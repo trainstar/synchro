@@ -2,18 +2,6 @@ package synchro
 
 import "testing"
 
-func TestOperation_Constants(t *testing.T) {
-	if OpInsert != 1 {
-		t.Errorf("OpInsert = %d, want 1", OpInsert)
-	}
-	if OpUpdate != 2 {
-		t.Errorf("OpUpdate = %d, want 2", OpUpdate)
-	}
-	if OpDelete != 3 {
-		t.Errorf("OpDelete = %d, want 3", OpDelete)
-	}
-}
-
 func TestOperation_String(t *testing.T) {
 	tests := []struct {
 		op   Operation

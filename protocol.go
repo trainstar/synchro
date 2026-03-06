@@ -53,27 +53,33 @@ type Record struct {
 
 // RegisterRequest is the request body for client registration.
 type RegisterRequest struct {
-	ClientID   string  `json:"client_id"`
-	ClientName *string `json:"client_name,omitempty"`
-	Platform   string  `json:"platform"`
-	AppVersion string  `json:"app_version"`
+	ClientID      string  `json:"client_id"`
+	ClientName    *string `json:"client_name,omitempty"`
+	Platform      string  `json:"platform"`
+	AppVersion    string  `json:"app_version"`
+	SchemaVersion int64   `json:"schema_version,omitempty"`
+	SchemaHash    string  `json:"schema_hash,omitempty"`
 }
 
 // RegisterResponse is the response for client registration.
 type RegisterResponse struct {
-	ID         string     `json:"id"`
-	ServerTime time.Time  `json:"server_time"`
-	LastSyncAt *time.Time `json:"last_sync_at,omitempty"`
-	Checkpoint int64      `json:"checkpoint"`
+	ID            string     `json:"id"`
+	ServerTime    time.Time  `json:"server_time"`
+	LastSyncAt    *time.Time `json:"last_sync_at,omitempty"`
+	Checkpoint    int64      `json:"checkpoint"`
+	SchemaVersion int64      `json:"schema_version"`
+	SchemaHash    string     `json:"schema_hash"`
 }
 
 // PullRequest is the request for pulling changes.
 type PullRequest struct {
-	ClientID     string   `json:"client_id"`
-	Checkpoint   int64    `json:"checkpoint"`
-	Tables       []string `json:"tables,omitempty"`
-	Limit        int      `json:"limit,omitempty"`
-	KnownBuckets []string `json:"known_buckets,omitempty"`
+	ClientID      string   `json:"client_id"`
+	Checkpoint    int64    `json:"checkpoint"`
+	Tables        []string `json:"tables,omitempty"`
+	Limit         int      `json:"limit,omitempty"`
+	KnownBuckets  []string `json:"known_buckets,omitempty"`
+	SchemaVersion int64    `json:"schema_version,omitempty"`
+	SchemaHash    string   `json:"schema_hash,omitempty"`
 }
 
 // DefaultPullLimit is the default number of records per pull.
@@ -89,6 +95,8 @@ type PullResponse struct {
 	Checkpoint    int64         `json:"checkpoint"`
 	HasMore       bool          `json:"has_more"`
 	BucketUpdates *BucketUpdate `json:"bucket_updates,omitempty"`
+	SchemaVersion int64         `json:"schema_version"`
+	SchemaHash    string        `json:"schema_hash"`
 }
 
 // DeleteEntry represents a deleted record in a pull response.
@@ -105,8 +113,10 @@ type BucketUpdate struct {
 
 // PushRequest is the request body for pushing changes.
 type PushRequest struct {
-	ClientID string       `json:"client_id"`
-	Changes  []PushRecord `json:"changes"`
+	ClientID      string       `json:"client_id"`
+	Changes       []PushRecord `json:"changes"`
+	SchemaVersion int64        `json:"schema_version,omitempty"`
+	SchemaHash    string       `json:"schema_hash,omitempty"`
 }
 
 // PushRecord represents a single record being pushed from the client.
@@ -121,10 +131,12 @@ type PushRecord struct {
 
 // PushResponse is the response for pushing changes.
 type PushResponse struct {
-	Accepted   []PushResult `json:"accepted"`
-	Rejected   []PushResult `json:"rejected"`
-	Checkpoint int64        `json:"checkpoint"`
-	ServerTime time.Time    `json:"server_time"`
+	Accepted      []PushResult `json:"accepted"`
+	Rejected      []PushResult `json:"rejected"`
+	Checkpoint    int64        `json:"checkpoint"`
+	ServerTime    time.Time    `json:"server_time"`
+	SchemaVersion int64        `json:"schema_version"`
+	SchemaHash    string       `json:"schema_hash"`
 }
 
 // PushResult represents the result of processing a single push record.
@@ -146,14 +158,60 @@ const (
 
 // TableMeta describes a single table's sync configuration.
 type TableMeta struct {
-	TableName    string   `json:"table_name"`
-	Direction    string   `json:"direction"`
-	Dependencies []string `json:"dependencies"`
-	ParentTable  string   `json:"parent_table,omitempty"`
+	TableName            string   `json:"table_name"`
+	PushPolicy           string   `json:"push_policy"`
+	Dependencies         []string `json:"dependencies"`
+	ParentTable          string   `json:"parent_table,omitempty"`
+	ParentFKCol          string   `json:"parent_fk_col,omitempty"`
+	UpdatedAtColumn      string   `json:"updated_at_column,omitempty"`
+	DeletedAtColumn      string   `json:"deleted_at_column,omitempty"`
+	BucketByColumn       string   `json:"bucket_by_column,omitempty"`
+	BucketPrefix         string   `json:"bucket_prefix,omitempty"`
+	GlobalWhenBucketNull bool     `json:"global_when_bucket_null,omitempty"`
+	AllowGlobalRead      bool     `json:"allow_global_read,omitempty"`
+	BucketFunction       string   `json:"bucket_function,omitempty"`
 }
 
 // TableMetaResponse is the response for the table metadata endpoint.
 type TableMetaResponse struct {
-	Tables     []TableMeta `json:"tables"`
-	ServerTime time.Time   `json:"server_time"`
+	Tables        []TableMeta `json:"tables"`
+	ServerTime    time.Time   `json:"server_time"`
+	SchemaVersion int64       `json:"schema_version"`
+	SchemaHash    string      `json:"schema_hash"`
+}
+
+// SchemaColumn describes a table column for client-side table creation.
+type SchemaColumn struct {
+	Name         string `json:"name"`
+	DBType       string `json:"db_type"`
+	LogicalType  string `json:"logical_type"`
+	Nullable     bool   `json:"nullable"`
+	DefaultSQL   string `json:"default_sql,omitempty"`
+	IsPrimaryKey bool   `json:"is_primary_key"`
+}
+
+// SchemaTable describes table metadata and column definitions.
+type SchemaTable struct {
+	TableName            string         `json:"table_name"`
+	PushPolicy           string         `json:"push_policy"`
+	ParentTable          string         `json:"parent_table,omitempty"`
+	ParentFKCol          string         `json:"parent_fk_col,omitempty"`
+	Dependencies         []string       `json:"dependencies,omitempty"`
+	UpdatedAtColumn      string         `json:"updated_at_column"`
+	DeletedAtColumn      string         `json:"deleted_at_column"`
+	PrimaryKey           []string       `json:"primary_key"`
+	BucketByColumn       string         `json:"bucket_by_column,omitempty"`
+	BucketPrefix         string         `json:"bucket_prefix,omitempty"`
+	GlobalWhenBucketNull bool           `json:"global_when_bucket_null,omitempty"`
+	AllowGlobalRead      bool           `json:"allow_global_read,omitempty"`
+	BucketFunction       string         `json:"bucket_function,omitempty"`
+	Columns              []SchemaColumn `json:"columns"`
+}
+
+// SchemaResponse returns the full sync schema contract.
+type SchemaResponse struct {
+	SchemaVersion int64         `json:"schema_version"`
+	SchemaHash    string        `json:"schema_hash"`
+	ServerTime    time.Time     `json:"server_time"`
+	Tables        []SchemaTable `json:"tables"`
 }

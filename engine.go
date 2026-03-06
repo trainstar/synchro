@@ -5,6 +5,8 @@ import (
 	"database/sql"
 	"fmt"
 	"log/slog"
+	"slices"
+	"strings"
 	"time"
 )
 
@@ -47,6 +49,7 @@ type Engine struct {
 	clients    *clientStore
 	changelog  *changelogStore
 	checkpoint *checkpointStore
+	schema     *schemaStore
 	config     Config
 	logger     *slog.Logger
 }
@@ -81,6 +84,7 @@ func NewEngine(cfg Config) (*Engine, error) {
 
 	cl := &changelogStore{}
 	cp := &checkpointStore{}
+	schema := &schemaStore{}
 
 	e := &Engine{
 		db:         cfg.DB,
@@ -91,6 +95,7 @@ func NewEngine(cfg Config) (*Engine, error) {
 		clients:    &clientStore{},
 		changelog:  cl,
 		checkpoint: cp,
+		schema:     schema,
 		config:     cfg,
 		logger:     logger,
 		push: &pushProcessor{
@@ -118,6 +123,14 @@ func (e *Engine) Registry() *Registry {
 
 // RegisterClient registers or updates a sync client.
 func (e *Engine) RegisterClient(ctx context.Context, userID string, req *RegisterRequest) (*RegisterResponse, error) {
+	manifest, err := e.schema.GetManifest(ctx, e.db, e.registry)
+	if err != nil {
+		return nil, err
+	}
+	if err := validateClientSchema(manifest, req.SchemaVersion, req.SchemaHash, true); err != nil {
+		return nil, err
+	}
+
 	// Version check
 	if e.config.MinClientVersion != "" && req.AppVersion != "" {
 		if err := CheckVersion(req.AppVersion, e.config.MinClientVersion); err != nil {
@@ -139,15 +152,25 @@ func (e *Engine) RegisterClient(ctx context.Context, userID string, req *Registe
 	}
 
 	return &RegisterResponse{
-		ID:         client.ID,
-		ServerTime: time.Now().UTC(),
-		LastSyncAt: client.LastSyncAt,
-		Checkpoint: lastPullSeq,
+		ID:            client.ID,
+		ServerTime:    time.Now().UTC(),
+		LastSyncAt:    client.LastSyncAt,
+		Checkpoint:    lastPullSeq,
+		SchemaVersion: manifest.Version,
+		SchemaHash:    manifest.Hash,
 	}, nil
 }
 
 // Pull retrieves changes for a client since their checkpoint.
 func (e *Engine) Pull(ctx context.Context, userID string, req *PullRequest) (*PullResponse, error) {
+	manifest, err := e.schema.GetManifest(ctx, e.db, e.registry)
+	if err != nil {
+		return nil, err
+	}
+	if err := validateClientSchema(manifest, req.SchemaVersion, req.SchemaHash, false); err != nil {
+		return nil, err
+	}
+
 	// Verify client is registered and check staleness
 	client, err := e.clients.GetClient(ctx, e.db, userID, req.ClientID)
 	if err != nil {
@@ -166,10 +189,25 @@ func (e *Engine) Pull(ctx context.Context, userID string, req *PullRequest) (*Pu
 		buckets = []string{fmt.Sprintf("user:%s", userID), "global"}
 	}
 
-	resp, err := e.pull.processPull(ctx, e.db, req, buckets)
+	tx, err := e.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return nil, fmt.Errorf("beginning pull transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	if err := SetAuthContext(ctx, tx, userID); err != nil {
+		return nil, fmt.Errorf("setting pull auth context: %w", err)
+	}
+
+	resp, err := e.pull.processPull(ctx, tx, req, buckets)
 	if err != nil {
 		return nil, err
 	}
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("committing pull transaction: %w", err)
+	}
+	resp.SchemaVersion = manifest.Version
+	resp.SchemaHash = manifest.Hash
 
 	// Compute bucket updates if client sent known buckets
 	if len(req.KnownBuckets) > 0 {
@@ -199,6 +237,14 @@ func (e *Engine) Pull(ctx context.Context, userID string, req *PullRequest) (*Pu
 
 // Push processes client changes within a transaction.
 func (e *Engine) Push(ctx context.Context, userID string, req *PushRequest) (*PushResponse, error) {
+	manifest, err := e.schema.GetManifest(ctx, e.db, e.registry)
+	if err != nil {
+		return nil, err
+	}
+	if err := validateClientSchema(manifest, req.SchemaVersion, req.SchemaHash, false); err != nil {
+		return nil, err
+	}
+
 	// Verify client is registered and check staleness
 	client, err := e.clients.GetClient(ctx, e.db, userID, req.ClientID)
 	if err != nil {
@@ -279,24 +325,45 @@ func (e *Engine) Push(ctx context.Context, userID string, req *PushRequest) (*Pu
 	}
 
 	return &PushResponse{
-		Accepted:   accepted,
-		Rejected:   rejected,
-		Checkpoint: checkpoint,
-		ServerTime: time.Now().UTC(),
+		Accepted:      accepted,
+		Rejected:      rejected,
+		Checkpoint:    checkpoint,
+		ServerTime:    time.Now().UTC(),
+		SchemaVersion: manifest.Version,
+		SchemaHash:    manifest.Hash,
 	}, nil
 }
 
 // TableMetadata returns sync metadata for all registered tables.
-func (e *Engine) TableMetadata() *TableMetaResponse {
+func (e *Engine) TableMetadata(ctx context.Context) (*TableMetaResponse, error) {
+	manifest, err := e.schema.GetManifest(ctx, e.db, e.registry)
+	if err != nil {
+		return nil, err
+	}
+
 	configs := e.registry.All()
+	slices.SortFunc(configs, func(a, b *TableConfig) int {
+		return strings.Compare(a.TableName, b.TableName)
+	})
 	tables := make([]TableMeta, 0, len(configs))
 
 	for _, cfg := range configs {
+		deps := append([]string{}, cfg.Dependencies...)
+		slices.Sort(deps)
+
 		meta := TableMeta{
-			TableName:    cfg.TableName,
-			Direction:    string(cfg.Direction),
-			Dependencies: cfg.Dependencies,
-			ParentTable:  cfg.ParentTable,
+			TableName:            cfg.TableName,
+			PushPolicy:           string(cfg.PushPolicy),
+			Dependencies:         deps,
+			ParentTable:          cfg.ParentTable,
+			ParentFKCol:          cfg.ParentFKCol,
+			UpdatedAtColumn:      cfg.UpdatedAtColumn,
+			DeletedAtColumn:      cfg.DeletedAtColumn,
+			BucketByColumn:       cfg.BucketByColumn,
+			BucketPrefix:         cfg.BucketPrefix,
+			GlobalWhenBucketNull: cfg.GlobalWhenBucketNull,
+			AllowGlobalRead:      cfg.AllowGlobalRead,
+			BucketFunction:       cfg.BucketFunction,
 		}
 		if meta.Dependencies == nil {
 			meta.Dependencies = []string{}
@@ -305,9 +372,30 @@ func (e *Engine) TableMetadata() *TableMetaResponse {
 	}
 
 	return &TableMetaResponse{
-		Tables:     tables,
-		ServerTime: time.Now().UTC(),
+		Tables:        tables,
+		ServerTime:    time.Now().UTC(),
+		SchemaVersion: manifest.Version,
+		SchemaHash:    manifest.Hash,
+	}, nil
+}
+
+// Schema returns the full server schema contract.
+func (e *Engine) Schema(ctx context.Context) (*SchemaResponse, error) {
+	return e.schema.GetSchema(ctx, e.db, e.registry)
+}
+
+// CurrentSchemaManifest returns current server schema version/hash.
+func (e *Engine) CurrentSchemaManifest(ctx context.Context) (int64, string, error) {
+	manifest, err := e.schema.GetManifest(ctx, e.db, e.registry)
+	if err != nil {
+		return 0, "", err
 	}
+	return manifest.Version, manifest.Hash, nil
+}
+
+// SchemaManifestHistory returns persisted manifest rows ordered by newest version first.
+func (e *Engine) SchemaManifestHistory(ctx context.Context, limit int) ([]SchemaManifestEntry, error) {
+	return e.schema.ListManifests(ctx, e.db, limit)
 }
 
 // diffBuckets compares known (client) buckets with current (server) buckets

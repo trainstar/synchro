@@ -52,6 +52,42 @@ func Migrations() []string {
 			confirmed_lsn BIGINT NOT NULL DEFAULT 0,
 			updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 		)`,
+
+		// Membership index for bucket delta assignment.
+		`CREATE TABLE IF NOT EXISTS sync_bucket_edges (
+			table_name TEXT NOT NULL,
+			record_id TEXT NOT NULL,
+			bucket_id TEXT NOT NULL,
+			updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+			PRIMARY KEY (table_name, record_id, bucket_id)
+		)`,
+
+		`CREATE INDEX IF NOT EXISTS idx_sync_bucket_edges_bucket
+			ON sync_bucket_edges (bucket_id, table_name, record_id)`,
+
+		// Resolver failures for operational debugging and replay tooling.
+		`CREATE TABLE IF NOT EXISTS sync_rule_failures (
+			id BIGSERIAL PRIMARY KEY,
+			table_name TEXT NOT NULL,
+			record_id TEXT NOT NULL,
+			operation SMALLINT NOT NULL,
+			error_text TEXT NOT NULL,
+			payload JSONB,
+			created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+		)`,
+
+		`CREATE INDEX IF NOT EXISTS idx_sync_rule_failures_created
+			ON sync_rule_failures (created_at)`,
+
+		// Schema contract version/hash history.
+		`CREATE TABLE IF NOT EXISTS sync_schema_manifest (
+			schema_version BIGINT PRIMARY KEY,
+			schema_hash TEXT NOT NULL,
+			created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+		)`,
+
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_sync_schema_manifest_hash
+			ON sync_schema_manifest (schema_hash)`,
 	}
 }
 

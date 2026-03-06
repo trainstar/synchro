@@ -33,11 +33,11 @@ This gives O(log n) pull queries (indexed by `bucket_id, seq`) and complete deco
 
 ### Engine (`engine.go`)
 
-Top-level orchestrator. Holds all dependencies and exposes `RegisterClient()`, `Push()`, `Pull()`, and `TableMetadata()`. Wires together the push/pull processors, conflict resolver, ownership resolver, and hooks.
+Top-level orchestrator. Holds all dependencies and exposes `RegisterClient()`, `Push()`, `Pull()`, `TableMetadata()`, `Schema()`, and manifest inspection helpers (`CurrentSchemaManifest()`, `SchemaManifestHistory()`). Wires together the push/pull processors, conflict resolver, ownership resolver, schema store, and hooks.
 
 ### Registry (`registry.go`)
 
-Holds `TableConfig` entries that define sync behavior per table: direction (bidirectional, server-only, system-and-user), ownership column, parent relationships, protected columns, sync column projections, and dependencies.
+Holds `TableConfig` entries that define sync behavior per table: `PushPolicy`, ownership column, parent relationships, protected columns, sync column projections, dependencies, and bucket configuration.
 
 Validates the full config graph at engine startup: checks parent chains terminate at an owner, detects cycles, and enforces that pushable tables have ownership paths.
 
@@ -78,8 +78,8 @@ Converts raw pgoutput protocol messages into `WALEvent` structs. Maintains a rel
 Determines which buckets a record belongs to. The default `JoinResolver`:
 
 - Tables with `OwnerColumn` -- reads owner directly from record data (zero queries).
-- `ServerOnly` tables -- always assigned to `global` bucket.
-- `SystemAndUser` tables with NULL owner -- assigned to `global`.
+- Tables with `BucketByColumn` + `BucketPrefix` -- uses fast-path bucket assignment without extra joins.
+- Nullable bucket values can emit `global` only when `GlobalWhenBucketNull=true`.
 - Child tables -- walks the parent chain via a single JOIN query to find the root owner.
 
 ### Conflict Resolver (`conflict.go`)
@@ -102,6 +102,10 @@ Tracks per-client pull progress. Monotonically advances `last_pull_seq` (never g
 ### Changelog Store (`changelog.go`)
 
 Reads and writes `sync_changelog` entries. Supports single writes, batch writes, and range queries for pull.
+
+### Schema Store (`schema.go`)
+
+Builds canonical schema payloads from `pg_catalog`, computes deterministic schema hashes, and persists monotonic manifest versions in `sync_schema_manifest` under advisory lock protection.
 
 ## Data Flow
 
@@ -129,15 +133,15 @@ RLS policies enforce authorization at the database level. The push processor doe
 
 ```
 Client -> POST /sync/pull
-  1. Get client's bucket subscriptions (e.g., ["user:abc-123", "global"])
-  2. Query sync_changelog WHERE bucket_id = ANY(subs) AND seq > checkpoint
-  3. Deduplicate: keep latest entry per (table, record_id)
-  4. Separate deletes from changes
-  5. Hydrate changed records: batch SELECT per table
-  6. Advance checkpoint to max seq
-  7. Update client last_pull_at
-  8. Fire OnPullComplete hook
-  9. Return changes, deletes, new checkpoint, has_more flag
+  1. Validate `schema_version` + `schema_hash` against server manifest
+  2. Start read-only tx and set RLS auth context
+  3. Get client's bucket subscriptions (e.g., ["user:abc-123", "global"])
+  4. Query sync_changelog WHERE bucket_id = ANY(subs) AND seq > checkpoint
+  5. Deduplicate: keep latest entry per (table, record_id)
+  6. Separate deletes from changes
+  7. Hydrate changed records: batch SELECT per table
+  8. Commit read-only tx, then best-effort advance checkpoint in client state
+  9. Update client last_pull_at and return changes/deletes/checkpoint/schema identifiers
 ```
 
 ## Design Decisions
@@ -173,9 +177,9 @@ The `DB` interface requires only `ExecContext`, `QueryRowContext`, and `QueryCon
 
 HTTP handlers use `net/http.Handler` and `http.HandlerFunc`. The consuming application wires them into whatever router they use (Echo, Chi, stdlib mux). Context-based user ID injection via `handler.WithUserID()`.
 
-### slog + Optional OTel
+### slog Logging
 
-Logging uses `log/slog` (stdlib). OTel tracing and metrics are opt-in via `TracerProvider` and `MeterProvider` in `Config`. If nil, no tracing/metrics overhead is added.
+Logging uses `log/slog` (stdlib). If you need OTel log correlation, configure that in the host application's logging pipeline and pass the resulting logger via `Config.Logger`.
 
 ## Bucketing Model
 
@@ -184,13 +188,13 @@ Records are assigned to buckets that determine pull visibility:
 | Bucket Type | Format | Contents |
 |-------------|--------|----------|
 | **User** | `user:<uuid>` | Records owned by a specific user |
-| **Global** | `global` | Server-only reference data, system records with NULL owner |
+| **Global** | `global` | Reference data and rows explicitly configured for global visibility |
 | **Group** | `group:<id>` | (Phase 2) Shared group data |
 | **Share** | `share:<id>` | (Phase 2) 1:N sharing via multi-bucket assignment |
 
 Each client subscribes to a set of buckets (stored in `sync_clients.bucket_subs`). On registration, a client is automatically subscribed to `["user:<user_id>", "global"]`.
 
-A single record can appear in multiple buckets. For example, a `SystemAndUser` record with an owner gets changelog entries in both `user:<owner_id>` and `global`.
+A single record can appear in multiple buckets when resolver logic emits multiple bucket IDs.
 
 ## Checkpoint Consistency Model
 

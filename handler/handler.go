@@ -2,9 +2,8 @@ package handler
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
-	"strconv"
-	"strings"
 
 	"github.com/trainstar/synchro"
 )
@@ -21,6 +20,10 @@ func New(engine *synchro.Engine) *Handler {
 
 // ServeRegister handles POST /sync/register.
 func (h *Handler) ServeRegister(w http.ResponseWriter, r *http.Request) {
+	if !requireMethod(w, r, http.MethodPost) {
+		return
+	}
+
 	ctx := r.Context()
 	userID := UserIDFromContext(ctx)
 	if userID == "" {
@@ -28,8 +31,22 @@ func (h *Handler) ServeRegister(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	body, err := decodeJSONObject(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	if _, ok := body["schema_version"]; !ok {
+		writeError(w, http.StatusBadRequest, "schema_version is required")
+		return
+	}
+	if _, ok := body["schema_hash"]; !ok {
+		writeError(w, http.StatusBadRequest, "schema_hash is required")
+		return
+	}
+
 	var req synchro.RegisterRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := remarshal(body, &req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
@@ -40,6 +57,10 @@ func (h *Handler) ServeRegister(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusUpgradeRequired, "client upgrade required")
 			return
 		}
+		if err == synchro.ErrSchemaMismatch {
+			h.writeSchemaMismatch(w, r)
+			return
+		}
 		writeError(w, http.StatusInternalServerError, "failed to register client")
 		return
 	}
@@ -47,9 +68,12 @@ func (h *Handler) ServeRegister(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, resp)
 }
 
-// ServePull handles GET /sync/pull.
-// Query parameters: client_id (required), checkpoint (int64), tables (comma-separated), limit (int).
+// ServePull handles POST /sync/pull.
 func (h *Handler) ServePull(w http.ResponseWriter, r *http.Request) {
+	if !requireMethod(w, r, http.MethodPost) {
+		return
+	}
+
 	ctx := r.Context()
 	userID := UserIDFromContext(ctx)
 	if userID == "" {
@@ -57,53 +81,30 @@ func (h *Handler) ServePull(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	q := r.URL.Query()
-	clientID := q.Get("client_id")
-	if clientID == "" {
-		writeError(w, http.StatusBadRequest, "client_id is required")
+	body, err := decodeJSONObject(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	for _, k := range []string{"client_id", "schema_version", "schema_hash"} {
+		if _, ok := body[k]; !ok {
+			writeError(w, http.StatusBadRequest, k+" is required")
+			return
+		}
+	}
+
+	var req synchro.PullRequest
+	if err := remarshal(body, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
 
-	var checkpoint int64
-	if v := q.Get("checkpoint"); v != "" {
-		var err error
-		checkpoint, err = strconv.ParseInt(v, 10, 64)
-		if err != nil {
-			writeError(w, http.StatusBadRequest, "invalid checkpoint")
-			return
-		}
-	}
-
-	var tables []string
-	if v := q.Get("tables"); v != "" {
-		tables = strings.Split(v, ",")
-	}
-
-	var limit int
-	if v := q.Get("limit"); v != "" {
-		var err error
-		limit, err = strconv.Atoi(v)
-		if err != nil {
-			writeError(w, http.StatusBadRequest, "invalid limit")
-			return
-		}
-	}
-
-	var knownBuckets []string
-	if v := q.Get("known_buckets"); v != "" {
-		knownBuckets = strings.Split(v, ",")
-	}
-
-	req := &synchro.PullRequest{
-		ClientID:     clientID,
-		Checkpoint:   checkpoint,
-		Tables:       tables,
-		Limit:        limit,
-		KnownBuckets: knownBuckets,
-	}
-
-	resp, err := h.engine.Pull(ctx, userID, req)
+	resp, err := h.engine.Pull(ctx, userID, &req)
 	if err != nil {
+		if err == synchro.ErrSchemaMismatch {
+			h.writeSchemaMismatch(w, r)
+			return
+		}
 		writeError(w, http.StatusInternalServerError, "failed to pull changes")
 		return
 	}
@@ -113,6 +114,10 @@ func (h *Handler) ServePull(w http.ResponseWriter, r *http.Request) {
 
 // ServePush handles POST /sync/push.
 func (h *Handler) ServePush(w http.ResponseWriter, r *http.Request) {
+	if !requireMethod(w, r, http.MethodPost) {
+		return
+	}
+
 	ctx := r.Context()
 	userID := UserIDFromContext(ctx)
 	if userID == "" {
@@ -120,14 +125,32 @@ func (h *Handler) ServePush(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	body, err := decodeJSONObject(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	if _, ok := body["schema_version"]; !ok {
+		writeError(w, http.StatusBadRequest, "schema_version is required")
+		return
+	}
+	if _, ok := body["schema_hash"]; !ok {
+		writeError(w, http.StatusBadRequest, "schema_hash is required")
+		return
+	}
+
 	var req synchro.PushRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := remarshal(body, &req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
 
 	resp, err := h.engine.Push(ctx, userID, &req)
 	if err != nil {
+		if err == synchro.ErrSchemaMismatch {
+			h.writeSchemaMismatch(w, r)
+			return
+		}
 		writeError(w, http.StatusInternalServerError, "failed to push changes")
 		return
 	}
@@ -136,8 +159,30 @@ func (h *Handler) ServePush(w http.ResponseWriter, r *http.Request) {
 }
 
 // ServeTableMeta handles GET /sync/tables.
-func (h *Handler) ServeTableMeta(w http.ResponseWriter, _ *http.Request) {
-	resp := h.engine.TableMetadata()
+func (h *Handler) ServeTableMeta(w http.ResponseWriter, r *http.Request) {
+	if !requireMethod(w, r, http.MethodGet) {
+		return
+	}
+
+	resp, err := h.engine.TableMetadata(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to load table metadata")
+		return
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// ServeSchema handles GET /sync/schema.
+func (h *Handler) ServeSchema(w http.ResponseWriter, r *http.Request) {
+	if !requireMethod(w, r, http.MethodGet) {
+		return
+	}
+
+	resp, err := h.engine.Schema(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to load schema")
+		return
+	}
 	writeJSON(w, http.StatusOK, resp)
 }
 
@@ -151,4 +196,48 @@ func writeError(w http.ResponseWriter, status int, msg string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	json.NewEncoder(w).Encode(map[string]string{"error": msg})
+}
+
+func requireMethod(w http.ResponseWriter, r *http.Request, allowed string) bool {
+	if r.Method == allowed {
+		return true
+	}
+	w.Header().Set("Allow", allowed)
+	writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+	return false
+}
+
+func decodeJSONObject(r *http.Request) (map[string]json.RawMessage, error) {
+	var body map[string]json.RawMessage
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		return nil, err
+	}
+	if body == nil {
+		return nil, errors.New("empty body")
+	}
+	return body, nil
+}
+
+func remarshal(src map[string]json.RawMessage, dst any) error {
+	b, err := json.Marshal(src)
+	if err != nil {
+		return err
+	}
+	return json.Unmarshal(b, dst)
+}
+
+func (h *Handler) writeSchemaMismatch(w http.ResponseWriter, r *http.Request) {
+	version, hash, err := h.engine.CurrentSchemaManifest(r.Context())
+	if err != nil {
+		writeError(w, http.StatusConflict, "schema mismatch")
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusConflict)
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"code":                  "schema_mismatch",
+		"message":               "client schema does not match server schema",
+		"server_schema_version": version,
+		"server_schema_hash":    hash,
+	})
 }

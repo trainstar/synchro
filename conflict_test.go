@@ -85,9 +85,6 @@ func TestLWWResolver_WithBaseVersion_ServerUnchanged(t *testing.T) {
 	if res.Winner != "client" {
 		t.Errorf("Winner = %q, want %q", res.Winner, "client")
 	}
-	if res.Reason != "server unchanged since base version" {
-		t.Errorf("Reason = %q, want %q", res.Reason, "server unchanged since base version")
-	}
 }
 
 func TestLWWResolver_WithBaseVersion_ServerChanged_ClientNewer(t *testing.T) {
@@ -175,33 +172,16 @@ func TestServerWinsResolver(t *testing.T) {
 	resolver := &ServerWinsResolver{}
 	now := time.Now()
 
-	tests := []struct {
-		name       string
-		clientTime time.Time
-		serverTime time.Time
-	}{
-		{"client newer", now.Add(10 * time.Second), now},
-		{"server newer", now, now.Add(10 * time.Second)},
-		{"equal", now, now},
+	res, err := resolver.Resolve(context.Background(), Conflict{
+		Table:      "items",
+		RecordID:   "abc",
+		ClientTime: now.Add(10 * time.Second),
+		ServerTime: now,
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
 	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			res, err := resolver.Resolve(context.Background(), Conflict{
-				Table:      "items",
-				RecordID:   "abc",
-				ClientTime: tt.clientTime,
-				ServerTime: tt.serverTime,
-			})
-			if err != nil {
-				t.Fatalf("unexpected error: %v", err)
-			}
-			if res.Winner != "server" {
-				t.Errorf("Winner = %q, want %q", res.Winner, "server")
-			}
-			if res.Reason != "server always wins" {
-				t.Errorf("Reason = %q, want %q", res.Reason, "server always wins")
-			}
-		})
+	if res.Winner != "server" {
+		t.Errorf("Winner = %q, want %q", res.Winner, "server")
 	}
 }

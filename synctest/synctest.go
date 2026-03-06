@@ -14,27 +14,28 @@ func NewTestRegistry() *synchro.Registry {
 
 	r.Register(&synchro.TableConfig{
 		TableName:   "items",
-		Direction:   synchro.Bidirectional,
+		PushPolicy:  synchro.PushPolicyOwnerOnly,
 		OwnerColumn: "user_id",
 	})
 
 	r.Register(&synchro.TableConfig{
-		TableName:   "item_details",
-		Direction:   synchro.Bidirectional,
-		ParentTable: "items",
-		ParentFKCol: "item_id",
+		TableName:    "item_details",
+		PushPolicy:   synchro.PushPolicyOwnerOnly,
+		ParentTable:  "items",
+		ParentFKCol:  "item_id",
 		Dependencies: []string{"items"},
 	})
 
 	r.Register(&synchro.TableConfig{
-		TableName: "categories",
-		Direction: synchro.ServerOnly,
+		TableName:  "categories",
+		PushPolicy: synchro.PushPolicyDisabled,
 	})
 
 	r.Register(&synchro.TableConfig{
-		TableName:   "tags",
-		Direction:   synchro.SystemAndUser,
-		OwnerColumn: "user_id",
+		TableName:       "tags",
+		PushPolicy:      synchro.PushPolicyOwnerOnly,
+		OwnerColumn:     "user_id",
+		AllowGlobalRead: true,
 	})
 
 	return r
@@ -55,9 +56,11 @@ func MakePushRecord(id, table, operation string, data map[string]any) synchro.Pu
 // MakeRegisterRequest creates a RegisterRequest for testing.
 func MakeRegisterRequest(clientID, platform, version string) *synchro.RegisterRequest {
 	return &synchro.RegisterRequest{
-		ClientID:   clientID,
-		Platform:   platform,
-		AppVersion: version,
+		ClientID:      clientID,
+		Platform:      platform,
+		AppVersion:    version,
+		SchemaVersion: 0,
+		SchemaHash:    "",
 	}
 }
 

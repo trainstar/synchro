@@ -1,7 +1,6 @@
 package synchro
 
 import (
-	"sort"
 	"testing"
 )
 
@@ -10,7 +9,7 @@ func testConfig(t *testing.T, opts ...func(*TableConfig)) *TableConfig {
 	t.Helper()
 	cfg := &TableConfig{
 		TableName:   "items",
-		Direction:   Bidirectional,
+		PushPolicy:  PushPolicyOwnerOnly,
 		OwnerColumn: "user_id",
 	}
 	for _, fn := range opts {
@@ -201,34 +200,5 @@ func TestQuoteIdentifier(t *testing.T) {
 				t.Errorf("quoteIdentifier(%q) = %q, want %q", tt.input, got, tt.want)
 			}
 		})
-	}
-}
-
-// --- Determinism test for AllowedInsertColumns ---
-
-func TestAllowedInsertColumns_Deterministic(t *testing.T) {
-	cfg := testConfig(t, func(c *TableConfig) {
-		c.ParentFKCol = "parent_id"
-	})
-
-	dataCols := []string{"id", "user_id", "parent_id", "name", "value", "created_at"}
-
-	// Run multiple times to check order consistency.
-	first := cfg.AllowedInsertColumns(dataCols)
-	for i := 0; i < 10; i++ {
-		got := cfg.AllowedInsertColumns(dataCols)
-		if len(got) != len(first) {
-			t.Fatalf("iteration %d: length mismatch %d vs %d", i, len(got), len(first))
-		}
-		// Sort both for comparison since input order is stable.
-		a := append([]string{}, first...)
-		b := append([]string{}, got...)
-		sort.Strings(a)
-		sort.Strings(b)
-		for j := range a {
-			if a[j] != b[j] {
-				t.Fatalf("iteration %d: mismatch at index %d: %q vs %q", i, j, a[j], b[j])
-			}
-		}
 	}
 }

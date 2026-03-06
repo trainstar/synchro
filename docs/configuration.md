@@ -7,34 +7,41 @@ Register every table that participates in sync. Registration order matters for d
 ```go
 registry := synchro.NewRegistry()
 
-// Bidirectional: user-owned data that clients can push and pull
+// User-owned table: push and pull enabled
 registry.Register(&synchro.TableConfig{
-    TableName:   "workouts",
-    Direction:   synchro.Bidirectional,
-    OwnerColumn: "user_id",
+    TableName:      "workouts",
+    PushPolicy:     synchro.PushPolicyOwnerOnly,
+    OwnerColumn:    "user_id",
+    BucketByColumn: "user_id",
+    BucketPrefix:   "user:",
 })
 
 // Child table: inherits ownership through parent chain
 registry.Register(&synchro.TableConfig{
-    TableName:    "workout_sets",
-    Direction:    synchro.Bidirectional,
-    ParentTable:  "workouts",
-    ParentFKCol:  "workout_id",
-    Dependencies: []string{"workouts"},
+    TableName:      "workout_sets",
+    PushPolicy:     synchro.PushPolicyOwnerOnly,
+    ParentTable:    "workouts",
+    ParentFKCol:    "workout_id",
+    Dependencies:   []string{"workouts"},
+    BucketByColumn: "workout_id",
+    BucketPrefix:   "workout:",
 })
 
-// Server-only: reference data, pull only
+// Reference table: pull-only
 registry.Register(&synchro.TableConfig{
-    TableName: "exercise_types",
-    Direction: synchro.ServerOnly,
+    TableName:  "exercise_types",
+    PushPolicy: synchro.PushPolicyDisabled,
 })
 
-// System + User: system records (NULL owner) + user records
-// Pulls both, pushes only user-owned
+// Nullable owner + global-read behavior is explicit
 registry.Register(&synchro.TableConfig{
-    TableName:   "food_brands",
-    Direction:   synchro.SystemAndUser,
-    OwnerColumn: "user_id",
+    TableName:            "food_brands",
+    PushPolicy:           synchro.PushPolicyOwnerOnly,
+    OwnerColumn:          "user_id",
+    BucketByColumn:       "user_id",
+    BucketPrefix:         "user:",
+    GlobalWhenBucketNull: true,
+    AllowGlobalRead:      true,
 })
 ```
 
@@ -43,7 +50,7 @@ registry.Register(&synchro.TableConfig{
 | Field | Required | Default | Description |
 |-------|----------|---------|-------------|
 | `TableName` | Yes | -- | Database table name |
-| `Direction` | Yes | -- | `Bidirectional`, `ServerOnly`, or `SystemAndUser` |
+| `PushPolicy` | No | inferred | `owner_only` or `disabled` |
 | `OwnerColumn` | Conditional | `""` | Column holding user ID. Required for pushable tables without `ParentTable`. |
 | `ParentTable` | No | `""` | Parent table name for child records |
 | `ParentFKCol` | Conditional | `""` | FK column to parent. Required when `ParentTable` is set. |
@@ -53,6 +60,11 @@ registry.Register(&synchro.TableConfig{
 | `UpdatedAtColumn` | No | `"updated_at"` | Timestamp column for conflict detection |
 | `DeletedAtColumn` | No | `"deleted_at"` | Soft delete column |
 | `ProtectedColumns` | No | `nil` | Additional columns clients cannot write (beyond defaults) |
+| `BucketByColumn` | No | `OwnerColumn` | Fast-path bucket source column |
+| `BucketPrefix` | No | `"user:"` | Prefix applied to `BucketByColumn` values |
+| `GlobalWhenBucketNull` | No | `false` | Emits `global` when bucket source value is null/empty |
+| `AllowGlobalRead` | No | `false` | Adds global-read RLS behavior for null-owner rows |
+| `BucketFunction` | No | `""` | Optional SQL bucket resolver function override |
 
 **Default protected columns** (always enforced): `id`, `created_at`, `updated_at`, `deleted_at`, the owner column, and the parent FK column.
 
@@ -78,9 +90,7 @@ engine, err := synchro.NewEngine(synchro.Config{
     Ownership:          nil,               // defaults to JoinResolver
     MinClientVersion:   "1.2.0",           // optional semver gate
     ClockSkewTolerance: 5 * time.Second,   // optional LWW tolerance
-    Logger:             slog.Default(),     // optional, defaults to slog.Default()
-    TracerProvider:     tp,                // optional OTel tracer
-    MeterProvider:      mp,                // optional OTel meter
+    Logger:             slog.Default(),    // optional, defaults to slog.Default()
 })
 ```
 
@@ -227,28 +237,7 @@ func (r *PerTableResolver) Resolve(ctx context.Context, c synchro.Conflict) (syn
 
 ## Telemetry Integration
 
-### OpenTelemetry
-
-Pass OTel providers to `Config`. When set, the engine creates a tracer scoped to `github.com/trainstar/synchro`.
-
-```go
-import (
-    "go.opentelemetry.io/otel"
-    sdktrace "go.opentelemetry.io/otel/sdk/trace"
-    sdkmetric "go.opentelemetry.io/otel/sdk/metric"
-)
-
-tp := sdktrace.NewTracerProvider(/* ... */)
-mp := sdkmetric.NewMeterProvider(/* ... */)
-
-engine, _ := synchro.NewEngine(synchro.Config{
-    // ...
-    TracerProvider: tp,
-    MeterProvider:  mp,
-})
-```
-
-When providers are `nil`, no tracing or metrics overhead is added.
+Synchro uses `Config.Logger` for structured logs. For OpenTelemetry correlation, configure your logger pipeline in the host application (for example via `otelslog`) and pass that logger into `Config.Logger`.
 
 ### Structured Logging
 
@@ -281,6 +270,7 @@ mux.HandleFunc("POST /sync/register", h.ServeRegister)
 mux.HandleFunc("POST /sync/pull", h.ServePull)
 mux.HandleFunc("POST /sync/push", h.ServePush)
 mux.HandleFunc("GET /sync/tables", h.ServeTableMeta)
+mux.HandleFunc("GET /sync/schema", h.ServeSchema)
 ```
 
 ### Echo
@@ -295,6 +285,7 @@ g.POST("/register", echo.WrapHandler(http.HandlerFunc(h.ServeRegister)))
 g.POST("/pull", echo.WrapHandler(http.HandlerFunc(h.ServePull)))
 g.POST("/push", echo.WrapHandler(http.HandlerFunc(h.ServePush)))
 g.GET("/tables", echo.WrapHandler(http.HandlerFunc(h.ServeTableMeta)))
+g.GET("/schema", echo.WrapHandler(http.HandlerFunc(h.ServeSchema)))
 ```
 
 Or wrap directly in your Echo handler to use Echo's context:
@@ -321,6 +312,7 @@ r.Route("/sync", func(r chi.Router) {
     r.Post("/pull", h.ServePull)
     r.Post("/push", h.ServePush)
     r.Get("/tables", h.ServeTableMeta)
+    r.Get("/schema", h.ServeSchema)
 })
 ```
 
@@ -424,7 +416,7 @@ for _, stmt := range append(stmts, rlsStmts...) {
 
 `GenerateRLSPolicies(registry)` produces:
 
-- `ServerOnly` tables: `SELECT` policy with `USING (true)`.
-- Tables with `OwnerColumn`: Separate `SELECT`, `INSERT`, `UPDATE`, `DELETE` policies checking `owner_col = current_setting('app.user_id')::uuid`.
-- `SystemAndUser` tables: `SELECT` includes `owner IS NULL OR owner = current_setting(...)`.
+- `PushPolicyDisabled` tables: read-only behavior (no write policies generated).
+- Tables with `OwnerColumn`: `SELECT`, `INSERT`, `UPDATE`, `DELETE` policies scoped to `owner_col::text = current_setting('app.user_id', true)`.
+- Tables with `AllowGlobalRead=true`: `SELECT` additionally allows `owner_col IS NULL`.
 - Child tables: `EXISTS` subquery through parent chain to verify ownership.

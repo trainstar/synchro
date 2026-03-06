@@ -2,6 +2,8 @@ package wal
 
 import (
 	"context"
+	"database/sql"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"time"
@@ -15,7 +17,7 @@ import (
 
 // BucketAssigner resolves which buckets a changed record belongs to.
 type BucketAssigner interface {
-	AssignBuckets(ctx context.Context, table string, recordID string, data map[string]any) ([]string, error)
+	AssignBuckets(ctx context.Context, table string, recordID string, operation synchro.Operation, data map[string]any) ([]string, error)
 }
 
 // ConsumerConfig configures the WAL consumer.
@@ -35,7 +37,7 @@ type ConsumerConfig struct {
 	// Assigner determines bucket IDs for changed records.
 	Assigner BucketAssigner
 
-	// ChangelogDB writes entries to the sync_changelog table and persists WAL position.
+	// ChangelogDB writes entries to sync sidecar tables and persists WAL position.
 	ChangelogDB synchro.DB
 
 	// Logger for consumer events.
@@ -73,7 +75,6 @@ func NewConsumer(cfg ConsumerConfig) *Consumer {
 
 // Start begins consuming WAL events. Blocks until ctx is cancelled.
 func (c *Consumer) Start(ctx context.Context) error {
-	// Load persisted LSN for crash recovery
 	persistedLSN, err := c.position.Load(ctx)
 	if err != nil {
 		return fmt.Errorf("loading persisted LSN: %w", err)
@@ -86,17 +87,13 @@ func (c *Consumer) Start(ctx context.Context) error {
 	c.conn = conn
 	defer conn.Close(ctx)
 
-	// Create replication slot if it doesn't exist
 	_, err = pglogrepl.CreateReplicationSlot(ctx, conn, c.cfg.SlotName, "pgoutput",
 		pglogrepl.CreateReplicationSlotOptions{Temporary: false})
 	if err != nil {
-		// Slot may already exist — log and continue
 		c.logger.InfoContext(ctx, "replication slot creation",
 			"slot", c.cfg.SlotName, "result", err.Error())
 	}
 
-	// Determine start position: use persisted LSN if available,
-	// otherwise fall back to current server position (first run only).
 	startLSN := persistedLSN
 	if startLSN == 0 {
 		sysident, err := pglogrepl.IdentifySystem(ctx, conn)
@@ -111,7 +108,6 @@ func (c *Consumer) Start(ctx context.Context) error {
 			"start_lsn", startLSN)
 	}
 
-	// Start replication from the determined position
 	err = pglogrepl.StartReplication(ctx, conn, c.cfg.SlotName, startLSN,
 		pglogrepl.StartReplicationOptions{
 			PluginArgs: []string{
@@ -136,7 +132,6 @@ func (c *Consumer) Start(ctx context.Context) error {
 
 	for {
 		if ctx.Err() != nil {
-			// Send final status before exiting
 			_ = pglogrepl.SendStandbyStatusUpdate(ctx, conn,
 				pglogrepl.StandbyStatusUpdate{WALWritePosition: c.position.Confirmed()})
 			return ctx.Err()
@@ -198,21 +193,9 @@ func (c *Consumer) Start(ctx context.Context) error {
 			}
 
 			for _, event := range events {
-				buckets, err := c.cfg.Assigner.AssignBuckets(ctx, event.TableName, event.RecordID, event.Data)
-				if err != nil {
-					c.logger.ErrorContext(ctx, "failed to assign buckets",
-						"err", err, "table", event.TableName, "id", event.RecordID)
-					continue
-				}
-
-				for _, bucket := range buckets {
-					_, err := c.cfg.ChangelogDB.ExecContext(ctx,
-						"INSERT INTO sync_changelog (bucket_id, table_name, record_id, operation) VALUES ($1, $2, $3, $4)",
-						bucket, event.TableName, event.RecordID, int(event.Operation))
-					if err != nil {
-						c.logger.ErrorContext(ctx, "failed to write changelog",
-							"err", err, "bucket", bucket, "table", event.TableName, "id", event.RecordID)
-					}
+				if err := c.applyEvent(ctx, event); err != nil {
+					c.logger.ErrorContext(ctx, "failed to process WAL event",
+						"err", err, "table", event.TableName, "id", event.RecordID, "op", event.Operation.String())
 				}
 			}
 
@@ -223,4 +206,321 @@ func (c *Consumer) Start(ctx context.Context) error {
 			}
 		}
 	}
+}
+
+func (c *Consumer) applyEvent(ctx context.Context, event WALEvent) error {
+	db := c.cfg.ChangelogDB
+	var (
+		tx  *sql.Tx
+		err error
+	)
+	if beginner, ok := c.cfg.ChangelogDB.(synchro.TxBeginner); ok {
+		tx, err = beginner.BeginTx(ctx, nil)
+		if err != nil {
+			return fmt.Errorf("begin WAL event tx: %w", err)
+		}
+		db = tx
+		defer tx.Rollback()
+	}
+
+	existing, err := c.loadExistingBuckets(ctx, db, event.TableName, event.RecordID)
+	if err != nil {
+		return err
+	}
+
+	desired := []string{}
+	if event.Operation != synchro.OpDelete || len(existing) == 0 {
+		desired, err = c.cfg.Assigner.AssignBuckets(ctx, event.TableName, event.RecordID, event.Operation, event.Data)
+		if err != nil {
+			if writeErr := c.writeRuleFailure(ctx, db, event, err); writeErr != nil {
+				c.logger.ErrorContext(ctx, "failed to write rule failure record",
+					"err", writeErr, "table", event.TableName, "id", event.RecordID)
+			}
+			if tx != nil {
+				if commitErr := tx.Commit(); commitErr != nil {
+					return fmt.Errorf("commit rule failure tx: %w", commitErr)
+				}
+			}
+			return nil
+		}
+		desired = dedupeBuckets(desired)
+	}
+
+	entries := buildEdgeDiffEntries(event, existing, desired)
+	if err := c.writeChangelogEntries(ctx, db, entries); err != nil {
+		return err
+	}
+
+	if err := c.applyEdgeDiff(ctx, db, event, existing, desired); err != nil {
+		return err
+	}
+
+	if tx != nil {
+		if err := tx.Commit(); err != nil {
+			return fmt.Errorf("commit WAL event tx: %w", err)
+		}
+	}
+	return nil
+}
+
+func (c *Consumer) loadExistingBuckets(ctx context.Context, db synchro.DB, tableName, recordID string) ([]string, error) {
+	rows, err := db.QueryContext(ctx, `
+		SELECT bucket_id
+		FROM sync_bucket_edges
+		WHERE table_name = $1 AND record_id = $2
+	`, tableName, recordID)
+	if err != nil {
+		return nil, fmt.Errorf("loading existing bucket edges: %w", err)
+	}
+	defer rows.Close()
+
+	var buckets []string
+	for rows.Next() {
+		var b string
+		if err := rows.Scan(&b); err != nil {
+			return nil, fmt.Errorf("scanning bucket edge: %w", err)
+		}
+		buckets = append(buckets, b)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("reading bucket edges: %w", err)
+	}
+	return buckets, nil
+}
+
+func (c *Consumer) applyEdgeDiff(
+	ctx context.Context,
+	db synchro.DB,
+	event WALEvent,
+	existing []string,
+	desired []string,
+) error {
+	if event.Operation == synchro.OpDelete {
+		_, err := db.ExecContext(ctx, `
+			DELETE FROM sync_bucket_edges
+			WHERE table_name = $1 AND record_id = $2
+		`, event.TableName, event.RecordID)
+		if err != nil {
+			return fmt.Errorf("deleting bucket edges for delete event: %w", err)
+		}
+		return nil
+	}
+
+	added, _, removed := diffBucketSets(existing, desired)
+	if len(added) > 0 {
+		if err := c.upsertBucketEdges(ctx, db, event.TableName, event.RecordID, added); err != nil {
+			return err
+		}
+	}
+	if len(removed) > 0 {
+		if err := c.deleteBucketEdges(ctx, db, event.TableName, event.RecordID, removed); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (c *Consumer) upsertBucketEdges(ctx context.Context, db synchro.DB, tableName, recordID string, buckets []string) error {
+	if len(buckets) == 0 {
+		return nil
+	}
+	query := "INSERT INTO sync_bucket_edges (table_name, record_id, bucket_id, updated_at) VALUES "
+	args := make([]any, 0, len(buckets)*3)
+	for i, bucket := range buckets {
+		if i > 0 {
+			query += ", "
+		}
+		base := i*3 + 1
+		query += fmt.Sprintf("($%d, $%d, $%d, now())", base, base+1, base+2)
+		args = append(args, tableName, recordID, bucket)
+	}
+	query += " ON CONFLICT (table_name, record_id, bucket_id) DO UPDATE SET updated_at = now()"
+	if _, err := db.ExecContext(ctx, query, args...); err != nil {
+		return fmt.Errorf("upserting bucket edges: %w", err)
+	}
+	return nil
+}
+
+func (c *Consumer) deleteBucketEdges(ctx context.Context, db synchro.DB, tableName, recordID string, buckets []string) error {
+	if len(buckets) == 0 {
+		return nil
+	}
+	inClause, args, next := synchroExpandSlicePlaceholder(buckets, 3, []any{tableName, recordID})
+	query := fmt.Sprintf(`
+		DELETE FROM sync_bucket_edges
+		WHERE table_name = $1
+		  AND record_id = $2
+		  AND bucket_id IN %s
+	`, inClause)
+	_ = next
+	if _, err := db.ExecContext(ctx, query, args...); err != nil {
+		return fmt.Errorf("deleting bucket edges: %w", err)
+	}
+	return nil
+}
+
+func (c *Consumer) writeChangelogEntries(ctx context.Context, db synchro.DB, entries []changelogEntry) error {
+	if len(entries) == 0 {
+		return nil
+	}
+
+	query := "INSERT INTO sync_changelog (bucket_id, table_name, record_id, operation) VALUES "
+	args := make([]any, 0, len(entries)*4)
+	for i, e := range entries {
+		if i > 0 {
+			query += ", "
+		}
+		base := i*4 + 1
+		query += fmt.Sprintf("($%d, $%d, $%d, $%d)", base, base+1, base+2, base+3)
+		args = append(args, e.BucketID, e.TableName, e.RecordID, int(e.Operation))
+	}
+	if _, err := db.ExecContext(ctx, query, args...); err != nil {
+		return fmt.Errorf("writing changelog entries: %w", err)
+	}
+	return nil
+}
+
+func (c *Consumer) writeRuleFailure(ctx context.Context, db synchro.DB, event WALEvent, cause error) error {
+	payload, _ := json.Marshal(event.Data)
+	_, err := db.ExecContext(ctx, `
+		INSERT INTO sync_rule_failures (table_name, record_id, operation, error_text, payload)
+		VALUES ($1, $2, $3, $4, $5::jsonb)
+	`, event.TableName, event.RecordID, int(event.Operation), cause.Error(), string(payload))
+	if err != nil {
+		return fmt.Errorf("writing sync_rule_failures row: %w", err)
+	}
+	return nil
+}
+
+type changelogEntry struct {
+	BucketID  string
+	TableName string
+	RecordID  string
+	Operation synchro.Operation
+}
+
+func buildEdgeDiffEntries(event WALEvent, existing []string, desired []string) []changelogEntry {
+	existing = dedupeBuckets(existing)
+	desired = dedupeBuckets(desired)
+
+	existingSet := make(map[string]struct{}, len(existing))
+	for _, b := range existing {
+		existingSet[b] = struct{}{}
+	}
+	desiredSet := make(map[string]struct{}, len(desired))
+	for _, b := range desired {
+		desiredSet[b] = struct{}{}
+	}
+
+	out := make([]changelogEntry, 0, len(existing)+len(desired))
+
+	if event.Operation == synchro.OpDelete {
+		targets := existing
+		if len(targets) == 0 {
+			targets = desired
+		}
+		for _, bucket := range targets {
+			out = append(out, changelogEntry{
+				BucketID:  bucket,
+				TableName: event.TableName,
+				RecordID:  event.RecordID,
+				Operation: synchro.OpDelete,
+			})
+		}
+		return out
+	}
+
+	for _, bucket := range desired {
+		if _, ok := existingSet[bucket]; ok {
+			op := event.Operation
+			if op == synchro.OpInsert {
+				op = synchro.OpUpdate
+			}
+			out = append(out, changelogEntry{
+				BucketID:  bucket,
+				TableName: event.TableName,
+				RecordID:  event.RecordID,
+				Operation: op,
+			})
+			continue
+		}
+		out = append(out, changelogEntry{
+			BucketID:  bucket,
+			TableName: event.TableName,
+			RecordID:  event.RecordID,
+			Operation: synchro.OpInsert,
+		})
+	}
+
+	for _, bucket := range existing {
+		if _, ok := desiredSet[bucket]; ok {
+			continue
+		}
+		out = append(out, changelogEntry{
+			BucketID:  bucket,
+			TableName: event.TableName,
+			RecordID:  event.RecordID,
+			Operation: synchro.OpDelete,
+		})
+	}
+	return out
+}
+
+func diffBucketSets(existing []string, desired []string) (added []string, kept []string, removed []string) {
+	existingSet := make(map[string]struct{}, len(existing))
+	for _, b := range existing {
+		existingSet[b] = struct{}{}
+	}
+	desiredSet := make(map[string]struct{}, len(desired))
+	for _, b := range desired {
+		desiredSet[b] = struct{}{}
+		if _, ok := existingSet[b]; ok {
+			kept = append(kept, b)
+		} else {
+			added = append(added, b)
+		}
+	}
+	for _, b := range existing {
+		if _, ok := desiredSet[b]; !ok {
+			removed = append(removed, b)
+		}
+	}
+	return added, kept, removed
+}
+
+func dedupeBuckets(in []string) []string {
+	if len(in) < 2 {
+		return in
+	}
+	seen := make(map[string]struct{}, len(in))
+	out := make([]string, 0, len(in))
+	for _, b := range in {
+		if b == "" {
+			continue
+		}
+		if _, ok := seen[b]; ok {
+			continue
+		}
+		seen[b] = struct{}{}
+		out = append(out, b)
+	}
+	return out
+}
+
+// Local copy of synchro.expandSlicePlaceholder to avoid exposing internal helpers.
+func synchroExpandSlicePlaceholder(slice []string, startIdx int, args []any) (string, []any, int) {
+	if len(slice) == 0 {
+		return "(NULL)", args, startIdx
+	}
+	query := "("
+	for i, v := range slice {
+		if i > 0 {
+			query += ", "
+		}
+		query += fmt.Sprintf("$%d", startIdx)
+		args = append(args, v)
+		startIdx++
+	}
+	query += ")"
+	return query, args, startIdx
 }

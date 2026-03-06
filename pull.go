@@ -48,37 +48,8 @@ func (p *pullProcessor) processPull(ctx context.Context, db DB, req *PullRequest
 		}, nil
 	}
 
-	// Group entries by table and operation
-	type recordRef struct {
-		TableName string
-		RecordID  string
-		Operation Operation
-		Seq       int64
-	}
-
 	// Deduplicate: for the same record, keep only the latest entry
-	seen := make(map[string]int) // "table:id" → index in refs
-	refs := make([]recordRef, 0, len(entries))
-	for _, e := range entries {
-		key := e.TableName + ":" + e.RecordID
-		if idx, ok := seen[key]; ok {
-			// Replace with newer entry
-			refs[idx] = recordRef{
-				TableName: e.TableName,
-				RecordID:  e.RecordID,
-				Operation: e.Operation,
-				Seq:       e.Seq,
-			}
-		} else {
-			seen[key] = len(refs)
-			refs = append(refs, recordRef{
-				TableName: e.TableName,
-				RecordID:  e.RecordID,
-				Operation: e.Operation,
-				Seq:       e.Seq,
-			})
-		}
-	}
+	refs := deduplicateEntries(entries)
 
 	// Separate deletes from changes, group changes by table
 	var deletes []DeleteEntry
@@ -178,11 +149,50 @@ func (p *pullProcessor) hydrateRecords(ctx context.Context, db DB, tableName str
 	return records, rows.Err()
 }
 
-// buildJsonPairs builds json_build_object arguments like "'col1', col1, 'col2', col2".
+// recordRef is a deduplicated reference to a changelog entry.
+type recordRef struct {
+	TableName string
+	RecordID  string
+	Operation Operation
+	Seq       int64
+}
+
+// deduplicateEntries keeps only the latest changelog entry per record.
+// Entries are assumed to be ordered by seq. For duplicate records, the later
+// entry replaces the earlier one at the same position in the output slice.
+func deduplicateEntries(entries []ChangelogEntry) []recordRef {
+	seen := make(map[string]int, len(entries)) // "table:id" → index in refs
+	refs := make([]recordRef, 0, len(entries))
+	for _, e := range entries {
+		key := e.TableName + ":" + e.RecordID
+		if idx, ok := seen[key]; ok {
+			refs[idx] = recordRef{
+				TableName: e.TableName,
+				RecordID:  e.RecordID,
+				Operation: e.Operation,
+				Seq:       e.Seq,
+			}
+		} else {
+			seen[key] = len(refs)
+			refs = append(refs, recordRef{
+				TableName: e.TableName,
+				RecordID:  e.RecordID,
+				Operation: e.Operation,
+				Seq:       e.Seq,
+			})
+		}
+	}
+	return refs
+}
+
+// buildJsonPairs builds json_build_object arguments like "'col1', "col1", 'col2', "col2"".
+// Column names are escaped as both SQL string literal keys (single-quote doubled)
+// and SQL identifiers (double-quote escaped via quoteIdentifier).
 func buildJsonPairs(cols []string) string {
 	pairs := make([]string, 0, len(cols)*2)
 	for _, col := range cols {
-		pairs = append(pairs, fmt.Sprintf("'%s', %s", col, quoteIdentifier(col)))
+		safeKey := strings.ReplaceAll(col, "'", "''")
+		pairs = append(pairs, fmt.Sprintf("'%s', %s", safeKey, quoteIdentifier(col)))
 	}
 	return strings.Join(pairs, ", ")
 }

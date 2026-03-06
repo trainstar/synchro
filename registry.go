@@ -2,17 +2,14 @@ package synchro
 
 import "fmt"
 
-// SyncDirection defines how data flows for a table.
-type SyncDirection string
+// PushPolicy defines whether a table accepts client writes.
+type PushPolicy string
 
 const (
-	// Bidirectional means the table supports both push and pull (user-owned data).
-	Bidirectional SyncDirection = "bidirectional"
-	// ServerOnly means the table only supports pull (reference data).
-	ServerOnly SyncDirection = "server_only"
-	// SystemAndUser means the table pulls both system (NULL owner) and user records,
-	// but only accepts pushes for user-owned records.
-	SystemAndUser SyncDirection = "system_and_user"
+	// PushPolicyDisabled means the table is read-only from clients.
+	PushPolicyDisabled PushPolicy = "disabled"
+	// PushPolicyOwnerOnly means pushes are allowed when ownership can be resolved.
+	PushPolicyOwnerOnly PushPolicy = "owner_only"
 )
 
 // defaultProtectedColumns are columns that clients may never write directly.
@@ -27,10 +24,11 @@ type TableConfig struct {
 	// TableName is the database table name.
 	TableName string
 
-	// Direction specifies if the table is bidirectional or server-only.
-	Direction SyncDirection
+	// PushPolicy controls whether pushes are accepted for this table.
+	// Default: owner_only when OwnerColumn/ParentTable is set, otherwise disabled.
+	PushPolicy PushPolicy
 
-	// OwnerColumn is the column name for user ownership (empty for server-only).
+	// OwnerColumn is the column name for user ownership.
 	OwnerColumn string
 
 	// ParentTable is the parent table name for child tables.
@@ -57,6 +55,25 @@ type TableConfig struct {
 	// ProtectedColumns are additional columns (beyond defaults) that clients may not write.
 	// Default protected: id, created_at, updated_at, deleted_at, OwnerColumn.
 	ProtectedColumns []string
+
+	// BucketByColumn enables fast-path bucketing without SQL function execution.
+	// Bucket ID is formed as BucketPrefix + value(column).
+	BucketByColumn string
+
+	// BucketPrefix prefixes fast-path bucket values. Default "user:".
+	BucketPrefix string
+
+	// GlobalWhenBucketNull emits "global" when BucketByColumn value is NULL/empty.
+	GlobalWhenBucketNull bool
+
+	// AllowGlobalRead enables NULL-owner rows to be readable by all users via RLS.
+	// Default false.
+	AllowGlobalRead bool
+
+	// BucketFunction optionally overrides the global SQL bucket resolver function
+	// for this table. Signature:
+	//   (table_name text, operation text, new_row jsonb, old_row jsonb) -> setof text.
+	BucketFunction string
 
 	// protectedSet is a pre-computed lookup set, populated by Register().
 	protectedSet map[string]bool
@@ -92,7 +109,6 @@ func (c *TableConfig) IsProtected(col string) bool {
 func (c *TableConfig) AllowedInsertColumns(dataCols []string) []string {
 	allowed := make([]string, 0, len(dataCols))
 	for _, col := range dataCols {
-		// Allow: non-protected columns + id + owner + parent FK (set once at insert)
 		if !c.protectedSet[col] || col == c.IDColumn || col == c.OwnerColumn || col == c.ParentFKCol {
 			allowed = append(allowed, col)
 		}
@@ -137,6 +153,19 @@ func (r *Registry) Register(cfg *TableConfig) {
 	if cfg.DeletedAtColumn == "" {
 		cfg.DeletedAtColumn = "deleted_at"
 	}
+	if cfg.PushPolicy == "" {
+		if cfg.OwnerColumn != "" || cfg.ParentTable != "" {
+			cfg.PushPolicy = PushPolicyOwnerOnly
+		} else {
+			cfg.PushPolicy = PushPolicyDisabled
+		}
+	}
+	if cfg.BucketByColumn == "" && cfg.BucketFunction == "" && cfg.OwnerColumn != "" {
+		cfg.BucketByColumn = cfg.OwnerColumn
+	}
+	if cfg.BucketByColumn != "" && cfg.BucketPrefix == "" {
+		cfg.BucketPrefix = "user:"
+	}
 
 	cfg.protectedSet = cfg.buildProtectedSet()
 
@@ -158,30 +187,6 @@ func (r *Registry) All() []*TableConfig {
 	return result
 }
 
-// BidirectionalTables returns all tables configured for bidirectional sync.
-func (r *Registry) BidirectionalTables() []*TableConfig {
-	var result []*TableConfig
-	for _, name := range r.tableOrder {
-		cfg := r.tables[name]
-		if cfg.Direction == Bidirectional {
-			result = append(result, cfg)
-		}
-	}
-	return result
-}
-
-// ServerOnlyTables returns all tables configured for server-only sync.
-func (r *Registry) ServerOnlyTables() []*TableConfig {
-	var result []*TableConfig
-	for _, name := range r.tableOrder {
-		cfg := r.tables[name]
-		if cfg.Direction == ServerOnly {
-			result = append(result, cfg)
-		}
-	}
-	return result
-}
-
 // TableNames returns the names of all registered tables.
 func (r *Registry) TableNames() []string {
 	return append([]string{}, r.tableOrder...)
@@ -196,7 +201,7 @@ func (r *Registry) IsRegistered(tableName string) bool {
 // IsPushable returns true if the table accepts push operations.
 func (r *Registry) IsPushable(tableName string) bool {
 	cfg := r.tables[tableName]
-	return cfg != nil && (cfg.Direction == Bidirectional || cfg.Direction == SystemAndUser)
+	return cfg != nil && cfg.PushPolicy != PushPolicyDisabled
 }
 
 // Validate checks all registered tables for configuration errors.
@@ -204,53 +209,57 @@ func (r *Registry) Validate() error {
 	for _, name := range r.tableOrder {
 		cfg := r.tables[name]
 
-		// ProtectedColumns must not contain default protected columns (redundant)
+		if cfg.PushPolicy != PushPolicyDisabled && cfg.PushPolicy != PushPolicyOwnerOnly {
+			return fmt.Errorf("%w: table %q has %q", ErrInvalidPushPolicy, name, cfg.PushPolicy)
+		}
+
+		if cfg.GlobalWhenBucketNull && !cfg.AllowGlobalRead {
+			return fmt.Errorf("%w: table %q has GlobalWhenBucketNull without AllowGlobalRead", ErrInvalidBucketConfig, name)
+		}
+
 		for _, col := range cfg.ProtectedColumns {
 			if defaultProtectedColumns[col] {
-				return fmt.Errorf("table %q: ProtectedColumns contains default protected column %q (redundant)", name, col)
+				return fmt.Errorf("%w: table %q contains default protected column %q", ErrRedundantProtected, name, col)
 			}
 			if col == cfg.IDColumn {
-				return fmt.Errorf("table %q: ProtectedColumns contains PK column %q (redundant)", name, col)
+				return fmt.Errorf("%w: table %q contains PK column %q", ErrRedundantProtected, name, col)
 			}
 			if col == cfg.OwnerColumn {
-				return fmt.Errorf("table %q: ProtectedColumns contains ownership column %q (redundant)", name, col)
+				return fmt.Errorf("%w: table %q contains ownership column %q", ErrRedundantProtected, name, col)
 			}
 		}
 
-		// Child tables with ParentTable must reference a registered table
 		if cfg.ParentTable != "" {
 			parentCfg := r.tables[cfg.ParentTable]
 			if parentCfg == nil {
-				return fmt.Errorf("table %q references unregistered parent %q", name, cfg.ParentTable)
+				return fmt.Errorf("%w: table %q references %q", ErrUnregisteredParent, name, cfg.ParentTable)
 			}
 			if cfg.ParentFKCol == "" {
-				return fmt.Errorf("table %q has ParentTable %q but no ParentFKCol", name, cfg.ParentTable)
+				return fmt.Errorf("%w: table %q has ParentTable %q", ErrMissingParentFKCol, name, cfg.ParentTable)
 			}
 		}
 
-		// Parent chain must terminate at a table with OwnerColumn (no orphaned chains)
 		if cfg.ParentTable != "" {
 			visited := map[string]bool{name: true}
 			current := cfg
 			for current.ParentTable != "" {
 				if visited[current.ParentTable] {
-					return fmt.Errorf("table %q: cycle detected in parent chain at %q", name, current.ParentTable)
+					return fmt.Errorf("%w: table %q at %q", ErrCycleDetected, name, current.ParentTable)
 				}
 				visited[current.ParentTable] = true
 				parent := r.tables[current.ParentTable]
 				if parent == nil {
-					return fmt.Errorf("table %q: broken parent chain, %q is not registered", name, current.ParentTable)
+					return fmt.Errorf("%w: table %q, %q is not registered", ErrUnregisteredParent, name, current.ParentTable)
 				}
 				current = parent
 			}
 			if current.OwnerColumn == "" {
-				return fmt.Errorf("table %q: parent chain root %q has no OwnerColumn (orphaned chain)", name, current.TableName)
+				return fmt.Errorf("%w: table %q, root %q has no OwnerColumn", ErrOrphanedChain, name, current.TableName)
 			}
 		}
 
-		// Pushable tables without OwnerColumn and without ParentTable must be ServerOnly
 		if r.IsPushable(name) && cfg.OwnerColumn == "" && cfg.ParentTable == "" {
-			return fmt.Errorf("table %q is pushable but has no OwnerColumn or ParentTable", name)
+			return fmt.Errorf("%w: table %q has no OwnerColumn or ParentTable", ErrMissingOwnership, name)
 		}
 	}
 	return nil

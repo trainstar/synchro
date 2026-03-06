@@ -1,19 +1,23 @@
 package synchro
 
-import (
-	"fmt"
-)
+import "fmt"
 
 // GenerateRLSPolicies generates SQL statements to enable RLS and create
 // policies for all registered tables based on registry configuration.
+//
+// Ownership comparisons use text equality instead of hard-coded UUID casts so
+// integrations can use non-UUID user identifiers.
 func GenerateRLSPolicies(registry *Registry) []string {
 	var stmts []string
 
 	for _, cfg := range registry.All() {
-		if cfg.Direction == ServerOnly {
-			// ServerOnly tables get a read-all policy, no write
+		stmts = append(stmts,
+			fmt.Sprintf("ALTER TABLE %s ENABLE ROW LEVEL SECURITY", quoteIdentifier(cfg.TableName)),
+		)
+
+		// No ownership columns anywhere: read-all table.
+		if cfg.OwnerColumn == "" && cfg.ParentTable == "" {
 			stmts = append(stmts,
-				fmt.Sprintf("ALTER TABLE %s ENABLE ROW LEVEL SECURITY", quoteIdentifier(cfg.TableName)),
 				fmt.Sprintf(`CREATE POLICY %s ON %s FOR SELECT USING (true)`,
 					quoteIdentifier("sync_read_"+cfg.TableName), quoteIdentifier(cfg.TableName)),
 			)
@@ -21,65 +25,51 @@ func GenerateRLSPolicies(registry *Registry) []string {
 		}
 
 		if cfg.OwnerColumn != "" {
-			stmts = append(stmts,
-				fmt.Sprintf("ALTER TABLE %s ENABLE ROW LEVEL SECURITY", quoteIdentifier(cfg.TableName)),
-			)
+			readPredicate := fmt.Sprintf("%s::text = current_setting('app.user_id', true)",
+				quoteIdentifier(cfg.OwnerColumn))
+			if cfg.AllowGlobalRead {
+				readPredicate = fmt.Sprintf("(%s IS NULL OR %s)",
+					quoteIdentifier(cfg.OwnerColumn), readPredicate)
+			}
+			writePredicate := fmt.Sprintf("%s::text = current_setting('app.user_id', true)",
+				quoteIdentifier(cfg.OwnerColumn))
 
-			// Read policy
-			if cfg.Direction == SystemAndUser {
-				// SystemAndUser: read system (NULL owner) + own records
+			stmts = append(stmts,
+				fmt.Sprintf(`CREATE POLICY %s ON %s FOR SELECT USING (%s)`,
+					quoteIdentifier("sync_read_"+cfg.TableName), quoteIdentifier(cfg.TableName), readPredicate),
+			)
+			if registry.IsPushable(cfg.TableName) {
 				stmts = append(stmts,
-					fmt.Sprintf(`CREATE POLICY %s ON %s FOR SELECT USING (%s IS NULL OR %s = current_setting('app.user_id')::uuid)`,
-						quoteIdentifier("sync_read_"+cfg.TableName), quoteIdentifier(cfg.TableName),
-						quoteIdentifier(cfg.OwnerColumn), quoteIdentifier(cfg.OwnerColumn)),
-				)
-			} else {
-				// Bidirectional: only own records
-				stmts = append(stmts,
-					fmt.Sprintf(`CREATE POLICY %s ON %s FOR SELECT USING (%s = current_setting('app.user_id')::uuid)`,
-						quoteIdentifier("sync_read_"+cfg.TableName), quoteIdentifier(cfg.TableName),
-						quoteIdentifier(cfg.OwnerColumn)),
+					fmt.Sprintf(`CREATE POLICY %s ON %s FOR INSERT WITH CHECK (%s)`,
+						quoteIdentifier("sync_write_ins_"+cfg.TableName), quoteIdentifier(cfg.TableName), writePredicate),
+					fmt.Sprintf(`CREATE POLICY %s ON %s FOR UPDATE USING (%s)`,
+						quoteIdentifier("sync_write_upd_"+cfg.TableName), quoteIdentifier(cfg.TableName), writePredicate),
+					fmt.Sprintf(`CREATE POLICY %s ON %s FOR DELETE USING (%s)`,
+						quoteIdentifier("sync_write_del_"+cfg.TableName), quoteIdentifier(cfg.TableName), writePredicate),
 				)
 			}
-
-			// Write policy (INSERT/UPDATE/DELETE): must be own records
-			stmts = append(stmts,
-				fmt.Sprintf(`CREATE POLICY %s ON %s FOR INSERT WITH CHECK (%s = current_setting('app.user_id')::uuid)`,
-					quoteIdentifier("sync_write_ins_"+cfg.TableName), quoteIdentifier(cfg.TableName),
-					quoteIdentifier(cfg.OwnerColumn)),
-				fmt.Sprintf(`CREATE POLICY %s ON %s FOR UPDATE USING (%s = current_setting('app.user_id')::uuid)`,
-					quoteIdentifier("sync_write_upd_"+cfg.TableName), quoteIdentifier(cfg.TableName),
-					quoteIdentifier(cfg.OwnerColumn)),
-				fmt.Sprintf(`CREATE POLICY %s ON %s FOR DELETE USING (%s = current_setting('app.user_id')::uuid)`,
-					quoteIdentifier("sync_write_del_"+cfg.TableName), quoteIdentifier(cfg.TableName),
-					quoteIdentifier(cfg.OwnerColumn)),
-			)
 			continue
 		}
 
-		if cfg.ParentTable != "" {
-			// Child table: policy chains through parent
-			parentCfg := registry.Get(cfg.ParentTable)
-			if parentCfg == nil {
-				continue
-			}
-
+		// Child table ownership checks are resolved through parent chains.
+		readCheck := buildParentOwnerCheck(registry, cfg, cfg.AllowGlobalRead)
+		if readCheck != "" {
 			stmts = append(stmts,
-				fmt.Sprintf("ALTER TABLE %s ENABLE ROW LEVEL SECURITY", quoteIdentifier(cfg.TableName)),
+				fmt.Sprintf(`CREATE POLICY %s ON %s FOR SELECT USING (%s)`,
+					quoteIdentifier("sync_read_"+cfg.TableName), quoteIdentifier(cfg.TableName), readCheck),
 			)
+		}
 
-			// Build the ownership check as a subquery through the parent chain
-			ownerCheck := buildParentOwnerCheck(registry, cfg)
-			if ownerCheck != "" {
+		if registry.IsPushable(cfg.TableName) {
+			writeCheck := buildParentOwnerCheck(registry, cfg, false)
+			if writeCheck != "" {
 				stmts = append(stmts,
-					fmt.Sprintf(`CREATE POLICY %s ON %s FOR SELECT USING (%s)`,
-						quoteIdentifier("sync_read_"+cfg.TableName), quoteIdentifier(cfg.TableName), ownerCheck),
 					fmt.Sprintf(`CREATE POLICY %s ON %s FOR INSERT WITH CHECK (%s)`,
-						quoteIdentifier("sync_write_ins_"+cfg.TableName), quoteIdentifier(cfg.TableName), ownerCheck),
+						quoteIdentifier("sync_write_ins_"+cfg.TableName), quoteIdentifier(cfg.TableName), writeCheck),
 					fmt.Sprintf(`CREATE POLICY %s ON %s FOR UPDATE USING (%s)`,
-						quoteIdentifier("sync_write_upd_"+cfg.TableName), quoteIdentifier(cfg.TableName), ownerCheck),
+						quoteIdentifier("sync_write_upd_"+cfg.TableName), quoteIdentifier(cfg.TableName), writeCheck),
 					fmt.Sprintf(`CREATE POLICY %s ON %s FOR DELETE USING (%s)`,
-						quoteIdentifier("sync_write_del_"+cfg.TableName), quoteIdentifier(cfg.TableName), ownerCheck),
+						quoteIdentifier("sync_write_del_"+cfg.TableName), quoteIdentifier(cfg.TableName), writeCheck),
 				)
 			}
 		}
@@ -88,17 +78,13 @@ func GenerateRLSPolicies(registry *Registry) []string {
 	return stmts
 }
 
-// buildParentOwnerCheck builds a nested EXISTS subquery for RLS that
-// chains through parent tables to verify ownership.
-// childRef is the SQL expression for the child table (raw table name at depth 0,
-// alias at deeper levels). depth tracks nesting for unique aliases.
-func buildParentOwnerCheck(registry *Registry, cfg *TableConfig) string {
-	// The policy is ON cfg.TableName, so at the top level the child is
-	// referenced by its raw table name (RLS policies have implicit access).
-	return buildParentOwnerCheckAt(registry, cfg, quoteIdentifier(cfg.TableName), 1)
+// buildParentOwnerCheck builds nested EXISTS clauses that follow parent FKs to
+// the chain root owner column.
+func buildParentOwnerCheck(registry *Registry, cfg *TableConfig, includeGlobal bool) string {
+	return buildParentOwnerCheckAt(registry, cfg, quoteIdentifier(cfg.TableName), 1, includeGlobal)
 }
 
-func buildParentOwnerCheckAt(registry *Registry, cfg *TableConfig, childRef string, depth int) string {
+func buildParentOwnerCheckAt(registry *Registry, cfg *TableConfig, childRef string, depth int, includeGlobal bool) string {
 	if cfg.ParentTable == "" {
 		return ""
 	}
@@ -109,33 +95,31 @@ func buildParentOwnerCheckAt(registry *Registry, cfg *TableConfig, childRef stri
 	}
 
 	alias := fmt.Sprintf("p%d", depth)
-
 	if parentCfg.OwnerColumn != "" {
-		check := fmt.Sprintf(`EXISTS (SELECT 1 FROM %s %s WHERE %s.%s = %s.%s`,
+		base := fmt.Sprintf(`EXISTS (SELECT 1 FROM %s %s WHERE %s.%s = %s.%s AND `,
 			quoteIdentifier(parentCfg.TableName), alias,
 			alias, quoteIdentifier(parentCfg.IDColumn),
 			childRef, quoteIdentifier(cfg.ParentFKCol))
 
-		if parentCfg.Direction == SystemAndUser {
-			check += fmt.Sprintf(` AND (%s.%s IS NULL OR %s.%s = current_setting('app.user_id')::uuid))`,
+		var ownerPredicate string
+		if includeGlobal {
+			ownerPredicate = fmt.Sprintf("(%s.%s IS NULL OR %s.%s::text = current_setting('app.user_id', true))",
 				alias, quoteIdentifier(parentCfg.OwnerColumn),
 				alias, quoteIdentifier(parentCfg.OwnerColumn))
 		} else {
-			check += fmt.Sprintf(` AND %s.%s = current_setting('app.user_id')::uuid)`,
+			ownerPredicate = fmt.Sprintf("%s.%s::text = current_setting('app.user_id', true)",
 				alias, quoteIdentifier(parentCfg.OwnerColumn))
 		}
-		return check
+		return base + ownerPredicate + `)`
 	}
 
-	// Parent is also a child — recurse with the current alias as the new childRef
-	innerCheck := buildParentOwnerCheckAt(registry, parentCfg, alias, depth+1)
-	if innerCheck == "" {
+	inner := buildParentOwnerCheckAt(registry, parentCfg, alias, depth+1, includeGlobal)
+	if inner == "" {
 		return ""
 	}
-
 	return fmt.Sprintf(`EXISTS (SELECT 1 FROM %s %s WHERE %s.%s = %s.%s AND %s)`,
 		quoteIdentifier(parentCfg.TableName), alias,
 		alias, quoteIdentifier(parentCfg.IDColumn),
 		childRef, quoteIdentifier(cfg.ParentFKCol),
-		innerCheck)
+		inner)
 }
