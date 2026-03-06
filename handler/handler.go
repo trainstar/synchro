@@ -1,21 +1,38 @@
 package handler
 
 import (
+	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
+	"net"
 	"net/http"
+	"strconv"
 
 	"github.com/trainstar/synchro"
 )
 
 // Handler provides net/http handlers for sync endpoints.
 type Handler struct {
-	engine *synchro.Engine
+	engine            *synchro.Engine
+	defaultRetryAfter int
+}
+
+// Option configures a Handler.
+type Option func(*Handler)
+
+// WithDefaultRetryAfter sets the default Retry-After seconds for transient errors.
+func WithDefaultRetryAfter(seconds int) Option {
+	return func(h *Handler) { h.defaultRetryAfter = seconds }
 }
 
 // New creates a new sync HTTP handler.
-func New(engine *synchro.Engine) *Handler {
-	return &Handler{engine: engine}
+func New(engine *synchro.Engine, opts ...Option) *Handler {
+	h := &Handler{engine: engine, defaultRetryAfter: 5}
+	for _, opt := range opts {
+		opt(h)
+	}
+	return h
 }
 
 // ServeRegister handles POST /sync/register.
@@ -59,6 +76,10 @@ func (h *Handler) ServeRegister(w http.ResponseWriter, r *http.Request) {
 		}
 		if err == synchro.ErrSchemaMismatch {
 			h.writeSchemaMismatch(w, r)
+			return
+		}
+		if isTransientError(err) {
+			writeRetryError(w, http.StatusServiceUnavailable, "service temporarily unavailable", h.defaultRetryAfter)
 			return
 		}
 		writeError(w, http.StatusInternalServerError, "failed to register client")
@@ -105,6 +126,10 @@ func (h *Handler) ServePull(w http.ResponseWriter, r *http.Request) {
 			h.writeSchemaMismatch(w, r)
 			return
 		}
+		if isTransientError(err) {
+			writeRetryError(w, http.StatusServiceUnavailable, "service temporarily unavailable", h.defaultRetryAfter)
+			return
+		}
 		writeError(w, http.StatusInternalServerError, "failed to pull changes")
 		return
 	}
@@ -149,6 +174,10 @@ func (h *Handler) ServePush(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		if err == synchro.ErrSchemaMismatch {
 			h.writeSchemaMismatch(w, r)
+			return
+		}
+		if isTransientError(err) {
+			writeRetryError(w, http.StatusServiceUnavailable, "service temporarily unavailable", h.defaultRetryAfter)
 			return
 		}
 		writeError(w, http.StatusInternalServerError, "failed to push changes")
@@ -199,6 +228,10 @@ func (h *Handler) ServeResync(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusNotFound, "client not registered")
 			return
 		}
+		if isTransientError(err) {
+			writeRetryError(w, http.StatusServiceUnavailable, "service temporarily unavailable", h.defaultRetryAfter)
+			return
+		}
 		writeError(w, http.StatusInternalServerError, "failed to resync")
 		return
 	}
@@ -244,6 +277,24 @@ func writeError(w http.ResponseWriter, status int, msg string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	json.NewEncoder(w).Encode(map[string]string{"error": msg})
+}
+
+func writeRetryError(w http.ResponseWriter, status int, msg string, retryAfter int) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Retry-After", strconv.Itoa(retryAfter))
+	w.WriteHeader(status)
+	json.NewEncoder(w).Encode(map[string]any{
+		"error":       msg,
+		"retry_after": retryAfter,
+	})
+}
+
+func isTransientError(err error) bool {
+	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, sql.ErrConnDone) {
+		return true
+	}
+	var netErr net.Error
+	return errors.As(err, &netErr)
 }
 
 func requireMethod(w http.ResponseWriter, r *http.Request, allowed string) bool {

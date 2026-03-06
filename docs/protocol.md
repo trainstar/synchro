@@ -480,11 +480,22 @@ Most errors return a JSON body with an `error` field.
 | `401` | Missing user identity in context |
 | `409` | Schema mismatch (`code = schema_mismatch`) |
 | `426` | Client version below `MinClientVersion` |
+| `429` | Rate limited (via `RetryAfterMiddleware`) |
 | `500` | Internal server error |
+| `503` | Transient error (DB down, connection lost, timeout) |
 
 ```json
 {
   "error": "description of the error"
+}
+```
+
+`429` and `503` responses include a `Retry-After` header (seconds, RFC 7231 §7.1.3) and a `retry_after` field in the body:
+
+```json
+{
+  "error": "service temporarily unavailable",
+  "retry_after": 5
 }
 ```
 

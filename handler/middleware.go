@@ -40,6 +40,18 @@ func UserIDMiddleware(header string, next http.Handler) http.Handler {
 	})
 }
 
+// RetryAfterMiddleware rejects requests when the check function returns true.
+// The consuming app provides the policy (rate limiting, maintenance mode, etc.).
+func RetryAfterMiddleware(check func(r *http.Request) (reject bool, status int, retryAfter int), next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if reject, status, retryAfter := check(r); reject {
+			writeRetryError(w, status, http.StatusText(status), retryAfter)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
 // VersionCheckMiddleware validates the client version header against the minimum.
 func VersionCheckMiddleware(header, minVersion string, next http.Handler) http.Handler {
 	if minVersion == "" {

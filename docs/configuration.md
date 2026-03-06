@@ -375,6 +375,36 @@ Optional middleware that rejects clients below a minimum version:
 wrapped := handler.VersionCheckMiddleware("X-App-Version", "1.2.0", mux)
 ```
 
+### Retry-After
+
+Synchro automatically returns `503 Service Unavailable` with a `Retry-After` header when it detects transient errors (closed DB pool, connection timeout, network failure). The default retry interval is 5 seconds:
+
+```go
+h := handler.New(engine, handler.WithDefaultRetryAfter(10)) // 10 seconds
+```
+
+For application-level backpressure (rate limiting, maintenance mode), use the middleware. The consuming app provides the policy:
+
+```go
+// Rate limiting (429)
+wrapped := handler.RetryAfterMiddleware(func(r *http.Request) (bool, int, int) {
+    if rateLimiter.IsExceeded(r) {
+        return true, 429, 60
+    }
+    return false, 0, 0
+}, mux)
+
+// Maintenance mode (503)
+wrapped := handler.RetryAfterMiddleware(func(r *http.Request) (bool, int, int) {
+    if maintenanceMode {
+        return true, 503, 300
+    }
+    return false, 0, 0
+}, mux)
+```
+
+Both the HTTP `Retry-After` header and a `retry_after` field in the JSON body are set, so clients can use either.
+
 ## WAL Consumer Setup
 
 The WAL consumer runs as a long-lived goroutine alongside your server.

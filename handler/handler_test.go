@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -101,5 +102,121 @@ func TestServePull_SchemaMismatchIncludesServerManifest(t *testing.T) {
 	}
 	if body["server_schema_hash"] != hash {
 		t.Fatalf("server_schema_hash = %v, want %q", body["server_schema_hash"], hash)
+	}
+}
+
+func TestHandler_TransientError_Returns503(t *testing.T) {
+	db := synctest.TestDB(t)
+	ctx := context.Background()
+
+	reg := synctest.NewTestRegistry()
+	engine, err := synchro.NewEngine(synchro.Config{DB: db, Registry: reg})
+	if err != nil {
+		t.Fatalf("NewEngine: %v", err)
+	}
+
+	userID := "00000000-0000-0000-0000-000000000001"
+	clientID := "client-503"
+
+	if _, err := engine.RegisterClient(ctx, userID, synctest.MakeRegisterRequest(clientID, "test", "1.0.0")); err != nil {
+		t.Fatalf("RegisterClient: %v", err)
+	}
+	sv, sh, err := engine.CurrentSchemaManifest(ctx)
+	if err != nil {
+		t.Fatalf("CurrentSchemaManifest: %v", err)
+	}
+
+	// Close the DB to force sql.ErrConnDone on next call.
+	db.Close()
+
+	h := handler.New(engine, handler.WithDefaultRetryAfter(10))
+	pullReq := map[string]any{
+		"client_id":      clientID,
+		"checkpoint":     0,
+		"schema_version": sv,
+		"schema_hash":    sh,
+	}
+	payload, _ := json.Marshal(pullReq)
+	req := httptest.NewRequest(http.MethodPost, "/sync/pull", bytes.NewReader(payload))
+	req = req.WithContext(handler.WithUserID(req.Context(), userID))
+
+	rec := httptest.NewRecorder()
+	h.ServePull(rec, req)
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusServiceUnavailable)
+	}
+
+	retryAfter := rec.Header().Get("Retry-After")
+	if retryAfter != "10" {
+		t.Fatalf("Retry-After header = %q, want %q", retryAfter, "10")
+	}
+
+	var body map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode body: %v", err)
+	}
+	if body["retry_after"] != float64(10) {
+		t.Fatalf("retry_after = %v, want 10", body["retry_after"])
+	}
+	if body["error"] == nil || body["error"] == "" {
+		t.Fatal("expected error message in body")
+	}
+}
+
+func TestHandler_RetryAfterMiddleware_Rejects(t *testing.T) {
+	check := func(r *http.Request) (bool, int, int) {
+		return true, http.StatusTooManyRequests, 60
+	}
+
+	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Fatal("inner handler should not be called")
+	})
+
+	mw := handler.RetryAfterMiddleware(check, inner)
+
+	req := httptest.NewRequest(http.MethodPost, "/sync/pull", nil)
+	rec := httptest.NewRecorder()
+	mw.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusTooManyRequests)
+	}
+	if got := rec.Header().Get("Retry-After"); got != "60" {
+		t.Fatalf("Retry-After = %q, want %q", got, "60")
+	}
+
+	var body map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode body: %v", err)
+	}
+	if body["retry_after"] != float64(60) {
+		t.Fatalf("retry_after = %v, want 60", body["retry_after"])
+	}
+}
+
+func TestHandler_RetryAfterMiddleware_Passes(t *testing.T) {
+	check := func(r *http.Request) (bool, int, int) {
+		return false, 0, 0
+	}
+
+	called := false
+	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called = true
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprint(w, "ok")
+	})
+
+	mw := handler.RetryAfterMiddleware(check, inner)
+
+	req := httptest.NewRequest(http.MethodPost, "/sync/pull", nil)
+	rec := httptest.NewRecorder()
+	mw.ServeHTTP(rec, req)
+
+	if !called {
+		t.Fatal("inner handler was not called")
+	}
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
 	}
 }
