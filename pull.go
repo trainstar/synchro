@@ -185,6 +185,152 @@ func deduplicateEntries(entries []ChangelogEntry) []recordRef {
 	return refs
 }
 
+// DefaultResyncLimit is the default number of records per resync page.
+const DefaultResyncLimit = 100
+
+// MaxResyncLimit is the maximum records per resync page.
+const MaxResyncLimit = 1000
+
+// processResync returns one page of resync data, iterating tables in registration order.
+// The cursor tracks which table and which record ID the client has consumed up to.
+func (p *pullProcessor) processResync(ctx context.Context, db DB, cursor *ResyncCursor, limit int) (*ResyncResponse, error) {
+	tables := p.registry.TableNames()
+	if len(tables) == 0 {
+		return &ResyncResponse{Records: []Record{}, HasMore: false}, nil
+	}
+
+	if limit <= 0 {
+		limit = DefaultResyncLimit
+	}
+	if limit > MaxResyncLimit {
+		limit = MaxResyncLimit
+	}
+
+	tableIndex := 0
+	afterID := ""
+	var checkpoint int64
+
+	if cursor != nil {
+		tableIndex = cursor.TableIndex
+		afterID = cursor.AfterID
+		checkpoint = cursor.Checkpoint
+	}
+
+	// On the first page, capture MAX(seq) as the checkpoint
+	if checkpoint == 0 {
+		err := db.QueryRowContext(ctx, "SELECT COALESCE(MAX(seq), 0) FROM sync_changelog").Scan(&checkpoint)
+		if err != nil {
+			return nil, fmt.Errorf("capturing resync checkpoint: %w", err)
+		}
+	}
+
+	var records []Record
+
+	for tableIndex < len(tables) && len(records) < limit {
+		tableName := tables[tableIndex]
+		cfg := p.registry.Get(tableName)
+		if cfg == nil {
+			tableIndex++
+			afterID = ""
+			continue
+		}
+
+		remaining := limit - len(records)
+		page, err := resyncPage(ctx, db, cfg, afterID, remaining)
+		if err != nil {
+			return nil, fmt.Errorf("resync page for %q: %w", tableName, err)
+		}
+
+		records = append(records, page...)
+
+		if len(page) < remaining {
+			// Table exhausted, move to next
+			tableIndex++
+			afterID = ""
+		} else {
+			// More records may exist in this table
+			afterID = page[len(page)-1].ID
+			break
+		}
+	}
+
+	hasMore := tableIndex < len(tables)
+
+	resp := &ResyncResponse{
+		Records:    records,
+		Checkpoint: checkpoint,
+		HasMore:    hasMore,
+	}
+	if len(resp.Records) == 0 {
+		resp.Records = []Record{}
+	}
+
+	if hasMore {
+		resp.Cursor = &ResyncCursor{
+			Checkpoint: checkpoint,
+			TableIndex: tableIndex,
+			AfterID:    afterID,
+		}
+	}
+
+	return resp, nil
+}
+
+// resyncPage fetches one page of records from a table for full resync.
+//
+// The WHERE clause uses id::text > $1 with ORDER BY id::text for cursor pagination.
+// Text-cast is used because Synchro is a generic library with no constraint on the
+// underlying PK type (UUID, BIGSERIAL, TEXT, ULID, etc.). Casting to text is the only
+// comparison that works across all types without requiring type configuration.
+//
+// This prevents PostgreSQL from using the native PK index (a seq scan + sort per page).
+// This is acceptable because: (1) full resync is rare, only after compaction boundary;
+// (2) pages are bounded by LIMIT; (3) dominant cost is JSON serialization + network;
+// (4) consuming apps can add an expression index (CREATE INDEX ON t ((id::text))) if needed.
+func resyncPage(ctx context.Context, db DB, cfg *TableConfig, afterID string, limit int) ([]Record, error) {
+	var selectExpr string
+	if len(cfg.SyncColumns) > 0 {
+		selectExpr = fmt.Sprintf("json_build_object(%s)::text", buildJsonPairs(cfg.SyncColumns))
+	} else {
+		selectExpr = "row_to_json(t)::text"
+	}
+
+	query := fmt.Sprintf(
+		`SELECT %s::text AS id, %s AS data, %s AS updated_at
+		FROM %s t
+		WHERE %s IS NULL AND %s::text > $1
+		ORDER BY %s::text
+		LIMIT $2`,
+		quoteIdentifier(cfg.IDColumn),
+		selectExpr,
+		quoteIdentifier(cfg.UpdatedAtColumn),
+		quoteIdentifier(cfg.TableName),
+		quoteIdentifier(cfg.DeletedAtColumn),
+		quoteIdentifier(cfg.IDColumn),
+		quoteIdentifier(cfg.IDColumn),
+	)
+
+	rows, err := db.QueryContext(ctx, query, afterID, limit)
+	if err != nil {
+		return nil, fmt.Errorf("querying resync page from %q: %w", cfg.TableName, err)
+	}
+	defer rows.Close()
+
+	var records []Record
+	for rows.Next() {
+		var r Record
+		var dataStr string
+		if err := rows.Scan(&r.ID, &dataStr, &r.UpdatedAt); err != nil {
+			return nil, fmt.Errorf("scanning resync record from %q: %w", cfg.TableName, err)
+		}
+		r.TableName = cfg.TableName
+		r.Data = json.RawMessage(dataStr)
+		records = append(records, r)
+	}
+
+	return records, rows.Err()
+}
+
 // buildJsonPairs builds json_build_object arguments like "'col1', "col1", 'col2', "col2"".
 // Column names are escaped as both SQL string literal keys (single-quote doubled)
 // and SQL identifiers (double-quote escaped via quoteIdentifier).

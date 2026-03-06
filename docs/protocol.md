@@ -9,6 +9,7 @@ All endpoints accept and return `application/json`. Authentication is handled by
 | `POST` | `/sync/register` | Register or re-register a client device |
 | `POST` | `/sync/pull` | Pull changes since checkpoint |
 | `POST` | `/sync/push` | Push local changes to server |
+| `POST` | `/sync/resync` | Full resync when checkpoint is behind compaction boundary |
 | `GET` | `/sync/tables` | Get sync metadata for all tables |
 | `GET` | `/sync/schema` | Get canonical schema contract for SDK table creation |
 
@@ -139,9 +140,12 @@ Retrieves changes for the client since their checkpoint.
 | `deletes` | `DeleteEntry[]` | Records that were deleted (soft-deleted) |
 | `checkpoint` | `int64` | New checkpoint to send on next pull |
 | `has_more` | `bool` | `true` if more records are available (pull again) |
+| `resync_required` | `bool` | `true` if client must do a full resync (checkpoint is behind compaction boundary) |
 | `bucket_updates` | `BucketUpdate?` | Changes to client's bucket subscriptions |
 | `schema_version` | `int64` | Current server schema version |
 | `schema_hash` | `string` | Current server schema hash |
+
+When `resync_required` is `true`, the client's checkpoint has fallen behind the compaction boundary — incremental pull is no longer possible. The client must call `POST /sync/resync` to rebuild its local state.
 
 **Record** fields:
 
@@ -267,6 +271,10 @@ Pushes local changes from the client to the server. All changes are applied with
 | `status` | `string` | `applied`, `conflict`, or `error` |
 | `reason` | `string?` | Explanation for conflict or error |
 | `server_version` | `Record?` | Current server version (on conflict) |
+| `server_updated_at` | `string?` | Server-set `updated_at` timestamp (on applied create/update) |
+| `server_deleted_at` | `string?` | Server-set `deleted_at` timestamp (on applied delete) |
+
+**Read-Your-Own-Writes**: Applied results include `server_updated_at` (or `server_deleted_at` for deletes) so the client can apply the server-set timestamp locally without waiting for the next pull. The push response `checkpoint` is always `0` — the client should not advance its pull checkpoint from a push response.
 
 ### Push Operations
 
@@ -295,6 +303,85 @@ The following columns are silently stripped from push data and never written by 
 - The owner column (set once on create, enforced to authenticated user)
 - The parent FK column (set once on create)
 - Any additional columns listed in `TableConfig.ProtectedColumns`
+
+## POST /sync/resync
+
+Full resync for clients whose checkpoint has fallen behind the compaction boundary. Returns all non-deleted records across all registered tables, paginated with a stateless cursor.
+
+### Request
+
+```json
+{
+  "client_id": "device-abc-123",
+  "cursor": null,
+  "limit": 100,
+  "schema_version": 7,
+  "schema_hash": "d16b7d9d..."
+}
+```
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `client_id` | `string` | Yes | -- | The registered client ID |
+| `cursor` | `ResyncCursor?` | No | `null` | Cursor from previous resync page (`null` for first page) |
+| `limit` | `int` | No | 100 | Max records per page (capped at 1000) |
+| `schema_version` | `int64` | Yes | -- | Client schema version |
+| `schema_hash` | `string` | Yes | -- | Client schema hash |
+
+### Response (200)
+
+```json
+{
+  "records": [
+    {
+      "id": "a1b2c3d4-...",
+      "table_name": "workouts",
+      "data": { "id": "a1b2c3d4-...", "name": "Push Day", "..." : "..." },
+      "updated_at": "2026-03-05T11:30:00Z"
+    }
+  ],
+  "cursor": {
+    "checkpoint": 1500,
+    "table_idx": 1,
+    "after_id": "f8e7d6c5-..."
+  },
+  "checkpoint": 1500,
+  "has_more": true,
+  "schema_version": 7,
+  "schema_hash": "d16b7d9d..."
+}
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `records` | `Record[]` | Non-deleted records from the current page |
+| `cursor` | `ResyncCursor?` | Cursor for the next page (null when `has_more` is false) |
+| `checkpoint` | `int64` | Captured `MAX(seq)` at resync start — used as the client's new checkpoint |
+| `has_more` | `bool` | `true` if more pages remain |
+| `schema_version` | `int64` | Current server schema version |
+| `schema_hash` | `string` | Current server schema hash |
+
+### Resync Flow
+
+```
+1. POST /sync/pull returns resync_required: true
+2. Client drops local synced data
+3. POST /sync/resync {client_id, cursor: null}
+   -> records[...], cursor: {...}, has_more: true
+4. POST /sync/resync {client_id, cursor: {...}}
+   -> records[...], cursor: {...}, has_more: true
+5. POST /sync/resync {client_id, cursor: {...}}
+   -> records[...], cursor: null, has_more: false, checkpoint: 1500
+6. Client stores checkpoint: 1500, resumes normal pull cycle
+```
+
+On final page, the server advances the client's checkpoint and reactivates the client (if previously deactivated by compaction).
+
+### Resync Pagination
+
+Tables are iterated in registration order. Within each table, records are ordered by `id::text` with cursor-based pagination. The cursor is stateless — the client sends it back unmodified.
+
+The checkpoint is captured as `MAX(seq)` on the first page and carried through subsequent pages via the cursor. Changes that occur during resync get changelog entries after this checkpoint, so the first normal pull after resync picks them up.
 
 ## Checkpoint Semantics
 

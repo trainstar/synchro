@@ -61,6 +61,17 @@ func (s *changelogStore) WriteBatch(ctx context.Context, db DB, entries []Change
 	return nil
 }
 
+// MinSeq returns the minimum sequence number in the changelog.
+// Returns 0 if the changelog is empty.
+func (s *changelogStore) MinSeq(ctx context.Context, db DB) (int64, error) {
+	var seq int64
+	err := db.QueryRowContext(ctx, "SELECT COALESCE(MIN(seq), 0) FROM sync_changelog").Scan(&seq)
+	if err != nil {
+		return 0, fmt.Errorf("querying min seq: %w", err)
+	}
+	return seq, nil
+}
+
 // QueryAfter returns changelog entries for the given buckets after the given sequence.
 // If tables is non-empty, only entries for those tables are returned.
 func (s *changelogStore) QueryAfter(ctx context.Context, db DB, bucketIDs []string, afterSeq int64, limit int, tables []string) ([]ChangelogEntry, error) {

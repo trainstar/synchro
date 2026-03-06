@@ -101,7 +101,8 @@ func (p *pushProcessor) pushCreate(ctx context.Context, tx DB, userID string, cf
 	// Set the ID
 	data[cfg.IDColumn] = record.ID
 
-	if err := insertRecord(ctx, tx, cfg, data); err != nil {
+	ts, err := insertRecord(ctx, tx, cfg, data)
+	if err != nil {
 		p.logger.ErrorContext(ctx, "failed to insert record",
 			"err", err, "table", record.TableName, "id", record.ID)
 		return &PushResult{
@@ -110,10 +111,14 @@ func (p *pushProcessor) pushCreate(ctx context.Context, tx DB, userID string, cf
 		}, nil
 	}
 
-	return &PushResult{
+	result := &PushResult{
 		ID: record.ID, TableName: record.TableName, Operation: record.Operation,
 		Status: PushStatusApplied,
-	}, nil
+	}
+	if !ts.IsZero() {
+		result.ServerUpdatedAt = &ts
+	}
+	return result, nil
 }
 
 // pushUpdate handles an update operation with conflict resolution.
@@ -187,7 +192,8 @@ func (p *pushProcessor) pushUpdate(ctx context.Context, tx DB, userID string, cf
 		}, nil
 	}
 
-	if err := updateRecord(ctx, tx, cfg, record.ID, data); err != nil {
+	ts, err := updateRecord(ctx, tx, cfg, record.ID, data)
+	if err != nil {
 		p.logger.ErrorContext(ctx, "failed to update record",
 			"err", err, "table", record.TableName, "id", record.ID)
 		return &PushResult{
@@ -196,10 +202,14 @@ func (p *pushProcessor) pushUpdate(ctx context.Context, tx DB, userID string, cf
 		}, nil
 	}
 
-	return &PushResult{
+	result := &PushResult{
 		ID: record.ID, TableName: record.TableName, Operation: record.Operation,
 		Status: PushStatusApplied,
-	}, nil
+	}
+	if !ts.IsZero() {
+		result.ServerUpdatedAt = &ts
+	}
+	return result, nil
 }
 
 // pushDelete handles a delete operation (soft delete).
@@ -226,10 +236,12 @@ func (p *pushProcessor) pushDelete(ctx context.Context, tx DB, _ string, cfg *Ta
 	}
 
 	// Apply soft delete
-	query := fmt.Sprintf("UPDATE %s SET %s = now() WHERE %s = $1",
-		quoteIdentifier(cfg.TableName), quoteIdentifier(cfg.DeletedAtColumn), quoteIdentifier(cfg.IDColumn))
+	query := fmt.Sprintf("UPDATE %s SET %s = now() WHERE %s = $1 RETURNING %s",
+		quoteIdentifier(cfg.TableName), quoteIdentifier(cfg.DeletedAtColumn),
+		quoteIdentifier(cfg.IDColumn), quoteIdentifier(cfg.DeletedAtColumn))
 
-	if _, err := tx.ExecContext(ctx, query, record.ID); err != nil {
+	var deletedAt time.Time
+	if err := tx.QueryRowContext(ctx, query, record.ID).Scan(&deletedAt); err != nil {
 		p.logger.ErrorContext(ctx, "failed to delete record",
 			"err", err, "table", record.TableName, "id", record.ID)
 		return &PushResult{
@@ -240,7 +252,8 @@ func (p *pushProcessor) pushDelete(ctx context.Context, tx DB, _ string, cfg *Ta
 
 	return &PushResult{
 		ID: record.ID, TableName: record.TableName, Operation: record.Operation,
-		Status: PushStatusApplied,
+		Status:          PushStatusApplied,
+		ServerDeletedAt: &deletedAt,
 	}, nil
 }
 
@@ -283,9 +296,9 @@ func getRecordByID(ctx context.Context, db DB, cfg *TableConfig, id string) (*ex
 	return rec, nil
 }
 
-// insertRecord inserts a new record from sync data.
+// insertRecord inserts a new record from sync data and returns the server-assigned updated_at.
 // Uses the deny-list model: all columns are allowed except protected ones.
-func insertRecord(ctx context.Context, db DB, cfg *TableConfig, data map[string]any) error {
+func insertRecord(ctx context.Context, db DB, cfg *TableConfig, data map[string]any) (time.Time, error) {
 	// Collect column names from data
 	dataCols := make([]string, 0, len(data))
 	for col := range data {
@@ -295,7 +308,7 @@ func insertRecord(ctx context.Context, db DB, cfg *TableConfig, data map[string]
 	// Filter to allowed insert columns
 	allowed := cfg.AllowedInsertColumns(dataCols)
 	if len(allowed) == 0 {
-		return fmt.Errorf("no allowed columns for insert on table %q", cfg.TableName)
+		return time.Time{}, fmt.Errorf("no allowed columns for insert on table %q", cfg.TableName)
 	}
 
 	columns := make([]string, 0, len(allowed))
@@ -308,18 +321,21 @@ func insertRecord(ctx context.Context, db DB, cfg *TableConfig, data map[string]
 		values = append(values, data[col])
 	}
 
-	query := fmt.Sprintf("INSERT INTO %s (%s) VALUES (%s)",
+	query := fmt.Sprintf("INSERT INTO %s (%s) VALUES (%s) RETURNING %s",
 		quoteIdentifier(cfg.TableName),
 		strings.Join(columns, ", "),
-		strings.Join(placeholders, ", "))
+		strings.Join(placeholders, ", "),
+		quoteIdentifier(cfg.UpdatedAtColumn))
 
-	_, err := db.ExecContext(ctx, query, values...)
-	return err
+	var ts time.Time
+	err := db.QueryRowContext(ctx, query, values...).Scan(&ts)
+	return ts, err
 }
 
-// updateRecord updates a record from sync data.
+// updateRecord updates a record from sync data and returns the server-assigned updated_at.
 // Uses the deny-list model: protected columns are silently dropped.
-func updateRecord(ctx context.Context, db DB, cfg *TableConfig, id string, data map[string]any) error {
+// Returns zero time when all columns are protected (nothing to update).
+func updateRecord(ctx context.Context, db DB, cfg *TableConfig, id string, data map[string]any) (time.Time, error) {
 	dataCols := make([]string, 0, len(data))
 	for col := range data {
 		dataCols = append(dataCols, col)
@@ -327,7 +343,7 @@ func updateRecord(ctx context.Context, db DB, cfg *TableConfig, id string, data 
 
 	allowed := cfg.AllowedUpdateColumns(dataCols)
 	if len(allowed) == 0 {
-		return nil // Nothing to update
+		return time.Time{}, nil // Nothing to update
 	}
 
 	setClauses := make([]string, 0, len(allowed))
@@ -340,14 +356,16 @@ func updateRecord(ctx context.Context, db DB, cfg *TableConfig, id string, data 
 
 	values = append(values, id)
 
-	query := fmt.Sprintf("UPDATE %s SET %s WHERE %s = $%d",
+	query := fmt.Sprintf("UPDATE %s SET %s WHERE %s = $%d RETURNING %s",
 		quoteIdentifier(cfg.TableName),
 		strings.Join(setClauses, ", "),
 		quoteIdentifier(cfg.IDColumn),
-		len(values))
+		len(values),
+		quoteIdentifier(cfg.UpdatedAtColumn))
 
-	_, err := db.ExecContext(ctx, query, values...)
-	return err
+	var ts time.Time
+	err := db.QueryRowContext(ctx, query, values...).Scan(&ts)
+	return ts, err
 }
 
 // SetAuthContext sets the RLS auth context for push operations.

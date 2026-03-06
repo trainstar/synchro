@@ -158,6 +158,54 @@ func (h *Handler) ServePush(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, resp)
 }
 
+// ServeResync handles POST /sync/resync.
+func (h *Handler) ServeResync(w http.ResponseWriter, r *http.Request) {
+	if !requireMethod(w, r, http.MethodPost) {
+		return
+	}
+
+	ctx := r.Context()
+	userID := UserIDFromContext(ctx)
+	if userID == "" {
+		writeError(w, http.StatusUnauthorized, "missing user identity")
+		return
+	}
+
+	body, err := decodeJSONObject(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	for _, k := range []string{"client_id", "schema_version", "schema_hash"} {
+		if _, ok := body[k]; !ok {
+			writeError(w, http.StatusBadRequest, k+" is required")
+			return
+		}
+	}
+
+	var req synchro.ResyncRequest
+	if err := remarshal(body, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	resp, err := h.engine.Resync(ctx, userID, &req)
+	if err != nil {
+		if err == synchro.ErrSchemaMismatch {
+			h.writeSchemaMismatch(w, r)
+			return
+		}
+		if err == synchro.ErrClientNotRegistered {
+			writeError(w, http.StatusNotFound, "client not registered")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "failed to resync")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, resp)
+}
+
 // ServeTableMeta handles GET /sync/tables.
 func (h *Handler) ServeTableMeta(w http.ResponseWriter, r *http.Request) {
 	if !requireMethod(w, r, http.MethodGet) {

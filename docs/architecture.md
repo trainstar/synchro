@@ -33,7 +33,7 @@ This gives O(log n) pull queries (indexed by `bucket_id, seq`) and complete deco
 
 ### Engine (`engine.go`)
 
-Top-level orchestrator. Holds all dependencies and exposes `RegisterClient()`, `Push()`, `Pull()`, `TableMetadata()`, `Schema()`, and manifest inspection helpers (`CurrentSchemaManifest()`, `SchemaManifestHistory()`). Wires together the push/pull processors, conflict resolver, ownership resolver, schema store, and hooks.
+Top-level orchestrator. Holds all dependencies and exposes `RegisterClient()`, `Push()`, `Pull()`, `Resync()`, `TableMetadata()`, `Schema()`, `RunCompaction()`, `StartCompaction()`, and manifest inspection helpers (`CurrentSchemaManifest()`, `SchemaManifestHistory()`). Wires together the push/pull processors, conflict resolver, ownership resolver, compactor, schema store, and hooks.
 
 ### Registry (`registry.go`)
 
@@ -59,6 +59,8 @@ Handles server-to-client reads:
 - Deduplicates entries for the same record (keeps latest operation).
 - Separates deletes from changes, batch-hydrates changed records per table.
 - Returns paginated results with `has_more` flag and new checkpoint.
+- Detects stale checkpoints (behind compaction boundary) and returns `resync_required`.
+- Handles full resync via cursor-based table-by-table pagination for clients that need to rebuild.
 
 ### WAL Consumer (`wal/consumer.go`)
 
@@ -101,11 +103,20 @@ Tracks per-client pull progress. Monotonically advances `last_pull_seq` (never g
 
 ### Changelog Store (`changelog.go`)
 
-Reads and writes `sync_changelog` entries. Supports single writes, batch writes, and range queries for pull.
+Reads and writes `sync_changelog` entries. Supports single writes, batch writes, range queries for pull, and `MinSeq()` for compaction boundary detection.
 
 ### Schema Store (`schema.go`)
 
 Builds canonical schema payloads from `pg_catalog`, computes deterministic schema hashes, and persists monotonic manifest versions in `sync_schema_manifest` under advisory lock protection.
+
+### Compactor (`compaction.go`)
+
+Manages changelog compaction to prevent unbounded growth of `sync_changelog`:
+
+- **Stale client deactivation** -- Marks clients inactive if they haven't synced within a configurable threshold (default 7 days). Prevents one stale client from blocking compaction for all others.
+- **Safe sequence calculation** -- Computes `MIN(last_pull_seq)` across all active clients as the safe compaction boundary.
+- **Batched deletion** -- Deletes changelog entries with `seq <= safeSeq` in configurable batches (default 10,000) to avoid long-running transactions.
+- **Orchestration** -- `RunCompaction()` runs all three steps. `StartCompaction()` runs on a background ticker.
 
 ## Data Flow
 
@@ -118,13 +129,13 @@ Client -> POST /sync/push
   3. For each PushRecord:
      a. Validate table is registered and pushable
      b. Parse operation (create/update/delete)
-     c. For creates: check for existing record, enforce ownership, INSERT
-     d. For updates: fetch existing, run ConflictResolver, UPDATE allowed columns
-     e. For deletes: fetch existing, soft-delete via deleted_at
+     c. For creates: check for existing record, enforce ownership, INSERT RETURNING updated_at
+     d. For updates: fetch existing, run ConflictResolver, UPDATE allowed columns RETURNING updated_at
+     e. For deletes: fetch existing, soft-delete via deleted_at RETURNING deleted_at
   4. Fire OnPushAccepted hook (within transaction)
   5. Commit transaction
   6. Update client last_push_at
-  7. Return accepted/rejected results
+  7. Return accepted/rejected results with server-set timestamps (RYOW)
 ```
 
 RLS policies enforce authorization at the database level. The push processor does not walk FK chains -- Postgres RLS handles it.
@@ -134,14 +145,15 @@ RLS policies enforce authorization at the database level. The push processor doe
 ```
 Client -> POST /sync/pull
   1. Validate `schema_version` + `schema_hash` against server manifest
-  2. Start read-only tx and set RLS auth context
-  3. Get client's bucket subscriptions (e.g., ["user:abc-123", "global"])
-  4. Query sync_changelog WHERE bucket_id = ANY(subs) AND seq > checkpoint
-  5. Deduplicate: keep latest entry per (table, record_id)
-  6. Separate deletes from changes
-  7. Hydrate changed records: batch SELECT per table
-  8. Commit read-only tx, then best-effort advance checkpoint in client state
-  9. Update client last_pull_at and return changes/deletes/checkpoint/schema identifiers
+  2. Check for stale checkpoint: if client checkpoint < MIN(seq) in changelog, return resync_required
+  3. Start read-only tx and set RLS auth context
+  4. Get client's bucket subscriptions (e.g., ["user:abc-123", "global"])
+  5. Query sync_changelog WHERE bucket_id = ANY(subs) AND seq > checkpoint
+  6. Deduplicate: keep latest entry per (table, record_id)
+  7. Separate deletes from changes
+  8. Hydrate changed records: batch SELECT per table
+  9. Commit read-only tx, then best-effort advance checkpoint in client state
+  10. Update client last_pull_at and return changes/deletes/checkpoint/schema identifiers
 ```
 
 ## Design Decisions
@@ -189,8 +201,8 @@ Records are assigned to buckets that determine pull visibility:
 |-------------|--------|----------|
 | **User** | `user:<uuid>` | Records owned by a specific user |
 | **Global** | `global` | Reference data and rows explicitly configured for global visibility |
-| **Group** | `group:<id>` | (Phase 2) Shared group data |
-| **Share** | `share:<id>` | (Phase 2) 1:N sharing via multi-bucket assignment |
+| **Group** | `group:<id>` | (Future) Shared group data |
+| **Share** | `share:<id>` | (Future) 1:N sharing via multi-bucket assignment |
 
 Each client subscribes to a set of buckets (stored in `sync_clients.bucket_subs`). On registration, a client is automatically subscribed to `["user:<user_id>", "global"]`.
 
@@ -203,7 +215,7 @@ A single record can appear in multiple buckets when resolver logic emits multipl
 - `AdvanceCheckpoint` only moves forward (guards against `last_pull_seq < $2`).
 - Pull returns `has_more: true` when the result set was truncated by `limit`, signaling the client should pull again.
 - Checkpoint advancement is best-effort (logged warning on failure, does not fail the pull).
-- The changelog is append-only; compaction (Phase 2) removes entries below the minimum checkpoint across all active clients.
+- The changelog is append-only; compaction removes entries below the minimum checkpoint across all active clients. When a client's checkpoint falls behind the compaction boundary, the server returns `resync_required` and the client must do a full resync via `/sync/resync`.
 
 ### Failure Semantics
 

@@ -33,6 +33,9 @@ type Config struct {
 	// ClockSkewTolerance is added to client timestamps during LWW comparison.
 	ClockSkewTolerance time.Duration
 
+	// Compactor configures changelog compaction. Optional.
+	Compactor *CompactorConfig
+
 	// Logger for sync operations. Defaults to slog.Default().
 	Logger *slog.Logger
 }
@@ -50,6 +53,7 @@ type Engine struct {
 	changelog  *changelogStore
 	checkpoint *checkpointStore
 	schema     *schemaStore
+	compactor  *Compactor
 	config     Config
 	logger     *slog.Logger
 }
@@ -86,6 +90,11 @@ func NewEngine(cfg Config) (*Engine, error) {
 	cp := &checkpointStore{}
 	schema := &schemaStore{}
 
+	var compactor *Compactor
+	if cfg.Compactor != nil {
+		compactor = NewCompactor(cfg.Compactor)
+	}
+
 	e := &Engine{
 		db:         cfg.DB,
 		registry:   cfg.Registry,
@@ -96,6 +105,7 @@ func NewEngine(cfg Config) (*Engine, error) {
 		changelog:  cl,
 		checkpoint: cp,
 		schema:     schema,
+		compactor:  compactor,
 		config:     cfg,
 		logger:     logger,
 		push: &pushProcessor{
@@ -180,6 +190,27 @@ func (e *Engine) Pull(ctx context.Context, userID string, req *PullRequest) (*Pu
 	if e.hooks.OnStaleClient != nil && client.LastSyncAt != nil {
 		if !e.hooks.OnStaleClient(ctx, req.ClientID, *client.LastSyncAt) {
 			return nil, ErrStaleClient
+		}
+	}
+
+	// Check if client's checkpoint is behind the compaction boundary
+	if req.Checkpoint > 0 {
+		minSeq, err := e.changelog.MinSeq(ctx, e.db)
+		if err != nil {
+			return nil, fmt.Errorf("checking min seq: %w", err)
+		}
+		if minSeq > 0 && req.Checkpoint < minSeq {
+			if e.hooks.OnResyncRequired != nil {
+				e.hooks.OnResyncRequired(ctx, req.ClientID, req.Checkpoint, minSeq)
+			}
+			return &PullResponse{
+				ResyncRequired: true,
+				Changes:        []Record{},
+				Deletes:        []DeleteEntry{},
+				Checkpoint:     req.Checkpoint,
+				SchemaVersion:  manifest.Version,
+				SchemaHash:     manifest.Hash,
+			}, nil
 		}
 	}
 
@@ -308,16 +339,6 @@ func (e *Engine) Push(ctx context.Context, userID string, req *PushRequest) (*Pu
 		return nil, fmt.Errorf("committing push transaction: %w", err)
 	}
 
-	// Query current max changelog seq so the client knows what checkpoint
-	// will eventually include their push (WAL consumer writes changelog entries
-	// asynchronously after the commit).
-	var checkpoint int64
-	err = e.db.QueryRowContext(ctx,
-		"SELECT COALESCE(MAX(seq), 0) FROM sync_changelog").Scan(&checkpoint)
-	if err != nil {
-		e.logger.WarnContext(ctx, "failed to read changelog checkpoint", "err", err)
-	}
-
 	// Update last push timestamp
 	if err := e.clients.UpdateLastSync(ctx, e.db, userID, req.ClientID, "push"); err != nil {
 		e.logger.WarnContext(ctx, "failed to update client last push",
@@ -327,7 +348,7 @@ func (e *Engine) Push(ctx context.Context, userID string, req *PushRequest) (*Pu
 	return &PushResponse{
 		Accepted:      accepted,
 		Rejected:      rejected,
-		Checkpoint:    checkpoint,
+		Checkpoint:    0,
 		ServerTime:    time.Now().UTC(),
 		SchemaVersion: manifest.Version,
 		SchemaHash:    manifest.Hash,
@@ -391,6 +412,109 @@ func (e *Engine) CurrentSchemaManifest(ctx context.Context) (int64, string, erro
 		return 0, "", err
 	}
 	return manifest.Version, manifest.Hash, nil
+}
+
+// Resync performs a full resync for a client whose checkpoint is behind the
+// compaction boundary. Returns paginated results using a stateless cursor.
+func (e *Engine) Resync(ctx context.Context, userID string, req *ResyncRequest) (*ResyncResponse, error) {
+	manifest, err := e.schema.GetManifest(ctx, e.db, e.registry)
+	if err != nil {
+		return nil, err
+	}
+	if err := validateClientSchema(manifest, req.SchemaVersion, req.SchemaHash, false); err != nil {
+		return nil, err
+	}
+
+	// Verify client is registered
+	_, err = e.clients.GetClient(ctx, e.db, userID, req.ClientID)
+	if err != nil {
+		return nil, ErrClientNotRegistered
+	}
+
+	tx, err := e.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return nil, fmt.Errorf("beginning resync transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	if err := SetAuthContext(ctx, tx, userID); err != nil {
+		return nil, fmt.Errorf("setting resync auth context: %w", err)
+	}
+
+	resp, err := e.pull.processResync(ctx, tx, req.Cursor, req.Limit)
+	if err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("committing resync transaction: %w", err)
+	}
+	resp.SchemaVersion = manifest.Version
+	resp.SchemaHash = manifest.Hash
+
+	// When resync completes, advance client checkpoint and reactivate
+	if !resp.HasMore && resp.Checkpoint > 0 {
+		if err := e.checkpoint.AdvanceCheckpoint(ctx, e.db, userID, req.ClientID, resp.Checkpoint); err != nil {
+			e.logger.WarnContext(ctx, "failed to advance resync checkpoint",
+				"err", err, "client_id", req.ClientID)
+		}
+		// Reactivate client (may have been deactivated by compactor)
+		if _, err := e.db.ExecContext(ctx,
+			"UPDATE sync_clients SET is_active = true, updated_at = now() WHERE user_id = $1 AND client_id = $2",
+			userID, req.ClientID); err != nil {
+			e.logger.WarnContext(ctx, "failed to reactivate client after resync",
+				"err", err, "client_id", req.ClientID)
+		}
+	}
+
+	return resp, nil
+}
+
+// RunCompaction runs a single compaction cycle. Returns an error if no
+// Compactor was configured.
+func (e *Engine) RunCompaction(ctx context.Context) (CompactResult, error) {
+	if e.compactor == nil {
+		return CompactResult{}, fmt.Errorf("synchro: compaction not configured")
+	}
+
+	result, err := e.compactor.RunCompaction(ctx, e.db)
+	if err != nil {
+		return result, err
+	}
+
+	if e.hooks.OnCompaction != nil {
+		e.hooks.OnCompaction(ctx, result)
+	}
+
+	return result, nil
+}
+
+// StartCompaction runs compaction on a recurring interval in a background goroutine.
+// The goroutine stops when ctx is cancelled. No-op if no Compactor was configured.
+func (e *Engine) StartCompaction(ctx context.Context, interval time.Duration) {
+	if e.compactor == nil {
+		return
+	}
+
+	go func() {
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				result, err := e.compactor.RunCompaction(ctx, e.db)
+				if err != nil {
+					e.logger.ErrorContext(ctx, "compaction failed", "err", err)
+					continue
+				}
+				if e.hooks.OnCompaction != nil {
+					e.hooks.OnCompaction(ctx, result)
+				}
+			}
+		}
+	}()
 }
 
 // SchemaManifestHistory returns persisted manifest rows ordered by newest version first.

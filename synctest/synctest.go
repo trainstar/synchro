@@ -64,6 +64,26 @@ func MakeRegisterRequest(clientID, platform, version string) *synchro.RegisterRe
 	}
 }
 
+// MakePushRequest creates a PushRequest with schema fields for testing.
+func MakePushRequest(clientID string, schemaVersion int64, schemaHash string, changes ...synchro.PushRecord) *synchro.PushRequest {
+	return &synchro.PushRequest{
+		ClientID:      clientID,
+		SchemaVersion: schemaVersion,
+		SchemaHash:    schemaHash,
+		Changes:       changes,
+	}
+}
+
+// MakePullRequest creates a PullRequest with schema fields for testing.
+func MakePullRequest(clientID string, checkpoint int64, schemaVersion int64, schemaHash string) *synchro.PullRequest {
+	return &synchro.PullRequest{
+		ClientID:      clientID,
+		Checkpoint:    checkpoint,
+		SchemaVersion: schemaVersion,
+		SchemaHash:    schemaHash,
+	}
+}
+
 // MustMarshal marshals v to JSON or panics.
 func MustMarshal(v any) json.RawMessage {
 	data, err := json.Marshal(v)

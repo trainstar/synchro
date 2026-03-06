@@ -33,4 +33,11 @@ type Hooks struct {
 	// OnStaleClient is called when a client hasn't synced recently.
 	// Return true to allow the sync, false to reject with ErrStaleClient.
 	OnStaleClient func(ctx context.Context, clientID string, lastSync time.Time) bool
+
+	// OnCompaction is called after a successful compaction run.
+	OnCompaction func(ctx context.Context, result CompactResult)
+
+	// OnResyncRequired is called when a client's checkpoint falls behind the
+	// compaction boundary and requires a full resync.
+	OnResyncRequired func(ctx context.Context, clientID string, checkpoint int64, minSeq int64)
 }

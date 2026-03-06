@@ -91,7 +91,17 @@ engine, err := synchro.NewEngine(synchro.Config{
     MinClientVersion:   "1.2.0",           // optional semver gate
     ClockSkewTolerance: 5 * time.Second,   // optional LWW tolerance
     Logger:             slog.Default(),    // optional, defaults to slog.Default()
+    Compactor: &synchro.CompactorConfig{   // optional, enables changelog compaction
+        StaleThreshold: 7 * 24 * time.Hour, // deactivate clients inactive for 7 days
+        BatchSize:      10000,               // rows deleted per batch
+    },
 })
+
+// Manual compaction (e.g., from a cron job)
+result, err := engine.RunCompaction(ctx)
+
+// Or start background compaction on an interval
+engine.StartCompaction(ctx, 1*time.Hour)
 ```
 
 ## Hooks
@@ -145,6 +155,22 @@ hooks := synchro.Hooks{
     // Return true to allow, false to reject.
     OnStaleClient: func(ctx context.Context, clientID string, lastSync time.Time) bool {
         return time.Since(lastSync) < 30*24*time.Hour // allow up to 30 days
+    },
+
+    // Called after a compaction run completes.
+    OnCompaction: func(ctx context.Context, result synchro.CompactResult) {
+        slog.InfoContext(ctx, "compaction complete",
+            "deactivated", result.DeactivatedClients,
+            "safe_seq", result.SafeSeq,
+            "deleted", result.DeletedEntries)
+    },
+
+    // Called when a client's checkpoint is behind the compaction boundary.
+    OnResyncRequired: func(ctx context.Context, clientID string, checkpoint, minSeq int64) {
+        slog.WarnContext(ctx, "client requires resync",
+            "client_id", clientID,
+            "checkpoint", checkpoint,
+            "min_seq", minSeq)
     },
 }
 ```
@@ -269,6 +295,7 @@ mux := http.NewServeMux()
 mux.HandleFunc("POST /sync/register", h.ServeRegister)
 mux.HandleFunc("POST /sync/pull", h.ServePull)
 mux.HandleFunc("POST /sync/push", h.ServePush)
+mux.HandleFunc("POST /sync/resync", h.ServeResync)
 mux.HandleFunc("GET /sync/tables", h.ServeTableMeta)
 mux.HandleFunc("GET /sync/schema", h.ServeSchema)
 ```
@@ -284,6 +311,7 @@ g := e.Group("/sync")
 g.POST("/register", echo.WrapHandler(http.HandlerFunc(h.ServeRegister)))
 g.POST("/pull", echo.WrapHandler(http.HandlerFunc(h.ServePull)))
 g.POST("/push", echo.WrapHandler(http.HandlerFunc(h.ServePush)))
+g.POST("/resync", echo.WrapHandler(http.HandlerFunc(h.ServeResync)))
 g.GET("/tables", echo.WrapHandler(http.HandlerFunc(h.ServeTableMeta)))
 g.GET("/schema", echo.WrapHandler(http.HandlerFunc(h.ServeSchema)))
 ```
@@ -311,6 +339,7 @@ r.Route("/sync", func(r chi.Router) {
     r.Post("/register", h.ServeRegister)
     r.Post("/pull", h.ServePull)
     r.Post("/push", h.ServePush)
+    r.Post("/resync", h.ServeResync)
     r.Get("/tables", h.ServeTableMeta)
     r.Get("/schema", h.ServeSchema)
 })

@@ -90,13 +90,14 @@ const MaxPullLimit = 1000
 
 // PullResponse is the response for pulling changes.
 type PullResponse struct {
-	Changes       []Record      `json:"changes"`
-	Deletes       []DeleteEntry `json:"deletes"`
-	Checkpoint    int64         `json:"checkpoint"`
-	HasMore       bool          `json:"has_more"`
-	BucketUpdates *BucketUpdate `json:"bucket_updates,omitempty"`
-	SchemaVersion int64         `json:"schema_version"`
-	SchemaHash    string        `json:"schema_hash"`
+	Changes        []Record      `json:"changes"`
+	Deletes        []DeleteEntry `json:"deletes"`
+	Checkpoint     int64         `json:"checkpoint"`
+	HasMore        bool          `json:"has_more"`
+	ResyncRequired bool          `json:"resync_required,omitempty"`
+	BucketUpdates  *BucketUpdate `json:"bucket_updates,omitempty"`
+	SchemaVersion  int64         `json:"schema_version"`
+	SchemaHash     string        `json:"schema_hash"`
 }
 
 // DeleteEntry represents a deleted record in a pull response.
@@ -141,12 +142,14 @@ type PushResponse struct {
 
 // PushResult represents the result of processing a single push record.
 type PushResult struct {
-	ID            string  `json:"id"`
-	TableName     string  `json:"table_name"`
-	Operation     string  `json:"operation"`
-	Status        string  `json:"status"`
-	Reason        string  `json:"reason,omitempty"`
-	ServerVersion *Record `json:"server_version,omitempty"`
+	ID              string     `json:"id"`
+	TableName       string     `json:"table_name"`
+	Operation       string     `json:"operation"`
+	Status          string     `json:"status"`
+	Reason          string     `json:"reason,omitempty"`
+	ServerVersion   *Record    `json:"server_version,omitempty"`
+	ServerUpdatedAt *time.Time `json:"server_updated_at,omitempty"`
+	ServerDeletedAt *time.Time `json:"server_deleted_at,omitempty"`
 }
 
 // Push status constants.
@@ -178,6 +181,32 @@ type TableMetaResponse struct {
 	ServerTime    time.Time   `json:"server_time"`
 	SchemaVersion int64       `json:"schema_version"`
 	SchemaHash    string      `json:"schema_hash"`
+}
+
+// ResyncRequest is the request for a full resync.
+type ResyncRequest struct {
+	ClientID      string       `json:"client_id"`
+	Cursor        *ResyncCursor `json:"cursor,omitempty"`
+	Limit         int          `json:"limit,omitempty"`
+	SchemaVersion int64        `json:"schema_version,omitempty"`
+	SchemaHash    string       `json:"schema_hash,omitempty"`
+}
+
+// ResyncCursor tracks pagination state across resync pages.
+type ResyncCursor struct {
+	Checkpoint int64  `json:"checkpoint"`
+	TableIndex int    `json:"table_idx"`
+	AfterID    string `json:"after_id"`
+}
+
+// ResyncResponse is the response for a full resync page.
+type ResyncResponse struct {
+	Records       []Record      `json:"records"`
+	Cursor        *ResyncCursor `json:"cursor,omitempty"`
+	Checkpoint    int64         `json:"checkpoint"`
+	HasMore       bool          `json:"has_more"`
+	SchemaVersion int64         `json:"schema_version"`
+	SchemaHash    string        `json:"schema_hash"`
 }
 
 // SchemaColumn describes a table column for client-side table creation.
