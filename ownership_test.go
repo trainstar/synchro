@@ -82,6 +82,31 @@ func TestJoinResolver_BucketByColumn_NullGlobalOptIn(t *testing.T) {
 	}
 }
 
+// bucketAssigner mirrors wal.BucketAssigner for compile-time conformance
+// checking without introducing a circular import.
+type bucketAssigner interface {
+	AssignBuckets(ctx context.Context, table string, recordID string, operation Operation, data map[string]any) ([]string, error)
+}
+
+var _ bucketAssigner = (*JoinResolver)(nil)
+
+func TestJoinResolver_AssignBuckets_SatisfiesBucketAssigner(t *testing.T) {
+	r := NewRegistry()
+	r.Register(&TableConfig{
+		TableName:      "items",
+		PushPolicy:     PushPolicyOwnerOnly,
+		BucketByColumn: "owner_id",
+		BucketPrefix:   "user:",
+	})
+
+	// Without DB, AssignBuckets should return an error.
+	resolverNoDB := NewJoinResolver(r)
+	_, err := resolverNoDB.AssignBuckets(context.Background(), "items", "item-1", OpInsert, map[string]any{"owner_id": "u1"})
+	if err == nil {
+		t.Fatal("expected error when db is nil, got nil")
+	}
+}
+
 func TestJoinResolver_UnregisteredTable(t *testing.T) {
 	r := NewRegistry()
 	resolver := NewJoinResolver(r)

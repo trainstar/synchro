@@ -35,6 +35,18 @@ func New(engine *synchro.Engine, opts ...Option) *Handler {
 	return h
 }
 
+// Routes returns an http.Handler with all sync endpoints mounted.
+func (h *Handler) Routes() http.Handler {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/sync/register", h.ServeRegister)
+	mux.HandleFunc("/sync/pull", h.ServePull)
+	mux.HandleFunc("/sync/push", h.ServePush)
+	mux.HandleFunc("/sync/resync", h.ServeResync)
+	mux.HandleFunc("/sync/tables", h.ServeTableMeta)
+	mux.HandleFunc("/sync/schema", h.ServeSchema)
+	return mux
+}
+
 // ServeRegister handles POST /sync/register.
 func (h *Handler) ServeRegister(w http.ResponseWriter, r *http.Request) {
 	if !requireMethod(w, r, http.MethodPost) {

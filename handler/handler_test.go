@@ -14,6 +14,53 @@ import (
 	"github.com/trainstar/synchro/synctest"
 )
 
+func TestHandler_Routes_MountsAllEndpoints(t *testing.T) {
+	h := handler.New(nil)
+	srv := httptest.NewServer(h.Routes())
+	defer srv.Close()
+
+	routes := []struct {
+		path   string
+		method string
+		want   int
+	}{
+		// POST endpoints should return 401 (missing user identity) not 404
+		{"/sync/register", http.MethodPost, http.StatusUnauthorized},
+		{"/sync/pull", http.MethodPost, http.StatusUnauthorized},
+		{"/sync/push", http.MethodPost, http.StatusUnauthorized},
+		{"/sync/resync", http.MethodPost, http.StatusUnauthorized},
+		// GET endpoints — engine is nil so these will panic/500, but
+		// wrong method should return 405, confirming the route exists
+		{"/sync/tables", http.MethodPost, http.StatusMethodNotAllowed},
+		{"/sync/schema", http.MethodPost, http.StatusMethodNotAllowed},
+	}
+
+	for _, tc := range routes {
+		t.Run(tc.method+" "+tc.path, func(t *testing.T) {
+			req, _ := http.NewRequest(tc.method, srv.URL+tc.path, bytes.NewBufferString(`{}`))
+			req.Header.Set("Content-Type", "application/json")
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				t.Fatalf("request failed: %v", err)
+			}
+			resp.Body.Close()
+			if resp.StatusCode != tc.want {
+				t.Fatalf("status = %d, want %d", resp.StatusCode, tc.want)
+			}
+		})
+	}
+
+	// Verify unregistered path returns 404
+	resp, err := http.Post(srv.URL+"/sync/nonexistent", "application/json", bytes.NewBufferString(`{}`))
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("unregistered path: status = %d, want %d", resp.StatusCode, http.StatusNotFound)
+	}
+}
+
 func TestServePull_MethodNotAllowed(t *testing.T) {
 	h := handler.New(nil)
 

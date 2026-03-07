@@ -8,6 +8,7 @@ import (
 
 	"github.com/jackc/pglogrepl"
 
+	"github.com/trainstar/synchro"
 	"github.com/trainstar/synchro/synctest"
 	"github.com/trainstar/synchro/wal"
 )
@@ -75,6 +76,7 @@ func TestFailure_ReplicationSlotDropped(t *testing.T) {
 		SlotName:        slotName,
 		PublicationName: pubName,
 		Registry:        reg,
+		Assigner:        synchro.NewJoinResolverWithDB(reg, db),
 		ChangelogDB:     db,
 	})
 
@@ -118,6 +120,7 @@ func TestFailure_ReplicationSlotDropped(t *testing.T) {
 		SlotName:        slotName,
 		PublicationName: pubName,
 		Registry:        reg,
+		Assigner:        synchro.NewJoinResolverWithDB(reg, db),
 		ChangelogDB:     db,
 	})
 

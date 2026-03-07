@@ -417,7 +417,7 @@ consumer := wal.NewConsumer(wal.ConsumerConfig{
     SlotName:        "synchro_slot",
     PublicationName: "synchro_pub",
     Registry:        registry,
-    Assigner:        synchro.NewJoinResolver(registry), // implements BucketAssigner
+    Assigner:        synchro.NewJoinResolverWithDB(registry, db), // implements BucketAssigner
     ChangelogDB:     db,                                // *sql.DB
     Logger:          logger,
     StandbyTimeout:  10 * time.Second,                  // default

@@ -11,13 +11,31 @@ type OwnershipResolver interface {
 }
 
 // JoinResolver is the default OwnershipResolver that uses registry metadata.
+// It also implements wal.BucketAssigner when constructed with NewJoinResolverWithDB.
 type JoinResolver struct {
 	registry *Registry
+	db       DB
 }
 
 // NewJoinResolver creates a JoinResolver from a registry.
+// The returned resolver can be used as an OwnershipResolver but not as a
+// wal.BucketAssigner (no DB handle). Use NewJoinResolverWithDB for WAL consumer usage.
 func NewJoinResolver(registry *Registry) *JoinResolver {
 	return &JoinResolver{registry: registry}
+}
+
+// NewJoinResolverWithDB creates a JoinResolver that also satisfies wal.BucketAssigner.
+// The db handle is used by AssignBuckets to resolve parent-chain ownership.
+func NewJoinResolverWithDB(registry *Registry, db DB) *JoinResolver {
+	return &JoinResolver{registry: registry, db: db}
+}
+
+// AssignBuckets implements wal.BucketAssigner by delegating to ResolveOwner.
+func (r *JoinResolver) AssignBuckets(ctx context.Context, table string, recordID string, _ Operation, data map[string]any) ([]string, error) {
+	if r.db == nil {
+		return nil, fmt.Errorf("JoinResolver: AssignBuckets requires a DB handle; use NewJoinResolverWithDB")
+	}
+	return r.ResolveOwner(ctx, r.db, table, recordID, data)
 }
 
 // ResolveOwner determines bucket IDs for a record.
