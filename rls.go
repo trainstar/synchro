@@ -13,6 +13,7 @@ func GenerateRLSPolicies(registry *Registry) []string {
 	for _, cfg := range registry.All() {
 		stmts = append(stmts,
 			fmt.Sprintf("ALTER TABLE %s ENABLE ROW LEVEL SECURITY", quoteIdentifier(cfg.TableName)),
+			fmt.Sprintf("ALTER TABLE %s FORCE ROW LEVEL SECURITY", quoteIdentifier(cfg.TableName)),
 		)
 
 		// No ownership columns anywhere: read-all table.

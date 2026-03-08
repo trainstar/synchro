@@ -13,8 +13,9 @@ func TestGenerateRLSPolicies_PushDisabledTable(t *testing.T) {
 	})
 
 	stmts := GenerateRLSPolicies(r)
-	if len(stmts) != 2 {
-		t.Fatalf("got %d statements, want 2", len(stmts))
+	// ENABLE + FORCE + SELECT policy = 3 statements
+	if len(stmts) != 3 {
+		t.Fatalf("got %d statements, want 3", len(stmts))
 	}
 
 	for _, s := range stmts {
@@ -88,8 +89,9 @@ func TestGenerateRLSPolicies_ChildTable(t *testing.T) {
 			child = append(child, s)
 		}
 	}
-	if len(child) != 5 {
-		t.Fatalf("got %d child statements, want 5", len(child))
+	// ENABLE + FORCE + SELECT + INSERT + UPDATE + DELETE = 6 statements per child table
+	if len(child) != 6 {
+		t.Fatalf("got %d child statements, want 6", len(child))
 	}
 	for _, s := range child {
 		if strings.Contains(s, "FOR SELECT") || strings.Contains(s, "FOR INSERT") {

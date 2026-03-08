@@ -162,6 +162,9 @@ func (r *Registry) Register(cfg *TableConfig) {
 	}
 	if cfg.BucketByColumn == "" && cfg.BucketFunction == "" && cfg.OwnerColumn != "" {
 		cfg.BucketByColumn = cfg.OwnerColumn
+		if cfg.AllowGlobalRead {
+			cfg.GlobalWhenBucketNull = true
+		}
 	}
 	if cfg.BucketByColumn != "" && cfg.BucketPrefix == "" {
 		cfg.BucketPrefix = "user:"

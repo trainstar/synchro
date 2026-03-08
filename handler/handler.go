@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"github.com/trainstar/synchro"
 )
@@ -303,6 +304,11 @@ func writeRetryError(w http.ResponseWriter, status int, msg string, retryAfter i
 
 func isTransientError(err error) bool {
 	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, sql.ErrConnDone) {
+		return true
+	}
+	// sql.DB.Close() produces an unexported "sql: database is closed" error
+	// that doesn't match sql.ErrConnDone. Check the error message as a fallback.
+	if err != nil && strings.Contains(err.Error(), "database is closed") {
 		return true
 	}
 	var netErr net.Error

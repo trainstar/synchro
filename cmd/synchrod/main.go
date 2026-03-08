@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -28,6 +29,9 @@ type config struct {
 	PublicationName  string
 	MinClientVersion string
 	LogLevel         string
+	JWTSecret        string
+	JWKSURL          string
+	JWTUserClaim     string
 }
 
 func main() {
@@ -42,6 +46,9 @@ func main() {
 		PublicationName:  envOr("PUBLICATION_NAME", "synchro_pub"),
 		MinClientVersion: os.Getenv("MIN_CLIENT_VERSION"),
 		LogLevel:         envOr("LOG_LEVEL", "info"),
+		JWTSecret:        os.Getenv("JWT_SECRET"),
+		JWKSURL:          os.Getenv("JWKS_URL"),
+		JWTUserClaim:     envOr("JWT_USER_CLAIM", "sub"),
 	}
 
 	if err := run(ctx, cfg); err != nil {
@@ -75,6 +82,10 @@ func run(ctx context.Context, cfg config) error {
 		}
 	}
 
+	if err := synctest.SetupTestSchema(ctx, db); err != nil {
+		return fmt.Errorf("setting up test schema: %w", err)
+	}
+
 	registry := synctest.NewTestRegistry()
 
 	engine, err := synchro.NewEngine(synchro.Config{
@@ -89,6 +100,17 @@ func run(ctx context.Context, cfg config) error {
 
 	// Start WAL consumer if ReplicationURL is set.
 	if cfg.ReplicationURL != "" {
+		// Ensure publication exists (idempotent).
+		tableNames := registry.TableNames()
+		pubSQL := fmt.Sprintf("CREATE PUBLICATION %s FOR TABLE %s",
+			cfg.PublicationName, strings.Join(tableNames, ", "))
+		if _, err := db.ExecContext(ctx, pubSQL); err != nil {
+			// Ignore "already exists" errors.
+			if !strings.Contains(err.Error(), "already exists") {
+				return fmt.Errorf("creating publication: %w", err)
+			}
+		}
+
 		consumer := wal.NewConsumer(wal.ConsumerConfig{
 			ConnString:      cfg.ReplicationURL,
 			SlotName:        cfg.SlotName,
@@ -107,8 +129,31 @@ func run(ctx context.Context, cfg config) error {
 	}
 
 	h := handler.New(engine)
-	syncHandler := handler.UserIDMiddleware("X-User-ID",
-		handler.VersionCheckMiddleware("X-Client-Version", cfg.MinClientVersion, h.Routes()))
+
+	var authMiddleware func(http.Handler) http.Handler
+	switch {
+	case cfg.JWTSecret != "":
+		authMiddleware = func(next http.Handler) http.Handler {
+			return handler.JWTAuthMiddleware(handler.JWTAuthConfig{
+				Secret:    []byte(cfg.JWTSecret),
+				UserClaim: cfg.JWTUserClaim,
+			}, next)
+		}
+	case cfg.JWKSURL != "":
+		authMiddleware = func(next http.Handler) http.Handler {
+			return handler.JWTAuthMiddleware(handler.JWTAuthConfig{
+				JWKSURL:   cfg.JWKSURL,
+				UserClaim: cfg.JWTUserClaim,
+			}, next)
+		}
+	default:
+		authMiddleware = func(next http.Handler) http.Handler {
+			return handler.UserIDMiddleware("X-User-ID", next)
+		}
+	}
+
+	syncHandler := authMiddleware(
+		handler.VersionCheckMiddleware("X-App-Version", cfg.MinClientVersion, h.Routes()))
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {

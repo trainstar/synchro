@@ -288,8 +288,8 @@ func (e *Engine) Push(ctx context.Context, userID string, req *PushRequest) (*Pu
 		}
 	}
 
-	var accepted []PushResult
-	var rejected []PushResult
+	accepted := make([]PushResult, 0)
+	rejected := make([]PushResult, 0)
 
 	tx, err := e.db.BeginTx(ctx, nil)
 	if err != nil {

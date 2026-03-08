@@ -1,0 +1,198 @@
+import Foundation
+import GRDB
+
+public typealias Row = GRDB.Row
+
+final class SynchroDatabase: @unchecked Sendable {
+    let dbPool: DatabasePool
+    let path: String
+
+    init(path: String) throws {
+        self.path = path
+        var config = Configuration()
+        config.journalMode = .wal
+        self.dbPool = try DatabasePool(path: path, configuration: config)
+        try runMigrations()
+    }
+
+    // MARK: - Queries
+
+    func query(_ sql: String, params: [any DatabaseValueConvertible]?) throws -> [Row] {
+        try dbPool.read { db in
+            try Row.fetchAll(db, sql: sql, arguments: StatementArguments(params ?? []))
+        }
+    }
+
+    func queryOne(_ sql: String, params: [any DatabaseValueConvertible]?) throws -> Row? {
+        try dbPool.read { db in
+            try Row.fetchOne(db, sql: sql, arguments: StatementArguments(params ?? []))
+        }
+    }
+
+    func execute(_ sql: String, params: [any DatabaseValueConvertible]?) throws -> ExecResult {
+        try dbPool.write { db in
+            try db.execute(sql: sql, arguments: StatementArguments(params ?? []))
+            return ExecResult(rowsAffected: db.changesCount)
+        }
+    }
+
+    // MARK: - Transactions
+
+    func readTransaction<T>(_ block: (GRDB.Database) throws -> T) throws -> T {
+        try dbPool.read { db in
+            try block(db)
+        }
+    }
+
+    func writeTransaction<T>(_ block: (GRDB.Database) throws -> T) throws -> T {
+        try dbPool.write { db in
+            try block(db)
+        }
+    }
+
+    // MARK: - Batch
+
+    func executeBatch(_ statements: [SQLStatement]) throws -> Int {
+        try dbPool.write { db in
+            var total = 0
+            for stmt in statements {
+                try db.execute(sql: stmt.sql, arguments: StatementArguments(stmt.params ?? []))
+                total += db.changesCount
+            }
+            return total
+        }
+    }
+
+    // MARK: - Schema (local-only tables)
+
+    func createTable(_ name: String, columns: [ColumnDef], options: TableOptions?) throws {
+        let ifNotExists = options?.ifNotExists ?? true
+        let withoutRowid = options?.withoutRowid ?? false
+        let quotedName = SQLiteHelpers.quoteIdentifier(name)
+
+        var colDefs: [String] = []
+        for col in columns {
+            var def = "\(SQLiteHelpers.quoteIdentifier(col.name)) \(col.type)"
+            if col.primaryKey { def += " PRIMARY KEY" }
+            if !col.nullable { def += " NOT NULL" }
+            if let defaultVal = col.defaultValue { def += " DEFAULT \(defaultVal)" }
+            colDefs.append(def)
+        }
+
+        var sql = "CREATE TABLE"
+        if ifNotExists { sql += " IF NOT EXISTS" }
+        sql += " \(quotedName) (\(colDefs.joined(separator: ", ")))"
+        if withoutRowid { sql += " WITHOUT ROWID" }
+
+        try dbPool.write { db in
+            try db.execute(sql: sql)
+        }
+    }
+
+    func alterTable(_ name: String, addColumns: [ColumnDef]) throws {
+        let quotedName = SQLiteHelpers.quoteIdentifier(name)
+        try dbPool.write { db in
+            for col in addColumns {
+                var def = "ALTER TABLE \(quotedName) ADD COLUMN \(SQLiteHelpers.quoteIdentifier(col.name)) \(col.type)"
+                if !col.nullable { def += " NOT NULL DEFAULT ''" }
+                if let defaultVal = col.defaultValue { def += " DEFAULT \(defaultVal)" }
+                try db.execute(sql: def)
+            }
+        }
+    }
+
+    func createIndex(_ table: String, columns: [String], unique: Bool) throws {
+        let quotedTable = SQLiteHelpers.quoteIdentifier(table)
+        let quotedCols = columns.map { SQLiteHelpers.quoteIdentifier($0) }.joined(separator: ", ")
+        let indexName = SQLiteHelpers.quoteIdentifier("idx_\(table)_\(columns.joined(separator: "_"))")
+        let uniqueStr = unique ? "UNIQUE " : ""
+        let sql = "CREATE \(uniqueStr)INDEX IF NOT EXISTS \(indexName) ON \(quotedTable) (\(quotedCols))"
+        try dbPool.write { db in
+            try db.execute(sql: sql)
+        }
+    }
+
+    // MARK: - Observation
+
+    func onChange(tables: [String], callback: @escaping () -> Void) -> DatabaseCancellable {
+        let observation = DatabaseRegionObservation(tracking: tables.map { Table($0) })
+        let cancellable = observation.start(in: dbPool, onError: { error in
+            #if DEBUG
+            print("[Synchro] onChange observation error: \(error)")
+            #endif
+        }, onChange: { _ in
+            callback()
+        })
+        return cancellable
+    }
+
+    func watch(_ sql: String, params: [any DatabaseValueConvertible]?, tables: [String], callback: @escaping ([Row]) -> Void) -> DatabaseCancellable {
+        let observation = ValueObservation.tracking(regions: tables.map { Table($0) }, fetch: { db -> [Row] in
+            try Row.fetchAll(db, sql: sql, arguments: StatementArguments(params ?? []))
+        })
+        let cancellable = observation.start(in: dbPool, onError: { error in
+            // Observation errors are non-fatal; the observation continues.
+            // In production, wire this to your logging infrastructure.
+            #if DEBUG
+            print("[Synchro] watch observation error: \(error)")
+            #endif
+        }, onChange: { rows in
+            callback(rows)
+        })
+        return cancellable
+    }
+
+    // MARK: - WAL Checkpoint
+
+    func checkpoint(mode: CheckpointMode) throws {
+        let grdbMode: GRDB.Database.CheckpointMode
+        switch mode {
+        case .passive: grdbMode = .passive
+        case .full: grdbMode = .full
+        case .restart: grdbMode = .restart
+        case .truncate: grdbMode = .truncate
+        }
+        try dbPool.writeWithoutTransaction { db in
+            try db.checkpoint(grdbMode)
+        }
+    }
+
+    // MARK: - Close
+
+    func close() throws {
+        try dbPool.close()
+    }
+
+    // MARK: - Migrations
+
+    private func runMigrations() throws {
+        var migrator = DatabaseMigrator()
+        migrator.registerMigration("synchro_v1") { db in
+            try db.execute(sql: """
+                CREATE TABLE IF NOT EXISTS _synchro_pending_changes (
+                    record_id TEXT NOT NULL,
+                    table_name TEXT NOT NULL,
+                    operation TEXT NOT NULL,
+                    base_updated_at TEXT,
+                    client_updated_at TEXT NOT NULL,
+                    PRIMARY KEY (table_name, record_id)
+                )
+                """)
+
+            try db.execute(sql: """
+                CREATE TABLE IF NOT EXISTS _synchro_meta (
+                    key TEXT PRIMARY KEY,
+                    value TEXT NOT NULL
+                )
+                """)
+
+            try db.execute(sql: """
+                INSERT OR IGNORE INTO _synchro_meta (key, value) VALUES ('sync_lock', '0')
+                """)
+            try db.execute(sql: """
+                INSERT OR IGNORE INTO _synchro_meta (key, value) VALUES ('checkpoint', '0')
+                """)
+        }
+        try migrator.migrate(dbPool)
+    }
+}

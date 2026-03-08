@@ -192,6 +192,9 @@ func (p *pushProcessor) pushUpdate(ctx context.Context, tx DB, userID string, cf
 		}, nil
 	}
 
+	// Resurrection: if this is a create on a deleted record, clear deleted_at
+	isResurrection := record.Operation == "create" && existing.DeletedAt != nil
+
 	ts, err := updateRecord(ctx, tx, cfg, record.ID, data)
 	if err != nil {
 		p.logger.ErrorContext(ctx, "failed to update record",
@@ -200,6 +203,20 @@ func (p *pushProcessor) pushUpdate(ctx context.Context, tx DB, userID string, cf
 			ID: record.ID, TableName: record.TableName, Operation: record.Operation,
 			Status: PushStatusError, Reason: "failed to update record",
 		}, nil
+	}
+
+	if isResurrection {
+		clearQuery := fmt.Sprintf("UPDATE %s SET %s = NULL WHERE %s = $1 RETURNING %s",
+			quoteIdentifier(cfg.TableName), quoteIdentifier(cfg.DeletedAtColumn),
+			quoteIdentifier(cfg.IDColumn), quoteIdentifier(cfg.UpdatedAtColumn))
+		if err := tx.QueryRowContext(ctx, clearQuery, record.ID).Scan(&ts); err != nil {
+			p.logger.ErrorContext(ctx, "failed to clear deleted_at for resurrection",
+				"err", err, "table", record.TableName, "id", record.ID)
+			return &PushResult{
+				ID: record.ID, TableName: record.TableName, Operation: record.Operation,
+				Status: PushStatusError, Reason: "failed to resurrect record",
+			}, nil
+		}
 	}
 
 	result := &PushResult{

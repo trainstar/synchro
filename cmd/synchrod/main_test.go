@@ -8,11 +8,29 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
+
+	"github.com/golang-jwt/jwt/v5"
 
 	"github.com/trainstar/synchro"
 	"github.com/trainstar/synchro/handler"
 	"github.com/trainstar/synchro/synctest"
 )
+
+var testJWTSecret = []byte("test-secret-for-synchrod-tests")
+
+func signTestJWT(userID string, secret []byte) string {
+	token := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{
+		"sub": userID,
+		"iat": time.Now().Unix(),
+		"exp": time.Now().Add(time.Hour).Unix(),
+	})
+	signed, err := token.SignedString(secret)
+	if err != nil {
+		panic(fmt.Sprintf("signing test JWT: %v", err))
+	}
+	return signed
+}
 
 func setupTestServer(t *testing.T) (*httptest.Server, *sql.DB) {
 	t.Helper()
@@ -30,8 +48,13 @@ func setupTestServer(t *testing.T) (*httptest.Server, *sql.DB) {
 	}
 
 	h := handler.New(engine)
-	syncHandler := handler.UserIDMiddleware("X-User-ID",
-		handler.VersionCheckMiddleware("X-Client-Version", "1.0.0", h.Routes()))
+	syncHandler := handler.JWTAuthMiddleware(
+		handler.JWTAuthConfig{
+			Secret:    testJWTSecret,
+			UserClaim: "sub",
+		},
+		handler.VersionCheckMiddleware("X-App-Version", "1.0.0", h.Routes()),
+	)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
@@ -59,7 +82,7 @@ func TestHTTP_HealthCheck(t *testing.T) {
 	}
 }
 
-func TestHTTP_MissingUserID_401(t *testing.T) {
+func TestHTTP_MissingAuth_401(t *testing.T) {
 	srv, _ := setupTestServer(t)
 
 	resp, err := http.Post(srv.URL+"/sync/register", "application/json", bytes.NewBufferString(`{}`))
@@ -72,13 +95,76 @@ func TestHTTP_MissingUserID_401(t *testing.T) {
 	}
 }
 
-func TestHTTP_UpgradeRequired_426(t *testing.T) {
+func TestHTTP_InvalidJWT_401(t *testing.T) {
 	srv, _ := setupTestServer(t)
 
 	req, _ := http.NewRequest(http.MethodPost, srv.URL+"/sync/register", bytes.NewBufferString(`{}`))
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-User-ID", "user-1")
-	req.Header.Set("X-Client-Version", "0.1.0")
+	req.Header.Set("Authorization", "Bearer invalid-token")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusUnauthorized)
+	}
+}
+
+func TestHTTP_ExpiredJWT_401(t *testing.T) {
+	srv, _ := setupTestServer(t)
+
+	token := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{
+		"sub": "user-1",
+		"iat": time.Now().Add(-2 * time.Hour).Unix(),
+		"exp": time.Now().Add(-1 * time.Hour).Unix(),
+	})
+	expired, _ := token.SignedString(testJWTSecret)
+
+	req, _ := http.NewRequest(http.MethodPost, srv.URL+"/sync/register", bytes.NewBufferString(`{}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+expired)
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusUnauthorized)
+	}
+}
+
+func TestHTTP_WrongSigningKey_401(t *testing.T) {
+	srv, _ := setupTestServer(t)
+
+	wrongKey := []byte("wrong-secret")
+	tokenStr := signTestJWT("user-1", wrongKey)
+
+	req, _ := http.NewRequest(http.MethodPost, srv.URL+"/sync/register", bytes.NewBufferString(`{}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+tokenStr)
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusUnauthorized)
+	}
+}
+
+func TestHTTP_UpgradeRequired_426(t *testing.T) {
+	srv, _ := setupTestServer(t)
+
+	tokenStr := signTestJWT("user-1", testJWTSecret)
+
+	req, _ := http.NewRequest(http.MethodPost, srv.URL+"/sync/register", bytes.NewBufferString(`{}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+tokenStr)
+	req.Header.Set("X-App-Version", "0.1.0")
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -239,10 +325,12 @@ func TestHTTP_SchemaMismatch_409(t *testing.T) {
 func TestHTTP_BadRequest_400(t *testing.T) {
 	srv, _ := setupTestServer(t)
 
+	tokenStr := signTestJWT("user-1", testJWTSecret)
+
 	req, _ := http.NewRequest(http.MethodPost, srv.URL+"/sync/push", bytes.NewBufferString(`not json`))
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-User-ID", "user-1")
-	req.Header.Set("X-Client-Version", "1.0.0")
+	req.Header.Set("Authorization", "Bearer "+tokenStr)
+	req.Header.Set("X-App-Version", "1.0.0")
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -251,6 +339,155 @@ func TestHTTP_BadRequest_400(t *testing.T) {
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusBadRequest)
+	}
+}
+
+func TestHTTP_TablesEndpoint(t *testing.T) {
+	srv, _ := setupTestServer(t)
+
+	tokenStr := signTestJWT("user-tables", testJWTSecret)
+
+	req, _ := http.NewRequest(http.MethodGet, srv.URL+"/sync/tables", nil)
+	req.Header.Set("Authorization", "Bearer "+tokenStr)
+	req.Header.Set("X-App-Version", "1.0.0")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("GET /sync/tables: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusOK)
+	}
+
+	var body map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatalf("decoding response: %v", err)
+	}
+
+	tables, ok := body["tables"].([]any)
+	if !ok {
+		t.Fatal("response missing 'tables' array")
+	}
+
+	// Verify expected tables exist
+	tableMap := make(map[string]map[string]any)
+	for _, entry := range tables {
+		tbl := entry.(map[string]any)
+		name := tbl["table_name"].(string)
+		tableMap[name] = tbl
+	}
+
+	for _, expected := range []string{"items", "item_details", "categories", "tags"} {
+		if _, ok := tableMap[expected]; !ok {
+			t.Errorf("table %q not found in /sync/tables response", expected)
+		}
+	}
+
+	// Each entry should have table_name, push_policy, dependencies
+	for _, entry := range tables {
+		tbl := entry.(map[string]any)
+		if _, ok := tbl["table_name"]; !ok {
+			t.Error("table entry missing 'table_name'")
+		}
+		if _, ok := tbl["push_policy"]; !ok {
+			t.Error("table entry missing 'push_policy'")
+		}
+		if _, ok := tbl["dependencies"]; !ok {
+			t.Error("table entry missing 'dependencies'")
+		}
+	}
+
+	// categories has push_policy = "disabled"
+	if cat, ok := tableMap["categories"]; ok {
+		if cat["push_policy"] != "disabled" {
+			t.Errorf("categories push_policy = %v, want %q", cat["push_policy"], "disabled")
+		}
+	}
+
+	// item_details has dependencies = ["items"]
+	if detail, ok := tableMap["item_details"]; ok {
+		deps, ok := detail["dependencies"].([]any)
+		if !ok {
+			t.Fatal("item_details 'dependencies' is not an array")
+		}
+		if len(deps) != 1 || deps[0] != "items" {
+			t.Errorf("item_details dependencies = %v, want [items]", deps)
+		}
+	}
+}
+
+func TestHTTP_SchemaEndpoint(t *testing.T) {
+	srv, _ := setupTestServer(t)
+
+	tokenStr := signTestJWT("user-schema", testJWTSecret)
+
+	req, _ := http.NewRequest(http.MethodGet, srv.URL+"/sync/schema", nil)
+	req.Header.Set("Authorization", "Bearer "+tokenStr)
+	req.Header.Set("X-App-Version", "1.0.0")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("GET /sync/schema: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusOK)
+	}
+
+	var body map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatalf("decoding response: %v", err)
+	}
+
+	// Must have schema_version, schema_hash, tables
+	if _, ok := body["schema_version"]; !ok {
+		t.Error("response missing 'schema_version'")
+	}
+	if _, ok := body["schema_hash"]; !ok {
+		t.Error("response missing 'schema_hash'")
+	}
+
+	tables, ok := body["tables"].([]any)
+	if !ok {
+		t.Fatal("response missing 'tables' array")
+	}
+
+	if len(tables) == 0 {
+		t.Fatal("expected at least one table in schema response")
+	}
+
+	// Each table has columns array with name, db_type, nullable
+	for _, entry := range tables {
+		tbl := entry.(map[string]any)
+		tableName, _ := tbl["table_name"].(string)
+
+		columns, ok := tbl["columns"].([]any)
+		if !ok {
+			t.Errorf("table %q missing 'columns' array", tableName)
+			continue
+		}
+
+		if len(columns) == 0 {
+			t.Errorf("table %q has empty columns array", tableName)
+			continue
+		}
+
+		for _, colEntry := range columns {
+			col := colEntry.(map[string]any)
+			if _, ok := col["name"]; !ok {
+				t.Errorf("table %q: column missing 'name'", tableName)
+			}
+			if _, ok := col["db_type"]; !ok {
+				t.Errorf("table %q: column missing 'db_type'", tableName)
+			}
+			// nullable should be present (can be true or false)
+			if _, ok := col["nullable"]; !ok {
+				t.Errorf("table %q: column missing 'nullable'", tableName)
+			}
+		}
 	}
 }
 
@@ -265,9 +502,9 @@ func doJSON(t *testing.T, srv *httptest.Server, method, path, userID, clientVers
 		t.Fatalf("new request: %v", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-User-ID", userID)
+	req.Header.Set("Authorization", "Bearer "+signTestJWT(userID, testJWTSecret))
 	if clientVersion != "" {
-		req.Header.Set("X-Client-Version", clientVersion)
+		req.Header.Set("X-App-Version", clientVersion)
 	}
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {

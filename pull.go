@@ -52,7 +52,7 @@ func (p *pullProcessor) processPull(ctx context.Context, db DB, req *PullRequest
 	refs := deduplicateEntries(entries)
 
 	// Separate deletes from changes, group changes by table
-	var deletes []DeleteEntry
+	deletes := make([]DeleteEntry, 0)
 	changesByTable := make(map[string][]string) // table → record IDs
 
 	for _, ref := range refs {
@@ -67,7 +67,7 @@ func (p *pullProcessor) processPull(ctx context.Context, db DB, req *PullRequest
 	}
 
 	// Hydrate changed records by batch-fetching per table
-	var changes []Record
+	changes := make([]Record, 0)
 	for tableName, ids := range changesByTable {
 		records, err := p.hydrateRecords(ctx, db, tableName, ids)
 		if err != nil {
