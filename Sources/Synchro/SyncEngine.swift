@@ -25,8 +25,11 @@ final class SyncEngine: @unchecked Sendable {
     private var currentStatus: SyncStatus = .stopped
     private var statusCallbacks: [UUID: (SyncStatus) -> Void] = [:]
     private var conflictCallbacks: [UUID: (ConflictEvent) -> Void] = [:]
-    private var resyncCallbacks: [UUID: () async -> Bool] = [:]
+    private var snapshotCallbacks: [UUID: () async -> Bool] = [:]
     private let lock = NSLock()
+    private var started = false
+    private var cycleRunning = false
+    private var cycleQueued = false
 
     private var syncedTables: [SchemaTable] = []
     private var schemaVersion: Int64 = 0
@@ -55,41 +58,61 @@ final class SyncEngine: @unchecked Sendable {
     // MARK: - Lifecycle
 
     func start(options: SyncOptions? = nil) async throws {
-        // Fetch schema first so we can register with the correct version
-        let schema = try await schemaManager.ensureSchema(httpClient: httpClient)
-        self.syncedTables = schema.tables
-        self.schemaVersion = schema.schemaVersion
-        self.schemaHash = schema.schemaHash
-
-        // Single register with actual schema version
-        let registerReq = RegisterRequest(
-            clientID: config.clientID,
-            clientName: nil,
-            platform: config.platform,
-            appVersion: config.appVersion,
-            schemaVersion: schema.schemaVersion,
-            schemaHash: schema.schemaHash
-        )
-        let registerResp = try await httpClient.register(request: registerReq)
-
-        try database.writeTransaction { db in
-            try SynchroMeta.set(db, key: .clientServerID, value: registerResp.id)
+        lock.lock()
+        if started {
+            lock.unlock()
+            throw SynchroError.alreadyStarted
         }
+        started = true
+        lock.unlock()
 
-        updateStatus(.idle)
+        // Clear sync lock in case of prior crash
+        do {
+            try database.writeTransaction { db in
+                try SynchroMeta.setSyncLock(db, locked: false)
+            }
 
-        // Start sync loop
-        syncTask = Task { [weak self] in
-            guard let self else { return }
-            await self.syncLoop()
+            let schema = try await schemaManager.ensureSchema(httpClient: httpClient)
+            self.syncedTables = schema.tables
+            self.schemaVersion = schema.schemaVersion
+            self.schemaHash = schema.schemaHash
+
+            let registerReq = RegisterRequest(
+                clientID: config.clientID,
+                clientName: nil,
+                platform: config.platform,
+                appVersion: config.appVersion,
+                schemaVersion: schema.schemaVersion,
+                schemaHash: schema.schemaHash
+            )
+            let registerResp = try await httpClient.register(request: registerReq)
+
+            let needsInitialSnapshot = try database.writeTransaction { db in
+                try SynchroMeta.set(db, key: .clientServerID, value: registerResp.id)
+                let checkpoint = try SynchroMeta.getInt64(db, key: .checkpoint)
+                let snapshotComplete = try SynchroMeta.get(db, key: .snapshotComplete) == "1"
+                return checkpoint == 0 || !snapshotComplete
+            }
+
+            updateStatus(.idle)
+
+            if needsInitialSnapshot {
+                try await rebuildFromSnapshot(reason: "initial_sync_required", requiresApproval: false)
+            }
+
+            syncTask = Task { [weak self] in
+                guard let self else { return }
+                await self.syncLoop()
+            }
+            startPendingObserver()
+            try await runSyncCycleWithRetry()
+            options?.initialSyncCompleted?()
+        } catch {
+            lock.lock()
+            started = false
+            lock.unlock()
+            throw error
         }
-
-        // Start watching for pending changes (debounced push)
-        startPendingObserver()
-
-        // Run initial sync
-        try await runSyncCycleWithRetry()
-        options?.initialSyncCompleted?()
     }
 
     func stop() {
@@ -99,6 +122,11 @@ final class SyncEngine: @unchecked Sendable {
         debounceTask = nil
         pendingObserver?.cancel()
         pendingObserver = nil
+        lock.lock()
+        started = false
+        cycleRunning = false
+        cycleQueued = false
+        lock.unlock()
         updateStatus(.stopped)
     }
 
@@ -132,14 +160,14 @@ final class SyncEngine: @unchecked Sendable {
         }
     }
 
-    func onResyncRequired(_ callback: @escaping () async -> Bool) -> any Cancellable {
+    func onSnapshotRequired(_ callback: @escaping () async -> Bool) -> any Cancellable {
         let id = UUID()
         lock.lock()
-        resyncCallbacks[id] = callback
+        snapshotCallbacks[id] = callback
         lock.unlock()
         return CallbackCancellable { [weak self] in
             self?.lock.lock()
-            self?.resyncCallbacks.removeValue(forKey: id)
+            self?.snapshotCallbacks.removeValue(forKey: id)
             self?.lock.unlock()
         }
     }
@@ -165,6 +193,37 @@ final class SyncEngine: @unchecked Sendable {
     // MARK: - Retry
 
     private func runSyncCycleWithRetry() async throws {
+        lock.lock()
+        if cycleRunning {
+            cycleQueued = true
+            lock.unlock()
+            return
+        }
+        cycleRunning = true
+        lock.unlock()
+        defer {
+            lock.lock()
+            cycleRunning = false
+            lock.unlock()
+        }
+
+        repeat {
+            lock.lock()
+            cycleQueued = false
+            lock.unlock()
+
+            try await runSingleSyncCycleWithRetry()
+
+            lock.lock()
+            let shouldRepeat = cycleQueued
+            lock.unlock()
+            if !shouldRepeat {
+                break
+            }
+        } while true
+    }
+
+    private func runSingleSyncCycleWithRetry() async throws {
         var attempt = 0
         var lastError: Error?
 
@@ -238,6 +297,12 @@ final class SyncEngine: @unchecked Sendable {
                 for conflict in outcome.conflicts {
                     fireConflict(conflict)
                 }
+                if outcome.hasRetryableRejections {
+                    throw RetryableError(
+                        underlying: .pushRejected(results: responseRetryableResults(outcome.response)),
+                        retryAfter: nil
+                    )
+                }
                 hasMore = try changeTracker.hasPendingChanges()
             } else {
                 hasMore = false
@@ -254,7 +319,7 @@ final class SyncEngine: @unchecked Sendable {
         let knownBucketsStr = try database.readTransaction { db in
             try SynchroMeta.get(db, key: .knownBuckets) ?? "[]"
         }
-        let knownBuckets = (try? JSONDecoder().decode([String].self, from: Data(knownBucketsStr.utf8))) ?? []
+        var knownBuckets = (try? JSONDecoder().decode([String].self, from: Data(knownBucketsStr.utf8))) ?? []
 
         var hasMore = true
         while hasMore {
@@ -270,78 +335,86 @@ final class SyncEngine: @unchecked Sendable {
 
             let response = try await httpClient.pull(request: request)
 
-            if response.resyncRequired == true {
-                try await handleResync()
+            if response.snapshotRequired == true {
+                try await rebuildFromSnapshot(reason: response.snapshotReason ?? "snapshot_required", requiresApproval: response.snapshotReason != "initial_sync_required")
                 return
             }
 
-            try pullProcessor.applyChanges(changes: response.changes, syncedTables: syncedTables)
-            try pullProcessor.applyDeletes(deletes: response.deletes, syncedTables: syncedTables)
+            try pullProcessor.applyPullPage(changes: response.changes, deletes: response.deletes, syncedTables: syncedTables)
             try pullProcessor.updateCheckpoint(response.checkpoint)
             try pullProcessor.updateKnownBuckets(bucketUpdates: response.bucketUpdates)
 
             checkpoint = response.checkpoint
             hasMore = response.hasMore
+            if hasMore, response.bucketUpdates != nil {
+                let reloadedBuckets = try database.readTransaction { db in
+                    try SynchroMeta.get(db, key: .knownBuckets) ?? "[]"
+                }
+                knownBuckets = (try? JSONDecoder().decode([String].self, from: Data(reloadedBuckets.utf8))) ?? []
+            }
         }
     }
 
-    // MARK: - Resync
+    // MARK: - Snapshot
 
-    private func handleResync() async throws {
-        // Push any remaining changes first
-        try await runPush()
-
-        // Ask callbacks if resync is approved
-        var approved = true
-        lock.lock()
-        let callbacks = resyncCallbacks
-        lock.unlock()
-
-        for (_, callback) in callbacks {
-            let result = await callback()
-            if !result {
-                approved = false
-                break
+    private func rebuildFromSnapshot(reason: String, requiresApproval: Bool) async throws {
+        if requiresApproval {
+            try await runPush()
+            var approved = true
+            lock.lock()
+            let callbacks = snapshotCallbacks
+            lock.unlock()
+            for (_, callback) in callbacks {
+                let result = await callback()
+                if !result {
+                    approved = false
+                    break
+                }
+            }
+            guard approved else {
+                throw SynchroError.snapshotRequired
             }
         }
 
-        guard approved else {
-            throw SynchroError.resyncRequired
-        }
-
-        // Drop synced data and pending changes
         let schema = SchemaResponse(
             schemaVersion: schemaVersion,
             schemaHash: schemaHash,
             serverTime: Date(),
             tables: syncedTables
         )
-        try schemaManager.dropSyncedTables(schema: schema)
-        try changeTracker.clearAll()
-        try schemaManager.createSyncedTables(schema: schema)
+        try database.writeTransaction { db in
+            try schemaManager.dropSyncedTablesInTransaction(db, schema: schema)
+            try db.execute(sql: "DELETE FROM _synchro_pending_changes")
+            try SynchroMeta.setInt64(db, key: .checkpoint, value: 0)
+            try SynchroMeta.set(db, key: .knownBuckets, value: "[]")
+            try SynchroMeta.set(db, key: .snapshotComplete, value: "0")
+            try schemaManager.createSyncedTablesInTransaction(db, schema: schema)
+        }
 
-        // Page through resync
-        var cursor: ResyncCursor? = nil
+        var cursor: SnapshotCursor? = nil
         var hasMore = true
 
         while hasMore {
-            let request = ResyncRequest(
+            let request = SnapshotRequest(
                 clientID: clientID,
                 cursor: cursor,
-                limit: config.resyncPageSize,
+                limit: config.snapshotPageSize,
                 schemaVersion: schemaVersion,
                 schemaHash: schemaHash
             )
 
-            let response = try await httpClient.resync(request: request)
+            let response = try await httpClient.snapshot(request: request)
 
-            try pullProcessor.applyResyncPage(records: response.records, syncedTables: syncedTables)
+            try pullProcessor.applySnapshotPage(records: response.records, syncedTables: syncedTables)
 
             cursor = response.cursor
             hasMore = response.hasMore
 
             if !hasMore {
-                try pullProcessor.updateCheckpoint(response.checkpoint)
+                try database.writeTransaction { db in
+                    try SynchroMeta.setInt64(db, key: .checkpoint, value: response.checkpoint)
+                    try SynchroMeta.set(db, key: .snapshotComplete, value: "1")
+                }
             }
         }
     }
@@ -398,6 +471,10 @@ final class SyncEngine: @unchecked Sendable {
         for (_, cb) in callbacks {
             cb(event)
         }
+    }
+
+    private func responseRetryableResults(_ response: PushResponse) -> [PushResult] {
+        response.rejected.filter { $0.status == PushStatus.rejectedRetryable }
     }
 }
 

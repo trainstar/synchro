@@ -66,7 +66,8 @@ public struct PullResponse: Codable, Sendable {
     public var deletes: [DeleteEntry]
     public var checkpoint: Int64
     public var hasMore: Bool
-    public var resyncRequired: Bool?
+    public var snapshotRequired: Bool?
+    public var snapshotReason: String?
     public var bucketUpdates: BucketUpdate?
     public var schemaVersion: Int64
     public var schemaHash: String
@@ -76,7 +77,8 @@ public struct PullResponse: Codable, Sendable {
         case deletes
         case checkpoint
         case hasMore = "has_more"
-        case resyncRequired = "resync_required"
+        case snapshotRequired = "snapshot_required"
+        case snapshotReason = "snapshot_reason"
         case bucketUpdates = "bucket_updates"
         case schemaVersion = "schema_version"
         case schemaHash = "schema_hash"
@@ -171,7 +173,8 @@ public struct PushResult: Codable, Sendable {
     public var tableName: String
     public var operation: String
     public var status: String
-    public var reason: String?
+    public var reasonCode: String?
+    public var message: String?
     public var serverVersion: Record?
     public var serverUpdatedAt: Date?
     public var serverDeletedAt: Date?
@@ -181,18 +184,42 @@ public struct PushResult: Codable, Sendable {
         case tableName = "table_name"
         case operation
         case status
-        case reason
+        case reasonCode = "reason_code"
+        case message
         case serverVersion = "server_version"
         case serverUpdatedAt = "server_updated_at"
         case serverDeletedAt = "server_deleted_at"
     }
+
+    public init(
+        id: String,
+        tableName: String,
+        operation: String,
+        status: String,
+        reasonCode: String? = nil,
+        message: String? = nil,
+        reason: String? = nil,
+        serverVersion: Record? = nil,
+        serverUpdatedAt: Date? = nil,
+        serverDeletedAt: Date? = nil
+    ) {
+        self.id = id
+        self.tableName = tableName
+        self.operation = operation
+        self.status = status
+        self.reasonCode = reasonCode
+        self.message = message ?? reason
+        self.serverVersion = serverVersion
+        self.serverUpdatedAt = serverUpdatedAt
+        self.serverDeletedAt = serverDeletedAt
+    }
 }
 
-// MARK: - Resync
+// MARK: - Snapshot
 
-public struct ResyncRequest: Codable, Sendable {
+public struct SnapshotRequest: Codable, Sendable {
     public var clientID: String
-    public var cursor: ResyncCursor?
+    public var cursor: SnapshotCursor?
     public var limit: Int?
     public var schemaVersion: Int64
     public var schemaHash: String
@@ -206,7 +233,7 @@ public struct ResyncRequest: Codable, Sendable {
     }
 }
 
-public struct ResyncCursor: Codable, Sendable {
+public struct SnapshotCursor: Codable, Sendable {
     public var checkpoint: Int64
     public var tableIndex: Int
     public var afterID: String
@@ -218,9 +245,9 @@ public struct ResyncCursor: Codable, Sendable {
     }
 }
 
-public struct ResyncResponse: Codable, Sendable {
+public struct SnapshotResponse: Codable, Sendable {
     public var records: [Record]
-    public var cursor: ResyncCursor?
+    public var cursor: SnapshotCursor?
     public var checkpoint: Int64
     public var hasMore: Bool
     public var schemaVersion: Int64
@@ -292,6 +319,8 @@ public struct SchemaColumn: Codable, Sendable {
     public var logicalType: String
     public var nullable: Bool
     public var defaultSQL: String?
+    public var defaultKind: String = "none"
+    public var sqliteDefaultSQL: String? = nil
     public var isPrimaryKey: Bool
 
     enum CodingKeys: String, CodingKey {
@@ -300,7 +329,29 @@ public struct SchemaColumn: Codable, Sendable {
         case logicalType = "logical_type"
         case nullable
         case defaultSQL = "default_sql"
+        case defaultKind = "default_kind"
+        case sqliteDefaultSQL = "sqlite_default_sql"
         case isPrimaryKey = "is_primary_key"
+    }
+
+    public init(
+        name: String,
+        dbType: String,
+        logicalType: String,
+        nullable: Bool,
+        defaultSQL: String? = nil,
+        defaultKind: String = "none",
+        sqliteDefaultSQL: String? = nil,
+        isPrimaryKey: Bool
+    ) {
+        self.name = name
+        self.dbType = dbType
+        self.logicalType = logicalType
+        self.nullable = nullable
+        self.defaultSQL = defaultSQL
+        self.defaultKind = defaultKind
+        self.sqliteDefaultSQL = sqliteDefaultSQL
+        self.isPrimaryKey = isPrimaryKey
     }
 }
 
@@ -494,7 +545,8 @@ public struct AnyCodable: Codable, Sendable, Equatable {
 public enum PushStatus {
     public static let applied = "applied"
     public static let conflict = "conflict"
-    public static let error = "error"
+    public static let rejectedTerminal = "rejected_terminal"
+    public static let rejectedRetryable = "rejected_retryable"
 }
 
 // MARK: - JSON Date Coding

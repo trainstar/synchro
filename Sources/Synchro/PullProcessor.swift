@@ -8,6 +8,24 @@ final class PullProcessor: @unchecked Sendable {
         self.database = database
     }
 
+    func applyPullPage(changes: [Record], deletes: [DeleteEntry], syncedTables: [SchemaTable]) throws {
+        guard !changes.isEmpty || !deletes.isEmpty else { return }
+        let tableMap = Dictionary(uniqueKeysWithValues: syncedTables.map { ($0.tableName, $0) })
+
+        try database.writeTransaction { db in
+            try SynchroMeta.setSyncLock(db, locked: true)
+            defer { try? SynchroMeta.setSyncLock(db, locked: false) }
+
+            for record in changes {
+                guard let schema = tableMap[record.tableName] else { continue }
+                try upsertRecord(db: db, record: record, schema: schema)
+            }
+            try applyDeletesInTransaction(db: db, deletes: deletes, tableMap: tableMap)
+
+            try SynchroMeta.setSyncLock(db, locked: false)
+        }
+    }
+
     func applyChanges(changes: [Record], syncedTables: [SchemaTable]) throws {
         guard !changes.isEmpty else { return }
         let tableMap = Dictionary(uniqueKeysWithValues: syncedTables.map { ($0.tableName, $0) })
@@ -33,24 +51,28 @@ final class PullProcessor: @unchecked Sendable {
             try SynchroMeta.setSyncLock(db, locked: true)
             defer { try? SynchroMeta.setSyncLock(db, locked: false) }
 
-            for entry in deletes {
-                guard let schema = tableMap[entry.tableName] else { continue }
-                let pkCol = schema.primaryKey.first ?? "id"
-                let quoted = SQLiteHelpers.quoteIdentifier(entry.tableName)
-                let quotedPK = SQLiteHelpers.quoteIdentifier(pkCol)
-                let quotedDeletedAt = SQLiteHelpers.quoteIdentifier(schema.deletedAtColumn)
-
-                try db.execute(
-                    sql: "UPDATE \(quoted) SET \(quotedDeletedAt) = \(SQLiteHelpers.timestampNow()) WHERE \(quotedPK) = ? AND \(quotedDeletedAt) IS NULL",
-                    arguments: [entry.id]
-                )
-            }
+            try applyDeletesInTransaction(db: db, deletes: deletes, tableMap: tableMap)
 
             try SynchroMeta.setSyncLock(db, locked: false)
         }
     }
 
-    func applyResyncPage(records: [Record], syncedTables: [SchemaTable]) throws {
+    private func applyDeletesInTransaction(db: GRDB.Database, deletes: [DeleteEntry], tableMap: [String: SchemaTable]) throws {
+        for entry in deletes {
+            guard let schema = tableMap[entry.tableName] else { continue }
+            let pkCol = schema.primaryKey.first ?? "id"
+            let quoted = SQLiteHelpers.quoteIdentifier(entry.tableName)
+            let quotedPK = SQLiteHelpers.quoteIdentifier(pkCol)
+            let quotedDeletedAt = SQLiteHelpers.quoteIdentifier(schema.deletedAtColumn)
+
+            try db.execute(
+                sql: "UPDATE \(quoted) SET \(quotedDeletedAt) = \(SQLiteHelpers.timestampNow()) WHERE \(quotedPK) = ? AND \(quotedDeletedAt) IS NULL",
+                arguments: [entry.id]
+            )
+        }
+    }
+
+    func applySnapshotPage(records: [Record], syncedTables: [SchemaTable]) throws {
         guard !records.isEmpty else { return }
         let tableMap = Dictionary(uniqueKeysWithValues: syncedTables.map { ($0.tableName, $0) })
 
@@ -158,4 +180,3 @@ final class PullProcessor: @unchecked Sendable {
         }
     }
 }
-
