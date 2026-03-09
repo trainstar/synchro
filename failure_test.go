@@ -13,7 +13,7 @@ import (
 )
 
 // TestFailure_PushHookRollback verifies that a failing OnPushAccepted hook
-// rolls back the entire transaction, leaving no records committed.
+// rolls back the entire transaction, leaving no orders committed.
 func TestFailure_PushHookRollback(t *testing.T) {
 	db := synctest.TestDB(t)
 	ctx := context.Background()
@@ -44,11 +44,13 @@ func TestFailure_PushHookRollback(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RegisterClient: %v", err)
 	}
+	snapshotClientReady(t, ctx, engine, userID, clientID, sv, sh)
+	snapshotClientReady(t, ctx, engine, userID, clientID, sv, sh)
 
-	itemID := "00000000-0000-0000-0000-f00000000001"
+	orderID := "00000000-0000-0000-0000-f00000000001"
 	pushReq := synctest.MakePushRequest(clientID, sv, sh,
-		synctest.MakePushRecord(itemID, "items", "create", map[string]any{
-			"name": "hook failure test",
+		synctest.MakePushRecord(orderID, "orders", "create", map[string]any{
+			"ship_address": "789 Pine Rd",
 		}),
 	)
 
@@ -60,9 +62,9 @@ func TestFailure_PushHookRollback(t *testing.T) {
 
 	// Verify no record was committed.
 	var count int
-	err = db.QueryRowContext(ctx, "SELECT COUNT(*) FROM items WHERE id = $1", itemID).Scan(&count)
+	err = db.QueryRowContext(ctx, "SELECT COUNT(*) FROM orders WHERE id = $1", orderID).Scan(&count)
 	if err != nil {
-		t.Fatalf("querying items: %v", err)
+		t.Fatalf("querying orders: %v", err)
 	}
 	if count != 0 {
 		t.Fatalf("expected 0 rows after hook failure rollback, got %d", count)
@@ -78,9 +80,9 @@ func TestFailure_PushHookRollback(t *testing.T) {
 		t.Fatalf("expected 1 accepted, got %d (rejected: %v)", len(pushResp.Accepted), pushResp.Rejected)
 	}
 
-	err = db.QueryRowContext(ctx, "SELECT COUNT(*) FROM items WHERE id = $1", itemID).Scan(&count)
+	err = db.QueryRowContext(ctx, "SELECT COUNT(*) FROM orders WHERE id = $1", orderID).Scan(&count)
 	if err != nil {
-		t.Fatalf("querying items after success: %v", err)
+		t.Fatalf("querying orders after success: %v", err)
 	}
 	if count != 1 {
 		t.Fatalf("expected 1 row after successful push, got %d", count)
@@ -111,18 +113,19 @@ func TestFailure_CheckpointResetIdempotentPull(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RegisterClient: %v", err)
 	}
+	snapshotClientReady(t, ctx, engine, userID, clientID, sv, sh)
 
 	// Push a record and simulate WAL changelog entry.
-	itemID := "00000000-0000-0000-0000-f00000000002"
+	orderID := "00000000-0000-0000-0000-f00000000002"
 	_, err = engine.Push(ctx, userID, synctest.MakePushRequest(clientID, sv, sh,
-		synctest.MakePushRecord(itemID, "items", "create", map[string]any{"name": "checkpoint test"}),
+		synctest.MakePushRecord(orderID, "orders", "create", map[string]any{"ship_address": "101 Maple Dr"}),
 	))
 	if err != nil {
 		t.Fatalf("Push: %v", err)
 	}
 	_, err = db.ExecContext(ctx,
 		"INSERT INTO sync_changelog (bucket_id, table_name, record_id, operation) VALUES ($1, $2, $3, $4)",
-		"user:"+userID, "items", itemID, 1)
+		"user:"+userID, "orders", orderID, 1)
 	if err != nil {
 		t.Fatalf("writing changelog: %v", err)
 	}
@@ -187,9 +190,9 @@ func TestFailure_ConcurrentPushesLWW(t *testing.T) {
 	}
 
 	// Create a record via push from client A.
-	itemID := "00000000-0000-0000-0000-f00000000003"
+	orderID := "00000000-0000-0000-0000-f00000000003"
 	_, err = engine.Push(ctx, userID, synctest.MakePushRequest(clientA, sv, sh,
-		synctest.MakePushRecord(itemID, "items", "create", map[string]any{"name": "original"}),
+		synctest.MakePushRecord(orderID, "orders", "create", map[string]any{"ship_address": "200 Cedar Ln"}),
 	))
 	if err != nil {
 		t.Fatalf("Push create: %v", err)
@@ -198,7 +201,7 @@ func TestFailure_ConcurrentPushesLWW(t *testing.T) {
 	// Insert changelog entry so both clients see the record.
 	_, err = db.ExecContext(ctx,
 		"INSERT INTO sync_changelog (bucket_id, table_name, record_id, operation) VALUES ($1, $2, $3, $4)",
-		"user:"+userID, "items", itemID, 1)
+		"user:"+userID, "orders", orderID, 1)
 	if err != nil {
 		t.Fatalf("writing changelog: %v", err)
 	}
@@ -216,13 +219,13 @@ func TestFailure_ConcurrentPushesLWW(t *testing.T) {
 	wg.Add(2)
 	go func() {
 		defer wg.Done()
-		rec := synctest.MakePushRecord(itemID, "items", "update", map[string]any{"name": "from A"})
+		rec := synctest.MakePushRecord(orderID, "orders", "update", map[string]any{"ship_address": "300 Birch Way"})
 		rec.ClientUpdatedAt = olderTime
 		_, errA = engine.Push(ctx, userID, synctest.MakePushRequest(clientA, sv, sh, rec))
 	}()
 	go func() {
 		defer wg.Done()
-		rec := synctest.MakePushRecord(itemID, "items", "update", map[string]any{"name": "from B"})
+		rec := synctest.MakePushRecord(orderID, "orders", "update", map[string]any{"ship_address": "400 Spruce Ct"})
 		rec.ClientUpdatedAt = newerTime
 		_, errB = engine.Push(ctx, userID, synctest.MakePushRequest(clientB, sv, sh, rec))
 	}()
@@ -237,13 +240,13 @@ func TestFailure_ConcurrentPushesLWW(t *testing.T) {
 	}
 
 	// Query DB: exactly one final version, newer timestamp wins (LWW determinism).
-	var name string
-	err = db.QueryRowContext(ctx, "SELECT name FROM items WHERE id = $1", itemID).Scan(&name)
+	var shipAddr string
+	err = db.QueryRowContext(ctx, "SELECT ship_address FROM orders WHERE id = $1", orderID).Scan(&shipAddr)
 	if err != nil {
 		t.Fatalf("querying final record: %v", err)
 	}
-	if name != "from B" {
-		t.Fatalf("expected newer timestamp winner %q, got %q", "from B", name)
+	if shipAddr != "400 Spruce Ct" {
+		t.Fatalf("expected newer timestamp winner %q, got %q", "400 Spruce Ct", shipAddr)
 	}
 }
 
@@ -270,44 +273,45 @@ func TestFailure_ChangelogOrderAndDedup(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RegisterClient: %v", err)
 	}
+	snapshotClientReady(t, ctx, engine, userID, clientID, sv, sh)
 
 	// Create records across different tables so they exist for pull hydration.
-	itemA := "00000000-0000-0000-0000-f00000000004"
-	tagB := "00000000-0000-0000-0000-f00000000005"
+	orderA := "00000000-0000-0000-0000-f00000000004"
+	catB := "00000000-0000-0000-0000-f00000000005"
 
 	_, err = engine.Push(ctx, userID, synctest.MakePushRequest(clientID, sv, sh,
-		synctest.MakePushRecord(itemA, "items", "create", map[string]any{"name": "item A"}),
+		synctest.MakePushRecord(orderA, "orders", "create", map[string]any{"ship_address": "500 Walnut Blvd"}),
 	))
 	if err != nil {
-		t.Fatalf("Push create itemA: %v", err)
+		t.Fatalf("Push create orderA: %v", err)
 	}
 	_, err = engine.Push(ctx, userID, synctest.MakePushRequest(clientID, sv, sh,
-		synctest.MakePushRecord(tagB, "tags", "create", map[string]any{"name": "tag B"}),
+		synctest.MakePushRecord(catB, "categories", "create", map[string]any{"name": "Category B"}),
 	))
 	if err != nil {
-		t.Fatalf("Push create tagB: %v", err)
+		t.Fatalf("Push create catB: %v", err)
 	}
 
-	// Soft-delete itemA so the DELETE changelog entry resolves correctly.
+	// Soft-delete orderA so the DELETE changelog entry resolves correctly.
 	_, err = engine.Push(ctx, userID, synctest.MakePushRequest(clientID, sv, sh,
-		synctest.MakePushRecord(itemA, "items", "delete", nil),
+		synctest.MakePushRecord(orderA, "orders", "delete", nil),
 	))
 	if err != nil {
-		t.Fatalf("Push delete itemA: %v", err)
+		t.Fatalf("Push delete orderA: %v", err)
 	}
 
 	// Insert interleaved changelog entries across different tables,
-	// with multiple entries for the same record (itemA):
-	//   tags/tagB create, items/itemA update, items/itemA delete.
+	// with multiple entries for the same record (orderA):
+	//   categories/catB create, orders/orderA update, orders/orderA delete.
 	// Dedup: two entries for same record (UPDATE at seq=N+1, DELETE at seq=N+2) → pull returns only DELETE.
 	for _, entry := range []struct {
 		table string
 		id    string
 		op    int
 	}{
-		{"tags", tagB, 1},   // create
-		{"items", itemA, 2}, // update
-		{"items", itemA, 3}, // delete — dedup should keep only this for itemA
+		{"categories", catB, 1},   // create
+		{"orders", orderA, 2}, // update
+		{"orders", orderA, 3}, // delete — dedup should keep only this for orderA
 	} {
 		_, err = db.ExecContext(ctx,
 			"INSERT INTO sync_changelog (bucket_id, table_name, record_id, operation) VALUES ($1, $2, $3, $4)",
@@ -323,18 +327,18 @@ func TestFailure_ChangelogOrderAndDedup(t *testing.T) {
 	}
 
 	// Verify results in seq order.
-	// Dedup: tagB's create → Changes, itemA's UPDATE+DELETE deduped to DELETE → Deletes.
+	// Dedup: catB's create → Changes, orderA's UPDATE+DELETE deduped to DELETE → Deletes.
 	if len(pullResp.Changes) != 1 {
-		t.Fatalf("expected 1 change (tagB), got %d", len(pullResp.Changes))
+		t.Fatalf("expected 1 change (catB), got %d", len(pullResp.Changes))
 	}
-	if pullResp.Changes[0].ID != tagB {
-		t.Fatalf("expected change for tagB, got %q", pullResp.Changes[0].ID)
+	if pullResp.Changes[0].ID != catB {
+		t.Fatalf("expected change for catB, got %q", pullResp.Changes[0].ID)
 	}
 	if len(pullResp.Deletes) != 1 {
-		t.Fatalf("expected 1 delete (itemA deduped), got %d", len(pullResp.Deletes))
+		t.Fatalf("expected 1 delete (orderA deduped), got %d", len(pullResp.Deletes))
 	}
-	if pullResp.Deletes[0].ID != itemA {
-		t.Fatalf("expected delete for itemA, got %q", pullResp.Deletes[0].ID)
+	if pullResp.Deletes[0].ID != orderA {
+		t.Fatalf("expected delete for orderA, got %q", pullResp.Deletes[0].ID)
 	}
 }
 
@@ -364,9 +368,9 @@ func TestFailure_ClockSkewIntegration(t *testing.T) {
 	}
 
 	// Create a record.
-	itemID := "00000000-0000-0000-0000-f00000000006"
+	orderID := "00000000-0000-0000-0000-f00000000006"
 	createResp, err := engine.Push(ctx, userID, synctest.MakePushRequest(clientID, sv, sh,
-		synctest.MakePushRecord(itemID, "items", "create", map[string]any{"name": "skew test"}),
+		synctest.MakePushRecord(orderID, "orders", "create", map[string]any{"ship_address": "700 Oak Rd"}),
 	))
 	if err != nil {
 		t.Fatalf("Push create: %v", err)
@@ -378,7 +382,7 @@ func TestFailure_ClockSkewIntegration(t *testing.T) {
 
 	// Update with client timestamp 5s behind server — server should win
 	// because 5s > 1s tolerance.
-	rec1 := synctest.MakePushRecord(itemID, "items", "update", map[string]any{"name": "stale update"})
+	rec1 := synctest.MakePushRecord(orderID, "orders", "update", map[string]any{"ship_address": "701 Stale Way"})
 	rec1.ClientUpdatedAt = serverTime.Add(-5 * time.Second)
 	resp1, err := engine.Push(ctx, userID, synctest.MakePushRequest(clientID, sv, sh, rec1))
 	if err != nil {
@@ -391,7 +395,7 @@ func TestFailure_ClockSkewIntegration(t *testing.T) {
 
 	// Update with client timestamp 500ms behind server — client should win
 	// because tolerance (1s) compensates for the 500ms gap.
-	rec2 := synctest.MakePushRecord(itemID, "items", "update", map[string]any{"name": "close update"})
+	rec2 := synctest.MakePushRecord(orderID, "orders", "update", map[string]any{"ship_address": "702 Close St"})
 	rec2.ClientUpdatedAt = serverTime.Add(-500 * time.Millisecond)
 	resp2, err := engine.Push(ctx, userID, synctest.MakePushRequest(clientID, sv, sh, rec2))
 	if err != nil {
@@ -403,13 +407,13 @@ func TestFailure_ClockSkewIntegration(t *testing.T) {
 	}
 
 	// Verify final state.
-	var name string
-	err = db.QueryRowContext(ctx, "SELECT name FROM items WHERE id = $1", itemID).Scan(&name)
+	var shipAddr string
+	err = db.QueryRowContext(ctx, "SELECT ship_address FROM orders WHERE id = $1", orderID).Scan(&shipAddr)
 	if err != nil {
 		t.Fatalf("querying final record: %v", err)
 	}
-	if name != "close update" {
-		t.Fatalf("expected name %q, got %q", "close update", name)
+	if shipAddr != "702 Close St" {
+		t.Fatalf("expected ship_address %q, got %q", "702 Close St", shipAddr)
 	}
 }
 
@@ -447,14 +451,14 @@ func TestFailure_PartialPushWithHookFailure(t *testing.T) {
 		t.Fatalf("RegisterClient: %v", err)
 	}
 
-	// Push 3 records: 2 valid creates to "items" + 1 to read-only "categories".
-	itemID1 := "00000000-0000-0000-0000-f00000000007"
-	itemID2 := "00000000-0000-0000-0000-f00000000008"
-	catID := "00000000-0000-0000-0000-f00000000009"
+	// Push 3 records: 2 valid creates to "orders" + 1 to read-only "products".
+	orderID1 := "00000000-0000-0000-0000-f00000000007"
+	orderID2 := "00000000-0000-0000-0000-f00000000008"
+	prodID := "00000000-0000-0000-0000-f00000000009"
 	pushReq := synctest.MakePushRequest(clientID, sv, sh,
-		synctest.MakePushRecord(itemID1, "items", "create", map[string]any{"name": "item 1"}),
-		synctest.MakePushRecord(itemID2, "items", "create", map[string]any{"name": "item 2"}),
-		synctest.MakePushRecord(catID, "categories", "create", map[string]any{"name": "cat 1"}),
+		synctest.MakePushRecord(orderID1, "orders", "create", map[string]any{"ship_address": "601 First Ave"}),
+		synctest.MakePushRecord(orderID2, "orders", "create", map[string]any{"ship_address": "602 Second Ave"}),
+		synctest.MakePushRecord(prodID, "products", "create", map[string]any{"name": "Test Product"}),
 	)
 
 	// Hook fires for 2 accepted records and fails.
@@ -463,12 +467,12 @@ func TestFailure_PartialPushWithHookFailure(t *testing.T) {
 		t.Fatal("expected Push to fail when hook returns error")
 	}
 
-	// Verify 0 rows in items (full rollback).
+	// Verify 0 rows in orders (full rollback).
 	var count int
 	err = db.QueryRowContext(ctx,
-		"SELECT COUNT(*) FROM items WHERE id IN ($1, $2)", itemID1, itemID2).Scan(&count)
+		"SELECT COUNT(*) FROM orders WHERE id IN ($1, $2)", orderID1, orderID2).Scan(&count)
 	if err != nil {
-		t.Fatalf("querying items: %v", err)
+		t.Fatalf("querying orders: %v", err)
 	}
 	if count != 0 {
 		t.Fatalf("expected 0 rows after hook failure, got %d", count)
@@ -477,8 +481,8 @@ func TestFailure_PartialPushWithHookFailure(t *testing.T) {
 	// Remove failing hook, push valid records only.
 	hookShouldFail = false
 	pushReq2 := synctest.MakePushRequest(clientID, sv, sh,
-		synctest.MakePushRecord(itemID1, "items", "create", map[string]any{"name": "item 1"}),
-		synctest.MakePushRecord(itemID2, "items", "create", map[string]any{"name": "item 2"}),
+		synctest.MakePushRecord(orderID1, "orders", "create", map[string]any{"ship_address": "601 First Ave"}),
+		synctest.MakePushRecord(orderID2, "orders", "create", map[string]any{"ship_address": "602 Second Ave"}),
 	)
 	pushResp, err := engine.Push(ctx, userID, pushReq2)
 	if err != nil {
@@ -489,9 +493,9 @@ func TestFailure_PartialPushWithHookFailure(t *testing.T) {
 	}
 
 	err = db.QueryRowContext(ctx,
-		"SELECT COUNT(*) FROM items WHERE id IN ($1, $2)", itemID1, itemID2).Scan(&count)
+		"SELECT COUNT(*) FROM orders WHERE id IN ($1, $2)", orderID1, orderID2).Scan(&count)
 	if err != nil {
-		t.Fatalf("querying items after success: %v", err)
+		t.Fatalf("querying orders after success: %v", err)
 	}
 	if count != 2 {
 		t.Fatalf("expected 2 rows after successful push, got %d", count)

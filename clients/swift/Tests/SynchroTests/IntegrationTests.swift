@@ -142,12 +142,35 @@ final class IntegrationTests: XCTestCase {
         ))
     }
 
-    private func pushItem(
+    private func bootstrapSnapshot(
         http: HttpClient,
         clientID: String,
-        itemID: String,
+        schemaVersion: Int64,
+        schemaHash: String
+    ) async throws {
+        var cursor: SnapshotCursor?
+
+        while true {
+            let resp = try await http.snapshot(request: SnapshotRequest(
+                clientID: clientID,
+                cursor: cursor,
+                limit: 100,
+                schemaVersion: schemaVersion,
+                schemaHash: schemaHash
+            ))
+            if !resp.hasMore {
+                return
+            }
+            cursor = resp.cursor
+        }
+    }
+
+    private func pushOrder(
+        http: HttpClient,
+        clientID: String,
+        orderID: String,
         userID: String,
-        name: String,
+        shipAddress: String,
         schemaVersion: Int64,
         schemaHash: String,
         clientUpdatedAt: Date = Date()
@@ -156,14 +179,13 @@ final class IntegrationTests: XCTestCase {
             clientID: clientID,
             changes: [
                 PushRecord(
-                    id: itemID,
-                    tableName: "items",
+                    id: orderID,
+                    tableName: "orders",
                     operation: "create",
                     data: [
-                        "id": AnyCodable(itemID),
+                        "id": AnyCodable(orderID),
                         "user_id": AnyCodable(userID),
-                        "name": AnyCodable(name),
-                        "description": AnyCodable("integration test"),
+                        "ship_address": AnyCodable(shipAddress),
                     ],
                     clientUpdatedAt: clientUpdatedAt,
                     baseUpdatedAt: nil
@@ -183,12 +205,18 @@ final class IntegrationTests: XCTestCase {
         let (http, clientID) = makeHttpClient(userID: userID)
 
         let reg = try await register(http: http, clientID: clientID)
+        try await bootstrapSnapshot(
+            http: http,
+            clientID: clientID,
+            schemaVersion: reg.schemaVersion,
+            schemaHash: reg.schemaHash
+        )
 
         // Push a record
-        let itemID = UUID().uuidString.lowercased()
-        let pushResp = try await pushItem(
-            http: http, clientID: clientID, itemID: itemID, userID: userID,
-            name: "Round Trip Item",
+        let orderID = UUID().uuidString.lowercased()
+        let pushResp = try await pushOrder(
+            http: http, clientID: clientID, orderID: orderID, userID: userID,
+            shipAddress: "123 Main St",
             schemaVersion: reg.schemaVersion, schemaHash: reg.schemaHash
         )
         XCTAssertEqual(pushResp.accepted.count, 1)
@@ -198,16 +226,16 @@ final class IntegrationTests: XCTestCase {
         let pullResp = try await pollForRecord(
             http: http, clientID: clientID, checkpoint: 0,
             schemaVersion: reg.schemaVersion, schemaHash: reg.schemaHash,
-            recordID: itemID
+            recordID: orderID
         )
 
-        let found = pullResp.changes.first(where: { $0.id == itemID })
-        XCTAssertNotNil(found, "pushed item should appear in pull response")
-        XCTAssertEqual(found?.tableName, "items")
+        let found = pullResp.changes.first(where: { $0.id == orderID })
+        XCTAssertNotNil(found, "pushed order should appear in pull response")
+        XCTAssertEqual(found?.tableName, "orders")
 
         // Verify the data content
-        let name = found?.data["name"]
-        XCTAssertNotNil(name, "pulled record should contain 'name' field")
+        let shipAddress = found?.data["ship_address"]
+        XCTAssertNotNil(shipAddress, "pulled record should contain 'ship_address' field")
     }
 
     // MARK: - Test 2: Pull Checkpoint Advancement
@@ -219,15 +247,21 @@ final class IntegrationTests: XCTestCase {
         let (http, clientID) = makeHttpClient(userID: userID)
 
         let reg = try await register(http: http, clientID: clientID)
+        try await bootstrapSnapshot(
+            http: http,
+            clientID: clientID,
+            schemaVersion: reg.schemaVersion,
+            schemaHash: reg.schemaHash
+        )
 
         // Push 3 records
-        var itemIDs: [String] = []
+        var orderIDs: [String] = []
         for i in 0..<3 {
-            let itemID = UUID().uuidString.lowercased()
-            itemIDs.append(itemID)
-            let resp = try await pushItem(
-                http: http, clientID: clientID, itemID: itemID, userID: userID,
-                name: "Checkpoint Item \(i)",
+            let orderID = UUID().uuidString.lowercased()
+            orderIDs.append(orderID)
+            let resp = try await pushOrder(
+                http: http, clientID: clientID, orderID: orderID, userID: userID,
+                shipAddress: "Checkpoint Address \(i)",
                 schemaVersion: reg.schemaVersion, schemaHash: reg.schemaHash
             )
             XCTAssertEqual(resp.accepted.count, 1)
@@ -237,7 +271,7 @@ final class IntegrationTests: XCTestCase {
         _ = try await pollForRecord(
             http: http, clientID: clientID, checkpoint: 0,
             schemaVersion: reg.schemaVersion, schemaHash: reg.schemaHash,
-            recordID: itemIDs.last!
+            recordID: orderIDs.last!
         )
 
         // Now pull with limit=1 repeatedly and verify checkpoint advances
@@ -268,10 +302,10 @@ final class IntegrationTests: XCTestCase {
             if !pullResp.hasMore { break }
         } while iterations < 20 // Safety limit
 
-        // All 3 items should have been pulled
-        for itemID in itemIDs {
-            XCTAssertTrue(allPulledIDs.contains(where: { $0 == itemID }),
-                "item \(itemID) should appear in paginated pull")
+        // All 3 orders should have been pulled
+        for orderID in orderIDs {
+            XCTAssertTrue(allPulledIDs.contains(where: { $0 == orderID }),
+                "order \(orderID) should appear in paginated pull")
         }
     }
 
@@ -284,12 +318,18 @@ final class IntegrationTests: XCTestCase {
         let (http, clientID) = makeHttpClient(userID: userID)
 
         let reg = try await register(http: http, clientID: clientID)
+        try await bootstrapSnapshot(
+            http: http,
+            clientID: clientID,
+            schemaVersion: reg.schemaVersion,
+            schemaHash: reg.schemaHash
+        )
 
         // Push a create
-        let itemID = UUID().uuidString.lowercased()
-        let createResp = try await pushItem(
-            http: http, clientID: clientID, itemID: itemID, userID: userID,
-            name: "Conflict Test Item",
+        let orderID = UUID().uuidString.lowercased()
+        let createResp = try await pushOrder(
+            http: http, clientID: clientID, orderID: orderID, userID: userID,
+            shipAddress: "456 Conflict Ave",
             schemaVersion: reg.schemaVersion, schemaHash: reg.schemaHash
         )
         XCTAssertEqual(createResp.accepted.count, 1)
@@ -303,14 +343,13 @@ final class IntegrationTests: XCTestCase {
             clientID: clientID,
             changes: [
                 PushRecord(
-                    id: itemID,
-                    tableName: "items",
+                    id: orderID,
+                    tableName: "orders",
                     operation: "update",
                     data: [
-                        "id": AnyCodable(itemID),
+                        "id": AnyCodable(orderID),
                         "user_id": AnyCodable(userID),
-                        "name": AnyCodable("Conflicting Update"),
-                        "description": AnyCodable("should lose"),
+                        "ship_address": AnyCodable("789 Conflict Blvd"),
                     ],
                     clientUpdatedAt: ancientDate,
                     baseUpdatedAt: ancientDate
@@ -323,7 +362,7 @@ final class IntegrationTests: XCTestCase {
         // Server wins — update should be in rejected with status "conflict"
         XCTAssertEqual(conflictResp.rejected.count, 1, "conflicting update should be rejected")
         XCTAssertEqual(conflictResp.rejected.first?.status, "conflict")
-        XCTAssertEqual(conflictResp.rejected.first?.id, itemID)
+        XCTAssertEqual(conflictResp.rejected.first?.id, orderID)
 
         // Server version should be returned so client can reconcile
         XCTAssertNotNil(conflictResp.rejected.first?.serverVersion,
@@ -339,12 +378,18 @@ final class IntegrationTests: XCTestCase {
         let (http, clientID) = makeHttpClient(userID: userID)
 
         let reg = try await register(http: http, clientID: clientID)
+        try await bootstrapSnapshot(
+            http: http,
+            clientID: clientID,
+            schemaVersion: reg.schemaVersion,
+            schemaHash: reg.schemaHash
+        )
 
         // Create a record
-        let itemID = UUID().uuidString.lowercased()
-        let createResp = try await pushItem(
-            http: http, clientID: clientID, itemID: itemID, userID: userID,
-            name: "Deletable Item",
+        let orderID = UUID().uuidString.lowercased()
+        let createResp = try await pushOrder(
+            http: http, clientID: clientID, orderID: orderID, userID: userID,
+            shipAddress: "999 Deletable Ln",
             schemaVersion: reg.schemaVersion, schemaHash: reg.schemaHash
         )
         XCTAssertEqual(createResp.accepted.count, 1)
@@ -353,7 +398,7 @@ final class IntegrationTests: XCTestCase {
         let pullAfterCreate = try await pollForRecord(
             http: http, clientID: clientID, checkpoint: 0,
             schemaVersion: reg.schemaVersion, schemaHash: reg.schemaHash,
-            recordID: itemID
+            recordID: orderID
         )
         let checkpointAfterCreate = pullAfterCreate.checkpoint
 
@@ -362,11 +407,11 @@ final class IntegrationTests: XCTestCase {
             clientID: clientID,
             changes: [
                 PushRecord(
-                    id: itemID,
-                    tableName: "items",
+                    id: orderID,
+                    tableName: "orders",
                     operation: "delete",
                     data: [
-                        "id": AnyCodable(itemID),
+                        "id": AnyCodable(orderID),
                         "user_id": AnyCodable(userID),
                     ],
                     clientUpdatedAt: Date(),
@@ -399,13 +444,13 @@ final class IntegrationTests: XCTestCase {
             ))
 
             // Check deletes list
-            if pullResp.deletes.contains(where: { $0.id == itemID }) {
+            if pullResp.deletes.contains(where: { $0.id == orderID }) {
                 foundDelete = true
                 break
             }
 
             // Check if it appears as a change with deleted_at set
-            if let record = pullResp.changes.first(where: { $0.id == itemID }),
+            if let record = pullResp.changes.first(where: { $0.id == orderID }),
                record.deletedAt != nil {
                 foundDelete = true
                 break
@@ -523,7 +568,7 @@ final class IntegrationTests: XCTestCase {
 
         // Cleanup: drop the drift column even if test fails
         addTeardownBlock { [self] in
-            try? runSQL("ALTER TABLE items DROP COLUMN IF EXISTS _drift")
+            try? runSQL("ALTER TABLE orders DROP COLUMN IF EXISTS _drift")
         }
 
         let userID = UUID().uuidString.lowercased()
@@ -536,14 +581,14 @@ final class IntegrationTests: XCTestCase {
 
         // Alter the DB schema — this changes the pg_catalog metadata that the
         // schema hash is computed from, without any server code change
-        try runSQL("ALTER TABLE items ADD COLUMN _drift TEXT")
+        try runSQL("ALTER TABLE orders ADD COLUMN _drift TEXT")
 
         // Push with the stale schema should get 409 schemaMismatch
-        let itemID = UUID().uuidString.lowercased()
+        let orderID = UUID().uuidString.lowercased()
         do {
-            _ = try await pushItem(
-                http: http, clientID: clientID, itemID: itemID, userID: userID,
-                name: "Should Be Rejected",
+            _ = try await pushOrder(
+                http: http, clientID: clientID, orderID: orderID, userID: userID,
+                shipAddress: "Should Be Rejected",
                 schemaVersion: oldVersion, schemaHash: oldHash
             )
             XCTFail("expected schemaMismatch error after schema drift")
@@ -572,53 +617,65 @@ final class IntegrationTests: XCTestCase {
 
         let regA = try await register(http: httpA, clientID: clientA)
         let regB = try await register(http: httpB, clientID: clientB)
+        try await bootstrapSnapshot(
+            http: httpA,
+            clientID: clientA,
+            schemaVersion: regA.schemaVersion,
+            schemaHash: regA.schemaHash
+        )
+        try await bootstrapSnapshot(
+            http: httpB,
+            clientID: clientB,
+            schemaVersion: regB.schemaVersion,
+            schemaHash: regB.schemaHash
+        )
 
         // User A pushes
-        let itemA = UUID().uuidString.lowercased()
-        let pushA = try await pushItem(
-            http: httpA, clientID: clientA, itemID: itemA, userID: userA,
-            name: "User A Private Item",
+        let orderA = UUID().uuidString.lowercased()
+        let pushA = try await pushOrder(
+            http: httpA, clientID: clientA, orderID: orderA, userID: userA,
+            shipAddress: "User A Private Address",
             schemaVersion: regA.schemaVersion, schemaHash: regA.schemaHash
         )
         XCTAssertEqual(pushA.accepted.count, 1)
 
         // User B pushes
-        let itemB = UUID().uuidString.lowercased()
-        let pushB = try await pushItem(
-            http: httpB, clientID: clientB, itemID: itemB, userID: userB,
-            name: "User B Private Item",
+        let orderB = UUID().uuidString.lowercased()
+        let pushB = try await pushOrder(
+            http: httpB, clientID: clientB, orderID: orderB, userID: userB,
+            shipAddress: "User B Private Address",
             schemaVersion: regB.schemaVersion, schemaHash: regB.schemaHash
         )
         XCTAssertEqual(pushB.accepted.count, 1)
 
-        // Wait for User B's item to appear in User B's pull (proves WAL processed it)
+        // Wait for User B's order to appear in User B's pull (proves WAL processed it)
         let pullB = try await pollForRecord(
             http: httpB, clientID: clientB, checkpoint: 0,
             schemaVersion: regB.schemaVersion, schemaHash: regB.schemaHash,
-            recordID: itemB
+            recordID: orderB
         )
 
-        // User B should see their own item
-        XCTAssertTrue(pullB.changes.contains(where: { $0.id == itemB }),
-            "User B should see their own item")
+        // User B should see their own order
+        XCTAssertTrue(pullB.changes.contains(where: { $0.id == orderB }),
+            "User B should see their own order")
 
-        // User B should NOT see User A's item — bucket isolation
-        XCTAssertFalse(pullB.changes.contains(where: { $0.id == itemA }),
-            "User B must not see User A's item (bucket isolation)")
+        // User B should NOT see User A's order — bucket isolation
+        XCTAssertFalse(pullB.changes.contains(where: { $0.id == orderA }),
+            "User B must not see User A's order (bucket isolation)")
 
-        // Wait for User A's item to appear in User A's pull
+        // Wait for User A's order to appear in User A's pull
         let pullA = try await pollForRecord(
             http: httpA, clientID: clientA, checkpoint: 0,
             schemaVersion: regA.schemaVersion, schemaHash: regA.schemaHash,
-            recordID: itemA
+            recordID: orderA
         )
 
-        // User A should see their own item
-        XCTAssertTrue(pullA.changes.contains(where: { $0.id == itemA }),
-            "User A should see their own item")
+        // User A should see their own order
+        XCTAssertTrue(pullA.changes.contains(where: { $0.id == orderA }),
+            "User A should see their own order")
 
-        // User A should NOT see User B's item
-        XCTAssertFalse(pullA.changes.contains(where: { $0.id == itemB }),
-            "User A must not see User B's item (bucket isolation)")
+        // User A should NOT see User B's order
+        XCTAssertFalse(pullA.changes.contains(where: { $0.id == orderB }),
+            "User A must not see User B's order (bucket isolation)")
     }
 }

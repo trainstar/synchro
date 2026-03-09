@@ -165,12 +165,13 @@ hooks := synchro.Hooks{
             "deleted", result.DeletedEntries)
     },
 
-    // Called when a client's checkpoint is behind the compaction boundary.
-    OnResyncRequired: func(ctx context.Context, clientID string, checkpoint, minSeq int64) {
-        slog.WarnContext(ctx, "client requires resync",
+    // Called when a client must rebuild from a full snapshot.
+    OnSnapshotRequired: func(ctx context.Context, clientID string, checkpoint, minSeq int64, reason string) {
+        slog.WarnContext(ctx, "client requires snapshot rebuild",
             "client_id", clientID,
             "checkpoint", checkpoint,
-            "min_seq", minSeq)
+            "min_seq", minSeq,
+            "reason", reason)
     },
 }
 ```
@@ -295,7 +296,7 @@ mux := http.NewServeMux()
 mux.HandleFunc("POST /sync/register", h.ServeRegister)
 mux.HandleFunc("POST /sync/pull", h.ServePull)
 mux.HandleFunc("POST /sync/push", h.ServePush)
-mux.HandleFunc("POST /sync/resync", h.ServeResync)
+mux.HandleFunc("POST /sync/snapshot", h.ServeSnapshot)
 mux.HandleFunc("GET /sync/tables", h.ServeTableMeta)
 mux.HandleFunc("GET /sync/schema", h.ServeSchema)
 ```
@@ -311,7 +312,7 @@ g := e.Group("/sync")
 g.POST("/register", echo.WrapHandler(http.HandlerFunc(h.ServeRegister)))
 g.POST("/pull", echo.WrapHandler(http.HandlerFunc(h.ServePull)))
 g.POST("/push", echo.WrapHandler(http.HandlerFunc(h.ServePush)))
-g.POST("/resync", echo.WrapHandler(http.HandlerFunc(h.ServeResync)))
+g.POST("/snapshot", echo.WrapHandler(http.HandlerFunc(h.ServeSnapshot)))
 g.GET("/tables", echo.WrapHandler(http.HandlerFunc(h.ServeTableMeta)))
 g.GET("/schema", echo.WrapHandler(http.HandlerFunc(h.ServeSchema)))
 ```
@@ -339,7 +340,7 @@ r.Route("/sync", func(r chi.Router) {
     r.Post("/register", h.ServeRegister)
     r.Post("/pull", h.ServePull)
     r.Post("/push", h.ServePush)
-    r.Post("/resync", h.ServeResync)
+    r.Post("/snapshot", h.ServeSnapshot)
     r.Get("/tables", h.ServeTableMeta)
     r.Get("/schema", h.ServeSchema)
 })

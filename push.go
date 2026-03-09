@@ -26,14 +26,14 @@ func (p *pushProcessor) processPush(ctx context.Context, tx DB, userID string, r
 	if cfg == nil {
 		return &PushResult{
 			ID: record.ID, TableName: record.TableName, Operation: record.Operation,
-			Status: PushStatusError, Reason: "table not registered for sync",
+			Status: PushStatusRejectedTerminal, ReasonCode: "table_not_registered", Message: "table not registered for sync",
 		}, nil
 	}
 
 	if !p.registry.IsPushable(record.TableName) {
 		return &PushResult{
 			ID: record.ID, TableName: record.TableName, Operation: record.Operation,
-			Status: PushStatusError, Reason: "table is read-only",
+			Status: PushStatusRejectedTerminal, ReasonCode: "table_read_only", Message: "table is read-only",
 		}, nil
 	}
 
@@ -41,7 +41,7 @@ func (p *pushProcessor) processPush(ctx context.Context, tx DB, userID string, r
 	if !ok {
 		return &PushResult{
 			ID: record.ID, TableName: record.TableName, Operation: record.Operation,
-			Status: PushStatusError, Reason: fmt.Sprintf("unknown operation: %s", record.Operation),
+			Status: PushStatusRejectedTerminal, ReasonCode: "invalid_operation", Message: fmt.Sprintf("unknown operation: %s", record.Operation),
 		}, nil
 	}
 
@@ -55,7 +55,7 @@ func (p *pushProcessor) processPush(ctx context.Context, tx DB, userID string, r
 	default:
 		return &PushResult{
 			ID: record.ID, TableName: record.TableName, Operation: record.Operation,
-			Status: PushStatusError, Reason: "unsupported operation",
+			Status: PushStatusRejectedTerminal, ReasonCode: "unsupported_operation", Message: "unsupported operation",
 		}, nil
 	}
 }
@@ -80,7 +80,7 @@ func (p *pushProcessor) pushCreate(ctx context.Context, tx DB, userID string, cf
 
 		return &PushResult{
 			ID: record.ID, TableName: record.TableName, Operation: record.Operation,
-			Status: PushStatusConflict, Reason: "record already exists",
+			Status: PushStatusConflict, ReasonCode: "record_exists", Message: "record already exists",
 			ServerVersion: serverVersion,
 		}, nil
 	}
@@ -90,7 +90,7 @@ func (p *pushProcessor) pushCreate(ctx context.Context, tx DB, userID string, cf
 	if err := json.Unmarshal(record.Data, &data); err != nil {
 		return &PushResult{
 			ID: record.ID, TableName: record.TableName, Operation: record.Operation,
-			Status: PushStatusError, Reason: "invalid data format",
+			Status: PushStatusRejectedTerminal, ReasonCode: "invalid_data", Message: "invalid data format",
 		}, nil
 	}
 
@@ -107,7 +107,7 @@ func (p *pushProcessor) pushCreate(ctx context.Context, tx DB, userID string, cf
 			"err", err, "table", record.TableName, "id", record.ID)
 		return &PushResult{
 			ID: record.ID, TableName: record.TableName, Operation: record.Operation,
-			Status: PushStatusError, Reason: "failed to create record",
+			Status: PushStatusRejectedRetryable, ReasonCode: "create_failed", Message: "failed to create record",
 		}, nil
 	}
 
@@ -128,7 +128,7 @@ func (p *pushProcessor) pushUpdate(ctx context.Context, tx DB, userID string, cf
 		if errors.Is(err, sql.ErrNoRows) {
 			return &PushResult{
 				ID: record.ID, TableName: record.TableName, Operation: record.Operation,
-				Status: PushStatusError, Reason: "record not found",
+				Status: PushStatusRejectedTerminal, ReasonCode: "record_not_found", Message: "record not found",
 			}, nil
 		}
 		return nil, fmt.Errorf("getting existing record: %w", err)
@@ -143,7 +143,7 @@ func (p *pushProcessor) pushUpdate(ctx context.Context, tx DB, userID string, cf
 		}
 		return &PushResult{
 			ID: record.ID, TableName: record.TableName, Operation: record.Operation,
-			Status: PushStatusConflict, Reason: "record is deleted",
+			Status: PushStatusConflict, ReasonCode: "record_deleted", Message: "record is deleted",
 			ServerVersion: serverVersion,
 		}, nil
 	}
@@ -178,7 +178,7 @@ func (p *pushProcessor) pushUpdate(ctx context.Context, tx DB, userID string, cf
 		}
 		return &PushResult{
 			ID: record.ID, TableName: record.TableName, Operation: record.Operation,
-			Status: PushStatusConflict, Reason: resolution.Reason,
+			Status: PushStatusConflict, ReasonCode: "server_won_conflict", Message: resolution.Reason,
 			ServerVersion: serverVersion,
 		}, nil
 	}
@@ -188,7 +188,7 @@ func (p *pushProcessor) pushUpdate(ctx context.Context, tx DB, userID string, cf
 	if err := json.Unmarshal(record.Data, &data); err != nil {
 		return &PushResult{
 			ID: record.ID, TableName: record.TableName, Operation: record.Operation,
-			Status: PushStatusError, Reason: "invalid data format",
+			Status: PushStatusRejectedTerminal, ReasonCode: "invalid_data", Message: "invalid data format",
 		}, nil
 	}
 
@@ -201,7 +201,7 @@ func (p *pushProcessor) pushUpdate(ctx context.Context, tx DB, userID string, cf
 			"err", err, "table", record.TableName, "id", record.ID)
 		return &PushResult{
 			ID: record.ID, TableName: record.TableName, Operation: record.Operation,
-			Status: PushStatusError, Reason: "failed to update record",
+			Status: PushStatusRejectedRetryable, ReasonCode: "update_failed", Message: "failed to update record",
 		}, nil
 	}
 
@@ -214,7 +214,7 @@ func (p *pushProcessor) pushUpdate(ctx context.Context, tx DB, userID string, cf
 				"err", err, "table", record.TableName, "id", record.ID)
 			return &PushResult{
 				ID: record.ID, TableName: record.TableName, Operation: record.Operation,
-				Status: PushStatusError, Reason: "failed to resurrect record",
+				Status: PushStatusRejectedRetryable, ReasonCode: "resurrection_failed", Message: "failed to resurrect record",
 			}, nil
 		}
 	}
@@ -233,7 +233,7 @@ func (p *pushProcessor) pushUpdate(ctx context.Context, tx DB, userID string, cf
 func (p *pushProcessor) pushDelete(ctx context.Context, tx DB, _ string, cfg *TableConfig, record *PushRecord) (*PushResult, error) {
 	notFoundResult := &PushResult{
 		ID: record.ID, TableName: record.TableName, Operation: record.Operation,
-		Status: PushStatusError, Reason: "record not found or not accessible",
+		Status: PushStatusRejectedTerminal, ReasonCode: "record_not_found", Message: "record not found or not accessible",
 	}
 
 	existing, err := getRecordByID(ctx, tx, cfg, record.ID)
@@ -248,7 +248,7 @@ func (p *pushProcessor) pushDelete(ctx context.Context, tx DB, _ string, cfg *Ta
 	if existing.DeletedAt != nil {
 		return &PushResult{
 			ID: record.ID, TableName: record.TableName, Operation: record.Operation,
-			Status: PushStatusApplied, Reason: "record already deleted",
+			Status: PushStatusApplied, ReasonCode: "already_deleted", Message: "record already deleted",
 		}, nil
 	}
 
@@ -263,7 +263,7 @@ func (p *pushProcessor) pushDelete(ctx context.Context, tx DB, _ string, cfg *Ta
 			"err", err, "table", record.TableName, "id", record.ID)
 		return &PushResult{
 			ID: record.ID, TableName: record.TableName, Operation: record.Operation,
-			Status: PushStatusError, Reason: "failed to delete record",
+			Status: PushStatusRejectedRetryable, ReasonCode: "delete_failed", Message: "failed to delete record",
 		}, nil
 	}
 

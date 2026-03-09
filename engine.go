@@ -193,25 +193,35 @@ func (e *Engine) Pull(ctx context.Context, userID string, req *PullRequest) (*Pu
 		}
 	}
 
-	// Check if client's checkpoint is behind the compaction boundary
-	if req.Checkpoint > 0 {
-		minSeq, err := e.changelog.MinSeq(ctx, e.db)
-		if err != nil {
-			return nil, fmt.Errorf("checking min seq: %w", err)
+	if req.Checkpoint == 0 && client.LastPullAt == nil {
+		return &PullResponse{
+			SnapshotRequired: true,
+			SnapshotReason:   SnapshotReasonInitialSyncRequired,
+			Changes:          []Record{},
+			Deletes:          []DeleteEntry{},
+			Checkpoint:       req.Checkpoint,
+			SchemaVersion:    manifest.Version,
+			SchemaHash:       manifest.Hash,
+		}, nil
+	}
+
+	minSeq, err := e.changelog.MinSeq(ctx, e.db)
+	if err != nil {
+		return nil, fmt.Errorf("checking min seq: %w", err)
+	}
+	if req.Checkpoint > 0 && minSeq > 0 && req.Checkpoint < minSeq {
+		if e.hooks.OnSnapshotRequired != nil {
+			e.hooks.OnSnapshotRequired(ctx, req.ClientID, req.Checkpoint, minSeq, SnapshotReasonCheckpointBeforeLimit)
 		}
-		if minSeq > 0 && req.Checkpoint < minSeq {
-			if e.hooks.OnResyncRequired != nil {
-				e.hooks.OnResyncRequired(ctx, req.ClientID, req.Checkpoint, minSeq)
-			}
-			return &PullResponse{
-				ResyncRequired: true,
-				Changes:        []Record{},
-				Deletes:        []DeleteEntry{},
-				Checkpoint:     req.Checkpoint,
-				SchemaVersion:  manifest.Version,
-				SchemaHash:     manifest.Hash,
-			}, nil
-		}
+		return &PullResponse{
+			SnapshotRequired: true,
+			SnapshotReason:   SnapshotReasonCheckpointBeforeLimit,
+			Changes:          []Record{},
+			Deletes:          []DeleteEntry{},
+			Checkpoint:       req.Checkpoint,
+			SchemaVersion:    manifest.Version,
+			SchemaHash:       manifest.Hash,
+		}, nil
 	}
 
 	// Get client's bucket subscriptions
@@ -309,7 +319,9 @@ func (e *Engine) Push(ctx context.Context, userID string, req *PushRequest) (*Pu
 				"err", err, "table", record.TableName, "id", record.ID)
 			rejected = append(rejected, PushResult{
 				ID: record.ID, TableName: record.TableName, Operation: record.Operation,
-				Status: PushStatusError, Reason: "internal error",
+				Status:     PushStatusRejectedRetryable,
+				ReasonCode: "internal_error",
+				Message:    "internal error",
 			})
 			continue
 		}
@@ -414,9 +426,8 @@ func (e *Engine) CurrentSchemaManifest(ctx context.Context) (int64, string, erro
 	return manifest.Version, manifest.Hash, nil
 }
 
-// Resync performs a full resync for a client whose checkpoint is behind the
-// compaction boundary. Returns paginated results using a stateless cursor.
-func (e *Engine) Resync(ctx context.Context, userID string, req *ResyncRequest) (*ResyncResponse, error) {
+// Snapshot performs a full snapshot for a client. Returns paginated results using a stateless cursor.
+func (e *Engine) Snapshot(ctx context.Context, userID string, req *SnapshotRequest) (*SnapshotResponse, error) {
 	manifest, err := e.schema.GetManifest(ctx, e.db, e.registry)
 	if err != nil {
 		return nil, err
@@ -433,35 +444,35 @@ func (e *Engine) Resync(ctx context.Context, userID string, req *ResyncRequest) 
 
 	tx, err := e.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
 	if err != nil {
-		return nil, fmt.Errorf("beginning resync transaction: %w", err)
+		return nil, fmt.Errorf("beginning snapshot transaction: %w", err)
 	}
 	defer tx.Rollback()
 
 	if err := SetAuthContext(ctx, tx, userID); err != nil {
-		return nil, fmt.Errorf("setting resync auth context: %w", err)
+		return nil, fmt.Errorf("setting snapshot auth context: %w", err)
 	}
 
-	resp, err := e.pull.processResync(ctx, tx, req.Cursor, req.Limit)
+	resp, err := e.pull.processSnapshot(ctx, tx, req.Cursor, req.Limit)
 	if err != nil {
 		return nil, err
 	}
 	if err := tx.Commit(); err != nil {
-		return nil, fmt.Errorf("committing resync transaction: %w", err)
+		return nil, fmt.Errorf("committing snapshot transaction: %w", err)
 	}
 	resp.SchemaVersion = manifest.Version
 	resp.SchemaHash = manifest.Hash
 
-	// When resync completes, advance client checkpoint and reactivate
-	if !resp.HasMore && resp.Checkpoint > 0 {
+	// When snapshot completes, advance client checkpoint and reactivate.
+	if !resp.HasMore {
 		if err := e.checkpoint.AdvanceCheckpoint(ctx, e.db, userID, req.ClientID, resp.Checkpoint); err != nil {
-			e.logger.WarnContext(ctx, "failed to advance resync checkpoint",
+			e.logger.WarnContext(ctx, "failed to advance snapshot checkpoint",
 				"err", err, "client_id", req.ClientID)
 		}
-		// Reactivate client (may have been deactivated by compactor)
+		// Reactivate client (may have been deactivated by compactor).
 		if _, err := e.db.ExecContext(ctx,
 			"UPDATE sync_clients SET is_active = true, updated_at = now() WHERE user_id = $1 AND client_id = $2",
 			userID, req.ClientID); err != nil {
-			e.logger.WarnContext(ctx, "failed to reactivate client after resync",
+			e.logger.WarnContext(ctx, "failed to reactivate client after snapshot",
 				"err", err, "client_id", req.ClientID)
 		}
 	}

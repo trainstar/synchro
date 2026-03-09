@@ -185,25 +185,25 @@ func deduplicateEntries(entries []ChangelogEntry) []recordRef {
 	return refs
 }
 
-// DefaultResyncLimit is the default number of records per resync page.
-const DefaultResyncLimit = 100
+// DefaultSnapshotLimit is the default number of records per snapshot page.
+const DefaultSnapshotLimit = 100
 
-// MaxResyncLimit is the maximum records per resync page.
-const MaxResyncLimit = 1000
+// MaxSnapshotLimit is the maximum records per snapshot page.
+const MaxSnapshotLimit = 1000
 
-// processResync returns one page of resync data, iterating tables in registration order.
+// processSnapshot returns one page of snapshot data, iterating tables in registration order.
 // The cursor tracks which table and which record ID the client has consumed up to.
-func (p *pullProcessor) processResync(ctx context.Context, db DB, cursor *ResyncCursor, limit int) (*ResyncResponse, error) {
+func (p *pullProcessor) processSnapshot(ctx context.Context, db DB, cursor *SnapshotCursor, limit int) (*SnapshotResponse, error) {
 	tables := p.registry.TableNames()
 	if len(tables) == 0 {
-		return &ResyncResponse{Records: []Record{}, HasMore: false}, nil
+		return &SnapshotResponse{Records: []Record{}, HasMore: false}, nil
 	}
 
 	if limit <= 0 {
-		limit = DefaultResyncLimit
+		limit = DefaultSnapshotLimit
 	}
-	if limit > MaxResyncLimit {
-		limit = MaxResyncLimit
+	if limit > MaxSnapshotLimit {
+		limit = MaxSnapshotLimit
 	}
 
 	tableIndex := 0
@@ -216,11 +216,11 @@ func (p *pullProcessor) processResync(ctx context.Context, db DB, cursor *Resync
 		checkpoint = cursor.Checkpoint
 	}
 
-	// On the first page, capture MAX(seq) as the checkpoint
+	// On the first page, capture MAX(seq) as the checkpoint.
 	if checkpoint == 0 {
 		err := db.QueryRowContext(ctx, "SELECT COALESCE(MAX(seq), 0) FROM sync_changelog").Scan(&checkpoint)
 		if err != nil {
-			return nil, fmt.Errorf("capturing resync checkpoint: %w", err)
+			return nil, fmt.Errorf("capturing snapshot checkpoint: %w", err)
 		}
 	}
 
@@ -236,9 +236,9 @@ func (p *pullProcessor) processResync(ctx context.Context, db DB, cursor *Resync
 		}
 
 		remaining := limit - len(records)
-		page, err := resyncPage(ctx, db, cfg, afterID, remaining)
+		page, err := snapshotPage(ctx, db, cfg, afterID, remaining)
 		if err != nil {
-			return nil, fmt.Errorf("resync page for %q: %w", tableName, err)
+			return nil, fmt.Errorf("snapshot page for %q: %w", tableName, err)
 		}
 
 		records = append(records, page...)
@@ -256,7 +256,7 @@ func (p *pullProcessor) processResync(ctx context.Context, db DB, cursor *Resync
 
 	hasMore := tableIndex < len(tables)
 
-	resp := &ResyncResponse{
+	resp := &SnapshotResponse{
 		Records:    records,
 		Checkpoint: checkpoint,
 		HasMore:    hasMore,
@@ -266,7 +266,7 @@ func (p *pullProcessor) processResync(ctx context.Context, db DB, cursor *Resync
 	}
 
 	if hasMore {
-		resp.Cursor = &ResyncCursor{
+		resp.Cursor = &SnapshotCursor{
 			Checkpoint: checkpoint,
 			TableIndex: tableIndex,
 			AfterID:    afterID,
@@ -276,7 +276,7 @@ func (p *pullProcessor) processResync(ctx context.Context, db DB, cursor *Resync
 	return resp, nil
 }
 
-// resyncPage fetches one page of records from a table for full resync.
+// snapshotPage fetches one page of records from a table for full snapshot.
 //
 // The WHERE clause uses id::text > $1 with ORDER BY id::text for cursor pagination.
 // Text-cast is used because Synchro is a generic library with no constraint on the
@@ -287,7 +287,7 @@ func (p *pullProcessor) processResync(ctx context.Context, db DB, cursor *Resync
 // This is acceptable because: (1) full resync is rare, only after compaction boundary;
 // (2) pages are bounded by LIMIT; (3) dominant cost is JSON serialization + network;
 // (4) consuming apps can add an expression index (CREATE INDEX ON t ((id::text))) if needed.
-func resyncPage(ctx context.Context, db DB, cfg *TableConfig, afterID string, limit int) ([]Record, error) {
+func snapshotPage(ctx context.Context, db DB, cfg *TableConfig, afterID string, limit int) ([]Record, error) {
 	var selectExpr string
 	if len(cfg.SyncColumns) > 0 {
 		selectExpr = fmt.Sprintf("json_build_object(%s)::text", buildJsonPairs(cfg.SyncColumns))
@@ -312,7 +312,7 @@ func resyncPage(ctx context.Context, db DB, cfg *TableConfig, afterID string, li
 
 	rows, err := db.QueryContext(ctx, query, afterID, limit)
 	if err != nil {
-		return nil, fmt.Errorf("querying resync page from %q: %w", cfg.TableName, err)
+		return nil, fmt.Errorf("querying snapshot page from %q: %w", cfg.TableName, err)
 	}
 	defer rows.Close()
 
@@ -321,7 +321,7 @@ func resyncPage(ctx context.Context, db DB, cfg *TableConfig, afterID string, li
 		var r Record
 		var dataStr string
 		if err := rows.Scan(&r.ID, &dataStr, &r.UpdatedAt); err != nil {
-			return nil, fmt.Errorf("scanning resync record from %q: %w", cfg.TableName, err)
+			return nil, fmt.Errorf("scanning snapshot record from %q: %w", cfg.TableName, err)
 		}
 		r.TableName = cfg.TableName
 		r.Data = json.RawMessage(dataStr)

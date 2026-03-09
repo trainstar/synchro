@@ -28,7 +28,7 @@ func TestHandler_Routes_MountsAllEndpoints(t *testing.T) {
 		{"/sync/register", http.MethodPost, http.StatusUnauthorized},
 		{"/sync/pull", http.MethodPost, http.StatusUnauthorized},
 		{"/sync/push", http.MethodPost, http.StatusUnauthorized},
-		{"/sync/resync", http.MethodPost, http.StatusUnauthorized},
+		{"/sync/snapshot", http.MethodPost, http.StatusUnauthorized},
 		// GET endpoints — engine is nil so these will panic/500, but
 		// wrong method should return 405, confirming the route exists
 		{"/sync/tables", http.MethodPost, http.StatusMethodNotAllowed},

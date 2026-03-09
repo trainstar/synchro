@@ -200,18 +200,33 @@ func TestHTTP_RegisterPushPullRoundTrip(t *testing.T) {
 	schemaVersion := int64(regBody["schema_version"].(float64))
 	schemaHash := regBody["schema_hash"].(string)
 
+	// Complete initial bootstrap before validating incremental pull semantics.
+	snapshotResp := doJSON(t, srv, http.MethodPost, "/sync/snapshot", userID, "1.0.0", map[string]any{
+		"client_id":      clientID,
+		"schema_version": schemaVersion,
+		"schema_hash":    schemaHash,
+		"limit":          100,
+	})
+	if snapshotResp.StatusCode != http.StatusOK {
+		var body map[string]any
+		json.NewDecoder(snapshotResp.Body).Decode(&body)
+		snapshotResp.Body.Close()
+		t.Fatalf("snapshot status = %d, want %d, body: %v", snapshotResp.StatusCode, http.StatusOK, body)
+	}
+	snapshotResp.Body.Close()
+
 	// --- Push create ---
-	itemID := "00000000-0000-0000-0000-aaaaaaaaaaaa"
+	orderID := "00000000-0000-0000-0000-aaaaaaaaaaaa"
 	pushResp := doJSON(t, srv, http.MethodPost, "/sync/push", userID, "1.0.0", map[string]any{
 		"client_id":      clientID,
 		"schema_version": schemaVersion,
 		"schema_hash":    schemaHash,
 		"changes": []map[string]any{
 			{
-				"id":                itemID,
-				"table_name":        "items",
+				"id":                orderID,
+				"table_name":        "orders",
 				"operation":         "create",
-				"data":              map[string]any{"id": itemID, "user_id": userID, "name": "Test Item", "description": "A test"},
+				"data":              map[string]any{"id": orderID, "user_id": userID, "ship_address": "123 Main St"},
 				"client_updated_at": "2026-03-07T00:00:00Z",
 			},
 		},
@@ -232,12 +247,12 @@ func TestHTTP_RegisterPushPullRoundTrip(t *testing.T) {
 	}
 
 	// --- Simulate WAL: insert changelog entry directly ---
-	// The push wrote the row to `items` via RLS. Now simulate the WAL consumer
+	// The push wrote the row to `orders` via RLS. Now simulate the WAL consumer
 	// by inserting a changelog entry so the pull finds it.
 	_, execErr := db.Exec(`
 		INSERT INTO sync_changelog (bucket_id, table_name, record_id, operation)
 		VALUES ($1, $2, $3, $4)
-	`, fmt.Sprintf("user:%s", userID), "items", itemID, 1)
+	`, fmt.Sprintf("user:%s", userID), "orders", orderID, 1)
 	if execErr != nil {
 		t.Fatalf("inserting changelog: %v", execErr)
 	}
@@ -267,13 +282,13 @@ func TestHTTP_RegisterPushPullRoundTrip(t *testing.T) {
 	found := false
 	for _, c := range changes {
 		rec := c.(map[string]any)
-		if rec["id"] == itemID {
+		if rec["id"] == orderID {
 			found = true
 			break
 		}
 	}
 	if !found {
-		t.Fatalf("pushed item %s not found in pull response", itemID)
+		t.Fatalf("pushed order %s not found in pull response", orderID)
 	}
 }
 
@@ -379,7 +394,7 @@ func TestHTTP_TablesEndpoint(t *testing.T) {
 		tableMap[name] = tbl
 	}
 
-	for _, expected := range []string{"items", "item_details", "categories", "tags"} {
+	for _, expected := range []string{"orders", "order_details", "products", "categories"} {
 		if _, ok := tableMap[expected]; !ok {
 			t.Errorf("table %q not found in /sync/tables response", expected)
 		}
@@ -399,21 +414,21 @@ func TestHTTP_TablesEndpoint(t *testing.T) {
 		}
 	}
 
-	// categories has push_policy = "disabled"
-	if cat, ok := tableMap["categories"]; ok {
-		if cat["push_policy"] != "disabled" {
-			t.Errorf("categories push_policy = %v, want %q", cat["push_policy"], "disabled")
+	// products has push_policy = "disabled"
+	if prod, ok := tableMap["products"]; ok {
+		if prod["push_policy"] != "disabled" {
+			t.Errorf("products push_policy = %v, want %q", prod["push_policy"], "disabled")
 		}
 	}
 
-	// item_details has dependencies = ["items"]
-	if detail, ok := tableMap["item_details"]; ok {
+	// order_details has dependencies = ["orders"]
+	if detail, ok := tableMap["order_details"]; ok {
 		deps, ok := detail["dependencies"].([]any)
 		if !ok {
-			t.Fatal("item_details 'dependencies' is not an array")
+			t.Fatal("order_details 'dependencies' is not an array")
 		}
-		if len(deps) != 1 || deps[0] != "items" {
-			t.Errorf("item_details dependencies = %v, want [items]", deps)
+		if len(deps) != 1 || deps[0] != "orders" {
+			t.Errorf("order_details dependencies = %v, want [orders]", deps)
 		}
 	}
 }

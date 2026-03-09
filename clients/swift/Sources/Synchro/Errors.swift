@@ -6,13 +6,12 @@ public enum SynchroError: Error, Sendable {
     case tableNotSynced(String)
     case upgradeRequired(currentVersion: String, minimumVersion: String)
     case schemaMismatch(serverVersion: Int64, serverHash: String)
-    case resyncRequired
+    case snapshotRequired
     case pushRejected(results: [PushResult])
     case networkError(underlying: Error)
     case serverError(status: Int, message: String)
     case databaseError(underlying: Error)
     case invalidResponse(message: String)
-    case syncInProgress
     case alreadyStarted
     case notStarted
 }
@@ -30,8 +29,8 @@ extension SynchroError: LocalizedError {
             return "App version \(current) is below minimum \(minimum)"
         case .schemaMismatch(let version, let hash):
             return "Schema mismatch: server version \(version), hash \(hash)"
-        case .resyncRequired:
-            return "Full resync required"
+        case .snapshotRequired:
+            return "Full snapshot required"
         case .pushRejected(let results):
             return "Push rejected: \(results.count) record(s)"
         case .networkError(let err):
@@ -42,8 +41,6 @@ extension SynchroError: LocalizedError {
             return "Database error: \(err.localizedDescription)"
         case .invalidResponse(let message):
             return "Invalid response: \(message)"
-        case .syncInProgress:
-            return "Sync is already in progress"
         case .alreadyStarted:
             return "Sync has already been started"
         case .notStarted:

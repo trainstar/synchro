@@ -154,12 +154,12 @@ func TestIntegration_SchemaManifest_ChangesOnDrift(t *testing.T) {
 
 	col := fmt.Sprintf("schema_drift_%d", time.Now().UnixNano())
 	if _, err := db.ExecContext(ctx,
-		fmt.Sprintf("ALTER TABLE items ADD COLUMN %s TEXT NOT NULL DEFAULT ''", col),
+		fmt.Sprintf("ALTER TABLE orders ADD COLUMN %s TEXT NOT NULL DEFAULT ''", col),
 	); err != nil {
 		t.Fatalf("alter table add column: %v", err)
 	}
 	t.Cleanup(func() {
-		_, _ = db.ExecContext(ctx, fmt.Sprintf("ALTER TABLE items DROP COLUMN IF EXISTS %s", col))
+		_, _ = db.ExecContext(ctx, fmt.Sprintf("ALTER TABLE orders DROP COLUMN IF EXISTS %s", col))
 	})
 
 	v2, h2, err := engine.CurrentSchemaManifest(ctx)
@@ -171,6 +171,122 @@ func TestIntegration_SchemaManifest_ChangesOnDrift(t *testing.T) {
 	}
 	if v2 <= v1 {
 		t.Fatalf("schema version did not advance: before=%d after=%d", v1, v2)
+	}
+}
+
+func TestIntegration_EnumTypeResolution(t *testing.T) {
+	db := synctest.TestDB(t)
+	ctx := context.Background()
+
+	// The test schema already creates the order_status enum and the orders
+	// table with a status column of type order_status. Verify that schema
+	// discovery resolves the enum to "string".
+	reg := synchro.NewRegistry()
+	reg.Register(&synchro.TableConfig{
+		TableName:   "orders",
+		PushPolicy:  synchro.PushPolicyOwnerOnly,
+		OwnerColumn: "user_id",
+	})
+
+	engine, err := synchro.NewEngine(synchro.Config{
+		DB:       db,
+		Registry: reg,
+	})
+	if err != nil {
+		t.Fatalf("NewEngine: %v", err)
+	}
+
+	schema, err := engine.Schema(ctx)
+	if err != nil {
+		t.Fatalf("Schema: %v", err)
+	}
+
+	var found bool
+	for _, table := range schema.Tables {
+		if table.TableName != "orders" {
+			continue
+		}
+		for _, col := range table.Columns {
+			if col.Name == "status" {
+				found = true
+				if col.LogicalType != "string" {
+					t.Errorf("enum column 'status' logical type = %q, want %q", col.LogicalType, "string")
+				}
+				if col.DBType != "order_status" {
+					t.Errorf("enum column 'status' db_type = %q, want %q", col.DBType, "order_status")
+				}
+			}
+		}
+	}
+	if !found {
+		t.Fatal("column 'status' not found in orders schema")
+	}
+}
+
+func TestIntegration_DomainTypeResolution(t *testing.T) {
+	db := synctest.TestDB(t)
+	ctx := context.Background()
+
+	// Create a domain type and a table using it.
+	_, err := db.ExecContext(ctx, `
+		DO $$ BEGIN
+			IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'positive_int') THEN
+				CREATE DOMAIN positive_int AS integer CHECK (VALUE > 0);
+			END IF;
+		END $$
+	`)
+	if err != nil {
+		t.Fatalf("creating domain type: %v", err)
+	}
+
+	_, err = db.ExecContext(ctx, `
+		CREATE TABLE IF NOT EXISTS domain_test (
+			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+			quantity positive_int NOT NULL DEFAULT 1,
+			created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+			updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+			deleted_at TIMESTAMPTZ
+		)
+	`)
+	if err != nil {
+		t.Fatalf("creating domain_test table: %v", err)
+	}
+
+	reg := synchro.NewRegistry()
+	reg.Register(&synchro.TableConfig{
+		TableName:  "domain_test",
+		PushPolicy: synchro.PushPolicyDisabled,
+	})
+
+	engine, err := synchro.NewEngine(synchro.Config{
+		DB:       db,
+		Registry: reg,
+	})
+	if err != nil {
+		t.Fatalf("NewEngine: %v", err)
+	}
+
+	schema, err := engine.Schema(ctx)
+	if err != nil {
+		t.Fatalf("Schema: %v", err)
+	}
+
+	var found bool
+	for _, table := range schema.Tables {
+		if table.TableName != "domain_test" {
+			continue
+		}
+		for _, col := range table.Columns {
+			if col.Name == "quantity" {
+				found = true
+				if col.LogicalType != "int" {
+					t.Errorf("domain column 'quantity' logical type = %q, want %q", col.LogicalType, "int")
+				}
+			}
+		}
+	}
+	if !found {
+		t.Fatal("column 'quantity' not found in domain_test schema")
 	}
 }
 

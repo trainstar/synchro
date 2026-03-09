@@ -60,29 +60,52 @@ func setupWALTest(t *testing.T, tables []string) (*walTestEnv, context.Context) 
 		}
 	}
 
+	// Create custom types
+	appTypesDDL := []string{
+		`DO $$ BEGIN
+			IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'order_status') THEN
+				CREATE TYPE order_status AS ENUM ('pending', 'processing', 'shipped', 'delivered', 'cancelled');
+			END IF;
+		END $$`,
+	}
+	for _, stmt := range appTypesDDL {
+		if _, err := db.ExecContext(ctx, stmt); err != nil {
+			t.Fatalf("creating app type: %v", err)
+		}
+	}
+
 	// Create all app tables
 	appDDL := []string{
-		`CREATE TABLE IF NOT EXISTS items (
+		`CREATE TABLE IF NOT EXISTS orders (
 			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
 			user_id UUID NOT NULL,
-			name TEXT NOT NULL DEFAULT '',
-			description TEXT NOT NULL DEFAULT '',
+			status order_status NOT NULL DEFAULT 'pending',
+			order_date TIMESTAMPTZ NOT NULL DEFAULT now(),
+			required_date DATE,
+			preferred_ship_time TIME WITHOUT TIME ZONE,
+			ship_address TEXT NOT NULL DEFAULT '',
+			metadata JSONB NOT NULL DEFAULT '{}',
+			total_cents BIGINT NOT NULL DEFAULT 0,
 			created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
 			updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
 			deleted_at TIMESTAMPTZ
 		)`,
-		`CREATE TABLE IF NOT EXISTS item_details (
+		`CREATE TABLE IF NOT EXISTS order_details (
 			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-			item_id UUID NOT NULL REFERENCES items(id),
-			notes TEXT NOT NULL DEFAULT '',
+			order_id UUID NOT NULL REFERENCES orders(id),
+			product_name TEXT NOT NULL DEFAULT '',
+			quantity INTEGER NOT NULL DEFAULT 1,
+			unit_price NUMERIC(10,2) NOT NULL DEFAULT 0,
 			created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
 			updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
 			deleted_at TIMESTAMPTZ
 		)`,
-		`CREATE TABLE IF NOT EXISTS tags (
+		`CREATE TABLE IF NOT EXISTS categories (
 			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
 			user_id UUID,
 			name TEXT NOT NULL DEFAULT '',
+			description TEXT NOT NULL DEFAULT '',
+			search_tags TEXT[] NOT NULL DEFAULT '{}',
 			created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
 			updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
 			deleted_at TIMESTAMPTZ
@@ -174,20 +197,20 @@ func setupWALTest(t *testing.T, tables []string) (*walTestEnv, context.Context) 
 }
 
 func TestWAL_ConsumerEndToEnd(t *testing.T) {
-	env, ctx := setupWALTest(t, []string{"items"})
+	env, ctx := setupWALTest(t, []string{"orders"})
 	db := env.DB
 
 	// --- INSERT ---
 	userID := "00000000-0000-0000-0000-000000000001"
-	itemID := "00000000-0000-0000-0000-aa0000000001"
+	orderID := "00000000-0000-0000-0000-aa0000000001"
 	_, err := db.ExecContext(ctx,
-		"INSERT INTO items (id, user_id, name, description) VALUES ($1, $2, $3, $4)",
-		itemID, userID, "WAL Test Item", "Created for WAL consumer test")
+		"INSERT INTO orders (id, user_id, ship_address) VALUES ($1, $2, $3)",
+		orderID, userID, "123 WAL St")
 	if err != nil {
-		t.Fatalf("INSERT item: %v", err)
+		t.Fatalf("INSERT order: %v", err)
 	}
 
-	insertEntry := pollChangelog(t, ctx, db, "items", itemID, 10*time.Second)
+	insertEntry := pollChangelog(t, ctx, db, "orders", orderID, 10*time.Second)
 	if insertEntry.BucketID != "user:"+userID {
 		t.Errorf("INSERT bucket_id = %q, want %q", insertEntry.BucketID, "user:"+userID)
 	}
@@ -196,12 +219,12 @@ func TestWAL_ConsumerEndToEnd(t *testing.T) {
 	}
 
 	// --- UPDATE ---
-	_, err = db.ExecContext(ctx, "UPDATE items SET name = 'Updated WAL Item' WHERE id = $1", itemID)
+	_, err = db.ExecContext(ctx, "UPDATE orders SET ship_address = '456 WAL Ave' WHERE id = $1", orderID)
 	if err != nil {
-		t.Fatalf("UPDATE item: %v", err)
+		t.Fatalf("UPDATE order: %v", err)
 	}
 
-	updateEntry := pollChangelogAfter(t, ctx, db, "items", itemID, insertEntry.Seq, 10*time.Second)
+	updateEntry := pollChangelogAfter(t, ctx, db, "orders", orderID, insertEntry.Seq, 10*time.Second)
 	if updateEntry.BucketID != "user:"+userID {
 		t.Errorf("UPDATE bucket_id = %q, want %q", updateEntry.BucketID, "user:"+userID)
 	}
@@ -210,12 +233,12 @@ func TestWAL_ConsumerEndToEnd(t *testing.T) {
 	}
 
 	// --- SOFT DELETE ---
-	_, err = db.ExecContext(ctx, "UPDATE items SET deleted_at = now() WHERE id = $1", itemID)
+	_, err = db.ExecContext(ctx, "UPDATE orders SET deleted_at = now() WHERE id = $1", orderID)
 	if err != nil {
-		t.Fatalf("SOFT DELETE item: %v", err)
+		t.Fatalf("SOFT DELETE order: %v", err)
 	}
 
-	deleteEntry := pollChangelogAfter(t, ctx, db, "items", itemID, updateEntry.Seq, 10*time.Second)
+	deleteEntry := pollChangelogAfter(t, ctx, db, "orders", orderID, updateEntry.Seq, 10*time.Second)
 	if deleteEntry.BucketID != "user:"+userID {
 		t.Errorf("SOFT DELETE bucket_id = %q, want %q", deleteEntry.BucketID, "user:"+userID)
 	}
@@ -225,37 +248,37 @@ func TestWAL_ConsumerEndToEnd(t *testing.T) {
 }
 
 func TestWAL_ChildTableBucketAssignment(t *testing.T) {
-	env, ctx := setupWALTest(t, []string{"items", "item_details"})
+	env, ctx := setupWALTest(t, []string{"orders", "order_details"})
 	db := env.DB
 
 	userID := "00000000-0000-0000-0000-000000000001"
-	itemID := "00000000-0000-0000-0000-bb0000000001"
+	orderID := "00000000-0000-0000-0000-bb0000000001"
 
-	// Insert parent item with user_id
+	// Insert parent order with user_id
 	_, err := db.ExecContext(ctx,
-		"INSERT INTO items (id, user_id, name) VALUES ($1, $2, $3)",
-		itemID, userID, "Parent Item")
+		"INSERT INTO orders (id, user_id, ship_address) VALUES ($1, $2, $3)",
+		orderID, userID, "100 Parent St")
 	if err != nil {
-		t.Fatalf("INSERT parent item: %v", err)
+		t.Fatalf("INSERT parent order: %v", err)
 	}
 
 	// Wait for parent changelog entry
-	parentEntry := pollChangelog(t, ctx, db, "items", itemID, 10*time.Second)
+	parentEntry := pollChangelog(t, ctx, db, "orders", orderID, 10*time.Second)
 	if parentEntry.BucketID != "user:"+userID {
 		t.Errorf("parent bucket_id = %q, want %q", parentEntry.BucketID, "user:"+userID)
 	}
 
-	// Insert child detail — item_details has NO user_id column.
-	// Bucket must be resolved via parent chain: item_details.item_id -> items.user_id
+	// Insert child detail — order_details has NO user_id column.
+	// Bucket must be resolved via parent chain: order_details.order_id -> orders.user_id
 	detailID := "00000000-0000-0000-0000-bb0000000002"
 	_, err = db.ExecContext(ctx,
-		"INSERT INTO item_details (id, item_id, notes) VALUES ($1, $2, $3)",
-		detailID, itemID, "Child notes")
+		"INSERT INTO order_details (id, order_id, product_name) VALUES ($1, $2, $3)",
+		detailID, orderID, "Widget A")
 	if err != nil {
-		t.Fatalf("INSERT item_details: %v", err)
+		t.Fatalf("INSERT order_details: %v", err)
 	}
 
-	childEntry := pollChangelog(t, ctx, db, "item_details", detailID, 10*time.Second)
+	childEntry := pollChangelog(t, ctx, db, "order_details", detailID, 10*time.Second)
 	if childEntry.BucketID != "user:"+userID {
 		t.Errorf("child bucket_id = %q, want %q (resolved via parent chain)", childEntry.BucketID, "user:"+userID)
 	}
@@ -265,69 +288,69 @@ func TestWAL_ChildTableBucketAssignment(t *testing.T) {
 }
 
 func TestWAL_GlobalTableBucketAssignment(t *testing.T) {
-	env, ctx := setupWALTest(t, []string{"tags"})
+	env, ctx := setupWALTest(t, []string{"categories"})
 	db := env.DB
 
-	// Insert tag with user_id=NULL -> should get bucket "global"
-	globalTagID := "00000000-0000-0000-0000-cc0000000001"
+	// Insert category with user_id=NULL -> should get bucket "global"
+	globalCategoryID := "00000000-0000-0000-0000-cc0000000001"
 	_, err := db.ExecContext(ctx,
-		"INSERT INTO tags (id, user_id, name) VALUES ($1, NULL, $2)",
-		globalTagID, "Global Tag")
+		"INSERT INTO categories (id, user_id, name) VALUES ($1, NULL, $2)",
+		globalCategoryID, "Global Category")
 	if err != nil {
-		t.Fatalf("INSERT global tag: %v", err)
+		t.Fatalf("INSERT global category: %v", err)
 	}
 
-	globalEntry := pollChangelog(t, ctx, db, "tags", globalTagID, 10*time.Second)
+	globalEntry := pollChangelog(t, ctx, db, "categories", globalCategoryID, 10*time.Second)
 	if globalEntry.BucketID != "global" {
-		t.Errorf("global tag bucket_id = %q, want %q", globalEntry.BucketID, "global")
+		t.Errorf("global category bucket_id = %q, want %q", globalEntry.BucketID, "global")
 	}
 	if globalEntry.Operation != int(synchro.OpInsert) {
-		t.Errorf("global tag operation = %d, want %d (OpInsert)", globalEntry.Operation, synchro.OpInsert)
+		t.Errorf("global category operation = %d, want %d (OpInsert)", globalEntry.Operation, synchro.OpInsert)
 	}
 
-	// Insert tag with user_id=X -> should get bucket "user:X"
+	// Insert category with user_id=X -> should get bucket "user:X"
 	userID := "00000000-0000-0000-0000-000000000099"
-	userTagID := "00000000-0000-0000-0000-cc0000000002"
+	userCategoryID := "00000000-0000-0000-0000-cc0000000002"
 	_, err = db.ExecContext(ctx,
-		"INSERT INTO tags (id, user_id, name) VALUES ($1, $2, $3)",
-		userTagID, userID, "User Tag")
+		"INSERT INTO categories (id, user_id, name) VALUES ($1, $2, $3)",
+		userCategoryID, userID, "User Category")
 	if err != nil {
-		t.Fatalf("INSERT user tag: %v", err)
+		t.Fatalf("INSERT user category: %v", err)
 	}
 
-	userEntry := pollChangelog(t, ctx, db, "tags", userTagID, 10*time.Second)
+	userEntry := pollChangelog(t, ctx, db, "categories", userCategoryID, 10*time.Second)
 	if userEntry.BucketID != "user:"+userID {
-		t.Errorf("user tag bucket_id = %q, want %q", userEntry.BucketID, "user:"+userID)
+		t.Errorf("user category bucket_id = %q, want %q", userEntry.BucketID, "user:"+userID)
 	}
 	if userEntry.Operation != int(synchro.OpInsert) {
-		t.Errorf("user tag operation = %d, want %d (OpInsert)", userEntry.Operation, synchro.OpInsert)
+		t.Errorf("user category operation = %d, want %d (OpInsert)", userEntry.Operation, synchro.OpInsert)
 	}
 }
 
 func TestWAL_OwnershipChange(t *testing.T) {
-	env, ctx := setupWALTest(t, []string{"items"})
+	env, ctx := setupWALTest(t, []string{"orders"})
 	db := env.DB
 
 	userA := "00000000-0000-0000-0000-00000000000a"
 	userB := "00000000-0000-0000-0000-00000000000b"
-	itemID := "00000000-0000-0000-0000-dd0000000001"
+	orderID := "00000000-0000-0000-0000-dd0000000001"
 
-	// Insert item owned by user A
+	// Insert order owned by user A
 	_, err := db.ExecContext(ctx,
-		"INSERT INTO items (id, user_id, name) VALUES ($1, $2, $3)",
-		itemID, userA, "Ownership Change Item")
+		"INSERT INTO orders (id, user_id, ship_address) VALUES ($1, $2, $3)",
+		orderID, userA, "100 Ownership St")
 	if err != nil {
-		t.Fatalf("INSERT item: %v", err)
+		t.Fatalf("INSERT order: %v", err)
 	}
 
-	insertEntry := pollChangelog(t, ctx, db, "items", itemID, 10*time.Second)
+	insertEntry := pollChangelog(t, ctx, db, "orders", orderID, 10*time.Second)
 	if insertEntry.BucketID != "user:"+userA {
 		t.Fatalf("initial bucket_id = %q, want %q", insertEntry.BucketID, "user:"+userA)
 	}
 
 	// Change ownership from A to B
 	_, err = db.ExecContext(ctx,
-		"UPDATE items SET user_id = $1 WHERE id = $2", userB, itemID)
+		"UPDATE orders SET user_id = $1 WHERE id = $2", userB, orderID)
 	if err != nil {
 		t.Fatalf("UPDATE ownership: %v", err)
 	}
@@ -341,8 +364,8 @@ func TestWAL_OwnershipChange(t *testing.T) {
 	for time.Now().Before(deadline) {
 		rows, err := db.QueryContext(ctx,
 			`SELECT bucket_id, operation FROM sync_changelog
-			 WHERE table_name = 'items' AND record_id = $1 AND seq > $2
-			 ORDER BY seq`, itemID, insertEntry.Seq)
+			 WHERE table_name = 'orders' AND record_id = $1 AND seq > $2
+			 ORDER BY seq`, orderID, insertEntry.Seq)
 		if err != nil {
 			t.Fatalf("querying changelog: %v", err)
 		}

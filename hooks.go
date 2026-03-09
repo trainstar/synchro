@@ -37,7 +37,6 @@ type Hooks struct {
 	// OnCompaction is called after a successful compaction run.
 	OnCompaction func(ctx context.Context, result CompactResult)
 
-	// OnResyncRequired is called when a client's checkpoint falls behind the
-	// compaction boundary and requires a full resync.
-	OnResyncRequired func(ctx context.Context, clientID string, checkpoint int64, minSeq int64)
+	// OnSnapshotRequired is called when a client must rebuild from a full snapshot.
+	OnSnapshotRequired func(ctx context.Context, clientID string, checkpoint int64, minSeq int64, reason string)
 }

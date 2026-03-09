@@ -60,7 +60,6 @@ var (
 	// ErrInvalidBucketConfig indicates contradictory bucket configuration.
 	ErrInvalidBucketConfig = errors.New("synchro: invalid bucket configuration")
 
-	// ErrResyncRequired indicates the client's checkpoint is behind the
-	// compaction boundary and a full resync is needed.
-	ErrResyncRequired = errors.New("synchro: resync required")
+	// ErrSnapshotRequired indicates the client must rebuild from a full snapshot.
+	ErrSnapshotRequired = errors.New("synchro: snapshot required")
 )

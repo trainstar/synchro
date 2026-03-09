@@ -4,9 +4,9 @@ import "testing"
 
 func TestDeduplicateEntries_NoDuplicates(t *testing.T) {
 	entries := []ChangelogEntry{
-		{Seq: 1, TableName: "items", RecordID: "a", Operation: OpInsert},
-		{Seq: 2, TableName: "items", RecordID: "b", Operation: OpUpdate},
-		{Seq: 3, TableName: "tags", RecordID: "c", Operation: OpDelete},
+		{Seq: 1, TableName: "orders", RecordID: "a", Operation: OpInsert},
+		{Seq: 2, TableName: "orders", RecordID: "b", Operation: OpUpdate},
+		{Seq: 3, TableName: "categories", RecordID: "c", Operation: OpDelete},
 	}
 
 	refs := deduplicateEntries(entries)
@@ -25,9 +25,9 @@ func TestDeduplicateEntries_NoDuplicates(t *testing.T) {
 
 func TestDeduplicateEntries_SameRecordDifferentOps(t *testing.T) {
 	entries := []ChangelogEntry{
-		{Seq: 1, TableName: "items", RecordID: "a", Operation: OpInsert},
-		{Seq: 2, TableName: "items", RecordID: "a", Operation: OpUpdate},
-		{Seq: 3, TableName: "items", RecordID: "a", Operation: OpDelete},
+		{Seq: 1, TableName: "orders", RecordID: "a", Operation: OpInsert},
+		{Seq: 2, TableName: "orders", RecordID: "a", Operation: OpUpdate},
+		{Seq: 3, TableName: "orders", RecordID: "a", Operation: OpDelete},
 	}
 
 	refs := deduplicateEntries(entries)
@@ -44,11 +44,11 @@ func TestDeduplicateEntries_SameRecordDifferentOps(t *testing.T) {
 
 func TestDeduplicateEntries_Interleaved(t *testing.T) {
 	entries := []ChangelogEntry{
-		{Seq: 1, TableName: "items", RecordID: "a", Operation: OpInsert},
-		{Seq: 2, TableName: "tags", RecordID: "b", Operation: OpInsert},
-		{Seq: 3, TableName: "items", RecordID: "a", Operation: OpUpdate},
-		{Seq: 4, TableName: "items", RecordID: "c", Operation: OpInsert},
-		{Seq: 5, TableName: "tags", RecordID: "b", Operation: OpDelete},
+		{Seq: 1, TableName: "orders", RecordID: "a", Operation: OpInsert},
+		{Seq: 2, TableName: "categories", RecordID: "b", Operation: OpInsert},
+		{Seq: 3, TableName: "orders", RecordID: "a", Operation: OpUpdate},
+		{Seq: 4, TableName: "orders", RecordID: "c", Operation: OpInsert},
+		{Seq: 5, TableName: "categories", RecordID: "b", Operation: OpDelete},
 	}
 
 	refs := deduplicateEntries(entries)
@@ -56,15 +56,15 @@ func TestDeduplicateEntries_Interleaved(t *testing.T) {
 		t.Fatalf("got %d refs, want 3", len(refs))
 	}
 
-	// Position 0: items:a → updated to OpUpdate at seq 3
+	// Position 0: orders:a → updated to OpUpdate at seq 3
 	if refs[0].RecordID != "a" || refs[0].Operation != OpUpdate || refs[0].Seq != 3 {
 		t.Errorf("refs[0] = {%s, %v, %d}, want {a, OpUpdate, 3}", refs[0].RecordID, refs[0].Operation, refs[0].Seq)
 	}
-	// Position 1: tags:b → updated to OpDelete at seq 5
+	// Position 1: categories:b → updated to OpDelete at seq 5
 	if refs[1].RecordID != "b" || refs[1].Operation != OpDelete || refs[1].Seq != 5 {
 		t.Errorf("refs[1] = {%s, %v, %d}, want {b, OpDelete, 5}", refs[1].RecordID, refs[1].Operation, refs[1].Seq)
 	}
-	// Position 2: items:c → kept at seq 4
+	// Position 2: orders:c → kept at seq 4
 	if refs[2].RecordID != "c" || refs[2].Operation != OpInsert || refs[2].Seq != 4 {
 		t.Errorf("refs[2] = {%s, %v, %d}, want {c, OpInsert, 4}", refs[2].RecordID, refs[2].Operation, refs[2].Seq)
 	}
@@ -72,7 +72,7 @@ func TestDeduplicateEntries_Interleaved(t *testing.T) {
 
 func TestDeduplicateEntries_SingleEntry(t *testing.T) {
 	entries := []ChangelogEntry{
-		{Seq: 42, TableName: "items", RecordID: "x", Operation: OpInsert},
+		{Seq: 42, TableName: "orders", RecordID: "x", Operation: OpInsert},
 	}
 
 	refs := deduplicateEntries(entries)

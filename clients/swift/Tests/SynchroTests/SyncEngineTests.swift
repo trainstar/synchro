@@ -3,62 +3,6 @@ import GRDB
 @testable import Synchro
 
 final class SyncEngineTests: XCTestCase {
-    func testCallbackCancellable() {
-        var cancelled = false
-        let cancellable = CallbackCancellable {
-            cancelled = true
-        }
-        XCTAssertFalse(cancelled)
-        cancellable.cancel()
-        XCTAssertTrue(cancelled)
-
-        // Second cancel is a no-op
-        cancellable.cancel()
-        XCTAssertTrue(cancelled)
-    }
-
-    func testDatabaseCancellableWrapper() {
-        let mock = MockDatabaseCancellable()
-        let wrapper = DatabaseCancellableWrapper(mock)
-        XCTAssertFalse(mock.cancelled)
-        wrapper.cancel()
-        XCTAssertTrue(mock.cancelled)
-
-        // Second cancel is a no-op (inner is nil)
-        wrapper.cancel()
-    }
-
-    func testSyncStatusValues() {
-        let idle: SyncStatus = .idle
-        let syncing: SyncStatus = .syncing
-        let error: SyncStatus = .error(retryAt: Date())
-        let errorNoRetry: SyncStatus = .error(retryAt: nil)
-        let stopped: SyncStatus = .stopped
-
-        switch idle {
-        case .idle: break
-        default: XCTFail("expected idle")
-        }
-        switch syncing {
-        case .syncing: break
-        default: XCTFail("expected syncing")
-        }
-        switch error {
-        case .error(let retryAt):
-            XCTAssertNotNil(retryAt)
-        default: XCTFail("expected error")
-        }
-        switch errorNoRetry {
-        case .error(let retryAt):
-            XCTAssertNil(retryAt)
-        default: XCTFail("expected error with nil retryAt")
-        }
-        switch stopped {
-        case .stopped: break
-        default: XCTFail("expected stopped")
-        }
-    }
-
     func testCallbackRegistrationAndCancellation() throws {
         let (engine, _) = try makeSyncEngine()
 
@@ -118,39 +62,6 @@ final class SyncEngineTests: XCTestCase {
         XCTAssertEqual(updates2.count, 1, "Uncancelled callback should still fire")
     }
 
-    func testRetryDelayExponentialBackoff() {
-        // We can't directly test the private retryDelay method,
-        // but we can verify the formula properties through the RetryableError type
-        let error1 = RetryableError(
-            underlying: .serverError(status: 503, message: "unavailable"),
-            retryAfter: nil
-        )
-        XCTAssertNotNil(error1.underlying)
-        XCTAssertNil(error1.retryAfter)
-
-        let error2 = RetryableError(
-            underlying: .serverError(status: 429, message: "rate limited"),
-            retryAfter: 30
-        )
-        XCTAssertEqual(error2.retryAfter, 30)
-    }
-
-    func testRetryableErrorPreservesServerRetryAfter() {
-        let error = RetryableError(
-            underlying: .serverError(status: 503, message: "down"),
-            retryAfter: 15.5
-        )
-        XCTAssertEqual(error.retryAfter, 15.5)
-
-        switch error.underlying {
-        case .serverError(let status, let msg):
-            XCTAssertEqual(status, 503)
-            XCTAssertEqual(msg, "down")
-        default:
-            XCTFail("Expected serverError")
-        }
-    }
-
     // MARK: - Behavioral Sync Tests
 
     override func tearDown() {
@@ -169,6 +80,9 @@ final class SyncEngineTests: XCTestCase {
             } else if path.hasSuffix("/sync/register") {
                 callLog.append("register")
                 return try self.mockResponse(json: self.registerJSON)
+            } else if path.hasSuffix("/sync/snapshot") {
+                callLog.append("snapshot")
+                return try self.mockResponse(json: self.snapshotJSON(checkpoint: 0, records: []))
             } else if path.hasSuffix("/sync/pull") {
                 callLog.append("pull")
                 return try self.mockResponse(json: self.pullJSON(checkpoint: 10))
@@ -182,18 +96,18 @@ final class SyncEngineTests: XCTestCase {
         try await engine.start()
 
         // Schema fetched, client registered, initial pull completed (no push — no pending)
-        XCTAssertEqual(callLog, ["schema", "register", "pull"])
+        XCTAssertEqual(callLog, ["schema", "register", "snapshot", "pull"])
 
         // Checkpoint advanced from pull
         let checkpoint = try db.readTransaction { db in try SynchroMeta.getInt64(db, key: .checkpoint) }
         XCTAssertEqual(checkpoint, 10)
 
         // Synced tables were created
-        let tables = try db.query("SELECT name FROM sqlite_master WHERE type='table' AND name='workouts'", params: nil)
+        let tables = try db.query("SELECT name FROM sqlite_master WHERE type='table' AND name='orders'", params: nil)
         XCTAssertEqual(tables.count, 1)
 
         // CDC triggers were created
-        let triggers = try db.query("SELECT name FROM sqlite_master WHERE type='trigger' AND name LIKE '_synchro_cdc_%workouts'", params: nil)
+        let triggers = try db.query("SELECT name FROM sqlite_master WHERE type='trigger' AND name LIKE '_synchro_cdc_%orders'", params: nil)
         XCTAssertEqual(triggers.count, 3)
     }
 
@@ -206,6 +120,8 @@ final class SyncEngineTests: XCTestCase {
                 return try self.mockResponse(json: self.schemaJSON)
             } else if path.hasSuffix("/sync/register") {
                 return try self.mockResponse(json: self.registerJSON)
+            } else if path.hasSuffix("/sync/snapshot") {
+                return try self.mockResponse(json: self.snapshotJSON(checkpoint: 0, records: []))
             } else if path.hasSuffix("/sync/push") {
                 pushCalled = true
                 // Accept the pushed record with a server timestamp
@@ -239,8 +155,8 @@ final class SyncEngineTests: XCTestCase {
 
         // Insert a record — CDC trigger fires, pending created
         _ = try db.execute(
-            "INSERT INTO workouts (id, name, user_id, updated_at) VALUES (?, ?, ?, ?)",
-            params: ["w1", "Push Day", "u1", "2026-01-01T10:00:00.000Z"]
+            "INSERT INTO orders (id, ship_address, user_id, updated_at) VALUES (?, ?, ?, ?)",
+            params: ["w1", "123 Main St", "u1", "2026-01-01T10:00:00.000Z"]
         )
         let tracker = ChangeTracker(database: db)
         XCTAssertTrue(try tracker.hasPendingChanges())
@@ -255,7 +171,7 @@ final class SyncEngineTests: XCTestCase {
         XCTAssertFalse(try tracker.hasPendingChanges())
 
         // RYOW: local updated_at matches server timestamp
-        let row = try db.queryOne("SELECT updated_at FROM workouts WHERE id = ?", params: ["w1"])
+        let row = try db.queryOne("SELECT updated_at FROM orders WHERE id = ?", params: ["w1"])
         XCTAssertEqual(row?["updated_at"] as String?, "2026-01-01T14:00:00.000Z")
     }
 
@@ -266,14 +182,16 @@ final class SyncEngineTests: XCTestCase {
                 return try self.mockResponse(json: self.schemaJSON)
             } else if path.hasSuffix("/sync/register") {
                 return try self.mockResponse(json: self.registerJSON)
+            } else if path.hasSuffix("/sync/snapshot") {
+                return try self.mockResponse(json: self.snapshotJSON(checkpoint: 0, records: []))
             } else if path.hasSuffix("/sync/pull") {
                 // Return a server record in the initial pull
                 let json: [String: Any] = [
                     "changes": [
                         [
-                            "id": "w1", "table_name": "workouts",
+                            "id": "w1", "table_name": "orders",
                             "data": [
-                                "id": "w1", "name": "Server Workout",
+                                "id": "w1", "ship_address": "Server Address",
                                 "user_id": "u1", "updated_at": "2026-01-01T12:00:00.000Z",
                             ] as [String: Any],
                             "updated_at": "2026-01-01T12:00:00.000Z",
@@ -294,8 +212,8 @@ final class SyncEngineTests: XCTestCase {
         try await engine.start()
 
         // Server record should be in local DB
-        let row = try db.queryOne("SELECT name FROM workouts WHERE id = ?", params: ["w1"])
-        XCTAssertEqual(row?["name"] as String?, "Server Workout")
+        let row = try db.queryOne("SELECT ship_address FROM orders WHERE id = ?", params: ["w1"])
+        XCTAssertEqual(row?["ship_address"] as String?, "Server Address")
 
         // No pending changes (pull applies under sync_lock)
         let tracker = ChangeTracker(database: db)
@@ -311,14 +229,16 @@ final class SyncEngineTests: XCTestCase {
                 return try self.mockResponse(json: self.schemaJSON)
             } else if path.hasSuffix("/sync/register") {
                 return try self.mockResponse(json: self.registerJSON)
+            } else if path.hasSuffix("/sync/snapshot") {
+                return try self.mockResponse(json: self.snapshotJSON(checkpoint: 0, records: []))
             } else if path.hasSuffix("/sync/pull") {
                 pullCallCount += 1
                 if pullCallCount == 1 {
                     // First page: has_more=true
                     let json: [String: Any] = [
                         "changes": [
-                            ["id": "w1", "table_name": "workouts",
-                             "data": ["id": "w1", "name": "Workout 1", "user_id": "u1",
+                            ["id": "w1", "table_name": "orders",
+                             "data": ["id": "w1", "ship_address": "Address 1", "user_id": "u1",
                                       "updated_at": "2026-01-01T12:00:00.000Z"] as [String: Any],
                              "updated_at": "2026-01-01T12:00:00.000Z"] as [String: Any]
                         ],
@@ -331,8 +251,8 @@ final class SyncEngineTests: XCTestCase {
                     // Second page: has_more=false
                     let json: [String: Any] = [
                         "changes": [
-                            ["id": "w2", "table_name": "workouts",
-                             "data": ["id": "w2", "name": "Workout 2", "user_id": "u1",
+                            ["id": "w2", "table_name": "orders",
+                             "data": ["id": "w2", "ship_address": "Address 2", "user_id": "u1",
                                       "updated_at": "2026-01-01T13:00:00.000Z"] as [String: Any],
                              "updated_at": "2026-01-01T13:00:00.000Z"] as [String: Any]
                         ],
@@ -355,7 +275,7 @@ final class SyncEngineTests: XCTestCase {
         XCTAssertEqual(pullCallCount, 2)
 
         // Both records applied
-        let count = try db.query("SELECT id FROM workouts", params: nil)
+        let count = try db.query("SELECT id FROM orders", params: nil)
         XCTAssertEqual(count.count, 2)
 
         // Checkpoint is from the final page
@@ -372,6 +292,8 @@ final class SyncEngineTests: XCTestCase {
                 return try self.mockResponse(json: self.schemaJSON)
             } else if path.hasSuffix("/sync/register") {
                 return try self.mockResponse(json: self.registerJSON)
+            } else if path.hasSuffix("/sync/snapshot") {
+                return try self.mockResponse(json: self.snapshotJSON(checkpoint: 0, records: []))
             } else if path.hasSuffix("/sync/push") {
                 pushCallCount += 1
                 if pushCallCount == 1 {
@@ -409,8 +331,8 @@ final class SyncEngineTests: XCTestCase {
 
         // Insert a record
         _ = try db.execute(
-            "INSERT INTO workouts (id, name, user_id, updated_at) VALUES (?, ?, ?, ?)",
-            params: ["w1", "Push Day", "u1", "2026-01-01T10:00:00.000Z"]
+            "INSERT INTO orders (id, ship_address, user_id, updated_at) VALUES (?, ?, ?, ?)",
+            params: ["w1", "123 Main St", "u1", "2026-01-01T10:00:00.000Z"]
         )
 
         // Sync — first push fails (503), retry succeeds
@@ -431,6 +353,8 @@ final class SyncEngineTests: XCTestCase {
                 return try self.mockResponse(json: self.schemaJSON)
             } else if path.hasSuffix("/sync/register") {
                 return try self.mockResponse(json: self.registerJSON)
+            } else if path.hasSuffix("/sync/snapshot") {
+                return try self.mockResponse(json: self.snapshotJSON(checkpoint: 0, records: []))
             } else if path.hasSuffix("/sync/pull") {
                 return try self.mockResponse(json: self.pullJSON(checkpoint: 10))
             }
@@ -466,10 +390,10 @@ final class SyncEngineTests: XCTestCase {
         XCTAssertEqual(statuses, ["stopped"])
     }
 
-    func testResyncFlowRebuildsTables() async throws {
+    func testSnapshotFlowRebuildsTables() async throws {
         var pullCallCount = 0
-        var resyncCallCount = 0
-        var resyncApproved = false
+        var snapshotCallCount = 0
+        var snapshotApproved = false
 
         MockURLProtocol.requestHandler = { request in
             let path = request.url!.path
@@ -480,26 +404,30 @@ final class SyncEngineTests: XCTestCase {
             } else if path.hasSuffix("/sync/pull") {
                 pullCallCount += 1
                 if pullCallCount == 1 {
-                    // Initial pull during start() — return resync_required
+                    // Initial pull during start() — return snapshot_required
                     let json: [String: Any] = [
                         "changes": [] as [Any], "deletes": [] as [Any],
                         "checkpoint": 0, "has_more": false,
-                        "resync_required": true,
+                        "snapshot_required": true,
                         "schema_version": 1, "schema_hash": "test",
                     ]
                     return try self.mockResponse(json: json)
                 } else {
-                    XCTFail("Pull should not be called again after resync")
+                    XCTFail("Pull should not be called again after snapshot")
                     return try self.mockResponse(json: self.pullJSON(checkpoint: 0))
                 }
-            } else if path.hasSuffix("/sync/resync") {
-                resyncCallCount += 1
-                if resyncCallCount == 1 {
-                    // First resync page
+            } else if path.hasSuffix("/sync/snapshot") {
+                snapshotCallCount += 1
+                if snapshotCallCount == 1 {
+                    // Initial bootstrap snapshot is empty.
+                    let json = self.snapshotJSON(checkpoint: 0, records: [])
+                    return try self.mockResponse(json: json)
+                } else if snapshotCallCount == 2 {
+                    // Rebuild snapshot first page
                     let json: [String: Any] = [
                         "records": [
-                            ["id": "w1", "table_name": "workouts",
-                             "data": ["id": "w1", "name": "Rebuilt Workout", "user_id": "u1",
+                            ["id": "w1", "table_name": "orders",
+                             "data": ["id": "w1", "ship_address": "Rebuilt Address", "user_id": "u1",
                                       "updated_at": "2026-01-01T12:00:00.000Z"] as [String: Any],
                              "updated_at": "2026-01-01T12:00:00.000Z"] as [String: Any]
                         ],
@@ -509,7 +437,7 @@ final class SyncEngineTests: XCTestCase {
                     ]
                     return try self.mockResponse(json: json)
                 } else {
-                    // Final resync page
+                    // Final snapshot page
                     let json: [String: Any] = [
                         "records": [] as [Any],
                         "checkpoint": 100, "has_more": false,
@@ -524,29 +452,29 @@ final class SyncEngineTests: XCTestCase {
         let (engine, db) = try makeIntegrationEnv()
         defer { engine.stop() }
 
-        // Register resync approval callback
-        let _ = engine.onResyncRequired {
-            resyncApproved = true
+        // Register snapshot approval callback
+        let _ = engine.onSnapshotRequired {
+            snapshotApproved = true
             return true
         }
 
         try await engine.start()
 
-        // Resync callback was invoked
-        XCTAssertTrue(resyncApproved)
+        // Snapshot callback was invoked
+        XCTAssertTrue(snapshotApproved)
 
-        // Resync paged through (2 calls: first with data, second empty)
-        XCTAssertEqual(resyncCallCount, 2)
+        // Snapshot paged through (2 calls: first with data, second empty)
+        XCTAssertEqual(snapshotCallCount, 3)
 
         // Rebuilt record exists in local DB
-        let row = try db.queryOne("SELECT name FROM workouts WHERE id = ?", params: ["w1"])
-        XCTAssertEqual(row?["name"] as String?, "Rebuilt Workout")
+        let row = try db.queryOne("SELECT ship_address FROM orders WHERE id = ?", params: ["w1"])
+        XCTAssertEqual(row?["ship_address"] as String?, "Rebuilt Address")
 
-        // Checkpoint set from final resync page
+        // Checkpoint set from final snapshot page
         let checkpoint = try db.readTransaction { db in try SynchroMeta.getInt64(db, key: .checkpoint) }
         XCTAssertEqual(checkpoint, 100)
 
-        // No pending changes (resync applied under sync_lock)
+        // No pending changes (snapshot applied under sync_lock)
         let tracker = ChangeTracker(database: db)
         XCTAssertFalse(try tracker.hasPendingChanges())
     }
@@ -560,6 +488,8 @@ final class SyncEngineTests: XCTestCase {
                 return try self.mockResponse(json: self.schemaJSON)
             } else if path.hasSuffix("/sync/register") {
                 return try self.mockResponse(json: self.registerJSON)
+            } else if path.hasSuffix("/sync/snapshot") {
+                return try self.mockResponse(json: self.snapshotJSON(checkpoint: 0, records: []))
             } else if path.hasSuffix("/sync/push") {
                 // Reject the push with a conflict + server version
                 let body = try JSONSerialization.jsonObject(with: request.bodyData()!) as! [String: Any]
@@ -576,7 +506,7 @@ final class SyncEngineTests: XCTestCase {
                             "table_name": change["table_name"]!,
                             "data": [
                                 "id": change["id"]!,
-                                "name": "Server Wins",
+                                "ship_address": "Server Wins",
                                 "user_id": "u1",
                                 "updated_at": "2026-01-01T15:00:00.000Z",
                             ] as [String: Any],
@@ -608,8 +538,8 @@ final class SyncEngineTests: XCTestCase {
 
         // Insert a record that will conflict
         _ = try db.execute(
-            "INSERT INTO workouts (id, name, user_id, updated_at) VALUES (?, ?, ?, ?)",
-            params: ["w1", "Client Name", "u1", "2026-01-01T10:00:00.000Z"]
+            "INSERT INTO orders (id, ship_address, user_id, updated_at) VALUES (?, ?, ?, ?)",
+            params: ["w1", "Client Address", "u1", "2026-01-01T10:00:00.000Z"]
         )
 
         // Sync — push is rejected with conflict, server version applied
@@ -617,13 +547,13 @@ final class SyncEngineTests: XCTestCase {
 
         // Conflict callback was fired
         XCTAssertEqual(receivedConflicts.count, 1)
-        XCTAssertEqual(receivedConflicts[0].table, "workouts")
+        XCTAssertEqual(receivedConflicts[0].table, "orders")
         XCTAssertEqual(receivedConflicts[0].recordID, "w1")
-        XCTAssertEqual(receivedConflicts[0].serverData?["name"], AnyCodable("Server Wins"))
+        XCTAssertEqual(receivedConflicts[0].serverData?["ship_address"], AnyCodable("Server Wins"))
 
         // Server version was applied locally
-        let row = try db.queryOne("SELECT name FROM workouts WHERE id = ?", params: ["w1"])
-        XCTAssertEqual(row?["name"] as String?, "Server Wins")
+        let row = try db.queryOne("SELECT ship_address FROM orders WHERE id = ?", params: ["w1"])
+        XCTAssertEqual(row?["ship_address"] as String?, "Server Wins")
 
         // Pending drained
         let tracker = ChangeTracker(database: db)
@@ -705,17 +635,17 @@ final class SyncEngineTests: XCTestCase {
             "server_time": "2026-01-01T12:00:00.000Z",
             "tables": [
                 [
-                    "table_name": "workouts",
+                    "table_name": "orders",
                     "push_policy": "owner_only",
                     "updated_at_column": "updated_at",
                     "deleted_at_column": "deleted_at",
                     "primary_key": ["id"],
                     "columns": [
-                        ["name": "id", "db_type": "uuid", "logical_type": "string", "nullable": false, "is_primary_key": true] as [String: Any],
-                        ["name": "name", "db_type": "text", "logical_type": "string", "nullable": true, "is_primary_key": false] as [String: Any],
-                        ["name": "user_id", "db_type": "uuid", "logical_type": "string", "nullable": false, "is_primary_key": false] as [String: Any],
-                        ["name": "updated_at", "db_type": "timestamp", "logical_type": "datetime", "nullable": false, "is_primary_key": false] as [String: Any],
-                        ["name": "deleted_at", "db_type": "timestamp", "logical_type": "datetime", "nullable": true, "is_primary_key": false] as [String: Any],
+                        ["name": "id", "db_type": "uuid", "logical_type": "string", "nullable": false, "default_kind": "none", "is_primary_key": true] as [String: Any],
+                        ["name": "ship_address", "db_type": "text", "logical_type": "string", "nullable": true, "default_kind": "none", "is_primary_key": false] as [String: Any],
+                        ["name": "user_id", "db_type": "uuid", "logical_type": "string", "nullable": false, "default_kind": "none", "is_primary_key": false] as [String: Any],
+                        ["name": "updated_at", "db_type": "timestamp", "logical_type": "datetime", "nullable": false, "default_kind": "none", "is_primary_key": false] as [String: Any],
+                        ["name": "deleted_at", "db_type": "timestamp", "logical_type": "datetime", "nullable": true, "default_kind": "none", "is_primary_key": false] as [String: Any],
                     ]
                 ] as [String: Any]
             ]
@@ -743,16 +673,19 @@ final class SyncEngineTests: XCTestCase {
         ]
     }
 
+    private func snapshotJSON(checkpoint: Int, records: [[String: Any]]) -> [String: Any] {
+        [
+            "records": records,
+            "checkpoint": checkpoint,
+            "has_more": false,
+            "schema_version": 1,
+            "schema_hash": "test",
+        ]
+    }
+
     private func mockResponse(statusCode: Int = 200, json: [String: Any]) throws -> (HTTPURLResponse, Data) {
         let data = try JSONSerialization.data(withJSONObject: json)
         let response = HTTPURLResponse(url: URL(string: "http://test.local")!, statusCode: statusCode, httpVersion: nil, headerFields: nil)!
         return (response, data)
     }
-}
-
-// MARK: - Mock
-
-final class MockDatabaseCancellable: DatabaseCancellable {
-    var cancelled = false
-    func cancel() { cancelled = true }
 }

@@ -110,6 +110,9 @@ func (s *schemaStore) buildCanonicalSchemaTables(ctx context.Context, db DB, reg
 		if len(pk) > 1 {
 			return nil, fmt.Errorf("%w: table %q has composite primary key", ErrUnsupportedSchemaFeature, cfg.TableName)
 		}
+		if err := validateOfflineSchemaDefaults(cfg, cols); err != nil {
+			return nil, err
+		}
 
 		deps := append([]string{}, cfg.Dependencies...)
 		slices.Sort(deps)
@@ -208,6 +211,12 @@ func loadTableColumnsAndPK(ctx context.Context, db DB, table string) ([]SchemaCo
 		pkSet[c] = struct{}{}
 	}
 
+	// Pre-load enum and domain type names for fallback resolution.
+	enumTypes, domainTypes, err := loadEnumAndDomainTypes(ctx, db)
+	if err != nil {
+		return nil, nil, err
+	}
+
 	colRows, err := queryColumns(ctx, db, schemaName, tableName)
 	if err != nil {
 		return nil, nil, err
@@ -223,21 +232,166 @@ func loadTableColumnsAndPK(ctx context.Context, db DB, table string) ([]SchemaCo
 		_, c.IsPK = pkSet[c.Name]
 		logicalType, err := mapLogicalType(c.DBType)
 		if err != nil {
-			return nil, nil, fmt.Errorf("%w: table %q column %q type %q", ErrUnsupportedSchemaFeature, table, c.Name, c.DBType)
+			// Check if the type is a known enum → map to "string".
+			if enumTypes[c.DBType] {
+				logicalType = "string"
+				err = nil
+			} else if baseType, ok := domainTypes[c.DBType]; ok {
+				// Domain type → resolve to base type and re-map.
+				logicalType, err = mapLogicalType(baseType)
+				if err != nil {
+					return nil, nil, fmt.Errorf("%w: table %q column %q domain type %q (base %q)", ErrUnsupportedSchemaFeature, table, c.Name, c.DBType, baseType)
+				}
+			} else {
+				return nil, nil, fmt.Errorf("%w: table %q column %q type %q", ErrUnsupportedSchemaFeature, table, c.Name, c.DBType)
+			}
 		}
 		cols = append(cols, SchemaColumn{
-			Name:         c.Name,
-			DBType:       c.DBType,
-			LogicalType:  logicalType,
-			Nullable:     c.Nullable,
-			DefaultSQL:   c.DefaultSQL,
-			IsPrimaryKey: c.IsPK,
+			Name:             c.Name,
+			DBType:           c.DBType,
+			LogicalType:      logicalType,
+			Nullable:         c.Nullable,
+			DefaultSQL:       c.DefaultSQL,
+			DefaultKind:      defaultKindFor(c.DefaultSQL),
+			SQLiteDefaultSQL: sqliteDefaultSQL(c.DefaultSQL),
+			IsPrimaryKey:     c.IsPK,
 		})
 	}
 	if err := colRows.Err(); err != nil {
 		return nil, nil, fmt.Errorf("reading schema columns for %q: %w", table, err)
 	}
 	return cols, pkCols, nil
+}
+
+func validateOfflineSchemaDefaults(cfg *TableConfig, cols []SchemaColumn) error {
+	if cfg.PushPolicy == PushPolicyDisabled {
+		return nil
+	}
+
+	protected := make(map[string]struct{}, len(cfg.protectedSet))
+	for key := range cfg.protectedSet {
+		protected[key] = struct{}{}
+	}
+
+	for _, col := range cols {
+		if col.Nullable || col.IsPrimaryKey || col.DefaultSQL == "" {
+			continue
+		}
+		if _, ok := protected[col.Name]; ok {
+			continue
+		}
+		if col.DefaultKind == DefaultKindServerOnly {
+			return fmt.Errorf("%w: table %q column %q default %q is not portable to sqlite", ErrUnsupportedSchemaFeature, cfg.TableName, col.Name, col.DefaultSQL)
+		}
+	}
+	return nil
+}
+
+var (
+	numericDefaultPattern = regexp.MustCompile(`^[+-]?\d+(\.\d+)?$`)
+	stringDefaultPattern  = regexp.MustCompile(`^'(?:[^']|'')*'$`)
+	jsonDefaultPattern    = regexp.MustCompile(`^\s*'[\[{].*[\]}]'\s*(::[\w\s\[\]\.]+)?$`)
+	defaultCastPattern    = regexp.MustCompile(`(?i)(::[\w\s\[\]\.\"]+)+$`)
+)
+
+func defaultKindFor(defaultSQL string) string {
+	if strings.TrimSpace(defaultSQL) == "" {
+		return DefaultKindNone
+	}
+	if isPortableDefault(defaultSQL) {
+		return DefaultKindPortable
+	}
+	return DefaultKindServerOnly
+}
+
+func sqliteDefaultSQL(defaultSQL string) string {
+	trimmed := normalizePortableDefault(defaultSQL)
+	if trimmed == "" {
+		return ""
+	}
+
+	switch {
+	case strings.EqualFold(trimmed, "null"):
+		return "NULL"
+	case strings.EqualFold(trimmed, "true"):
+		return "1"
+	case strings.EqualFold(trimmed, "false"):
+		return "0"
+	case numericDefaultPattern.MatchString(trimmed):
+		return trimmed
+	case stringDefaultPattern.MatchString(trimmed):
+		return trimmed
+	case jsonDefaultPattern.MatchString(trimmed):
+		return strings.TrimSpace(strings.Split(trimmed, "::")[0])
+	}
+
+	lowered := strings.ToLower(trimmed)
+	switch lowered {
+	case "now()", "current_timestamp", "transaction_timestamp()", "statement_timestamp()":
+		return "CURRENT_TIMESTAMP"
+	case "current_date":
+		return "CURRENT_DATE"
+	case "current_time":
+		return "CURRENT_TIME"
+	}
+
+	return ""
+}
+
+func isPortableDefault(defaultSQL string) bool {
+	return sqliteDefaultSQL(defaultSQL) != ""
+}
+
+func normalizePortableDefault(defaultSQL string) string {
+	trimmed := strings.TrimSpace(defaultSQL)
+	if trimmed == "" {
+		return ""
+	}
+	for {
+		unwrapped := strings.TrimSpace(defaultCastPattern.ReplaceAllString(trimmed, ""))
+		if len(unwrapped) >= 2 && unwrapped[0] == '(' && unwrapped[len(unwrapped)-1] == ')' {
+			trimmed = strings.TrimSpace(unwrapped[1 : len(unwrapped)-1])
+			continue
+		}
+		trimmed = unwrapped
+		break
+	}
+	return trimmed
+}
+
+// loadEnumAndDomainTypes queries pg_type for all enum type names and domain
+// types with their base types. This is used as a fallback when mapLogicalType
+// does not recognize a type from the whitelist.
+func loadEnumAndDomainTypes(ctx context.Context, db DB) (enums map[string]bool, domains map[string]string, err error) {
+	enums = make(map[string]bool)
+	domains = make(map[string]string)
+
+	rows, err := db.QueryContext(ctx, `
+		SELECT t.typname, t.typtype, COALESCE(pg_catalog.format_type(t.typbasetype, t.typtypmod), '')
+		FROM pg_catalog.pg_type t
+		WHERE t.typtype IN ('e', 'd')
+	`)
+	if err != nil {
+		return nil, nil, fmt.Errorf("loading enum/domain types: %w", err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var name, typType, baseType string
+		if err := rows.Scan(&name, &typType, &baseType); err != nil {
+			return nil, nil, fmt.Errorf("scanning pg_type row: %w", err)
+		}
+		switch typType {
+		case "e":
+			enums[name] = true
+		case "d":
+			domains[name] = baseType
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, nil, fmt.Errorf("reading pg_type rows: %w", err)
+	}
+	return enums, domains, nil
 }
 
 func queryColumns(ctx context.Context, db DB, schemaName, tableName string) (*sql.Rows, error) {
@@ -340,7 +494,7 @@ var rePrefix = regexp.MustCompile(`^([a-z ]+)(\(.+\))?$`)
 func mapLogicalType(dbType string) (string, error) {
 	t := strings.ToLower(strings.TrimSpace(dbType))
 	if strings.HasSuffix(t, "[]") {
-		return "", ErrUnsupportedSchemaFeature
+		return "json", nil
 	}
 
 	switch t {
@@ -364,6 +518,8 @@ func mapLogicalType(dbType string) (string, error) {
 		return "time", nil
 	case "timestamp without time zone", "timestamp with time zone":
 		return "datetime", nil
+	case "interval":
+		return "string", nil
 	}
 
 	if strings.HasPrefix(t, "character varying(") || strings.HasPrefix(t, "character(") {

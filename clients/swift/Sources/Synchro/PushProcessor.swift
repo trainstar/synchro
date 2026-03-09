@@ -13,6 +13,7 @@ final class PushProcessor: @unchecked Sendable {
     struct PushOutcome: Sendable {
         let response: PushResponse
         let conflicts: [ConflictEvent]
+        let hasRetryableRejections: Bool
     }
 
     func processPush(httpClient: HttpClient, clientID: String, schemaVersion: Int64, schemaHash: String, syncedTables: [SchemaTable], batchSize: Int = 100) async throws -> PushOutcome? {
@@ -35,11 +36,12 @@ final class PushProcessor: @unchecked Sendable {
         let response = try await httpClient.push(request: request)
 
         let conflicts = try applyAccepted(accepted: response.accepted, syncedTables: syncedTables)
-        let rejectedConflicts = try applyRejected(rejected: response.rejected, syncedTables: syncedTables)
+        let rejectedOutcome = try applyRejectedOutcome(rejected: response.rejected, syncedTables: syncedTables)
 
         return PushOutcome(
             response: response,
-            conflicts: conflicts + rejectedConflicts
+            conflicts: conflicts + rejectedOutcome.conflicts,
+            hasRetryableRejections: rejectedOutcome.hasRetryableRejections
         )
     }
 
@@ -92,17 +94,31 @@ final class PushProcessor: @unchecked Sendable {
         return []
     }
 
+    private struct RejectedOutcome {
+        var conflicts: [ConflictEvent]
+        var hasRetryableRejections: Bool
+    }
+
     func applyRejected(rejected: [PushResult], syncedTables: [SchemaTable]) throws -> [ConflictEvent] {
-        guard !rejected.isEmpty else { return [] }
+        try applyRejectedOutcome(rejected: rejected, syncedTables: syncedTables).conflicts
+    }
+
+    private func applyRejectedOutcome(rejected: [PushResult], syncedTables: [SchemaTable]) throws -> RejectedOutcome {
+        guard !rejected.isEmpty else { return RejectedOutcome(conflicts: [], hasRetryableRejections: false) }
         let tableMap = Dictionary(uniqueKeysWithValues: syncedTables.map { ($0.tableName, $0) })
         var conflicts: [ConflictEvent] = []
+        var hasRetryableRejections = false
 
         try database.writeTransaction { db in
             try SynchroMeta.setSyncLock(db, locked: true)
             defer { try? SynchroMeta.setSyncLock(db, locked: false) }
 
             for result in rejected {
-                // Remove from pending queue (server version wins on client side)
+                if result.status == PushStatus.rejectedRetryable {
+                    hasRetryableRejections = true
+                    continue
+                }
+
                 try db.execute(
                     sql: "DELETE FROM _synchro_pending_changes WHERE table_name = ? AND record_id = ?",
                     arguments: [result.tableName, result.id]
@@ -151,6 +167,6 @@ final class PushProcessor: @unchecked Sendable {
             try SynchroMeta.setSyncLock(db, locked: false)
         }
 
-        return conflicts
+        return RejectedOutcome(conflicts: conflicts, hasRetryableRejections: hasRetryableRejections)
     }
 }

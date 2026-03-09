@@ -33,7 +33,7 @@ This gives O(log n) pull queries (indexed by `bucket_id, seq`) and complete deco
 
 ### Engine (`engine.go`)
 
-Top-level orchestrator. Holds all dependencies and exposes `RegisterClient()`, `Push()`, `Pull()`, `Resync()`, `TableMetadata()`, `Schema()`, `RunCompaction()`, `StartCompaction()`, and manifest inspection helpers (`CurrentSchemaManifest()`, `SchemaManifestHistory()`). Wires together the push/pull processors, conflict resolver, ownership resolver, compactor, schema store, and hooks.
+Top-level orchestrator. Holds all dependencies and exposes `RegisterClient()`, `Push()`, `Pull()`, `Snapshot()`, `TableMetadata()`, `Schema()`, `RunCompaction()`, `StartCompaction()`, and manifest inspection helpers (`CurrentSchemaManifest()`, `SchemaManifestHistory()`). Wires together the push/pull processors, conflict resolver, ownership resolver, compactor, schema store, and hooks.
 
 ### Registry (`registry.go`)
 
@@ -59,8 +59,8 @@ Handles server-to-client reads:
 - Deduplicates entries for the same record (keeps latest operation).
 - Separates deletes from changes, batch-hydrates changed records per table.
 - Returns paginated results with `has_more` flag and new checkpoint.
-- Detects stale checkpoints (behind compaction boundary) and returns `resync_required`.
-- Handles full resync via cursor-based table-by-table pagination for clients that need to rebuild.
+- Detects invalid incremental state and returns `snapshot_required` with a reason.
+- Handles full snapshot pagination for bootstrap and rebuild flows.
 
 ### WAL Consumer (`wal/consumer.go`)
 
@@ -145,15 +145,30 @@ RLS policies enforce authorization at the database level. The push processor doe
 ```
 Client -> POST /sync/pull
   1. Validate `schema_version` + `schema_hash` against server manifest
-  2. Check for stale checkpoint: if client checkpoint < MIN(seq) in changelog, return resync_required
-  3. Start read-only tx and set RLS auth context
-  4. Get client's bucket subscriptions (e.g., ["user:abc-123", "global"])
-  5. Query sync_changelog WHERE bucket_id = ANY(subs) AND seq > checkpoint
-  6. Deduplicate: keep latest entry per (table, record_id)
-  7. Separate deletes from changes
-  8. Hydrate changed records: batch SELECT per table
-  9. Commit read-only tx, then best-effort advance checkpoint in client state
-  10. Update client last_pull_at and return changes/deletes/checkpoint/schema identifiers
+  2. If initial bootstrap is incomplete, return `snapshot_required=initial_sync_required`
+  3. Check for stale checkpoint: if client checkpoint < MIN(seq) in changelog, return `snapshot_required=checkpoint_before_retention`
+  4. Start read-only tx and set RLS auth context
+  5. Get client's bucket subscriptions (e.g., ["user:abc-123", "global"])
+  6. Query sync_changelog WHERE bucket_id = ANY(subs) AND seq > checkpoint
+  7. Deduplicate: keep latest entry per (table, record_id)
+  8. Separate deletes from changes
+  9. Hydrate changed records: batch SELECT per table
+  10. Commit read-only tx, then best-effort advance checkpoint in client state
+  11. Update client last_pull_at and return changes/deletes/checkpoint/schema identifiers
+```
+
+### Snapshot Path
+
+```text
+Client -> POST /sync/snapshot
+  1. Validate `schema_version` + `schema_hash` against server manifest
+  2. Start read-only tx and set RLS auth context
+  3. On the first page, capture `MAX(seq)` as the snapshot checkpoint
+  4. Read visible rows directly from app tables in registration order
+  5. Page deterministically by table index + primary key
+  6. Return records plus a stateless cursor carrying the captured checkpoint
+  7. On the final page, reactivate the client and persist the snapshot checkpoint
+  8. Client resumes normal incremental pull from that checkpoint
 ```
 
 ## Design Decisions
@@ -214,11 +229,11 @@ A single record can appear in multiple buckets when resolver logic emits multipl
 - A client's checkpoint is the highest seq it has successfully processed.
 - `AdvanceCheckpoint` only moves forward (guards against `last_pull_seq < $2`).
 - Pull returns `has_more: true` when the result set was truncated by `limit`, signaling the client should pull again.
-- Checkpoint advancement is best-effort (logged warning on failure, does not fail the pull).
-- The changelog is append-only; compaction removes entries below the minimum checkpoint across all active clients. When a client's checkpoint falls behind the compaction boundary, the server returns `resync_required` and the client must do a full resync via `/sync/resync`.
+- Checkpoint advancement is best-effort for pull state, but bootstrap correctness does not depend on `pull(checkpoint=0)`.
+- The changelog is append-only; compaction removes entries below the minimum checkpoint across all active clients. When a client's checkpoint falls behind the compaction boundary, the server returns `snapshot_required` and the client must rebuild via `/sync/snapshot`.
 
 ### Failure Semantics
 
 - If a pull succeeds but checkpoint advancement fails, the client will re-pull the same entries on the next request. This is safe because pull responses are idempotent.
 - If a push transaction fails, no changelog entries are written (the WAL consumer only sees committed changes).
-- If the WAL consumer crashes, it resumes from the last confirmed LSN. Changes are reprocessed idempotently.
+- If the WAL consumer crashes, it resumes from the last durably persisted confirmed LSN. Changes are reprocessed idempotently.

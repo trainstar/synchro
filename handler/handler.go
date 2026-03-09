@@ -42,7 +42,7 @@ func (h *Handler) Routes() http.Handler {
 	mux.HandleFunc("/sync/register", h.ServeRegister)
 	mux.HandleFunc("/sync/pull", h.ServePull)
 	mux.HandleFunc("/sync/push", h.ServePush)
-	mux.HandleFunc("/sync/resync", h.ServeResync)
+	mux.HandleFunc("/sync/snapshot", h.ServeSnapshot)
 	mux.HandleFunc("/sync/tables", h.ServeTableMeta)
 	mux.HandleFunc("/sync/schema", h.ServeSchema)
 	return mux
@@ -200,8 +200,8 @@ func (h *Handler) ServePush(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, resp)
 }
 
-// ServeResync handles POST /sync/resync.
-func (h *Handler) ServeResync(w http.ResponseWriter, r *http.Request) {
+// ServeSnapshot handles POST /sync/snapshot.
+func (h *Handler) ServeSnapshot(w http.ResponseWriter, r *http.Request) {
 	if !requireMethod(w, r, http.MethodPost) {
 		return
 	}
@@ -225,13 +225,13 @@ func (h *Handler) ServeResync(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	var req synchro.ResyncRequest
+	var req synchro.SnapshotRequest
 	if err := remarshal(body, &req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
 
-	resp, err := h.engine.Resync(ctx, userID, &req)
+	resp, err := h.engine.Snapshot(ctx, userID, &req)
 	if err != nil {
 		if err == synchro.ErrSchemaMismatch {
 			h.writeSchemaMismatch(w, r)
@@ -245,7 +245,7 @@ func (h *Handler) ServeResync(w http.ResponseWriter, r *http.Request) {
 			writeRetryError(w, http.StatusServiceUnavailable, "service temporarily unavailable", h.defaultRetryAfter)
 			return
 		}
-		writeError(w, http.StatusInternalServerError, "failed to resync")
+		writeError(w, http.StatusInternalServerError, "failed to snapshot")
 		return
 	}
 

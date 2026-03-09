@@ -8,11 +8,11 @@ import (
 func TestRegister_Defaults(t *testing.T) {
 	r := NewRegistry()
 	r.Register(&TableConfig{
-		TableName:   "items",
+		TableName:   "orders",
 		OwnerColumn: "user_id",
 	})
 
-	cfg := r.Get("items")
+	cfg := r.Get("orders")
 	if cfg == nil {
 		t.Fatal("expected registered config, got nil")
 	}
@@ -102,10 +102,10 @@ func TestTableNames(t *testing.T) {
 
 func TestIsRegistered(t *testing.T) {
 	r := NewRegistry()
-	r.Register(&TableConfig{TableName: "items"})
+	r.Register(&TableConfig{TableName: "orders"})
 
-	if !r.IsRegistered("items") {
-		t.Error("IsRegistered(items) = false, want true")
+	if !r.IsRegistered("orders") {
+		t.Error("IsRegistered(orders) = false, want true")
 	}
 	if r.IsRegistered("missing") {
 		t.Error("IsRegistered(missing) = true, want false")
@@ -205,7 +205,7 @@ func TestValidate_OrphanedChain(t *testing.T) {
 func TestValidate_PushableWithoutOwnerColumn(t *testing.T) {
 	r := NewRegistry()
 	r.Register(&TableConfig{
-		TableName:  "items",
+		TableName:  "orders",
 		PushPolicy: PushPolicyOwnerOnly,
 	})
 
@@ -254,7 +254,7 @@ func TestValidate_RedundantProtectedColumn(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			r := NewRegistry()
 			r.Register(&TableConfig{
-				TableName:        "items",
+				TableName:        "orders",
 				PushPolicy:       PushPolicyOwnerOnly,
 				OwnerColumn:      "user_id",
 				ProtectedColumns: tt.protected,
@@ -274,7 +274,7 @@ func TestValidate_RedundantProtectedColumn(t *testing.T) {
 func TestValidate_InvalidPushPolicy(t *testing.T) {
 	r := NewRegistry()
 	r.Register(&TableConfig{
-		TableName:   "items",
+		TableName:   "orders",
 		PushPolicy:  PushPolicy("invalid"),
 		OwnerColumn: "user_id",
 	})
@@ -287,7 +287,7 @@ func TestValidate_InvalidPushPolicy(t *testing.T) {
 func TestValidate_InvalidBucketConfig(t *testing.T) {
 	r := NewRegistry()
 	r.Register(&TableConfig{
-		TableName:            "items",
+		TableName:            "orders",
 		PushPolicy:           PushPolicyOwnerOnly,
 		OwnerColumn:          "user_id",
 		GlobalWhenBucketNull: true,
@@ -302,19 +302,19 @@ func TestValidate_InvalidBucketConfig(t *testing.T) {
 func TestValidate_ValidConfig(t *testing.T) {
 	r := NewRegistry()
 	r.Register(&TableConfig{
-		TableName:   "workouts",
+		TableName:   "orders",
 		PushPolicy:  PushPolicyOwnerOnly,
 		OwnerColumn: "user_id",
 	})
 	r.Register(&TableConfig{
-		TableName:   "workout_sets",
+		TableName:   "order_details",
 		PushPolicy:  PushPolicyOwnerOnly,
 		OwnerColumn: "user_id",
-		ParentTable: "workouts",
-		ParentFKCol: "workout_id",
+		ParentTable: "orders",
+		ParentFKCol: "order_id",
 	})
 	r.Register(&TableConfig{
-		TableName:  "equipment_types",
+		TableName:  "products",
 		PushPolicy: PushPolicyDisabled,
 	})
 
@@ -326,12 +326,12 @@ func TestValidate_ValidConfig(t *testing.T) {
 func TestAllowedInsertColumns(t *testing.T) {
 	r := NewRegistry()
 	r.Register(&TableConfig{
-		TableName:   "items",
+		TableName:   "orders",
 		PushPolicy:  PushPolicyOwnerOnly,
 		OwnerColumn: "user_id",
 		ParentFKCol: "parent_id",
 	})
-	cfg := r.Get("items")
+	cfg := r.Get("orders")
 
 	dataCols := []string{"id", "user_id", "parent_id", "name", "created_at", "updated_at", "deleted_at"}
 	allowed := cfg.AllowedInsertColumns(dataCols)
@@ -356,13 +356,13 @@ func TestAllowedInsertColumns(t *testing.T) {
 func TestAllowedUpdateColumns(t *testing.T) {
 	r := NewRegistry()
 	r.Register(&TableConfig{
-		TableName:        "items",
+		TableName:        "orders",
 		PushPolicy:       PushPolicyOwnerOnly,
 		OwnerColumn:      "user_id",
 		ParentFKCol:      "parent_id",
 		ProtectedColumns: []string{"secret"},
 	})
-	cfg := r.Get("items")
+	cfg := r.Get("orders")
 
 	dataCols := []string{"id", "user_id", "parent_id", "name", "secret", "created_at", "updated_at", "deleted_at"}
 	allowed := cfg.AllowedUpdateColumns(dataCols)
@@ -385,12 +385,12 @@ func TestAllowedUpdateColumns(t *testing.T) {
 func TestIsProtected(t *testing.T) {
 	r := NewRegistry()
 	r.Register(&TableConfig{
-		TableName:        "items",
+		TableName:        "orders",
 		PushPolicy:       PushPolicyOwnerOnly,
 		OwnerColumn:      "user_id",
 		ProtectedColumns: []string{"internal_flag"},
 	})
-	cfg := r.Get("items")
+	cfg := r.Get("orders")
 
 	tests := []struct {
 		col  string

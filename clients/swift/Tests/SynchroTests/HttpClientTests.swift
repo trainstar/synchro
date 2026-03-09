@@ -114,13 +114,13 @@ final class HttpClientTests: XCTestCase {
             "server_time": "2026-01-01T12:00:00.000Z",
             "tables": [
                 [
-                    "table_name": "workouts",
+                    "table_name": "orders",
                     "push_policy": "owner_only",
                     "updated_at_column": "updated_at",
                     "deleted_at_column": "deleted_at",
                     "primary_key": ["id"],
                     "columns": [
-                        ["name": "id", "db_type": "uuid", "logical_type": "string", "nullable": false, "is_primary_key": true]
+                        ["name": "id", "db_type": "uuid", "logical_type": "string", "nullable": false, "default_kind": "none", "is_primary_key": true]
                     ]
                 ] as [String : Any]
             ]
@@ -137,7 +137,7 @@ final class HttpClientTests: XCTestCase {
         let resp = try await httpClient.fetchSchema()
         XCTAssertEqual(resp.schemaVersion, 3)
         XCTAssertEqual(resp.tables.count, 1)
-        XCTAssertEqual(resp.tables[0].tableName, "workouts")
+        XCTAssertEqual(resp.tables[0].tableName, "orders")
     }
 
     func testSchemaMismatch409() async throws {
@@ -280,7 +280,7 @@ final class HttpClientTests: XCTestCase {
         let req = PullRequest(
             clientID: "dev-1",
             checkpoint: 100,
-            tables: ["workouts"],
+            tables: ["orders"],
             limit: 50,
             knownBuckets: ["user:123", "global"],
             schemaVersion: 7,
@@ -290,15 +290,15 @@ final class HttpClientTests: XCTestCase {
 
         XCTAssertEqual(capturedBody?["client_id"] as? String, "dev-1")
         XCTAssertEqual(capturedBody?["checkpoint"] as? Int, 100)
-        XCTAssertEqual(capturedBody?["tables"] as? [String], ["workouts"])
+        XCTAssertEqual(capturedBody?["tables"] as? [String], ["orders"])
         XCTAssertEqual(capturedBody?["limit"] as? Int, 50)
         XCTAssertEqual(capturedBody?["known_buckets"] as? [String], ["user:123", "global"])
         XCTAssertEqual(capturedBody?["schema_version"] as? Int, 7)
         XCTAssertEqual(capturedBody?["schema_hash"] as? String, "hash7")
     }
 
-    func testResyncRequestEncoding() async throws {
-        let resyncResponseBody: [String: Any] = [
+    func testSnapshotRequestEncoding() async throws {
+        let snapshotResponseBody: [String: Any] = [
             "records": [] as [Any],
             "checkpoint": 50,
             "has_more": true,
@@ -310,21 +310,21 @@ final class HttpClientTests: XCTestCase {
 
         MockURLProtocol.requestHandler = { request in
             XCTAssertEqual(request.httpMethod, "POST")
-            XCTAssertTrue(request.url!.path.hasSuffix("/sync/resync"))
+            XCTAssertTrue(request.url!.path.hasSuffix("/sync/snapshot"))
             capturedBody = try JSONSerialization.jsonObject(with: request.bodyData()!) as? [String: Any]
-            let data = try JSONSerialization.data(withJSONObject: resyncResponseBody)
+            let data = try JSONSerialization.data(withJSONObject: snapshotResponseBody)
             let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
             return (response, data)
         }
 
-        let req = ResyncRequest(
+        let req = SnapshotRequest(
             clientID: "dev-1",
-            cursor: ResyncCursor(checkpoint: 10, tableIndex: 0, afterID: "w5"),
+            cursor: SnapshotCursor(checkpoint: 10, tableIndex: 0, afterID: "w5"),
             limit: 100,
             schemaVersion: 3,
             schemaHash: "hash3"
         )
-        let resp = try await httpClient.resync(request: req)
+        let resp = try await httpClient.snapshot(request: req)
 
         XCTAssertEqual(capturedBody?["client_id"] as? String, "dev-1")
         XCTAssertEqual(capturedBody?["limit"] as? Int, 100)
@@ -344,7 +344,7 @@ final class HttpClientTests: XCTestCase {
             "schema_hash": "xyz",
             "tables": [
                 [
-                    "table_name": "workouts",
+                    "table_name": "orders",
                     "push_policy": "owner_only",
                     "dependencies": [] as [String],
                 ] as [String : Any]
@@ -362,7 +362,7 @@ final class HttpClientTests: XCTestCase {
         let resp = try await httpClient.fetchTables()
         XCTAssertEqual(resp.schemaVersion, 2)
         XCTAssertEqual(resp.tables.count, 1)
-        XCTAssertEqual(resp.tables[0].tableName, "workouts")
+        XCTAssertEqual(resp.tables[0].tableName, "orders")
         XCTAssertEqual(resp.tables[0].pushPolicy, "owner_only")
     }
 
@@ -390,9 +390,9 @@ final class HttpClientTests: XCTestCase {
             changes: [
                 PushRecord(
                     id: "rec-1",
-                    tableName: "workouts",
+                    tableName: "orders",
                     operation: "create",
-                    data: ["name": AnyCodable("Push Day")],
+                    data: ["ship_address": AnyCodable("123 Main St")],
                     clientUpdatedAt: ISO8601DateFormatter().date(from: "2026-01-01T12:00:00Z")!
                 )
             ],

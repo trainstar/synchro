@@ -8,7 +8,7 @@ import (
 func TestGenerateRLSPolicies_PushDisabledTable(t *testing.T) {
 	r := NewRegistry()
 	r.Register(&TableConfig{
-		TableName:  "categories",
+		TableName:  "products",
 		PushPolicy: PushPolicyDisabled,
 	})
 
@@ -28,7 +28,7 @@ func TestGenerateRLSPolicies_PushDisabledTable(t *testing.T) {
 func TestGenerateRLSPolicies_OwnerTable_DefaultNoNullRead(t *testing.T) {
 	r := NewRegistry()
 	r.Register(&TableConfig{
-		TableName:   "items",
+		TableName:   "orders",
 		PushPolicy:  PushPolicyOwnerOnly,
 		OwnerColumn: "user_id",
 	})
@@ -54,7 +54,7 @@ func TestGenerateRLSPolicies_OwnerTable_DefaultNoNullRead(t *testing.T) {
 func TestGenerateRLSPolicies_OwnerTable_GlobalReadOptIn(t *testing.T) {
 	r := NewRegistry()
 	r.Register(&TableConfig{
-		TableName:       "tags",
+		TableName:       "categories",
 		PushPolicy:      PushPolicyOwnerOnly,
 		OwnerColumn:     "user_id",
 		AllowGlobalRead: true,
@@ -71,21 +71,21 @@ func TestGenerateRLSPolicies_OwnerTable_GlobalReadOptIn(t *testing.T) {
 func TestGenerateRLSPolicies_ChildTable(t *testing.T) {
 	r := NewRegistry()
 	r.Register(&TableConfig{
-		TableName:   "workouts",
+		TableName:   "orders",
 		PushPolicy:  PushPolicyOwnerOnly,
 		OwnerColumn: "user_id",
 	})
 	r.Register(&TableConfig{
-		TableName:   "workout_sets",
+		TableName:   "order_details",
 		PushPolicy:  PushPolicyOwnerOnly,
-		ParentTable: "workouts",
-		ParentFKCol: "workout_id",
+		ParentTable: "orders",
+		ParentFKCol: "order_id",
 	})
 
 	stmts := GenerateRLSPolicies(r)
 	var child []string
 	for _, s := range stmts {
-		if strings.Contains(s, `"workout_sets"`) {
+		if strings.Contains(s, `"order_details"`) {
 			child = append(child, s)
 		}
 	}
@@ -98,7 +98,7 @@ func TestGenerateRLSPolicies_ChildTable(t *testing.T) {
 			if !strings.Contains(s, "EXISTS") {
 				t.Errorf("child policy should use EXISTS subquery: %s", s)
 			}
-			if !strings.Contains(s, `"workouts"`) {
+			if !strings.Contains(s, `"orders"`) {
 				t.Errorf("child policy should reference parent table: %s", s)
 			}
 		}

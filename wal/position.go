@@ -52,15 +52,14 @@ func (p *Position) Confirmed() pglogrepl.LSN {
 	return p.confirmed
 }
 
-// SetConfirmed updates the confirmed LSN in memory and persists it.
+// SetConfirmed persists the confirmed LSN and only then updates the in-memory value.
 func (p *Position) SetConfirmed(ctx context.Context, lsn pglogrepl.LSN) error {
 	p.mu.Lock()
-	if lsn <= p.confirmed {
-		p.mu.Unlock()
+	current := p.confirmed
+	p.mu.Unlock()
+	if lsn <= current {
 		return nil
 	}
-	p.confirmed = lsn
-	p.mu.Unlock()
 
 	_, err := p.db.ExecContext(ctx,
 		`INSERT INTO sync_wal_position (slot_name, confirmed_lsn, updated_at)
@@ -70,5 +69,11 @@ func (p *Position) SetConfirmed(ctx context.Context, lsn pglogrepl.LSN) error {
 	if err != nil {
 		return fmt.Errorf("persisting WAL position: %w", err)
 	}
+
+	p.mu.Lock()
+	if lsn > p.confirmed {
+		p.confirmed = lsn
+	}
+	p.mu.Unlock()
 	return nil
 }

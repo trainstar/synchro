@@ -148,7 +148,7 @@ public final class SynchroClient: @unchecked Sendable {
         syncEngine.onConflict(callback)
     }
 
-    public func onResyncRequired(_ callback: @escaping () async -> Bool) -> any Cancellable {
-        syncEngine.onResyncRequired(callback)
+    public func onSnapshotRequired(_ callback: @escaping () async -> Bool) -> any Cancellable {
+        syncEngine.onSnapshotRequired(callback)
     }
 }

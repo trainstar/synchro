@@ -13,36 +13,58 @@ import (
 	"github.com/trainstar/synchro/migrate"
 )
 
-// appTableDDL creates the application tables used by NewTestRegistry.
+// appTypesDDL creates custom types used by the Northwind test schema.
+var appTypesDDL = []string{
+	`DO $$ BEGIN
+		IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'order_status') THEN
+			CREATE TYPE order_status AS ENUM ('pending', 'processing', 'shipped', 'delivered', 'cancelled');
+		END IF;
+	END $$`,
+}
+
+// appTableDDL creates the Northwind-based application tables used by NewTestRegistry.
 var appTableDDL = []string{
-	`CREATE TABLE IF NOT EXISTS items (
+	`CREATE TABLE IF NOT EXISTS orders (
 		id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
 		user_id UUID NOT NULL,
-		name TEXT NOT NULL DEFAULT '',
-		description TEXT NOT NULL DEFAULT '',
+		status order_status NOT NULL DEFAULT 'pending',
+		order_date TIMESTAMPTZ NOT NULL DEFAULT now(),
+		required_date DATE,
+		preferred_ship_time TIME WITHOUT TIME ZONE,
+		ship_address TEXT NOT NULL DEFAULT '',
+		metadata JSONB NOT NULL DEFAULT '{}',
+		total_cents BIGINT NOT NULL DEFAULT 0,
 		created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
 		updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
 		deleted_at TIMESTAMPTZ
 	)`,
-	`CREATE TABLE IF NOT EXISTS item_details (
+	`CREATE TABLE IF NOT EXISTS order_details (
 		id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-		item_id UUID NOT NULL REFERENCES items(id),
-		notes TEXT NOT NULL DEFAULT '',
+		order_id UUID NOT NULL REFERENCES orders(id),
+		product_name TEXT NOT NULL DEFAULT '',
+		quantity INTEGER NOT NULL DEFAULT 1,
+		unit_price NUMERIC(10,2) NOT NULL DEFAULT 0,
+		created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+		updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+		deleted_at TIMESTAMPTZ
+	)`,
+	`CREATE TABLE IF NOT EXISTS products (
+		id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+		name TEXT NOT NULL DEFAULT '',
+		unit_price NUMERIC(10,2) NOT NULL DEFAULT 0,
+		units_in_stock INTEGER NOT NULL DEFAULT 0,
+		discontinued BOOLEAN NOT NULL DEFAULT false,
+		thumbnail BYTEA,
 		created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
 		updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
 		deleted_at TIMESTAMPTZ
 	)`,
 	`CREATE TABLE IF NOT EXISTS categories (
 		id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-		name TEXT NOT NULL DEFAULT '',
-		created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-		updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-		deleted_at TIMESTAMPTZ
-	)`,
-	`CREATE TABLE IF NOT EXISTS tags (
-		id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
 		user_id UUID,
 		name TEXT NOT NULL DEFAULT '',
+		description TEXT NOT NULL DEFAULT '',
+		search_tags TEXT[] NOT NULL DEFAULT '{}',
 		created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
 		updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
 		deleted_at TIMESTAMPTZ
@@ -102,15 +124,20 @@ func ReplaceDSNDatabase(dsn, newDB string) string {
 	return parsed.String()
 }
 
-// SetupTestSchema creates the application tables and sets REPLICA IDENTITY FULL
-// for WAL logical replication. Idempotent — safe to call on every startup.
+// SetupTestSchema creates the application types and tables, then sets
+// REPLICA IDENTITY FULL for WAL logical replication. Idempotent — safe to call on every startup.
 func SetupTestSchema(ctx context.Context, db *sql.DB) error {
+	for _, stmt := range appTypesDDL {
+		if _, err := db.ExecContext(ctx, stmt); err != nil {
+			return fmt.Errorf("creating app type: %w", err)
+		}
+	}
 	for _, stmt := range appTableDDL {
 		if _, err := db.ExecContext(ctx, stmt); err != nil {
 			return fmt.Errorf("creating app table: %w", err)
 		}
 	}
-	for _, table := range []string{"items", "item_details", "categories", "tags"} {
+	for _, table := range []string{"orders", "order_details", "products", "categories"} {
 		if _, err := db.ExecContext(ctx, fmt.Sprintf("ALTER TABLE %s REPLICA IDENTITY FULL", table)); err != nil {
 			return fmt.Errorf("setting replica identity on %s: %w", table, err)
 		}
@@ -139,6 +166,15 @@ func TestDB(t *testing.T) *sql.DB {
 			db.Close()
 			DropTempDB(dsn, dbName)
 			t.Fatalf("running migration: %v", err)
+		}
+	}
+
+	// Create app types
+	for _, stmt := range appTypesDDL {
+		if _, err := db.ExecContext(ctx, stmt); err != nil {
+			db.Close()
+			DropTempDB(dsn, dbName)
+			t.Fatalf("creating app type: %v", err)
 		}
 	}
 
@@ -184,6 +220,13 @@ func TestDBWithAppRole(t *testing.T) (adminDB *sql.DB, appDB *sql.DB) {
 			adminConn.Close()
 			DropTempDB(dsn, dbName)
 			t.Fatalf("running migration: %v", err)
+		}
+	}
+	for _, stmt := range appTypesDDL {
+		if _, err := adminConn.ExecContext(ctx, stmt); err != nil {
+			adminConn.Close()
+			DropTempDB(dsn, dbName)
+			t.Fatalf("creating app type: %v", err)
 		}
 	}
 	for _, stmt := range appTableDDL {

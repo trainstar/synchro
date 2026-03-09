@@ -4,14 +4,14 @@ import GRDB
 
 final class PushProcessorTests: XCTestCase {
     private let testTable = SchemaTable(
-        tableName: "workouts",
+        tableName: "orders",
         pushPolicy: "owner_only",
         updatedAtColumn: "updated_at",
         deletedAtColumn: "deleted_at",
         primaryKey: ["id"],
         columns: [
             SchemaColumn(name: "id", dbType: "uuid", logicalType: "string", nullable: false, isPrimaryKey: true),
-            SchemaColumn(name: "name", dbType: "text", logicalType: "string", nullable: true, isPrimaryKey: false),
+            SchemaColumn(name: "ship_address", dbType: "text", logicalType: "string", nullable: true, isPrimaryKey: false),
             SchemaColumn(name: "user_id", dbType: "uuid", logicalType: "string", nullable: false, isPrimaryKey: false),
             SchemaColumn(name: "updated_at", dbType: "timestamp with time zone", logicalType: "datetime", nullable: false, isPrimaryKey: false),
             SchemaColumn(name: "deleted_at", dbType: "timestamp with time zone", logicalType: "datetime", nullable: true, isPrimaryKey: false),
@@ -51,8 +51,8 @@ final class PushProcessorTests: XCTestCase {
         let (db, tracker, _) = try makeTestEnv()
 
         _ = try db.execute(
-            "INSERT INTO workouts (id, name, user_id, updated_at) VALUES (?, ?, ?, ?)",
-            params: ["w1", "Push Day", "u1", "2026-01-01T10:00:00.000Z"]
+            "INSERT INTO orders (id, ship_address, user_id, updated_at) VALUES (?, ?, ?, ?)",
+            params: ["w1", "123 Main St", "u1", "2026-01-01T10:00:00.000Z"]
         )
 
         let pending = try tracker.pendingChanges()
@@ -63,19 +63,19 @@ final class PushProcessorTests: XCTestCase {
         XCTAssertEqual(pushRecords[0].id, "w1")
         XCTAssertEqual(pushRecords[0].operation, "create")
         XCTAssertNotNil(pushRecords[0].data)
-        XCTAssertEqual(pushRecords[0].data?["name"], AnyCodable("Push Day"))
+        XCTAssertEqual(pushRecords[0].data?["ship_address"], AnyCodable("123 Main St"))
     }
 
     func testHydrateDeleteHasNilData() throws {
         let (db, tracker, _) = try makeTestEnv()
 
         _ = try db.execute(
-            "INSERT INTO workouts (id, name, user_id, updated_at) VALUES (?, ?, ?, ?)",
-            params: ["w1", "Push Day", "u1", "2026-01-01T10:00:00.000Z"]
+            "INSERT INTO orders (id, ship_address, user_id, updated_at) VALUES (?, ?, ?, ?)",
+            params: ["w1", "123 Main St", "u1", "2026-01-01T10:00:00.000Z"]
         )
         try tracker.clearAll()
 
-        _ = try db.execute("DELETE FROM workouts WHERE id = ?", params: ["w1"])
+        _ = try db.execute("DELETE FROM orders WHERE id = ?", params: ["w1"])
 
         let pending = try tracker.pendingChanges()
         XCTAssertEqual(pending.count, 1)
@@ -90,8 +90,8 @@ final class PushProcessorTests: XCTestCase {
         let (db, tracker, _) = try makeTestEnv()
 
         _ = try db.execute(
-            "INSERT INTO workouts (id, name, user_id, updated_at) VALUES (?, ?, ?, ?)",
-            params: ["w1", "Push Day", "u1", "2026-01-01T10:00:00.000Z"]
+            "INSERT INTO orders (id, ship_address, user_id, updated_at) VALUES (?, ?, ?, ?)",
+            params: ["w1", "123 Main St", "u1", "2026-01-01T10:00:00.000Z"]
         )
 
         let pending = try tracker.pendingChanges()
@@ -124,12 +124,12 @@ final class PushProcessorTests: XCTestCase {
         let (db, tracker, _) = try makeTestEnv()
 
         _ = try db.execute(
-            "INSERT INTO workouts (id, name, user_id, updated_at) VALUES (?, ?, ?, ?)",
-            params: ["w1", "Push Day", "u1", "2026-01-01T10:00:00.000Z"]
+            "INSERT INTO orders (id, ship_address, user_id, updated_at) VALUES (?, ?, ?, ?)",
+            params: ["w1", "123 Main St", "u1", "2026-01-01T10:00:00.000Z"]
         )
         _ = try db.execute(
-            "INSERT INTO workouts (id, name, user_id, updated_at) VALUES (?, ?, ?, ?)",
-            params: ["w2", "Pull Day", "u1", "2026-01-01T10:00:00.000Z"]
+            "INSERT INTO orders (id, ship_address, user_id, updated_at) VALUES (?, ?, ?, ?)",
+            params: ["w2", "456 Oak Ave", "u1", "2026-01-01T10:00:00.000Z"]
         )
 
         let pending = try tracker.pendingChanges()
@@ -138,7 +138,7 @@ final class PushProcessorTests: XCTestCase {
         let pushRecords = try tracker.hydratePendingForPush(pending: pending, syncedTables: [testTable])
         XCTAssertEqual(pushRecords.count, 2)
 
-        let ids = Set(pushRecords.map(\.id))
+        let ids = Set(pushRecords.map { $0.id })
         XCTAssertTrue(ids.contains("w1"))
         XCTAssertTrue(ids.contains("w2"))
     }
@@ -148,8 +148,8 @@ final class PushProcessorTests: XCTestCase {
 
         for i in 1...5 {
             _ = try db.execute(
-                "INSERT INTO workouts (id, name, user_id, updated_at) VALUES (?, ?, ?, ?)",
-                params: ["w\(i)", "Workout \(i)", "u1", "2026-01-01T10:00:00.000Z"]
+                "INSERT INTO orders (id, ship_address, user_id, updated_at) VALUES (?, ?, ?, ?)",
+                params: ["w\(i)", "Address \(i)", "u1", "2026-01-01T10:00:00.000Z"]
             )
         }
 
@@ -163,8 +163,8 @@ final class PushProcessorTests: XCTestCase {
         let (db, tracker, processor) = try makeTestEnv()
 
         _ = try db.execute(
-            "INSERT INTO workouts (id, name, user_id, updated_at) VALUES (?, ?, ?, ?)",
-            params: ["w1", "Push Day", "u1", "2026-01-01T10:00:00.000Z"]
+            "INSERT INTO orders (id, ship_address, user_id, updated_at) VALUES (?, ?, ?, ?)",
+            params: ["w1", "123 Main St", "u1", "2026-01-01T10:00:00.000Z"]
         )
 
         // Verify pending entry exists
@@ -176,7 +176,7 @@ final class PushProcessorTests: XCTestCase {
 
         let accepted = [PushResult(
             id: "w1",
-            tableName: "workouts",
+            tableName: "orders",
             operation: "create",
             status: PushStatus.applied,
             serverUpdatedAt: serverTime
@@ -188,7 +188,7 @@ final class PushProcessorTests: XCTestCase {
         XCTAssertFalse(try tracker.hasPendingChanges())
 
         // RYOW: local updated_at should match server timestamp
-        let row = try db.queryOne("SELECT updated_at FROM workouts WHERE id = ?", params: ["w1"])
+        let row = try db.queryOne("SELECT updated_at FROM orders WHERE id = ?", params: ["w1"])
         XCTAssertEqual(row?["updated_at"] as String?, "2026-01-01T12:00:00.000Z")
     }
 
@@ -225,11 +225,11 @@ final class PushProcessorTests: XCTestCase {
         let (db, tracker, processor) = try makeTestEnv()
 
         _ = try db.execute(
-            "INSERT INTO workouts (id, name, user_id, updated_at) VALUES (?, ?, ?, ?)",
-            params: ["w1", "Push Day", "u1", "2026-01-01T10:00:00.000Z"]
+            "INSERT INTO orders (id, ship_address, user_id, updated_at) VALUES (?, ?, ?, ?)",
+            params: ["w1", "123 Main St", "u1", "2026-01-01T10:00:00.000Z"]
         )
         try tracker.clearAll()
-        _ = try db.execute("DELETE FROM workouts WHERE id = ?", params: ["w1"])
+        _ = try db.execute("DELETE FROM orders WHERE id = ?", params: ["w1"])
 
         XCTAssertTrue(try tracker.hasPendingChanges())
 
@@ -239,7 +239,7 @@ final class PushProcessorTests: XCTestCase {
 
         let accepted = [PushResult(
             id: "w1",
-            tableName: "workouts",
+            tableName: "orders",
             operation: "delete",
             status: PushStatus.applied,
             serverDeletedAt: serverTime
@@ -249,7 +249,7 @@ final class PushProcessorTests: XCTestCase {
 
         XCTAssertFalse(try tracker.hasPendingChanges())
 
-        let row = try db.queryOne("SELECT deleted_at FROM workouts WHERE id = ?", params: ["w1"])
+        let row = try db.queryOne("SELECT deleted_at FROM orders WHERE id = ?", params: ["w1"])
         XCTAssertEqual(row?["deleted_at"] as String?, "2026-01-01T12:00:00.000Z")
     }
 
@@ -257,8 +257,8 @@ final class PushProcessorTests: XCTestCase {
         let (db, tracker, processor) = try makeTestEnv()
 
         _ = try db.execute(
-            "INSERT INTO workouts (id, name, user_id, updated_at) VALUES (?, ?, ?, ?)",
-            params: ["w1", "Push Day", "u1", "2026-01-01T10:00:00.000Z"]
+            "INSERT INTO orders (id, ship_address, user_id, updated_at) VALUES (?, ?, ?, ?)",
+            params: ["w1", "123 Main St", "u1", "2026-01-01T10:00:00.000Z"]
         )
 
         let formatter = ISO8601DateFormatter()
@@ -266,7 +266,7 @@ final class PushProcessorTests: XCTestCase {
 
         let accepted = [PushResult(
             id: "w1",
-            tableName: "workouts",
+            tableName: "orders",
             operation: "create",
             status: PushStatus.applied,
             serverUpdatedAt: formatter.date(from: "2026-01-01T12:00:00.000Z")!
@@ -285,18 +285,18 @@ final class PushProcessorTests: XCTestCase {
 
         // Insert local record
         _ = try db.execute(
-            "INSERT INTO workouts (id, name, user_id, updated_at) VALUES (?, ?, ?, ?)",
-            params: ["w1", "Client Name", "u1", "2026-01-01T10:00:00.000Z"]
+            "INSERT INTO orders (id, ship_address, user_id, updated_at) VALUES (?, ?, ?, ?)",
+            params: ["w1", "Client Address", "u1", "2026-01-01T10:00:00.000Z"]
         )
 
         XCTAssertTrue(try tracker.hasPendingChanges())
 
         let serverVersion = Record(
             id: "w1",
-            tableName: "workouts",
+            tableName: "orders",
             data: [
                 "id": AnyCodable("w1"),
-                "name": AnyCodable("Server Name"),
+                "ship_address": AnyCodable("Server Address"),
                 "user_id": AnyCodable("u1"),
                 "updated_at": AnyCodable("2026-01-01T11:00:00.000Z"),
             ],
@@ -305,10 +305,10 @@ final class PushProcessorTests: XCTestCase {
 
         let rejected = [PushResult(
             id: "w1",
-            tableName: "workouts",
+            tableName: "orders",
             operation: "update",
             status: PushStatus.conflict,
-            reason: "server version is newer",
+            message: "server version is newer",
             serverVersion: serverVersion
         )]
 
@@ -318,31 +318,31 @@ final class PushProcessorTests: XCTestCase {
         XCTAssertFalse(try tracker.hasPendingChanges())
 
         // Local record should have server's data
-        let row = try db.queryOne("SELECT name, updated_at FROM workouts WHERE id = ?", params: ["w1"])
-        XCTAssertEqual(row?["name"] as String?, "Server Name")
+        let row = try db.queryOne("SELECT ship_address, updated_at FROM orders WHERE id = ?", params: ["w1"])
+        XCTAssertEqual(row?["ship_address"] as String?, "Server Address")
         XCTAssertEqual(row?["updated_at"] as String?, "2026-01-01T11:00:00.000Z")
 
         // Should fire conflict event
         XCTAssertEqual(conflicts.count, 1)
-        XCTAssertEqual(conflicts[0].table, "workouts")
+        XCTAssertEqual(conflicts[0].table, "orders")
         XCTAssertEqual(conflicts[0].recordID, "w1")
-        XCTAssertEqual(conflicts[0].serverData?["name"], AnyCodable("Server Name"))
+        XCTAssertEqual(conflicts[0].serverData?["ship_address"], AnyCodable("Server Address"))
     }
 
     func testApplyRejectedWithoutServerVersion() throws {
         let (db, tracker, processor) = try makeTestEnv()
 
         _ = try db.execute(
-            "INSERT INTO workouts (id, name, user_id, updated_at) VALUES (?, ?, ?, ?)",
-            params: ["w1", "Client Name", "u1", "2026-01-01T10:00:00.000Z"]
+            "INSERT INTO orders (id, ship_address, user_id, updated_at) VALUES (?, ?, ?, ?)",
+            params: ["w1", "Client Address", "u1", "2026-01-01T10:00:00.000Z"]
         )
 
         let rejected = [PushResult(
             id: "w1",
-            tableName: "workouts",
+            tableName: "orders",
             operation: "update",
-            status: PushStatus.error,
-            reason: "ownership violation"
+            status: PushStatus.rejectedTerminal,
+            message: "ownership violation"
         )]
 
         let conflicts = try processor.applyRejected(rejected: rejected, syncedTables: [testTable])
@@ -351,8 +351,8 @@ final class PushProcessorTests: XCTestCase {
         XCTAssertFalse(try tracker.hasPendingChanges())
 
         // Local record unchanged (no server version to apply)
-        let row = try db.queryOne("SELECT name FROM workouts WHERE id = ?", params: ["w1"])
-        XCTAssertEqual(row?["name"] as String?, "Client Name")
+        let row = try db.queryOne("SELECT ship_address FROM orders WHERE id = ?", params: ["w1"])
+        XCTAssertEqual(row?["ship_address"] as String?, "Client Address")
 
         // Error status, not conflict — no conflict event
         XCTAssertEqual(conflicts.count, 0)
@@ -362,16 +362,16 @@ final class PushProcessorTests: XCTestCase {
         let (db, tracker, processor) = try makeTestEnv()
 
         _ = try db.execute(
-            "INSERT INTO workouts (id, name, user_id, updated_at) VALUES (?, ?, ?, ?)",
-            params: ["w1", "Client Name", "u1", "2026-01-01T10:00:00.000Z"]
+            "INSERT INTO orders (id, ship_address, user_id, updated_at) VALUES (?, ?, ?, ?)",
+            params: ["w1", "Client Address", "u1", "2026-01-01T10:00:00.000Z"]
         )
 
         let serverVersion = Record(
             id: "w1",
-            tableName: "workouts",
+            tableName: "orders",
             data: [
                 "id": AnyCodable("w1"),
-                "name": AnyCodable("Server Name"),
+                "ship_address": AnyCodable("Server Address"),
                 "user_id": AnyCodable("u1"),
                 "updated_at": AnyCodable("2026-01-01T11:00:00.000Z"),
             ],
@@ -380,10 +380,10 @@ final class PushProcessorTests: XCTestCase {
 
         let rejected = [PushResult(
             id: "w1",
-            tableName: "workouts",
+            tableName: "orders",
             operation: "update",
             status: PushStatus.conflict,
-            reason: "server version is newer",
+            message: "server version is newer",
             serverVersion: serverVersion
         )]
 

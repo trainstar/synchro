@@ -31,6 +31,9 @@ enum SQLiteSchema {
             if !col.nullable && !col.isPrimaryKey {
                 def += " NOT NULL"
             }
+            if let defaultSQL = col.sqliteDefaultSQL, !defaultSQL.isEmpty {
+                def += " DEFAULT \(defaultSQL)"
+            }
             colDefs.append(def)
         }
 
@@ -52,19 +55,24 @@ enum SQLiteSchema {
 
         var triggers: [String] = []
 
+        let escapedName = name.replacingOccurrences(of: "'", with: "''")
+        let quotedInsertTrigger = SQLiteHelpers.quoteIdentifier("_synchro_cdc_insert_\(name)")
+        let quotedUpdateTrigger = SQLiteHelpers.quoteIdentifier("_synchro_cdc_update_\(name)")
+        let quotedDeleteTrigger = SQLiteHelpers.quoteIdentifier("_synchro_cdc_delete_\(name)")
+
         // DROP existing triggers first (for re-creation on schema update)
-        triggers.append("DROP TRIGGER IF EXISTS _synchro_cdc_insert_\(name)")
-        triggers.append("DROP TRIGGER IF EXISTS _synchro_cdc_update_\(name)")
-        triggers.append("DROP TRIGGER IF EXISTS _synchro_cdc_delete_\(name)")
+        triggers.append("DROP TRIGGER IF EXISTS \(quotedInsertTrigger)")
+        triggers.append("DROP TRIGGER IF EXISTS \(quotedUpdateTrigger)")
+        triggers.append("DROP TRIGGER IF EXISTS \(quotedDeleteTrigger)")
 
         // INSERT trigger
         triggers.append("""
-            CREATE TRIGGER _synchro_cdc_insert_\(name)
+            CREATE TRIGGER \(quotedInsertTrigger)
             AFTER INSERT ON \(quoted)
             WHEN \(lockCheck)
             BEGIN
                 INSERT INTO _synchro_pending_changes (record_id, table_name, operation, client_updated_at)
-                VALUES (NEW.\(quotedPK), '\(name)', 'create', \(tsNow))
+                VALUES (NEW.\(quotedPK), '\(escapedName)', 'create', \(tsNow))
                 ON CONFLICT (table_name, record_id) DO UPDATE SET
                     operation = CASE
                         WHEN _synchro_pending_changes.operation = 'delete' THEN 'update'
@@ -76,13 +84,13 @@ enum SQLiteSchema {
 
         // UPDATE trigger
         triggers.append("""
-            CREATE TRIGGER _synchro_cdc_update_\(name)
+            CREATE TRIGGER \(quotedUpdateTrigger)
             AFTER UPDATE ON \(quoted)
             WHEN \(lockCheck)
             BEGIN
                 INSERT INTO _synchro_pending_changes (record_id, table_name, operation, base_updated_at, client_updated_at)
                 VALUES (
-                    NEW.\(quotedPK), '\(name)',
+                    NEW.\(quotedPK), '\(escapedName)',
                     CASE WHEN NEW.\(quotedDeletedAt) IS NOT NULL AND OLD.\(quotedDeletedAt) IS NULL THEN 'delete' ELSE 'update' END,
                     OLD.\(quotedUpdatedAt),
                     \(tsNow)
@@ -99,7 +107,7 @@ enum SQLiteSchema {
                     END,
                     client_updated_at = excluded.client_updated_at;
                 DELETE FROM _synchro_pending_changes
-                WHERE table_name = '\(name)' AND record_id = NEW.\(quotedPK)
+                WHERE table_name = '\(escapedName)' AND record_id = NEW.\(quotedPK)
                   AND operation = 'delete'
                   AND base_updated_at IS NULL;
             END
@@ -107,7 +115,7 @@ enum SQLiteSchema {
 
         // BEFORE DELETE trigger (converts hard delete to soft delete)
         triggers.append("""
-            CREATE TRIGGER _synchro_cdc_delete_\(name)
+            CREATE TRIGGER \(quotedDeleteTrigger)
             BEFORE DELETE ON \(quoted)
             WHEN \(lockCheck)
             BEGIN

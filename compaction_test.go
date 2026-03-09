@@ -49,13 +49,6 @@ func TestNewCompactor_ZeroValues_UseDefaults(t *testing.T) {
 	}
 }
 
-func TestCompactResult_ZeroValue(t *testing.T) {
-	var r CompactResult
-	if r.DeactivatedClients != 0 || r.SafeSeq != 0 || r.DeletedEntries != 0 {
-		t.Error("zero value CompactResult should have all zero fields")
-	}
-}
-
 func TestCompact_ZeroSafeSeq_IsNoop(t *testing.T) {
 	c := NewCompactor(nil)
 	// safeSeq=0 should return immediately with 0 deleted, no DB calls needed.

@@ -14,8 +14,8 @@ public struct SynchroConfig: Sendable {
     public let pullPageSize: Int
     /// Max pending changes per push batch (default 100).
     public let pushBatchSize: Int
-    /// Max records per resync page (default 100, server caps at 1000).
-    public let resyncPageSize: Int
+    /// Max records per snapshot page (default 100, server caps at 1000).
+    public let snapshotPageSize: Int
 
     public init(
         dbPath: String,
@@ -29,7 +29,7 @@ public struct SynchroConfig: Sendable {
         maxRetryAttempts: Int = 5,
         pullPageSize: Int = 100,
         pushBatchSize: Int = 100,
-        resyncPageSize: Int = 100
+        snapshotPageSize: Int = 100
     ) {
         self.dbPath = dbPath
         self.serverURL = serverURL
@@ -42,6 +42,6 @@ public struct SynchroConfig: Sendable {
         self.maxRetryAttempts = maxRetryAttempts
         self.pullPageSize = min(pullPageSize, 1000)
         self.pushBatchSize = pushBatchSize
-        self.resyncPageSize = min(resyncPageSize, 1000)
+        self.snapshotPageSize = min(snapshotPageSize, 1000)
     }
 }

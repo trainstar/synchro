@@ -43,6 +43,9 @@ func (r *LWWResolver) Resolve(_ context.Context, c Conflict) (Resolution, error)
 	clientTime := c.ClientTime.Add(r.ClockSkewTolerance)
 
 	if c.BaseVersion != nil {
+		if c.BaseVersion.After(c.ServerTime) {
+			return Resolution{Winner: "server", Reason: "client base version is ahead of server version"}, nil
+		}
 		// Optimistic: check if server changed since client's base
 		if !c.BaseVersion.Equal(c.ServerTime) && !c.BaseVersion.After(c.ServerTime) {
 			// Server modified since base — use LWW

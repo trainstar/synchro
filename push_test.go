@@ -8,7 +8,7 @@ import (
 func testConfig(t *testing.T, opts ...func(*TableConfig)) *TableConfig {
 	t.Helper()
 	cfg := &TableConfig{
-		TableName:   "items",
+		TableName:   "orders",
 		PushPolicy:  PushPolicyOwnerOnly,
 		OwnerColumn: "user_id",
 	}
@@ -64,10 +64,10 @@ func TestInsertRecord_ColumnFiltering(t *testing.T) {
 
 func TestInsertRecord_WithParentFK(t *testing.T) {
 	cfg := testConfig(t, func(c *TableConfig) {
-		c.ParentFKCol = "workout_id"
+		c.ParentFKCol = "order_id"
 	})
 
-	dataCols := []string{"id", "user_id", "workout_id", "name", "updated_at"}
+	dataCols := []string{"id", "user_id", "order_id", "name", "updated_at"}
 	allowed := cfg.AllowedInsertColumns(dataCols)
 
 	allowedSet := make(map[string]bool, len(allowed))
@@ -76,8 +76,8 @@ func TestInsertRecord_WithParentFK(t *testing.T) {
 	}
 
 	// ParentFKCol should be allowed on insert.
-	if !allowedSet["workout_id"] {
-		t.Error("expected 'workout_id' (ParentFKCol) to be allowed on insert")
+	if !allowedSet["order_id"] {
+		t.Error("expected 'order_id' (ParentFKCol) to be allowed on insert")
 	}
 	if allowedSet["updated_at"] {
 		t.Error("expected 'updated_at' to be denied on insert")
@@ -134,10 +134,10 @@ func TestUpdateRecord_ColumnFiltering(t *testing.T) {
 
 func TestUpdateRecord_WithParentFK(t *testing.T) {
 	cfg := testConfig(t, func(c *TableConfig) {
-		c.ParentFKCol = "workout_id"
+		c.ParentFKCol = "order_id"
 	})
 
-	dataCols := []string{"workout_id", "name"}
+	dataCols := []string{"order_id", "name"}
 	allowed := cfg.AllowedUpdateColumns(dataCols)
 
 	allowedSet := make(map[string]bool, len(allowed))
@@ -146,8 +146,8 @@ func TestUpdateRecord_WithParentFK(t *testing.T) {
 	}
 
 	// ParentFKCol is protected on update.
-	if allowedSet["workout_id"] {
-		t.Error("expected 'workout_id' (ParentFKCol) to be denied on update")
+	if allowedSet["order_id"] {
+		t.Error("expected 'order_id' (ParentFKCol) to be denied on update")
 	}
 	if !allowedSet["name"] {
 		t.Error("expected 'name' to be allowed on update")

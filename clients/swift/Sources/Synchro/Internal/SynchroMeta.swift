@@ -7,6 +7,7 @@ enum MetaKey: String {
     case schemaHash = "schema_hash"
     case clientServerID = "client_server_id"
     case knownBuckets = "known_buckets"
+    case snapshotComplete = "snapshot_complete"
     case syncLock = "sync_lock"
 }
 

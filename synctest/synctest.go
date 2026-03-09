@@ -8,31 +8,31 @@ import (
 	"github.com/trainstar/synchro"
 )
 
-// NewTestRegistry creates a minimal registry for testing with a few tables.
+// NewTestRegistry creates a minimal Northwind-based registry for testing.
 func NewTestRegistry() *synchro.Registry {
 	r := synchro.NewRegistry()
 
 	r.Register(&synchro.TableConfig{
-		TableName:   "items",
+		TableName:   "orders",
 		PushPolicy:  synchro.PushPolicyOwnerOnly,
 		OwnerColumn: "user_id",
 	})
 
 	r.Register(&synchro.TableConfig{
-		TableName:    "item_details",
+		TableName:    "order_details",
 		PushPolicy:   synchro.PushPolicyOwnerOnly,
-		ParentTable:  "items",
-		ParentFKCol:  "item_id",
-		Dependencies: []string{"items"},
+		ParentTable:  "orders",
+		ParentFKCol:  "order_id",
+		Dependencies: []string{"orders"},
 	})
 
 	r.Register(&synchro.TableConfig{
-		TableName:  "categories",
+		TableName:  "products",
 		PushPolicy: synchro.PushPolicyDisabled,
 	})
 
 	r.Register(&synchro.TableConfig{
-		TableName:       "tags",
+		TableName:       "categories",
 		PushPolicy:      synchro.PushPolicyOwnerOnly,
 		OwnerColumn:     "user_id",
 		AllowGlobalRead: true,

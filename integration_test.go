@@ -21,6 +21,42 @@ func schemaFields(t *testing.T, ctx context.Context, engine *synchro.Engine) (in
 	return v, h
 }
 
+func snapshotClientReady(t *testing.T, ctx context.Context, engine *synchro.Engine, userID, clientID string, schemaVersion int64, schemaHash string) int64 {
+	t.Helper()
+
+	var (
+		cursor     *synchro.SnapshotCursor
+		checkpoint int64
+	)
+	for {
+		resp, err := engine.Snapshot(ctx, userID, &synchro.SnapshotRequest{
+			ClientID:      clientID,
+			Cursor:        cursor,
+			Limit:         100,
+			SchemaVersion: schemaVersion,
+			SchemaHash:    schemaHash,
+		})
+		if err != nil {
+			t.Fatalf("Snapshot bootstrap for %s: %v", clientID, err)
+		}
+		if !resp.HasMore {
+			pullResp, err := engine.Pull(ctx, userID, synctest.MakePullRequest(clientID, resp.Checkpoint, schemaVersion, schemaHash))
+			if err != nil {
+				t.Fatalf("Post-snapshot pull readiness check for %s: %v", clientID, err)
+			}
+			if pullResp.SnapshotRequired {
+				t.Fatalf("client %s still requires snapshot after completed snapshot", clientID)
+			}
+			return resp.Checkpoint
+		}
+		cursor = resp.Cursor
+		checkpoint = resp.Checkpoint
+		if checkpoint < 0 {
+			t.Fatalf("invalid snapshot checkpoint for %s: %d", clientID, checkpoint)
+		}
+	}
+}
+
 func TestIntegration_PushPullRoundTrip(t *testing.T) {
 	db := synctest.TestDB(t)
 	reg := synctest.NewTestRegistry()
@@ -43,13 +79,16 @@ func TestIntegration_PushPullRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RegisterClient: %v", err)
 	}
+	snapshotClientReady(t, ctx, engine, userID, clientID, sv, sh)
+	snapshotClientReady(t, ctx, engine, userID, clientID, sv, sh)
+	snapshotClientReady(t, ctx, engine, userID, clientID, sv, sh)
+	snapshotClientReady(t, ctx, engine, userID, clientID, sv, sh)
 
 	// Push a create
-	itemID := "00000000-0000-0000-0000-000000000010"
+	orderID := "00000000-0000-0000-0000-000000000010"
 	pushReq := synctest.MakePushRequest(clientID, sv, sh,
-		synctest.MakePushRecord(itemID, "items", "create", map[string]any{
-			"name":        "Test Item",
-			"description": "A test item",
+		synctest.MakePushRecord(orderID, "orders", "create", map[string]any{
+			"ship_address": "123 Main St",
 		}),
 	)
 
@@ -69,7 +108,7 @@ func TestIntegration_PushPullRoundTrip(t *testing.T) {
 	// Simulate WAL: write a changelog entry for the created record
 	_, err = db.ExecContext(ctx,
 		"INSERT INTO sync_changelog (bucket_id, table_name, record_id, operation) VALUES ($1, $2, $3, $4)",
-		"user:"+userID, "items", itemID, 1)
+		"user:"+userID, "orders", orderID, 1)
 	if err != nil {
 		t.Fatalf("writing changelog: %v", err)
 	}
@@ -83,14 +122,14 @@ func TestIntegration_PushPullRoundTrip(t *testing.T) {
 	if len(pullResp.Changes) != 1 {
 		t.Fatalf("expected 1 change, got %d", len(pullResp.Changes))
 	}
-	if pullResp.Changes[0].ID != itemID {
-		t.Errorf("pulled record ID = %q, want %q", pullResp.Changes[0].ID, itemID)
+	if pullResp.Changes[0].ID != orderID {
+		t.Errorf("pulled record ID = %q, want %q", pullResp.Changes[0].ID, orderID)
 	}
 
 	// Push an update
 	updateReq := synctest.MakePushRequest(clientID, sv, sh,
-		synctest.MakePushRecord(itemID, "items", "update", map[string]any{
-			"name": "Updated Item",
+		synctest.MakePushRecord(orderID, "orders", "update", map[string]any{
+			"ship_address": "456 Oak Ave",
 		}),
 	)
 	updateResp, err := engine.Push(ctx, userID, updateReq)
@@ -109,7 +148,7 @@ func TestIntegration_PushPullRoundTrip(t *testing.T) {
 	// Simulate WAL for the update
 	_, err = db.ExecContext(ctx,
 		"INSERT INTO sync_changelog (bucket_id, table_name, record_id, operation) VALUES ($1, $2, $3, $4)",
-		"user:"+userID, "items", itemID, 2)
+		"user:"+userID, "orders", orderID, 2)
 	if err != nil {
 		t.Fatalf("writing changelog: %v", err)
 	}
@@ -126,7 +165,7 @@ func TestIntegration_PushPullRoundTrip(t *testing.T) {
 
 	// Push a delete
 	deleteReq := synctest.MakePushRequest(clientID, sv, sh,
-		synctest.MakePushRecord(itemID, "items", "delete", nil),
+		synctest.MakePushRecord(orderID, "orders", "delete", nil),
 	)
 	deleteResp, err := engine.Push(ctx, userID, deleteReq)
 	if err != nil {
@@ -144,7 +183,7 @@ func TestIntegration_PushPullRoundTrip(t *testing.T) {
 	// Simulate WAL for the delete
 	_, err = db.ExecContext(ctx,
 		"INSERT INTO sync_changelog (bucket_id, table_name, record_id, operation) VALUES ($1, $2, $3, $4)",
-		"user:"+userID, "items", itemID, 3)
+		"user:"+userID, "orders", orderID, 3)
 	if err != nil {
 		t.Fatalf("writing changelog: %v", err)
 	}
@@ -158,8 +197,8 @@ func TestIntegration_PushPullRoundTrip(t *testing.T) {
 	if len(pullResp3.Deletes) != 1 {
 		t.Fatalf("expected 1 delete entry, got %d", len(pullResp3.Deletes))
 	}
-	if pullResp3.Deletes[0].ID != itemID {
-		t.Errorf("deleted record ID = %q, want %q", pullResp3.Deletes[0].ID, itemID)
+	if pullResp3.Deletes[0].ID != orderID {
+		t.Errorf("deleted record ID = %q, want %q", pullResp3.Deletes[0].ID, orderID)
 	}
 }
 
@@ -211,12 +250,14 @@ func TestIntegration_RLSEnforcement(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RegisterClient B: %v", err)
 	}
+	snapshotClientReady(t, ctx, engine, userA, clientA, sv, sh)
+	snapshotClientReady(t, ctx, engine, userB, clientB, sv, sh)
 
 	// User A creates a record
-	itemID := "00000000-0000-0000-0000-000000000020"
+	orderID := "00000000-0000-0000-0000-000000000020"
 	pushReq := synctest.MakePushRequest(clientA, sv, sh,
-		synctest.MakePushRecord(itemID, "items", "create", map[string]any{
-			"name": "User A Item",
+		synctest.MakePushRecord(orderID, "orders", "create", map[string]any{
+			"ship_address": "100 Elm St",
 		}),
 	)
 	resp, err := engine.Push(ctx, userA, pushReq)
@@ -229,8 +270,8 @@ func TestIntegration_RLSEnforcement(t *testing.T) {
 
 	// User B tries to update user A's record — RLS should block it
 	updateReq := synctest.MakePushRequest(clientB, sv, sh,
-		synctest.MakePushRecord(itemID, "items", "update", map[string]any{
-			"name": "Hijacked",
+		synctest.MakePushRecord(orderID, "orders", "update", map[string]any{
+			"ship_address": "Hijacked",
 		}),
 	)
 	updateResp, err := engine.Push(ctx, userB, updateReq)
@@ -247,8 +288,8 @@ func TestIntegration_RLSEnforcement(t *testing.T) {
 
 	// User A can still update their own record
 	updateReqA := synctest.MakePushRequest(clientA, sv, sh,
-		synctest.MakePushRecord(itemID, "items", "update", map[string]any{
-			"name": "Updated by A",
+		synctest.MakePushRecord(orderID, "orders", "update", map[string]any{
+			"ship_address": "Updated by A",
 		}),
 	)
 	updateRespA, err := engine.Push(ctx, userA, updateReqA)
@@ -281,12 +322,14 @@ func TestIntegration_RYOW_PushReturnsServerTimestamps(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RegisterClient: %v", err)
 	}
+	snapshotClientReady(t, ctx, engine, userID, clientID, sv, sh)
+	snapshotClientReady(t, ctx, engine, userID, clientID, sv, sh)
 
 	// Create
-	itemID := "00000000-0000-0000-0000-000000000030"
+	orderID := "00000000-0000-0000-0000-000000000030"
 	createResp, err := engine.Push(ctx, userID, synctest.MakePushRequest(clientID, sv, sh,
-		synctest.MakePushRecord(itemID, "items", "create", map[string]any{
-			"name": "RYOW test",
+		synctest.MakePushRecord(orderID, "orders", "create", map[string]any{
+			"ship_address": "RYOW test",
 		}),
 	))
 	if err != nil {
@@ -314,10 +357,10 @@ func TestIntegration_RYOW_PushReturnsServerTimestamps(t *testing.T) {
 	}
 
 	// Update — pass BaseUpdatedAt so optimistic concurrency resolves correctly
-	updateData, _ := json.Marshal(map[string]any{"name": "RYOW updated"})
+	updateData, _ := json.Marshal(map[string]any{"ship_address": "RYOW updated"})
 	updateResp, err := engine.Push(ctx, userID, synctest.MakePushRequest(clientID, sv, sh,
 		synchro.PushRecord{
-			ID: itemID, TableName: "items", Operation: "update",
+			ID: orderID, TableName: "orders", Operation: "update",
 			Data: updateData, ClientUpdatedAt: time.Now().UTC(), BaseUpdatedAt: &createTS,
 		},
 	))
@@ -339,7 +382,7 @@ func TestIntegration_RYOW_PushReturnsServerTimestamps(t *testing.T) {
 
 	// Delete
 	delResp, err := engine.Push(ctx, userID, synctest.MakePushRequest(clientID, sv, sh,
-		synctest.MakePushRecord(itemID, "items", "delete", nil),
+		synctest.MakePushRecord(orderID, "orders", "delete", nil),
 	))
 	if err != nil {
 		t.Fatalf("Push delete: %v", err)
@@ -387,11 +430,13 @@ func TestIntegration_Compaction(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RegisterClient B: %v", err)
 	}
+	snapshotClientReady(t, ctx, engine, userID, clientA, sv, sh)
+	snapshotClientReady(t, ctx, engine, userID, clientB, sv, sh)
 
 	// Push a record
-	itemID := "00000000-0000-0000-0000-000000000040"
+	orderID := "00000000-0000-0000-0000-000000000040"
 	_, err = engine.Push(ctx, userID, synctest.MakePushRequest(clientA, sv, sh,
-		synctest.MakePushRecord(itemID, "items", "create", map[string]any{"name": "compact test"}),
+		synctest.MakePushRecord(orderID, "orders", "create", map[string]any{"ship_address": "800 Compact Ln"}),
 	))
 	if err != nil {
 		t.Fatalf("Push: %v", err)
@@ -401,7 +446,7 @@ func TestIntegration_Compaction(t *testing.T) {
 	for i := 0; i < 20; i++ {
 		_, err = db.ExecContext(ctx,
 			"INSERT INTO sync_changelog (bucket_id, table_name, record_id, operation) VALUES ($1, $2, $3, $4)",
-			"user:"+userID, "items", itemID, 2)
+			"user:"+userID, "orders", orderID, 2)
 		if err != nil {
 			t.Fatalf("writing changelog entry %d: %v", i, err)
 		}
@@ -474,18 +519,19 @@ func TestIntegration_StaleClientDeactivation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RegisterClient: %v", err)
 	}
+	snapshotClientReady(t, ctx, engine, userID, clientID, sv, sh)
 
 	// Push a record and create changelog entries
-	itemID := "00000000-0000-0000-0000-000000000041"
+	orderID := "00000000-0000-0000-0000-000000000041"
 	_, err = engine.Push(ctx, userID, synctest.MakePushRequest(clientID, sv, sh,
-		synctest.MakePushRecord(itemID, "items", "create", map[string]any{"name": "stale test"}),
+		synctest.MakePushRecord(orderID, "orders", "create", map[string]any{"ship_address": "801 Stale Dr"}),
 	))
 	if err != nil {
 		t.Fatalf("Push: %v", err)
 	}
 	_, err = db.ExecContext(ctx,
 		"INSERT INTO sync_changelog (bucket_id, table_name, record_id, operation) VALUES ($1, $2, $3, $4)",
-		"user:"+userID, "items", itemID, 1)
+		"user:"+userID, "orders", orderID, 1)
 	if err != nil {
 		t.Fatalf("writing changelog: %v", err)
 	}
@@ -543,19 +589,20 @@ func TestIntegration_ResyncRequired(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RegisterClient: %v", err)
 	}
+	snapshotClientReady(t, ctx, engine, userID, clientID, sv, sh)
 
 	// Push 5 records to create actual DB rows, then insert changelog entries
 	for i := 0; i < 5; i++ {
 		recID := fmt.Sprintf("00000000-0000-0000-0000-0000000050%02d", i)
 		_, err = engine.Push(ctx, userID, synctest.MakePushRequest(clientID, sv, sh,
-			synctest.MakePushRecord(recID, "items", "create", map[string]any{"name": fmt.Sprintf("item-%d", i)}),
+			synctest.MakePushRecord(recID, "orders", "create", map[string]any{"ship_address": fmt.Sprintf("order-%d", i)}),
 		))
 		if err != nil {
-			t.Fatalf("Push item %d: %v", i, err)
+			t.Fatalf("Push order %d: %v", i, err)
 		}
 		_, err = db.ExecContext(ctx,
 			"INSERT INTO sync_changelog (bucket_id, table_name, record_id, operation) VALUES ($1, $2, $3, $4)",
-			"user:"+userID, "items", recID, 1)
+			"user:"+userID, "orders", recID, 1)
 		if err != nil {
 			t.Fatalf("writing changelog: %v", err)
 		}
@@ -581,14 +628,14 @@ func TestIntegration_ResyncRequired(t *testing.T) {
 	for i := 0; i < 3; i++ {
 		recID := fmt.Sprintf("00000000-0000-0000-0000-0000000060%02d", i)
 		_, err = engine.Push(ctx, userID, synctest.MakePushRequest(clientID, sv, sh,
-			synctest.MakePushRecord(recID, "items", "create", map[string]any{"name": fmt.Sprintf("new-item-%d", i)}),
+			synctest.MakePushRecord(recID, "orders", "create", map[string]any{"ship_address": fmt.Sprintf("new-order-%d", i)}),
 		))
 		if err != nil {
-			t.Fatalf("Push new item %d: %v", i, err)
+			t.Fatalf("Push new order %d: %v", i, err)
 		}
 		_, err = db.ExecContext(ctx,
 			"INSERT INTO sync_changelog (bucket_id, table_name, record_id, operation) VALUES ($1, $2, $3, $4)",
-			"user:"+userID, "items", recID, 1)
+			"user:"+userID, "orders", recID, 1)
 		if err != nil {
 			t.Fatalf("writing new changelog: %v", err)
 		}
@@ -601,20 +648,23 @@ func TestIntegration_ResyncRequired(t *testing.T) {
 		t.Fatalf("deleting old entry: %v", err)
 	}
 
-	// Now pull with old checkpoint — should get resync_required
+	// Now pull with old checkpoint — should get snapshot_required
 	pullResp2, err := engine.Pull(ctx, userID, synctest.MakePullRequest(clientID, pullResp.Checkpoint, sv, sh))
 	if err != nil {
 		t.Fatalf("Pull with stale checkpoint: %v", err)
 	}
-	if !pullResp2.ResyncRequired {
-		t.Fatal("expected ResyncRequired = true")
+	if !pullResp2.SnapshotRequired {
+		t.Fatal("expected SnapshotRequired = true")
+	}
+	if pullResp2.SnapshotReason != synchro.SnapshotReasonCheckpointBeforeLimit {
+		t.Fatalf("snapshot reason = %q, want %q", pullResp2.SnapshotReason, synchro.SnapshotReasonCheckpointBeforeLimit)
 	}
 	if pullResp2.Checkpoint != pullResp.Checkpoint {
 		t.Errorf("checkpoint should be preserved: got %d, want %d", pullResp2.Checkpoint, pullResp.Checkpoint)
 	}
 }
 
-func TestIntegration_ResyncRoundTrip(t *testing.T) {
+func TestIntegration_SnapshotRoundTrip(t *testing.T) {
 	db := synctest.TestDB(t)
 	reg := synctest.NewTestRegistry()
 	ctx := context.Background()
@@ -637,14 +687,14 @@ func TestIntegration_ResyncRoundTrip(t *testing.T) {
 	}
 
 	// Create several records across tables
-	itemIDs := []string{
+	orderIDs := []string{
 		"00000000-0000-0000-0000-000000000050",
 		"00000000-0000-0000-0000-000000000051",
 		"00000000-0000-0000-0000-000000000052",
 	}
-	for _, id := range itemIDs {
+	for _, id := range orderIDs {
 		_, err = engine.Push(ctx, userID, synctest.MakePushRequest(clientID, sv, sh,
-			synctest.MakePushRecord(id, "items", "create", map[string]any{"name": "resync " + id}),
+			synctest.MakePushRecord(id, "orders", "create", map[string]any{"ship_address": "resync " + id}),
 		))
 		if err != nil {
 			t.Fatalf("Push %s: %v", id, err)
@@ -652,10 +702,10 @@ func TestIntegration_ResyncRoundTrip(t *testing.T) {
 	}
 
 	// Write changelog entries (simulate WAL)
-	for _, id := range itemIDs {
+	for _, id := range orderIDs {
 		_, err = db.ExecContext(ctx,
 			"INSERT INTO sync_changelog (bucket_id, table_name, record_id, operation) VALUES ($1, $2, $3, $4)",
-			"user:"+userID, "items", id, 1)
+			"user:"+userID, "orders", id, 1)
 		if err != nil {
 			t.Fatalf("writing changelog: %v", err)
 		}
@@ -663,11 +713,12 @@ func TestIntegration_ResyncRoundTrip(t *testing.T) {
 
 	// Resync — page through all records with small limit
 	var allRecords []synchro.Record
-	var cursor *synchro.ResyncCursor
+	var cursor *synchro.SnapshotCursor
+	var finalCheckpoint int64
 	pages := 0
 
 	for {
-		resyncResp, err := engine.Resync(ctx, userID, &synchro.ResyncRequest{
+		snapshotResp, err := engine.Snapshot(ctx, userID, &synchro.SnapshotRequest{
 			ClientID:      clientID,
 			Cursor:        cursor,
 			Limit:         2, // Small limit to force pagination
@@ -675,20 +726,21 @@ func TestIntegration_ResyncRoundTrip(t *testing.T) {
 			SchemaHash:    sh,
 		})
 		if err != nil {
-			t.Fatalf("Resync page %d: %v", pages, err)
+			t.Fatalf("Snapshot page %d: %v", pages, err)
 		}
 		pages++
 
-		allRecords = append(allRecords, resyncResp.Records...)
+		allRecords = append(allRecords, snapshotResp.Records...)
 
-		if !resyncResp.HasMore {
-			if resyncResp.Checkpoint == 0 {
+		if !snapshotResp.HasMore {
+			if snapshotResp.Checkpoint == 0 {
 				t.Error("expected nonzero checkpoint on final page")
 			}
+			finalCheckpoint = snapshotResp.Checkpoint
 			break
 		}
 
-		cursor = resyncResp.Cursor
+		cursor = snapshotResp.Cursor
 		if cursor == nil {
 			t.Fatal("expected cursor on intermediate page")
 		}
@@ -698,23 +750,22 @@ func TestIntegration_ResyncRoundTrip(t *testing.T) {
 		}
 	}
 
-	if len(allRecords) < len(itemIDs) {
-		t.Errorf("resync returned %d records, expected at least %d", len(allRecords), len(itemIDs))
+	if len(allRecords) < len(orderIDs) {
+		t.Errorf("snapshot returned %d records, expected at least %d", len(allRecords), len(orderIDs))
 	}
-	t.Logf("resync completed in %d pages with %d records", pages, len(allRecords))
+	t.Logf("snapshot completed in %d pages with %d records", pages, len(allRecords))
 
-	// Normal pull should work after resync
-	pullResp, err := engine.Pull(ctx, userID, synctest.MakePullRequest(clientID, 0, sv, sh))
+	// Normal pull should work after snapshot when resuming from the snapshot checkpoint.
+	pullResp, err := engine.Pull(ctx, userID, synctest.MakePullRequest(clientID, finalCheckpoint, sv, sh))
 	if err != nil {
-		t.Fatalf("Pull after resync: %v", err)
+		t.Fatalf("Pull after snapshot: %v", err)
 	}
-	// Pull from checkpoint 0 should still find the changelog entries
 	if len(pullResp.Changes) == 0 && len(pullResp.Deletes) == 0 {
-		t.Log("no changes in pull after resync (changelog may have been consumed)")
+		t.Log("no changes in pull after snapshot (changelog may have been consumed)")
 	}
 }
 
-func TestIntegration_ResyncReactivatesClient(t *testing.T) {
+func TestIntegration_SnapshotReactivatesClient(t *testing.T) {
 	db := synctest.TestDB(t)
 	reg := synctest.NewTestRegistry()
 	ctx := context.Background()
@@ -741,9 +792,9 @@ func TestIntegration_ResyncReactivatesClient(t *testing.T) {
 	}
 
 	// Create a record
-	itemID := "00000000-0000-0000-0000-000000000060"
+	orderID := "00000000-0000-0000-0000-000000000060"
 	_, err = engine.Push(ctx, userID, synctest.MakePushRequest(clientID, sv, sh,
-		synctest.MakePushRecord(itemID, "items", "create", map[string]any{"name": "reactivate test"}),
+		synctest.MakePushRecord(orderID, "orders", "create", map[string]any{"ship_address": "900 Activate Ave"}),
 	))
 	if err != nil {
 		t.Fatalf("Push: %v", err)
@@ -752,15 +803,29 @@ func TestIntegration_ResyncReactivatesClient(t *testing.T) {
 	// Write changelog entry
 	_, err = db.ExecContext(ctx,
 		"INSERT INTO sync_changelog (bucket_id, table_name, record_id, operation) VALUES ($1, $2, $3, $4)",
-		"user:"+userID, "items", itemID, 1)
+		"user:"+userID, "orders", orderID, 1)
 	if err != nil {
 		t.Fatalf("writing changelog: %v", err)
 	}
 
-	// Pull to advance checkpoint
-	_, err = engine.Pull(ctx, userID, synctest.MakePullRequest(clientID, 0, sv, sh))
+	initialSnapshot, err := engine.Snapshot(ctx, userID, &synchro.SnapshotRequest{
+		ClientID:      clientID,
+		SchemaVersion: sv,
+		SchemaHash:    sh,
+	})
 	if err != nil {
-		t.Fatalf("Pull: %v", err)
+		t.Fatalf("Initial Snapshot: %v", err)
+	}
+	for initialSnapshot.HasMore {
+		initialSnapshot, err = engine.Snapshot(ctx, userID, &synchro.SnapshotRequest{
+			ClientID:      clientID,
+			Cursor:        initialSnapshot.Cursor,
+			SchemaVersion: sv,
+			SchemaHash:    sh,
+		})
+		if err != nil {
+			t.Fatalf("Initial Snapshot continuation: %v", err)
+		}
 	}
 
 	// Deactivate client via compaction
@@ -779,29 +844,27 @@ func TestIntegration_ResyncReactivatesClient(t *testing.T) {
 		t.Fatalf("querying client: %v", err)
 	}
 	if isActive {
-		t.Fatal("expected client to be deactivated before resync")
+		t.Fatal("expected client to be deactivated before snapshot")
 	}
 
-	// Resync — page through all records (single page should suffice)
-	resyncResp, err := engine.Resync(ctx, userID, &synchro.ResyncRequest{
+	snapshotResp, err := engine.Snapshot(ctx, userID, &synchro.SnapshotRequest{
 		ClientID:      clientID,
 		SchemaVersion: sv,
 		SchemaHash:    sh,
 	})
 	if err != nil {
-		t.Fatalf("Resync: %v", err)
+		t.Fatalf("Snapshot: %v", err)
 	}
-	if resyncResp.HasMore {
-		// Drain remaining pages
-		for resyncResp.HasMore {
-			resyncResp, err = engine.Resync(ctx, userID, &synchro.ResyncRequest{
+	if snapshotResp.HasMore {
+		for snapshotResp.HasMore {
+			snapshotResp, err = engine.Snapshot(ctx, userID, &synchro.SnapshotRequest{
 				ClientID:      clientID,
-				Cursor:        resyncResp.Cursor,
+				Cursor:        snapshotResp.Cursor,
 				SchemaVersion: sv,
 				SchemaHash:    sh,
 			})
 			if err != nil {
-				t.Fatalf("Resync continuation: %v", err)
+				t.Fatalf("Snapshot continuation: %v", err)
 			}
 		}
 	}
@@ -811,10 +874,10 @@ func TestIntegration_ResyncReactivatesClient(t *testing.T) {
 		"SELECT is_active FROM sync_clients WHERE user_id = $1 AND client_id = $2",
 		userID, clientID).Scan(&isActive)
 	if err != nil {
-		t.Fatalf("querying client after resync: %v", err)
+		t.Fatalf("querying client after snapshot: %v", err)
 	}
 	if !isActive {
-		t.Error("expected client to be reactivated after resync")
+		t.Error("expected client to be reactivated after snapshot")
 	}
 }
 
@@ -845,40 +908,46 @@ func TestIntegration_PullBucketIsolation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RegisterClient B: %v", err)
 	}
+	snapshotClientReady(t, ctx, engine, userA, clientA, sv, sh)
+	snapshotClientReady(t, ctx, engine, userB, clientB, sv, sh)
+	snapshotClientReady(t, ctx, engine, userA, clientA, sv, sh)
+	snapshotClientReady(t, ctx, engine, userB, clientB, sv, sh)
+	snapshotClientReady(t, ctx, engine, userA, clientA, sv, sh)
+	snapshotClientReady(t, ctx, engine, userB, clientB, sv, sh)
 
-	// User A pushes item-A
-	itemA := "00000000-0000-0000-0000-000000000b01"
+	// User A pushes order-A
+	orderA := "00000000-0000-0000-0000-000000000b01"
 	_, err = engine.Push(ctx, userA, synctest.MakePushRequest(clientA, sv, sh,
-		synctest.MakePushRecord(itemA, "items", "create", map[string]any{"name": "Item A"}),
+		synctest.MakePushRecord(orderA, "orders", "create", map[string]any{"ship_address": "100 Alpha St"}),
 	))
 	if err != nil {
-		t.Fatalf("Push item-A: %v", err)
+		t.Fatalf("Push order-A: %v", err)
 	}
 
-	// User B pushes item-B
-	itemB := "00000000-0000-0000-0000-000000000b02"
+	// User B pushes order-B
+	orderB := "00000000-0000-0000-0000-000000000b02"
 	_, err = engine.Push(ctx, userB, synctest.MakePushRequest(clientB, sv, sh,
-		synctest.MakePushRecord(itemB, "items", "create", map[string]any{"name": "Item B"}),
+		synctest.MakePushRecord(orderB, "orders", "create", map[string]any{"ship_address": "200 Beta St"}),
 	))
 	if err != nil {
-		t.Fatalf("Push item-B: %v", err)
+		t.Fatalf("Push order-B: %v", err)
 	}
 
-	// Simulate WAL: assign each item to its owner's bucket
+	// Simulate WAL: assign each order to its owner's bucket
 	_, err = db.ExecContext(ctx,
 		"INSERT INTO sync_changelog (bucket_id, table_name, record_id, operation) VALUES ($1, $2, $3, $4)",
-		"user:"+userA, "items", itemA, 1)
+		"user:"+userA, "orders", orderA, 1)
 	if err != nil {
-		t.Fatalf("writing changelog for item-A: %v", err)
+		t.Fatalf("writing changelog for order-A: %v", err)
 	}
 	_, err = db.ExecContext(ctx,
 		"INSERT INTO sync_changelog (bucket_id, table_name, record_id, operation) VALUES ($1, $2, $3, $4)",
-		"user:"+userB, "items", itemB, 1)
+		"user:"+userB, "orders", orderB, 1)
 	if err != nil {
-		t.Fatalf("writing changelog for item-B: %v", err)
+		t.Fatalf("writing changelog for order-B: %v", err)
 	}
 
-	// User A pulls: should only see item-A
+	// User A pulls: should only see order-A
 	pullRespA, err := engine.Pull(ctx, userA, synctest.MakePullRequest(clientA, 0, sv, sh))
 	if err != nil {
 		t.Fatalf("Pull A: %v", err)
@@ -886,11 +955,11 @@ func TestIntegration_PullBucketIsolation(t *testing.T) {
 	if len(pullRespA.Changes) != 1 {
 		t.Fatalf("User A: expected 1 change, got %d", len(pullRespA.Changes))
 	}
-	if pullRespA.Changes[0].ID != itemA {
-		t.Errorf("User A: expected item %s, got %s", itemA, pullRespA.Changes[0].ID)
+	if pullRespA.Changes[0].ID != orderA {
+		t.Errorf("User A: expected order %s, got %s", orderA, pullRespA.Changes[0].ID)
 	}
 
-	// User B pulls: should only see item-B
+	// User B pulls: should only see order-B
 	pullRespB, err := engine.Pull(ctx, userB, synctest.MakePullRequest(clientB, 0, sv, sh))
 	if err != nil {
 		t.Fatalf("Pull B: %v", err)
@@ -898,8 +967,8 @@ func TestIntegration_PullBucketIsolation(t *testing.T) {
 	if len(pullRespB.Changes) != 1 {
 		t.Fatalf("User B: expected 1 change, got %d", len(pullRespB.Changes))
 	}
-	if pullRespB.Changes[0].ID != itemB {
-		t.Errorf("User B: expected item %s, got %s", itemB, pullRespB.Changes[0].ID)
+	if pullRespB.Changes[0].ID != orderB {
+		t.Errorf("User B: expected order %s, got %s", orderB, pullRespB.Changes[0].ID)
 	}
 }
 
@@ -924,18 +993,19 @@ func TestIntegration_ProtectedColumnEnforcement(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RegisterClient: %v", err)
 	}
+	snapshotClientReady(t, ctx, engine, userID, clientID, sv, sh)
 
-	itemID := "00000000-0000-0000-0000-000000000c10"
+	orderID := "00000000-0000-0000-0000-000000000c10"
 	attackerID := "00000000-0000-0000-0000-00000000dead"
 	fakeTime := time.Date(2000, 1, 1, 0, 0, 0, 0, time.UTC)
 
 	// Push create with protected columns injected
 	pushResp, err := engine.Push(ctx, userID, synctest.MakePushRequest(clientID, sv, sh,
-		synctest.MakePushRecord(itemID, "items", "create", map[string]any{
-			"name":       "Protected Test",
-			"created_at": fakeTime.Format(time.RFC3339),
-			"updated_at": fakeTime.Format(time.RFC3339),
-			"user_id":    attackerID,
+		synctest.MakePushRecord(orderID, "orders", "create", map[string]any{
+			"ship_address": "300 Protected Ave",
+			"created_at":   fakeTime.Format(time.RFC3339),
+			"updated_at":   fakeTime.Format(time.RFC3339),
+			"user_id":      attackerID,
 		}),
 	))
 	if err != nil {
@@ -949,10 +1019,10 @@ func TestIntegration_ProtectedColumnEnforcement(t *testing.T) {
 	var dbUserID string
 	var dbCreatedAt, dbUpdatedAt time.Time
 	err = db.QueryRowContext(ctx,
-		"SELECT user_id, created_at, updated_at FROM items WHERE id = $1", itemID,
+		"SELECT user_id, created_at, updated_at FROM orders WHERE id = $1", orderID,
 	).Scan(&dbUserID, &dbCreatedAt, &dbUpdatedAt)
 	if err != nil {
-		t.Fatalf("querying item: %v", err)
+		t.Fatalf("querying order: %v", err)
 	}
 
 	if dbUserID != userID {
@@ -967,12 +1037,12 @@ func TestIntegration_ProtectedColumnEnforcement(t *testing.T) {
 
 	// Push update with protected timestamp — pass BaseUpdatedAt for optimistic concurrency
 	updateData, _ := json.Marshal(map[string]any{
-		"name":       "Updated Name",
-		"updated_at": fakeTime.Format(time.RFC3339),
+		"ship_address": "400 Updated Blvd",
+		"updated_at":   fakeTime.Format(time.RFC3339),
 	})
 	updateResp, err := engine.Push(ctx, userID, synctest.MakePushRequest(clientID, sv, sh,
 		synchro.PushRecord{
-			ID: itemID, TableName: "items", Operation: "update",
+			ID: orderID, TableName: "orders", Operation: "update",
 			Data: updateData, ClientUpdatedAt: time.Now().UTC(), BaseUpdatedAt: &dbUpdatedAt,
 		},
 	))
@@ -983,16 +1053,16 @@ func TestIntegration_ProtectedColumnEnforcement(t *testing.T) {
 		t.Fatalf("expected 1 accepted update, got %d", len(updateResp.Accepted))
 	}
 
-	var dbName string
+	var dbShipAddr string
 	var dbUpdatedAt2 time.Time
 	err = db.QueryRowContext(ctx,
-		"SELECT name, updated_at FROM items WHERE id = $1", itemID,
-	).Scan(&dbName, &dbUpdatedAt2)
+		"SELECT ship_address, updated_at FROM orders WHERE id = $1", orderID,
+	).Scan(&dbShipAddr, &dbUpdatedAt2)
 	if err != nil {
-		t.Fatalf("querying updated item: %v", err)
+		t.Fatalf("querying updated order: %v", err)
 	}
-	if dbName != "Updated Name" {
-		t.Errorf("name = %q, want %q", dbName, "Updated Name")
+	if dbShipAddr != "400 Updated Blvd" {
+		t.Errorf("ship_address = %q, want %q", dbShipAddr, "400 Updated Blvd")
 	}
 	if dbUpdatedAt2.Equal(fakeTime) {
 		t.Error("updated_at after update should be server-assigned, not the fake timestamp")
@@ -1020,12 +1090,13 @@ func TestIntegration_SoftDeleteLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RegisterClient: %v", err)
 	}
+	snapshotClientReady(t, ctx, engine, userID, clientID, sv, sh)
 
-	itemID := "00000000-0000-0000-0000-000000000d10"
+	orderID := "00000000-0000-0000-0000-000000000d10"
 
 	// Create
 	createResp, err := engine.Push(ctx, userID, synctest.MakePushRequest(clientID, sv, sh,
-		synctest.MakePushRecord(itemID, "items", "create", map[string]any{"name": "Lifecycle Item"}),
+		synctest.MakePushRecord(orderID, "orders", "create", map[string]any{"ship_address": "500 Lifecycle Ln"}),
 	))
 	if err != nil {
 		t.Fatalf("Push create: %v", err)
@@ -1036,7 +1107,7 @@ func TestIntegration_SoftDeleteLifecycle(t *testing.T) {
 
 	// Delete
 	deleteResp, err := engine.Push(ctx, userID, synctest.MakePushRequest(clientID, sv, sh,
-		synctest.MakePushRecord(itemID, "items", "delete", nil),
+		synctest.MakePushRecord(orderID, "orders", "delete", nil),
 	))
 	if err != nil {
 		t.Fatalf("Push delete: %v", err)
@@ -1051,9 +1122,9 @@ func TestIntegration_SoftDeleteLifecycle(t *testing.T) {
 		t.Error("ServerDeletedAt should be set on delete")
 	}
 
-	// Idempotent delete (same item again)
+	// Idempotent delete (same order again)
 	deleteResp2, err := engine.Push(ctx, userID, synctest.MakePushRequest(clientID, sv, sh,
-		synctest.MakePushRecord(itemID, "items", "delete", nil),
+		synctest.MakePushRecord(orderID, "orders", "delete", nil),
 	))
 	if err != nil {
 		t.Fatalf("Push idempotent delete: %v", err)
@@ -1067,7 +1138,7 @@ func TestIntegration_SoftDeleteLifecycle(t *testing.T) {
 
 	// Resurrect: create same ID with new data
 	resurrectResp, err := engine.Push(ctx, userID, synctest.MakePushRequest(clientID, sv, sh,
-		synctest.MakePushRecord(itemID, "items", "create", map[string]any{"name": "Resurrected Item"}),
+		synctest.MakePushRecord(orderID, "orders", "create", map[string]any{"ship_address": "600 Resurrection Dr"}),
 	))
 	if err != nil {
 		t.Fatalf("Push resurrect: %v", err)
@@ -1076,20 +1147,20 @@ func TestIntegration_SoftDeleteLifecycle(t *testing.T) {
 		t.Fatalf("resurrect: expected 1 accepted, got %d (rejected: %v)", len(resurrectResp.Accepted), resurrectResp.Rejected)
 	}
 
-	// Verify DB: deleted_at is NULL, name is new value
-	var dbName string
+	// Verify DB: deleted_at is NULL, ship_address is new value
+	var dbShipAddr string
 	var dbDeletedAt *time.Time
 	err = db.QueryRowContext(ctx,
-		"SELECT name, deleted_at FROM items WHERE id = $1", itemID,
-	).Scan(&dbName, &dbDeletedAt)
+		"SELECT ship_address, deleted_at FROM orders WHERE id = $1", orderID,
+	).Scan(&dbShipAddr, &dbDeletedAt)
 	if err != nil {
-		t.Fatalf("querying resurrected item: %v", err)
+		t.Fatalf("querying resurrected order: %v", err)
 	}
 	if dbDeletedAt != nil {
 		t.Error("deleted_at should be NULL after resurrection")
 	}
-	if dbName != "Resurrected Item" {
-		t.Errorf("name = %q, want %q", dbName, "Resurrected Item")
+	if dbShipAddr != "600 Resurrection Dr" {
+		t.Errorf("ship_address = %q, want %q", dbShipAddr, "600 Resurrection Dr")
 	}
 }
 
@@ -1114,10 +1185,11 @@ func TestIntegration_ReadOnlyTableRejection(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RegisterClient: %v", err)
 	}
+	snapshotClientReady(t, ctx, engine, userID, clientID, sv, sh)
 
-	catID := "00000000-0000-0000-0000-000000000e10"
+	prodID := "00000000-0000-0000-0000-000000000e10"
 	pushResp, err := engine.Push(ctx, userID, synctest.MakePushRequest(clientID, sv, sh,
-		synctest.MakePushRecord(catID, "categories", "create", map[string]any{"name": "Hacked Category"}),
+		synctest.MakePushRecord(prodID, "products", "create", map[string]any{"name": "Hacked Product"}),
 	))
 	if err != nil {
 		t.Fatalf("Push to read-only table: %v", err)
@@ -1132,12 +1204,12 @@ func TestIntegration_ReadOnlyTableRejection(t *testing.T) {
 
 	// Verify no row was created
 	var count int
-	err = db.QueryRowContext(ctx, "SELECT COUNT(*) FROM categories WHERE id = $1", catID).Scan(&count)
+	err = db.QueryRowContext(ctx, "SELECT COUNT(*) FROM products WHERE id = $1", prodID).Scan(&count)
 	if err != nil {
-		t.Fatalf("querying categories: %v", err)
+		t.Fatalf("querying products: %v", err)
 	}
 	if count != 0 {
-		t.Errorf("expected 0 rows in categories, got %d", count)
+		t.Errorf("expected 0 rows in products, got %d", count)
 	}
 }
 
@@ -1162,24 +1234,25 @@ func TestIntegration_GlobalBucketPullVisibility(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RegisterClient: %v", err)
 	}
+	snapshotClientReady(t, ctx, engine, userID, clientID, sv, sh)
 
-	// Insert a global tag (user_id = NULL) directly in DB
-	tagID := "00000000-0000-0000-0000-000000000f10"
+	// Insert a global category (user_id = NULL) directly in DB
+	catID := "00000000-0000-0000-0000-000000000f10"
 	_, err = db.ExecContext(ctx,
-		"INSERT INTO tags (id, user_id, name) VALUES ($1, NULL, $2)", tagID, "Global Tag")
+		"INSERT INTO categories (id, user_id, name) VALUES ($1, NULL, $2)", catID, "Global Category")
 	if err != nil {
-		t.Fatalf("inserting global tag: %v", err)
+		t.Fatalf("inserting global category: %v", err)
 	}
 
 	// Simulate WAL: assign to "global" bucket
 	_, err = db.ExecContext(ctx,
 		"INSERT INTO sync_changelog (bucket_id, table_name, record_id, operation) VALUES ($1, $2, $3, $4)",
-		"global", "tags", tagID, 1)
+		"global", "categories", catID, 1)
 	if err != nil {
 		t.Fatalf("writing global changelog: %v", err)
 	}
 
-	// Pull as any user — should see the global tag
+	// Pull as any user — should see the global category
 	pullResp, err := engine.Pull(ctx, userID, synctest.MakePullRequest(clientID, 0, sv, sh))
 	if err != nil {
 		t.Fatalf("Pull: %v", err)
@@ -1187,13 +1260,13 @@ func TestIntegration_GlobalBucketPullVisibility(t *testing.T) {
 
 	found := false
 	for _, c := range pullResp.Changes {
-		if c.ID == tagID {
+		if c.ID == catID {
 			found = true
 			break
 		}
 	}
 	if !found {
-		t.Fatalf("global tag %s not found in pull response (got %d changes)", tagID, len(pullResp.Changes))
+		t.Fatalf("global category %s not found in pull response (got %d changes)", catID, len(pullResp.Changes))
 	}
 }
 
@@ -1218,26 +1291,27 @@ func TestIntegration_PullPagination(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RegisterClient: %v", err)
 	}
+	snapshotClientReady(t, ctx, engine, userID, clientID, sv, sh)
 
-	// Push 5 items
-	itemIDs := make([]string, 5)
+	// Push 5 orders
+	orderIDs := make([]string, 5)
 	for i := 0; i < 5; i++ {
-		itemIDs[i] = fmt.Sprintf("00000000-0000-0000-0000-00000010%04d", i)
+		orderIDs[i] = fmt.Sprintf("00000000-0000-0000-0000-00000010%04d", i)
 		_, err = engine.Push(ctx, userID, synctest.MakePushRequest(clientID, sv, sh,
-			synctest.MakePushRecord(itemIDs[i], "items", "create", map[string]any{
-				"name": fmt.Sprintf("Page Item %d", i),
+			synctest.MakePushRecord(orderIDs[i], "orders", "create", map[string]any{
+				"ship_address": fmt.Sprintf("Order %d", i),
 			}),
 		))
 		if err != nil {
-			t.Fatalf("Push item %d: %v", i, err)
+			t.Fatalf("Push order %d: %v", i, err)
 		}
 	}
 
 	// Insert 5 changelog entries
-	for _, id := range itemIDs {
+	for _, id := range orderIDs {
 		_, err = db.ExecContext(ctx,
 			"INSERT INTO sync_changelog (bucket_id, table_name, record_id, operation) VALUES ($1, $2, $3, $4)",
-			"user:"+userID, "items", id, 1)
+			"user:"+userID, "orders", id, 1)
 		if err != nil {
 			t.Fatalf("writing changelog: %v", err)
 		}
@@ -1277,15 +1351,15 @@ func TestIntegration_PullPagination(t *testing.T) {
 	}
 
 	if len(allIDs) != 5 {
-		t.Fatalf("expected 5 total items across pages, got %d", len(allIDs))
+		t.Fatalf("expected 5 total orders across pages, got %d", len(allIDs))
 	}
-	for _, id := range itemIDs {
+	for _, id := range orderIDs {
 		if !allIDs[id] {
-			t.Errorf("item %s not found across paginated pulls", id)
+			t.Errorf("order %s not found across paginated pulls", id)
 		}
 	}
 	if pages < 2 {
-		t.Errorf("expected at least 2 pages with Limit=2 and 5 items, got %d", pages)
+		t.Errorf("expected at least 2 pages with Limit=2 and 5 orders, got %d", pages)
 	}
 }
 
@@ -1336,13 +1410,15 @@ func TestIntegration_RLSBroadCoverage(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RegisterClient B: %v", err)
 	}
+	snapshotClientReady(t, ctx, engine, userA, clientA, sv, sh)
+	snapshotClientReady(t, ctx, engine, userB, clientB, sv, sh)
 
 	// User A: full CRUD lifecycle under RLS
-	itemID := "00000000-0000-0000-0000-000000001110"
+	orderID := "00000000-0000-0000-0000-000000001110"
 
 	// Create
 	createResp, err := engine.Push(ctx, userA, synctest.MakePushRequest(clientA, sv, sh,
-		synctest.MakePushRecord(itemID, "items", "create", map[string]any{"name": "RLS Item"}),
+		synctest.MakePushRecord(orderID, "orders", "create", map[string]any{"ship_address": "100 RLS Ave"}),
 	))
 	if err != nil {
 		t.Fatalf("User A create: %v", err)
@@ -1353,10 +1429,10 @@ func TestIntegration_RLSBroadCoverage(t *testing.T) {
 	createTS := *createResp.Accepted[0].ServerUpdatedAt
 
 	// Update — pass BaseUpdatedAt so optimistic concurrency resolves correctly
-	updateData, _ := json.Marshal(map[string]any{"name": "RLS Updated"})
+	updateData, _ := json.Marshal(map[string]any{"ship_address": "200 RLS Blvd"})
 	updateResp, err := engine.Push(ctx, userA, synctest.MakePushRequest(clientA, sv, sh,
 		synchro.PushRecord{
-			ID: itemID, TableName: "items", Operation: "update",
+			ID: orderID, TableName: "orders", Operation: "update",
 			Data: updateData, ClientUpdatedAt: time.Now().UTC(), BaseUpdatedAt: &createTS,
 		},
 	))
@@ -1369,7 +1445,7 @@ func TestIntegration_RLSBroadCoverage(t *testing.T) {
 
 	// Delete
 	deleteResp, err := engine.Push(ctx, userA, synctest.MakePushRequest(clientA, sv, sh,
-		synctest.MakePushRecord(itemID, "items", "delete", nil),
+		synctest.MakePushRecord(orderID, "orders", "delete", nil),
 	))
 	if err != nil {
 		t.Fatalf("User A delete: %v", err)
@@ -1379,17 +1455,17 @@ func TestIntegration_RLSBroadCoverage(t *testing.T) {
 	}
 
 	// User B: attempt to create with User A's ID as owner → should fail
-	itemID2 := "00000000-0000-0000-0000-000000001111"
+	orderID2 := "00000000-0000-0000-0000-000000001111"
 	createRespB, err := engine.Push(ctx, userB, synctest.MakePushRequest(clientB, sv, sh,
-		synctest.MakePushRecord(itemID2, "items", "create", map[string]any{
-			"name":    "Sneaky Item",
-			"user_id": userA, // attempt to set owner to A
+		synctest.MakePushRecord(orderID2, "orders", "create", map[string]any{
+			"ship_address": "300 Sneaky St",
+			"user_id":      userA, // attempt to set owner to A
 		}),
 	))
 	if err != nil {
 		t.Fatalf("User B create: %v", err)
 	}
-	// Engine enforces user_id = userB, so the item should be created under userB's ownership
+	// Engine enforces user_id = userB, so the order should be created under userB's ownership
 	// (protected column enforcement sets user_id to authenticated user).
 	// RLS should allow this since the row will have user_id=userB.
 	if len(createRespB.Accepted) != 1 {
@@ -1397,63 +1473,63 @@ func TestIntegration_RLSBroadCoverage(t *testing.T) {
 			len(createRespB.Accepted), createRespB.Rejected)
 	}
 
-	// Verify the item is owned by B, not A (query via admin to bypass RLS)
+	// Verify the order is owned by B, not A (query via admin to bypass RLS)
 	var ownerID string
-	err = adminDB.QueryRowContext(ctx, "SELECT user_id FROM items WHERE id = $1", itemID2).Scan(&ownerID)
+	err = adminDB.QueryRowContext(ctx, "SELECT user_id FROM orders WHERE id = $1", orderID2).Scan(&ownerID)
 	if err != nil {
-		t.Fatalf("querying item owner: %v", err)
+		t.Fatalf("querying order owner: %v", err)
 	}
 	if ownerID != userB {
-		t.Errorf("item owner = %q, want %q (should be enforced to authenticated user)", ownerID, userB)
+		t.Errorf("order owner = %q, want %q (should be enforced to authenticated user)", ownerID, userB)
 	}
 
-	// User B: attempt to delete User A's item → RLS blocks
+	// User B: attempt to delete User A's order → RLS blocks
 	deleteRespB, err := engine.Push(ctx, userB, synctest.MakePushRequest(clientB, sv, sh,
-		synctest.MakePushRecord(itemID, "items", "delete", nil),
+		synctest.MakePushRecord(orderID, "orders", "delete", nil),
 	))
 	if err != nil {
 		t.Fatalf("User B delete attempt: %v", err)
 	}
 	if len(deleteRespB.Accepted) != 0 {
-		t.Errorf("User B delete User A's item: expected 0 accepted, got %d", len(deleteRespB.Accepted))
+		t.Errorf("User B delete User A's order: expected 0 accepted, got %d", len(deleteRespB.Accepted))
 	}
 
-	// Child table: User A creates item_details referencing their item
-	// First resurrect User A's item (it was deleted above)
+	// Child table: User A creates order_details referencing their order
+	// First resurrect User A's order (it was deleted above)
 	_, err = engine.Push(ctx, userA, synctest.MakePushRequest(clientA, sv, sh,
-		synctest.MakePushRecord(itemID, "items", "create", map[string]any{"name": "Resurrected for child test"}),
+		synctest.MakePushRecord(orderID, "orders", "create", map[string]any{"ship_address": "400 Child Test Ave"}),
 	))
 	if err != nil {
-		t.Fatalf("Resurrect item for child test: %v", err)
+		t.Fatalf("Resurrect order for child test: %v", err)
 	}
 
 	detailID := "00000000-0000-0000-0000-000000001112"
 	detailResp, err := engine.Push(ctx, userA, synctest.MakePushRequest(clientA, sv, sh,
-		synctest.MakePushRecord(detailID, "item_details", "create", map[string]any{
-			"item_id": itemID,
-			"notes":   "User A's notes",
+		synctest.MakePushRecord(detailID, "order_details", "create", map[string]any{
+			"order_id":     orderID,
+			"product_name": "Widget A",
 		}),
 	))
 	if err != nil {
-		t.Fatalf("User A create item_details: %v", err)
+		t.Fatalf("User A create order_details: %v", err)
 	}
 	if len(detailResp.Accepted) != 1 {
-		t.Fatalf("User A item_details: expected 1 accepted, got %d (rejected: %v)",
+		t.Fatalf("User A order_details: expected 1 accepted, got %d (rejected: %v)",
 			len(detailResp.Accepted), detailResp.Rejected)
 	}
 
-	// User B attempts item_details referencing User A's item → RLS blocks.
+	// User B attempts order_details referencing User A's order → RLS blocks.
 	// RLS policy violations on INSERT abort the PostgreSQL transaction,
 	// so Push returns an error (not a clean rejection).
 	detailID2 := "00000000-0000-0000-0000-000000001113"
 	detailRespB, err := engine.Push(ctx, userB, synctest.MakePushRequest(clientB, sv, sh,
-		synctest.MakePushRecord(detailID2, "item_details", "create", map[string]any{
-			"item_id": itemID,
-			"notes":   "User B trying to add to A's item",
+		synctest.MakePushRecord(detailID2, "order_details", "create", map[string]any{
+			"order_id":     orderID,
+			"product_name": "Widget B",
 		}),
 	))
 	if err == nil && len(detailRespB.Accepted) > 0 {
-		t.Error("User B should not be able to create item_details on A's item")
+		t.Error("User B should not be able to create order_details on A's order")
 	}
 	// Either Push returns an error (tx aborted by RLS) or the record is rejected — both are correct.
 }
@@ -1479,38 +1555,39 @@ func TestIntegration_PullHydrationMissingRecord(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RegisterClient: %v", err)
 	}
+	snapshotClientReady(t, ctx, engine, userID, clientID, sv, sh)
 
-	// Push two items so they exist in the DB
-	itemA := "00000000-0000-0000-0000-000000002010"
-	itemB := "00000000-0000-0000-0000-000000002011"
+	// Push two orders so they exist in the DB
+	orderA := "00000000-0000-0000-0000-000000002010"
+	orderB := "00000000-0000-0000-0000-000000002011"
 
 	_, err = engine.Push(ctx, userID, synctest.MakePushRequest(clientID, sv, sh,
-		synctest.MakePushRecord(itemA, "items", "create", map[string]any{"name": "Item A"}),
+		synctest.MakePushRecord(orderA, "orders", "create", map[string]any{"ship_address": "100 Alpha St"}),
 	))
 	if err != nil {
-		t.Fatalf("Push item A: %v", err)
+		t.Fatalf("Push order A: %v", err)
 	}
 	_, err = engine.Push(ctx, userID, synctest.MakePushRequest(clientID, sv, sh,
-		synctest.MakePushRecord(itemB, "items", "create", map[string]any{"name": "Item B"}),
+		synctest.MakePushRecord(orderB, "orders", "create", map[string]any{"ship_address": "200 Beta St"}),
 	))
 	if err != nil {
-		t.Fatalf("Push item B: %v", err)
+		t.Fatalf("Push order B: %v", err)
 	}
 
 	// Insert changelog entries for both
-	for _, id := range []string{itemA, itemB} {
+	for _, id := range []string{orderA, orderB} {
 		_, err = db.ExecContext(ctx,
 			"INSERT INTO sync_changelog (bucket_id, table_name, record_id, operation) VALUES ($1, $2, $3, $4)",
-			"user:"+userID, "items", id, 1)
+			"user:"+userID, "orders", id, 1)
 		if err != nil {
 			t.Fatalf("writing changelog for %s: %v", id, err)
 		}
 	}
 
-	// Hard-delete item A from the DB (simulating out-of-band removal)
-	_, err = db.ExecContext(ctx, "DELETE FROM items WHERE id = $1", itemA)
+	// Hard-delete order A from the DB (simulating out-of-band removal)
+	_, err = db.ExecContext(ctx, "DELETE FROM orders WHERE id = $1", orderA)
 	if err != nil {
-		t.Fatalf("hard-deleting item A: %v", err)
+		t.Fatalf("hard-deleting order A: %v", err)
 	}
 
 	// Pull — should succeed without error, gracefully skipping the missing record
@@ -1519,18 +1596,18 @@ func TestIntegration_PullHydrationMissingRecord(t *testing.T) {
 		t.Fatalf("Pull: %v", err)
 	}
 
-	// Item B should still appear
+	// Order B should still appear
 	foundB := false
 	for _, c := range pullResp.Changes {
-		if c.ID == itemA {
-			t.Error("hard-deleted item A should not appear in pull response")
+		if c.ID == orderA {
+			t.Error("hard-deleted order A should not appear in pull response")
 		}
-		if c.ID == itemB {
+		if c.ID == orderB {
 			foundB = true
 		}
 	}
 	if !foundB {
-		t.Error("item B should appear in pull response despite item A being missing")
+		t.Error("order B should appear in pull response despite order A being missing")
 	}
 }
 
@@ -1561,26 +1638,28 @@ func TestIntegration_PullCheckpointMultiUserInterleaving(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RegisterClient B: %v", err)
 	}
+	snapshotClientReady(t, ctx, engine, userA, clientA, sv, sh)
+	snapshotClientReady(t, ctx, engine, userB, clientB, sv, sh)
 
-	// Create items for both users
-	itemA1 := "00000000-0000-0000-0000-000000003010"
-	itemA2 := "00000000-0000-0000-0000-000000003011"
-	itemB1 := "00000000-0000-0000-0000-000000003020"
-	itemB2 := "00000000-0000-0000-0000-000000003021"
-	itemB3 := "00000000-0000-0000-0000-000000003022"
+	// Create orders for both users
+	orderA1 := "00000000-0000-0000-0000-000000003010"
+	orderA2 := "00000000-0000-0000-0000-000000003011"
+	orderB1 := "00000000-0000-0000-0000-000000003020"
+	orderB2 := "00000000-0000-0000-0000-000000003021"
+	orderB3 := "00000000-0000-0000-0000-000000003022"
 
-	// Push all items
+	// Push all orders
 	for _, tc := range []struct {
-		userID, clientID, itemID, name string
+		userID, clientID, orderID, name string
 	}{
-		{userA, clientA, itemA1, "A1"},
-		{userA, clientA, itemA2, "A2"},
-		{userB, clientB, itemB1, "B1"},
-		{userB, clientB, itemB2, "B2"},
-		{userB, clientB, itemB3, "B3"},
+		{userA, clientA, orderA1, "A1"},
+		{userA, clientA, orderA2, "A2"},
+		{userB, clientB, orderB1, "B1"},
+		{userB, clientB, orderB2, "B2"},
+		{userB, clientB, orderB3, "B3"},
 	} {
 		_, err = engine.Push(ctx, tc.userID, synctest.MakePushRequest(tc.clientID, sv, sh,
-			synctest.MakePushRecord(tc.itemID, "items", "create", map[string]any{"name": tc.name}),
+			synctest.MakePushRecord(tc.orderID, "orders", "create", map[string]any{"ship_address": tc.name}),
 		))
 		if err != nil {
 			t.Fatalf("Push %s: %v", tc.name, err)
@@ -1588,32 +1667,32 @@ func TestIntegration_PullCheckpointMultiUserInterleaving(t *testing.T) {
 	}
 
 	// Insert interleaved changelog entries:
-	// seq N+0: user:A, items, item-A1
-	// seq N+1: user:B, items, item-B1
-	// seq N+2: user:B, items, item-B2
-	// seq N+3: user:A, items, item-A2
-	// seq N+4: user:B, items, item-B3
+	// seq N+0: user:A, orders, order-A1
+	// seq N+1: user:B, orders, order-B1
+	// seq N+2: user:B, orders, order-B2
+	// seq N+3: user:A, orders, order-A2
+	// seq N+4: user:B, orders, order-B3
 	interleaved := []struct {
 		bucketID string
 		recordID string
 	}{
-		{"user:" + userA, itemA1},
-		{"user:" + userB, itemB1},
-		{"user:" + userB, itemB2},
-		{"user:" + userA, itemA2},
-		{"user:" + userB, itemB3},
+		{"user:" + userA, orderA1},
+		{"user:" + userB, orderB1},
+		{"user:" + userB, orderB2},
+		{"user:" + userA, orderA2},
+		{"user:" + userB, orderB3},
 	}
 
 	for _, e := range interleaved {
 		_, err = db.ExecContext(ctx,
 			"INSERT INTO sync_changelog (bucket_id, table_name, record_id, operation) VALUES ($1, $2, $3, $4)",
-			e.bucketID, "items", e.recordID, 1)
+			e.bucketID, "orders", e.recordID, 1)
 		if err != nil {
 			t.Fatalf("writing changelog for %s: %v", e.recordID, err)
 		}
 	}
 
-	// Pull as User A with Limit=1 — should get item-A1
+	// Pull as User A with Limit=1 — should get order-A1
 	pullReqA1 := synctest.MakePullRequest(clientA, 0, sv, sh)
 	pullReqA1.Limit = 1
 	pullRespA1, err := engine.Pull(ctx, userA, pullReqA1)
@@ -1623,14 +1702,14 @@ func TestIntegration_PullCheckpointMultiUserInterleaving(t *testing.T) {
 	if len(pullRespA1.Changes) != 1 {
 		t.Fatalf("User A page 1: expected 1 change, got %d", len(pullRespA1.Changes))
 	}
-	if pullRespA1.Changes[0].ID != itemA1 {
-		t.Errorf("User A page 1: expected %s, got %s", itemA1, pullRespA1.Changes[0].ID)
+	if pullRespA1.Changes[0].ID != orderA1 {
+		t.Errorf("User A page 1: expected %s, got %s", orderA1, pullRespA1.Changes[0].ID)
 	}
 	if !pullRespA1.HasMore {
 		t.Error("User A page 1: expected has_more=true")
 	}
 
-	// Pull as User A from checkpoint — should get item-A2, skipping B's entries
+	// Pull as User A from checkpoint — should get order-A2, skipping B's entries
 	pullRespA2, err := engine.Pull(ctx, userA, synctest.MakePullRequest(clientA, pullRespA1.Checkpoint, sv, sh))
 	if err != nil {
 		t.Fatalf("Pull A page 2: %v", err)
@@ -1638,8 +1717,8 @@ func TestIntegration_PullCheckpointMultiUserInterleaving(t *testing.T) {
 	if len(pullRespA2.Changes) != 1 {
 		t.Fatalf("User A page 2: expected 1 change, got %d", len(pullRespA2.Changes))
 	}
-	if pullRespA2.Changes[0].ID != itemA2 {
-		t.Errorf("User A page 2: expected %s, got %s", itemA2, pullRespA2.Changes[0].ID)
+	if pullRespA2.Changes[0].ID != orderA2 {
+		t.Errorf("User A page 2: expected %s, got %s", orderA2, pullRespA2.Changes[0].ID)
 	}
 	if pullRespA2.HasMore {
 		t.Error("User A page 2: expected has_more=false")
@@ -1649,7 +1728,7 @@ func TestIntegration_PullCheckpointMultiUserInterleaving(t *testing.T) {
 		t.Errorf("checkpoint did not advance: %d <= %d", pullRespA2.Checkpoint, pullRespA1.Checkpoint)
 	}
 
-	// Pull as User B — should get all 3 B items, no A items
+	// Pull as User B — should get all 3 B orders, no A orders
 	pullRespB, err := engine.Pull(ctx, userB, synctest.MakePullRequest(clientB, 0, sv, sh))
 	if err != nil {
 		t.Fatalf("Pull B: %v", err)
@@ -1657,16 +1736,16 @@ func TestIntegration_PullCheckpointMultiUserInterleaving(t *testing.T) {
 	if len(pullRespB.Changes) != 3 {
 		t.Fatalf("User B: expected 3 changes, got %d", len(pullRespB.Changes))
 	}
-	bIDs := map[string]bool{itemB1: false, itemB2: false, itemB3: false}
+	bIDs := map[string]bool{orderB1: false, orderB2: false, orderB3: false}
 	for _, c := range pullRespB.Changes {
 		if _, ok := bIDs[c.ID]; !ok {
-			t.Errorf("User B: unexpected item %s", c.ID)
+			t.Errorf("User B: unexpected order %s", c.ID)
 		}
 		bIDs[c.ID] = true
 	}
 	for id, found := range bIDs {
 		if !found {
-			t.Errorf("User B: missing item %s", id)
+			t.Errorf("User B: missing order %s", id)
 		}
 	}
 }

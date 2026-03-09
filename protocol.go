@@ -90,14 +90,15 @@ const MaxPullLimit = 1000
 
 // PullResponse is the response for pulling changes.
 type PullResponse struct {
-	Changes        []Record      `json:"changes"`
-	Deletes        []DeleteEntry `json:"deletes"`
-	Checkpoint     int64         `json:"checkpoint"`
-	HasMore        bool          `json:"has_more"`
-	ResyncRequired bool          `json:"resync_required,omitempty"`
-	BucketUpdates  *BucketUpdate `json:"bucket_updates,omitempty"`
-	SchemaVersion  int64         `json:"schema_version"`
-	SchemaHash     string        `json:"schema_hash"`
+	Changes          []Record      `json:"changes"`
+	Deletes          []DeleteEntry `json:"deletes"`
+	Checkpoint       int64         `json:"checkpoint"`
+	HasMore          bool          `json:"has_more"`
+	SnapshotRequired bool          `json:"snapshot_required,omitempty"`
+	SnapshotReason   string        `json:"snapshot_reason,omitempty"`
+	BucketUpdates    *BucketUpdate `json:"bucket_updates,omitempty"`
+	SchemaVersion    int64         `json:"schema_version"`
+	SchemaHash       string        `json:"schema_hash"`
 }
 
 // DeleteEntry represents a deleted record in a pull response.
@@ -146,7 +147,8 @@ type PushResult struct {
 	TableName       string     `json:"table_name"`
 	Operation       string     `json:"operation"`
 	Status          string     `json:"status"`
-	Reason          string     `json:"reason,omitempty"`
+	ReasonCode      string     `json:"reason_code,omitempty"`
+	Message         string     `json:"message,omitempty"`
 	ServerVersion   *Record    `json:"server_version,omitempty"`
 	ServerUpdatedAt *time.Time `json:"server_updated_at,omitempty"`
 	ServerDeletedAt *time.Time `json:"server_deleted_at,omitempty"`
@@ -154,9 +156,17 @@ type PushResult struct {
 
 // Push status constants.
 const (
-	PushStatusApplied  = "applied"
-	PushStatusConflict = "conflict"
-	PushStatusError    = "error"
+	PushStatusApplied           = "applied"
+	PushStatusConflict          = "conflict"
+	PushStatusRejectedTerminal  = "rejected_terminal"
+	PushStatusRejectedRetryable = "rejected_retryable"
+)
+
+// Pull snapshot reason constants.
+const (
+	SnapshotReasonInitialSyncRequired   = "initial_sync_required"
+	SnapshotReasonCheckpointBeforeLimit = "checkpoint_before_retention"
+	SnapshotReasonHistoryUnavailable    = "history_unavailable"
 )
 
 // TableMeta describes a single table's sync configuration.
@@ -183,40 +193,49 @@ type TableMetaResponse struct {
 	SchemaHash    string      `json:"schema_hash"`
 }
 
-// ResyncRequest is the request for a full resync.
-type ResyncRequest struct {
-	ClientID      string       `json:"client_id"`
-	Cursor        *ResyncCursor `json:"cursor,omitempty"`
-	Limit         int          `json:"limit,omitempty"`
-	SchemaVersion int64        `json:"schema_version,omitempty"`
-	SchemaHash    string       `json:"schema_hash,omitempty"`
+// SnapshotRequest is the request for a full snapshot.
+type SnapshotRequest struct {
+	ClientID      string          `json:"client_id"`
+	Cursor        *SnapshotCursor `json:"cursor,omitempty"`
+	Limit         int             `json:"limit,omitempty"`
+	SchemaVersion int64           `json:"schema_version,omitempty"`
+	SchemaHash    string          `json:"schema_hash,omitempty"`
 }
 
-// ResyncCursor tracks pagination state across resync pages.
-type ResyncCursor struct {
+// SnapshotCursor tracks pagination state across snapshot pages.
+type SnapshotCursor struct {
 	Checkpoint int64  `json:"checkpoint"`
 	TableIndex int    `json:"table_idx"`
 	AfterID    string `json:"after_id"`
 }
 
-// ResyncResponse is the response for a full resync page.
-type ResyncResponse struct {
-	Records       []Record      `json:"records"`
-	Cursor        *ResyncCursor `json:"cursor,omitempty"`
-	Checkpoint    int64         `json:"checkpoint"`
-	HasMore       bool          `json:"has_more"`
-	SchemaVersion int64         `json:"schema_version"`
-	SchemaHash    string        `json:"schema_hash"`
+// SnapshotResponse is the response for a full snapshot page.
+type SnapshotResponse struct {
+	Records       []Record         `json:"records"`
+	Cursor        *SnapshotCursor  `json:"cursor,omitempty"`
+	Checkpoint    int64            `json:"checkpoint"`
+	HasMore       bool             `json:"has_more"`
+	SchemaVersion int64            `json:"schema_version"`
+	SchemaHash    string           `json:"schema_hash"`
 }
+
+// Schema default kind constants.
+const (
+	DefaultKindNone       = "none"
+	DefaultKindPortable   = "portable"
+	DefaultKindServerOnly = "server_only"
+)
 
 // SchemaColumn describes a table column for client-side table creation.
 type SchemaColumn struct {
-	Name         string `json:"name"`
-	DBType       string `json:"db_type"`
-	LogicalType  string `json:"logical_type"`
-	Nullable     bool   `json:"nullable"`
-	DefaultSQL   string `json:"default_sql,omitempty"`
-	IsPrimaryKey bool   `json:"is_primary_key"`
+	Name             string `json:"name"`
+	DBType           string `json:"db_type"`
+	LogicalType      string `json:"logical_type"`
+	Nullable         bool   `json:"nullable"`
+	DefaultSQL       string `json:"default_sql,omitempty"`
+	DefaultKind      string `json:"default_kind"`
+	SQLiteDefaultSQL string `json:"sqlite_default_sql,omitempty"`
+	IsPrimaryKey     bool   `json:"is_primary_key"`
 }
 
 // SchemaTable describes table metadata and column definitions.

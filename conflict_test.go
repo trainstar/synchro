@@ -12,7 +12,7 @@ func TestLWWResolver_ClientNewer(t *testing.T) {
 	now := time.Now()
 
 	res, err := resolver.Resolve(context.Background(), Conflict{
-		Table:      "items",
+		Table:      "orders",
 		RecordID:   "abc",
 		ClientData: json.RawMessage(`{"name":"new"}`),
 		ServerData: json.RawMessage(`{"name":"old"}`),
@@ -32,7 +32,7 @@ func TestLWWResolver_ServerNewer(t *testing.T) {
 	now := time.Now()
 
 	res, err := resolver.Resolve(context.Background(), Conflict{
-		Table:      "items",
+		Table:      "orders",
 		RecordID:   "abc",
 		ClientData: json.RawMessage(`{"name":"old"}`),
 		ServerData: json.RawMessage(`{"name":"new"}`),
@@ -52,7 +52,7 @@ func TestLWWResolver_EqualTimestamps_ServerWins(t *testing.T) {
 	now := time.Now()
 
 	res, err := resolver.Resolve(context.Background(), Conflict{
-		Table:      "items",
+		Table:      "orders",
 		RecordID:   "abc",
 		ClientTime: now,
 		ServerTime: now,
@@ -72,7 +72,7 @@ func TestLWWResolver_WithBaseVersion_ServerUnchanged(t *testing.T) {
 	base := now
 
 	res, err := resolver.Resolve(context.Background(), Conflict{
-		Table:       "items",
+		Table:       "orders",
 		RecordID:    "abc",
 		ClientTime:  now.Add(1 * time.Second),
 		ServerTime:  now,
@@ -93,7 +93,7 @@ func TestLWWResolver_WithBaseVersion_ServerChanged_ClientNewer(t *testing.T) {
 	base := now.Add(-5 * time.Second)
 
 	res, err := resolver.Resolve(context.Background(), Conflict{
-		Table:       "items",
+		Table:       "orders",
 		RecordID:    "abc",
 		ClientTime:  now.Add(1 * time.Second),
 		ServerTime:  now,
@@ -114,7 +114,7 @@ func TestLWWResolver_WithBaseVersion_ServerChanged_ServerNewer(t *testing.T) {
 	base := now.Add(-5 * time.Second)
 
 	res, err := resolver.Resolve(context.Background(), Conflict{
-		Table:       "items",
+		Table:       "orders",
 		RecordID:    "abc",
 		ClientTime:  now.Add(-1 * time.Second),
 		ServerTime:  now,
@@ -135,7 +135,7 @@ func TestLWWResolver_ClockSkewTolerance(t *testing.T) {
 	now := time.Now()
 
 	res, err := resolver.Resolve(context.Background(), Conflict{
-		Table:      "items",
+		Table:      "orders",
 		RecordID:   "abc",
 		ClientTime: now.Add(-500 * time.Millisecond),
 		ServerTime: now,
@@ -155,7 +155,7 @@ func TestLWWResolver_ClockSkewTolerance_NotEnough(t *testing.T) {
 	now := time.Now()
 
 	res, err := resolver.Resolve(context.Background(), Conflict{
-		Table:      "items",
+		Table:      "orders",
 		RecordID:   "abc",
 		ClientTime: now.Add(-2 * time.Second),
 		ServerTime: now,
@@ -173,7 +173,7 @@ func TestServerWinsResolver(t *testing.T) {
 	now := time.Now()
 
 	res, err := resolver.Resolve(context.Background(), Conflict{
-		Table:      "items",
+		Table:      "orders",
 		RecordID:   "abc",
 		ClientTime: now.Add(10 * time.Second),
 		ServerTime: now,

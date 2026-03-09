@@ -194,15 +194,13 @@ func (c *Consumer) Start(ctx context.Context) error {
 
 			for _, event := range events {
 				if err := c.applyEvent(ctx, event); err != nil {
-					c.logger.ErrorContext(ctx, "failed to process WAL event",
-						"err", err, "table", event.TableName, "id", event.RecordID, "op", event.Operation.String())
+					return fmt.Errorf("processing WAL event for %s/%s %s: %w", event.TableName, event.RecordID, event.Operation.String(), err)
 				}
 			}
 
 			newLSN := xld.WALStart + pglogrepl.LSN(len(xld.WALData))
 			if err := c.position.SetConfirmed(ctx, newLSN); err != nil {
-				c.logger.ErrorContext(ctx, "failed to persist WAL position",
-					"err", err, "lsn", newLSN)
+				return fmt.Errorf("persisting WAL position %s: %w", newLSN, err)
 			}
 		}
 	}

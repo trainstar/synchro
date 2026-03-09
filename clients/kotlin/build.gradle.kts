@@ -1,19 +1,5 @@
-// Synchro Kotlin SDK - Placeholder
-// This will become a proper Android Library module in Phase 2.
-//
-// To set up:
-// 1. Create settings.gradle.kts with pluginManagement block
-// 2. Apply com.android.library and kotlin-android plugins
-// 3. Add Room and OkHttp dependencies
-
-buildscript {
-    repositories {
-        google()
-        mavenCentral()
-    }
-}
-
-allprojects {
-    group = "com.trainstar.synchro"
-    version = "0.1.0"
+plugins {
+    id("com.android.library") version "8.2.2" apply false
+    id("org.jetbrains.kotlin.android") version "1.9.22" apply false
+    id("org.jetbrains.kotlin.plugin.serialization") version "1.9.22" apply false
 }

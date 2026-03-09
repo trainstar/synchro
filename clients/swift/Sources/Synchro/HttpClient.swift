@@ -27,8 +27,8 @@ final class HttpClient: @unchecked Sendable {
         try await post("/sync/push", body: request)
     }
 
-    func resync(request: ResyncRequest) async throws -> ResyncResponse {
-        try await post("/sync/resync", body: request)
+    func snapshot(request: SnapshotRequest) async throws -> SnapshotResponse {
+        try await post("/sync/snapshot", body: request)
     }
 
     func fetchSchema() async throws -> SchemaResponse {
@@ -69,7 +69,10 @@ final class HttpClient: @unchecked Sendable {
         do {
             (data, response) = try await session.data(for: req)
         } catch {
-            throw SynchroError.networkError(underlying: error)
+            throw RetryableError(
+                underlying: .networkError(underlying: error),
+                retryAfter: nil
+            )
         }
 
         guard let httpResponse = response as? HTTPURLResponse else {
@@ -92,9 +95,10 @@ final class HttpClient: @unchecked Sendable {
             )
 
         case 426:
+            let minimumVersion = errorMessage(from: data) ?? "unknown"
             throw SynchroError.upgradeRequired(
                 currentVersion: config.appVersion,
-                minimumVersion: "unknown"
+                minimumVersion: minimumVersion
             )
 
         case 429, 503:
