@@ -4,8 +4,8 @@ sealed class SynchroError(message: String, cause: Throwable? = null) : Exception
     class NotConnected : SynchroError("Not connected to sync server")
     class SchemaNotLoaded : SynchroError("Schema has not been loaded from server")
     class TableNotSynced(val table: String) : SynchroError("Table '$table' is not a synced table")
-    class UpgradeRequired(val currentVersion: String, val serverMessage: String) :
-        SynchroError("Upgrade required (current: $currentVersion): $serverMessage")
+    class UpgradeRequired(val currentVersion: String, val minimumVersion: String) :
+        SynchroError("App version $currentVersion is below minimum $minimumVersion")
 
     class SchemaMismatch(val serverVersion: Long, val serverHash: String) :
         SynchroError("Schema mismatch: server version $serverVersion, hash $serverHash")
@@ -23,7 +23,7 @@ sealed class SynchroError(message: String, cause: Throwable? = null) : Exception
     class DatabaseError(val underlying: Throwable) :
         SynchroError("Database error: ${underlying.message}", underlying)
 
-    class InvalidResponse(val detail: String) : SynchroError("Invalid response: $detail")
+    class InvalidResponse(val message: String) : SynchroError("Invalid response: $message")
     class AlreadyStarted : SynchroError("Sync has already been started")
     class NotStarted : SynchroError("Sync has not been started")
 }

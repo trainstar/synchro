@@ -105,7 +105,7 @@ class HttpClient(
                 val msg = errorMessage(responseBody) ?: "client upgrade required"
                 throw SynchroError.UpgradeRequired(
                     currentVersion = config.appVersion,
-                    serverMessage = msg
+                    minimumVersion = msg
                 )
             }
 

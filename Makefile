@@ -15,6 +15,10 @@
 	test-kotlin \
 	test-kotlin-unit \
 	test-kotlin-integration \
+	test-rn-unit \
+	test-rn-e2e-ios \
+	test-rn-e2e-android \
+	test-rn \
 	test-integration \
 	synchrod-test-start \
 	synchrod-test-stop \
@@ -66,7 +70,11 @@ help:
 	@echo "  test-kotlin-unit      - Run Kotlin unit tests"
 	@echo "  test-kotlin           - Run Kotlin tests with integration env wired"
 	@echo "  test-kotlin-integration - Alias of test-kotlin"
-	@echo "  test-integration      - Run Go integration + WAL + Swift + Kotlin integration against a live synchrod"
+	@echo "  test-rn-unit          - Run React Native Jest unit tests"
+	@echo "  test-rn-e2e-ios       - Run React Native Detox E2E tests on iOS"
+	@echo "  test-rn-e2e-android   - Run React Native Detox E2E tests on Android"
+	@echo "  test-rn               - Run React Native E2E tests on both platforms"
+	@echo "  test-integration      - Run Go integration + WAL + Swift + Kotlin + RN integration against a live synchrod"
 	@echo "  clean                 - Remove local build/test artifacts"
 
 build:
@@ -101,7 +109,7 @@ db-clean-slots:
 		"SELECT pg_drop_replication_slot(slot_name) FROM pg_replication_slots WHERE active = false;" 2>/dev/null || true
 	@echo "Done."
 
-test: test-go-unit test-swift-unit test-kotlin-unit
+test: test-go-unit test-swift-unit test-kotlin-unit test-rn-unit
 
 test-go-unit:
 	go test ./...
@@ -190,11 +198,25 @@ test-kotlin: synchrod-test-restart
 
 test-kotlin-integration: test-kotlin
 
+test-rn-unit:
+	cd clients/react-native && npm test -- --testPathIgnorePatterns=e2e
+
+test-rn-e2e-ios: synchrod-test-restart
+	cd clients/react-native/example && \
+		$(TEST_ENV) npx detox test --configuration ios.sim.debug
+
+test-rn-e2e-android: synchrod-test-restart
+	cd clients/react-native/example && \
+		$(TEST_ENV) npx detox test --configuration android.emu.debug
+
+test-rn: test-rn-e2e-ios test-rn-e2e-android
+
 test-integration:
 	$(TEST_ENV) $(MAKE) test-go-integration
 	$(TEST_ENV) $(MAKE) test-go-wal
 	$(TEST_ENV) $(MAKE) test-swift
 	$(TEST_ENV) $(MAKE) test-kotlin
+	$(TEST_ENV) $(MAKE) test-rn
 
 clean:
 	rm -rf bin/ "$(SYNCHROD_PID_FILE)" "$(SYNCHROD_LOG_FILE)"
