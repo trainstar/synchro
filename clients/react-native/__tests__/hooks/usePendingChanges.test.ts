@@ -1,6 +1,7 @@
 import { renderHook, act, waitFor } from '@testing-library/react-native';
 import { usePendingChanges } from '../../src/hooks/usePendingChanges';
 import { SynchroClient } from '../../src/SynchroClient';
+import { resetNativeModuleMockState } from '../__mocks__/react-native';
 
 function makeClient(): SynchroClient {
   return new SynchroClient({
@@ -14,6 +15,7 @@ function makeClient(): SynchroClient {
 
 describe('usePendingChanges', () => {
   beforeEach(() => {
+    resetNativeModuleMockState();
     jest.useFakeTimers();
   });
 
@@ -33,7 +35,10 @@ describe('usePendingChanges', () => {
 
   it('polls and updates count', async () => {
     const client = makeClient();
-    jest.spyOn(client, 'pendingChangeCount').mockResolvedValue(3);
+    jest
+      .spyOn(client, 'pendingChangeCount')
+      .mockResolvedValueOnce(3)
+      .mockResolvedValueOnce(5);
 
     const { result } = renderHook(() => usePendingChanges(client, 1000));
 
@@ -43,6 +48,37 @@ describe('usePendingChanges', () => {
     });
 
     expect(result.current).toBe(3);
+
+    await act(async () => {
+      jest.advanceTimersByTime(1000);
+      await Promise.resolve();
+    });
+
+    expect(result.current).toBe(5);
+    expect(client.pendingChangeCount).toHaveBeenCalledTimes(2);
+  });
+
+  it('ignores polling errors and keeps the last good count', async () => {
+    const client = makeClient();
+    jest
+      .spyOn(client, 'pendingChangeCount')
+      .mockResolvedValueOnce(2)
+      .mockRejectedValueOnce(new Error('temporary failure'));
+
+    const { result } = renderHook(() => usePendingChanges(client, 1000));
+
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(result.current).toBe(2);
+
+    await act(async () => {
+      jest.advanceTimersByTime(1000);
+      await Promise.resolve();
+    });
+
+    expect(result.current).toBe(2);
   });
 
   it('cleans up interval on unmount', async () => {

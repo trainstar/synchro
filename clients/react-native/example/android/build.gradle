@@ -8,6 +8,8 @@ buildscript {
         kotlinVersion = "2.1.20"
     }
     repositories {
+        mavenLocal()
+        maven { url("$rootDir/../node_modules/detox/Detox-android") }
         google()
         mavenCentral()
     }
@@ -19,3 +21,12 @@ buildscript {
 }
 
 apply plugin: "com.facebook.react.rootproject"
+
+allprojects {
+    repositories {
+        mavenLocal()
+        maven { url("$rootDir/../node_modules/detox/Detox-android") }
+        google()
+        mavenCentral()
+    }
+}

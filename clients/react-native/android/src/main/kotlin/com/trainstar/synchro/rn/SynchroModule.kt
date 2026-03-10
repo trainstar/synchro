@@ -1,8 +1,8 @@
 package com.trainstar.synchro.rn
 
 import com.facebook.react.bridge.*
-import com.facebook.react.modules.core.DeviceEventManagerModule
 import com.trainstar.synchro.*
+import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.*
 import kotlinx.coroutines.channels.Channel
 import org.json.JSONArray
@@ -10,14 +10,9 @@ import org.json.JSONObject
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 
+@OptIn(ExperimentalCoroutinesApi::class)
 class SynchroModule(reactContext: ReactApplicationContext) :
-    ReactContextBaseJavaModule(reactContext) {
-
-    companion object {
-        const val NAME = "SynchroModule"
-    }
-
-    override fun getName(): String = NAME
+    NativeSynchroSpec(reactContext) {
 
     private var client: SynchroClient? = null
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -25,12 +20,9 @@ class SynchroModule(reactContext: ReactApplicationContext) :
     private val observers = ConcurrentHashMap<String, Cancellable>()
     private val pendingAuthContinuations = ConcurrentHashMap<String, CancellableContinuation<String>>()
     private val pendingSnapshotContinuations = ConcurrentHashMap<String, CancellableContinuation<Boolean>>()
-
-    private fun emit(eventName: String, params: WritableMap) {
-        reactApplicationContext
-            .getJSModule(DeviceEventManagerModule.RCTDeviceEventEmitter::class.java)
-            .emit(eventName, params)
-    }
+    private var statusSubscription: Cancellable? = null
+    private var conflictSubscription: Cancellable? = null
+    private var snapshotSubscription: Cancellable? = null
 
     private fun rejectWithError(promise: Promise, error: Throwable) {
         when (error) {
@@ -62,8 +54,8 @@ class SynchroModule(reactContext: ReactApplicationContext) :
             is SynchroError.PushRejected -> "PUSH_REJECTED" to mapOf(
                 "results" to JSONArray(error.results.map { r ->
                     JSONObject().apply {
-                        put("recordID", r.recordID)
-                        put("table", r.table)
+                        put("recordID", r.id)
+                        put("table", r.tableName)
                         put("status", r.status)
                     }
                 }).toString()
@@ -78,17 +70,16 @@ class SynchroModule(reactContext: ReactApplicationContext) :
             is SynchroError.DatabaseError -> "DATABASE_ERROR" to mapOf(
                 "message" to (error.underlying.message ?: "")
             )
-            is SynchroError.InvalidResponse -> "INVALID_RESPONSE" to mapOf("message" to error.message)
+            is SynchroError.InvalidResponse -> "INVALID_RESPONSE" to mapOf("message" to error.details)
             is SynchroError.AlreadyStarted -> "ALREADY_STARTED" to emptyMap()
             is SynchroError.NotStarted -> "NOT_STARTED" to emptyMap()
-            else -> "UNKNOWN" to emptyMap()
         }
     }
 
     // MARK: - Lifecycle
 
     @ReactMethod
-    fun initialize(config: ReadableMap, promise: Promise) {
+    override fun initialize(config: ReadableMap, promise: Promise) {
         try {
             val dbPath = config.getString("dbPath") ?: throw IllegalArgumentException("Missing dbPath")
             val serverURL = config.getString("serverURL") ?: throw IllegalArgumentException("Missing serverURL")
@@ -116,7 +107,7 @@ class SynchroModule(reactContext: ReactApplicationContext) :
                         val params = Arguments.createMap().apply {
                             putString("requestID", requestID)
                         }
-                        emit("onAuthRequest", params)
+                        emitOnAuthRequest(params)
                     }
                 },
                 clientID = clientID,
@@ -130,7 +121,10 @@ class SynchroModule(reactContext: ReactApplicationContext) :
                 snapshotPageSize = snapshotPageSize
             )
 
+            client?.close()
+            clearRuntimeState()
             client = SynchroClient(synchroConfig, reactApplicationContext)
+            wireClientEvents(client!!)
             promise.resolve(null)
         } catch (e: Exception) {
             rejectWithError(promise, e)
@@ -138,26 +132,27 @@ class SynchroModule(reactContext: ReactApplicationContext) :
     }
 
     @ReactMethod
-    fun resolveAuthRequest(requestID: String, token: String) {
+    override fun resolveAuthRequest(requestID: String, token: String) {
         pendingAuthContinuations.remove(requestID)?.resume(token) {}
     }
 
     @ReactMethod
-    fun rejectAuthRequest(requestID: String, error: String) {
+    override fun rejectAuthRequest(requestID: String, error: String) {
         pendingAuthContinuations.remove(requestID)?.cancel(
             Exception(error)
         )
     }
 
     @ReactMethod
-    fun resolveSnapshotRequest(requestID: String, approved: Boolean) {
+    override fun resolveSnapshotRequest(requestID: String, approved: Boolean) {
         pendingSnapshotContinuations.remove(requestID)?.resume(approved) {}
     }
 
     @ReactMethod
-    fun close(promise: Promise) {
+    override fun close(promise: Promise) {
         try {
             client?.close()
+            clearRuntimeState()
             client = null
             promise.resolve(null)
         } catch (e: Exception) {
@@ -166,7 +161,7 @@ class SynchroModule(reactContext: ReactApplicationContext) :
     }
 
     @ReactMethod
-    fun getPath(promise: Promise) {
+    override fun getPath(promise: Promise) {
         val c = client ?: run {
             promise.reject("NOT_CONNECTED", "Client not initialized")
             return
@@ -177,7 +172,7 @@ class SynchroModule(reactContext: ReactApplicationContext) :
     // MARK: - Core SQL
 
     @ReactMethod
-    fun query(sql: String, paramsJson: String, promise: Promise) {
+    override fun query(sql: String, paramsJson: String, promise: Promise) {
         val c = client ?: run {
             promise.reject("NOT_CONNECTED", "Client not initialized")
             return
@@ -192,7 +187,7 @@ class SynchroModule(reactContext: ReactApplicationContext) :
     }
 
     @ReactMethod
-    fun queryOne(sql: String, paramsJson: String, promise: Promise) {
+    override fun queryOne(sql: String, paramsJson: String, promise: Promise) {
         val c = client ?: run {
             promise.reject("NOT_CONNECTED", "Client not initialized")
             return
@@ -207,7 +202,7 @@ class SynchroModule(reactContext: ReactApplicationContext) :
     }
 
     @ReactMethod
-    fun execute(sql: String, paramsJson: String, promise: Promise) {
+    override fun execute(sql: String, paramsJson: String, promise: Promise) {
         val c = client ?: run {
             promise.reject("NOT_CONNECTED", "Client not initialized")
             return
@@ -225,7 +220,7 @@ class SynchroModule(reactContext: ReactApplicationContext) :
     }
 
     @ReactMethod
-    fun executeBatch(statementsJson: String, promise: Promise) {
+    override fun executeBatch(statementsJson: String, promise: Promise) {
         val c = client ?: run {
             promise.reject("NOT_CONNECTED", "Client not initialized")
             return
@@ -265,12 +260,12 @@ class SynchroModule(reactContext: ReactApplicationContext) :
     private class TransactionRollbackException : Exception("rollback")
 
     @ReactMethod
-    fun beginWriteTransaction(promise: Promise) {
+    override fun beginWriteTransaction(promise: Promise) {
         beginTransaction(isWrite = true, promise = promise)
     }
 
     @ReactMethod
-    fun beginReadTransaction(promise: Promise) {
+    override fun beginReadTransaction(promise: Promise) {
         beginTransaction(isWrite = false, promise = promise)
     }
 
@@ -290,7 +285,7 @@ class SynchroModule(reactContext: ReactApplicationContext) :
                     promise.resolve(txID)
                     runBlocking {
                         withTimeout(5000) {
-                            for (op in session.operations) {
+                            transactionLoop@ for (op in session.operations) {
                                 when (op) {
                                     is TransactionOp.Query -> {
                                         try {
@@ -326,7 +321,7 @@ class SynchroModule(reactContext: ReactApplicationContext) :
                                     is TransactionOp.Commit -> {
                                         op.deferred.complete(Unit)
                                         session.operations.close()
-                                        return@runBlocking
+                                        break@transactionLoop
                                     }
                                     is TransactionOp.Rollback -> {
                                         op.deferred.complete(Unit)
@@ -379,7 +374,7 @@ class SynchroModule(reactContext: ReactApplicationContext) :
     }
 
     @ReactMethod
-    fun txQuery(txID: String, sql: String, paramsJson: String, promise: Promise) {
+    override fun txQuery(txID: String, sql: String, paramsJson: String, promise: Promise) {
         val session = sessions[txID] ?: run {
             promise.reject("TRANSACTION_TIMEOUT", "Transaction not found or expired")
             return
@@ -397,7 +392,7 @@ class SynchroModule(reactContext: ReactApplicationContext) :
     }
 
     @ReactMethod
-    fun txQueryOne(txID: String, sql: String, paramsJson: String, promise: Promise) {
+    override fun txQueryOne(txID: String, sql: String, paramsJson: String, promise: Promise) {
         val session = sessions[txID] ?: run {
             promise.reject("TRANSACTION_TIMEOUT", "Transaction not found or expired")
             return
@@ -415,7 +410,7 @@ class SynchroModule(reactContext: ReactApplicationContext) :
     }
 
     @ReactMethod
-    fun txExecute(txID: String, sql: String, paramsJson: String, promise: Promise) {
+    override fun txExecute(txID: String, sql: String, paramsJson: String, promise: Promise) {
         val session = sessions[txID] ?: run {
             promise.reject("TRANSACTION_TIMEOUT", "Transaction not found or expired")
             return
@@ -433,7 +428,7 @@ class SynchroModule(reactContext: ReactApplicationContext) :
     }
 
     @ReactMethod
-    fun commitTransaction(txID: String, promise: Promise) {
+    override fun commitTransaction(txID: String, promise: Promise) {
         val session = sessions[txID] ?: run {
             promise.reject("TRANSACTION_TIMEOUT", "Transaction not found or expired")
             return
@@ -451,7 +446,7 @@ class SynchroModule(reactContext: ReactApplicationContext) :
     }
 
     @ReactMethod
-    fun rollbackTransaction(txID: String, promise: Promise) {
+    override fun rollbackTransaction(txID: String, promise: Promise) {
         val session = sessions[txID] ?: run {
             promise.resolve(null) // Already gone
             return
@@ -471,7 +466,7 @@ class SynchroModule(reactContext: ReactApplicationContext) :
     // MARK: - Schema
 
     @ReactMethod
-    fun createTable(name: String, columnsJson: String, optionsJson: String?, promise: Promise) {
+    override fun createTable(name: String, columnsJson: String, optionsJson: String?, promise: Promise) {
         val c = client ?: run {
             promise.reject("NOT_CONNECTED", "Client not initialized")
             return
@@ -487,7 +482,7 @@ class SynchroModule(reactContext: ReactApplicationContext) :
     }
 
     @ReactMethod
-    fun alterTable(name: String, columnsJson: String, promise: Promise) {
+    override fun alterTable(name: String, columnsJson: String, promise: Promise) {
         val c = client ?: run {
             promise.reject("NOT_CONNECTED", "Client not initialized")
             return
@@ -502,13 +497,13 @@ class SynchroModule(reactContext: ReactApplicationContext) :
     }
 
     @ReactMethod
-    fun createIndex(table: String, columns: ReadableArray, unique: Boolean, promise: Promise) {
+    override fun createIndex(table: String, columns: ReadableArray, unique: Boolean, promise: Promise) {
         val c = client ?: run {
             promise.reject("NOT_CONNECTED", "Client not initialized")
             return
         }
         try {
-            val cols = (0 until columns.size()).map { columns.getString(it) }
+            val cols = (0 until columns.size()).mapNotNull { columns.getString(it) }
             c.createIndex(table, cols, unique)
             promise.resolve(null)
         } catch (e: Exception) {
@@ -519,24 +514,24 @@ class SynchroModule(reactContext: ReactApplicationContext) :
     // MARK: - Observation
 
     @ReactMethod
-    fun addChangeObserver(observerID: String, tables: ReadableArray, promise: Promise) {
+    override fun addChangeObserver(observerID: String, tables: ReadableArray, promise: Promise) {
         val c = client ?: run {
             promise.reject("NOT_CONNECTED", "Client not initialized")
             return
         }
-        val tableList = (0 until tables.size()).map { tables.getString(it) }
+        val tableList = (0 until tables.size()).mapNotNull { tables.getString(it) }
         val cancellable = c.onChange(tableList) {
             val params = Arguments.createMap().apply {
                 putString("observerID", observerID)
             }
-            emit("onChange", params)
+            emitOnChange(params)
         }
         observers[observerID] = cancellable
         promise.resolve(null)
     }
 
     @ReactMethod
-    fun addQueryObserver(
+    override fun addQueryObserver(
         observerID: String,
         sql: String,
         paramsJson: String,
@@ -549,13 +544,13 @@ class SynchroModule(reactContext: ReactApplicationContext) :
         }
         try {
             val params = parseParams(paramsJson)
-            val tableList = (0 until tables.size()).map { tables.getString(it) }
+            val tableList = (0 until tables.size()).mapNotNull { tables.getString(it) }
             val cancellable = c.watch(sql, params, tableList) { rows ->
                 val eventParams = Arguments.createMap().apply {
                     putString("observerID", observerID)
                     putString("rowsJson", rowsToJson(rows))
                 }
-                emit("onQueryResult", eventParams)
+                emitOnQueryResult(eventParams)
             }
             observers[observerID] = cancellable
             promise.resolve(null)
@@ -565,7 +560,7 @@ class SynchroModule(reactContext: ReactApplicationContext) :
     }
 
     @ReactMethod
-    fun removeObserver(observerID: String, promise: Promise) {
+    override fun removeObserver(observerID: String, promise: Promise) {
         observers.remove(observerID)?.cancel()
         promise.resolve(null)
     }
@@ -573,7 +568,7 @@ class SynchroModule(reactContext: ReactApplicationContext) :
     // MARK: - WAL / Sync
 
     @ReactMethod
-    fun checkpoint(mode: String, promise: Promise) {
+    override fun checkpoint(mode: String, promise: Promise) {
         val c = client ?: run {
             promise.reject("NOT_CONNECTED", "Client not initialized")
             return
@@ -593,7 +588,7 @@ class SynchroModule(reactContext: ReactApplicationContext) :
     }
 
     @ReactMethod
-    fun start(promise: Promise) {
+    override fun start(promise: Promise) {
         val c = client ?: run {
             promise.reject("NOT_CONNECTED", "Client not initialized")
             return
@@ -609,17 +604,21 @@ class SynchroModule(reactContext: ReactApplicationContext) :
     }
 
     @ReactMethod
-    fun stop(promise: Promise) {
+    override fun stop(promise: Promise) {
         val c = client ?: run {
             promise.reject("NOT_CONNECTED", "Client not initialized")
             return
         }
-        c.stop()
-        promise.resolve(null)
+        try {
+            c.stop()
+            promise.resolve(null)
+        } catch (e: Exception) {
+            rejectWithError(promise, e)
+        }
     }
 
     @ReactMethod
-    fun syncNow(promise: Promise) {
+    override fun syncNow(promise: Promise) {
         val c = client ?: run {
             promise.reject("NOT_CONNECTED", "Client not initialized")
             return
@@ -635,7 +634,7 @@ class SynchroModule(reactContext: ReactApplicationContext) :
     }
 
     @ReactMethod
-    fun pendingChangeCount(promise: Promise) {
+    override fun pendingChangeCount(promise: Promise) {
         val c = client ?: run {
             promise.reject("NOT_CONNECTED", "Client not initialized")
             return
@@ -649,12 +648,106 @@ class SynchroModule(reactContext: ReactApplicationContext) :
 
     // Event listener registration (required by RN)
     @ReactMethod
-    fun addListener(eventName: String) { /* no-op */ }
+    override fun addListener(eventName: String) { /* no-op */ }
 
     @ReactMethod
-    fun removeListeners(count: Int) { /* no-op */ }
+    override fun removeListeners(count: Double) { /* no-op */ }
 
     // MARK: - Helpers
+
+    private fun wireClientEvents(client: SynchroClient) {
+        statusSubscription?.cancel()
+        conflictSubscription?.cancel()
+        snapshotSubscription?.cancel()
+
+        statusSubscription = client.onStatusChange { status ->
+            val params = Arguments.createMap().apply {
+                when (status) {
+                    is SyncStatus.Idle -> {
+                        putString("status", "idle")
+                        putNull("retryAt")
+                    }
+                    is SyncStatus.Syncing -> {
+                        putString("status", "syncing")
+                        putNull("retryAt")
+                    }
+                    is SyncStatus.Stopped -> {
+                        putString("status", "stopped")
+                        putNull("retryAt")
+                    }
+                    is SyncStatus.Error -> {
+                        putString("status", "error")
+                        putString("retryAt", status.retryAt?.toString())
+                    }
+                }
+            }
+            emitOnStatusChange(params)
+        }
+
+        conflictSubscription = client.onConflict { event ->
+            val params = Arguments.createMap().apply {
+                putString("table", event.table)
+                putString("recordID", event.recordID)
+                putString("clientDataJson", event.clientData?.let { anyCodableMapToJson(it) })
+                putString("serverDataJson", event.serverData?.let { anyCodableMapToJson(it) })
+            }
+            emitOnConflict(params)
+        }
+
+        snapshotSubscription = client.onSnapshotRequired {
+            suspendCancellableCoroutine { continuation ->
+                val requestID = UUID.randomUUID().toString()
+                pendingSnapshotContinuations[requestID] = continuation
+                continuation.invokeOnCancellation {
+                    pendingSnapshotContinuations.remove(requestID)
+                }
+                val params = Arguments.createMap().apply {
+                    putString("requestID", requestID)
+                }
+                emitOnSnapshotRequired(params)
+            }
+        }
+    }
+
+    private fun clearRuntimeState() {
+        statusSubscription?.cancel()
+        conflictSubscription?.cancel()
+        snapshotSubscription?.cancel()
+        statusSubscription = null
+        conflictSubscription = null
+        snapshotSubscription = null
+        observers.values.forEach { it.cancel() }
+        observers.clear()
+        sessions.values.forEach { it.operations.close() }
+        sessions.clear()
+        pendingAuthContinuations.values.forEach { it.cancel(CancellationException("client closed")) }
+        pendingAuthContinuations.clear()
+        pendingSnapshotContinuations.values.forEach { it.cancel(CancellationException("client closed")) }
+        pendingSnapshotContinuations.clear()
+    }
+
+    private fun anyCodableMapToJson(value: Map<String, AnyCodable>): String {
+        val obj = JSONObject()
+        value.forEach { (key, anyCodable) ->
+            obj.put(key, anyCodableToJsonValue(anyCodable.value))
+        }
+        return obj.toString()
+    }
+
+    private fun anyCodableToJsonValue(value: Any?): Any? = when (value) {
+        null -> JSONObject.NULL
+        is Boolean, is Number, is String -> value
+        is List<*> -> JSONArray().apply {
+            value.forEach { put(anyCodableToJsonValue(it)) }
+        }
+        is Map<*, *> -> JSONObject().apply {
+            value.forEach { (k, v) ->
+                put(k.toString(), anyCodableToJsonValue(v))
+            }
+        }
+        is AnyCodable -> anyCodableToJsonValue(value.value)
+        else -> value.toString()
+    }
 
     private fun parseParams(json: String): Array<Any?> {
         val array = JSONArray(json)

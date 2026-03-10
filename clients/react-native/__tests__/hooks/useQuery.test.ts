@@ -1,6 +1,7 @@
 import { renderHook, act, waitFor } from '@testing-library/react-native';
 import { useQuery } from '../../src/hooks/useQuery';
 import { SynchroClient } from '../../src/SynchroClient';
+import { resetNativeModuleMockState } from '../__mocks__/react-native';
 
 function makeClient(): SynchroClient {
   return new SynchroClient({
@@ -11,6 +12,10 @@ function makeClient(): SynchroClient {
     appVersion: '1.0.0',
   });
 }
+
+beforeEach(() => {
+  resetNativeModuleMockState();
+});
 
 describe('useQuery', () => {
   it('fetches data in one-shot mode (no tables)', async () => {
@@ -77,5 +82,38 @@ describe('useQuery', () => {
     act(() => result.current.refresh());
 
     await waitFor(() => expect(result.current.data).toEqual([{ count: 2 }]));
+  });
+
+  it('re-subscribes when watch dependencies change', async () => {
+    const client = makeClient();
+    const unsubscribeA = jest.fn();
+    const unsubscribeB = jest.fn();
+
+    jest
+      .spyOn(client, 'watch')
+      .mockImplementationOnce((_sql, _params, _tables, callback) => {
+        callback([{ id: '1' }]);
+        return unsubscribeA;
+      })
+      .mockImplementationOnce((_sql, _params, _tables, callback) => {
+        callback([{ id: '2' }]);
+        return unsubscribeB;
+      });
+
+    const { result, rerender, unmount } = renderHook(
+      ({ sql }) => useQuery(client, sql, undefined, ['items']),
+      { initialProps: { sql: 'SELECT * FROM items' } }
+    );
+
+    await waitFor(() => expect(result.current.data).toEqual([{ id: '1' }]));
+
+    rerender({ sql: 'SELECT * FROM items WHERE done = 0' });
+
+    await waitFor(() => expect(result.current.data).toEqual([{ id: '2' }]));
+
+    expect(unsubscribeA).toHaveBeenCalledTimes(1);
+
+    unmount();
+    expect(unsubscribeB).toHaveBeenCalledTimes(1);
   });
 });

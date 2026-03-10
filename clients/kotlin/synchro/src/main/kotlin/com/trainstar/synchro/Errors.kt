@@ -23,7 +23,7 @@ sealed class SynchroError(message: String, cause: Throwable? = null) : Exception
     class DatabaseError(val underlying: Throwable) :
         SynchroError("Database error: ${underlying.message}", underlying)
 
-    class InvalidResponse(val message: String) : SynchroError("Invalid response: $message")
+    class InvalidResponse(val details: String) : SynchroError("Invalid response: $details")
     class AlreadyStarted : SynchroError("Sync has already been started")
     class NotStarted : SynchroError("Sync has not been started")
 }

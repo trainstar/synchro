@@ -17,6 +17,12 @@ import {
   TransactionTimeoutError,
 } from '../src/errors';
 
+import { resetNativeModuleMockState } from './__mocks__/react-native';
+
+beforeEach(() => {
+  resetNativeModuleMockState();
+});
+
 describe('mapNativeError', () => {
   it('maps NOT_CONNECTED', () => {
     const err = mapNativeError({ code: 'NOT_CONNECTED', message: 'Not connected' });

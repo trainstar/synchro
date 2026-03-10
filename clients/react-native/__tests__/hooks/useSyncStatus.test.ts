@@ -1,7 +1,11 @@
 import { renderHook, act } from '@testing-library/react-native';
 import { useSyncStatus } from '../../src/hooks/useSyncStatus';
 import { SynchroClient } from '../../src/SynchroClient';
-import { emitNativeEvent } from '../__mocks__/react-native';
+import {
+  emitNativeEvent,
+  mockNativeModule,
+  resetNativeModuleMockState,
+} from '../__mocks__/react-native';
 
 function makeClient(): SynchroClient {
   return new SynchroClient({
@@ -12,6 +16,10 @@ function makeClient(): SynchroClient {
     appVersion: '1.0.0',
   });
 }
+
+beforeEach(() => {
+  resetNativeModuleMockState();
+});
 
 describe('useSyncStatus', () => {
   it('starts with idle status', () => {
@@ -35,12 +43,19 @@ describe('useSyncStatus', () => {
 
   it('cleans up subscription on unmount', () => {
     const client = makeClient();
-    const { result, unmount } = renderHook(() => useSyncStatus(client));
+    const { unmount } = renderHook(() => useSyncStatus(client));
+    const remove =
+      mockNativeModule.onStatusChange.mock.results[0]?.value?.remove as
+        | jest.Mock
+        | undefined;
 
     unmount();
 
-    // After unmount, emitting should not cause issues
-    emitNativeEvent('onStatusChange', { status: 'error', retryAt: null });
-    // No assertion needed — just verifying no crash
+    expect(remove).toBeDefined();
+    expect(remove).toHaveBeenCalledTimes(1);
+
+    act(() => {
+      emitNativeEvent('onStatusChange', { status: 'error', retryAt: null });
+    });
   });
 });

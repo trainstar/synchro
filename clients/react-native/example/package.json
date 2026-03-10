@@ -9,7 +9,9 @@
     "build:android": "react-native build-android --extra-params \"--no-daemon --console=plain -PreactNativeArchitectures=arm64-v8a\"",
     "build:ios": "react-native build-ios --mode Debug",
     "detox:build:ios": "detox build --configuration ios.sim.debug",
-    "detox:test:ios": "detox test --configuration ios.sim.debug"
+    "detox:test:ios": "detox test --configuration ios.sim.debug",
+    "detox:build:android": "detox build --configuration android.emu.release",
+    "detox:test:android": "detox test --configuration android.emu.release"
   },
   "dependencies": {
     "react": "19.2.0",

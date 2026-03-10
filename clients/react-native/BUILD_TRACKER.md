@@ -1,81 +1,30 @@
-# React Native Client SDK — Build & E2E Tracker
+# React Native Client SDK — Verification Notes
 
-## Architecture
-- **New Architecture only** (RCT_NEW_ARCH_ENABLED=1, bridgeless mode)
-- **ObjC++ thin wrapper** (`SynchroModule.mm`) conforms to Codegen `NativeSynchroSpec`
-- **Swift implementation** (`SynchroModule.swift` as `SynchroModuleImpl`) — all logic lives here
-- **Event delegation**: Swift → ObjC++ via `SynchroEventEmitting` protocol → Codegen `emitOnXxx:` methods
+## Current State
 
-## Issues Found & Fixed
+- New Architecture only
+- iOS bridge uses the Codegen-generated ObjC++ wrapper plus Swift implementation
+- JS package builds and publishes as an npm package
 
-### 1. StatementArguments optional not unwrapped
-- **File**: `SynchroModule.swift` (transaction block, 3 occurrences)
-- **Error**: `StatementArguments(...)` returns optional in GRDB 7.0
-- **Fix**: Added `?? StatementArguments()` fallback
-- **Status**: FIXED
-
-### 2. Swift types not visible to ObjC++
-- **Files**: `SynchroModule.swift`
-- **Error**: `cannot find protocol declaration for 'SynchroEventEmitting'`, `unknown type name 'SynchroModuleImpl'`
-- **Root cause**: Protocol and class lacked `public` visibility for cross-module access
-- **Fix**: Added `@objc public protocol`, `public class`, `@objc public weak var`, `@objc public func` on all methods
-- **Status**: FIXED
-
-### 3. Missing `import React` in Swift
-- **File**: `SynchroModule.swift`
-- **Error**: `cannot find type 'RCTPromiseResolveBlock'` / `RCTPromiseRejectBlock` in scope
-- **Fix**: Added `import React`
-- **Status**: FIXED
-
-### 4. Duplicate `@objc` attribute
-- **File**: `SynchroModule.swift`
-- **Error**: `duplicate attribute` on `@objc(SynchroModuleImpl) @objc public class`
-- **Fix**: Removed second `@objc`, kept `@objc(SynchroModuleImpl)` for ObjC name mapping
-- **Status**: FIXED
-
-### 5. Debug console.log statements
-- **Files**: `SynchroClient.ts`, `App.tsx`
-- **Error**: Debug logging left from troubleshooting
-- **Fix**: Removed all `console.log` debug statements
-- **Status**: FIXED
-
-### 6. Detox buttons not hittable (off-screen)
-- **Files**: `sync.test.ts`, `App.tsx`
-- **Error**: Buttons below the fold on iPhone SE cause "View is not hittable"
-- **Fix**: Added `scrollToAndTap()` helper using `waitFor().toBeVisible().whileElement().scroll()`, added `testID="test-scroll"` to ScrollView
-- **Status**: FIXED
-
-### 7. iPhone 16 simulator not available
-- **Error**: Build destination `iPhone 16` not found
-- **Fix**: Using `iPhone SE (3rd generation)` (available simulator)
-- **Status**: FIXED
-
-## Build Status
+## Verified
 
 | Step | Status | Notes |
 |------|--------|-------|
-| pod install (NEW_ARCH=1) | PASS | Codegen ran, 82 deps installed |
-| xcodebuild | PASS | BUILD SUCCEEDED |
-| Unit tests (Jest) | PENDING | 54 tests |
-| E2E tests (Detox) | PENDING | 16 tests |
+| TypeScript typecheck | PASS | `npm run typecheck` |
+| Package build | PASS | `npm run prepare` |
+| Tarball dry-run | PASS | `npm pack --dry-run` |
+| Unit tests | PASS | Jest suite |
+| iOS E2E | PASS | Detox against live `synchrod` |
+| Android build | PASS | `npm run build:android` with JDK 17 + Android SDK |
 
-## E2E Test Matrix
+## Outstanding
 
-| Test | Status | Notes |
+| Area | Status | Notes |
 |------|--------|-------|
-| shows the test harness | PENDING | |
-| initializes successfully | PENDING | |
-| executes a query | PENDING | |
-| executes a write | PENDING | |
-| write transaction commit | PENDING | |
-| write transaction rollback | PENDING | |
-| read transaction | PENDING | |
-| transaction timeout | PENDING | |
-| transaction error recovery | PENDING | |
-| starts sync | PENDING | |
-| push/pull round trip | PENDING | |
-| conflict resolution | PENDING | |
-| multi-user isolation | PENDING | |
-| shows sync status | PENDING | |
-| stops sync | PENDING | |
-| maps native errors | PENDING | |
+| Android E2E verification | IN PROGRESS | Emulator + API 34 image provisioning in progress in the audit environment |
+
+## Guidance
+
+- Do not use this file as the source of truth for package docs.
+- Public package docs live in `README.md`.
+- Shipability requires both iOS and Android verification, not just iOS green runs.

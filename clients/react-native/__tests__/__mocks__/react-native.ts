@@ -68,6 +68,17 @@ export const Platform = {
   select: jest.fn((obj: any) => obj.ios),
 };
 
+export function resetNativeModuleMockState() {
+  Object.values(mockNativeModule).forEach((value) => {
+    if (typeof value?.mockClear === 'function') {
+      value.mockClear();
+    }
+  });
+  Object.keys(listeners).forEach((eventName) => {
+    delete listeners[eventName];
+  });
+}
+
 // Helper: emit a native event to all JS listeners
 export function emitNativeEvent(eventName: string, data: any) {
   listeners[eventName]?.forEach((cb) => cb(data));

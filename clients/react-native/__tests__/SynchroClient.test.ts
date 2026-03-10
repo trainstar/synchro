@@ -1,5 +1,9 @@
 import { SynchroClient } from '../src/SynchroClient';
-import { mockNativeModule, emitNativeEvent } from './__mocks__/react-native';
+import {
+  mockNativeModule,
+  emitNativeEvent,
+  resetNativeModuleMockState,
+} from './__mocks__/react-native';
 
 function makeClient(): SynchroClient {
   return new SynchroClient({
@@ -12,7 +16,7 @@ function makeClient(): SynchroClient {
 }
 
 beforeEach(() => {
-  jest.clearAllMocks();
+  resetNativeModuleMockState();
 });
 
 describe('SynchroClient', () => {

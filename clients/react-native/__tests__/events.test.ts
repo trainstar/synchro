@@ -1,5 +1,5 @@
 import { SynchroClient } from '../src/SynchroClient';
-import { emitNativeEvent } from './__mocks__/react-native';
+import { emitNativeEvent, resetNativeModuleMockState } from './__mocks__/react-native';
 
 function makeClient(): SynchroClient {
   return new SynchroClient({
@@ -10,6 +10,10 @@ function makeClient(): SynchroClient {
     appVersion: '1.0.0',
   });
 }
+
+beforeEach(() => {
+  resetNativeModuleMockState();
+});
 
 describe('Event routing', () => {
   it('routes onStatusChange to subscriber', () => {

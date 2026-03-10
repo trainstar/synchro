@@ -24,12 +24,21 @@ module.exports = {
         'cd android && ./gradlew assembleDebug assembleAndroidTest -DtestBuildType=debug',
       reversePorts: [8080],
     },
+    'android.release': {
+      type: 'android.apk',
+      binaryPath: 'android/app/build/outputs/apk/release/app-release.apk',
+      testBinaryPath:
+        'android/app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk',
+      build:
+        'cd android && ./gradlew assembleRelease assembleDebugAndroidTest',
+      reversePorts: [8080],
+    },
   },
   devices: {
     simulator: {
       type: 'ios.simulator',
       device: {
-        type: 'iPhone SE (3rd generation)',
+        id: '4B92F199-A5D5-464E-9378-7333A322EC36',
       },
     },
     emulator: {
@@ -47,6 +56,10 @@ module.exports = {
     'android.emu.debug': {
       device: 'emulator',
       app: 'android.debug',
+    },
+    'android.emu.release': {
+      device: 'emulator',
+      app: 'android.release',
     },
   },
 };

@@ -44,6 +44,9 @@ public class SynchroModuleImpl: NSObject {
     private var sessions: [String: TransactionSession] = [:]
     private let sessionsLock = NSLock()
     private var observers: [String: any Synchro.Cancellable] = [:]
+    private var statusSubscription: (any Synchro.Cancellable)?
+    private var conflictSubscription: (any Synchro.Cancellable)?
+    private var snapshotSubscription: (any Synchro.Cancellable)?
 
     private var pendingAuthContinuations: [String: CheckedContinuation<String, Error>] = [:]
     private let authLock = NSLock()
@@ -52,7 +55,9 @@ public class SynchroModuleImpl: NSObject {
     private let snapshotLock = NSLock()
 
     private func emit(_ name: String, _ body: [String: Any]) {
-        eventDelegate?.emitEvent(name, body: body as NSDictionary)
+        DispatchQueue.main.async { [weak self] in
+            self?.eventDelegate?.emitEvent(name, body: body as NSDictionary)
+        }
     }
 
     @objc public func rejectWithError(_ reject: @escaping RCTPromiseRejectBlock, _ error: Error) {
@@ -161,7 +166,11 @@ public class SynchroModuleImpl: NSObject {
                 pushBatchSize: pushBatchSize,
                 snapshotPageSize: snapshotPageSize
             )
-            self.client = try SynchroClient(config: synchroConfig)
+            try client?.close()
+            clearRuntimeState()
+            let client = try SynchroClient(config: synchroConfig)
+            self.client = client
+            wireClientEvents(client)
             resolve(nil)
         } catch {
             rejectWithError(reject, error)
@@ -199,6 +208,7 @@ public class SynchroModuleImpl: NSObject {
     ) {
         do {
             try client?.close()
+            clearRuntimeState()
             client = nil
             resolve(nil)
         } catch {
@@ -545,6 +555,101 @@ public class SynchroModuleImpl: NSObject {
         return sessions[txID]
     }
 
+    private func wireClientEvents(_ client: SynchroClient) {
+        statusSubscription?.cancel()
+        conflictSubscription?.cancel()
+        snapshotSubscription?.cancel()
+
+        statusSubscription = client.onStatusChange { [weak self] status in
+            self?.emit("onStatusChange", self?.statusPayload(status) ?? [:])
+        }
+
+        conflictSubscription = client.onConflict { [weak self] event in
+            self?.emit("onConflict", self?.conflictPayload(event) ?? [:])
+        }
+
+        snapshotSubscription = client.onSnapshotRequired { [weak self] in
+            await withCheckedContinuation { continuation in
+                let requestID = UUID().uuidString
+                self?.snapshotLock.lock()
+                self?.pendingSnapshotContinuations[requestID] = continuation
+                self?.snapshotLock.unlock()
+                self?.emit("onSnapshotRequired", ["requestID": requestID])
+            }
+        }
+    }
+
+    private func clearRuntimeState() {
+        statusSubscription?.cancel()
+        conflictSubscription?.cancel()
+        snapshotSubscription?.cancel()
+        statusSubscription = nil
+        conflictSubscription = nil
+        snapshotSubscription = nil
+
+        observers.values.forEach { $0.cancel() }
+        observers.removeAll()
+
+        sessionsLock.lock()
+        sessions.removeAll()
+        sessionsLock.unlock()
+
+        authLock.lock()
+        let authContinuations = pendingAuthContinuations
+        pendingAuthContinuations.removeAll()
+        authLock.unlock()
+        authContinuations.values.forEach { continuation in
+            continuation.resume(throwing: NSError(
+                domain: "SynchroModule",
+                code: 0,
+                userInfo: [NSLocalizedDescriptionKey: "client closed"]
+            ))
+        }
+
+        snapshotLock.lock()
+        let snapshotContinuations = pendingSnapshotContinuations
+        pendingSnapshotContinuations.removeAll()
+        snapshotLock.unlock()
+        snapshotContinuations.values.forEach { continuation in
+            continuation.resume(returning: false)
+        }
+    }
+
+    private func statusPayload(_ status: SyncStatus) -> [String: Any] {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+
+        switch status {
+        case .idle:
+            return ["status": "idle", "retryAt": NSNull()]
+        case .syncing:
+            return ["status": "syncing", "retryAt": NSNull()]
+        case .stopped:
+            return ["status": "stopped", "retryAt": NSNull()]
+        case .error(let retryAt):
+            return [
+                "status": "error",
+                "retryAt": retryAt.map { formatter.string(from: $0) } ?? NSNull()
+            ]
+        }
+    }
+
+    private func conflictPayload(_ event: ConflictEvent) -> [String: Any] {
+        [
+            "table": event.table,
+            "recordID": event.recordID,
+            "clientDataJson": encodeAnyCodableMap(event.clientData) ?? NSNull(),
+            "serverDataJson": encodeAnyCodableMap(event.serverData) ?? NSNull()
+        ]
+    }
+
+    private func encodeAnyCodableMap(_ value: [String: AnyCodable]?) -> String? {
+        guard let value else { return nil }
+        let encoder = JSONEncoder()
+        guard let data = try? encoder.encode(value) else { return nil }
+        return String(data: data, encoding: .utf8)
+    }
+
     // MARK: - Schema
 
     @objc
@@ -707,9 +812,13 @@ public class SynchroModuleImpl: NSObject {
         Task {
             do {
                 try await client.start()
-                resolve(nil)
+                DispatchQueue.main.async {
+                    resolve(nil)
+                }
             } catch {
-                self.rejectWithError(reject, error)
+                DispatchQueue.main.async {
+                    self.rejectWithError(reject, error)
+                }
             }
         }
     }
@@ -724,7 +833,9 @@ public class SynchroModuleImpl: NSObject {
             return
         }
         client.stop()
-        resolve(nil)
+        DispatchQueue.main.async {
+            resolve(nil)
+        }
     }
 
     @objc
@@ -739,9 +850,13 @@ public class SynchroModuleImpl: NSObject {
         Task {
             do {
                 try await client.syncNow()
-                resolve(nil)
+                DispatchQueue.main.async {
+                    resolve(nil)
+                }
             } catch {
-                self.rejectWithError(reject, error)
+                DispatchQueue.main.async {
+                    self.rejectWithError(reject, error)
+                }
             }
         }
     }

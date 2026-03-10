@@ -7,8 +7,8 @@ Mobile and cross-platform SDKs for the Synchro sync library. Each SDK wraps a pl
 | SDK | Platform | Wraps | Status |
 |-----|----------|-------|--------|
 | **Swift** | iOS / macOS | GRDB | In Progress |
-| **Kotlin** | Android | Room | Planned |
-| **React Native** | iOS + Android | Swift + Kotlin | Planned |
+| **Kotlin** | Android | Room | In Progress |
+| **React Native** | iOS + Android | Swift + Kotlin | In Progress |
 
 ## Architecture
 
@@ -17,7 +17,7 @@ All SDKs implement the same interface contract. See [ARCHITECTURE.md](./ARCHITEC
 ### Layer Model
 
 - **Layer 1 (Native)**: Swift wraps GRDB, Kotlin wraps Room. SQLite triggers on synced tables auto-track all writes (CDC). HTTP sync orchestration talks to the Synchro server.
-- **Layer 2 (React Native)**: Native module wraps both Layer 1 SDKs. SQL strings down, JSON rows up, events via emitter.
+- **Layer 2 (React Native)**: TurboModule bridge wraps both Layer 1 SDKs. SQL strings down, JSON rows up, typed events up.
 
 ### Change Detection
 
@@ -36,9 +36,9 @@ Client-side CDC mirrors the server's WAL approach using SQLite triggers:
 # Swift
 cd swift && swift build && swift test
 
-# Kotlin (planned)
+# Kotlin
 cd kotlin && ./gradlew build
 
-# React Native (planned)
+# React Native
 cd react-native && npm install && npm test
 ```

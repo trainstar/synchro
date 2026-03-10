@@ -6,7 +6,7 @@ Shared architecture for all Synchro client SDKs (Swift, Kotlin, React Native).
 
 The React Native SDK is a thin TurboModule bridge wrapping both native SDKs. No sync logic is reimplemented in JS.
 
-- **Bridge format**: SQL strings down, JSON rows up, events via `NativeEventEmitter`
+- **Bridge format**: SQL strings down, JSON rows up, typed TurboModule events up
 - **Transactions**: Handle/session pattern — native holds the transaction open on a background thread, JS sends operations via semaphore (iOS) / channel (Kotlin), 5s inactivity timeout
 - **Auth**: Bidirectional — native emits `onAuthRequest`, JS calls `authProvider()`, resolves back via `resolveAuthRequest()`
 - **Error mapping**: Native `SynchroError` → bridge wire format (`code` + `userInfo`) → typed JS error classes
@@ -48,7 +48,7 @@ Every native SDK (Swift/Kotlin) exposes the same logical interface:
 ### Status
 - `onStatusChange(callback) -> Cancellable` -- Observe sync status changes
 - `onConflict(callback) -> Cancellable` -- Observe conflict events
-- `onResyncRequired(callback) -> Cancellable` -- Handle resync prompt
+- `onSnapshotRequired(handler) -> Cancellable` -- Handle full snapshot approval prompts
 
 ## Internal SQLite Tables
 

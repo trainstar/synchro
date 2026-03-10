@@ -19,7 +19,6 @@
     "android",
     "ios",
     "*.podspec",
-    "react-native.config.js",
     "!ios/build",
     "!android/build",
     "!android/gradle",
@@ -35,6 +34,8 @@
     "example": "yarn workspace @trainstar/synchro-react-native-example",
     "clean": "del-cli android/build example/android/build example/android/app/build example/ios/build lib",
     "prepare": "bob build",
+    "pack:dry-run": "npm pack --dry-run",
+    "test:unit": "jest --runInBand",
     "typecheck": "tsc",
     "test": "jest"
   },

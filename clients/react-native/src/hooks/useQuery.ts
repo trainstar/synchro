@@ -10,6 +10,27 @@ interface UseQueryResult {
   refresh: () => void;
 }
 
+function arraysEqual<T>(
+  a?: readonly T[],
+  b?: readonly T[]
+): boolean {
+  if (a === b) return true;
+  if (!a || !b) return !a && !b;
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i += 1) {
+    if (a[i] !== b[i]) return false;
+  }
+  return true;
+}
+
+function useStableArray<T>(value?: readonly T[]): readonly T[] | undefined {
+  const ref = useRef<readonly T[] | undefined>(value);
+  if (!arraysEqual(ref.current, value)) {
+    ref.current = value ? [...value] : value;
+  }
+  return ref.current;
+}
+
 export function useQuery(
   client: SynchroClient,
   sql: string,
@@ -21,6 +42,8 @@ export function useQuery(
   const [error, setError] = useState<SynchroError | null>(null);
   const refreshCounter = useRef(0);
   const [, setRefreshTrigger] = useState(0);
+  const stableParams = useStableArray(params);
+  const stableTables = useStableArray(tables);
 
   const refresh = useCallback(() => {
     refreshCounter.current += 1;
@@ -28,11 +51,11 @@ export function useQuery(
   }, []);
 
   useEffect(() => {
-    if (tables && tables.length > 0) {
+    if (stableTables && stableTables.length > 0) {
       // Reactive mode: use watch()
       setLoading(true);
       let firstResult = true;
-      const unsubscribe = client.watch(sql, params, tables, (rows) => {
+      const unsubscribe = client.watch(sql, stableParams as unknown[] | undefined, stableTables as string[], (rows) => {
         setData(rows);
         setError(null);
         if (firstResult) {
@@ -46,7 +69,7 @@ export function useQuery(
       let cancelled = false;
       setLoading(true);
       client
-        .query(sql, params)
+        .query(sql, stableParams as unknown[] | undefined)
         .then((rows) => {
           if (!cancelled) {
             setData(rows);
@@ -64,8 +87,7 @@ export function useQuery(
         cancelled = true;
       };
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [client, sql, JSON.stringify(params), JSON.stringify(tables), refreshCounter.current]);
+  }, [client, sql, stableParams, stableTables, refreshCounter.current]);
 
   return { data, loading, error, refresh };
 }
