@@ -1,8 +1,11 @@
 <p align="center">
   <img src="docs/assets/synchro-logo.svg" alt="Synchro" width="280"><br><br>
+  <a href="https://github.com/trainstar/synchro/actions/workflows/release.yml"><img src="https://img.shields.io/github/actions/workflow/status/trainstar/synchro/release.yml?label=release&logo=github" alt="Release"></a>
   <a href="https://pkg.go.dev/github.com/trainstar/synchro"><img src="https://img.shields.io/github/go-mod/go-version/trainstar/synchro?logo=go&logoColor=white" alt="Go"></a>
   <a href="https://pkg.go.dev/github.com/trainstar/synchro"><img src="https://pkg.go.dev/badge/github.com/trainstar/synchro.svg" alt="Go Reference"></a>
   <a href="https://www.npmjs.com/package/@trainstar/synchro-react-native"><img src="https://img.shields.io/npm/v/@trainstar/synchro-react-native?logo=npm&logoColor=white&label=npm" alt="npm"></a>
+  <a href="https://central.sonatype.com/artifact/com.trainstar/synchro"><img src="https://img.shields.io/maven-central/v/com.trainstar/synchro?logo=apache-maven&logoColor=white&label=maven" alt="Maven Central"></a>
+  <a href="https://github.com/trainstar/synchro"><img src="https://img.shields.io/github/v/tag/trainstar/synchro?filter=!v*&logo=swift&logoColor=white&label=SPM" alt="SPM"></a>
   <a href="LICENSE"><img src="https://img.shields.io/github/license/trainstar/synchro" alt="License"></a>
   <a href="https://trainstar.github.io/synchro"><img src="https://img.shields.io/badge/docs-trainstar.github.io%2Fsynchro-blue" alt="Docs"></a>
 </p>
