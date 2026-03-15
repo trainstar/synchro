@@ -1,8 +1,5 @@
 <p align="center">
-  <img src="docs/assets/logo.svg" alt="Synchro" width="300">
-</p>
-
-<p align="center">
+  <img src="docs/assets/logo.svg" alt="Synchro" width="200"><br><br>
   <a href="https://pkg.go.dev/github.com/trainstar/synchro"><img src="https://img.shields.io/github/go-mod/go-version/trainstar/synchro?logo=go&logoColor=white" alt="Go"></a>
   <a href="https://pkg.go.dev/github.com/trainstar/synchro"><img src="https://pkg.go.dev/badge/github.com/trainstar/synchro.svg" alt="Go Reference"></a>
   <a href="https://www.npmjs.com/package/@trainstar/synchro-react-native"><img src="https://img.shields.io/npm/v/@trainstar/synchro-react-native?logo=npm&logoColor=white&label=npm" alt="npm"></a>
