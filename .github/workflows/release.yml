@@ -148,7 +148,7 @@ jobs:
           fetch-depth: 0
 
       - name: Fetch secrets from Doppler
-        uses: dopplerhq/secrets-fetch-action@v2
+        uses: dopplerhq/secrets-fetch-action@v1.3.1
         with:
           doppler-token: ${{ secrets.DOPPLER_TOKEN }}
           inject-env-vars: true
@@ -197,7 +197,7 @@ jobs:
           java-version: '17'
 
       - name: Fetch secrets from Doppler
-        uses: dopplerhq/secrets-fetch-action@v2
+        uses: dopplerhq/secrets-fetch-action@v1.3.1
         with:
           doppler-token: ${{ secrets.DOPPLER_TOKEN }}
           inject-env-vars: true
