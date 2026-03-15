@@ -47,7 +47,7 @@ mavenPublishing {
     publishToMavenCentral(com.vanniktech.maven.publish.SonatypeHost.CENTRAL_PORTAL)
     signAllPublications()
 
-    coordinates("com.trainstar", "synchro", project.findProperty("version")?.toString() ?: "0.1.0")
+    coordinates("fit.trainstar", "synchro", project.findProperty("version")?.toString() ?: "0.1.0")
 
     pom {
         name.set("Synchro")

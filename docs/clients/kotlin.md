@@ -6,7 +6,7 @@
 
     ```kotlin
     dependencies {
-        implementation("com.trainstar:synchro:0.1.0")
+        implementation("fit.trainstar:synchro:0.1.0")
     }
     ```
 
@@ -14,7 +14,7 @@
 
     ```groovy
     dependencies {
-        implementation 'com.trainstar:synchro:0.1.0'
+        implementation 'fit.trainstar:synchro:0.1.0'
     }
     ```
 
