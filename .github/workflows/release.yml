@@ -245,7 +245,6 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
-          registry-url: 'https://registry.npmjs.org'
 
       - name: Install dependencies and build
         working-directory: clients/react-native
@@ -256,6 +255,7 @@ jobs:
       - name: Stamp version and publish
         working-directory: clients/react-native
         run: |
+          npm config set registry https://registry.npmjs.org/
           npm version "$VERSION" --no-git-tag-version
           npm publish --access public --provenance
 
