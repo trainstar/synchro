@@ -1,1 +1,34 @@
+# Go
 bin/
+*.test
+*.out
+cover.out
+
+# macOS / IDE
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Test artifacts
+.synchrod-test.log
+.synchrod-test.pid
+
+# Kotlin
+clients/kotlin/.gradle/
+clients/kotlin/**/build/
+
+# React Native artifacts
+clients/react-native/example/artifacts/
+
+# MkDocs build output
+site/
+
+# Local-only
+.ignore/
+
+# AI config
+AGENTS.md
+CLAUDE.md

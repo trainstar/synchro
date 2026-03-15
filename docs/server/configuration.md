@@ -1,4 +1,9 @@
-# Synchro Configuration Guide
+# Configuration
+
+!!! tip "What does NOT change"
+    Your application routes, your ORM, your existing queries, your auth middleware — all stay the same. Synchro mounts alongside your existing server.
+
+---
 
 ## Table Registration
 
@@ -66,7 +71,8 @@ registry.Register(&synchro.TableConfig{
 | `AllowGlobalRead` | No | `false` | Adds global-read RLS behavior for null-owner rows |
 | `BucketFunction` | No | `""` | Optional SQL bucket resolver function override |
 
-**Default protected columns** (always enforced): `id`, `created_at`, `updated_at`, `deleted_at`, the owner column, and the parent FK column.
+!!! info "Default protected columns"
+    The following columns are **always** protected and cannot be written by clients: `id`, `created_at`, `updated_at`, `deleted_at`, the owner column, and the parent FK column.
 
 ### Validation Rules
 
@@ -78,6 +84,8 @@ registry.Register(&synchro.TableConfig{
 - No cycles in parent chains.
 - Pushable tables have either `OwnerColumn` or `ParentTable`.
 - `ProtectedColumns` does not redundantly list default protected columns.
+
+---
 
 ## Engine Setup
 
@@ -103,6 +111,8 @@ result, err := engine.RunCompaction(ctx)
 // Or start background compaction on an interval
 engine.StartCompaction(ctx, 1*time.Hour)
 ```
+
+---
 
 ## Hooks
 
@@ -176,6 +186,8 @@ hooks := synchro.Hooks{
 }
 ```
 
+---
+
 ## Custom OwnershipResolver
 
 The default `JoinResolver` handles most cases. Implement `OwnershipResolver` for custom bucketing logic (e.g., sharing, group ownership).
@@ -187,6 +199,8 @@ type OwnershipResolver interface {
 ```
 
 The returned slice contains bucket IDs. A record can belong to multiple buckets.
+
+### Example: Sharing Resolver
 
 ```go
 type SharingResolver struct {
@@ -224,6 +238,8 @@ func (r *SharingResolver) ResolveOwner(ctx context.Context, db synchro.DB, table
 }
 ```
 
+---
+
 ## Custom ConflictResolver
 
 ```go
@@ -248,6 +264,8 @@ The `Conflict` struct provides:
 
 Return `Resolution{Winner: "client"}` to accept the push, or `Resolution{Winner: "server"}` to reject it.
 
+### Example: Per-Table Resolver
+
 ```go
 type PerTableResolver struct {
     resolvers map[string]synchro.ConflictResolver
@@ -261,6 +279,8 @@ func (r *PerTableResolver) Resolve(ctx context.Context, c synchro.Conflict) (syn
     return r.fallback.Resolve(ctx, c)
 }
 ```
+
+---
 
 ## Telemetry Integration
 
@@ -280,6 +300,8 @@ engine, _ := synchro.NewEngine(synchro.Config{
     Logger: logger,
 })
 ```
+
+---
 
 ## HTTP Handler Wiring
 
@@ -350,23 +372,23 @@ r.Route("/sync", func(r chi.Router) {
 
 Synchro handlers read the user ID from context via `handler.UserIDFromContext(ctx)`. You must inject it.
 
-**Option A: Use the built-in header middleware** (for development):
+=== "Built-in header middleware (development)"
 
-```go
-wrapped := handler.UserIDMiddleware("X-User-ID", mux)
-```
+    ```go
+    wrapped := handler.UserIDMiddleware("X-User-ID", mux)
+    ```
 
-**Option B: Inject from your own auth middleware** (production):
+=== "Custom auth middleware (production)"
 
-```go
-func authMiddleware(next http.Handler) http.Handler {
-    return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-        userID := extractUserIDFromJWT(r) // your auth logic
-        ctx := handler.WithUserID(r.Context(), userID)
-        next.ServeHTTP(w, r.WithContext(ctx))
-    })
-}
-```
+    ```go
+    func authMiddleware(next http.Handler) http.Handler {
+        return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+            userID := extractUserIDFromJWT(r) // your auth logic
+            ctx := handler.WithUserID(r.Context(), userID)
+            next.ServeHTTP(w, r.WithContext(ctx))
+        })
+    }
+    ```
 
 ### Version Check Middleware
 
@@ -386,25 +408,31 @@ h := handler.New(engine, handler.WithDefaultRetryAfter(10)) // 10 seconds
 
 For application-level backpressure (rate limiting, maintenance mode), use the middleware. The consuming app provides the policy:
 
-```go
-// Rate limiting (429)
-wrapped := handler.RetryAfterMiddleware(func(r *http.Request) (bool, int, int) {
-    if rateLimiter.IsExceeded(r) {
-        return true, 429, 60
-    }
-    return false, 0, 0
-}, mux)
+=== "Rate limiting (429)"
 
-// Maintenance mode (503)
-wrapped := handler.RetryAfterMiddleware(func(r *http.Request) (bool, int, int) {
-    if maintenanceMode {
-        return true, 503, 300
-    }
-    return false, 0, 0
-}, mux)
-```
+    ```go
+    wrapped := handler.RetryAfterMiddleware(func(r *http.Request) (bool, int, int) {
+        if rateLimiter.IsExceeded(r) {
+            return true, 429, 60
+        }
+        return false, 0, 0
+    }, mux)
+    ```
+
+=== "Maintenance mode (503)"
+
+    ```go
+    wrapped := handler.RetryAfterMiddleware(func(r *http.Request) (bool, int, int) {
+        if maintenanceMode {
+            return true, 503, 300
+        }
+        return false, 0, 0
+    }, mux)
+    ```
 
 Both the HTTP `Retry-After` header and a `retry_after` field in the JSON body are set, so clients can use either.
+
+---
 
 ## WAL Consumer Setup
 
@@ -443,7 +471,10 @@ CREATE PUBLICATION synchro_pub FOR TABLE
 ALTER SYSTEM SET wal_level = 'logical';
 ```
 
-The consumer creates the replication slot automatically on first start.
+!!! note
+    The consumer creates the replication slot automatically on first start.
+
+---
 
 ## Migration Setup
 
@@ -469,14 +500,20 @@ for _, stmt := range append(stmts, rlsStmts...) {
 
 ### Infrastructure Tables Created
 
-- `sync_changelog` -- Append-only changelog with `BIGSERIAL` seq, indexed by `(bucket_id, seq)`.
-- `sync_clients` -- Client registration, bucket subscriptions, checkpoint tracking.
+| Table | Purpose |
+|-------|---------|
+| `sync_changelog` | Append-only changelog with `BIGSERIAL` seq, indexed by `(bucket_id, seq)` |
+| `sync_clients` | Client registration, bucket subscriptions, checkpoint tracking |
+| `sync_wal_position` | WAL consumer LSN tracking for crash recovery |
+| `sync_bucket_edges` | Membership index for bucket delta assignment |
+| `sync_rule_failures` | Resolver failures for operational debugging and replay tooling |
+| `sync_schema_manifest` | Schema contract version/hash history |
 
 ### RLS Policies Generated
 
 `GenerateRLSPolicies(registry)` produces:
 
-- `PushPolicyDisabled` tables: read-only behavior (no write policies generated).
-- Tables with `OwnerColumn`: `SELECT`, `INSERT`, `UPDATE`, `DELETE` policies scoped to `owner_col::text = current_setting('app.user_id', true)`.
-- Tables with `AllowGlobalRead=true`: `SELECT` additionally allows `owner_col IS NULL`.
-- Child tables: `EXISTS` subquery through parent chain to verify ownership.
+- **`PushPolicyDisabled` tables** -- read-only behavior (no write policies generated).
+- **Tables with `OwnerColumn`** -- `SELECT`, `INSERT`, `UPDATE`, `DELETE` policies scoped to `owner_col::text = current_setting('app.user_id', true)`.
+- **Tables with `AllowGlobalRead=true`** -- `SELECT` additionally allows `owner_col IS NULL`.
+- **Child tables** -- `EXISTS` subquery through parent chain to verify ownership.

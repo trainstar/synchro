@@ -1,0 +1,76 @@
+site_name: Synchro
+site_url: https://trainstar.github.io/synchro
+site_description: Offline-first sync for Go + PostgreSQL
+repo_url: https://github.com/trainstar/synchro
+repo_name: trainstar/synchro
+
+theme:
+  name: material
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+  features:
+    - navigation.tabs
+    - navigation.sections
+    - navigation.expand
+    - content.code.copy
+    - content.tabs.link
+    - toc.follow
+  icon:
+    repo: fontawesome/brands/github
+
+markdown_extensions:
+  - admonition
+  - pymdownx.details
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+  - pymdownx.tabbed:
+      alternate_style: true
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.inlinehilite
+  - attr_list
+  - md_in_html
+  - toc:
+      permalink: true
+
+plugins:
+  - search
+  - minify:
+      minify_html: true
+
+extra_css:
+  - assets/stylesheets/extra.css
+
+nav:
+  - Home: index.md
+  - Getting Started:
+      - Quick Start: getting-started/quickstart.md
+      - Core Concepts: getting-started/concepts.md
+  - Server:
+      - Configuration: server/configuration.md
+      - Architecture: server/architecture.md
+      - Deployment: server/deployment.md
+      - Type Reference: server/types.md
+  - Client SDKs:
+      - Overview: clients/overview.md
+      - Swift / iOS: clients/swift.md
+      - Kotlin / Android: clients/kotlin.md
+      - React Native: clients/react-native.md
+  - Protocol:
+      - API Reference: protocol/api-reference.md

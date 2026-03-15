@@ -1,19 +1,23 @@
-# Synchro Wire Protocol
+# API Reference
 
 All endpoints accept and return `application/json`. Authentication is handled by the consuming application. Synchro expects a user ID in request context for `register`, `pull`, `push`, and `snapshot`.
 
-## Endpoints
+---
+
+## Endpoints Overview
 
 | Method | Path | Description |
 |--------|------|-------------|
-| `POST` | `/sync/register` | Register or re-register a client device |
-| `POST` | `/sync/pull` | Pull incremental changes after a checkpoint |
-| `POST` | `/sync/push` | Push local changes to the server |
-| `POST` | `/sync/snapshot` | Read a full snapshot for bootstrap or rebuild |
-| `GET` | `/sync/tables` | Get sync metadata for all tables |
-| `GET` | `/sync/schema` | Get the canonical schema contract for SDK table creation |
+| `POST` | [`/sync/register`](#post-syncregister) | Register or re-register a client device |
+| `POST` | [`/sync/pull`](#post-syncpull) | Pull incremental changes after a checkpoint |
+| `POST` | [`/sync/push`](#post-syncpush) | Push local changes to the server |
+| `POST` | [`/sync/snapshot`](#post-syncsnapshot) | Read a full snapshot for bootstrap or rebuild |
+| `GET` | [`/sync/tables`](#get-synctables) | Get sync metadata for all tables |
+| `GET` | [`/sync/schema`](#get-syncschema) | Get the canonical schema contract for SDK table creation |
 
-## POST /sync/register
+---
+
+## POST /sync/register { #post-syncregister }
 
 Registers a client device for sync. Upserts on `(user_id, client_id)`. On first registration, the client is subscribed to `["user:<user_id>", "global"]` buckets.
 
@@ -71,7 +75,9 @@ Returned when `app_version` is below the server's `MinClientVersion`.
 }
 ```
 
-## POST /sync/pull
+---
+
+## POST /sync/pull { #post-syncpull }
 
 Retrieves incremental changes for the client after its checkpoint. `pull` is not the bootstrap endpoint. Fresh clients and stale clients rebuild through `POST /sync/snapshot`.
 
@@ -146,7 +152,9 @@ Retrieves incremental changes for the client after its checkpoint. `pull` is not
 | `schema_version` | `int64` | Current server schema version |
 | `schema_hash` | `string` | Current server schema hash |
 
-When `snapshot_required` is `true`, incremental replay is invalid. Current reasons:
+### Snapshot Required
+
+When `snapshot_required` is `true`, incremental replay is invalid. The client must call `POST /sync/snapshot` and rebuild local state before returning to normal incremental pull.
 
 | Value | Meaning |
 |-------|---------|
@@ -154,9 +162,7 @@ When `snapshot_required` is `true`, incremental replay is invalid. Current reaso
 | `checkpoint_before_retention` | The client's checkpoint is behind the compaction boundary |
 | `history_unavailable` | Incremental history cannot satisfy the request |
 
-The client must call `POST /sync/snapshot` and rebuild local state before returning to normal incremental pull.
-
-**Record** fields:
+### Record
 
 | Field | Type | Description |
 |-------|------|-------------|
@@ -166,7 +172,7 @@ The client must call `POST /sync/snapshot` and rebuild local state before return
 | `updated_at` | `string` | Server-side `updated_at` timestamp |
 | `deleted_at` | `string?` | Present when the record is soft-deleted |
 
-**DeleteEntry** fields:
+### DeleteEntry
 
 | Field | Type | Description |
 |-------|------|-------------|
@@ -183,7 +189,9 @@ Pull(checkpoint=100)  -> changes[...], checkpoint=185, has_more=true
 Pull(checkpoint=185)  -> changes[...], checkpoint=192, has_more=false
 ```
 
-## POST /sync/push
+---
+
+## POST /sync/push { #post-syncpush }
 
 Pushes local changes from the client to the server. All changes are applied inside a single database transaction under RLS context.
 
@@ -225,7 +233,7 @@ Pushes local changes from the client to the server. All changes are applied insi
 }
 ```
 
-**PushRecord** fields:
+### PushRecord
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
@@ -272,7 +280,7 @@ Pushes local changes from the client to the server. All changes are applied insi
 }
 ```
 
-**PushResult** fields:
+### PushResult
 
 | Field | Type | Description |
 |-------|------|-------------|
@@ -286,7 +294,7 @@ Pushes local changes from the client to the server. All changes are applied insi
 | `server_updated_at` | `string?` | Server timestamp for successfully applied writes |
 | `server_deleted_at` | `string?` | Server delete timestamp when relevant |
 
-Push statuses:
+### Push Statuses
 
 | Status | Meaning |
 |--------|---------|
@@ -295,7 +303,12 @@ Push statuses:
 | `rejected_terminal` | The write is invalid and should be removed from the local queue |
 | `rejected_retryable` | The write should remain queued and be retried later |
 
-## POST /sync/snapshot
+!!! info "Transaction semantics"
+    All push changes are applied inside a single database transaction with RLS context set via `SET LOCAL app.user_id`. If the transaction fails, no changes are committed.
+
+---
+
+## POST /sync/snapshot { #post-syncsnapshot }
 
 Reads a full snapshot for bootstrap or local rebuild. Snapshot pages are stateless except for the cursor the client sends back.
 
@@ -321,7 +334,7 @@ The server captures a snapshot checkpoint once at the start of the flow. That ch
 | `schema_version` | `int64` | Yes | -- | Client schema version |
 | `schema_hash` | `string` | Yes | -- | Client schema hash |
 
-**SnapshotCursor** fields:
+### SnapshotCursor
 
 | Field | Type | Description |
 |-------|------|-------------|
@@ -370,9 +383,12 @@ The server captures a snapshot checkpoint once at the start of the flow. That ch
 
 ### Snapshot Flow
 
+!!! tip "Bootstrap sequence"
+    New clients follow this flow before switching to incremental pull.
+
 ```text
 1. POST /sync/register
-2. GET /sync/schema
+2. GET  /sync/schema
 3. POST /sync/snapshot {client_id, cursor: null}
 4. POST /sync/snapshot {client_id, cursor: {...}}
 5. Repeat until has_more=false
@@ -380,7 +396,9 @@ The server captures a snapshot checkpoint once at the start of the flow. That ch
 7. Resume normal POST /sync/pull from that checkpoint
 ```
 
-## GET /sync/tables
+---
+
+## GET /sync/tables { #get-synctables }
 
 Returns sync metadata for all registered tables. No authentication required.
 
@@ -413,9 +431,12 @@ Returns sync metadata for all registered tables. No authentication required.
 }
 ```
 
-Clients use this to understand push ordering and pull-only vs pushable tables. The schema endpoint remains the authoritative source for local table creation.
+!!! note
+    Clients use this to understand push ordering and pull-only vs pushable tables. The `/sync/schema` endpoint remains the authoritative source for local table creation.
 
-## GET /sync/schema
+---
+
+## GET /sync/schema { #get-syncschema }
 
 Returns the server-authoritative schema contract for local table creation and migration.
 
@@ -471,9 +492,12 @@ Returns the server-authoritative schema contract for local table creation and mi
 | `sqlite_default_sql` | `string?` | SQLite-safe default expression when `default_kind=portable` |
 | `is_primary_key` | `bool` | Whether the column is part of the primary key |
 
-`sqlite_default_sql` is the only default expression client SDKs should use when generating local SQLite tables. `server_only` defaults are informative only and cannot be translated locally.
+!!! warning "Client-side defaults"
+    `sqlite_default_sql` is the only default expression client SDKs should use when generating local SQLite tables. `server_only` defaults are informative only and cannot be translated locally.
 
-## Error Responses
+---
+
+## Error Responses { #error-responses }
 
 Most errors return a JSON body with an `error` field.
 
@@ -488,11 +512,15 @@ Most errors return a JSON body with an `error` field.
 | `500` | Internal server error |
 | `503` | Transient error (DB down, connection lost, timeout) |
 
+### Standard Error
+
 ```json
 {
   "error": "description of the error"
 }
 ```
+
+### Retryable Error (429 / 503)
 
 `429` and `503` responses include a `Retry-After` header and a `retry_after` field in the body:
 
@@ -503,7 +531,10 @@ Most errors return a JSON body with an `error` field.
 }
 ```
 
-Schema mismatch response body:
+!!! tip "Retry behavior"
+    Clients should respect the `Retry-After` header value (in seconds) before retrying. SDKs implement exponential backoff with this value as the minimum delay.
+
+### Schema Mismatch (409)
 
 ```json
 {
@@ -513,3 +544,6 @@ Schema mismatch response body:
   "server_schema_hash": "d16b7d9d..."
 }
 ```
+
+!!! info "Schema recovery"
+    When a client receives a `409`, it should re-fetch `GET /sync/schema`, apply any local migrations, and retry the original request with the updated `schema_version` and `schema_hash`.

@@ -1,26 +1,30 @@
-# Synchro Architecture
+# Architecture
 
 ## Overview
 
 Synchro is a standalone, offline-first sync library for Go + PostgreSQL. It provides bidirectional data synchronization between mobile/desktop clients and a PostgreSQL server using WAL-based change detection, a bucketed changelog, and checkpoint-based cursors.
 
+```mermaid
+graph LR
+    subgraph Client
+        A[Local DB<br/>SQLite] --- B[Changelog]
+    end
+    subgraph Server
+        C[App Tables<br/>RLS-enforced]
+        D[sync_changelog<br/>bucketed, monotonic]
+        E[sync_clients<br/>per-device state]
+        F[WAL Consumer<br/>pglogrepl]
+    end
+    A <-->|push/pull<br/>HTTP/JSON| C
+    C --> F
+    F --> D
 ```
-Client Device                          Server
-+------------------+                   +-------------------------------------------+
-|  Local DB        |   push/pull       |  PostgreSQL                               |
-|  (SQLite, etc.)  | <--------------> |  +-- App Tables (RLS-enforced)            |
-|  Changelog       |   HTTP/JSON       |  +-- sync_changelog (bucketed, monotonic) |
-|  Checkpoint seq  |                   |  +-- sync_clients (per-device state)      |
-+------------------+                   |                                           |
-                                       |  WAL Consumer (pglogrepl)                 |
-                                       |    reads WAL -> assigns buckets ->        |
-                                       |    writes sync_changelog entries          |
-                                       +-------------------------------------------+
-```
+
+---
 
 ## High-Level Architecture
 
-### WAL -> Changelog -> Bucketed Pull
+### WAL --> Changelog --> Bucketed Pull
 
 1. **WAL capture** -- A `wal.Consumer` connects to a PostgreSQL logical replication slot (pgoutput protocol). It receives INSERT/UPDATE/DELETE events for registered tables.
 2. **Bucket assignment** -- Each WAL event passes through a `BucketAssigner` (typically the `OwnershipResolver`) to determine which buckets the record belongs to (e.g., `user:abc-123`, `global`).
@@ -28,6 +32,8 @@ Client Device                          Server
 4. **Pull** -- Clients pull changes by querying `sync_changelog WHERE bucket_id = ANY(subs) AND seq > checkpoint`, hydrating records from app tables, then advancing the checkpoint.
 
 This gives O(log n) pull queries (indexed by `bucket_id, seq`) and complete decoupling between write and read paths.
+
+---
 
 ## Component Responsibilities
 
@@ -118,58 +124,116 @@ Manages changelog compaction to prevent unbounded growth of `sync_changelog`:
 - **Batched deletion** -- Deletes changelog entries with `seq <= safeSeq` in configurable batches (default 10,000) to avoid long-running transactions.
 - **Orchestration** -- `RunCompaction()` runs all three steps. `StartCompaction()` runs on a background ticker.
 
+---
+
 ## Data Flow
 
 ### Push Path
 
-```
-Client -> POST /sync/push
-  1. Begin transaction
-  2. SET LOCAL app.user_id = '<user_id>'  (RLS context)
-  3. For each PushRecord:
-     a. Validate table is registered and pushable
-     b. Parse operation (create/update/delete)
-     c. For creates: check for existing record, enforce ownership, INSERT RETURNING updated_at
-     d. For updates: fetch existing, run ConflictResolver, UPDATE allowed columns RETURNING updated_at
-     e. For deletes: fetch existing, soft-delete via deleted_at RETURNING deleted_at
-  4. Fire OnPushAccepted hook (within transaction)
-  5. Commit transaction
-  6. Update client last_push_at
-  7. Return accepted/rejected results with server-set timestamps (RYOW)
+```mermaid
+sequenceDiagram
+    participant Client
+    participant Handler as POST /sync/push
+    participant Engine
+    participant DB as PostgreSQL
+
+    Client->>Handler: Push request
+    Handler->>Engine: Push(ctx, userID, req)
+    Engine->>DB: BEGIN transaction
+    Engine->>DB: SET LOCAL app.user_id (RLS context)
+
+    loop For each PushRecord
+        Engine->>Engine: Validate table is registered and pushable
+        Engine->>Engine: Parse operation (create/update/delete)
+        alt Create
+            Engine->>DB: Check for existing record
+            Engine->>DB: INSERT RETURNING updated_at
+        else Update
+            Engine->>DB: Fetch existing record
+            Engine->>Engine: Run ConflictResolver
+            Engine->>DB: UPDATE allowed columns RETURNING updated_at
+        else Delete
+            Engine->>DB: Fetch existing record
+            Engine->>DB: Soft-delete via deleted_at RETURNING deleted_at
+        end
+    end
+
+    Engine->>Engine: Fire OnPushAccepted hook (within tx)
+    Engine->>DB: COMMIT
+    Engine->>DB: Update client last_push_at
+    Engine-->>Client: Accepted/rejected results with server-set timestamps (RYOW)
 ```
 
 RLS policies enforce authorization at the database level. The push processor does not walk FK chains -- Postgres RLS handles it.
 
 ### Pull Path
 
-```
-Client -> POST /sync/pull
-  1. Validate `schema_version` + `schema_hash` against server manifest
-  2. If initial bootstrap is incomplete, return `snapshot_required=initial_sync_required`
-  3. Check for stale checkpoint: if client checkpoint < MIN(seq) in changelog, return `snapshot_required=checkpoint_before_retention`
-  4. Start read-only tx and set RLS auth context
-  5. Get client's bucket subscriptions (e.g., ["user:abc-123", "global"])
-  6. Query sync_changelog WHERE bucket_id = ANY(subs) AND seq > checkpoint
-  7. Deduplicate: keep latest entry per (table, record_id)
-  8. Separate deletes from changes
-  9. Hydrate changed records: batch SELECT per table
-  10. Commit read-only tx, then best-effort advance checkpoint in client state
-  11. Update client last_pull_at and return changes/deletes/checkpoint/schema identifiers
+```mermaid
+sequenceDiagram
+    participant Client
+    participant Handler as POST /sync/pull
+    participant Engine
+    participant DB as PostgreSQL
+
+    Client->>Handler: Pull request
+    Handler->>Engine: Pull(ctx, userID, req)
+    Engine->>Engine: Validate schema_version + schema_hash against manifest
+    Engine->>Engine: Check for initial bootstrap / stale checkpoint
+
+    Engine->>DB: BEGIN read-only tx
+    Engine->>DB: SET LOCAL app.user_id (RLS auth context)
+    Engine->>DB: Get client bucket subscriptions
+
+    Engine->>DB: SELECT sync_changelog WHERE bucket_id = ANY(subs) AND seq > checkpoint
+    Engine->>Engine: Deduplicate (keep latest per table, record_id)
+    Engine->>Engine: Separate deletes from changes
+
+    loop For each table with changes
+        Engine->>DB: Batch SELECT to hydrate records
+    end
+
+    Engine->>DB: COMMIT read-only tx
+    Engine->>DB: Advance checkpoint (best-effort)
+    Engine->>DB: Update client last_pull_at
+    Engine-->>Client: Changes / deletes / checkpoint / schema identifiers
 ```
 
 ### Snapshot Path
 
-```text
-Client -> POST /sync/snapshot
-  1. Validate `schema_version` + `schema_hash` against server manifest
-  2. Start read-only tx and set RLS auth context
-  3. On the first page, capture `MAX(seq)` as the snapshot checkpoint
-  4. Read visible rows directly from app tables in registration order
-  5. Page deterministically by table index + primary key
-  6. Return records plus a stateless cursor carrying the captured checkpoint
-  7. On the final page, reactivate the client and persist the snapshot checkpoint
-  8. Client resumes normal incremental pull from that checkpoint
+```mermaid
+sequenceDiagram
+    participant Client
+    participant Handler as POST /sync/snapshot
+    participant Engine
+    participant DB as PostgreSQL
+
+    Client->>Handler: Snapshot request
+    Handler->>Engine: Snapshot(ctx, userID, req)
+    Engine->>Engine: Validate schema_version + schema_hash against manifest
+
+    Engine->>DB: BEGIN read-only tx
+    Engine->>DB: SET LOCAL app.user_id (RLS auth context)
+
+    alt First page
+        Engine->>DB: Capture MAX(seq) as snapshot checkpoint
+    end
+
+    Engine->>DB: Read visible rows from app tables in registration order
+    Engine->>Engine: Page deterministically by table index + primary key
+
+    Engine->>DB: COMMIT read-only tx
+
+    alt Final page
+        Engine->>DB: Reactivate client
+        Engine->>DB: Persist snapshot checkpoint
+    end
+
+    Engine-->>Client: Records + stateless cursor (carries captured checkpoint)
+
+    Note over Client: Resumes normal incremental pull from snapshot checkpoint
 ```
+
+---
 
 ## Design Decisions
 
@@ -198,7 +262,7 @@ The `ProtectedColumns` model is a deny-list: all columns are accepted by default
 
 ### database/sql (Not sqlx)
 
-The `DB` interface requires only `ExecContext`, `QueryRowContext`, and `QueryContext` from `database/sql`. This makes synchro compatible with any database layer (raw `*sql.DB`, `*sql.Tx`, sqlx, pgx stdlib adapter) without adding dependencies.
+The `DB` interface requires only `ExecContext`, `QueryRowContext`, and `QueryContext` from `database/sql`. This makes Synchro compatible with any database layer (raw `*sql.DB`, `*sql.Tx`, sqlx, pgx stdlib adapter) without adding dependencies.
 
 ### net/http (Not Framework)
 
@@ -207,6 +271,8 @@ HTTP handlers use `net/http.Handler` and `http.HandlerFunc`. The consuming appli
 ### slog Logging
 
 Logging uses `log/slog` (stdlib). If you need OTel log correlation, configure that in the host application's logging pipeline and pass the resulting logger via `Config.Logger`.
+
+---
 
 ## Bucketing Model
 
@@ -222,6 +288,8 @@ Records are assigned to buckets that determine pull visibility:
 Each client subscribes to a set of buckets (stored in `sync_clients.bucket_subs`). On registration, a client is automatically subscribed to `["user:<user_id>", "global"]`.
 
 A single record can appear in multiple buckets when resolver logic emits multiple bucket IDs.
+
+---
 
 ## Checkpoint Consistency Model
 
