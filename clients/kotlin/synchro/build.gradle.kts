@@ -2,7 +2,7 @@ plugins {
     id("com.android.library")
     id("org.jetbrains.kotlin.android")
     id("org.jetbrains.kotlin.plugin.serialization")
-    `maven-publish`
+    id("com.vanniktech.maven.publish")
 }
 
 android {
@@ -43,15 +43,33 @@ dependencies {
     testImplementation("androidx.test:core:1.5.0")
 }
 
-afterEvaluate {
-    publishing {
-        publications {
-            create<MavenPublication>("release") {
-                from(components["release"])
-                groupId = "com.trainstar"
-                artifactId = "synchro"
-                version = "0.1.0"
+mavenPublishing {
+    publishToMavenCentral(com.vanniktech.maven.publish.SonatypeHost.CENTRAL_PORTAL)
+    signAllPublications()
+
+    coordinates("com.trainstar", "synchro", project.findProperty("version")?.toString() ?: "0.1.0")
+
+    pom {
+        name.set("Synchro")
+        description.set("Offline-first sync SDK for Android")
+        url.set("https://github.com/trainstar/synchro")
+
+        licenses {
+            license {
+                name.set("MIT License")
+                url.set("https://opensource.org/licenses/MIT")
             }
+        }
+        developers {
+            developer {
+                id.set("trainstar")
+                name.set("Trainstar")
+            }
+        }
+        scm {
+            url.set("https://github.com/trainstar/synchro")
+            connection.set("scm:git:git://github.com/trainstar/synchro.git")
+            developerConnection.set("scm:git:ssh://github.com/trainstar/synchro.git")
         }
     }
 }
