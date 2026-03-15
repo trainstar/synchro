@@ -28,8 +28,8 @@ theme:
     - content.code.copy
     - content.tabs.link
     - toc.follow
-  logo: assets/logo.svg
-  favicon: assets/logo.svg
+  logo: assets/synchro-logo.svg
+  favicon: assets/synchro-logo.svg
   icon:
     repo: fontawesome/brands/github
 
