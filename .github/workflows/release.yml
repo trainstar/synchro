@@ -164,14 +164,16 @@ jobs:
           git tag -f "$VERSION"
           git push origin "$VERSION" --force
 
-      - name: Publish to CocoaPods
-        env:
-          COCOAPODS_TRUNK_TOKEN: ${{ env.COCOAPODS_TRUNK_TOKEN }}
-        run: |
-          git checkout swift-sdk
-          sed -i '' "s/s.version.*=.*/s.version      = \"$VERSION\"/" Synchro.podspec
-          pod repo update
-          pod trunk push Synchro.podspec --allow-warnings
+      # CocoaPods publish skipped: GRDB.swift 7.0 is not available on CocoaPods trunk (SPM-only).
+      # Uncomment when GRDB 7.x is published to CocoaPods.
+      # - name: Publish to CocoaPods
+      #   env:
+      #     COCOAPODS_TRUNK_TOKEN: ${{ env.COCOAPODS_TRUNK_TOKEN }}
+      #   run: |
+      #     git checkout swift-sdk
+      #     sed -i '' "s/s.version.*=.*/s.version      = \"$VERSION\"/" Synchro.podspec
+      #     pod repo update
+      #     pod trunk push Synchro.podspec --allow-warnings
 
       - name: Build Swift source archive
         run: |
