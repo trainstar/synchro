@@ -1,7 +1,13 @@
 # Synchro
 
-[![Go](https://img.shields.io/badge/Go-1.22+-00ADD8?logo=go&logoColor=white)](https://go.dev)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Release](https://img.shields.io/github/actions/workflow/status/trainstar/synchro/release.yml?label=release&logo=github)](https://github.com/trainstar/synchro/actions/workflows/release.yml)
+[![Go](https://img.shields.io/github/go-mod/go-version/trainstar/synchro?logo=go&logoColor=white)](https://pkg.go.dev/github.com/trainstar/synchro)
+[![Go Reference](https://pkg.go.dev/badge/github.com/trainstar/synchro.svg)](https://pkg.go.dev/github.com/trainstar/synchro)
+[![npm](https://img.shields.io/npm/v/@trainstar/synchro-react-native?logo=npm&logoColor=white&label=npm)](https://www.npmjs.com/package/@trainstar/synchro-react-native)
+[![Maven Central](https://img.shields.io/maven-central/v/com.trainstar/synchro?logo=apache-maven&logoColor=white&label=maven)](https://central.sonatype.com/artifact/com.trainstar/synchro)
+[![CocoaPods](https://img.shields.io/cocoapods/v/Synchro?logo=cocoapods&logoColor=white)](https://cocoapods.org/pods/Synchro)
+[![SPM](https://img.shields.io/github/v/tag/trainstar/synchro?filter=!v*&logo=swift&logoColor=white&label=SPM)](https://github.com/trainstar/synchro)
+[![License](https://img.shields.io/github/license/trainstar/synchro)](LICENSE)
 [![Docs](https://img.shields.io/badge/docs-trainstar.github.io%2Fsynchro-blue)](https://trainstar.github.io/synchro)
 
 Offline-first sync for Go + PostgreSQL. Your tables. Your server. Minimal changes.

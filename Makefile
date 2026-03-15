@@ -23,6 +23,10 @@
 	synchrod-test-start \
 	synchrod-test-stop \
 	synchrod-test-restart \
+	release-check \
+	release-swift-local \
+	release-kotlin-local \
+	release-npm-dry-run \
 	clean
 
 # Local infrastructure defaults.
@@ -75,6 +79,10 @@ help:
 	@echo "  test-rn-e2e-android   - Run React Native Detox E2E tests on Android"
 	@echo "  test-rn               - Run React Native E2E tests on both platforms"
 	@echo "  test-integration      - Run Go integration + WAL + Swift + Kotlin + RN integration against a live synchrod"
+	@echo "  release-check         - Run all SDK unit tests locally"
+	@echo "  release-swift-local   - Dry-run subtree split for Swift SDK"
+	@echo "  release-kotlin-local  - Publish Kotlin SDK to mavenLocal"
+	@echo "  release-npm-dry-run   - Dry-run npm pack for React Native SDK"
 	@echo "  clean                 - Remove local build/test artifacts"
 
 build:
@@ -217,6 +225,22 @@ test-integration:
 	$(TEST_ENV) $(MAKE) test-swift
 	$(TEST_ENV) $(MAKE) test-kotlin
 	$(TEST_ENV) $(MAKE) test-rn
+
+release-check: test-go-unit test-swift-unit test-kotlin-unit test-rn-unit
+	@echo "All SDK tests passed."
+
+release-swift-local:
+	git subtree split --prefix=clients/swift -b swift-sdk
+	@echo "Branch 'swift-sdk' created. Verify Package.swift is at root:"
+	@git show swift-sdk:Package.swift | head -5
+
+release-kotlin-local:
+	cd clients/kotlin && ./gradlew :synchro:publishToMavenLocal
+	@echo "Published to mavenLocal. Check:"
+	@ls -la ~/.m2/repository/com/trainstar/synchro/ 2>/dev/null || echo "Not found in ~/.m2"
+
+release-npm-dry-run:
+	cd clients/react-native && npm pack --dry-run
 
 clean:
 	rm -rf bin/ "$(SYNCHROD_PID_FILE)" "$(SYNCHROD_LOG_FILE)"

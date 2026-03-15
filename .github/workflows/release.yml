@@ -1,0 +1,311 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Release version (e.g. 0.2.0, without v prefix)'
+        required: true
+        type: string
+
+permissions:
+  contents: write
+  id-token: write
+
+jobs:
+  # ── Validate version format ────────────────────────────────────────────
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.validate.outputs.version }}
+    steps:
+      - name: Validate version
+        id: validate
+        run: |
+          VERSION="${{ inputs.version }}"
+          if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Version '$VERSION' does not match X.Y.Z pattern"
+            exit 1
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Version: $VERSION"
+
+  # ── Go tests ───────────────────────────────────────────────────────────
+  test-go:
+    needs: prepare
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: synchro_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd="pg_isready -U postgres"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=5
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Run Go tests
+        env:
+          TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/synchro_test?sslmode=disable
+        run: go test -count=1 -p 1 ./...
+
+  # ── Swift tests ────────────────────────────────────────────────────────
+  test-swift:
+    needs: prepare
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: cd clients/swift && swift test
+
+  # ── Kotlin tests ───────────────────────────────────────────────────────
+  test-kotlin:
+    needs: prepare
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - run: cd clients/kotlin && ./gradlew :synchro:test
+
+  # ── React Native tests ────────────────────────────────────────────────
+  test-rn:
+    needs: prepare
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install dependencies
+        run: cd clients/react-native && yarn install --immutable
+
+      - run: cd clients/react-native && npm test -- --testPathIgnorePatterns=e2e
+
+  # ── Build Go binaries ─────────────────────────────────────────────────
+  build-go:
+    needs: [test-go, prepare]
+    runs-on: ubuntu-latest
+    env:
+      VERSION: ${{ needs.prepare.outputs.version }}
+    strategy:
+      matrix:
+        include:
+          - goos: linux
+            goarch: amd64
+          - goos: linux
+            goarch: arm64
+          - goos: darwin
+            goarch: amd64
+          - goos: darwin
+            goarch: arm64
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Build synchrod
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: '0'
+        run: |
+          BINARY="synchrod-${{ matrix.goos }}-${{ matrix.goarch }}"
+          go build -ldflags="-s -w -X main.version=${VERSION}" -o "$BINARY" ./cmd/synchrod
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: "synchrod-${{ matrix.goos }}-${{ matrix.goarch }}"
+          path: "synchrod-${{ matrix.goos }}-${{ matrix.goarch }}"
+
+  # ── Publish Swift SDK ──────────────────────────────────────────────────
+  release-swift:
+    needs: [test-go, test-swift, prepare]
+    runs-on: macos-latest
+    env:
+      VERSION: ${{ needs.prepare.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Fetch secrets from Doppler
+        uses: dopplerhq/secrets-fetch-action@v2
+        with:
+          doppler-token: ${{ secrets.DOPPLER_TOKEN }}
+          inject-env-vars: true
+
+      - name: Subtree split and push swift-sdk branch
+        run: |
+          git subtree split --prefix=clients/swift -b swift-sdk
+          git push origin swift-sdk --force
+
+      - name: Tag swift-sdk branch
+        run: |
+          git checkout swift-sdk
+          git tag -f "$VERSION"
+          git push origin "$VERSION" --force
+
+      - name: Publish to CocoaPods
+        env:
+          COCOAPODS_TRUNK_TOKEN: ${{ env.COCOAPODS_TRUNK_TOKEN }}
+        run: |
+          git checkout swift-sdk
+          sed -i '' "s/s.version.*=.*/s.version      = \"$VERSION\"/" Synchro.podspec
+          pod trunk push Synchro.podspec --allow-warnings
+
+      - name: Build Swift source archive
+        run: |
+          git checkout swift-sdk
+          zip -r "Synchro-swift-${VERSION}.zip" . -x '.git/*'
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: swift-archive
+          path: "Synchro-swift-${{ needs.prepare.outputs.version }}.zip"
+
+  # ── Publish Kotlin SDK ─────────────────────────────────────────────────
+  release-kotlin:
+    needs: [test-kotlin, prepare]
+    runs-on: ubuntu-latest
+    env:
+      VERSION: ${{ needs.prepare.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Fetch secrets from Doppler
+        uses: dopplerhq/secrets-fetch-action@v2
+        with:
+          doppler-token: ${{ secrets.DOPPLER_TOKEN }}
+          inject-env-vars: true
+
+      - name: Import GPG key
+        run: |
+          echo "$GPG_PRIVATE_KEY" | gpg --batch --import
+          GPG_KEY_ID=$(gpg --list-secret-keys --keyid-format short 2>/dev/null | grep sec | head -1 | sed 's/.*\///' | sed 's/ .*//')
+          echo "GPG_KEY_ID=$GPG_KEY_ID" >> "$GITHUB_ENV"
+
+      - name: Publish to Maven Central
+        working-directory: clients/kotlin
+        env:
+          ORG_GRADLE_PROJECT_mavenCentralUsername: ${{ env.MAVEN_CENTRAL_USERNAME }}
+          ORG_GRADLE_PROJECT_mavenCentralPassword: ${{ env.MAVEN_CENTRAL_PASSWORD }}
+          ORG_GRADLE_PROJECT_signingInMemoryKey: ${{ env.GPG_PRIVATE_KEY }}
+          ORG_GRADLE_PROJECT_signingInMemoryKeyPassword: ${{ env.GPG_PASSPHRASE }}
+        run: ./gradlew publishAndReleaseToMavenCentral -Pversion="$VERSION"
+
+      - name: Collect AAR artifact
+        run: |
+          AAR_PATH=$(find clients/kotlin/synchro/build/outputs/aar -name '*.aar' | head -1)
+          cp "$AAR_PATH" "synchro-${VERSION}.aar"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: kotlin-aar
+          path: "synchro-${{ needs.prepare.outputs.version }}.aar"
+
+  # ── Publish React Native SDK ───────────────────────────────────────────
+  release-npm:
+    needs: [release-swift, release-kotlin, test-rn, prepare]
+    runs-on: ubuntu-latest
+    env:
+      VERSION: ${{ needs.prepare.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Install dependencies and build
+        working-directory: clients/react-native
+        run: |
+          yarn install --immutable
+          yarn prepare
+
+      - name: Stamp version and publish
+        working-directory: clients/react-native
+        run: |
+          npm version "$VERSION" --no-git-tag-version
+          npm publish --access public --provenance
+
+      - name: Pack tarball for release artifact
+        working-directory: clients/react-native
+        run: npm pack
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: npm-tarball
+          path: "clients/react-native/trainstar-synchro-react-native-${{ needs.prepare.outputs.version }}.tgz"
+
+  # ── Create GitHub Release with all artifacts ───────────────────────────
+  create-release:
+    needs: [release-swift, release-kotlin, release-npm, build-go, prepare]
+    runs-on: ubuntu-latest
+    env:
+      VERSION: ${{ needs.prepare.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Generate checksums
+        run: |
+          cd artifacts
+          sha256sum \
+            synchrod-linux-amd64/synchrod-linux-amd64 \
+            synchrod-linux-arm64/synchrod-linux-arm64 \
+            synchrod-darwin-amd64/synchrod-darwin-amd64 \
+            synchrod-darwin-arm64/synchrod-darwin-arm64 \
+            swift-archive/Synchro-swift-${VERSION}.zip \
+            kotlin-aar/synchro-${VERSION}.aar \
+            npm-tarball/trainstar-synchro-react-native-${VERSION}.tgz \
+            > checksums.txt
+
+      - name: Create tag
+        run: |
+          git tag "v${VERSION}"
+          git push origin "v${VERSION}"
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "v${VERSION}" \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "v${VERSION}" \
+            --generate-notes \
+            "artifacts/synchrod-linux-amd64/synchrod-linux-amd64#synchrod-linux-amd64" \
+            "artifacts/synchrod-linux-arm64/synchrod-linux-arm64#synchrod-linux-arm64" \
+            "artifacts/synchrod-darwin-amd64/synchrod-darwin-amd64#synchrod-darwin-amd64" \
+            "artifacts/synchrod-darwin-arm64/synchrod-darwin-arm64#synchrod-darwin-arm64" \
+            "artifacts/swift-archive/Synchro-swift-${VERSION}.zip" \
+            "artifacts/kotlin-aar/synchro-${VERSION}.aar" \
+            "artifacts/npm-tarball/trainstar-synchro-react-native-${VERSION}.tgz" \
+            "artifacts/checksums.txt"
