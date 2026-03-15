@@ -234,6 +234,9 @@ jobs:
   release-npm:
     needs: [release-swift, release-kotlin, test-rn, prepare]
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
     env:
       VERSION: ${{ needs.prepare.outputs.version }}
     steps:
