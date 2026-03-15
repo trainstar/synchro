@@ -170,6 +170,7 @@ jobs:
         run: |
           git checkout swift-sdk
           sed -i '' "s/s.version.*=.*/s.version      = \"$VERSION\"/" Synchro.podspec
+          pod repo update
           pod trunk push Synchro.podspec --allow-warnings
 
       - name: Build Swift source archive
