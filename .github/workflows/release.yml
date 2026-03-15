@@ -96,7 +96,7 @@ jobs:
       - name: Install dependencies
         run: cd clients/react-native && yarn install --immutable
 
-      - run: cd clients/react-native && npm test -- --testPathIgnorePatterns=e2e
+      - run: cd clients/react-native && npm test -- --testPathIgnorePatterns=e2e --testPathIgnorePatterns=__mocks__
 
   # ── Build Go binaries ─────────────────────────────────────────────────
   build-go:
