@@ -30,11 +30,11 @@ Synchro works with your existing tables. The only requirement is a nullable `del
 
 ```sql
 -- Your existing table
-CREATE TABLE workouts (
+CREATE TABLE tasks (
     id         UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     user_id    UUID NOT NULL REFERENCES users(id),
     title      TEXT NOT NULL,
-    duration   INTEGER,
+    priority   INTEGER,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     deleted_at TIMESTAMPTZ           -- (1)!
@@ -53,7 +53,7 @@ Tell Synchro which tables to sync and how ownership works.
 registry := synchro.NewRegistry()
 
 registry.Register(&synchro.TableConfig{
-    TableName:   "workouts",
+    TableName:   "tasks",
     OwnerColumn: "user_id",
 })
 ```
@@ -171,13 +171,13 @@ ALTER SYSTEM SET wal_level = 'logical';
 -- Then restart PostgreSQL
 
 -- Create the publication
-CREATE PUBLICATION synchro_pub FOR TABLE workouts;
+CREATE PUBLICATION synchro_pub FOR TABLE tasks;
 ```
 
 To add more tables later:
 
 ```sql
-ALTER PUBLICATION synchro_pub ADD TABLE exercises, sets;
+ALTER PUBLICATION synchro_pub ADD TABLE comments, categories;
 ```
 
 ---
@@ -196,8 +196,8 @@ ALTER PUBLICATION synchro_pub ADD TABLE exercises, sets;
     ))
     try await client.start()
 
-    let workouts = try client.query(
-        "SELECT * FROM workouts ORDER BY created_at DESC"
+    let tasks = try client.query(
+        "SELECT * FROM tasks ORDER BY created_at DESC"
     )
     ```
 
@@ -213,8 +213,8 @@ ALTER PUBLICATION synchro_pub ADD TABLE exercises, sets;
     ), context)
     client.start()
 
-    val workouts = client.query(
-        "SELECT * FROM workouts ORDER BY created_at DESC"
+    val tasks = client.query(
+        "SELECT * FROM tasks ORDER BY created_at DESC"
     )
     ```
 
@@ -232,8 +232,8 @@ ALTER PUBLICATION synchro_pub ADD TABLE exercises, sets;
     });
     await client.start();
 
-    const workouts = await client.query(
-        'SELECT * FROM workouts ORDER BY created_at DESC'
+    const tasks = await client.query(
+        'SELECT * FROM tasks ORDER BY created_at DESC'
     );
     ```
 

@@ -62,13 +62,13 @@ val client = SynchroClient(config, context)
 ```kotlin
 // Fetch multiple rows
 val rows = client.query(
-    "SELECT * FROM workouts WHERE user_id = ?",
+    "SELECT * FROM tasks WHERE user_id = ?",
     params = arrayOf(userId)
 )
 
 // Fetch a single row
-val workout = client.queryOne(
-    "SELECT * FROM workouts WHERE id = ?",
+val task = client.queryOne(
+    "SELECT * FROM tasks WHERE id = ?",
     params = arrayOf(id)
 )
 ```
@@ -79,8 +79,8 @@ val workout = client.queryOne(
 
 ```kotlin
 val result = client.execute(
-    "INSERT INTO workouts (id, name, user_id) VALUES (?, ?, ?)",
-    params = arrayOf(UUID.randomUUID().toString(), "Leg Day", userId)
+    "INSERT INTO tasks (id, title, user_id) VALUES (?, ?, ?)",
+    params = arrayOf(UUID.randomUUID().toString(), "Review proposal", userId)
 )
 // result.rowsAffected == 1
 ```
@@ -93,12 +93,12 @@ val result = client.execute(
 ```kotlin
 val affected = client.executeBatch(listOf(
     SQLStatement(
-        sql = "INSERT INTO workouts (id, name, user_id) VALUES (?, ?, ?)",
-        params = arrayOf(UUID.randomUUID().toString(), "Push Day", userId)
+        sql = "INSERT INTO tasks (id, title, user_id) VALUES (?, ?, ?)",
+        params = arrayOf(UUID.randomUUID().toString(), "Write report", userId)
     ),
     SQLStatement(
-        sql = "INSERT INTO workouts (id, name, user_id) VALUES (?, ?, ?)",
-        params = arrayOf(UUID.randomUUID().toString(), "Pull Day", userId)
+        sql = "INSERT INTO tasks (id, title, user_id) VALUES (?, ?, ?)",
+        params = arrayOf(UUID.randomUUID().toString(), "Update docs", userId)
     ),
 ))
 // affected == 2
@@ -110,18 +110,18 @@ val affected = client.executeBatch(listOf(
 // Write transaction: multiple operations atomically
 client.writeTransaction { db ->
     db.execSQL(
-        "INSERT INTO workouts (id, name, user_id) VALUES (?, ?, ?)",
-        arrayOf(UUID.randomUUID().toString(), "Leg Day", userId)
+        "INSERT INTO tasks (id, title, user_id) VALUES (?, ?, ?)",
+        arrayOf(UUID.randomUUID().toString(), "Review proposal", userId)
     )
     db.execSQL(
-        "INSERT INTO workout_sets (id, workout_id, exercise, reps) VALUES (?, ?, ?, ?)",
-        arrayOf(UUID.randomUUID().toString(), workoutId, "Squat", 10)
+        "INSERT INTO comments (id, task_id, body, status) VALUES (?, ?, ?, ?)",
+        arrayOf(UUID.randomUUID().toString(), taskId, "Looks good", "open")
     )
 }
 
 // Read transaction: consistent snapshot
 val count = client.readTransaction { db ->
-    db.rawQuery("SELECT COUNT(*) FROM workouts", null).use { cursor ->
+    db.rawQuery("SELECT COUNT(*) FROM tasks", null).use { cursor ->
         if (cursor.moveToFirst()) cursor.getInt(0) else 0
     }
 }
@@ -132,8 +132,8 @@ val count = client.readTransaction { db ->
 ### Change Notification
 
 ```kotlin
-val cancellable = client.onChange(listOf("workouts")) {
-    println("workouts table changed")
+val cancellable = client.onChange(listOf("tasks")) {
+    println("tasks table changed")
 }
 
 // Later: stop observing
@@ -144,10 +144,10 @@ cancellable.cancel()
 
 ```kotlin
 val cancellable = client.watch(
-    "SELECT * FROM workouts ORDER BY created_at DESC",
-    tables = listOf("workouts")
+    "SELECT * FROM tasks ORDER BY created_at DESC",
+    tables = listOf("tasks")
 ) { rows ->
-    this.workouts = rows
+    this.tasks = rows
 }
 ```
 

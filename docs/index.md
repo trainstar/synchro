@@ -10,10 +10,10 @@
 Your existing table:
 
 ```sql
-CREATE TABLE workouts (
+CREATE TABLE tasks (
     id UUID PRIMARY KEY,
     user_id UUID NOT NULL,
-    name TEXT NOT NULL,
+    title TEXT NOT NULL,
     created_at TIMESTAMPTZ DEFAULT now(),
     updated_at TIMESTAMPTZ DEFAULT now()
 );
@@ -22,7 +22,7 @@ CREATE TABLE workouts (
 To enable sync, add one column:
 
 ```sql
-ALTER TABLE workouts ADD COLUMN deleted_at TIMESTAMPTZ;
+ALTER TABLE tasks ADD COLUMN deleted_at TIMESTAMPTZ;
 ```
 
 !!! tip
@@ -34,7 +34,7 @@ On the server — register what you already have:
 registry := synchro.NewRegistry()
 
 registry.Register(&synchro.TableConfig{
-    TableName:   "workouts",
+    TableName:   "tasks",
     OwnerColumn: "user_id",
 })
 ```
@@ -53,7 +53,7 @@ On the client — initialize and use standard SQL:
     ))
     try await client.start()
 
-    let rows = try client.query("SELECT * FROM workouts")
+    let rows = try client.query("SELECT * FROM tasks")
     ```
 
 === "Kotlin"
@@ -68,7 +68,7 @@ On the client — initialize and use standard SQL:
     ), context)
     client.start()
 
-    val rows = client.query("SELECT * FROM workouts")
+    val rows = client.query("SELECT * FROM tasks")
     ```
 
 === "React Native"
@@ -83,7 +83,7 @@ On the client — initialize and use standard SQL:
     });
     await client.start();
 
-    const rows = await client.query('SELECT * FROM workouts');
+    const rows = await client.query('SELECT * FROM tasks');
     ```
 
 No special write API. No ORM. No framework lock-in. **Standard SQL on every platform.**
