@@ -68,8 +68,9 @@ func (p *pushProcessor) pushCreate(ctx context.Context, tx DB, userID string, cf
 	}
 
 	if existing != nil {
+		// Resurrection: if the table supports soft deletes and the record is deleted,
+		// treat as update to resurrect. When HasDeletedAt is false, DeletedAt is always nil.
 		if existing.DeletedAt != nil {
-			// Deleted record — treat as update to resurrect
 			return p.pushUpdate(ctx, tx, userID, cfg, record)
 		}
 
@@ -111,14 +112,11 @@ func (p *pushProcessor) pushCreate(ctx context.Context, tx DB, userID string, cf
 		}, nil
 	}
 
-	result := &PushResult{
+	return &PushResult{
 		ID: record.ID, TableName: record.TableName, Operation: record.Operation,
-		Status: PushStatusApplied,
-	}
-	if !ts.IsZero() {
-		result.ServerUpdatedAt = &ts
-	}
-	return result, nil
+		Status:          PushStatusApplied,
+		ServerUpdatedAt: ts,
+	}, nil
 }
 
 // pushUpdate handles an update operation with conflict resolution.
@@ -148,39 +146,47 @@ func (p *pushProcessor) pushUpdate(ctx context.Context, tx DB, userID string, cf
 		}, nil
 	}
 
-	// Conflict resolution
-	conflict := Conflict{
-		Table:      record.TableName,
-		RecordID:   record.ID,
-		UserID:     userID,
-		ClientData: record.Data,
-		ServerData: existing.Data,
-		ClientTime: record.ClientUpdatedAt,
-		ServerTime: existing.UpdatedAt,
-	}
-	if record.BaseUpdatedAt != nil {
-		conflict.BaseVersion = record.BaseUpdatedAt
-	}
-
-	resolution, err := p.resolver.Resolve(ctx, conflict)
-	if err != nil {
-		return nil, fmt.Errorf("resolving conflict: %w", err)
-	}
-
-	if p.hooks.OnConflict != nil {
-		p.hooks.OnConflict(ctx, conflict, resolution)
-	}
-
-	if resolution.Winner == "server" {
-		serverVersion := &Record{
-			ID: existing.ID, TableName: record.TableName,
-			Data: existing.Data, UpdatedAt: existing.UpdatedAt,
+	// Conflict resolution: only possible when the table has updated_at for LWW.
+	// Without updated_at, last push wins unconditionally.
+	if cfg.HasUpdatedAt() {
+		var serverTime time.Time
+		if existing.UpdatedAt != nil {
+			serverTime = *existing.UpdatedAt
 		}
-		return &PushResult{
-			ID: record.ID, TableName: record.TableName, Operation: record.Operation,
-			Status: PushStatusConflict, ReasonCode: "server_won_conflict", Message: resolution.Reason,
-			ServerVersion: serverVersion,
-		}, nil
+
+		conflict := Conflict{
+			Table:      record.TableName,
+			RecordID:   record.ID,
+			UserID:     userID,
+			ClientData: record.Data,
+			ServerData: existing.Data,
+			ClientTime: record.ClientUpdatedAt,
+			ServerTime: serverTime,
+		}
+		if record.BaseUpdatedAt != nil {
+			conflict.BaseVersion = record.BaseUpdatedAt
+		}
+
+		resolution, err := p.resolver.Resolve(ctx, conflict)
+		if err != nil {
+			return nil, fmt.Errorf("resolving conflict: %w", err)
+		}
+
+		if p.hooks.OnConflict != nil {
+			p.hooks.OnConflict(ctx, conflict, resolution)
+		}
+
+		if resolution.Winner == "server" {
+			serverVersion := &Record{
+				ID: existing.ID, TableName: record.TableName,
+				Data: existing.Data, UpdatedAt: existing.UpdatedAt,
+			}
+			return &PushResult{
+				ID: record.ID, TableName: record.TableName, Operation: record.Operation,
+				Status: PushStatusConflict, ReasonCode: "server_won_conflict", Message: resolution.Reason,
+				ServerVersion: serverVersion,
+			}, nil
+		}
 	}
 
 	// Parse data
@@ -205,41 +211,60 @@ func (p *pushProcessor) pushUpdate(ctx context.Context, tx DB, userID string, cf
 		}, nil
 	}
 
-	if isResurrection {
-		clearQuery := fmt.Sprintf("UPDATE %s SET %s = NULL WHERE %s = $1 RETURNING %s",
-			quoteIdentifier(cfg.TableName), quoteIdentifier(cfg.DeletedAtColumn),
-			quoteIdentifier(cfg.IDColumn), quoteIdentifier(cfg.UpdatedAtColumn))
-		if err := tx.QueryRowContext(ctx, clearQuery, record.ID).Scan(&ts); err != nil {
-			p.logger.ErrorContext(ctx, "failed to clear deleted_at for resurrection",
-				"err", err, "table", record.TableName, "id", record.ID)
-			return &PushResult{
-				ID: record.ID, TableName: record.TableName, Operation: record.Operation,
-				Status: PushStatusRejectedRetryable, ReasonCode: "resurrection_failed", Message: "failed to resurrect record",
-			}, nil
+	if isResurrection && cfg.HasDeletedAt() {
+		if cfg.HasUpdatedAt() {
+			clearQuery := fmt.Sprintf("UPDATE %s SET %s = NULL WHERE %s = $1 RETURNING %s",
+				quoteIdentifier(cfg.TableName), quoteIdentifier(cfg.DeletedAtCol()),
+				quoteIdentifier(cfg.IDColumn), quoteIdentifier(cfg.UpdatedAtCol()))
+			var resTS time.Time
+			if err := tx.QueryRowContext(ctx, clearQuery, record.ID).Scan(&resTS); err != nil {
+				p.logger.ErrorContext(ctx, "failed to clear deleted_at for resurrection",
+					"err", err, "table", record.TableName, "id", record.ID)
+				return &PushResult{
+					ID: record.ID, TableName: record.TableName, Operation: record.Operation,
+					Status: PushStatusRejectedRetryable, ReasonCode: "resurrection_failed", Message: "failed to resurrect record",
+				}, nil
+			}
+			ts = &resTS
+		} else {
+			clearQuery := fmt.Sprintf("UPDATE %s SET %s = NULL WHERE %s = $1",
+				quoteIdentifier(cfg.TableName), quoteIdentifier(cfg.DeletedAtCol()),
+				quoteIdentifier(cfg.IDColumn))
+			if _, err := tx.ExecContext(ctx, clearQuery, record.ID); err != nil {
+				p.logger.ErrorContext(ctx, "failed to clear deleted_at for resurrection",
+					"err", err, "table", record.TableName, "id", record.ID)
+				return &PushResult{
+					ID: record.ID, TableName: record.TableName, Operation: record.Operation,
+					Status: PushStatusRejectedRetryable, ReasonCode: "resurrection_failed", Message: "failed to resurrect record",
+				}, nil
+			}
 		}
 	}
 
-	result := &PushResult{
+	return &PushResult{
 		ID: record.ID, TableName: record.TableName, Operation: record.Operation,
-		Status: PushStatusApplied,
-	}
-	if !ts.IsZero() {
-		result.ServerUpdatedAt = &ts
-	}
-	return result, nil
+		Status:          PushStatusApplied,
+		ServerUpdatedAt: ts,
+	}, nil
 }
 
-// pushDelete handles a delete operation (soft delete).
+// pushDelete handles a delete operation (soft delete when deleted_at exists, hard delete otherwise).
 func (p *pushProcessor) pushDelete(ctx context.Context, tx DB, _ string, cfg *TableConfig, record *PushRecord) (*PushResult, error) {
-	notFoundResult := &PushResult{
-		ID: record.ID, TableName: record.TableName, Operation: record.Operation,
-		Status: PushStatusRejectedTerminal, ReasonCode: "record_not_found", Message: "record not found or not accessible",
+	if cfg.HasDeletedAt() {
+		return p.pushSoftDelete(ctx, tx, cfg, record)
 	}
+	return p.pushHardDelete(ctx, tx, cfg, record)
+}
 
+// pushSoftDelete performs a soft delete by setting deleted_at = now().
+func (p *pushProcessor) pushSoftDelete(ctx context.Context, tx DB, cfg *TableConfig, record *PushRecord) (*PushResult, error) {
 	existing, err := getRecordByID(ctx, tx, cfg, record.ID)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return notFoundResult, nil
+			return &PushResult{
+				ID: record.ID, TableName: record.TableName, Operation: record.Operation,
+				Status: PushStatusRejectedTerminal, ReasonCode: "record_not_found", Message: "record not found or not accessible",
+			}, nil
 		}
 		return nil, fmt.Errorf("getting existing record: %w", err)
 	}
@@ -252,10 +277,9 @@ func (p *pushProcessor) pushDelete(ctx context.Context, tx DB, _ string, cfg *Ta
 		}, nil
 	}
 
-	// Apply soft delete
 	query := fmt.Sprintf("UPDATE %s SET %s = now() WHERE %s = $1 RETURNING %s",
-		quoteIdentifier(cfg.TableName), quoteIdentifier(cfg.DeletedAtColumn),
-		quoteIdentifier(cfg.IDColumn), quoteIdentifier(cfg.DeletedAtColumn))
+		quoteIdentifier(cfg.TableName), quoteIdentifier(cfg.DeletedAtCol()),
+		quoteIdentifier(cfg.IDColumn), quoteIdentifier(cfg.DeletedAtCol()))
 
 	var deletedAt time.Time
 	if err := tx.QueryRowContext(ctx, query, record.ID).Scan(&deletedAt); err != nil {
@@ -274,26 +298,66 @@ func (p *pushProcessor) pushDelete(ctx context.Context, tx DB, _ string, cfg *Ta
 	}, nil
 }
 
+// pushHardDelete performs a hard DELETE when the table has no deleted_at column.
+func (p *pushProcessor) pushHardDelete(ctx context.Context, tx DB, cfg *TableConfig, record *PushRecord) (*PushResult, error) {
+	query := fmt.Sprintf("DELETE FROM %s WHERE %s = $1",
+		quoteIdentifier(cfg.TableName), quoteIdentifier(cfg.IDColumn))
+
+	result, err := tx.ExecContext(ctx, query, record.ID)
+	if err != nil {
+		p.logger.ErrorContext(ctx, "failed to hard delete record",
+			"err", err, "table", record.TableName, "id", record.ID)
+		return &PushResult{
+			ID: record.ID, TableName: record.TableName, Operation: record.Operation,
+			Status: PushStatusRejectedRetryable, ReasonCode: "delete_failed", Message: "failed to delete record",
+		}, nil
+	}
+
+	rows, _ := result.RowsAffected()
+	if rows == 0 {
+		// Record not found — idempotent: treat as already deleted
+		return &PushResult{
+			ID: record.ID, TableName: record.TableName, Operation: record.Operation,
+			Status: PushStatusApplied, ReasonCode: "already_deleted", Message: "record already deleted",
+		}, nil
+	}
+
+	return &PushResult{
+		ID: record.ID, TableName: record.TableName, Operation: record.Operation,
+		Status: PushStatusApplied,
+	}, nil
+}
+
 // existingRecord holds data about a record for conflict detection.
 type existingRecord struct {
 	ID        string
 	Data      json.RawMessage
-	UpdatedAt time.Time
+	UpdatedAt *time.Time
 	DeletedAt *time.Time
 }
 
 // getRecordByID retrieves a record by ID for conflict detection.
+// Uses NULL casts for timestamp columns that don't exist on the table.
 func getRecordByID(ctx context.Context, db DB, cfg *TableConfig, id string) (*existingRecord, error) {
+	uaExpr := "NULL::timestamptz"
+	if cfg.HasUpdatedAt() {
+		uaExpr = quoteIdentifier(cfg.UpdatedAtCol())
+	}
+	daExpr := "NULL::timestamptz"
+	if cfg.HasDeletedAt() {
+		daExpr = quoteIdentifier(cfg.DeletedAtCol())
+	}
+
 	query := fmt.Sprintf(
 		"SELECT %s::text as id, row_to_json(t)::text as data, %s as updated_at, %s as deleted_at FROM %s t WHERE %s = $1",
-		quoteIdentifier(cfg.IDColumn), quoteIdentifier(cfg.UpdatedAtColumn), quoteIdentifier(cfg.DeletedAtColumn),
+		quoteIdentifier(cfg.IDColumn), uaExpr, daExpr,
 		quoteIdentifier(cfg.TableName), quoteIdentifier(cfg.IDColumn),
 	)
 
 	var (
 		recID     string
 		dataStr   string
-		updatedAt time.Time
+		updatedAt sql.NullTime
 		deletedAt sql.NullTime
 	)
 
@@ -303,9 +367,11 @@ func getRecordByID(ctx context.Context, db DB, cfg *TableConfig, id string) (*ex
 	}
 
 	rec := &existingRecord{
-		ID:        recID,
-		Data:      json.RawMessage(dataStr),
-		UpdatedAt: updatedAt,
+		ID:   recID,
+		Data: json.RawMessage(dataStr),
+	}
+	if updatedAt.Valid {
+		rec.UpdatedAt = &updatedAt.Time
 	}
 	if deletedAt.Valid {
 		rec.DeletedAt = &deletedAt.Time
@@ -315,7 +381,8 @@ func getRecordByID(ctx context.Context, db DB, cfg *TableConfig, id string) (*ex
 
 // insertRecord inserts a new record from sync data and returns the server-assigned updated_at.
 // Uses the deny-list model: all columns are allowed except protected ones.
-func insertRecord(ctx context.Context, db DB, cfg *TableConfig, data map[string]any) (time.Time, error) {
+// Returns nil when the table has no updated_at column.
+func insertRecord(ctx context.Context, db DB, cfg *TableConfig, data map[string]any) (*time.Time, error) {
 	// Collect column names from data
 	dataCols := make([]string, 0, len(data))
 	for col := range data {
@@ -325,7 +392,7 @@ func insertRecord(ctx context.Context, db DB, cfg *TableConfig, data map[string]
 	// Filter to allowed insert columns
 	allowed := cfg.AllowedInsertColumns(dataCols)
 	if len(allowed) == 0 {
-		return time.Time{}, fmt.Errorf("no allowed columns for insert on table %q", cfg.TableName)
+		return nil, fmt.Errorf("no allowed columns for insert on table %q", cfg.TableName)
 	}
 
 	columns := make([]string, 0, len(allowed))
@@ -338,21 +405,33 @@ func insertRecord(ctx context.Context, db DB, cfg *TableConfig, data map[string]
 		values = append(values, data[col])
 	}
 
-	query := fmt.Sprintf("INSERT INTO %s (%s) VALUES (%s) RETURNING %s",
+	if cfg.HasUpdatedAt() {
+		query := fmt.Sprintf("INSERT INTO %s (%s) VALUES (%s) RETURNING %s",
+			quoteIdentifier(cfg.TableName),
+			strings.Join(columns, ", "),
+			strings.Join(placeholders, ", "),
+			quoteIdentifier(cfg.UpdatedAtCol()))
+
+		var ts time.Time
+		if err := db.QueryRowContext(ctx, query, values...).Scan(&ts); err != nil {
+			return nil, err
+		}
+		return &ts, nil
+	}
+
+	query := fmt.Sprintf("INSERT INTO %s (%s) VALUES (%s)",
 		quoteIdentifier(cfg.TableName),
 		strings.Join(columns, ", "),
-		strings.Join(placeholders, ", "),
-		quoteIdentifier(cfg.UpdatedAtColumn))
+		strings.Join(placeholders, ", "))
 
-	var ts time.Time
-	err := db.QueryRowContext(ctx, query, values...).Scan(&ts)
-	return ts, err
+	_, err := db.ExecContext(ctx, query, values...)
+	return nil, err
 }
 
 // updateRecord updates a record from sync data and returns the server-assigned updated_at.
 // Uses the deny-list model: protected columns are silently dropped.
-// Returns zero time when all columns are protected (nothing to update).
-func updateRecord(ctx context.Context, db DB, cfg *TableConfig, id string, data map[string]any) (time.Time, error) {
+// Returns nil when all columns are protected (nothing to update) or the table has no updated_at.
+func updateRecord(ctx context.Context, db DB, cfg *TableConfig, id string, data map[string]any) (*time.Time, error) {
 	dataCols := make([]string, 0, len(data))
 	for col := range data {
 		dataCols = append(dataCols, col)
@@ -360,7 +439,7 @@ func updateRecord(ctx context.Context, db DB, cfg *TableConfig, id string, data 
 
 	allowed := cfg.AllowedUpdateColumns(dataCols)
 	if len(allowed) == 0 {
-		return time.Time{}, nil // Nothing to update
+		return nil, nil // Nothing to update
 	}
 
 	setClauses := make([]string, 0, len(allowed))
@@ -373,16 +452,29 @@ func updateRecord(ctx context.Context, db DB, cfg *TableConfig, id string, data 
 
 	values = append(values, id)
 
-	query := fmt.Sprintf("UPDATE %s SET %s WHERE %s = $%d RETURNING %s",
+	if cfg.HasUpdatedAt() {
+		query := fmt.Sprintf("UPDATE %s SET %s WHERE %s = $%d RETURNING %s",
+			quoteIdentifier(cfg.TableName),
+			strings.Join(setClauses, ", "),
+			quoteIdentifier(cfg.IDColumn),
+			len(values),
+			quoteIdentifier(cfg.UpdatedAtCol()))
+
+		var ts time.Time
+		if err := db.QueryRowContext(ctx, query, values...).Scan(&ts); err != nil {
+			return nil, err
+		}
+		return &ts, nil
+	}
+
+	query := fmt.Sprintf("UPDATE %s SET %s WHERE %s = $%d",
 		quoteIdentifier(cfg.TableName),
 		strings.Join(setClauses, ", "),
 		quoteIdentifier(cfg.IDColumn),
-		len(values),
-		quoteIdentifier(cfg.UpdatedAtColumn))
+		len(values))
 
-	var ts time.Time
-	err := db.QueryRowContext(ctx, query, values...).Scan(&ts)
-	return ts, err
+	_, err := db.ExecContext(ctx, query, values...)
+	return nil, err
 }
 
 // SetAuthContext sets the RLS auth context for push operations.

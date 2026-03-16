@@ -87,6 +87,10 @@ Synchro supports three conflict resolution strategies:
 
 The default strategy. Compares the client's `client_updated_at` timestamp against the server's `updated_at`, adjusting for configurable clock skew tolerance.
 
+:::note[LWW requires `updated_at`]
+LWW conflict resolution requires the table to have an `updated_at` column (or the column configured via `Config.UpdatedAtColumn`). Tables without this column use **last-push-wins** -- every push is applied unconditionally with no conflict detection. This is fine for append-only tables or tables where concurrent edits don't occur, but for collaborative data you should add `updated_at` to get proper conflict handling.
+:::
+
 ```go
 engine, _ := synchro.NewEngine(synchro.Config{
     DB:                 db,
@@ -281,6 +285,6 @@ The pending queue is a local SQLite table that tracks which records have been mo
 3. Sends the hydrated changes to the server.
 4. On success, drains the acknowledged entries from the queue.
 
-:::note[Soft deletes everywhere]
-The `BEFORE DELETE` trigger converts hard deletes to soft deletes locally, matching the server convention. The `deleted_at` timestamp is set, and the sync engine pushes this as a delete operation. The server marks the record as deleted and propagates it via the changelog to other clients.
+:::note[Soft deletes and hard deletes]
+For tables with a `deleted_at` column, the `BEFORE DELETE` trigger converts hard deletes to soft deletes locally, matching the server convention. The `deleted_at` timestamp is set, and the sync engine pushes this as a delete operation. For tables without `deleted_at`, the server performs a hard `DELETE` and the WAL consumer captures the native DELETE event for the changelog.
 :::

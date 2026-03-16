@@ -71,6 +71,21 @@ var appTableDDL = []string{
 	)`,
 }
 
+// bareTableDDL creates tables without timestamp columns for introspection testing.
+var bareTableDDL = []string{
+	`CREATE TABLE IF NOT EXISTS bare_items (
+		id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+		user_id UUID NOT NULL,
+		name TEXT NOT NULL DEFAULT ''
+	)`,
+	`CREATE TABLE IF NOT EXISTS partial_items (
+		id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+		user_id UUID NOT NULL,
+		name TEXT NOT NULL DEFAULT '',
+		updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+	)`,
+}
+
 // CreateTempDB creates a uniquely-named database for test isolation.
 // Returns the database name and a connection to it. The caller must
 // call DropTempDB in cleanup.
@@ -137,7 +152,12 @@ func SetupTestSchema(ctx context.Context, db *sql.DB) error {
 			return fmt.Errorf("creating app table: %w", err)
 		}
 	}
-	for _, table := range []string{"orders", "order_details", "products", "categories"} {
+	for _, stmt := range bareTableDDL {
+		if _, err := db.ExecContext(ctx, stmt); err != nil {
+			return fmt.Errorf("creating bare table: %w", err)
+		}
+	}
+	for _, table := range []string{"orders", "order_details", "products", "categories", "bare_items", "partial_items"} {
 		if _, err := db.ExecContext(ctx, fmt.Sprintf("ALTER TABLE %s REPLICA IDENTITY FULL", table)); err != nil {
 			return fmt.Errorf("setting replica identity on %s: %w", table, err)
 		}
@@ -184,6 +204,15 @@ func TestDB(t *testing.T) *sql.DB {
 			db.Close()
 			DropTempDB(dsn, dbName)
 			t.Fatalf("creating app table: %v", err)
+		}
+	}
+
+	// Create bare tables for introspection tests
+	for _, stmt := range bareTableDDL {
+		if _, err := db.ExecContext(ctx, stmt); err != nil {
+			db.Close()
+			DropTempDB(dsn, dbName)
+			t.Fatalf("creating bare table: %v", err)
 		}
 	}
 
@@ -234,6 +263,13 @@ func TestDBWithAppRole(t *testing.T) (adminDB *sql.DB, appDB *sql.DB) {
 			adminConn.Close()
 			DropTempDB(dsn, dbName)
 			t.Fatalf("creating app table: %v", err)
+		}
+	}
+	for _, stmt := range bareTableDDL {
+		if _, err := adminConn.ExecContext(ctx, stmt); err != nil {
+			adminConn.Close()
+			DropTempDB(dsn, dbName)
+			t.Fatalf("creating bare table: %v", err)
 		}
 	}
 

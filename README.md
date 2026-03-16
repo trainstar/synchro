@@ -10,7 +10,7 @@
   <a href="https://trainstar.github.io/synchro"><img src="https://img.shields.io/badge/docs-trainstar.github.io%2Fsynchro-blue" alt="Docs"></a>
 </p>
 
-<p align="center">Offline-first sync between PostgreSQL and native client SDKs for Swift, Kotlin, and React Native. Go server you can embed or deploy standalone. Your tables. Minimal changes.</p>
+<p align="center">Offline-first sync between PostgreSQL and native client SDKs for Swift, Kotlin, and React Native. Go server you can embed or deploy standalone. Your tables. Zero schema changes.</p>
 
 ---
 
@@ -178,10 +178,12 @@ const tasks = await client.query('SELECT * FROM tasks WHERE completed = 0');
 
 | Component | What Changes |
 |-----------|-------------|
-| Your tables | Add `deleted_at TIMESTAMPTZ NULL` column |
+| Your tables | No schema changes required -- Synchro adapts to your columns |
 | PostgreSQL | Set `wal_level = logical` (one-time config) |
 | Your server | Register tables + wire 6 HTTP endpoints |
 | Client app | `query()` and `execute()` against local SQLite |
+
+Synchro introspects your tables at startup. Tables with `updated_at` get conflict resolution. Tables with `deleted_at` get soft deletes. Tables without either still sync -- every push applies, deletes are permanent. Most production tables already have these columns; if yours don't, Synchro works anyway.
 
 ## Requirements
 

@@ -41,6 +41,32 @@ func NewTestRegistry() *synchro.Registry {
 	return r
 }
 
+// NewMixedTestRegistry creates a registry with both full-column and bare tables
+// for introspection testing.
+func NewMixedTestRegistry() *synchro.Registry {
+	r := synchro.NewRegistry()
+
+	r.Register(&synchro.TableConfig{
+		TableName:   "orders",
+		PushPolicy:  synchro.PushPolicyOwnerOnly,
+		OwnerColumn: "user_id",
+	})
+
+	r.Register(&synchro.TableConfig{
+		TableName:   "bare_items",
+		PushPolicy:  synchro.PushPolicyOwnerOnly,
+		OwnerColumn: "user_id",
+	})
+
+	r.Register(&synchro.TableConfig{
+		TableName:   "partial_items",
+		PushPolicy:  synchro.PushPolicyOwnerOnly,
+		OwnerColumn: "user_id",
+	})
+
+	return r
+}
+
 // MakePushRecord creates a PushRecord for testing.
 func MakePushRecord(id, table, operation string, data map[string]any) synchro.PushRecord {
 	jsonData, _ := json.Marshal(data)

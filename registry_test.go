@@ -19,11 +19,13 @@ func TestRegister_Defaults(t *testing.T) {
 	if cfg.IDColumn != "id" {
 		t.Errorf("IDColumn = %q, want %q", cfg.IDColumn, "id")
 	}
-	if cfg.UpdatedAtColumn != "updated_at" {
-		t.Errorf("UpdatedAtColumn = %q, want %q", cfg.UpdatedAtColumn, "updated_at")
+	// UpdatedAtColumn/DeletedAtColumn are now computed by introspection,
+	// so they start empty until NewEngine runs.
+	if cfg.UpdatedAtCol() != "" {
+		t.Errorf("UpdatedAtCol() = %q, want empty before introspection", cfg.UpdatedAtCol())
 	}
-	if cfg.DeletedAtColumn != "deleted_at" {
-		t.Errorf("DeletedAtColumn = %q, want %q", cfg.DeletedAtColumn, "deleted_at")
+	if cfg.DeletedAtCol() != "" {
+		t.Errorf("DeletedAtCol() = %q, want empty before introspection", cfg.DeletedAtCol())
 	}
 	if cfg.PushPolicy != PushPolicyOwnerOnly {
 		t.Errorf("PushPolicy = %q, want %q", cfg.PushPolicy, PushPolicyOwnerOnly)
@@ -36,25 +38,25 @@ func TestRegister_Defaults(t *testing.T) {
 	}
 }
 
-func TestRegister_CustomColumns(t *testing.T) {
+func TestRegister_CustomIDColumn(t *testing.T) {
 	r := NewRegistry()
 	r.Register(&TableConfig{
-		TableName:       "events",
-		PushPolicy:      PushPolicyDisabled,
-		IDColumn:        "event_id",
-		UpdatedAtColumn: "modified_at",
-		DeletedAtColumn: "removed_at",
+		TableName:  "events",
+		PushPolicy: PushPolicyDisabled,
+		IDColumn:   "event_id",
 	})
 
 	cfg := r.Get("events")
 	if cfg.IDColumn != "event_id" {
 		t.Errorf("IDColumn = %q, want %q", cfg.IDColumn, "event_id")
 	}
-	if cfg.UpdatedAtColumn != "modified_at" {
-		t.Errorf("UpdatedAtColumn = %q, want %q", cfg.UpdatedAtColumn, "modified_at")
+	// UpdatedAtColumn/DeletedAtColumn are set by introspection via Config-level names,
+	// not per-table registration.
+	if cfg.UpdatedAtCol() != "" {
+		t.Errorf("UpdatedAtCol() = %q, want empty before introspection", cfg.UpdatedAtCol())
 	}
-	if cfg.DeletedAtColumn != "removed_at" {
-		t.Errorf("DeletedAtColumn = %q, want %q", cfg.DeletedAtColumn, "removed_at")
+	if cfg.DeletedAtCol() != "" {
+		t.Errorf("DeletedAtCol() = %q, want empty before introspection", cfg.DeletedAtCol())
 	}
 }
 
@@ -246,7 +248,6 @@ func TestValidate_RedundantProtectedColumn(t *testing.T) {
 		name      string
 		protected []string
 	}{
-		{name: "default protected column", protected: []string{"created_at"}},
 		{name: "PK column", protected: []string{"id"}},
 		{name: "ownership column", protected: []string{"user_id"}},
 	}
@@ -332,6 +333,13 @@ func TestAllowedInsertColumns(t *testing.T) {
 		ParentFKCol: "parent_id",
 	})
 	cfg := r.Get("orders")
+	// Simulate introspection detecting all timestamp columns.
+	cfg.hasUpdatedAt = true
+	cfg.hasDeletedAt = true
+	cfg.hasCreatedAt = true
+	cfg.updatedAtColumn = "updated_at"
+	cfg.deletedAtColumn = "deleted_at"
+	cfg.finalizeProtectedSet()
 
 	dataCols := []string{"id", "user_id", "parent_id", "name", "created_at", "updated_at", "deleted_at"}
 	allowed := cfg.AllowedInsertColumns(dataCols)
@@ -363,6 +371,13 @@ func TestAllowedUpdateColumns(t *testing.T) {
 		ProtectedColumns: []string{"secret"},
 	})
 	cfg := r.Get("orders")
+	// Simulate introspection detecting all timestamp columns.
+	cfg.hasUpdatedAt = true
+	cfg.hasDeletedAt = true
+	cfg.hasCreatedAt = true
+	cfg.updatedAtColumn = "updated_at"
+	cfg.deletedAtColumn = "deleted_at"
+	cfg.finalizeProtectedSet()
 
 	dataCols := []string{"id", "user_id", "parent_id", "name", "secret", "created_at", "updated_at", "deleted_at"}
 	allowed := cfg.AllowedUpdateColumns(dataCols)
@@ -383,6 +398,7 @@ func TestAllowedUpdateColumns(t *testing.T) {
 }
 
 func TestIsProtected(t *testing.T) {
+	// Test before introspection (no timestamp columns in protected set)
 	r := NewRegistry()
 	r.Register(&TableConfig{
 		TableName:        "orders",
@@ -392,7 +408,36 @@ func TestIsProtected(t *testing.T) {
 	})
 	cfg := r.Get("orders")
 
-	tests := []struct {
+	// Before introspection: only id, owner, extra protected are in the set
+	preTests := []struct {
+		col  string
+		want bool
+	}{
+		{"id", true},
+		{"user_id", true},
+		{"created_at", false}, // not in set until introspection
+		{"updated_at", false},
+		{"deleted_at", false},
+		{"internal_flag", true},
+		{"name", false},
+	}
+	for _, tt := range preTests {
+		t.Run("pre/"+tt.col, func(t *testing.T) {
+			if got := cfg.IsProtected(tt.col); got != tt.want {
+				t.Errorf("IsProtected(%q) before introspection = %v, want %v", tt.col, got, tt.want)
+			}
+		})
+	}
+
+	// After introspection (simulate all timestamp columns present)
+	cfg.hasUpdatedAt = true
+	cfg.hasDeletedAt = true
+	cfg.hasCreatedAt = true
+	cfg.updatedAtColumn = "updated_at"
+	cfg.deletedAtColumn = "deleted_at"
+	cfg.finalizeProtectedSet()
+
+	postTests := []struct {
 		col  string
 		want bool
 	}{
@@ -405,10 +450,10 @@ func TestIsProtected(t *testing.T) {
 		{"name", false},
 		{"description", false},
 	}
-	for _, tt := range tests {
-		t.Run(tt.col, func(t *testing.T) {
+	for _, tt := range postTests {
+		t.Run("post/"+tt.col, func(t *testing.T) {
 			if got := cfg.IsProtected(tt.col); got != tt.want {
-				t.Errorf("IsProtected(%q) = %v, want %v", tt.col, got, tt.want)
+				t.Errorf("IsProtected(%q) after introspection = %v, want %v", tt.col, got, tt.want)
 			}
 		})
 	}
