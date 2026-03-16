@@ -3,7 +3,7 @@ title: "Synchro"
 description: "Offline-first sync between PostgreSQL and native client SDKs"
 template: splash
 hero:
-  tagline: "Offline-first sync between PostgreSQL and native client SDKs for Swift, Kotlin, and React Native."
+  tagline: "Offline-first sync between PostgreSQL and native client SDKs for Swift, Kotlin, and React Native. Your tables. Minimal changes."
   actions:
     - text: Quick Start
       link: /synchro/getting-started/quickstart/
@@ -14,220 +14,104 @@ hero:
       icon: external
 ---
 
-**Offline-first sync for Go + PostgreSQL.**
-*Your tables. Your server. Minimal changes.*
+import { Card, CardGrid } from '@astrojs/starlight/components';
 
----
+## Why Synchro
 
-## What changes?
-
-Your existing table:
-
-```sql
-CREATE TABLE tasks (
-    id UUID PRIMARY KEY,
-    user_id UUID NOT NULL,
-    title TEXT NOT NULL,
-    created_at TIMESTAMPTZ DEFAULT now(),
-    updated_at TIMESTAMPTZ DEFAULT now()
-);
-```
-
-To enable sync, add one column:
-
-```sql
-ALTER TABLE tasks ADD COLUMN deleted_at TIMESTAMPTZ;
-```
-
-:::tip
-If your tables already have `id`, `created_at`, `updated_at`, and a user ownership column — you may need **zero schema changes**. Just add `deleted_at` for soft deletes.
-:::
-
-On the server — register what you already have:
-
-```go
-registry := synchro.NewRegistry()
-
-registry.Register(&synchro.TableConfig{
-    TableName:   "tasks",
-    OwnerColumn: "user_id",
-})
-```
-
-On the client — initialize and use standard SQL:
-
-### Swift
-
-```swift
-let client = try SynchroClient(config: SynchroConfig(
-    dbPath: "synchro.db",
-    serverURL: URL(string: "https://api.example.com")!,
-    authProvider: { await getToken() },
-    clientID: UIDevice.current.identifierForVendor!.uuidString,
-    appVersion: "1.0.0"
-))
-try await client.start()
-
-let rows = try client.query("SELECT * FROM tasks")
-```
-
-### Kotlin
-
-```kotlin
-val client = SynchroClient(SynchroConfig(
-    dbPath = "synchro.db",
-    serverURL = "https://api.example.com",
-    authProvider = { getToken() },
-    clientID = Settings.Secure.getString(contentResolver, Settings.Secure.ANDROID_ID),
-    appVersion = "1.0.0"
-), context)
-client.start()
-
-val rows = client.query("SELECT * FROM tasks")
-```
-
-### React Native
-
-```typescript
-const client = new SynchroClient({
-    dbPath: 'synchro.db',
-    serverURL: 'https://api.example.com',
-    authProvider: async () => await getToken(),
-    clientID: await getUniqueId(),
-    appVersion: '1.0.0',
-});
-await client.start();
-
-const rows = await client.query('SELECT * FROM tasks');
-```
-
-No special write API. No ORM. No framework lock-in. **Standard SQL on every platform.**
-
----
-
-## What Synchro does NOT require
-
-:::note
-- No triggers on your tables
-- No audit tables or shadow tables
-- No stored procedures or CDC functions
-- No special indexes or extensions
-- No ORM or framework lock-in
-- No separate service to deploy (unless you want one)
-:::
+<CardGrid>
+  <Card title="Standard SQL" icon="pencil">
+    `query()`, `execute()`, transactions, batch writes, prepared statements, and reactive observation. Plain SQL with parameter binding. No ORM, no proprietary query language.
+  </Card>
+  <Card title="Bidirectional sync" icon="random">
+    Clients read and write locally. Changes push to the server and pull to other devices automatically. Works offline, syncs when connectivity returns.
+  </Card>
+  <Card title="WAL-based CDC" icon="seti:db">
+    PostgreSQL logical replication captures changes at the database level. No triggers on your tables, no polling, no audit tables, no shadow tables.
+  </Card>
+  <Card title="RLS authorization" icon="approve-check">
+    Push writes execute under `SET LOCAL app.user_id`. PostgreSQL row-level security enforces access. Authorization lives in the database, not application code.
+  </Card>
+</CardGrid>
 
 ---
 
 ## How it works
 
-Three steps, nothing hidden:
+<pre class="mermaid">
+flowchart TB
+    subgraph Client["Client Device"]
+        direction LR
+        APP[Your App] -- "query / execute" --> SDK
+        subgraph SDK["Native SDK"]
+            direction TB
+            DB[(SQLite)]
+            CDC[CDC Triggers]
+            PQ[Pending Queue]
+            DB --> CDC --> PQ
+        end
+    end
 
-1. **PostgreSQL WAL captures changes automatically** — no triggers, no polling. Synchro reads the write-ahead log your database already produces.
-2. **Synchro assigns changes to user buckets** — each change is routed to the user(s) who own it, based on your ownership column and parent chains.
-3. **Client SDKs pull their bucket and sync offline** — each device maintains a local SQLite database, pulls only its data, and pushes local writes back.
+    subgraph Server["Go Server"]
+        direction TB
+        PG[("PostgreSQL")]
+        WAL[WAL Consumer]
+        CL[Changelog]
+        PG --> WAL --> CL
+    end
 
-```mermaid
-flowchart LR
-    A["App Tables"] --> B["PostgreSQL WAL"]
-    B --> C["Synchro Engine"]
-    C --> D["Changelog + Buckets"]
-    D --> E["HTTP API"]
-    E --> F["Client SQLite"]
+    PQ -- "push" --> PG
+    CL -- "pull" --> DB
+</pre>
 
-    style A fill:#4051b5,color:#fff
-    style B fill:#4051b5,color:#fff
-    style C fill:#4051b5,color:#fff
-    style D fill:#4051b5,color:#fff
-    style E fill:#4051b5,color:#fff
-    style F fill:#4051b5,color:#fff
+Your app writes standard SQL to a local SQLite database. CDC triggers detect changes and queue them for push. The Go server uses PostgreSQL WAL to detect changes and serves them to clients via pull. Conflicts are resolved automatically using last-writer-wins with configurable strategies.
+
+---
+
+## One interface, every platform
+
+```swift
+// Swift
+try client.execute("INSERT INTO tasks (id, user_id, title) VALUES (?, ?, ?)",
+    params: [uuid, userId, "Ship v1"])
+let tasks = try client.query("SELECT * FROM tasks WHERE completed = 0")
+```
+
+```kotlin
+// Kotlin
+client.execute("INSERT INTO tasks (id, user_id, title) VALUES (?, ?, ?)",
+    arrayOf(uuid, userId, "Ship v1"))
+val tasks = client.query("SELECT * FROM tasks WHERE completed = 0")
+```
+
+```typescript
+// React Native (bridges to native Swift and Kotlin SDKs)
+await client.execute('INSERT INTO tasks (id, user_id, title) VALUES (?, ?, ?)',
+    [uuid, userId, 'Ship v1']);
+const tasks = await client.query('SELECT * FROM tasks WHERE completed = 0');
 ```
 
 ---
 
-## Full bidirectional sync, built in
+## Deploy your way
 
-Synchro handles both directions out of the box:
-
-- **Push** — client writes flow to the server in a single transaction, validated through PostgreSQL Row-Level Security. No application-layer authorization code required.
-- **Pull** — the server sends only the changes each client needs, paginated via checkpoint cursors. Clients never download the full dataset after the initial sync.
-- **Conflict resolution** — Last-Write-Wins (LWW) by default, with clock skew tolerance. Switch to ServerWins or plug in a custom resolver per table.
-- **Protected columns** — deny-list filtering prevents clients from overwriting server-controlled fields like `id`, `created_at`, or any column you specify.
-- **Schema governance** — a version handshake between client and server ensures clients stay compatible. Outdated clients get a clear upgrade signal, not silent data corruption.
-
----
-
-## Embed or deploy — scale without rewriting
-
-Three deployment modes, one library:
-
-**Mode A: Embedded** — sync runs inside your existing Go application. No extra processes. Add the sync routes to your router and you are done.
-
-**Mode B: Split** — a dedicated sync worker reads WAL and writes the changelog. Your app server handles push/pull HTTP. Shared PostgreSQL database.
-
-**Mode C: Scale** — dedicated sync store with read replicas. WAL consumer, HTTP handlers, and your application each run independently.
+<CardGrid>
+  <Card title="Embedded" icon="laptop">
+    Import as a Go library into your existing server. Add sync routes to your router. No extra processes.
+  </Card>
+  <Card title="Standalone" icon="rocket">
+    Run `synchrod` as a dedicated binary. Or split the WAL consumer and HTTP handlers across services for scale.
+  </Card>
+</CardGrid>
 
 Same library. Same protocol. Same SDKs. Moving between modes is a configuration change, not a rewrite.
 
 ---
 
-## Platform SDKs
-
-### Go Server
-
-The sync engine, WAL consumer, and HTTP handlers. Embeds into any `net/http` compatible router.
-
-[Server docs](/synchro/server/configuration/)
-
-### Swift / iOS
-
-Native Swift SDK with local SQLite, background sync, and CDC triggers. SwiftPM distribution.
-
-[Swift docs](/synchro/clients/swift/)
-
-### Kotlin / Android
-
-Native Kotlin SDK with local SQLite, background sync, and CDC triggers. Maven Central distribution.
-
-[Kotlin docs](/synchro/clients/kotlin/)
-
-### React Native
-
-TypeScript SDK bridging to native SQLite on both platforms. npm distribution.
-
-[React Native docs](/synchro/clients/react-native/)
-
----
-
-## Feature highlights
-
-### Bidirectional sync
-
-Full push and pull. Clients write locally and sync when connectivity returns.
-
-### Conflict resolution
-
-LWW with clock skew tolerance, ServerWins, or custom resolvers — per table.
-
-### RLS authorization
-
-Push writes execute under `SET LOCAL app.user_id`. PostgreSQL enforces access, not your code.
-
-### Schema governance
-
-Version handshake between client and server. Incompatible clients get a clear upgrade signal.
-
-### Automatic CDC
-
-WAL-based change detection. No triggers, no polling, no audit tables.
-
-### Compaction + snapshot
-
-Changelog compaction keeps storage bounded. Snapshot sync for new or stale clients.
-
-### Column protection
-
-Deny-list filtering prevents clients from overwriting server-controlled columns.
-
----
-
-[Get started](/synchro/getting-started/quickstart/)
+<CardGrid>
+  <Card title="Get started" icon="right-arrow">
+    Follow the [quick start guide](/synchro/getting-started/quickstart/) to set up sync in minutes.
+  </Card>
+  <Card title="Architecture" icon="open-book">
+    Read the [architecture docs](/synchro/server/architecture/) to understand the sync protocol in depth.
+  </Card>
+</CardGrid>

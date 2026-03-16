@@ -19,6 +19,13 @@ export default defineConfig({
 			editLink: {
 				baseUrl: 'https://github.com/trainstar/synchro/edit/master/docs/src/content/docs/',
 			},
+			head: [
+				{
+					tag: 'script',
+					attrs: { type: 'module' },
+					content: `import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs'; mermaid.initialize({ startOnLoad: true, theme: 'dark' });`,
+				},
+			],
 			sidebar: [
 				{
 					label: 'Getting Started',
