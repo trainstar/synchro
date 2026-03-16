@@ -51,7 +51,7 @@ Every client reads and writes to a local SQLite database using standard SQL. Syn
 
 ## Why Synchro
 
-- **Native SQL interface.** Clients write directly to SQLite the same way you'd write to any database. No proprietary query language, no object wrappers, no SDK-specific APIs.
+- **Standard SQL.** Read with `query()`, write with `execute()`. Plain SQL strings with parameter binding. No proprietary query language, no object wrappers, no SDK-specific APIs.
 - **Full bidirectional sync with conflict resolution.** Reads and writes sync automatically. Not read-only replication, not bring-your-own-write-path.
 - **WAL-based change detection.** PostgreSQL logical replication captures changes at the database level. No triggers, no polling, no application-layer diffing.
 - **RLS-enforced authorization.** Row-level security policies in Postgres guard your data. Authorization lives in the database, not in application code.
@@ -120,7 +120,7 @@ http.HandleFunc("GET /sync/schema",     h.ServeSchema)
 
 ### Client Usage
 
-Every client SDK exposes the same interface: `query()` for reads, `execute()` for writes. You write standard SQL against a local SQLite database. Changes sync automatically in the background.
+Every client SDK exposes two methods: `query()` for reads and `execute()` for writes. You pass standard SQL with parameter binding. Changes sync automatically in the background.
 
 **Swift**
 
