@@ -11,12 +11,12 @@ This page explains the foundational ideas behind Synchro: how changes are captur
 
 Synchro captures data changes through PostgreSQL **logical replication**, not triggers. When your application writes to a synced table, PostgreSQL records the change in the Write-Ahead Log (WAL). A long-running Synchro consumer decodes these WAL events and writes structured entries into the `sync_changelog`.
 
-``` mermaid
+<pre class="mermaid">
 graph LR
     A[App Write] --> B[PostgreSQL WAL]
     B --> C[Synchro Consumer]
     C --> D[sync_changelog]
-```
+</pre>
 
 **Why not triggers?**
 
@@ -126,7 +126,7 @@ The `Conflict` struct provides full context: table name, record ID, client/serve
 
 ### Push Flow
 
-``` mermaid
+<pre class="mermaid">
 sequenceDiagram
     participant Client
     participant Server
@@ -151,7 +151,7 @@ sequenceDiagram
     end
     Server->>DB: COMMIT
     Server-->>Client: accepted[] + rejected[]
-```
+</pre>
 
 Each push is processed in a single database transaction under RLS context. The client receives per-record results: `applied`, `conflict` (with the current server version), `rejected_terminal`, or `rejected_retryable`.
 
@@ -168,7 +168,7 @@ Synchro enforces **server-authoritative schema**. The server computes a canonica
 3. **Handshake on every request** -- Push, pull, and snapshot requests include the client's `schema_version` and `schema_hash`. The server compares them against the current manifest.
 4. **Mismatch handling** -- If the client's schema does not match, the server returns HTTP `409 Conflict` with the current server version and hash. The client re-fetches the schema via `GET /sync/schema` and migrates its local SQLite tables.
 
-``` mermaid
+<pre class="mermaid">
 graph TD
     A[Client sends request] --> B{schema_version + schema_hash match?}
     B -->|Yes| C[Process normally]
@@ -176,7 +176,7 @@ graph TD
     D --> E[Client calls GET /sync/schema]
     E --> F[Client migrates local tables]
     F --> G[Client retries request]
-```
+</pre>
 
 :::note[No drift]
 The schema contract is deterministic. Two servers with the same PostgreSQL schema and the same registered tables will always produce the same hash. There is no manual versioning -- the version increments automatically when the schema changes.
@@ -188,7 +188,7 @@ The schema contract is deterministic. Two servers with the same PostgreSQL schem
 
 The full lifecycle from first connection to steady-state sync:
 
-``` mermaid
+<pre class="mermaid">
 sequenceDiagram
     participant Client
     participant Server
@@ -212,7 +212,7 @@ sequenceDiagram
         Client->>Server: POST /sync/pull (checkpoint)
         Server-->>Client: changes, deletes, new checkpoint
     end
-```
+</pre>
 
 ### Phase 1: Registration
 

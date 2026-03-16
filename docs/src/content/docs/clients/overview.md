@@ -20,7 +20,7 @@ The SDK stack has two layers:
 - **Layer 1 (Native):** Swift wraps GRDB, Kotlin wraps Android SQLiteOpenHelper. Each contains a full sync engine -- schema manager, change tracker, push/pull processors, HTTP client, and retry logic.
 - **Layer 2 (React Native):** A TurboModule bridge wraps both native SDKs. SQL strings go down, JSON rows come back up. React hooks provide reactive bindings on top.
 
-``` mermaid
+<pre class="mermaid">
 graph TB
     subgraph "React Native"
         JS[JavaScript / TypeScript]
@@ -33,7 +33,7 @@ graph TB
     JS --> Bridge
     Bridge --> Swift
     Bridge --> Kotlin
-```
+</pre>
 
 ## Shared Interface Contract
 
@@ -94,7 +94,7 @@ Schema methods are for **local-only** tables (caches, preferences, drafts). Sync
 
 SQLite triggers automatically track all writes to synced tables. There is no special write API -- standard SQL INSERT, UPDATE, and DELETE statements work. The CDC system intercepts changes transparently.
 
-``` mermaid
+<pre class="mermaid">
 graph LR
     A[client.execute] --> B[SQLite Write]
     B --> C[CDC Trigger]
@@ -102,7 +102,7 @@ graph LR
     D --> E[Push to Server]
     E --> F[Server Accepts]
     F --> G[Drain from Queue]
-```
+</pre>
 
 ### Trigger Behavior
 
