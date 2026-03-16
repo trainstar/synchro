@@ -17,37 +17,35 @@
 ## How It Works
 
 ```mermaid
-flowchart LR
-    subgraph Clients
-        direction TB
-        subgraph iOS
-            A[Swift SDK]
-            A1[(SQLite)]
-            A --- A1
+flowchart TB
+    subgraph Client["Client Device"]
+        direction LR
+        APP[Your App] -- "query / execute" --> SDK
+        subgraph SDK["Native SDK"]
+            direction TB
+            DB[(SQLite)]
+            CDC[CDC Triggers]
+            PQ[Pending Queue]
+            DB --> CDC --> PQ
         end
-        subgraph Android
-            B[Kotlin SDK]
-            B1[(SQLite)]
-            B --- B1
-        end
-        subgraph RN["React Native"]
-            C[RN Bridge]
-        end
-        C -. "iOS" .-> A
-        C -. "Android" .-> B
     end
 
     subgraph Server["Go Server"]
         direction TB
-        D[("PostgreSQL")]
-        E["WAL Consumer"]
-        F["Changelog"]
-        D --> E --> F
+        PG[("PostgreSQL")]
+        WAL[WAL Consumer]
+        CL[Changelog]
+        PG --> WAL --> CL
     end
 
-    A -- "push / pull" --> Server
-    B -- "push / pull" --> Server
+    PQ -- "push" --> PG
+    CL -- "pull" --> DB
+
+    style Client fill:#1a1a2e,color:#fff
+    style Server fill:#16213e,color:#fff
 ```
+
+> **Swift, Kotlin, and React Native** all use the same architecture. React Native bridges to the native Swift (iOS) and Kotlin (Android) SDKs. Your app writes standard SQL to a local SQLite database. CDC triggers detect changes and queue them for push. The server uses PostgreSQL WAL to detect changes and serves them to clients via pull.
 
 Every client reads and writes to a local SQLite database using standard SQL. Synchro syncs changes bidirectionally with your PostgreSQL server in the background. WAL-based change detection means no triggers, no polling, no custom APIs. Conflicts are resolved automatically using last-writer-wins with configurable strategies.
 
