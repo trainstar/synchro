@@ -62,24 +62,29 @@ Every client reads and writes to a local SQLite database using standard SQL. Syn
 
 ### Install
 
+**Server**
+
 ```bash
-# Server (Go library)
 go get github.com/trainstar/synchro
 ```
 
+**Swift / iOS** (Swift Package Manager)
+
 ```swift
-// Swift (SPM)
 .package(url: "https://github.com/trainstar/synchro.git", from: "0.1.2")
 ```
 
+**Kotlin / Android** (Gradle)
+
 ```kotlin
-// Kotlin (Gradle)
 implementation("fit.trainstar:synchro:0.1.2")
 ```
 
+**React Native** (bridges to the native Swift and Kotlin SDKs above)
+
 ```bash
-# React Native
 npm install @trainstar/synchro-react-native
+cd ios && pod install  # installs the native iOS dependency
 ```
 
 ### Server Setup
