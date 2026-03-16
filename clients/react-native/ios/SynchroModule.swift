@@ -149,8 +149,16 @@ public class SynchroModuleImpl: NSObject {
             if (seedPath as NSString).isAbsolutePath {
                 resolvedSeedPath = seedPath
             } else {
-                let documentsURL = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
-                resolvedSeedPath = documentsURL.appendingPathComponent(seedPath).path
+                // Bundled app resources live in Bundle.main, not Documents.
+                // Check the app bundle first, fall back to Documents.
+                let name = (seedPath as NSString).deletingPathExtension
+                let ext = (seedPath as NSString).pathExtension
+                if let bundlePath = Bundle.main.path(forResource: name, ofType: ext.isEmpty ? nil : ext) {
+                    resolvedSeedPath = bundlePath
+                } else {
+                    let documentsURL = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
+                    resolvedSeedPath = documentsURL.appendingPathComponent(seedPath).path
+                }
             }
         } else {
             resolvedSeedPath = nil

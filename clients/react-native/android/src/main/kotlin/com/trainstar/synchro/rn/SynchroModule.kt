@@ -92,7 +92,23 @@ class SynchroModule(reactContext: ReactApplicationContext) :
             val pullPageSize = if (config.hasKey("pullPageSize")) config.getInt("pullPageSize") else 100
             val pushBatchSize = if (config.hasKey("pushBatchSize")) config.getInt("pushBatchSize") else 100
             val snapshotPageSize = if (config.hasKey("snapshotPageSize")) config.getInt("snapshotPageSize") else 100
-            val seedDatabasePath = if (config.hasKey("seedDatabasePath")) config.getString("seedDatabasePath") else null
+            val rawSeedPath = if (config.hasKey("seedDatabasePath")) config.getString("seedDatabasePath") else null
+
+            // Android bundled assets live inside the APK — they're not on the filesystem.
+            // For relative paths, extract from assets to filesDir so the native SDK can read it.
+            val seedDatabasePath = rawSeedPath?.let { seedPath ->
+                if (java.io.File(seedPath).isAbsolute) {
+                    seedPath
+                } else {
+                    val dest = java.io.File(reactApplicationContext.filesDir, seedPath)
+                    if (!dest.exists()) {
+                        reactApplicationContext.assets.open(seedPath).use { input ->
+                            dest.outputStream().use { output -> input.copyTo(output) }
+                        }
+                    }
+                    dest.absolutePath
+                }
+            }
 
             val synchroConfig = SynchroConfig(
                 dbPath = dbPath,
