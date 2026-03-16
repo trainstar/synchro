@@ -20,9 +20,21 @@
 flowchart LR
     subgraph Clients
         direction TB
-        A["Swift\n(SQLite)"]
-        B["Kotlin\n(SQLite)"]
-        C["React Native\n(SQLite)"]
+        subgraph iOS
+            A[Swift SDK]
+            A1[(SQLite)]
+            A --- A1
+        end
+        subgraph Android
+            B[Kotlin SDK]
+            B1[(SQLite)]
+            B --- B1
+        end
+        subgraph RN["React Native"]
+            C[RN Bridge]
+        end
+        C -. "iOS" .-> A
+        C -. "Android" .-> B
     end
 
     subgraph Server["Go Server"]
@@ -33,13 +45,8 @@ flowchart LR
         D --> E --> F
     end
 
-    A -- "push (writes)" --> Server
-    B -- "push (writes)" --> Server
-    C -- "push (writes)" --> Server
-
-    Server -- "pull (changes)" --> A
-    Server -- "pull (changes)" --> B
-    Server -- "pull (changes)" --> C
+    A -- "push / pull" --> Server
+    B -- "push / pull" --> Server
 ```
 
 Every client reads and writes to a local SQLite database using standard SQL. Synchro syncs changes bidirectionally with your PostgreSQL server in the background. WAL-based change detection means no triggers, no polling, no custom APIs. Conflicts are resolved automatically using last-writer-wins with configurable strategies.
