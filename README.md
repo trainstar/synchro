@@ -183,6 +183,19 @@ const tasks = await client.query('SELECT * FROM tasks WHERE completed = 0');
 | Your server | Register tables + wire 6 HTTP endpoints |
 | Client app | `query()` and `execute()` against local SQLite |
 
+## Requirements
+
+| Component | Minimum Version |
+|-----------|----------------|
+| Go | 1.22+ |
+| PostgreSQL | 14+ (logical replication) |
+| iOS | 16.0+ |
+| macOS | 13.0+ |
+| Android | API 24+ (minSdk 24) |
+| React Native | 0.83+ |
+| Node.js | 20+ |
+| JDK | 17+ (for Android builds) |
+
 ## Links
 
 - [Documentation](https://trainstar.github.io/synchro)
