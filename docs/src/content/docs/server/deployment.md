@@ -108,7 +108,7 @@ The `X-User-ID` header fallback has no authentication. It exists for local devel
 
 Sync runs inside your application process. Zero extra infrastructure.
 
-```mermaid
+<pre class="mermaid">
 graph TB
     subgraph "Your Application Process"
         API[App API]
@@ -119,7 +119,7 @@ graph TB
     API --> DB
     Sync --> DB
     WAL --> DB
-```
+</pre>
 
 **Use when:** early stage, low-to-medium write volume, simplicity is the priority.
 
@@ -164,7 +164,7 @@ mux.Handle("/sync/", authMiddleware(h.Routes()))
 
 Dedicated sync worker process. Same database.
 
-```mermaid
+<pre class="mermaid">
 graph TB
     subgraph "App Process"
         API[App API]
@@ -177,7 +177,7 @@ graph TB
     API --> DB
     Sync --> DB
     WAL --> DB
-```
+</pre>
 
 **Use when:** sync CPU competes with API, you need process isolation before splitting the database.
 
@@ -195,7 +195,7 @@ graph TB
 
 Full isolation with a dedicated sync store.
 
-```mermaid
+<pre class="mermaid">
 graph TB
     subgraph "App Process"
         API[App API]
@@ -211,7 +211,7 @@ graph TB
     WAL --> PrimaryDB
     Sync --> SyncDB
     Sync --> Replica
-```
+</pre>
 
 **Use when:** high write throughput, large bucket fanout, strict OLTP protection needed.
 
