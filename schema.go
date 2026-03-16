@@ -123,8 +123,8 @@ func (s *schemaStore) buildCanonicalSchemaTables(ctx context.Context, db DB, reg
 			ParentTable:          cfg.ParentTable,
 			ParentFKCol:          cfg.ParentFKCol,
 			Dependencies:         deps,
-			UpdatedAtColumn:      cfg.UpdatedAtColumn,
-			DeletedAtColumn:      cfg.DeletedAtColumn,
+			UpdatedAtColumn:      cfg.UpdatedAtCol(),
+			DeletedAtColumn:      cfg.DeletedAtCol(),
 			PrimaryKey:           pk,
 			BucketByColumn:       cfg.BucketByColumn,
 			BucketPrefix:         cfg.BucketPrefix,
@@ -480,6 +480,50 @@ func loadPrimaryKeyColumns(ctx context.Context, db DB, schemaName, tableName str
 		return nil, fmt.Errorf("reading primary key columns for %q: %w", tableName, err)
 	}
 	return cols, nil
+}
+
+// introspectTimestampColumns checks pg_catalog for the presence of the named
+// timestamp columns on a given table. Returns booleans for each.
+func introspectTimestampColumns(ctx context.Context, db DB, tableName, updatedAtName, deletedAtName string) (hasUpdatedAt, hasDeletedAt, hasCreatedAt bool, err error) {
+	schemaName, table := splitSchemaTable(tableName)
+
+	var qHasUA, qHasDA, qHasCA sql.NullBool
+
+	if schemaName != "" {
+		err = db.QueryRowContext(ctx, `
+			SELECT
+				bool_or(a.attname = $2) AS has_updated_at,
+				bool_or(a.attname = $3) AS has_deleted_at,
+				bool_or(a.attname = 'created_at') AS has_created_at
+			FROM pg_catalog.pg_attribute a
+			JOIN pg_catalog.pg_class c ON c.oid = a.attrelid
+			JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+			WHERE c.relname = $1
+			  AND n.nspname = $4
+			  AND a.attnum > 0 AND NOT a.attisdropped
+			  AND a.attname IN ($2, $3, 'created_at')
+		`, table, updatedAtName, deletedAtName, schemaName).Scan(&qHasUA, &qHasDA, &qHasCA)
+	} else {
+		err = db.QueryRowContext(ctx, `
+			SELECT
+				bool_or(a.attname = $2) AS has_updated_at,
+				bool_or(a.attname = $3) AS has_deleted_at,
+				bool_or(a.attname = 'created_at') AS has_created_at
+			FROM pg_catalog.pg_attribute a
+			JOIN pg_catalog.pg_class c ON c.oid = a.attrelid
+			JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+			WHERE c.relname = $1
+			  AND n.nspname = ANY(current_schemas(false))
+			  AND a.attnum > 0 AND NOT a.attisdropped
+			  AND a.attname IN ($2, $3, 'created_at')
+		`, table, updatedAtName, deletedAtName).Scan(&qHasUA, &qHasDA, &qHasCA)
+	}
+
+	if err != nil {
+		return false, false, false, fmt.Errorf("introspecting timestamp columns for %q: %w", tableName, err)
+	}
+
+	return qHasUA.Bool, qHasDA.Bool, qHasCA.Bool, nil
 }
 
 func splitSchemaTable(name string) (schema string, table string) {

@@ -5,6 +5,7 @@ import (
 )
 
 // helper to build a registered TableConfig with protectedSet populated.
+// Simulates a table with all timestamp columns present (the common case).
 func testConfig(t *testing.T, opts ...func(*TableConfig)) *TableConfig {
 	t.Helper()
 	cfg := &TableConfig{
@@ -15,17 +16,17 @@ func testConfig(t *testing.T, opts ...func(*TableConfig)) *TableConfig {
 	for _, fn := range opts {
 		fn(cfg)
 	}
-	// Apply defaults and build protected set, same as Register does.
+	// Apply defaults, same as Register does.
 	if cfg.IDColumn == "" {
 		cfg.IDColumn = "id"
 	}
-	if cfg.UpdatedAtColumn == "" {
-		cfg.UpdatedAtColumn = "updated_at"
-	}
-	if cfg.DeletedAtColumn == "" {
-		cfg.DeletedAtColumn = "deleted_at"
-	}
-	cfg.protectedSet = cfg.buildProtectedSet()
+	// Simulate introspection: all timestamp columns present by default.
+	cfg.hasUpdatedAt = true
+	cfg.hasDeletedAt = true
+	cfg.hasCreatedAt = true
+	cfg.updatedAtColumn = "updated_at"
+	cfg.deletedAtColumn = "deleted_at"
+	cfg.finalizeProtectedSet()
 	return cfg
 }
 

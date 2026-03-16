@@ -26,14 +26,22 @@ go get github.com/trainstar/synchro
 
 ## 2. Prepare Your Schema
 
-Synchro works with your existing tables. The only requirement is a nullable `deleted_at` column for soft-delete tracking.
+Synchro works with your existing tables -- point it at what you have and it adapts automatically. No columns to add, no naming conventions to follow, no migration framework required.
 
-:::note[You are describing your existing table, not changing it]
-Synchro does not generate tables, impose naming conventions, or require a migration framework. You own your schema. The only addition is the `deleted_at` column if you do not already have one.
+At startup, Synchro introspects each registered table via `pg_catalog` and enables the best sync strategy the schema supports:
+
+| Column | When present | When absent |
+|--------|-------------|-------------|
+| `updated_at` | LWW conflict resolution -- concurrent edits are detected and the most recent write wins | Last-push-wins -- every push is applied unconditionally, no conflict detection |
+| `deleted_at` | Soft deletes -- row stays in the database with a timestamp, clients see the deletion, resurrection is possible | Hard deletes -- row is permanently removed via `DELETE`, WAL captures the event for the changelog |
+| `created_at` | Protected from client writes (server-managed) | No effect on sync behavior |
+
+:::tip[Recommended for production]
+Most tables already have `updated_at` and `deleted_at`. If yours do, Synchro uses them automatically. If you're starting fresh, we recommend adding them for the richest sync behavior -- but they are not required to get started.
 :::
 
 ```sql
--- Your existing table
+-- Works as-is. Synchro detects your columns automatically.
 CREATE TABLE tasks (
     id         UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     user_id    UUID NOT NULL REFERENCES users(id),
@@ -41,11 +49,16 @@ CREATE TABLE tasks (
     priority   INTEGER,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    deleted_at TIMESTAMPTZ           -- (1)!
+    deleted_at TIMESTAMPTZ
+);
+
+-- This also works. No timestamp columns needed.
+CREATE TABLE tags (
+    id      UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id UUID NOT NULL,
+    label   TEXT NOT NULL
 );
 ```
-
-1. This is the only column Synchro requires. If your table already has a soft-delete column, point `DeletedAtColumn` at it.
 
 ---
 

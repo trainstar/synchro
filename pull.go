@@ -99,14 +99,19 @@ func (p *pullProcessor) hydrateRecords(ctx context.Context, db DB, tableName str
 	// Build SELECT clause
 	var selectExpr string
 	if len(cfg.SyncColumns) > 0 {
-		quotedCols := make([]string, len(cfg.SyncColumns))
-		for i, col := range cfg.SyncColumns {
-			quotedCols[i] = quoteIdentifier(col)
-		}
 		selectExpr = fmt.Sprintf("json_build_object(%s)::text",
 			buildJsonPairs(cfg.SyncColumns))
 	} else {
 		selectExpr = "row_to_json(t)::text"
+	}
+
+	uaExpr := "NULL::timestamptz"
+	if cfg.HasUpdatedAt() {
+		uaExpr = quoteIdentifier(cfg.UpdatedAtCol())
+	}
+	daExpr := "NULL::timestamptz"
+	if cfg.HasDeletedAt() {
+		daExpr = quoteIdentifier(cfg.DeletedAtCol())
 	}
 
 	// Expand slice into individual placeholders for database/sql compatibility.
@@ -117,8 +122,8 @@ func (p *pullProcessor) hydrateRecords(ctx context.Context, db DB, tableName str
 		"SELECT %s::text AS id, %s AS data, %s AS updated_at, %s AS deleted_at FROM %s t WHERE %s IN %s",
 		quoteIdentifier(cfg.IDColumn),
 		selectExpr,
-		quoteIdentifier(cfg.UpdatedAtColumn),
-		quoteIdentifier(cfg.DeletedAtColumn),
+		uaExpr,
+		daExpr,
 		quoteIdentifier(cfg.TableName),
 		quoteIdentifier(cfg.IDColumn),
 		idList)
@@ -133,13 +138,17 @@ func (p *pullProcessor) hydrateRecords(ctx context.Context, db DB, tableName str
 	for rows.Next() {
 		var r Record
 		var dataStr string
+		var updatedAt sql.NullTime
 		var deletedAt sql.NullTime
 
-		if err := rows.Scan(&r.ID, &dataStr, &r.UpdatedAt, &deletedAt); err != nil {
+		if err := rows.Scan(&r.ID, &dataStr, &updatedAt, &deletedAt); err != nil {
 			return nil, fmt.Errorf("scanning record from %q: %w", tableName, err)
 		}
 		r.TableName = tableName
 		r.Data = json.RawMessage(dataStr)
+		if updatedAt.Valid {
+			r.UpdatedAt = &updatedAt.Time
+		}
 		if deletedAt.Valid {
 			r.DeletedAt = &deletedAt.Time
 		}
@@ -295,18 +304,33 @@ func snapshotPage(ctx context.Context, db DB, cfg *TableConfig, afterID string, 
 		selectExpr = "row_to_json(t)::text"
 	}
 
+	uaExpr := "NULL::timestamptz"
+	if cfg.HasUpdatedAt() {
+		uaExpr = quoteIdentifier(cfg.UpdatedAtCol())
+	}
+
+	// Build WHERE clause: filter out soft-deleted records only when deleted_at exists
+	var whereClause string
+	if cfg.HasDeletedAt() {
+		whereClause = fmt.Sprintf("WHERE %s IS NULL AND %s::text > $1",
+			quoteIdentifier(cfg.DeletedAtCol()),
+			quoteIdentifier(cfg.IDColumn))
+	} else {
+		whereClause = fmt.Sprintf("WHERE %s::text > $1",
+			quoteIdentifier(cfg.IDColumn))
+	}
+
 	query := fmt.Sprintf(
 		`SELECT %s::text AS id, %s AS data, %s AS updated_at
 		FROM %s t
-		WHERE %s IS NULL AND %s::text > $1
+		%s
 		ORDER BY %s::text
 		LIMIT $2`,
 		quoteIdentifier(cfg.IDColumn),
 		selectExpr,
-		quoteIdentifier(cfg.UpdatedAtColumn),
+		uaExpr,
 		quoteIdentifier(cfg.TableName),
-		quoteIdentifier(cfg.DeletedAtColumn),
-		quoteIdentifier(cfg.IDColumn),
+		whereClause,
 		quoteIdentifier(cfg.IDColumn),
 	)
 
@@ -320,11 +344,15 @@ func snapshotPage(ctx context.Context, db DB, cfg *TableConfig, afterID string, 
 	for rows.Next() {
 		var r Record
 		var dataStr string
-		if err := rows.Scan(&r.ID, &dataStr, &r.UpdatedAt); err != nil {
+		var updatedAt sql.NullTime
+		if err := rows.Scan(&r.ID, &dataStr, &updatedAt); err != nil {
 			return nil, fmt.Errorf("scanning snapshot record from %q: %w", cfg.TableName, err)
 		}
 		r.TableName = cfg.TableName
 		r.Data = json.RawMessage(dataStr)
+		if updatedAt.Valid {
+			r.UpdatedAt = &updatedAt.Time
+		}
 		records = append(records, r)
 	}
 

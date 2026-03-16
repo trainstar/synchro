@@ -66,8 +66,6 @@ registry.Register(&synchro.TableConfig{
 | `SyncColumns` | No | `nil` | Column subset to include in pull responses. `nil` = all columns. |
 | `Dependencies` | No | `nil` | Tables that must sync first (push ordering hint for clients) |
 | `IDColumn` | No | `"id"` | Primary key column name |
-| `UpdatedAtColumn` | No | `"updated_at"` | Timestamp column for conflict detection |
-| `DeletedAtColumn` | No | `"deleted_at"` | Soft delete column |
 | `ProtectedColumns` | No | `nil` | Additional columns clients cannot write (beyond defaults) |
 | `BucketByColumn` | No | `OwnerColumn` | Fast-path bucket source column |
 | `BucketPrefix` | No | `"user:"` | Prefix applied to `BucketByColumn` values |
@@ -76,7 +74,7 @@ registry.Register(&synchro.TableConfig{
 | `BucketFunction` | No | `""` | Optional SQL bucket resolver function override |
 
 :::note[Default protected columns]
-The following columns are **always** protected and cannot be written by clients: `id`, `created_at`, `updated_at`, `deleted_at`, the owner column, and the parent FK column.
+The following columns are protected and cannot be written by clients: `id`, the owner column, and the parent FK column. Additionally, `created_at`, `updated_at`, and `deleted_at` are protected **when they exist** on the table (detected by introspection).
 :::
 
 ### Validation Rules
@@ -103,13 +101,43 @@ engine, err := synchro.NewEngine(synchro.Config{
     Ownership:          nil,               // defaults to JoinResolver
     MinClientVersion:   "1.2.0",           // optional semver gate
     ClockSkewTolerance: 5 * time.Second,   // optional LWW tolerance
+    UpdatedAtColumn:    "updated_at",      // optional, default "updated_at"
+    DeletedAtColumn:    "deleted_at",      // optional, default "deleted_at"
     Logger:             slog.Default(),    // optional, defaults to slog.Default()
     Compactor: &synchro.CompactorConfig{   // optional, enables changelog compaction
         StaleThreshold: 7 * 24 * time.Hour, // deactivate clients inactive for 7 days
         BatchSize:      10000,               // rows deleted per batch
     },
 })
+```
 
+### Schema Introspection
+
+At startup, `NewEngine` introspects each registered table via `pg_catalog` to detect which timestamp columns exist. No schema modifications are required -- Synchro adapts to your tables as they are.
+
+| Column | When present | When absent |
+|--------|-------------|-------------|
+| `updated_at` | LWW conflict resolution -- concurrent edits detected and resolved by timestamp. Column is protected from client writes. | Last-push-wins -- every update applied unconditionally. Column not referenced. |
+| `deleted_at` | Soft deletes -- `UPDATE SET deleted_at = now()`. Row preserved for resurrection. Column protected from client writes. | Hard deletes -- `DELETE FROM`. Row permanently removed, WAL captures the event. |
+| `created_at` | Protected from client writes (server-managed). | No effect on sync behavior. |
+
+`UpdatedAtColumn` and `DeletedAtColumn` on `Config` set the **convention name** to look for. Each table is checked independently -- a single registry can contain tables with and without these columns.
+
+```go
+// Use custom column names across all tables
+engine, _ := synchro.NewEngine(synchro.Config{
+    DB:              db,
+    Registry:        registry,
+    UpdatedAtColumn: "modified_at",
+    DeletedAtColumn: "removed_at",
+})
+```
+
+:::tip[When to add timestamp columns]
+For tables where multiple clients may edit the same record concurrently, `updated_at` is strongly recommended -- without it there is no conflict detection. For tables where you need to preserve deletion history or support undo, `deleted_at` is recommended. Reference data tables that are read-only (`PushPolicyDisabled`) work fine without either.
+:::
+
+```go
 // Manual compaction (e.g., from a cron job)
 result, err := engine.RunCompaction(ctx)
 

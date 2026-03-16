@@ -36,6 +36,14 @@ type Config struct {
 	// Compactor configures changelog compaction. Optional.
 	Compactor *CompactorConfig
 
+	// UpdatedAtColumn is the column name convention for change tracking.
+	// Introspected per table. Default: "updated_at".
+	UpdatedAtColumn string
+
+	// DeletedAtColumn is the column name convention for soft deletes.
+	// Introspected per table. Default: "deleted_at".
+	DeletedAtColumn string
+
 	// Logger for sync operations. Defaults to slog.Default().
 	Logger *slog.Logger
 }
@@ -71,9 +79,38 @@ func NewEngine(cfg Config) (*Engine, error) {
 		return nil, fmt.Errorf("synchro: registry validation failed: %w", err)
 	}
 
+	if cfg.UpdatedAtColumn == "" {
+		cfg.UpdatedAtColumn = "updated_at"
+	}
+	if cfg.DeletedAtColumn == "" {
+		cfg.DeletedAtColumn = "deleted_at"
+	}
+
 	logger := cfg.Logger
 	if logger == nil {
 		logger = slog.Default()
+	}
+
+	// Introspect each registered table for timestamp columns.
+	ctx := context.Background()
+	for _, tcfg := range cfg.Registry.All() {
+		hasUA, hasDA, hasCA, err := introspectTimestampColumns(ctx, cfg.DB, tcfg.TableName, cfg.UpdatedAtColumn, cfg.DeletedAtColumn)
+		if err != nil {
+			return nil, fmt.Errorf("synchro: introspecting %q: %w", tcfg.TableName, err)
+		}
+		tcfg.hasUpdatedAt = hasUA
+		tcfg.hasDeletedAt = hasDA
+		tcfg.hasCreatedAt = hasCA
+		if hasUA {
+			tcfg.updatedAtColumn = cfg.UpdatedAtColumn
+		}
+		if hasDA {
+			tcfg.deletedAtColumn = cfg.DeletedAtColumn
+		}
+		tcfg.finalizeProtectedSet()
+
+		logger.Info("table introspected", "table", tcfg.TableName,
+			"updated_at", hasUA, "deleted_at", hasDA, "created_at", hasCA)
 	}
 
 	resolver := cfg.ConflictResolver
@@ -390,8 +427,8 @@ func (e *Engine) TableMetadata(ctx context.Context) (*TableMetaResponse, error) 
 			Dependencies:         deps,
 			ParentTable:          cfg.ParentTable,
 			ParentFKCol:          cfg.ParentFKCol,
-			UpdatedAtColumn:      cfg.UpdatedAtColumn,
-			DeletedAtColumn:      cfg.DeletedAtColumn,
+			UpdatedAtColumn:      cfg.UpdatedAtCol(),
+			DeletedAtColumn:      cfg.DeletedAtCol(),
 			BucketByColumn:       cfg.BucketByColumn,
 			BucketPrefix:         cfg.BucketPrefix,
 			GlobalWhenBucketNull: cfg.GlobalWhenBucketNull,

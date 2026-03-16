@@ -12,13 +12,6 @@ const (
 	PushPolicyOwnerOnly PushPolicy = "owner_only"
 )
 
-// defaultProtectedColumns are columns that clients may never write directly.
-var defaultProtectedColumns = map[string]bool{
-	"created_at": true,
-	"updated_at": true,
-	"deleted_at": true,
-}
-
 // TableConfig defines sync behavior for a table.
 type TableConfig struct {
 	// TableName is the database table name.
@@ -46,14 +39,8 @@ type TableConfig struct {
 	// IDColumn is the primary key column name (defaults to "id").
 	IDColumn string
 
-	// UpdatedAtColumn is the timestamp column for change tracking (defaults to "updated_at").
-	UpdatedAtColumn string
-
-	// DeletedAtColumn is the soft delete column (defaults to "deleted_at").
-	DeletedAtColumn string
-
 	// ProtectedColumns are additional columns (beyond defaults) that clients may not write.
-	// Default protected: id, created_at, updated_at, deleted_at, OwnerColumn.
+	// Default protected: id, OwnerColumn, ParentFKCol, plus any timestamp columns detected by introspection.
 	ProtectedColumns []string
 
 	// BucketByColumn enables fast-path bucketing without SQL function execution.
@@ -75,16 +62,37 @@ type TableConfig struct {
 	//   (table_name text, operation text, new_row jsonb, old_row jsonb) -> setof text.
 	BucketFunction string
 
-	// protectedSet is a pre-computed lookup set, populated by Register().
+	// Computed by introspection — not user-configurable.
+	hasUpdatedAt    bool
+	hasDeletedAt    bool
+	hasCreatedAt    bool
+	updatedAtColumn string // resolved name or "" if absent
+	deletedAtColumn string // resolved name or "" if absent
+
+	// protectedSet is a pre-computed lookup set, populated by Register() and
+	// finalized after introspection.
 	protectedSet map[string]bool
 }
 
-// buildProtectedSet computes the full set of protected columns.
+// HasUpdatedAt returns true if the table has an updated_at column.
+func (c *TableConfig) HasUpdatedAt() bool { return c.hasUpdatedAt }
+
+// HasDeletedAt returns true if the table has a deleted_at column.
+func (c *TableConfig) HasDeletedAt() bool { return c.hasDeletedAt }
+
+// HasCreatedAt returns true if the table has a created_at column.
+func (c *TableConfig) HasCreatedAt() bool { return c.hasCreatedAt }
+
+// UpdatedAtCol returns the resolved updated_at column name, or "" if absent.
+func (c *TableConfig) UpdatedAtCol() string { return c.updatedAtColumn }
+
+// DeletedAtCol returns the resolved deleted_at column name, or "" if absent.
+func (c *TableConfig) DeletedAtCol() string { return c.deletedAtColumn }
+
+// buildProtectedSet computes a preliminary set of protected columns.
+// This is called during Register() before introspection runs.
 func (c *TableConfig) buildProtectedSet() map[string]bool {
-	s := make(map[string]bool, len(defaultProtectedColumns)+len(c.ProtectedColumns)+3)
-	for col := range defaultProtectedColumns {
-		s[col] = true
-	}
+	s := make(map[string]bool, len(c.ProtectedColumns)+6)
 	s[c.IDColumn] = true
 	if c.OwnerColumn != "" {
 		s[c.OwnerColumn] = true
@@ -96,6 +104,32 @@ func (c *TableConfig) buildProtectedSet() map[string]bool {
 		s[col] = true
 	}
 	return s
+}
+
+// finalizeProtectedSet rebuilds the protected set after introspection,
+// adding only timestamp columns that actually exist in the table.
+func (c *TableConfig) finalizeProtectedSet() {
+	s := make(map[string]bool, len(c.ProtectedColumns)+6)
+	s[c.IDColumn] = true
+	if c.hasCreatedAt {
+		s["created_at"] = true
+	}
+	if c.hasUpdatedAt {
+		s[c.updatedAtColumn] = true
+	}
+	if c.hasDeletedAt {
+		s[c.deletedAtColumn] = true
+	}
+	if c.OwnerColumn != "" {
+		s[c.OwnerColumn] = true
+	}
+	if c.ParentFKCol != "" {
+		s[c.ParentFKCol] = true
+	}
+	for _, col := range c.ProtectedColumns {
+		s[col] = true
+	}
+	c.protectedSet = s
 }
 
 // IsProtected returns true if the column is protected from client writes.
@@ -146,12 +180,6 @@ func NewRegistry() *Registry {
 func (r *Registry) Register(cfg *TableConfig) {
 	if cfg.IDColumn == "" {
 		cfg.IDColumn = "id"
-	}
-	if cfg.UpdatedAtColumn == "" {
-		cfg.UpdatedAtColumn = "updated_at"
-	}
-	if cfg.DeletedAtColumn == "" {
-		cfg.DeletedAtColumn = "deleted_at"
 	}
 	if cfg.PushPolicy == "" {
 		if cfg.OwnerColumn != "" || cfg.ParentTable != "" {
@@ -221,9 +249,6 @@ func (r *Registry) Validate() error {
 		}
 
 		for _, col := range cfg.ProtectedColumns {
-			if defaultProtectedColumns[col] {
-				return fmt.Errorf("%w: table %q contains default protected column %q", ErrRedundantProtected, name, col)
-			}
 			if col == cfg.IDColumn {
 				return fmt.Errorf("%w: table %q contains PK column %q", ErrRedundantProtected, name, col)
 			}

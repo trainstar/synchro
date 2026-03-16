@@ -47,7 +47,7 @@ type Record struct {
 	ID        string          `json:"id"`
 	TableName string          `json:"table_name"`
 	Data      json.RawMessage `json:"data"`
-	UpdatedAt time.Time       `json:"updated_at"`
+	UpdatedAt *time.Time      `json:"updated_at,omitempty"`
 	DeletedAt *time.Time      `json:"deleted_at,omitempty"`
 }
 
@@ -245,8 +245,8 @@ type SchemaTable struct {
 	ParentTable          string         `json:"parent_table,omitempty"`
 	ParentFKCol          string         `json:"parent_fk_col,omitempty"`
 	Dependencies         []string       `json:"dependencies,omitempty"`
-	UpdatedAtColumn      string         `json:"updated_at_column"`
-	DeletedAtColumn      string         `json:"deleted_at_column"`
+	UpdatedAtColumn      string         `json:"updated_at_column,omitempty"`
+	DeletedAtColumn      string         `json:"deleted_at_column,omitempty"`
 	PrimaryKey           []string       `json:"primary_key"`
 	BucketByColumn       string         `json:"bucket_by_column,omitempty"`
 	BucketPrefix         string         `json:"bucket_prefix,omitempty"`

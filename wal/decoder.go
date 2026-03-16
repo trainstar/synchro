@@ -95,10 +95,13 @@ func (d *Decoder) handleUpdate(msg *pglogrepl.UpdateMessage) ([]WALEvent, error)
 	cfg := d.registry.Get(rel.RelationName)
 	recordID := fmt.Sprintf("%v", data[cfg.IDColumn])
 
-	// Detect soft deletes: if deleted_at column is now non-null, emit OpDelete.
+	// Detect soft deletes: if the table has a deleted_at column and it is now
+	// non-null, emit OpDelete.
 	op := synchro.OpUpdate
-	if deletedAtVal, ok := data[cfg.DeletedAtColumn]; ok && deletedAtVal != nil {
-		op = synchro.OpDelete
+	if cfg.HasDeletedAt() {
+		if deletedAtVal, ok := data[cfg.DeletedAtCol()]; ok && deletedAtVal != nil {
+			op = synchro.OpDelete
+		}
 	}
 
 	return []WALEvent{{
