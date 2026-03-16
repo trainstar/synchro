@@ -183,7 +183,7 @@ const tasks = await client.query('SELECT * FROM tasks WHERE completed = 0');
 | Your server | Register tables + wire 6 HTTP endpoints |
 | Client app | `query()` and `execute()` against local SQLite |
 
-Synchro introspects your tables at startup and adapts automatically. Tables with a change-tracking timestamp get conflict resolution. Tables with a soft-delete column get soft deletes. Tables without either still sync -- every push applies, deletes are permanent. Column names are configurable; defaults are `updated_at` and `deleted_at`.
+Synchro introspects your tables at startup and adapts automatically. If a change-tracking timestamp column exists, you get conflict resolution. If a soft-delete column exists, you get soft deletes. Neither is required -- tables without them still sync, with last-push-wins and hard deletes. The column names to look for default to `updated_at` and `deleted_at` but are configurable.
 
 ## Requirements
 
