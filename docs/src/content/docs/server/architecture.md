@@ -7,7 +7,7 @@ description: "Detailed architecture documentation for the Synchro sync engine."
 
 Synchro is a standalone, offline-first sync library for Go + PostgreSQL. It provides bidirectional data synchronization between mobile/desktop clients and a PostgreSQL server using WAL-based change detection, a bucketed changelog, and checkpoint-based cursors.
 
-```mermaid
+<pre class="mermaid">
 graph LR
     subgraph Client
         A[Local DB<br/>SQLite] --- B[Changelog]
@@ -21,7 +21,7 @@ graph LR
     A <-->|push/pull<br/>HTTP/JSON| C
     C --> F
     F --> D
-```
+</pre>
 
 ---
 
@@ -133,7 +133,7 @@ Manages changelog compaction to prevent unbounded growth of `sync_changelog`:
 
 ### Push Path
 
-```mermaid
+<pre class="mermaid">
 sequenceDiagram
     participant Client
     participant Handler as POST /sync/push
@@ -165,13 +165,13 @@ sequenceDiagram
     Engine->>DB: COMMIT
     Engine->>DB: Update client last_push_at
     Engine-->>Client: Accepted/rejected results with server-set timestamps (RYOW)
-```
+</pre>
 
 RLS policies enforce authorization at the database level. The push processor does not walk FK chains -- Postgres RLS handles it.
 
 ### Pull Path
 
-```mermaid
+<pre class="mermaid">
 sequenceDiagram
     participant Client
     participant Handler as POST /sync/pull
@@ -199,11 +199,11 @@ sequenceDiagram
     Engine->>DB: Advance checkpoint (best-effort)
     Engine->>DB: Update client last_pull_at
     Engine-->>Client: Changes / deletes / checkpoint / schema identifiers
-```
+</pre>
 
 ### Snapshot Path
 
-```mermaid
+<pre class="mermaid">
 sequenceDiagram
     participant Client
     participant Handler as POST /sync/snapshot
@@ -234,7 +234,7 @@ sequenceDiagram
     Engine-->>Client: Records + stateless cursor (carries captured checkpoint)
 
     Note over Client: Resumes normal incremental pull from snapshot checkpoint
-```
+</pre>
 
 ---
 
