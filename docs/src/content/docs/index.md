@@ -115,3 +115,4 @@ Same library. Same protocol. Same SDKs. Moving between modes is a configuration 
     Read the [architecture docs](/synchro/server/architecture/) to understand the sync protocol in depth.
   </Card>
 </CardGrid>
+
