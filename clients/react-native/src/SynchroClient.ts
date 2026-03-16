@@ -63,6 +63,7 @@ export class SynchroClient {
         pullPageSize: this.config.pullPageSize ?? 100,
         pushBatchSize: this.config.pushBatchSize ?? 100,
         snapshotPageSize: this.config.snapshotPageSize ?? 100,
+        seedDatabasePath: this.config.seedDatabasePath,
       });
     } catch (error) {
       throw mapNativeError(error);

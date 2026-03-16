@@ -3,6 +3,22 @@ package com.trainstar.synchro
 import android.content.Context
 
 class SynchroClient(private val config: SynchroConfig, context: Context) {
+    init {
+        config.seedDatabasePath?.let { seedPath ->
+            val dbFile = context.getDatabasePath(config.dbPath)
+            val seedFile = java.io.File(seedPath)
+            if (!dbFile.exists() && seedFile.exists()) {
+                dbFile.parentFile?.mkdirs()
+                seedFile.copyTo(dbFile)
+                // Copy WAL/SHM files if they exist alongside the seed
+                for (suffix in listOf("-wal", "-shm")) {
+                    val src = java.io.File(seedPath + suffix)
+                    val dst = java.io.File(dbFile.path + suffix)
+                    if (src.exists()) src.copyTo(dst)
+                }
+            }
+        }
+    }
     private val database: SynchroDatabase = SynchroDatabase(context, config.dbPath)
     private val okHttpClient: okhttp3.OkHttpClient = okhttp3.OkHttpClient.Builder()
         .connectTimeout(30, java.util.concurrent.TimeUnit.SECONDS)

@@ -16,9 +16,17 @@ cover.out
 .synchrod-test.log
 .synchrod-test.pid
 
+# Seed database output
+seed.db
+
+# Swift build cache
+.build/
+Package.resolved
+
 # Kotlin
 clients/kotlin/.gradle/
 clients/kotlin/**/build/
+clients/kotlin/local.properties
 
 # React Native artifacts
 clients/react-native/example/artifacts/

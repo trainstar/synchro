@@ -13,6 +13,20 @@ public final class SynchroClient: @unchecked Sendable {
 
     public init(config: SynchroConfig) throws {
         self.config = config
+        if let seedPath = config.seedDatabasePath {
+            let fm = FileManager.default
+            if !fm.fileExists(atPath: config.dbPath) && fm.fileExists(atPath: seedPath) {
+                try fm.copyItem(atPath: seedPath, toPath: config.dbPath)
+                // Copy WAL/SHM files if they exist alongside the seed
+                for suffix in ["-wal", "-shm"] {
+                    let src = seedPath + suffix
+                    let dst = config.dbPath + suffix
+                    if fm.fileExists(atPath: src) {
+                        try fm.copyItem(atPath: src, toPath: dst)
+                    }
+                }
+            }
+        }
         self.database = try SynchroDatabase(path: config.dbPath)
         self.httpClient = HttpClient(config: config)
         self.schemaManager = SchemaManager(database: database)

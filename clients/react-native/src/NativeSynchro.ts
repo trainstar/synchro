@@ -28,6 +28,7 @@ export interface Spec extends TurboModule {
     pullPageSize: number;
     pushBatchSize: number;
     snapshotPageSize: number;
+    seedDatabasePath?: string;
   }): Promise<void>;
   close(): Promise<void>;
   getPath(): Promise<string>;

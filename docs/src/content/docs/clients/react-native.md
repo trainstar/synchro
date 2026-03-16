@@ -47,6 +47,7 @@ await client.initialize();
 | `pullPageSize` | `number` | `100` | Rows per pull page (max 1000) |
 | `pushBatchSize` | `number` | `100` | Pending changes per push batch (max 1000) |
 | `snapshotPageSize` | `number` | `100` | Rows per snapshot page (max 1000) |
+| `seedDatabasePath` | `string` | `undefined` | Path to a pre-built seed database for offline-first bootstrap |
 
 :::note[Two-step initialization]
 The constructor wires up the auth callback bridge. `initialize()` creates the native database and configures the sync engine. All SQL and sync methods require `initialize()` to have completed.
@@ -366,3 +367,45 @@ try {
   }
 }
 ```
+
+## Seed Database (Optional)
+
+Ship a pre-built SQLite file so the app works offline on first launch — no server required. Useful when users may not have connectivity on first open, or when your onboarding flow writes data before sign-in.
+
+Without a seed, tables are created on first `start()` from the server schema. The seed removes that dependency.
+
+```typescript
+import RNFS from 'react-native-fs';
+import { Platform } from 'react-native';
+
+// Resolve platform-specific seed path
+const seedPath = Platform.select({
+  ios: `${RNFS.MainBundlePath}/seed.db`,
+  android: `${RNFS.DocumentDirectoryPath}/seed.db`,
+});
+
+// On Android, copy from assets on first install
+if (Platform.OS === 'android' && !(await RNFS.exists(seedPath))) {
+  await RNFS.copyFileAssets('seed.db', seedPath);
+}
+
+const client = new SynchroClient({
+  dbPath: 'synchro.db',
+  serverURL: 'https://api.example.com',
+  authProvider: async () => await getToken(),
+  clientID: deviceId,
+  appVersion: '1.0.0',
+  seedDatabasePath: seedPath,
+});
+```
+
+If `seedDatabasePath` is set and no database exists at `dbPath`, the seed is copied. If a database already exists, the seed is ignored. Generate seeds with the `synchroseed` CLI — see [Seed Database](/synchro/server/seed-database/).
+
+## Schema Reconciliation
+
+On connect, schema updates are reconciled **additively** — the client never drops tables or columns:
+
+- **New columns/tables** from the server are added
+- **Removed columns/tables** from the server are preserved locally
+- **Local-only tables** (`createTable()`) and extra columns are never touched
+- **Type changes** (e.g., `TEXT` → `INTEGER`) trigger a destructive rebuild (rare, intentional migrations only)

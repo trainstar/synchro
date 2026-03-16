@@ -182,6 +182,23 @@ graph TD
 The schema contract is deterministic. Two servers with the same PostgreSQL schema and the same registered tables will always produce the same hash. There is no manual versioning -- the version increments automatically when the schema changes.
 :::
 
+### Schema Reconciliation
+
+When a client connects and receives a new schema version, the schema manager reconciles the local SQLite database **additively**:
+
+- **New columns** from the server are added via `ALTER TABLE ADD COLUMN`
+- **New tables** from the server are created with CDC triggers
+- **Removed columns** (present locally but not in server schema) are **preserved** — no data is dropped
+- **Removed tables** (present locally but not in server schema) are **preserved** — no data is dropped
+- **Local-only tables** (created by the app, not in server schema) are **never touched**
+- **Extra columns** on synced tables (added locally by the app) are **never touched**
+
+The only scenario that triggers a destructive rebuild is when a synced column's **type changes** (e.g., a column that was `TEXT` is now `INTEGER`). This is a rare, intentional schema migration that requires re-bootstrapping the local database.
+
+:::tip[Safe for local-only tables]
+You can freely create local-only tables (e.g., `app_settings`, `drafts`, `cache`) alongside synced tables. Schema reconciliation will never affect them.
+:::
+
 ---
 
 ## Sync Lifecycle

@@ -142,6 +142,19 @@ public class SynchroModuleImpl: NSObject {
         let pullPageSize = config["pullPageSize"] as? Int ?? 100
         let pushBatchSize = config["pushBatchSize"] as? Int ?? 100
         let snapshotPageSize = config["snapshotPageSize"] as? Int ?? 100
+        let seedDatabasePath = config["seedDatabasePath"] as? String
+
+        let resolvedSeedPath: String?
+        if let seedPath = seedDatabasePath {
+            if (seedPath as NSString).isAbsolutePath {
+                resolvedSeedPath = seedPath
+            } else {
+                let documentsURL = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
+                resolvedSeedPath = documentsURL.appendingPathComponent(seedPath).path
+            }
+        } else {
+            resolvedSeedPath = nil
+        }
 
         do {
             let synchroConfig = SynchroConfig(
@@ -164,7 +177,8 @@ public class SynchroModuleImpl: NSObject {
                 maxRetryAttempts: maxRetryAttempts,
                 pullPageSize: pullPageSize,
                 pushBatchSize: pushBatchSize,
-                snapshotPageSize: snapshotPageSize
+                snapshotPageSize: snapshotPageSize,
+                seedDatabasePath: resolvedSeedPath
             )
             try client?.close()
             clearRuntimeState()

@@ -63,6 +63,7 @@ let client = try SynchroClient(config: config)
 | `pullPageSize` | `Int` | `100` | Rows per pull page (capped at 1000) |
 | `pushBatchSize` | `Int` | `100` | Pending changes per push batch (max 1000) |
 | `snapshotPageSize` | `Int` | `100` | Rows per snapshot page (capped at 1000) |
+| `seedDatabasePath` | `String?` | `nil` | Path to a pre-built seed database for offline-first bootstrap |
 
 ## Core Usage
 
@@ -254,3 +255,31 @@ public enum SynchroError: Error {
 | `invalidResponse` | Server response could not be decoded |
 | `alreadyStarted` | `start()` called when sync is already running |
 | `notStarted` | `syncNow()` called before `start()` |
+
+## Seed Database (Optional)
+
+Ship a pre-built SQLite file so the app works offline on first launch — no server required. Useful when users may not have connectivity on first open, or when your onboarding flow writes data before sign-in.
+
+Without a seed, tables are created on first `start()` from the server schema. The seed removes that dependency.
+
+```swift
+let config = SynchroConfig(
+    dbPath: dbURL.path,
+    serverURL: URL(string: "https://api.example.com")!,
+    authProvider: { await getToken() },
+    clientID: deviceID,
+    appVersion: "1.0.0",
+    seedDatabasePath: Bundle.main.path(forResource: "seed", ofType: "db")
+)
+```
+
+If `seedDatabasePath` is set and no database exists at `dbPath`, the seed is copied. If a database already exists, the seed is ignored. Generate seeds with the `synchroseed` CLI — see [Seed Database](/synchro/server/seed-database/).
+
+## Schema Reconciliation
+
+On connect, schema updates are reconciled **additively** — the client never drops tables or columns:
+
+- **New columns/tables** from the server are added
+- **Removed columns/tables** from the server are preserved locally
+- **Local-only tables** (`createTable()`) and extra columns are never touched
+- **Type changes** (e.g., `TEXT` → `INTEGER`) trigger a destructive rebuild (rare, intentional migrations only)

@@ -21,11 +21,7 @@ final class SchemaManager: @unchecked Sendable {
             return schema
         }
 
-        if localVersion == 0 {
-            try createSyncedTables(schema: schema)
-        } else {
-            try migrateSchema(newSchema: schema)
-        }
+        try migrateSchema(newSchema: schema)
 
         try database.writeTransaction { db in
             try SynchroMeta.setInt64(db, key: .schemaVersion, value: schema.schemaVersion)
@@ -55,12 +51,7 @@ final class SchemaManager: @unchecked Sendable {
 
     func migrateSchema(newSchema: SchemaResponse) throws {
         try database.writeTransaction { db in
-            let localTables = try String.fetchAll(
-                db,
-                sql: "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE '_synchro_%'"
-            )
-            let newTableMap = Dictionary(uniqueKeysWithValues: newSchema.tables.map { ($0.tableName, $0) })
-            if try requiresDestructiveRebuild(localTables: localTables, newTableMap: newTableMap, db: db) {
+            if try requiresDestructiveRebuild(db: db, newSchema: newSchema) {
                 try db.execute(sql: "DELETE FROM _synchro_pending_changes")
                 try dropSyncedTablesInTransaction(db, schema: SchemaResponse(schemaVersion: 0, schemaHash: "", serverTime: Date(), tables: newSchema.tables))
                 try createSyncedTablesInTransaction(db, schema: newSchema)
@@ -82,12 +73,17 @@ final class SchemaManager: @unchecked Sendable {
                         let sqlType = SQLiteSchema.sqliteType(for: col.logicalType)
                         let quotedTable = SQLiteHelpers.quoteIdentifier(table.tableName)
                         let quotedCol = SQLiteHelpers.quoteIdentifier(col.name)
+                        // ALTER TABLE ADD COLUMN in SQLite requires constant defaults for NOT NULL columns.
+                        // Non-constant defaults (CURRENT_TIMESTAMP, etc.) are rejected. Adding as nullable
+                        // is safe: existing rows get NULL, the server enforces constraints on push.
+                        let hasDefault = col.sqliteDefaultSQL != nil && !col.sqliteDefaultSQL!.isEmpty
+                        let isConstantDefault = hasDefault && !isNonConstantDefault(col.sqliteDefaultSQL!)
                         var sql = "ALTER TABLE \(quotedTable) ADD COLUMN \(quotedCol) \(sqlType)"
-                        if !col.nullable && !col.isPrimaryKey {
+                        if !col.nullable && !col.isPrimaryKey && isConstantDefault {
                             sql += " NOT NULL"
                         }
-                        if let defaultSQL = col.sqliteDefaultSQL, !defaultSQL.isEmpty {
-                            sql += " DEFAULT \(defaultSQL)"
+                        if hasDefault && isConstantDefault {
+                            sql += " DEFAULT \(col.sqliteDefaultSQL!)"
                         }
                         try db.execute(sql: sql)
                     }
@@ -101,16 +97,30 @@ final class SchemaManager: @unchecked Sendable {
         }
     }
 
-    private func requiresDestructiveRebuild(localTables: [String], newTableMap: [String: SchemaTable], db: GRDB.Database) throws -> Bool {
-        for localTable in localTables where newTableMap[localTable] == nil {
-            return true
-        }
+    /// Returns true if the SQL default expression is non-constant (not allowed in ALTER TABLE ADD COLUMN).
+    private func isNonConstantDefault(_ sql: String) -> Bool {
+        let upper = sql.uppercased()
+        return upper.contains("CURRENT_TIMESTAMP") ||
+               upper.contains("CURRENT_DATE") ||
+               upper.contains("CURRENT_TIME") ||
+               upper.contains("(")
+    }
+
+    /// Only triggers destructive rebuild when a synced column's type has changed.
+    /// Extra local tables, extra local columns, and removed server columns are all preserved.
+    private func requiresDestructiveRebuild(db: GRDB.Database, newSchema: SchemaResponse) throws -> Bool {
+        let newTableMap = Dictionary(uniqueKeysWithValues: newSchema.tables.map { ($0.tableName, $0) })
         for (tableName, table) in newTableMap {
             guard try db.tableExists(tableName) else { continue }
-            let existingColumns = Set(try db.columns(in: tableName).map(\.name))
-            let newColumns = Set(table.columns.map(\.name))
-            if !existingColumns.isSubset(of: newColumns) {
-                return true
+            let existingColumnTypes = Dictionary(
+                uniqueKeysWithValues: try db.columns(in: tableName).map { ($0.name, $0.type.uppercased()) }
+            )
+            for col in table.columns {
+                guard let localType = existingColumnTypes[col.name] else { continue }
+                let serverType = SQLiteSchema.sqliteType(for: col.logicalType).uppercased()
+                if localType != serverType {
+                    return true
+                }
             }
         }
         return false

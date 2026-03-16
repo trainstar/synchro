@@ -17,9 +17,6 @@ export default defineConfig({
 			social: [
 				{ icon: 'github', label: 'GitHub', href: 'https://github.com/trainstar/synchro' },
 			],
-			editLink: {
-				baseUrl: 'https://github.com/trainstar/synchro/edit/master/docs/src/content/docs/',
-			},
 			head: [
 				{
 					tag: 'script',
@@ -41,6 +38,7 @@ export default defineConfig({
 						{ label: 'Configuration', slug: 'server/configuration' },
 						{ label: 'Architecture', slug: 'server/architecture' },
 						{ label: 'Deployment', slug: 'server/deployment' },
+						{ label: 'Seed Database', slug: 'server/seed-database' },
 						{ label: 'Type Reference', slug: 'server/types' },
 					],
 				},

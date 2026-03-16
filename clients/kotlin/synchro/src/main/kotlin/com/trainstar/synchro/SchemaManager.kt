@@ -15,11 +15,7 @@ class SchemaManager(private val database: SynchroDatabase) {
             return schema
         }
 
-        if (localVersion == 0L) {
-            createSyncedTables(schema)
-        } else {
-            migrateSchema(schema)
-        }
+        migrateSchema(schema)
 
         database.writeTransaction { db ->
             SynchroMeta.setInt64(db, MetaKey.SCHEMA_VERSION, schema.schemaVersion)
@@ -81,8 +77,13 @@ class SchemaManager(private val database: SynchroDatabase) {
                             val sqlType = SQLiteSchema.sqliteType(col.logicalType)
                             val quotedTable = SQLiteHelpers.quoteIdentifier(table.tableName)
                             val quotedCol = SQLiteHelpers.quoteIdentifier(col.name)
-                            val defaultClause = if (col.sqliteDefaultSQL.isNullOrEmpty()) "" else " DEFAULT ${col.sqliteDefaultSQL}"
-                            val notNullClause = if (!col.nullable && !col.isPrimaryKey) " NOT NULL" else ""
+                            // ALTER TABLE ADD COLUMN in SQLite requires constant defaults for NOT NULL columns.
+                            // Non-constant defaults (CURRENT_TIMESTAMP, etc.) are rejected. Adding as nullable
+                            // is safe: existing rows get NULL, the server enforces constraints on push.
+                            val hasDefault = !col.sqliteDefaultSQL.isNullOrEmpty()
+                            val isConstantDefault = hasDefault && !isNonConstantDefault(col.sqliteDefaultSQL!!)
+                            val notNullClause = if (!col.nullable && !col.isPrimaryKey && isConstantDefault) " NOT NULL" else ""
+                            val defaultClause = if (isConstantDefault) " DEFAULT ${col.sqliteDefaultSQL}" else ""
                             db.execSQL("ALTER TABLE $quotedTable ADD COLUMN $quotedCol $sqlType$notNullClause$defaultClause")
                         }
                     }
@@ -97,38 +98,44 @@ class SchemaManager(private val database: SynchroDatabase) {
         }
     }
 
+    /** Returns true if the SQL default expression is non-constant (not allowed in ALTER TABLE ADD COLUMN). */
+    private fun isNonConstantDefault(sql: String): Boolean {
+        val upper = sql.uppercase()
+        return "CURRENT_TIMESTAMP" in upper ||
+               "CURRENT_DATE" in upper ||
+               "CURRENT_TIME" in upper ||
+               "(" in upper
+    }
+
+    /**
+     * Only triggers destructive rebuild when a synced column's type has changed.
+     * Extra local tables, extra local columns, and removed server columns are all preserved.
+     */
     private fun requiresDestructiveRebuild(db: android.database.sqlite.SQLiteDatabase, newSchema: SchemaResponse): Boolean {
         val newTableMap = newSchema.tables.associateBy { it.tableName }
-        db.rawQuery(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE '_synchro_%'",
-            null
-        ).use { cursor ->
-            while (cursor.moveToNext()) {
-                if (newTableMap[cursor.getString(0)] == null) {
-                    return true
-                }
-            }
-        }
 
         for ((tableName, table) in newTableMap) {
             val tableExists = db.rawQuery(
                 "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
                 arrayOf(tableName)
             ).use { it.moveToFirst() }
-            if (!tableExists) {
-                continue
-            }
+            if (!tableExists) continue
 
-            val existingColumns = mutableSetOf<String>()
+            val existingColumnTypes = mutableMapOf<String, String>()
             db.rawQuery("PRAGMA table_info(${SQLiteHelpers.quoteIdentifier(tableName)})", null).use { cursor ->
                 val nameIdx = cursor.getColumnIndex("name")
+                val typeIdx = cursor.getColumnIndex("type")
                 while (cursor.moveToNext()) {
-                    existingColumns.add(cursor.getString(nameIdx))
+                    existingColumnTypes[cursor.getString(nameIdx)] = cursor.getString(typeIdx).uppercase()
                 }
             }
-            val newColumns = table.columns.map { it.name }.toSet()
-            if (!existingColumns.all { it in newColumns }) {
-                return true
+
+            for (col in table.columns) {
+                val localType = existingColumnTypes[col.name] ?: continue
+                val serverType = SQLiteSchema.sqliteType(col.logicalType).uppercase()
+                if (localType != serverType) {
+                    return true
+                }
             }
         }
 

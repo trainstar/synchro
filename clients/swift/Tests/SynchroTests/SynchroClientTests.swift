@@ -14,6 +14,78 @@ final class SynchroClientTests: XCTestCase {
         )
     }
 
+    func testClientInitCreatesDatabase() throws {
+        let config = makeConfig()
+        let client = try SynchroClient(config: config)
+
+        let rows = try client.query("SELECT name FROM sqlite_master WHERE type='table'", params: nil)
+        let tableNames = rows.map { $0["name"] as! String }
+        XCTAssertTrue(tableNames.contains("_synchro_pending_changes"))
+        XCTAssertTrue(tableNames.contains("_synchro_meta"))
+
+        try client.close()
+    }
+
+    func testCoreSQL() throws {
+        let config = makeConfig()
+        let client = try SynchroClient(config: config)
+
+        try client.createTable("local_notes", columns: [
+            ColumnDef(name: "id", type: "TEXT", nullable: false, primaryKey: true),
+            ColumnDef(name: "body", type: "TEXT"),
+        ])
+
+        let result = try client.execute(
+            "INSERT INTO local_notes (id, body) VALUES (?, ?)",
+            params: ["n1", "hello"]
+        )
+        XCTAssertEqual(result.rowsAffected, 1)
+
+        let rows = try client.query("SELECT * FROM local_notes WHERE id = ?", params: ["n1"])
+        XCTAssertEqual(rows.count, 1)
+        XCTAssertEqual(rows[0]["body"] as? String, "hello")
+
+        let one = try client.queryOne("SELECT * FROM local_notes WHERE id = ?", params: ["n1"])
+        XCTAssertNotNil(one)
+
+        try client.close()
+    }
+
+    func testBatchExecution() throws {
+        let config = makeConfig()
+        let client = try SynchroClient(config: config)
+
+        try client.createTable("orders", columns: [
+            ColumnDef(name: "id", type: "TEXT", nullable: false, primaryKey: true),
+            ColumnDef(name: "value", type: "INTEGER"),
+        ])
+
+        let total = try client.executeBatch([
+            SQLStatement(sql: "INSERT INTO orders (id, value) VALUES (?, ?)", params: ["a", 1]),
+            SQLStatement(sql: "INSERT INTO orders (id, value) VALUES (?, ?)", params: ["b", 2]),
+            SQLStatement(sql: "INSERT INTO orders (id, value) VALUES (?, ?)", params: ["c", 3]),
+        ])
+        XCTAssertEqual(total, 3)
+
+        let rows = try client.query("SELECT COUNT(*) as cnt FROM orders", params: nil)
+        XCTAssertEqual(rows[0]["cnt"] as? Int64, 3)
+
+        try client.close()
+    }
+
+    func testMetaTablesInitialized() throws {
+        let config = makeConfig()
+        let client = try SynchroClient(config: config)
+
+        let lockRow = try client.queryOne("SELECT value FROM _synchro_meta WHERE key = 'sync_lock'", params: nil)
+        XCTAssertEqual(lockRow?["value"] as? String, "0")
+
+        let cpRow = try client.queryOne("SELECT value FROM _synchro_meta WHERE key = 'checkpoint'", params: nil)
+        XCTAssertEqual(cpRow?["value"] as? String, "0")
+
+        try client.close()
+    }
+
     func testCreateIndex() throws {
         let config = makeConfig()
         let client = try SynchroClient(config: config)
