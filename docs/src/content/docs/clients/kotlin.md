@@ -1,22 +1,25 @@
-# Kotlin / Android
+---
+title: "Kotlin / Android"
+description: "Kotlin SDK for Android with SQLiteOpenHelper-backed sync."
+---
 
 ## Installation
 
-=== "Gradle (Kotlin DSL)"
+### Gradle (Kotlin DSL)
 
-    ```kotlin
-    dependencies {
-        implementation("fit.trainstar:synchro:0.1.0")
-    }
-    ```
+```kotlin
+dependencies {
+    implementation("fit.trainstar:synchro:0.1.0")
+}
+```
 
-=== "Gradle (Groovy)"
+### Gradle (Groovy)
 
-    ```groovy
-    dependencies {
-        implementation 'fit.trainstar:synchro:0.1.0'
-    }
-    ```
+```groovy
+dependencies {
+    implementation 'fit.trainstar:synchro:0.1.0'
+}
+```
 
 **Android:** minSdk 24, compileSdk 34
 
@@ -52,8 +55,9 @@ val client = SynchroClient(config, context)
 | `pushBatchSize` | `Int` | `100` | Pending changes per push batch (validated 1--1000) |
 | `snapshotPageSize` | `Int` | `100` | Rows per snapshot page (validated 1--1000) |
 
-!!! note "Validation"
-    `pullPageSize`, `pushBatchSize`, and `snapshotPageSize` are validated at construction time. An `IllegalArgumentException` is thrown if any value is outside the 1--1000 range.
+:::note[Validation]
+`pullPageSize`, `pushBatchSize`, and `snapshotPageSize` are validated at construction time. An `IllegalArgumentException` is thrown if any value is outside the 1--1000 range.
+:::
 
 ## Core Usage
 
@@ -85,8 +89,9 @@ val result = client.execute(
 // result.rowsAffected == 1
 ```
 
-!!! info "CDC triggers track writes automatically"
-    Any INSERT, UPDATE, or DELETE on a synced table is captured by SQLite triggers and queued for push. No special write API is needed.
+:::note[CDC triggers track writes automatically]
+Any INSERT, UPDATE, or DELETE on a synced table is captured by SQLite triggers and queued for push. No special write API is needed.
+:::
 
 ### Batch Execution
 
@@ -169,14 +174,15 @@ client.stop()
 client.close()
 ```
 
-!!! note "`start()` and `syncNow()` are suspend functions"
-    Both `start()` and `syncNow()` are Kotlin suspend functions. Call them from a coroutine scope:
+:::note[`start()` and `syncNow()` are suspend functions]
+Both `start()` and `syncNow()` are Kotlin suspend functions. Call them from a coroutine scope:
 
-    ```kotlin
-    lifecycleScope.launch {
-        client.start()
-    }
-    ```
+```kotlin
+lifecycleScope.launch {
+    client.start()
+}
+```
+:::
 
 ## Status and Events
 
@@ -231,8 +237,9 @@ val cancellable = client.onSnapshotRequired {
 }
 ```
 
-!!! warning "Snapshot callback is required for recovery"
-    If no `onSnapshotRequired` handler is registered and the server requests a snapshot (due to bucket reassignment, compaction, or data loss), the sync engine will enter an error state. Always register a handler.
+:::caution[Snapshot callback is required for recovery]
+If no `onSnapshotRequired` handler is registered and the server requests a snapshot (due to bucket reassignment, compaction, or data loss), the sync engine will enter an error state. Always register a handler.
+:::
 
 ## Error Handling
 

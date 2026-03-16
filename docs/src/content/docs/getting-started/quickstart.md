@@ -1,4 +1,7 @@
-# Quick Start
+---
+title: "Quick Start"
+description: "Zero to working sync in 15 minutes with Synchro, Go, and PostgreSQL."
+---
 
 Zero to working sync in 15 minutes. This guide walks you through adding Synchro to an existing Go + PostgreSQL application and connecting a client SDK.
 
@@ -25,8 +28,9 @@ go get github.com/trainstar/synchro
 
 Synchro works with your existing tables. The only requirement is a nullable `deleted_at` column for soft-delete tracking.
 
-!!! info "You are describing your existing table, not changing it"
-    Synchro does not generate tables, impose naming conventions, or require a migration framework. You own your schema. The only addition is the `deleted_at` column if you do not already have one.
+:::note[You are describing your existing table, not changing it]
+Synchro does not generate tables, impose naming conventions, or require a migration framework. You own your schema. The only addition is the `deleted_at` column if you do not already have one.
+:::
 
 ```sql
 -- Your existing table
@@ -58,7 +62,7 @@ registry.Register(&synchro.TableConfig{
 })
 ```
 
-That is the minimal registration. `PushPolicy`, `BucketByColumn`, and `BucketPrefix` are inferred from the `OwnerColumn` automatically. See [Configuration](../server/configuration.md) for the full set of options.
+That is the minimal registration. `PushPolicy`, `BucketByColumn`, and `BucketPrefix` are inferred from the `OwnerColumn` automatically. See [Configuration](/synchro/server/configuration/) for the full set of options.
 
 ---
 
@@ -97,8 +101,9 @@ for _, stmt := range synchro.GenerateRLSPolicies(registry) {
 }
 ```
 
-!!! warning "RLS requires a non-superuser connection for push operations"
-    PostgreSQL superusers bypass RLS. Your application's runtime database connection should use a non-superuser role for push authorization to take effect.
+:::caution[RLS requires a non-superuser connection for push operations]
+PostgreSQL superusers bypass RLS. Your application's runtime database connection should use a non-superuser role for push authorization to take effect.
+:::
 
 ---
 
@@ -156,8 +161,9 @@ consumer := wal.NewConsumer(wal.ConsumerConfig{
 go consumer.Start(ctx) // blocks until ctx is cancelled
 ```
 
-!!! note "The connection string must include `replication=database`"
-    This enables the PostgreSQL replication protocol. Use a separate connection string from your application pool.
+:::note[The connection string must include `replication=database`]
+This enables the PostgreSQL replication protocol. Use a separate connection string from your application pool.
+:::
 
 ---
 
@@ -184,58 +190,58 @@ ALTER PUBLICATION synchro_pub ADD TABLE comments, categories;
 
 ## 9. Connect a Client
 
-=== "Swift"
+### Swift
 
-    ```swift
-    let client = try SynchroClient(config: SynchroConfig(
-        dbPath: "synchro.db",
-        serverURL: URL(string: "https://api.example.com")!,
-        authProvider: { await getToken() },
-        clientID: "device-123",
-        appVersion: "1.0.0"
-    ))
-    try await client.start()
+```swift
+let client = try SynchroClient(config: SynchroConfig(
+    dbPath: "synchro.db",
+    serverURL: URL(string: "https://api.example.com")!,
+    authProvider: { await getToken() },
+    clientID: "device-123",
+    appVersion: "1.0.0"
+))
+try await client.start()
 
-    let tasks = try client.query(
-        "SELECT * FROM tasks ORDER BY created_at DESC"
-    )
-    ```
+let tasks = try client.query(
+    "SELECT * FROM tasks ORDER BY created_at DESC"
+)
+```
 
-=== "Kotlin"
+### Kotlin
 
-    ```kotlin
-    val client = SynchroClient(SynchroConfig(
-        dbPath = "synchro.db",
-        serverURL = "https://api.example.com",
-        authProvider = { getToken() },
-        clientID = "device-123",
-        appVersion = "1.0.0"
-    ), context)
-    client.start()
+```kotlin
+val client = SynchroClient(SynchroConfig(
+    dbPath = "synchro.db",
+    serverURL = "https://api.example.com",
+    authProvider = { getToken() },
+    clientID = "device-123",
+    appVersion = "1.0.0"
+), context)
+client.start()
 
-    val tasks = client.query(
-        "SELECT * FROM tasks ORDER BY created_at DESC"
-    )
-    ```
+val tasks = client.query(
+    "SELECT * FROM tasks ORDER BY created_at DESC"
+)
+```
 
-=== "React Native"
+### React Native
 
-    ```typescript
-    import { SynchroClient } from '@trainstar/synchro-react-native';
+```typescript
+import { SynchroClient } from '@trainstar/synchro-react-native';
 
-    const client = new SynchroClient({
-        dbPath: 'synchro.db',
-        serverURL: 'https://api.example.com',
-        authProvider: async () => await getToken(),
-        clientID: 'device-123',
-        appVersion: '1.0.0',
-    });
-    await client.start();
+const client = new SynchroClient({
+    dbPath: 'synchro.db',
+    serverURL: 'https://api.example.com',
+    authProvider: async () => await getToken(),
+    clientID: 'device-123',
+    appVersion: '1.0.0',
+});
+await client.start();
 
-    const tasks = await client.query(
-        'SELECT * FROM tasks ORDER BY created_at DESC'
-    );
-    ```
+const tasks = await client.query(
+    'SELECT * FROM tasks ORDER BY created_at DESC'
+);
+```
 
 The client SDK handles registration, schema sync, snapshot bootstrap, and the ongoing push/pull loop automatically. Write to your local SQLite tables with normal SQL -- CDC triggers capture changes and queue them for push.
 
@@ -243,6 +249,6 @@ The client SDK handles registration, schema sync, snapshot bootstrap, and the on
 
 ## Next Steps
 
-- [Core Concepts](concepts.md) -- Understand how WAL capture, buckets, checkpoints, and conflict resolution work together.
-- [Configuration](../server/configuration.md) -- Full reference for `TableConfig`, `Config`, hooks, middleware, and advanced options.
-- [API Reference](../protocol/api-reference.md) -- Wire protocol specification for building custom clients.
+- [Core Concepts](/synchro/getting-started/concepts/) -- Understand how WAL capture, buckets, checkpoints, and conflict resolution work together.
+- [Configuration](/synchro/server/configuration/) -- Full reference for `TableConfig`, `Config`, hooks, middleware, and advanced options.
+- [API Reference](/synchro/protocol/api-reference/) -- Wire protocol specification for building custom clients.

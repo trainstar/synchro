@@ -23,8 +23,10 @@ clients/kotlin/**/build/
 # React Native artifacts
 clients/react-native/example/artifacts/
 
-# MkDocs build output
-site/
+# Docs build output
+docs/node_modules/
+docs/dist/
+docs/.astro/
 
 # Local-only
 .ignore/

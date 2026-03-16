@@ -1,4 +1,7 @@
-# Type Reference
+---
+title: "Type Reference"
+description: "PostgreSQL to SQLite type mapping, supported and unsupported types, and default value portability."
+---
 
 ## Supported Types
 
@@ -43,8 +46,9 @@ Synchro maps PostgreSQL column types to a logical type system, which client SDKs
 | Domains | *(base type)* | *(base type)* | Resolved to underlying type |
 | `halfvec(n)` | `string` | `TEXT` | pgvector half-precision vector |
 
-!!! info "Enum and domain resolution"
-    When Synchro encounters a column type not in the core mapping, it queries `pg_type` to check if the type is a user-defined enum (mapped to `string`) or a domain (resolved to its base type and re-mapped). If neither, the column is rejected as unsupported.
+:::note[Enum and domain resolution]
+When Synchro encounters a column type not in the core mapping, it queries `pg_type` to check if the type is a user-defined enum (mapped to `string`) or a domain (resolved to its base type and re-mapped). If neither, the column is rejected as unsupported.
+:::
 
 ---
 
@@ -61,8 +65,9 @@ These PostgreSQL types are not supported for sync. Using them on a synced table 
 | XML | `xml` | Use `json`/`jsonb` instead |
 | Range | `int4range`, `tsrange`, `daterange` | No SQLite equivalent |
 
-!!! tip "Workaround for unsupported types"
-    If you need a column with an unsupported type on a synced table, store it in a supported type and convert at the application layer. For example, store `inet` as `text`, or store `int4range` as two separate `integer` columns.
+:::tip[Workaround for unsupported types]
+If you need a column with an unsupported type on a synced table, store it in a supported type and convert at the application layer. For example, store `inet` as `text`, or store `int4range` as two separate `integer` columns.
+:::
 
 ---
 
@@ -130,8 +135,9 @@ Not all PostgreSQL defaults can be replicated to SQLite. The schema endpoint cla
 | Sequence | `DEFAULT nextval(...)` | No | Server-only, omitted locally |
 | Expression | `DEFAULT (now() + interval '30 days')` | No | Server-only, omitted locally |
 
-!!! warning "Non-portable defaults on NOT NULL columns"
-    If a push-enabled table has a `NOT NULL` column with a `server_only` default and no client-side default, inserts from the client will fail. Either make the column nullable, add a portable default, or list it in `ProtectedColumns` so clients never write to it.
+:::caution[Non-portable defaults on NOT NULL columns]
+If a push-enabled table has a `NOT NULL` column with a `server_only` default and no client-side default, inserts from the client will fail. Either make the column nullable, add a portable default, or list it in `ProtectedColumns` so clients never write to it.
+:::
 
 ### Schema Endpoint Response
 
@@ -165,8 +171,9 @@ The `/sync/schema` endpoint returns `default_kind` and `sqlite_default_sql` for 
 | `CHECK` | Enforced | Not enforced | Server validates on push |
 | `DEFAULT` | Enforced | Portable only | See portability matrix above |
 
-!!! info "Foreign keys on the client"
-    Client SDKs do not create foreign key constraints. The client database is a local cache of server-authoritative data. Referential integrity is enforced by the server on push, and the sync protocol's dependency ordering ensures parent records arrive before children during pull and snapshot.
+:::note[Foreign keys on the client]
+Client SDKs do not create foreign key constraints. The client database is a local cache of server-authoritative data. Referential integrity is enforced by the server on push, and the sync protocol's dependency ordering ensures parent records arrive before children during pull and snapshot.
+:::
 
 ### Protected Columns
 

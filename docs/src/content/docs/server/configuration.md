@@ -1,7 +1,11 @@
-# Configuration
+---
+title: "Configuration"
+description: "Full reference for TableConfig, Engine setup, hooks, middleware, and advanced options."
+---
 
-!!! tip "What does NOT change"
-    Your application routes, your ORM, your existing queries, your auth middleware — all stay the same. Synchro mounts alongside your existing server.
+:::tip[What does NOT change]
+Your application routes, your ORM, your existing queries, your auth middleware — all stay the same. Synchro mounts alongside your existing server.
+:::
 
 ---
 
@@ -71,8 +75,9 @@ registry.Register(&synchro.TableConfig{
 | `AllowGlobalRead` | No | `false` | Adds global-read RLS behavior for null-owner rows |
 | `BucketFunction` | No | `""` | Optional SQL bucket resolver function override |
 
-!!! info "Default protected columns"
-    The following columns are **always** protected and cannot be written by clients: `id`, `created_at`, `updated_at`, `deleted_at`, the owner column, and the parent FK column.
+:::note[Default protected columns]
+The following columns are **always** protected and cannot be written by clients: `id`, `created_at`, `updated_at`, `deleted_at`, the owner column, and the parent FK column.
+:::
 
 ### Validation Rules
 
@@ -372,23 +377,23 @@ r.Route("/sync", func(r chi.Router) {
 
 Synchro handlers read the user ID from context via `handler.UserIDFromContext(ctx)`. You must inject it.
 
-=== "Built-in header middleware (development)"
+### Built-in header middleware (development)
 
-    ```go
-    wrapped := handler.UserIDMiddleware("X-User-ID", mux)
-    ```
+```go
+wrapped := handler.UserIDMiddleware("X-User-ID", mux)
+```
 
-=== "Custom auth middleware (production)"
+### Custom auth middleware (production)
 
-    ```go
-    func authMiddleware(next http.Handler) http.Handler {
-        return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-            userID := extractUserIDFromJWT(r) // your auth logic
-            ctx := handler.WithUserID(r.Context(), userID)
-            next.ServeHTTP(w, r.WithContext(ctx))
-        })
-    }
-    ```
+```go
+func authMiddleware(next http.Handler) http.Handler {
+    return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+        userID := extractUserIDFromJWT(r) // your auth logic
+        ctx := handler.WithUserID(r.Context(), userID)
+        next.ServeHTTP(w, r.WithContext(ctx))
+    })
+}
+```
 
 ### Version Check Middleware
 
@@ -408,27 +413,27 @@ h := handler.New(engine, handler.WithDefaultRetryAfter(10)) // 10 seconds
 
 For application-level backpressure (rate limiting, maintenance mode), use the middleware. The consuming app provides the policy:
 
-=== "Rate limiting (429)"
+### Rate limiting (429)
 
-    ```go
-    wrapped := handler.RetryAfterMiddleware(func(r *http.Request) (bool, int, int) {
-        if rateLimiter.IsExceeded(r) {
-            return true, 429, 60
-        }
-        return false, 0, 0
-    }, mux)
-    ```
+```go
+wrapped := handler.RetryAfterMiddleware(func(r *http.Request) (bool, int, int) {
+    if rateLimiter.IsExceeded(r) {
+        return true, 429, 60
+    }
+    return false, 0, 0
+}, mux)
+```
 
-=== "Maintenance mode (503)"
+### Maintenance mode (503)
 
-    ```go
-    wrapped := handler.RetryAfterMiddleware(func(r *http.Request) (bool, int, int) {
-        if maintenanceMode {
-            return true, 503, 300
-        }
-        return false, 0, 0
-    }, mux)
-    ```
+```go
+wrapped := handler.RetryAfterMiddleware(func(r *http.Request) (bool, int, int) {
+    if maintenanceMode {
+        return true, 503, 300
+    }
+    return false, 0, 0
+}, mux)
+```
 
 Both the HTTP `Retry-After` header and a `retry_after` field in the JSON body are set, so clients can use either.
 
@@ -471,8 +476,9 @@ CREATE PUBLICATION synchro_pub FOR TABLE
 ALTER SYSTEM SET wal_level = 'logical';
 ```
 
-!!! note
-    The consumer creates the replication slot automatically on first start.
+:::note
+The consumer creates the replication slot automatically on first start.
+:::
 
 ---
 
