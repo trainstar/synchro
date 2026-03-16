@@ -1,4 +1,7 @@
-# Deployment Guide
+---
+title: "Deployment Guide"
+description: "PostgreSQL requirements, synchrod reference server, deployment modes, and production checklist."
+---
 
 ## PostgreSQL Requirements
 
@@ -20,8 +23,9 @@ Recommended settings:
 | `max_replication_slots` | 1 | 4+ | One per WAL consumer instance |
 | `max_wal_senders` | 1 | 4+ | One per replication connection |
 
-!!! warning "Restart required"
-    Changing `wal_level` requires a full PostgreSQL restart. A reload is not sufficient. Plan this during a maintenance window.
+:::caution[Restart required]
+Changing `wal_level` requires a full PostgreSQL restart. A reload is not sufficient. Plan this during a maintenance window.
+:::
 
 ### Publication
 
@@ -33,11 +37,12 @@ CREATE PUBLICATION synchro_pub FOR TABLE tasks, comments, categories;
 
 The `synchrod` reference server creates the publication automatically on startup if it does not exist. When embedding the library, you must create it manually or as part of your migration pipeline.
 
-!!! tip "Adding tables later"
-    To add a table to an existing publication:
-    ```sql
-    ALTER PUBLICATION synchro_pub ADD TABLE new_table;
-    ```
+:::tip[Adding tables later]
+To add a table to an existing publication:
+```sql
+ALTER PUBLICATION synchro_pub ADD TABLE new_table;
+```
+:::
 
 ### Replication Slot
 
@@ -79,8 +84,9 @@ bin/synchrod
 
 *One of `JWT_SECRET` or `JWKS_URL` is required for authentication. If neither is set, `synchrod` falls back to the `X-User-ID` header (development only).
 
-!!! danger "Do not use X-User-ID in production"
-    The `X-User-ID` header fallback has no authentication. It exists for local development only. Always configure `JWT_SECRET` or `JWKS_URL` in production.
+:::danger[Do not use X-User-ID in production]
+The `X-User-ID` header fallback has no authentication. It exists for local development only. Always configure `JWT_SECRET` or `JWKS_URL` in production.
+:::
 
 ### Endpoints
 
@@ -117,32 +123,32 @@ graph TB
 
 **Use when:** early stage, low-to-medium write volume, simplicity is the priority.
 
-=== "Go"
+### Go
 
-    ```go
-    // In your main application
-    engine, err := synchro.NewEngine(synchro.Config{
-        DB:       db,
-        Registry: registry,
-        Logger:   logger,
-    })
+```go
+// In your main application
+engine, err := synchro.NewEngine(synchro.Config{
+    DB:       db,
+    Registry: registry,
+    Logger:   logger,
+})
 
-    // Start WAL consumer in-process
-    consumer := wal.NewConsumer(wal.ConsumerConfig{
-        ConnString:      replicationURL,
-        SlotName:        "synchro_slot",
-        PublicationName: "synchro_pub",
-        Registry:        registry,
-        Assigner:        synchro.NewJoinResolverWithDB(registry, db),
-        ChangelogDB:     db,
-        Logger:          logger,
-    })
-    go consumer.Start(ctx)
+// Start WAL consumer in-process
+consumer := wal.NewConsumer(wal.ConsumerConfig{
+    ConnString:      replicationURL,
+    SlotName:        "synchro_slot",
+    PublicationName: "synchro_pub",
+    Registry:        registry,
+    Assigner:        synchro.NewJoinResolverWithDB(registry, db),
+    ChangelogDB:     db,
+    Logger:          logger,
+})
+go consumer.Start(ctx)
 
-    // Mount sync routes alongside your API
-    h := handler.New(engine)
-    mux.Handle("/sync/", authMiddleware(h.Routes()))
-    ```
+// Mount sync routes alongside your API
+h := handler.New(engine)
+mux.Handle("/sync/", authMiddleware(h.Routes()))
+```
 
 **Tradeoffs:**
 
@@ -217,8 +223,9 @@ graph TB
 | Independent resource allocation | Cross-DB consistency is eventual |
 | Read replicas for pull scale-out | Higher operational complexity |
 
-!!! info "Same library, same protocol"
-    All three modes use the same Synchro library and the same client SDKs. Moving between modes is a configuration change, not a rewrite.
+:::note[Same library, same protocol]
+All three modes use the same Synchro library and the same client SDKs. Moving between modes is a configuration change, not a rewrite.
+:::
 
 ---
 
@@ -258,5 +265,6 @@ graph TB
 - [ ] Tested restore procedure for sync infrastructure tables
 - [ ] Replication slot recreation documented for disaster recovery
 
-!!! warning "Replication slot retention"
-    An inactive replication slot causes PostgreSQL to retain WAL segments indefinitely, which can fill disk. Monitor `pg_replication_slots` and drop orphaned slots.
+:::caution[Replication slot retention]
+An inactive replication slot causes PostgreSQL to retain WAL segments indefinitely, which can fill disk. Monitor `pg_replication_slots` and drop orphaned slots.
+:::

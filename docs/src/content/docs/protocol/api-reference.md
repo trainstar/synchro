@@ -1,4 +1,7 @@
-# API Reference
+---
+title: "API Reference"
+description: "Wire protocol specification for the Synchro sync API endpoints."
+---
 
 All endpoints accept and return `application/json`. Authentication is handled by the consuming application. Synchro expects a user ID in request context for `register`, `pull`, `push`, and `snapshot`.
 
@@ -17,7 +20,7 @@ All endpoints accept and return `application/json`. Authentication is handled by
 
 ---
 
-## POST /sync/register { #post-syncregister }
+## POST /sync/register
 
 Registers a client device for sync. Upserts on `(user_id, client_id)`. On first registration, the client is subscribed to `["user:<user_id>", "global"]` buckets.
 
@@ -77,7 +80,7 @@ Returned when `app_version` is below the server's `MinClientVersion`.
 
 ---
 
-## POST /sync/pull { #post-syncpull }
+## POST /sync/pull
 
 Retrieves incremental changes for the client after its checkpoint. `pull` is not the bootstrap endpoint. Fresh clients and stale clients rebuild through `POST /sync/snapshot`.
 
@@ -191,7 +194,7 @@ Pull(checkpoint=185)  -> changes[...], checkpoint=192, has_more=false
 
 ---
 
-## POST /sync/push { #post-syncpush }
+## POST /sync/push
 
 Pushes local changes from the client to the server. All changes are applied inside a single database transaction under RLS context.
 
@@ -303,12 +306,13 @@ Pushes local changes from the client to the server. All changes are applied insi
 | `rejected_terminal` | The write is invalid and should be removed from the local queue |
 | `rejected_retryable` | The write should remain queued and be retried later |
 
-!!! info "Transaction semantics"
-    All push changes are applied inside a single database transaction with RLS context set via `SET LOCAL app.user_id`. If the transaction fails, no changes are committed.
+:::note[Transaction semantics]
+All push changes are applied inside a single database transaction with RLS context set via `SET LOCAL app.user_id`. If the transaction fails, no changes are committed.
+:::
 
 ---
 
-## POST /sync/snapshot { #post-syncsnapshot }
+## POST /sync/snapshot
 
 Reads a full snapshot for bootstrap or local rebuild. Snapshot pages are stateless except for the cursor the client sends back.
 
@@ -383,8 +387,9 @@ The server captures a snapshot checkpoint once at the start of the flow. That ch
 
 ### Snapshot Flow
 
-!!! tip "Bootstrap sequence"
-    New clients follow this flow before switching to incremental pull.
+:::tip[Bootstrap sequence]
+New clients follow this flow before switching to incremental pull.
+:::
 
 ```text
 1. POST /sync/register
@@ -398,7 +403,7 @@ The server captures a snapshot checkpoint once at the start of the flow. That ch
 
 ---
 
-## GET /sync/tables { #get-synctables }
+## GET /sync/tables
 
 Returns sync metadata for all registered tables. No authentication required.
 
@@ -431,12 +436,13 @@ Returns sync metadata for all registered tables. No authentication required.
 }
 ```
 
-!!! note
-    Clients use this to understand push ordering and pull-only vs pushable tables. The `/sync/schema` endpoint remains the authoritative source for local table creation.
+:::note
+Clients use this to understand push ordering and pull-only vs pushable tables. The `/sync/schema` endpoint remains the authoritative source for local table creation.
+:::
 
 ---
 
-## GET /sync/schema { #get-syncschema }
+## GET /sync/schema
 
 Returns the server-authoritative schema contract for local table creation and migration.
 
@@ -492,12 +498,13 @@ Returns the server-authoritative schema contract for local table creation and mi
 | `sqlite_default_sql` | `string?` | SQLite-safe default expression when `default_kind=portable` |
 | `is_primary_key` | `bool` | Whether the column is part of the primary key |
 
-!!! warning "Client-side defaults"
-    `sqlite_default_sql` is the only default expression client SDKs should use when generating local SQLite tables. `server_only` defaults are informative only and cannot be translated locally.
+:::caution[Client-side defaults]
+`sqlite_default_sql` is the only default expression client SDKs should use when generating local SQLite tables. `server_only` defaults are informative only and cannot be translated locally.
+:::
 
 ---
 
-## Error Responses { #error-responses }
+## Error Responses
 
 Most errors return a JSON body with an `error` field.
 
@@ -531,8 +538,9 @@ Most errors return a JSON body with an `error` field.
 }
 ```
 
-!!! tip "Retry behavior"
-    Clients should respect the `Retry-After` header value (in seconds) before retrying. SDKs implement exponential backoff with this value as the minimum delay.
+:::tip[Retry behavior]
+Clients should respect the `Retry-After` header value (in seconds) before retrying. SDKs implement exponential backoff with this value as the minimum delay.
+:::
 
 ### Schema Mismatch (409)
 
@@ -545,5 +553,6 @@ Most errors return a JSON body with an `error` field.
 }
 ```
 
-!!! info "Schema recovery"
-    When a client receives a `409`, it should re-fetch `GET /sync/schema`, apply any local migrations, and retry the original request with the updated `schema_version` and `schema_hash`.
+:::note[Schema recovery]
+When a client receives a `409`, it should re-fetch `GET /sync/schema`, apply any local migrations, and retry the original request with the updated `schema_version` and `schema_hash`.
+:::

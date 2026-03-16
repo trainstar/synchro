@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/assets/synchro-logo.svg" alt="Synchro" width="280"><br><br>
+  <img src="docs/public/logo.svg" alt="Synchro" width="280"><br><br>
   <a href="https://github.com/trainstar/synchro/actions/workflows/release.yml"><img src="https://img.shields.io/github/actions/workflow/status/trainstar/synchro/release.yml?branch=master&event=workflow_dispatch&label=release&logo=github" alt="Release"></a>
   <a href="https://pkg.go.dev/github.com/trainstar/synchro"><img src="https://img.shields.io/github/go-mod/go-version/trainstar/synchro?logo=go&logoColor=white" alt="Go"></a>
   <a href="https://pkg.go.dev/github.com/trainstar/synchro"><img src="https://pkg.go.dev/badge/github.com/trainstar/synchro.svg" alt="Go Reference"></a>
@@ -16,24 +16,33 @@
 
 ## How It Works
 
-```
- Phone A            Server (Go + PostgreSQL)           Phone B
- ───────            ───────────────────────            ───────
-    │                                                     │
-    │  INSERT INTO tasks ...                              │
-    │  (writes to local SQLite)                           │
-    │                                                     │
-    ├──── push ────►  WAL detects change                  │
-    │                 writes to changelog                  │
-    │                 resolves conflicts (LWW)             │
-    │                                                     │
-    │                 changelog entry ready  ────pull────► │
-    │                                        applies to   │
-    │                                        local SQLite  │
-    │                                                     │
+```mermaid
+flowchart LR
+    subgraph Clients
+        direction TB
+        A["Swift\n(SQLite)"]
+        B["Kotlin\n(SQLite)"]
+        C["React Native\n(SQLite)"]
+    end
+
+    subgraph Server["Go Server"]
+        direction TB
+        D[("PostgreSQL")]
+        E["WAL Consumer"]
+        F["Changelog"]
+        D --> E --> F
+    end
+
+    A -- "push (writes)" --> Server
+    B -- "push (writes)" --> Server
+    C -- "push (writes)" --> Server
+
+    Server -- "pull (changes)" --> A
+    Server -- "pull (changes)" --> B
+    Server -- "pull (changes)" --> C
 ```
 
-Clients read and write to a local SQLite database using standard SQL. Synchro syncs changes bidirectionally with your PostgreSQL server in the background. WAL-based change detection means no triggers, no polling, no custom APIs. Conflicts are resolved automatically using last-writer-wins with configurable strategies.
+Every client reads and writes to a local SQLite database using standard SQL. Synchro syncs changes bidirectionally with your PostgreSQL server in the background. WAL-based change detection means no triggers, no polling, no custom APIs. Conflicts are resolved automatically using last-writer-wins with configurable strategies.
 
 ## Why Synchro
 

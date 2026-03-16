@@ -1,4 +1,18 @@
-# Synchro
+---
+title: "Synchro"
+description: "Offline-first sync between PostgreSQL and native client SDKs"
+template: splash
+hero:
+  tagline: "Offline-first sync between PostgreSQL and native client SDKs for Swift, Kotlin, and React Native."
+  actions:
+    - text: Quick Start
+      link: /synchro/getting-started/quickstart/
+      icon: right-arrow
+    - text: GitHub
+      link: https://github.com/trainstar/synchro
+      variant: minimal
+      icon: external
+---
 
 **Offline-first sync for Go + PostgreSQL.**
 *Your tables. Your server. Minimal changes.*
@@ -25,8 +39,9 @@ To enable sync, add one column:
 ALTER TABLE tasks ADD COLUMN deleted_at TIMESTAMPTZ;
 ```
 
-!!! tip
-    If your tables already have `id`, `created_at`, `updated_at`, and a user ownership column — you may need **zero schema changes**. Just add `deleted_at` for soft deletes.
+:::tip
+If your tables already have `id`, `created_at`, `updated_at`, and a user ownership column — you may need **zero schema changes**. Just add `deleted_at` for soft deletes.
+:::
 
 On the server — register what you already have:
 
@@ -41,50 +56,50 @@ registry.Register(&synchro.TableConfig{
 
 On the client — initialize and use standard SQL:
 
-=== "Swift"
+### Swift
 
-    ```swift
-    let client = try SynchroClient(config: SynchroConfig(
-        dbPath: "synchro.db",
-        serverURL: URL(string: "https://api.example.com")!,
-        authProvider: { await getToken() },
-        clientID: UIDevice.current.identifierForVendor!.uuidString,
-        appVersion: "1.0.0"
-    ))
-    try await client.start()
+```swift
+let client = try SynchroClient(config: SynchroConfig(
+    dbPath: "synchro.db",
+    serverURL: URL(string: "https://api.example.com")!,
+    authProvider: { await getToken() },
+    clientID: UIDevice.current.identifierForVendor!.uuidString,
+    appVersion: "1.0.0"
+))
+try await client.start()
 
-    let rows = try client.query("SELECT * FROM tasks")
-    ```
+let rows = try client.query("SELECT * FROM tasks")
+```
 
-=== "Kotlin"
+### Kotlin
 
-    ```kotlin
-    val client = SynchroClient(SynchroConfig(
-        dbPath = "synchro.db",
-        serverURL = "https://api.example.com",
-        authProvider = { getToken() },
-        clientID = Settings.Secure.getString(contentResolver, Settings.Secure.ANDROID_ID),
-        appVersion = "1.0.0"
-    ), context)
-    client.start()
+```kotlin
+val client = SynchroClient(SynchroConfig(
+    dbPath = "synchro.db",
+    serverURL = "https://api.example.com",
+    authProvider = { getToken() },
+    clientID = Settings.Secure.getString(contentResolver, Settings.Secure.ANDROID_ID),
+    appVersion = "1.0.0"
+), context)
+client.start()
 
-    val rows = client.query("SELECT * FROM tasks")
-    ```
+val rows = client.query("SELECT * FROM tasks")
+```
 
-=== "React Native"
+### React Native
 
-    ```typescript
-    const client = new SynchroClient({
-        dbPath: 'synchro.db',
-        serverURL: 'https://api.example.com',
-        authProvider: async () => await getToken(),
-        clientID: await getUniqueId(),
-        appVersion: '1.0.0',
-    });
-    await client.start();
+```typescript
+const client = new SynchroClient({
+    dbPath: 'synchro.db',
+    serverURL: 'https://api.example.com',
+    authProvider: async () => await getToken(),
+    clientID: await getUniqueId(),
+    appVersion: '1.0.0',
+});
+await client.start();
 
-    const rows = await client.query('SELECT * FROM tasks');
-    ```
+const rows = await client.query('SELECT * FROM tasks');
+```
 
 No special write API. No ORM. No framework lock-in. **Standard SQL on every platform.**
 
@@ -92,13 +107,14 @@ No special write API. No ORM. No framework lock-in. **Standard SQL on every plat
 
 ## What Synchro does NOT require
 
-!!! info
-    - No triggers on your tables
-    - No audit tables or shadow tables
-    - No stored procedures or CDC functions
-    - No special indexes or extensions
-    - No ORM or framework lock-in
-    - No separate service to deploy (unless you want one)
+:::note
+- No triggers on your tables
+- No audit tables or shadow tables
+- No stored procedures or CDC functions
+- No special indexes or extensions
+- No ORM or framework lock-in
+- No separate service to deploy (unless you want one)
+:::
 
 ---
 
@@ -156,118 +172,62 @@ Same library. Same protocol. Same SDKs. Moving between modes is a configuration 
 
 ## Platform SDKs
 
-<div class="grid-cards" markdown>
-
-<div class="card" markdown>
-
 ### Go Server
 
 The sync engine, WAL consumer, and HTTP handlers. Embeds into any `net/http` compatible router.
 
-[Server docs](server/configuration.md){ .md-button }
-
-</div>
-
-<div class="card" markdown>
+[Server docs](/synchro/server/configuration/)
 
 ### Swift / iOS
 
 Native Swift SDK with local SQLite, background sync, and CDC triggers. SwiftPM distribution.
 
-[Swift docs](clients/swift.md){ .md-button }
-
-</div>
-
-<div class="card" markdown>
+[Swift docs](/synchro/clients/swift/)
 
 ### Kotlin / Android
 
 Native Kotlin SDK with local SQLite, background sync, and CDC triggers. Maven Central distribution.
 
-[Kotlin docs](clients/kotlin.md){ .md-button }
-
-</div>
-
-<div class="card" markdown>
+[Kotlin docs](/synchro/clients/kotlin/)
 
 ### React Native
 
 TypeScript SDK bridging to native SQLite on both platforms. npm distribution.
 
-[React Native docs](clients/react-native.md){ .md-button }
-
-</div>
-
-</div>
+[React Native docs](/synchro/clients/react-native/)
 
 ---
 
 ## Feature highlights
 
-<div class="grid-cards" markdown>
-
-<div class="card" markdown>
-
 ### Bidirectional sync
 
 Full push and pull. Clients write locally and sync when connectivity returns.
-
-</div>
-
-<div class="card" markdown>
 
 ### Conflict resolution
 
 LWW with clock skew tolerance, ServerWins, or custom resolvers — per table.
 
-</div>
-
-<div class="card" markdown>
-
 ### RLS authorization
 
 Push writes execute under `SET LOCAL app.user_id`. PostgreSQL enforces access, not your code.
-
-</div>
-
-<div class="card" markdown>
 
 ### Schema governance
 
 Version handshake between client and server. Incompatible clients get a clear upgrade signal.
 
-</div>
-
-<div class="card" markdown>
-
 ### Automatic CDC
 
 WAL-based change detection. No triggers, no polling, no audit tables.
-
-</div>
-
-<div class="card" markdown>
 
 ### Compaction + snapshot
 
 Changelog compaction keeps storage bounded. Snapshot sync for new or stale clients.
 
-</div>
-
-<div class="card" markdown>
-
 ### Column protection
 
 Deny-list filtering prevents clients from overwriting server-controlled columns.
 
-</div>
-
-</div>
-
 ---
 
-<div style="text-align: center; margin: 2rem 0;" markdown>
-
-[Get started](getting-started/quickstart.md){ .md-button .md-button--primary }
-
-</div>
+[Get started](/synchro/getting-started/quickstart/)

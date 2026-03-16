@@ -1,4 +1,7 @@
-# Core Concepts
+---
+title: "Core Concepts"
+description: "How WAL capture, buckets, checkpoints, and conflict resolution work in Synchro."
+---
 
 This page explains the foundational ideas behind Synchro: how changes are captured, how data is partitioned, how clients stay in sync, and how conflicts are resolved.
 
@@ -47,8 +50,9 @@ The default `JoinResolver` uses the registry metadata:
 
 When a client registers, the server computes its bucket subscriptions (typically `["user:<user_id>", "global"]`). During pull, only changelog entries matching the client's subscriptions are returned.
 
-!!! tip "Bucket changes are tracked automatically"
-    If a record's ownership changes (e.g., transferred to another user), the WAL consumer detects the bucket change and emits both a DELETE in the old bucket and an INSERT in the new bucket. Clients in the old bucket see a deletion; clients in the new bucket see the record appear.
+:::tip[Bucket changes are tracked automatically]
+If a record's ownership changes (e.g., transferred to another user), the WAL consumer detects the bucket change and emits both a DELETE in the old bucket and an INSERT in the new bucket. Clients in the old bucket see a deletion; clients in the new bucket see the record appear.
+:::
 
 ---
 
@@ -79,46 +83,46 @@ Conflicts occur when a client pushes a change to a record that was modified on t
 
 Synchro supports three conflict resolution strategies:
 
-=== "LWW (Last-Write-Wins)"
+### LWW (Last-Write-Wins)
 
-    The default strategy. Compares the client's `client_updated_at` timestamp against the server's `updated_at`, adjusting for configurable clock skew tolerance.
+The default strategy. Compares the client's `client_updated_at` timestamp against the server's `updated_at`, adjusting for configurable clock skew tolerance.
 
-    ```go
-    engine, _ := synchro.NewEngine(synchro.Config{
-        DB:                 db,
-        Registry:           registry,
-        ClockSkewTolerance: 5 * time.Second, // favour the client within 5s
-    })
-    ```
+```go
+engine, _ := synchro.NewEngine(synchro.Config{
+    DB:                 db,
+    Registry:           registry,
+    ClockSkewTolerance: 5 * time.Second, // favour the client within 5s
+})
+```
 
-    If the client provides a `base_updated_at` (optimistic concurrency), the resolver first checks whether the server record changed since that base version:
+If the client provides a `base_updated_at` (optimistic concurrency), the resolver first checks whether the server record changed since that base version:
 
-    - **Server unchanged since base** -- Client wins (no true conflict).
-    - **Server changed since base** -- Falls back to timestamp comparison.
+- **Server unchanged since base** -- Client wins (no true conflict).
+- **Server changed since base** -- Falls back to timestamp comparison.
 
-=== "ServerWins"
+### ServerWins
 
-    The server version always wins. Client changes are rejected with a `conflict` status and the current server version is returned so the client can reconcile.
+The server version always wins. Client changes are rejected with a `conflict` status and the current server version is returned so the client can reconcile.
 
-    ```go
-    engine, _ := synchro.NewEngine(synchro.Config{
-        DB:               db,
-        Registry:         registry,
-        ConflictResolver: &synchro.ServerWinsResolver{},
-    })
-    ```
+```go
+engine, _ := synchro.NewEngine(synchro.Config{
+    DB:               db,
+    Registry:         registry,
+    ConflictResolver: &synchro.ServerWinsResolver{},
+})
+```
 
-=== "Custom"
+### Custom
 
-    Implement the `ConflictResolver` interface for domain-specific logic.
+Implement the `ConflictResolver` interface for domain-specific logic.
 
-    ```go
-    type ConflictResolver interface {
-        Resolve(ctx context.Context, conflict Conflict) (Resolution, error)
-    }
-    ```
+```go
+type ConflictResolver interface {
+    Resolve(ctx context.Context, conflict Conflict) (Resolution, error)
+}
+```
 
-    The `Conflict` struct provides full context: table name, record ID, client/server data as JSON, timestamps, and the client's base version.
+The `Conflict` struct provides full context: table name, record ID, client/server data as JSON, timestamps, and the client's base version.
 
 ### Push Flow
 
@@ -174,8 +178,9 @@ graph TD
     F --> G[Client retries request]
 ```
 
-!!! info "No drift"
-    The schema contract is deterministic. Two servers with the same PostgreSQL schema and the same registered tables will always produce the same hash. There is no manual versioning -- the version increments automatically when the schema changes.
+:::note[No drift]
+The schema contract is deterministic. Two servers with the same PostgreSQL schema and the same registered tables will always produce the same hash. There is no manual versioning -- the version increments automatically when the schema changes.
+:::
 
 ---
 
@@ -259,5 +264,6 @@ The pending queue is a local SQLite table that tracks which records have been mo
 3. Sends the hydrated changes to the server.
 4. On success, drains the acknowledged entries from the queue.
 
-!!! note "Soft deletes everywhere"
-    The `BEFORE DELETE` trigger converts hard deletes to soft deletes locally, matching the server convention. The `deleted_at` timestamp is set, and the sync engine pushes this as a delete operation. The server marks the record as deleted and propagates it via the changelog to other clients.
+:::note[Soft deletes everywhere]
+The `BEFORE DELETE` trigger converts hard deletes to soft deletes locally, matching the server convention. The `deleted_at` timestamp is set, and the sync engine pushes this as a delete operation. The server marks the record as deleted and propagates it via the changelog to other clients.
+:::

@@ -1,31 +1,34 @@
-# Swift / iOS
+---
+title: "Swift / iOS"
+description: "Swift SDK for iOS and macOS with GRDB-backed SQLite sync."
+---
 
 ## Installation
 
-=== "Swift Package Manager"
+### Swift Package Manager
 
-    Add to `Package.swift`:
+Add to `Package.swift`:
 
-    ```swift
-    dependencies: [
-        .package(url: "https://github.com/trainstar/synchro.git", from: "0.1.0")
-    ]
-    ```
+```swift
+dependencies: [
+    .package(url: "https://github.com/trainstar/synchro.git", from: "0.1.0")
+]
+```
 
-    Then add `"Synchro"` to your target's dependencies:
+Then add `"Synchro"` to your target's dependencies:
 
-    ```swift
-    .target(
-        name: "MyApp",
-        dependencies: ["Synchro"]
-    )
-    ```
+```swift
+.target(
+    name: "MyApp",
+    dependencies: ["Synchro"]
+)
+```
 
-=== "CocoaPods"
+### CocoaPods
 
-    ```ruby
-    pod 'Synchro', '~> 0.1.0'
-    ```
+```ruby
+pod 'Synchro', '~> 0.1.0'
+```
 
 **Platforms:** iOS 16.0+, macOS 13.0+
 
@@ -89,8 +92,9 @@ let result = try client.execute(
 // result.rowsAffected == 1
 ```
 
-!!! info "CDC triggers track writes automatically"
-    Any INSERT, UPDATE, or DELETE on a synced table is captured by SQLite triggers and queued for push. No special write API is needed.
+:::note[CDC triggers track writes automatically]
+Any INSERT, UPDATE, or DELETE on a synced table is captured by SQLite triggers and queued for push. No special write API is needed.
+:::
 
 ### Batch Execution
 
@@ -209,8 +213,9 @@ let cancel = client.onSnapshotRequired { () async -> Bool in
 }
 ```
 
-!!! warning "Snapshot callback is required for recovery"
-    If no `onSnapshotRequired` handler is registered and the server requests a snapshot (due to bucket reassignment, compaction, or data loss), the sync engine will enter an error state. Always register a handler.
+:::caution[Snapshot callback is required for recovery]
+If no `onSnapshotRequired` handler is registered and the server requests a snapshot (due to bucket reassignment, compaction, or data loss), the sync engine will enter an error state. Always register a handler.
+:::
 
 ## Error Handling
 

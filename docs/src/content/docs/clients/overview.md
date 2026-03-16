@@ -1,4 +1,7 @@
-# Client SDK Overview
+---
+title: "Client SDK Overview"
+description: "Overview of native SDKs for iOS, Android, and React Native with shared interface contracts."
+---
 
 Native SDKs for iOS, Android, and React Native. These are not JavaScript wrappers -- they are native implementations using platform-standard database libraries (GRDB for Swift, Room/SQLiteOpenHelper for Kotlin). Each SDK embeds a full sync engine that handles registration, schema management, CDC-based change tracking, push/pull, conflict resolution, and snapshot recovery.
 
@@ -60,8 +63,9 @@ All SDKs expose the same logical API. Method names and signatures are consistent
 | `alterTable(name, addColumns)` | Add columns to an existing table |
 | `createIndex(table, columns, unique?)` | Create an index on a table |
 
-!!! info "Synced tables are managed automatically"
-    Schema methods are for **local-only** tables (caches, preferences, drafts). Synced tables are created and migrated automatically by the schema manager during `start()`.
+:::note[Synced tables are managed automatically]
+Schema methods are for **local-only** tables (caches, preferences, drafts). Synced tables are created and migrated automatically by the schema manager during `start()`.
+:::
 
 ### Observation
 
@@ -108,8 +112,9 @@ graph LR
 | **AFTER UPDATE** | Any UPDATE on a synced table | `update` operation (or `delete` if `deleted_at` becomes non-null) |
 | **BEFORE DELETE** | Any DELETE on a synced table | Converts hard delete to soft delete (sets `deleted_at`, cancels the DELETE) |
 
-!!! warning "Sync lock prevents self-tracking"
-    During pull processing, the SDK sets a sync lock (`_synchro_meta.sync_lock = '1'`). CDC triggers check this flag and skip recording changes that originate from the server. This prevents pull-applied rows from bouncing back as pushes.
+:::caution[Sync lock prevents self-tracking]
+During pull processing, the SDK sets a sync lock (`_synchro_meta.sync_lock = '1'`). CDC triggers check this flag and skip recording changes that originate from the server. This prevents pull-applied rows from bouncing back as pushes.
+:::
 
 ## Logical Type Mapping
 
@@ -147,5 +152,6 @@ All SDKs share the same configuration parameters and defaults.
 | `pushBatchSize` | Int | `100` | 1--1000 |
 | `snapshotPageSize` | Int | `100` | 1--1000 |
 
-!!! note "Page size capping"
-    `pullPageSize` and `snapshotPageSize` are capped at 1000 by the SDK. Values above 1000 are silently clamped. `pushBatchSize` is validated to be within 1--1000 on Kotlin; on Swift it is passed through (the server enforces the cap).
+:::note[Page size capping]
+`pullPageSize` and `snapshotPageSize` are capped at 1000 by the SDK. Values above 1000 are silently clamped. `pushBatchSize` is validated to be within 1--1000 on Kotlin; on Swift it is passed through (the server enforces the cap).
+:::

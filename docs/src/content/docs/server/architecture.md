@@ -1,4 +1,7 @@
-# Architecture
+---
+title: "Architecture"
+description: "Detailed architecture documentation for the Synchro sync engine."
+---
 
 ## Overview
 

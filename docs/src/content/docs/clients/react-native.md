@@ -1,4 +1,7 @@
-# React Native
+---
+title: "React Native"
+description: "React Native SDK with TurboModule bridge to native Swift and Kotlin sync engines."
+---
 
 ## Installation
 
@@ -45,8 +48,9 @@ await client.initialize();
 | `pushBatchSize` | `number` | `100` | Pending changes per push batch (max 1000) |
 | `snapshotPageSize` | `number` | `100` | Rows per snapshot page (max 1000) |
 
-!!! info "Two-step initialization"
-    The constructor wires up the auth callback bridge. `initialize()` creates the native database and configures the sync engine. All SQL and sync methods require `initialize()` to have completed.
+:::note[Two-step initialization]
+The constructor wires up the auth callback bridge. `initialize()` creates the native database and configures the sync engine. All SQL and sync methods require `initialize()` to have completed.
+:::
 
 ## Core Usage
 
@@ -78,8 +82,9 @@ const result = await client.execute(
 // result.rowsAffected === 1
 ```
 
-!!! info "CDC triggers track writes automatically"
-    Any INSERT, UPDATE, or DELETE on a synced table is captured by SQLite triggers on the native side and queued for push. No special write API is needed.
+:::note[CDC triggers track writes automatically]
+Any INSERT, UPDATE, or DELETE on a synced table is captured by SQLite triggers on the native side and queued for push. No special write API is needed.
+:::
 
 ### Batch Execution
 
@@ -121,8 +126,9 @@ const count = await client.readTransaction(async (tx) => {
 
 The `Transaction` interface exposes `query`, `queryOne`, and `execute` -- the same SQL methods as the top-level client.
 
-!!! warning "Transaction timeout"
-    Transactions are held open on the native side across async bridge calls. If no operation is performed within **5 seconds**, the transaction is automatically rolled back and a `TransactionTimeoutError` is thrown. Keep transactions short and avoid awaiting user interaction inside them.
+:::caution[Transaction timeout]
+Transactions are held open on the native side across async bridge calls. If no operation is performed within **5 seconds**, the transaction is automatically rolled back and a `TransactionTimeoutError` is thrown. Keep transactions short and avoid awaiting user interaction inside them.
+:::
 
 ## Schema (Local-Only Tables)
 
@@ -207,8 +213,9 @@ function TaskList() {
 
 **Returns:** `{ data: Row[], loading: boolean, error: SynchroError | null, refresh: () => void }`
 
-!!! note "Reactive vs one-shot mode"
-    When `tables` is provided and non-empty, `useQuery` uses `client.watch()` for reactive updates. When `tables` is omitted or empty, it performs a single `client.query()` call. Use `refresh()` to manually re-execute a one-shot query.
+:::note[Reactive vs one-shot mode]
+When `tables` is provided and non-empty, `useQuery` uses `client.watch()` for reactive updates. When `tables` is omitted or empty, it performs a single `client.query()` call. Use `refresh()` to manually re-execute a one-shot query.
+:::
 
 ### useSyncStatus
 
@@ -311,8 +318,9 @@ const unsubscribe = client.onSnapshotRequired(async () => {
 });
 ```
 
-!!! warning "Snapshot callback is required for recovery"
-    If no `onSnapshotRequired` handler is registered and the server requests a snapshot (due to bucket reassignment, compaction, or data loss), the sync engine will enter an error state. Always register a handler.
+:::caution[Snapshot callback is required for recovery]
+If no `onSnapshotRequired` handler is registered and the server requests a snapshot (due to bucket reassignment, compaction, or data loss), the sync engine will enter an error state. Always register a handler.
+:::
 
 ## Error Handling
 
