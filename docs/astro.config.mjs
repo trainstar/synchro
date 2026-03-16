@@ -10,6 +10,7 @@ export default defineConfig({
 			title: 'Synchro',
 			logo: {
 				src: './src/assets/logo.svg',
+				replacesTitle: true,
 			},
 			favicon: '/favicon.svg',
 			social: [
