@@ -27,7 +27,9 @@
 	release-swift-local \
 	release-kotlin-local \
 	release-npm-dry-run \
-	clean
+	clean \
+	seed-build \
+	seed-generate
 
 # Local infrastructure defaults.
 DB_HOST ?= 10.0.0.86
@@ -35,6 +37,9 @@ DB_PORT ?= 5432
 DB_NAME ?= synchro_test
 DB_USER ?= postgres
 DB_PASSWORD ?= postgres
+
+# Android SDK (Homebrew install via android-commandlinetools).
+ANDROID_HOME ?= /opt/homebrew/share/android-commandlinetools
 
 # Synchrod test server defaults.
 SYNCHRO_TEST_HOST ?= localhost
@@ -83,6 +88,8 @@ help:
 	@echo "  release-swift-local   - Dry-run subtree split for Swift SDK"
 	@echo "  release-kotlin-local  - Publish Kotlin SDK to mavenLocal"
 	@echo "  release-npm-dry-run   - Dry-run npm pack for React Native SDK"
+	@echo "  seed-build            - Build the synchroseed CLI tool"
+	@echo "  seed-generate         - Generate a seed database from the test server"
 	@echo "  clean                 - Remove local build/test artifacts"
 
 build:
@@ -199,15 +206,15 @@ test-swift: synchrod-test-restart
 	cd clients/swift && $(TEST_ENV) swift test
 
 test-kotlin-unit:
-	cd clients/kotlin && ./gradlew :synchro:test
+	cd clients/kotlin && ANDROID_HOME="$(ANDROID_HOME)" ./gradlew :synchro:test
 
 test-kotlin: synchrod-test-restart
-	cd clients/kotlin && $(TEST_ENV) ./gradlew :synchro:test
+	cd clients/kotlin && ANDROID_HOME="$(ANDROID_HOME)" $(TEST_ENV) ./gradlew :synchro:test
 
 test-kotlin-integration: test-kotlin
 
 test-rn-unit:
-	cd clients/react-native && npm test -- --testPathIgnorePatterns=e2e
+	cd clients/react-native && npm test -- --testPathIgnorePatterns=e2e __mocks__
 
 test-rn-e2e-ios: synchrod-test-restart
 	cd clients/react-native/example && \
@@ -241,6 +248,12 @@ release-kotlin-local:
 
 release-npm-dry-run:
 	cd clients/react-native && npm pack --dry-run
+
+seed-build:
+	go build -o bin/synchroseed ./cmd/synchroseed
+
+seed-generate: seed-build
+	bin/synchroseed -server=$(SYNCHRO_TEST_URL) -jwt-secret=$(SYNCHRO_TEST_JWT_SECRET) -output=seed.db
 
 clean:
 	rm -rf bin/ "$(SYNCHROD_PID_FILE)" "$(SYNCHROD_LOG_FILE)"

@@ -92,6 +92,7 @@ class SynchroModule(reactContext: ReactApplicationContext) :
             val pullPageSize = if (config.hasKey("pullPageSize")) config.getInt("pullPageSize") else 100
             val pushBatchSize = if (config.hasKey("pushBatchSize")) config.getInt("pushBatchSize") else 100
             val snapshotPageSize = if (config.hasKey("snapshotPageSize")) config.getInt("snapshotPageSize") else 100
+            val seedDatabasePath = if (config.hasKey("seedDatabasePath")) config.getString("seedDatabasePath") else null
 
             val synchroConfig = SynchroConfig(
                 dbPath = dbPath,
@@ -118,7 +119,8 @@ class SynchroModule(reactContext: ReactApplicationContext) :
                 maxRetryAttempts = maxRetryAttempts,
                 pullPageSize = pullPageSize,
                 pushBatchSize = pushBatchSize,
-                snapshotPageSize = snapshotPageSize
+                snapshotPageSize = snapshotPageSize,
+                seedDatabasePath = seedDatabasePath
             )
 
             client?.close()

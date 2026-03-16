@@ -66,6 +66,7 @@ export interface SynchroConfig {
   pullPageSize?: number;
   pushBatchSize?: number;
   snapshotPageSize?: number;
+  seedDatabasePath?: string;
 }
 
 export type Unsubscribe = () => void;

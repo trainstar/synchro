@@ -27,8 +27,8 @@ graph TB
         Bridge[TurboModule Bridge]
     end
     subgraph "Native"
-        Swift[Swift SDK<br/>GRDB + SQLite]
-        Kotlin[Kotlin SDK<br/>SQLiteOpenHelper + SQLite]
+        Swift["Swift SDK — GRDB + SQLite"]
+        Kotlin["Kotlin SDK — SQLiteOpenHelper + SQLite"]
     end
     JS --> Bridge
     Bridge --> Swift
