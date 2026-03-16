@@ -38,7 +38,7 @@ When the WAL consumer processes a change, it calls the configured `BucketAssigne
 
 The default `JoinResolver` uses the registry metadata:
 
-- **Tables with an `OwnerColumn`** -- Bucket ID is `user:<owner_column_value>`. A workout owned by user `abc-123` goes into bucket `user:abc-123`.
+- **Tables with an `OwnerColumn`** -- Bucket ID is `user:<owner_column_value>`. A task owned by user `abc-123` goes into bucket `user:abc-123`.
 - **Child tables (via `ParentTable`)** -- The resolver walks the parent chain up to the root table and uses the root's owner column.
 - **Tables without ownership** -- Records go into the `global` bucket, visible to all clients.
 - **Custom resolvers** -- Implement the `BucketAssigner` interface for multi-tenant, team-based, or content-sharing bucket strategies.

@@ -68,13 +68,13 @@ let client = try SynchroClient(config: config)
 ```swift
 // Fetch multiple rows
 let rows = try client.query(
-    "SELECT * FROM workouts WHERE user_id = ?",
+    "SELECT * FROM tasks WHERE user_id = ?",
     params: [userId]
 )
 
 // Fetch a single row
-let workout = try client.queryOne(
-    "SELECT * FROM workouts WHERE id = ?",
+let task = try client.queryOne(
+    "SELECT * FROM tasks WHERE id = ?",
     params: [id]
 )
 ```
@@ -83,8 +83,8 @@ let workout = try client.queryOne(
 
 ```swift
 let result = try client.execute(
-    "INSERT INTO workouts (id, name, user_id) VALUES (?, ?, ?)",
-    params: [UUID().uuidString, "Leg Day", userId]
+    "INSERT INTO tasks (id, title, user_id) VALUES (?, ?, ?)",
+    params: [UUID().uuidString, "Review proposal", userId]
 )
 // result.rowsAffected == 1
 ```
@@ -96,10 +96,10 @@ let result = try client.execute(
 
 ```swift
 let affected = try client.executeBatch([
-    SQLStatement(sql: "INSERT INTO workouts (id, name, user_id) VALUES (?, ?, ?)",
-                 params: [UUID().uuidString, "Push Day", userId]),
-    SQLStatement(sql: "INSERT INTO workouts (id, name, user_id) VALUES (?, ?, ?)",
-                 params: [UUID().uuidString, "Pull Day", userId]),
+    SQLStatement(sql: "INSERT INTO tasks (id, title, user_id) VALUES (?, ?, ?)",
+                 params: [UUID().uuidString, "Write report", userId]),
+    SQLStatement(sql: "INSERT INTO tasks (id, title, user_id) VALUES (?, ?, ?)",
+                 params: [UUID().uuidString, "Update docs", userId]),
 ])
 // affected == 2
 ```
@@ -110,18 +110,18 @@ let affected = try client.executeBatch([
 // Write transaction: multiple operations atomically
 try client.writeTransaction { db in
     try db.execute(
-        sql: "INSERT INTO workouts (id, name, user_id) VALUES (?, ?, ?)",
-        arguments: [UUID().uuidString, "Leg Day", userId]
+        sql: "INSERT INTO tasks (id, title, user_id) VALUES (?, ?, ?)",
+        arguments: [UUID().uuidString, "Review proposal", userId]
     )
     try db.execute(
-        sql: "INSERT INTO workout_sets (id, workout_id, exercise, reps) VALUES (?, ?, ?, ?)",
-        arguments: [UUID().uuidString, workoutId, "Squat", 10]
+        sql: "INSERT INTO comments (id, task_id, body, status) VALUES (?, ?, ?, ?)",
+        arguments: [UUID().uuidString, taskId, "Looks good", "open"]
     )
 }
 
 // Read transaction: consistent snapshot
 let count = try client.readTransaction { db in
-    try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM workouts") ?? 0
+    try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM tasks") ?? 0
 }
 ```
 
@@ -130,8 +130,8 @@ let count = try client.readTransaction { db in
 ### Change Notification
 
 ```swift
-let cancel = client.onChange(tables: ["workouts"]) {
-    print("workouts table changed")
+let cancel = client.onChange(tables: ["tasks"]) {
+    print("tasks table changed")
 }
 
 // Later: stop observing
@@ -142,10 +142,10 @@ cancel.cancel()
 
 ```swift
 let cancel = client.watch(
-    "SELECT * FROM workouts ORDER BY created_at DESC",
-    tables: ["workouts"]
+    "SELECT * FROM tasks ORDER BY created_at DESC",
+    tables: ["tasks"]
 ) { rows in
-    self.workouts = rows
+    self.tasks = rows
 }
 ```
 

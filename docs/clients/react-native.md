@@ -55,13 +55,13 @@ await client.initialize();
 ```typescript
 // Fetch multiple rows
 const rows = await client.query(
-  'SELECT * FROM workouts WHERE user_id = ?',
+  'SELECT * FROM tasks WHERE user_id = ?',
   [userId]
 );
 
 // Fetch a single row
-const workout = await client.queryOne(
-  'SELECT * FROM workouts WHERE id = ?',
+const task = await client.queryOne(
+  'SELECT * FROM tasks WHERE id = ?',
   [id]
 );
 ```
@@ -72,8 +72,8 @@ const workout = await client.queryOne(
 
 ```typescript
 const result = await client.execute(
-  'INSERT INTO workouts (id, name, user_id) VALUES (?, ?, ?)',
-  [crypto.randomUUID(), 'Leg Day', userId]
+  'INSERT INTO tasks (id, title, user_id) VALUES (?, ?, ?)',
+  [crypto.randomUUID(), 'Review proposal', userId]
 );
 // result.rowsAffected === 1
 ```
@@ -86,12 +86,12 @@ const result = await client.execute(
 ```typescript
 const result = await client.executeBatch([
   {
-    sql: 'INSERT INTO workouts (id, name, user_id) VALUES (?, ?, ?)',
-    params: [crypto.randomUUID(), 'Push Day', userId],
+    sql: 'INSERT INTO tasks (id, title, user_id) VALUES (?, ?, ?)',
+    params: [crypto.randomUUID(), 'Write report', userId],
   },
   {
-    sql: 'INSERT INTO workouts (id, name, user_id) VALUES (?, ?, ?)',
-    params: [crypto.randomUUID(), 'Pull Day', userId],
+    sql: 'INSERT INTO tasks (id, title, user_id) VALUES (?, ?, ?)',
+    params: [crypto.randomUUID(), 'Update docs', userId],
   },
 ]);
 // result.totalRowsAffected === 2
@@ -103,18 +103,18 @@ const result = await client.executeBatch([
 // Write transaction
 await client.writeTransaction(async (tx) => {
   await tx.execute(
-    'INSERT INTO workouts (id, name, user_id) VALUES (?, ?, ?)',
-    [workoutId, 'Leg Day', userId]
+    'INSERT INTO tasks (id, title, user_id) VALUES (?, ?, ?)',
+    [taskId, 'Review proposal', userId]
   );
   await tx.execute(
-    'INSERT INTO workout_sets (id, workout_id, exercise, reps) VALUES (?, ?, ?, ?)',
-    [crypto.randomUUID(), workoutId, 'Squat', 10]
+    'INSERT INTO comments (id, task_id, body, status) VALUES (?, ?, ?, ?)',
+    [crypto.randomUUID(), taskId, 'Looks good', 'open']
   );
 });
 
 // Read transaction
 const count = await client.readTransaction(async (tx) => {
-  const row = await tx.queryOne('SELECT COUNT(*) as c FROM workouts');
+  const row = await tx.queryOne('SELECT COUNT(*) as c FROM tasks');
   return (row?.c as number) ?? 0;
 });
 ```
@@ -145,8 +145,8 @@ await client.createIndex('drafts', ['created_at']);
 ### Change Notification
 
 ```typescript
-const unsubscribe = client.onChange(['workouts'], () => {
-  console.log('workouts table changed');
+const unsubscribe = client.onChange(['tasks'], () => {
+  console.log('tasks table changed');
 });
 
 // Later: stop observing
@@ -157,11 +157,11 @@ unsubscribe();
 
 ```typescript
 const unsubscribe = client.watch(
-  'SELECT * FROM workouts ORDER BY created_at DESC',
+  'SELECT * FROM tasks ORDER BY created_at DESC',
   undefined,
-  ['workouts'],
+  ['tasks'],
   (rows) => {
-    setWorkouts(rows);
+    setTasks(rows);
   }
 );
 ```
@@ -179,12 +179,12 @@ Reactive queries that automatically re-execute when observed tables change.
 ```tsx
 import { useQuery } from '@trainstar/synchro-react-native';
 
-function WorkoutList() {
+function TaskList() {
   const { data, loading, error, refresh } = useQuery(
     client,
-    'SELECT * FROM workouts ORDER BY created_at DESC',
+    'SELECT * FROM tasks ORDER BY created_at DESC',
     [],
-    ['workouts']
+    ['tasks']
   );
 
   if (loading) return <ActivityIndicator />;

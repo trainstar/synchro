@@ -87,7 +87,7 @@ Retrieves incremental changes for the client after its checkpoint. `pull` is not
 {
   "client_id": "device-abc-123",
   "checkpoint": 42,
-  "tables": ["workouts", "workout_sets"],
+  "tables": ["tasks", "comments"],
   "limit": 100,
   "known_buckets": ["user:123", "global"],
   "schema_version": 7,
@@ -112,10 +112,10 @@ Retrieves incremental changes for the client after its checkpoint. `pull` is not
   "changes": [
     {
       "id": "a1b2c3d4-...",
-      "table_name": "workouts",
+      "table_name": "tasks",
       "data": {
         "id": "a1b2c3d4-...",
-        "name": "Push Day",
+        "title": "Write report",
         "user_id": "user-123",
         "created_at": "2026-03-05T10:00:00Z",
         "updated_at": "2026-03-05T11:30:00Z"
@@ -126,7 +126,7 @@ Retrieves incremental changes for the client after its checkpoint. `pull` is not
   "deletes": [
     {
       "id": "e5f6g7h8-...",
-      "table_name": "workout_sets"
+      "table_name": "comments"
     }
   ],
   "checkpoint": 58,
@@ -205,27 +205,27 @@ Pushes local changes from the client to the server. All changes are applied insi
   "changes": [
     {
       "id": "new-uuid-here",
-      "table_name": "workouts",
+      "table_name": "tasks",
       "operation": "create",
       "data": {
-        "name": "Leg Day",
-        "description": "Squats and deadlifts"
+        "title": "Review proposal",
+        "status": "open"
       },
       "client_updated_at": "2026-03-05T11:00:00Z"
     },
     {
       "id": "existing-uuid",
-      "table_name": "workouts",
+      "table_name": "tasks",
       "operation": "update",
       "data": {
-        "name": "Updated Push Day"
+        "title": "Updated report draft"
       },
       "client_updated_at": "2026-03-05T11:05:00Z",
       "base_updated_at": "2026-03-05T10:00:00Z"
     },
     {
       "id": "deleted-uuid",
-      "table_name": "workout_sets",
+      "table_name": "comments",
       "operation": "delete",
       "client_updated_at": "2026-03-05T11:10:00Z"
     }
@@ -251,7 +251,7 @@ Pushes local changes from the client to the server. All changes are applied insi
   "accepted": [
     {
       "id": "new-uuid-here",
-      "table_name": "workouts",
+      "table_name": "tasks",
       "operation": "create",
       "status": "applied",
       "server_updated_at": "2026-03-05T11:00:01Z"
@@ -260,15 +260,15 @@ Pushes local changes from the client to the server. All changes are applied insi
   "rejected": [
     {
       "id": "existing-uuid",
-      "table_name": "workouts",
+      "table_name": "tasks",
       "operation": "update",
       "status": "conflict",
       "reason_code": "server_newer",
       "message": "server version is newer",
       "server_version": {
         "id": "existing-uuid",
-        "table_name": "workouts",
-        "data": { "name": "Server Push Day" },
+        "table_name": "tasks",
+        "data": { "title": "Server report draft" },
         "updated_at": "2026-03-05T11:03:00Z"
       }
     }
@@ -349,10 +349,10 @@ The server captures a snapshot checkpoint once at the start of the flow. That ch
   "records": [
     {
       "id": "a1b2c3d4-...",
-      "table_name": "workouts",
+      "table_name": "tasks",
       "data": {
         "id": "a1b2c3d4-...",
-        "name": "Push Day",
+        "title": "Write report",
         "user_id": "user-123",
         "created_at": "2026-03-05T10:00:00Z",
         "updated_at": "2026-03-05T11:30:00Z"
@@ -408,19 +408,19 @@ Returns sync metadata for all registered tables. No authentication required.
 {
   "tables": [
     {
-      "table_name": "workouts",
+      "table_name": "tasks",
       "push_policy": "owner_only",
       "dependencies": [],
       "parent_table": ""
     },
     {
-      "table_name": "workout_sets",
+      "table_name": "comments",
       "push_policy": "owner_only",
-      "dependencies": ["workouts"],
-      "parent_table": "workouts"
+      "dependencies": ["tasks"],
+      "parent_table": "tasks"
     },
     {
-      "table_name": "exercise_types",
+      "table_name": "categories",
       "push_policy": "disabled",
       "dependencies": []
     }
@@ -449,7 +449,7 @@ Returns the server-authoritative schema contract for local table creation and mi
   "server_time": "2026-03-05T12:00:00Z",
   "tables": [
     {
-      "table_name": "workouts",
+      "table_name": "tasks",
       "push_policy": "owner_only",
       "updated_at_column": "updated_at",
       "deleted_at_column": "deleted_at",

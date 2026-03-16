@@ -14,7 +14,7 @@ registry := synchro.NewRegistry()
 
 // User-owned table: push and pull enabled
 registry.Register(&synchro.TableConfig{
-    TableName:      "workouts",
+    TableName:      "tasks",
     PushPolicy:     synchro.PushPolicyOwnerOnly,
     OwnerColumn:    "user_id",
     BucketByColumn: "user_id",
@@ -23,24 +23,24 @@ registry.Register(&synchro.TableConfig{
 
 // Child table: inherits ownership through parent chain
 registry.Register(&synchro.TableConfig{
-    TableName:      "workout_sets",
+    TableName:      "comments",
     PushPolicy:     synchro.PushPolicyOwnerOnly,
-    ParentTable:    "workouts",
-    ParentFKCol:    "workout_id",
-    Dependencies:   []string{"workouts"},
-    BucketByColumn: "workout_id",
-    BucketPrefix:   "workout:",
+    ParentTable:    "tasks",
+    ParentFKCol:    "task_id",
+    Dependencies:   []string{"tasks"},
+    BucketByColumn: "task_id",
+    BucketPrefix:   "task:",
 })
 
 // Reference table: pull-only
 registry.Register(&synchro.TableConfig{
-    TableName:  "exercise_types",
+    TableName:  "categories",
     PushPolicy: synchro.PushPolicyDisabled,
 })
 
 // Nullable owner + global-read behavior is explicit
 registry.Register(&synchro.TableConfig{
-    TableName:            "food_brands",
+    TableName:            "tags",
     PushPolicy:           synchro.PushPolicyOwnerOnly,
     OwnerColumn:          "user_id",
     BucketByColumn:       "user_id",
@@ -124,10 +124,10 @@ hooks := synchro.Hooks{
     // Use for side effects like rebuilding search indexes.
     OnPushAccepted: func(ctx context.Context, tx *sql.Tx, accepted []synchro.AcceptedRecord) error {
         for _, rec := range accepted {
-            if rec.TableName == "foods" {
-                // Rebuild search index for the modified food
+            if rec.TableName == "tasks" {
+                // Rebuild search index for the modified task
                 _, err := tx.ExecContext(ctx,
-                    "SELECT rebuild_food_search_index($1)", rec.ID)
+                    "SELECT rebuild_task_search_index($1)", rec.ID)
                 if err != nil {
                     return err
                 }
@@ -216,9 +216,9 @@ func (r *SharingResolver) ResolveOwner(ctx context.Context, db synchro.DB, table
     }
 
     // Check if record is shared with other users
-    if table == "workouts" {
+    if table == "tasks" {
         rows, err := r.db.QueryContext(ctx,
-            "SELECT shared_with_user_id FROM workout_shares WHERE workout_id = $1",
+            "SELECT shared_with_user_id FROM task_shares WHERE task_id = $1",
             recordID)
         if err != nil {
             return nil, err
@@ -465,7 +465,7 @@ go func() {
 ```sql
 -- Create the publication for tables you want to sync
 CREATE PUBLICATION synchro_pub FOR TABLE
-    workouts, workout_sets, foods, food_brands, exercise_types;
+    tasks, comments, tags, categories;
 
 -- Ensure wal_level = logical (requires restart)
 ALTER SYSTEM SET wal_level = 'logical';

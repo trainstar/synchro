@@ -28,7 +28,7 @@ Recommended settings:
 Create a publication for all tables that participate in sync:
 
 ```sql
-CREATE PUBLICATION synchro_pub FOR TABLE workouts, workout_sets, exercise_types;
+CREATE PUBLICATION synchro_pub FOR TABLE tasks, comments, categories;
 ```
 
 The `synchrod` reference server creates the publication automatically on startup if it does not exist. When embedding the library, you must create it manually or as part of your migration pipeline.
