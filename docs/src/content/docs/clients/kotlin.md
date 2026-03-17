@@ -51,13 +51,13 @@ val client = SynchroClient(config, context)
 | `syncInterval` | `Double` | `30.0` | Seconds between sync cycles |
 | `pushDebounce` | `Double` | `0.5` | Seconds after a write before triggering push |
 | `maxRetryAttempts` | `Int` | `5` | Maximum retry count before entering error state |
-| `pullPageSize` | `Int` | `100` | Rows per pull page (validated 1--1000) |
-| `pushBatchSize` | `Int` | `100` | Pending changes per push batch (validated 1--1000) |
-| `snapshotPageSize` | `Int` | `100` | Rows per snapshot page (validated 1--1000) |
+| `pullPageSize` | `Int` | `100` | Rows per pull page (validated 1 to 1000) |
+| `pushBatchSize` | `Int` | `100` | Pending changes per push batch (validated 1 to 1000) |
+| `snapshotPageSize` | `Int` | `100` | Rows per snapshot page (validated 1 to 1000) |
 | `seedDatabasePath` | `String?` | `null` | Path to a pre-built seed database for offline-first bootstrap |
 
 :::note[Validation]
-`pullPageSize`, `pushBatchSize`, and `snapshotPageSize` are validated at construction time. An `IllegalArgumentException` is thrown if any value is outside the 1--1000 range.
+`pullPageSize`, `pushBatchSize`, and `snapshotPageSize` are validated at construction time. An `IllegalArgumentException` is thrown if any value is outside the 1 to 1000 range.
 :::
 
 ## Core Usage
@@ -307,7 +307,7 @@ try {
 
 ## Seed Database (Optional)
 
-Ship a pre-built SQLite file so the app works offline on first launch — no server required. Useful when users may not have connectivity on first open, or when your onboarding flow writes data before sign-in.
+Ship a pre-built SQLite file so the app works offline on first launch, no server required. Useful when users may not have connectivity on first open, or when your onboarding flow writes data before sign-in.
 
 Without a seed, tables are created on first `start()` from the server schema. The seed removes that dependency.
 
@@ -330,11 +330,11 @@ val config = SynchroConfig(
 )
 ```
 
-If `seedDatabasePath` is set and no database exists at `dbPath`, the seed is copied. If a database already exists, the seed is ignored. Generate seeds with the `synchroseed` CLI — see [Seed Database](/synchro/server/seed-database/).
+If `seedDatabasePath` is set and no database exists at `dbPath`, the seed is copied. If a database already exists, the seed is ignored. Generate seeds with the `synchroseed` CLI. See [Seed Database](/synchro/server/seed-database/).
 
 ## Schema Reconciliation
 
-On connect, schema updates are reconciled **additively** — the client never drops tables or columns:
+On connect, schema updates are reconciled **additively**, and the client never drops tables or columns:
 
 - **New columns/tables** from the server are added
 - **Removed columns/tables** from the server are preserved locally

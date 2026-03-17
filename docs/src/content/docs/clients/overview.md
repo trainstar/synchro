@@ -3,7 +3,7 @@ title: "Client SDK Overview"
 description: "Overview of native SDKs for iOS, Android, and React Native with shared interface contracts."
 ---
 
-Native SDKs for iOS, Android, and React Native. These are not JavaScript wrappers -- they are native implementations using platform-standard database libraries (GRDB for Swift, Room/SQLiteOpenHelper for Kotlin). Each SDK embeds a full sync engine that handles registration, schema management, CDC-based change tracking, push/pull, conflict resolution, and snapshot recovery.
+Native SDKs for iOS, Android, and React Native. These are not JavaScript wrappers. They are native implementations using platform-standard database libraries (GRDB for Swift, Room/SQLiteOpenHelper for Kotlin). Each SDK embeds a full sync engine that handles registration, schema management, CDC-based change tracking, push/pull, conflict resolution, and snapshot recovery.
 
 ## SDK Architecture
 
@@ -17,7 +17,7 @@ Native SDKs for iOS, Android, and React Native. These are not JavaScript wrapper
 
 The SDK stack has two layers:
 
-- **Layer 1 (Native):** Swift wraps GRDB, Kotlin wraps Android SQLiteOpenHelper. Each contains a full sync engine -- schema manager, change tracker, push/pull processors, HTTP client, and retry logic.
+- **Layer 1 (Native):** Swift wraps GRDB, Kotlin wraps Android SQLiteOpenHelper. Each contains a full sync engine: schema manager, change tracker, push/pull processors, HTTP client, and retry logic.
 - **Layer 2 (React Native):** A TurboModule bridge wraps both native SDKs. SQL strings go down, JSON rows come back up. React hooks provide reactive bindings on top.
 
 <pre class="mermaid">
@@ -27,8 +27,8 @@ graph TB
         Bridge[TurboModule Bridge]
     end
     subgraph "Native"
-        Swift["Swift SDK — GRDB + SQLite"]
-        Kotlin["Kotlin SDK — SQLiteOpenHelper + SQLite"]
+        Swift["Swift SDK (GRDB + SQLite)"]
+        Kotlin["Kotlin SDK (SQLiteOpenHelper + SQLite)"]
     end
     JS --> Bridge
     Bridge --> Swift
@@ -92,7 +92,7 @@ Schema methods are for **local-only** tables (caches, preferences, drafts). Sync
 
 ## Client-Side CDC
 
-SQLite triggers automatically track all writes to synced tables. There is no special write API -- standard SQL INSERT, UPDATE, and DELETE statements work. The CDC system intercepts changes transparently.
+SQLite triggers automatically track all writes to synced tables. There is no special write API. Standard SQL INSERT, UPDATE, and DELETE statements work. The CDC system intercepts changes transparently.
 
 <pre class="mermaid">
 graph LR
@@ -139,19 +139,19 @@ All SDKs share the same configuration parameters and defaults.
 
 | Parameter | Type | Default | Constraint |
 |-----------|------|---------|------------|
-| `dbPath` | String | Required | -- |
-| `serverURL` | String / URL | Required | -- |
+| `dbPath` | String | Required | - |
+| `serverURL` | String / URL | Required | - |
 | `authProvider` | Async function | Required | Returns JWT token |
 | `clientID` | String | Required | Unique device identifier |
-| `platform` | String | `"ios"` / `"android"` | -- |
+| `platform` | String | `"ios"` / `"android"` | - |
 | `appVersion` | String | Required | Semantic version |
-| `syncInterval` | Seconds | `30` | -- |
-| `pushDebounce` | Seconds | `0.5` | -- |
-| `maxRetryAttempts` | Int | `5` | -- |
-| `pullPageSize` | Int | `100` | 1--1000 |
-| `pushBatchSize` | Int | `100` | 1--1000 |
-| `snapshotPageSize` | Int | `100` | 1--1000 |
+| `syncInterval` | Seconds | `30` | - |
+| `pushDebounce` | Seconds | `0.5` | - |
+| `maxRetryAttempts` | Int | `5` | - |
+| `pullPageSize` | Int | `100` | 1 to 1000 |
+| `pushBatchSize` | Int | `100` | 1 to 1000 |
+| `snapshotPageSize` | Int | `100` | 1 to 1000 |
 
 :::note[Page size capping]
-`pullPageSize` and `snapshotPageSize` are capped at 1000 by the SDK. Values above 1000 are silently clamped. `pushBatchSize` is validated to be within 1--1000 on Kotlin; on Swift it is passed through (the server enforces the cap).
+`pullPageSize` and `snapshotPageSize` are capped at 1000 by the SDK. Values above 1000 are silently clamped. `pushBatchSize` is validated to be within 1 to 1000 on Kotlin; on Swift it is passed through (the server enforces the cap).
 :::

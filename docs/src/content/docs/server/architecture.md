@@ -29,10 +29,10 @@ graph LR
 
 ### WAL --> Changelog --> Bucketed Pull
 
-1. **WAL capture** -- A `wal.Consumer` connects to a PostgreSQL logical replication slot (pgoutput protocol). It receives INSERT/UPDATE/DELETE events for registered tables.
-2. **Bucket assignment** -- Each WAL event passes through a `BucketAssigner` (typically the `OwnershipResolver`) to determine which buckets the record belongs to (e.g., `user:abc-123`, `global`).
-3. **Changelog write** -- One `sync_changelog` row per bucket is written with a monotonic `BIGSERIAL` sequence number.
-4. **Pull** -- Clients pull changes by querying `sync_changelog WHERE bucket_id = ANY(subs) AND seq > checkpoint`, hydrating records from app tables, then advancing the checkpoint.
+1. **WAL capture:** A `wal.Consumer` connects to a PostgreSQL logical replication slot (pgoutput protocol). It receives INSERT/UPDATE/DELETE events for registered tables.
+2. **Bucket assignment:** Each WAL event passes through a `BucketAssigner` (typically the `OwnershipResolver`) to determine which buckets the record belongs to (e.g., `user:abc-123`, `global`).
+3. **Changelog write:** One `sync_changelog` row per bucket is written with a monotonic `BIGSERIAL` sequence number.
+4. **Pull:** Clients pull changes by querying `sync_changelog WHERE bucket_id = ANY(subs) AND seq > checkpoint`, hydrating records from app tables, then advancing the checkpoint.
 
 This gives O(log n) pull queries (indexed by `bucket_id, seq`) and complete decoupling between write and read paths.
 
@@ -54,9 +54,9 @@ Validates the full config graph at engine startup: checks parent chains terminat
 
 Handles client-to-server writes inside a single database transaction:
 
-- **Create** -- Inserts new records, enforces ownership column, handles resurrection of soft-deleted records.
-- **Update** -- Runs conflict resolution (LWW by default), applies allowed columns via deny-list filtering.
-- **Delete** -- Soft-deletes via `deleted_at = now()`, idempotent for already-deleted records.
+- **Create:** Inserts new records, enforces ownership column, handles resurrection of soft-deleted records.
+- **Update:** Runs conflict resolution (LWW by default), applies allowed columns via deny-list filtering.
+- **Delete:** Soft-deletes via `deleted_at = now()`, idempotent for already-deleted records.
 
 All push operations execute under RLS context (`SET LOCAL app.user_id`).
 
@@ -88,17 +88,17 @@ Converts raw pgoutput protocol messages into `WALEvent` structs. Maintains a rel
 
 Determines which buckets a record belongs to. The default `JoinResolver`:
 
-- Tables with `OwnerColumn` -- reads owner directly from record data (zero queries).
-- Tables with `BucketByColumn` + `BucketPrefix` -- uses fast-path bucket assignment without extra joins.
+- Tables with `OwnerColumn`: reads owner directly from record data (zero queries).
+- Tables with `BucketByColumn` + `BucketPrefix`: uses fast-path bucket assignment without extra joins.
 - Nullable bucket values can emit `global` only when `GlobalWhenBucketNull=true`.
-- Child tables -- walks the parent chain via a single JOIN query to find the root owner.
+- Child tables: walks the parent chain via a single JOIN query to find the root owner.
 
 ### Conflict Resolver (`conflict.go`)
 
 Determines winner when client and server versions diverge. Built-in resolvers:
 
-- **LWWResolver** -- Last-Write-Wins with configurable clock skew tolerance. Supports optimistic concurrency via `BaseUpdatedAt`.
-- **ServerWinsResolver** -- Server always wins.
+- **LWWResolver:** Last-Write-Wins with configurable clock skew tolerance. Supports optimistic concurrency via `BaseUpdatedAt`.
+- **ServerWinsResolver:** Server always wins.
 
 Custom resolvers implement the `ConflictResolver` interface.
 
@@ -122,10 +122,10 @@ Builds canonical schema payloads from `pg_catalog`, computes deterministic schem
 
 Manages changelog compaction to prevent unbounded growth of `sync_changelog`:
 
-- **Stale client deactivation** -- Marks clients inactive if they haven't synced within a configurable threshold (default 7 days). Prevents one stale client from blocking compaction for all others.
-- **Safe sequence calculation** -- Computes `MIN(last_pull_seq)` across all active clients as the safe compaction boundary.
-- **Batched deletion** -- Deletes changelog entries with `seq <= safeSeq` in configurable batches (default 10,000) to avoid long-running transactions.
-- **Orchestration** -- `RunCompaction()` runs all three steps. `StartCompaction()` runs on a background ticker.
+- **Stale client deactivation:** Marks clients inactive if they haven't synced within a configurable threshold (default 7 days). Prevents one stale client from blocking compaction for all others.
+- **Safe sequence calculation:** Computes `MIN(last_pull_seq)` across all active clients as the safe compaction boundary.
+- **Batched deletion:** Deletes changelog entries with `seq <= safeSeq` in configurable batches (default 10,000) to avoid long-running transactions.
+- **Orchestration:** `RunCompaction()` runs all three steps. `StartCompaction()` runs on a background ticker.
 
 ---
 
@@ -167,7 +167,7 @@ sequenceDiagram
     Engine-->>Client: Accepted/rejected results with server-set timestamps (RYOW)
 </pre>
 
-RLS policies enforce authorization at the database level. The push processor does not walk FK chains -- Postgres RLS handles it.
+RLS policies enforce authorization at the database level. The push processor does not walk FK chains. Postgres RLS handles it.
 
 ### Pull Path
 
@@ -256,7 +256,7 @@ Push operations set `app.user_id` via `SET LOCAL` and let PostgreSQL Row-Level S
 
 - Authorization logic lives in the database, not application code.
 - Child table access is enforced via `EXISTS (SELECT 1 FROM parent WHERE ...)` subquery policies.
-- The push processor does not need to walk parent chains -- RLS handles it.
+- The push processor does not need to walk parent chains. RLS handles it.
 - Ownership resolution (for bucketing) is separate from authorization.
 
 ### Deny-List for Column Filtering (Not Allow-List)
