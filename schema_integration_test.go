@@ -3,6 +3,7 @@ package synchro_test
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"sync"
 	"testing"
@@ -22,8 +23,9 @@ func resetSchemaManifest(t *testing.T, db *sql.DB) {
 func TestIntegration_PullPushRejectBootstrapSchema(t *testing.T) {
 	db := synctest.TestDB(t)
 	resetSchemaManifest(t, db)
+	ctx := context.Background()
 
-	engine, err := synchro.NewEngine(synchro.Config{
+	engine, err := synchro.NewEngine(ctx, &synchro.Config{
 		DB:       db,
 		Registry: synctest.NewTestRegistry(),
 	})
@@ -31,7 +33,6 @@ func TestIntegration_PullPushRejectBootstrapSchema(t *testing.T) {
 		t.Fatalf("NewEngine: %v", err)
 	}
 
-	ctx := context.Background()
 	userID := "00000000-0000-0000-0000-000000000101"
 	clientID := "strict-schema-client"
 
@@ -45,7 +46,7 @@ func TestIntegration_PullPushRejectBootstrapSchema(t *testing.T) {
 		SchemaVersion: 0,
 		SchemaHash:    "",
 	})
-	if err != synchro.ErrSchemaMismatch {
+	if !errors.Is(err, synchro.ErrSchemaMismatch) {
 		t.Fatalf("Pull error = %v, want %v", err, synchro.ErrSchemaMismatch)
 	}
 
@@ -55,7 +56,7 @@ func TestIntegration_PullPushRejectBootstrapSchema(t *testing.T) {
 		SchemaVersion: 0,
 		SchemaHash:    "",
 	})
-	if err != synchro.ErrSchemaMismatch {
+	if !errors.Is(err, synchro.ErrSchemaMismatch) {
 		t.Fatalf("Push error = %v, want %v", err, synchro.ErrSchemaMismatch)
 	}
 }
@@ -63,8 +64,9 @@ func TestIntegration_PullPushRejectBootstrapSchema(t *testing.T) {
 func TestIntegration_SchemaManifest_RaceSafe(t *testing.T) {
 	db := synctest.TestDB(t)
 	resetSchemaManifest(t, db)
+	ctx := context.Background()
 
-	engine, err := synchro.NewEngine(synchro.Config{
+	engine, err := synchro.NewEngine(ctx, &synchro.Config{
 		DB:       db,
 		Registry: synctest.NewTestRegistry(),
 	})
@@ -72,7 +74,6 @@ func TestIntegration_SchemaManifest_RaceSafe(t *testing.T) {
 		t.Fatalf("NewEngine: %v", err)
 	}
 
-	ctx := context.Background()
 	const workers = 24
 
 	type result struct {
@@ -137,8 +138,9 @@ func TestIntegration_SchemaManifest_RaceSafe(t *testing.T) {
 func TestIntegration_SchemaManifest_ChangesOnDrift(t *testing.T) {
 	db := synctest.TestDB(t)
 	resetSchemaManifest(t, db)
+	ctx := context.Background()
 
-	engine, err := synchro.NewEngine(synchro.Config{
+	engine, err := synchro.NewEngine(ctx, &synchro.Config{
 		DB:       db,
 		Registry: synctest.NewTestRegistry(),
 	})
@@ -146,7 +148,6 @@ func TestIntegration_SchemaManifest_ChangesOnDrift(t *testing.T) {
 		t.Fatalf("NewEngine: %v", err)
 	}
 
-	ctx := context.Background()
 	v1, h1, err := engine.CurrentSchemaManifest(ctx)
 	if err != nil {
 		t.Fatalf("CurrentSchemaManifest before drift: %v", err)
@@ -188,7 +189,7 @@ func TestIntegration_EnumTypeResolution(t *testing.T) {
 		OwnerColumn: "user_id",
 	})
 
-	engine, err := synchro.NewEngine(synchro.Config{
+	engine, err := synchro.NewEngine(ctx, &synchro.Config{
 		DB:       db,
 		Registry: reg,
 	})
@@ -258,7 +259,7 @@ func TestIntegration_DomainTypeResolution(t *testing.T) {
 		PushPolicy: synchro.PushPolicyDisabled,
 	})
 
-	engine, err := synchro.NewEngine(synchro.Config{
+	engine, err := synchro.NewEngine(ctx, &synchro.Config{
 		DB:       db,
 		Registry: reg,
 	})
@@ -331,11 +332,11 @@ func TestIntegration_SchemaManifest_DeterministicAcrossOrderVariations(t *testin
 	regB.Register(&synchro.TableConfig{TableName: t3, PushPolicy: synchro.PushPolicyDisabled, Dependencies: []string{t2, t1}})
 	regB.Register(&synchro.TableConfig{TableName: t1, PushPolicy: synchro.PushPolicyDisabled})
 
-	engineA, err := synchro.NewEngine(synchro.Config{DB: db, Registry: regA})
+	engineA, err := synchro.NewEngine(ctx, &synchro.Config{DB: db, Registry: regA})
 	if err != nil {
 		t.Fatalf("NewEngine A: %v", err)
 	}
-	engineB, err := synchro.NewEngine(synchro.Config{DB: db, Registry: regB})
+	engineB, err := synchro.NewEngine(ctx, &synchro.Config{DB: db, Registry: regB})
 	if err != nil {
 		t.Fatalf("NewEngine B: %v", err)
 	}

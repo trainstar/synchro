@@ -50,7 +50,7 @@ type SQLBucketResolver struct {
 }
 
 // NewSQLBucketResolver creates a SQL-first resolver.
-func NewSQLBucketResolver(cfg SQLBucketResolverConfig) (*SQLBucketResolver, error) {
+func NewSQLBucketResolver(cfg *SQLBucketResolverConfig) (*SQLBucketResolver, error) {
 	if cfg.DB == nil {
 		return nil, fmt.Errorf("synchro: SQLBucketResolver DB is required")
 	}
@@ -183,7 +183,7 @@ func (r *SQLBucketResolver) callSQLRule(
 	if err != nil {
 		return nil, fmt.Errorf("executing SQL bucket rule %q: %w", functionName, err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	buckets := make([]string, 0, 4)
 	for rows.Next() {

@@ -167,7 +167,7 @@ func (p *pushProcessor) pushUpdate(ctx context.Context, tx DB, userID string, cf
 			conflict.BaseVersion = record.BaseUpdatedAt
 		}
 
-		resolution, err := p.resolver.Resolve(ctx, conflict)
+		resolution, err := p.resolver.Resolve(ctx, &conflict)
 		if err != nil {
 			return nil, fmt.Errorf("resolving conflict: %w", err)
 		}

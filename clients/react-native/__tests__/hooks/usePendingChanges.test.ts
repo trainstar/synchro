@@ -1,4 +1,4 @@
-import { renderHook, act, waitFor } from '@testing-library/react-native';
+import { renderHook, act } from '@testing-library/react-native';
 import { usePendingChanges } from '../../src/hooks/usePendingChanges';
 import { SynchroClient } from '../../src/SynchroClient';
 import { resetNativeModuleMockState } from '../__mocks__/react-native';

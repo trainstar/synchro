@@ -105,7 +105,7 @@ func (s *changelogStore) QueryAfter(ctx context.Context, db DB, bucketIDs []stri
 	if err != nil {
 		return nil, fmt.Errorf("querying changelog: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var entries []ChangelogEntry
 	for rows.Next() {

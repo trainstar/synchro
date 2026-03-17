@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -35,6 +36,13 @@ type config struct {
 }
 
 func main() {
+	if err := mainRun(); err != nil {
+		fmt.Fprintf(os.Stderr, "synchrod: %v\n", err)
+		os.Exit(1)
+	}
+}
+
+func mainRun() error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
@@ -51,13 +59,10 @@ func main() {
 		JWTUserClaim:     envOr("JWT_USER_CLAIM", "sub"),
 	}
 
-	if err := run(ctx, cfg); err != nil {
-		fmt.Fprintf(os.Stderr, "synchrod: %v\n", err)
-		os.Exit(1)
-	}
+	return run(ctx, &cfg)
 }
 
-func run(ctx context.Context, cfg config) error {
+func run(ctx context.Context, cfg *config) error {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
 		Level: parseLogLevel(cfg.LogLevel),
 	}))
@@ -88,7 +93,7 @@ func run(ctx context.Context, cfg config) error {
 
 	registry := synctest.NewTestRegistry()
 
-	engine, err := synchro.NewEngine(synchro.Config{
+	engine, err := synchro.NewEngine(ctx, &synchro.Config{
 		DB:               db,
 		Registry:         registry,
 		MinClientVersion: cfg.MinClientVersion,
@@ -111,7 +116,7 @@ func run(ctx context.Context, cfg config) error {
 			}
 		}
 
-		consumer := wal.NewConsumer(wal.ConsumerConfig{
+		consumer := wal.NewConsumer(&wal.ConsumerConfig{
 			ConnString:      cfg.ReplicationURL,
 			SlotName:        cfg.SlotName,
 			PublicationName: cfg.PublicationName,
@@ -159,7 +164,7 @@ func run(ctx context.Context, cfg config) error {
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(`{"status":"ok"}`))
+		_, _ = w.Write([]byte(`{"status":"ok"}`))
 	})
 	mux.Handle("/sync/", syncHandler)
 
@@ -176,7 +181,7 @@ func run(ctx context.Context, cfg config) error {
 
 	select {
 	case err := <-errCh:
-		if err != http.ErrServerClosed {
+		if !errors.Is(err, http.ErrServerClosed) {
 			return fmt.Errorf("HTTP server failed: %w", err)
 		}
 	case <-ctx.Done():

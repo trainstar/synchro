@@ -67,7 +67,7 @@ type Engine struct {
 }
 
 // NewEngine creates a new sync engine from the given configuration.
-func NewEngine(cfg Config) (*Engine, error) {
+func NewEngine(ctx context.Context, cfg *Config) (*Engine, error) {
 	if cfg.DB == nil {
 		return nil, fmt.Errorf("synchro: DB is required")
 	}
@@ -92,25 +92,12 @@ func NewEngine(cfg Config) (*Engine, error) {
 	}
 
 	// Introspect each registered table for timestamp columns.
-	ctx := context.Background()
+	if err := cfg.Registry.Introspect(ctx, cfg.DB, cfg.UpdatedAtColumn, cfg.DeletedAtColumn); err != nil {
+		return nil, fmt.Errorf("synchro: %w", err)
+	}
 	for _, tcfg := range cfg.Registry.All() {
-		hasUA, hasDA, hasCA, err := introspectTimestampColumns(ctx, cfg.DB, tcfg.TableName, cfg.UpdatedAtColumn, cfg.DeletedAtColumn)
-		if err != nil {
-			return nil, fmt.Errorf("synchro: introspecting %q: %w", tcfg.TableName, err)
-		}
-		tcfg.hasUpdatedAt = hasUA
-		tcfg.hasDeletedAt = hasDA
-		tcfg.hasCreatedAt = hasCA
-		if hasUA {
-			tcfg.updatedAtColumn = cfg.UpdatedAtColumn
-		}
-		if hasDA {
-			tcfg.deletedAtColumn = cfg.DeletedAtColumn
-		}
-		tcfg.finalizeProtectedSet()
-
 		logger.Info("table introspected", "table", tcfg.TableName,
-			"updated_at", hasUA, "deleted_at", hasDA, "created_at", hasCA)
+			"updated_at", tcfg.HasUpdatedAt(), "deleted_at", tcfg.HasDeletedAt(), "created_at", tcfg.HasCreatedAt())
 	}
 
 	resolver := cfg.ConflictResolver
@@ -143,7 +130,7 @@ func NewEngine(cfg Config) (*Engine, error) {
 		checkpoint: cp,
 		schema:     schema,
 		compactor:  compactor,
-		config:     cfg,
+		config:     *cfg,
 		logger:     logger,
 		push: &pushProcessor{
 			registry:  cfg.Registry,
@@ -271,7 +258,7 @@ func (e *Engine) Pull(ctx context.Context, userID string, req *PullRequest) (*Pu
 	if err != nil {
 		return nil, fmt.Errorf("beginning pull transaction: %w", err)
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 
 	if err := SetAuthContext(ctx, tx, userID); err != nil {
 		return nil, fmt.Errorf("setting pull auth context: %w", err)
@@ -342,7 +329,7 @@ func (e *Engine) Push(ctx context.Context, userID string, req *PushRequest) (*Pu
 	if err != nil {
 		return nil, fmt.Errorf("beginning transaction: %w", err)
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 
 	// Set RLS context
 	if err := SetAuthContext(ctx, tx, userID); err != nil {
@@ -483,7 +470,7 @@ func (e *Engine) Snapshot(ctx context.Context, userID string, req *SnapshotReque
 	if err != nil {
 		return nil, fmt.Errorf("beginning snapshot transaction: %w", err)
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 
 	if err := SetAuthContext(ctx, tx, userID); err != nil {
 		return nil, fmt.Errorf("setting snapshot auth context: %w", err)

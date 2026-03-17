@@ -132,7 +132,7 @@ func (p *pullProcessor) hydrateRecords(ctx context.Context, db DB, tableName str
 	if err != nil {
 		return nil, fmt.Errorf("hydrating records from %q: %w", tableName, err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var records []Record
 	for rows.Next() {
@@ -338,7 +338,7 @@ func snapshotPage(ctx context.Context, db DB, cfg *TableConfig, afterID string, 
 	if err != nil {
 		return nil, fmt.Errorf("querying snapshot page from %q: %w", cfg.TableName, err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var records []Record
 	for rows.Next() {

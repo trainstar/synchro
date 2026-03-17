@@ -100,7 +100,7 @@ func (s *schemaStore) buildCanonicalSchemaTables(ctx context.Context, db DB, reg
 
 	tables := make([]SchemaTable, 0, len(configs))
 	for _, cfg := range configs {
-		cols, pk, err := loadTableColumnsAndPK(ctx, db, cfg.TableName, cfg.SyncColumns)
+		cols, pk, err := loadTableColumnsAndPK(ctx, db, cfg.TableName, cfg.ExcludeColumns)
 		if err != nil {
 			return nil, err
 		}
@@ -144,7 +144,7 @@ func (s *schemaStore) getOrCreateManifest(ctx context.Context, db DB, hash strin
 		if err != nil {
 			return schemaManifest{}, fmt.Errorf("starting manifest tx: %w", err)
 		}
-		defer tx.Rollback()
+		defer func() { _ = tx.Rollback() }()
 		manifest, err := getOrCreateManifestTx(ctx, tx, hash)
 		if err != nil {
 			return schemaManifest{}, err
@@ -199,7 +199,7 @@ type columnMeta struct {
 	IsPK       bool
 }
 
-func loadTableColumnsAndPK(ctx context.Context, db DB, table string, syncColumns []string) ([]SchemaColumn, []string, error) {
+func loadTableColumnsAndPK(ctx context.Context, db DB, table string, excludeCols []string) ([]SchemaColumn, []string, error) {
 	schemaName, tableName := splitSchemaTable(table)
 
 	pkCols, err := loadPrimaryKeyColumns(ctx, db, schemaName, tableName)
@@ -221,14 +221,11 @@ func loadTableColumnsAndPK(ctx context.Context, db DB, table string, syncColumns
 	if err != nil {
 		return nil, nil, err
 	}
-	defer colRows.Close()
+	defer func() { _ = colRows.Close() }()
 
-	var syncSet map[string]bool
-	if len(syncColumns) > 0 {
-		syncSet = make(map[string]bool, len(syncColumns))
-		for _, col := range syncColumns {
-			syncSet[col] = true
-		}
+	excludeSet := make(map[string]bool, len(excludeCols))
+	for _, col := range excludeCols {
+		excludeSet[col] = true
 	}
 
 	var cols []SchemaColumn
@@ -237,7 +234,7 @@ func loadTableColumnsAndPK(ctx context.Context, db DB, table string, syncColumns
 		if err := colRows.Scan(&c.Name, &c.DBType, &c.Nullable, &c.DefaultSQL); err != nil {
 			return nil, nil, fmt.Errorf("scanning schema column for %q: %w", table, err)
 		}
-		if syncSet != nil && !syncSet[c.Name] {
+		if excludeSet[c.Name] {
 			continue
 		}
 		_, c.IsPK = pkSet[c.Name]
@@ -246,7 +243,6 @@ func loadTableColumnsAndPK(ctx context.Context, db DB, table string, syncColumns
 			// Check if the type is a known enum → map to "string".
 			if enumTypes[c.DBType] {
 				logicalType = "string"
-				err = nil
 			} else if baseType, ok := domainTypes[c.DBType]; ok {
 				// Domain type → resolve to base type and re-map.
 				logicalType, err = mapLogicalType(baseType)

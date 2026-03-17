@@ -71,7 +71,7 @@ func TestFailure_ReplicationSlotDropped(t *testing.T) {
 
 	// --- Phase 1: Start consumer, drop slot, verify it returns an error ---
 
-	consumer1 := wal.NewConsumer(wal.ConsumerConfig{
+	consumer1 := wal.NewConsumer(&wal.ConsumerConfig{
 		ConnString:      replURL,
 		SlotName:        slotName,
 		PublicationName: pubName,
@@ -115,7 +115,7 @@ func TestFailure_ReplicationSlotDropped(t *testing.T) {
 	// Clean up again in case phase 1 left a slot.
 	_, _ = db.ExecContext(ctx, "SELECT pg_drop_replication_slot($1)", slotName)
 
-	consumer2 := wal.NewConsumer(wal.ConsumerConfig{
+	consumer2 := wal.NewConsumer(&wal.ConsumerConfig{
 		ConnString:      replURL,
 		SlotName:        slotName,
 		PublicationName: pubName,

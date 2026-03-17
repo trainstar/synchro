@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -38,7 +39,7 @@ func setupTestServer(t *testing.T) (*httptest.Server, *sql.DB) {
 	db := synctest.TestDB(t)
 	reg := synctest.NewTestRegistry()
 
-	engine, err := synchro.NewEngine(synchro.Config{
+	engine, err := synchro.NewEngine(context.Background(), &synchro.Config{
 		DB:               db,
 		Registry:         reg,
 		MinClientVersion: "1.0.0",
@@ -60,7 +61,7 @@ func setupTestServer(t *testing.T) (*httptest.Server, *sql.DB) {
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(`{"status":"ok"}`))
+		_, _ = w.Write([]byte(`{"status":"ok"}`))
 	})
 	mux.Handle("/sync/", syncHandler)
 
@@ -72,11 +73,15 @@ func setupTestServer(t *testing.T) (*httptest.Server, *sql.DB) {
 func TestHTTP_HealthCheck(t *testing.T) {
 	srv, _ := setupTestServer(t)
 
-	resp, err := http.Get(srv.URL + "/healthz")
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, srv.URL+"/healthz", nil)
+	if err != nil {
+		t.Fatalf("creating request: %v", err)
+	}
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatalf("GET /healthz: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusOK)
 	}
@@ -85,11 +90,16 @@ func TestHTTP_HealthCheck(t *testing.T) {
 func TestHTTP_MissingAuth_401(t *testing.T) {
 	srv, _ := setupTestServer(t)
 
-	resp, err := http.Post(srv.URL+"/sync/register", "application/json", bytes.NewBufferString(`{}`))
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, srv.URL+"/sync/register", bytes.NewBufferString(`{}`))
+	if err != nil {
+		t.Fatalf("creating request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatalf("POST /sync/register: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusUnauthorized {
 		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusUnauthorized)
 	}
@@ -98,7 +108,7 @@ func TestHTTP_MissingAuth_401(t *testing.T) {
 func TestHTTP_InvalidJWT_401(t *testing.T) {
 	srv, _ := setupTestServer(t)
 
-	req, _ := http.NewRequest(http.MethodPost, srv.URL+"/sync/register", bytes.NewBufferString(`{}`))
+	req, _ := http.NewRequestWithContext(context.Background(), http.MethodPost, srv.URL+"/sync/register", bytes.NewBufferString(`{}`))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer invalid-token")
 
@@ -106,7 +116,7 @@ func TestHTTP_InvalidJWT_401(t *testing.T) {
 	if err != nil {
 		t.Fatalf("request: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusUnauthorized {
 		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusUnauthorized)
 	}
@@ -122,7 +132,7 @@ func TestHTTP_ExpiredJWT_401(t *testing.T) {
 	})
 	expired, _ := token.SignedString(testJWTSecret)
 
-	req, _ := http.NewRequest(http.MethodPost, srv.URL+"/sync/register", bytes.NewBufferString(`{}`))
+	req, _ := http.NewRequestWithContext(context.Background(), http.MethodPost, srv.URL+"/sync/register", bytes.NewBufferString(`{}`))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+expired)
 
@@ -130,7 +140,7 @@ func TestHTTP_ExpiredJWT_401(t *testing.T) {
 	if err != nil {
 		t.Fatalf("request: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusUnauthorized {
 		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusUnauthorized)
 	}
@@ -142,7 +152,7 @@ func TestHTTP_WrongSigningKey_401(t *testing.T) {
 	wrongKey := []byte("wrong-secret")
 	tokenStr := signTestJWT("user-1", wrongKey)
 
-	req, _ := http.NewRequest(http.MethodPost, srv.URL+"/sync/register", bytes.NewBufferString(`{}`))
+	req, _ := http.NewRequestWithContext(context.Background(), http.MethodPost, srv.URL+"/sync/register", bytes.NewBufferString(`{}`))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+tokenStr)
 
@@ -150,7 +160,7 @@ func TestHTTP_WrongSigningKey_401(t *testing.T) {
 	if err != nil {
 		t.Fatalf("request: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusUnauthorized {
 		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusUnauthorized)
 	}
@@ -161,7 +171,7 @@ func TestHTTP_UpgradeRequired_426(t *testing.T) {
 
 	tokenStr := signTestJWT("user-1", testJWTSecret)
 
-	req, _ := http.NewRequest(http.MethodPost, srv.URL+"/sync/register", bytes.NewBufferString(`{}`))
+	req, _ := http.NewRequestWithContext(context.Background(), http.MethodPost, srv.URL+"/sync/register", bytes.NewBufferString(`{}`))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+tokenStr)
 	req.Header.Set("X-App-Version", "0.1.0")
@@ -170,7 +180,7 @@ func TestHTTP_UpgradeRequired_426(t *testing.T) {
 	if err != nil {
 		t.Fatalf("request: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusUpgradeRequired {
 		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusUpgradeRequired)
 	}
@@ -194,8 +204,8 @@ func TestHTTP_RegisterPushPullRoundTrip(t *testing.T) {
 		t.Fatalf("register status = %d, want %d", regResp.StatusCode, http.StatusOK)
 	}
 	var regBody map[string]any
-	json.NewDecoder(regResp.Body).Decode(&regBody)
-	regResp.Body.Close()
+	_ = json.NewDecoder(regResp.Body).Decode(&regBody)
+	_ = regResp.Body.Close()
 
 	schemaVersion := int64(regBody["schema_version"].(float64))
 	schemaHash := regBody["schema_hash"].(string)
@@ -209,11 +219,11 @@ func TestHTTP_RegisterPushPullRoundTrip(t *testing.T) {
 	})
 	if snapshotResp.StatusCode != http.StatusOK {
 		var body map[string]any
-		json.NewDecoder(snapshotResp.Body).Decode(&body)
-		snapshotResp.Body.Close()
+		_ = json.NewDecoder(snapshotResp.Body).Decode(&body)
+		_ = snapshotResp.Body.Close()
 		t.Fatalf("snapshot status = %d, want %d, body: %v", snapshotResp.StatusCode, http.StatusOK, body)
 	}
-	snapshotResp.Body.Close()
+	_ = snapshotResp.Body.Close()
 
 	// --- Push create ---
 	orderID := "00000000-0000-0000-0000-aaaaaaaaaaaa"
@@ -233,13 +243,13 @@ func TestHTTP_RegisterPushPullRoundTrip(t *testing.T) {
 	})
 	if pushResp.StatusCode != http.StatusOK {
 		var body map[string]any
-		json.NewDecoder(pushResp.Body).Decode(&body)
-		pushResp.Body.Close()
+		_ = json.NewDecoder(pushResp.Body).Decode(&body)
+		_ = pushResp.Body.Close()
 		t.Fatalf("push status = %d, want %d, body: %v", pushResp.StatusCode, http.StatusOK, body)
 	}
 	var pushBody map[string]any
-	json.NewDecoder(pushResp.Body).Decode(&pushBody)
-	pushResp.Body.Close()
+	_ = json.NewDecoder(pushResp.Body).Decode(&pushBody)
+	_ = pushResp.Body.Close()
 
 	accepted := pushBody["accepted"].([]any)
 	if len(accepted) != 1 {
@@ -249,7 +259,7 @@ func TestHTTP_RegisterPushPullRoundTrip(t *testing.T) {
 	// --- Simulate WAL: insert changelog entry directly ---
 	// The push wrote the row to `orders` via RLS. Now simulate the WAL consumer
 	// by inserting a changelog entry so the pull finds it.
-	_, execErr := db.Exec(`
+	_, execErr := db.ExecContext(context.Background(), `
 		INSERT INTO sync_changelog (bucket_id, table_name, record_id, operation)
 		VALUES ($1, $2, $3, $4)
 	`, fmt.Sprintf("user:%s", userID), "orders", orderID, 1)
@@ -266,13 +276,13 @@ func TestHTTP_RegisterPushPullRoundTrip(t *testing.T) {
 	})
 	if pullResp.StatusCode != http.StatusOK {
 		var body map[string]any
-		json.NewDecoder(pullResp.Body).Decode(&body)
-		pullResp.Body.Close()
+		_ = json.NewDecoder(pullResp.Body).Decode(&body)
+		_ = pullResp.Body.Close()
 		t.Fatalf("pull status = %d, want %d, body: %v", pullResp.StatusCode, http.StatusOK, body)
 	}
 	var pullBody map[string]any
-	json.NewDecoder(pullResp.Body).Decode(&pullBody)
-	pullResp.Body.Close()
+	_ = json.NewDecoder(pullResp.Body).Decode(&pullBody)
+	_ = pullResp.Body.Close()
 
 	changes := pullBody["changes"].([]any)
 	if len(changes) == 0 {
@@ -310,8 +320,8 @@ func TestHTTP_SchemaMismatch_409(t *testing.T) {
 		t.Fatalf("register status = %d", regResp.StatusCode)
 	}
 	var regBody map[string]any
-	json.NewDecoder(regResp.Body).Decode(&regBody)
-	regResp.Body.Close()
+	_ = json.NewDecoder(regResp.Body).Decode(&regBody)
+	_ = regResp.Body.Close()
 
 	schemaVersion := int64(regBody["schema_version"].(float64))
 
@@ -322,7 +332,7 @@ func TestHTTP_SchemaMismatch_409(t *testing.T) {
 		"schema_version": schemaVersion + 999,
 		"schema_hash":    regBody["schema_hash"],
 	})
-	defer pullResp.Body.Close()
+	defer func() { _ = pullResp.Body.Close() }()
 
 	if pullResp.StatusCode != http.StatusConflict {
 		var body map[string]any
