@@ -222,8 +222,8 @@ jobs:
       !contains(needs.*.result, 'cancelled')
     runs-on: macos-latest
     env:
-      DB_USER: ${{ github.actor }}
-      DB_PASSWORD: ''
+      DB_USER: postgres
+      DB_PASSWORD: postgres
     steps:
       - uses: actions/checkout@v4
 
@@ -236,26 +236,27 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      - name: Install and configure Postgres
+      - name: Install Postgres
+        uses: ikalnytskyi/action-setup-postgres@v7
+        with:
+          username: postgres
+          password: postgres
+          database: synchro_test
+          postgres-version: '16'
+        id: postgres
+
+      - name: Configure WAL for logical replication
         run: |
-          brew install postgresql@16
-          brew services start postgresql@16
-          sleep 3
-          until pg_isready; do sleep 1; done
-
-          psql postgres -c "ALTER SYSTEM SET wal_level = logical;"
-          psql postgres -c "ALTER SYSTEM SET max_replication_slots = 10;"
-          psql postgres -c "ALTER SYSTEM SET max_wal_senders = 10;"
-          brew services restart postgresql@16
-          sleep 3
-          until pg_isready; do sleep 1; done
-
-          createdb synchro_test
+          psql '${{ steps.postgres.outputs.connection-uri }}' -c "ALTER SYSTEM SET wal_level = logical;"
+          psql '${{ steps.postgres.outputs.connection-uri }}' -c "ALTER SYSTEM SET max_replication_slots = 10;"
+          psql '${{ steps.postgres.outputs.connection-uri }}' -c "ALTER SYSTEM SET max_wal_senders = 10;"
+          pg_ctl restart -D "$(psql '${{ steps.postgres.outputs.connection-uri }}' -t -A -c 'SHOW data_directory')"
+          until pg_isready -h localhost -U postgres; do sleep 1; done
 
       - name: Prepare test database and start synchrod
         run: |
-          make db-prepare-server DB_HOST=localhost DB_USER=$(whoami) DB_PASSWORD=
-          make synchrod-test-start DB_HOST=localhost DB_USER=$(whoami) DB_PASSWORD=
+          make db-prepare-server DB_HOST=localhost DB_USER=postgres DB_PASSWORD=postgres
+          make synchrod-test-start DB_HOST=localhost DB_USER=postgres DB_PASSWORD=postgres
 
       - name: Health check synchrod
         run: |
@@ -271,10 +272,10 @@ jobs:
           exit 1
 
       - name: Run Swift integration tests
-        run: make test-swift DB_HOST=localhost DB_USER=$(whoami) DB_PASSWORD=
+        run: make test-swift DB_HOST=localhost DB_USER=postgres DB_PASSWORD=postgres
 
       - name: Run Kotlin integration tests
-        run: make test-kotlin DB_HOST=localhost DB_USER=$(whoami) DB_PASSWORD=
+        run: make test-kotlin DB_HOST=localhost DB_USER=postgres DB_PASSWORD=postgres
 
       - name: Stop synchrod
         if: always()
