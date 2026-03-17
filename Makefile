@@ -140,7 +140,7 @@ db-clean-slots:
 
 lint-go:
 	golangci-lint run
-	go-licenses check ./... --allowed_licenses=MIT,BSD-2-Clause,BSD-3-Clause,Apache-2.0,ISC,MPL-2.0
+	go-licenses check ./... --allowed_licenses=MIT,BSD-2-Clause,BSD-3-Clause,Apache-2.0,ISC,MPL-2.0,CC0-1.0 --ignore modernc.org/mathutil
 
 lint-rn:
 	cd clients/react-native && yarn typecheck
