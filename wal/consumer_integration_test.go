@@ -371,29 +371,30 @@ func TestWAL_OwnershipChange(t *testing.T) {
 	deadline := time.Now().Add(10 * time.Second)
 	var foundDeleteA, foundInsertB bool
 	for time.Now().Before(deadline) {
-		rows, err := db.QueryContext(ctx,
-			`SELECT bucket_id, operation FROM sync_changelog
-			 WHERE table_name = 'orders' AND record_id = $1 AND seq > $2
-			 ORDER BY seq`, orderID, insertEntry.Seq)
-		if err != nil {
-			t.Fatalf("querying changelog: %v", err)
-		}
+		func() {
+			rows, err := db.QueryContext(ctx,
+				`SELECT bucket_id, operation FROM sync_changelog
+				 WHERE table_name = 'orders' AND record_id = $1 AND seq > $2
+				 ORDER BY seq`, orderID, insertEntry.Seq)
+			if err != nil {
+				t.Fatalf("querying changelog: %v", err)
+			}
+			defer func() { _ = rows.Close() }()
 
-		for rows.Next() {
-			var bucketID string
-			var op int
-			if err := rows.Scan(&bucketID, &op); err != nil {
-				_ = rows.Close()
-				t.Fatalf("scanning: %v", err)
+			for rows.Next() {
+				var bucketID string
+				var op int
+				if err := rows.Scan(&bucketID, &op); err != nil {
+					t.Fatalf("scanning: %v", err)
+				}
+				if bucketID == "user:"+userA && op == int(synchro.OpDelete) {
+					foundDeleteA = true
+				}
+				if bucketID == "user:"+userB && op == int(synchro.OpInsert) {
+					foundInsertB = true
+				}
 			}
-			if bucketID == "user:"+userA && op == int(synchro.OpDelete) {
-				foundDeleteA = true
-			}
-			if bucketID == "user:"+userB && op == int(synchro.OpInsert) {
-				foundInsertB = true
-			}
-		}
-		_ = rows.Close()
+		}()
 
 		if foundDeleteA && foundInsertB {
 			break
