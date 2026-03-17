@@ -336,12 +336,12 @@ func TestHTTP_SchemaMismatch_409(t *testing.T) {
 
 	if pullResp.StatusCode != http.StatusConflict {
 		var body map[string]any
-		json.NewDecoder(pullResp.Body).Decode(&body)
+		_ = json.NewDecoder(pullResp.Body).Decode(&body)
 		t.Fatalf("status = %d, want %d, body: %v", pullResp.StatusCode, http.StatusConflict, body)
 	}
 
 	var body map[string]any
-	json.NewDecoder(pullResp.Body).Decode(&body)
+	_ = json.NewDecoder(pullResp.Body).Decode(&body)
 	if body["code"] != "schema_mismatch" {
 		t.Fatalf("code = %v, want schema_mismatch", body["code"])
 	}
@@ -361,7 +361,7 @@ func TestHTTP_BadRequest_400(t *testing.T) {
 	if err != nil {
 		t.Fatalf("request: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusBadRequest)
 	}
@@ -380,7 +380,7 @@ func TestHTTP_TablesEndpoint(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GET /sync/tables: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusOK)
@@ -456,7 +456,7 @@ func TestHTTP_SchemaEndpoint(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GET /sync/schema: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusOK)
