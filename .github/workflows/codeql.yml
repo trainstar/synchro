@@ -79,7 +79,7 @@ jobs:
 
       - name: Build Kotlin project
         working-directory: clients/kotlin
-        run: ./gradlew :synchro:compileKotlin
+        run: ./gradlew :synchro:compileDebugKotlin
 
       - uses: github/codeql-action/analyze@v3
         with:
