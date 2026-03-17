@@ -12,7 +12,7 @@ cd ios && pod install
 
 **Requirements:** React Native 0.83+, iOS 16.0+, Android minSdk 24
 
-The package uses the TurboModule (Codegen) architecture. It bridges to the native Swift SDK on iOS and the native Kotlin SDK on Android -- there is no JavaScript SQLite driver involved.
+The package uses the TurboModule (Codegen) architecture. It bridges to the native Swift SDK on iOS and the native Kotlin SDK on Android. There is no JavaScript SQLite driver involved.
 
 ## Configuration
 
@@ -125,7 +125,7 @@ const count = await client.readTransaction(async (tx) => {
 });
 ```
 
-The `Transaction` interface exposes `query`, `queryOne`, and `execute` -- the same SQL methods as the top-level client.
+The `Transaction` interface exposes `query`, `queryOne`, and `execute`, the same SQL methods as the top-level client.
 
 :::caution[Transaction timeout]
 Transactions are held open on the native side across async bridge calls. If no operation is performed within **5 seconds**, the transaction is automatically rolled back and a `TransactionTimeoutError` is thrown. Keep transactions short and avoid awaiting user interaction inside them.
@@ -267,7 +267,7 @@ function PendingBadge() {
 | `client` | `SynchroClient` | Required | The initialized client instance |
 | `pollInterval` | `number` | `2000` | Milliseconds between polls |
 
-**Returns:** `number` -- the count of pending changes
+**Returns:** `number`: the count of pending changes
 
 ## Sync Control
 
@@ -370,7 +370,7 @@ try {
 
 ## Seed Database (Optional)
 
-Ship a pre-built SQLite file so the app works offline on first launch — no server required. Useful when users may not have connectivity on first open, or when your onboarding flow writes data before sign-in.
+Ship a pre-built SQLite file so the app works offline on first launch, no server required. Useful when users may not have connectivity on first open, or when your onboarding flow writes data before sign-in.
 
 Without a seed, tables are created on first `start()` from the server schema. The seed removes that dependency.
 
@@ -399,11 +399,11 @@ const client = new SynchroClient({
 });
 ```
 
-If `seedDatabasePath` is set and no database exists at `dbPath`, the seed is copied. If a database already exists, the seed is ignored. Generate seeds with the `synchroseed` CLI — see [Seed Database](/synchro/server/seed-database/).
+If `seedDatabasePath` is set and no database exists at `dbPath`, the seed is copied. If a database already exists, the seed is ignored. Generate seeds with the `synchroseed` CLI. See [Seed Database](/synchro/server/seed-database/).
 
 ## Schema Reconciliation
 
-On connect, schema updates are reconciled **additively** — the client never drops tables or columns:
+On connect, schema updates are reconciled **additively**, and the client never drops tables or columns:
 
 - **New columns/tables** from the server are added
 - **Removed columns/tables** from the server are preserved locally

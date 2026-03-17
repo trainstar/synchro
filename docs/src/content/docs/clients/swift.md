@@ -258,7 +258,7 @@ public enum SynchroError: Error {
 
 ## Seed Database (Optional)
 
-Ship a pre-built SQLite file so the app works offline on first launch — no server required. Useful when users may not have connectivity on first open, or when your onboarding flow writes data before sign-in.
+Ship a pre-built SQLite file so the app works offline on first launch, no server required. Useful when users may not have connectivity on first open, or when your onboarding flow writes data before sign-in.
 
 Without a seed, tables are created on first `start()` from the server schema. The seed removes that dependency.
 
@@ -273,11 +273,11 @@ let config = SynchroConfig(
 )
 ```
 
-If `seedDatabasePath` is set and no database exists at `dbPath`, the seed is copied. If a database already exists, the seed is ignored. Generate seeds with the `synchroseed` CLI — see [Seed Database](/synchro/server/seed-database/).
+If `seedDatabasePath` is set and no database exists at `dbPath`, the seed is copied. If a database already exists, the seed is ignored. Generate seeds with the `synchroseed` CLI. See [Seed Database](/synchro/server/seed-database/).
 
 ## Schema Reconciliation
 
-On connect, schema updates are reconciled **additively** — the client never drops tables or columns:
+On connect, schema updates are reconciled **additively**, and the client never drops tables or columns:
 
 - **New columns/tables** from the server are added
 - **Removed columns/tables** from the server are preserved locally

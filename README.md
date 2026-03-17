@@ -16,13 +16,14 @@
 
 ## How It Works
 
+Every client reads and writes to a local SQLite database using standard SQL. Synchro syncs changes bidirectionally with your PostgreSQL server in the background. WAL-based change detection means no triggers, no polling, no custom APIs. Conflicts are resolved automatically using last-writer-wins with configurable strategies.
+
 ```mermaid
 flowchart TB
+    APP[Your App] -- "query / execute" --> DB
+
     subgraph Client["Client Device"]
-        direction LR
-        APP[Your App] -- "query / execute" --> SDK
         subgraph SDK["Native SDK"]
-            direction TB
             DB[(SQLite)]
             CDC[CDC Triggers]
             PQ[Pending Queue]
@@ -31,7 +32,6 @@ flowchart TB
     end
 
     subgraph Server["Go Server"]
-        direction TB
         PG[("PostgreSQL")]
         WAL[WAL Consumer]
         CL[Changelog]
@@ -46,8 +46,6 @@ flowchart TB
 ```
 
 > **Swift, Kotlin, and React Native** all use the same architecture. React Native bridges to the native Swift (iOS) and Kotlin (Android) SDKs. Your app writes standard SQL to a local SQLite database. CDC triggers detect changes and queue them for push. The server uses PostgreSQL WAL to detect changes and serves them to clients via pull.
-
-Every client reads and writes to a local SQLite database using standard SQL. Synchro syncs changes bidirectionally with your PostgreSQL server in the background. WAL-based change detection means no triggers, no polling, no custom APIs. Conflicts are resolved automatically using last-writer-wins with configurable strategies.
 
 ## Why Synchro
 
@@ -178,12 +176,12 @@ const tasks = await client.query('SELECT * FROM tasks WHERE completed = 0');
 
 | Component | What Changes |
 |-----------|-------------|
-| Your tables | No schema changes required -- Synchro adapts to your columns |
+| Your tables | No schema changes required. Synchro adapts to your columns. |
 | PostgreSQL | Set `wal_level = logical` (one-time config) |
 | Your server | Register tables + wire 6 HTTP endpoints |
 | Client app | `query()` and `execute()` against local SQLite |
 
-Synchro introspects your tables at startup and adapts automatically. If a change-tracking timestamp column exists, you get conflict resolution. If a soft-delete column exists, you get soft deletes. Neither is required -- tables without them still sync, with last-push-wins and hard deletes. The column names to look for default to `updated_at` and `deleted_at` but are configurable.
+Synchro introspects your tables at startup and adapts automatically. If a change-tracking timestamp column exists, you get conflict resolution. If a soft-delete column exists, you get soft deletes. Neither is required. Tables without them still sync, with last-push-wins and hard deletes. The column names to look for default to `updated_at` and `deleted_at` but are configurable.
 
 ## Requirements
 

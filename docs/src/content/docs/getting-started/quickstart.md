@@ -26,18 +26,18 @@ go get github.com/trainstar/synchro
 
 ## 2. Prepare Your Schema
 
-Synchro works with your existing tables -- point it at what you have and it adapts automatically. No columns to add, no naming conventions to follow, no migration framework required.
+Synchro works with your existing tables. Point it at what you have and it adapts automatically. No columns to add, no naming conventions to follow, no migration framework required.
 
 At startup, Synchro introspects each registered table via `pg_catalog` and enables the best sync strategy the schema supports:
 
 | Column | When present | When absent |
 |--------|-------------|-------------|
-| `updated_at` | LWW conflict resolution -- concurrent edits are detected and the most recent write wins | Last-push-wins -- every push is applied unconditionally, no conflict detection |
-| `deleted_at` | Soft deletes -- row stays in the database with a timestamp, clients see the deletion, resurrection is possible | Hard deletes -- row is permanently removed via `DELETE`, WAL captures the event for the changelog |
+| `updated_at` | LWW conflict resolution: concurrent edits are detected and the most recent write wins | Last-push-wins: every push is applied unconditionally, no conflict detection |
+| `deleted_at` | Soft deletes: row stays in the database with a timestamp, clients see the deletion, resurrection is possible | Hard deletes: row is permanently removed via `DELETE`, WAL captures the event for the changelog |
 | `created_at` | Protected from client writes (server-managed) | No effect on sync behavior |
 
 :::tip[Recommended for production]
-Most tables already have `updated_at` and `deleted_at`. If yours do, Synchro uses them automatically. If you're starting fresh, we recommend adding them for the richest sync behavior -- but they are not required to get started.
+Most tables already have `updated_at` and `deleted_at`. If yours do, Synchro uses them automatically. If you're starting fresh, we recommend adding them for the richest sync behavior, but they are not required to get started.
 :::
 
 ```sql
@@ -256,12 +256,12 @@ const tasks = await client.query(
 );
 ```
 
-The client SDK handles registration, schema sync, snapshot bootstrap, and the ongoing push/pull loop automatically. Write to your local SQLite tables with normal SQL -- CDC triggers capture changes and queue them for push.
+The client SDK handles registration, schema sync, snapshot bootstrap, and the ongoing push/pull loop automatically. Write to your local SQLite tables with normal SQL. CDC triggers capture changes and queue them for push.
 
 ---
 
 ## Next Steps
 
-- [Core Concepts](/synchro/getting-started/concepts/) -- Understand how WAL capture, buckets, checkpoints, and conflict resolution work together.
-- [Configuration](/synchro/server/configuration/) -- Full reference for `TableConfig`, `Config`, hooks, middleware, and advanced options.
-- [API Reference](/synchro/protocol/api-reference/) -- Wire protocol specification for building custom clients.
+- [Core Concepts](/synchro/getting-started/concepts/). Understand how WAL capture, buckets, checkpoints, and conflict resolution work together.
+- [Configuration](/synchro/server/configuration/). Full reference for `TableConfig`, `Config`, hooks, middleware, and advanced options.
+- [API Reference](/synchro/protocol/api-reference/). Wire protocol specification for building custom clients.

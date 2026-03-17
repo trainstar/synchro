@@ -3,7 +3,7 @@ title: "Seed Database"
 description: "Generate and bundle a seed SQLite database for offline-first client bootstrap."
 ---
 
-A seed database is a pre-built SQLite file that ships with your app. It contains synced table schemas, CDC triggers, and optionally pre-loaded data. The app can query and write locally on first launch — before connecting to the server.
+A seed database is a pre-built SQLite file that ships with your app. It contains synced table schemas, CDC triggers, and optionally pre-loaded data. The app can query and write locally on first launch, before connecting to the server.
 
 ## Two Modes
 
@@ -19,7 +19,7 @@ When the client calls `start()` for the first time:
 2. The client performs a normal initial sync (register → snapshot → incremental)
 3. The snapshot **replaces** seed data with the server's authoritative dataset
 
-The seed is a **warm cache**, not a source of truth. It gives the app something to show before connectivity. Once the client syncs, the server is authoritative. Any local writes made before connecting are pushed to the server before the snapshot runs — they are not lost.
+The seed is a **warm cache**, not a source of truth. It gives the app something to show before connectivity. Once the client syncs, the server is authoritative. Any local writes made before connecting are pushed to the server before the snapshot runs. They are not lost.
 
 ## Generating a Seed Database
 
@@ -41,7 +41,7 @@ bin/synchroseed -server=http://localhost:8080 -token=<jwt> -output=seed.db
 bin/synchroseed -server=http://localhost:8080 -token=<jwt> -output=seed.db -with-data
 ```
 
-The `-with-data` flag registers a temporary client, pages through the snapshot endpoint, and inserts all records with the sync lock engaged (CDC triggers don't fire). The auth token determines which data is included — the same bucket-scoped data the token's user would receive on first sync.
+The `-with-data` flag registers a temporary client, pages through the snapshot endpoint, and inserts all records with the sync lock engaged (CDC triggers don't fire). The auth token determines which data is included: the same bucket-scoped data the token's user would receive on first sync.
 
 For reference data visible to all users, use a token with access to global buckets.
 
@@ -153,4 +153,4 @@ On first connect, the schema manager compares the seed's tables against the serv
 - **Stale data** (`-with-data`): Seed data is replaced by the authoritative snapshot on first sync. The seed shows content during the offline window; the server is the source of truth after connect.
 - **WAL files**: The seed generator sets WAL mode. The client copies WAL/SHM sidecar files alongside the seed if they exist.
 - **GRDB migrations**: The seed includes `grdb_migrations` with `synchro_v1` applied. GRDB skips re-running the migration.
-- **Android SQLiteOpenHelper**: The seed is opened with version 1 — `onCreate` is not called (DB exists), `onUpgrade` is not called (version matches).
+- **Android SQLiteOpenHelper**: The seed is opened with version 1, so `onCreate` is not called (DB exists) and `onUpgrade` is not called (version matches).

@@ -4,7 +4,7 @@ description: "Full reference for TableConfig, Engine setup, hooks, middleware, a
 ---
 
 :::tip[What does NOT change]
-Your application routes, your ORM, your existing queries, your auth middleware — all stay the same. Synchro mounts alongside your existing server.
+Your application routes, your ORM, your existing queries, your auth middleware: all stay the same. Synchro mounts alongside your existing server.
 :::
 
 ---
@@ -58,7 +58,7 @@ registry.Register(&synchro.TableConfig{
 
 | Field | Required | Default | Description |
 |-------|----------|---------|-------------|
-| `TableName` | Yes | -- | Database table name |
+| `TableName` | Yes | - | Database table name |
 | `PushPolicy` | No | inferred | `owner_only` or `disabled` |
 | `OwnerColumn` | Conditional | `""` | Column holding user ID. Required for pushable tables without `ParentTable`. |
 | `ParentTable` | No | `""` | Parent table name for child records |
@@ -113,15 +113,15 @@ engine, err := synchro.NewEngine(synchro.Config{
 
 ### Schema Introspection
 
-At startup, `NewEngine` introspects each registered table via `pg_catalog` to detect which timestamp columns exist. No schema modifications are required -- Synchro adapts to your tables as they are.
+At startup, `NewEngine` introspects each registered table via `pg_catalog` to detect which timestamp columns exist. No schema modifications are required. Synchro adapts to your tables as they are.
 
 | Column | When present | When absent |
 |--------|-------------|-------------|
-| `updated_at` | LWW conflict resolution -- concurrent edits detected and resolved by timestamp. Column is protected from client writes. | Last-push-wins -- every update applied unconditionally. Column not referenced. |
-| `deleted_at` | Soft deletes -- `UPDATE SET deleted_at = now()`. Row preserved for resurrection. Column protected from client writes. | Hard deletes -- `DELETE FROM`. Row permanently removed, WAL captures the event. |
+| `updated_at` | LWW conflict resolution: concurrent edits detected and resolved by timestamp. Column is protected from client writes. | Last-push-wins: every update applied unconditionally. Column not referenced. |
+| `deleted_at` | Soft deletes: `UPDATE SET deleted_at = now()`. Row preserved for resurrection. Column protected from client writes. | Hard deletes: `DELETE FROM`. Row permanently removed, WAL captures the event. |
 | `created_at` | Protected from client writes (server-managed). | No effect on sync behavior. |
 
-`UpdatedAtColumn` and `DeletedAtColumn` on `Config` set the **convention name** to look for. Each table is checked independently -- a single registry can contain tables with and without these columns.
+`UpdatedAtColumn` and `DeletedAtColumn` on `Config` set the **convention name** to look for. Each table is checked independently, so a single registry can contain tables with and without these columns.
 
 ```go
 // Use custom column names across all tables
@@ -134,7 +134,7 @@ engine, _ := synchro.NewEngine(synchro.Config{
 ```
 
 :::tip[When to add timestamp columns]
-For tables where multiple clients may edit the same record concurrently, `updated_at` is strongly recommended -- without it there is no conflict detection. For tables where you need to preserve deletion history or support undo, `deleted_at` is recommended. Reference data tables that are read-only (`PushPolicyDisabled`) work fine without either.
+For tables where multiple clients may edit the same record concurrently, `updated_at` is strongly recommended. Without it there is no conflict detection. For tables where you need to preserve deletion history or support undo, `deleted_at` is recommended. Reference data tables that are read-only (`PushPolicyDisabled`) work fine without either.
 :::
 
 ```go
@@ -485,7 +485,7 @@ consumer := wal.NewConsumer(wal.ConsumerConfig{
     StandbyTimeout:  10 * time.Second,                  // default
 })
 
-// Run in a goroutine — blocks until context is cancelled
+// Run in a goroutine. Blocks until context is cancelled.
 go func() {
     if err := consumer.Start(ctx); err != nil && ctx.Err() == nil {
         log.Fatal("WAL consumer failed", "err", err)
@@ -547,7 +547,7 @@ for _, stmt := range append(stmts, rlsStmts...) {
 
 `GenerateRLSPolicies(registry)` produces:
 
-- **`PushPolicyDisabled` tables** -- read-only behavior (no write policies generated).
-- **Tables with `OwnerColumn`** -- `SELECT`, `INSERT`, `UPDATE`, `DELETE` policies scoped to `owner_col::text = current_setting('app.user_id', true)`.
-- **Tables with `AllowGlobalRead=true`** -- `SELECT` additionally allows `owner_col IS NULL`.
-- **Child tables** -- `EXISTS` subquery through parent chain to verify ownership.
+- **`PushPolicyDisabled` tables:** read-only behavior (no write policies generated).
+- **Tables with `OwnerColumn`:** `SELECT`, `INSERT`, `UPDATE`, `DELETE` policies scoped to `owner_col::text = current_setting('app.user_id', true)`.
+- **Tables with `AllowGlobalRead=true`:** `SELECT` additionally allows `owner_col IS NULL`.
+- **Child tables:** `EXISTS` subquery through parent chain to verify ownership.

@@ -22,7 +22,7 @@ graph LR
 
 | | WAL Replication | Triggers |
 |---|---|---|
-| **Transaction overhead** | Zero -- WAL is written regardless | Trigger function executes inside every write transaction |
+| **Transaction overhead** | Zero (WAL is written regardless) | Trigger function executes inside every write transaction |
 | **Maintenance** | One consumer process | Trigger DDL on every synced table; must be recreated on schema changes |
 | **Decoupling** | Consumer can lag, restart, or crash without affecting the application | Trigger failure can abort the application transaction |
 | **Visibility** | Captures all changes including those from migrations, backfills, and direct SQL | Only captures changes routed through the trigger |
@@ -33,7 +33,7 @@ The consumer connects using PostgreSQL's replication protocol (`replication=data
 
 ## Buckets and Subscriptions
 
-Every changelog entry is tagged with a **bucket ID**. Buckets are the unit of data partitioning -- they determine which changes a client receives during pull.
+Every changelog entry is tagged with a **bucket ID**. Buckets are the unit of data partitioning: they determine which changes a client receives during pull.
 
 ### How Buckets Are Assigned
 
@@ -41,10 +41,10 @@ When the WAL consumer processes a change, it calls the configured `BucketAssigne
 
 The default `JoinResolver` uses the registry metadata:
 
-- **Tables with an `OwnerColumn`** -- Bucket ID is `user:<owner_column_value>`. A task owned by user `abc-123` goes into bucket `user:abc-123`.
-- **Child tables (via `ParentTable`)** -- The resolver walks the parent chain up to the root table and uses the root's owner column.
-- **Tables without ownership** -- Records go into the `global` bucket, visible to all clients.
-- **Custom resolvers** -- Implement the `BucketAssigner` interface for multi-tenant, team-based, or content-sharing bucket strategies.
+- **Tables with an `OwnerColumn`:** Bucket ID is `user:<owner_column_value>`. A task owned by user `abc-123` goes into bucket `user:abc-123`.
+- **Child tables (via `ParentTable`):** The resolver walks the parent chain up to the root table and uses the root's owner column.
+- **Tables without ownership:** Records go into the `global` bucket, visible to all clients.
+- **Custom resolvers:** Implement the `BucketAssigner` interface for multi-tenant, team-based, or content-sharing bucket strategies.
 
 ### Client Subscriptions
 
@@ -58,7 +58,7 @@ If a record's ownership changes (e.g., transferred to another user), the WAL con
 
 ## Checkpoints
 
-The `sync_changelog` table uses a monotonically increasing `BIGSERIAL` column (`seq`) as its cursor. Each client tracks its **checkpoint** -- the highest `seq` value it has processed.
+The `sync_changelog` table uses a monotonically increasing `BIGSERIAL` column (`seq`) as its cursor. Each client tracks its **checkpoint**, the highest `seq` value it has processed.
 
 ### How Checkpoints Work
 
@@ -69,9 +69,9 @@ The `sync_changelog` table uses a monotonically increasing `BIGSERIAL` column (`
 
 ### Properties
 
-- **Idempotent advancement** -- Checkpoint only moves forward. Re-sending the same checkpoint returns the same changes. The server enforces `last_pull_seq < new_seq` on update.
-- **Per-client isolation** -- Each client has its own checkpoint. Slow clients do not block fast ones.
-- **Compaction boundary** -- If changelog compaction is enabled, entries below a retention threshold are deleted. If a client's checkpoint falls behind the compaction boundary, the server responds with `snapshot_required: true` and the client must re-bootstrap via the snapshot endpoint.
+- **Idempotent advancement:** Checkpoint only moves forward. Re-sending the same checkpoint returns the same changes. The server enforces `last_pull_seq < new_seq` on update.
+- **Per-client isolation:** Each client has its own checkpoint. Slow clients do not block fast ones.
+- **Compaction boundary:** If changelog compaction is enabled, entries below a retention threshold are deleted. If a client's checkpoint falls behind the compaction boundary, the server responds with `snapshot_required: true` and the client must re-bootstrap via the snapshot endpoint.
 
 ---
 
@@ -88,7 +88,7 @@ Synchro supports three conflict resolution strategies:
 The default strategy. Compares the client's `client_updated_at` timestamp against the server's `updated_at`, adjusting for configurable clock skew tolerance.
 
 :::note[LWW requires `updated_at`]
-LWW conflict resolution requires the table to have an `updated_at` column (or the column configured via `Config.UpdatedAtColumn`). Tables without this column use **last-push-wins** -- every push is applied unconditionally with no conflict detection. This is fine for append-only tables or tables where concurrent edits don't occur, but for collaborative data you should add `updated_at` to get proper conflict handling.
+LWW conflict resolution requires the table to have an `updated_at` column (or the column configured via `Config.UpdatedAtColumn`). Tables without this column use **last-push-wins**, where every push is applied unconditionally with no conflict detection. This is fine for append-only tables or tables where concurrent edits don't occur, but for collaborative data you should add `updated_at` to get proper conflict handling.
 :::
 
 ```go
@@ -101,8 +101,8 @@ engine, _ := synchro.NewEngine(synchro.Config{
 
 If the client provides a `base_updated_at` (optimistic concurrency), the resolver first checks whether the server record changed since that base version:
 
-- **Server unchanged since base** -- Client wins (no true conflict).
-- **Server changed since base** -- Falls back to timestamp comparison.
+- **Server unchanged since base:** Client wins (no true conflict).
+- **Server changed since base:** Falls back to timestamp comparison.
 
 ### ServerWins
 
@@ -167,10 +167,10 @@ Synchro enforces **server-authoritative schema**. The server computes a canonica
 
 ### How It Works
 
-1. **Server computes schema** -- On first request, the server reads column definitions from `pg_catalog`, computes a SHA-256 hash, and persists it in `sync_schema_manifest` with an auto-incrementing version.
-2. **Client receives schema on registration** -- The register response includes `schema_version` and `schema_hash`.
-3. **Handshake on every request** -- Push, pull, and snapshot requests include the client's `schema_version` and `schema_hash`. The server compares them against the current manifest.
-4. **Mismatch handling** -- If the client's schema does not match, the server returns HTTP `409 Conflict` with the current server version and hash. The client re-fetches the schema via `GET /sync/schema` and migrates its local SQLite tables.
+1. **Server computes schema:** On first request, the server reads column definitions from `pg_catalog`, computes a SHA-256 hash, and persists it in `sync_schema_manifest` with an auto-incrementing version.
+2. **Client receives schema on registration:** The register response includes `schema_version` and `schema_hash`.
+3. **Handshake on every request:** Push, pull, and snapshot requests include the client's `schema_version` and `schema_hash`. The server compares them against the current manifest.
+4. **Mismatch handling:** If the client's schema does not match, the server returns HTTP `409 Conflict` with the current server version and hash. The client re-fetches the schema via `GET /sync/schema` and migrates its local SQLite tables.
 
 <pre class="mermaid">
 graph TD
@@ -183,7 +183,7 @@ graph TD
 </pre>
 
 :::note[No drift]
-The schema contract is deterministic. Two servers with the same PostgreSQL schema and the same registered tables will always produce the same hash. There is no manual versioning -- the version increments automatically when the schema changes.
+The schema contract is deterministic. Two servers with the same PostgreSQL schema and the same registered tables will always produce the same hash. There is no manual versioning; the version increments automatically when the schema changes.
 :::
 
 ### Schema Reconciliation
@@ -192,8 +192,8 @@ When a client connects and receives a new schema version, the schema manager rec
 
 - **New columns** from the server are added via `ALTER TABLE ADD COLUMN`
 - **New tables** from the server are created with CDC triggers
-- **Removed columns** (present locally but not in server schema) are **preserved** — no data is dropped
-- **Removed tables** (present locally but not in server schema) are **preserved** — no data is dropped
+- **Removed columns** (present locally but not in server schema) are **preserved**. No data is dropped.
+- **Removed tables** (present locally but not in server schema) are **preserved**. No data is dropped.
 - **Local-only tables** (created by the app, not in server schema) are **never touched**
 - **Extra columns** on synced tables (added locally by the app) are **never touched**
 
@@ -251,8 +251,8 @@ The client pages through a full snapshot of its subscribed data. The snapshot en
 
 The client enters a push-then-pull loop:
 
-1. **Push** -- Send any locally queued changes. The server returns per-record results.
-2. **Pull** -- Send the current checkpoint. The server returns all changes since that checkpoint, along with deletes and a new checkpoint value.
+1. **Push:** Send any locally queued changes. The server returns per-record results.
+2. **Pull:** Send the current checkpoint. The server returns all changes since that checkpoint, along with deletes and a new checkpoint value.
 
 This loop runs on a configurable interval (typically 5-30 seconds) and on-demand when the user makes local changes.
 
@@ -260,7 +260,7 @@ This loop runs on a configurable interval (typically 5-30 seconds) and on-demand
 
 ## Client-Side CDC
 
-Client SDKs use SQLite triggers to automatically track local changes. There is no special write API -- applications use normal SQL `INSERT`, `UPDATE`, and `DELETE` statements against their local tables.
+Client SDKs use SQLite triggers to automatically track local changes. There is no special write API; applications use normal SQL `INSERT`, `UPDATE`, and `DELETE` statements against their local tables.
 
 ### How It Works
 

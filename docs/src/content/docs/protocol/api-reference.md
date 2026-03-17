@@ -100,13 +100,13 @@ Retrieves incremental changes for the client after its checkpoint. `pull` is not
 
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
-| `client_id` | `string` | Yes | -- | Registered client ID |
-| `checkpoint` | `int64` | Yes | -- | Last processed changelog seq |
+| `client_id` | `string` | Yes | - | Registered client ID |
+| `checkpoint` | `int64` | Yes | - | Last processed changelog seq |
 | `tables` | `string[]` | No | all tables | Optional table filter |
 | `limit` | `int` | No | 100 | Max records per response (capped at 1000) |
-| `known_buckets` | `string[]` | No | -- | Buckets the client currently knows about |
-| `schema_version` | `int64` | Yes | -- | Client schema version |
-| `schema_hash` | `string` | Yes | -- | Client schema hash |
+| `known_buckets` | `string[]` | No | - | Buckets the client currently knows about |
+| `schema_version` | `int64` | Yes | - | Client schema version |
+| `schema_hash` | `string` | Yes | - | Client schema hash |
 
 ### Response (200)
 
@@ -332,11 +332,11 @@ The server captures a snapshot checkpoint once at the start of the flow. That ch
 
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
-| `client_id` | `string` | Yes | -- | Registered client ID |
+| `client_id` | `string` | Yes | - | Registered client ID |
 | `cursor` | `SnapshotCursor?` | No | `null` | Cursor from the previous snapshot page |
 | `limit` | `int` | No | 100 | Max records per response (capped at 1000) |
-| `schema_version` | `int64` | Yes | -- | Client schema version |
-| `schema_hash` | `string` | Yes | -- | Client schema hash |
+| `schema_version` | `int64` | Yes | - | Client schema version |
+| `schema_hash` | `string` | Yes | - | Client schema hash |
 
 ### SnapshotCursor
 
