@@ -63,7 +63,7 @@ func newTestServer(t *testing.T) *httptest.Server {
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(testSchema)
+		_ = json.NewEncoder(w).Encode(testSchema)
 	}))
 }
 
@@ -89,7 +89,7 @@ func generateTestDB(t *testing.T) (string, *sql.DB) {
 	if err != nil {
 		t.Fatalf("opening generated database: %v", err)
 	}
-	t.Cleanup(func() { db.Close() })
+	t.Cleanup(func() { _ = db.Close() })
 
 	return dbPath, db
 }
@@ -120,7 +120,7 @@ func TestGenerateHasInfrastructureTables(t *testing.T) {
 	if err != nil {
 		t.Fatalf("querying _synchro_meta: %v", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	gotMeta := make(map[string]string)
 	for rows.Next() {
@@ -176,7 +176,7 @@ func TestGenerateHasCorrectSyncedTables(t *testing.T) {
 	if err != nil {
 		t.Fatalf("querying pragma for users: %v", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	type colInfo struct {
 		name    string

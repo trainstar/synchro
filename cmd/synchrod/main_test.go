@@ -352,7 +352,7 @@ func TestHTTP_BadRequest_400(t *testing.T) {
 
 	tokenStr := signTestJWT("user-1", testJWTSecret)
 
-	req, _ := http.NewRequest(http.MethodPost, srv.URL+"/sync/push", bytes.NewBufferString(`not json`))
+	req, _ := http.NewRequestWithContext(context.Background(), http.MethodPost, srv.URL+"/sync/push", bytes.NewBufferString(`not json`))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+tokenStr)
 	req.Header.Set("X-App-Version", "1.0.0")
@@ -372,7 +372,7 @@ func TestHTTP_TablesEndpoint(t *testing.T) {
 
 	tokenStr := signTestJWT("user-tables", testJWTSecret)
 
-	req, _ := http.NewRequest(http.MethodGet, srv.URL+"/sync/tables", nil)
+	req, _ := http.NewRequestWithContext(context.Background(), http.MethodGet, srv.URL+"/sync/tables", nil)
 	req.Header.Set("Authorization", "Bearer "+tokenStr)
 	req.Header.Set("X-App-Version", "1.0.0")
 
@@ -448,7 +448,7 @@ func TestHTTP_SchemaEndpoint(t *testing.T) {
 
 	tokenStr := signTestJWT("user-schema", testJWTSecret)
 
-	req, _ := http.NewRequest(http.MethodGet, srv.URL+"/sync/schema", nil)
+	req, _ := http.NewRequestWithContext(context.Background(), http.MethodGet, srv.URL+"/sync/schema", nil)
 	req.Header.Set("Authorization", "Bearer "+tokenStr)
 	req.Header.Set("X-App-Version", "1.0.0")
 

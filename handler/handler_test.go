@@ -179,7 +179,7 @@ func TestHandler_TransientError_Returns503(t *testing.T) {
 	}
 
 	// Close the DB to force sql.ErrConnDone on next call.
-	db.Close()
+	_ = db.Close()
 
 	h := handler.New(engine, handler.WithDefaultRetryAfter(10))
 	pullReq := map[string]any{

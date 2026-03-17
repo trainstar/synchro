@@ -473,7 +473,7 @@ func loadPrimaryKeyColumns(ctx context.Context, db DB, schemaName, tableName str
 	if err != nil {
 		return nil, fmt.Errorf("querying primary key columns for %q: %w", tableName, err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var cols []string
 	for rows.Next() {

@@ -3,6 +3,7 @@ package wal_test
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"os"
 	"testing"
@@ -193,7 +194,7 @@ func setupWALTest(t *testing.T, tables []string) (*walTestEnv, context.Context) 
 		consumerCancel()
 		select {
 		case err := <-errCh:
-			if err != nil && err != context.Canceled {
+			if err != nil && !errors.Is(err, context.Canceled) {
 				t.Errorf("consumer error on shutdown: %v", err)
 			}
 		case <-time.After(5 * time.Second):
