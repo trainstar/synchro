@@ -132,7 +132,7 @@ func Generate(cfg Config) error {
 	if err != nil {
 		return fmt.Errorf("opening sqlite database: %w", err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	ctx := context.Background()
 
