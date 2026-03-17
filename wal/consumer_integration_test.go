@@ -47,7 +47,7 @@ func setupWALTest(t *testing.T, tables []string) (*walTestEnv, context.Context) 
 
 	dbName, db := synctest.CreateTempDB(t, databaseURL)
 	t.Cleanup(func() {
-		db.Close()
+		_ = db.Close()
 		synctest.DropTempDB(databaseURL, dbName)
 	})
 
@@ -383,7 +383,7 @@ func TestWAL_OwnershipChange(t *testing.T) {
 			var bucketID string
 			var op int
 			if err := rows.Scan(&bucketID, &op); err != nil {
-				rows.Close()
+				_ = rows.Close()
 				t.Fatalf("scanning: %v", err)
 			}
 			if bucketID == "user:"+userA && op == int(synchro.OpDelete) {
@@ -393,7 +393,7 @@ func TestWAL_OwnershipChange(t *testing.T) {
 				foundInsertB = true
 			}
 		}
-		rows.Close()
+		_ = rows.Close()
 
 		if foundDeleteA && foundInsertB {
 			break

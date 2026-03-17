@@ -270,7 +270,7 @@ func (c *Consumer) loadExistingBuckets(ctx context.Context, db synchro.DB, table
 	if err != nil {
 		return nil, fmt.Errorf("loading existing bucket edges: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var buckets []string
 	for rows.Next() {
