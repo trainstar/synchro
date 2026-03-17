@@ -522,7 +522,7 @@ func doJSON(t *testing.T, srv *httptest.Server, method, path, userID, clientVers
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
-	req, err := http.NewRequest(method, srv.URL+path, bytes.NewReader(payload))
+	req, err := http.NewRequestWithContext(context.Background(), method, srv.URL+path, bytes.NewReader(payload))
 	if err != nil {
 		t.Fatalf("new request: %v", err)
 	}

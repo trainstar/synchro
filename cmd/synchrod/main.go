@@ -75,7 +75,7 @@ func run(ctx context.Context, cfg *config) error {
 	if err != nil {
 		return fmt.Errorf("opening database: %w", err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	if err := db.PingContext(ctx); err != nil {
 		return fmt.Errorf("pinging database: %w", err)
@@ -186,10 +186,9 @@ func run(ctx context.Context, cfg *config) error {
 		}
 	case <-ctx.Done():
 		logger.InfoContext(ctx, "shutting down")
-		//nolint:contextcheck // parent ctx is cancelled; fresh context for graceful shutdown
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second) //nolint:contextcheck // parent ctx is cancelled
 		defer cancel()
-		if err := srv.Shutdown(shutdownCtx); err != nil {
+		if err := srv.Shutdown(shutdownCtx); err != nil { //nolint:contextcheck // uses shutdownCtx defined above
 			return fmt.Errorf("HTTP shutdown: %w", err)
 		}
 	}

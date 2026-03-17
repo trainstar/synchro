@@ -37,7 +37,7 @@ func TestHandler_Routes_MountsAllEndpoints(t *testing.T) {
 
 	for _, tc := range routes {
 		t.Run(tc.method+" "+tc.path, func(t *testing.T) {
-			req, _ := http.NewRequest(tc.method, srv.URL+tc.path, bytes.NewBufferString(`{}`))
+			req, _ := http.NewRequestWithContext(context.Background(), tc.method, srv.URL+tc.path, bytes.NewBufferString(`{}`))
 			req.Header.Set("Content-Type", "application/json")
 			resp, err := http.DefaultClient.Do(req)
 			if err != nil {
