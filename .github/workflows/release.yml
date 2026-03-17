@@ -30,6 +30,17 @@ jobs:
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "Version: $VERSION"
 
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Check license compliance
+        run: |
+          go install github.com/google/go-licenses@latest
+          go-licenses check ./... --allowed_licenses=MIT,BSD-2-Clause,BSD-3-Clause,Apache-2.0,ISC,MPL-2.0
+
   # ── Go tests ───────────────────────────────────────────────────────────
   test-go:
     needs: prepare
@@ -55,10 +66,20 @@ jobs:
         with:
           go-version-file: go.mod
 
+      - name: Configure WAL for logical replication
+        run: |
+          PGPASSWORD=postgres psql -h localhost -U postgres -c "ALTER SYSTEM SET wal_level = logical;"
+          PGPASSWORD=postgres psql -h localhost -U postgres -c "ALTER SYSTEM SET max_replication_slots = 10;"
+          PGPASSWORD=postgres psql -h localhost -U postgres -c "ALTER SYSTEM SET max_wal_senders = 10;"
+          docker restart $(docker ps -q --filter "ancestor=postgres:16")
+          sleep 3
+          until PGPASSWORD=postgres pg_isready -h localhost -U postgres; do sleep 1; done
+
       - name: Run Go tests
         env:
           TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/synchro_test?sslmode=disable
-        run: go test -count=1 -p 1 ./...
+          TEST_REPLICATION_URL: postgres://postgres:postgres@localhost:5432/synchro_test?replication=database&sslmode=disable
+        run: go test -race -count=1 -p 1 ./...
 
   # ── Swift tests ────────────────────────────────────────────────────────
   test-swift:
@@ -131,10 +152,19 @@ jobs:
           BINARY="synchrod-${{ matrix.goos }}-${{ matrix.goarch }}"
           go build -ldflags="-s -w -X main.version=${VERSION}" -o "$BINARY" ./cmd/synchrod
 
+      - name: Generate SBOM
+        uses: anchore/sbom-action@v0
+        with:
+          artifact-name: "sbom-${{ matrix.goos }}-${{ matrix.goarch }}.spdx.json"
+          output-file: "sbom-${{ matrix.goos }}-${{ matrix.goarch }}.spdx.json"
+          format: spdx-json
+
       - uses: actions/upload-artifact@v4
         with:
           name: "synchrod-${{ matrix.goos }}-${{ matrix.goarch }}"
-          path: "synchrod-${{ matrix.goos }}-${{ matrix.goarch }}"
+          path: |
+            synchrod-${{ matrix.goos }}-${{ matrix.goarch }}
+            sbom-${{ matrix.goos }}-${{ matrix.goarch }}.spdx.json
 
   # ── Publish Swift SDK ──────────────────────────────────────────────────
   release-swift:
@@ -293,6 +323,10 @@ jobs:
             synchrod-linux-arm64/synchrod-linux-arm64 \
             synchrod-darwin-amd64/synchrod-darwin-amd64 \
             synchrod-darwin-arm64/synchrod-darwin-arm64 \
+            synchrod-linux-amd64/sbom-linux-amd64.spdx.json \
+            synchrod-linux-arm64/sbom-linux-arm64.spdx.json \
+            synchrod-darwin-amd64/sbom-darwin-amd64.spdx.json \
+            synchrod-darwin-arm64/sbom-darwin-arm64.spdx.json \
             swift-archive/Synchro-swift-${VERSION}.zip \
             kotlin-aar/synchro-${VERSION}.aar \
             npm-tarball/trainstar-synchro-react-native-${VERSION}.tgz \
@@ -315,6 +349,10 @@ jobs:
             "artifacts/synchrod-linux-arm64/synchrod-linux-arm64#synchrod-linux-arm64" \
             "artifacts/synchrod-darwin-amd64/synchrod-darwin-amd64#synchrod-darwin-amd64" \
             "artifacts/synchrod-darwin-arm64/synchrod-darwin-arm64#synchrod-darwin-arm64" \
+            "artifacts/synchrod-linux-amd64/sbom-linux-amd64.spdx.json" \
+            "artifacts/synchrod-linux-arm64/sbom-linux-arm64.spdx.json" \
+            "artifacts/synchrod-darwin-amd64/sbom-darwin-amd64.spdx.json" \
+            "artifacts/synchrod-darwin-arm64/sbom-darwin-arm64.spdx.json" \
             "artifacts/swift-archive/Synchro-swift-${VERSION}.zip" \
             "artifacts/kotlin-aar/synchro-${VERSION}.aar" \
             "artifacts/npm-tarball/trainstar-synchro-react-native-${VERSION}.tgz" \

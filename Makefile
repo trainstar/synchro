@@ -1,14 +1,19 @@
 .PHONY: \
 	help \
 	build \
+	build-check \
 	run \
 	db-init \
 	db-prepare-server \
 	db-reset \
 	db-clean-slots \
+	lint-go \
+	lint-rn \
 	test \
 	test-go-unit \
+	test-go-unit-race \
 	test-go-integration \
+	test-go-integration-race \
 	test-go-wal \
 	test-swift \
 	test-swift-unit \
@@ -62,14 +67,19 @@ TEST_ENV = \
 help:
 	@echo "Available targets:"
 	@echo "  build                 - Build the synchrod binary"
+	@echo "  build-check           - Build library and cross-compile smoke test"
 	@echo "  run                   - Run synchrod locally with current env"
 	@echo "  db-init               - Create the test database if missing"
 	@echo "  db-prepare-server     - Reset the shared synchrod test DB and install test schema"
 	@echo "  db-reset              - Drop and recreate the test database"
 	@echo "  db-clean-slots        - Drop inactive replication slots in the test DB"
+	@echo "  lint-go               - Run Go linters and license check"
+	@echo "  lint-rn               - Run React Native typecheck and ESLint"
 	@echo "  test                  - Run local default validation (Go unit + Swift + Kotlin unit tests)"
 	@echo "  test-go-unit          - Run Go tests without integration env"
+	@echo "  test-go-unit-race     - Run Go tests with race detector"
 	@echo "  test-go-integration   - Run Go integration tests against the configured test DB"
+	@echo "  test-go-integration-race - Run Go integration tests with race detector"
 	@echo "  test-go-wal           - Run Go WAL/replication tests against the configured test DB"
 	@echo "  synchrod-test-start   - Start the synchrod integration server in the background"
 	@echo "  synchrod-test-stop    - Stop the synchrod integration server"
@@ -94,6 +104,10 @@ help:
 
 build:
 	go build -o bin/synchrod ./cmd/synchrod
+
+build-check:
+	go build ./...
+	GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build ./cmd/synchrod
 
 run:
 	go run ./cmd/synchrod
@@ -124,13 +138,27 @@ db-clean-slots:
 		"SELECT pg_drop_replication_slot(slot_name) FROM pg_replication_slots WHERE active = false;" 2>/dev/null || true
 	@echo "Done."
 
+lint-go:
+	golangci-lint run
+	go-licenses check ./... --allowed_licenses=MIT,BSD-2-Clause,BSD-3-Clause,Apache-2.0,ISC,MPL-2.0
+
+lint-rn:
+	cd clients/react-native && yarn typecheck
+	cd clients/react-native && yarn lint
+
 test: test-go-unit test-swift-unit test-kotlin-unit test-rn-unit
 
 test-go-unit:
 	go test ./...
 
+test-go-unit-race:
+	go test -race ./...
+
 test-go-integration:
 	$(TEST_ENV) go test -count=1 -p 1 ./...
+
+test-go-integration-race:
+	$(TEST_ENV) go test -race -count=1 -p 1 ./...
 
 test-go-wal:
 	$(TEST_ENV) go test -count=1 -p 1 -v ./...

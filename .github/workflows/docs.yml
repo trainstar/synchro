@@ -5,6 +5,7 @@ on:
     branches: [master]
     paths:
       - 'docs/**'
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -20,6 +21,12 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
+
+      - uses: actions/cache@v4
+        with:
+          path: docs/node_modules
+          key: docs-node-${{ hashFiles('docs/package-lock.json') }}
+          restore-keys: docs-node-
 
       - name: Install and build
         working-directory: docs

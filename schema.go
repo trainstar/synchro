@@ -100,7 +100,7 @@ func (s *schemaStore) buildCanonicalSchemaTables(ctx context.Context, db DB, reg
 
 	tables := make([]SchemaTable, 0, len(configs))
 	for _, cfg := range configs {
-		cols, pk, err := loadTableColumnsAndPK(ctx, db, cfg.TableName)
+		cols, pk, err := loadTableColumnsAndPK(ctx, db, cfg.TableName, cfg.SyncColumns)
 		if err != nil {
 			return nil, err
 		}
@@ -199,7 +199,7 @@ type columnMeta struct {
 	IsPK       bool
 }
 
-func loadTableColumnsAndPK(ctx context.Context, db DB, table string) ([]SchemaColumn, []string, error) {
+func loadTableColumnsAndPK(ctx context.Context, db DB, table string, syncColumns []string) ([]SchemaColumn, []string, error) {
 	schemaName, tableName := splitSchemaTable(table)
 
 	pkCols, err := loadPrimaryKeyColumns(ctx, db, schemaName, tableName)
@@ -223,11 +223,22 @@ func loadTableColumnsAndPK(ctx context.Context, db DB, table string) ([]SchemaCo
 	}
 	defer colRows.Close()
 
+	var syncSet map[string]bool
+	if len(syncColumns) > 0 {
+		syncSet = make(map[string]bool, len(syncColumns))
+		for _, col := range syncColumns {
+			syncSet[col] = true
+		}
+	}
+
 	var cols []SchemaColumn
 	for colRows.Next() {
 		var c columnMeta
 		if err := colRows.Scan(&c.Name, &c.DBType, &c.Nullable, &c.DefaultSQL); err != nil {
 			return nil, nil, fmt.Errorf("scanning schema column for %q: %w", table, err)
+		}
+		if syncSet != nil && !syncSet[c.Name] {
+			continue
 		}
 		_, c.IsPK = pkSet[c.Name]
 		logicalType, err := mapLogicalType(c.DBType)
