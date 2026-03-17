@@ -1,6 +1,7 @@
 package seeddb
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"net/http"
@@ -98,7 +99,7 @@ func TestGenerateHasInfrastructureTables(t *testing.T) {
 
 	// Verify _synchro_pending_changes table exists.
 	var pcCount int
-	err := db.QueryRow("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='_synchro_pending_changes'").Scan(&pcCount)
+	err := db.QueryRowContext(context.Background(),"SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='_synchro_pending_changes'").Scan(&pcCount)
 	if err != nil {
 		t.Fatalf("querying sqlite_master: %v", err)
 	}
@@ -115,7 +116,7 @@ func TestGenerateHasInfrastructureTables(t *testing.T) {
 		"snapshot_complete":  "0",
 	}
 
-	rows, err := db.Query("SELECT key, value FROM _synchro_meta ORDER BY key")
+	rows, err := db.QueryContext(context.Background(),"SELECT key, value FROM _synchro_meta ORDER BY key")
 	if err != nil {
 		t.Fatalf("querying _synchro_meta: %v", err)
 	}
@@ -146,7 +147,7 @@ func TestGenerateHasInfrastructureTables(t *testing.T) {
 
 	// Verify grdb_migrations table has synchro_v1.
 	var migrationID string
-	err = db.QueryRow("SELECT identifier FROM grdb_migrations WHERE identifier = 'synchro_v1'").Scan(&migrationID)
+	err = db.QueryRowContext(context.Background(),"SELECT identifier FROM grdb_migrations WHERE identifier = 'synchro_v1'").Scan(&migrationID)
 	if err != nil {
 		t.Fatalf("querying grdb_migrations: %v", err)
 	}
@@ -161,7 +162,7 @@ func TestGenerateHasCorrectSyncedTables(t *testing.T) {
 	// Verify both tables exist.
 	for _, tableName := range []string{"users", "tasks"} {
 		var count int
-		err := db.QueryRow("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?", tableName).Scan(&count)
+		err := db.QueryRowContext(context.Background(),"SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?", tableName).Scan(&count)
 		if err != nil {
 			t.Fatalf("querying for table %s: %v", tableName, err)
 		}
@@ -171,7 +172,7 @@ func TestGenerateHasCorrectSyncedTables(t *testing.T) {
 	}
 
 	// Verify users table columns via PRAGMA.
-	rows, err := db.Query("PRAGMA table_info(users)")
+	rows, err := db.QueryContext(context.Background(),"PRAGMA table_info(users)")
 	if err != nil {
 		t.Fatalf("querying pragma for users: %v", err)
 	}
@@ -251,7 +252,7 @@ func TestGenerateHasCorrectCDCTriggers(t *testing.T) {
 
 		for _, triggerName := range expectedTriggers {
 			var count int
-			err := db.QueryRow(
+			err := db.QueryRowContext(context.Background(),
 				"SELECT COUNT(*) FROM sqlite_master WHERE type='trigger' AND name=?",
 				triggerName,
 			).Scan(&count)
@@ -266,7 +267,7 @@ func TestGenerateHasCorrectCDCTriggers(t *testing.T) {
 
 	// Verify total trigger count is 6 (3 per table * 2 tables).
 	var totalTriggers int
-	err := db.QueryRow("SELECT COUNT(*) FROM sqlite_master WHERE type='trigger'").Scan(&totalTriggers)
+	err := db.QueryRowContext(context.Background(),"SELECT COUNT(*) FROM sqlite_master WHERE type='trigger'").Scan(&totalTriggers)
 	if err != nil {
 		t.Fatalf("counting triggers: %v", err)
 	}
@@ -280,7 +281,7 @@ func TestGenerateCanInsertAndQuery(t *testing.T) {
 
 	// Disable sync_lock so triggers fire (it's already '0' by default).
 	// Insert a user row.
-	_, err := db.Exec(`
+	_, err := db.ExecContext(context.Background(),`
 		INSERT INTO "users" (id, name, email, age, score, active, updated_at)
 		VALUES ('user-1', 'Alice', 'alice@example.com', 30, 95.5, 1, '2024-01-01T00:00:00.000Z')
 	`)
@@ -292,7 +293,7 @@ func TestGenerateCanInsertAndQuery(t *testing.T) {
 	var id, name string
 	var age int
 	var score float64
-	err = db.QueryRow("SELECT id, name, age, score FROM users WHERE id = 'user-1'").Scan(&id, &name, &age, &score)
+	err = db.QueryRowContext(context.Background(),"SELECT id, name, age, score FROM users WHERE id = 'user-1'").Scan(&id, &name, &age, &score)
 	if err != nil {
 		t.Fatalf("querying user: %v", err)
 	}
@@ -302,7 +303,7 @@ func TestGenerateCanInsertAndQuery(t *testing.T) {
 
 	// Verify the CDC trigger fired and created a pending change.
 	var recordID, operation string
-	err = db.QueryRow("SELECT record_id, operation FROM _synchro_pending_changes WHERE table_name = 'users'").Scan(&recordID, &operation)
+	err = db.QueryRowContext(context.Background(),"SELECT record_id, operation FROM _synchro_pending_changes WHERE table_name = 'users'").Scan(&recordID, &operation)
 	if err != nil {
 		t.Fatalf("querying pending changes: %v", err)
 	}
@@ -314,7 +315,7 @@ func TestGenerateCanInsertAndQuery(t *testing.T) {
 	}
 
 	// Insert a task and verify cross-table isolation.
-	_, err = db.Exec(`
+	_, err = db.ExecContext(context.Background(),`
 		INSERT INTO "tasks" (id, title, user_id, updated_at)
 		VALUES ('task-1', 'Do stuff', 'user-1', '2024-01-01T00:00:00.000Z')
 	`)
@@ -323,7 +324,7 @@ func TestGenerateCanInsertAndQuery(t *testing.T) {
 	}
 
 	var taskCount int
-	err = db.QueryRow("SELECT COUNT(*) FROM _synchro_pending_changes").Scan(&taskCount)
+	err = db.QueryRowContext(context.Background(),"SELECT COUNT(*) FROM _synchro_pending_changes").Scan(&taskCount)
 	if err != nil {
 		t.Fatalf("counting pending changes: %v", err)
 	}
@@ -380,7 +381,7 @@ func TestGenerateCreateTableSQL(t *testing.T) {
 		},
 	}
 
-	sql := GenerateCreateTableSQL(table)
+	sql := GenerateCreateTableSQL(&table)
 
 	// Verify table name is quoted.
 	if !strings.Contains(sql, `"items"`) {
@@ -426,7 +427,7 @@ func TestGenerateCDCTriggers(t *testing.T) {
 		},
 	}
 
-	triggers := GenerateCDCTriggers(table)
+	triggers := GenerateCDCTriggers(&table)
 
 	if len(triggers) != 3 {
 		t.Fatalf("expected 3 triggers, got %d", len(triggers))

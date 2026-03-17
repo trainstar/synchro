@@ -140,17 +140,25 @@ func setupWALTest(t *testing.T, tables []string) (*walTestEnv, context.Context) 
 		t.Fatalf("creating publication: %v", err)
 	}
 	t.Cleanup(func() {
-		db.ExecContext(context.Background(), fmt.Sprintf("DROP PUBLICATION IF EXISTS %s", pubName))
-		db.ExecContext(context.Background(),
+		_, _ = db.ExecContext(context.Background(), fmt.Sprintf("DROP PUBLICATION IF EXISTS %s", pubName))
+		_, _ = db.ExecContext(context.Background(),
 			fmt.Sprintf("SELECT pg_drop_replication_slot('%s') FROM pg_replication_slots WHERE slot_name = '%s'", slotName, slotName))
 	})
 
 	tempReplicationURL := synctest.ReplaceDSNDatabase(replicationURL, dbName)
 
 	reg := synctest.NewTestRegistry()
+
+	// Run introspection so the registry knows which tables have deleted_at
+	// columns. Without this, soft delete detection in the WAL decoder will
+	// not fire because HasDeletedAt() returns false.
+	if err := reg.Introspect(ctx, db, "", ""); err != nil {
+		t.Fatalf("introspecting registry: %v", err)
+	}
+
 	assigner := synchro.NewJoinResolverWithDB(reg, db)
 
-	consumer := wal.NewConsumer(wal.ConsumerConfig{
+	consumer := wal.NewConsumer(&wal.ConsumerConfig{
 		ConnString:      tempReplicationURL,
 		SlotName:        slotName,
 		PublicationName: pubName,

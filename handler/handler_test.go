@@ -43,7 +43,7 @@ func TestHandler_Routes_MountsAllEndpoints(t *testing.T) {
 			if err != nil {
 				t.Fatalf("request failed: %v", err)
 			}
-			resp.Body.Close()
+			_ = resp.Body.Close()
 			if resp.StatusCode != tc.want {
 				t.Fatalf("status = %d, want %d", resp.StatusCode, tc.want)
 			}
@@ -51,11 +51,16 @@ func TestHandler_Routes_MountsAllEndpoints(t *testing.T) {
 	}
 
 	// Verify unregistered path returns 404
-	resp, err := http.Post(srv.URL+"/sync/nonexistent", "application/json", bytes.NewBufferString(`{}`))
+	postReq, err := http.NewRequestWithContext(context.Background(), http.MethodPost, srv.URL+"/sync/nonexistent", bytes.NewBufferString(`{}`))
+	if err != nil {
+		t.Fatalf("creating request: %v", err)
+	}
+	postReq.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(postReq)
 	if err != nil {
 		t.Fatalf("request failed: %v", err)
 	}
-	resp.Body.Close()
+	_ = resp.Body.Close()
 	if resp.StatusCode != http.StatusNotFound {
 		t.Fatalf("unregistered path: status = %d, want %d", resp.StatusCode, http.StatusNotFound)
 	}
@@ -103,7 +108,7 @@ func TestServePull_SchemaMismatchIncludesServerManifest(t *testing.T) {
 	ctx := context.Background()
 
 	reg := synctest.NewTestRegistry()
-	engine, err := synchro.NewEngine(synchro.Config{DB: db, Registry: reg})
+	engine, err := synchro.NewEngine(ctx, &synchro.Config{DB: db, Registry: reg})
 	if err != nil {
 		t.Fatalf("NewEngine: %v", err)
 	}
@@ -157,7 +162,7 @@ func TestHandler_TransientError_Returns503(t *testing.T) {
 	ctx := context.Background()
 
 	reg := synctest.NewTestRegistry()
-	engine, err := synchro.NewEngine(synchro.Config{DB: db, Registry: reg})
+	engine, err := synchro.NewEngine(ctx, &synchro.Config{DB: db, Registry: reg})
 	if err != nil {
 		t.Fatalf("NewEngine: %v", err)
 	}
@@ -251,7 +256,7 @@ func TestHandler_RetryAfterMiddleware_Passes(t *testing.T) {
 	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		called = true
 		w.WriteHeader(http.StatusOK)
-		fmt.Fprint(w, "ok")
+		_, _ = fmt.Fprint(w, "ok")
 	})
 
 	mw := handler.RetryAfterMiddleware(check, inner)

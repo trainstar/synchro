@@ -1,5 +1,6 @@
 import { SynchroClient } from '../src/SynchroClient';
-import { emitNativeEvent, resetNativeModuleMockState } from './__mocks__/react-native';
+import { SyncStatus, ConflictEvent } from '../src/types';
+import { emitNativeEvent, mockNativeModule, resetNativeModuleMockState } from './__mocks__/react-native';
 
 function makeClient(): SynchroClient {
   return new SynchroClient({
@@ -18,7 +19,7 @@ beforeEach(() => {
 describe('Event routing', () => {
   it('routes onStatusChange to subscriber', () => {
     const client = makeClient();
-    const statuses: any[] = [];
+    const statuses: SyncStatus[] = [];
 
     client.onStatusChange((s) => statuses.push(s));
 
@@ -32,7 +33,7 @@ describe('Event routing', () => {
 
   it('parses retryAt as Date', () => {
     const client = makeClient();
-    const statuses: any[] = [];
+    const statuses: SyncStatus[] = [];
 
     client.onStatusChange((s) => statuses.push(s));
 
@@ -40,12 +41,12 @@ describe('Event routing', () => {
     emitNativeEvent('onStatusChange', { status: 'error', retryAt: iso });
 
     expect(statuses[0].retryAt).toBeInstanceOf(Date);
-    expect(statuses[0].retryAt.toISOString()).toBe(iso);
+    expect(statuses[0].retryAt!.toISOString()).toBe(iso);
   });
 
   it('routes onConflict with deserialized data', () => {
     const client = makeClient();
-    const conflicts: any[] = [];
+    const conflicts: ConflictEvent[] = [];
 
     client.onConflict((e) => conflicts.push(e));
 
@@ -64,7 +65,7 @@ describe('Event routing', () => {
 
   it('handles null conflict data', () => {
     const client = makeClient();
-    const conflicts: any[] = [];
+    const conflicts: ConflictEvent[] = [];
 
     client.onConflict((e) => conflicts.push(e));
 
@@ -81,7 +82,7 @@ describe('Event routing', () => {
 
   it('unsubscribe stops delivery', () => {
     const client = makeClient();
-    const statuses: any[] = [];
+    const statuses: SyncStatus[] = [];
 
     const unsub = client.onStatusChange((s) => statuses.push(s));
 
@@ -94,8 +95,8 @@ describe('Event routing', () => {
 
   it('multiple subscribers receive independent events', () => {
     const client = makeClient();
-    const a: any[] = [];
-    const b: any[] = [];
+    const a: SyncStatus[] = [];
+    const b: SyncStatus[] = [];
 
     client.onStatusChange((s) => a.push(s));
     client.onStatusChange((s) => b.push(s));
@@ -116,7 +117,6 @@ describe('Event routing', () => {
 
     // Simulate native firing onChange for the first observer
     // The observer IDs are generated internally, so we extract them from mock calls
-    const { mockNativeModule } = require('./__mocks__/react-native');
     const obs1ID = mockNativeModule.addChangeObserver.mock.calls[0]?.[0];
     const obs2ID = mockNativeModule.addChangeObserver.mock.calls[1]?.[0];
 
@@ -133,7 +133,7 @@ describe('Event routing', () => {
 
   it('routes onQueryResult events by observer ID', () => {
     const client = makeClient();
-    const results: any[] = [];
+    const results: unknown[] = [];
 
     const unsub = client.watch(
       'SELECT * FROM items',
@@ -142,7 +142,6 @@ describe('Event routing', () => {
       (rows) => results.push(rows)
     );
 
-    const { mockNativeModule } = require('./__mocks__/react-native');
     const obsID = mockNativeModule.addQueryObserver.mock.calls[0]?.[0];
 
     emitNativeEvent('onQueryResult', {
@@ -164,7 +163,6 @@ describe('Event routing', () => {
 
   it('unsubscribing onChange cleans up native observer', () => {
     const client = makeClient();
-    const { mockNativeModule } = require('./__mocks__/react-native');
 
     const unsub = client.onChange(['items'], () => {});
 

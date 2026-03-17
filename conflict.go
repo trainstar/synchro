@@ -29,7 +29,7 @@ type Resolution struct {
 
 // ConflictResolver resolves conflicts between client and server data.
 type ConflictResolver interface {
-	Resolve(ctx context.Context, conflict Conflict) (Resolution, error)
+	Resolve(ctx context.Context, conflict *Conflict) (Resolution, error)
 }
 
 // LWWResolver implements Last-Write-Wins conflict resolution.
@@ -39,7 +39,7 @@ type LWWResolver struct {
 }
 
 // Resolve implements ConflictResolver using LWW semantics.
-func (r *LWWResolver) Resolve(_ context.Context, c Conflict) (Resolution, error) {
+func (r *LWWResolver) Resolve(_ context.Context, c *Conflict) (Resolution, error) {
 	clientTime := c.ClientTime.Add(r.ClockSkewTolerance)
 
 	if c.BaseVersion != nil {
@@ -69,6 +69,6 @@ func (r *LWWResolver) Resolve(_ context.Context, c Conflict) (Resolution, error)
 type ServerWinsResolver struct{}
 
 // Resolve implements ConflictResolver by always choosing the server.
-func (r *ServerWinsResolver) Resolve(_ context.Context, _ Conflict) (Resolution, error) {
+func (r *ServerWinsResolver) Resolve(_ context.Context, _ *Conflict) (Resolution, error) {
 	return Resolution{Winner: "server", Reason: "server always wins"}, nil
 }

@@ -62,7 +62,7 @@ func TestIntegration_PushPullRoundTrip(t *testing.T) {
 	reg := synctest.NewTestRegistry()
 	ctx := context.Background()
 
-	engine, err := synchro.NewEngine(synchro.Config{
+	engine, err := synchro.NewEngine(ctx, &synchro.Config{
 		DB:       db,
 		Registry: reg,
 	})
@@ -218,16 +218,16 @@ func TestIntegration_RLSEnforcement(t *testing.T) {
 	// Clean up RLS policies after test so they don't persist
 	t.Cleanup(func() {
 		for _, cfg := range reg.All() {
-			adminDB.ExecContext(ctx, fmt.Sprintf("ALTER TABLE %q DISABLE ROW LEVEL SECURITY", cfg.TableName))
-			adminDB.ExecContext(ctx, fmt.Sprintf("DROP POLICY IF EXISTS %q ON %q", "sync_read_"+cfg.TableName, cfg.TableName))
-			adminDB.ExecContext(ctx, fmt.Sprintf("DROP POLICY IF EXISTS %q ON %q", "sync_write_ins_"+cfg.TableName, cfg.TableName))
-			adminDB.ExecContext(ctx, fmt.Sprintf("DROP POLICY IF EXISTS %q ON %q", "sync_write_upd_"+cfg.TableName, cfg.TableName))
-			adminDB.ExecContext(ctx, fmt.Sprintf("DROP POLICY IF EXISTS %q ON %q", "sync_write_del_"+cfg.TableName, cfg.TableName))
+			_, _ = adminDB.ExecContext(ctx, fmt.Sprintf("ALTER TABLE %q DISABLE ROW LEVEL SECURITY", cfg.TableName))
+			_, _ = adminDB.ExecContext(ctx, fmt.Sprintf("DROP POLICY IF EXISTS %q ON %q", "sync_read_"+cfg.TableName, cfg.TableName))
+			_, _ = adminDB.ExecContext(ctx, fmt.Sprintf("DROP POLICY IF EXISTS %q ON %q", "sync_write_ins_"+cfg.TableName, cfg.TableName))
+			_, _ = adminDB.ExecContext(ctx, fmt.Sprintf("DROP POLICY IF EXISTS %q ON %q", "sync_write_upd_"+cfg.TableName, cfg.TableName))
+			_, _ = adminDB.ExecContext(ctx, fmt.Sprintf("DROP POLICY IF EXISTS %q ON %q", "sync_write_del_"+cfg.TableName, cfg.TableName))
 		}
 	})
 
 	// Engine uses non-superuser connection so RLS is enforced
-	engine, err := synchro.NewEngine(synchro.Config{
+	engine, err := synchro.NewEngine(ctx, &synchro.Config{
 		DB:       appDB,
 		Registry: reg,
 	})
@@ -306,7 +306,7 @@ func TestIntegration_RYOW_PushReturnsServerTimestamps(t *testing.T) {
 	reg := synctest.NewTestRegistry()
 	ctx := context.Background()
 
-	engine, err := synchro.NewEngine(synchro.Config{
+	engine, err := synchro.NewEngine(ctx, &synchro.Config{
 		DB:       db,
 		Registry: reg,
 	})
@@ -404,7 +404,7 @@ func TestIntegration_Compaction(t *testing.T) {
 	reg := synctest.NewTestRegistry()
 	ctx := context.Background()
 
-	engine, err := synchro.NewEngine(synchro.Config{
+	engine, err := synchro.NewEngine(ctx, &synchro.Config{
 		DB:       db,
 		Registry: reg,
 		Compactor: &synchro.CompactorConfig{
@@ -499,7 +499,7 @@ func TestIntegration_StaleClientDeactivation(t *testing.T) {
 	reg := synctest.NewTestRegistry()
 	ctx := context.Background()
 
-	engine, err := synchro.NewEngine(synchro.Config{
+	engine, err := synchro.NewEngine(ctx, &synchro.Config{
 		DB:       db,
 		Registry: reg,
 		Compactor: &synchro.CompactorConfig{
@@ -573,7 +573,7 @@ func TestIntegration_ResyncRequired(t *testing.T) {
 	reg := synctest.NewTestRegistry()
 	ctx := context.Background()
 
-	engine, err := synchro.NewEngine(synchro.Config{
+	engine, err := synchro.NewEngine(ctx, &synchro.Config{
 		DB:       db,
 		Registry: reg,
 	})
@@ -669,7 +669,7 @@ func TestIntegration_SnapshotRoundTrip(t *testing.T) {
 	reg := synctest.NewTestRegistry()
 	ctx := context.Background()
 
-	engine, err := synchro.NewEngine(synchro.Config{
+	engine, err := synchro.NewEngine(ctx, &synchro.Config{
 		DB:       db,
 		Registry: reg,
 	})
@@ -770,7 +770,7 @@ func TestIntegration_SnapshotReactivatesClient(t *testing.T) {
 	reg := synctest.NewTestRegistry()
 	ctx := context.Background()
 
-	engine, err := synchro.NewEngine(synchro.Config{
+	engine, err := synchro.NewEngine(ctx, &synchro.Config{
 		DB:       db,
 		Registry: reg,
 		Compactor: &synchro.CompactorConfig{
@@ -886,7 +886,7 @@ func TestIntegration_PullBucketIsolation(t *testing.T) {
 	reg := synctest.NewTestRegistry()
 	ctx := context.Background()
 
-	engine, err := synchro.NewEngine(synchro.Config{
+	engine, err := synchro.NewEngine(ctx, &synchro.Config{
 		DB:       db,
 		Registry: reg,
 	})
@@ -977,7 +977,7 @@ func TestIntegration_ProtectedColumnEnforcement(t *testing.T) {
 	reg := synctest.NewTestRegistry()
 	ctx := context.Background()
 
-	engine, err := synchro.NewEngine(synchro.Config{
+	engine, err := synchro.NewEngine(ctx, &synchro.Config{
 		DB:       db,
 		Registry: reg,
 	})
@@ -1074,7 +1074,7 @@ func TestIntegration_SoftDeleteLifecycle(t *testing.T) {
 	reg := synctest.NewTestRegistry()
 	ctx := context.Background()
 
-	engine, err := synchro.NewEngine(synchro.Config{
+	engine, err := synchro.NewEngine(ctx, &synchro.Config{
 		DB:       db,
 		Registry: reg,
 	})
@@ -1169,7 +1169,7 @@ func TestIntegration_ReadOnlyTableRejection(t *testing.T) {
 	reg := synctest.NewTestRegistry()
 	ctx := context.Background()
 
-	engine, err := synchro.NewEngine(synchro.Config{
+	engine, err := synchro.NewEngine(ctx, &synchro.Config{
 		DB:       db,
 		Registry: reg,
 	})
@@ -1218,7 +1218,7 @@ func TestIntegration_GlobalBucketPullVisibility(t *testing.T) {
 	reg := synctest.NewTestRegistry()
 	ctx := context.Background()
 
-	engine, err := synchro.NewEngine(synchro.Config{
+	engine, err := synchro.NewEngine(ctx, &synchro.Config{
 		DB:       db,
 		Registry: reg,
 	})
@@ -1275,7 +1275,7 @@ func TestIntegration_PullPagination(t *testing.T) {
 	reg := synctest.NewTestRegistry()
 	ctx := context.Background()
 
-	engine, err := synchro.NewEngine(synchro.Config{
+	engine, err := synchro.NewEngine(ctx, &synchro.Config{
 		DB:       db,
 		Registry: reg,
 	})
@@ -1379,16 +1379,16 @@ func TestIntegration_RLSBroadCoverage(t *testing.T) {
 	// Clean up RLS policies after test so they don't persist
 	t.Cleanup(func() {
 		for _, cfg := range reg.All() {
-			adminDB.ExecContext(ctx, fmt.Sprintf("ALTER TABLE %q DISABLE ROW LEVEL SECURITY", cfg.TableName))
-			adminDB.ExecContext(ctx, fmt.Sprintf("DROP POLICY IF EXISTS %q ON %q", "sync_read_"+cfg.TableName, cfg.TableName))
-			adminDB.ExecContext(ctx, fmt.Sprintf("DROP POLICY IF EXISTS %q ON %q", "sync_write_ins_"+cfg.TableName, cfg.TableName))
-			adminDB.ExecContext(ctx, fmt.Sprintf("DROP POLICY IF EXISTS %q ON %q", "sync_write_upd_"+cfg.TableName, cfg.TableName))
-			adminDB.ExecContext(ctx, fmt.Sprintf("DROP POLICY IF EXISTS %q ON %q", "sync_write_del_"+cfg.TableName, cfg.TableName))
+			_, _ = adminDB.ExecContext(ctx, fmt.Sprintf("ALTER TABLE %q DISABLE ROW LEVEL SECURITY", cfg.TableName))
+			_, _ = adminDB.ExecContext(ctx, fmt.Sprintf("DROP POLICY IF EXISTS %q ON %q", "sync_read_"+cfg.TableName, cfg.TableName))
+			_, _ = adminDB.ExecContext(ctx, fmt.Sprintf("DROP POLICY IF EXISTS %q ON %q", "sync_write_ins_"+cfg.TableName, cfg.TableName))
+			_, _ = adminDB.ExecContext(ctx, fmt.Sprintf("DROP POLICY IF EXISTS %q ON %q", "sync_write_upd_"+cfg.TableName, cfg.TableName))
+			_, _ = adminDB.ExecContext(ctx, fmt.Sprintf("DROP POLICY IF EXISTS %q ON %q", "sync_write_del_"+cfg.TableName, cfg.TableName))
 		}
 	})
 
 	// Engine uses non-superuser connection so RLS is enforced
-	engine, err := synchro.NewEngine(synchro.Config{
+	engine, err := synchro.NewEngine(ctx, &synchro.Config{
 		DB:       appDB,
 		Registry: reg,
 	})
@@ -1539,7 +1539,7 @@ func TestIntegration_PullHydrationMissingRecord(t *testing.T) {
 	reg := synctest.NewTestRegistry()
 	ctx := context.Background()
 
-	engine, err := synchro.NewEngine(synchro.Config{
+	engine, err := synchro.NewEngine(ctx, &synchro.Config{
 		DB:       db,
 		Registry: reg,
 	})
@@ -1616,7 +1616,7 @@ func TestIntegration_PullCheckpointMultiUserInterleaving(t *testing.T) {
 	reg := synctest.NewTestRegistry()
 	ctx := context.Background()
 
-	engine, err := synchro.NewEngine(synchro.Config{
+	engine, err := synchro.NewEngine(ctx, &synchro.Config{
 		DB:       db,
 		Registry: reg,
 	})
@@ -1755,7 +1755,7 @@ func TestIntegration_RunCompaction_NotConfigured(t *testing.T) {
 	reg := synctest.NewTestRegistry()
 	ctx := context.Background()
 
-	engine, err := synchro.NewEngine(synchro.Config{
+	engine, err := synchro.NewEngine(ctx, &synchro.Config{
 		DB:       db,
 		Registry: reg,
 		// No Compactor configured

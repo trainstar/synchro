@@ -1,6 +1,9 @@
 package synchro
 
-import "fmt"
+import (
+	"context"
+	"fmt"
+)
 
 // PushPolicy defines whether a table accepts client writes.
 type PushPolicy string
@@ -42,6 +45,10 @@ type TableConfig struct {
 	// ProtectedColumns are additional columns (beyond defaults) that clients may not write.
 	// Default protected: id, OwnerColumn, ParentFKCol, plus any timestamp columns detected by introspection.
 	ProtectedColumns []string
+
+	// ExcludeColumns lists columns to omit entirely from introspection and client schema.
+	// Use this for server-only computed columns (e.g. tsvector, halfvec) with no SQLite equivalent.
+	ExcludeColumns []string
 
 	// BucketByColumn enables fast-path bucketing without SQL function execution.
 	// Bucket ID is formed as BucketPrefix + value(column).
@@ -290,6 +297,39 @@ func (r *Registry) Validate() error {
 		if r.IsPushable(name) && cfg.OwnerColumn == "" && cfg.ParentTable == "" {
 			return fmt.Errorf("%w: table %q has no OwnerColumn or ParentTable", ErrMissingOwnership, name)
 		}
+	}
+	return nil
+}
+
+// Introspect queries the database for each registered table to determine
+// which timestamp columns (updated_at, deleted_at, created_at) exist. The
+// column names checked default to "updated_at" and "deleted_at" when the
+// provided values are empty. This populates the same metadata that NewEngine
+// sets internally, allowing external consumers (e.g. the WAL consumer) to
+// rely on HasDeletedAt / DeletedAtCol for soft delete detection.
+func (r *Registry) Introspect(ctx context.Context, db DB, updatedAtColumn, deletedAtColumn string) error {
+	if updatedAtColumn == "" {
+		updatedAtColumn = "updated_at"
+	}
+	if deletedAtColumn == "" {
+		deletedAtColumn = "deleted_at"
+	}
+
+	for _, tcfg := range r.All() {
+		hasUA, hasDA, hasCA, err := introspectTimestampColumns(ctx, db, tcfg.TableName, updatedAtColumn, deletedAtColumn)
+		if err != nil {
+			return fmt.Errorf("introspecting %q: %w", tcfg.TableName, err)
+		}
+		tcfg.hasUpdatedAt = hasUA
+		tcfg.hasDeletedAt = hasDA
+		tcfg.hasCreatedAt = hasCA
+		if hasUA {
+			tcfg.updatedAtColumn = updatedAtColumn
+		}
+		if hasDA {
+			tcfg.deletedAtColumn = deletedAtColumn
+		}
+		tcfg.finalizeProtectedSet()
 	}
 	return nil
 }

@@ -2,6 +2,7 @@ package seeddb
 
 import (
 	"bytes"
+	"context"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -91,7 +92,7 @@ type snapshotRecord struct {
 func FetchSchema(serverURL, authToken string) (*schemaResponse, error) {
 	url := strings.TrimRight(serverURL, "/") + "/sync/schema"
 
-	req, err := http.NewRequest(http.MethodGet, url, nil)
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, url, nil)
 	if err != nil {
 		return nil, fmt.Errorf("creating request: %w", err)
 	}
@@ -104,7 +105,7 @@ func FetchSchema(serverURL, authToken string) (*schemaResponse, error) {
 	if err != nil {
 		return nil, fmt.Errorf("fetching schema: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("fetching schema: server returned %d", resp.StatusCode)
@@ -133,11 +134,13 @@ func Generate(cfg Config) error {
 	}
 	defer db.Close()
 
-	tx, err := db.Begin()
+	ctx := context.Background()
+
+	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("beginning transaction: %w", err)
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 
 	if err := createInfrastructureTables(tx, schema); err != nil {
 		return fmt.Errorf("creating infrastructure tables: %w", err)
@@ -145,15 +148,16 @@ func Generate(cfg Config) error {
 
 	// Build column map for data insertion.
 	tableColumns := make(map[string][]schemaColumn, len(schema.Tables))
-	for _, table := range schema.Tables {
+	for i := range schema.Tables {
+		table := &schema.Tables[i]
 		ddl := GenerateCreateTableSQL(table)
-		if _, err := tx.Exec(ddl); err != nil {
+		if _, err := tx.ExecContext(ctx, ddl); err != nil {
 			return fmt.Errorf("creating table %s: %w", table.TableName, err)
 		}
 
 		triggers := GenerateCDCTriggers(table)
 		for _, trigger := range triggers {
-			if _, err := tx.Exec(trigger); err != nil {
+			if _, err := tx.ExecContext(ctx, trigger); err != nil {
 				return fmt.Errorf("creating trigger for table %s: %w", table.TableName, err)
 			}
 		}
@@ -173,7 +177,7 @@ func Generate(cfg Config) error {
 	}
 
 	// Set WAL journal mode outside the transaction.
-	if _, err := db.Exec("PRAGMA journal_mode=WAL"); err != nil {
+	if _, err := db.ExecContext(ctx, "PRAGMA journal_mode=WAL"); err != nil {
 		return fmt.Errorf("setting WAL journal mode: %w", err)
 	}
 
@@ -199,10 +203,10 @@ func fetchAndInsertData(db *sql.DB, cfg Config, schema *schemaResponse, tableCol
 	}
 
 	// Set sync_lock=1 to prevent CDC triggers from firing during inserts.
-	if _, err := db.Exec("UPDATE _synchro_meta SET value = '1' WHERE key = 'sync_lock'"); err != nil {
+	if _, err := db.ExecContext(context.Background(), "UPDATE _synchro_meta SET value = '1' WHERE key = 'sync_lock'"); err != nil {
 		return fmt.Errorf("setting sync lock: %w", err)
 	}
-	defer db.Exec("UPDATE _synchro_meta SET value = '0' WHERE key = 'sync_lock'") //nolint:errcheck
+	defer func() { _, _ = db.ExecContext(context.Background(), "UPDATE _synchro_meta SET value = '0' WHERE key = 'sync_lock'") }()
 
 	// Page through snapshot.
 	var cursor *snapshotCursor
@@ -239,11 +243,12 @@ func fetchAndInsertData(db *sql.DB, cfg Config, schema *schemaResponse, tableCol
 
 // insertRecords inserts snapshot records into the seed database.
 func insertRecords(db *sql.DB, records []snapshotRecord, tableColumns map[string][]schemaColumn) error {
-	tx, err := db.Begin()
+	ctx := context.Background()
+	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 
 	for _, rec := range records {
 		cols, ok := tableColumns[rec.TableName]
@@ -290,7 +295,7 @@ func insertRecords(db *sql.DB, records []snapshotRecord, tableColumns map[string
 			strings.Join(placeholders, ", "),
 		)
 
-		if _, err := tx.Exec(insertSQL, values...); err != nil {
+		if _, err := tx.ExecContext(ctx, insertSQL, values...); err != nil {
 			return fmt.Errorf("inserting record %s/%s: %w", rec.TableName, rec.ID, err)
 		}
 	}
@@ -305,7 +310,7 @@ func postJSON[T any](url, authToken string, body any) (*T, error) {
 		return nil, fmt.Errorf("marshaling request: %w", err)
 	}
 
-	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(jsonBody))
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, url, bytes.NewReader(jsonBody))
 	if err != nil {
 		return nil, fmt.Errorf("creating request: %w", err)
 	}
@@ -319,7 +324,7 @@ func postJSON[T any](url, authToken string, body any) (*T, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("server returned %d", resp.StatusCode)
@@ -342,6 +347,7 @@ func hashString(s string) uint32 {
 }
 
 func createInfrastructureTables(tx *sql.Tx, schema *schemaResponse) error {
+	ctx := context.Background()
 	infraSQL := `
 CREATE TABLE IF NOT EXISTS _synchro_pending_changes (
     record_id TEXT NOT NULL,
@@ -361,7 +367,7 @@ CREATE TABLE IF NOT EXISTS grdb_migrations (
     identifier TEXT NOT NULL PRIMARY KEY
 );
 `
-	if _, err := tx.Exec(infraSQL); err != nil {
+	if _, err := tx.ExecContext(ctx, infraSQL); err != nil {
 		return fmt.Errorf("creating infrastructure tables: %w", err)
 	}
 
@@ -373,12 +379,12 @@ CREATE TABLE IF NOT EXISTS grdb_migrations (
 		{"snapshot_complete", "0"},
 	}
 	for _, m := range metaValues {
-		if _, err := tx.Exec("INSERT OR IGNORE INTO _synchro_meta (key, value) VALUES (?, ?)", m.key, m.value); err != nil {
+		if _, err := tx.ExecContext(ctx, "INSERT OR IGNORE INTO _synchro_meta (key, value) VALUES (?, ?)", m.key, m.value); err != nil {
 			return fmt.Errorf("inserting meta key %s: %w", m.key, err)
 		}
 	}
 
-	if _, err := tx.Exec("INSERT OR IGNORE INTO grdb_migrations (identifier) VALUES ('synchro_v1')"); err != nil {
+	if _, err := tx.ExecContext(ctx, "INSERT OR IGNORE INTO grdb_migrations (identifier) VALUES ('synchro_v1')"); err != nil {
 		return fmt.Errorf("inserting grdb migration: %w", err)
 	}
 
@@ -408,7 +414,7 @@ func SQLiteType(logicalType string) string {
 }
 
 // GenerateCreateTableSQL generates a CREATE TABLE IF NOT EXISTS statement for a schema table.
-func GenerateCreateTableSQL(table schemaTable) string {
+func GenerateCreateTableSQL(table *schemaTable) string {
 	var b strings.Builder
 
 	b.WriteString(fmt.Sprintf("CREATE TABLE IF NOT EXISTS %s (\n", quoteIdentifier(table.TableName)))
@@ -439,7 +445,7 @@ func GenerateCreateTableSQL(table schemaTable) string {
 }
 
 // GenerateCDCTriggers generates the 3 CDC triggers (insert, update, delete) for a schema table.
-func GenerateCDCTriggers(table schemaTable) []string {
+func GenerateCDCTriggers(table *schemaTable) []string {
 	tableName := table.TableName
 	escapedName := escapeSQLString(tableName)
 

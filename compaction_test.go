@@ -1,6 +1,7 @@
 package synchro
 
 import (
+	"context"
 	"testing"
 	"time"
 )
@@ -54,7 +55,7 @@ func TestCompact_ZeroSafeSeq_IsNoop(t *testing.T) {
 	// safeSeq=0 should return immediately with 0 deleted, no DB calls needed.
 	// We can't call Compact with a nil DB, but we can verify the early return
 	// path by passing safeSeq <= 0.
-	deleted, err := c.Compact(nil, nil, 0)
+	deleted, err := c.Compact(context.Background(), nil, 0)
 	if err != nil {
 		t.Fatalf("Compact(0) err = %v", err)
 	}
@@ -62,7 +63,7 @@ func TestCompact_ZeroSafeSeq_IsNoop(t *testing.T) {
 		t.Errorf("Compact(0) deleted = %d, want 0", deleted)
 	}
 
-	deleted, err = c.Compact(nil, nil, -1)
+	deleted, err = c.Compact(context.Background(), nil, -1)
 	if err != nil {
 		t.Fatalf("Compact(-1) err = %v", err)
 	}

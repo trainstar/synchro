@@ -59,14 +59,14 @@ type Consumer struct {
 }
 
 // NewConsumer creates a new WAL consumer.
-func NewConsumer(cfg ConsumerConfig) *Consumer {
+func NewConsumer(cfg *ConsumerConfig) *Consumer {
 	logger := cfg.Logger
 	if logger == nil {
 		logger = slog.Default()
 	}
 
 	return &Consumer{
-		cfg:      cfg,
+		cfg:      *cfg,
 		position: NewPosition(cfg.ChangelogDB, cfg.SlotName),
 		decoder:  NewDecoder(cfg.Registry),
 		logger:   logger,
@@ -85,7 +85,7 @@ func (c *Consumer) Start(ctx context.Context) error {
 		return fmt.Errorf("connecting to replication slot: %w", err)
 	}
 	c.conn = conn
-	defer conn.Close(ctx)
+	defer func() { _ = conn.Close(ctx) }()
 
 	_, err = pglogrepl.CreateReplicationSlot(ctx, conn, c.cfg.SlotName, "pgoutput",
 		pglogrepl.CreateReplicationSlotOptions{Temporary: false})
@@ -218,7 +218,7 @@ func (c *Consumer) applyEvent(ctx context.Context, event WALEvent) error {
 			return fmt.Errorf("begin WAL event tx: %w", err)
 		}
 		db = tx
-		defer tx.Rollback()
+		defer func() { _ = tx.Rollback() }()
 	}
 
 	existing, err := c.loadExistingBuckets(ctx, db, event.TableName, event.RecordID)

@@ -1,4 +1,5 @@
 import { SynchroClient } from '../src/SynchroClient';
+import { SyncStatus } from '../src/types';
 import {
   mockNativeModule,
   emitNativeEvent,
@@ -167,7 +168,7 @@ describe('SynchroClient', () => {
 
   describe('auth callback', () => {
     it('resolves auth requests from native', async () => {
-      const client = makeClient();
+      makeClient();
 
       // Simulate native requesting auth
       emitNativeEvent('onAuthRequest', { requestID: 'auth-1' });
@@ -182,7 +183,7 @@ describe('SynchroClient', () => {
     });
 
     it('rejects auth requests when provider throws', async () => {
-      const client = new SynchroClient({
+      new SynchroClient({
         dbPath: '/test.db',
         serverURL: 'http://localhost:8080',
         authProvider: async () => {
@@ -235,8 +236,8 @@ describe('SynchroClient', () => {
   describe('status listener multiplexing', () => {
     it('delivers status events to multiple subscribers independently', () => {
       const client = makeClient();
-      const a: any[] = [];
-      const b: any[] = [];
+      const a: SyncStatus[] = [];
+      const b: SyncStatus[] = [];
 
       const unsub1 = client.onStatusChange((s) => a.push(s));
       const unsub2 = client.onStatusChange((s) => b.push(s));

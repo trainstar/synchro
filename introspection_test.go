@@ -14,7 +14,7 @@ func TestIntrospect_FullTable(t *testing.T) {
 	db := synctest.TestDB(t)
 	registry := synctest.NewTestRegistry()
 
-	engine, err := synchro.NewEngine(synchro.Config{
+	engine, err := synchro.NewEngine(context.Background(), &synchro.Config{
 		DB:       db,
 		Registry: registry,
 	})
@@ -44,7 +44,7 @@ func TestIntrospect_BareTable(t *testing.T) {
 	db := synctest.TestDB(t)
 	registry := synctest.NewMixedTestRegistry()
 
-	engine, err := synchro.NewEngine(synchro.Config{
+	engine, err := synchro.NewEngine(context.Background(), &synchro.Config{
 		DB:       db,
 		Registry: registry,
 	})
@@ -74,7 +74,7 @@ func TestIntrospect_PartialTable(t *testing.T) {
 	db := synctest.TestDB(t)
 	registry := synctest.NewMixedTestRegistry()
 
-	engine, err := synchro.NewEngine(synchro.Config{
+	engine, err := synchro.NewEngine(context.Background(), &synchro.Config{
 		DB:       db,
 		Registry: registry,
 	})
@@ -98,7 +98,7 @@ func TestIntrospect_MixedRegistry(t *testing.T) {
 	db := synctest.TestDB(t)
 	registry := synctest.NewMixedTestRegistry()
 
-	engine, err := synchro.NewEngine(synchro.Config{
+	engine, err := synchro.NewEngine(context.Background(), &synchro.Config{
 		DB:       db,
 		Registry: registry,
 	})
@@ -145,7 +145,7 @@ func TestIntrospect_CustomColumnName(t *testing.T) {
 		OwnerColumn: "user_id",
 	})
 
-	engine, err := synchro.NewEngine(synchro.Config{
+	engine, err := synchro.NewEngine(context.Background(), &synchro.Config{
 		DB:              db,
 		Registry:        registry,
 		UpdatedAtColumn: "modified_at",
@@ -167,7 +167,7 @@ func TestProtectedColumns_BareTable(t *testing.T) {
 	db := synctest.TestDB(t)
 	registry := synctest.NewMixedTestRegistry()
 
-	engine, err := synchro.NewEngine(synchro.Config{
+	engine, err := synchro.NewEngine(context.Background(), &synchro.Config{
 		DB:       db,
 		Registry: registry,
 	})
@@ -199,7 +199,7 @@ func TestProtectedColumns_FullTable(t *testing.T) {
 	db := synctest.TestDB(t)
 	registry := synctest.NewMixedTestRegistry()
 
-	engine, err := synchro.NewEngine(synchro.Config{
+	engine, err := synchro.NewEngine(context.Background(), &synchro.Config{
 		DB:       db,
 		Registry: registry,
 	})
@@ -224,7 +224,7 @@ func TestPush_BareTable_Create(t *testing.T) {
 	db := synctest.TestDB(t)
 	registry := synctest.NewMixedTestRegistry()
 
-	engine, err := synchro.NewEngine(synchro.Config{
+	engine, err := synchro.NewEngine(context.Background(), &synchro.Config{
 		DB:       db,
 		Registry: registry,
 	})
@@ -266,7 +266,7 @@ func TestPush_BareTable_Update(t *testing.T) {
 	db := synctest.TestDB(t)
 	registry := synctest.NewMixedTestRegistry()
 
-	engine, err := synchro.NewEngine(synchro.Config{
+	engine, err := synchro.NewEngine(context.Background(), &synchro.Config{
 		DB:       db,
 		Registry: registry,
 	})
@@ -327,7 +327,7 @@ func TestPush_BareTable_HardDelete(t *testing.T) {
 	db := synctest.TestDB(t)
 	registry := synctest.NewMixedTestRegistry()
 
-	engine, err := synchro.NewEngine(synchro.Config{
+	engine, err := synchro.NewEngine(context.Background(), &synchro.Config{
 		DB:       db,
 		Registry: registry,
 	})
@@ -386,7 +386,7 @@ func TestPush_BareTable_HardDelete_Idempotent(t *testing.T) {
 	db := synctest.TestDB(t)
 	registry := synctest.NewMixedTestRegistry()
 
-	engine, err := synchro.NewEngine(synchro.Config{
+	engine, err := synchro.NewEngine(context.Background(), &synchro.Config{
 		DB:       db,
 		Registry: registry,
 	})
@@ -440,7 +440,7 @@ func TestPush_FullTable_SoftDelete_Preserved(t *testing.T) {
 	db := synctest.TestDB(t)
 	registry := synctest.NewMixedTestRegistry()
 
-	engine, err := synchro.NewEngine(synchro.Config{
+	engine, err := synchro.NewEngine(context.Background(), &synchro.Config{
 		DB:       db,
 		Registry: registry,
 	})
@@ -498,7 +498,7 @@ func TestPush_FullTable_LWW_Preserved(t *testing.T) {
 	db := synctest.TestDB(t)
 	registry := synctest.NewMixedTestRegistry()
 
-	engine, err := synchro.NewEngine(synchro.Config{
+	engine, err := synchro.NewEngine(context.Background(), &synchro.Config{
 		DB:       db,
 		Registry: registry,
 	})
@@ -557,7 +557,7 @@ func TestPull_BareTable_AfterHardDelete(t *testing.T) {
 	db := synctest.TestDB(t)
 	registry := synctest.NewMixedTestRegistry()
 
-	engine, err := synchro.NewEngine(synchro.Config{
+	engine, err := synchro.NewEngine(context.Background(), &synchro.Config{
 		DB:       db,
 		Registry: registry,
 	})
@@ -632,7 +632,7 @@ func TestSchemaHash_DiffersBetweenFullAndBare(t *testing.T) {
 
 	// Engine with full-column tables only
 	fullRegistry := synctest.NewTestRegistry()
-	fullEngine, err := synchro.NewEngine(synchro.Config{
+	fullEngine, err := synchro.NewEngine(context.Background(), &synchro.Config{
 		DB:       db,
 		Registry: fullRegistry,
 	})
@@ -646,7 +646,7 @@ func TestSchemaHash_DiffersBetweenFullAndBare(t *testing.T) {
 
 	// Engine with mixed tables
 	mixedRegistry := synctest.NewMixedTestRegistry()
-	mixedEngine, err := synchro.NewEngine(synchro.Config{
+	mixedEngine, err := synchro.NewEngine(context.Background(), &synchro.Config{
 		DB:       db,
 		Registry: mixedRegistry,
 	})
@@ -667,7 +667,7 @@ func TestSnapshot_BareTable(t *testing.T) {
 	db := synctest.TestDB(t)
 	registry := synctest.NewMixedTestRegistry()
 
-	engine, err := synchro.NewEngine(synchro.Config{
+	engine, err := synchro.NewEngine(context.Background(), &synchro.Config{
 		DB:       db,
 		Registry: registry,
 	})

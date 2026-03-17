@@ -83,11 +83,11 @@ func (h *Handler) ServeRegister(w http.ResponseWriter, r *http.Request) {
 
 	resp, err := h.engine.RegisterClient(ctx, userID, &req)
 	if err != nil {
-		if err == synchro.ErrUpgradeRequired {
+		if errors.Is(err, synchro.ErrUpgradeRequired) {
 			writeError(w, http.StatusUpgradeRequired, "client upgrade required")
 			return
 		}
-		if err == synchro.ErrSchemaMismatch {
+		if errors.Is(err, synchro.ErrSchemaMismatch) {
 			h.writeSchemaMismatch(w, r)
 			return
 		}
@@ -135,7 +135,7 @@ func (h *Handler) ServePull(w http.ResponseWriter, r *http.Request) {
 
 	resp, err := h.engine.Pull(ctx, userID, &req)
 	if err != nil {
-		if err == synchro.ErrSchemaMismatch {
+		if errors.Is(err, synchro.ErrSchemaMismatch) {
 			h.writeSchemaMismatch(w, r)
 			return
 		}
@@ -185,7 +185,7 @@ func (h *Handler) ServePush(w http.ResponseWriter, r *http.Request) {
 
 	resp, err := h.engine.Push(ctx, userID, &req)
 	if err != nil {
-		if err == synchro.ErrSchemaMismatch {
+		if errors.Is(err, synchro.ErrSchemaMismatch) {
 			h.writeSchemaMismatch(w, r)
 			return
 		}
@@ -233,11 +233,11 @@ func (h *Handler) ServeSnapshot(w http.ResponseWriter, r *http.Request) {
 
 	resp, err := h.engine.Snapshot(ctx, userID, &req)
 	if err != nil {
-		if err == synchro.ErrSchemaMismatch {
+		if errors.Is(err, synchro.ErrSchemaMismatch) {
 			h.writeSchemaMismatch(w, r)
 			return
 		}
-		if err == synchro.ErrClientNotRegistered {
+		if errors.Is(err, synchro.ErrClientNotRegistered) {
 			writeError(w, http.StatusNotFound, "client not registered")
 			return
 		}
@@ -283,20 +283,20 @@ func (h *Handler) ServeSchema(w http.ResponseWriter, r *http.Request) {
 func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	json.NewEncoder(w).Encode(v)
+	_ = json.NewEncoder(w).Encode(v)
 }
 
 func writeError(w http.ResponseWriter, status int, msg string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	json.NewEncoder(w).Encode(map[string]string{"error": msg})
+	_ = json.NewEncoder(w).Encode(map[string]string{"error": msg})
 }
 
 func writeRetryError(w http.ResponseWriter, status int, msg string, retryAfter int) {
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Retry-After", strconv.Itoa(retryAfter))
 	w.WriteHeader(status)
-	json.NewEncoder(w).Encode(map[string]any{
+	_ = json.NewEncoder(w).Encode(map[string]any{
 		"error":       msg,
 		"retry_after": retryAfter,
 	})

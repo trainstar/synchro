@@ -20,7 +20,7 @@ func TestFailure_PushHookRollback(t *testing.T) {
 
 	hookShouldFail := true
 	reg := synctest.NewTestRegistry()
-	engine, err := synchro.NewEngine(synchro.Config{
+	engine, err := synchro.NewEngine(ctx, &synchro.Config{
 		DB:       db,
 		Registry: reg,
 		Hooks: synchro.Hooks{
@@ -97,7 +97,7 @@ func TestFailure_CheckpointResetIdempotentPull(t *testing.T) {
 	ctx := context.Background()
 
 	reg := synctest.NewTestRegistry()
-	engine, err := synchro.NewEngine(synchro.Config{
+	engine, err := synchro.NewEngine(ctx, &synchro.Config{
 		DB:       db,
 		Registry: reg,
 	})
@@ -167,7 +167,7 @@ func TestFailure_ConcurrentPushesLWW(t *testing.T) {
 	ctx := context.Background()
 
 	reg := synctest.NewTestRegistry()
-	engine, err := synchro.NewEngine(synchro.Config{
+	engine, err := synchro.NewEngine(ctx, &synchro.Config{
 		DB:       db,
 		Registry: reg,
 	})
@@ -257,7 +257,7 @@ func TestFailure_ChangelogOrderAndDedup(t *testing.T) {
 	ctx := context.Background()
 
 	reg := synctest.NewTestRegistry()
-	engine, err := synchro.NewEngine(synchro.Config{
+	engine, err := synchro.NewEngine(ctx, &synchro.Config{
 		DB:       db,
 		Registry: reg,
 	})
@@ -349,7 +349,7 @@ func TestFailure_ClockSkewIntegration(t *testing.T) {
 	ctx := context.Background()
 
 	reg := synctest.NewTestRegistry()
-	engine, err := synchro.NewEngine(synchro.Config{
+	engine, err := synchro.NewEngine(ctx, &synchro.Config{
 		DB:               db,
 		Registry:         reg,
 		ClockSkewTolerance: 1 * time.Second,
@@ -426,7 +426,7 @@ func TestFailure_PartialPushWithHookFailure(t *testing.T) {
 
 	hookShouldFail := true
 	reg := synctest.NewTestRegistry()
-	engine, err := synchro.NewEngine(synchro.Config{
+	engine, err := synchro.NewEngine(ctx, &synchro.Config{
 		DB:       db,
 		Registry: reg,
 		Hooks: synchro.Hooks{

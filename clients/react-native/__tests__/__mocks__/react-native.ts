@@ -2,11 +2,11 @@
 
 export type EventSubscription = { remove: () => void };
 
-const listeners: Record<string, Array<(...args: any[]) => void>> = {};
+const listeners: Record<string, Array<(...args: unknown[]) => void>> = {};
 
 // Helper to create a mock EventEmitter function (Codegen pattern)
 function createEventEmitter(eventName: string) {
-  return jest.fn((callback: (...args: any[]) => void) => {
+  return jest.fn((callback: (...args: unknown[]) => void) => {
     if (!listeners[eventName]) listeners[eventName] = [];
     listeners[eventName].push(callback);
     return {
@@ -65,7 +65,7 @@ export const TurboModuleRegistry = {
 
 export const Platform = {
   OS: 'ios',
-  select: jest.fn((obj: any) => obj.ios),
+  select: jest.fn((obj: Record<string, unknown>) => obj.ios),
 };
 
 export function resetNativeModuleMockState() {
@@ -80,6 +80,6 @@ export function resetNativeModuleMockState() {
 }
 
 // Helper: emit a native event to all JS listeners
-export function emitNativeEvent(eventName: string, data: any) {
+export function emitNativeEvent(eventName: string, data: unknown) {
   listeners[eventName]?.forEach((cb) => cb(data));
 }

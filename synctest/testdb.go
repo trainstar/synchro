@@ -100,10 +100,10 @@ func CreateTempDB(t *testing.T, dsn string) (string, *sql.DB) {
 	dbName := fmt.Sprintf("synchro_test_%d", rand.Int63())
 
 	if _, err := adminDB.ExecContext(context.Background(), fmt.Sprintf("CREATE DATABASE %q", dbName)); err != nil {
-		adminDB.Close()
+		_ = adminDB.Close()
 		t.Fatalf("creating temp database %s: %v", dbName, err)
 	}
-	adminDB.Close()
+	_ = adminDB.Close()
 
 	tempDSN := ReplaceDSNDatabase(dsn, dbName)
 	db, err := sql.Open("pgx", tempDSN)
@@ -122,11 +122,11 @@ func DropTempDB(baseDSN, dbName string) {
 	if err != nil {
 		return
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 	// Terminate any lingering connections before dropping.
-	db.ExecContext(context.Background(), fmt.Sprintf(
+	_, _ = db.ExecContext(context.Background(), fmt.Sprintf(
 		"SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = '%s' AND pid <> pg_backend_pid()", dbName))
-	db.ExecContext(context.Background(), fmt.Sprintf("DROP DATABASE IF EXISTS %q", dbName))
+	_, _ = db.ExecContext(context.Background(), fmt.Sprintf("DROP DATABASE IF EXISTS %q", dbName))
 }
 
 // ReplaceDSNDatabase returns a new DSN with the database name replaced.
@@ -183,7 +183,7 @@ func TestDB(t *testing.T) *sql.DB {
 	// Run synchro infrastructure migrations
 	for _, stmt := range migrate.Migrations() {
 		if _, err := db.ExecContext(ctx, stmt); err != nil {
-			db.Close()
+			_ = db.Close()
 			DropTempDB(dsn, dbName)
 			t.Fatalf("running migration: %v", err)
 		}
@@ -192,7 +192,7 @@ func TestDB(t *testing.T) *sql.DB {
 	// Create app types
 	for _, stmt := range appTypesDDL {
 		if _, err := db.ExecContext(ctx, stmt); err != nil {
-			db.Close()
+			_ = db.Close()
 			DropTempDB(dsn, dbName)
 			t.Fatalf("creating app type: %v", err)
 		}
@@ -201,7 +201,7 @@ func TestDB(t *testing.T) *sql.DB {
 	// Create app tables
 	for _, stmt := range appTableDDL {
 		if _, err := db.ExecContext(ctx, stmt); err != nil {
-			db.Close()
+			_ = db.Close()
 			DropTempDB(dsn, dbName)
 			t.Fatalf("creating app table: %v", err)
 		}
@@ -210,14 +210,14 @@ func TestDB(t *testing.T) *sql.DB {
 	// Create bare tables for introspection tests
 	for _, stmt := range bareTableDDL {
 		if _, err := db.ExecContext(ctx, stmt); err != nil {
-			db.Close()
+			_ = db.Close()
 			DropTempDB(dsn, dbName)
 			t.Fatalf("creating bare table: %v", err)
 		}
 	}
 
 	t.Cleanup(func() {
-		db.Close()
+		_ = db.Close()
 		DropTempDB(dsn, dbName)
 	})
 
@@ -246,28 +246,28 @@ func TestDBWithAppRole(t *testing.T) (adminDB *sql.DB, appDB *sql.DB) {
 	// Run migrations and create tables via superuser.
 	for _, stmt := range migrate.Migrations() {
 		if _, err := adminConn.ExecContext(ctx, stmt); err != nil {
-			adminConn.Close()
+			_ = adminConn.Close()
 			DropTempDB(dsn, dbName)
 			t.Fatalf("running migration: %v", err)
 		}
 	}
 	for _, stmt := range appTypesDDL {
 		if _, err := adminConn.ExecContext(ctx, stmt); err != nil {
-			adminConn.Close()
+			_ = adminConn.Close()
 			DropTempDB(dsn, dbName)
 			t.Fatalf("creating app type: %v", err)
 		}
 	}
 	for _, stmt := range appTableDDL {
 		if _, err := adminConn.ExecContext(ctx, stmt); err != nil {
-			adminConn.Close()
+			_ = adminConn.Close()
 			DropTempDB(dsn, dbName)
 			t.Fatalf("creating app table: %v", err)
 		}
 	}
 	for _, stmt := range bareTableDDL {
 		if _, err := adminConn.ExecContext(ctx, stmt); err != nil {
-			adminConn.Close()
+			_ = adminConn.Close()
 			DropTempDB(dsn, dbName)
 			t.Fatalf("creating bare table: %v", err)
 		}
@@ -287,7 +287,7 @@ func TestDBWithAppRole(t *testing.T) (adminDB *sql.DB, appDB *sql.DB) {
 	}
 	for _, stmt := range roleSetup {
 		if _, err := adminConn.ExecContext(ctx, stmt); err != nil {
-			adminConn.Close()
+			_ = adminConn.Close()
 			DropTempDB(dsn, dbName)
 			t.Fatalf("setting up app role: %v", err)
 		}
@@ -298,21 +298,21 @@ func TestDBWithAppRole(t *testing.T) (adminDB *sql.DB, appDB *sql.DB) {
 	appDSN := fmt.Sprintf("postgres://synchro_app:synchro_app@%s/%s?sslmode=disable", parsed.Host, dbName)
 	appConn, err := sql.Open("pgx", appDSN)
 	if err != nil {
-		adminConn.Close()
+		_ = adminConn.Close()
 		DropTempDB(dsn, dbName)
 		t.Fatalf("opening app database: %v", err)
 	}
 
 	if err := appConn.PingContext(ctx); err != nil {
-		appConn.Close()
-		adminConn.Close()
+		_ = appConn.Close()
+		_ = adminConn.Close()
 		DropTempDB(dsn, dbName)
 		t.Fatalf("pinging app database: %v", err)
 	}
 
 	t.Cleanup(func() {
-		appConn.Close()
-		adminConn.Close()
+		_ = appConn.Close()
+		_ = adminConn.Close()
 		DropTempDB(dsn, dbName)
 	})
 
