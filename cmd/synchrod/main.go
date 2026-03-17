@@ -139,14 +139,14 @@ func run(ctx context.Context, cfg *config) error {
 	switch {
 	case cfg.JWTSecret != "":
 		authMiddleware = func(next http.Handler) http.Handler {
-			return handler.JWTAuthMiddleware(handler.JWTAuthConfig{
+			return handler.JWTAuthMiddleware(handler.JWTAuthConfig{ //nolint:contextcheck // JWKS fetch is startup-time, not per-request
 				Secret:    []byte(cfg.JWTSecret),
 				UserClaim: cfg.JWTUserClaim,
 			}, next)
 		}
 	case cfg.JWKSURL != "":
 		authMiddleware = func(next http.Handler) http.Handler {
-			return handler.JWTAuthMiddleware(handler.JWTAuthConfig{
+			return handler.JWTAuthMiddleware(handler.JWTAuthConfig{ //nolint:contextcheck // JWKS fetch is startup-time, not per-request
 				JWKSURL:   cfg.JWKSURL,
 				UserClaim: cfg.JWTUserClaim,
 			}, next)
@@ -186,7 +186,7 @@ func run(ctx context.Context, cfg *config) error {
 		}
 	case <-ctx.Done():
 		logger.InfoContext(ctx, "shutting down")
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second) //nolint:contextcheck // parent ctx is cancelled; fresh context for graceful shutdown
 		defer cancel()
 		if err := srv.Shutdown(shutdownCtx); err != nil {
 			return fmt.Errorf("HTTP shutdown: %w", err)

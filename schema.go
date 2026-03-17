@@ -76,7 +76,7 @@ func (s *schemaStore) ListManifests(ctx context.Context, db DB, limit int) ([]Sc
 	if err != nil {
 		return nil, fmt.Errorf("listing schema manifests: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	result := make([]SchemaManifestEntry, 0, limit)
 	for rows.Next() {
@@ -381,7 +381,7 @@ func loadEnumAndDomainTypes(ctx context.Context, db DB) (enums map[string]bool, 
 	if err != nil {
 		return nil, nil, fmt.Errorf("loading enum/domain types: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	for rows.Next() {
 		var name, typType, baseType string
