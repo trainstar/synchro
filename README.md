@@ -1,5 +1,8 @@
 <p align="center">
-  <img src="docs/public/logo.svg" alt="Synchro" width="280"><br><br>
+  <img src="docs/public/logo.svg" alt="Synchro" width="280">
+</p>
+
+<p align="center">
   <a href="https://github.com/trainstar/synchro/actions/workflows/release.yml"><img src="https://img.shields.io/github/actions/workflow/status/trainstar/synchro/release.yml?branch=master&event=workflow_dispatch&label=release&logo=github" alt="Release"></a>
   <a href="https://pkg.go.dev/github.com/trainstar/synchro"><img src="https://img.shields.io/github/go-mod/go-version/trainstar/synchro?logo=go&logoColor=white" alt="Go"></a>
   <a href="https://pkg.go.dev/github.com/trainstar/synchro"><img src="https://pkg.go.dev/badge/github.com/trainstar/synchro.svg" alt="Go Reference"></a>
