@@ -1,6 +1,6 @@
 {
   "name": "@trainstar/synchro-react-native",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "React Native bridge for Synchro sync SDK",
   "source": "./src/index.ts",
   "main": "./lib/module/index.js",
@@ -37,6 +37,7 @@
     "pack:dry-run": "npm pack --dry-run",
     "test:unit": "jest --runInBand",
     "typecheck": "tsc",
+    "lint": "eslint src/ __tests__/",
     "test": "jest"
   },
   "keywords": [
@@ -61,9 +62,12 @@
   "devDependencies": {
     "@react-native/babel-preset": "0.83.0",
     "@testing-library/react-native": "^12.4.0",
+    "@typescript-eslint/eslint-plugin": "^8.0.0",
+    "@typescript-eslint/parser": "^8.0.0",
     "@types/jest": "^29.5.14",
     "@types/react": "^19.2.0",
     "del-cli": "^6.0.0",
+    "eslint": "^9.0.0",
     "jest": "^29.7.0",
     "react": "19.2.0",
     "react-native": "0.83.0",

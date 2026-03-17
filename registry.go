@@ -137,6 +137,7 @@ func (c *TableConfig) IsProtected(col string) bool {
 	return c.protectedSet[col]
 }
 
+
 // AllowedInsertColumns returns the set of columns allowed in an INSERT.
 // This includes all non-protected columns plus id, owner col, and parent FK col
 // (which are set once on creation).

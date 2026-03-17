@@ -1,0 +1,35 @@
+run:
+  timeout: 5m
+
+linters:
+  enable:
+    - errcheck
+    - govet
+    - staticcheck
+    - unused
+    - gosimple
+    - gocritic
+    - misspell
+    - errorlint
+    - bodyclose
+    - sqlclosecheck
+    - contextcheck
+    - durationcheck
+    - noctx
+    - unconvert
+    - wastedassign
+
+issues:
+  exclude-dirs:
+    - clients
+    - docs
+
+linters-settings:
+  gocritic:
+    enabled-tags:
+      - diagnostic
+      - performance
+  errorlint:
+    errorf: true
+    asserts: true
+    comparison: true
