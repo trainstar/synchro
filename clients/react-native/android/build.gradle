@@ -75,7 +75,7 @@ repositories {
 
 dependencies {
   implementation "com.facebook.react:react-android"
-  implementation "com.trainstar:synchro:0.1.0"
+  implementation "fit.trainstar:synchro:0.1.0"
   implementation "org.jetbrains.kotlinx:kotlinx-coroutines-core:1.8.0"
   implementation "org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.0"
 }

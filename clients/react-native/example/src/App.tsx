@@ -35,7 +35,8 @@ type ResultKey =
   | 'conflict'
   | 'multiUser'
   | 'stop'
-  | 'errorMap';
+  | 'errorMap'
+  | 'seedInit';
 
 type TestResult = boolean | null;
 type Results = Record<ResultKey, TestResult>;
@@ -57,6 +58,7 @@ function createEmptyResults(): Results {
     multiUser: null,
     stop: null,
     errorMap: null,
+    seedInit: null,
   };
 }
 
@@ -528,6 +530,49 @@ export default function App() {
     }
   }, [client, ensureInitialized, update]);
 
+  const runSeedInit = useCallback(async () => {
+    const seedID = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    let seedClient: SynchroClient | null = null;
+    try {
+      seedClient = new SynchroClient({
+        dbPath: `synchro-seed-test-${seedID}.db`,
+        serverURL: SYNCHRO_TEST_URL,
+        authProvider: async () => USER1_JWT,
+        clientID: `rn-seed-device-${seedID}`,
+        appVersion: '1.0.0',
+        seedDatabasePath: 'seed.db',
+      });
+      await seedClient.initialize();
+
+      // Verify the orders table exists from the seed
+      const rows = await seedClient.query('SELECT * FROM orders');
+      const tableExists = Array.isArray(rows);
+
+      // Insert a row into orders
+      const orderID = uuid();
+      await seedClient.execute(
+        "INSERT INTO orders (id, user_id, ship_address, created_at, updated_at) VALUES (?, ?, ?, datetime('now'), datetime('now'))",
+        [orderID, USER1_ID, 'seed-test']
+      );
+
+      // Verify the CDC trigger fired
+      const pending = await seedClient.query(
+        'SELECT * FROM _synchro_pending_changes WHERE record_id = ?',
+        [orderID]
+      );
+
+      update('seedInit', tableExists && pending.length > 0);
+    } catch {
+      update('seedInit', false);
+    } finally {
+      try {
+        await seedClient?.close();
+      } catch {
+        // Best-effort cleanup.
+      }
+    }
+  }, [update]);
+
   return (
     <View style={styles.container}>
       <ScrollView testID="test-scroll" contentContainerStyle={styles.scroll}>
@@ -596,6 +641,9 @@ export default function App() {
           </TouchableOpacity>
           <TouchableOpacity style={styles.button} onPress={runErrorMap} testID="btn-errorMap">
             <Text>Error Mapping</Text>
+          </TouchableOpacity>
+          <TouchableOpacity style={styles.button} onPress={runSeedInit} testID="btn-seedInit">
+            <Text>Seed Init</Text>
           </TouchableOpacity>
         </View>
       </ScrollView>

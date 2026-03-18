@@ -18,6 +18,8 @@ cover.out
 
 # Seed database output
 seed.db
+clients/react-native/example/seed.db
+clients/react-native/example/android/app/src/main/assets/seed.db
 
 # Swift build cache
 .build/
