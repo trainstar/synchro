@@ -25,7 +25,7 @@ jobs:
       rn-e2e: ${{ steps.filter.outputs.rn-e2e }}
       docs: ${{ steps.filter.outputs.docs }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - uses: dorny/paths-filter@v3
         id: filter
@@ -70,7 +70,7 @@ jobs:
     if: needs.changes.outputs.go == 'true'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - uses: actions/setup-go@v5
         with:
@@ -91,7 +91,7 @@ jobs:
     if: needs.changes.outputs.rn == 'true'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - uses: actions/setup-node@v4
         with:
@@ -115,7 +115,7 @@ jobs:
     if: needs.changes.outputs.go == 'true'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - uses: actions/setup-go@v5
         with:
@@ -144,7 +144,7 @@ jobs:
           --health-timeout=5s
           --health-retries=5
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - uses: actions/setup-go@v5
         with:
@@ -171,7 +171,7 @@ jobs:
     if: needs.changes.outputs.swift == 'true'
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - uses: actions/cache@v4
         with:
@@ -188,7 +188,7 @@ jobs:
     if: needs.changes.outputs.kotlin == 'true'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - uses: actions/setup-java@v4
         with:
@@ -210,7 +210,7 @@ jobs:
     if: needs.changes.outputs.rn == 'true'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - uses: actions/setup-node@v4
         with:
@@ -237,7 +237,7 @@ jobs:
       DB_USER: postgres
       DB_PASSWORD: postgres
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - uses: actions/setup-go@v5
         with:
@@ -314,7 +314,7 @@ jobs:
       DB_USER: postgres
       DB_PASSWORD: postgres
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           fetch-depth: 1
 
@@ -445,7 +445,7 @@ jobs:
           --health-timeout=5s
           --health-retries=5
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           fetch-depth: 1
 
@@ -562,7 +562,7 @@ jobs:
     if: needs.changes.outputs.go == 'true'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - uses: actions/setup-go@v5
         with:
@@ -584,7 +584,7 @@ jobs:
     if: needs.changes.outputs.docs == 'true'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - uses: actions/setup-node@v4
         with:
