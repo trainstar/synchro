@@ -37,11 +37,16 @@ func setupTestServer(t *testing.T) (*httptest.Server, *sql.DB) {
 	t.Helper()
 
 	db := synctest.TestDB(t)
-	reg := synctest.NewTestRegistry()
 
 	engine, err := synchro.NewEngine(context.Background(), &synchro.Config{
-		DB:               db,
-		Registry:         reg,
+		DB:     db,
+		Tables: synctest.NewTestTables(),
+		AuthorizeWrite: synchro.Chain(
+			synchro.ReadOnly("products"),
+			synchro.StampColumn("user_id"),
+			synchro.VerifyOwner("user_id"),
+		),
+		BucketFunc:       synchro.UserBucket("user_id"),
 		MinClientVersion: "1.0.0",
 	})
 	if err != nil {

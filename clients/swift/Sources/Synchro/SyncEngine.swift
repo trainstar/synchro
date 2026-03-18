@@ -89,6 +89,14 @@ final class SyncEngine: @unchecked Sendable {
 
             let needsInitialSnapshot = try database.writeTransaction { db in
                 try SynchroMeta.set(db, key: .clientServerID, value: registerResp.id)
+
+                // Store per-bucket checkpoints from register response if available
+                if let bucketCPs = registerResp.bucketCheckpoints {
+                    for (bucketID, cp) in bucketCPs {
+                        try SynchroMeta.setBucketCheckpoint(db, bucketID: bucketID, checkpoint: cp)
+                    }
+                }
+
                 let checkpoint = try SynchroMeta.getInt64(db, key: .checkpoint)
                 let snapshotComplete = try SynchroMeta.get(db, key: .snapshotComplete) == "1"
                 return checkpoint == 0 || !snapshotComplete
@@ -321,11 +329,19 @@ final class SyncEngine: @unchecked Sendable {
         }
         var knownBuckets = (try? JSONDecoder().decode([String].self, from: Data(knownBucketsStr.utf8))) ?? []
 
+        // Load per-bucket checkpoints to send with the pull request
+        var bucketCheckpoints = try database.readTransaction { db in
+            try SynchroMeta.getAllBucketCheckpoints(db)
+        }
+
         var hasMore = true
+        var bucketsToRebuild: [String] = []
+        var lastBucketChecksums: [String: Int32]? = nil
         while hasMore {
             let request = PullRequest(
                 clientID: clientID,
                 checkpoint: checkpoint,
+                bucketCheckpoints: bucketCheckpoints.isEmpty ? nil : bucketCheckpoints,
                 tables: nil,
                 limit: config.pullPageSize,
                 knownBuckets: knownBuckets.isEmpty ? nil : knownBuckets,
@@ -341,10 +357,32 @@ final class SyncEngine: @unchecked Sendable {
             }
 
             try pullProcessor.applyPullPage(changes: response.changes, deletes: response.deletes, syncedTables: syncedTables)
+            try pullProcessor.trackBucketMembership(records: response.changes)
             try pullProcessor.updateCheckpoint(response.checkpoint)
+            try pullProcessor.updateBucketCheckpoints(response.bucketCheckpoints)
             try pullProcessor.updateKnownBuckets(bucketUpdates: response.bucketUpdates)
 
             checkpoint = response.checkpoint
+
+            // Update local bucket checkpoints from response
+            if let responseBucketCheckpoints = response.bucketCheckpoints {
+                for (bucketID, cp) in responseBucketCheckpoints {
+                    bucketCheckpoints[bucketID] = cp
+                }
+            }
+
+            // Accumulate bucket rebuild requests from this page
+            if let pageBuckets = response.rebuildBuckets {
+                for b in pageBuckets where !bucketsToRebuild.contains(b) {
+                    bucketsToRebuild.append(b)
+                }
+            }
+
+            // Capture bucket checksums from the final page for verification.
+            if let serverCS = response.bucketChecksums {
+                lastBucketChecksums = serverCS
+            }
+
             hasMore = response.hasMore
             if hasMore, response.bucketUpdates != nil {
                 let reloadedBuckets = try database.readTransaction { db in
@@ -352,6 +390,100 @@ final class SyncEngine: @unchecked Sendable {
                 }
                 knownBuckets = (try? JSONDecoder().decode([String].self, from: Data(reloadedBuckets.utf8))) ?? []
             }
+        }
+
+        // Checksum verification: compare server bucket checksums with local.
+        // Mismatch triggers a rebuild for that bucket. This runs inline in the
+        // pull cycle with no extra HTTP call.
+        if let serverBucketChecksums = lastBucketChecksums {
+            for (bucketID, serverCS) in serverBucketChecksums {
+                do {
+                    let localCS = try pullProcessor.computeBucketChecksum(bucketID: bucketID)
+                    if localCS != serverCS && !bucketsToRebuild.contains(bucketID) {
+                        print("[Synchro] Checksum mismatch for bucket \(bucketID): server=\(serverCS) local=\(localCS), triggering rebuild")
+                        bucketsToRebuild.append(bucketID)
+                    }
+                } catch {
+                    print("[Synchro] Failed to compute bucket checksum for \(bucketID): \(error), triggering rebuild")
+                    if !bucketsToRebuild.contains(bucketID) {
+                        bucketsToRebuild.append(bucketID)
+                    }
+                }
+            }
+        }
+
+        // After all pull pages complete, rebuild any buckets the server requested
+        // or that failed checksum verification.
+        for bucketID in bucketsToRebuild {
+            try await rebuildBucket(bucketID: bucketID)
+        }
+    }
+
+    // MARK: - Bucket Rebuild
+
+    private func rebuildBucket(bucketID: String) async throws {
+        // Save old members so we can detect orphans after rebuild
+        let oldMembers = try database.readTransaction { db in
+            try SynchroMeta.getBucketMemberRecordIDs(db, bucketID: bucketID)
+        }
+        try database.writeTransaction { db in
+            try SynchroMeta.deleteBucketMembers(db, bucketID: bucketID)
+        }
+
+        // Paginate through POST /sync/rebuild to fetch all records for this bucket
+        var cursor: String? = nil
+        var hasMore = true
+        var rebuiltCheckpoint: Int64 = 0
+
+        while hasMore {
+            let request = RebuildRequest(
+                clientID: clientID,
+                bucketID: bucketID,
+                cursor: cursor,
+                limit: config.pullPageSize,
+                schemaVersion: schemaVersion,
+                schemaHash: schemaHash
+            )
+
+            let response = try await httpClient.rebuild(request: request)
+
+            // Apply records and track bucket membership
+            try pullProcessor.applyChanges(changes: response.records, syncedTables: syncedTables)
+            try pullProcessor.trackBucketMembership(records: response.records, overrideBucketID: bucketID)
+
+            cursor = response.cursor
+            hasMore = response.hasMore
+            rebuiltCheckpoint = response.checkpoint
+        }
+
+        // Soft-delete records that were in the old bucket but not in the rebuild
+        let newMembers = try database.readTransaction { db in
+            try SynchroMeta.getBucketMemberRecordIDs(db, bucketID: bucketID)
+        }
+        let newMemberSet = Set(newMembers.map { "\($0.tableName)|\($0.recordID)" })
+        let orphanedMembers = oldMembers.filter { !newMemberSet.contains("\($0.tableName)|\($0.recordID)") }
+
+        if !orphanedMembers.isEmpty {
+            let tableMap = Dictionary(uniqueKeysWithValues: syncedTables.map { ($0.tableName, $0) })
+            try database.writeTransaction { db in
+                for member in orphanedMembers {
+                    guard let schema = tableMap[member.tableName] else { continue }
+                    let pkCol = schema.primaryKey.first ?? "id"
+                    let quoted = SQLiteHelpers.quoteIdentifier(member.tableName)
+                    let quotedPK = SQLiteHelpers.quoteIdentifier(pkCol)
+                    let quotedDeletedAt = SQLiteHelpers.quoteIdentifier(schema.deletedAtColumn)
+
+                    try db.execute(
+                        sql: "UPDATE \(quoted) SET \(quotedDeletedAt) = \(SQLiteHelpers.timestampNow()) WHERE \(quotedPK) = ? AND \(quotedDeletedAt) IS NULL",
+                        arguments: [member.recordID]
+                    )
+                }
+            }
+        }
+
+        // Update the bucket checkpoint
+        try database.writeTransaction { db in
+            try SynchroMeta.setBucketCheckpoint(db, bucketID: bucketID, checkpoint: rebuiltCheckpoint)
         }
     }
 
@@ -388,6 +520,8 @@ final class SyncEngine: @unchecked Sendable {
             try SynchroMeta.setInt64(db, key: .checkpoint, value: 0)
             try SynchroMeta.set(db, key: .knownBuckets, value: "[]")
             try SynchroMeta.set(db, key: .snapshotComplete, value: "0")
+            try SynchroMeta.deleteAllBucketCheckpoints(db)
+            try SynchroMeta.deleteAllBucketMembers(db)
             try schemaManager.createSyncedTablesInTransaction(db, schema: schema)
         }
 

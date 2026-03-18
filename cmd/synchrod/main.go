@@ -91,11 +91,17 @@ func run(ctx context.Context, cfg *config) error {
 		return fmt.Errorf("setting up test schema: %w", err)
 	}
 
-	registry := synctest.NewTestRegistry()
+	tables := synctest.NewTestTables()
 
 	engine, err := synchro.NewEngine(ctx, &synchro.Config{
-		DB:               db,
-		Registry:         registry,
+		DB:     db,
+		Tables: tables,
+		AuthorizeWrite: synchro.Chain(
+			synchro.ReadOnly("products"),
+			synchro.StampColumn("user_id"),
+			synchro.VerifyOwner("user_id"),
+		),
+		BucketFunc:       synchro.UserBucket("user_id"),
 		MinClientVersion: cfg.MinClientVersion,
 		Logger:           logger,
 	})
@@ -105,6 +111,7 @@ func run(ctx context.Context, cfg *config) error {
 
 	// Start WAL consumer if ReplicationURL is set.
 	if cfg.ReplicationURL != "" {
+		registry := engine.Registry()
 		// Ensure publication exists (idempotent).
 		tableNames := registry.TableNames()
 		pubSQL := fmt.Sprintf("CREATE PUBLICATION %s FOR TABLE %s",
@@ -121,7 +128,7 @@ func run(ctx context.Context, cfg *config) error {
 			SlotName:        cfg.SlotName,
 			PublicationName: cfg.PublicationName,
 			Registry:        registry,
-			Assigner:        synchro.NewJoinResolverWithDB(registry, db),
+			Assigner:        engine.NewBucketAssigner(),
 			ChangelogDB:     db,
 			Logger:          logger,
 		})

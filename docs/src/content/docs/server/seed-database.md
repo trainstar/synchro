@@ -41,9 +41,9 @@ bin/synchroseed -server=http://localhost:8080 -token=<jwt> -output=seed.db
 bin/synchroseed -server=http://localhost:8080 -token=<jwt> -output=seed.db -with-data
 ```
 
-The `-with-data` flag registers a temporary client, pages through the snapshot endpoint, and inserts all records with the sync lock engaged (CDC triggers don't fire). The auth token determines which data is included: the same bucket-scoped data the token's user would receive on first sync.
+The `-with-data` flag registers a temporary client, pages through the snapshot endpoint, and inserts all records with the sync lock engaged (CDC triggers don't fire). The auth token determines which data is included: the server's standard snapshot scoping applies, returning the token user's own records plus any global records (rows where the owner column is NULL). This is the same scoping used by normal sync operations.
 
-For reference data visible to all users, use a token with access to global buckets.
+For reference data visible to all users, use a dedicated seed user token. The seed database contains schema and reference data only — it does not depend on the runtime bucketing or authorization model.
 
 | Flag | Default | Description |
 |------|---------|-------------|

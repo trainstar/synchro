@@ -193,6 +193,24 @@ final class SynchroDatabase: @unchecked Sendable {
                 INSERT OR IGNORE INTO _synchro_meta (key, value) VALUES ('checkpoint', '0')
                 """)
         }
+        migrator.registerMigration("synchro_v2_buckets") { db in
+            try db.execute(sql: """
+                CREATE TABLE IF NOT EXISTS _synchro_bucket_members (
+                    bucket_id TEXT NOT NULL,
+                    table_name TEXT NOT NULL,
+                    record_id TEXT NOT NULL,
+                    checksum INTEGER NOT NULL DEFAULT 0,
+                    PRIMARY KEY (bucket_id, table_name, record_id)
+                )
+                """)
+
+            try db.execute(sql: """
+                CREATE TABLE IF NOT EXISTS _synchro_bucket_checkpoints (
+                    bucket_id TEXT PRIMARY KEY,
+                    checkpoint INTEGER NOT NULL DEFAULT 0
+                )
+                """)
+        }
         try migrator.migrate(dbPool)
     }
 }

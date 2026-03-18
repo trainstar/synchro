@@ -147,6 +147,8 @@ class SchemaManager(private val database: SynchroDatabase) {
         SynchroMeta.setInt64(db, MetaKey.CHECKPOINT, 0L)
         SynchroMeta.set(db, MetaKey.KNOWN_BUCKETS, "[]")
         SynchroMeta.set(db, MetaKey.SNAPSHOT_COMPLETE, "0")
+        SynchroMeta.clearAllBucketCheckpoints(db)
+        db.execSQL("DELETE FROM _synchro_bucket_members")
     }
 
     fun dropSyncedTables(schema: SchemaResponse) {

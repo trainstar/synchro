@@ -8,34 +8,45 @@ import (
 	"github.com/trainstar/synchro"
 )
 
+// NewTestTables returns the minimal Northwind-based table list for testing.
+func NewTestTables() []synchro.Table {
+	return []synchro.Table{
+		{Name: "orders"},
+		{Name: "order_details"},
+		{Name: "products"},
+		{Name: "categories"},
+	}
+}
+
+// NewMixedTestTables returns tables with both full-column and bare tables
+// for introspection testing.
+func NewMixedTestTables() []synchro.Table {
+	return []synchro.Table{
+		{Name: "orders"},
+		{Name: "bare_items"},
+		{Name: "partial_items"},
+	}
+}
+
 // NewTestRegistry creates a minimal Northwind-based registry for testing.
+// Uses RegisterForTest so no DB connection is needed.
 func NewTestRegistry() *synchro.Registry {
 	r := synchro.NewRegistry()
 
-	r.Register(&synchro.TableConfig{
-		TableName:   "orders",
-		PushPolicy:  synchro.PushPolicyOwnerOnly,
-		OwnerColumn: "user_id",
+	r.RegisterForTest(&synchro.TableConfig{
+		TableName: "orders",
 	})
 
-	r.Register(&synchro.TableConfig{
-		TableName:    "order_details",
-		PushPolicy:   synchro.PushPolicyOwnerOnly,
-		ParentTable:  "orders",
-		ParentFKCol:  "order_id",
-		Dependencies: []string{"orders"},
+	r.RegisterForTest(&synchro.TableConfig{
+		TableName: "order_details",
 	})
 
-	r.Register(&synchro.TableConfig{
-		TableName:  "products",
-		PushPolicy: synchro.PushPolicyDisabled,
+	r.RegisterForTest(&synchro.TableConfig{
+		TableName: "products",
 	})
 
-	r.Register(&synchro.TableConfig{
-		TableName:       "categories",
-		PushPolicy:      synchro.PushPolicyOwnerOnly,
-		OwnerColumn:     "user_id",
-		AllowGlobalRead: true,
+	r.RegisterForTest(&synchro.TableConfig{
+		TableName: "categories",
 	})
 
 	return r
@@ -46,22 +57,16 @@ func NewTestRegistry() *synchro.Registry {
 func NewMixedTestRegistry() *synchro.Registry {
 	r := synchro.NewRegistry()
 
-	r.Register(&synchro.TableConfig{
-		TableName:   "orders",
-		PushPolicy:  synchro.PushPolicyOwnerOnly,
-		OwnerColumn: "user_id",
+	r.RegisterForTest(&synchro.TableConfig{
+		TableName: "orders",
 	})
 
-	r.Register(&synchro.TableConfig{
-		TableName:   "bare_items",
-		PushPolicy:  synchro.PushPolicyOwnerOnly,
-		OwnerColumn: "user_id",
+	r.RegisterForTest(&synchro.TableConfig{
+		TableName: "bare_items",
 	})
 
-	r.Register(&synchro.TableConfig{
-		TableName:   "partial_items",
-		PushPolicy:  synchro.PushPolicyOwnerOnly,
-		OwnerColumn: "user_id",
+	r.RegisterForTest(&synchro.TableConfig{
+		TableName: "partial_items",
 	})
 
 	return r
@@ -105,6 +110,26 @@ func MakePullRequest(clientID string, checkpoint int64, schemaVersion int64, sch
 	return &synchro.PullRequest{
 		ClientID:      clientID,
 		Checkpoint:    checkpoint,
+		SchemaVersion: schemaVersion,
+		SchemaHash:    schemaHash,
+	}
+}
+
+// MakePerBucketPullRequest creates a PullRequest using per-bucket checkpoints.
+func MakePerBucketPullRequest(clientID string, bucketCheckpoints map[string]int64, schemaVersion int64, schemaHash string) *synchro.PullRequest {
+	return &synchro.PullRequest{
+		ClientID:          clientID,
+		BucketCheckpoints: bucketCheckpoints,
+		SchemaVersion:     schemaVersion,
+		SchemaHash:        schemaHash,
+	}
+}
+
+// MakeRebuildRequest creates a RebuildRequest for testing.
+func MakeRebuildRequest(clientID, bucketID string, schemaVersion int64, schemaHash string) *synchro.RebuildRequest {
+	return &synchro.RebuildRequest{
+		ClientID:      clientID,
+		BucketID:      bucketID,
 		SchemaVersion: schemaVersion,
 		SchemaHash:    schemaHash,
 	}

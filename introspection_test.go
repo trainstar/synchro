@@ -12,11 +12,16 @@ import (
 
 func TestIntrospect_FullTable(t *testing.T) {
 	db := synctest.TestDB(t)
-	registry := synctest.NewTestRegistry()
 
 	engine, err := synchro.NewEngine(context.Background(), &synchro.Config{
-		DB:       db,
-		Registry: registry,
+		DB:     db,
+		Tables: synctest.NewTestTables(),
+		AuthorizeWrite: synchro.Chain(
+			synchro.ReadOnly("products"),
+			synchro.StampColumn("user_id"),
+			synchro.VerifyOwner("user_id"),
+		),
+		BucketFunc: synchro.UserBucket("user_id"),
 	})
 	if err != nil {
 		t.Fatalf("NewEngine: %v", err)
@@ -42,11 +47,15 @@ func TestIntrospect_FullTable(t *testing.T) {
 
 func TestIntrospect_BareTable(t *testing.T) {
 	db := synctest.TestDB(t)
-	registry := synctest.NewMixedTestRegistry()
 
 	engine, err := synchro.NewEngine(context.Background(), &synchro.Config{
-		DB:       db,
-		Registry: registry,
+		DB:     db,
+		Tables: synctest.NewMixedTestTables(),
+		AuthorizeWrite: synchro.Chain(
+			synchro.StampColumn("user_id"),
+			synchro.VerifyOwner("user_id"),
+		),
+		BucketFunc: synchro.UserBucket("user_id"),
 	})
 	if err != nil {
 		t.Fatalf("NewEngine: %v", err)
@@ -72,11 +81,15 @@ func TestIntrospect_BareTable(t *testing.T) {
 
 func TestIntrospect_PartialTable(t *testing.T) {
 	db := synctest.TestDB(t)
-	registry := synctest.NewMixedTestRegistry()
 
 	engine, err := synchro.NewEngine(context.Background(), &synchro.Config{
-		DB:       db,
-		Registry: registry,
+		DB:     db,
+		Tables: synctest.NewMixedTestTables(),
+		AuthorizeWrite: synchro.Chain(
+			synchro.StampColumn("user_id"),
+			synchro.VerifyOwner("user_id"),
+		),
+		BucketFunc: synchro.UserBucket("user_id"),
 	})
 	if err != nil {
 		t.Fatalf("NewEngine: %v", err)
@@ -96,11 +109,15 @@ func TestIntrospect_PartialTable(t *testing.T) {
 
 func TestIntrospect_MixedRegistry(t *testing.T) {
 	db := synctest.TestDB(t)
-	registry := synctest.NewMixedTestRegistry()
 
 	engine, err := synchro.NewEngine(context.Background(), &synchro.Config{
-		DB:       db,
-		Registry: registry,
+		DB:     db,
+		Tables: synctest.NewMixedTestTables(),
+		AuthorizeWrite: synchro.Chain(
+			synchro.StampColumn("user_id"),
+			synchro.VerifyOwner("user_id"),
+		),
+		BucketFunc: synchro.UserBucket("user_id"),
 	})
 	if err != nil {
 		t.Fatalf("NewEngine: %v", err)
@@ -138,17 +155,15 @@ func TestIntrospect_CustomColumnName(t *testing.T) {
 		t.Fatalf("creating custom_ts table: %v", err)
 	}
 
-	registry := synchro.NewRegistry()
-	registry.Register(&synchro.TableConfig{
-		TableName:   "custom_ts",
-		PushPolicy:  synchro.PushPolicyOwnerOnly,
-		OwnerColumn: "user_id",
-	})
-
 	engine, err := synchro.NewEngine(context.Background(), &synchro.Config{
 		DB:              db,
-		Registry:        registry,
+		Tables:          []synchro.Table{{Name: "custom_ts"}},
 		UpdatedAtColumn: "modified_at",
+		AuthorizeWrite: synchro.Chain(
+			synchro.StampColumn("user_id"),
+			synchro.VerifyOwner("user_id"),
+		),
+		BucketFunc: synchro.UserBucket("user_id"),
 	})
 	if err != nil {
 		t.Fatalf("NewEngine: %v", err)
@@ -165,11 +180,15 @@ func TestIntrospect_CustomColumnName(t *testing.T) {
 
 func TestProtectedColumns_BareTable(t *testing.T) {
 	db := synctest.TestDB(t)
-	registry := synctest.NewMixedTestRegistry()
 
 	engine, err := synchro.NewEngine(context.Background(), &synchro.Config{
-		DB:       db,
-		Registry: registry,
+		DB:     db,
+		Tables: synctest.NewMixedTestTables(),
+		AuthorizeWrite: synchro.Chain(
+			synchro.StampColumn("user_id"),
+			synchro.VerifyOwner("user_id"),
+		),
+		BucketFunc: synchro.UserBucket("user_id"),
 	})
 	if err != nil {
 		t.Fatalf("NewEngine: %v", err)
@@ -186,22 +205,25 @@ func TestProtectedColumns_BareTable(t *testing.T) {
 	if cfg.IsProtected("created_at") {
 		t.Error("bare_items: created_at should not be protected")
 	}
-	// id and user_id should still be protected
+	// id should still be protected
 	if !cfg.IsProtected("id") {
 		t.Error("bare_items: id should be protected")
 	}
-	if !cfg.IsProtected("user_id") {
-		t.Error("bare_items: user_id should be protected")
-	}
+	// user_id is protected only if it's a FK column. In bare_items it's NOT a FK.
+	// It will be protected via AuthorizeWrite (StampColumn/VerifyOwner), not via protectedSet.
 }
 
 func TestProtectedColumns_FullTable(t *testing.T) {
 	db := synctest.TestDB(t)
-	registry := synctest.NewMixedTestRegistry()
 
 	engine, err := synchro.NewEngine(context.Background(), &synchro.Config{
-		DB:       db,
-		Registry: registry,
+		DB:     db,
+		Tables: synctest.NewMixedTestTables(),
+		AuthorizeWrite: synchro.Chain(
+			synchro.StampColumn("user_id"),
+			synchro.VerifyOwner("user_id"),
+		),
+		BucketFunc: synchro.UserBucket("user_id"),
 	})
 	if err != nil {
 		t.Fatalf("NewEngine: %v", err)
@@ -222,11 +244,15 @@ func TestProtectedColumns_FullTable(t *testing.T) {
 
 func TestPush_BareTable_Create(t *testing.T) {
 	db := synctest.TestDB(t)
-	registry := synctest.NewMixedTestRegistry()
 
 	engine, err := synchro.NewEngine(context.Background(), &synchro.Config{
-		DB:       db,
-		Registry: registry,
+		DB:     db,
+		Tables: synctest.NewMixedTestTables(),
+		AuthorizeWrite: synchro.Chain(
+			synchro.StampColumn("user_id"),
+			synchro.VerifyOwner("user_id"),
+		),
+		BucketFunc: synchro.UserBucket("user_id"),
 	})
 	if err != nil {
 		t.Fatalf("NewEngine: %v", err)
@@ -264,11 +290,15 @@ func TestPush_BareTable_Create(t *testing.T) {
 
 func TestPush_BareTable_Update(t *testing.T) {
 	db := synctest.TestDB(t)
-	registry := synctest.NewMixedTestRegistry()
 
 	engine, err := synchro.NewEngine(context.Background(), &synchro.Config{
-		DB:       db,
-		Registry: registry,
+		DB:     db,
+		Tables: synctest.NewMixedTestTables(),
+		AuthorizeWrite: synchro.Chain(
+			synchro.StampColumn("user_id"),
+			synchro.VerifyOwner("user_id"),
+		),
+		BucketFunc: synchro.UserBucket("user_id"),
 	})
 	if err != nil {
 		t.Fatalf("NewEngine: %v", err)
@@ -325,11 +355,15 @@ func TestPush_BareTable_Update(t *testing.T) {
 
 func TestPush_BareTable_HardDelete(t *testing.T) {
 	db := synctest.TestDB(t)
-	registry := synctest.NewMixedTestRegistry()
 
 	engine, err := synchro.NewEngine(context.Background(), &synchro.Config{
-		DB:       db,
-		Registry: registry,
+		DB:     db,
+		Tables: synctest.NewMixedTestTables(),
+		AuthorizeWrite: synchro.Chain(
+			synchro.StampColumn("user_id"),
+			synchro.VerifyOwner("user_id"),
+		),
+		BucketFunc: synchro.UserBucket("user_id"),
 	})
 	if err != nil {
 		t.Fatalf("NewEngine: %v", err)
@@ -384,11 +418,15 @@ func TestPush_BareTable_HardDelete(t *testing.T) {
 
 func TestPush_BareTable_HardDelete_Idempotent(t *testing.T) {
 	db := synctest.TestDB(t)
-	registry := synctest.NewMixedTestRegistry()
 
 	engine, err := synchro.NewEngine(context.Background(), &synchro.Config{
-		DB:       db,
-		Registry: registry,
+		DB:     db,
+		Tables: synctest.NewMixedTestTables(),
+		AuthorizeWrite: synchro.Chain(
+			synchro.StampColumn("user_id"),
+			synchro.VerifyOwner("user_id"),
+		),
+		BucketFunc: synchro.UserBucket("user_id"),
 	})
 	if err != nil {
 		t.Fatalf("NewEngine: %v", err)
@@ -438,11 +476,15 @@ func TestPush_BareTable_HardDelete_Idempotent(t *testing.T) {
 
 func TestPush_FullTable_SoftDelete_Preserved(t *testing.T) {
 	db := synctest.TestDB(t)
-	registry := synctest.NewMixedTestRegistry()
 
 	engine, err := synchro.NewEngine(context.Background(), &synchro.Config{
-		DB:       db,
-		Registry: registry,
+		DB:     db,
+		Tables: synctest.NewMixedTestTables(),
+		AuthorizeWrite: synchro.Chain(
+			synchro.StampColumn("user_id"),
+			synchro.VerifyOwner("user_id"),
+		),
+		BucketFunc: synchro.UserBucket("user_id"),
 	})
 	if err != nil {
 		t.Fatalf("NewEngine: %v", err)
@@ -496,11 +538,15 @@ func TestPush_FullTable_SoftDelete_Preserved(t *testing.T) {
 
 func TestPush_FullTable_LWW_Preserved(t *testing.T) {
 	db := synctest.TestDB(t)
-	registry := synctest.NewMixedTestRegistry()
 
 	engine, err := synchro.NewEngine(context.Background(), &synchro.Config{
-		DB:       db,
-		Registry: registry,
+		DB:     db,
+		Tables: synctest.NewMixedTestTables(),
+		AuthorizeWrite: synchro.Chain(
+			synchro.StampColumn("user_id"),
+			synchro.VerifyOwner("user_id"),
+		),
+		BucketFunc: synchro.UserBucket("user_id"),
 	})
 	if err != nil {
 		t.Fatalf("NewEngine: %v", err)
@@ -555,11 +601,15 @@ func TestPush_FullTable_LWW_Preserved(t *testing.T) {
 
 func TestPull_BareTable_AfterHardDelete(t *testing.T) {
 	db := synctest.TestDB(t)
-	registry := synctest.NewMixedTestRegistry()
 
 	engine, err := synchro.NewEngine(context.Background(), &synchro.Config{
-		DB:       db,
-		Registry: registry,
+		DB:     db,
+		Tables: synctest.NewMixedTestTables(),
+		AuthorizeWrite: synchro.Chain(
+			synchro.StampColumn("user_id"),
+			synchro.VerifyOwner("user_id"),
+		),
+		BucketFunc: synchro.UserBucket("user_id"),
 	})
 	if err != nil {
 		t.Fatalf("NewEngine: %v", err)
@@ -631,10 +681,15 @@ func TestSchemaHash_DiffersBetweenFullAndBare(t *testing.T) {
 	ctx := context.Background()
 
 	// Engine with full-column tables only
-	fullRegistry := synctest.NewTestRegistry()
 	fullEngine, err := synchro.NewEngine(context.Background(), &synchro.Config{
-		DB:       db,
-		Registry: fullRegistry,
+		DB:     db,
+		Tables: synctest.NewTestTables(),
+		AuthorizeWrite: synchro.Chain(
+			synchro.ReadOnly("products"),
+			synchro.StampColumn("user_id"),
+			synchro.VerifyOwner("user_id"),
+		),
+		BucketFunc: synchro.UserBucket("user_id"),
 	})
 	if err != nil {
 		t.Fatalf("NewEngine (full): %v", err)
@@ -645,10 +700,14 @@ func TestSchemaHash_DiffersBetweenFullAndBare(t *testing.T) {
 	}
 
 	// Engine with mixed tables
-	mixedRegistry := synctest.NewMixedTestRegistry()
 	mixedEngine, err := synchro.NewEngine(context.Background(), &synchro.Config{
-		DB:       db,
-		Registry: mixedRegistry,
+		DB:     db,
+		Tables: synctest.NewMixedTestTables(),
+		AuthorizeWrite: synchro.Chain(
+			synchro.StampColumn("user_id"),
+			synchro.VerifyOwner("user_id"),
+		),
+		BucketFunc: synchro.UserBucket("user_id"),
 	})
 	if err != nil {
 		t.Fatalf("NewEngine (mixed): %v", err)
@@ -665,11 +724,15 @@ func TestSchemaHash_DiffersBetweenFullAndBare(t *testing.T) {
 
 func TestSnapshot_BareTable(t *testing.T) {
 	db := synctest.TestDB(t)
-	registry := synctest.NewMixedTestRegistry()
 
 	engine, err := synchro.NewEngine(context.Background(), &synchro.Config{
-		DB:       db,
-		Registry: registry,
+		DB:     db,
+		Tables: synctest.NewMixedTestTables(),
+		AuthorizeWrite: synchro.Chain(
+			synchro.StampColumn("user_id"),
+			synchro.VerifyOwner("user_id"),
+		),
+		BucketFunc: synchro.UserBucket("user_id"),
 	})
 	if err != nil {
 		t.Fatalf("NewEngine: %v", err)

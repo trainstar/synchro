@@ -39,12 +39,53 @@ class SynchroDatabase(context: Context, dbPath: String) :
             )
         """.trimIndent())
 
+        db.execSQL("""
+            CREATE TABLE IF NOT EXISTS _synchro_bucket_checkpoints (
+                bucket_id TEXT PRIMARY KEY,
+                checkpoint INTEGER NOT NULL DEFAULT 0
+            )
+        """.trimIndent())
+
+        db.execSQL("""
+            CREATE TABLE IF NOT EXISTS _synchro_bucket_members (
+                bucket_id TEXT NOT NULL,
+                table_name TEXT NOT NULL,
+                record_id TEXT NOT NULL,
+                checksum INTEGER,
+                PRIMARY KEY (bucket_id, table_name, record_id)
+            )
+        """.trimIndent())
+
         db.execSQL("INSERT OR IGNORE INTO _synchro_meta (key, value) VALUES ('sync_lock', '0')")
         db.execSQL("INSERT OR IGNORE INTO _synchro_meta (key, value) VALUES ('checkpoint', '0')")
     }
 
     override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
         // No upgrades yet
+    }
+
+    /**
+     * Ensures the bucket checkpoint and bucket member tables exist.
+     * Safe to call on databases created before bucket support was added,
+     * since it uses IF NOT EXISTS.
+     */
+    fun ensureBucketTables() {
+        val db = writableDatabase
+        db.execSQL("""
+            CREATE TABLE IF NOT EXISTS _synchro_bucket_checkpoints (
+                bucket_id TEXT PRIMARY KEY,
+                checkpoint INTEGER NOT NULL DEFAULT 0
+            )
+        """.trimIndent())
+        db.execSQL("""
+            CREATE TABLE IF NOT EXISTS _synchro_bucket_members (
+                bucket_id TEXT NOT NULL,
+                table_name TEXT NOT NULL,
+                record_id TEXT NOT NULL,
+                checksum INTEGER,
+                PRIMARY KEY (bucket_id, table_name, record_id)
+            )
+        """.trimIndent())
     }
 
     // MARK: - Queries

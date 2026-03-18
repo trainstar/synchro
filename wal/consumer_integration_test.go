@@ -157,7 +157,7 @@ func setupWALTest(t *testing.T, tables []string) (*walTestEnv, context.Context) 
 		t.Fatalf("introspecting registry: %v", err)
 	}
 
-	assigner := synchro.NewJoinResolverWithDB(reg, db)
+	assigner := synchro.NewJoinResolverWithDB(reg, db, synchro.UserBucket("user_id"))
 
 	consumer := wal.NewConsumer(&wal.ConsumerConfig{
 		ConnString:      tempReplicationURL,

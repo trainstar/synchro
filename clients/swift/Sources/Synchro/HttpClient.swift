@@ -31,6 +31,10 @@ final class HttpClient: @unchecked Sendable {
         try await post("/sync/snapshot", body: request)
     }
 
+    func rebuild(request: RebuildRequest) async throws -> RebuildResponse {
+        try await post("/sync/rebuild", body: request)
+    }
+
     func fetchSchema() async throws -> SchemaResponse {
         try await get("/sync/schema")
     }

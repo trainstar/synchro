@@ -42,9 +42,11 @@ func (h *Handler) Routes() http.Handler {
 	mux.HandleFunc("/sync/register", h.ServeRegister)
 	mux.HandleFunc("/sync/pull", h.ServePull)
 	mux.HandleFunc("/sync/push", h.ServePush)
+	mux.HandleFunc("/sync/rebuild", h.ServeRebuild)
 	mux.HandleFunc("/sync/snapshot", h.ServeSnapshot)
 	mux.HandleFunc("/sync/tables", h.ServeTableMeta)
 	mux.HandleFunc("/sync/schema", h.ServeSchema)
+	mux.HandleFunc("/sync/debug", h.ServeClientDebug)
 	return mux
 }
 
@@ -200,7 +202,60 @@ func (h *Handler) ServePush(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, resp)
 }
 
+// ServeRebuild handles POST /sync/rebuild.
+func (h *Handler) ServeRebuild(w http.ResponseWriter, r *http.Request) {
+	if !requireMethod(w, r, http.MethodPost) {
+		return
+	}
+
+	ctx := r.Context()
+	userID := UserIDFromContext(ctx)
+	if userID == "" {
+		writeError(w, http.StatusUnauthorized, "missing user identity")
+		return
+	}
+
+	body, err := decodeJSONObject(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	for _, k := range []string{"client_id", "bucket_id"} {
+		if _, ok := body[k]; !ok {
+			writeError(w, http.StatusBadRequest, k+" is required")
+			return
+		}
+	}
+
+	var req synchro.RebuildRequest
+	if err := remarshal(body, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	resp, err := h.engine.Rebuild(ctx, userID, &req)
+	if err != nil {
+		if errors.Is(err, synchro.ErrSchemaMismatch) {
+			h.writeSchemaMismatch(w, r)
+			return
+		}
+		if errors.Is(err, synchro.ErrClientNotRegistered) {
+			writeError(w, http.StatusNotFound, "client not registered")
+			return
+		}
+		if isTransientError(err) {
+			writeRetryError(w, http.StatusServiceUnavailable, "service temporarily unavailable", h.defaultRetryAfter)
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "failed to rebuild bucket")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, resp)
+}
+
 // ServeSnapshot handles POST /sync/snapshot.
+// Deprecated: Use ServeRebuild for per-bucket reconstruction.
 func (h *Handler) ServeSnapshot(w http.ResponseWriter, r *http.Request) {
 	if !requireMethod(w, r, http.MethodPost) {
 		return
@@ -277,6 +332,42 @@ func (h *Handler) ServeSchema(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to load schema")
 		return
 	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// ServeClientDebug handles GET /sync/debug?client_id=xxx.
+func (h *Handler) ServeClientDebug(w http.ResponseWriter, r *http.Request) {
+	if !requireMethod(w, r, http.MethodGet) {
+		return
+	}
+
+	ctx := r.Context()
+	userID := UserIDFromContext(ctx)
+	if userID == "" {
+		writeError(w, http.StatusUnauthorized, "missing user identity")
+		return
+	}
+
+	clientID := r.URL.Query().Get("client_id")
+	if clientID == "" {
+		writeError(w, http.StatusBadRequest, "client_id query parameter is required")
+		return
+	}
+
+	resp, err := h.engine.ClientDebugInfo(ctx, userID, clientID)
+	if err != nil {
+		if errors.Is(err, synchro.ErrClientNotRegistered) {
+			writeError(w, http.StatusNotFound, "client not registered")
+			return
+		}
+		if isTransientError(err) {
+			writeRetryError(w, http.StatusServiceUnavailable, "service temporarily unavailable", h.defaultRetryAfter)
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "failed to get client debug info")
+		return
+	}
+
 	writeJSON(w, http.StatusOK, resp)
 }
 

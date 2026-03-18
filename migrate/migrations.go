@@ -1,11 +1,15 @@
 package migrate
 
 // Migrations returns the SQL statements needed to create the synchro
-// infrastructure tables. The consuming application should run these
-// through their own migration system.
+// infrastructure tables. All statements are idempotent (IF NOT EXISTS).
+//
+// The consuming application should run these once during initial setup.
+// After that, synchro.NewEngine() automatically detects and adds any
+// missing columns to existing tables -- no need to re-run Migrations()
+// when upgrading the library.
 func Migrations() []string {
 	return []string{
-		// Changelog table — ordered log of all changes by bucket
+		// Changelog table: ordered log of all changes by bucket
 		`CREATE TABLE IF NOT EXISTS sync_changelog (
 			seq BIGSERIAL PRIMARY KEY,
 			bucket_id TEXT NOT NULL,
@@ -58,6 +62,7 @@ func Migrations() []string {
 			table_name TEXT NOT NULL,
 			record_id TEXT NOT NULL,
 			bucket_id TEXT NOT NULL,
+			checksum INTEGER,
 			updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
 			PRIMARY KEY (table_name, record_id, bucket_id)
 		)`,
@@ -88,6 +93,16 @@ func Migrations() []string {
 
 		`CREATE UNIQUE INDEX IF NOT EXISTS idx_sync_schema_manifest_hash
 			ON sync_schema_manifest (schema_hash)`,
+
+		// Per-bucket checkpoints for each client.
+		`CREATE TABLE IF NOT EXISTS sync_client_checkpoints (
+			user_id TEXT NOT NULL,
+			client_id TEXT NOT NULL,
+			bucket_id TEXT NOT NULL,
+			checkpoint BIGINT NOT NULL DEFAULT 0,
+			updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+			PRIMARY KEY (user_id, client_id, bucket_id)
+		)`,
 	}
 }
 

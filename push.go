@@ -13,11 +13,12 @@ import (
 
 // pushProcessor handles push operations.
 type pushProcessor struct {
-	registry  *Registry
-	resolver  ConflictResolver
-	changelog *changelogStore
-	hooks     Hooks
-	logger    *slog.Logger
+	registry       *Registry
+	resolver       ConflictResolver
+	authorizeWrite AuthorizeWriteFunc
+	changelog      *changelogStore
+	hooks          Hooks
+	logger         *slog.Logger
 }
 
 // processPush processes a single push record within a transaction.
@@ -30,19 +31,40 @@ func (p *pushProcessor) processPush(ctx context.Context, tx DB, userID string, r
 		}, nil
 	}
 
-	if !p.registry.IsPushable(record.TableName) {
-		return &PushResult{
-			ID: record.ID, TableName: record.TableName, Operation: record.Operation,
-			Status: PushStatusRejectedTerminal, ReasonCode: "table_read_only", Message: "table is read-only",
-		}, nil
-	}
-
 	op, ok := ParseOperation(record.Operation)
 	if !ok {
 		return &PushResult{
 			ID: record.ID, TableName: record.TableName, Operation: record.Operation,
 			Status: PushStatusRejectedTerminal, ReasonCode: "invalid_operation", Message: fmt.Sprintf("unknown operation: %s", record.Operation),
 		}, nil
+	}
+
+	// AuthorizeWrite: for create operations, call before checking existing record.
+	// For update/delete: load existing first, populate record.Existing, then authorize.
+	if p.authorizeWrite != nil {
+		if op == OpInsert {
+			// Capture identity before authorizeWrite — it may return nil record on error.
+			recID, recTable, recOp := record.ID, record.TableName, record.Operation
+			var err error
+			record, err = p.authorizeWrite(ctx, userID, record)
+			if err != nil {
+				if errors.Is(err, ErrTableReadOnly) {
+					return &PushResult{
+						ID: recID, TableName: recTable, Operation: recOp,
+						Status: PushStatusRejectedTerminal, ReasonCode: "table_read_only", Message: "table is read-only",
+					}, nil
+				}
+				if errors.Is(err, ErrOwnershipViolation) {
+					return &PushResult{
+						ID: recID, TableName: recTable, Operation: recOp,
+						Status: PushStatusRejectedTerminal, ReasonCode: "ownership_violation", Message: "ownership violation",
+					}, nil
+				}
+				return nil, fmt.Errorf("authorize write: %w", err)
+			}
+		}
+		// For update/delete, authorization happens inside the respective methods
+		// after loading the existing record.
 	}
 
 	switch op {
@@ -58,6 +80,43 @@ func (p *pushProcessor) processPush(ctx context.Context, tx DB, userID string, r
 			Status: PushStatusRejectedTerminal, ReasonCode: "unsupported_operation", Message: "unsupported operation",
 		}, nil
 	}
+}
+
+// authorizeExisting runs AuthorizeWrite on update/delete operations after loading existing data.
+func (p *pushProcessor) authorizeExisting(ctx context.Context, tx DB, userID string, cfg *TableConfig, record *PushRecord, existing *existingRecord) (*PushRecord, *PushResult) {
+	if p.authorizeWrite == nil {
+		return record, nil
+	}
+
+	// Populate Existing field from the loaded record.
+	if existing != nil && existing.Data != nil {
+		var data map[string]any
+		if err := json.Unmarshal(existing.Data, &data); err == nil {
+			record.Existing = data
+		}
+	}
+
+	authorized, err := p.authorizeWrite(ctx, userID, record)
+	if err != nil {
+		if errors.Is(err, ErrTableReadOnly) {
+			return nil, &PushResult{
+				ID: record.ID, TableName: record.TableName, Operation: record.Operation,
+				Status: PushStatusRejectedTerminal, ReasonCode: "table_read_only", Message: "table is read-only",
+			}
+		}
+		if errors.Is(err, ErrOwnershipViolation) {
+			return nil, &PushResult{
+				ID: record.ID, TableName: record.TableName, Operation: record.Operation,
+				Status: PushStatusRejectedTerminal, ReasonCode: "ownership_violation", Message: "ownership violation",
+			}
+		}
+		// Return as retryable for unexpected errors.
+		return nil, &PushResult{
+			ID: record.ID, TableName: record.TableName, Operation: record.Operation,
+			Status: PushStatusRejectedRetryable, ReasonCode: "authorize_failed", Message: "authorization failed",
+		}
+	}
+	return authorized, nil
 }
 
 // pushCreate handles a create operation.
@@ -86,17 +145,13 @@ func (p *pushProcessor) pushCreate(ctx context.Context, tx DB, userID string, cf
 		}, nil
 	}
 
-	// Parse data and enforce ownership
+	// Parse data
 	var data map[string]any
 	if err := json.Unmarshal(record.Data, &data); err != nil {
 		return &PushResult{
 			ID: record.ID, TableName: record.TableName, Operation: record.Operation,
 			Status: PushStatusRejectedTerminal, ReasonCode: "invalid_data", Message: "invalid data format",
 		}, nil
-	}
-
-	if cfg.OwnerColumn != "" {
-		data[cfg.OwnerColumn] = userID
 	}
 
 	// Set the ID
@@ -130,6 +185,12 @@ func (p *pushProcessor) pushUpdate(ctx context.Context, tx DB, userID string, cf
 			}, nil
 		}
 		return nil, fmt.Errorf("getting existing record: %w", err)
+	}
+
+	// Authorize update/delete with existing data.
+	record, rejection := p.authorizeExisting(ctx, tx, userID, cfg, record, existing)
+	if rejection != nil {
+		return rejection, nil
 	}
 
 	// Check if record is deleted (can't update deleted records unless resurrecting)
@@ -249,24 +310,37 @@ func (p *pushProcessor) pushUpdate(ctx context.Context, tx DB, userID string, cf
 }
 
 // pushDelete handles a delete operation (soft delete when deleted_at exists, hard delete otherwise).
-func (p *pushProcessor) pushDelete(ctx context.Context, tx DB, _ string, cfg *TableConfig, record *PushRecord) (*PushResult, error) {
+func (p *pushProcessor) pushDelete(ctx context.Context, tx DB, userID string, cfg *TableConfig, record *PushRecord) (*PushResult, error) {
+	// Load existing record for authorization.
+	existing, err := getRecordByID(ctx, tx, cfg, record.ID)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return nil, fmt.Errorf("getting existing record for delete: %w", err)
+	}
+
+	// Authorize delete with existing data. Skip authorization if record doesn't
+	// exist — the delete will be idempotent (already_deleted) without needing
+	// ownership checks.
+	if existing != nil {
+		var rejection *PushResult
+		record, rejection = p.authorizeExisting(ctx, tx, userID, cfg, record, existing)
+		if rejection != nil {
+			return rejection, nil
+		}
+	}
+
 	if cfg.HasDeletedAt() {
-		return p.pushSoftDelete(ctx, tx, cfg, record)
+		return p.pushSoftDelete(ctx, tx, cfg, record, existing)
 	}
 	return p.pushHardDelete(ctx, tx, cfg, record)
 }
 
 // pushSoftDelete performs a soft delete by setting deleted_at = now().
-func (p *pushProcessor) pushSoftDelete(ctx context.Context, tx DB, cfg *TableConfig, record *PushRecord) (*PushResult, error) {
-	existing, err := getRecordByID(ctx, tx, cfg, record.ID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return &PushResult{
-				ID: record.ID, TableName: record.TableName, Operation: record.Operation,
-				Status: PushStatusRejectedTerminal, ReasonCode: "record_not_found", Message: "record not found or not accessible",
-			}, nil
-		}
-		return nil, fmt.Errorf("getting existing record: %w", err)
+func (p *pushProcessor) pushSoftDelete(ctx context.Context, tx DB, cfg *TableConfig, record *PushRecord, existing *existingRecord) (*PushResult, error) {
+	if existing == nil {
+		return &PushResult{
+			ID: record.ID, TableName: record.TableName, Operation: record.Operation,
+			Status: PushStatusRejectedTerminal, ReasonCode: "record_not_found", Message: "record not found or not accessible",
+		}, nil
 	}
 
 	// Already deleted — idempotent success

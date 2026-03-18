@@ -27,7 +27,13 @@ func TestIntegration_PullPushRejectBootstrapSchema(t *testing.T) {
 
 	engine, err := synchro.NewEngine(ctx, &synchro.Config{
 		DB:       db,
-		Registry: synctest.NewTestRegistry(),
+		Tables: synctest.NewTestTables(),
+		AuthorizeWrite: synchro.Chain(
+			synchro.ReadOnly("products"),
+			synchro.StampColumn("user_id"),
+			synchro.VerifyOwner("user_id"),
+		),
+		BucketFunc: synchro.UserBucket("user_id"),
 	})
 	if err != nil {
 		t.Fatalf("NewEngine: %v", err)
@@ -68,7 +74,13 @@ func TestIntegration_SchemaManifest_RaceSafe(t *testing.T) {
 
 	engine, err := synchro.NewEngine(ctx, &synchro.Config{
 		DB:       db,
-		Registry: synctest.NewTestRegistry(),
+		Tables: synctest.NewTestTables(),
+		AuthorizeWrite: synchro.Chain(
+			synchro.ReadOnly("products"),
+			synchro.StampColumn("user_id"),
+			synchro.VerifyOwner("user_id"),
+		),
+		BucketFunc: synchro.UserBucket("user_id"),
 	})
 	if err != nil {
 		t.Fatalf("NewEngine: %v", err)
@@ -142,7 +154,13 @@ func TestIntegration_SchemaManifest_ChangesOnDrift(t *testing.T) {
 
 	engine, err := synchro.NewEngine(ctx, &synchro.Config{
 		DB:       db,
-		Registry: synctest.NewTestRegistry(),
+		Tables: synctest.NewTestTables(),
+		AuthorizeWrite: synchro.Chain(
+			synchro.ReadOnly("products"),
+			synchro.StampColumn("user_id"),
+			synchro.VerifyOwner("user_id"),
+		),
+		BucketFunc: synchro.UserBucket("user_id"),
 	})
 	if err != nil {
 		t.Fatalf("NewEngine: %v", err)
@@ -182,16 +200,15 @@ func TestIntegration_EnumTypeResolution(t *testing.T) {
 	// The test schema already creates the order_status enum and the orders
 	// table with a status column of type order_status. Verify that schema
 	// discovery resolves the enum to "string".
-	reg := synchro.NewRegistry()
-	reg.Register(&synchro.TableConfig{
-		TableName:   "orders",
-		PushPolicy:  synchro.PushPolicyOwnerOnly,
-		OwnerColumn: "user_id",
-	})
-
 	engine, err := synchro.NewEngine(ctx, &synchro.Config{
-		DB:       db,
-		Registry: reg,
+		DB:     db,
+		Tables: synctest.NewTestTables(),
+		AuthorizeWrite: synchro.Chain(
+			synchro.ReadOnly("products"),
+			synchro.StampColumn("user_id"),
+			synchro.VerifyOwner("user_id"),
+		),
+		BucketFunc: synchro.UserBucket("user_id"),
 	})
 	if err != nil {
 		t.Fatalf("NewEngine: %v", err)
@@ -253,15 +270,15 @@ func TestIntegration_DomainTypeResolution(t *testing.T) {
 		t.Fatalf("creating domain_test table: %v", err)
 	}
 
-	reg := synchro.NewRegistry()
-	reg.Register(&synchro.TableConfig{
-		TableName:  "domain_test",
-		PushPolicy: synchro.PushPolicyDisabled,
-	})
-
 	engine, err := synchro.NewEngine(ctx, &synchro.Config{
-		DB:       db,
-		Registry: reg,
+		DB:     db,
+		Tables: []synchro.Table{{Name: "domain_test"}},
+		AuthorizeWrite: synchro.Chain(
+			synchro.ReadOnly("products"),
+			synchro.StampColumn("user_id"),
+			synchro.VerifyOwner("user_id"),
+		),
+		BucketFunc: synchro.UserBucket("user_id"),
 	})
 	if err != nil {
 		t.Fatalf("NewEngine: %v", err)
@@ -322,21 +339,22 @@ func TestIntegration_SchemaManifest_DeterministicAcrossOrderVariations(t *testin
 		_, _ = db.ExecContext(ctx, fmt.Sprintf("DROP TABLE IF EXISTS %s CASCADE", t1))
 	})
 
-	regA := synchro.NewRegistry()
-	regA.Register(&synchro.TableConfig{TableName: t1, PushPolicy: synchro.PushPolicyDisabled})
-	regA.Register(&synchro.TableConfig{TableName: t2, PushPolicy: synchro.PushPolicyDisabled})
-	regA.Register(&synchro.TableConfig{TableName: t3, PushPolicy: synchro.PushPolicyDisabled, Dependencies: []string{t1, t2}})
+	tablesA := []synchro.Table{{Name: t1}, {Name: t2}, {Name: t3}}
+	tablesB := []synchro.Table{{Name: t2}, {Name: t3}, {Name: t1}}
 
-	regB := synchro.NewRegistry()
-	regB.Register(&synchro.TableConfig{TableName: t2, PushPolicy: synchro.PushPolicyDisabled})
-	regB.Register(&synchro.TableConfig{TableName: t3, PushPolicy: synchro.PushPolicyDisabled, Dependencies: []string{t2, t1}})
-	regB.Register(&synchro.TableConfig{TableName: t1, PushPolicy: synchro.PushPolicyDisabled})
-
-	engineA, err := synchro.NewEngine(ctx, &synchro.Config{DB: db, Registry: regA})
+	engineA, err := synchro.NewEngine(ctx, &synchro.Config{
+		DB:         db,
+		Tables:     tablesA,
+		BucketFunc: synchro.UserBucket("user_id"),
+	})
 	if err != nil {
 		t.Fatalf("NewEngine A: %v", err)
 	}
-	engineB, err := synchro.NewEngine(ctx, &synchro.Config{DB: db, Registry: regB})
+	engineB, err := synchro.NewEngine(ctx, &synchro.Config{
+		DB:         db,
+		Tables:     tablesB,
+		BucketFunc: synchro.UserBucket("user_id"),
+	})
 	if err != nil {
 		t.Fatalf("NewEngine B: %v", err)
 	}

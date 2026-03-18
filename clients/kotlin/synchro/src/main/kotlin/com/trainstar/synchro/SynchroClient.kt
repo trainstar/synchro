@@ -103,6 +103,58 @@ class SynchroClient(private val config: SynchroConfig, context: Context) {
 
     val path: String get() = database.path
 
+    // MARK: - Debug
+
+    /**
+     * Returns diagnostic information about local sync state for support tickets.
+     */
+    fun debugInfo(): SynchroDebugInfo {
+        return database.readTransaction { db ->
+            val checkpoint = SynchroMeta.getInt64(db, MetaKey.CHECKPOINT)
+            val bucketCheckpoints = SynchroMeta.getAllBucketCheckpoints(db)
+
+            val buckets = bucketCheckpoints.map { (bucketId, cp) ->
+                var memberCount = 0
+                var xor = 0
+                db.rawQuery(
+                    "SELECT checksum FROM _synchro_bucket_members WHERE bucket_id = ?",
+                    arrayOf(bucketId)
+                ).use { cursor ->
+                    while (cursor.moveToNext()) {
+                        memberCount++
+                        if (!cursor.isNull(0)) {
+                            xor = xor xor cursor.getInt(0)
+                        }
+                    }
+                }
+                BucketDebugInfo(
+                    bucketID = bucketId,
+                    checkpoint = cp,
+                    memberCount = memberCount,
+                    checksum = xor
+                )
+            }
+
+            var pendingCount = 0
+            db.rawQuery("SELECT COUNT(*) FROM _synchro_pending_changes", null).use { cursor ->
+                if (cursor.moveToFirst()) pendingCount = cursor.getInt(0)
+            }
+
+            val schemaVersion = SynchroMeta.getInt64(db, MetaKey.SCHEMA_VERSION)
+            val schemaHash = SynchroMeta.get(db, MetaKey.SCHEMA_HASH) ?: ""
+
+            SynchroDebugInfo(
+                clientID = config.clientID,
+                buckets = buckets,
+                lastSyncCheckpoint = checkpoint,
+                schemaVersion = schemaVersion,
+                schemaHash = schemaHash,
+                pendingChangeCount = pendingCount,
+                generatedAt = java.time.Instant.now().toString()
+            )
+        }
+    }
+
     // MARK: - Sync Status
 
     fun pendingChangeCount(): Int = changeTracker.pendingChangeCount()

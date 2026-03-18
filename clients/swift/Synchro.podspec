@@ -1,6 +1,6 @@
 Pod::Spec.new do |s|
   s.name         = "Synchro"
-  s.version      = "0.1.0"
+  s.version      = "0.2.0"
   s.summary      = "Offline-first sync SDK for iOS"
   s.homepage     = "https://github.com/trainstar/synchro"
   s.license      = { :type => "MIT" }

@@ -68,7 +68,7 @@
 - (void)initialize:(JS::NativeSynchro::SpecInitializeConfig &)config
            resolve:(RCTPromiseResolveBlock)resolve
             reject:(RCTPromiseRejectBlock)reject {
-    NSDictionary *configDict = @{
+    NSMutableDictionary *configDict = [@{
         @"dbPath": config.dbPath(),
         @"serverURL": config.serverURL(),
         @"clientID": config.clientID(),
@@ -80,7 +80,11 @@
         @"pullPageSize": @(config.pullPageSize()),
         @"pushBatchSize": @(config.pushBatchSize()),
         @"snapshotPageSize": @(config.snapshotPageSize()),
-    };
+    } mutableCopy];
+    NSString *seedPath = config.seedDatabasePath();
+    if (seedPath) {
+        configDict[@"seedDatabasePath"] = seedPath;
+    }
     [self.impl initialize:configDict resolve:resolve reject:reject];
 }
 

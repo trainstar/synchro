@@ -36,30 +36,7 @@ var (
 	// ErrClientNotRegistered indicates the client has not been registered.
 	ErrClientNotRegistered = errors.New("synchro: client not registered")
 
-	// ErrUnregisteredParent indicates a table references a parent not in the registry.
-	ErrUnregisteredParent = errors.New("synchro: unregistered parent table")
-
-	// ErrCycleDetected indicates a cycle exists in the parent chain.
-	ErrCycleDetected = errors.New("synchro: cycle detected in parent chain")
-
-	// ErrOrphanedChain indicates the parent chain root has no OwnerColumn.
-	ErrOrphanedChain = errors.New("synchro: orphaned parent chain")
-
-	// ErrMissingOwnership indicates a pushable table has no ownership path.
-	ErrMissingOwnership = errors.New("synchro: pushable table has no ownership path")
-
-	// ErrMissingParentFKCol indicates ParentTable is set without ParentFKCol.
-	ErrMissingParentFKCol = errors.New("synchro: ParentTable set without ParentFKCol")
-
-	// ErrRedundantProtected indicates a ProtectedColumns entry is redundant.
-	ErrRedundantProtected = errors.New("synchro: redundant protected column")
-
-	// ErrInvalidPushPolicy indicates an unsupported push policy value.
-	ErrInvalidPushPolicy = errors.New("synchro: invalid push policy")
-
-	// ErrInvalidBucketConfig indicates contradictory bucket configuration.
-	ErrInvalidBucketConfig = errors.New("synchro: invalid bucket configuration")
-
 	// ErrSnapshotRequired indicates the client must rebuild from a full snapshot.
+	// Deprecated: Use bucket rebuild instead. Kept for legacy client compatibility.
 	ErrSnapshotRequired = errors.New("synchro: snapshot required")
 )
