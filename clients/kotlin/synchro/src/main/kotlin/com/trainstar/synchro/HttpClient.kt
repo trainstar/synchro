@@ -33,6 +33,9 @@ class HttpClient(
     suspend fun snapshot(request: SnapshotRequest): SnapshotResponse =
         post("/sync/snapshot", json.encodeToString(request))
 
+    suspend fun rebuild(request: RebuildRequest): RebuildResponse =
+        post("/sync/rebuild", json.encodeToString(request))
+
     suspend fun fetchSchema(): SchemaResponse =
         get("/sync/schema")
 

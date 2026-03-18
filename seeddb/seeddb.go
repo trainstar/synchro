@@ -75,9 +75,10 @@ type snapshotCursor struct {
 }
 
 type snapshotResponse struct {
-	Records []snapshotRecord `json:"records"`
-	Cursor  *snapshotCursor  `json:"cursor,omitempty"`
-	HasMore bool             `json:"has_more"`
+	Records    []snapshotRecord `json:"records"`
+	Cursor     *snapshotCursor  `json:"cursor,omitempty"`
+	HasMore    bool             `json:"has_more"`
+	Checkpoint int64            `json:"checkpoint"`
 }
 
 type snapshotRecord struct {
@@ -211,6 +212,7 @@ func fetchAndInsertData(db *sql.DB, cfg Config, schema *schemaResponse, tableCol
 	// Page through snapshot.
 	var cursor *snapshotCursor
 	var totalRecords int
+	var finalCheckpoint int64
 	for {
 		snapReq := snapshotRequest{
 			ClientID:      regReq.ClientID,
@@ -231,13 +233,24 @@ func fetchAndInsertData(db *sql.DB, cfg Config, schema *schemaResponse, tableCol
 			totalRecords += len(snapResp.Records)
 		}
 
+		finalCheckpoint = snapResp.Checkpoint
+
 		if !snapResp.HasMore {
 			break
 		}
 		cursor = snapResp.Cursor
 	}
 
-	fmt.Printf("  inserted %d records from snapshot\n", totalRecords)
+	// Mark the seed as a completed snapshot so the sync engine does
+	// incremental pull instead of a destructive rebuild.
+	if _, err := db.Exec("UPDATE _synchro_meta SET value = ? WHERE key = 'checkpoint'", fmt.Sprintf("%d", finalCheckpoint)); err != nil {
+		return fmt.Errorf("setting checkpoint: %w", err)
+	}
+	if _, err := db.Exec("UPDATE _synchro_meta SET value = '1' WHERE key = 'snapshot_complete'"); err != nil {
+		return fmt.Errorf("setting snapshot_complete: %w", err)
+	}
+
+	fmt.Printf("  inserted %d records from snapshot (checkpoint=%d)\n", totalRecords, finalCheckpoint)
 	return nil
 }
 

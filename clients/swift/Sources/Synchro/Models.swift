@@ -26,6 +26,7 @@ public struct RegisterResponse: Codable, Sendable {
     public var serverTime: Date
     public var lastSyncAt: Date?
     public var checkpoint: Int64
+    public var bucketCheckpoints: [String: Int64]?
     public var schemaVersion: Int64
     public var schemaHash: String
 
@@ -34,6 +35,7 @@ public struct RegisterResponse: Codable, Sendable {
         case serverTime = "server_time"
         case lastSyncAt = "last_sync_at"
         case checkpoint
+        case bucketCheckpoints = "bucket_checkpoints"
         case schemaVersion = "schema_version"
         case schemaHash = "schema_hash"
     }
@@ -44,6 +46,7 @@ public struct RegisterResponse: Codable, Sendable {
 public struct PullRequest: Codable, Sendable {
     public var clientID: String
     public var checkpoint: Int64
+    public var bucketCheckpoints: [String: Int64]?
     public var tables: [String]?
     public var limit: Int?
     public var knownBuckets: [String]?
@@ -53,6 +56,7 @@ public struct PullRequest: Codable, Sendable {
     enum CodingKeys: String, CodingKey {
         case clientID = "client_id"
         case checkpoint
+        case bucketCheckpoints = "bucket_checkpoints"
         case tables
         case limit
         case knownBuckets = "known_buckets"
@@ -65,9 +69,12 @@ public struct PullResponse: Codable, Sendable {
     public var changes: [Record]
     public var deletes: [DeleteEntry]
     public var checkpoint: Int64
+    public var bucketCheckpoints: [String: Int64]?
     public var hasMore: Bool
     public var snapshotRequired: Bool?
     public var snapshotReason: String?
+    public var rebuildBuckets: [String]?
+    public var bucketChecksums: [String: Int32]?
     public var bucketUpdates: BucketUpdate?
     public var schemaVersion: Int64
     public var schemaHash: String
@@ -76,9 +83,12 @@ public struct PullResponse: Codable, Sendable {
         case changes
         case deletes
         case checkpoint
+        case bucketCheckpoints = "bucket_checkpoints"
         case hasMore = "has_more"
         case snapshotRequired = "snapshot_required"
         case snapshotReason = "snapshot_reason"
+        case rebuildBuckets = "rebuild_buckets"
+        case bucketChecksums = "bucket_checksums"
         case bucketUpdates = "bucket_updates"
         case schemaVersion = "schema_version"
         case schemaHash = "schema_hash"
@@ -91,6 +101,8 @@ public struct Record: Codable, Sendable {
     public var data: [String: AnyCodable]
     public var updatedAt: Date
     public var deletedAt: Date?
+    public var bucketID: String?
+    public var checksum: Int32?
 
     enum CodingKeys: String, CodingKey {
         case id
@@ -98,6 +110,8 @@ public struct Record: Codable, Sendable {
         case data
         case updatedAt = "updated_at"
         case deletedAt = "deleted_at"
+        case bucketID = "bucket_id"
+        case checksum
     }
 }
 
@@ -258,6 +272,46 @@ public struct SnapshotResponse: Codable, Sendable {
         case cursor
         case checkpoint
         case hasMore = "has_more"
+        case schemaVersion = "schema_version"
+        case schemaHash = "schema_hash"
+    }
+}
+
+// MARK: - Rebuild
+
+public struct RebuildRequest: Codable, Sendable {
+    public var clientID: String
+    public var bucketID: String
+    public var cursor: String?
+    public var limit: Int?
+    public var schemaVersion: Int64
+    public var schemaHash: String
+
+    enum CodingKeys: String, CodingKey {
+        case clientID = "client_id"
+        case bucketID = "bucket_id"
+        case cursor
+        case limit
+        case schemaVersion = "schema_version"
+        case schemaHash = "schema_hash"
+    }
+}
+
+public struct RebuildResponse: Codable, Sendable {
+    public var records: [Record]
+    public var cursor: String?
+    public var checkpoint: Int64
+    public var hasMore: Bool
+    public var bucketChecksum: Int32?
+    public var schemaVersion: Int64
+    public var schemaHash: String
+
+    enum CodingKeys: String, CodingKey {
+        case records
+        case cursor
+        case checkpoint
+        case hasMore = "has_more"
+        case bucketChecksum = "bucket_checksum"
         case schemaVersion = "schema_version"
         case schemaHash = "schema_hash"
     }
@@ -547,6 +601,25 @@ public enum PushStatus {
     public static let conflict = "conflict"
     public static let rejectedTerminal = "rejected_terminal"
     public static let rejectedRetryable = "rejected_retryable"
+}
+
+// MARK: - Debug Types
+
+public struct SynchroDebugInfo: Codable, Sendable {
+    public var clientID: String
+    public var buckets: [BucketDebugInfo]
+    public var lastSyncCheckpoint: Int64
+    public var schemaVersion: Int64
+    public var schemaHash: String
+    public var pendingChangeCount: Int
+    public var generatedAt: Date
+}
+
+public struct BucketDebugInfo: Codable, Sendable {
+    public var bucketID: String
+    public var checkpoint: Int64
+    public var memberCount: Int
+    public var checksum: Int32
 }
 
 // MARK: - JSON Date Coding

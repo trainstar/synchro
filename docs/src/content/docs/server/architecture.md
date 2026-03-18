@@ -13,7 +13,7 @@ graph LR
         A[Local DB<br/>SQLite] --- B[Changelog]
     end
     subgraph Server
-        C[App Tables<br/>RLS-enforced]
+        C[App Tables<br/>RLS optional]
         D[sync_changelog<br/>bucketed, monotonic]
         E[sync_clients<br/>per-device state]
         F[WAL Consumer<br/>pglogrepl]
@@ -25,12 +25,37 @@ graph LR
 
 ---
 
+## Configuration at a Glance
+
+The engine is configured with a single `Config` struct. Table metadata (PKs, FKs, column types, nullability, timestamps) is auto-introspected from `pg_catalog`. You only declare table names and optional column exclusions.
+
+```go
+engine := synchro.NewEngine(ctx, &synchro.Config{
+    DB: db,
+    Tables: []synchro.Table{
+        {Name: "exercises", Exclude: []string{"search_vector"}},
+        {Name: "workouts"},
+        {Name: "products"},
+    },
+    AuthorizeWrite: synchro.Chain(
+        synchro.ReadOnly("products"),
+        synchro.StampColumn("user_id"),
+        synchro.VerifyOwner("user_id"),
+    ),
+    BucketFunc: synchro.UserBucket("user_id"),
+})
+```
+
+See the [Configuration](/server/configuration/) page for the full reference.
+
+---
+
 ## High-Level Architecture
 
 ### WAL --> Changelog --> Bucketed Pull
 
 1. **WAL capture:** A `wal.Consumer` connects to a PostgreSQL logical replication slot (pgoutput protocol). It receives INSERT/UPDATE/DELETE events for registered tables.
-2. **Bucket assignment:** Each WAL event passes through a `BucketAssigner` (typically the `OwnershipResolver`) to determine which buckets the record belongs to (e.g., `user:abc-123`, `global`).
+2. **Bucket assignment:** Each WAL event passes through the `BucketFunc` (or `JoinResolver` for child table FK chain resolution) to determine which buckets the record belongs to (e.g., `user:abc-123`, `global`).
 3. **Changelog write:** One `sync_changelog` row per bucket is written with a monotonic `BIGSERIAL` sequence number.
 4. **Pull:** Clients pull changes by querying `sync_changelog WHERE bucket_id = ANY(subs) AND seq > checkpoint`, hydrating records from app tables, then advancing the checkpoint.
 
@@ -42,34 +67,50 @@ This gives O(log n) pull queries (indexed by `bucket_id, seq`) and complete deco
 
 ### Engine (`engine.go`)
 
-Top-level orchestrator. Holds all dependencies and exposes `RegisterClient()`, `Push()`, `Pull()`, `Snapshot()`, `TableMetadata()`, `Schema()`, `RunCompaction()`, `StartCompaction()`, and manifest inspection helpers (`CurrentSchemaManifest()`, `SchemaManifestHistory()`). Wires together the push/pull processors, conflict resolver, ownership resolver, compactor, schema store, and hooks.
+Top-level orchestrator. Holds all dependencies and exposes `RegisterClient()`, `Push()`, `Pull()`, `Rebuild()`, `Snapshot()`, `TableMetadata()`, `Schema()`, `RunCompaction()`, `StartCompaction()`, and manifest inspection helpers (`CurrentSchemaManifest()`, `SchemaManifestHistory()`). Wires together the push/pull processors, `AuthorizeWrite` chain, `BucketFunc`, conflict resolver, compactor, schema store, and hooks.
 
 ### Registry (`registry.go`)
 
-Holds `TableConfig` entries that define sync behavior per table: `PushPolicy`, ownership column, parent relationships, protected columns, sync column projections, dependencies, and bucket configuration.
+Built automatically at engine startup from `Config.Tables` (a slice of `Table{Name, Exclude}`). The engine introspects `pg_catalog` to discover primary keys, foreign keys, column nullability, and timestamp columns for each table. Parent/child relationships and dependency ordering are auto-detected from the FK graph, so no manual `ParentTable`, `ParentFKCol`, or `Dependencies` configuration is required.
 
-Validates the full config graph at engine startup: checks parent chains terminate at an owner, detects cycles, and enforces that pushable tables have ownership paths.
+The registry validates the introspected graph at startup: checks FK chains are acyclic and that all referenced tables are registered.
 
 ### Push Processor (`push.go`)
 
 Handles client-to-server writes inside a single database transaction:
 
-- **Create:** Inserts new records, enforces ownership column, handles resurrection of soft-deleted records.
-- **Update:** Runs conflict resolution (LWW by default), applies allowed columns via deny-list filtering.
+- **Create:** Inserts new records, handles resurrection of soft-deleted records.
+- **Update:** Runs conflict resolution (LWW by default), applies allowed columns.
 - **Delete:** Soft-deletes via `deleted_at = now()`, idempotent for already-deleted records.
 
-All push operations execute under RLS context (`SET LOCAL app.user_id`).
+Authorization is delegated to the `AuthorizeWrite` hook, a composable chain of helpers that replace the old `PushPolicy` / `OwnerColumn` / `ProtectedColumns` fields:
+
+- `ReadOnly(...)`: rejects writes to reference tables.
+- `StampColumn("user_id")`: stamps the owner column on INSERT, strips it on UPDATE (server-derived from JWT, never client-provided).
+- `VerifyOwner("user_id")`: checks ownership on UPDATE/DELETE by comparing the authenticated user against the existing record.
+- `protectedColumns()`: strips server-computed columns (`id`, timestamps) from client payloads.
+
+Push operations still execute under RLS context (`SET LOCAL app.user_id`) for defense-in-depth, but correctness does not depend on RLS. `AuthorizeWrite` is the primary authorization gate.
 
 ### Pull Processor (`pull.go`)
 
-Handles server-to-client reads:
+Handles server-to-client reads via two paths:
+
+**Legacy pull** (single global checkpoint):
 
 - Queries `sync_changelog` for the client's subscribed buckets after their checkpoint.
 - Deduplicates entries for the same record (keeps latest operation).
 - Separates deletes from changes, batch-hydrates changed records per table.
 - Returns paginated results with `has_more` flag and new checkpoint.
 - Detects invalid incremental state and returns `snapshot_required` with a reason.
-- Handles full snapshot pagination for bootstrap and rebuild flows.
+
+**Per-bucket pull** (`processPerBucketPull()`):
+
+- Each subscribed bucket has its own independent checkpoint stored in `sync_client_checkpoints`.
+- On each pull, `detectStaleBuckets()` compares each bucket's checkpoint against the compaction boundary. If a bucket's checkpoint has fallen behind, that bucket is flagged as stale.
+- Stale buckets are not pulled incrementally. Instead, the response includes a `RebuildBuckets` list, signaling the client to call `POST /sync/rebuild` for each stale bucket.
+- Non-stale buckets are pulled normally, each advancing its own checkpoint independently.
+- This avoids full-database snapshots: only the affected buckets need rebuilding.
 
 ### WAL Consumer (`wal/consumer.go`)
 
@@ -77,21 +118,20 @@ Long-running goroutine that connects to PostgreSQL logical replication:
 
 - Uses `pglogrepl` to manage replication slot and standby status.
 - Decodes pgoutput messages (relation, insert, update, delete) via `wal.Decoder`.
-- Assigns buckets and writes changelog entries for each event.
+- Assigns buckets via `BucketFunc` (direct owner column) or `JoinResolver` (FK chain for child tables) and writes changelog entries for each event.
 - Tracks LSN position for crash recovery.
 
 ### WAL Decoder (`wal/decoder.go`)
 
 Converts raw pgoutput protocol messages into `WALEvent` structs. Maintains a relation cache for column name resolution. Only emits events for tables registered in the `Registry`.
 
-### Ownership Resolver (`ownership.go`)
+### Bucket Assignment (`ownership.go`)
 
-Determines which buckets a record belongs to. The default `JoinResolver`:
+Determines which buckets a record belongs to. Primary bucket assignment is via `BucketFunc`, a plain function with the signature `func(table, op string, data map[string]any) []string`. It receives the table name, operation type, and record data, then returns the list of bucket IDs the record belongs to.
 
-- Tables with `OwnerColumn`: reads owner directly from record data (zero queries).
-- Tables with `BucketByColumn` + `BucketPrefix`: uses fast-path bucket assignment without extra joins.
-- Nullable bucket values can emit `global` only when `GlobalWhenBucketNull=true`.
-- Child tables: walks the parent chain via a single JOIN query to find the root owner.
+For the common case, `UserBucket("user_id")` returns a function that reads the `user_id` column from the data map. If the column is present and non-nil, it returns `["user:<value>"]`. If the column is nil, it returns `["global"]`. If the column is missing entirely, it returns nil, allowing FK chain fallback.
+
+The `JoinResolver` handles FK chain resolution for child tables that lack a direct owner column. It walks the parent chain via a single JOIN query to find the root owner. The `JoinResolver` accepts an optional `BucketFunc` for tables where direct column lookup is possible, falling back to FK chain resolution when `BucketFunc` returns nil.
 
 ### Conflict Resolver (`conflict.go`)
 
@@ -108,7 +148,10 @@ Manages `sync_clients` table: registration (upsert), bucket subscriptions, last 
 
 ### Checkpoint Store (`checkpoint.go`)
 
-Tracks per-client pull progress. Monotonically advances `last_pull_seq` (never goes backward).
+Tracks per-client pull progress via two mechanisms:
+
+- **Per-bucket checkpoints** (primary): Stored in `sync_client_checkpoints` with one row per `(client_id, bucket_id)`. Each bucket's checkpoint advances independently, enabling granular rebuild of individual buckets without affecting others.
+- **Legacy global checkpoint**: The `last_pull_seq` column on `sync_clients` is kept for backwards compatibility with clients that have not migrated to per-bucket cursors. Monotonically advances (never goes backward).
 
 ### Changelog Store (`changelog.go`)
 
@@ -123,7 +166,7 @@ Builds canonical schema payloads from `pg_catalog`, computes deterministic schem
 Manages changelog compaction to prevent unbounded growth of `sync_changelog`:
 
 - **Stale client deactivation:** Marks clients inactive if they haven't synced within a configurable threshold (default 7 days). Prevents one stale client from blocking compaction for all others.
-- **Safe sequence calculation:** Computes `MIN(last_pull_seq)` across all active clients as the safe compaction boundary.
+- **Safe sequence calculation:** Reads the minimum checkpoint from `sync_client_checkpoints` across all active clients. Falls back to `MIN(last_pull_seq)` from `sync_clients` for clients that have not yet migrated to per-bucket checkpoints. The lower of the two values is used as the safe compaction boundary.
 - **Batched deletion:** Deletes changelog entries with `seq <= safeSeq` in configurable batches (default 10,000) to avoid long-running transactions.
 - **Orchestration:** `RunCompaction()` runs all three steps. `StartCompaction()` runs on a background ticker.
 
@@ -146,7 +189,8 @@ sequenceDiagram
     Engine->>DB: SET LOCAL app.user_id (RLS context)
 
     loop For each PushRecord
-        Engine->>Engine: Validate table is registered and pushable
+        Engine->>Engine: Validate table is registered
+        Engine->>Engine: Run AuthorizeWrite chain (ReadOnly, StampColumn, VerifyOwner)
         Engine->>Engine: Parse operation (create/update/delete)
         alt Create
             Engine->>DB: Check for existing record
@@ -167,7 +211,7 @@ sequenceDiagram
     Engine-->>Client: Accepted/rejected results with server-set timestamps (RYOW)
 </pre>
 
-RLS policies enforce authorization at the database level. The push processor does not walk FK chains. Postgres RLS handles it.
+The `AuthorizeWrite` chain handles push authorization. RLS policies provide defense-in-depth at the database level but are not required for correctness.
 
 ### Pull Path
 
@@ -201,39 +245,46 @@ sequenceDiagram
     Engine-->>Client: Changes / deletes / checkpoint / schema identifiers
 </pre>
 
-### Snapshot Path
+### Rebuild Path
+
+When a pull detects that one or more buckets have stale checkpoints (behind the compaction boundary), the client receives a `RebuildBuckets` list in the pull response. For each stale bucket, the client calls `POST /sync/rebuild` to rebuild that bucket's data without affecting other buckets.
 
 <pre class="mermaid">
 sequenceDiagram
     participant Client
-    participant Handler as POST /sync/snapshot
+    participant PullHandler as POST /sync/pull
+    participant RebuildHandler as POST /sync/rebuild
     participant Engine
     participant DB as PostgreSQL
 
-    Client->>Handler: Snapshot request
-    Handler->>Engine: Snapshot(ctx, userID, req)
+    Client->>PullHandler: Pull request
+    PullHandler->>Engine: Pull(ctx, userID, req)
+    Engine->>Engine: detectStaleBuckets() per bucket checkpoint
+    Engine-->>Client: Response with RebuildBuckets: ["user:abc-123"]
+
+    Client->>RebuildHandler: Rebuild request (bucket_id, cursor)
+    RebuildHandler->>Engine: Rebuild(ctx, userID, req)
     Engine->>Engine: Validate schema_version + schema_hash against manifest
 
     Engine->>DB: BEGIN read-only tx
     Engine->>DB: SET LOCAL app.user_id (RLS auth context)
 
     alt First page
-        Engine->>DB: Capture MAX(seq) as snapshot checkpoint
+        Engine->>DB: Capture MAX(seq) as rebuild checkpoint
     end
 
-    Engine->>DB: Read visible rows from app tables in registration order
-    Engine->>Engine: Page deterministically by table index + primary key
+    Engine->>DB: Read records from sync_bucket_edges for bucket
+    Engine->>Engine: Paginate by primary key cursor
 
     Engine->>DB: COMMIT read-only tx
 
     alt Final page
-        Engine->>DB: Reactivate client
-        Engine->>DB: Persist snapshot checkpoint
+        Engine->>DB: Persist per-bucket checkpoint in sync_client_checkpoints
     end
 
-    Engine-->>Client: Records + stateless cursor (carries captured checkpoint)
+    Engine-->>Client: Records + cursor + has_more
 
-    Note over Client: Resumes normal incremental pull from snapshot checkpoint
+    Note over Client: Resumes incremental pull for this bucket from rebuild checkpoint
 </pre>
 
 ---
@@ -250,18 +301,22 @@ Change detection uses PostgreSQL logical replication, not database triggers. Thi
 
 The WAL consumer runs as a separate process, decoupling changelog production from application write latency.
 
-### RLS for Push Authorization (Not FK Walking)
+### Ownership Scoping Across All Sync Paths
 
-Push operations set `app.user_id` via `SET LOCAL` and let PostgreSQL Row-Level Security enforce access. This means:
+Ownership scoping is split into three distinct concerns, each with a clear responsibility:
 
-- Authorization logic lives in the database, not application code.
-- Child table access is enforced via `EXISTS (SELECT 1 FROM parent WHERE ...)` subquery policies.
-- The push processor does not need to walk parent chains. RLS handles it.
-- Ownership resolution (for bucketing) is separate from authorization.
+**Bucketing (`BucketFunc`)** determines who gets what data. A plain function `func(table, op string, data map[string]any) []string` that assigns records to buckets. For the common case, `UserBucket("user_id")` reads the owner column from the data map, returning `["user:<value>"]` for user-owned records and `["global"]` for null-owner records. Used by:
+
+- **Pull:** Bucketing ensures clients only receive changelog entries for their subscribed buckets (`user:<id>`, `global`).
+- **Rebuild:** `sync_bucket_edges` (populated by the WAL consumer using `BucketFunc`) is used to paginate records for per-bucket rebuilds.
+
+**Push authorization (`AuthorizeWrite`)** handles write-path authorization without requiring RLS. A composable chain of helpers (`ReadOnly`, `StampColumn`, `VerifyOwner`) that validates and transforms each push operation before it hits the database. This is the primary authorization gate for writes.
+
+**RLS (optional defense-in-depth)** provides PostgreSQL row-level security policies as an additional safety net. All push operations still execute under `SET LOCAL app.user_id`, and `GenerateRLSPolicies()` generates standard policies. However, the application works correctly without RLS enabled, since `AuthorizeWrite` and `BucketFunc` are sufficient for correctness.
 
 ### Deny-List for Column Filtering (Not Allow-List)
 
-The `ProtectedColumns` model is a deny-list: all columns are accepted by default, except explicitly protected ones (`id`, `created_at`, `updated_at`, `deleted_at`, owner column, parent FK). This avoids needing to update a column allow-list every time a table gains a column.
+Protected column filtering uses a deny-list: all columns are accepted by default, except server-computed ones (`id`, `created_at`, `updated_at`, `deleted_at`) which are stripped by the `protectedColumns()` helper within the `AuthorizeWrite` chain. The owner column is handled separately by `StampColumn` (set on INSERT, stripped on UPDATE). This avoids needing to update a column allow-list every time a table gains a column.
 
 ### database/sql (Not sqlx)
 
@@ -297,14 +352,40 @@ A single record can appear in multiple buckets when resolver logic emits multipl
 ## Checkpoint Consistency Model
 
 - Checkpoints are monotonic `BIGSERIAL` values from `sync_changelog.seq`.
-- A client's checkpoint is the highest seq it has successfully processed.
-- `AdvanceCheckpoint` only moves forward (guards against `last_pull_seq < $2`).
+- **Per-bucket checkpoints** are stored in `sync_client_checkpoints` with one row per `(client_id, bucket_id)`. Each bucket advances independently.
+- **Legacy global checkpoint** (`last_pull_seq` on `sync_clients`) is maintained for backwards compatibility. Clients using the legacy path continue to work as before.
+- `AdvanceCheckpoint` only moves forward (guards against regression).
 - Pull returns `has_more: true` when the result set was truncated by `limit`, signaling the client should pull again.
 - Checkpoint advancement is best-effort for pull state, but bootstrap correctness does not depend on `pull(checkpoint=0)`.
-- The changelog is append-only; compaction removes entries below the minimum checkpoint across all active clients. When a client's checkpoint falls behind the compaction boundary, the server returns `snapshot_required` and the client must rebuild via `/sync/snapshot`.
+- The changelog is append-only; compaction removes entries below the minimum checkpoint across all active clients (considering both per-bucket and legacy checkpoints).
+- **Stale bucket detection:** When a bucket's per-bucket checkpoint falls behind the compaction boundary, that bucket is flagged as stale. The pull response includes a `RebuildBuckets` list for the affected buckets, and the client calls `POST /sync/rebuild` to rebuild only those buckets. This replaces the old full-database snapshot approach, where a single stale checkpoint forced a complete rebuild of all data.
+
+### Checksum Verification
+
+Synchro includes a per-record and per-bucket checksum protocol for detecting data drift between server and client.
+
+**Per-record checksums:** The server computes a CRC32 (IEEE polynomial) checksum for each record during hydration. The computation unmarshals the `row_to_json` output into a `map[string]any`, re-marshals with `json.Marshal` (which sorts keys alphabetically), and computes `crc32.ChecksumIEEE`. This ensures deterministic checksums regardless of the original column order. Per-record checksums are included on each `Record` in pull and rebuild responses.
+
+**Per-bucket checksums:** On the final page of a pull response (`has_more: false`), the server includes a `bucket_checksums` map. Each value is the XOR of all per-record checksums stored in `sync_bucket_edges` for that bucket, computed via `BIT_XOR(checksum::int)` in PostgreSQL.
+
+**WAL consumer:** The WAL consumer computes and stores `ComputeRecordChecksumFromMap(event.Data)` in the `sync_bucket_edges.checksum` column when upserting bucket edges. This is the source of truth for per-bucket aggregate checksums.
+
+**Client verification:** After the pull loop completes, the client computes the local bucket checksum (XOR of all stored per-record checksums from `_synchro_bucket_members`) and compares with the server's `bucket_checksums`. A mismatch triggers an automatic bucket rebuild. No extra HTTP call is needed -- verification is inline in the pull response processing.
+
+**Backwards compatibility:** Clients that receive records from older servers (without `checksum` fields) fall back to computing CRC32 locally from the record data.
+
+### Debug Endpoint
+
+`GET /sync/debug?client_id=xxx` returns diagnostic information about a sync client. Requires authentication (UserID from context). Returns:
+
+- **client:** Registration state (ID, platform, app_version, is_active, timestamps, bucket subscriptions, legacy checkpoint)
+- **buckets:** Per-bucket state (checkpoint, member count, aggregate checksum)
+- **changelog_stats:** Changelog min/max sequence and total entry count
+- **server_time:** Current server timestamp
 
 ### Failure Semantics
 
 - If a pull succeeds but checkpoint advancement fails, the client will re-pull the same entries on the next request. This is safe because pull responses are idempotent.
+- If a rebuild page succeeds but the final checkpoint persist fails, the client re-requests the rebuild from the beginning. Rebuild responses are idempotent.
 - If a push transaction fails, no changelog entries are written (the WAL consumer only sees committed changes).
 - If the WAL consumer crashes, it resumes from the last durably persisted confirmed LSN. Changes are reprocessed idempotently.

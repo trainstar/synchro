@@ -29,10 +29,13 @@ func TestHandler_Routes_MountsAllEndpoints(t *testing.T) {
 		{"/sync/pull", http.MethodPost, http.StatusUnauthorized},
 		{"/sync/push", http.MethodPost, http.StatusUnauthorized},
 		{"/sync/snapshot", http.MethodPost, http.StatusUnauthorized},
-		// GET endpoints — engine is nil so these will panic/500, but
+		{"/sync/rebuild", http.MethodPost, http.StatusUnauthorized},
+		// GET endpoints. engine is nil so these will panic/500, but
 		// wrong method should return 405, confirming the route exists
 		{"/sync/tables", http.MethodPost, http.StatusMethodNotAllowed},
 		{"/sync/schema", http.MethodPost, http.StatusMethodNotAllowed},
+		// Debug endpoint: POST should return 405 (route exists, wrong method)
+		{"/sync/debug", http.MethodPost, http.StatusMethodNotAllowed},
 	}
 
 	for _, tc := range routes {
@@ -107,8 +110,16 @@ func TestServePull_SchemaMismatchIncludesServerManifest(t *testing.T) {
 	db := synctest.TestDB(t)
 	ctx := context.Background()
 
-	reg := synctest.NewTestRegistry()
-	engine, err := synchro.NewEngine(ctx, &synchro.Config{DB: db, Registry: reg})
+	engine, err := synchro.NewEngine(ctx, &synchro.Config{
+		DB:     db,
+		Tables: synctest.NewTestTables(),
+		AuthorizeWrite: synchro.Chain(
+			synchro.ReadOnly("products"),
+			synchro.StampColumn("user_id"),
+			synchro.VerifyOwner("user_id"),
+		),
+		BucketFunc: synchro.UserBucket("user_id"),
+	})
 	if err != nil {
 		t.Fatalf("NewEngine: %v", err)
 	}
@@ -161,8 +172,16 @@ func TestHandler_TransientError_Returns503(t *testing.T) {
 	db := synctest.TestDB(t)
 	ctx := context.Background()
 
-	reg := synctest.NewTestRegistry()
-	engine, err := synchro.NewEngine(ctx, &synchro.Config{DB: db, Registry: reg})
+	engine, err := synchro.NewEngine(ctx, &synchro.Config{
+		DB:     db,
+		Tables: synctest.NewTestTables(),
+		AuthorizeWrite: synchro.Chain(
+			synchro.ReadOnly("products"),
+			synchro.StampColumn("user_id"),
+			synchro.VerifyOwner("user_id"),
+		),
+		BucketFunc: synchro.UserBucket("user_id"),
+	})
 	if err != nil {
 		t.Fatalf("NewEngine: %v", err)
 	}
@@ -244,6 +263,193 @@ func TestHandler_RetryAfterMiddleware_Rejects(t *testing.T) {
 	}
 	if body["retry_after"] != float64(60) {
 		t.Fatalf("retry_after = %v, want 60", body["retry_after"])
+	}
+}
+
+func TestServeRebuild_MethodNotAllowed(t *testing.T) {
+	h := handler.New(nil)
+
+	req := httptest.NewRequest(http.MethodGet, "/sync/rebuild", bytes.NewBufferString(`{}`))
+	rec := httptest.NewRecorder()
+	h.ServeRebuild(rec, req)
+
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusMethodNotAllowed)
+	}
+	if got := rec.Header().Get("Allow"); got != http.MethodPost {
+		t.Fatalf("Allow header = %q, want %q", got, http.MethodPost)
+	}
+}
+
+func TestServeRebuild_MissingRequiredFields(t *testing.T) {
+	h := handler.New(nil)
+
+	cases := []struct {
+		name    string
+		payload string
+		errKey  string
+	}{
+		{
+			name:    "missing both client_id and bucket_id",
+			payload: `{}`,
+			errKey:  "client_id",
+		},
+		{
+			name:    "missing bucket_id",
+			payload: `{"client_id":"c1"}`,
+			errKey:  "bucket_id",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodPost, "/sync/rebuild", bytes.NewBufferString(tc.payload))
+			req = req.WithContext(handler.WithUserID(req.Context(), "user-1"))
+
+			rec := httptest.NewRecorder()
+			h.ServeRebuild(rec, req)
+
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want %d", rec.Code, http.StatusBadRequest)
+			}
+
+			var body map[string]string
+			if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+				t.Fatalf("decode body: %v", err)
+			}
+			if body["error"] != tc.errKey+" is required" {
+				t.Fatalf("error = %q, want %q", body["error"], tc.errKey+" is required")
+			}
+		})
+	}
+}
+
+func TestServeClientDebug_MissingClientID(t *testing.T) {
+	h := handler.New(nil)
+
+	req := httptest.NewRequest(http.MethodGet, "/sync/debug", nil)
+	req = req.WithContext(handler.WithUserID(req.Context(), "user-1"))
+
+	rec := httptest.NewRecorder()
+	h.ServeClientDebug(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusBadRequest)
+	}
+
+	var body map[string]string
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode body: %v", err)
+	}
+	if body["error"] != "client_id query parameter is required" {
+		t.Fatalf("error = %q, want 'client_id query parameter is required'", body["error"])
+	}
+}
+
+func TestServeClientDebug_MethodNotAllowed(t *testing.T) {
+	h := handler.New(nil)
+
+	req := httptest.NewRequest(http.MethodPost, "/sync/debug", bytes.NewBufferString(`{}`))
+	rec := httptest.NewRecorder()
+	h.ServeClientDebug(rec, req)
+
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusMethodNotAllowed)
+	}
+	if got := rec.Header().Get("Allow"); got != http.MethodGet {
+		t.Fatalf("Allow header = %q, want %q", got, http.MethodGet)
+	}
+}
+
+func TestServeClientDebug_ReturnsClientState(t *testing.T) {
+	db := synctest.TestDB(t)
+	ctx := context.Background()
+
+	engine, err := synchro.NewEngine(ctx, &synchro.Config{
+		DB:     db,
+		Tables: synctest.NewTestTables(),
+		AuthorizeWrite: synchro.Chain(
+			synchro.ReadOnly("products"),
+			synchro.StampColumn("user_id"),
+			synchro.VerifyOwner("user_id"),
+		),
+		BucketFunc: synchro.UserBucket("user_id"),
+	})
+	if err != nil {
+		t.Fatalf("NewEngine: %v", err)
+	}
+
+	userID := "00000000-0000-0000-0000-000000000042"
+	clientID := "debug-test-client"
+
+	if _, err := engine.RegisterClient(ctx, userID, synctest.MakeRegisterRequest(clientID, "ios", "2.0.0")); err != nil {
+		t.Fatalf("RegisterClient: %v", err)
+	}
+
+	h := handler.New(engine)
+	req := httptest.NewRequest(http.MethodGet, "/sync/debug?client_id="+clientID, nil)
+	req = req.WithContext(handler.WithUserID(req.Context(), userID))
+
+	rec := httptest.NewRecorder()
+	h.ServeClientDebug(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body = %s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+
+	var resp map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+
+	client, ok := resp["client"].(map[string]any)
+	if !ok {
+		t.Fatal("response missing 'client' object")
+	}
+	if client["client_id"] != clientID {
+		t.Fatalf("client_id = %v, want %q", client["client_id"], clientID)
+	}
+	if client["platform"] != "ios" {
+		t.Fatalf("platform = %v, want 'ios'", client["platform"])
+	}
+	if _, ok := resp["buckets"]; !ok {
+		t.Fatal("response missing 'buckets' array")
+	}
+	if _, ok := resp["changelog_stats"]; !ok {
+		t.Fatal("response missing 'changelog_stats' object")
+	}
+	if _, ok := resp["server_time"]; !ok {
+		t.Fatal("response missing 'server_time'")
+	}
+}
+
+func TestServeClientDebug_NotRegistered(t *testing.T) {
+	db := synctest.TestDB(t)
+	ctx := context.Background()
+
+	engine, err := synchro.NewEngine(ctx, &synchro.Config{
+		DB:     db,
+		Tables: synctest.NewTestTables(),
+		AuthorizeWrite: synchro.Chain(
+			synchro.ReadOnly("products"),
+			synchro.StampColumn("user_id"),
+			synchro.VerifyOwner("user_id"),
+		),
+		BucketFunc: synchro.UserBucket("user_id"),
+	})
+	if err != nil {
+		t.Fatalf("NewEngine: %v", err)
+	}
+
+	h := handler.New(engine)
+	req := httptest.NewRequest(http.MethodGet, "/sync/debug?client_id=nonexistent", nil)
+	req = req.WithContext(handler.WithUserID(req.Context(), "00000000-0000-0000-0000-000000000099"))
+
+	rec := httptest.NewRecorder()
+	h.ServeClientDebug(rec, req)
+
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusNotFound)
 	}
 }
 

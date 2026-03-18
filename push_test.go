@@ -9,14 +9,12 @@ import (
 func testConfig(t *testing.T, opts ...func(*TableConfig)) *TableConfig {
 	t.Helper()
 	cfg := &TableConfig{
-		TableName:   "orders",
-		PushPolicy:  PushPolicyOwnerOnly,
-		OwnerColumn: "user_id",
+		TableName: "orders",
 	}
 	for _, fn := range opts {
 		fn(cfg)
 	}
-	// Apply defaults, same as Register does.
+	// Apply defaults.
 	if cfg.IDColumn == "" {
 		cfg.IDColumn = "id"
 	}
@@ -33,7 +31,7 @@ func testConfig(t *testing.T, opts ...func(*TableConfig)) *TableConfig {
 func TestInsertRecord_ColumnFiltering(t *testing.T) {
 	cfg := testConfig(t)
 
-	dataCols := []string{"id", "user_id", "name", "description", "created_at", "updated_at", "deleted_at"}
+	dataCols := []string{"id", "name", "description", "created_at", "updated_at", "deleted_at"}
 	allowed := cfg.AllowedInsertColumns(dataCols)
 
 	allowedSet := make(map[string]bool, len(allowed))
@@ -41,12 +39,9 @@ func TestInsertRecord_ColumnFiltering(t *testing.T) {
 		allowedSet[col] = true
 	}
 
-	// id and user_id are allowed on insert even though they are protected.
+	// id is allowed on insert even though it is protected.
 	if !allowedSet["id"] {
 		t.Error("expected 'id' to be allowed on insert")
-	}
-	if !allowedSet["user_id"] {
-		t.Error("expected 'user_id' (owner column) to be allowed on insert")
 	}
 	if !allowedSet["name"] {
 		t.Error("expected 'name' to be allowed on insert")
@@ -63,12 +58,15 @@ func TestInsertRecord_ColumnFiltering(t *testing.T) {
 	}
 }
 
-func TestInsertRecord_WithParentFK(t *testing.T) {
+func TestInsertRecord_WithFKCol(t *testing.T) {
 	cfg := testConfig(t, func(c *TableConfig) {
-		c.ParentFKCol = "order_id"
+		c.foreignKeys = []FKRelation{
+			{Column: "order_id", RefTable: "orders", RefColumn: "id"},
+		}
+		c.finalizeProtectedSet()
 	})
 
-	dataCols := []string{"id", "user_id", "order_id", "name", "updated_at"}
+	dataCols := []string{"id", "order_id", "name", "updated_at"}
 	allowed := cfg.AllowedInsertColumns(dataCols)
 
 	allowedSet := make(map[string]bool, len(allowed))
@@ -76,40 +74,19 @@ func TestInsertRecord_WithParentFK(t *testing.T) {
 		allowedSet[col] = true
 	}
 
-	// ParentFKCol should be allowed on insert.
+	// FK col should be allowed on insert.
 	if !allowedSet["order_id"] {
-		t.Error("expected 'order_id' (ParentFKCol) to be allowed on insert")
+		t.Error("expected 'order_id' (FK col) to be allowed on insert")
 	}
 	if allowedSet["updated_at"] {
 		t.Error("expected 'updated_at' to be denied on insert")
 	}
 }
 
-func TestInsertRecord_WithExtraProtected(t *testing.T) {
-	cfg := testConfig(t, func(c *TableConfig) {
-		c.ProtectedColumns = []string{"internal_score"}
-	})
-
-	dataCols := []string{"id", "user_id", "name", "internal_score"}
-	allowed := cfg.AllowedInsertColumns(dataCols)
-
-	allowedSet := make(map[string]bool, len(allowed))
-	for _, col := range allowed {
-		allowedSet[col] = true
-	}
-
-	if allowedSet["internal_score"] {
-		t.Error("expected 'internal_score' (extra protected) to be denied on insert")
-	}
-	if !allowedSet["name"] {
-		t.Error("expected 'name' to be allowed on insert")
-	}
-}
-
 func TestUpdateRecord_ColumnFiltering(t *testing.T) {
 	cfg := testConfig(t)
 
-	dataCols := []string{"id", "user_id", "name", "description", "created_at", "updated_at", "deleted_at"}
+	dataCols := []string{"id", "name", "description", "created_at", "updated_at", "deleted_at"}
 	allowed := cfg.AllowedUpdateColumns(dataCols)
 
 	allowedSet := make(map[string]bool, len(allowed))
@@ -125,17 +102,20 @@ func TestUpdateRecord_ColumnFiltering(t *testing.T) {
 		t.Error("expected 'description' to be allowed on update")
 	}
 
-	// Everything else should be denied — including id and user_id.
-	for _, col := range []string{"id", "user_id", "created_at", "updated_at", "deleted_at"} {
+	// Everything else should be denied.
+	for _, col := range []string{"id", "created_at", "updated_at", "deleted_at"} {
 		if allowedSet[col] {
 			t.Errorf("expected %q to be denied on update", col)
 		}
 	}
 }
 
-func TestUpdateRecord_WithParentFK(t *testing.T) {
+func TestUpdateRecord_WithFKCol(t *testing.T) {
 	cfg := testConfig(t, func(c *TableConfig) {
-		c.ParentFKCol = "order_id"
+		c.foreignKeys = []FKRelation{
+			{Column: "order_id", RefTable: "orders", RefColumn: "id"},
+		}
+		c.finalizeProtectedSet()
 	})
 
 	dataCols := []string{"order_id", "name"}
@@ -146,9 +126,9 @@ func TestUpdateRecord_WithParentFK(t *testing.T) {
 		allowedSet[col] = true
 	}
 
-	// ParentFKCol is protected on update.
+	// FK col is protected on update.
 	if allowedSet["order_id"] {
-		t.Error("expected 'order_id' (ParentFKCol) to be denied on update")
+		t.Error("expected 'order_id' (FK col) to be denied on update")
 	}
 	if !allowedSet["name"] {
 		t.Error("expected 'name' to be allowed on update")
@@ -158,7 +138,7 @@ func TestUpdateRecord_WithParentFK(t *testing.T) {
 func TestUpdateRecord_AllProtected_ReturnsEmpty(t *testing.T) {
 	cfg := testConfig(t)
 
-	dataCols := []string{"id", "user_id", "created_at", "updated_at", "deleted_at"}
+	dataCols := []string{"id", "created_at", "updated_at", "deleted_at"}
 	allowed := cfg.AllowedUpdateColumns(dataCols)
 
 	if len(allowed) != 0 {

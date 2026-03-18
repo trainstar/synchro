@@ -19,10 +19,16 @@ func TestFailure_PushHookRollback(t *testing.T) {
 	ctx := context.Background()
 
 	hookShouldFail := true
-	reg := synctest.NewTestRegistry()
+	
 	engine, err := synchro.NewEngine(ctx, &synchro.Config{
 		DB:       db,
-		Registry: reg,
+		Tables: synctest.NewTestTables(),
+		AuthorizeWrite: synchro.Chain(
+			synchro.ReadOnly("products"),
+			synchro.StampColumn("user_id"),
+			synchro.VerifyOwner("user_id"),
+		),
+		BucketFunc: synchro.UserBucket("user_id"),
 		Hooks: synchro.Hooks{
 			OnPushAccepted: func(ctx context.Context, tx *sql.Tx, accepted []synchro.AcceptedRecord) error {
 				if hookShouldFail {
@@ -96,10 +102,16 @@ func TestFailure_CheckpointResetIdempotentPull(t *testing.T) {
 	db := synctest.TestDB(t)
 	ctx := context.Background()
 
-	reg := synctest.NewTestRegistry()
+	
 	engine, err := synchro.NewEngine(ctx, &synchro.Config{
 		DB:       db,
-		Registry: reg,
+		Tables: synctest.NewTestTables(),
+		AuthorizeWrite: synchro.Chain(
+			synchro.ReadOnly("products"),
+			synchro.StampColumn("user_id"),
+			synchro.VerifyOwner("user_id"),
+		),
+		BucketFunc: synchro.UserBucket("user_id"),
 	})
 	if err != nil {
 		t.Fatalf("NewEngine: %v", err)
@@ -166,10 +178,16 @@ func TestFailure_ConcurrentPushesLWW(t *testing.T) {
 	db := synctest.TestDB(t)
 	ctx := context.Background()
 
-	reg := synctest.NewTestRegistry()
+	
 	engine, err := synchro.NewEngine(ctx, &synchro.Config{
 		DB:       db,
-		Registry: reg,
+		Tables: synctest.NewTestTables(),
+		AuthorizeWrite: synchro.Chain(
+			synchro.ReadOnly("products"),
+			synchro.StampColumn("user_id"),
+			synchro.VerifyOwner("user_id"),
+		),
+		BucketFunc: synchro.UserBucket("user_id"),
 	})
 	if err != nil {
 		t.Fatalf("NewEngine: %v", err)
@@ -256,10 +274,16 @@ func TestFailure_ChangelogOrderAndDedup(t *testing.T) {
 	db := synctest.TestDB(t)
 	ctx := context.Background()
 
-	reg := synctest.NewTestRegistry()
+	
 	engine, err := synchro.NewEngine(ctx, &synchro.Config{
 		DB:       db,
-		Registry: reg,
+		Tables: synctest.NewTestTables(),
+		AuthorizeWrite: synchro.Chain(
+			synchro.ReadOnly("products"),
+			synchro.StampColumn("user_id"),
+			synchro.VerifyOwner("user_id"),
+		),
+		BucketFunc: synchro.UserBucket("user_id"),
 	})
 	if err != nil {
 		t.Fatalf("NewEngine: %v", err)
@@ -348,10 +372,16 @@ func TestFailure_ClockSkewIntegration(t *testing.T) {
 	db := synctest.TestDB(t)
 	ctx := context.Background()
 
-	reg := synctest.NewTestRegistry()
+	
 	engine, err := synchro.NewEngine(ctx, &synchro.Config{
 		DB:               db,
-		Registry:         reg,
+		Tables: synctest.NewTestTables(),
+		AuthorizeWrite: synchro.Chain(
+			synchro.ReadOnly("products"),
+			synchro.StampColumn("user_id"),
+			synchro.VerifyOwner("user_id"),
+		),
+		BucketFunc: synchro.UserBucket("user_id"),
 		ClockSkewTolerance: 1 * time.Second,
 	})
 	if err != nil {
@@ -425,10 +455,16 @@ func TestFailure_PartialPushWithHookFailure(t *testing.T) {
 	ctx := context.Background()
 
 	hookShouldFail := true
-	reg := synctest.NewTestRegistry()
+	
 	engine, err := synchro.NewEngine(ctx, &synchro.Config{
 		DB:       db,
-		Registry: reg,
+		Tables: synctest.NewTestTables(),
+		AuthorizeWrite: synchro.Chain(
+			synchro.ReadOnly("products"),
+			synchro.StampColumn("user_id"),
+			synchro.VerifyOwner("user_id"),
+		),
+		BucketFunc: synchro.UserBucket("user_id"),
 		Hooks: synchro.Hooks{
 			OnPushAccepted: func(ctx context.Context, tx *sql.Tx, accepted []synchro.AcceptedRecord) error {
 				if hookShouldFail {

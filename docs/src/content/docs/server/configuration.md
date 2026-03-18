@@ -1,6 +1,6 @@
 ---
 title: "Configuration"
-description: "Full reference for TableConfig, Engine setup, hooks, middleware, and advanced options."
+description: "Full reference for Config, Table, composable helpers, hooks, middleware, and advanced options."
 ---
 
 :::tip[What does NOT change]
@@ -9,96 +9,27 @@ Your application routes, your ORM, your existing queries, your auth middleware: 
 
 ---
 
-## Table Registration
-
-Register every table that participates in sync. Registration order matters for dependency resolution.
-
-```go
-registry := synchro.NewRegistry()
-
-// User-owned table: push and pull enabled
-registry.Register(&synchro.TableConfig{
-    TableName:      "tasks",
-    PushPolicy:     synchro.PushPolicyOwnerOnly,
-    OwnerColumn:    "user_id",
-    BucketByColumn: "user_id",
-    BucketPrefix:   "user:",
-})
-
-// Child table: inherits ownership through parent chain
-registry.Register(&synchro.TableConfig{
-    TableName:      "comments",
-    PushPolicy:     synchro.PushPolicyOwnerOnly,
-    ParentTable:    "tasks",
-    ParentFKCol:    "task_id",
-    Dependencies:   []string{"tasks"},
-    BucketByColumn: "task_id",
-    BucketPrefix:   "task:",
-})
-
-// Reference table: pull-only
-registry.Register(&synchro.TableConfig{
-    TableName:  "categories",
-    PushPolicy: synchro.PushPolicyDisabled,
-})
-
-// Nullable owner + global-read behavior is explicit
-registry.Register(&synchro.TableConfig{
-    TableName:            "tags",
-    PushPolicy:           synchro.PushPolicyOwnerOnly,
-    OwnerColumn:          "user_id",
-    BucketByColumn:       "user_id",
-    BucketPrefix:         "user:",
-    GlobalWhenBucketNull: true,
-    AllowGlobalRead:      true,
-})
-```
-
-### TableConfig Fields
-
-| Field | Required | Default | Description |
-|-------|----------|---------|-------------|
-| `TableName` | Yes | - | Database table name |
-| `PushPolicy` | No | inferred | `owner_only` or `disabled` |
-| `OwnerColumn` | Conditional | `""` | Column holding user ID. Required for pushable tables without `ParentTable`. |
-| `ParentTable` | No | `""` | Parent table name for child records |
-| `ParentFKCol` | Conditional | `""` | FK column to parent. Required when `ParentTable` is set. |
-| `SyncColumns` | No | `nil` | Column subset to include in pull responses. `nil` = all columns. |
-| `Dependencies` | No | `nil` | Tables that must sync first (push ordering hint for clients) |
-| `IDColumn` | No | `"id"` | Primary key column name |
-| `ProtectedColumns` | No | `nil` | Additional columns clients cannot write (beyond defaults) |
-| `BucketByColumn` | No | `OwnerColumn` | Fast-path bucket source column |
-| `BucketPrefix` | No | `"user:"` | Prefix applied to `BucketByColumn` values |
-| `GlobalWhenBucketNull` | No | `false` | Emits `global` when bucket source value is null/empty |
-| `AllowGlobalRead` | No | `false` | Adds global-read RLS behavior for null-owner rows |
-| `BucketFunction` | No | `""` | Optional SQL bucket resolver function override |
-
-:::note[Default protected columns]
-The following columns are protected and cannot be written by clients: `id`, the owner column, and the parent FK column. Additionally, `created_at`, `updated_at`, and `deleted_at` are protected **when they exist** on the table (detected by introspection).
-:::
-
-### Validation Rules
-
-`Registry.Validate()` runs automatically on `NewEngine()` and checks:
-
-- `ParentTable` references a registered table.
-- `ParentFKCol` is set when `ParentTable` is set.
-- Parent chains terminate at a table with `OwnerColumn` (no orphaned chains).
-- No cycles in parent chains.
-- Pushable tables have either `OwnerColumn` or `ParentTable`.
-- `ProtectedColumns` does not redundantly list default protected columns.
-
----
-
 ## Engine Setup
 
+The engine is configured with a single `Config` struct. Table metadata (primary keys, foreign keys, column nullability, timestamps, parent/child relationships, dependency ordering) is auto-introspected from `pg_catalog` at startup.
+
 ```go
-engine, err := synchro.NewEngine(synchro.Config{
-    DB:                 db,                // *sql.DB
-    Registry:           registry,
+engine := synchro.NewEngine(ctx, &synchro.Config{
+    DB: db, // *sql.DB
+    Tables: []synchro.Table{
+        {Name: "categories"},
+        {Name: "tasks"},
+        {Name: "comments"},
+        {Name: "tags", Exclude: []string{"search_vector"}},
+    },
+    AuthorizeWrite: synchro.Chain(
+        synchro.ReadOnly("categories"),
+        synchro.StampColumn("user_id"),
+        synchro.VerifyOwner("user_id"),
+    ),
+    BucketFunc:         synchro.UserBucket("user_id"),
     Hooks:              hooks,             // optional
     ConflictResolver:   nil,               // defaults to LWWResolver
-    Ownership:          nil,               // defaults to JoinResolver
     MinClientVersion:   "1.2.0",           // optional semver gate
     ClockSkewTolerance: 5 * time.Second,   // optional LWW tolerance
     UpdatedAtColumn:    "updated_at",      // optional, default "updated_at"
@@ -111,7 +42,133 @@ engine, err := synchro.NewEngine(synchro.Config{
 })
 ```
 
-### Schema Introspection
+### Config Fields
+
+| Field | Required | Default | Description |
+|-------|----------|---------|-------------|
+| `DB` | Yes | - | `*sql.DB` connection pool |
+| `Tables` | Yes | - | Slice of `Table` structs declaring synced tables |
+| `AuthorizeWrite` | Yes | - | Composable write authorization chain (see below) |
+| `BucketFunc` | Yes | - | Bucket assignment function for data routing (see below) |
+| `Hooks` | No | `Hooks{}` | Lifecycle callbacks |
+| `ConflictResolver` | No | `LWWResolver` | Conflict resolution strategy |
+| `MinClientVersion` | No | `""` | Semver gate: reject clients below this version |
+| `ClockSkewTolerance` | No | `0` | LWW tolerance for clock drift |
+| `UpdatedAtColumn` | No | `"updated_at"` | Convention name for update timestamp column |
+| `DeletedAtColumn` | No | `"deleted_at"` | Convention name for soft-delete timestamp column |
+| `Logger` | No | `slog.Default()` | Structured logger |
+| `Compactor` | No | `nil` | Enables changelog compaction when set |
+
+---
+
+## Table Declaration
+
+Tables are declared as a flat slice. You only provide the table name and optional column exclusions. Everything else (PKs, FKs, column types, nullability, parent/child relationships, dependency ordering) is auto-introspected from `pg_catalog`.
+
+```go
+Tables: []synchro.Table{
+    {Name: "categories"},
+    {Name: "tasks"},
+    {Name: "comments"},
+    {Name: "tags", Exclude: []string{"search_vector", "embedding"}},
+}
+```
+
+### Table Fields
+
+| Field | Required | Default | Description |
+|-------|----------|---------|-------------|
+| `Name` | Yes | - | Database table name |
+| `Exclude` | No | `nil` | Columns to exclude from sync (e.g., `tsvector`, `halfvec`, `ltree` types that have no SQLite equivalent) |
+
+### What Introspection Detects
+
+At startup, `NewEngine` queries `pg_catalog` for each declared table:
+
+- **Primary key** column (replaces the old `IDColumn` field)
+- **Foreign keys** to other registered tables (replaces `ParentTable`, `ParentFKCol`, `Dependencies`)
+- **Column nullability** and types
+- **Timestamp columns** (`updated_at`, `deleted_at`, `created_at`), detected by convention name
+
+Parent/child relationships and dependency ordering are derived from the FK graph automatically. No manual configuration required.
+
+### Validation
+
+`NewEngine` validates the introspected graph at startup:
+
+- All FK targets reference registered tables.
+- No cycles in the FK dependency graph.
+- All declared table names exist in the database.
+
+---
+
+## AuthorizeWrite
+
+`AuthorizeWrite` is a composable chain of helpers that handles push authorization. It replaces the old `PushPolicy`, `OwnerColumn`, and `ProtectedColumns` fields.
+
+```go
+AuthorizeWrite: synchro.Chain(
+    synchro.ReadOnly("categories", "units"),
+    synchro.StampColumn("user_id"),
+    synchro.VerifyOwner("user_id"),
+),
+```
+
+### Composable Helpers
+
+| Helper | Purpose |
+|--------|---------|
+| `Chain(...)` | Composes multiple `AuthorizeWrite` functions into a single chain. Each runs in order; first rejection stops the chain. |
+| `ReadOnly(tables...)` | Rejects all writes (create/update/delete) to the listed tables. Use for reference data. |
+| `StampColumn(col)` | On INSERT: stamps `col` with the authenticated user ID (server-derived from JWT, never client-provided). On UPDATE: strips `col` from the payload (owner is immutable). |
+| `VerifyOwner(col)` | On UPDATE/DELETE: fetches the existing record and verifies the authenticated user matches `col`. Rejects the operation if they don't match. |
+
+The `protectedColumns()` helper (called internally) strips server-computed columns (`id`, `created_at`, `updated_at`, `deleted_at`) from client payloads.
+
+### Migration from Old Fields
+
+| Old Field | Replacement |
+|-----------|-------------|
+| `PushPolicy: PushPolicyDisabled` | `ReadOnly("table_name")` |
+| `PushPolicy: PushPolicyOwnerOnly` | `StampColumn("user_id")` + `VerifyOwner("user_id")` |
+| `OwnerColumn: "user_id"` | `StampColumn("user_id")` + `VerifyOwner("user_id")` |
+| `ProtectedColumns: [...]` | Server-computed columns are handled automatically; custom protected columns can be stripped in a custom `AuthorizeWrite` function |
+
+---
+
+## BucketFunc
+
+`BucketFunc` determines which buckets a record belongs to, controlling who gets what data. It is a plain function type:
+
+```go
+type BucketFunc func(table, op string, data map[string]any) []string
+```
+
+It receives the table name, operation type (`insert`, `update`, `delete`), and the record data map. It returns a slice of bucket IDs the record belongs to. Returning nil signals that the function cannot resolve buckets for this record (allowing FK chain fallback via the `JoinResolver`).
+
+```go
+BucketFunc: synchro.UserBucket("user_id"),
+```
+
+### Built-in Bucket Functions
+
+| Function | Behavior | Description |
+|----------|----------|-------------|
+| `UserBucket(col)` | Reads `col` from data map. Non-nil: `["user:<value>"]`. Nil: `["global"]`. Missing: `nil` (FK fallback). | Covers the common case of user-owned + reference data. |
+
+For custom bucketing logic (e.g., group ownership, sharing), write a function matching the `BucketFunc` signature.
+
+### Migration from Old Fields
+
+| Old Fields | Replacement |
+|-----------|-------------|
+| `BucketByColumn: "user_id"` + `BucketPrefix: "user:"` | `UserBucket("user_id")` |
+| `AllowGlobalRead: true` + `GlobalWhenBucketNull: true` | Built into `UserBucket` (null = global) |
+| `BucketFunction: "my_sql_func"` | Write a custom `BucketFunc` function |
+
+---
+
+## Schema Introspection
 
 At startup, `NewEngine` introspects each registered table via `pg_catalog` to detect which timestamp columns exist. No schema modifications are required. Synchro adapts to your tables as they are.
 
@@ -121,20 +178,22 @@ At startup, `NewEngine` introspects each registered table via `pg_catalog` to de
 | `deleted_at` | Soft deletes: `UPDATE SET deleted_at = now()`. Row preserved for resurrection. Column protected from client writes. | Hard deletes: `DELETE FROM`. Row permanently removed, WAL captures the event. |
 | `created_at` | Protected from client writes (server-managed). | No effect on sync behavior. |
 
-`UpdatedAtColumn` and `DeletedAtColumn` on `Config` set the **convention name** to look for. Each table is checked independently, so a single registry can contain tables with and without these columns.
+`UpdatedAtColumn` and `DeletedAtColumn` on `Config` set the **convention name** to look for. Each table is checked independently, so a single engine can contain tables with and without these columns.
 
 ```go
 // Use custom column names across all tables
-engine, _ := synchro.NewEngine(synchro.Config{
+engine := synchro.NewEngine(ctx, &synchro.Config{
     DB:              db,
-    Registry:        registry,
+    Tables:          tables,
+    AuthorizeWrite:  authChain,
+    BucketFunc:      bucketFunc,
     UpdatedAtColumn: "modified_at",
     DeletedAtColumn: "removed_at",
 })
 ```
 
 :::tip[When to add timestamp columns]
-For tables where multiple clients may edit the same record concurrently, `updated_at` is strongly recommended. Without it there is no conflict detection. For tables where you need to preserve deletion history or support undo, `deleted_at` is recommended. Reference data tables that are read-only (`PushPolicyDisabled`) work fine without either.
+For tables where multiple clients may edit the same record concurrently, `updated_at` is strongly recommended. Without it there is no conflict detection. For tables where you need to preserve deletion history or support undo, `deleted_at` is recommended. Reference data tables that are read-only work fine without either.
 :::
 
 ```go
@@ -209,6 +268,9 @@ hooks := synchro.Hooks{
     },
 
     // Called when a client must rebuild from a full snapshot.
+    // DEPRECATED: Use OnBucketRebuild instead. Per-bucket rebuilds replace
+    // full snapshots in the new architecture. This hook is still called for
+    // legacy clients using the global checkpoint path.
     OnSnapshotRequired: func(ctx context.Context, clientID string, checkpoint, minSeq int64, reason string) {
         slog.WarnContext(ctx, "client requires snapshot rebuild",
             "client_id", clientID,
@@ -216,58 +278,62 @@ hooks := synchro.Hooks{
             "min_seq", minSeq,
             "reason", reason)
     },
+
+    // Called when a per-bucket rebuild is triggered for a client.
+    // Fires once per stale bucket detected during pull.
+    OnBucketRebuild: func(ctx context.Context, clientID string, bucketID string, checkpoint, minSeq int64) {
+        slog.WarnContext(ctx, "bucket rebuild triggered",
+            "client_id", clientID,
+            "bucket_id", bucketID,
+            "checkpoint", checkpoint,
+            "min_seq", minSeq)
+    },
 }
 ```
 
 ---
 
-## Custom OwnershipResolver
+## Custom BucketFunc
 
-The default `JoinResolver` handles most cases. Implement `OwnershipResolver` for custom bucketing logic (e.g., sharing, group ownership).
+The built-in `UserBucket` handles the common case. For custom bucketing logic (e.g., sharing, group ownership), write a function matching the `BucketFunc` signature.
 
-```go
-type OwnershipResolver interface {
-    ResolveOwner(ctx context.Context, db synchro.DB, table string, recordID string, data map[string]any) ([]string, error)
-}
-```
+A `BucketFunc` receives the table name, operation, and record data, then returns bucket IDs. Return nil when the function cannot determine buckets (e.g., child tables without the owner column), which allows the `JoinResolver` to fall back to FK chain resolution.
 
-The returned slice contains bucket IDs. A record can belong to multiple buckets.
-
-### Example: Sharing Resolver
+### Example: Sharing BucketFunc
 
 ```go
-type SharingResolver struct {
-    inner synchro.OwnershipResolver
-    db    *sql.DB
-}
+func SharingBucket(db *sql.DB) synchro.BucketFunc {
+    base := synchro.UserBucket("user_id")
 
-func (r *SharingResolver) ResolveOwner(ctx context.Context, db synchro.DB, table string, recordID string, data map[string]any) ([]string, error) {
-    // Get the standard owner buckets
-    buckets, err := r.inner.ResolveOwner(ctx, db, table, recordID, data)
-    if err != nil {
-        return nil, err
-    }
-
-    // Check if record is shared with other users
-    if table == "tasks" {
-        rows, err := r.db.QueryContext(ctx,
-            "SELECT shared_with_user_id FROM task_shares WHERE task_id = $1",
-            recordID)
-        if err != nil {
-            return nil, err
+    return func(table, op string, data map[string]any) []string {
+        // Get the standard owner buckets
+        buckets := base(table, op, data)
+        if buckets == nil {
+            return nil // let JoinResolver handle FK chain
         }
-        defer rows.Close()
 
-        for rows.Next() {
-            var sharedUserID string
-            if err := rows.Scan(&sharedUserID); err != nil {
-                return nil, err
+        // Add buckets for shared users
+        if table == "tasks" {
+            recordID, _ := data["id"].(string)
+            rows, err := db.Query(
+                "SELECT shared_with_user_id FROM task_shares WHERE task_id = $1",
+                recordID)
+            if err != nil {
+                return buckets // fall back to standard buckets on error
             }
-            buckets = append(buckets, fmt.Sprintf("user:%s", sharedUserID))
-        }
-    }
+            defer rows.Close()
 
-    return buckets, nil
+            for rows.Next() {
+                var sharedUserID string
+                if err := rows.Scan(&sharedUserID); err != nil {
+                    continue
+                }
+                buckets = append(buckets, fmt.Sprintf("user:%s", sharedUserID))
+            }
+        }
+
+        return buckets
+    }
 }
 ```
 
@@ -328,7 +394,7 @@ logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
     Level: slog.LevelInfo,
 }))
 
-engine, _ := synchro.NewEngine(synchro.Config{
+engine := synchro.NewEngine(ctx, &synchro.Config{
     // ...
     Logger: logger,
 })
@@ -352,6 +418,7 @@ mux.HandleFunc("POST /sync/register", h.ServeRegister)
 mux.HandleFunc("POST /sync/pull", h.ServePull)
 mux.HandleFunc("POST /sync/push", h.ServePush)
 mux.HandleFunc("POST /sync/snapshot", h.ServeSnapshot)
+mux.HandleFunc("POST /sync/rebuild", h.ServeRebuild)
 mux.HandleFunc("GET /sync/tables", h.ServeTableMeta)
 mux.HandleFunc("GET /sync/schema", h.ServeSchema)
 ```
@@ -368,6 +435,7 @@ g.POST("/register", echo.WrapHandler(http.HandlerFunc(h.ServeRegister)))
 g.POST("/pull", echo.WrapHandler(http.HandlerFunc(h.ServePull)))
 g.POST("/push", echo.WrapHandler(http.HandlerFunc(h.ServePush)))
 g.POST("/snapshot", echo.WrapHandler(http.HandlerFunc(h.ServeSnapshot)))
+g.POST("/rebuild", echo.WrapHandler(http.HandlerFunc(h.ServeRebuild)))
 g.GET("/tables", echo.WrapHandler(http.HandlerFunc(h.ServeTableMeta)))
 g.GET("/schema", echo.WrapHandler(http.HandlerFunc(h.ServeSchema)))
 ```
@@ -396,6 +464,7 @@ r.Route("/sync", func(r chi.Router) {
     r.Post("/pull", h.ServePull)
     r.Post("/push", h.ServePush)
     r.Post("/snapshot", h.ServeSnapshot)
+    r.Post("/rebuild", h.ServeRebuild)
     r.Get("/tables", h.ServeTableMeta)
     r.Get("/schema", h.ServeSchema)
 })
@@ -478,8 +547,7 @@ consumer := wal.NewConsumer(wal.ConsumerConfig{
     ConnString:      "postgres://user:pass@host:5432/db?replication=database",
     SlotName:        "synchro_slot",
     PublicationName: "synchro_pub",
-    Registry:        registry,
-    Assigner:        synchro.NewJoinResolverWithDB(registry, db), // implements BucketAssigner
+    Engine:          engine,                            // provides registry + BucketFunc
     ChangelogDB:     db,                                // *sql.DB
     Logger:          logger,
     StandbyTimeout:  10 * time.Second,                  // default
@@ -520,8 +588,8 @@ import "github.com/trainstar/synchro/migrate"
 // Get infrastructure table DDL
 stmts := migrate.Migrations()
 
-// Get RLS policies from your registry
-rlsStmts := synchro.GenerateRLSPolicies(registry)
+// Get RLS policies (optional defense-in-depth)
+rlsStmts := synchro.GenerateRLSPolicies("user_id") // owner column name
 
 // Run through your migration system
 for _, stmt := range append(stmts, rlsStmts...) {
@@ -537,17 +605,45 @@ for _, stmt := range append(stmts, rlsStmts...) {
 | Table | Purpose |
 |-------|---------|
 | `sync_changelog` | Append-only changelog with `BIGSERIAL` seq, indexed by `(bucket_id, seq)` |
-| `sync_clients` | Client registration, bucket subscriptions, checkpoint tracking |
+| `sync_clients` | Client registration, bucket subscriptions, legacy global checkpoint tracking |
+| `sync_client_checkpoints` | Per-bucket checkpoint tracking with one row per `(client_id, bucket_id)`. Stores the highest seq each client has processed for each bucket independently. |
 | `sync_wal_position` | WAL consumer LSN tracking for crash recovery |
-| `sync_bucket_edges` | Membership index for bucket delta assignment |
+| `sync_bucket_edges` | Membership index for bucket delta assignment and rebuild pagination |
 | `sync_rule_failures` | Resolver failures for operational debugging and replay tooling |
 | `sync_schema_manifest` | Schema contract version/hash history |
 
-### RLS Policies Generated
+### RLS Policies Generated (Optional)
 
-`GenerateRLSPolicies(registry)` produces:
+`GenerateRLSPolicies(ownerColumn)` takes the owner column name and generates standard RLS policies for all registered tables. RLS is optional defense-in-depth. The application works correctly without it, since `AuthorizeWrite` handles push authorization and `BucketFunc` handles pull/snapshot scoping.
 
-- **`PushPolicyDisabled` tables:** read-only behavior (no write policies generated).
-- **Tables with `OwnerColumn`:** `SELECT`, `INSERT`, `UPDATE`, `DELETE` policies scoped to `owner_col::text = current_setting('app.user_id', true)`.
-- **Tables with `AllowGlobalRead=true`:** `SELECT` additionally allows `owner_col IS NULL`.
-- **Child tables:** `EXISTS` subquery through parent chain to verify ownership.
+Generated policies:
+
+- **Read-only tables** (listed in `ReadOnly(...)`): no write policies generated.
+- **Tables with the owner column:** `SELECT`, `INSERT`, `UPDATE`, `DELETE` policies scoped to `owner_col::text = current_setting('app.user_id', true)`.
+- **Nullable owner columns:** `SELECT` additionally allows `owner_col IS NULL` (global/reference rows).
+- **Child tables:** `EXISTS` subquery through the auto-detected FK chain to verify ownership.
+
+---
+
+## Debug Endpoint
+
+The sync handler mounts a debug endpoint at `GET /sync/debug?client_id=xxx`. It requires authentication and returns a `ClientDebugResponse` containing:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `client` | `ClientDebugInfo` | Client registration state |
+| `buckets` | `[]ServerBucketDebug` | Per-bucket checkpoint, member count, checksum |
+| `changelog_stats` | `ChangelogDebugStats` | Min/max seq, total entries |
+| `server_time` | `time.Time` | Current server timestamp |
+
+This endpoint is read-only and safe to call at any time. It does not modify any state.
+
+## Checksum Protocol
+
+The `Record` type includes an optional `checksum` field (CRC32, IEEE polynomial). The pull response includes `bucket_checksums` on the final page. The rebuild response includes `bucket_checksum` on the final page.
+
+Checksums are computed by `ComputeRecordChecksum(jsonStr)` in `checksum.go`: unmarshal into `map[string]any`, re-marshal with `json.Marshal` (sorted keys), `crc32.ChecksumIEEE`.
+
+The `sync_bucket_edges` table has a `checksum BIGINT` column populated by the WAL consumer. Bucket aggregate checksums are computed via `BIT_XOR(checksum::int)` in PostgreSQL.
+
+Client SDKs store server-provided per-record checksums in `_synchro_bucket_members.checksum` and verify the bucket aggregate after each pull cycle. Mismatches trigger automatic bucket rebuilds.

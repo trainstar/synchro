@@ -64,6 +64,9 @@ class SyncEngine(
                 SynchroMeta.setSyncLock(db, false)
             }
 
+            // Ensure bucket tables exist for databases created before bucket support
+            database.ensureBucketTables()
+
             // Fetch schema first so we can register with the correct version
             val schema = schemaManager.ensureSchema(httpClient)
             syncedTables = schema.tables
@@ -83,6 +86,12 @@ class SyncEngine(
 
             val needsInitialSnapshot = database.writeTransaction { db ->
                 SynchroMeta.set(db, MetaKey.CLIENT_SERVER_ID, registerResp.id)
+
+                // Store per-bucket checkpoints from registration if provided
+                registerResp.bucketCheckpoints?.forEach { (bucketId, cp) ->
+                    SynchroMeta.setBucketCheckpoint(db, bucketId, cp)
+                }
+
                 val checkpoint = SynchroMeta.getInt64(db, MetaKey.CHECKPOINT)
                 val snapshotComplete = SynchroMeta.get(db, MetaKey.SNAPSHOT_COMPLETE) == "1"
                 checkpoint == 0L || !snapshotComplete
@@ -277,6 +286,9 @@ class SyncEngine(
             SynchroMeta.getInt64(db, MetaKey.CHECKPOINT)
         }
         var knownBuckets = loadKnownBuckets()
+        var bucketCheckpoints = loadBucketCheckpoints()
+        var pendingRebuilds: List<String> = emptyList()
+        var lastBucketChecksums: Map<String, Int>? = null
 
         var hasMore = true
         while (hasMore) {
@@ -286,6 +298,7 @@ class SyncEngine(
                 tables = null,
                 limit = config.effectivePullPageSize,
                 knownBuckets = if (knownBuckets.isEmpty()) null else knownBuckets,
+                bucketCheckpoints = if (bucketCheckpoints.isEmpty()) null else bucketCheckpoints,
                 schemaVersion = schemaVersion,
                 schemaHash = schemaHash
             )
@@ -298,8 +311,20 @@ class SyncEngine(
             }
 
             pullProcessor.applyPullPage(response.changes, response.deletes, syncedTables)
+            pullProcessor.trackBucketMembership(response.changes)
             pullProcessor.updateCheckpoint(response.checkpoint)
             pullProcessor.updateKnownBuckets(response.bucketUpdates)
+            pullProcessor.updateBucketCheckpoints(response.bucketCheckpoints)
+
+            // Accumulate rebuild requests across pages
+            response.rebuildBuckets?.let { buckets ->
+                pendingRebuilds = (pendingRebuilds + buckets).distinct()
+            }
+
+            // Capture bucket checksums from the final page for verification.
+            response.bucketChecksums?.let { serverCS ->
+                lastBucketChecksums = serverCS
+            }
 
             checkpoint = response.checkpoint
             hasMore = response.hasMore
@@ -308,7 +333,108 @@ class SyncEngine(
             if (hasMore && response.bucketUpdates != null) {
                 knownBuckets = loadKnownBuckets()
             }
+            if (hasMore && response.bucketCheckpoints != null) {
+                bucketCheckpoints = loadBucketCheckpoints()
+            }
         }
+
+        // Checksum verification: compare server bucket checksums with local.
+        // Mismatch triggers a rebuild for that bucket. Runs inline with no
+        // extra HTTP call.
+        lastBucketChecksums?.forEach { (bucketId, serverCS) ->
+            try {
+                val localCS = pullProcessor.computeBucketChecksum(bucketId)
+                if (localCS != serverCS && bucketId !in pendingRebuilds) {
+                    android.util.Log.w("SyncEngine", "Checksum mismatch for bucket $bucketId: server=$serverCS local=$localCS, triggering rebuild")
+                    pendingRebuilds = pendingRebuilds + bucketId
+                }
+            } catch (e: Exception) {
+                android.util.Log.e("SyncEngine", "Failed to compute bucket checksum for $bucketId, triggering rebuild", e)
+                if (bucketId !in pendingRebuilds) {
+                    pendingRebuilds = pendingRebuilds + bucketId
+                }
+            }
+        }
+
+        // Process all pending bucket rebuilds after the pull loop finishes.
+        for (bucketId in pendingRebuilds) {
+            rebuildBucket(bucketId)
+        }
+    }
+
+    // MARK: - Bucket Rebuild
+
+    /**
+     * Rebuilds a single bucket by clearing its local membership, fetching all
+     * records from the server via paginated POST /sync/rebuild calls, upserting
+     * each record, and updating the bucket checkpoint.
+     */
+    private suspend fun rebuildBucket(bucketId: String) {
+        // Save old members so we can detect orphans after rebuild
+        val oldMembers = database.readTransaction { db ->
+            SynchroMeta.getBucketMembers(db, bucketId)
+        }
+
+        // Clear existing membership for this bucket before rebuilding
+        pullProcessor.clearBucketMembers(bucketId)
+
+        var cursor: String? = null
+        var hasMore = true
+        var rebuiltCheckpoint = 0L
+
+        while (hasMore) {
+            val request = RebuildRequest(
+                clientID = clientID,
+                bucketId = bucketId,
+                cursor = cursor,
+                limit = config.effectivePullPageSize,
+                schemaVersion = schemaVersion,
+                schemaHash = schemaHash
+            )
+
+            val response = httpClient.rebuild(request)
+
+            // Apply records and track bucket membership
+            pullProcessor.applyChanges(response.records, syncedTables)
+            pullProcessor.trackBucketMembership(response.records, overrideBucketId = bucketId)
+
+            cursor = response.cursor
+            hasMore = response.hasMore
+            rebuiltCheckpoint = response.checkpoint
+        }
+
+        // Soft-delete records that were in the old bucket but not in the rebuild
+        val newMembers = database.readTransaction { db ->
+            SynchroMeta.getBucketMembers(db, bucketId)
+        }
+        val newMemberSet = newMembers.map { "${it.first}|${it.second}" }.toSet()
+        val orphanedMembers = oldMembers.filter { "${it.first}|${it.second}" !in newMemberSet }
+
+        if (orphanedMembers.isNotEmpty()) {
+            val tableMap = syncedTables.associateBy { it.tableName }
+            database.writeTransaction { db ->
+                for ((tableName, recordId) in orphanedMembers) {
+                    val schema = tableMap[tableName] ?: continue
+                    val pkCol = schema.primaryKey.firstOrNull() ?: "id"
+                    val quoted = SQLiteHelpers.quoteIdentifier(tableName)
+                    val quotedPK = SQLiteHelpers.quoteIdentifier(pkCol)
+                    val quotedDeletedAt = SQLiteHelpers.quoteIdentifier(schema.deletedAtColumn)
+
+                    val stmt = db.compileStatement(
+                        "UPDATE $quoted SET $quotedDeletedAt = ${SQLiteHelpers.timestampNow()} WHERE $quotedPK = ? AND $quotedDeletedAt IS NULL"
+                    )
+                    try {
+                        stmt.bindString(1, recordId)
+                        stmt.executeUpdateDelete()
+                    } finally {
+                        stmt.close()
+                    }
+                }
+            }
+        }
+
+        // Update the bucket checkpoint
+        pullProcessor.updateBucketCheckpoint(bucketId, rebuiltCheckpoint)
     }
 
     private fun loadKnownBuckets(): List<String> {
@@ -319,6 +445,12 @@ class SyncEngine(
             Json.decodeFromString<List<String>>(knownBucketsStr)
         } catch (_: Exception) {
             emptyList()
+        }
+    }
+
+    private fun loadBucketCheckpoints(): Map<String, Long> {
+        return database.readTransaction { db ->
+            SynchroMeta.getAllBucketCheckpoints(db)
         }
     }
 
@@ -356,6 +488,8 @@ class SyncEngine(
             SynchroMeta.setInt64(db, MetaKey.CHECKPOINT, 0L)
             SynchroMeta.set(db, MetaKey.KNOWN_BUCKETS, "[]")
             SynchroMeta.set(db, MetaKey.SNAPSHOT_COMPLETE, "0")
+            SynchroMeta.clearAllBucketCheckpoints(db)
+            db.execSQL("DELETE FROM _synchro_bucket_members")
             schemaManager.createSyncedTablesInTransaction(db, schema)
         }
 

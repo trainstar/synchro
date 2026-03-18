@@ -304,9 +304,31 @@ func (c *Consumer) applyEdgeDiff(
 		return nil
 	}
 
-	added, _, removed := diffBucketSets(existing, desired)
+	// Compute checksum from event data for integrity verification.
+	// Stored as int32 in PostgreSQL INTEGER column. uint32 -> int32 wraps
+	// values above 2^31 to negative; BIT_XOR operates on bits, not sign.
+	var checksumPtr *int32
+	if event.Data != nil {
+		csU32, err := synchro.ComputeRecordChecksumFromMap(event.Data)
+		if err != nil {
+			c.logger.ErrorContext(ctx, "failed to compute record checksum",
+				"err", err, "table", event.TableName, "id", event.RecordID)
+		} else {
+			cs := int32(csU32)
+			checksumPtr = &cs
+		}
+	}
+
+	added, kept, removed := diffBucketSets(existing, desired)
+	// Upsert added buckets with checksum.
 	if len(added) > 0 {
-		if err := c.upsertBucketEdges(ctx, db, event.TableName, event.RecordID, added); err != nil {
+		if err := c.upsertBucketEdges(ctx, db, event.TableName, event.RecordID, added, checksumPtr); err != nil {
+			return err
+		}
+	}
+	// Update kept buckets with new checksum (data may have changed).
+	if len(kept) > 0 {
+		if err := c.upsertBucketEdges(ctx, db, event.TableName, event.RecordID, kept, checksumPtr); err != nil {
 			return err
 		}
 	}
@@ -318,21 +340,21 @@ func (c *Consumer) applyEdgeDiff(
 	return nil
 }
 
-func (c *Consumer) upsertBucketEdges(ctx context.Context, db synchro.DB, tableName, recordID string, buckets []string) error {
+func (c *Consumer) upsertBucketEdges(ctx context.Context, db synchro.DB, tableName, recordID string, buckets []string, checksum *int32) error {
 	if len(buckets) == 0 {
 		return nil
 	}
-	query := "INSERT INTO sync_bucket_edges (table_name, record_id, bucket_id, updated_at) VALUES "
-	args := make([]any, 0, len(buckets)*3)
+	query := "INSERT INTO sync_bucket_edges (table_name, record_id, bucket_id, updated_at, checksum) VALUES "
+	args := make([]any, 0, len(buckets)*4)
 	for i, bucket := range buckets {
 		if i > 0 {
 			query += ", "
 		}
-		base := i*3 + 1
-		query += fmt.Sprintf("($%d, $%d, $%d, now())", base, base+1, base+2)
-		args = append(args, tableName, recordID, bucket)
+		base := i*4 + 1
+		query += fmt.Sprintf("($%d, $%d, $%d, now(), $%d)", base, base+1, base+2, base+3)
+		args = append(args, tableName, recordID, bucket, checksum)
 	}
-	query += " ON CONFLICT (table_name, record_id, bucket_id) DO UPDATE SET updated_at = now()"
+	query += " ON CONFLICT (table_name, record_id, bucket_id) DO UPDATE SET updated_at = now(), checksum = EXCLUDED.checksum"
 	if _, err := db.ExecContext(ctx, query, args...); err != nil {
 		return fmt.Errorf("upserting bucket edges: %w", err)
 	}

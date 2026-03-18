@@ -26,6 +26,7 @@ data class RegisterResponse(
     @SerialName("server_time") val serverTime: String,
     @SerialName("last_sync_at") val lastSyncAt: String? = null,
     val checkpoint: Long,
+    @SerialName("bucket_checkpoints") val bucketCheckpoints: Map<String, Long>? = null,
     @SerialName("schema_version") val schemaVersion: Long,
     @SerialName("schema_hash") val schemaHash: String
 )
@@ -39,6 +40,7 @@ data class PullRequest(
     val tables: List<String>? = null,
     val limit: Int? = null,
     @SerialName("known_buckets") val knownBuckets: List<String>? = null,
+    @SerialName("bucket_checkpoints") val bucketCheckpoints: Map<String, Long>? = null,
     @SerialName("schema_version") val schemaVersion: Long,
     @SerialName("schema_hash") val schemaHash: String
 )
@@ -52,6 +54,9 @@ data class PullResponse(
     @SerialName("snapshot_required") val snapshotRequired: Boolean? = null,
     @SerialName("snapshot_reason") val snapshotReason: String? = null,
     @SerialName("bucket_updates") val bucketUpdates: BucketUpdate? = null,
+    @SerialName("bucket_checkpoints") val bucketCheckpoints: Map<String, Long>? = null,
+    @SerialName("rebuild_buckets") val rebuildBuckets: List<String>? = null,
+    @SerialName("bucket_checksums") val bucketChecksums: Map<String, Int>? = null,
     @SerialName("schema_version") val schemaVersion: Long,
     @SerialName("schema_hash") val schemaHash: String
 )
@@ -62,7 +67,9 @@ data class Record(
     @SerialName("table_name") val tableName: String,
     val data: Map<String, @Serializable(with = AnyCodableSerializer::class) AnyCodable>,
     @SerialName("updated_at") val updatedAt: String,
-    @SerialName("deleted_at") val deletedAt: String? = null
+    @SerialName("deleted_at") val deletedAt: String? = null,
+    @SerialName("bucket_id") val bucketId: String? = null,
+    val checksum: Int? = null
 )
 
 @Serializable
@@ -165,6 +172,29 @@ data class SnapshotResponse(
     val cursor: SnapshotCursor? = null,
     val checkpoint: Long,
     @SerialName("has_more") val hasMore: Boolean,
+    @SerialName("schema_version") val schemaVersion: Long,
+    @SerialName("schema_hash") val schemaHash: String
+)
+
+// MARK: - Rebuild
+
+@Serializable
+data class RebuildRequest(
+    @SerialName("client_id") val clientID: String,
+    @SerialName("bucket_id") val bucketId: String,
+    val cursor: String? = null,
+    val limit: Int? = null,
+    @SerialName("schema_version") val schemaVersion: Long,
+    @SerialName("schema_hash") val schemaHash: String
+)
+
+@Serializable
+data class RebuildResponse(
+    val records: List<Record>,
+    val cursor: String? = null,
+    val checkpoint: Long,
+    @SerialName("has_more") val hasMore: Boolean,
+    @SerialName("bucket_checksum") val bucketChecksum: Int? = null,
     @SerialName("schema_version") val schemaVersion: Long,
     @SerialName("schema_hash") val schemaHash: String
 )
@@ -381,6 +411,25 @@ object PushStatus {
     const val REJECTED_TERMINAL = "rejected_terminal"
     const val REJECTED_RETRYABLE = "rejected_retryable"
 }
+
+// MARK: - Debug Types
+
+data class SynchroDebugInfo(
+    val clientID: String,
+    val buckets: List<BucketDebugInfo>,
+    val lastSyncCheckpoint: Long,
+    val schemaVersion: Long,
+    val schemaHash: String,
+    val pendingChangeCount: Int,
+    val generatedAt: String
+)
+
+data class BucketDebugInfo(
+    val bucketID: String,
+    val checkpoint: Long,
+    val memberCount: Int,
+    val checksum: Int
+)
 
 // MARK: - Schema Mismatch Body (internal)
 

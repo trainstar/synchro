@@ -17,6 +17,14 @@ export type {
   ConflictEvent,
   SynchroConfig,
   Unsubscribe,
+  PullRequest,
+  PullResponse,
+  SyncRecord,
+  DeleteEntry,
+  BucketUpdate,
+  RegisterResponse,
+  RebuildRequest,
+  RebuildResponse,
 } from './types';
 
 export {

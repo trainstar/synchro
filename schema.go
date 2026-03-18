@@ -114,24 +114,29 @@ func (s *schemaStore) buildCanonicalSchemaTables(ctx context.Context, db DB, reg
 			return nil, err
 		}
 
-		deps := append([]string{}, cfg.Dependencies...)
+		// Compute dependencies from FK graph.
+		var deps []string
+		for _, fk := range cfg.foreignKeys {
+			deps = append(deps, fk.RefTable)
+		}
 		slices.Sort(deps)
 
+		// Compute push_policy: "enabled" by default. Tables are read-only only
+		// when AuthorizeWrite rejects them, which is not available at schema level.
+		// Use "enabled" as default since the schema contract is computed without
+		// runtime hooks.
+		pushPolicy := "enabled"
+
 		table := SchemaTable{
-			TableName:            cfg.TableName,
-			PushPolicy:           string(cfg.PushPolicy),
-			ParentTable:          cfg.ParentTable,
-			ParentFKCol:          cfg.ParentFKCol,
-			Dependencies:         deps,
-			UpdatedAtColumn:      cfg.UpdatedAtCol(),
-			DeletedAtColumn:      cfg.DeletedAtCol(),
-			PrimaryKey:           pk,
-			BucketByColumn:       cfg.BucketByColumn,
-			BucketPrefix:         cfg.BucketPrefix,
-			GlobalWhenBucketNull: cfg.GlobalWhenBucketNull,
-			AllowGlobalRead:      cfg.AllowGlobalRead,
-			BucketFunction:       cfg.BucketFunction,
-			Columns:              cols,
+			TableName:       cfg.TableName,
+			PushPolicy:      pushPolicy,
+			ParentTable:     cfg.parentTable,
+			ParentFKCol:     cfg.parentFKCol,
+			Dependencies:    deps,
+			UpdatedAtColumn: cfg.UpdatedAtCol(),
+			DeletedAtColumn: cfg.DeletedAtCol(),
+			PrimaryKey:      pk,
+			Columns:         cols,
 		}
 		tables = append(tables, table)
 	}
@@ -271,10 +276,6 @@ func loadTableColumnsAndPK(ctx context.Context, db DB, table string, excludeCols
 }
 
 func validateOfflineSchemaDefaults(cfg *TableConfig, cols []SchemaColumn) error {
-	if cfg.PushPolicy == PushPolicyDisabled {
-		return nil
-	}
-
 	protected := make(map[string]struct{}, len(cfg.protectedSet))
 	for key := range cfg.protectedSet {
 		protected[key] = struct{}{}

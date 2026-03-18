@@ -98,6 +98,161 @@ final class PullProcessor: @unchecked Sendable {
         }
     }
 
+    func updateBucketCheckpoints(_ bucketCheckpoints: [String: Int64]?) throws {
+        guard let checkpoints = bucketCheckpoints, !checkpoints.isEmpty else { return }
+        try database.writeTransaction { db in
+            for (bucketID, checkpoint) in checkpoints {
+                try SynchroMeta.setBucketCheckpoint(db, bucketID: bucketID, checkpoint: checkpoint)
+            }
+        }
+    }
+
+    func getBucketCheckpoints() throws -> [String: Int64] {
+        try database.readTransaction { db in
+            try SynchroMeta.getAllBucketCheckpoints(db)
+        }
+    }
+
+    func trackBucketMembership(records: [Record], overrideBucketID: String? = nil) throws {
+        let recordsToTrack: [(record: Record, bucketID: String)]
+        if let override = overrideBucketID {
+            recordsToTrack = records.map { ($0, override) }
+        } else {
+            recordsToTrack = records.compactMap { record in
+                guard let bucketID = record.bucketID else { return nil }
+                return (record, bucketID)
+            }
+        }
+        guard !recordsToTrack.isEmpty else { return }
+
+        try database.writeTransaction { db in
+            for (record, bucketID) in recordsToTrack {
+                // Use server-provided checksum if available, fall back to local CRC32.
+                let checksum = record.checksum ?? Int32(bitPattern: Self.crc32Checksum(for: record.data))
+                try SynchroMeta.upsertBucketMember(
+                    db,
+                    bucketID: bucketID,
+                    tableName: record.tableName,
+                    recordID: record.id,
+                    checksum: checksum
+                )
+            }
+        }
+    }
+
+    func clearBucketMembers(bucketID: String) throws {
+        try database.writeTransaction { db in
+            try SynchroMeta.deleteBucketMembers(db, bucketID: bucketID)
+        }
+    }
+
+    func clearAllBucketData() throws {
+        try database.writeTransaction { db in
+            try SynchroMeta.deleteAllBucketMembers(db)
+            try SynchroMeta.deleteAllBucketCheckpoints(db)
+        }
+    }
+
+    func applyRebuildPage(records: [Record], bucketID: String, syncedTables: [SchemaTable]) throws {
+        guard !records.isEmpty else { return }
+        let tableMap = Dictionary(uniqueKeysWithValues: syncedTables.map { ($0.tableName, $0) })
+
+        try database.writeTransaction { db in
+            try SynchroMeta.setSyncLock(db, locked: true)
+            defer { try? SynchroMeta.setSyncLock(db, locked: false) }
+
+            for record in records {
+                guard let schema = tableMap[record.tableName] else { continue }
+                try upsertRecord(db: db, record: record, schema: schema)
+
+                // Use server-provided checksum if available, fall back to local CRC32.
+                let checksum = record.checksum ?? Int32(bitPattern: Self.crc32Checksum(for: record.data))
+                try SynchroMeta.upsertBucketMember(
+                    db,
+                    bucketID: bucketID,
+                    tableName: record.tableName,
+                    recordID: record.id,
+                    checksum: checksum
+                )
+            }
+
+            try SynchroMeta.setSyncLock(db, locked: false)
+        }
+    }
+
+    func deleteBucketOrphanedRecords(bucketID: String, syncedTables: [SchemaTable]) throws {
+        let tableMap = Dictionary(uniqueKeysWithValues: syncedTables.map { ($0.tableName, $0) })
+
+        try database.writeTransaction { db in
+            let members = try SynchroMeta.getBucketMemberRecordIDs(db, bucketID: bucketID)
+            for member in members {
+                guard let schema = tableMap[member.tableName] else { continue }
+                let pkCol = schema.primaryKey.first ?? "id"
+                let quoted = SQLiteHelpers.quoteIdentifier(member.tableName)
+                let quotedPK = SQLiteHelpers.quoteIdentifier(pkCol)
+                let quotedDeletedAt = SQLiteHelpers.quoteIdentifier(schema.deletedAtColumn)
+
+                // Soft-delete records that were in this bucket but not refreshed during rebuild
+                try db.execute(
+                    sql: "UPDATE \(quoted) SET \(quotedDeletedAt) = \(SQLiteHelpers.timestampNow()) WHERE \(quotedPK) = ? AND \(quotedDeletedAt) IS NULL",
+                    arguments: [member.recordID]
+                )
+            }
+        }
+    }
+
+    // MARK: - Bucket Checksum Verification
+
+    /// Computes the aggregate checksum for a bucket by XOR-ing all stored
+    /// per-record checksums from `_synchro_bucket_members`.
+    func computeBucketChecksum(bucketID: String) throws -> Int32 {
+        try database.readTransaction { db in
+            let rows = try Row.fetchAll(
+                db,
+                sql: "SELECT checksum FROM _synchro_bucket_members WHERE bucket_id = ?",
+                arguments: [bucketID]
+            )
+            var xor: Int32 = 0
+            for row in rows {
+                if let cs: Int64 = row["checksum"] {
+                    xor ^= Int32(truncatingIfNeeded: cs)
+                }
+            }
+            return xor
+        }
+    }
+
+    // MARK: - CRC32 Checksum
+
+    static func crc32Checksum(for data: [String: AnyCodable]) -> UInt32 {
+        guard let jsonData = try? JSONEncoder.synchroEncoder().encode(data.mapValues { $0 }) else {
+            return 0
+        }
+        return crc32(bytes: jsonData)
+    }
+
+    private static func crc32(bytes: Data) -> UInt32 {
+        // CRC32 (ISO 3309 / ITU-T V.42) lookup table
+        let table: [UInt32] = (0..<256).map { i -> UInt32 in
+            var crc = UInt32(i)
+            for _ in 0..<8 {
+                if crc & 1 == 1 {
+                    crc = (crc >> 1) ^ 0xEDB88320
+                } else {
+                    crc >>= 1
+                }
+            }
+            return crc
+        }
+
+        var crc: UInt32 = 0xFFFFFFFF
+        for byte in bytes {
+            let index = Int((crc ^ UInt32(byte)) & 0xFF)
+            crc = (crc >> 8) ^ table[index]
+        }
+        return crc ^ 0xFFFFFFFF
+    }
+
     func updateKnownBuckets(bucketUpdates: BucketUpdate?) throws {
         guard let updates = bucketUpdates else { return }
         try database.writeTransaction { db in

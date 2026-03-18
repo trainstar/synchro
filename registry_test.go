@@ -1,15 +1,13 @@
 package synchro
 
 import (
-	"errors"
 	"testing"
 )
 
-func TestRegister_Defaults(t *testing.T) {
+func TestRegisterForTest_Defaults(t *testing.T) {
 	r := NewRegistry()
-	r.Register(&TableConfig{
-		TableName:   "orders",
-		OwnerColumn: "user_id",
+	r.RegisterForTest(&TableConfig{
+		TableName: "orders",
 	})
 
 	cfg := r.Get("orders")
@@ -19,39 +17,8 @@ func TestRegister_Defaults(t *testing.T) {
 	if cfg.IDColumn != "id" {
 		t.Errorf("IDColumn = %q, want %q", cfg.IDColumn, "id")
 	}
-	// UpdatedAtColumn/DeletedAtColumn are now computed by introspection,
-	// so they start empty until NewEngine runs.
-	if cfg.UpdatedAtCol() != "" {
-		t.Errorf("UpdatedAtCol() = %q, want empty before introspection", cfg.UpdatedAtCol())
-	}
-	if cfg.DeletedAtCol() != "" {
-		t.Errorf("DeletedAtCol() = %q, want empty before introspection", cfg.DeletedAtCol())
-	}
-	if cfg.PushPolicy != PushPolicyOwnerOnly {
-		t.Errorf("PushPolicy = %q, want %q", cfg.PushPolicy, PushPolicyOwnerOnly)
-	}
-	if cfg.BucketByColumn != "user_id" {
-		t.Errorf("BucketByColumn = %q, want %q", cfg.BucketByColumn, "user_id")
-	}
-	if cfg.BucketPrefix != "user:" {
-		t.Errorf("BucketPrefix = %q, want %q", cfg.BucketPrefix, "user:")
-	}
-}
-
-func TestRegister_CustomIDColumn(t *testing.T) {
-	r := NewRegistry()
-	r.Register(&TableConfig{
-		TableName:  "events",
-		PushPolicy: PushPolicyDisabled,
-		IDColumn:   "event_id",
-	})
-
-	cfg := r.Get("events")
-	if cfg.IDColumn != "event_id" {
-		t.Errorf("IDColumn = %q, want %q", cfg.IDColumn, "event_id")
-	}
-	// UpdatedAtColumn/DeletedAtColumn are set by introspection via Config-level names,
-	// not per-table registration.
+	// UpdatedAtColumn/DeletedAtColumn are computed by introspection,
+	// so they start empty until Introspect runs.
 	if cfg.UpdatedAtCol() != "" {
 		t.Errorf("UpdatedAtCol() = %q, want empty before introspection", cfg.UpdatedAtCol())
 	}
@@ -71,7 +38,7 @@ func TestAll_PreservesOrder(t *testing.T) {
 	r := NewRegistry()
 	names := []string{"alpha", "beta", "gamma"}
 	for _, n := range names {
-		r.Register(&TableConfig{TableName: n})
+		r.RegisterForTest(&TableConfig{TableName: n})
 	}
 
 	all := r.All()
@@ -87,8 +54,8 @@ func TestAll_PreservesOrder(t *testing.T) {
 
 func TestTableNames(t *testing.T) {
 	r := NewRegistry()
-	r.Register(&TableConfig{TableName: "a"})
-	r.Register(&TableConfig{TableName: "b"})
+	r.RegisterForTest(&TableConfig{TableName: "a"})
+	r.RegisterForTest(&TableConfig{TableName: "b"})
 
 	got := r.TableNames()
 	if len(got) != 2 || got[0] != "a" || got[1] != "b" {
@@ -104,7 +71,7 @@ func TestTableNames(t *testing.T) {
 
 func TestIsRegistered(t *testing.T) {
 	r := NewRegistry()
-	r.Register(&TableConfig{TableName: "orders"})
+	r.RegisterForTest(&TableConfig{TableName: "orders"})
 
 	if !r.IsRegistered("orders") {
 		t.Error("IsRegistered(orders) = false, want true")
@@ -114,210 +81,32 @@ func TestIsRegistered(t *testing.T) {
 	}
 }
 
-func TestIsPushable(t *testing.T) {
+func TestValidate_EmptyName(t *testing.T) {
 	r := NewRegistry()
-	r.Register(&TableConfig{
-		TableName:   "owned",
-		PushPolicy:  PushPolicyOwnerOnly,
-		OwnerColumn: "user_id",
-	})
-	r.Register(&TableConfig{
-		TableName:  "ref",
-		PushPolicy: PushPolicyDisabled,
-	})
-	if !r.IsPushable("owned") {
-		t.Error("IsPushable(owned) = false, want true")
-	}
-	if r.IsPushable("ref") {
-		t.Error("IsPushable(ref) = true, want false")
-	}
-	if r.IsPushable("missing") {
-		t.Error("IsPushable(missing) = true, want false")
-	}
-}
-
-func TestValidate_UnregisteredParent(t *testing.T) {
-	r := NewRegistry()
-	r.Register(&TableConfig{
-		TableName:   "child",
-		PushPolicy:  PushPolicyOwnerOnly,
-		OwnerColumn: "user_id",
-		ParentTable: "missing_parent",
-		ParentFKCol: "parent_id",
-	})
+	r.RegisterForTest(&TableConfig{TableName: ""})
 
 	err := r.Validate()
 	if err == nil {
-		t.Fatal("expected error for unregistered parent, got nil")
-	}
-	if !errors.Is(err, ErrUnregisteredParent) {
-		t.Errorf("expected ErrUnregisteredParent, got: %v", err)
+		t.Fatal("expected error for empty table name, got nil")
 	}
 }
 
-func TestValidate_CycleDetection(t *testing.T) {
+func TestValidate_DuplicateName(t *testing.T) {
 	r := NewRegistry()
-	r.Register(&TableConfig{
-		TableName:   "a",
-		PushPolicy:  PushPolicyOwnerOnly,
-		OwnerColumn: "user_id",
-		ParentTable: "b",
-		ParentFKCol: "b_id",
-	})
-	r.Register(&TableConfig{
-		TableName:   "b",
-		PushPolicy:  PushPolicyOwnerOnly,
-		OwnerColumn: "user_id",
-		ParentTable: "a",
-		ParentFKCol: "a_id",
-	})
+	r.RegisterForTest(&TableConfig{TableName: "orders"})
+	r.RegisterForTest(&TableConfig{TableName: "orders"})
 
 	err := r.Validate()
 	if err == nil {
-		t.Fatal("expected error for cycle, got nil")
-	}
-	if !errors.Is(err, ErrCycleDetected) {
-		t.Errorf("expected ErrCycleDetected, got: %v", err)
-	}
-}
-
-func TestValidate_OrphanedChain(t *testing.T) {
-	r := NewRegistry()
-	r.Register(&TableConfig{
-		TableName:  "root",
-		PushPolicy: PushPolicyDisabled,
-	})
-	r.Register(&TableConfig{
-		TableName:   "child",
-		PushPolicy:  PushPolicyOwnerOnly,
-		OwnerColumn: "user_id",
-		ParentTable: "root",
-		ParentFKCol: "root_id",
-	})
-
-	err := r.Validate()
-	if err == nil {
-		t.Fatal("expected error for orphaned chain, got nil")
-	}
-	if !errors.Is(err, ErrOrphanedChain) {
-		t.Errorf("expected ErrOrphanedChain, got: %v", err)
-	}
-}
-
-func TestValidate_PushableWithoutOwnerColumn(t *testing.T) {
-	r := NewRegistry()
-	r.Register(&TableConfig{
-		TableName:  "orders",
-		PushPolicy: PushPolicyOwnerOnly,
-	})
-
-	err := r.Validate()
-	if err == nil {
-		t.Fatal("expected error for pushable without OwnerColumn, got nil")
-	}
-	if !errors.Is(err, ErrMissingOwnership) {
-		t.Errorf("expected ErrMissingOwnership, got: %v", err)
-	}
-}
-
-func TestValidate_ParentTableWithoutParentFKCol(t *testing.T) {
-	r := NewRegistry()
-	r.Register(&TableConfig{
-		TableName:   "parent",
-		PushPolicy:  PushPolicyOwnerOnly,
-		OwnerColumn: "user_id",
-	})
-	r.Register(&TableConfig{
-		TableName:   "child",
-		PushPolicy:  PushPolicyOwnerOnly,
-		OwnerColumn: "user_id",
-		ParentTable: "parent",
-	})
-
-	err := r.Validate()
-	if err == nil {
-		t.Fatal("expected error for ParentTable without ParentFKCol, got nil")
-	}
-	if !errors.Is(err, ErrMissingParentFKCol) {
-		t.Errorf("expected ErrMissingParentFKCol, got: %v", err)
-	}
-}
-
-func TestValidate_RedundantProtectedColumn(t *testing.T) {
-	tests := []struct {
-		name      string
-		protected []string
-	}{
-		{name: "PK column", protected: []string{"id"}},
-		{name: "ownership column", protected: []string{"user_id"}},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			r := NewRegistry()
-			r.Register(&TableConfig{
-				TableName:        "orders",
-				PushPolicy:       PushPolicyOwnerOnly,
-				OwnerColumn:      "user_id",
-				ProtectedColumns: tt.protected,
-			})
-
-			err := r.Validate()
-			if err == nil {
-				t.Fatal("expected error, got nil")
-			}
-			if !errors.Is(err, ErrRedundantProtected) {
-				t.Errorf("expected ErrRedundantProtected, got: %v", err)
-			}
-		})
-	}
-}
-
-func TestValidate_InvalidPushPolicy(t *testing.T) {
-	r := NewRegistry()
-	r.Register(&TableConfig{
-		TableName:   "orders",
-		PushPolicy:  PushPolicy("invalid"),
-		OwnerColumn: "user_id",
-	})
-	err := r.Validate()
-	if err == nil || !errors.Is(err, ErrInvalidPushPolicy) {
-		t.Fatalf("expected ErrInvalidPushPolicy, got: %v", err)
-	}
-}
-
-func TestValidate_InvalidBucketConfig(t *testing.T) {
-	r := NewRegistry()
-	r.Register(&TableConfig{
-		TableName:            "orders",
-		PushPolicy:           PushPolicyOwnerOnly,
-		OwnerColumn:          "user_id",
-		GlobalWhenBucketNull: true,
-		AllowGlobalRead:      false,
-	})
-	err := r.Validate()
-	if err == nil || !errors.Is(err, ErrInvalidBucketConfig) {
-		t.Fatalf("expected ErrInvalidBucketConfig, got: %v", err)
+		t.Fatal("expected error for duplicate table name, got nil")
 	}
 }
 
 func TestValidate_ValidConfig(t *testing.T) {
 	r := NewRegistry()
-	r.Register(&TableConfig{
-		TableName:   "orders",
-		PushPolicy:  PushPolicyOwnerOnly,
-		OwnerColumn: "user_id",
-	})
-	r.Register(&TableConfig{
-		TableName:   "order_details",
-		PushPolicy:  PushPolicyOwnerOnly,
-		OwnerColumn: "user_id",
-		ParentTable: "orders",
-		ParentFKCol: "order_id",
-	})
-	r.Register(&TableConfig{
-		TableName:  "products",
-		PushPolicy: PushPolicyDisabled,
-	})
+	r.RegisterForTest(&TableConfig{TableName: "orders"})
+	r.RegisterForTest(&TableConfig{TableName: "order_details"})
+	r.RegisterForTest(&TableConfig{TableName: "products"})
 
 	if err := r.Validate(); err != nil {
 		t.Errorf("Validate() returned unexpected error: %v", err)
@@ -326,13 +115,13 @@ func TestValidate_ValidConfig(t *testing.T) {
 
 func TestAllowedInsertColumns(t *testing.T) {
 	r := NewRegistry()
-	r.Register(&TableConfig{
-		TableName:   "orders",
-		PushPolicy:  PushPolicyOwnerOnly,
-		OwnerColumn: "user_id",
-		ParentFKCol: "parent_id",
-	})
-	cfg := r.Get("orders")
+	cfg := &TableConfig{
+		TableName: "orders",
+		foreignKeys: []FKRelation{
+			{Column: "parent_id", RefTable: "parents", RefColumn: "id"},
+		},
+	}
+	r.RegisterForTest(cfg)
 	// Simulate introspection detecting all timestamp columns.
 	cfg.hasUpdatedAt = true
 	cfg.hasDeletedAt = true
@@ -341,7 +130,7 @@ func TestAllowedInsertColumns(t *testing.T) {
 	cfg.deletedAtColumn = "deleted_at"
 	cfg.finalizeProtectedSet()
 
-	dataCols := []string{"id", "user_id", "parent_id", "name", "created_at", "updated_at", "deleted_at"}
+	dataCols := []string{"id", "parent_id", "name", "created_at", "updated_at", "deleted_at"}
 	allowed := cfg.AllowedInsertColumns(dataCols)
 
 	allowedSet := make(map[string]bool, len(allowed))
@@ -349,7 +138,7 @@ func TestAllowedInsertColumns(t *testing.T) {
 		allowedSet[col] = true
 	}
 
-	for _, col := range []string{"id", "user_id", "parent_id", "name"} {
+	for _, col := range []string{"id", "parent_id", "name"} {
 		if !allowedSet[col] {
 			t.Errorf("AllowedInsertColumns: expected %q to be allowed", col)
 		}
@@ -363,14 +152,13 @@ func TestAllowedInsertColumns(t *testing.T) {
 
 func TestAllowedUpdateColumns(t *testing.T) {
 	r := NewRegistry()
-	r.Register(&TableConfig{
-		TableName:        "orders",
-		PushPolicy:       PushPolicyOwnerOnly,
-		OwnerColumn:      "user_id",
-		ParentFKCol:      "parent_id",
-		ProtectedColumns: []string{"secret"},
-	})
-	cfg := r.Get("orders")
+	cfg := &TableConfig{
+		TableName: "orders",
+		foreignKeys: []FKRelation{
+			{Column: "parent_id", RefTable: "parents", RefColumn: "id"},
+		},
+	}
+	r.RegisterForTest(cfg)
 	// Simulate introspection detecting all timestamp columns.
 	cfg.hasUpdatedAt = true
 	cfg.hasDeletedAt = true
@@ -379,7 +167,7 @@ func TestAllowedUpdateColumns(t *testing.T) {
 	cfg.deletedAtColumn = "deleted_at"
 	cfg.finalizeProtectedSet()
 
-	dataCols := []string{"id", "user_id", "parent_id", "name", "secret", "created_at", "updated_at", "deleted_at"}
+	dataCols := []string{"id", "parent_id", "name", "created_at", "updated_at", "deleted_at"}
 	allowed := cfg.AllowedUpdateColumns(dataCols)
 
 	allowedSet := make(map[string]bool, len(allowed))
@@ -390,7 +178,7 @@ func TestAllowedUpdateColumns(t *testing.T) {
 	if !allowedSet["name"] {
 		t.Error("AllowedUpdateColumns: expected 'name' to be allowed")
 	}
-	for _, col := range []string{"id", "user_id", "parent_id", "secret", "created_at", "updated_at", "deleted_at"} {
+	for _, col := range []string{"id", "parent_id", "created_at", "updated_at", "deleted_at"} {
 		if allowedSet[col] {
 			t.Errorf("AllowedUpdateColumns: expected %q to be denied", col)
 		}
@@ -398,35 +186,16 @@ func TestAllowedUpdateColumns(t *testing.T) {
 }
 
 func TestIsProtected(t *testing.T) {
-	// Test before introspection (no timestamp columns in protected set)
 	r := NewRegistry()
-	r.Register(&TableConfig{
-		TableName:        "orders",
-		PushPolicy:       PushPolicyOwnerOnly,
-		OwnerColumn:      "user_id",
-		ProtectedColumns: []string{"internal_flag"},
-	})
-	cfg := r.Get("orders")
+	cfg := &TableConfig{TableName: "orders"}
+	r.RegisterForTest(cfg)
 
-	// Before introspection: only id, owner, extra protected are in the set
-	preTests := []struct {
-		col  string
-		want bool
-	}{
-		{"id", true},
-		{"user_id", true},
-		{"created_at", false}, // not in set until introspection
-		{"updated_at", false},
-		{"deleted_at", false},
-		{"internal_flag", true},
-		{"name", false},
+	// Before introspection: only id is in the set
+	if !cfg.IsProtected("id") {
+		t.Error("id should be protected before introspection")
 	}
-	for _, tt := range preTests {
-		t.Run("pre/"+tt.col, func(t *testing.T) {
-			if got := cfg.IsProtected(tt.col); got != tt.want {
-				t.Errorf("IsProtected(%q) before introspection = %v, want %v", tt.col, got, tt.want)
-			}
-		})
+	if cfg.IsProtected("name") {
+		t.Error("name should not be protected")
 	}
 
 	// After introspection (simulate all timestamp columns present)
@@ -435,6 +204,9 @@ func TestIsProtected(t *testing.T) {
 	cfg.hasCreatedAt = true
 	cfg.updatedAtColumn = "updated_at"
 	cfg.deletedAtColumn = "deleted_at"
+	cfg.foreignKeys = []FKRelation{
+		{Column: "parent_id", RefTable: "parents", RefColumn: "id"},
+	}
 	cfg.finalizeProtectedSet()
 
 	postTests := []struct {
@@ -442,11 +214,10 @@ func TestIsProtected(t *testing.T) {
 		want bool
 	}{
 		{"id", true},
-		{"user_id", true},
 		{"created_at", true},
 		{"updated_at", true},
 		{"deleted_at", true},
-		{"internal_flag", true},
+		{"parent_id", true},
 		{"name", false},
 		{"description", false},
 	}
@@ -456,5 +227,53 @@ func TestIsProtected(t *testing.T) {
 				t.Errorf("IsProtected(%q) after introspection = %v, want %v", tt.col, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestTopologicalSort(t *testing.T) {
+	r := NewRegistry()
+	r.RegisterForTest(&TableConfig{TableName: "orders"})
+	r.RegisterForTest(&TableConfig{
+		TableName:   "order_details",
+		parentTable: "orders",
+		parentFKCol: "order_id",
+	})
+	r.RegisterForTest(&TableConfig{TableName: "products"})
+
+	sorted := r.topologicalSort()
+	if len(sorted) != 3 {
+		t.Fatalf("expected 3 tables, got %d", len(sorted))
+	}
+
+	// orders must come before order_details.
+	ordersIdx := -1
+	detailsIdx := -1
+	for i, name := range sorted {
+		if name == "orders" {
+			ordersIdx = i
+		}
+		if name == "order_details" {
+			detailsIdx = i
+		}
+	}
+	if ordersIdx >= detailsIdx {
+		t.Errorf("orders (idx=%d) should come before order_details (idx=%d)", ordersIdx, detailsIdx)
+	}
+}
+
+func TestRegisterTable(t *testing.T) {
+	r := NewRegistry()
+	r.registerTable(Table{Name: "orders", Exclude: []string{"col_a"}}, []string{"global_col"})
+
+	cfg := r.Get("orders")
+	if cfg == nil {
+		t.Fatal("expected registered config")
+	}
+	if cfg.IDColumn != "id" {
+		t.Errorf("IDColumn = %q, want %q", cfg.IDColumn, "id")
+	}
+	// Check merged excludes.
+	if len(cfg.ExcludeColumns) != 2 {
+		t.Errorf("ExcludeColumns = %v, want 2 entries", cfg.ExcludeColumns)
 	}
 }

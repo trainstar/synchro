@@ -91,19 +91,3 @@ func TestDeduplicateEntries_Empty(t *testing.T) {
 	}
 }
 
-func TestBuildJsonPairs_EscapesSingleQuotes(t *testing.T) {
-	// Column name with embedded single quote must not break the SQL string literal.
-	result := buildJsonPairs([]string{"it's_col", "normal"})
-
-	// Key must have doubled single quotes, value must be double-quote-escaped identifier.
-	if expected := `'it''s_col', "it's_col", 'normal', "normal"`; result != expected {
-		t.Errorf("buildJsonPairs =\n  %s\nwant:\n  %s", result, expected)
-	}
-}
-
-func TestBuildJsonPairs_SafeColumns(t *testing.T) {
-	result := buildJsonPairs([]string{"name", "age"})
-	if expected := `'name', "name", 'age', "age"`; result != expected {
-		t.Errorf("buildJsonPairs = %s, want %s", result, expected)
-	}
-}

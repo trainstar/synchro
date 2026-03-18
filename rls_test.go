@@ -5,14 +5,13 @@ import (
 	"testing"
 )
 
-func TestGenerateRLSPolicies_PushDisabledTable(t *testing.T) {
+func TestGenerateRLSPolicies_NoOwnerColumn(t *testing.T) {
 	r := NewRegistry()
-	r.Register(&TableConfig{
-		TableName:  "products",
-		PushPolicy: PushPolicyDisabled,
+	r.RegisterForTest(&TableConfig{
+		TableName: "products",
 	})
 
-	stmts := GenerateRLSPolicies(r)
+	stmts := GenerateRLSPolicies(r, "user_id")
 	// ENABLE + FORCE + SELECT policy = 3 statements
 	if len(stmts) != 3 {
 		t.Fatalf("got %d statements, want 3", len(stmts))
@@ -20,20 +19,19 @@ func TestGenerateRLSPolicies_PushDisabledTable(t *testing.T) {
 
 	for _, s := range stmts {
 		if strings.Contains(s, "FOR INSERT") || strings.Contains(s, "FOR UPDATE") || strings.Contains(s, "FOR DELETE") {
-			t.Fatalf("push-disabled table should not have write policies: %s", s)
+			t.Fatalf("reference table should not have write policies: %s", s)
 		}
 	}
 }
 
-func TestGenerateRLSPolicies_OwnerTable_DefaultNoNullRead(t *testing.T) {
+func TestGenerateRLSPolicies_OwnerTable_NotNullable(t *testing.T) {
 	r := NewRegistry()
-	r.Register(&TableConfig{
-		TableName:   "orders",
-		PushPolicy:  PushPolicyOwnerOnly,
-		OwnerColumn: "user_id",
+	r.RegisterForTest(&TableConfig{
+		TableName:      "orders",
+		columnNullable: map[string]bool{"user_id": false, "id": false},
 	})
 
-	stmts := GenerateRLSPolicies(r)
+	stmts := GenerateRLSPolicies(r, "user_id")
 	selectFound := false
 	for _, s := range stmts {
 		if strings.Contains(s, "FOR SELECT") {
@@ -42,7 +40,7 @@ func TestGenerateRLSPolicies_OwnerTable_DefaultNoNullRead(t *testing.T) {
 				t.Errorf("SELECT policy missing owner check: %s", s)
 			}
 			if strings.Contains(s, "IS NULL OR") {
-				t.Errorf("default owner table should not allow NULL-owner reads: %s", s)
+				t.Errorf("non-nullable owner table should not allow NULL-owner reads: %s", s)
 			}
 		}
 	}
@@ -51,38 +49,34 @@ func TestGenerateRLSPolicies_OwnerTable_DefaultNoNullRead(t *testing.T) {
 	}
 }
 
-func TestGenerateRLSPolicies_OwnerTable_GlobalReadOptIn(t *testing.T) {
+func TestGenerateRLSPolicies_OwnerTable_Nullable(t *testing.T) {
 	r := NewRegistry()
-	r.Register(&TableConfig{
-		TableName:       "categories",
-		PushPolicy:      PushPolicyOwnerOnly,
-		OwnerColumn:     "user_id",
-		AllowGlobalRead: true,
+	r.RegisterForTest(&TableConfig{
+		TableName:      "categories",
+		columnNullable: map[string]bool{"user_id": true, "id": false},
 	})
 
-	stmts := GenerateRLSPolicies(r)
+	stmts := GenerateRLSPolicies(r, "user_id")
 	for _, s := range stmts {
 		if strings.Contains(s, "FOR SELECT") && !strings.Contains(s, "IS NULL OR") {
-			t.Errorf("global-read opt-in table should allow NULL-owner reads: %s", s)
+			t.Errorf("nullable owner table should allow NULL-owner reads: %s", s)
 		}
 	}
 }
 
 func TestGenerateRLSPolicies_ChildTable(t *testing.T) {
 	r := NewRegistry()
-	r.Register(&TableConfig{
-		TableName:   "orders",
-		PushPolicy:  PushPolicyOwnerOnly,
-		OwnerColumn: "user_id",
+	r.RegisterForTest(&TableConfig{
+		TableName:      "orders",
+		columnNullable: map[string]bool{"user_id": false, "id": false},
 	})
-	r.Register(&TableConfig{
+	r.RegisterForTest(&TableConfig{
 		TableName:   "order_details",
-		PushPolicy:  PushPolicyOwnerOnly,
-		ParentTable: "orders",
-		ParentFKCol: "order_id",
+		parentTable: "orders",
+		parentFKCol: "order_id",
 	})
 
-	stmts := GenerateRLSPolicies(r)
+	stmts := GenerateRLSPolicies(r, "user_id")
 	var child []string
 	for _, s := range stmts {
 		if strings.Contains(s, `"order_details"`) {

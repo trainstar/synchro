@@ -73,16 +73,52 @@ func (c *Compactor) DeactivateStaleClients(ctx context.Context, db DB) (int64, e
 	return result.RowsAffected()
 }
 
-// SafeSeq returns the minimum last_pull_seq across all active clients.
+// SafeSeq returns the minimum checkpoint across all buckets for all active clients.
+// Uses sync_client_checkpoints as the primary source (per-bucket cursors).
+// Falls back to sync_clients.last_pull_seq for clients that haven't been
+// upgraded to per-bucket checkpoints yet.
 // Returns 0 if there are no active clients (nothing safe to compact).
 func (c *Compactor) SafeSeq(ctx context.Context, db DB) (int64, error) {
-	var seq int64
+	// Get minimum from per-bucket checkpoints
+	var bucketMin int64
 	err := db.QueryRowContext(ctx,
-		"SELECT COALESCE(MIN(last_pull_seq), 0) FROM sync_clients WHERE is_active = true AND last_pull_seq IS NOT NULL").Scan(&seq)
+		`SELECT COALESCE(MIN(cp.checkpoint), 0)
+		FROM sync_client_checkpoints cp
+		JOIN sync_clients c ON c.user_id = cp.user_id AND c.client_id = cp.client_id
+		WHERE c.is_active = true`).Scan(&bucketMin)
 	if err != nil {
-		return 0, fmt.Errorf("computing safe seq: %w", err)
+		return 0, fmt.Errorf("computing safe seq from bucket checkpoints: %w", err)
 	}
-	return seq, nil
+
+	// Also check legacy last_pull_seq for clients without per-bucket checkpoints
+	var legacyMin int64
+	err = db.QueryRowContext(ctx,
+		`SELECT COALESCE(MIN(c.last_pull_seq), 0)
+		FROM sync_clients c
+		WHERE c.is_active = true
+		  AND c.last_pull_seq IS NOT NULL
+		  AND NOT EXISTS (
+			SELECT 1 FROM sync_client_checkpoints cp
+			WHERE cp.user_id = c.user_id AND cp.client_id = c.client_id
+		  )`).Scan(&legacyMin)
+	if err != nil {
+		return 0, fmt.Errorf("computing safe seq from legacy checkpoints: %w", err)
+	}
+
+	// Return the minimum of both sources
+	switch {
+	case bucketMin == 0 && legacyMin == 0:
+		return 0, nil
+	case bucketMin == 0:
+		return legacyMin, nil
+	case legacyMin == 0:
+		return bucketMin, nil
+	default:
+		if bucketMin < legacyMin {
+			return bucketMin, nil
+		}
+		return legacyMin, nil
+	}
 }
 
 // Compact deletes changelog entries with seq <= safeSeq in batches.
