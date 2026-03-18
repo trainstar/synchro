@@ -34,7 +34,9 @@
 	release-npm-dry-run \
 	clean \
 	seed-build \
-	seed-generate
+	seed-generate \
+	seed-generate-example \
+	seed-bundle-example
 
 # Local infrastructure defaults.
 DB_HOST ?= 10.0.0.86
@@ -100,6 +102,8 @@ help:
 	@echo "  release-npm-dry-run   - Dry-run npm pack for React Native SDK"
 	@echo "  seed-build            - Build the synchroseed CLI tool"
 	@echo "  seed-generate         - Generate a seed database from the test server"
+	@echo "  seed-generate-example - Generate a seed database into the RN example app"
+	@echo "  seed-bundle-example   - Generate and copy seed into both iOS and Android example apps"
 	@echo "  clean                 - Remove local build/test artifacts"
 
 build:
@@ -282,6 +286,15 @@ seed-build:
 
 seed-generate: seed-build
 	bin/synchroseed -server=$(SYNCHRO_TEST_URL) -jwt-secret=$(SYNCHRO_TEST_JWT_SECRET) -output=seed.db
+
+SEED_OUTPUT ?= clients/react-native/example/seed.db
+
+seed-generate-example: seed-build
+	bin/synchroseed -server=$(SYNCHRO_TEST_URL) -jwt-secret=$(SYNCHRO_TEST_JWT_SECRET) -output=$(SEED_OUTPUT)
+
+seed-bundle-example: seed-generate-example
+	mkdir -p clients/react-native/example/android/app/src/main/assets
+	cp $(SEED_OUTPUT) clients/react-native/example/android/app/src/main/assets/seed.db
 
 clean:
 	rm -rf bin/ "$(SYNCHROD_PID_FILE)" "$(SYNCHROD_LOG_FILE)"

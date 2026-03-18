@@ -38,7 +38,7 @@ module.exports = {
     simulator: {
       type: 'ios.simulator',
       device: {
-        id: '4B92F199-A5D5-464E-9378-7333A322EC36',
+        type: 'iPhone SE (3rd generation)',
       },
     },
     emulator: {

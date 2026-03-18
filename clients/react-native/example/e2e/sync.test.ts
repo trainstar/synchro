@@ -77,7 +77,10 @@ describe('Synchro RN E2E', () => {
       await waitFor(element(by.id('status-value')))
         .toHaveText('idle')
         .withTimeout(15000);
-      await waitFor(element(by.id('btn-init'))).toBeVisible().withTimeout(5000);
+      await waitFor(element(by.id('header')))
+        .toBeVisible()
+        .whileElement(by.id('test-scroll'))
+        .scroll(400, 'up');
     }
   });
 
@@ -140,5 +143,9 @@ describe('Synchro RN E2E', () => {
 
   it('maps native errors to typed JS errors', async () => {
     await runAction('errorMap', 10000);
+  });
+
+  it('seed database initializes offline with schema and CDC triggers', async () => {
+    await runAction('seedInit', 10000);
   });
 });
