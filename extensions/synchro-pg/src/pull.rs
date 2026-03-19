@@ -23,13 +23,15 @@ fn synchro_pull(
     p_bucket_checkpoints: default!(Option<pgrx::JsonB>, "NULL"),
     p_limit: default!(i32, "100"),
     p_tables: default!(Option<Vec<String>>, "NULL"),
-    _p_known_buckets: default!(Option<Vec<String>>, "NULL"),
+    p_known_buckets: default!(Option<Vec<String>>, "NULL"),
     p_schema_version: default!(i64, "0"),
     p_schema_hash: default!(&str, "''"),
 ) -> pgrx::JsonB {
     // Validate schema if provided.
     if p_schema_version > 0 || !p_schema_hash.is_empty() {
-        validate_schema(p_schema_version, p_schema_hash);
+        if let Err(err_json) = validate_schema(p_schema_version, p_schema_hash) {
+            return err_json;
+        }
     }
 
     let limit = clamp_pull_limit(p_limit);
@@ -52,13 +54,41 @@ fn synchro_pull(
         );
 
         // Load client bucket subscriptions.
-        let bucket_subs = load_client_buckets(client, p_user_id, p_client_id);
+        let bucket_subs = match load_client_buckets(client, p_user_id, p_client_id) {
+            Ok(subs) => subs,
+            Err(err_json) => return err_json,
+        };
+
+        // Compare known_buckets against server bucket subscriptions.
+        let bucket_updates: Option<serde_json::Value> = p_known_buckets.as_ref().and_then(|known| {
+            let known_set: std::collections::HashSet<&str> =
+                known.iter().map(|s| s.as_str()).collect();
+            let server_set: std::collections::HashSet<&str> =
+                bucket_subs.iter().map(|s| s.as_str()).collect();
+
+            let added: Vec<&str> = server_set.difference(&known_set).copied().collect();
+            let removed: Vec<&str> = known_set.difference(&server_set).copied().collect();
+
+            if !added.is_empty() || !removed.is_empty() {
+                Some(serde_json::json!({
+                    "added": added,
+                    "removed": removed,
+                }))
+            } else {
+                None
+            }
+        });
 
         // Get schema info.
         let (schema_version, schema_hash) = get_latest_schema(client);
 
-        // Detect stale buckets.
-        let stale_buckets = detect_stale_buckets(client, &bucket_subs, &bucket_cps);
+        // Detect stale buckets (only in per-bucket checkpoint mode).
+        // In legacy mode bucket_cps is empty, so stale detection is not applicable.
+        let stale_buckets = if per_bucket {
+            detect_stale_buckets(client, &bucket_subs, &bucket_cps)
+        } else {
+            vec![]
+        };
 
         // If stale buckets detected, return immediately with rebuild instruction.
         // Do NOT query changelog or advance checkpoints (Go behavior).
@@ -74,6 +104,9 @@ fn synchro_pull(
             });
             if per_bucket {
                 resp["bucket_checkpoints"] = serde_json::json!(bucket_cps);
+            }
+            if let Some(ref updates) = bucket_updates {
+                resp["bucket_updates"] = updates.clone();
             }
             return pgrx::JsonB(resp);
         }
@@ -135,6 +168,9 @@ fn synchro_pull(
             });
             if per_bucket {
                 resp["bucket_checkpoints"] = serde_json::json!(bucket_cps);
+            }
+            if let Some(ref updates) = bucket_updates {
+                resp["bucket_updates"] = updates.clone();
             }
             return pgrx::JsonB(resp);
         }
@@ -244,6 +280,9 @@ fn synchro_pull(
         if let Some(checksums) = bucket_checksums {
             response["bucket_checksums"] = serde_json::json!(checksums);
         }
+        if let Some(ref updates) = bucket_updates {
+            response["bucket_updates"] = updates.clone();
+        }
 
         pgrx::JsonB(response)
     })
@@ -266,7 +305,7 @@ pub(crate) fn load_client_buckets(
     client: &SpiClient<'_>,
     user_id: &str,
     client_id: &str,
-) -> Vec<String> {
+) -> Result<Vec<String>, pgrx::JsonB> {
     let tup_table = client
         .select(
             "SELECT bucket_subs FROM sync_clients \
@@ -281,10 +320,10 @@ pub(crate) fn load_client_buckets(
             .get_by_name::<Vec<String>, &str>("bucket_subs")
             .unwrap_or(None);
         if let Some(s) = subs {
-            return s;
+            return Ok(s);
         }
     }
-    pgrx::error!("client not found or inactive: {}/{}", user_id, client_id);
+    Err(pgrx::JsonB(serde_json::json!({"error": "client_not_found"})))
 }
 
 pub(crate) fn get_latest_schema(client: &SpiClient<'_>) -> (i64, String) {
@@ -351,7 +390,7 @@ fn detect_stale_buckets(
 
 /// Load registry within an existing SPI context.
 fn load_registry_inner(client: &SpiClient<'_>) -> Vec<TableRegistration> {
-    let query = "SELECT table_name, bucket_sql, pk_column, updated_at_col,
+    let query = "SELECT table_name, bucket_sql, pk_column, pk_type, updated_at_col,
                         deleted_at_col, push_policy, exclude_columns,
                         has_updated_at, has_deleted_at
                  FROM sync_registry
@@ -366,6 +405,7 @@ fn load_registry_inner(client: &SpiClient<'_>) -> Vec<TableRegistration> {
         let table_name: String = row.get_by_name("table_name").unwrap_or(None).unwrap_or_default();
         let bucket_sql: String = row.get_by_name("bucket_sql").unwrap_or(None).unwrap_or_default();
         let pk_column: String = row.get_by_name("pk_column").unwrap_or(None).unwrap_or_default();
+        let pk_type: String = row.get_by_name("pk_type").unwrap_or(None).unwrap_or_else(|| "text".to_string());
         let updated_at_col: String = row
             .get_by_name("updated_at_col")
             .unwrap_or(None)
@@ -391,6 +431,7 @@ fn load_registry_inner(client: &SpiClient<'_>) -> Vec<TableRegistration> {
             pk_column,
             updated_at_col,
             deleted_at_col,
+            pk_type,
             push_policy: crate::registry::PushPolicy::parse(&push_policy_str)
                 .unwrap_or(crate::registry::PushPolicy::Enabled),
             exclude_columns,

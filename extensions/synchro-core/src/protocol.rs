@@ -161,4 +161,24 @@ mod tests {
         assert_eq!(clamp_rebuild_limit(500), 500);
         assert_eq!(clamp_rebuild_limit(5000), MAX_REBUILD_LIMIT);
     }
+
+    #[test]
+    fn from_i16_boundary_values() {
+        // Negative values, i16::MIN, i16::MAX must all return None.
+        assert_eq!(Operation::from_i16(-1), None);
+        assert_eq!(Operation::from_i16(i16::MIN), None);
+        assert_eq!(Operation::from_i16(i16::MAX), None);
+        // Valid range boundaries.
+        assert_eq!(Operation::from_i16(1), Some(Operation::Insert));
+        assert_eq!(Operation::from_i16(3), Some(Operation::Delete));
+    }
+
+    #[test]
+    fn clamp_boundary_exact() {
+        // Exactly at boundaries: 1 and MAX should pass through unchanged.
+        assert_eq!(clamp_pull_limit(1), 1);
+        assert_eq!(clamp_pull_limit(MAX_PULL_LIMIT), MAX_PULL_LIMIT);
+        assert_eq!(clamp_rebuild_limit(1), 1);
+        assert_eq!(clamp_rebuild_limit(MAX_REBUILD_LIMIT), MAX_REBUILD_LIMIT);
+    }
 }

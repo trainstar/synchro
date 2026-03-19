@@ -408,3 +408,285 @@ impl std::fmt::Display for DecodeError {
 }
 
 impl std::error::Error for DecodeError {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // -----------------------------------------------------------------------
+    // pgoutput binary message builders
+    // -----------------------------------------------------------------------
+
+    fn build_relation_msg(rel_id: u32, namespace: &str, name: &str, cols: &[(&str, u32)]) -> Vec<u8> {
+        let mut buf = vec![RELATION_MSG];
+        buf.extend_from_slice(&rel_id.to_be_bytes());
+        buf.extend_from_slice(namespace.as_bytes());
+        buf.push(0); // null terminator
+        buf.extend_from_slice(name.as_bytes());
+        buf.push(0); // null terminator
+        buf.push(b'f'); // replica identity: full
+        buf.extend_from_slice(&(cols.len() as u16).to_be_bytes());
+        for (col_name, type_oid) in cols {
+            buf.push(0); // flags
+            buf.extend_from_slice(col_name.as_bytes());
+            buf.push(0); // null terminator
+            buf.extend_from_slice(&type_oid.to_be_bytes()); // type OID
+            buf.extend_from_slice(&(-1i32).to_be_bytes()); // type modifier
+        }
+        buf
+    }
+
+    fn build_tuple(cols: &[Option<&str>]) -> Vec<u8> {
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&(cols.len() as u16).to_be_bytes());
+        for col in cols {
+            match col {
+                Some(val) => {
+                    buf.push(COL_TEXT);
+                    buf.extend_from_slice(&(val.len() as u32).to_be_bytes());
+                    buf.extend_from_slice(val.as_bytes());
+                }
+                None => {
+                    buf.push(COL_NULL);
+                }
+            }
+        }
+        buf
+    }
+
+    fn build_insert_msg(rel_id: u32, cols: &[Option<&str>]) -> Vec<u8> {
+        let mut buf = vec![INSERT_MSG];
+        buf.extend_from_slice(&rel_id.to_be_bytes());
+        buf.push(b'N'); // new tuple
+        buf.extend(&build_tuple(cols));
+        buf
+    }
+
+    fn build_update_msg(rel_id: u32, new_cols: &[Option<&str>]) -> Vec<u8> {
+        let mut buf = vec![UPDATE_MSG];
+        buf.extend_from_slice(&rel_id.to_be_bytes());
+        buf.push(b'N'); // new tuple directly (no old tuple)
+        buf.extend(&build_tuple(new_cols));
+        buf
+    }
+
+    fn build_delete_msg(rel_id: u32, key_cols: &[Option<&str>]) -> Vec<u8> {
+        let mut buf = vec![DELETE_MSG];
+        buf.extend_from_slice(&rel_id.to_be_bytes());
+        buf.push(b'K'); // key tuple
+        buf.extend(&build_tuple(key_cols));
+        buf
+    }
+
+    fn make_decoder(tables: &[(&str, &str, &str, bool)]) -> WalDecoder {
+        let mut decoder = WalDecoder::new();
+        let meta: HashMap<String, TableMeta> = tables
+            .iter()
+            .map(|(name, pk, del_col, has_del)| {
+                (
+                    name.to_string(),
+                    TableMeta {
+                        pk_column: pk.to_string(),
+                        deleted_at_col: del_col.to_string(),
+                        has_deleted_at: *has_del,
+                    },
+                )
+            })
+            .collect();
+        decoder.set_registered_tables(meta);
+        decoder
+    }
+
+    // -----------------------------------------------------------------------
+    // Tests (10, per plan)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn decode_relation_then_insert() {
+        let mut decoder = make_decoder(&[("orders", "id", "deleted_at", true)]);
+
+        // Send relation message first to populate cache.
+        let rel_msg = build_relation_msg(1, "public", "orders", &[("id", 2950), ("title", 25)]);
+        let events = decoder.decode(&rel_msg).unwrap();
+        assert!(events.is_empty()); // Relation messages produce no events.
+
+        // Now send insert that references the cached relation.
+        let ins_msg = build_insert_msg(1, &[Some("abc-123"), Some("Test Order")]);
+        let events = decoder.decode(&ins_msg).unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].table_name, "orders");
+        assert_eq!(events[0].record_id, "abc-123");
+        assert_eq!(events[0].operation, Operation::Insert);
+        assert_eq!(events[0].data.get("title"), Some(&Some("Test Order".to_string())));
+    }
+
+    #[test]
+    fn decode_update_new_tuple() {
+        let mut decoder = make_decoder(&[("orders", "id", "deleted_at", true)]);
+
+        let rel_msg = build_relation_msg(1, "public", "orders", &[("id", 2950), ("title", 25)]);
+        decoder.decode(&rel_msg).unwrap();
+
+        let upd_msg = build_update_msg(1, &[Some("abc-123"), Some("Updated Title")]);
+        let events = decoder.decode(&upd_msg).unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].operation, Operation::Update);
+        assert_eq!(events[0].data.get("title"), Some(&Some("Updated Title".to_string())));
+    }
+
+    #[test]
+    fn decode_update_soft_delete_detection() {
+        let mut decoder = make_decoder(&[("orders", "id", "deleted_at", true)]);
+
+        let rel_msg = build_relation_msg(
+            1,
+            "public",
+            "orders",
+            &[("id", 2950), ("title", 25), ("deleted_at", 1184)],
+        );
+        decoder.decode(&rel_msg).unwrap();
+
+        // Update where deleted_at is non-null: should emit Delete operation.
+        let upd_msg = build_update_msg(
+            1,
+            &[Some("abc-123"), Some("Deleted"), Some("2025-01-01 00:00:00+00")],
+        );
+        let events = decoder.decode(&upd_msg).unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].operation, Operation::Delete);
+    }
+
+    #[test]
+    fn decode_delete_key_tuple() {
+        let mut decoder = make_decoder(&[("orders", "id", "deleted_at", true)]);
+
+        let rel_msg = build_relation_msg(1, "public", "orders", &[("id", 2950), ("title", 25)]);
+        decoder.decode(&rel_msg).unwrap();
+
+        let del_msg = build_delete_msg(1, &[Some("abc-123"), Some("irrelevant")]);
+        let events = decoder.decode(&del_msg).unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].operation, Operation::Delete);
+        assert_eq!(events[0].record_id, "abc-123");
+    }
+
+    #[test]
+    fn decode_unregistered_filtered() {
+        let mut decoder = make_decoder(&[("orders", "id", "deleted_at", true)]);
+        // "products" is NOT registered.
+
+        let rel_msg = build_relation_msg(2, "public", "products", &[("id", 2950), ("name", 25)]);
+        decoder.decode(&rel_msg).unwrap();
+
+        let ins_msg = build_insert_msg(2, &[Some("prod-1"), Some("Widget")]);
+        let events = decoder.decode(&ins_msg).unwrap();
+        assert!(events.is_empty(), "unregistered table events should be filtered");
+    }
+
+    #[test]
+    fn decode_null_column() {
+        let mut decoder = make_decoder(&[("orders", "id", "deleted_at", true)]);
+
+        let rel_msg = build_relation_msg(
+            1,
+            "public",
+            "orders",
+            &[("id", 2950), ("title", 25), ("notes", 25)],
+        );
+        decoder.decode(&rel_msg).unwrap();
+
+        // Insert where notes is NULL.
+        let ins_msg = build_insert_msg(1, &[Some("abc-123"), Some("Test"), None]);
+        let events = decoder.decode(&ins_msg).unwrap();
+        assert_eq!(events.len(), 1);
+        // NULL must be represented as None, not Some("").
+        assert_eq!(events[0].data.get("notes"), Some(&None));
+        // Non-null must be Some.
+        assert_eq!(events[0].data.get("title"), Some(&Some("Test".to_string())));
+    }
+
+    #[test]
+    fn decode_unchanged_toast_skipped() {
+        let mut decoder = make_decoder(&[("orders", "id", "deleted_at", true)]);
+
+        let rel_msg = build_relation_msg(
+            1,
+            "public",
+            "orders",
+            &[("id", 2950), ("title", 25), ("large_text", 25)],
+        );
+        decoder.decode(&rel_msg).unwrap();
+
+        // Build update with unchanged TOAST column.
+        let mut buf = vec![UPDATE_MSG];
+        buf.extend_from_slice(&1u32.to_be_bytes());
+        buf.push(b'N');
+        // 3 columns: id=text, title=text, large_text=unchanged
+        buf.extend_from_slice(&3u16.to_be_bytes());
+        // col 0: id
+        buf.push(COL_TEXT);
+        buf.extend_from_slice(&7u32.to_be_bytes());
+        buf.extend_from_slice(b"abc-123");
+        // col 1: title
+        buf.push(COL_TEXT);
+        buf.extend_from_slice(&7u32.to_be_bytes());
+        buf.extend_from_slice(b"Updated");
+        // col 2: large_text (unchanged TOAST)
+        buf.push(COL_UNCHANGED);
+
+        let events = decoder.decode(&buf).unwrap();
+        assert_eq!(events.len(), 1);
+        // Unchanged column should NOT be in the data map.
+        assert!(events[0].data.get("large_text").is_none());
+        // Other columns should be present.
+        assert_eq!(events[0].data.get("id"), Some(&Some("abc-123".to_string())));
+    }
+
+    #[test]
+    fn decode_missing_pk_errors() {
+        let mut decoder = make_decoder(&[("orders", "id", "deleted_at", true)]);
+
+        // Register with columns that don't include the PK "id".
+        let rel_msg = build_relation_msg(1, "public", "orders", &[("title", 25), ("notes", 25)]);
+        decoder.decode(&rel_msg).unwrap();
+
+        let ins_msg = build_insert_msg(1, &[Some("Test"), Some("Some notes")]);
+        let result = decoder.decode(&ins_msg);
+        assert!(result.is_err(), "missing PK column should error");
+        let err_msg = format!("{}", result.unwrap_err());
+        assert!(err_msg.contains("missing primary key"));
+    }
+
+    #[test]
+    fn decode_null_pk_errors() {
+        let mut decoder = make_decoder(&[("orders", "id", "deleted_at", true)]);
+
+        let rel_msg = build_relation_msg(1, "public", "orders", &[("id", 2950), ("title", 25)]);
+        decoder.decode(&rel_msg).unwrap();
+
+        // Insert where PK is NULL.
+        let ins_msg = build_insert_msg(1, &[None, Some("Test")]);
+        let result = decoder.decode(&ins_msg);
+        assert!(result.is_err(), "NULL PK should error");
+        let err_msg = format!("{}", result.unwrap_err());
+        assert!(err_msg.contains("NULL primary key"));
+    }
+
+    #[test]
+    fn decode_truncated_data_errors() {
+        let mut decoder = make_decoder(&[("orders", "id", "deleted_at", true)]);
+
+        let rel_msg = build_relation_msg(1, "public", "orders", &[("id", 2950)]);
+        decoder.decode(&rel_msg).unwrap();
+
+        // Truncated insert message: relation_id + 'N' + column count but no column data.
+        let mut buf = vec![INSERT_MSG];
+        buf.extend_from_slice(&1u32.to_be_bytes());
+        buf.push(b'N');
+        buf.extend_from_slice(&1u16.to_be_bytes()); // says 1 column
+        // But no column data follows: truncated.
+
+        let result = decoder.decode(&buf);
+        assert!(result.is_err(), "truncated data should error");
+    }
+}

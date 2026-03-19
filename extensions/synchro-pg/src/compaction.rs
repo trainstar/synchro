@@ -55,6 +55,38 @@ fn deactivate_stale_clients(client: &mut SpiClient<'_>, threshold: &str) -> i64 
 }
 
 fn calculate_safe_seq(client: &SpiClient<'_>) -> i64 {
+    // Check if there are any active clients at all.
+    let has_active_clients: bool = match client.select(
+        "SELECT EXISTS (SELECT 1 FROM sync_clients WHERE is_active = true) AS has_active",
+        None,
+        &[],
+    ) {
+        Ok(tup) => tup
+            .first()
+            .get_one::<bool>()
+            .ok()
+            .flatten()
+            .unwrap_or(false),
+        Err(e) => pgrx::error!("checking active clients: {}", e),
+    };
+
+    // No active clients: safe to compact everything up to MAX(seq).
+    if !has_active_clients {
+        return match client.select(
+            "SELECT COALESCE(MAX(seq), 0) AS max_seq FROM sync_changelog",
+            None,
+            &[],
+        ) {
+            Ok(tup) => tup
+                .first()
+                .get_one::<i64>()
+                .ok()
+                .flatten()
+                .unwrap_or(0),
+            Err(e) => pgrx::error!("querying max changelog seq: {}", e),
+        };
+    }
+
     // Per-bucket checkpoints (primary source).
     let bucket_min: i64 = match client.select(
         "SELECT COALESCE(MIN(cp.checkpoint), 0) AS min_cp \

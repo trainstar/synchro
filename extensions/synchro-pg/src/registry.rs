@@ -32,6 +32,7 @@ pub struct TableRegistration {
     pub table_name: String,
     pub bucket_sql: String,
     pub pk_column: String,
+    pub pk_type: String,
     pub updated_at_col: String,
     pub deleted_at_col: String,
     pub push_policy: PushPolicy,
@@ -83,17 +84,32 @@ fn synchro_register_table(
         pgrx::error!("table {:?} does not exist", p_table_name);
     }
 
-    // Validate bucket_sql by executing with a dummy UUID via parameterized query.
-    // The bucket_sql is stored as a parameter, not interpolated into the string.
-    if let Err(e) = Spi::run_with_args(
-        "DO $__synchro_validate__$ DECLARE _result TEXT[];
-        BEGIN
-            EXECUTE $1 USING '00000000-0000-0000-0000-000000000000'::text INTO _result;
-        END $__synchro_validate__$",
-        &[p_bucket_sql.into()],
-    ) {
+    // Validate bucket_sql by executing it with a dummy UUID. The query must
+    // accept a TEXT parameter ($1) and be valid SQL. We execute it via SPI
+    // select (not a DO block, which cannot accept SPI parameters). An empty
+    // result set is expected (no row matches the dummy UUID).
+    if let Err(e) = Spi::connect(|client| {
+        client.select(
+            p_bucket_sql,
+            None,
+            &["00000000-0000-0000-0000-000000000000".into()],
+        )?;
+        Ok::<_, pgrx::spi::Error>(())
+    }) {
         pgrx::error!("bucket_sql validation failed: {}", e);
     }
+
+    // Introspect PK column type for cast generation in push/pull queries.
+    let pk_type: String = Spi::get_one_with_args(
+        "SELECT format_type(a.atttypid, a.atttypmod) FROM pg_catalog.pg_attribute a \
+         JOIN pg_catalog.pg_class c ON c.oid = a.attrelid \
+         JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
+         WHERE c.relname = $1 AND a.attname = $2 \
+         AND n.nspname = ANY(current_schemas(false)) AND NOT a.attisdropped",
+        &[p_table_name.into(), p_pk_column.into()],
+    )
+    .unwrap_or(Some("text".to_string()))
+    .unwrap_or_else(|| "text".to_string());
 
     // Introspect timestamp columns.
     let has_updated_at: bool = Spi::get_one_with_args(
@@ -130,12 +146,13 @@ fn synchro_register_table(
     let exclude_arr = p_exclude_columns;
     if let Err(e) = Spi::run_with_args(
         "INSERT INTO sync_registry (
-            table_name, bucket_sql, pk_column, updated_at_col, deleted_at_col,
+            table_name, bucket_sql, pk_column, pk_type, updated_at_col, deleted_at_col,
             push_policy, exclude_columns, has_updated_at, has_deleted_at
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
         ON CONFLICT (table_name) DO UPDATE SET
             bucket_sql = EXCLUDED.bucket_sql,
             pk_column = EXCLUDED.pk_column,
+            pk_type = EXCLUDED.pk_type,
             updated_at_col = EXCLUDED.updated_at_col,
             deleted_at_col = EXCLUDED.deleted_at_col,
             push_policy = EXCLUDED.push_policy,
@@ -147,6 +164,7 @@ fn synchro_register_table(
             p_table_name.into(),
             p_bucket_sql.into(),
             p_pk_column.into(),
+            pk_type.as_str().into(),
             p_updated_at_col.into(),
             p_deleted_at_col.into(),
             policy.as_str().into(),
@@ -291,7 +309,7 @@ pub fn load_registry() -> Result<Vec<TableRegistration>, spi::Error> {
     let mut tables = Vec::new();
 
     Spi::connect(|client| {
-        let query = "SELECT table_name, bucket_sql, pk_column, updated_at_col,
+        let query = "SELECT table_name, bucket_sql, pk_column, pk_type, updated_at_col,
                             deleted_at_col, push_policy, exclude_columns,
                             has_updated_at, has_deleted_at
                      FROM sync_registry
@@ -302,6 +320,7 @@ pub fn load_registry() -> Result<Vec<TableRegistration>, spi::Error> {
             let table_name: String = row.get_by_name("table_name")?.unwrap_or_default();
             let bucket_sql: String = row.get_by_name("bucket_sql")?.unwrap_or_default();
             let pk_column: String = row.get_by_name("pk_column")?.unwrap_or_default();
+            let pk_type: String = row.get_by_name("pk_type")?.unwrap_or_else(|| "text".to_string());
             let updated_at_col: String = row.get_by_name("updated_at_col")?.unwrap_or_default();
             let deleted_at_col: String = row.get_by_name("deleted_at_col")?.unwrap_or_default();
             let push_policy_str: String = row.get_by_name("push_policy")?.unwrap_or_default();
@@ -314,6 +333,7 @@ pub fn load_registry() -> Result<Vec<TableRegistration>, spi::Error> {
                 table_name,
                 bucket_sql,
                 pk_column,
+                pk_type,
                 updated_at_col,
                 deleted_at_col,
                 push_policy: PushPolicy::parse(&push_policy_str).unwrap_or(PushPolicy::Enabled),
