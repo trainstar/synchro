@@ -14,8 +14,6 @@ public struct SynchroConfig: Sendable {
     public let pullPageSize: Int
     /// Max pending changes per push batch (default 100).
     public let pushBatchSize: Int
-    /// Max records per snapshot page (default 100, server caps at 1000).
-    public let snapshotPageSize: Int
     /// Path to a pre-built seed database for offline-first bootstrap.
     /// If set and no database exists at `dbPath`, the seed file is copied before opening.
     public let seedDatabasePath: String?
@@ -32,7 +30,6 @@ public struct SynchroConfig: Sendable {
         maxRetryAttempts: Int = 5,
         pullPageSize: Int = 100,
         pushBatchSize: Int = 100,
-        snapshotPageSize: Int = 100,
         seedDatabasePath: String? = nil
     ) {
         self.dbPath = dbPath
@@ -46,7 +43,6 @@ public struct SynchroConfig: Sendable {
         self.maxRetryAttempts = maxRetryAttempts
         self.pullPageSize = min(pullPageSize, 1000)
         self.pushBatchSize = pushBatchSize
-        self.snapshotPageSize = min(snapshotPageSize, 1000)
         self.seedDatabasePath = seedDatabasePath
     }
 }

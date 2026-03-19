@@ -51,8 +51,6 @@ data class PullResponse(
     val deletes: List<DeleteEntry>,
     val checkpoint: Long,
     @SerialName("has_more") val hasMore: Boolean,
-    @SerialName("snapshot_required") val snapshotRequired: Boolean? = null,
-    @SerialName("snapshot_reason") val snapshotReason: String? = null,
     @SerialName("bucket_updates") val bucketUpdates: BucketUpdate? = null,
     @SerialName("bucket_checkpoints") val bucketCheckpoints: Map<String, Long>? = null,
     @SerialName("rebuild_buckets") val rebuildBuckets: List<String>? = null,
@@ -147,34 +145,6 @@ data class PushResult(
         serverDeletedAt = serverDeletedAt
     )
 }
-
-// MARK: - Snapshot
-
-@Serializable
-data class SnapshotRequest(
-    @SerialName("client_id") val clientID: String,
-    val cursor: SnapshotCursor? = null,
-    val limit: Int? = null,
-    @SerialName("schema_version") val schemaVersion: Long,
-    @SerialName("schema_hash") val schemaHash: String
-)
-
-@Serializable
-data class SnapshotCursor(
-    val checkpoint: Long,
-    @SerialName("table_idx") val tableIndex: Int,
-    @SerialName("after_id") val afterID: String
-)
-
-@Serializable
-data class SnapshotResponse(
-    val records: List<Record>,
-    val cursor: SnapshotCursor? = null,
-    val checkpoint: Long,
-    @SerialName("has_more") val hasMore: Boolean,
-    @SerialName("schema_version") val schemaVersion: Long,
-    @SerialName("schema_hash") val schemaHash: String
-)
 
 // MARK: - Rebuild
 

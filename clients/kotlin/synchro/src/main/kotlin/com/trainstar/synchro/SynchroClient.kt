@@ -175,6 +175,4 @@ class SynchroClient(private val config: SynchroConfig, context: Context) {
     fun onConflict(callback: (ConflictEvent) -> Unit): Cancellable =
         syncEngine.onConflict(callback)
 
-    fun onSnapshotRequired(callback: suspend () -> Boolean): Cancellable =
-        syncEngine.onSnapshotRequired(callback)
 }

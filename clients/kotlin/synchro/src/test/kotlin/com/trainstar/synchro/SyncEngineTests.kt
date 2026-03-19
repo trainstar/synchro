@@ -106,10 +106,6 @@ class SyncEngineTests {
                     callLog.add("register")
                     mockResponse(registerJSON)
                 }
-                path.endsWith("/sync/snapshot") -> {
-                    callLog.add("snapshot")
-                    mockResponse(snapshotJSON(0))
-                }
                 path.endsWith("/sync/pull") -> {
                     callLog.add("pull")
                     mockResponse(pullJSON(10))
@@ -121,7 +117,7 @@ class SyncEngineTests {
         try {
             engine.start()
 
-            assertEquals(listOf("schema", "register", "snapshot", "pull"), callLog)
+            assertEquals(listOf("schema", "register", "pull"), callLog)
 
             val checkpoint = db.readTransaction { conn -> SynchroMeta.getInt64(conn, MetaKey.CHECKPOINT) }
             assertEquals(10L, checkpoint)
@@ -145,7 +141,6 @@ class SyncEngineTests {
             when {
                 path.endsWith("/sync/schema") -> mockResponse(schemaJSON)
                 path.endsWith("/sync/register") -> mockResponse(registerJSON)
-                path.endsWith("/sync/snapshot") -> mockResponse(snapshotJSON(0))
                 path.endsWith("/sync/push") -> {
                     pushCalled = true
                     val body = Json.decodeFromString<JsonObject>(request.body.readUtf8())
@@ -190,7 +185,6 @@ class SyncEngineTests {
             when {
                 path.endsWith("/sync/schema") -> mockResponse(schemaJSON)
                 path.endsWith("/sync/register") -> mockResponse(registerJSON)
-                path.endsWith("/sync/snapshot") -> mockResponse(snapshotJSON(0))
                 path.endsWith("/sync/pull") -> {
                     mockResponse("""
                         {
@@ -233,7 +227,6 @@ class SyncEngineTests {
             when {
                 path.endsWith("/sync/schema") -> mockResponse(schemaJSON)
                 path.endsWith("/sync/register") -> mockResponse(registerJSON)
-                path.endsWith("/sync/snapshot") -> mockResponse(snapshotJSON(0))
                 path.endsWith("/sync/pull") -> {
                     pullCallCount++
                     if (pullCallCount == 1) {
@@ -280,7 +273,6 @@ class SyncEngineTests {
             when {
                 path.endsWith("/sync/schema") -> mockResponse(schemaJSON)
                 path.endsWith("/sync/register") -> mockResponse(registerJSON)
-                path.endsWith("/sync/snapshot") -> mockResponse(snapshotJSON(0))
                 path.endsWith("/sync/push") -> {
                     pushCallCount++
                     if (pushCallCount == 1) {
@@ -327,7 +319,6 @@ class SyncEngineTests {
             when {
                 path.endsWith("/sync/schema") -> mockResponse(schemaJSON)
                 path.endsWith("/sync/register") -> mockResponse(registerJSON)
-                path.endsWith("/sync/snapshot") -> mockResponse(snapshotJSON(0))
                 path.endsWith("/sync/pull") -> mockResponse(pullJSON(10))
                 else -> mockResponse("""{"error":"unexpected"}""", 500)
             }
@@ -364,70 +355,6 @@ class SyncEngineTests {
     }
 
     @Test
-    fun testSnapshotFlowRebuildsTables() = runTest {
-        var pullCallCount = 0
-        var snapshotCallCount = 0
-        var snapshotApproved = false
-
-        val (engine, db) = makeIntegrationEnv { request ->
-            val path = request.path ?: ""
-            when {
-                path.endsWith("/sync/schema") -> mockResponse(schemaJSON)
-                path.endsWith("/sync/register") -> mockResponse(registerJSON)
-                path.endsWith("/sync/snapshot") -> {
-                    snapshotCallCount++
-                    if (snapshotCallCount == 1) {
-                        mockResponse(snapshotJSON(0))
-                    } else if (snapshotCallCount == 2) {
-                        mockResponse("""
-                            {
-                                "records": [{"id":"w1","table_name":"orders","data":{"id":"w1","ship_address":"Rebuilt Address","user_id":"u1","updated_at":"2026-01-01T12:00:00.000Z"},"updated_at":"2026-01-01T12:00:00.000Z"}],
-                                "cursor": {"checkpoint":50,"table_idx":0,"after_id":"w1"},
-                                "checkpoint": 50, "has_more": true,
-                                "schema_version": 1, "schema_hash": "test"
-                            }
-                        """.trimIndent())
-                    } else {
-                        mockResponse("""{"records":[],"checkpoint":100,"has_more":false,"schema_version":1,"schema_hash":"test"}""")
-                    }
-                }
-                path.endsWith("/sync/pull") -> {
-                    pullCallCount++
-                    if (pullCallCount == 1) {
-                        mockResponse("""{"changes":[],"deletes":[],"checkpoint":0,"has_more":false,"snapshot_required":true,"schema_version":1,"schema_hash":"test"}""")
-                    } else {
-                        mockResponse(pullJSON(0))
-                    }
-                }
-                else -> mockResponse("""{"error":"unexpected: $path"}""", 500)
-            }
-        }
-
-        engine.onSnapshotRequired {
-            snapshotApproved = true
-            true
-        }
-
-        try {
-            engine.start()
-
-            assertTrue(snapshotApproved)
-            assertEquals(3, snapshotCallCount)
-
-            val row = db.queryOne("SELECT ship_address FROM orders WHERE id = ?", arrayOf("w1"))
-            assertEquals("Rebuilt Address", row?.get("ship_address"))
-
-            val checkpoint = db.readTransaction { conn -> SynchroMeta.getInt64(conn, MetaKey.CHECKPOINT) }
-            assertEquals(100L, checkpoint)
-
-            val tracker = ChangeTracker(db)
-            assertFalse(tracker.hasPendingChanges())
-        } finally {
-            engine.stop()
-        }
-    }
-
-    @Test
     fun testConflictCallbackFiresDuringSyncCycle() = runTest {
         val receivedConflicts = mutableListOf<ConflictEvent>()
 
@@ -436,7 +363,6 @@ class SyncEngineTests {
             when {
                 path.endsWith("/sync/schema") -> mockResponse(schemaJSON)
                 path.endsWith("/sync/register") -> mockResponse(registerJSON)
-                path.endsWith("/sync/snapshot") -> mockResponse(snapshotJSON(0))
                 path.endsWith("/sync/push") -> {
                     val body = Json.decodeFromString<JsonObject>(request.body.readUtf8())
                     val changes = body["changes"] as kotlinx.serialization.json.JsonArray
@@ -568,16 +494,6 @@ class SyncEngineTests {
         {
             "changes": [],
             "deletes": [],
-            "checkpoint": $checkpoint,
-            "has_more": false,
-            "schema_version": 1,
-            "schema_hash": "test"
-        }
-    """.trimIndent()
-
-    private fun snapshotJSON(checkpoint: Int): String = """
-        {
-            "records": [],
             "checkpoint": $checkpoint,
             "has_more": false,
             "schema_version": 1,

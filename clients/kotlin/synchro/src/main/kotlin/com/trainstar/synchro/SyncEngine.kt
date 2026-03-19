@@ -30,7 +30,6 @@ class SyncEngine(
     private var currentStatus: SyncStatus = SyncStatus.Stopped
     private val statusCallbacks = ConcurrentHashMap<String, (SyncStatus) -> Unit>()
     private val conflictCallbacks = ConcurrentHashMap<String, (ConflictEvent) -> Unit>()
-    private val snapshotCallbacks = ConcurrentHashMap<String, suspend () -> Boolean>()
 
     @Volatile
     private var syncedTables: List<SchemaTable> = emptyList()
@@ -84,7 +83,7 @@ class SyncEngine(
             )
             val registerResp = httpClient.register(registerReq)
 
-            val needsInitialSnapshot = database.writeTransaction { db ->
+            val needsInitialSync = database.writeTransaction { db ->
                 SynchroMeta.set(db, MetaKey.CLIENT_SERVER_ID, registerResp.id)
 
                 // Store per-bucket checkpoints from registration if provided
@@ -93,14 +92,15 @@ class SyncEngine(
                 }
 
                 val checkpoint = SynchroMeta.getInt64(db, MetaKey.CHECKPOINT)
-                val snapshotComplete = SynchroMeta.get(db, MetaKey.SNAPSHOT_COMPLETE) == "1"
-                checkpoint == 0L || !snapshotComplete
+                val initialSyncComplete = SynchroMeta.get(db, MetaKey.SNAPSHOT_COMPLETE) == "1"
+                checkpoint == 0L || !initialSyncComplete
             }
 
             updateStatus(SyncStatus.Idle)
 
-            if (needsInitialSnapshot) {
-                rebuildFromSnapshot(requiresApproval = false)
+            if (needsInitialSync) {
+                val buckets = registerResp.bucketCheckpoints?.keys?.toList() ?: emptyList()
+                initialSync(buckets)
             }
 
             // Start sync loop
@@ -151,12 +151,6 @@ class SyncEngine(
         val id = UUID.randomUUID().toString()
         conflictCallbacks[id] = callback
         return CallbackCancellable { conflictCallbacks.remove(id) }
-    }
-
-    fun onSnapshotRequired(callback: suspend () -> Boolean): Cancellable {
-        val id = UUID.randomUUID().toString()
-        snapshotCallbacks[id] = callback
-        return CallbackCancellable { snapshotCallbacks.remove(id) }
     }
 
     // MARK: - Sync Loop
@@ -305,11 +299,6 @@ class SyncEngine(
 
             val response = httpClient.pull(request)
 
-            if (response.snapshotRequired == true) {
-                rebuildFromSnapshot(requiresApproval = response.snapshotReason != "initial_sync_required")
-                return
-            }
-
             pullProcessor.applyPullPage(response.changes, response.deletes, syncedTables)
             pullProcessor.trackBucketMembership(response.changes)
             pullProcessor.updateCheckpoint(response.checkpoint)
@@ -454,28 +443,9 @@ class SyncEngine(
         }
     }
 
-    // MARK: - Snapshot
+    // MARK: - Initial Sync
 
-    private suspend fun rebuildFromSnapshot(requiresApproval: Boolean) {
-        if (requiresApproval) {
-            runPush()
-        }
-
-        var approved = true
-        if (requiresApproval) {
-            for ((_, callback) in snapshotCallbacks) {
-                val result = callback()
-                if (!result) {
-                    approved = false
-                    break
-                }
-            }
-        }
-
-        if (!approved) {
-            throw SynchroError.SnapshotRequired()
-        }
-
+    private suspend fun initialSync(buckets: List<String>) {
         val schema = SchemaResponse(
             schemaVersion = schemaVersion,
             schemaHash = schemaHash,
@@ -493,31 +463,12 @@ class SyncEngine(
             schemaManager.createSyncedTablesInTransaction(db, schema)
         }
 
-        var cursor: SnapshotCursor? = null
-        var hasMore = true
+        for (bucketId in buckets) {
+            rebuildBucket(bucketId)
+        }
 
-        while (hasMore) {
-            val request = SnapshotRequest(
-                clientID = clientID,
-                cursor = cursor,
-                limit = config.effectiveSnapshotPageSize,
-                schemaVersion = schemaVersion,
-                schemaHash = schemaHash
-            )
-
-            val response = httpClient.snapshot(request)
-
-            pullProcessor.applySnapshotPage(response.records, syncedTables)
-
-            cursor = response.cursor
-            hasMore = response.hasMore
-
-            if (!hasMore) {
-                database.writeTransaction { db ->
-                    SynchroMeta.setInt64(db, MetaKey.CHECKPOINT, response.checkpoint)
-                    SynchroMeta.set(db, MetaKey.SNAPSHOT_COMPLETE, "1")
-                }
-            }
+        database.writeTransaction { db ->
+            SynchroMeta.set(db, MetaKey.SNAPSHOT_COMPLETE, "1")
         }
     }
 

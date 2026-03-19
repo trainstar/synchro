@@ -47,14 +47,12 @@ export const mockNativeModule: Record<string, jest.Mock> = {
   pendingChangeCount: jest.fn().mockResolvedValue(0),
   resolveAuthRequest: jest.fn(),
   rejectAuthRequest: jest.fn(),
-  resolveSnapshotRequest: jest.fn(),
   addListener: jest.fn(),
   removeListeners: jest.fn(),
   // Codegen EventEmitter pattern
   onStatusChange: createEventEmitter('onStatusChange'),
   onConflict: createEventEmitter('onConflict'),
   onAuthRequest: createEventEmitter('onAuthRequest'),
-  onSnapshotRequired: createEventEmitter('onSnapshotRequired'),
   onChange: createEventEmitter('onChange'),
   onQueryResult: createEventEmitter('onQueryResult'),
 };

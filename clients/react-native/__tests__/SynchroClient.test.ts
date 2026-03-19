@@ -37,7 +37,6 @@ describe('SynchroClient', () => {
         maxRetryAttempts: 5,
         pullPageSize: 100,
         pushBatchSize: 100,
-        snapshotPageSize: 100,
       });
     });
   });
@@ -199,36 +198,6 @@ describe('SynchroClient', () => {
       expect(mockNativeModule.rejectAuthRequest).toHaveBeenCalledWith(
         'auth-2',
         'auth failed'
-      );
-    });
-  });
-
-  describe('snapshot approval', () => {
-    it('resolves snapshot request with handler result', async () => {
-      const client = makeClient();
-      client.onSnapshotRequired(async () => true);
-
-      emitNativeEvent('onSnapshotRequired', { requestID: 'snap-1' });
-      await new Promise((r) => setTimeout(r, 10));
-
-      expect(mockNativeModule.resolveSnapshotRequest).toHaveBeenCalledWith(
-        'snap-1',
-        true
-      );
-    });
-
-    it('rejects snapshot on handler error', async () => {
-      const client = makeClient();
-      client.onSnapshotRequired(async () => {
-        throw new Error('denied');
-      });
-
-      emitNativeEvent('onSnapshotRequired', { requestID: 'snap-2' });
-      await new Promise((r) => setTimeout(r, 10));
-
-      expect(mockNativeModule.resolveSnapshotRequest).toHaveBeenCalledWith(
-        'snap-2',
-        false
       );
     });
   });

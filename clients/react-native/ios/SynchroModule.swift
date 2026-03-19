@@ -46,13 +46,9 @@ public class SynchroModuleImpl: NSObject {
     private var observers: [String: any Synchro.Cancellable] = [:]
     private var statusSubscription: (any Synchro.Cancellable)?
     private var conflictSubscription: (any Synchro.Cancellable)?
-    private var snapshotSubscription: (any Synchro.Cancellable)?
 
     private var pendingAuthContinuations: [String: CheckedContinuation<String, Error>] = [:]
     private let authLock = NSLock()
-
-    private var pendingSnapshotContinuations: [String: CheckedContinuation<Bool, Never>] = [:]
-    private let snapshotLock = NSLock()
 
     private func emit(_ name: String, _ body: [String: Any]) {
         DispatchQueue.main.async { [weak self] in
@@ -88,8 +84,6 @@ public class SynchroModuleImpl: NSObject {
             return ("UPGRADE_REQUIRED", ["currentVersion": current, "minimumVersion": minimum])
         case .schemaMismatch(let version, let hash):
             return ("SCHEMA_MISMATCH", ["serverVersion": "\(version)", "serverHash": hash])
-        case .snapshotRequired:
-            return ("SNAPSHOT_REQUIRED", [:])
         case .pushRejected(let results):
             let data = try? JSONSerialization.data(withJSONObject: results.map { r in
                 ["recordID": r.id, "table": r.tableName, "status": r.status] as [String: Any]
@@ -141,7 +135,6 @@ public class SynchroModuleImpl: NSObject {
         let maxRetryAttempts = config["maxRetryAttempts"] as? Int ?? 5
         let pullPageSize = config["pullPageSize"] as? Int ?? 100
         let pushBatchSize = config["pushBatchSize"] as? Int ?? 100
-        let snapshotPageSize = config["snapshotPageSize"] as? Int ?? 100
         let seedDatabasePath = config["seedDatabasePath"] as? String
 
         let resolvedSeedPath: String?
@@ -185,7 +178,6 @@ public class SynchroModuleImpl: NSObject {
                 maxRetryAttempts: maxRetryAttempts,
                 pullPageSize: pullPageSize,
                 pushBatchSize: pushBatchSize,
-                snapshotPageSize: snapshotPageSize,
                 seedDatabasePath: resolvedSeedPath
             )
             try client?.close()
@@ -213,14 +205,6 @@ public class SynchroModuleImpl: NSObject {
         let continuation = pendingAuthContinuations.removeValue(forKey: requestID)
         authLock.unlock()
         continuation?.resume(throwing: NSError(domain: "Auth", code: 0, userInfo: [NSLocalizedDescriptionKey: error]))
-    }
-
-    @objc
-    public func resolveSnapshotRequest(_ requestID: String, approved: Bool) {
-        snapshotLock.lock()
-        let continuation = pendingSnapshotContinuations.removeValue(forKey: requestID)
-        snapshotLock.unlock()
-        continuation?.resume(returning: approved)
     }
 
     @objc
@@ -580,7 +564,6 @@ public class SynchroModuleImpl: NSObject {
     private func wireClientEvents(_ client: SynchroClient) {
         statusSubscription?.cancel()
         conflictSubscription?.cancel()
-        snapshotSubscription?.cancel()
 
         statusSubscription = client.onStatusChange { [weak self] status in
             self?.emit("onStatusChange", self?.statusPayload(status) ?? [:])
@@ -589,25 +572,13 @@ public class SynchroModuleImpl: NSObject {
         conflictSubscription = client.onConflict { [weak self] event in
             self?.emit("onConflict", self?.conflictPayload(event) ?? [:])
         }
-
-        snapshotSubscription = client.onSnapshotRequired { [weak self] in
-            await withCheckedContinuation { continuation in
-                let requestID = UUID().uuidString
-                self?.snapshotLock.lock()
-                self?.pendingSnapshotContinuations[requestID] = continuation
-                self?.snapshotLock.unlock()
-                self?.emit("onSnapshotRequired", ["requestID": requestID])
-            }
-        }
     }
 
     private func clearRuntimeState() {
         statusSubscription?.cancel()
         conflictSubscription?.cancel()
-        snapshotSubscription?.cancel()
         statusSubscription = nil
         conflictSubscription = nil
-        snapshotSubscription = nil
 
         observers.values.forEach { $0.cancel() }
         observers.removeAll()
@@ -626,14 +597,6 @@ public class SynchroModuleImpl: NSObject {
                 code: 0,
                 userInfo: [NSLocalizedDescriptionKey: "client closed"]
             ))
-        }
-
-        snapshotLock.lock()
-        let snapshotContinuations = pendingSnapshotContinuations
-        pendingSnapshotContinuations.removeAll()
-        snapshotLock.unlock()
-        snapshotContinuations.values.forEach { continuation in
-            continuation.resume(returning: false)
         }
     }
 

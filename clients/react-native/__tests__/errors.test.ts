@@ -6,7 +6,6 @@ import {
   TableNotSyncedError,
   UpgradeRequiredError,
   SchemaMismatchError,
-  SnapshotRequiredError,
   PushRejectedError,
   NetworkError,
   ServerError,
@@ -67,11 +66,6 @@ describe('mapNativeError', () => {
     const typed = err as SchemaMismatchError;
     expect(typed.serverVersion).toBe(5);
     expect(typed.serverHash).toBe('abc');
-  });
-
-  it('maps SNAPSHOT_REQUIRED', () => {
-    const err = mapNativeError({ code: 'SNAPSHOT_REQUIRED', message: '' });
-    expect(err).toBeInstanceOf(SnapshotRequiredError);
   });
 
   it('maps PUSH_REJECTED with results', () => {
