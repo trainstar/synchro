@@ -26,7 +26,9 @@ fn synchro_rebuild(
 ) -> pgrx::JsonB {
     // Validate schema if provided.
     if p_schema_version > 0 || !p_schema_hash.is_empty() {
-        validate_schema(p_schema_version, p_schema_hash);
+        if let Err(err_json) = validate_schema(p_schema_version, p_schema_hash) {
+            return err_json;
+        }
     }
 
     let limit = clamp_rebuild_limit(p_limit);
@@ -40,14 +42,12 @@ fn synchro_rebuild(
         );
 
         // Validate client exists and is subscribed to this bucket.
-        let bucket_subs = load_client_buckets(client, p_user_id, p_client_id);
+        let bucket_subs = match load_client_buckets(client, p_user_id, p_client_id) {
+            Ok(subs) => subs,
+            Err(err_json) => return err_json,
+        };
         if !bucket_subs.contains(&p_bucket_id.to_string()) {
-            pgrx::error!(
-                "client {}/{} is not subscribed to bucket {:?}",
-                p_user_id,
-                p_client_id,
-                p_bucket_id
-            );
+            return pgrx::JsonB(serde_json::json!({"error": "client_not_found"}));
         }
 
         // Load registry for hydration.

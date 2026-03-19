@@ -15,7 +15,9 @@ fn synchro_register_client(
 ) -> pgrx::JsonB {
     // Validate schema version/hash if provided.
     if p_schema_version > 0 || !p_schema_hash.is_empty() {
-        validate_schema(p_schema_version, p_schema_hash);
+        if let Err(err_json) = validate_schema(p_schema_version, p_schema_hash) {
+            return err_json;
+        }
     }
 
     let user_bucket = format!("user:{p_user_id}");
@@ -73,9 +75,13 @@ fn synchro_register_client(
 }
 
 /// Validate client schema version/hash against the server manifest.
-pub fn validate_schema(schema_version: i64, schema_hash: &str) {
+///
+/// Returns Ok(()) if valid, or Err(JsonB) with a structured error response
+/// for schema mismatches. Business conditions are returned as JSONB, not
+/// PG exceptions.
+pub fn validate_schema(schema_version: i64, schema_hash: &str) -> Result<(), pgrx::JsonB> {
     if schema_version == 0 && schema_hash.is_empty() {
-        return;
+        return Ok(());
     }
 
     let server_hash: Option<String> = Spi::get_one_with_args(
@@ -85,25 +91,61 @@ pub fn validate_schema(schema_version: i64, schema_hash: &str) {
     .unwrap_or(None);
 
     match server_hash {
-        Some(ref h) if h == schema_hash => {}
+        Some(ref h) if h == schema_hash => Ok(()),
         Some(_) => {
-            pgrx::error!(
-                "schema mismatch: client hash {:?} does not match server for version {}",
-                schema_hash,
-                schema_version
-            );
+            // Hash mismatch for this version.
+            let (sv, sh) = latest_server_schema();
+            Err(pgrx::JsonB(serde_json::json!({
+                "error": "schema_mismatch",
+                "server_schema_version": sv,
+                "server_schema_hash": sh,
+            })))
         }
         None => {
-            let has_any: bool = Spi::get_one("SELECT EXISTS (SELECT 1 FROM sync_schema_manifest)")
-                .unwrap_or(Some(false))
-                .unwrap_or(false);
+            // Version not found. Only error if the manifest has entries.
+            let has_any: bool =
+                Spi::get_one("SELECT EXISTS (SELECT 1 FROM sync_schema_manifest)")
+                    .unwrap_or(Some(false))
+                    .unwrap_or(false);
 
             if has_any {
-                pgrx::error!(
-                    "schema version {} not found on server",
-                    schema_version
-                );
+                let (sv, sh) = latest_server_schema();
+                Err(pgrx::JsonB(serde_json::json!({
+                    "error": "schema_mismatch",
+                    "server_schema_version": sv,
+                    "server_schema_hash": sh,
+                })))
+            } else {
+                // No schema manifest entries yet, skip validation.
+                Ok(())
             }
         }
     }
+}
+
+/// Get the latest server schema version and hash.
+fn latest_server_schema() -> (i64, String) {
+    Spi::connect(|client| {
+        let tup = match client.select(
+            "SELECT schema_version, schema_hash FROM sync_schema_manifest \
+             ORDER BY schema_version DESC LIMIT 1",
+            None,
+            &[],
+        ) {
+            Ok(t) => t,
+            Err(_) => return (0, String::new()),
+        };
+        for row in tup {
+            let v: i64 = row
+                .get_by_name::<i64, &str>("schema_version")
+                .unwrap_or(None)
+                .unwrap_or(0);
+            let h: String = row
+                .get_by_name::<String, &str>("schema_hash")
+                .unwrap_or(None)
+                .unwrap_or_default();
+            return (v, h);
+        }
+        (0, String::new())
+    })
 }

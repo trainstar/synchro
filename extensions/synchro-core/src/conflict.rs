@@ -228,6 +228,62 @@ mod tests {
         assert_eq!(r.reason, "server version is newer");
     }
 
+    // Boundary conditions: these catch off-by-one and precision issues.
+
+    #[test]
+    fn lww_exactly_at_tolerance_boundary() {
+        // Client is exactly 500ms behind server. With 500ms tolerance,
+        // adjusted client == server. Equal means server wins (not strictly greater).
+        let mut c = base_conflict();
+        c.client_time = Utc.timestamp_millis_opt(1_000_000).unwrap();
+        c.server_time = Utc.timestamp_millis_opt(1_000_500).unwrap();
+        let r = resolver(500).resolve(&c);
+        assert_eq!(r.winner, "server");
+
+        // 501ms tolerance tips it to client.
+        let r2 = resolver(501).resolve(&c);
+        assert_eq!(r2.winner, "client");
+    }
+
+    #[test]
+    fn base_equals_server_tolerance_irrelevant() {
+        // When base == server (server unchanged), client wins regardless of
+        // tolerance. Tolerance only applies to the LWW timestamp comparison,
+        // which is skipped when base == server.
+        let mut c = base_conflict();
+        c.base_version = Some(ts(1000));
+        c.server_time = ts(1000);
+        c.client_time = ts(500); // Client timestamp way behind, doesn't matter.
+        let r = resolver(500).resolve(&c);
+        assert_eq!(r.winner, "client");
+        assert_eq!(r.reason, "server unchanged since base version");
+    }
+
+    #[test]
+    fn lww_zero_tolerance() {
+        // Degenerate config: zero tolerance means pure timestamp comparison
+        // with no client advantage. Client must be strictly newer to win.
+        let mut c = base_conflict();
+        c.client_time = ts(1000);
+        c.server_time = ts(1000);
+        let r = resolver(0).resolve(&c);
+        assert_eq!(r.winner, "server");
+
+        c.client_time = ts(1001);
+        let r2 = resolver(0).resolve(&c);
+        assert_eq!(r2.winner, "client");
+    }
+
+    #[test]
+    fn lww_subsecond_precision() {
+        // Timestamps differ by 1 millisecond. Must not be truncated to seconds.
+        let mut c = base_conflict();
+        c.client_time = Utc.timestamp_millis_opt(1_000_001).unwrap();
+        c.server_time = Utc.timestamp_millis_opt(1_000_000).unwrap();
+        let r = resolver(0).resolve(&c);
+        assert_eq!(r.winner, "client");
+    }
+
     // ServerWins
 
     #[test]

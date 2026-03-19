@@ -10,17 +10,31 @@ use crate::bucketing::resolve_buckets;
 use crate::registry::{load_registry, TableRegistration};
 use crate::wal_decoder::{TableMeta, WalDecoder, WalEvent};
 
-/// GUC: replication slot name.
-static REPLICATION_SLOT: &str = "synchro_slot";
-
-/// GUC: publication name.
-static PUBLICATION_NAME: &str = "synchro_pub";
+// Replication slot and publication name are read from GUCs:
+//   crate::REPLICATION_SLOT_GUC
+//   crate::PUBLICATION_NAME_GUC
 
 /// How many WAL messages to consume per poll cycle.
 static BATCH_SIZE: i32 = 500;
 
 /// Poll interval when no changes are found (milliseconds).
 static IDLE_POLL_MS: u64 = 100;
+
+/// Read the replication slot name from the GUC, falling back to default.
+fn replication_slot() -> String {
+    crate::REPLICATION_SLOT_GUC
+        .get()
+        .and_then(|cs| cs.to_str().ok().map(String::from))
+        .unwrap_or_else(|| "synchro_slot".to_string())
+}
+
+/// Read the publication name from the GUC, falling back to default.
+fn publication_name() -> String {
+    crate::PUBLICATION_NAME_GUC
+        .get()
+        .and_then(|cs| cs.to_str().ok().map(String::from))
+        .unwrap_or_else(|| "synchro_pub".to_string())
+}
 
 /// Register the WAL background worker.
 ///
@@ -53,10 +67,12 @@ pub extern "C-unwind" fn synchro_wal_worker_main(_arg: pg_sys::Datum) {
     // Using None connects to the default database.
     BackgroundWorker::connect_worker_to_spi(None, None);
 
+    let slot_name = replication_slot();
+    let pub_name_init = publication_name();
     log!(
         "synchro WAL worker started (slot={}, publication={})",
-        REPLICATION_SLOT,
-        PUBLICATION_NAME,
+        slot_name,
+        pub_name_init,
     );
 
     // Ensure the replication slot exists.
@@ -132,9 +148,12 @@ fn build_decoder(registry: &[TableRegistration]) -> WalDecoder {
 
 /// Create the replication slot if it does not already exist.
 fn ensure_replication_slot() -> Result<(), String> {
+    let slot = replication_slot();
+    let pub_name = publication_name();
+
     let slot_exists: bool = Spi::get_one_with_args(
         "SELECT EXISTS (SELECT 1 FROM pg_replication_slots WHERE slot_name = $1)",
-        &[REPLICATION_SLOT.into()],
+        &[slot.as_str().into()],
     )
     .unwrap_or(Some(false))
     .unwrap_or(false);
@@ -142,19 +161,19 @@ fn ensure_replication_slot() -> Result<(), String> {
     if !slot_exists {
         Spi::run_with_args(
             "SELECT pg_create_logical_replication_slot($1, 'pgoutput')",
-            &[REPLICATION_SLOT.into()],
+            &[slot.as_str().into()],
         )
         .map_err(|e| format!("creating replication slot: {e}"))?;
         log!(
             "synchro WAL worker: created replication slot '{}'",
-            REPLICATION_SLOT
+            slot
         );
     }
 
     // Ensure publication exists (may not yet if no tables registered).
     let pub_exists: bool = Spi::get_one_with_args(
         "SELECT EXISTS (SELECT 1 FROM pg_publication WHERE pubname = $1)",
-        &[PUBLICATION_NAME.into()],
+        &[pub_name.as_str().into()],
     )
     .unwrap_or(Some(false))
     .unwrap_or(false);
@@ -162,7 +181,7 @@ fn ensure_replication_slot() -> Result<(), String> {
     if !pub_exists {
         Spi::run_with_args(
             "SELECT pg_catalog.format('CREATE PUBLICATION %I FOR ALL TABLES', $1)",
-            &[PUBLICATION_NAME.into()],
+            &[pub_name.as_str().into()],
         )
         .ok();
         // Publication may not exist yet; that is fine. The first
@@ -184,6 +203,9 @@ fn poll_and_process(
     decoder: &mut WalDecoder,
     registry: &[TableRegistration],
 ) -> Result<usize, String> {
+    let slot = replication_slot();
+    let pub_name = publication_name();
+
     // Phase 1: Peek WAL messages and apply events in one SPI transaction.
     let result: (usize, Option<String>) = Spi::connect_mut(|client| {
         // Peek at changes without consuming them.
@@ -194,9 +216,9 @@ fn poll_and_process(
                  'proto_version', '1', 'publication_names', $3)",
                 None,
                 &[
-                    REPLICATION_SLOT.into(),
+                    slot.as_str().into(),
                     BATCH_SIZE.into(),
-                    PUBLICATION_NAME.into(),
+                    pub_name.as_str().into(),
                 ],
             )
             .map_err(|e| format!("peeking WAL slot: {e}"))?;
@@ -254,7 +276,7 @@ fn poll_and_process(
     if let Some(lsn) = max_lsn {
         Spi::run_with_args(
             "SELECT pg_replication_slot_advance($1, $2::pg_lsn)",
-            &[REPLICATION_SLOT.into(), lsn.as_str().into()],
+            &[slot.as_str().into(), lsn.as_str().into()],
         )
         .map_err(|e| format!("advancing slot: {e}"))?;
     }

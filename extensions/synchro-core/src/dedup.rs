@@ -140,4 +140,53 @@ mod tests {
         assert_eq!(refs[0].seq, 10);
         assert_eq!(refs[0].operation, Operation::Delete);
     }
+
+    #[test]
+    fn large_batch_performance() {
+        // 10k entries for 1k unique records (10 updates each).
+        // Must not be O(n^2) or blow up.
+        let mut entries = Vec::with_capacity(10_000);
+        for i in 0..10_000i64 {
+            let record_id = format!("r{}", i % 1000);
+            entries.push(entry(i, "items", &record_id, "b1", Operation::Update));
+        }
+        let refs = deduplicate_entries(&entries);
+        assert_eq!(refs.len(), 1000);
+        // Each record should have seq from its last occurrence (9000+).
+        for r in &refs {
+            assert!(r.seq >= 9000);
+        }
+    }
+
+    #[test]
+    fn alternating_insert_delete() {
+        // Same record: Insert, Delete, Insert, Delete.
+        // Final state must be Delete at the last seq.
+        let entries = vec![
+            entry(1, "items", "a", "b1", Operation::Insert),
+            entry(2, "items", "a", "b1", Operation::Delete),
+            entry(3, "items", "a", "b1", Operation::Insert),
+            entry(4, "items", "a", "b1", Operation::Delete),
+        ];
+        let refs = deduplicate_entries(&entries);
+        assert_eq!(refs.len(), 1);
+        assert_eq!(refs[0].seq, 4);
+        assert_eq!(refs[0].operation, Operation::Delete);
+    }
+
+    #[test]
+    fn different_buckets_same_record_deduped() {
+        // Same table+record appearing in different buckets. Dedup key is
+        // (table_name, record_id), NOT (table_name, record_id, bucket_id).
+        // The later entry replaces the earlier regardless of bucket.
+        let entries = vec![
+            entry(1, "items", "a", "bucket_x", Operation::Insert),
+            entry(2, "items", "a", "bucket_y", Operation::Update),
+        ];
+        let refs = deduplicate_entries(&entries);
+        assert_eq!(refs.len(), 1);
+        assert_eq!(refs[0].seq, 2);
+        assert_eq!(refs[0].bucket_id, "bucket_y");
+        assert_eq!(refs[0].operation, Operation::Update);
+    }
 }

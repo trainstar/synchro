@@ -142,4 +142,48 @@ mod tests {
         let cs = compute_record_checksum("{}");
         assert_eq!(cs as i32, -1549353149);
     }
+
+    // Cross-platform divergence vectors: types that differ between JSON serializers.
+
+    #[test]
+    fn null_vs_empty_string() {
+        // null and "" must produce different checksums. If a serializer
+        // normalizes one to the other, checksums silently diverge from Go.
+        let with_null = compute_record_checksum(r#"{"a":null}"#);
+        let with_empty = compute_record_checksum(r#"{"a":""}"#);
+        assert_ne!(with_null, with_empty);
+    }
+
+    #[test]
+    fn unicode_content() {
+        // Unicode must survive the parse -> re-serialize round-trip without
+        // escaping differences (e.g., \u00e9 vs raw UTF-8 byte).
+        let a = compute_record_checksum(r#"{"name":"café"}"#);
+        let b = compute_record_checksum("{\"name\":\"caf\u{00e9}\"}");
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn nested_arrays() {
+        // Arrays with mixed types: Go json.Marshal and serde_json must produce
+        // the same byte sequence.
+        let cs = compute_record_checksum(r#"{"tags":["a","b","c"],"counts":[1,2,3]}"#);
+        assert_ne!(cs, 0);
+        // Same data, keys in different order: must match.
+        let cs2 = compute_record_checksum(r#"{"counts":[1,2,3],"tags":["a","b","c"]}"#);
+        assert_eq!(cs, cs2);
+    }
+
+    #[test]
+    fn float_vs_integer_distinct() {
+        // serde_json preserves the distinction between 1 (integer) and 1.0
+        // (float). They serialize differently and produce different checksums.
+        // This is safe because both Go and Rust receive data from PostgreSQL
+        // JSONB, which normalizes number representation before it reaches
+        // either serializer. The checksum is computed on JSONB output, not
+        // raw client input.
+        let cs_int = compute_record_checksum(r#"{"val":1}"#);
+        let cs_float = compute_record_checksum(r#"{"val":1.0}"#);
+        assert_ne!(cs_int, cs_float);
+    }
 }

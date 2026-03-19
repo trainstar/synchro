@@ -286,4 +286,49 @@ mod tests {
         let result: Vec<String> = dedup_buckets(&[]);
         assert!(result.is_empty());
     }
+
+    // Multi-bucket reassignment and fan-out/fan-in edge cases.
+
+    #[test]
+    fn diff_multi_bucket_reassignment() {
+        // [A,B] -> [B,C]: A removed, B kept, C added.
+        // Catches add/keep/remove classification error.
+        let existing = vec![s("a"), s("b")];
+        let desired = vec![s("b"), s("c")];
+        let diff = diff_bucket_sets(&existing, &desired);
+        assert_eq!(diff.added, vec![s("c")]);
+        assert_eq!(diff.kept, vec![s("b")]);
+        assert_eq!(diff.removed, vec![s("a")]);
+    }
+
+    #[test]
+    fn diff_fan_out_zero_to_five() {
+        // Empty existing -> 5 desired: all added, nothing kept or removed.
+        let desired: Vec<String> = (0..5).map(|i| format!("b{i}")).collect();
+        let diff = diff_bucket_sets(&[], &desired);
+        assert_eq!(diff.added.len(), 5);
+        assert!(diff.kept.is_empty());
+        assert!(diff.removed.is_empty());
+    }
+
+    #[test]
+    fn diff_fan_in_five_to_one() {
+        // 5 existing -> 1 desired: 4 removed, 1 kept, 0 added.
+        let existing: Vec<String> = (0..5).map(|i| format!("b{i}")).collect();
+        let desired = vec![s("b2")];
+        let diff = diff_bucket_sets(&existing, &desired);
+        assert!(diff.added.is_empty());
+        assert_eq!(diff.kept, vec![s("b2")]);
+        assert_eq!(diff.removed.len(), 4);
+    }
+
+    #[test]
+    fn diff_identical_sets() {
+        // Identical existing and desired: all kept, nothing added or removed.
+        let buckets = vec![s("a"), s("b"), s("c")];
+        let diff = diff_bucket_sets(&buckets, &buckets);
+        assert!(diff.added.is_empty());
+        assert_eq!(diff.kept.len(), 3);
+        assert!(diff.removed.is_empty());
+    }
 }
