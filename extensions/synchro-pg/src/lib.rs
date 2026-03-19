@@ -15,7 +15,7 @@ pgrx::pg_module_magic!();
 
 /// Extension initialization. Called when the shared library is loaded.
 #[pg_guard]
-pub extern "C" fn _PG_init() {
+pub extern "C-unwind" fn _PG_init() {
     // GUC registration and background worker setup will be added here.
 }
 

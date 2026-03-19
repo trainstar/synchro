@@ -55,13 +55,15 @@ fn synchro_register_table(
     p_exclude_columns: default!(Vec<String>, "'{}'"),
 ) {
     // Validate push_policy.
-    if PushPolicy::parse(p_push_policy).is_none() {
-        pgrx::error!(
-            "invalid push_policy: {:?}, expected 'enabled' or 'read_only'",
-            p_push_policy
-        );
-    }
-    let policy = PushPolicy::parse(p_push_policy).unwrap();
+    let policy = match PushPolicy::parse(p_push_policy) {
+        Some(p) => p,
+        None => {
+            pgrx::error!(
+                "invalid push_policy: {:?}, expected 'enabled' or 'read_only'",
+                p_push_policy
+            );
+        }
+    };
 
     // Validate that the target table exists.
     let table_exists: bool = Spi::get_one_with_args(
@@ -72,7 +74,7 @@ fn synchro_register_table(
               AND n.nspname = ANY(current_schemas(false))
               AND c.relkind IN ('r', 'p')
         )",
-        vec![(PgBuiltInOids::TEXTOID.oid(), p_table_name.into_datum())],
+        &[p_table_name.into()],
     )
     .unwrap_or(Some(false))
     .unwrap_or(false);
@@ -81,14 +83,15 @@ fn synchro_register_table(
         pgrx::error!("table {:?} does not exist", p_table_name);
     }
 
-    // Validate bucket_sql by executing with a dummy UUID.
-    if let Err(e) = Spi::run(&format!(
-        "DO $$ DECLARE _result TEXT[];
+    // Validate bucket_sql by executing with a dummy UUID via parameterized query.
+    // The bucket_sql is stored as a parameter, not interpolated into the string.
+    if let Err(e) = Spi::run_with_args(
+        "DO $__synchro_validate__$ DECLARE _result TEXT[];
         BEGIN
-            EXECUTE $sql${bucket_sql}$sql$ USING '00000000-0000-0000-0000-000000000000'::text INTO _result;
-        END $$",
-        bucket_sql = p_bucket_sql
-    )) {
+            EXECUTE $1 USING '00000000-0000-0000-0000-000000000000'::text INTO _result;
+        END $__synchro_validate__$",
+        &[p_bucket_sql.into()],
+    ) {
         pgrx::error!("bucket_sql validation failed: {}", e);
     }
 
@@ -103,10 +106,7 @@ fn synchro_register_table(
               AND a.attname = $2
               AND NOT a.attisdropped
         )",
-        vec![
-            (PgBuiltInOids::TEXTOID.oid(), p_table_name.into_datum()),
-            (PgBuiltInOids::TEXTOID.oid(), p_updated_at_col.into_datum()),
-        ],
+        &[p_table_name.into(), p_updated_at_col.into()],
     )
     .unwrap_or(Some(false))
     .unwrap_or(false);
@@ -121,10 +121,7 @@ fn synchro_register_table(
               AND a.attname = $2
               AND NOT a.attisdropped
         )",
-        vec![
-            (PgBuiltInOids::TEXTOID.oid(), p_table_name.into_datum()),
-            (PgBuiltInOids::TEXTOID.oid(), p_deleted_at_col.into_datum()),
-        ],
+        &[p_table_name.into(), p_deleted_at_col.into()],
     )
     .unwrap_or(Some(false))
     .unwrap_or(false);
@@ -146,54 +143,66 @@ fn synchro_register_table(
             has_updated_at = EXCLUDED.has_updated_at,
             has_deleted_at = EXCLUDED.has_deleted_at,
             updated_at = now()",
-        Some(vec![
-            (PgBuiltInOids::TEXTOID.oid(), p_table_name.into_datum()),
-            (PgBuiltInOids::TEXTOID.oid(), p_bucket_sql.into_datum()),
-            (PgBuiltInOids::TEXTOID.oid(), p_pk_column.into_datum()),
-            (PgBuiltInOids::TEXTOID.oid(), p_updated_at_col.into_datum()),
-            (PgBuiltInOids::TEXTOID.oid(), p_deleted_at_col.into_datum()),
-            (PgBuiltInOids::TEXTOID.oid(), policy.as_str().into_datum()),
-            (PgBuiltInOids::TEXTARRAYOID.oid(), exclude_arr.into_datum()),
-            (PgBuiltInOids::BOOLOID.oid(), has_updated_at.into_datum()),
-            (PgBuiltInOids::BOOLOID.oid(), has_deleted_at.into_datum()),
-        ]),
+        &[
+            p_table_name.into(),
+            p_bucket_sql.into(),
+            p_pk_column.into(),
+            p_updated_at_col.into(),
+            p_deleted_at_col.into(),
+            policy.as_str().into(),
+            exclude_arr.into(),
+            has_updated_at.into(),
+            has_deleted_at.into(),
+        ],
     ) {
         pgrx::error!("failed to upsert sync_registry: {}", e);
     }
 
-    // Add table to WAL publication.
+    // Add table to WAL publication using PG's format() for safe identifier quoting.
     let pub_name = "synchro_pub";
     let pub_exists: bool = Spi::get_one_with_args(
         "SELECT EXISTS (SELECT 1 FROM pg_publication WHERE pubname = $1)",
-        vec![(PgBuiltInOids::TEXTOID.oid(), pub_name.into_datum())],
+        &[pub_name.into()],
     )
     .unwrap_or(Some(false))
     .unwrap_or(false);
 
     if !pub_exists {
-        let _ = Spi::run(&format!(
-            "CREATE PUBLICATION {pub_name} FOR TABLE {table_ident}",
-            table_ident = quote_identifier(p_table_name),
-        ));
+        // Build DDL safely using format(%I) for identifier quoting.
+        let ddl: Option<String> = Spi::get_one_with_args(
+            "SELECT format('CREATE PUBLICATION %I FOR TABLE %I', $1, $2)",
+            &[pub_name.into(), p_table_name.into()],
+        )
+        .unwrap_or(None);
+
+        if let Some(sql) = ddl {
+            if let Err(e) = Spi::run(&sql) {
+                pgrx::error!("failed to create publication: {}", e);
+            }
+        }
     } else {
         let in_pub: bool = Spi::get_one_with_args(
             "SELECT EXISTS (
                 SELECT 1 FROM pg_publication_tables
                 WHERE pubname = $1 AND tablename = $2
             )",
-            vec![
-                (PgBuiltInOids::TEXTOID.oid(), pub_name.into_datum()),
-                (PgBuiltInOids::TEXTOID.oid(), p_table_name.into_datum()),
-            ],
+            &[pub_name.into(), p_table_name.into()],
         )
         .unwrap_or(Some(false))
         .unwrap_or(false);
 
         if !in_pub {
-            let _ = Spi::run(&format!(
-                "ALTER PUBLICATION {pub_name} ADD TABLE {table_ident}",
-                table_ident = quote_identifier(p_table_name),
-            ));
+            let ddl: Option<String> = Spi::get_one_with_args(
+                "SELECT format('ALTER PUBLICATION %I ADD TABLE %I', $1, $2)",
+                &[pub_name.into(), p_table_name.into()],
+            )
+            .unwrap_or(None);
+
+            if let Some(sql) = ddl {
+                if let Err(e) = Spi::run(&sql) {
+                    pgrx::error!("failed to add table to publication: {}", e);
+                }
+            }
         }
     }
 
@@ -205,11 +214,21 @@ fn synchro_register_table(
 }
 
 /// Unregister a table from synchronization.
+///
+/// Removes the registry entry, cleans up bucket edges, and removes
+/// the table from the WAL publication.
 #[pg_extern]
 fn synchro_unregister_table(p_table_name: &str) {
+    // Delete registry entry.
     let _ = Spi::run_with_args(
         "DELETE FROM sync_registry WHERE table_name = $1",
-        Some(vec![(PgBuiltInOids::TEXTOID.oid(), p_table_name.into_datum())]),
+        &[p_table_name.into()],
+    );
+
+    // Clean up bucket edges for this table.
+    let _ = Spi::run_with_args(
+        "DELETE FROM sync_bucket_edges WHERE table_name = $1",
+        &[p_table_name.into()],
     );
 
     // Remove from publication.
@@ -219,19 +238,21 @@ fn synchro_unregister_table(p_table_name: &str) {
             SELECT 1 FROM pg_publication_tables
             WHERE pubname = $1 AND tablename = $2
         )",
-        vec![
-            (PgBuiltInOids::TEXTOID.oid(), pub_name.into_datum()),
-            (PgBuiltInOids::TEXTOID.oid(), p_table_name.into_datum()),
-        ],
+        &[pub_name.into(), p_table_name.into()],
     )
     .unwrap_or(Some(false))
     .unwrap_or(false);
 
     if in_pub {
-        let _ = Spi::run(&format!(
-            "ALTER PUBLICATION {pub_name} DROP TABLE {table_ident}",
-            table_ident = quote_identifier(p_table_name),
-        ));
+        let ddl: Option<String> = Spi::get_one_with_args(
+            "SELECT format('ALTER PUBLICATION %I DROP TABLE %I', $1, $2)",
+            &[pub_name.into(), p_table_name.into()],
+        )
+        .unwrap_or(None);
+
+        if let Some(sql) = ddl {
+            let _ = Spi::run(&sql);
+        }
     }
 
     recompute_schema_manifest();
@@ -239,6 +260,8 @@ fn synchro_unregister_table(p_table_name: &str) {
 }
 
 /// Recompute the schema manifest hash from all registered tables.
+///
+/// Uses ON CONFLICT on schema_hash to avoid TOCTOU races on schema_version.
 fn recompute_schema_manifest() {
     let _ = Spi::run(
         "WITH registry_hash AS (
@@ -262,12 +285,6 @@ fn recompute_schema_manifest() {
     );
 }
 
-/// Double-quote a SQL identifier, escaping internal double quotes.
-fn quote_identifier(name: &str) -> String {
-    let escaped = name.replace('"', "\"\"");
-    format!("\"{escaped}\"")
-}
-
 /// Load all registered tables from sync_registry into memory.
 /// Used by the background worker on startup and after NOTIFY.
 pub fn load_registry() -> Result<Vec<TableRegistration>, spi::Error> {
@@ -279,7 +296,7 @@ pub fn load_registry() -> Result<Vec<TableRegistration>, spi::Error> {
                             has_updated_at, has_deleted_at
                      FROM sync_registry
                      ORDER BY table_name";
-        let tup_table = client.select(query, None, None)?;
+        let tup_table = client.select(query, None, &[])?;
 
         for row in tup_table {
             let table_name: String = row.get_by_name("table_name")?.unwrap_or_default();

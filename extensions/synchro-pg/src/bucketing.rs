@@ -20,15 +20,12 @@ pub fn resolve_buckets(
     let tup_table = client.select(
         bucket_sql,
         None,
-        Some(vec![(
-            PgBuiltInOids::TEXTOID.oid(),
-            record_id.into_datum(),
-        )]),
+        &[record_id.into()],
     )?;
 
     let mut buckets = Vec::new();
     for row in tup_table {
-        let val: Option<Vec<String>> = row.get(1).unwrap_or(None);
+        let val: Option<Vec<String>> = row.get::<Vec<String>>(1).unwrap_or(None);
         if let Some(arr) = val {
             buckets.extend(arr);
         }
@@ -46,10 +43,7 @@ pub fn validate_bucket_sql(bucket_sql: &str) -> Result<(), String> {
         match client.select(
             bucket_sql,
             None,
-            Some(vec![(
-                PgBuiltInOids::TEXTOID.oid(),
-                dummy_id.into_datum(),
-            )]),
+            &[dummy_id.into()],
         ) {
             Ok(_) => Ok(()),
             Err(e) => Err(format!("bucket SQL validation failed: {e}")),

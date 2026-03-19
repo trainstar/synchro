@@ -1,12 +1,12 @@
 use pgrx::prelude::*;
 use pgrx::bgworkers::*;
 use pgrx::spi::SpiClient;
-use std::collections::HashMap;
 
 use synchro_core::checksum::compute_record_checksum;
-use synchro_core::edge_diff::{build_edge_diff_entries, diff_bucket_sets, dedup_buckets};
+use synchro_core::edge_diff::{build_edge_diff_entries, diff_bucket_sets};
 use synchro_core::protocol::Operation;
 
+use crate::bucketing::resolve_buckets;
 use crate::registry::{load_registry, TableRegistration};
 use crate::wal_decoder::{TableMeta, WalDecoder, WalEvent};
 
@@ -16,9 +16,15 @@ static REPLICATION_SLOT: &str = "synchro_slot";
 /// GUC: publication name.
 static PUBLICATION_NAME: &str = "synchro_pub";
 
+/// How many WAL messages to consume per poll cycle.
+static BATCH_SIZE: i32 = 500;
+
+/// Poll interval when no changes are found (milliseconds).
+static IDLE_POLL_MS: u64 = 100;
+
 /// Register the WAL background worker.
 ///
-/// Called from `_PG_init()`.
+/// Called from `_PG_init()` once GUCs are registered.
 pub fn register_bgworker() {
     BackgroundWorkerBuilder::new("synchro WAL consumer")
         .set_function("synchro_wal_worker_main")
@@ -30,21 +36,22 @@ pub fn register_bgworker() {
 
 /// Background worker entry point.
 ///
-/// This function runs as a separate PostgreSQL process. It:
-/// 1. Loads the table registry from sync_registry.
-/// 2. Connects to the replication slot.
-/// 3. Decodes pgoutput messages.
-/// 4. Executes bucket SQL via SPI.
-/// 5. Writes changelog entries and manages bucket edges.
-///
-/// Currently a skeleton that will be filled when the replication protocol
-/// client library is integrated.
+/// Lifecycle:
+/// 1. Ensure replication slot exists.
+/// 2. Load table registry from sync_registry.
+/// 3. Build WAL decoder with table metadata.
+/// 4. Poll pg_logical_slot_peek_binary_changes in a loop.
+/// 5. Decode pgoutput messages and apply events (buckets, changelog, edges).
+/// 6. Advance slot only after successful processing.
+/// 7. Shutdown on SIGTERM, reload registry on SIGHUP.
 #[pg_guard]
 #[no_mangle]
-pub extern "C" fn synchro_wal_worker_main(_arg: pg_sys::Datum) {
+pub extern "C-unwind" fn synchro_wal_worker_main(_arg: pg_sys::Datum) {
     BackgroundWorker::attach_signal_handlers(SignalWakeFlags::SIGHUP | SignalWakeFlags::SIGTERM);
 
-    BackgroundWorker::connect_worker_to_spi(Some("synchro_pg"), None);
+    // TODO: database name should come from a GUC (synchro.database).
+    // Using None connects to the default database.
+    BackgroundWorker::connect_worker_to_spi(None, None);
 
     log!(
         "synchro WAL worker started (slot={}, publication={})",
@@ -52,8 +59,14 @@ pub extern "C" fn synchro_wal_worker_main(_arg: pg_sys::Datum) {
         PUBLICATION_NAME,
     );
 
-    // Load registry and build decoder table metadata.
-    let registry = match load_registry_for_worker() {
+    // Ensure the replication slot exists.
+    if let Err(e) = ensure_replication_slot() {
+        log!("synchro WAL worker: failed to create replication slot: {}", e);
+        return;
+    }
+
+    // Load registry and build decoder.
+    let mut registry = match load_registry_for_worker() {
         Ok(r) => r,
         Err(e) => {
             log!("synchro WAL worker: failed to load registry: {}", e);
@@ -61,8 +74,46 @@ pub extern "C" fn synchro_wal_worker_main(_arg: pg_sys::Datum) {
         }
     };
 
-    let mut _decoder = WalDecoder::new();
-    let table_meta: HashMap<String, TableMeta> = registry
+    let mut decoder = build_decoder(&registry);
+
+    log!(
+        "synchro WAL worker: registry loaded ({} tables), entering main loop",
+        registry.len()
+    );
+
+    // Main loop: poll WAL changes, process events, handle signals.
+    while BackgroundWorker::wait_latch(Some(std::time::Duration::from_millis(IDLE_POLL_MS))) {
+        if BackgroundWorker::sighup_received() {
+            log!("synchro WAL worker: reloading registry");
+            match load_registry_for_worker() {
+                Ok(r) => {
+                    decoder = build_decoder(&r);
+                    registry = r;
+                }
+                Err(e) => {
+                    log!("synchro WAL worker: registry reload failed: {}", e);
+                }
+            }
+        }
+
+        match poll_and_process(&mut decoder, &registry) {
+            Ok(0) => {}
+            Ok(n) => {
+                log!("synchro WAL worker: processed {} WAL messages", n);
+            }
+            Err(e) => {
+                log!("synchro WAL worker: error processing WAL: {}", e);
+            }
+        }
+    }
+
+    log!("synchro WAL worker shutting down");
+}
+
+/// Build a WalDecoder from the current registry.
+fn build_decoder(registry: &[TableRegistration]) -> WalDecoder {
+    let mut decoder = WalDecoder::new();
+    let table_meta: std::collections::HashMap<String, TableMeta> = registry
         .iter()
         .map(|t| {
             (
@@ -75,27 +126,147 @@ pub extern "C" fn synchro_wal_worker_main(_arg: pg_sys::Datum) {
             )
         })
         .collect();
-    _decoder.set_registered_tables(table_meta);
+    decoder.set_registered_tables(table_meta);
+    decoder
+}
 
-    // Main loop placeholder.
-    // The actual replication protocol connection will be implemented
-    // using a Rust pglogrepl library or raw protocol handling.
-    // For now, the worker waits for shutdown signal.
-    while BackgroundWorker::wait_latch(Some(std::time::Duration::from_secs(10))) {
-        if BackgroundWorker::sighup_received() {
-            // Reload registry on SIGHUP.
-            log!("synchro WAL worker: reloading registry");
-        }
+/// Create the replication slot if it does not already exist.
+fn ensure_replication_slot() -> Result<(), String> {
+    let slot_exists: bool = Spi::get_one_with_args(
+        "SELECT EXISTS (SELECT 1 FROM pg_replication_slots WHERE slot_name = $1)",
+        &[REPLICATION_SLOT.into()],
+    )
+    .unwrap_or(Some(false))
+    .unwrap_or(false);
+
+    if !slot_exists {
+        Spi::run_with_args(
+            "SELECT pg_create_logical_replication_slot($1, 'pgoutput')",
+            &[REPLICATION_SLOT.into()],
+        )
+        .map_err(|e| format!("creating replication slot: {e}"))?;
+        log!(
+            "synchro WAL worker: created replication slot '{}'",
+            REPLICATION_SLOT
+        );
     }
 
-    log!("synchro WAL worker shutting down");
+    // Ensure publication exists (may not yet if no tables registered).
+    let pub_exists: bool = Spi::get_one_with_args(
+        "SELECT EXISTS (SELECT 1 FROM pg_publication WHERE pubname = $1)",
+        &[PUBLICATION_NAME.into()],
+    )
+    .unwrap_or(Some(false))
+    .unwrap_or(false);
+
+    if !pub_exists {
+        Spi::run_with_args(
+            "SELECT pg_catalog.format('CREATE PUBLICATION %I FOR ALL TABLES', $1)",
+            &[PUBLICATION_NAME.into()],
+        )
+        .ok();
+        // Publication may not exist yet; that is fine. The first
+        // synchro_register_table call creates it. We just avoid
+        // a hard error on the peek call below.
+    }
+
+    Ok(())
+}
+
+/// Poll WAL changes, decode, apply events, advance slot.
+///
+/// Uses peek (non-consuming) + advance pattern for crash safety:
+/// 1. Peek changes without advancing the slot.
+/// 2. Decode and apply all events in a single SPI transaction.
+/// 3. On commit, advance the slot to the last processed LSN.
+/// If any step fails, the slot stays put and changes are re-peeked on retry.
+fn poll_and_process(
+    decoder: &mut WalDecoder,
+    registry: &[TableRegistration],
+) -> Result<usize, String> {
+    // Phase 1: Peek WAL messages and apply events in one SPI transaction.
+    let result: (usize, Option<String>) = Spi::connect_mut(|client| {
+        // Peek at changes without consuming them.
+        let tup_table = client
+            .select(
+                "SELECT lsn::text, data \
+                 FROM pg_logical_slot_peek_binary_changes($1, NULL, $2, \
+                 'proto_version', '1', 'publication_names', $3)",
+                None,
+                &[
+                    REPLICATION_SLOT.into(),
+                    BATCH_SIZE.into(),
+                    PUBLICATION_NAME.into(),
+                ],
+            )
+            .map_err(|e| format!("peeking WAL slot: {e}"))?;
+
+        let mut messages: Vec<Vec<u8>> = Vec::new();
+        let mut max_lsn: Option<String> = None;
+        for row in tup_table {
+            if let Ok(Some(lsn)) = row.get::<String>(1) {
+                max_lsn = Some(lsn);
+            }
+            if let Ok(Some(data)) = row.get::<Vec<u8>>(2) {
+                messages.push(data);
+            }
+        }
+        // SpiTupleTable dropped here, releasing borrow on client.
+
+        if messages.is_empty() {
+            return Ok::<_, String>((0, None));
+        }
+
+        let msg_count = messages.len();
+
+        // Decode pgoutput messages into events.
+        let mut events: Vec<WalEvent> = Vec::new();
+        for wal_data in &messages {
+            match decoder.decode(wal_data) {
+                Ok(decoded) => events.extend(decoded),
+                Err(e) => {
+                    log!("synchro WAL worker: decode error (skipping): {}", e);
+                }
+            }
+        }
+
+        // Apply each event. Failures are per-event (non-fatal).
+        for event in &events {
+            if let Err(e) = apply_event(client, event, registry) {
+                log!(
+                    "synchro WAL worker: event error ({}.{}): {}",
+                    event.table_name,
+                    event.record_id,
+                    e
+                );
+                let _ = write_rule_failure(client, event, &e);
+            }
+        }
+
+        Ok::<_, String>((msg_count, max_lsn))
+    })?;
+
+    let (msg_count, max_lsn) = result;
+
+    // Phase 2: Advance slot after the SPI transaction has committed.
+    // Slot advancement is non-transactional in PG, so we do it only
+    // after the changelog and edge writes are durable.
+    if let Some(lsn) = max_lsn {
+        Spi::run_with_args(
+            "SELECT pg_replication_slot_advance($1, $2::pg_lsn)",
+            &[REPLICATION_SLOT.into(), lsn.as_str().into()],
+        )
+        .map_err(|e| format!("advancing slot: {e}"))?;
+    }
+
+    Ok(msg_count)
 }
 
 /// Apply a single WAL event: resolve buckets, diff edges, write changelog.
 ///
-/// This function is called within the bgworker's SPI connection.
-/// It matches the Go `Consumer.applyEvent` logic.
-pub fn apply_wal_event(
+/// Operates within the caller's SPI transaction.
+fn apply_event(
+    client: &mut SpiClient<'_>,
     event: &WalEvent,
     registry: &[TableRegistration],
 ) -> Result<(), String> {
@@ -104,34 +275,44 @@ pub fn apply_wal_event(
         .find(|t| t.table_name == event.table_name)
         .ok_or_else(|| format!("table {:?} not in registry", event.table_name))?;
 
-    Spi::connect(|mut client| {
-        // 1. Load existing bucket edges.
-        let existing = load_existing_buckets(&client, &event.table_name, &event.record_id)?;
+    // 1. Load existing bucket edges.
+    let existing = load_existing_buckets(client, &event.table_name, &event.record_id)?;
 
-        // 2. Resolve desired buckets via bucket_sql (unless delete with existing edges).
-        let desired = if event.operation != Operation::Delete || existing.is_empty() {
-            execute_bucket_sql(&client, &table_reg.bucket_sql, &event.record_id)?
-        } else {
-            vec![]
-        };
+    // 2. Resolve desired buckets.
+    // For deletes: the record no longer exists in the table, so bucket_sql
+    // would return nothing. Use existing buckets instead.
+    let desired = if event.operation == Operation::Delete {
+        vec![]
+    } else {
+        resolve_buckets(client, &table_reg.bucket_sql, &event.record_id)
+            .map_err(|e| format!("resolving buckets: {e}"))?
+    };
 
-        // 3. Build changelog entries from edge diff.
-        let entries = build_edge_diff_entries(
-            &event.table_name,
-            &event.record_id,
-            event.operation,
-            &existing,
-            &desired,
-        );
+    // 3. Build changelog entries from edge diff.
+    let entries = build_edge_diff_entries(
+        &event.table_name,
+        &event.record_id,
+        event.operation,
+        &existing,
+        &desired,
+    );
 
-        // 4. Write changelog entries.
-        write_changelog_entries(&mut client, &entries)?;
+    // 4. Write changelog entries.
+    write_changelog_entries(client, &entries)?;
 
-        // 5. Apply edge diff (upsert/delete bucket edges).
-        apply_edge_diff(&mut client, event, &existing, &desired)?;
+    // 5. Apply edge diff (upsert/delete bucket edges).
+    apply_edge_diff(client, event, &existing, &desired)?;
 
-        Ok(())
-    })
+    Ok(())
+}
+
+/// Public wrapper that opens its own SPI transaction.
+/// Used by tests and any non-bgworker callers.
+pub fn apply_wal_event(
+    event: &WalEvent,
+    registry: &[TableRegistration],
+) -> Result<(), String> {
+    Spi::connect_mut(|client| apply_event(client, event, registry))
 }
 
 fn load_existing_buckets(
@@ -141,49 +322,20 @@ fn load_existing_buckets(
 ) -> Result<Vec<String>, String> {
     let tup_table = client
         .select(
-            "SELECT bucket_id FROM sync_bucket_edges WHERE table_name = $1 AND record_id = $2",
+            "SELECT bucket_id FROM sync_bucket_edges \
+             WHERE table_name = $1 AND record_id = $2",
             None,
-            Some(vec![
-                (PgBuiltInOids::TEXTOID.oid(), table_name.into_datum()),
-                (PgBuiltInOids::TEXTOID.oid(), record_id.into_datum()),
-            ]),
+            &[table_name.into(), record_id.into()],
         )
         .map_err(|e| format!("loading existing buckets: {e}"))?;
 
     let mut buckets = Vec::new();
     for row in tup_table {
-        if let Ok(Some(bid)) = row.get_by_name::<String, _>("bucket_id") {
+        if let Ok(Some(bid)) = row.get_by_name::<String, &str>("bucket_id") {
             buckets.push(bid);
         }
     }
     Ok(buckets)
-}
-
-fn execute_bucket_sql(
-    client: &SpiClient<'_>,
-    bucket_sql: &str,
-    record_id: &str,
-) -> Result<Vec<String>, String> {
-    // Execute the developer-defined bucket SQL with the record ID as $1.
-    let tup_table = client
-        .select(
-            bucket_sql,
-            None,
-            Some(vec![(
-                PgBuiltInOids::TEXTOID.oid(),
-                record_id.into_datum(),
-            )]),
-        )
-        .map_err(|e| format!("executing bucket SQL: {e}"))?;
-
-    let mut buckets = Vec::new();
-    for row in tup_table {
-        let val: Option<Vec<String>> = row.get(1).unwrap_or(None);
-        if let Some(arr) = val {
-            buckets.extend(arr);
-        }
-    }
-    Ok(dedup_buckets(&buckets))
 }
 
 fn write_changelog_entries(
@@ -193,14 +345,15 @@ fn write_changelog_entries(
     for entry in entries {
         client
             .update(
-                "INSERT INTO sync_changelog (bucket_id, table_name, record_id, operation) VALUES ($1, $2, $3, $4)",
+                "INSERT INTO sync_changelog (bucket_id, table_name, record_id, operation) \
+                 VALUES ($1, $2, $3, $4)",
                 None,
-                Some(vec![
-                    (PgBuiltInOids::TEXTOID.oid(), entry.bucket_id.as_str().into_datum()),
-                    (PgBuiltInOids::TEXTOID.oid(), entry.table_name.as_str().into_datum()),
-                    (PgBuiltInOids::TEXTOID.oid(), entry.record_id.as_str().into_datum()),
-                    (PgBuiltInOids::INT2OID.oid(), entry.operation.to_i16().into_datum()),
-                ]),
+                &[
+                    entry.bucket_id.as_str().into(),
+                    entry.table_name.as_str().into(),
+                    entry.record_id.as_str().into(),
+                    entry.operation.to_i16().into(),
+                ],
             )
             .map_err(|e| format!("writing changelog entry: {e}"))?;
     }
@@ -214,15 +367,15 @@ fn apply_edge_diff(
     desired: &[String],
 ) -> Result<(), String> {
     if event.operation == Operation::Delete {
-        // Remove all edges for this record.
         client
             .update(
-                "DELETE FROM sync_bucket_edges WHERE table_name = $1 AND record_id = $2",
+                "DELETE FROM sync_bucket_edges \
+                 WHERE table_name = $1 AND record_id = $2",
                 None,
-                Some(vec![
-                    (PgBuiltInOids::TEXTOID.oid(), event.table_name.as_str().into_datum()),
-                    (PgBuiltInOids::TEXTOID.oid(), event.record_id.as_str().into_datum()),
-                ]),
+                &[
+                    event.table_name.as_str().into(),
+                    event.record_id.as_str().into(),
+                ],
             )
             .map_err(|e| format!("deleting bucket edges: {e}"))?;
         return Ok(());
@@ -230,7 +383,6 @@ fn apply_edge_diff(
 
     // Compute checksum from event data.
     let checksum: Option<i32> = {
-        // Build a JSON string from the event data for checksumming.
         let json_map: serde_json::Map<String, serde_json::Value> = event
             .data
             .iter()
@@ -242,8 +394,9 @@ fn apply_edge_diff(
                 (k.clone(), val)
             })
             .collect();
-        let json_str = serde_json::to_string(&json_map).ok();
-        json_str.map(|s| compute_record_checksum(&s) as i32)
+        serde_json::to_string(&json_map)
+            .ok()
+            .map(|s| compute_record_checksum(&s) as i32)
     };
 
     let diff = diff_bucket_sets(existing, desired);
@@ -259,17 +412,18 @@ fn apply_edge_diff(
     for bucket in &upsert_buckets {
         client
             .update(
-                "INSERT INTO sync_bucket_edges (table_name, record_id, bucket_id, checksum, updated_at)
-                 VALUES ($1, $2, $3, $4, now())
-                 ON CONFLICT (table_name, record_id, bucket_id)
+                "INSERT INTO sync_bucket_edges \
+                 (table_name, record_id, bucket_id, checksum, updated_at) \
+                 VALUES ($1, $2, $3, $4, now()) \
+                 ON CONFLICT (table_name, record_id, bucket_id) \
                  DO UPDATE SET checksum = EXCLUDED.checksum, updated_at = now()",
                 None,
-                Some(vec![
-                    (PgBuiltInOids::TEXTOID.oid(), event.table_name.as_str().into_datum()),
-                    (PgBuiltInOids::TEXTOID.oid(), event.record_id.as_str().into_datum()),
-                    (PgBuiltInOids::TEXTOID.oid(), (*bucket).into_datum()),
-                    (PgBuiltInOids::INT4OID.oid(), checksum.into_datum()),
-                ]),
+                &[
+                    event.table_name.as_str().into(),
+                    event.record_id.as_str().into(),
+                    (*bucket).into(),
+                    checksum.into(),
+                ],
             )
             .map_err(|e| format!("upserting bucket edge: {e}"))?;
     }
@@ -278,13 +432,14 @@ fn apply_edge_diff(
     for bucket in &diff.removed {
         client
             .update(
-                "DELETE FROM sync_bucket_edges WHERE table_name = $1 AND record_id = $2 AND bucket_id = $3",
+                "DELETE FROM sync_bucket_edges \
+                 WHERE table_name = $1 AND record_id = $2 AND bucket_id = $3",
                 None,
-                Some(vec![
-                    (PgBuiltInOids::TEXTOID.oid(), event.table_name.as_str().into_datum()),
-                    (PgBuiltInOids::TEXTOID.oid(), event.record_id.as_str().into_datum()),
-                    (PgBuiltInOids::TEXTOID.oid(), bucket.as_str().into_datum()),
-                ]),
+                &[
+                    event.table_name.as_str().into(),
+                    event.record_id.as_str().into(),
+                    bucket.as_str().into(),
+                ],
             )
             .map_err(|e| format!("deleting bucket edge: {e}"))?;
     }
@@ -293,31 +448,32 @@ fn apply_edge_diff(
 }
 
 fn load_registry_for_worker() -> Result<Vec<TableRegistration>, String> {
-    Spi::connect(|_client| load_registry().map_err(|e| format!("loading registry: {e}")))
+    load_registry().map_err(|e| format!("loading registry: {e}"))
 }
 
-/// Write a rule failure row when bucket resolution fails.
-pub fn write_rule_failure(
+/// Write a rule failure row when event processing fails.
+/// Participates in the caller's SPI transaction.
+fn write_rule_failure(
+    client: &mut SpiClient<'_>,
     event: &WalEvent,
     error_text: &str,
 ) -> Result<(), String> {
     let payload = serde_json::to_string(&event.data).unwrap_or_default();
 
-    Spi::connect(|mut client| {
-        client
-            .update(
-                "INSERT INTO sync_rule_failures (table_name, record_id, operation, error_text, payload)
-                 VALUES ($1, $2, $3, $4, $5::jsonb)",
-                None,
-                Some(vec![
-                    (PgBuiltInOids::TEXTOID.oid(), event.table_name.as_str().into_datum()),
-                    (PgBuiltInOids::TEXTOID.oid(), event.record_id.as_str().into_datum()),
-                    (PgBuiltInOids::INT2OID.oid(), event.operation.to_i16().into_datum()),
-                    (PgBuiltInOids::TEXTOID.oid(), error_text.into_datum()),
-                    (PgBuiltInOids::TEXTOID.oid(), payload.as_str().into_datum()),
-                ]),
-            )
-            .map_err(|e| format!("writing rule failure: {e}"))?;
-        Ok(())
-    })
+    client
+        .update(
+            "INSERT INTO sync_rule_failures \
+             (table_name, record_id, operation, error_text, payload) \
+             VALUES ($1, $2, $3, $4, $5::jsonb)",
+            None,
+            &[
+                event.table_name.as_str().into(),
+                event.record_id.as_str().into(),
+                event.operation.to_i16().into(),
+                error_text.into(),
+                payload.as_str().into(),
+            ],
+        )
+        .map_err(|e| format!("writing rule failure: {e}"))?;
+    Ok(())
 }
