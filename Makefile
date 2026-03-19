@@ -398,9 +398,15 @@ synchrod-pg-test-start: test-adapter-setup
 		echo "synchrod-pg already running"; \
 		exit 0; \
 	fi; \
-	echo "Loading seed data..."; \
+	echo "Loading schema and registering tables..."; \
 	psql -h localhost -p $(PGRX_PORT) -U $(USER) -d $(ADAPTER_TEST_DB) -f extensions/testdata/schema.sql >/dev/null 2>&1; \
 	psql -h localhost -p $(PGRX_PORT) -U $(USER) -d $(ADAPTER_TEST_DB) -f extensions/testdata/register.sql >/dev/null 2>&1; \
+	if [ -f extensions/testdata/seed.sql ]; then \
+		echo "Loading seed data (this may take a minute)..."; \
+		psql -h localhost -p $(PGRX_PORT) -U $(USER) -d $(ADAPTER_TEST_DB) -f extensions/testdata/seed.sql >/dev/null 2>&1; \
+	else \
+		echo "No seed.sql found. Run 'make ext-seed' to generate TPC-H data."; \
+	fi; \
 	echo "Starting synchrod-pg on :$(SYNCHROD_PG_PORT)..."; \
 	nohup env \
 		DATABASE_URL="$(ADAPTER_TEST_URL)" \
