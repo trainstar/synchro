@@ -13,6 +13,21 @@ use crate::registry::{PushPolicy, TableRegistration};
 // Clock skew tolerance is read from the synchro.clock_skew_tolerance_ms GUC
 // (registered in lib.rs). Accessed via crate::CLOCK_SKEW_TOLERANCE_MS_GUC.
 
+/// SQL expression that formats a timestamptz column as ISO 8601 UTC.
+/// Usage: `format!("{}", iso8601_sql("col_name"))` produces
+/// `to_char("col_name" AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')`
+pub(crate) fn iso8601_sql(col: &str) -> String {
+    format!(
+        r#"to_char({} AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')"#,
+        col
+    )
+}
+
+/// SQL expression for `now()` in ISO 8601 UTC.
+pub(crate) fn iso8601_now() -> String {
+    iso8601_sql("now()")
+}
+
 /// Push client changes to the server.
 ///
 /// Returns JSONB with per-record results: status, reason, server timestamps.
@@ -99,11 +114,15 @@ fn synchro_push(
         // Update client sync timestamp and get checkpoint + server time.
         let mut checkpoint: i64 = 0;
         let mut server_time = String::new();
-        if let Ok(tup) = client.update(
+        let update_sql = format!(
             "UPDATE sync_clients SET last_sync_at = now() \
              WHERE user_id = $1 AND client_id = $2 \
              RETURNING COALESCE(last_pull_seq, 0) AS checkpoint, \
-             now()::timestamptz::text AS server_time",
+             {} AS server_time",
+            iso8601_now(),
+        );
+        if let Ok(tup) = client.update(
+            &update_sql,
             None,
             &[p_user_id.into(), p_client_id.into()],
         ) {
@@ -305,8 +324,8 @@ fn push_create(
 
     let returning = if table_reg.has_updated_at {
         format!(
-            " RETURNING {}::text AS updated_at",
-            pg_quote_ident(&table_reg.updated_at_col)
+            " RETURNING {} AS updated_at",
+            iso8601_sql(&pg_quote_ident(&table_reg.updated_at_col))
         )
     } else {
         String::new()
@@ -542,12 +561,12 @@ fn push_soft_delete(
     }
 
     let sql = format!(
-        "UPDATE {} SET {} = now() WHERE {} = $1::{} RETURNING {}::text AS deleted_at",
+        "UPDATE {} SET {} = now() WHERE {} = $1::{} RETURNING {} AS deleted_at",
         pg_quote_ident(&table_reg.table_name),
         pg_quote_ident(&table_reg.deleted_at_col),
         pg_quote_ident(&table_reg.pk_column),
         table_reg.pk_type,
-        pg_quote_ident(&table_reg.deleted_at_col),
+        iso8601_sql(&pg_quote_ident(&table_reg.deleted_at_col)),
     );
 
     match client.update(&sql, None, &[id.into()]) {
@@ -593,12 +612,12 @@ fn load_existing_record(
     table_reg: &TableRegistration,
 ) -> Option<ExistingRecord> {
     let updated_at_expr = if table_reg.has_updated_at {
-        format!("{}::text", pg_quote_ident(&table_reg.updated_at_col))
+        iso8601_sql(&pg_quote_ident(&table_reg.updated_at_col))
     } else {
         "NULL::text".into()
     };
     let deleted_at_expr = if table_reg.has_deleted_at {
-        format!("{}::text", pg_quote_ident(&table_reg.deleted_at_col))
+        iso8601_sql(&pg_quote_ident(&table_reg.deleted_at_col))
     } else {
         "NULL::text".into()
     };
@@ -893,7 +912,7 @@ fn parse_pg_timestamptz(s: &str) -> Option<chrono::DateTime<chrono::Utc>> {
 }
 
 /// Quote a SQL string literal (escape single quotes).
-fn pg_quote_literal(s: &str) -> String {
+pub(crate) fn pg_quote_literal(s: &str) -> String {
     let escaped = s.replace('\'', "''");
     format!("'{}'", escaped)
 }

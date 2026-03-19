@@ -557,21 +557,15 @@ pub(crate) fn hydrate_records(
             .collect::<String>()
     };
 
-    // Build timestamp expressions.
+    // Build timestamp expressions (ISO 8601 UTC).
     let updated_at_expr = if table_reg.has_updated_at {
-        format!(
-            "t.{}::timestamptz::text",
-            pg_quote_ident(&table_reg.updated_at_col)
-        )
+        crate::push::iso8601_sql(&format!("t.{}", pg_quote_ident(&table_reg.updated_at_col)))
     } else {
         "NULL::text".into()
     };
 
     let deleted_at_expr = if table_reg.has_deleted_at {
-        format!(
-            "t.{}::timestamptz::text",
-            pg_quote_ident(&table_reg.deleted_at_col)
-        )
+        crate::push::iso8601_sql(&format!("t.{}", pg_quote_ident(&table_reg.deleted_at_col)))
     } else {
         "NULL::text".into()
     };
