@@ -53,6 +53,9 @@ fn synchro_pull(
             &[p_user_id.into()],
         );
 
+        // Ensure to_jsonb() serializes timestamptz as UTC for the wire protocol.
+        let _ = client.update("SET LOCAL timezone = 'UTC'", None, &[]);
+
         // Load client bucket subscriptions.
         let bucket_subs = match load_client_buckets(client, p_user_id, p_client_id) {
             Ok(subs) => subs,
@@ -570,16 +573,51 @@ pub(crate) fn hydrate_records(
         "NULL::text".into()
     };
 
+    // Build a JSONB override object to replace timestamps in the data blob
+    // with ISO 8601 UTC format. PostgreSQL's to_jsonb() uses "+00:00" for UTC
+    // offsets, but the wire protocol requires "Z" suffix.
+    let mut ts_override_parts: Vec<String> = Vec::new();
+    if table_reg.has_updated_at {
+        let iso = crate::push::iso8601_sql(
+            &format!("t.{}", pg_quote_ident(&table_reg.updated_at_col)),
+        );
+        ts_override_parts.push(format!(
+            "'{col}', to_jsonb({iso})",
+            col = table_reg.updated_at_col.replace('\'', "''"),
+            iso = iso,
+        ));
+    }
+    if table_reg.has_deleted_at {
+        let iso = crate::push::iso8601_sql(
+            &format!("t.{}", pg_quote_ident(&table_reg.deleted_at_col)),
+        );
+        ts_override_parts.push(format!(
+            "'{col}', to_jsonb({iso})",
+            col = table_reg.deleted_at_col.replace('\'', "''"),
+            iso = iso,
+        ));
+    }
+
+    let data_expr = if ts_override_parts.is_empty() {
+        format!("(to_jsonb(t){exclude})::text", exclude = exclude_expr)
+    } else {
+        format!(
+            "((to_jsonb(t){exclude}) || jsonb_build_object({overrides}))::text",
+            exclude = exclude_expr,
+            overrides = ts_override_parts.join(", "),
+        )
+    };
+
     // Build hydration query.
     let query = format!(
         "SELECT {pk}::text AS id, \
-         (to_jsonb(t){exclude})::text AS data, \
+         {data} AS data, \
          {updated_at} AS updated_at, \
          {deleted_at} AS deleted_at \
          FROM {table} t \
          WHERE {pk}::text = ANY($1)",
         pk = pg_quote_ident(&table_reg.pk_column),
-        exclude = exclude_expr,
+        data = data_expr,
         updated_at = updated_at_expr,
         deleted_at = deleted_at_expr,
         table = pg_quote_ident(table_name),

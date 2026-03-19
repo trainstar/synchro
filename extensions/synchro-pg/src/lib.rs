@@ -185,6 +185,18 @@ mod tests {
     use serde_json::Value;
 
     // -----------------------------------------------------------------------
+    // Wire protocol helpers
+    // -----------------------------------------------------------------------
+
+    /// Assert that a JSON value is an ISO 8601 UTC timestamp (contains 'T', ends with 'Z').
+    fn assert_iso8601(value: &Value, field_name: &str) {
+        if let Some(s) = value.as_str() {
+            assert!(s.contains('T') && s.ends_with('Z'),
+                "{} must be ISO 8601 UTC (got: {})", field_name, s);
+        }
+    }
+
+    // -----------------------------------------------------------------------
     // Shared test setup
     // -----------------------------------------------------------------------
 
@@ -373,6 +385,7 @@ mod tests {
         let resp = register_client("user1", "client1");
         assert!(resp.get("id").is_some());
         assert!(resp.get("server_time").is_some());
+        assert_iso8601(&resp["server_time"], "register server_time");
         assert_eq!(resp.get("schema_version").and_then(|v| v.as_i64()).unwrap_or(0) > 0, true);
 
         // Verify bucket_subs in sync_clients.
@@ -409,6 +422,11 @@ mod tests {
         let accepted = resp.get("accepted").unwrap().as_array().unwrap();
         assert_eq!(accepted.len(), 1);
         assert_eq!(accepted[0].get("status").unwrap().as_str().unwrap(), "applied");
+
+        // Validate server_updated_at is ISO 8601 UTC if present.
+        if let Some(ts) = accepted[0].get("server_updated_at") {
+            assert_iso8601(ts, "push accepted server_updated_at");
+        }
 
         // Verify record exists in table.
         let title: Option<String> = Spi::get_one(
@@ -942,6 +960,7 @@ mod tests {
         // Envelope fields present.
         assert!(resp.get("checkpoint").is_some());
         assert!(resp.get("server_time").and_then(|v| v.as_str()).is_some());
+        assert_iso8601(&resp["server_time"], "push envelope server_time");
         assert!(resp.get("schema_version").is_some());
         assert!(resp.get("schema_hash").is_some());
     }
@@ -1060,6 +1079,15 @@ mod tests {
         assert!(c.get("table_name").is_some());
         assert!(c.get("data").is_some());
         assert!(c.get("checksum").is_some());
+
+        // Validate updated_at on hydrated records is ISO 8601 UTC.
+        for change in changes {
+            if let Some(data) = change.get("data") {
+                if let Some(ts) = data.get("updated_at") {
+                    assert_iso8601(ts, "pull hydrated updated_at");
+                }
+            }
+        }
     }
 
     #[pg_test]

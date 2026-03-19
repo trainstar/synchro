@@ -41,6 +41,9 @@ fn synchro_rebuild(
             &[p_user_id.into()],
         );
 
+        // Ensure to_jsonb() serializes timestamptz as UTC for the wire protocol.
+        let _ = client.update("SET LOCAL timezone = 'UTC'", None, &[]);
+
         // Validate client exists and is subscribed to this bucket.
         let bucket_subs = match load_client_buckets(client, p_user_id, p_client_id) {
             Ok(subs) => subs,
