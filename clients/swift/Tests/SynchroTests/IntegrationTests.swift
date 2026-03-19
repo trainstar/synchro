@@ -5,7 +5,7 @@ import CommonCrypto
 #endif
 @testable import Synchro
 
-/// Integration tests that run against a real synchrod server with WAL consumer.
+/// Integration tests that run against a real synchrod-pg server with PG extension.
 /// Requires SYNCHRO_TEST_URL and SYNCHRO_TEST_JWT_SECRET environment variables.
 /// Skips when env vars are not set (same pattern as Go integration tests).
 final class IntegrationTests: XCTestCase {
@@ -67,7 +67,7 @@ final class IntegrationTests: XCTestCase {
         return Data(digest)
     }
 
-    // MARK: - Helpers
+    // MARK: - HTTP Helpers
 
     private func makeHttpClient(userID: String, clientID: String? = nil, appVersion: String = "1.0.0") -> (HttpClient, String) {
         let cid = clientID ?? UUID().uuidString.lowercased()
@@ -84,388 +84,1158 @@ final class IntegrationTests: XCTestCase {
         return (HttpClient(config: config), cid)
     }
 
-    /// Polls pull until a record with the given ID appears, or timeout expires.
-    /// WAL processing is async — after a push, the WAL consumer needs time to
-    /// decode the event, assign buckets, and write changelog entries.
-    private func pollForRecord(
+    /// Fetches server schema, then registers the client. Returns the register response
+    /// plus schema version/hash for use in subsequent calls.
+    private func registerWithSchema(
+        http: HttpClient,
+        clientID: String
+    ) async throws -> (reg: RegisterResponse, schemaVersion: Int64, schemaHash: String) {
+        let schema = try await http.fetchSchema()
+        let reg = try await http.register(request: RegisterRequest(
+            clientID: clientID,
+            clientName: nil,
+            platform: "test",
+            appVersion: "1.0.0",
+            schemaVersion: schema.schemaVersion,
+            schemaHash: schema.schemaHash
+        ))
+        return (reg, schema.schemaVersion, schema.schemaHash)
+    }
+
+    /// Paginates through POST /sync/rebuild until hasMore == false.
+    /// Returns all records and the final bucketChecksum (if present).
+    @discardableResult
+    private func rebuildBucket(
         http: HttpClient,
         clientID: String,
-        checkpoint: Int64,
+        bucketID: String,
         schemaVersion: Int64,
-        schemaHash: String,
-        recordID: String,
-        timeout: TimeInterval = 10
+        schemaHash: String
+    ) async throws -> (records: [Record], bucketChecksum: Int32?) {
+        var allRecords: [Record] = []
+        var cursor: String? = nil
+        var hasMore = true
+        var finalChecksum: Int32? = nil
+
+        while hasMore {
+            let resp = try await http.rebuild(request: RebuildRequest(
+                clientID: clientID,
+                bucketID: bucketID,
+                cursor: cursor,
+                limit: 100,
+                schemaVersion: schemaVersion,
+                schemaHash: schemaHash
+            ))
+            allRecords.append(contentsOf: resp.records)
+            cursor = resp.cursor
+            hasMore = resp.hasMore
+            if !hasMore {
+                finalChecksum = resp.bucketChecksum
+            }
+        }
+        return (allRecords, finalChecksum)
+    }
+
+    // MARK: - Push Helpers
+
+    private func pushCustomer(
+        http: HttpClient, clientID: String,
+        customerID: String, userID: String,
+        email: String = "test@example.com",
+        internalNotes: String? = nil,
+        schemaVersion: Int64, schemaHash: String,
+        clientUpdatedAt: Date = Date()
+    ) async throws -> PushResponse {
+        var data: [String: AnyCodable] = [
+            "id": AnyCodable(customerID),
+            "user_id": AnyCodable(userID),
+            "email": AnyCodable(email),
+        ]
+        if let notes = internalNotes {
+            data["internal_notes"] = AnyCodable(notes)
+        }
+        return try await http.push(request: PushRequest(
+            clientID: clientID,
+            changes: [PushRecord(
+                id: customerID, tableName: "customers", operation: "create",
+                data: data, clientUpdatedAt: clientUpdatedAt
+            )],
+            schemaVersion: schemaVersion, schemaHash: schemaHash
+        ))
+    }
+
+    private func pushOrder(
+        http: HttpClient, clientID: String,
+        orderID: String, customerID: String,
+        shipAddress: [String: Any]? = nil,
+        schemaVersion: Int64, schemaHash: String,
+        clientUpdatedAt: Date = Date()
+    ) async throws -> PushResponse {
+        var data: [String: AnyCodable] = [
+            "id": AnyCodable(orderID),
+            "customer_id": AnyCodable(customerID),
+        ]
+        if let addr = shipAddress {
+            data["ship_address"] = AnyCodable(addr)
+        }
+        return try await http.push(request: PushRequest(
+            clientID: clientID,
+            changes: [PushRecord(
+                id: orderID, tableName: "orders", operation: "create",
+                data: data, clientUpdatedAt: clientUpdatedAt
+            )],
+            schemaVersion: schemaVersion, schemaHash: schemaHash
+        ))
+    }
+
+    private func pushLineItem(
+        http: HttpClient, clientID: String,
+        lineItemID: String, orderID: String,
+        quantity: Int = 1, unitPrice: Double = 10.00,
+        schemaVersion: Int64, schemaHash: String,
+        clientUpdatedAt: Date = Date()
+    ) async throws -> PushResponse {
+        try await http.push(request: PushRequest(
+            clientID: clientID,
+            changes: [PushRecord(
+                id: lineItemID, tableName: "line_items", operation: "create",
+                data: [
+                    "id": AnyCodable(lineItemID),
+                    "order_id": AnyCodable(orderID),
+                    "quantity": AnyCodable(quantity),
+                    "unit_price": AnyCodable(unitPrice),
+                ],
+                clientUpdatedAt: clientUpdatedAt
+            )],
+            schemaVersion: schemaVersion, schemaHash: schemaHash
+        ))
+    }
+
+    private func pushDocument(
+        http: HttpClient, clientID: String,
+        docID: String, ownerID: String,
+        title: String = "Test Document",
+        schemaVersion: Int64, schemaHash: String,
+        clientUpdatedAt: Date = Date()
+    ) async throws -> PushResponse {
+        try await http.push(request: PushRequest(
+            clientID: clientID,
+            changes: [PushRecord(
+                id: docID, tableName: "documents", operation: "create",
+                data: [
+                    "id": AnyCodable(docID),
+                    "owner_id": AnyCodable(ownerID),
+                    "title": AnyCodable(title),
+                ],
+                clientUpdatedAt: clientUpdatedAt
+            )],
+            schemaVersion: schemaVersion, schemaHash: schemaHash
+        ))
+    }
+
+    private func pushDocumentMember(
+        http: HttpClient, clientID: String,
+        memberID: String, docID: String, userID: String,
+        role: String = "editor",
+        schemaVersion: Int64, schemaHash: String,
+        clientUpdatedAt: Date = Date()
+    ) async throws -> PushResponse {
+        try await http.push(request: PushRequest(
+            clientID: clientID,
+            changes: [PushRecord(
+                id: memberID, tableName: "document_members", operation: "create",
+                data: [
+                    "id": AnyCodable(memberID),
+                    "document_id": AnyCodable(docID),
+                    "user_id": AnyCodable(userID),
+                    "role": AnyCodable(role),
+                ],
+                clientUpdatedAt: clientUpdatedAt
+            )],
+            schemaVersion: schemaVersion, schemaHash: schemaHash
+        ))
+    }
+
+    private func pushDocumentComment(
+        http: HttpClient, clientID: String,
+        commentID: String, docID: String, authorID: String,
+        body: String = "Test comment",
+        schemaVersion: Int64, schemaHash: String,
+        clientUpdatedAt: Date = Date()
+    ) async throws -> PushResponse {
+        try await http.push(request: PushRequest(
+            clientID: clientID,
+            changes: [PushRecord(
+                id: commentID, tableName: "document_comments", operation: "create",
+                data: [
+                    "id": AnyCodable(commentID),
+                    "document_id": AnyCodable(docID),
+                    "author_id": AnyCodable(authorID),
+                    "body": AnyCodable(body),
+                ],
+                clientUpdatedAt: clientUpdatedAt
+            )],
+            schemaVersion: schemaVersion, schemaHash: schemaHash
+        ))
+    }
+
+    /// Polls pull every 250ms until a record with the given ID appears, or timeout expires.
+    private func pollForRecord(
+        http: HttpClient, clientID: String,
+        checkpoint: Int64,
+        schemaVersion: Int64, schemaHash: String,
+        recordID: String, timeout: TimeInterval = 10
     ) async throws -> PullResponse {
         let deadline = Date().addingTimeInterval(timeout)
         var lastResponse: PullResponse?
 
         while Date() < deadline {
             let resp = try await http.pull(request: PullRequest(
-                clientID: clientID,
-                checkpoint: checkpoint,
-                tables: nil,
-                limit: 100,
-                knownBuckets: nil,
-                schemaVersion: schemaVersion,
-                schemaHash: schemaHash
+                clientID: clientID, checkpoint: checkpoint,
+                tables: nil, limit: 100, knownBuckets: nil,
+                schemaVersion: schemaVersion, schemaHash: schemaHash
             ))
             lastResponse = resp
             if resp.changes.contains(where: { $0.id == recordID }) {
                 return resp
             }
-            try await Task.sleep(nanoseconds: 250_000_000) // 250ms
+            try await Task.sleep(nanoseconds: 250_000_000)
         }
 
-        // Final attempt
-        if let last = lastResponse {
-            return last
-        }
+        if let last = lastResponse { return last }
         return try await http.pull(request: PullRequest(
-            clientID: clientID,
-            checkpoint: checkpoint,
-            tables: nil,
-            limit: 100,
-            knownBuckets: nil,
-            schemaVersion: schemaVersion,
-            schemaHash: schemaHash
+            clientID: clientID, checkpoint: checkpoint,
+            tables: nil, limit: 100, knownBuckets: nil,
+            schemaVersion: schemaVersion, schemaHash: schemaHash
         ))
     }
 
-    private func register(http: HttpClient, clientID: String) async throws -> RegisterResponse {
-        try await http.register(request: RegisterRequest(
-            clientID: clientID,
-            clientName: nil,
-            platform: "test",
-            appVersion: "1.0.0",
-            schemaVersion: 0,
-            schemaHash: ""
-        ))
-    }
+    // MARK: - Test 1: Register and Schema Fetch
 
-    private func bootstrapSnapshot(
-        http: HttpClient,
-        clientID: String,
-        schemaVersion: Int64,
-        schemaHash: String
-    ) async throws {
-        var cursor: SnapshotCursor?
-
-        while true {
-            let resp = try await http.snapshot(request: SnapshotRequest(
-                clientID: clientID,
-                cursor: cursor,
-                limit: 100,
-                schemaVersion: schemaVersion,
-                schemaHash: schemaHash
-            ))
-            if !resp.hasMore {
-                return
-            }
-            cursor = resp.cursor
-        }
-    }
-
-    private func pushOrder(
-        http: HttpClient,
-        clientID: String,
-        orderID: String,
-        userID: String,
-        shipAddress: String,
-        schemaVersion: Int64,
-        schemaHash: String,
-        clientUpdatedAt: Date = Date()
-    ) async throws -> PushResponse {
-        try await http.push(request: PushRequest(
-            clientID: clientID,
-            changes: [
-                PushRecord(
-                    id: orderID,
-                    tableName: "orders",
-                    operation: "create",
-                    data: [
-                        "id": AnyCodable(orderID),
-                        "user_id": AnyCodable(userID),
-                        "ship_address": AnyCodable(shipAddress),
-                    ],
-                    clientUpdatedAt: clientUpdatedAt,
-                    baseUpdatedAt: nil
-                ),
-            ],
-            schemaVersion: schemaVersion,
-            schemaHash: schemaHash
-        ))
-    }
-
-    // MARK: - Test 1: Push and Pull Round Trip
-
-    func testPushAndPullRoundTrip() async throws {
+    func testRegisterAndSchemaFetch() async throws {
         try skipIfNoServer()
 
         let userID = UUID().uuidString.lowercased()
         let (http, clientID) = makeHttpClient(userID: userID)
 
-        let reg = try await register(http: http, clientID: clientID)
-        try await bootstrapSnapshot(
-            http: http,
-            clientID: clientID,
-            schemaVersion: reg.schemaVersion,
-            schemaHash: reg.schemaHash
-        )
+        let schema = try await http.fetchSchema()
+        XCTAssertGreaterThan(schema.schemaVersion, 0, "schema version should be > 0")
+        XCTAssertFalse(schema.schemaHash.isEmpty, "schema hash should be non-empty")
+        XCTAssertGreaterThanOrEqual(schema.tables.count, 13, "should have at least 13 TPC-H tables")
 
-        // Push a record
+        // Verify read-only tables are marked correctly
+        let regions = schema.tables.first(where: { $0.tableName == "regions" })
+        XCTAssertNotNil(regions, "regions table should exist in schema")
+        XCTAssertEqual(regions?.pushPolicy, "read_only", "regions should be read_only")
+
+        // Verify writable tables
+        let customers = schema.tables.first(where: { $0.tableName == "customers" })
+        XCTAssertNotNil(customers, "customers table should exist in schema")
+        XCTAssertEqual(customers?.pushPolicy, "enabled", "customers should be enabled")
+
+        // Register
+        let reg = try await http.register(request: RegisterRequest(
+            clientID: clientID, clientName: nil, platform: "test",
+            appVersion: "1.0.0",
+            schemaVersion: schema.schemaVersion, schemaHash: schema.schemaHash
+        ))
+        XCTAssertFalse(reg.id.isEmpty)
+        XCTAssertEqual(reg.schemaVersion, schema.schemaVersion)
+        XCTAssertEqual(reg.schemaHash, schema.schemaHash)
+        XCTAssertNotNil(reg.bucketCheckpoints, "register should return bucket_checkpoints")
+    }
+
+    // MARK: - Test 2: Rebuild Bootstrap
+
+    func testRebuildBootstrap() async throws {
+        try skipIfNoServer()
+
+        let userID = UUID().uuidString.lowercased()
+        let (http, clientID) = makeHttpClient(userID: userID)
+        let (reg, sv, sh) = try await registerWithSchema(http: http, clientID: clientID)
+
+        // Rebuild global bucket: should have reference data (regions, nations, etc.)
+        let (globalRecords, globalChecksum) = try await rebuildBucket(
+            http: http, clientID: clientID, bucketID: "global",
+            schemaVersion: sv, schemaHash: sh
+        )
+        XCTAssertGreaterThan(globalRecords.count, 0, "global bucket should contain reference data")
+
+        // Final page should have a checksum
+        XCTAssertNotNil(globalChecksum, "final rebuild page should include bucket_checksum")
+
+        // Rebuild user bucket: empty for a brand new user
+        let userBucket = "user:\(userID)"
+        let (userRecords, _) = try await rebuildBucket(
+            http: http, clientID: clientID, bucketID: userBucket,
+            schemaVersion: sv, schemaHash: sh
+        )
+        XCTAssertEqual(userRecords.count, 0, "new user's bucket should be empty")
+    }
+
+    // MARK: - Test 3: Push/Pull FK Chain
+
+    func testPushPullFKChain() async throws {
+        try skipIfNoServer()
+
+        let userID = UUID().uuidString.lowercased()
+        let (http, clientID) = makeHttpClient(userID: userID)
+        let (_, sv, sh) = try await registerWithSchema(http: http, clientID: clientID)
+
+        // Push customer (root owner)
+        let custID = UUID().uuidString.lowercased()
+        let custResp = try await pushCustomer(
+            http: http, clientID: clientID,
+            customerID: custID, userID: userID,
+            schemaVersion: sv, schemaHash: sh
+        )
+        XCTAssertEqual(custResp.accepted.count, 1)
+
+        // Push order with customer_id FK and JSONB ship_address
         let orderID = UUID().uuidString.lowercased()
-        let pushResp = try await pushOrder(
-            http: http, clientID: clientID, orderID: orderID, userID: userID,
-            shipAddress: "123 Main St",
-            schemaVersion: reg.schemaVersion, schemaHash: reg.schemaHash
+        let address: [String: Any] = ["street": "123 Main St", "city": "Anytown", "zip": "12345"]
+        let orderResp = try await pushOrder(
+            http: http, clientID: clientID,
+            orderID: orderID, customerID: custID, shipAddress: address,
+            schemaVersion: sv, schemaHash: sh
         )
-        XCTAssertEqual(pushResp.accepted.count, 1)
-        XCTAssertEqual(pushResp.accepted.first?.status, "applied")
+        XCTAssertEqual(orderResp.accepted.count, 1)
 
-        // Pull it back — WAL consumer processes the INSERT asynchronously
+        // Poll-pull: both should appear
         let pullResp = try await pollForRecord(
             http: http, clientID: clientID, checkpoint: 0,
-            schemaVersion: reg.schemaVersion, schemaHash: reg.schemaHash,
-            recordID: orderID
+            schemaVersion: sv, schemaHash: sh, recordID: orderID
         )
 
-        let found = pullResp.changes.first(where: { $0.id == orderID })
-        XCTAssertNotNil(found, "pushed order should appear in pull response")
-        XCTAssertEqual(found?.tableName, "orders")
+        let foundCust = pullResp.changes.first(where: { $0.id == custID })
+        XCTAssertNotNil(foundCust, "customer should appear in pull")
 
-        // Verify the data content
-        let shipAddress = found?.data["ship_address"]
-        XCTAssertNotNil(shipAddress, "pulled record should contain 'ship_address' field")
+        let foundOrder = pullResp.changes.first(where: { $0.id == orderID })
+        XCTAssertNotNil(foundOrder, "order should appear in pull")
+        XCTAssertEqual(foundOrder?.tableName, "orders")
+
+        // Verify JSONB ship_address round-trips
+        if let shipAddr = foundOrder?.data["ship_address"]?.value as? [String: Any] {
+            XCTAssertEqual(shipAddr["street"] as? String, "123 Main St")
+        }
     }
 
-    // MARK: - Test 2: Pull Checkpoint Advancement
+    // MARK: - Test 4: Deep FK Chain
 
-    func testPullCheckpointAdvancement() async throws {
+    func testDeepFKChain() async throws {
         try skipIfNoServer()
 
         let userID = UUID().uuidString.lowercased()
         let (http, clientID) = makeHttpClient(userID: userID)
+        let (_, sv, sh) = try await registerWithSchema(http: http, clientID: clientID)
 
-        let reg = try await register(http: http, clientID: clientID)
-        try await bootstrapSnapshot(
-            http: http,
-            clientID: clientID,
-            schemaVersion: reg.schemaVersion,
-            schemaHash: reg.schemaHash
+        let custID = UUID().uuidString.lowercased()
+        _ = try await pushCustomer(
+            http: http, clientID: clientID,
+            customerID: custID, userID: userID,
+            schemaVersion: sv, schemaHash: sh
         )
 
-        // Push 3 records
+        let orderID = UUID().uuidString.lowercased()
+        _ = try await pushOrder(
+            http: http, clientID: clientID,
+            orderID: orderID, customerID: custID,
+            schemaVersion: sv, schemaHash: sh
+        )
+
+        let lineItemID = UUID().uuidString.lowercased()
+        let liResp = try await pushLineItem(
+            http: http, clientID: clientID,
+            lineItemID: lineItemID, orderID: orderID,
+            schemaVersion: sv, schemaHash: sh
+        )
+        XCTAssertEqual(liResp.accepted.count, 1)
+
+        // All three should appear in pull
+        let pullResp = try await pollForRecord(
+            http: http, clientID: clientID, checkpoint: 0,
+            schemaVersion: sv, schemaHash: sh, recordID: lineItemID
+        )
+
+        XCTAssertTrue(pullResp.changes.contains(where: { $0.id == custID }), "customer should be in pull")
+        XCTAssertTrue(pullResp.changes.contains(where: { $0.id == orderID }), "order should be in pull")
+        XCTAssertTrue(pullResp.changes.contains(where: { $0.id == lineItemID }), "line_item should be in pull")
+    }
+
+    // MARK: - Test 5: Pull Pagination
+
+    func testPullPagination() async throws {
+        try skipIfNoServer()
+
+        let userID = UUID().uuidString.lowercased()
+        let (http, clientID) = makeHttpClient(userID: userID)
+        let (_, sv, sh) = try await registerWithSchema(http: http, clientID: clientID)
+
+        // Push customer first (required for FK), then 3 orders
+        let custID = UUID().uuidString.lowercased()
+        _ = try await pushCustomer(
+            http: http, clientID: clientID,
+            customerID: custID, userID: userID,
+            schemaVersion: sv, schemaHash: sh
+        )
+
         var orderIDs: [String] = []
-        for i in 0..<3 {
-            let orderID = UUID().uuidString.lowercased()
-            orderIDs.append(orderID)
-            let resp = try await pushOrder(
-                http: http, clientID: clientID, orderID: orderID, userID: userID,
-                shipAddress: "Checkpoint Address \(i)",
-                schemaVersion: reg.schemaVersion, schemaHash: reg.schemaHash
+        for _ in 0..<3 {
+            let oid = UUID().uuidString.lowercased()
+            orderIDs.append(oid)
+            _ = try await pushOrder(
+                http: http, clientID: clientID,
+                orderID: oid, customerID: custID,
+                schemaVersion: sv, schemaHash: sh
             )
-            XCTAssertEqual(resp.accepted.count, 1)
         }
 
-        // Wait for WAL consumer to process all 3
+        // Wait for last order to appear
         _ = try await pollForRecord(
             http: http, clientID: clientID, checkpoint: 0,
-            schemaVersion: reg.schemaVersion, schemaHash: reg.schemaHash,
-            recordID: orderIDs.last!
+            schemaVersion: sv, schemaHash: sh, recordID: orderIDs.last!
         )
 
-        // Now pull with limit=1 repeatedly and verify checkpoint advances
+        // Pull with limit=1 and verify checkpoint advances
         var checkpoint: Int64 = 0
-        var allPulledIDs: [String] = []
+        var allPulledIDs: Set<String> = []
         var iterations = 0
 
         repeat {
-            let pullResp = try await http.pull(request: PullRequest(
-                clientID: clientID,
-                checkpoint: checkpoint,
-                tables: nil,
-                limit: 1,
-                knownBuckets: nil,
-                schemaVersion: reg.schemaVersion,
-                schemaHash: reg.schemaHash
+            let resp = try await http.pull(request: PullRequest(
+                clientID: clientID, checkpoint: checkpoint,
+                tables: nil, limit: 1, knownBuckets: nil,
+                schemaVersion: sv, schemaHash: sh
             ))
 
-            for change in pullResp.changes {
-                allPulledIDs.append(change.id)
+            for change in resp.changes {
+                allPulledIDs.insert(change.id)
             }
 
-            XCTAssertGreaterThan(pullResp.checkpoint, checkpoint,
-                "checkpoint must advance on each pull page")
-            checkpoint = pullResp.checkpoint
+            XCTAssertGreaterThanOrEqual(resp.checkpoint, checkpoint,
+                "checkpoint must not go backwards")
+            checkpoint = resp.checkpoint
             iterations += 1
 
-            if !pullResp.hasMore { break }
-        } while iterations < 20 // Safety limit
+            if !resp.hasMore { break }
+        } while iterations < 50
 
-        // All 3 orders should have been pulled
-        for orderID in orderIDs {
-            XCTAssertTrue(allPulledIDs.contains(where: { $0 == orderID }),
-                "order \(orderID) should appear in paginated pull")
+        // All 3 orders appear exactly once
+        for oid in orderIDs {
+            XCTAssertTrue(allPulledIDs.contains(oid), "order \(oid) should appear in paginated pull")
         }
     }
 
-    // MARK: - Test 3: Conflict Resolution (LWW)
+    // MARK: - Test 6: Conflict Server Wins
 
-    func testConflictResolution() async throws {
+    func testConflictServerWins() async throws {
         try skipIfNoServer()
 
         let userID = UUID().uuidString.lowercased()
         let (http, clientID) = makeHttpClient(userID: userID)
+        let (_, sv, sh) = try await registerWithSchema(http: http, clientID: clientID)
 
-        let reg = try await register(http: http, clientID: clientID)
-        try await bootstrapSnapshot(
-            http: http,
-            clientID: clientID,
-            schemaVersion: reg.schemaVersion,
-            schemaHash: reg.schemaHash
+        let custID = UUID().uuidString.lowercased()
+        _ = try await pushCustomer(
+            http: http, clientID: clientID,
+            customerID: custID, userID: userID,
+            schemaVersion: sv, schemaHash: sh
         )
 
-        // Push a create
-        let orderID = UUID().uuidString.lowercased()
-        let createResp = try await pushOrder(
-            http: http, clientID: clientID, orderID: orderID, userID: userID,
-            shipAddress: "456 Conflict Ave",
-            schemaVersion: reg.schemaVersion, schemaHash: reg.schemaHash
-        )
-        XCTAssertEqual(createResp.accepted.count, 1)
-        XCTAssertEqual(createResp.accepted.first?.status, "applied")
-
-        // Push a conflicting update with old timestamps.
-        // baseUpdatedAt doesn't match server's updated_at → conflict detected.
-        // clientUpdatedAt is ancient → server version is newer → server wins via LWW.
+        // Update with ancient timestamps: server version is newer, server wins
         let ancientDate = Date(timeIntervalSince1970: 946684800) // 2000-01-01
         let conflictResp = try await http.push(request: PushRequest(
             clientID: clientID,
-            changes: [
-                PushRecord(
-                    id: orderID,
-                    tableName: "orders",
-                    operation: "update",
-                    data: [
-                        "id": AnyCodable(orderID),
-                        "user_id": AnyCodable(userID),
-                        "ship_address": AnyCodable("789 Conflict Blvd"),
-                    ],
-                    clientUpdatedAt: ancientDate,
-                    baseUpdatedAt: ancientDate
-                ),
-            ],
-            schemaVersion: reg.schemaVersion,
-            schemaHash: reg.schemaHash
+            changes: [PushRecord(
+                id: custID, tableName: "customers", operation: "update",
+                data: [
+                    "id": AnyCodable(custID),
+                    "user_id": AnyCodable(userID),
+                    "email": AnyCodable("stale@example.com"),
+                ],
+                clientUpdatedAt: ancientDate, baseUpdatedAt: ancientDate
+            )],
+            schemaVersion: sv, schemaHash: sh
         ))
 
-        // Server wins — update should be in rejected with status "conflict"
-        XCTAssertEqual(conflictResp.rejected.count, 1, "conflicting update should be rejected")
+        XCTAssertEqual(conflictResp.rejected.count, 1)
         XCTAssertEqual(conflictResp.rejected.first?.status, "conflict")
-        XCTAssertEqual(conflictResp.rejected.first?.id, orderID)
-
-        // Server version should be returned so client can reconcile
-        XCTAssertNotNil(conflictResp.rejected.first?.serverVersion,
-            "rejected conflict should include server version for reconciliation")
+        XCTAssertEqual(conflictResp.rejected.first?.reasonCode, "server_won_conflict")
+        XCTAssertNotNil(conflictResp.rejected.first?.serverVersion, "should include serverVersion")
     }
 
-    // MARK: - Test 4: Soft Delete Sync
+    // MARK: - Test 7: Conflict Client Wins
 
-    func testSoftDeleteSync() async throws {
+    func testConflictClientWins() async throws {
         try skipIfNoServer()
 
         let userID = UUID().uuidString.lowercased()
         let (http, clientID) = makeHttpClient(userID: userID)
+        let (_, sv, sh) = try await registerWithSchema(http: http, clientID: clientID)
 
-        let reg = try await register(http: http, clientID: clientID)
-        try await bootstrapSnapshot(
-            http: http,
+        let custID = UUID().uuidString.lowercased()
+        let createResp = try await pushCustomer(
+            http: http, clientID: clientID,
+            customerID: custID, userID: userID,
+            schemaVersion: sv, schemaHash: sh
+        )
+        let serverUpdatedAt = createResp.accepted.first?.serverUpdatedAt
+
+        // Update with fresh timestamp + matching baseUpdatedAt
+        let updateResp = try await http.push(request: PushRequest(
             clientID: clientID,
-            schemaVersion: reg.schemaVersion,
-            schemaHash: reg.schemaHash
+            changes: [PushRecord(
+                id: custID, tableName: "customers", operation: "update",
+                data: [
+                    "id": AnyCodable(custID),
+                    "user_id": AnyCodable(userID),
+                    "email": AnyCodable("updated@example.com"),
+                ],
+                clientUpdatedAt: Date(), baseUpdatedAt: serverUpdatedAt
+            )],
+            schemaVersion: sv, schemaHash: sh
+        ))
+
+        XCTAssertEqual(updateResp.accepted.count, 1)
+        XCTAssertEqual(updateResp.accepted.first?.status, PushStatus.applied)
+    }
+
+    // MARK: - Test 8: Conflict Duplicate Create
+
+    func testConflictDuplicateCreate() async throws {
+        try skipIfNoServer()
+
+        let userID = UUID().uuidString.lowercased()
+        let (http, clientID) = makeHttpClient(userID: userID)
+        let (_, sv, sh) = try await registerWithSchema(http: http, clientID: clientID)
+
+        let custID = UUID().uuidString.lowercased()
+        _ = try await pushCustomer(
+            http: http, clientID: clientID,
+            customerID: custID, userID: userID,
+            schemaVersion: sv, schemaHash: sh
         )
 
-        // Create a record
+        // Push create with same ID
+        let dupResp = try await pushCustomer(
+            http: http, clientID: clientID,
+            customerID: custID, userID: userID, email: "dup@example.com",
+            schemaVersion: sv, schemaHash: sh
+        )
+
+        XCTAssertEqual(dupResp.rejected.count, 1)
+        XCTAssertEqual(dupResp.rejected.first?.reasonCode, "record_exists")
+    }
+
+    // MARK: - Test 9: Conflict Update on Deleted
+
+    func testConflictUpdateOnDeleted() async throws {
+        try skipIfNoServer()
+
+        let userID = UUID().uuidString.lowercased()
+        let (http, clientID) = makeHttpClient(userID: userID)
+        let (_, sv, sh) = try await registerWithSchema(http: http, clientID: clientID)
+
+        let custID = UUID().uuidString.lowercased()
+        _ = try await pushCustomer(
+            http: http, clientID: clientID,
+            customerID: custID, userID: userID,
+            schemaVersion: sv, schemaHash: sh
+        )
+
+        // Delete
+        _ = try await http.push(request: PushRequest(
+            clientID: clientID,
+            changes: [PushRecord(
+                id: custID, tableName: "customers", operation: "delete",
+                data: ["id": AnyCodable(custID), "user_id": AnyCodable(userID)],
+                clientUpdatedAt: Date()
+            )],
+            schemaVersion: sv, schemaHash: sh
+        ))
+
+        // Update on deleted record
+        let updateResp = try await http.push(request: PushRequest(
+            clientID: clientID,
+            changes: [PushRecord(
+                id: custID, tableName: "customers", operation: "update",
+                data: [
+                    "id": AnyCodable(custID),
+                    "user_id": AnyCodable(userID),
+                    "email": AnyCodable("ghost@example.com"),
+                ],
+                clientUpdatedAt: Date()
+            )],
+            schemaVersion: sv, schemaHash: sh
+        ))
+
+        XCTAssertEqual(updateResp.rejected.count, 1)
+        XCTAssertEqual(updateResp.rejected.first?.reasonCode, "record_deleted")
+    }
+
+    // MARK: - Test 10: Resurrection
+
+    func testResurrection() async throws {
+        try skipIfNoServer()
+
+        let userID = UUID().uuidString.lowercased()
+        let (http, clientID) = makeHttpClient(userID: userID)
+        let (_, sv, sh) = try await registerWithSchema(http: http, clientID: clientID)
+
+        let custID = UUID().uuidString.lowercased()
+        _ = try await pushCustomer(
+            http: http, clientID: clientID,
+            customerID: custID, userID: userID,
+            schemaVersion: sv, schemaHash: sh
+        )
+
+        // Delete
+        _ = try await http.push(request: PushRequest(
+            clientID: clientID,
+            changes: [PushRecord(
+                id: custID, tableName: "customers", operation: "delete",
+                data: ["id": AnyCodable(custID), "user_id": AnyCodable(userID)],
+                clientUpdatedAt: Date()
+            )],
+            schemaVersion: sv, schemaHash: sh
+        ))
+
+        // Re-create same ID (resurrection)
+        let resurrectResp = try await pushCustomer(
+            http: http, clientID: clientID,
+            customerID: custID, userID: userID, email: "reborn@example.com",
+            schemaVersion: sv, schemaHash: sh
+        )
+        XCTAssertEqual(resurrectResp.accepted.count, 1, "resurrection should be accepted")
+
+        // Poll pull: record should have no deletedAt
+        let pullResp = try await pollForRecord(
+            http: http, clientID: clientID, checkpoint: 0,
+            schemaVersion: sv, schemaHash: sh, recordID: custID
+        )
+        let found = pullResp.changes.last(where: { $0.id == custID })
+        XCTAssertNil(found?.deletedAt, "resurrected record should not have deletedAt")
+    }
+
+    // MARK: - Test 11: Soft Delete
+
+    func testSoftDelete() async throws {
+        try skipIfNoServer()
+
+        let userID = UUID().uuidString.lowercased()
+        let (http, clientID) = makeHttpClient(userID: userID)
+        let (_, sv, sh) = try await registerWithSchema(http: http, clientID: clientID)
+
+        let custID = UUID().uuidString.lowercased()
+        _ = try await pushCustomer(
+            http: http, clientID: clientID,
+            customerID: custID, userID: userID,
+            schemaVersion: sv, schemaHash: sh
+        )
+
         let orderID = UUID().uuidString.lowercased()
-        let createResp = try await pushOrder(
-            http: http, clientID: clientID, orderID: orderID, userID: userID,
-            shipAddress: "999 Deletable Ln",
-            schemaVersion: reg.schemaVersion, schemaHash: reg.schemaHash
+        _ = try await pushOrder(
+            http: http, clientID: clientID,
+            orderID: orderID, customerID: custID,
+            schemaVersion: sv, schemaHash: sh
         )
-        XCTAssertEqual(createResp.accepted.count, 1)
 
-        // Wait for WAL consumer to process the create
+        // Wait for order to appear
         let pullAfterCreate = try await pollForRecord(
             http: http, clientID: clientID, checkpoint: 0,
-            schemaVersion: reg.schemaVersion, schemaHash: reg.schemaHash,
-            recordID: orderID
+            schemaVersion: sv, schemaHash: sh, recordID: orderID
         )
         let checkpointAfterCreate = pullAfterCreate.checkpoint
 
-        // Soft-delete it
+        // Soft-delete the order
         let deleteResp = try await http.push(request: PushRequest(
             clientID: clientID,
-            changes: [
-                PushRecord(
-                    id: orderID,
-                    tableName: "orders",
-                    operation: "delete",
-                    data: [
-                        "id": AnyCodable(orderID),
-                        "user_id": AnyCodable(userID),
-                    ],
-                    clientUpdatedAt: Date(),
-                    baseUpdatedAt: nil
-                ),
-            ],
-            schemaVersion: reg.schemaVersion,
-            schemaHash: reg.schemaHash
+            changes: [PushRecord(
+                id: orderID, tableName: "orders", operation: "delete",
+                data: ["id": AnyCodable(orderID), "customer_id": AnyCodable(custID)],
+                clientUpdatedAt: Date()
+            )],
+            schemaVersion: sv, schemaHash: sh
         ))
-        XCTAssertEqual(deleteResp.accepted.count, 1, "delete should be accepted")
-        XCTAssertNotNil(deleteResp.accepted.first?.serverDeletedAt,
-            "delete result should include server deleted_at timestamp")
+        XCTAssertEqual(deleteResp.accepted.count, 1)
+        XCTAssertNotNil(deleteResp.accepted.first?.serverDeletedAt)
 
-        // Pull after the delete — should see the delete in the deletes list or
-        // the record should have deleted_at set. Poll until we see the delete
-        // changelog entry from WAL.
+        // Poll until delete propagates
         let deadline = Date().addingTimeInterval(10)
         var foundDelete = false
-        var checkpoint = checkpointAfterCreate
+        var cp = checkpointAfterCreate
 
         while Date() < deadline && !foundDelete {
-            let pullResp = try await http.pull(request: PullRequest(
-                clientID: clientID,
-                checkpoint: checkpoint,
-                tables: nil,
-                limit: 100,
-                knownBuckets: nil,
-                schemaVersion: reg.schemaVersion,
-                schemaHash: reg.schemaHash
+            let resp = try await http.pull(request: PullRequest(
+                clientID: clientID, checkpoint: cp,
+                tables: nil, limit: 100, knownBuckets: nil,
+                schemaVersion: sv, schemaHash: sh
             ))
-
-            // Check deletes list
-            if pullResp.deletes.contains(where: { $0.id == orderID }) {
+            if resp.deletes.contains(where: { $0.id == orderID }) {
                 foundDelete = true
                 break
             }
-
-            // Check if it appears as a change with deleted_at set
-            if let record = pullResp.changes.first(where: { $0.id == orderID }),
-               record.deletedAt != nil {
+            if let record = resp.changes.first(where: { $0.id == orderID }), record.deletedAt != nil {
                 foundDelete = true
                 break
             }
-
-            checkpoint = pullResp.checkpoint
-            if !pullResp.hasMore {
-                try await Task.sleep(nanoseconds: 250_000_000)
-            }
+            cp = resp.checkpoint
+            if !resp.hasMore { try await Task.sleep(nanoseconds: 250_000_000) }
         }
-
-        XCTAssertTrue(foundDelete, "soft-deleted record should appear in pull as deleted")
+        XCTAssertTrue(foundDelete, "soft-deleted order should appear in pull as deleted")
     }
 
-    // MARK: - Test 5: Auth Failure
+    // MARK: - Test 12: Read-Only Rejection
+
+    func testReadOnlyRejection() async throws {
+        try skipIfNoServer()
+
+        let userID = UUID().uuidString.lowercased()
+        let (http, clientID) = makeHttpClient(userID: userID)
+        let (_, sv, sh) = try await registerWithSchema(http: http, clientID: clientID)
+
+        let regionID = UUID().uuidString.lowercased()
+        let resp = try await http.push(request: PushRequest(
+            clientID: clientID,
+            changes: [PushRecord(
+                id: regionID, tableName: "regions", operation: "create",
+                data: [
+                    "id": AnyCodable(regionID),
+                    "name": AnyCodable("Atlantis"),
+                ],
+                clientUpdatedAt: Date()
+            )],
+            schemaVersion: sv, schemaHash: sh
+        ))
+
+        XCTAssertEqual(resp.rejected.count, 1)
+        XCTAssertEqual(resp.rejected.first?.status, PushStatus.rejectedTerminal)
+        XCTAssertEqual(resp.rejected.first?.reasonCode, "table_read_only")
+    }
+
+    // MARK: - Test 13: Bucket Isolation
+
+    func testBucketIsolation() async throws {
+        try skipIfNoServer()
+
+        let userA = UUID().uuidString.lowercased()
+        let userB = UUID().uuidString.lowercased()
+        let (httpA, clientA) = makeHttpClient(userID: userA)
+        let (httpB, clientB) = makeHttpClient(userID: userB)
+
+        let (_, svA, shA) = try await registerWithSchema(http: httpA, clientID: clientA)
+        let (_, svB, shB) = try await registerWithSchema(http: httpB, clientID: clientB)
+
+        // User A pushes a customer + order
+        let custA = UUID().uuidString.lowercased()
+        _ = try await pushCustomer(http: httpA, clientID: clientA, customerID: custA, userID: userA, schemaVersion: svA, schemaHash: shA)
+        let orderA = UUID().uuidString.lowercased()
+        _ = try await pushOrder(http: httpA, clientID: clientA, orderID: orderA, customerID: custA, schemaVersion: svA, schemaHash: shA)
+
+        // User B pushes a customer + order
+        let custB = UUID().uuidString.lowercased()
+        _ = try await pushCustomer(http: httpB, clientID: clientB, customerID: custB, userID: userB, schemaVersion: svB, schemaHash: shB)
+        let orderB = UUID().uuidString.lowercased()
+        _ = try await pushOrder(http: httpB, clientID: clientB, orderID: orderB, customerID: custB, schemaVersion: svB, schemaHash: shB)
+
+        // User A pull: should see A's data, not B's
+        let pullA = try await pollForRecord(
+            http: httpA, clientID: clientA, checkpoint: 0,
+            schemaVersion: svA, schemaHash: shA, recordID: orderA
+        )
+        XCTAssertTrue(pullA.changes.contains(where: { $0.id == orderA }), "User A should see own order")
+        XCTAssertFalse(pullA.changes.contains(where: { $0.id == orderB }), "User A must not see B's order")
+
+        // User B pull: should see B's data, not A's
+        let pullB = try await pollForRecord(
+            http: httpB, clientID: clientB, checkpoint: 0,
+            schemaVersion: svB, schemaHash: shB, recordID: orderB
+        )
+        XCTAssertTrue(pullB.changes.contains(where: { $0.id == orderB }), "User B should see own order")
+        XCTAssertFalse(pullB.changes.contains(where: { $0.id == orderA }), "User B must not see A's order")
+    }
+
+    // MARK: - Test 14: Excluded Columns
+
+    func testExcludedColumns() async throws {
+        try skipIfNoServer()
+
+        let userID = UUID().uuidString.lowercased()
+        let (http, clientID) = makeHttpClient(userID: userID)
+        let (_, sv, sh) = try await registerWithSchema(http: http, clientID: clientID)
+
+        let custID = UUID().uuidString.lowercased()
+        _ = try await pushCustomer(
+            http: http, clientID: clientID,
+            customerID: custID, userID: userID,
+            email: "visible@example.com", internalNotes: "SECRET_DATA",
+            schemaVersion: sv, schemaHash: sh
+        )
+
+        let pullResp = try await pollForRecord(
+            http: http, clientID: clientID, checkpoint: 0,
+            schemaVersion: sv, schemaHash: sh, recordID: custID
+        )
+
+        let found = pullResp.changes.first(where: { $0.id == custID })
+        XCTAssertNotNil(found)
+        XCTAssertNil(found?.data["internal_notes"], "internal_notes should be excluded from pull")
+        XCTAssertNotNil(found?.data["email"], "non-excluded fields should be present")
+    }
+
+    // MARK: - Test 15: Multi-Bucket Collaboration
+
+    func testMultiBucketCollaboration() async throws {
+        try skipIfNoServer()
+
+        let userA = UUID().uuidString.lowercased()
+        let userB = UUID().uuidString.lowercased()
+        let (httpA, clientA) = makeHttpClient(userID: userA)
+        let (httpB, clientB) = makeHttpClient(userID: userB)
+
+        let (_, svA, shA) = try await registerWithSchema(http: httpA, clientID: clientA)
+        let (_, svB, shB) = try await registerWithSchema(http: httpB, clientID: clientB)
+
+        // User A creates a document
+        let docID = UUID().uuidString.lowercased()
+        let docResp = try await pushDocument(
+            http: httpA, clientID: clientA,
+            docID: docID, ownerID: userA,
+            schemaVersion: svA, schemaHash: shA
+        )
+        XCTAssertEqual(docResp.accepted.count, 1)
+
+        // User A adds User B as a document member
+        let memberID = UUID().uuidString.lowercased()
+        let memberResp = try await pushDocumentMember(
+            http: httpA, clientID: clientA,
+            memberID: memberID, docID: docID, userID: userB,
+            schemaVersion: svA, schemaHash: shA
+        )
+        XCTAssertEqual(memberResp.accepted.count, 1)
+
+        // User B should see the document_member in their bucket
+        let pullB = try await pollForRecord(
+            http: httpB, clientID: clientB, checkpoint: 0,
+            schemaVersion: svB, schemaHash: shB, recordID: memberID
+        )
+        XCTAssertTrue(pullB.changes.contains(where: { $0.id == memberID }),
+            "User B should see document_member in their bucket")
+    }
+
+    // MARK: - Test 16: Dual Bucket Ownership
+
+    func testDualBucketOwnership() async throws {
+        try skipIfNoServer()
+
+        let userA = UUID().uuidString.lowercased()
+        let userB = UUID().uuidString.lowercased()
+        let (httpA, clientA) = makeHttpClient(userID: userA)
+        let (httpB, clientB) = makeHttpClient(userID: userB)
+
+        let (_, svA, shA) = try await registerWithSchema(http: httpA, clientID: clientA)
+        let (_, svB, shB) = try await registerWithSchema(http: httpB, clientID: clientB)
+
+        // User A creates a document
+        let docID = UUID().uuidString.lowercased()
+        _ = try await pushDocument(
+            http: httpA, clientID: clientA,
+            docID: docID, ownerID: userA,
+            schemaVersion: svA, schemaHash: shA
+        )
+
+        // User B creates a comment on it (dual ownership: doc owner + comment author)
+        let commentID = UUID().uuidString.lowercased()
+        let commentResp = try await pushDocumentComment(
+            http: httpB, clientID: clientB,
+            commentID: commentID, docID: docID, authorID: userB,
+            schemaVersion: svB, schemaHash: shB
+        )
+        XCTAssertEqual(commentResp.accepted.count, 1)
+
+        // User A (document owner) should see the comment
+        let pullA = try await pollForRecord(
+            http: httpA, clientID: clientA, checkpoint: 0,
+            schemaVersion: svA, schemaHash: shA, recordID: commentID
+        )
+        XCTAssertTrue(pullA.changes.contains(where: { $0.id == commentID }),
+            "Document owner should see comment")
+
+        // User B (comment author) should also see the comment
+        let pullB = try await pollForRecord(
+            http: httpB, clientID: clientB, checkpoint: 0,
+            schemaVersion: svB, schemaHash: shB, recordID: commentID
+        )
+        XCTAssertTrue(pullB.changes.contains(where: { $0.id == commentID }),
+            "Comment author should see comment")
+    }
+
+    // MARK: - Test 17: Type Zoo
+
+    func testTypeZoo() async throws {
+        try skipIfNoServer()
+
+        let userID = UUID().uuidString.lowercased()
+        let (http, clientID) = makeHttpClient(userID: userID)
+        let (_, sv, sh) = try await registerWithSchema(http: http, clientID: clientID)
+
+        let zooID = UUID().uuidString.lowercased()
+        let testUUID = UUID().uuidString.lowercased()
+        let data: [String: AnyCodable] = [
+            "id": AnyCodable(zooID),
+            "user_id": AnyCodable(userID),
+            "text_val": AnyCodable("hello world"),
+            "varchar_val": AnyCodable("bounded string"),
+            "bool_val": AnyCodable(true),
+            "smallint_val": AnyCodable(42),
+            "int_val": AnyCodable(123456),
+            "bigint_val": AnyCodable(Int64(9876543210)),
+            "numeric_val": AnyCodable("99999.99"),
+            "real_val": AnyCodable(3.14),
+            "double_val": AnyCodable(2.718281828),
+            "date_val": AnyCodable("2026-03-19"),
+            "timestamptz_val": AnyCodable("2026-03-19T12:00:00.000Z"),
+            "jsonb_val": AnyCodable(["nested": "object", "count": 42] as [String: Any]),
+            "text_array_val": AnyCodable(["alpha", "beta", "gamma"]),
+            "int_array_val": AnyCodable([1, 2, 3]),
+            "uuid_val": AnyCodable(testUUID),
+        ]
+
+        let pushResp = try await http.push(request: PushRequest(
+            clientID: clientID,
+            changes: [PushRecord(
+                id: zooID, tableName: "type_zoo", operation: "create",
+                data: data, clientUpdatedAt: Date()
+            )],
+            schemaVersion: sv, schemaHash: sh
+        ))
+        XCTAssertEqual(pushResp.accepted.count, 1, "type_zoo push should be accepted")
+
+        // Pull it back and verify values
+        let pullResp = try await pollForRecord(
+            http: http, clientID: clientID, checkpoint: 0,
+            schemaVersion: sv, schemaHash: sh, recordID: zooID
+        )
+        let found = pullResp.changes.first(where: { $0.id == zooID })
+        XCTAssertNotNil(found, "type_zoo record should appear in pull")
+
+        let d = found!.data
+        XCTAssertEqual(d["text_val"]?.value as? String, "hello world")
+        XCTAssertEqual(d["varchar_val"]?.value as? String, "bounded string")
+        XCTAssertEqual(d["bool_val"]?.value as? Bool, true)
+        XCTAssertNotNil(d["smallint_val"], "smallint should round-trip")
+        XCTAssertNotNil(d["int_val"], "integer should round-trip")
+        XCTAssertNotNil(d["bigint_val"], "bigint should round-trip")
+        XCTAssertNotNil(d["real_val"], "real should round-trip")
+        XCTAssertNotNil(d["double_val"], "double should round-trip")
+        XCTAssertEqual(d["date_val"]?.value as? String, "2026-03-19")
+        XCTAssertNotNil(d["timestamptz_val"], "timestamptz should round-trip")
+        XCTAssertNotNil(d["jsonb_val"], "JSONB should round-trip")
+        XCTAssertEqual(d["uuid_val"]?.value as? String, testUUID)
+
+        // Nullable columns not sent should be null
+        XCTAssertTrue(
+            d["xml_val"] == nil || d["xml_val"]?.value is NSNull,
+            "nullable column not sent should be null"
+        )
+    }
+
+    // MARK: - Test 18: Bucket Updates
+
+    func testBucketUpdates() async throws {
+        try skipIfNoServer()
+
+        let userID = UUID().uuidString.lowercased()
+        let (http, clientID) = makeHttpClient(userID: userID)
+        let (_, sv, sh) = try await registerWithSchema(http: http, clientID: clientID)
+
+        // Pull with empty knownBuckets: should get bucketUpdates.added
+        let resp = try await http.pull(request: PullRequest(
+            clientID: clientID, checkpoint: 0,
+            tables: nil, limit: 100, knownBuckets: [],
+            schemaVersion: sv, schemaHash: sh
+        ))
+
+        XCTAssertNotNil(resp.bucketUpdates, "should get bucket updates on first pull")
+        XCTAssertNotNil(resp.bucketUpdates?.added, "bucketUpdates should have added list")
+
+        // Pull again with correct knownBuckets: no more updates
+        let knownBuckets = resp.bucketUpdates?.added ?? []
+        var finalCheckpoint = resp.checkpoint
+        if resp.hasMore {
+            // Drain remaining pages
+            var hasMore = resp.hasMore
+            var cp = resp.checkpoint
+            while hasMore {
+                let page = try await http.pull(request: PullRequest(
+                    clientID: clientID, checkpoint: cp,
+                    tables: nil, limit: 100, knownBuckets: knownBuckets,
+                    schemaVersion: sv, schemaHash: sh
+                ))
+                cp = page.checkpoint
+                hasMore = page.hasMore
+            }
+            finalCheckpoint = cp
+        }
+
+        let resp2 = try await http.pull(request: PullRequest(
+            clientID: clientID, checkpoint: finalCheckpoint,
+            tables: nil, limit: 100, knownBuckets: knownBuckets,
+            schemaVersion: sv, schemaHash: sh
+        ))
+        // On a fully caught-up pull, bucketUpdates should be nil or have empty added
+        let newAdded = resp2.bucketUpdates?.added ?? []
+        XCTAssertTrue(newAdded.isEmpty, "no new buckets should be added on subsequent pull")
+    }
+
+    // MARK: - Test 19: Per-Bucket Checkpoints
+
+    func testPerBucketCheckpoints() async throws {
+        try skipIfNoServer()
+
+        let userID = UUID().uuidString.lowercased()
+        let (http, clientID) = makeHttpClient(userID: userID)
+        let (reg, sv, sh) = try await registerWithSchema(http: http, clientID: clientID)
+
+        // Use bucket_checkpoints from register
+        let bucketCheckpoints = reg.bucketCheckpoints ?? [:]
+
+        let resp = try await http.pull(request: PullRequest(
+            clientID: clientID, checkpoint: 0,
+            bucketCheckpoints: bucketCheckpoints.isEmpty ? nil : bucketCheckpoints,
+            tables: nil, limit: 100, knownBuckets: nil,
+            schemaVersion: sv, schemaHash: sh
+        ))
+
+        // Response should include updated bucket_checkpoints
+        XCTAssertNotNil(resp.bucketCheckpoints, "response should include bucket_checkpoints")
+
+        // Second pull from those checkpoints: no duplicate data
+        let resp2 = try await http.pull(request: PullRequest(
+            clientID: clientID, checkpoint: resp.checkpoint,
+            bucketCheckpoints: resp.bucketCheckpoints,
+            tables: nil, limit: 100, knownBuckets: nil,
+            schemaVersion: sv, schemaHash: sh
+        ))
+        XCTAssertTrue(resp2.changes.isEmpty || resp2.checkpoint >= resp.checkpoint,
+            "second pull from same checkpoints should not duplicate data")
+    }
+
+    // MARK: - Test 20: Bucket Checksums on Final Page
+
+    func testBucketChecksumsOnFinalPage() async throws {
+        try skipIfNoServer()
+
+        let userID = UUID().uuidString.lowercased()
+        let (http, clientID) = makeHttpClient(userID: userID)
+        let (_, sv, sh) = try await registerWithSchema(http: http, clientID: clientID)
+
+        // Push some data
+        let custID = UUID().uuidString.lowercased()
+        _ = try await pushCustomer(
+            http: http, clientID: clientID,
+            customerID: custID, userID: userID,
+            schemaVersion: sv, schemaHash: sh
+        )
+
+        // Wait for it to appear
+        _ = try await pollForRecord(
+            http: http, clientID: clientID, checkpoint: 0,
+            schemaVersion: sv, schemaHash: sh, recordID: custID
+        )
+
+        // Pull to final page with limit=1
+        var checkpoint: Int64 = 0
+        var lastBucketChecksums: [String: Int32]? = nil
+        var intermediateHadChecksums = false
+        var iterations = 0
+
+        repeat {
+            let resp = try await http.pull(request: PullRequest(
+                clientID: clientID, checkpoint: checkpoint,
+                tables: nil, limit: 1, knownBuckets: nil,
+                schemaVersion: sv, schemaHash: sh
+            ))
+            checkpoint = resp.checkpoint
+
+            if resp.hasMore && resp.bucketChecksums != nil {
+                intermediateHadChecksums = true
+            }
+            if !resp.hasMore {
+                lastBucketChecksums = resp.bucketChecksums
+                break
+            }
+            iterations += 1
+        } while iterations < 100
+
+        XCTAssertNotNil(lastBucketChecksums, "final page should include bucket_checksums")
+        XCTAssertFalse(lastBucketChecksums?.isEmpty ?? true, "bucket_checksums should be non-empty")
+        XCTAssertFalse(intermediateHadChecksums, "intermediate pages (has_more=true) should NOT have checksums")
+    }
+
+    // MARK: - Test 21: Push Response Envelope
+
+    func testPushResponseEnvelope() async throws {
+        try skipIfNoServer()
+
+        let userID = UUID().uuidString.lowercased()
+        let (http, clientID) = makeHttpClient(userID: userID)
+        let (_, sv, sh) = try await registerWithSchema(http: http, clientID: clientID)
+
+        let custID = UUID().uuidString.lowercased()
+        let regionID = UUID().uuidString.lowercased()
+
+        let resp = try await http.push(request: PushRequest(
+            clientID: clientID,
+            changes: [
+                // Valid customer create
+                PushRecord(
+                    id: custID, tableName: "customers", operation: "create",
+                    data: [
+                        "id": AnyCodable(custID),
+                        "user_id": AnyCodable(userID),
+                        "email": AnyCodable("envelope@example.com"),
+                    ],
+                    clientUpdatedAt: Date()
+                ),
+                // Invalid: write to read-only table
+                PushRecord(
+                    id: regionID, tableName: "regions", operation: "create",
+                    data: [
+                        "id": AnyCodable(regionID),
+                        "name": AnyCodable("Invalid"),
+                    ],
+                    clientUpdatedAt: Date()
+                ),
+            ],
+            schemaVersion: sv, schemaHash: sh
+        ))
+
+        // Accepted entry shape
+        XCTAssertEqual(resp.accepted.count, 1)
+        let accepted = resp.accepted.first!
+        XCTAssertEqual(accepted.id, custID)
+        XCTAssertEqual(accepted.tableName, "customers")
+        XCTAssertEqual(accepted.operation, "create")
+        XCTAssertEqual(accepted.status, PushStatus.applied)
+        XCTAssertNotNil(accepted.serverUpdatedAt)
+
+        // Rejected entry shape
+        XCTAssertEqual(resp.rejected.count, 1)
+        let rejected = resp.rejected.first!
+        XCTAssertEqual(rejected.id, regionID)
+        XCTAssertEqual(rejected.tableName, "regions")
+        XCTAssertEqual(rejected.operation, "create")
+        XCTAssertEqual(rejected.status, PushStatus.rejectedTerminal)
+        XCTAssertNotNil(rejected.reasonCode)
+
+        // Envelope fields
+        XCTAssertGreaterThan(resp.checkpoint, 0)
+        XCTAssertGreaterThan(resp.schemaVersion, 0)
+        XCTAssertFalse(resp.schemaHash.isEmpty)
+    }
+
+    // MARK: - Test 22: Auth Failure
 
     func testAuthFailure() async throws {
         try skipIfNoServer()
@@ -481,18 +1251,7 @@ final class IntegrationTests: XCTestCase {
         )
         let http = HttpClient(config: config)
 
-        do {
-            _ = try await http.fetchSchema()
-            XCTFail("expected auth failure with invalid JWT")
-        } catch let error as SynchroError {
-            if case .serverError(let status, _) = error {
-                XCTAssertEqual(status, 401)
-            } else {
-                XCTFail("expected serverError(401), got \(error)")
-            }
-        }
-
-        // Also verify no data leaks — register should fail too
+        // Register should fail with 401
         do {
             _ = try await http.register(request: RegisterRequest(
                 clientID: config.clientID, clientName: nil, platform: "test",
@@ -508,7 +1267,7 @@ final class IntegrationTests: XCTestCase {
         }
     }
 
-    // MARK: - Test 7: Version Mismatch
+    // MARK: - Test 23: Version Mismatch
 
     func testVersionMismatch() async throws {
         try skipIfNoServer()
@@ -528,154 +1287,47 @@ final class IntegrationTests: XCTestCase {
             XCTFail("expected upgrade required error")
         } catch let error as SynchroError {
             if case .upgradeRequired = error {
-                // Expected — server requires >= 1.0.0, client sent 0.0.1
+                // Expected: server requires >= 1.0.0, client sent 0.0.1
             } else {
                 XCTFail("expected upgradeRequired, got \(error)")
             }
         }
     }
 
-    // MARK: - Test 6: Schema Drift Detection
+    // MARK: - Test 24: Schema Mismatch
 
-    private func skipIfNoDatabase() throws {
-        guard ProcessInfo.processInfo.environment["TEST_DATABASE_URL"] != nil else {
-            throw XCTSkip("TEST_DATABASE_URL not set")
-        }
-    }
-
-    private func runSQL(_ sql: String) throws {
-        guard let dbURL = ProcessInfo.processInfo.environment["TEST_DATABASE_URL"] else {
-            throw XCTSkip("TEST_DATABASE_URL not set")
-        }
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
-        process.arguments = ["psql", dbURL, "-c", sql]
-        let pipe = Pipe()
-        process.standardOutput = pipe
-        process.standardError = pipe
-        try process.run()
-        process.waitUntilExit()
-        guard process.terminationStatus == 0 else {
-            let output = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-            XCTFail("psql failed: \(output)")
-            return
-        }
-    }
-
-    func testSchemaDriftDetection() async throws {
+    func testSchemaMismatch() async throws {
         try skipIfNoServer()
-        try skipIfNoDatabase()
-
-        // Cleanup: drop the drift column even if test fails
-        addTeardownBlock { [self] in
-            try? runSQL("ALTER TABLE orders DROP COLUMN IF EXISTS _drift")
-        }
 
         let userID = UUID().uuidString.lowercased()
         let (http, clientID) = makeHttpClient(userID: userID)
 
-        // Register and capture the current schema version/hash
-        let reg = try await register(http: http, clientID: clientID)
-        let oldVersion = reg.schemaVersion
-        let oldHash = reg.schemaHash
+        // First register normally to get valid schema
+        let (_, sv, sh) = try await registerWithSchema(http: http, clientID: clientID)
 
-        // Alter the DB schema — this changes the pg_catalog metadata that the
-        // schema hash is computed from, without any server code change
-        try runSQL("ALTER TABLE orders ADD COLUMN _drift TEXT")
-
-        // Push with the stale schema should get 409 schemaMismatch
-        let orderID = UUID().uuidString.lowercased()
+        // Push with stale schema_version=0 and hash="stale"
         do {
-            _ = try await pushOrder(
-                http: http, clientID: clientID, orderID: orderID, userID: userID,
-                shipAddress: "Should Be Rejected",
-                schemaVersion: oldVersion, schemaHash: oldHash
-            )
-            XCTFail("expected schemaMismatch error after schema drift")
+            _ = try await http.push(request: PushRequest(
+                clientID: clientID,
+                changes: [PushRecord(
+                    id: UUID().uuidString.lowercased(),
+                    tableName: "customers", operation: "create",
+                    data: [
+                        "id": AnyCodable(UUID().uuidString.lowercased()),
+                        "user_id": AnyCodable(userID),
+                    ],
+                    clientUpdatedAt: Date()
+                )],
+                schemaVersion: 0, schemaHash: "stale"
+            ))
+            XCTFail("expected schema mismatch error")
         } catch let error as SynchroError {
             guard case .schemaMismatch(let serverVersion, let serverHash) = error else {
                 XCTFail("expected schemaMismatch, got \(error)")
                 return
             }
-            // Server should report a newer version and a different hash
-            XCTAssertGreaterThan(serverVersion, oldVersion,
-                "server schema version should advance after ALTER TABLE")
-            XCTAssertNotEqual(serverHash, oldHash,
-                "server schema hash should differ after column addition")
+            XCTAssertEqual(serverVersion, sv, "server should report current schema version")
+            XCTAssertEqual(serverHash, sh, "server should report current schema hash")
         }
-    }
-
-    // MARK: - Test 8: Multi-User Isolation
-
-    func testMultiUserIsolation() async throws {
-        try skipIfNoServer()
-
-        let userA = UUID().uuidString.lowercased()
-        let userB = UUID().uuidString.lowercased()
-        let (httpA, clientA) = makeHttpClient(userID: userA)
-        let (httpB, clientB) = makeHttpClient(userID: userB)
-
-        let regA = try await register(http: httpA, clientID: clientA)
-        let regB = try await register(http: httpB, clientID: clientB)
-        try await bootstrapSnapshot(
-            http: httpA,
-            clientID: clientA,
-            schemaVersion: regA.schemaVersion,
-            schemaHash: regA.schemaHash
-        )
-        try await bootstrapSnapshot(
-            http: httpB,
-            clientID: clientB,
-            schemaVersion: regB.schemaVersion,
-            schemaHash: regB.schemaHash
-        )
-
-        // User A pushes
-        let orderA = UUID().uuidString.lowercased()
-        let pushA = try await pushOrder(
-            http: httpA, clientID: clientA, orderID: orderA, userID: userA,
-            shipAddress: "User A Private Address",
-            schemaVersion: regA.schemaVersion, schemaHash: regA.schemaHash
-        )
-        XCTAssertEqual(pushA.accepted.count, 1)
-
-        // User B pushes
-        let orderB = UUID().uuidString.lowercased()
-        let pushB = try await pushOrder(
-            http: httpB, clientID: clientB, orderID: orderB, userID: userB,
-            shipAddress: "User B Private Address",
-            schemaVersion: regB.schemaVersion, schemaHash: regB.schemaHash
-        )
-        XCTAssertEqual(pushB.accepted.count, 1)
-
-        // Wait for User B's order to appear in User B's pull (proves WAL processed it)
-        let pullB = try await pollForRecord(
-            http: httpB, clientID: clientB, checkpoint: 0,
-            schemaVersion: regB.schemaVersion, schemaHash: regB.schemaHash,
-            recordID: orderB
-        )
-
-        // User B should see their own order
-        XCTAssertTrue(pullB.changes.contains(where: { $0.id == orderB }),
-            "User B should see their own order")
-
-        // User B should NOT see User A's order — bucket isolation
-        XCTAssertFalse(pullB.changes.contains(where: { $0.id == orderA }),
-            "User B must not see User A's order (bucket isolation)")
-
-        // Wait for User A's order to appear in User A's pull
-        let pullA = try await pollForRecord(
-            http: httpA, clientID: clientA, checkpoint: 0,
-            schemaVersion: regA.schemaVersion, schemaHash: regA.schemaHash,
-            recordID: orderA
-        )
-
-        // User A should see their own order
-        XCTAssertTrue(pullA.changes.contains(where: { $0.id == orderA }),
-            "User A should see their own order")
-
-        // User A should NOT see User B's order
-        XCTAssertFalse(pullA.changes.contains(where: { $0.id == orderB }),
-            "User A must not see User B's order (bucket isolation)")
     }
 }

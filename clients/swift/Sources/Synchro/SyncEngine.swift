@@ -25,7 +25,6 @@ final class SyncEngine: @unchecked Sendable {
     private var currentStatus: SyncStatus = .stopped
     private var statusCallbacks: [UUID: (SyncStatus) -> Void] = [:]
     private var conflictCallbacks: [UUID: (ConflictEvent) -> Void] = [:]
-    private var snapshotCallbacks: [UUID: () async -> Bool] = [:]
     private let lock = NSLock()
     private var started = false
     private var cycleRunning = false
@@ -87,7 +86,7 @@ final class SyncEngine: @unchecked Sendable {
             )
             let registerResp = try await httpClient.register(request: registerReq)
 
-            let needsInitialSnapshot = try database.writeTransaction { db in
+            let needsInitialSync = try database.writeTransaction { db in
                 try SynchroMeta.set(db, key: .clientServerID, value: registerResp.id)
 
                 // Store per-bucket checkpoints from register response if available
@@ -98,14 +97,15 @@ final class SyncEngine: @unchecked Sendable {
                 }
 
                 let checkpoint = try SynchroMeta.getInt64(db, key: .checkpoint)
-                let snapshotComplete = try SynchroMeta.get(db, key: .snapshotComplete) == "1"
-                return checkpoint == 0 || !snapshotComplete
+                let initialSyncComplete = try SynchroMeta.get(db, key: .snapshotComplete) == "1"
+                return checkpoint == 0 || !initialSyncComplete
             }
 
             updateStatus(.idle)
 
-            if needsInitialSnapshot {
-                try await rebuildFromSnapshot(reason: "initial_sync_required", requiresApproval: false)
+            if needsInitialSync {
+                let buckets = registerResp.bucketCheckpoints.map { Array($0.keys) } ?? []
+                try await initialSync(buckets: buckets)
             }
 
             syncTask = Task { [weak self] in
@@ -164,18 +164,6 @@ final class SyncEngine: @unchecked Sendable {
         return CallbackCancellable { [weak self] in
             self?.lock.lock()
             self?.conflictCallbacks.removeValue(forKey: id)
-            self?.lock.unlock()
-        }
-    }
-
-    func onSnapshotRequired(_ callback: @escaping () async -> Bool) -> any Cancellable {
-        let id = UUID()
-        lock.lock()
-        snapshotCallbacks[id] = callback
-        lock.unlock()
-        return CallbackCancellable { [weak self] in
-            self?.lock.lock()
-            self?.snapshotCallbacks.removeValue(forKey: id)
             self?.lock.unlock()
         }
     }
@@ -351,11 +339,6 @@ final class SyncEngine: @unchecked Sendable {
 
             let response = try await httpClient.pull(request: request)
 
-            if response.snapshotRequired == true {
-                try await rebuildFromSnapshot(reason: response.snapshotReason ?? "snapshot_required", requiresApproval: response.snapshotReason != "initial_sync_required")
-                return
-            }
-
             try pullProcessor.applyPullPage(changes: response.changes, deletes: response.deletes, syncedTables: syncedTables)
             try pullProcessor.trackBucketMembership(records: response.changes)
             try pullProcessor.updateCheckpoint(response.checkpoint)
@@ -487,27 +470,9 @@ final class SyncEngine: @unchecked Sendable {
         }
     }
 
-    // MARK: - Snapshot
+    // MARK: - Initial Sync
 
-    private func rebuildFromSnapshot(reason: String, requiresApproval: Bool) async throws {
-        if requiresApproval {
-            try await runPush()
-            var approved = true
-            lock.lock()
-            let callbacks = snapshotCallbacks
-            lock.unlock()
-            for (_, callback) in callbacks {
-                let result = await callback()
-                if !result {
-                    approved = false
-                    break
-                }
-            }
-            guard approved else {
-                throw SynchroError.snapshotRequired
-            }
-        }
-
+    private func initialSync(buckets: [String]) async throws {
         let schema = SchemaResponse(
             schemaVersion: schemaVersion,
             schemaHash: schemaHash,
@@ -525,31 +490,12 @@ final class SyncEngine: @unchecked Sendable {
             try schemaManager.createSyncedTablesInTransaction(db, schema: schema)
         }
 
-        var cursor: SnapshotCursor? = nil
-        var hasMore = true
+        for bucketID in buckets {
+            try await rebuildBucket(bucketID: bucketID)
+        }
 
-        while hasMore {
-            let request = SnapshotRequest(
-                clientID: clientID,
-                cursor: cursor,
-                limit: config.snapshotPageSize,
-                schemaVersion: schemaVersion,
-                schemaHash: schemaHash
-            )
-
-            let response = try await httpClient.snapshot(request: request)
-
-            try pullProcessor.applySnapshotPage(records: response.records, syncedTables: syncedTables)
-
-            cursor = response.cursor
-            hasMore = response.hasMore
-
-            if !hasMore {
-                try database.writeTransaction { db in
-                    try SynchroMeta.setInt64(db, key: .checkpoint, value: response.checkpoint)
-                    try SynchroMeta.set(db, key: .snapshotComplete, value: "1")
-                }
-            }
+        try database.writeTransaction { db in
+            try SynchroMeta.set(db, key: .snapshotComplete, value: "1")
         }
     }
 

@@ -99,23 +99,6 @@ class PullProcessor(private val database: SynchroDatabase) {
         }
     }
 
-    fun applySnapshotPage(records: List<Record>, syncedTables: List<SchemaTable>) {
-        if (records.isEmpty()) return
-        val tableMap = syncedTables.associateBy { it.tableName }
-
-        database.writeTransaction { db ->
-            SynchroMeta.setSyncLock(db, true)
-            try {
-                for (record in records) {
-                    val schema = tableMap[record.tableName] ?: continue
-                    insertOrReplace(db, record, schema)
-                }
-            } finally {
-                SynchroMeta.setSyncLock(db, false)
-            }
-        }
-    }
-
     fun updateCheckpoint(checkpoint: Long) {
         database.writeTransaction { db ->
             val current = SynchroMeta.getInt64(db, MetaKey.CHECKPOINT)
@@ -341,23 +324,6 @@ class PullProcessor(private val database: SynchroDatabase) {
 
         val sql = "INSERT INTO $quoted ($quotedColumns) VALUES ($placeholders) ON CONFLICT ($quotedPK) DO UPDATE SET $updateClauses"
         executeWithTypedBindings(db, sql, dbValues)
-    }
-
-    private fun insertOrReplace(db: SQLiteDatabase, record: Record, schema: SchemaTable) {
-        val columns = schema.columns.map { it.name }
-        val pkCol = schema.primaryKey.firstOrNull() ?: "id"
-        val quoted = SQLiteHelpers.quoteIdentifier(record.tableName)
-
-        val dbValues = buildDatabaseValues(columns, pkCol, record.id, record.data)
-
-        val quotedColumns = columns.joinToString(", ") { SQLiteHelpers.quoteIdentifier(it) }
-        val placeholders = SQLiteHelpers.placeholders(columns.size)
-
-        executeWithTypedBindings(
-            db,
-            "INSERT OR REPLACE INTO $quoted ($quotedColumns) VALUES ($placeholders)",
-            dbValues
-        )
     }
 
     private fun buildDatabaseValues(

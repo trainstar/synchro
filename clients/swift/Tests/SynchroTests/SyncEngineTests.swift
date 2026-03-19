@@ -80,9 +80,6 @@ final class SyncEngineTests: XCTestCase {
             } else if path.hasSuffix("/sync/register") {
                 callLog.append("register")
                 return try self.mockResponse(json: self.registerJSON)
-            } else if path.hasSuffix("/sync/snapshot") {
-                callLog.append("snapshot")
-                return try self.mockResponse(json: self.snapshotJSON(checkpoint: 0, records: []))
             } else if path.hasSuffix("/sync/pull") {
                 callLog.append("pull")
                 return try self.mockResponse(json: self.pullJSON(checkpoint: 10))
@@ -96,7 +93,7 @@ final class SyncEngineTests: XCTestCase {
         try await engine.start()
 
         // Schema fetched, client registered, initial pull completed (no push — no pending)
-        XCTAssertEqual(callLog, ["schema", "register", "snapshot", "pull"])
+        XCTAssertEqual(callLog, ["schema", "register", "pull"])
 
         // Checkpoint advanced from pull
         let checkpoint = try db.readTransaction { db in try SynchroMeta.getInt64(db, key: .checkpoint) }
@@ -120,8 +117,6 @@ final class SyncEngineTests: XCTestCase {
                 return try self.mockResponse(json: self.schemaJSON)
             } else if path.hasSuffix("/sync/register") {
                 return try self.mockResponse(json: self.registerJSON)
-            } else if path.hasSuffix("/sync/snapshot") {
-                return try self.mockResponse(json: self.snapshotJSON(checkpoint: 0, records: []))
             } else if path.hasSuffix("/sync/push") {
                 pushCalled = true
                 // Accept the pushed record with a server timestamp
@@ -182,8 +177,6 @@ final class SyncEngineTests: XCTestCase {
                 return try self.mockResponse(json: self.schemaJSON)
             } else if path.hasSuffix("/sync/register") {
                 return try self.mockResponse(json: self.registerJSON)
-            } else if path.hasSuffix("/sync/snapshot") {
-                return try self.mockResponse(json: self.snapshotJSON(checkpoint: 0, records: []))
             } else if path.hasSuffix("/sync/pull") {
                 // Return a server record in the initial pull
                 let json: [String: Any] = [
@@ -229,8 +222,6 @@ final class SyncEngineTests: XCTestCase {
                 return try self.mockResponse(json: self.schemaJSON)
             } else if path.hasSuffix("/sync/register") {
                 return try self.mockResponse(json: self.registerJSON)
-            } else if path.hasSuffix("/sync/snapshot") {
-                return try self.mockResponse(json: self.snapshotJSON(checkpoint: 0, records: []))
             } else if path.hasSuffix("/sync/pull") {
                 pullCallCount += 1
                 if pullCallCount == 1 {
@@ -292,8 +283,6 @@ final class SyncEngineTests: XCTestCase {
                 return try self.mockResponse(json: self.schemaJSON)
             } else if path.hasSuffix("/sync/register") {
                 return try self.mockResponse(json: self.registerJSON)
-            } else if path.hasSuffix("/sync/snapshot") {
-                return try self.mockResponse(json: self.snapshotJSON(checkpoint: 0, records: []))
             } else if path.hasSuffix("/sync/push") {
                 pushCallCount += 1
                 if pushCallCount == 1 {
@@ -353,8 +342,6 @@ final class SyncEngineTests: XCTestCase {
                 return try self.mockResponse(json: self.schemaJSON)
             } else if path.hasSuffix("/sync/register") {
                 return try self.mockResponse(json: self.registerJSON)
-            } else if path.hasSuffix("/sync/snapshot") {
-                return try self.mockResponse(json: self.snapshotJSON(checkpoint: 0, records: []))
             } else if path.hasSuffix("/sync/pull") {
                 return try self.mockResponse(json: self.pullJSON(checkpoint: 10))
             }
@@ -390,95 +377,6 @@ final class SyncEngineTests: XCTestCase {
         XCTAssertEqual(statuses, ["stopped"])
     }
 
-    func testSnapshotFlowRebuildsTables() async throws {
-        var pullCallCount = 0
-        var snapshotCallCount = 0
-        var snapshotApproved = false
-
-        MockURLProtocol.requestHandler = { request in
-            let path = request.url!.path
-            if path.hasSuffix("/sync/schema") {
-                return try self.mockResponse(json: self.schemaJSON)
-            } else if path.hasSuffix("/sync/register") {
-                return try self.mockResponse(json: self.registerJSON)
-            } else if path.hasSuffix("/sync/pull") {
-                pullCallCount += 1
-                if pullCallCount == 1 {
-                    // Initial pull during start() — return snapshot_required
-                    let json: [String: Any] = [
-                        "changes": [] as [Any], "deletes": [] as [Any],
-                        "checkpoint": 0, "has_more": false,
-                        "snapshot_required": true,
-                        "schema_version": 1, "schema_hash": "test",
-                    ]
-                    return try self.mockResponse(json: json)
-                } else {
-                    XCTFail("Pull should not be called again after snapshot")
-                    return try self.mockResponse(json: self.pullJSON(checkpoint: 0))
-                }
-            } else if path.hasSuffix("/sync/snapshot") {
-                snapshotCallCount += 1
-                if snapshotCallCount == 1 {
-                    // Initial bootstrap snapshot is empty.
-                    let json = self.snapshotJSON(checkpoint: 0, records: [])
-                    return try self.mockResponse(json: json)
-                } else if snapshotCallCount == 2 {
-                    // Rebuild snapshot first page
-                    let json: [String: Any] = [
-                        "records": [
-                            ["id": "w1", "table_name": "orders",
-                             "data": ["id": "w1", "ship_address": "Rebuilt Address", "user_id": "u1",
-                                      "updated_at": "2026-01-01T12:00:00.000Z"] as [String: Any],
-                             "updated_at": "2026-01-01T12:00:00.000Z"] as [String: Any]
-                        ],
-                        "cursor": ["checkpoint": 50, "table_idx": 0, "after_id": "w1"] as [String: Any],
-                        "checkpoint": 50, "has_more": true,
-                        "schema_version": 1, "schema_hash": "test",
-                    ]
-                    return try self.mockResponse(json: json)
-                } else {
-                    // Final snapshot page
-                    let json: [String: Any] = [
-                        "records": [] as [Any],
-                        "checkpoint": 100, "has_more": false,
-                        "schema_version": 1, "schema_hash": "test",
-                    ]
-                    return try self.mockResponse(json: json)
-                }
-            }
-            return try self.mockResponse(statusCode: 500, json: ["error": "unexpected: \(request.url!.path)"])
-        }
-
-        let (engine, db) = try makeIntegrationEnv()
-        defer { engine.stop() }
-
-        // Register snapshot approval callback
-        let _ = engine.onSnapshotRequired {
-            snapshotApproved = true
-            return true
-        }
-
-        try await engine.start()
-
-        // Snapshot callback was invoked
-        XCTAssertTrue(snapshotApproved)
-
-        // Snapshot paged through (2 calls: first with data, second empty)
-        XCTAssertEqual(snapshotCallCount, 3)
-
-        // Rebuilt record exists in local DB
-        let row = try db.queryOne("SELECT ship_address FROM orders WHERE id = ?", params: ["w1"])
-        XCTAssertEqual(row?["ship_address"] as String?, "Rebuilt Address")
-
-        // Checkpoint set from final snapshot page
-        let checkpoint = try db.readTransaction { db in try SynchroMeta.getInt64(db, key: .checkpoint) }
-        XCTAssertEqual(checkpoint, 100)
-
-        // No pending changes (snapshot applied under sync_lock)
-        let tracker = ChangeTracker(database: db)
-        XCTAssertFalse(try tracker.hasPendingChanges())
-    }
-
     func testConflictCallbackFiresDuringSyncCycle() async throws {
         var receivedConflicts: [ConflictEvent] = []
 
@@ -488,8 +386,6 @@ final class SyncEngineTests: XCTestCase {
                 return try self.mockResponse(json: self.schemaJSON)
             } else if path.hasSuffix("/sync/register") {
                 return try self.mockResponse(json: self.registerJSON)
-            } else if path.hasSuffix("/sync/snapshot") {
-                return try self.mockResponse(json: self.snapshotJSON(checkpoint: 0, records: []))
             } else if path.hasSuffix("/sync/push") {
                 // Reject the push with a conflict + server version
                 let body = try JSONSerialization.jsonObject(with: request.bodyData()!) as! [String: Any]
@@ -666,16 +562,6 @@ final class SyncEngineTests: XCTestCase {
         [
             "changes": [] as [Any],
             "deletes": [] as [Any],
-            "checkpoint": checkpoint,
-            "has_more": false,
-            "schema_version": 1,
-            "schema_hash": "test",
-        ]
-    }
-
-    private func snapshotJSON(checkpoint: Int, records: [[String: Any]]) -> [String: Any] {
-        [
-            "records": records,
             "checkpoint": checkpoint,
             "has_more": false,
             "schema_version": 1,

@@ -71,8 +71,6 @@ public struct PullResponse: Codable, Sendable {
     public var checkpoint: Int64
     public var bucketCheckpoints: [String: Int64]?
     public var hasMore: Bool
-    public var snapshotRequired: Bool?
-    public var snapshotReason: String?
     public var rebuildBuckets: [String]?
     public var bucketChecksums: [String: Int32]?
     public var bucketUpdates: BucketUpdate?
@@ -85,8 +83,6 @@ public struct PullResponse: Codable, Sendable {
         case checkpoint
         case bucketCheckpoints = "bucket_checkpoints"
         case hasMore = "has_more"
-        case snapshotRequired = "snapshot_required"
-        case snapshotReason = "snapshot_reason"
         case rebuildBuckets = "rebuild_buckets"
         case bucketChecksums = "bucket_checksums"
         case bucketUpdates = "bucket_updates"
@@ -226,54 +222,6 @@ public struct PushResult: Codable, Sendable {
         self.serverVersion = serverVersion
         self.serverUpdatedAt = serverUpdatedAt
         self.serverDeletedAt = serverDeletedAt
-    }
-}
-
-// MARK: - Snapshot
-
-public struct SnapshotRequest: Codable, Sendable {
-    public var clientID: String
-    public var cursor: SnapshotCursor?
-    public var limit: Int?
-    public var schemaVersion: Int64
-    public var schemaHash: String
-
-    enum CodingKeys: String, CodingKey {
-        case clientID = "client_id"
-        case cursor
-        case limit
-        case schemaVersion = "schema_version"
-        case schemaHash = "schema_hash"
-    }
-}
-
-public struct SnapshotCursor: Codable, Sendable {
-    public var checkpoint: Int64
-    public var tableIndex: Int
-    public var afterID: String
-
-    enum CodingKeys: String, CodingKey {
-        case checkpoint
-        case tableIndex = "table_idx"
-        case afterID = "after_id"
-    }
-}
-
-public struct SnapshotResponse: Codable, Sendable {
-    public var records: [Record]
-    public var cursor: SnapshotCursor?
-    public var checkpoint: Int64
-    public var hasMore: Bool
-    public var schemaVersion: Int64
-    public var schemaHash: String
-
-    enum CodingKeys: String, CodingKey {
-        case records
-        case cursor
-        case checkpoint
-        case hasMore = "has_more"
-        case schemaVersion = "schema_version"
-        case schemaHash = "schema_hash"
     }
 }
 

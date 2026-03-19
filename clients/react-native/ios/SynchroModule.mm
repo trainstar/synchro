@@ -54,8 +54,6 @@
         [self emitOnConflict:body];
     } else if ([name isEqualToString:@"onAuthRequest"]) {
         [self emitOnAuthRequest:body];
-    } else if ([name isEqualToString:@"onSnapshotRequired"]) {
-        [self emitOnSnapshotRequired:body];
     } else if ([name isEqualToString:@"onChange"]) {
         [self emitOnChange:body];
     } else if ([name isEqualToString:@"onQueryResult"]) {
@@ -79,7 +77,6 @@
         @"maxRetryAttempts": @(config.maxRetryAttempts()),
         @"pullPageSize": @(config.pullPageSize()),
         @"pushBatchSize": @(config.pushBatchSize()),
-        @"snapshotPageSize": @(config.snapshotPageSize()),
     } mutableCopy];
     NSString *seedPath = config.seedDatabasePath();
     if (seedPath) {
@@ -252,11 +249,6 @@
     [self.impl rejectAuthRequest:requestID error:error];
 }
 
-- (void)resolveSnapshotRequest:(NSString *)requestID
-                      approved:(BOOL)approved {
-    [self.impl resolveSnapshotRequest:requestID approved:approved];
-}
-
 - (void)addListener:(NSString *)eventName {
     // No-op: event delivery handled by Codegen EventEmitter
 }
@@ -364,9 +356,6 @@ RCT_EXTERN_METHOD(resolveAuthRequest:(NSString *)requestID
                   token:(NSString *)token)
 RCT_EXTERN_METHOD(rejectAuthRequest:(NSString *)requestID
                   error:(NSString *)error)
-RCT_EXTERN_METHOD(resolveSnapshotRequest:(NSString *)requestID
-                  approved:(BOOL)approved)
-
 @end
 
 #endif

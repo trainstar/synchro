@@ -62,13 +62,6 @@ export class SchemaMismatchError extends SynchroError {
   }
 }
 
-export class SnapshotRequiredError extends SynchroError {
-  constructor() {
-    super('SNAPSHOT_REQUIRED', 'Full snapshot required');
-    this.name = 'SnapshotRequiredError';
-  }
-}
-
 export interface PushResultItem {
   recordID: string;
   table: string;
@@ -171,8 +164,6 @@ export function mapNativeError(error: unknown): SynchroError {
         parseInt(userInfo.serverVersion ?? '0', 10),
         userInfo.serverHash ?? ''
       );
-    case 'SNAPSHOT_REQUIRED':
-      return new SnapshotRequiredError();
     case 'PUSH_REJECTED': {
       let results: PushResultItem[] = [];
       try {

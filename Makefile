@@ -64,7 +64,7 @@ ANDROID_HOME ?= /opt/homebrew/share/android-commandlinetools
 
 # Synchrod test server defaults.
 SYNCHRO_TEST_HOST ?= localhost
-SYNCHRO_TEST_PORT ?= 8080
+SYNCHRO_TEST_PORT ?= $(SYNCHROD_PG_PORT)
 SYNCHRO_TEST_JWT_SECRET ?= test-secret-for-integration-tests
 MIN_CLIENT_VERSION ?= 1.0.0
 SYNCHROD_PID_FILE ?= .synchrod-test.pid
@@ -264,13 +264,13 @@ synchrod-test-restart: synchrod-test-stop db-prepare-server
 test-swift-unit:
 	cd clients/swift && swift test
 
-test-swift: synchrod-test-restart
+test-swift: synchrod-pg-test-restart
 	cd clients/swift && $(TEST_ENV) swift test
 
 test-kotlin-unit:
 	cd clients/kotlin && ANDROID_HOME="$(ANDROID_HOME)" ./gradlew :synchro:test
 
-test-kotlin: synchrod-test-restart
+test-kotlin: synchrod-pg-test-restart
 	cd clients/kotlin && ANDROID_HOME="$(ANDROID_HOME)" $(TEST_ENV) ./gradlew :synchro:test
 
 test-kotlin-integration: test-kotlin
@@ -278,11 +278,11 @@ test-kotlin-integration: test-kotlin
 test-rn-unit:
 	cd clients/react-native && npm test -- --testPathIgnorePatterns=e2e __mocks__
 
-test-rn-e2e-ios: synchrod-test-restart
+test-rn-e2e-ios: synchrod-pg-test-restart
 	cd clients/react-native/example && \
 		$(TEST_ENV) npx detox test --configuration ios.sim.debug
 
-test-rn-e2e-android: synchrod-test-restart
+test-rn-e2e-android: synchrod-pg-test-restart
 	cd clients/react-native/example && \
 		$(TEST_ENV) npx detox test --configuration android.emu.debug
 
