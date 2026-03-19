@@ -315,51 +315,18 @@ fn load_bucket_details(
 }
 
 fn load_changelog_stats(client: &SpiClient<'_>) -> serde_json::Value {
-    let tup = match client.select(
-        "SELECT COALESCE(MIN(seq), 0) AS min_seq, \
-         COALESCE(MAX(seq), 0) AS max_seq, \
-         COUNT(*) AS total \
-         FROM sync_changelog",
-        None,
+    // Single query for all three stats (consistent snapshot).
+    match Spi::get_three_with_args::<i64, i64, i64>(
+        "SELECT COALESCE(MIN(seq), 0), COALESCE(MAX(seq), 0), COUNT(*) FROM sync_changelog",
         &[],
     ) {
-        Ok(t) => t,
-        Err(_) => {
-            return serde_json::json!({
-                "min_seq": 0,
-                "max_seq": 0,
-                "total_entries": 0,
-            })
-        }
-    };
-
-    let min_seq: i64 = tup.first().get_one::<i64>().ok().flatten().unwrap_or(0);
-
-    // Re-query for max_seq and total since we consumed the tuple table.
-    let tup2 = match client.select(
-        "SELECT COALESCE(MAX(seq), 0) AS max_seq, COUNT(*) AS total FROM sync_changelog",
-        None,
-        &[],
-    ) {
-        Ok(t) => t,
-        Err(_) => {
-            return serde_json::json!({
-                "min_seq": min_seq,
-                "max_seq": 0,
-                "total_entries": 0,
-            })
-        }
-    };
-
-    // Use get_two to get both values from the same row.
-    match tup2.first().get_two::<i64, i64>() {
-        Ok((max_seq, total)) => serde_json::json!({
-            "min_seq": min_seq,
+        Ok((min_seq, max_seq, total)) => serde_json::json!({
+            "min_seq": min_seq.unwrap_or(0),
             "max_seq": max_seq.unwrap_or(0),
             "total_entries": total.unwrap_or(0),
         }),
         Err(_) => serde_json::json!({
-            "min_seq": min_seq,
+            "min_seq": 0,
             "max_seq": 0,
             "total_entries": 0,
         }),

@@ -50,7 +50,7 @@ fn deactivate_stale_clients(client: &mut SpiClient<'_>, threshold: &str) -> i64 
         &[threshold.into()],
     ) {
         Ok(tup) => tup.len() as i64,
-        Err(_) => 0,
+        Err(e) => pgrx::error!("deactivating stale clients: {}", e),
     }
 }
 
@@ -70,7 +70,7 @@ fn calculate_safe_seq(client: &SpiClient<'_>) -> i64 {
             .ok()
             .flatten()
             .unwrap_or(0),
-        Err(_) => 0,
+        Err(e) => pgrx::error!("querying bucket checkpoints for safe seq: {}", e),
     };
 
     // Legacy single checkpoint (fallback for clients without per-bucket CPs).
@@ -92,7 +92,7 @@ fn calculate_safe_seq(client: &SpiClient<'_>) -> i64 {
             .ok()
             .flatten()
             .unwrap_or(0),
-        Err(_) => 0,
+        Err(e) => pgrx::error!("querying legacy checkpoints for safe seq: {}", e),
     };
 
     // Take the minimum of both (0 means that source has no data).
