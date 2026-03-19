@@ -48,3 +48,5 @@ extensions/target/
 AGENTS.md
 CLAUDE.md
 synchrod-pg
+.synchrod-pg-test.log
+.synchrod-pg-test.pid
