@@ -73,7 +73,7 @@ fn synchro_register_client(
 }
 
 /// Validate client schema version/hash against the server manifest.
-fn validate_schema(schema_version: i64, schema_hash: &str) {
+pub fn validate_schema(schema_version: i64, schema_hash: &str) {
     if schema_version == 0 && schema_hash.is_empty() {
         return;
     }
