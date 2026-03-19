@@ -1593,6 +1593,7 @@ dependencies = [
 name = "synchro-pg"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "pgrx",
  "pgrx-tests",
  "serde",
