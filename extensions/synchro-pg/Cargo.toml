@@ -1,0 +1,28 @@
+[package]
+name = "synchro-pg"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "PostgreSQL extension for Synchro sync engine (pgrx)"
+
+[lib]
+crate-type = ["cdylib", "lib"]
+
+[features]
+default = ["pg18"]
+pg14 = ["pgrx/pg14", "pgrx-tests/pg14"]
+pg15 = ["pgrx/pg15", "pgrx-tests/pg15"]
+pg16 = ["pgrx/pg16", "pgrx-tests/pg16"]
+pg17 = ["pgrx/pg17", "pgrx-tests/pg17"]
+pg18 = ["pgrx/pg18", "pgrx-tests/pg18"]
+pg_test = []
+
+[dependencies]
+synchro-core = { path = "../synchro-core" }
+pgrx = "0.17"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+chrono = { version = "0.4", features = ["serde"] }
+
+[dev-dependencies]
+pgrx-tests = "0.17"

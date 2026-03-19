@@ -38,6 +38,9 @@ docs/node_modules/
 docs/dist/
 docs/.astro/
 
+# Rust build artifacts
+extensions/target/
+
 # Local-only
 .ignore/
 
