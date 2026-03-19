@@ -46,6 +46,10 @@ func testServer(t *testing.T) *httptest.Server {
 		t.Skip("synchro_pg extension not installed")
 	}
 
+	// Clean up stale test clients from prior runs.
+	_, _ = db.ExecContext(context.Background(),
+		"DELETE FROM sync_clients WHERE client_id LIKE 'test-%' OR client_id LIKE '%-client'")
+
 	handler := Routes(Config{
 		DB:               db,
 		JWTSecret:        []byte("test-secret-for-integration-tests"),
@@ -321,17 +325,40 @@ func TestDebugRequiresAuth(t *testing.T) {
 }
 
 func TestSchemaMismatch409Body(t *testing.T) {
-	srv := testServer(t)
+	dbURL := os.Getenv("TEST_DATABASE_URL")
+	if dbURL == "" {
+		t.Skip("TEST_DATABASE_URL not set")
+	}
+
+	db, err := sql.Open("pgx", dbURL)
+	if err != nil {
+		t.Fatalf("opening database: %v", err)
+	}
+	defer db.Close()
+
+	// Create a test table and register it to populate the schema manifest.
+	_, _ = db.Exec("CREATE TABLE IF NOT EXISTS test_mismatch_tbl (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), name TEXT, updated_at TIMESTAMPTZ DEFAULT now(), deleted_at TIMESTAMPTZ)")
+	_, _ = db.Exec("SELECT synchro_register_table('test_mismatch_tbl', $$SELECT ARRAY['global'] FROM test_mismatch_tbl WHERE id = $1::uuid$$, 'id', 'updated_at', 'deleted_at', 'read_only')")
+	t.Cleanup(func() {
+		_, _ = db.Exec("SELECT synchro_unregister_table('test_mismatch_tbl')")
+		_, _ = db.Exec("DROP TABLE IF EXISTS test_mismatch_tbl")
+	})
+
+	handler := Routes(Config{
+		DB:        db,
+		JWTSecret: []byte("test-secret-for-integration-tests"),
+	})
+	srv := httptest.NewServer(handler)
+	defer srv.Close()
+
 	token := testToken("user-1")
 
-	// Register the client first (with no schema validation).
+	// Register the client (with no schema validation).
 	doJSON(t, "POST", srv.URL+"/sync/register", token, map[string]any{
 		"client_id": "mismatch-client", "schema_version": 0, "schema_hash": "",
 	})
 
-	// Push with wrong schema version/hash. If manifest is empty (no tables
-	// registered), validation is skipped and this returns 200. If manifest has
-	// entries, this returns 409.
+	// Push with wrong schema. Manifest has entries now, so this should return 409.
 	status, body := doJSON(t, "POST", srv.URL+"/sync/push", token, map[string]any{
 		"client_id":      "mismatch-client",
 		"changes":        []map[string]any{},
@@ -339,22 +366,17 @@ func TestSchemaMismatch409Body(t *testing.T) {
 		"schema_hash":    "definitely_wrong_hash",
 	})
 
-	if status == 409 {
-		// Verify the response body has the structured fields.
-		if body["error"] != "schema_mismatch" {
-			t.Errorf("expected error='schema_mismatch', got %v", body["error"])
-		}
-		if body["server_schema_version"] == nil {
-			t.Error("409 response missing 'server_schema_version'")
-		}
-		if body["server_schema_hash"] == nil {
-			t.Error("409 response missing 'server_schema_hash'")
-		}
-	} else if status == 200 {
-		// No schema manifest entries. Test passes (schema validation was skipped).
-		t.Log("schema manifest empty, schema mismatch test skipped (no tables registered)")
-	} else {
-		t.Fatalf("expected 409 or 200, got %d: %v", status, body)
+	if status != 409 {
+		t.Fatalf("expected 409, got %d: %v", status, body)
+	}
+	if body["error"] != "schema_mismatch" {
+		t.Errorf("expected error='schema_mismatch', got %v", body["error"])
+	}
+	if body["server_schema_version"] == nil {
+		t.Error("409 response missing 'server_schema_version'")
+	}
+	if body["server_schema_hash"] == nil {
+		t.Error("409 response missing 'server_schema_hash'")
 	}
 }
 
