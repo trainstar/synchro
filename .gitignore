@@ -47,3 +47,4 @@ extensions/target/
 # AI config
 AGENTS.md
 CLAUDE.md
+synchrod-pg
