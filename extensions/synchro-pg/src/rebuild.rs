@@ -13,7 +13,7 @@ use crate::registry::load_registry;
 /// Returns all current records in a bucket via sync_bucket_edges,
 /// using keyset (cursor) pagination. Each page returns hydrated records
 /// with a cursor for the next page. On the final page, includes the
-/// bucket checksum and a checkpoint (MAX seq) for the client to adopt.
+/// bucket checksum and sets the client's checkpoint for this bucket.
 #[pg_extern]
 fn synchro_rebuild(
     p_user_id: &str,
@@ -29,19 +29,35 @@ fn synchro_rebuild(
         validate_schema(p_schema_version, p_schema_hash);
     }
 
-    // Validate client exists.
-    let _ = load_client_buckets(p_user_id, p_client_id);
-
     let limit = clamp_rebuild_limit(p_limit);
 
-    let registry = match load_registry() {
-        Ok(r) => r,
-        Err(e) => pgrx::error!("failed to load registry: {}", e),
-    };
-
-    let (schema_version, schema_hash) = get_latest_schema();
-
     Spi::connect_mut(|client| {
+        // Set RLS context.
+        let _ = client.update(
+            "SELECT set_config('app.user_id', $1, true)",
+            None,
+            &[p_user_id.into()],
+        );
+
+        // Validate client exists and is subscribed to this bucket.
+        let bucket_subs = load_client_buckets(client, p_user_id, p_client_id);
+        if !bucket_subs.contains(&p_bucket_id.to_string()) {
+            pgrx::error!(
+                "client {}/{} is not subscribed to bucket {:?}",
+                p_user_id,
+                p_client_id,
+                p_bucket_id
+            );
+        }
+
+        // Load registry for hydration.
+        let registry = match load_registry() {
+            Ok(r) => r,
+            Err(e) => pgrx::error!("failed to load registry: {}", e),
+        };
+
+        let (schema_version, schema_hash) = get_latest_schema(client);
+
         // Capture rebuild checkpoint: MAX(seq) at this moment.
         let rebuild_checkpoint: i64 = {
             let tup = client
@@ -53,20 +69,19 @@ fn synchro_rebuild(
                 .unwrap_or_else(|e| pgrx::error!("querying max seq: {}", e));
             let mut cp = 0i64;
             for row in tup {
-                cp = row.get_by_name("cp").unwrap_or(None).unwrap_or(0);
+                cp = row
+                    .get_by_name::<i64, &str>("cp")
+                    .unwrap_or(None)
+                    .unwrap_or(0);
             }
             cp
         };
 
         // Parse cursor: "table_name|record_id" or empty.
-        let (cursor_table, cursor_id) = parse_cursor(p_cursor);
+        let cursor_parts = parse_cursor(p_cursor);
 
         // Query bucket edges with keyset pagination.
-        let edges = if let (Some(ct), Some(ci)) = (&cursor_table, &cursor_id) {
-            query_edges_with_cursor(client, p_bucket_id, ct, ci, limit + 1)
-        } else {
-            query_edges(client, p_bucket_id, limit + 1)
-        };
+        let edges = query_edges(client, p_bucket_id, cursor_parts.as_ref(), limit + 1);
 
         // Detect has_more.
         let has_more = edges.len() > limit as usize;
@@ -77,10 +92,17 @@ fn synchro_rebuild(
         };
 
         if edges.is_empty() {
-            // Final page (or empty bucket). Set checkpoint.
-            set_rebuild_checkpoint(client, p_user_id, p_client_id, p_bucket_id, rebuild_checkpoint);
+            // Final page (or empty bucket). Set checkpoint and advance legacy.
+            complete_rebuild(
+                client,
+                p_user_id,
+                p_client_id,
+                p_bucket_id,
+                rebuild_checkpoint,
+            );
 
-            let bucket_checksums = compute_bucket_checksums(client, &[p_bucket_id.to_string()]);
+            let bucket_checksums =
+                compute_bucket_checksums(client, &[p_bucket_id.to_string()]);
             let bucket_checksum = bucket_checksums.get(p_bucket_id).copied();
 
             return pgrx::JsonB(serde_json::json!({
@@ -111,7 +133,7 @@ fn synchro_rebuild(
             let hydrated = hydrate_records(client, table_name, &id_refs, &registry);
 
             for mut record in hydrated {
-                // Filter out soft-deleted records (rebuild is snapshot mode).
+                // Rebuild is snapshot mode: filter out soft-deleted records.
                 let is_deleted = record
                     .get("deleted_at")
                     .and_then(|v| v.as_str())
@@ -141,7 +163,7 @@ fn synchro_rebuild(
 
         // On final page: compute bucket checksum and set checkpoint.
         let bucket_checksum = if !has_more {
-            set_rebuild_checkpoint(
+            complete_rebuild(
                 client,
                 p_user_id,
                 p_client_id,
@@ -175,97 +197,74 @@ fn synchro_rebuild(
 // Internal helpers
 // ---------------------------------------------------------------------------
 
-fn parse_cursor(cursor: &str) -> (Option<String>, Option<String>) {
+fn parse_cursor(cursor: &str) -> Option<(String, String)> {
     if cursor.is_empty() {
-        return (None, None);
+        return None;
     }
-    match cursor.split_once('|') {
-        Some((table, id)) => (Some(table.to_string()), Some(id.to_string())),
-        None => (None, None),
-    }
+    cursor
+        .split_once('|')
+        .map(|(t, id)| (t.to_string(), id.to_string()))
 }
 
 fn query_edges(
     client: &SpiClient<'_>,
     bucket_id: &str,
+    cursor: Option<&(String, String)>,
     limit: i32,
 ) -> Vec<(String, String)> {
-    let tup_table = match client.select(
-        "SELECT table_name, record_id FROM sync_bucket_edges \
-         WHERE bucket_id = $1 \
-         ORDER BY table_name, record_id \
-         LIMIT $2",
-        None,
-        &[bucket_id.into(), limit.into()],
-    ) {
+    let tup_table = if let Some((cursor_table, cursor_id)) = cursor {
+        client.select(
+            "SELECT table_name, record_id FROM sync_bucket_edges \
+             WHERE bucket_id = $1 AND (table_name, record_id) > ($2, $3) \
+             ORDER BY table_name, record_id LIMIT $4",
+            None,
+            &[
+                bucket_id.into(),
+                cursor_table.as_str().into(),
+                cursor_id.as_str().into(),
+                limit.into(),
+            ],
+        )
+    } else {
+        client.select(
+            "SELECT table_name, record_id FROM sync_bucket_edges \
+             WHERE bucket_id = $1 \
+             ORDER BY table_name, record_id LIMIT $2",
+            None,
+            &[bucket_id.into(), limit.into()],
+        )
+    };
+
+    let tup_table = match tup_table {
         Ok(t) => t,
         Err(e) => pgrx::error!("querying bucket edges: {}", e),
     };
 
     let mut edges = Vec::new();
     for row in tup_table {
-        let table: String = row
-            .get_by_name::<String, &str>("table_name")
-            .unwrap_or(None)
-            .unwrap_or_default();
-        let record: String = row
-            .get_by_name::<String, &str>("record_id")
-            .unwrap_or(None)
-            .unwrap_or_default();
+        let table: String = match row.get_by_name::<String, &str>("table_name") {
+            Ok(Some(v)) if !v.is_empty() => v,
+            _ => continue,
+        };
+        let record: String = match row.get_by_name::<String, &str>("record_id") {
+            Ok(Some(v)) if !v.is_empty() => v,
+            _ => continue,
+        };
         edges.push((table, record));
     }
     edges
 }
 
-fn query_edges_with_cursor(
-    client: &SpiClient<'_>,
-    bucket_id: &str,
-    cursor_table: &str,
-    cursor_id: &str,
-    limit: i32,
-) -> Vec<(String, String)> {
-    let tup_table = match client.select(
-        "SELECT table_name, record_id FROM sync_bucket_edges \
-         WHERE bucket_id = $1 \
-         AND (table_name, record_id) > ($2, $3) \
-         ORDER BY table_name, record_id \
-         LIMIT $4",
-        None,
-        &[
-            bucket_id.into(),
-            cursor_table.into(),
-            cursor_id.into(),
-            limit.into(),
-        ],
-    ) {
-        Ok(t) => t,
-        Err(e) => pgrx::error!("querying bucket edges with cursor: {}", e),
-    };
-
-    let mut edges = Vec::new();
-    for row in tup_table {
-        let table: String = row
-            .get_by_name::<String, &str>("table_name")
-            .unwrap_or(None)
-            .unwrap_or_default();
-        let record: String = row
-            .get_by_name::<String, &str>("record_id")
-            .unwrap_or(None)
-            .unwrap_or_default();
-        edges.push((table, record));
-    }
-    edges
-}
-
-/// Set the client's checkpoint for a bucket after rebuild completes.
-/// Uses unconditional upsert (no WHERE checkpoint < constraint).
-fn set_rebuild_checkpoint(
+/// Complete a rebuild: set bucket checkpoint (unconditional), advance legacy
+/// checkpoint, sync per-bucket checkpoints, reactivate client.
+fn complete_rebuild(
     client: &mut SpiClient<'_>,
     user_id: &str,
     client_id: &str,
     bucket_id: &str,
     checkpoint: i64,
 ) {
+    // Set the bucket checkpoint unconditionally.
     let _ = client.update(
         "INSERT INTO sync_client_checkpoints \
          (user_id, client_id, bucket_id, checkpoint) \
@@ -279,5 +278,24 @@ fn set_rebuild_checkpoint(
             bucket_id.into(),
             checkpoint.into(),
         ],
+    );
+
+    // Advance legacy checkpoint (monotonic).
+    let _ = client.update(
+        "UPDATE sync_clients \
+         SET last_pull_seq = $3, last_pull_at = now(), last_sync_at = now() \
+         WHERE user_id = $1 AND client_id = $2 \
+         AND (last_pull_seq IS NULL OR last_pull_seq < $3)",
+        None,
+        &[user_id.into(), client_id.into(), checkpoint.into()],
+    );
+
+    // Sync all per-bucket checkpoints behind this value.
+    let _ = client.update(
+        "UPDATE sync_client_checkpoints \
+         SET checkpoint = $3, updated_at = now() \
+         WHERE user_id = $1 AND client_id = $2 AND checkpoint < $3",
+        None,
+        &[user_id.into(), client_id.into(), checkpoint.into()],
     );
 }

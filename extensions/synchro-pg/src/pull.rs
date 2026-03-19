@@ -5,7 +5,7 @@ use synchro_core::dedup::{deduplicate_entries, ChangelogEntry as DedupEntry};
 use synchro_core::protocol::{clamp_pull_limit, Operation};
 
 use crate::client::validate_schema;
-use crate::registry::{load_registry, TableRegistration};
+use crate::registry::TableRegistration;
 
 /// Pull changes for a client.
 ///
@@ -34,29 +34,53 @@ fn synchro_pull(
 
     let limit = clamp_pull_limit(p_limit);
 
-    // Load client bucket subscriptions.
-    let bucket_subs = load_client_buckets(p_user_id, p_client_id);
-
-    // Load registry for hydration.
-    let registry = match load_registry() {
-        Ok(r) => r,
-        Err(e) => pgrx::error!("failed to load registry: {}", e),
-    };
-
-    // Get schema info.
-    let (schema_version, schema_hash) = get_latest_schema();
-
     // Determine pull mode.
     let per_bucket = p_bucket_checkpoints.is_some();
     let bucket_cps: std::collections::HashMap<String, i64> = match &p_bucket_checkpoints {
-        Some(jsonb) => serde_json::from_value(jsonb.0.clone()).unwrap_or_default(),
+        Some(jsonb) => serde_json::from_value(jsonb.0.clone())
+            .unwrap_or_else(|e| pgrx::error!("invalid bucket_checkpoints JSON: {}", e)),
         None => std::collections::HashMap::new(),
     };
 
-    // Detect stale buckets.
-    let stale_buckets = detect_stale_buckets(&bucket_subs, &bucket_cps);
-
+    // All reads and writes in a single SPI transaction to avoid TOCTOU races.
     Spi::connect_mut(|client| {
+        // Set RLS context.
+        let _ = client.update(
+            "SELECT set_config('app.user_id', $1, true)",
+            None,
+            &[p_user_id.into()],
+        );
+
+        // Load client bucket subscriptions.
+        let bucket_subs = load_client_buckets(client, p_user_id, p_client_id);
+
+        // Get schema info.
+        let (schema_version, schema_hash) = get_latest_schema(client);
+
+        // Detect stale buckets.
+        let stale_buckets = detect_stale_buckets(client, &bucket_subs, &bucket_cps);
+
+        // If stale buckets detected, return immediately with rebuild instruction.
+        // Do NOT query changelog or advance checkpoints (Go behavior).
+        if !stale_buckets.is_empty() {
+            let mut resp = serde_json::json!({
+                "changes": [],
+                "deletes": [],
+                "checkpoint": p_checkpoint,
+                "has_more": false,
+                "rebuild_buckets": stale_buckets,
+                "schema_version": schema_version,
+                "schema_hash": schema_hash,
+            });
+            if per_bucket {
+                resp["bucket_checkpoints"] = serde_json::json!(bucket_cps);
+            }
+            return pgrx::JsonB(resp);
+        }
+
+        // Load registry for hydration.
+        let registry = load_registry_inner(client);
+
         // Determine effective checkpoint.
         let effective_cp = if per_bucket {
             bucket_subs
@@ -78,7 +102,7 @@ fn synchro_pull(
             &tables_param,
         );
 
-        // Filter per-bucket (only include entries beyond each bucket's checkpoint).
+        // Filter per-bucket (only entries beyond each bucket's checkpoint).
         let filtered: Vec<RawChangelogEntry> = if per_bucket {
             raw_entries
                 .into_iter()
@@ -100,14 +124,19 @@ fn synchro_pull(
         };
 
         if entries.is_empty() {
-            return pgrx::JsonB(build_empty_response(
-                p_checkpoint,
-                &bucket_cps,
-                per_bucket,
-                &stale_buckets,
-                schema_version,
-                &schema_hash,
-            ));
+            let checkpoint_val = if per_bucket { effective_cp } else { p_checkpoint };
+            let mut resp = serde_json::json!({
+                "changes": [],
+                "deletes": [],
+                "checkpoint": checkpoint_val,
+                "has_more": false,
+                "schema_version": schema_version,
+                "schema_hash": schema_hash,
+            });
+            if per_bucket {
+                resp["bucket_checkpoints"] = serde_json::json!(bucket_cps);
+            }
+            return pgrx::JsonB(resp);
         }
 
         // Deduplicate: keep latest entry per (table_name, record_id).
@@ -215,9 +244,6 @@ fn synchro_pull(
         if let Some(checksums) = bucket_checksums {
             response["bucket_checksums"] = serde_json::json!(checksums);
         }
-        if !stale_buckets.is_empty() {
-            response["rebuild_buckets"] = serde_json::json!(stale_buckets);
-        }
 
         pgrx::JsonB(response)
     })
@@ -236,41 +262,77 @@ struct RawChangelogEntry {
     operation: Operation,
 }
 
-pub(crate) fn load_client_buckets(user_id: &str, client_id: &str) -> Vec<String> {
-    let subs: Option<Vec<String>> = Spi::get_one_with_args(
-        "SELECT bucket_subs FROM sync_clients \
-         WHERE user_id = $1 AND client_id = $2 AND is_active = true",
-        &[user_id.into(), client_id.into()],
-    )
-    .unwrap_or(None);
+pub(crate) fn load_client_buckets(
+    client: &SpiClient<'_>,
+    user_id: &str,
+    client_id: &str,
+) -> Vec<String> {
+    let tup_table = client
+        .select(
+            "SELECT bucket_subs FROM sync_clients \
+             WHERE user_id = $1 AND client_id = $2 AND is_active = true",
+            None,
+            &[user_id.into(), client_id.into()],
+        )
+        .unwrap_or_else(|e| pgrx::error!("querying client: {}", e));
 
-    match subs {
-        Some(s) => s,
-        None => pgrx::error!("client not found or inactive: {}/{}", user_id, client_id),
+    for row in tup_table {
+        let subs: Option<Vec<String>> = row
+            .get_by_name::<Vec<String>, &str>("bucket_subs")
+            .unwrap_or(None);
+        if let Some(s) = subs {
+            return s;
+        }
     }
+    pgrx::error!("client not found or inactive: {}/{}", user_id, client_id);
 }
 
-pub(crate) fn get_latest_schema() -> (i64, String) {
-    let row: Option<(Option<i64>, Option<String>)> = Spi::get_two(
+pub(crate) fn get_latest_schema(client: &SpiClient<'_>) -> (i64, String) {
+    let tup_table = match client.select(
         "SELECT schema_version, schema_hash FROM sync_schema_manifest \
          ORDER BY schema_version DESC LIMIT 1",
-    )
-    .ok();
+        None,
+        &[],
+    ) {
+        Ok(t) => t,
+        Err(_) => return (0, String::new()),
+    };
 
-    match row {
-        Some((Some(v), Some(h))) => (v, h),
-        _ => (0, String::new()),
+    for row in tup_table {
+        let v: i64 = row
+            .get_by_name::<i64, &str>("schema_version")
+            .unwrap_or(None)
+            .unwrap_or(0);
+        let h: String = row
+            .get_by_name::<String, &str>("schema_hash")
+            .unwrap_or(None)
+            .unwrap_or_default();
+        return (v, h);
     }
+    (0, String::new())
 }
 
 fn detect_stale_buckets(
+    client: &SpiClient<'_>,
     bucket_subs: &[String],
     bucket_cps: &std::collections::HashMap<String, i64>,
 ) -> Vec<String> {
-    let min_seq: i64 =
-        Spi::get_one("SELECT COALESCE(MIN(seq), 0) FROM sync_changelog")
-            .unwrap_or(Some(0))
+    let tup_table = match client.select(
+        "SELECT COALESCE(MIN(seq), 0) AS min_seq FROM sync_changelog",
+        None,
+        &[],
+    ) {
+        Ok(t) => t,
+        Err(_) => return vec![],
+    };
+
+    let mut min_seq: i64 = 0;
+    for row in tup_table {
+        min_seq = row
+            .get_by_name::<i64, &str>("min_seq")
+            .unwrap_or(None)
             .unwrap_or(0);
+    }
 
     if min_seq == 0 {
         return vec![];
@@ -285,6 +347,58 @@ fn detect_stale_buckets(
         }
     }
     stale
+}
+
+/// Load registry within an existing SPI context.
+fn load_registry_inner(client: &SpiClient<'_>) -> Vec<TableRegistration> {
+    let query = "SELECT table_name, bucket_sql, pk_column, updated_at_col,
+                        deleted_at_col, push_policy, exclude_columns,
+                        has_updated_at, has_deleted_at
+                 FROM sync_registry
+                 ORDER BY table_name";
+    let tup_table = match client.select(query, None, &[]) {
+        Ok(t) => t,
+        Err(e) => pgrx::error!("loading registry: {}", e),
+    };
+
+    let mut tables = Vec::new();
+    for row in tup_table {
+        let table_name: String = row.get_by_name("table_name").unwrap_or(None).unwrap_or_default();
+        let bucket_sql: String = row.get_by_name("bucket_sql").unwrap_or(None).unwrap_or_default();
+        let pk_column: String = row.get_by_name("pk_column").unwrap_or(None).unwrap_or_default();
+        let updated_at_col: String = row
+            .get_by_name("updated_at_col")
+            .unwrap_or(None)
+            .unwrap_or_default();
+        let deleted_at_col: String = row
+            .get_by_name("deleted_at_col")
+            .unwrap_or(None)
+            .unwrap_or_default();
+        let push_policy_str: String = row
+            .get_by_name("push_policy")
+            .unwrap_or(None)
+            .unwrap_or_default();
+        let exclude_columns: Vec<String> = row
+            .get_by_name("exclude_columns")
+            .unwrap_or(None)
+            .unwrap_or_default();
+        let has_updated_at: bool = row.get_by_name("has_updated_at").unwrap_or(None).unwrap_or(false);
+        let has_deleted_at: bool = row.get_by_name("has_deleted_at").unwrap_or(None).unwrap_or(false);
+
+        tables.push(TableRegistration {
+            table_name,
+            bucket_sql,
+            pk_column,
+            updated_at_col,
+            deleted_at_col,
+            push_policy: crate::registry::PushPolicy::parse(&push_policy_str)
+                .unwrap_or(crate::registry::PushPolicy::Enabled),
+            exclude_columns,
+            has_updated_at,
+            has_deleted_at,
+        });
+    }
+    tables
 }
 
 fn query_changelog(
@@ -333,21 +447,33 @@ fn query_changelog(
 
     let mut entries = Vec::new();
     for row in tup_table {
-        let seq: i64 = row.get_by_name("seq").unwrap_or(None).unwrap_or(0);
-        let bucket_id: String = row
-            .get_by_name("bucket_id")
+        let seq: i64 = row
+            .get_by_name::<i64, &str>("seq")
             .unwrap_or(None)
-            .unwrap_or_default();
-        let table_name: String = row
-            .get_by_name("table_name")
+            .unwrap_or(0);
+        let bucket_id: String = match row.get_by_name::<String, &str>("bucket_id") {
+            Ok(Some(v)) if !v.is_empty() => v,
+            _ => continue, // skip entries with NULL/empty required fields
+        };
+        let table_name: String = match row.get_by_name::<String, &str>("table_name") {
+            Ok(Some(v)) if !v.is_empty() => v,
+            _ => continue,
+        };
+        let record_id: String = match row.get_by_name::<String, &str>("record_id") {
+            Ok(Some(v)) if !v.is_empty() => v,
+            _ => continue,
+        };
+        let op_i16: i16 = row
+            .get_by_name::<i16, &str>("operation")
             .unwrap_or(None)
-            .unwrap_or_default();
-        let record_id: String = row
-            .get_by_name("record_id")
-            .unwrap_or(None)
-            .unwrap_or_default();
-        let op_i16: i16 = row.get_by_name("operation").unwrap_or(None).unwrap_or(0);
-        let operation = Operation::from_i16(op_i16).unwrap_or(Operation::Update);
+            .unwrap_or(0);
+        let operation = match Operation::from_i16(op_i16) {
+            Some(op) => op,
+            None => {
+                log!("unknown operation {} in changelog seq {}, skipping", op_i16, seq);
+                continue;
+            }
+        };
 
         entries.push(RawChangelogEntry {
             seq,
@@ -372,7 +498,7 @@ pub(crate) fn hydrate_records(
 ) -> Vec<serde_json::Value> {
     let table_reg = match registry.iter().find(|t| t.table_name == table_name) {
         Some(t) => t,
-        None => return vec![],
+        None => pgrx::error!("table {:?} not found in registry during hydration", table_name),
     };
 
     if ids.is_empty() {
@@ -427,16 +553,19 @@ pub(crate) fn hydrate_records(
     let id_arr: Vec<String> = ids.iter().map(|s| s.to_string()).collect();
     let tup_table = match client.select(&query, None, &[id_arr.into()]) {
         Ok(t) => t,
-        Err(e) => {
-            log!("hydration error for table {}: {}", table_name, e);
-            return vec![];
-        }
+        Err(e) => pgrx::error!("hydration failed for table {}: {}", table_name, e),
     };
 
     let mut records = Vec::new();
     for row in tup_table {
-        let id: String = row.get_by_name("id").unwrap_or(None).unwrap_or_default();
-        let data_str: String = row.get_by_name("data").unwrap_or(None).unwrap_or_default();
+        let id: String = row
+            .get_by_name::<String, &str>("id")
+            .unwrap_or(None)
+            .unwrap_or_default();
+        let data_str: String = row
+            .get_by_name::<String, &str>("data")
+            .unwrap_or(None)
+            .unwrap_or_default();
         let updated_at: Option<String> = row
             .get_by_name::<String, &str>("updated_at")
             .unwrap_or(None);
@@ -481,17 +610,20 @@ pub(crate) fn compute_bucket_checksums(
         &[bucket_arr.into()],
     ) {
         Ok(t) => t,
-        Err(_) => return std::collections::HashMap::new(),
+        Err(e) => {
+            log!("computing bucket checksums: {}", e);
+            return std::collections::HashMap::new();
+        }
     };
 
     let mut checksums = std::collections::HashMap::new();
     for row in tup_table {
         let bid: String = row
-            .get_by_name("bucket_id")
+            .get_by_name::<String, &str>("bucket_id")
             .unwrap_or(None)
             .unwrap_or_default();
         let cs: i32 = row
-            .get_by_name("checksum")
+            .get_by_name::<i32, &str>("checksum")
             .unwrap_or(None)
             .unwrap_or(0);
         checksums.insert(bid, cs);
@@ -506,7 +638,7 @@ fn advance_checkpoints(
     checkpoint: i64,
     bucket_checkpoints: Option<&std::collections::HashMap<String, i64>>,
 ) {
-    // Advance legacy checkpoint.
+    // Advance legacy checkpoint (monotonic).
     let _ = client.update(
         "UPDATE sync_clients \
          SET last_pull_seq = $3, last_pull_at = now(), last_sync_at = now() \
@@ -516,7 +648,17 @@ fn advance_checkpoints(
         &[user_id.into(), client_id.into(), checkpoint.into()],
     );
 
-    // Advance per-bucket checkpoints.
+    // Sync all existing per-bucket checkpoints that are behind the legacy CP.
+    // Matches Go AdvanceCheckpoint which propagates to sync_client_checkpoints.
+    let _ = client.update(
+        "UPDATE sync_client_checkpoints \
+         SET checkpoint = $3, updated_at = now() \
+         WHERE user_id = $1 AND client_id = $2 AND checkpoint < $3",
+        None,
+        &[user_id.into(), client_id.into(), checkpoint.into()],
+    );
+
+    // Advance individual per-bucket checkpoints.
     if let Some(cps) = bucket_checkpoints {
         for (bucket_id, &seq) in cps {
             let _ = client.update(
@@ -536,33 +678,6 @@ fn advance_checkpoints(
             );
         }
     }
-}
-
-fn build_empty_response(
-    checkpoint: i64,
-    bucket_cps: &std::collections::HashMap<String, i64>,
-    per_bucket: bool,
-    stale_buckets: &[String],
-    schema_version: i64,
-    schema_hash: &str,
-) -> serde_json::Value {
-    let mut resp = serde_json::json!({
-        "changes": [],
-        "deletes": [],
-        "checkpoint": checkpoint,
-        "has_more": false,
-        "schema_version": schema_version,
-        "schema_hash": schema_hash,
-    });
-
-    if per_bucket {
-        resp["bucket_checkpoints"] = serde_json::json!(bucket_cps);
-    }
-    if !stale_buckets.is_empty() {
-        resp["rebuild_buckets"] = serde_json::json!(stale_buckets);
-    }
-
-    resp
 }
 
 /// Double-quote a SQL identifier, escaping internal double quotes.
