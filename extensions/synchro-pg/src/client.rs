@@ -56,12 +56,12 @@ fn synchro_register_client(
         FROM upserted u
         LEFT JOIN schema s ON true
         LEFT JOIN bucket_cps bc ON true",
-        vec![
-            (PgBuiltInOids::TEXTOID.oid(), p_user_id.into_datum()),
-            (PgBuiltInOids::TEXTOID.oid(), p_client_id.into_datum()),
-            (PgBuiltInOids::TEXTOID.oid(), p_platform.into_datum()),
-            (PgBuiltInOids::TEXTOID.oid(), p_app_version.into_datum()),
-            (PgBuiltInOids::TEXTOID.oid(), user_bucket.as_str().into_datum()),
+        &[
+            p_user_id.into(),
+            p_client_id.into(),
+            p_platform.into(),
+            p_app_version.into(),
+            user_bucket.as_str().into(),
         ],
     )
     .unwrap_or(None);
@@ -80,7 +80,7 @@ fn validate_schema(schema_version: i64, schema_hash: &str) {
 
     let server_hash: Option<String> = Spi::get_one_with_args(
         "SELECT schema_hash FROM sync_schema_manifest WHERE schema_version = $1",
-        vec![(PgBuiltInOids::INT8OID.oid(), schema_version.into_datum())],
+        &[schema_version.into()],
     )
     .unwrap_or(None);
 

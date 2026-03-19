@@ -59,6 +59,30 @@ pub struct TableMeta {
     pub has_deleted_at: bool,
 }
 
+/// Extract the primary key value from decoded tuple data.
+/// Returns a DecodeError if the PK column is missing or NULL.
+fn extract_record_id(
+    tuple_data: &HashMap<String, Option<String>>,
+    pk_column: &str,
+    table_name: &str,
+) -> Result<String, DecodeError> {
+    match tuple_data.get(pk_column) {
+        Some(Some(id)) if !id.is_empty() => Ok(id.clone()),
+        Some(Some(_)) => Err(DecodeError::InvalidMessage(format!(
+            "empty primary key column '{}' in table '{}'",
+            pk_column, table_name
+        ))),
+        Some(None) => Err(DecodeError::InvalidMessage(format!(
+            "NULL primary key column '{}' in table '{}'",
+            pk_column, table_name
+        ))),
+        None => Err(DecodeError::InvalidMessage(format!(
+            "missing primary key column '{}' in table '{}' (check REPLICA IDENTITY)",
+            pk_column, table_name
+        ))),
+    }
+}
+
 impl WalDecoder {
     pub fn new() -> Self {
         Self {
@@ -143,10 +167,7 @@ impl WalDecoder {
         };
 
         let tuple_data = self.read_tuple(&mut cursor, &rel.columns)?;
-        let record_id = tuple_data
-            .get(&meta.pk_column)
-            .and_then(|v| v.clone())
-            .unwrap_or_default();
+        let record_id = extract_record_id(&tuple_data, &meta.pk_column, &rel.relation_name)?;
 
         Ok(vec![WalEvent {
             table_name: rel.relation_name.clone(),
@@ -183,10 +204,7 @@ impl WalDecoder {
         }
 
         let tuple_data = self.read_tuple(&mut cursor, &rel.columns)?;
-        let record_id = tuple_data
-            .get(&meta.pk_column)
-            .and_then(|v| v.clone())
-            .unwrap_or_default();
+        let record_id = extract_record_id(&tuple_data, &meta.pk_column, &rel.relation_name)?;
 
         // Detect soft deletes: if deleted_at column exists and is non-null, emit Delete.
         let mut op = Operation::Update;
@@ -224,10 +242,7 @@ impl WalDecoder {
         }
 
         let tuple_data = self.read_tuple(&mut cursor, &rel.columns)?;
-        let record_id = tuple_data
-            .get(&meta.pk_column)
-            .and_then(|v| v.clone())
-            .unwrap_or_default();
+        let record_id = extract_record_id(&tuple_data, &meta.pk_column, &rel.relation_name)?;
 
         Ok(vec![WalEvent {
             table_name: rel.relation_name.clone(),
