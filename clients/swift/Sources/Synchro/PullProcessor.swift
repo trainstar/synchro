@@ -72,23 +72,6 @@ final class PullProcessor: @unchecked Sendable {
         }
     }
 
-    func applySnapshotPage(records: [Record], syncedTables: [SchemaTable]) throws {
-        guard !records.isEmpty else { return }
-        let tableMap = Dictionary(uniqueKeysWithValues: syncedTables.map { ($0.tableName, $0) })
-
-        try database.writeTransaction { db in
-            try SynchroMeta.setSyncLock(db, locked: true)
-            defer { try? SynchroMeta.setSyncLock(db, locked: false) }
-
-            for record in records {
-                guard let schema = tableMap[record.tableName] else { continue }
-                try insertOrReplace(db: db, record: record, schema: schema)
-            }
-
-            try SynchroMeta.setSyncLock(db, locked: false)
-        }
-    }
-
     func updateCheckpoint(_ checkpoint: Int64) throws {
         try database.writeTransaction { db in
             let current = try SynchroMeta.getInt64(db, key: .checkpoint)
@@ -305,22 +288,6 @@ final class PullProcessor: @unchecked Sendable {
         let sql = "INSERT INTO \(quoted) (\(quotedColumns)) VALUES (\(placeholders)) ON CONFLICT (\(quotedPK)) DO UPDATE SET \(updateClauses)"
 
         try db.execute(sql: sql, arguments: StatementArguments(dbValues))
-    }
-
-    private func insertOrReplace(db: GRDB.Database, record: Record, schema: SchemaTable) throws {
-        let columns = schema.columns.map(\.name)
-        let pkCol = schema.primaryKey.first ?? "id"
-        let quoted = SQLiteHelpers.quoteIdentifier(record.tableName)
-
-        let dbValues = buildDatabaseValues(columns: columns, pkCol: pkCol, recordID: record.id, data: record.data, schema: schema)
-
-        let quotedColumns = columns.map { SQLiteHelpers.quoteIdentifier($0) }.joined(separator: ", ")
-        let placeholders = SQLiteHelpers.placeholders(count: columns.count)
-
-        try db.execute(
-            sql: "INSERT OR REPLACE INTO \(quoted) (\(quotedColumns)) VALUES (\(placeholders))",
-            arguments: StatementArguments(dbValues)
-        )
     }
 
     private func buildDatabaseValues(columns: [String], pkCol: String, recordID: String, data: [String: AnyCodable], schema: SchemaTable) -> [DatabaseValue] {

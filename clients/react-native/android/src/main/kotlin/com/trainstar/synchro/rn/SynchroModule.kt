@@ -19,10 +19,8 @@ class SynchroModule(reactContext: ReactApplicationContext) :
     private val sessions = ConcurrentHashMap<String, TransactionSession>()
     private val observers = ConcurrentHashMap<String, Cancellable>()
     private val pendingAuthContinuations = ConcurrentHashMap<String, CancellableContinuation<String>>()
-    private val pendingSnapshotContinuations = ConcurrentHashMap<String, CancellableContinuation<Boolean>>()
     private var statusSubscription: Cancellable? = null
     private var conflictSubscription: Cancellable? = null
-    private var snapshotSubscription: Cancellable? = null
 
     private fun rejectWithError(promise: Promise, error: Throwable) {
         when (error) {
@@ -50,7 +48,6 @@ class SynchroModule(reactContext: ReactApplicationContext) :
                 "serverVersion" to error.serverVersion.toString(),
                 "serverHash" to error.serverHash
             )
-            is SynchroError.SnapshotRequired -> "SNAPSHOT_REQUIRED" to emptyMap()
             is SynchroError.PushRejected -> "PUSH_REJECTED" to mapOf(
                 "results" to JSONArray(error.results.map { r ->
                     JSONObject().apply {
@@ -91,7 +88,6 @@ class SynchroModule(reactContext: ReactApplicationContext) :
             val maxRetryAttempts = if (config.hasKey("maxRetryAttempts")) config.getInt("maxRetryAttempts") else 5
             val pullPageSize = if (config.hasKey("pullPageSize")) config.getInt("pullPageSize") else 100
             val pushBatchSize = if (config.hasKey("pushBatchSize")) config.getInt("pushBatchSize") else 100
-            val snapshotPageSize = if (config.hasKey("snapshotPageSize")) config.getInt("snapshotPageSize") else 100
             val rawSeedPath = if (config.hasKey("seedDatabasePath")) config.getString("seedDatabasePath") else null
 
             // Android bundled assets live inside the APK — they're not on the filesystem.
@@ -135,7 +131,6 @@ class SynchroModule(reactContext: ReactApplicationContext) :
                 maxRetryAttempts = maxRetryAttempts,
                 pullPageSize = pullPageSize,
                 pushBatchSize = pushBatchSize,
-                snapshotPageSize = snapshotPageSize,
                 seedDatabasePath = seedDatabasePath
             )
 
@@ -159,11 +154,6 @@ class SynchroModule(reactContext: ReactApplicationContext) :
         pendingAuthContinuations.remove(requestID)?.cancel(
             Exception(error)
         )
-    }
-
-    @ReactMethod
-    override fun resolveSnapshotRequest(requestID: String, approved: Boolean) {
-        pendingSnapshotContinuations.remove(requestID)?.resume(approved) {}
     }
 
     @ReactMethod
@@ -676,7 +666,6 @@ class SynchroModule(reactContext: ReactApplicationContext) :
     private fun wireClientEvents(client: SynchroClient) {
         statusSubscription?.cancel()
         conflictSubscription?.cancel()
-        snapshotSubscription?.cancel()
 
         statusSubscription = client.onStatusChange { status ->
             val params = Arguments.createMap().apply {
@@ -711,37 +700,19 @@ class SynchroModule(reactContext: ReactApplicationContext) :
             }
             emitOnConflict(params)
         }
-
-        snapshotSubscription = client.onSnapshotRequired {
-            suspendCancellableCoroutine { continuation ->
-                val requestID = UUID.randomUUID().toString()
-                pendingSnapshotContinuations[requestID] = continuation
-                continuation.invokeOnCancellation {
-                    pendingSnapshotContinuations.remove(requestID)
-                }
-                val params = Arguments.createMap().apply {
-                    putString("requestID", requestID)
-                }
-                emitOnSnapshotRequired(params)
-            }
-        }
     }
 
     private fun clearRuntimeState() {
         statusSubscription?.cancel()
         conflictSubscription?.cancel()
-        snapshotSubscription?.cancel()
         statusSubscription = null
         conflictSubscription = null
-        snapshotSubscription = null
         observers.values.forEach { it.cancel() }
         observers.clear()
         sessions.values.forEach { it.operations.close() }
         sessions.clear()
         pendingAuthContinuations.values.forEach { it.cancel(CancellationException("client closed")) }
         pendingAuthContinuations.clear()
-        pendingSnapshotContinuations.values.forEach { it.cancel(CancellationException("client closed")) }
-        pendingSnapshotContinuations.clear()
     }
 
     private fun anyCodableMapToJson(value: Map<String, AnyCodable>): String {

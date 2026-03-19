@@ -231,45 +231,6 @@ class HttpClientTests {
     }
 
     @Test
-    fun testSnapshotRequestEncoding() = runTest {
-        val snapshotResponseBody = """
-            {
-                "records": [],
-                "checkpoint": 50,
-                "has_more": true,
-                "schema_version": 1,
-                "schema_hash": "abc"
-            }
-        """.trimIndent()
-
-        server.enqueue(MockResponse().setBody(snapshotResponseBody).setResponseCode(200))
-
-        val req = SnapshotRequest(
-            clientID = "dev-1",
-            cursor = SnapshotCursor(checkpoint = 10, tableIndex = 0, afterID = "w5"),
-            limit = 100,
-            schemaVersion = 3,
-            schemaHash = "hash3"
-        )
-        val resp = httpClient.snapshot(req)
-
-        val recorded = server.takeRequest()
-        assertEquals("POST", recorded.method)
-        assertTrue(recorded.path!!.endsWith("/sync/snapshot"))
-
-        val body = Json.decodeFromString<kotlinx.serialization.json.JsonObject>(recorded.body.readUtf8())
-        assertEquals("\"dev-1\"", body["client_id"].toString())
-        assertEquals("100", body["limit"].toString())
-        assertEquals("3", body["schema_version"].toString())
-        val cursor = body["cursor"] as kotlinx.serialization.json.JsonObject
-        assertEquals("10", cursor["checkpoint"].toString())
-        assertEquals("0", cursor["table_idx"].toString())
-        assertEquals("\"w5\"", cursor["after_id"].toString())
-        assertEquals(50L, resp.checkpoint)
-        assertTrue(resp.hasMore)
-    }
-
-    @Test
     fun testFetchTablesSuccess() = runTest {
         val responseBody = """
             {

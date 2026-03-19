@@ -297,46 +297,6 @@ final class HttpClientTests: XCTestCase {
         XCTAssertEqual(capturedBody?["schema_hash"] as? String, "hash7")
     }
 
-    func testSnapshotRequestEncoding() async throws {
-        let snapshotResponseBody: [String: Any] = [
-            "records": [] as [Any],
-            "checkpoint": 50,
-            "has_more": true,
-            "schema_version": 1,
-            "schema_hash": "abc",
-        ]
-
-        var capturedBody: [String: Any]?
-
-        MockURLProtocol.requestHandler = { request in
-            XCTAssertEqual(request.httpMethod, "POST")
-            XCTAssertTrue(request.url!.path.hasSuffix("/sync/snapshot"))
-            capturedBody = try JSONSerialization.jsonObject(with: request.bodyData()!) as? [String: Any]
-            let data = try JSONSerialization.data(withJSONObject: snapshotResponseBody)
-            let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
-            return (response, data)
-        }
-
-        let req = SnapshotRequest(
-            clientID: "dev-1",
-            cursor: SnapshotCursor(checkpoint: 10, tableIndex: 0, afterID: "w5"),
-            limit: 100,
-            schemaVersion: 3,
-            schemaHash: "hash3"
-        )
-        let resp = try await httpClient.snapshot(request: req)
-
-        XCTAssertEqual(capturedBody?["client_id"] as? String, "dev-1")
-        XCTAssertEqual(capturedBody?["limit"] as? Int, 100)
-        XCTAssertEqual(capturedBody?["schema_version"] as? Int, 3)
-        let cursor = capturedBody?["cursor"] as? [String: Any]
-        XCTAssertEqual(cursor?["checkpoint"] as? Int, 10)
-        XCTAssertEqual(cursor?["table_idx"] as? Int, 0)
-        XCTAssertEqual(cursor?["after_id"] as? String, "w5")
-        XCTAssertEqual(resp.checkpoint, 50)
-        XCTAssertTrue(resp.hasMore)
-    }
-
     func testFetchTablesSuccess() async throws {
         let responseBody: [String: Any] = [
             "server_time": "2026-01-01T12:00:00.000Z",

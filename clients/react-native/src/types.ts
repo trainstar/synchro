@@ -65,7 +65,6 @@ export interface SynchroConfig {
   maxRetryAttempts?: number;
   pullPageSize?: number;
   pushBatchSize?: number;
-  snapshotPageSize?: number;
   seedDatabasePath?: string;
 }
 
@@ -92,8 +91,6 @@ export interface PullResponse {
   checkpoint: number;
   bucketCheckpoints?: Record<string, number>;
   hasMore: boolean;
-  snapshotRequired?: boolean;
-  snapshotReason?: string;
   rebuildBuckets?: string[];
   bucketChecksums?: Record<string, number>;
   bucketUpdates?: BucketUpdate;

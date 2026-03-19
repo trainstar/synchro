@@ -34,7 +34,6 @@ export {
   TableNotSyncedError,
   UpgradeRequiredError,
   SchemaMismatchError,
-  SnapshotRequiredError,
   PushRejectedError,
   NetworkError,
   ServerError,
