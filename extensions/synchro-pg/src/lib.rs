@@ -1730,16 +1730,44 @@ mod tests {
         let resp: Option<pgrx::JsonB> = Spi::get_one("SELECT synchro_schema()").unwrap();
         let resp = resp.unwrap().0;
 
+        // Envelope fields.
+        assert!(resp.get("schema_version").is_some());
+        assert!(resp.get("schema_hash").is_some());
+        let server_time = resp["server_time"].as_str().unwrap();
+        assert!(server_time.contains('T') && server_time.ends_with('Z'),
+            "server_time must be ISO 8601 UTC, got: {}", server_time);
+
         let tables = resp["tables"].as_array().unwrap();
         assert!(!tables.is_empty());
-        // At least one table should have columns.
-        let has_columns = tables.iter().any(|t| {
-            t["columns"]
-                .as_array()
-                .map(|c| !c.is_empty())
-                .unwrap_or(false)
-        });
-        assert!(has_columns, "schema should include column definitions");
+
+        // Find test_orders and validate the full contract.
+        let orders = tables.iter().find(|t| t["table_name"].as_str() == Some("test_orders"))
+            .expect("test_orders should be in schema");
+
+        // Per-table fields.
+        assert_eq!(orders["push_policy"].as_str(), Some("enabled"));
+        assert_eq!(orders["updated_at_column"].as_str(), Some("updated_at"));
+        assert_eq!(orders["deleted_at_column"].as_str(), Some("deleted_at"));
+        let pk = orders["primary_key"].as_array().unwrap();
+        assert_eq!(pk[0].as_str(), Some("id"));
+
+        // Per-column fields: validate one column has all required fields.
+        let columns = orders["columns"].as_array().unwrap();
+        assert!(!columns.is_empty());
+        let id_col = columns.iter().find(|c| c["name"].as_str() == Some("id"))
+            .expect("id column should exist");
+        assert!(id_col.get("db_type").is_some(), "column missing db_type");
+        assert!(id_col.get("logical_type").is_some(), "column missing logical_type");
+        assert!(id_col.get("nullable").is_some(), "column missing nullable");
+        assert!(id_col.get("default_kind").is_some(), "column missing default_kind");
+        assert_eq!(id_col["is_primary_key"].as_bool(), Some(true));
+
+        // Verify logical_type mapping: uuid -> text, boolean -> integer.
+        assert_eq!(id_col["logical_type"].as_str(), Some("text"), "uuid should map to text");
+
+        // Verify default_kind: gen_random_uuid() is server_only.
+        assert_eq!(id_col["default_kind"].as_str(), Some("server_only"),
+            "gen_random_uuid() should be server_only");
     }
 
     #[pg_test]

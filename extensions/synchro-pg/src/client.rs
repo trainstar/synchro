@@ -1,5 +1,7 @@
 use pgrx::prelude::*;
 
+use crate::push::{iso8601_now, iso8601_sql};
+
 /// Register a client for synchronization.
 ///
 /// Upserts into sync_clients with default bucket subscriptions (user:{user_id}
@@ -22,7 +24,7 @@ fn synchro_register_client(
 
     let user_bucket = format!("user:{p_user_id}");
 
-    let row: Option<pgrx::JsonB> = Spi::get_one_with_args(
+    let sql = format!(
         "WITH upserted AS (
             INSERT INTO sync_clients (
                 user_id, client_id, platform, app_version,
@@ -48,16 +50,22 @@ fn synchro_register_client(
         )
         SELECT jsonb_build_object(
             'id', u.id::text,
-            'server_time', now(),
-            'last_sync_at', u.last_sync_at,
+            'server_time', {server_time},
+            'last_sync_at', {last_sync_at},
             'checkpoint', COALESCE(u.last_pull_seq, 0),
-            'bucket_checkpoints', COALESCE(bc.cps, '{}'::jsonb),
+            'bucket_checkpoints', COALESCE(bc.cps, '{{}}'::jsonb),
             'schema_version', COALESCE(s.schema_version, 0),
             'schema_hash', COALESCE(s.schema_hash, '')
         )
         FROM upserted u
         LEFT JOIN schema s ON true
         LEFT JOIN bucket_cps bc ON true",
+        server_time = iso8601_now(),
+        last_sync_at = iso8601_sql("u.last_sync_at"),
+    );
+
+    let row: Option<pgrx::JsonB> = Spi::get_one_with_args(
+        &sql,
         &[
             p_user_id.into(),
             p_client_id.into(),
