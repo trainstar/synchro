@@ -8,6 +8,7 @@
 	db-reset \
 	db-clean-slots \
 	lint-go \
+	lint-rust \
 	lint-rn \
 	test \
 	test-go-unit \
@@ -15,6 +16,16 @@
 	test-go-integration \
 	test-go-integration-race \
 	test-go-wal \
+	test-rust-core \
+	test-rust-pg \
+	test-rust-pg-all \
+	test-adapter \
+	test-adapter-setup \
+	test-adapter-teardown \
+	ext-build \
+	ext-install \
+	ext-test \
+	ext-seed \
 	test-swift \
 	test-swift-unit \
 	test-kotlin \
@@ -28,6 +39,9 @@
 	synchrod-test-start \
 	synchrod-test-stop \
 	synchrod-test-restart \
+	synchrod-pg-test-start \
+	synchrod-pg-test-stop \
+	synchrod-pg-test-restart \
 	release-check \
 	release-swift-local \
 	release-kotlin-local \
@@ -105,6 +119,22 @@ help:
 	@echo "  seed-generate-example - Generate a seed database into the RN example app"
 	@echo "  seed-bundle-example   - Generate and copy seed into both iOS and Android example apps"
 	@echo "  clean                 - Remove local build/test artifacts"
+	@echo ""
+	@echo "Extension targets:"
+	@echo "  ext-build             - Build the synchro_pg extension"
+	@echo "  ext-install           - Install extension into local PG 18"
+	@echo "  ext-test              - Run pgrx integration tests (PG 18)"
+	@echo "  ext-seed              - Generate TPC-H test seed data"
+	@echo "  test-rust-core        - Run synchro-core unit tests"
+	@echo "  test-rust-pg          - Run pgrx integration tests (PG 18)"
+	@echo "  test-rust-pg-all      - Run pgrx tests on PG 14-18"
+	@echo "  test-adapter          - Run Go adapter integration tests"
+	@echo "  test-adapter-setup    - Set up PG for adapter tests"
+	@echo "  test-adapter-teardown - Tear down adapter test PG"
+	@echo "  lint-rust             - Run Rust linters (fmt + clippy)"
+	@echo "  synchrod-pg-test-start   - Start extension-backed test server"
+	@echo "  synchrod-pg-test-stop    - Stop extension-backed test server"
+	@echo "  synchrod-pg-test-restart - Restart extension-backed test server"
 
 build:
 	go build -o bin/synchrod ./cmd/synchrod
@@ -296,5 +326,113 @@ seed-bundle-example: seed-generate-example
 	mkdir -p clients/react-native/example/android/app/src/main/assets
 	cp $(SEED_OUTPUT) clients/react-native/example/android/app/src/main/assets/seed.db
 
+# ---------------------------------------------------------------------------
+# Extension targets
+# ---------------------------------------------------------------------------
+
+PGRX_PG ?= pg18
+PGRX_PORT ?= 28818
+ADAPTER_TEST_DB ?= synchro_adapter_test
+ADAPTER_TEST_URL ?= postgres://$(USER)@localhost:$(PGRX_PORT)/$(ADAPTER_TEST_DB)?sslmode=disable
+SYNCHROD_PG_PID_FILE ?= .synchrod-pg-test.pid
+SYNCHROD_PG_LOG_FILE ?= .synchrod-pg-test.log
+SYNCHROD_PG_PORT ?= 8081
+
+ext-build:
+	cd extensions/synchro-pg && cargo build
+
+ext-install:
+	cd extensions/synchro-pg && cargo pgrx install
+
+ext-test: test-rust-pg
+
+ext-seed:
+	python3 extensions/testdata/generate/generate.py
+
+test-rust-core:
+	cd extensions && cargo test -p synchro-core
+
+test-rust-pg:
+	cd extensions/synchro-pg && cargo pgrx test $(PGRX_PG)
+
+test-rust-pg-all:
+	@for v in 14 15 16 17 18; do \
+		echo "=== PG $$v ==="; \
+		cd extensions/synchro-pg && cargo pgrx test pg$$v || exit 1; \
+		cd ../..; \
+	done
+	@echo "All PG versions passed."
+
+lint-rust:
+	cd extensions && cargo fmt --check
+	cd extensions && cargo clippy -- -D warnings
+
+# Adapter test lifecycle: start pgrx PG, create DB, install extension, run tests, stop.
+test-adapter-setup:
+	@echo "Setting up adapter test database..."
+	@cd extensions/synchro-pg && cargo pgrx start $(PGRX_PG)
+	@psql -h localhost -p $(PGRX_PORT) -U $(USER) -d postgres -c \
+		"DROP DATABASE IF EXISTS $(ADAPTER_TEST_DB)" 2>/dev/null || true
+	@psql -h localhost -p $(PGRX_PORT) -U $(USER) -d postgres -c \
+		"CREATE DATABASE $(ADAPTER_TEST_DB)"
+	@psql -h localhost -p $(PGRX_PORT) -U $(USER) -d $(ADAPTER_TEST_DB) -c \
+		"CREATE EXTENSION IF NOT EXISTS synchro_pg CASCADE"
+	@echo "Adapter test database ready: $(ADAPTER_TEST_URL)"
+
+test-adapter-teardown:
+	@echo "Tearing down adapter test database..."
+	@psql -h localhost -p $(PGRX_PORT) -U $(USER) -d postgres -c \
+		"DROP DATABASE IF EXISTS $(ADAPTER_TEST_DB)" 2>/dev/null || true
+	@cd extensions/synchro-pg && cargo pgrx stop $(PGRX_PG) 2>/dev/null || true
+	@echo "Done."
+
+test-adapter: test-adapter-setup
+	@echo "Running adapter integration tests..."
+	cd api/go && TEST_DATABASE_URL="$(ADAPTER_TEST_URL)" go test -v -count=1 ./...
+	@$(MAKE) test-adapter-teardown
+
+# Extension-backed synchrod lifecycle (for client SDK tests).
+synchrod-pg-test-start: test-adapter-setup
+	@set -e; \
+	if [ -f "$(SYNCHROD_PG_PID_FILE)" ] && kill -0 "$$(cat "$(SYNCHROD_PG_PID_FILE)")" 2>/dev/null; then \
+		echo "synchrod-pg already running"; \
+		exit 0; \
+	fi; \
+	echo "Loading seed data..."; \
+	psql -h localhost -p $(PGRX_PORT) -U $(USER) -d $(ADAPTER_TEST_DB) -f extensions/testdata/schema.sql >/dev/null 2>&1; \
+	psql -h localhost -p $(PGRX_PORT) -U $(USER) -d $(ADAPTER_TEST_DB) -f extensions/testdata/register.sql >/dev/null 2>&1; \
+	echo "Starting synchrod-pg on :$(SYNCHROD_PG_PORT)..."; \
+	nohup env \
+		DATABASE_URL="$(ADAPTER_TEST_URL)" \
+		JWT_SECRET="$(SYNCHRO_TEST_JWT_SECRET)" \
+		MIN_CLIENT_VERSION="$(MIN_CLIENT_VERSION)" \
+		LISTEN_ADDR=":$(SYNCHROD_PG_PORT)" \
+		go run ./cmd/synchrod-pg >"$(SYNCHROD_PG_LOG_FILE)" 2>&1 </dev/null & echo $$! >"$(SYNCHROD_PG_PID_FILE)"; \
+	sleep 2; \
+	if ! kill -0 "$$(cat "$(SYNCHROD_PG_PID_FILE)")" 2>/dev/null; then \
+		echo "synchrod-pg failed to start:"; \
+		cat "$(SYNCHROD_PG_LOG_FILE)"; \
+		rm -f "$(SYNCHROD_PG_PID_FILE)"; \
+		exit 1; \
+	fi; \
+	echo "synchrod-pg running on http://localhost:$(SYNCHROD_PG_PORT)"
+
+synchrod-pg-test-stop:
+	@if [ -f "$(SYNCHROD_PG_PID_FILE)" ]; then \
+		PID="$$(cat "$(SYNCHROD_PG_PID_FILE)")"; \
+		if kill -0 "$$PID" 2>/dev/null; then \
+			kill "$$PID"; \
+			wait "$$PID" 2>/dev/null || true; \
+			echo "synchrod-pg stopped"; \
+		fi; \
+		rm -f "$(SYNCHROD_PG_PID_FILE)"; \
+	else \
+		echo "synchrod-pg not running"; \
+	fi
+	@$(MAKE) test-adapter-teardown
+
+synchrod-pg-test-restart: synchrod-pg-test-stop
+	@$(MAKE) synchrod-pg-test-start
+
 clean:
-	rm -rf bin/ "$(SYNCHROD_PID_FILE)" "$(SYNCHROD_LOG_FILE)"
+	rm -rf bin/ "$(SYNCHROD_PID_FILE)" "$(SYNCHROD_LOG_FILE)" "$(SYNCHROD_PG_PID_FILE)" "$(SYNCHROD_PG_LOG_FILE)"
