@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strings"
 	"testing"
 
 	_ "github.com/jackc/pgx/v5/stdlib"
@@ -105,6 +106,19 @@ func doJSON(t *testing.T, method, url, token string, body any) (int, map[string]
 	return resp.StatusCode, result
 }
 
+// assertISO8601 validates that a field in the response body is an ISO 8601 UTC timestamp.
+func assertISO8601(t *testing.T, body map[string]any, field string) {
+	t.Helper()
+	v, ok := body[field].(string)
+	if !ok {
+		t.Errorf("%s is not a string: %v", field, body[field])
+		return
+	}
+	if !strings.Contains(v, "T") || !strings.HasSuffix(v, "Z") {
+		t.Errorf("%s is not ISO 8601 UTC: %s", field, v)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Passthrough tests
 // ---------------------------------------------------------------------------
@@ -130,6 +144,7 @@ func TestRegisterPassthrough(t *testing.T) {
 	if body["server_time"] == nil {
 		t.Error("response missing 'server_time'")
 	}
+	assertISO8601(t, body, "server_time")
 }
 
 func TestPullPassthrough(t *testing.T) {
@@ -260,6 +275,7 @@ func TestPushResponseEnvelopePassthrough(t *testing.T) {
 			t.Errorf("push response missing '%s'", field)
 		}
 	}
+	assertISO8601(t, body, "server_time")
 }
 
 func TestRebuildPassthrough(t *testing.T) {
@@ -297,6 +313,32 @@ func TestSchemaNoAuth(t *testing.T) {
 	}
 	if body["tables"] == nil {
 		t.Error("response missing 'tables'")
+	}
+	if body["schema_version"] == nil {
+		t.Error("response missing 'schema_version'")
+	}
+
+	// Validate table-level contract if tables are present.
+	if tables, ok := body["tables"].([]any); ok && len(tables) > 0 {
+		tbl, ok := tables[0].(map[string]any)
+		if !ok {
+			t.Fatal("first table entry is not an object")
+		}
+		if tbl["primary_key"] == nil {
+			t.Error("table missing 'primary_key'")
+		}
+		if cols, ok := tbl["columns"].([]any); ok && len(cols) > 0 {
+			col, ok := cols[0].(map[string]any)
+			if !ok {
+				t.Fatal("first column entry is not an object")
+			}
+			if col["logical_type"] == nil {
+				t.Error("column missing 'logical_type'")
+			}
+			if col["default_kind"] == nil {
+				t.Error("column missing 'default_kind'")
+			}
+		}
 	}
 }
 
