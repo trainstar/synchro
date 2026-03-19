@@ -1,0 +1,6 @@
+comment = 'Synchro: offline-first sync engine for PostgreSQL'
+default_version = '0.1.0'
+module_pathname = '$libdir/synchro_pg'
+relocatable = false
+superuser = true
+schema = 'public'
