@@ -584,8 +584,11 @@ pub(crate) fn hydrate_records(
     };
 
     // With timezone='UTC', to_jsonb() serializes timestamptz as ISO 8601
-    // with +00:00 offset natively. No override object needed.
-    let data_expr = format!("(to_jsonb(t){exclude})::text", exclude = exclude_expr);
+    // with +00:00 offset. Replace with Z for canonical UTC format.
+    let data_expr = format!(
+        "replace((to_jsonb(t){exclude})::text, '+00:00', 'Z')",
+        exclude = exclude_expr
+    );
 
     // Build hydration query.
     let query = format!(

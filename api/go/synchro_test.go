@@ -115,7 +115,7 @@ func assertISO8601(t *testing.T, body map[string]any, field string) {
 		t.Errorf("%s is not a string: %v", field, body[field])
 		return
 	}
-	isUTC := strings.HasSuffix(v, "Z") || strings.HasSuffix(v, "+00:00")
+	isUTC := strings.HasSuffix(v, "Z")
 	if !strings.Contains(v, "T") || !isUTC {
 		t.Errorf("%s is not ISO 8601 UTC: %s", field, v)
 	}
@@ -649,7 +649,7 @@ func TestEndToEndPushThenPull(t *testing.T) {
 			}
 			// Verify timestamps are ISO 8601.
 			if ts, ok := data["updated_at"].(string); ok {
-				isUTC := strings.HasSuffix(ts, "Z") || strings.HasSuffix(ts, "+00:00")
+				isUTC := strings.HasSuffix(ts, "Z")
 			if !strings.Contains(ts, "T") || !isUTC {
 					t.Errorf("pulled updated_at not ISO 8601 UTC: %s", ts)
 				}
