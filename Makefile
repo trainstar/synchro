@@ -414,9 +414,9 @@ synchrod-pg-test-start: test-adapter-setup
 		exit 0; \
 	fi; \
 	echo "Loading schema..."; \
-	psql -h localhost -p $(PGRX_PORT) -U $(USER) -d $(ADAPTER_TEST_DB) -f extensions/testdata/schema.sql >/dev/null 2>&1; \
+	psql -h localhost -p $(PGRX_PORT) -U $(USER) -d $(ADAPTER_TEST_DB) -f extensions/testdata/schema.sql 2>&1 || true; \
 	echo "Registering tables..."; \
-	psql -h localhost -p $(PGRX_PORT) -U $(USER) -d $(ADAPTER_TEST_DB) -f extensions/testdata/register.sql >/dev/null 2>&1; \
+	psql -h localhost -p $(PGRX_PORT) -U $(USER) -d $(ADAPTER_TEST_DB) -f extensions/testdata/register.sql 2>&1 || true; \
 	echo "Dropping replication slot and restarting PG for clean seed..."; \
 	psql -h localhost -p $(PGRX_PORT) -U $(USER) -d $(ADAPTER_TEST_DB) -c \
 		"SELECT pg_drop_replication_slot(slot_name) FROM pg_replication_slots WHERE slot_name = 'synchro_slot'" >/dev/null 2>&1 || true; \
