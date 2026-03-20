@@ -426,17 +426,22 @@ synchrod-pg-test-start: test-adapter-setup
 	echo "Waiting for bgworker to start and recreate slot..."; \
 	sleep 3; \
 	if [ -f extensions/testdata/seed.sql ]; then \
+		echo "Clearing stale data before seed load..."; \
+		psql -h localhost -p $(PGRX_PORT) -U $(USER) -d $(ADAPTER_TEST_DB) -c \
+			"TRUNCATE regions, nations, suppliers, parts, part_suppliers, categories, customers, orders, line_items, documents, document_members, document_comments, type_zoo CASCADE" >/dev/null 2>&1 || true; \
+		psql -h localhost -p $(PGRX_PORT) -U $(USER) -d $(ADAPTER_TEST_DB) -c \
+			"TRUNCATE sync_changelog, sync_bucket_edges, sync_client_checkpoints, sync_rule_failures CASCADE" >/dev/null 2>&1 || true; \
 		echo "Loading seed data (this may take a minute)..."; \
 		psql -h localhost -p $(PGRX_PORT) -U $(USER) -d $(ADAPTER_TEST_DB) -f extensions/testdata/seed.sql >/dev/null 2>&1; \
-		echo "Waiting for bgworker to process seed data..."; \
-		for i in $$(seq 1 30); do \
+		echo "Waiting for bgworker to process seed data (may take 60+ seconds for large seeds)..."; \
+		for i in $$(seq 1 120); do \
 			EDGE_COUNT=$$(psql -h localhost -p $(PGRX_PORT) -U $(USER) -d $(ADAPTER_TEST_DB) -t -A -c "SELECT count(*) FROM sync_bucket_edges" 2>/dev/null); \
-			if [ "$$EDGE_COUNT" -gt 0 ] 2>/dev/null; then \
-				echo "Seed data processed ($$EDGE_COUNT edges)."; \
+			if [ "$$EDGE_COUNT" -gt 100 ] 2>/dev/null; then \
+				echo "Seed data processed ($$EDGE_COUNT edges in $$i seconds)."; \
 				break; \
 			fi; \
-			if [ "$$i" -eq 30 ]; then \
-				echo "WARNING: bgworker did not process seed data within 30 seconds."; \
+			if [ "$$i" -eq 120 ]; then \
+				echo "WARNING: bgworker did not process seed data within 120 seconds ($$EDGE_COUNT edges)."; \
 			fi; \
 			sleep 1; \
 		done; \
