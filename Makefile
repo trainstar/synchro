@@ -413,15 +413,29 @@ synchrod-pg-test-start: test-adapter-setup
 		echo "synchrod-pg already running"; \
 		exit 0; \
 	fi; \
-	echo "Loading schema and registering tables..."; \
+	echo "Loading schema..."; \
 	psql -h localhost -p $(PGRX_PORT) -U $(USER) -d $(ADAPTER_TEST_DB) -f extensions/testdata/schema.sql >/dev/null 2>&1; \
+	echo "Registering tables..."; \
 	psql -h localhost -p $(PGRX_PORT) -U $(USER) -d $(ADAPTER_TEST_DB) -f extensions/testdata/register.sql >/dev/null 2>&1; \
 	echo "Reloading bgworker registry..."; \
 	psql -h localhost -p $(PGRX_PORT) -U $(USER) -d $(ADAPTER_TEST_DB) -c "SELECT pg_reload_conf()" >/dev/null 2>&1; \
-	sleep 1; \
+	echo "Waiting for bgworker to reload registry..."; \
+	sleep 2; \
 	if [ -f extensions/testdata/seed.sql ]; then \
 		echo "Loading seed data (this may take a minute)..."; \
 		psql -h localhost -p $(PGRX_PORT) -U $(USER) -d $(ADAPTER_TEST_DB) -f extensions/testdata/seed.sql >/dev/null 2>&1; \
+		echo "Waiting for bgworker to process seed data..."; \
+		for i in $$(seq 1 30); do \
+			EDGE_COUNT=$$(psql -h localhost -p $(PGRX_PORT) -U $(USER) -d $(ADAPTER_TEST_DB) -t -A -c "SELECT count(*) FROM sync_bucket_edges" 2>/dev/null); \
+			if [ "$$EDGE_COUNT" -gt 0 ] 2>/dev/null; then \
+				echo "Seed data processed ($$EDGE_COUNT edges)."; \
+				break; \
+			fi; \
+			if [ "$$i" -eq 30 ]; then \
+				echo "WARNING: bgworker did not process seed data within 30 seconds."; \
+			fi; \
+			sleep 1; \
+		done; \
 	else \
 		echo "No seed.sql found. Run 'make ext-seed' to generate TPC-H data."; \
 	fi; \

@@ -38,7 +38,7 @@ type Config struct {
 	JWTUserClaim string
 
 	// MinClientVersion is the minimum client version allowed (semver).
-	// When set, requests with X-Client-Version below this are rejected with 426.
+	// When set, requests with X-App-Version below this are rejected with 426.
 	// Leave empty to skip version checking.
 	MinClientVersion string
 }

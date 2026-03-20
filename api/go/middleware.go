@@ -104,7 +104,7 @@ func versionCheckMiddleware(minVersion string, next http.Handler) http.Handler {
 		return next
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		clientVersion := r.Header.Get("X-Client-Version")
+		clientVersion := r.Header.Get("X-App-Version")
 		if clientVersion != "" {
 			if err := checkVersion(clientVersion, minVersion); err != nil {
 				writeJSONError(w, http.StatusUpgradeRequired, "client upgrade required")
