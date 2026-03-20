@@ -8,6 +8,9 @@ use pgrx::spi::SpiClient;
 #[pg_extern]
 fn synchro_schema() -> pgrx::JsonB {
     Spi::connect_mut(|client| {
+        // Ensure timestamps serialize as ISO 8601 UTC via to_json().
+        let _ = client.update("SET LOCAL timezone = 'UTC'", None, &[]);
+
         let (schema_version, schema_hash) = crate::pull::get_latest_schema(&client);
         let tables = build_table_schemas(&client);
 
@@ -24,6 +27,9 @@ fn synchro_schema() -> pgrx::JsonB {
 #[pg_extern]
 fn synchro_tables() -> pgrx::JsonB {
     Spi::connect_mut(|client| {
+        // Ensure timestamps serialize as ISO 8601 UTC via to_json().
+        let _ = client.update("SET LOCAL timezone = 'UTC'", None, &[]);
+
         let (schema_version, schema_hash) = crate::pull::get_latest_schema(&client);
 
         let tup_table = match client.select(
@@ -81,6 +87,9 @@ fn synchro_tables() -> pgrx::JsonB {
 #[pg_extern]
 fn synchro_debug(p_user_id: &str, p_client_id: &str) -> pgrx::JsonB {
     Spi::connect_mut(|client| {
+        // Ensure timestamps serialize as ISO 8601 UTC via to_json().
+        let _ = client.update("SET LOCAL timezone = 'UTC'", None, &[]);
+
         let client_info = load_client_debug(&client, p_user_id, p_client_id);
 
         let bucket_subs: Vec<String> = client_info
@@ -110,7 +119,7 @@ fn synchro_debug(p_user_id: &str, p_client_id: &str) -> pgrx::JsonB {
 // ---------------------------------------------------------------------------
 
 fn server_time_str(client: &SpiClient<'_>) -> String {
-    let sql = format!("SELECT {} AS t", crate::push::iso8601_now());
+    let sql = format!("SELECT {} AS t", crate::push::ts_to_iso("now()"));
     let tup = match client.select(&sql, None, &[]) {
         Ok(t) => t,
         Err(_) => return String::new(),
@@ -400,8 +409,8 @@ fn load_client_debug(
          {} AS last_pull_at, \
          last_pull_seq, bucket_subs \
          FROM sync_clients WHERE user_id = $1 AND client_id = $2",
-        crate::push::iso8601_sql("last_sync_at"),
-        crate::push::iso8601_sql("last_pull_at"),
+        crate::push::ts_to_iso("last_sync_at"),
+        crate::push::ts_to_iso("last_pull_at"),
     );
     let tup = match client.select(&sql, None, &[user_id.into(), client_id.into()]) {
         Ok(t) => t,

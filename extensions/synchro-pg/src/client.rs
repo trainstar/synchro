@@ -1,6 +1,6 @@
 use pgrx::prelude::*;
 
-use crate::push::{iso8601_now, iso8601_sql};
+use crate::push::ts_to_iso;
 
 /// Register a client for synchronization.
 ///
@@ -60,26 +60,34 @@ fn synchro_register_client(
         FROM upserted u
         LEFT JOIN schema s ON true
         LEFT JOIN bucket_cps bc ON true",
-        server_time = iso8601_now(),
-        last_sync_at = iso8601_sql("u.last_sync_at"),
+        server_time = ts_to_iso("now()"),
+        last_sync_at = ts_to_iso("u.last_sync_at"),
     );
 
-    let row: Option<pgrx::JsonB> = Spi::get_one_with_args(
-        &sql,
-        &[
-            p_user_id.into(),
-            p_client_id.into(),
-            p_platform.into(),
-            p_app_version.into(),
-            user_bucket.as_str().into(),
-        ],
-    )
-    .unwrap_or(None);
+    Spi::connect_mut(|client| {
+        // Ensure timestamps serialize as ISO 8601 UTC via to_json().
+        let _ = client.update("SET LOCAL timezone = 'UTC'", None, &[]);
 
-    match row {
-        Some(json) => json,
-        None => pgrx::error!("client registration returned no result"),
-    }
+        let tup = client.update(
+            &sql,
+            None,
+            &[
+                p_user_id.into(),
+                p_client_id.into(),
+                p_platform.into(),
+                p_app_version.into(),
+                user_bucket.as_str().into(),
+            ],
+        )
+        .unwrap_or_else(|e| pgrx::error!("registering client: {}", e));
+
+        let row: Option<pgrx::JsonB> = tup.first().get_one().ok().flatten();
+
+        match row {
+            Some(json) => json,
+            None => pgrx::error!("client registration returned no result"),
+        }
+    })
 }
 
 /// Validate client schema version/hash against the server manifest.
