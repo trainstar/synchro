@@ -392,7 +392,7 @@ fn detect_stale_buckets(
 }
 
 /// Load registry within an existing SPI context.
-fn load_registry_inner(client: &SpiClient<'_>) -> Vec<TableRegistration> {
+pub(crate) fn load_registry_inner(client: &SpiClient<'_>) -> Vec<TableRegistration> {
     let query = "SELECT table_name, bucket_sql, pk_column, pk_type, updated_at_col,
                         deleted_at_col, push_policy, exclude_columns,
                         has_updated_at, has_deleted_at
