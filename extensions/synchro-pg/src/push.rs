@@ -463,8 +463,8 @@ fn push_update_inner(
 
         let returning = if table_reg.has_updated_at {
             format!(
-                " RETURNING {}::text AS updated_at",
-                pg_quote_ident(&table_reg.updated_at_col)
+                " RETURNING {} AS updated_at",
+                ts_to_iso(&pg_quote_ident(&table_reg.updated_at_col))
             )
         } else {
             String::new()
@@ -498,12 +498,12 @@ fn push_update_inner(
     if is_resurrection && table_reg.has_deleted_at {
         let resurrection_sql = if table_reg.has_updated_at {
             format!(
-                "UPDATE {} SET {} = NULL WHERE {} = $1::{} RETURNING {}::text AS updated_at",
+                "UPDATE {} SET {} = NULL WHERE {} = $1::{} RETURNING {} AS updated_at",
                 pg_quote_ident(&table_reg.table_name),
                 pg_quote_ident(&table_reg.deleted_at_col),
                 pg_quote_ident(&table_reg.pk_column),
                 table_reg.pk_type,
-                pg_quote_ident(&table_reg.updated_at_col),
+                ts_to_iso(&pg_quote_ident(&table_reg.updated_at_col)),
             )
         } else {
             format!(
