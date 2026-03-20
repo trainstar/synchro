@@ -2006,6 +2006,114 @@ mod tests {
         // Reset GUC.
         Spi::run("RESET synchro.clock_skew_tolerance_ms").unwrap();
     }
+
+    // -----------------------------------------------------------------------
+    // Mixed Push (Bug 2): valid create + read-only rejection in same batch
+    // -----------------------------------------------------------------------
+
+    #[pg_test]
+    fn test_push_mixed_accepted_and_read_only_rejected() {
+        setup_test_tables();
+        register_client("u1", "c1");
+
+        // Batch: one valid create (test_orders) and one read-only rejection (test_products).
+        // The extension must return a proper JSONB response with accepted[1] and rejected[1],
+        // not a PG error that aborts the transaction.
+        let resp: Option<pgrx::JsonB> = Spi::get_one_with_args(
+            "SELECT synchro_push($1, $2, $3::jsonb, 0, '')",
+            &[
+                "u1".into(),
+                "c1".into(),
+                r#"[
+                    {"id":"f0a11111-1111-1111-1111-111111111111","table_name":"test_orders","operation":"create","data":{"user_id":"u1","title":"Valid Order"}},
+                    {"id":"f0a22222-2222-2222-2222-222222222222","table_name":"test_products","operation":"create","data":{"name":"Read Only Product"}}
+                ]"#.into(),
+            ],
+        )
+        .unwrap();
+        let resp = resp.unwrap().0;
+
+        let accepted = resp["accepted"].as_array().unwrap();
+        let rejected = resp["rejected"].as_array().unwrap();
+        assert_eq!(accepted.len(), 1, "one record should be accepted");
+        assert_eq!(rejected.len(), 1, "one record should be rejected");
+        assert_eq!(accepted[0]["status"].as_str().unwrap(), "applied");
+        assert_eq!(rejected[0]["status"].as_str().unwrap(), "rejected_terminal");
+        assert_eq!(rejected[0]["reason_code"].as_str().unwrap(), "table_read_only");
+
+        // Verify the accepted record was persisted despite the rejection.
+        let title: Option<String> = Spi::get_one(
+            "SELECT title FROM test_orders WHERE id = 'f0a11111-1111-1111-1111-111111111111'",
+        )
+        .unwrap();
+        assert_eq!(title, Some("Valid Order".to_string()));
+    }
+
+    // -----------------------------------------------------------------------
+    // Pull bucket_checkpoints (Bug 3): empty bucket_checkpoints in response
+    // -----------------------------------------------------------------------
+
+    #[pg_test]
+    fn test_pull_empty_bucket_checkpoints_returned() {
+        setup_test_tables();
+        register_client("u1", "c1");
+
+        // Send per-bucket checkpoints as empty JSONB object.
+        // The response must include bucket_checkpoints even when no entries exist.
+        let bucket_cps = serde_json::json!({});
+        let resp: Option<pgrx::JsonB> = Spi::get_one_with_args(
+            "SELECT synchro_pull($1, $2, 0, $3::jsonb, 100, NULL, NULL, 0, '')",
+            &[
+                "u1".into(),
+                "c1".into(),
+                pgrx::JsonB(bucket_cps).into(),
+            ],
+        )
+        .unwrap();
+        let resp = resp.unwrap().0;
+
+        // bucket_checkpoints must be present in the response.
+        assert!(
+            resp.get("bucket_checkpoints").is_some(),
+            "response must include bucket_checkpoints when per-bucket mode is active"
+        );
+    }
+
+    #[pg_test]
+    fn test_pull_bucket_checkpoints_with_entries() {
+        setup_test_tables();
+        register_client("u1", "c1");
+
+        // Insert changelog and edges.
+        Spi::run(
+            "INSERT INTO test_orders (id, user_id, title) VALUES
+             ('bca01111-1111-1111-1111-111111111111', 'u1', 'BCP Test')",
+        )
+        .unwrap();
+        insert_changelog("user:u1", "test_orders", "bca01111-1111-1111-1111-111111111111", 1);
+        insert_edge("test_orders", "bca01111-1111-1111-1111-111111111111", "user:u1");
+
+        // Pull with per-bucket checkpoints.
+        let bucket_cps = serde_json::json!({"user:u1": 0, "global": 0});
+        let resp: Option<pgrx::JsonB> = Spi::get_one_with_args(
+            "SELECT synchro_pull($1, $2, 0, $3::jsonb, 100, NULL, NULL, 0, '')",
+            &[
+                "u1".into(),
+                "c1".into(),
+                pgrx::JsonB(bucket_cps).into(),
+            ],
+        )
+        .unwrap();
+        let resp = resp.unwrap().0;
+
+        // bucket_checkpoints must be present and contain updated values.
+        let bcp = resp.get("bucket_checkpoints");
+        assert!(bcp.is_some(), "response must include bucket_checkpoints");
+        let bcp_obj = bcp.unwrap().as_object().unwrap();
+        // user:u1 should have advanced beyond 0.
+        let u1_cp = bcp_obj.get("user:u1").and_then(|v| v.as_i64()).unwrap_or(0);
+        assert!(u1_cp > 0, "user:u1 bucket checkpoint should have advanced");
+    }
 }
 
 #[cfg(test)]

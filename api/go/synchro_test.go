@@ -663,6 +663,274 @@ func TestEndToEndPushThenPull(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// Version check (Bug 1)
+// ---------------------------------------------------------------------------
+
+func TestVersionCheckRejectsOldClient(t *testing.T) {
+	dbURL := os.Getenv("TEST_DATABASE_URL")
+	if dbURL == "" {
+		t.Skip("TEST_DATABASE_URL not set")
+	}
+
+	db, err := sql.Open("pgx", dbURL)
+	if err != nil {
+		t.Fatalf("opening database: %v", err)
+	}
+	defer db.Close()
+
+	handler := Routes(Config{
+		DB:               db,
+		JWTSecret:        []byte("test-secret-for-integration-tests"),
+		MinClientVersion: "2.0.0",
+	})
+	srv := httptest.NewServer(handler)
+	defer srv.Close()
+
+	req, err := http.NewRequest("GET", srv.URL+"/sync/schema", nil)
+	if err != nil {
+		t.Fatalf("creating request: %v", err)
+	}
+	req.Header.Set("X-App-Version", "1.0.0")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("sending request: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusUpgradeRequired {
+		t.Errorf("expected 426 Upgrade Required, got %d", resp.StatusCode)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Mixed push adapter test (Bug 2)
+// ---------------------------------------------------------------------------
+
+func TestPushMixedAcceptedAndRejected(t *testing.T) {
+	srv := testServer(t)
+	token := testToken("user-mix")
+
+	// Register client.
+	status, body := doJSON(t, "POST", srv.URL+"/sync/register", token, map[string]any{
+		"client_id": "mix-client", "schema_version": 0, "schema_hash": "",
+	})
+	if status != 200 {
+		t.Fatalf("register failed: %d %v", status, body)
+	}
+
+	// Push a batch: one valid create and one to a read-only table.
+	// This must return 200 with accepted[1] and rejected[1], not 500.
+	status, body = doJSON(t, "POST", srv.URL+"/sync/push", token, map[string]any{
+		"client_id": "mix-client",
+		"changes": []map[string]any{
+			{
+				"id":         "f0b11111-1111-1111-1111-111111111111",
+				"table_name": "test_push_table",
+				"operation":  "create",
+				"data":       map[string]any{"name": "Valid"},
+			},
+			{
+				"id":         "f0b22222-2222-2222-2222-222222222222",
+				"table_name": "nonexistent_table",
+				"operation":  "create",
+				"data":       map[string]any{"name": "Bad"},
+			},
+		},
+		"schema_version": 0,
+		"schema_hash":    "",
+	})
+
+	if status != 200 {
+		t.Fatalf("expected 200, got %d: %v", status, body)
+	}
+	if body["accepted"] == nil {
+		t.Error("response missing 'accepted'")
+	}
+	if body["rejected"] == nil {
+		t.Error("response missing 'rejected'")
+	}
+
+	// Both records should be in rejected (test_push_table is not registered,
+	// nonexistent_table is not registered).
+	rejected, _ := body["rejected"].([]any)
+	if len(rejected) < 2 {
+		t.Fatalf("expected at least 2 rejected records, got %d: %v", len(rejected), body)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Pull bucket_checkpoints (Bug 3)
+// ---------------------------------------------------------------------------
+
+func TestPullBucketCheckpointsReturned(t *testing.T) {
+	srv := testServer(t)
+	token := testToken("user-bcp")
+
+	// Register client.
+	doJSON(t, "POST", srv.URL+"/sync/register", token, map[string]any{
+		"client_id": "bcp-client", "schema_version": 0, "schema_hash": "",
+	})
+
+	// Pull with empty bucket_checkpoints. Response must include bucket_checkpoints.
+	status, body := doJSON(t, "POST", srv.URL+"/sync/pull", token, map[string]any{
+		"client_id":          "bcp-client",
+		"checkpoint":         0,
+		"bucket_checkpoints": map[string]int64{},
+		"schema_version":     0,
+		"schema_hash":        "",
+	})
+
+	if status != 200 {
+		t.Fatalf("expected 200, got %d: %v", status, body)
+	}
+	if body["bucket_checkpoints"] == nil {
+		t.Error("response missing 'bucket_checkpoints' when per-bucket mode is active")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Rebuild after seed data (Bug 4)
+// ---------------------------------------------------------------------------
+
+func TestRebuildAfterSeedData(t *testing.T) {
+	dbURL := os.Getenv("TEST_DATABASE_URL")
+	if dbURL == "" {
+		t.Skip("TEST_DATABASE_URL not set")
+	}
+
+	db, err := sql.Open("pgx", dbURL)
+	if err != nil {
+		t.Fatalf("opening database: %v", err)
+	}
+	defer db.Close()
+
+	// Verify extension is installed.
+	var extExists bool
+	if err := db.QueryRow(
+		"SELECT EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'synchro_pg')",
+	).Scan(&extExists); err != nil || !extExists {
+		t.Skip("synchro_pg extension not installed")
+	}
+
+	// Check if wal_level is logical (required for bgworker).
+	var walLevel string
+	if err := db.QueryRow("SHOW wal_level").Scan(&walLevel); err != nil {
+		t.Fatalf("checking wal_level: %v", err)
+	}
+	if walLevel != "logical" {
+		t.Skip("wal_level is not logical (required for bgworker E2E test)")
+	}
+
+	// Create a dedicated test table for this test.
+	_, err = db.Exec(`
+		CREATE TABLE IF NOT EXISTS test_rebuild_seed (
+			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+			user_id TEXT NOT NULL,
+			name TEXT NOT NULL DEFAULT '',
+			created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+			updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+			deleted_at TIMESTAMPTZ
+		)`)
+	if err != nil {
+		t.Fatalf("creating test table: %v", err)
+	}
+	// Clean up from prior runs.
+	_, _ = db.Exec("DELETE FROM sync_changelog WHERE table_name = 'test_rebuild_seed'")
+	_, _ = db.Exec("DELETE FROM sync_bucket_edges WHERE table_name = 'test_rebuild_seed'")
+	_, _ = db.Exec("DELETE FROM test_rebuild_seed")
+	_, _ = db.Exec("DELETE FROM sync_clients WHERE client_id = 'rebuild-seed-client'")
+
+	t.Cleanup(func() {
+		_, _ = db.Exec("DELETE FROM sync_changelog WHERE table_name = 'test_rebuild_seed'")
+		_, _ = db.Exec("DELETE FROM sync_bucket_edges WHERE table_name = 'test_rebuild_seed'")
+		_, _ = db.Exec("SELECT synchro_unregister_table('test_rebuild_seed')")
+		_, _ = db.Exec("DROP TABLE IF EXISTS test_rebuild_seed")
+		_, _ = db.Exec("DELETE FROM sync_clients WHERE client_id = 'rebuild-seed-client'")
+	})
+
+	// Register the table for sync.
+	_, err = db.Exec(`SELECT synchro_register_table(
+		'test_rebuild_seed',
+		$$SELECT ARRAY['user:' || user_id] FROM test_rebuild_seed WHERE id = $1::uuid$$,
+		'id', 'updated_at', 'deleted_at', 'enabled'
+	)`)
+	if err != nil {
+		t.Fatalf("registering table: %v", err)
+	}
+
+	// Signal bgworker to reload registry.
+	if _, err := db.Exec("SELECT pg_reload_conf()"); err != nil {
+		t.Fatalf("reloading config: %v", err)
+	}
+	time.Sleep(500 * time.Millisecond)
+
+	// Insert seed data AFTER bgworker knows about the table.
+	_, err = db.Exec(`INSERT INTO test_rebuild_seed (id, user_id, name) VALUES
+		('d0a11111-1111-1111-1111-111111111111', 'rebuild-user', 'Seed Item 1')`)
+	if err != nil {
+		t.Fatalf("inserting seed data: %v", err)
+	}
+
+	// Wait for bgworker to process WAL entries and create edges.
+	var edgeCount int64
+	for attempt := 0; attempt < 50; attempt++ {
+		err = db.QueryRow(
+			"SELECT count(*) FROM sync_bucket_edges WHERE table_name = 'test_rebuild_seed'",
+		).Scan(&edgeCount)
+		if err == nil && edgeCount > 0 {
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	if edgeCount == 0 {
+		t.Fatal("bgworker did not process seed data within 5 seconds. " +
+			"Verify synchro.auto_start = on and wal_level = logical.")
+	}
+
+	// Set up HTTP server and register client.
+	handler := Routes(Config{
+		DB:        db,
+		JWTSecret: []byte("test-secret-for-integration-tests"),
+	})
+	srv := httptest.NewServer(handler)
+	defer srv.Close()
+
+	token := testToken("rebuild-user")
+
+	doJSON(t, "POST", srv.URL+"/sync/register", token, map[string]any{
+		"client_id": "rebuild-seed-client", "schema_version": 0, "schema_hash": "",
+	})
+
+	// Rebuild should return the seeded record.
+	status, body := doJSON(t, "POST", srv.URL+"/sync/rebuild", token, map[string]any{
+		"client_id": "rebuild-seed-client",
+		"bucket_id": "user:rebuild-user",
+	})
+
+	if status != 200 {
+		t.Fatalf("rebuild failed: %d %v", status, body)
+	}
+
+	records, _ := body["records"].([]any)
+	found := false
+	for _, r := range records {
+		rm, _ := r.(map[string]any)
+		if rm["id"] == "d0a11111-1111-1111-1111-111111111111" {
+			found = true
+			data, _ := rm["data"].(map[string]any)
+			if data["name"] != "Seed Item 1" {
+				t.Errorf("wrong name: %v", data["name"])
+			}
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("seeded record not found in rebuild response. records=%d", len(records))
+	}
+}
+
+// ---------------------------------------------------------------------------
 // Unit tests (no database required)
 // ---------------------------------------------------------------------------
 
