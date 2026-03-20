@@ -126,6 +126,10 @@ pub(crate) static AUTO_START_GUC: GucSetting<bool> = GucSetting::<bool>::new(tru
 /// Clock skew tolerance for LWW conflict resolution (milliseconds).
 pub(crate) static CLOCK_SKEW_TOLERANCE_MS_GUC: GucSetting<i32> = GucSetting::<i32>::new(500);
 
+/// Database name for the WAL background worker to connect to.
+pub(crate) static DATABASE_GUC: GucSetting<Option<CString>> =
+    GucSetting::<Option<CString>>::new(None);
+
 /// Extension initialization. Called when the shared library is loaded.
 ///
 /// Registers all GUCs and conditionally starts the WAL background worker.
@@ -154,6 +158,15 @@ pub extern "C-unwind" fn _PG_init() {
         c"Whether to auto-start the synchro WAL background worker.",
         c"When true, the WAL consumer background worker starts on server boot.",
         &AUTO_START_GUC,
+        GucContext::Postmaster,
+        GucFlags::default(),
+    );
+
+    GucRegistry::define_string_guc(
+        c"synchro.database",
+        c"Database name for the WAL background worker.",
+        c"The database the WAL consumer connects to. Must have the synchro_pg extension installed. Defaults to postgres.",
+        &DATABASE_GUC,
         GucContext::Postmaster,
         GucFlags::default(),
     );
@@ -1973,6 +1986,7 @@ pub mod pg_test {
         vec![
             "shared_preload_libraries = 'synchro_pg'",
             "synchro.auto_start = off",
+            "synchro.database = 'postgres'",
         ]
     }
 }
