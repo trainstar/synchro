@@ -313,12 +313,6 @@ fn poll_and_process(
             }
         }
 
-        // Log decoded events summary.
-        if !events.is_empty() {
-            let table_names: Vec<&str> = events.iter().map(|e| e.table_name.as_str()).collect();
-            log!("synchro WAL worker: decoded {} events for tables: {:?}", events.len(), table_names);
-        }
-
         // Apply each event. Failures are per-event (non-fatal).
         for event in &events {
             if let Err(e) = apply_event(client, event, registry) {
@@ -373,15 +367,8 @@ fn apply_event(
     let desired = if event.operation == Operation::Delete {
         vec![]
     } else {
-        let buckets = resolve_buckets(client, &table_reg.bucket_sql, &event.record_id)
-            .map_err(|e| format!("resolving buckets: {e}"))?;
-        if buckets.is_empty() {
-            log!(
-                "synchro WAL worker: resolve_buckets returned empty for {}.{} (sql: {})",
-                event.table_name, event.record_id, table_reg.bucket_sql
-            );
-        }
-        buckets
+        resolve_buckets(client, &table_reg.bucket_sql, &event.record_id)
+            .map_err(|e| format!("resolving buckets: {e}"))?
     };
 
     // 3. Build changelog entries from edge diff.

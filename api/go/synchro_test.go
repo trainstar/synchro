@@ -625,6 +625,7 @@ func TestEndToEndPushThenPull(t *testing.T) {
 	status, body = doJSON(t, "POST", srv.URL+"/sync/pull", token, map[string]any{
 		"client_id":      "e2e-client",
 		"checkpoint":     0,
+		"tables":         []string{"test_e2e_items"},
 		"schema_version": 0,
 		"schema_hash":    "",
 	})
