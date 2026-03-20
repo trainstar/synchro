@@ -105,9 +105,12 @@ fn synchro_pull(
                 "schema_version": schema_version,
                 "schema_hash": schema_hash,
             });
-            if per_bucket {
-                resp["bucket_checkpoints"] = serde_json::json!(bucket_cps);
-            }
+            let resp_bucket_cps = if per_bucket {
+                bucket_cps.clone()
+            } else {
+                load_stored_bucket_checkpoints(client, p_user_id, p_client_id)
+            };
+            resp["bucket_checkpoints"] = serde_json::json!(resp_bucket_cps);
             if let Some(ref updates) = bucket_updates {
                 resp["bucket_updates"] = updates.clone();
             }
@@ -169,9 +172,12 @@ fn synchro_pull(
                 "schema_version": schema_version,
                 "schema_hash": schema_hash,
             });
-            if per_bucket {
-                resp["bucket_checkpoints"] = serde_json::json!(bucket_cps);
-            }
+            let resp_bucket_cps = if per_bucket {
+                bucket_cps.clone()
+            } else {
+                load_stored_bucket_checkpoints(client, p_user_id, p_client_id)
+            };
+            resp["bucket_checkpoints"] = serde_json::json!(resp_bucket_cps);
             if let Some(ref updates) = bucket_updates {
                 resp["bucket_updates"] = updates.clone();
             }
@@ -277,9 +283,12 @@ fn synchro_pull(
             "schema_hash": schema_hash,
         });
 
-        if per_bucket {
-            response["bucket_checkpoints"] = serde_json::json!(new_bucket_cps);
-        }
+        let resp_bucket_cps = if per_bucket {
+            new_bucket_cps
+        } else {
+            load_stored_bucket_checkpoints(client, p_user_id, p_client_id)
+        };
+        response["bucket_checkpoints"] = serde_json::json!(resp_bucket_cps);
         if let Some(checksums) = bucket_checksums {
             response["bucket_checksums"] = serde_json::json!(checksums);
         }
@@ -721,6 +730,38 @@ fn advance_checkpoints(
             );
         }
     }
+}
+
+/// Load the server-side per-bucket checkpoints for a client from sync_client_checkpoints.
+/// Used when the client did not send bucket_checkpoints (legacy mode) so the response
+/// still includes the server's stored state.
+fn load_stored_bucket_checkpoints(
+    client: &SpiClient<'_>,
+    user_id: &str,
+    client_id: &str,
+) -> std::collections::HashMap<String, i64> {
+    let mut cps = std::collections::HashMap::new();
+    if let Ok(tup) = client.select(
+        "SELECT bucket_id, checkpoint FROM sync_client_checkpoints \
+         WHERE user_id = $1 AND client_id = $2",
+        None,
+        &[user_id.into(), client_id.into()],
+    ) {
+        for row in tup {
+            let bid: String = row
+                .get_by_name::<String, &str>("bucket_id")
+                .unwrap_or(None)
+                .unwrap_or_default();
+            let cp: i64 = row
+                .get_by_name::<i64, &str>("checkpoint")
+                .unwrap_or(None)
+                .unwrap_or(0);
+            if !bid.is_empty() {
+                cps.insert(bid, cp);
+            }
+        }
+    }
+    cps
 }
 
 /// Double-quote a SQL identifier, escaping internal double quotes.
