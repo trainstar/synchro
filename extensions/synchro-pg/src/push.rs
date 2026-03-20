@@ -289,7 +289,7 @@ fn push_create(
 
     if let Some(ref ex) = existing {
         if ex.deleted_at.is_none() {
-            return conflict_result("record_exists", "record already exists", ex, table_reg);
+            return conflict_result("record_exists", "record already exists", ex, table_reg, id);
         }
         // Exists but soft-deleted: resurrection via update path.
         return push_update_inner(
@@ -404,7 +404,7 @@ fn push_update_inner(
 
     // If soft-deleted and not a resurrection: conflict.
     if existing.deleted_at.is_some() && !is_resurrection {
-        return conflict_result("record_deleted", "record has been deleted", &existing, table_reg);
+        return conflict_result("record_deleted", "record has been deleted", &existing, table_reg, id);
     }
 
     // Conflict resolution via LWW (if table has updated_at).
@@ -435,6 +435,7 @@ fn push_update_inner(
                         &resolution.reason,
                         &existing,
                         table_reg,
+                        id,
                     );
                 }
             }
@@ -851,6 +852,7 @@ fn conflict_result(
     message: &str,
     existing: &ExistingRecord,
     table_reg: &TableRegistration,
+    record_id: &str,
 ) -> serde_json::Value {
     let mut r = serde_json::json!({
         "status": PUSH_STATUS_CONFLICT,
@@ -860,29 +862,22 @@ fn conflict_result(
     if let Some(ua) = &existing.updated_at {
         r["server_updated_at"] = serde_json::json!(ua);
     }
-    // Include server version as a Record envelope: {data, updated_at, deleted_at}.
-    // Strip excluded columns from data. Use the ISO 8601 timestamps from
-    // load_existing_record (not the PG-format ones inside row_to_json).
+    // Include server version as a full Record: {id, table_name, data, updated_at, deleted_at}.
+    // Strip excluded columns. Normalize all timestamps in the data blob to ISO 8601 UTC.
     if let Some(data_str) = &existing.data {
         if let Ok(mut data) = serde_json::from_str::<serde_json::Value>(data_str) {
             if let Some(obj) = data.as_object_mut() {
-                // Strip excluded columns.
                 for col in &table_reg.exclude_columns {
                     obj.remove(col);
                 }
-                // Replace PG-format timestamps with ISO 8601 versions.
-                if let Some(ua) = &existing.updated_at {
-                    if table_reg.has_updated_at {
-                        obj.insert(table_reg.updated_at_col.clone(), serde_json::json!(ua));
-                    }
-                }
-                if let Some(da) = &existing.deleted_at {
-                    if table_reg.has_deleted_at {
-                        obj.insert(table_reg.deleted_at_col.clone(), serde_json::json!(da));
-                    }
-                }
+                // Normalize all PG-format timestamps to ISO 8601 UTC.
+                normalize_timestamps(obj);
             }
-            let mut sv = serde_json::json!({"data": data});
+            let mut sv = serde_json::json!({
+                "id": record_id,
+                "table_name": table_reg.table_name,
+                "data": data,
+            });
             if let Some(ua) = &existing.updated_at {
                 sv["updated_at"] = serde_json::json!(ua);
             }
@@ -893,6 +888,23 @@ fn conflict_result(
         }
     }
     r
+}
+
+/// Normalize all timestamps in a JSON object to ISO 8601 UTC (Z suffix).
+/// Detects any string that parses as a timestamp and is NOT already in UTC Z format.
+fn normalize_timestamps(obj: &mut serde_json::Map<String, serde_json::Value>) {
+    for (_, val) in obj.iter_mut() {
+        if let Some(s) = val.as_str() {
+            // Skip if already ISO 8601 UTC.
+            if s.ends_with('Z') {
+                continue;
+            }
+            // Try to parse as a timestamp. If it parses, normalize to UTC Z.
+            if let Some(dt) = parse_pg_timestamptz(s) {
+                *val = serde_json::json!(dt.format("%Y-%m-%dT%H:%M:%S%.6fZ").to_string());
+            }
+        }
+    }
 }
 
 fn reject_terminal(reason_code: &str, message: &str) -> serde_json::Value {
