@@ -517,9 +517,18 @@ func TestEndToEndPushThenPull(t *testing.T) {
 	if err != nil {
 		t.Fatalf("creating test table: %v", err)
 	}
+	// Clean up from any prior failed runs.
+	_, _ = db.Exec("DELETE FROM sync_changelog WHERE table_name = 'test_e2e_items'")
+	_, _ = db.Exec("DELETE FROM sync_bucket_edges WHERE table_name = 'test_e2e_items'")
+	_, _ = db.Exec("DELETE FROM test_e2e_items")
+	_, _ = db.Exec("DELETE FROM sync_clients WHERE client_id = 'e2e-client'")
+
 	t.Cleanup(func() {
+		_, _ = db.Exec("DELETE FROM sync_changelog WHERE table_name = 'test_e2e_items'")
+		_, _ = db.Exec("DELETE FROM sync_bucket_edges WHERE table_name = 'test_e2e_items'")
 		_, _ = db.Exec("SELECT synchro_unregister_table('test_e2e_items')")
 		_, _ = db.Exec("DROP TABLE IF EXISTS test_e2e_items")
+		_, _ = db.Exec("DELETE FROM sync_clients WHERE client_id = 'e2e-client'")
 	})
 
 	// Register table for sync.
@@ -531,6 +540,13 @@ func TestEndToEndPushThenPull(t *testing.T) {
 	if err != nil {
 		t.Fatalf("registering table: %v", err)
 	}
+
+	// Signal the WAL background worker to reload its registry so it
+	// picks up the newly registered table.
+	if _, err := db.Exec("SELECT pg_reload_conf()"); err != nil {
+		t.Fatalf("reloading config: %v", err)
+	}
+	time.Sleep(500 * time.Millisecond) // Give bgworker time to reload.
 
 	// Set up HTTP server.
 	handler := Routes(Config{

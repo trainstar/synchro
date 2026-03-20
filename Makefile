@@ -332,7 +332,7 @@ seed-bundle-example: seed-generate-example
 
 PGRX_PG ?= pg18
 PGRX_PORT ?= 28818
-ADAPTER_TEST_DB ?= synchro_adapter_test
+ADAPTER_TEST_DB ?= postgres
 ADAPTER_TEST_URL ?= postgres://$(USER)@localhost:$(PGRX_PORT)/$(ADAPTER_TEST_DB)?sslmode=disable
 SYNCHROD_PG_PID_FILE ?= .synchrod-pg-test.pid
 SYNCHROD_PG_LOG_FILE ?= .synchrod-pg-test.log
@@ -375,12 +375,14 @@ test-adapter-setup:
 		echo "wal_level = logical" >> ~/.pgrx/data-18/postgresql.conf
 	@sed -i 's/^synchro.auto_start = off/synchro.auto_start = on/' ~/.pgrx/data-18/postgresql.conf 2>/dev/null || true
 	@cd extensions/synchro-pg && cargo pgrx start $(PGRX_PG)
-	@psql -h localhost -p $(PGRX_PORT) -U $(USER) -d postgres -c \
-		"DROP DATABASE IF EXISTS $(ADAPTER_TEST_DB)" 2>/dev/null || true
-	@psql -h localhost -p $(PGRX_PORT) -U $(USER) -d postgres -c \
-		"CREATE DATABASE $(ADAPTER_TEST_DB)"
+	@if [ "$(ADAPTER_TEST_DB)" != "postgres" ]; then \
+		psql -h localhost -p $(PGRX_PORT) -U $(USER) -d postgres -c \
+			"DROP DATABASE IF EXISTS $(ADAPTER_TEST_DB)" 2>/dev/null || true; \
+		psql -h localhost -p $(PGRX_PORT) -U $(USER) -d postgres -c \
+			"CREATE DATABASE $(ADAPTER_TEST_DB)"; \
+	fi
 	@psql -h localhost -p $(PGRX_PORT) -U $(USER) -d $(ADAPTER_TEST_DB) -c \
-		"CREATE EXTENSION IF NOT EXISTS synchro_pg CASCADE"
+		"CREATE EXTENSION IF NOT EXISTS synchro_pg CASCADE" 2>/dev/null || true
 	@echo "Adapter test database ready: $(ADAPTER_TEST_URL)"
 
 test-adapter-teardown-restore:
@@ -388,9 +390,11 @@ test-adapter-teardown-restore:
 	@sed -i 's/^synchro.auto_start = on/synchro.auto_start = off/' ~/.pgrx/data-18/postgresql.conf 2>/dev/null || true
 
 test-adapter-teardown:
-	@echo "Tearing down adapter test database..."
-	@psql -h localhost -p $(PGRX_PORT) -U $(USER) -d postgres -c \
-		"DROP DATABASE IF EXISTS $(ADAPTER_TEST_DB)" 2>/dev/null || true
+	@echo "Tearing down adapter test environment..."
+	@if [ "$(ADAPTER_TEST_DB)" != "postgres" ]; then \
+		psql -h localhost -p $(PGRX_PORT) -U $(USER) -d postgres -c \
+			"DROP DATABASE IF EXISTS $(ADAPTER_TEST_DB)" 2>/dev/null || true; \
+	fi
 	@cd extensions/synchro-pg && cargo pgrx stop $(PGRX_PG) 2>/dev/null || true
 	@echo "Done."
 
