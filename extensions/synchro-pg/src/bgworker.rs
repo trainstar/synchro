@@ -150,6 +150,15 @@ pub extern "C-unwind" fn synchro_wal_worker_main(_arg: pg_sys::Datum) {
 
     let mut decoder = build_decoder(&registry);
 
+    // Pre-populate the WAL decoder's relation cache from pg_catalog.
+    // This handles the case where the bgworker restarts but the replication
+    // slot has already advanced past the RelationMessages for registered tables.
+    // Without this, events for those tables would be silently dropped.
+    let preloaded = BackgroundWorker::transaction(|| {
+        preload_relations_from_catalog(&registry)
+    });
+    decoder.preload_relations(preloaded);
+
     log!(
         "synchro WAL worker: registry loaded ({} tables), entering main loop",
         registry.len()
@@ -183,6 +192,49 @@ pub extern "C-unwind" fn synchro_wal_worker_main(_arg: pg_sys::Datum) {
     }
 
     log!("synchro WAL worker shutting down");
+}
+
+/// Load relation OIDs and column metadata from pg_catalog for all
+/// registered tables. Returns data to be passed to decoder.preload_relations().
+fn preload_relations_from_catalog(
+    registry: &[TableRegistration],
+) -> Vec<(u32, String, Vec<crate::wal_decoder::ColumnInfo>)> {
+    use crate::wal_decoder::ColumnInfo;
+
+    let mut relations = Vec::new();
+    for table_reg in registry {
+        let oid_sql = format!(
+            "SELECT c.oid::integer FROM pg_catalog.pg_class c WHERE c.relname = '{}'",
+            table_reg.table_name.replace('\'', "''")
+        );
+        let relid: i32 = match Spi::get_one::<i32>(&oid_sql) {
+            Ok(Some(id)) => id,
+            _ => continue,
+        };
+
+        let col_sql = format!(
+            "SELECT a.attname::text AS name, a.atttypid::integer AS type_oid \
+             FROM pg_catalog.pg_attribute a \
+             WHERE a.attrelid = {} AND a.attnum > 0 AND NOT a.attisdropped \
+             ORDER BY a.attnum",
+            relid
+        );
+        let mut columns = Vec::new();
+        let _ = Spi::connect(|client| {
+            if let Ok(tup) = client.select(&col_sql, None, &[]) {
+                for row in tup {
+                    let name: String = row.get_by_name::<String, &str>("name")
+                        .unwrap_or(None).unwrap_or_default();
+                    let oid: i32 = row.get_by_name::<i32, &str>("type_oid")
+                        .unwrap_or(None).unwrap_or(0);
+                    columns.push(ColumnInfo { name, data_type_oid: oid as u32 });
+                }
+            }
+            Ok::<_, pgrx::spi::Error>(())
+        });
+        relations.push((relid as u32, table_reg.table_name.clone(), columns));
+    }
+    relations
 }
 
 /// Build a WalDecoder from the current registry.
@@ -370,6 +422,13 @@ fn apply_event(
         resolve_buckets(client, &table_reg.bucket_sql, &event.record_id)
             .map_err(|e| format!("resolving buckets: {e}"))?
     };
+
+    if desired.is_empty() && event.operation != Operation::Delete {
+        log!(
+            "synchro WAL worker: empty buckets for {}.{} (op={:?}, sql={})",
+            event.table_name, event.record_id, event.operation, table_reg.bucket_sql
+        );
+    }
 
     // 3. Build changelog entries from edge diff.
     let entries = build_edge_diff_entries(
