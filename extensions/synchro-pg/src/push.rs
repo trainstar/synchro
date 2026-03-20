@@ -16,16 +16,17 @@ use crate::registry::{PushPolicy, TableRegistration};
 // Clock skew tolerance is read from the synchro.clock_skew_tolerance_ms GUC
 // (registered in lib.rs). Accessed via crate::CLOCK_SKEW_TOLERANCE_MS_GUC.
 
-/// SQL expression that formats a timestamptz column as ISO 8601 UTC.
+/// SQL expression that formats a timestamptz column as ISO 8601 UTC with Z suffix.
 ///
-/// Uses PG's built-in `to_json()` serialization, which outputs timestamptz
-/// as ISO 8601 with +00:00 offset when `timezone = 'UTC'` is set. The
-/// surrounding JSON quotes are stripped with `trim()`.
+/// Uses PG's `to_char` with AT TIME ZONE 'UTC' to produce canonical format:
+/// `2026-03-20T16:03:36.914731Z`
 ///
-/// Callers MUST issue `SET LOCAL timezone = 'UTC'` in their SPI context
-/// before using this expression.
+/// Callers MUST issue `SET LOCAL timezone = 'UTC'` in their SPI context.
 pub(crate) fn ts_to_iso(col: &str) -> String {
-    format!("trim(both '\"' from to_json({})::text)", col)
+    format!(
+        r#"to_char({} AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')"#,
+        col
+    )
 }
 
 /// Push client changes to the server.
@@ -674,7 +675,7 @@ fn load_existing_record(
     };
 
     let sql = format!(
-        "SELECT {} AS updated_at, {} AS deleted_at, row_to_json(t)::text AS data \
+        "SELECT {} AS updated_at, {} AS deleted_at, replace(row_to_json(t)::text, '+00:00', 'Z') AS data \
          FROM {} t WHERE {} = $1::{}",
         updated_at_expr,
         deleted_at_expr,
