@@ -100,13 +100,15 @@ fn synchro_push(
             results.push(result);
         }
 
-        // Split results into accepted (applied/conflict) and rejected.
+        // Split results: only applied goes to accepted. Everything else
+        // (conflict, rejected_terminal, rejected_retryable) goes to rejected.
+        // A conflict means the client's write was NOT applied.
         let mut accepted: Vec<serde_json::Value> = Vec::new();
         let mut rejected: Vec<serde_json::Value> = Vec::new();
         for result in results {
             let status = result.get("status").and_then(|v| v.as_str()).unwrap_or("");
             match status {
-                "applied" | "conflict" => accepted.push(result),
+                "applied" => accepted.push(result),
                 _ => rejected.push(result),
             }
         }
@@ -287,7 +289,7 @@ fn push_create(
 
     if let Some(ref ex) = existing {
         if ex.deleted_at.is_none() {
-            return conflict_result("record_exists", "record already exists", ex);
+            return conflict_result("record_exists", "record already exists", ex, table_reg);
         }
         // Exists but soft-deleted: resurrection via update path.
         return push_update_inner(
@@ -402,7 +404,7 @@ fn push_update_inner(
 
     // If soft-deleted and not a resurrection: conflict.
     if existing.deleted_at.is_some() && !is_resurrection {
-        return conflict_result("record_deleted", "record has been deleted", &existing);
+        return conflict_result("record_deleted", "record has been deleted", &existing, table_reg);
     }
 
     // Conflict resolution via LWW (if table has updated_at).
@@ -432,6 +434,7 @@ fn push_update_inner(
                         "server_won_conflict",
                         &resolution.reason,
                         &existing,
+                        table_reg,
                     );
                 }
             }
@@ -847,6 +850,7 @@ fn conflict_result(
     reason_code: &str,
     message: &str,
     existing: &ExistingRecord,
+    table_reg: &TableRegistration,
 ) -> serde_json::Value {
     let mut r = serde_json::json!({
         "status": PUSH_STATUS_CONFLICT,
@@ -856,10 +860,36 @@ fn conflict_result(
     if let Some(ua) = &existing.updated_at {
         r["server_updated_at"] = serde_json::json!(ua);
     }
-    // Include server version data so clients can perform merge resolution.
+    // Include server version as a Record envelope: {data, updated_at, deleted_at}.
+    // Strip excluded columns from data. Use the ISO 8601 timestamps from
+    // load_existing_record (not the PG-format ones inside row_to_json).
     if let Some(data_str) = &existing.data {
-        if let Ok(data) = serde_json::from_str::<serde_json::Value>(data_str) {
-            r["server_version"] = data;
+        if let Ok(mut data) = serde_json::from_str::<serde_json::Value>(data_str) {
+            if let Some(obj) = data.as_object_mut() {
+                // Strip excluded columns.
+                for col in &table_reg.exclude_columns {
+                    obj.remove(col);
+                }
+                // Replace PG-format timestamps with ISO 8601 versions.
+                if let Some(ua) = &existing.updated_at {
+                    if table_reg.has_updated_at {
+                        obj.insert(table_reg.updated_at_col.clone(), serde_json::json!(ua));
+                    }
+                }
+                if let Some(da) = &existing.deleted_at {
+                    if table_reg.has_deleted_at {
+                        obj.insert(table_reg.deleted_at_col.clone(), serde_json::json!(da));
+                    }
+                }
+            }
+            let mut sv = serde_json::json!({"data": data});
+            if let Some(ua) = &existing.updated_at {
+                sv["updated_at"] = serde_json::json!(ua);
+            }
+            if let Some(da) = &existing.deleted_at {
+                sv["deleted_at"] = serde_json::json!(da);
+            }
+            r["server_version"] = sv;
         }
     }
     r

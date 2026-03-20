@@ -530,10 +530,12 @@ mod tests {
         .unwrap();
         let resp = resp.unwrap().0;
 
-        let accepted = resp["accepted"].as_array().unwrap();
-        assert_eq!(accepted.len(), 1);
-        assert_eq!(accepted[0]["status"].as_str().unwrap(), "conflict");
-        assert_eq!(accepted[0]["reason_code"].as_str().unwrap(), "record_exists");
+        // Conflicts go to rejected, not accepted. The client's write was NOT applied.
+        let rejected = resp["rejected"].as_array().unwrap();
+        assert_eq!(rejected.len(), 1);
+        assert_eq!(rejected[0]["status"].as_str().unwrap(), "conflict");
+        assert_eq!(rejected[0]["reason_code"].as_str().unwrap(), "record_exists");
+        assert_eq!(resp["accepted"].as_array().unwrap().len(), 0);
     }
 
     #[pg_test]
@@ -594,8 +596,10 @@ mod tests {
         .unwrap();
         let resp = resp.unwrap().0;
 
-        let accepted = resp["accepted"].as_array().unwrap();
-        assert_eq!(accepted[0]["status"].as_str().unwrap(), "conflict");
+        // Conflict goes to rejected.
+        let rejected = resp["rejected"].as_array().unwrap();
+        assert_eq!(rejected[0]["status"].as_str().unwrap(), "conflict");
+        assert_eq!(resp["accepted"].as_array().unwrap().len(), 0);
 
         // Title should be unchanged.
         let title: Option<String> = Spi::get_one(
@@ -1964,7 +1968,7 @@ mod tests {
             ],
         )
         .unwrap();
-        let status2 = resp2.unwrap().0["accepted"][0]["status"]
+        let status2 = resp2.unwrap().0["rejected"][0]["status"]
             .as_str()
             .unwrap()
             .to_string();
