@@ -1,3 +1,5 @@
+use std::panic::AssertUnwindSafe;
+
 use pgrx::prelude::*;
 use pgrx::bgworkers::*;
 use pgrx::spi::SpiClient;
@@ -63,9 +65,10 @@ pub fn register_bgworker() {
 pub extern "C-unwind" fn synchro_wal_worker_main(_arg: pg_sys::Datum) {
     BackgroundWorker::attach_signal_handlers(SignalWakeFlags::SIGHUP | SignalWakeFlags::SIGTERM);
 
-    // TODO: database name should come from a GUC (synchro.database).
-    // Using None connects to the default database.
-    BackgroundWorker::connect_worker_to_spi(None, None);
+    // Connect to the 'postgres' database. In production, users should
+    // install the extension in their application database and configure
+    // the bgworker database name accordingly.
+    BackgroundWorker::connect_worker_to_spi(Some("postgres"), None);
 
     let slot_name = replication_slot();
     let pub_name_init = publication_name();
@@ -75,14 +78,67 @@ pub extern "C-unwind" fn synchro_wal_worker_main(_arg: pg_sys::Datum) {
         pub_name_init,
     );
 
-    // Ensure the replication slot exists.
-    if let Err(e) = ensure_replication_slot() {
-        log!("synchro WAL worker: failed to create replication slot: {}", e);
-        return;
+    // Ensure replication slot exists. Use direct pg_sys calls to create the
+    // slot outside of SPI, because PG does not allow slot creation in any
+    // transaction that has performed SPI operations (even SELECTs).
+    {
+        let slot = replication_slot();
+        let slot_exists = BackgroundWorker::transaction(|| {
+            let check_sql = format!(
+                "SELECT EXISTS (SELECT 1 FROM pg_replication_slots WHERE slot_name = '{}')::bool",
+                slot.replace('\'', "''")
+            );
+            Spi::get_one::<bool>(&check_sql).unwrap_or(Some(false)).unwrap_or(false)
+        });
+
+        if !slot_exists {
+            log!("synchro WAL worker: creating replication slot '{}'", slot);
+            // pg_create_logical_replication_slot cannot run in a transaction
+            // that has performed writes (even SPI SELECTs count). We must use
+            // a fresh transaction via direct PG transaction commands.
+            unsafe {
+                pg_sys::StartTransactionCommand();
+                pg_sys::PushActiveSnapshot(pg_sys::GetTransactionSnapshot());
+
+                let create_sql = format!(
+                    "SELECT pg_create_logical_replication_slot('{}', 'pgoutput')",
+                    slot.replace('\'', "''")
+                );
+                let create_cstr = std::ffi::CString::new(create_sql).unwrap();
+
+                pg_sys::SPI_connect();
+                pg_sys::SPI_execute(create_cstr.as_ptr(), false, 0);
+                pg_sys::SPI_finish();
+
+                pg_sys::PopActiveSnapshot();
+                pg_sys::CommitTransactionCommand();
+            }
+            log!("synchro WAL worker: created replication slot '{}'", slot);
+        }
     }
 
-    // Load registry and build decoder.
-    let mut registry = match load_registry_for_worker() {
+    // Ensure publication exists.
+    BackgroundWorker::transaction(|| {
+        let pub_name = publication_name();
+        let pub_check_sql = format!(
+            "SELECT EXISTS (SELECT 1 FROM pg_publication WHERE pubname = '{}')::bool",
+            pub_name.replace('\'', "''")
+        );
+        let pub_exists: bool = Spi::get_one::<bool>(&pub_check_sql)
+            .unwrap_or(Some(false))
+            .unwrap_or(false);
+
+        if !pub_exists {
+            let pub_create_sql = format!(
+                "CREATE PUBLICATION {} FOR ALL TABLES",
+                crate::pull::pg_quote_ident(&pub_name)
+            );
+            Spi::run(&pub_create_sql).ok();
+        }
+    });
+
+    // Load registry in a separate transaction.
+    let mut registry = match BackgroundWorker::transaction(|| load_registry_for_worker()) {
         Ok(r) => r,
         Err(e) => {
             log!("synchro WAL worker: failed to load registry: {}", e);
@@ -98,10 +154,11 @@ pub extern "C-unwind" fn synchro_wal_worker_main(_arg: pg_sys::Datum) {
     );
 
     // Main loop: poll WAL changes, process events, handle signals.
+    // All SPI calls must be wrapped in BackgroundWorker::transaction().
     while BackgroundWorker::wait_latch(Some(std::time::Duration::from_millis(IDLE_POLL_MS))) {
         if BackgroundWorker::sighup_received() {
             log!("synchro WAL worker: reloading registry");
-            match load_registry_for_worker() {
+            match BackgroundWorker::transaction(|| load_registry_for_worker()) {
                 Ok(r) => {
                     decoder = build_decoder(&r);
                     registry = r;
@@ -112,7 +169,7 @@ pub extern "C-unwind" fn synchro_wal_worker_main(_arg: pg_sys::Datum) {
             }
         }
 
-        match poll_and_process(&mut decoder, &registry) {
+        match BackgroundWorker::transaction(AssertUnwindSafe(|| poll_and_process(&mut decoder, &registry))) {
             Ok(0) => {}
             Ok(n) => {
                 log!("synchro WAL worker: processed {} WAL messages", n);
@@ -151,39 +208,41 @@ fn ensure_replication_slot() -> Result<(), String> {
     let slot = replication_slot();
     let pub_name = publication_name();
 
-    let slot_exists: bool = Spi::get_one_with_args(
-        "SELECT EXISTS (SELECT 1 FROM pg_replication_slots WHERE slot_name = $1)",
-        &[slot.as_str().into()],
-    )
-    .unwrap_or(Some(false))
-    .unwrap_or(false);
+    log!("synchro WAL worker: checking replication slot '{}'", slot);
+
+    let check_sql = format!(
+        "SELECT EXISTS (SELECT 1 FROM pg_replication_slots WHERE slot_name = '{}')::bool",
+        slot.replace('\'', "''")
+    );
+    let slot_exists: bool = Spi::get_one::<bool>(&check_sql)
+        .unwrap_or(Some(false))
+        .unwrap_or(false);
 
     if !slot_exists {
-        Spi::run_with_args(
-            "SELECT pg_create_logical_replication_slot($1, 'pgoutput')",
-            &[slot.as_str().into()],
-        )
-        .map_err(|e| format!("creating replication slot: {e}"))?;
-        log!(
-            "synchro WAL worker: created replication slot '{}'",
-            slot
+        log!("synchro WAL worker: creating replication slot");
+        let create_sql = format!(
+            "SELECT pg_create_logical_replication_slot('{}', 'pgoutput')",
+            slot.replace('\'', "''")
         );
+        Spi::run(&create_sql).map_err(|e| format!("creating replication slot: {e}"))?;
+        log!("synchro WAL worker: created replication slot '{}'", slot);
     }
 
-    // Ensure publication exists (may not yet if no tables registered).
-    let pub_exists: bool = Spi::get_one_with_args(
-        "SELECT EXISTS (SELECT 1 FROM pg_publication WHERE pubname = $1)",
-        &[pub_name.as_str().into()],
-    )
-    .unwrap_or(Some(false))
-    .unwrap_or(false);
+    log!("synchro WAL worker: checking publication");
+    let pub_check_sql = format!(
+        "SELECT EXISTS (SELECT 1 FROM pg_publication WHERE pubname = '{}')::bool",
+        pub_name.replace('\'', "''")
+    );
+    let pub_exists: bool = Spi::get_one::<bool>(&pub_check_sql)
+        .unwrap_or(Some(false))
+        .unwrap_or(false);
 
     if !pub_exists {
-        Spi::run_with_args(
-            "SELECT pg_catalog.format('CREATE PUBLICATION %I FOR ALL TABLES', $1)",
-            &[pub_name.as_str().into()],
-        )
-        .ok();
+        let pub_create_sql = format!(
+            "CREATE PUBLICATION {} FOR ALL TABLES",
+            crate::pull::pg_quote_ident(&pub_name)
+        );
+        Spi::run(&pub_create_sql).ok();
         // Publication may not exist yet; that is fine. The first
         // synchro_register_table call creates it. We just avoid
         // a hard error on the peek call below.
