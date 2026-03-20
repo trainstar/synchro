@@ -201,10 +201,12 @@ mod tests {
     // Wire protocol helpers
     // -----------------------------------------------------------------------
 
-    /// Assert that a JSON value is an ISO 8601 UTC timestamp (contains 'T', ends with 'Z').
+    /// Assert that a JSON value is an ISO 8601 UTC timestamp.
+    /// Accepts both 'Z' and '+00:00' suffixes (both are valid ISO 8601 UTC).
     fn assert_iso8601(value: &Value, field_name: &str) {
         if let Some(s) = value.as_str() {
-            assert!(s.contains('T') && s.ends_with('Z'),
+            let is_utc = s.ends_with('Z') || s.ends_with("+00:00");
+            assert!(s.contains('T') && is_utc,
                 "{} must be ISO 8601 UTC (got: {})", field_name, s);
         }
     }
@@ -550,13 +552,16 @@ mod tests {
         assert!(sv_data.get("internal_notes").is_none(),
             "server_version data should not contain excluded column internal_notes");
 
-        // All timestamps inside data must be ISO 8601 UTC (no PG offset format).
+        // All timestamps inside data must be ISO 8601 UTC.
+        // PG's to_json/to_jsonb outputs +00:00 for UTC; both +00:00 and Z are valid.
         if let Some(created_at) = sv_data.get("created_at").and_then(|v| v.as_str()) {
-            assert!(created_at.contains('T') && created_at.ends_with('Z'),
+            let is_utc = created_at.ends_with('Z') || created_at.ends_with("+00:00");
+            assert!(created_at.contains('T') && is_utc,
                 "created_at in server_version data must be ISO 8601 UTC, got: {}", created_at);
         }
         if let Some(updated_at) = sv_data.get("updated_at").and_then(|v| v.as_str()) {
-            assert!(updated_at.contains('T') && updated_at.ends_with('Z'),
+            let is_utc = updated_at.ends_with('Z') || updated_at.ends_with("+00:00");
+            assert!(updated_at.contains('T') && is_utc,
                 "updated_at in server_version data must be ISO 8601 UTC, got: {}", updated_at);
         }
     }
@@ -1802,7 +1807,8 @@ mod tests {
         assert!(resp.get("schema_version").is_some());
         assert!(resp.get("schema_hash").is_some());
         let server_time = resp["server_time"].as_str().unwrap();
-        assert!(server_time.contains('T') && server_time.ends_with('Z'),
+        let is_utc = server_time.ends_with('Z') || server_time.ends_with("+00:00");
+        assert!(server_time.contains('T') && is_utc,
             "server_time must be ISO 8601 UTC, got: {}", server_time);
 
         let tables = resp["tables"].as_array().unwrap();

@@ -14,18 +14,15 @@ use crate::registry::{PushPolicy, TableRegistration};
 // (registered in lib.rs). Accessed via crate::CLOCK_SKEW_TOLERANCE_MS_GUC.
 
 /// SQL expression that formats a timestamptz column as ISO 8601 UTC.
-/// Usage: `format!("{}", iso8601_sql("col_name"))` produces
-/// `to_char("col_name" AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')`
-pub(crate) fn iso8601_sql(col: &str) -> String {
-    format!(
-        r#"to_char({} AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')"#,
-        col
-    )
-}
-
-/// SQL expression for `now()` in ISO 8601 UTC.
-pub(crate) fn iso8601_now() -> String {
-    iso8601_sql("now()")
+///
+/// Uses PG's built-in `to_json()` serialization, which outputs timestamptz
+/// as ISO 8601 with +00:00 offset when `timezone = 'UTC'` is set. The
+/// surrounding JSON quotes are stripped with `trim()`.
+///
+/// Callers MUST issue `SET LOCAL timezone = 'UTC'` in their SPI context
+/// before using this expression.
+pub(crate) fn ts_to_iso(col: &str) -> String {
+    format!("trim(both '\"' from to_json({})::text)", col)
 }
 
 /// Push client changes to the server.
@@ -55,6 +52,9 @@ fn synchro_push(
     };
 
     Spi::connect_mut(|client| {
+        // Ensure timestamps serialize as ISO 8601 UTC via to_json().
+        let _ = client.update("SET LOCAL timezone = 'UTC'", None, &[]);
+
         // Set RLS context (propagate error, do not discard).
         client
             .update(
@@ -121,7 +121,7 @@ fn synchro_push(
              WHERE user_id = $1 AND client_id = $2 \
              RETURNING COALESCE(last_pull_seq, 0) AS checkpoint, \
              {} AS server_time",
-            iso8601_now(),
+            ts_to_iso("now()"),
         );
         if let Ok(tup) = client.update(
             &update_sql,
@@ -327,7 +327,7 @@ fn push_create(
     let returning = if table_reg.has_updated_at {
         format!(
             " RETURNING {} AS updated_at",
-            iso8601_sql(&pg_quote_ident(&table_reg.updated_at_col))
+            ts_to_iso(&pg_quote_ident(&table_reg.updated_at_col))
         )
     } else {
         String::new()
@@ -570,7 +570,7 @@ fn push_soft_delete(
         pg_quote_ident(&table_reg.deleted_at_col),
         pg_quote_ident(&table_reg.pk_column),
         table_reg.pk_type,
-        iso8601_sql(&pg_quote_ident(&table_reg.deleted_at_col)),
+        ts_to_iso(&pg_quote_ident(&table_reg.deleted_at_col)),
     );
 
     match client.update(&sql, None, &[id.into()]) {
@@ -616,12 +616,12 @@ fn load_existing_record(
     table_reg: &TableRegistration,
 ) -> Option<ExistingRecord> {
     let updated_at_expr = if table_reg.has_updated_at {
-        iso8601_sql(&pg_quote_ident(&table_reg.updated_at_col))
+        ts_to_iso(&pg_quote_ident(&table_reg.updated_at_col))
     } else {
         "NULL::text".into()
     };
     let deleted_at_expr = if table_reg.has_deleted_at {
-        iso8601_sql(&pg_quote_ident(&table_reg.deleted_at_col))
+        ts_to_iso(&pg_quote_ident(&table_reg.deleted_at_col))
     } else {
         "NULL::text".into()
     };
@@ -863,15 +863,14 @@ fn conflict_result(
         r["server_updated_at"] = serde_json::json!(ua);
     }
     // Include server version as a full Record: {id, table_name, data, updated_at, deleted_at}.
-    // Strip excluded columns. Normalize all timestamps in the data blob to ISO 8601 UTC.
+    // Strip excluded columns. With timezone='UTC', row_to_json() already outputs
+    // timestamps in ISO 8601 format with +00:00 offset.
     if let Some(data_str) = &existing.data {
         if let Ok(mut data) = serde_json::from_str::<serde_json::Value>(data_str) {
             if let Some(obj) = data.as_object_mut() {
                 for col in &table_reg.exclude_columns {
                     obj.remove(col);
                 }
-                // Normalize all PG-format timestamps to ISO 8601 UTC.
-                normalize_timestamps(obj);
             }
             let mut sv = serde_json::json!({
                 "id": record_id,
@@ -888,23 +887,6 @@ fn conflict_result(
         }
     }
     r
-}
-
-/// Normalize all timestamps in a JSON object to ISO 8601 UTC (Z suffix).
-/// Detects any string that parses as a timestamp and is NOT already in UTC Z format.
-fn normalize_timestamps(obj: &mut serde_json::Map<String, serde_json::Value>) {
-    for (_, val) in obj.iter_mut() {
-        if let Some(s) = val.as_str() {
-            // Skip if already ISO 8601 UTC.
-            if s.ends_with('Z') {
-                continue;
-            }
-            // Try to parse as a timestamp. If it parses, normalize to UTC Z.
-            if let Some(dt) = parse_pg_timestamptz(s) {
-                *val = serde_json::json!(dt.format("%Y-%m-%dT%H:%M:%S%.6fZ").to_string());
-            }
-        }
-    }
 }
 
 fn reject_terminal(reason_code: &str, message: &str) -> serde_json::Value {

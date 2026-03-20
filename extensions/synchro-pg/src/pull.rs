@@ -560,53 +560,23 @@ pub(crate) fn hydrate_records(
             .collect::<String>()
     };
 
-    // Build timestamp expressions (ISO 8601 UTC).
+    // Build timestamp expressions (ISO 8601 UTC via to_json()).
+    // Requires SET LOCAL timezone = 'UTC' in the SPI context.
     let updated_at_expr = if table_reg.has_updated_at {
-        crate::push::iso8601_sql(&format!("t.{}", pg_quote_ident(&table_reg.updated_at_col)))
+        crate::push::ts_to_iso(&format!("t.{}", pg_quote_ident(&table_reg.updated_at_col)))
     } else {
         "NULL::text".into()
     };
 
     let deleted_at_expr = if table_reg.has_deleted_at {
-        crate::push::iso8601_sql(&format!("t.{}", pg_quote_ident(&table_reg.deleted_at_col)))
+        crate::push::ts_to_iso(&format!("t.{}", pg_quote_ident(&table_reg.deleted_at_col)))
     } else {
         "NULL::text".into()
     };
 
-    // Build a JSONB override object to replace timestamps in the data blob
-    // with ISO 8601 UTC format. PostgreSQL's to_jsonb() uses "+00:00" for UTC
-    // offsets, but the wire protocol requires "Z" suffix.
-    let mut ts_override_parts: Vec<String> = Vec::new();
-    if table_reg.has_updated_at {
-        let iso = crate::push::iso8601_sql(
-            &format!("t.{}", pg_quote_ident(&table_reg.updated_at_col)),
-        );
-        ts_override_parts.push(format!(
-            "'{col}', to_jsonb({iso})",
-            col = table_reg.updated_at_col.replace('\'', "''"),
-            iso = iso,
-        ));
-    }
-    if table_reg.has_deleted_at {
-        let iso = crate::push::iso8601_sql(
-            &format!("t.{}", pg_quote_ident(&table_reg.deleted_at_col)),
-        );
-        ts_override_parts.push(format!(
-            "'{col}', to_jsonb({iso})",
-            col = table_reg.deleted_at_col.replace('\'', "''"),
-            iso = iso,
-        ));
-    }
-
-    let data_expr = if ts_override_parts.is_empty() {
-        format!("(to_jsonb(t){exclude})::text", exclude = exclude_expr)
-    } else {
-        format!(
-            "((to_jsonb(t){exclude}) || jsonb_build_object({overrides}))::text",
-            exclude = exclude_expr,
-            overrides = ts_override_parts.join(", "),
-        )
-    };
+    // With timezone='UTC', to_jsonb() serializes timestamptz as ISO 8601
+    // with +00:00 offset natively. No override object needed.
+    let data_expr = format!("(to_jsonb(t){exclude})::text", exclude = exclude_expr);
 
     // Build hydration query.
     let query = format!(
