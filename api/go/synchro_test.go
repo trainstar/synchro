@@ -15,6 +15,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	_ "github.com/jackc/pgx/v5/stdlib"
 )
@@ -469,6 +470,183 @@ func TestSQLError503(t *testing.T) {
 		t.Errorf("expected 500 or 503, got %d: %v", status, body)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// End-to-end pipeline test: push -> WAL consumer -> changelog -> pull
+// ---------------------------------------------------------------------------
+
+func TestEndToEndPushThenPull(t *testing.T) {
+	dbURL := os.Getenv("TEST_DATABASE_URL")
+	if dbURL == "" {
+		t.Skip("TEST_DATABASE_URL not set")
+	}
+
+	db, err := sql.Open("pgx", dbURL)
+	if err != nil {
+		t.Fatalf("opening database: %v", err)
+	}
+	defer db.Close()
+
+	// Verify extension and WAL consumer prerequisites.
+	var extExists bool
+	if err := db.QueryRow(
+		"SELECT EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'synchro_pg')",
+	).Scan(&extExists); err != nil || !extExists {
+		t.Skip("synchro_pg extension not installed")
+	}
+
+	// Check wal_level is logical.
+	var walLevel string
+	if err := db.QueryRow("SHOW wal_level").Scan(&walLevel); err != nil {
+		t.Fatalf("checking wal_level: %v", err)
+	}
+	if walLevel != "logical" {
+		t.Skip("wal_level is not logical (required for WAL consumer E2E test)")
+	}
+
+	// Create a dedicated test table for E2E.
+	_, err = db.Exec(`
+		CREATE TABLE IF NOT EXISTS test_e2e_items (
+			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+			user_id TEXT NOT NULL,
+			title TEXT NOT NULL DEFAULT '',
+			created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+			updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+			deleted_at TIMESTAMPTZ
+		)`)
+	if err != nil {
+		t.Fatalf("creating test table: %v", err)
+	}
+	t.Cleanup(func() {
+		_, _ = db.Exec("SELECT synchro_unregister_table('test_e2e_items')")
+		_, _ = db.Exec("DROP TABLE IF EXISTS test_e2e_items")
+	})
+
+	// Register table for sync.
+	_, err = db.Exec(`SELECT synchro_register_table(
+		'test_e2e_items',
+		$$SELECT ARRAY['user:' || user_id] FROM test_e2e_items WHERE id = $1::uuid$$,
+		'id', 'updated_at', 'deleted_at', 'enabled'
+	)`)
+	if err != nil {
+		t.Fatalf("registering table: %v", err)
+	}
+
+	// Set up HTTP server.
+	handler := Routes(Config{
+		DB:        db,
+		JWTSecret: []byte("test-secret-for-integration-tests"),
+	})
+	srv := httptest.NewServer(handler)
+	defer srv.Close()
+
+	token := testToken("e2e-user")
+
+	// Register client.
+	status, body := doJSON(t, "POST", srv.URL+"/sync/register", token, map[string]any{
+		"client_id": "e2e-client", "schema_version": 0, "schema_hash": "",
+	})
+	if status != 200 {
+		t.Fatalf("register failed: %d %v", status, body)
+	}
+
+	// Push a record.
+	pushID := "e2e00000-0001-0001-0001-000000000001"
+	status, body = doJSON(t, "POST", srv.URL+"/sync/push", token, map[string]any{
+		"client_id": "e2e-client",
+		"changes": []map[string]any{
+			{
+				"id":         pushID,
+				"table_name": "test_e2e_items",
+				"operation":  "create",
+				"data":       map[string]any{"user_id": "e2e-user", "title": "E2E Test Record"},
+			},
+		},
+		"schema_version": 0,
+		"schema_hash":    "",
+	})
+	if status != 200 {
+		t.Fatalf("push failed: %d %v", status, body)
+	}
+	accepted, _ := body["accepted"].([]any)
+	if len(accepted) == 0 {
+		t.Fatalf("push returned no accepted results: %v", body)
+	}
+	if s, _ := accepted[0].(map[string]any)["status"].(string); s != "applied" {
+		t.Fatalf("push not applied: %v", accepted[0])
+	}
+
+	// Verify record exists in the data table.
+	var title string
+	err = db.QueryRow("SELECT title FROM test_e2e_items WHERE id = $1::uuid", pushID).Scan(&title)
+	if err != nil {
+		t.Fatalf("record not in data table: %v", err)
+	}
+	if title != "E2E Test Record" {
+		t.Fatalf("wrong title: %s", title)
+	}
+
+	// Wait for the WAL consumer to process the change into the changelog.
+	// The bgworker polls every 100ms. Give it up to 5 seconds.
+	var changelogCount int64
+	for attempt := 0; attempt < 50; attempt++ {
+		err = db.QueryRow(
+			"SELECT count(*) FROM sync_changelog WHERE table_name = 'test_e2e_items' AND record_id = $1",
+			pushID,
+		).Scan(&changelogCount)
+		if err == nil && changelogCount > 0 {
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	if changelogCount == 0 {
+		t.Fatal("WAL consumer did not populate changelog within 5 seconds. " +
+			"Verify synchro.auto_start = on and wal_level = logical.")
+	}
+
+	// Pull and verify the record comes back.
+	status, body = doJSON(t, "POST", srv.URL+"/sync/pull", token, map[string]any{
+		"client_id":      "e2e-client",
+		"checkpoint":     0,
+		"schema_version": 0,
+		"schema_hash":    "",
+	})
+	if status != 200 {
+		t.Fatalf("pull failed: %d %v", status, body)
+	}
+
+	changes, _ := body["changes"].([]any)
+	found := false
+	for _, c := range changes {
+		cm, _ := c.(map[string]any)
+		if cm["id"] == pushID {
+			found = true
+			// Verify the hydrated data.
+			data, _ := cm["data"].(map[string]any)
+			if data["title"] != "E2E Test Record" {
+				t.Errorf("pulled record has wrong title: %v", data["title"])
+			}
+			if data["user_id"] != "e2e-user" {
+				t.Errorf("pulled record has wrong user_id: %v", data["user_id"])
+			}
+			// Verify timestamps are ISO 8601.
+			if ts, ok := data["updated_at"].(string); ok {
+				if !strings.Contains(ts, "T") || !strings.HasSuffix(ts, "Z") {
+					t.Errorf("pulled updated_at not ISO 8601: %s", ts)
+				}
+			}
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("pushed record not found in pull response. changes=%d, deletes=%v",
+			len(changes), body["deletes"])
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Unit tests (no database required)
+// ---------------------------------------------------------------------------
 
 func TestPqTextArrayEncoding(t *testing.T) {
 	// Unit test for pqTextArray helper (no DB needed).
