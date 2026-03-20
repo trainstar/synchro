@@ -370,6 +370,10 @@ lint-rust:
 # Adapter test lifecycle: start pgrx PG, create DB, install extension, run tests, stop.
 test-adapter-setup:
 	@echo "Setting up adapter test database..."
+	@# Ensure wal_level=logical and bgworker enabled for E2E testing.
+	@grep -q "^wal_level = logical" ~/.pgrx/data-18/postgresql.conf 2>/dev/null || \
+		echo "wal_level = logical" >> ~/.pgrx/data-18/postgresql.conf
+	@sed -i 's/^synchro.auto_start = off/synchro.auto_start = on/' ~/.pgrx/data-18/postgresql.conf 2>/dev/null || true
 	@cd extensions/synchro-pg && cargo pgrx start $(PGRX_PG)
 	@psql -h localhost -p $(PGRX_PORT) -U $(USER) -d postgres -c \
 		"DROP DATABASE IF EXISTS $(ADAPTER_TEST_DB)" 2>/dev/null || true
@@ -378,6 +382,10 @@ test-adapter-setup:
 	@psql -h localhost -p $(PGRX_PORT) -U $(USER) -d $(ADAPTER_TEST_DB) -c \
 		"CREATE EXTENSION IF NOT EXISTS synchro_pg CASCADE"
 	@echo "Adapter test database ready: $(ADAPTER_TEST_URL)"
+
+test-adapter-teardown-restore:
+	@# Restore auto_start = off for pgrx unit tests.
+	@sed -i 's/^synchro.auto_start = on/synchro.auto_start = off/' ~/.pgrx/data-18/postgresql.conf 2>/dev/null || true
 
 test-adapter-teardown:
 	@echo "Tearing down adapter test database..."
@@ -389,6 +397,7 @@ test-adapter-teardown:
 test-adapter: test-adapter-setup
 	@echo "Running adapter integration tests..."
 	cd api/go && TEST_DATABASE_URL="$(ADAPTER_TEST_URL)" go test -v -count=1 ./...
+	@$(MAKE) test-adapter-teardown-restore
 	@$(MAKE) test-adapter-teardown
 
 # Extension-backed synchrod lifecycle (for client SDK tests).
