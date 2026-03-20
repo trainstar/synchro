@@ -417,10 +417,14 @@ synchrod-pg-test-start: test-adapter-setup
 	psql -h localhost -p $(PGRX_PORT) -U $(USER) -d $(ADAPTER_TEST_DB) -f extensions/testdata/schema.sql >/dev/null 2>&1; \
 	echo "Registering tables..."; \
 	psql -h localhost -p $(PGRX_PORT) -U $(USER) -d $(ADAPTER_TEST_DB) -f extensions/testdata/register.sql >/dev/null 2>&1; \
-	echo "Reloading bgworker registry..."; \
-	psql -h localhost -p $(PGRX_PORT) -U $(USER) -d $(ADAPTER_TEST_DB) -c "SELECT pg_reload_conf()" >/dev/null 2>&1; \
-	echo "Waiting for bgworker to reload registry..."; \
-	sleep 2; \
+	echo "Dropping replication slot and restarting PG for clean seed..."; \
+	psql -h localhost -p $(PGRX_PORT) -U $(USER) -d $(ADAPTER_TEST_DB) -c \
+		"SELECT pg_drop_replication_slot(slot_name) FROM pg_replication_slots WHERE slot_name = 'synchro_slot'" >/dev/null 2>&1 || true; \
+	(cd $(CURDIR)/extensions/synchro-pg && cargo pgrx stop $(PGRX_PG)) 2>/dev/null || true; \
+	sleep 1; \
+	(cd $(CURDIR)/extensions/synchro-pg && cargo pgrx start $(PGRX_PG)); \
+	echo "Waiting for bgworker to start and recreate slot..."; \
+	sleep 3; \
 	if [ -f extensions/testdata/seed.sql ]; then \
 		echo "Loading seed data (this may take a minute)..."; \
 		psql -h localhost -p $(PGRX_PORT) -U $(USER) -d $(ADAPTER_TEST_DB) -f extensions/testdata/seed.sql >/dev/null 2>&1; \
