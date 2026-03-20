@@ -536,6 +536,29 @@ mod tests {
         assert_eq!(rejected[0]["status"].as_str().unwrap(), "conflict");
         assert_eq!(rejected[0]["reason_code"].as_str().unwrap(), "record_exists");
         assert_eq!(resp["accepted"].as_array().unwrap().len(), 0);
+
+        // server_version must be a full Record: id, table_name, data, updated_at.
+        let sv = &rejected[0]["server_version"];
+        assert_eq!(sv["id"].as_str().unwrap(), "44444444-4444-4444-4444-444444444444");
+        assert_eq!(sv["table_name"].as_str().unwrap(), "test_orders");
+        assert!(sv.get("data").is_some(), "server_version missing data");
+        assert!(sv.get("updated_at").is_some(), "server_version missing updated_at");
+        assert_iso8601(&sv["updated_at"], "server_version updated_at");
+
+        // data must not contain excluded columns.
+        let sv_data = &sv["data"];
+        assert!(sv_data.get("internal_notes").is_none(),
+            "server_version data should not contain excluded column internal_notes");
+
+        // All timestamps inside data must be ISO 8601 UTC (no PG offset format).
+        if let Some(created_at) = sv_data.get("created_at").and_then(|v| v.as_str()) {
+            assert!(created_at.contains('T') && created_at.ends_with('Z'),
+                "created_at in server_version data must be ISO 8601 UTC, got: {}", created_at);
+        }
+        if let Some(updated_at) = sv_data.get("updated_at").and_then(|v| v.as_str()) {
+            assert!(updated_at.contains('T') && updated_at.ends_with('Z'),
+                "updated_at in server_version data must be ISO 8601 UTC, got: {}", updated_at);
+        }
     }
 
     #[pg_test]
