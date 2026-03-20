@@ -65,10 +65,12 @@ pub fn register_bgworker() {
 pub extern "C-unwind" fn synchro_wal_worker_main(_arg: pg_sys::Datum) {
     BackgroundWorker::attach_signal_handlers(SignalWakeFlags::SIGHUP | SignalWakeFlags::SIGTERM);
 
-    // Connect to the 'postgres' database. In production, users should
-    // install the extension in their application database and configure
-    // the bgworker database name accordingly.
-    BackgroundWorker::connect_worker_to_spi(Some("postgres"), None);
+    // Connect to the configured database (synchro.database GUC).
+    let db_name = crate::DATABASE_GUC
+        .get()
+        .and_then(|cs| cs.to_str().ok().map(String::from))
+        .unwrap_or_else(|| "postgres".to_string());
+    BackgroundWorker::connect_worker_to_spi(Some(&db_name), None);
 
     let slot_name = replication_slot();
     let pub_name_init = publication_name();

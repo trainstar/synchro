@@ -374,6 +374,8 @@ test-adapter-setup:
 	@grep -q "^wal_level = logical" ~/.pgrx/data-18/postgresql.conf 2>/dev/null || \
 		echo "wal_level = logical" >> ~/.pgrx/data-18/postgresql.conf
 	@sed -i 's/^synchro.auto_start = off/synchro.auto_start = on/' ~/.pgrx/data-18/postgresql.conf 2>/dev/null || true
+	@sed -i "s/^synchro.database = .*/synchro.database = '$(ADAPTER_TEST_DB)'/" ~/.pgrx/data-18/postgresql.conf 2>/dev/null || \
+		echo "synchro.database = '$(ADAPTER_TEST_DB)'" >> ~/.pgrx/data-18/postgresql.conf
 	@cd extensions/synchro-pg && cargo pgrx start $(PGRX_PG)
 	@if [ "$(ADAPTER_TEST_DB)" != "postgres" ]; then \
 		psql -h localhost -p $(PGRX_PORT) -U $(USER) -d postgres -c \
@@ -414,6 +416,9 @@ synchrod-pg-test-start: test-adapter-setup
 	echo "Loading schema and registering tables..."; \
 	psql -h localhost -p $(PGRX_PORT) -U $(USER) -d $(ADAPTER_TEST_DB) -f extensions/testdata/schema.sql >/dev/null 2>&1; \
 	psql -h localhost -p $(PGRX_PORT) -U $(USER) -d $(ADAPTER_TEST_DB) -f extensions/testdata/register.sql >/dev/null 2>&1; \
+	echo "Reloading bgworker registry..."; \
+	psql -h localhost -p $(PGRX_PORT) -U $(USER) -d $(ADAPTER_TEST_DB) -c "SELECT pg_reload_conf()" >/dev/null 2>&1; \
+	sleep 1; \
 	if [ -f extensions/testdata/seed.sql ]; then \
 		echo "Loading seed data (this may take a minute)..."; \
 		psql -h localhost -p $(PGRX_PORT) -U $(USER) -d $(ADAPTER_TEST_DB) -f extensions/testdata/seed.sql >/dev/null 2>&1; \
