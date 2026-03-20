@@ -931,6 +931,207 @@ func TestRebuildAfterSeedData(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// Pull bucket_checkpoints with non-empty values (Bug 2 diagnostic)
+// ---------------------------------------------------------------------------
+
+func TestPullBucketCheckpointsNonEmpty(t *testing.T) {
+	srv := testServer(t)
+	token := testToken("user-bcp2")
+
+	// Register client.
+	doJSON(t, "POST", srv.URL+"/sync/register", token, map[string]any{
+		"client_id": "bcp2-client", "schema_version": 0, "schema_hash": "",
+	})
+
+	// Pull with non-empty bucket_checkpoints.
+	// This verifies the adapter correctly forwards non-empty bucket_checkpoints
+	// to the extension and returns them in the response.
+	status, body := doJSON(t, "POST", srv.URL+"/sync/pull", token, map[string]any{
+		"client_id":          "bcp2-client",
+		"checkpoint":         0,
+		"bucket_checkpoints": map[string]int64{"user:user-bcp2": 0, "global": 0},
+		"schema_version":     0,
+		"schema_hash":        "",
+	})
+
+	if status != 200 {
+		t.Fatalf("expected 200, got %d: %v", status, body)
+	}
+	if body["bucket_checkpoints"] == nil {
+		t.Error("response missing 'bucket_checkpoints' when non-empty per-bucket checkpoints are sent")
+	}
+	// Verify the returned value is an object (not null or a scalar).
+	bcp, ok := body["bucket_checkpoints"].(map[string]any)
+	if !ok {
+		t.Fatalf("bucket_checkpoints is not an object: %T %v", body["bucket_checkpoints"], body["bucket_checkpoints"])
+	}
+	// Both buckets should be present in the response.
+	if bcp["user:user-bcp2"] == nil {
+		t.Error("bucket_checkpoints missing 'user:user-bcp2'")
+	}
+	if bcp["global"] == nil {
+		t.Error("bucket_checkpoints missing 'global'")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Mixed push with registered tables (Bug 3 adapter diagnostic)
+// ---------------------------------------------------------------------------
+
+func TestPushMixedWritableAndReadOnly(t *testing.T) {
+	dbURL := os.Getenv("TEST_DATABASE_URL")
+	if dbURL == "" {
+		t.Skip("TEST_DATABASE_URL not set")
+	}
+
+	db, err := sql.Open("pgx", dbURL)
+	if err != nil {
+		t.Fatalf("opening database: %v", err)
+	}
+	defer db.Close()
+
+	// Verify extension is installed.
+	var extExists bool
+	if err := db.QueryRow(
+		"SELECT EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'synchro_pg')",
+	).Scan(&extExists); err != nil || !extExists {
+		t.Skip("synchro_pg extension not installed")
+	}
+
+	// Create test tables: one writable, one read-only.
+	_, err = db.Exec(`
+		CREATE TABLE IF NOT EXISTS test_mixed_writable (
+			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+			user_id TEXT NOT NULL,
+			name TEXT NOT NULL DEFAULT '',
+			created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+			updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+			deleted_at TIMESTAMPTZ
+		)`)
+	if err != nil {
+		t.Fatalf("creating writable table: %v", err)
+	}
+	_, err = db.Exec(`
+		CREATE TABLE IF NOT EXISTS test_mixed_readonly (
+			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+			name TEXT NOT NULL DEFAULT '',
+			created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+			updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+			deleted_at TIMESTAMPTZ
+		)`)
+	if err != nil {
+		t.Fatalf("creating readonly table: %v", err)
+	}
+
+	// Register tables.
+	_, _ = db.Exec(`SELECT synchro_register_table(
+		'test_mixed_writable',
+		$$SELECT ARRAY['user:' || user_id] FROM test_mixed_writable WHERE id = $1::uuid$$,
+		'id', 'updated_at', 'deleted_at', 'enabled'
+	)`)
+	_, _ = db.Exec(`SELECT synchro_register_table(
+		'test_mixed_readonly',
+		$$SELECT ARRAY['global'] FROM test_mixed_readonly WHERE id = $1::uuid$$,
+		'id', 'updated_at', 'deleted_at', 'read_only'
+	)`)
+
+	// Clean up stale data from prior runs.
+	_, _ = db.Exec("DELETE FROM test_mixed_writable")
+	_, _ = db.Exec("DELETE FROM sync_clients WHERE client_id = 'mixed-rw-client'")
+
+	t.Cleanup(func() {
+		_, _ = db.Exec("SELECT synchro_unregister_table('test_mixed_writable')")
+		_, _ = db.Exec("SELECT synchro_unregister_table('test_mixed_readonly')")
+		_, _ = db.Exec("DROP TABLE IF EXISTS test_mixed_writable")
+		_, _ = db.Exec("DROP TABLE IF EXISTS test_mixed_readonly")
+		_, _ = db.Exec("DELETE FROM sync_clients WHERE client_id = 'mixed-rw-client'")
+	})
+
+	handler := Routes(Config{
+		DB:        db,
+		JWTSecret: []byte("test-secret-for-integration-tests"),
+	})
+	srv := httptest.NewServer(handler)
+	defer srv.Close()
+
+	token := testToken("user-mixed-rw")
+
+	// Register client.
+	status, body := doJSON(t, "POST", srv.URL+"/sync/register", token, map[string]any{
+		"client_id": "mixed-rw-client", "schema_version": 0, "schema_hash": "",
+	})
+	if status != 200 {
+		t.Fatalf("register failed: %d %v", status, body)
+	}
+
+	// Push: one valid create to writable table + one create to read-only table.
+	// This must return 200 with accepted[1] and rejected[1], not 500.
+	status, body = doJSON(t, "POST", srv.URL+"/sync/push", token, map[string]any{
+		"client_id": "mixed-rw-client",
+		"changes": []map[string]any{
+			{
+				"id":         "f1a11111-1111-1111-1111-111111111111",
+				"table_name": "test_mixed_writable",
+				"operation":  "create",
+				"data":       map[string]any{"user_id": "user-mixed-rw", "name": "Valid Write"},
+			},
+			{
+				"id":         "f1a22222-2222-2222-2222-222222222222",
+				"table_name": "test_mixed_readonly",
+				"operation":  "create",
+				"data":       map[string]any{"name": "Read Only Attempt"},
+			},
+		},
+		"schema_version": 0,
+		"schema_hash":    "",
+	})
+
+	if status != 200 {
+		t.Fatalf("expected 200, got %d: %v", status, body)
+	}
+
+	accepted, _ := body["accepted"].([]any)
+	rejected, _ := body["rejected"].([]any)
+
+	if len(accepted) != 1 {
+		t.Errorf("expected 1 accepted, got %d: %v", len(accepted), body)
+	}
+	if len(rejected) != 1 {
+		t.Errorf("expected 1 rejected, got %d: %v", len(rejected), body)
+	}
+
+	// Verify the accepted record has "applied" status.
+	if len(accepted) > 0 {
+		rec, _ := accepted[0].(map[string]any)
+		if rec["status"] != "applied" {
+			t.Errorf("expected accepted status 'applied', got %v", rec["status"])
+		}
+	}
+	// Verify the rejected record has "rejected_terminal" status.
+	if len(rejected) > 0 {
+		rec, _ := rejected[0].(map[string]any)
+		if rec["status"] != "rejected_terminal" {
+			t.Errorf("expected rejected status 'rejected_terminal', got %v", rec["status"])
+		}
+		if rec["reason_code"] != "table_read_only" {
+			t.Errorf("expected reason_code 'table_read_only', got %v", rec["reason_code"])
+		}
+	}
+
+	// Verify the accepted record was persisted.
+	var name string
+	err = db.QueryRow(
+		"SELECT name FROM test_mixed_writable WHERE id = 'f1a11111-1111-1111-1111-111111111111'",
+	).Scan(&name)
+	if err != nil {
+		t.Fatalf("accepted record not persisted: %v", err)
+	}
+	if name != "Valid Write" {
+		t.Errorf("expected name 'Valid Write', got %q", name)
+	}
+}
+
+// ---------------------------------------------------------------------------
 // Unit tests (no database required)
 // ---------------------------------------------------------------------------
 

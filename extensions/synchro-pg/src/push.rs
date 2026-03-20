@@ -1,5 +1,8 @@
+use std::panic::AssertUnwindSafe;
+
 use pgrx::prelude::*;
 use pgrx::spi::SpiClient;
+use pgrx::PgTryBuilder;
 use synchro_core::conflict::{Conflict, LwwResolver};
 use synchro_core::protocol::{
     Operation, PUSH_STATUS_APPLIED, PUSH_STATUS_CONFLICT, PUSH_STATUS_REJECTED_RETRYABLE,
@@ -76,19 +79,63 @@ fn synchro_push(
         let has_write_protect = check_write_protect_exists(client);
 
         // Process each change, annotating results with record identity.
+        // Each record is wrapped in a savepoint so that a PG ERROR from one
+        // record's DML (e.g., type coercion failure in jsonb_populate_record)
+        // does not abort the entire transaction and prevent subsequent records
+        // from being processed.
         let mut results: Vec<serde_json::Value> = Vec::with_capacity(changes.len());
         for change in &changes {
             let id = change.get("id").and_then(|v| v.as_str()).unwrap_or("");
             let table_name = change.get("table_name").and_then(|v| v.as_str()).unwrap_or("");
             let operation = change.get("operation").and_then(|v| v.as_str()).unwrap_or("");
 
-            let mut result = process_record(
-                client,
-                p_user_id,
-                change,
-                &registry,
-                has_write_protect,
-            );
+            // Create a savepoint before processing this record.
+            let _ = client.update("SAVEPOINT synchro_per_record", None, &[]);
+
+            let mut result = {
+                let client_ptr: *mut SpiClient<'_> = &mut *client;
+                let change_clone = change.clone();
+                let registry_clone = registry.clone();
+                let user_id_owned = p_user_id.to_string();
+
+                PgTryBuilder::new(AssertUnwindSafe(move || {
+                    // SAFETY: client_ptr is valid for the duration of PgTryBuilder::execute
+                    // because the savepoint keeps the SPI connection alive. The pointer
+                    // is only used within this synchronous closure, which runs
+                    // synchronously before client is borrowed again.
+                    let client_ref = unsafe { &mut *client_ptr };
+                    process_record(
+                        client_ref,
+                        &user_id_owned,
+                        &change_clone,
+                        &registry_clone,
+                        has_write_protect,
+                    )
+                }))
+                .catch_others(|cause| {
+                    let msg = match &cause {
+                        pgrx::pg_sys::panic::CaughtError::PostgresError(e) => {
+                            e.message().to_string()
+                        }
+                        pgrx::pg_sys::panic::CaughtError::ErrorReport(e) => {
+                            e.message().to_string()
+                        }
+                        pgrx::pg_sys::panic::CaughtError::RustPanic { ereport, .. } => {
+                            ereport.message().to_string()
+                        }
+                    };
+                    reject_retryable("dml_failed", &msg)
+                })
+                .execute()
+            };
+
+            // If the record was rejected due to a caught PG ERROR, roll back
+            // the savepoint to restore the transaction to a usable state.
+            let status = result.get("status").and_then(|v| v.as_str()).unwrap_or("");
+            if status == PUSH_STATUS_REJECTED_RETRYABLE {
+                let _ = client.update("ROLLBACK TO SAVEPOINT synchro_per_record", None, &[]);
+            }
+            let _ = client.update("RELEASE SAVEPOINT synchro_per_record", None, &[]);
 
             // Annotate with record identity for the wire protocol.
             if let Some(obj) = result.as_object_mut() {

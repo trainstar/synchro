@@ -1681,6 +1681,151 @@ mod tests {
         assert!(resp.get("error").is_some());
     }
 
+    #[pg_test]
+    fn test_rebuild_global_bucket() {
+        setup_test_tables();
+        register_client("user1", "client1");
+
+        // Insert a record into test_products (a global/read-only table).
+        let product_id = "d1000000-1111-1111-1111-111111111111";
+        Spi::run_with_args(
+            "INSERT INTO test_products (id, name, price) VALUES ($1::uuid, 'Widget', 9.99)",
+            &[product_id.into()],
+        )
+        .unwrap();
+
+        // Insert a bucket edge directly for the global bucket.
+        insert_edge("test_products", product_id, "global");
+
+        // Call synchro_rebuild for the global bucket.
+        let resp: Option<pgrx::JsonB> = Spi::get_one_with_args(
+            "SELECT synchro_rebuild($1, $2, 'global', '', 100, 0, '')",
+            &["user1".into(), "client1".into()],
+        )
+        .unwrap();
+        let resp = resp.unwrap().0;
+
+        let records = resp["records"].as_array().unwrap();
+        assert!(
+            !records.is_empty(),
+            "rebuild global bucket should return records when edges exist, got 0"
+        );
+
+        // The product record should be in the results.
+        let found = records
+            .iter()
+            .any(|r| r["id"].as_str() == Some(product_id));
+        assert!(found, "product record should be in rebuild response");
+
+        // On the final page (no more records), bucket_checksum should be present.
+        if resp["has_more"].as_bool() == Some(false) {
+            assert!(
+                resp.get("bucket_checksum").is_some(),
+                "final page should include bucket_checksum"
+            );
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Push DML Error Recovery (Bug 3): PG ERROR in one record must not abort others
+    // -----------------------------------------------------------------------
+
+    #[pg_test]
+    fn test_push_dml_error_does_not_abort_batch() {
+        setup_test_tables();
+        register_client("u1", "c1");
+
+        // Push a batch with two records:
+        // 1. First record has a type mismatch (amount is numeric, we send an
+        //    invalid value via jsonb_populate_record to trigger a PG ERROR).
+        //    Actually, jsonb_populate_record handles string-to-numeric coercion.
+        //    Instead, use a direct SQL violation: insert with a duplicate PK
+        //    where the existing record is NOT soft-deleted (conflict).
+        //    But conflict returns "conflict" not "rejected_retryable".
+        //
+        // Better approach: try to insert a record with a value that fails PG
+        // type coercion. A UUID column receiving "not-a-uuid" will error.
+        // But the PK is validated before the INSERT... Let's use a different
+        // trigger: insert into test_orders with a NULL user_id (NOT NULL).
+        // Actually, strip_protected_columns might remove user_id if it's not
+        // in the data. Let's send empty data so the INSERT fails.
+        //
+        // Simplest: create a table with a CHECK constraint that will fail.
+        Spi::run(
+            "CREATE TABLE IF NOT EXISTS test_constrained (
+                id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                user_id TEXT NOT NULL,
+                value INT NOT NULL CHECK (value > 0),
+                created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                deleted_at TIMESTAMPTZ
+            )",
+        )
+        .unwrap();
+        Spi::run(
+            "SELECT synchro_register_table(
+                'test_constrained',
+                $$SELECT ARRAY['user:' || user_id] FROM test_constrained WHERE id = $1::uuid$$,
+                'id', 'updated_at', 'deleted_at', 'enabled'
+            )",
+        )
+        .unwrap();
+
+        // Batch: first record violates CHECK constraint (value = -1),
+        // second is a valid order create.
+        let resp: Option<pgrx::JsonB> = Spi::get_one_with_args(
+            "SELECT synchro_push($1, $2, $3::jsonb, 0, '')",
+            &[
+                "u1".into(),
+                "c1".into(),
+                r#"[
+                    {"id":"d2a11111-1111-1111-1111-111111111111","table_name":"test_constrained","operation":"create","data":{"user_id":"u1","value":-1}},
+                    {"id":"d2a22222-2222-2222-2222-222222222222","table_name":"test_orders","operation":"create","data":{"user_id":"u1","title":"After Error"}}
+                ]"#.into(),
+            ],
+        )
+        .unwrap();
+        let resp = resp.unwrap().0;
+
+        // The first record should be rejected (DML error caught by savepoint).
+        let rejected = resp["rejected"].as_array().unwrap();
+        assert!(
+            rejected.len() >= 1,
+            "the constrained record should be rejected"
+        );
+        let constrained_rejected = rejected
+            .iter()
+            .find(|r| r["id"].as_str() == Some("d2a11111-1111-1111-1111-111111111111"));
+        assert!(
+            constrained_rejected.is_some(),
+            "constrained record should be in rejected list"
+        );
+
+        // The second record should be accepted (savepoint rollback recovered
+        // the transaction).
+        let accepted = resp["accepted"].as_array().unwrap();
+        let order_accepted = accepted
+            .iter()
+            .find(|r| r["id"].as_str() == Some("d2a22222-2222-2222-2222-222222222222"));
+        assert!(
+            order_accepted.is_some(),
+            "valid order should be accepted even after a prior DML error"
+        );
+        assert_eq!(
+            order_accepted.unwrap()["status"].as_str().unwrap(),
+            "applied"
+        );
+
+        // Verify the accepted record was actually persisted.
+        let title: Option<String> = Spi::get_one(
+            "SELECT title FROM test_orders WHERE id = 'd2a22222-2222-2222-2222-222222222222'",
+        )
+        .unwrap();
+        assert_eq!(title, Some("After Error".to_string()));
+
+        // No explicit cleanup needed: pgrx tests run in a rolled-back transaction.
+    }
+
     // -----------------------------------------------------------------------
     // Compaction (5 tests)
     // -----------------------------------------------------------------------

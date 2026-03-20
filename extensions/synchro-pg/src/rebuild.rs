@@ -5,8 +5,8 @@ use synchro_core::protocol::clamp_rebuild_limit;
 use crate::client::validate_schema;
 use crate::pull::{
     compute_bucket_checksums, get_latest_schema, hydrate_records, load_client_buckets,
+    load_registry_inner,
 };
-use crate::registry::load_registry;
 
 /// Paginated bucket rebuild.
 ///
@@ -53,11 +53,10 @@ fn synchro_rebuild(
             return pgrx::JsonB(serde_json::json!({"error": "client_not_found"}));
         }
 
-        // Load registry for hydration.
-        let registry = match load_registry() {
-            Ok(r) => r,
-            Err(e) => pgrx::error!("failed to load registry: {}", e),
-        };
+        // Load registry for hydration (reuse the existing SPI connection to
+        // avoid nested SPI connect/disconnect which can corrupt the outer
+        // connection's read state and cause subsequent queries to return 0 rows).
+        let registry = load_registry_inner(client);
 
         let (schema_version, schema_hash) = get_latest_schema(client);
 
