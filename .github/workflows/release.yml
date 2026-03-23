@@ -592,11 +592,41 @@ jobs:
       - name: Set Android Java home
         run: echo "ANDROID_JAVA_HOME=${JAVA_HOME}" >> "$GITHUB_ENV"
 
+      - name: Enable KVM permissions
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
       - name: Install React Native dependencies
         working-directory: clients/react-native
         run: |
           corepack enable
           yarn install --immutable
+
+      - name: Cache Android AVD
+        id: rn-android-avd-cache
+        uses: actions/cache@v5.0.4
+        with:
+          path: |
+            ~/.android/avd/*
+            ~/.android/adb*
+          key: rn-android-avd-${{ runner.os }}-api34-google-apis-x86_64-pixel_7
+
+      - name: Generate Android AVD snapshot
+        if: steps.rn-android-avd-cache.outputs.cache-hit != 'true'
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 34
+          arch: x86_64
+          profile: pixel_7
+          target: google_apis
+          force-avd-creation: false
+          disable-linux-hw-accel: false
+          disable-animations: false
+          emulator-boot-timeout: 900
+          emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
+          script: echo "Generated Android AVD snapshot"
 
       - name: Validate React Native Android bridge
         uses: reactivecircus/android-emulator-runner@v2
@@ -605,7 +635,11 @@ jobs:
           arch: x86_64
           profile: pixel_7
           target: google_apis
-          emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim
+          force-avd-creation: false
+          disable-linux-hw-accel: false
+          disable-animations: true
+          emulator-boot-timeout: 900
+          emulator-options: -no-snapshot-save -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
           script: make test-rn-e2e-android
 
   validate-docs:
