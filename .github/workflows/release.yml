@@ -191,7 +191,10 @@ jobs:
 
       - name: Install PostgreSQL 18 and extension build dependencies on macOS
         if: runner.os == 'macOS'
-        run: brew install postgresql@18 pkg-config openssl@3 libxml2 libxslt
+        run: |
+          for formula in postgresql@18 pkgconf openssl@3 libxml2 libxslt; do
+            brew list --versions "$formula" >/dev/null 2>&1 || brew install "$formula"
+          done
 
       - name: Install cargo-pgrx
         run: |
@@ -262,7 +265,10 @@ jobs:
           key: cargo-pgrx-${{ runner.os }}-0.17.0
 
       - name: Install PostgreSQL 18 and extension build dependencies on macOS
-        run: brew install postgresql@18 pkg-config openssl@3 libxml2 libxslt
+        run: |
+          for formula in postgresql@18 pkgconf openssl@3 libxml2 libxslt; do
+            brew list --versions "$formula" >/dev/null 2>&1 || brew install "$formula"
+          done
 
       - name: Install cargo-pgrx
         run: |
@@ -356,7 +362,10 @@ jobs:
 
       - name: Install PostgreSQL 18 and extension build dependencies on macOS
         if: runner.os == 'macOS'
-        run: brew install postgresql@18 pkg-config openssl@3 libxml2 libxslt
+        run: |
+          for formula in postgresql@18 pkgconf openssl@3 libxml2 libxslt; do
+            brew list --versions "$formula" >/dev/null 2>&1 || brew install "$formula"
+          done
 
       - name: Install cargo-pgrx
         run: |
@@ -592,7 +601,7 @@ jobs:
     needs: validate-server
     strategy:
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        os: [ubuntu-24.04, macos-15]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v6.0.2
