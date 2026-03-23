@@ -3,6 +3,485 @@ title: Wire Protocol
 description: Canonical HTTP and JSON contract for connect, push, pull, and rebuild.
 ---
 
-import SpecDocument from '../../../../vnext/01-wire-protocol.md';
+# Wire Protocol
 
-<SpecDocument />
+## Purpose
+
+This document defines the proposed canonical HTTP and JSON contract between end clients and a Synchro server adapter such as `api/go`.
+
+The contract is designed for:
+
+- native mobile clients with local SQLite
+- deterministic server-defined scopes
+- end-to-end synced CRUD
+- low hot-path round trips
+- thin server adapters
+
+All timestamps on the wire use RFC 3339 in UTC, for example `2026-03-20T18:22:11Z`.
+
+## Transport Rules
+
+- JSON over HTTP
+- UTF-8
+- gzip or brotli compression recommended
+- bearer token authentication handled by the adapter
+- idempotency required for mutation replay safety
+
+## Core Concepts
+
+### Scope
+
+A scope is a server-defined selective-sync unit.
+
+Examples:
+
+- `workouts_user:u_123`
+- `exercises_public`
+- `project:p_42`
+
+### Scope Cursor
+
+A scope cursor is an opaque token representing incremental progress for one scope instance.
+
+Clients treat cursors as opaque strings.
+
+### Server Version
+
+Each synced row carries an opaque `server_version`.
+
+Clients use this for optimistic preconditions on updates and deletes.
+
+Clients do not interpret the value.
+
+### Mutation
+
+A mutation is a client-originated create, update, or delete for a synced table row.
+
+### Rebuild
+
+A rebuild is a full authoritative re-materialization of one scope instance.
+
+Rebuild is exceptional, not the normal hot path.
+
+## Endpoint Set
+
+### `POST /sync/connect`
+
+Establishes or resumes sync state for a client.
+
+Responsibilities:
+
+- registers the client if needed
+- negotiates protocol version
+- negotiates schema state
+- returns authoritative scope assignment state
+- returns full schema only when required
+
+This endpoint does not return normal change data.
+
+This replaces a separate mandatory bootstrap dance between registration and schema fetch.
+
+### `POST /sync/push`
+
+Uploads a batch of client mutations for synced tables.
+
+Responsibilities:
+
+- accepts row-level synced CRUD mutations
+- applies policy and validation
+- returns per-mutation outcomes
+- returns canonical server rows for accepted mutations when appropriate
+
+### `POST /sync/pull`
+
+Fetches incremental updates for assigned scopes.
+
+Responsibilities:
+
+- advances per-scope cursors
+- returns upserts and deletes
+- returns scope assignment changes
+- requests rebuild for stale or invalid scope state
+- optionally returns checksums on final page
+
+### `POST /sync/rebuild`
+
+Returns an authoritative rebuild stream for one scope instance.
+
+Responsibilities:
+
+- returns the current contents of the scope
+- pages results with a rebuild cursor
+- returns the final authoritative scope cursor and checksum
+
+### Optional Non-Core Endpoints
+
+These are useful, but not required by the client hot path:
+
+- `GET /sync/schema`
+- `GET /sync/debug`
+
+Clients should not require them in the normal steady-state flow.
+
+## Connection Handshake
+
+### Request
+
+```json
+{
+  "client_id": "ios-device-123",
+  "platform": "ios",
+  "app_version": "1.4.0",
+  "protocol_version": 1,
+  "schema": {
+    "version": 7,
+    "hash": "3b6f9f2f"
+  },
+  "scope_set_version": 12,
+  "known_scopes": {
+    "workouts_user:u_123": { "cursor": "c_889" },
+    "exercises_public": { "cursor": "c_201" }
+  }
+}
+```
+
+### Response
+
+```json
+{
+  "server_time": "2026-03-20T18:22:11Z",
+  "protocol_version": 1,
+  "scope_set_version": 13,
+  "schema": {
+    "version": 8,
+    "hash": "8b21d2a1",
+    "action": "replace"
+  },
+  "scopes": {
+    "add": [
+      { "id": "workouts_user:u_123", "cursor": null },
+      { "id": "exercises_public", "cursor": null },
+      { "id": "exercises_user:u_123", "cursor": null }
+    ],
+    "remove": []
+  },
+  "schema_definition": {
+    "tables": []
+  }
+}
+```
+
+### Schema Actions
+
+- `none`: client schema is acceptable, no schema body returned
+- `fetch`: client should fetch schema from `GET /sync/schema`
+- `replace`: schema body is included and client should replace local synced schema metadata
+- `rebuild_local`: schema body is included and client must rebuild local synced state after applying schema
+- `unsupported`: client is too old or incompatible
+
+### Scope Assignment Rules
+
+- the server is authoritative for scope assignment
+- `scope_set_version` changes whenever the client’s assigned scope set changes
+- if the client’s `scope_set_version` matches and the server does not need to send a diff, the server may return empty `add` and `remove`
+- clients must not invent scope instances locally
+
+## Mutation Model
+
+### Server Version Semantics
+
+`server_version` is an opaque server-generated row version token.
+
+Required semantics:
+
+- it changes whenever the authoritative synced row changes
+- clients may use it only for optimistic preconditions and reconciliation
+- clients must not sort, increment, or parse it
+
+### Push Request
+
+```json
+{
+  "client_id": "ios-device-123",
+  "batch_id": "b_20260320_001",
+  "schema": {
+    "version": 8,
+    "hash": "8b21d2a1"
+  },
+  "mutations": [
+    {
+      "mutation_id": "m_001",
+      "table": "workouts",
+      "op": "insert",
+      "pk": { "id": "w_1" },
+      "columns": {
+        "user_id": "u_123",
+        "name": "Lower Body",
+        "started_at": "2026-03-20T18:00:00Z"
+      }
+    },
+    {
+      "mutation_id": "m_002",
+      "table": "workouts",
+      "op": "update",
+      "pk": { "id": "w_2" },
+      "base_version": "sv_902",
+      "columns": {
+        "name": "Upper Body"
+      }
+    },
+    {
+      "mutation_id": "m_003",
+      "table": "workouts",
+      "op": "delete",
+      "pk": { "id": "w_3" },
+      "base_version": "sv_777"
+    }
+  ]
+}
+```
+
+### Push Response
+
+```json
+{
+  "server_time": "2026-03-20T18:22:11Z",
+  "accepted": [
+    {
+      "mutation_id": "m_001",
+      "table": "workouts",
+      "pk": { "id": "w_1" },
+      "status": "applied",
+      "server_row": {
+        "id": "w_1",
+        "user_id": "u_123",
+        "name": "Lower Body",
+        "started_at": "2026-03-20T18:00:00Z",
+        "updated_at": "2026-03-20T18:22:11Z"
+      },
+      "server_version": "sv_903"
+    }
+  ],
+  "rejected": [
+    {
+      "mutation_id": "m_003",
+      "table": "workouts",
+      "pk": { "id": "w_3" },
+      "status": "conflict",
+      "code": "version_conflict",
+      "message": "row version no longer matches",
+      "server_row": {
+        "id": "w_3",
+        "user_id": "u_123",
+        "name": "Leg Day",
+        "updated_at": "2026-03-20T18:21:01Z"
+      },
+      "server_version": "sv_778"
+    }
+  ]
+}
+```
+
+## Incremental Pull Model
+
+### Pull Request
+
+```json
+{
+  "client_id": "ios-device-123",
+  "schema": {
+    "version": 8,
+    "hash": "8b21d2a1"
+  },
+  "scope_set_version": 13,
+  "scopes": {
+    "workouts_user:u_123": { "cursor": "c_889" },
+    "exercises_public": { "cursor": "c_201" },
+    "exercises_user:u_123": { "cursor": "c_050" }
+  },
+  "limit": 500,
+  "checksum_mode": "requested"
+}
+```
+
+### Pull Response
+
+```json
+{
+  "changes": [
+    {
+      "scope": "workouts_user:u_123",
+      "table": "workouts",
+      "op": "upsert",
+      "pk": { "id": "w_9" },
+      "row": {
+        "id": "w_9",
+        "user_id": "u_123",
+        "name": "Tempo Run",
+        "updated_at": "2026-03-20T18:20:00Z"
+      },
+      "server_version": "sv_991"
+    },
+    {
+      "scope": "exercises_public",
+      "table": "exercises",
+      "op": "delete",
+      "pk": { "id": "e_7" },
+      "server_version": "sv_400"
+    }
+  ],
+  "scope_set_version": 14,
+  "scope_cursors": {
+    "workouts_user:u_123": "c_890",
+    "exercises_public": "c_202",
+    "exercises_user:u_123": "c_050"
+  },
+  "scope_updates": {
+    "add": [],
+    "remove": []
+  },
+  "rebuild": [],
+  "has_more": false,
+  "checksums": {
+    "workouts_user:u_123": "cs_a19d",
+    "exercises_public": "cs_0f22",
+    "exercises_user:u_123": "cs_7771"
+  }
+}
+```
+
+`scope_set_version` in pull responses is authoritative after any returned `scope_updates`. Clients must persist it atomically with the applied scope delta.
+
+### Checksum Modes
+
+- `none`: do not return checksums
+- `requested`: return checksums when practical, typically on final page
+- `required`: client explicitly requests checksums and the server must either provide them or fail the request
+
+Default mode is `none`.
+
+## Design Notes
+
+### Schema Fetch Minimization
+
+The server should not return full schema on every connect.
+
+Use `schema.action` plus optional inline schema payload to avoid unnecessary bootstrap round trips without turning `connect` into a heavy steady-state endpoint.
+
+### Explicit Rebuild
+
+Rebuild is a dedicated flow, not hidden incremental behavior.
+
+### First-Class Synced CRUD
+
+The protocol owns row-level synced CRUD instead of delegating the write contract to arbitrary app backend APIs.
+```
+
+## Rebuild Model
+
+### Rebuild Request
+
+```json
+{
+  "client_id": "ios-device-123",
+  "scope": "exercises_public",
+  "cursor": null,
+  "limit": 1000
+}
+```
+
+### Rebuild Response
+
+```json
+{
+  "scope": "exercises_public",
+  "records": [
+    {
+      "table": "exercises",
+      "pk": { "id": "e_1" },
+      "row": {
+        "id": "e_1",
+        "user_id": null,
+        "name": "Squat"
+      },
+      "server_version": "sv_100"
+    }
+  ],
+  "cursor": "rb_002",
+  "has_more": true
+}
+```
+
+Final rebuild page:
+
+```json
+{
+  "scope": "exercises_public",
+  "records": [],
+  "cursor": null,
+  "has_more": false,
+  "final_scope_cursor": "c_202",
+  "checksum": "cs_0f22"
+}
+```
+
+## Error Model
+
+### HTTP Status Use
+
+- `400` invalid request
+- `401` auth required or invalid auth
+- `409` semantic conflict that prevented the requested operation as a whole
+- `422` schema or contract violation
+- `426` client upgrade required
+- `429` retry later
+- `503` temporary server unavailability
+
+### Error Body
+
+```json
+{
+  "error": {
+    "code": "upgrade_required",
+    "message": "client version is below the minimum supported version",
+    "retryable": false
+  }
+}
+```
+
+### Per-Mutation Rejection Codes
+
+- `version_conflict`
+- `policy_rejected`
+- `validation_failed`
+- `table_not_synced`
+- `unknown_scope_effect`
+- `server_retryable`
+
+## Design Choices
+
+### No Arbitrary Client Shapes
+
+Clients never send raw replication predicates to define what data should sync.
+
+### No Mandatory Separate Schema Round Trip
+
+`/sync/connect` can return schema when needed, which reduces bootstrap round trips.
+
+### Opaque Cursors And Versions
+
+Clients must not interpret cursors or server versions.
+
+### Rebuild Is Explicit
+
+Rebuild is a dedicated flow, not an overloaded pull response pretending to be incremental.
+
+### Synced CRUD Is First-Class
+
+The protocol owns row-level synced CRUD instead of delegating the write contract to arbitrary app backend APIs.
+
+## Open Follow-Up Questions
+
+- whether `/sync/connect` should remain named `connect` or `register`
+- whether rebuild should support multiple scopes per request in the future
+- whether checksums should always be returned on final pull pages or only when requested

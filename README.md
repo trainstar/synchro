@@ -13,7 +13,7 @@ The current release architecture is:
 
 ## Status
 
-The vNext contract is documented, implemented, and validated for the current supported surface:
+The current release contract is documented, implemented, and validated for the current supported surface:
 
 - PostgreSQL 18
 - Swift on iOS 16+ and macOS 13+
@@ -32,7 +32,8 @@ The validated test matrix for the current release scope is:
 ## Documentation
 
 - Docs site: `https://trainstar.github.io/synchro`
-- Release spec source: [docs/vnext/README.md](/Users/mdspinali/Documents/projects/trainstar/repos/synchro/docs/vnext/README.md)
+- Published release spec: `https://trainstar.github.io/synchro/spec/00-principles/`
+- Docs source: [docs/src/content/docs/spec/00-principles.mdx](/Users/mdspinali/Documents/projects/trainstar/repos/synchro/docs/src/content/docs/spec/00-principles.mdx)
 - Shared conformance fixtures: [conformance/README.md](/Users/mdspinali/Documents/projects/trainstar/repos/synchro/conformance/README.md)
 
 ## Quick Start
@@ -81,7 +82,6 @@ clients/react-native/   React Native bridge
 extensions/synchro-core Shared Rust semantics
 extensions/synchro-pg   PostgreSQL extension
 docs/                   Published docs site
-docs/vnext/             Authoritative release spec source
 conformance/            Shared protocol and scenario fixtures
 ```
 
