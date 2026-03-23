@@ -59,6 +59,7 @@ PGRX_SOCKET_DIR ?= $(HOME)/.pgrx
 PGRX_ADMIN_HOST ?= $(if $(filter Darwin,$(shell uname -s)),$(PGRX_SOCKET_DIR),localhost)
 PGRX_ADMIN_USER ?= $(shell id -un)
 PGRX_LOG_FILE ?= $(HOME)/.pgrx/$(PGRX_PG_MAJOR).log
+PGRX_AUTOSTART ?= on
 PGRX_PG_CONFIG ?= $(shell awk -F'"' '/^$(PGRX_PG)[[:space:]]*=/ { print $$2 }' $(HOME)/.pgrx/config.toml)
 PGRX_PG_BIN_DIR ?= $(dir $(PGRX_PG_CONFIG))
 PGRX_PSQL ?= $(PGRX_PG_BIN_DIR)psql
@@ -288,9 +289,9 @@ test-adapter-setup: ext-install
 	@$(PGRX_PSQL) -h "$(PGRX_ADMIN_HOST)" -p $(PGRX_PORT) -U "$(PGRX_ADMIN_USER)" -d postgres -c "CREATE DATABASE $(ADAPTER_TEST_DB)"
 	@$(PGRX_PSQL) -h "$(PGRX_ADMIN_HOST)" -p $(PGRX_PORT) -U "$(PGRX_ADMIN_USER)" -d $(ADAPTER_TEST_DB) -c "CREATE EXTENSION IF NOT EXISTS synchro_pg CASCADE"
 	@if grep -q "^synchro.auto_start" "$(PGRX_DATA_DIR)/postgresql.conf"; then \
-		perl -0pi -e "s/^synchro\.auto_start\s*=.*$$/synchro.auto_start = on/m" "$(PGRX_DATA_DIR)/postgresql.conf"; \
+		perl -0pi -e "s/^synchro\.auto_start\s*=.*$$/synchro.auto_start = $(PGRX_AUTOSTART)/m" "$(PGRX_DATA_DIR)/postgresql.conf"; \
 	else \
-		printf "\nsynchro.auto_start = on\n" >> "$(PGRX_DATA_DIR)/postgresql.conf"; \
+		printf "\nsynchro.auto_start = $(PGRX_AUTOSTART)\n" >> "$(PGRX_DATA_DIR)/postgresql.conf"; \
 	fi
 	@if grep -q "^synchro.database" "$(PGRX_DATA_DIR)/postgresql.conf"; then \
 		perl -0pi -e "s/^synchro\.database\s*=.*$$/synchro.database = '$(ADAPTER_TEST_DB)'/m" "$(PGRX_DATA_DIR)/postgresql.conf"; \
@@ -329,18 +330,19 @@ test-adapter: test-adapter-setup
 	cd api/go && GOWORK=off TEST_DATABASE_URL="$(ADAPTER_TEST_URL)" go test -v -count=1 ./...
 	@$(MAKE) test-adapter-teardown
 
-synchrod-pg-test-start: test-adapter-setup
+synchrod-pg-test-start:
 	@set -e; \
 	if [ -f "$(SYNCHROD_PG_PID_FILE)" ] && kill -0 "$$(cat "$(SYNCHROD_PG_PID_FILE)")" 2>/dev/null; then \
 		echo "synchrod-pg already running"; \
 		exit 0; \
 	fi; \
+	$(MAKE) test-adapter-setup PGRX_AUTOSTART=off; \
 	echo "Loading schema and registering tables..."; \
-	$(PGRX_PSQL) -v ON_ERROR_STOP=1 -h "$(PGRX_ADMIN_HOST)" -p $(PGRX_PORT) -U "$(PGRX_ADMIN_USER)" -d $(ADAPTER_TEST_DB) -f extensions/testdata/schema.sql; \
-	$(PGRX_PSQL) -v ON_ERROR_STOP=1 -h "$(PGRX_ADMIN_HOST)" -p $(PGRX_PORT) -U "$(PGRX_ADMIN_USER)" -d $(ADAPTER_TEST_DB) -f extensions/testdata/register.sql; \
+	$(PGRX_PSQL) -v ON_ERROR_STOP=1 -h "$(PGRX_ADMIN_HOST)" -p $(PGRX_PORT) -U "$(PGRX_ADMIN_USER)" -d $(ADAPTER_TEST_DB) -f extensions/testdata/schema.sql || { if [ -f "$(PGRX_LOG_FILE)" ]; then tail -n 200 "$(PGRX_LOG_FILE)"; fi; exit 1; }; \
+	$(PGRX_PSQL) -v ON_ERROR_STOP=1 -h "$(PGRX_ADMIN_HOST)" -p $(PGRX_PORT) -U "$(PGRX_ADMIN_USER)" -d $(ADAPTER_TEST_DB) -f extensions/testdata/register.sql || { if [ -f "$(PGRX_LOG_FILE)" ]; then tail -n 200 "$(PGRX_LOG_FILE)"; fi; exit 1; }; \
 	if [ -f extensions/testdata/seed.sql ]; then \
 		echo "Loading seed data (this may take a minute)..."; \
-		$(PGRX_PSQL) -v ON_ERROR_STOP=1 -h "$(PGRX_ADMIN_HOST)" -p $(PGRX_PORT) -U "$(PGRX_ADMIN_USER)" -d $(ADAPTER_TEST_DB) -f extensions/testdata/seed.sql; \
+		$(PGRX_PSQL) -v ON_ERROR_STOP=1 -h "$(PGRX_ADMIN_HOST)" -p $(PGRX_PORT) -U "$(PGRX_ADMIN_USER)" -d $(ADAPTER_TEST_DB) -f extensions/testdata/seed.sql || { if [ -f "$(PGRX_LOG_FILE)" ]; then tail -n 200 "$(PGRX_LOG_FILE)"; fi; exit 1; }; \
 		echo "Waiting for bgworker to observe seeded rows..."; \
 		for attempt in $$(seq 1 60); do \
 			EDGE_COUNT=$$($(PGRX_PSQL) -h "$(PGRX_ADMIN_HOST)" -p $(PGRX_PORT) -U "$(PGRX_ADMIN_USER)" -d $(ADAPTER_TEST_DB) -Atqc "SELECT count(*) FROM sync_bucket_edges" 2>/dev/null || echo 0); \
@@ -353,14 +355,39 @@ synchrod-pg-test-start: test-adapter-setup
 		echo "No seed.sql found. Run 'make ext-seed' to generate test data."; \
 	fi; \
 	echo "Backfilling scope edges..."; \
-	$(PGRX_PSQL) -v ON_ERROR_STOP=1 -h "$(PGRX_ADMIN_HOST)" -p $(PGRX_PORT) -U "$(PGRX_ADMIN_USER)" -d $(ADAPTER_TEST_DB) -c "SELECT synchro_backfill_bucket_edges()"; \
+	$(PGRX_PSQL) -v ON_ERROR_STOP=1 -h "$(PGRX_ADMIN_HOST)" -p $(PGRX_PORT) -U "$(PGRX_ADMIN_USER)" -d $(ADAPTER_TEST_DB) -c "SELECT synchro_backfill_bucket_edges()" || { if [ -f "$(PGRX_LOG_FILE)" ]; then tail -n 200 "$(PGRX_LOG_FILE)"; fi; exit 1; }; \
+	echo "Restarting PostgreSQL with bgworker enabled..."; \
+	if grep -q "^synchro.auto_start" "$(PGRX_DATA_DIR)/postgresql.conf"; then \
+		perl -0pi -e "s/^synchro\.auto_start\s*=.*$$/synchro.auto_start = on/m" "$(PGRX_DATA_DIR)/postgresql.conf"; \
+	else \
+		printf "\nsynchro.auto_start = on\n" >> "$(PGRX_DATA_DIR)/postgresql.conf"; \
+	fi; \
+	cd "$(CURDIR)/extensions/synchro-pg" && CARGO_TARGET_DIR="$(PGRX_TARGET_DIR)" cargo pgrx stop $(PGRX_PG); \
+	cd "$(CURDIR)/extensions/synchro-pg" && CARGO_TARGET_DIR="$(PGRX_TARGET_DIR)" cargo pgrx start $(PGRX_PG); \
+	READY=0; \
+	LAST_ERR=""; \
+	for attempt in $$(seq 1 $(PGRX_READY_TIMEOUT)); do \
+		PROBE_OUTPUT=$$($(PGRX_PSQL) -h "$(PGRX_ADMIN_HOST)" -p $(PGRX_PORT) -U "$(PGRX_ADMIN_USER)" -d postgres -Atqc "SELECT CASE WHEN pg_is_in_recovery() THEN '0' ELSE '1' END" 2>&1 || true); \
+		if [ "$$PROBE_OUTPUT" = "1" ]; then \
+			READY=1; \
+			break; \
+		fi; \
+		LAST_ERR="$$PROBE_OUTPUT"; \
+		sleep 1; \
+	done; \
+	if [ "$$READY" -ne 1 ]; then \
+		echo "pgrx postgres did not become writable in $(PGRX_READY_TIMEOUT)s after re-enabling the worker"; \
+		if [ -n "$$LAST_ERR" ]; then echo "$$LAST_ERR"; fi; \
+		if [ -f "$(PGRX_LOG_FILE)" ]; then tail -n 200 "$(PGRX_LOG_FILE)"; fi; \
+		exit 1; \
+	fi; \
 	echo "Starting synchrod-pg on :$(SYNCHROD_PG_PORT)..."; \
 	nohup env \
 		DATABASE_URL="$(ADAPTER_TEST_URL)" \
 		JWT_SECRET="$(SYNCHRO_TEST_JWT_SECRET)" \
 		MIN_CLIENT_VERSION="$(MIN_CLIENT_VERSION)" \
 		LISTEN_ADDR=":$(SYNCHROD_PG_PORT)" \
-		sh -c 'cd api/go && GOWORK=off go run ./cmd/synchrod-pg' >"$(SYNCHROD_PG_LOG_FILE)" 2>&1 </dev/null & echo $$! >"$(SYNCHROD_PG_PID_FILE)"; \
+		sh -c 'cd "$(CURDIR)/api/go" && GOWORK=off go run ./cmd/synchrod-pg' >"$(SYNCHROD_PG_LOG_FILE)" 2>&1 </dev/null & echo $$! >"$(SYNCHROD_PG_PID_FILE)"; \
 	sleep 2; \
 	if ! kill -0 "$$(cat "$(SYNCHROD_PG_PID_FILE)")" 2>/dev/null; then \
 		echo "synchrod-pg failed to start:"; \
