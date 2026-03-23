@@ -336,11 +336,11 @@ synchrod-pg-test-start: test-adapter-setup
 		exit 0; \
 	fi; \
 	echo "Loading schema and registering tables..."; \
-	$(PGRX_PSQL) -h "$(PGRX_ADMIN_HOST)" -p $(PGRX_PORT) -U "$(PGRX_ADMIN_USER)" -d $(ADAPTER_TEST_DB) -f extensions/testdata/schema.sql >/dev/null 2>&1; \
-	$(PGRX_PSQL) -h "$(PGRX_ADMIN_HOST)" -p $(PGRX_PORT) -U "$(PGRX_ADMIN_USER)" -d $(ADAPTER_TEST_DB) -f extensions/testdata/register.sql >/dev/null 2>&1; \
+	$(PGRX_PSQL) -v ON_ERROR_STOP=1 -h "$(PGRX_ADMIN_HOST)" -p $(PGRX_PORT) -U "$(PGRX_ADMIN_USER)" -d $(ADAPTER_TEST_DB) -f extensions/testdata/schema.sql; \
+	$(PGRX_PSQL) -v ON_ERROR_STOP=1 -h "$(PGRX_ADMIN_HOST)" -p $(PGRX_PORT) -U "$(PGRX_ADMIN_USER)" -d $(ADAPTER_TEST_DB) -f extensions/testdata/register.sql; \
 	if [ -f extensions/testdata/seed.sql ]; then \
 		echo "Loading seed data (this may take a minute)..."; \
-		$(PGRX_PSQL) -h "$(PGRX_ADMIN_HOST)" -p $(PGRX_PORT) -U "$(PGRX_ADMIN_USER)" -d $(ADAPTER_TEST_DB) -f extensions/testdata/seed.sql >/dev/null 2>&1; \
+		$(PGRX_PSQL) -v ON_ERROR_STOP=1 -h "$(PGRX_ADMIN_HOST)" -p $(PGRX_PORT) -U "$(PGRX_ADMIN_USER)" -d $(ADAPTER_TEST_DB) -f extensions/testdata/seed.sql; \
 		echo "Waiting for bgworker to observe seeded rows..."; \
 		for attempt in $$(seq 1 60); do \
 			EDGE_COUNT=$$($(PGRX_PSQL) -h "$(PGRX_ADMIN_HOST)" -p $(PGRX_PORT) -U "$(PGRX_ADMIN_USER)" -d $(ADAPTER_TEST_DB) -Atqc "SELECT count(*) FROM sync_bucket_edges" 2>/dev/null || echo 0); \
@@ -353,7 +353,7 @@ synchrod-pg-test-start: test-adapter-setup
 		echo "No seed.sql found. Run 'make ext-seed' to generate test data."; \
 	fi; \
 	echo "Backfilling scope edges..."; \
-	$(PGRX_PSQL) -h "$(PGRX_ADMIN_HOST)" -p $(PGRX_PORT) -U "$(PGRX_ADMIN_USER)" -d $(ADAPTER_TEST_DB) -c "SELECT synchro_backfill_bucket_edges()" >/dev/null 2>&1; \
+	$(PGRX_PSQL) -v ON_ERROR_STOP=1 -h "$(PGRX_ADMIN_HOST)" -p $(PGRX_PORT) -U "$(PGRX_ADMIN_USER)" -d $(ADAPTER_TEST_DB) -c "SELECT synchro_backfill_bucket_edges()"; \
 	echo "Starting synchrod-pg on :$(SYNCHROD_PG_PORT)..."; \
 	nohup env \
 		DATABASE_URL="$(ADAPTER_TEST_URL)" \
