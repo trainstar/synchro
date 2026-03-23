@@ -1,5 +1,7 @@
 # Go
 bin/
+!extensions/synchro-pg/src/bin/
+!extensions/synchro-pg/src/bin/pgrx_embed.rs
 *.test
 *.out
 cover.out
