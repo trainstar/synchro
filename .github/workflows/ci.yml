@@ -73,7 +73,7 @@ jobs:
         run: make lint-go
 
       - name: Run Rust lint checks
-        run: make lint-rust
+        run: make lint-rust-core
 
       - name: Run React Native lint checks
         run: make lint-rn
@@ -144,6 +144,9 @@ jobs:
 
       - name: Run shared core tests
         run: make test-rust-core
+
+      - name: Run PostgreSQL extension lint checks
+        run: make lint-rust-pg
 
       - name: Run PostgreSQL extension tests
         run: make test-rust-pg
