@@ -120,14 +120,11 @@ jobs:
           path: ~/.pgrx
           key: pgrx-${{ runner.os }}-0.17.0-pg18
 
-      - name: Install PostgreSQL 18 and extension build dependencies on macOS
-        run: brew install postgresql@18 pkg-config openssl@3 libxml2 libxslt
-
       - name: Install cargo-pgrx
         run: cargo install --locked cargo-pgrx --version 0.17.0
 
       - name: Initialize PostgreSQL 18 for pgrx
-        run: cargo pgrx init --pg18 "$(brew --prefix postgresql@18)/bin/pg_config"
+        run: cargo pgrx init --pg18 download
 
       - name: Validate Rust core
         run: make test-rust-core
@@ -288,11 +285,20 @@ jobs:
           path: ~/.pgrx
           key: pgrx-${{ runner.os }}-0.17.0-pg18
 
+      - name: Install PostgreSQL 18 and extension build dependencies on macOS
+        if: runner.os == 'macOS'
+        run: brew install postgresql@18 pkg-config openssl@3 libxml2 libxslt
+
       - name: Install cargo-pgrx
         run: cargo install --locked cargo-pgrx --version 0.17.0
 
       - name: Initialize PostgreSQL 18 for pgrx
-        run: cargo pgrx init --pg18 download
+        run: |
+          if [ "$RUNNER_OS" = "macOS" ]; then
+            cargo pgrx init --pg18 "$(brew --prefix postgresql@18)/bin/pg_config"
+          else
+            cargo pgrx init --pg18 download
+          fi
 
       - uses: android-actions/setup-android@v3
 
