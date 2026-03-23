@@ -3,6 +3,276 @@ title: Client Contract
 description: Required client responsibilities, forbidden behavior, and the intended public SDK surface.
 ---
 
-import SpecDocument from '../../../../vnext/02-client-contract.md';
+# Client Contract
 
-<SpecDocument />
+## Purpose
+
+This document defines the proposed responsibilities and boundaries for Synchro end clients:
+
+- Swift
+- Kotlin
+- React Native
+
+The goal is thin clients with strong local UX, not fake-thin clients that push complexity into apps.
+
+## Client Types
+
+### Swift
+
+Native iOS and Apple-platform client using local SQLite.
+
+### Kotlin
+
+Native Android client using local SQLite.
+
+### React Native
+
+Thin bridge over the native Swift and Kotlin clients.
+
+React Native must not become a third sync engine.
+
+## What End Clients Must Do
+
+### Local SQLite
+
+Each native client must expose a local SQLite database as the application’s main offline store.
+
+The application reads and writes local SQL.
+
+### Local Change Capture
+
+Each native client must capture row-level local mutations for synced tables and enqueue them for push.
+
+This is client-owned because the network is not on the interaction path.
+
+### Mutation Queue
+
+Each native client must maintain a durable local mutation queue with stable mutation identifiers.
+
+Required properties:
+
+- survives app restarts
+- preserves order
+- allows replay after transient failures
+- supports canonical reconciliation from server responses
+
+### Local Sync Metadata
+
+Each native client must persist local sync metadata.
+
+At minimum:
+
+- schema version and hash
+- assigned scopes
+- per-scope cursors
+- per-row server versions or equivalent reconciliation metadata
+- mutation queue state
+
+### Scheduling And Retry
+
+Each native client must own:
+
+- background sync scheduling
+- foreground sync triggers
+- debounce after local writes
+- retry policy for transient failures
+
+### Apply Server State Safely
+
+Each native client must apply pull and rebuild results without turning those writes back into client-originated mutations.
+
+### Status Reporting
+
+Each native client must expose sync status to the app in a stable, productized way.
+
+## What End Clients Must Not Do
+
+### No Sync Semantics Ownership
+
+Clients must not define:
+
+- scope membership rules
+- conflict semantics
+- synced-table write semantics
+- rebuild decision semantics
+- schema compatibility policy beyond executing the server contract
+
+### No Arbitrary Backend Write Contract
+
+Clients must not require each app to invent a custom sync write API.
+
+Clients speak the Synchro wire protocol.
+
+### No Client-Defined Replication Predicates
+
+Clients must not send arbitrary replication predicates to the server.
+
+They sync server-assigned scope instances.
+
+## Local Storage Model
+
+The client local database consists of:
+
+- synced application tables
+- local-only application tables
+- Synchro metadata tables
+
+Synchro metadata is not part of the app domain model.
+
+## Proposed Metadata Responsibilities
+
+### Required Metadata
+
+- scope assignment table with `scope_set_version`
+- per-scope cursor table
+- mutation queue table
+- mutation failure or rejection table
+- per-row server version table or equivalent side metadata
+- schema state table
+- local client identity table or equivalent metadata
+- sync status table or in-memory equivalent
+
+### Preferred Principle
+
+Avoid polluting synced application tables with protocol bookkeeping unless there is a strong performance reason.
+
+Prefer side metadata tables.
+
+### Minimum Guarantees
+
+The metadata model must guarantee:
+
+- queued mutations survive process death
+- scope cursor advancement is atomic with successful apply
+- rebuild state is durable across restarts
+- rejected mutations remain inspectable until explicitly cleared
+
+## Sync Loop Responsibilities
+
+The native client sync loop should follow this order:
+
+1. ensure connection and schema state
+2. push pending mutations
+3. pull incremental changes
+4. rebuild any scope explicitly requested by the server
+5. publish final status
+
+Push before pull is preferred for read-your-own-write behavior and simpler reconciliation.
+
+## Rebuild Responsibilities
+
+Clients must support server-requested scope rebuild.
+
+Client responsibilities during rebuild:
+
+- pause normal incremental advancement for that scope
+- clear the local materialized membership for that scope
+- page rebuild results
+- install the final authoritative cursor and checksum
+- resume normal incremental pull
+
+Rebuild should be automatic by default.
+
+Application-mediated rebuild approval should be the exception, not the default, because it hurts DX and makes the sync engine less dependable.
+
+## Conflict And Rejection Handling
+
+Clients must distinguish:
+
+- transient transport failures
+- per-mutation semantic rejection
+- per-mutation conflict
+- whole-request incompatibility or upgrade errors
+
+Clients must not guess how to resolve semantic conflicts.
+
+The server response is authoritative.
+
+Rejected mutations should remain observable to the application through either:
+
+- a typed event stream, or
+- a stable inspection API over local metadata
+
+## Public SDK Surface
+
+The public SDK surface should remain small and stable.
+
+Expected top-level capabilities:
+
+- open or initialize local database
+- query and execute SQL
+- start sync
+- stop sync
+- trigger sync now
+- inspect sync status
+- observe sync events
+
+Recommended concrete surface:
+
+- `startSync()`
+- `stopSync()`
+- `syncNow()`
+- `query(...)`
+- `execute(...)`
+- `transaction(...)`
+- `observeSyncStatus(...)`
+- `observeSyncEvents(...)`
+- `inspectPendingMutations()` or equivalent
+
+The app should not need to reason about protocol internals to use the SDK.
+
+## React Native Contract
+
+React Native should expose:
+
+- the same logical SDK surface as native clients
+- typed errors
+- typed status events
+- typed conflict and rebuild events where retained
+
+React Native should not duplicate:
+
+- queue semantics
+- local metadata semantics
+- conflict handling logic
+- rebuild logic
+
+## Error And Status Surface
+
+Clients should expose a productized status model, not raw transport noise.
+
+Suggested states:
+
+- stopped
+- connecting
+- ready
+- syncing
+- rebuilding
+- backoff
+- error
+
+Suggested event categories:
+
+- mutation accepted
+- mutation rejected
+- rebuild requested
+- schema replaced
+- upgrade required
+
+Expose productized typed errors, not raw HTTP or transport errors by default.
+
+Transport details may be attached as diagnostic metadata.
+
+## Competitive Design Intent
+
+This client contract is intended to beat alternatives by ensuring:
+
+- local SQL remains the primary developer experience
+- apps do not invent custom backend write contracts
+- clients are simpler than systems centered on arbitrary replication subscriptions
+- React Native is a real bridge, not a separate half-implemented client
+
+## Open Follow-Up Questions
+
+- whether clients expose row-level rejection events directly or through queue inspection
+- whether per-row server versions are stored in side tables only or may be embedded in synced tables when advantageous
