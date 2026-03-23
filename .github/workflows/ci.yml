@@ -19,6 +19,66 @@ permissions:
   contents: read
 
 jobs:
+  linux-pgrx-runtime:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install PostgreSQL extension build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            ccache \
+            clang \
+            flex \
+            bison \
+            libclang-dev \
+            libreadline-dev \
+            libssl-dev \
+            libxml2-dev \
+            libxml2-utils \
+            libxslt-dev \
+            pkg-config \
+            xsltproc \
+            zlib1g-dev
+
+      - uses: actions/cache@v5.0.4
+        with:
+          path: ~/.pgrx
+          key: pgrx-${{ runner.os }}-0.17.0-pg18
+
+      - uses: actions/cache@v5.0.4
+        with:
+          path: |
+            ~/.cargo/bin/cargo-pgrx
+            ~/.cargo/.crates.toml
+            ~/.cargo/.crates2.json
+          key: cargo-pgrx-${{ runner.os }}-0.17.0
+
+      - name: Install cargo-pgrx
+        run: |
+          if ! command -v cargo-pgrx >/dev/null 2>&1 || [ "$(cargo pgrx --version | awk '{print $2}')" != "0.17.0" ]; then
+            cargo install --locked cargo-pgrx --version 0.17.0
+          fi
+
+      - name: Initialize PostgreSQL 18 for pgrx
+        run: |
+          if [ -f "$HOME/.pgrx/config.toml" ] && grep -q '^pg18' "$HOME/.pgrx/config.toml"; then
+            echo "Using cached PG18 pgrx runtime"
+          else
+            cargo pgrx init --pg18 download
+          fi
+
+      - name: Archive PG18 pgrx runtime
+        run: tar -C "$HOME" -cf "$RUNNER_TEMP/pgrx-pg18-linux.tar" .pgrx
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pgrx-pg18-linux
+          path: ${{ runner.temp }}/pgrx-pg18-linux.tar
+          compression-level: 0
+
   quality:
     runs-on: ubuntu-24.04
     steps:
@@ -105,6 +165,7 @@ jobs:
 
   server:
     runs-on: ubuntu-24.04
+    needs: linux-pgrx-runtime
     steps:
       - uses: actions/checkout@v6.0.2
 
@@ -141,11 +202,6 @@ jobs:
 
       - uses: actions/cache@v5.0.4
         with:
-          path: ~/.pgrx
-          key: pgrx-${{ runner.os }}-0.17.0-pg18
-
-      - uses: actions/cache@v5.0.4
-        with:
           path: |
             ~/.cargo/bin/cargo-pgrx
             ~/.cargo/.crates.toml
@@ -158,8 +214,18 @@ jobs:
             cargo install --locked cargo-pgrx --version 0.17.0
           fi
 
-      - name: Initialize PostgreSQL 18 for pgrx
-        run: cargo pgrx init --pg18 download
+      - uses: actions/download-artifact@v5
+        with:
+          name: pgrx-pg18-linux
+          path: ${{ runner.temp }}/pgrx-pg18-linux
+
+      - name: Restore PostgreSQL 18 pgrx runtime
+        run: tar -C "$HOME" -xf "$RUNNER_TEMP/pgrx-pg18-linux/pgrx-pg18-linux.tar"
+
+      - name: Verify PostgreSQL 18 for pgrx
+        run: |
+          test -f "$HOME/.pgrx/config.toml"
+          grep -q '^pg18' "$HOME/.pgrx/config.toml"
 
       - name: Run shared core tests
         run: make test-rust-core
@@ -216,7 +282,12 @@ jobs:
           fi
 
       - name: Initialize PostgreSQL 18 for pgrx
-        run: cargo pgrx init --pg18 "$(brew --prefix postgresql@18)/bin/pg_config"
+        run: |
+          if [ -f "$HOME/.pgrx/config.toml" ] && grep -q '^pg18' "$HOME/.pgrx/config.toml"; then
+            echo "Using cached PG18 pgrx runtime"
+          else
+            cargo pgrx init --pg18 "$(brew --prefix postgresql@18)/bin/pg_config"
+          fi
 
       - name: Run Swift integration tests
         run: make test-swift
@@ -311,6 +382,7 @@ jobs:
 
   kotlin-sdk:
     runs-on: ubuntu-24.04
+    needs: linux-pgrx-runtime
     env:
       ANDROID_HOME: /usr/local/lib/android/sdk
       ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
@@ -357,11 +429,6 @@ jobs:
 
       - uses: actions/cache@v5.0.4
         with:
-          path: ~/.pgrx
-          key: pgrx-${{ runner.os }}-0.17.0-pg18
-
-      - uses: actions/cache@v5.0.4
-        with:
           path: |
             ~/.cargo/bin/cargo-pgrx
             ~/.cargo/.crates.toml
@@ -374,8 +441,18 @@ jobs:
             cargo install --locked cargo-pgrx --version 0.17.0
           fi
 
-      - name: Initialize PostgreSQL 18 for pgrx
-        run: cargo pgrx init --pg18 download
+      - uses: actions/download-artifact@v5
+        with:
+          name: pgrx-pg18-linux
+          path: ${{ runner.temp }}/pgrx-pg18-linux
+
+      - name: Restore PostgreSQL 18 pgrx runtime
+        run: tar -C "$HOME" -xf "$RUNNER_TEMP/pgrx-pg18-linux/pgrx-pg18-linux.tar"
+
+      - name: Verify PostgreSQL 18 for pgrx
+        run: |
+          test -f "$HOME/.pgrx/config.toml"
+          grep -q '^pg18' "$HOME/.pgrx/config.toml"
 
       - uses: android-actions/setup-android@v3
 
@@ -397,6 +474,7 @@ jobs:
 
   rn-android:
     runs-on: ubuntu-24.04
+    needs: linux-pgrx-runtime
     env:
       ANDROID_HOME: /usr/local/lib/android/sdk
       ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
@@ -457,11 +535,6 @@ jobs:
 
       - uses: actions/cache@v5.0.4
         with:
-          path: ~/.pgrx
-          key: pgrx-${{ runner.os }}-0.17.0-pg18
-
-      - uses: actions/cache@v5.0.4
-        with:
           path: |
             ~/.cargo/bin/cargo-pgrx
             ~/.cargo/.crates.toml
@@ -474,8 +547,18 @@ jobs:
             cargo install --locked cargo-pgrx --version 0.17.0
           fi
 
-      - name: Initialize PostgreSQL 18 for pgrx
-        run: cargo pgrx init --pg18 download
+      - uses: actions/download-artifact@v5
+        with:
+          name: pgrx-pg18-linux
+          path: ${{ runner.temp }}/pgrx-pg18-linux
+
+      - name: Restore PostgreSQL 18 pgrx runtime
+        run: tar -C "$HOME" -xf "$RUNNER_TEMP/pgrx-pg18-linux/pgrx-pg18-linux.tar"
+
+      - name: Verify PostgreSQL 18 for pgrx
+        run: |
+          test -f "$HOME/.pgrx/config.toml"
+          grep -q '^pg18' "$HOME/.pgrx/config.toml"
 
       - uses: android-actions/setup-android@v3
 
