@@ -32,8 +32,16 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
-          cache: yarn
-          cache-dependency-path: clients/react-native/yarn.lock
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            clients/react-native/node_modules
+            clients/react-native/example/node_modules
+            clients/react-native/.yarn/install-state.gz
+          key: rn-deps-${{ runner.os }}-${{ hashFiles('clients/react-native/yarn.lock', 'clients/react-native/package.json', 'clients/react-native/example/package.json') }}
+          restore-keys: |
+            rn-deps-${{ runner.os }}-
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -193,8 +201,16 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
-          cache: yarn
-          cache-dependency-path: clients/react-native/yarn.lock
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            clients/react-native/node_modules
+            clients/react-native/example/node_modules
+            clients/react-native/.yarn/install-state.gz
+          key: rn-deps-${{ runner.os }}-${{ hashFiles('clients/react-native/yarn.lock', 'clients/react-native/package.json', 'clients/react-native/example/package.json') }}
+          restore-keys: |
+            rn-deps-${{ runner.os }}-
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -346,8 +362,16 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
-          cache: yarn
-          cache-dependency-path: clients/react-native/yarn.lock
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            clients/react-native/node_modules
+            clients/react-native/example/node_modules
+            clients/react-native/.yarn/install-state.gz
+          key: rn-deps-${{ runner.os }}-${{ hashFiles('clients/react-native/yarn.lock', 'clients/react-native/package.json', 'clients/react-native/example/package.json') }}
+          restore-keys: |
+            rn-deps-${{ runner.os }}-
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -599,8 +623,16 @@ jobs:
         with:
           node-version: '22'
           registry-url: 'https://registry.npmjs.org'
-          cache: yarn
-          cache-dependency-path: clients/react-native/yarn.lock
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            clients/react-native/node_modules
+            clients/react-native/example/node_modules
+            clients/react-native/.yarn/install-state.gz
+          key: rn-deps-${{ runner.os }}-${{ hashFiles('clients/react-native/yarn.lock', 'clients/react-native/package.json', 'clients/react-native/example/package.json') }}
+          restore-keys: |
+            rn-deps-${{ runner.os }}-
 
       - name: Install and build React Native package
         working-directory: clients/react-native
