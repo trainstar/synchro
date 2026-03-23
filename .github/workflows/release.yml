@@ -727,6 +727,13 @@ jobs:
             xsltproc \
             zlib1g-dev
 
+      - name: Install PostgreSQL 18 and extension build dependencies on macOS
+        if: runner.os == 'macOS'
+        run: |
+          for formula in postgresql@18 pkgconf openssl@3 libxml2 libxslt; do
+            brew list --versions "$formula" >/dev/null 2>&1 || brew install "$formula"
+          done
+
       - uses: actions/cache@v5.0.4
         with:
           path: ~/.pgrx
@@ -747,7 +754,14 @@ jobs:
           fi
 
       - name: Initialize PostgreSQL 18 for pgrx
-        run: cargo pgrx init --pg18 download
+        run: |
+          if [ -f "$HOME/.pgrx/config.toml" ] && grep -q '^pg18' "$HOME/.pgrx/config.toml"; then
+            echo "Using cached PG18 pgrx runtime"
+          elif [ "$RUNNER_OS" = "macOS" ]; then
+            cargo pgrx init --pg18 "$(brew --prefix postgresql@18)/bin/pg_config"
+          else
+            cargo pgrx init --pg18 download
+          fi
 
       - name: Package PG 18 extension
         run: |
