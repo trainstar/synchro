@@ -1,0 +1,75 @@
+---
+title: Quickstart
+description: Validate the current Synchro release surface locally.
+---
+
+## Prerequisites
+
+- PostgreSQL 18 via `cargo pgrx`
+- Rust toolchain for `extensions/synchro-core` and `extensions/synchro-pg`
+- Go 1.24 for `api/go`
+- Xcode and Swift for Apple SDK validation
+- JDK 17 and Android SDK for Kotlin and Android validation
+- Node.js 22 for React Native validation
+
+## Core validation
+
+Run the shared Rust semantics tests:
+
+```bash
+make test-rust-core
+```
+
+Run the PostgreSQL extension tests on PG 18:
+
+```bash
+make test-rust-pg
+```
+
+Run the Go adapter integration tests against the extension-backed database:
+
+```bash
+make test-adapter
+```
+
+## Client validation
+
+Run the Apple SDK integration tests:
+
+```bash
+make test-swift
+```
+
+Run the Android SDK integration tests:
+
+```bash
+make test-kotlin
+```
+
+Run the React Native bridge tests:
+
+```bash
+make test-rn
+```
+
+## Local adapter server
+
+Start the extension-backed adapter for manual work:
+
+```bash
+make synchrod-pg-test-start
+```
+
+The default test server URL is `http://localhost:8081`.
+
+Stop it when you are done:
+
+```bash
+make synchrod-pg-test-stop
+```
+
+## What to read next
+
+- [Architecture overview](/synchro/architecture/overview/)
+- [Wire Protocol](/synchro/spec/01-wire-protocol/)
+- [Conformance Plan](/synchro/spec/06-conformance-plan/)

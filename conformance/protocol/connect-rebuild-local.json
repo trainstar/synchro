@@ -1,0 +1,69 @@
+{
+  "fixture_version": 1,
+  "name": "connect_requires_schema_replace_and_local_rebuild",
+  "kind": "protocol.connect",
+  "summary": "Client schema is behind and the new local materialization contract requires rebuild after schema apply.",
+  "spec_refs": [
+    "01-wire-protocol: Connection Handshake",
+    "01-wire-protocol: Schema Actions",
+    "05-schema-evolution: Connect-Time Schema Decision",
+    "05-schema-evolution: Schema Change Affecting Scope Composition"
+  ],
+  "input": {
+    "request": {
+      "client_id": "android-device-456",
+      "platform": "android",
+      "app_version": "2.0.0",
+      "protocol_version": 1,
+      "schema": {
+        "version": 7,
+        "hash": "3b6f9f2f"
+      },
+      "scope_set_version": 12,
+      "known_scopes": {
+        "exercises_public": {
+          "cursor": "c_201"
+        }
+      }
+    }
+  },
+  "expected": {
+    "response": {
+      "server_time": "2026-03-20T18:22:11Z",
+      "protocol_version": 1,
+      "scope_set_version": 13,
+      "schema": {
+        "version": 8,
+        "hash": "8b21d2a1",
+        "action": "rebuild_local"
+      },
+      "scopes": {
+        "add": [
+          {
+            "id": "exercises_public",
+            "cursor": null
+          },
+          {
+            "id": "exercises_user:u_123",
+            "cursor": null
+          }
+        ],
+        "remove": []
+      },
+      "schema_definition": {
+        "tables": [
+          {
+            "name": "exercises",
+            "composition": "multi_scope"
+          }
+        ]
+      }
+    },
+    "assertions": [
+      "response.schema.action must equal rebuild_local",
+      "response.scope_set_version must move forward",
+      "response.schema_definition must be present",
+      "newly assigned scopes may start with null cursor"
+    ]
+  }
+}

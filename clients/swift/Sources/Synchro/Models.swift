@@ -1,5 +1,5 @@
 import Foundation
-import GRDB
+@preconcurrency import GRDB
 
 // MARK: - Register
 
@@ -423,7 +423,7 @@ public struct ExecResult: Sendable {
     public let rowsAffected: Int
 }
 
-public struct SQLStatement: Sendable {
+public struct SQLStatement: @unchecked Sendable {
     public let sql: String
     public let params: [any DatabaseValueConvertible]?
 
@@ -459,20 +459,13 @@ public struct TableOptions: Sendable {
     }
 }
 
-public enum CheckpointMode: Sendable {
-    case passive
-    case full
-    case restart
-    case truncate
-}
-
 public protocol Cancellable: Sendable {
     func cancel()
 }
 
 // MARK: - AnyCodable
 
-public struct AnyCodable: Codable, Sendable, Equatable {
+public struct AnyCodable: Codable, @unchecked Sendable, Equatable {
     public let value: Any
 
     public init(_ value: Any) {
@@ -551,41 +544,15 @@ public enum PushStatus {
     public static let rejectedRetryable = "rejected_retryable"
 }
 
-// MARK: - Debug Types
-
-public struct SynchroDebugInfo: Codable, Sendable {
-    public var clientID: String
-    public var buckets: [BucketDebugInfo]
-    public var lastSyncCheckpoint: Int64
-    public var schemaVersion: Int64
-    public var schemaHash: String
-    public var pendingChangeCount: Int
-    public var generatedAt: Date
-}
-
-public struct BucketDebugInfo: Codable, Sendable {
-    public var bucketID: String
-    public var checkpoint: Int64
-    public var memberCount: Int
-    public var checksum: Int32
-}
-
 // MARK: - JSON Date Coding
 
 extension JSONDecoder {
     static func synchroDecoder() -> JSONDecoder {
         let decoder = JSONDecoder()
-        let formatter = ISO8601DateFormatter()
-        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        let fallback = ISO8601DateFormatter()
-        fallback.formatOptions = [.withInternetDateTime]
         decoder.dateDecodingStrategy = .custom { decoder in
             let container = try decoder.singleValueContainer()
             let string = try container.decode(String.self)
-            if let date = formatter.date(from: string) {
-                return date
-            }
-            if let date = fallback.date(from: string) {
+            if let date = SynchroDateCoding.parse(string) {
                 return date
             }
             throw DecodingError.dataCorruptedError(in: container, debugDescription: "invalid date: \(string)")
@@ -597,12 +564,39 @@ extension JSONDecoder {
 extension JSONEncoder {
     static func synchroEncoder() -> JSONEncoder {
         let encoder = JSONEncoder()
-        let formatter = ISO8601DateFormatter()
-        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
         encoder.dateEncodingStrategy = .custom { date, encoder in
             var container = encoder.singleValueContainer()
-            try container.encode(formatter.string(from: date))
+            try container.encode(SynchroDateCoding.string(from: date))
         }
         return encoder
+    }
+}
+
+private enum SynchroDateCoding {
+    private static let lock = NSLock()
+    private static let fractionalFormatter: ISO8601DateFormatter = {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return formatter
+    }()
+    private static let fallbackFormatter: ISO8601DateFormatter = {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime]
+        return formatter
+    }()
+
+    static func parse(_ string: String) -> Date? {
+        lock.lock()
+        defer { lock.unlock() }
+        if let date = fractionalFormatter.date(from: string) {
+            return date
+        }
+        return fallbackFormatter.date(from: string)
+    }
+
+    static func string(from date: Date) -> String {
+        lock.lock()
+        defer { lock.unlock() }
+        return fractionalFormatter.string(from: date)
     }
 }

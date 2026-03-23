@@ -10,7 +10,6 @@ import type {
   ColumnDef,
   TableOptions,
   Transaction,
-  CheckpointMode,
   SyncStatus,
   SyncStatusType,
   ConflictEvent,
@@ -304,16 +303,6 @@ export class SynchroClient {
       subscription.remove();
       this.native.removeObserver(observerID);
     };
-  }
-
-  // -- WAL --
-
-  async checkpoint(mode: CheckpointMode = 'passive'): Promise<void> {
-    try {
-      await this.native.checkpoint(mode);
-    } catch (error) {
-      throw mapNativeError(error);
-    }
   }
 
   // -- Lifecycle --

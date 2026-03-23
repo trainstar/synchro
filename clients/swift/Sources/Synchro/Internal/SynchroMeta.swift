@@ -1,14 +1,23 @@
 import Foundation
-import GRDB
+@preconcurrency import GRDB
 
 enum MetaKey: String {
     case checkpoint
     case schemaVersion = "schema_version"
     case schemaHash = "schema_hash"
+    case localSchema = "local_schema"
     case clientServerID = "client_server_id"
+    case scopeSetVersion = "scope_set_version"
     case knownBuckets = "known_buckets"
     case snapshotComplete = "snapshot_complete"
     case syncLock = "sync_lock"
+}
+
+struct LocalScopeState: Sendable, Equatable {
+    let scopeID: String
+    let cursor: String?
+    let checksum: String?
+    let generation: Int64
 }
 
 enum SynchroMeta {
@@ -122,5 +131,145 @@ enum SynchroMeta {
                   let recordID: String = row["record_id"] else { return nil }
             return (tableName: tableName, recordID: recordID)
         }
+    }
+
+    // MARK: - Scope State
+
+    static func getAllScopes(_ db: GRDB.Database) throws -> [LocalScopeState] {
+        let rows = try Row.fetchAll(
+            db,
+            sql: "SELECT scope_id, cursor, checksum, generation FROM _synchro_scopes ORDER BY scope_id"
+        )
+        return rows.compactMap { row in
+            guard let scopeID: String = row["scope_id"] else { return nil }
+            let cursor: String? = row["cursor"]
+            let checksum: String? = row["checksum"]
+            let generation: Int64 = row["generation"] ?? 0
+            return LocalScopeState(
+                scopeID: scopeID,
+                cursor: cursor,
+                checksum: checksum,
+                generation: generation
+            )
+        }
+    }
+
+    static func upsertScope(_ db: GRDB.Database, scopeID: String, cursor: String?, checksum: String?, generation: Int64? = nil) throws {
+        let currentGeneration: Int64
+        if let generation {
+            currentGeneration = generation
+        } else {
+            currentGeneration = try getScopeGeneration(db, scopeID: scopeID)
+        }
+        try db.execute(
+            sql: """
+                INSERT INTO _synchro_scopes (scope_id, cursor, checksum, generation) VALUES (?, ?, ?, ?)
+                ON CONFLICT (scope_id) DO UPDATE SET
+                    cursor = excluded.cursor,
+                    checksum = excluded.checksum,
+                    generation = excluded.generation
+                """,
+            arguments: [scopeID, cursor, checksum, currentGeneration]
+        )
+    }
+
+    static func getScopeGeneration(_ db: GRDB.Database, scopeID: String) throws -> Int64 {
+        let row = try Row.fetchOne(
+            db,
+            sql: "SELECT generation FROM _synchro_scopes WHERE scope_id = ?",
+            arguments: [scopeID]
+        )
+        return row?["generation"] as? Int64 ?? 0
+    }
+
+    static func bumpScopeGeneration(_ db: GRDB.Database, scopeID: String) throws -> Int64 {
+        let nextGeneration = try getScopeGeneration(db, scopeID: scopeID) + 1
+        try upsertScope(db, scopeID: scopeID, cursor: nil, checksum: nil, generation: nextGeneration)
+        return nextGeneration
+    }
+
+    static func deleteScope(_ db: GRDB.Database, scopeID: String) throws {
+        try db.execute(sql: "DELETE FROM _synchro_scopes WHERE scope_id = ?", arguments: [scopeID])
+    }
+
+    static func clearAllScopes(_ db: GRDB.Database) throws {
+        try db.execute(sql: "DELETE FROM _synchro_scopes")
+    }
+
+    static func invalidateAllScopes(_ db: GRDB.Database) throws {
+        try db.execute(sql: "UPDATE _synchro_scopes SET cursor = NULL, checksum = NULL, generation = 0")
+        try clearAllScopeRows(db)
+    }
+
+    static func clearAllScopeRows(_ db: GRDB.Database) throws {
+        try db.execute(sql: "DELETE FROM _synchro_scope_rows")
+    }
+
+    // MARK: - Scope Rows
+
+    static func upsertScopeRow(_ db: GRDB.Database, scopeID: String, tableName: String, recordID: String, generation: Int64) throws {
+        try db.execute(
+            sql: """
+                INSERT INTO _synchro_scope_rows (scope_id, table_name, record_id, generation) VALUES (?, ?, ?, ?)
+                ON CONFLICT (scope_id, table_name, record_id) DO UPDATE SET generation = excluded.generation
+                """,
+            arguments: [scopeID, tableName, recordID, generation]
+        )
+    }
+
+    static func deleteScopeRow(_ db: GRDB.Database, scopeID: String, tableName: String, recordID: String) throws {
+        try db.execute(
+            sql: "DELETE FROM _synchro_scope_rows WHERE scope_id = ? AND table_name = ? AND record_id = ?",
+            arguments: [scopeID, tableName, recordID]
+        )
+    }
+
+    static func deleteScopeRows(_ db: GRDB.Database, scopeID: String) throws {
+        try db.execute(
+            sql: "DELETE FROM _synchro_scope_rows WHERE scope_id = ?",
+            arguments: [scopeID]
+        )
+    }
+
+    static func getScopeRowRecordIDs(_ db: GRDB.Database, scopeID: String) throws -> [(tableName: String, recordID: String)] {
+        let rows = try Row.fetchAll(
+            db,
+            sql: "SELECT table_name, record_id FROM _synchro_scope_rows WHERE scope_id = ?",
+            arguments: [scopeID]
+        )
+        return rows.compactMap { row in
+            guard let tableName: String = row["table_name"],
+                  let recordID: String = row["record_id"] else { return nil }
+            return (tableName: tableName, recordID: recordID)
+        }
+    }
+
+    static func getStaleScopeRowRecordIDs(_ db: GRDB.Database, scopeID: String, generation: Int64) throws -> [(tableName: String, recordID: String)] {
+        let rows = try Row.fetchAll(
+            db,
+            sql: "SELECT table_name, record_id FROM _synchro_scope_rows WHERE scope_id = ? AND generation <> ?",
+            arguments: [scopeID, generation]
+        )
+        return rows.compactMap { row in
+            guard let tableName: String = row["table_name"],
+                  let recordID: String = row["record_id"] else { return nil }
+            return (tableName: tableName, recordID: recordID)
+        }
+    }
+
+    static func deleteStaleScopeRows(_ db: GRDB.Database, scopeID: String, generation: Int64) throws {
+        try db.execute(
+            sql: "DELETE FROM _synchro_scope_rows WHERE scope_id = ? AND generation <> ?",
+            arguments: [scopeID, generation]
+        )
+    }
+
+    static func hasScopeRows(_ db: GRDB.Database, tableName: String, recordID: String) throws -> Bool {
+        let row = try Row.fetchOne(
+            db,
+            sql: "SELECT 1 AS present FROM _synchro_scope_rows WHERE table_name = ? AND record_id = ? LIMIT 1",
+            arguments: [tableName, recordID]
+        )
+        return row != nil
     }
 }

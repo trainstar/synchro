@@ -1,0 +1,55 @@
+{
+  "fixture_version": 1,
+  "name": "connect_none_existing_schema",
+  "kind": "protocol.connect",
+  "summary": "Client schema and scope assignment are already acceptable. No schema payload is returned.",
+  "spec_refs": [
+    "01-wire-protocol: Connection Handshake",
+    "01-wire-protocol: Schema Actions",
+    "04-invariants: Scope Assignment Authority"
+  ],
+  "input": {
+    "request": {
+      "client_id": "ios-device-123",
+      "platform": "ios",
+      "app_version": "1.4.0",
+      "protocol_version": 1,
+      "schema": {
+        "version": 8,
+        "hash": "8b21d2a1"
+      },
+      "scope_set_version": 13,
+      "known_scopes": {
+        "workouts_user:u_123": {
+          "cursor": "c_889"
+        },
+        "exercises_public": {
+          "cursor": "c_201"
+        }
+      }
+    }
+  },
+  "expected": {
+    "response": {
+      "server_time": "2026-03-20T18:22:11Z",
+      "protocol_version": 1,
+      "scope_set_version": 13,
+      "schema": {
+        "version": 8,
+        "hash": "8b21d2a1",
+        "action": "none"
+      },
+      "scopes": {
+        "add": [],
+        "remove": []
+      }
+    },
+    "assertions": [
+      "response.schema.action must equal none",
+      "response.scope_set_version must remain unchanged",
+      "response.scopes.add must be empty",
+      "response.scopes.remove must be empty",
+      "response must not include schema_definition"
+    ]
+  }
+}

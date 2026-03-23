@@ -2,21 +2,29 @@ package com.trainstar.synchro
 
 import android.content.Context
 import androidx.test.core.app.ApplicationProvider
+import org.junit.After
 import org.junit.Assert.*
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
-import java.util.UUID
 
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [28])
 class SchemaManagerTests {
+    private val databases = TestDatabaseTracker()
 
     private fun makeTestDB(): SynchroDatabase {
         val context = ApplicationProvider.getApplicationContext<Context>()
-        val dbName = "synchro_test_${UUID.randomUUID()}.sqlite"
-        return SynchroDatabase(context, dbName)
+        return databases.create(context)
+    }
+
+    private fun makeManifest(tables: List<VNextTableSchema>): VNextSchemaManifest =
+        VNextSchemaManifest(tables)
+
+    @After
+    fun tearDown() {
+        databases.closeAll()
     }
 
     @Test
@@ -53,6 +61,94 @@ class SchemaManagerTests {
         // Verify triggers exist
         val triggers = db.query("SELECT name FROM sqlite_master WHERE type='trigger' AND name LIKE '_synchro_cdc_%orders'")
         assertEquals(3, triggers.size)
+    }
+
+    @Test
+    fun testReconcileLocalSchemaFromPortableManifest() {
+        val db = makeTestDB()
+        val manager = SchemaManager(db)
+        val manifest = makeManifest(
+            listOf(
+                VNextTableSchema(
+                    name = "workouts",
+                    primaryKey = listOf("id"),
+                    updatedAtColumn = "updated_at",
+                    deletedAtColumn = "deleted_at",
+                    composition = VNextCompositionClass.SINGLE_SCOPE,
+                    columns = listOf(
+                        VNextColumnSchema(name = "id", typeName = "uuid", nullable = false),
+                        VNextColumnSchema(name = "name", typeName = "text", nullable = false),
+                        VNextColumnSchema(name = "updated_at", typeName = "timestamp", nullable = false),
+                        VNextColumnSchema(name = "deleted_at", typeName = "timestamp", nullable = true),
+                    ),
+                    indexes = null,
+                )
+            )
+        )
+
+        manager.reconcileLocalSchema(schemaVersion = 7, schemaHash = "portable-v1", tables = manifest.localTables())
+
+        assertEquals(1, db.query("SELECT name FROM sqlite_master WHERE type='table' AND name='workouts'").size)
+        assertEquals(3, db.query("SELECT name FROM sqlite_master WHERE type='trigger' AND name LIKE '_synchro_cdc_%workouts'").size)
+
+        db.readTransaction { rawDb ->
+            assertEquals(7L, SynchroMeta.getInt64(rawDb, MetaKey.SCHEMA_VERSION))
+            assertEquals("portable-v1", SynchroMeta.get(rawDb, MetaKey.SCHEMA_HASH))
+        }
+    }
+
+    @Test
+    fun testReconcileLocalSchemaMigratesAdditiveManifestChange() {
+        val db = makeTestDB()
+        val manager = SchemaManager(db)
+
+        val v1 = makeManifest(
+            listOf(
+                VNextTableSchema(
+                    name = "workouts",
+                    primaryKey = listOf("id"),
+                    updatedAtColumn = "updated_at",
+                    deletedAtColumn = "deleted_at",
+                    composition = VNextCompositionClass.SINGLE_SCOPE,
+                    columns = listOf(
+                        VNextColumnSchema(name = "id", typeName = "uuid", nullable = false),
+                        VNextColumnSchema(name = "name", typeName = "text", nullable = false),
+                        VNextColumnSchema(name = "updated_at", typeName = "timestamp", nullable = false),
+                        VNextColumnSchema(name = "deleted_at", typeName = "timestamp", nullable = true),
+                    ),
+                    indexes = null,
+                )
+            )
+        )
+        manager.reconcileLocalSchema(schemaVersion = 1, schemaHash = "portable-v1", tables = v1.localTables())
+
+        db.execute("INSERT INTO workouts (id, name, updated_at) VALUES ('w-1', 'Morning Run', '2026-01-01T00:00:00Z')")
+
+        val v2 = makeManifest(
+            listOf(
+                VNextTableSchema(
+                    name = "workouts",
+                    primaryKey = listOf("id"),
+                    updatedAtColumn = "updated_at",
+                    deletedAtColumn = "deleted_at",
+                    composition = VNextCompositionClass.SINGLE_SCOPE,
+                    columns = listOf(
+                        VNextColumnSchema(name = "id", typeName = "uuid", nullable = false),
+                        VNextColumnSchema(name = "name", typeName = "text", nullable = false),
+                        VNextColumnSchema(name = "notes", typeName = "text", nullable = true),
+                        VNextColumnSchema(name = "updated_at", typeName = "timestamp", nullable = false),
+                        VNextColumnSchema(name = "deleted_at", typeName = "timestamp", nullable = true),
+                    ),
+                    indexes = null,
+                )
+            )
+        )
+        manager.reconcileLocalSchema(schemaVersion = 2, schemaHash = "portable-v2", tables = v2.localTables())
+
+        val row = db.queryOne("SELECT name, notes FROM workouts WHERE id = ?", arrayOf("w-1"))
+        assertNotNull(row)
+        assertEquals("Morning Run", row?.get("name"))
+        assertNull(row?.get("notes"))
     }
 
     @Test

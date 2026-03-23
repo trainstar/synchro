@@ -1,0 +1,51 @@
+{
+  "fixture_version": 1,
+  "name": "rebuild_single_scope_paged_then_finalized",
+  "kind": "protocol.rebuild",
+  "summary": "Rebuild is paged per scope and ends with a final authoritative scope cursor and checksum.",
+  "spec_refs": [
+    "01-wire-protocol: Rebuild Model",
+    "03-state-machines: Rebuild Flow",
+    "04-invariants: Rebuild Finality"
+  ],
+  "input": {
+    "request": {
+      "client_id": "ios-device-123",
+      "scope": "exercises_public",
+      "cursor": null,
+      "limit": 1000
+    }
+  },
+  "expected": {
+    "pages": [
+      {
+        "scope": "exercises_public",
+        "records": [
+          {
+            "table": "exercises",
+            "pk": {
+              "id": "e_1"
+            },
+            "server_version": "sv_100"
+          }
+        ],
+        "cursor": "rb_002",
+        "has_more": true
+      },
+      {
+        "scope": "exercises_public",
+        "records": [],
+        "cursor": null,
+        "has_more": false,
+        "final_scope_cursor": "c_202",
+        "checksum": "cs_0f22"
+      }
+    ],
+    "assertions": [
+      "intermediate pages must not finalize the scope cursor",
+      "final page must include final_scope_cursor",
+      "final page must include checksum when rebuild completes",
+      "client may resume normal incremental sync only after final page apply"
+    ]
+  }
+}

@@ -213,12 +213,6 @@
     [self.impl removeObserver:observerID resolve:resolve reject:reject];
 }
 
-- (void)checkpoint:(NSString *)mode
-           resolve:(RCTPromiseResolveBlock)resolve
-            reject:(RCTPromiseRejectBlock)reject {
-    [self.impl checkpoint:mode resolve:resolve reject:reject];
-}
-
 - (void)start:(RCTPromiseResolveBlock)resolve
        reject:(RCTPromiseRejectBlock)reject {
     [self.impl start:resolve reject:reject];
@@ -339,9 +333,6 @@ RCT_EXTERN_METHOD(addQueryObserver:(NSString *)observerID
                   resolve:(RCTPromiseResolveBlock)resolve
                   reject:(RCTPromiseRejectBlock)reject)
 RCT_EXTERN_METHOD(removeObserver:(NSString *)observerID
-                  resolve:(RCTPromiseResolveBlock)resolve
-                  reject:(RCTPromiseRejectBlock)reject)
-RCT_EXTERN_METHOD(checkpoint:(NSString *)mode
                   resolve:(RCTPromiseResolveBlock)resolve
                   reject:(RCTPromiseRejectBlock)reject)
 RCT_EXTERN_METHOD(start:(RCTPromiseResolveBlock)resolve

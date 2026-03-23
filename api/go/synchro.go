@@ -53,13 +53,13 @@ type Handler struct {
 //
 // Endpoints:
 //
-//	POST /sync/register   (auth required)
-//	POST /sync/pull       (auth required)
-//	POST /sync/push       (auth required)
-//	POST /sync/rebuild    (auth required)
-//	GET  /sync/schema     (no auth)
-//	GET  /sync/tables     (no auth)
-//	GET  /sync/debug      (auth required)
+//	POST /sync/connect  (auth required)
+//	POST /sync/pull     (auth required)
+//	POST /sync/push     (auth required)
+//	POST /sync/rebuild  (auth required)
+//	GET  /sync/schema   (no auth)
+//	GET  /sync/tables   (no auth)
+//	GET  /sync/debug    (auth required)
 func Routes(cfg Config) http.Handler {
 	if cfg.DB == nil {
 		panic("synchroapi: Config.DB is required")
@@ -75,14 +75,14 @@ func Routes(cfg Config) http.Handler {
 
 	// Authenticated endpoints wrapped in JWT middleware.
 	authMux := http.NewServeMux()
-	authMux.HandleFunc("/sync/register", h.serveRegister)
+	authMux.HandleFunc("/sync/connect", h.serveConnect)
 	authMux.HandleFunc("/sync/pull", h.servePull)
 	authMux.HandleFunc("/sync/push", h.servePush)
 	authMux.HandleFunc("/sync/rebuild", h.serveRebuild)
 	authMux.HandleFunc("/sync/debug", h.serveDebug)
 
 	authed := jwtMiddleware(cfg, authMux)
-	mux.Handle("/sync/register", authed)
+	mux.Handle("/sync/connect", authed)
 	mux.Handle("/sync/pull", authed)
 	mux.Handle("/sync/push", authed)
 	mux.Handle("/sync/rebuild", authed)

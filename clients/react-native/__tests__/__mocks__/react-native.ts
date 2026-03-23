@@ -40,7 +40,6 @@ export const mockNativeModule: Record<string, jest.Mock> = {
   addChangeObserver: jest.fn().mockResolvedValue(undefined),
   addQueryObserver: jest.fn().mockResolvedValue(undefined),
   removeObserver: jest.fn().mockResolvedValue(undefined),
-  checkpoint: jest.fn().mockResolvedValue(undefined),
   start: jest.fn().mockResolvedValue(undefined),
   stop: jest.fn().mockResolvedValue(undefined),
   syncNow: jest.fn().mockResolvedValue(undefined),

@@ -1,5 +1,5 @@
 import Foundation
-import GRDB
+@preconcurrency import GRDB
 
 final class SchemaManager: @unchecked Sendable {
     private let database: SynchroDatabase
@@ -31,6 +31,33 @@ final class SchemaManager: @unchecked Sendable {
         return schema
     }
 
+    func loadStoredLocalSchema() throws -> [LocalSchemaTable]? {
+        try database.readTransaction { db in
+            guard let encoded = try SynchroMeta.get(db, key: .localSchema) else {
+                return nil
+            }
+            return try JSONDecoder().decode([LocalSchemaTable].self, from: Data(encoded.utf8))
+        }
+    }
+
+    func reconcileLocalSchema(schemaVersion: Int64, schemaHash: String, tables: [LocalSchemaTable]) throws {
+        let (localVersion, localHash) = try database.readTransaction { db in
+            let version = try SynchroMeta.getInt64(db, key: .schemaVersion)
+            let hash = try SynchroMeta.get(db, key: .schemaHash) ?? ""
+            return (version, hash)
+        }
+
+        if localVersion != schemaVersion || localHash != schemaHash {
+            try migrateLocalSchema(newTables: tables)
+        }
+
+        try database.writeTransaction { db in
+            try SynchroMeta.setInt64(db, key: .schemaVersion, value: schemaVersion)
+            try SynchroMeta.set(db, key: .schemaHash, value: schemaHash)
+            try persistLocalSchemaTables(db, tables: tables)
+        }
+    }
+
     func createSyncedTables(schema: SchemaResponse) throws {
         try database.writeTransaction { db in
             try createSyncedTablesInTransaction(db, schema: schema)
@@ -38,7 +65,11 @@ final class SchemaManager: @unchecked Sendable {
     }
 
     func createSyncedTablesInTransaction(_ db: GRDB.Database, schema: SchemaResponse) throws {
-        for table in schema.tables {
+        try createSyncedTablesInTransaction(db, tables: schema.tables.map(\.localSchema))
+    }
+
+    func createSyncedTablesInTransaction(_ db: GRDB.Database, tables: [LocalSchemaTable]) throws {
+        for table in tables {
             let createSQL = SQLiteSchema.generateCreateTableSQL(table: table)
             try db.execute(sql: createSQL)
 
@@ -50,18 +81,24 @@ final class SchemaManager: @unchecked Sendable {
     }
 
     func migrateSchema(newSchema: SchemaResponse) throws {
+        try migrateLocalSchema(newTables: newSchema.tables.map(\.localSchema))
+    }
+
+    func migrateLocalSchema(newTables: [LocalSchemaTable]) throws {
         try database.writeTransaction { db in
-            if try requiresDestructiveRebuild(db: db, newSchema: newSchema) {
+            if try requiresDestructiveRebuild(db: db, newTables: newTables) {
                 try db.execute(sql: "DELETE FROM _synchro_pending_changes")
-                try dropSyncedTablesInTransaction(db, schema: SchemaResponse(schemaVersion: 0, schemaHash: "", serverTime: Date(), tables: newSchema.tables))
-                try createSyncedTablesInTransaction(db, schema: newSchema)
+                try SynchroMeta.invalidateAllScopes(db)
+                try dropSyncedTablesInTransaction(db, tables: newTables)
+                try createSyncedTablesInTransaction(db, tables: newTables)
                 try SynchroMeta.setInt64(db, key: .checkpoint, value: 0)
                 try SynchroMeta.set(db, key: .knownBuckets, value: "[]")
                 try SynchroMeta.set(db, key: .snapshotComplete, value: "0")
+                try persistLocalSchemaTables(db, tables: newTables)
                 return
             }
 
-            for table in newSchema.tables {
+            for table in newTables {
                 let tableExists = try db.tableExists(table.tableName)
                 if !tableExists {
                     let createSQL = SQLiteSchema.generateCreateTableSQL(table: table)
@@ -94,6 +131,8 @@ final class SchemaManager: @unchecked Sendable {
                     try db.execute(sql: trigger)
                 }
             }
+
+            try persistLocalSchemaTables(db, tables: newTables)
         }
     }
 
@@ -108,8 +147,8 @@ final class SchemaManager: @unchecked Sendable {
 
     /// Only triggers destructive rebuild when a synced column's type has changed.
     /// Extra local tables, extra local columns, and removed server columns are all preserved.
-    private func requiresDestructiveRebuild(db: GRDB.Database, newSchema: SchemaResponse) throws -> Bool {
-        let newTableMap = Dictionary(uniqueKeysWithValues: newSchema.tables.map { ($0.tableName, $0) })
+    private func requiresDestructiveRebuild(db: GRDB.Database, newTables: [LocalSchemaTable]) throws -> Bool {
+        let newTableMap = Dictionary(uniqueKeysWithValues: newTables.map { ($0.tableName, $0) })
         for (tableName, table) in newTableMap {
             guard try db.tableExists(tableName) else { continue }
             let existingColumnTypes = Dictionary(
@@ -133,7 +172,11 @@ final class SchemaManager: @unchecked Sendable {
     }
 
     func dropSyncedTablesInTransaction(_ db: GRDB.Database, schema: SchemaResponse) throws {
-        for table in schema.tables.reversed() {
+        try dropSyncedTablesInTransaction(db, tables: schema.tables.map(\.localSchema))
+    }
+
+    func dropSyncedTablesInTransaction(_ db: GRDB.Database, tables: [LocalSchemaTable]) throws {
+        for table in tables.reversed() {
             let quoted = SQLiteHelpers.quoteIdentifier(table.tableName)
             let insertTrigger = SQLiteHelpers.quoteIdentifier("_synchro_cdc_insert_\(table.tableName)")
             let updateTrigger = SQLiteHelpers.quoteIdentifier("_synchro_cdc_update_\(table.tableName)")
@@ -143,5 +186,14 @@ final class SchemaManager: @unchecked Sendable {
             try db.execute(sql: "DROP TRIGGER IF EXISTS \(deleteTrigger)")
             try db.execute(sql: "DROP TABLE IF EXISTS \(quoted)")
         }
+    }
+
+    private func persistLocalSchemaTables(_ db: GRDB.Database, tables: [LocalSchemaTable]) throws {
+        let encoded = try JSONEncoder().encode(tables)
+        try SynchroMeta.set(
+            db,
+            key: .localSchema,
+            value: String(data: encoded, encoding: .utf8) ?? "[]"
+        )
     }
 }

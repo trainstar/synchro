@@ -19,7 +19,15 @@ final class HttpClient: @unchecked Sendable {
         try await post("/sync/register", body: request)
     }
 
+    func connect(request: VNextConnectRequest) async throws -> VNextConnectResponse {
+        try await post("/sync/connect", body: request)
+    }
+
     func pull(request: PullRequest) async throws -> PullResponse {
+        try await post("/sync/pull", body: request)
+    }
+
+    func pull(request: VNextPullRequest) async throws -> VNextPullResponse {
         try await post("/sync/pull", body: request)
     }
 
@@ -27,7 +35,15 @@ final class HttpClient: @unchecked Sendable {
         try await post("/sync/push", body: request)
     }
 
+    func push(request: VNextPushRequest) async throws -> VNextPushResponse {
+        try await post("/sync/push", body: request)
+    }
+
     func rebuild(request: RebuildRequest) async throws -> RebuildResponse {
+        try await post("/sync/rebuild", body: request)
+    }
+
+    func rebuild(request: VNextRebuildRequest) async throws -> VNextRebuildResponse {
         try await post("/sync/rebuild", body: request)
     }
 
@@ -84,15 +100,23 @@ final class HttpClient: @unchecked Sendable {
             do {
                 return try decoder.decode(Resp.self, from: data)
             } catch {
+                debugLogHTTPFailure(request: req, statusCode: httpResponse.statusCode, responseData: data)
                 throw SynchroError.invalidResponse(message: "decode failed: \(error.localizedDescription)")
             }
 
         case 409:
-            let body = try? decoder.decode(SchemaMismatchBody.self, from: data)
-            throw SynchroError.schemaMismatch(
-                serverVersion: body?.serverSchemaVersion ?? 0,
-                serverHash: body?.serverSchemaHash ?? ""
-            )
+            let msg = errorMessage(from: data) ?? "semantic conflict"
+            throw SynchroError.serverError(status: httpResponse.statusCode, message: msg)
+
+        case 422:
+            if let schemaMismatch = decodeSchemaMismatch(from: data) {
+                throw SynchroError.schemaMismatch(
+                    serverVersion: schemaMismatch.serverSchemaVersion ?? 0,
+                    serverHash: schemaMismatch.serverSchemaHash ?? ""
+                )
+            }
+            let msg = errorMessage(from: data) ?? "schema or contract violation"
+            throw SynchroError.serverError(status: httpResponse.statusCode, message: msg)
 
         case 426:
             let minimumVersion = errorMessage(from: data) ?? "unknown"
@@ -112,9 +136,19 @@ final class HttpClient: @unchecked Sendable {
             )
 
         default:
+            debugLogHTTPFailure(request: req, statusCode: httpResponse.statusCode, responseData: data)
             let msg = errorMessage(from: data) ?? "HTTP \(httpResponse.statusCode)"
             throw SynchroError.serverError(status: httpResponse.statusCode, message: msg)
         }
+    }
+
+    private func debugLogHTTPFailure(request: URLRequest, statusCode: Int, responseData: Data) {
+#if DEBUG
+        let path = request.url?.path ?? "<unknown>"
+        let requestBody = request.httpBody.flatMap { String(data: $0, encoding: .utf8) } ?? "<empty>"
+        let responseBody = String(data: responseData, encoding: .utf8) ?? "<non-utf8>"
+        NSLog("Synchro HTTP failure path=%@ status=%d request=%@ response=%@", path, statusCode, requestBody, responseBody)
+#endif
     }
 
     private func parseRetryAfter(_ response: HTTPURLResponse) -> TimeInterval? {
@@ -126,8 +160,27 @@ final class HttpClient: @unchecked Sendable {
     }
 
     private func errorMessage(from data: Data) -> String? {
+        if let body = try? decoder.decode(VNextErrorResponse.self, from: data) {
+            return body.error.message
+        }
         if let body = try? JSONDecoder().decode([String: String].self, from: data) {
             return body["error"]
+        }
+        return nil
+    }
+
+    private func decodeSchemaMismatch(from data: Data) -> SchemaMismatchBody? {
+        if let body = try? decoder.decode(SchemaMismatchBody.self, from: data) {
+            return body
+        }
+        if let body = try? decoder.decode(VNextErrorResponse.self, from: data),
+           body.error.code == .schemaMismatch {
+            return SchemaMismatchBody(
+                code: body.error.code.rawValue,
+                message: body.error.message,
+                serverSchemaVersion: nil,
+                serverSchemaHash: nil
+            )
         }
         return nil
     }

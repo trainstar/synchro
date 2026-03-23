@@ -1,4 +1,9 @@
-use crate::protocol::Operation;
+//! Legacy edge-diff helpers for scope materialization.
+//!
+//! The current PostgreSQL extension still uses bucket terminology. In vNext,
+//! these bucket identifiers correspond to deterministic scope instance ids.
+
+use crate::change::ChangeOperation;
 use std::collections::HashSet;
 
 /// A changelog entry to write after computing the edge diff.
@@ -7,7 +12,13 @@ pub struct ChangelogEntry {
     pub bucket_id: String,
     pub table_name: String,
     pub record_id: String,
-    pub operation: Operation,
+    pub operation: ChangeOperation,
+}
+
+impl ChangelogEntry {
+    pub fn scope_id(&self) -> &str {
+        &self.bucket_id
+    }
 }
 
 /// The three-way bucket diff: which buckets were added, kept, or removed.
@@ -17,6 +28,8 @@ pub struct BucketDiff {
     pub kept: Vec<String>,
     pub removed: Vec<String>,
 }
+
+pub type ScopeDiff = BucketDiff;
 
 /// Compute the three-way diff between existing and desired bucket sets.
 ///
@@ -44,6 +57,10 @@ pub fn diff_bucket_sets(existing: &[String], desired: &[String]) -> BucketDiff {
     diff
 }
 
+pub fn diff_scope_sets(existing: &[String], desired: &[String]) -> ScopeDiff {
+    diff_bucket_sets(existing, desired)
+}
+
 /// Build changelog entries from the edge diff between existing and desired
 /// buckets for a given WAL event.
 ///
@@ -56,7 +73,7 @@ pub fn diff_bucket_sets(existing: &[String], desired: &[String]) -> BucketDiff {
 pub fn build_edge_diff_entries(
     table_name: &str,
     record_id: &str,
-    operation: Operation,
+    operation: ChangeOperation,
     existing: &[String],
     desired: &[String],
 ) -> Vec<ChangelogEntry> {
@@ -68,7 +85,7 @@ pub fn build_edge_diff_entries(
 
     let mut out = Vec::with_capacity(existing.len() + desired.len());
 
-    if operation == Operation::Delete {
+    if operation == ChangeOperation::Delete {
         let targets = if existing.is_empty() {
             &desired
         } else {
@@ -79,7 +96,7 @@ pub fn build_edge_diff_entries(
                 bucket_id: bucket.clone(),
                 table_name: table_name.into(),
                 record_id: record_id.into(),
-                operation: Operation::Delete,
+                operation: ChangeOperation::Delete,
             });
         }
         return out;
@@ -88,8 +105,8 @@ pub fn build_edge_diff_entries(
     for bucket in &desired {
         if existing_set.contains(bucket.as_str()) {
             // Kept: use event op, but Insert -> Update for re-added records.
-            let op = if operation == Operation::Insert {
-                Operation::Update
+            let op = if operation == ChangeOperation::Insert {
+                ChangeOperation::Update
             } else {
                 operation
             };
@@ -105,7 +122,7 @@ pub fn build_edge_diff_entries(
                 bucket_id: bucket.clone(),
                 table_name: table_name.into(),
                 record_id: record_id.into(),
-                operation: Operation::Insert,
+                operation: ChangeOperation::Insert,
             });
         }
     }
@@ -116,7 +133,7 @@ pub fn build_edge_diff_entries(
                 bucket_id: bucket.clone(),
                 table_name: table_name.into(),
                 record_id: record_id.into(),
-                operation: Operation::Delete,
+                operation: ChangeOperation::Delete,
             });
         }
     }
@@ -129,11 +146,7 @@ pub fn build_edge_diff_entries(
 /// Matches Go `dedupeBuckets`.
 pub fn dedup_buckets(buckets: &[String]) -> Vec<String> {
     if buckets.len() < 2 {
-        return buckets
-            .iter()
-            .filter(|b| !b.is_empty())
-            .cloned()
-            .collect();
+        return buckets.iter().filter(|b| !b.is_empty()).cloned().collect();
     }
     let mut seen = HashSet::with_capacity(buckets.len());
     let mut out = Vec::with_capacity(buckets.len());
@@ -146,6 +159,10 @@ pub fn dedup_buckets(buckets: &[String]) -> Vec<String> {
         }
     }
     out
+}
+
+pub fn dedup_scope_ids(scope_ids: &[String]) -> Vec<String> {
+    dedup_buckets(scope_ids)
 }
 
 #[cfg(test)]
@@ -185,16 +202,12 @@ mod tests {
 
     #[test]
     fn edge_diff_insert_new_record() {
-        let entries = build_edge_diff_entries(
-            "items",
-            "r1",
-            Operation::Insert,
-            &[],
-            &[s("user:u1")],
-        );
+        let entries =
+            build_edge_diff_entries("items", "r1", ChangeOperation::Insert, &[], &[s("user:u1")]);
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].bucket_id, "user:u1");
-        assert_eq!(entries[0].operation, Operation::Insert);
+        assert_eq!(entries[0].scope_id(), "user:u1");
+        assert_eq!(entries[0].operation, ChangeOperation::Insert);
     }
 
     #[test]
@@ -202,12 +215,12 @@ mod tests {
         let entries = build_edge_diff_entries(
             "items",
             "r1",
-            Operation::Update,
+            ChangeOperation::Update,
             &[s("user:u1")],
             &[s("user:u1")],
         );
         assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0].operation, Operation::Update);
+        assert_eq!(entries[0].operation, ChangeOperation::Update);
     }
 
     #[test]
@@ -216,12 +229,12 @@ mod tests {
         let entries = build_edge_diff_entries(
             "items",
             "r1",
-            Operation::Insert,
+            ChangeOperation::Insert,
             &[s("user:u1")],
             &[s("user:u1")],
         );
         assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0].operation, Operation::Update);
+        assert_eq!(entries[0].operation, ChangeOperation::Update);
     }
 
     #[test]
@@ -229,17 +242,17 @@ mod tests {
         let entries = build_edge_diff_entries(
             "items",
             "r1",
-            Operation::Update,
+            ChangeOperation::Update,
             &[s("user:u1")],
             &[s("user:u2")],
         );
         assert_eq!(entries.len(), 2);
         // Added to new bucket.
         assert_eq!(entries[0].bucket_id, "user:u2");
-        assert_eq!(entries[0].operation, Operation::Insert);
+        assert_eq!(entries[0].operation, ChangeOperation::Insert);
         // Removed from old bucket.
         assert_eq!(entries[1].bucket_id, "user:u1");
-        assert_eq!(entries[1].operation, Operation::Delete);
+        assert_eq!(entries[1].operation, ChangeOperation::Delete);
     }
 
     #[test]
@@ -247,26 +260,23 @@ mod tests {
         let entries = build_edge_diff_entries(
             "items",
             "r1",
-            Operation::Delete,
+            ChangeOperation::Delete,
             &[s("user:u1"), s("user:u2")],
             &[],
         );
         assert_eq!(entries.len(), 2);
-        assert!(entries.iter().all(|e| e.operation == Operation::Delete));
+        assert!(entries
+            .iter()
+            .all(|e| e.operation == ChangeOperation::Delete));
     }
 
     #[test]
     fn edge_diff_delete_no_existing_uses_desired() {
-        let entries = build_edge_diff_entries(
-            "items",
-            "r1",
-            Operation::Delete,
-            &[],
-            &[s("user:u1")],
-        );
+        let entries =
+            build_edge_diff_entries("items", "r1", ChangeOperation::Delete, &[], &[s("user:u1")]);
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].bucket_id, "user:u1");
-        assert_eq!(entries[0].operation, Operation::Delete);
+        assert_eq!(entries[0].operation, ChangeOperation::Delete);
     }
 
     #[test]
@@ -330,5 +340,14 @@ mod tests {
         assert!(diff.added.is_empty());
         assert_eq!(diff.kept.len(), 3);
         assert!(diff.removed.is_empty());
+    }
+
+    #[test]
+    fn scope_aliases_match_bucket_helpers() {
+        let existing = vec![s("scope_a")];
+        let desired = vec![s("scope_a"), s("scope_b"), s("")];
+        let diff = diff_scope_sets(&existing, &desired);
+        assert_eq!(diff.added, vec![s("scope_b"), s("")]);
+        assert_eq!(dedup_scope_ids(&desired), vec![s("scope_a"), s("scope_b")]);
     }
 }

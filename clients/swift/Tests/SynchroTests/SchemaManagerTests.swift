@@ -39,6 +39,10 @@ final class SchemaManagerTests: XCTestCase {
         SchemaResponse(schemaVersion: version, schemaHash: hash, serverTime: Date(), tables: tables)
     }
 
+    private func makeManifest(tables: [VNextTableSchema]) -> VNextSchemaManifest {
+        VNextSchemaManifest(tables: tables)
+    }
+
     private func columnNames(db: SynchroDatabase, table: String) throws -> Set<String> {
         let rows = try db.query("PRAGMA table_info(\(table))", params: nil)
         return Set(rows.map { $0["name"] as String })
@@ -102,6 +106,95 @@ final class SchemaManagerTests: XCTestCase {
         // Verify triggers exist
         let triggers = try db.query("SELECT name FROM sqlite_master WHERE type='trigger' AND name LIKE '_synchro_cdc_%orders'", params: nil)
         XCTAssertEqual(triggers.count, 3)
+    }
+
+    func testReconcileLocalSchemaFromPortableManifest() throws {
+        let db = try makeTestDB()
+        let manager = SchemaManager(database: db)
+        let manifest = makeManifest(tables: [
+            VNextTableSchema(
+                name: "workouts",
+                primaryKey: ["id"],
+                updatedAtColumn: "updated_at",
+                deletedAtColumn: "deleted_at",
+                composition: .singleScope,
+                columns: [
+                    VNextColumnSchema(name: "id", type: "uuid", nullable: false),
+                    VNextColumnSchema(name: "name", type: "text", nullable: false),
+                    VNextColumnSchema(name: "updated_at", type: "timestamp", nullable: false),
+                    VNextColumnSchema(name: "deleted_at", type: "timestamp", nullable: true),
+                ],
+                indexes: nil
+            )
+        ])
+
+        let tables = try manifest.localTables()
+        try manager.reconcileLocalSchema(schemaVersion: 7, schemaHash: "portable-v1", tables: tables)
+
+        XCTAssertTrue(try tableExists(db: db, name: "workouts"))
+        XCTAssertEqual(try triggerCount(db: db, table: "workouts"), 3)
+
+        let schemaState = try db.readTransaction { grdb in
+            (
+                try SynchroMeta.getInt64(grdb, key: .schemaVersion),
+                try SynchroMeta.get(grdb, key: .schemaHash)
+            )
+        }
+        XCTAssertEqual(schemaState.0, 7)
+        XCTAssertEqual(schemaState.1, "portable-v1")
+    }
+
+    func testReconcileLocalSchemaMigratesAdditiveManifestChange() throws {
+        let db = try makeTestDB()
+        let manager = SchemaManager(database: db)
+
+        let v1 = makeManifest(tables: [
+            VNextTableSchema(
+                name: "workouts",
+                primaryKey: ["id"],
+                updatedAtColumn: "updated_at",
+                deletedAtColumn: "deleted_at",
+                composition: .singleScope,
+                columns: [
+                    VNextColumnSchema(name: "id", type: "uuid", nullable: false),
+                    VNextColumnSchema(name: "name", type: "text", nullable: false),
+                    VNextColumnSchema(name: "updated_at", type: "timestamp", nullable: false),
+                    VNextColumnSchema(name: "deleted_at", type: "timestamp", nullable: true),
+                ],
+                indexes: nil
+            )
+        ])
+        try manager.reconcileLocalSchema(schemaVersion: 1, schemaHash: "portable-v1", tables: try v1.localTables())
+
+        _ = try db.execute(
+            "INSERT INTO workouts (id, name, updated_at) VALUES ('w-1', 'Morning Run', '2026-01-01T00:00:00Z')",
+            params: nil
+        )
+
+        let v2 = makeManifest(tables: [
+            VNextTableSchema(
+                name: "workouts",
+                primaryKey: ["id"],
+                updatedAtColumn: "updated_at",
+                deletedAtColumn: "deleted_at",
+                composition: .singleScope,
+                columns: [
+                    VNextColumnSchema(name: "id", type: "uuid", nullable: false),
+                    VNextColumnSchema(name: "name", type: "text", nullable: false),
+                    VNextColumnSchema(name: "notes", type: "text", nullable: true),
+                    VNextColumnSchema(name: "updated_at", type: "timestamp", nullable: false),
+                    VNextColumnSchema(name: "deleted_at", type: "timestamp", nullable: true),
+                ],
+                indexes: nil
+            )
+        ])
+        try manager.reconcileLocalSchema(schemaVersion: 2, schemaHash: "portable-v2", tables: try v2.localTables())
+
+        XCTAssertTrue(try columnNames(db: db, table: "workouts").contains("notes"))
+        let row = try db.queryOne("SELECT name, notes FROM workouts WHERE id = ?", params: ["w-1"])
+        XCTAssertNotNil(row)
+        XCTAssertEqual(row?["name"] as? String, "Morning Run")
+        XCTAssertNil(row?["notes"])
     }
 
     // MARK: - 2. testMigrateSchemaAddsColumn

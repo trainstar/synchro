@@ -1,8 +1,16 @@
+//! Legacy timestamp-based conflict helpers.
+//!
+//! These helpers reflect the current PostgreSQL extension behavior. They are
+//! not the authoritative vNext wire contract for conflict representation.
+//!
+//! In vNext, `server_version` remains opaque on the wire even if a specific
+//! server implementation uses timestamp-based policy internally.
+
 use chrono::{DateTime, Utc};
 
-/// Full context for conflict resolution.
+/// Full context for timestamp-based conflict resolution.
 #[derive(Debug, Clone)]
-pub struct Conflict {
+pub struct TimestampConflictContext {
     pub table: String,
     pub record_id: String,
     pub client_id: String,
@@ -12,11 +20,27 @@ pub struct Conflict {
     pub base_version: Option<DateTime<Utc>>,
 }
 
-/// Describes how a conflict was resolved.
+/// Winner chosen by a timestamp-based conflict resolver.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TimestampResolutionWinner {
+    Client,
+    Server,
+}
+
+impl TimestampResolutionWinner {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Client => "client",
+            Self::Server => "server",
+        }
+    }
+}
+
+/// Describes how a timestamp-based conflict was resolved.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Resolution {
-    /// "client" or "server".
-    pub winner: &'static str,
+pub struct TimestampResolution {
+    /// `client` or `server`.
+    pub winner: TimestampResolutionWinner,
     /// Human-readable explanation.
     pub reason: &'static str,
 }
@@ -30,11 +54,11 @@ pub struct Resolution {
 /// The client timestamp is adjusted forward by `clock_skew_tolerance` before
 /// comparison. This gives the client a slight advantage to compensate for
 /// network latency and clock drift.
-pub struct LwwResolver {
+pub struct TimestampLwwResolver {
     pub clock_skew_tolerance: chrono::Duration,
 }
 
-impl LwwResolver {
+impl TimestampLwwResolver {
     pub fn new(clock_skew_tolerance: chrono::Duration) -> Self {
         Self {
             clock_skew_tolerance,
@@ -48,17 +72,16 @@ impl LwwResolver {
     /// 1. Adjust client time by adding clock_skew_tolerance.
     /// 2. If base_version exists:
     ///    a. base > server: server wins (client version ahead of server).
-    ///    b. base != server AND base <= server (server changed since base):
-    ///       use LWW on adjusted client time vs server time.
+    ///    b. base != server AND base <= server (server changed since base): use LWW on adjusted client time vs server time.
     ///    c. base == server (server unchanged): client wins.
     /// 3. No base_version: pure LWW comparison.
-    pub fn resolve(&self, conflict: &Conflict) -> Resolution {
+    pub fn resolve(&self, conflict: &TimestampConflictContext) -> TimestampResolution {
         let client_time = conflict.client_time + self.clock_skew_tolerance;
 
         if let Some(base) = conflict.base_version {
             if base > conflict.server_time {
-                return Resolution {
-                    winner: "server",
+                return TimestampResolution {
+                    winner: TimestampResolutionWinner::Server,
                     reason: "client base version is ahead of server version",
                 };
             }
@@ -66,33 +89,33 @@ impl LwwResolver {
             if base != conflict.server_time {
                 // Server modified since base: use LWW.
                 if client_time > conflict.server_time {
-                    return Resolution {
-                        winner: "client",
+                    return TimestampResolution {
+                        winner: TimestampResolutionWinner::Client,
                         reason: "client timestamp newer (LWW with base)",
                     };
                 }
-                return Resolution {
-                    winner: "server",
+                return TimestampResolution {
+                    winner: TimestampResolutionWinner::Server,
                     reason: "server version is newer",
                 };
             }
 
             // base == server_time: server unchanged since client's base.
-            return Resolution {
-                winner: "client",
+            return TimestampResolution {
+                winner: TimestampResolutionWinner::Client,
                 reason: "server unchanged since base version",
             };
         }
 
         // No base version: pure LWW.
         if client_time > conflict.server_time {
-            Resolution {
-                winner: "client",
+            TimestampResolution {
+                winner: TimestampResolutionWinner::Client,
                 reason: "client timestamp newer (LWW)",
             }
         } else {
-            Resolution {
-                winner: "server",
+            TimestampResolution {
+                winner: TimestampResolutionWinner::Server,
                 reason: "server version is newer",
             }
         }
@@ -104,12 +127,12 @@ impl LwwResolver {
 // ---------------------------------------------------------------------------
 
 /// Always resolves in favor of the server.
-pub struct ServerWinsResolver;
+pub struct TimestampServerWinsResolver;
 
-impl ServerWinsResolver {
-    pub fn resolve(&self, _conflict: &Conflict) -> Resolution {
-        Resolution {
-            winner: "server",
+impl TimestampServerWinsResolver {
+    pub fn resolve(&self, _conflict: &TimestampConflictContext) -> TimestampResolution {
+        TimestampResolution {
+            winner: TimestampResolutionWinner::Server,
             reason: "server always wins",
         }
     }
@@ -128,8 +151,8 @@ mod tests {
         Utc.timestamp_opt(secs, 0).unwrap()
     }
 
-    fn base_conflict() -> Conflict {
-        Conflict {
+    fn base_conflict() -> TimestampConflictContext {
+        TimestampConflictContext {
             table: "items".into(),
             record_id: "r1".into(),
             client_id: "c1".into(),
@@ -140,8 +163,8 @@ mod tests {
         }
     }
 
-    fn resolver(tolerance_ms: i64) -> LwwResolver {
-        LwwResolver::new(chrono::Duration::milliseconds(tolerance_ms))
+    fn resolver(tolerance_ms: i64) -> TimestampLwwResolver {
+        TimestampLwwResolver::new(chrono::Duration::milliseconds(tolerance_ms))
     }
 
     // Pure LWW (no base version)
@@ -152,7 +175,7 @@ mod tests {
         c.client_time = ts(1001);
         c.server_time = ts(1000);
         let r = resolver(0).resolve(&c);
-        assert_eq!(r.winner, "client");
+        assert_eq!(r.winner, TimestampResolutionWinner::Client);
         assert_eq!(r.reason, "client timestamp newer (LWW)");
     }
 
@@ -162,7 +185,7 @@ mod tests {
         c.client_time = ts(999);
         c.server_time = ts(1000);
         let r = resolver(0).resolve(&c);
-        assert_eq!(r.winner, "server");
+        assert_eq!(r.winner, TimestampResolutionWinner::Server);
         assert_eq!(r.reason, "server version is newer");
     }
 
@@ -170,7 +193,7 @@ mod tests {
     fn lww_equal_server_wins() {
         let c = base_conflict();
         let r = resolver(0).resolve(&c);
-        assert_eq!(r.winner, "server");
+        assert_eq!(r.winner, TimestampResolutionWinner::Server);
     }
 
     #[test]
@@ -179,9 +202,15 @@ mod tests {
         c.client_time = ts(999);
         c.server_time = ts(1000);
         // 500ms tolerance not enough (1s behind).
-        assert_eq!(resolver(500).resolve(&c).winner, "server");
+        assert_eq!(
+            resolver(500).resolve(&c).winner,
+            TimestampResolutionWinner::Server
+        );
         // 1001ms tolerance tips it to client.
-        assert_eq!(resolver(1001).resolve(&c).winner, "client");
+        assert_eq!(
+            resolver(1001).resolve(&c).winner,
+            TimestampResolutionWinner::Client
+        );
     }
 
     // With base version
@@ -192,7 +221,7 @@ mod tests {
         c.base_version = Some(ts(2000));
         c.server_time = ts(1000);
         let r = resolver(0).resolve(&c);
-        assert_eq!(r.winner, "server");
+        assert_eq!(r.winner, TimestampResolutionWinner::Server);
         assert_eq!(r.reason, "client base version is ahead of server version");
     }
 
@@ -202,7 +231,7 @@ mod tests {
         c.base_version = Some(ts(1000));
         c.server_time = ts(1000);
         let r = resolver(0).resolve(&c);
-        assert_eq!(r.winner, "client");
+        assert_eq!(r.winner, TimestampResolutionWinner::Client);
         assert_eq!(r.reason, "server unchanged since base version");
     }
 
@@ -213,7 +242,7 @@ mod tests {
         c.client_time = ts(1100);
         c.server_time = ts(1000);
         let r = resolver(0).resolve(&c);
-        assert_eq!(r.winner, "client");
+        assert_eq!(r.winner, TimestampResolutionWinner::Client);
         assert_eq!(r.reason, "client timestamp newer (LWW with base)");
     }
 
@@ -224,7 +253,7 @@ mod tests {
         c.client_time = ts(999);
         c.server_time = ts(1000);
         let r = resolver(0).resolve(&c);
-        assert_eq!(r.winner, "server");
+        assert_eq!(r.winner, TimestampResolutionWinner::Server);
         assert_eq!(r.reason, "server version is newer");
     }
 
@@ -238,11 +267,11 @@ mod tests {
         c.client_time = Utc.timestamp_millis_opt(1_000_000).unwrap();
         c.server_time = Utc.timestamp_millis_opt(1_000_500).unwrap();
         let r = resolver(500).resolve(&c);
-        assert_eq!(r.winner, "server");
+        assert_eq!(r.winner, TimestampResolutionWinner::Server);
 
         // 501ms tolerance tips it to client.
         let r2 = resolver(501).resolve(&c);
-        assert_eq!(r2.winner, "client");
+        assert_eq!(r2.winner, TimestampResolutionWinner::Client);
     }
 
     #[test]
@@ -255,7 +284,7 @@ mod tests {
         c.server_time = ts(1000);
         c.client_time = ts(500); // Client timestamp way behind, doesn't matter.
         let r = resolver(500).resolve(&c);
-        assert_eq!(r.winner, "client");
+        assert_eq!(r.winner, TimestampResolutionWinner::Client);
         assert_eq!(r.reason, "server unchanged since base version");
     }
 
@@ -267,11 +296,11 @@ mod tests {
         c.client_time = ts(1000);
         c.server_time = ts(1000);
         let r = resolver(0).resolve(&c);
-        assert_eq!(r.winner, "server");
+        assert_eq!(r.winner, TimestampResolutionWinner::Server);
 
         c.client_time = ts(1001);
         let r2 = resolver(0).resolve(&c);
-        assert_eq!(r2.winner, "client");
+        assert_eq!(r2.winner, TimestampResolutionWinner::Client);
     }
 
     #[test]
@@ -281,7 +310,7 @@ mod tests {
         c.client_time = Utc.timestamp_millis_opt(1_000_001).unwrap();
         c.server_time = Utc.timestamp_millis_opt(1_000_000).unwrap();
         let r = resolver(0).resolve(&c);
-        assert_eq!(r.winner, "client");
+        assert_eq!(r.winner, TimestampResolutionWinner::Client);
     }
 
     // ServerWins
@@ -289,8 +318,14 @@ mod tests {
     #[test]
     fn server_wins_always() {
         let c = base_conflict();
-        let r = ServerWinsResolver.resolve(&c);
-        assert_eq!(r.winner, "server");
+        let r = TimestampServerWinsResolver.resolve(&c);
+        assert_eq!(r.winner, TimestampResolutionWinner::Server);
         assert_eq!(r.reason, "server always wins");
+    }
+
+    #[test]
+    fn winner_string_values_are_stable() {
+        assert_eq!(TimestampResolutionWinner::Client.as_str(), "client");
+        assert_eq!(TimestampResolutionWinner::Server.as_str(), "server");
     }
 }

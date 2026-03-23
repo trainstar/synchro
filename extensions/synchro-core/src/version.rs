@@ -43,10 +43,7 @@ impl Semver {
         let minor = parse_component(parts[1], "minor")?;
 
         // Strip pre-release / build metadata from patch.
-        let patch_str = parts[2]
-            .split(&['-', '+'][..])
-            .next()
-            .unwrap_or(parts[2]);
+        let patch_str = parts[2].split(&['-', '+'][..]).next().unwrap_or(parts[2]);
         let patch = parse_component(patch_str, "patch")?;
 
         Ok(Self {
@@ -120,25 +117,53 @@ mod tests {
     #[test]
     fn parse_basic() {
         let v = Semver::parse("1.2.3").unwrap();
-        assert_eq!(v, Semver { major: 1, minor: 2, patch: 3 });
+        assert_eq!(
+            v,
+            Semver {
+                major: 1,
+                minor: 2,
+                patch: 3
+            }
+        );
     }
 
     #[test]
     fn parse_with_v_prefix() {
         let v = Semver::parse("v1.2.3").unwrap();
-        assert_eq!(v, Semver { major: 1, minor: 2, patch: 3 });
+        assert_eq!(
+            v,
+            Semver {
+                major: 1,
+                minor: 2,
+                patch: 3
+            }
+        );
     }
 
     #[test]
     fn parse_with_prerelease() {
         let v = Semver::parse("1.2.3-beta").unwrap();
-        assert_eq!(v, Semver { major: 1, minor: 2, patch: 3 });
+        assert_eq!(
+            v,
+            Semver {
+                major: 1,
+                minor: 2,
+                patch: 3
+            }
+        );
     }
 
     #[test]
     fn parse_with_build_metadata() {
         let v = Semver::parse("1.2.3+build.123").unwrap();
-        assert_eq!(v, Semver { major: 1, minor: 2, patch: 3 });
+        assert_eq!(
+            v,
+            Semver {
+                major: 1,
+                minor: 2,
+                patch: 3
+            }
+        );
     }
 
     #[test]
@@ -153,25 +178,39 @@ mod tests {
 
     #[test]
     fn less_than_major() {
-        assert!(Semver::parse("1.0.0").unwrap().less_than(Semver::parse("2.0.0").unwrap()));
-        assert!(!Semver::parse("2.0.0").unwrap().less_than(Semver::parse("1.0.0").unwrap()));
+        assert!(Semver::parse("1.0.0")
+            .unwrap()
+            .less_than(Semver::parse("2.0.0").unwrap()));
+        assert!(!Semver::parse("2.0.0")
+            .unwrap()
+            .less_than(Semver::parse("1.0.0").unwrap()));
     }
 
     #[test]
     fn less_than_minor() {
-        assert!(Semver::parse("1.1.0").unwrap().less_than(Semver::parse("1.2.0").unwrap()));
-        assert!(!Semver::parse("1.2.0").unwrap().less_than(Semver::parse("1.1.0").unwrap()));
+        assert!(Semver::parse("1.1.0")
+            .unwrap()
+            .less_than(Semver::parse("1.2.0").unwrap()));
+        assert!(!Semver::parse("1.2.0")
+            .unwrap()
+            .less_than(Semver::parse("1.1.0").unwrap()));
     }
 
     #[test]
     fn less_than_patch() {
-        assert!(Semver::parse("1.2.3").unwrap().less_than(Semver::parse("1.2.4").unwrap()));
-        assert!(!Semver::parse("1.2.4").unwrap().less_than(Semver::parse("1.2.3").unwrap()));
+        assert!(Semver::parse("1.2.3")
+            .unwrap()
+            .less_than(Semver::parse("1.2.4").unwrap()));
+        assert!(!Semver::parse("1.2.4")
+            .unwrap()
+            .less_than(Semver::parse("1.2.3").unwrap()));
     }
 
     #[test]
     fn less_than_equal() {
-        assert!(!Semver::parse("1.2.3").unwrap().less_than(Semver::parse("1.2.3").unwrap()));
+        assert!(!Semver::parse("1.2.3")
+            .unwrap()
+            .less_than(Semver::parse("1.2.3").unwrap()));
     }
 
     #[test]

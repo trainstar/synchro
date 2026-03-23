@@ -1,0 +1,506 @@
+import Foundation
+
+public enum VNextContractViolation: Error, Equatable {
+    case emptyScopeID
+    case duplicateAddedScope(String)
+    case duplicateRemovedScope(String)
+    case conflictingScopeAssignment(String)
+    case schemaDefinitionMismatch(action: VNextSchemaAction, hasSchemaDefinition: Bool)
+    case emptyTableName
+    case duplicateTableName(String)
+    case missingPrimaryKey(tableName: String)
+    case missingUpdatedAtColumn(tableName: String)
+    case missingDeletedAtColumn(tableName: String)
+    case missingColumns(tableName: String)
+    case emptyColumnName(tableName: String)
+    case duplicateColumnName(tableName: String, columnName: String)
+    case unknownPrimaryKeyColumn(tableName: String, columnName: String)
+    case unknownUpdatedAtColumn(tableName: String, columnName: String)
+    case unknownDeletedAtColumn(tableName: String, columnName: String)
+    case emptyIndexName(tableName: String)
+    case duplicateIndexName(tableName: String, indexName: String)
+    case unknownIndexColumn(tableName: String, indexName: String, columnName: String)
+    case requiredChecksumsMissing
+    case finalRebuildCursorMissing
+    case finalRebuildChecksumMissing
+    case partialRebuildHasFinalCursor
+    case partialRebuildHasChecksum
+}
+
+public enum VNextOperation: String, Codable, Sendable {
+    case insert
+    case upsert
+    case update
+    case delete
+}
+
+public enum VNextSchemaAction: String, Codable, Sendable {
+    case none
+    case fetch
+    case replace = "replace"
+    case rebuildLocal = "rebuild_local"
+    case unsupported
+
+    public var requiresSchemaDefinition: Bool {
+        self == .replace || self == .rebuildLocal
+    }
+
+    public var requiresLocalRebuild: Bool {
+        self == .rebuildLocal
+    }
+
+    public var isCompatible: Bool {
+        self != .unsupported
+    }
+}
+
+public enum VNextChecksumMode: String, Codable, Sendable {
+    case none
+    case requested
+    case required
+}
+
+public enum VNextMutationStatus: String, Codable, Sendable {
+    case applied
+    case conflict
+    case rejectedTerminal = "rejected_terminal"
+    case rejectedRetryable = "rejected_retryable"
+}
+
+public enum VNextMutationRejectionCode: String, Codable, Sendable {
+    case versionConflict = "version_conflict"
+    case policyRejected = "policy_rejected"
+    case validationFailed = "validation_failed"
+    case tableNotSynced = "table_not_synced"
+    case unknownScopeEffect = "unknown_scope_effect"
+    case serverRetryable = "server_retryable"
+}
+
+public enum VNextProtocolErrorCode: String, Codable, Sendable {
+    case invalidRequest = "invalid_request"
+    case upgradeRequired = "upgrade_required"
+    case authRequired = "auth_required"
+    case schemaMismatch = "schema_mismatch"
+    case retryLater = "retry_later"
+    case temporaryUnavailable = "temporary_unavailable"
+}
+
+public enum VNextCompositionClass: String, Codable, Sendable {
+    case singleScope = "single_scope"
+    case multiScope = "multi_scope"
+}
+
+public struct VNextSchemaRef: Codable, Sendable, Equatable {
+    public var version: Int64
+    public var hash: String
+}
+
+public struct VNextScopeCursorRef: Codable, Sendable, Equatable {
+    public var cursor: String?
+}
+
+public struct VNextScopeAssignment: Codable, Sendable, Equatable {
+    public var id: String
+    public var cursor: String?
+}
+
+public struct VNextScopeAssignmentDelta: Codable, Sendable, Equatable {
+    public var add: [VNextScopeAssignment]
+    public var remove: [String]
+
+    public func validate() throws {
+        var added = Set<String>()
+        for scope in add {
+            if scope.id.isEmpty {
+                throw VNextContractViolation.emptyScopeID
+            }
+            if !added.insert(scope.id).inserted {
+                throw VNextContractViolation.duplicateAddedScope(scope.id)
+            }
+        }
+
+        var removed = Set<String>()
+        for scopeID in remove {
+            if scopeID.isEmpty {
+                throw VNextContractViolation.emptyScopeID
+            }
+            if !removed.insert(scopeID).inserted {
+                throw VNextContractViolation.duplicateRemovedScope(scopeID)
+            }
+            if added.contains(scopeID) {
+                throw VNextContractViolation.conflictingScopeAssignment(scopeID)
+            }
+        }
+    }
+}
+
+public struct VNextSchemaDescriptor: Codable, Sendable, Equatable {
+    public var version: Int64
+    public var hash: String
+    public var action: VNextSchemaAction
+}
+
+public struct VNextColumnSchema: Codable, Sendable, Equatable {
+    public var name: String
+    public var type: String
+    public var nullable: Bool
+}
+
+public struct VNextIndexSchema: Codable, Sendable, Equatable {
+    public var name: String
+    public var columns: [String]
+}
+
+public struct VNextTableSchema: Codable, Sendable, Equatable {
+    public var name: String
+    public var primaryKey: [String]?
+    public var updatedAtColumn: String?
+    public var deletedAtColumn: String?
+    public var composition: VNextCompositionClass?
+    public var columns: [VNextColumnSchema]?
+    public var indexes: [VNextIndexSchema]?
+
+    enum CodingKeys: String, CodingKey {
+        case name
+        case primaryKey = "primary_key"
+        case updatedAtColumn = "updated_at_column"
+        case deletedAtColumn = "deleted_at_column"
+        case composition
+        case columns
+        case indexes
+    }
+}
+
+public struct VNextSchemaManifest: Codable, Sendable, Equatable {
+    public var tables: [VNextTableSchema]
+
+    public func validate() throws {
+        var tableNames = Set<String>()
+        for table in tables {
+            if table.name.isEmpty {
+                throw VNextContractViolation.emptyTableName
+            }
+            if !tableNames.insert(table.name).inserted {
+                throw VNextContractViolation.duplicateTableName(table.name)
+            }
+
+            var columnNames = Set<String>()
+            if let columns = table.columns {
+                for column in columns {
+                    if column.name.isEmpty {
+                        throw VNextContractViolation.emptyColumnName(tableName: table.name)
+                    }
+                    if !columnNames.insert(column.name).inserted {
+                        throw VNextContractViolation.duplicateColumnName(tableName: table.name, columnName: column.name)
+                    }
+                }
+                if let primaryKey = table.primaryKey {
+                    for columnName in primaryKey where !columnNames.contains(columnName) {
+                        throw VNextContractViolation.unknownPrimaryKeyColumn(tableName: table.name, columnName: columnName)
+                    }
+                }
+                if let updatedAtColumn = table.updatedAtColumn, !columnNames.contains(updatedAtColumn) {
+                    throw VNextContractViolation.unknownUpdatedAtColumn(tableName: table.name, columnName: updatedAtColumn)
+                }
+                if let deletedAtColumn = table.deletedAtColumn, !columnNames.contains(deletedAtColumn) {
+                    throw VNextContractViolation.unknownDeletedAtColumn(tableName: table.name, columnName: deletedAtColumn)
+                }
+            }
+
+            var indexNames = Set<String>()
+            if let indexes = table.indexes {
+                for index in indexes {
+                    if index.name.isEmpty {
+                        throw VNextContractViolation.emptyIndexName(tableName: table.name)
+                    }
+                    if !indexNames.insert(index.name).inserted {
+                        throw VNextContractViolation.duplicateIndexName(tableName: table.name, indexName: index.name)
+                    }
+                    if !columnNames.isEmpty {
+                        for columnName in index.columns where !columnNames.contains(columnName) {
+                            throw VNextContractViolation.unknownIndexColumn(tableName: table.name, indexName: index.name, columnName: columnName)
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+public struct VNextConnectRequest: Codable, Sendable, Equatable {
+    public var clientID: String
+    public var platform: String
+    public var appVersion: String
+    public var protocolVersion: Int
+    public var schema: VNextSchemaRef
+    public var scopeSetVersion: Int64
+    public var knownScopes: [String: VNextScopeCursorRef]
+
+    enum CodingKeys: String, CodingKey {
+        case clientID = "client_id"
+        case platform
+        case appVersion = "app_version"
+        case protocolVersion = "protocol_version"
+        case schema
+        case scopeSetVersion = "scope_set_version"
+        case knownScopes = "known_scopes"
+    }
+}
+
+public struct VNextConnectResponse: Codable, Sendable, Equatable {
+    public var serverTime: String
+    public var protocolVersion: Int
+    public var scopeSetVersion: Int64
+    public var schema: VNextSchemaDescriptor
+    public var scopes: VNextScopeAssignmentDelta
+    public var schemaDefinition: VNextSchemaManifest?
+
+    enum CodingKeys: String, CodingKey {
+        case serverTime = "server_time"
+        case protocolVersion = "protocol_version"
+        case scopeSetVersion = "scope_set_version"
+        case schema
+        case scopes
+        case schemaDefinition = "schema_definition"
+    }
+
+    public func validate() throws {
+        if schema.action.requiresSchemaDefinition != (schemaDefinition != nil) {
+            throw VNextContractViolation.schemaDefinitionMismatch(
+                action: schema.action,
+                hasSchemaDefinition: schemaDefinition != nil
+            )
+        }
+        try scopes.validate()
+        try schemaDefinition?.validate()
+    }
+}
+
+public struct VNextMutation: Codable, Sendable, Equatable {
+    public var mutationID: String
+    public var table: String
+    public var op: VNextOperation
+    public var pk: [String: AnyCodable]
+    public var baseVersion: String?
+    public var columns: [String: AnyCodable]?
+
+    enum CodingKeys: String, CodingKey {
+        case mutationID = "mutation_id"
+        case table
+        case op
+        case pk
+        case baseVersion = "base_version"
+        case columns
+    }
+}
+
+public struct VNextPushRequest: Codable, Sendable, Equatable {
+    public var clientID: String
+    public var batchID: String
+    public var schema: VNextSchemaRef
+    public var mutations: [VNextMutation]
+
+    enum CodingKeys: String, CodingKey {
+        case clientID = "client_id"
+        case batchID = "batch_id"
+        case schema
+        case mutations
+    }
+}
+
+public struct VNextAcceptedMutation: Codable, Sendable, Equatable {
+    public var mutationID: String
+    public var table: String
+    public var pk: [String: AnyCodable]
+    public var status: VNextMutationStatus
+    public var serverRow: [String: AnyCodable]?
+    public var serverVersion: String
+
+    enum CodingKeys: String, CodingKey {
+        case mutationID = "mutation_id"
+        case table
+        case pk
+        case status
+        case serverRow = "server_row"
+        case serverVersion = "server_version"
+    }
+}
+
+public struct VNextRejectedMutation: Codable, Sendable, Equatable {
+    public var mutationID: String
+    public var table: String
+    public var pk: [String: AnyCodable]
+    public var status: VNextMutationStatus
+    public var code: VNextMutationRejectionCode
+    public var message: String?
+    public var serverRow: [String: AnyCodable]?
+    public var serverVersion: String?
+
+    enum CodingKeys: String, CodingKey {
+        case mutationID = "mutation_id"
+        case table
+        case pk
+        case status
+        case code
+        case message
+        case serverRow = "server_row"
+        case serverVersion = "server_version"
+    }
+}
+
+public struct VNextPushResponse: Codable, Sendable, Equatable {
+    public var serverTime: String
+    public var accepted: [VNextAcceptedMutation]
+    public var rejected: [VNextRejectedMutation]
+
+    enum CodingKeys: String, CodingKey {
+        case serverTime = "server_time"
+        case accepted
+        case rejected
+    }
+}
+
+public struct VNextPullRequest: Codable, Sendable, Equatable {
+    public var clientID: String
+    public var schema: VNextSchemaRef
+    public var scopeSetVersion: Int64
+    public var scopes: [String: VNextScopeCursorRef]
+    public var limit: Int
+    public var checksumMode: VNextChecksumMode?
+
+    enum CodingKeys: String, CodingKey {
+        case clientID = "client_id"
+        case schema
+        case scopeSetVersion = "scope_set_version"
+        case scopes
+        case limit
+        case checksumMode = "checksum_mode"
+    }
+}
+
+public struct VNextChangeRecord: Codable, Sendable, Equatable {
+    public var scope: String
+    public var table: String
+    public var op: VNextOperation
+    public var pk: [String: AnyCodable]
+    public var row: [String: AnyCodable]?
+    public var serverVersion: String
+
+    enum CodingKeys: String, CodingKey {
+        case scope
+        case table
+        case op
+        case pk
+        case row
+        case serverVersion = "server_version"
+    }
+}
+
+public struct VNextPullResponse: Codable, Sendable, Equatable {
+    public var changes: [VNextChangeRecord]
+    public var scopeSetVersion: Int64
+    public var scopeCursors: [String: String]
+    public var scopeUpdates: VNextScopeAssignmentDelta
+    public var rebuild: [String]
+    public var hasMore: Bool
+    public var checksums: [String: String]?
+
+    enum CodingKeys: String, CodingKey {
+        case changes
+        case scopeSetVersion = "scope_set_version"
+        case scopeCursors = "scope_cursors"
+        case scopeUpdates = "scope_updates"
+        case rebuild
+        case hasMore = "has_more"
+        case checksums
+    }
+
+    public func requestsRebuild() -> Bool {
+        !rebuild.isEmpty
+    }
+
+    public func validate(for request: VNextPullRequest) throws {
+        try scopeUpdates.validate()
+        if request.checksumMode == .required && checksums == nil {
+            throw VNextContractViolation.requiredChecksumsMissing
+        }
+    }
+}
+
+public struct VNextRebuildRequest: Codable, Sendable, Equatable {
+    public var clientID: String
+    public var scope: String
+    public var cursor: String?
+    public var limit: Int
+
+    enum CodingKeys: String, CodingKey {
+        case clientID = "client_id"
+        case scope
+        case cursor
+        case limit
+    }
+}
+
+public struct VNextRebuildRecord: Codable, Sendable, Equatable {
+    public var table: String
+    public var pk: [String: AnyCodable]
+    public var row: [String: AnyCodable]?
+    public var serverVersion: String
+
+    enum CodingKeys: String, CodingKey {
+        case table
+        case pk
+        case row
+        case serverVersion = "server_version"
+    }
+}
+
+public struct VNextRebuildResponse: Codable, Sendable, Equatable {
+    public var scope: String
+    public var records: [VNextRebuildRecord]
+    public var cursor: String?
+    public var hasMore: Bool
+    public var finalScopeCursor: String?
+    public var checksum: String?
+
+    enum CodingKeys: String, CodingKey {
+        case scope
+        case records
+        case cursor
+        case hasMore = "has_more"
+        case finalScopeCursor = "final_scope_cursor"
+        case checksum
+    }
+
+    public func isFinalPage() -> Bool {
+        !hasMore && finalScopeCursor != nil
+    }
+
+    public func validate() throws {
+        if hasMore {
+            if finalScopeCursor != nil {
+                throw VNextContractViolation.partialRebuildHasFinalCursor
+            }
+            if checksum != nil {
+                throw VNextContractViolation.partialRebuildHasChecksum
+            }
+        } else {
+            if finalScopeCursor == nil {
+                throw VNextContractViolation.finalRebuildCursorMissing
+            }
+            if checksum == nil {
+                throw VNextContractViolation.finalRebuildChecksumMissing
+            }
+        }
+    }
+}
+
+public struct VNextErrorBody: Codable, Sendable, Equatable {
+    public var code: VNextProtocolErrorCode
+    public var message: String
+    public var retryable: Bool
+}
+
+public struct VNextErrorResponse: Codable, Sendable, Equatable {
+    public var error: VNextErrorBody
+}
