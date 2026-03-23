@@ -2,12 +2,15 @@ name: CodeQL
 
 on:
   pull_request:
-    branches: [master]
+    branches: [dev]
   push:
-    branches: [master]
+    branches: [dev]
   schedule:
     - cron: '23 4 * * 1'
   workflow_dispatch:
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 permissions:
   security-events: write
@@ -22,6 +25,7 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: api/go/go.mod
+          cache-dependency-path: api/go/go.sum
 
       - uses: github/codeql-action/init@v3
         with:
