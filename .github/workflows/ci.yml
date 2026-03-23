@@ -20,20 +20,20 @@ permissions:
 
 jobs:
   quality:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6.0.2
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v6.3.0
         with:
           go-version-file: api/go/go.mod
           cache-dependency-path: api/go/go.sum
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6.3.0
         with:
           node-version: '22'
 
-      - uses: actions/cache@v4
+      - uses: actions/cache@v5.0.4
         with:
           path: |
             clients/react-native/node_modules
@@ -90,11 +90,11 @@ jobs:
         run: make test-rn-unit
 
   docs:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6.0.2
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6.3.0
         with:
           node-version: '22'
           cache: npm
@@ -104,11 +104,11 @@ jobs:
         run: make docs-build
 
   server:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6.0.2
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v6.3.0
         with:
           go-version-file: api/go/go.mod
           cache-dependency-path: api/go/go.sum
@@ -139,13 +139,24 @@ jobs:
             xsltproc \
             zlib1g-dev
 
-      - uses: actions/cache@v4
+      - uses: actions/cache@v5.0.4
         with:
           path: ~/.pgrx
           key: pgrx-${{ runner.os }}-0.17.0-pg18
 
+      - uses: actions/cache@v5.0.4
+        with:
+          path: |
+            ~/.cargo/bin/cargo-pgrx
+            ~/.cargo/.crates.toml
+            ~/.cargo/.crates2.json
+          key: cargo-pgrx-${{ runner.os }}-0.17.0
+
       - name: Install cargo-pgrx
-        run: cargo install --locked cargo-pgrx --version 0.17.0
+        run: |
+          if ! command -v cargo-pgrx >/dev/null 2>&1 || [ "$(cargo pgrx --version | awk '{print $2}')" != "0.17.0" ]; then
+            cargo install --locked cargo-pgrx --version 0.17.0
+          fi
 
       - name: Initialize PostgreSQL 18 for pgrx
         run: cargo pgrx init --pg18 download
@@ -163,11 +174,11 @@ jobs:
         run: make test-adapter
 
   swift-sdk:
-    runs-on: macos-latest
+    runs-on: macos-15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6.0.2
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v6.3.0
         with:
           go-version-file: api/go/go.mod
           cache-dependency-path: api/go/go.sum
@@ -179,16 +190,27 @@ jobs:
           workspaces: |
             extensions -> target
 
-      - uses: actions/cache@v4
+      - uses: actions/cache@v5.0.4
         with:
           path: ~/.pgrx
           key: pgrx-${{ runner.os }}-0.17.0-pg18
+
+      - uses: actions/cache@v5.0.4
+        with:
+          path: |
+            ~/.cargo/bin/cargo-pgrx
+            ~/.cargo/.crates.toml
+            ~/.cargo/.crates2.json
+          key: cargo-pgrx-${{ runner.os }}-0.17.0
 
       - name: Install PostgreSQL 18 and extension build dependencies on macOS
         run: brew install postgresql@18 pkg-config openssl@3 libxml2 libxslt
 
       - name: Install cargo-pgrx
-        run: cargo install --locked cargo-pgrx --version 0.17.0
+        run: |
+          if ! command -v cargo-pgrx >/dev/null 2>&1 || [ "$(cargo pgrx --version | awk '{print $2}')" != "0.17.0" ]; then
+            cargo install --locked cargo-pgrx --version 0.17.0
+          fi
 
       - name: Initialize PostgreSQL 18 for pgrx
         run: cargo pgrx init --pg18 "$(brew --prefix postgresql@18)/bin/pg_config"
@@ -197,20 +219,20 @@ jobs:
         run: make test-swift
 
   rn-ios:
-    runs-on: macos-latest
+    runs-on: macos-15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6.0.2
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v6.3.0
         with:
           go-version-file: api/go/go.mod
           cache-dependency-path: api/go/go.sum
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6.3.0
         with:
           node-version: '22'
 
-      - uses: actions/cache@v4
+      - uses: actions/cache@v5.0.4
         with:
           path: |
             clients/react-native/node_modules
@@ -227,23 +249,34 @@ jobs:
           workspaces: |
             extensions -> target
 
-      - uses: actions/cache@v4
+      - uses: actions/cache@v5.0.4
         with:
           path: ~/.pgrx
           key: pgrx-${{ runner.os }}-0.17.0-pg18
 
-      - uses: actions/cache@v4
+      - uses: actions/cache@v5.0.4
         with:
           path: |
             ~/Library/Caches/CocoaPods
             clients/react-native/example/ios/Pods
           key: cocoapods-${{ runner.os }}-${{ hashFiles('clients/react-native/example/ios/Podfile.lock', 'Synchro.podspec', 'clients/react-native/SynchroReactNative.podspec') }}
 
+      - uses: actions/cache@v5.0.4
+        with:
+          path: |
+            ~/.cargo/bin/cargo-pgrx
+            ~/.cargo/.crates.toml
+            ~/.cargo/.crates2.json
+          key: cargo-pgrx-${{ runner.os }}-0.17.0
+
       - name: Install PostgreSQL 18 and extension build dependencies on macOS
         run: brew install postgresql@18 pkg-config openssl@3 libxml2 libxslt
 
       - name: Install cargo-pgrx
-        run: cargo install --locked cargo-pgrx --version 0.17.0
+        run: |
+          if ! command -v cargo-pgrx >/dev/null 2>&1 || [ "$(cargo pgrx --version | awk '{print $2}')" != "0.17.0" ]; then
+            cargo install --locked cargo-pgrx --version 0.17.0
+          fi
 
       - name: Initialize PostgreSQL 18 for pgrx
         run: cargo pgrx init --pg18 "$(brew --prefix postgresql@18)/bin/pg_config"
@@ -260,24 +293,31 @@ jobs:
             sudo gem install cocoapods
           fi
 
+      - name: Reset Watchman state
+        run: |
+          if command -v watchman >/dev/null 2>&1; then
+            watchman watch-del "$GITHUB_WORKSPACE/clients/react-native" || true
+            watchman watch-project "$GITHUB_WORKSPACE/clients/react-native"
+          fi
+
       - name: Run React Native iOS Detox tests
         run: make test-rn-e2e-ios
 
   kotlin-sdk:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     env:
       ANDROID_HOME: /usr/local/lib/android/sdk
       ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
       GRADLE_TEST_ARGS: ""
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6.0.2
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v6.3.0
         with:
           go-version-file: api/go/go.mod
           cache-dependency-path: api/go/go.sum
 
-      - uses: actions/setup-java@v4
+      - uses: actions/setup-java@v5.2.0
         with:
           distribution: temurin
           java-version: '17'
@@ -309,13 +349,24 @@ jobs:
             xsltproc \
             zlib1g-dev
 
-      - uses: actions/cache@v4
+      - uses: actions/cache@v5.0.4
         with:
           path: ~/.pgrx
           key: pgrx-${{ runner.os }}-0.17.0-pg18
 
+      - uses: actions/cache@v5.0.4
+        with:
+          path: |
+            ~/.cargo/bin/cargo-pgrx
+            ~/.cargo/.crates.toml
+            ~/.cargo/.crates2.json
+          key: cargo-pgrx-${{ runner.os }}-0.17.0
+
       - name: Install cargo-pgrx
-        run: cargo install --locked cargo-pgrx --version 0.17.0
+        run: |
+          if ! command -v cargo-pgrx >/dev/null 2>&1 || [ "$(cargo pgrx --version | awk '{print $2}')" != "0.17.0" ]; then
+            cargo install --locked cargo-pgrx --version 0.17.0
+          fi
 
       - name: Initialize PostgreSQL 18 for pgrx
         run: cargo pgrx init --pg18 download
@@ -339,30 +390,30 @@ jobs:
         run: make test-kotlin
 
   rn-android:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     env:
       ANDROID_HOME: /usr/local/lib/android/sdk
       ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
       GRADLE_TEST_ARGS: ""
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6.0.2
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v6.3.0
         with:
           go-version-file: api/go/go.mod
           cache-dependency-path: api/go/go.sum
 
-      - uses: actions/setup-java@v4
+      - uses: actions/setup-java@v5.2.0
         with:
           distribution: temurin
           java-version: '17'
           cache: gradle
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6.3.0
         with:
           node-version: '22'
 
-      - uses: actions/cache@v4
+      - uses: actions/cache@v5.0.4
         with:
           path: |
             clients/react-native/node_modules
@@ -398,13 +449,24 @@ jobs:
             xsltproc \
             zlib1g-dev
 
-      - uses: actions/cache@v4
+      - uses: actions/cache@v5.0.4
         with:
           path: ~/.pgrx
           key: pgrx-${{ runner.os }}-0.17.0-pg18
 
+      - uses: actions/cache@v5.0.4
+        with:
+          path: |
+            ~/.cargo/bin/cargo-pgrx
+            ~/.cargo/.crates.toml
+            ~/.cargo/.crates2.json
+          key: cargo-pgrx-${{ runner.os }}-0.17.0
+
       - name: Install cargo-pgrx
-        run: cargo install --locked cargo-pgrx --version 0.17.0
+        run: |
+          if ! command -v cargo-pgrx >/dev/null 2>&1 || [ "$(cargo pgrx --version | awk '{print $2}')" != "0.17.0" ]; then
+            cargo install --locked cargo-pgrx --version 0.17.0
+          fi
 
       - name: Initialize PostgreSQL 18 for pgrx
         run: cargo pgrx init --pg18 download
