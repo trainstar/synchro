@@ -61,30 +61,43 @@ async function runAction(label: string, timeout = 5000) {
   await expectBadge(label, 'PASS', timeout);
 }
 
+async function waitForIdleStatus(timeout = 15000) {
+  await waitFor(element(by.id('status-value')))
+    .toHaveText('idle')
+    .withTimeout(timeout);
+  await waitFor(element(by.id('sync-status')))
+    .toBeVisible()
+    .whileElement(by.id('test-scroll'))
+    .scroll(400, 'up');
+}
+
+async function relaunchToIdle() {
+  await device.launchApp({ newInstance: true, delete: true });
+  await waitForIdleStatus(10000);
+  await waitFor(element(by.id('btn-reset'))).toBeVisible().withTimeout(5000);
+}
+
+async function resetHarnessForTest() {
+  await scrollToTopAndTap('btn-reset');
+  if (device.getPlatform() !== 'ios') {
+    await waitForIdleStatus(15000);
+    return;
+  }
+
+  try {
+    await waitForIdleStatus(4000);
+  } catch {
+    await relaunchToIdle();
+  }
+}
+
 describe('Synchro RN E2E', () => {
   beforeAll(async () => {
-    if (device.getPlatform() === 'android') {
-      await device.launchApp({ newInstance: true, delete: true });
-    }
+    await relaunchToIdle();
   });
 
   beforeEach(async () => {
-    if (device.getPlatform() === 'ios') {
-      await device.launchApp({ newInstance: true, delete: true });
-      await waitFor(element(by.id('status-value')))
-        .toHaveText('idle')
-        .withTimeout(5000);
-      await waitFor(element(by.id('btn-reset'))).toBeVisible().withTimeout(5000);
-    } else {
-      await scrollToTopAndTap('btn-reset');
-      await waitFor(element(by.id('status-value')))
-        .toHaveText('idle')
-        .withTimeout(15000);
-      await waitFor(element(by.id('sync-status')))
-        .toBeVisible()
-        .whileElement(by.id('test-scroll'))
-        .scroll(400, 'up');
-    }
+    await resetHarnessForTest();
   });
 
   it('shows the test harness', async () => {
