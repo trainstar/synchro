@@ -364,6 +364,13 @@ jobs:
             sudo gem install cocoapods
           fi
 
+      - name: Ensure Detox iOS utilities are available
+        run: |
+          if ! command -v applesimutils >/dev/null 2>&1; then
+            brew tap wix/brew
+            brew install applesimutils
+          fi
+
       - name: Reset Watchman state
         run: |
           if command -v watchman >/dev/null 2>&1; then
