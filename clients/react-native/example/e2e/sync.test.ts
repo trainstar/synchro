@@ -71,13 +71,16 @@ describe('Synchro RN E2E', () => {
   beforeEach(async () => {
     if (device.getPlatform() === 'ios') {
       await device.launchApp({ newInstance: true, delete: true });
-      await waitFor(element(by.id('header'))).toBeVisible().withTimeout(5000);
+      await waitFor(element(by.id('status-value')))
+        .toHaveText('idle')
+        .withTimeout(5000);
+      await waitFor(element(by.id('btn-reset'))).toBeVisible().withTimeout(5000);
     } else {
       await scrollToTopAndTap('btn-reset');
       await waitFor(element(by.id('status-value')))
         .toHaveText('idle')
         .withTimeout(15000);
-      await waitFor(element(by.id('header')))
+      await waitFor(element(by.id('sync-status')))
         .toBeVisible()
         .whileElement(by.id('test-scroll'))
         .scroll(400, 'up');
@@ -85,8 +88,8 @@ describe('Synchro RN E2E', () => {
   });
 
   it('shows the test harness', async () => {
-    await expect(element(by.id('header'))).toBeVisible();
     await expect(element(by.id('sync-status'))).toBeVisible();
+    await expect(element(by.id('btn-reset'))).toBeVisible();
   });
 
   it('initializes successfully', async () => {

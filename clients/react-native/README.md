@@ -67,7 +67,6 @@ Events and hooks:
 
 - `onStatusChange(callback)`
 - `onConflict(callback)`
-- `onSnapshotRequired(handler)`
 - `useQuery(client, sql, params?, tables?)`
 - `useSyncStatus(client)`
 - `usePendingChanges(client, pollInterval?)`
@@ -100,7 +99,6 @@ Native errors are normalized to typed JS errors, including:
 - `TableNotSyncedError`
 - `UpgradeRequiredError`
 - `SchemaMismatchError`
-- `SnapshotRequiredError`
 - `PushRejectedError`
 - `NetworkError`
 - `ServerError`

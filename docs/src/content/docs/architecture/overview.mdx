@@ -1,0 +1,37 @@
+---
+title: Architecture Overview
+description: Synchro’s current layer model and the boundaries between server, extension, and clients.
+---
+
+Synchro’s release architecture is intentionally narrow:
+
+- `extensions/synchro-core` owns shared deterministic sync semantics
+- `extensions/synchro-pg` owns PostgreSQL-near execution, scope materialization, and synced CRUD application
+- `api/go` owns transport, auth integration, and HTTP translation
+- native clients own local SQLite, queueing, scheduling, and safe apply
+- React Native is a bridge over the native clients, not an independent sync engine
+
+## Why this shape
+
+This architecture exists to keep:
+
+- sync semantics close to the data
+- the HTTP layer thin
+- native SDK behavior consistent
+- the hot path low in round trips
+
+## Core design choices
+
+- deterministic server-defined scopes
+- extension-side change capture and materialization
+- per-scope cursors and explicit rebuild
+- full synced CRUD for synced tables
+- SQL migration based configuration, with structured defaults and custom SQL escape hatches
+
+## Specification
+
+The detailed architectural contract is published in:
+
+- [Principles](/synchro/spec/00-principles/)
+- [State Machines](/synchro/spec/03-state-machines/)
+- [Invariants](/synchro/spec/04-invariants/)

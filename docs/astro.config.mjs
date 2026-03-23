@@ -26,35 +26,35 @@ export default defineConfig({
 			],
 			sidebar: [
 				{
-					label: 'Getting Started',
+					label: 'Overview',
 					items: [
-						{ label: 'Quick Start', slug: 'getting-started/quickstart' },
-						{ label: 'Core Concepts', slug: 'getting-started/concepts' },
+						{ label: 'Welcome', slug: '' },
+						{ label: 'Quickstart', slug: 'getting-started/quickstart' },
 					],
 				},
 				{
-					label: 'Server',
+					label: 'Architecture',
 					items: [
-						{ label: 'Configuration', slug: 'server/configuration' },
-						{ label: 'Architecture', slug: 'server/architecture' },
-						{ label: 'Deployment', slug: 'server/deployment' },
-						{ label: 'Seed Database', slug: 'server/seed-database' },
-						{ label: 'Type Reference', slug: 'server/types' },
+						{ label: 'Overview', slug: 'architecture/overview' },
 					],
 				},
 				{
 					label: 'Client SDKs',
 					items: [
 						{ label: 'Overview', slug: 'clients/overview' },
-						{ label: 'Swift / iOS', slug: 'clients/swift' },
-						{ label: 'Kotlin / Android', slug: 'clients/kotlin' },
-						{ label: 'React Native', slug: 'clients/react-native' },
 					],
 				},
 				{
-					label: 'Protocol',
+					label: 'Specification',
 					items: [
-						{ label: 'API Reference', slug: 'protocol/api-reference' },
+						{ label: 'Principles', slug: 'spec/00-principles' },
+						{ label: 'Wire Protocol', slug: 'spec/01-wire-protocol' },
+						{ label: 'Client Contract', slug: 'spec/02-client-contract' },
+						{ label: 'State Machines', slug: 'spec/03-state-machines' },
+						{ label: 'Invariants', slug: 'spec/04-invariants' },
+						{ label: 'Schema Evolution', slug: 'spec/05-schema-evolution' },
+						{ label: 'Conformance Plan', slug: 'spec/06-conformance-plan' },
+						{ label: 'Audit Sequence', slug: 'spec/07-audit-sequence' },
 					],
 				},
 			],

@@ -128,10 +128,16 @@ class SchemaIntegrationTests {
         val client1 = SynchroClient(makeConfig(userID = userID, dbPath = dbPath, clientID = clientID), context)
         client1.start()
 
-        // 2. Insert data and push it to server
+        // 2. Insert customer (required FK for orders) and order, push to server
+        val custID = UUID.randomUUID().toString()
+        client1.execute(
+            "INSERT INTO customers (id, user_id, name, balance, is_active, created_at, updated_at) VALUES (?, ?, ?, 0, 1, ?, ?)",
+            arrayOf(custID, userID, "Schema Test Customer", "2026-01-01T00:00:00.000Z", "2026-01-01T00:00:00.000Z")
+        )
         val orderID = UUID.randomUUID().toString()
         client1.execute(
-            "INSERT INTO orders (id, user_id, ship_address, updated_at) VALUES ('$orderID', '$userID', '123 Main St', '2026-01-01T00:00:00.000Z')"
+            "INSERT INTO orders (id, customer_id, status, total_price, currency, ship_address, created_at, updated_at) VALUES (?, ?, 'pending', 0, 'USD', ?, ?, ?)",
+            arrayOf(orderID, custID, "123 Main St", "2026-01-01T00:00:00.000Z", "2026-01-01T00:00:00.000Z")
         )
         client1.syncNow()
 
@@ -242,10 +248,16 @@ class SchemaIntegrationTests {
         val orders = client.query("SELECT * FROM orders")
         assertEquals(0, orders.size)
 
-        // Insert data offline — CDC triggers should fire
+        // Insert customer (FK required) and order offline — CDC triggers should fire
+        val custID = UUID.randomUUID().toString()
+        client.execute(
+            "INSERT INTO customers (id, user_id, name, balance, is_active, created_at, updated_at) VALUES (?, ?, ?, 0, 1, ?, ?)",
+            arrayOf(custID, UUID.randomUUID().toString(), "Offline Customer", "2026-01-01T00:00:00.000Z", "2026-01-01T00:00:00.000Z")
+        )
         val orderID = UUID.randomUUID().toString()
         client.execute(
-            "INSERT INTO orders (id, user_id, ship_address, updated_at) VALUES ('$orderID', '${UUID.randomUUID()}', '456 Oak Ave', '2026-01-01T00:00:00.000Z')"
+            "INSERT INTO orders (id, customer_id, status, total_price, currency, ship_address, created_at, updated_at) VALUES (?, ?, 'pending', 0, 'USD', ?, ?, ?)",
+            arrayOf(orderID, custID, "456 Oak Ave", "2026-01-01T00:00:00.000Z", "2026-01-01T00:00:00.000Z")
         )
 
         // Query back
@@ -274,7 +286,7 @@ class SchemaIntegrationTests {
 
         // Create STALE seed: only orders table with minimal columns (no other tables)
         val minimalColumns = ordersTable.columns.filter {
-            it.name in listOf("id", "user_id", "ship_address", "updated_at", "deleted_at")
+            it.name in listOf("id", "customer_id", "ship_address", "updated_at", "deleted_at")
         }
         val staleOrders = ordersTable.copy(columns = minimalColumns)
         val seedPath = createSeedDB(tables = listOf(staleOrders), schemaVersion = 0, schemaHash = "stale-seed")
@@ -305,13 +317,19 @@ class SchemaIntegrationTests {
         }
 
         // Verify sync works — can insert after reconciliation
+        val custID = UUID.randomUUID().toString()
+        client.execute(
+            "INSERT INTO customers (id, user_id, name, balance, is_active, created_at, updated_at) VALUES (?, ?, ?, 0, 1, ?, ?)",
+            arrayOf(custID, UUID.randomUUID().toString(), "Reconcile Customer", "2026-01-01T00:00:00.000Z", "2026-01-01T00:00:00.000Z")
+        )
         val orderID = UUID.randomUUID().toString()
         client.execute(
-            "INSERT INTO orders (id, user_id, ship_address, updated_at) VALUES ('$orderID', '${UUID.randomUUID()}', 'post-reconcile', '2026-01-01T00:00:00.000Z')"
+            "INSERT INTO orders (id, customer_id, status, total_price, currency, ship_address, created_at, updated_at) VALUES (?, ?, 'pending', 0, 'USD', ?, ?, ?)",
+            arrayOf(orderID, custID, "post-reconcile insert", "2026-01-01T00:00:00.000Z", "2026-01-01T00:00:00.000Z")
         )
         val row = client.queryOne("SELECT ship_address FROM orders WHERE id = ?", arrayOf(orderID))
         assertNotNull(row)
-        assertEquals("post-reconcile", row?.get("ship_address"))
+        assertEquals("post-reconcile insert", row?.get("ship_address"))
 
         client.stop()
         client.close()

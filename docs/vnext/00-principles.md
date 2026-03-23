@@ -1,0 +1,258 @@
+# Principles
+
+## Purpose
+
+This document defines the product thesis, architectural boundaries, and non-negotiable principles for Synchro vNext.
+
+It is the highest-level source of truth for the new system. Lower-level specs must conform to it.
+
+## Product Thesis
+
+Synchro vNext is a full offline sync product for native apps using local SQLite.
+
+It is designed to beat current alternatives on:
+
+- developer experience
+- predictable sync semantics
+- end-to-end synced CRUD
+- thin server adapter architecture
+- native client parity
+- performance through extension-side execution and deterministic sync scopes
+
+Synchro vNext is not a generic local-first substrate first. It is an opinionated sync product first.
+
+## Product Promise
+
+The promise of Synchro vNext is:
+
+- local-first SQLite on device
+- full synced CRUD for synced tables
+- thin server/API adapter implementations
+- shared sync semantics across adapters through the Rust core
+- minimal required application schema changes
+- deterministic selective sync with explicit rebuild semantics
+
+## Layer Model
+
+The system is composed of four layers:
+
+- `extensions/synchro-core`: shared deterministic sync semantics
+- `extensions/synchro-pg`: PostgreSQL extension that executes those semantics close to the data
+- `api/go`: one HTTP adapter that implements the contract over the extension
+- end clients: Swift, Kotlin, React Native
+
+`api/go` is not an end client. It is one adapter.
+
+## Architectural Principles
+
+### Shared Core Semantics
+
+All core sync semantics should live in the shared Rust core wherever possible.
+
+That includes:
+
+- deterministic sync rules
+- conflict semantics
+- checksums
+- diffing and dedup logic
+- protocol-level semantic invariants
+
+### Extension-Centered Execution
+
+The PostgreSQL extension is the authoritative execution environment for server-side sync logic.
+
+The system should prefer:
+
+- WAL/CDC-driven server-side change detection
+- extension-owned sync metadata
+- extension-side membership materialization
+- extension-side write application for synced CRUD
+
+The system should not depend on a separate sync database or sync service database on the server.
+
+### Thin API Adapters
+
+`api/go` and future adapters should remain thin.
+
+They may own:
+
+- transport
+- authentication integration
+- version gating
+- HTTP validation and translation
+
+They should not own:
+
+- sync semantics
+- scope membership semantics
+- conflict resolution semantics
+- rebuild semantics
+- synced-table write semantics
+
+### Thin End Clients
+
+Swift and Kotlin should be as thin as possible without becoming fake-thin.
+
+They still need to own:
+
+- local SQLite integration
+- local change capture
+- local queueing
+- scheduling and retry orchestration
+- applying server-delivered state safely
+
+They should not invent server sync semantics.
+
+React Native should remain a thin bridge over the native clients, not a separate sync engine.
+
+## Selective Sync Model
+
+Synchro vNext uses server-defined deterministic sync scopes.
+
+The public abstraction is:
+
+- scope definition
+- scope instance
+- scope membership
+- scope checkpoint
+- scope rebuild
+
+Clients do not define arbitrary replication queries.
+
+The system should not use client-authored dynamic shape graphs or arbitrary client-side replication predicates as the primary sync model.
+
+## Scope Design Principles
+
+### Deterministic Membership
+
+Scope membership must be deterministic and server-defined.
+
+The server decides which rows belong to which scope instances.
+
+### Materialized Membership
+
+The system should materialize membership and metadata so that:
+
+- pull is cheap
+- rebuild is explicit
+- per-scope cursor progression is explicit
+- checksums are explicit
+
+### Scope Count vs Fanout
+
+A high number of scope instances is acceptable.
+
+The true scaling danger is fanout:
+
+- for one changed row, how many scope instances must be updated or notified
+
+The system must optimize for low fanout.
+
+### Shared Data Strategy
+
+Shared or public data should prefer shared scopes with many subscribers.
+
+The system should avoid duplicating shared rows into large numbers of private scopes unless there is a strong reason to do so.
+
+### Advanced Scope Logic
+
+The system must support advanced scope logic as an escape hatch.
+
+Common cases should be handled by first-class structured configuration.
+
+Advanced cases may use custom SQL.
+
+## Write Model
+
+Synchro vNext owns row-level CRUD for synced tables end-to-end.
+
+That includes:
+
+- create
+- update
+- delete
+- policy enforcement
+- conflict handling
+- canonical server response
+- resulting scope membership effects
+
+Synchro vNext does not attempt to own arbitrary business workflows or domain commands.
+
+Business commands that are not row-level synced CRUD remain outside Synchro.
+
+## Configuration Model
+
+Configuration should live in SQL migrations in the consuming application’s database repo.
+
+The preferred authoring model is:
+
+- structured Synchro SQL configuration for common cases
+- custom SQL escape hatches for advanced cases
+
+The system should not use YAML or server-language config as the primary source of truth for sync semantics.
+
+## Schema Friction
+
+Synchro vNext should require only extension-owned infrastructure tables on the server.
+
+It should not require application teams to modify every application table as a prerequisite for adoption.
+
+Minimal schema friction is a goal, but not at the cost of ambiguous or under-specified behavior.
+
+## Performance Principles
+
+The system should outperform alternatives by combining:
+
+- local SQLite on device
+- extension-side execution near the data
+- deterministic scopes
+- materialized membership
+- cheap incremental pull
+- scoped rebuild instead of broad destructive resync
+- no unnecessary extra network round trips for core sync logic
+
+The system must explicitly optimize for:
+
+- low row-change fanout
+- cheap pull
+- efficient shared/public data handling
+- explicit rebuild costs
+
+## Competitive Positioning
+
+Synchro vNext is intended to beat alternatives by being:
+
+- more complete than systems that stop at read sync and ask users to invent their own write API
+- more predictable than systems centered on arbitrary replication shapes
+- better for native mobile DX
+- better for thin adapter implementations
+- better for shared semantics across multiple adapters and client SDKs
+
+## Migration Stance
+
+Deleted legacy implementation and deleted legacy docs have zero authority over vNext.
+
+No old names, old behavior, or old contracts have any right to shape vNext unless they are re-adopted deliberately.
+
+## Non-Goals
+
+Synchro vNext is not trying to be:
+
+- a generic workflow engine
+- a client-defined arbitrary query replication system
+- a system whose main value is “bring your own backend write path”
+- a system whose semantics are inferred from old code or legacy docs
+
+## Follow-Up Inputs For 01 And 02
+
+The following items are still required before `01-wire-protocol` and `02-client-contract` can be completed cleanly:
+
+- exact endpoint set
+- exact mutation payload model
+- exact server response model for accepted and rejected mutations
+- exact scope assignment and scope update handshake
+- exact checkpoint and checksum field design
+- exact rebuild request and response shape
+- exact schema handshake flow
+- exact client-visible error taxonomy
+- exact public SDK surface for Swift and Kotlin

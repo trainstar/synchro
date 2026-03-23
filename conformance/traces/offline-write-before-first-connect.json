@@ -1,0 +1,36 @@
+{
+  "fixture_version": 1,
+  "name": "offline_write_before_first_connect",
+  "kind": "trace.client",
+  "summary": "Client accepts offline synced-table writes before the first successful connect, then pushes them after reaching ready state.",
+  "spec_refs": [
+    "02-client-contract: Mutation Queue",
+    "03-state-machines: Offline Writes Before First Connect",
+    "04-invariants: Offline Writes Before First Connect"
+  ],
+  "initial_state": "uninitialized",
+  "events": [
+    "initialize_local_db",
+    "open_metadata",
+    "local_write_to_synced_table",
+    "capture_mutation_into_queue",
+    "connect_success",
+    "schema_action_none",
+    "enter_ready",
+    "push_pending_mutations",
+    "pull_incremental_changes"
+  ],
+  "expected_transitions": [
+    "uninitialized -> local_ready",
+    "local_ready -> connecting",
+    "connecting -> ready",
+    "ready -> pushing",
+    "pushing -> pulling",
+    "pulling -> ready"
+  ],
+  "assertions": [
+    "local write must be durable before first connect succeeds",
+    "queued mutation must survive until push reconciliation",
+    "push must occur before normal pull in the first ready cycle"
+  ]
+}

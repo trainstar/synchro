@@ -1,0 +1,94 @@
+{
+  "fixture_version": 1,
+  "name": "portable_schema_manifest",
+  "kind": "schema.manifest",
+  "summary": "Portable schema manifest for synced tables, including composition class and portable column types.",
+  "spec_refs": [
+    "05-schema-evolution: Canonical Schema Model",
+    "05-schema-evolution: Portable Type System"
+  ],
+  "manifest": {
+    "tables": [
+      {
+        "name": "workouts",
+        "primary_key": [
+          "id"
+        ],
+        "updated_at_column": "updated_at",
+        "deleted_at_column": "deleted_at",
+        "composition": "single_scope",
+        "columns": [
+          {
+            "name": "id",
+            "type": "uuid",
+            "nullable": false
+          },
+          {
+            "name": "name",
+            "type": "text",
+            "nullable": false
+          },
+          {
+            "name": "updated_at",
+            "type": "timestamp",
+            "nullable": false
+          },
+          {
+            "name": "deleted_at",
+            "type": "timestamp",
+            "nullable": true
+          },
+          {
+            "name": "started_at",
+            "type": "timestamp",
+            "nullable": true
+          }
+        ],
+        "indexes": [
+          {
+            "name": "idx_workouts_started_at",
+            "columns": [
+              "started_at"
+            ]
+          }
+        ]
+      },
+      {
+        "name": "exercises",
+        "primary_key": [
+          "id"
+        ],
+        "updated_at_column": "updated_at",
+        "deleted_at_column": "deleted_at",
+        "composition": "multi_scope",
+        "columns": [
+          {
+            "name": "id",
+            "type": "uuid",
+            "nullable": false
+          },
+          {
+            "name": "user_id",
+            "type": "uuid",
+            "nullable": true
+          },
+          {
+            "name": "name",
+            "type": "text",
+            "nullable": false
+          },
+          {
+            "name": "updated_at",
+            "type": "timestamp",
+            "nullable": false
+          },
+          {
+            "name": "deleted_at",
+            "type": "timestamp",
+            "nullable": true
+          }
+        ]
+      }
+    ]
+  }
+}

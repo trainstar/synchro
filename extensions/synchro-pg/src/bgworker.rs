@@ -1,12 +1,10 @@
-use std::panic::AssertUnwindSafe;
-
-use pgrx::prelude::*;
 use pgrx::bgworkers::*;
+use pgrx::prelude::*;
 use pgrx::spi::SpiClient;
 
+use synchro_core::change::ChangeOperation;
 use synchro_core::checksum::compute_record_checksum;
 use synchro_core::edge_diff::{build_edge_diff_entries, diff_bucket_sets};
-use synchro_core::protocol::Operation;
 
 use crate::bucketing::resolve_buckets;
 use crate::registry::{load_registry, TableRegistration};
@@ -38,6 +36,14 @@ fn publication_name() -> String {
         .unwrap_or_else(|| "synchro_pub".to_string())
 }
 
+/// Read the worker database from the GUC, falling back to postgres.
+fn database_name() -> String {
+    crate::DATABASE_GUC
+        .get()
+        .and_then(|cs| cs.to_str().ok().map(String::from))
+        .unwrap_or_else(|| "postgres".to_string())
+}
+
 /// Register the WAL background worker.
 ///
 /// Called from `_PG_init()` once GUCs are registered.
@@ -64,12 +70,7 @@ pub fn register_bgworker() {
 #[no_mangle]
 pub extern "C-unwind" fn synchro_wal_worker_main(_arg: pg_sys::Datum) {
     BackgroundWorker::attach_signal_handlers(SignalWakeFlags::SIGHUP | SignalWakeFlags::SIGTERM);
-
-    // Connect to the configured database (synchro.database GUC).
-    let db_name = crate::DATABASE_GUC
-        .get()
-        .and_then(|cs| cs.to_str().ok().map(String::from))
-        .unwrap_or_else(|| "postgres".to_string());
+    let db_name = database_name();
     BackgroundWorker::connect_worker_to_spi(Some(&db_name), None);
 
     let slot_name = replication_slot();
@@ -80,67 +81,17 @@ pub extern "C-unwind" fn synchro_wal_worker_main(_arg: pg_sys::Datum) {
         pub_name_init,
     );
 
-    // Ensure replication slot exists. Use direct pg_sys calls to create the
-    // slot outside of SPI, because PG does not allow slot creation in any
-    // transaction that has performed SPI operations (even SELECTs).
-    {
-        let slot = replication_slot();
-        let slot_exists = BackgroundWorker::transaction(|| {
-            let check_sql = format!(
-                "SELECT EXISTS (SELECT 1 FROM pg_replication_slots WHERE slot_name = '{}')::bool",
-                slot.replace('\'', "''")
-            );
-            Spi::get_one::<bool>(&check_sql).unwrap_or(Some(false)).unwrap_or(false)
-        });
-
-        if !slot_exists {
-            log!("synchro WAL worker: creating replication slot '{}'", slot);
-            // pg_create_logical_replication_slot cannot run in a transaction
-            // that has performed writes (even SPI SELECTs count). We must use
-            // a fresh transaction via direct PG transaction commands.
-            unsafe {
-                pg_sys::StartTransactionCommand();
-                pg_sys::PushActiveSnapshot(pg_sys::GetTransactionSnapshot());
-
-                let create_sql = format!(
-                    "SELECT pg_create_logical_replication_slot('{}', 'pgoutput')",
-                    slot.replace('\'', "''")
-                );
-                let create_cstr = std::ffi::CString::new(create_sql).unwrap();
-
-                pg_sys::SPI_connect();
-                pg_sys::SPI_execute(create_cstr.as_ptr(), false, 0);
-                pg_sys::SPI_finish();
-
-                pg_sys::PopActiveSnapshot();
-                pg_sys::CommitTransactionCommand();
-            }
-            log!("synchro WAL worker: created replication slot '{}'", slot);
-        }
+    // Ensure the replication slot exists.
+    if let Err(e) = ensure_replication_slot() {
+        log!(
+            "synchro WAL worker: failed to create replication slot: {}",
+            e
+        );
+        return;
     }
 
-    // Ensure publication exists.
-    BackgroundWorker::transaction(|| {
-        let pub_name = publication_name();
-        let pub_check_sql = format!(
-            "SELECT EXISTS (SELECT 1 FROM pg_publication WHERE pubname = '{}')::bool",
-            pub_name.replace('\'', "''")
-        );
-        let pub_exists: bool = Spi::get_one::<bool>(&pub_check_sql)
-            .unwrap_or(Some(false))
-            .unwrap_or(false);
-
-        if !pub_exists {
-            let pub_create_sql = format!(
-                "CREATE PUBLICATION {} FOR ALL TABLES",
-                crate::pull::pg_quote_ident(&pub_name)
-            );
-            Spi::run(&pub_create_sql).ok();
-        }
-    });
-
-    // Load registry in a separate transaction.
-    let mut registry = match BackgroundWorker::transaction(|| load_registry_for_worker()) {
+    // Load registry and build decoder.
+    let mut registry = match load_registry_for_worker() {
         Ok(r) => r,
         Err(e) => {
             log!("synchro WAL worker: failed to load registry: {}", e);
@@ -149,15 +100,7 @@ pub extern "C-unwind" fn synchro_wal_worker_main(_arg: pg_sys::Datum) {
     };
 
     let mut decoder = build_decoder(&registry);
-
-    // Pre-populate the WAL decoder's relation cache from pg_catalog.
-    // This handles the case where the bgworker restarts but the replication
-    // slot has already advanced past the RelationMessages for registered tables.
-    // Without this, events for those tables would be silently dropped.
-    let preloaded = BackgroundWorker::transaction(|| {
-        preload_relations_from_catalog(&registry)
-    });
-    decoder.preload_relations(preloaded);
+    decoder.preload_relations(preload_relations_from_catalog(&registry));
 
     log!(
         "synchro WAL worker: registry loaded ({} tables), entering main loop",
@@ -165,11 +108,10 @@ pub extern "C-unwind" fn synchro_wal_worker_main(_arg: pg_sys::Datum) {
     );
 
     // Main loop: poll WAL changes, process events, handle signals.
-    // All SPI calls must be wrapped in BackgroundWorker::transaction().
     while BackgroundWorker::wait_latch(Some(std::time::Duration::from_millis(IDLE_POLL_MS))) {
         if BackgroundWorker::sighup_received() {
             log!("synchro WAL worker: reloading registry");
-            match BackgroundWorker::transaction(|| load_registry_for_worker()) {
+            match load_registry_for_worker() {
                 Ok(r) => {
                     decoder = build_decoder(&r);
                     registry = r;
@@ -180,7 +122,7 @@ pub extern "C-unwind" fn synchro_wal_worker_main(_arg: pg_sys::Datum) {
             }
         }
 
-        match BackgroundWorker::transaction(AssertUnwindSafe(|| poll_and_process(&mut decoder, &registry))) {
+        match poll_and_process(&mut decoder, &registry) {
             Ok(0) => {}
             Ok(n) => {
                 log!("synchro WAL worker: processed {} WAL messages", n);
@@ -192,49 +134,6 @@ pub extern "C-unwind" fn synchro_wal_worker_main(_arg: pg_sys::Datum) {
     }
 
     log!("synchro WAL worker shutting down");
-}
-
-/// Load relation OIDs and column metadata from pg_catalog for all
-/// registered tables. Returns data to be passed to decoder.preload_relations().
-fn preload_relations_from_catalog(
-    registry: &[TableRegistration],
-) -> Vec<(u32, String, Vec<crate::wal_decoder::ColumnInfo>)> {
-    use crate::wal_decoder::ColumnInfo;
-
-    let mut relations = Vec::new();
-    for table_reg in registry {
-        let oid_sql = format!(
-            "SELECT c.oid::integer FROM pg_catalog.pg_class c WHERE c.relname = '{}'",
-            table_reg.table_name.replace('\'', "''")
-        );
-        let relid: i32 = match Spi::get_one::<i32>(&oid_sql) {
-            Ok(Some(id)) => id,
-            _ => continue,
-        };
-
-        let col_sql = format!(
-            "SELECT a.attname::text AS name, a.atttypid::integer AS type_oid \
-             FROM pg_catalog.pg_attribute a \
-             WHERE a.attrelid = {} AND a.attnum > 0 AND NOT a.attisdropped \
-             ORDER BY a.attnum",
-            relid
-        );
-        let mut columns = Vec::new();
-        let _ = Spi::connect(|client| {
-            if let Ok(tup) = client.select(&col_sql, None, &[]) {
-                for row in tup {
-                    let name: String = row.get_by_name::<String, &str>("name")
-                        .unwrap_or(None).unwrap_or_default();
-                    let oid: i32 = row.get_by_name::<i32, &str>("type_oid")
-                        .unwrap_or(None).unwrap_or(0);
-                    columns.push(ColumnInfo { name, data_type_oid: oid as u32 });
-                }
-            }
-            Ok::<_, pgrx::spi::Error>(())
-        });
-        relations.push((relid as u32, table_reg.table_name.clone(), columns));
-    }
-    relations
 }
 
 /// Build a WalDecoder from the current registry.
@@ -257,46 +156,89 @@ fn build_decoder(registry: &[TableRegistration]) -> WalDecoder {
     decoder
 }
 
+fn preload_relations_from_catalog(
+    registry: &[TableRegistration],
+) -> Vec<(u32, String, Vec<crate::wal_decoder::ColumnInfo>)> {
+    use crate::wal_decoder::ColumnInfo;
+
+    let mut relations = Vec::new();
+    for table_reg in registry {
+        let oid_sql = format!(
+            "SELECT c.oid::integer FROM pg_catalog.pg_class c \
+             JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
+             WHERE c.relname = '{}' AND n.nspname = ANY(current_schemas(false))",
+            table_reg.table_name.replace('\'', "''")
+        );
+
+        let relid: i32 = match Spi::get_one::<i32>(&oid_sql) {
+            Ok(Some(id)) => id,
+            _ => continue,
+        };
+
+        let col_sql = format!(
+            "SELECT a.attname::text AS name \
+             FROM pg_catalog.pg_attribute a \
+             WHERE a.attrelid = {} AND a.attnum > 0 AND NOT a.attisdropped \
+             ORDER BY a.attnum",
+            relid
+        );
+
+        let mut columns = Vec::new();
+        if let Ok(tup) = Spi::connect(|client| client.select(&col_sql, None, &[])) {
+            for row in tup {
+                let name: String = row
+                    .get_by_name::<String, &str>("name")
+                    .unwrap_or(None)
+                    .unwrap_or_default();
+                if !name.is_empty() {
+                    columns.push(ColumnInfo { name });
+                }
+            }
+        }
+
+        if !columns.is_empty() {
+            relations.push((relid as u32, table_reg.table_name.clone(), columns));
+        }
+    }
+
+    relations
+}
+
 /// Create the replication slot if it does not already exist.
 fn ensure_replication_slot() -> Result<(), String> {
     let slot = replication_slot();
     let pub_name = publication_name();
 
-    log!("synchro WAL worker: checking replication slot '{}'", slot);
-
-    let check_sql = format!(
-        "SELECT EXISTS (SELECT 1 FROM pg_replication_slots WHERE slot_name = '{}')::bool",
-        slot.replace('\'', "''")
-    );
-    let slot_exists: bool = Spi::get_one::<bool>(&check_sql)
-        .unwrap_or(Some(false))
-        .unwrap_or(false);
+    let slot_exists: bool = Spi::get_one_with_args(
+        "SELECT EXISTS (SELECT 1 FROM pg_replication_slots WHERE slot_name = $1)",
+        &[slot.as_str().into()],
+    )
+    .unwrap_or(Some(false))
+    .unwrap_or(false);
 
     if !slot_exists {
-        log!("synchro WAL worker: creating replication slot");
-        let create_sql = format!(
-            "SELECT pg_create_logical_replication_slot('{}', 'pgoutput')",
-            slot.replace('\'', "''")
-        );
-        Spi::run(&create_sql).map_err(|e| format!("creating replication slot: {e}"))?;
+        Spi::run_with_args(
+            "SELECT pg_create_logical_replication_slot($1, 'pgoutput')",
+            &[slot.as_str().into()],
+        )
+        .map_err(|e| format!("creating replication slot: {e}"))?;
         log!("synchro WAL worker: created replication slot '{}'", slot);
     }
 
-    log!("synchro WAL worker: checking publication");
-    let pub_check_sql = format!(
-        "SELECT EXISTS (SELECT 1 FROM pg_publication WHERE pubname = '{}')::bool",
-        pub_name.replace('\'', "''")
-    );
-    let pub_exists: bool = Spi::get_one::<bool>(&pub_check_sql)
-        .unwrap_or(Some(false))
-        .unwrap_or(false);
+    // Ensure publication exists (may not yet if no tables registered).
+    let pub_exists: bool = Spi::get_one_with_args(
+        "SELECT EXISTS (SELECT 1 FROM pg_publication WHERE pubname = $1)",
+        &[pub_name.as_str().into()],
+    )
+    .unwrap_or(Some(false))
+    .unwrap_or(false);
 
     if !pub_exists {
-        let pub_create_sql = format!(
+        let create_sql = format!(
             "CREATE PUBLICATION {} FOR ALL TABLES",
             crate::pull::pg_quote_ident(&pub_name)
         );
-        Spi::run(&pub_create_sql).ok();
+        Spi::run(&create_sql).ok();
         // Publication may not exist yet; that is fine. The first
         // synchro_register_table call creates it. We just avoid
         // a hard error on the peek call below.
@@ -311,6 +253,7 @@ fn ensure_replication_slot() -> Result<(), String> {
 /// 1. Peek changes without advancing the slot.
 /// 2. Decode and apply all events in a single SPI transaction.
 /// 3. On commit, advance the slot to the last processed LSN.
+///
 /// If any step fails, the slot stays put and changes are re-peeked on retry.
 fn poll_and_process(
     decoder: &mut WalDecoder,
@@ -416,19 +359,12 @@ fn apply_event(
     // 2. Resolve desired buckets.
     // For deletes: the record no longer exists in the table, so bucket_sql
     // would return nothing. Use existing buckets instead.
-    let desired = if event.operation == Operation::Delete {
+    let desired = if event.operation == ChangeOperation::Delete {
         vec![]
     } else {
         resolve_buckets(client, &table_reg.bucket_sql, &event.record_id)
             .map_err(|e| format!("resolving buckets: {e}"))?
     };
-
-    if desired.is_empty() && event.operation != Operation::Delete {
-        log!(
-            "synchro WAL worker: empty buckets for {}.{} (op={:?}, sql={})",
-            event.table_name, event.record_id, event.operation, table_reg.bucket_sql
-        );
-    }
 
     // 3. Build changelog entries from edge diff.
     let entries = build_edge_diff_entries(
@@ -446,15 +382,6 @@ fn apply_event(
     apply_edge_diff(client, event, &existing, &desired)?;
 
     Ok(())
-}
-
-/// Public wrapper that opens its own SPI transaction.
-/// Used by tests and any non-bgworker callers.
-pub fn apply_wal_event(
-    event: &WalEvent,
-    registry: &[TableRegistration],
-) -> Result<(), String> {
-    Spi::connect_mut(|client| apply_event(client, event, registry))
 }
 
 fn load_existing_buckets(
@@ -508,7 +435,7 @@ fn apply_edge_diff(
     existing: &[String],
     desired: &[String],
 ) -> Result<(), String> {
-    if event.operation == Operation::Delete {
+    if event.operation == ChangeOperation::Delete {
         client
             .update(
                 "DELETE FROM sync_bucket_edges \

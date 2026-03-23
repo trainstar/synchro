@@ -1,5 +1,6 @@
 use pgrx::prelude::*;
 use pgrx::spi::SpiClient;
+use synchro_core::contract::{ColumnSchema, IndexSchema, SchemaManifest, TableSchema};
 
 /// Return the full schema contract for all registered tables.
 ///
@@ -7,18 +8,35 @@ use pgrx::spi::SpiClient;
 /// Used by client SDKs to build local database schemas.
 #[pg_extern]
 fn synchro_schema() -> pgrx::JsonB {
-    Spi::connect_mut(|client| {
-        // Ensure timestamps serialize as ISO 8601 UTC via to_json().
-        let _ = client.update("SET LOCAL timezone = 'UTC'", None, &[]);
-
-        let (schema_version, schema_hash) = crate::pull::get_latest_schema(&client);
-        let tables = build_table_schemas(&client);
+    Spi::connect(|client| {
+        let (schema_version, schema_hash) = crate::pull::get_latest_schema(client);
+        let tables = build_table_schemas(client);
 
         pgrx::JsonB(serde_json::json!({
             "schema_version": schema_version,
             "schema_hash": schema_hash,
-            "server_time": server_time_str(&client),
+            "server_time": server_time_str(client),
             "tables": tables,
+        }))
+    })
+}
+
+/// Return the canonical portable schema manifest for registered synced tables.
+///
+/// This is the vNext-oriented schema surface intended for adapter and client
+/// contract work. The older `synchro_schema()` JSON remains for legacy
+/// compatibility during the audit sequence.
+#[pg_extern]
+fn synchro_schema_manifest() -> pgrx::JsonB {
+    Spi::connect(|client| {
+        let (schema_version, schema_hash) = crate::pull::get_latest_schema(client);
+        let manifest = build_schema_manifest(client);
+
+        pgrx::JsonB(serde_json::json!({
+            "schema_version": schema_version,
+            "schema_hash": schema_hash,
+            "server_time": server_time_str(client),
+            "manifest": manifest,
         }))
     })
 }
@@ -26,15 +44,12 @@ fn synchro_schema() -> pgrx::JsonB {
 /// Return a simplified list of registered tables with sync metadata.
 #[pg_extern]
 fn synchro_tables() -> pgrx::JsonB {
-    Spi::connect_mut(|client| {
-        // Ensure timestamps serialize as ISO 8601 UTC via to_json().
-        let _ = client.update("SET LOCAL timezone = 'UTC'", None, &[]);
-
-        let (schema_version, schema_hash) = crate::pull::get_latest_schema(&client);
+    Spi::connect(|client| {
+        let (schema_version, schema_hash) = crate::pull::get_latest_schema(client);
 
         let tup_table = match client.select(
             "SELECT table_name, push_policy, pk_column, updated_at_col, \
-             deleted_at_col, exclude_columns, has_updated_at, has_deleted_at \
+             deleted_at_col, exclude_columns \
              FROM sync_registry ORDER BY table_name",
             None,
             &[],
@@ -45,35 +60,45 @@ fn synchro_tables() -> pgrx::JsonB {
 
         let mut tables: Vec<serde_json::Value> = Vec::new();
         for row in tup_table {
-            let table_name: String = row.get_by_name("table_name").unwrap_or(None).unwrap_or_default();
-            let push_policy: String = row.get_by_name("push_policy").unwrap_or(None).unwrap_or_default();
-            let pk_column: String = row.get_by_name("pk_column").unwrap_or(None).unwrap_or_default();
-            let updated_at_col: String = row.get_by_name("updated_at_col").unwrap_or(None).unwrap_or_default();
-            let deleted_at_col: String = row.get_by_name("deleted_at_col").unwrap_or(None).unwrap_or_default();
-            let exclude_columns: Vec<String> = row.get_by_name("exclude_columns").unwrap_or(None).unwrap_or_default();
-            let has_updated_at: bool = row.get_by_name("has_updated_at").unwrap_or(None).unwrap_or(false);
-            let has_deleted_at: bool = row.get_by_name("has_deleted_at").unwrap_or(None).unwrap_or(false);
+            let table_name: String = row
+                .get_by_name::<String, &str>("table_name")
+                .unwrap_or(None)
+                .unwrap_or_default();
+            let push_policy: String = row
+                .get_by_name::<String, &str>("push_policy")
+                .unwrap_or(None)
+                .unwrap_or_default();
+            let pk_column: String = row
+                .get_by_name::<String, &str>("pk_column")
+                .unwrap_or(None)
+                .unwrap_or_default();
+            let updated_at_col: String = row
+                .get_by_name::<String, &str>("updated_at_col")
+                .unwrap_or(None)
+                .unwrap_or_default();
+            let deleted_at_col: String = row
+                .get_by_name::<String, &str>("deleted_at_col")
+                .unwrap_or(None)
+                .unwrap_or_default();
+            let exclude_columns: Vec<String> = row
+                .get_by_name::<Vec<String>, &str>("exclude_columns")
+                .unwrap_or(None)
+                .unwrap_or_default();
 
-            let mut table = serde_json::json!({
+            tables.push(serde_json::json!({
                 "table_name": table_name,
                 "push_policy": push_policy,
-                "primary_key": [pk_column],
+                "dependencies": [],
+                "pk_column": pk_column,
+                "updated_at_column": updated_at_col,
+                "deleted_at_column": deleted_at_col,
                 "exclude_columns": exclude_columns,
-            });
-
-            if has_updated_at {
-                table["updated_at_column"] = serde_json::json!(updated_at_col);
-            }
-            if has_deleted_at {
-                table["deleted_at_column"] = serde_json::json!(deleted_at_col);
-            }
-
-            tables.push(table);
+            }));
         }
 
         pgrx::JsonB(serde_json::json!({
             "tables": tables,
-            "server_time": server_time_str(&client),
+            "server_time": server_time_str(client),
             "schema_version": schema_version,
             "schema_hash": schema_hash,
         }))
@@ -86,12 +111,11 @@ fn synchro_tables() -> pgrx::JsonB {
 /// and changelog statistics.
 #[pg_extern]
 fn synchro_debug(p_user_id: &str, p_client_id: &str) -> pgrx::JsonB {
-    Spi::connect_mut(|client| {
-        // Ensure timestamps serialize as ISO 8601 UTC via to_json().
-        let _ = client.update("SET LOCAL timezone = 'UTC'", None, &[]);
+    Spi::connect(|client| {
+        // Load client info.
+        let client_info = load_client_debug(client, p_user_id, p_client_id);
 
-        let client_info = load_client_debug(&client, p_user_id, p_client_id);
-
+        // Load bucket details.
         let bucket_subs: Vec<String> = client_info
             .get("bucket_subs")
             .and_then(|v| v.as_array())
@@ -102,14 +126,16 @@ fn synchro_debug(p_user_id: &str, p_client_id: &str) -> pgrx::JsonB {
             })
             .unwrap_or_default();
 
-        let buckets = load_bucket_details(&client, p_user_id, p_client_id, &bucket_subs);
-        let changelog_stats = load_changelog_stats(&client);
+        let buckets = load_bucket_details(client, p_user_id, p_client_id, &bucket_subs);
+
+        // Changelog stats.
+        let changelog_stats = load_changelog_stats(client);
 
         pgrx::JsonB(serde_json::json!({
             "client": client_info,
             "buckets": buckets,
             "changelog_stats": changelog_stats,
-            "server_time": server_time_str(&client),
+            "server_time": server_time_str(client),
         }))
     })
 }
@@ -119,22 +145,14 @@ fn synchro_debug(p_user_id: &str, p_client_id: &str) -> pgrx::JsonB {
 // ---------------------------------------------------------------------------
 
 fn server_time_str(client: &SpiClient<'_>) -> String {
-    let sql = format!("SELECT {} AS t", crate::push::ts_to_iso("now()"));
-    let tup = match client.select(&sql, None, &[]) {
-        Ok(t) => t,
-        Err(_) => return String::new(),
-    };
-    tup.first()
-        .get_one::<String>()
-        .ok()
-        .flatten()
-        .unwrap_or_default()
+    let _ = client;
+    chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
 }
 
 fn build_table_schemas(client: &SpiClient<'_>) -> Vec<serde_json::Value> {
     let reg_tup = match client.select(
         "SELECT table_name, push_policy, pk_column, updated_at_col, \
-         deleted_at_col, exclude_columns, has_updated_at, has_deleted_at \
+         deleted_at_col, exclude_columns \
          FROM sync_registry ORDER BY table_name",
         None,
         &[],
@@ -143,105 +161,95 @@ fn build_table_schemas(client: &SpiClient<'_>) -> Vec<serde_json::Value> {
         Err(_) => return vec![],
     };
 
-    let mut reg_entries: Vec<(String, String, String, String, String, Vec<String>, bool, bool)> = Vec::new();
+    let mut table_names: Vec<(String, String, String, String, String, Vec<String>)> = Vec::new();
     for row in reg_tup {
-        let tn: String = row.get_by_name("table_name").unwrap_or(None).unwrap_or_default();
-        let pp: String = row.get_by_name("push_policy").unwrap_or(None).unwrap_or_default();
-        let pk: String = row.get_by_name("pk_column").unwrap_or(None).unwrap_or_default();
-        let ua: String = row.get_by_name("updated_at_col").unwrap_or(None).unwrap_or_default();
-        let da: String = row.get_by_name("deleted_at_col").unwrap_or(None).unwrap_or_default();
-        let ec: Vec<String> = row.get_by_name("exclude_columns").unwrap_or(None).unwrap_or_default();
-        let has_ua: bool = row.get_by_name("has_updated_at").unwrap_or(None).unwrap_or(false);
-        let has_da: bool = row.get_by_name("has_deleted_at").unwrap_or(None).unwrap_or(false);
-        reg_entries.push((tn, pp, pk, ua, da, ec, has_ua, has_da));
+        let tn: String = row
+            .get_by_name("table_name")
+            .unwrap_or(None)
+            .unwrap_or_default();
+        let pp: String = row
+            .get_by_name("push_policy")
+            .unwrap_or(None)
+            .unwrap_or_default();
+        let pk: String = row
+            .get_by_name("pk_column")
+            .unwrap_or(None)
+            .unwrap_or_default();
+        let ua: String = row
+            .get_by_name("updated_at_col")
+            .unwrap_or(None)
+            .unwrap_or_default();
+        let da: String = row
+            .get_by_name("deleted_at_col")
+            .unwrap_or(None)
+            .unwrap_or_default();
+        let ec: Vec<String> = row
+            .get_by_name("exclude_columns")
+            .unwrap_or(None)
+            .unwrap_or_default();
+        table_names.push((tn, pp, pk, ua, da, ec));
     }
 
     let mut tables: Vec<serde_json::Value> = Vec::new();
-    for (table_name, push_policy, pk_col, ua_col, da_col, _ec, has_ua, has_da) in &reg_entries {
+    for (table_name, push_policy, pk_col, ua, da, _ec) in &table_names {
         let columns = introspect_columns(client, table_name, pk_col);
 
-        let mut table = serde_json::json!({
+        tables.push(serde_json::json!({
             "table_name": table_name,
             "push_policy": push_policy,
+            "dependencies": [],
+            "updated_at_column": ua,
+            "deleted_at_column": da,
             "primary_key": [pk_col],
             "columns": columns,
-        });
-
-        if *has_ua {
-            table["updated_at_column"] = serde_json::json!(ua_col);
-        }
-        if *has_da {
-            table["deleted_at_column"] = serde_json::json!(da_col);
-        }
-
-        tables.push(table);
+        }));
     }
     tables
 }
 
-/// Map a PG type name to a platform-agnostic logical type.
-///
-/// Logical types tell client SDKs what SQLite/CoreData/Room type to use
-/// without parsing PG-specific type names.
-fn logical_type(db_type: &str) -> &'static str {
-    let lower = db_type.to_lowercase();
-    let base = lower.split('(').next().unwrap_or(&lower).trim();
+pub(crate) fn build_schema_manifest(client: &SpiClient<'_>) -> SchemaManifest {
+    let reg_tup = match client.select(
+        "SELECT table_name, push_policy, pk_column, updated_at_col, \
+         deleted_at_col, exclude_columns \
+         FROM sync_registry ORDER BY table_name",
+        None,
+        &[],
+    ) {
+        Ok(t) => t,
+        Err(_) => return SchemaManifest { tables: vec![] },
+    };
 
-    match base {
-        "uuid" => "text",
-        "text" | "varchar" | "character varying" | "char" | "character" | "name" => "text",
-        "boolean" | "bool" => "integer",
-        "smallint" | "int2" => "integer",
-        "integer" | "int" | "int4" => "integer",
-        "bigint" | "int8" => "integer",
-        "real" | "float4" => "real",
-        "double precision" | "float8" => "real",
-        "numeric" | "decimal" => "real",
-        "date" => "text",
-        "timestamp without time zone" | "timestamp" => "text",
-        "timestamp with time zone" | "timestamptz" => "text",
-        "interval" => "text",
-        "jsonb" | "json" => "text",
-        "bytea" => "blob",
-        "text[]" | "character varying[]" => "text",
-        "integer[]" | "int[]" | "smallint[]" | "bigint[]" => "text",
-        "inet" | "cidr" | "macaddr" | "macaddr8" => "text",
-        "point" | "line" | "lseg" | "box" | "path" | "polygon" | "circle" => "text",
-        "xml" => "text",
-        "int4range" | "int8range" | "numrange" | "tsrange" | "tstzrange" | "daterange" => "text",
-        _ => "text",
-    }
-}
+    let mut tables = Vec::new();
+    for row in reg_tup {
+        let table_name: String = row
+            .get_by_name("table_name")
+            .unwrap_or(None)
+            .unwrap_or_default();
+        let pk_column: String = row
+            .get_by_name("pk_column")
+            .unwrap_or(None)
+            .unwrap_or_default();
 
-/// Classify a column default as portable, server-only, or none.
-///
-/// Portable defaults can be replicated on the client (literal values, simple
-/// expressions). Server-only defaults depend on server state (sequences,
-/// gen_random_uuid, now()).
-fn default_kind(default_sql: &str) -> &'static str {
-    if default_sql.is_empty() {
-        return "none";
+        tables.push(TableSchema {
+            name: table_name.clone(),
+            primary_key: Some(vec![pk_column.clone()]),
+            updated_at_column: Some(
+                row.get_by_name::<String, &str>("updated_at_col")
+                    .unwrap_or(None)
+                    .unwrap_or_default(),
+            ),
+            deleted_at_column: Some(
+                row.get_by_name::<String, &str>("deleted_at_col")
+                    .unwrap_or(None)
+                    .unwrap_or_default(),
+            ),
+            composition: None,
+            columns: Some(introspect_manifest_columns(client, &table_name, &pk_column)),
+            indexes: Some(introspect_manifest_indexes(client, &table_name)),
+        });
     }
 
-    let lower = default_sql.to_lowercase();
-
-    // Server-only: anything that depends on server state.
-    if lower.contains("nextval(")
-        || lower.contains("gen_random_uuid()")
-        || lower.contains("uuid_generate_")
-        || lower.contains("now()")
-        || lower.contains("current_timestamp")
-        || lower.contains("current_date")
-        || lower.contains("current_time")
-        || lower.contains("clock_timestamp()")
-        || lower.contains("statement_timestamp()")
-        || lower.contains("transaction_timestamp()")
-    {
-        return "server_only";
-    }
-
-    // Portable: literal values and simple expressions.
-    "portable"
+    SchemaManifest { tables }
 }
 
 fn introspect_columns(
@@ -249,186 +257,222 @@ fn introspect_columns(
     table_name: &str,
     pk_column: &str,
 ) -> Vec<serde_json::Value> {
-    // Open the relation via the relcache. This works reliably in pgrx test
-    // contexts where pg_catalog.pg_attribute rows may not yet be visible for
-    // tables created in the same transaction. The relcache is populated by
-    // DDL itself and does not depend on catalog snapshot visibility.
-    let rel = match pgrx::PgRelation::open_with_name_and_share_lock(table_name) {
-        Ok(r) => r,
-        Err(e) => {
-            log!("synchro_schema: cannot open relation {}: {}", table_name, e);
-            return vec![];
-        }
+    let tup = match client.select(
+        "SELECT jsonb_build_object(
+             'name', a.attname,
+             'db_type', pg_catalog.format_type(a.atttypid, a.atttypmod),
+             'nullable', NOT a.attnotnull,
+             'default_sql', COALESCE(pg_catalog.pg_get_expr(ad.adbin, ad.adrelid), ''),
+             'default_kind', CASE
+                 WHEN ad.adbin IS NULL THEN 'none'
+                 ELSE 'server_expression'
+             END,
+             'is_primary_key', a.attname = $2
+         ) AS column_json \
+         FROM pg_catalog.pg_attribute a \
+         JOIN pg_catalog.pg_class c ON c.oid = a.attrelid \
+         JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
+         LEFT JOIN pg_catalog.pg_attrdef ad ON ad.adrelid = a.attrelid AND ad.adnum = a.attnum \
+         WHERE c.relname = $1 AND n.nspname = ANY(current_schemas(false)) \
+         AND a.attnum > 0 AND NOT a.attisdropped \
+         ORDER BY a.attnum",
+        None,
+        &[table_name.into(), pk_column.into()],
+    ) {
+        Ok(t) => t,
+        Err(_) => return vec![],
     };
-    let tupdesc = pgrx::PgTupleDesc::from_relation(&rel);
 
-    // Collect column metadata from the TupleDesc (name, type oid, type mod,
-    // nullable, has_default). Skip dropped columns.
-    struct ColMeta {
-        name: String,
-        attnum: i16,
-        type_oid: u32,
-        type_mod: i32,
-        nullable: bool,
-    }
-    let mut col_metas: Vec<ColMeta> = Vec::with_capacity(tupdesc.len());
-    for att in tupdesc.iter() {
-        if att.is_dropped() {
-            continue;
-        }
-        col_metas.push(ColMeta {
-            name: att.name().to_string(),
-            attnum: att.num(),
-            type_oid: u32::from(att.type_oid().value()),
-            type_mod: att.type_mod(),
-            nullable: !att.attnotnull,
-        });
-    }
-
-    if col_metas.is_empty() {
-        return vec![];
-    }
-
-    // Resolve type OIDs + typmod to type names via format_type() in one query.
-    let pairs: Vec<String> = col_metas
-        .iter()
-        .map(|c| format!("({},{})", c.type_oid, c.type_mod))
-        .collect();
-    let type_sql = format!(
-        "SELECT format_type(v.oid::oid, v.tmod) AS type_name \
-         FROM (VALUES {}) AS v(oid, tmod)",
-        pairs.join(","),
-    );
-    let mut type_names: Vec<String> = Vec::with_capacity(col_metas.len());
-    match client.select(&type_sql, None, &[]) {
-        Ok(tup) => {
-            for row in tup {
-                let tn: String = row
-                    .get_by_name::<String, &str>("type_name")
-                    .unwrap_or(None)
+    let mut columns: Vec<serde_json::Value> = Vec::new();
+    for row in tup {
+        if let Some(json) = row.get::<pgrx::JsonB>(1).unwrap_or(None) {
+            let mut column = json.0;
+            if let Some(obj) = column.as_object_mut() {
+                let db_type = obj
+                    .get("db_type")
+                    .and_then(|value| value.as_str())
                     .unwrap_or_default();
-                type_names.push(tn);
-            }
-        }
-        Err(_) => {
-            type_names.resize(col_metas.len(), String::new());
-        }
-    }
-
-    // Extract default expressions from the TupleDesc's constraint data.
-    // The relcache stores defaults in TupleConstr.defval[], which contains
-    // the serialized node tree (adbin). We deparse each via the C-level
-    // deparse_expression() function. This avoids querying pg_attrdef,
-    // which may not be visible in pgrx test contexts for tables created
-    // in the same transaction.
-    let mut default_map: std::collections::HashMap<i16, String> =
-        std::collections::HashMap::new();
-
-    unsafe {
-        let tupdesc_ptr = tupdesc.as_ptr();
-        let constr = (*tupdesc_ptr).constr;
-        if !constr.is_null() {
-            let num_defval = (*constr).num_defval as usize;
-            let defval_ptr = (*constr).defval;
-            if !defval_ptr.is_null() && num_defval > 0 {
-                let defvals = std::slice::from_raw_parts(defval_ptr, num_defval);
-
-                // Build a deparse context for this relation.
-                let relname_cstr = std::ffi::CString::new(table_name)
-                    .unwrap_or_else(|_| std::ffi::CString::new("").unwrap());
-                let dpcontext = pgrx::pg_sys::deparse_context_for(
-                    relname_cstr.as_ptr(),
-                    rel.oid(),
+                obj.insert(
+                    "logical_type".into(),
+                    serde_json::json!(legacy_logical_type(db_type)),
                 );
-
-                for dv in defvals {
-                    if dv.adbin.is_null() {
-                        continue;
-                    }
-                    // Parse the node tree text back to a Node.
-                    let node = pgrx::pg_sys::stringToNode(dv.adbin);
-                    if node.is_null() {
-                        continue;
-                    }
-                    // Deparse to readable SQL.
-                    let expr_ptr = pgrx::pg_sys::deparse_expression(
-                        node as *mut pgrx::pg_sys::Node,
-                        dpcontext,
-                        false,
-                        false,
-                    );
-                    if !expr_ptr.is_null() {
-                        let expr_cstr = std::ffi::CStr::from_ptr(expr_ptr);
-                        if let Ok(expr_str) = expr_cstr.to_str() {
-                            if !expr_str.is_empty() {
-                                default_map.insert(dv.adnum, expr_str.to_string());
-                            }
-                        }
-                    }
-                }
             }
+            columns.push(column);
         }
-    }
-
-    // Assemble the column JSON objects.
-    let mut columns: Vec<serde_json::Value> = Vec::with_capacity(col_metas.len());
-    for (idx, cm) in col_metas.iter().enumerate() {
-        let db_type_str = type_names.get(idx).cloned().unwrap_or_default();
-        let default_sql_str = default_map.get(&cm.attnum).cloned().unwrap_or_default();
-
-        let is_pk = cm.name == pk_column;
-        let ltype = logical_type(&db_type_str);
-        let dkind = default_kind(&default_sql_str);
-
-        let mut col = serde_json::json!({
-            "name": cm.name,
-            "db_type": db_type_str,
-            "logical_type": ltype,
-            "nullable": cm.nullable,
-            "is_primary_key": is_pk,
-            "default_kind": dkind,
-        });
-
-        if !default_sql_str.is_empty() {
-            col["default_sql"] = serde_json::json!(default_sql_str);
-        }
-
-        columns.push(col);
     }
     columns
 }
 
-fn load_client_debug(
+fn introspect_manifest_columns(
     client: &SpiClient<'_>,
-    user_id: &str,
-    client_id: &str,
-) -> serde_json::Value {
-    let sql = format!(
+    table_name: &str,
+    pk_column: &str,
+) -> Vec<ColumnSchema> {
+    introspect_columns(client, table_name, pk_column)
+        .into_iter()
+        .filter_map(|column| {
+            let name = column.get("name").and_then(|value| value.as_str())?;
+            let db_type = column.get("db_type").and_then(|value| value.as_str())?;
+            let nullable = column.get("nullable").and_then(|value| value.as_bool())?;
+
+            Some(ColumnSchema {
+                name: name.to_string(),
+                type_name: portable_type_name(db_type),
+                nullable,
+            })
+        })
+        .collect()
+}
+
+fn introspect_manifest_indexes(client: &SpiClient<'_>, table_name: &str) -> Vec<IndexSchema> {
+    let tup = match client.select(
+        "SELECT idx.indexname AS name, \
+         array_agg(att.attname ORDER BY key_pos.ordinality) AS columns \
+         FROM pg_indexes idx \
+         JOIN pg_class c ON c.relname = idx.tablename \
+         JOIN pg_namespace n ON n.oid = c.relnamespace \
+         JOIN pg_index pi ON pi.indexrelid = to_regclass(idx.indexname) \
+         JOIN unnest(pi.indkey) WITH ORDINALITY AS key_pos(attnum, ordinality) ON true \
+         JOIN pg_attribute att ON att.attrelid = c.oid AND att.attnum = key_pos.attnum \
+         WHERE idx.tablename = $1 \
+           AND n.nspname = ANY(current_schemas(false)) \
+           AND NOT pi.indisprimary \
+           AND att.attnum > 0 \
+         GROUP BY idx.indexname \
+         ORDER BY idx.indexname",
+        None,
+        &[table_name.into()],
+    ) {
+        Ok(t) => t,
+        Err(_) => return vec![],
+    };
+
+    let mut indexes = Vec::new();
+    for row in tup {
+        let name: String = row
+            .get_by_name::<String, &str>("name")
+            .unwrap_or(None)
+            .unwrap_or_default();
+        let columns: Vec<String> = row
+            .get_by_name::<Vec<String>, &str>("columns")
+            .unwrap_or(None)
+            .unwrap_or_default();
+        if !name.is_empty() && !columns.is_empty() {
+            indexes.push(IndexSchema { name, columns });
+        }
+    }
+
+    indexes
+}
+
+fn portable_type_name(db_type: &str) -> String {
+    match db_type {
+        "uuid" => "uuid".into(),
+        "text" | "character varying" | "character" => "text".into(),
+        "boolean" => "boolean".into(),
+        "integer" => "integer".into(),
+        "bigint" => "bigint".into(),
+        "numeric" => "numeric".into(),
+        "json" | "jsonb" => "json".into(),
+        "bytea" => "bytes".into(),
+        "real" | "double precision" => "float".into(),
+        "timestamp with time zone" | "timestamp without time zone" => "timestamp".into(),
+        _ => db_type.to_string(),
+    }
+}
+
+fn legacy_logical_type(db_type: &str) -> &'static str {
+    let normalized = db_type.to_ascii_lowercase();
+    if normalized.contains("timestamp") {
+        return "datetime";
+    }
+    if normalized == "date" {
+        return "date";
+    }
+    if normalized == "boolean" {
+        return "boolean";
+    }
+    if normalized == "uuid"
+        || normalized == "text"
+        || normalized.starts_with("character varying")
+        || normalized.starts_with("character(")
+        || normalized.starts_with("character ")
+        || normalized == "character"
+        || normalized == "inet"
+        || normalized == "cidr"
+        || normalized == "macaddr"
+        || normalized == "xml"
+    {
+        return "string";
+    }
+    if normalized == "smallint" || normalized == "integer" {
+        return "int";
+    }
+    if normalized == "bigint" {
+        return "int64";
+    }
+    if normalized.starts_with("numeric") || normalized == "real" || normalized == "double precision"
+    {
+        return "float";
+    }
+    if normalized == "json" || normalized == "jsonb" || normalized.ends_with("[]") {
+        return "json";
+    }
+    if normalized == "bytea" {
+        return "bytes";
+    }
+    "string"
+}
+
+fn load_client_debug(client: &SpiClient<'_>, user_id: &str, client_id: &str) -> serde_json::Value {
+    let tup = match client.select(
         "SELECT id::text, client_id, user_id, platform, app_version, is_active, \
-         {} AS last_sync_at, \
-         {} AS last_pull_at, \
-         last_pull_seq, bucket_subs \
+         last_sync_at::text, last_pull_at::text, last_pull_seq, bucket_subs \
          FROM sync_clients WHERE user_id = $1 AND client_id = $2",
-        crate::push::ts_to_iso("last_sync_at"),
-        crate::push::ts_to_iso("last_pull_at"),
-    );
-    let tup = match client.select(&sql, None, &[user_id.into(), client_id.into()]) {
+        None,
+        &[user_id.into(), client_id.into()],
+    ) {
         Ok(t) => t,
         Err(e) => pgrx::error!("querying client: {}", e),
     };
 
-    for row in tup {
-        let id: String = row.get_by_name::<String, &str>("id").unwrap_or(None).unwrap_or_default();
-        let cid: String = row.get_by_name::<String, &str>("client_id").unwrap_or(None).unwrap_or_default();
-        let platform: String = row.get_by_name::<String, &str>("platform").unwrap_or(None).unwrap_or_default();
-        let app_version: String = row.get_by_name::<String, &str>("app_version").unwrap_or(None).unwrap_or_default();
-        let is_active: bool = row.get_by_name::<bool, &str>("is_active").unwrap_or(None).unwrap_or(false);
-        let last_sync_at: Option<String> = row.get_by_name::<String, &str>("last_sync_at").unwrap_or(None);
-        let last_pull_at: Option<String> = row.get_by_name::<String, &str>("last_pull_at").unwrap_or(None);
-        let last_pull_seq: i64 = row.get_by_name::<i64, &str>("last_pull_seq").unwrap_or(None).unwrap_or(0);
-        let bucket_subs: Vec<String> = row.get_by_name::<Vec<String>, &str>("bucket_subs").unwrap_or(None).unwrap_or_default();
+    if let Some(row) = tup.into_iter().next() {
+        let id: String = row
+            .get_by_name::<String, &str>("id")
+            .unwrap_or(None)
+            .unwrap_or_default();
+        let cid: String = row
+            .get_by_name::<String, &str>("client_id")
+            .unwrap_or(None)
+            .unwrap_or_default();
+        let platform: String = row
+            .get_by_name::<String, &str>("platform")
+            .unwrap_or(None)
+            .unwrap_or_default();
+        let app_version: String = row
+            .get_by_name::<String, &str>("app_version")
+            .unwrap_or(None)
+            .unwrap_or_default();
+        let is_active: bool = row
+            .get_by_name::<bool, &str>("is_active")
+            .unwrap_or(None)
+            .unwrap_or(false);
+        let last_sync_at: Option<String> = row
+            .get_by_name::<String, &str>("last_sync_at")
+            .unwrap_or(None);
+        let last_pull_at: Option<String> = row
+            .get_by_name::<String, &str>("last_pull_at")
+            .unwrap_or(None);
+        let last_pull_seq: i64 = row
+            .get_by_name::<i64, &str>("last_pull_seq")
+            .unwrap_or(None)
+            .unwrap_or(0);
+        let bucket_subs: Vec<String> = row
+            .get_by_name::<Vec<String>, &str>("bucket_subs")
+            .unwrap_or(None)
+            .unwrap_or_default();
 
-        return serde_json::json!({
+        serde_json::json!({
             "id": id,
             "client_id": cid,
             "platform": platform,
@@ -438,10 +482,10 @@ fn load_client_debug(
             "last_pull_at": last_pull_at,
             "legacy_checkpoint": last_pull_seq,
             "bucket_subs": bucket_subs,
-        });
+        })
+    } else {
+        pgrx::error!("client not found: {}/{}", user_id, client_id);
     }
-
-    pgrx::error!("client not found: {}/{}", user_id, client_id);
 }
 
 fn load_bucket_details(
@@ -450,6 +494,7 @@ fn load_bucket_details(
     client_id: &str,
     bucket_subs: &[String],
 ) -> Vec<serde_json::Value> {
+    // Load checkpoints.
     let cp_tup = match client.select(
         "SELECT bucket_id, checkpoint FROM sync_client_checkpoints \
          WHERE user_id = $1 AND client_id = $2",
@@ -462,13 +507,20 @@ fn load_bucket_details(
 
     let mut checkpoints: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
     for row in cp_tup {
-        let bid: String = row.get_by_name::<String, &str>("bucket_id").unwrap_or(None).unwrap_or_default();
-        let cp: i64 = row.get_by_name::<i64, &str>("checkpoint").unwrap_or(None).unwrap_or(0);
+        let bid: String = row
+            .get_by_name::<String, &str>("bucket_id")
+            .unwrap_or(None)
+            .unwrap_or_default();
+        let cp: i64 = row
+            .get_by_name::<i64, &str>("checkpoint")
+            .unwrap_or(None)
+            .unwrap_or(0);
         checkpoints.insert(bid, cp);
     }
 
     let mut buckets: Vec<serde_json::Value> = Vec::new();
     for bid in bucket_subs {
+        // Member count.
         let member_count: i64 = match client.select(
             "SELECT COUNT(*) AS cnt FROM sync_bucket_edges WHERE bucket_id = $1",
             None,
@@ -478,6 +530,7 @@ fn load_bucket_details(
             Err(_) => 0,
         };
 
+        // Checksum.
         let checksum: Option<i32> = match client.select(
             "SELECT BIT_XOR(checksum) AS cs FROM sync_bucket_edges \
              WHERE bucket_id = $1 AND checksum IS NOT NULL",
@@ -499,6 +552,7 @@ fn load_bucket_details(
 }
 
 fn load_changelog_stats(_client: &SpiClient<'_>) -> serde_json::Value {
+    // Single query for all three stats (consistent snapshot).
     match Spi::get_three_with_args::<i64, i64, i64>(
         "SELECT COALESCE(MIN(seq), 0), COALESCE(MAX(seq), 0), COUNT(*) FROM sync_changelog",
         &[],

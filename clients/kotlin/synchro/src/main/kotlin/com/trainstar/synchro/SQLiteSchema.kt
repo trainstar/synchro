@@ -15,7 +15,7 @@ object SQLiteSchema {
         else -> "TEXT"
     }
 
-    fun generateCreateTableSQL(table: SchemaTable): String {
+    fun generateCreateTableSQL(table: LocalSchemaTable): String {
         val quotedName = SQLiteHelpers.quoteIdentifier(table.tableName)
         val colDefs = table.columns.map { col ->
             val quotedCol = SQLiteHelpers.quoteIdentifier(col.name)
@@ -30,7 +30,7 @@ object SQLiteSchema {
         return "CREATE TABLE IF NOT EXISTS $quotedName (${colDefs.joinToString(", ")})"
     }
 
-    fun generateCDCTriggers(table: SchemaTable): List<String> {
+    fun generateCDCTriggers(table: LocalSchemaTable): List<String> {
         val name = table.tableName
         val quoted = SQLiteHelpers.quoteIdentifier(name)
         val safeName = SQLiteHelpers.escapeSQLString(name)
@@ -115,6 +115,7 @@ object SQLiteSchema {
 
         return triggers
     }
+
 }
 
 object SQLiteHelpers {

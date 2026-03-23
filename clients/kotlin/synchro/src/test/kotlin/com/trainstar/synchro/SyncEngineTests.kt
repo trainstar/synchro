@@ -4,7 +4,10 @@ import android.content.Context
 import androidx.test.core.app.ApplicationProvider
 import kotlinx.coroutines.test.runTest
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.buildJsonObject
 import okhttp3.OkHttpClient
 import okhttp3.mockwebserver.Dispatcher
 import okhttp3.mockwebserver.MockResponse
@@ -23,10 +26,12 @@ import java.util.UUID
 class SyncEngineTests {
 
     private var server: MockWebServer? = null
+    private val databases = TestDatabaseTracker()
 
     @After
     fun tearDown() {
         server?.shutdown()
+        databases.closeAll()
     }
 
     // MARK: - Unit Tests
@@ -98,17 +103,17 @@ class SyncEngineTests {
         val (engine, db) = makeIntegrationEnv { request ->
             val path = request.path ?: ""
             when {
-                path.endsWith("/sync/schema") -> {
-                    callLog.add("schema")
-                    mockResponse(schemaJSON)
+                path.endsWith("/sync/connect") -> {
+                    callLog.add("connect")
+                    mockResponse(connectJSON)
                 }
-                path.endsWith("/sync/register") -> {
-                    callLog.add("register")
-                    mockResponse(registerJSON)
+                path.endsWith("/sync/rebuild") -> {
+                    callLog.add("rebuild")
+                    mockResponse(rebuildJSON(finalCursor = "scope_cursor_1"))
                 }
                 path.endsWith("/sync/pull") -> {
                     callLog.add("pull")
-                    mockResponse(pullJSON(10))
+                    mockResponse(scopePullJSON(cursor = "scope_cursor_2"))
                 }
                 else -> mockResponse("""{"error":"unexpected: $path"}""", 500)
             }
@@ -117,10 +122,16 @@ class SyncEngineTests {
         try {
             engine.start()
 
-            assertEquals(listOf("schema", "register", "pull"), callLog)
+            assertEquals(listOf("connect", "rebuild", "pull"), callLog)
 
-            val checkpoint = db.readTransaction { conn -> SynchroMeta.getInt64(conn, MetaKey.CHECKPOINT) }
-            assertEquals(10L, checkpoint)
+            val scopeSetVersion = db.readTransaction { conn -> SynchroMeta.getInt64(conn, MetaKey.SCOPE_SET_VERSION) }
+            assertEquals(1L, scopeSetVersion)
+
+            val scopes = db.readTransaction { conn -> SynchroMeta.getAllScopes(conn) }
+            assertEquals(1, scopes.size)
+            assertEquals(scopeID, scopes[0].scopeID)
+            assertEquals("scope_cursor_2", scopes[0].cursor)
+            assertEquals("sum_2", scopes[0].checksum)
 
             val tables = db.query("SELECT name FROM sqlite_master WHERE type='table' AND name='orders'")
             assertEquals(1, tables.size)
@@ -139,19 +150,28 @@ class SyncEngineTests {
         val (engine, db) = makeIntegrationEnv { request ->
             val path = request.path ?: ""
             when {
-                path.endsWith("/sync/schema") -> mockResponse(schemaJSON)
-                path.endsWith("/sync/register") -> mockResponse(registerJSON)
+                path.endsWith("/sync/connect") -> mockResponse(connectJSON)
+                path.endsWith("/sync/rebuild") -> mockResponse(rebuildJSON(finalCursor = "scope_cursor_1"))
                 path.endsWith("/sync/push") -> {
                     pushCalled = true
                     val body = Json.decodeFromString<JsonObject>(request.body.readUtf8())
-                    val changes = body["changes"] as kotlinx.serialization.json.JsonArray
-                    val accepted = changes.map { change ->
+                    val mutations = body["mutations"] as kotlinx.serialization.json.JsonArray
+                    val accepted = mutations.map { change ->
                         val c = change as JsonObject
-                        """{"id":${c["id"]},"table_name":${c["table_name"]},"operation":${c["operation"]},"status":"applied","server_updated_at":"2026-01-01T14:00:00.000Z"}"""
+                        val pk = c["pk"] as JsonObject
+                        val columns = c["columns"] as? JsonObject ?: JsonObject(emptyMap())
+                        val id = pk["id"]!!
+                        val serverRow = buildJsonObject {
+                            put("id", id)
+                            for ((key, value) in columns) put(key, value)
+                            put("updated_at", JsonPrimitive("2026-01-01T14:00:00.000Z"))
+                            put("deleted_at", JsonNull)
+                        }
+                        """{"mutation_id":${c["mutation_id"]},"table":${c["table"]},"pk":$pk,"status":"applied","server_row":$serverRow,"server_version":"2026-01-01T14:00:00.000Z"}"""
                     }
-                    mockResponse("""{"accepted":[${accepted.joinToString(",")}],"rejected":[],"checkpoint":20,"server_time":"2026-01-01T14:00:00.000Z","schema_version":1,"schema_hash":"test"}""")
+                    mockResponse("""{"server_time":"2026-01-01T14:00:00.000Z","accepted":[${accepted.joinToString(",")}],"rejected":[]}""")
                 }
-                path.endsWith("/sync/pull") -> mockResponse(pullJSON(20))
+                path.endsWith("/sync/pull") -> mockResponse(scopePullJSON(cursor = "scope_cursor_2"))
                 else -> mockResponse("""{"error":"unexpected"}""", 500)
             }
         }
@@ -183,21 +203,27 @@ class SyncEngineTests {
         val (engine, db) = makeIntegrationEnv { request ->
             val path = request.path ?: ""
             when {
-                path.endsWith("/sync/schema") -> mockResponse(schemaJSON)
-                path.endsWith("/sync/register") -> mockResponse(registerJSON)
+                path.endsWith("/sync/connect") -> mockResponse(connectJSON)
+                path.endsWith("/sync/rebuild") -> mockResponse(rebuildJSON(finalCursor = "scope_cursor_1"))
                 path.endsWith("/sync/pull") -> {
                     mockResponse("""
                         {
                             "changes": [
                                 {
-                                    "id": "w1", "table_name": "orders",
-                                    "data": {"id": "w1", "ship_address": "Server Address", "user_id": "u1", "updated_at": "2026-01-01T12:00:00.000Z"},
-                                    "updated_at": "2026-01-01T12:00:00.000Z"
+                                    "scope": "$scopeID",
+                                    "table": "orders",
+                                    "op": "upsert",
+                                    "pk": {"id": "w1"},
+                                    "row": {"id": "w1", "ship_address": "Server Address", "user_id": "u1", "updated_at": "2026-01-01T12:00:00.000Z", "deleted_at": null},
+                                    "server_version": "sv_1"
                                 }
                             ],
-                            "deletes": [],
-                            "checkpoint": 15, "has_more": false,
-                            "schema_version": 1, "schema_hash": "test"
+                            "scope_set_version": 1,
+                            "scope_cursors": {"$scopeID": "scope_cursor_2"},
+                            "scope_updates": {"add": [], "remove": []},
+                            "rebuild": [],
+                            "has_more": false,
+                            "checksums": {"$scopeID": "sum_2"}
                         }
                     """.trimIndent())
                 }
@@ -225,22 +251,31 @@ class SyncEngineTests {
         val (engine, db) = makeIntegrationEnv { request ->
             val path = request.path ?: ""
             when {
-                path.endsWith("/sync/schema") -> mockResponse(schemaJSON)
-                path.endsWith("/sync/register") -> mockResponse(registerJSON)
+                path.endsWith("/sync/connect") -> mockResponse(connectJSON)
+                path.endsWith("/sync/rebuild") -> mockResponse(rebuildJSON(finalCursor = "scope_cursor_1"))
                 path.endsWith("/sync/pull") -> {
                     pullCallCount++
                     if (pullCallCount == 1) {
                         mockResponse("""
                             {
-                                "changes": [{"id":"w1","table_name":"orders","data":{"id":"w1","ship_address":"Address 1","user_id":"u1","updated_at":"2026-01-01T12:00:00.000Z"},"updated_at":"2026-01-01T12:00:00.000Z"}],
-                                "deletes":[],"checkpoint":5,"has_more":true,"schema_version":1,"schema_hash":"test"
+                                "changes": [{"scope":"$scopeID","table":"orders","op":"upsert","pk":{"id":"w1"},"row":{"id":"w1","ship_address":"Address 1","user_id":"u1","updated_at":"2026-01-01T12:00:00.000Z","deleted_at":null},"server_version":"sv_1"}],
+                                "scope_set_version":1,
+                                "scope_cursors":{"$scopeID":"scope_cursor_mid"},
+                                "scope_updates":{"add":[],"remove":[]},
+                                "rebuild":[],
+                                "has_more":true
                             }
                         """.trimIndent())
                     } else {
                         mockResponse("""
                             {
-                                "changes": [{"id":"w2","table_name":"orders","data":{"id":"w2","ship_address":"Address 2","user_id":"u1","updated_at":"2026-01-01T13:00:00.000Z"},"updated_at":"2026-01-01T13:00:00.000Z"}],
-                                "deletes":[],"checkpoint":10,"has_more":false,"schema_version":1,"schema_hash":"test"
+                                "changes": [{"scope":"$scopeID","table":"orders","op":"upsert","pk":{"id":"w2"},"row":{"id":"w2","ship_address":"Address 2","user_id":"u1","updated_at":"2026-01-01T13:00:00.000Z","deleted_at":null},"server_version":"sv_2"}],
+                                "scope_set_version":1,
+                                "scope_cursors":{"$scopeID":"scope_cursor_2"},
+                                "scope_updates":{"add":[],"remove":[]},
+                                "rebuild":[],
+                                "has_more":false,
+                                "checksums":{"$scopeID":"sum_2"}
                             }
                         """.trimIndent())
                     }
@@ -257,8 +292,8 @@ class SyncEngineTests {
             val count = db.query("SELECT id FROM orders")
             assertEquals(2, count.size)
 
-            val checkpoint = db.readTransaction { conn -> SynchroMeta.getInt64(conn, MetaKey.CHECKPOINT) }
-            assertEquals(10L, checkpoint)
+            val scopes = db.readTransaction { conn -> SynchroMeta.getAllScopes(conn) }
+            assertEquals("scope_cursor_2", scopes.first().cursor)
         } finally {
             engine.stop()
         }
@@ -271,8 +306,8 @@ class SyncEngineTests {
         val (engine, db) = makeIntegrationEnv { request ->
             val path = request.path ?: ""
             when {
-                path.endsWith("/sync/schema") -> mockResponse(schemaJSON)
-                path.endsWith("/sync/register") -> mockResponse(registerJSON)
+                path.endsWith("/sync/connect") -> mockResponse(connectJSON)
+                path.endsWith("/sync/rebuild") -> mockResponse(rebuildJSON(finalCursor = "scope_cursor_1"))
                 path.endsWith("/sync/push") -> {
                     pushCallCount++
                     if (pushCallCount == 1) {
@@ -281,15 +316,24 @@ class SyncEngineTests {
                             .setHeader("Retry-After", "0.01")
                     } else {
                         val body = Json.decodeFromString<JsonObject>(request.body.readUtf8())
-                        val changes = body["changes"] as kotlinx.serialization.json.JsonArray
-                        val accepted = changes.map { change ->
+                        val mutations = body["mutations"] as kotlinx.serialization.json.JsonArray
+                        val accepted = mutations.map { change ->
                             val c = change as JsonObject
-                            """{"id":${c["id"]},"table_name":${c["table_name"]},"operation":${c["operation"]},"status":"applied","server_updated_at":"2026-01-01T14:00:00.000Z"}"""
+                            val pk = c["pk"] as JsonObject
+                            val columns = c["columns"] as? JsonObject ?: JsonObject(emptyMap())
+                            val id = pk["id"]!!
+                            val serverRow = buildJsonObject {
+                                put("id", id)
+                                for ((key, value) in columns) put(key, value)
+                                put("updated_at", JsonPrimitive("2026-01-01T14:00:00.000Z"))
+                                put("deleted_at", JsonNull)
+                            }
+                            """{"mutation_id":${c["mutation_id"]},"table":${c["table"]},"pk":$pk,"status":"applied","server_row":$serverRow,"server_version":"2026-01-01T14:00:00.000Z"}"""
                         }
-                        mockResponse("""{"accepted":[${accepted.joinToString(",")}],"rejected":[],"checkpoint":20,"server_time":"2026-01-01T14:00:00.000Z","schema_version":1,"schema_hash":"test"}""")
+                        mockResponse("""{"server_time":"2026-01-01T14:00:00.000Z","accepted":[${accepted.joinToString(",")}],"rejected":[]}""")
                     }
                 }
-                path.endsWith("/sync/pull") -> mockResponse(pullJSON(20))
+                path.endsWith("/sync/pull") -> mockResponse(scopePullJSON(cursor = "scope_cursor_2"))
                 else -> mockResponse("""{"error":"unexpected"}""", 500)
             }
         }
@@ -317,9 +361,9 @@ class SyncEngineTests {
         val (engine, _) = makeIntegrationEnv { request ->
             val path = request.path ?: ""
             when {
-                path.endsWith("/sync/schema") -> mockResponse(schemaJSON)
-                path.endsWith("/sync/register") -> mockResponse(registerJSON)
-                path.endsWith("/sync/pull") -> mockResponse(pullJSON(10))
+                path.endsWith("/sync/connect") -> mockResponse(connectJSON)
+                path.endsWith("/sync/rebuild") -> mockResponse(rebuildJSON(finalCursor = "scope_cursor_1"))
+                path.endsWith("/sync/pull") -> mockResponse(scopePullJSON(cursor = "scope_cursor_2"))
                 else -> mockResponse("""{"error":"unexpected"}""", 500)
             }
         }
@@ -361,18 +405,19 @@ class SyncEngineTests {
         val (engine, db) = makeIntegrationEnv { request ->
             val path = request.path ?: ""
             when {
-                path.endsWith("/sync/schema") -> mockResponse(schemaJSON)
-                path.endsWith("/sync/register") -> mockResponse(registerJSON)
+                path.endsWith("/sync/connect") -> mockResponse(connectJSON)
+                path.endsWith("/sync/rebuild") -> mockResponse(rebuildJSON(finalCursor = "scope_cursor_1"))
                 path.endsWith("/sync/push") -> {
                     val body = Json.decodeFromString<JsonObject>(request.body.readUtf8())
-                    val changes = body["changes"] as kotlinx.serialization.json.JsonArray
-                    val rejected = changes.map { change ->
+                    val mutations = body["mutations"] as kotlinx.serialization.json.JsonArray
+                    val rejected = mutations.map { change ->
                         val c = change as JsonObject
-                        """{"id":${c["id"]},"table_name":${c["table_name"]},"operation":${c["operation"]},"status":"conflict","message":"server version is newer","server_version":{"id":${c["id"]},"table_name":${c["table_name"]},"data":{"id":${c["id"]},"ship_address":"Server Wins Address","user_id":"u1","updated_at":"2026-01-01T15:00:00.000Z"},"updated_at":"2026-01-01T15:00:00.000Z"}}"""
+                        val pk = c["pk"] as JsonObject
+                        """{"mutation_id":${c["mutation_id"]},"table":${c["table"]},"pk":$pk,"status":"conflict","code":"version_conflict","message":"server version is newer","server_row":{"id":${pk["id"]},"ship_address":"Server Wins Address","user_id":"u1","updated_at":"2026-01-01T15:00:00.000Z","deleted_at":null},"server_version":"2026-01-01T15:00:00.000Z"}"""
                     }
-                    mockResponse("""{"accepted":[],"rejected":[${rejected.joinToString(",")}],"checkpoint":20,"server_time":"2026-01-01T15:00:00.000Z","schema_version":1,"schema_hash":"test"}""")
+                    mockResponse("""{"server_time":"2026-01-01T15:00:00.000Z","accepted":[],"rejected":[${rejected.joinToString(",")}]}""")
                 }
-                path.endsWith("/sync/pull") -> mockResponse(pullJSON(20))
+                path.endsWith("/sync/pull") -> mockResponse(scopePullJSON(cursor = "scope_cursor_2"))
                 else -> mockResponse("""{"error":"unexpected"}""", 500)
             }
         }
@@ -417,7 +462,7 @@ class SyncEngineTests {
             appVersion = "1.0.0",
             maxRetryAttempts = 3
         )
-        val db = SynchroDatabase(context, dbName)
+        val db = databases.open(context, dbName)
         val httpClient = HttpClient(config)
         val schemaManager = SchemaManager(db)
         val changeTracker = ChangeTracker(db)
@@ -446,7 +491,7 @@ class SyncEngineTests {
             syncInterval = 999.0,
             maxRetryAttempts = 3
         )
-        val db = SynchroDatabase(context, dbName)
+        val db = databases.open(context, dbName)
         val httpClient = HttpClient(config, OkHttpClient())
         val schemaManager = SchemaManager(db)
         val changeTracker = ChangeTracker(db)
@@ -459,45 +504,79 @@ class SyncEngineTests {
 
     // MARK: - Mock JSON Helpers
 
-    private val schemaJSON = """
+    private val scopeID = "orders_user:u1"
+
+    private val connectJSON = """
         {
-            "schema_version": 1, "schema_hash": "test",
             "server_time": "2026-01-01T12:00:00.000Z",
-            "tables": [{
-                "table_name": "orders",
-                "push_policy": "owner_only",
-                "updated_at_column": "updated_at",
-                "deleted_at_column": "deleted_at",
-                "primary_key": ["id"],
-                "columns": [
-                    {"name":"id","db_type":"uuid","logical_type":"string","nullable":false,"default_kind":"none","is_primary_key":true},
-                    {"name":"ship_address","db_type":"text","logical_type":"string","nullable":true,"default_kind":"none","is_primary_key":false},
-                    {"name":"user_id","db_type":"uuid","logical_type":"string","nullable":false,"default_kind":"none","is_primary_key":false},
-                    {"name":"updated_at","db_type":"timestamp","logical_type":"datetime","nullable":false,"default_kind":"none","is_primary_key":false},
-                    {"name":"deleted_at","db_type":"timestamp","logical_type":"datetime","nullable":true,"default_kind":"none","is_primary_key":false}
+            "protocol_version": 1,
+            "scope_set_version": 1,
+            "schema": {
+                "version": 1,
+                "hash": "test",
+                "action": "replace"
+            },
+            "scopes": {
+                "add": [
+                    {
+                        "id": "$scopeID",
+                        "cursor": null
+                    }
+                ],
+                "remove": []
+            },
+            "schema_definition": {
+                "tables": [
+                    {
+                        "name": "orders",
+                        "primary_key": ["id"],
+                        "updated_at_column": "updated_at",
+                        "deleted_at_column": "deleted_at",
+                        "composition": "single_scope",
+                        "columns": [
+                            {"name":"id","type":"string","nullable":false},
+                            {"name":"ship_address","type":"string","nullable":true},
+                            {"name":"user_id","type":"string","nullable":false},
+                            {"name":"updated_at","type":"datetime","nullable":false},
+                            {"name":"deleted_at","type":"datetime","nullable":true}
+                        ]
+                    }
                 ]
-            }]
+            }
         }
     """.trimIndent()
 
-    private val registerJSON = """
+    private fun rebuildJSON(
+        records: String = "[]",
+        cursor: String? = null,
+        hasMore: Boolean = false,
+        finalCursor: String? = null,
+        checksum: String = "sum_1"
+    ): String = """
         {
-            "id": "server-client-1",
-            "server_time": "2026-01-01T12:00:00.000Z",
-            "checkpoint": 0,
-            "schema_version": 1,
-            "schema_hash": "test"
+            "scope": "$scopeID",
+            "records": $records,
+            "cursor": ${cursor?.let { "\"$it\"" } ?: "null"},
+            "has_more": $hasMore,
+            "final_scope_cursor": ${finalCursor?.let { "\"$it\"" } ?: "null"},
+            "checksum": ${if (hasMore) "null" else "\"$checksum\""}
         }
     """.trimIndent()
 
-    private fun pullJSON(checkpoint: Int): String = """
+    private fun scopePullJSON(
+        cursor: String,
+        changes: String = "[]",
+        hasMore: Boolean = false,
+        rebuild: String = "[]"
+    ): String = """
         {
-            "changes": [],
-            "deletes": [],
-            "checkpoint": $checkpoint,
-            "has_more": false,
-            "schema_version": 1,
-            "schema_hash": "test"
+            "changes": $changes,
+            "scope_set_version": 1,
+            "scope_cursors": {"$scopeID": "$cursor"},
+            "scope_updates": {"add": [], "remove": []},
+            "rebuild": $rebuild,
+            "has_more": $hasMore,
+            "checksums": {"$scopeID": "sum_2"}
         }
     """.trimIndent()
 

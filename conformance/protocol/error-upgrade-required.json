@@ -1,0 +1,24 @@
+{
+  "fixture_version": 1,
+  "name": "error_upgrade_required",
+  "kind": "protocol.error",
+  "summary": "Canonical non-retryable upgrade-required error envelope.",
+  "spec_refs": [
+    "01-wire-protocol: Error Model",
+    "02-client-contract: Error And Status Surface"
+  ],
+  "expected": {
+    "http_status": 426,
+    "response": {
+      "error": {
+        "code": "upgrade_required",
+        "message": "client version is below the minimum supported version",
+        "retryable": false
+      }
+    },
+    "assertions": [
+      "error.code must equal upgrade_required",
+      "retryable must be false"
+    ]
+  }
+}

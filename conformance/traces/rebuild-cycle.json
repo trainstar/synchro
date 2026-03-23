@@ -1,0 +1,20 @@
+{
+  "fixture_version": 1,
+  "name": "rebuild_cycle",
+  "kind": "trace.client",
+  "summary": "Canonical ready to rebuild to ready cycle for explicit scope rebuild.",
+  "spec_refs": [
+    "03-state-machines: Rebuild Flow",
+    "04-invariants: Rebuild Finality"
+  ],
+  "expected_transitions": [
+    "ready -> rebuilding",
+    "rebuilding -> rebuilding",
+    "rebuilding -> rebuilding",
+    "rebuilding -> ready"
+  ],
+  "assertions": [
+    "rebuild may stay in rebuilding across multiple pages",
+    "client returns to ready only after final rebuild page apply"
+  ]
+}

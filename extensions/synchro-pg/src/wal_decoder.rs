@@ -1,19 +1,18 @@
 use std::collections::HashMap;
-use synchro_core::protocol::Operation;
+use synchro_core::change::ChangeOperation;
 
 /// A decoded WAL event relevant to sync.
 #[derive(Debug, Clone)]
 pub struct WalEvent {
     pub table_name: String,
     pub record_id: String,
-    pub operation: Operation,
+    pub operation: ChangeOperation,
     pub data: HashMap<String, Option<String>>,
 }
 
 /// Cached relation metadata from pgoutput RelationMessages.
 #[derive(Debug, Clone)]
 pub struct RelationInfo {
-    pub relation_id: u32,
     pub relation_name: String,
     pub columns: Vec<ColumnInfo>,
 }
@@ -21,7 +20,6 @@ pub struct RelationInfo {
 #[derive(Debug, Clone)]
 pub struct ColumnInfo {
     pub name: String,
-    pub data_type_oid: u32,
 }
 
 /// pgoutput message types (first byte).
@@ -122,11 +120,13 @@ impl WalDecoder {
     /// RelationMessages were consumed by a previous session.
     pub fn preload_relations(&mut self, relations: Vec<(u32, String, Vec<ColumnInfo>)>) {
         for (oid, name, columns) in relations {
-            self.relations.insert(oid, RelationInfo {
-                relation_id: oid,
-                relation_name: name,
-                columns,
-            });
+            self.relations.insert(
+                oid,
+                RelationInfo {
+                    relation_name: name,
+                    columns,
+                },
+            );
         }
     }
 
@@ -144,18 +144,14 @@ impl WalDecoder {
         for _ in 0..ncols {
             let _flags = cursor.read_u8()?;
             let name = cursor.read_string()?;
-            let data_type_oid = cursor.read_u32()?;
+            let _data_type_oid = cursor.read_u32()?;
             let _type_modifier = cursor.read_u32()?;
-            columns.push(ColumnInfo {
-                name,
-                data_type_oid,
-            });
+            columns.push(ColumnInfo { name });
         }
 
         self.relations.insert(
             relation_id,
             RelationInfo {
-                relation_id,
                 relation_name,
                 columns,
             },
@@ -186,7 +182,7 @@ impl WalDecoder {
         Ok(vec![WalEvent {
             table_name: rel.relation_name.clone(),
             record_id,
-            operation: Operation::Insert,
+            operation: ChangeOperation::Insert,
             data: tuple_data,
         }])
     }
@@ -222,10 +218,10 @@ impl WalDecoder {
         let record_id = extract_record_id(&tuple_data, &meta.pk_column, &rel.relation_name)?;
 
         // Detect soft deletes: if deleted_at column exists and is non-null, emit Delete.
-        let mut op = Operation::Update;
+        let mut op = ChangeOperation::Update;
         if meta.has_deleted_at {
             if let Some(Some(_)) = tuple_data.get(&meta.deleted_at_col) {
-                op = Operation::Delete;
+                op = ChangeOperation::Delete;
             }
         }
 
@@ -263,7 +259,7 @@ impl WalDecoder {
         Ok(vec![WalEvent {
             table_name: rel.relation_name.clone(),
             record_id,
-            operation: Operation::Delete,
+            operation: ChangeOperation::Delete,
             data: tuple_data,
         }])
     }
@@ -305,11 +301,7 @@ impl WalDecoder {
     }
 
     /// Skip a tuple without storing data.
-    fn skip_tuple(
-        &self,
-        cursor: &mut Cursor,
-        _columns: &[ColumnInfo],
-    ) -> Result<(), DecodeError> {
+    fn skip_tuple(&self, cursor: &mut Cursor, _columns: &[ColumnInfo]) -> Result<(), DecodeError> {
         let ncols = cursor.read_u16()? as usize;
         for _ in 0..ncols {
             let col_type = cursor.read_u8()?;
@@ -433,7 +425,12 @@ mod tests {
     // pgoutput binary message builders
     // -----------------------------------------------------------------------
 
-    fn build_relation_msg(rel_id: u32, namespace: &str, name: &str, cols: &[(&str, u32)]) -> Vec<u8> {
+    fn build_relation_msg(
+        rel_id: u32,
+        namespace: &str,
+        name: &str,
+        cols: &[(&str, u32)],
+    ) -> Vec<u8> {
         let mut buf = vec![RELATION_MSG];
         buf.extend_from_slice(&rel_id.to_be_bytes());
         buf.extend_from_slice(namespace.as_bytes());
@@ -532,8 +529,11 @@ mod tests {
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].table_name, "orders");
         assert_eq!(events[0].record_id, "abc-123");
-        assert_eq!(events[0].operation, Operation::Insert);
-        assert_eq!(events[0].data.get("title"), Some(&Some("Test Order".to_string())));
+        assert_eq!(events[0].operation, ChangeOperation::Insert);
+        assert_eq!(
+            events[0].data.get("title"),
+            Some(&Some("Test Order".to_string()))
+        );
     }
 
     #[test]
@@ -546,8 +546,11 @@ mod tests {
         let upd_msg = build_update_msg(1, &[Some("abc-123"), Some("Updated Title")]);
         let events = decoder.decode(&upd_msg).unwrap();
         assert_eq!(events.len(), 1);
-        assert_eq!(events[0].operation, Operation::Update);
-        assert_eq!(events[0].data.get("title"), Some(&Some("Updated Title".to_string())));
+        assert_eq!(events[0].operation, ChangeOperation::Update);
+        assert_eq!(
+            events[0].data.get("title"),
+            Some(&Some("Updated Title".to_string()))
+        );
     }
 
     #[test]
@@ -565,11 +568,15 @@ mod tests {
         // Update where deleted_at is non-null: should emit Delete operation.
         let upd_msg = build_update_msg(
             1,
-            &[Some("abc-123"), Some("Deleted"), Some("2025-01-01 00:00:00+00")],
+            &[
+                Some("abc-123"),
+                Some("Deleted"),
+                Some("2025-01-01 00:00:00+00"),
+            ],
         );
         let events = decoder.decode(&upd_msg).unwrap();
         assert_eq!(events.len(), 1);
-        assert_eq!(events[0].operation, Operation::Delete);
+        assert_eq!(events[0].operation, ChangeOperation::Delete);
     }
 
     #[test]
@@ -582,7 +589,7 @@ mod tests {
         let del_msg = build_delete_msg(1, &[Some("abc-123"), Some("irrelevant")]);
         let events = decoder.decode(&del_msg).unwrap();
         assert_eq!(events.len(), 1);
-        assert_eq!(events[0].operation, Operation::Delete);
+        assert_eq!(events[0].operation, ChangeOperation::Delete);
         assert_eq!(events[0].record_id, "abc-123");
     }
 
@@ -596,7 +603,10 @@ mod tests {
 
         let ins_msg = build_insert_msg(2, &[Some("prod-1"), Some("Widget")]);
         let events = decoder.decode(&ins_msg).unwrap();
-        assert!(events.is_empty(), "unregistered table events should be filtered");
+        assert!(
+            events.is_empty(),
+            "unregistered table events should be filtered"
+        );
     }
 
     #[test]
@@ -700,7 +710,7 @@ mod tests {
         buf.extend_from_slice(&1u32.to_be_bytes());
         buf.push(b'N');
         buf.extend_from_slice(&1u16.to_be_bytes()); // says 1 column
-        // But no column data follows: truncated.
+                                                    // But no column data follows: truncated.
 
         let result = decoder.decode(&buf);
         assert!(result.is_err(), "truncated data should error");

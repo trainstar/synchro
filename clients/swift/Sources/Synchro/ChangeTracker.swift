@@ -1,5 +1,5 @@
 import Foundation
-import GRDB
+@preconcurrency import GRDB
 
 struct PendingChange: Sendable {
     let recordID: String
@@ -37,9 +37,8 @@ final class ChangeTracker: @unchecked Sendable {
         }
     }
 
-    func hydratePendingForPush(pending: [PendingChange], syncedTables: [SchemaTable]) throws -> [PushRecord] {
+    func hydratePendingForPush(pending: [PendingChange], syncedTables: [LocalSchemaTable]) throws -> [PushRecord] {
         let tableMap = Dictionary(uniqueKeysWithValues: syncedTables.map { ($0.tableName, $0) })
-        let decoder = JSONDecoder.synchroDecoder()
         let dateFormatter = ISO8601DateFormatter()
         dateFormatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
 
@@ -105,6 +104,10 @@ final class ChangeTracker: @unchecked Sendable {
             }
             return records
         }
+    }
+
+    func hydratePendingForPush(pending: [PendingChange], syncedTables: [SchemaTable]) throws -> [PushRecord] {
+        try hydratePendingForPush(pending: pending, syncedTables: syncedTables.map(\.localSchema))
     }
 
     func removePending(entries: [PendingChange]) throws {
