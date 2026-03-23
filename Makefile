@@ -57,6 +57,7 @@ PGRX_PG_MAJOR := $(patsubst pg%,%,$(PGRX_PG))
 PGRX_DATA_DIR ?= $(HOME)/.pgrx/data-$(PGRX_PG_MAJOR)
 PGRX_SOCKET_DIR ?= $(HOME)/.pgrx
 PGRX_ADMIN_HOST ?= $(if $(filter Darwin,$(shell uname -s)),$(PGRX_SOCKET_DIR),localhost)
+PGRX_ADMIN_USER ?= $(shell id -un)
 PGRX_LOG_FILE ?= $(HOME)/.pgrx/$(PGRX_PG_MAJOR).log
 PGRX_PG_CONFIG ?= $(shell awk -F'"' '/^$(PGRX_PG)[[:space:]]*=/ { print $$2 }' $(HOME)/.pgrx/config.toml)
 PGRX_TARGET_DIR ?= $(CURDIR)/.pgrx-target
@@ -259,22 +260,25 @@ test-adapter-setup: ext-install
 	fi
 	@cd extensions/synchro-pg && CARGO_TARGET_DIR="$(PGRX_TARGET_DIR)" cargo pgrx start $(PGRX_PG)
 	@READY=0; \
+	LAST_ERR=""; \
 	for attempt in $$(seq 1 $(PGRX_READY_TIMEOUT)); do \
-		if pg_isready -h "$(PGRX_ADMIN_HOST)" -p $(PGRX_PORT) -U $(USER) -d postgres >/dev/null 2>&1 && \
-			psql -h "$(PGRX_ADMIN_HOST)" -p $(PGRX_PORT) -U $(USER) -d postgres -Atqc "SELECT CASE WHEN pg_is_in_recovery() THEN '0' ELSE '1' END" 2>/dev/null | grep -q '^1$$'; then \
+		PROBE_OUTPUT=$$(psql -h "$(PGRX_ADMIN_HOST)" -p $(PGRX_PORT) -U "$(PGRX_ADMIN_USER)" -d postgres -Atqc "SELECT CASE WHEN pg_is_in_recovery() THEN '0' ELSE '1' END" 2>&1 || true); \
+		if [ "$$PROBE_OUTPUT" = "1" ]; then \
 			READY=1; \
 			break; \
 		fi; \
+		LAST_ERR="$$PROBE_OUTPUT"; \
 		sleep 1; \
 	done; \
 	if [ "$$READY" -ne 1 ]; then \
 		echo "pgrx postgres did not become writable in $(PGRX_READY_TIMEOUT)s"; \
+		if [ -n "$$LAST_ERR" ]; then echo "$$LAST_ERR"; fi; \
 		if [ -f "$(PGRX_LOG_FILE)" ]; then tail -n 200 "$(PGRX_LOG_FILE)"; fi; \
 		exit 1; \
 	fi
-	@psql -h "$(PGRX_ADMIN_HOST)" -p $(PGRX_PORT) -U $(USER) -d postgres -c "DROP DATABASE IF EXISTS $(ADAPTER_TEST_DB)" 2>/dev/null || true
-	@psql -h "$(PGRX_ADMIN_HOST)" -p $(PGRX_PORT) -U $(USER) -d postgres -c "CREATE DATABASE $(ADAPTER_TEST_DB)"
-	@psql -h "$(PGRX_ADMIN_HOST)" -p $(PGRX_PORT) -U $(USER) -d $(ADAPTER_TEST_DB) -c "CREATE EXTENSION IF NOT EXISTS synchro_pg CASCADE"
+	@psql -h "$(PGRX_ADMIN_HOST)" -p $(PGRX_PORT) -U "$(PGRX_ADMIN_USER)" -d postgres -c "DROP DATABASE IF EXISTS $(ADAPTER_TEST_DB)" 2>/dev/null || true
+	@psql -h "$(PGRX_ADMIN_HOST)" -p $(PGRX_PORT) -U "$(PGRX_ADMIN_USER)" -d postgres -c "CREATE DATABASE $(ADAPTER_TEST_DB)"
+	@psql -h "$(PGRX_ADMIN_HOST)" -p $(PGRX_PORT) -U "$(PGRX_ADMIN_USER)" -d $(ADAPTER_TEST_DB) -c "CREATE EXTENSION IF NOT EXISTS synchro_pg CASCADE"
 	@if grep -q "^synchro.auto_start" "$(PGRX_DATA_DIR)/postgresql.conf"; then \
 		perl -0pi -e "s/^synchro\.auto_start\s*=.*$$/synchro.auto_start = on/m" "$(PGRX_DATA_DIR)/postgresql.conf"; \
 	else \
@@ -288,16 +292,19 @@ test-adapter-setup: ext-install
 	@cd extensions/synchro-pg && CARGO_TARGET_DIR="$(PGRX_TARGET_DIR)" cargo pgrx stop $(PGRX_PG)
 	@cd extensions/synchro-pg && CARGO_TARGET_DIR="$(PGRX_TARGET_DIR)" cargo pgrx start $(PGRX_PG)
 	@READY=0; \
+	LAST_ERR=""; \
 	for attempt in $$(seq 1 $(PGRX_READY_TIMEOUT)); do \
-		if pg_isready -h "$(PGRX_ADMIN_HOST)" -p $(PGRX_PORT) -U $(USER) -d postgres >/dev/null 2>&1 && \
-			psql -h "$(PGRX_ADMIN_HOST)" -p $(PGRX_PORT) -U $(USER) -d postgres -Atqc "SELECT CASE WHEN pg_is_in_recovery() THEN '0' ELSE '1' END" 2>/dev/null | grep -q '^1$$'; then \
+		PROBE_OUTPUT=$$(psql -h "$(PGRX_ADMIN_HOST)" -p $(PGRX_PORT) -U "$(PGRX_ADMIN_USER)" -d postgres -Atqc "SELECT CASE WHEN pg_is_in_recovery() THEN '0' ELSE '1' END" 2>&1 || true); \
+		if [ "$$PROBE_OUTPUT" = "1" ]; then \
 			READY=1; \
 			break; \
 		fi; \
+		LAST_ERR="$$PROBE_OUTPUT"; \
 		sleep 1; \
 	done; \
 	if [ "$$READY" -ne 1 ]; then \
 		echo "pgrx postgres did not become writable in $(PGRX_READY_TIMEOUT)s after enabling the worker"; \
+		if [ -n "$$LAST_ERR" ]; then echo "$$LAST_ERR"; fi; \
 		if [ -f "$(PGRX_LOG_FILE)" ]; then tail -n 200 "$(PGRX_LOG_FILE)"; fi; \
 		exit 1; \
 	fi
@@ -305,7 +312,7 @@ test-adapter-setup: ext-install
 
 test-adapter-teardown:
 	@echo "Tearing down adapter test database..."
-	@psql -h "$(PGRX_ADMIN_HOST)" -p $(PGRX_PORT) -U $(USER) -d postgres -c "DROP DATABASE IF EXISTS $(ADAPTER_TEST_DB)" 2>/dev/null || true
+	@psql -h "$(PGRX_ADMIN_HOST)" -p $(PGRX_PORT) -U "$(PGRX_ADMIN_USER)" -d postgres -c "DROP DATABASE IF EXISTS $(ADAPTER_TEST_DB)" 2>/dev/null || true
 	@cd extensions/synchro-pg && CARGO_TARGET_DIR="$(PGRX_TARGET_DIR)" cargo pgrx stop $(PGRX_PG) 2>/dev/null || true
 	@echo "Done."
 
@@ -321,14 +328,14 @@ synchrod-pg-test-start: test-adapter-setup
 		exit 0; \
 	fi; \
 	echo "Loading schema and registering tables..."; \
-	psql -h "$(PGRX_ADMIN_HOST)" -p $(PGRX_PORT) -U $(USER) -d $(ADAPTER_TEST_DB) -f extensions/testdata/schema.sql >/dev/null 2>&1; \
-	psql -h "$(PGRX_ADMIN_HOST)" -p $(PGRX_PORT) -U $(USER) -d $(ADAPTER_TEST_DB) -f extensions/testdata/register.sql >/dev/null 2>&1; \
+	psql -h "$(PGRX_ADMIN_HOST)" -p $(PGRX_PORT) -U "$(PGRX_ADMIN_USER)" -d $(ADAPTER_TEST_DB) -f extensions/testdata/schema.sql >/dev/null 2>&1; \
+	psql -h "$(PGRX_ADMIN_HOST)" -p $(PGRX_PORT) -U "$(PGRX_ADMIN_USER)" -d $(ADAPTER_TEST_DB) -f extensions/testdata/register.sql >/dev/null 2>&1; \
 	if [ -f extensions/testdata/seed.sql ]; then \
 		echo "Loading seed data (this may take a minute)..."; \
-		psql -h "$(PGRX_ADMIN_HOST)" -p $(PGRX_PORT) -U $(USER) -d $(ADAPTER_TEST_DB) -f extensions/testdata/seed.sql >/dev/null 2>&1; \
+		psql -h "$(PGRX_ADMIN_HOST)" -p $(PGRX_PORT) -U "$(PGRX_ADMIN_USER)" -d $(ADAPTER_TEST_DB) -f extensions/testdata/seed.sql >/dev/null 2>&1; \
 		echo "Waiting for bgworker to observe seeded rows..."; \
 		for attempt in $$(seq 1 60); do \
-			EDGE_COUNT=$$(psql -h "$(PGRX_ADMIN_HOST)" -p $(PGRX_PORT) -U $(USER) -d $(ADAPTER_TEST_DB) -Atqc "SELECT count(*) FROM sync_bucket_edges" 2>/dev/null || echo 0); \
+			EDGE_COUNT=$$(psql -h "$(PGRX_ADMIN_HOST)" -p $(PGRX_PORT) -U "$(PGRX_ADMIN_USER)" -d $(ADAPTER_TEST_DB) -Atqc "SELECT count(*) FROM sync_bucket_edges" 2>/dev/null || echo 0); \
 			if [ "$$EDGE_COUNT" -gt 0 ] 2>/dev/null; then \
 				break; \
 			fi; \
@@ -338,7 +345,7 @@ synchrod-pg-test-start: test-adapter-setup
 		echo "No seed.sql found. Run 'make ext-seed' to generate test data."; \
 	fi; \
 	echo "Backfilling scope edges..."; \
-	psql -h "$(PGRX_ADMIN_HOST)" -p $(PGRX_PORT) -U $(USER) -d $(ADAPTER_TEST_DB) -c "SELECT synchro_backfill_bucket_edges()" >/dev/null 2>&1; \
+	psql -h "$(PGRX_ADMIN_HOST)" -p $(PGRX_PORT) -U "$(PGRX_ADMIN_USER)" -d $(ADAPTER_TEST_DB) -c "SELECT synchro_backfill_bucket_edges()" >/dev/null 2>&1; \
 	echo "Starting synchrod-pg on :$(SYNCHROD_PG_PORT)..."; \
 	nohup env \
 		DATABASE_URL="$(ADAPTER_TEST_URL)" \
