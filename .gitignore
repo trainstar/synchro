@@ -53,5 +53,8 @@ extensions/target/
 AGENTS.md
 CLAUDE.md
 synchrod-pg
+!api/go/cmd/
+!api/go/cmd/synchrod-pg/
+!api/go/cmd/synchrod-pg/main.go
 .synchrod-pg-test.log
 .synchrod-pg-test.pid
