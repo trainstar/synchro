@@ -36,6 +36,20 @@ The validated test matrix for the current release scope is:
 - Docs source: [docs/src/content/docs/spec/00-principles.mdx](/Users/mdspinali/Documents/projects/trainstar/repos/synchro/docs/src/content/docs/spec/00-principles.mdx)
 - Shared conformance fixtures: [conformance/README.md](/Users/mdspinali/Documents/projects/trainstar/repos/synchro/conformance/README.md)
 
+## Adapter Auth Modes
+
+`api/go` supports two auth integration modes for authenticated sync routes:
+
+- trusted upstream auth via `UserIDResolver`, recommended when Synchro is mounted behind an existing API router that already validates identity and resolves the internal user UUID
+- direct JWT validation in the adapter via `JWTSecret` or `JWKSURL`
+
+For Trainstar-style integration, the best practice is trusted upstream auth:
+
+1. the main API validates the WorkOS bearer token
+2. the main API resolves the Trainstar internal user UUID
+3. Synchro receives that canonical internal user UUID through a trusted resolver
+4. the PostgreSQL extension sets `app.user_id` and runs DB-side policy and sync logic
+
 ## Quick Start
 
 ### 1. Run the Rust core tests

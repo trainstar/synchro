@@ -22,6 +22,13 @@ import (
 // Skips the test if TEST_DATABASE_URL is not set.
 func testServer(t *testing.T) *httptest.Server {
 	t.Helper()
+	return testServerWithConfig(t, func(cfg *Config) {
+		cfg.JWTSecret = []byte("test-secret-for-integration-tests")
+	})
+}
+
+func testServerWithConfig(t *testing.T, configure func(*Config)) *httptest.Server {
+	t.Helper()
 
 	dbURL := os.Getenv("TEST_DATABASE_URL")
 	if dbURL == "" {
@@ -48,11 +55,15 @@ func testServer(t *testing.T) *httptest.Server {
 	_, _ = db.ExecContext(context.Background(),
 		"DELETE FROM sync_clients WHERE client_id LIKE 'test-%' OR client_id LIKE '%-client'")
 
-	handler := Routes(Config{
+	cfg := Config{
 		DB:               db,
-		JWTSecret:        []byte("test-secret-for-integration-tests"),
 		MinClientVersion: "1.0.0",
-	})
+	}
+	if configure != nil {
+		configure(&cfg)
+	}
+
+	handler := Routes(cfg)
 
 	srv := httptest.NewServer(handler)
 	t.Cleanup(srv.Close)
@@ -142,6 +153,31 @@ func TestConnectPassthrough(t *testing.T) {
 	}
 	if body["scopes"] == nil {
 		t.Error("response missing 'scopes'")
+	}
+}
+
+func TestConnectPassthroughTrustedUpstreamAuth(t *testing.T) {
+	srv := testServerWithConfig(t, func(cfg *Config) {
+		cfg.UserIDResolver = func(r *http.Request) (string, error) {
+			return "user-1", nil
+		}
+	})
+
+	status, body := doJSON(t, "POST", srv.URL+"/sync/connect", "", map[string]any{
+		"client_id":         "test-vnext-connect-upstream-client",
+		"platform":          "ios",
+		"app_version":       "1.0.0",
+		"protocol_version":  1,
+		"schema":            map[string]any{"version": 0, "hash": ""},
+		"scope_set_version": 0,
+		"known_scopes":      map[string]any{},
+	})
+
+	if status != 200 {
+		t.Fatalf("expected 200, got %d: %v", status, body)
+	}
+	if body["protocol_version"] == nil {
+		t.Error("response missing 'protocol_version'")
 	}
 }
 
@@ -272,6 +308,62 @@ func TestDebugRequiresAuth(t *testing.T) {
 	if status != 401 {
 		t.Errorf("expected 401, got %d", status)
 	}
+}
+
+func TestTrustedUpstreamAuthRequiresUser(t *testing.T) {
+	srv := testServerWithConfig(t, func(cfg *Config) {
+		cfg.UserIDResolver = func(r *http.Request) (string, error) {
+			return "", ErrAuthRequired
+		}
+	})
+
+	status, body := doJSON(t, "POST", srv.URL+"/sync/connect", "", map[string]any{
+		"client_id":         "test-vnext-connect-missing-upstream-user",
+		"platform":          "ios",
+		"app_version":       "1.0.0",
+		"protocol_version":  1,
+		"schema":            map[string]any{"version": 0, "hash": ""},
+		"scope_set_version": 0,
+		"known_scopes":      map[string]any{},
+	})
+
+	if status != 401 {
+		t.Fatalf("expected 401, got %d: %v", status, body)
+	}
+}
+
+func TestRequestContextUserIDResolver(t *testing.T) {
+	req := httptest.NewRequest(http.MethodGet, "/sync/connect", nil)
+
+	_, err := RequestContextUserIDResolver(req)
+	if err == nil || err != ErrAuthRequired {
+		t.Fatalf("expected ErrAuthRequired, got %v", err)
+	}
+
+	req = req.WithContext(WithUserID(req.Context(), "USER-1"))
+	userID, err := RequestContextUserIDResolver(req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if userID != "user-1" {
+		t.Fatalf("expected normalized user ID, got %q", userID)
+	}
+}
+
+func TestRoutesPanicsOnMixedAuthModes(t *testing.T) {
+	defer func() {
+		if recover() == nil {
+			t.Fatal("expected panic for mixed auth configuration")
+		}
+	}()
+
+	_ = Routes(Config{
+		DB: &sql.DB{},
+		UserIDResolver: func(r *http.Request) (string, error) {
+			return "user-1", nil
+		},
+		JWTSecret: []byte("test-secret-for-integration-tests"),
+	})
 }
 
 func TestSchemaMismatch422Body(t *testing.T) {

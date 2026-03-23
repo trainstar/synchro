@@ -12,6 +12,15 @@ description: Validate the current Synchro release surface locally.
 - JDK 17 and Android SDK for Kotlin and Android validation
 - Node.js 22 for React Native validation
 
+## Adapter auth configuration
+
+Protected sync routes in `api/go` support two auth modes:
+
+- direct JWT validation with `JWTSecret` or `JWKSURL`
+- trusted upstream auth with `UserIDResolver`
+
+Use trusted upstream auth when Synchro is mounted behind an existing product API that already validates bearer tokens and resolves internal user IDs.
+
 ## Core validation
 
 Run the shared Rust semantics tests:

@@ -24,7 +24,7 @@ All timestamps on the wire use RFC 3339 in UTC, for example `2026-03-20T18:22:11
 - JSON over HTTP
 - UTF-8
 - gzip or brotli compression recommended
-- bearer token authentication handled by the adapter
+- bearer-token authentication handled by the adapter
 - idempotency required for mutation replay safety
 
 ## Core Concepts
@@ -62,6 +62,17 @@ A mutation is a client-originated create, update, or delete for a synced table r
 A rebuild is a full authoritative re-materialization of one scope instance.
 
 Rebuild is exceptional, not the normal hot path.
+
+## Adapter Auth Boundary
+
+The wire protocol assumes authenticated sync requests reach the adapter with one canonical resolved user identity.
+
+Adapters may satisfy that boundary by:
+
+- validating bearer tokens directly, for example with JWT verification
+- trusting an upstream API layer that already validated identity and resolved the internal user ID
+
+The protocol does not require every adapter to implement the same identity-provider logic.
 
 ## Endpoint Set
 

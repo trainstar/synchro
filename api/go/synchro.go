@@ -3,7 +3,7 @@
 // SELECT synchro_*() via database/sql, forward the JSONB response.
 //
 // This package has zero dependency on the synchro engine module. Users bring
-// their own *sql.DB (pgx/v5 stdlib recommended) and JWT configuration.
+// their own *sql.DB (pgx/v5 stdlib recommended) and auth integration.
 //
 // Usage:
 //
@@ -11,6 +11,13 @@
 //	    DB:               db,
 //	    JWTSecret:        []byte("my-secret"),
 //	    MinClientVersion: "1.0.0",
+//	})
+//
+// Or, when the main API router already authenticated the request:
+//
+//	handler := synchroapi.Routes(synchroapi.Config{
+//	    DB:             db,
+//	    UserIDResolver: synchroapi.RequestContextUserIDResolver,
 //	})
 //	http.ListenAndServe(":8080", handler)
 package synchroapi
@@ -26,12 +33,17 @@ type Config struct {
 	// PostgreSQL database with the synchro_pg extension installed.
 	DB *sql.DB
 
+	// UserIDResolver resolves the canonical internal user ID from a trusted
+	// upstream-authenticated request. Mutually exclusive with JWTSecret and
+	// JWKSURL.
+	UserIDResolver UserIDResolver
+
 	// JWTSecret is the HS256 shared secret for token validation.
-	// Mutually exclusive with JWKSURL.
+	// Mutually exclusive with JWKSURL and UserIDResolver.
 	JWTSecret []byte
 
 	// JWKSURL is the RS256/ES256 JWKS endpoint for token validation.
-	// Mutually exclusive with JWTSecret.
+	// Mutually exclusive with JWTSecret and UserIDResolver.
 	JWKSURL string
 
 	// JWTUserClaim is the JWT claim containing the user ID (default: "sub").
@@ -49,7 +61,10 @@ type Handler struct {
 }
 
 // Routes returns an http.Handler with all sync endpoints mounted.
-// The returned handler applies version check and JWT auth middleware.
+// The returned handler applies version check and one auth mode:
+//
+// - trusted upstream auth via UserIDResolver
+// - JWT validation via JWTSecret or JWKSURL
 //
 // Endpoints:
 //
@@ -81,7 +96,7 @@ func Routes(cfg Config) http.Handler {
 	authMux.HandleFunc("/sync/rebuild", h.serveRebuild)
 	authMux.HandleFunc("/sync/debug", h.serveDebug)
 
-	authed := jwtMiddleware(cfg, authMux)
+	authed := authMiddleware(cfg, authMux)
 	mux.Handle("/sync/connect", authed)
 	mux.Handle("/sync/pull", authed)
 	mux.Handle("/sync/push", authed)

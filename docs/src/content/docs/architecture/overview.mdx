@@ -28,6 +28,21 @@ This architecture exists to keep:
 - full synced CRUD for synced tables
 - SQL migration based configuration, with structured defaults and custom SQL escape hatches
 
+## Adapter auth modes
+
+The current Go adapter supports two ways to authenticate the protected sync routes:
+
+- direct JWT validation inside `api/go`
+- trusted upstream auth, where the host API resolves the canonical internal user ID and Synchro receives that resolved user ID through a trusted resolver
+
+Recommended mode when Synchro is mounted inside a larger product API:
+
+- keep identity-provider validation and product-specific user mapping in the main API
+- pass the resolved internal user UUID into Synchro
+- let the extension enforce DB-side policy with `app.user_id`
+
+This keeps Synchro generic and avoids duplicating WorkOS or product-specific identity logic inside the sync adapter.
+
 ## Specification
 
 The detailed architectural contract is published in:

@@ -2,6 +2,7 @@ package synchroapi
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -14,6 +15,17 @@ type contextKey string
 
 const userIDKey contextKey = "synchroapi.user_id"
 
+// ErrAuthRequired indicates the request does not carry an authenticated user.
+var ErrAuthRequired = errors.New("auth required")
+
+// UserIDResolver resolves the canonical internal user ID for a request.
+// It is intended for trusted upstream auth integration, for example when the
+// main API router has already validated WorkOS or another identity provider.
+//
+// Return ErrAuthRequired when the request is unauthenticated.
+// Return any other error only for internal resolver failures.
+type UserIDResolver func(*http.Request) (string, error)
+
 // UserIDFromContext extracts the user ID set by the JWT middleware.
 func UserIDFromContext(ctx context.Context) string {
 	if v, ok := ctx.Value(userIDKey).(string); ok {
@@ -22,10 +34,54 @@ func UserIDFromContext(ctx context.Context) string {
 	return ""
 }
 
-// withUserID returns a new context with the user ID set.
+// WithUserID returns a new context with the user ID set.
 // UUIDs are normalized to lowercase per RFC 4122 / PostgreSQL convention.
-func withUserID(ctx context.Context, userID string) context.Context {
+func WithUserID(ctx context.Context, userID string) context.Context {
 	return context.WithValue(ctx, userIDKey, strings.ToLower(userID))
+}
+
+// RequestContextUserIDResolver resolves a user ID previously stored in the
+// request context with WithUserID.
+func RequestContextUserIDResolver(r *http.Request) (string, error) {
+	userID := UserIDFromContext(r.Context())
+	if userID == "" {
+		return "", ErrAuthRequired
+	}
+	return userID, nil
+}
+
+func authMiddleware(cfg Config, next http.Handler) http.Handler {
+	switch {
+	case cfg.UserIDResolver != nil:
+		if len(cfg.JWTSecret) > 0 || cfg.JWKSURL != "" {
+			panic("synchroapi: UserIDResolver is mutually exclusive with JWTSecret and JWKSURL")
+		}
+		return resolverMiddleware(cfg.UserIDResolver, next)
+	case len(cfg.JWTSecret) > 0 || cfg.JWKSURL != "":
+		return jwtMiddleware(cfg, next)
+	default:
+		panic("synchroapi: auth configuration requires UserIDResolver, JWTSecret, or JWKSURL")
+	}
+}
+
+func resolverMiddleware(resolve UserIDResolver, next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		userID, err := resolve(r)
+		switch {
+		case err == nil && userID == "":
+			writeJSONError(w, http.StatusUnauthorized, "missing user identity")
+			return
+		case err != nil && errors.Is(err, ErrAuthRequired):
+			writeJSONError(w, http.StatusUnauthorized, "missing user identity")
+			return
+		case err != nil:
+			writeJSONError(w, http.StatusInternalServerError, "auth resolution failed")
+			return
+		}
+
+		ctx := WithUserID(r.Context(), userID)
+		next.ServeHTTP(w, r.WithContext(ctx))
+	})
 }
 
 // jwtMiddleware validates a Bearer token and extracts the user ID.
@@ -66,7 +122,7 @@ func jwtMiddleware(cfg Config, next http.Handler) http.Handler {
 			return
 		}
 
-		ctx := withUserID(r.Context(), userID)
+		ctx := WithUserID(r.Context(), userID)
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }
