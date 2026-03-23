@@ -17,22 +17,45 @@ func mapPGError(w http.ResponseWriter, raw []byte) bool {
 	}
 
 	var probe struct {
-		Error string `json:"error"`
+		Error json.RawMessage `json:"error"`
 	}
-	if err := json.Unmarshal(raw, &probe); err != nil || probe.Error == "" {
+	if err := json.Unmarshal(raw, &probe); err != nil || len(probe.Error) == 0 {
 		return false
 	}
 
-	status := classifyError(probe.Error)
+	status, retryAfter, ok := classifyPGError(probe.Error)
+	if !ok {
+		return false
+	}
 	w.Header().Set("Content-Type", "application/json")
+	if retryAfter != "" {
+		w.Header().Set("Retry-After", retryAfter)
+	}
 	w.WriteHeader(status)
 	_, _ = w.Write(raw)
 	return true
 }
 
-// classifyError maps a structured error string from the extension to an HTTP
-// status code.
-func classifyError(errMsg string) int {
+func classifyPGError(raw json.RawMessage) (int, string, bool) {
+	var legacy string
+	if err := json.Unmarshal(raw, &legacy); err == nil && legacy != "" {
+		return classifyLegacyError(legacy), "", true
+	}
+
+	var vnext struct {
+		Code      string `json:"code"`
+		Message   string `json:"message"`
+		Retryable bool   `json:"retryable"`
+	}
+	if err := json.Unmarshal(raw, &vnext); err == nil && vnext.Code != "" {
+		return classifyVNextError(vnext.Code, vnext.Retryable), retryAfterForCode(vnext.Code), true
+	}
+
+	return 0, "", false
+}
+
+// classifyLegacyError maps the legacy string error model to an HTTP status code.
+func classifyLegacyError(errMsg string) int {
 	lower := strings.ToLower(errMsg)
 
 	switch {
@@ -44,6 +67,37 @@ func classifyError(errMsg string) int {
 		return http.StatusForbidden
 	default:
 		return http.StatusInternalServerError
+	}
+}
+
+func classifyVNextError(code string, retryable bool) int {
+	switch strings.ToLower(code) {
+	case "invalid_request":
+		return http.StatusBadRequest
+	case "auth_required":
+		return http.StatusUnauthorized
+	case "schema_mismatch":
+		return http.StatusUnprocessableEntity
+	case "upgrade_required":
+		return http.StatusUpgradeRequired
+	case "retry_later":
+		return http.StatusTooManyRequests
+	case "temporary_unavailable":
+		return http.StatusServiceUnavailable
+	default:
+		if retryable {
+			return http.StatusServiceUnavailable
+		}
+		return http.StatusInternalServerError
+	}
+}
+
+func retryAfterForCode(code string) string {
+	switch strings.ToLower(code) {
+	case "retry_later", "temporary_unavailable":
+		return "5"
+	default:
+		return ""
 	}
 }
 

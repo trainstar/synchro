@@ -1,0 +1,25 @@
+{
+  "fixture_version": 1,
+  "name": "phase0_hot_path_budgets",
+  "kind": "performance.budgets",
+  "summary": "Initial non-negotiable request and workload budgets for the vNext architecture.",
+  "spec_refs": [
+    "00-principles: Performance Principles",
+    "06-conformance-plan: Round-Trip Budget"
+  ],
+  "budgets": {
+    "warm_connect_requests": 1,
+    "steady_state_pull_only_requests_per_cycle": 1,
+    "steady_state_push_plus_pull_requests_per_cycle": 2,
+    "rebuild_extra_requests": "explicit_rebuild_pagination_only"
+  },
+  "server_side_expectations": {
+    "high_scope_count_allowed": true,
+    "high_row_change_fanout_not_preferred": true,
+    "shared_public_data_should_prefer_shared_scopes": true
+  },
+  "client_side_expectations": {
+    "seeded_startup_should_reduce_network_and_local_setup_cost": true,
+    "multi_scope_provenance_overhead_must_be_measured": true
+  }
+}

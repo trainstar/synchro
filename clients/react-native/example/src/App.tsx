@@ -12,14 +12,16 @@ import type { ConflictEvent } from '@trainstar/synchro-react-native';
 
 const SYNCHRO_TEST_URL =
   Platform.OS === 'android'
-    ? 'http://10.0.2.2:8080'
-    : 'http://127.0.0.1:8080';
+    ? 'http://10.0.2.2:8081'
+    : 'http://127.0.0.1:8081';
 
 const USER1_JWT =
   'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJhMTExMTExMS0xMTExLTExMTEtMTExMS0xMTExMTExMTExMTEiLCJleHAiOjQxMDI0NDQ4MDB9.ZPjufmc-mgkQC6rc6GVNzH9V3jhqQZMl2AuF0Cleuz8';
 const USER1_ID = 'a1111111-1111-1111-1111-111111111111';
 const USER2_JWT =
   'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJiMjIyMjIyMi0yMjIyLTIyMjItMjIyMi0yMjIyMjIyMjIyMjIiLCJleHAiOjQxMDI0NDQ4MDB9.md1BWZARNDofCHihSjDmFY6Wr2L1MBf9r-BDc5zrhFE';
+const TEST_SYNC_INTERVAL_SECONDS = 300;
+const TEST_PUSH_DEBOUNCE_SECONDS = 60;
 
 type ResultKey =
   | 'init'
@@ -78,7 +80,8 @@ function createClient(): SynchroClient {
     authProvider: async () => USER1_JWT,
     clientID: `rn-test-device-${launchID}`,
     appVersion: '1.0.0',
-    syncInterval: 300,
+    syncInterval: TEST_SYNC_INTERVAL_SECONDS,
+    pushDebounce: TEST_PUSH_DEBOUNCE_SECONDS,
   });
 }
 
@@ -102,6 +105,62 @@ async function syncHTTP(
   return res.json();
 }
 
+async function connectManualClient(token: string, clientID: string): Promise<any> {
+  return syncHTTP('POST', '/sync/connect', token, {
+    client_id: clientID,
+    platform: 'test',
+    app_version: '1.0.0',
+    protocol_version: 1,
+    schema: {
+      version: 0,
+      hash: '',
+    },
+    scope_set_version: 0,
+    known_scopes: {},
+  });
+}
+
+function schemaRefFromConnect(connect: any) {
+  return {
+    version: connect.schema.version,
+    hash: connect.schema.hash,
+  };
+}
+
+async function rebuildAllAssignedScopes(
+  token: string,
+  clientID: string,
+  connect: any
+): Promise<any[]> {
+  const records: any[] = [];
+  const scopes = Array.isArray(connect.scopes?.add) ? connect.scopes.add : [];
+
+  for (const scope of scopes) {
+    let cursor = scope.cursor ?? null;
+
+    while (true) {
+      const rebuild = await syncHTTP('POST', '/sync/rebuild', token, {
+        client_id: clientID,
+        scope: scope.id,
+        cursor,
+        limit: 100,
+      });
+
+      if (Array.isArray(rebuild.records)) {
+        records.push(...rebuild.records);
+      }
+
+      if (!rebuild.has_more) {
+        break;
+      }
+
+      cursor = rebuild.cursor ?? null;
+    }
+  }
+
+  return records;
+}
+
 async function waitForPendingDrain(client: SynchroClient, timeoutMs = 5000) {
   const startedAt = Date.now();
   while (Date.now() - startedAt < timeoutMs) {
@@ -115,6 +174,18 @@ async function waitForPendingDrain(client: SynchroClient, timeoutMs = 5000) {
 
 async function waitForWAL(delayMs = 1000) {
   await new Promise((resolve) => setTimeout(resolve, delayMs));
+}
+
+async function insertCustomer(
+  client: SynchroClient,
+  id: string,
+  userID: string,
+  name: string
+) {
+  await client.execute(
+    "INSERT INTO customers (id, user_id, name, balance, is_active, created_at, updated_at) VALUES (?, ?, ?, 0, 1, datetime('now'), datetime('now'))",
+    [id, userID, name]
+  );
 }
 
 function StatusBadge({ label, ok }: { label: string; ok: TestResult }) {
@@ -140,9 +211,12 @@ export default function App() {
   const startedRef = useRef(false);
   const conflictSubscriptionRef = useRef<(() => void) | null>(null);
   const conflictsRef = useRef<ConflictEvent[]>([]);
+  const currentStepRef = useRef('idle');
 
   const [results, setResults] = useState<Results>(() => createEmptyResults());
   const [displayStatus, setDisplayStatus] = useState('idle');
+  const [currentStep, setCurrentStep] = useState('idle');
+  const [lastError, setLastError] = useState<string | null>(null);
   const [lastResult, setLastResult] = useState<LastResult>({
     key: null,
     ok: null,
@@ -160,7 +234,31 @@ export default function App() {
   const update = useCallback((key: ResultKey, ok: boolean) => {
     setResults((prev) => ({ ...prev, [key]: ok }));
     setLastResult({ key, ok });
+    const nextStep = ok ? `${key}:pass` : `${key}:fail`;
+    currentStepRef.current = nextStep;
+    setCurrentStep(nextStep);
+    console.log(`step: ${nextStep}`);
   }, []);
+
+  const markStep = useCallback((step: string) => {
+    currentStepRef.current = step;
+    setCurrentStep(step);
+    console.log(`step: ${step}`);
+  }, []);
+
+  const formatError = useCallback((error: unknown) => {
+    if (error instanceof Error) {
+      return `${error.name}: ${error.message}`;
+    }
+    return String(error);
+  }, []);
+
+  const captureError = useCallback((key: ResultKey, error: unknown) => {
+    const message = `${key}@${currentStepRef.current}: ${formatError(error)}`;
+    setLastError(message);
+    setCurrentStep(`${key}:error`);
+    console.error(message, error);
+  }, [formatError]);
 
   const ensureInitialized = useCallback(async () => {
     if (initializedRef.current) {
@@ -217,6 +315,9 @@ export default function App() {
     setResults(createEmptyResults());
     setLastResult({ key: null, ok: null });
     setDisplayStatus('idle');
+    setCurrentStep('idle');
+    currentStepRef.current = 'idle';
+    setLastError(null);
     setClient(createClient());
   }, [client]);
 
@@ -373,15 +474,18 @@ export default function App() {
 
   const runPushPull = useCallback(async () => {
     try {
+      setLastError(null);
+      markStep('pushPull:start');
       await ensureStarted();
-      const orderID = uuid();
-      await client.execute(
-        "INSERT INTO orders (id, user_id, ship_address, created_at, updated_at) VALUES (?, ?, ?, datetime('now'), datetime('now'))",
-        [orderID, USER1_ID, 'push-test']
-      );
+      markStep('pushPull:started');
+      const customerID = uuid();
+      await insertCustomer(client, customerID, USER1_ID, 'push-test-customer');
+      markStep('pushPull:inserted');
       await client.syncNow();
+      markStep('pushPull:synced');
       update('pushPull', await waitForPendingDrain(client));
-    } catch {
+    } catch (error) {
+      captureError('pushPull', error);
       update('pushPull', false);
     } finally {
       try {
@@ -394,66 +498,70 @@ export default function App() {
 
   const runConflict = useCallback(async () => {
     try {
+      setLastError(null);
+      markStep('conflict:start');
       await ensureStarted();
       conflictsRef.current = [];
+      markStep('conflict:started');
 
       const recordID = uuid();
-      await client.execute(
-        "INSERT INTO orders (id, user_id, ship_address, created_at, updated_at) VALUES (?, ?, ?, datetime('now'), datetime('now'))",
-        [recordID, USER1_ID, 'original']
-      );
+      await insertCustomer(client, recordID, USER1_ID, 'original');
+      markStep('conflict:inserted');
       await client.syncNow();
+      markStep('conflict:initial-sync');
       await waitForPendingDrain(client);
 
       const clientBID = `rn-conflict-client-${uuid()}`;
-      const schema = await syncHTTP('GET', '/sync/schema', USER1_JWT);
-      await syncHTTP('POST', '/sync/register', USER1_JWT, {
-        client_id: clientBID,
-        platform: 'test',
-        app_version: '1.0.0',
-        schema_version: schema.schema_version,
-        schema_hash: schema.schema_hash,
-      });
+      const connect = await connectManualClient(USER1_JWT, clientBID);
+      markStep('conflict:manual-connected');
 
       const now = new Date().toISOString();
       await syncHTTP('POST', '/sync/push', USER1_JWT, {
         client_id: clientBID,
-        schema_version: schema.schema_version,
-        schema_hash: schema.schema_hash,
-        changes: [
+        batch_id: `batch-${recordID}`,
+        schema: schemaRefFromConnect(connect),
+        mutations: [
           {
-            record_id: recordID,
-            table: 'orders',
-            operation: 'update',
-            data: {
+            mutation_id: `mutation-${recordID}`,
+            table: 'customers',
+            op: 'update',
+            pk: {
               id: recordID,
+            },
+            columns: {
               user_id: USER1_ID,
-              ship_address: 'server-version',
+              name: 'server-version',
               updated_at: now,
             },
             client_updated_at: now,
           },
         ],
       });
+      markStep('conflict:manual-pushed');
 
       await waitForWAL();
+      markStep('conflict:wal-1');
 
       await client.execute(
-        "UPDATE orders SET ship_address = ?, updated_at = datetime('now') WHERE id = ?",
+        "UPDATE customers SET name = ?, updated_at = datetime('now') WHERE id = ?",
         ['client-version', recordID]
       );
+      markStep('conflict:updated-local');
       await client.syncNow();
+      markStep('conflict:resynced');
       await waitForWAL(1500);
+      markStep('conflict:wal-2');
 
       const row = await client.queryOne(
-        'SELECT ship_address FROM orders WHERE id = ?',
+        'SELECT name FROM customers WHERE id = ?',
         [recordID]
       );
       const conflictFired = conflictsRef.current.some(
         (event) => event.recordID === recordID
       );
       update('conflict', conflictFired || row !== null);
-    } catch {
+    } catch (error) {
+      captureError('conflict', error);
       update('conflict', false);
     } finally {
       try {
@@ -466,38 +574,37 @@ export default function App() {
 
   const runMultiUser = useCallback(async () => {
     try {
+      setLastError(null);
+      markStep('multiUser:start');
       await ensureStarted();
+      markStep('multiUser:started');
 
       const isolationID = uuid();
-      await client.execute(
-        "INSERT INTO orders (id, user_id, ship_address, created_at, updated_at) VALUES (?, ?, ?, datetime('now'), datetime('now'))",
-        [isolationID, USER1_ID, 'user1-only']
-      );
+      await insertCustomer(client, isolationID, USER1_ID, 'user1-only');
+      markStep('multiUser:inserted');
       await client.syncNow();
+      markStep('multiUser:synced');
       await waitForPendingDrain(client);
       await waitForWAL();
+      markStep('multiUser:wal');
 
       const client2ID = `rn-isolation-client-${uuid()}`;
-      const schema = await syncHTTP('GET', '/sync/schema', USER2_JWT);
-      const register = await syncHTTP('POST', '/sync/register', USER2_JWT, {
-        client_id: client2ID,
-        platform: 'test',
-        app_version: '1.0.0',
-        schema_version: schema.schema_version,
-        schema_hash: schema.schema_hash,
-      });
-      const pull = await syncHTTP('POST', '/sync/pull', USER2_JWT, {
-        client_id: client2ID,
-        checkpoint: register.checkpoint,
-        schema_version: schema.schema_version,
-        schema_hash: schema.schema_hash,
-      });
+      const connect = await connectManualClient(USER2_JWT, client2ID);
+      markStep('multiUser:user2-connected');
+      const rebuiltRecords = await rebuildAllAssignedScopes(
+        USER2_JWT,
+        client2ID,
+        connect
+      );
+      markStep('multiUser:user2-rebuilt');
 
-      const hasUser1Record = (pull.changes ?? []).some(
-        (record: any) => record.record_id === isolationID
+      const hasUser1Record = rebuiltRecords.some(
+        (record: any) =>
+          record.table === 'customers' && record.pk?.id === isolationID
       );
       update('multiUser', !hasUser1Record);
-    } catch {
+    } catch (error) {
+      captureError('multiUser', error);
       update('multiUser', false);
     } finally {
       try {
@@ -584,6 +691,8 @@ export default function App() {
           <Text>Status</Text>
           <Text testID="status-value">{displayStatus}</Text>
         </View>
+        <Text testID="step-value">{currentStep}</Text>
+        <Text testID="error-value">{lastError ?? 'none'}</Text>
 
         <TouchableOpacity
           style={styles.button}

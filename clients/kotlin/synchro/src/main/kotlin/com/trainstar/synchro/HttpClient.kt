@@ -24,13 +24,25 @@ class HttpClient(
     suspend fun register(request: RegisterRequest): RegisterResponse =
         post("/sync/register", json.encodeToString(request))
 
+    suspend fun connect(request: VNextConnectRequest): VNextConnectResponse =
+        post("/sync/connect", json.encodeToString(request))
+
     suspend fun pull(request: PullRequest): PullResponse =
+        post("/sync/pull", json.encodeToString(request))
+
+    suspend fun pull(request: VNextPullRequest): VNextPullResponse =
         post("/sync/pull", json.encodeToString(request))
 
     suspend fun push(request: PushRequest): PushResponse =
         post("/sync/push", json.encodeToString(request))
 
+    suspend fun push(request: VNextPushRequest): VNextPushResponse =
+        post("/sync/push", json.encodeToString(request))
+
     suspend fun rebuild(request: RebuildRequest): RebuildResponse =
+        post("/sync/rebuild", json.encodeToString(request))
+
+    suspend fun rebuild(request: VNextRebuildRequest): VNextRebuildResponse =
         post("/sync/rebuild", json.encodeToString(request))
 
     suspend fun fetchSchema(): SchemaResponse =
@@ -90,15 +102,20 @@ class HttpClient(
             }
 
             409 -> {
-                val body = try {
-                    json.decodeFromString<SchemaMismatchBody>(responseBody)
-                } catch (_: Exception) {
-                    null
+                val msg = errorMessage(responseBody) ?: "semantic conflict"
+                throw SynchroError.ServerError(status = response.code, serverMessage = msg)
+            }
+
+            422 -> {
+                val body = decodeSchemaMismatch(responseBody)
+                if (body != null) {
+                    throw SynchroError.SchemaMismatch(
+                        serverVersion = body.serverSchemaVersion ?: 0,
+                        serverHash = body.serverSchemaHash ?: ""
+                    )
                 }
-                throw SynchroError.SchemaMismatch(
-                    serverVersion = body?.serverSchemaVersion ?: 0,
-                    serverHash = body?.serverSchemaHash ?: ""
-                )
+                val msg = errorMessage(responseBody) ?: "schema or contract violation"
+                throw SynchroError.ServerError(status = response.code, serverMessage = msg)
             }
 
             426 -> {
@@ -128,9 +145,36 @@ class HttpClient(
     }
 
     private fun errorMessage(body: String): String? {
+        try {
+            return json.decodeFromString<VNextErrorResponse>(body).error.message
+        } catch (_: Exception) {
+        }
         return try {
             val map = json.decodeFromString<Map<String, String>>(body)
             map["error"]
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    private fun decodeSchemaMismatch(body: String): SchemaMismatchBody? {
+        try {
+            return json.decodeFromString<SchemaMismatchBody>(body)
+        } catch (_: Exception) {
+        }
+
+        return try {
+            val vnext = json.decodeFromString<VNextErrorResponse>(body)
+            if (vnext.error.code == VNextProtocolErrorCode.SCHEMA_MISMATCH) {
+                SchemaMismatchBody(
+                    code = vnext.error.code.name.lowercase(),
+                    message = vnext.error.message,
+                    serverSchemaVersion = null,
+                    serverSchemaHash = null
+                )
+            } else {
+                null
+            }
         } catch (_: Exception) {
             null
         }

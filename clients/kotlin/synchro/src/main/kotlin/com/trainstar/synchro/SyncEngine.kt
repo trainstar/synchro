@@ -32,7 +32,7 @@ class SyncEngine(
     private val conflictCallbacks = ConcurrentHashMap<String, (ConflictEvent) -> Unit>()
 
     @Volatile
-    private var syncedTables: List<SchemaTable> = emptyList()
+    private var syncedTables: List<LocalSchemaTable> = emptyList()
     @Volatile
     private var schemaVersion: Long = 0
     @Volatile
@@ -63,45 +63,22 @@ class SyncEngine(
                 SynchroMeta.setSyncLock(db, false)
             }
 
-            // Ensure bucket tables exist for databases created before bucket support
-            database.ensureBucketTables()
+            database.ensureScopeTables()
 
-            // Fetch schema first so we can register with the correct version
-            val schema = schemaManager.ensureSchema(httpClient)
-            syncedTables = schema.tables
-            schemaVersion = schema.schemaVersion
-            schemaHash = schema.schemaHash
+            val connectResponse = connect()
+            val connectSchema = resolveConnectSchema(connectResponse)
+            syncedTables = connectSchema.first
+            schemaVersion = connectSchema.second.first
+            schemaHash = connectSchema.second.second
 
-            // Register with actual schema version
-            val registerReq = RegisterRequest(
-                clientID = config.clientID,
-                clientName = null,
-                platform = config.platform,
-                appVersion = config.appVersion,
-                schemaVersion = schema.schemaVersion,
-                schemaHash = schema.schemaHash
+            applyScopeAssignmentDelta(
+                connectResponse.scopes,
+                connectResponse.scopeSetVersion
             )
-            val registerResp = httpClient.register(registerReq)
-
-            val needsInitialSync = database.writeTransaction { db ->
-                SynchroMeta.set(db, MetaKey.CLIENT_SERVER_ID, registerResp.id)
-
-                // Store per-bucket checkpoints from registration if provided
-                registerResp.bucketCheckpoints?.forEach { (bucketId, cp) ->
-                    SynchroMeta.setBucketCheckpoint(db, bucketId, cp)
-                }
-
-                val checkpoint = SynchroMeta.getInt64(db, MetaKey.CHECKPOINT)
-                val initialSyncComplete = SynchroMeta.get(db, MetaKey.SNAPSHOT_COMPLETE) == "1"
-                checkpoint == 0L || !initialSyncComplete
-            }
 
             updateStatus(SyncStatus.Idle)
 
-            if (needsInitialSync) {
-                val buckets = registerResp.bucketCheckpoints?.keys?.toList() ?: emptyList()
-                initialSync(buckets)
-            }
+            rebuildAssignedScopesNeedingCursor()
 
             // Start sync loop
             syncJob = scope!!.launch {
@@ -261,7 +238,7 @@ class SyncEngine(
                 if (outcome.hasRetryableRejections) {
                     throw RetryableError(
                         underlying = SynchroError.PushRejected(
-                            outcome.response.rejected.filter { it.status == PushStatus.REJECTED_RETRYABLE }
+                            outcome.response.rejected.filter { it.status == VNextMutationStatus.REJECTED_RETRYABLE }
                         ),
                         retryAfter = null
                     )
@@ -276,199 +253,199 @@ class SyncEngine(
     // MARK: - Pull
 
     private suspend fun runPullLoop() {
-        var checkpoint = database.readTransaction { db ->
-            SynchroMeta.getInt64(db, MetaKey.CHECKPOINT)
-        }
-        var knownBuckets = loadKnownBuckets()
-        var bucketCheckpoints = loadBucketCheckpoints()
-        var pendingRebuilds: List<String> = emptyList()
-        var lastBucketChecksums: Map<String, Int>? = null
-
         var hasMore = true
+        var scopeSetVersion = database.readTransaction { db ->
+            SynchroMeta.getInt64(db, MetaKey.SCOPE_SET_VERSION)
+        }
+        val pendingRebuilds = linkedSetOf<String>()
+
         while (hasMore) {
-            val request = PullRequest(
+            val scopes = loadKnownScopes()
+            if (scopes.isEmpty()) {
+                return
+            }
+
+            val request = VNextPullRequest(
                 clientID = clientID,
-                checkpoint = checkpoint,
-                tables = null,
+                schema = VNextSchemaRef(version = schemaVersion, hash = schemaHash),
+                scopeSetVersion = scopeSetVersion,
+                scopes = scopes,
                 limit = config.effectivePullPageSize,
-                knownBuckets = if (knownBuckets.isEmpty()) null else knownBuckets,
-                bucketCheckpoints = if (bucketCheckpoints.isEmpty()) null else bucketCheckpoints,
-                schemaVersion = schemaVersion,
-                schemaHash = schemaHash
+                checksumMode = VNextChecksumMode.REQUESTED
             )
 
             val response = httpClient.pull(request)
+            response.validate(request)
 
-            pullProcessor.applyPullPage(response.changes, response.deletes, syncedTables)
-            pullProcessor.trackBucketMembership(response.changes)
-            pullProcessor.updateCheckpoint(response.checkpoint)
-            pullProcessor.updateKnownBuckets(response.bucketUpdates)
-            pullProcessor.updateBucketCheckpoints(response.bucketCheckpoints)
-
-            // Accumulate rebuild requests across pages
-            response.rebuildBuckets?.let { buckets ->
-                pendingRebuilds = (pendingRebuilds + buckets).distinct()
-            }
-
-            // Capture bucket checksums from the final page for verification.
-            response.bucketChecksums?.let { serverCS ->
-                lastBucketChecksums = serverCS
-            }
-
-            checkpoint = response.checkpoint
+            pullProcessor.applyScopeChanges(
+                changes = response.changes,
+                syncedTables = syncedTables,
+                scopeCursors = response.scopeCursors,
+                checksums = response.checksums
+            )
+            applyScopeAssignmentDelta(response.scopeUpdates, response.scopeSetVersion)
+            pendingRebuilds.addAll(response.rebuild)
+            scopeSetVersion = response.scopeSetVersion
             hasMore = response.hasMore
-
-            // Reload known buckets after applying updates for next page
-            if (hasMore && response.bucketUpdates != null) {
-                knownBuckets = loadKnownBuckets()
-            }
-            if (hasMore && response.bucketCheckpoints != null) {
-                bucketCheckpoints = loadBucketCheckpoints()
-            }
         }
 
-        // Checksum verification: compare server bucket checksums with local.
-        // Mismatch triggers a rebuild for that bucket. Runs inline with no
-        // extra HTTP call.
-        lastBucketChecksums?.forEach { (bucketId, serverCS) ->
-            try {
-                val localCS = pullProcessor.computeBucketChecksum(bucketId)
-                if (localCS != serverCS && bucketId !in pendingRebuilds) {
-                    android.util.Log.w("SyncEngine", "Checksum mismatch for bucket $bucketId: server=$serverCS local=$localCS, triggering rebuild")
-                    pendingRebuilds = pendingRebuilds + bucketId
-                }
-            } catch (e: Exception) {
-                android.util.Log.e("SyncEngine", "Failed to compute bucket checksum for $bucketId, triggering rebuild", e)
-                if (bucketId !in pendingRebuilds) {
-                    pendingRebuilds = pendingRebuilds + bucketId
-                }
-            }
+        pendingRebuilds.addAll(scopeIDsNeedingRebuild())
+        val knownScopeIDs = database.readTransaction { db ->
+            SynchroMeta.getAllScopes(db).map { it.scopeID }.toSet()
         }
 
-        // Process all pending bucket rebuilds after the pull loop finishes.
-        for (bucketId in pendingRebuilds) {
-            rebuildBucket(bucketId)
+        for (scopeId in pendingRebuilds) {
+            if (scopeId in knownScopeIDs) {
+                rebuildScope(scopeId)
+            }
         }
     }
 
-    // MARK: - Bucket Rebuild
+    // MARK: - Scope Rebuild
 
-    /**
-     * Rebuilds a single bucket by clearing its local membership, fetching all
-     * records from the server via paginated POST /sync/rebuild calls, upserting
-     * each record, and updating the bucket checkpoint.
-     */
-    private suspend fun rebuildBucket(bucketId: String) {
-        // Save old members so we can detect orphans after rebuild
-        val oldMembers = database.readTransaction { db ->
-            SynchroMeta.getBucketMembers(db, bucketId)
-        }
-
-        // Clear existing membership for this bucket before rebuilding
-        pullProcessor.clearBucketMembers(bucketId)
-
+    private suspend fun rebuildScope(scopeId: String) {
+        val generation = pullProcessor.beginScopeRebuild(scopeId)
         var cursor: String? = null
-        var hasMore = true
-        var rebuiltCheckpoint = 0L
 
-        while (hasMore) {
-            val request = RebuildRequest(
+        while (true) {
+            val request = VNextRebuildRequest(
                 clientID = clientID,
-                bucketId = bucketId,
+                scope = scopeId,
                 cursor = cursor,
-                limit = config.effectivePullPageSize,
-                schemaVersion = schemaVersion,
-                schemaHash = schemaHash
+                limit = config.effectivePullPageSize
             )
 
             val response = httpClient.rebuild(request)
+            response.validate()
 
-            // Apply records and track bucket membership
-            pullProcessor.applyChanges(response.records, syncedTables)
-            pullProcessor.trackBucketMembership(response.records, overrideBucketId = bucketId)
+            pullProcessor.applyScopeRebuildPage(
+                scopeId = scopeId,
+                generation = generation,
+                records = response.records,
+                syncedTables = syncedTables
+            )
 
-            cursor = response.cursor
-            hasMore = response.hasMore
-            rebuiltCheckpoint = response.checkpoint
+            if (response.hasMore) {
+                cursor = response.cursor
+                continue
+            }
+
+            val finalCursor = response.finalScopeCursor
+                ?: throw SynchroError.InvalidResponse("final rebuild page missing final scope cursor for $scopeId")
+            val checksum = response.checksum
+                ?: throw SynchroError.InvalidResponse("final rebuild page missing checksum for $scopeId")
+
+            pullProcessor.finalizeScopeRebuild(
+                scopeId = scopeId,
+                generation = generation,
+                finalCursor = finalCursor,
+                checksum = checksum,
+                syncedTables = syncedTables
+            )
+            return
+        }
+    }
+
+    // MARK: - Bootstrap
+
+    private suspend fun connect(): VNextConnectResponse {
+        val request = VNextConnectRequest(
+            clientID = clientID,
+            platform = config.platform,
+            appVersion = config.appVersion,
+            protocolVersion = 1,
+            schema = database.readTransaction { db ->
+                VNextSchemaRef(
+                    version = SynchroMeta.getInt64(db, MetaKey.SCHEMA_VERSION),
+                    hash = SynchroMeta.get(db, MetaKey.SCHEMA_HASH) ?: ""
+                )
+            },
+            scopeSetVersion = database.readTransaction { db ->
+                SynchroMeta.getInt64(db, MetaKey.SCOPE_SET_VERSION)
+            },
+            knownScopes = loadKnownScopes()
+        )
+
+        val response = httpClient.connect(request)
+        response.validate()
+
+        if (!response.schema.action.isCompatible()) {
+            throw SynchroError.InvalidResponse("unsupported connect schema action")
         }
 
-        // Soft-delete records that were in the old bucket but not in the rebuild
-        val newMembers = database.readTransaction { db ->
-            SynchroMeta.getBucketMembers(db, bucketId)
-        }
-        val newMemberSet = newMembers.map { "${it.first}|${it.second}" }.toSet()
-        val orphanedMembers = oldMembers.filter { "${it.first}|${it.second}" !in newMemberSet }
+        return response
+    }
 
-        if (orphanedMembers.isNotEmpty()) {
-            val tableMap = syncedTables.associateBy { it.tableName }
-            database.writeTransaction { db ->
-                for ((tableName, recordId) in orphanedMembers) {
-                    val schema = tableMap[tableName] ?: continue
-                    val pkCol = schema.primaryKey.firstOrNull() ?: "id"
-                    val quoted = SQLiteHelpers.quoteIdentifier(tableName)
-                    val quotedPK = SQLiteHelpers.quoteIdentifier(pkCol)
-                    val quotedDeletedAt = SQLiteHelpers.quoteIdentifier(schema.deletedAtColumn)
-
-                    val stmt = db.compileStatement(
-                        "UPDATE $quoted SET $quotedDeletedAt = ${SQLiteHelpers.timestampNow()} WHERE $quotedPK = ? AND $quotedDeletedAt IS NULL"
-                    )
-                    try {
-                        stmt.bindString(1, recordId)
-                        stmt.executeUpdateDelete()
-                    } finally {
-                        stmt.close()
-                    }
+    private suspend fun resolveConnectSchema(response: VNextConnectResponse): Pair<List<LocalSchemaTable>, Pair<Long, String>> {
+        return when (response.schema.action) {
+            VNextSchemaAction.NONE -> {
+                val tables = schemaManager.loadStoredLocalSchema()
+                    ?: throw SynchroError.InvalidResponse("connect returned schema action none without stored local schema")
+                database.writeTransaction { db ->
+                    SynchroMeta.setInt64(db, MetaKey.SCHEMA_VERSION, response.schema.version)
+                    SynchroMeta.set(db, MetaKey.SCHEMA_HASH, response.schema.hash)
                 }
+                tables to (response.schema.version to response.schema.hash)
+            }
+            VNextSchemaAction.FETCH -> {
+                val schema = schemaManager.ensureSchema(httpClient)
+                schema.tables.map { it.localSchema } to (schema.schemaVersion to schema.schemaHash)
+            }
+            VNextSchemaAction.REPLACE, VNextSchemaAction.REBUILD_LOCAL -> {
+                val manifest = response.schemaDefinition
+                    ?: throw SynchroError.InvalidResponse("connect schema action ${response.schema.action} missing schema_definition")
+                val tables = manifest.localTables()
+                schemaManager.reconcileLocalSchema(
+                    schemaVersion = response.schema.version,
+                    schemaHash = response.schema.hash,
+                    tables = tables
+                )
+                tables to (response.schema.version to response.schema.hash)
+            }
+            VNextSchemaAction.UNSUPPORTED -> {
+                throw SynchroError.InvalidResponse("unsupported connect schema action")
             }
         }
-
-        // Update the bucket checkpoint
-        pullProcessor.updateBucketCheckpoint(bucketId, rebuiltCheckpoint)
     }
 
-    private fun loadKnownBuckets(): List<String> {
-        val knownBucketsStr = database.readTransaction { db ->
-            SynchroMeta.get(db, MetaKey.KNOWN_BUCKETS) ?: "[]"
-        }
-        return try {
-            Json.decodeFromString<List<String>>(knownBucketsStr)
-        } catch (_: Exception) {
-            emptyList()
-        }
-    }
-
-    private fun loadBucketCheckpoints(): Map<String, Long> {
+    private fun loadKnownScopes(): Map<String, VNextScopeCursorRef> {
         return database.readTransaction { db ->
-            SynchroMeta.getAllBucketCheckpoints(db)
+            SynchroMeta.getAllScopes(db).associate { scope ->
+                scope.scopeID to VNextScopeCursorRef(cursor = scope.cursor)
+            }
         }
     }
 
-    // MARK: - Initial Sync
-
-    private suspend fun initialSync(buckets: List<String>) {
-        val schema = SchemaResponse(
-            schemaVersion = schemaVersion,
-            schemaHash = schemaHash,
-            serverTime = java.time.Instant.now().toString(),
-            tables = syncedTables
-        )
-        database.writeTransaction { db ->
-            schemaManager.dropSyncedTablesInTransaction(db, schema)
-            changeTracker.clearAllInTransaction(db)
-            SynchroMeta.setInt64(db, MetaKey.CHECKPOINT, 0L)
-            SynchroMeta.set(db, MetaKey.KNOWN_BUCKETS, "[]")
-            SynchroMeta.set(db, MetaKey.SNAPSHOT_COMPLETE, "0")
-            SynchroMeta.clearAllBucketCheckpoints(db)
-            db.execSQL("DELETE FROM _synchro_bucket_members")
-            schemaManager.createSyncedTablesInTransaction(db, schema)
-        }
-
-        for (bucketId in buckets) {
-            rebuildBucket(bucketId)
+    private fun applyScopeAssignmentDelta(delta: VNextScopeAssignmentDelta, scopeSetVersion: Long) {
+        for (scopeId in delta.remove) {
+            pullProcessor.removeScope(scopeId, syncedTables)
         }
 
         database.writeTransaction { db ->
-            SynchroMeta.set(db, MetaKey.SNAPSHOT_COMPLETE, "1")
+            for (scope in delta.add) {
+                SynchroMeta.upsertScope(
+                    db,
+                    scopeId = scope.id,
+                    cursor = scope.cursor,
+                    checksum = null
+                )
+            }
+            SynchroMeta.setInt64(db, MetaKey.SCOPE_SET_VERSION, scopeSetVersion)
+        }
+    }
+
+    private fun scopeIDsNeedingRebuild(): Set<String> {
+        return database.readTransaction { db ->
+            SynchroMeta.getAllScopes(db)
+                .filter { it.cursor == null }
+                .map { it.scopeID }
+                .toSet()
+        }
+    }
+
+    private suspend fun rebuildAssignedScopesNeedingCursor() {
+        for (scopeId in scopeIDsNeedingRebuild()) {
+            rebuildScope(scopeId)
         }
     }
 

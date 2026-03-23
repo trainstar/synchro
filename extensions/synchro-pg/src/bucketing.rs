@@ -17,11 +17,7 @@ pub fn resolve_buckets(
     bucket_sql: &str,
     record_id: &str,
 ) -> Result<Vec<String>, spi::Error> {
-    let tup_table = client.select(
-        bucket_sql,
-        None,
-        &[record_id.into()],
-    )?;
+    let tup_table = client.select(bucket_sql, None, &[record_id.into()])?;
 
     let mut buckets = Vec::new();
     for row in tup_table {
@@ -32,21 +28,4 @@ pub fn resolve_buckets(
     }
 
     Ok(dedup_buckets(&buckets))
-}
-
-/// Validate a bucket SQL query by executing it with a dummy UUID.
-///
-/// Returns Ok(()) if the query executes successfully and returns TEXT[].
-pub fn validate_bucket_sql(bucket_sql: &str) -> Result<(), String> {
-    Spi::connect(|client| {
-        let dummy_id = "00000000-0000-0000-0000-000000000000";
-        match client.select(
-            bucket_sql,
-            None,
-            &[dummy_id.into()],
-        ) {
-            Ok(_) => Ok(()),
-            Err(e) => Err(format!("bucket SQL validation failed: {e}")),
-        }
-    })
 }

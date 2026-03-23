@@ -85,10 +85,7 @@ public class SynchroModuleImpl: NSObject {
         case .schemaMismatch(let version, let hash):
             return ("SCHEMA_MISMATCH", ["serverVersion": "\(version)", "serverHash": hash])
         case .pushRejected(let results):
-            let data = try? JSONSerialization.data(withJSONObject: results.map { r in
-                ["recordID": r.id, "table": r.tableName, "status": r.status] as [String: Any]
-            })
-            return ("PUSH_REJECTED", ["results": data.flatMap { String(data: $0, encoding: .utf8) } ?? "[]"])
+            return ("PUSH_REJECTED", ["results": encodeRejectedMutations(results)])
         case .networkError(let underlying):
             return ("NETWORK_ERROR", ["message": underlying.localizedDescription])
         case .serverError(let status, let msg):
@@ -628,6 +625,59 @@ public class SynchroModuleImpl: NSObject {
         ]
     }
 
+    private func encodeRejectedMutations(_ results: [VNextRejectedMutation]) -> String {
+        let payload = results.map { result in
+            [
+                "mutationID": result.mutationID,
+                "table": result.table,
+                "pk": anyCodableMapToJSONObject(result.pk),
+                "status": result.status.rawValue,
+                "code": result.code.rawValue,
+                "message": result.message ?? NSNull(),
+                "serverRow": anyCodableMapToJSONObject(result.serverRow),
+                "serverVersion": result.serverVersion ?? NSNull()
+            ] as [String: Any]
+        }
+
+        guard JSONSerialization.isValidJSONObject(payload),
+              let data = try? JSONSerialization.data(withJSONObject: payload),
+              let json = String(data: data, encoding: .utf8) else {
+            return "[]"
+        }
+
+        return json
+    }
+
+    private func anyCodableMapToJSONObject(_ value: [String: AnyCodable]?) -> Any {
+        guard let value else { return NSNull() }
+        return value.mapValues { anyCodableToJSONObject($0.value) }
+    }
+
+    private func anyCodableToJSONObject(_ value: Any?) -> Any {
+        switch value {
+        case nil:
+            return NSNull()
+        case let value as String:
+            return value
+        case let value as NSNumber:
+            return value
+        case let value as Bool:
+            return value
+        case let value as AnyCodable:
+            return anyCodableToJSONObject(value.value)
+        case let value as [AnyCodable]:
+            return value.map { anyCodableToJSONObject($0.value) }
+        case let value as [String: AnyCodable]:
+            return value.mapValues { anyCodableToJSONObject($0.value) }
+        case let value as [Any]:
+            return value.map { anyCodableToJSONObject($0) }
+        case let value as [String: Any]:
+            return value.mapValues { anyCodableToJSONObject($0) }
+        default:
+            return String(describing: value)
+        }
+    }
+
     private func encodeAnyCodableMap(_ value: [String: AnyCodable]?) -> String? {
         guard let value else { return nil }
         let encoder = JSONEncoder()
@@ -756,33 +806,6 @@ public class SynchroModuleImpl: NSObject {
             cancellable.cancel()
         }
         resolve(nil)
-    }
-
-    // MARK: - WAL / Sync
-
-    @objc
-    public func checkpoint(
-        _ mode: String,
-        resolve: @escaping RCTPromiseResolveBlock,
-        reject: @escaping RCTPromiseRejectBlock
-    ) {
-        guard let client = client else {
-            reject("NOT_CONNECTED", "Client not initialized", nil)
-            return
-        }
-        do {
-            let checkpointMode: Synchro.CheckpointMode
-            switch mode {
-            case "full": checkpointMode = .full
-            case "restart": checkpointMode = .restart
-            case "truncate": checkpointMode = .truncate
-            default: checkpointMode = .passive
-            }
-            try client.checkpoint(mode: checkpointMode)
-            resolve(nil)
-        } catch {
-            rejectWithError(reject, error)
-        }
     }
 
     @objc

@@ -278,6 +278,38 @@ final class PushProcessorTests: XCTestCase {
         XCTAssertFalse(try tracker.hasPendingChanges())
     }
 
+    func testApplyAcceptedVNextAppliesCanonicalServerRow() throws {
+        let (db, tracker, processor) = try makeTestEnv()
+
+        _ = try db.execute(
+            "INSERT INTO orders (id, ship_address, user_id, updated_at) VALUES (?, ?, ?, ?)",
+            params: ["w1", "Client Address", "u1", "2026-01-01T10:00:00.000Z"]
+        )
+
+        let accepted = [VNextAcceptedMutation(
+            mutationID: "m1",
+            table: "orders",
+            pk: ["id": AnyCodable("w1")],
+            status: .applied,
+            serverRow: [
+                "id": AnyCodable("w1"),
+                "ship_address": AnyCodable("Canonical Address"),
+                "user_id": AnyCodable("u1"),
+                "updated_at": AnyCodable("2026-01-01T12:00:00.000Z"),
+                "deleted_at": AnyCodable(NSNull())
+            ],
+            serverVersion: "2026-01-01T12:00:00.000Z"
+        )]
+
+        _ = try processor.applyAccepted(accepted: accepted, syncedTables: [testTable])
+
+        XCTAssertFalse(try tracker.hasPendingChanges())
+
+        let row = try db.queryOne("SELECT ship_address, updated_at FROM orders WHERE id = ?", params: ["w1"])
+        XCTAssertEqual(row?["ship_address"] as String?, "Canonical Address")
+        XCTAssertEqual(row?["updated_at"] as String?, "2026-01-01T12:00:00.000Z")
+    }
+
     // MARK: - applyRejected Tests
 
     func testApplyRejectedAppliesServerVersion() throws {
@@ -356,6 +388,42 @@ final class PushProcessorTests: XCTestCase {
 
         // Error status, not conflict — no conflict event
         XCTAssertEqual(conflicts.count, 0)
+    }
+
+    func testApplyRejectedVNextConflictAppliesCanonicalServerRow() throws {
+        let (db, tracker, processor) = try makeTestEnv()
+
+        _ = try db.execute(
+            "INSERT INTO orders (id, ship_address, user_id, updated_at) VALUES (?, ?, ?, ?)",
+            params: ["w1", "Client Address", "u1", "2026-01-01T10:00:00.000Z"]
+        )
+
+        let rejected = [VNextRejectedMutation(
+            mutationID: "m1",
+            table: "orders",
+            pk: ["id": AnyCodable("w1")],
+            status: .conflict,
+            code: .versionConflict,
+            message: "server version is newer",
+            serverRow: [
+                "id": AnyCodable("w1"),
+                "ship_address": AnyCodable("Server Address"),
+                "user_id": AnyCodable("u1"),
+                "updated_at": AnyCodable("2026-01-01T11:00:00.000Z"),
+                "deleted_at": AnyCodable(NSNull())
+            ],
+            serverVersion: "2026-01-01T11:00:00.000Z"
+        )]
+
+        let conflicts = try processor.applyRejected(rejected: rejected, syncedTables: [testTable])
+
+        XCTAssertFalse(try tracker.hasPendingChanges())
+
+        let row = try db.queryOne("SELECT ship_address, updated_at FROM orders WHERE id = ?", params: ["w1"])
+        XCTAssertEqual(row?["ship_address"] as String?, "Server Address")
+        XCTAssertEqual(row?["updated_at"] as String?, "2026-01-01T11:00:00.000Z")
+        XCTAssertEqual(conflicts.count, 1)
+        XCTAssertEqual(conflicts[0].serverData?["ship_address"], AnyCodable("Server Address"))
     }
 
     func testApplyRejectedDoesNotTriggerCDC() throws {

@@ -1,4 +1,10 @@
-use crate::protocol::Operation;
+//! Legacy changelog dedup helpers.
+//!
+//! These helpers still use `bucket_id` in their stored field names because the
+//! current PostgreSQL extension has not been migrated yet. In vNext terms, that
+//! identifier represents a scope instance id.
+
+use crate::change::ChangeOperation;
 
 /// A reference to a changelog entry, used during deduplication.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -6,8 +12,14 @@ pub struct RecordRef {
     pub table_name: String,
     pub record_id: String,
     pub bucket_id: String,
-    pub operation: Operation,
+    pub operation: ChangeOperation,
     pub seq: i64,
+}
+
+impl RecordRef {
+    pub fn scope_id(&self) -> &str {
+        &self.bucket_id
+    }
 }
 
 /// Input entry for deduplication (mirrors ChangelogEntry fields needed).
@@ -17,7 +29,13 @@ pub struct ChangelogEntry {
     pub bucket_id: String,
     pub table_name: String,
     pub record_id: String,
-    pub operation: Operation,
+    pub operation: ChangeOperation,
+}
+
+impl ChangelogEntry {
+    pub fn scope_id(&self) -> &str {
+        &self.bucket_id
+    }
 }
 
 /// Deduplicates changelog entries, keeping only the latest entry per record.
@@ -60,7 +78,7 @@ pub fn deduplicate_entries(entries: &[ChangelogEntry]) -> Vec<RecordRef> {
 mod tests {
     use super::*;
 
-    fn entry(seq: i64, table: &str, id: &str, bucket: &str, op: Operation) -> ChangelogEntry {
+    fn entry(seq: i64, table: &str, id: &str, bucket: &str, op: ChangeOperation) -> ChangelogEntry {
         ChangelogEntry {
             seq,
             bucket_id: bucket.into(),
@@ -73,8 +91,8 @@ mod tests {
     #[test]
     fn no_duplicates() {
         let entries = vec![
-            entry(1, "items", "a", "b1", Operation::Insert),
-            entry(2, "items", "b", "b1", Operation::Insert),
+            entry(1, "items", "a", "b1", ChangeOperation::Insert),
+            entry(2, "items", "b", "b1", ChangeOperation::Insert),
         ];
         let refs = deduplicate_entries(&entries);
         assert_eq!(refs.len(), 2);
@@ -85,16 +103,16 @@ mod tests {
     #[test]
     fn duplicate_keeps_latest_at_same_position() {
         let entries = vec![
-            entry(1, "items", "a", "b1", Operation::Insert),
-            entry(2, "items", "b", "b1", Operation::Insert),
-            entry(3, "items", "a", "b1", Operation::Update),
+            entry(1, "items", "a", "b1", ChangeOperation::Insert),
+            entry(2, "items", "b", "b1", ChangeOperation::Insert),
+            entry(3, "items", "a", "b1", ChangeOperation::Update),
         ];
         let refs = deduplicate_entries(&entries);
         assert_eq!(refs.len(), 2);
         // "a" stays at position 0, but updated to seq 3 / Update.
         assert_eq!(refs[0].record_id, "a");
         assert_eq!(refs[0].seq, 3);
-        assert_eq!(refs[0].operation, Operation::Update);
+        assert_eq!(refs[0].operation, ChangeOperation::Update);
         // "b" remains at position 1.
         assert_eq!(refs[1].record_id, "b");
         assert_eq!(refs[1].seq, 2);
@@ -103,20 +121,20 @@ mod tests {
     #[test]
     fn insert_then_delete() {
         let entries = vec![
-            entry(1, "items", "a", "b1", Operation::Insert),
-            entry(2, "items", "a", "b1", Operation::Delete),
+            entry(1, "items", "a", "b1", ChangeOperation::Insert),
+            entry(2, "items", "a", "b1", ChangeOperation::Delete),
         ];
         let refs = deduplicate_entries(&entries);
         assert_eq!(refs.len(), 1);
-        assert_eq!(refs[0].operation, Operation::Delete);
+        assert_eq!(refs[0].operation, ChangeOperation::Delete);
         assert_eq!(refs[0].seq, 2);
     }
 
     #[test]
     fn different_tables_not_deduped() {
         let entries = vec![
-            entry(1, "items", "a", "b1", Operation::Insert),
-            entry(2, "orders", "a", "b1", Operation::Insert),
+            entry(1, "items", "a", "b1", ChangeOperation::Insert),
+            entry(2, "orders", "a", "b1", ChangeOperation::Insert),
         ];
         let refs = deduplicate_entries(&entries);
         assert_eq!(refs.len(), 2);
@@ -131,14 +149,14 @@ mod tests {
     #[test]
     fn triple_update_keeps_last() {
         let entries = vec![
-            entry(1, "items", "a", "b1", Operation::Insert),
-            entry(5, "items", "a", "b1", Operation::Update),
-            entry(10, "items", "a", "b1", Operation::Delete),
+            entry(1, "items", "a", "b1", ChangeOperation::Insert),
+            entry(5, "items", "a", "b1", ChangeOperation::Update),
+            entry(10, "items", "a", "b1", ChangeOperation::Delete),
         ];
         let refs = deduplicate_entries(&entries);
         assert_eq!(refs.len(), 1);
         assert_eq!(refs[0].seq, 10);
-        assert_eq!(refs[0].operation, Operation::Delete);
+        assert_eq!(refs[0].operation, ChangeOperation::Delete);
     }
 
     #[test]
@@ -148,7 +166,7 @@ mod tests {
         let mut entries = Vec::with_capacity(10_000);
         for i in 0..10_000i64 {
             let record_id = format!("r{}", i % 1000);
-            entries.push(entry(i, "items", &record_id, "b1", Operation::Update));
+            entries.push(entry(i, "items", &record_id, "b1", ChangeOperation::Update));
         }
         let refs = deduplicate_entries(&entries);
         assert_eq!(refs.len(), 1000);
@@ -163,15 +181,15 @@ mod tests {
         // Same record: Insert, Delete, Insert, Delete.
         // Final state must be Delete at the last seq.
         let entries = vec![
-            entry(1, "items", "a", "b1", Operation::Insert),
-            entry(2, "items", "a", "b1", Operation::Delete),
-            entry(3, "items", "a", "b1", Operation::Insert),
-            entry(4, "items", "a", "b1", Operation::Delete),
+            entry(1, "items", "a", "b1", ChangeOperation::Insert),
+            entry(2, "items", "a", "b1", ChangeOperation::Delete),
+            entry(3, "items", "a", "b1", ChangeOperation::Insert),
+            entry(4, "items", "a", "b1", ChangeOperation::Delete),
         ];
         let refs = deduplicate_entries(&entries);
         assert_eq!(refs.len(), 1);
         assert_eq!(refs[0].seq, 4);
-        assert_eq!(refs[0].operation, Operation::Delete);
+        assert_eq!(refs[0].operation, ChangeOperation::Delete);
     }
 
     #[test]
@@ -180,13 +198,14 @@ mod tests {
         // (table_name, record_id), NOT (table_name, record_id, bucket_id).
         // The later entry replaces the earlier regardless of bucket.
         let entries = vec![
-            entry(1, "items", "a", "bucket_x", Operation::Insert),
-            entry(2, "items", "a", "bucket_y", Operation::Update),
+            entry(1, "items", "a", "bucket_x", ChangeOperation::Insert),
+            entry(2, "items", "a", "bucket_y", ChangeOperation::Update),
         ];
         let refs = deduplicate_entries(&entries);
         assert_eq!(refs.len(), 1);
         assert_eq!(refs[0].seq, 2);
         assert_eq!(refs[0].bucket_id, "bucket_y");
-        assert_eq!(refs[0].operation, Operation::Update);
+        assert_eq!(refs[0].scope_id(), "bucket_y");
+        assert_eq!(refs[0].operation, ChangeOperation::Update);
     }
 }

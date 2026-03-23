@@ -77,12 +77,7 @@ fn calculate_safe_seq(client: &SpiClient<'_>) -> i64 {
             None,
             &[],
         ) {
-            Ok(tup) => tup
-                .first()
-                .get_one::<i64>()
-                .ok()
-                .flatten()
-                .unwrap_or(0),
+            Ok(tup) => tup.first().get_one::<i64>().ok().flatten().unwrap_or(0),
             Err(e) => pgrx::error!("querying max changelog seq: {}", e),
         };
     }
@@ -96,12 +91,7 @@ fn calculate_safe_seq(client: &SpiClient<'_>) -> i64 {
         None,
         &[],
     ) {
-        Ok(tup) => tup
-            .first()
-            .get_one::<i64>()
-            .ok()
-            .flatten()
-            .unwrap_or(0),
+        Ok(tup) => tup.first().get_one::<i64>().ok().flatten().unwrap_or(0),
         Err(e) => pgrx::error!("querying bucket checkpoints for safe seq: {}", e),
     };
 
@@ -118,12 +108,7 @@ fn calculate_safe_seq(client: &SpiClient<'_>) -> i64 {
         None,
         &[],
     ) {
-        Ok(tup) => tup
-            .first()
-            .get_one::<i64>()
-            .ok()
-            .flatten()
-            .unwrap_or(0),
+        Ok(tup) => tup.first().get_one::<i64>().ok().flatten().unwrap_or(0),
         Err(e) => pgrx::error!("querying legacy checkpoints for safe seq: {}", e),
     };
 
@@ -139,17 +124,14 @@ fn calculate_safe_seq(client: &SpiClient<'_>) -> i64 {
 fn batch_delete_changelog(client: &mut SpiClient<'_>, safe_seq: i64, batch_size: i32) -> i64 {
     let mut total: i64 = 0;
 
-    loop {
-        let deleted = match client.update(
-            "DELETE FROM sync_changelog WHERE seq IN ( \
+    while let Ok(tup) = client.update(
+        "DELETE FROM sync_changelog WHERE seq IN ( \
                  SELECT seq FROM sync_changelog WHERE seq <= $1 ORDER BY seq LIMIT $2 \
              )",
-            None,
-            &[safe_seq.into(), batch_size.into()],
-        ) {
-            Ok(tup) => tup.len() as i64,
-            Err(_) => break,
-        };
+        None,
+        &[safe_seq.into(), batch_size.into()],
+    ) {
+        let deleted = tup.len() as i64;
 
         total += deleted;
         if deleted < batch_size as i64 {

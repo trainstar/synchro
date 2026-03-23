@@ -1,130 +1,396 @@
 name: Release
 
 on:
+  push:
+    tags:
+      - 'v*.*.*'
   workflow_dispatch:
-    inputs:
-      version:
-        description: 'Release version (e.g. 0.2.0, without v prefix)'
-        required: true
-        type: string
 
 permissions:
   contents: write
   id-token: write
 
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  VERSION: ${{ github.ref_name }}
+
 jobs:
-  # ── Validate version format ────────────────────────────────────────────
-  prepare:
+  validate-quality:
     runs-on: ubuntu-latest
-    outputs:
-      version: ${{ steps.validate.outputs.version }}
-    steps:
-      - name: Validate version
-        id: validate
-        run: |
-          VERSION="${{ inputs.version }}"
-          if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            echo "::error::Version '$VERSION' does not match X.Y.Z pattern"
-            exit 1
-          fi
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-          echo "Version: $VERSION"
-
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-go@v5
-        with:
-          go-version-file: go.mod
-
-      - name: Check license compliance
-        run: |
-          go install github.com/google/go-licenses@latest
-          go-licenses check ./... --allowed_licenses=MIT,BSD-2-Clause,BSD-3-Clause,Apache-2.0,ISC,MPL-2.0,CC0-1.0 --ignore modernc.org/mathutil
-
-  # ── Go tests ───────────────────────────────────────────────────────────
-  test-go:
-    needs: prepare
-    runs-on: ubuntu-latest
-    services:
-      postgres:
-        image: postgres:16
-        env:
-          POSTGRES_USER: postgres
-          POSTGRES_PASSWORD: postgres
-          POSTGRES_DB: synchro_test
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd="pg_isready -U postgres"
-          --health-interval=5s
-          --health-timeout=5s
-          --health-retries=5
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-go@v5
         with:
-          go-version-file: go.mod
+          go-version-file: api/go/go.mod
 
-      - name: Configure WAL for logical replication
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: yarn
+          cache-dependency-path: clients/react-native/yarn.lock
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            extensions -> target
+
+      - name: Install React Native dependencies
+        working-directory: clients/react-native
         run: |
-          PGPASSWORD=postgres psql -h localhost -U postgres -c "ALTER SYSTEM SET wal_level = logical;"
-          PGPASSWORD=postgres psql -h localhost -U postgres -c "ALTER SYSTEM SET max_replication_slots = 10;"
-          PGPASSWORD=postgres psql -h localhost -U postgres -c "ALTER SYSTEM SET max_wal_senders = 10;"
-          docker restart $(docker ps -q --filter "ancestor=postgres:16")
-          sleep 3
-          until PGPASSWORD=postgres pg_isready -h localhost -U postgres; do sleep 1; done
+          corepack enable
+          yarn install --immutable
 
-      - name: Run Go tests
-        env:
-          TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/synchro_test?sslmode=disable
-          TEST_REPLICATION_URL: postgres://postgres:postgres@localhost:5432/synchro_test?replication=database&sslmode=disable
-        run: go test -race -count=1 -p 1 ./...
+      - name: Run Go lint checks
+        run: make lint-go
 
-  # ── Swift tests ────────────────────────────────────────────────────────
-  test-swift:
-    needs: prepare
+      - name: Run Rust lint checks
+        run: make lint-rust
+
+      - name: Run React Native lint checks
+        run: make lint-rn
+
+      - name: Run React Native unit tests
+        run: make test-rn-unit
+
+  validate-server:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: api/go/go.mod
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            extensions -> target
+
+      - name: Install PostgreSQL extension build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            ccache \
+            clang \
+            flex \
+            bison \
+            libclang-dev \
+            libreadline-dev \
+            libssl-dev \
+            libxml2-dev \
+            libxml2-utils \
+            libxslt-dev \
+            pkg-config \
+            xsltproc \
+            zlib1g-dev
+
+      - uses: actions/cache@v4
+        with:
+          path: ~/.pgrx
+          key: pgrx-${{ runner.os }}-0.17.0-pg18
+
+      - name: Install cargo-pgrx
+        run: cargo install --locked cargo-pgrx --version 0.17.0
+
+      - name: Initialize PostgreSQL 18 for pgrx
+        run: cargo pgrx init --pg18 download
+
+      - name: Validate Rust core
+        run: make test-rust-core
+
+      - name: Validate PostgreSQL extension
+        run: make test-rust-pg
+
+      - name: Validate Go adapter
+        run: make test-adapter
+
+  validate-swift:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
-      - run: cd clients/swift && swift test
 
-  # ── Kotlin tests ───────────────────────────────────────────────────────
-  test-kotlin:
-    needs: prepare
-    runs-on: ubuntu-latest
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: api/go/go.mod
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            extensions -> target
+
+      - uses: actions/cache@v4
+        with:
+          path: ~/.pgrx
+          key: pgrx-${{ runner.os }}-0.17.0-pg18
+
+      - name: Install cargo-pgrx
+        run: cargo install --locked cargo-pgrx --version 0.17.0
+
+      - name: Initialize PostgreSQL 18 for pgrx
+        run: cargo pgrx init --pg18 download
+
+      - name: Validate Swift SDK
+        run: make test-swift
+
+  validate-rn-ios:
+    runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: api/go/go.mod
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: yarn
+          cache-dependency-path: clients/react-native/yarn.lock
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            extensions -> target
+
+      - uses: actions/cache@v4
+        with:
+          path: ~/.pgrx
+          key: pgrx-${{ runner.os }}-0.17.0-pg18
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/Library/Caches/CocoaPods
+            clients/react-native/example/ios/Pods
+          key: cocoapods-${{ runner.os }}-${{ hashFiles('clients/react-native/example/ios/Podfile.lock', 'Synchro.podspec', 'clients/react-native/SynchroReactNative.podspec') }}
+
+      - name: Install cargo-pgrx
+        run: cargo install --locked cargo-pgrx --version 0.17.0
+
+      - name: Initialize PostgreSQL 18 for pgrx
+        run: cargo pgrx init --pg18 download
+
+      - name: Install React Native dependencies
+        working-directory: clients/react-native
+        run: |
+          corepack enable
+          yarn install --immutable
+
+      - name: Ensure CocoaPods is available
+        run: |
+          if ! command -v pod >/dev/null 2>&1; then
+            sudo gem install cocoapods
+          fi
+
+      - name: Validate React Native iOS bridge
+        run: make test-rn-e2e-ios
+
+  validate-kotlin:
+    runs-on: ubuntu-latest
+    env:
+      ANDROID_HOME: /usr/local/lib/android/sdk
+      ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
+      GRADLE_TEST_ARGS: ""
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: api/go/go.mod
 
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '17'
+          cache: gradle
 
-      - run: cd clients/kotlin && ./gradlew :synchro:test
+      - uses: dtolnay/rust-toolchain@stable
 
-  # ── React Native tests ────────────────────────────────────────────────
-  test-rn:
-    needs: prepare
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            extensions -> target
+
+      - name: Install PostgreSQL extension build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            ccache \
+            clang \
+            flex \
+            bison \
+            libclang-dev \
+            libreadline-dev \
+            libssl-dev \
+            libxml2-dev \
+            libxml2-utils \
+            libxslt-dev \
+            pkg-config \
+            xsltproc \
+            zlib1g-dev
+
+      - uses: actions/cache@v4
+        with:
+          path: ~/.pgrx
+          key: pgrx-${{ runner.os }}-0.17.0-pg18
+
+      - name: Install cargo-pgrx
+        run: cargo install --locked cargo-pgrx --version 0.17.0
+
+      - name: Initialize PostgreSQL 18 for pgrx
+        run: cargo pgrx init --pg18 download
+
+      - uses: android-actions/setup-android@v3
+
+      - name: Accept Android SDK licenses
+        run: yes | sdkmanager --licenses > /dev/null
+
+      - name: Install Android SDK components
+        run: |
+          sdkmanager \
+            "platform-tools" \
+            "platforms;android-34" \
+            "build-tools;34.0.0"
+
+      - name: Set Android Java home
+        run: echo "ANDROID_JAVA_HOME=${JAVA_HOME}" >> "$GITHUB_ENV"
+
+      - name: Validate Kotlin SDK
+        run: make test-kotlin
+
+  validate-rn-android:
+    runs-on: ubuntu-latest
+    env:
+      ANDROID_HOME: /usr/local/lib/android/sdk
+      ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
+      GRADLE_TEST_ARGS: ""
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: api/go/go.mod
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: gradle
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: yarn
+          cache-dependency-path: clients/react-native/yarn.lock
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            extensions -> target
+
+      - name: Install PostgreSQL extension build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            ccache \
+            clang \
+            flex \
+            bison \
+            libclang-dev \
+            libreadline-dev \
+            libssl-dev \
+            libxml2-dev \
+            libxml2-utils \
+            libxslt-dev \
+            pkg-config \
+            xsltproc \
+            zlib1g-dev
+
+      - uses: actions/cache@v4
+        with:
+          path: ~/.pgrx
+          key: pgrx-${{ runner.os }}-0.17.0-pg18
+
+      - name: Install cargo-pgrx
+        run: cargo install --locked cargo-pgrx --version 0.17.0
+
+      - name: Initialize PostgreSQL 18 for pgrx
+        run: cargo pgrx init --pg18 download
+
+      - uses: android-actions/setup-android@v3
+
+      - name: Accept Android SDK licenses
+        run: yes | sdkmanager --licenses > /dev/null
+
+      - name: Install Android SDK components
+        run: |
+          sdkmanager \
+            "platform-tools" \
+            "platforms;android-34" \
+            "build-tools;34.0.0" \
+            "emulator" \
+            "system-images;android-34;google_apis;x86_64"
+
+      - name: Set Android Java home
+        run: echo "ANDROID_JAVA_HOME=${JAVA_HOME}" >> "$GITHUB_ENV"
+
+      - name: Install React Native dependencies
+        working-directory: clients/react-native
+        run: |
+          corepack enable
+          yarn install --immutable
+
+      - name: Validate React Native Android bridge
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 34
+          arch: x86_64
+          profile: pixel_7
+          target: google_apis
+          emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim
+          script: make test-rn-e2e-android
+
+  validate-docs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: docs/package-lock.json
 
-      - name: Install dependencies
-        run: cd clients/react-native && yarn install --immutable
+      - name: Validate docs build
+        run: make docs-build
 
-      - run: cd clients/react-native && npm test -- --testPathIgnorePatterns=e2e --testPathIgnorePatterns=__mocks__
-
-  # ── Build Go binaries ─────────────────────────────────────────────────
-  build-go:
-    needs: [test-go, prepare]
+  build-adapter-binaries:
+    needs:
+      - validate-quality
+      - validate-server
+      - validate-swift
+      - validate-rn-ios
+      - validate-kotlin
+      - validate-rn-android
+      - validate-docs
     runs-on: ubuntu-latest
-    env:
-      VERSION: ${{ needs.prepare.outputs.version }}
     strategy:
       matrix:
         include:
@@ -141,86 +407,88 @@ jobs:
 
       - uses: actions/setup-go@v5
         with:
-          go-version-file: go.mod
+          go-version-file: api/go/go.mod
 
-      - name: Build synchrod
+      - name: Build synchrod-pg binary
         env:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
           CGO_ENABLED: '0'
         run: |
-          BINARY="synchrod-${{ matrix.goos }}-${{ matrix.goarch }}"
-          go build -ldflags="-s -w -X main.version=${VERSION}" -o "$BINARY" ./cmd/synchrod
-
-      - name: Generate SBOM
-        uses: anchore/sbom-action@v0
-        with:
-          artifact-name: "sbom-${{ matrix.goos }}-${{ matrix.goarch }}.spdx.json"
-          output-file: "sbom-${{ matrix.goos }}-${{ matrix.goarch }}.spdx.json"
-          format: spdx-json
+          mkdir -p dist
+          cd api/go
+          GOWORK=off go build -ldflags="-s -w" -o "../../dist/synchrod-pg-${{ matrix.goos }}-${{ matrix.goarch }}" ./cmd/synchrod-pg
 
       - uses: actions/upload-artifact@v4
         with:
-          name: "synchrod-${{ matrix.goos }}-${{ matrix.goarch }}"
-          path: |
-            synchrod-${{ matrix.goos }}-${{ matrix.goarch }}
-            sbom-${{ matrix.goos }}-${{ matrix.goarch }}.spdx.json
+          name: synchrod-pg-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: dist/synchrod-pg-${{ matrix.goos }}-${{ matrix.goarch }}
 
-  # ── Publish Swift SDK ──────────────────────────────────────────────────
-  release-swift:
-    needs: [test-go, test-swift, prepare]
-    runs-on: macos-latest
-    env:
-      VERSION: ${{ needs.prepare.outputs.version }}
+  package-extension:
+    needs: validate-server
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
         with:
-          fetch-depth: 0
+          workspaces: |
+            extensions -> target
 
-      - name: Fetch secrets from Doppler
-        uses: dopplerhq/secrets-fetch-action@v1.3.1
+      - name: Install PostgreSQL extension build dependencies on Linux
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            ccache \
+            clang \
+            flex \
+            bison \
+            libclang-dev \
+            libreadline-dev \
+            libssl-dev \
+            libxml2-dev \
+            libxml2-utils \
+            libxslt-dev \
+            pkg-config \
+            xsltproc \
+            zlib1g-dev
+
+      - uses: actions/cache@v4
         with:
-          doppler-token: ${{ secrets.DOPPLER_TOKEN }}
-          inject-env-vars: true
+          path: ~/.pgrx
+          key: pgrx-${{ runner.os }}-0.17.0-pg18
 
-      - name: Subtree split and push swift-sdk branch
+      - name: Install cargo-pgrx
+        run: cargo install --locked cargo-pgrx --version 0.17.0
+
+      - name: Initialize PostgreSQL 18 for pgrx
+        run: cargo pgrx init --pg18 download
+
+      - name: Package PG 18 extension
         run: |
-          git subtree split --prefix=clients/swift -b swift-sdk
-          git push origin swift-sdk --force
-
-      - name: Tag swift-sdk branch
-        run: |
-          git checkout swift-sdk
-          git tag -f "$VERSION"
-          git push origin "$VERSION" --force
-
-      # CocoaPods publish skipped: GRDB.swift 7.0 is not available on CocoaPods trunk (SPM-only).
-      # Uncomment when GRDB 7.x is published to CocoaPods.
-      # - name: Publish to CocoaPods
-      #   env:
-      #     COCOAPODS_TRUNK_TOKEN: ${{ env.COCOAPODS_TRUNK_TOKEN }}
-      #   run: |
-      #     git checkout swift-sdk
-      #     sed -i '' "s/s.version.*=.*/s.version      = \"$VERSION\"/" Synchro.podspec
-      #     pod repo update
-      #     pod trunk push Synchro.podspec --allow-warnings
-
-      - name: Build Swift source archive
-        run: |
-          git checkout swift-sdk
-          zip -r "Synchro-swift-${VERSION}.zip" . -x '.git/*'
+          mkdir -p dist
+          cd extensions/synchro-pg
+          PG_CONFIG_PATH="$(awk -F'\"' '/^pg18[[:space:]]*=/ { print $2 }' "$HOME/.pgrx/config.toml")"
+          CARGO_TARGET_DIR="${GITHUB_WORKSPACE}/.pgrx-target" cargo pgrx package --pg-config "$PG_CONFIG_PATH" --out-dir "${GITHUB_WORKSPACE}/dist/synchro-pg-pg18"
+          cd "${GITHUB_WORKSPACE}/dist"
+          tar -czf "synchro-pg-pg18-${{ runner.os }}-${{ runner.arch }}.tar.gz" synchro-pg-pg18
 
       - uses: actions/upload-artifact@v4
         with:
-          name: swift-archive
-          path: "Synchro-swift-${{ needs.prepare.outputs.version }}.zip"
+          name: synchro-pg-pg18-${{ runner.os }}-${{ runner.arch }}
+          path: dist/synchro-pg-pg18-${{ runner.os }}-${{ runner.arch }}.tar.gz
 
-  # ── Publish Kotlin SDK ─────────────────────────────────────────────────
-  release-kotlin:
-    needs: [test-kotlin, prepare]
+  publish-kotlin:
+    needs: validate-kotlin
     runs-on: ubuntu-latest
-    env:
-      VERSION: ${{ needs.prepare.outputs.version }}
+    if: ${{ github.event_name == 'push' && secrets.MAVEN_CENTRAL_USERNAME != '' && secrets.MAVEN_CENTRAL_PASSWORD != '' && secrets.GPG_PRIVATE_KEY != '' && secrets.GPG_PASSPHRASE != '' }}
     steps:
       - uses: actions/checkout@v4
 
@@ -228,47 +496,24 @@ jobs:
         with:
           distribution: temurin
           java-version: '17'
+          cache: gradle
 
-      - name: Fetch secrets from Doppler
-        uses: dopplerhq/secrets-fetch-action@v1.3.1
-        with:
-          doppler-token: ${{ secrets.DOPPLER_TOKEN }}
-          inject-env-vars: true
-
-      - name: Import GPG key
-        run: |
-          echo "$GPG_PRIVATE_KEY" | gpg --batch --import
-          GPG_KEY_ID=$(gpg --list-secret-keys --keyid-format short 2>/dev/null | grep sec | head -1 | sed 's/.*\///' | sed 's/ .*//')
-          echo "GPG_KEY_ID=$GPG_KEY_ID" >> "$GITHUB_ENV"
-
-      - name: Publish to Maven Central
+      - name: Publish Kotlin package
         working-directory: clients/kotlin
         env:
-          ORG_GRADLE_PROJECT_mavenCentralUsername: ${{ env.MAVEN_CENTRAL_USERNAME }}
-          ORG_GRADLE_PROJECT_mavenCentralPassword: ${{ env.MAVEN_CENTRAL_PASSWORD }}
-          ORG_GRADLE_PROJECT_signingInMemoryKey: ${{ env.GPG_PRIVATE_KEY }}
-          ORG_GRADLE_PROJECT_signingInMemoryKeyPassword: ${{ env.GPG_PASSPHRASE }}
-        run: ./gradlew publishAndReleaseToMavenCentral -Pversion="$VERSION"
+          ORG_GRADLE_PROJECT_mavenCentralUsername: ${{ secrets.MAVEN_CENTRAL_USERNAME }}
+          ORG_GRADLE_PROJECT_mavenCentralPassword: ${{ secrets.MAVEN_CENTRAL_PASSWORD }}
+          ORG_GRADLE_PROJECT_signingInMemoryKey: ${{ secrets.GPG_PRIVATE_KEY }}
+          ORG_GRADLE_PROJECT_signingInMemoryKeyPassword: ${{ secrets.GPG_PASSPHRASE }}
+        run: ./gradlew publishAndReleaseToMavenCentral -Pversion="${VERSION#v}"
 
-      - name: Collect AAR artifact
-        run: |
-          AAR_PATH=$(find clients/kotlin/synchro/build/outputs/aar -name '*.aar' | head -1)
-          cp "$AAR_PATH" "synchro-${VERSION}.aar"
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: kotlin-aar
-          path: "synchro-${{ needs.prepare.outputs.version }}.aar"
-
-  # ── Publish React Native SDK ───────────────────────────────────────────
-  release-npm:
-    needs: [release-swift, release-kotlin, test-rn, prepare]
+  publish-npm:
+    needs: [validate-rn-ios, validate-rn-android]
     runs-on: ubuntu-latest
+    if: ${{ github.event_name == 'push' && secrets.NPM_TOKEN != '' }}
     permissions:
       contents: read
       id-token: write
-    env:
-      VERSION: ${{ needs.prepare.outputs.version }}
     steps:
       - uses: actions/checkout@v4
 
@@ -276,38 +521,28 @@ jobs:
         with:
           node-version: '22'
           registry-url: 'https://registry.npmjs.org'
+          cache: yarn
+          cache-dependency-path: clients/react-native/yarn.lock
 
-      - run: npm install -g npm@latest
-
-      - name: Install dependencies and build
+      - name: Install and build React Native package
         working-directory: clients/react-native
         run: |
+          corepack enable
           yarn install --immutable
           yarn prepare
 
-      - name: Stamp version and publish
+      - name: Publish React Native package
         working-directory: clients/react-native
         env:
-          NODE_AUTH_TOKEN: ''
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
-          npm version "$VERSION" --no-git-tag-version
+          npm version "${VERSION#v}" --no-git-tag-version
           npm publish --access public --provenance
 
-      - name: Pack tarball for release artifact
-        working-directory: clients/react-native
-        run: npm pack
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: npm-tarball
-          path: "clients/react-native/trainstar-synchro-react-native-${{ needs.prepare.outputs.version }}.tgz"
-
-  # ── Create GitHub Release with all artifacts ───────────────────────────
   create-release:
-    needs: [release-swift, release-kotlin, release-npm, build-go, prepare]
+    needs: [build-adapter-binaries, package-extension]
     runs-on: ubuntu-latest
-    env:
-      VERSION: ${{ needs.prepare.outputs.version }}
+    if: ${{ github.event_name == 'push' }}
     steps:
       - uses: actions/checkout@v4
 
@@ -317,43 +552,12 @@ jobs:
 
       - name: Generate checksums
         run: |
-          cd artifacts
-          sha256sum \
-            synchrod-linux-amd64/synchrod-linux-amd64 \
-            synchrod-linux-arm64/synchrod-linux-arm64 \
-            synchrod-darwin-amd64/synchrod-darwin-amd64 \
-            synchrod-darwin-arm64/synchrod-darwin-arm64 \
-            synchrod-linux-amd64/sbom-linux-amd64.spdx.json \
-            synchrod-linux-arm64/sbom-linux-arm64.spdx.json \
-            synchrod-darwin-amd64/sbom-darwin-amd64.spdx.json \
-            synchrod-darwin-arm64/sbom-darwin-arm64.spdx.json \
-            swift-archive/Synchro-swift-${VERSION}.zip \
-            kotlin-aar/synchro-${VERSION}.aar \
-            npm-tarball/trainstar-synchro-react-native-${VERSION}.tgz \
-            > checksums.txt
+          find artifacts -type f -print0 | sort -z | xargs -0 shasum -a 256 > SHA256SUMS.txt
 
-      - name: Create tag
-        run: |
-          git tag "v${VERSION}"
-          git push origin "v${VERSION}"
-
-      - name: Create GitHub Release
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          gh release create "v${VERSION}" \
-            --repo "$GITHUB_REPOSITORY" \
-            --title "v${VERSION}" \
-            --generate-notes \
-            "artifacts/synchrod-linux-amd64/synchrod-linux-amd64#synchrod-linux-amd64" \
-            "artifacts/synchrod-linux-arm64/synchrod-linux-arm64#synchrod-linux-arm64" \
-            "artifacts/synchrod-darwin-amd64/synchrod-darwin-amd64#synchrod-darwin-amd64" \
-            "artifacts/synchrod-darwin-arm64/synchrod-darwin-arm64#synchrod-darwin-arm64" \
-            "artifacts/synchrod-linux-amd64/sbom-linux-amd64.spdx.json" \
-            "artifacts/synchrod-linux-arm64/sbom-linux-arm64.spdx.json" \
-            "artifacts/synchrod-darwin-amd64/sbom-darwin-amd64.spdx.json" \
-            "artifacts/synchrod-darwin-arm64/sbom-darwin-arm64.spdx.json" \
-            "artifacts/swift-archive/Synchro-swift-${VERSION}.zip" \
-            "artifacts/kotlin-aar/synchro-${VERSION}.aar" \
-            "artifacts/npm-tarball/trainstar-synchro-react-native-${VERSION}.tgz" \
-            "artifacts/checksums.txt"
+      - name: Publish GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            artifacts/**/*
+            SHA256SUMS.txt

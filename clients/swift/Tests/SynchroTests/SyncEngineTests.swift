@@ -74,15 +74,15 @@ final class SyncEngineTests: XCTestCase {
 
         MockURLProtocol.requestHandler = { request in
             let path = request.url!.path
-            if path.hasSuffix("/sync/schema") {
-                callLog.append("schema")
-                return try self.mockResponse(json: self.schemaJSON)
-            } else if path.hasSuffix("/sync/register") {
-                callLog.append("register")
-                return try self.mockResponse(json: self.registerJSON)
+            if path.hasSuffix("/sync/connect") {
+                callLog.append("connect")
+                return try self.mockResponse(json: self.connectJSON)
+            } else if path.hasSuffix("/sync/rebuild") {
+                callLog.append("rebuild")
+                return try self.mockResponse(json: self.rebuildJSON(finalCursor: "scope_cursor_1"))
             } else if path.hasSuffix("/sync/pull") {
                 callLog.append("pull")
-                return try self.mockResponse(json: self.pullJSON(checkpoint: 10))
+                return try self.mockResponse(json: self.scopePullJSON(cursor: "scope_cursor_2"))
             }
             return try self.mockResponse(statusCode: 500, json: ["error": "unexpected: \(path)"])
         }
@@ -92,18 +92,24 @@ final class SyncEngineTests: XCTestCase {
 
         try await engine.start()
 
-        // Schema fetched, client registered, initial pull completed (no push — no pending)
-        XCTAssertEqual(callLog, ["schema", "register", "pull"])
+        XCTAssertEqual(callLog, ["connect", "rebuild", "pull"])
 
-        // Checkpoint advanced from pull
-        let checkpoint = try db.readTransaction { db in try SynchroMeta.getInt64(db, key: .checkpoint) }
-        XCTAssertEqual(checkpoint, 10)
+        let scopeSetVersion = try db.readTransaction { db in
+            try SynchroMeta.getInt64(db, key: .scopeSetVersion)
+        }
+        XCTAssertEqual(scopeSetVersion, 1)
 
-        // Synced tables were created
+        let scopes = try db.readTransaction { db in
+            try SynchroMeta.getAllScopes(db)
+        }
+        XCTAssertEqual(scopes.count, 1)
+        XCTAssertEqual(scopes[0].scopeID, self.scopeID)
+        XCTAssertEqual(scopes[0].cursor, "scope_cursor_2")
+        XCTAssertEqual(scopes[0].checksum, "sum_2")
+
         let tables = try db.query("SELECT name FROM sqlite_master WHERE type='table' AND name='orders'", params: nil)
         XCTAssertEqual(tables.count, 1)
 
-        // CDC triggers were created
         let triggers = try db.query("SELECT name FROM sqlite_master WHERE type='trigger' AND name LIKE '_synchro_cdc_%orders'", params: nil)
         XCTAssertEqual(triggers.count, 3)
     }
@@ -113,32 +119,38 @@ final class SyncEngineTests: XCTestCase {
 
         MockURLProtocol.requestHandler = { request in
             let path = request.url!.path
-            if path.hasSuffix("/sync/schema") {
-                return try self.mockResponse(json: self.schemaJSON)
-            } else if path.hasSuffix("/sync/register") {
-                return try self.mockResponse(json: self.registerJSON)
+            if path.hasSuffix("/sync/connect") {
+                return try self.mockResponse(json: self.connectJSON)
+            } else if path.hasSuffix("/sync/rebuild") {
+                return try self.mockResponse(json: self.rebuildJSON(finalCursor: "scope_cursor_1"))
             } else if path.hasSuffix("/sync/push") {
                 pushCalled = true
-                // Accept the pushed record with a server timestamp
                 let body = try JSONSerialization.jsonObject(with: request.bodyData()!) as! [String: Any]
-                let changes = body["changes"] as! [[String: Any]]
-                let accepted: [[String: Any]] = changes.map { change in
-                    [
-                        "id": change["id"]!,
-                        "table_name": change["table_name"]!,
-                        "operation": change["operation"]!,
+                let mutations = body["mutations"] as! [[String: Any]]
+                let accepted: [[String: Any]] = mutations.map { mutation in
+                    let pk = mutation["pk"] as! [String: Any]
+                    let columns = mutation["columns"] as? [String: Any] ?? [:]
+                    var serverRow = columns
+                    serverRow["id"] = pk["id"]
+                    serverRow["updated_at"] = "2026-01-01T14:00:00.000Z"
+                    serverRow["deleted_at"] = NSNull()
+                    return [
+                        "mutation_id": mutation["mutation_id"]!,
+                        "table": mutation["table"]!,
+                        "pk": pk,
                         "status": "applied",
-                        "server_updated_at": "2026-01-01T14:00:00.000Z",
+                        "server_row": serverRow,
+                        "server_version": "2026-01-01T14:00:00.000Z",
                     ] as [String: Any]
                 }
                 let json: [String: Any] = [
-                    "accepted": accepted, "rejected": [] as [Any],
-                    "checkpoint": 20, "server_time": "2026-01-01T14:00:00.000Z",
-                    "schema_version": 1, "schema_hash": "test",
+                    "server_time": "2026-01-01T14:00:00.000Z",
+                    "accepted": accepted,
+                    "rejected": [] as [Any]
                 ]
                 return try self.mockResponse(json: json)
             } else if path.hasSuffix("/sync/pull") {
-                return try self.mockResponse(json: self.pullJSON(checkpoint: 20))
+                return try self.mockResponse(json: self.scopePullJSON(cursor: "scope_cursor_2"))
             }
             return try self.mockResponse(statusCode: 500, json: ["error": "unexpected"])
         }
@@ -148,7 +160,6 @@ final class SyncEngineTests: XCTestCase {
 
         try await engine.start()
 
-        // Insert a record — CDC trigger fires, pending created
         _ = try db.execute(
             "INSERT INTO orders (id, ship_address, user_id, updated_at) VALUES (?, ?, ?, ?)",
             params: ["w1", "123 Main St", "u1", "2026-01-01T10:00:00.000Z"]
@@ -156,16 +167,10 @@ final class SyncEngineTests: XCTestCase {
         let tracker = ChangeTracker(database: db)
         XCTAssertTrue(try tracker.hasPendingChanges())
 
-        // Sync — pushes the record, server accepts with RYOW timestamp
         try await engine.syncNow()
 
-        // Push was called
         XCTAssertTrue(pushCalled)
-
-        // Pending drained
         XCTAssertFalse(try tracker.hasPendingChanges())
-
-        // RYOW: local updated_at matches server timestamp
         let row = try db.queryOne("SELECT updated_at FROM orders WHERE id = ?", params: ["w1"])
         XCTAssertEqual(row?["updated_at"] as String?, "2026-01-01T14:00:00.000Z")
     }
@@ -173,26 +178,33 @@ final class SyncEngineTests: XCTestCase {
     func testPullAppliesServerRecord() async throws {
         MockURLProtocol.requestHandler = { request in
             let path = request.url!.path
-            if path.hasSuffix("/sync/schema") {
-                return try self.mockResponse(json: self.schemaJSON)
-            } else if path.hasSuffix("/sync/register") {
-                return try self.mockResponse(json: self.registerJSON)
+            if path.hasSuffix("/sync/connect") {
+                return try self.mockResponse(json: self.connectJSON)
+            } else if path.hasSuffix("/sync/rebuild") {
+                return try self.mockResponse(json: self.rebuildJSON(finalCursor: "scope_cursor_1"))
             } else if path.hasSuffix("/sync/pull") {
-                // Return a server record in the initial pull
                 let json: [String: Any] = [
                     "changes": [
                         [
-                            "id": "w1", "table_name": "orders",
-                            "data": [
+                            "scope": self.scopeID,
+                            "table": "orders",
+                            "op": "upsert",
+                            "pk": ["id": "w1"] as [String: Any],
+                            "row": [
                                 "id": "w1", "ship_address": "Server Address",
-                                "user_id": "u1", "updated_at": "2026-01-01T12:00:00.000Z",
+                                "user_id": "u1",
+                                "updated_at": "2026-01-01T12:00:00.000Z",
+                                "deleted_at": NSNull()
                             ] as [String: Any],
-                            "updated_at": "2026-01-01T12:00:00.000Z",
+                            "server_version": "sv_1",
                         ] as [String: Any]
                     ],
-                    "deletes": [] as [Any],
-                    "checkpoint": 15, "has_more": false,
-                    "schema_version": 1, "schema_hash": "test",
+                    "scope_set_version": 1,
+                    "scope_cursors": [self.scopeID: "scope_cursor_2"],
+                    "scope_updates": ["add": [] as [Any], "remove": [] as [Any]],
+                    "rebuild": [] as [Any],
+                    "has_more": false,
+                    "checksums": [self.scopeID: "sum_2"]
                 ]
                 return try self.mockResponse(json: json)
             }
@@ -204,11 +216,9 @@ final class SyncEngineTests: XCTestCase {
 
         try await engine.start()
 
-        // Server record should be in local DB
         let row = try db.queryOne("SELECT ship_address FROM orders WHERE id = ?", params: ["w1"])
         XCTAssertEqual(row?["ship_address"] as String?, "Server Address")
 
-        // No pending changes (pull applies under sync_lock)
         let tracker = ChangeTracker(database: db)
         XCTAssertFalse(try tracker.hasPendingChanges())
     }
@@ -218,38 +228,61 @@ final class SyncEngineTests: XCTestCase {
 
         MockURLProtocol.requestHandler = { request in
             let path = request.url!.path
-            if path.hasSuffix("/sync/schema") {
-                return try self.mockResponse(json: self.schemaJSON)
-            } else if path.hasSuffix("/sync/register") {
-                return try self.mockResponse(json: self.registerJSON)
+            if path.hasSuffix("/sync/connect") {
+                return try self.mockResponse(json: self.connectJSON)
+            } else if path.hasSuffix("/sync/rebuild") {
+                return try self.mockResponse(json: self.rebuildJSON(finalCursor: "scope_cursor_1"))
             } else if path.hasSuffix("/sync/pull") {
                 pullCallCount += 1
                 if pullCallCount == 1 {
-                    // First page: has_more=true
                     let json: [String: Any] = [
                         "changes": [
-                            ["id": "w1", "table_name": "orders",
-                             "data": ["id": "w1", "ship_address": "Address 1", "user_id": "u1",
-                                      "updated_at": "2026-01-01T12:00:00.000Z"] as [String: Any],
-                             "updated_at": "2026-01-01T12:00:00.000Z"] as [String: Any]
+                            [
+                                "scope": self.scopeID,
+                                "table": "orders",
+                                "op": "upsert",
+                                "pk": ["id": "w1"] as [String: Any],
+                                "row": [
+                                    "id": "w1",
+                                    "ship_address": "Address 1",
+                                    "user_id": "u1",
+                                    "updated_at": "2026-01-01T12:00:00.000Z",
+                                    "deleted_at": NSNull()
+                                ] as [String: Any],
+                                "server_version": "sv_1",
+                            ] as [String: Any]
                         ],
-                        "deletes": [] as [Any],
-                        "checkpoint": 5, "has_more": true,
-                        "schema_version": 1, "schema_hash": "test",
+                        "scope_set_version": 1,
+                        "scope_cursors": [self.scopeID: "scope_cursor_mid"],
+                        "scope_updates": ["add": [] as [Any], "remove": [] as [Any]],
+                        "rebuild": [] as [Any],
+                        "has_more": true
                     ]
                     return try self.mockResponse(json: json)
                 } else {
-                    // Second page: has_more=false
                     let json: [String: Any] = [
                         "changes": [
-                            ["id": "w2", "table_name": "orders",
-                             "data": ["id": "w2", "ship_address": "Address 2", "user_id": "u1",
-                                      "updated_at": "2026-01-01T13:00:00.000Z"] as [String: Any],
-                             "updated_at": "2026-01-01T13:00:00.000Z"] as [String: Any]
+                            [
+                                "scope": self.scopeID,
+                                "table": "orders",
+                                "op": "upsert",
+                                "pk": ["id": "w2"] as [String: Any],
+                                "row": [
+                                    "id": "w2",
+                                    "ship_address": "Address 2",
+                                    "user_id": "u1",
+                                    "updated_at": "2026-01-01T13:00:00.000Z",
+                                    "deleted_at": NSNull()
+                                ] as [String: Any],
+                                "server_version": "sv_2",
+                            ] as [String: Any]
                         ],
-                        "deletes": [] as [Any],
-                        "checkpoint": 10, "has_more": false,
-                        "schema_version": 1, "schema_hash": "test",
+                        "scope_set_version": 1,
+                        "scope_cursors": [self.scopeID: "scope_cursor_2"],
+                        "scope_updates": ["add": [] as [Any], "remove": [] as [Any]],
+                        "rebuild": [] as [Any],
+                        "has_more": false,
+                        "checksums": [self.scopeID: "sum_2"]
                     ]
                     return try self.mockResponse(json: json)
                 }
@@ -262,16 +295,14 @@ final class SyncEngineTests: XCTestCase {
 
         try await engine.start()
 
-        // Two pull requests were made
         XCTAssertEqual(pullCallCount, 2)
-
-        // Both records applied
         let count = try db.query("SELECT id FROM orders", params: nil)
         XCTAssertEqual(count.count, 2)
 
-        // Checkpoint is from the final page
-        let checkpoint = try db.readTransaction { db in try SynchroMeta.getInt64(db, key: .checkpoint) }
-        XCTAssertEqual(checkpoint, 10)
+        let scopes = try db.readTransaction { db in
+            try SynchroMeta.getAllScopes(db)
+        }
+        XCTAssertEqual(scopes.first?.cursor, "scope_cursor_2")
     }
 
     func testSyncRetriesOnRetryableError() async throws {
@@ -279,14 +310,13 @@ final class SyncEngineTests: XCTestCase {
 
         MockURLProtocol.requestHandler = { request in
             let path = request.url!.path
-            if path.hasSuffix("/sync/schema") {
-                return try self.mockResponse(json: self.schemaJSON)
-            } else if path.hasSuffix("/sync/register") {
-                return try self.mockResponse(json: self.registerJSON)
+            if path.hasSuffix("/sync/connect") {
+                return try self.mockResponse(json: self.connectJSON)
+            } else if path.hasSuffix("/sync/rebuild") {
+                return try self.mockResponse(json: self.rebuildJSON(finalCursor: "scope_cursor_1"))
             } else if path.hasSuffix("/sync/push") {
                 pushCallCount += 1
                 if pushCallCount == 1 {
-                    // First attempt: 503 with short retry-after
                     let data = try JSONSerialization.data(withJSONObject: ["error": "unavailable"])
                     let response = HTTPURLResponse(url: request.url!, statusCode: 503, httpVersion: nil,
                                                    headerFields: ["Retry-After": "0.01"])!
@@ -294,21 +324,32 @@ final class SyncEngineTests: XCTestCase {
                 } else {
                     // Second attempt: success
                     let body = try JSONSerialization.jsonObject(with: request.bodyData()!) as! [String: Any]
-                    let changes = body["changes"] as! [[String: Any]]
-                    let accepted: [[String: Any]] = changes.map { [
-                        "id": $0["id"]!, "table_name": $0["table_name"]!,
-                        "operation": $0["operation"]!, "status": "applied",
-                        "server_updated_at": "2026-01-01T14:00:00.000Z",
-                    ] as [String: Any] }
+                    let mutations = body["mutations"] as! [[String: Any]]
+                    let accepted: [[String: Any]] = mutations.map {
+                        let pk = $0["pk"] as! [String: Any]
+                        let columns = $0["columns"] as? [String: Any] ?? [:]
+                        var serverRow = columns
+                        serverRow["id"] = pk["id"]
+                        serverRow["updated_at"] = "2026-01-01T14:00:00.000Z"
+                        serverRow["deleted_at"] = NSNull()
+                        return [
+                            "mutation_id": $0["mutation_id"]!,
+                            "table": $0["table"]!,
+                            "pk": pk,
+                            "status": "applied",
+                            "server_row": serverRow,
+                            "server_version": "2026-01-01T14:00:00.000Z",
+                        ] as [String: Any]
+                    }
                     let json: [String: Any] = [
-                        "accepted": accepted, "rejected": [] as [Any],
-                        "checkpoint": 20, "server_time": "2026-01-01T14:00:00.000Z",
-                        "schema_version": 1, "schema_hash": "test",
+                        "server_time": "2026-01-01T14:00:00.000Z",
+                        "accepted": accepted,
+                        "rejected": [] as [Any],
                     ]
                     return try self.mockResponse(json: json)
                 }
             } else if path.hasSuffix("/sync/pull") {
-                return try self.mockResponse(json: self.pullJSON(checkpoint: 20))
+                return try self.mockResponse(json: self.scopePullJSON(cursor: "scope_cursor_2"))
             }
             return try self.mockResponse(statusCode: 500, json: ["error": "unexpected"])
         }
@@ -318,19 +359,14 @@ final class SyncEngineTests: XCTestCase {
 
         try await engine.start()
 
-        // Insert a record
         _ = try db.execute(
             "INSERT INTO orders (id, ship_address, user_id, updated_at) VALUES (?, ?, ?, ?)",
             params: ["w1", "123 Main St", "u1", "2026-01-01T10:00:00.000Z"]
         )
 
-        // Sync — first push fails (503), retry succeeds
         try await engine.syncNow()
 
-        // Push was retried
         XCTAssertEqual(pushCallCount, 2)
-
-        // Pending drained despite initial failure
         let tracker = ChangeTracker(database: db)
         XCTAssertFalse(try tracker.hasPendingChanges())
     }
@@ -338,12 +374,12 @@ final class SyncEngineTests: XCTestCase {
     func testStatusTransitionsDuringSyncCycle() async throws {
         MockURLProtocol.requestHandler = { request in
             let path = request.url!.path
-            if path.hasSuffix("/sync/schema") {
-                return try self.mockResponse(json: self.schemaJSON)
-            } else if path.hasSuffix("/sync/register") {
-                return try self.mockResponse(json: self.registerJSON)
+            if path.hasSuffix("/sync/connect") {
+                return try self.mockResponse(json: self.connectJSON)
+            } else if path.hasSuffix("/sync/rebuild") {
+                return try self.mockResponse(json: self.rebuildJSON(finalCursor: "scope_cursor_1"))
             } else if path.hasSuffix("/sync/pull") {
-                return try self.mockResponse(json: self.pullJSON(checkpoint: 10))
+                return try self.mockResponse(json: self.scopePullJSON(cursor: "scope_cursor_2"))
             }
             return try self.mockResponse(statusCode: 500, json: ["error": "unexpected"])
         }
@@ -363,15 +399,12 @@ final class SyncEngineTests: XCTestCase {
 
         try await engine.start()
 
-        // start() sets idle after register, then syncing+idle for initial sync cycle
         XCTAssertEqual(statuses, ["idle", "syncing", "idle"])
 
-        // syncNow triggers another cycle
         statuses.removeAll()
         try await engine.syncNow()
         XCTAssertEqual(statuses, ["syncing", "idle"])
 
-        // stop sets stopped
         statuses.removeAll()
         engine.stop()
         XCTAssertEqual(statuses, ["stopped"])
@@ -382,42 +415,40 @@ final class SyncEngineTests: XCTestCase {
 
         MockURLProtocol.requestHandler = { request in
             let path = request.url!.path
-            if path.hasSuffix("/sync/schema") {
-                return try self.mockResponse(json: self.schemaJSON)
-            } else if path.hasSuffix("/sync/register") {
-                return try self.mockResponse(json: self.registerJSON)
+            if path.hasSuffix("/sync/connect") {
+                return try self.mockResponse(json: self.connectJSON)
+            } else if path.hasSuffix("/sync/rebuild") {
+                return try self.mockResponse(json: self.rebuildJSON(finalCursor: "scope_cursor_1"))
             } else if path.hasSuffix("/sync/push") {
-                // Reject the push with a conflict + server version
                 let body = try JSONSerialization.jsonObject(with: request.bodyData()!) as! [String: Any]
-                let changes = body["changes"] as! [[String: Any]]
-                let rejected: [[String: Any]] = changes.map { change in
-                    [
-                        "id": change["id"]!,
-                        "table_name": change["table_name"]!,
-                        "operation": change["operation"]!,
+                let mutations = body["mutations"] as! [[String: Any]]
+                let rejected: [[String: Any]] = mutations.map { mutation in
+                    let pk = mutation["pk"] as! [String: Any]
+                    return [
+                        "mutation_id": mutation["mutation_id"]!,
+                        "table": mutation["table"]!,
+                        "pk": pk,
                         "status": "conflict",
-                        "reason": "server version is newer",
-                        "server_version": [
-                            "id": change["id"]!,
-                            "table_name": change["table_name"]!,
-                            "data": [
-                                "id": change["id"]!,
-                                "ship_address": "Server Wins",
-                                "user_id": "u1",
-                                "updated_at": "2026-01-01T15:00:00.000Z",
-                            ] as [String: Any],
+                        "code": "version_conflict",
+                        "message": "server version is newer",
+                        "server_row": [
+                            "id": pk["id"]!,
+                            "ship_address": "Server Wins",
+                            "user_id": "u1",
                             "updated_at": "2026-01-01T15:00:00.000Z",
+                            "deleted_at": NSNull()
                         ] as [String: Any],
+                        "server_version": "2026-01-01T15:00:00.000Z",
                     ] as [String: Any]
                 }
                 let json: [String: Any] = [
-                    "accepted": [] as [Any], "rejected": rejected,
-                    "checkpoint": 20, "server_time": "2026-01-01T15:00:00.000Z",
-                    "schema_version": 1, "schema_hash": "test",
+                    "server_time": "2026-01-01T15:00:00.000Z",
+                    "accepted": [] as [Any],
+                    "rejected": rejected,
                 ]
                 return try self.mockResponse(json: json)
             } else if path.hasSuffix("/sync/pull") {
-                return try self.mockResponse(json: self.pullJSON(checkpoint: 20))
+                return try self.mockResponse(json: self.scopePullJSON(cursor: "scope_cursor_2"))
             }
             return try self.mockResponse(statusCode: 500, json: ["error": "unexpected"])
         }
@@ -425,33 +456,27 @@ final class SyncEngineTests: XCTestCase {
         let (engine, db) = try makeIntegrationEnv()
         defer { engine.stop() }
 
-        // Register conflict callback
         let _ = engine.onConflict { event in
             receivedConflicts.append(event)
         }
 
         try await engine.start()
 
-        // Insert a record that will conflict
         _ = try db.execute(
             "INSERT INTO orders (id, ship_address, user_id, updated_at) VALUES (?, ?, ?, ?)",
             params: ["w1", "Client Address", "u1", "2026-01-01T10:00:00.000Z"]
         )
 
-        // Sync — push is rejected with conflict, server version applied
         try await engine.syncNow()
 
-        // Conflict callback was fired
         XCTAssertEqual(receivedConflicts.count, 1)
         XCTAssertEqual(receivedConflicts[0].table, "orders")
         XCTAssertEqual(receivedConflicts[0].recordID, "w1")
         XCTAssertEqual(receivedConflicts[0].serverData?["ship_address"], AnyCodable("Server Wins"))
 
-        // Server version was applied locally
         let row = try db.queryOne("SELECT ship_address FROM orders WHERE id = ?", params: ["w1"])
         XCTAssertEqual(row?["ship_address"] as String?, "Server Wins")
 
-        // Pending drained
         let tracker = ChangeTracker(database: db)
         XCTAssertFalse(try tracker.hasPendingChanges())
     }
@@ -525,47 +550,82 @@ final class SyncEngineTests: XCTestCase {
 
     // MARK: - Mock JSON Helpers
 
-    private var schemaJSON: [String: Any] {
+    private let scopeID = "orders_user:u1"
+
+    private var connectJSON: [String: Any] {
         [
-            "schema_version": 1, "schema_hash": "test",
             "server_time": "2026-01-01T12:00:00.000Z",
-            "tables": [
-                [
-                    "table_name": "orders",
-                    "push_policy": "owner_only",
-                    "updated_at_column": "updated_at",
-                    "deleted_at_column": "deleted_at",
-                    "primary_key": ["id"],
-                    "columns": [
-                        ["name": "id", "db_type": "uuid", "logical_type": "string", "nullable": false, "default_kind": "none", "is_primary_key": true] as [String: Any],
-                        ["name": "ship_address", "db_type": "text", "logical_type": "string", "nullable": true, "default_kind": "none", "is_primary_key": false] as [String: Any],
-                        ["name": "user_id", "db_type": "uuid", "logical_type": "string", "nullable": false, "default_kind": "none", "is_primary_key": false] as [String: Any],
-                        ["name": "updated_at", "db_type": "timestamp", "logical_type": "datetime", "nullable": false, "default_kind": "none", "is_primary_key": false] as [String: Any],
-                        ["name": "deleted_at", "db_type": "timestamp", "logical_type": "datetime", "nullable": true, "default_kind": "none", "is_primary_key": false] as [String: Any],
-                    ]
-                ] as [String: Any]
-            ]
+            "protocol_version": 1,
+            "scope_set_version": 1,
+            "schema": [
+                "version": 1,
+                "hash": "test",
+                "action": "replace"
+            ],
+            "scopes": [
+                "add": [
+                    [
+                        "id": scopeID,
+                        "cursor": NSNull()
+                    ] as [String: Any]
+                ],
+                "remove": [] as [Any]
+            ],
+            "schema_definition": [
+                "tables": [
+                    [
+                        "name": "orders",
+                        "primary_key": ["id"],
+                        "updated_at_column": "updated_at",
+                        "deleted_at_column": "deleted_at",
+                        "composition": "single_scope",
+                        "columns": [
+                            ["name": "id", "type": "string", "nullable": false] as [String: Any],
+                            ["name": "ship_address", "type": "string", "nullable": true] as [String: Any],
+                            ["name": "user_id", "type": "string", "nullable": false] as [String: Any],
+                            ["name": "updated_at", "type": "datetime", "nullable": false] as [String: Any],
+                            ["name": "deleted_at", "type": "datetime", "nullable": true] as [String: Any],
+                        ]
+                    ] as [String: Any]
+                ]
+            ] as [String: Any]
         ]
     }
 
-    private var registerJSON: [String: Any] {
+    private func rebuildJSON(
+        records: [[String: Any]] = [],
+        cursor: String? = nil,
+        hasMore: Bool = false,
+        finalCursor: String? = nil,
+        checksum: String = "sum_1"
+    ) -> [String: Any] {
         [
-            "id": "server-client-1",
-            "server_time": "2026-01-01T12:00:00.000Z",
-            "checkpoint": 0,
-            "schema_version": 1,
-            "schema_hash": "test",
+            "scope": scopeID,
+            "records": records,
+            "cursor": cursor ?? NSNull(),
+            "has_more": hasMore,
+            "final_scope_cursor": finalCursor ?? NSNull(),
+            "checksum": hasMore ? NSNull() : checksum,
         ]
     }
 
-    private func pullJSON(checkpoint: Int) -> [String: Any] {
+    private func scopePullJSON(
+        cursor: String,
+        changes: [[String: Any]] = [],
+        hasMore: Bool = false,
+        rebuild: [String] = []
+    ) -> [String: Any] {
         [
-            "changes": [] as [Any],
-            "deletes": [] as [Any],
-            "checkpoint": checkpoint,
-            "has_more": false,
-            "schema_version": 1,
-            "schema_hash": "test",
+            "changes": changes,
+            "scope_set_version": 1,
+            "scope_cursors": [scopeID: cursor],
+            "scope_updates": [
+                "add": [] as [Any],
+                "remove": [] as [Any],
+            ] as [String: Any],
+            "rebuild": rebuild,
+            "has_more": hasMore,
+            "checksums": [scopeID: "sum_2"]
         ]
     }
 

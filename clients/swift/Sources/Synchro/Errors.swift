@@ -6,7 +6,7 @@ public enum SynchroError: Error, Sendable {
     case tableNotSynced(String)
     case upgradeRequired(currentVersion: String, minimumVersion: String)
     case schemaMismatch(serverVersion: Int64, serverHash: String)
-    case pushRejected(results: [PushResult])
+    case pushRejected(results: [VNextRejectedMutation])
     case networkError(underlying: Error)
     case serverError(status: Int, message: String)
     case databaseError(underlying: Error)
@@ -29,7 +29,7 @@ extension SynchroError: LocalizedError {
         case .schemaMismatch(let version, let hash):
             return "Schema mismatch: server version \(version), hash \(hash)"
         case .pushRejected(let results):
-            return "Push rejected: \(results.count) record(s)"
+            return "Push rejected: \(results.count) mutation(s)"
         case .networkError(let err):
             return "Network error: \(err.localizedDescription)"
         case .serverError(let status, let message):

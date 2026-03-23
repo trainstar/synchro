@@ -42,7 +42,7 @@ class ChangeTracker(private val database: SynchroDatabase) {
 
     fun hydratePendingForPush(
         pending: List<PendingChange>,
-        syncedTables: List<SchemaTable>
+        syncedTables: List<LocalSchemaTable>
     ): List<PushRecord> {
         val tableMap = syncedTables.associateBy { it.tableName }
 

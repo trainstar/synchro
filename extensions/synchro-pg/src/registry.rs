@@ -287,26 +287,37 @@ fn synchro_unregister_table(p_table_name: &str) {
 ///
 /// Uses ON CONFLICT on schema_hash to avoid TOCTOU races on schema_version.
 fn recompute_schema_manifest() {
-    let _ = Spi::run(
-        "WITH registry_hash AS (
-            SELECT md5(string_agg(
-                table_name || ':' || bucket_sql || ':' || pk_column || ':' ||
-                updated_at_col || ':' || deleted_at_col || ':' || push_policy || ':' ||
-                array_to_string(exclude_columns, ','),
-                '|' ORDER BY table_name
-            )) AS hash
-            FROM sync_registry
-        )
-        INSERT INTO sync_schema_manifest (schema_version, schema_hash)
-        SELECT
-            COALESCE((SELECT MAX(schema_version) FROM sync_schema_manifest), 0) + 1,
-            COALESCE(rh.hash, '')
-        FROM registry_hash rh
-        WHERE NOT EXISTS (
-            SELECT 1 FROM sync_schema_manifest sm
-            WHERE sm.schema_hash = COALESCE(rh.hash, '')
-        )",
-    );
+    let _ = Spi::connect_mut(|client| {
+        let manifest = crate::schema::build_schema_manifest(client);
+        if let Err(err) = manifest.validate() {
+            pgrx::error!("failed to validate canonical schema manifest: {}", err);
+        }
+
+        let manifest_json = match serde_json::to_string(&manifest) {
+            Ok(json) => json,
+            Err(err) => pgrx::error!("failed to serialize canonical schema manifest: {}", err),
+        };
+
+        let schema_hash: String =
+            Spi::get_one_with_args("SELECT md5($1)", &[manifest_json.as_str().into()])
+                .unwrap_or(None)
+                .unwrap_or_default();
+
+        let _ = client.update(
+            "INSERT INTO sync_schema_manifest (schema_version, schema_hash)
+             SELECT
+                 COALESCE((SELECT MAX(schema_version) FROM sync_schema_manifest), 0) + 1,
+                 $1
+             WHERE NOT EXISTS (
+                 SELECT 1 FROM sync_schema_manifest sm
+                 WHERE sm.schema_hash = $1
+             )",
+            None,
+            &[schema_hash.as_str().into()],
+        )?;
+
+        Ok::<(), spi::Error>(())
+    });
 }
 
 /// Load all registered tables from sync_registry into memory.
@@ -326,7 +337,9 @@ pub fn load_registry() -> Result<Vec<TableRegistration>, spi::Error> {
             let table_name: String = row.get_by_name("table_name")?.unwrap_or_default();
             let bucket_sql: String = row.get_by_name("bucket_sql")?.unwrap_or_default();
             let pk_column: String = row.get_by_name("pk_column")?.unwrap_or_default();
-            let pk_type: String = row.get_by_name("pk_type")?.unwrap_or_else(|| "text".to_string());
+            let pk_type: String = row
+                .get_by_name("pk_type")?
+                .unwrap_or_else(|| "text".to_string());
             let updated_at_col: String = row.get_by_name("updated_at_col")?.unwrap_or_default();
             let deleted_at_col: String = row.get_by_name("deleted_at_col")?.unwrap_or_default();
             let push_policy_str: String = row.get_by_name("push_policy")?.unwrap_or_default();

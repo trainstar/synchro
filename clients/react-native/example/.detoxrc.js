@@ -15,14 +15,16 @@ module.exports = {
       binaryPath:
         'ios/build/Build/Products/Debug-iphonesimulator/SynchroReactNativeExample.app',
       build:
-        'xcodebuild -workspace ios/SynchroReactNativeExample.xcworkspace -scheme SynchroReactNativeExample -configuration Debug -sdk iphonesimulator -derivedDataPath ios/build',
+        "FORCE_BUNDLING=1 RCT_NO_LAUNCH_PACKAGER=1 xcodebuild -quiet -workspace ios/SynchroReactNativeExample.xcworkspace -scheme SynchroReactNativeExample -configuration Debug -sdk iphonesimulator -destination 'generic/platform=iOS Simulator' -derivedDataPath ios/build ONLY_ACTIVE_ARCH=YES SWIFT_ACTIVE_COMPILATION_CONDITIONS='$(inherited) DETOX_E2E'",
     },
     'android.debug': {
       type: 'android.apk',
       binaryPath: 'android/app/build/outputs/apk/debug/app-debug.apk',
+      testBinaryPath:
+        'android/app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk',
       build:
-        'cd android && ./gradlew assembleDebug assembleAndroidTest -DtestBuildType=debug',
-      reversePorts: [8080],
+        'cd android && ./gradlew assembleDebug assembleAndroidTest -DtestBuildType=debug -PdetoxBundleDebug=true',
+      reversePorts: [8081],
     },
     'android.release': {
       type: 'android.apk',
@@ -31,7 +33,7 @@ module.exports = {
         'android/app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk',
       build:
         'cd android && ./gradlew assembleRelease assembleDebugAndroidTest',
-      reversePorts: [8080],
+      reversePorts: [8081],
     },
   },
   devices: {

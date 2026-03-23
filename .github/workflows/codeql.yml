@@ -7,6 +7,7 @@ on:
     branches: [master]
   schedule:
     - cron: '23 4 * * 1'
+  workflow_dispatch:
 
 permissions:
   security-events: write
@@ -20,13 +21,15 @@ jobs:
 
       - uses: actions/setup-go@v5
         with:
-          go-version-file: go.mod
+          go-version-file: api/go/go.mod
 
       - uses: github/codeql-action/init@v3
         with:
           languages: go
 
-      - uses: github/codeql-action/autobuild@v3
+      - name: Build Go adapter
+        working-directory: api/go
+        run: GOWORK=off go build ./...
 
       - uses: github/codeql-action/analyze@v3
         with:
@@ -37,11 +40,21 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: yarn
+          cache-dependency-path: clients/react-native/yarn.lock
+
       - uses: github/codeql-action/init@v3
         with:
           languages: javascript-typescript
 
-      - uses: github/codeql-action/autobuild@v3
+      - name: Install React Native dependencies
+        working-directory: clients/react-native
+        run: |
+          corepack enable
+          yarn install --immutable
 
       - uses: github/codeql-action/analyze@v3
         with:
@@ -57,7 +70,8 @@ jobs:
         with:
           languages: swift
 
-      - uses: github/codeql-action/autobuild@v3
+      - name: Build Swift package
+        run: swift build
 
       - uses: github/codeql-action/analyze@v3
         with:
@@ -65,6 +79,9 @@ jobs:
 
   analyze-kotlin:
     runs-on: ubuntu-latest
+    env:
+      ANDROID_HOME: /usr/local/lib/android/sdk
+      ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
     steps:
       - uses: actions/checkout@v4
 
@@ -72,12 +89,25 @@ jobs:
         with:
           distribution: temurin
           java-version: '17'
+          cache: gradle
+
+      - uses: android-actions/setup-android@v3
+
+      - name: Accept Android SDK licenses
+        run: yes | sdkmanager --licenses > /dev/null
+
+      - name: Install Android SDK components
+        run: |
+          sdkmanager \
+            "platform-tools" \
+            "platforms;android-34" \
+            "build-tools;34.0.0"
 
       - uses: github/codeql-action/init@v3
         with:
           languages: java-kotlin
 
-      - name: Build Kotlin project
+      - name: Build Kotlin package
         working-directory: clients/kotlin
         run: ./gradlew :synchro:compileDebugKotlin
 

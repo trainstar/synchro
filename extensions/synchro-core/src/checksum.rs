@@ -107,13 +107,19 @@ mod tests {
 
     #[test]
     fn go_vector_sorted_keys() {
-        assert_eq!(compute_record_checksum(r#"{"id":"abc","name":"test"}"#), 1221324213);
+        assert_eq!(
+            compute_record_checksum(r#"{"id":"abc","name":"test"}"#),
+            1221324213
+        );
     }
 
     #[test]
     fn go_vector_unsorted_keys_canonicalize() {
         // Different key order, same canonical output.
-        assert_eq!(compute_record_checksum(r#"{"name":"test","id":"abc"}"#), 1221324213);
+        assert_eq!(
+            compute_record_checksum(r#"{"name":"test","id":"abc"}"#),
+            1221324213
+        );
     }
 
     #[test]
@@ -129,9 +135,7 @@ mod tests {
     #[test]
     fn go_vector_mixed_types() {
         assert_eq!(
-            compute_record_checksum(
-                r#"{"user_id":"u1","email":"test@example.com","active":true}"#
-            ),
+            compute_record_checksum(r#"{"user_id":"u1","email":"test@example.com","active":true}"#),
             830595651
         );
     }

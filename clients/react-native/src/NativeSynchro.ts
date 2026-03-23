@@ -86,7 +86,6 @@ export interface Spec extends TurboModule {
   removeObserver(observerID: string): Promise<void>;
 
   // -- Sync --
-  checkpoint(mode: string): Promise<void>;
   start(): Promise<void>;
   stop(): Promise<void>;
   syncNow(): Promise<void>;

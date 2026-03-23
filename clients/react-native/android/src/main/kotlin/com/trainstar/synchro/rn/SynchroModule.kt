@@ -5,6 +5,17 @@ import com.trainstar.synchro.*
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.*
 import kotlinx.coroutines.channels.Channel
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonNull
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.boolean
+import kotlinx.serialization.json.booleanOrNull
+import kotlinx.serialization.json.double
+import kotlinx.serialization.json.doubleOrNull
+import kotlinx.serialization.json.long
+import kotlinx.serialization.json.longOrNull
 import org.json.JSONArray
 import org.json.JSONObject
 import java.util.UUID
@@ -49,13 +60,7 @@ class SynchroModule(reactContext: ReactApplicationContext) :
                 "serverHash" to error.serverHash
             )
             is SynchroError.PushRejected -> "PUSH_REJECTED" to mapOf(
-                "results" to JSONArray(error.results.map { r ->
-                    JSONObject().apply {
-                        put("recordID", r.id)
-                        put("table", r.tableName)
-                        put("status", r.status)
-                    }
-                }).toString()
+                "results" to rejectedMutationsJson(error.results)
             )
             is SynchroError.NetworkError -> "NETWORK_ERROR" to mapOf(
                 "message" to (error.underlying.message ?: "")
@@ -573,28 +578,6 @@ class SynchroModule(reactContext: ReactApplicationContext) :
         promise.resolve(null)
     }
 
-    // MARK: - WAL / Sync
-
-    @ReactMethod
-    override fun checkpoint(mode: String, promise: Promise) {
-        val c = client ?: run {
-            promise.reject("NOT_CONNECTED", "Client not initialized")
-            return
-        }
-        try {
-            val checkpointMode = when (mode) {
-                "full" -> CheckpointMode.FULL
-                "restart" -> CheckpointMode.RESTART
-                "truncate" -> CheckpointMode.TRUNCATE
-                else -> CheckpointMode.PASSIVE
-            }
-            c.checkpoint(checkpointMode)
-            promise.resolve(null)
-        } catch (e: Exception) {
-            rejectWithError(promise, e)
-        }
-    }
-
     @ReactMethod
     override fun start(promise: Promise) {
         val c = client ?: run {
@@ -713,6 +696,60 @@ class SynchroModule(reactContext: ReactApplicationContext) :
         sessions.clear()
         pendingAuthContinuations.values.forEach { it.cancel(CancellationException("client closed")) }
         pendingAuthContinuations.clear()
+    }
+
+    private fun rejectedMutationsJson(results: List<VNextRejectedMutation>): String {
+        return JSONArray(results.map { result ->
+            JSONObject().apply {
+                put("mutationID", result.mutationID)
+                put("table", result.table)
+                put("pk", jsonObjectToJsonObject(result.pk))
+                put("status", mutationStatusWireValue(result.status))
+                put("code", mutationRejectionCodeWireValue(result.code))
+                put("message", result.message ?: JSONObject.NULL)
+                put("serverRow", result.serverRow?.let { jsonObjectToJsonObject(it) } ?: JSONObject.NULL)
+                put("serverVersion", result.serverVersion ?: JSONObject.NULL)
+            }
+        }).toString()
+    }
+
+    private fun mutationStatusWireValue(status: VNextMutationStatus): String = when (status) {
+        VNextMutationStatus.APPLIED -> "applied"
+        VNextMutationStatus.CONFLICT -> "conflict"
+        VNextMutationStatus.REJECTED_TERMINAL -> "rejected_terminal"
+        VNextMutationStatus.REJECTED_RETRYABLE -> "rejected_retryable"
+    }
+
+    private fun mutationRejectionCodeWireValue(code: VNextMutationRejectionCode): String = when (code) {
+        VNextMutationRejectionCode.VERSION_CONFLICT -> "version_conflict"
+        VNextMutationRejectionCode.POLICY_REJECTED -> "policy_rejected"
+        VNextMutationRejectionCode.VALIDATION_FAILED -> "validation_failed"
+        VNextMutationRejectionCode.TABLE_NOT_SYNCED -> "table_not_synced"
+        VNextMutationRejectionCode.UNKNOWN_SCOPE_EFFECT -> "unknown_scope_effect"
+        VNextMutationRejectionCode.SERVER_RETRYABLE -> "server_retryable"
+    }
+
+    private fun jsonObjectToJsonObject(value: JsonObject): JSONObject {
+        val obj = JSONObject()
+        value.forEach { (key, element) ->
+            obj.put(key, jsonElementToJsonValue(element))
+        }
+        return obj
+    }
+
+    private fun jsonElementToJsonValue(value: JsonElement): Any? = when (value) {
+        JsonNull -> JSONObject.NULL
+        is JsonPrimitive -> when {
+            value.isString -> value.content
+            value.booleanOrNull != null -> value.boolean
+            value.longOrNull != null -> value.long
+            value.doubleOrNull != null -> value.double
+            else -> value.content
+        }
+        is JsonObject -> jsonObjectToJsonObject(value)
+        is JsonArray -> JSONArray().apply {
+            value.forEach { put(jsonElementToJsonValue(it)) }
+        }
     }
 
     private fun anyCodableMapToJson(value: Map<String, AnyCodable>): String {

@@ -1,5 +1,5 @@
 import Foundation
-import GRDB
+@preconcurrency import GRDB
 
 public final class SynchroClient: @unchecked Sendable {
     private let config: SynchroConfig
@@ -114,12 +114,6 @@ public final class SynchroClient: @unchecked Sendable {
         DatabaseCancellableWrapper(database.watch(sql, params: params, tables: tables, callback: callback))
     }
 
-    // MARK: - WAL
-
-    public func checkpoint(mode: CheckpointMode = .passive) throws {
-        try database.checkpoint(mode: mode)
-    }
-
     // MARK: - Lifecycle
 
     public func close() throws {
@@ -129,66 +123,6 @@ public final class SynchroClient: @unchecked Sendable {
 
     public var path: String {
         database.path
-    }
-
-    // MARK: - Debug
-
-    /// Returns diagnostic information about local sync state for support tickets.
-    public func debugInfo() throws -> SynchroDebugInfo {
-        try database.readTransaction { db in
-            let checkpoint = try SynchroMeta.getInt64(db, key: .checkpoint)
-            let bucketCheckpoints = try SynchroMeta.getAllBucketCheckpoints(db)
-
-            var buckets: [BucketDebugInfo] = []
-            for (bucketID, cp) in bucketCheckpoints {
-                let memberRows = try Row.fetchAll(
-                    db,
-                    sql: "SELECT checksum FROM _synchro_bucket_members WHERE bucket_id = ?",
-                    arguments: [bucketID]
-                )
-                var xor: Int32 = 0
-                for row in memberRows {
-                    if let cs: Int64 = row["checksum"] {
-                        xor ^= Int32(truncatingIfNeeded: cs)
-                    }
-                }
-                buckets.append(BucketDebugInfo(
-                    bucketID: bucketID,
-                    checkpoint: cp,
-                    memberCount: memberRows.count,
-                    checksum: xor
-                ))
-            }
-
-            let pendingCount = try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM _synchro_pending_changes") ?? 0
-            let schemaVersion = try SynchroMeta.getInt64(db, key: .schemaVersion)
-            let schemaHash = try SynchroMeta.get(db, key: .schemaHash) ?? ""
-
-            return SynchroDebugInfo(
-                clientID: config.clientID,
-                buckets: buckets,
-                lastSyncCheckpoint: checkpoint,
-                schemaVersion: schemaVersion,
-                schemaHash: schemaHash,
-                pendingChangeCount: pendingCount,
-                generatedAt: Date()
-            )
-        }
-    }
-
-    /// Returns debug info as a pretty-printed JSON string for export.
-    public func debugInfoJSON() throws -> String {
-        let info = try debugInfo()
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-        let formatter = ISO8601DateFormatter()
-        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        encoder.dateEncodingStrategy = .custom { date, encoder in
-            var container = encoder.singleValueContainer()
-            try container.encode(formatter.string(from: date))
-        }
-        let data = try encoder.encode(info)
-        return String(data: data, encoding: .utf8) ?? "{}"
     }
 
     // MARK: - Sync Status
