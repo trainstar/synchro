@@ -60,6 +60,8 @@ react {
  * Set this to true to Run Proguard on Release builds to minify the Java bytecode.
  */
 def enableProguardInReleaseBuilds = false
+def canonicalSeedDb = file("${rootDir}/../seed.db")
+def androidSeedAsset = file("${projectDir}/src/main/assets/seed.db")
 
 /**
  * The preferred build flavor of JavaScriptCore (JSC)
@@ -110,6 +112,22 @@ android {
             proguardFiles getDefaultProguardFile("proguard-android.txt"), "proguard-rules.pro"
         }
     }
+}
+
+tasks.register("syncSeedDb") {
+    inputs.file(canonicalSeedDb)
+    outputs.file(androidSeedAsset)
+    doLast {
+        if (!canonicalSeedDb.exists()) {
+            throw new GradleException("Missing bundled seed database at ${canonicalSeedDb}")
+        }
+        androidSeedAsset.parentFile.mkdirs()
+        ant.copy(file: canonicalSeedDb, tofile: androidSeedAsset, overwrite: true)
+    }
+}
+
+tasks.named("preBuild").configure {
+    dependsOn("syncSeedDb")
 }
 
 dependencies {

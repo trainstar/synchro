@@ -51,3 +51,4 @@ The Make targets start and configure the `synchrod` test server automatically.
 - The harness assumes the repo test JWT secret and test server settings used by the existing Swift and Kotlin integration flows.
 - iOS Detox runs build a bundled JS app instead of relying on Metro. This avoids a port collision with the local Synchro adapter on `8081`.
 - Android verification is required for shipability. iOS-only green runs are not sufficient.
+- `seed.db` is a canonical bundled offline seed asset for the harness. iOS packages it directly from the example root, and Android copies the same file into app assets during `preBuild`.
