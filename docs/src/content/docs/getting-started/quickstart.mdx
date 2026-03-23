@@ -7,7 +7,7 @@ description: Validate the current Synchro release surface locally.
 
 - PostgreSQL 18 via `cargo pgrx`
 - Rust toolchain for `extensions/synchro-core` and `extensions/synchro-pg`
-- Go 1.24 for `api/go`
+- Go 1.25 for `api/go`
 - Xcode and Swift for Apple SDK validation
 - JDK 17 and Android SDK for Kotlin and Android validation
 - Node.js 22 for React Native validation
@@ -76,6 +76,26 @@ Stop it when you are done:
 ```bash
 make synchrod-pg-test-stop
 ```
+
+## Preinitialized seed databases
+
+Generate a client-compatible SQLite seed database directly from the canonical PostgreSQL schema manifest:
+
+```bash
+cd api/go
+GOWORK=off go run ./cmd/synchro-seed \
+  --database-url "postgres://user:pass@localhost:5432/app?sslmode=disable" \
+  --output ./build/seed.db
+```
+
+Use this when you want to bundle a warm-start database with the app so clients begin with the correct synced-table schema and metadata before the first `connect`.
+
+Current release behavior:
+
+- the generator builds the synced-table SQLite schema from `synchro_schema_manifest()`
+- it installs the same local CDC triggers the native SDKs use
+- it writes seed metadata such as `schema_version`, `schema_hash`, `local_schema`, and `scope_set_version`
+- it does not create a separate sync mode, clients still reconcile with the server on first `connect`
 
 ## What to read next
 
