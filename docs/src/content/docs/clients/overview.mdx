@@ -38,6 +38,22 @@ It does not own:
 - Kotlin is released from `clients/kotlin/synchro`
 - React Native is released from `clients/react-native`
 
+## Seeded database support
+
+The native SDKs support copying a preinitialized SQLite database into place before first open.
+
+Use this for:
+
+- warm-starting the synced-table schema
+- bundling reference data or other installer-time content you want available immediately
+- reducing first-start schema work and initial traffic
+
+Generate the seed artifact with:
+
+- `api/go/cmd/synchro-seed`
+
+The generated database is still only a warm cache. The SDKs always reconcile it against the authoritative server contract on first `connect`.
+
 ### React Native on iOS
 
 The current iOS integration requires the consuming app to add the native Synchro dependency and GRDB in its Podfile. This is part of the current public installation contract until the CocoaPods dependency story is simplified further.
