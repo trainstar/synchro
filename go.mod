@@ -6,8 +6,8 @@ require (
 	github.com/MicahParks/keyfunc/v3 v3.8.0
 	github.com/golang-jwt/jwt/v5 v5.3.1
 	github.com/jackc/pglogrepl v0.0.0-20251213150135-2e8d0df862c1
-	github.com/jackc/pgx/v5 v5.8.0
-	modernc.org/sqlite v1.46.2
+	github.com/jackc/pgx/v5 v5.9.1
+	modernc.org/sqlite v1.47.0
 )
 
 require (
