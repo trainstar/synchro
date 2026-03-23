@@ -378,8 +378,11 @@ jobs:
             watchman watch-project "$GITHUB_WORKSPACE/clients/react-native"
           fi
 
+      - name: Build React Native iOS Detox app
+        run: make test-rn-e2e-ios-build
+
       - name: Validate React Native iOS bridge
-        run: make test-rn-e2e-ios
+        run: make test-rn-e2e-ios-run
 
   validate-kotlin:
     runs-on: ubuntu-24.04
@@ -604,6 +607,9 @@ jobs:
           corepack enable
           yarn install --immutable
 
+      - name: Build React Native Android Detox app
+        run: make test-rn-e2e-android-build
+
       - name: Cache Android AVD
         id: rn-android-avd-cache
         uses: actions/cache@v5.0.4
@@ -642,7 +648,7 @@ jobs:
           disable-animations: true
           emulator-boot-timeout: 900
           emulator-options: -no-snapshot-save -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
-          script: make test-rn-e2e-android
+          script: make test-rn-e2e-android-run
 
   validate-docs:
     runs-on: ubuntu-24.04

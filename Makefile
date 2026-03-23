@@ -185,19 +185,29 @@ rn-ios-pods:
 			echo "React Native iOS pods already match Podfile.lock"; \
 		fi
 
-test-rn-e2e-ios: synchrod-pg-test-restart rn-seed-asset rn-watchman-reset rn-ios-pods
+test-rn-e2e-ios-build: rn-seed-asset rn-watchman-reset rn-ios-pods
 	cd clients/react-native/example && npx detox build --configuration ios.sim.debug
+
+test-rn-e2e-ios-run: synchrod-pg-test-restart
 	cd clients/react-native/example && \
 		$(TEST_ENV) npx detox test --configuration ios.sim.debug $(DETOX_ARGS)
 
-test-rn-e2e-android: release-kotlin-local synchrod-pg-test-restart rn-seed-asset rn-watchman-reset
+test-rn-e2e-ios: test-rn-e2e-ios-build test-rn-e2e-ios-run
+
+test-rn-e2e-android-build: release-kotlin-local rn-seed-asset rn-watchman-reset
 	@test -n "$(ANDROID_JAVA_HOME)" || (echo "Android Detox requires JDK 17. Set ANDROID_JAVA_HOME to a JDK 17 install."; exit 1)
 	@test -d "$(ANDROID_HOME)" || (echo "Android SDK not found at $(ANDROID_HOME). Set ANDROID_HOME to a valid SDK install."; exit 1)
 	cd clients/react-native/example && ANDROID_HOME="$(ANDROID_HOME)" ANDROID_SDK_ROOT="$(ANDROID_HOME)" JAVA_HOME="$(ANDROID_JAVA_HOME)" PATH="$(ANDROID_JAVA_HOME)/bin:$$PATH" npx detox build --configuration android.emu.debug
+
+test-rn-e2e-android-run: synchrod-pg-test-restart
+	@test -n "$(ANDROID_JAVA_HOME)" || (echo "Android Detox requires JDK 17. Set ANDROID_JAVA_HOME to a JDK 17 install."; exit 1)
+	@test -d "$(ANDROID_HOME)" || (echo "Android SDK not found at $(ANDROID_HOME). Set ANDROID_HOME to a valid SDK install."; exit 1)
 	cd clients/react-native/example && \
 		ANDROID_HOME="$(ANDROID_HOME)" ANDROID_SDK_ROOT="$(ANDROID_HOME)" \
 		JAVA_HOME="$(ANDROID_JAVA_HOME)" PATH="$(ANDROID_JAVA_HOME)/bin:$$PATH" \
 		$(TEST_ENV) npx detox test --configuration android.emu.debug $(DETOX_ARGS)
+
+test-rn-e2e-android: test-rn-e2e-android-build test-rn-e2e-android-run
 
 test-rn: test-rn-e2e-ios test-rn-e2e-android
 
