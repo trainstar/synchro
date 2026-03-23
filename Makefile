@@ -153,7 +153,7 @@ test-kotlin: synchrod-pg-test-restart
 test-kotlin-integration: test-kotlin
 
 test-rn-unit:
-	cd clients/react-native && npm test -- --testPathIgnorePatterns=e2e __mocks__
+	cd clients/react-native && yarn test:unit
 
 rn-ios-pods:
 	cd clients/react-native/example/ios && \
