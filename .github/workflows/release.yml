@@ -89,22 +89,10 @@ jobs:
       - name: Run React Native unit tests
         run: make test-rn-unit
 
-  validate-server:
+  linux-pgrx-runtime:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v6.0.2
-
-      - uses: actions/setup-go@v6.3.0
-        with:
-          go-version-file: api/go/go.mod
-          cache-dependency-path: api/go/go.sum
-
       - uses: dtolnay/rust-toolchain@stable
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: |
-            extensions -> target
 
       - name: Install PostgreSQL extension build dependencies
         run: |
@@ -145,7 +133,85 @@ jobs:
           fi
 
       - name: Initialize PostgreSQL 18 for pgrx
-        run: cargo pgrx init --pg18 download
+        run: |
+          if [ -f "$HOME/.pgrx/config.toml" ] && grep -q '^pg18' "$HOME/.pgrx/config.toml"; then
+            echo "Using cached PG18 pgrx runtime"
+          else
+            cargo pgrx init --pg18 download
+          fi
+
+      - name: Archive PG18 pgrx runtime
+        run: tar -C "$HOME" -cf "$RUNNER_TEMP/pgrx-pg18-linux.tar" .pgrx
+
+      - uses: actions/upload-artifact@v7.0.0
+        with:
+          name: pgrx-pg18-linux
+          path: ${{ runner.temp }}/pgrx-pg18-linux.tar
+          compression-level: 0
+
+  validate-server:
+    runs-on: ubuntu-24.04
+    needs: linux-pgrx-runtime
+    steps:
+      - uses: actions/checkout@v6.0.2
+
+      - uses: actions/setup-go@v6.3.0
+        with:
+          go-version-file: api/go/go.mod
+          cache-dependency-path: api/go/go.sum
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            extensions -> target
+
+      - name: Install PostgreSQL extension build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            ccache \
+            clang \
+            flex \
+            bison \
+            libclang-dev \
+            libreadline-dev \
+            libssl-dev \
+            libxml2-dev \
+            libxml2-utils \
+            libxslt-dev \
+            pkg-config \
+            xsltproc \
+            zlib1g-dev
+
+      - uses: actions/cache@v5.0.4
+        with:
+          path: |
+            ~/.cargo/bin/cargo-pgrx
+            ~/.cargo/.crates.toml
+            ~/.cargo/.crates2.json
+          key: cargo-pgrx-${{ runner.os }}-0.17.0
+
+      - name: Install cargo-pgrx
+        run: |
+          if ! command -v cargo-pgrx >/dev/null 2>&1 || [ "$(cargo pgrx --version | awk '{print $2}')" != "0.17.0" ]; then
+            cargo install --locked cargo-pgrx --version 0.17.0
+          fi
+
+      - uses: actions/download-artifact@v8.0.1
+        with:
+          name: pgrx-pg18-linux
+          path: ${{ runner.temp }}/pgrx-pg18-linux
+
+      - name: Restore PostgreSQL 18 pgrx runtime
+        run: tar -C "$HOME" -xf "$RUNNER_TEMP/pgrx-pg18-linux/pgrx-pg18-linux.tar"
+
+      - name: Verify PostgreSQL 18 for pgrx
+        run: |
+          test -f "$HOME/.pgrx/config.toml"
+          grep -q '^pg18' "$HOME/.pgrx/config.toml"
 
       - name: Validate Rust core
         run: make test-rust-core
@@ -204,7 +270,9 @@ jobs:
 
       - name: Initialize PostgreSQL 18 for pgrx
         run: |
-          if [ "$RUNNER_OS" = "macOS" ]; then
+          if [ -f "$HOME/.pgrx/config.toml" ] && grep -q '^pg18' "$HOME/.pgrx/config.toml"; then
+            echo "Using cached PG18 pgrx runtime"
+          elif [ "$RUNNER_OS" = "macOS" ]; then
             cargo pgrx init --pg18 "$(brew --prefix postgresql@18)/bin/pg_config"
           else
             cargo pgrx init --pg18 download
@@ -277,7 +345,12 @@ jobs:
           fi
 
       - name: Initialize PostgreSQL 18 for pgrx
-        run: cargo pgrx init --pg18 "$(brew --prefix postgresql@18)/bin/pg_config"
+        run: |
+          if [ -f "$HOME/.pgrx/config.toml" ] && grep -q '^pg18' "$HOME/.pgrx/config.toml"; then
+            echo "Using cached PG18 pgrx runtime"
+          else
+            cargo pgrx init --pg18 "$(brew --prefix postgresql@18)/bin/pg_config"
+          fi
 
       - name: Install React Native dependencies
         working-directory: clients/react-native
@@ -303,6 +376,7 @@ jobs:
 
   validate-kotlin:
     runs-on: ubuntu-24.04
+    needs: linux-pgrx-runtime
     env:
       ANDROID_HOME: /usr/local/lib/android/sdk
       ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
@@ -349,23 +423,11 @@ jobs:
 
       - uses: actions/cache@v5.0.4
         with:
-          path: ~/.pgrx
-          key: pgrx-${{ runner.os }}-0.17.0-pg18
-
-      - uses: actions/cache@v5.0.4
-        with:
           path: |
             ~/.cargo/bin/cargo-pgrx
             ~/.cargo/.crates.toml
             ~/.cargo/.crates2.json
           key: cargo-pgrx-${{ runner.os }}-0.17.0
-
-      - name: Install PostgreSQL 18 and extension build dependencies on macOS
-        if: runner.os == 'macOS'
-        run: |
-          for formula in postgresql@18 pkgconf openssl@3 libxml2 libxslt; do
-            brew list --versions "$formula" >/dev/null 2>&1 || brew install "$formula"
-          done
 
       - name: Install cargo-pgrx
         run: |
@@ -373,22 +435,34 @@ jobs:
             cargo install --locked cargo-pgrx --version 0.17.0
           fi
 
-      - name: Initialize PostgreSQL 18 for pgrx
-        run: |
-          if [ "$RUNNER_OS" = "macOS" ]; then
-            cargo pgrx init --pg18 "$(brew --prefix postgresql@18)/bin/pg_config"
-          else
-            cargo pgrx init --pg18 download
-          fi
+      - uses: actions/download-artifact@v8.0.1
+        with:
+          name: pgrx-pg18-linux
+          path: ${{ runner.temp }}/pgrx-pg18-linux
 
-      - uses: android-actions/setup-android@v3
+      - name: Restore PostgreSQL 18 pgrx runtime
+        run: tar -C "$HOME" -xf "$RUNNER_TEMP/pgrx-pg18-linux/pgrx-pg18-linux.tar"
+
+      - name: Verify PostgreSQL 18 for pgrx
+        run: |
+          test -f "$HOME/.pgrx/config.toml"
+          grep -q '^pg18' "$HOME/.pgrx/config.toml"
+
+      - name: Verify Android SDK tooling
+        run: |
+          SDKMANAGER="$(find "$ANDROID_SDK_ROOT/cmdline-tools" -type f -name sdkmanager | sort | tail -n 1)"
+          test -x "$SDKMANAGER"
+          "$SDKMANAGER" --version
 
       - name: Accept Android SDK licenses
-        run: yes | sdkmanager --licenses > /dev/null
+        run: |
+          SDKMANAGER="$(find "$ANDROID_SDK_ROOT/cmdline-tools" -type f -name sdkmanager | sort | tail -n 1)"
+          yes | "$SDKMANAGER" --licenses > /dev/null
 
       - name: Install Android SDK components
         run: |
-          sdkmanager \
+          SDKMANAGER="$(find "$ANDROID_SDK_ROOT/cmdline-tools" -type f -name sdkmanager | sort | tail -n 1)"
+          "$SDKMANAGER" \
             "platform-tools" \
             "platforms;android-34" \
             "build-tools;34.0.0"
@@ -401,6 +475,7 @@ jobs:
 
   validate-rn-android:
     runs-on: ubuntu-24.04
+    needs: linux-pgrx-runtime
     env:
       ANDROID_HOME: /usr/local/lib/android/sdk
       ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
@@ -461,11 +536,6 @@ jobs:
 
       - uses: actions/cache@v5.0.4
         with:
-          path: ~/.pgrx
-          key: pgrx-${{ runner.os }}-0.17.0-pg18
-
-      - uses: actions/cache@v5.0.4
-        with:
           path: |
             ~/.cargo/bin/cargo-pgrx
             ~/.cargo/.crates.toml
@@ -478,17 +548,34 @@ jobs:
             cargo install --locked cargo-pgrx --version 0.17.0
           fi
 
-      - name: Initialize PostgreSQL 18 for pgrx
-        run: cargo pgrx init --pg18 download
+      - uses: actions/download-artifact@v8.0.1
+        with:
+          name: pgrx-pg18-linux
+          path: ${{ runner.temp }}/pgrx-pg18-linux
 
-      - uses: android-actions/setup-android@v3
+      - name: Restore PostgreSQL 18 pgrx runtime
+        run: tar -C "$HOME" -xf "$RUNNER_TEMP/pgrx-pg18-linux/pgrx-pg18-linux.tar"
+
+      - name: Verify PostgreSQL 18 for pgrx
+        run: |
+          test -f "$HOME/.pgrx/config.toml"
+          grep -q '^pg18' "$HOME/.pgrx/config.toml"
+
+      - name: Verify Android SDK tooling
+        run: |
+          SDKMANAGER="$(find "$ANDROID_SDK_ROOT/cmdline-tools" -type f -name sdkmanager | sort | tail -n 1)"
+          test -x "$SDKMANAGER"
+          "$SDKMANAGER" --version
 
       - name: Accept Android SDK licenses
-        run: yes | sdkmanager --licenses > /dev/null
+        run: |
+          SDKMANAGER="$(find "$ANDROID_SDK_ROOT/cmdline-tools" -type f -name sdkmanager | sort | tail -n 1)"
+          yes | "$SDKMANAGER" --licenses > /dev/null
 
       - name: Install Android SDK components
         run: |
-          sdkmanager \
+          SDKMANAGER="$(find "$ANDROID_SDK_ROOT/cmdline-tools" -type f -name sdkmanager | sort | tail -n 1)"
+          "$SDKMANAGER" \
             "platform-tools" \
             "platforms;android-34" \
             "build-tools;34.0.0" \
