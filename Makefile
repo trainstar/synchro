@@ -7,6 +7,8 @@
 	docs-dev \
 	lint-go \
 	lint-rn \
+	lint-rust-core \
+	lint-rust-pg \
 	lint-rust \
 	test \
 	test-rust-core \
@@ -85,7 +87,9 @@ help:
 	@echo "  docs-dev              - Run the docs site locally"
 	@echo "  lint-go               - Run Go formatting checks and go vet"
 	@echo "  lint-rn               - Run React Native typecheck and ESLint"
-	@echo "  lint-rust             - Run Rust fmt and clippy"
+	@echo "  lint-rust-core        - Run Rust fmt and clippy for the shared core"
+	@echo "  lint-rust-pg          - Run Rust fmt and clippy for the PostgreSQL extension"
+	@echo "  lint-rust             - Run all Rust fmt and clippy checks"
 	@echo "  test                  - Run the default local validation set"
 	@echo "  test-rust-core        - Run synchro-core unit tests"
 	@echo "  test-rust-pg          - Run pgrx integration tests on PG 18"
@@ -175,7 +179,7 @@ test-rn-e2e-android: release-kotlin-local synchrod-pg-test-restart
 
 test-rn: test-rn-e2e-ios test-rn-e2e-android
 
-release-check: lint-go lint-rust lint-rn test-rust-core test-rust-pg test-adapter test-swift test-kotlin test-rn docs-build
+release-check: lint-go lint-rust-core lint-rn test-rust-core test-rust-pg test-adapter test-swift test-kotlin test-rn docs-build
 	@echo "Release validation passed."
 
 release-kotlin-local:
@@ -216,9 +220,15 @@ lint-go:
 	@test -z "$$(find api/go -name '*.go' -not -path '*/vendor/*' -print0 | xargs -0 gofmt -l)"
 	cd api/go && GOWORK=off go vet ./...
 
-lint-rust:
-	cd extensions && cargo fmt --check
-	cd extensions && cargo clippy -- -D warnings
+lint-rust-core:
+	cd extensions && cargo fmt --check -p synchro-core
+	cd extensions && cargo clippy -p synchro-core -- -D warnings
+
+lint-rust-pg:
+	cd extensions && cargo fmt --check -p synchro-pg
+	cd extensions && cargo clippy -p synchro-pg --features pg18 -- -D warnings
+
+lint-rust: lint-rust-core lint-rust-pg
 
 test-adapter-setup: ext-install
 	@echo "Setting up adapter test database..."
