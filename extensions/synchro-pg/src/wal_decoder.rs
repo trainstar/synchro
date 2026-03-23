@@ -165,7 +165,6 @@ impl WalDecoder {
         let relation_id = cursor.read_u32()?;
         let _tuple_type = cursor.read_u8()?; // 'N' for new tuple
 
-
         let rel = match self.relations.get(&relation_id) {
             Some(r) => r,
             None => return Ok(vec![]),
@@ -190,7 +189,6 @@ impl WalDecoder {
     fn handle_update(&self, data: &[u8]) -> Result<Vec<WalEvent>, DecodeError> {
         let mut cursor = Cursor::new(data);
         let relation_id = cursor.read_u32()?;
-
 
         let rel = match self.relations.get(&relation_id) {
             Some(r) => r,
@@ -236,7 +234,6 @@ impl WalDecoder {
     fn handle_delete(&self, data: &[u8]) -> Result<Vec<WalEvent>, DecodeError> {
         let mut cursor = Cursor::new(data);
         let relation_id = cursor.read_u32()?;
-
 
         let rel = match self.relations.get(&relation_id) {
             Some(r) => r,

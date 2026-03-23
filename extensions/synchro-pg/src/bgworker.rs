@@ -184,17 +184,20 @@ fn preload_relations_from_catalog(
         );
 
         let mut columns = Vec::new();
-        if let Ok(tup) = Spi::connect(|client| client.select(&col_sql, None, &[])) {
-            for row in tup {
-                let name: String = row
-                    .get_by_name::<String, &str>("name")
-                    .unwrap_or(None)
-                    .unwrap_or_default();
-                if !name.is_empty() {
-                    columns.push(ColumnInfo { name });
+        let _ = Spi::connect(|client| {
+            if let Ok(tup) = client.select(&col_sql, None, &[]) {
+                for row in tup {
+                    let name: String = row
+                        .get_by_name::<String, &str>("name")
+                        .unwrap_or(None)
+                        .unwrap_or_default();
+                    if !name.is_empty() {
+                        columns.push(ColumnInfo { name });
+                    }
                 }
             }
-        }
+            Ok::<_, pgrx::spi::SpiError>(())
+        });
 
         if !columns.is_empty() {
             relations.push((relid as u32, table_reg.table_name.clone(), columns));
