@@ -316,6 +316,10 @@ Seeded databases are warm caches only.
 
 They do not relax schema compatibility rules.
 
+Current release surface:
+
+- `api/go/cmd/synchro-seed` generates a client-compatible SQLite seed from the canonical `synchro_schema_manifest()` output
+
 ## Portable Type System
 
 The schema manifest should use a portable client-facing type system rather than backend-specific DDL strings wherever possible.

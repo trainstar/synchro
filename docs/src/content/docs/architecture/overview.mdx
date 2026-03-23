@@ -28,6 +28,22 @@ This architecture exists to keep:
 - full synced CRUD for synced tables
 - SQL migration based configuration, with structured defaults and custom SQL escape hatches
 
+## Seeded warm-start databases
+
+Synchro now ships a schema-first seed generator:
+
+- `api/go/cmd/synchro-seed`
+
+It connects directly to PostgreSQL, reads the canonical `synchro_schema_manifest()` output, and emits a client-compatible SQLite database artifact.
+
+Use it when you want:
+
+- faster first app start
+- bundled local schema and sync metadata
+- a warm-start database artifact generated from the same canonical schema contract clients use at runtime
+
+Do not treat it as a separate sync system. Seeded databases remain warm caches only and must still reconcile through the normal `connect`, rebuild, push, and pull flows.
+
 ## Adapter auth modes
 
 The current Go adapter supports two ways to authenticate the protected sync routes:

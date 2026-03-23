@@ -86,6 +86,25 @@ make synchrod-pg-test-start
 
 The test adapter listens on `http://localhost:8081` by default.
 
+### 6. Generate a preinitialized seed database
+
+Use the canonical PostgreSQL schema manifest to build a client-compatible SQLite seed:
+
+```bash
+cd api/go
+GOWORK=off go run ./cmd/synchro-seed \
+  --database-url "postgres://user:pass@localhost:5432/app?sslmode=disable" \
+  --output ./build/seed.db
+```
+
+This generator creates:
+
+- the current synced-table SQLite schema
+- the local CDC triggers the native SDKs expect
+- `_synchro_meta` entries for `schema_version`, `schema_hash`, `local_schema`, and scope bootstrap state
+
+Use it when you want a warm-start database artifact for app bundling or installation-time copying. It is schema-first. The generated seed is a cache warm-start, not a different sync mode.
+
 ## Repository Layout
 
 ```text
@@ -105,6 +124,7 @@ The intended public release surfaces are:
 
 - PostgreSQL extension for PG 18
 - `synchrod-pg` adapter binary from `api/go/cmd/synchrod-pg`
+- `synchro-seed` generator binary from `api/go/cmd/synchro-seed`
 - Swift Package Manager package from the repo root `Package.swift`
 - CocoaPods package from the repo root `Synchro.podspec`
 - Kotlin package from `clients/kotlin/synchro`

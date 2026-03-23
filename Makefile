@@ -1,6 +1,7 @@
 .PHONY: \
 	help \
 	build \
+	build-seed \
 	build-check \
 	run \
 	docs-build \
@@ -79,6 +80,7 @@ SYNCHROD_PG_PID_FILE ?= .synchrod-pg-test.pid
 SYNCHROD_PG_LOG_FILE ?= .synchrod-pg-test.log
 
 BINARY ?= bin/synchrod-pg
+SEED_BINARY ?= bin/synchro-seed
 GRADLE_TEST_ARGS ?= --rerun-tasks
 
 TEST_ENV = \
@@ -90,6 +92,7 @@ TEST_ENV = \
 help:
 	@echo "Available targets:"
 	@echo "  build                 - Build the synchrod-pg adapter binary"
+	@echo "  build-seed            - Build the seed database generator binary"
 	@echo "  build-check           - Build the Go adapter module"
 	@echo "  run                   - Run synchrod-pg locally with current env"
 	@echo "  docs-build            - Install docs dependencies and build the docs site"
@@ -123,6 +126,10 @@ help:
 build:
 	@mkdir -p "$(dir $(BINARY))"
 	cd api/go && GOWORK=off go build -o ../../$(BINARY) ./cmd/synchrod-pg
+
+build-seed:
+	@mkdir -p "$(dir $(SEED_BINARY))"
+	cd api/go && GOWORK=off go build -o ../../$(SEED_BINARY) ./cmd/synchro-seed
 
 build-check:
 	cd api/go && GOWORK=off go build ./...
