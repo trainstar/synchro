@@ -16,6 +16,7 @@ concurrency:
 
 env:
   VERSION: ${{ github.ref_name }}
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
   validate-quality:
@@ -26,6 +27,7 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: api/go/go.mod
+          cache-dependency-path: api/go/go.sum
 
       - uses: actions/setup-node@v4
         with:
@@ -39,6 +41,25 @@ jobs:
         with:
           workspaces: |
             extensions -> target
+
+      - name: Install PostgreSQL extension build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            ccache \
+            clang \
+            flex \
+            bison \
+            libclang-dev \
+            libreadline-dev \
+            libssl-dev \
+            libxml2-dev \
+            libxml2-utils \
+            libxslt-dev \
+            pkg-config \
+            xsltproc \
+            zlib1g-dev
 
       - name: Install React Native dependencies
         working-directory: clients/react-native
@@ -66,6 +87,7 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: api/go/go.mod
+          cache-dependency-path: api/go/go.sum
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -98,11 +120,14 @@ jobs:
           path: ~/.pgrx
           key: pgrx-${{ runner.os }}-0.17.0-pg18
 
+      - name: Install PostgreSQL 18 and extension build dependencies on macOS
+        run: brew install postgresql@18 pkg-config openssl@3 libxml2 libxslt
+
       - name: Install cargo-pgrx
         run: cargo install --locked cargo-pgrx --version 0.17.0
 
       - name: Initialize PostgreSQL 18 for pgrx
-        run: cargo pgrx init --pg18 download
+        run: cargo pgrx init --pg18 "$(brew --prefix postgresql@18)/bin/pg_config"
 
       - name: Validate Rust core
         run: make test-rust-core
@@ -121,6 +146,7 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: api/go/go.mod
+          cache-dependency-path: api/go/go.sum
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -134,11 +160,20 @@ jobs:
           path: ~/.pgrx
           key: pgrx-${{ runner.os }}-0.17.0-pg18
 
+      - name: Install PostgreSQL 18 and extension build dependencies on macOS
+        if: runner.os == 'macOS'
+        run: brew install postgresql@18 pkg-config openssl@3 libxml2 libxslt
+
       - name: Install cargo-pgrx
         run: cargo install --locked cargo-pgrx --version 0.17.0
 
       - name: Initialize PostgreSQL 18 for pgrx
-        run: cargo pgrx init --pg18 download
+        run: |
+          if [ "$RUNNER_OS" = "macOS" ]; then
+            cargo pgrx init --pg18 "$(brew --prefix postgresql@18)/bin/pg_config"
+          else
+            cargo pgrx init --pg18 download
+          fi
 
       - name: Validate Swift SDK
         run: make test-swift
@@ -151,6 +186,7 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: api/go/go.mod
+          cache-dependency-path: api/go/go.sum
 
       - uses: actions/setup-node@v4
         with:
@@ -177,11 +213,14 @@ jobs:
             clients/react-native/example/ios/Pods
           key: cocoapods-${{ runner.os }}-${{ hashFiles('clients/react-native/example/ios/Podfile.lock', 'Synchro.podspec', 'clients/react-native/SynchroReactNative.podspec') }}
 
+      - name: Install PostgreSQL 18 and extension build dependencies on macOS
+        run: brew install postgresql@18 pkg-config openssl@3 libxml2 libxslt
+
       - name: Install cargo-pgrx
         run: cargo install --locked cargo-pgrx --version 0.17.0
 
       - name: Initialize PostgreSQL 18 for pgrx
-        run: cargo pgrx init --pg18 download
+        run: cargo pgrx init --pg18 "$(brew --prefix postgresql@18)/bin/pg_config"
 
       - name: Install React Native dependencies
         working-directory: clients/react-native
@@ -210,6 +249,7 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: api/go/go.mod
+          cache-dependency-path: api/go/go.sum
 
       - uses: actions/setup-java@v4
         with:
@@ -284,6 +324,7 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: api/go/go.mod
+          cache-dependency-path: api/go/go.sum
 
       - uses: actions/setup-java@v4
         with:
@@ -380,6 +421,32 @@ jobs:
 
       - name: Validate docs build
         run: make docs-build
+
+  release-gates:
+    runs-on: ubuntu-latest
+    outputs:
+      publish_kotlin: ${{ steps.gates.outputs.publish_kotlin }}
+      publish_npm: ${{ steps.gates.outputs.publish_npm }}
+    steps:
+      - id: gates
+        env:
+          MAVEN_CENTRAL_USERNAME: ${{ secrets.MAVEN_CENTRAL_USERNAME }}
+          MAVEN_CENTRAL_PASSWORD: ${{ secrets.MAVEN_CENTRAL_PASSWORD }}
+          GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
+          GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          if [ -n "$MAVEN_CENTRAL_USERNAME" ] && [ -n "$MAVEN_CENTRAL_PASSWORD" ] && [ -n "$GPG_PRIVATE_KEY" ] && [ -n "$GPG_PASSPHRASE" ]; then
+            echo "publish_kotlin=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "publish_kotlin=false" >> "$GITHUB_OUTPUT"
+          fi
+
+          if [ -n "$NPM_TOKEN" ]; then
+            echo "publish_npm=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "publish_npm=false" >> "$GITHUB_OUTPUT"
+          fi
 
   build-adapter-binaries:
     needs:
@@ -486,9 +553,9 @@ jobs:
           path: dist/synchro-pg-pg18-${{ runner.os }}-${{ runner.arch }}.tar.gz
 
   publish-kotlin:
-    needs: validate-kotlin
+    needs: [validate-kotlin, release-gates]
     runs-on: ubuntu-latest
-    if: ${{ github.event_name == 'push' && secrets.MAVEN_CENTRAL_USERNAME != '' && secrets.MAVEN_CENTRAL_PASSWORD != '' && secrets.GPG_PRIVATE_KEY != '' && secrets.GPG_PASSPHRASE != '' }}
+    if: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') && needs.release-gates.outputs.publish_kotlin == 'true' }}
     steps:
       - uses: actions/checkout@v4
 
@@ -508,9 +575,9 @@ jobs:
         run: ./gradlew publishAndReleaseToMavenCentral -Pversion="${VERSION#v}"
 
   publish-npm:
-    needs: [validate-rn-ios, validate-rn-android]
+    needs: [validate-rn-ios, validate-rn-android, release-gates]
     runs-on: ubuntu-latest
-    if: ${{ github.event_name == 'push' && secrets.NPM_TOKEN != '' }}
+    if: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') && needs.release-gates.outputs.publish_npm == 'true' }}
     permissions:
       contents: read
       id-token: write
@@ -542,7 +609,7 @@ jobs:
   create-release:
     needs: [build-adapter-binaries, package-extension]
     runs-on: ubuntu-latest
-    if: ${{ github.event_name == 'push' }}
+    if: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') }}
     steps:
       - uses: actions/checkout@v4
 
