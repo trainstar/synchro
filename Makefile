@@ -52,6 +52,7 @@ ANDROID_JAVA_HOME ?= $(shell \
 
 PGRX_PG ?= pg18
 PGRX_PORT ?= 28818
+PGRX_READY_TIMEOUT ?= 90
 PGRX_PG_MAJOR := $(patsubst pg%,%,$(PGRX_PG))
 PGRX_DATA_DIR ?= $(HOME)/.pgrx/data-$(PGRX_PG_MAJOR)
 PGRX_PG_CONFIG ?= $(shell awk -F'"' '/^$(PGRX_PG)[[:space:]]*=/ { print $$2 }' $(HOME)/.pgrx/config.toml)
@@ -260,15 +261,16 @@ test-adapter-setup: ext-install
 	fi
 	@cd extensions/synchro-pg && CARGO_TARGET_DIR="$(PGRX_TARGET_DIR)" cargo pgrx start $(PGRX_PG)
 	@READY=0; \
-	for attempt in $$(seq 1 30); do \
-		if psql -h localhost -p $(PGRX_PORT) -U $(USER) -d postgres -Atqc "SELECT CASE WHEN pg_is_in_recovery() THEN '0' ELSE '1' END" 2>/dev/null | grep -q '^1$$'; then \
+	for attempt in $$(seq 1 $(PGRX_READY_TIMEOUT)); do \
+		if pg_isready -h localhost -p $(PGRX_PORT) -U $(USER) -d postgres >/dev/null 2>&1 && \
+			psql -h localhost -p $(PGRX_PORT) -U $(USER) -d postgres -Atqc "SELECT CASE WHEN pg_is_in_recovery() THEN '0' ELSE '1' END" 2>/dev/null | grep -q '^1$$'; then \
 			READY=1; \
 			break; \
 		fi; \
 		sleep 1; \
 	done; \
 	if [ "$$READY" -ne 1 ]; then \
-		echo "pgrx postgres did not become writable in time"; \
+		echo "pgrx postgres did not become writable in $(PGRX_READY_TIMEOUT)s"; \
 		exit 1; \
 	fi
 	@psql -h localhost -p $(PGRX_PORT) -U $(USER) -d postgres -c "DROP DATABASE IF EXISTS $(ADAPTER_TEST_DB)" 2>/dev/null || true
