@@ -10,4 +10,5 @@ Pod::Spec.new do |s|
   s.osx.deployment_target = "13.0"
   s.swift_version = "5.9"
   s.source_files = "clients/swift/Sources/Synchro/**/*.swift"
+  s.dependency "GRDB.swift"
 end

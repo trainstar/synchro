@@ -162,20 +162,26 @@ test-kotlin-integration: test-kotlin
 test-rn-unit:
 	cd clients/react-native && yarn test:unit
 
+rn-watchman-reset:
+	@if command -v watchman >/dev/null 2>&1; then \
+		watchman watch-del "$(PWD)/clients/react-native" >/dev/null 2>&1 || true; \
+		watchman watch-project "$(PWD)/clients/react-native" >/dev/null; \
+	fi
+
 rn-ios-pods:
 	cd clients/react-native/example/ios && \
-		if [ ! -f Pods/Manifest.lock ] || [ ! -f SynchroReactNativeExample.xcworkspace/contents.xcworkspacedata ] || ! cmp -s Podfile.lock Pods/Manifest.lock; then \
+		if [ ! -f Pods/Manifest.lock ] || [ ! -f SynchroReactNativeExample.xcworkspace/contents.xcworkspacedata ] || ! cmp -s Podfile.lock Pods/Manifest.lock || [ Podfile -nt Pods/Manifest.lock ] || [ ../../../SynchroReactNative.podspec -nt Pods/Manifest.lock ] || [ ../../../../Synchro.podspec -nt Pods/Manifest.lock ]; then \
 			pod install; \
 		else \
 			echo "React Native iOS pods already match Podfile.lock"; \
 		fi
 
-test-rn-e2e-ios: synchrod-pg-test-restart rn-ios-pods
+test-rn-e2e-ios: synchrod-pg-test-restart rn-watchman-reset rn-ios-pods
 	cd clients/react-native/example && npx detox build --configuration ios.sim.debug
 	cd clients/react-native/example && \
 		$(TEST_ENV) npx detox test --configuration ios.sim.debug $(DETOX_ARGS)
 
-test-rn-e2e-android: release-kotlin-local synchrod-pg-test-restart
+test-rn-e2e-android: release-kotlin-local synchrod-pg-test-restart rn-watchman-reset
 	@test -n "$(ANDROID_JAVA_HOME)" || (echo "Android Detox requires JDK 17. Set ANDROID_JAVA_HOME to a JDK 17 install."; exit 1)
 	@test -d "$(ANDROID_HOME)" || (echo "Android SDK not found at $(ANDROID_HOME). Set ANDROID_HOME to a valid SDK install."; exit 1)
 	cd clients/react-native/example && ANDROID_HOME="$(ANDROID_HOME)" ANDROID_SDK_ROOT="$(ANDROID_HOME)" JAVA_HOME="$(ANDROID_JAVA_HOME)" PATH="$(ANDROID_JAVA_HOME)/bin:$$PATH" npx detox build --configuration android.emu.debug
