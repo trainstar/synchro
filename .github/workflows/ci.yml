@@ -12,6 +12,9 @@ concurrency:
   group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
 permissions:
   contents: read
 
@@ -24,6 +27,7 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: api/go/go.mod
+          cache-dependency-path: api/go/go.sum
 
       - uses: actions/setup-node@v4
         with:
@@ -37,6 +41,25 @@ jobs:
         with:
           workspaces: |
             extensions -> target
+
+      - name: Install PostgreSQL extension build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            ccache \
+            clang \
+            flex \
+            bison \
+            libclang-dev \
+            libreadline-dev \
+            libssl-dev \
+            libxml2-dev \
+            libxml2-utils \
+            libxslt-dev \
+            pkg-config \
+            xsltproc \
+            zlib1g-dev
 
       - name: Install React Native dependencies
         working-directory: clients/react-native
@@ -78,6 +101,7 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: api/go/go.mod
+          cache-dependency-path: api/go/go.sum
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -133,6 +157,7 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: api/go/go.mod
+          cache-dependency-path: api/go/go.sum
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -146,11 +171,14 @@ jobs:
           path: ~/.pgrx
           key: pgrx-${{ runner.os }}-0.17.0-pg18
 
+      - name: Install PostgreSQL 18 and extension build dependencies on macOS
+        run: brew install postgresql@18 pkg-config openssl@3 libxml2 libxslt
+
       - name: Install cargo-pgrx
         run: cargo install --locked cargo-pgrx --version 0.17.0
 
       - name: Initialize PostgreSQL 18 for pgrx
-        run: cargo pgrx init --pg18 download
+        run: cargo pgrx init --pg18 "$(brew --prefix postgresql@18)/bin/pg_config"
 
       - name: Run Swift integration tests
         run: make test-swift
@@ -163,6 +191,7 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: api/go/go.mod
+          cache-dependency-path: api/go/go.sum
 
       - uses: actions/setup-node@v4
         with:
@@ -189,11 +218,14 @@ jobs:
             clients/react-native/example/ios/Pods
           key: cocoapods-${{ runner.os }}-${{ hashFiles('clients/react-native/example/ios/Podfile.lock', 'Synchro.podspec', 'clients/react-native/SynchroReactNative.podspec') }}
 
+      - name: Install PostgreSQL 18 and extension build dependencies on macOS
+        run: brew install postgresql@18 pkg-config openssl@3 libxml2 libxslt
+
       - name: Install cargo-pgrx
         run: cargo install --locked cargo-pgrx --version 0.17.0
 
       - name: Initialize PostgreSQL 18 for pgrx
-        run: cargo pgrx init --pg18 download
+        run: cargo pgrx init --pg18 "$(brew --prefix postgresql@18)/bin/pg_config"
 
       - name: Install React Native dependencies
         working-directory: clients/react-native
@@ -222,6 +254,7 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: api/go/go.mod
+          cache-dependency-path: api/go/go.sum
 
       - uses: actions/setup-java@v4
         with:
@@ -296,6 +329,7 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: api/go/go.mod
+          cache-dependency-path: api/go/go.sum
 
       - uses: actions/setup-java@v4
         with:
