@@ -84,7 +84,7 @@ Example shape:
   "hash": "8b21d2a1",
   "tables": [
     {
-      "name": "workouts",
+      "name": "documents",
       "primary_key": ["id"],
       "updated_at_column": "updated_at",
       "deleted_at_column": "deleted_at",
@@ -98,7 +98,7 @@ Example shape:
         { "name": "started_at", "type": "timestamp", "nullable": true }
       ],
       "indexes": [
-        { "name": "idx_workouts_started_at", "columns": ["started_at"] }
+        { "name": "idx_documents_started_at", "columns": ["started_at"] }
       ]
     }
   ]
@@ -309,6 +309,7 @@ Seeded databases must carry:
 - schema version
 - schema hash
 - local metadata version if distinct
+- continuation metadata for any bundled portable scopes
 
 At first `connect`, the server compares those values exactly as it would for any other client.
 
@@ -318,7 +319,7 @@ They do not relax schema compatibility rules.
 
 Current release surface:
 
-- `api/go/cmd/synchro-seed` generates a client-compatible SQLite seed from the canonical `synchro_schema_manifest()` output
+- `api/go/cmd/synchro-seed` generates a client-compatible SQLite seed from the canonical `synchro_schema_manifest()` output plus any server-declared portable scopes
 
 ## Portable Type System
 
@@ -385,7 +386,7 @@ That means:
 
 Change:
 
-- add nullable `notes` column to `workouts`
+- add nullable `notes` column to `documents`
 
 Expected handling:
 
@@ -398,7 +399,7 @@ Expected handling:
 
 Change:
 
-- add synced `exercise_categories` table with existing server rows
+- add synced `template_categories` table with existing server rows
 
 Expected handling:
 
@@ -410,7 +411,7 @@ Expected handling:
 
 Change:
 
-- split `exercises` from one coarse scope design into `exercises_public` and `exercises_user:<id>`
+- split `templates` from one coarse scope design into `templates_public` and `templates_user:<id>`
 
 Expected handling:
 

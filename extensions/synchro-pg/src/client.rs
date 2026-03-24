@@ -49,7 +49,8 @@ pub(crate) fn load_client_connect_state(
 /// Register a client for synchronization.
 ///
 /// Upserts into sync_clients with default bucket subscriptions (user:{user_id}
-/// and global). Returns JSONB matching the Go RegisterResponse.
+/// plus every registered shared runtime scope). Returns JSONB matching the Go
+/// RegisterResponse.
 #[pg_extern]
 fn synchro_register_client(
     p_user_id: &str,
@@ -69,17 +70,36 @@ fn synchro_register_client(
     let user_bucket = format!("user:{p_user_id}");
 
     let row: Option<pgrx::JsonB> = Spi::get_one_with_args(
-        "WITH upserted AS (
+        "WITH desired_scopes AS (
+            SELECT ARRAY[$5::text]::text[]
+                   || COALESCE(
+                        ARRAY(
+                            SELECT scope_id
+                            FROM sync_shared_scopes
+                            ORDER BY scope_id
+                        ),
+                        ARRAY[]::text[]
+                   ) AS bucket_subs
+        ),
+        upserted AS (
             INSERT INTO sync_clients (
                 user_id, client_id, platform, app_version,
                 bucket_subs, is_active
-            ) VALUES ($1, $2, $3, $4, ARRAY[$5, 'global'], true)
+            )
+            SELECT $1, $2, $3, $4, ds.bucket_subs, true
+            FROM desired_scopes ds
             ON CONFLICT (user_id, client_id) DO UPDATE SET
                 platform = EXCLUDED.platform,
                 app_version = EXCLUDED.app_version,
+                bucket_subs = EXCLUDED.bucket_subs,
+                scope_set_version = CASE
+                    WHEN sync_clients.bucket_subs IS DISTINCT FROM EXCLUDED.bucket_subs
+                        THEN sync_clients.scope_set_version + 1
+                    ELSE sync_clients.scope_set_version
+                END,
                 is_active = true,
                 updated_at = now()
-            RETURNING id, last_sync_at, last_pull_seq, bucket_subs
+            RETURNING id, last_sync_at, last_pull_seq, bucket_subs, scope_set_version
         ),
         seeded_checkpoints AS (
             INSERT INTO sync_client_checkpoints (user_id, client_id, bucket_id, checkpoint)
@@ -339,15 +359,41 @@ fn ensure_client_connect_state(
 
     let _ = client
         .update(
-            "INSERT INTO sync_clients (
+            "WITH desired_scopes AS (
+                SELECT ARRAY[$5::text]::text[]
+                       || COALESCE(
+                            ARRAY(
+                                SELECT scope_id
+                                FROM sync_shared_scopes
+                                ORDER BY scope_id
+                            ),
+                            ARRAY[]::text[]
+                       ) AS bucket_subs
+            ),
+            upserted AS (
+                INSERT INTO sync_clients (
                 user_id, client_id, platform, app_version,
                 bucket_subs, is_active
-            ) VALUES ($1, $2, $3, $4, ARRAY[$5, 'global'], true)
-            ON CONFLICT (user_id, client_id) DO UPDATE SET
-                platform = EXCLUDED.platform,
-                app_version = EXCLUDED.app_version,
-                is_active = true,
-                updated_at = now()",
+                )
+                SELECT $1, $2, $3, $4, ds.bucket_subs, true
+                FROM desired_scopes ds
+                ON CONFLICT (user_id, client_id) DO UPDATE SET
+                    platform = EXCLUDED.platform,
+                    app_version = EXCLUDED.app_version,
+                    bucket_subs = EXCLUDED.bucket_subs,
+                    scope_set_version = CASE
+                        WHEN sync_clients.bucket_subs IS DISTINCT FROM EXCLUDED.bucket_subs
+                            THEN sync_clients.scope_set_version + 1
+                        ELSE sync_clients.scope_set_version
+                    END,
+                    is_active = true,
+                    updated_at = now()
+                RETURNING user_id, client_id, bucket_subs
+            )
+            INSERT INTO sync_client_checkpoints (user_id, client_id, bucket_id, checkpoint)
+            SELECT u.user_id, u.client_id, bucket_id, 0
+            FROM upserted u, unnest(u.bucket_subs) AS bucket_id
+            ON CONFLICT (user_id, client_id, bucket_id) DO NOTHING",
             None,
             &[
                 user_id.into(),

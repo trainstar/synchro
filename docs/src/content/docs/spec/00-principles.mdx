@@ -159,6 +159,23 @@ Shared or public data should prefer shared scopes with many subscribers.
 
 The system should avoid duplicating shared rows into large numbers of private scopes unless there is a strong reason to do so.
 
+Recommended pattern:
+
+- private rows in private scopes
+- shared rows in shared scopes
+- both may materialize into the same local table
+- bundled seeds export those same shared scopes, not seed-only variants
+
+Example:
+
+- `documents_user:{user_id}` for user-owned documents
+- `templates_public` for public templates
+- `templates_user:{user_id}` for user-created templates
+
+The system should prefer one shared scope with many subscribers over copying the same shared rows into every private scope.
+
+Shared scopes should be grouped by operational behavior, not only by visibility. One shared `global` scope is acceptable for small stable datasets that change together. Larger or more independently changing public datasets should use separate shared scopes.
+
 ### Advanced Scope Logic
 
 The system must support advanced scope logic as an escape hatch.

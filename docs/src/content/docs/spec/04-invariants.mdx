@@ -110,6 +110,13 @@ The system should preserve correctness under high fanout, but product and config
 
 Shared or public data should preferably live in shared scopes with many subscribers, not by being copied into many private scopes.
 
+Preferred example:
+
+- `templates_public` for the shared template catalog
+- `templates_user:{user_id}` for user-created templates
+
+Both may justify rows in the same local `templates` table. The shared rows should not be duplicated into each private scope.
+
 ### Scope-Local Rebuild
 
 Rebuild must be scope-local.
@@ -168,6 +175,16 @@ For tables that support multi-scope composition, local provenance metadata must 
 A seeded or preinitialized local database is a warm-start optimization only.
 
 It is not a separate sync mode and does not weaken server authority.
+
+### Portable Seed Authority
+
+Only server-declared portable scopes may be exported into a bundled seed.
+
+The client must not infer that a seeded row is portable.
+
+### Seed Resume Correctness
+
+If a bundled seed contains portable scope data, it must also contain the continuation metadata required for normal delta sync from that state.
 
 ### Offline Writes Before First Connect
 

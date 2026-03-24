@@ -146,6 +146,7 @@ The metadata model must guarantee:
 - scope cursor advancement is atomic with successful apply
 - rebuild state is durable across restarts
 - rejected mutations remain inspectable until explicitly cleared
+- seeded portable scope state can be resumed without forcing a full local wipe
 
 ## Sync Loop Responsibilities
 

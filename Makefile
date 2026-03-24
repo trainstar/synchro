@@ -292,6 +292,7 @@ test-adapter-setup: ext-install
 	else \
 		printf "\nsynchro.auto_start = off\n" >> "$(PGRX_DATA_DIR)/postgresql.conf"; \
 	fi
+	@cd extensions/synchro-pg && CARGO_TARGET_DIR="$(PGRX_TARGET_DIR)" cargo pgrx stop $(PGRX_PG) 2>/dev/null || true
 	@cd extensions/synchro-pg && CARGO_TARGET_DIR="$(PGRX_TARGET_DIR)" cargo pgrx start $(PGRX_PG)
 	@READY=0; \
 	LAST_ERR=""; \
@@ -352,8 +353,13 @@ test-adapter-teardown:
 
 test-adapter: test-adapter-setup
 	@echo "Running adapter integration tests..."
-	cd api/go && GOWORK=off TEST_DATABASE_URL="$(ADAPTER_TEST_URL)" go test -v -count=1 ./...
-	@$(MAKE) test-adapter-teardown
+	@set -e; \
+	status=0; \
+	if ! (cd api/go && GOWORK=off TEST_DATABASE_URL="$(ADAPTER_TEST_URL)" go test -v -count=1 -p 1 ./...); then \
+		status=$$?; \
+	fi; \
+	$(MAKE) test-adapter-teardown; \
+	exit $$status
 
 synchrod-pg-test-start:
 	@set -e; \
