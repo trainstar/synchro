@@ -106,25 +106,122 @@ class HttpClientTests {
     }
 
     @Test
-    fun testSchemaMismatch409() = runTest {
+    fun testConnectVNextSuccess() = runTest {
         val responseBody = """
             {
-                "code": "schema_mismatch",
-                "message": "client schema does not match server schema",
-                "server_schema_version": 5,
-                "server_schema_hash": "newHash"
+                "server_time": "2026-03-20T18:22:11Z",
+                "protocol_version": 1,
+                "scope_set_version": 13,
+                "schema": {
+                    "version": 8,
+                    "hash": "8b21d2a1",
+                    "action": "none"
+                },
+                "scopes": {
+                    "add": [],
+                    "remove": []
+                }
             }
         """.trimIndent()
 
-        server.enqueue(MockResponse().setBody(responseBody).setResponseCode(409))
+        server.enqueue(MockResponse().setBody(responseBody).setResponseCode(200))
 
-        val req = PullRequest(clientID = "test", checkpoint = 0, schemaVersion = 1, schemaHash = "old")
+        val req = VNextConnectRequest(
+            clientID = "test-device",
+            platform = "android",
+            appVersion = "1.0.0",
+            protocolVersion = 1,
+            schema = VNextSchemaRef(version = 8, hash = "8b21d2a1"),
+            scopeSetVersion = 13,
+            knownScopes = emptyMap()
+        )
+        val resp = httpClient.connect(req)
+
+        assertEquals(VNextSchemaAction.NONE, resp.schema.action)
+        resp.validate()
+
+        val recorded = server.takeRequest()
+        assertEquals("POST", recorded.method)
+        assertTrue(recorded.path!!.endsWith("/sync/connect"))
+        val body = Json.decodeFromString<Map<String, kotlinx.serialization.json.JsonElement>>(recorded.body.readUtf8())
+        assertEquals("\"test-device\"", body["client_id"].toString())
+        assertEquals("1", body["protocol_version"].toString())
+    }
+
+    @Test
+    fun testPullVNextEncoding() = runTest {
+        val responseBody = """
+            {
+                "changes": [],
+                "scope_set_version": 13,
+                "scope_cursors": {
+                    "workouts_user:u_123": "c_890"
+                },
+                "scope_updates": {
+                    "add": [],
+                    "remove": []
+                },
+                "rebuild": [],
+                "has_more": false,
+                "checksums": {
+                    "workouts_user:u_123": "cs_a19d"
+                }
+            }
+        """.trimIndent()
+
+        server.enqueue(MockResponse().setBody(responseBody).setResponseCode(200))
+
+        val req = VNextPullRequest(
+            clientID = "test-device",
+            schema = VNextSchemaRef(version = 8, hash = "8b21d2a1"),
+            scopeSetVersion = 13,
+            scopes = mapOf("workouts_user:u_123" to VNextScopeCursorRef(cursor = "c_890")),
+            limit = 100,
+            checksumMode = VNextChecksumMode.REQUIRED
+        )
+        val resp = httpClient.pull(req)
+
+        resp.validate(req)
+        assertEquals(13L, resp.scopeSetVersion)
+        assertEquals("c_890", resp.scopeCursors["workouts_user:u_123"])
+
+        val recorded = server.takeRequest()
+        assertEquals("POST", recorded.method)
+        assertTrue(recorded.path!!.endsWith("/sync/pull"))
+        val body = Json.decodeFromString<Map<String, kotlinx.serialization.json.JsonElement>>(recorded.body.readUtf8())
+        assertEquals("\"test-device\"", body["client_id"].toString())
+        assertEquals("13", body["scope_set_version"].toString())
+        assertEquals("\"required\"", body["checksum_mode"].toString())
+    }
+
+    @Test
+    fun testSchemaMismatch422() = runTest {
+        val responseBody = """
+            {
+                "error": {
+                    "code": "schema_mismatch",
+                    "message": "client schema does not match server schema",
+                    "retryable": false
+                }
+            }
+        """.trimIndent()
+
+        server.enqueue(MockResponse().setBody(responseBody).setResponseCode(422))
+
+        val req = VNextPullRequest(
+            clientID = "test",
+            schema = VNextSchemaRef(version = 1, hash = "old"),
+            scopeSetVersion = 0,
+            scopes = emptyMap(),
+            limit = 100,
+            checksumMode = VNextChecksumMode.NONE
+        )
         try {
             httpClient.pull(req)
             fail("Expected schemaMismatch error")
         } catch (e: SynchroError.SchemaMismatch) {
-            assertEquals(5L, e.serverVersion)
-            assertEquals("newHash", e.serverHash)
+            assertEquals(0L, e.serverVersion)
+            assertEquals("", e.serverHash)
         }
     }
 
@@ -228,45 +325,6 @@ class HttpClientTests {
         assertEquals("[\"user:123\",\"global\"]", body["known_buckets"].toString())
         assertEquals("7", body["schema_version"].toString())
         assertEquals("\"hash7\"", body["schema_hash"].toString())
-    }
-
-    @Test
-    fun testSnapshotRequestEncoding() = runTest {
-        val snapshotResponseBody = """
-            {
-                "records": [],
-                "checkpoint": 50,
-                "has_more": true,
-                "schema_version": 1,
-                "schema_hash": "abc"
-            }
-        """.trimIndent()
-
-        server.enqueue(MockResponse().setBody(snapshotResponseBody).setResponseCode(200))
-
-        val req = SnapshotRequest(
-            clientID = "dev-1",
-            cursor = SnapshotCursor(checkpoint = 10, tableIndex = 0, afterID = "w5"),
-            limit = 100,
-            schemaVersion = 3,
-            schemaHash = "hash3"
-        )
-        val resp = httpClient.snapshot(req)
-
-        val recorded = server.takeRequest()
-        assertEquals("POST", recorded.method)
-        assertTrue(recorded.path!!.endsWith("/sync/snapshot"))
-
-        val body = Json.decodeFromString<kotlinx.serialization.json.JsonObject>(recorded.body.readUtf8())
-        assertEquals("\"dev-1\"", body["client_id"].toString())
-        assertEquals("100", body["limit"].toString())
-        assertEquals("3", body["schema_version"].toString())
-        val cursor = body["cursor"] as kotlinx.serialization.json.JsonObject
-        assertEquals("10", cursor["checkpoint"].toString())
-        assertEquals("0", cursor["table_idx"].toString())
-        assertEquals("\"w5\"", cursor["after_id"].toString())
-        assertEquals(50L, resp.checkpoint)
-        assertTrue(resp.hasMore)
     }
 
     @Test

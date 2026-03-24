@@ -1,3 +1,5 @@
+import type { Row } from './types';
+
 export class SynchroError extends Error {
   readonly code: string;
 
@@ -62,25 +64,22 @@ export class SchemaMismatchError extends SynchroError {
   }
 }
 
-export class SnapshotRequiredError extends SynchroError {
-  constructor() {
-    super('SNAPSHOT_REQUIRED', 'Full snapshot required');
-    this.name = 'SnapshotRequiredError';
-  }
-}
-
-export interface PushResultItem {
-  recordID: string;
+export interface PushRejectedMutation {
+  mutationID: string;
   table: string;
+  pk: Row;
   status: string;
+  code: string;
   message?: string;
+  serverRow?: Row | null;
+  serverVersion?: string | null;
 }
 
 export class PushRejectedError extends SynchroError {
-  readonly results: PushResultItem[];
+  readonly results: PushRejectedMutation[];
 
-  constructor(results: PushResultItem[]) {
-    super('PUSH_REJECTED', `Push rejected: ${results.length} record(s)`);
+  constructor(results: PushRejectedMutation[]) {
+    super('PUSH_REJECTED', `Push rejected: ${results.length} mutation(s)`);
     this.name = 'PushRejectedError';
     this.results = results;
   }
@@ -171,10 +170,8 @@ export function mapNativeError(error: unknown): SynchroError {
         parseInt(userInfo.serverVersion ?? '0', 10),
         userInfo.serverHash ?? ''
       );
-    case 'SNAPSHOT_REQUIRED':
-      return new SnapshotRequiredError();
     case 'PUSH_REJECTED': {
-      let results: PushResultItem[] = [];
+      let results: PushRejectedMutation[] = [];
       try {
         results = JSON.parse(userInfo.results ?? '[]');
       } catch {

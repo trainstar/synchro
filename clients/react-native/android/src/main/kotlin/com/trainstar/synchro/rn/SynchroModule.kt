@@ -5,6 +5,17 @@ import com.trainstar.synchro.*
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.*
 import kotlinx.coroutines.channels.Channel
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonNull
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.boolean
+import kotlinx.serialization.json.booleanOrNull
+import kotlinx.serialization.json.double
+import kotlinx.serialization.json.doubleOrNull
+import kotlinx.serialization.json.long
+import kotlinx.serialization.json.longOrNull
 import org.json.JSONArray
 import org.json.JSONObject
 import java.util.UUID
@@ -19,10 +30,8 @@ class SynchroModule(reactContext: ReactApplicationContext) :
     private val sessions = ConcurrentHashMap<String, TransactionSession>()
     private val observers = ConcurrentHashMap<String, Cancellable>()
     private val pendingAuthContinuations = ConcurrentHashMap<String, CancellableContinuation<String>>()
-    private val pendingSnapshotContinuations = ConcurrentHashMap<String, CancellableContinuation<Boolean>>()
     private var statusSubscription: Cancellable? = null
     private var conflictSubscription: Cancellable? = null
-    private var snapshotSubscription: Cancellable? = null
 
     private fun rejectWithError(promise: Promise, error: Throwable) {
         when (error) {
@@ -50,15 +59,8 @@ class SynchroModule(reactContext: ReactApplicationContext) :
                 "serverVersion" to error.serverVersion.toString(),
                 "serverHash" to error.serverHash
             )
-            is SynchroError.SnapshotRequired -> "SNAPSHOT_REQUIRED" to emptyMap()
             is SynchroError.PushRejected -> "PUSH_REJECTED" to mapOf(
-                "results" to JSONArray(error.results.map { r ->
-                    JSONObject().apply {
-                        put("recordID", r.id)
-                        put("table", r.tableName)
-                        put("status", r.status)
-                    }
-                }).toString()
+                "results" to rejectedMutationsJson(error.results)
             )
             is SynchroError.NetworkError -> "NETWORK_ERROR" to mapOf(
                 "message" to (error.underlying.message ?: "")
@@ -91,7 +93,6 @@ class SynchroModule(reactContext: ReactApplicationContext) :
             val maxRetryAttempts = if (config.hasKey("maxRetryAttempts")) config.getInt("maxRetryAttempts") else 5
             val pullPageSize = if (config.hasKey("pullPageSize")) config.getInt("pullPageSize") else 100
             val pushBatchSize = if (config.hasKey("pushBatchSize")) config.getInt("pushBatchSize") else 100
-            val snapshotPageSize = if (config.hasKey("snapshotPageSize")) config.getInt("snapshotPageSize") else 100
             val rawSeedPath = if (config.hasKey("seedDatabasePath")) config.getString("seedDatabasePath") else null
 
             // Android bundled assets live inside the APK — they're not on the filesystem.
@@ -135,7 +136,6 @@ class SynchroModule(reactContext: ReactApplicationContext) :
                 maxRetryAttempts = maxRetryAttempts,
                 pullPageSize = pullPageSize,
                 pushBatchSize = pushBatchSize,
-                snapshotPageSize = snapshotPageSize,
                 seedDatabasePath = seedDatabasePath
             )
 
@@ -159,11 +159,6 @@ class SynchroModule(reactContext: ReactApplicationContext) :
         pendingAuthContinuations.remove(requestID)?.cancel(
             Exception(error)
         )
-    }
-
-    @ReactMethod
-    override fun resolveSnapshotRequest(requestID: String, approved: Boolean) {
-        pendingSnapshotContinuations.remove(requestID)?.resume(approved) {}
     }
 
     @ReactMethod
@@ -583,28 +578,6 @@ class SynchroModule(reactContext: ReactApplicationContext) :
         promise.resolve(null)
     }
 
-    // MARK: - WAL / Sync
-
-    @ReactMethod
-    override fun checkpoint(mode: String, promise: Promise) {
-        val c = client ?: run {
-            promise.reject("NOT_CONNECTED", "Client not initialized")
-            return
-        }
-        try {
-            val checkpointMode = when (mode) {
-                "full" -> CheckpointMode.FULL
-                "restart" -> CheckpointMode.RESTART
-                "truncate" -> CheckpointMode.TRUNCATE
-                else -> CheckpointMode.PASSIVE
-            }
-            c.checkpoint(checkpointMode)
-            promise.resolve(null)
-        } catch (e: Exception) {
-            rejectWithError(promise, e)
-        }
-    }
-
     @ReactMethod
     override fun start(promise: Promise) {
         val c = client ?: run {
@@ -676,7 +649,6 @@ class SynchroModule(reactContext: ReactApplicationContext) :
     private fun wireClientEvents(client: SynchroClient) {
         statusSubscription?.cancel()
         conflictSubscription?.cancel()
-        snapshotSubscription?.cancel()
 
         statusSubscription = client.onStatusChange { status ->
             val params = Arguments.createMap().apply {
@@ -711,37 +683,73 @@ class SynchroModule(reactContext: ReactApplicationContext) :
             }
             emitOnConflict(params)
         }
-
-        snapshotSubscription = client.onSnapshotRequired {
-            suspendCancellableCoroutine { continuation ->
-                val requestID = UUID.randomUUID().toString()
-                pendingSnapshotContinuations[requestID] = continuation
-                continuation.invokeOnCancellation {
-                    pendingSnapshotContinuations.remove(requestID)
-                }
-                val params = Arguments.createMap().apply {
-                    putString("requestID", requestID)
-                }
-                emitOnSnapshotRequired(params)
-            }
-        }
     }
 
     private fun clearRuntimeState() {
         statusSubscription?.cancel()
         conflictSubscription?.cancel()
-        snapshotSubscription?.cancel()
         statusSubscription = null
         conflictSubscription = null
-        snapshotSubscription = null
         observers.values.forEach { it.cancel() }
         observers.clear()
         sessions.values.forEach { it.operations.close() }
         sessions.clear()
         pendingAuthContinuations.values.forEach { it.cancel(CancellationException("client closed")) }
         pendingAuthContinuations.clear()
-        pendingSnapshotContinuations.values.forEach { it.cancel(CancellationException("client closed")) }
-        pendingSnapshotContinuations.clear()
+    }
+
+    private fun rejectedMutationsJson(results: List<VNextRejectedMutation>): String {
+        return JSONArray(results.map { result ->
+            JSONObject().apply {
+                put("mutationID", result.mutationID)
+                put("table", result.table)
+                put("pk", jsonObjectToJsonObject(result.pk))
+                put("status", mutationStatusWireValue(result.status))
+                put("code", mutationRejectionCodeWireValue(result.code))
+                put("message", result.message ?: JSONObject.NULL)
+                put("serverRow", result.serverRow?.let { jsonObjectToJsonObject(it) } ?: JSONObject.NULL)
+                put("serverVersion", result.serverVersion ?: JSONObject.NULL)
+            }
+        }).toString()
+    }
+
+    private fun mutationStatusWireValue(status: VNextMutationStatus): String = when (status) {
+        VNextMutationStatus.APPLIED -> "applied"
+        VNextMutationStatus.CONFLICT -> "conflict"
+        VNextMutationStatus.REJECTED_TERMINAL -> "rejected_terminal"
+        VNextMutationStatus.REJECTED_RETRYABLE -> "rejected_retryable"
+    }
+
+    private fun mutationRejectionCodeWireValue(code: VNextMutationRejectionCode): String = when (code) {
+        VNextMutationRejectionCode.VERSION_CONFLICT -> "version_conflict"
+        VNextMutationRejectionCode.POLICY_REJECTED -> "policy_rejected"
+        VNextMutationRejectionCode.VALIDATION_FAILED -> "validation_failed"
+        VNextMutationRejectionCode.TABLE_NOT_SYNCED -> "table_not_synced"
+        VNextMutationRejectionCode.UNKNOWN_SCOPE_EFFECT -> "unknown_scope_effect"
+        VNextMutationRejectionCode.SERVER_RETRYABLE -> "server_retryable"
+    }
+
+    private fun jsonObjectToJsonObject(value: JsonObject): JSONObject {
+        val obj = JSONObject()
+        value.forEach { (key, element) ->
+            obj.put(key, jsonElementToJsonValue(element))
+        }
+        return obj
+    }
+
+    private fun jsonElementToJsonValue(value: JsonElement): Any? = when (value) {
+        JsonNull -> JSONObject.NULL
+        is JsonPrimitive -> when {
+            value.isString -> value.content
+            value.booleanOrNull != null -> value.boolean
+            value.longOrNull != null -> value.long
+            value.doubleOrNull != null -> value.double
+            else -> value.content
+        }
+        is JsonObject -> jsonObjectToJsonObject(value)
+        is JsonArray -> JSONArray().apply {
+            value.forEach { put(jsonElementToJsonValue(it)) }
+        }
     }
 
     private fun anyCodableMapToJson(value: Map<String, AnyCodable>): String {

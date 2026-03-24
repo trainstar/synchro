@@ -2,16 +2,17 @@ package com.trainstar.synchro
 
 import android.content.Context
 import androidx.test.core.app.ApplicationProvider
+import org.junit.After
 import org.junit.Assert.*
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
-import java.util.UUID
 
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [28])
 class ChangeTrackerTests {
+    private val databases = TestDatabaseTracker()
 
     private val testSchema = SchemaResponse(
         schemaVersion = 1,
@@ -38,12 +39,16 @@ class ChangeTrackerTests {
 
     private fun makeTestEnv(): Triple<SynchroDatabase, ChangeTracker, SchemaManager> {
         val context = ApplicationProvider.getApplicationContext<Context>()
-        val dbName = "synchro_test_${UUID.randomUUID()}.sqlite"
-        val db = SynchroDatabase(context, dbName)
+        val db = databases.create(context)
         val tracker = ChangeTracker(db)
         val manager = SchemaManager(db)
         manager.createSyncedTables(testSchema)
         return Triple(db, tracker, manager)
+    }
+
+    @After
+    fun tearDown() {
+        databases.closeAll()
     }
 
     @Test

@@ -1,0 +1,80 @@
+{
+  "fixture_version": 1,
+  "name": "push_mixed_accept_and_conflict_reject",
+  "kind": "protocol.push",
+  "summary": "A push batch may accept some mutations and reject others with authoritative server state.",
+  "spec_refs": [
+    "01-wire-protocol: Mutation Model",
+    "02-client-contract: Conflict And Rejection Handling",
+    "04-invariants: No Silent Mutation Loss",
+    "04-invariants: Canonical Server Outcome"
+  ],
+  "input": {
+    "request": {
+      "client_id": "ios-device-123",
+      "batch_id": "b_20260320_001",
+      "schema": {
+        "version": 8,
+        "hash": "8b21d2a1"
+      },
+      "mutations": [
+        {
+          "mutation_id": "m_001",
+          "table": "workouts",
+          "op": "insert",
+          "pk": {
+            "id": "w_1"
+          },
+          "columns": {
+            "user_id": "u_123",
+            "name": "Lower Body",
+            "started_at": "2026-03-20T18:00:00Z"
+          }
+        },
+        {
+          "mutation_id": "m_003",
+          "table": "workouts",
+          "op": "delete",
+          "pk": {
+            "id": "w_3"
+          },
+          "base_version": "sv_777"
+        }
+      ]
+    }
+  },
+  "expected": {
+    "response": {
+      "server_time": "2026-03-20T18:22:11Z",
+      "accepted": [
+        {
+          "mutation_id": "m_001",
+          "table": "workouts",
+          "pk": {
+            "id": "w_1"
+          },
+          "status": "applied",
+          "server_version": "sv_903"
+        }
+      ],
+      "rejected": [
+        {
+          "mutation_id": "m_003",
+          "table": "workouts",
+          "pk": {
+            "id": "w_3"
+          },
+          "status": "conflict",
+          "code": "version_conflict",
+          "server_version": "sv_778"
+        }
+      ]
+    },
+    "assertions": [
+      "every mutation_id must resolve to accepted or rejected",
+      "accepted mutations must include canonical server_version",
+      "rejected conflicts must include inspectable rejection code",
+      "rejected conflicts may include authoritative server_row"
+    ]
+  }
+}

@@ -140,29 +140,124 @@ final class HttpClientTests: XCTestCase {
         XCTAssertEqual(resp.tables[0].tableName, "orders")
     }
 
-    func testSchemaMismatch409() async throws {
+    func testConnectVNextSuccess() async throws {
         let responseBody: [String: Any] = [
-            "code": "schema_mismatch",
-            "message": "client schema does not match server schema",
-            "server_schema_version": 5,
-            "server_schema_hash": "newHash",
+            "server_time": "2026-03-20T18:22:11Z",
+            "protocol_version": 1,
+            "scope_set_version": 13,
+            "schema": [
+                "version": 8,
+                "hash": "8b21d2a1",
+                "action": "none",
+            ],
+            "scopes": [
+                "add": [],
+                "remove": [],
+            ],
+        ]
+
+        MockURLProtocol.requestHandler = { request in
+            XCTAssertEqual(request.httpMethod, "POST")
+            XCTAssertTrue(request.url!.path.hasSuffix("/sync/connect"))
+            let body = try JSONSerialization.jsonObject(with: request.bodyData()!) as! [String: Any]
+            XCTAssertEqual(body["client_id"] as? String, "test-device")
+            XCTAssertEqual(body["protocol_version"] as? Int, 1)
+
+            let data = try JSONSerialization.data(withJSONObject: responseBody)
+            let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: ["Content-Type": "application/json"])!
+            return (response, data)
+        }
+
+        let req = VNextConnectRequest(
+            clientID: "test-device",
+            platform: "ios",
+            appVersion: "1.0.0",
+            protocolVersion: 1,
+            schema: .init(version: 8, hash: "8b21d2a1"),
+            scopeSetVersion: 13,
+            knownScopes: [:]
+        )
+        let resp = try await httpClient.connect(request: req)
+        XCTAssertEqual(resp.schema.action, .none)
+        try resp.validate()
+    }
+
+    func testPullVNextEncoding() async throws {
+        let responseBody: [String: Any] = [
+            "changes": [],
+            "scope_set_version": 13,
+            "scope_cursors": [
+                "workouts_user:u_123": "c_890",
+            ],
+            "scope_updates": [
+                "add": [],
+                "remove": [],
+            ],
+            "rebuild": [],
+            "has_more": false,
+            "checksums": [
+                "workouts_user:u_123": "cs_a19d",
+            ],
+        ]
+
+        MockURLProtocol.requestHandler = { request in
+            XCTAssertEqual(request.httpMethod, "POST")
+            XCTAssertTrue(request.url!.path.hasSuffix("/sync/pull"))
+            let body = try JSONSerialization.jsonObject(with: request.bodyData()!) as! [String: Any]
+            XCTAssertEqual(body["client_id"] as? String, "test-device")
+            XCTAssertEqual(body["scope_set_version"] as? Int64, 13)
+            XCTAssertEqual(body["checksum_mode"] as? String, "required")
+
+            let data = try JSONSerialization.data(withJSONObject: responseBody)
+            let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: ["Content-Type": "application/json"])!
+            return (response, data)
+        }
+
+        let req = VNextPullRequest(
+            clientID: "test-device",
+            schema: .init(version: 8, hash: "8b21d2a1"),
+            scopeSetVersion: 13,
+            scopes: ["workouts_user:u_123": .init(cursor: "c_890")],
+            limit: 100,
+            checksumMode: .required
+        )
+        let resp = try await httpClient.pull(request: req)
+        try resp.validate(for: req)
+        XCTAssertEqual(resp.scopeSetVersion, 13)
+        XCTAssertEqual(resp.scopeCursors["workouts_user:u_123"], "c_890")
+    }
+
+    func testSchemaMismatch422() async throws {
+        let responseBody: [String: Any] = [
+            "error": [
+                "code": "schema_mismatch",
+                "message": "client schema does not match server schema",
+                "retryable": false,
+            ],
         ]
 
         MockURLProtocol.requestHandler = { request in
             let data = try JSONSerialization.data(withJSONObject: responseBody)
-            let response = HTTPURLResponse(url: request.url!, statusCode: 409, httpVersion: nil, headerFields: nil)!
+            let response = HTTPURLResponse(url: request.url!, statusCode: 422, httpVersion: nil, headerFields: nil)!
             return (response, data)
         }
 
-        let req = PullRequest(clientID: "test", checkpoint: 0, schemaVersion: 1, schemaHash: "old")
+        let req = VNextPullRequest(
+            clientID: "test",
+            schema: .init(version: 1, hash: "old"),
+            scopeSetVersion: 0,
+            scopes: [:],
+            limit: 100,
+            checksumMode: VNextChecksumMode.none
+        )
         do {
             _ = try await httpClient.pull(request: req)
             XCTFail("Expected schemaMismatch error")
         } catch let error as SynchroError {
             switch error {
             case .schemaMismatch(let version, let hash):
-                XCTAssertEqual(version, 5)
-                XCTAssertEqual(hash, "newHash")
+                XCTAssertEqual(version, 0)
+                XCTAssertEqual(hash, "")
             default:
                 XCTFail("Expected schemaMismatch, got \(error)")
             }
@@ -295,46 +390,6 @@ final class HttpClientTests: XCTestCase {
         XCTAssertEqual(capturedBody?["known_buckets"] as? [String], ["user:123", "global"])
         XCTAssertEqual(capturedBody?["schema_version"] as? Int, 7)
         XCTAssertEqual(capturedBody?["schema_hash"] as? String, "hash7")
-    }
-
-    func testSnapshotRequestEncoding() async throws {
-        let snapshotResponseBody: [String: Any] = [
-            "records": [] as [Any],
-            "checkpoint": 50,
-            "has_more": true,
-            "schema_version": 1,
-            "schema_hash": "abc",
-        ]
-
-        var capturedBody: [String: Any]?
-
-        MockURLProtocol.requestHandler = { request in
-            XCTAssertEqual(request.httpMethod, "POST")
-            XCTAssertTrue(request.url!.path.hasSuffix("/sync/snapshot"))
-            capturedBody = try JSONSerialization.jsonObject(with: request.bodyData()!) as? [String: Any]
-            let data = try JSONSerialization.data(withJSONObject: snapshotResponseBody)
-            let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
-            return (response, data)
-        }
-
-        let req = SnapshotRequest(
-            clientID: "dev-1",
-            cursor: SnapshotCursor(checkpoint: 10, tableIndex: 0, afterID: "w5"),
-            limit: 100,
-            schemaVersion: 3,
-            schemaHash: "hash3"
-        )
-        let resp = try await httpClient.snapshot(request: req)
-
-        XCTAssertEqual(capturedBody?["client_id"] as? String, "dev-1")
-        XCTAssertEqual(capturedBody?["limit"] as? Int, 100)
-        XCTAssertEqual(capturedBody?["schema_version"] as? Int, 3)
-        let cursor = capturedBody?["cursor"] as? [String: Any]
-        XCTAssertEqual(cursor?["checkpoint"] as? Int, 10)
-        XCTAssertEqual(cursor?["table_idx"] as? Int, 0)
-        XCTAssertEqual(cursor?["after_id"] as? String, "w5")
-        XCTAssertEqual(resp.checkpoint, 50)
-        XCTAssertTrue(resp.hasMore)
     }
 
     func testFetchTablesSuccess() async throws {

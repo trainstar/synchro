@@ -218,4 +218,90 @@ final class PullProcessorTests: XCTestCase {
         let pending = try tracker.pendingChanges()
         XCTAssertEqual(pending.count, 0)
     }
+
+    func testApplyScopeDeletePreservesCanonicalDeletedAt() throws {
+        let (db, processor) = try makeTestEnv()
+
+        try db.writeTransaction { conn in
+            try SynchroMeta.setSyncLock(conn, locked: true)
+            try SynchroMeta.upsertScope(conn, scopeID: "orders:user1", cursor: "10", checksum: nil)
+            try SynchroMeta.upsertScopeRow(conn, scopeID: "orders:user1", tableName: "orders", recordID: "w1", generation: 0)
+        }
+        _ = try db.execute(
+            "INSERT INTO orders (id, ship_address, updated_at) VALUES (?, ?, ?)",
+            params: ["w1", "123 Main St", "2026-01-01T10:00:00.000Z"]
+        )
+        try db.writeTransaction { conn in
+            try SynchroMeta.setSyncLock(conn, locked: false)
+        }
+
+        let change = VNextChangeRecord(
+            scope: "orders:user1",
+            table: "orders",
+            op: .delete,
+            pk: ["id": AnyCodable("w1")],
+            row: [
+                "id": AnyCodable("w1"),
+                "ship_address": AnyCodable("123 Main St"),
+                "updated_at": AnyCodable("2026-01-04T00:00:00.000Z"),
+                "deleted_at": AnyCodable("2026-01-04T00:00:00.000Z"),
+            ],
+            serverVersion: "2026-01-04T00:00:00.000Z"
+        )
+
+        try processor.applyScopeChanges(
+            changes: [change],
+            syncedTables: [testTable.localSchema],
+            scopeCursors: ["orders:user1": "11"],
+            checksums: nil
+        )
+
+        let row = try db.queryOne("SELECT deleted_at FROM orders WHERE id = ?", params: ["w1"])
+        XCTAssertEqual(row?["deleted_at"] as String?, "2026-01-04T00:00:00.000Z")
+    }
+
+    func testApplyScopeDeleteUsesDeletedAtAsEffectiveVersion() throws {
+        let (db, processor) = try makeTestEnv()
+
+        try db.writeTransaction { conn in
+            try SynchroMeta.setSyncLock(conn, locked: true)
+            try SynchroMeta.upsertScope(conn, scopeID: "orders:user1", cursor: "10", checksum: nil)
+            try SynchroMeta.upsertScopeRow(conn, scopeID: "orders:user1", tableName: "orders", recordID: "w1", generation: 0)
+        }
+        _ = try db.execute(
+            "INSERT INTO orders (id, ship_address, updated_at) VALUES (?, ?, ?)",
+            params: ["w1", "123 Main St", "2026-01-03T00:00:00.000Z"]
+        )
+        try db.writeTransaction { conn in
+            try SynchroMeta.setSyncLock(conn, locked: false)
+        }
+
+        let change = VNextChangeRecord(
+            scope: "orders:user1",
+            table: "orders",
+            op: .delete,
+            pk: ["id": AnyCodable("w1")],
+            row: [
+                "id": AnyCodable("w1"),
+                "ship_address": AnyCodable("123 Main St"),
+                "updated_at": AnyCodable("2026-01-03T00:00:00.000Z"),
+                "deleted_at": AnyCodable("2026-01-04T00:00:00.000Z"),
+            ],
+            serverVersion: "2026-01-04T00:00:00.000Z"
+        )
+
+        try processor.applyScopeChanges(
+            changes: [change],
+            syncedTables: [testTable.localSchema],
+            scopeCursors: ["orders:user1": "11"],
+            checksums: nil
+        )
+
+        let row = try db.queryOne(
+            "SELECT updated_at, deleted_at FROM orders WHERE id = ?",
+            params: ["w1"]
+        )
+        XCTAssertEqual(row?["updated_at"] as String?, "2026-01-03T00:00:00.000Z")
+        XCTAssertEqual(row?["deleted_at"] as String?, "2026-01-04T00:00:00.000Z")
+    }
 }

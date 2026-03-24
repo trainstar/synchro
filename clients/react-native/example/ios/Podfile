@@ -17,8 +17,8 @@ if linkage != nil
 end
 
 target 'SynchroReactNativeExample' do
-  # Local path to the Synchro Swift SDK for monorepo development
-  pod 'Synchro', :path => '../../../swift'
+  # Local path to the Synchro podspec at the repository root
+  pod 'Synchro', :path => '../../../..'
   # GRDB 7.0 is only available via git (not published to CocoaPods trunk)
   pod 'GRDB.swift', :git => 'https://github.com/groue/GRDB.swift.git', :tag => 'v7.0.0'
 

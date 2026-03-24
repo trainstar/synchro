@@ -1,0 +1,46 @@
+{
+  "fixture_version": 1,
+  "name": "connect_unsupported_client_runtime",
+  "kind": "protocol.connect",
+  "summary": "Client is too old for the current server contract and must stop normal sync.",
+  "spec_refs": [
+    "01-wire-protocol: Connection Handshake",
+    "01-wire-protocol: Schema Actions",
+    "05-schema-evolution: Connect-Time Schema Decision"
+  ],
+  "input": {
+    "request": {
+      "client_id": "ios-device-legacy",
+      "platform": "ios",
+      "app_version": "0.9.0",
+      "protocol_version": 1,
+      "schema": {
+        "version": 4,
+        "hash": "deadbeef"
+      },
+      "scope_set_version": 2,
+      "known_scopes": {}
+    }
+  },
+  "expected": {
+    "response": {
+      "server_time": "2026-03-20T18:22:11Z",
+      "protocol_version": 1,
+      "scope_set_version": 2,
+      "schema": {
+        "version": 9,
+        "hash": "9f4ea2bc",
+        "action": "unsupported"
+      },
+      "scopes": {
+        "add": [],
+        "remove": []
+      }
+    },
+    "assertions": [
+      "response.schema.action must equal unsupported",
+      "response must not include schema_definition",
+      "client must not continue normal sync after unsupported"
+    ]
+  }
+}

@@ -1,0 +1,15 @@
+[package]
+name = "synchro-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Portable sync core: conflict resolution, checksums, dedup, protocol types"
+
+[dependencies]
+crc32fast = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+chrono = { version = "0.4", features = ["serde"] }
+
+[dev-dependencies]
+pretty_assertions = "1"

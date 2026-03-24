@@ -1,0 +1,46 @@
+{
+  "fixture_version": 1,
+  "name": "schema_additive_column_and_scope_rebuild",
+  "kind": "schema.evolution",
+  "summary": "An additive schema change may still require rebuild when existing authoritative rows need rematerialization under the new shape.",
+  "spec_refs": [
+    "05-schema-evolution: Compatible Additive Change",
+    "05-schema-evolution: Connect-Time Schema Decision",
+    "05-schema-evolution: Client Migration Rules"
+  ],
+  "input": {
+    "previous_schema": {
+      "version": 8,
+      "hash": "8b21d2a1"
+    },
+    "next_schema": {
+      "version": 9,
+      "hash": "9f4ea2bc"
+    },
+    "change": {
+      "table": "workouts",
+      "operation": "add_column",
+      "column": {
+        "name": "notes",
+        "type": "text",
+        "nullable": true
+      }
+    }
+  },
+  "expected": {
+    "connect_schema_action": "rebuild_local",
+    "required_client_steps": [
+      "pause_normal_sync",
+      "persist_migration_intent",
+      "apply_local_ddl",
+      "update_schema_metadata",
+      "rebuild_affected_scopes",
+      "resume_normal_sync"
+    ],
+    "assertions": [
+      "schema version and hash must move forward together",
+      "queued mutations must remain inspectable and safe through migration",
+      "rebuild must target affected scopes, not wipe unrelated local data"
+    ]
+  }
+}

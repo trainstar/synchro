@@ -1,0 +1,114 @@
+---
+title: Architecture Overview
+description: Synchro’s current layer model and the boundaries between server, extension, and clients.
+---
+
+Synchro’s release architecture is intentionally narrow:
+
+- `extensions/synchro-core` owns shared deterministic sync semantics
+- `extensions/synchro-pg` owns PostgreSQL-near execution, scope materialization, and synced CRUD application
+- `api/go` owns transport, auth integration, and HTTP translation
+- native clients own local SQLite, queueing, scheduling, and safe apply
+- React Native is a bridge over the native clients, not an independent sync engine
+
+## Why this shape
+
+This architecture exists to keep:
+
+- sync semantics close to the data
+- the HTTP layer thin
+- native SDK behavior consistent
+- the hot path low in round trips
+
+## Core design choices
+
+- deterministic server-defined scopes
+- extension-side change capture and materialization
+- per-scope cursors and explicit rebuild
+- full synced CRUD for synced tables
+- SQL migration based configuration, with structured defaults and custom SQL escape hatches
+
+## Scope design guidelines
+
+The most important selective-sync rule is:
+
+- optimize for low row-change fanout, not low total scope count
+
+What matters is not how many scopes exist globally. What matters is how many scope instances a single changed row forces the server to update.
+
+Recommended modeling pattern:
+
+- private data goes into private scopes such as `documents_user:{user_id}`
+- shared or public data goes into shared scopes such as `templates_public`
+- one local SQLite table may be fed by both shared and private scopes
+- bundled seeds should export those same shared runtime scopes, not seed-only copies
+
+Concrete example:
+
+- every user should see the public template catalog
+- every user should also see their own custom templates
+
+Model that as:
+
+- `templates_public`
+- `templates_user:{user_id}`
+
+Do not duplicate the public template catalog into every `templates_user:{user_id}` scope. One public-row change should update one shared scope, not one scope per user.
+
+### Shared scope grouping
+
+Do not create a separate scope just because data is seeded.
+
+Scope boundaries should follow sync and rebuild behavior:
+
+- use one shared `global` scope only when the datasets are small, stable, and change together
+- split into multiple shared scopes when datasets differ in size, change rate, rebuild needs, or likely subscription patterns
+
+Practical rule:
+
+- tiny lookup tables that rarely change can live in one shared `reference_public` scope
+- a larger public catalog should usually get its own shared scope such as `templates_public`
+
+## Seeded warm-start databases
+
+Synchro now ships a portable seed generator:
+
+- `api/go/cmd/synchro-seed`
+
+It connects directly to PostgreSQL, reads the canonical `synchro_schema_manifest()` output, exports any explicitly declared portable scopes, and emits a client-compatible SQLite database artifact.
+
+Use it when you want:
+
+- faster first app start
+- bundled local schema, portable data, and sync metadata
+- a warm-start database artifact generated from the same canonical schema contract clients use at runtime
+
+Rules for the current release:
+
+- the generator exports only server-declared portable or public scopes
+- it does not accept JWT input
+- if no portable scopes are declared, the output is schema-only
+- clients keep the seeded portable rows after login and reconcile them through the normal `connect`, rebuild, push, and pull flows
+
+## Adapter auth modes
+
+The current Go adapter supports two ways to authenticate the protected sync routes:
+
+- direct JWT validation inside `api/go`
+- trusted upstream auth, where the host API resolves the canonical internal user ID and Synchro receives that resolved user ID through a trusted resolver
+
+Recommended mode when Synchro is mounted inside a larger product API:
+
+- keep identity-provider validation and product-specific user mapping in the main API
+- pass the resolved internal user UUID into Synchro
+- let the extension enforce DB-side policy with `app.user_id`
+
+This keeps Synchro generic and avoids duplicating WorkOS or product-specific identity logic inside the sync adapter.
+
+## Specification
+
+The detailed architectural contract is published in:
+
+- [Principles](/synchro/spec/00-principles/)
+- [State Machines](/synchro/spec/03-state-machines/)
+- [Invariants](/synchro/spec/04-invariants/)

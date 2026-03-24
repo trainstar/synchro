@@ -1,0 +1,80 @@
+{
+  "fixture_version": 1,
+  "name": "pull_delta_with_scope_update_and_rebuild_request",
+  "kind": "protocol.pull",
+  "summary": "Pull may return incremental changes, scope assignment deltas, and explicit rebuild requests in the same response.",
+  "spec_refs": [
+    "01-wire-protocol: Incremental Pull Model",
+    "03-state-machines: Normal Sync Cycle",
+    "03-state-machines: Rebuild Flow"
+  ],
+  "input": {
+    "request": {
+      "client_id": "ios-device-123",
+      "schema": {
+        "version": 8,
+        "hash": "8b21d2a1"
+      },
+      "scope_set_version": 13,
+      "scopes": {
+        "workouts_user:u_123": {
+          "cursor": "c_889"
+        },
+        "exercises_public": {
+          "cursor": "c_201"
+        },
+        "exercises_user:u_123": {
+          "cursor": "c_050"
+        }
+      },
+      "limit": 500,
+      "checksum_mode": "requested"
+    }
+  },
+  "expected": {
+    "response": {
+      "changes": [
+        {
+          "scope": "workouts_user:u_123",
+          "table": "workouts",
+          "op": "upsert",
+          "pk": {
+            "id": "w_9"
+          },
+          "server_version": "sv_991"
+        }
+      ],
+      "scope_set_version": 14,
+      "scope_cursors": {
+        "workouts_user:u_123": "c_890",
+        "exercises_public": "c_202",
+        "exercises_user:u_123": "c_050"
+      },
+      "scope_updates": {
+        "add": [
+          {
+            "id": "workout_templates_public",
+            "cursor": null
+          }
+        ],
+        "remove": []
+      },
+      "rebuild": [
+        "exercises_user:u_123"
+      ],
+      "has_more": false,
+      "checksums": {
+        "workouts_user:u_123": "cs_a19d",
+        "exercises_public": "cs_0f22",
+        "exercises_user:u_123": "cs_7771"
+      }
+    },
+    "assertions": [
+      "scope cursors must advance only for durably applicable changes",
+      "scope_set_version must advance with scope assignment deltas",
+      "new scopes may be added during pull via scope_updates.add",
+      "rebuild requests must be explicit",
+      "checksums are valid only when checksum_mode permits them"
+    ]
+  }
+}

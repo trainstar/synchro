@@ -1,0 +1,93 @@
+---
+title: Client SDKs
+description: Supported client surfaces and the boundary between native SDKs and the React Native bridge.
+---
+
+Synchro currently ships three client surfaces:
+
+- Swift for Apple platforms
+- Kotlin for Android
+- React Native as a bridge over the native SDKs
+
+## Native SDK responsibilities
+
+The native SDKs own:
+
+- local SQLite access
+- local mutation capture
+- durable queueing
+- background and foreground sync scheduling
+- applying server state without echo loops
+
+They do not define server sync semantics.
+
+## React Native boundary
+
+React Native exposes the same product surface as the native SDKs, but it must remain a bridge.
+
+It does not own:
+
+- queue semantics
+- rebuild semantics
+- conflict semantics
+- server protocol interpretation
+
+## Installation notes
+
+- Swift is released through Swift Package Manager from the repo root `Package.swift`
+- Kotlin is released from `clients/kotlin/synchro`
+- React Native is released from `clients/react-native`
+
+## Local and published consumption
+
+Supported consumers should switch dependency source only. Package identity and runtime behavior stay the same.
+
+| Surface | Local development | Published release |
+| --- | --- | --- |
+| Native Apple SDK | local SPM package path to the repo root | tagged SPM release from the repo root |
+| Apple pod surface | `pod 'Synchro', :path => '/absolute/path/to/synchro'` | `pod 'Synchro', :git => 'https://github.com/trainstar/synchro.git', :tag => 'v<version>'` |
+| Kotlin SDK | `mavenLocal()`, then `mavenCentral()` | Maven Central |
+| React Native package | local packed `.tgz` from `make local-consumer-artifacts` | npm |
+| RN iOS native dependency | local pod path to the repo root `Synchro.podspec` | tagged git pod `v<version>` |
+| RN Android native dependency | `mavenLocal()`, then `mavenCentral()`, optional `synchroVersion=<version>` override | Maven Central |
+
+Use `make local-consumer-artifacts` to prepare the supported local-consumer flow.
+
+## Seeded database support
+
+The native SDKs support copying a preinitialized SQLite database into place before first open.
+
+Use this for:
+
+- warm-starting the synced-table schema
+- bundling portable reference data or other installer-time content you want available immediately
+- reducing first-start schema work and initial traffic
+
+Generate the seed artifact with:
+
+- `api/go/cmd/synchro-seed`
+
+Current seed rules:
+
+- the generator may include schema plus explicitly server-declared portable scopes
+- if no portable scopes are declared, the generator produces schema-only output
+- the SDKs keep seeded portable rows after login
+- the first authenticated sync continues from the seeded continuation metadata instead of wiping the DB
+- auth-scoped user data still arrives through normal sync after login
+
+### React Native on iOS
+
+The current iOS integration requires the consuming app to add the native Synchro dependency and GRDB in its Podfile. This is part of the current public installation contract until the CocoaPods dependency story is simplified further.
+
+```ruby
+pod 'Synchro', :git => 'https://github.com/trainstar/synchro.git', :tag => 'v<version>'
+pod 'GRDB.swift', :git => 'https://github.com/groue/GRDB.swift.git', :tag => 'v7.0.0'
+```
+
+## Specification
+
+The SDK contract is defined in:
+
+- [Client Contract](/synchro/spec/02-client-contract/)
+- [State Machines](/synchro/spec/03-state-machines/)
+- [Schema Evolution](/synchro/spec/05-schema-evolution/)

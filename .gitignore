@@ -1,5 +1,7 @@
 # Go
 bin/
+!extensions/synchro-pg/src/bin/
+!extensions/synchro-pg/src/bin/pgrx_embed.rs
 *.test
 *.out
 cover.out
@@ -15,11 +17,13 @@ cover.out
 # Test artifacts
 .synchrod-test.log
 .synchrod-test.pid
+.synchrod-pg-test.log
+.synchrod-pg-test.pid
 
 # Seed database output
 seed.db
-clients/react-native/example/seed.db
 clients/react-native/example/android/app/src/main/assets/seed.db
+!clients/react-native/example/seed.db
 
 # Swift build cache
 .build/
@@ -33,10 +37,17 @@ clients/kotlin/local.properties
 # React Native artifacts
 clients/react-native/example/artifacts/
 
+# Local consumer artifacts
+dist/
+
 # Docs build output
 docs/node_modules/
 docs/dist/
 docs/.astro/
+
+# Rust build artifacts
+extensions/target/
+.pgrx-target/
 
 # Local-only
 .ignore/
@@ -44,3 +55,9 @@ docs/.astro/
 # AI config
 AGENTS.md
 CLAUDE.md
+synchrod-pg
+!api/go/cmd/
+!api/go/cmd/synchrod-pg/
+!api/go/cmd/synchrod-pg/main.go
+.synchrod-pg-test.log
+.synchrod-pg-test.pid

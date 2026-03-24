@@ -11,12 +11,12 @@ Pod::Spec.new do |s|
   s.authors      = package["author"]
 
   s.platforms    = { :ios => "16.0" }
-  s.source       = { :git => "https://github.com/trainstar/synchro.git", :tag => "#{s.version}" }
+  s.source       = { :git => "https://github.com/trainstar/synchro.git", :tag => "v#{s.version}" }
 
   s.source_files = "ios/**/*.{h,m,mm,swift,cpp}"
   s.private_header_files = "ios/**/*.h"
 
-  s.dependency "Synchro", "~> 0.1"
+  s.dependency "Synchro", "= #{s.version}"
 
   install_modules_dependencies(s)
 end

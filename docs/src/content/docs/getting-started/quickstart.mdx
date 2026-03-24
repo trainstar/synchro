@@ -1,0 +1,113 @@
+---
+title: Quickstart
+description: Validate the current Synchro release surface locally.
+---
+
+## Prerequisites
+
+- PostgreSQL 18 via `cargo pgrx`
+- Rust toolchain for `extensions/synchro-core` and `extensions/synchro-pg`
+- Go 1.25 for `api/go`
+- Xcode and Swift for Apple SDK validation
+- JDK 17 and Android SDK for Kotlin and Android validation
+- Node.js 22 for React Native validation
+
+## Adapter auth configuration
+
+Protected sync routes in `api/go` support two auth modes:
+
+- direct JWT validation with `JWTSecret` or `JWKSURL`
+- trusted upstream auth with `UserIDResolver`
+
+Use trusted upstream auth when Synchro is mounted behind an existing product API that already validates bearer tokens and resolves internal user IDs.
+
+## Core validation
+
+Run the shared Rust semantics tests:
+
+```bash
+make test-rust-core
+```
+
+Run the PostgreSQL extension tests on PG 18:
+
+```bash
+make test-rust-pg
+```
+
+Run the Go adapter integration tests against the extension-backed database:
+
+```bash
+make test-adapter
+```
+
+## Client validation
+
+Run the Apple SDK integration tests:
+
+```bash
+make test-swift
+```
+
+Run the Android SDK integration tests:
+
+```bash
+make test-kotlin
+```
+
+Run the React Native bridge tests:
+
+```bash
+make test-rn
+```
+
+## Local adapter server
+
+Start the extension-backed adapter for manual work:
+
+```bash
+make synchrod-pg-test-start
+```
+
+The default test server URL is `http://localhost:8081`.
+
+Stop it when you are done:
+
+```bash
+make synchrod-pg-test-stop
+```
+
+## Preinitialized seed databases
+
+Generate a client-compatible SQLite seed database directly from PostgreSQL:
+
+```bash
+cd api/go
+GOWORK=off go run ./cmd/synchro-seed \
+  --database-url "postgres://user:pass@localhost:5432/app?sslmode=disable" \
+  --output ./build/seed.db
+```
+
+Use this when you want to bundle a warm-start database with the app so clients begin with the correct synced-table schema and any portable or public reference data before the first `connect`.
+
+Current release behavior:
+
+- the generator always builds the synced-table SQLite schema from `synchro_schema_manifest()`
+- it exports only server-declared portable scopes, never auth-scoped data
+- it installs the same local CDC triggers the native SDKs use
+- it writes portable scope continuation state into `_synchro_scopes`, `_synchro_scope_rows`, and checkpoint compatibility tables
+- it writes seed metadata such as `schema_version`, `schema_hash`, `local_schema`, `scope_set_version`, `known_buckets`, and `snapshot_complete`
+- if no portable scopes are configured, the output is schema-only
+- it does not create a separate sync mode, clients still log in and reconcile with the server on first `connect`
+
+Operational rules:
+
+- the generator is trusted tooling, not a client bootstrap API
+- it does not accept a JWT
+- clients keep the seeded schema and portable data after login, then sync forward from that state
+
+## What to read next
+
+- [Architecture overview](/synchro/architecture/overview/)
+- [Wire Protocol](/synchro/spec/01-wire-protocol/)
+- [Conformance Plan](/synchro/spec/06-conformance-plan/)

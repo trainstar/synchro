@@ -32,8 +32,6 @@ export interface Transaction {
   execute(sql: string, params?: unknown[]): Promise<ExecResult>;
 }
 
-export type CheckpointMode = 'passive' | 'full' | 'restart' | 'truncate';
-
 export type SyncStatusType =
   | 'idle'
   | 'connecting'
@@ -65,106 +63,7 @@ export interface SynchroConfig {
   maxRetryAttempts?: number;
   pullPageSize?: number;
   pushBatchSize?: number;
-  snapshotPageSize?: number;
   seedDatabasePath?: string;
 }
 
 export type Unsubscribe = () => void;
-
-// -- Sync Protocol Types --
-// These mirror the Go server and native SDK models.
-// JSON keys use snake_case on the wire; TypeScript uses camelCase.
-
-export interface PullRequest {
-  clientId: string;
-  checkpoint: number;
-  bucketCheckpoints?: Record<string, number>;
-  tables?: string[];
-  limit?: number;
-  knownBuckets?: string[];
-  schemaVersion: number;
-  schemaHash: string;
-}
-
-export interface PullResponse {
-  changes: SyncRecord[];
-  deletes: DeleteEntry[];
-  checkpoint: number;
-  bucketCheckpoints?: Record<string, number>;
-  hasMore: boolean;
-  snapshotRequired?: boolean;
-  snapshotReason?: string;
-  rebuildBuckets?: string[];
-  bucketChecksums?: Record<string, number>;
-  bucketUpdates?: BucketUpdate;
-  schemaVersion: number;
-  schemaHash: string;
-}
-
-export interface SyncRecord {
-  id: string;
-  tableName: string;
-  data: Record<string, unknown>;
-  updatedAt: string;
-  deletedAt?: string;
-  bucketId?: string;
-  checksum?: number;
-}
-
-export interface DeleteEntry {
-  id: string;
-  tableName: string;
-}
-
-export interface BucketUpdate {
-  added?: string[];
-  removed?: string[];
-}
-
-export interface RegisterResponse {
-  id: string;
-  serverTime: string;
-  lastSyncAt?: string;
-  checkpoint: number;
-  bucketCheckpoints?: Record<string, number>;
-  schemaVersion: number;
-  schemaHash: string;
-}
-
-export interface RebuildRequest {
-  clientId: string;
-  bucketId: string;
-  cursor?: string;
-  limit?: number;
-  schemaVersion: number;
-  schemaHash: string;
-}
-
-export interface RebuildResponse {
-  records: SyncRecord[];
-  cursor?: string;
-  checkpoint: number;
-  hasMore: boolean;
-  bucketChecksum?: number;
-  schemaVersion: number;
-  schemaHash: string;
-}
-
-// -- Debug Types --
-
-export interface SynchroDebugInfo {
-  clientID: string;
-  buckets: BucketDebugInfo[];
-  lastSyncCheckpoint: number;
-  schemaVersion: number;
-  schemaHash: string;
-  pendingChangeCount: number;
-  generatedAt: string;
-}
-
-export interface BucketDebugInfo {
-  bucketID: string;
-  checkpoint: number;
-  memberCount: number;
-  checksum: number;
-}

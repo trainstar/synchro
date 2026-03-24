@@ -1,5 +1,5 @@
 import Foundation
-import GRDB
+@preconcurrency import GRDB
 
 enum SQLiteHelpers {
     static func quoteIdentifier(_ name: String) -> String {

@@ -150,11 +150,16 @@ final class SchemaIntegrationTests: XCTestCase {
         let client1 = try SynchroClient(config: config1)
         try await client1.start()
 
-        // 2. Insert data and push it to server so it survives reconnect
+        // 2. Insert customer (required FK for orders) and order, push to server
+        let custID = UUID().uuidString
+        _ = try client1.execute(
+            "INSERT INTO customers (id, user_id, name, balance, is_active, created_at, updated_at) VALUES (?, ?, ?, 0, 1, ?, ?)",
+            params: [custID, userID, "Schema Test Customer", "2026-01-01T00:00:00.000Z", "2026-01-01T00:00:00.000Z"]
+        )
         let orderID = UUID().uuidString
         _ = try client1.execute(
-            "INSERT INTO orders (id, user_id, ship_address, updated_at) VALUES (?, ?, ?, ?)",
-            params: [orderID, userID, "123 Main St", "2026-01-01T00:00:00.000Z"]
+            "INSERT INTO orders (id, customer_id, status, total_price, currency, ship_address, created_at, updated_at) VALUES (?, ?, 'pending', 0, 'USD', ?, ?, ?)",
+            params: [orderID, custID, "123 Main St", "2026-01-01T00:00:00.000Z", "2026-01-01T00:00:00.000Z"]
         )
         try await client1.syncNow()
 
@@ -262,11 +267,16 @@ final class SchemaIntegrationTests: XCTestCase {
         let orders = try client.query("SELECT * FROM orders", params: nil)
         XCTAssertEqual(orders.count, 0, "seed DB should have empty tables")
 
-        // Insert data offline — CDC triggers should fire
+        // Insert customer (FK required) and order offline — CDC triggers should fire
+        let custID = UUID().uuidString
+        _ = try client.execute(
+            "INSERT INTO customers (id, user_id, name, balance, is_active, created_at, updated_at) VALUES (?, ?, ?, 0, 1, ?, ?)",
+            params: [custID, UUID().uuidString, "Offline Customer", "2026-01-01T00:00:00.000Z", "2026-01-01T00:00:00.000Z"]
+        )
         let orderID = UUID().uuidString
         _ = try client.execute(
-            "INSERT INTO orders (id, user_id, ship_address, updated_at) VALUES (?, ?, ?, ?)",
-            params: [orderID, UUID().uuidString, "456 Oak Ave", "2026-01-01T00:00:00.000Z"]
+            "INSERT INTO orders (id, customer_id, status, total_price, currency, ship_address, created_at, updated_at) VALUES (?, ?, 'pending', 0, 'USD', ?, ?, ?)",
+            params: [orderID, custID, "456 Oak Ave", "2026-01-01T00:00:00.000Z", "2026-01-01T00:00:00.000Z"]
         )
 
         // Query back
@@ -299,7 +309,7 @@ final class SchemaIntegrationTests: XCTestCase {
 
         // Create a STALE seed: only the orders table with minimal columns (no other tables)
         let minimalColumns = ordersTable.columns.filter {
-            ["id", "user_id", "ship_address", "updated_at", "deleted_at"].contains($0.name)
+            ["id", "customer_id", "ship_address", "updated_at", "deleted_at"].contains($0.name)
         }
         let staleOrders = withColumns(ordersTable, columns: minimalColumns)
         let seedPath = try createSeedDB(tables: [staleOrders], schemaVersion: 0, schemaHash: "stale-seed")
@@ -326,10 +336,15 @@ final class SchemaIntegrationTests: XCTestCase {
         }
 
         // Verify sync works — can insert and push after reconciliation
+        let custID = UUID().uuidString
+        _ = try client.execute(
+            "INSERT INTO customers (id, user_id, name, balance, is_active, created_at, updated_at) VALUES (?, ?, ?, 0, 1, ?, ?)",
+            params: [custID, UUID().uuidString, "Reconcile Customer", "2026-01-01T00:00:00.000Z", "2026-01-01T00:00:00.000Z"]
+        )
         let orderID = UUID().uuidString
         _ = try client.execute(
-            "INSERT INTO orders (id, user_id, ship_address, updated_at) VALUES (?, ?, ?, ?)",
-            params: [orderID, UUID().uuidString, "post-reconcile insert", "2026-01-01T00:00:00.000Z"]
+            "INSERT INTO orders (id, customer_id, status, total_price, currency, ship_address, created_at, updated_at) VALUES (?, ?, 'pending', 0, 'USD', ?, ?, ?)",
+            params: [orderID, custID, "post-reconcile insert", "2026-01-01T00:00:00.000Z", "2026-01-01T00:00:00.000Z"]
         )
         let row = try client.queryOne("SELECT ship_address FROM orders WHERE id = ?", params: [orderID])
         XCTAssertNotNil(row)
