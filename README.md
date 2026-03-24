@@ -1,3 +1,22 @@
+<p align="center">
+  <img src="docs/public/logo.svg" alt="Synchro" width="320">
+</p>
+
+<p align="center">
+  <a href="https://github.com/trainstar/synchro/actions/workflows/ci.yml">
+    <img src="https://github.com/trainstar/synchro/actions/workflows/ci.yml/badge.svg?branch=dev" alt="CI">
+  </a>
+  <a href="https://github.com/trainstar/synchro/actions/workflows/codeql.yml">
+    <img src="https://github.com/trainstar/synchro/actions/workflows/codeql.yml/badge.svg?branch=dev" alt="CodeQL">
+  </a>
+  <a href="https://github.com/trainstar/synchro/actions/workflows/dependency-review.yml">
+    <img src="https://github.com/trainstar/synchro/actions/workflows/dependency-review.yml/badge.svg?branch=dev" alt="Dependency Scan">
+  </a>
+  <a href="https://github.com/trainstar/synchro/actions/workflows/docs.yml">
+    <img src="https://github.com/trainstar/synchro/actions/workflows/docs.yml/badge.svg?branch=dev" alt="Docs">
+  </a>
+</p>
+
 # Synchro
 
 Synchro is an offline-first sync system for native apps using local SQLite, a PostgreSQL extension, and a thin HTTP adapter.
