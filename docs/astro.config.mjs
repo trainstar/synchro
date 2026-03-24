@@ -8,6 +8,7 @@ export default defineConfig({
 	integrations: [
 		starlight({
 			title: 'Synchro',
+			disable404Route: true,
 			logo: {
 				light: './src/assets/logo.svg',
 				dark: './src/assets/logo-dark.svg',
@@ -36,12 +37,16 @@ export default defineConfig({
 					label: 'Architecture',
 					items: [
 						{ label: 'Overview', slug: 'architecture/overview' },
+						{ label: 'Scope Modeling', slug: 'architecture/scope-modeling' },
+						{ label: 'Portable Seeds', slug: 'architecture/portable-seeds' },
+						{ label: 'Auth Integration', slug: 'architecture/auth-integration' },
 					],
 				},
 				{
 					label: 'Client SDKs',
 					items: [
 						{ label: 'Overview', slug: 'clients/overview' },
+						{ label: 'Consumption', slug: 'clients/consumption' },
 					],
 				},
 				{

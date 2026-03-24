@@ -1,0 +1,75 @@
+---
+title: Portable Seeds
+description: How Synchro generates and consumes bundled SQLite seed databases.
+---
+
+Synchro supports generating a client-compatible SQLite seed directly from PostgreSQL.
+
+The generator lives at:
+
+- `api/go/cmd/synchro-seed`
+
+## What the generator does
+
+The portable seed generator is trusted tooling. It connects directly to PostgreSQL and builds a SQLite database that native clients can open immediately.
+
+Current release behavior:
+
+- always builds the synced-table SQLite schema from `synchro_schema_manifest()`
+- installs the same local CDC triggers the native SDKs use
+- exports only explicitly server-declared portable scopes
+- writes continuation metadata into `_synchro_scopes`, `_synchro_scope_rows`, and compatibility checkpoint tables
+- writes `_synchro_meta` values such as `schema_version`, `schema_hash`, `local_schema`, `scope_set_version`, `known_buckets`, and `snapshot_complete`
+
+If no portable scopes are configured, the generator falls back to a schema-only seed.
+
+## What it does not do
+
+The portable seed generator does not:
+
+- accept a JWT
+- export auth-scoped user data
+- create a separate client sync mode
+
+Clients still log in normally, connect normally, and reconcile with the server on first use.
+
+## Generation example
+
+```bash
+cd api/go
+GOWORK=off go run ./cmd/synchro-seed \
+  --database-url "postgres://user:pass@localhost:5432/app?sslmode=disable" \
+  --output ./build/seed.db
+```
+
+## Client behavior after login
+
+When clients open a portable seed:
+
+- they keep the seeded schema
+- they keep the seeded portable rows
+- they continue sync from the embedded continuation metadata
+- auth-scoped user data arrives through normal sync after login
+
+This is a warm-start path, not a second protocol.
+
+## When to use portable seeds
+
+Portable seeds are useful when you want:
+
+- faster first app start
+- installer-time or bundle-time content available immediately
+- less initial schema work on device
+- shared portable data available before the first round trip completes
+
+## Relationship to scope modeling
+
+Portable seeds should contain the same shared runtime scopes clients keep syncing later.
+
+Do not invent seed-only scope copies for bundling. If a dataset belongs in a shared runtime scope, that is the scope the seed should export.
+
+## Read next
+
+- [Scope modeling](/synchro/architecture/scope-modeling/)
+- [Client SDKs](/synchro/clients/overview/)
+- [Schema evolution](/synchro/spec/05-schema-evolution/)

@@ -1,7 +1,9 @@
 ---
 title: Quickstart
-description: Validate the current Synchro release surface locally.
+description: Validate the current Synchro release surface locally and find the next integration path quickly.
 ---
+
+Use this page when you want to validate the current release surface on your machine. If you want installation details for another repo, go to [Client consumption](/synchro/clients/consumption/). If you want the architectural model first, go to [Architecture overview](/synchro/architecture/overview/).
 
 ## Prerequisites
 
@@ -12,16 +14,16 @@ description: Validate the current Synchro release surface locally.
 - JDK 17 and Android SDK for Kotlin and Android validation
 - Node.js 22 for React Native validation
 
-## Adapter auth configuration
+## Auth mode
 
 Protected sync routes in `api/go` support two auth modes:
 
 - direct JWT validation with `JWTSecret` or `JWKSURL`
 - trusted upstream auth with `UserIDResolver`
 
-Use trusted upstream auth when Synchro is mounted behind an existing product API that already validates bearer tokens and resolves internal user IDs.
+Use trusted upstream auth when Synchro is mounted behind an existing product API that already validates bearer tokens and resolves internal user IDs. See the [auth integration guide](/synchro/architecture/auth-integration/) for the decision framework.
 
-## Core validation
+## Validate the core
 
 Run the shared Rust semantics tests:
 
@@ -41,7 +43,7 @@ Run the Go adapter integration tests against the extension-backed database:
 make test-adapter
 ```
 
-## Client validation
+## Validate the clients
 
 Run the Apple SDK integration tests:
 
@@ -106,8 +108,12 @@ Operational rules:
 - it does not accept a JWT
 - clients keep the seeded schema and portable data after login, then sync forward from that state
 
+See [Portable seeds](/synchro/architecture/portable-seeds/) for the detailed rules.
+
 ## What to read next
 
 - [Architecture overview](/synchro/architecture/overview/)
+- [Scope modeling](/synchro/architecture/scope-modeling/)
+- [Client consumption](/synchro/clients/consumption/)
 - [Wire Protocol](/synchro/spec/01-wire-protocol/)
 - [Conformance Plan](/synchro/spec/06-conformance-plan/)

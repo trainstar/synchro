@@ -1,0 +1,82 @@
+---
+title: Scope Modeling
+description: Best practices for defining shared, private, and portable scopes without creating avoidable fanout.
+---
+
+Scope design is the highest leverage selective-sync decision in Synchro.
+
+The main rule is:
+
+- optimize for low row-change fanout, not low total scope count
+
+What matters is not how many scopes exist globally. What matters is how many scope instances a single changed row forces the server to update.
+
+## What a scope boundary means
+
+A scope is not only a visibility boundary. It is also the unit for:
+
+- continuation state
+- checksum and rebuild behavior
+- change propagation
+- operational debugging
+
+That means scope design should follow runtime behavior, not only who can read a row.
+
+## Recommended baseline model
+
+Use:
+
+- private scopes for private data, such as `documents_user:{user_id}`
+- shared scopes for shared data, such as `templates_public`
+- one local table may be fed by multiple scopes
+
+Example:
+
+- every user should see the public template catalog
+- every user should also see their own private templates
+
+Model that as:
+
+- `templates_public`
+- `templates_user:{user_id}`
+
+Do not copy the public template catalog into every `templates_user:{user_id}` scope. One public row change should update one shared scope, not one scope per user.
+
+## Shared scope grouping
+
+Do not create seed-only scopes. The seed should export the same shared runtime scopes that clients keep syncing after login.
+
+When deciding whether datasets belong in one shared scope or several, use operational behavior:
+
+- use one shared `global` scope only when datasets are small, stable, and tend to change together
+- split into multiple shared scopes when datasets differ in size, change rate, rebuild needs, or likely subscription patterns
+
+Practical examples:
+
+- tiny lookup tables can live in one `reference_public` scope
+- a larger public catalog should usually get its own scope such as `templates_public`
+
+## Anti-patterns
+
+Avoid these patterns:
+
+- duplicating shared data into every private scope
+- creating separate seed-only copies of runtime scopes
+- splitting scopes by table name alone when the data has the same change and rebuild behavior
+- stuffing unrelated large datasets into one `global` scope only because they are all public
+
+## Portable seed relationship
+
+Bundled portable seeds should include:
+
+- schema
+- any explicitly declared portable scopes
+- the continuation metadata for those scopes
+
+Clients then log in normally and continue sync from that seeded state. They do not wipe the database first.
+
+## Read next
+
+- [Architecture overview](/synchro/architecture/overview/)
+- [Portable seeds](/synchro/architecture/portable-seeds/)
+- [Invariants](/synchro/spec/04-invariants/)

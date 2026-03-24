@@ -1,0 +1,67 @@
+---
+title: Auth Integration
+description: How to mount Synchro behind your existing API or let the adapter validate JWTs directly.
+---
+
+The Go adapter supports two integration modes for protected sync routes.
+
+## 1. Trusted upstream auth
+
+Recommended when Synchro is mounted behind an existing product API.
+
+Flow:
+
+1. your main API validates the bearer token
+2. your main API resolves the canonical internal user ID
+3. Synchro receives that resolved user ID through a trusted resolver
+4. the PostgreSQL extension runs DB-side policy and sync logic with that canonical identity
+
+Why this is the better default:
+
+- product-specific identity logic stays in the product API
+- Synchro stays generic
+- internal user mapping lives in one place
+- adapter code stays transport-focused
+
+## 2. Direct JWT validation in the adapter
+
+Supported when Synchro must validate bearer tokens itself.
+
+Current adapter support:
+
+- `JWTSecret`
+- `JWKSURL`
+
+Use this when you do not already have a trusted upstream API layer resolving product identities before the request reaches Synchro.
+
+## Portable seed relationship
+
+Portable seed generation is separate from runtime auth.
+
+The seed generator:
+
+- is trusted tooling
+- connects directly to PostgreSQL
+- does not accept JWT input
+
+Client runtime auth stays unchanged after that. Apps still authenticate normally when they begin real sync.
+
+## Choosing the right mode
+
+Use trusted upstream auth when:
+
+- Synchro is mounted inside a larger product API
+- you already validate tokens elsewhere
+- you need product-specific user resolution before sync
+
+Use direct JWT validation when:
+
+- Synchro is exposed more directly
+- you want the adapter to own bearer-token validation
+- you do not have a separate API layer resolving internal user IDs first
+
+## Read next
+
+- [Architecture overview](/synchro/architecture/overview/)
+- [Quickstart](/synchro/getting-started/quickstart/)
+- [Client contract](/synchro/spec/02-client-contract/)

@@ -17,6 +17,13 @@ The product center is:
 - full synced CRUD for synced tables
 - thin adapters instead of server-side sync logic in application code
 
+## Why teams use it
+
+- local SQLite is the real product surface
+- selective sync is server-defined and deterministic
+- sync logic stays close to PostgreSQL instead of being reimplemented in app routers
+- portable seed generation gives apps a warm-start path for schema and shared portable data
+
 ## Current support
 
 - PostgreSQL 18
@@ -24,11 +31,15 @@ The product center is:
 - Kotlin on Android API 24+
 - React Native bridge over the native SDKs
 
-## Start here
+## Start here by goal
 
-- [Quickstart](/synchro/getting-started/quickstart/)
-- [Architecture overview](/synchro/architecture/overview/)
-- [Client SDK overview](/synchro/clients/overview/)
+- Validate the release locally: [Quickstart](/synchro/getting-started/quickstart/)
+- Understand the runtime model: [Architecture overview](/synchro/architecture/overview/)
+- Model scopes correctly: [Scope modeling](/synchro/architecture/scope-modeling/)
+- Plan bundled warm-start databases: [Portable seeds](/synchro/architecture/portable-seeds/)
+- Choose an auth integration path: [Auth integration](/synchro/architecture/auth-integration/)
+- Install from another repo: [Client consumption](/synchro/clients/consumption/)
+- Read the public SDK boundaries: [Client SDKs](/synchro/clients/overview/)
 
 ## Release specification
 
@@ -42,3 +53,13 @@ The published spec is the release contract for the current implementation:
 - [Schema Evolution](/synchro/spec/05-schema-evolution/)
 - [Conformance Plan](/synchro/spec/06-conformance-plan/)
 - [Audit Sequence](/synchro/spec/07-audit-sequence/)
+
+## Public release surfaces
+
+- PostgreSQL extension for PG 18
+- `synchrod-pg` adapter
+- `synchro-seed` generator
+- Swift Package Manager package
+- CocoaPods package
+- Kotlin package
+- React Native package
