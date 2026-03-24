@@ -2,623 +2,591 @@ name: CI
 
 on:
   pull_request:
-    branches: [master]
   push:
-    branches: [master]
+    branches:
+      - '**'
+    tags-ignore:
+      - 'v*.*.*'
 
 concurrency:
-  group: ci-${{ github.event.pull_request.number || github.sha }}
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 permissions:
   contents: read
 
 jobs:
-  # ── Path filter to skip unnecessary jobs ──────────────────────────────
-  changes:
-    runs-on: ubuntu-latest
-    outputs:
-      go: ${{ steps.filter.outputs.go }}
-      swift: ${{ steps.filter.outputs.swift }}
-      kotlin: ${{ steps.filter.outputs.kotlin }}
-      rn: ${{ steps.filter.outputs.rn }}
-      rn-e2e: ${{ steps.filter.outputs.rn-e2e }}
-      docs: ${{ steps.filter.outputs.docs }}
+  metadata:
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6.0.2
 
-      - uses: dorny/paths-filter@v3
-        id: filter
+      - uses: actions/setup-go@v6.3.0
         with:
-          filters: |
-            go:
-              - '*.go'
-              - 'go.mod'
-              - 'go.sum'
-              - 'cmd/**'
-              - 'handler/**'
-              - 'wal/**'
-              - 'migrate/**'
-              - 'synctest/**'
-              - 'seeddb/**'
-            swift:
-              - 'clients/swift/**'
-            kotlin:
-              - 'clients/kotlin/**'
-            rn:
-              - 'clients/react-native/src/**'
-              - 'clients/react-native/__tests__/**'
-              - 'clients/react-native/package.json'
-              - 'clients/react-native/yarn.lock'
-            rn-e2e:
-              - 'clients/react-native/**'
-              - '*.go'
-              - 'go.mod'
-              - 'go.sum'
-              - 'cmd/**'
-              - 'handler/**'
-              - 'wal/**'
-              - 'migrate/**'
-              - 'synctest/**'
-              - 'seeddb/**'
-            docs:
-              - 'docs/**'
+          go-version-file: api/go/go.mod
+          cache-dependency-path: api/go/go.sum
 
-  # ── Go lint ───────────────────────────────────────────────────────────
-  lint-go:
-    needs: changes
-    if: needs.changes.outputs.go == 'true'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-go@v5
-        with:
-          go-version-file: go.mod
-
-      - uses: golangci/golangci-lint-action@v8
-        with:
-          version: v2.9.0
-
-      - name: Check license compliance
-        run: |
-          go install github.com/google/go-licenses@latest
-          go-licenses check ./... --allowed_licenses=MIT,BSD-2-Clause,BSD-3-Clause,Apache-2.0,ISC,MPL-2.0,CC0-1.0 --ignore modernc.org/mathutil
-
-  # ── React Native lint ─────────────────────────────────────────────────
-  lint-rn:
-    needs: changes
-    if: needs.changes.outputs.rn == 'true'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6.3.0
         with:
           node-version: '22'
 
-      - name: Install dependencies
-        working-directory: clients/react-native
-        run: yarn install --immutable
+      - name: Validate release metadata alignment
+        run: make version-check
 
-      - name: Typecheck
-        working-directory: clients/react-native
-        run: yarn typecheck
+      - name: Validate React Native package packing
+        run: make release-npm-dry-run
 
-      - name: Lint
-        working-directory: clients/react-native
-        run: yarn lint
-
-  # ── Go unit tests (no database) ──────────────────────────────────────
-  test-go-unit:
-    needs: changes
-    if: needs.changes.outputs.go == 'true'
-    runs-on: ubuntu-latest
+  linux-pgrx-runtime:
+    needs: metadata
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
 
-      - uses: actions/setup-go@v5
-        with:
-          go-version-file: go.mod
-
-      - name: Run unit tests with race detector
-        run: go test -race ./...
-
-  # ── Go integration tests (Postgres) ──────────────────────────────────
-  test-go-integration:
-    needs: changes
-    if: needs.changes.outputs.go == 'true'
-    runs-on: ubuntu-latest
-    services:
-      postgres:
-        image: postgres:16
-        env:
-          POSTGRES_USER: postgres
-          POSTGRES_PASSWORD: postgres
-          POSTGRES_DB: synchro_test
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd="pg_isready -U postgres"
-          --health-interval=5s
-          --health-timeout=5s
-          --health-retries=5
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-go@v5
-        with:
-          go-version-file: go.mod
-
-      - name: Configure WAL for logical replication
+      - name: Install PostgreSQL extension build dependencies
         run: |
-          PGPASSWORD=postgres psql -h localhost -U postgres -c "ALTER SYSTEM SET wal_level = logical;"
-          PGPASSWORD=postgres psql -h localhost -U postgres -c "ALTER SYSTEM SET max_replication_slots = 10;"
-          PGPASSWORD=postgres psql -h localhost -U postgres -c "ALTER SYSTEM SET max_wal_senders = 10;"
-          docker restart $(docker ps -q --filter "ancestor=postgres:16")
-          sleep 3
-          until PGPASSWORD=postgres pg_isready -h localhost -U postgres; do sleep 1; done
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            ccache \
+            clang \
+            flex \
+            bison \
+            libclang-dev \
+            libreadline-dev \
+            libssl-dev \
+            libxml2-dev \
+            libxml2-utils \
+            libxslt-dev \
+            pkg-config \
+            xsltproc \
+            zlib1g-dev
 
-      - name: Run integration tests with race detector
-        env:
-          TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/synchro_test?sslmode=disable
-          TEST_REPLICATION_URL: postgres://postgres:postgres@localhost:5432/synchro_test?replication=database&sslmode=disable
-        run: go test -race -count=1 -p 1 ./...
-
-  # ── Swift unit tests ──────────────────────────────────────────────────
-  test-swift-unit:
-    needs: changes
-    if: needs.changes.outputs.swift == 'true'
-    runs-on: macos-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/cache@v4
+      - uses: actions/cache@v5.0.4
         with:
-          path: clients/swift/.build
-          key: swift-${{ runner.os }}-${{ hashFiles('clients/swift/Package.resolved') }}
-          restore-keys: swift-${{ runner.os }}-
+          path: ~/.pgrx
+          key: pgrx-${{ runner.os }}-0.17.0-pg18
 
-      - name: Run Swift unit tests
-        run: cd clients/swift && swift test
-
-  # ── Kotlin unit tests ─────────────────────────────────────────────────
-  test-kotlin-unit:
-    needs: changes
-    if: needs.changes.outputs.kotlin == 'true'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-java@v4
+      - uses: actions/cache@v5.0.4
         with:
-          distribution: temurin
-          java-version: '17'
+          path: |
+            ~/.cargo/bin/cargo-pgrx
+            ~/.cargo/.crates.toml
+            ~/.cargo/.crates2.json
+          key: cargo-pgrx-${{ runner.os }}-0.17.0
 
-      - uses: actions/cache@v4
+      - name: Install cargo-pgrx
+        run: |
+          if ! command -v cargo-pgrx >/dev/null 2>&1 || [ "$(cargo pgrx --version | awk '{print $2}')" != "0.17.0" ]; then
+            cargo install --locked cargo-pgrx --version 0.17.0
+          fi
+
+      - name: Initialize PostgreSQL 18 for pgrx
+        run: |
+          if [ -f "$HOME/.pgrx/config.toml" ] && grep -q '^pg18' "$HOME/.pgrx/config.toml"; then
+            echo "Using cached PG18 pgrx runtime"
+          else
+            cargo pgrx init --pg18 download
+          fi
+
+      - name: Archive PG18 pgrx runtime
+        run: tar -C "$HOME" -cf "$RUNNER_TEMP/pgrx-pg18-linux.tar" .pgrx
+
+      - uses: actions/upload-artifact@v7.0.0
         with:
-          path: ~/.gradle
-          key: gradle-${{ runner.os }}-${{ hashFiles('clients/kotlin/**/*.gradle*', 'clients/kotlin/**/gradle-wrapper.properties') }}
-          restore-keys: gradle-${{ runner.os }}-
+          name: pgrx-pg18-linux
+          path: ${{ runner.temp }}/pgrx-pg18-linux.tar
+          compression-level: 0
 
-      - name: Run Kotlin unit tests
-        run: cd clients/kotlin && ./gradlew :synchro:test
-
-  # ── React Native unit tests ──────────────────────────────────────────
-  test-rn-unit:
-    needs: changes
-    if: needs.changes.outputs.rn == 'true'
-    runs-on: ubuntu-latest
+  quality:
+    needs: metadata
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6.0.2
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-go@v6.3.0
+        with:
+          go-version-file: api/go/go.mod
+          cache-dependency-path: api/go/go.sum
+
+      - uses: actions/setup-node@v6.3.0
         with:
           node-version: '22'
 
-      - name: Install dependencies
-        working-directory: clients/react-native
-        run: yarn install --immutable
+      - uses: actions/cache@v5.0.4
+        with:
+          path: |
+            clients/react-native/node_modules
+            clients/react-native/example/node_modules
+            clients/react-native/.yarn/install-state.gz
+          key: rn-deps-${{ runner.os }}-${{ hashFiles('clients/react-native/yarn.lock', 'clients/react-native/package.json', 'clients/react-native/example/package.json') }}
+          restore-keys: |
+            rn-deps-${{ runner.os }}-
 
-      - name: Run unit tests
-        working-directory: clients/react-native
-        run: npm test -- --testPathIgnorePatterns=e2e __mocks__
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
 
-  # ── End-to-end integration (Swift + Kotlin against synchrod) ─────────
-  test-integration-e2e:
-    needs: [changes, test-go-unit, test-swift-unit, test-kotlin-unit]
-    if: |
-      always() &&
-      (needs.changes.outputs.go == 'true' || needs.changes.outputs.swift == 'true' || needs.changes.outputs.kotlin == 'true') &&
-      !contains(needs.*.result, 'failure') &&
-      !contains(needs.*.result, 'cancelled')
-    runs-on: macos-latest
-    env:
-      DB_USER: postgres
-      DB_PASSWORD: postgres
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            extensions -> target
+
+      - name: Install PostgreSQL extension build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            ccache \
+            clang \
+            flex \
+            bison \
+            libclang-dev \
+            libreadline-dev \
+            libssl-dev \
+            libxml2-dev \
+            libxml2-utils \
+            libxslt-dev \
+            pkg-config \
+            xsltproc \
+            zlib1g-dev
+
+      - name: Install React Native dependencies
+        working-directory: clients/react-native
+        run: |
+          corepack enable
+          yarn install --immutable
+
+      - name: Run Go lint checks
+        run: make lint-go
+
+      - name: Run Rust lint checks
+        run: make lint-rust-core
+
+      - name: Run React Native lint checks
+        run: make lint-rn
+
+      - name: Run React Native unit tests
+        run: make test-rn-unit
+
+  docs:
+    needs: metadata
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6.0.2
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-node@v6.3.0
         with:
-          go-version-file: go.mod
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: docs/package-lock.json
 
-      - uses: actions/setup-java@v4
+      - name: Build docs site
+        run: make docs-build
+
+  server:
+    runs-on: ubuntu-24.04
+    needs: [metadata, linux-pgrx-runtime]
+    steps:
+      - uses: actions/checkout@v6.0.2
+
+      - uses: actions/setup-go@v6.3.0
         with:
-          distribution: temurin
-          java-version: '17'
+          go-version-file: api/go/go.mod
+          cache-dependency-path: api/go/go.sum
 
-      - name: Install Postgres
-        uses: ikalnytskyi/action-setup-postgres@v7
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
         with:
-          username: postgres
-          password: postgres
-          database: synchro_test
-          postgres-version: '16'
-        id: postgres
+          workspaces: |
+            extensions -> target
 
-      - name: Configure WAL for logical replication
+      - name: Install PostgreSQL extension build dependencies
         run: |
-          psql '${{ steps.postgres.outputs.connection-uri }}' -c "ALTER SYSTEM SET wal_level = logical;"
-          psql '${{ steps.postgres.outputs.connection-uri }}' -c "ALTER SYSTEM SET max_replication_slots = 10;"
-          psql '${{ steps.postgres.outputs.connection-uri }}' -c "ALTER SYSTEM SET max_wal_senders = 10;"
-          pg_ctl restart -D "$(psql '${{ steps.postgres.outputs.connection-uri }}' -t -A -c 'SHOW data_directory')"
-          until pg_isready -h localhost -U postgres; do sleep 1; done
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            ccache \
+            clang \
+            flex \
+            bison \
+            libclang-dev \
+            libreadline-dev \
+            libssl-dev \
+            libxml2-dev \
+            libxml2-utils \
+            libxslt-dev \
+            pkg-config \
+            xsltproc \
+            zlib1g-dev
 
-      - name: Prepare test database and start synchrod
-        run: |
-          make db-prepare-server DB_HOST=localhost DB_USER=postgres DB_PASSWORD=postgres
-          make synchrod-test-start DB_HOST=localhost DB_USER=postgres DB_PASSWORD=postgres
+      - uses: actions/cache@v5.0.4
+        with:
+          path: |
+            ~/.cargo/bin/cargo-pgrx
+            ~/.cargo/.crates.toml
+            ~/.cargo/.crates2.json
+          key: cargo-pgrx-${{ runner.os }}-0.17.0
 
-      - name: Health check synchrod
+      - name: Install cargo-pgrx
         run: |
-          for i in $(seq 1 30); do
-            if curl -sf http://localhost:8080/healthz; then
-              echo "synchrod is healthy"
-              exit 0
-            fi
-            sleep 1
+          if ! command -v cargo-pgrx >/dev/null 2>&1 || [ "$(cargo pgrx --version | awk '{print $2}')" != "0.17.0" ]; then
+            cargo install --locked cargo-pgrx --version 0.17.0
+          fi
+
+      - uses: actions/download-artifact@v8.0.1
+        with:
+          name: pgrx-pg18-linux
+          path: ${{ runner.temp }}/pgrx-pg18-linux
+
+      - name: Restore PostgreSQL 18 pgrx runtime
+        run: tar -C "$HOME" -xf "$RUNNER_TEMP/pgrx-pg18-linux/pgrx-pg18-linux.tar"
+
+      - name: Verify PostgreSQL 18 for pgrx
+        run: |
+          test -f "$HOME/.pgrx/config.toml"
+          grep -q '^pg18' "$HOME/.pgrx/config.toml"
+
+      - name: Run shared core tests
+        run: make test-rust-core
+
+      - name: Run PostgreSQL extension lint checks
+        run: make lint-rust-pg
+
+      - name: Run PostgreSQL extension tests
+        run: make test-rust-pg
+
+      - name: Run adapter integration tests
+        run: make test-adapter
+
+  swift-sdk:
+    needs: metadata
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v6.0.2
+
+      - uses: actions/setup-go@v6.3.0
+        with:
+          go-version-file: api/go/go.mod
+          cache-dependency-path: api/go/go.sum
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            extensions -> target
+
+      - uses: actions/cache@v5.0.4
+        with:
+          path: ~/.pgrx
+          key: pgrx-${{ runner.os }}-0.17.0-pg18
+
+      - uses: actions/cache@v5.0.4
+        with:
+          path: |
+            ~/.cargo/bin/cargo-pgrx
+            ~/.cargo/.crates.toml
+            ~/.cargo/.crates2.json
+          key: cargo-pgrx-${{ runner.os }}-0.17.0
+
+      - name: Install PostgreSQL 18 and extension build dependencies on macOS
+        run: |
+          for formula in postgresql@18 pkgconf openssl@3 libxml2 libxslt; do
+            brew list --versions "$formula" >/dev/null 2>&1 || brew install "$formula"
           done
-          echo "synchrod failed health check"
-          cat .synchrod-test.log || true
-          exit 1
+
+      - name: Install cargo-pgrx
+        run: |
+          if ! command -v cargo-pgrx >/dev/null 2>&1 || [ "$(cargo pgrx --version | awk '{print $2}')" != "0.17.0" ]; then
+            cargo install --locked cargo-pgrx --version 0.17.0
+          fi
+
+      - name: Initialize PostgreSQL 18 for pgrx
+        run: |
+          if [ -f "$HOME/.pgrx/config.toml" ] && grep -q '^pg18' "$HOME/.pgrx/config.toml"; then
+            echo "Using cached PG18 pgrx runtime"
+          else
+            cargo pgrx init --pg18 "$(brew --prefix postgresql@18)/bin/pg_config"
+          fi
+
+      - name: Ensure CocoaPods is available
+        run: |
+          if ! command -v pod >/dev/null 2>&1; then
+            sudo gem install cocoapods
+          fi
+
+      - name: Validate Apple package metadata
+        run: make release-pods-check
 
       - name: Run Swift integration tests
-        run: make test-swift DB_HOST=localhost DB_USER=postgres DB_PASSWORD=postgres
+        run: make test-swift
 
-      - name: Run Kotlin integration tests
-        run: make test-kotlin DB_HOST=localhost DB_USER=postgres DB_PASSWORD=postgres
-
-      - name: Stop synchrod
-        if: always()
-        run: make synchrod-test-stop
-
-      - name: Upload synchrod log on failure
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: synchrod-test-log
-          path: .synchrod-test.log
-
-  # ── React Native Detox E2E (iOS) ────────────────────────────────────
-  test-rn-e2e-ios:
-    needs: [changes, test-go-unit, test-rn-unit]
-    if: |
-      always() &&
-      needs.changes.outputs.rn-e2e == 'true' &&
-      !contains(needs.*.result, 'failure') &&
-      !contains(needs.*.result, 'cancelled')
-    runs-on: macos-latest
-    timeout-minutes: 30
+  kotlin-sdk:
+    runs-on: ubuntu-24.04
+    needs: [metadata, linux-pgrx-runtime]
     env:
-      DB_USER: postgres
-      DB_PASSWORD: postgres
+      ANDROID_HOME: /usr/local/lib/android/sdk
+      ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
+      GRADLE_TEST_ARGS: ""
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6.0.2
+
+      - uses: actions/setup-go@v6.3.0
         with:
-          fetch-depth: 1
+          go-version-file: api/go/go.mod
+          cache-dependency-path: api/go/go.sum
 
-      - uses: actions/setup-go@v5
-        with:
-          go-version-file: go.mod
-
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '22'
-
-      - name: Install Postgres
-        uses: ikalnytskyi/action-setup-postgres@v7
-        with:
-          username: postgres
-          password: postgres
-          database: synchro_test
-          postgres-version: '16'
-        id: postgres
-
-      - name: Configure WAL for logical replication
-        run: |
-          psql '${{ steps.postgres.outputs.connection-uri }}' -c "ALTER SYSTEM SET wal_level = logical;"
-          psql '${{ steps.postgres.outputs.connection-uri }}' -c "ALTER SYSTEM SET max_replication_slots = 10;"
-          psql '${{ steps.postgres.outputs.connection-uri }}' -c "ALTER SYSTEM SET max_wal_senders = 10;"
-          pg_ctl restart -D "$(psql '${{ steps.postgres.outputs.connection-uri }}' -t -A -c 'SHOW data_directory')"
-          until pg_isready -h localhost -U postgres; do sleep 1; done
-
-      - name: Prepare test database and start synchrod
-        run: |
-          make db-prepare-server DB_HOST=localhost DB_USER=postgres DB_PASSWORD=postgres
-          make synchrod-test-start DB_HOST=localhost DB_USER=postgres DB_PASSWORD=postgres
-
-      - name: Health check synchrod
-        run: |
-          for i in $(seq 1 30); do
-            if curl -sf http://localhost:8080/healthz; then
-              echo "synchrod is healthy"
-              exit 0
-            fi
-            sleep 1
-          done
-          echo "synchrod failed health check"
-          cat .synchrod-test.log || true
-          exit 1
-
-      - name: Generate and bundle seed database
-        run: make seed-bundle-example DB_HOST=localhost DB_USER=postgres DB_PASSWORD=postgres
-
-      - name: Cache node_modules
-        uses: actions/cache@v4
-        with:
-          path: |
-            clients/react-native/node_modules
-            clients/react-native/example/node_modules
-          key: rn-node-${{ runner.os }}-${{ hashFiles('clients/react-native/yarn.lock') }}
-          restore-keys: rn-node-${{ runner.os }}-
-
-      - name: Install JS dependencies
-        run: |
-          cd clients/react-native && yarn install --immutable
-          cd example && yarn install --immutable
-
-      - name: Cache CocoaPods
-        uses: actions/cache@v4
-        with:
-          path: clients/react-native/example/ios/Pods
-          key: pods-${{ runner.os }}-${{ hashFiles('clients/react-native/example/ios/Podfile.lock') }}
-          restore-keys: pods-${{ runner.os }}-
-
-      - name: Install CocoaPods
-        working-directory: clients/react-native/example/ios
-        run: bundle install && bundle exec pod install
-
-      - name: Install applesimutils
-        run: brew tap wix/brew && brew install applesimutils
-
-      - name: Cache Detox framework
-        uses: actions/cache@v4
-        with:
-          path: ~/Library/Detox/ios
-          key: detox-ios-${{ hashFiles('clients/react-native/example/node_modules/.package-lock.json') }}
-          restore-keys: detox-ios-
-
-      - name: Build iOS app for Detox
-        working-directory: clients/react-native/example
-        run: npx detox build --configuration ios.sim.debug
-
-      - name: Run Detox E2E tests (iOS)
-        working-directory: clients/react-native/example
-        run: npx detox test --configuration ios.sim.debug --headless --record-logs failing --take-screenshots failing
-
-      - name: Stop synchrod
-        if: always()
-        run: make synchrod-test-stop
-
-      - name: Upload artifacts on failure
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: rn-e2e-ios-artifacts
-          path: |
-            .synchrod-test.log
-            clients/react-native/example/artifacts/
-
-  # ── React Native Detox E2E (Android) ──────────────────────────────
-  test-rn-e2e-android:
-    needs: [changes, test-go-unit, test-rn-unit]
-    if: |
-      always() &&
-      needs.changes.outputs.rn-e2e == 'true' &&
-      !contains(needs.*.result, 'failure') &&
-      !contains(needs.*.result, 'cancelled')
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    services:
-      postgres:
-        image: postgres:16
-        env:
-          POSTGRES_USER: postgres
-          POSTGRES_PASSWORD: postgres
-          POSTGRES_DB: synchro_test
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd="pg_isready -U postgres"
-          --health-interval=5s
-          --health-timeout=5s
-          --health-retries=5
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 1
-
-      - uses: actions/setup-go@v5
-        with:
-          go-version-file: go.mod
-
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '22'
-
-      - uses: actions/setup-java@v4
+      - uses: actions/setup-java@v5.2.0
         with:
           distribution: temurin
           java-version: '17'
+          cache: gradle
 
-      - name: Configure WAL for logical replication
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            extensions -> target
+
+      - name: Install PostgreSQL extension build dependencies
         run: |
-          PGPASSWORD=postgres psql -h localhost -U postgres -c "ALTER SYSTEM SET wal_level = logical;"
-          PGPASSWORD=postgres psql -h localhost -U postgres -c "ALTER SYSTEM SET max_replication_slots = 10;"
-          PGPASSWORD=postgres psql -h localhost -U postgres -c "ALTER SYSTEM SET max_wal_senders = 10;"
-          docker restart $(docker ps -q --filter "ancestor=postgres:16")
-          sleep 3
-          until PGPASSWORD=postgres pg_isready -h localhost -U postgres; do sleep 1; done
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            ccache \
+            clang \
+            flex \
+            bison \
+            libclang-dev \
+            libreadline-dev \
+            libssl-dev \
+            libxml2-dev \
+            libxml2-utils \
+            libxslt-dev \
+            pkg-config \
+            xsltproc \
+            zlib1g-dev
 
-      - name: Prepare test database and start synchrod
+      - uses: actions/cache@v5.0.4
+        with:
+          path: |
+            ~/.cargo/bin/cargo-pgrx
+            ~/.cargo/.crates.toml
+            ~/.cargo/.crates2.json
+          key: cargo-pgrx-${{ runner.os }}-0.17.0
+
+      - name: Install cargo-pgrx
         run: |
-          make db-prepare-server DB_HOST=localhost DB_USER=postgres DB_PASSWORD=postgres
-          make synchrod-test-start DB_HOST=localhost DB_USER=postgres DB_PASSWORD=postgres
+          if ! command -v cargo-pgrx >/dev/null 2>&1 || [ "$(cargo pgrx --version | awk '{print $2}')" != "0.17.0" ]; then
+            cargo install --locked cargo-pgrx --version 0.17.0
+          fi
 
-      - name: Health check synchrod
+      - uses: actions/download-artifact@v8.0.1
+        with:
+          name: pgrx-pg18-linux
+          path: ${{ runner.temp }}/pgrx-pg18-linux
+
+      - name: Restore PostgreSQL 18 pgrx runtime
+        run: tar -C "$HOME" -xf "$RUNNER_TEMP/pgrx-pg18-linux/pgrx-pg18-linux.tar"
+
+      - name: Verify PostgreSQL 18 for pgrx
         run: |
-          for i in $(seq 1 30); do
-            if curl -sf http://localhost:8080/healthz; then
-              echo "synchrod is healthy"
-              exit 0
-            fi
-            sleep 1
-          done
-          echo "synchrod failed health check"
-          cat .synchrod-test.log || true
-          exit 1
+          test -f "$HOME/.pgrx/config.toml"
+          grep -q '^pg18' "$HOME/.pgrx/config.toml"
 
-      - name: Generate and bundle seed database
-        run: make seed-bundle-example DB_HOST=localhost DB_USER=postgres DB_PASSWORD=postgres
+      - name: Verify Android SDK tooling
+        run: |
+          SDKMANAGER="$(find "$ANDROID_SDK_ROOT/cmdline-tools" -type f -name sdkmanager | sort | tail -n 1)"
+          test -x "$SDKMANAGER"
+          "$SDKMANAGER" --version
 
-      - name: Cache node_modules
-        uses: actions/cache@v4
+      - name: Accept Android SDK licenses
+        run: |
+          SDKMANAGER="$(find "$ANDROID_SDK_ROOT/cmdline-tools" -type f -name sdkmanager | sort | tail -n 1)"
+          yes | "$SDKMANAGER" --licenses > /dev/null
+
+      - name: Install Android SDK components
+        run: |
+          SDKMANAGER="$(find "$ANDROID_SDK_ROOT/cmdline-tools" -type f -name sdkmanager | sort | tail -n 1)"
+          "$SDKMANAGER" \
+            "platform-tools" \
+            "platforms;android-34" \
+            "build-tools;34.0.0"
+
+      - name: Set Android Java home
+        run: echo "ANDROID_JAVA_HOME=${JAVA_HOME}" >> "$GITHUB_ENV"
+
+      - name: Run Kotlin integration tests
+        run: make test-kotlin
+
+  rn-android:
+    runs-on: ubuntu-24.04
+    needs: [metadata, linux-pgrx-runtime]
+    env:
+      ANDROID_HOME: /usr/local/lib/android/sdk
+      ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
+      GRADLE_TEST_ARGS: ""
+    steps:
+      - uses: actions/checkout@v6.0.2
+
+      - uses: actions/setup-go@v6.3.0
+        with:
+          go-version-file: api/go/go.mod
+          cache-dependency-path: api/go/go.sum
+
+      - uses: actions/setup-java@v5.2.0
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: gradle
+
+      - uses: actions/setup-node@v6.3.0
+        with:
+          node-version: '22'
+
+      - uses: actions/cache@v5.0.4
         with:
           path: |
             clients/react-native/node_modules
             clients/react-native/example/node_modules
-          key: rn-node-${{ runner.os }}-${{ hashFiles('clients/react-native/yarn.lock') }}
-          restore-keys: rn-node-${{ runner.os }}-
+            clients/react-native/.yarn/install-state.gz
+          key: rn-deps-${{ runner.os }}-${{ hashFiles('clients/react-native/yarn.lock', 'clients/react-native/package.json', 'clients/react-native/example/package.json') }}
+          restore-keys: |
+            rn-deps-${{ runner.os }}-
 
-      - name: Install JS dependencies
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            extensions -> target
+
+      - name: Install PostgreSQL extension build dependencies
         run: |
-          cd clients/react-native && yarn install --immutable
-          cd example && yarn install --immutable
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            ccache \
+            clang \
+            flex \
+            bison \
+            libclang-dev \
+            libreadline-dev \
+            libssl-dev \
+            libxml2-dev \
+            libxml2-utils \
+            libxslt-dev \
+            pkg-config \
+            xsltproc \
+            zlib1g-dev
 
-      - name: Cache Gradle
-        uses: actions/cache@v4
+      - uses: actions/cache@v5.0.4
         with:
-          path: ~/.gradle
-          key: gradle-rn-${{ runner.os }}-${{ hashFiles('clients/react-native/example/android/gradle/wrapper/gradle-wrapper.properties', 'clients/react-native/example/android/app/build.gradle') }}
-          restore-keys: gradle-rn-${{ runner.os }}-
+          path: |
+            ~/.cargo/bin/cargo-pgrx
+            ~/.cargo/.crates.toml
+            ~/.cargo/.crates2.json
+          key: cargo-pgrx-${{ runner.os }}-0.17.0
 
-      - name: Cache AVD
-        uses: actions/cache@v4
-        id: avd-cache
+      - name: Install cargo-pgrx
+        run: |
+          if ! command -v cargo-pgrx >/dev/null 2>&1 || [ "$(cargo pgrx --version | awk '{print $2}')" != "0.17.0" ]; then
+            cargo install --locked cargo-pgrx --version 0.17.0
+          fi
+
+      - uses: actions/download-artifact@v8.0.1
         with:
-          path: ~/.android/avd
-          key: avd-api-31-x86_64
+          name: pgrx-pg18-linux
+          path: ${{ runner.temp }}/pgrx-pg18-linux
 
-      - name: Enable KVM
+      - name: Restore PostgreSQL 18 pgrx runtime
+        run: tar -C "$HOME" -xf "$RUNNER_TEMP/pgrx-pg18-linux/pgrx-pg18-linux.tar"
+
+      - name: Verify PostgreSQL 18 for pgrx
+        run: |
+          test -f "$HOME/.pgrx/config.toml"
+          grep -q '^pg18' "$HOME/.pgrx/config.toml"
+
+      - name: Verify Android SDK tooling
+        run: |
+          SDKMANAGER="$(find "$ANDROID_SDK_ROOT/cmdline-tools" -type f -name sdkmanager | sort | tail -n 1)"
+          test -x "$SDKMANAGER"
+          "$SDKMANAGER" --version
+
+      - name: Accept Android SDK licenses
+        run: |
+          SDKMANAGER="$(find "$ANDROID_SDK_ROOT/cmdline-tools" -type f -name sdkmanager | sort | tail -n 1)"
+          yes | "$SDKMANAGER" --licenses > /dev/null
+
+      - name: Install Android SDK components
+        run: |
+          SDKMANAGER="$(find "$ANDROID_SDK_ROOT/cmdline-tools" -type f -name sdkmanager | sort | tail -n 1)"
+          "$SDKMANAGER" \
+            "platform-tools" \
+            "platforms;android-34" \
+            "build-tools;34.0.0" \
+            "emulator" \
+            "system-images;android-34;google_apis;x86_64"
+
+      - name: Set Android Java home
+        run: echo "ANDROID_JAVA_HOME=${JAVA_HOME}" >> "$GITHUB_ENV"
+
+      - name: Enable KVM permissions
         run: |
           echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
           sudo udevadm control --reload-rules
           sudo udevadm trigger --name-match=kvm
 
-      - name: Build Android app for Detox
-        working-directory: clients/react-native/example
-        run: npx detox build --configuration android.emu.debug
+      - name: Install React Native dependencies
+        working-directory: clients/react-native
+        run: |
+          corepack enable
+          yarn install --immutable
 
-      - name: Run Detox E2E tests (Android)
+      - name: Build React Native Android Detox app
+        run: make test-rn-e2e-android-build
+
+      - name: Cache Android AVD
+        id: rn-android-avd-cache
+        uses: actions/cache@v5.0.4
+        with:
+          path: |
+            ~/.android/avd/*
+            ~/.android/adb*
+          key: rn-android-avd-${{ runner.os }}-api34-google-apis-x86_64-pixel_7
+
+      - name: Generate Android AVD snapshot
+        if: steps.rn-android-avd-cache.outputs.cache-hit != 'true'
         uses: reactivecircus/android-emulator-runner@v2
         with:
-          api-level: 31
-          target: google_apis
+          api-level: 34
           arch: x86_64
           avd-name: Pixel_7_API_34
+          profile: pixel_7
+          target: google_apis
           force-avd-creation: false
-          emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim
-          script: |
-            cd clients/react-native/example
-            npx detox test --configuration android.emu.debug --headless --record-logs failing --take-screenshots failing
+          disable-linux-hw-accel: false
+          disable-animations: false
+          emulator-boot-timeout: 900
+          emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
+          script: echo "Generated Android AVD snapshot"
 
-      - name: Stop synchrod
-        if: always()
-        run: make synchrod-test-stop
-
-      - name: Upload artifacts on failure
-        if: failure()
-        uses: actions/upload-artifact@v4
+      - name: Run React Native Android Detox tests
+        uses: reactivecircus/android-emulator-runner@v2
         with:
-          name: rn-e2e-android-artifacts
-          path: |
-            .synchrod-test.log
-            clients/react-native/example/artifacts/
-
-  # ── Go build check ───────────────────────────────────────────────────
-  build-go:
-    needs: changes
-    if: needs.changes.outputs.go == 'true'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-go@v5
-        with:
-          go-version-file: go.mod
-
-      - name: Build library
-        run: go build ./...
-
-      - name: Cross-compile smoke test (linux/arm64)
-        env:
-          GOOS: linux
-          GOARCH: arm64
-          CGO_ENABLED: '0'
-        run: go build ./cmd/synchrod
-
-  # ── Docs build check ─────────────────────────────────────────────────
-  build-docs:
-    needs: changes
-    if: needs.changes.outputs.docs == 'true'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '22'
-
-      - name: Build docs
-        working-directory: docs
-        run: |
-          npm ci
-          npm run build
-
-  # ── Aggregate gate (single required status check) ────────────────────
-  ci-gate:
-    if: always()
-    needs:
-      - lint-go
-      - lint-rn
-      - test-go-unit
-      - test-go-integration
-      - test-swift-unit
-      - test-kotlin-unit
-      - test-rn-unit
-      - test-integration-e2e
-      - test-rn-e2e-ios
-      - test-rn-e2e-android
-      - build-go
-      - build-docs
-    runs-on: ubuntu-latest
-    steps:
-      - name: Check upstream job results
-        run: |
-          echo "Job results: ${{ toJSON(needs.*.result) }}"
-          if echo "${{ toJSON(needs.*.result) }}" | grep -qE '"failure"|"cancelled"'; then
-            echo "One or more upstream jobs failed or were cancelled."
-            exit 1
-          fi
-          echo "All upstream jobs passed or were skipped."
+          api-level: 34
+          arch: x86_64
+          avd-name: Pixel_7_API_34
+          profile: pixel_7
+          target: google_apis
+          force-avd-creation: false
+          disable-linux-hw-accel: false
+          disable-animations: true
+          emulator-boot-timeout: 900
+          emulator-options: -no-snapshot-save -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
+          script: make test-rn-e2e-android-run

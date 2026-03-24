@@ -2572,10 +2572,10 @@ __metadata:
     "@react-native/babel-preset": "npm:0.83.0"
     "@react-native/metro-config": "npm:0.83.0"
     "@react-native/typescript-config": "npm:0.83.0"
-    "@types/react": "npm:^19.2.0"
+    "@types/react": "npm:^19.2.4"
     detox: "npm:^20.34.0"
     jest: "npm:^29.7.0"
-    react: "npm:19.2.0"
+    react: "npm:19.2.4"
     react-native: "npm:0.83.0"
     react-native-builder-bob: "npm:^0.40.18"
     react-native-monorepo-config: "npm:^0.3.3"
@@ -2591,16 +2591,16 @@ __metadata:
     "@react-native/babel-preset": "npm:0.83.0"
     "@testing-library/react-native": "npm:^12.4.0"
     "@types/jest": "npm:^29.5.14"
-    "@types/react": "npm:^19.2.0"
+    "@types/react": "npm:^19.2.4"
     "@typescript-eslint/eslint-plugin": "npm:^8.0.0"
     "@typescript-eslint/parser": "npm:^8.0.0"
     del-cli: "npm:^6.0.0"
     eslint: "npm:^9.0.0"
     jest: "npm:^29.7.0"
-    react: "npm:19.2.0"
+    react: "npm:19.2.4"
     react-native: "npm:0.83.0"
     react-native-builder-bob: "npm:^0.40.18"
-    react-test-renderer: "npm:^19.2.0"
+    react-test-renderer: "npm:^19.2.4"
     ts-jest: "npm:^29.1.0"
     turbo: "npm:^2.5.6"
     typescript: "npm:^5.9.2"
@@ -2718,7 +2718,7 @@ __metadata:
   languageName: node
   linkType: hard
 
-"@types/react@npm:^19.2.0":
+"@types/react@npm:^19.2.4":
   version: 19.2.14
   resolution: "@types/react@npm:19.2.14"
   dependencies:
@@ -7913,7 +7913,7 @@ __metadata:
   languageName: node
   linkType: hard
 
-"react-test-renderer@npm:^19.2.0":
+"react-test-renderer@npm:^19.2.4":
   version: 19.2.4
   resolution: "react-test-renderer@npm:19.2.4"
   dependencies:
@@ -7925,10 +7925,10 @@ __metadata:
   languageName: node
   linkType: hard
 
-"react@npm:19.2.0":
-  version: 19.2.0
-  resolution: "react@npm:19.2.0"
-  checksum: 10c0/1b6d64eacb9324725bfe1e7860cb7a6b8a34bc89a482920765ebff5c10578eb487e6b46b2f0df263bd27a25edbdae2c45e5ea5d81ae61404301c1a7192c38330
+"react@npm:19.2.4":
+  version: 19.2.4
+  resolution: "react@npm:19.2.4"
+  checksum: 10c0/cd2c9ff67a720799cc3b38a516009986f7fc4cb8d3e15716c6211cf098d1357ee3e348ab05ad0600042bbb0fd888530ba92e329198c92eafa0994f5213396596
   languageName: node
   linkType: hard
 

@@ -11,20 +11,11 @@ export type {
   ColumnDef,
   TableOptions,
   Transaction,
-  CheckpointMode,
   SyncStatus,
   SyncStatusType,
   ConflictEvent,
   SynchroConfig,
   Unsubscribe,
-  PullRequest,
-  PullResponse,
-  SyncRecord,
-  DeleteEntry,
-  BucketUpdate,
-  RegisterResponse,
-  RebuildRequest,
-  RebuildResponse,
 } from './types';
 
 export {
@@ -34,7 +25,6 @@ export {
   TableNotSyncedError,
   UpgradeRequiredError,
   SchemaMismatchError,
-  SnapshotRequiredError,
   PushRejectedError,
   NetworkError,
   ServerError,
@@ -46,4 +36,4 @@ export {
   mapNativeError,
 } from './errors';
 
-export type { PushResultItem } from './errors';
+export type { PushRejectedMutation } from './errors';

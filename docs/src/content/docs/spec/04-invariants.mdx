@@ -1,0 +1,244 @@
+---
+title: Invariants
+description: Rules that must always hold if Synchro is correct.
+---
+
+# Invariants
+
+## Purpose
+
+This document defines the rules that must always hold if Synchro is correct.
+
+These invariants are the basis for:
+
+- conformance testing
+- implementation audits
+- debugging
+- performance validation
+
+## Authority
+
+If implementation behavior conflicts with these invariants, the implementation is wrong unless the invariant is deliberately changed.
+
+## Protocol Invariants
+
+### Canonical Time Format
+
+All wire timestamps use RFC 3339 in UTC.
+
+### Opaque Cursor Invariant
+
+Clients must treat scope cursors as opaque values.
+
+No client may infer ordering or meaning from cursor encoding.
+
+### Opaque Server Version Invariant
+
+Clients must treat `server_version` as opaque.
+
+No client may sort, increment, or inspect it semantically.
+
+### Scope Assignment Authority
+
+The server is authoritative for scope assignment.
+
+Clients may cache scope assignment state but may not invent scope instances locally.
+
+### Scope Set Version Monotonicity
+
+`scope_set_version` must only move forward when the client’s authoritative assigned scope set changes.
+
+### Schema Authority
+
+The server is authoritative for schema compatibility decisions and schema action responses.
+
+## Data Correctness Invariants
+
+### Local SQL Is The App Surface
+
+The application reads and writes local SQLite.
+
+The sync engine must not require the app to use a separate write path for synced CRUD.
+
+### Synced CRUD Authority
+
+Row-level synced CRUD semantics are defined by Synchro, not by app-specific transport contracts.
+
+### No Silent Mutation Loss
+
+A local mutation must never disappear silently.
+
+It must end in one of these states:
+
+- pending
+- accepted
+- rejected with inspectable reason
+
+### Canonical Server Outcome
+
+When the server accepts or rejects a mutation with authoritative row state, that server state is authoritative.
+
+Clients must reconcile to it.
+
+### No Duplicate Local Intent
+
+A local user action should not be duplicated by sync replay.
+
+Read-your-own-write behavior must not produce double-apply of the same logical mutation.
+
+### No Silent Server Apply Echo Loop
+
+When clients apply server-originated state, local change capture must not re-enqueue it as new client intent.
+
+## Scope Invariants
+
+### Deterministic Scope Membership
+
+For a given server state, scope membership must be deterministic.
+
+The same authoritative row state must map to the same set of scope instances.
+
+### Low-Fanout Design Principle
+
+High total scope count is acceptable.
+
+The dangerous scaling pattern is high fanout, where a single row change must update large numbers of scope instances.
+
+The system should preserve correctness under high fanout, but product and configuration defaults should minimize it.
+
+### Shared Data Modeling
+
+Shared or public data should preferably live in shared scopes with many subscribers, not by being copied into many private scopes.
+
+Preferred example:
+
+- `templates_public` for the shared template catalog
+- `templates_user:{user_id}` for user-created templates
+
+Both may justify rows in the same local `templates` table. The shared rows should not be duplicated into each private scope.
+
+### Scope-Local Rebuild
+
+Rebuild must be scope-local.
+
+Rebuilding one scope must not require wiping unrelated local data.
+
+## Cursor And Rebuild Invariants
+
+### Per-Scope Cursor Correctness
+
+A scope cursor may advance only after the corresponding incremental changes for that scope have been durably applied locally.
+
+### Rebuild Finality
+
+A rebuild is complete only when:
+
+- all rebuild pages for the scope are applied
+- stale provenance for that scope is pruned
+- rows with zero remaining provenance are removed
+- the final authoritative cursor is installed
+
+### Rebuild Does Not Erase Valid Overlapping Data
+
+If a local row belongs to multiple scopes, rebuilding one scope must not delete that row while another valid provenance edge remains.
+
+### First Sync Uses Rebuild Semantics
+
+Initial materialization for a scope with no usable cursor follows the same correctness rules as any later rebuild.
+
+## Local Metadata Invariants
+
+### Durable Queue Invariant
+
+Queued mutations must survive process death and restart.
+
+### Durable Rebuild State Invariant
+
+If a client process crashes during rebuild, the rebuild-in-progress state must remain recoverable from durable metadata.
+
+### Durable Cursor Invariant
+
+Scope cursor advancement must be durable and atomic with successful apply.
+
+### Rejection Inspectability
+
+Rejected mutations must remain inspectable until cleared by explicit client policy.
+
+### Provenance Correctness
+
+For tables that support multi-scope composition, local provenance metadata must accurately reflect which scopes currently justify each local row.
+
+## Startup And Warm-Start Invariants
+
+### Seeded DB Is Cache Only
+
+A seeded or preinitialized local database is a warm-start optimization only.
+
+It is not a separate sync mode and does not weaken server authority.
+
+### Portable Seed Authority
+
+Only server-declared portable scopes may be exported into a bundled seed.
+
+The client must not infer that a seeded row is portable.
+
+### Seed Resume Correctness
+
+If a bundled seed contains portable scope data, it must also contain the continuation metadata required for normal delta sync from that state.
+
+### Offline Writes Before First Connect
+
+Offline writes before first successful connect are allowed.
+
+They must be preserved and reconciled through the same durable mutation queue as any later offline writes.
+
+## Retry And Failure Invariants
+
+### Retryable Failures Do Not Corrupt State
+
+Retryable transport or availability failures must not corrupt local sync metadata.
+
+### Non-Retryable Failures Are Explicit
+
+Non-retryable failures must surface as explicit error state, not silent degraded behavior.
+
+### Automatic Rebuild Default
+
+Scope rebuild should be automatic by default.
+
+If a product chooses to require app mediation, that must be an explicit product decision, not an implementation accident.
+
+## Adapter And Client Boundary Invariants
+
+### Thin Adapter Invariant
+
+Server adapters such as `api/go` must not define sync semantics.
+
+### Thin React Native Invariant
+
+React Native must not become a separate sync engine with divergent semantics.
+
+### Native Client Responsibility Boundary
+
+Native clients own local database integration, queueing, scheduling, and safe apply.
+
+They do not own server sync semantics.
+
+## Competitive Invariants
+
+### No Mandatory Custom Backend Write Contract
+
+Using Synchro for synced CRUD must not require every application to invent a custom backend upload protocol.
+
+### No Arbitrary Client-Defined Replication Model
+
+The primary sync model must not depend on arbitrary client-authored replication predicates.
+
+### No Extra Hot-Path Network Hop For Core Sync Logic
+
+Core sync semantics should execute close to the data, not through an extra server-to-service hot-path hop.
+
+## Open Follow-Up Questions
+
+- whether checksum verification becomes a required invariant in more cases or remains selective
+- whether certain configuration classes should declare maximum expected fanout for observability and validation

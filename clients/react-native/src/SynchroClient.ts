@@ -10,7 +10,6 @@ import type {
   ColumnDef,
   TableOptions,
   Transaction,
-  CheckpointMode,
   SyncStatus,
   SyncStatusType,
   ConflictEvent,
@@ -62,7 +61,6 @@ export class SynchroClient {
         maxRetryAttempts: this.config.maxRetryAttempts ?? 5,
         pullPageSize: this.config.pullPageSize ?? 100,
         pushBatchSize: this.config.pushBatchSize ?? 100,
-        snapshotPageSize: this.config.snapshotPageSize ?? 100,
         seedDatabasePath: this.config.seedDatabasePath,
       });
     } catch (error) {
@@ -307,16 +305,6 @@ export class SynchroClient {
     };
   }
 
-  // -- WAL --
-
-  async checkpoint(mode: CheckpointMode = 'passive'): Promise<void> {
-    try {
-      await this.native.checkpoint(mode);
-    } catch (error) {
-      throw mapNativeError(error);
-    }
-  }
-
   // -- Lifecycle --
 
   async close(): Promise<void> {
@@ -406,20 +394,4 @@ export class SynchroClient {
     return () => subscription.remove();
   }
 
-  onSnapshotRequired(
-    handler: () => Promise<boolean>
-  ): Unsubscribe {
-    const subscription = this.native.onSnapshotRequired(
-      (event: { requestID: string }) => {
-        handler()
-          .then((approved) => {
-            this.native.resolveSnapshotRequest(event.requestID, approved);
-          })
-          .catch(() => {
-            this.native.resolveSnapshotRequest(event.requestID, false);
-          });
-      }
-    );
-    return () => subscription.remove();
-  }
 }

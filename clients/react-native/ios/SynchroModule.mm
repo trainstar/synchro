@@ -54,8 +54,6 @@
         [self emitOnConflict:body];
     } else if ([name isEqualToString:@"onAuthRequest"]) {
         [self emitOnAuthRequest:body];
-    } else if ([name isEqualToString:@"onSnapshotRequired"]) {
-        [self emitOnSnapshotRequired:body];
     } else if ([name isEqualToString:@"onChange"]) {
         [self emitOnChange:body];
     } else if ([name isEqualToString:@"onQueryResult"]) {
@@ -79,7 +77,6 @@
         @"maxRetryAttempts": @(config.maxRetryAttempts()),
         @"pullPageSize": @(config.pullPageSize()),
         @"pushBatchSize": @(config.pushBatchSize()),
-        @"snapshotPageSize": @(config.snapshotPageSize()),
     } mutableCopy];
     NSString *seedPath = config.seedDatabasePath();
     if (seedPath) {
@@ -216,12 +213,6 @@
     [self.impl removeObserver:observerID resolve:resolve reject:reject];
 }
 
-- (void)checkpoint:(NSString *)mode
-           resolve:(RCTPromiseResolveBlock)resolve
-            reject:(RCTPromiseRejectBlock)reject {
-    [self.impl checkpoint:mode resolve:resolve reject:reject];
-}
-
 - (void)start:(RCTPromiseResolveBlock)resolve
        reject:(RCTPromiseRejectBlock)reject {
     [self.impl start:resolve reject:reject];
@@ -250,11 +241,6 @@
 - (void)rejectAuthRequest:(NSString *)requestID
                     error:(NSString *)error {
     [self.impl rejectAuthRequest:requestID error:error];
-}
-
-- (void)resolveSnapshotRequest:(NSString *)requestID
-                      approved:(BOOL)approved {
-    [self.impl resolveSnapshotRequest:requestID approved:approved];
 }
 
 - (void)addListener:(NSString *)eventName {
@@ -349,9 +335,6 @@ RCT_EXTERN_METHOD(addQueryObserver:(NSString *)observerID
 RCT_EXTERN_METHOD(removeObserver:(NSString *)observerID
                   resolve:(RCTPromiseResolveBlock)resolve
                   reject:(RCTPromiseRejectBlock)reject)
-RCT_EXTERN_METHOD(checkpoint:(NSString *)mode
-                  resolve:(RCTPromiseResolveBlock)resolve
-                  reject:(RCTPromiseRejectBlock)reject)
 RCT_EXTERN_METHOD(start:(RCTPromiseResolveBlock)resolve
                   reject:(RCTPromiseRejectBlock)reject)
 RCT_EXTERN_METHOD(stop:(RCTPromiseResolveBlock)resolve
@@ -364,9 +347,6 @@ RCT_EXTERN_METHOD(resolveAuthRequest:(NSString *)requestID
                   token:(NSString *)token)
 RCT_EXTERN_METHOD(rejectAuthRequest:(NSString *)requestID
                   error:(NSString *)error)
-RCT_EXTERN_METHOD(resolveSnapshotRequest:(NSString *)requestID
-                  approved:(BOOL)approved)
-
 @end
 
 #endif

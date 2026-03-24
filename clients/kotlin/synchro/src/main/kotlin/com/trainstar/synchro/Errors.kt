@@ -10,9 +10,8 @@ sealed class SynchroError(message: String, cause: Throwable? = null) : Exception
     class SchemaMismatch(val serverVersion: Long, val serverHash: String) :
         SynchroError("Schema mismatch: server version $serverVersion, hash $serverHash")
 
-    class SnapshotRequired : SynchroError("Full snapshot required")
-    class PushRejected(val results: List<PushResult>) :
-        SynchroError("Push rejected: ${results.size} record(s)")
+    class PushRejected(val results: List<VNextRejectedMutation>) :
+        SynchroError("Push rejected: ${results.size} mutation(s)")
 
     class NetworkError(val underlying: Throwable) :
         SynchroError("Network error: ${underlying.message}", underlying)

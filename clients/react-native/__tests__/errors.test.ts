@@ -6,7 +6,6 @@ import {
   TableNotSyncedError,
   UpgradeRequiredError,
   SchemaMismatchError,
-  SnapshotRequiredError,
   PushRejectedError,
   NetworkError,
   ServerError,
@@ -69,13 +68,19 @@ describe('mapNativeError', () => {
     expect(typed.serverHash).toBe('abc');
   });
 
-  it('maps SNAPSHOT_REQUIRED', () => {
-    const err = mapNativeError({ code: 'SNAPSHOT_REQUIRED', message: '' });
-    expect(err).toBeInstanceOf(SnapshotRequiredError);
-  });
-
   it('maps PUSH_REJECTED with results', () => {
-    const results = [{ recordID: 'r1', table: 'items', status: 'rejected' }];
+    const results = [
+      {
+        mutationID: 'm1',
+        table: 'items',
+        pk: { id: 'r1' },
+        status: 'conflict',
+        code: 'version_conflict',
+        message: 'server version is newer',
+        serverRow: { id: 'r1', name: 'server' },
+        serverVersion: '2026-03-20T18:22:11Z',
+      },
+    ];
     const err = mapNativeError({
       code: 'PUSH_REJECTED',
       message: '',

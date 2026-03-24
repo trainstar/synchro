@@ -1,6 +1,13 @@
 package com.trainstar.synchro
 
+import kotlinx.serialization.encodeToString
+import kotlinx.serialization.json.Json
+
 class SchemaManager(private val database: SynchroDatabase) {
+    private val json = Json {
+        ignoreUnknownKeys = true
+        encodeDefaults = true
+    }
 
     suspend fun ensureSchema(httpClient: HttpClient): SchemaResponse {
         val (localVersion, localHash) = database.readTransaction { db ->
@@ -25,6 +32,31 @@ class SchemaManager(private val database: SynchroDatabase) {
         return schema
     }
 
+    fun loadStoredLocalSchema(): List<LocalSchemaTable>? {
+        return database.readTransaction { db ->
+            val encoded = SynchroMeta.get(db, MetaKey.LOCAL_SCHEMA) ?: return@readTransaction null
+            json.decodeFromString<List<LocalSchemaTable>>(encoded)
+        }
+    }
+
+    fun reconcileLocalSchema(schemaVersion: Long, schemaHash: String, tables: List<LocalSchemaTable>) {
+        val (localVersion, localHash) = database.readTransaction { db ->
+            val version = SynchroMeta.getInt64(db, MetaKey.SCHEMA_VERSION)
+            val hash = SynchroMeta.get(db, MetaKey.SCHEMA_HASH) ?: ""
+            Pair(version, hash)
+        }
+
+        if (localVersion != schemaVersion || localHash != schemaHash) {
+            migrateLocalSchema(tables)
+        }
+
+        database.writeTransaction { db ->
+            SynchroMeta.setInt64(db, MetaKey.SCHEMA_VERSION, schemaVersion)
+            SynchroMeta.set(db, MetaKey.SCHEMA_HASH, schemaHash)
+            persistLocalSchemaTables(db, tables)
+        }
+    }
+
     fun createSyncedTables(schema: SchemaResponse) {
         database.writeTransaction { db ->
             createSyncedTablesInTransaction(db, schema)
@@ -32,7 +64,11 @@ class SchemaManager(private val database: SynchroDatabase) {
     }
 
     internal fun createSyncedTablesInTransaction(db: android.database.sqlite.SQLiteDatabase, schema: SchemaResponse) {
-        for (table in schema.tables) {
+        createSyncedTablesInTransaction(db, schema.tables.map { it.localSchema })
+    }
+
+    internal fun createSyncedTablesInTransaction(db: android.database.sqlite.SQLiteDatabase, tables: List<LocalSchemaTable>) {
+        for (table in tables) {
             val createSQL = SQLiteSchema.generateCreateTableSQL(table)
             db.execSQL(createSQL)
 
@@ -44,15 +80,20 @@ class SchemaManager(private val database: SynchroDatabase) {
     }
 
     fun migrateSchema(newSchema: SchemaResponse) {
+        migrateLocalSchema(newSchema.tables.map { it.localSchema })
+    }
+
+    fun migrateLocalSchema(newTables: List<LocalSchemaTable>) {
         database.writeTransaction { db ->
-            if (requiresDestructiveRebuild(db, newSchema)) {
-                dropSyncedTablesInTransaction(db, SchemaResponse(0, "", "", newSchema.tables))
+            if (requiresDestructiveRebuild(db, newTables)) {
+                dropSyncedTablesInTransaction(db, newTables)
                 clearLocalStateForRebuild(db)
-                createSyncedTablesInTransaction(db, newSchema)
+                createSyncedTablesInTransaction(db, newTables)
+                persistLocalSchemaTables(db, newTables)
                 return@writeTransaction
             }
 
-            for (table in newSchema.tables) {
+            for (table in newTables) {
                 // Check if table exists
                 val tableExists = db.rawQuery(
                     "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
@@ -95,6 +136,8 @@ class SchemaManager(private val database: SynchroDatabase) {
                     db.execSQL(trigger)
                 }
             }
+
+            persistLocalSchemaTables(db, newTables)
         }
     }
 
@@ -111,8 +154,8 @@ class SchemaManager(private val database: SynchroDatabase) {
      * Only triggers destructive rebuild when a synced column's type has changed.
      * Extra local tables, extra local columns, and removed server columns are all preserved.
      */
-    private fun requiresDestructiveRebuild(db: android.database.sqlite.SQLiteDatabase, newSchema: SchemaResponse): Boolean {
-        val newTableMap = newSchema.tables.associateBy { it.tableName }
+    private fun requiresDestructiveRebuild(db: android.database.sqlite.SQLiteDatabase, newTables: List<LocalSchemaTable>): Boolean {
+        val newTableMap = newTables.associateBy { it.tableName }
 
         for ((tableName, table) in newTableMap) {
             val tableExists = db.rawQuery(
@@ -149,6 +192,7 @@ class SchemaManager(private val database: SynchroDatabase) {
         SynchroMeta.set(db, MetaKey.SNAPSHOT_COMPLETE, "0")
         SynchroMeta.clearAllBucketCheckpoints(db)
         db.execSQL("DELETE FROM _synchro_bucket_members")
+        SynchroMeta.invalidateAllScopes(db)
     }
 
     fun dropSyncedTables(schema: SchemaResponse) {
@@ -158,7 +202,11 @@ class SchemaManager(private val database: SynchroDatabase) {
     }
 
     internal fun dropSyncedTablesInTransaction(db: android.database.sqlite.SQLiteDatabase, schema: SchemaResponse) {
-        for (table in schema.tables.reversed()) {
+        dropSyncedTablesInTransaction(db, schema.tables.map { it.localSchema })
+    }
+
+    internal fun dropSyncedTablesInTransaction(db: android.database.sqlite.SQLiteDatabase, tables: List<LocalSchemaTable>) {
+        for (table in tables.reversed()) {
             val quoted = SQLiteHelpers.quoteIdentifier(table.tableName)
             val trigInsert = SQLiteHelpers.quoteIdentifier("_synchro_cdc_insert_${table.tableName}")
             val trigUpdate = SQLiteHelpers.quoteIdentifier("_synchro_cdc_update_${table.tableName}")
@@ -168,5 +216,9 @@ class SchemaManager(private val database: SynchroDatabase) {
             db.execSQL("DROP TRIGGER IF EXISTS $trigDelete")
             db.execSQL("DROP TABLE IF EXISTS $quoted")
         }
+    }
+
+    private fun persistLocalSchemaTables(db: android.database.sqlite.SQLiteDatabase, tables: List<LocalSchemaTable>) {
+        SynchroMeta.set(db, MetaKey.LOCAL_SCHEMA, json.encodeToString(tables))
     }
 }

@@ -1,42 +1,52 @@
-name: Deploy docs
+name: Docs
 
 on:
   push:
-    branches: [master]
+    branches: [dev]
     paths:
+      - 'README.md'
       - 'docs/**'
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
   pages: write
   id-token: write
 
-jobs:
-  deploy:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
+concurrency:
+  group: docs-pages
+  cancel-in-progress: true
 
-      - uses: actions/setup-node@v4
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6.0.2
+
+      - uses: actions/configure-pages@v5
+
+      - uses: actions/setup-node@v6.3.0
         with:
           node-version: '22'
+          cache: npm
+          cache-dependency-path: docs/package-lock.json
 
-      - uses: actions/cache@v4
+      - name: Install and build docs
+        run: make docs-build
+
+      - uses: actions/upload-pages-artifact@v3
         with:
-          path: docs/node_modules
-          key: docs-node-${{ hashFiles('docs/package-lock.json') }}
-          restore-keys: docs-node-
+          path: docs/dist
 
-      - name: Install and build
-        working-directory: docs
-        run: |
-          npm ci
-          npm run build
-
-      - name: Deploy to GitHub Pages
-        uses: peaceiris/actions-gh-pages@v4
-        with:
-          github_token: ${{ secrets.GITHUB_TOKEN }}
-          publish_dir: docs/dist
-          force_orphan: true
+  deploy:
+    needs: build
+    runs-on: ubuntu-24.04
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

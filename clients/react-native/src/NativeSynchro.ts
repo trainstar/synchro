@@ -10,7 +10,6 @@ type ConflictEvent = {
   serverDataJson: string | null;
 };
 type AuthRequestEvent = { requestID: string };
-type SnapshotRequiredEvent = { requestID: string };
 type ChangeEvent = { observerID: string };
 type QueryResultEvent = { observerID: string; rowsJson: string };
 
@@ -27,7 +26,6 @@ export interface Spec extends TurboModule {
     maxRetryAttempts: number;
     pullPageSize: number;
     pushBatchSize: number;
-    snapshotPageSize: number;
     seedDatabasePath?: string;
   }): Promise<void>;
   close(): Promise<void>;
@@ -88,7 +86,6 @@ export interface Spec extends TurboModule {
   removeObserver(observerID: string): Promise<void>;
 
   // -- Sync --
-  checkpoint(mode: string): Promise<void>;
   start(): Promise<void>;
   stop(): Promise<void>;
   syncNow(): Promise<void>;
@@ -97,13 +94,11 @@ export interface Spec extends TurboModule {
   // -- Bidirectional responses --
   resolveAuthRequest(requestID: string, token: string): void;
   rejectAuthRequest(requestID: string, error: string): void;
-  resolveSnapshotRequest(requestID: string, approved: boolean): void;
 
   // -- Typed events --
   readonly onStatusChange: EventEmitter<StatusEvent>;
   readonly onConflict: EventEmitter<ConflictEvent>;
   readonly onAuthRequest: EventEmitter<AuthRequestEvent>;
-  readonly onSnapshotRequired: EventEmitter<SnapshotRequiredEvent>;
   readonly onChange: EventEmitter<ChangeEvent>;
   readonly onQueryResult: EventEmitter<QueryResultEvent>;
 

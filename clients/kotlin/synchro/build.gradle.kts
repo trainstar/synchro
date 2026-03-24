@@ -45,9 +45,12 @@ dependencies {
 
 mavenPublishing {
     publishToMavenCentral(com.vanniktech.maven.publish.SonatypeHost.CENTRAL_PORTAL)
-    signAllPublications()
+    val localPublish = gradle.startParameter.taskNames.any { it.contains("MavenLocal") }
+    if (!localPublish) {
+        signAllPublications()
+    }
 
-    coordinates("fit.trainstar", "synchro", project.findProperty("version")?.toString() ?: "0.1.0")
+    coordinates("fit.trainstar", "synchro", project.version.toString())
 
     pom {
         name.set("Synchro")

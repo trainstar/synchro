@@ -1,7 +1,15 @@
 import Foundation
-import GRDB
+@preconcurrency import GRDB
 
 public typealias Row = GRDB.Row
+
+private struct ObservedRows: @unchecked Sendable {
+    let rows: [Row]
+}
+
+private struct ObservedQueryParams: @unchecked Sendable {
+    let values: [any DatabaseValueConvertible]?
+}
 
 final class SynchroDatabase: @unchecked Sendable {
     let dbPool: DatabasePool
@@ -127,8 +135,9 @@ final class SynchroDatabase: @unchecked Sendable {
     }
 
     func watch(_ sql: String, params: [any DatabaseValueConvertible]?, tables: [String], callback: @escaping ([Row]) -> Void) -> DatabaseCancellable {
-        let observation = ValueObservation.tracking(regions: tables.map { Table($0) }, fetch: { db -> [Row] in
-            try Row.fetchAll(db, sql: sql, arguments: StatementArguments(params ?? []))
+        let observedParams = ObservedQueryParams(values: params)
+        let observation = ValueObservation.tracking(regions: tables.map { Table($0) }, fetch: { db -> ObservedRows in
+            ObservedRows(rows: try Row.fetchAll(db, sql: sql, arguments: StatementArguments(observedParams.values ?? [])))
         })
         let cancellable = observation.start(in: dbPool, onError: { error in
             // Observation errors are non-fatal; the observation continues.
@@ -136,25 +145,10 @@ final class SynchroDatabase: @unchecked Sendable {
             #if DEBUG
             print("[Synchro] watch observation error: \(error)")
             #endif
-        }, onChange: { rows in
-            callback(rows)
+        }, onChange: { observed in
+            callback(observed.rows)
         })
         return cancellable
-    }
-
-    // MARK: - WAL Checkpoint
-
-    func checkpoint(mode: CheckpointMode) throws {
-        let grdbMode: GRDB.Database.CheckpointMode
-        switch mode {
-        case .passive: grdbMode = .passive
-        case .full: grdbMode = .full
-        case .restart: grdbMode = .restart
-        case .truncate: grdbMode = .truncate
-        }
-        try dbPool.writeWithoutTransaction { db in
-            try db.checkpoint(grdbMode)
-        }
     }
 
     // MARK: - Close
@@ -209,6 +203,31 @@ final class SynchroDatabase: @unchecked Sendable {
                     bucket_id TEXT PRIMARY KEY,
                     checkpoint INTEGER NOT NULL DEFAULT 0
                 )
+                """)
+        }
+        migrator.registerMigration("synchro_v3_scopes") { db in
+            try db.execute(sql: """
+                CREATE TABLE IF NOT EXISTS _synchro_scopes (
+                    scope_id TEXT PRIMARY KEY,
+                    cursor TEXT,
+                    checksum TEXT,
+                    generation INTEGER NOT NULL DEFAULT 0
+                )
+                """)
+
+            try db.execute(sql: """
+                CREATE TABLE IF NOT EXISTS _synchro_scope_rows (
+                    scope_id TEXT NOT NULL,
+                    table_name TEXT NOT NULL,
+                    record_id TEXT NOT NULL,
+                    generation INTEGER NOT NULL DEFAULT 0,
+                    PRIMARY KEY (scope_id, table_name, record_id)
+                )
+                """)
+
+            try db.execute(sql: """
+                CREATE INDEX IF NOT EXISTS idx_synchro_scope_rows_record
+                ON _synchro_scope_rows (table_name, record_id)
                 """)
         }
         try migrator.migrate(dbPool)
