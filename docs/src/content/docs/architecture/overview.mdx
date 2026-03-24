@@ -28,21 +28,67 @@ This architecture exists to keep:
 - full synced CRUD for synced tables
 - SQL migration based configuration, with structured defaults and custom SQL escape hatches
 
+## Scope design guidelines
+
+The most important selective-sync rule is:
+
+- optimize for low row-change fanout, not low total scope count
+
+What matters is not how many scopes exist globally. What matters is how many scope instances a single changed row forces the server to update.
+
+Recommended modeling pattern:
+
+- private data goes into private scopes such as `documents_user:{user_id}`
+- shared or public data goes into shared scopes such as `templates_public`
+- one local SQLite table may be fed by both shared and private scopes
+- bundled seeds should export those same shared runtime scopes, not seed-only copies
+
+Concrete example:
+
+- every user should see the public template catalog
+- every user should also see their own custom templates
+
+Model that as:
+
+- `templates_public`
+- `templates_user:{user_id}`
+
+Do not duplicate the public template catalog into every `templates_user:{user_id}` scope. One public-row change should update one shared scope, not one scope per user.
+
+### Shared scope grouping
+
+Do not create a separate scope just because data is seeded.
+
+Scope boundaries should follow sync and rebuild behavior:
+
+- use one shared `global` scope only when the datasets are small, stable, and change together
+- split into multiple shared scopes when datasets differ in size, change rate, rebuild needs, or likely subscription patterns
+
+Practical rule:
+
+- tiny lookup tables that rarely change can live in one shared `reference_public` scope
+- a larger public catalog should usually get its own shared scope such as `templates_public`
+
 ## Seeded warm-start databases
 
-Synchro now ships a schema-first seed generator:
+Synchro now ships a portable seed generator:
 
 - `api/go/cmd/synchro-seed`
 
-It connects directly to PostgreSQL, reads the canonical `synchro_schema_manifest()` output, and emits a client-compatible SQLite database artifact.
+It connects directly to PostgreSQL, reads the canonical `synchro_schema_manifest()` output, exports any explicitly declared portable scopes, and emits a client-compatible SQLite database artifact.
 
 Use it when you want:
 
 - faster first app start
-- bundled local schema and sync metadata
+- bundled local schema, portable data, and sync metadata
 - a warm-start database artifact generated from the same canonical schema contract clients use at runtime
 
-Do not treat it as a separate sync system. Seeded databases remain warm caches only and must still reconcile through the normal `connect`, rebuild, push, and pull flows.
+Rules for the current release:
+
+- the generator exports only server-declared portable or public scopes
+- it does not accept JWT input
+- if no portable scopes are declared, the output is schema-only
+- clients keep the seeded portable rows after login and reconcile them through the normal `connect`, rebuild, push, and pull flows
 
 ## Adapter auth modes
 

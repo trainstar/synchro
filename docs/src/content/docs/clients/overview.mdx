@@ -45,14 +45,20 @@ The native SDKs support copying a preinitialized SQLite database into place befo
 Use this for:
 
 - warm-starting the synced-table schema
-- bundling reference data or other installer-time content you want available immediately
+- bundling portable reference data or other installer-time content you want available immediately
 - reducing first-start schema work and initial traffic
 
 Generate the seed artifact with:
 
 - `api/go/cmd/synchro-seed`
 
-The generated database is still only a warm cache. The SDKs always reconcile it against the authoritative server contract on first `connect`.
+Current seed rules:
+
+- the generator may include schema plus explicitly server-declared portable scopes
+- if no portable scopes are declared, the generator produces schema-only output
+- the SDKs keep seeded portable rows after login
+- the first authenticated sync continues from the seeded continuation metadata instead of wiping the DB
+- auth-scoped user data still arrives through normal sync after login
 
 ### React Native on iOS
 

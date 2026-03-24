@@ -42,7 +42,8 @@ Local database is open and client metadata tables are available.
 This state may begin from:
 
 - an empty local database
-- a preinitialized or seeded local database
+- a preinitialized or seeded local database containing schema only
+- a preinitialized or seeded local database containing schema plus portable scope data
 
 #### `connecting`
 
@@ -105,13 +106,19 @@ Client sync is intentionally stopped.
 4. call `POST /sync/connect`
 5. enter `connecting`
 6. apply schema action if required
-7. compare local scope metadata against authoritative server scope assignment
-8. rebuild only scopes that require it
-9. resume normal push and pull loop
+7. preserve any portable seeded scopes already present locally
+8. compare local scope metadata against authoritative server scope assignment
+9. rebuild only scopes that require it
+10. pull incremental changes for already-seeded portable scopes as normal delta
+11. resume normal push and pull loop
 
 Seeded databases are a warm-start optimization only.
 
 They do not create a different sync protocol mode.
+
+Portable seeded data must already belong to server-declared portable scopes.
+
+Portable seed generation does not use client JWT input.
 
 ## Offline Writes Before First Connect
 
@@ -194,10 +201,10 @@ One local table may be composed from multiple scopes.
 
 Example:
 
-- `exercises_public`
-- `exercises_user:u_123`
+- `templates_public`
+- `templates_user:u_123`
 
-Both may materialize rows into the same local `exercises` table.
+Both may materialize rows into the same local `templates` table.
 
 The app queries the local table normally.
 

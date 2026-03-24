@@ -175,7 +175,8 @@ Every major spec area should map to automated scenarios.
 ### State-Machine Scenarios
 
 - empty first startup
-- seeded startup
+- seeded startup from schema-only seed
+- seeded startup from portable-data seed
 - offline write before first connect
 - push then pull steady state
 - retryable failure during connect
@@ -200,6 +201,7 @@ Every major spec area should map to automated scenarios.
 - scope-logic change without structural schema change
 - phased rollout preserving queued mutations
 - unsupported destructive change
+- portable seed generated on old schema, then reconciled after connect
 
 ### Shared Versus Private Scope Scenarios
 
@@ -207,6 +209,7 @@ Every major spec area should map to automated scenarios.
 - shared public scope with many subscribers
 - row present in both shared and private scopes
 - public-row update with low server-side fanout
+- portable seeded public row updated incrementally after login
 
 ## Performance Conformance
 
@@ -235,6 +238,7 @@ The suite should measure and report:
 The suite should measure and report:
 
 - seeded startup versus empty startup
+- portable seeded startup versus schema-only seed startup
 - queue replay cost
 - rebuild apply cost
 - local provenance overhead for multi-scope tables

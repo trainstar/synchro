@@ -35,8 +35,8 @@ A scope is a server-defined selective-sync unit.
 
 Examples:
 
-- `workouts_user:u_123`
-- `exercises_public`
+- `documents_user:u_123`
+- `templates_public`
 - `project:p_42`
 
 ### Scope Cursor
@@ -150,8 +150,8 @@ Clients should not require them in the normal steady-state flow.
   },
   "scope_set_version": 12,
   "known_scopes": {
-    "workouts_user:u_123": { "cursor": "c_889" },
-    "exercises_public": { "cursor": "c_201" }
+    "documents_user:u_123": { "cursor": "c_889" },
+    "templates_public": { "cursor": "c_201" }
   }
 }
 ```
@@ -170,9 +170,9 @@ Clients should not require them in the normal steady-state flow.
   },
   "scopes": {
     "add": [
-      { "id": "workouts_user:u_123", "cursor": null },
-      { "id": "exercises_public", "cursor": null },
-      { "id": "exercises_user:u_123", "cursor": null }
+      { "id": "documents_user:u_123", "cursor": null },
+      { "id": "templates_public", "cursor": null },
+      { "id": "templates_user:u_123", "cursor": null }
     ],
     "remove": []
   },
@@ -222,7 +222,7 @@ Required semantics:
   "mutations": [
     {
       "mutation_id": "m_001",
-      "table": "workouts",
+      "table": "documents",
       "op": "insert",
       "pk": { "id": "w_1" },
       "columns": {
@@ -233,7 +233,7 @@ Required semantics:
     },
     {
       "mutation_id": "m_002",
-      "table": "workouts",
+      "table": "documents",
       "op": "update",
       "pk": { "id": "w_2" },
       "base_version": "sv_902",
@@ -243,7 +243,7 @@ Required semantics:
     },
     {
       "mutation_id": "m_003",
-      "table": "workouts",
+      "table": "documents",
       "op": "delete",
       "pk": { "id": "w_3" },
       "base_version": "sv_777"
@@ -260,7 +260,7 @@ Required semantics:
   "accepted": [
     {
       "mutation_id": "m_001",
-      "table": "workouts",
+      "table": "documents",
       "pk": { "id": "w_1" },
       "status": "applied",
       "server_row": {
@@ -276,7 +276,7 @@ Required semantics:
   "rejected": [
     {
       "mutation_id": "m_003",
-      "table": "workouts",
+      "table": "documents",
       "pk": { "id": "w_3" },
       "status": "conflict",
       "code": "version_conflict",
@@ -306,9 +306,9 @@ Required semantics:
   },
   "scope_set_version": 13,
   "scopes": {
-    "workouts_user:u_123": { "cursor": "c_889" },
-    "exercises_public": { "cursor": "c_201" },
-    "exercises_user:u_123": { "cursor": "c_050" }
+    "documents_user:u_123": { "cursor": "c_889" },
+    "templates_public": { "cursor": "c_201" },
+    "templates_user:u_123": { "cursor": "c_050" }
   },
   "limit": 500,
   "checksum_mode": "requested"
@@ -321,8 +321,8 @@ Required semantics:
 {
   "changes": [
     {
-      "scope": "workouts_user:u_123",
-      "table": "workouts",
+      "scope": "documents_user:u_123",
+      "table": "documents",
       "op": "upsert",
       "pk": { "id": "w_9" },
       "row": {
@@ -334,8 +334,8 @@ Required semantics:
       "server_version": "sv_991"
     },
     {
-      "scope": "exercises_public",
-      "table": "exercises",
+      "scope": "templates_public",
+      "table": "templates",
       "op": "delete",
       "pk": { "id": "e_7" },
       "server_version": "sv_400"
@@ -343,9 +343,9 @@ Required semantics:
   ],
   "scope_set_version": 14,
   "scope_cursors": {
-    "workouts_user:u_123": "c_890",
-    "exercises_public": "c_202",
-    "exercises_user:u_123": "c_050"
+    "documents_user:u_123": "c_890",
+    "templates_public": "c_202",
+    "templates_user:u_123": "c_050"
   },
   "scope_updates": {
     "add": [],
@@ -354,9 +354,9 @@ Required semantics:
   "rebuild": [],
   "has_more": false,
   "checksums": {
-    "workouts_user:u_123": "cs_a19d",
-    "exercises_public": "cs_0f22",
-    "exercises_user:u_123": "cs_7771"
+    "documents_user:u_123": "cs_a19d",
+    "templates_public": "cs_0f22",
+    "templates_user:u_123": "cs_7771"
   }
 }
 ```
@@ -395,7 +395,7 @@ The protocol owns row-level synced CRUD instead of delegating the write contract
 ```json
 {
   "client_id": "ios-device-123",
-  "scope": "exercises_public",
+  "scope": "templates_public",
   "cursor": null,
   "limit": 1000
 }
@@ -405,10 +405,10 @@ The protocol owns row-level synced CRUD instead of delegating the write contract
 
 ```json
 {
-  "scope": "exercises_public",
+  "scope": "templates_public",
   "records": [
     {
-      "table": "exercises",
+      "table": "templates",
       "pk": { "id": "e_1" },
       "row": {
         "id": "e_1",
@@ -427,7 +427,7 @@ Final rebuild page:
 
 ```json
 {
-  "scope": "exercises_public",
+  "scope": "templates_public",
   "records": [],
   "cursor": null,
   "has_more": false,
