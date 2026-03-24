@@ -8,6 +8,7 @@ mod bucketing;
 mod client;
 mod compaction;
 mod materialize;
+mod portable_seed;
 mod pull;
 mod push;
 mod rebuild;
@@ -70,6 +71,13 @@ CREATE TABLE IF NOT EXISTS sync_clients (
 ALTER TABLE sync_clients
     ADD COLUMN IF NOT EXISTS scope_set_version BIGINT NOT NULL DEFAULT 1;
 CREATE INDEX IF NOT EXISTS idx_sync_clients_user_id ON sync_clients (user_id);
+
+CREATE TABLE IF NOT EXISTS sync_shared_scopes (
+    scope_id TEXT PRIMARY KEY,
+    portable BOOLEAN NOT NULL DEFAULT false,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
 
 CREATE TABLE IF NOT EXISTS sync_bucket_edges (
     table_name TEXT NOT NULL,
@@ -298,6 +306,14 @@ mod tests {
         row.unwrap().0
     }
 
+    fn register_shared_scope(scope_id: &str, portable: bool) {
+        Spi::run_with_args(
+            "SELECT synchro_register_shared_scope($1, $2)",
+            &[scope_id.into(), portable.into()],
+        )
+        .unwrap();
+    }
+
     /// Return the latest schema version and hash persisted by the extension.
     fn latest_schema_ref() -> (i64, String) {
         let row: Option<pgrx::JsonB> = Spi::get_one(
@@ -420,7 +436,7 @@ mod tests {
             true
         );
         assert_eq!(resp["bucket_checkpoints"]["user:user1"].as_i64(), Some(0));
-        assert_eq!(resp["bucket_checkpoints"]["global"].as_i64(), Some(0));
+        assert!(resp["bucket_checkpoints"]["global"].is_null());
 
         // Verify bucket_subs in sync_clients.
         let subs: Option<Vec<String>> = Spi::get_one_with_args(
@@ -430,7 +446,68 @@ mod tests {
         .unwrap();
         let subs = subs.unwrap();
         assert!(subs.contains(&"user:user1".to_string()));
-        assert!(subs.contains(&"global".to_string()));
+        assert_eq!(subs.len(), 1);
+    }
+
+    #[pg_test]
+    fn test_connect_includes_registered_shared_scopes() {
+        setup_test_tables();
+        register_shared_scope("catalog", true);
+
+        let first = connect_client(
+            "user1",
+            json!({
+                "client_id": "client1",
+                "platform": "ios",
+                "app_version": "1.0.0",
+                "protocol_version": 1,
+                "schema": {
+                    "version": 0,
+                    "hash": ""
+                },
+                "scope_set_version": 0,
+                "known_scopes": {}
+            }),
+        );
+
+        assert_eq!(first["scope_set_version"].as_i64(), Some(1));
+        let first_added_scopes = first["scopes"]["add"].as_array().unwrap();
+        let first_added_ids: Vec<&str> = first_added_scopes
+            .iter()
+            .filter_map(|scope| scope["id"].as_str())
+            .collect();
+        assert!(first_added_ids.contains(&"user:user1"));
+        assert!(first_added_ids.contains(&"catalog"));
+
+        register_shared_scope("runtime-only", false);
+
+        let (schema_version, schema_hash) = latest_schema_ref();
+        let second = connect_client(
+            "user1",
+            json!({
+                "client_id": "client1",
+                "platform": "ios",
+                "app_version": "1.0.0",
+                "protocol_version": 1,
+                "schema": {
+                    "version": schema_version,
+                    "hash": schema_hash
+                },
+                "scope_set_version": 1,
+                "known_scopes": {
+                    "user:user1": { "cursor": "1" },
+                    "catalog": { "cursor": "1" }
+                }
+            }),
+        );
+
+        assert_eq!(second["scope_set_version"].as_i64(), Some(2));
+        let second_added_scopes = second["scopes"]["add"].as_array().unwrap();
+        let second_added_ids: Vec<&str> = second_added_scopes
+            .iter()
+            .filter_map(|scope| scope["id"].as_str())
+            .collect();
+        assert!(second_added_ids.contains(&"runtime-only"));
     }
 
     #[pg_test]
@@ -459,14 +536,88 @@ mod tests {
         assert!(resp.get("schema_definition").is_some());
 
         let added_scopes = resp["scopes"]["add"].as_array().unwrap();
-        assert_eq!(added_scopes.len(), 2);
+        assert_eq!(added_scopes.len(), 1);
         let added_ids: Vec<&str> = added_scopes
             .iter()
             .filter_map(|scope| scope["id"].as_str())
             .collect();
         assert!(added_ids.contains(&"user:user1"));
-        assert!(added_ids.contains(&"global"));
         assert_eq!(resp["scopes"]["remove"].as_array().unwrap().len(), 0);
+    }
+
+    #[pg_test]
+    fn test_portable_seed_export_is_side_effect_free() {
+        setup_test_tables();
+        register_shared_scope("global", true);
+
+        Spi::run(
+            "INSERT INTO test_products (id, name, price)
+             VALUES ('37373737-3737-3737-3737-373737373737', 'Seed Push Up', 0)",
+        )
+        .unwrap();
+        insert_edge(
+            "test_products",
+            "37373737-3737-3737-3737-373737373737",
+            "global",
+        );
+        insert_changelog(
+            "global",
+            "test_products",
+            "37373737-3737-3737-3737-373737373737",
+            1,
+        );
+
+        let clients_before: Option<i64> =
+            Spi::get_one("SELECT count(*) FROM sync_clients").unwrap();
+        assert_eq!(clients_before, Some(0));
+
+        let manifest: Option<pgrx::JsonB> =
+            Spi::get_one("SELECT synchro_portable_seed_manifest()").unwrap();
+        let manifest = manifest.unwrap().0;
+        let scopes = manifest["portable_scopes"].as_array().unwrap();
+        assert_eq!(scopes.len(), 1);
+        assert_eq!(scopes[0]["id"].as_str(), Some("global"));
+        assert!(scopes[0]["cursor"].as_str().is_some());
+        assert!(scopes[0]["checksum"].as_str().is_some());
+
+        let page: Option<pgrx::JsonB> = Spi::get_one_with_args(
+            "SELECT synchro_portable_seed_scope($1, $2, $3)",
+            &["global".into(), "".into(), 100.into()],
+        )
+        .unwrap();
+        let page = page.unwrap().0;
+        assert_eq!(page["scope"].as_str(), Some("global"));
+        assert_eq!(page["has_more"].as_bool(), Some(false));
+        let records = page["records"].as_array().unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0]["table"].as_str(), Some("test_products"));
+        assert_eq!(
+            records[0]["record_id"].as_str(),
+            Some("37373737-3737-3737-3737-373737373737")
+        );
+        assert_eq!(records[0]["row"]["name"].as_str(), Some("Seed Push Up"));
+
+        let clients_after: Option<i64> = Spi::get_one("SELECT count(*) FROM sync_clients").unwrap();
+        assert_eq!(clients_after, Some(0));
+    }
+
+    #[pg_test]
+    fn test_portable_seed_manifest_excludes_non_portable_shared_scopes() {
+        setup_test_tables();
+        register_shared_scope("catalog", true);
+        register_shared_scope("runtime-only", false);
+
+        let manifest: Option<pgrx::JsonB> =
+            Spi::get_one("SELECT synchro_portable_seed_manifest()").unwrap();
+        let manifest = manifest.unwrap().0;
+        let scopes = manifest["portable_scopes"].as_array().unwrap();
+        let scope_ids: Vec<&str> = scopes
+            .iter()
+            .filter_map(|scope| scope["id"].as_str())
+            .collect();
+
+        assert!(scope_ids.contains(&"catalog"));
+        assert!(!scope_ids.contains(&"runtime-only"));
     }
 
     #[pg_test]
@@ -487,7 +638,6 @@ mod tests {
                 },
                 "scope_set_version": 1,
                 "known_scopes": {
-                    "global": { "cursor": "c-global" },
                     "user:user1": { "cursor": "c-user" }
                 }
             }),
@@ -719,6 +869,7 @@ mod tests {
     #[pg_test]
     fn test_rebuild_vnext_returns_final_cursor_and_checksum() {
         setup_test_tables();
+        register_shared_scope("global", true);
         connect_client(
             "user1",
             json!({
@@ -2242,7 +2393,7 @@ mod tests {
 
         // Client known_buckets matches server exactly.
         let resp: Option<pgrx::JsonB> = Spi::get_one_with_args(
-            "SELECT synchro_pull($1, $2, 0, NULL, 100, NULL, ARRAY['user:u1','global'], 0, '')",
+            "SELECT synchro_pull($1, $2, 0, NULL, 100, NULL, ARRAY['user:u1'], 0, '')",
             &["u1".into(), "c1".into()],
         )
         .unwrap();

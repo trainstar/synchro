@@ -373,7 +373,7 @@ fn synchro_rebuild_vnext(p_user_id: &str, p_request: pgrx::JsonB) -> pgrx::JsonB
 // Internal helpers
 // ---------------------------------------------------------------------------
 
-fn parse_cursor(cursor: &str) -> Option<(String, String)> {
+pub(crate) fn parse_cursor(cursor: &str) -> Option<(String, String)> {
     if cursor.is_empty() {
         return None;
     }

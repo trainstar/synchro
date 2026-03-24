@@ -5,6 +5,8 @@
 -- Reference tables: global bucket, read-only
 -- =========================================================================
 
+SELECT synchro_register_shared_scope('global', true);
+
 SELECT synchro_register_table(
     'regions',
     $$SELECT ARRAY['global'] FROM regions WHERE id = $1::uuid$$,

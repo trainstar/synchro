@@ -42,6 +42,7 @@ CREATE TABLE IF NOT EXISTS sync_clients (
     platform TEXT NOT NULL DEFAULT '',
     app_version TEXT NOT NULL DEFAULT '',
     bucket_subs TEXT[] NOT NULL DEFAULT '{}',
+    scope_set_version BIGINT NOT NULL DEFAULT 1,
     last_sync_at TIMESTAMPTZ,
     last_pull_at TIMESTAMPTZ,
     last_push_at TIMESTAMPTZ,
@@ -54,6 +55,13 @@ CREATE TABLE IF NOT EXISTS sync_clients (
 
 CREATE INDEX IF NOT EXISTS idx_sync_clients_user_id
     ON sync_clients (user_id);
+
+CREATE TABLE IF NOT EXISTS sync_shared_scopes (
+    scope_id TEXT PRIMARY KEY,
+    portable BOOLEAN NOT NULL DEFAULT false,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
 
 -- Bucket edge membership index.
 CREATE TABLE IF NOT EXISTS sync_bucket_edges (
