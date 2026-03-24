@@ -1,4 +1,4 @@
-name: Dependency Review
+name: Dependency Scan
 
 on:
   pull_request:
@@ -8,17 +8,32 @@ env:
 
 permissions:
   contents: read
+  security-events: write
 
 jobs:
-  dependency-review:
+  dependency-scan:
     runs-on: ubuntu-24.04
     permissions:
       contents: read
-      pull-requests: read
+      security-events: write
     steps:
       - uses: actions/checkout@v6.0.2
 
-      - name: Review dependency changes
-        uses: actions/dependency-review-action@v4
+      - name: Run dependency vulnerability scan
+        uses: aquasecurity/trivy-action@0.33.1
         with:
-          fail-on-severity: moderate
+          scan-type: fs
+          scan-ref: .
+          scanners: vuln
+          vuln-type: library
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          format: sarif
+          output: trivy-dependencies.sarif
+          exit-code: 1
+
+      - name: Upload dependency scan results
+        if: always()
+        uses: github/codeql-action/upload-sarif@v4
+        with:
+          sarif_file: trivy-dependencies.sarif

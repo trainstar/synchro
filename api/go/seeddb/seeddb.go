@@ -69,9 +69,9 @@ type localSchemaColumn struct {
 }
 
 type portableSeedManifest struct {
-	SchemaVersion  int64                `json:"schema_version"`
-	SchemaHash     string               `json:"schema_hash"`
-	PortableScopes []portableSeedScope  `json:"portable_scopes"`
+	SchemaVersion  int64               `json:"schema_version"`
+	SchemaHash     string              `json:"schema_hash"`
+	PortableScopes []portableSeedScope `json:"portable_scopes"`
 }
 
 type portableSeedScope struct {
