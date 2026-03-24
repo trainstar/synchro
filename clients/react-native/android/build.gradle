@@ -33,6 +33,9 @@ apply plugin: "kotlin-android"
 
 apply plugin: "com.facebook.react"
 
+def defaultSynchroVersion = "0.2.0"
+def resolvedSynchroVersion = findProperty("synchroVersion")?.toString() ?: defaultSynchroVersion
+
 android {
   namespace "com.trainstar.synchro.rn"
 
@@ -71,11 +74,12 @@ android {
 
 repositories {
   mavenLocal()
+  mavenCentral()
 }
 
 dependencies {
   implementation "com.facebook.react:react-android"
-  implementation "fit.trainstar:synchro:0.1.0"
+  implementation "fit.trainstar:synchro:${resolvedSynchroVersion}"
   implementation "org.jetbrains.kotlinx:kotlinx-serialization-json:1.6.3"
   implementation "org.jetbrains.kotlinx:kotlinx-coroutines-core:1.8.0"
   implementation "org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.0"

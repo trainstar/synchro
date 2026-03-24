@@ -15,11 +15,36 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  VERSION: ${{ github.ref_name }}
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
+  validate-metadata:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6.0.2
+
+      - uses: actions/setup-go@v6.3.0
+        with:
+          go-version-file: api/go/go.mod
+          cache-dependency-path: api/go/go.sum
+
+      - uses: actions/setup-node@v6.3.0
+        with:
+          node-version: '22'
+
+      - name: Validate release metadata alignment
+        run: |
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            make version-check EXPECTED_TAG="${GITHUB_REF_NAME}"
+          else
+            make version-check
+          fi
+
+      - name: Validate React Native package packing
+        run: make release-npm-dry-run
+
   validate-quality:
+    needs: validate-metadata
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v6.0.2
@@ -90,6 +115,7 @@ jobs:
         run: make test-rn-unit
 
   linux-pgrx-runtime:
+    needs: validate-metadata
     runs-on: ubuntu-24.04
     steps:
       - uses: dtolnay/rust-toolchain@stable
@@ -151,7 +177,7 @@ jobs:
 
   validate-server:
     runs-on: ubuntu-24.04
-    needs: linux-pgrx-runtime
+    needs: [validate-metadata, linux-pgrx-runtime]
     steps:
       - uses: actions/checkout@v6.0.2
 
@@ -226,6 +252,7 @@ jobs:
         run: make test-adapter
 
   validate-swift:
+    needs: validate-metadata
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v6.0.2
@@ -278,10 +305,20 @@ jobs:
             cargo pgrx init --pg18 download
           fi
 
+      - name: Ensure CocoaPods is available
+        run: |
+          if ! command -v pod >/dev/null 2>&1; then
+            sudo gem install cocoapods
+          fi
+
+      - name: Validate Apple package metadata
+        run: make release-pods-check
+
       - name: Validate Swift SDK
         run: make test-swift
 
   validate-rn-ios:
+    needs: validate-metadata
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v6.0.2
@@ -386,7 +423,7 @@ jobs:
 
   validate-kotlin:
     runs-on: ubuntu-24.04
-    needs: linux-pgrx-runtime
+    needs: [validate-metadata, linux-pgrx-runtime]
     env:
       ANDROID_HOME: /usr/local/lib/android/sdk
       ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
@@ -485,7 +522,7 @@ jobs:
 
   validate-rn-android:
     runs-on: ubuntu-24.04
-    needs: linux-pgrx-runtime
+    needs: [validate-metadata, linux-pgrx-runtime]
     env:
       ANDROID_HOME: /usr/local/lib/android/sdk
       ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
@@ -651,6 +688,7 @@ jobs:
           script: make test-rn-e2e-android-run
 
   validate-docs:
+    needs: validate-metadata
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v6.0.2
@@ -718,7 +756,7 @@ jobs:
         with:
           go-version-file: api/go/go.mod
 
-      - name: Build synchrod-pg binary
+      - name: Build Go release binaries
         env:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
@@ -727,11 +765,14 @@ jobs:
           mkdir -p dist
           cd api/go
           GOWORK=off go build -ldflags="-s -w" -o "../../dist/synchrod-pg-${{ matrix.goos }}-${{ matrix.goarch }}" ./cmd/synchrod-pg
+          GOWORK=off go build -ldflags="-s -w" -o "../../dist/synchro-seed-${{ matrix.goos }}-${{ matrix.goarch }}" ./cmd/synchro-seed
 
       - uses: actions/upload-artifact@v7.0.0
         with:
-          name: synchrod-pg-${{ matrix.goos }}-${{ matrix.goarch }}
-          path: dist/synchrod-pg-${{ matrix.goos }}-${{ matrix.goarch }}
+          name: go-binaries-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: |
+            dist/synchrod-pg-${{ matrix.goos }}-${{ matrix.goarch }}
+            dist/synchro-seed-${{ matrix.goos }}-${{ matrix.goarch }}
 
   package-extension:
     needs: validate-server
@@ -839,7 +880,7 @@ jobs:
           ORG_GRADLE_PROJECT_mavenCentralPassword: ${{ secrets.MAVEN_CENTRAL_PASSWORD }}
           ORG_GRADLE_PROJECT_signingInMemoryKey: ${{ secrets.GPG_PRIVATE_KEY }}
           ORG_GRADLE_PROJECT_signingInMemoryKeyPassword: ${{ secrets.GPG_PASSPHRASE }}
-        run: ./gradlew publishAndReleaseToMavenCentral -Pversion="${VERSION#v}"
+        run: ./gradlew publishAndReleaseToMavenCentral
 
   publish-npm:
     needs: [validate-rn-ios, validate-rn-android, release-gates]
@@ -877,9 +918,7 @@ jobs:
         working-directory: clients/react-native
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-        run: |
-          npm version "${VERSION#v}" --no-git-tag-version
-          npm publish --access public --provenance
+        run: npm publish --access public --provenance
 
   create-release:
     needs: [build-adapter-binaries, package-extension]

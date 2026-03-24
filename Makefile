@@ -1,5 +1,9 @@
 .PHONY: \
 	help \
+	version-print \
+	version-check \
+	version-sync \
+	set-version \
 	build \
 	build-seed \
 	build-check \
@@ -36,9 +40,11 @@
 	synchrod-pg-test-start \
 	synchrod-pg-test-stop \
 	synchrod-pg-test-restart \
+	release-pods-check \
 	release-check \
 	release-kotlin-local \
 	release-npm-dry-run \
+	local-consumer-artifacts \
 	clean
 
 ANDROID_HOME ?= /opt/homebrew/share/android-commandlinetools
@@ -82,6 +88,8 @@ SYNCHROD_PG_LOG_FILE ?= .synchrod-pg-test.log
 BINARY ?= bin/synchrod-pg
 SEED_BINARY ?= bin/synchro-seed
 GRADLE_TEST_ARGS ?= --rerun-tasks
+LOCAL_CONSUMER_DIR ?= $(CURDIR)/dist/local-consumer
+CURRENT_VERSION := $(shell cat VERSION 2>/dev/null)
 
 TEST_ENV = \
 	TEST_DATABASE_URL="$(ADAPTER_TEST_URL)" \
@@ -91,6 +99,10 @@ TEST_ENV = \
 
 help:
 	@echo "Available targets:"
+	@echo "  version-print         - Print the canonical repo version from VERSION"
+	@echo "  version-check         - Verify every public release surface matches VERSION"
+	@echo "  version-sync          - Sync versioned metadata from VERSION"
+	@echo "  set-version           - Set VERSION=X.Y.Z and sync public metadata"
 	@echo "  build                 - Build the synchrod-pg adapter binary"
 	@echo "  build-seed            - Build the seed database generator binary"
 	@echo "  build-check           - Build the Go adapter module"
@@ -118,10 +130,25 @@ help:
 	@echo "  synchrod-pg-test-start   - Start the extension-backed test adapter"
 	@echo "  synchrod-pg-test-stop    - Stop the extension-backed test adapter"
 	@echo "  synchrod-pg-test-restart - Restart the extension-backed test adapter"
+	@echo "  release-pods-check    - Validate Apple package metadata surfaces"
 	@echo "  release-check         - Run the full release validation matrix"
 	@echo "  release-kotlin-local  - Publish Kotlin SDK to mavenLocal"
 	@echo "  release-npm-dry-run   - Dry-run npm pack for the React Native package"
+	@echo "  local-consumer-artifacts - Build local-consumer artifacts for RN, Kotlin, and Apple"
 	@echo "  clean                 - Remove local build and server artifacts"
+
+version-print:
+	@cd api/go && GOWORK=off go run ./cmd/synchro-version print
+
+version-check:
+	@cd api/go && GOWORK=off go run ./cmd/synchro-version check $(if $(EXPECTED_TAG),--expected-tag "$(EXPECTED_TAG)")
+
+version-sync:
+	@cd api/go && GOWORK=off go run ./cmd/synchro-version sync
+
+set-version:
+	@test -n "$(VERSION)" || (echo "Provide VERSION=X.Y.Z"; exit 1)
+	cd api/go && GOWORK=off go run ./cmd/synchro-version set "$(VERSION)"
 
 build:
 	@mkdir -p "$(dir $(BINARY))"
@@ -218,17 +245,36 @@ test-rn-e2e-android: test-rn-e2e-android-build test-rn-e2e-android-run
 
 test-rn: test-rn-e2e-ios test-rn-e2e-android
 
-release-check: lint-go lint-rust-core lint-rn test-rust-core test-rust-pg test-adapter test-swift test-kotlin test-rn docs-build
+release-pods-check: version-check
+	@command -v pod >/dev/null 2>&1 || (echo "CocoaPods CLI is required for release-pods-check."; exit 1)
+	pod ipc spec Synchro.podspec >/dev/null
+	swift package dump-package >/dev/null
+	@echo "Apple package metadata validated."
+
+release-check: version-check release-pods-check build build-seed build-check release-kotlin-local release-npm-dry-run lint-go lint-rust-core lint-rn test-rust-core test-rust-pg test-adapter test-swift test-kotlin test-rn docs-build
 	@echo "Release validation passed."
 
-release-kotlin-local:
+release-kotlin-local: version-check
 	@test -n "$(ANDROID_JAVA_HOME)" || (echo "Android builds require JDK 17. Set ANDROID_JAVA_HOME to a JDK 17 install."; exit 1)
 	@test -d "$(ANDROID_HOME)" || (echo "Android SDK not found at $(ANDROID_HOME). Set ANDROID_HOME to a valid SDK install."; exit 1)
 	cd clients/kotlin && ANDROID_HOME="$(ANDROID_HOME)" ANDROID_SDK_ROOT="$(ANDROID_HOME)" JAVA_HOME="$(ANDROID_JAVA_HOME)" PATH="$(ANDROID_JAVA_HOME)/bin:$$PATH" ./gradlew :synchro:publishToMavenLocal
 	@echo "Published to mavenLocal."
 
-release-npm-dry-run:
+release-npm-dry-run: version-check
+	cd clients/react-native && corepack enable
+	cd clients/react-native && yarn install --immutable
 	cd clients/react-native && npm pack --dry-run
+
+local-consumer-artifacts: version-check release-pods-check release-kotlin-local
+	@mkdir -p "$(LOCAL_CONSUMER_DIR)"
+	@TARBALL=$$(cd clients/react-native && corepack enable >/dev/null 2>&1 && yarn install --immutable >/dev/null && npm pack --silent --pack-destination "$(LOCAL_CONSUMER_DIR)"); \
+		echo "Local consumer artifacts ready for Synchro $(CURRENT_VERSION)"; \
+		echo "React Native tarball: $(LOCAL_CONSUMER_DIR)/$$TARBALL"; \
+		echo "Kotlin SDK: published to mavenLocal() at fit.trainstar:synchro:$(CURRENT_VERSION)"; \
+		echo "Native Apple local path: $(CURDIR)"; \
+		echo "React Native iOS Podfile entry: pod 'Synchro', :path => '$(CURDIR)'"; \
+		echo "Android repository order: mavenLocal(), then mavenCentral()"; \
+		echo "If a consumer overrides the native Android SDK version, set synchroVersion=$(CURRENT_VERSION)"
 
 ext-build:
 	cd extensions/synchro-pg && cargo build

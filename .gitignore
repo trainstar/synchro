@@ -37,6 +37,9 @@ clients/kotlin/local.properties
 # React Native artifacts
 clients/react-native/example/artifacts/
 
+# Local consumer artifacts
+dist/
+
 # Docs build output
 docs/node_modules/
 docs/dist/
