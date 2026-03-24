@@ -1,0 +1,66 @@
+---
+title: Client Consumption
+description: Supported local and published installation paths for Swift, Kotlin, and React Native consumers.
+---
+
+Synchro supports two consumption modes:
+
+- local, for pre-release integration in another repo
+- published, for tagged or registry-backed releases
+
+Consumers should switch dependency source only. Package identity and runtime behavior should stay the same.
+
+## Local and published matrix
+
+| Surface | Local development | Published release |
+| --- | --- | --- |
+| Native Apple SDK | local SPM package path to the repo root | tagged SPM release from the repo root |
+| Apple pod surface | `pod 'Synchro', :path => '/absolute/path/to/synchro'` | `pod 'Synchro', :git => 'https://github.com/trainstar/synchro.git', :tag => 'v<version>'` |
+| Kotlin SDK | `mavenLocal()`, then `mavenCentral()` | Maven Central |
+| React Native package | local packed `.tgz` from `make local-consumer-artifacts` | npm |
+| RN iOS native dependency | local pod path to the repo root `Synchro.podspec` | tagged git pod `v<version>` |
+| RN Android native dependency | `mavenLocal()`, then `mavenCentral()`, optional `synchroVersion=<version>` override | Maven Central |
+
+## Supported local-consumer workflow
+
+Prepare local-consumer artifacts with:
+
+```bash
+make local-consumer-artifacts
+```
+
+That flow:
+
+- checks repo version alignment first
+- packs the React Native bridge into `dist/local-consumer/`
+- publishes the Kotlin SDK to `mavenLocal()`
+- validates the Apple local-consumer surfaces from the repo root
+
+This is the supported pre-release integration path. Raw sibling-source linking may still work, but it is not the documented primary contract.
+
+## Versioning
+
+The repo uses one canonical release version from the root `VERSION` file.
+
+Use:
+
+- `make version-check` to verify metadata alignment
+- `make version-sync` to rewrite versioned surfaces from `VERSION`
+- `make set-version VERSION=X.Y.Z` to update the canonical repo version
+
+## React Native on iOS
+
+The current React Native iOS integration requires the consuming app to add the native Apple SDK and GRDB in its Podfile.
+
+```ruby
+pod 'Synchro', :git => 'https://github.com/trainstar/synchro.git', :tag => 'v<version>'
+pod 'GRDB.swift', :git => 'https://github.com/groue/GRDB.swift.git', :tag => 'v7.0.0'
+```
+
+That requirement applies in both local and published consumption modes until the bridge dependency story is simplified further.
+
+## Read next
+
+- [Client SDKs](/synchro/clients/overview/)
+- [Portable seeds](/synchro/architecture/portable-seeds/)
+- [Quickstart](/synchro/getting-started/quickstart/)

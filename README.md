@@ -2,24 +2,23 @@
   <img src="docs/public/logo.svg" alt="Synchro" width="320">
 </p>
 
-<p align="center">
-  <a href="https://github.com/trainstar/synchro/actions/workflows/ci.yml">
-    <img src="https://github.com/trainstar/synchro/actions/workflows/ci.yml/badge.svg?branch=dev" alt="CI">
-  </a>
-  <a href="https://github.com/trainstar/synchro/actions/workflows/codeql.yml">
-    <img src="https://github.com/trainstar/synchro/actions/workflows/codeql.yml/badge.svg?branch=dev" alt="CodeQL">
-  </a>
-  <a href="https://github.com/trainstar/synchro/actions/workflows/dependency-review.yml">
-    <img src="https://github.com/trainstar/synchro/actions/workflows/dependency-review.yml/badge.svg?branch=dev" alt="Dependency Scan">
-  </a>
-  <a href="https://github.com/trainstar/synchro/actions/workflows/docs.yml">
-    <img src="https://github.com/trainstar/synchro/actions/workflows/docs.yml/badge.svg?branch=dev" alt="Docs">
-  </a>
-</p>
+<p align="center"><img src="https://github.com/trainstar/synchro/actions/workflows/ci.yml/badge.svg?branch=dev" alt="CI">&nbsp;<img src="https://github.com/trainstar/synchro/actions/workflows/codeql.yml/badge.svg?branch=dev" alt="CodeQL">&nbsp;<img src="https://github.com/trainstar/synchro/actions/workflows/dependency-review.yml/badge.svg?branch=dev" alt="Dependency Scan">&nbsp;<img src="https://github.com/trainstar/synchro/actions/workflows/docs.yml/badge.svg?branch=dev" alt="Docs"></p>
 
 # Synchro
 
 Synchro is an offline-first sync system for native apps using local SQLite, a PostgreSQL extension, and a thin HTTP adapter.
+
+It is built for teams that want SQLite-first clients, deterministic selective sync, and a server implementation that stays close to PostgreSQL instead of recreating sync semantics in application code.
+
+## Why Synchro
+
+- local SQLite is the product center, not a cache afterthought
+- sync semantics live in Rust and PostgreSQL, close to the data and WAL
+- the HTTP adapter stays thin and transport-focused
+- Swift and Kotlin are the real client engines, React Native is a bridge over them
+- portable seed generation gives apps a real warm-start path instead of a schema-only bootstrap
+
+## Architecture
 
 The current release architecture is:
 
@@ -30,16 +29,26 @@ The current release architecture is:
 - `clients/kotlin`: native Android SDK
 - `clients/react-native`: thin React Native bridge over the native SDKs
 
-## Status
+## Scope model
 
-The current release contract is documented, implemented, and validated for the current supported surface:
+The README should only give the mental model:
+
+- private data belongs in private scopes
+- shared data belongs in shared runtime scopes
+- bundled seeds export those same shared runtime scopes, not seed-only copies
+
+Detailed scope design guidance lives in the [Scope modeling](https://trainstar.github.io/synchro/architecture/scope-modeling/) guide. The normative architectural rules live in the [Principles](https://trainstar.github.io/synchro/spec/00-principles/) spec.
+
+## Current support
+
+The current supported release surface is:
 
 - PostgreSQL 18
 - Swift on iOS 16+ and macOS 13+
 - Kotlin on Android API 24+
 - React Native bridge over the native SDKs
 
-The validated test matrix for the current release scope is:
+The validated test matrix for that surface is:
 
 - `make test-rust-core`
 - `make test-rust-pg`
@@ -50,75 +59,30 @@ The validated test matrix for the current release scope is:
 
 ## Documentation
 
-- Docs site: `https://trainstar.github.io/synchro`
-- Published release spec: `https://trainstar.github.io/synchro/spec/00-principles/`
+- [Docs site](https://trainstar.github.io/synchro)
+- [Welcome](https://trainstar.github.io/synchro/)
+- [Architecture overview](https://trainstar.github.io/synchro/architecture/overview/)
+- [Scope modeling](https://trainstar.github.io/synchro/architecture/scope-modeling/)
+- [Portable seeds](https://trainstar.github.io/synchro/architecture/portable-seeds/)
+- [Auth integration](https://trainstar.github.io/synchro/architecture/auth-integration/)
+- [Client integration overview](https://trainstar.github.io/synchro/clients/overview/)
+- [Client consumption](https://trainstar.github.io/synchro/clients/consumption/)
+- [Quickstart](https://trainstar.github.io/synchro/getting-started/quickstart/)
+- [Published release spec](https://trainstar.github.io/synchro/spec/00-principles/)
 - Docs source: [docs/src/content/docs/spec/00-principles.mdx](/Users/mdspinali/Documents/projects/trainstar/repos/synchro/docs/src/content/docs/spec/00-principles.mdx)
 - Shared conformance fixtures: [conformance/README.md](/Users/mdspinali/Documents/projects/trainstar/repos/synchro/conformance/README.md)
 
-## Scope Design Guidelines
+## Quickstart
 
-Use scopes to keep server-side fanout low.
-
-Recommended modeling rules:
-
-- private data belongs in private scopes such as `documents_user:{user_id}`
-- shared or public data belongs in shared scopes such as `templates_public`
-- the same local SQLite table may be populated from both shared and private scopes
-- do not create seed-only scopes, bundled seeds should export the same shared runtime scopes clients continue syncing after login
-
-Example:
-
-- public templates that every user should see: `templates_public`
-- user-created templates for one user: `templates_user:{user_id}`
-
-Do not copy the public templates into every user scope.
-
-That would make one public-row update touch every user scope. The better design is one shared scope with many subscribers. High scope count is acceptable. High row-change fanout is the real scaling problem.
-
-Use one shared `global` scope only when the bundled public datasets are small, change together, and do not need independent rebuild or observability boundaries.
-
-Split public data into multiple shared scopes when:
-
-- one dataset is materially larger than the others
-- it changes at a different rate
-- it may need independent rebuild
-- some clients may later subscribe to one shared dataset but not another
-
-## Adapter Auth Modes
-
-`api/go` supports two auth integration modes for authenticated sync routes:
-
-- trusted upstream auth via `UserIDResolver`, recommended when Synchro is mounted behind an existing API router that already validates identity and resolves the internal user UUID
-- direct JWT validation in the adapter via `JWTSecret` or `JWKSURL`
-
-For Trainstar-style integration, the best practice is trusted upstream auth:
-
-1. the main API validates the WorkOS bearer token
-2. the main API resolves the Trainstar internal user UUID
-3. Synchro receives that canonical internal user UUID through a trusted resolver
-4. the PostgreSQL extension sets `app.user_id` and runs DB-side policy and sync logic
-
-## Quick Start
-
-### 1. Run the Rust core tests
+### 1. Validate the core release surface
 
 ```bash
 make test-rust-core
-```
-
-### 2. Validate the PostgreSQL extension on PG 18
-
-```bash
 make test-rust-pg
-```
-
-### 3. Validate the Go adapter against the extension-backed test database
-
-```bash
 make test-adapter
 ```
 
-### 4. Validate the native SDKs and React Native bridge
+### 2. Validate the native SDKs and React Native bridge
 
 ```bash
 make test-swift
@@ -126,17 +90,15 @@ make test-kotlin
 make test-rn
 ```
 
-### 5. Start the local extension-backed adapter for manual work
+### 3. Start the extension-backed adapter locally
 
 ```bash
 make synchrod-pg-test-start
 ```
 
-The test adapter listens on `http://localhost:8081` by default.
+The default test adapter listens on `http://localhost:8081`.
 
-### 6. Generate a preinitialized seed database
-
-Use the canonical PostgreSQL schema manifest and portable-scope export to build a client-compatible SQLite seed:
+### 4. Generate a preinitialized seed database
 
 ```bash
 cd api/go
@@ -145,17 +107,18 @@ GOWORK=off go run ./cmd/synchro-seed \
   --output ./build/seed.db
 ```
 
-This generator creates:
+This generator creates a client-compatible SQLite seed from the canonical PostgreSQL schema manifest plus any explicitly declared portable scopes. If no portable scopes are configured, it falls back to a schema-only seed.
 
-- the current synced-table SQLite schema
-- the local CDC triggers the native SDKs expect
-- any server-declared portable or public scope data
-- portable scope continuation metadata in `_synchro_scopes`, `_synchro_scope_rows`, and compatibility checkpoint tables
-- `_synchro_meta` entries for `schema_version`, `schema_hash`, `local_schema`, `scope_set_version`, `known_buckets`, and `snapshot_complete`
+See the [portable seeds guide](https://trainstar.github.io/synchro/architecture/portable-seeds/) for the full contract.
 
-If no portable scopes are declared on the server, the generator falls back to a schema-only seed.
+## Auth integration
 
-Use it when you want a warm-start database artifact for app bundling or installation-time copying. Clients open the seed, log in normally, and continue sync from that seeded state. The seed is not a different sync mode, and the generator does not require JWT input.
+The adapter supports two integration modes for protected sync routes:
+
+- trusted upstream auth, recommended when Synchro is mounted behind an existing product API
+- direct JWT validation inside the adapter
+
+For hosted product APIs, trusted upstream auth is the better default. See the [auth integration guide](https://trainstar.github.io/synchro/architecture/auth-integration/) for the decision framework and wiring model.
 
 ## Repository Layout
 
@@ -170,9 +133,9 @@ docs/                   Published docs site
 conformance/            Shared protocol and scenario fixtures
 ```
 
-## Release Surfaces
+## Public release surfaces
 
-The intended public release surfaces are:
+Synchro currently publishes or intends to publish these consumer surfaces:
 
 - PostgreSQL extension for PG 18
 - `synchrod-pg` adapter binary from `api/go/cmd/synchrod-pg`
@@ -182,7 +145,7 @@ The intended public release surfaces are:
 - Kotlin package from `clients/kotlin/synchro`
 - React Native package from `clients/react-native`
 
-## Dependency Source Matrix
+## Local and published consumption
 
 Supported consumers should switch dependency source only. Package identity and runtime behavior stay the same.
 
@@ -195,11 +158,15 @@ Supported consumers should switch dependency source only. Package identity and r
 | RN iOS native dependency | local pod path to the repo root `Synchro.podspec` | tagged git pod `v<version>` |
 | RN Android native dependency | `mavenLocal()`, then `mavenCentral()`, optional `synchroVersion=<version>` override | Maven Central |
 
-Use `make local-consumer-artifacts` to prepare the supported local-consumer artifacts:
+Use `make local-consumer-artifacts` to prepare the supported local-consumer flow:
 
 - a packed React Native tarball in `dist/local-consumer/`
 - the Kotlin SDK published to `mavenLocal()`
 - validated Apple local-consumer surfaces from the repo root
+
+The full installation matrix lives in the [client consumption guide](https://trainstar.github.io/synchro/clients/consumption/).
+
+## React Native iOS note
 
 React Native on iOS currently depends on the native Apple SDK and GRDB being added in the consuming app's Podfile. That installation requirement is part of the current public contract in both local and published modes.
 

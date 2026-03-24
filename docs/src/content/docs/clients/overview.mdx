@@ -38,20 +38,11 @@ It does not own:
 - Kotlin is released from `clients/kotlin/synchro`
 - React Native is released from `clients/react-native`
 
-## Local and published consumption
+## Client guides
 
-Supported consumers should switch dependency source only. Package identity and runtime behavior stay the same.
-
-| Surface | Local development | Published release |
-| --- | --- | --- |
-| Native Apple SDK | local SPM package path to the repo root | tagged SPM release from the repo root |
-| Apple pod surface | `pod 'Synchro', :path => '/absolute/path/to/synchro'` | `pod 'Synchro', :git => 'https://github.com/trainstar/synchro.git', :tag => 'v<version>'` |
-| Kotlin SDK | `mavenLocal()`, then `mavenCentral()` | Maven Central |
-| React Native package | local packed `.tgz` from `make local-consumer-artifacts` | npm |
-| RN iOS native dependency | local pod path to the repo root `Synchro.podspec` | tagged git pod `v<version>` |
-| RN Android native dependency | `mavenLocal()`, then `mavenCentral()`, optional `synchroVersion=<version>` override | Maven Central |
-
-Use `make local-consumer-artifacts` to prepare the supported local-consumer flow.
+- [Client consumption](/synchro/clients/consumption/)
+- [Portable seeds](/synchro/architecture/portable-seeds/)
+- [Client contract](/synchro/spec/02-client-contract/)
 
 ## Seeded database support
 
@@ -75,7 +66,7 @@ Current seed rules:
 - the first authenticated sync continues from the seeded continuation metadata instead of wiping the DB
 - auth-scoped user data still arrives through normal sync after login
 
-### React Native on iOS
+## React Native on iOS
 
 The current iOS integration requires the consuming app to add the native Synchro dependency and GRDB in its Podfile. This is part of the current public installation contract until the CocoaPods dependency story is simplified further.
 
@@ -88,6 +79,7 @@ pod 'GRDB.swift', :git => 'https://github.com/groue/GRDB.swift.git', :tag => 'v7
 
 The SDK contract is defined in:
 
+- [Client consumption](/synchro/clients/consumption/)
 - [Client Contract](/synchro/spec/02-client-contract/)
 - [State Machines](/synchro/spec/03-state-machines/)
 - [Schema Evolution](/synchro/spec/05-schema-evolution/)
