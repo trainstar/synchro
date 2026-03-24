@@ -272,7 +272,6 @@ fn portable_shared_scope_exists(client: &SpiClient<'_>, scope_id: &str) -> bool 
             &[scope_id.into()],
         )
         .unwrap_or_else(|err| pgrx::error!("checking portable shared scope existence: {}", err))
-        .into_iter()
         .next()
         .and_then(|row| row.get_by_name::<bool, &str>("exists").unwrap_or(None))
         .unwrap_or(false)
