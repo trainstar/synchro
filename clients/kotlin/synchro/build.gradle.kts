@@ -50,7 +50,7 @@ mavenPublishing {
         signAllPublications()
     }
 
-    coordinates("fit.trainstar", "synchro", project.findProperty("version")?.toString() ?: "0.1.0")
+    coordinates("fit.trainstar", "synchro", project.version.toString())
 
     pom {
         name.set("Synchro")

@@ -163,11 +163,30 @@ The intended public release surfaces are:
 - Kotlin package from `clients/kotlin/synchro`
 - React Native package from `clients/react-native`
 
-React Native on iOS currently depends on the native Apple SDK and GRDB being added in the consuming app's Podfile. That installation requirement is part of the current public contract.
+## Dependency Source Matrix
+
+Supported consumers should switch dependency source only. Package identity and runtime behavior stay the same.
+
+| Surface | Local development | Published release |
+| --- | --- | --- |
+| Native Apple SDK | local SPM package path to the repo root | tagged SPM release from the repo root |
+| Apple pod surface | `pod 'Synchro', :path => '/absolute/path/to/synchro'` | `pod 'Synchro', :git => 'https://github.com/trainstar/synchro.git', :tag => 'v<version>'` |
+| Kotlin SDK | `mavenLocal()`, then `mavenCentral()` | Maven Central |
+| React Native package | local packed `.tgz` from `make local-consumer-artifacts` | npm |
+| RN iOS native dependency | local pod path to the repo root `Synchro.podspec` | tagged git pod `v<version>` |
+| RN Android native dependency | `mavenLocal()`, then `mavenCentral()`, optional `synchroVersion=<version>` override | Maven Central |
+
+Use `make local-consumer-artifacts` to prepare the supported local-consumer artifacts:
+
+- a packed React Native tarball in `dist/local-consumer/`
+- the Kotlin SDK published to `mavenLocal()`
+- validated Apple local-consumer surfaces from the repo root
+
+React Native on iOS currently depends on the native Apple SDK and GRDB being added in the consuming app's Podfile. That installation requirement is part of the current public contract in both local and published modes.
 
 Example Podfile entries:
 
 ```ruby
-pod 'Synchro', :git => 'https://github.com/trainstar/synchro.git', :tag => 'v0.2.0'
+pod 'Synchro', :git => 'https://github.com/trainstar/synchro.git', :tag => 'v<version>'
 pod 'GRDB.swift', :git => 'https://github.com/groue/GRDB.swift.git', :tag => 'v7.0.0'
 ```

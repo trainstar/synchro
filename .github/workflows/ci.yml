@@ -19,7 +19,28 @@ permissions:
   contents: read
 
 jobs:
+  metadata:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6.0.2
+
+      - uses: actions/setup-go@v6.3.0
+        with:
+          go-version-file: api/go/go.mod
+          cache-dependency-path: api/go/go.sum
+
+      - uses: actions/setup-node@v6.3.0
+        with:
+          node-version: '22'
+
+      - name: Validate release metadata alignment
+        run: make version-check
+
+      - name: Validate React Native package packing
+        run: make release-npm-dry-run
+
   linux-pgrx-runtime:
+    needs: metadata
     runs-on: ubuntu-24.04
     steps:
       - uses: dtolnay/rust-toolchain@stable
@@ -80,6 +101,7 @@ jobs:
           compression-level: 0
 
   quality:
+    needs: metadata
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v6.0.2
@@ -150,6 +172,7 @@ jobs:
         run: make test-rn-unit
 
   docs:
+    needs: metadata
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v6.0.2
@@ -165,7 +188,7 @@ jobs:
 
   server:
     runs-on: ubuntu-24.04
-    needs: linux-pgrx-runtime
+    needs: [metadata, linux-pgrx-runtime]
     steps:
       - uses: actions/checkout@v6.0.2
 
@@ -240,6 +263,7 @@ jobs:
         run: make test-adapter
 
   swift-sdk:
+    needs: metadata
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v6.0.2
@@ -289,12 +313,21 @@ jobs:
             cargo pgrx init --pg18 "$(brew --prefix postgresql@18)/bin/pg_config"
           fi
 
+      - name: Ensure CocoaPods is available
+        run: |
+          if ! command -v pod >/dev/null 2>&1; then
+            sudo gem install cocoapods
+          fi
+
+      - name: Validate Apple package metadata
+        run: make release-pods-check
+
       - name: Run Swift integration tests
         run: make test-swift
 
   kotlin-sdk:
     runs-on: ubuntu-24.04
-    needs: linux-pgrx-runtime
+    needs: [metadata, linux-pgrx-runtime]
     env:
       ANDROID_HOME: /usr/local/lib/android/sdk
       ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
@@ -393,7 +426,7 @@ jobs:
 
   rn-android:
     runs-on: ubuntu-24.04
-    needs: linux-pgrx-runtime
+    needs: [metadata, linux-pgrx-runtime]
     env:
       ANDROID_HOME: /usr/local/lib/android/sdk
       ANDROID_SDK_ROOT: /usr/local/lib/android/sdk

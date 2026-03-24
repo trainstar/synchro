@@ -2482,7 +2482,7 @@ PODS:
     - ReactCommon/turbomodule/bridging
     - ReactCommon/turbomodule/core
     - SocketRocket
-    - Synchro (~> 0.2)
+    - Synchro (= 0.2.0)
     - Yoga
   - Yoga (0.0.0)
 
@@ -2823,7 +2823,7 @@ SPEC CHECKSUMS:
   ReactCommon: c6cd81778336e767e27fe63c6707dd6b735fff5c
   SocketRocket: d4aabe649be1e368d1318fdf28a022d714d65748
   Synchro: be3588c2318ab89938a2ee539c9f7c679284bc42
-  SynchroReactNative: 8d21d7f8566e22e06188bb99d6ff1a7594cd5ac3
+  SynchroReactNative: 294317b5663afae2be232142b685e5203d7386f1
   Yoga: 7a9f26c70daf0b08d82ec2f862e9a8872442129e
 
 PODFILE CHECKSUM: e0ef9b9dbc9d5667d968f38d96dad894fb21611f
