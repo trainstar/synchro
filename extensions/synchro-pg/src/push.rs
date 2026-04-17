@@ -362,7 +362,7 @@ fn process_record(
         _ => serde_json::json!({}),
     };
 
-    // Strip protected columns (pk, timestamps, created_at) and exclude_columns.
+    // Strip protected and non-synced columns before policy hooks run.
     strip_protected_columns(&mut data, table_reg);
 
     // Call write_protect function if it exists.
@@ -377,8 +377,11 @@ fn process_record(
         }
     }
 
-    // Load the actual column set from pg_catalog to validate client-supplied column names.
-    let valid_columns = get_table_columns(client, table_name);
+    let valid_columns = table_reg
+        .sync_columns
+        .iter()
+        .cloned()
+        .collect::<std::collections::HashSet<_>>();
 
     // Parse client timestamps for conflict resolution.
     let timestamps = WriteTimestamps {
@@ -1020,10 +1023,11 @@ fn load_existing_record(
     };
 
     let sql = format!(
-        "SELECT {} AS updated_at, {} AS deleted_at, row_to_json(t)::text AS data \
+        "SELECT {} AS updated_at, {} AS deleted_at, ({})::text AS data \
          FROM {} t WHERE {} = $1::{}",
         updated_at_expr,
         deleted_at_expr,
+        crate::pull::synced_row_projection_sql(table_reg, "t"),
         pg_quote_ident(&table_reg.table_name),
         pg_quote_ident(&table_reg.pk_column),
         table_reg.pk_type,
@@ -1052,38 +1056,12 @@ fn load_existing_record(
     }
 }
 
-/// Load the actual column names for a table.
-/// Uses SELECT * LIMIT 0 to get column names from the result descriptor,
-/// which avoids catalog cache visibility issues in nested SPI connections.
-fn get_table_columns(
-    client: &SpiClient<'_>,
-    table_name: &str,
-) -> std::collections::HashSet<String> {
-    let describe_sql = format!(
-        "SELECT * FROM {} LIMIT 0",
-        crate::pull::pg_quote_ident(table_name)
-    );
-    let tup_table = match client.select(&describe_sql, None, &[]) {
-        Ok(t) => t,
-        Err(e) => pgrx::error!("introspecting table columns: {}", e),
-    };
-
-    let mut cols = std::collections::HashSet::new();
-    let ncols = tup_table.columns().unwrap_or(0);
-    for i in 1..=ncols {
-        if let Ok(name) = tup_table.column_name(i) {
-            cols.insert(name);
-        }
-    }
-    cols
-}
-
 fn get_required_insert_columns(
     client: &SpiClient<'_>,
     table_reg: &TableRegistration,
 ) -> std::collections::HashSet<String> {
     let tup_table = match client.select(
-        "SELECT a.attname
+        "SELECT a.attname::text AS attname
          FROM pg_catalog.pg_attribute a
          JOIN pg_catalog.pg_class c ON c.oid = a.attrelid
          JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
@@ -1102,10 +1080,17 @@ fn get_required_insert_columns(
         Err(e) => pgrx::error!("loading required insert columns: {}", e),
     };
 
+    let sync_columns: std::collections::HashSet<&str> = table_reg
+        .sync_columns
+        .iter()
+        .map(|column| column.as_str())
+        .collect();
     let mut required = std::collections::HashSet::new();
     for row in tup_table {
         if let Ok(Some(column_name)) = row.get_by_name::<String, &str>("attname") {
-            required.insert(column_name);
+            if sync_columns.contains(column_name.as_str()) {
+                required.insert(column_name);
+            }
         }
     }
 
@@ -1117,15 +1102,12 @@ fn get_required_insert_columns(
         required.remove(&table_reg.deleted_at_col);
     }
     required.remove("created_at");
-    for column in &table_reg.exclude_columns {
-        required.remove(column);
-    }
 
     required
 }
 
-/// Get allowed columns: client data keys that are real table columns,
-/// minus protected columns (pk, timestamps, created_at) and exclude_columns.
+/// Get allowed columns: client data keys that are part of the synced shape,
+/// minus protected columns (pk, timestamps, created_at).
 fn allowed_columns(
     data: &serde_json::Value,
     table_reg: &TableRegistration,
@@ -1144,27 +1126,27 @@ fn allowed_columns(
     if table_reg.has_deleted_at {
         protected.insert(table_reg.deleted_at_col.as_str());
     }
-    // Protect created_at by convention (server-authoritative).
+    // Protect created_at by convention.
     protected.insert("created_at");
-
-    let excluded: std::collections::HashSet<&str> = table_reg
-        .exclude_columns
-        .iter()
-        .map(|s| s.as_str())
-        .collect();
 
     obj.keys()
         .filter(|k| {
             let k_str = k.as_str();
-            valid_columns.contains(k_str) && !protected.contains(k_str) && !excluded.contains(k_str)
+            valid_columns.contains(k_str) && !protected.contains(k_str)
         })
         .cloned()
         .collect()
 }
 
-/// Strip protected and excluded columns from client data in place.
+/// Strip protected and non-synced columns from client data in place.
 fn strip_protected_columns(data: &mut serde_json::Value, table_reg: &TableRegistration) {
     if let Some(obj) = data.as_object_mut() {
+        let synced_columns: std::collections::HashSet<&str> = table_reg
+            .sync_columns
+            .iter()
+            .map(|column| column.as_str())
+            .collect();
+        obj.retain(|key, _| synced_columns.contains(key.as_str()));
         obj.remove(&table_reg.pk_column);
         if table_reg.has_updated_at {
             obj.remove(&table_reg.updated_at_col);
@@ -1173,9 +1155,6 @@ fn strip_protected_columns(data: &mut serde_json::Value, table_reg: &TableRegist
             obj.remove(&table_reg.deleted_at_col);
         }
         obj.remove("created_at");
-        for col in &table_reg.exclude_columns {
-            obj.remove(col);
-        }
     }
 }
 
@@ -1233,74 +1212,8 @@ fn call_write_protect(
 
 /// Load registry within an existing SPI context.
 fn load_registry_inner(client: &SpiClient<'_>) -> Vec<TableRegistration> {
-    let tup_table = match client.select(
-        "SELECT table_name, bucket_sql, pk_column, pk_type, updated_at_col, \
-         deleted_at_col, push_policy, exclude_columns, has_updated_at, has_deleted_at \
-         FROM sync_registry ORDER BY table_name",
-        None,
-        &[],
-    ) {
-        Ok(t) => t,
-        Err(e) => pgrx::error!("loading registry: {}", e),
-    };
-
-    let mut tables = Vec::new();
-    for row in tup_table {
-        let table_name: String = row
-            .get_by_name("table_name")
-            .unwrap_or(None)
-            .unwrap_or_default();
-        let bucket_sql: String = row
-            .get_by_name("bucket_sql")
-            .unwrap_or(None)
-            .unwrap_or_default();
-        let pk_column: String = row
-            .get_by_name("pk_column")
-            .unwrap_or(None)
-            .unwrap_or_default();
-        let pk_type: String = row
-            .get_by_name("pk_type")
-            .unwrap_or(None)
-            .unwrap_or_else(|| "text".to_string());
-        let updated_at_col: String = row
-            .get_by_name("updated_at_col")
-            .unwrap_or(None)
-            .unwrap_or_default();
-        let deleted_at_col: String = row
-            .get_by_name("deleted_at_col")
-            .unwrap_or(None)
-            .unwrap_or_default();
-        let push_policy_str: String = row
-            .get_by_name("push_policy")
-            .unwrap_or(None)
-            .unwrap_or_default();
-        let exclude_columns: Vec<String> = row
-            .get_by_name("exclude_columns")
-            .unwrap_or(None)
-            .unwrap_or_default();
-        let has_updated_at: bool = row
-            .get_by_name("has_updated_at")
-            .unwrap_or(None)
-            .unwrap_or(false);
-        let has_deleted_at: bool = row
-            .get_by_name("has_deleted_at")
-            .unwrap_or(None)
-            .unwrap_or(false);
-
-        tables.push(TableRegistration {
-            table_name,
-            bucket_sql,
-            pk_column,
-            pk_type,
-            updated_at_col,
-            deleted_at_col,
-            push_policy: PushPolicy::parse(&push_policy_str).unwrap_or(PushPolicy::Enabled),
-            exclude_columns,
-            has_updated_at,
-            has_deleted_at,
-        });
-    }
-    tables
+    crate::registry::load_registry_from_client(client)
+        .unwrap_or_else(|e| pgrx::error!("loading registry: {}", e))
 }
 
 // ---------------------------------------------------------------------------

@@ -133,7 +133,7 @@ describe('Synchro RN E2E', () => {
     await runAction('txTimeout', 15000);
   });
 
-  it('transaction error recovery — write lock released after timeout', async () => {
+  it('transaction error recovery, write lock released after timeout', async () => {
     await runAction('txRecovery', 20000);
   });
 
@@ -141,15 +141,15 @@ describe('Synchro RN E2E', () => {
     await runAction('start', 15000);
   });
 
-  it('push/pull round trip — pending changes drain after sync', async () => {
+  it('push/pull round trip, pending changes drain after sync', async () => {
     await runAction('pushPull', 25000);
   });
 
-  it('conflict resolution — detects server-side conflict', async () => {
+  it('conflict resolution, detects server-side conflict', async () => {
     await runAction('conflict', 30000);
   });
 
-  it('multi-user isolation — user 2 cannot see user 1 data', async () => {
+  it('multi-user isolation, user 2 cannot see user 1 data', async () => {
     await runAction('multiUser', 25000);
   });
 

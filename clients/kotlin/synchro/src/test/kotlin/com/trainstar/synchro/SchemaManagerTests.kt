@@ -76,10 +76,10 @@ class SchemaManagerTests {
                     deletedAtColumn = "deleted_at",
                     composition = VNextCompositionClass.SINGLE_SCOPE,
                     columns = listOf(
-                        VNextColumnSchema(name = "id", typeName = "uuid", nullable = false),
-                        VNextColumnSchema(name = "name", typeName = "text", nullable = false),
-                        VNextColumnSchema(name = "updated_at", typeName = "timestamp", nullable = false),
-                        VNextColumnSchema(name = "deleted_at", typeName = "timestamp", nullable = true),
+                        VNextColumnSchema(name = "id", typeName = "string", nullable = false),
+                        VNextColumnSchema(name = "name", typeName = "string", nullable = false),
+                        VNextColumnSchema(name = "updated_at", typeName = "datetime", nullable = false),
+                        VNextColumnSchema(name = "deleted_at", typeName = "datetime", nullable = true),
                     ),
                     indexes = null,
                 )
@@ -111,10 +111,10 @@ class SchemaManagerTests {
                     deletedAtColumn = "deleted_at",
                     composition = VNextCompositionClass.SINGLE_SCOPE,
                     columns = listOf(
-                        VNextColumnSchema(name = "id", typeName = "uuid", nullable = false),
-                        VNextColumnSchema(name = "name", typeName = "text", nullable = false),
-                        VNextColumnSchema(name = "updated_at", typeName = "timestamp", nullable = false),
-                        VNextColumnSchema(name = "deleted_at", typeName = "timestamp", nullable = true),
+                        VNextColumnSchema(name = "id", typeName = "string", nullable = false),
+                        VNextColumnSchema(name = "name", typeName = "string", nullable = false),
+                        VNextColumnSchema(name = "updated_at", typeName = "datetime", nullable = false),
+                        VNextColumnSchema(name = "deleted_at", typeName = "datetime", nullable = true),
                     ),
                     indexes = null,
                 )
@@ -133,11 +133,11 @@ class SchemaManagerTests {
                     deletedAtColumn = "deleted_at",
                     composition = VNextCompositionClass.SINGLE_SCOPE,
                     columns = listOf(
-                        VNextColumnSchema(name = "id", typeName = "uuid", nullable = false),
-                        VNextColumnSchema(name = "name", typeName = "text", nullable = false),
-                        VNextColumnSchema(name = "notes", typeName = "text", nullable = true),
-                        VNextColumnSchema(name = "updated_at", typeName = "timestamp", nullable = false),
-                        VNextColumnSchema(name = "deleted_at", typeName = "timestamp", nullable = true),
+                        VNextColumnSchema(name = "id", typeName = "string", nullable = false),
+                        VNextColumnSchema(name = "name", typeName = "string", nullable = false),
+                        VNextColumnSchema(name = "notes", typeName = "string", nullable = true),
+                        VNextColumnSchema(name = "updated_at", typeName = "datetime", nullable = false),
+                        VNextColumnSchema(name = "deleted_at", typeName = "datetime", nullable = true),
                     ),
                     indexes = null,
                 )
@@ -149,6 +149,69 @@ class SchemaManagerTests {
         assertNotNull(row)
         assertEquals("Morning Run", row?.get("name"))
         assertNull(row?.get("notes"))
+    }
+
+    @Test
+    fun testPortableManifestAliasTypesNormalizeWithoutTriggeringRebuild() {
+        val db = makeTestDB()
+        val manager = SchemaManager(db)
+
+        val canonical = makeManifest(
+            listOf(
+                VNextTableSchema(
+                    name = "metrics",
+                    primaryKey = listOf("id"),
+                    updatedAtColumn = "updated_at",
+                    deletedAtColumn = "deleted_at",
+                    composition = VNextCompositionClass.SINGLE_SCOPE,
+                    columns = listOf(
+                        VNextColumnSchema(name = "id", typeName = "string", nullable = false),
+                        VNextColumnSchema(name = "score", typeName = "int", nullable = true),
+                        VNextColumnSchema(name = "updated_at", typeName = "datetime", nullable = false),
+                        VNextColumnSchema(name = "deleted_at", typeName = "datetime", nullable = true),
+                    ),
+                    indexes = null,
+                )
+            )
+        )
+        manager.reconcileLocalSchema(schemaVersion = 1, schemaHash = "canonical-v1", tables = canonical.localTables())
+        db.execute("INSERT INTO metrics (id, score, updated_at) VALUES ('m-1', 7, '2026-01-01T00:00:00Z')")
+        db.writeTransaction { rawDb ->
+            SynchroMeta.set(rawDb, MetaKey.SNAPSHOT_COMPLETE, "1")
+        }
+
+        val aliasManifest = makeManifest(
+            listOf(
+                VNextTableSchema(
+                    name = "metrics",
+                    primaryKey = listOf("id"),
+                    updatedAtColumn = "updated_at",
+                    deletedAtColumn = "deleted_at",
+                    composition = VNextCompositionClass.SINGLE_SCOPE,
+                    columns = listOf(
+                        VNextColumnSchema(name = "id", typeName = "uuid", nullable = false),
+                        VNextColumnSchema(name = "score", typeName = "integer", nullable = true),
+                        VNextColumnSchema(name = "updated_at", typeName = "timestamp", nullable = false),
+                        VNextColumnSchema(name = "deleted_at", typeName = "timestamp", nullable = true),
+                    ),
+                    indexes = null,
+                )
+            )
+        )
+
+        val normalizedTables = aliasManifest.localTables()
+        assertEquals(listOf("string", "int", "datetime", "datetime"), normalizedTables[0].columns.map { it.logicalType })
+
+        manager.reconcileLocalSchema(schemaVersion = 2, schemaHash = "alias-v2", tables = normalizedTables)
+
+        val row = db.queryOne("SELECT score FROM metrics WHERE id = ?", arrayOf("m-1"))
+        assertNotNull(row)
+        assertEquals(7L, row?.get("score"))
+
+        val snapshotComplete = db.readTransaction { rawDb ->
+            SynchroMeta.get(rawDb, MetaKey.SNAPSHOT_COMPLETE)
+        }
+        assertEquals("1", snapshotComplete)
     }
 
     @Test

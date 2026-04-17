@@ -87,6 +87,27 @@ final class VNextContractTests: XCTestCase {
         XCTAssertTrue(tables[1].columns.contains { $0.name == "user_id" && !$0.isPrimaryKey })
     }
 
+    func testPortableSchemaManifestFixtureUsesCanonicalTypeNames() throws {
+        let manifest: VNextSchemaManifest = try decodeFixtureValue(
+            path: "conformance/schema/schema-manifest-portable.json",
+            jsonPath: ["manifest"]
+        )
+
+        let allowed: Set<String> = ["string", "int", "int64", "float", "boolean", "datetime", "date", "time", "json", "bytes"]
+        let emittedTypes = Set(manifest.tables.flatMap { $0.columns ?? [] }.map(\.type))
+
+        XCTAssertFalse(emittedTypes.isEmpty)
+        XCTAssertTrue(emittedTypes.isSubset(of: allowed), "fixture emitted non-canonical portable types: \(emittedTypes.subtracting(allowed))")
+    }
+
+    func testSQLiteSchemaNormalizesPatternAliases() {
+        XCTAssertEqual(SQLiteSchema.normalizedLogicalType("numeric(5,1)"), "float")
+        XCTAssertEqual(SQLiteSchema.normalizedLogicalType("varchar(255)"), "string")
+        XCTAssertEqual(SQLiteSchema.normalizedLogicalType("text[]"), "json")
+        XCTAssertEqual(SQLiteSchema.normalizedLogicalType("interval"), "string")
+        XCTAssertEqual(SQLiteSchema.normalizedLogicalType("int4range"), "string")
+    }
+
     func testUpgradeRequiredErrorFixtureDecodes() throws {
         let errorResponse: VNextErrorResponse = try decodeFixtureValue(
             path: "conformance/protocol/error-upgrade-required.json",

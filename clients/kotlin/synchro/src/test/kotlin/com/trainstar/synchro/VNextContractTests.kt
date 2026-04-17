@@ -104,6 +104,29 @@ class VNextContractTests {
     }
 
     @Test
+    fun testPortableSchemaManifestFixtureUsesCanonicalTypeNames() {
+        val manifest = decodeFixtureValue<VNextSchemaManifest>(
+            "conformance/schema/schema-manifest-portable.json",
+            listOf("manifest")
+        )
+
+        val allowed = setOf("string", "int", "int64", "float", "boolean", "datetime", "date", "time", "json", "bytes")
+        val emittedTypes = manifest.tables.flatMap { it.columns.orEmpty() }.map { it.typeName }.toSet()
+
+        assertTrue(emittedTypes.isNotEmpty())
+        assertTrue("fixture emitted non-canonical portable types: ${emittedTypes - allowed}", emittedTypes.subtract(allowed).isEmpty())
+    }
+
+    @Test
+    fun testSQLiteSchemaNormalizesPatternAliases() {
+        assertEquals("float", SQLiteSchema.normalizedLogicalType("numeric(5,1)"))
+        assertEquals("string", SQLiteSchema.normalizedLogicalType("varchar(255)"))
+        assertEquals("json", SQLiteSchema.normalizedLogicalType("text[]"))
+        assertEquals("string", SQLiteSchema.normalizedLogicalType("interval"))
+        assertEquals("string", SQLiteSchema.normalizedLogicalType("int4range"))
+    }
+
+    @Test
     fun testUpgradeRequiredErrorFixtureDecodes() {
         val response = decodeFixtureValue<VNextErrorResponse>(
             "conformance/protocol/error-upgrade-required.json",

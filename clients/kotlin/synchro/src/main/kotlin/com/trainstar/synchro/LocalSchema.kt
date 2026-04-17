@@ -74,7 +74,7 @@ fun VNextSchemaManifest.localTables(): List<LocalSchemaTable> {
             columns = columns.map { column ->
                 LocalSchemaColumn(
                     name = column.name,
-                    logicalType = column.typeName,
+                    logicalType = SQLiteSchema.normalizedLogicalType(column.typeName),
                     nullable = column.nullable,
                     sqliteDefaultSQL = null,
                     isPrimaryKey = column.name in primaryKey,

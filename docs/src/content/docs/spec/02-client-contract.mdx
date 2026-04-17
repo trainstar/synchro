@@ -222,6 +222,15 @@ Recommended concrete surface:
 
 The app should not need to reason about protocol internals to use the SDK.
 
+Transient startup failures must not force the host app to become a retry supervisor.
+
+Required startup behavior:
+
+- retryable startup failures stay inside the native SDK retry and backoff loop
+- the app should not need to re-call `startSync()` after transient transport or availability failures
+- non-retryable bootstrap failures may still surface immediately and require explicit application action
+- first-sync completion should be observable through stable status or callback surfaces, not by forcing app-owned retry orchestration
+
 ## React Native Contract
 
 React Native should expose:

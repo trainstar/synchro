@@ -76,6 +76,34 @@ At minimum, the schema manifest should define:
 - local composition class, for example single-scope or multi-scope
 - recommended local indexes where needed for expected query performance
 
+## Table Registration And Column Selection
+
+The server defines the synced shape for each registered PostgreSQL table.
+
+For an existing table, the preferred contract is an explicit synced column set at registration time.
+
+That means:
+
+- the PostgreSQL table may contain additional server-only columns
+- the registered synced shape names the columns that replicate to clients
+- the schema manifest contains only that resolved synced shape
+- pull, push, rebuild, and seed export all use the same resolved synced shape
+
+Synchro should not require shadow tables just to sync a subset of columns from an existing PostgreSQL table.
+
+Recommended registration surfaces:
+
+- `p_sync_columns` as the primary contract when the synced shape is a subset of the table
+- `p_exclude_columns` only as convenience when most columns sync and a few should not
+
+Those two inputs are mutually exclusive. The server resolves them to one authoritative synced column set.
+
+Required sync columns must still be present in that set:
+
+- primary key
+- `updated_at` when the table uses update timestamps
+- `deleted_at` when the table uses soft delete semantics
+
 Example shape:
 
 ```json
@@ -90,12 +118,12 @@ Example shape:
       "deleted_at_column": "deleted_at",
       "composition": "single_scope",
       "columns": [
-        { "name": "id", "type": "uuid", "nullable": false },
-        { "name": "user_id", "type": "uuid", "nullable": false },
-        { "name": "name", "type": "text", "nullable": false },
-        { "name": "updated_at", "type": "timestamp", "nullable": false },
-        { "name": "deleted_at", "type": "timestamp", "nullable": true },
-        { "name": "started_at", "type": "timestamp", "nullable": true }
+        { "name": "id", "type": "string", "nullable": false },
+        { "name": "user_id", "type": "string", "nullable": false },
+        { "name": "name", "type": "string", "nullable": false },
+        { "name": "updated_at", "type": "datetime", "nullable": false },
+        { "name": "deleted_at", "type": "datetime", "nullable": true },
+        { "name": "started_at", "type": "datetime", "nullable": true }
       ],
       "indexes": [
         { "name": "idx_documents_started_at", "columns": ["started_at"] }
@@ -323,21 +351,62 @@ Current release surface:
 
 ## Portable Type System
 
-The schema manifest should use a portable client-facing type system rather than backend-specific DDL strings wherever possible.
+The schema manifest uses one canonical portable logical type enum.
 
-The exact type catalog can be finalized later, but it should cover at least:
+Allowed manifest types:
 
-- uuid
-- text
-- int32
-- int64
-- float64
-- bool
-- json
-- blob
-- date
-- timestamp
-- decimal
+- `string`
+- `int`
+- `int64`
+- `float`
+- `boolean`
+- `datetime`
+- `date`
+- `time`
+- `json`
+- `bytes`
+
+The server must emit only those canonical names in `synchro_schema_manifest()`.
+
+### PostgreSQL To Portable Mapping
+
+| PostgreSQL source type | Portable manifest type |
+| --- | --- |
+| `uuid`, `text`, `varchar`, `character varying`, `character` | `string` |
+| `smallint`, `integer` | `int` |
+| `bigint` | `int64` |
+| `numeric`, `numeric(p,s)`, `decimal`, `real`, `double precision` | `float` |
+| `boolean` | `boolean` |
+| `timestamp with time zone`, `timestamp without time zone` | `datetime` |
+| `date` | `date` |
+| `time`, `time without time zone` | `time` |
+| `interval`, network types, XML, geometric types, range types | `string` |
+| `json`, `jsonb` | `json` |
+| PostgreSQL arrays such as `text[]`, `integer[]`, `uuid[]` | `json` |
+| `bytea` | `bytes` |
+
+### Portable To SQLite Mapping
+
+| Portable manifest type | SQLite column type |
+| --- | --- |
+| `string` | `TEXT` |
+| `int` | `INTEGER` |
+| `int64` | `INTEGER` |
+| `float` | `REAL` |
+| `boolean` | `INTEGER` |
+| `datetime` | `TEXT` |
+| `date` | `TEXT` |
+| `time` | `TEXT` |
+| `json` | `TEXT` |
+| `bytes` | `BLOB` |
+
+### Alias Hardening
+
+Clients should normalize older alias values such as `uuid`, `text`, `integer`, `numeric(5,1)`, `varchar(255)`, `text[]`, and `timestamp` to the canonical enum before local type mapping or destructive rebuild decisions.
+
+That alias handling is defensive compatibility only.
+
+The server contract itself is still canonical-only.
 
 If a server-side type cannot be represented safely in the portable schema model, the server must either:
 

@@ -10,12 +10,15 @@ CREATE TABLE IF NOT EXISTS sync_registry (
     updated_at_col TEXT NOT NULL DEFAULT 'updated_at',
     deleted_at_col TEXT NOT NULL DEFAULT 'deleted_at',
     push_policy TEXT NOT NULL DEFAULT 'enabled',
+    sync_columns TEXT[] NOT NULL DEFAULT '{}',
     exclude_columns TEXT[] NOT NULL DEFAULT '{}',
     has_updated_at BOOLEAN NOT NULL DEFAULT true,
     has_deleted_at BOOLEAN NOT NULL DEFAULT true,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+ALTER TABLE sync_registry
+    ADD COLUMN IF NOT EXISTS sync_columns TEXT[] NOT NULL DEFAULT '{}';
 
 -- Changelog table: ordered log of all changes by bucket.
 CREATE TABLE IF NOT EXISTS sync_changelog (

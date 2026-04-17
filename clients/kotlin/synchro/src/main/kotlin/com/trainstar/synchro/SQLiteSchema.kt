@@ -1,7 +1,34 @@
 package com.trainstar.synchro
 
 object SQLiteSchema {
-    fun sqliteType(logicalType: String): String = when (logicalType) {
+    fun normalizedLogicalType(logicalType: String): String {
+        val normalized = logicalType.trim().lowercase()
+        return when {
+            normalized.endsWith("[]") -> "json"
+            normalized.startsWith("numeric(") || normalized.startsWith("decimal(") -> "float"
+            normalized.startsWith("character varying")
+                || normalized.startsWith("varchar(")
+                || normalized.startsWith("character(") -> "string"
+            normalized.endsWith("range") -> "string"
+            normalized in setOf(
+                "string", "text", "uuid", "varchar", "character",
+                "interval", "inet", "cidr", "macaddr", "macaddr8", "xml",
+                "point", "line", "lseg", "box", "path", "polygon", "circle"
+            ) -> "string"
+            normalized in setOf("int", "int32", "smallint", "integer") -> "int"
+            normalized in setOf("int64", "bigint") -> "int64"
+            normalized in setOf("float", "float64", "numeric", "decimal", "real", "double precision") -> "float"
+            normalized in setOf("boolean", "bool") -> "boolean"
+            normalized in setOf("datetime", "timestamp", "timestamp with time zone", "timestamp without time zone") -> "datetime"
+            normalized == "date" -> "date"
+            normalized == "time" || normalized == "time without time zone" -> "time"
+            normalized in setOf("json", "jsonb") -> "json"
+            normalized in setOf("bytes", "blob", "bytea") -> "bytes"
+            else -> normalized
+        }
+    }
+
+    fun sqliteType(logicalType: String): String = when (normalizedLogicalType(logicalType)) {
         "string" -> "TEXT"
         "int" -> "INTEGER"
         "int64" -> "INTEGER"

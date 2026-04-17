@@ -1,4 +1,5 @@
 use pgrx::prelude::*;
+use pgrx::spi::SpiClient;
 use serde::{Deserialize, Serialize};
 
 /// Push policy for a registered table.
@@ -36,7 +37,7 @@ pub struct TableRegistration {
     pub updated_at_col: String,
     pub deleted_at_col: String,
     pub push_policy: PushPolicy,
-    pub exclude_columns: Vec<String>,
+    pub sync_columns: Vec<String>,
     pub has_updated_at: bool,
     pub has_deleted_at: bool,
 }
@@ -54,6 +55,7 @@ fn synchro_register_table(
     p_deleted_at_col: default!(&str, "'deleted_at'"),
     p_push_policy: default!(&str, "'enabled'"),
     p_exclude_columns: default!(Vec<String>, "'{}'"),
+    p_sync_columns: default!(Vec<String>, "'{}'"),
 ) {
     // Validate push_policy.
     let policy = match PushPolicy::parse(p_push_policy) {
@@ -99,6 +101,18 @@ fn synchro_register_table(
         pgrx::error!("bucket_sql validation failed: {}", e);
     }
 
+    let actual_columns = match ordered_table_columns(p_table_name) {
+        Ok(columns) => columns,
+        Err(err) => pgrx::error!("loading table columns for {:?}: {}", p_table_name, err),
+    };
+    if !actual_columns.iter().any(|column| column == p_pk_column) {
+        pgrx::error!(
+            "primary key column {:?} does not exist on table {:?}",
+            p_pk_column,
+            p_table_name
+        );
+    }
+
     // Introspect PK column type for cast generation in push/pull queries.
     let pk_type: String = Spi::get_one_with_args(
         "SELECT format_type(a.atttypid, a.atttypmod) FROM pg_catalog.pg_attribute a \
@@ -142,13 +156,27 @@ fn synchro_register_table(
     .unwrap_or(Some(false))
     .unwrap_or(false);
 
+    let (sync_columns, exclude_columns) = match normalize_synced_columns(
+        &actual_columns,
+        p_table_name,
+        p_pk_column,
+        p_updated_at_col,
+        p_deleted_at_col,
+        has_updated_at,
+        has_deleted_at,
+        &p_sync_columns,
+        &p_exclude_columns,
+    ) {
+        Ok(selection) => selection,
+        Err(message) => pgrx::error!("{}", message),
+    };
+
     // Upsert into sync_registry.
-    let exclude_arr = p_exclude_columns;
     if let Err(e) = Spi::run_with_args(
         "INSERT INTO sync_registry (
             table_name, bucket_sql, pk_column, pk_type, updated_at_col, deleted_at_col,
-            push_policy, exclude_columns, has_updated_at, has_deleted_at
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+            push_policy, sync_columns, exclude_columns, has_updated_at, has_deleted_at
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
         ON CONFLICT (table_name) DO UPDATE SET
             bucket_sql = EXCLUDED.bucket_sql,
             pk_column = EXCLUDED.pk_column,
@@ -156,6 +184,7 @@ fn synchro_register_table(
             updated_at_col = EXCLUDED.updated_at_col,
             deleted_at_col = EXCLUDED.deleted_at_col,
             push_policy = EXCLUDED.push_policy,
+            sync_columns = EXCLUDED.sync_columns,
             exclude_columns = EXCLUDED.exclude_columns,
             has_updated_at = EXCLUDED.has_updated_at,
             has_deleted_at = EXCLUDED.has_deleted_at,
@@ -168,7 +197,8 @@ fn synchro_register_table(
             p_updated_at_col.into(),
             p_deleted_at_col.into(),
             policy.as_str().into(),
-            exclude_arr.into(),
+            sync_columns.into(),
+            exclude_columns.into(),
             has_updated_at.into(),
             has_deleted_at.into(),
         ],
@@ -323,45 +353,202 @@ fn recompute_schema_manifest() {
 /// Load all registered tables from sync_registry into memory.
 /// Used by the background worker on startup and after NOTIFY.
 pub fn load_registry() -> Result<Vec<TableRegistration>, spi::Error> {
+    Spi::connect(|client| load_registry_from_client(client))
+}
+
+pub(crate) fn load_registry_from_client(
+    client: &SpiClient<'_>,
+) -> Result<Vec<TableRegistration>, spi::Error> {
+    let query = "SELECT table_name, bucket_sql, pk_column, pk_type, updated_at_col,
+                        deleted_at_col, push_policy, sync_columns, exclude_columns,
+                        has_updated_at, has_deleted_at
+                 FROM sync_registry
+                 ORDER BY table_name";
+    let tup_table = client.select(query, None, &[])?;
     let mut tables = Vec::new();
 
-    Spi::connect(|client| {
-        let query = "SELECT table_name, bucket_sql, pk_column, pk_type, updated_at_col,
-                            deleted_at_col, push_policy, exclude_columns,
-                            has_updated_at, has_deleted_at
-                     FROM sync_registry
-                     ORDER BY table_name";
-        let tup_table = client.select(query, None, &[])?;
+    for row in tup_table {
+        let table_name: String = row.get_by_name("table_name")?.unwrap_or_default();
+        let bucket_sql: String = row.get_by_name("bucket_sql")?.unwrap_or_default();
+        let pk_column: String = row.get_by_name("pk_column")?.unwrap_or_default();
+        let pk_type: String = row
+            .get_by_name("pk_type")?
+            .unwrap_or_else(|| "text".to_string());
+        let updated_at_col: String = row.get_by_name("updated_at_col")?.unwrap_or_default();
+        let deleted_at_col: String = row.get_by_name("deleted_at_col")?.unwrap_or_default();
+        let push_policy_str: String = row.get_by_name("push_policy")?.unwrap_or_default();
+        let sync_columns: Vec<String> = row.get_by_name("sync_columns")?.unwrap_or_default();
+        let exclude_columns: Vec<String> = row.get_by_name("exclude_columns")?.unwrap_or_default();
+        let has_updated_at: bool = row.get_by_name("has_updated_at")?.unwrap_or(false);
+        let has_deleted_at: bool = row.get_by_name("has_deleted_at")?.unwrap_or(false);
 
-        for row in tup_table {
-            let table_name: String = row.get_by_name("table_name")?.unwrap_or_default();
-            let bucket_sql: String = row.get_by_name("bucket_sql")?.unwrap_or_default();
-            let pk_column: String = row.get_by_name("pk_column")?.unwrap_or_default();
-            let pk_type: String = row
-                .get_by_name("pk_type")?
-                .unwrap_or_else(|| "text".to_string());
-            let updated_at_col: String = row.get_by_name("updated_at_col")?.unwrap_or_default();
-            let deleted_at_col: String = row.get_by_name("deleted_at_col")?.unwrap_or_default();
-            let push_policy_str: String = row.get_by_name("push_policy")?.unwrap_or_default();
-            let exclude_columns: Vec<String> =
-                row.get_by_name("exclude_columns")?.unwrap_or_default();
-            let has_updated_at: bool = row.get_by_name("has_updated_at")?.unwrap_or(false);
-            let has_deleted_at: bool = row.get_by_name("has_deleted_at")?.unwrap_or(false);
+        let resolved_sync_columns = if sync_columns.is_empty() {
+            let all_columns = ordered_table_columns_in_client(client, &table_name)?;
+            all_columns
+                .into_iter()
+                .filter(|column| !exclude_columns.iter().any(|excluded| excluded == column))
+                .collect()
+        } else {
+            sync_columns
+        };
 
-            tables.push(TableRegistration {
-                table_name,
-                bucket_sql,
-                pk_column,
-                pk_type,
-                updated_at_col,
-                deleted_at_col,
-                push_policy: PushPolicy::parse(&push_policy_str).unwrap_or(PushPolicy::Enabled),
-                exclude_columns,
-                has_updated_at,
-                has_deleted_at,
-            });
+        tables.push(TableRegistration {
+            table_name,
+            bucket_sql,
+            pk_column,
+            pk_type,
+            updated_at_col,
+            deleted_at_col,
+            push_policy: PushPolicy::parse(&push_policy_str).unwrap_or(PushPolicy::Enabled),
+            sync_columns: resolved_sync_columns,
+            has_updated_at,
+            has_deleted_at,
+        });
+    }
+
+    Ok(tables)
+}
+
+fn ordered_table_columns(table_name: &str) -> Result<Vec<String>, spi::Error> {
+    Spi::connect(|client| ordered_table_columns_in_client(client, table_name))
+}
+
+pub(crate) fn ordered_table_columns_in_client(
+    client: &SpiClient<'_>,
+    table_name: &str,
+) -> Result<Vec<String>, spi::Error> {
+    let tup_table = client.select(
+        "SELECT a.attname::text AS attname
+         FROM pg_catalog.pg_attribute a
+         JOIN pg_catalog.pg_class c ON c.oid = a.attrelid
+         JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+         WHERE c.relname = $1
+           AND n.nspname = ANY(current_schemas(false))
+           AND a.attnum > 0
+           AND NOT a.attisdropped
+         ORDER BY a.attnum",
+        None,
+        &[table_name.into()],
+    )?;
+
+    let mut columns = Vec::new();
+    for row in tup_table {
+        if let Some(column_name) = row.get_by_name::<String, &str>("attname")? {
+            columns.push(column_name);
         }
+    }
 
-        Ok(tables)
-    })
+    Ok(columns)
+}
+
+fn normalize_synced_columns(
+    actual_columns: &[String],
+    table_name: &str,
+    pk_column: &str,
+    updated_at_col: &str,
+    deleted_at_col: &str,
+    has_updated_at: bool,
+    has_deleted_at: bool,
+    requested_sync_columns: &[String],
+    requested_exclude_columns: &[String],
+) -> Result<(Vec<String>, Vec<String>), String> {
+    if !requested_sync_columns.is_empty() && !requested_exclude_columns.is_empty() {
+        return Err(format!(
+            "table {table_name} registration cannot specify both sync_columns and exclude_columns"
+        ));
+    }
+
+    validate_unique_columns(table_name, "sync_columns", requested_sync_columns)?;
+    validate_unique_columns(table_name, "exclude_columns", requested_exclude_columns)?;
+
+    let actual_column_set: std::collections::HashSet<&str> = actual_columns
+        .iter()
+        .map(|column| column.as_str())
+        .collect();
+    for column in requested_sync_columns {
+        if !actual_column_set.contains(column.as_str()) {
+            return Err(format!(
+                "table {table_name} sync column {column} does not exist"
+            ));
+        }
+    }
+    for column in requested_exclude_columns {
+        if !actual_column_set.contains(column.as_str()) {
+            return Err(format!(
+                "table {table_name} excluded column {column} does not exist"
+            ));
+        }
+    }
+
+    let requested_sync_set: std::collections::HashSet<&str> = requested_sync_columns
+        .iter()
+        .map(|column| column.as_str())
+        .collect();
+    let requested_exclude_set: std::collections::HashSet<&str> = requested_exclude_columns
+        .iter()
+        .map(|column| column.as_str())
+        .collect();
+
+    let sync_columns: Vec<String> = if requested_sync_set.is_empty() {
+        actual_columns
+            .iter()
+            .filter(|column| !requested_exclude_set.contains(column.as_str()))
+            .cloned()
+            .collect()
+    } else {
+        actual_columns
+            .iter()
+            .filter(|column| requested_sync_set.contains(column.as_str()))
+            .cloned()
+            .collect()
+    };
+
+    ensure_required_sync_column(table_name, pk_column, &sync_columns, "primary key")?;
+    if has_updated_at {
+        ensure_required_sync_column(table_name, updated_at_col, &sync_columns, "updated_at")?;
+    }
+    if has_deleted_at {
+        ensure_required_sync_column(table_name, deleted_at_col, &sync_columns, "deleted_at")?;
+    }
+
+    let sync_column_set: std::collections::HashSet<&str> =
+        sync_columns.iter().map(|column| column.as_str()).collect();
+    let exclude_columns = actual_columns
+        .iter()
+        .filter(|column| !sync_column_set.contains(column.as_str()))
+        .cloned()
+        .collect();
+
+    Ok((sync_columns, exclude_columns))
+}
+
+fn validate_unique_columns(
+    table_name: &str,
+    label: &str,
+    columns: &[String],
+) -> Result<(), String> {
+    let mut seen = std::collections::HashSet::new();
+    for column in columns {
+        if !seen.insert(column.as_str()) {
+            return Err(format!(
+                "table {table_name} {label} contains duplicate column {column}"
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn ensure_required_sync_column(
+    table_name: &str,
+    column_name: &str,
+    sync_columns: &[String],
+    label: &str,
+) -> Result<(), String> {
+    if sync_columns.iter().any(|column| column == column_name) {
+        return Ok(());
+    }
+
+    Err(format!(
+        "table {table_name} {label} column {column_name} must be part of the synced column set"
+    ))
 }

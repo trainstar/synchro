@@ -176,6 +176,9 @@ func Generate(ctx context.Context, pg *sql.DB, opts GenerateOptions) error {
 	if err := writePortableSeedData(ctx, pgTx, tx, localTables, portable); err != nil {
 		return err
 	}
+	if err := createSyncedTableTriggers(ctx, tx, localTables); err != nil {
+		return err
+	}
 	if err := writeMetadata(ctx, tx, env, localTables, portable); err != nil {
 		return err
 	}
@@ -271,12 +274,6 @@ func (m manifestEnvelope) validate() error {
 		if len(table.PrimaryKey) != 1 {
 			return fmt.Errorf("table %s must use exactly one primary key column for local seed generation", table.Name)
 		}
-		if table.UpdatedAtColumn == "" {
-			return fmt.Errorf("table %s is missing updated_at_column", table.Name)
-		}
-		if table.DeletedAtColumn == "" {
-			return fmt.Errorf("table %s is missing deleted_at_column", table.Name)
-		}
 		if len(table.Columns) == 0 {
 			return fmt.Errorf("table %s has no columns", table.Name)
 		}
@@ -295,11 +292,15 @@ func (m manifestEnvelope) validate() error {
 		if _, ok := columnNames[table.PrimaryKey[0]]; !ok {
 			return fmt.Errorf("table %s primary key column %s is missing from columns", table.Name, table.PrimaryKey[0])
 		}
-		if _, ok := columnNames[table.UpdatedAtColumn]; !ok {
-			return fmt.Errorf("table %s updated_at column %s is missing from columns", table.Name, table.UpdatedAtColumn)
+		if table.UpdatedAtColumn != "" {
+			if _, ok := columnNames[table.UpdatedAtColumn]; !ok {
+				return fmt.Errorf("table %s updated_at column %s is missing from columns", table.Name, table.UpdatedAtColumn)
+			}
 		}
-		if _, ok := columnNames[table.DeletedAtColumn]; !ok {
-			return fmt.Errorf("table %s deleted_at column %s is missing from columns", table.Name, table.DeletedAtColumn)
+		if table.DeletedAtColumn != "" {
+			if _, ok := columnNames[table.DeletedAtColumn]; !ok {
+				return fmt.Errorf("table %s deleted_at column %s is missing from columns", table.Name, table.DeletedAtColumn)
+			}
 		}
 	}
 
@@ -411,6 +412,12 @@ func createSyncedTables(ctx context.Context, tx *sql.Tx, tables []localSchemaTab
 		if _, err := tx.ExecContext(ctx, createTableSQL(table)); err != nil {
 			return fmt.Errorf("creating synced table %s: %w", table.TableName, err)
 		}
+	}
+	return nil
+}
+
+func createSyncedTableTriggers(ctx context.Context, tx *sql.Tx, tables []localSchemaTable) error {
+	for _, table := range tables {
 		for _, stmt := range cdcTriggerSQL(table) {
 			if _, err := tx.ExecContext(ctx, stmt); err != nil {
 				return fmt.Errorf("creating cdc triggers for %s: %w", table.TableName, err)
@@ -774,6 +781,8 @@ func cdcTriggerSQL(table localSchemaTable) []string {
 	pkColumn := table.PrimaryKey[0]
 	lockCheck := "(SELECT value FROM _synchro_meta WHERE key = 'sync_lock') = '0'"
 	nowExpr := "strftime('%Y-%m-%dT%H:%M:%fZ', 'now')"
+	hasUpdatedAt := strings.TrimSpace(table.UpdatedAtColumn) != ""
+	hasDeletedAt := strings.TrimSpace(table.DeletedAtColumn) != ""
 	escapedName := escapeSQLString(name)
 	insertTrigger := quoteIdentifier("_synchro_cdc_insert_" + name)
 	updateTrigger := quoteIdentifier("_synchro_cdc_update_" + name)
@@ -782,6 +791,50 @@ func cdcTriggerSQL(table localSchemaTable) []string {
 	quotedPK := quoteIdentifier(pkColumn)
 	quotedUpdatedAt := quoteIdentifier(table.UpdatedAtColumn)
 	quotedDeletedAt := quoteIdentifier(table.DeletedAtColumn)
+
+	baseUpdatedAtExpr := "NULL"
+	if hasUpdatedAt {
+		baseUpdatedAtExpr = "OLD." + quotedUpdatedAt
+	}
+
+	updateOperationExpr := "'update'"
+	if hasDeletedAt {
+		updateOperationExpr = fmt.Sprintf(
+			"CASE WHEN NEW.%s IS NOT NULL AND OLD.%s IS NULL THEN 'delete' ELSE 'update' END",
+			quotedDeletedAt,
+			quotedDeletedAt,
+		)
+	}
+
+	updateCleanupSQL := ""
+	if hasDeletedAt {
+		updateCleanupSQL = fmt.Sprintf(`
+	DELETE FROM _synchro_pending_changes
+	WHERE table_name = '%s' AND record_id = NEW.%s
+	  AND operation = 'delete'
+	  AND base_updated_at IS NULL;`, escapedName, quotedPK)
+	}
+
+	deleteTriggerSQL := fmt.Sprintf(`CREATE TRIGGER %s
+BEFORE DELETE ON %s
+WHEN %s
+BEGIN
+	UPDATE %s SET %s = %s WHERE %s = OLD.%s;
+	SELECT RAISE(IGNORE);
+END`, deleteTrigger, quotedTable, lockCheck, quotedTable, quotedDeletedAt, nowExpr, quotedPK, quotedPK)
+	if !hasDeletedAt {
+		deleteTriggerSQL = fmt.Sprintf(`CREATE TRIGGER %s
+AFTER DELETE ON %s
+WHEN %s
+BEGIN
+	INSERT INTO _synchro_pending_changes (record_id, table_name, operation, base_updated_at, client_updated_at)
+	VALUES (OLD.%s, '%s', 'delete', %s, %s)
+	ON CONFLICT (table_name, record_id) DO UPDATE SET
+		operation = 'delete',
+		base_updated_at = COALESCE(_synchro_pending_changes.base_updated_at, excluded.base_updated_at),
+		client_updated_at = excluded.client_updated_at;
+END`, deleteTrigger, quotedTable, lockCheck, quotedPK, escapedName, baseUpdatedAtExpr, nowExpr)
+	}
 
 	return []string{
 		fmt.Sprintf("DROP TRIGGER IF EXISTS %s", insertTrigger),
@@ -807,8 +860,8 @@ BEGIN
 	INSERT INTO _synchro_pending_changes (record_id, table_name, operation, base_updated_at, client_updated_at)
 	VALUES (
 		NEW.%s, '%s',
-		CASE WHEN NEW.%s IS NOT NULL AND OLD.%s IS NULL THEN 'delete' ELSE 'update' END,
-		OLD.%s,
+		%s,
+		%s,
 		%s
 	)
 	ON CONFLICT (table_name, record_id) DO UPDATE SET
@@ -822,18 +875,9 @@ BEGIN
 			ELSE COALESCE(_synchro_pending_changes.base_updated_at, excluded.base_updated_at)
 		END,
 		client_updated_at = excluded.client_updated_at;
-	DELETE FROM _synchro_pending_changes
-	WHERE table_name = '%s' AND record_id = NEW.%s
-	  AND operation = 'delete'
-	  AND base_updated_at IS NULL;
-END`, updateTrigger, quotedTable, lockCheck, quotedPK, escapedName, quotedDeletedAt, quotedDeletedAt, quotedUpdatedAt, nowExpr, escapedName, quotedPK),
-		fmt.Sprintf(`CREATE TRIGGER %s
-BEFORE DELETE ON %s
-WHEN %s
-BEGIN
-	UPDATE %s SET %s = %s WHERE %s = OLD.%s;
-	SELECT RAISE(IGNORE);
-END`, deleteTrigger, quotedTable, lockCheck, quotedTable, quotedDeletedAt, nowExpr, quotedPK, quotedPK),
+%s
+END`, updateTrigger, quotedTable, lockCheck, quotedPK, escapedName, updateOperationExpr, baseUpdatedAtExpr, nowExpr, updateCleanupSQL),
+		deleteTriggerSQL,
 	}
 }
 

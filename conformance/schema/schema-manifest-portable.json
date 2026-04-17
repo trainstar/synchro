@@ -20,27 +20,27 @@
         "columns": [
           {
             "name": "id",
-            "type": "uuid",
+            "type": "string",
             "nullable": false
           },
           {
             "name": "name",
-            "type": "text",
+            "type": "string",
             "nullable": false
           },
           {
             "name": "updated_at",
-            "type": "timestamp",
+            "type": "datetime",
             "nullable": false
           },
           {
             "name": "deleted_at",
-            "type": "timestamp",
+            "type": "datetime",
             "nullable": true
           },
           {
             "name": "started_at",
-            "type": "timestamp",
+            "type": "datetime",
             "nullable": true
           }
         ],
@@ -64,27 +64,27 @@
         "columns": [
           {
             "name": "id",
-            "type": "uuid",
+            "type": "string",
             "nullable": false
           },
           {
             "name": "user_id",
-            "type": "uuid",
+            "type": "string",
             "nullable": true
           },
           {
             "name": "name",
-            "type": "text",
+            "type": "string",
             "nullable": false
           },
           {
             "name": "updated_at",
-            "type": "timestamp",
+            "type": "datetime",
             "nullable": false
           },
           {
             "name": "deleted_at",
-            "type": "timestamp",
+            "type": "datetime",
             "nullable": true
           }
         ]

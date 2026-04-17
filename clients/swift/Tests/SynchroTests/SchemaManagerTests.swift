@@ -119,10 +119,10 @@ final class SchemaManagerTests: XCTestCase {
                 deletedAtColumn: "deleted_at",
                 composition: .singleScope,
                 columns: [
-                    VNextColumnSchema(name: "id", type: "uuid", nullable: false),
-                    VNextColumnSchema(name: "name", type: "text", nullable: false),
-                    VNextColumnSchema(name: "updated_at", type: "timestamp", nullable: false),
-                    VNextColumnSchema(name: "deleted_at", type: "timestamp", nullable: true),
+                    VNextColumnSchema(name: "id", type: "string", nullable: false),
+                    VNextColumnSchema(name: "name", type: "string", nullable: false),
+                    VNextColumnSchema(name: "updated_at", type: "datetime", nullable: false),
+                    VNextColumnSchema(name: "deleted_at", type: "datetime", nullable: true),
                 ],
                 indexes: nil
             )
@@ -156,10 +156,10 @@ final class SchemaManagerTests: XCTestCase {
                 deletedAtColumn: "deleted_at",
                 composition: .singleScope,
                 columns: [
-                    VNextColumnSchema(name: "id", type: "uuid", nullable: false),
-                    VNextColumnSchema(name: "name", type: "text", nullable: false),
-                    VNextColumnSchema(name: "updated_at", type: "timestamp", nullable: false),
-                    VNextColumnSchema(name: "deleted_at", type: "timestamp", nullable: true),
+                    VNextColumnSchema(name: "id", type: "string", nullable: false),
+                    VNextColumnSchema(name: "name", type: "string", nullable: false),
+                    VNextColumnSchema(name: "updated_at", type: "datetime", nullable: false),
+                    VNextColumnSchema(name: "deleted_at", type: "datetime", nullable: true),
                 ],
                 indexes: nil
             )
@@ -179,11 +179,11 @@ final class SchemaManagerTests: XCTestCase {
                 deletedAtColumn: "deleted_at",
                 composition: .singleScope,
                 columns: [
-                    VNextColumnSchema(name: "id", type: "uuid", nullable: false),
-                    VNextColumnSchema(name: "name", type: "text", nullable: false),
-                    VNextColumnSchema(name: "notes", type: "text", nullable: true),
-                    VNextColumnSchema(name: "updated_at", type: "timestamp", nullable: false),
-                    VNextColumnSchema(name: "deleted_at", type: "timestamp", nullable: true),
+                    VNextColumnSchema(name: "id", type: "string", nullable: false),
+                    VNextColumnSchema(name: "name", type: "string", nullable: false),
+                    VNextColumnSchema(name: "notes", type: "string", nullable: true),
+                    VNextColumnSchema(name: "updated_at", type: "datetime", nullable: false),
+                    VNextColumnSchema(name: "deleted_at", type: "datetime", nullable: true),
                 ],
                 indexes: nil
             )
@@ -195,6 +195,74 @@ final class SchemaManagerTests: XCTestCase {
         XCTAssertNotNil(row)
         XCTAssertEqual(row?["name"] as? String, "Morning Run")
         XCTAssertNil(row?["notes"])
+    }
+
+    func testPortableManifestAliasTypesNormalizeWithoutTriggeringRebuild() throws {
+        let db = try makeTestDB()
+        let manager = SchemaManager(database: db)
+
+        let canonical = makeManifest(tables: [
+            VNextTableSchema(
+                name: "metrics",
+                primaryKey: ["id"],
+                updatedAtColumn: "updated_at",
+                deletedAtColumn: "deleted_at",
+                composition: .singleScope,
+                columns: [
+                    VNextColumnSchema(name: "id", type: "string", nullable: false),
+                    VNextColumnSchema(name: "score", type: "int", nullable: true),
+                    VNextColumnSchema(name: "updated_at", type: "datetime", nullable: false),
+                    VNextColumnSchema(name: "deleted_at", type: "datetime", nullable: true),
+                ],
+                indexes: nil
+            )
+        ])
+        try manager.reconcileLocalSchema(
+            schemaVersion: 1,
+            schemaHash: "canonical-v1",
+            tables: try canonical.localTables()
+        )
+        _ = try db.execute(
+            "INSERT INTO metrics (id, score, updated_at) VALUES ('m-1', 7, '2026-01-01T00:00:00Z')",
+            params: nil
+        )
+        try db.writeTransaction { grdb in
+            try SynchroMeta.set(grdb, key: .snapshotComplete, value: "1")
+        }
+
+        let aliasManifest = makeManifest(tables: [
+            VNextTableSchema(
+                name: "metrics",
+                primaryKey: ["id"],
+                updatedAtColumn: "updated_at",
+                deletedAtColumn: "deleted_at",
+                composition: .singleScope,
+                columns: [
+                    VNextColumnSchema(name: "id", type: "uuid", nullable: false),
+                    VNextColumnSchema(name: "score", type: "integer", nullable: true),
+                    VNextColumnSchema(name: "updated_at", type: "timestamp", nullable: false),
+                    VNextColumnSchema(name: "deleted_at", type: "timestamp", nullable: true),
+                ],
+                indexes: nil
+            )
+        ])
+        let normalizedTables = try aliasManifest.localTables()
+        XCTAssertEqual(normalizedTables[0].columns.map(\.logicalType), ["string", "int", "datetime", "datetime"])
+
+        try manager.reconcileLocalSchema(
+            schemaVersion: 2,
+            schemaHash: "alias-v2",
+            tables: normalizedTables
+        )
+
+        let row = try db.queryOne("SELECT score FROM metrics WHERE id = ?", params: ["m-1"])
+        XCTAssertNotNil(row)
+        XCTAssertEqual(row?["score"] as? Int64, 7)
+
+        let snapshotComplete = try db.readTransaction { grdb in
+            try SynchroMeta.get(grdb, key: .snapshotComplete)
+        }
+        XCTAssertEqual(snapshotComplete, "1")
     }
 
     // MARK: - 2. testMigrateSchemaAddsColumn

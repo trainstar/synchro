@@ -1,6 +1,8 @@
 use pgrx::prelude::*;
 use pgrx::spi::SpiClient;
-use synchro_core::contract::{ColumnSchema, IndexSchema, SchemaManifest, TableSchema};
+use synchro_core::contract::{
+    normalize_portable_type_name, ColumnSchema, IndexSchema, SchemaManifest, TableSchema,
+};
 
 /// Return the full schema contract for all registered tables.
 ///
@@ -49,7 +51,7 @@ fn synchro_tables() -> pgrx::JsonB {
 
         let tup_table = match client.select(
             "SELECT table_name, push_policy, pk_column, updated_at_col, \
-             deleted_at_col, exclude_columns \
+             deleted_at_col, sync_columns, exclude_columns, has_updated_at, has_deleted_at \
              FROM sync_registry ORDER BY table_name",
             None,
             &[],
@@ -80,18 +82,31 @@ fn synchro_tables() -> pgrx::JsonB {
                 .get_by_name::<String, &str>("deleted_at_col")
                 .unwrap_or(None)
                 .unwrap_or_default();
+            let sync_columns: Vec<String> = row
+                .get_by_name::<Vec<String>, &str>("sync_columns")
+                .unwrap_or(None)
+                .unwrap_or_default();
             let exclude_columns: Vec<String> = row
                 .get_by_name::<Vec<String>, &str>("exclude_columns")
                 .unwrap_or(None)
                 .unwrap_or_default();
+            let has_updated_at: bool = row
+                .get_by_name::<bool, &str>("has_updated_at")
+                .unwrap_or(None)
+                .unwrap_or(false);
+            let has_deleted_at: bool = row
+                .get_by_name::<bool, &str>("has_deleted_at")
+                .unwrap_or(None)
+                .unwrap_or(false);
 
             tables.push(serde_json::json!({
                 "table_name": table_name,
                 "push_policy": push_policy,
                 "dependencies": [],
                 "pk_column": pk_column,
-                "updated_at_column": updated_at_col,
-                "deleted_at_column": deleted_at_col,
+                "updated_at_column": optional_sync_column_name(has_updated_at, &updated_at_col),
+                "deleted_at_column": optional_sync_column_name(has_deleted_at, &deleted_at_col),
+                "sync_columns": sync_columns,
                 "exclude_columns": exclude_columns,
             }));
         }
@@ -150,57 +165,34 @@ fn server_time_str(client: &SpiClient<'_>) -> String {
 }
 
 fn build_table_schemas(client: &SpiClient<'_>) -> Vec<serde_json::Value> {
-    let reg_tup = match client.select(
-        "SELECT table_name, push_policy, pk_column, updated_at_col, \
-         deleted_at_col, exclude_columns \
-         FROM sync_registry ORDER BY table_name",
-        None,
-        &[],
-    ) {
-        Ok(t) => t,
+    let mut tables: Vec<serde_json::Value> = Vec::new();
+    let registrations = match crate::registry::load_registry_from_client(client) {
+        Ok(registrations) => registrations,
         Err(_) => return vec![],
     };
 
-    let mut table_names: Vec<(String, String, String, String, String, Vec<String>)> = Vec::new();
-    for row in reg_tup {
-        let tn: String = row
-            .get_by_name("table_name")
-            .unwrap_or(None)
-            .unwrap_or_default();
-        let pp: String = row
-            .get_by_name("push_policy")
-            .unwrap_or(None)
-            .unwrap_or_default();
-        let pk: String = row
-            .get_by_name("pk_column")
-            .unwrap_or(None)
-            .unwrap_or_default();
-        let ua: String = row
-            .get_by_name("updated_at_col")
-            .unwrap_or(None)
-            .unwrap_or_default();
-        let da: String = row
-            .get_by_name("deleted_at_col")
-            .unwrap_or(None)
-            .unwrap_or_default();
-        let ec: Vec<String> = row
-            .get_by_name("exclude_columns")
-            .unwrap_or(None)
-            .unwrap_or_default();
-        table_names.push((tn, pp, pk, ua, da, ec));
-    }
-
-    let mut tables: Vec<serde_json::Value> = Vec::new();
-    for (table_name, push_policy, pk_col, ua, da, _ec) in &table_names {
-        let columns = introspect_columns(client, table_name, pk_col);
+    for registration in registrations {
+        let columns = introspect_columns(
+            client,
+            &registration.table_name,
+            &registration.pk_column,
+            &registration.sync_columns,
+        );
+        let table_name = registration.table_name.clone();
+        let pk_column = registration.pk_column.clone();
+        let updated_at_column =
+            optional_sync_column_name(registration.has_updated_at, &registration.updated_at_col);
+        let deleted_at_column =
+            optional_sync_column_name(registration.has_deleted_at, &registration.deleted_at_col);
+        let push_policy = registration.push_policy.as_str();
 
         tables.push(serde_json::json!({
             "table_name": table_name,
             "push_policy": push_policy,
             "dependencies": [],
-            "updated_at_column": ua,
-            "deleted_at_column": da,
-            "primary_key": [pk_col],
+            "updated_at_column": updated_at_column,
+            "deleted_at_column": deleted_at_column,
+            "primary_key": [pk_column],
             "columns": columns,
         }));
     }
@@ -208,54 +200,51 @@ fn build_table_schemas(client: &SpiClient<'_>) -> Vec<serde_json::Value> {
 }
 
 pub(crate) fn build_schema_manifest(client: &SpiClient<'_>) -> SchemaManifest {
-    let reg_tup = match client.select(
-        "SELECT table_name, push_policy, pk_column, updated_at_col, \
-         deleted_at_col, exclude_columns \
-         FROM sync_registry ORDER BY table_name",
-        None,
-        &[],
-    ) {
-        Ok(t) => t,
+    let mut tables = Vec::new();
+    let registrations = match crate::registry::load_registry_from_client(client) {
+        Ok(registrations) => registrations,
         Err(_) => return SchemaManifest { tables: vec![] },
     };
 
-    let mut tables = Vec::new();
-    for row in reg_tup {
-        let table_name: String = row
-            .get_by_name("table_name")
-            .unwrap_or(None)
-            .unwrap_or_default();
-        let pk_column: String = row
-            .get_by_name("pk_column")
-            .unwrap_or(None)
-            .unwrap_or_default();
-
+    for registration in registrations {
         tables.push(TableSchema {
-            name: table_name.clone(),
-            primary_key: Some(vec![pk_column.clone()]),
-            updated_at_column: Some(
-                row.get_by_name::<String, &str>("updated_at_col")
-                    .unwrap_or(None)
-                    .unwrap_or_default(),
+            name: registration.table_name.clone(),
+            primary_key: Some(vec![registration.pk_column.clone()]),
+            updated_at_column: optional_sync_column_name(
+                registration.has_updated_at,
+                &registration.updated_at_col,
             ),
-            deleted_at_column: Some(
-                row.get_by_name::<String, &str>("deleted_at_col")
-                    .unwrap_or(None)
-                    .unwrap_or_default(),
+            deleted_at_column: optional_sync_column_name(
+                registration.has_deleted_at,
+                &registration.deleted_at_col,
             ),
             composition: None,
-            columns: Some(introspect_manifest_columns(client, &table_name, &pk_column)),
-            indexes: Some(introspect_manifest_indexes(client, &table_name)),
+            columns: Some(introspect_manifest_columns(
+                client,
+                &registration.table_name,
+                &registration.pk_column,
+                &registration.sync_columns,
+            )),
+            indexes: Some(introspect_manifest_indexes(
+                client,
+                &registration.table_name,
+                &registration.sync_columns,
+            )),
         });
     }
 
-    SchemaManifest { tables }
+    let manifest = SchemaManifest { tables };
+    if let Err(err) = manifest.validate() {
+        pgrx::error!("building portable schema manifest: {}", err);
+    }
+    manifest
 }
 
 fn introspect_columns(
     client: &SpiClient<'_>,
     table_name: &str,
     pk_column: &str,
+    sync_columns: &[String],
 ) -> Vec<serde_json::Value> {
     let tup = match client.select(
         "SELECT jsonb_build_object(
@@ -283,10 +272,20 @@ fn introspect_columns(
         Err(_) => return vec![],
     };
 
+    let sync_column_set: std::collections::HashSet<&str> =
+        sync_columns.iter().map(|column| column.as_str()).collect();
     let mut columns: Vec<serde_json::Value> = Vec::new();
     for row in tup {
         if let Some(json) = row.get::<pgrx::JsonB>(1).unwrap_or(None) {
             let mut column = json.0;
+            let is_synced = column
+                .get("name")
+                .and_then(|value| value.as_str())
+                .map(|name| sync_column_set.contains(name))
+                .unwrap_or(false);
+            if !is_synced {
+                continue;
+            }
             if let Some(obj) = column.as_object_mut() {
                 let db_type = obj
                     .get("db_type")
@@ -307,8 +306,9 @@ fn introspect_manifest_columns(
     client: &SpiClient<'_>,
     table_name: &str,
     pk_column: &str,
+    sync_columns: &[String],
 ) -> Vec<ColumnSchema> {
-    introspect_columns(client, table_name, pk_column)
+    introspect_columns(client, table_name, pk_column, sync_columns)
         .into_iter()
         .filter_map(|column| {
             let name = column.get("name").and_then(|value| value.as_str())?;
@@ -324,10 +324,14 @@ fn introspect_manifest_columns(
         .collect()
 }
 
-fn introspect_manifest_indexes(client: &SpiClient<'_>, table_name: &str) -> Vec<IndexSchema> {
+fn introspect_manifest_indexes(
+    client: &SpiClient<'_>,
+    table_name: &str,
+    sync_columns: &[String],
+) -> Vec<IndexSchema> {
     let tup = match client.select(
-        "SELECT idx.indexname AS name, \
-         array_agg(att.attname ORDER BY key_pos.ordinality) AS columns \
+        "SELECT idx.indexname::text AS name, \
+         array_agg(att.attname::text ORDER BY key_pos.ordinality) AS columns \
          FROM pg_indexes idx \
          JOIN pg_class c ON c.relname = idx.tablename \
          JOIN pg_namespace n ON n.oid = c.relnamespace \
@@ -347,6 +351,8 @@ fn introspect_manifest_indexes(client: &SpiClient<'_>, table_name: &str) -> Vec<
         Err(_) => return vec![],
     };
 
+    let sync_column_set: std::collections::HashSet<&str> =
+        sync_columns.iter().map(|column| column.as_str()).collect();
     let mut indexes = Vec::new();
     for row in tup {
         let name: String = row
@@ -357,6 +363,12 @@ fn introspect_manifest_indexes(client: &SpiClient<'_>, table_name: &str) -> Vec<
             .get_by_name::<Vec<String>, &str>("columns")
             .unwrap_or(None)
             .unwrap_or_default();
+        if columns
+            .iter()
+            .any(|column| !sync_column_set.contains(column.as_str()))
+        {
+            continue;
+        }
         if !name.is_empty() && !columns.is_empty() {
             indexes.push(IndexSchema { name, columns });
         }
@@ -365,20 +377,37 @@ fn introspect_manifest_indexes(client: &SpiClient<'_>, table_name: &str) -> Vec<
     indexes
 }
 
-fn portable_type_name(db_type: &str) -> String {
-    match db_type {
-        "uuid" => "uuid".into(),
-        "text" | "character varying" | "character" => "text".into(),
-        "boolean" => "boolean".into(),
-        "integer" => "integer".into(),
-        "bigint" => "bigint".into(),
-        "numeric" => "numeric".into(),
-        "json" | "jsonb" => "json".into(),
-        "bytea" => "bytes".into(),
-        "real" | "double precision" => "float".into(),
-        "timestamp with time zone" | "timestamp without time zone" => "timestamp".into(),
-        _ => db_type.to_string(),
+fn optional_sync_column_name(enabled: bool, column_name: &str) -> Option<String> {
+    if !enabled {
+        return None;
     }
+
+    let trimmed = column_name.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
+fn portable_type_name(db_type: &str) -> String {
+    let normalized = db_type.trim().to_ascii_lowercase();
+
+    if let Some(type_name) = normalize_portable_type_name(normalized.as_str()) {
+        return type_name.to_string();
+    }
+
+    if normalized.starts_with("numeric(") || normalized.starts_with("decimal(") {
+        return "float".into();
+    }
+    if normalized.starts_with("character varying")
+        || normalized.starts_with("varchar(")
+        || normalized.starts_with("character(")
+    {
+        return "string".into();
+    }
+
+    db_type.to_string()
 }
 
 fn legacy_logical_type(db_type: &str) -> &'static str {
@@ -398,10 +427,20 @@ fn legacy_logical_type(db_type: &str) -> &'static str {
         || normalized.starts_with("character(")
         || normalized.starts_with("character ")
         || normalized == "character"
+        || normalized == "interval"
         || normalized == "inet"
         || normalized == "cidr"
         || normalized == "macaddr"
+        || normalized == "macaddr8"
         || normalized == "xml"
+        || normalized == "point"
+        || normalized == "line"
+        || normalized == "lseg"
+        || normalized == "box"
+        || normalized == "path"
+        || normalized == "polygon"
+        || normalized == "circle"
+        || normalized.ends_with("range")
     {
         return "string";
     }

@@ -22,7 +22,7 @@
       "operation": "add_column",
       "column": {
         "name": "notes",
-        "type": "text",
+        "type": "string",
         "nullable": true
       }
     }

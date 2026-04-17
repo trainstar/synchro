@@ -64,37 +64,22 @@ class SyncEngine(
             }
 
             database.ensureScopeTables()
-
-            val connectResponse = connect()
-            val connectSchema = resolveConnectSchema(connectResponse)
-            syncedTables = connectSchema.first
-            schemaVersion = connectSchema.second.first
-            schemaHash = connectSchema.second.second
-
-            applyScopeAssignmentDelta(
-                connectResponse.scopes,
-                connectResponse.scopeSetVersion
-            )
-
-            updateStatus(SyncStatus.Idle)
-
-            rebuildAssignedScopesNeedingCursor()
-
-            // Start sync loop
-            syncJob = scope!!.launch {
-                syncLoop()
-            }
-
-            // Start watching for pending changes (debounced push)
-            startPendingObserver()
-
-            // Run initial sync
-            runSyncCycleWithRetry()
-            options?.initialSyncCompleted?.invoke()
         } catch (e: Exception) {
             started.set(false)
             scope?.cancel()
             scope = null
+            throw e
+        }
+
+        val startupGate = CompletableDeferred<Unit>()
+        syncJob = scope!!.launch {
+            runManagedLoop(startupGate, options)
+        }
+
+        try {
+            startupGate.await()
+        } catch (e: Exception) {
+            teardownAfterFailedStart()
             throw e
         }
     }
@@ -144,6 +129,78 @@ class SyncEngine(
                 // Error already handled in runSyncCycleWithRetry
             }
         }
+    }
+
+    private suspend fun runManagedLoop(
+        startupGate: CompletableDeferred<Unit>,
+        options: SyncOptions?
+    ) {
+        val startupCompleted = runStartupSequence(startupGate, options)
+        if (!startupCompleted) return
+        syncLoop()
+    }
+
+    private suspend fun runStartupSequence(
+        startupGate: CompletableDeferred<Unit>,
+        options: SyncOptions?
+    ): Boolean {
+        var startupAttempt = 0
+        var gateResolved = false
+
+        while (currentCoroutineContext().isActive) {
+            try {
+                val connectResponse = connect()
+                val connectSchema = resolveConnectSchema(connectResponse)
+                syncedTables = connectSchema.first
+                schemaVersion = connectSchema.second.first
+                schemaHash = connectSchema.second.second
+
+                applyScopeAssignmentDelta(
+                    connectResponse.scopes,
+                    connectResponse.scopeSetVersion
+                )
+
+                updateStatus(SyncStatus.Idle)
+
+                rebuildAssignedScopesNeedingCursor()
+                runSyncCycleWithRetry()
+                startPendingObserver()
+
+                if (!gateResolved) {
+                    startupGate.complete(Unit)
+                }
+                options?.initialSyncCompleted?.invoke()
+                return true
+            } catch (e: CancellationException) {
+                if (!gateResolved) {
+                    startupGate.complete(Unit)
+                }
+                throw e
+            } catch (e: RetryableError) {
+                startupAttempt++
+                val delayMs = retryDelay(startupAttempt, e.retryAfter)
+                val retryAt = java.time.Instant.now().plusMillis((delayMs * 1000).toLong())
+                updateStatus(SyncStatus.Error(retryAt = retryAt))
+                if (!gateResolved) {
+                    startupGate.complete(Unit)
+                    gateResolved = true
+                }
+                delay((delayMs * 1000).toLong())
+            } catch (e: Exception) {
+                handleSyncError(e)
+                if (gateResolved) {
+                    finishStartupFailure()
+                } else {
+                    startupGate.completeExceptionally(e)
+                }
+                return false
+            }
+        }
+
+        if (!gateResolved) {
+            startupGate.complete(Unit)
+        }
+        return false
     }
 
     // MARK: - Retry
@@ -452,6 +509,7 @@ class SyncEngine(
     // MARK: - Debounce
 
     private fun startPendingObserver() {
+        if (pendingObserver != null) return
         pendingObserver = database.onChange(listOf("_synchro_pending_changes")) {
             scheduleDebouncedPush()
         }
@@ -483,6 +541,33 @@ class SyncEngine(
         } else {
             updateStatus(SyncStatus.Error(retryAt = null))
         }
+    }
+
+    private fun teardownAfterFailedStart() {
+        syncJob?.cancel()
+        syncJob = null
+        debounceJob?.cancel()
+        debounceJob = null
+        pendingObserver?.cancel()
+        pendingObserver = null
+        scope?.cancel()
+        scope = null
+        started.set(false)
+        cycleRunning.set(false)
+        cycleQueued.set(false)
+    }
+
+    private fun finishStartupFailure() {
+        syncJob = null
+        debounceJob?.cancel()
+        debounceJob = null
+        pendingObserver?.cancel()
+        pendingObserver = null
+        scope?.cancel()
+        scope = null
+        started.set(false)
+        cycleRunning.set(false)
+        cycleQueued.set(false)
     }
 
     // MARK: - Status

@@ -32,12 +32,15 @@ CREATE TABLE IF NOT EXISTS sync_registry (
     updated_at_col TEXT NOT NULL DEFAULT 'updated_at',
     deleted_at_col TEXT NOT NULL DEFAULT 'deleted_at',
     push_policy TEXT NOT NULL DEFAULT 'enabled',
+    sync_columns TEXT[] NOT NULL DEFAULT '{}',
     exclude_columns TEXT[] NOT NULL DEFAULT '{}',
     has_updated_at BOOLEAN NOT NULL DEFAULT true,
     has_deleted_at BOOLEAN NOT NULL DEFAULT true,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+ALTER TABLE sync_registry
+    ADD COLUMN IF NOT EXISTS sync_columns TEXT[] NOT NULL DEFAULT '{}';
 
 CREATE TABLE IF NOT EXISTS sync_changelog (
     seq BIGSERIAL PRIMARY KEY,
@@ -286,6 +289,111 @@ mod tests {
         .unwrap();
     }
 
+    fn setup_sync_columns_table() {
+        setup_test_tables();
+
+        Spi::run(
+            "CREATE TABLE IF NOT EXISTS test_sync_columns_items (
+                id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                user_id TEXT NOT NULL,
+                title TEXT NOT NULL DEFAULT '',
+                search_vector TEXT DEFAULT '',
+                internal_notes TEXT DEFAULT '',
+                created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                deleted_at TIMESTAMPTZ
+            )",
+        )
+        .unwrap();
+        Spi::run(
+            "CREATE INDEX IF NOT EXISTS idx_test_sync_columns_items_title
+             ON test_sync_columns_items (title)",
+        )
+        .unwrap();
+        Spi::run(
+            "CREATE INDEX IF NOT EXISTS idx_test_sync_columns_items_search_vector
+             ON test_sync_columns_items (search_vector)",
+        )
+        .unwrap();
+        Spi::run(
+            "SELECT synchro_register_table(
+                'test_sync_columns_items',
+                $$SELECT ARRAY['user:' || user_id] FROM test_sync_columns_items WHERE id = $1::uuid$$,
+                'id',
+                'updated_at',
+                'deleted_at',
+                'enabled',
+                ARRAY[]::text[],
+                ARRAY['id', 'user_id', 'title', 'updated_at', 'deleted_at']
+            )",
+        )
+        .unwrap();
+    }
+
+    fn setup_portable_type_contract_table() {
+        setup_test_tables();
+
+        Spi::run(
+            "CREATE TABLE IF NOT EXISTS test_portable_type_contract (
+                id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                user_id TEXT NOT NULL,
+                label TEXT NOT NULL DEFAULT '',
+                col_smallint SMALLINT,
+                col_integer INTEGER,
+                col_bigint BIGINT,
+                col_numeric NUMERIC(5,1),
+                col_real REAL,
+                col_double DOUBLE PRECISION,
+                col_timestamp TIMESTAMPTZ,
+                col_interval INTERVAL,
+                col_json JSONB,
+                col_blob BYTEA,
+                col_text_array TEXT[],
+                col_int_array INTEGER[],
+                col_inet INET,
+                col_point POINT,
+                col_int4range INT4RANGE,
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                deleted_at TIMESTAMPTZ
+            )",
+        )
+        .unwrap();
+
+        Spi::run(
+            "SELECT synchro_register_table(
+                p_table_name := 'test_portable_type_contract',
+                p_bucket_sql := $$SELECT ARRAY['user:' || user_id] FROM test_portable_type_contract WHERE id = $1::uuid$$,
+                p_pk_column := 'id',
+                p_updated_at_col := 'updated_at',
+                p_deleted_at_col := 'deleted_at',
+                p_push_policy := 'enabled',
+                p_sync_columns := ARRAY[
+                    'id',
+                    'user_id',
+                    'label',
+                    'col_smallint',
+                    'col_integer',
+                    'col_bigint',
+                    'col_numeric',
+                    'col_real',
+                    'col_double',
+                    'col_timestamp',
+                    'col_interval',
+                    'col_json',
+                    'col_blob',
+                    'col_text_array',
+                    'col_int_array',
+                    'col_inet',
+                    'col_point',
+                    'col_int4range',
+                    'updated_at',
+                    'deleted_at'
+                ]
+            )",
+        )
+        .unwrap();
+    }
+
     /// Register a test client and return the raw JSONB response.
     fn register_client(user_id: &str, client_id: &str) -> Value {
         let row: Option<pgrx::JsonB> = Spi::get_one_with_args(
@@ -399,6 +507,32 @@ mod tests {
         let version: Option<i64> =
             Spi::get_one("SELECT MAX(schema_version) FROM sync_schema_manifest").unwrap();
         assert!(version.unwrap_or(0) > 0);
+    }
+
+    #[pg_test]
+    fn test_register_table_rejects_conflicting_column_selection() {
+        setup_test_tables();
+
+        let result = std::panic::catch_unwind(|| {
+            Spi::run(
+                "SELECT synchro_register_table(
+                    'test_orders',
+                    $$SELECT ARRAY['user:' || user_id] FROM test_orders WHERE id = $1::uuid$$,
+                    'id',
+                    'updated_at',
+                    'deleted_at',
+                    'enabled',
+                    ARRAY['internal_notes'],
+                    ARRAY['id', 'user_id', 'title', 'updated_at', 'deleted_at']
+                )",
+            )
+            .unwrap();
+        });
+
+        assert!(
+            result.is_err(),
+            "registration should reject simultaneous sync_columns and exclude_columns"
+        );
     }
 
     #[pg_test]
@@ -1358,6 +1492,39 @@ mod tests {
     }
 
     #[pg_test]
+    fn test_push_create_strips_non_synced_columns() {
+        setup_sync_columns_table();
+        register_client("u1", "c1");
+
+        let resp: Option<pgrx::JsonB> = Spi::get_one_with_args(
+            "SELECT synchro_push($1, $2, $3::jsonb, 0, '')",
+            &[
+                "u1".into(),
+                "c1".into(),
+                r#"[{"id":"55555555-5555-5555-5555-555555555555","table_name":"test_sync_columns_items","operation":"create","data":{"user_id":"u1","title":"Sync columns","search_vector":"fts","internal_notes":"secret"}}]"#.into(),
+            ],
+        )
+        .unwrap();
+        let resp = resp.unwrap().0;
+        assert_eq!(resp["accepted"][0]["status"].as_str().unwrap(), "applied");
+
+        let row: Option<pgrx::JsonB> = Spi::get_one(
+            "SELECT jsonb_build_object(
+                'title', title,
+                'search_vector', search_vector,
+                'internal_notes', internal_notes
+             )
+             FROM test_sync_columns_items
+             WHERE id = '55555555-5555-5555-5555-555555555555'",
+        )
+        .unwrap();
+        let row = row.expect("inserted row should exist").0;
+        assert_eq!(row["title"].as_str(), Some("Sync columns"));
+        assert_eq!(row["search_vector"].as_str(), Some(""));
+        assert_eq!(row["internal_notes"].as_str(), Some(""));
+    }
+
+    #[pg_test]
     fn test_push_create_duplicate_conflict() {
         setup_test_tables();
         register_client("u1", "c1");
@@ -2154,6 +2321,59 @@ mod tests {
     }
 
     #[pg_test]
+    fn test_pull_sync_columns_strip_non_synced_fields() {
+        setup_sync_columns_table();
+        register_client("u1", "c1");
+
+        Spi::run(
+            "INSERT INTO test_sync_columns_items (id, user_id, title, search_vector, internal_notes)
+             VALUES (
+                '44444444-4444-4444-4444-444444444444',
+                'u1',
+                'Projection test',
+                'fts data',
+                'server secret'
+             )",
+        )
+        .unwrap();
+        insert_edge(
+            "test_sync_columns_items",
+            "44444444-4444-4444-4444-444444444444",
+            "user:u1",
+        );
+        insert_changelog(
+            "user:u1",
+            "test_sync_columns_items",
+            "44444444-4444-4444-4444-444444444444",
+            1,
+        );
+
+        let resp: Option<pgrx::JsonB> = Spi::get_one_with_args(
+            "SELECT synchro_pull($1, $2, 0, NULL, 100, NULL, NULL, 0, '')",
+            &["u1".into(), "c1".into()],
+        )
+        .unwrap();
+        let resp = resp.unwrap().0;
+
+        let change = resp["changes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|change| change["table_name"].as_str() == Some("test_sync_columns_items"))
+            .expect("test_sync_columns_items should be present in pull response");
+        let data = &change["data"];
+        assert_eq!(data["title"].as_str(), Some("Projection test"));
+        assert!(
+            data.get("search_vector").is_none(),
+            "non-synced search_vector should be stripped from pull response"
+        );
+        assert!(
+            data.get("internal_notes").is_none(),
+            "non-synced internal_notes should be stripped from pull response"
+        );
+    }
+
+    #[pg_test]
     fn test_pull_bucket_isolation() {
         setup_test_tables();
         register_client("u1", "c1");
@@ -2733,10 +2953,142 @@ mod tests {
         let columns = orders.columns.as_ref().expect("columns should be present");
         assert!(columns
             .iter()
-            .any(|column| { column.name == "user_id" && column.type_name == "text" }));
+            .any(|column| { column.name == "user_id" && column.type_name == "string" }));
         assert!(columns
             .iter()
-            .any(|column| { column.name == "updated_at" && column.type_name == "timestamp" }));
+            .any(|column| { column.name == "updated_at" && column.type_name == "datetime" }));
+        assert!(
+            columns.iter().all(|column| column.name != "internal_notes"),
+            "exclude_columns must not leak into the portable manifest"
+        );
+        assert!(columns.iter().all(|column| {
+            synchro_core::contract::is_canonical_portable_type_name(&column.type_name)
+        }));
+    }
+
+    #[pg_test]
+    fn test_schema_surfaces_use_sync_columns_as_canonical_shape() {
+        setup_sync_columns_table();
+
+        let legacy: Option<pgrx::JsonB> = Spi::get_one("SELECT synchro_schema()").unwrap();
+        let legacy = legacy.unwrap().0;
+        let legacy_table = legacy["tables"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|table| table["table_name"].as_str() == Some("test_sync_columns_items"))
+            .expect("legacy schema should include test_sync_columns_items");
+        let legacy_columns = legacy_table["columns"].as_array().unwrap();
+        assert!(legacy_columns
+            .iter()
+            .any(|column| column["name"].as_str() == Some("title")));
+        assert!(legacy_columns
+            .iter()
+            .all(|column| column["name"].as_str() != Some("search_vector")));
+        assert!(legacy_columns
+            .iter()
+            .all(|column| column["name"].as_str() != Some("internal_notes")));
+
+        let manifest_resp: Option<pgrx::JsonB> =
+            Spi::get_one("SELECT synchro_schema_manifest()").unwrap();
+        let manifest_resp = manifest_resp.unwrap().0;
+        let manifest: synchro_core::contract::SchemaManifest =
+            serde_json::from_value(manifest_resp["manifest"].clone()).unwrap();
+        manifest.validate().unwrap();
+
+        let table = manifest
+            .tables
+            .iter()
+            .find(|table| table.name == "test_sync_columns_items")
+            .expect("portable schema manifest should include test_sync_columns_items");
+        let columns = table.columns.as_ref().expect("columns should be present");
+        assert!(columns.iter().any(|column| column.name == "title"));
+        assert!(columns.iter().all(|column| column.name != "search_vector"));
+        assert!(columns.iter().all(|column| column.name != "internal_notes"));
+
+        let indexes = table.indexes.as_ref().expect("indexes should be present");
+        assert!(indexes
+            .iter()
+            .any(|index| index.name == "idx_test_sync_columns_items_title"));
+        assert!(indexes
+            .iter()
+            .all(|index| index.name != "idx_test_sync_columns_items_search_vector"));
+    }
+
+    #[pg_test]
+    fn test_schema_surfaces_omit_missing_timestamp_columns() {
+        setup_test_tables();
+
+        let legacy: Option<pgrx::JsonB> = Spi::get_one("SELECT synchro_schema()").unwrap();
+        let legacy = legacy.unwrap().0;
+        let bare_items = legacy["tables"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|table| table["table_name"].as_str() == Some("test_bare_items"))
+            .expect("legacy schema should include test_bare_items");
+        assert!(bare_items["updated_at_column"].is_null());
+        assert!(bare_items["deleted_at_column"].is_null());
+
+        let manifest_resp: Option<pgrx::JsonB> =
+            Spi::get_one("SELECT synchro_schema_manifest()").unwrap();
+        let manifest_resp = manifest_resp.unwrap().0;
+        let manifest: synchro_core::contract::SchemaManifest =
+            serde_json::from_value(manifest_resp["manifest"].clone()).unwrap();
+        let bare_items = manifest
+            .tables
+            .iter()
+            .find(|table| table.name == "test_bare_items")
+            .expect("portable schema should include test_bare_items");
+        assert!(bare_items.updated_at_column.is_none());
+        assert!(bare_items.deleted_at_column.is_none());
+    }
+
+    #[pg_test]
+    fn test_schema_manifest_emits_canonical_portable_types() {
+        setup_portable_type_contract_table();
+
+        let manifest_resp: Option<pgrx::JsonB> =
+            Spi::get_one("SELECT synchro_schema_manifest()").unwrap();
+        let manifest_resp = manifest_resp.unwrap().0;
+        let manifest: synchro_core::contract::SchemaManifest =
+            serde_json::from_value(manifest_resp["manifest"].clone()).unwrap();
+        manifest.validate().unwrap();
+
+        let table = manifest
+            .tables
+            .iter()
+            .find(|table| table.name == "test_portable_type_contract")
+            .expect("portable schema manifest should include test_portable_type_contract");
+        let columns = table.columns.as_ref().expect("columns should be present");
+        let types: std::collections::HashMap<_, _> = columns
+            .iter()
+            .map(|column| (column.name.as_str(), column.type_name.as_str()))
+            .collect();
+
+        assert_eq!(types.get("id"), Some(&"string"));
+        assert_eq!(types.get("user_id"), Some(&"string"));
+        assert_eq!(types.get("label"), Some(&"string"));
+        assert_eq!(types.get("col_smallint"), Some(&"int"));
+        assert_eq!(types.get("col_integer"), Some(&"int"));
+        assert_eq!(types.get("col_bigint"), Some(&"int64"));
+        assert_eq!(types.get("col_numeric"), Some(&"float"));
+        assert_eq!(types.get("col_real"), Some(&"float"));
+        assert_eq!(types.get("col_double"), Some(&"float"));
+        assert_eq!(types.get("col_timestamp"), Some(&"datetime"));
+        assert_eq!(types.get("col_interval"), Some(&"string"));
+        assert_eq!(types.get("col_json"), Some(&"json"));
+        assert_eq!(types.get("col_blob"), Some(&"bytes"));
+        assert_eq!(types.get("col_text_array"), Some(&"json"));
+        assert_eq!(types.get("col_int_array"), Some(&"json"));
+        assert_eq!(types.get("col_inet"), Some(&"string"));
+        assert_eq!(types.get("col_point"), Some(&"string"));
+        assert_eq!(types.get("col_int4range"), Some(&"string"));
+        assert_eq!(types.get("updated_at"), Some(&"datetime"));
+        assert_eq!(types.get("deleted_at"), Some(&"datetime"));
+        assert!(columns.iter().all(|column| {
+            synchro_core::contract::is_canonical_portable_type_name(&column.type_name)
+        }));
     }
 
     #[pg_test]

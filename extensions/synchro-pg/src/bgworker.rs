@@ -82,7 +82,7 @@ pub extern "C-unwind" fn synchro_wal_worker_main(_arg: pg_sys::Datum) {
     );
 
     // Ensure the replication slot exists.
-    if let Err(e) = ensure_replication_slot() {
+    if let Err(e) = BackgroundWorker::transaction(ensure_replication_slot) {
         log!(
             "synchro WAL worker: failed to create replication slot: {}",
             e
@@ -91,7 +91,7 @@ pub extern "C-unwind" fn synchro_wal_worker_main(_arg: pg_sys::Datum) {
     }
 
     // Load registry and build decoder.
-    let mut registry = match load_registry_for_worker() {
+    let mut registry = match BackgroundWorker::transaction(load_registry_for_worker) {
         Ok(r) => r,
         Err(e) => {
             log!("synchro WAL worker: failed to load registry: {}", e);
@@ -100,7 +100,8 @@ pub extern "C-unwind" fn synchro_wal_worker_main(_arg: pg_sys::Datum) {
     };
 
     let mut decoder = build_decoder(&registry);
-    decoder.preload_relations(preload_relations_from_catalog(&registry));
+    let relations = BackgroundWorker::transaction(|| preload_relations_from_catalog(&registry));
+    decoder.preload_relations(relations);
 
     log!(
         "synchro WAL worker: registry loaded ({} tables), entering main loop",
@@ -111,9 +112,12 @@ pub extern "C-unwind" fn synchro_wal_worker_main(_arg: pg_sys::Datum) {
     while BackgroundWorker::wait_latch(Some(std::time::Duration::from_millis(IDLE_POLL_MS))) {
         if BackgroundWorker::sighup_received() {
             log!("synchro WAL worker: reloading registry");
-            match load_registry_for_worker() {
+            match BackgroundWorker::transaction(load_registry_for_worker) {
                 Ok(r) => {
                     decoder = build_decoder(&r);
+                    let relations =
+                        BackgroundWorker::transaction(|| preload_relations_from_catalog(&r));
+                    decoder.preload_relations(relations);
                     registry = r;
                 }
                 Err(e) => {
@@ -211,41 +215,56 @@ fn preload_relations_from_catalog(
 fn ensure_replication_slot() -> Result<(), String> {
     let slot = replication_slot();
     let pub_name = publication_name();
+    Spi::connect_mut(|client| {
+        let mut slot_exists = false;
+        let slot_rows = client
+            .select(
+                "SELECT EXISTS (SELECT 1 FROM pg_replication_slots WHERE slot_name = $1)",
+                None,
+                &[slot.as_str().into()],
+            )
+            .map_err(|e| format!("checking replication slot: {e}"))?;
+        for row in slot_rows {
+            slot_exists = row.get::<bool>(1).ok().flatten().unwrap_or(false);
+        }
 
-    let slot_exists: bool = Spi::get_one_with_args(
-        "SELECT EXISTS (SELECT 1 FROM pg_replication_slots WHERE slot_name = $1)",
-        &[slot.as_str().into()],
-    )
-    .unwrap_or(Some(false))
-    .unwrap_or(false);
+        if !slot_exists {
+            log!("synchro WAL worker: creating replication slot");
+            let _ = client
+                .select(
+                    "SELECT pg_create_logical_replication_slot($1, 'pgoutput')",
+                    None,
+                    &[slot.as_str().into()],
+                )
+                .map_err(|e| format!("creating replication slot: {e}"))?;
+            log!("synchro WAL worker: created replication slot '{}'", slot);
+        }
 
-    if !slot_exists {
-        Spi::run_with_args(
-            "SELECT pg_create_logical_replication_slot($1, 'pgoutput')",
-            &[slot.as_str().into()],
-        )
-        .map_err(|e| format!("creating replication slot: {e}"))?;
-        log!("synchro WAL worker: created replication slot '{}'", slot);
-    }
+        let mut pub_exists = false;
+        let publication_rows = client
+            .select(
+                "SELECT EXISTS (SELECT 1 FROM pg_publication WHERE pubname = $1)",
+                None,
+                &[pub_name.as_str().into()],
+            )
+            .map_err(|e| format!("checking publication: {e}"))?;
+        for row in publication_rows {
+            pub_exists = row.get::<bool>(1).ok().flatten().unwrap_or(false);
+        }
 
-    // Ensure publication exists (may not yet if no tables registered).
-    let pub_exists: bool = Spi::get_one_with_args(
-        "SELECT EXISTS (SELECT 1 FROM pg_publication WHERE pubname = $1)",
-        &[pub_name.as_str().into()],
-    )
-    .unwrap_or(Some(false))
-    .unwrap_or(false);
+        if !pub_exists {
+            log!("synchro WAL worker: creating publication");
+            let create_sql = format!(
+                "CREATE PUBLICATION {} FOR ALL TABLES",
+                crate::pull::pg_quote_ident(&pub_name)
+            );
+            let _ = client.update(&create_sql, None, &[]);
+            // Publication creation is opportunistic here. The first
+            // synchro_register_table call also ensures it exists.
+        }
 
-    if !pub_exists {
-        let create_sql = format!(
-            "CREATE PUBLICATION {} FOR ALL TABLES",
-            crate::pull::pg_quote_ident(&pub_name)
-        );
-        Spi::run(&create_sql).ok();
-        // Publication may not exist yet; that is fine. The first
-        // synchro_register_table call creates it. We just avoid
-        // a hard error on the peek call below.
-    }
+        Ok::<(), String>(())
+    })?;
 
     Ok(())
 }
@@ -262,69 +281,75 @@ fn poll_and_process(
     decoder: &mut WalDecoder,
     registry: &[TableRegistration],
 ) -> Result<usize, String> {
+    let mut decoder = std::panic::AssertUnwindSafe(decoder);
     let slot = replication_slot();
     let pub_name = publication_name();
+    let slot_for_peek = slot.clone();
+    let pub_name_for_peek = pub_name.clone();
 
     // Phase 1: Peek WAL messages and apply events in one SPI transaction.
-    let result: (usize, Option<String>) = Spi::connect_mut(|client| {
-        // Peek at changes without consuming them.
-        let tup_table = client
-            .select(
-                "SELECT lsn::text, data \
-                 FROM pg_logical_slot_peek_binary_changes($1, NULL, $2, \
-                 'proto_version', '1', 'publication_names', $3)",
-                None,
-                &[
-                    slot.as_str().into(),
-                    BATCH_SIZE.into(),
-                    pub_name.as_str().into(),
-                ],
-            )
-            .map_err(|e| format!("peeking WAL slot: {e}"))?;
+    let result: (usize, Option<String>) = BackgroundWorker::transaction(move || {
+        let decoder = &mut *decoder;
+        Spi::connect_mut(|client| {
+            // Peek at changes without consuming them.
+            let tup_table = client
+                .select(
+                    "SELECT lsn::text, data \
+                     FROM pg_logical_slot_peek_binary_changes($1, NULL, $2, \
+                     'proto_version', '1', 'publication_names', $3)",
+                    None,
+                    &[
+                        slot_for_peek.as_str().into(),
+                        BATCH_SIZE.into(),
+                        pub_name_for_peek.as_str().into(),
+                    ],
+                )
+                .map_err(|e| format!("peeking WAL slot: {e}"))?;
 
-        let mut messages: Vec<Vec<u8>> = Vec::new();
-        let mut max_lsn: Option<String> = None;
-        for row in tup_table {
-            if let Ok(Some(lsn)) = row.get::<String>(1) {
-                max_lsn = Some(lsn);
-            }
-            if let Ok(Some(data)) = row.get::<Vec<u8>>(2) {
-                messages.push(data);
-            }
-        }
-        // SpiTupleTable dropped here, releasing borrow on client.
-
-        if messages.is_empty() {
-            return Ok::<_, String>((0, None));
-        }
-
-        let msg_count = messages.len();
-
-        // Decode pgoutput messages into events.
-        let mut events: Vec<WalEvent> = Vec::new();
-        for wal_data in &messages {
-            match decoder.decode(wal_data) {
-                Ok(decoded) => events.extend(decoded),
-                Err(e) => {
-                    log!("synchro WAL worker: decode error (skipping): {}", e);
+            let mut messages: Vec<Vec<u8>> = Vec::new();
+            let mut max_lsn: Option<String> = None;
+            for row in tup_table {
+                if let Ok(Some(lsn)) = row.get::<String>(1) {
+                    max_lsn = Some(lsn);
+                }
+                if let Ok(Some(data)) = row.get::<Vec<u8>>(2) {
+                    messages.push(data);
                 }
             }
-        }
+            // SpiTupleTable dropped here, releasing borrow on client.
 
-        // Apply each event. Failures are per-event (non-fatal).
-        for event in &events {
-            if let Err(e) = apply_event(client, event, registry) {
-                log!(
-                    "synchro WAL worker: event error ({}.{}): {}",
-                    event.table_name,
-                    event.record_id,
-                    e
-                );
-                let _ = write_rule_failure(client, event, &e);
+            if messages.is_empty() {
+                return Ok::<_, String>((0, None));
             }
-        }
 
-        Ok::<_, String>((msg_count, max_lsn))
+            let msg_count = messages.len();
+
+            // Decode pgoutput messages into events.
+            let mut events: Vec<WalEvent> = Vec::new();
+            for wal_data in &messages {
+                match decoder.decode(wal_data) {
+                    Ok(decoded) => events.extend(decoded),
+                    Err(e) => {
+                        log!("synchro WAL worker: decode error (skipping): {}", e);
+                    }
+                }
+            }
+
+            // Apply each event. Failures are per-event (non-fatal).
+            for event in &events {
+                if let Err(e) = apply_event(client, event, registry) {
+                    log!(
+                        "synchro WAL worker: event error ({}.{}): {}",
+                        event.table_name,
+                        event.record_id,
+                        e
+                    );
+                    let _ = write_rule_failure(client, event, &e);
+                }
+            }
+
+            Ok::<_, String>((msg_count, max_lsn))
+        })
     })?;
 
     let (msg_count, max_lsn) = result;
@@ -333,11 +358,13 @@ fn poll_and_process(
     // Slot advancement is non-transactional in PG, so we do it only
     // after the changelog and edge writes are durable.
     if let Some(lsn) = max_lsn {
-        Spi::run_with_args(
-            "SELECT pg_replication_slot_advance($1, $2::pg_lsn)",
-            &[slot.as_str().into(), lsn.as_str().into()],
-        )
-        .map_err(|e| format!("advancing slot: {e}"))?;
+        BackgroundWorker::transaction(|| {
+            Spi::run_with_args(
+                "SELECT pg_replication_slot_advance($1, $2::pg_lsn)",
+                &[slot.as_str().into(), lsn.as_str().into()],
+            )
+            .map_err(|e| format!("advancing slot: {e}"))
+        })?;
     }
 
     Ok(msg_count)

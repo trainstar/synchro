@@ -23,9 +23,11 @@ This architecture exists to keep:
 ## Core design choices
 
 - deterministic server-defined scopes
+- server-defined synced column sets for registered PostgreSQL tables
 - extension-side change capture and materialization
 - per-scope cursors and explicit rebuild
 - full synced CRUD for synced tables
+- canonical portable schema types on the wire, with client-side alias normalization only as defensive compatibility
 - SQL migration based configuration, with structured defaults and custom SQL escape hatches
 
 ## Architecture guides

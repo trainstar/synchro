@@ -636,74 +636,8 @@ fn maybe_scope_checksums(
 
 /// Load registry within an existing SPI context.
 fn load_registry_inner(client: &SpiClient<'_>) -> Vec<TableRegistration> {
-    let query = "SELECT table_name, bucket_sql, pk_column, pk_type, updated_at_col,
-                        deleted_at_col, push_policy, exclude_columns,
-                        has_updated_at, has_deleted_at
-                 FROM sync_registry
-                 ORDER BY table_name";
-    let tup_table = match client.select(query, None, &[]) {
-        Ok(t) => t,
-        Err(e) => pgrx::error!("loading registry: {}", e),
-    };
-
-    let mut tables = Vec::new();
-    for row in tup_table {
-        let table_name: String = row
-            .get_by_name("table_name")
-            .unwrap_or(None)
-            .unwrap_or_default();
-        let bucket_sql: String = row
-            .get_by_name("bucket_sql")
-            .unwrap_or(None)
-            .unwrap_or_default();
-        let pk_column: String = row
-            .get_by_name("pk_column")
-            .unwrap_or(None)
-            .unwrap_or_default();
-        let pk_type: String = row
-            .get_by_name("pk_type")
-            .unwrap_or(None)
-            .unwrap_or_else(|| "text".to_string());
-        let updated_at_col: String = row
-            .get_by_name("updated_at_col")
-            .unwrap_or(None)
-            .unwrap_or_default();
-        let deleted_at_col: String = row
-            .get_by_name("deleted_at_col")
-            .unwrap_or(None)
-            .unwrap_or_default();
-        let push_policy_str: String = row
-            .get_by_name("push_policy")
-            .unwrap_or(None)
-            .unwrap_or_default();
-        let exclude_columns: Vec<String> = row
-            .get_by_name("exclude_columns")
-            .unwrap_or(None)
-            .unwrap_or_default();
-        let has_updated_at: bool = row
-            .get_by_name("has_updated_at")
-            .unwrap_or(None)
-            .unwrap_or(false);
-        let has_deleted_at: bool = row
-            .get_by_name("has_deleted_at")
-            .unwrap_or(None)
-            .unwrap_or(false);
-
-        tables.push(TableRegistration {
-            table_name,
-            bucket_sql,
-            pk_column,
-            updated_at_col,
-            deleted_at_col,
-            pk_type,
-            push_policy: crate::registry::PushPolicy::parse(&push_policy_str)
-                .unwrap_or(crate::registry::PushPolicy::Enabled),
-            exclude_columns,
-            has_updated_at,
-            has_deleted_at,
-        });
-    }
-    tables
+    crate::registry::load_registry_from_client(client)
+        .unwrap_or_else(|e| pgrx::error!("loading registry: {}", e))
 }
 
 fn query_changelog(
@@ -843,17 +777,6 @@ pub(crate) fn hydrate_records(
         return vec![];
     }
 
-    // Build exclude expression for JSONB subtraction.
-    let exclude_expr = if table_reg.exclude_columns.is_empty() {
-        String::new()
-    } else {
-        table_reg
-            .exclude_columns
-            .iter()
-            .map(|c| format!(" - '{}'", c.replace('\'', "''")))
-            .collect::<String>()
-    };
-
     // Build timestamp expressions.
     let updated_at_expr = if table_reg.has_updated_at {
         format!(
@@ -876,13 +799,13 @@ pub(crate) fn hydrate_records(
     // Build hydration query.
     let query = format!(
         "SELECT {pk}::text AS id, \
-         (to_jsonb(t){exclude})::text AS data, \
+         ({projection})::text AS data, \
          {updated_at} AS updated_at, \
          {deleted_at} AS deleted_at \
          FROM {table} t \
          WHERE {pk}::text = ANY($1)",
         pk = pg_quote_ident(&table_reg.pk_column),
-        exclude = exclude_expr,
+        projection = synced_row_projection_sql(table_reg, "t"),
         updated_at = updated_at_expr,
         deleted_at = deleted_at_expr,
         table = pg_quote_ident(table_name),
@@ -957,6 +880,18 @@ pub(crate) fn hydrate_records(
         records.push(record);
     }
     records
+}
+
+pub(crate) fn synced_row_projection_sql(table_reg: &TableRegistration, row_alias: &str) -> String {
+    let qualified = |column: &str| format!("{row_alias}.{}", pg_quote_ident(column));
+    let pairs = table_reg
+        .sync_columns
+        .iter()
+        .map(|column| format!("'{}', {}", column.replace('\'', "''"), qualified(column)))
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    format!("jsonb_build_object({pairs})")
 }
 
 pub(crate) fn compute_bucket_checksums(

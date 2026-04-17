@@ -20,6 +20,8 @@ import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
 import java.util.UUID
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [28])
@@ -357,6 +359,99 @@ class SyncEngineTests {
     }
 
     @Test
+    fun testRetryableStartupFailureDoesNotRequireAppRestart() = runTest {
+        var pullCallCount = 0
+
+        val (engine, db) = makeIntegrationEnv(maxRetryAttempts = 0) { request ->
+            val path = request.path ?: ""
+            when {
+                path.endsWith("/sync/connect") -> mockResponse(connectJSON)
+                path.endsWith("/sync/rebuild") -> mockResponse(rebuildJSON(finalCursor = "scope_cursor_1"))
+                path.endsWith("/sync/pull") -> {
+                    pullCallCount++
+                    if (pullCallCount == 1) {
+                        mockResponse("""{"error":"temporarily unavailable"}""", 503)
+                            .addHeader("Retry-After", "0.01")
+                    } else {
+                        mockResponse(scopePullJSON(cursor = "scope_cursor_2"))
+                    }
+                }
+                else -> mockResponse("""{"error":"unexpected"}""", 500)
+            }
+        }
+
+        val statuses = mutableListOf<String>()
+        engine.onStatusChange { status ->
+            when (status) {
+                is SyncStatus.Idle -> statuses.add("idle")
+                is SyncStatus.Syncing -> statuses.add("syncing")
+                is SyncStatus.Error -> statuses.add("error")
+                is SyncStatus.Stopped -> statuses.add("stopped")
+            }
+        }
+
+        val initialSyncCompleted = CountDownLatch(1)
+
+        try {
+            engine.start(SyncOptions(initialSyncCompleted = { initialSyncCompleted.countDown() }))
+
+            try {
+                engine.start()
+                fail("Expected AlreadyStarted while engine owns startup retry")
+            } catch (e: SynchroError.AlreadyStarted) {
+            }
+
+            assertTrue(initialSyncCompleted.await(2, TimeUnit.SECONDS))
+
+            assertEquals(2, pullCallCount)
+            assertTrue(statuses.contains("error"))
+            assertEquals("idle", statuses.last())
+
+            val scope = db.readTransaction { conn ->
+                SynchroMeta.getAllScopes(conn).firstOrNull()
+            }
+            assertEquals("scope_cursor_2", scope?.cursor)
+        } finally {
+            engine.stop()
+        }
+    }
+
+    @Test
+    fun testNonRetryableStartupFailureStillThrowsAndAllowsRestart() = runTest {
+        var returnSuccess = false
+
+        val (engine, _) = makeIntegrationEnv { request ->
+            val path = request.path ?: ""
+            when {
+                path.endsWith("/sync/connect") -> {
+                    if (returnSuccess) {
+                        mockResponse(connectJSON)
+                    } else {
+                        mockResponse("""{"error":"fatal bootstrap"}""", 500)
+                    }
+                }
+                path.endsWith("/sync/rebuild") -> mockResponse(rebuildJSON(finalCursor = "scope_cursor_1"))
+                path.endsWith("/sync/pull") -> mockResponse(scopePullJSON(cursor = "scope_cursor_2"))
+                else -> mockResponse("""{"error":"unexpected"}""", 500)
+            }
+        }
+
+        try {
+            try {
+                engine.start()
+                fail("Expected non-retryable startup failure")
+            } catch (e: Exception) {
+                assertFalse(e is RetryableError)
+            }
+
+            returnSuccess = true
+            engine.start()
+        } finally {
+            engine.stop()
+        }
+    }
+
+    @Test
     fun testStatusTransitionsDuringSyncCycle() = runTest {
         val (engine, _) = makeIntegrationEnv { request ->
             val path = request.path ?: ""
@@ -473,7 +568,10 @@ class SyncEngineTests {
         return Pair(engine, db)
     }
 
-    private fun makeIntegrationEnv(handler: (RecordedRequest) -> MockResponse): Pair<SyncEngine, SynchroDatabase> {
+    private fun makeIntegrationEnv(
+        maxRetryAttempts: Int = 3,
+        handler: (RecordedRequest) -> MockResponse
+    ): Pair<SyncEngine, SynchroDatabase> {
         server = MockWebServer()
         server!!.dispatcher = object : Dispatcher() {
             override fun dispatch(request: RecordedRequest): MockResponse = handler(request)
@@ -489,7 +587,7 @@ class SyncEngineTests {
             clientID = "test-device",
             appVersion = "1.0.0",
             syncInterval = 999.0,
-            maxRetryAttempts = 3
+            maxRetryAttempts = maxRetryAttempts
         )
         val db = databases.open(context, dbName)
         val httpClient = HttpClient(config, OkHttpClient())

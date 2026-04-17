@@ -244,6 +244,27 @@ describe('SynchroClient', () => {
       expect(mockNativeModule.start).toHaveBeenCalled();
     });
 
+    it('does not require JS to call start twice when native startup retries', async () => {
+      const client = makeClient();
+      const statuses: SyncStatus[] = [];
+
+      client.onStatusChange((status) => statuses.push(status));
+
+      await client.start();
+
+      emitNativeEvent('onStatusChange', {
+        status: 'error',
+        retryAt: '2026-01-01T00:00:00.000Z',
+      });
+      emitNativeEvent('onStatusChange', {
+        status: 'idle',
+        retryAt: null,
+      });
+
+      expect(mockNativeModule.start).toHaveBeenCalledTimes(1);
+      expect(statuses.map((status) => status.status)).toEqual(['error', 'idle']);
+    });
+
     it('stop calls native stop', async () => {
       const client = makeClient();
       await client.stop();

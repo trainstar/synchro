@@ -83,6 +83,10 @@ Client sync is intentionally stopped.
 
 ## Client Startup Flow
 
+`startSync()` should arm the client-owned startup state machine.
+
+It must not require the host application to supervise transient startup retry with its own timers, connectivity listeners, or repeated `startSync()` calls.
+
 ### Path A: Empty Local Database
 
 1. enter `uninitialized`

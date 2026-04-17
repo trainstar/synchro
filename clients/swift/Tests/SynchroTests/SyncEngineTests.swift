@@ -371,6 +371,102 @@ final class SyncEngineTests: XCTestCase {
         XCTAssertFalse(try tracker.hasPendingChanges())
     }
 
+    func testRetryableStartupFailureDoesNotRequireAppRestart() async throws {
+        var pullCallCount = 0
+
+        MockURLProtocol.requestHandler = { request in
+            let path = request.url!.path
+            if path.hasSuffix("/sync/connect") {
+                return try self.mockResponse(json: self.connectJSON)
+            } else if path.hasSuffix("/sync/rebuild") {
+                return try self.mockResponse(json: self.rebuildJSON(finalCursor: "scope_cursor_1"))
+            } else if path.hasSuffix("/sync/pull") {
+                pullCallCount += 1
+                if pullCallCount == 1 {
+                    let data = try JSONSerialization.data(withJSONObject: ["error": "temporarily unavailable"])
+                    let response = HTTPURLResponse(
+                        url: request.url!,
+                        statusCode: 503,
+                        httpVersion: nil,
+                        headerFields: ["Retry-After": "0.01"]
+                    )!
+                    return (response, data)
+                }
+                return try self.mockResponse(json: self.scopePullJSON(cursor: "scope_cursor_2"))
+            }
+            return try self.mockResponse(statusCode: 500, json: ["error": "unexpected"])
+        }
+
+        let (engine, db) = try makeIntegrationEnv(maxRetryAttempts: 0)
+        defer { engine.stop() }
+
+        var statuses: [String] = []
+        let _ = engine.onStatusChange { status in
+            switch status {
+            case .idle: statuses.append("idle")
+            case .syncing: statuses.append("syncing")
+            case .error: statuses.append("error")
+            case .stopped: statuses.append("stopped")
+            }
+        }
+
+        let initialSyncCompleted = expectation(description: "initial sync completed after internal retry")
+        try await engine.start(options: SyncOptions(initialSyncCompleted: {
+            initialSyncCompleted.fulfill()
+        }))
+
+        do {
+            try await engine.start()
+            XCTFail("Expected alreadyStarted while engine owns startup retry")
+        } catch SynchroError.alreadyStarted {
+        } catch {
+            XCTFail("Expected alreadyStarted, got \(error)")
+        }
+
+        await fulfillment(of: [initialSyncCompleted], timeout: 1.0)
+
+        XCTAssertEqual(pullCallCount, 2)
+        XCTAssertTrue(statuses.contains("error"))
+        XCTAssertEqual(statuses.last, "idle")
+
+        let scope = try db.readTransaction { db in
+            try SynchroMeta.getAllScopes(db).first
+        }
+        XCTAssertEqual(scope?.cursor, "scope_cursor_2")
+    }
+
+    func testNonRetryableStartupFailureStillThrowsAndAllowsRestart() async throws {
+        var returnSuccess = false
+
+        MockURLProtocol.requestHandler = { request in
+            let path = request.url!.path
+            if path.hasSuffix("/sync/connect") {
+                if returnSuccess {
+                    return try self.mockResponse(json: self.connectJSON)
+                }
+                return try self.mockResponse(statusCode: 500, json: ["error": "fatal bootstrap"])
+            } else if path.hasSuffix("/sync/rebuild") {
+                return try self.mockResponse(json: self.rebuildJSON(finalCursor: "scope_cursor_1"))
+            } else if path.hasSuffix("/sync/pull") {
+                return try self.mockResponse(json: self.scopePullJSON(cursor: "scope_cursor_2"))
+            }
+            return try self.mockResponse(statusCode: 500, json: ["error": "unexpected"])
+        }
+
+        let (engine, _) = try makeIntegrationEnv()
+        defer { engine.stop() }
+
+        do {
+            try await engine.start()
+            XCTFail("Expected non-retryable startup failure")
+        } catch {
+            XCTAssertFalse(error is RetryableError)
+        }
+
+        returnSuccess = true
+        try await engine.start()
+    }
+
     func testStatusTransitionsDuringSyncCycle() async throws {
         MockURLProtocol.requestHandler = { request in
             let path = request.url!.path
@@ -513,7 +609,7 @@ final class SyncEngineTests: XCTestCase {
         return (engine, db)
     }
 
-    private func makeIntegrationEnv() throws -> (SyncEngine, SynchroDatabase) {
+    private func makeIntegrationEnv(maxRetryAttempts: Int = 3) throws -> (SyncEngine, SynchroDatabase) {
         let sessionConfig = URLSessionConfiguration.ephemeral
         sessionConfig.protocolClasses = [MockURLProtocol.self]
         let session = URLSession(configuration: sessionConfig)
@@ -527,7 +623,7 @@ final class SyncEngineTests: XCTestCase {
             clientID: "test-device",
             appVersion: "1.0.0",
             syncInterval: 999,
-            maxRetryAttempts: 3
+            maxRetryAttempts: maxRetryAttempts
         )
         let db = try SynchroDatabase(path: path)
         let httpClient = HttpClient(config: config, session: session)

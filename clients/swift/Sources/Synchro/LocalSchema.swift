@@ -76,7 +76,7 @@ extension VNextSchemaManifest {
                 columns: columns.map { column in
                     LocalSchemaColumn(
                         name: column.name,
-                        logicalType: column.type,
+                        logicalType: SQLiteSchema.normalizedLogicalType(column.type),
                         nullable: column.nullable,
                         sqliteDefaultSQL: nil,
                         isPrimaryKey: primaryKey.contains(column.name)

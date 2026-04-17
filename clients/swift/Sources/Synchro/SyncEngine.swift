@@ -19,6 +19,40 @@ private struct SyncEngineState {
     var cycleQueued = false
 }
 
+private actor StartupGate {
+    private var continuation: CheckedContinuation<Void, Error>?
+    private var result: Result<Void, Error>?
+
+    func wait() async throws {
+        if let result {
+            try result.get()
+            return
+        }
+
+        try await withCheckedThrowingContinuation { continuation in
+            if let result {
+                continuation.resume(with: result)
+            } else {
+                self.continuation = continuation
+            }
+        }
+    }
+
+    func succeed() {
+        guard result == nil else { return }
+        result = .success(())
+        continuation?.resume()
+        continuation = nil
+    }
+
+    func fail(_ error: Error) {
+        guard result == nil else { return }
+        result = .failure(error)
+        continuation?.resume(throwing: error)
+        continuation = nil
+    }
+}
+
 final class SyncEngine: @unchecked Sendable {
     private let config: SynchroConfig
     private let database: SynchroDatabase
@@ -77,31 +111,24 @@ final class SyncEngine: @unchecked Sendable {
             try database.writeTransaction { db in
                 try SynchroMeta.setSyncLock(db, locked: false)
             }
-
-            let connectResponse = try await connect()
-            let connectSchema = try await resolveConnectSchema(connectResponse)
-            self.syncedTables = connectSchema.tables
-            self.schemaVersion = connectSchema.version
-            self.schemaHash = connectSchema.hash
-
-            try applyScopeAssignmentDelta(
-                connectResponse.scopes,
-                scopeSetVersion: connectResponse.scopeSetVersion
-            )
-
-            updateStatus(.idle)
-
-            try await rebuildAssignedScopesNeedingCursor()
-
-            syncTask = Task { [weak self] in
-                guard let self else { return }
-                await self.syncLoop()
-            }
-            startPendingObserver()
-            try await runSyncCycleWithRetry()
-            options?.initialSyncCompleted?()
         } catch {
             state.withLock { $0.started = false }
+            throw error
+        }
+
+        let startupGate = StartupGate()
+        syncTask = Task { [weak self] in
+            guard let self else {
+                await startupGate.succeed()
+                return
+            }
+            await self.runManagedLoop(startupGate: startupGate, options: options)
+        }
+
+        do {
+            try await startupGate.wait()
+        } catch {
+            teardownAfterFailedStart()
             throw error
         }
     }
@@ -159,6 +186,70 @@ final class SyncEngine: @unchecked Sendable {
                 // Error already handled in runSyncCycleWithRetry
             }
         }
+    }
+
+    private func runManagedLoop(startupGate: StartupGate, options: SyncOptions?) async {
+        let startupCompleted = await runStartupSequence(startupGate: startupGate, options: options)
+        guard startupCompleted else { return }
+        await syncLoop()
+    }
+
+    private func runStartupSequence(startupGate: StartupGate, options: SyncOptions?) async -> Bool {
+        var startupAttempt = 0
+        var gateResolved = false
+
+        while !Task.isCancelled {
+            do {
+                let connectResponse = try await connect()
+                let connectSchema = try await resolveConnectSchema(connectResponse)
+                self.syncedTables = connectSchema.tables
+                self.schemaVersion = connectSchema.version
+                self.schemaHash = connectSchema.hash
+
+                try applyScopeAssignmentDelta(
+                    connectResponse.scopes,
+                    scopeSetVersion: connectResponse.scopeSetVersion
+                )
+
+                updateStatus(.idle)
+
+                try await rebuildAssignedScopesNeedingCursor()
+                try await runSyncCycleWithRetry()
+                startPendingObserver()
+
+                if !gateResolved {
+                    await startupGate.succeed()
+                }
+                options?.initialSyncCompleted?()
+                return true
+            } catch let error as RetryableError {
+                startupAttempt += 1
+                let delay = retryDelay(attempt: startupAttempt, serverRetryAfter: error.retryAfter)
+                updateStatus(.error(retryAt: Date().addingTimeInterval(delay)))
+                if !gateResolved {
+                    await startupGate.succeed()
+                    gateResolved = true
+                }
+                do {
+                    try await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+                } catch {
+                    return false
+                }
+            } catch {
+                handleSyncError(error)
+                if gateResolved {
+                    finishStartupFailure()
+                } else {
+                    await startupGate.fail(error)
+                }
+                return false
+            }
+        }
+
+        if !gateResolved {
+            await startupGate.succeed()
+        }
+        return false
     }
 
     // MARK: - Retry
@@ -490,6 +581,7 @@ final class SyncEngine: @unchecked Sendable {
     // MARK: - Debounce
 
     private func startPendingObserver() {
+        guard pendingObserver == nil else { return }
         pendingObserver = database.onChange(tables: ["_synchro_pending_changes"]) { [weak self] in
             self?.scheduleDebouncedPush()
         }
@@ -517,6 +609,33 @@ final class SyncEngine: @unchecked Sendable {
             updateStatus(.error(retryAt: retryAt))
         } else {
             updateStatus(.error(retryAt: nil))
+        }
+    }
+
+    private func teardownAfterFailedStart() {
+        syncTask?.cancel()
+        syncTask = nil
+        debounceTask?.cancel()
+        debounceTask = nil
+        pendingObserver?.cancel()
+        pendingObserver = nil
+        state.withLock {
+            $0.started = false
+            $0.cycleRunning = false
+            $0.cycleQueued = false
+        }
+    }
+
+    private func finishStartupFailure() {
+        syncTask = nil
+        debounceTask?.cancel()
+        debounceTask = nil
+        pendingObserver?.cancel()
+        pendingObserver = nil
+        state.withLock {
+            $0.started = false
+            $0.cycleRunning = false
+            $0.cycleQueued = false
         }
     }
 

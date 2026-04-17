@@ -1,8 +1,55 @@
 import Foundation
 
 enum SQLiteSchema {
+    static func normalizedLogicalType(_ logicalType: String) -> String {
+        let normalized = logicalType.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+
+        if normalized.hasSuffix("[]") {
+            return "json"
+        }
+        if normalized.hasPrefix("numeric(") || normalized.hasPrefix("decimal(") {
+            return "float"
+        }
+        if normalized.hasPrefix("character varying")
+            || normalized.hasPrefix("varchar(")
+            || normalized.hasPrefix("character(")
+        {
+            return "string"
+        }
+        if normalized.hasSuffix("range") {
+            return "string"
+        }
+
+        switch normalized {
+        case "string", "text", "uuid", "varchar", "character",
+             "interval", "inet", "cidr", "macaddr", "macaddr8", "xml",
+             "point", "line", "lseg", "box", "path", "polygon", "circle":
+            return "string"
+        case "int", "int32", "smallint", "integer":
+            return "int"
+        case "int64", "bigint":
+            return "int64"
+        case "float", "float64", "numeric", "decimal", "real", "double precision":
+            return "float"
+        case "boolean", "bool":
+            return "boolean"
+        case "datetime", "timestamp", "timestamp with time zone", "timestamp without time zone":
+            return "datetime"
+        case "date":
+            return "date"
+        case "time", "time without time zone":
+            return "time"
+        case "json", "jsonb":
+            return "json"
+        case "bytes", "blob", "bytea":
+            return "bytes"
+        default:
+            return normalized
+        }
+    }
+
     static func sqliteType(for logicalType: String) -> String {
-        switch logicalType {
+        switch normalizedLogicalType(logicalType) {
         case "string":   return "TEXT"
         case "int":      return "INTEGER"
         case "int64":    return "INTEGER"

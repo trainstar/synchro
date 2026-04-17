@@ -159,6 +159,14 @@ func TestGenerateCreatesClientCompatibleSeedDatabase(t *testing.T) {
 		}
 	}
 
+	var pendingCount int
+	if err := sqliteDB.QueryRow("SELECT COUNT(*) FROM _synchro_pending_changes").Scan(&pendingCount); err != nil {
+		t.Fatalf("reading pending queue size: %v", err)
+	}
+	if pendingCount != 0 {
+		t.Fatalf("expected generated seed to start with an empty pending queue, got %d rows", pendingCount)
+	}
+
 	_, err = sqliteDB.Exec(
 		fmt.Sprintf("INSERT INTO %s (id, user_id, title, updated_at, deleted_at) VALUES (?, ?, ?, ?, NULL)", quoteIdentifier(tableName)),
 		"00000000-0000-0000-0000-000000000001",
@@ -180,6 +188,54 @@ func TestGenerateCreatesClientCompatibleSeedDatabase(t *testing.T) {
 	}
 	if operation != "create" {
 		t.Fatalf("expected pending operation=create, got %q", operation)
+	}
+}
+
+func TestManifestValidateAllowsTablesWithoutSyncTimestamps(t *testing.T) {
+	env := manifestEnvelope{
+		SchemaVersion: 1,
+		SchemaHash:    "hash-1",
+		Manifest: schemaManifest{
+			Tables: []tableSchema{
+				{
+					Name:       "test_items",
+					PrimaryKey: []string{"id"},
+					Columns: []columnSchema{
+						{Name: "id", Type: "text", Nullable: false},
+						{Name: "title", Type: "text", Nullable: false},
+					},
+				},
+			},
+		},
+	}
+
+	if err := env.validate(); err != nil {
+		t.Fatalf("manifest with optional timestamps should validate: %v", err)
+	}
+}
+
+func TestCDCTriggerSQLSupportsTablesWithoutDeletedAt(t *testing.T) {
+	table := localSchemaTable{
+		TableName:       "test_items",
+		UpdatedAtColumn: "updated_at",
+		DeletedAtColumn: "",
+		PrimaryKey:      []string{"id"},
+		Columns: []localSchemaColumn{
+			{Name: "id", LogicalType: "string", IsPrimaryKey: true},
+			{Name: "title", LogicalType: "string"},
+			{Name: "updated_at", LogicalType: "datetime"},
+		},
+	}
+
+	statements := cdcTriggerSQL(table)
+	if len(statements) != 6 {
+		t.Fatalf("expected 6 trigger statements, got %d", len(statements))
+	}
+	if !strings.Contains(statements[5], "AFTER DELETE ON") {
+		t.Fatalf("expected hard delete trigger for tables without deleted_at, got %q", statements[5])
+	}
+	if strings.Contains(statements[5], `SET "" =`) {
+		t.Fatalf("delete trigger should not reference an empty deleted_at column: %q", statements[5])
 	}
 }
 
@@ -331,8 +387,23 @@ func TestGenerateHydratesPortableRowsAndScopeState(t *testing.T) {
 	if err := json.Unmarshal([]byte(knownBucketsRaw), &knownBuckets); err != nil {
 		t.Fatalf("decoding known_buckets: %v", err)
 	}
-	if len(knownBuckets) != 1 || knownBuckets[0] != "global" {
+	foundGlobal := false
+	for _, bucketID := range knownBuckets {
+		if bucketID == "global" {
+			foundGlobal = true
+			break
+		}
+	}
+	if !foundGlobal {
 		t.Fatalf("expected known_buckets to contain global, got %v", knownBuckets)
+	}
+
+	var pendingCount int
+	if err := sqliteDB.QueryRow("SELECT COUNT(*) FROM _synchro_pending_changes").Scan(&pendingCount); err != nil {
+		t.Fatalf("reading portable seed pending queue size: %v", err)
+	}
+	if pendingCount != 0 {
+		t.Fatalf("expected portable seed to start with an empty pending queue, got %d rows", pendingCount)
 	}
 }
 

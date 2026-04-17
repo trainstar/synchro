@@ -209,6 +209,7 @@ export default function App() {
   const [client, setClient] = useState(() => createClient());
   const initializedRef = useRef(false);
   const startedRef = useRef(false);
+  const statusSubscriptionRef = useRef<(() => void) | null>(null);
   const conflictSubscriptionRef = useRef<(() => void) | null>(null);
   const conflictsRef = useRef<ConflictEvent[]>([]);
   const currentStepRef = useRef('idle');
@@ -224,6 +225,7 @@ export default function App() {
 
   useEffect(() => {
     return () => {
+      statusSubscriptionRef.current?.();
       conflictSubscriptionRef.current?.();
       void client.close().catch(() => {
         // Cleanup is best-effort when Detox terminates the app.
@@ -238,7 +240,7 @@ export default function App() {
     currentStepRef.current = nextStep;
     setCurrentStep(nextStep);
     console.log(`step: ${nextStep}`);
-  }, []);
+  }, [client]);
 
   const markStep = useCallback((step: string) => {
     currentStepRef.current = step;
@@ -265,6 +267,10 @@ export default function App() {
       return;
     }
     await client.initialize();
+    statusSubscriptionRef.current?.();
+    statusSubscriptionRef.current = client.onStatusChange((status) => {
+      setDisplayStatus(status.status);
+    });
     conflictSubscriptionRef.current?.();
     conflictSubscriptionRef.current = client.onConflict((event) => {
       conflictsRef.current.push(event);
@@ -280,7 +286,6 @@ export default function App() {
     }
     await client.start();
     startedRef.current = true;
-    setDisplayStatus('syncing');
   }, [client, ensureInitialized]);
 
   const stopSync = useCallback(async () => {
@@ -289,7 +294,6 @@ export default function App() {
     }
     await client.stop();
     startedRef.current = false;
-    setDisplayStatus('stopped');
   }, [client]);
 
   const ensureLocalTable = useCallback(async () => {
@@ -302,6 +306,8 @@ export default function App() {
 
   const resetHarness = useCallback(async () => {
     try {
+      statusSubscriptionRef.current?.();
+      statusSubscriptionRef.current = null;
       conflictSubscriptionRef.current?.();
       conflictSubscriptionRef.current = null;
       await client.close();

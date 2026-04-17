@@ -57,6 +57,23 @@ pub enum ContractViolation {
         table_name: String,
         column_name: String,
     },
+    UnsupportedColumnType {
+        table_name: String,
+        column_name: String,
+        type_name: String,
+    },
+    UnknownPrimaryKeyColumn {
+        table_name: String,
+        column_name: String,
+    },
+    UnknownUpdatedAtColumn {
+        table_name: String,
+        column_name: String,
+    },
+    UnknownDeletedAtColumn {
+        table_name: String,
+        column_name: String,
+    },
     EmptyIndexName {
         table_name: String,
     },
@@ -110,6 +127,35 @@ impl std::fmt::Display for ContractViolation {
             } => write!(
                 f,
                 "schema manifest table {table_name} contains duplicate column {column_name}"
+            ),
+            Self::UnsupportedColumnType {
+                table_name,
+                column_name,
+                type_name,
+            } => write!(
+                f,
+                "schema manifest table {table_name} column {column_name} uses unsupported type {type_name}"
+            ),
+            Self::UnknownPrimaryKeyColumn {
+                table_name,
+                column_name,
+            } => write!(
+                f,
+                "schema manifest table {table_name} primary key references unknown column {column_name}"
+            ),
+            Self::UnknownUpdatedAtColumn {
+                table_name,
+                column_name,
+            } => write!(
+                f,
+                "schema manifest table {table_name} updated_at_column references unknown column {column_name}"
+            ),
+            Self::UnknownDeletedAtColumn {
+                table_name,
+                column_name,
+            } => write!(
+                f,
+                "schema manifest table {table_name} deleted_at_column references unknown column {column_name}"
             ),
             Self::EmptyIndexName { table_name } => {
                 write!(f, "schema manifest table {table_name} contains an empty index name")
@@ -345,6 +391,60 @@ pub struct SchemaManifest {
     pub tables: Vec<TableSchema>,
 }
 
+pub fn normalize_portable_type_name(type_name: &str) -> Option<&'static str> {
+    let normalized = type_name.trim().to_ascii_lowercase();
+
+    if normalized.ends_with("[]") {
+        return Some("json");
+    }
+    if normalized.starts_with("numeric(") || normalized.starts_with("decimal(") {
+        return Some("float");
+    }
+    if normalized.starts_with("character varying")
+        || normalized.starts_with("varchar(")
+        || normalized.starts_with("character(")
+    {
+        return Some("string");
+    }
+    if normalized.ends_with("range") {
+        return Some("string");
+    }
+
+    match normalized.as_str() {
+        "string" | "text" | "uuid" | "varchar" | "character" | "interval" | "inet" | "cidr"
+        | "macaddr" | "macaddr8" | "xml" | "point" | "line" | "lseg" | "box" | "path"
+        | "polygon" | "circle" => Some("string"),
+        "int" | "int32" | "smallint" | "integer" => Some("int"),
+        "int64" | "bigint" => Some("int64"),
+        "float" | "float64" | "numeric" | "decimal" | "real" | "double precision" => Some("float"),
+        "boolean" | "bool" => Some("boolean"),
+        "datetime" | "timestamp" | "timestamp with time zone" | "timestamp without time zone" => {
+            Some("datetime")
+        }
+        "date" => Some("date"),
+        "time" | "time without time zone" => Some("time"),
+        "json" | "jsonb" => Some("json"),
+        "bytes" | "blob" | "bytea" => Some("bytes"),
+        _ => None,
+    }
+}
+
+pub fn is_canonical_portable_type_name(type_name: &str) -> bool {
+    matches!(
+        type_name,
+        "string"
+            | "int"
+            | "int64"
+            | "float"
+            | "boolean"
+            | "datetime"
+            | "date"
+            | "time"
+            | "json"
+            | "bytes"
+    )
+}
+
 impl SchemaManifest {
     pub fn validate(&self) -> Result<(), ContractViolation> {
         let mut table_names = std::collections::HashSet::with_capacity(self.tables.len());
@@ -366,12 +466,46 @@ impl SchemaManifest {
                             table_name: table.name.clone(),
                         });
                     }
+                    if !is_canonical_portable_type_name(column.type_name.as_str()) {
+                        return Err(ContractViolation::UnsupportedColumnType {
+                            table_name: table.name.clone(),
+                            column_name: column.name.clone(),
+                            type_name: column.type_name.clone(),
+                        });
+                    }
                     if !column_names.insert(column.name.as_str()) {
                         return Err(ContractViolation::DuplicateColumnName {
                             table_name: table.name.clone(),
                             column_name: column.name.clone(),
                         });
                     }
+                }
+            }
+
+            if let Some(primary_key) = &table.primary_key {
+                for column_name in primary_key {
+                    if !column_names.is_empty() && !column_names.contains(column_name.as_str()) {
+                        return Err(ContractViolation::UnknownPrimaryKeyColumn {
+                            table_name: table.name.clone(),
+                            column_name: column_name.clone(),
+                        });
+                    }
+                }
+            }
+            if let Some(column_name) = &table.updated_at_column {
+                if !column_names.is_empty() && !column_names.contains(column_name.as_str()) {
+                    return Err(ContractViolation::UnknownUpdatedAtColumn {
+                        table_name: table.name.clone(),
+                        column_name: column_name.clone(),
+                    });
+                }
+            }
+            if let Some(column_name) = &table.deleted_at_column {
+                if !column_names.is_empty() && !column_names.contains(column_name.as_str()) {
+                    return Err(ContractViolation::UnknownDeletedAtColumn {
+                        table_name: table.name.clone(),
+                        column_name: column_name.clone(),
+                    });
                 }
             }
 
@@ -906,7 +1040,7 @@ mod tests {
                 composition: Some(CompositionClass::SingleScope),
                 columns: Some(vec![ColumnSchema {
                     name: "id".into(),
-                    type_name: "uuid".into(),
+                    type_name: "string".into(),
                     nullable: false,
                 }]),
                 indexes: Some(vec![IndexSchema {
@@ -924,6 +1058,130 @@ mod tests {
                 column_name: "user_id".into(),
             })
         );
+    }
+
+    #[test]
+    fn schema_manifest_rejects_missing_primary_key_column() {
+        let manifest = SchemaManifest {
+            tables: vec![TableSchema {
+                name: "documents".into(),
+                primary_key: Some(vec!["id".into()]),
+                updated_at_column: None,
+                deleted_at_column: None,
+                composition: Some(CompositionClass::SingleScope),
+                columns: Some(vec![ColumnSchema {
+                    name: "title".into(),
+                    type_name: "string".into(),
+                    nullable: false,
+                }]),
+                indexes: None,
+            }],
+        };
+
+        assert_eq!(
+            manifest.validate(),
+            Err(ContractViolation::UnknownPrimaryKeyColumn {
+                table_name: "documents".into(),
+                column_name: "id".into(),
+            })
+        );
+    }
+
+    #[test]
+    fn schema_manifest_rejects_missing_timestamp_columns() {
+        let updated_manifest = SchemaManifest {
+            tables: vec![TableSchema {
+                name: "documents".into(),
+                primary_key: Some(vec!["id".into()]),
+                updated_at_column: Some("updated_at".into()),
+                deleted_at_column: None,
+                composition: Some(CompositionClass::SingleScope),
+                columns: Some(vec![ColumnSchema {
+                    name: "id".into(),
+                    type_name: "string".into(),
+                    nullable: false,
+                }]),
+                indexes: None,
+            }],
+        };
+
+        assert_eq!(
+            updated_manifest.validate(),
+            Err(ContractViolation::UnknownUpdatedAtColumn {
+                table_name: "documents".into(),
+                column_name: "updated_at".into(),
+            })
+        );
+
+        let deleted_manifest = SchemaManifest {
+            tables: vec![TableSchema {
+                name: "documents".into(),
+                primary_key: Some(vec!["id".into()]),
+                updated_at_column: None,
+                deleted_at_column: Some("deleted_at".into()),
+                composition: Some(CompositionClass::SingleScope),
+                columns: Some(vec![ColumnSchema {
+                    name: "id".into(),
+                    type_name: "string".into(),
+                    nullable: false,
+                }]),
+                indexes: None,
+            }],
+        };
+
+        assert_eq!(
+            deleted_manifest.validate(),
+            Err(ContractViolation::UnknownDeletedAtColumn {
+                table_name: "documents".into(),
+                column_name: "deleted_at".into(),
+            })
+        );
+    }
+
+    #[test]
+    fn schema_manifest_rejects_noncanonical_column_type() {
+        let manifest = SchemaManifest {
+            tables: vec![TableSchema {
+                name: "documents".into(),
+                primary_key: Some(vec!["id".into()]),
+                updated_at_column: None,
+                deleted_at_column: None,
+                composition: Some(CompositionClass::SingleScope),
+                columns: Some(vec![
+                    ColumnSchema {
+                        name: "id".into(),
+                        type_name: "string".into(),
+                        nullable: false,
+                    },
+                    ColumnSchema {
+                        name: "score".into(),
+                        type_name: "integer".into(),
+                        nullable: false,
+                    },
+                ]),
+                indexes: None,
+            }],
+        };
+
+        assert_eq!(
+            manifest.validate(),
+            Err(ContractViolation::UnsupportedColumnType {
+                table_name: "documents".into(),
+                column_name: "score".into(),
+                type_name: "integer".into(),
+            })
+        );
+    }
+
+    #[test]
+    fn normalize_portable_type_name_handles_pattern_aliases_and_arrays() {
+        assert_eq!(normalize_portable_type_name("numeric(5,1)"), Some("float"));
+        assert_eq!(normalize_portable_type_name("varchar(255)"), Some("string"));
+        assert_eq!(normalize_portable_type_name("text[]"), Some("json"));
+        assert_eq!(normalize_portable_type_name("integer[]"), Some("json"));
+        assert_eq!(normalize_portable_type_name("interval"), Some("string"));
+        assert_eq!(normalize_portable_type_name("inet"), Some("string"));
+        assert_eq!(normalize_portable_type_name("int4range"), Some("string"));
     }
 
     #[test]
