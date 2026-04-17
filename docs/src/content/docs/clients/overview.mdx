@@ -1,7 +1,11 @@
 ---
 title: Client SDKs
-description: Supported client surfaces and the boundary between native SDKs and the React Native bridge.
+description: Native-first client engines for Swift and Kotlin, with React Native as a bridge over them.
 ---
+
+Synchro's client story is native-first.
+
+Swift and Kotlin are real sync engines, not thin wrappers over a generic client. React Native exposes the same product surface through a bridge over those native engines.
 
 Synchro currently ships three client surfaces:
 
@@ -19,7 +23,7 @@ The native SDKs own:
 - background and foreground sync scheduling
 - applying server state without echo loops
 
-They do not define server sync semantics.
+They do not define server sync semantics. They execute the server contract locally and productize the offline runtime for the app.
 
 ## React Native boundary
 

@@ -13,14 +13,15 @@ It is the highest-level source of truth for the new system. Lower-level specs mu
 
 ## Product Thesis
 
-Synchro is a full offline sync product for native apps using local SQLite.
+Synchro is an offline sync product for teams building serious native apps.
 
 It is designed to beat current alternatives on:
 
+- extension-based server architecture instead of a separate sync tier
 - developer experience
+- lower adoption friction
 - predictable sync semantics
 - end-to-end synced CRUD
-- thin server adapter architecture
 - native client parity
 - performance through extension-side execution and deterministic sync scopes
 
@@ -30,9 +31,10 @@ Synchro is not a generic local-first substrate first. It is an opinionated sync 
 
 The promise of Synchro is:
 
-- local-first SQLite on device
+- extension-based server execution close to the data
 - full synced CRUD for synced tables
-- thin server/API adapter implementations
+- thin, replaceable host adapters
+- native client engines with local SQLite on device
 - shared sync semantics across adapters through the Rust core
 - minimal required application schema changes
 - deterministic selective sync with explicit rebuild semantics
@@ -43,10 +45,10 @@ The system is composed of four layers:
 
 - `extensions/synchro-core`: shared deterministic sync semantics
 - `extensions/synchro-pg`: PostgreSQL extension that executes those semantics close to the data
-- `api/go`: one HTTP adapter that implements the contract over the extension
+- `api/go`: one reference host layer that implements the contract over the extension
 - end clients: Swift, Kotlin, React Native
 
-`api/go` is not an end client. It is one adapter.
+`api/go` is not an end client. It is one host layer.
 
 ## Architectural Principles
 

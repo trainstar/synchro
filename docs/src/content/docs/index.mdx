@@ -1,28 +1,21 @@
 ---
 title: Synchro
-description: Offline-first sync for native apps using local SQLite, a PostgreSQL extension, and a thin HTTP adapter.
+description: Production-grade offline sync for serious native apps, built around an extension-based server architecture.
 ---
 
-Synchro is a native-first sync system built around four layers:
+Synchro gives teams building serious native apps production-grade offline sync without a separate sync tier.
 
-- a shared Rust core for deterministic sync semantics
-- a PostgreSQL extension that executes sync logic near the data
-- a thin Go HTTP adapter
-- native Swift and Kotlin SDKs, with React Native as a bridge over them
+Its core differentiator is an extension-based server architecture: server-side sync logic runs inside PostgreSQL instead of being rebuilt in a standalone sync service or spread across application handlers.
 
-The product center is:
+Swift and Kotlin are first-class client engines. React Native is a bridge over them.
 
-- local SQLite on device
-- deterministic server-defined scopes
-- full synced CRUD for synced tables
-- thin adapters instead of server-side sync logic in application code
+## Why teams choose it
 
-## Why teams use it
-
-- local SQLite is the real product surface
-- selective sync is server-defined and deterministic
-- sync logic stays close to PostgreSQL instead of being reimplemented in app routers
-- portable seed generation gives apps a warm-start path for schema and shared portable data
+- No separate sync tier. The server-side sync contract lives in the PostgreSQL extension, not in a standalone sync service.
+- Native-first client engines. Swift and Kotlin own local SQLite, change capture, queueing, retry, and safe apply. React Native stays a bridge.
+- Lower adoption friction. Synchro is designed for minimal required schema changes and SQL-based configuration in the database repo.
+- Deterministic selective sync. Server-defined scopes, materialized membership, and explicit rebuilds make behavior predictable.
+- Portable seeds. Generate client-compatible SQLite seeds from PostgreSQL for faster first start and bundled shared data.
 
 ## Current support
 
@@ -57,7 +50,7 @@ The published spec is the release contract for the current implementation:
 ## Public release surfaces
 
 - PostgreSQL extension for PG 18
-- `synchrod-pg` adapter
+- `synchrod-pg` reference host binary
 - `synchro-seed` generator
 - Swift Package Manager package
 - CocoaPods package

@@ -1,13 +1,17 @@
 ---
 title: Architecture Overview
-description: Synchro’s current layer model and the boundaries between server, extension, adapter, and clients.
+description: Synchro’s extension-based server architecture and the boundaries between the extension, host layer, and native clients.
 ---
 
-Synchro’s release architecture is intentionally narrow:
+Synchro uses an extension-based server architecture.
+
+The authoritative server-side sync contract runs inside PostgreSQL. Host layers stay thin and replaceable. Native clients own local SQLite, queueing, scheduling, and safe apply.
+
+The current release architecture is:
 
 - `extensions/synchro-core` owns shared deterministic sync semantics
 - `extensions/synchro-pg` owns PostgreSQL-near execution, scope materialization, and synced CRUD application
-- `api/go` owns transport, auth integration, and HTTP translation
+- `api/go` is one host layer for transport, auth integration, and HTTP translation
 - native clients own local SQLite, queueing, scheduling, and safe apply
 - React Native is a bridge over the native clients, not an independent sync engine
 
@@ -15,8 +19,9 @@ Synchro’s release architecture is intentionally narrow:
 
 This architecture exists to keep:
 
+- the server-side sync contract in the database layer
+- the host layer thin and replaceable
 - sync semantics close to the data
-- the HTTP layer thin
 - native SDK behavior consistent
 - the hot path low in round trips
 
@@ -66,12 +71,12 @@ Detailed rules live in [Portable seeds](/synchro/architecture/portable-seeds/).
 
 ## Auth integration at a glance
 
-The Go adapter supports:
+The reference Go host layer supports:
 
 - trusted upstream auth
 - direct JWT validation
 
-For most product APIs, trusted upstream auth is the better default because product-specific identity logic stays in the host API instead of the sync adapter.
+For most product APIs, trusted upstream auth is the better default because product-specific identity logic stays in the host API instead of the host layer.
 
 Detailed wiring guidance lives in [Auth integration](/synchro/architecture/auth-integration/).
 
