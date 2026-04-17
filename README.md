@@ -6,75 +6,79 @@
 
 # Synchro
 
-Synchro is an offline-first sync system for native apps using local SQLite, a PostgreSQL extension, and a thin HTTP adapter.
+Synchro is a sync stack for apps that keep a real SQLite database on device and PostgreSQL on the server.
 
-It is built for teams that want SQLite-first clients, deterministic selective sync, and a server implementation that stays close to PostgreSQL instead of recreating sync semantics in application code.
+It combines a PostgreSQL extension, a thin Go HTTP adapter, native Swift and Kotlin SDKs, and a React Native bridge over those native SDKs.
 
-## Why Synchro
+The goal is straightforward: keep sync semantics close to PostgreSQL, keep the adapter thin, and let client apps work against local SQLite instead of a remote-first cache.
 
-- local SQLite is the product center, not a cache afterthought
-- sync semantics live in Rust and PostgreSQL, close to the data and WAL
-- the HTTP adapter stays thin and transport-focused
-- Swift and Kotlin are the real client engines, React Native is a bridge over them
-- portable seed generation gives apps a real warm-start path instead of a schema-only bootstrap
+## When Synchro Fits
 
-## Architecture
+Use Synchro when:
 
-The current release architecture is:
+- your app treats local SQLite as the primary on-device data store
+- you need deterministic selective sync with server-defined scope assignment
+- you want synced CRUD, rebuild, and schema evolution to be part of the platform contract
+- you want PostgreSQL to own sync behavior instead of reimplementing it in product API handlers
 
-- `extensions/synchro-core`: shared deterministic sync semantics in Rust
-- `extensions/synchro-pg`: PostgreSQL extension that executes sync logic near the data
-- `api/go`: thin HTTP adapter over the extension
-- `clients/swift`: native Apple SDK
-- `clients/kotlin`: native Android SDK
-- `clients/react-native`: thin React Native bridge over the native SDKs
+Synchro is not the right fit when:
 
-## Scope model
+- you need support for a server database other than PostgreSQL
+- you want a browser-first sync client instead of native SQLite clients
+- you want application code to define ad hoc sync rules on each request
 
-The README should only give the mental model:
+## Requirements
 
-- private data belongs in private scopes
-- shared data belongs in shared runtime scopes
-- bundled seeds export those same shared runtime scopes, not seed-only copies
-
-Detailed scope design guidance lives in the [Scope modeling](https://trainstar.github.io/synchro/architecture/scope-modeling/) guide. The normative architectural rules live in the [Principles](https://trainstar.github.io/synchro/spec/00-principles/) spec.
-
-## Current support
-
-The current supported release surface is:
+### Runtime Support
 
 - PostgreSQL 18
-- Swift on iOS 16+ and macOS 13+
-- Kotlin on Android API 24+
-- React Native bridge over the native SDKs
+- iOS 16 or later
+- macOS 13 or later
+- Android API 24 or later
+- React Native through the native Apple and Android SDKs
 
-The validated test matrix for that surface is:
+### Local Validation and Development
 
-- `make test-rust-core`
-- `make test-rust-pg`
-- `make test-adapter`
-- `make test-swift`
-- `make test-kotlin`
-- `make test-rn`
+- Rust toolchain with `cargo pgrx` configured for PostgreSQL 18
+- Go 1.25 for `api/go`
+- Xcode and Swift for Apple SDK validation
+- JDK 17 and Android SDK for Kotlin and Android validation
+- Node.js 22 and Yarn for React Native validation
+- CocoaPods for React Native iOS validation
 
-## Documentation
+The `Makefile` is the supported entry point for validation. Android targets expect `ANDROID_HOME` and `ANDROID_JAVA_HOME` to be set correctly.
 
-- [Docs site](https://trainstar.github.io/synchro)
-- [Welcome](https://trainstar.github.io/synchro/)
-- [Architecture overview](https://trainstar.github.io/synchro/architecture/overview/)
-- [Scope modeling](https://trainstar.github.io/synchro/architecture/scope-modeling/)
-- [Portable seeds](https://trainstar.github.io/synchro/architecture/portable-seeds/)
-- [Auth integration](https://trainstar.github.io/synchro/architecture/auth-integration/)
-- [Client integration overview](https://trainstar.github.io/synchro/clients/overview/)
-- [Client consumption](https://trainstar.github.io/synchro/clients/consumption/)
-- [Quickstart](https://trainstar.github.io/synchro/getting-started/quickstart/)
-- [Published release spec](https://trainstar.github.io/synchro/spec/00-principles/)
-- Docs source: [docs/src/content/docs/spec/00-principles.mdx](/Users/mdspinali/Documents/projects/trainstar/repos/synchro/docs/src/content/docs/spec/00-principles.mdx)
-- Shared conformance fixtures: [conformance/README.md](/Users/mdspinali/Documents/projects/trainstar/repos/synchro/conformance/README.md)
+## Status and Support
 
-## Quickstart
+- project status: active development
+- repository owner: `trainstar`
+- default development branch: `dev`
+- issue tracker: [github.com/trainstar/synchro/issues](https://github.com/trainstar/synchro/issues)
+- license: [LICENSE](LICENSE)
 
-### 1. Validate the core release surface
+## What This Repository Contains
+
+- `extensions/synchro-core`: shared deterministic sync semantics in Rust
+- `extensions/synchro-pg`: PostgreSQL extension that applies sync logic close to the data
+- `api/go`: HTTP adapter, auth integration, and transport translation
+- `clients/swift`: native Apple SDK
+- `clients/kotlin`: native Android SDK
+- `clients/react-native`: React Native bridge over the native SDKs
+- `conformance/`: shared executable contract fixtures
+- `docs/`: published docs site and specification
+
+## Core Capabilities
+
+- deterministic server-defined scopes
+- synced create, update, delete, pull, and rebuild flows
+- schema evolution with explicit client actions
+- portable seed database generation for warm starts
+- native SQLite change capture on clients
+- thin adapter auth integration with either trusted upstream auth or direct JWT validation
+
+## Quick Start
+
+Validate the core server surface:
 
 ```bash
 make test-rust-core
@@ -82,7 +86,7 @@ make test-rust-pg
 make test-adapter
 ```
 
-### 2. Validate the native SDKs and React Native bridge
+Validate the client surfaces:
 
 ```bash
 make test-swift
@@ -90,89 +94,67 @@ make test-kotlin
 make test-rn
 ```
 
-### 3. Start the extension-backed adapter locally
+Start the extension-backed local adapter:
 
 ```bash
 make synchrod-pg-test-start
 ```
 
-The default test adapter listens on `http://localhost:8081`.
+The default local test URL is `http://localhost:8081`.
 
-### 4. Generate a preinitialized seed database
+Stop it when you are done:
 
 ```bash
-cd api/go
-GOWORK=off go run ./cmd/synchro-seed \
-  --database-url "postgres://user:pass@localhost:5432/app?sslmode=disable" \
-  --output ./build/seed.db
+make synchrod-pg-test-stop
 ```
 
-This generator creates a client-compatible SQLite seed from the canonical PostgreSQL schema manifest plus any explicitly declared portable scopes. If no portable scopes are configured, it falls back to a schema-only seed.
+Build the seed database generator:
 
-See the [portable seeds guide](https://trainstar.github.io/synchro/architecture/portable-seeds/) for the full contract.
+```bash
+make build-seed
+```
 
-## Auth integration
+For the full local validation and release matrix, see:
 
-The adapter supports two integration modes for protected sync routes:
+- [Quickstart](https://trainstar.github.io/synchro/getting-started/quickstart/)
+- [Client consumption](https://trainstar.github.io/synchro/clients/consumption/)
 
-- trusted upstream auth, recommended when Synchro is mounted behind an existing product API
-- direct JWT validation inside the adapter
+## Public Release Surfaces
 
-For hosted product APIs, trusted upstream auth is the better default. See the [auth integration guide](https://trainstar.github.io/synchro/architecture/auth-integration/) for the decision framework and wiring model.
+Synchro currently publishes or is structured to publish these surfaces:
+
+- PostgreSQL extension for PostgreSQL 18
+- `synchrod-pg` adapter binary
+- `synchro-seed` seed database generator
+- Swift Package Manager package from the repo root
+- CocoaPods package from the repo root
+- Kotlin package from `clients/kotlin/synchro`
+- React Native package from `clients/react-native`
+
+## Architecture and Spec
+
+Start here if you are evaluating the system:
+
+- [Docs site](https://trainstar.github.io/synchro/)
+- [Architecture overview](https://trainstar.github.io/synchro/architecture/overview/)
+- [Scope modeling](https://trainstar.github.io/synchro/architecture/scope-modeling/)
+- [Portable seeds](https://trainstar.github.io/synchro/architecture/portable-seeds/)
+- [Auth integration](https://trainstar.github.io/synchro/architecture/auth-integration/)
+- [Wire protocol](https://trainstar.github.io/synchro/spec/01-wire-protocol/)
+- [Client contract](https://trainstar.github.io/synchro/spec/02-client-contract/)
+- [State machines](https://trainstar.github.io/synchro/spec/03-state-machines/)
+- [Schema evolution](https://trainstar.github.io/synchro/spec/05-schema-evolution/)
+- [Conformance fixtures](conformance/)
 
 ## Repository Layout
 
 ```text
-api/go/                 Thin Go HTTP adapter
+api/go/                 Go HTTP adapter and release utilities
 clients/swift/          Apple SDK
 clients/kotlin/         Android SDK
 clients/react-native/   React Native bridge
-extensions/synchro-core Shared Rust semantics
-extensions/synchro-pg   PostgreSQL extension
+conformance/            Shared contract fixtures
 docs/                   Published docs site
-conformance/            Shared protocol and scenario fixtures
-```
-
-## Public release surfaces
-
-Synchro currently publishes or intends to publish these consumer surfaces:
-
-- PostgreSQL extension for PG 18
-- `synchrod-pg` adapter binary from `api/go/cmd/synchrod-pg`
-- `synchro-seed` generator binary from `api/go/cmd/synchro-seed`
-- Swift Package Manager package from the repo root `Package.swift`
-- CocoaPods package from the repo root `Synchro.podspec`
-- Kotlin package from `clients/kotlin/synchro`
-- React Native package from `clients/react-native`
-
-## Local and published consumption
-
-Supported consumers should switch dependency source only. Package identity and runtime behavior stay the same.
-
-| Surface | Local development | Published release |
-| --- | --- | --- |
-| Native Apple SDK | local SPM package path to the repo root | tagged SPM release from the repo root |
-| Apple pod surface | `pod 'Synchro', :path => '/absolute/path/to/synchro'` | `pod 'Synchro', :git => 'https://github.com/trainstar/synchro.git', :tag => 'v<version>'` |
-| Kotlin SDK | `mavenLocal()`, then `mavenCentral()` | Maven Central |
-| React Native package | local packed `.tgz` from `make local-consumer-artifacts` | npm |
-| RN iOS native dependency | local pod path to the repo root `Synchro.podspec` | tagged git pod `v<version>` |
-| RN Android native dependency | `mavenLocal()`, then `mavenCentral()`, optional `synchroVersion=<version>` override | Maven Central |
-
-Use `make local-consumer-artifacts` to prepare the supported local-consumer flow:
-
-- a packed React Native tarball in `dist/local-consumer/`
-- the Kotlin SDK published to `mavenLocal()`
-- validated Apple local-consumer surfaces from the repo root
-
-The full installation matrix lives in the [client consumption guide](https://trainstar.github.io/synchro/clients/consumption/).
-
-## React Native iOS note
-
-React Native on iOS currently depends on the native Apple SDK and GRDB being added in the consuming app's Podfile. That installation requirement is part of the current public contract in both local and published modes.
-
-Example Podfile entries:
-
-```ruby
-pod 'Synchro', :git => 'https://github.com/trainstar/synchro.git', :tag => 'v<version>'
-pod 'GRDB.swift', :git => 'https://github.com/groue/GRDB.swift.git', :tag => 'v7.0.0'
+extensions/synchro-core Shared Rust sync semantics
+extensions/synchro-pg   PostgreSQL extension
 ```
