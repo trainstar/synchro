@@ -1,10 +1,9 @@
 use pgrx::prelude::*;
 use pgrx::spi::SpiClient;
 use synchro_core::change::ChangeOperation;
-use synchro_core::checksum::compute_record_checksum;
+use synchro_core::checksum::compute_record_checksum_from_value;
 use synchro_core::contract::{
-    ChangeRecord, ChecksumMode, ProtocolErrorCode, PullRequest, PullResponse, ScopeCursorRef,
-    Operation,
+    ChangeRecord, Operation, ProtocolErrorCode, PullRequest, PullResponse, ScopeCursorRef,
 };
 use synchro_core::dedup::{
     deduplicate_entries, ChangelogEntry as DedupEntry, RecordRef as DedupRecordRef,
@@ -12,6 +11,7 @@ use synchro_core::dedup::{
 use synchro_core::limits::clamp_pull_limit;
 
 use crate::client::{build_scope_delta, protocol_error_response, validate_schema_ref};
+use crate::cursor_token::{issue_scope_cursor, parse_scope_cursor, ParsedScopeCursor};
 use crate::registry::TableRegistration;
 
 /// Pull scoped changes for a client using per-scope cursors.
@@ -55,13 +55,30 @@ fn synchro_pull_contract(p_user_id: &str, p_request: pgrx::JsonB) -> pgrx::JsonB
             .filter(|scope_id: &&String| request.scopes.contains_key(scope_id.as_str()))
             .cloned()
             .collect();
-        let scope_cps = match parse_scope_checkpoints(&request.scopes, &active_scopes) {
+        let (scope_cps, mut stale_scopes) =
+            match parse_scope_checkpoints(client, &request.scopes, &active_scopes) {
             Ok(cursors) => cursors,
             Err(err_json) => return err_json,
         };
+        let stale_lookup: std::collections::HashSet<&str> =
+            stale_scopes.iter().map(|scope_id| scope_id.as_str()).collect();
+        let mut current_scopes: Vec<String> = active_scopes
+            .iter()
+            .filter(|scope_id| !stale_lookup.contains(scope_id.as_str()))
+            .cloned()
+            .collect();
+        let compacted_stale_scopes = detect_stale_buckets(client, &current_scopes, &scope_cps);
+        if !compacted_stale_scopes.is_empty() {
+            let mut stale_seen: std::collections::HashSet<String> = stale_scopes.iter().cloned().collect();
+            for scope_id in compacted_stale_scopes {
+                if stale_seen.insert(scope_id.clone()) {
+                    stale_scopes.push(scope_id);
+                }
+            }
+            current_scopes.retain(|scope_id| !stale_seen.contains(scope_id));
+        }
 
-        let stale_scopes = detect_stale_buckets(client, &active_scopes, &scope_cps);
-        if !stale_scopes.is_empty() {
+        if current_scopes.is_empty() {
             let response = PullResponse {
                 changes: Vec::new(),
                 scope_set_version,
@@ -69,15 +86,10 @@ fn synchro_pull_contract(p_user_id: &str, p_request: pgrx::JsonB) -> pgrx::JsonB
                 scope_updates,
                 rebuild: stale_scopes,
                 has_more: false,
-                checksums: maybe_scope_checksums(
-                    client,
-                    &active_scopes,
-                    request.checksum_mode,
-                    false,
-                ),
+                checksums: final_scope_checksums(client, &current_scopes, false),
             };
 
-            if let Err(err) = response.validate_for_request(&request) {
+            if let Err(err) = response.validate() {
                 pgrx::error!("invalid pull response: {}", err);
             }
 
@@ -90,29 +102,24 @@ fn synchro_pull_contract(p_user_id: &str, p_request: pgrx::JsonB) -> pgrx::JsonB
                 scope_set_version,
                 scope_cursors: std::collections::BTreeMap::new(),
                 scope_updates,
-                rebuild: Vec::new(),
+                rebuild: stale_scopes,
                 has_more: false,
-                checksums: maybe_scope_checksums(
-                    client,
-                    &active_scopes,
-                    request.checksum_mode,
-                    false,
-                ),
+                checksums: final_scope_checksums(client, &current_scopes, false),
             };
 
-            if let Err(err) = response.validate_for_request(&request) {
+            if let Err(err) = response.validate() {
                 pgrx::error!("invalid pull response: {}", err);
             }
 
             return pgrx::JsonB(serde_json::to_value(response).unwrap());
         }
 
-        let effective_cp = active_scopes
+        let effective_cp = current_scopes
             .iter()
             .map(|scope_id| scope_cps.get(scope_id).copied().unwrap_or(0))
             .min()
             .unwrap_or(0);
-        let raw_entries = query_changelog(client, &active_scopes, effective_cp, limit + 1, &None);
+        let raw_entries = query_changelog(client, &current_scopes, effective_cp, limit + 1, &None);
         let filtered: Vec<RawChangelogEntry> = raw_entries
             .into_iter()
             .filter(|entry| {
@@ -145,7 +152,9 @@ fn synchro_pull_contract(p_user_id: &str, p_request: pgrx::JsonB) -> pgrx::JsonB
         let mut changes = Vec::new();
         let mut scope_cursors = std::collections::BTreeMap::new();
         for entry in &deduped {
-            scope_cursors.insert(entry.bucket_id.clone(), entry.seq.to_string());
+            let next_cursor = issue_scope_cursor(client, &entry.bucket_id, entry.seq)
+                .unwrap_or_else(|err| pgrx::error!("issuing scope cursor: {}", err));
+            scope_cursors.insert(entry.bucket_id.clone(), next_cursor);
             let pk = contract_pk_value(&registry, &entry.table_name, &entry.record_id);
             let hydrated_record =
                 hydrated.get(&(entry.table_name.clone(), entry.record_id.clone()));
@@ -156,6 +165,7 @@ fn synchro_pull_contract(p_user_id: &str, p_request: pgrx::JsonB) -> pgrx::JsonB
                     op: Operation::Delete,
                     pk,
                     row: hydrated_record.map(|record| record["data"].clone()),
+                    row_checksum: hydrated_record.and_then(record_checksum),
                     server_version: hydrated_record
                         .map(|record| record_server_version(record, entry.seq))
                         .unwrap_or_else(|| entry.seq.to_string()),
@@ -168,6 +178,7 @@ fn synchro_pull_contract(p_user_id: &str, p_request: pgrx::JsonB) -> pgrx::JsonB
                             op: Operation::Upsert,
                             pk,
                             row: Some(record["data"].clone()),
+                            row_checksum: record_checksum(record),
                             server_version: record_server_version(record, entry.seq),
                         });
                     }
@@ -180,17 +191,12 @@ fn synchro_pull_contract(p_user_id: &str, p_request: pgrx::JsonB) -> pgrx::JsonB
             scope_set_version,
             scope_cursors,
             scope_updates,
-            rebuild: Vec::new(),
+            rebuild: stale_scopes,
             has_more,
-            checksums: maybe_scope_checksums(
-                client,
-                &active_scopes,
-                request.checksum_mode,
-                has_more,
-            ),
+            checksums: final_scope_checksums(client, &current_scopes, has_more),
         };
 
-        if let Err(err) = response.validate_for_request(&request) {
+        if let Err(err) = response.validate() {
             pgrx::error!("invalid pull response: {}", err);
         }
 
@@ -304,10 +310,18 @@ fn detect_stale_buckets(
 }
 
 fn parse_scope_checkpoints(
+    client: &SpiClient<'_>,
     scopes: &std::collections::BTreeMap<String, ScopeCursorRef>,
     active_scopes: &[String],
-) -> Result<std::collections::HashMap<String, i64>, pgrx::JsonB> {
+) -> Result<
+    (
+        std::collections::HashMap<String, i64>,
+        Vec<String>,
+    ),
+    pgrx::JsonB,
+> {
     let mut checkpoints = std::collections::HashMap::new();
+    let mut stale_scopes = Vec::new();
 
     for scope_id in active_scopes {
         let cursor = scopes
@@ -317,26 +331,30 @@ fn parse_scope_checkpoints(
             continue;
         };
 
-        let checkpoint = cursor.parse::<i64>().map_err(|_| {
-            protocol_error_response(
-                ProtocolErrorCode::InvalidRequest,
-                format!("scope {scope_id} cursor must be a decimal sequence value"),
-                false,
-            )
-        })?;
-        checkpoints.insert(scope_id.clone(), checkpoint);
+        match parse_scope_cursor(client, scope_id, cursor) {
+            Ok(ParsedScopeCursor::Current(checkpoint)) => {
+                checkpoints.insert(scope_id.clone(), checkpoint);
+            }
+            Ok(ParsedScopeCursor::Stale) => stale_scopes.push(scope_id.clone()),
+            Err(err) => {
+                return Err(protocol_error_response(
+                    ProtocolErrorCode::InvalidRequest,
+                    format!("scope {scope_id} cursor is invalid: {err}"),
+                    false,
+                ));
+            }
+        }
     }
 
-    Ok(checkpoints)
+    Ok((checkpoints, stale_scopes))
 }
 
-fn maybe_scope_checksums(
+fn final_scope_checksums(
     client: &SpiClient<'_>,
     scope_ids: &[String],
-    checksum_mode: Option<ChecksumMode>,
     has_more: bool,
 ) -> Option<std::collections::BTreeMap<String, String>> {
-    if has_more || matches!(checksum_mode.unwrap_or_default(), ChecksumMode::None) {
+    if has_more {
         return None;
     }
 
@@ -348,6 +366,49 @@ fn maybe_scope_checksums(
     }
 
     Some(response)
+}
+
+pub(crate) fn record_checksum(record: &serde_json::Value) -> Option<i32> {
+    record
+        .get("checksum")
+        .and_then(|value| value.as_i64())
+        .map(|value| value as i32)
+}
+
+pub(crate) fn canonicalize_synced_row_data(
+    table_reg: &TableRegistration,
+    data: &mut serde_json::Value,
+) {
+    if let Some(obj) = data.as_object_mut() {
+        if table_reg.has_updated_at {
+            if let Some(updated_at) = obj
+                .get(&table_reg.updated_at_col)
+                .and_then(|value| value.as_str())
+            {
+                obj.insert(
+                    table_reg.updated_at_col.clone(),
+                    serde_json::json!(crate::push::canonical_timestamp(updated_at)),
+                );
+            }
+        }
+        if table_reg.has_deleted_at {
+            if let Some(deleted_at) = obj
+                .get(&table_reg.deleted_at_col)
+                .and_then(|value| value.as_str())
+            {
+                obj.insert(
+                    table_reg.deleted_at_col.clone(),
+                    serde_json::json!(crate::push::canonical_timestamp(deleted_at)),
+                );
+            }
+        }
+    }
+}
+
+pub(crate) fn synced_row_checksum(table_reg: &TableRegistration, data: &serde_json::Value) -> i32 {
+    let mut canonical = data.clone();
+    canonicalize_synced_row_data(table_reg, &mut canonical);
+    compute_record_checksum_from_value(&canonical) as i32
 }
 
 /// Load registry within an existing SPI context.
@@ -550,34 +611,10 @@ pub(crate) fn hydrate_records(
             .get_by_name::<String, &str>("deleted_at")
             .unwrap_or(None);
 
-        let checksum = compute_record_checksum(&data_str) as i32;
         let mut data: serde_json::Value =
             serde_json::from_str(&data_str).unwrap_or(serde_json::Value::Null);
-
-        if let Some(obj) = data.as_object_mut() {
-            if table_reg.has_updated_at {
-                if let Some(updated_at) = obj
-                    .get(&table_reg.updated_at_col)
-                    .and_then(|value| value.as_str())
-                {
-                    obj.insert(
-                        table_reg.updated_at_col.clone(),
-                        serde_json::json!(crate::push::canonical_timestamp(updated_at)),
-                    );
-                }
-            }
-            if table_reg.has_deleted_at {
-                if let Some(deleted_at) = obj
-                    .get(&table_reg.deleted_at_col)
-                    .and_then(|value| value.as_str())
-                {
-                    obj.insert(
-                        table_reg.deleted_at_col.clone(),
-                        serde_json::json!(crate::push::canonical_timestamp(deleted_at)),
-                    );
-                }
-            }
-        }
+        canonicalize_synced_row_data(table_reg, &mut data);
+        let checksum = synced_row_checksum(table_reg, &data);
 
         let mut record = serde_json::json!({
             "id": id,

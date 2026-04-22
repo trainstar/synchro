@@ -183,9 +183,10 @@ For each scope:
 5. write or update local scope provenance metadata
 6. when rebuild completes, prune stale provenance for that scope
 7. remove local app rows only when they have zero remaining provenance
-8. install final authoritative cursor and checksum for that scope
-9. clear rebuild-in-progress marker
-10. continue with next requested scope or return to `ready`
+8. verify the final authoritative checksum against local scope state
+9. install final authoritative cursor and checksum for that scope only if verification succeeds
+10. clear rebuild-in-progress marker
+11. continue with next requested scope or return to `ready`
 
 Rebuild cleanup is provenance cleanup. It must not invent a new local tombstone. If a row is absent from the rebuilt scope set and no other local provenance edge remains, the client removes the local row.
 
@@ -340,7 +341,8 @@ For incremental pull, the server:
 2. evaluates scope assignment delta if needed
 3. serves incremental changes for provided scope cursors
 4. advances authoritative cursor state as needed
-5. requests explicit rebuild when incremental state is invalid
+5. returns authoritative final checksums on terminal pull pages
+6. requests explicit rebuild when incremental state is invalid
 
 ### Rebuild State
 

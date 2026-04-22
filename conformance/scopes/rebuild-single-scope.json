@@ -26,6 +26,7 @@
             "pk": {
               "id": "e_1"
             },
+            "row_checksum": 424242,
             "server_version": "sv_100"
           }
         ],
@@ -37,7 +38,7 @@
         "records": [],
         "cursor": null,
         "has_more": false,
-        "final_scope_cursor": "c_202",
+        "final_scope_cursor": "v2.exercises_public_202.sig",
         "checksum": "cs_0f22"
       }
     ],

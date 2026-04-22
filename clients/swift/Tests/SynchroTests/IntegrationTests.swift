@@ -94,7 +94,7 @@ final class IntegrationTests: XCTestCase {
             clientID: clientID,
             platform: "ios",
             appVersion: "1.0.0",
-            protocolVersion: 1,
+            protocolVersion: 2,
             schema: .init(version: 0, hash: ""),
             scopeSetVersion: 0,
             knownScopes: [:]

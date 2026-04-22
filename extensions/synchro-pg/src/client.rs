@@ -6,7 +6,7 @@ use synchro_core::contract::{
 };
 
 pub(crate) const SQL_CONTRACT_VERSION: i32 = 1;
-pub(crate) const PROTOCOL_VERSION: u32 = 1;
+pub(crate) const PROTOCOL_VERSION: u32 = 2;
 
 #[derive(Debug, Clone)]
 pub(crate) struct ClientConnectState {

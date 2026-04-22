@@ -14,7 +14,7 @@
       "client_id": "android-device-456",
       "platform": "android",
       "app_version": "2.0.0",
-      "protocol_version": 1,
+      "protocol_version": 2,
       "schema": {
         "version": 7,
         "hash": "3b6f9f2f"
@@ -22,7 +22,7 @@
       "scope_set_version": 12,
       "known_scopes": {
         "exercises_public": {
-          "cursor": "c_201"
+          "cursor": "v2.exercises_public_201.sig"
         }
       }
     }
@@ -30,7 +30,7 @@
   "expected": {
     "response": {
       "server_time": "2026-03-20T18:22:11Z",
-      "protocol_version": 1,
+      "protocol_version": 2,
       "scope_set_version": 13,
       "schema": {
         "version": 8,

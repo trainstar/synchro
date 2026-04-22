@@ -459,20 +459,6 @@ func writePortableSeedData(
 			return fmt.Errorf("writing portable scope %s: %w", scope.ID, err)
 		}
 
-		checkpoint, err := parseScopeCheckpoint(scope.ID, scope.Cursor)
-		if err != nil {
-			return err
-		}
-		if _, err := tx.ExecContext(
-			ctx,
-			`INSERT INTO _synchro_bucket_checkpoints (bucket_id, checkpoint) VALUES (?, ?)
-			 ON CONFLICT (bucket_id) DO UPDATE SET checkpoint = excluded.checkpoint`,
-			scope.ID,
-			checkpoint,
-		); err != nil {
-			return fmt.Errorf("writing portable checkpoint for %s: %w", scope.ID, err)
-		}
-
 		cursor := ""
 		for {
 			page, err := loadPortableSeedPage(ctx, pg, scope.ID, cursor, 1000)
@@ -498,9 +484,6 @@ func writePortableSeedData(
 					generation,
 				); err != nil {
 					return fmt.Errorf("writing portable scope row %s/%s/%s: %w", scope.ID, record.Table, record.RecordID, err)
-				}
-				if err := upsertPortableBucketMember(ctx, tx, scope.ID, record); err != nil {
-					return err
 				}
 			}
 
@@ -564,35 +547,6 @@ func upsertPortableRecord(ctx context.Context, tx *sql.Tx, table localSchemaTabl
 	return nil
 }
 
-func upsertPortableBucketMember(ctx context.Context, tx *sql.Tx, scopeID string, record portableSeedRecord) error {
-	if record.Checksum != nil {
-		if _, err := tx.ExecContext(
-			ctx,
-			`INSERT INTO _synchro_bucket_members (bucket_id, table_name, record_id, checksum) VALUES (?, ?, ?, ?)
-			 ON CONFLICT (bucket_id, table_name, record_id) DO UPDATE SET checksum = excluded.checksum`,
-			scopeID,
-			record.Table,
-			record.RecordID,
-			*record.Checksum,
-		); err != nil {
-			return fmt.Errorf("writing portable bucket member %s/%s/%s: %w", scopeID, record.Table, record.RecordID, err)
-		}
-		return nil
-	}
-
-	if _, err := tx.ExecContext(
-		ctx,
-		`INSERT INTO _synchro_bucket_members (bucket_id, table_name, record_id, checksum) VALUES (?, ?, ?, NULL)
-		 ON CONFLICT (bucket_id, table_name, record_id) DO UPDATE SET checksum = excluded.checksum`,
-		scopeID,
-		record.Table,
-		record.RecordID,
-	); err != nil {
-		return fmt.Errorf("writing portable bucket member %s/%s/%s: %w", scopeID, record.Table, record.RecordID, err)
-	}
-	return nil
-}
-
 func primaryKeyColumn(table localSchemaTable) string {
 	for _, column := range table.Columns {
 		if column.IsPrimaryKey {
@@ -603,17 +557,6 @@ func primaryKeyColumn(table localSchemaTable) string {
 		return table.PrimaryKey[0]
 	}
 	return "id"
-}
-
-func parseScopeCheckpoint(scopeID string, cursor string) (int64, error) {
-	if strings.TrimSpace(cursor) == "" {
-		return 0, nil
-	}
-	checkpoint, err := strconv.ParseInt(cursor, 10, 64)
-	if err != nil {
-		return 0, fmt.Errorf("portable scope %s cursor %q is not a decimal sequence value: %w", scopeID, cursor, err)
-	}
-	return checkpoint, nil
 }
 
 func sqliteValue(column localSchemaColumn, raw any) (any, error) {

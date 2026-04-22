@@ -7,7 +7,7 @@ description: Canonical HTTP and JSON contract for connect, push, pull, and rebui
 
 ## Purpose
 
-This document defines the proposed canonical HTTP and JSON contract between end clients and a Synchro server adapter such as `api/go`.
+This document defines the canonical HTTP and JSON contract between end clients and a Synchro server adapter such as `api/go`.
 
 The contract is designed for:
 
@@ -44,6 +44,10 @@ Examples:
 A scope cursor is an opaque token representing incremental progress for one scope instance.
 
 Clients treat cursors as opaque strings.
+
+`null` means the client has no usable resumable state for that scope and must rebuild.
+
+Any non-null cursor is a valid opaque resume token issued by the server. The token may encode stream lineage and checkpoint state internally, but clients must not parse or inspect it.
 
 ### Server Version
 
@@ -114,7 +118,7 @@ Responsibilities:
 - returns upserts and deletes
 - returns scope assignment changes
 - requests rebuild for stale or invalid scope state
-- optionally returns checksums on final page
+- returns authoritative scope checksums on the final page
 
 ### `POST /sync/rebuild`
 
@@ -144,15 +148,15 @@ Clients should not require them in the normal steady-state flow.
   "client_id": "ios-device-123",
   "platform": "ios",
   "app_version": "1.4.0",
-  "protocol_version": 1,
+  "protocol_version": 2,
   "schema": {
     "version": 7,
     "hash": "3b6f9f2f"
   },
   "scope_set_version": 12,
   "known_scopes": {
-    "documents_user:u_123": { "cursor": "c_889" },
-    "templates_public": { "cursor": "c_201" }
+    "documents_user:u_123": { "cursor": "v2.eyJzY29wZV9pZCI6ImRvY3VtZW50c191c2VyOnVfMTIzIiwic3RyZWFtX2dlbmVyYXRpb24iOiJnZW5fNyIsImNoZWNrcG9pbnQiOjg4OX0.sig" },
+    "templates_public": { "cursor": "v2.eyJzY29wZV9pZCI6InRlbXBsYXRlc19wdWJsaWMiLCJzdHJlYW1fZ2VuZXJhdGlvbiI6Imdlbl83IiwiY2hlY2twb2ludCI6MjAxfQ.sig" }
   }
 }
 ```
@@ -162,7 +166,7 @@ Clients should not require them in the normal steady-state flow.
 ```json
 {
   "server_time": "2026-03-20T18:22:11Z",
-  "protocol_version": 1,
+  "protocol_version": 2,
   "scope_set_version": 13,
   "schema": {
     "version": 8,
@@ -317,12 +321,11 @@ The authoritative row version comes from protocol version fields, not from clien
   },
   "scope_set_version": 13,
   "scopes": {
-    "documents_user:u_123": { "cursor": "c_889" },
-    "templates_public": { "cursor": "c_201" },
-    "templates_user:u_123": { "cursor": "c_050" }
+    "documents_user:u_123": { "cursor": "v2.eyJzY29wZV9pZCI6ImRvY3VtZW50c191c2VyOnVfMTIzIiwic3RyZWFtX2dlbmVyYXRpb24iOiJnZW5fNyIsImNoZWNrcG9pbnQiOjg4OX0.sig" },
+    "templates_public": { "cursor": "v2.eyJzY29wZV9pZCI6InRlbXBsYXRlc19wdWJsaWMiLCJzdHJlYW1fZ2VuZXJhdGlvbiI6Imdlbl83IiwiY2hlY2twb2ludCI6MjAxfQ.sig" },
+    "templates_user:u_123": { "cursor": "v2.eyJzY29wZV9pZCI6InRlbXBsYXRlc191c2VyOnVfMTIzIiwic3RyZWFtX2dlbmVyYXRpb24iOiJnZW5fNyIsImNoZWNrcG9pbnQiOjUwfQ.sig" }
   },
-  "limit": 500,
-  "checksum_mode": "requested"
+  "limit": 500
 }
 ```
 
@@ -342,6 +345,7 @@ The authoritative row version comes from protocol version fields, not from clien
         "name": "Tempo Run",
         "updated_at": "2026-03-20T18:20:00Z"
       },
+      "row_checksum": 131313,
       "server_version": "sv_991"
     },
     {
@@ -354,9 +358,9 @@ The authoritative row version comes from protocol version fields, not from clien
   ],
   "scope_set_version": 14,
   "scope_cursors": {
-    "documents_user:u_123": "c_890",
-    "templates_public": "c_202",
-    "templates_user:u_123": "c_050"
+    "documents_user:u_123": "v2.eyJzY29wZV9pZCI6ImRvY3VtZW50c191c2VyOnVfMTIzIiwic3RyZWFtX2dlbmVyYXRpb24iOiJnZW5fNyIsImNoZWNrcG9pbnQiOjg5MH0.sig",
+    "templates_public": "v2.eyJzY29wZV9pZCI6InRlbXBsYXRlc19wdWJsaWMiLCJzdHJlYW1fZ2VuZXJhdGlvbiI6Imdlbl83IiwiY2hlY2twb2ludCI6MjAyfQ.sig",
+    "templates_user:u_123": "v2.eyJzY29wZV9pZCI6InRlbXBsYXRlc191c2VyOnVfMTIzIiwic3RyZWFtX2dlbmVyYXRpb24iOiJnZW5fNyIsImNoZWNrcG9pbnQiOjUwfQ.sig"
   },
   "scope_updates": {
     "add": [],
@@ -377,16 +381,17 @@ The authoritative row version comes from protocol version fields, not from clien
 - A delete change may omit `row` when the server only needs the client to remove local materialization for that scope.
 - A delete change may include `row` when the server is returning an authoritative tombstone. In that case `row.deleted_at` must be non-null and canonical.
 - Clients must not synthesize a new local tombstone when `row` is absent. Scope cleanup without an authoritative tombstone is local removal, not a new local delete mutation.
+- Row-bearing pull changes must include `row_checksum`.
 
 `scope_set_version` in pull responses is authoritative after any returned `scope_updates`. Clients must persist it atomically with the applied scope delta.
 
-### Checksum Modes
+### Final Pull Integrity
 
-- `none`: do not return checksums
-- `requested`: return checksums when practical, typically on final page
-- `required`: client explicitly requests checksums and the server must either provide them or fail the request
+Final pull pages must include authoritative scope checksums for all active scopes, even when there are no row changes in the page.
 
-Default mode is `none`.
+Clients must verify those checksums against local materialization state.
+
+If a final pull checksum does not match local scope state, the client must invalidate the local cursor for that scope and rebuild it.
 
 ## Design Notes
 
@@ -432,6 +437,7 @@ The protocol owns row-level synced CRUD instead of delegating the write contract
         "user_id": null,
         "name": "Squat"
       },
+      "row_checksum": 424242,
       "server_version": "sv_100"
     }
   ],
@@ -448,7 +454,7 @@ Final rebuild page:
   "records": [],
   "cursor": null,
   "has_more": false,
-  "final_scope_cursor": "c_202",
+  "final_scope_cursor": "v2.eyJzY29wZV9pZCI6InRlbXBsYXRlc19wdWJsaWMiLCJzdHJlYW1fZ2VuZXJhdGlvbiI6Imdlbl83IiwiY2hlY2twb2ludCI6MjAyfQ.sig",
   "checksum": "cs_0f22"
 }
 ```
@@ -512,4 +518,3 @@ The protocol owns row-level synced CRUD instead of delegating the write contract
 
 - whether `/sync/connect` should remain named `connect` or `register`
 - whether rebuild should support multiple scopes per request in the future
-- whether checksums should always be returned on final pull pages or only when requested

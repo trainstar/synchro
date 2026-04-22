@@ -13,7 +13,7 @@
       "client_id": "ios-device-123",
       "platform": "ios",
       "app_version": "1.4.0",
-      "protocol_version": 1,
+      "protocol_version": 2,
       "schema": {
         "version": 8,
         "hash": "8b21d2a1"
@@ -21,10 +21,10 @@
       "scope_set_version": 13,
       "known_scopes": {
         "workouts_user:u_123": {
-          "cursor": "c_889"
+          "cursor": "v2.workouts_user_u_123_889.sig"
         },
         "exercises_public": {
-          "cursor": "c_201"
+          "cursor": "v2.exercises_public_201.sig"
         }
       }
     }
@@ -32,7 +32,7 @@
   "expected": {
     "response": {
       "server_time": "2026-03-20T18:22:11Z",
-      "protocol_version": 1,
+      "protocol_version": 2,
       "scope_set_version": 13,
       "schema": {
         "version": 8,

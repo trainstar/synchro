@@ -30,19 +30,14 @@ final class ContractTests: XCTestCase {
     }
 
     func testPullRequiredChecksumsFixtureDecodesAndValidates() throws {
-        let request: PullRequest = try decodeFixtureValue(
-            path: "conformance/protocol/pull-required-checksums.json",
-            jsonPath: ["input", "request"]
-        )
         let response: PullResponse = try decodeFixtureValue(
             path: "conformance/protocol/pull-required-checksums.json",
             jsonPath: ["expected", "response"]
         )
 
-        XCTAssertEqual(request.checksumMode, .required)
         XCTAssertEqual(response.scopeSetVersion, 13)
-        XCTAssertEqual(response.scopeCursors["workouts_user:u_123"], "c_890")
-        try response.validate(for: request)
+        XCTAssertEqual(response.scopeCursors["workouts_user:u_123"], "v2.workouts_user_u_123_890.sig")
+        try response.validate()
     }
 
     func testRebuildFixturePagesDecodeAndValidate() throws {

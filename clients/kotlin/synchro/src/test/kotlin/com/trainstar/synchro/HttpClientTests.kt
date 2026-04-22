@@ -74,7 +74,7 @@ class HttpClientTests {
         val responseBody = """
             {
                 "server_time": "2026-03-20T18:22:11Z",
-                "protocol_version": 1,
+                "protocol_version": 2,
                 "scope_set_version": 13,
                 "schema": {
                     "version": 8,
@@ -94,7 +94,7 @@ class HttpClientTests {
             clientID = "test-device",
             platform = "android",
             appVersion = "1.0.0",
-            protocolVersion = 1,
+            protocolVersion = 2,
             schema = SchemaRef(version = 8, hash = "8b21d2a1"),
             scopeSetVersion = 13,
             knownScopes = emptyMap()
@@ -109,7 +109,7 @@ class HttpClientTests {
         assertTrue(recorded.path!!.endsWith("/sync/connect"))
         val body = Json.decodeFromString<Map<String, kotlinx.serialization.json.JsonElement>>(recorded.body.readUtf8())
         assertEquals("\"test-device\"", body["client_id"].toString())
-        assertEquals("1", body["protocol_version"].toString())
+        assertEquals("2", body["protocol_version"].toString())
     }
 
     @Test
@@ -119,7 +119,7 @@ class HttpClientTests {
                 "changes": [],
                 "scope_set_version": 13,
                 "scope_cursors": {
-                    "workouts_user:u_123": "c_890"
+                    "workouts_user:u_123": "v2.workouts_user_u_123_890.sig"
                 },
                 "scope_updates": {
                     "add": [],
@@ -139,15 +139,14 @@ class HttpClientTests {
             clientID = "test-device",
             schema = SchemaRef(version = 8, hash = "8b21d2a1"),
             scopeSetVersion = 13,
-            scopes = mapOf("workouts_user:u_123" to ScopeCursorRef(cursor = "c_890")),
-            limit = 100,
-            checksumMode = ChecksumMode.REQUIRED
+            scopes = mapOf("workouts_user:u_123" to ScopeCursorRef(cursor = "v2.workouts_user_u_123_890.sig")),
+            limit = 100
         )
         val resp = httpClient.pull(req)
 
-        resp.validate(req)
+        resp.validate()
         assertEquals(13L, resp.scopeSetVersion)
-        assertEquals("c_890", resp.scopeCursors["workouts_user:u_123"])
+        assertEquals("v2.workouts_user_u_123_890.sig", resp.scopeCursors["workouts_user:u_123"])
 
         val recorded = server.takeRequest()
         assertEquals("POST", recorded.method)
@@ -155,7 +154,7 @@ class HttpClientTests {
         val body = Json.decodeFromString<Map<String, kotlinx.serialization.json.JsonElement>>(recorded.body.readUtf8())
         assertEquals("\"test-device\"", body["client_id"].toString())
         assertEquals("13", body["scope_set_version"].toString())
-        assertEquals("\"required\"", body["checksum_mode"].toString())
+        assertNull(body["checksum_mode"])
     }
 
     @Test
@@ -177,8 +176,7 @@ class HttpClientTests {
             schema = SchemaRef(version = 1, hash = "old"),
             scopeSetVersion = 0,
             scopes = emptyMap(),
-            limit = 100,
-            checksumMode = ChecksumMode.NONE
+            limit = 100
         )
         try {
             httpClient.pull(req)
@@ -197,7 +195,7 @@ class HttpClientTests {
             clientID = "test",
             platform = "android",
             appVersion = "0.1.0",
-            protocolVersion = 1,
+            protocolVersion = 2,
             schema = SchemaRef(version = 0, hash = ""),
             scopeSetVersion = 0,
             knownScopes = emptyMap()
@@ -249,8 +247,7 @@ class HttpClientTests {
             schema = SchemaRef(version = 1, hash = "abc"),
             scopeSetVersion = 0,
             scopes = emptyMap(),
-            limit = 100,
-            checksumMode = ChecksumMode.NONE
+            limit = 100
         )
         try {
             httpClient.pull(req)
@@ -269,8 +266,7 @@ class HttpClientTests {
             schema = SchemaRef(version = 1, hash = "abc"),
             scopeSetVersion = 0,
             scopes = emptyMap(),
-            limit = 100,
-            checksumMode = ChecksumMode.NONE
+            limit = 100
         )
         try {
             httpClient.pull(req)

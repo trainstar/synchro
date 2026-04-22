@@ -225,7 +225,8 @@ final class SynchroDatabase: @unchecked Sendable {
                     scope_id TEXT PRIMARY KEY,
                     cursor TEXT,
                     checksum TEXT,
-                    generation INTEGER NOT NULL DEFAULT 0
+                    generation INTEGER NOT NULL DEFAULT 0,
+                    local_checksum INTEGER NOT NULL DEFAULT 0
                 )
                 """)
 
@@ -234,6 +235,7 @@ final class SynchroDatabase: @unchecked Sendable {
                     scope_id TEXT NOT NULL,
                     table_name TEXT NOT NULL,
                     record_id TEXT NOT NULL,
+                    checksum INTEGER NOT NULL DEFAULT 0,
                     generation INTEGER NOT NULL DEFAULT 0,
                     PRIMARY KEY (scope_id, table_name, record_id)
                 )
@@ -243,6 +245,32 @@ final class SynchroDatabase: @unchecked Sendable {
                 CREATE INDEX IF NOT EXISTS idx_synchro_scope_rows_record
                 ON _synchro_scope_rows (table_name, record_id)
                 """)
+        }
+        migrator.registerMigration("synchro_v4_scope_integrity") { db in
+            let scopeColumns = try db.columns(in: "_synchro_scopes").map(\.name)
+            if !scopeColumns.contains("local_checksum") {
+                try db.execute(sql: """
+                    ALTER TABLE _synchro_scopes
+                    ADD COLUMN local_checksum INTEGER NOT NULL DEFAULT 0
+                    """)
+            }
+
+            let scopeRowColumns = try db.columns(in: "_synchro_scope_rows").map(\.name)
+            if !scopeRowColumns.contains("checksum") {
+                try db.execute(sql: """
+                    ALTER TABLE _synchro_scope_rows
+                    ADD COLUMN checksum INTEGER NOT NULL DEFAULT 0
+                    """)
+            }
+
+            try db.execute(sql: """
+                UPDATE _synchro_scopes
+                SET cursor = NULL,
+                    checksum = NULL,
+                    generation = 0,
+                    local_checksum = 0
+                """)
+            try db.execute(sql: "DELETE FROM _synchro_scope_rows")
         }
         try migrator.migrate(dbPool)
     }

@@ -3,10 +3,10 @@ use pgrx::prelude::*;
 use pgrx::spi::SpiClient;
 
 use synchro_core::change::ChangeOperation;
-use synchro_core::checksum::compute_record_checksum;
 use synchro_core::edge_diff::{build_edge_diff_entries, diff_bucket_sets};
 
 use crate::bucketing::resolve_buckets;
+use crate::materialize::current_row_checksum;
 use crate::registry::{load_registry, TableRegistration};
 use crate::wal_decoder::{TableMeta, WalDecoder, WalEvent};
 
@@ -409,7 +409,7 @@ fn apply_event(
     write_changelog_entries(client, &entries)?;
 
     // 5. Apply edge diff (upsert/delete bucket edges).
-    apply_edge_diff(client, event, &existing, &desired)?;
+    apply_edge_diff(client, event, table_reg, &existing, &desired)?;
 
     Ok(())
 }
@@ -462,6 +462,7 @@ fn write_changelog_entries(
 fn apply_edge_diff(
     client: &mut SpiClient<'_>,
     event: &WalEvent,
+    table_reg: &TableRegistration,
     existing: &[String],
     desired: &[String],
 ) -> Result<(), String> {
@@ -480,23 +481,7 @@ fn apply_edge_diff(
         return Ok(());
     }
 
-    // Compute checksum from event data.
-    let checksum: Option<i32> = {
-        let json_map: serde_json::Map<String, serde_json::Value> = event
-            .data
-            .iter()
-            .map(|(k, v)| {
-                let val = match v {
-                    Some(s) => serde_json::Value::String(s.clone()),
-                    None => serde_json::Value::Null,
-                };
-                (k.clone(), val)
-            })
-            .collect();
-        serde_json::to_string(&json_map)
-            .ok()
-            .map(|s| compute_record_checksum(&s) as i32)
-    };
+    let checksum = current_row_checksum(client, table_reg, &event.record_id)?;
 
     let diff = diff_bucket_sets(existing, desired);
 

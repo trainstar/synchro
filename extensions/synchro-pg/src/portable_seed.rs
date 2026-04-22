@@ -4,6 +4,7 @@ use serde::Serialize;
 use synchro_core::limits::clamp_rebuild_limit;
 
 use crate::client::protocol_error_response;
+use crate::cursor_token::issue_scope_cursor;
 use crate::pull::{compute_bucket_checksums, get_latest_schema, hydrate_records};
 use crate::rebuild::parse_cursor;
 use crate::registry::load_registry;
@@ -125,7 +126,7 @@ fn synchro_portable_seed_manifest() -> pgrx::JsonB {
     Spi::connect(|client| {
         let (schema_version, schema_hash) = get_latest_schema(client);
         let portable_scopes = load_portable_shared_scopes(client);
-        let seed_cursor = portable_seed_checkpoint(client).to_string();
+        let seed_checkpoint = portable_seed_checkpoint(client);
         let checksums = compute_bucket_checksums(client, &portable_scopes);
 
         let response = PortableSeedManifest {
@@ -136,7 +137,8 @@ fn synchro_portable_seed_manifest() -> pgrx::JsonB {
                 .into_iter()
                 .map(|scope_id| PortableSeedScope {
                     id: scope_id.clone(),
-                    cursor: seed_cursor.clone(),
+                    cursor: issue_scope_cursor(client, &scope_id, seed_checkpoint)
+                        .unwrap_or_else(|err| pgrx::error!("issuing portable seed cursor: {}", err)),
                     checksum: checksums.get(&scope_id).copied().unwrap_or(0).to_string(),
                 })
                 .collect(),

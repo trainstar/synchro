@@ -32,6 +32,10 @@ Clients must treat scope cursors as opaque values.
 
 No client may infer ordering or meaning from cursor encoding.
 
+`null` is reserved for no usable resumable state.
+
+Any non-null cursor is a valid server-issued resume token.
+
 ### Opaque Server Version Invariant
 
 Clients must treat `server_version` as opaque.
@@ -143,6 +147,20 @@ Rebuilding one scope must not require wiping unrelated local data.
 
 A scope cursor may advance only after the corresponding incremental changes for that scope have been durably applied locally.
 
+### Progress And Integrity Separation
+
+A scope cursor proves resumable progress only.
+
+A scope cursor does not prove local materialization integrity.
+
+Scope integrity must be validated separately through authoritative checksum verification.
+
+### Final Pull Checksum Requirement
+
+Terminal pull pages must include authoritative scope checksums for all active scopes.
+
+Clients must verify those checksums against local scope state before treating the scope as healthy.
+
 ### Rebuild Finality
 
 A rebuild is complete only when:
@@ -150,6 +168,7 @@ A rebuild is complete only when:
 - all rebuild pages for the scope are applied
 - stale provenance for that scope is pruned
 - rows with zero remaining provenance are removed from local materialization
+- the final authoritative checksum matches local scope state
 - the final authoritative cursor is installed
 
 ### Rebuild Does Not Erase Valid Overlapping Data

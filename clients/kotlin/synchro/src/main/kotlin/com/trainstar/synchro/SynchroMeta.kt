@@ -19,6 +19,7 @@ data class LocalScopeState(
     val cursor: String?,
     val checksum: String?,
     val generation: Long,
+    val localChecksum: Int,
 )
 
 object SynchroMeta {
@@ -156,7 +157,7 @@ object SynchroMeta {
     fun getAllScopes(db: SQLiteDatabase): List<LocalScopeState> {
         val result = mutableListOf<LocalScopeState>()
         db.rawQuery(
-            "SELECT scope_id, cursor, checksum, generation FROM _synchro_scopes ORDER BY scope_id",
+            "SELECT scope_id, cursor, checksum, generation, local_checksum FROM _synchro_scopes ORDER BY scope_id",
             null
         ).use { cursor ->
             while (cursor.moveToNext()) {
@@ -166,11 +167,30 @@ object SynchroMeta {
                         cursor = if (cursor.isNull(1)) null else cursor.getString(1),
                         checksum = if (cursor.isNull(2)) null else cursor.getString(2),
                         generation = cursor.getLong(3),
+                        localChecksum = cursor.getInt(4),
                     )
                 )
             }
         }
         return result
+    }
+
+    fun getScope(db: SQLiteDatabase, scopeId: String): LocalScopeState? {
+        db.rawQuery(
+            "SELECT scope_id, cursor, checksum, generation, local_checksum FROM _synchro_scopes WHERE scope_id = ?",
+            arrayOf(scopeId)
+        ).use { cursor ->
+            if (!cursor.moveToFirst()) {
+                return null
+            }
+            return LocalScopeState(
+                scopeID = cursor.getString(0),
+                cursor = if (cursor.isNull(1)) null else cursor.getString(1),
+                checksum = if (cursor.isNull(2)) null else cursor.getString(2),
+                generation = cursor.getLong(3),
+                localChecksum = cursor.getInt(4)
+            )
+        }
     }
 
     fun getScopeGeneration(db: SQLiteDatabase, scopeId: String): Long {
@@ -182,23 +202,39 @@ object SynchroMeta {
         }
     }
 
-    fun upsertScope(db: SQLiteDatabase, scopeId: String, cursor: String?, checksum: String?, generation: Long? = null) {
+    fun upsertScope(
+        db: SQLiteDatabase,
+        scopeId: String,
+        cursor: String?,
+        checksum: String?,
+        generation: Long? = null,
+        localChecksum: Int? = null
+    ) {
         val effectiveGeneration = generation ?: getScopeGeneration(db, scopeId)
+        val effectiveLocalChecksum = localChecksum ?: getScopeLocalChecksum(db, scopeId)
         db.execSQL(
             """
-            INSERT INTO _synchro_scopes (scope_id, cursor, checksum, generation) VALUES (?, ?, ?, ?)
+            INSERT INTO _synchro_scopes (scope_id, cursor, checksum, generation, local_checksum) VALUES (?, ?, ?, ?, ?)
             ON CONFLICT (scope_id) DO UPDATE SET
                 cursor = excluded.cursor,
                 checksum = excluded.checksum,
-                generation = excluded.generation
+                generation = excluded.generation,
+                local_checksum = excluded.local_checksum
             """.trimIndent(),
-            arrayOf(scopeId, cursor, checksum, effectiveGeneration.toString())
+            arrayOf(scopeId, cursor, checksum, effectiveGeneration.toString(), effectiveLocalChecksum.toString())
         )
     }
 
     fun bumpScopeGeneration(db: SQLiteDatabase, scopeId: String): Long {
         val nextGeneration = getScopeGeneration(db, scopeId) + 1
-        upsertScope(db, scopeId, cursor = null, checksum = null, generation = nextGeneration)
+        upsertScope(
+            db,
+            scopeId,
+            cursor = null,
+            checksum = null,
+            generation = nextGeneration,
+            localChecksum = 0
+        )
         return nextGeneration
     }
 
@@ -211,35 +247,54 @@ object SynchroMeta {
     }
 
     fun invalidateAllScopes(db: SQLiteDatabase) {
-        db.execSQL("UPDATE _synchro_scopes SET cursor = NULL, checksum = NULL, generation = 0")
+        db.execSQL("UPDATE _synchro_scopes SET cursor = NULL, checksum = NULL, generation = 0, local_checksum = 0")
         clearAllScopeRows(db)
     }
 
     fun clearAllScopeRows(db: SQLiteDatabase) {
         db.execSQL("DELETE FROM _synchro_scope_rows")
+        db.execSQL("UPDATE _synchro_scopes SET local_checksum = 0")
     }
 
     // MARK: - Scope Rows
 
-    fun upsertScopeRow(db: SQLiteDatabase, scopeId: String, tableName: String, recordId: String, generation: Long) {
+    fun upsertScopeRow(
+        db: SQLiteDatabase,
+        scopeId: String,
+        tableName: String,
+        recordId: String,
+        checksum: Int,
+        generation: Long
+    ) {
+        val existingChecksum = getScopeRowChecksum(db, scopeId, tableName, recordId) ?: 0
+        val nextLocalChecksum = xorChecksum(
+            xorChecksum(getScopeLocalChecksum(db, scopeId), existingChecksum),
+            checksum
+        )
         db.execSQL(
             """
-            INSERT INTO _synchro_scope_rows (scope_id, table_name, record_id, generation) VALUES (?, ?, ?, ?)
-            ON CONFLICT (scope_id, table_name, record_id) DO UPDATE SET generation = excluded.generation
+            INSERT INTO _synchro_scope_rows (scope_id, table_name, record_id, checksum, generation) VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT (scope_id, table_name, record_id) DO UPDATE SET
+                checksum = excluded.checksum,
+                generation = excluded.generation
             """.trimIndent(),
-            arrayOf(scopeId, tableName, recordId, generation.toString())
+            arrayOf(scopeId, tableName, recordId, checksum.toString(), generation.toString())
         )
+        setScopeLocalChecksum(db, scopeId, nextLocalChecksum)
     }
 
     fun deleteScopeRow(db: SQLiteDatabase, scopeId: String, tableName: String, recordId: String) {
+        val existingChecksum = getScopeRowChecksum(db, scopeId, tableName, recordId) ?: 0
         db.execSQL(
             "DELETE FROM _synchro_scope_rows WHERE scope_id = ? AND table_name = ? AND record_id = ?",
             arrayOf(scopeId, tableName, recordId)
         )
+        setScopeLocalChecksum(db, scopeId, xorChecksum(getScopeLocalChecksum(db, scopeId), existingChecksum))
     }
 
     fun deleteScopeRows(db: SQLiteDatabase, scopeId: String) {
         db.execSQL("DELETE FROM _synchro_scope_rows WHERE scope_id = ?", arrayOf(scopeId))
+        setScopeLocalChecksum(db, scopeId, 0)
     }
 
     fun getScopeRows(db: SQLiteDatabase, scopeId: String): List<Pair<String, String>> {
@@ -273,6 +328,7 @@ object SynchroMeta {
             "DELETE FROM _synchro_scope_rows WHERE scope_id = ? AND generation <> ?",
             arrayOf(scopeId, generation.toString())
         )
+        recomputeScopeLocalChecksum(db, scopeId)
     }
 
     fun hasScopeRows(db: SQLiteDatabase, tableName: String, recordId: String): Boolean {
@@ -283,4 +339,49 @@ object SynchroMeta {
             return cursor.moveToFirst()
         }
     }
+
+    fun getScopeLocalChecksum(db: SQLiteDatabase, scopeId: String): Int {
+        db.rawQuery(
+            "SELECT local_checksum FROM _synchro_scopes WHERE scope_id = ?",
+            arrayOf(scopeId)
+        ).use { cursor ->
+            return if (cursor.moveToFirst()) cursor.getInt(0) else 0
+        }
+    }
+
+    private fun setScopeLocalChecksum(db: SQLiteDatabase, scopeId: String, checksum: Int) {
+        db.execSQL(
+            "UPDATE _synchro_scopes SET local_checksum = ? WHERE scope_id = ?",
+            arrayOf(checksum.toString(), scopeId)
+        )
+    }
+
+    private fun getScopeRowChecksum(
+        db: SQLiteDatabase,
+        scopeId: String,
+        tableName: String,
+        recordId: String
+    ): Int? {
+        db.rawQuery(
+            "SELECT checksum FROM _synchro_scope_rows WHERE scope_id = ? AND table_name = ? AND record_id = ?",
+            arrayOf(scopeId, tableName, recordId)
+        ).use { cursor ->
+            return if (cursor.moveToFirst()) cursor.getInt(0) else null
+        }
+    }
+
+    private fun recomputeScopeLocalChecksum(db: SQLiteDatabase, scopeId: String) {
+        var aggregate = 0
+        db.rawQuery(
+            "SELECT checksum FROM _synchro_scope_rows WHERE scope_id = ?",
+            arrayOf(scopeId)
+        ).use { cursor ->
+            while (cursor.moveToNext()) {
+                aggregate = xorChecksum(aggregate, cursor.getInt(0))
+            }
+        }
+        setScopeLocalChecksum(db, scopeId, aggregate)
+    }
+
+    private fun xorChecksum(lhs: Int, rhs: Int): Int = lhs xor rhs
 }

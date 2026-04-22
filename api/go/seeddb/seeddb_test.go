@@ -343,26 +343,26 @@ func TestGenerateHydratesPortableRowsAndScopeState(t *testing.T) {
 		t.Fatal("expected non-empty portable scope checksum")
 	}
 
-	var checkpoint int64
+	var checkpointRows int64
 	if err := sqliteDB.QueryRow(
-		"SELECT checkpoint FROM _synchro_bucket_checkpoints WHERE bucket_id = 'global'",
-	).Scan(&checkpoint); err != nil {
-		t.Fatalf("reading portable bucket checkpoint: %v", err)
+		"SELECT COUNT(*) FROM _synchro_bucket_checkpoints WHERE bucket_id = 'global'",
+	).Scan(&checkpointRows); err != nil {
+		t.Fatalf("reading portable bucket checkpoint rows: %v", err)
 	}
-	if checkpoint <= 0 {
-		t.Fatalf("expected portable checkpoint > 0, got %d", checkpoint)
+	if checkpointRows != 0 {
+		t.Fatalf("expected no portable bucket checkpoint rows, got %d", checkpointRows)
 	}
 
-	var memberChecksum int64
+	var memberRows int64
 	if err := sqliteDB.QueryRow(
-		"SELECT checksum FROM _synchro_bucket_members WHERE bucket_id = 'global' AND table_name = ? AND record_id = ?",
+		"SELECT COUNT(*) FROM _synchro_bucket_members WHERE bucket_id = 'global' AND table_name = ? AND record_id = ?",
 		tableName,
 		recordID,
-	).Scan(&memberChecksum); err != nil {
-		t.Fatalf("reading portable bucket member: %v", err)
+	).Scan(&memberRows); err != nil {
+		t.Fatalf("reading portable bucket member rows: %v", err)
 	}
-	if memberChecksum != 12345 {
-		t.Fatalf("expected portable member checksum 12345, got %d", memberChecksum)
+	if memberRows != 0 {
+		t.Fatalf("expected no portable bucket member rows, got %d", memberRows)
 	}
 
 	var scopeRowCount int64

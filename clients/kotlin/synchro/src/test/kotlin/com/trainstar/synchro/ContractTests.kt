@@ -43,19 +43,14 @@ class ContractTests {
 
     @Test
     fun testPullRequiredChecksumsFixtureDecodesAndValidates() {
-        val request = decodeFixtureValue<PullRequest>(
-            "conformance/protocol/pull-required-checksums.json",
-            listOf("input", "request")
-        )
         val response = decodeFixtureValue<PullResponse>(
             "conformance/protocol/pull-required-checksums.json",
             listOf("expected", "response")
         )
 
-        assertEquals(ChecksumMode.REQUIRED, request.checksumMode)
         assertEquals(13L, response.scopeSetVersion)
-        assertEquals("c_890", response.scopeCursors["workouts_user:u_123"])
-        response.validate(request)
+        assertEquals("v2.workouts_user_u_123_890.sig", response.scopeCursors["workouts_user:u_123"])
+        response.validate()
     }
 
     @Test

@@ -115,7 +115,7 @@ func connectClient(t *testing.T, srv *httptest.Server, token, clientID string) {
 		"client_id":         clientID,
 		"platform":          "ios",
 		"app_version":       "1.0.0",
-		"protocol_version":  1,
+		"protocol_version":  2,
 		"schema":            map[string]any{"version": 0, "hash": ""},
 		"scope_set_version": 0,
 		"known_scopes":      map[string]any{},
@@ -133,7 +133,7 @@ func TestConnectPassthrough(t *testing.T) {
 		"client_id":         "test-canonical-connect-client",
 		"platform":          "ios",
 		"app_version":       "1.0.0",
-		"protocol_version":  1,
+		"protocol_version":  2,
 		"schema":            map[string]any{"version": 0, "hash": ""},
 		"scope_set_version": 0,
 		"known_scopes":      map[string]any{},
@@ -185,7 +185,7 @@ func TestConnectPassthroughTrustedUpstreamAuth(t *testing.T) {
 		"client_id":         "test-canonical-connect-upstream-client",
 		"platform":          "ios",
 		"app_version":       "1.0.0",
-		"protocol_version":  1,
+		"protocol_version":  2,
 		"schema":            map[string]any{"version": 0, "hash": ""},
 		"scope_set_version": 0,
 		"known_scopes":      map[string]any{},
@@ -237,7 +237,6 @@ func TestPullPassthrough(t *testing.T) {
 		"scope_set_version": 0,
 		"scopes":            map[string]any{},
 		"limit":             100,
-		"checksum_mode":     "requested",
 	})
 
 	if status != 200 {

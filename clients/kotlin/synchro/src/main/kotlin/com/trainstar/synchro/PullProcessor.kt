@@ -104,7 +104,8 @@ class PullProcessor(private val database: SynchroDatabase) {
         scopeCursors: Map<String, String>,
         checksums: Map<String, String>?
     ) {
-        if (changes.isEmpty() && scopeCursors.isEmpty()) return
+        val checksumMap = checksums ?: emptyMap()
+        if (changes.isEmpty() && scopeCursors.isEmpty() && checksumMap.isEmpty()) return
         val tableMap = syncedTables.associateBy { it.tableName }
 
         database.writeSyncLockedTransaction { db ->
@@ -118,17 +119,54 @@ class PullProcessor(private val database: SynchroDatabase) {
                         val record = scopeRecord(change, schema)
                         upsertRecord(db, record, schema)
                         val generation = SynchroMeta.getScopeGeneration(db, change.scope)
-                        SynchroMeta.upsertScopeRow(db, change.scope, change.table, recordId, generation)
+                        SynchroMeta.upsertScopeRow(
+                            db,
+                            change.scope,
+                            change.table,
+                            recordId,
+                            requiredScopeRowChecksum(change.rowChecksum, change.table, recordId),
+                            generation
+                        )
                     }
                 }
             }
 
-            for ((scopeId, cursor) in scopeCursors) {
+            val scopeIds = (scopeCursors.keys + checksumMap.keys).toSet()
+            for (scopeId in scopeIds) {
+                val existingScope = SynchroMeta.getScope(db, scopeId) ?: continue
+                val nextCursor = scopeCursors[scopeId] ?: existingScope.cursor
+                val localChecksum = SynchroMeta.getScopeLocalChecksum(db, scopeId)
+                val serverChecksum = checksumMap[scopeId]
+                if (serverChecksum != null) {
+                    val expectedChecksum = parseScopeChecksum(scopeId, serverChecksum)
+                    if (localChecksum == expectedChecksum) {
+                        SynchroMeta.upsertScope(
+                            db,
+                            scopeId = scopeId,
+                            cursor = nextCursor,
+                            checksum = serverChecksum,
+                            generation = existingScope.generation,
+                            localChecksum = localChecksum
+                        )
+                    } else {
+                        SynchroMeta.upsertScope(
+                            db,
+                            scopeId = scopeId,
+                            cursor = null,
+                            checksum = null,
+                            generation = existingScope.generation,
+                            localChecksum = localChecksum
+                        )
+                    }
+                    continue
+                }
                 SynchroMeta.upsertScope(
                     db,
                     scopeId = scopeId,
-                    cursor = cursor,
-                    checksum = checksums?.get(scopeId)
+                    cursor = nextCursor,
+                    checksum = existingScope.checksum,
+                    generation = existingScope.generation,
+                    localChecksum = localChecksum
                 )
             }
         }
@@ -150,7 +188,14 @@ class PullProcessor(private val database: SynchroDatabase) {
                 val recordId = scopeRecordID(record.pk, schema)
                 val scopedRecord = scopeRecord(record, schema)
                 upsertRecord(db, scopedRecord, schema)
-                SynchroMeta.upsertScopeRow(db, scopeId, record.table, recordId, generation)
+                SynchroMeta.upsertScopeRow(
+                    db,
+                    scopeId,
+                    record.table,
+                    recordId,
+                    requiredScopeRowChecksum(record.rowChecksum, record.table, recordId),
+                    generation
+                )
             }
         }
     }
@@ -167,7 +212,20 @@ class PullProcessor(private val database: SynchroDatabase) {
                 removeLocalRowIfUnreferenced(db, tableName, recordId, schema)
             }
 
-            SynchroMeta.upsertScope(db, scopeId, finalCursor, checksum, generation)
+            val localChecksum = SynchroMeta.getScopeLocalChecksum(db, scopeId)
+            val expectedChecksum = parseScopeChecksum(scopeId, checksum)
+            if (localChecksum != expectedChecksum) {
+                throw SynchroError.InvalidResponse("scope checksum mismatch after rebuild for $scopeId")
+            }
+
+            SynchroMeta.upsertScope(
+                db,
+                scopeId,
+                finalCursor,
+                checksum,
+                generation,
+                localChecksum
+            )
         }
     }
 
@@ -344,6 +402,18 @@ class PullProcessor(private val database: SynchroDatabase) {
             )
     }
 
+    private fun requiredScopeRowChecksum(checksum: Int?, tableName: String, recordId: String): Int {
+        return checksum
+            ?: throw SynchroError.InvalidResponse(
+                "missing scope row checksum for $tableName/$recordId"
+            )
+    }
+
+    private fun parseScopeChecksum(scopeId: String, checksum: String): Int {
+        return checksum.toIntOrNull()
+            ?: throw SynchroError.InvalidResponse("invalid checksum for scope $scopeId")
+    }
+
     // MARK: - Private
 
     private fun upsertRecord(db: SQLiteDatabase, record: Record, schema: LocalSchemaTable) {
@@ -409,19 +479,20 @@ class PullProcessor(private val database: SynchroDatabase) {
     private fun scopeRecord(change: ChangeRecord, schema: LocalSchemaTable): Record {
         val row = change.row ?: throw SynchroError.InvalidResponse("missing row for ${change.table} ${change.op}")
         val recordId = scopeRecordID(change.pk, schema)
-        return scopeRecord(change.table, recordId, jsonObjectToAnyMap(row), schema)
+        return scopeRecord(change.table, recordId, jsonObjectToAnyMap(row), change.rowChecksum, schema)
     }
 
     private fun scopeRecord(rebuild: RebuildRecord, schema: LocalSchemaTable): Record {
         val row = rebuild.row ?: throw SynchroError.InvalidResponse("missing rebuild row for ${rebuild.table}")
         val recordId = scopeRecordID(rebuild.pk, schema)
-        return scopeRecord(rebuild.table, recordId, jsonObjectToAnyMap(row), schema)
+        return scopeRecord(rebuild.table, recordId, jsonObjectToAnyMap(row), rebuild.rowChecksum, schema)
     }
 
     private fun scopeRecord(
         tableName: String,
         recordId: String,
         row: Map<String, AnyCodable>,
+        checksum: Int?,
         schema: LocalSchemaTable
     ): Record {
         val updatedAt = row[schema.updatedAtColumn]?.value as? String
@@ -435,7 +506,7 @@ class PullProcessor(private val database: SynchroDatabase) {
             updatedAt = updatedAt,
             deletedAt = deletedAt,
             bucketId = null,
-            checksum = null
+            checksum = checksum
         )
     }
 

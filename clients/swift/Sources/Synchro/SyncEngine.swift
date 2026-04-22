@@ -389,12 +389,11 @@ final class SyncEngine: @unchecked Sendable {
                 schema: SchemaRef(version: schemaVersion, hash: schemaHash),
                 scopeSetVersion: scopeSetVersion,
                 scopes: scopes,
-                limit: config.pullPageSize,
-                checksumMode: .requested
+                limit: config.pullPageSize
             )
 
             let response = try await httpClient.pull(request: request)
-            try response.validate(for: request)
+            try response.validate()
 
             try pullProcessor.applyScopeChanges(
                 changes: response.changes,
@@ -483,7 +482,7 @@ final class SyncEngine: @unchecked Sendable {
             clientID: clientID,
             platform: config.platform,
             appVersion: config.appVersion,
-            protocolVersion: 1,
+            protocolVersion: 2,
             schema: SchemaRef(version: schemaState.version, hash: schemaState.hash),
             scopeSetVersion: try database.readTransaction { db in
                 try SynchroMeta.getInt64(db, key: .scopeSetVersion)

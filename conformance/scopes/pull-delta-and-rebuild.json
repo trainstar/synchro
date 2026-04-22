@@ -18,17 +18,16 @@
       "scope_set_version": 13,
       "scopes": {
         "workouts_user:u_123": {
-          "cursor": "c_889"
+          "cursor": "v2.workouts_user_u_123_889.sig"
         },
         "exercises_public": {
-          "cursor": "c_201"
+          "cursor": "v2.exercises_public_201.sig"
         },
         "exercises_user:u_123": {
-          "cursor": "c_050"
+          "cursor": "v2.exercises_user_u_123_050.sig"
         }
       },
-      "limit": 500,
-      "checksum_mode": "requested"
+      "limit": 500
     }
   },
   "expected": {
@@ -41,14 +40,15 @@
           "pk": {
             "id": "w_9"
           },
+          "row_checksum": 131313,
           "server_version": "sv_991"
         }
       ],
       "scope_set_version": 14,
       "scope_cursors": {
-        "workouts_user:u_123": "c_890",
-        "exercises_public": "c_202",
-        "exercises_user:u_123": "c_050"
+        "workouts_user:u_123": "v2.workouts_user_u_123_890.sig",
+        "exercises_public": "v2.exercises_public_202.sig",
+        "exercises_user:u_123": "v2.exercises_user_u_123_050.sig"
       },
       "scope_updates": {
         "add": [
@@ -74,7 +74,7 @@
       "scope_set_version must advance with scope assignment deltas",
       "new scopes may be added during pull via scope_updates.add",
       "rebuild requests must be explicit",
-      "checksums are valid only when checksum_mode permits them"
+      "final pull pages must include checksums for active scopes"
     ]
   }
 }

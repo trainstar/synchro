@@ -89,7 +89,7 @@ pub enum ContractViolation {
     MissingMutationClientVersion {
         mutation_id: String,
     },
-    RequiredChecksumsMissing,
+    FinalPullChecksumsMissing,
     FinalRebuildCursorMissing,
     FinalRebuildChecksumMissing,
     PartialRebuildHasFinalCursor,
@@ -182,8 +182,8 @@ impl std::fmt::Display for ContractViolation {
                 f,
                 "push mutation {mutation_id} must include client_version for insert, update, or upsert"
             ),
-            Self::RequiredChecksumsMissing => {
-                f.write_str("pull response is missing required checksums")
+            Self::FinalPullChecksumsMissing => {
+                f.write_str("final pull page must include checksums")
             }
             Self::FinalRebuildCursorMissing => {
                 f.write_str("final rebuild page must include final_scope_cursor")
@@ -248,15 +248,6 @@ impl SchemaAction {
     pub fn is_compatible(self) -> bool {
         !matches!(self, Self::Unsupported)
     }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
-#[serde(rename_all = "snake_case")]
-pub enum ChecksumMode {
-    #[default]
-    None,
-    Requested,
-    Required,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -679,8 +670,6 @@ pub struct PullRequest {
     pub scope_set_version: i64,
     pub scopes: BTreeMap<String, ScopeCursorRef>,
     pub limit: i32,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub checksum_mode: Option<ChecksumMode>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -691,6 +680,8 @@ pub struct ChangeRecord {
     pub pk: Value,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub row: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub row_checksum: Option<i32>,
     pub server_version: String,
 }
 
@@ -711,12 +702,10 @@ impl PullResponse {
         !self.rebuild.is_empty()
     }
 
-    pub fn validate_for_request(&self, request: &PullRequest) -> Result<(), ContractViolation> {
+    pub fn validate(&self) -> Result<(), ContractViolation> {
         self.scope_updates.validate()?;
-        if request.checksum_mode.unwrap_or_default() == ChecksumMode::Required
-            && self.checksums.is_none()
-        {
-            return Err(ContractViolation::RequiredChecksumsMissing);
+        if !self.has_more && self.checksums.is_none() {
+            return Err(ContractViolation::FinalPullChecksumsMissing);
         }
         Ok(())
     }
@@ -736,6 +725,8 @@ pub struct RebuildRecord {
     pub pk: Value,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub row: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub row_checksum: Option<i32>,
     pub server_version: String,
 }
 
@@ -840,7 +831,7 @@ mod tests {
         let response: ConnectResponse =
             serde_json::from_value(doc["expected"]["response"].clone()).unwrap();
 
-        assert_eq!(request.protocol_version, 1);
+        assert_eq!(request.protocol_version, 2);
         response.validate().unwrap();
         assert_eq!(response.schema.action, SchemaAction::None);
         assert!(response.schema.action.is_compatible());
@@ -896,12 +887,12 @@ mod tests {
     #[test]
     fn pull_fixture_decodes() {
         let doc = fixture("../../../conformance/scopes/pull-delta-and-rebuild.json");
-        let request: PullRequest = serde_json::from_value(doc["input"]["request"].clone()).unwrap();
+        let _request: PullRequest =
+            serde_json::from_value(doc["input"]["request"].clone()).unwrap();
         let response: PullResponse =
             serde_json::from_value(doc["expected"]["response"].clone()).unwrap();
 
-        response.validate_for_request(&request).unwrap();
-        assert_eq!(request.checksum_mode, Some(ChecksumMode::Requested));
+        response.validate().unwrap();
         assert_eq!(response.scope_set_version, 14);
         assert_eq!(response.changes[0].op, Operation::Upsert);
         assert!(response.requests_rebuild());
@@ -910,12 +901,12 @@ mod tests {
     #[test]
     fn pull_required_checksums_fixture_decodes() {
         let doc = fixture("../../../conformance/protocol/pull-required-checksums.json");
-        let request: PullRequest = serde_json::from_value(doc["input"]["request"].clone()).unwrap();
+        let _request: PullRequest =
+            serde_json::from_value(doc["input"]["request"].clone()).unwrap();
         let response: PullResponse =
             serde_json::from_value(doc["expected"]["response"].clone()).unwrap();
 
-        response.validate_for_request(&request).unwrap();
-        assert_eq!(request.checksum_mode, Some(ChecksumMode::Required));
+        response.validate().unwrap();
         assert!(response.checksums.is_some());
         assert!(!response.requests_rebuild());
     }
@@ -934,7 +925,10 @@ mod tests {
         assert!(pages[0].has_more);
         assert!(!pages[0].is_final_page());
         assert!(pages[1].is_final_page());
-        assert_eq!(pages[1].final_scope_cursor.as_deref(), Some("c_202"));
+        assert_eq!(
+            pages[1].final_scope_cursor.as_deref(),
+            Some("v2.exercises_public_202.sig")
+        );
         assert_eq!(pages[1].checksum.as_deref(), Some("cs_0f22"));
     }
 
@@ -1008,7 +1002,7 @@ mod tests {
     fn connect_validate_rejects_missing_schema_definition() {
         let response = ConnectResponse {
             server_time: Utc::now(),
-            protocol_version: 1,
+            protocol_version: 2,
             scope_set_version: 7,
             schema: SchemaDescriptor {
                 version: 8,
@@ -1041,7 +1035,7 @@ mod tests {
                 },
                 ScopeAssignment {
                     id: "scope_a".into(),
-                    cursor: Some("c_1".into()),
+                    cursor: Some("v2.scope_a_1.sig".into()),
                 },
             ],
             remove: vec![],
@@ -1224,18 +1218,7 @@ mod tests {
     }
 
     #[test]
-    fn pull_validate_requires_checksums_when_mode_is_required() {
-        let request = PullRequest {
-            client_id: "client_1".into(),
-            schema: SchemaRef {
-                version: 1,
-                hash: "hash_1".into(),
-            },
-            scope_set_version: 1,
-            scopes: BTreeMap::new(),
-            limit: 100,
-            checksum_mode: Some(ChecksumMode::Required),
-        };
+    fn pull_validate_requires_final_checksums() {
         let response = PullResponse {
             changes: vec![],
             scope_set_version: 1,
@@ -1250,8 +1233,8 @@ mod tests {
         };
 
         assert_eq!(
-            response.validate_for_request(&request),
-            Err(ContractViolation::RequiredChecksumsMissing)
+            response.validate(),
+            Err(ContractViolation::FinalPullChecksumsMissing)
         );
     }
 
@@ -1262,7 +1245,7 @@ mod tests {
             records: vec![],
             cursor: Some("rb_001".into()),
             has_more: true,
-            final_scope_cursor: Some("c_1".into()),
+            final_scope_cursor: Some("v2.scope_a_1.sig".into()),
             checksum: None,
         };
         assert_eq!(
@@ -1275,7 +1258,7 @@ mod tests {
             records: vec![],
             cursor: None,
             has_more: false,
-            final_scope_cursor: Some("c_1".into()),
+            final_scope_cursor: Some("v2.scope_a_1.sig".into()),
             checksum: None,
         };
         assert_eq!(

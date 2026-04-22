@@ -113,7 +113,7 @@ final class HttpClientTests: XCTestCase {
     func testConnectSuccess() async throws {
         let responseBody: [String: Any] = [
             "server_time": "2026-03-20T18:22:11Z",
-            "protocol_version": 1,
+            "protocol_version": 2,
             "scope_set_version": 13,
             "schema": [
                 "version": 8,
@@ -131,7 +131,7 @@ final class HttpClientTests: XCTestCase {
             XCTAssertTrue(request.url!.path.hasSuffix("/sync/connect"))
             let body = try JSONSerialization.jsonObject(with: request.bodyData()!) as! [String: Any]
             XCTAssertEqual(body["client_id"] as? String, "test-device")
-            XCTAssertEqual(body["protocol_version"] as? Int, 1)
+            XCTAssertEqual(body["protocol_version"] as? Int, 2)
 
             let data = try JSONSerialization.data(withJSONObject: responseBody)
             let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: ["Content-Type": "application/json"])!
@@ -142,7 +142,7 @@ final class HttpClientTests: XCTestCase {
             clientID: "test-device",
             platform: "ios",
             appVersion: "1.0.0",
-            protocolVersion: 1,
+            protocolVersion: 2,
             schema: .init(version: 8, hash: "8b21d2a1"),
             scopeSetVersion: 13,
             knownScopes: [:]
@@ -154,10 +154,10 @@ final class HttpClientTests: XCTestCase {
 
     func testPullEncoding() async throws {
         let responseBody: [String: Any] = [
-            "changes": [],
-            "scope_set_version": 13,
-            "scope_cursors": [
-                "workouts_user:u_123": "c_890",
+                "changes": [],
+                "scope_set_version": 13,
+                "scope_cursors": [
+                "workouts_user:u_123": "v2.workouts_user_u_123_890.sig",
             ],
             "scope_updates": [
                 "add": [],
@@ -176,7 +176,7 @@ final class HttpClientTests: XCTestCase {
             let body = try JSONSerialization.jsonObject(with: request.bodyData()!) as! [String: Any]
             XCTAssertEqual(body["client_id"] as? String, "test-device")
             XCTAssertEqual(body["scope_set_version"] as? Int64, 13)
-            XCTAssertEqual(body["checksum_mode"] as? String, "required")
+            XCTAssertNil(body["checksum_mode"])
 
             let data = try JSONSerialization.data(withJSONObject: responseBody)
             let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: ["Content-Type": "application/json"])!
@@ -187,14 +187,13 @@ final class HttpClientTests: XCTestCase {
             clientID: "test-device",
             schema: .init(version: 8, hash: "8b21d2a1"),
             scopeSetVersion: 13,
-            scopes: ["workouts_user:u_123": .init(cursor: "c_890")],
-            limit: 100,
-            checksumMode: .required
+            scopes: ["workouts_user:u_123": .init(cursor: "v2.workouts_user_u_123_890.sig")],
+            limit: 100
         )
         let resp = try await httpClient.pull(request: req)
-        try resp.validate(for: req)
+        try resp.validate()
         XCTAssertEqual(resp.scopeSetVersion, 13)
-        XCTAssertEqual(resp.scopeCursors["workouts_user:u_123"], "c_890")
+        XCTAssertEqual(resp.scopeCursors["workouts_user:u_123"], "v2.workouts_user_u_123_890.sig")
     }
 
     func testSchemaMismatch422() async throws {
@@ -217,8 +216,7 @@ final class HttpClientTests: XCTestCase {
             schema: .init(version: 1, hash: "old"),
             scopeSetVersion: 0,
             scopes: [:],
-            limit: 100,
-            checksumMode: ChecksumMode.none
+            limit: 100
         )
         do {
             _ = try await httpClient.pull(request: req)
@@ -247,7 +245,7 @@ final class HttpClientTests: XCTestCase {
             clientID: "test",
             platform: "ios",
             appVersion: "0.1.0",
-            protocolVersion: 1,
+            protocolVersion: 2,
             schema: .init(version: 0, hash: ""),
             scopeSetVersion: 0,
             knownScopes: [:]
@@ -308,8 +306,7 @@ final class HttpClientTests: XCTestCase {
             schema: .init(version: 1, hash: "abc"),
             scopeSetVersion: 0,
             scopes: [:],
-            limit: 100,
-            checksumMode: ChecksumMode.none
+            limit: 100
         )
         do {
             _ = try await httpClient.pull(request: req)
@@ -333,8 +330,7 @@ final class HttpClientTests: XCTestCase {
             schema: .init(version: 1, hash: "abc"),
             scopeSetVersion: 0,
             scopes: [:],
-            limit: 100,
-            checksumMode: ChecksumMode.none
+            limit: 100
         )
         do {
             _ = try await httpClient.pull(request: req)

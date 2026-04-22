@@ -1,11 +1,10 @@
 use pgrx::prelude::*;
 use pgrx::spi::SpiClient;
 use synchro_core::change::ChangeOperation;
-use synchro_core::checksum::compute_record_checksum;
 use synchro_core::edge_diff::{build_edge_diff_entries, diff_bucket_sets};
 
 use crate::bucketing::resolve_buckets;
-use crate::pull::pg_quote_ident;
+use crate::pull::{pg_quote_ident, synced_row_checksum, synced_row_projection_sql};
 use crate::registry::{load_registry, TableRegistration};
 
 #[pg_extern]
@@ -258,13 +257,14 @@ fn load_live_record_ids(
     Ok(record_ids)
 }
 
-fn current_row_checksum(
+pub(crate) fn current_row_checksum(
     client: &SpiClient<'_>,
     table: &TableRegistration,
     record_id: &str,
 ) -> Result<Option<i32>, String> {
     let sql = format!(
-        "SELECT row_to_json(t)::text AS row_json FROM {} t WHERE {} = $1::{}",
+        "SELECT ({})::text AS row_json FROM {} t WHERE {} = $1::{}",
+        synced_row_projection_sql(table, "t"),
         pg_quote_ident(&table.table_name),
         pg_quote_ident(&table.pk_column),
         table.pk_type,
@@ -277,5 +277,7 @@ fn current_row_checksum(
         .get_by_name::<String, &str>("row_json")
         .unwrap_or(None);
 
-    Ok(row_json.map(|row_json| compute_record_checksum(&row_json) as i32))
+    Ok(row_json
+        .and_then(|row_json| serde_json::from_str::<serde_json::Value>(&row_json).ok())
+        .map(|row_json| synced_row_checksum(table, &row_json)))
 }

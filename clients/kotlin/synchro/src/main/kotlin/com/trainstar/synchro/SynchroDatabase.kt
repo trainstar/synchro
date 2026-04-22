@@ -10,7 +10,7 @@ import java.util.concurrent.CopyOnWriteArraySet
 typealias Row = Map<String, Any?>
 
 class SynchroDatabase(context: Context, dbPath: String) :
-    SQLiteOpenHelper(context, dbPath, null, 1) {
+    SQLiteOpenHelper(context, dbPath, null, 2) {
 
     val path: String = dbPath
     private val changeNotifier = ChangeNotifier()
@@ -61,7 +61,8 @@ class SynchroDatabase(context: Context, dbPath: String) :
                 scope_id TEXT PRIMARY KEY,
                 cursor TEXT,
                 checksum TEXT,
-                generation INTEGER NOT NULL DEFAULT 0
+                generation INTEGER NOT NULL DEFAULT 0,
+                local_checksum INTEGER NOT NULL DEFAULT 0
             )
         """.trimIndent())
 
@@ -70,6 +71,7 @@ class SynchroDatabase(context: Context, dbPath: String) :
                 scope_id TEXT NOT NULL,
                 table_name TEXT NOT NULL,
                 record_id TEXT NOT NULL,
+                checksum INTEGER NOT NULL DEFAULT 0,
                 generation INTEGER NOT NULL DEFAULT 0,
                 PRIMARY KEY (scope_id, table_name, record_id)
             )
@@ -85,7 +87,9 @@ class SynchroDatabase(context: Context, dbPath: String) :
     }
 
     override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
-        // No upgrades yet
+        if (oldVersion < 2) {
+            migrateScopeIntegrity(db)
+        }
     }
 
     /**
@@ -119,7 +123,8 @@ class SynchroDatabase(context: Context, dbPath: String) :
                 scope_id TEXT PRIMARY KEY,
                 cursor TEXT,
                 checksum TEXT,
-                generation INTEGER NOT NULL DEFAULT 0
+                generation INTEGER NOT NULL DEFAULT 0,
+                local_checksum INTEGER NOT NULL DEFAULT 0
             )
         """.trimIndent())
         db.execSQL("""
@@ -127,6 +132,7 @@ class SynchroDatabase(context: Context, dbPath: String) :
                 scope_id TEXT NOT NULL,
                 table_name TEXT NOT NULL,
                 record_id TEXT NOT NULL,
+                checksum INTEGER NOT NULL DEFAULT 0,
                 generation INTEGER NOT NULL DEFAULT 0,
                 PRIMARY KEY (scope_id, table_name, record_id)
             )
@@ -135,6 +141,42 @@ class SynchroDatabase(context: Context, dbPath: String) :
             CREATE INDEX IF NOT EXISTS idx_synchro_scope_rows_record
             ON _synchro_scope_rows (table_name, record_id)
         """.trimIndent())
+        migrateScopeIntegrity(db)
+    }
+
+    private fun migrateScopeIntegrity(db: SQLiteDatabase) {
+        if (!hasColumn(db, "_synchro_scopes", "local_checksum")) {
+            db.execSQL(
+                "ALTER TABLE _synchro_scopes ADD COLUMN local_checksum INTEGER NOT NULL DEFAULT 0"
+            )
+        }
+        if (!hasColumn(db, "_synchro_scope_rows", "checksum")) {
+            db.execSQL(
+                "ALTER TABLE _synchro_scope_rows ADD COLUMN checksum INTEGER NOT NULL DEFAULT 0"
+            )
+        }
+        db.execSQL(
+            """
+            UPDATE _synchro_scopes
+            SET cursor = NULL,
+                checksum = NULL,
+                generation = 0,
+                local_checksum = 0
+            """.trimIndent()
+        )
+        db.execSQL("DELETE FROM _synchro_scope_rows")
+    }
+
+    private fun hasColumn(db: SQLiteDatabase, tableName: String, columnName: String): Boolean {
+        db.rawQuery("PRAGMA table_info(${SQLiteHelpers.quoteIdentifier(tableName)})", null).use { cursor ->
+            val nameIndex = cursor.getColumnIndex("name")
+            while (cursor.moveToNext()) {
+                if (cursor.getString(nameIndex) == columnName) {
+                    return true
+                }
+            }
+        }
+        return false
     }
 
     // MARK: - Queries

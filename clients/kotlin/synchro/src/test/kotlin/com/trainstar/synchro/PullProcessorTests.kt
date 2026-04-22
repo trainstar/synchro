@@ -71,10 +71,16 @@ class PullProcessorTests {
         }
     }
 
-    private fun addScopeRow(db: SynchroDatabase, scopeId: String, recordId: String, generation: Long = 0) {
+    private fun addScopeRow(
+        db: SynchroDatabase,
+        scopeId: String,
+        recordId: String,
+        checksum: Int = 7,
+        generation: Long = 0
+    ) {
         db.writeTransaction { conn ->
             SynchroMeta.upsertScope(conn, scopeId, "10", null, generation)
-            SynchroMeta.upsertScopeRow(conn, scopeId, "orders", recordId, generation)
+            SynchroMeta.upsertScopeRow(conn, scopeId, "orders", recordId, checksum, generation)
         }
     }
 
@@ -280,7 +286,7 @@ class PullProcessorTests {
         db.writeTransaction { conn ->
             SynchroMeta.setSyncLock(conn, true)
             SynchroMeta.upsertScope(conn, "orders:user1", "10", null)
-            SynchroMeta.upsertScopeRow(conn, "orders:user1", "orders", "w1", 0)
+            SynchroMeta.upsertScopeRow(conn, "orders:user1", "orders", "w1", 7, 0)
         }
         db.execute(
             "INSERT INTO orders (id, ship_address, updated_at) VALUES (?, ?, ?)",
@@ -420,8 +426,8 @@ class PullProcessorTests {
         processor.finalizeScopeRebuild(
             scopeId = "orders:user1",
             generation = 2,
-            finalCursor = "20",
-            checksum = "sum_20",
+            finalCursor = "scope_cursor_20",
+            checksum = "0",
             syncedTables = listOf(localTestTable)
         )
 
@@ -441,8 +447,8 @@ class PullProcessorTests {
         processor.finalizeScopeRebuild(
             scopeId = "orders:user1",
             generation = 2,
-            finalCursor = "20",
-            checksum = "sum_20",
+            finalCursor = "scope_cursor_20",
+            checksum = "0",
             syncedTables = listOf(localTestTable)
         )
 

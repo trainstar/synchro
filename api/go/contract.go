@@ -9,7 +9,7 @@ import (
 )
 
 const (
-	ExpectedProtocolVersion    = 1
+	ExpectedProtocolVersion    = 2
 	ExpectedSQLContractVersion = 1
 )
 

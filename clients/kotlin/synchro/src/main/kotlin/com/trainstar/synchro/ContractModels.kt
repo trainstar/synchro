@@ -28,13 +28,6 @@ enum class SchemaAction {
 }
 
 @Serializable
-enum class ChecksumMode {
-    @SerialName("none") NONE,
-    @SerialName("requested") REQUESTED,
-    @SerialName("required") REQUIRED,
-}
-
-@Serializable
 enum class MutationStatus {
     @SerialName("applied") APPLIED,
     @SerialName("conflict") CONFLICT,
@@ -282,7 +275,6 @@ data class PullRequest(
     @SerialName("scope_set_version") val scopeSetVersion: Long,
     val scopes: Map<String, ScopeCursorRef>,
     val limit: Int,
-    @SerialName("checksum_mode") val checksumMode: ChecksumMode? = null,
 )
 
 @Serializable
@@ -292,6 +284,7 @@ data class ChangeRecord(
     val op: Operation,
     val pk: JsonObject,
     val row: JsonObject? = null,
+    @SerialName("row_checksum") val rowChecksum: Int? = null,
     @SerialName("server_version") val serverVersion: String,
 )
 
@@ -307,10 +300,10 @@ data class PullResponse(
 ) {
     fun requestsRebuild(): Boolean = rebuild.isNotEmpty()
 
-    fun validate(request: PullRequest) {
+    fun validate() {
         scopeUpdates.validate()
-        if (request.checksumMode == ChecksumMode.REQUIRED && checksums == null) {
-            throw ContractException("required checksums missing")
+        if (!hasMore && checksums == null) {
+            throw ContractException("final pull page must include checksums")
         }
     }
 }
@@ -328,6 +321,7 @@ data class RebuildRecord(
     val table: String,
     val pk: JsonObject,
     val row: JsonObject? = null,
+    @SerialName("row_checksum") val rowChecksum: Int? = null,
     @SerialName("server_version") val serverVersion: String,
 )
 

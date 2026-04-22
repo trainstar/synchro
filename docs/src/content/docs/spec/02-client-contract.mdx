@@ -65,6 +65,7 @@ At minimum:
 - schema version and hash
 - assigned scopes
 - per-scope cursors
+- per-scope authoritative checksum state
 - per-row server versions or equivalent reconciliation metadata
 - mutation queue state
 
@@ -144,6 +145,7 @@ The metadata model must guarantee:
 
 - queued mutations survive process death
 - scope cursor advancement is atomic with successful apply
+- scope checksum verification is atomic with successful final pull or rebuild apply
 - rebuild state is durable across restarts
 - rejected mutations remain inspectable until explicitly cleared
 - seeded portable scope state can be resumed without forcing a full local wipe
@@ -169,7 +171,8 @@ Client responsibilities during rebuild:
 - pause normal incremental advancement for that scope
 - clear the local materialized membership for that scope
 - page rebuild results
-- install the final authoritative cursor and checksum
+- verify the final authoritative checksum against local scope state
+- install the final authoritative cursor and checksum only after verification succeeds
 - resume normal incremental pull
 
 Rebuild should be automatic by default.

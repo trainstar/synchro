@@ -2,7 +2,7 @@
   "fixture_version": 1,
   "name": "pull_with_required_checksums",
   "kind": "protocol.pull",
-  "summary": "When checksum_mode is required, the final pull page must include checksums.",
+  "summary": "Final pull pages must include checksums even when there are no changes.",
   "spec_refs": [
     "01-wire-protocol: Incremental Pull Model",
     "01-wire-protocol: Checksum Modes",
@@ -18,11 +18,10 @@
       "scope_set_version": 13,
       "scopes": {
         "workouts_user:u_123": {
-          "cursor": "c_890"
+          "cursor": "v2.workouts_user_u_123_890.sig"
         }
       },
-      "limit": 100,
-      "checksum_mode": "required"
+      "limit": 100
     }
   },
   "expected": {
@@ -30,7 +29,7 @@
       "changes": [],
       "scope_set_version": 13,
       "scope_cursors": {
-        "workouts_user:u_123": "c_890"
+        "workouts_user:u_123": "v2.workouts_user_u_123_890.sig"
       },
       "scope_updates": {
         "add": [],
@@ -43,7 +42,7 @@
       }
     },
     "assertions": [
-      "checksums must be present when checksum_mode is required",
+      "checksums must be present on final pull pages",
       "empty changes are valid on a final no-op page"
     ]
   }

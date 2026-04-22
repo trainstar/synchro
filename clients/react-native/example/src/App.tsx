@@ -110,7 +110,7 @@ async function connectManualClient(token: string, clientID: string): Promise<any
     client_id: clientID,
     platform: 'test',
     app_version: '1.0.0',
-    protocol_version: 1,
+    protocol_version: 2,
     schema: {
       version: 0,
       hash: '',

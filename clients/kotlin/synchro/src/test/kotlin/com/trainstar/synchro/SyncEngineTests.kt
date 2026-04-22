@@ -133,7 +133,7 @@ class SyncEngineTests {
             assertEquals(1, scopes.size)
             assertEquals(scopeID, scopes[0].scopeID)
             assertEquals("scope_cursor_2", scopes[0].cursor)
-            assertEquals("sum_2", scopes[0].checksum)
+            assertEquals("0", scopes[0].checksum)
 
             val tables = db.query("SELECT name FROM sqlite_master WHERE type='table' AND name='orders'")
             assertEquals(1, tables.size)
@@ -217,6 +217,7 @@ class SyncEngineTests {
                                     "op": "upsert",
                                     "pk": {"id": "w1"},
                                     "row": {"id": "w1", "ship_address": "Server Address", "user_id": "u1", "updated_at": "2026-01-01T12:00:00.000Z", "deleted_at": null},
+                                    "row_checksum": 7,
                                     "server_version": "sv_1"
                                 }
                             ],
@@ -225,7 +226,7 @@ class SyncEngineTests {
                             "scope_updates": {"add": [], "remove": []},
                             "rebuild": [],
                             "has_more": false,
-                            "checksums": {"$scopeID": "sum_2"}
+                            "checksums": {"$scopeID": "7"}
                         }
                     """.trimIndent())
                 }
@@ -262,11 +263,13 @@ class SyncEngineTests {
                                     "table": "orders",
                                     "pk": {"id": "w1"},
                                     "row": {"id": "w1", "ship_address": "Seeded", "user_id": "u1", "updated_at": "2026-01-01T12:00:00.000Z", "deleted_at": null},
+                                    "row_checksum": 7,
                                     "server_version": "sv_1"
                                 }
                             ]
                         """.trimIndent(),
-                        finalCursor = "scope_cursor_1"
+                        finalCursor = "scope_cursor_1",
+                        checksum = "7"
                     )
                 )
                 path.endsWith("/sync/pull") -> {
@@ -321,7 +324,7 @@ class SyncEngineTests {
                     if (pullCallCount == 1) {
                         mockResponse("""
                             {
-                                "changes": [{"scope":"$scopeID","table":"orders","op":"upsert","pk":{"id":"w1"},"row":{"id":"w1","ship_address":"Address 1","user_id":"u1","updated_at":"2026-01-01T12:00:00.000Z","deleted_at":null},"server_version":"sv_1"}],
+                                "changes": [{"scope":"$scopeID","table":"orders","op":"upsert","pk":{"id":"w1"},"row":{"id":"w1","ship_address":"Address 1","user_id":"u1","updated_at":"2026-01-01T12:00:00.000Z","deleted_at":null},"row_checksum":7,"server_version":"sv_1"}],
                                 "scope_set_version":1,
                                 "scope_cursors":{"$scopeID":"scope_cursor_mid"},
                                 "scope_updates":{"add":[],"remove":[]},
@@ -332,13 +335,13 @@ class SyncEngineTests {
                     } else {
                         mockResponse("""
                             {
-                                "changes": [{"scope":"$scopeID","table":"orders","op":"upsert","pk":{"id":"w2"},"row":{"id":"w2","ship_address":"Address 2","user_id":"u1","updated_at":"2026-01-01T13:00:00.000Z","deleted_at":null},"server_version":"sv_2"}],
+                                "changes": [{"scope":"$scopeID","table":"orders","op":"upsert","pk":{"id":"w2"},"row":{"id":"w2","ship_address":"Address 2","user_id":"u1","updated_at":"2026-01-01T13:00:00.000Z","deleted_at":null},"row_checksum":9,"server_version":"sv_2"}],
                                 "scope_set_version":1,
                                 "scope_cursors":{"$scopeID":"scope_cursor_2"},
                                 "scope_updates":{"add":[],"remove":[]},
                                 "rebuild":[],
                                 "has_more":false,
-                                "checksums":{"$scopeID":"sum_2"}
+                                "checksums":{"$scopeID":"14"}
                             }
                         """.trimIndent())
                     }
@@ -668,7 +671,7 @@ class SyncEngineTests {
     private val connectJSON = """
         {
             "server_time": "2026-01-01T12:00:00.000Z",
-            "protocol_version": 1,
+            "protocol_version": 2,
             "scope_set_version": 1,
             "schema": {
                 "version": 1,
@@ -710,7 +713,7 @@ class SyncEngineTests {
         cursor: String? = null,
         hasMore: Boolean = false,
         finalCursor: String? = null,
-        checksum: String = "sum_1"
+        checksum: String = "0"
     ): String = """
         {
             "scope": "$scopeID",
@@ -726,7 +729,8 @@ class SyncEngineTests {
         cursor: String,
         changes: String = "[]",
         hasMore: Boolean = false,
-        rebuild: String = "[]"
+        rebuild: String = "[]",
+        checksum: String = "0"
     ): String = """
         {
             "changes": $changes,
@@ -735,7 +739,7 @@ class SyncEngineTests {
             "scope_updates": {"add": [], "remove": []},
             "rebuild": $rebuild,
             "has_more": $hasMore,
-            "checksums": {"$scopeID": "sum_2"}
+            "checksums": {"$scopeID": "$checksum"}
         }
     """.trimIndent()
 

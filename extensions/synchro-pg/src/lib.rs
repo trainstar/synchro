@@ -7,6 +7,7 @@ mod bgworker;
 mod bucketing;
 mod client;
 mod compaction;
+mod cursor_token;
 mod materialize;
 mod portable_seed;
 mod pull;
@@ -117,6 +118,21 @@ CREATE TABLE IF NOT EXISTS sync_client_checkpoints (
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     PRIMARY KEY (user_id, client_id, bucket_id)
 );
+
+CREATE TABLE IF NOT EXISTS sync_runtime_state (
+    singleton BOOLEAN PRIMARY KEY DEFAULT true CHECK (singleton),
+    stream_generation TEXT NOT NULL,
+    cursor_secret TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+INSERT INTO sync_runtime_state (singleton, stream_generation, cursor_secret)
+VALUES (
+    true,
+    gen_random_uuid()::text,
+    replace(gen_random_uuid()::text, '-', '') || replace(gen_random_uuid()::text, '-', '')
+)
+ON CONFLICT (singleton) DO NOTHING;
 "#,
     name = "create_infrastructure_tables",
     bootstrap
@@ -401,7 +417,7 @@ mod tests {
                 "client_id": client_id,
                 "platform": "test",
                 "app_version": "1.0.0",
-                "protocol_version": 1,
+                "protocol_version": 2,
                 "schema": { "version": 0, "hash": "" },
                 "scope_set_version": 0,
                 "known_scopes": {}
@@ -453,22 +469,15 @@ mod tests {
         scope_set_version: i64,
         scopes: Value,
         limit: i32,
-        checksum_mode: Option<&str>,
     ) -> Value {
         let (schema_version, schema_hash) = latest_schema_ref();
-        let mut request = json!({
+        let request = json!({
             "client_id": client_id,
             "schema": { "version": schema_version, "hash": schema_hash },
             "scope_set_version": scope_set_version,
             "scopes": scopes,
             "limit": limit,
         });
-        if let Some(mode) = checksum_mode {
-            request
-                .as_object_mut()
-                .unwrap()
-                .insert("checksum_mode".into(), json!(mode));
-        }
 
         let row: Option<pgrx::JsonB> = Spi::get_one_with_args(
             "SELECT synchro_pull($1, $2::jsonb)",
@@ -528,6 +537,15 @@ mod tests {
         let version = row.0["version"].as_i64().unwrap_or(0);
         let hash = row.0["hash"].as_str().unwrap_or_default().to_string();
         (version, hash)
+    }
+
+    fn issued_scope_cursor(scope_id: &str, checkpoint: i64) -> String {
+        Spi::connect(|client| crate::cursor_token::issue_scope_cursor(client, scope_id, checkpoint))
+            .expect("issue scope cursor")
+    }
+
+    fn scope_cursor_ref(scope_id: &str, checkpoint: i64) -> Value {
+        json!({ "cursor": issued_scope_cursor(scope_id, checkpoint) })
     }
 
     /// Insert a changelog entry directly for test fixtures.
@@ -748,7 +766,7 @@ mod tests {
                 "client_id": "client1",
                 "platform": "ios",
                 "app_version": "1.0.0",
-                "protocol_version": 1,
+                "protocol_version": 2,
                 "schema": {
                     "version": 0,
                     "hash": ""
@@ -776,15 +794,15 @@ mod tests {
                 "client_id": "client1",
                 "platform": "ios",
                 "app_version": "1.0.0",
-                "protocol_version": 1,
+                "protocol_version": 2,
                 "schema": {
                     "version": schema_version,
                     "hash": schema_hash
                 },
                 "scope_set_version": 1,
                 "known_scopes": {
-                    "user:user1": { "cursor": "1" },
-                    "catalog": { "cursor": "1" }
+                    "user:user1": scope_cursor_ref("user:user1", 1),
+                    "catalog": scope_cursor_ref("catalog", 1)
                 }
             }),
         );
@@ -808,7 +826,7 @@ mod tests {
                 "client_id": "client1",
                 "platform": "ios",
                 "app_version": "1.0.0",
-                "protocol_version": 1,
+                "protocol_version": 2,
                 "schema": {
                     "version": 0,
                     "hash": ""
@@ -818,7 +836,7 @@ mod tests {
             }),
         );
 
-        assert_eq!(resp["protocol_version"].as_u64(), Some(1));
+        assert_eq!(resp["protocol_version"].as_u64(), Some(2));
         assert_eq!(resp["scope_set_version"].as_i64(), Some(1));
         assert_eq!(resp["schema"]["action"].as_str(), Some("replace"));
         assert!(resp.get("schema_definition").is_some());
@@ -919,14 +937,14 @@ mod tests {
                 "client_id": "client1",
                 "platform": "ios",
                 "app_version": "1.0.0",
-                "protocol_version": 1,
+                "protocol_version": 2,
                 "schema": {
                     "version": schema_version,
                     "hash": schema_hash
                 },
                 "scope_set_version": 1,
                 "known_scopes": {
-                    "user:user1": { "cursor": "c-user" }
+                    "user:user1": scope_cursor_ref("user:user1", 1)
                 }
             }),
         );
@@ -971,7 +989,7 @@ mod tests {
                 "client_id": "client1",
                 "platform": "ios",
                 "app_version": "1.0.0",
-                "protocol_version": 1,
+                "protocol_version": 2,
                 "schema": { "version": 0, "hash": "" },
                 "scope_set_version": 0,
                 "known_scopes": {}
@@ -1005,10 +1023,9 @@ mod tests {
                     "schema": { "version": schema_version, "hash": schema_hash },
                     "scope_set_version": 1,
                     "scopes": {
-                        "user:user1": { "cursor": "0" }
+                        "user:user1": scope_cursor_ref("user:user1", 0)
                     },
-                    "limit": 100,
-                    "checksum_mode": "requested"
+                    "limit": 100
                 })
                 .to_string()
                 .into(),
@@ -1038,7 +1055,7 @@ mod tests {
                 "client_id": "client1",
                 "platform": "ios",
                 "app_version": "1.0.0",
-                "protocol_version": 1,
+                "protocol_version": 2,
                 "schema": { "version": 0, "hash": "" },
                 "scope_set_version": 0,
                 "known_scopes": {}
@@ -1073,10 +1090,9 @@ mod tests {
                     "schema": { "version": schema_version, "hash": schema_hash },
                     "scope_set_version": 1,
                     "scopes": {
-                        "user:user1": { "cursor": "0" }
+                        "user:user1": scope_cursor_ref("user:user1", 0)
                     },
-                    "limit": 100,
-                    "checksum_mode": "requested"
+                    "limit": 100
                 })
                 .to_string()
                 .into(),
@@ -1103,7 +1119,7 @@ mod tests {
                 "client_id": "client1",
                 "platform": "ios",
                 "app_version": "1.0.0",
-                "protocol_version": 1,
+                "protocol_version": 2,
                 "schema": { "version": 0, "hash": "" },
                 "scope_set_version": 0,
                 "known_scopes": {}
@@ -1139,8 +1155,7 @@ mod tests {
                     "scopes": {
                         "user:user1": { "cursor": null }
                     },
-                    "limit": 100,
-                    "checksum_mode": "requested"
+                    "limit": 100
                 })
                 .to_string()
                 .into(),
@@ -1164,7 +1179,7 @@ mod tests {
                 "client_id": "client1",
                 "platform": "ios",
                 "app_version": "1.0.0",
-                "protocol_version": 1,
+                "protocol_version": 2,
                 "schema": { "version": 0, "hash": "" },
                 "scope_set_version": 0,
                 "known_scopes": {}
@@ -1226,7 +1241,7 @@ mod tests {
                 "client_id": "client1",
                 "platform": "ios",
                 "app_version": "1.0.0",
-                "protocol_version": 1,
+                "protocol_version": 2,
                 "schema": { "version": 0, "hash": "" },
                 "scope_set_version": 0,
                 "known_scopes": {}
@@ -1302,7 +1317,7 @@ mod tests {
                 "client_id": "client1",
                 "platform": "ios",
                 "app_version": "1.0.0",
-                "protocol_version": 1,
+                "protocol_version": 2,
                 "schema": { "version": 0, "hash": "" },
                 "scope_set_version": 0,
                 "known_scopes": {}
@@ -1389,7 +1404,7 @@ mod tests {
                 "client_id": "client1",
                 "platform": "ios",
                 "app_version": "1.0.0",
-                "protocol_version": 1,
+                "protocol_version": 2,
                 "schema": { "version": 0, "hash": "" },
                 "scope_set_version": 0,
                 "known_scopes": {}
@@ -1464,7 +1479,7 @@ mod tests {
                 "client_id": "client1",
                 "platform": "ios",
                 "app_version": "1.0.0",
-                "protocol_version": 1,
+                "protocol_version": 2,
                 "schema": { "version": 0, "hash": "" },
                 "scope_set_version": 0,
                 "known_scopes": {}
@@ -1515,7 +1530,7 @@ mod tests {
                 "client_id": "client1",
                 "platform": "ios",
                 "app_version": "1.0.0",
-                "protocol_version": 1,
+                "protocol_version": 2,
                 "schema": { "version": 0, "hash": "" },
                 "scope_set_version": 0,
                 "known_scopes": {}
@@ -1625,7 +1640,7 @@ mod tests {
                 "client_id": "client1",
                 "platform": "ios",
                 "app_version": "1.0.0",
-                "protocol_version": 1,
+                "protocol_version": 2,
                 "schema": { "version": 0, "hash": "" },
                 "scope_set_version": 0,
                 "known_scopes": {}
@@ -2246,9 +2261,8 @@ mod tests {
             "u1",
             "c1",
             1,
-            json!({ "user:u1": { "cursor": "0" } }),
+            json!({ "user:u1": scope_cursor_ref("user:u1", 0) }),
             100,
-            Some("requested"),
         );
 
         let hits = resp["changes"]
@@ -2268,9 +2282,8 @@ mod tests {
             "u1",
             "c1",
             1,
-            json!({ "user:u1": { "cursor": "0" } }),
+            json!({ "user:u1": scope_cursor_ref("user:u1", 0) }),
             1,
-            None,
         );
         assert_eq!(resp["has_more"].as_bool(), Some(true));
     }
@@ -2283,9 +2296,8 @@ mod tests {
             "u1",
             "c1",
             1,
-            json!({ "user:u1": { "cursor": "0" } }),
+            json!({ "user:u1": scope_cursor_ref("user:u1", 0) }),
             100,
-            Some("requested"),
         );
 
         for change in resp["changes"].as_array().unwrap() {
@@ -2327,9 +2339,8 @@ mod tests {
             "u1",
             "c1",
             1,
-            json!({ "user:u1": { "cursor": "0" } }),
+            json!({ "user:u1": scope_cursor_ref("user:u1", 0) }),
             100,
-            Some("requested"),
         );
 
         let change = resp["changes"]
@@ -2384,9 +2395,8 @@ mod tests {
             "u1",
             "c1",
             1,
-            json!({ "user:u1": { "cursor": "0" } }),
+            json!({ "user:u1": scope_cursor_ref("user:u1", 0) }),
             100,
-            Some("requested"),
         );
 
         for change in resp["changes"].as_array().unwrap() {
@@ -2402,7 +2412,7 @@ mod tests {
         setup_test_tables();
         register_client("u1", "c1");
 
-        let resp = pull_client("u1", "c1", 0, json!({}), 100, None);
+        let resp = pull_client("u1", "c1", 0, json!({}), 100);
         let added = resp["scope_updates"]["add"].as_array().unwrap();
         assert!(
             added.iter().any(|scope| scope["id"].as_str() == Some("user:u1")),
@@ -2419,9 +2429,8 @@ mod tests {
             "u1",
             "c1",
             0,
-            json!({ "team:old": { "cursor": "0" } }),
+            json!({ "team:old": scope_cursor_ref("team:old", 0) }),
             100,
-            None,
         );
         let removed = resp["scope_updates"]["remove"].as_array().unwrap();
         assert!(
@@ -2437,9 +2446,12 @@ mod tests {
 
         let scopes = client_scope_ids("u1", "c1")
             .into_iter()
-            .map(|scope_id| (scope_id, json!({ "cursor": "0" })))
+            .map(|scope_id| {
+                let cursor = issued_scope_cursor(&scope_id, 0);
+                (scope_id, json!({ "cursor": cursor }))
+            })
             .collect::<serde_json::Map<String, Value>>();
-        let resp = pull_client("u1", "c1", 1, Value::Object(scopes), 100, None);
+        let resp = pull_client("u1", "c1", 1, Value::Object(scopes), 100);
 
         assert_eq!(resp["scope_updates"]["add"].as_array().unwrap().len(), 0);
         assert_eq!(resp["scope_updates"]["remove"].as_array().unwrap().len(), 0);
@@ -2508,7 +2520,20 @@ mod tests {
             &["u1".into(), "c1".into()],
         )
         .unwrap();
-        assert_eq!(stored.map(|value| value.to_string()), Some(final_scope_cursor.to_string()));
+        let parsed_checkpoint = Spi::connect(|client| {
+            match crate::cursor_token::parse_scope_cursor(client, "user:u1", final_scope_cursor)
+                .expect("final scope cursor should decode for rebuilt scope")
+            {
+                crate::cursor_token::ParsedScopeCursor::Current(checkpoint) => {
+                    Ok::<i64, pgrx::spi::Error>(checkpoint)
+                }
+                crate::cursor_token::ParsedScopeCursor::Stale => {
+                    panic!("rebuilt final scope cursor must not be stale")
+                }
+            }
+        })
+        .unwrap();
+        assert_eq!(stored, Some(parsed_checkpoint));
     }
 
     #[pg_test]
@@ -2933,7 +2958,7 @@ mod tests {
                 "client_id": "empty_client",
                 "platform": "test",
                 "app_version": "1.0.0",
-                "protocol_version": 1,
+                "protocol_version": 2,
                 "schema": { "version": 1, "hash": "somehash" },
                 "scope_set_version": 0,
                 "known_scopes": {}

@@ -77,7 +77,8 @@ final class PullProcessor: @unchecked Sendable {
         scopeCursors: [String: String],
         checksums: [String: String]?
     ) throws {
-        guard !changes.isEmpty || !scopeCursors.isEmpty else { return }
+        let checksumMap = checksums ?? [:]
+        guard !changes.isEmpty || !scopeCursors.isEmpty || !checksumMap.isEmpty else { return }
         let tableMap = Dictionary(uniqueKeysWithValues: syncedTables.map { ($0.tableName, $0) })
 
         try database.writeSyncLockedTransaction { db in
@@ -102,17 +103,53 @@ final class PullProcessor: @unchecked Sendable {
                         scopeID: change.scope,
                         tableName: change.table,
                         recordID: recordID,
+                        checksum: try requiredScopeRowChecksum(
+                            change.rowChecksum,
+                            tableName: change.table,
+                            recordID: recordID
+                        ),
                         generation: generation
                     )
                 }
             }
 
-            for (scopeID, cursor) in scopeCursors {
+            let scopeIDs = Set(scopeCursors.keys).union(checksumMap.keys)
+            for scopeID in scopeIDs {
+                guard let existingScope = try SynchroMeta.getScope(db, scopeID: scopeID) else {
+                    continue
+                }
+                let nextCursor = scopeCursors[scopeID] ?? existingScope.cursor
+                let localChecksum = try SynchroMeta.getScopeLocalChecksum(db, scopeID: scopeID)
+                if let serverChecksum = checksumMap[scopeID] {
+                    let expectedChecksum = try parseScopeChecksum(scopeID: scopeID, checksum: serverChecksum)
+                    if localChecksum == expectedChecksum {
+                        try SynchroMeta.upsertScope(
+                            db,
+                            scopeID: scopeID,
+                            cursor: nextCursor,
+                            checksum: serverChecksum,
+                            generation: existingScope.generation,
+                            localChecksum: localChecksum
+                        )
+                    } else {
+                        try SynchroMeta.upsertScope(
+                            db,
+                            scopeID: scopeID,
+                            cursor: nil,
+                            checksum: nil,
+                            generation: existingScope.generation,
+                            localChecksum: localChecksum
+                        )
+                    }
+                    continue
+                }
                 try SynchroMeta.upsertScope(
                     db,
                     scopeID: scopeID,
-                    cursor: cursor,
-                    checksum: checksums?[scopeID]
+                    cursor: nextCursor,
+                    checksum: existingScope.checksum,
+                    generation: existingScope.generation,
+                    localChecksum: localChecksum
                 )
             }
         }
@@ -139,6 +176,11 @@ final class PullProcessor: @unchecked Sendable {
                     scopeID: scopeID,
                     tableName: record.table,
                     recordID: recordID,
+                    checksum: try requiredScopeRowChecksum(
+                        record.rowChecksum,
+                        tableName: record.table,
+                        recordID: recordID
+                    ),
                     generation: generation
                 )
             }
@@ -162,12 +204,21 @@ final class PullProcessor: @unchecked Sendable {
                 )
             }
 
+            let localChecksum = try SynchroMeta.getScopeLocalChecksum(db, scopeID: scopeID)
+            let expectedChecksum = try parseScopeChecksum(scopeID: scopeID, checksum: checksum)
+            guard localChecksum == expectedChecksum else {
+                throw SynchroError.invalidResponse(
+                    message: "scope checksum mismatch after rebuild for \(scopeID)"
+                )
+            }
+
             try SynchroMeta.upsertScope(
                 db,
                 scopeID: scopeID,
                 cursor: finalCursor,
                 checksum: checksum,
-                generation: generation
+                generation: generation,
+                localChecksum: localChecksum
             )
         }
     }
@@ -323,6 +374,24 @@ final class PullProcessor: @unchecked Sendable {
         return checksum
     }
 
+    private func requiredScopeRowChecksum(_ checksum: Int32?, tableName: String, recordID: String) throws -> Int32 {
+        guard let checksum else {
+            throw SynchroError.invalidResponse(
+                message: "missing scope row checksum for \(tableName)/\(recordID)"
+            )
+        }
+        return checksum
+    }
+
+    private func parseScopeChecksum(scopeID: String, checksum: String) throws -> Int32 {
+        guard let parsed = Int32(checksum) else {
+            throw SynchroError.invalidResponse(
+                message: "invalid checksum for scope \(scopeID)"
+            )
+        }
+        return parsed
+    }
+
     func updateKnownBuckets(bucketUpdates: BucketUpdate?) throws {
         guard let updates = bucketUpdates else { return }
         try database.writeTransaction { db in
@@ -399,7 +468,13 @@ final class PullProcessor: @unchecked Sendable {
             throw SynchroError.invalidResponse(message: "missing row for \(change.table) \(change.op)")
         }
         let recordID = try scopeRecordID(pk: change.pk, schema: schema)
-        return try scopeRecord(tableName: change.table, recordID: recordID, row: row, schema: schema)
+        return try scopeRecord(
+            tableName: change.table,
+            recordID: recordID,
+            row: row,
+            checksum: change.rowChecksum,
+            schema: schema
+        )
     }
 
     private func scopeRecord(from rebuild: RebuildRecord, schema: LocalSchemaTable) throws -> Record {
@@ -407,10 +482,22 @@ final class PullProcessor: @unchecked Sendable {
             throw SynchroError.invalidResponse(message: "missing rebuild row for \(rebuild.table)")
         }
         let recordID = try scopeRecordID(pk: rebuild.pk, schema: schema)
-        return try scopeRecord(tableName: rebuild.table, recordID: recordID, row: row, schema: schema)
+        return try scopeRecord(
+            tableName: rebuild.table,
+            recordID: recordID,
+            row: row,
+            checksum: rebuild.rowChecksum,
+            schema: schema
+        )
     }
 
-    private func scopeRecord(tableName: String, recordID: String, row: [String: AnyCodable], schema: LocalSchemaTable) throws -> Record {
+    private func scopeRecord(
+        tableName: String,
+        recordID: String,
+        row: [String: AnyCodable],
+        checksum: Int32?,
+        schema: LocalSchemaTable
+    ) throws -> Record {
         let updatedAtRaw = row[schema.updatedAtColumn]?.value as? String
         guard let updatedAtRaw, let updatedAt = formatter.date(from: updatedAtRaw) else {
             throw SynchroError.invalidResponse(message: "missing or invalid \(schema.updatedAtColumn) for \(tableName)")
@@ -425,7 +512,7 @@ final class PullProcessor: @unchecked Sendable {
             updatedAt: updatedAt,
             deletedAt: deletedAt,
             bucketID: nil,
-            checksum: nil
+            checksum: checksum
         )
     }
 

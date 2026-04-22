@@ -18,6 +18,7 @@ struct LocalScopeState: Sendable, Equatable {
     let cursor: String?
     let checksum: String?
     let generation: Int64
+    let localChecksum: Int32
 }
 
 enum SynchroMeta {
@@ -147,38 +148,67 @@ enum SynchroMeta {
     static func getAllScopes(_ db: GRDB.Database) throws -> [LocalScopeState] {
         let rows = try Row.fetchAll(
             db,
-            sql: "SELECT scope_id, cursor, checksum, generation FROM _synchro_scopes ORDER BY scope_id"
+            sql: "SELECT scope_id, cursor, checksum, generation, local_checksum FROM _synchro_scopes ORDER BY scope_id"
         )
         return rows.compactMap { row in
             guard let scopeID: String = row["scope_id"] else { return nil }
             let cursor: String? = row["cursor"]
             let checksum: String? = row["checksum"]
             let generation: Int64 = row["generation"] ?? 0
+            let localChecksum = Int32(truncatingIfNeeded: (row["local_checksum"] as Int64?) ?? 0)
             return LocalScopeState(
                 scopeID: scopeID,
                 cursor: cursor,
                 checksum: checksum,
-                generation: generation
+                generation: generation,
+                localChecksum: localChecksum
             )
         }
     }
 
-    static func upsertScope(_ db: GRDB.Database, scopeID: String, cursor: String?, checksum: String?, generation: Int64? = nil) throws {
+    static func getScope(_ db: GRDB.Database, scopeID: String) throws -> LocalScopeState? {
+        let row = try Row.fetchOne(
+            db,
+            sql: "SELECT scope_id, cursor, checksum, generation, local_checksum FROM _synchro_scopes WHERE scope_id = ?",
+            arguments: [scopeID]
+        )
+        guard let row, let currentScopeID: String = row["scope_id"] else {
+            return nil
+        }
+        return LocalScopeState(
+            scopeID: currentScopeID,
+            cursor: row["cursor"],
+            checksum: row["checksum"],
+            generation: row["generation"] ?? 0,
+            localChecksum: Int32(truncatingIfNeeded: (row["local_checksum"] as Int64?) ?? 0)
+        )
+    }
+
+    static func upsertScope(
+        _ db: GRDB.Database,
+        scopeID: String,
+        cursor: String?,
+        checksum: String?,
+        generation: Int64? = nil,
+        localChecksum: Int32? = nil
+    ) throws {
         let currentGeneration: Int64
         if let generation {
             currentGeneration = generation
         } else {
             currentGeneration = try getScopeGeneration(db, scopeID: scopeID)
         }
+        let effectiveLocalChecksum = try Int64(localChecksum ?? getScopeLocalChecksum(db, scopeID: scopeID))
         try db.execute(
             sql: """
-                INSERT INTO _synchro_scopes (scope_id, cursor, checksum, generation) VALUES (?, ?, ?, ?)
+                INSERT INTO _synchro_scopes (scope_id, cursor, checksum, generation, local_checksum) VALUES (?, ?, ?, ?, ?)
                 ON CONFLICT (scope_id) DO UPDATE SET
                     cursor = excluded.cursor,
                     checksum = excluded.checksum,
-                    generation = excluded.generation
+                    generation = excluded.generation,
+                    local_checksum = excluded.local_checksum
                 """,
-            arguments: [scopeID, cursor, checksum, currentGeneration]
+            arguments: [scopeID, cursor, checksum, currentGeneration, effectiveLocalChecksum]
         )
     }
 
@@ -193,7 +223,14 @@ enum SynchroMeta {
 
     static func bumpScopeGeneration(_ db: GRDB.Database, scopeID: String) throws -> Int64 {
         let nextGeneration = try getScopeGeneration(db, scopeID: scopeID) + 1
-        try upsertScope(db, scopeID: scopeID, cursor: nil, checksum: nil, generation: nextGeneration)
+        try upsertScope(
+            db,
+            scopeID: scopeID,
+            cursor: nil,
+            checksum: nil,
+            generation: nextGeneration,
+            localChecksum: 0
+        )
         return nextGeneration
     }
 
@@ -206,31 +243,66 @@ enum SynchroMeta {
     }
 
     static func invalidateAllScopes(_ db: GRDB.Database) throws {
-        try db.execute(sql: "UPDATE _synchro_scopes SET cursor = NULL, checksum = NULL, generation = 0")
+        try db.execute(sql: "UPDATE _synchro_scopes SET cursor = NULL, checksum = NULL, generation = 0, local_checksum = 0")
         try clearAllScopeRows(db)
     }
 
     static func clearAllScopeRows(_ db: GRDB.Database) throws {
         try db.execute(sql: "DELETE FROM _synchro_scope_rows")
+        try db.execute(sql: "UPDATE _synchro_scopes SET local_checksum = 0")
     }
 
     // MARK: - Scope Rows
 
-    static func upsertScopeRow(_ db: GRDB.Database, scopeID: String, tableName: String, recordID: String, generation: Int64) throws {
+    static func upsertScopeRow(
+        _ db: GRDB.Database,
+        scopeID: String,
+        tableName: String,
+        recordID: String,
+        checksum: Int32,
+        generation: Int64
+    ) throws {
+        let existingChecksum = try scopeRowChecksum(
+            db,
+            scopeID: scopeID,
+            tableName: tableName,
+            recordID: recordID
+        )
+        let nextLocalChecksum = xorChecksum(
+            xorChecksum(
+                try getScopeLocalChecksum(db, scopeID: scopeID),
+                existingChecksum ?? 0
+            ),
+            checksum
+        )
         try db.execute(
             sql: """
-                INSERT INTO _synchro_scope_rows (scope_id, table_name, record_id, generation) VALUES (?, ?, ?, ?)
-                ON CONFLICT (scope_id, table_name, record_id) DO UPDATE SET generation = excluded.generation
+                INSERT INTO _synchro_scope_rows (scope_id, table_name, record_id, checksum, generation) VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT (scope_id, table_name, record_id) DO UPDATE SET
+                    checksum = excluded.checksum,
+                    generation = excluded.generation
                 """,
-            arguments: [scopeID, tableName, recordID, generation]
+            arguments: [scopeID, tableName, recordID, Int64(checksum), generation]
         )
+        try setScopeLocalChecksum(db, scopeID: scopeID, checksum: nextLocalChecksum)
     }
 
     static func deleteScopeRow(_ db: GRDB.Database, scopeID: String, tableName: String, recordID: String) throws {
+        let existingChecksum = try scopeRowChecksum(
+            db,
+            scopeID: scopeID,
+            tableName: tableName,
+            recordID: recordID
+        ) ?? 0
         try db.execute(
             sql: "DELETE FROM _synchro_scope_rows WHERE scope_id = ? AND table_name = ? AND record_id = ?",
             arguments: [scopeID, tableName, recordID]
         )
+        let nextLocalChecksum = xorChecksum(
+            try getScopeLocalChecksum(db, scopeID: scopeID),
+            existingChecksum
+        )
+        try setScopeLocalChecksum(db, scopeID: scopeID, checksum: nextLocalChecksum)
     }
 
     static func deleteScopeRows(_ db: GRDB.Database, scopeID: String) throws {
@@ -238,6 +310,7 @@ enum SynchroMeta {
             sql: "DELETE FROM _synchro_scope_rows WHERE scope_id = ?",
             arguments: [scopeID]
         )
+        try setScopeLocalChecksum(db, scopeID: scopeID, checksum: 0)
     }
 
     static func getScopeRowRecordIDs(_ db: GRDB.Database, scopeID: String) throws -> [(tableName: String, recordID: String)] {
@@ -271,6 +344,7 @@ enum SynchroMeta {
             sql: "DELETE FROM _synchro_scope_rows WHERE scope_id = ? AND generation <> ?",
             arguments: [scopeID, generation]
         )
+        try recomputeScopeLocalChecksum(db, scopeID: scopeID)
     }
 
     static func hasScopeRows(_ db: GRDB.Database, tableName: String, recordID: String) throws -> Bool {
@@ -280,5 +354,55 @@ enum SynchroMeta {
             arguments: [tableName, recordID]
         )
         return row != nil
+    }
+
+    static func getScopeLocalChecksum(_ db: GRDB.Database, scopeID: String) throws -> Int32 {
+        let row = try Row.fetchOne(
+            db,
+            sql: "SELECT local_checksum FROM _synchro_scopes WHERE scope_id = ?",
+            arguments: [scopeID]
+        )
+        return Int32(truncatingIfNeeded: (row?["local_checksum"] as Int64?) ?? 0)
+    }
+
+    private static func setScopeLocalChecksum(_ db: GRDB.Database, scopeID: String, checksum: Int32) throws {
+        try db.execute(
+            sql: "UPDATE _synchro_scopes SET local_checksum = ? WHERE scope_id = ?",
+            arguments: [Int64(checksum), scopeID]
+        )
+    }
+
+    private static func scopeRowChecksum(
+        _ db: GRDB.Database,
+        scopeID: String,
+        tableName: String,
+        recordID: String
+    ) throws -> Int32? {
+        let row = try Row.fetchOne(
+            db,
+            sql: "SELECT checksum FROM _synchro_scope_rows WHERE scope_id = ? AND table_name = ? AND record_id = ?",
+            arguments: [scopeID, tableName, recordID]
+        )
+        let checksum: Int64? = row?["checksum"]
+        return checksum.map { Int32(truncatingIfNeeded: $0) }
+    }
+
+    private static func recomputeScopeLocalChecksum(_ db: GRDB.Database, scopeID: String) throws {
+        let rows = try Row.fetchAll(
+            db,
+            sql: "SELECT checksum FROM _synchro_scope_rows WHERE scope_id = ?",
+            arguments: [scopeID]
+        )
+        var aggregate: Int32 = 0
+        for row in rows {
+            if let checksum: Int64 = row["checksum"] {
+                aggregate = xorChecksum(aggregate, Int32(truncatingIfNeeded: checksum))
+            }
+        }
+        try setScopeLocalChecksum(db, scopeID: scopeID, checksum: aggregate)
+    }
+
+    private static func xorChecksum(_ lhs: Int32, _ rhs: Int32) -> Int32 {
+        lhs ^ rhs
     }
 }

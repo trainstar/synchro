@@ -327,12 +327,11 @@ class SyncEngine(
                 schema = SchemaRef(version = schemaVersion, hash = schemaHash),
                 scopeSetVersion = scopeSetVersion,
                 scopes = scopes,
-                limit = config.effectivePullPageSize,
-                checksumMode = ChecksumMode.REQUESTED
+                limit = config.effectivePullPageSize
             )
 
             val response = httpClient.pull(request)
-            response.validate(request)
+            response.validate()
 
             pullProcessor.applyScopeChanges(
                 changes = response.changes,
@@ -410,7 +409,7 @@ class SyncEngine(
             clientID = clientID,
             platform = config.platform,
             appVersion = config.appVersion,
-            protocolVersion = 1,
+            protocolVersion = 2,
             schema = database.readTransaction { db ->
                 SchemaRef(
                     version = SynchroMeta.getInt64(db, MetaKey.SCHEMA_VERSION),

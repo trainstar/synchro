@@ -46,11 +46,19 @@ final class PullProcessorTests: XCTestCase {
         _ db: SynchroDatabase,
         scopeID: String,
         recordID: String,
+        checksum: Int32 = 7,
         generation: Int64 = 0
     ) throws {
         try db.writeTransaction { conn in
             try SynchroMeta.upsertScope(conn, scopeID: scopeID, cursor: "10", checksum: nil, generation: generation)
-            try SynchroMeta.upsertScopeRow(conn, scopeID: scopeID, tableName: "orders", recordID: recordID, generation: generation)
+            try SynchroMeta.upsertScopeRow(
+                conn,
+                scopeID: scopeID,
+                tableName: "orders",
+                recordID: recordID,
+                checksum: checksum,
+                generation: generation
+            )
         }
     }
 
@@ -268,7 +276,14 @@ final class PullProcessorTests: XCTestCase {
         try db.writeTransaction { conn in
             try SynchroMeta.setSyncLock(conn, locked: true)
             try SynchroMeta.upsertScope(conn, scopeID: "orders:user1", cursor: "10", checksum: nil)
-            try SynchroMeta.upsertScopeRow(conn, scopeID: "orders:user1", tableName: "orders", recordID: "w1", generation: 0)
+            try SynchroMeta.upsertScopeRow(
+                conn,
+                scopeID: "orders:user1",
+                tableName: "orders",
+                recordID: "w1",
+                checksum: 7,
+                generation: 0
+            )
         }
         _ = try db.execute(
             "INSERT INTO orders (id, ship_address, updated_at) VALUES (?, ?, ?)",
@@ -404,8 +419,8 @@ final class PullProcessorTests: XCTestCase {
         try processor.finalizeScopeRebuild(
             scopeID: "orders:user1",
             generation: 2,
-            finalCursor: "20",
-            checksum: "sum_20",
+            finalCursor: "scope_cursor_20",
+            checksum: "0",
             syncedTables: [testTable.localSchema]
         )
 
@@ -424,8 +439,8 @@ final class PullProcessorTests: XCTestCase {
         try processor.finalizeScopeRebuild(
             scopeID: "orders:user1",
             generation: 2,
-            finalCursor: "20",
-            checksum: "sum_20",
+            finalCursor: "scope_cursor_20",
+            checksum: "0",
             syncedTables: [testTable.localSchema]
         )
 

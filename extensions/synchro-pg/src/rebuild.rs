@@ -4,9 +4,10 @@ use synchro_core::contract::{ProtocolErrorCode, RebuildRecord, RebuildRequest, R
 use synchro_core::limits::clamp_rebuild_limit;
 
 use crate::client::protocol_error_response;
+use crate::cursor_token::issue_scope_cursor;
 use crate::pull::{
     compute_bucket_checksums, contract_pk_value, hydrate_records, load_client_buckets,
-    record_server_version,
+    record_checksum, record_server_version,
 };
 use crate::registry::load_registry;
 
@@ -96,12 +97,14 @@ fn synchro_rebuild_contract(p_user_id: &str, p_request: pgrx::JsonB) -> pgrx::Js
                 .copied()
                 .unwrap_or(0)
                 .to_string();
+            let final_scope_cursor = issue_scope_cursor(client, &request.scope, rebuild_checkpoint)
+                .unwrap_or_else(|err| pgrx::error!("issuing rebuild scope cursor: {}", err));
             let response = RebuildResponse {
                 scope: request.scope.clone(),
                 records: Vec::new(),
                 cursor: None,
                 has_more: false,
-                final_scope_cursor: Some(rebuild_checkpoint.to_string()),
+                final_scope_cursor: Some(final_scope_cursor),
                 checksum: Some(checksum),
             };
             if let Err(err) = response.validate() {
@@ -141,6 +144,7 @@ fn synchro_rebuild_contract(p_user_id: &str, p_request: pgrx::JsonB) -> pgrx::Js
                     table: table_name.clone(),
                     pk: contract_pk_value(&registry, table_name, &record_id),
                     row: Some(record["data"].clone()),
+                    row_checksum: record_checksum(&record),
                     server_version: record_server_version(&record, rebuild_checkpoint),
                 });
             }
@@ -169,7 +173,9 @@ fn synchro_rebuild_contract(p_user_id: &str, p_request: pgrx::JsonB) -> pgrx::Js
                 .copied()
                 .unwrap_or(0)
                 .to_string();
-            (Some(rebuild_checkpoint.to_string()), Some(checksum))
+            let final_scope_cursor = issue_scope_cursor(client, &request.scope, rebuild_checkpoint)
+                .unwrap_or_else(|err| pgrx::error!("issuing rebuild scope cursor: {}", err));
+            (Some(final_scope_cursor), Some(checksum))
         };
 
         let response = RebuildResponse {

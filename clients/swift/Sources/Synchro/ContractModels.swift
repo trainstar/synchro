@@ -20,7 +20,7 @@ public enum ContractViolation: Error, Equatable {
     case emptyIndexName(tableName: String)
     case duplicateIndexName(tableName: String, indexName: String)
     case unknownIndexColumn(tableName: String, indexName: String, columnName: String)
-    case requiredChecksumsMissing
+    case finalPullChecksumsMissing
     case finalRebuildCursorMissing
     case finalRebuildChecksumMissing
     case partialRebuildHasFinalCursor
@@ -52,12 +52,6 @@ public enum SchemaAction: String, Codable, Sendable {
     public var isCompatible: Bool {
         self != .unsupported
     }
-}
-
-public enum ChecksumMode: String, Codable, Sendable {
-    case none
-    case requested
-    case required
 }
 
 public enum MutationStatus: String, Codable, Sendable {
@@ -368,7 +362,6 @@ public struct PullRequest: Codable, Sendable, Equatable {
     public var scopeSetVersion: Int64
     public var scopes: [String: ScopeCursorRef]
     public var limit: Int
-    public var checksumMode: ChecksumMode?
 
     enum CodingKeys: String, CodingKey {
         case clientID = "client_id"
@@ -376,7 +369,6 @@ public struct PullRequest: Codable, Sendable, Equatable {
         case scopeSetVersion = "scope_set_version"
         case scopes
         case limit
-        case checksumMode = "checksum_mode"
     }
 }
 
@@ -386,6 +378,7 @@ public struct ChangeRecord: Codable, Sendable, Equatable {
     public var op: Operation
     public var pk: [String: AnyCodable]
     public var row: [String: AnyCodable]?
+    public var rowChecksum: Int32?
     public var serverVersion: String
 
     enum CodingKeys: String, CodingKey {
@@ -394,6 +387,7 @@ public struct ChangeRecord: Codable, Sendable, Equatable {
         case op
         case pk
         case row
+        case rowChecksum = "row_checksum"
         case serverVersion = "server_version"
     }
 }
@@ -421,10 +415,10 @@ public struct PullResponse: Codable, Sendable, Equatable {
         !rebuild.isEmpty
     }
 
-    public func validate(for request: PullRequest) throws {
+    public func validate() throws {
         try scopeUpdates.validate()
-        if request.checksumMode == .required && checksums == nil {
-            throw ContractViolation.requiredChecksumsMissing
+        if !hasMore && checksums == nil {
+            throw ContractViolation.finalPullChecksumsMissing
         }
     }
 }
@@ -447,12 +441,14 @@ public struct RebuildRecord: Codable, Sendable, Equatable {
     public var table: String
     public var pk: [String: AnyCodable]
     public var row: [String: AnyCodable]?
+    public var rowChecksum: Int32?
     public var serverVersion: String
 
     enum CodingKeys: String, CodingKey {
         case table
         case pk
         case row
+        case rowChecksum = "row_checksum"
         case serverVersion = "server_version"
     }
 }

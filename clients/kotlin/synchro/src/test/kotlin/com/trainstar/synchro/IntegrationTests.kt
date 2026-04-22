@@ -93,7 +93,7 @@ class IntegrationTests {
             clientID = clientID,
             platform = "android",
             appVersion = "1.0.0",
-            protocolVersion = 1,
+            protocolVersion = 2,
             schema = SchemaRef(version = 0, hash = ""),
             scopeSetVersion = 0,
             knownScopes = emptyMap()

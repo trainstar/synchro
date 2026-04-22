@@ -105,7 +105,7 @@ final class SyncEngineTests: XCTestCase {
         XCTAssertEqual(scopes.count, 1)
         XCTAssertEqual(scopes[0].scopeID, self.scopeID)
         XCTAssertEqual(scopes[0].cursor, "scope_cursor_2")
-        XCTAssertEqual(scopes[0].checksum, "sum_2")
+        XCTAssertEqual(scopes[0].checksum, "0")
 
         let tables = try db.query("SELECT name FROM sqlite_master WHERE type='table' AND name='orders'", params: nil)
         XCTAssertEqual(tables.count, 1)
@@ -196,6 +196,7 @@ final class SyncEngineTests: XCTestCase {
                                 "updated_at": "2026-01-01T12:00:00.000Z",
                                 "deleted_at": NSNull()
                             ] as [String: Any],
+                            "row_checksum": 7,
                             "server_version": "sv_1",
                         ] as [String: Any]
                     ],
@@ -204,7 +205,7 @@ final class SyncEngineTests: XCTestCase {
                     "scope_updates": ["add": [] as [Any], "remove": [] as [Any]],
                     "rebuild": [] as [Any],
                     "has_more": false,
-                    "checksums": [self.scopeID: "sum_2"]
+                    "checksums": [self.scopeID: "7"]
                 ]
                 return try self.mockResponse(json: json)
             }
@@ -242,9 +243,11 @@ final class SyncEngineTests: XCTestCase {
                             "updated_at": "2026-01-01T12:00:00.000Z",
                             "deleted_at": NSNull()
                         ] as [String: Any],
+                        "row_checksum": 7,
                         "server_version": "sv_1",
                     ]],
-                    finalCursor: "scope_cursor_1"
+                    finalCursor: "scope_cursor_1",
+                    checksum: "7"
                 ))
             } else if path.hasSuffix("/sync/pull") {
                 pullCallCount += 1
@@ -306,6 +309,7 @@ final class SyncEngineTests: XCTestCase {
                                     "updated_at": "2026-01-01T12:00:00.000Z",
                                     "deleted_at": NSNull()
                                 ] as [String: Any],
+                                "row_checksum": 7,
                                 "server_version": "sv_1",
                             ] as [String: Any]
                         ],
@@ -331,6 +335,7 @@ final class SyncEngineTests: XCTestCase {
                                     "updated_at": "2026-01-01T13:00:00.000Z",
                                     "deleted_at": NSNull()
                                 ] as [String: Any],
+                                "row_checksum": 9,
                                 "server_version": "sv_2",
                             ] as [String: Any]
                         ],
@@ -339,7 +344,7 @@ final class SyncEngineTests: XCTestCase {
                         "scope_updates": ["add": [] as [Any], "remove": [] as [Any]],
                         "rebuild": [] as [Any],
                         "has_more": false,
-                        "checksums": [self.scopeID: "sum_2"]
+                        "checksums": [self.scopeID: "14"]
                     ]
                     return try self.mockResponse(json: json)
                 }
@@ -708,7 +713,7 @@ final class SyncEngineTests: XCTestCase {
     private var connectJSON: [String: Any] {
         [
             "server_time": "2026-01-01T12:00:00.000Z",
-            "protocol_version": 1,
+            "protocol_version": 2,
             "scope_set_version": 1,
             "schema": [
                 "version": 1,
@@ -750,7 +755,7 @@ final class SyncEngineTests: XCTestCase {
         cursor: String? = nil,
         hasMore: Bool = false,
         finalCursor: String? = nil,
-        checksum: String = "sum_1"
+        checksum: String = "0"
     ) -> [String: Any] {
         [
             "scope": scopeID,
@@ -766,7 +771,8 @@ final class SyncEngineTests: XCTestCase {
         cursor: String,
         changes: [[String: Any]] = [],
         hasMore: Bool = false,
-        rebuild: [String] = []
+        rebuild: [String] = [],
+        checksum: String = "0"
     ) -> [String: Any] {
         [
             "changes": changes,
@@ -778,7 +784,7 @@ final class SyncEngineTests: XCTestCase {
             ] as [String: Any],
             "rebuild": rebuild,
             "has_more": hasMore,
-            "checksums": [scopeID: "sum_2"]
+            "checksums": [scopeID: checksum]
         ]
     }
 
