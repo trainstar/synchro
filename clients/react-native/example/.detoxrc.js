@@ -48,6 +48,8 @@ module.exports = {
       device: {
         avdName: 'Pixel_7_API_34',
       },
+      bootArgs: '-no-snapshot-load -no-snapshot-save',
+      gpuMode: 'host',
     },
   },
   configurations: {

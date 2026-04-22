@@ -34,6 +34,7 @@
 	test-rn-unit \
 	rn-seed-asset \
 	rn-ios-pods \
+	rn-android-emulator-reset \
 	test-rn-e2e-ios \
 	test-rn-e2e-android \
 	test-rn \
@@ -57,6 +58,7 @@ ANDROID_JAVA_HOME ?= $(shell \
 			echo "$$CANDIDATE"; \
 		fi; \
 	fi)
+RN_ANDROID_DETOX_CONFIG ?= android.emu.release
 
 PGRX_PG ?= pg18
 PGRX_PORT ?= 28818
@@ -127,8 +129,9 @@ help:
 	@echo "  test-kotlin           - Run Kotlin integration tests against the local adapter"
 	@echo "  test-rn-unit          - Run React Native Jest tests"
 	@echo "  test-rn-e2e-ios       - Run React Native Detox tests on iOS"
-	@echo "  test-rn-e2e-android   - Run React Native Detox tests on Android"
+	@echo "  test-rn-e2e-android   - Run React Native Detox tests on Android ($(RN_ANDROID_DETOX_CONFIG))"
 	@echo "  test-rn               - Run React Native Detox tests on both platforms"
+	@echo "  rn-android-emulator-reset - Stop any running Pixel_7_API_34 emulator before Detox"
 	@echo "  synchrod-pg-test-start   - Start the extension-backed test adapter"
 	@echo "  synchrod-pg-test-stop    - Stop the extension-backed test adapter"
 	@echo "  synchrod-pg-test-restart - Restart the extension-backed test adapter"
@@ -221,6 +224,22 @@ rn-ios-pods:
 			echo "React Native iOS pods already match Podfile.lock"; \
 		fi
 
+rn-android-emulator-reset:
+	@test -d "$(ANDROID_HOME)" || (echo "Android SDK not found at $(ANDROID_HOME). Set ANDROID_HOME to a valid SDK install."; exit 1)
+	@test -x "$(ANDROID_HOME)/platform-tools/adb" || (echo "adb not found at $(ANDROID_HOME)/platform-tools/adb"; exit 1)
+	@ADB="$(ANDROID_HOME)/platform-tools/adb"; \
+	SERIALS="$$($$ADB devices | awk '/^emulator-/{print $$1}')"; \
+	for serial in $$SERIALS; do \
+		AVD_NAME="$$($$ADB -s $$serial emu avd name 2>/dev/null | tr -d '\r' | head -n1)"; \
+		if [ "$$AVD_NAME" = "Pixel_7_API_34" ]; then \
+			echo "Stopping Android emulator $$serial ($$AVD_NAME)"; \
+			$$ADB -s $$serial emu kill >/dev/null 2>&1 || true; \
+		fi; \
+	done; \
+	if [ -n "$$SERIALS" ]; then \
+		sleep 5; \
+	fi
+
 test-rn-e2e-ios-build: rn-seed-asset rn-watchman-reset rn-ios-pods
 	cd clients/react-native/example && npx detox build --configuration ios.sim.debug
 
@@ -230,18 +249,18 @@ test-rn-e2e-ios-run: synchrod-pg-test-restart
 
 test-rn-e2e-ios: test-rn-e2e-ios-build test-rn-e2e-ios-run
 
-test-rn-e2e-android-build: release-kotlin-local rn-seed-asset rn-watchman-reset
+test-rn-e2e-android-build: release-kotlin-local rn-seed-asset rn-watchman-reset rn-android-emulator-reset
 	@test -n "$(ANDROID_JAVA_HOME)" || (echo "Android Detox requires JDK 17. Set ANDROID_JAVA_HOME to a JDK 17 install."; exit 1)
 	@test -d "$(ANDROID_HOME)" || (echo "Android SDK not found at $(ANDROID_HOME). Set ANDROID_HOME to a valid SDK install."; exit 1)
-	cd clients/react-native/example && ANDROID_HOME="$(ANDROID_HOME)" ANDROID_SDK_ROOT="$(ANDROID_HOME)" JAVA_HOME="$(ANDROID_JAVA_HOME)" PATH="$(ANDROID_JAVA_HOME)/bin:$$PATH" npx detox build --configuration android.emu.debug
+	cd clients/react-native/example && ANDROID_HOME="$(ANDROID_HOME)" ANDROID_SDK_ROOT="$(ANDROID_HOME)" JAVA_HOME="$(ANDROID_JAVA_HOME)" PATH="$(ANDROID_JAVA_HOME)/bin:$$PATH" npx detox build --configuration $(RN_ANDROID_DETOX_CONFIG)
 
-test-rn-e2e-android-run: synchrod-pg-test-restart
+test-rn-e2e-android-run: synchrod-pg-test-restart rn-android-emulator-reset
 	@test -n "$(ANDROID_JAVA_HOME)" || (echo "Android Detox requires JDK 17. Set ANDROID_JAVA_HOME to a JDK 17 install."; exit 1)
 	@test -d "$(ANDROID_HOME)" || (echo "Android SDK not found at $(ANDROID_HOME). Set ANDROID_HOME to a valid SDK install."; exit 1)
 	cd clients/react-native/example && \
 		ANDROID_HOME="$(ANDROID_HOME)" ANDROID_SDK_ROOT="$(ANDROID_HOME)" \
 		JAVA_HOME="$(ANDROID_JAVA_HOME)" PATH="$(ANDROID_JAVA_HOME)/bin:$$PATH" \
-		$(TEST_ENV) npx detox test --configuration android.emu.debug $(DETOX_ARGS)
+		$(TEST_ENV) npx detox test --configuration $(RN_ANDROID_DETOX_CONFIG) $(DETOX_ARGS)
 
 test-rn-e2e-android: test-rn-e2e-android-build test-rn-e2e-android-run
 
