@@ -182,10 +182,12 @@ For each scope:
 4. write rebuilt rows into local app tables
 5. write or update local scope provenance metadata
 6. when rebuild completes, prune stale provenance for that scope
-7. delete app rows only when they have zero remaining provenance
+7. remove local app rows only when they have zero remaining provenance
 8. install final authoritative cursor and checksum for that scope
 9. clear rebuild-in-progress marker
 10. continue with next requested scope or return to `ready`
+
+Rebuild cleanup is provenance cleanup. It must not invent a new local tombstone. If a row is absent from the rebuilt scope set and no other local provenance edge remains, the client removes the local row.
 
 ### Hybrid Provenance Model
 

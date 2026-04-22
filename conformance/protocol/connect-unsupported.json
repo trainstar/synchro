@@ -10,7 +10,7 @@
   ],
   "input": {
     "request": {
-      "client_id": "ios-device-legacy",
+      "client_id": "ios-device-unsupported",
       "platform": "ios",
       "app_version": "0.9.0",
       "protocol_version": 1,

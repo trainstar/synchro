@@ -97,7 +97,7 @@ Current release behavior:
 - the generator always builds the synced-table SQLite schema from `synchro_schema_manifest()`
 - it exports only server-declared portable scopes, never auth-scoped data
 - it installs the same local CDC triggers the native SDKs use
-- it writes portable scope continuation state into `_synchro_scopes`, `_synchro_scope_rows`, and checkpoint compatibility tables
+- it writes portable scope continuation state into `_synchro_scopes`, `_synchro_scope_rows`, and `_synchro_bucket_checkpoints`
 - it writes seed metadata such as `schema_version`, `schema_hash`, `local_schema`, `scope_set_version`, `known_buckets`, and `snapshot_complete`
 - if no portable scopes are configured, the output is schema-only
 - it does not create a separate sync mode, clients still log in and reconcile with the server on first `connect`

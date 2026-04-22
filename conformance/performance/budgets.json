@@ -2,7 +2,7 @@
   "fixture_version": 1,
   "name": "phase0_hot_path_budgets",
   "kind": "performance.budgets",
-  "summary": "Initial non-negotiable request and workload budgets for the vNext architecture.",
+  "summary": "Initial non-negotiable request and workload budgets for the current architecture.",
   "spec_refs": [
     "00-principles: Performance Principles",
     "06-conformance-plan: Round-Trip Budget"

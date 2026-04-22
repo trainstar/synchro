@@ -90,6 +90,20 @@ Read-your-own-write behavior must not produce double-apply of the same logical m
 
 When clients apply server-originated state, local change capture must not re-enqueue it as new client intent.
 
+### Accepted Writes Advance Canonical Row Version
+
+When the server accepts a row mutation on a table with `updated_at`, it must advance the authoritative row version stored in that row.
+
+For accepted `insert` and `update` mutations, the persisted row version must come from `client_version`, not from a client-supplied `updated_at` column and not from leaving the prior row version unchanged.
+
+### No Synthetic Cleanup Tombstones
+
+SDK-owned cleanup for scope loss, rebuild pruning, or equivalent local provenance maintenance must not synthesize a new local delete tombstone.
+
+If the server sends an authoritative tombstone row, clients may preserve that canonical row state during incremental apply.
+
+If cleanup is only removing stale local materialization with no authoritative tombstone from the server, the client removes the row locally instead of creating a new delete mutation.
+
 ## Scope Invariants
 
 ### Deterministic Scope Membership
@@ -135,7 +149,7 @@ A rebuild is complete only when:
 
 - all rebuild pages for the scope are applied
 - stale provenance for that scope is pruned
-- rows with zero remaining provenance are removed
+- rows with zero remaining provenance are removed from local materialization
 - the final authoritative cursor is installed
 
 ### Rebuild Does Not Erase Valid Overlapping Data

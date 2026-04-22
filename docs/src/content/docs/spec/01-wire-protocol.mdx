@@ -99,6 +99,7 @@ Uploads a batch of client mutations for synced tables.
 Responsibilities:
 
 - accepts row-level synced CRUD mutations
+- carries both `client_version` and optional `base_version` for conflict resolution
 - applies policy and validation
 - returns per-mutation outcomes
 - returns canonical server rows for accepted mutations when appropriate
@@ -225,6 +226,7 @@ Required semantics:
       "table": "documents",
       "op": "insert",
       "pk": { "id": "w_1" },
+      "client_version": "2026-03-20T18:21:54Z",
       "columns": {
         "user_id": "u_123",
         "name": "Lower Body",
@@ -236,6 +238,7 @@ Required semantics:
       "table": "documents",
       "op": "update",
       "pk": { "id": "w_2" },
+      "client_version": "2026-03-20T18:22:00Z",
       "base_version": "sv_902",
       "columns": {
         "name": "Upper Body"
@@ -251,6 +254,14 @@ Required semantics:
   ]
 }
 ```
+
+`client_version` carries the client-side write timestamp for the mutation.
+`base_version` carries the authoritative server row version the client branched from, when known.
+For `insert`, `update`, and `upsert`, `client_version` is required.
+
+For accepted `insert` and `update` mutations on tables with an `updated_at` column, the server persists the canonical row version from `client_version`.
+Clients must not treat a row payload's `updated_at` field as writable input.
+The authoritative row version comes from protocol version fields, not from client-supplied timestamp columns.
 
 ### Push Response
 
@@ -360,6 +371,12 @@ Required semantics:
   }
 }
 ```
+
+### Delete Change Semantics
+
+- A delete change may omit `row` when the server only needs the client to remove local materialization for that scope.
+- A delete change may include `row` when the server is returning an authoritative tombstone. In that case `row.deleted_at` must be non-null and canonical.
+- Clients must not synthesize a new local tombstone when `row` is absent. Scope cleanup without an authoritative tombstone is local removal, not a new local delete mutation.
 
 `scope_set_version` in pull responses is authoritative after any returned `scope_updates`. Clients must persist it atomically with the applied scope delta.
 

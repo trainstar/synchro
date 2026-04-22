@@ -22,6 +22,12 @@ cover.out
 
 # Seed database output
 seed.db
+*.db-shm
+*.db-wal
+*.db-journal
+*.sqlite-shm
+*.sqlite-wal
+*.sqlite-journal
 clients/react-native/example/android/app/src/main/assets/seed.db
 !clients/react-native/example/seed.db
 
@@ -39,6 +45,9 @@ clients/react-native/example/artifacts/
 
 # Local consumer artifacts
 dist/
+plans/
+docs/.vscode/
+.playwright-mcp/
 
 # Docs build output
 docs/node_modules/

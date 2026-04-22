@@ -2,7 +2,7 @@
 
 ## Purpose
 
-This directory holds the shared executable contract corpus for Synchro vNext.
+This directory holds the shared executable contract corpus for Synchro.
 
 The goal is to make the spec testable across:
 
@@ -15,7 +15,7 @@ The goal is to make the spec testable across:
 
 ## Fixture Format
 
-Phase 0 uses JSON fixtures with `fixture_version = 1`.
+The corpus uses JSON fixtures with `fixture_version = 1`.
 
 This is intentionally simple and portable.
 
@@ -30,7 +30,7 @@ If the corpus outgrows plain JSON later, the format can evolve deliberately.
 - `traces/`: client and server state-machine traces
 - `performance/`: budgets and measurement scenario definitions
 
-## Phase 0 Seed Corpus
+## Current Seed Corpus
 
 The initial fixture set covers the highest-risk flows:
 
@@ -45,4 +45,4 @@ The initial fixture set covers the highest-risk flows:
 
 ## Working Rule
 
-If implementation behavior disagrees with these fixtures and the vNext docs, implementation is wrong unless the spec is deliberately changed.
+If implementation behavior disagrees with these fixtures and the current spec, implementation is wrong unless the spec is deliberately changed.

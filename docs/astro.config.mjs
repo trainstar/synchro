@@ -59,7 +59,6 @@ export default defineConfig({
 						{ label: 'Invariants', slug: 'spec/04-invariants' },
 						{ label: 'Schema Evolution', slug: 'spec/05-schema-evolution' },
 						{ label: 'Conformance Plan', slug: 'spec/06-conformance-plan' },
-						{ label: 'Audit Sequence', slug: 'spec/07-audit-sequence' },
 					],
 				},
 			],
