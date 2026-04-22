@@ -698,7 +698,7 @@ class SynchroModule(reactContext: ReactApplicationContext) :
         pendingAuthContinuations.clear()
     }
 
-    private fun rejectedMutationsJson(results: List<VNextRejectedMutation>): String {
+    private fun rejectedMutationsJson(results: List<RejectedMutation>): String {
         return JSONArray(results.map { result ->
             JSONObject().apply {
                 put("mutationID", result.mutationID)
@@ -713,20 +713,20 @@ class SynchroModule(reactContext: ReactApplicationContext) :
         }).toString()
     }
 
-    private fun mutationStatusWireValue(status: VNextMutationStatus): String = when (status) {
-        VNextMutationStatus.APPLIED -> "applied"
-        VNextMutationStatus.CONFLICT -> "conflict"
-        VNextMutationStatus.REJECTED_TERMINAL -> "rejected_terminal"
-        VNextMutationStatus.REJECTED_RETRYABLE -> "rejected_retryable"
+    private fun mutationStatusWireValue(status: MutationStatus): String = when (status) {
+        MutationStatus.APPLIED -> "applied"
+        MutationStatus.CONFLICT -> "conflict"
+        MutationStatus.REJECTED_TERMINAL -> "rejected_terminal"
+        MutationStatus.REJECTED_RETRYABLE -> "rejected_retryable"
     }
 
-    private fun mutationRejectionCodeWireValue(code: VNextMutationRejectionCode): String = when (code) {
-        VNextMutationRejectionCode.VERSION_CONFLICT -> "version_conflict"
-        VNextMutationRejectionCode.POLICY_REJECTED -> "policy_rejected"
-        VNextMutationRejectionCode.VALIDATION_FAILED -> "validation_failed"
-        VNextMutationRejectionCode.TABLE_NOT_SYNCED -> "table_not_synced"
-        VNextMutationRejectionCode.UNKNOWN_SCOPE_EFFECT -> "unknown_scope_effect"
-        VNextMutationRejectionCode.SERVER_RETRYABLE -> "server_retryable"
+    private fun mutationRejectionCodeWireValue(code: MutationRejectionCode): String = when (code) {
+        MutationRejectionCode.VERSION_CONFLICT -> "version_conflict"
+        MutationRejectionCode.POLICY_REJECTED -> "policy_rejected"
+        MutationRejectionCode.VALIDATION_FAILED -> "validation_failed"
+        MutationRejectionCode.TABLE_NOT_SYNCED -> "table_not_synced"
+        MutationRejectionCode.UNKNOWN_SCOPE_EFFECT -> "unknown_scope_effect"
+        MutationRejectionCode.SERVER_RETRYABLE -> "server_retryable"
     }
 
     private fun jsonObjectToJsonObject(value: JsonObject): JSONObject {

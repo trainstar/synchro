@@ -82,7 +82,6 @@ fn calculate_safe_seq(client: &SpiClient<'_>) -> i64 {
         };
     }
 
-    // Per-bucket checkpoints (primary source).
     let bucket_min: i64 = match client.select(
         "SELECT COALESCE(MIN(cp.checkpoint), 0) AS min_cp \
          FROM sync_client_checkpoints cp \
@@ -94,31 +93,7 @@ fn calculate_safe_seq(client: &SpiClient<'_>) -> i64 {
         Ok(tup) => tup.first().get_one::<i64>().ok().flatten().unwrap_or(0),
         Err(e) => pgrx::error!("querying bucket checkpoints for safe seq: {}", e),
     };
-
-    // Legacy single checkpoint (fallback for clients without per-bucket CPs).
-    let legacy_min: i64 = match client.select(
-        "SELECT COALESCE(MIN(c.last_pull_seq), 0) AS min_cp \
-         FROM sync_clients c \
-         WHERE c.is_active = true \
-         AND c.last_pull_seq IS NOT NULL \
-         AND NOT EXISTS ( \
-             SELECT 1 FROM sync_client_checkpoints cp \
-             WHERE cp.user_id = c.user_id AND cp.client_id = c.client_id \
-         )",
-        None,
-        &[],
-    ) {
-        Ok(tup) => tup.first().get_one::<i64>().ok().flatten().unwrap_or(0),
-        Err(e) => pgrx::error!("querying legacy checkpoints for safe seq: {}", e),
-    };
-
-    // Take the minimum of both (0 means that source has no data).
-    match (bucket_min, legacy_min) {
-        (0, 0) => 0,
-        (0, l) => l,
-        (b, 0) => b,
-        (b, l) => b.min(l),
-    }
+    bucket_min
 }
 
 fn batch_delete_changelog(client: &mut SpiClient<'_>, safe_seq: i64, batch_size: i32) -> i64 {

@@ -4,305 +4,19 @@ use synchro_core::change::ChangeOperation;
 use synchro_core::checksum::compute_record_checksum;
 use synchro_core::contract::{
     ChangeRecord, ChecksumMode, ProtocolErrorCode, PullRequest, PullResponse, ScopeCursorRef,
-    VNextOperation,
+    Operation,
 };
 use synchro_core::dedup::{
     deduplicate_entries, ChangelogEntry as DedupEntry, RecordRef as DedupRecordRef,
 };
 use synchro_core::limits::clamp_pull_limit;
 
-use crate::client::{
-    build_scope_delta, protocol_error_response, validate_schema, validate_schema_vnext,
-};
+use crate::client::{build_scope_delta, protocol_error_response, validate_schema_ref};
 use crate::registry::TableRegistration;
 
-/// Pull changes for a client.
-///
-/// Returns JSONB matching Go PullResponse: changes, deletes, checkpoint,
-/// bucket_checkpoints, has_more, bucket_checksums, schema_version, schema_hash.
-///
-/// Supports two modes:
-///   - Legacy (single checkpoint): when p_bucket_checkpoints is NULL
-///   - Per-bucket checkpoints: when p_bucket_checkpoints is provided
-#[allow(clippy::too_many_arguments)]
-#[pg_extern]
-fn synchro_pull(
-    p_user_id: &str,
-    p_client_id: &str,
-    p_checkpoint: default!(i64, "0"),
-    p_bucket_checkpoints: default!(Option<pgrx::JsonB>, "NULL"),
-    p_limit: default!(i32, "100"),
-    p_tables: default!(Option<Vec<String>>, "NULL"),
-    p_known_buckets: default!(Option<Vec<String>>, "NULL"),
-    p_schema_version: default!(i64, "0"),
-    p_schema_hash: default!(&str, "''"),
-) -> pgrx::JsonB {
-    // Validate schema if provided.
-    if p_schema_version > 0 || !p_schema_hash.is_empty() {
-        if let Err(err_json) = validate_schema(p_schema_version, p_schema_hash) {
-            return err_json;
-        }
-    }
-
-    let limit = clamp_pull_limit(p_limit);
-
-    // Determine pull mode.
-    let per_bucket = p_bucket_checkpoints.is_some();
-    let bucket_cps: std::collections::HashMap<String, i64> = match &p_bucket_checkpoints {
-        Some(jsonb) => serde_json::from_value(jsonb.0.clone())
-            .unwrap_or_else(|e| pgrx::error!("invalid bucket_checkpoints JSON: {}", e)),
-        None => std::collections::HashMap::new(),
-    };
-
-    // All reads and writes in a single SPI transaction to avoid TOCTOU races.
-    Spi::connect_mut(|client| {
-        // Set RLS context.
-        let _ = client.update(
-            "SELECT set_config('app.user_id', $1, true)",
-            None,
-            &[p_user_id.into()],
-        );
-
-        // Load client bucket subscriptions.
-        let bucket_subs = match load_client_buckets(client, p_user_id, p_client_id) {
-            Ok(subs) => subs,
-            Err(err_json) => return err_json,
-        };
-
-        // Compare known_buckets against server bucket subscriptions.
-        let bucket_updates: Option<serde_json::Value> =
-            p_known_buckets.as_ref().and_then(|known| {
-                let known_set: std::collections::HashSet<&str> =
-                    known.iter().map(|s| s.as_str()).collect();
-                let server_set: std::collections::HashSet<&str> =
-                    bucket_subs.iter().map(|s| s.as_str()).collect();
-
-                let added: Vec<&str> = server_set.difference(&known_set).copied().collect();
-                let removed: Vec<&str> = known_set.difference(&server_set).copied().collect();
-
-                if !added.is_empty() || !removed.is_empty() {
-                    Some(serde_json::json!({
-                        "added": added,
-                        "removed": removed,
-                    }))
-                } else {
-                    None
-                }
-            });
-
-        // Get schema info.
-        let (schema_version, schema_hash) = get_latest_schema(client);
-
-        // Detect stale buckets (only in per-bucket checkpoint mode).
-        // In legacy mode bucket_cps is empty, so stale detection is not applicable.
-        let stale_buckets = if per_bucket {
-            detect_stale_buckets(client, &bucket_subs, &bucket_cps)
-        } else {
-            vec![]
-        };
-
-        // If stale buckets detected, return immediately with rebuild instruction.
-        // Do NOT query changelog or advance checkpoints (Go behavior).
-        if !stale_buckets.is_empty() {
-            let mut resp = serde_json::json!({
-                "changes": [],
-                "deletes": [],
-                "checkpoint": p_checkpoint,
-                "has_more": false,
-                "rebuild_buckets": stale_buckets,
-                "schema_version": schema_version,
-                "schema_hash": schema_hash,
-            });
-            if per_bucket {
-                resp["bucket_checkpoints"] = serde_json::json!(bucket_cps);
-            }
-            if let Some(ref updates) = bucket_updates {
-                resp["bucket_updates"] = updates.clone();
-            }
-            return pgrx::JsonB(resp);
-        }
-
-        // Load registry for hydration.
-        let registry = load_registry_inner(client);
-
-        // Determine effective checkpoint.
-        let effective_cp = if per_bucket {
-            bucket_subs
-                .iter()
-                .map(|b| bucket_cps.get(b).copied().unwrap_or(0))
-                .min()
-                .unwrap_or(0)
-        } else {
-            p_checkpoint
-        };
-
-        // Query changelog entries.
-        let tables_param: Option<Vec<String>> = p_tables;
-        let raw_entries =
-            query_changelog(client, &bucket_subs, effective_cp, limit + 1, &tables_param);
-
-        // Filter per-bucket (only entries beyond each bucket's checkpoint).
-        let filtered: Vec<RawChangelogEntry> = if per_bucket {
-            raw_entries
-                .into_iter()
-                .filter(|e| {
-                    let bcp = bucket_cps.get(&e.bucket_id).copied().unwrap_or(0);
-                    e.seq > bcp
-                })
-                .collect()
-        } else {
-            raw_entries
-        };
-
-        // Detect has_more.
-        let has_more = filtered.len() > limit as usize;
-        let entries: Vec<RawChangelogEntry> = if has_more {
-            filtered[..limit as usize].to_vec()
-        } else {
-            filtered
-        };
-
-        if entries.is_empty() {
-            let checkpoint_val = if per_bucket {
-                effective_cp
-            } else {
-                p_checkpoint
-            };
-            let mut resp = serde_json::json!({
-                "changes": [],
-                "deletes": [],
-                "checkpoint": checkpoint_val,
-                "has_more": false,
-                "schema_version": schema_version,
-                "schema_hash": schema_hash,
-            });
-            if per_bucket {
-                resp["bucket_checkpoints"] = serde_json::json!(bucket_cps);
-            }
-            resp["bucket_checksums"] =
-                serde_json::json!(compute_bucket_checksums(client, &bucket_subs));
-            if let Some(ref updates) = bucket_updates {
-                resp["bucket_updates"] = updates.clone();
-            }
-            return pgrx::JsonB(resp);
-        }
-
-        // Deduplicate: keep latest entry per (table_name, record_id).
-        let dedup_input: Vec<DedupEntry> = entries
-            .iter()
-            .map(|e| DedupEntry {
-                seq: e.seq,
-                bucket_id: e.bucket_id.clone(),
-                table_name: e.table_name.clone(),
-                record_id: e.record_id.clone(),
-                operation: e.operation,
-            })
-            .collect();
-        let deduped = deduplicate_entries(&dedup_input);
-
-        // Separate deletes from changes, group changes by table.
-        let mut deletes: Vec<serde_json::Value> = Vec::new();
-        let mut changes_by_table: std::collections::HashMap<String, Vec<(String, String)>> =
-            std::collections::HashMap::new();
-
-        for r in &deduped {
-            if r.operation == ChangeOperation::Delete {
-                deletes.push(serde_json::json!({
-                    "id": r.record_id,
-                    "table_name": r.table_name,
-                }));
-            } else {
-                changes_by_table
-                    .entry(r.table_name.clone())
-                    .or_default()
-                    .push((r.record_id.clone(), r.bucket_id.clone()));
-            }
-        }
-
-        // Hydrate records per table.
-        let mut changes: Vec<serde_json::Value> = Vec::new();
-        for (table_name, id_bucket_pairs) in &changes_by_table {
-            let ids: Vec<&str> = id_bucket_pairs.iter().map(|(id, _)| id.as_str()).collect();
-            let bucket_map: std::collections::HashMap<&str, &str> = id_bucket_pairs
-                .iter()
-                .map(|(id, b)| (id.as_str(), b.as_str()))
-                .collect();
-
-            let hydrated = hydrate_records(client, table_name, &ids, &registry);
-            for mut record in hydrated {
-                if let Some(id) = record.get("id").and_then(|v| v.as_str()).map(String::from) {
-                    if let Some(bid) = bucket_map.get(id.as_str()) {
-                        record
-                            .as_object_mut()
-                            .unwrap()
-                            .insert("bucket_id".into(), serde_json::json!(bid));
-                    }
-                }
-                changes.push(record);
-            }
-        }
-
-        // Compute new checkpoint.
-        let new_checkpoint = entries.last().map(|e| e.seq).unwrap_or(p_checkpoint);
-
-        // Compute new per-bucket checkpoints.
-        let mut new_bucket_cps = bucket_cps.clone();
-        if per_bucket {
-            for e in &entries {
-                let current = new_bucket_cps.get(&e.bucket_id).copied().unwrap_or(0);
-                if e.seq > current {
-                    new_bucket_cps.insert(e.bucket_id.clone(), e.seq);
-                }
-            }
-        }
-
-        // Compute bucket checksums (final page only).
-        let bucket_checksums = if !has_more {
-            Some(compute_bucket_checksums(client, &bucket_subs))
-        } else {
-            None
-        };
-
-        // Advance checkpoints.
-        advance_checkpoints(
-            client,
-            p_user_id,
-            p_client_id,
-            new_checkpoint,
-            if per_bucket {
-                Some(&new_bucket_cps)
-            } else {
-                None
-            },
-        );
-
-        // Build response.
-        let mut response = serde_json::json!({
-            "changes": changes,
-            "deletes": deletes,
-            "checkpoint": new_checkpoint,
-            "has_more": has_more,
-            "schema_version": schema_version,
-            "schema_hash": schema_hash,
-        });
-
-        if per_bucket {
-            response["bucket_checkpoints"] = serde_json::json!(new_bucket_cps);
-        }
-        if let Some(checksums) = bucket_checksums {
-            response["bucket_checksums"] = serde_json::json!(checksums);
-        }
-        if let Some(ref updates) = bucket_updates {
-            response["bucket_updates"] = updates.clone();
-        }
-
-        pgrx::JsonB(response)
-    })
-}
-
-/// Pull vNext scoped changes for a client using per-scope cursors.
-#[pg_extern]
-fn synchro_pull_vnext(p_user_id: &str, p_request: pgrx::JsonB) -> pgrx::JsonB {
+/// Pull scoped changes for a client using per-scope cursors.
+#[pg_extern(name = "synchro_pull")]
+fn synchro_pull_contract(p_user_id: &str, p_request: pgrx::JsonB) -> pgrx::JsonB {
     let request: PullRequest = match serde_json::from_value(p_request.0) {
         Ok(request) => request,
         Err(err) => {
@@ -314,7 +28,7 @@ fn synchro_pull_vnext(p_user_id: &str, p_request: pgrx::JsonB) -> pgrx::JsonB {
         }
     };
 
-    if let Err(err_json) = validate_schema_vnext(&request.schema) {
+    if let Err(err_json) = validate_schema_ref(&request.schema) {
         return err_json;
     }
 
@@ -364,7 +78,7 @@ fn synchro_pull_vnext(p_user_id: &str, p_request: pgrx::JsonB) -> pgrx::JsonB {
             };
 
             if let Err(err) = response.validate_for_request(&request) {
-                pgrx::error!("invalid vNext pull response: {}", err);
+                pgrx::error!("invalid pull response: {}", err);
             }
 
             return pgrx::JsonB(serde_json::to_value(response).unwrap());
@@ -387,7 +101,7 @@ fn synchro_pull_vnext(p_user_id: &str, p_request: pgrx::JsonB) -> pgrx::JsonB {
             };
 
             if let Err(err) = response.validate_for_request(&request) {
-                pgrx::error!("invalid vNext pull response: {}", err);
+                pgrx::error!("invalid pull response: {}", err);
             }
 
             return pgrx::JsonB(serde_json::to_value(response).unwrap());
@@ -426,20 +140,20 @@ fn synchro_pull_vnext(p_user_id: &str, p_request: pgrx::JsonB) -> pgrx::JsonB {
             })
             .collect();
         let deduped = deduplicate_entries(&dedup_input);
-        let hydrated = hydrate_vnext_records(client, &registry, &deduped);
+        let hydrated = hydrate_contract_records(client, &registry, &deduped);
 
         let mut changes = Vec::new();
         let mut scope_cursors = std::collections::BTreeMap::new();
         for entry in &deduped {
             scope_cursors.insert(entry.bucket_id.clone(), entry.seq.to_string());
-            let pk = vnext_pk_value(&registry, &entry.table_name, &entry.record_id);
+            let pk = contract_pk_value(&registry, &entry.table_name, &entry.record_id);
             let hydrated_record =
                 hydrated.get(&(entry.table_name.clone(), entry.record_id.clone()));
             match entry.operation {
                 ChangeOperation::Delete => changes.push(ChangeRecord {
                     scope: entry.bucket_id.clone(),
                     table: entry.table_name.clone(),
-                    op: VNextOperation::Delete,
+                    op: Operation::Delete,
                     pk,
                     row: hydrated_record.map(|record| record["data"].clone()),
                     server_version: hydrated_record
@@ -451,7 +165,7 @@ fn synchro_pull_vnext(p_user_id: &str, p_request: pgrx::JsonB) -> pgrx::JsonB {
                         changes.push(ChangeRecord {
                             scope: entry.bucket_id.clone(),
                             table: entry.table_name.clone(),
-                            op: VNextOperation::Upsert,
+                            op: Operation::Upsert,
                             pk,
                             row: Some(record["data"].clone()),
                             server_version: record_server_version(record, entry.seq),
@@ -477,7 +191,7 @@ fn synchro_pull_vnext(p_user_id: &str, p_request: pgrx::JsonB) -> pgrx::JsonB {
         };
 
         if let Err(err) = response.validate_for_request(&request) {
-            pgrx::error!("invalid vNext pull response: {}", err);
+            pgrx::error!("invalid pull response: {}", err);
         }
 
         pgrx::JsonB(serde_json::to_value(response).unwrap())
@@ -519,8 +233,10 @@ pub(crate) fn load_client_buckets(
             return Ok(s);
         }
     }
-    Err(pgrx::JsonB(
-        serde_json::json!({"error": "client_not_found"}),
+    Err(protocol_error_response(
+        ProtocolErrorCode::InvalidRequest,
+        "client is not registered",
+        false,
     ))
 }
 
@@ -729,7 +445,7 @@ fn query_changelog(
     entries
 }
 
-fn hydrate_vnext_records(
+fn hydrate_contract_records(
     client: &SpiClient<'_>,
     registry: &[TableRegistration],
     entries: &[DedupRecordRef],
@@ -929,7 +645,7 @@ pub(crate) fn compute_bucket_checksums(
     checksums
 }
 
-pub(crate) fn vnext_pk_value(
+pub(crate) fn contract_pk_value(
     registry: &[TableRegistration],
     table_name: &str,
     record_id: &str,
@@ -954,55 +670,6 @@ pub(crate) fn record_server_version(record: &serde_json::Value, fallback_seq: i6
                 .map(|value| value.to_string())
         })
         .unwrap_or_else(|| fallback_seq.to_string())
-}
-
-fn advance_checkpoints(
-    client: &mut SpiClient<'_>,
-    user_id: &str,
-    client_id: &str,
-    checkpoint: i64,
-    bucket_checkpoints: Option<&std::collections::HashMap<String, i64>>,
-) {
-    // Advance legacy checkpoint (monotonic).
-    let _ = client.update(
-        "UPDATE sync_clients \
-         SET last_pull_seq = $3, last_pull_at = now(), last_sync_at = now() \
-         WHERE user_id = $1 AND client_id = $2 \
-         AND (last_pull_seq IS NULL OR last_pull_seq < $3)",
-        None,
-        &[user_id.into(), client_id.into(), checkpoint.into()],
-    );
-
-    // Sync all existing per-bucket checkpoints that are behind the legacy CP.
-    // Matches Go AdvanceCheckpoint which propagates to sync_client_checkpoints.
-    let _ = client.update(
-        "UPDATE sync_client_checkpoints \
-         SET checkpoint = $3, updated_at = now() \
-         WHERE user_id = $1 AND client_id = $2 AND checkpoint < $3",
-        None,
-        &[user_id.into(), client_id.into(), checkpoint.into()],
-    );
-
-    // Advance individual per-bucket checkpoints.
-    if let Some(cps) = bucket_checkpoints {
-        for (bucket_id, &seq) in cps {
-            let _ = client.update(
-                "INSERT INTO sync_client_checkpoints \
-                 (user_id, client_id, bucket_id, checkpoint) \
-                 VALUES ($1, $2, $3, $4) \
-                 ON CONFLICT (user_id, client_id, bucket_id) DO UPDATE \
-                 SET checkpoint = EXCLUDED.checkpoint, updated_at = now() \
-                 WHERE sync_client_checkpoints.checkpoint < EXCLUDED.checkpoint",
-                None,
-                &[
-                    user_id.into(),
-                    client_id.into(),
-                    bucket_id.as_str().into(),
-                    seq.into(),
-                ],
-            );
-        }
-    }
 }
 
 /// Double-quote a SQL identifier, escaping internal double quotes.

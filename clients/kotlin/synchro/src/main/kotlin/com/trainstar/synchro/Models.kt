@@ -8,57 +8,6 @@ import kotlinx.serialization.encoding.Decoder
 import kotlinx.serialization.encoding.Encoder
 import kotlinx.serialization.json.*
 
-// MARK: - Register
-
-@Serializable
-data class RegisterRequest(
-    @SerialName("client_id") val clientID: String,
-    @SerialName("client_name") val clientName: String? = null,
-    val platform: String,
-    @SerialName("app_version") val appVersion: String,
-    @SerialName("schema_version") val schemaVersion: Long,
-    @SerialName("schema_hash") val schemaHash: String
-)
-
-@Serializable
-data class RegisterResponse(
-    val id: String,
-    @SerialName("server_time") val serverTime: String,
-    @SerialName("last_sync_at") val lastSyncAt: String? = null,
-    val checkpoint: Long,
-    @SerialName("bucket_checkpoints") val bucketCheckpoints: Map<String, Long>? = null,
-    @SerialName("schema_version") val schemaVersion: Long,
-    @SerialName("schema_hash") val schemaHash: String
-)
-
-// MARK: - Pull
-
-@Serializable
-data class PullRequest(
-    @SerialName("client_id") val clientID: String,
-    val checkpoint: Long,
-    val tables: List<String>? = null,
-    val limit: Int? = null,
-    @SerialName("known_buckets") val knownBuckets: List<String>? = null,
-    @SerialName("bucket_checkpoints") val bucketCheckpoints: Map<String, Long>? = null,
-    @SerialName("schema_version") val schemaVersion: Long,
-    @SerialName("schema_hash") val schemaHash: String
-)
-
-@Serializable
-data class PullResponse(
-    val changes: List<Record>,
-    val deletes: List<DeleteEntry>,
-    val checkpoint: Long,
-    @SerialName("has_more") val hasMore: Boolean,
-    @SerialName("bucket_updates") val bucketUpdates: BucketUpdate? = null,
-    @SerialName("bucket_checkpoints") val bucketCheckpoints: Map<String, Long>? = null,
-    @SerialName("rebuild_buckets") val rebuildBuckets: List<String>? = null,
-    @SerialName("bucket_checksums") val bucketChecksums: Map<String, Int>? = null,
-    @SerialName("schema_version") val schemaVersion: Long,
-    @SerialName("schema_hash") val schemaHash: String
-)
-
 @Serializable
 data class Record(
     val id: String,
@@ -85,14 +34,6 @@ data class BucketUpdate(
 // MARK: - Push
 
 @Serializable
-data class PushRequest(
-    @SerialName("client_id") val clientID: String,
-    val changes: List<PushRecord>,
-    @SerialName("schema_version") val schemaVersion: Long,
-    @SerialName("schema_hash") val schemaHash: String
-)
-
-@Serializable
 data class PushRecord(
     val id: String,
     @SerialName("table_name") val tableName: String,
@@ -102,73 +43,6 @@ data class PushRecord(
     @SerialName("base_updated_at") val baseUpdatedAt: String? = null
 )
 
-@Serializable
-data class PushResponse(
-    val accepted: List<PushResult>,
-    val rejected: List<PushResult>,
-    val checkpoint: Long,
-    @SerialName("server_time") val serverTime: String,
-    @SerialName("schema_version") val schemaVersion: Long,
-    @SerialName("schema_hash") val schemaHash: String
-)
-
-@Serializable
-data class PushResult(
-    val id: String,
-    @SerialName("table_name") val tableName: String,
-    val operation: String,
-    val status: String,
-    @SerialName("reason_code") val reasonCode: String? = null,
-    val message: String? = null,
-    @SerialName("server_version") val serverVersion: Record? = null,
-    @SerialName("server_updated_at") val serverUpdatedAt: String? = null,
-    @SerialName("server_deleted_at") val serverDeletedAt: String? = null
-) {
-    constructor(
-        id: String,
-        tableName: String,
-        operation: String,
-        status: String,
-        reason: String? = null,
-        serverVersion: Record? = null,
-        serverUpdatedAt: String? = null,
-        serverDeletedAt: String? = null
-    ) : this(
-        id = id,
-        tableName = tableName,
-        operation = operation,
-        status = status,
-        reasonCode = null,
-        message = reason,
-        serverVersion = serverVersion,
-        serverUpdatedAt = serverUpdatedAt,
-        serverDeletedAt = serverDeletedAt
-    )
-}
-
-// MARK: - Rebuild
-
-@Serializable
-data class RebuildRequest(
-    @SerialName("client_id") val clientID: String,
-    @SerialName("bucket_id") val bucketId: String,
-    val cursor: String? = null,
-    val limit: Int? = null,
-    @SerialName("schema_version") val schemaVersion: Long,
-    @SerialName("schema_hash") val schemaHash: String
-)
-
-@Serializable
-data class RebuildResponse(
-    val records: List<Record>,
-    val cursor: String? = null,
-    val checkpoint: Long,
-    @SerialName("has_more") val hasMore: Boolean,
-    @SerialName("bucket_checksum") val bucketChecksum: Int? = null,
-    @SerialName("schema_version") val schemaVersion: Long,
-    @SerialName("schema_hash") val schemaHash: String
-)
-
 // MARK: - Schema
 
 @Serializable
@@ -176,38 +50,10 @@ data class SchemaResponse(
     @SerialName("schema_version") val schemaVersion: Long,
     @SerialName("schema_hash") val schemaHash: String,
     @SerialName("server_time") val serverTime: String,
-    val tables: List<SchemaTable>
-)
-
-@Serializable
-data class SchemaTable(
-    @SerialName("table_name") val tableName: String,
-    @SerialName("push_policy") val pushPolicy: String,
-    @SerialName("parent_table") val parentTable: String? = null,
-    @SerialName("parent_fk_col") val parentFKCol: String? = null,
-    val dependencies: List<String>? = null,
-    @SerialName("updated_at_column") val updatedAtColumn: String,
-    @SerialName("deleted_at_column") val deletedAtColumn: String,
-    @SerialName("primary_key") val primaryKey: List<String>,
-    @SerialName("bucket_by_column") val bucketByColumn: String? = null,
-    @SerialName("bucket_prefix") val bucketPrefix: String? = null,
-    @SerialName("global_when_bucket_null") val globalWhenBucketNull: Boolean? = null,
-    @SerialName("allow_global_read") val allowGlobalRead: Boolean? = null,
-    @SerialName("bucket_function") val bucketFunction: String? = null,
-    val columns: List<SchemaColumn>
-)
-
-@Serializable
-data class SchemaColumn(
-    val name: String,
-    @SerialName("db_type") val dbType: String,
-    @SerialName("logical_type") val logicalType: String,
-    val nullable: Boolean,
-    @SerialName("default_sql") val defaultSQL: String? = null,
-    @SerialName("default_kind") val defaultKind: String = "none",
-    @SerialName("sqlite_default_sql") val sqliteDefaultSQL: String? = null,
-    @SerialName("is_primary_key") val isPrimaryKey: Boolean
-)
+    val manifest: SchemaManifest
+) {
+    fun localTables(): List<LocalSchemaTable> = manifest.localTables()
+}
 
 // MARK: - Table Meta
 

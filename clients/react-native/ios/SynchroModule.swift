@@ -625,7 +625,7 @@ public class SynchroModuleImpl: NSObject {
         ]
     }
 
-    private func encodeRejectedMutations(_ results: [VNextRejectedMutation]) -> String {
+    private func encodeRejectedMutations(_ results: [RejectedMutation]) -> String {
         let payload = results.map { result in
             [
                 "mutationID": result.mutationID,

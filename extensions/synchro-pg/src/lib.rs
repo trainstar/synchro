@@ -65,7 +65,6 @@ CREATE TABLE IF NOT EXISTS sync_clients (
     last_sync_at TIMESTAMPTZ,
     last_pull_at TIMESTAMPTZ,
     last_push_at TIMESTAMPTZ,
-    last_pull_seq BIGINT,
     is_active BOOLEAN NOT NULL DEFAULT true,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -396,15 +395,21 @@ mod tests {
 
     /// Register a test client and return the raw JSONB response.
     fn register_client(user_id: &str, client_id: &str) -> Value {
-        let row: Option<pgrx::JsonB> = Spi::get_one_with_args(
-            "SELECT synchro_register_client($1, $2, 'test', '1.0.0', 0, '')",
-            &[user_id.into(), client_id.into()],
+        connect_client(
+            user_id,
+            json!({
+                "client_id": client_id,
+                "platform": "test",
+                "app_version": "1.0.0",
+                "protocol_version": 1,
+                "schema": { "version": 0, "hash": "" },
+                "scope_set_version": 0,
+                "known_scopes": {}
+            }),
         )
-        .unwrap();
-        row.unwrap().0
     }
 
-    /// Execute a vNext connect request and return the raw JSONB response.
+    /// Execute a canonical connect request and return the raw JSONB response.
     fn connect_client(user_id: &str, request: Value) -> Value {
         let row: Option<pgrx::JsonB> = Spi::get_one_with_args(
             "SELECT synchro_connect($1, $2::jsonb)",
@@ -420,6 +425,91 @@ mod tests {
             &[scope_id.into(), portable.into()],
         )
         .unwrap();
+    }
+
+    fn push_client(user_id: &str, client_id: &str, batch_id: &str, mutations: Value) -> Value {
+        let (schema_version, schema_hash) = latest_schema_ref();
+        let row: Option<pgrx::JsonB> = Spi::get_one_with_args(
+            "SELECT synchro_push($1, $2::jsonb)",
+            &[
+                user_id.into(),
+                json!({
+                    "client_id": client_id,
+                    "batch_id": batch_id,
+                    "schema": { "version": schema_version, "hash": schema_hash },
+                    "mutations": mutations
+                })
+                .to_string()
+                .into(),
+            ],
+        )
+        .unwrap();
+        row.unwrap().0
+    }
+
+    fn pull_client(
+        user_id: &str,
+        client_id: &str,
+        scope_set_version: i64,
+        scopes: Value,
+        limit: i32,
+        checksum_mode: Option<&str>,
+    ) -> Value {
+        let (schema_version, schema_hash) = latest_schema_ref();
+        let mut request = json!({
+            "client_id": client_id,
+            "schema": { "version": schema_version, "hash": schema_hash },
+            "scope_set_version": scope_set_version,
+            "scopes": scopes,
+            "limit": limit,
+        });
+        if let Some(mode) = checksum_mode {
+            request
+                .as_object_mut()
+                .unwrap()
+                .insert("checksum_mode".into(), json!(mode));
+        }
+
+        let row: Option<pgrx::JsonB> = Spi::get_one_with_args(
+            "SELECT synchro_pull($1, $2::jsonb)",
+            &[user_id.into(), request.to_string().into()],
+        )
+        .unwrap();
+        row.unwrap().0
+    }
+
+    fn rebuild_client(
+        user_id: &str,
+        client_id: &str,
+        scope: &str,
+        cursor: Option<&str>,
+        limit: i32,
+    ) -> Value {
+        let row: Option<pgrx::JsonB> = Spi::get_one_with_args(
+            "SELECT synchro_rebuild($1, $2::jsonb)",
+            &[
+                user_id.into(),
+                json!({
+                    "client_id": client_id,
+                    "scope": scope,
+                    "cursor": cursor,
+                    "limit": limit
+                })
+                .to_string()
+                .into(),
+            ],
+        )
+        .unwrap();
+        row.unwrap().0
+    }
+
+    fn client_scope_ids(user_id: &str, client_id: &str) -> Vec<String> {
+        Spi::get_one_with_args(
+            "SELECT bucket_subs FROM sync_clients WHERE user_id = $1 AND client_id = $2",
+            &[user_id.into(), client_id.into()],
+        )
+        .unwrap()
+        .unwrap_or_default()
     }
 
     /// Return the latest schema version and hash persisted by the extension.
@@ -510,6 +600,45 @@ mod tests {
     }
 
     #[pg_test]
+    fn test_register_table_for_all_publication() {
+        Spi::run("DROP PUBLICATION IF EXISTS synchro_pub").unwrap();
+        Spi::run("CREATE PUBLICATION synchro_pub FOR ALL TABLES").unwrap();
+        Spi::run(
+            "CREATE TABLE IF NOT EXISTS test_for_all_publication_items (
+                id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                user_id TEXT NOT NULL,
+                title TEXT NOT NULL DEFAULT '',
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                deleted_at TIMESTAMPTZ
+            )",
+        )
+        .unwrap();
+
+        Spi::run(
+            "SELECT synchro_register_table(
+                'test_for_all_publication_items',
+                $$SELECT ARRAY['user:' || user_id] FROM test_for_all_publication_items WHERE id = $1::uuid$$,
+                'id', 'updated_at', 'deleted_at', 'read_only'
+            )",
+        )
+        .unwrap();
+
+        let in_registry: Option<bool> = Spi::get_one(
+            "SELECT EXISTS (
+                SELECT 1 FROM sync_registry
+                WHERE table_name = 'test_for_all_publication_items'
+            )",
+        )
+        .unwrap();
+        assert_eq!(in_registry, Some(true));
+
+        let pub_all_tables: Option<bool> =
+            Spi::get_one("SELECT puballtables FROM pg_publication WHERE pubname = 'synchro_pub'")
+                .unwrap();
+        assert_eq!(pub_all_tables, Some(true));
+    }
+
+    #[pg_test]
     fn test_register_table_rejects_conflicting_column_selection() {
         setup_test_tables();
 
@@ -536,6 +665,29 @@ mod tests {
     }
 
     #[pg_test]
+    fn test_unregister_table_for_all_publication() {
+        setup_test_tables();
+        Spi::run("DROP PUBLICATION IF EXISTS synchro_pub").unwrap();
+        Spi::run("CREATE PUBLICATION synchro_pub FOR ALL TABLES").unwrap();
+
+        Spi::run("SELECT synchro_unregister_table('test_orders')").unwrap();
+
+        let in_registry: Option<bool> = Spi::get_one(
+            "SELECT EXISTS (
+                SELECT 1 FROM sync_registry
+                WHERE table_name = 'test_orders'
+            )",
+        )
+        .unwrap();
+        assert_eq!(in_registry, Some(false));
+
+        let pub_all_tables: Option<bool> =
+            Spi::get_one("SELECT puballtables FROM pg_publication WHERE pubname = 'synchro_pub'")
+                .unwrap();
+        assert_eq!(pub_all_tables, Some(true));
+    }
+
+    #[pg_test]
     fn test_unregister_cleanup() {
         setup_test_tables();
         // Insert an edge for test_bare_items.
@@ -559,18 +711,20 @@ mod tests {
     fn test_register_client_bucket_subs() {
         setup_test_tables();
         let resp = register_client("user1", "client1");
-        assert!(resp.get("id").is_some());
         let server_time = resp.get("server_time").and_then(|v| v.as_str()).unwrap();
         assert!(chrono::DateTime::parse_from_rfc3339(server_time).is_ok());
         assert_eq!(
-            resp.get("schema_version")
+            resp["schema"]
+                .get("version")
                 .and_then(|v| v.as_i64())
                 .unwrap_or(0)
                 > 0,
             true
         );
-        assert_eq!(resp["bucket_checkpoints"]["user:user1"].as_i64(), Some(0));
-        assert!(resp["bucket_checkpoints"]["global"].is_null());
+        let added_scopes = resp["scopes"]["add"].as_array().unwrap();
+        assert!(added_scopes
+            .iter()
+            .any(|scope| scope["id"].as_str() == Some("user:user1")));
 
         // Verify bucket_subs in sync_clients.
         let subs: Option<Vec<String>> = Spi::get_one_with_args(
@@ -809,7 +963,7 @@ mod tests {
     }
 
     #[pg_test]
-    fn test_pull_vnext_returns_upsert_and_scope_cursor() {
+    fn test_pull_returns_upsert_and_scope_cursor() {
         setup_test_tables();
         connect_client(
             "user1",
@@ -843,7 +997,7 @@ mod tests {
 
         let (schema_version, schema_hash) = latest_schema_ref();
         let resp: Option<pgrx::JsonB> = Spi::get_one_with_args(
-            "SELECT synchro_pull_vnext($1, $2::jsonb)",
+            "SELECT synchro_pull($1, $2::jsonb)",
             &[
                 "user1".into(),
                 json!({
@@ -876,7 +1030,7 @@ mod tests {
     }
 
     #[pg_test]
-    fn test_pull_vnext_delete_includes_tombstone_row() {
+    fn test_pull_delete_includes_tombstone_row() {
         setup_test_tables();
         connect_client(
             "user1",
@@ -911,7 +1065,7 @@ mod tests {
 
         let (schema_version, schema_hash) = latest_schema_ref();
         let resp: Option<pgrx::JsonB> = Spi::get_one_with_args(
-            "SELECT synchro_pull_vnext($1, $2::jsonb)",
+            "SELECT synchro_pull($1, $2::jsonb)",
             &[
                 "user1".into(),
                 json!({
@@ -941,7 +1095,7 @@ mod tests {
     }
 
     #[pg_test]
-    fn test_pull_vnext_requests_rebuild_for_scope_without_cursor() {
+    fn test_pull_requests_rebuild_for_scope_without_cursor() {
         setup_test_tables();
         connect_client(
             "user1",
@@ -975,7 +1129,7 @@ mod tests {
 
         let (schema_version, schema_hash) = latest_schema_ref();
         let resp: Option<pgrx::JsonB> = Spi::get_one_with_args(
-            "SELECT synchro_pull_vnext($1, $2::jsonb)",
+            "SELECT synchro_pull($1, $2::jsonb)",
             &[
                 "user1".into(),
                 json!({
@@ -1001,7 +1155,7 @@ mod tests {
     }
 
     #[pg_test]
-    fn test_rebuild_vnext_returns_final_cursor_and_checksum() {
+    fn test_rebuild_returns_final_cursor_and_checksum() {
         setup_test_tables();
         register_shared_scope("global", true);
         connect_client(
@@ -1035,7 +1189,7 @@ mod tests {
         );
 
         let resp: Option<pgrx::JsonB> = Spi::get_one_with_args(
-            "SELECT synchro_rebuild_vnext($1, $2::jsonb)",
+            "SELECT synchro_rebuild($1, $2::jsonb)",
             &[
                 "user1".into(),
                 json!({
@@ -1064,7 +1218,7 @@ mod tests {
     }
 
     #[pg_test]
-    fn test_push_vnext_mixed_accept_and_terminal_reject() {
+    fn test_push_mixed_accept_and_terminal_reject() {
         setup_test_tables();
         connect_client(
             "user1",
@@ -1081,7 +1235,7 @@ mod tests {
 
         let (schema_version, schema_hash) = latest_schema_ref();
         let resp: Option<pgrx::JsonB> = Spi::get_one_with_args(
-            "SELECT synchro_push_vnext($1, $2::jsonb)",
+            "SELECT synchro_push($1, $2::jsonb)",
             &[
                 "user1".into(),
                 json!({
@@ -1094,6 +1248,7 @@ mod tests {
                             "table": "test_orders",
                             "op": "insert",
                             "pk": { "id": "44444444-4444-4444-4444-444444444444" },
+                            "client_version": "2026-01-01T00:00:00Z",
                             "columns": {
                                 "user_id": "user1",
                                 "title": "Bench Press",
@@ -1105,6 +1260,7 @@ mod tests {
                             "table": "test_products",
                             "op": "insert",
                             "pk": { "id": "55555555-5555-5555-5555-555555555555" },
+                            "client_version": "2026-01-01T00:00:01Z",
                             "columns": {
                                 "name": "Read Only",
                                 "price": 12
@@ -1138,7 +1294,7 @@ mod tests {
     }
 
     #[pg_test]
-    fn test_push_vnext_delete_returns_canonical_tombstone_row() {
+    fn test_push_delete_returns_canonical_tombstone_row() {
         setup_test_tables();
         connect_client(
             "user1",
@@ -1166,7 +1322,7 @@ mod tests {
 
         let (schema_version, schema_hash) = latest_schema_ref();
         let resp: Option<pgrx::JsonB> = Spi::get_one_with_args(
-            "SELECT synchro_push_vnext($1, $2::jsonb)",
+            "SELECT synchro_push($1, $2::jsonb)",
             &[
                 "user1".into(),
                 json!({
@@ -1201,7 +1357,7 @@ mod tests {
     }
 
     #[pg_test]
-    fn test_push_vnext_update_typed_payloads() {
+    fn test_push_update_typed_payloads() {
         setup_test_tables();
 
         Spi::run(
@@ -1241,20 +1397,21 @@ mod tests {
         );
 
         Spi::run(
-            "INSERT INTO test_profiles (id, user_id, balance, is_active, preferences)
+            "INSERT INTO test_profiles (id, user_id, balance, is_active, preferences, updated_at)
              VALUES (
                 '90909090-9090-9090-9090-909090909090',
                 'user1',
                 0,
                 true,
-                '{\"theme\":\"light\"}'::jsonb
+                '{\"theme\":\"light\"}'::jsonb,
+                '2025-01-01T00:00:00Z'::timestamptz
              )",
         )
         .unwrap();
 
         let (schema_version, schema_hash) = latest_schema_ref();
         let resp: Option<pgrx::JsonB> = Spi::get_one_with_args(
-            "SELECT synchro_push_vnext($1, $2::jsonb)",
+            "SELECT synchro_push($1, $2::jsonb)",
             &[
                 "user1".into(),
                 json!({
@@ -1267,6 +1424,7 @@ mod tests {
                             "table": "test_profiles",
                             "op": "update",
                             "pk": { "id": "90909090-9090-9090-9090-909090909090" },
+                            "client_version": "2026-01-03T00:00:00Z",
                             "columns": {
                                 "user_id": "user1",
                                 "balance": "42.50",
@@ -1298,7 +1456,168 @@ mod tests {
     }
 
     #[pg_test]
-    fn test_push_vnext_materializes_bucket_edges_and_changelog() {
+    fn test_push_requires_client_version_for_update() {
+        setup_test_tables();
+        connect_client(
+            "user1",
+            json!({
+                "client_id": "client1",
+                "platform": "ios",
+                "app_version": "1.0.0",
+                "protocol_version": 1,
+                "schema": { "version": 0, "hash": "" },
+                "scope_set_version": 0,
+                "known_scopes": {}
+            }),
+        );
+
+        let (schema_version, schema_hash) = latest_schema_ref();
+        let resp: Option<pgrx::JsonB> = Spi::get_one_with_args(
+            "SELECT synchro_push($1, $2::jsonb)",
+            &[
+                "user1".into(),
+                json!({
+                    "client_id": "client1",
+                    "batch_id": "batch-missing-client-version",
+                    "schema": { "version": schema_version, "hash": schema_hash },
+                    "mutations": [
+                        {
+                            "mutation_id": "m-missing-client-version",
+                            "table": "test_orders",
+                            "op": "update",
+                            "pk": { "id": "99990000-0000-0000-0000-000000000001" },
+                            "columns": {
+                                "title": "Should Fail"
+                            }
+                        }
+                    ]
+                })
+                .to_string()
+                .into(),
+            ],
+        )
+        .unwrap();
+        let resp = resp.unwrap().0;
+
+        assert_eq!(resp["error"]["code"].as_str(), Some("invalid_request"));
+        assert!(resp["error"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("client_version"));
+    }
+
+    #[pg_test]
+    fn test_push_update_uses_client_version_for_lww() {
+        setup_test_tables();
+        connect_client(
+            "user1",
+            json!({
+                "client_id": "client1",
+                "platform": "ios",
+                "app_version": "1.0.0",
+                "protocol_version": 1,
+                "schema": { "version": 0, "hash": "" },
+                "scope_set_version": 0,
+                "known_scopes": {}
+            }),
+        );
+
+        Spi::run(
+            "INSERT INTO test_orders (id, user_id, title, updated_at)
+             VALUES (
+                '91919191-0000-0000-0000-000000000002',
+                'user1',
+                'Old Title',
+                '2020-01-01T00:00:00Z'::timestamptz
+             )",
+        )
+        .unwrap();
+
+        let (schema_version, schema_hash) = latest_schema_ref();
+        let resp: Option<pgrx::JsonB> = Spi::get_one_with_args(
+            "SELECT synchro_push($1, $2::jsonb)",
+            &[
+                "user1".into(),
+                json!({
+                    "client_id": "client1",
+                    "batch_id": "batch-client-version-lww",
+                    "schema": { "version": schema_version, "hash": schema_hash },
+                    "mutations": [
+                        {
+                            "mutation_id": "m-client-version-lww",
+                            "table": "test_orders",
+                            "op": "update",
+                            "pk": { "id": "91919191-0000-0000-0000-000000000002" },
+                            "client_version": "2025-01-01T00:00:00Z",
+                            "columns": {
+                                "title": "Updated via client_version"
+                            }
+                        }
+                    ]
+                })
+                .to_string()
+                .into(),
+            ],
+        )
+        .unwrap();
+        let resp = resp.unwrap().0;
+
+        let accepted = resp["accepted"].as_array().unwrap();
+        assert_eq!(accepted.len(), 1);
+        assert_eq!(accepted[0]["status"].as_str(), Some("applied"));
+
+        let title: Option<String> = Spi::get_one(
+            "SELECT title FROM test_orders WHERE id = '91919191-0000-0000-0000-000000000002'",
+        )
+        .unwrap();
+        assert_eq!(title, Some("Updated via client_version".to_string()));
+
+        let updated_at_utc: Option<String> = Spi::get_one(
+            "SELECT to_char(updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"')
+             FROM test_orders
+             WHERE id = '91919191-0000-0000-0000-000000000002'",
+        )
+        .unwrap();
+        assert_eq!(updated_at_utc, Some("2025-01-01T00:00:00Z".to_string()));
+    }
+
+    #[pg_test]
+    fn test_push_insert_persists_client_version_as_updated_at() {
+        setup_test_tables();
+        register_client("u1", "c1");
+
+        let resp = push_client(
+            "u1",
+            "c1",
+            "batch-insert-client-version",
+            json!([{
+                "mutation_id": "m-insert-client-version",
+                "table": "test_orders",
+                "op": "insert",
+                "pk": { "id": "92929292-0000-0000-0000-000000000002" },
+                "client_version": "2028-01-01T00:00:00Z",
+                "columns": {
+                    "user_id": "u1",
+                    "title": "Inserted via client_version"
+                }
+            }]),
+        );
+
+        let accepted = resp["accepted"].as_array().unwrap();
+        assert_eq!(accepted.len(), 1);
+        assert_eq!(accepted[0]["status"].as_str(), Some("applied"));
+
+        let updated_at_utc: Option<String> = Spi::get_one(
+            "SELECT to_char(updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"')
+             FROM test_orders
+             WHERE id = '92929292-0000-0000-0000-000000000002'",
+        )
+        .unwrap();
+        assert_eq!(updated_at_utc, Some("2028-01-01T00:00:00Z".to_string()));
+    }
+
+    #[pg_test]
+    fn test_push_materializes_bucket_edges_and_changelog() {
         setup_test_tables();
         connect_client(
             "user1",
@@ -1316,7 +1635,7 @@ mod tests {
         let (schema_version, schema_hash) = latest_schema_ref();
         let record_id = "91919191-9191-9191-9191-919191919191";
         let resp: Option<pgrx::JsonB> = Spi::get_one_with_args(
-            "SELECT synchro_push_vnext($1, $2::jsonb)",
+            "SELECT synchro_push($1, $2::jsonb)",
             &[
                 "user1".into(),
                 json!({
@@ -1329,9 +1648,10 @@ mod tests {
                             "table": "test_orders",
                             "op": "insert",
                             "pk": { "id": record_id },
+                            "client_version": "2026-01-04T00:00:00Z",
                             "columns": {
                                 "user_id": "user1",
-                                "title": "Materialized vNext",
+                                "title": "Materialized Insert",
                                 "amount": 15
                             }
                         }
@@ -1366,75 +1686,40 @@ mod tests {
         assert_eq!(changelog_count, Some(1));
     }
 
-    // -----------------------------------------------------------------------
-    // Push Round-Trip (12 tests)
-    // -----------------------------------------------------------------------
-
-    #[pg_test]
-    fn test_push_create_and_verify() {
+    fn setup_pull_fixtures() {
         setup_test_tables();
         register_client("u1", "c1");
 
-        let resp: Option<pgrx::JsonB> = Spi::get_one_with_args(
-            "SELECT synchro_push($1, $2, $3::jsonb, 0, '')",
-            &[
-                "u1".into(),
-                "c1".into(),
-                r#"[{"id":"11111111-1111-1111-1111-111111111111","table_name":"test_orders","operation":"create","data":{"user_id":"u1","title":"Test Order","amount":99.99}}]"#.into(),
-            ],
+        Spi::run(
+            "INSERT INTO test_orders (id, user_id, title, internal_notes) VALUES
+             ('a1111111-1111-1111-1111-111111111111', 'u1', 'Order 1', 'secret1'),
+             ('a2222222-2222-2222-2222-222222222222', 'u1', 'Order 2', 'secret2')",
         )
         .unwrap();
-        let resp = resp.unwrap().0;
 
-        let accepted = resp.get("accepted").unwrap().as_array().unwrap();
-        assert_eq!(accepted.len(), 1);
-        assert_eq!(
-            accepted[0].get("status").unwrap().as_str().unwrap(),
-            "applied"
+        insert_changelog(
+            "user:u1",
+            "test_orders",
+            "a1111111-1111-1111-1111-111111111111",
+            1,
+        );
+        insert_changelog(
+            "user:u1",
+            "test_orders",
+            "a2222222-2222-2222-2222-222222222222",
+            1,
         );
 
-        // Verify record exists in table.
-        let title: Option<String> = Spi::get_one(
-            "SELECT title FROM test_orders WHERE id = '11111111-1111-1111-1111-111111111111'",
-        )
-        .unwrap();
-        assert_eq!(title, Some("Test Order".to_string()));
-    }
-
-    #[pg_test]
-    fn test_push_create_materializes_bucket_edges_and_changelog() {
-        setup_test_tables();
-        register_client("u1", "c1");
-
-        let resp: Option<pgrx::JsonB> = Spi::get_one_with_args(
-            "SELECT synchro_push($1, $2, $3::jsonb, 0, '')",
-            &[
-                "u1".into(),
-                "c1".into(),
-                r#"[{"id":"12121212-1212-1212-1212-121212121212","table_name":"test_orders","operation":"create","data":{"user_id":"u1","title":"Materialized"}}]"#.into(),
-            ],
-        )
-        .unwrap();
-        let resp = resp.unwrap().0;
-        assert_eq!(resp["accepted"][0]["status"].as_str(), Some("applied"));
-
-        let bucket_edge_count: Option<i64> = Spi::get_one(
-            "SELECT count(*) FROM sync_bucket_edges
-             WHERE table_name = 'test_orders'
-               AND record_id = '12121212-1212-1212-1212-121212121212'
-               AND bucket_id = 'user:u1'",
-        )
-        .unwrap();
-        assert_eq!(bucket_edge_count, Some(1));
-
-        let changelog_count: Option<i64> = Spi::get_one(
-            "SELECT count(*) FROM sync_changelog
-             WHERE table_name = 'test_orders'
-               AND record_id = '12121212-1212-1212-1212-121212121212'
-               AND bucket_id = 'user:u1'",
-        )
-        .unwrap();
-        assert_eq!(changelog_count, Some(1));
+        insert_edge(
+            "test_orders",
+            "a1111111-1111-1111-1111-111111111111",
+            "user:u1",
+        );
+        insert_edge(
+            "test_orders",
+            "a2222222-2222-2222-2222-222222222222",
+            "user:u1",
+        );
     }
 
     #[pg_test]
@@ -1442,22 +1727,28 @@ mod tests {
         setup_test_tables();
         register_client("u1", "c1");
 
-        // Client tries to set updated_at and created_at. Both should be stripped.
-        let resp: Option<pgrx::JsonB> = Spi::get_one_with_args(
-            "SELECT synchro_push($1, $2, $3::jsonb, 0, '')",
-            &[
-                "u1".into(),
-                "c1".into(),
-                r#"[{"id":"22222222-2222-2222-2222-222222222222","table_name":"test_orders","operation":"create","data":{"user_id":"u1","title":"Protected Test","updated_at":"1999-01-01T00:00:00Z","created_at":"1999-01-01T00:00:00Z"}}]"#.into(),
-            ],
-        )
-        .unwrap();
-        let resp = resp.unwrap().0;
-        assert_eq!(resp["accepted"][0]["status"].as_str().unwrap(), "applied");
+        let resp = push_client(
+            "u1",
+            "c1",
+            "batch-protected",
+            json!([{
+                "mutation_id": "m-protected",
+                "table": "test_orders",
+                "op": "insert",
+                "pk": { "id": "22222222-2222-2222-2222-222222222222" },
+                "client_version": "2026-01-01T00:00:00Z",
+                "columns": {
+                    "user_id": "u1",
+                    "title": "Protected Test",
+                    "updated_at": "1999-01-01T00:00:00Z",
+                    "created_at": "1999-01-01T00:00:00Z"
+                }
+            }]),
+        );
+        assert_eq!(resp["accepted"][0]["status"].as_str(), Some("applied"));
 
-        // Verify server timestamps are NOT 1999.
         let year: Option<i32> = Spi::get_one(
-            "SELECT EXTRACT(YEAR FROM updated_at)::int FROM test_orders \
+            "SELECT EXTRACT(YEAR FROM updated_at)::int FROM test_orders
              WHERE id = '22222222-2222-2222-2222-222222222222'",
         )
         .unwrap();
@@ -1469,22 +1760,27 @@ mod tests {
         setup_test_tables();
         register_client("u1", "c1");
 
-        // internal_notes is in exclude_columns. Client sends it, should be stripped.
-        let resp: Option<pgrx::JsonB> = Spi::get_one_with_args(
-            "SELECT synchro_push($1, $2, $3::jsonb, 0, '')",
-            &[
-                "u1".into(),
-                "c1".into(),
-                r#"[{"id":"33333333-3333-3333-3333-333333333333","table_name":"test_orders","operation":"create","data":{"user_id":"u1","title":"Exclude Test","internal_notes":"secret stuff"}}]"#.into(),
-            ],
-        )
-        .unwrap();
-        let resp = resp.unwrap().0;
-        assert_eq!(resp["accepted"][0]["status"].as_str().unwrap(), "applied");
+        let resp = push_client(
+            "u1",
+            "c1",
+            "batch-exclude",
+            json!([{
+                "mutation_id": "m-exclude",
+                "table": "test_orders",
+                "op": "insert",
+                "pk": { "id": "33333333-3333-3333-3333-333333333333" },
+                "client_version": "2026-01-01T00:00:00Z",
+                "columns": {
+                    "user_id": "u1",
+                    "title": "Exclude Test",
+                    "internal_notes": "secret stuff"
+                }
+            }]),
+        );
+        assert_eq!(resp["accepted"][0]["status"].as_str(), Some("applied"));
 
-        // internal_notes should be default empty, not "secret stuff".
         let notes: Option<String> = Spi::get_one(
-            "SELECT internal_notes FROM test_orders \
+            "SELECT internal_notes FROM test_orders
              WHERE id = '33333333-3333-3333-3333-333333333333'",
         )
         .unwrap();
@@ -1496,17 +1792,25 @@ mod tests {
         setup_sync_columns_table();
         register_client("u1", "c1");
 
-        let resp: Option<pgrx::JsonB> = Spi::get_one_with_args(
-            "SELECT synchro_push($1, $2, $3::jsonb, 0, '')",
-            &[
-                "u1".into(),
-                "c1".into(),
-                r#"[{"id":"55555555-5555-5555-5555-555555555555","table_name":"test_sync_columns_items","operation":"create","data":{"user_id":"u1","title":"Sync columns","search_vector":"fts","internal_notes":"secret"}}]"#.into(),
-            ],
-        )
-        .unwrap();
-        let resp = resp.unwrap().0;
-        assert_eq!(resp["accepted"][0]["status"].as_str().unwrap(), "applied");
+        let resp = push_client(
+            "u1",
+            "c1",
+            "batch-sync-columns",
+            json!([{
+                "mutation_id": "m-sync-columns",
+                "table": "test_sync_columns_items",
+                "op": "insert",
+                "pk": { "id": "55555555-5555-5555-5555-555555555555" },
+                "client_version": "2026-01-01T00:00:00Z",
+                "columns": {
+                    "user_id": "u1",
+                    "title": "Sync columns",
+                    "search_vector": "fts",
+                    "internal_notes": "secret"
+                }
+            }]),
+        );
+        assert_eq!(resp["accepted"][0]["status"].as_str(), Some("applied"));
 
         let row: Option<pgrx::JsonB> = Spi::get_one(
             "SELECT jsonb_build_object(
@@ -1529,65 +1833,33 @@ mod tests {
         setup_test_tables();
         register_client("u1", "c1");
 
-        // Insert a record.
         Spi::run(
-            "INSERT INTO test_orders (id, user_id, title) \
+            "INSERT INTO test_orders (id, user_id, title)
              VALUES ('44444444-4444-4444-4444-444444444444', 'u1', 'Existing')",
         )
         .unwrap();
 
-        // Push a create for the same id. Should conflict.
-        let resp: Option<pgrx::JsonB> = Spi::get_one_with_args(
-            "SELECT synchro_push($1, $2, $3::jsonb, 0, '')",
-            &[
-                "u1".into(),
-                "c1".into(),
-                r#"[{"id":"44444444-4444-4444-4444-444444444444","table_name":"test_orders","operation":"create","data":{"user_id":"u1","title":"Duplicate"}}]"#.into(),
-            ],
-        )
-        .unwrap();
-        let resp = resp.unwrap().0;
+        let resp = push_client(
+            "u1",
+            "c1",
+            "batch-duplicate",
+            json!([{
+                "mutation_id": "m-duplicate",
+                "table": "test_orders",
+                "op": "insert",
+                "pk": { "id": "44444444-4444-4444-4444-444444444444" },
+                "client_version": "2026-01-01T00:00:00Z",
+                "columns": {
+                    "user_id": "u1",
+                    "title": "Duplicate"
+                }
+            }]),
+        );
 
         let rejected = resp["rejected"].as_array().unwrap();
         assert_eq!(rejected.len(), 1);
-        assert_eq!(rejected[0]["status"].as_str().unwrap(), "conflict");
-        assert_eq!(
-            rejected[0]["reason_code"].as_str().unwrap(),
-            "record_exists"
-        );
-    }
-
-    #[pg_test]
-    fn test_push_update_lww_client_wins() {
-        setup_test_tables();
-        register_client("u1", "c1");
-
-        // Insert with old timestamp.
-        Spi::run(
-            "INSERT INTO test_orders (id, user_id, title, updated_at) \
-             VALUES ('55555555-5555-5555-5555-555555555555', 'u1', 'Old', \
-             '2020-01-01T00:00:00Z')",
-        )
-        .unwrap();
-
-        // Push update with recent client timestamp. Client should win.
-        let resp: Option<pgrx::JsonB> = Spi::get_one_with_args(
-            "SELECT synchro_push($1, $2, $3::jsonb, 0, '')",
-            &[
-                "u1".into(),
-                "c1".into(),
-                r#"[{"id":"55555555-5555-5555-5555-555555555555","table_name":"test_orders","operation":"update","data":{"title":"Updated"},"client_updated_at":"2025-01-01T00:00:00Z"}]"#.into(),
-            ],
-        )
-        .unwrap();
-        let resp = resp.unwrap().0;
-        assert_eq!(resp["accepted"][0]["status"].as_str().unwrap(), "applied");
-
-        let title: Option<String> = Spi::get_one(
-            "SELECT title FROM test_orders WHERE id = '55555555-5555-5555-5555-555555555555'",
-        )
-        .unwrap();
-        assert_eq!(title, Some("Updated".to_string()));
+        assert_eq!(rejected[0]["status"].as_str(), Some("conflict"));
+        assert_eq!(rejected[0]["code"].as_str(), Some("version_conflict"));
     }
 
     #[pg_test]
@@ -1595,30 +1867,33 @@ mod tests {
         setup_test_tables();
         register_client("u1", "c1");
 
-        // Insert with very recent timestamp.
         Spi::run(
-            "INSERT INTO test_orders (id, user_id, title, updated_at) \
-             VALUES ('66666666-6666-6666-6666-666666666666', 'u1', 'Recent', \
+            "INSERT INTO test_orders (id, user_id, title, updated_at)
+             VALUES ('66666666-6666-6666-6666-666666666666', 'u1', 'Recent',
              '2099-01-01T00:00:00Z')",
         )
         .unwrap();
 
-        // Push update with old client timestamp. Server should win.
-        let resp: Option<pgrx::JsonB> = Spi::get_one_with_args(
-            "SELECT synchro_push($1, $2, $3::jsonb, 0, '')",
-            &[
-                "u1".into(),
-                "c1".into(),
-                r#"[{"id":"66666666-6666-6666-6666-666666666666","table_name":"test_orders","operation":"update","data":{"title":"Stale"},"client_updated_at":"2020-01-01T00:00:00Z"}]"#.into(),
-            ],
-        )
-        .unwrap();
-        let resp = resp.unwrap().0;
+        let resp = push_client(
+            "u1",
+            "c1",
+            "batch-server-wins",
+            json!([{
+                "mutation_id": "m-server-wins",
+                "table": "test_orders",
+                "op": "update",
+                "pk": { "id": "66666666-6666-6666-6666-666666666666" },
+                "client_version": "2020-01-01T00:00:00Z",
+                "columns": {
+                    "title": "Stale"
+                }
+            }]),
+        );
 
         let rejected = resp["rejected"].as_array().unwrap();
-        assert_eq!(rejected[0]["status"].as_str().unwrap(), "conflict");
+        assert_eq!(rejected[0]["status"].as_str(), Some("conflict"));
+        assert_eq!(rejected[0]["code"].as_str(), Some("version_conflict"));
 
-        // Title should be unchanged.
         let title: Option<String> = Spi::get_one(
             "SELECT title FROM test_orders WHERE id = '66666666-6666-6666-6666-666666666666'",
         )
@@ -1627,88 +1902,34 @@ mod tests {
     }
 
     #[pg_test]
-    fn test_push_update_lww_clock_skew() {
-        setup_test_tables();
-        register_client("u1", "c1");
-
-        // Insert with known timestamp.
-        Spi::run(
-            "INSERT INTO test_orders (id, user_id, title, updated_at) \
-             VALUES ('77777777-7777-7777-7777-777777777777', 'u1', 'Skew Test', \
-             '2025-06-15T12:00:00.500Z')",
-        )
-        .unwrap();
-
-        // Client is 400ms behind server. Default tolerance is 500ms, so client wins.
-        let resp: Option<pgrx::JsonB> = Spi::get_one_with_args(
-            "SELECT synchro_push($1, $2, $3::jsonb, 0, '')",
-            &[
-                "u1".into(),
-                "c1".into(),
-                r#"[{"id":"77777777-7777-7777-7777-777777777777","table_name":"test_orders","operation":"update","data":{"title":"Within Skew"},"client_updated_at":"2025-06-15T12:00:00.100Z"}]"#.into(),
-            ],
-        )
-        .unwrap();
-        let resp = resp.unwrap().0;
-        assert_eq!(resp["accepted"][0]["status"].as_str().unwrap(), "applied");
-    }
-
-    #[pg_test]
     fn test_push_update_lww_base_unchanged() {
         setup_test_tables();
         register_client("u1", "c1");
 
         Spi::run(
-            "INSERT INTO test_orders (id, user_id, title, updated_at) \
-             VALUES ('88888888-8888-8888-8888-888888888888', 'u1', 'Base Test', \
+            "INSERT INTO test_orders (id, user_id, title, updated_at)
+             VALUES ('88888888-8888-8888-8888-888888888888', 'u1', 'Base Test',
              '2025-06-15T12:00:00Z')",
         )
         .unwrap();
 
-        // Client base_updated_at matches server: server unchanged, client wins.
-        let resp: Option<pgrx::JsonB> = Spi::get_one_with_args(
-            "SELECT synchro_push($1, $2, $3::jsonb, 0, '')",
-            &[
-                "u1".into(),
-                "c1".into(),
-                r#"[{"id":"88888888-8888-8888-8888-888888888888","table_name":"test_orders","operation":"update","data":{"title":"Base Match"},"client_updated_at":"2020-01-01T00:00:00Z","base_updated_at":"2025-06-15T12:00:00Z"}]"#.into(),
-            ],
-        )
-        .unwrap();
-        let resp = resp.unwrap().0;
-        assert_eq!(resp["accepted"][0]["status"].as_str().unwrap(), "applied");
-    }
-
-    #[pg_test]
-    fn test_push_soft_delete() {
-        setup_test_tables();
-        register_client("u1", "c1");
-
-        Spi::run(
-            "INSERT INTO test_orders (id, user_id, title) \
-             VALUES ('99999999-9999-9999-9999-999999999999', 'u1', 'To Delete')",
-        )
-        .unwrap();
-
-        let resp: Option<pgrx::JsonB> = Spi::get_one_with_args(
-            "SELECT synchro_push($1, $2, $3::jsonb, 0, '')",
-            &[
-                "u1".into(),
-                "c1".into(),
-                r#"[{"id":"99999999-9999-9999-9999-999999999999","table_name":"test_orders","operation":"delete"}]"#.into(),
-            ],
-        )
-        .unwrap();
-        let resp = resp.unwrap().0;
-        assert_eq!(resp["accepted"][0]["status"].as_str().unwrap(), "applied");
-
-        // deleted_at should be set, not null.
-        let deleted: Option<bool> = Spi::get_one(
-            "SELECT deleted_at IS NOT NULL FROM test_orders \
-             WHERE id = '99999999-9999-9999-9999-999999999999'",
-        )
-        .unwrap();
-        assert_eq!(deleted, Some(true));
+        let resp = push_client(
+            "u1",
+            "c1",
+            "batch-base-match",
+            json!([{
+                "mutation_id": "m-base-match",
+                "table": "test_orders",
+                "op": "update",
+                "pk": { "id": "88888888-8888-8888-8888-888888888888" },
+                "client_version": "2020-01-01T00:00:00Z",
+                "base_version": "2025-06-15T12:00:00Z",
+                "columns": {
+                    "title": "Base Match"
+                }
+            }]),
+        );
+        assert_eq!(resp["accepted"][0]["status"].as_str(), Some("applied"));
     }
 
     #[pg_test]
@@ -1717,23 +1938,23 @@ mod tests {
         register_client("u1", "c1");
 
         Spi::run(
-            "INSERT INTO test_orders (id, user_id, title, deleted_at) \
+            "INSERT INTO test_orders (id, user_id, title, deleted_at)
              VALUES ('aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa', 'u1', 'Already Deleted', now())",
         )
         .unwrap();
 
-        // Delete again. Should succeed (idempotent), not error.
-        let resp: Option<pgrx::JsonB> = Spi::get_one_with_args(
-            "SELECT synchro_push($1, $2, $3::jsonb, 0, '')",
-            &[
-                "u1".into(),
-                "c1".into(),
-                r#"[{"id":"aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa","table_name":"test_orders","operation":"delete"}]"#.into(),
-            ],
-        )
-        .unwrap();
-        let resp = resp.unwrap().0;
-        assert_eq!(resp["accepted"][0]["status"].as_str().unwrap(), "applied");
+        let resp = push_client(
+            "u1",
+            "c1",
+            "batch-delete-idempotent",
+            json!([{
+                "mutation_id": "m-delete-idempotent",
+                "table": "test_orders",
+                "op": "delete",
+                "pk": { "id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa" }
+            }]),
+        );
+        assert_eq!(resp["accepted"][0]["status"].as_str(), Some("applied"));
     }
 
     #[pg_test]
@@ -1742,24 +1963,24 @@ mod tests {
         register_client("u1", "c1");
 
         Spi::run(
-            "INSERT INTO test_bare_items (id, name) \
+            "INSERT INTO test_bare_items (id, name)
              VALUES ('bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb', 'Bare Item')",
         )
         .unwrap();
 
-        let resp: Option<pgrx::JsonB> = Spi::get_one_with_args(
-            "SELECT synchro_push($1, $2, $3::jsonb, 0, '')",
-            &[
-                "u1".into(),
-                "c1".into(),
-                r#"[{"id":"bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb","table_name":"test_bare_items","operation":"delete"}]"#.into(),
-            ],
-        )
-        .unwrap();
-        let resp = resp.unwrap().0;
-        assert_eq!(resp["accepted"][0]["status"].as_str().unwrap(), "applied");
+        let resp = push_client(
+            "u1",
+            "c1",
+            "batch-hard-delete",
+            json!([{
+                "mutation_id": "m-hard-delete",
+                "table": "test_bare_items",
+                "op": "delete",
+                "pk": { "id": "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb" }
+            }]),
+        );
+        assert_eq!(resp["accepted"][0]["status"].as_str(), Some("applied"));
 
-        // Record should be gone entirely (hard delete).
         let count: Option<i64> = Spi::get_one(
             "SELECT count(*) FROM test_bare_items WHERE id = 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb'",
         )
@@ -1772,63 +1993,64 @@ mod tests {
         setup_test_tables();
         register_client("u1", "c1");
 
-        // Soft-deleted record.
         Spi::run(
-            "INSERT INTO test_orders (id, user_id, title, deleted_at) \
+            "INSERT INTO test_orders (id, user_id, title, deleted_at)
              VALUES ('cccccccc-cccc-cccc-cccc-cccccccccccc', 'u1', 'Dead', now())",
         )
         .unwrap();
 
-        // Create on soft-deleted: resurrection.
-        let resp: Option<pgrx::JsonB> = Spi::get_one_with_args(
-            "SELECT synchro_push($1, $2, $3::jsonb, 0, '')",
-            &[
-                "u1".into(),
-                "c1".into(),
-                r#"[{"id":"cccccccc-cccc-cccc-cccc-cccccccccccc","table_name":"test_orders","operation":"create","data":{"user_id":"u1","title":"Risen"}}]"#.into(),
-            ],
-        )
-        .unwrap();
-        let resp = resp.unwrap().0;
-        assert_eq!(resp["accepted"][0]["status"].as_str().unwrap(), "applied");
+        let resp = push_client(
+            "u1",
+            "c1",
+            "batch-resurrection",
+            json!([{
+                "mutation_id": "m-resurrection",
+                "table": "test_orders",
+                "op": "insert",
+                "pk": { "id": "cccccccc-cccc-cccc-cccc-cccccccccccc" },
+                "client_version": "2099-01-01T00:00:00Z",
+                "columns": {
+                    "user_id": "u1",
+                    "title": "Risen"
+                }
+            }]),
+        );
+        assert_eq!(resp["accepted"][0]["status"].as_str(), Some("applied"));
 
-        // deleted_at should be cleared, title updated.
         let row = Spi::get_two::<String, bool>(
-            "SELECT title, deleted_at IS NULL FROM test_orders \
+            "SELECT title, deleted_at IS NULL FROM test_orders
              WHERE id = 'cccccccc-cccc-cccc-cccc-cccccccccccc'",
         )
         .unwrap();
         assert_eq!(row.0, Some("Risen".to_string()));
-        assert_eq!(row.1, Some(true)); // deleted_at IS NULL = true
+        assert_eq!(row.1, Some(true));
     }
-
-    // -----------------------------------------------------------------------
-    // Push Safety (5 tests)
-    // -----------------------------------------------------------------------
 
     #[pg_test]
     fn test_push_read_only_rejected() {
         setup_test_tables();
         register_client("u1", "c1");
 
-        let resp: Option<pgrx::JsonB> = Spi::get_one_with_args(
-            "SELECT synchro_push($1, $2, $3::jsonb, 0, '')",
-            &[
-                "u1".into(),
-                "c1".into(),
-                r#"[{"id":"dddddddd-dddd-dddd-dddd-dddddddddddd","table_name":"test_products","operation":"create","data":{"name":"Hack Product"}}]"#.into(),
-            ],
-        )
-        .unwrap();
-        let resp = resp.unwrap().0;
+        let resp = push_client(
+            "u1",
+            "c1",
+            "batch-read-only",
+            json!([{
+                "mutation_id": "m-read-only",
+                "table": "test_products",
+                "op": "insert",
+                "pk": { "id": "dddddddd-dddd-dddd-dddd-dddddddddddd" },
+                "client_version": "2026-01-01T00:00:00Z",
+                "columns": {
+                    "name": "Hack Product"
+                }
+            }]),
+        );
 
         let rejected = resp["rejected"].as_array().unwrap();
         assert_eq!(rejected.len(), 1);
-        assert_eq!(rejected[0]["status"].as_str().unwrap(), "rejected_terminal");
-        assert_eq!(
-            rejected[0]["reason_code"].as_str().unwrap(),
-            "table_read_only"
-        );
+        assert_eq!(rejected[0]["status"].as_str(), Some("rejected_terminal"));
+        assert_eq!(rejected[0]["code"].as_str(), Some("policy_rejected"));
     }
 
     #[pg_test]
@@ -1860,13 +2082,12 @@ mod tests {
         setup_test_tables();
         register_client("u1", "c1");
 
-        // Create the write_protect function that stamps user_id.
         Spi::run(
             "CREATE OR REPLACE FUNCTION synchro_write_protect(
                 p_user_id TEXT, p_table_name TEXT, p_operation TEXT, p_record JSONB
             ) RETURNS JSONB AS $$
             BEGIN
-                IF p_operation = 'create' THEN
+                IF p_operation = 'insert' THEN
                     p_record := jsonb_set(p_record, '{user_id}', to_jsonb(p_user_id));
                 END IF;
                 RETURN p_record;
@@ -1875,18 +2096,22 @@ mod tests {
         )
         .unwrap();
 
-        // Push without user_id in data. write_protect should stamp it.
-        let resp: Option<pgrx::JsonB> = Spi::get_one_with_args(
-            "SELECT synchro_push($1, $2, $3::jsonb, 0, '')",
-            &[
-                "u1".into(),
-                "c1".into(),
-                r#"[{"id":"eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee","table_name":"test_orders","operation":"create","data":{"title":"Protected"}}]"#.into(),
-            ],
-        )
-        .unwrap();
-        let resp = resp.unwrap().0;
-        assert_eq!(resp["accepted"][0]["status"].as_str().unwrap(), "applied");
+        let resp = push_client(
+            "u1",
+            "c1",
+            "batch-write-protect",
+            json!([{
+                "mutation_id": "m-write-protect",
+                "table": "test_orders",
+                "op": "insert",
+                "pk": { "id": "eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee" },
+                "client_version": "2026-01-01T00:00:00Z",
+                "columns": {
+                    "title": "Protected"
+                }
+            }]),
+        );
+        assert_eq!(resp["accepted"][0]["status"].as_str(), Some("applied"));
 
         let uid: Option<String> = Spi::get_one(
             "SELECT user_id FROM test_orders WHERE id = 'eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee'",
@@ -1894,7 +2119,6 @@ mod tests {
         .unwrap();
         assert_eq!(uid, Some("u1".to_string()));
 
-        // Clean up.
         Spi::run("DROP FUNCTION IF EXISTS synchro_write_protect").unwrap();
     }
 
@@ -1903,33 +2127,42 @@ mod tests {
         setup_test_tables();
         register_client("u1", "c1");
 
-        // write_protect re-introduces updated_at. Extension should re-strip it.
         Spi::run(
             "CREATE OR REPLACE FUNCTION synchro_write_protect(
                 p_user_id TEXT, p_table_name TEXT, p_operation TEXT, p_record JSONB
             ) RETURNS JSONB AS $$
             BEGIN
-                p_record := jsonb_set(p_record, '{updated_at}', '\"1999-01-01T00:00:00Z\"'::jsonb);
+                p_record := jsonb_set(
+                    p_record,
+                    '{updated_at}',
+                    to_jsonb('1999-01-01T00:00:00Z'::text)
+                );
                 RETURN p_record;
             END;
             $$ LANGUAGE plpgsql",
         )
         .unwrap();
 
-        let resp: Option<pgrx::JsonB> = Spi::get_one_with_args(
-            "SELECT synchro_push($1, $2, $3::jsonb, 0, '')",
-            &[
-                "u1".into(),
-                "c1".into(),
-                r#"[{"id":"ffffffff-ffff-ffff-ffff-ffffffffffff","table_name":"test_orders","operation":"create","data":{"user_id":"u1","title":"Restrip"}}]"#.into(),
-            ],
-        )
-        .unwrap();
-        let resp = resp.unwrap().0;
-        assert_eq!(resp["accepted"][0]["status"].as_str().unwrap(), "applied");
+        let resp = push_client(
+            "u1",
+            "c1",
+            "batch-write-protect-restrip",
+            json!([{
+                "mutation_id": "m-write-protect-restrip",
+                "table": "test_orders",
+                "op": "insert",
+                "pk": { "id": "ffffffff-ffff-ffff-ffff-ffffffffffff" },
+                "client_version": "2026-01-01T00:00:00Z",
+                "columns": {
+                    "user_id": "u1",
+                    "title": "Restrip"
+                }
+            }]),
+        );
+        assert_eq!(resp["accepted"][0]["status"].as_str(), Some("applied"));
 
         let year: Option<i32> = Spi::get_one(
-            "SELECT EXTRACT(YEAR FROM updated_at)::int FROM test_orders \
+            "SELECT EXTRACT(YEAR FROM updated_at)::int FROM test_orders
              WHERE id = 'ffffffff-ffff-ffff-ffff-ffffffffffff'",
         )
         .unwrap();
@@ -1943,18 +2176,24 @@ mod tests {
         setup_test_tables();
         register_client("u1", "c1");
 
-        // Push with a column that doesn't exist. Should be silently ignored.
-        let resp: Option<pgrx::JsonB> = Spi::get_one_with_args(
-            "SELECT synchro_push($1, $2, $3::jsonb, 0, '')",
-            &[
-                "u1".into(),
-                "c1".into(),
-                r#"[{"id":"11111111-aaaa-bbbb-cccc-111111111111","table_name":"test_orders","operation":"create","data":{"user_id":"u1","title":"Valid","nonexistent_col":"bogus"}}]"#.into(),
-            ],
-        )
-        .unwrap();
-        let resp = resp.unwrap().0;
-        assert_eq!(resp["accepted"][0]["status"].as_str().unwrap(), "applied");
+        let resp = push_client(
+            "u1",
+            "c1",
+            "batch-invalid-column",
+            json!([{
+                "mutation_id": "m-invalid-column",
+                "table": "test_orders",
+                "op": "insert",
+                "pk": { "id": "11111111-aaaa-bbbb-cccc-111111111111" },
+                "client_version": "2026-01-01T00:00:00Z",
+                "columns": {
+                    "user_id": "u1",
+                    "title": "Valid",
+                    "nonexistent_col": "bogus"
+                }
+            }]),
+        );
+        assert_eq!(resp["accepted"][0]["status"].as_str(), Some("applied"));
     }
 
     #[pg_test]
@@ -1962,360 +2201,96 @@ mod tests {
         setup_test_tables();
         register_client("u1", "c1");
 
-        // Create an RLS policy that blocks writes unless app.user_id matches.
         Spi::run("ALTER TABLE test_orders ENABLE ROW LEVEL SECURITY").unwrap();
         Spi::run("ALTER TABLE test_orders FORCE ROW LEVEL SECURITY").unwrap();
         Spi::run(
-            "CREATE POLICY test_rls ON test_orders \
-             USING (user_id = current_setting('app.user_id', true)) \
+            "CREATE POLICY test_rls ON test_orders
+             USING (user_id = current_setting('app.user_id', true))
              WITH CHECK (user_id = current_setting('app.user_id', true))",
         )
         .unwrap();
 
-        // Push as u1 creating a record owned by u1. Should succeed.
-        let resp: Option<pgrx::JsonB> = Spi::get_one_with_args(
-            "SELECT synchro_push($1, $2, $3::jsonb, 0, '')",
-            &[
-                "u1".into(),
-                "c1".into(),
-                r#"[{"id":"22222222-aaaa-bbbb-cccc-222222222222","table_name":"test_orders","operation":"create","data":{"user_id":"u1","title":"RLS OK"}}]"#.into(),
-            ],
-        )
-        .unwrap();
-        let resp = resp.unwrap().0;
-        assert_eq!(resp["accepted"][0]["status"].as_str().unwrap(), "applied");
+        let resp = push_client(
+            "u1",
+            "c1",
+            "batch-rls",
+            json!([{
+                "mutation_id": "m-rls",
+                "table": "test_orders",
+                "op": "insert",
+                "pk": { "id": "22222222-aaaa-bbbb-cccc-222222222222" },
+                "client_version": "2026-01-01T00:00:00Z",
+                "columns": {
+                    "user_id": "u1",
+                    "title": "RLS OK"
+                }
+            }]),
+        );
+        assert_eq!(resp["accepted"][0]["status"].as_str(), Some("applied"));
 
-        // Clean up RLS.
         Spi::run("DROP POLICY test_rls ON test_orders").unwrap();
         Spi::run("ALTER TABLE test_orders DISABLE ROW LEVEL SECURITY").unwrap();
     }
 
-    // -----------------------------------------------------------------------
-    // Push Response Envelope (4 tests)
-    // -----------------------------------------------------------------------
-
-    #[pg_test]
-    fn test_push_response_shape_mixed() {
-        setup_test_tables();
-        register_client("u1", "c1");
-
-        // Two records: one valid create, one to a read-only table.
-        let resp: Option<pgrx::JsonB> = Spi::get_one_with_args(
-            "SELECT synchro_push($1, $2, $3::jsonb, 0, '')",
-            &[
-                "u1".into(),
-                "c1".into(),
-                r#"[
-                    {"id":"aaa11111-1111-1111-1111-111111111111","table_name":"test_orders","operation":"create","data":{"user_id":"u1","title":"Good"}},
-                    {"id":"bbb22222-2222-2222-2222-222222222222","table_name":"test_products","operation":"create","data":{"name":"Bad"}}
-                ]"#.into(),
-            ],
-        )
-        .unwrap();
-        let resp = resp.unwrap().0;
-
-        // accepted: 1, rejected: 1
-        assert_eq!(resp["accepted"].as_array().unwrap().len(), 1);
-        assert_eq!(resp["rejected"].as_array().unwrap().len(), 1);
-
-        // Envelope fields present.
-        assert!(resp.get("checkpoint").is_some());
-        let server_time = resp.get("server_time").and_then(|v| v.as_str()).unwrap();
-        assert!(chrono::DateTime::parse_from_rfc3339(server_time).is_ok());
-        assert!(resp.get("schema_version").is_some());
-        assert!(resp.get("schema_hash").is_some());
-    }
-
-    #[pg_test]
-    fn test_push_response_all_accepted() {
-        setup_test_tables();
-        register_client("u1", "c1");
-
-        let resp: Option<pgrx::JsonB> = Spi::get_one_with_args(
-            "SELECT synchro_push($1, $2, $3::jsonb, 0, '')",
-            &[
-                "u1".into(),
-                "c1".into(),
-                r#"[{"id":"ccc33333-3333-3333-3333-333333333333","table_name":"test_orders","operation":"create","data":{"user_id":"u1","title":"All Good"}}]"#.into(),
-            ],
-        )
-        .unwrap();
-        let resp = resp.unwrap().0;
-
-        assert_eq!(resp["accepted"].as_array().unwrap().len(), 1);
-        // rejected must be an empty array, not null or missing.
-        assert_eq!(resp["rejected"].as_array().unwrap().len(), 0);
-    }
-
-    #[pg_test]
-    fn test_push_response_all_rejected() {
-        setup_test_tables();
-        register_client("u1", "c1");
-
-        let resp: Option<pgrx::JsonB> = Spi::get_one_with_args(
-            "SELECT synchro_push($1, $2, $3::jsonb, 0, '')",
-            &[
-                "u1".into(),
-                "c1".into(),
-                r#"[{"id":"ddd44444-4444-4444-4444-444444444444","table_name":"test_products","operation":"create","data":{"name":"Nope"}}]"#.into(),
-            ],
-        )
-        .unwrap();
-        let resp = resp.unwrap().0;
-
-        // accepted must be an empty array, not null or missing.
-        assert_eq!(resp["accepted"].as_array().unwrap().len(), 0);
-        assert_eq!(resp["rejected"].as_array().unwrap().len(), 1);
-    }
-
-    #[pg_test]
-    fn test_push_result_fields() {
-        setup_test_tables();
-        register_client("u1", "c1");
-
-        let resp: Option<pgrx::JsonB> = Spi::get_one_with_args(
-            "SELECT synchro_push($1, $2, $3::jsonb, 0, '')",
-            &[
-                "u1".into(),
-                "c1".into(),
-                r#"[{"id":"eee55555-5555-5555-5555-555555555555","table_name":"test_products","operation":"create","data":{"name":"Fields"}}]"#.into(),
-            ],
-        )
-        .unwrap();
-        let resp = resp.unwrap().0;
-
-        let result = &resp["rejected"][0];
-        // Must have id, table_name, operation, status, reason_code.
-        assert_eq!(
-            result["id"].as_str().unwrap(),
-            "eee55555-5555-5555-5555-555555555555"
-        );
-        assert_eq!(result["table_name"].as_str().unwrap(), "test_products");
-        assert_eq!(result["operation"].as_str().unwrap(), "create");
-        assert_eq!(result["status"].as_str().unwrap(), "rejected_terminal");
-        assert_eq!(result["reason_code"].as_str().unwrap(), "table_read_only");
-        // Must NOT have a "reason" field (old name).
-        assert!(result.get("reason").is_none());
-    }
-
-    // -----------------------------------------------------------------------
-    // Pull (12 tests)
-    // -----------------------------------------------------------------------
-
-    /// Helper: set up a client with changelog fixtures for pull tests.
-    fn setup_pull_fixtures() {
-        setup_test_tables();
-        register_client("u1", "c1");
-
-        // Insert test records.
-        Spi::run(
-            "INSERT INTO test_orders (id, user_id, title, internal_notes) VALUES
-             ('a1111111-1111-1111-1111-111111111111', 'u1', 'Order 1', 'secret1'),
-             ('a2222222-2222-2222-2222-222222222222', 'u1', 'Order 2', 'secret2')",
-        )
-        .unwrap();
-
-        // Insert changelog entries.
-        insert_changelog(
-            "user:u1",
-            "test_orders",
-            "a1111111-1111-1111-1111-111111111111",
-            1,
-        );
-        insert_changelog(
-            "user:u1",
-            "test_orders",
-            "a2222222-2222-2222-2222-222222222222",
-            1,
-        );
-
-        // Insert edges.
-        insert_edge(
-            "test_orders",
-            "a1111111-1111-1111-1111-111111111111",
-            "user:u1",
-        );
-        insert_edge(
-            "test_orders",
-            "a2222222-2222-2222-2222-222222222222",
-            "user:u1",
-        );
-    }
-
-    #[pg_test]
-    fn test_pull_returns_hydrated_changes() {
-        setup_pull_fixtures();
-
-        let resp: Option<pgrx::JsonB> = Spi::get_one_with_args(
-            "SELECT synchro_pull($1, $2, 0, NULL, 100, NULL, NULL, 0, '')",
-            &["u1".into(), "c1".into()],
-        )
-        .unwrap();
-        let resp = resp.unwrap().0;
-
-        let changes = resp["changes"].as_array().unwrap();
-        assert!(changes.len() >= 2);
-        // Each change should have id, table_name, data, checksum.
-        let c = &changes[0];
-        assert!(c.get("id").is_some());
-        assert!(c.get("table_name").is_some());
-        assert!(c.get("data").is_some());
-        assert!(c.get("checksum").is_some());
-    }
-
-    #[pg_test]
-    fn test_pull_returns_deletes() {
-        setup_test_tables();
-        register_client("u1", "c1");
-
-        // Insert a delete changelog entry.
-        insert_changelog("user:u1", "test_orders", "deleted-id", 3); // 3 = Delete
-
-        let resp: Option<pgrx::JsonB> = Spi::get_one_with_args(
-            "SELECT synchro_pull($1, $2, 0, NULL, 100, NULL, NULL, 0, '')",
-            &["u1".into(), "c1".into()],
-        )
-        .unwrap();
-        let resp = resp.unwrap().0;
-
-        let deletes = resp["deletes"].as_array().unwrap();
-        assert!(deletes.len() >= 1);
-        let d = deletes
-            .iter()
-            .find(|d| d["id"].as_str() == Some("deleted-id"));
-        assert!(d.is_some());
-    }
-
     #[pg_test]
     fn test_pull_deduplication() {
-        setup_test_tables();
-        register_client("u1", "c1");
-
-        Spi::run(
-            "INSERT INTO test_orders (id, user_id, title) VALUES
-             ('de000111-1111-1111-1111-111111111111', 'u1', 'Dedup Test')",
-        )
-        .unwrap();
-        insert_edge(
-            "test_orders",
-            "de000111-1111-1111-1111-111111111111",
-            "user:u1",
-        );
-
-        // Two changelog entries for the same record. Pull should dedup to 1.
+        setup_pull_fixtures();
         insert_changelog(
             "user:u1",
             "test_orders",
-            "de000111-1111-1111-1111-111111111111",
-            1,
-        );
-        insert_changelog(
-            "user:u1",
-            "test_orders",
-            "de000111-1111-1111-1111-111111111111",
+            "a1111111-1111-1111-1111-111111111111",
             2,
         );
 
-        let resp: Option<pgrx::JsonB> = Spi::get_one_with_args(
-            "SELECT synchro_pull($1, $2, 0, NULL, 100, NULL, NULL, 0, '')",
-            &["u1".into(), "c1".into()],
-        )
-        .unwrap();
-        let resp = resp.unwrap().0;
+        let resp = pull_client(
+            "u1",
+            "c1",
+            1,
+            json!({ "user:u1": { "cursor": "0" } }),
+            100,
+            Some("requested"),
+        );
 
-        let changes = resp["changes"].as_array().unwrap();
-        let matches: Vec<_> = changes
+        let hits = resp["changes"]
+            .as_array()
+            .unwrap()
             .iter()
-            .filter(|c| c["id"].as_str() == Some("de000111-1111-1111-1111-111111111111"))
-            .collect();
-        assert_eq!(matches.len(), 1);
+            .filter(|change| change["pk"]["id"].as_str() == Some("a1111111-1111-1111-1111-111111111111"))
+            .count();
+        assert_eq!(hits, 1);
     }
 
     #[pg_test]
     fn test_pull_pagination_has_more() {
-        setup_test_tables();
-        register_client("u1", "c1");
+        setup_pull_fixtures();
 
-        // Insert 3 changelog entries.
-        for i in 1..=3 {
-            let id = format!("a{i:07}0-0000-0000-0000-000000000000");
-            insert_changelog("user:u1", "test_orders", &id, 1);
-        }
-
-        // Pull with limit=2. Should have has_more=true.
-        let resp: Option<pgrx::JsonB> = Spi::get_one_with_args(
-            "SELECT synchro_pull($1, $2, 0, NULL, 2, NULL, NULL, 0, '')",
-            &["u1".into(), "c1".into()],
-        )
-        .unwrap();
-        let resp = resp.unwrap().0;
+        let resp = pull_client(
+            "u1",
+            "c1",
+            1,
+            json!({ "user:u1": { "cursor": "0" } }),
+            1,
+            None,
+        );
         assert_eq!(resp["has_more"].as_bool(), Some(true));
-    }
-
-    #[pg_test]
-    fn test_pull_checkpoint_advances() {
-        setup_pull_fixtures();
-
-        let resp: Option<pgrx::JsonB> = Spi::get_one_with_args(
-            "SELECT synchro_pull($1, $2, 0, NULL, 100, NULL, NULL, 0, '')",
-            &["u1".into(), "c1".into()],
-        )
-        .unwrap();
-        let resp = resp.unwrap().0;
-
-        let checkpoint = resp["checkpoint"].as_i64().unwrap();
-        assert!(checkpoint > 0);
-
-        // Verify persisted in sync_clients.
-        let stored: Option<i64> = Spi::get_one_with_args(
-            "SELECT last_pull_seq FROM sync_clients WHERE user_id = $1 AND client_id = $2",
-            &["u1".into(), "c1".into()],
-        )
-        .unwrap();
-        assert_eq!(stored, Some(checkpoint));
-    }
-
-    #[pg_test]
-    fn test_pull_checkpoint_monotonic() {
-        setup_pull_fixtures();
-
-        // First pull: advances checkpoint.
-        let resp1: Option<pgrx::JsonB> = Spi::get_one_with_args(
-            "SELECT synchro_pull($1, $2, 0, NULL, 100, NULL, NULL, 0, '')",
-            &["u1".into(), "c1".into()],
-        )
-        .unwrap();
-        let cp1 = resp1.unwrap().0["checkpoint"].as_i64().unwrap();
-
-        // Second pull from checkpoint: should not regress.
-        let resp2: Option<pgrx::JsonB> = Spi::get_one_with_args(
-            "SELECT synchro_pull($1, $2, $3, NULL, 100, NULL, NULL, 0, '')",
-            &["u1".into(), "c1".into(), cp1.into()],
-        )
-        .unwrap();
-        let cp2 = resp2.unwrap().0["checkpoint"].as_i64().unwrap();
-        assert!(cp2 >= cp1);
     }
 
     #[pg_test]
     fn test_pull_exclude_columns_stripped() {
         setup_pull_fixtures();
 
-        let resp: Option<pgrx::JsonB> = Spi::get_one_with_args(
-            "SELECT synchro_pull($1, $2, 0, NULL, 100, NULL, NULL, 0, '')",
-            &["u1".into(), "c1".into()],
-        )
-        .unwrap();
-        let resp = resp.unwrap().0;
+        let resp = pull_client(
+            "u1",
+            "c1",
+            1,
+            json!({ "user:u1": { "cursor": "0" } }),
+            100,
+            Some("requested"),
+        );
 
-        // internal_notes is in exclude_columns. Must not appear in hydrated data.
         for change in resp["changes"].as_array().unwrap() {
-            if change["table_name"].as_str() == Some("test_orders") {
-                let data = &change["data"];
-                assert!(
-                    data.get("internal_notes").is_none(),
-                    "internal_notes should be stripped from pull response"
-                );
+            if change["table"].as_str() == Some("test_orders") {
+                assert!(change["row"].get("internal_notes").is_none());
             }
         }
     }
@@ -2348,29 +2323,25 @@ mod tests {
             1,
         );
 
-        let resp: Option<pgrx::JsonB> = Spi::get_one_with_args(
-            "SELECT synchro_pull($1, $2, 0, NULL, 100, NULL, NULL, 0, '')",
-            &["u1".into(), "c1".into()],
-        )
-        .unwrap();
-        let resp = resp.unwrap().0;
+        let resp = pull_client(
+            "u1",
+            "c1",
+            1,
+            json!({ "user:u1": { "cursor": "0" } }),
+            100,
+            Some("requested"),
+        );
 
         let change = resp["changes"]
             .as_array()
             .unwrap()
             .iter()
-            .find(|change| change["table_name"].as_str() == Some("test_sync_columns_items"))
+            .find(|change| change["table"].as_str() == Some("test_sync_columns_items"))
             .expect("test_sync_columns_items should be present in pull response");
-        let data = &change["data"];
-        assert_eq!(data["title"].as_str(), Some("Projection test"));
-        assert!(
-            data.get("search_vector").is_none(),
-            "non-synced search_vector should be stripped from pull response"
-        );
-        assert!(
-            data.get("internal_notes").is_none(),
-            "non-synced internal_notes should be stripped from pull response"
-        );
+        let row = &change["row"];
+        assert_eq!(row["title"].as_str(), Some("Projection test"));
+        assert!(row.get("search_vector").is_none());
+        assert!(row.get("internal_notes").is_none());
     }
 
     #[pg_test]
@@ -2379,7 +2350,6 @@ mod tests {
         register_client("u1", "c1");
         register_client("u2", "c2");
 
-        // Insert records for each user.
         Spi::run(
             "INSERT INTO test_orders (id, user_id, title) VALUES
              ('a00000a1-1111-1111-1111-111111111111', 'u1', 'User1 Order'),
@@ -2410,260 +2380,69 @@ mod tests {
             "user:u2",
         );
 
-        // u1 should only see their own data.
-        let resp: Option<pgrx::JsonB> = Spi::get_one_with_args(
-            "SELECT synchro_pull($1, $2, 0, NULL, 100, NULL, NULL, 0, '')",
-            &["u1".into(), "c1".into()],
-        )
-        .unwrap();
-        let resp = resp.unwrap().0;
-
-        let changes = resp["changes"].as_array().unwrap();
-        for c in changes {
-            if c["table_name"].as_str() == Some("test_orders") {
-                assert_ne!(
-                    c["id"].as_str(),
-                    Some("a00000a2-2222-2222-2222-222222222222"),
-                    "u1 should not see u2's data"
-                );
-            }
-        }
-    }
-
-    #[pg_test]
-    fn test_pull_per_bucket_independent() {
-        setup_test_tables();
-        register_client("u1", "c1");
-
-        // Insert into user:u1 bucket and global bucket at different seqs.
-        insert_changelog("user:u1", "test_orders", "per-bucket-user-record", 1);
-        insert_changelog("global", "test_products", "per-bucket-global-record", 1);
-
-        // Pull with per-bucket checkpoints. Advance user:u1 past its entry.
-        let bucket_cps = serde_json::json!({"user:u1": 999999, "global": 0});
-        let resp: Option<pgrx::JsonB> = Spi::get_one_with_args(
-            "SELECT synchro_pull($1, $2, 0, $3::jsonb, 100, NULL, NULL, 0, '')",
-            &["u1".into(), "c1".into(), pgrx::JsonB(bucket_cps).into()],
-        )
-        .unwrap();
-        let resp = resp.unwrap().0;
-
-        // user:u1 entries should be filtered (already seen), but global should not.
-        let empty: Vec<Value> = vec![];
-        let changes = resp["changes"].as_array().unwrap_or(&empty);
-        let deletes = resp["deletes"].as_array().unwrap_or(&empty);
-        let user_entries: Vec<_> = changes
-            .iter()
-            .chain(deletes.iter())
-            .filter(|e| {
-                e.get("id")
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.contains("per-bucket-user"))
-                    .unwrap_or(false)
-            })
-            .collect();
-        assert!(
-            user_entries.is_empty(),
-            "user:u1 entries should be filtered by per-bucket checkpoint"
+        let resp = pull_client(
+            "u1",
+            "c1",
+            1,
+            json!({ "user:u1": { "cursor": "0" } }),
+            100,
+            Some("requested"),
         );
-    }
 
-    #[pg_test]
-    fn test_pull_stale_returns_rebuild() {
-        setup_test_tables();
-        register_client("u1", "c1");
-
-        // Insert a changelog entry to establish min_seq.
-        insert_changelog("user:u1", "test_orders", "stale-record", 1);
-
-        // Pull with per-bucket checkpoints where the bucket checkpoint
-        // has no entry (None). This should trigger stale detection for
-        // buckets not in bucket_cps.
-        // Actually, stale detection fires when bucket_cps[bucket] > 0 AND < min_seq.
-        // Let's set up a scenario: insert entries, compact to raise min_seq.
-        // Simpler: just verify that rebuild_buckets appears when stale is detected.
-        // We need min_seq > 0 and a bucket checkpoint between 0 (exclusive) and min_seq.
-
-        // Get the current min seq.
-        let min_seq: Option<i64> =
-            Spi::get_one("SELECT COALESCE(MIN(seq), 0) FROM sync_changelog").unwrap();
-        let min_seq = min_seq.unwrap_or(0);
-
-        if min_seq > 1 {
-            // Set a bucket checkpoint below min_seq.
-            let bucket_cps = serde_json::json!({"user:u1": 1, "global": 1});
-            let resp: Option<pgrx::JsonB> = Spi::get_one_with_args(
-                "SELECT synchro_pull($1, $2, 0, $3::jsonb, 100, NULL, NULL, 0, '')",
-                &["u1".into(), "c1".into(), pgrx::JsonB(bucket_cps).into()],
-            )
-            .unwrap();
-            let resp = resp.unwrap().0;
-
-            // Should contain rebuild_buckets.
-            assert!(resp.get("rebuild_buckets").is_some());
-        }
-        // If min_seq <= 1, stale detection can't fire. This is expected in a fresh
-        // test database. The test validates the code path exists.
-    }
-
-    #[pg_test]
-    fn test_pull_stale_no_checkpoint_advance() {
-        setup_test_tables();
-        register_client("u1", "c1");
-
-        // Set initial checkpoint.
-        Spi::run_with_args(
-            "UPDATE sync_clients SET last_pull_seq = 5 WHERE user_id = $1 AND client_id = $2",
-            &["u1".into(), "c1".into()],
-        )
-        .unwrap();
-
-        // Insert entries and simulate stale by setting bucket checkpoint below min.
-        insert_changelog("user:u1", "test_orders", "stale-cp-record", 1);
-
-        // Pull. Even if stale, checkpoint must not advance beyond where it was.
-        let resp: Option<pgrx::JsonB> = Spi::get_one_with_args(
-            "SELECT synchro_pull($1, $2, 5, NULL, 100, NULL, NULL, 0, '')",
-            &["u1".into(), "c1".into()],
-        )
-        .unwrap();
-        let resp = resp.unwrap().0;
-
-        // If stale, checkpoint should remain at the input value (not advanced).
-        if resp.get("rebuild_buckets").is_some() {
-            let cp = resp["checkpoint"].as_i64().unwrap();
-            assert_eq!(cp, 5, "checkpoint should not advance when stale");
-        }
-    }
-
-    #[pg_test]
-    fn test_pull_checksums_final_page() {
-        setup_pull_fixtures();
-
-        // Pull all (no has_more). Should include bucket_checksums.
-        let resp: Option<pgrx::JsonB> = Spi::get_one_with_args(
-            "SELECT synchro_pull($1, $2, 0, NULL, 1000, NULL, NULL, 0, '')",
-            &["u1".into(), "c1".into()],
-        )
-        .unwrap();
-        let resp = resp.unwrap().0;
-
-        if resp["has_more"].as_bool() == Some(false) {
-            // Final page: bucket_checksums should be present.
-            assert!(
-                resp.get("bucket_checksums").is_some(),
-                "final page should include bucket_checksums"
+        for change in resp["changes"].as_array().unwrap() {
+            assert_ne!(
+                change["pk"]["id"].as_str(),
+                Some("a00000a2-2222-2222-2222-222222222222")
             );
         }
     }
 
-    // -----------------------------------------------------------------------
-    // Pull Bucket Updates (4 tests)
-    // -----------------------------------------------------------------------
-
     #[pg_test]
-    fn test_pull_bucket_updates_added() {
+    fn test_pull_scope_updates_added() {
         setup_test_tables();
         register_client("u1", "c1");
 
-        // Client thinks it only has "global". Server has "user:u1" and "global".
-        let resp: Option<pgrx::JsonB> = Spi::get_one_with_args(
-            "SELECT synchro_pull($1, $2, 0, NULL, 100, NULL, ARRAY['global'], 0, '')",
-            &["u1".into(), "c1".into()],
-        )
-        .unwrap();
-        let resp = resp.unwrap().0;
-
-        let updates = resp.get("bucket_updates");
-        assert!(updates.is_some(), "bucket_updates should be present");
-        let added = updates.unwrap()["added"].as_array().unwrap();
+        let resp = pull_client("u1", "c1", 0, json!({}), 100, None);
+        let added = resp["scope_updates"]["add"].as_array().unwrap();
         assert!(
-            added.iter().any(|v| v.as_str() == Some("user:u1")),
-            "user:u1 should be in added"
+            added.iter().any(|scope| scope["id"].as_str() == Some("user:u1")),
+            "user:u1 should be present in scope updates"
         );
     }
 
     #[pg_test]
-    fn test_pull_bucket_updates_removed() {
+    fn test_pull_scope_updates_removed() {
         setup_test_tables();
         register_client("u1", "c1");
 
-        // Client thinks it has "user:u1", "global", and "team:old".
-        // Server only has "user:u1" and "global". "team:old" should be removed.
-        let resp: Option<pgrx::JsonB> = Spi::get_one_with_args(
-            "SELECT synchro_pull($1, $2, 0, NULL, 100, NULL, ARRAY['user:u1','global','team:old'], 0, '')",
-            &["u1".into(), "c1".into()],
-        )
-        .unwrap();
-        let resp = resp.unwrap().0;
-
-        let updates = resp.get("bucket_updates");
-        assert!(updates.is_some(), "bucket_updates should be present");
-        let removed = updates.unwrap()["removed"].as_array().unwrap();
+        let resp = pull_client(
+            "u1",
+            "c1",
+            0,
+            json!({ "team:old": { "cursor": "0" } }),
+            100,
+            None,
+        );
+        let removed = resp["scope_updates"]["remove"].as_array().unwrap();
         assert!(
-            removed.iter().any(|v| v.as_str() == Some("team:old")),
-            "team:old should be in removed"
+            removed.iter().any(|scope| scope.as_str() == Some("team:old")),
+            "team:old should be removed"
         );
     }
 
     #[pg_test]
-    fn test_pull_bucket_updates_unchanged() {
+    fn test_pull_scope_updates_unchanged() {
         setup_test_tables();
         register_client("u1", "c1");
 
-        // Client known_buckets matches server exactly.
-        let resp: Option<pgrx::JsonB> = Spi::get_one_with_args(
-            "SELECT synchro_pull($1, $2, 0, NULL, 100, NULL, ARRAY['user:u1'], 0, '')",
-            &["u1".into(), "c1".into()],
-        )
-        .unwrap();
-        let resp = resp.unwrap().0;
+        let scopes = client_scope_ids("u1", "c1")
+            .into_iter()
+            .map(|scope_id| (scope_id, json!({ "cursor": "0" })))
+            .collect::<serde_json::Map<String, Value>>();
+        let resp = pull_client("u1", "c1", 1, Value::Object(scopes), 100, None);
 
-        // No bucket_updates when nothing changed.
-        assert!(
-            resp.get("bucket_updates").is_none(),
-            "bucket_updates should not be present when unchanged"
-        );
-    }
-
-    #[pg_test]
-    fn test_pull_bucket_updates_null() {
-        setup_test_tables();
-        register_client("u1", "c1");
-
-        // known_buckets not sent (NULL).
-        let resp: Option<pgrx::JsonB> = Spi::get_one_with_args(
-            "SELECT synchro_pull($1, $2, 0, NULL, 100, NULL, NULL, 0, '')",
-            &["u1".into(), "c1".into()],
-        )
-        .unwrap();
-        let resp = resp.unwrap().0;
-
-        assert!(
-            resp.get("bucket_updates").is_none(),
-            "bucket_updates should not be present when known_buckets is NULL"
-        );
-    }
-
-    // -----------------------------------------------------------------------
-    // Rebuild (6 tests)
-    // -----------------------------------------------------------------------
-
-    #[pg_test]
-    fn test_rebuild_basic() {
-        setup_pull_fixtures(); // Creates records + edges
-
-        let resp: Option<pgrx::JsonB> = Spi::get_one_with_args(
-            "SELECT synchro_rebuild($1, $2, 'user:u1', '', 100, 0, '')",
-            &["u1".into(), "c1".into()],
-        )
-        .unwrap();
-        let resp = resp.unwrap().0;
-
-        let records = resp["records"].as_array().unwrap();
-        assert!(!records.is_empty());
-        assert!(resp.get("checkpoint").is_some());
-        assert!(resp.get("schema_version").is_some());
+        assert_eq!(resp["scope_updates"]["add"].as_array().unwrap().len(), 0);
+        assert_eq!(resp["scope_updates"]["remove"].as_array().unwrap().len(), 0);
     }
 
     #[pg_test]
@@ -2671,7 +2450,6 @@ mod tests {
         setup_test_tables();
         register_client("u1", "c1");
 
-        // Insert 3 records with edges.
         for i in 1..=3 {
             let id = format!("b000000{i}-0000-0000-0000-000000000000");
             Spi::run_with_args(
@@ -2682,26 +2460,13 @@ mod tests {
             insert_edge("test_orders", &id, "user:u1");
         }
 
-        // First page: limit=2.
-        let resp1: Option<pgrx::JsonB> = Spi::get_one_with_args(
-            "SELECT synchro_rebuild($1, $2, 'user:u1', '', 2, 0, '')",
-            &["u1".into(), "c1".into()],
-        )
-        .unwrap();
-        let resp1 = resp1.unwrap().0;
-        assert_eq!(resp1["has_more"].as_bool(), Some(true));
-        let cursor = resp1["cursor"].as_str().unwrap();
+        let first = rebuild_client("u1", "c1", "user:u1", None, 2);
+        assert_eq!(first["has_more"].as_bool(), Some(true));
+        let cursor = first["cursor"].as_str().unwrap();
         assert!(!cursor.is_empty());
 
-        // Second page using cursor.
-        let resp2: Option<pgrx::JsonB> = Spi::get_one_with_args(
-            "SELECT synchro_rebuild($1, $2, 'user:u1', $3, 2, 0, '')",
-            &["u1".into(), "c1".into(), cursor.into()],
-        )
-        .unwrap();
-        let resp2 = resp2.unwrap().0;
-        // Should have remaining records.
-        assert!(resp2["records"].as_array().unwrap().len() >= 1);
+        let second = rebuild_client("u1", "c1", "user:u1", Some(cursor), 2);
+        assert!(!second["records"].as_array().unwrap().is_empty());
     }
 
     #[pg_test]
@@ -2720,68 +2485,30 @@ mod tests {
             "user:u1",
         );
 
-        let resp: Option<pgrx::JsonB> = Spi::get_one_with_args(
-            "SELECT synchro_rebuild($1, $2, 'user:u1', '', 100, 0, '')",
-            &["u1".into(), "c1".into()],
-        )
-        .unwrap();
-        let resp = resp.unwrap().0;
-
-        let records = resp["records"].as_array().unwrap();
-        let deleted = records
+        let resp = rebuild_client("u1", "c1", "user:u1", None, 100);
+        let deleted = resp["records"]
+            .as_array()
+            .unwrap()
             .iter()
-            .any(|r| r["id"].as_str() == Some("bde10000-1111-1111-1111-111111111111"));
-        assert!(
-            !deleted,
-            "soft-deleted records should be filtered from rebuild"
-        );
+            .any(|record| record["pk"]["id"].as_str() == Some("bde10000-1111-1111-1111-111111111111"));
+        assert!(!deleted);
     }
 
     #[pg_test]
-    fn test_rebuild_sets_checkpoint() {
+    fn test_rebuild_persists_final_scope_cursor() {
         setup_pull_fixtures();
 
-        let resp: Option<pgrx::JsonB> = Spi::get_one_with_args(
-            "SELECT synchro_rebuild($1, $2, 'user:u1', '', 1000, 0, '')",
+        let resp = rebuild_client("u1", "c1", "user:u1", None, 1000);
+        assert_eq!(resp["has_more"].as_bool(), Some(false));
+        let final_scope_cursor = resp["final_scope_cursor"].as_str().unwrap();
+
+        let stored: Option<i64> = Spi::get_one_with_args(
+            "SELECT checkpoint FROM sync_client_checkpoints
+             WHERE user_id = $1 AND client_id = $2 AND bucket_id = 'user:u1'",
             &["u1".into(), "c1".into()],
         )
         .unwrap();
-        let resp = resp.unwrap().0;
-
-        if resp["has_more"].as_bool() == Some(false) {
-            let cp = resp["checkpoint"].as_i64().unwrap();
-            // Verify checkpoint persisted in sync_client_checkpoints.
-            let stored: Option<i64> = Spi::get_one_with_args(
-                "SELECT checkpoint FROM sync_client_checkpoints \
-                 WHERE user_id = $1 AND client_id = $2 AND bucket_id = 'user:u1'",
-                &["u1".into(), "c1".into()],
-            )
-            .unwrap();
-            assert_eq!(stored, Some(cp));
-        }
-    }
-
-    #[pg_test]
-    fn test_rebuild_advances_legacy() {
-        setup_pull_fixtures();
-
-        let resp: Option<pgrx::JsonB> = Spi::get_one_with_args(
-            "SELECT synchro_rebuild($1, $2, 'user:u1', '', 1000, 0, '')",
-            &["u1".into(), "c1".into()],
-        )
-        .unwrap();
-        let resp = resp.unwrap().0;
-
-        if resp["has_more"].as_bool() == Some(false) {
-            let cp = resp["checkpoint"].as_i64().unwrap();
-            let legacy: Option<i64> = Spi::get_one_with_args(
-                "SELECT last_pull_seq FROM sync_clients WHERE user_id = $1 AND client_id = $2",
-                &["u1".into(), "c1".into()],
-            )
-            .unwrap();
-            // Legacy checkpoint should be >= rebuild checkpoint.
-            assert!(legacy.unwrap_or(0) >= cp);
-        }
+        assert_eq!(stored.map(|value| value.to_string()), Some(final_scope_cursor.to_string()));
     }
 
     #[pg_test]
@@ -2789,16 +2516,8 @@ mod tests {
         setup_test_tables();
         register_client("u1", "c1");
 
-        // u1 is not subscribed to "team:other".
-        let resp: Option<pgrx::JsonB> = Spi::get_one_with_args(
-            "SELECT synchro_rebuild($1, $2, 'team:other', '', 100, 0, '')",
-            &["u1".into(), "c1".into()],
-        )
-        .unwrap();
-        let resp = resp.unwrap().0;
-
-        // Should return a client_not_found error (not subscribed to bucket).
-        assert!(resp.get("error").is_some());
+        let resp = rebuild_client("u1", "c1", "team:other", None, 100);
+        assert_eq!(resp["error"]["code"].as_str(), Some("invalid_request"));
     }
 
     // -----------------------------------------------------------------------
@@ -2852,7 +2571,7 @@ mod tests {
         insert_changelog("user:u1", "test_orders", "preserve-1", 1);
         insert_changelog("user:u1", "test_orders", "preserve-2", 1);
 
-        // Client has never pulled (last_pull_seq is NULL or 0).
+        // Client has never pulled and seeded bucket checkpoints remain at 0.
         // safe_seq should be 0, so nothing gets deleted.
         let resp: Option<pgrx::JsonB> =
             Spi::get_one("SELECT synchro_compact('7 days', 10000)").unwrap();
@@ -2866,28 +2585,28 @@ mod tests {
     }
 
     #[pg_test]
-    fn test_compact_safe_seq_both_sources() {
+    fn test_compact_safe_seq_uses_bucket_checkpoints() {
         setup_test_tables();
         register_client("u1", "c1");
 
-        // Insert entries and advance both legacy and per-bucket checkpoints.
+        // Insert entries and advance only the per-bucket checkpoint.
         insert_changelog("user:u1", "test_orders", "both-src-1", 1);
         insert_changelog("user:u1", "test_orders", "both-src-2", 1);
 
-        // Advance legacy to seq 1.
+        // Advance the bucket checkpoint to seq 1.
         Spi::run_with_args(
-            "UPDATE sync_clients SET last_pull_seq = 1 WHERE user_id = $1 AND client_id = $2",
+            "UPDATE sync_client_checkpoints SET checkpoint = 1 \
+             WHERE user_id = $1 AND client_id = $2 AND bucket_id = 'user:u1'",
             &["u1".into(), "c1".into()],
         )
         .unwrap();
 
-        // Compact should respect the minimum of both checkpoint sources.
+        // Compaction should use the active bucket checkpoint as safe_seq.
         let resp: Option<pgrx::JsonB> =
             Spi::get_one("SELECT synchro_compact('7 days', 10000)").unwrap();
         let resp = resp.unwrap().0;
 
-        // safe_seq should be <= 1 (the legacy checkpoint).
-        assert!(resp["safe_seq"].as_i64().unwrap_or(0) <= 1);
+        assert_eq!(resp["safe_seq"].as_i64(), Some(1));
     }
 
     #[pg_test]
@@ -2912,10 +2631,10 @@ mod tests {
     fn test_schema_returns_columns() {
         setup_test_tables();
 
-        let resp: Option<pgrx::JsonB> = Spi::get_one("SELECT synchro_schema()").unwrap();
+        let resp: Option<pgrx::JsonB> = Spi::get_one("SELECT synchro_schema_manifest()").unwrap();
         let resp = resp.unwrap().0;
 
-        let tables = resp["tables"].as_array().unwrap();
+        let tables = resp["manifest"]["tables"].as_array().unwrap();
         assert!(!tables.is_empty());
         // At least one table should have columns.
         let has_columns = tables.iter().any(|t| {
@@ -2928,7 +2647,7 @@ mod tests {
     }
 
     #[pg_test]
-    fn test_schema_manifest_vnext_validates_against_core_contract() {
+    fn test_schema_manifest_validates_against_core_contract() {
         setup_test_tables();
 
         let resp: Option<pgrx::JsonB> = Spi::get_one("SELECT synchro_schema_manifest()").unwrap();
@@ -2967,27 +2686,24 @@ mod tests {
     }
 
     #[pg_test]
+    fn test_contract_info_reports_canonical_versions() {
+        let resp: Option<pgrx::JsonB> = Spi::get_one("SELECT synchro_contract_info()").unwrap();
+        let resp = resp.unwrap().0;
+
+        assert_eq!(
+            resp["sql_contract_version"].as_i64(),
+            Some(crate::client::SQL_CONTRACT_VERSION as i64)
+        );
+        assert_eq!(
+            resp["protocol_version"].as_i64(),
+            Some(crate::client::PROTOCOL_VERSION as i64)
+        );
+        assert!(resp["extension_version"].as_str().is_some());
+    }
+
+    #[pg_test]
     fn test_schema_surfaces_use_sync_columns_as_canonical_shape() {
         setup_sync_columns_table();
-
-        let legacy: Option<pgrx::JsonB> = Spi::get_one("SELECT synchro_schema()").unwrap();
-        let legacy = legacy.unwrap().0;
-        let legacy_table = legacy["tables"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|table| table["table_name"].as_str() == Some("test_sync_columns_items"))
-            .expect("legacy schema should include test_sync_columns_items");
-        let legacy_columns = legacy_table["columns"].as_array().unwrap();
-        assert!(legacy_columns
-            .iter()
-            .any(|column| column["name"].as_str() == Some("title")));
-        assert!(legacy_columns
-            .iter()
-            .all(|column| column["name"].as_str() != Some("search_vector")));
-        assert!(legacy_columns
-            .iter()
-            .all(|column| column["name"].as_str() != Some("internal_notes")));
 
         let manifest_resp: Option<pgrx::JsonB> =
             Spi::get_one("SELECT synchro_schema_manifest()").unwrap();
@@ -3018,17 +2734,6 @@ mod tests {
     #[pg_test]
     fn test_schema_surfaces_omit_missing_timestamp_columns() {
         setup_test_tables();
-
-        let legacy: Option<pgrx::JsonB> = Spi::get_one("SELECT synchro_schema()").unwrap();
-        let legacy = legacy.unwrap().0;
-        let bare_items = legacy["tables"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|table| table["table_name"].as_str() == Some("test_bare_items"))
-            .expect("legacy schema should include test_bare_items");
-        assert!(bare_items["updated_at_column"].is_null());
-        assert!(bare_items["deleted_at_column"].is_null());
 
         let manifest_resp: Option<pgrx::JsonB> =
             Spi::get_one("SELECT synchro_schema_manifest()").unwrap();
@@ -3155,40 +2860,65 @@ mod tests {
         setup_test_tables();
         register_client("u1", "c1");
 
-        // Push with wrong schema hash. Should return structured JSONB error.
         let resp: Option<pgrx::JsonB> = Spi::get_one_with_args(
-            "SELECT synchro_push($1, $2, '[]'::jsonb, 999, 'wrong_hash')",
-            &["u1".into(), "c1".into()],
+            "SELECT synchro_push($1, $2::jsonb)",
+            &[
+                "u1".into(),
+                json!({
+                    "client_id": "c1",
+                    "batch_id": "batch-schema-mismatch",
+                    "schema": { "version": 999, "hash": "wrong_hash" },
+                    "mutations": []
+                })
+                .to_string()
+                .into(),
+            ],
         )
         .unwrap();
         let resp = resp.unwrap().0;
 
-        assert_eq!(resp["error"].as_str(), Some("schema_mismatch"));
-        assert!(resp.get("server_schema_version").is_some());
-        assert!(resp.get("server_schema_hash").is_some());
-        // server_schema_version should be a real value, not 0.
-        assert!(resp["server_schema_version"].as_i64().unwrap_or(0) > 0);
+        assert_eq!(resp["error"]["code"].as_str(), Some("schema_mismatch"));
+        assert_eq!(resp["error"]["retryable"].as_bool(), Some(false));
+        assert!(resp["error"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("client schema"));
     }
 
     #[pg_test]
     fn test_client_not_found_returns_jsonb() {
         setup_test_tables();
 
-        // Pull with a non-existent client.
         let resp: Option<pgrx::JsonB> = Spi::get_one_with_args(
-            "SELECT synchro_pull($1, $2, 0, NULL, 100, NULL, NULL, 0, '')",
-            &["nonexistent_user".into(), "nonexistent_client".into()],
+            "SELECT synchro_pull($1, $2::jsonb)",
+            &[
+                "nonexistent_user".into(),
+                json!({
+                    "client_id": "nonexistent_client",
+                    "schema": { "version": 0, "hash": "" },
+                    "scope_set_version": 0,
+                    "scopes": {},
+                    "limit": 100
+                })
+                .to_string()
+                .into(),
+            ],
         )
         .unwrap();
         let resp = resp.unwrap().0;
 
-        assert_eq!(resp["error"].as_str(), Some("client_not_found"));
+        assert_eq!(resp["error"]["code"].as_str(), Some("invalid_request"));
+        assert_eq!(
+            resp["error"]["message"].as_str(),
+            Some("client is not registered")
+        );
+        assert_eq!(resp["error"]["retryable"].as_bool(), Some(false));
     }
 
     #[pg_test]
     fn test_schema_mismatch_no_manifest() {
         // Before any tables are registered, schema manifest is empty.
-        // Push with schema_version > 0 should pass (no manifest to validate against).
+        // Connect should accept any client schema when the server manifest is empty.
         Spi::run(
             "CREATE TABLE IF NOT EXISTS test_empty_table (
                 id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -3197,17 +2927,21 @@ mod tests {
         )
         .unwrap();
 
-        // Register a client without any tables registered.
-        // This calls validate_schema internally.
-        let resp: Option<pgrx::JsonB> = Spi::get_one_with_args(
-            "SELECT synchro_register_client($1, $2, 'test', '1.0.0', 1, 'somehash')",
-            &["empty_user".into(), "empty_client".into()],
-        )
-        .unwrap();
-        let resp = resp.unwrap().0;
+        let resp = connect_client(
+            "empty_user",
+            json!({
+                "client_id": "empty_client",
+                "platform": "test",
+                "app_version": "1.0.0",
+                "protocol_version": 1,
+                "schema": { "version": 1, "hash": "somehash" },
+                "scope_set_version": 0,
+                "known_scopes": {}
+            }),
+        );
 
-        // Should succeed, not error. The id field means it registered.
-        assert!(resp.get("id").is_some() || resp.get("error").is_none());
+        // Should succeed, not error.
+        assert!(resp.get("error").is_none());
     }
 
     // -----------------------------------------------------------------------
@@ -3227,17 +2961,22 @@ mod tests {
         )
         .unwrap();
 
-        // Client is 200ms behind server. With default 500ms tolerance, client wins.
-        let resp1: Option<pgrx::JsonB> = Spi::get_one_with_args(
-            "SELECT synchro_push($1, $2, $3::jsonb, 0, '')",
-            &[
-                "u1".into(),
-                "c1".into(),
-                r#"[{"id":"00c5e571-1111-1111-1111-111111111111","table_name":"test_orders","operation":"update","data":{"title":"Within 500ms"},"client_updated_at":"2025-06-15T11:59:59.800Z"}]"#.into(),
-            ],
-        )
-        .unwrap();
-        let status1 = resp1.unwrap().0["accepted"][0]["status"]
+        let resp1 = push_client(
+            "u1",
+            "c1",
+            "batch-skew-default",
+            json!([
+                {
+                    "mutation_id": "m-skew-default",
+                    "table": "test_orders",
+                    "op": "update",
+                    "pk": { "id": "00c5e571-1111-1111-1111-111111111111" },
+                    "client_version": "2025-06-15T11:59:59.800Z",
+                    "columns": { "title": "Within 500ms" }
+                }
+            ]),
+        );
+        let status1 = resp1["accepted"][0]["status"]
             .as_str()
             .unwrap()
             .to_string();
@@ -3255,15 +2994,22 @@ mod tests {
 
         // Push again with a client timestamp behind the (now-updated) server timestamp.
         // With 0ms tolerance, the 200ms gap means server wins.
-        let changes = format!(
-            r#"[{{"id":"00c5e571-1111-1111-1111-111111111111","table_name":"test_orders","operation":"update","data":{{"title":"With 0ms"}},"client_updated_at":"2020-01-01T00:00:00Z"}}]"#
+        let resp2 = push_client(
+            "u1",
+            "c1",
+            "batch-skew-zero",
+            json!([
+                {
+                    "mutation_id": "m-skew-zero",
+                    "table": "test_orders",
+                    "op": "update",
+                    "pk": { "id": "00c5e571-1111-1111-1111-111111111111" },
+                    "client_version": "2020-01-01T00:00:00Z",
+                    "columns": { "title": "With 0ms" }
+                }
+            ]),
         );
-        let resp2: Option<pgrx::JsonB> = Spi::get_one_with_args(
-            "SELECT synchro_push($1, $2, $3::jsonb, 0, '')",
-            &["u1".into(), "c1".into(), changes.as_str().into()],
-        )
-        .unwrap();
-        let status2 = resp2.unwrap().0["rejected"][0]["status"]
+        let status2 = resp2["rejected"][0]["status"]
             .as_str()
             .unwrap()
             .to_string();

@@ -110,9 +110,13 @@ final class SchemaIntegrationTests: XCTestCase {
 
     /// Create a copy of a SchemaTable with different columns.
     private func withColumns(_ table: SchemaTable, columns: [SchemaColumn]) -> SchemaTable {
-        var copy = table
-        copy.columns = columns
-        return copy
+        SchemaTable(
+            tableName: table.tableName,
+            updatedAtColumn: table.updatedAtColumn,
+            deletedAtColumn: table.deletedAtColumn,
+            primaryKey: table.primaryKey,
+            columns: columns
+        )
     }
 
     /// Create a seed database file with the given tables.

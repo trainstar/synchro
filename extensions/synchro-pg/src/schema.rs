@@ -1,33 +1,11 @@
 use pgrx::prelude::*;
 use pgrx::spi::SpiClient;
+use serde::Deserialize;
 use synchro_core::contract::{
     normalize_portable_type_name, ColumnSchema, IndexSchema, SchemaManifest, TableSchema,
 };
 
-/// Return the full schema contract for all registered tables.
-///
-/// Includes column metadata, types, nullability, defaults, and primary keys.
-/// Used by client SDKs to build local database schemas.
-#[pg_extern]
-fn synchro_schema() -> pgrx::JsonB {
-    Spi::connect(|client| {
-        let (schema_version, schema_hash) = crate::pull::get_latest_schema(client);
-        let tables = build_table_schemas(client);
-
-        pgrx::JsonB(serde_json::json!({
-            "schema_version": schema_version,
-            "schema_hash": schema_hash,
-            "server_time": server_time_str(client),
-            "tables": tables,
-        }))
-    })
-}
-
 /// Return the canonical portable schema manifest for registered synced tables.
-///
-/// This is the vNext-oriented schema surface intended for adapter and client
-/// contract work. The older `synchro_schema()` JSON remains for legacy
-/// compatibility during the audit sequence.
 #[pg_extern]
 fn synchro_schema_manifest() -> pgrx::JsonB {
     Spi::connect(|client| {
@@ -164,41 +142,6 @@ fn server_time_str(client: &SpiClient<'_>) -> String {
     chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
 }
 
-fn build_table_schemas(client: &SpiClient<'_>) -> Vec<serde_json::Value> {
-    let mut tables: Vec<serde_json::Value> = Vec::new();
-    let registrations = match crate::registry::load_registry_from_client(client) {
-        Ok(registrations) => registrations,
-        Err(_) => return vec![],
-    };
-
-    for registration in registrations {
-        let columns = introspect_columns(
-            client,
-            &registration.table_name,
-            &registration.pk_column,
-            &registration.sync_columns,
-        );
-        let table_name = registration.table_name.clone();
-        let pk_column = registration.pk_column.clone();
-        let updated_at_column =
-            optional_sync_column_name(registration.has_updated_at, &registration.updated_at_col);
-        let deleted_at_column =
-            optional_sync_column_name(registration.has_deleted_at, &registration.deleted_at_col);
-        let push_policy = registration.push_policy.as_str();
-
-        tables.push(serde_json::json!({
-            "table_name": table_name,
-            "push_policy": push_policy,
-            "dependencies": [],
-            "updated_at_column": updated_at_column,
-            "deleted_at_column": deleted_at_column,
-            "primary_key": [pk_column],
-            "columns": columns,
-        }));
-    }
-    tables
-}
-
 pub(crate) fn build_schema_manifest(client: &SpiClient<'_>) -> SchemaManifest {
     let mut tables = Vec::new();
     let registrations = match crate::registry::load_registry_from_client(client) {
@@ -240,88 +183,67 @@ pub(crate) fn build_schema_manifest(client: &SpiClient<'_>) -> SchemaManifest {
     manifest
 }
 
-fn introspect_columns(
-    client: &SpiClient<'_>,
-    table_name: &str,
-    pk_column: &str,
-    sync_columns: &[String],
-) -> Vec<serde_json::Value> {
-    let tup = match client.select(
-        "SELECT jsonb_build_object(
-             'name', a.attname,
-             'db_type', pg_catalog.format_type(a.atttypid, a.atttypmod),
-             'nullable', NOT a.attnotnull,
-             'default_sql', COALESCE(pg_catalog.pg_get_expr(ad.adbin, ad.adrelid), ''),
-             'default_kind', CASE
-                 WHEN ad.adbin IS NULL THEN 'none'
-                 ELSE 'server_expression'
-             END,
-             'is_primary_key', a.attname = $2
-         ) AS column_json \
-         FROM pg_catalog.pg_attribute a \
-         JOIN pg_catalog.pg_class c ON c.oid = a.attrelid \
-         JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
-         LEFT JOIN pg_catalog.pg_attrdef ad ON ad.adrelid = a.attrelid AND ad.adnum = a.attnum \
-         WHERE c.relname = $1 AND n.nspname = ANY(current_schemas(false)) \
-         AND a.attnum > 0 AND NOT a.attisdropped \
-         ORDER BY a.attnum",
-        None,
-        &[table_name.into(), pk_column.into()],
-    ) {
-        Ok(t) => t,
-        Err(_) => return vec![],
-    };
-
-    let sync_column_set: std::collections::HashSet<&str> =
-        sync_columns.iter().map(|column| column.as_str()).collect();
-    let mut columns: Vec<serde_json::Value> = Vec::new();
-    for row in tup {
-        if let Some(json) = row.get::<pgrx::JsonB>(1).unwrap_or(None) {
-            let mut column = json.0;
-            let is_synced = column
-                .get("name")
-                .and_then(|value| value.as_str())
-                .map(|name| sync_column_set.contains(name))
-                .unwrap_or(false);
-            if !is_synced {
-                continue;
-            }
-            if let Some(obj) = column.as_object_mut() {
-                let db_type = obj
-                    .get("db_type")
-                    .and_then(|value| value.as_str())
-                    .unwrap_or_default();
-                obj.insert(
-                    "logical_type".into(),
-                    serde_json::json!(legacy_logical_type(db_type)),
-                );
-            }
-            columns.push(column);
-        }
-    }
-    columns
-}
-
 fn introspect_manifest_columns(
     client: &SpiClient<'_>,
     table_name: &str,
     pk_column: &str,
     sync_columns: &[String],
 ) -> Vec<ColumnSchema> {
-    introspect_columns(client, table_name, pk_column, sync_columns)
-        .into_iter()
-        .filter_map(|column| {
-            let name = column.get("name").and_then(|value| value.as_str())?;
-            let db_type = column.get("db_type").and_then(|value| value.as_str())?;
-            let nullable = column.get("nullable").and_then(|value| value.as_bool())?;
+    #[derive(Deserialize)]
+    struct RawColumn {
+        name: String,
+        db_type: String,
+        nullable: bool,
+    }
 
-            Some(ColumnSchema {
-                name: name.to_string(),
-                type_name: portable_type_name(db_type),
-                nullable,
-            })
-        })
-        .collect()
+    let tup = match client.select(
+        "SELECT COALESCE(
+             jsonb_agg(
+                 jsonb_build_object(
+                     'name', a.attname,
+                     'db_type', pg_catalog.format_type(a.atttypid, a.atttypmod),
+                     'nullable', NOT a.attnotnull
+                 )
+                 ORDER BY a.attnum
+             ),
+             '[]'::jsonb
+         ) AS columns_json \
+         FROM pg_catalog.pg_attribute a \
+         JOIN pg_catalog.pg_class c ON c.oid = a.attrelid \
+         JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
+         WHERE c.relname = $1 AND n.nspname = ANY(current_schemas(false)) \
+           AND a.attnum > 0 AND NOT a.attisdropped \
+         GROUP BY c.oid",
+        None,
+        &[table_name.into()],
+    ) {
+        Ok(t) => t,
+        Err(_) => return vec![],
+    };
+
+    let raw_columns: Vec<RawColumn> = tup
+        .into_iter()
+        .next()
+        .and_then(|row| row.get::<pgrx::JsonB>(1).ok().flatten())
+        .and_then(|json| serde_json::from_value(json.0).ok())
+        .unwrap_or_default();
+
+    let sync_column_set: std::collections::HashSet<&str> =
+        sync_columns.iter().map(|column| column.as_str()).collect();
+    let mut columns = Vec::new();
+    for raw_column in raw_columns {
+        let name = raw_column.name;
+        if !sync_column_set.contains(name.as_str()) && name != pk_column {
+            continue;
+        }
+
+        columns.push(ColumnSchema {
+            name,
+            type_name: portable_type_name(&raw_column.db_type),
+            nullable: raw_column.nullable,
+        });
+    }
+    columns
 }
 
 fn introspect_manifest_indexes(
@@ -410,63 +332,10 @@ fn portable_type_name(db_type: &str) -> String {
     db_type.to_string()
 }
 
-fn legacy_logical_type(db_type: &str) -> &'static str {
-    let normalized = db_type.to_ascii_lowercase();
-    if normalized.contains("timestamp") {
-        return "datetime";
-    }
-    if normalized == "date" {
-        return "date";
-    }
-    if normalized == "boolean" {
-        return "boolean";
-    }
-    if normalized == "uuid"
-        || normalized == "text"
-        || normalized.starts_with("character varying")
-        || normalized.starts_with("character(")
-        || normalized.starts_with("character ")
-        || normalized == "character"
-        || normalized == "interval"
-        || normalized == "inet"
-        || normalized == "cidr"
-        || normalized == "macaddr"
-        || normalized == "macaddr8"
-        || normalized == "xml"
-        || normalized == "point"
-        || normalized == "line"
-        || normalized == "lseg"
-        || normalized == "box"
-        || normalized == "path"
-        || normalized == "polygon"
-        || normalized == "circle"
-        || normalized.ends_with("range")
-    {
-        return "string";
-    }
-    if normalized == "smallint" || normalized == "integer" {
-        return "int";
-    }
-    if normalized == "bigint" {
-        return "int64";
-    }
-    if normalized.starts_with("numeric") || normalized == "real" || normalized == "double precision"
-    {
-        return "float";
-    }
-    if normalized == "json" || normalized == "jsonb" || normalized.ends_with("[]") {
-        return "json";
-    }
-    if normalized == "bytea" {
-        return "bytes";
-    }
-    "string"
-}
-
 fn load_client_debug(client: &SpiClient<'_>, user_id: &str, client_id: &str) -> serde_json::Value {
     let tup = match client.select(
         "SELECT id::text, client_id, user_id, platform, app_version, is_active, \
-         last_sync_at::text, last_pull_at::text, last_pull_seq, bucket_subs \
+         last_sync_at::text, last_pull_at::text, bucket_subs \
          FROM sync_clients WHERE user_id = $1 AND client_id = $2",
         None,
         &[user_id.into(), client_id.into()],
@@ -502,10 +371,6 @@ fn load_client_debug(client: &SpiClient<'_>, user_id: &str, client_id: &str) -> 
         let last_pull_at: Option<String> = row
             .get_by_name::<String, &str>("last_pull_at")
             .unwrap_or(None);
-        let last_pull_seq: i64 = row
-            .get_by_name::<i64, &str>("last_pull_seq")
-            .unwrap_or(None)
-            .unwrap_or(0);
         let bucket_subs: Vec<String> = row
             .get_by_name::<Vec<String>, &str>("bucket_subs")
             .unwrap_or(None)
@@ -519,7 +384,6 @@ fn load_client_debug(client: &SpiClient<'_>, user_id: &str, client_id: &str) -> 
             "is_active": is_active,
             "last_sync_at": last_sync_at,
             "last_pull_at": last_pull_at,
-            "legacy_checkpoint": last_pull_seq,
             "bucket_subs": bucket_subs,
         })
     } else {

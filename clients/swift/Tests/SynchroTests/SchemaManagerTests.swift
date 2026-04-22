@@ -39,8 +39,8 @@ final class SchemaManagerTests: XCTestCase {
         SchemaResponse(schemaVersion: version, schemaHash: hash, serverTime: Date(), tables: tables)
     }
 
-    private func makeManifest(tables: [VNextTableSchema]) -> VNextSchemaManifest {
-        VNextSchemaManifest(tables: tables)
+    private func makeManifest(tables: [TableSchema]) -> SchemaManifest {
+        SchemaManifest(tables: tables)
     }
 
     private func columnNames(db: SynchroDatabase, table: String) throws -> Set<String> {
@@ -112,17 +112,17 @@ final class SchemaManagerTests: XCTestCase {
         let db = try makeTestDB()
         let manager = SchemaManager(database: db)
         let manifest = makeManifest(tables: [
-            VNextTableSchema(
+            TableSchema(
                 name: "workouts",
                 primaryKey: ["id"],
                 updatedAtColumn: "updated_at",
                 deletedAtColumn: "deleted_at",
                 composition: .singleScope,
                 columns: [
-                    VNextColumnSchema(name: "id", type: "string", nullable: false),
-                    VNextColumnSchema(name: "name", type: "string", nullable: false),
-                    VNextColumnSchema(name: "updated_at", type: "datetime", nullable: false),
-                    VNextColumnSchema(name: "deleted_at", type: "datetime", nullable: true),
+                    ColumnSchema(name: "id", type: "string", nullable: false),
+                    ColumnSchema(name: "name", type: "string", nullable: false),
+                    ColumnSchema(name: "updated_at", type: "datetime", nullable: false),
+                    ColumnSchema(name: "deleted_at", type: "datetime", nullable: true),
                 ],
                 indexes: nil
             )
@@ -149,17 +149,17 @@ final class SchemaManagerTests: XCTestCase {
         let manager = SchemaManager(database: db)
 
         let v1 = makeManifest(tables: [
-            VNextTableSchema(
+            TableSchema(
                 name: "workouts",
                 primaryKey: ["id"],
                 updatedAtColumn: "updated_at",
                 deletedAtColumn: "deleted_at",
                 composition: .singleScope,
                 columns: [
-                    VNextColumnSchema(name: "id", type: "string", nullable: false),
-                    VNextColumnSchema(name: "name", type: "string", nullable: false),
-                    VNextColumnSchema(name: "updated_at", type: "datetime", nullable: false),
-                    VNextColumnSchema(name: "deleted_at", type: "datetime", nullable: true),
+                    ColumnSchema(name: "id", type: "string", nullable: false),
+                    ColumnSchema(name: "name", type: "string", nullable: false),
+                    ColumnSchema(name: "updated_at", type: "datetime", nullable: false),
+                    ColumnSchema(name: "deleted_at", type: "datetime", nullable: true),
                 ],
                 indexes: nil
             )
@@ -172,18 +172,18 @@ final class SchemaManagerTests: XCTestCase {
         )
 
         let v2 = makeManifest(tables: [
-            VNextTableSchema(
+            TableSchema(
                 name: "workouts",
                 primaryKey: ["id"],
                 updatedAtColumn: "updated_at",
                 deletedAtColumn: "deleted_at",
                 composition: .singleScope,
                 columns: [
-                    VNextColumnSchema(name: "id", type: "string", nullable: false),
-                    VNextColumnSchema(name: "name", type: "string", nullable: false),
-                    VNextColumnSchema(name: "notes", type: "string", nullable: true),
-                    VNextColumnSchema(name: "updated_at", type: "datetime", nullable: false),
-                    VNextColumnSchema(name: "deleted_at", type: "datetime", nullable: true),
+                    ColumnSchema(name: "id", type: "string", nullable: false),
+                    ColumnSchema(name: "name", type: "string", nullable: false),
+                    ColumnSchema(name: "notes", type: "string", nullable: true),
+                    ColumnSchema(name: "updated_at", type: "datetime", nullable: false),
+                    ColumnSchema(name: "deleted_at", type: "datetime", nullable: true),
                 ],
                 indexes: nil
             )
@@ -202,17 +202,17 @@ final class SchemaManagerTests: XCTestCase {
         let manager = SchemaManager(database: db)
 
         let canonical = makeManifest(tables: [
-            VNextTableSchema(
+            TableSchema(
                 name: "metrics",
                 primaryKey: ["id"],
                 updatedAtColumn: "updated_at",
                 deletedAtColumn: "deleted_at",
                 composition: .singleScope,
                 columns: [
-                    VNextColumnSchema(name: "id", type: "string", nullable: false),
-                    VNextColumnSchema(name: "score", type: "int", nullable: true),
-                    VNextColumnSchema(name: "updated_at", type: "datetime", nullable: false),
-                    VNextColumnSchema(name: "deleted_at", type: "datetime", nullable: true),
+                    ColumnSchema(name: "id", type: "string", nullable: false),
+                    ColumnSchema(name: "score", type: "int", nullable: true),
+                    ColumnSchema(name: "updated_at", type: "datetime", nullable: false),
+                    ColumnSchema(name: "deleted_at", type: "datetime", nullable: true),
                 ],
                 indexes: nil
             )
@@ -231,17 +231,17 @@ final class SchemaManagerTests: XCTestCase {
         }
 
         let aliasManifest = makeManifest(tables: [
-            VNextTableSchema(
+            TableSchema(
                 name: "metrics",
                 primaryKey: ["id"],
                 updatedAtColumn: "updated_at",
                 deletedAtColumn: "deleted_at",
                 composition: .singleScope,
                 columns: [
-                    VNextColumnSchema(name: "id", type: "uuid", nullable: false),
-                    VNextColumnSchema(name: "score", type: "integer", nullable: true),
-                    VNextColumnSchema(name: "updated_at", type: "timestamp", nullable: false),
-                    VNextColumnSchema(name: "deleted_at", type: "timestamp", nullable: true),
+                    ColumnSchema(name: "id", type: "uuid", nullable: false),
+                    ColumnSchema(name: "score", type: "integer", nullable: true),
+                    ColumnSchema(name: "updated_at", type: "timestamp", nullable: false),
+                    ColumnSchema(name: "deleted_at", type: "timestamp", nullable: true),
                 ],
                 indexes: nil
             )

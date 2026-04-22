@@ -15,11 +15,7 @@ final class HttpClient: @unchecked Sendable {
 
     // MARK: - Endpoints
 
-    func register(request: RegisterRequest) async throws -> RegisterResponse {
-        try await post("/sync/register", body: request)
-    }
-
-    func connect(request: VNextConnectRequest) async throws -> VNextConnectResponse {
+    func connect(request: ConnectRequest) async throws -> ConnectResponse {
         try await post("/sync/connect", body: request)
     }
 
@@ -27,23 +23,11 @@ final class HttpClient: @unchecked Sendable {
         try await post("/sync/pull", body: request)
     }
 
-    func pull(request: VNextPullRequest) async throws -> VNextPullResponse {
-        try await post("/sync/pull", body: request)
-    }
-
     func push(request: PushRequest) async throws -> PushResponse {
         try await post("/sync/push", body: request)
     }
 
-    func push(request: VNextPushRequest) async throws -> VNextPushResponse {
-        try await post("/sync/push", body: request)
-    }
-
     func rebuild(request: RebuildRequest) async throws -> RebuildResponse {
-        try await post("/sync/rebuild", body: request)
-    }
-
-    func rebuild(request: VNextRebuildRequest) async throws -> VNextRebuildResponse {
         try await post("/sync/rebuild", body: request)
     }
 
@@ -160,7 +144,7 @@ final class HttpClient: @unchecked Sendable {
     }
 
     private func errorMessage(from data: Data) -> String? {
-        if let body = try? decoder.decode(VNextErrorResponse.self, from: data) {
+        if let body = try? decoder.decode(ErrorResponse.self, from: data) {
             return body.error.message
         }
         if let body = try? JSONDecoder().decode([String: String].self, from: data) {
@@ -173,7 +157,7 @@ final class HttpClient: @unchecked Sendable {
         if let body = try? decoder.decode(SchemaMismatchBody.self, from: data) {
             return body
         }
-        if let body = try? decoder.decode(VNextErrorResponse.self, from: data),
+        if let body = try? decoder.decode(ErrorResponse.self, from: data),
            body.error.code == .schemaMismatch {
             return SchemaMismatchBody(
                 code: body.error.code.rawValue,

@@ -37,40 +37,19 @@ func mapPGError(w http.ResponseWriter, raw []byte) bool {
 }
 
 func classifyPGError(raw json.RawMessage) (int, string, bool) {
-	var legacy string
-	if err := json.Unmarshal(raw, &legacy); err == nil && legacy != "" {
-		return classifyLegacyError(legacy), "", true
-	}
-
-	var vnext struct {
+	var protocol struct {
 		Code      string `json:"code"`
 		Message   string `json:"message"`
 		Retryable bool   `json:"retryable"`
 	}
-	if err := json.Unmarshal(raw, &vnext); err == nil && vnext.Code != "" {
-		return classifyVNextError(vnext.Code, vnext.Retryable), retryAfterForCode(vnext.Code), true
+	if err := json.Unmarshal(raw, &protocol); err == nil && protocol.Code != "" {
+		return classifyProtocolError(protocol.Code, protocol.Retryable), retryAfterForCode(protocol.Code), true
 	}
 
 	return 0, "", false
 }
 
-// classifyLegacyError maps the legacy string error model to an HTTP status code.
-func classifyLegacyError(errMsg string) int {
-	lower := strings.ToLower(errMsg)
-
-	switch {
-	case strings.Contains(lower, "schema_mismatch") || strings.Contains(lower, "schema version"):
-		return http.StatusConflict
-	case strings.Contains(lower, "not_found") || strings.Contains(lower, "inactive"):
-		return http.StatusNotFound
-	case strings.Contains(lower, "read_only"):
-		return http.StatusForbidden
-	default:
-		return http.StatusInternalServerError
-	}
-}
-
-func classifyVNextError(code string, retryable bool) int {
+func classifyProtocolError(code string, retryable bool) int {
 	switch strings.ToLower(code) {
 	case "invalid_request":
 		return http.StatusBadRequest

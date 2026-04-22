@@ -211,12 +211,7 @@ fn synchro_register_table(
         .get()
         .and_then(|cs| cs.to_str().ok().map(String::from))
         .unwrap_or_else(|| "synchro_pub".to_string());
-    let pub_exists: bool = Spi::get_one_with_args(
-        "SELECT EXISTS (SELECT 1 FROM pg_publication WHERE pubname = $1)",
-        &[pub_name.as_str().into()],
-    )
-    .unwrap_or(Some(false))
-    .unwrap_or(false);
+    let pub_exists = publication_exists(&pub_name);
 
     if !pub_exists {
         // Build DDL safely using format(%I) for identifier quoting.
@@ -231,7 +226,7 @@ fn synchro_register_table(
                 pgrx::error!("failed to create publication: {}", e);
             }
         }
-    } else {
+    } else if !publication_is_for_all_tables(&pub_name) {
         let in_pub: bool = Spi::get_one_with_args(
             "SELECT EXISTS (
                 SELECT 1 FROM pg_publication_tables
@@ -287,25 +282,27 @@ fn synchro_unregister_table(p_table_name: &str) {
         .get()
         .and_then(|cs| cs.to_str().ok().map(String::from))
         .unwrap_or_else(|| "synchro_pub".to_string());
-    let in_pub: bool = Spi::get_one_with_args(
-        "SELECT EXISTS (
-            SELECT 1 FROM pg_publication_tables
-            WHERE pubname = $1 AND tablename = $2
-        )",
-        &[pub_name.as_str().into(), p_table_name.into()],
-    )
-    .unwrap_or(Some(false))
-    .unwrap_or(false);
-
-    if in_pub {
-        let ddl: Option<String> = Spi::get_one_with_args(
-            "SELECT format('ALTER PUBLICATION %I DROP TABLE %I', $1, $2)",
+    if publication_exists(&pub_name) && !publication_is_for_all_tables(&pub_name) {
+        let in_pub: bool = Spi::get_one_with_args(
+            "SELECT EXISTS (
+                SELECT 1 FROM pg_publication_tables
+                WHERE pubname = $1 AND tablename = $2
+            )",
             &[pub_name.as_str().into(), p_table_name.into()],
         )
-        .unwrap_or(None);
+        .unwrap_or(Some(false))
+        .unwrap_or(false);
 
-        if let Some(sql) = ddl {
-            let _ = Spi::run(&sql);
+        if in_pub {
+            let ddl: Option<String> = Spi::get_one_with_args(
+                "SELECT format('ALTER PUBLICATION %I DROP TABLE %I', $1, $2)",
+                &[pub_name.as_str().into(), p_table_name.into()],
+            )
+            .unwrap_or(None);
+
+            if let Some(sql) = ddl {
+                let _ = Spi::run(&sql);
+            }
         }
     }
 
@@ -348,6 +345,24 @@ fn recompute_schema_manifest() {
 
         Ok::<(), spi::Error>(())
     });
+}
+
+fn publication_exists(pub_name: &str) -> bool {
+    Spi::get_one_with_args(
+        "SELECT EXISTS (SELECT 1 FROM pg_publication WHERE pubname = $1)",
+        &[pub_name.into()],
+    )
+    .unwrap_or(Some(false))
+    .unwrap_or(false)
+}
+
+fn publication_is_for_all_tables(pub_name: &str) -> bool {
+    Spi::get_one_with_args(
+        "SELECT puballtables FROM pg_publication WHERE pubname = $1",
+        &[pub_name.into()],
+    )
+    .unwrap_or(Some(false))
+    .unwrap_or(false)
 }
 
 /// Load all registered tables from sync_registry into memory.

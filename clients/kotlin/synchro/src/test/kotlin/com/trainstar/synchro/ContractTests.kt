@@ -12,17 +12,17 @@ import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.Paths
 
-class VNextContractTests {
+class ContractTests {
     private val json = Json { ignoreUnknownKeys = true }
 
     @Test
     fun testConnectNoneFixtureDecodesAndValidates() {
-        val response = decodeFixtureValue<VNextConnectResponse>(
+        val response = decodeFixtureValue<ConnectResponse>(
             "conformance/protocol/connect-none.json",
             listOf("expected", "response")
         )
 
-        assertEquals(VNextSchemaAction.NONE, response.schema.action)
+        assertEquals(SchemaAction.NONE, response.schema.action)
         assertEquals(13L, response.scopeSetVersion)
         assertEquals(null, response.schemaDefinition)
         response.validate()
@@ -30,12 +30,12 @@ class VNextContractTests {
 
     @Test
     fun testConnectRebuildLocalFixtureDecodesAndValidates() {
-        val response = decodeFixtureValue<VNextConnectResponse>(
+        val response = decodeFixtureValue<ConnectResponse>(
             "conformance/protocol/connect-rebuild-local.json",
             listOf("expected", "response")
         )
 
-        assertEquals(VNextSchemaAction.REBUILD_LOCAL, response.schema.action)
+        assertEquals(SchemaAction.REBUILD_LOCAL, response.schema.action)
         assertNotNull(response.schemaDefinition)
         assertEquals(2, response.scopes.add.size)
         response.validate()
@@ -43,16 +43,16 @@ class VNextContractTests {
 
     @Test
     fun testPullRequiredChecksumsFixtureDecodesAndValidates() {
-        val request = decodeFixtureValue<VNextPullRequest>(
+        val request = decodeFixtureValue<PullRequest>(
             "conformance/protocol/pull-required-checksums.json",
             listOf("input", "request")
         )
-        val response = decodeFixtureValue<VNextPullResponse>(
+        val response = decodeFixtureValue<PullResponse>(
             "conformance/protocol/pull-required-checksums.json",
             listOf("expected", "response")
         )
 
-        assertEquals(VNextChecksumMode.REQUIRED, request.checksumMode)
+        assertEquals(ChecksumMode.REQUIRED, request.checksumMode)
         assertEquals(13L, response.scopeSetVersion)
         assertEquals("c_890", response.scopeCursors["workouts_user:u_123"])
         response.validate(request)
@@ -60,7 +60,7 @@ class VNextContractTests {
 
     @Test
     fun testRebuildFixturePagesDecodeAndValidate() {
-        val pages = decodeFixtureValue<List<VNextRebuildResponse>>(
+        val pages = decodeFixtureValue<List<RebuildResponse>>(
             "conformance/scopes/rebuild-single-scope.json",
             listOf("expected", "pages")
         )
@@ -73,13 +73,13 @@ class VNextContractTests {
 
     @Test
     fun testPortableSchemaManifestFixtureDecodesAndValidates() {
-        val manifest = decodeFixtureValue<VNextSchemaManifest>(
+        val manifest = decodeFixtureValue<SchemaManifest>(
             "conformance/schema/schema-manifest-portable.json",
             listOf("manifest")
         )
 
         assertEquals(2, manifest.tables.size)
-        assertEquals(VNextCompositionClass.MULTI_SCOPE, manifest.tables[1].composition)
+        assertEquals(CompositionClass.MULTI_SCOPE, manifest.tables[1].composition)
         assertEquals("updated_at", manifest.tables[0].updatedAtColumn)
         assertEquals("deleted_at", manifest.tables[0].deletedAtColumn)
         manifest.validate()
@@ -87,7 +87,7 @@ class VNextContractTests {
 
     @Test
     fun testPortableSchemaManifestConvertsToLocalSchemaTables() {
-        val manifest = decodeFixtureValue<VNextSchemaManifest>(
+        val manifest = decodeFixtureValue<SchemaManifest>(
             "conformance/schema/schema-manifest-portable.json",
             listOf("manifest")
         )
@@ -105,7 +105,7 @@ class VNextContractTests {
 
     @Test
     fun testPortableSchemaManifestFixtureUsesCanonicalTypeNames() {
-        val manifest = decodeFixtureValue<VNextSchemaManifest>(
+        val manifest = decodeFixtureValue<SchemaManifest>(
             "conformance/schema/schema-manifest-portable.json",
             listOf("manifest")
         )
@@ -128,12 +128,12 @@ class VNextContractTests {
 
     @Test
     fun testUpgradeRequiredErrorFixtureDecodes() {
-        val response = decodeFixtureValue<VNextErrorResponse>(
+        val response = decodeFixtureValue<ErrorResponse>(
             "conformance/protocol/error-upgrade-required.json",
             listOf("expected", "response")
         )
 
-        assertEquals(VNextProtocolErrorCode.UPGRADE_REQUIRED, response.error.code)
+        assertEquals(ProtocolErrorCode.UPGRADE_REQUIRED, response.error.code)
         assertFalse(response.error.retryable)
     }
 

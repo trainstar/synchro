@@ -17,61 +17,34 @@ final class PullProcessor: @unchecked Sendable {
         guard !changes.isEmpty || !deletes.isEmpty else { return }
         let tableMap = Dictionary(uniqueKeysWithValues: syncedTables.map { ($0.tableName, $0) })
 
-        try database.writeTransaction { db in
-            try SynchroMeta.setSyncLock(db, locked: true)
-            defer { try? SynchroMeta.setSyncLock(db, locked: false) }
-
+        try database.writeSyncLockedTransaction { db in
             for record in changes {
                 guard let schema = tableMap[record.tableName] else { continue }
                 try upsertRecord(db: db, record: record, schema: schema)
             }
             try applyDeletesInTransaction(db: db, deletes: deletes, tableMap: tableMap)
-
-            try SynchroMeta.setSyncLock(db, locked: false)
         }
-    }
-
-    func applyPullPage(changes: [Record], deletes: [DeleteEntry], syncedTables: [SchemaTable]) throws {
-        try applyPullPage(changes: changes, deletes: deletes, syncedTables: syncedTables.map(\.localSchema))
     }
 
     func applyChanges(changes: [Record], syncedTables: [LocalSchemaTable]) throws {
         guard !changes.isEmpty else { return }
         let tableMap = Dictionary(uniqueKeysWithValues: syncedTables.map { ($0.tableName, $0) })
 
-        try database.writeTransaction { db in
-            try SynchroMeta.setSyncLock(db, locked: true)
-            defer { try? SynchroMeta.setSyncLock(db, locked: false) }
-
+        try database.writeSyncLockedTransaction { db in
             for record in changes {
                 guard let schema = tableMap[record.tableName] else { continue }
                 try upsertRecord(db: db, record: record, schema: schema)
             }
-
-            try SynchroMeta.setSyncLock(db, locked: false)
         }
-    }
-
-    func applyChanges(changes: [Record], syncedTables: [SchemaTable]) throws {
-        try applyChanges(changes: changes, syncedTables: syncedTables.map(\.localSchema))
     }
 
     func applyDeletes(deletes: [DeleteEntry], syncedTables: [LocalSchemaTable]) throws {
         guard !deletes.isEmpty else { return }
         let tableMap = Dictionary(uniqueKeysWithValues: syncedTables.map { ($0.tableName, $0) })
 
-        try database.writeTransaction { db in
-            try SynchroMeta.setSyncLock(db, locked: true)
-            defer { try? SynchroMeta.setSyncLock(db, locked: false) }
-
+        try database.writeSyncLockedTransaction { db in
             try applyDeletesInTransaction(db: db, deletes: deletes, tableMap: tableMap)
-
-            try SynchroMeta.setSyncLock(db, locked: false)
         }
-    }
-
-    func applyDeletes(deletes: [DeleteEntry], syncedTables: [SchemaTable]) throws {
-        try applyDeletes(deletes: deletes, syncedTables: syncedTables.map(\.localSchema))
     }
 
     private func applyDeletesInTransaction(db: GRDB.Database, deletes: [DeleteEntry], tableMap: [String: LocalSchemaTable]) throws {
@@ -99,7 +72,7 @@ final class PullProcessor: @unchecked Sendable {
     }
 
     func applyScopeChanges(
-        changes: [VNextChangeRecord],
+        changes: [ChangeRecord],
         syncedTables: [LocalSchemaTable],
         scopeCursors: [String: String],
         checksums: [String: String]?
@@ -107,29 +80,16 @@ final class PullProcessor: @unchecked Sendable {
         guard !changes.isEmpty || !scopeCursors.isEmpty else { return }
         let tableMap = Dictionary(uniqueKeysWithValues: syncedTables.map { ($0.tableName, $0) })
 
-        try database.writeTransaction { db in
-            try SynchroMeta.setSyncLock(db, locked: true)
-            defer { try? SynchroMeta.setSyncLock(db, locked: false) }
-
+        try database.writeSyncLockedTransaction { db in
             for change in changes {
                 guard let schema = tableMap[change.table] else { continue }
                 let recordID = try scopeRecordID(pk: change.pk, schema: schema)
 
                 switch change.op {
                 case .delete:
-                    if change.row != nil {
-                        let record = try scopeRecord(from: change, schema: schema)
-                        try upsertRecord(db: db, record: record, schema: schema)
-                    }
-                    try SynchroMeta.deleteScopeRow(
-                        db,
-                        scopeID: change.scope,
-                        tableName: change.table,
-                        recordID: recordID
-                    )
-                    try softDeleteIfOrphaned(
+                    try applyScopeDeleteChange(
                         db: db,
-                        tableName: change.table,
+                        change: change,
                         recordID: recordID,
                         schema: schema
                     )
@@ -164,14 +124,11 @@ final class PullProcessor: @unchecked Sendable {
         }
     }
 
-    func applyScopeRebuildPage(scopeID: String, generation: Int64, records: [VNextRebuildRecord], syncedTables: [LocalSchemaTable]) throws {
+    func applyScopeRebuildPage(scopeID: String, generation: Int64, records: [RebuildRecord], syncedTables: [LocalSchemaTable]) throws {
         guard !records.isEmpty else { return }
         let tableMap = Dictionary(uniqueKeysWithValues: syncedTables.map { ($0.tableName, $0) })
 
-        try database.writeTransaction { db in
-            try SynchroMeta.setSyncLock(db, locked: true)
-            defer { try? SynchroMeta.setSyncLock(db, locked: false) }
-
+        try database.writeSyncLockedTransaction { db in
             for record in records {
                 guard let schema = tableMap[record.table] else { continue }
                 let recordID = try scopeRecordID(pk: record.pk, schema: schema)
@@ -191,13 +148,13 @@ final class PullProcessor: @unchecked Sendable {
     func finalizeScopeRebuild(scopeID: String, generation: Int64, finalCursor: String, checksum: String, syncedTables: [LocalSchemaTable]) throws {
         let tableMap = Dictionary(uniqueKeysWithValues: syncedTables.map { ($0.tableName, $0) })
 
-        try database.writeTransaction { db in
+        try database.writeSyncLockedTransaction { db in
             let staleRows = try SynchroMeta.getStaleScopeRowRecordIDs(db, scopeID: scopeID, generation: generation)
             try SynchroMeta.deleteStaleScopeRows(db, scopeID: scopeID, generation: generation)
 
             for staleRow in staleRows {
                 guard let schema = tableMap[staleRow.tableName] else { continue }
-                try softDeleteIfOrphaned(
+                try removeLocalRowIfUnreferenced(
                     db: db,
                     tableName: staleRow.tableName,
                     recordID: staleRow.recordID,
@@ -218,14 +175,14 @@ final class PullProcessor: @unchecked Sendable {
     func removeScope(scopeID: String, syncedTables: [LocalSchemaTable]) throws {
         let tableMap = Dictionary(uniqueKeysWithValues: syncedTables.map { ($0.tableName, $0) })
 
-        try database.writeTransaction { db in
+        try database.writeSyncLockedTransaction { db in
             let scopeRows = try SynchroMeta.getScopeRowRecordIDs(db, scopeID: scopeID)
             try SynchroMeta.deleteScopeRows(db, scopeID: scopeID)
             try SynchroMeta.deleteScope(db, scopeID: scopeID)
 
             for scopeRow in scopeRows {
                 guard let schema = tableMap[scopeRow.tableName] else { continue }
-                try softDeleteIfOrphaned(
+                try removeLocalRowIfUnreferenced(
                     db: db,
                     tableName: scopeRow.tableName,
                     recordID: scopeRow.recordID,
@@ -271,8 +228,7 @@ final class PullProcessor: @unchecked Sendable {
 
         try database.writeTransaction { db in
             for (record, bucketID) in recordsToTrack {
-                // Use server-provided checksum if available, fall back to local CRC32.
-                let checksum = record.checksum ?? Int32(bitPattern: Self.crc32Checksum(for: record.data))
+                let checksum = try requiredRecordChecksum(record)
                 try SynchroMeta.upsertBucketMember(
                     db,
                     bucketID: bucketID,
@@ -301,16 +257,12 @@ final class PullProcessor: @unchecked Sendable {
         guard !records.isEmpty else { return }
         let tableMap = Dictionary(uniqueKeysWithValues: syncedTables.map { ($0.tableName, $0) })
 
-        try database.writeTransaction { db in
-            try SynchroMeta.setSyncLock(db, locked: true)
-            defer { try? SynchroMeta.setSyncLock(db, locked: false) }
-
+        try database.writeSyncLockedTransaction { db in
             for record in records {
                 guard let schema = tableMap[record.tableName] else { continue }
                 try upsertRecord(db: db, record: record, schema: schema)
 
-                // Use server-provided checksum if available, fall back to local CRC32.
-                let checksum = record.checksum ?? Int32(bitPattern: Self.crc32Checksum(for: record.data))
+                let checksum = try requiredRecordChecksum(record)
                 try SynchroMeta.upsertBucketMember(
                     db,
                     bucketID: bucketID,
@@ -320,37 +272,25 @@ final class PullProcessor: @unchecked Sendable {
                 )
             }
 
-            try SynchroMeta.setSyncLock(db, locked: false)
         }
-    }
-
-    func applyRebuildPage(records: [Record], bucketID: String, syncedTables: [SchemaTable]) throws {
-        try applyRebuildPage(records: records, bucketID: bucketID, syncedTables: syncedTables.map(\.localSchema))
     }
 
     func deleteBucketOrphanedRecords(bucketID: String, syncedTables: [LocalSchemaTable]) throws {
         let tableMap = Dictionary(uniqueKeysWithValues: syncedTables.map { ($0.tableName, $0) })
 
-        try database.writeTransaction { db in
+        try database.writeSyncLockedTransaction { db in
             let members = try SynchroMeta.getBucketMemberRecordIDs(db, bucketID: bucketID)
+            try SynchroMeta.deleteBucketMembers(db, bucketID: bucketID)
             for member in members {
                 guard let schema = tableMap[member.tableName] else { continue }
-                let pkCol = schema.primaryKey.first ?? "id"
-                let quoted = SQLiteHelpers.quoteIdentifier(member.tableName)
-                let quotedPK = SQLiteHelpers.quoteIdentifier(pkCol)
-                let quotedDeletedAt = SQLiteHelpers.quoteIdentifier(schema.deletedAtColumn)
-
-                // Soft-delete records that were in this bucket but not refreshed during rebuild
-                try db.execute(
-                    sql: "UPDATE \(quoted) SET \(quotedDeletedAt) = \(SQLiteHelpers.timestampNow()) WHERE \(quotedPK) = ? AND \(quotedDeletedAt) IS NULL",
-                    arguments: [member.recordID]
+                try removeLocalRowIfUnreferenced(
+                    db: db,
+                    tableName: member.tableName,
+                    recordID: member.recordID,
+                    schema: schema
                 )
             }
         }
-    }
-
-    func deleteBucketOrphanedRecords(bucketID: String, syncedTables: [SchemaTable]) throws {
-        try deleteBucketOrphanedRecords(bucketID: bucketID, syncedTables: syncedTables.map(\.localSchema))
     }
 
     // MARK: - Bucket Checksum Verification
@@ -374,35 +314,13 @@ final class PullProcessor: @unchecked Sendable {
         }
     }
 
-    // MARK: - CRC32 Checksum
-
-    static func crc32Checksum(for data: [String: AnyCodable]) -> UInt32 {
-        guard let jsonData = try? JSONEncoder.synchroEncoder().encode(data.mapValues { $0 }) else {
-            return 0
+    private func requiredRecordChecksum(_ record: Record) throws -> Int32 {
+        guard let checksum = record.checksum else {
+            throw SynchroError.invalidResponse(
+                message: "missing record checksum for bucket membership \(record.tableName)/\(record.id)"
+            )
         }
-        return crc32(bytes: jsonData)
-    }
-
-    private static func crc32(bytes: Data) -> UInt32 {
-        // CRC32 (ISO 3309 / ITU-T V.42) lookup table
-        let table: [UInt32] = (0..<256).map { i -> UInt32 in
-            var crc = UInt32(i)
-            for _ in 0..<8 {
-                if crc & 1 == 1 {
-                    crc = (crc >> 1) ^ 0xEDB88320
-                } else {
-                    crc >>= 1
-                }
-            }
-            return crc
-        }
-
-        var crc: UInt32 = 0xFFFFFFFF
-        for byte in bytes {
-            let index = Int((crc ^ UInt32(byte)) & 0xFF)
-            crc = (crc >> 8) ^ table[index]
-        }
-        return crc ^ 0xFFFFFFFF
+        return checksum
     }
 
     func updateKnownBuckets(bucketUpdates: BucketUpdate?) throws {
@@ -476,7 +394,7 @@ final class PullProcessor: @unchecked Sendable {
         }
     }
 
-    private func scopeRecord(from change: VNextChangeRecord, schema: LocalSchemaTable) throws -> Record {
+    private func scopeRecord(from change: ChangeRecord, schema: LocalSchemaTable) throws -> Record {
         guard let row = change.row else {
             throw SynchroError.invalidResponse(message: "missing row for \(change.table) \(change.op)")
         }
@@ -484,7 +402,7 @@ final class PullProcessor: @unchecked Sendable {
         return try scopeRecord(tableName: change.table, recordID: recordID, row: row, schema: schema)
     }
 
-    private func scopeRecord(from rebuild: VNextRebuildRecord, schema: LocalSchemaTable) throws -> Record {
+    private func scopeRecord(from rebuild: RebuildRecord, schema: LocalSchemaTable) throws -> Record {
         guard let row = rebuild.row else {
             throw SynchroError.invalidResponse(message: "missing rebuild row for \(rebuild.table)")
         }
@@ -531,18 +449,51 @@ final class PullProcessor: @unchecked Sendable {
         return nil
     }
 
-    private func softDeleteIfOrphaned(db: GRDB.Database, tableName: String, recordID: String, schema: LocalSchemaTable) throws {
-        guard try !SynchroMeta.hasScopeRows(db, tableName: tableName, recordID: recordID) else {
+    private func applyScopeDeleteChange(
+        db: GRDB.Database,
+        change: ChangeRecord,
+        recordID: String,
+        schema: LocalSchemaTable
+    ) throws {
+        if let row = change.row {
+            guard row[schema.deletedAtColumn]?.value as? String != nil else {
+                throw SynchroError.invalidResponse(
+                    message: "delete change for \(change.table) \(recordID) included a row without \(schema.deletedAtColumn)"
+                )
+            }
+            let record = try scopeRecord(from: change, schema: schema)
+            try upsertRecord(db: db, record: record, schema: schema)
+        }
+
+        try SynchroMeta.deleteScopeRow(
+            db,
+            scopeID: change.scope,
+            tableName: change.table,
+            recordID: recordID
+        )
+
+        if change.row == nil {
+            try removeLocalRowIfUnreferenced(
+                db: db,
+                tableName: change.table,
+                recordID: recordID,
+                schema: schema
+            )
+        }
+    }
+
+    private func removeLocalRowIfUnreferenced(db: GRDB.Database, tableName: String, recordID: String, schema: LocalSchemaTable) throws {
+        guard try !SynchroMeta.hasScopeRows(db, tableName: tableName, recordID: recordID),
+              try !SynchroMeta.hasBucketMembers(db, tableName: tableName, recordID: recordID) else {
             return
         }
 
         let pkCol = schema.primaryKey.first ?? "id"
         let quoted = SQLiteHelpers.quoteIdentifier(tableName)
         let quotedPK = SQLiteHelpers.quoteIdentifier(pkCol)
-        let quotedDeletedAt = SQLiteHelpers.quoteIdentifier(schema.deletedAtColumn)
 
         try db.execute(
-            sql: "UPDATE \(quoted) SET \(quotedDeletedAt) = \(SQLiteHelpers.timestampNow()) WHERE \(quotedPK) = ? AND \(quotedDeletedAt) IS NULL",
+            sql: "DELETE FROM \(quoted) WHERE \(quotedPK) = ?",
             arguments: [recordID]
         )
     }

@@ -223,6 +223,63 @@ final class SyncEngineTests: XCTestCase {
         XCTAssertFalse(try tracker.hasPendingChanges())
     }
 
+    func testScopeRemovalDeletesLocalRowWithoutQueueingPendingDelete() async throws {
+        var pullCallCount = 0
+
+        MockURLProtocol.requestHandler = { request in
+            let path = request.url!.path
+            if path.hasSuffix("/sync/connect") {
+                return try self.mockResponse(json: self.connectJSON)
+            } else if path.hasSuffix("/sync/rebuild") {
+                return try self.mockResponse(json: self.rebuildJSON(
+                    records: [[
+                        "table": "orders",
+                        "pk": ["id": "w1"] as [String: Any],
+                        "row": [
+                            "id": "w1",
+                            "ship_address": "Seeded",
+                            "user_id": "u1",
+                            "updated_at": "2026-01-01T12:00:00.000Z",
+                            "deleted_at": NSNull()
+                        ] as [String: Any],
+                        "server_version": "sv_1",
+                    ]],
+                    finalCursor: "scope_cursor_1"
+                ))
+            } else if path.hasSuffix("/sync/pull") {
+                pullCallCount += 1
+                if pullCallCount == 1 {
+                    return try self.mockResponse(json: self.scopePullJSON(cursor: "scope_cursor_2"))
+                }
+                return try self.mockResponse(json: [
+                    "changes": [] as [Any],
+                    "scope_set_version": 2,
+                    "scope_cursors": [self.scopeID: "scope_cursor_3"],
+                    "scope_updates": [
+                        "add": [] as [Any],
+                        "remove": [self.scopeID]
+                    ] as [String: Any],
+                    "rebuild": [] as [Any],
+                    "has_more": false,
+                    "checksums": [:] as [String: String]
+                ])
+            }
+            return try self.mockResponse(statusCode: 500, json: ["error": "unexpected"])
+        }
+
+        let (engine, db) = try makeIntegrationEnv()
+        defer { engine.stop() }
+
+        try await engine.start()
+        try await engine.syncNow()
+
+        let row = try db.queryOne("SELECT id FROM orders WHERE id = ?", params: ["w1"])
+        XCTAssertNil(row)
+
+        let tracker = ChangeTracker(database: db)
+        XCTAssertFalse(try tracker.hasPendingChanges())
+    }
+
     func testPullPagesUntilComplete() async throws {
         var pullCallCount = 0
 

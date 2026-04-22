@@ -1,3 +1,5 @@
+import org.gradle.api.tasks.testing.Test
+
 plugins {
     id("com.android.library")
     id("org.jetbrains.kotlin.android")
@@ -73,6 +75,27 @@ mavenPublishing {
             url.set("https://github.com/trainstar/synchro")
             connection.set("scm:git:git://github.com/trainstar/synchro.git")
             developerConnection.set("scm:git:ssh://github.com/trainstar/synchro.git")
+        }
+    }
+}
+
+val integrationTestPatterns = listOf(
+    "com.trainstar.synchro.IntegrationTests",
+    "com.trainstar.synchro.SchemaIntegrationTests"
+)
+
+tasks.withType<Test>().configureEach {
+    when (providers.gradleProperty("synchroTestSuite").orNull) {
+        "unit" -> {
+            filter {
+                integrationTestPatterns.forEach { excludeTestsMatching(it) }
+            }
+        }
+        "integration" -> {
+            filter {
+                integrationTestPatterns.forEach { includeTestsMatching(it) }
+                isFailOnNoMatchingTests = true
+            }
         }
     }
 }

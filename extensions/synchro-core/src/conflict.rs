@@ -1,10 +1,10 @@
-//! Legacy timestamp-based conflict helpers.
+//! Timestamp-based conflict helpers.
 //!
 //! These helpers reflect the current PostgreSQL extension behavior. They are
-//! not the authoritative vNext wire contract for conflict representation.
+//! not the authoritative wire contract for conflict representation.
 //!
-//! In vNext, `server_version` remains opaque on the wire even if a specific
-//! server implementation uses timestamp-based policy internally.
+//! `server_version` remains opaque on the wire even if a specific server
+//! implementation uses timestamp-based policy internally.
 
 use chrono::{DateTime, Utc};
 

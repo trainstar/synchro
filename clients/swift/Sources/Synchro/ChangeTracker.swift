@@ -106,10 +106,6 @@ final class ChangeTracker: @unchecked Sendable {
         }
     }
 
-    func hydratePendingForPush(pending: [PendingChange], syncedTables: [SchemaTable]) throws -> [PushRecord] {
-        try hydratePendingForPush(pending: pending, syncedTables: syncedTables.map(\.localSchema))
-    }
-
     func removePending(entries: [PendingChange]) throws {
         guard !entries.isEmpty else { return }
         try database.writeTransaction { db in

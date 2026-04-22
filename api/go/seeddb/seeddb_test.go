@@ -62,8 +62,12 @@ func registerSeedTestTable(t *testing.T, db *sql.DB, tableName string) {
 	}
 
 	t.Cleanup(func() {
-		_, _ = db.ExecContext(ctx, fmt.Sprintf("SELECT synchro_unregister_table('%s')", tableName))
-		_, _ = db.ExecContext(ctx, fmt.Sprintf("DROP TABLE IF EXISTS %s", quotePGIdent(tableName)))
+		if _, err := db.ExecContext(ctx, fmt.Sprintf("SELECT synchro_unregister_table('%s')", tableName)); err != nil {
+			t.Errorf("unregistering synced table %s: %v", tableName, err)
+		}
+		if _, err := db.ExecContext(ctx, fmt.Sprintf("DROP TABLE IF EXISTS %s", quotePGIdent(tableName))); err != nil {
+			t.Errorf("dropping test table %s: %v", tableName, err)
+		}
 	})
 }
 
@@ -75,7 +79,9 @@ func registerSharedScope(t *testing.T, db *sql.DB, scopeID string, portable bool
 		t.Fatalf("registering shared scope %s: %v", scopeID, err)
 	}
 	t.Cleanup(func() {
-		_, _ = db.ExecContext(ctx, "SELECT synchro_unregister_shared_scope($1)", scopeID)
+		if _, err := db.ExecContext(ctx, "SELECT synchro_unregister_shared_scope($1)", scopeID); err != nil {
+			t.Errorf("unregistering shared scope %s: %v", scopeID, err)
+		}
 	})
 }
 

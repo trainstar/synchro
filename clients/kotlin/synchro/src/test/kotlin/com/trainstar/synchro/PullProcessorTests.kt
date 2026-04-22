@@ -2,6 +2,7 @@ package com.trainstar.synchro
 
 import android.content.Context
 import androidx.test.core.app.ApplicationProvider
+import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 import org.junit.After
@@ -41,6 +42,50 @@ class PullProcessorTests {
         )
         manager.createSyncedTables(schema)
         return Pair(db, PullProcessor(db))
+    }
+
+    private fun insertOrder(
+        db: SynchroDatabase,
+        id: String,
+        shipAddress: String = "123 Main St",
+        updatedAt: String,
+        deletedAt: String? = null
+    ) {
+        db.writeSyncLockedTransaction { conn ->
+            val stmt = conn.compileStatement(
+                "INSERT INTO orders (id, ship_address, updated_at, deleted_at) VALUES (?, ?, ?, ?)"
+            )
+            try {
+                stmt.bindString(1, id)
+                stmt.bindString(2, shipAddress)
+                stmt.bindString(3, updatedAt)
+                if (deletedAt == null) {
+                    stmt.bindNull(4)
+                } else {
+                    stmt.bindString(4, deletedAt)
+                }
+                stmt.executeInsert()
+            } finally {
+                stmt.close()
+            }
+        }
+    }
+
+    private fun addScopeRow(db: SynchroDatabase, scopeId: String, recordId: String, generation: Long = 0) {
+        db.writeTransaction { conn ->
+            SynchroMeta.upsertScope(conn, scopeId, "10", null, generation)
+            SynchroMeta.upsertScopeRow(conn, scopeId, "orders", recordId, generation)
+        }
+    }
+
+    private fun addBucketMember(db: SynchroDatabase, bucketId: String, recordId: String) {
+        db.writeTransaction { conn ->
+            SynchroMeta.setBucketMember(conn, bucketId, "orders", recordId, 1)
+        }
+    }
+
+    private fun pendingChangeCount(db: SynchroDatabase): Int {
+        return ChangeTracker(db).pendingChangeCount()
     }
 
     @After
@@ -245,10 +290,10 @@ class PullProcessorTests {
             SynchroMeta.setSyncLock(conn, false)
         }
 
-        val change = VNextChangeRecord(
+        val change = ChangeRecord(
             scope = "orders:user1",
             table = "orders",
-            op = VNextOperation.DELETE,
+            op = Operation.DELETE,
             pk = buildJsonObject { put("id", "w1") },
             row = buildJsonObject {
                 put("id", "w1")
@@ -274,23 +319,13 @@ class PullProcessorTests {
     fun testApplyScopeDeleteUsesDeletedAtAsEffectiveVersion() {
         val (db, processor) = makeTestEnv()
 
-        db.writeTransaction { conn ->
-            SynchroMeta.setSyncLock(conn, true)
-            SynchroMeta.upsertScope(conn, "orders:user1", "10", null)
-            SynchroMeta.upsertScopeRow(conn, "orders:user1", "orders", "w1", 0)
-        }
-        db.execute(
-            "INSERT INTO orders (id, ship_address, updated_at) VALUES (?, ?, ?)",
-            arrayOf("w1", "123 Main St", "2026-01-03T00:00:00.000Z")
-        )
-        db.writeTransaction { conn ->
-            SynchroMeta.setSyncLock(conn, false)
-        }
+        addScopeRow(db, "orders:user1", "w1")
+        insertOrder(db, "w1", updatedAt = "2026-01-03T00:00:00.000Z")
 
-        val change = VNextChangeRecord(
+        val change = ChangeRecord(
             scope = "orders:user1",
             table = "orders",
-            op = VNextOperation.DELETE,
+            op = Operation.DELETE,
             pk = buildJsonObject { put("id", "w1") },
             row = buildJsonObject {
                 put("id", "w1")
@@ -311,5 +346,175 @@ class PullProcessorTests {
         val row = db.queryOne("SELECT updated_at, deleted_at FROM orders WHERE id = ?", arrayOf("w1"))
         assertEquals("2026-01-03T00:00:00.000Z", row?.get("updated_at"))
         assertEquals("2026-01-04T00:00:00.000Z", row?.get("deleted_at"))
+    }
+
+    @Test
+    fun testApplyScopeDeleteWithoutRowRemovesOrphanedRecordAndLeavesQueueEmpty() {
+        val (db, processor) = makeTestEnv()
+
+        addScopeRow(db, "orders:user1", "w1")
+        insertOrder(db, "w1", updatedAt = "2026-01-03T00:00:00.000Z")
+
+        val change = ChangeRecord(
+            scope = "orders:user1",
+            table = "orders",
+            op = Operation.DELETE,
+            pk = buildJsonObject { put("id", "w1") },
+            row = null,
+            serverVersion = "2026-01-04T00:00:00.000Z"
+        )
+
+        processor.applyScopeChanges(
+            changes = listOf(change),
+            syncedTables = listOf(localTestTable),
+            scopeCursors = mapOf("orders:user1" to "11"),
+            checksums = null
+        )
+
+        val row = db.queryOne("SELECT id FROM orders WHERE id = ?", arrayOf("w1"))
+        assertNull(row)
+        assertEquals(0, pendingChangeCount(db))
+    }
+
+    @Test
+    fun testApplyScopeDeleteRejectsRowWithoutDeletedAt() {
+        val (db, processor) = makeTestEnv()
+
+        addScopeRow(db, "orders:user1", "w1")
+        insertOrder(db, "w1", updatedAt = "2026-01-03T00:00:00.000Z")
+
+        val change = ChangeRecord(
+            scope = "orders:user1",
+            table = "orders",
+            op = Operation.DELETE,
+            pk = buildJsonObject { put("id", "w1") },
+            row = buildJsonObject {
+                put("id", "w1")
+                put("ship_address", "123 Main St")
+                put("updated_at", "2026-01-04T00:00:00.000Z")
+                put("deleted_at", JsonNull)
+            },
+            serverVersion = "2026-01-04T00:00:00.000Z"
+        )
+
+        try {
+            processor.applyScopeChanges(
+                changes = listOf(change),
+                syncedTables = listOf(localTestTable),
+                scopeCursors = mapOf("orders:user1" to "11"),
+                checksums = null
+            )
+            fail("Expected invalid delete tombstone payload to be rejected")
+        } catch (error: SynchroError.InvalidResponse) {
+            assertTrue(error.message!!.contains("delete change"))
+        }
+    }
+
+    @Test
+    fun testFinalizeScopeRebuildRemovesOrphanedRecordAndLeavesQueueEmpty() {
+        val (db, processor) = makeTestEnv()
+
+        addScopeRow(db, "orders:user1", "w1", generation = 1)
+        insertOrder(db, "w1", updatedAt = "2026-01-03T00:00:00.000Z")
+
+        processor.finalizeScopeRebuild(
+            scopeId = "orders:user1",
+            generation = 2,
+            finalCursor = "20",
+            checksum = "sum_20",
+            syncedTables = listOf(localTestTable)
+        )
+
+        val row = db.queryOne("SELECT id FROM orders WHERE id = ?", arrayOf("w1"))
+        assertNull(row)
+        assertEquals(0, pendingChangeCount(db))
+    }
+
+    @Test
+    fun testFinalizeScopeRebuildKeepsRecordBackedByAnotherScope() {
+        val (db, processor) = makeTestEnv()
+
+        addScopeRow(db, "orders:user1", "w1", generation = 1)
+        addScopeRow(db, "orders:shared", "w1", generation = 4)
+        insertOrder(db, "w1", updatedAt = "2026-01-03T00:00:00.000Z")
+
+        processor.finalizeScopeRebuild(
+            scopeId = "orders:user1",
+            generation = 2,
+            finalCursor = "20",
+            checksum = "sum_20",
+            syncedTables = listOf(localTestTable)
+        )
+
+        val row = db.queryOne("SELECT id FROM orders WHERE id = ?", arrayOf("w1"))
+        assertNotNull(row)
+        assertEquals(0, pendingChangeCount(db))
+    }
+
+    @Test
+    fun testRemoveScopeRemovesOrphanedRecordAndLeavesQueueEmpty() {
+        val (db, processor) = makeTestEnv()
+
+        addScopeRow(db, "orders:user1", "w1")
+        insertOrder(db, "w1", updatedAt = "2026-01-03T00:00:00.000Z")
+
+        processor.removeScope("orders:user1", listOf(localTestTable))
+
+        val row = db.queryOne("SELECT id FROM orders WHERE id = ?", arrayOf("w1"))
+        assertNull(row)
+        assertEquals(0, pendingChangeCount(db))
+    }
+
+    @Test
+    fun testRemoveScopeKeepsRecordBackedByBucketMembership() {
+        val (db, processor) = makeTestEnv()
+
+        addScopeRow(db, "orders:user1", "w1")
+        addBucketMember(db, "bucket-1", "w1")
+        insertOrder(db, "w1", updatedAt = "2026-01-03T00:00:00.000Z")
+
+        processor.removeScope("orders:user1", listOf(localTestTable))
+
+        val row = db.queryOne("SELECT id FROM orders WHERE id = ?", arrayOf("w1"))
+        assertNotNull(row)
+        assertEquals(0, pendingChangeCount(db))
+    }
+
+    @Test
+    fun testDeleteBucketOrphanedRecordsRemovesUnreferencedRowsAndLeavesQueueEmpty() {
+        val (db, processor) = makeTestEnv()
+
+        addBucketMember(db, "bucket-1", "w1")
+        insertOrder(db, "w1", updatedAt = "2026-01-03T00:00:00.000Z")
+
+        processor.deleteBucketOrphanedRecords("bucket-1", listOf(localTestTable))
+
+        val row = db.queryOne("SELECT id FROM orders WHERE id = ?", arrayOf("w1"))
+        assertNull(row)
+        assertEquals(0, pendingChangeCount(db))
+    }
+
+    @Test
+    fun testTrackBucketMembershipRejectsMissingChecksum() {
+        val (_, processor) = makeTestEnv()
+
+        val record = Record(
+            id = "w1",
+            tableName = "orders",
+            data = mapOf(
+                "id" to AnyCodable("w1"),
+                "user_id" to AnyCodable("user-1"),
+                "updated_at" to AnyCodable("2026-01-03T00:00:00.000Z"),
+            ),
+            updatedAt = "2026-01-03T00:00:00.000Z",
+            deletedAt = null,
+            bucketId = "bucket-1",
+            checksum = null,
+        )
+
+        val error = assertThrows(SynchroError.InvalidResponse::class.java) {
+            processor.trackBucketMembership(listOf(record))
+        }
+        assertTrue(error.details.contains("missing record checksum"))
     }
 }

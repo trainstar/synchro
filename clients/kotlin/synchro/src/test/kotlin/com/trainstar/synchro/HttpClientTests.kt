@@ -35,61 +35,25 @@ class HttpClientTests {
     }
 
     @Test
-    fun testRegisterSuccess() = runTest {
-        val responseBody = """
-            {
-                "id": "server-id-123",
-                "server_time": "2026-01-01T12:00:00.000Z",
-                "checkpoint": 0,
-                "schema_version": 1,
-                "schema_hash": "abc123"
-            }
-        """.trimIndent()
-
-        server.enqueue(MockResponse().setBody(responseBody).setResponseCode(200))
-
-        val req = RegisterRequest(
-            clientID = "test-device", platform = "android",
-            appVersion = "1.0.0", schemaVersion = 0, schemaHash = ""
-        )
-        val resp = httpClient.register(req)
-
-        assertEquals("server-id-123", resp.id)
-        assertEquals(1L, resp.schemaVersion)
-        assertEquals("abc123", resp.schemaHash)
-
-        // Verify request
-        val recorded = server.takeRequest()
-        assertEquals("POST", recorded.method)
-        assertTrue(recorded.path!!.endsWith("/sync/register"))
-        assertEquals("Bearer test-token", recorded.getHeader("Authorization"))
-        assertEquals("1.0.0", recorded.getHeader("X-App-Version"))
-        assertTrue(recorded.getHeader("Content-Type")!!.startsWith("application/json"))
-
-        val body = Json.decodeFromString<Map<String, kotlinx.serialization.json.JsonElement>>(recorded.body.readUtf8())
-        assertEquals("\"test-device\"", body["client_id"].toString())
-        assertEquals("\"android\"", body["platform"].toString())
-    }
-
-    @Test
     fun testFetchSchemaSuccess() = runTest {
         val responseBody = """
             {
                 "schema_version": 3,
                 "schema_hash": "def456",
                 "server_time": "2026-01-01T12:00:00.000Z",
-                "tables": [
-                    {
-                        "table_name": "orders",
-                        "push_policy": "owner_only",
-                        "updated_at_column": "updated_at",
-                        "deleted_at_column": "deleted_at",
-                        "primary_key": ["id"],
-                        "columns": [
-                            {"name": "id", "db_type": "uuid", "logical_type": "string", "nullable": false, "default_kind": "none", "is_primary_key": true}
-                        ]
-                    }
-                ]
+                "manifest": {
+                    "tables": [
+                        {
+                            "name": "orders",
+                            "primary_key": ["id"],
+                            "updated_at_column": "updated_at",
+                            "deleted_at_column": "deleted_at",
+                            "columns": [
+                                {"name": "id", "type": "string", "nullable": false}
+                            ]
+                        }
+                    ]
+                }
             }
         """.trimIndent()
 
@@ -106,7 +70,7 @@ class HttpClientTests {
     }
 
     @Test
-    fun testConnectVNextSuccess() = runTest {
+    fun testConnectSuccess() = runTest {
         val responseBody = """
             {
                 "server_time": "2026-03-20T18:22:11Z",
@@ -126,18 +90,18 @@ class HttpClientTests {
 
         server.enqueue(MockResponse().setBody(responseBody).setResponseCode(200))
 
-        val req = VNextConnectRequest(
+        val req = ConnectRequest(
             clientID = "test-device",
             platform = "android",
             appVersion = "1.0.0",
             protocolVersion = 1,
-            schema = VNextSchemaRef(version = 8, hash = "8b21d2a1"),
+            schema = SchemaRef(version = 8, hash = "8b21d2a1"),
             scopeSetVersion = 13,
             knownScopes = emptyMap()
         )
         val resp = httpClient.connect(req)
 
-        assertEquals(VNextSchemaAction.NONE, resp.schema.action)
+        assertEquals(SchemaAction.NONE, resp.schema.action)
         resp.validate()
 
         val recorded = server.takeRequest()
@@ -149,7 +113,7 @@ class HttpClientTests {
     }
 
     @Test
-    fun testPullVNextEncoding() = runTest {
+    fun testPullEncoding() = runTest {
         val responseBody = """
             {
                 "changes": [],
@@ -171,13 +135,13 @@ class HttpClientTests {
 
         server.enqueue(MockResponse().setBody(responseBody).setResponseCode(200))
 
-        val req = VNextPullRequest(
+        val req = PullRequest(
             clientID = "test-device",
-            schema = VNextSchemaRef(version = 8, hash = "8b21d2a1"),
+            schema = SchemaRef(version = 8, hash = "8b21d2a1"),
             scopeSetVersion = 13,
-            scopes = mapOf("workouts_user:u_123" to VNextScopeCursorRef(cursor = "c_890")),
+            scopes = mapOf("workouts_user:u_123" to ScopeCursorRef(cursor = "c_890")),
             limit = 100,
-            checksumMode = VNextChecksumMode.REQUIRED
+            checksumMode = ChecksumMode.REQUIRED
         )
         val resp = httpClient.pull(req)
 
@@ -208,13 +172,13 @@ class HttpClientTests {
 
         server.enqueue(MockResponse().setBody(responseBody).setResponseCode(422))
 
-        val req = VNextPullRequest(
+        val req = PullRequest(
             clientID = "test",
-            schema = VNextSchemaRef(version = 1, hash = "old"),
+            schema = SchemaRef(version = 1, hash = "old"),
             scopeSetVersion = 0,
             scopes = emptyMap(),
             limit = 100,
-            checksumMode = VNextChecksumMode.NONE
+            checksumMode = ChecksumMode.NONE
         )
         try {
             httpClient.pull(req)
@@ -229,9 +193,17 @@ class HttpClientTests {
     fun testUpgradeRequired426() = runTest {
         server.enqueue(MockResponse().setBody("""{"error":"client upgrade required"}""").setResponseCode(426))
 
-        val req = RegisterRequest(clientID = "test", platform = "android", appVersion = "0.1.0", schemaVersion = 0, schemaHash = "")
+        val req = ConnectRequest(
+            clientID = "test",
+            platform = "android",
+            appVersion = "0.1.0",
+            protocolVersion = 1,
+            schema = SchemaRef(version = 0, hash = ""),
+            scopeSetVersion = 0,
+            knownScopes = emptyMap()
+        )
         try {
-            httpClient.register(req)
+            httpClient.connect(req)
             fail("Expected upgradeRequired error")
         } catch (e: SynchroError.UpgradeRequired) {
             assertEquals("1.0.0", e.currentVersion)
@@ -247,7 +219,12 @@ class HttpClientTests {
                 .setHeader("Retry-After", "10")
         )
 
-        val req = PushRequest(clientID = "test", changes = emptyList(), schemaVersion = 1, schemaHash = "abc")
+        val req = PushRequest(
+            clientID = "test",
+            batchID = "batch-1",
+            schema = SchemaRef(version = 1, hash = "abc"),
+            mutations = emptyList()
+        )
         try {
             httpClient.push(req)
             fail("Expected retryable error")
@@ -267,7 +244,14 @@ class HttpClientTests {
                 .setHeader("Retry-After", "5")
         )
 
-        val req = PullRequest(clientID = "test", checkpoint = 0, schemaVersion = 1, schemaHash = "abc")
+        val req = PullRequest(
+            clientID = "test",
+            schema = SchemaRef(version = 1, hash = "abc"),
+            scopeSetVersion = 0,
+            scopes = emptyMap(),
+            limit = 100,
+            checksumMode = ChecksumMode.NONE
+        )
         try {
             httpClient.pull(req)
             fail("Expected retryable error")
@@ -280,7 +264,14 @@ class HttpClientTests {
     fun testServerError500() = runTest {
         server.enqueue(MockResponse().setBody("""{"error":"internal server error"}""").setResponseCode(500))
 
-        val req = PullRequest(clientID = "test", checkpoint = 0, schemaVersion = 1, schemaHash = "abc")
+        val req = PullRequest(
+            clientID = "test",
+            schema = SchemaRef(version = 1, hash = "abc"),
+            scopeSetVersion = 0,
+            scopes = emptyMap(),
+            limit = 100,
+            checksumMode = ChecksumMode.NONE
+        )
         try {
             httpClient.pull(req)
             fail("Expected serverError")
@@ -288,43 +279,6 @@ class HttpClientTests {
             assertEquals(500, e.status)
             assertEquals("internal server error", e.serverMessage)
         }
-    }
-
-    @Test
-    fun testPullRequestEncoding() = runTest {
-        val pullResponseBody = """
-            {
-                "changes": [],
-                "deletes": [],
-                "checkpoint": 42,
-                "has_more": false,
-                "schema_version": 1,
-                "schema_hash": "abc"
-            }
-        """.trimIndent()
-
-        server.enqueue(MockResponse().setBody(pullResponseBody).setResponseCode(200))
-
-        val req = PullRequest(
-            clientID = "dev-1",
-            checkpoint = 100,
-            tables = listOf("orders"),
-            limit = 50,
-            knownBuckets = listOf("user:123", "global"),
-            schemaVersion = 7,
-            schemaHash = "hash7"
-        )
-        httpClient.pull(req)
-
-        val recorded = server.takeRequest()
-        val body = Json.decodeFromString<kotlinx.serialization.json.JsonObject>(recorded.body.readUtf8())
-        assertEquals("\"dev-1\"", body["client_id"].toString())
-        assertEquals("100", body["checkpoint"].toString())
-        assertEquals("[\"orders\"]", body["tables"].toString())
-        assertEquals("50", body["limit"].toString())
-        assertEquals("[\"user:123\",\"global\"]", body["known_buckets"].toString())
-        assertEquals("7", body["schema_version"].toString())
-        assertEquals("\"hash7\"", body["schema_hash"].toString())
     }
 
     @Test
@@ -363,10 +317,7 @@ class HttpClientTests {
             {
                 "accepted": [],
                 "rejected": [],
-                "checkpoint": 0,
-                "server_time": "2026-01-01T12:00:00.000Z",
-                "schema_version": 1,
-                "schema_hash": "abc"
+                "server_time": "2026-01-01T12:00:00.000Z"
             }
         """.trimIndent()
 
@@ -374,27 +325,33 @@ class HttpClientTests {
 
         val req = PushRequest(
             clientID = "dev-1",
-            changes = listOf(
-                PushRecord(
-                    id = "rec-1",
-                    tableName = "orders",
-                    operation = "create",
-                    data = mapOf("ship_address" to AnyCodable("123 Main St")),
-                    clientUpdatedAt = "2026-01-01T12:00:00.000Z"
+            batchID = "batch-7",
+            schema = SchemaRef(version = 7, hash = "hash7"),
+            mutations = listOf(
+                Mutation(
+                    mutationID = "m-1",
+                    table = "orders",
+                    op = Operation.INSERT,
+                    pk = kotlinx.serialization.json.JsonObject(mapOf("id" to kotlinx.serialization.json.JsonPrimitive("rec-1"))),
+                    clientVersion = "2026-01-01T12:00:00.000Z",
+                    columns = kotlinx.serialization.json.JsonObject(
+                        mapOf("ship_address" to kotlinx.serialization.json.JsonPrimitive("123 Main St"))
+                    )
                 )
             ),
-            schemaVersion = 7,
-            schemaHash = "hash7"
         )
         httpClient.push(req)
 
         val recorded = server.takeRequest()
         val body = Json.decodeFromString<kotlinx.serialization.json.JsonObject>(recorded.body.readUtf8())
         assertEquals("\"dev-1\"", body["client_id"].toString())
-        val changes = body["changes"] as kotlinx.serialization.json.JsonArray
-        assertEquals(1, changes.size)
-        val change = changes[0] as kotlinx.serialization.json.JsonObject
-        assertEquals("\"rec-1\"", change["id"].toString())
-        assertEquals("\"create\"", change["operation"].toString())
+        assertEquals("\"batch-7\"", body["batch_id"].toString())
+        val mutations = body["mutations"] as kotlinx.serialization.json.JsonArray
+        assertEquals(1, mutations.size)
+        val mutation = mutations[0] as kotlinx.serialization.json.JsonObject
+        assertEquals("\"m-1\"", mutation["mutation_id"].toString())
+        assertEquals("\"orders\"", mutation["table"].toString())
+        assertEquals("\"insert\"", mutation["op"].toString())
+        assertEquals("\"2026-01-01T12:00:00.000Z\"", mutation["client_version"].toString())
     }
 }

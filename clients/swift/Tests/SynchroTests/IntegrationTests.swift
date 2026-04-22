@@ -89,8 +89,8 @@ final class IntegrationTests: XCTestCase {
         )
     }
 
-    private func makeConnectRequest(clientID: String) -> VNextConnectRequest {
-        VNextConnectRequest(
+    private func makeConnectRequest(clientID: String) -> ConnectRequest {
+        ConnectRequest(
             clientID: clientID,
             platform: "ios",
             appVersion: "1.0.0",

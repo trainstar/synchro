@@ -87,10 +87,6 @@ enum SQLiteSchema {
         return "CREATE TABLE IF NOT EXISTS \(quotedName) (\(colDefs.joined(separator: ", ")))"
     }
 
-    static func generateCreateTableSQL(table: SchemaTable) -> String {
-        generateCreateTableSQL(table: table.localSchema)
-    }
-
     static func generateCDCTriggers(table: LocalSchemaTable) -> [String] {
         let name = table.tableName
         let quoted = SQLiteHelpers.quoteIdentifier(name)
@@ -178,7 +174,4 @@ enum SQLiteSchema {
         return triggers
     }
 
-    static func generateCDCTriggers(table: SchemaTable) -> [String] {
-        generateCDCTriggers(table: table.localSchema)
-    }
 }

@@ -25,7 +25,7 @@ func (h *Handler) serveConnect(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var req ConnectRequestVNext
+	var req ConnectRequest
 	if err := json.Unmarshal(raw, &req); err != nil {
 		writeJSONError(w, http.StatusBadRequest, "invalid request body")
 		return
@@ -69,7 +69,7 @@ func (h *Handler) servePull(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var req PullRequestVNext
+	var req PullRequest
 	if err := json.Unmarshal(raw, &req); err != nil {
 		writeJSONError(w, http.StatusBadRequest, "invalid request body")
 		return
@@ -80,7 +80,7 @@ func (h *Handler) servePull(w http.ResponseWriter, r *http.Request) {
 	}
 	resp, err := h.queryJSONB(
 		r.Context(),
-		"SELECT synchro_pull_vnext($1, $2::jsonb)",
+		"SELECT synchro_pull($1, $2::jsonb)",
 		userID,
 		string(raw),
 	)
@@ -112,7 +112,7 @@ func (h *Handler) servePush(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var req PushRequestVNext
+	var req PushRequest
 	if err := json.Unmarshal(raw, &req); err != nil {
 		writeJSONError(w, http.StatusBadRequest, "invalid request body")
 		return
@@ -124,7 +124,7 @@ func (h *Handler) servePush(w http.ResponseWriter, r *http.Request) {
 
 	resp, err := h.queryJSONB(
 		r.Context(),
-		"SELECT synchro_push_vnext($1, $2::jsonb)",
+		"SELECT synchro_push($1, $2::jsonb)",
 		userID,
 		string(raw),
 	)
@@ -156,7 +156,7 @@ func (h *Handler) serveRebuild(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var req RebuildRequestVNext
+	var req RebuildRequest
 	if err := json.Unmarshal(raw, &req); err != nil {
 		writeJSONError(w, http.StatusBadRequest, "invalid request body")
 		return
@@ -171,7 +171,7 @@ func (h *Handler) serveRebuild(w http.ResponseWriter, r *http.Request) {
 	}
 	resp, err := h.queryJSONB(
 		r.Context(),
-		"SELECT synchro_rebuild_vnext($1, $2::jsonb)",
+		"SELECT synchro_rebuild($1, $2::jsonb)",
 		userID,
 		string(raw),
 	)
@@ -192,7 +192,7 @@ func (h *Handler) serveSchema(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	raw, err := h.queryJSONB(r.Context(), "SELECT synchro_schema()")
+	raw, err := h.queryJSONB(r.Context(), "SELECT synchro_schema_manifest()")
 	if err != nil {
 		mapSQLError(w, err)
 		return

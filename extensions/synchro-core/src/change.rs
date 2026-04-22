@@ -1,8 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
-/// Internal operation kind shared by changelog, WAL decoding, and legacy
-/// extension paths.
+/// Internal operation kind shared by changelog, WAL decoding, and local change queues.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[repr(i16)]
 pub enum ChangeOperation {
@@ -12,8 +11,8 @@ pub enum ChangeOperation {
 }
 
 impl ChangeOperation {
-    /// Returns the legacy wire-protocol string for this operation.
-    pub fn legacy_wire_name(self) -> &'static str {
+    /// Returns the queue wire-protocol string for this operation.
+    pub fn wire_name(self) -> &'static str {
         match self {
             Self::Insert => "create",
             Self::Update => "update",
@@ -21,8 +20,8 @@ impl ChangeOperation {
         }
     }
 
-    /// Parses a legacy wire-protocol string into an operation.
-    pub fn parse_legacy_wire(value: &str) -> Option<Self> {
+    /// Parses a queue wire-protocol string into an operation.
+    pub fn parse_wire(value: &str) -> Option<Self> {
         match value {
             "create" => Some(Self::Insert),
             "update" => Some(Self::Update),
@@ -49,7 +48,7 @@ impl ChangeOperation {
 
 impl fmt::Display for ChangeOperation {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.legacy_wire_name())
+        f.write_str(self.wire_name())
     }
 }
 
@@ -64,8 +63,8 @@ mod tests {
             ChangeOperation::Update,
             ChangeOperation::Delete,
         ] {
-            let wire = op.legacy_wire_name();
-            assert_eq!(ChangeOperation::parse_legacy_wire(wire), Some(op));
+            let wire = op.wire_name();
+            assert_eq!(ChangeOperation::parse_wire(wire), Some(op));
             let encoded = op.to_i16();
             assert_eq!(ChangeOperation::from_i16(encoded), Some(op));
         }
@@ -80,7 +79,7 @@ mod tests {
 
     #[test]
     fn operation_parse_unknown() {
-        assert_eq!(ChangeOperation::parse_legacy_wire("unknown"), None);
+        assert_eq!(ChangeOperation::parse_wire("unknown"), None);
         assert_eq!(ChangeOperation::from_i16(0), None);
         assert_eq!(ChangeOperation::from_i16(4), None);
     }

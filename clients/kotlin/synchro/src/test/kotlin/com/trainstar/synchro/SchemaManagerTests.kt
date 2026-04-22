@@ -19,8 +19,8 @@ class SchemaManagerTests {
         return databases.create(context)
     }
 
-    private fun makeManifest(tables: List<VNextTableSchema>): VNextSchemaManifest =
-        VNextSchemaManifest(tables)
+    private fun makeManifest(tables: List<TableSchema>): SchemaManifest =
+        SchemaManifest(tables)
 
     @After
     fun tearDown() {
@@ -69,17 +69,17 @@ class SchemaManagerTests {
         val manager = SchemaManager(db)
         val manifest = makeManifest(
             listOf(
-                VNextTableSchema(
+                TableSchema(
                     name = "workouts",
                     primaryKey = listOf("id"),
                     updatedAtColumn = "updated_at",
                     deletedAtColumn = "deleted_at",
-                    composition = VNextCompositionClass.SINGLE_SCOPE,
+                    composition = CompositionClass.SINGLE_SCOPE,
                     columns = listOf(
-                        VNextColumnSchema(name = "id", typeName = "string", nullable = false),
-                        VNextColumnSchema(name = "name", typeName = "string", nullable = false),
-                        VNextColumnSchema(name = "updated_at", typeName = "datetime", nullable = false),
-                        VNextColumnSchema(name = "deleted_at", typeName = "datetime", nullable = true),
+                        ColumnSchema(name = "id", typeName = "string", nullable = false),
+                        ColumnSchema(name = "name", typeName = "string", nullable = false),
+                        ColumnSchema(name = "updated_at", typeName = "datetime", nullable = false),
+                        ColumnSchema(name = "deleted_at", typeName = "datetime", nullable = true),
                     ),
                     indexes = null,
                 )
@@ -104,17 +104,17 @@ class SchemaManagerTests {
 
         val v1 = makeManifest(
             listOf(
-                VNextTableSchema(
+                TableSchema(
                     name = "workouts",
                     primaryKey = listOf("id"),
                     updatedAtColumn = "updated_at",
                     deletedAtColumn = "deleted_at",
-                    composition = VNextCompositionClass.SINGLE_SCOPE,
+                    composition = CompositionClass.SINGLE_SCOPE,
                     columns = listOf(
-                        VNextColumnSchema(name = "id", typeName = "string", nullable = false),
-                        VNextColumnSchema(name = "name", typeName = "string", nullable = false),
-                        VNextColumnSchema(name = "updated_at", typeName = "datetime", nullable = false),
-                        VNextColumnSchema(name = "deleted_at", typeName = "datetime", nullable = true),
+                        ColumnSchema(name = "id", typeName = "string", nullable = false),
+                        ColumnSchema(name = "name", typeName = "string", nullable = false),
+                        ColumnSchema(name = "updated_at", typeName = "datetime", nullable = false),
+                        ColumnSchema(name = "deleted_at", typeName = "datetime", nullable = true),
                     ),
                     indexes = null,
                 )
@@ -126,18 +126,18 @@ class SchemaManagerTests {
 
         val v2 = makeManifest(
             listOf(
-                VNextTableSchema(
+                TableSchema(
                     name = "workouts",
                     primaryKey = listOf("id"),
                     updatedAtColumn = "updated_at",
                     deletedAtColumn = "deleted_at",
-                    composition = VNextCompositionClass.SINGLE_SCOPE,
+                    composition = CompositionClass.SINGLE_SCOPE,
                     columns = listOf(
-                        VNextColumnSchema(name = "id", typeName = "string", nullable = false),
-                        VNextColumnSchema(name = "name", typeName = "string", nullable = false),
-                        VNextColumnSchema(name = "notes", typeName = "string", nullable = true),
-                        VNextColumnSchema(name = "updated_at", typeName = "datetime", nullable = false),
-                        VNextColumnSchema(name = "deleted_at", typeName = "datetime", nullable = true),
+                        ColumnSchema(name = "id", typeName = "string", nullable = false),
+                        ColumnSchema(name = "name", typeName = "string", nullable = false),
+                        ColumnSchema(name = "notes", typeName = "string", nullable = true),
+                        ColumnSchema(name = "updated_at", typeName = "datetime", nullable = false),
+                        ColumnSchema(name = "deleted_at", typeName = "datetime", nullable = true),
                     ),
                     indexes = null,
                 )
@@ -158,17 +158,17 @@ class SchemaManagerTests {
 
         val canonical = makeManifest(
             listOf(
-                VNextTableSchema(
+                TableSchema(
                     name = "metrics",
                     primaryKey = listOf("id"),
                     updatedAtColumn = "updated_at",
                     deletedAtColumn = "deleted_at",
-                    composition = VNextCompositionClass.SINGLE_SCOPE,
+                    composition = CompositionClass.SINGLE_SCOPE,
                     columns = listOf(
-                        VNextColumnSchema(name = "id", typeName = "string", nullable = false),
-                        VNextColumnSchema(name = "score", typeName = "int", nullable = true),
-                        VNextColumnSchema(name = "updated_at", typeName = "datetime", nullable = false),
-                        VNextColumnSchema(name = "deleted_at", typeName = "datetime", nullable = true),
+                        ColumnSchema(name = "id", typeName = "string", nullable = false),
+                        ColumnSchema(name = "score", typeName = "int", nullable = true),
+                        ColumnSchema(name = "updated_at", typeName = "datetime", nullable = false),
+                        ColumnSchema(name = "deleted_at", typeName = "datetime", nullable = true),
                     ),
                     indexes = null,
                 )
@@ -182,17 +182,17 @@ class SchemaManagerTests {
 
         val aliasManifest = makeManifest(
             listOf(
-                VNextTableSchema(
+                TableSchema(
                     name = "metrics",
                     primaryKey = listOf("id"),
                     updatedAtColumn = "updated_at",
                     deletedAtColumn = "deleted_at",
-                    composition = VNextCompositionClass.SINGLE_SCOPE,
+                    composition = CompositionClass.SINGLE_SCOPE,
                     columns = listOf(
-                        VNextColumnSchema(name = "id", typeName = "uuid", nullable = false),
-                        VNextColumnSchema(name = "score", typeName = "integer", nullable = true),
-                        VNextColumnSchema(name = "updated_at", typeName = "timestamp", nullable = false),
-                        VNextColumnSchema(name = "deleted_at", typeName = "timestamp", nullable = true),
+                        ColumnSchema(name = "id", typeName = "uuid", nullable = false),
+                        ColumnSchema(name = "score", typeName = "integer", nullable = true),
+                        ColumnSchema(name = "updated_at", typeName = "timestamp", nullable = false),
+                        ColumnSchema(name = "deleted_at", typeName = "timestamp", nullable = true),
                     ),
                     indexes = null,
                 )

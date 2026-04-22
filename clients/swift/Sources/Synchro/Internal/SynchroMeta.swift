@@ -133,6 +133,15 @@ enum SynchroMeta {
         }
     }
 
+    static func hasBucketMembers(_ db: GRDB.Database, tableName: String, recordID: String) throws -> Bool {
+        let row = try Row.fetchOne(
+            db,
+            sql: "SELECT 1 AS present FROM _synchro_bucket_members WHERE table_name = ? AND record_id = ? LIMIT 1",
+            arguments: [tableName, recordID]
+        )
+        return row != nil
+    }
+
     // MARK: - Scope State
 
     static func getAllScopes(_ db: GRDB.Database) throws -> [LocalScopeState] {

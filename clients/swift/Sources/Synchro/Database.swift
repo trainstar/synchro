@@ -58,6 +58,20 @@ final class SynchroDatabase: @unchecked Sendable {
         }
     }
 
+    func writeSyncLockedTransaction<T>(_ block: (GRDB.Database) throws -> T) throws -> T {
+        try dbPool.write { db in
+            try SynchroMeta.setSyncLock(db, locked: true)
+            do {
+                let result = try block(db)
+                try SynchroMeta.setSyncLock(db, locked: false)
+                return result
+            } catch {
+                try? SynchroMeta.setSyncLock(db, locked: false)
+                throw error
+            }
+        }
+    }
+
     // MARK: - Batch
 
     func executeBatch(_ statements: [SQLStatement]) throws -> Int {

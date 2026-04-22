@@ -74,56 +74,26 @@ final class HttpClientTests: XCTestCase {
         super.tearDown()
     }
 
-    func testRegisterSuccess() async throws {
-        let responseBody: [String: Any] = [
-            "id": "server-id-123",
-            "server_time": "2026-01-01T12:00:00.000Z",
-            "checkpoint": 0,
-            "schema_version": 1,
-            "schema_hash": "abc123",
-        ]
-
-        MockURLProtocol.requestHandler = { request in
-            XCTAssertEqual(request.httpMethod, "POST")
-            XCTAssertTrue(request.url!.path.hasSuffix("/sync/register"))
-            XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer test-token")
-            XCTAssertEqual(request.value(forHTTPHeaderField: "X-App-Version"), "1.0.0")
-            XCTAssertEqual(request.value(forHTTPHeaderField: "Content-Type"), "application/json")
-
-            // Verify request body
-            let body = try JSONSerialization.jsonObject(with: request.bodyData()!) as! [String: Any]
-            XCTAssertEqual(body["client_id"] as? String, "test-device")
-            XCTAssertEqual(body["platform"] as? String, "ios")
-
-            let data = try JSONSerialization.data(withJSONObject: responseBody)
-            let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: ["Content-Type": "application/json"])!
-            return (response, data)
-        }
-
-        let req = RegisterRequest(clientID: "test-device", platform: "ios", appVersion: "1.0.0", schemaVersion: 0, schemaHash: "")
-        let resp = try await httpClient.register(request: req)
-        XCTAssertEqual(resp.id, "server-id-123")
-        XCTAssertEqual(resp.schemaVersion, 1)
-        XCTAssertEqual(resp.schemaHash, "abc123")
-    }
-
     func testFetchSchemaSuccess() async throws {
         let responseBody: [String: Any] = [
             "schema_version": 3,
             "schema_hash": "def456",
             "server_time": "2026-01-01T12:00:00.000Z",
-            "tables": [
-                [
-                    "table_name": "orders",
-                    "push_policy": "owner_only",
-                    "updated_at_column": "updated_at",
-                    "deleted_at_column": "deleted_at",
-                    "primary_key": ["id"],
-                    "columns": [
-                        ["name": "id", "db_type": "uuid", "logical_type": "string", "nullable": false, "default_kind": "none", "is_primary_key": true]
-                    ]
-                ] as [String : Any]
-            ]
+            "manifest": [
+                "tables": [
+                    [
+                        "name": "orders",
+                        "primary_key": ["id"],
+                        "updated_at_column": "updated_at",
+                        "deleted_at_column": "deleted_at",
+                        "columns": [
+                            ["name": "id", "type": "string", "nullable": false],
+                            ["name": "updated_at", "type": "datetime", "nullable": false],
+                            ["name": "deleted_at", "type": "datetime", "nullable": true]
+                        ]
+                    ] as [String: Any]
+                ]
+            ],
         ]
 
         MockURLProtocol.requestHandler = { request in
@@ -140,7 +110,7 @@ final class HttpClientTests: XCTestCase {
         XCTAssertEqual(resp.tables[0].tableName, "orders")
     }
 
-    func testConnectVNextSuccess() async throws {
+    func testConnectSuccess() async throws {
         let responseBody: [String: Any] = [
             "server_time": "2026-03-20T18:22:11Z",
             "protocol_version": 1,
@@ -168,7 +138,7 @@ final class HttpClientTests: XCTestCase {
             return (response, data)
         }
 
-        let req = VNextConnectRequest(
+        let req = ConnectRequest(
             clientID: "test-device",
             platform: "ios",
             appVersion: "1.0.0",
@@ -182,7 +152,7 @@ final class HttpClientTests: XCTestCase {
         try resp.validate()
     }
 
-    func testPullVNextEncoding() async throws {
+    func testPullEncoding() async throws {
         let responseBody: [String: Any] = [
             "changes": [],
             "scope_set_version": 13,
@@ -213,7 +183,7 @@ final class HttpClientTests: XCTestCase {
             return (response, data)
         }
 
-        let req = VNextPullRequest(
+        let req = PullRequest(
             clientID: "test-device",
             schema: .init(version: 8, hash: "8b21d2a1"),
             scopeSetVersion: 13,
@@ -242,13 +212,13 @@ final class HttpClientTests: XCTestCase {
             return (response, data)
         }
 
-        let req = VNextPullRequest(
+        let req = PullRequest(
             clientID: "test",
             schema: .init(version: 1, hash: "old"),
             scopeSetVersion: 0,
             scopes: [:],
             limit: 100,
-            checksumMode: VNextChecksumMode.none
+            checksumMode: ChecksumMode.none
         )
         do {
             _ = try await httpClient.pull(request: req)
@@ -273,9 +243,17 @@ final class HttpClientTests: XCTestCase {
             return (response, data)
         }
 
-        let req = RegisterRequest(clientID: "test", platform: "ios", appVersion: "0.1.0", schemaVersion: 0, schemaHash: "")
+        let req = ConnectRequest(
+            clientID: "test",
+            platform: "ios",
+            appVersion: "0.1.0",
+            protocolVersion: 1,
+            schema: .init(version: 0, hash: ""),
+            scopeSetVersion: 0,
+            knownScopes: [:]
+        )
         do {
-            _ = try await httpClient.register(request: req)
+            _ = try await httpClient.connect(request: req)
             XCTFail("Expected upgradeRequired error")
         } catch let error as SynchroError {
             switch error {
@@ -296,7 +274,12 @@ final class HttpClientTests: XCTestCase {
             return (response, data)
         }
 
-        let req = PushRequest(clientID: "test", changes: [], schemaVersion: 1, schemaHash: "abc")
+        let req = PushRequest(
+            clientID: "test",
+            batchID: "batch-1",
+            schema: .init(version: 1, hash: "abc"),
+            mutations: []
+        )
         do {
             _ = try await httpClient.push(request: req)
             XCTFail("Expected retryable error")
@@ -320,7 +303,14 @@ final class HttpClientTests: XCTestCase {
             return (response, data)
         }
 
-        let req = PullRequest(clientID: "test", checkpoint: 0, schemaVersion: 1, schemaHash: "abc")
+        let req = PullRequest(
+            clientID: "test",
+            schema: .init(version: 1, hash: "abc"),
+            scopeSetVersion: 0,
+            scopes: [:],
+            limit: 100,
+            checksumMode: ChecksumMode.none
+        )
         do {
             _ = try await httpClient.pull(request: req)
             XCTFail("Expected retryable error")
@@ -338,7 +328,14 @@ final class HttpClientTests: XCTestCase {
             return (response, data)
         }
 
-        let req = PullRequest(clientID: "test", checkpoint: 0, schemaVersion: 1, schemaHash: "abc")
+        let req = PullRequest(
+            clientID: "test",
+            schema: .init(version: 1, hash: "abc"),
+            scopeSetVersion: 0,
+            scopes: [:],
+            limit: 100,
+            checksumMode: ChecksumMode.none
+        )
         do {
             _ = try await httpClient.pull(request: req)
             XCTFail("Expected serverError")
@@ -351,45 +348,6 @@ final class HttpClientTests: XCTestCase {
                 XCTFail("Expected serverError, got \(error)")
             }
         }
-    }
-
-    func testPullRequestEncoding() async throws {
-        let pullResponseBody: [String: Any] = [
-            "changes": [] as [Any],
-            "deletes": [] as [Any],
-            "checkpoint": 42,
-            "has_more": false,
-            "schema_version": 1,
-            "schema_hash": "abc",
-        ]
-
-        var capturedBody: [String: Any]?
-
-        MockURLProtocol.requestHandler = { request in
-            capturedBody = try JSONSerialization.jsonObject(with: request.bodyData()!) as? [String: Any]
-            let data = try JSONSerialization.data(withJSONObject: pullResponseBody)
-            let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
-            return (response, data)
-        }
-
-        let req = PullRequest(
-            clientID: "dev-1",
-            checkpoint: 100,
-            tables: ["orders"],
-            limit: 50,
-            knownBuckets: ["user:123", "global"],
-            schemaVersion: 7,
-            schemaHash: "hash7"
-        )
-        _ = try await httpClient.pull(request: req)
-
-        XCTAssertEqual(capturedBody?["client_id"] as? String, "dev-1")
-        XCTAssertEqual(capturedBody?["checkpoint"] as? Int, 100)
-        XCTAssertEqual(capturedBody?["tables"] as? [String], ["orders"])
-        XCTAssertEqual(capturedBody?["limit"] as? Int, 50)
-        XCTAssertEqual(capturedBody?["known_buckets"] as? [String], ["user:123", "global"])
-        XCTAssertEqual(capturedBody?["schema_version"] as? Int, 7)
-        XCTAssertEqual(capturedBody?["schema_hash"] as? String, "hash7")
     }
 
     func testFetchTablesSuccess() async throws {
@@ -425,10 +383,7 @@ final class HttpClientTests: XCTestCase {
         let pushResponseBody: [String: Any] = [
             "accepted": [] as [Any],
             "rejected": [] as [Any],
-            "checkpoint": 0,
             "server_time": "2026-01-01T12:00:00.000Z",
-            "schema_version": 1,
-            "schema_hash": "abc",
         ]
 
         var capturedBody: [String: Any]?
@@ -442,24 +397,29 @@ final class HttpClientTests: XCTestCase {
 
         let req = PushRequest(
             clientID: "dev-1",
-            changes: [
-                PushRecord(
-                    id: "rec-1",
-                    tableName: "orders",
-                    operation: "create",
-                    data: ["ship_address": AnyCodable("123 Main St")],
-                    clientUpdatedAt: ISO8601DateFormatter().date(from: "2026-01-01T12:00:00Z")!
+            batchID: "batch-7",
+            schema: .init(version: 7, hash: "hash7"),
+            mutations: [
+                Mutation(
+                    mutationID: "m-1",
+                    table: "orders",
+                    op: .insert,
+                    pk: ["id": AnyCodable("rec-1")],
+                    baseVersion: nil,
+                    clientVersion: "2026-01-01T12:00:00.000Z",
+                    columns: ["ship_address": AnyCodable("123 Main St")]
                 )
-            ],
-            schemaVersion: 7,
-            schemaHash: "hash7"
+            ]
         )
         _ = try await httpClient.push(request: req)
 
         XCTAssertEqual(capturedBody?["client_id"] as? String, "dev-1")
-        let changes = capturedBody?["changes"] as? [[String: Any]]
-        XCTAssertEqual(changes?.count, 1)
-        XCTAssertEqual(changes?[0]["id"] as? String, "rec-1")
-        XCTAssertEqual(changes?[0]["operation"] as? String, "create")
+        XCTAssertEqual(capturedBody?["batch_id"] as? String, "batch-7")
+        let mutations = capturedBody?["mutations"] as? [[String: Any]]
+        XCTAssertEqual(mutations?.count, 1)
+        XCTAssertEqual(mutations?[0]["mutation_id"] as? String, "m-1")
+        XCTAssertEqual(mutations?[0]["table"] as? String, "orders")
+        XCTAssertEqual(mutations?[0]["op"] as? String, "insert")
+        XCTAssertEqual(mutations?[0]["client_version"] as? String, "2026-01-01T12:00:00.000Z")
     }
 }

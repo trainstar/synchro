@@ -174,12 +174,19 @@ final class PushProcessorTests: XCTestCase {
         formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
         let serverTime = formatter.date(from: "2026-01-01T12:00:00.000Z")!
 
-        let accepted = [PushResult(
-            id: "w1",
-            tableName: "orders",
-            operation: "create",
-            status: PushStatus.applied,
-            serverUpdatedAt: serverTime
+        let accepted = [AcceptedMutation(
+            mutationID: "m1",
+            table: "orders",
+            pk: ["id": AnyCodable("w1")],
+            status: .applied,
+            serverRow: [
+                "id": AnyCodable("w1"),
+                "ship_address": AnyCodable("123 Main St"),
+                "user_id": AnyCodable("u1"),
+                "updated_at": AnyCodable("2026-01-01T12:00:00.000Z"),
+                "deleted_at": AnyCodable(NSNull())
+            ],
+            serverVersion: formatter.string(from: serverTime)
         )]
 
         _ = try processor.applyAccepted(accepted: accepted, syncedTables: [testTable])
@@ -206,12 +213,18 @@ final class PushProcessorTests: XCTestCase {
         formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
         let serverTime = formatter.date(from: "2026-01-01T14:00:00.000Z")!
 
-        let accepted = [PushResult(
-            id: "ci1",
-            tableName: "custom_items",
-            operation: "create",
-            status: PushStatus.applied,
-            serverUpdatedAt: serverTime
+        let accepted = [AcceptedMutation(
+            mutationID: "m1",
+            table: "custom_items",
+            pk: ["item_id": AnyCodable("ci1")],
+            status: .applied,
+            serverRow: [
+                "item_id": AnyCodable("ci1"),
+                "title": AnyCodable("My Item"),
+                "modified_at": AnyCodable("2026-01-01T14:00:00.000Z"),
+                "removed_at": AnyCodable(NSNull())
+            ],
+            serverVersion: formatter.string(from: serverTime)
         )]
 
         _ = try processor.applyAccepted(accepted: accepted, syncedTables: [customTable])
@@ -237,12 +250,19 @@ final class PushProcessorTests: XCTestCase {
         formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
         let serverTime = formatter.date(from: "2026-01-01T12:00:00.000Z")!
 
-        let accepted = [PushResult(
-            id: "w1",
-            tableName: "orders",
-            operation: "delete",
-            status: PushStatus.applied,
-            serverDeletedAt: serverTime
+        let accepted = [AcceptedMutation(
+            mutationID: "m1",
+            table: "orders",
+            pk: ["id": AnyCodable("w1")],
+            status: .applied,
+            serverRow: [
+                "id": AnyCodable("w1"),
+                "ship_address": AnyCodable("123 Main St"),
+                "user_id": AnyCodable("u1"),
+                "updated_at": AnyCodable("2026-01-01T10:00:00.000Z"),
+                "deleted_at": AnyCodable("2026-01-01T12:00:00.000Z")
+            ],
+            serverVersion: formatter.string(from: serverTime)
         )]
 
         _ = try processor.applyAccepted(accepted: accepted, syncedTables: [testTable])
@@ -264,12 +284,19 @@ final class PushProcessorTests: XCTestCase {
         let formatter = ISO8601DateFormatter()
         formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
 
-        let accepted = [PushResult(
-            id: "w1",
-            tableName: "orders",
-            operation: "create",
-            status: PushStatus.applied,
-            serverUpdatedAt: formatter.date(from: "2026-01-01T12:00:00.000Z")!
+        let accepted = [AcceptedMutation(
+            mutationID: "m1",
+            table: "orders",
+            pk: ["id": AnyCodable("w1")],
+            status: .applied,
+            serverRow: [
+                "id": AnyCodable("w1"),
+                "ship_address": AnyCodable("123 Main St"),
+                "user_id": AnyCodable("u1"),
+                "updated_at": AnyCodable("2026-01-01T12:00:00.000Z"),
+                "deleted_at": AnyCodable(NSNull())
+            ],
+            serverVersion: "2026-01-01T12:00:00.000Z"
         )]
 
         _ = try processor.applyAccepted(accepted: accepted, syncedTables: [testTable])
@@ -278,7 +305,7 @@ final class PushProcessorTests: XCTestCase {
         XCTAssertFalse(try tracker.hasPendingChanges())
     }
 
-    func testApplyAcceptedVNextAppliesCanonicalServerRow() throws {
+    func testApplyAcceptedAppliesCanonicalServerRow() throws {
         let (db, tracker, processor) = try makeTestEnv()
 
         _ = try db.execute(
@@ -286,7 +313,7 @@ final class PushProcessorTests: XCTestCase {
             params: ["w1", "Client Address", "u1", "2026-01-01T10:00:00.000Z"]
         )
 
-        let accepted = [VNextAcceptedMutation(
+        let accepted = [AcceptedMutation(
             mutationID: "m1",
             table: "orders",
             pk: ["id": AnyCodable("w1")],
@@ -335,13 +362,15 @@ final class PushProcessorTests: XCTestCase {
             updatedAt: ISO8601DateFormatter().date(from: "2026-01-01T11:00:00Z")!
         )
 
-        let rejected = [PushResult(
-            id: "w1",
-            tableName: "orders",
-            operation: "update",
-            status: PushStatus.conflict,
+        let rejected = [RejectedMutation(
+            mutationID: "m1",
+            table: "orders",
+            pk: ["id": AnyCodable("w1")],
+            status: .conflict,
+            code: .versionConflict,
             message: "server version is newer",
-            serverVersion: serverVersion
+            serverRow: serverVersion.data,
+            serverVersion: "2026-01-01T11:00:00.000Z"
         )]
 
         let conflicts = try processor.applyRejected(rejected: rejected, syncedTables: [testTable])
@@ -369,12 +398,15 @@ final class PushProcessorTests: XCTestCase {
             params: ["w1", "Client Address", "u1", "2026-01-01T10:00:00.000Z"]
         )
 
-        let rejected = [PushResult(
-            id: "w1",
-            tableName: "orders",
-            operation: "update",
-            status: PushStatus.rejectedTerminal,
-            message: "ownership violation"
+        let rejected = [RejectedMutation(
+            mutationID: "m1",
+            table: "orders",
+            pk: ["id": AnyCodable("w1")],
+            status: .rejectedTerminal,
+            code: .policyRejected,
+            message: "ownership violation",
+            serverRow: nil,
+            serverVersion: nil
         )]
 
         let conflicts = try processor.applyRejected(rejected: rejected, syncedTables: [testTable])
@@ -390,7 +422,7 @@ final class PushProcessorTests: XCTestCase {
         XCTAssertEqual(conflicts.count, 0)
     }
 
-    func testApplyRejectedVNextConflictAppliesCanonicalServerRow() throws {
+    func testApplyRejectedConflictAppliesCanonicalServerRow() throws {
         let (db, tracker, processor) = try makeTestEnv()
 
         _ = try db.execute(
@@ -398,7 +430,7 @@ final class PushProcessorTests: XCTestCase {
             params: ["w1", "Client Address", "u1", "2026-01-01T10:00:00.000Z"]
         )
 
-        let rejected = [VNextRejectedMutation(
+        let rejected = [RejectedMutation(
             mutationID: "m1",
             table: "orders",
             pk: ["id": AnyCodable("w1")],
@@ -446,13 +478,15 @@ final class PushProcessorTests: XCTestCase {
             updatedAt: ISO8601DateFormatter().date(from: "2026-01-01T11:00:00Z")!
         )
 
-        let rejected = [PushResult(
-            id: "w1",
-            tableName: "orders",
-            operation: "update",
-            status: PushStatus.conflict,
+        let rejected = [RejectedMutation(
+            mutationID: "m1",
+            table: "orders",
+            pk: ["id": AnyCodable("w1")],
+            status: .conflict,
+            code: .versionConflict,
             message: "server version is newer",
-            serverVersion: serverVersion
+            serverRow: serverVersion.data,
+            serverVersion: "2026-01-01T11:00:00.000Z"
         )]
 
         _ = try processor.applyRejected(rejected: rejected, syncedTables: [testTable])

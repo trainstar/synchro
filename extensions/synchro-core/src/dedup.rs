@@ -1,8 +1,7 @@
-//! Legacy changelog dedup helpers.
+//! Changelog dedup helpers.
 //!
 //! These helpers still use `bucket_id` in their stored field names because the
-//! current PostgreSQL extension has not been migrated yet. In vNext terms, that
-//! identifier represents a scope instance id.
+//! current PostgreSQL extension stores scope instance ids under that name.
 
 use crate::change::ChangeOperation;
 

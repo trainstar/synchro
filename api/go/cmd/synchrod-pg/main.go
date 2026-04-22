@@ -63,14 +63,8 @@ func run() error {
 		return fmt.Errorf("pinging database: %w", err)
 	}
 
-	var extExists bool
-	err = db.QueryRowContext(ctx,
-		"SELECT EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'synchro_pg')").Scan(&extExists)
-	if err != nil {
-		return fmt.Errorf("checking extension: %w", err)
-	}
-	if !extExists {
-		return fmt.Errorf("synchro_pg extension is not installed (run: CREATE EXTENSION synchro_pg)")
+	if err := synchroapi.RequireCompatibleExtension(ctx, db); err != nil {
+		return fmt.Errorf("verifying synchro_pg compatibility: %w", err)
 	}
 
 	syncHandler := synchroapi.Routes(synchroapi.Config{

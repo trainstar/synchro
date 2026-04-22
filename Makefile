@@ -87,6 +87,8 @@ SYNCHROD_PG_LOG_FILE ?= .synchrod-pg-test.log
 
 BINARY ?= bin/synchrod-pg
 SEED_BINARY ?= bin/synchro-seed
+GO_TEST_ARGS ?= -v -count=1 -p 1
+GO_TEST_PKGS ?= ./...
 GRADLE_TEST_ARGS ?= --rerun-tasks
 LOCAL_CONSUMER_DIR ?= $(CURDIR)/dist/local-consumer
 CURRENT_VERSION := $(shell cat VERSION 2>/dev/null)
@@ -118,7 +120,7 @@ help:
 	@echo "  test-rust-core        - Run synchro-core unit tests"
 	@echo "  test-rust-pg          - Run pgrx integration tests on PG 18"
 	@echo "  test-rust-pg-all      - Run pgrx tests on PG 14 through PG 18"
-	@echo "  test-adapter          - Run Go adapter integration tests"
+	@echo "  test-adapter          - Run Go adapter integration tests (override GO_TEST_PKGS to focus)"
 	@echo "  test-swift-unit       - Run Swift unit tests"
 	@echo "  test-swift            - Run Swift integration tests against the local adapter"
 	@echo "  test-kotlin-unit      - Run Kotlin unit tests"
@@ -178,7 +180,7 @@ lint-rn:
 test: test-rust-core test-adapter test-swift-unit test-kotlin-unit test-rn-unit docs-build
 
 test-swift-unit:
-	cd clients/swift && swift test
+	cd clients/swift && swift test --skip IntegrationTests --skip SchemaIntegrationTests
 
 test-swift: synchrod-pg-test-restart
 	cd clients/swift && $(TEST_ENV) swift test
@@ -186,12 +188,12 @@ test-swift: synchrod-pg-test-restart
 test-kotlin-unit:
 	@test -n "$(ANDROID_JAVA_HOME)" || (echo "Android builds require JDK 17. Set ANDROID_JAVA_HOME to a JDK 17 install."; exit 1)
 	@test -d "$(ANDROID_HOME)" || (echo "Android SDK not found at $(ANDROID_HOME). Set ANDROID_HOME to a valid SDK install."; exit 1)
-	cd clients/kotlin && ANDROID_HOME="$(ANDROID_HOME)" ANDROID_SDK_ROOT="$(ANDROID_HOME)" JAVA_HOME="$(ANDROID_JAVA_HOME)" PATH="$(ANDROID_JAVA_HOME)/bin:$$PATH" ./gradlew $(GRADLE_TEST_ARGS) :synchro:test
+	cd clients/kotlin && ANDROID_HOME="$(ANDROID_HOME)" ANDROID_SDK_ROOT="$(ANDROID_HOME)" JAVA_HOME="$(ANDROID_JAVA_HOME)" PATH="$(ANDROID_JAVA_HOME)/bin:$$PATH" ./gradlew $(GRADLE_TEST_ARGS) -PsynchroTestSuite=unit :synchro:test
 
 test-kotlin: synchrod-pg-test-restart
 	@test -n "$(ANDROID_JAVA_HOME)" || (echo "Android builds require JDK 17. Set ANDROID_JAVA_HOME to a JDK 17 install."; exit 1)
 	@test -d "$(ANDROID_HOME)" || (echo "Android SDK not found at $(ANDROID_HOME). Set ANDROID_HOME to a valid SDK install."; exit 1)
-	cd clients/kotlin && ANDROID_HOME="$(ANDROID_HOME)" ANDROID_SDK_ROOT="$(ANDROID_HOME)" JAVA_HOME="$(ANDROID_JAVA_HOME)" PATH="$(ANDROID_JAVA_HOME)/bin:$$PATH" $(TEST_ENV) ./gradlew $(GRADLE_TEST_ARGS) :synchro:test
+	cd clients/kotlin && ANDROID_HOME="$(ANDROID_HOME)" ANDROID_SDK_ROOT="$(ANDROID_HOME)" JAVA_HOME="$(ANDROID_JAVA_HOME)" PATH="$(ANDROID_JAVA_HOME)/bin:$$PATH" $(TEST_ENV) ./gradlew $(GRADLE_TEST_ARGS) -PsynchroTestSuite=integration :synchro:test
 
 test-kotlin-integration: test-kotlin
 
@@ -401,7 +403,9 @@ test-adapter: test-adapter-setup
 	@echo "Running adapter integration tests..."
 	@set -e; \
 	status=0; \
-	if ! (cd api/go && GOWORK=off TEST_DATABASE_URL="$(ADAPTER_TEST_URL)" go test -v -count=1 -p 1 ./...); then \
+	if (cd api/go && GOWORK=off TEST_DATABASE_URL="$(ADAPTER_TEST_URL)" go test $(GO_TEST_ARGS) $(GO_TEST_PKGS)); then \
+		status=0; \
+	else \
 		status=$$?; \
 	fi; \
 	$(MAKE) test-adapter-teardown; \

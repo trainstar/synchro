@@ -21,28 +21,16 @@ class HttpClient(
 
     // MARK: - Endpoints
 
-    suspend fun register(request: RegisterRequest): RegisterResponse =
-        post("/sync/register", json.encodeToString(request))
-
-    suspend fun connect(request: VNextConnectRequest): VNextConnectResponse =
+    suspend fun connect(request: ConnectRequest): ConnectResponse =
         post("/sync/connect", json.encodeToString(request))
 
     suspend fun pull(request: PullRequest): PullResponse =
         post("/sync/pull", json.encodeToString(request))
 
-    suspend fun pull(request: VNextPullRequest): VNextPullResponse =
-        post("/sync/pull", json.encodeToString(request))
-
     suspend fun push(request: PushRequest): PushResponse =
         post("/sync/push", json.encodeToString(request))
 
-    suspend fun push(request: VNextPushRequest): VNextPushResponse =
-        post("/sync/push", json.encodeToString(request))
-
     suspend fun rebuild(request: RebuildRequest): RebuildResponse =
-        post("/sync/rebuild", json.encodeToString(request))
-
-    suspend fun rebuild(request: VNextRebuildRequest): VNextRebuildResponse =
         post("/sync/rebuild", json.encodeToString(request))
 
     suspend fun fetchSchema(): SchemaResponse =
@@ -146,7 +134,7 @@ class HttpClient(
 
     private fun errorMessage(body: String): String? {
         try {
-            return json.decodeFromString<VNextErrorResponse>(body).error.message
+            return json.decodeFromString<ErrorResponse>(body).error.message
         } catch (_: Exception) {
         }
         return try {
@@ -157,18 +145,18 @@ class HttpClient(
         }
     }
 
-    private fun decodeSchemaMismatch(body: String): SchemaMismatchBody? {
+private fun decodeSchemaMismatch(body: String): SchemaMismatchBody? {
         try {
             return json.decodeFromString<SchemaMismatchBody>(body)
         } catch (_: Exception) {
         }
 
         return try {
-            val vnext = json.decodeFromString<VNextErrorResponse>(body)
-            if (vnext.error.code == VNextProtocolErrorCode.SCHEMA_MISMATCH) {
+            val errorResponse = json.decodeFromString<ErrorResponse>(body)
+            if (errorResponse.error.code == ProtocolErrorCode.SCHEMA_MISMATCH) {
                 SchemaMismatchBody(
-                    code = vnext.error.code.name.lowercase(),
-                    message = vnext.error.message,
+                    code = errorResponse.error.code.name.lowercase(),
+                    message = errorResponse.error.message,
                     serverSchemaVersion = null,
                     serverSchemaHash = null
                 )

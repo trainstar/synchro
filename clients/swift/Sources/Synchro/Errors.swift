@@ -6,7 +6,7 @@ public enum SynchroError: Error, Sendable {
     case tableNotSynced(String)
     case upgradeRequired(currentVersion: String, minimumVersion: String)
     case schemaMismatch(serverVersion: Int64, serverHash: String)
-    case pushRejected(results: [VNextRejectedMutation])
+    case pushRejected(results: [RejectedMutation])
     case networkError(underlying: Error)
     case serverError(status: Int, message: String)
     case databaseError(underlying: Error)

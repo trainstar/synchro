@@ -384,9 +384,9 @@ final class SyncEngine: @unchecked Sendable {
                 return
             }
 
-            let request = VNextPullRequest(
+            let request = PullRequest(
                 clientID: clientID,
-                schema: VNextSchemaRef(version: schemaVersion, hash: schemaHash),
+                schema: SchemaRef(version: schemaVersion, hash: schemaHash),
                 scopeSetVersion: scopeSetVersion,
                 scopes: scopes,
                 limit: config.pullPageSize,
@@ -429,7 +429,7 @@ final class SyncEngine: @unchecked Sendable {
         var cursor: String? = nil
 
         while true {
-            let request = VNextRebuildRequest(
+            let request = RebuildRequest(
                 clientID: clientID,
                 scope: scopeID,
                 cursor: cursor,
@@ -471,7 +471,7 @@ final class SyncEngine: @unchecked Sendable {
 
     // MARK: - Bootstrap
 
-    private func connect() async throws -> VNextConnectResponse {
+    private func connect() async throws -> ConnectResponse {
         let schemaState = try database.readTransaction { db in
             (
                 version: try SynchroMeta.getInt64(db, key: .schemaVersion),
@@ -479,12 +479,12 @@ final class SyncEngine: @unchecked Sendable {
             )
         }
 
-        let request = VNextConnectRequest(
+        let request = ConnectRequest(
             clientID: clientID,
             platform: config.platform,
             appVersion: config.appVersion,
             protocolVersion: 1,
-            schema: VNextSchemaRef(version: schemaState.version, hash: schemaState.hash),
+            schema: SchemaRef(version: schemaState.version, hash: schemaState.hash),
             scopeSetVersion: try database.readTransaction { db in
                 try SynchroMeta.getInt64(db, key: .scopeSetVersion)
             },
@@ -501,7 +501,7 @@ final class SyncEngine: @unchecked Sendable {
         return response
     }
 
-    private func resolveConnectSchema(_ response: VNextConnectResponse) async throws -> (tables: [LocalSchemaTable], version: Int64, hash: String) {
+    private func resolveConnectSchema(_ response: ConnectResponse) async throws -> (tables: [LocalSchemaTable], version: Int64, hash: String) {
         switch response.schema.action {
         case .none:
             guard let tables = try schemaManager.loadStoredLocalSchema() else {
@@ -515,7 +515,7 @@ final class SyncEngine: @unchecked Sendable {
 
         case .fetch:
             let schema = try await schemaManager.ensureSchema(httpClient: httpClient)
-            return (schema.tables.map(\.localSchema), schema.schemaVersion, schema.schemaHash)
+            return (try schema.localTables(), schema.schemaVersion, schema.schemaHash)
 
         case .replace, .rebuildLocal:
             guard let manifest = response.schemaDefinition else {
@@ -534,17 +534,17 @@ final class SyncEngine: @unchecked Sendable {
         }
     }
 
-    private func loadKnownScopes() throws -> [String: VNextScopeCursorRef] {
+    private func loadKnownScopes() throws -> [String: ScopeCursorRef] {
         try database.readTransaction { db in
             Dictionary(
                 uniqueKeysWithValues: try SynchroMeta.getAllScopes(db).map { scope in
-                    (scope.scopeID, VNextScopeCursorRef(cursor: scope.cursor))
+                    (scope.scopeID, ScopeCursorRef(cursor: scope.cursor))
                 }
             )
         }
     }
 
-    private func applyScopeAssignmentDelta(_ delta: VNextScopeAssignmentDelta, scopeSetVersion: Int64) throws {
+    private func applyScopeAssignmentDelta(_ delta: ScopeAssignmentDelta, scopeSetVersion: Int64) throws {
         for scopeID in delta.remove {
             try pullProcessor.removeScope(scopeID: scopeID, syncedTables: syncedTables)
         }

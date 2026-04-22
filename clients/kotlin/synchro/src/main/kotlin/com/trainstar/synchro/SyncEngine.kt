@@ -295,7 +295,7 @@ class SyncEngine(
                 if (outcome.hasRetryableRejections) {
                     throw RetryableError(
                         underlying = SynchroError.PushRejected(
-                            outcome.response.rejected.filter { it.status == VNextMutationStatus.REJECTED_RETRYABLE }
+                            outcome.response.rejected.filter { it.status == MutationStatus.REJECTED_RETRYABLE }
                         ),
                         retryAfter = null
                     )
@@ -322,13 +322,13 @@ class SyncEngine(
                 return
             }
 
-            val request = VNextPullRequest(
+            val request = PullRequest(
                 clientID = clientID,
-                schema = VNextSchemaRef(version = schemaVersion, hash = schemaHash),
+                schema = SchemaRef(version = schemaVersion, hash = schemaHash),
                 scopeSetVersion = scopeSetVersion,
                 scopes = scopes,
                 limit = config.effectivePullPageSize,
-                checksumMode = VNextChecksumMode.REQUESTED
+                checksumMode = ChecksumMode.REQUESTED
             )
 
             val response = httpClient.pull(request)
@@ -365,7 +365,7 @@ class SyncEngine(
         var cursor: String? = null
 
         while (true) {
-            val request = VNextRebuildRequest(
+            val request = RebuildRequest(
                 clientID = clientID,
                 scope = scopeId,
                 cursor = cursor,
@@ -405,14 +405,14 @@ class SyncEngine(
 
     // MARK: - Bootstrap
 
-    private suspend fun connect(): VNextConnectResponse {
-        val request = VNextConnectRequest(
+    private suspend fun connect(): ConnectResponse {
+        val request = ConnectRequest(
             clientID = clientID,
             platform = config.platform,
             appVersion = config.appVersion,
             protocolVersion = 1,
             schema = database.readTransaction { db ->
-                VNextSchemaRef(
+                SchemaRef(
                     version = SynchroMeta.getInt64(db, MetaKey.SCHEMA_VERSION),
                     hash = SynchroMeta.get(db, MetaKey.SCHEMA_HASH) ?: ""
                 )
@@ -433,9 +433,9 @@ class SyncEngine(
         return response
     }
 
-    private suspend fun resolveConnectSchema(response: VNextConnectResponse): Pair<List<LocalSchemaTable>, Pair<Long, String>> {
+    private suspend fun resolveConnectSchema(response: ConnectResponse): Pair<List<LocalSchemaTable>, Pair<Long, String>> {
         return when (response.schema.action) {
-            VNextSchemaAction.NONE -> {
+            SchemaAction.NONE -> {
                 val tables = schemaManager.loadStoredLocalSchema()
                     ?: throw SynchroError.InvalidResponse("connect returned schema action none without stored local schema")
                 database.writeTransaction { db ->
@@ -444,11 +444,11 @@ class SyncEngine(
                 }
                 tables to (response.schema.version to response.schema.hash)
             }
-            VNextSchemaAction.FETCH -> {
+            SchemaAction.FETCH -> {
                 val schema = schemaManager.ensureSchema(httpClient)
-                schema.tables.map { it.localSchema } to (schema.schemaVersion to schema.schemaHash)
+                schema.localTables() to (schema.schemaVersion to schema.schemaHash)
             }
-            VNextSchemaAction.REPLACE, VNextSchemaAction.REBUILD_LOCAL -> {
+            SchemaAction.REPLACE, SchemaAction.REBUILD_LOCAL -> {
                 val manifest = response.schemaDefinition
                     ?: throw SynchroError.InvalidResponse("connect schema action ${response.schema.action} missing schema_definition")
                 val tables = manifest.localTables()
@@ -459,21 +459,21 @@ class SyncEngine(
                 )
                 tables to (response.schema.version to response.schema.hash)
             }
-            VNextSchemaAction.UNSUPPORTED -> {
+            SchemaAction.UNSUPPORTED -> {
                 throw SynchroError.InvalidResponse("unsupported connect schema action")
             }
         }
     }
 
-    private fun loadKnownScopes(): Map<String, VNextScopeCursorRef> {
+    private fun loadKnownScopes(): Map<String, ScopeCursorRef> {
         return database.readTransaction { db ->
             SynchroMeta.getAllScopes(db).associate { scope ->
-                scope.scopeID to VNextScopeCursorRef(cursor = scope.cursor)
+                scope.scopeID to ScopeCursorRef(cursor = scope.cursor)
             }
         }
     }
 
-    private fun applyScopeAssignmentDelta(delta: VNextScopeAssignmentDelta, scopeSetVersion: Long) {
+    private fun applyScopeAssignmentDelta(delta: ScopeAssignmentDelta, scopeSetVersion: Long) {
         for (scopeId in delta.remove) {
             pullProcessor.removeScope(scopeId, syncedTables)
         }

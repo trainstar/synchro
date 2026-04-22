@@ -4,10 +4,10 @@ import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.JsonObject
 
-class VNextContractException(message: String) : IllegalArgumentException(message)
+class ContractException(message: String) : IllegalArgumentException(message)
 
 @Serializable
-enum class VNextOperation {
+enum class Operation {
     @SerialName("insert") INSERT,
     @SerialName("upsert") UPSERT,
     @SerialName("update") UPDATE,
@@ -15,7 +15,7 @@ enum class VNextOperation {
 }
 
 @Serializable
-enum class VNextSchemaAction {
+enum class SchemaAction {
     @SerialName("none") NONE,
     @SerialName("fetch") FETCH,
     @SerialName("replace") REPLACE,
@@ -28,14 +28,14 @@ enum class VNextSchemaAction {
 }
 
 @Serializable
-enum class VNextChecksumMode {
+enum class ChecksumMode {
     @SerialName("none") NONE,
     @SerialName("requested") REQUESTED,
     @SerialName("required") REQUIRED,
 }
 
 @Serializable
-enum class VNextMutationStatus {
+enum class MutationStatus {
     @SerialName("applied") APPLIED,
     @SerialName("conflict") CONFLICT,
     @SerialName("rejected_terminal") REJECTED_TERMINAL,
@@ -43,7 +43,7 @@ enum class VNextMutationStatus {
 }
 
 @Serializable
-enum class VNextMutationRejectionCode {
+enum class MutationRejectionCode {
     @SerialName("version_conflict") VERSION_CONFLICT,
     @SerialName("policy_rejected") POLICY_REJECTED,
     @SerialName("validation_failed") VALIDATION_FAILED,
@@ -53,7 +53,7 @@ enum class VNextMutationRejectionCode {
 }
 
 @Serializable
-enum class VNextProtocolErrorCode {
+enum class ProtocolErrorCode {
     @SerialName("invalid_request") INVALID_REQUEST,
     @SerialName("upgrade_required") UPGRADE_REQUIRED,
     @SerialName("auth_required") AUTH_REQUIRED,
@@ -63,31 +63,31 @@ enum class VNextProtocolErrorCode {
 }
 
 @Serializable
-enum class VNextCompositionClass {
+enum class CompositionClass {
     @SerialName("single_scope") SINGLE_SCOPE,
     @SerialName("multi_scope") MULTI_SCOPE,
 }
 
 @Serializable
-data class VNextSchemaRef(
+data class SchemaRef(
     val version: Long,
     val hash: String,
 )
 
 @Serializable
-data class VNextScopeCursorRef(
+data class ScopeCursorRef(
     val cursor: String? = null,
 )
 
 @Serializable
-data class VNextScopeAssignment(
+data class ScopeAssignment(
     val id: String,
     val cursor: String? = null,
 )
 
 @Serializable
-data class VNextScopeAssignmentDelta(
-    val add: List<VNextScopeAssignment>,
+data class ScopeAssignmentDelta(
+    val add: List<ScopeAssignment>,
     val remove: List<String>,
 ) {
     fun validate() {
@@ -95,7 +95,7 @@ data class VNextScopeAssignmentDelta(
         for (scope in add) {
             require(scope.id.isNotEmpty()) { "scope id must not be empty" }
             if (!added.add(scope.id)) {
-                throw VNextContractException("duplicate added scope ${scope.id}")
+                throw ContractException("duplicate added scope ${scope.id}")
             }
         }
 
@@ -103,78 +103,78 @@ data class VNextScopeAssignmentDelta(
         for (scopeId in remove) {
             require(scopeId.isNotEmpty()) { "scope id must not be empty" }
             if (!removed.add(scopeId)) {
-                throw VNextContractException("duplicate removed scope $scopeId")
+                throw ContractException("duplicate removed scope $scopeId")
             }
             if (added.contains(scopeId)) {
-                throw VNextContractException("conflicting scope assignment $scopeId")
+                throw ContractException("conflicting scope assignment $scopeId")
             }
         }
     }
 }
 
 @Serializable
-data class VNextSchemaDescriptor(
+data class SchemaDescriptor(
     val version: Long,
     val hash: String,
-    val action: VNextSchemaAction,
+    val action: SchemaAction,
 )
 
 @Serializable
-data class VNextColumnSchema(
+data class ColumnSchema(
     val name: String,
     @SerialName("type") val typeName: String,
     val nullable: Boolean,
 )
 
 @Serializable
-data class VNextIndexSchema(
+data class IndexSchema(
     val name: String,
     val columns: List<String>,
 )
 
 @Serializable
-data class VNextTableSchema(
+data class TableSchema(
     val name: String,
     @SerialName("primary_key") val primaryKey: List<String>? = null,
     @SerialName("updated_at_column") val updatedAtColumn: String? = null,
     @SerialName("deleted_at_column") val deletedAtColumn: String? = null,
-    val composition: VNextCompositionClass? = null,
-    val columns: List<VNextColumnSchema>? = null,
-    val indexes: List<VNextIndexSchema>? = null,
+    val composition: CompositionClass? = null,
+    val columns: List<ColumnSchema>? = null,
+    val indexes: List<IndexSchema>? = null,
 )
 
 @Serializable
-data class VNextSchemaManifest(
-    val tables: List<VNextTableSchema>,
+data class SchemaManifest(
+    val tables: List<TableSchema>,
 ) {
     fun validate() {
         val tableNames = mutableSetOf<String>()
         for (table in tables) {
             require(table.name.isNotEmpty()) { "table name must not be empty" }
             if (!tableNames.add(table.name)) {
-                throw VNextContractException("duplicate table ${table.name}")
+                throw ContractException("duplicate table ${table.name}")
             }
 
             val columnNames = mutableSetOf<String>()
             for (column in table.columns.orEmpty()) {
                 require(column.name.isNotEmpty()) { "column name must not be empty for ${table.name}" }
                 if (!columnNames.add(column.name)) {
-                    throw VNextContractException("duplicate column ${table.name}.${column.name}")
+                    throw ContractException("duplicate column ${table.name}.${column.name}")
                 }
             }
             table.primaryKey?.forEach { columnName ->
                 if (columnName !in columnNames) {
-                    throw VNextContractException("unknown primary key column ${table.name}.$columnName")
+                    throw ContractException("unknown primary key column ${table.name}.$columnName")
                 }
             }
             table.updatedAtColumn?.let { columnName ->
                 if (columnName !in columnNames) {
-                    throw VNextContractException("unknown updated_at column ${table.name}.$columnName")
+                    throw ContractException("unknown updated_at column ${table.name}.$columnName")
                 }
             }
             table.deletedAtColumn?.let { columnName ->
                 if (columnName !in columnNames) {
-                    throw VNextContractException("unknown deleted_at column ${table.name}.$columnName")
+                    throw ContractException("unknown deleted_at column ${table.name}.$columnName")
                 }
             }
 
@@ -182,12 +182,12 @@ data class VNextSchemaManifest(
             for (index in table.indexes.orEmpty()) {
                 require(index.name.isNotEmpty()) { "index name must not be empty for ${table.name}" }
                 if (!indexNames.add(index.name)) {
-                    throw VNextContractException("duplicate index ${table.name}.${index.name}")
+                    throw ContractException("duplicate index ${table.name}.${index.name}")
                 }
                 if (columnNames.isNotEmpty()) {
                     for (columnName in index.columns) {
                         if (!columnNames.contains(columnName)) {
-                            throw VNextContractException("unknown index column ${table.name}.${index.name} -> $columnName")
+                            throw ContractException("unknown index column ${table.name}.${index.name} -> $columnName")
                         }
                     }
                 }
@@ -197,28 +197,28 @@ data class VNextSchemaManifest(
 }
 
 @Serializable
-data class VNextConnectRequest(
+data class ConnectRequest(
     @SerialName("client_id") val clientID: String,
     val platform: String,
     @SerialName("app_version") val appVersion: String,
     @SerialName("protocol_version") val protocolVersion: Int,
-    val schema: VNextSchemaRef,
+    val schema: SchemaRef,
     @SerialName("scope_set_version") val scopeSetVersion: Long,
-    @SerialName("known_scopes") val knownScopes: Map<String, VNextScopeCursorRef>,
+    @SerialName("known_scopes") val knownScopes: Map<String, ScopeCursorRef>,
 )
 
 @Serializable
-data class VNextConnectResponse(
+data class ConnectResponse(
     @SerialName("server_time") val serverTime: String,
     @SerialName("protocol_version") val protocolVersion: Int,
     @SerialName("scope_set_version") val scopeSetVersion: Long,
-    val schema: VNextSchemaDescriptor,
-    val scopes: VNextScopeAssignmentDelta,
-    @SerialName("schema_definition") val schemaDefinition: VNextSchemaManifest? = null,
+    val schema: SchemaDescriptor,
+    val scopes: ScopeAssignmentDelta,
+    @SerialName("schema_definition") val schemaDefinition: SchemaManifest? = null,
 ) {
     fun validate() {
         if (schema.action.requiresSchemaDefinition() != (schemaDefinition != null)) {
-            throw VNextContractException(
+            throw ContractException(
                 "schema action ${schema.action} is inconsistent with schema_definition presence ${schemaDefinition != null}"
             )
         }
@@ -228,94 +228,95 @@ data class VNextConnectResponse(
 }
 
 @Serializable
-data class VNextMutation(
+data class Mutation(
     @SerialName("mutation_id") val mutationID: String,
     val table: String,
-    val op: VNextOperation,
+    val op: Operation,
     val pk: JsonObject,
     @SerialName("base_version") val baseVersion: String? = null,
+    @SerialName("client_version") val clientVersion: String? = null,
     val columns: JsonObject? = null,
 )
 
 @Serializable
-data class VNextPushRequest(
+data class PushRequest(
     @SerialName("client_id") val clientID: String,
     @SerialName("batch_id") val batchID: String,
-    val schema: VNextSchemaRef,
-    val mutations: List<VNextMutation>,
+    val schema: SchemaRef,
+    val mutations: List<Mutation>,
 )
 
 @Serializable
-data class VNextAcceptedMutation(
+data class AcceptedMutation(
     @SerialName("mutation_id") val mutationID: String,
     val table: String,
     val pk: JsonObject,
-    val status: VNextMutationStatus,
+    val status: MutationStatus,
     @SerialName("server_row") val serverRow: JsonObject? = null,
     @SerialName("server_version") val serverVersion: String,
 )
 
 @Serializable
-data class VNextRejectedMutation(
+data class RejectedMutation(
     @SerialName("mutation_id") val mutationID: String,
     val table: String,
     val pk: JsonObject,
-    val status: VNextMutationStatus,
-    val code: VNextMutationRejectionCode,
+    val status: MutationStatus,
+    val code: MutationRejectionCode,
     val message: String? = null,
     @SerialName("server_row") val serverRow: JsonObject? = null,
     @SerialName("server_version") val serverVersion: String? = null,
 )
 
 @Serializable
-data class VNextPushResponse(
+data class PushResponse(
     @SerialName("server_time") val serverTime: String,
-    val accepted: List<VNextAcceptedMutation>,
-    val rejected: List<VNextRejectedMutation>,
+    val accepted: List<AcceptedMutation>,
+    val rejected: List<RejectedMutation>,
 )
 
 @Serializable
-data class VNextPullRequest(
+data class PullRequest(
     @SerialName("client_id") val clientID: String,
-    val schema: VNextSchemaRef,
+    val schema: SchemaRef,
     @SerialName("scope_set_version") val scopeSetVersion: Long,
-    val scopes: Map<String, VNextScopeCursorRef>,
+    val scopes: Map<String, ScopeCursorRef>,
     val limit: Int,
-    @SerialName("checksum_mode") val checksumMode: VNextChecksumMode? = null,
+    @SerialName("checksum_mode") val checksumMode: ChecksumMode? = null,
 )
 
 @Serializable
-data class VNextChangeRecord(
+data class ChangeRecord(
     val scope: String,
     val table: String,
-    val op: VNextOperation,
+    val op: Operation,
     val pk: JsonObject,
     val row: JsonObject? = null,
     @SerialName("server_version") val serverVersion: String,
 )
 
 @Serializable
-data class VNextPullResponse(
-    val changes: List<VNextChangeRecord>,
+data class PullResponse(
+    val changes: List<ChangeRecord>,
     @SerialName("scope_set_version") val scopeSetVersion: Long,
     @SerialName("scope_cursors") val scopeCursors: Map<String, String>,
-    @SerialName("scope_updates") val scopeUpdates: VNextScopeAssignmentDelta,
+    @SerialName("scope_updates") val scopeUpdates: ScopeAssignmentDelta,
     val rebuild: List<String>,
     @SerialName("has_more") val hasMore: Boolean,
     val checksums: Map<String, String>? = null,
 ) {
     fun requestsRebuild(): Boolean = rebuild.isNotEmpty()
 
-    fun validate(request: VNextPullRequest) {
+    fun validate(request: PullRequest) {
         scopeUpdates.validate()
-        if (request.checksumMode == VNextChecksumMode.REQUIRED && checksums == null) {
-            throw VNextContractException("required checksums missing")
+        if (request.checksumMode == ChecksumMode.REQUIRED && checksums == null) {
+            throw ContractException("required checksums missing")
         }
     }
 }
 
 @Serializable
-data class VNextRebuildRequest(
+data class RebuildRequest(
     @SerialName("client_id") val clientID: String,
     val scope: String,
     val cursor: String? = null,
@@ -323,7 +324,7 @@ data class VNextRebuildRequest(
 )
 
 @Serializable
-data class VNextRebuildRecord(
+data class RebuildRecord(
     val table: String,
     val pk: JsonObject,
     val row: JsonObject? = null,
@@ -331,9 +332,9 @@ data class VNextRebuildRecord(
 )
 
 @Serializable
-data class VNextRebuildResponse(
+data class RebuildResponse(
     val scope: String,
-    val records: List<VNextRebuildRecord>,
+    val records: List<RebuildRecord>,
     val cursor: String? = null,
     @SerialName("has_more") val hasMore: Boolean,
     @SerialName("final_scope_cursor") val finalScopeCursor: String? = null,
@@ -344,30 +345,30 @@ data class VNextRebuildResponse(
     fun validate() {
         if (hasMore) {
             if (finalScopeCursor != null) {
-                throw VNextContractException("partial rebuild must not include final scope cursor")
+                throw ContractException("partial rebuild must not include final scope cursor")
             }
             if (checksum != null) {
-                throw VNextContractException("partial rebuild must not include checksum")
+                throw ContractException("partial rebuild must not include checksum")
             }
         } else {
             if (finalScopeCursor == null) {
-                throw VNextContractException("final rebuild page must include final scope cursor")
+                throw ContractException("final rebuild page must include final scope cursor")
             }
             if (checksum == null) {
-                throw VNextContractException("final rebuild page must include checksum")
+                throw ContractException("final rebuild page must include checksum")
             }
         }
     }
 }
 
 @Serializable
-data class VNextErrorBody(
-    val code: VNextProtocolErrorCode,
+data class ErrorBody(
+    val code: ProtocolErrorCode,
     val message: String,
     val retryable: Boolean,
 )
 
 @Serializable
-data class VNextErrorResponse(
-    val error: VNextErrorBody,
+data class ErrorResponse(
+    val error: ErrorBody,
 )

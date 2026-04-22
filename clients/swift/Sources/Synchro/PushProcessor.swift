@@ -11,7 +11,7 @@ final class PushProcessor: @unchecked Sendable {
     }
 
     struct PushOutcome: Sendable {
-        let response: VNextPushResponse
+        let response: PushResponse
         let conflicts: [ConflictEvent]
         let hasRetryableRejections: Bool
     }
@@ -32,10 +32,10 @@ final class PushProcessor: @unchecked Sendable {
             return nil
         }
 
-        let request = VNextPushRequest(
+        let request = PushRequest(
             clientID: clientID,
             batchID: buildBatchID(for: mutations),
-            schema: VNextSchemaRef(version: schemaVersion, hash: schemaHash),
+            schema: SchemaRef(version: schemaVersion, hash: schemaHash),
             mutations: mutations
         )
 
@@ -51,34 +51,24 @@ final class PushProcessor: @unchecked Sendable {
         )
     }
 
-    func processPush(httpClient: HttpClient, clientID: String, schemaVersion: Int64, schemaHash: String, syncedTables: [SchemaTable], batchSize: Int = 100) async throws -> PushOutcome? {
-        try await processPush(
-            httpClient: httpClient,
-            clientID: clientID,
-            schemaVersion: schemaVersion,
-            schemaHash: schemaHash,
-            syncedTables: syncedTables.map(\.localSchema),
-            batchSize: batchSize
-        )
-    }
-
-    private func buildMutations(from pushRecords: [PushRecord], syncedTables: [LocalSchemaTable]) throws -> [VNextMutation] {
+    private func buildMutations(from pushRecords: [PushRecord], syncedTables: [LocalSchemaTable]) throws -> [Mutation] {
         let tableMap = Dictionary(uniqueKeysWithValues: syncedTables.map { ($0.tableName, $0) })
         return try pushRecords.compactMap { record in
             guard let schema = tableMap[record.tableName] else { return nil }
             let pkColumn = schema.primaryKey.first ?? "id"
-            return VNextMutation(
+            return Mutation(
                 mutationID: mutationID(for: record),
                 table: record.tableName,
                 op: try mutationOperation(for: record.operation),
                 pk: [pkColumn: AnyCodable(record.id)],
                 baseVersion: record.baseUpdatedAt.map(Self.isoFormatter.string(from:)),
+                clientVersion: Self.isoFormatter.string(from: record.clientUpdatedAt),
                 columns: record.data
             )
         }
     }
 
-    private func mutationOperation(for operation: String) throws -> VNextOperation {
+    private func mutationOperation(for operation: String) throws -> Operation {
         switch operation {
         case "create":
             return .insert
@@ -95,7 +85,7 @@ final class PushProcessor: @unchecked Sendable {
         "\(record.tableName):\(record.id):\(record.operation):\(Self.isoFormatter.string(from: record.clientUpdatedAt))"
     }
 
-    private func buildBatchID(for mutations: [VNextMutation]) -> String {
+    private func buildBatchID(for mutations: [Mutation]) -> String {
         guard let first = mutations.first?.mutationID, let last = mutations.last?.mutationID else {
             return "empty"
         }
@@ -104,61 +94,11 @@ final class PushProcessor: @unchecked Sendable {
 
     // MARK: - Internal (visible for testing)
 
-    func applyAccepted(accepted: [PushResult], syncedTables: [LocalSchemaTable]) throws -> [ConflictEvent] {
-        guard !accepted.isEmpty else { return [] }
-        let tableMap = Dictionary(uniqueKeysWithValues: syncedTables.map { ($0.tableName, $0) })
-        let formatter = ISO8601DateFormatter()
-        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-
-        try database.writeTransaction { db in
-            try SynchroMeta.setSyncLock(db, locked: true)
-            defer { try? SynchroMeta.setSyncLock(db, locked: false) }
-
-            for result in accepted {
-                // Remove from pending queue
-                try db.execute(
-                    sql: "DELETE FROM _synchro_pending_changes WHERE table_name = ? AND record_id = ?",
-                    arguments: [result.tableName, result.id]
-                )
-
-                guard let schema = tableMap[result.tableName] else { continue }
-                let pkCol = schema.primaryKey.first ?? "id"
-                let quoted = SQLiteHelpers.quoteIdentifier(result.tableName)
-                let quotedPK = SQLiteHelpers.quoteIdentifier(pkCol)
-
-                // RYOW: apply server timestamps to local records using schema column names
-                if let serverUpdatedAt = result.serverUpdatedAt {
-                    let quotedUpdatedAt = SQLiteHelpers.quoteIdentifier(schema.updatedAtColumn)
-                    let ts = formatter.string(from: serverUpdatedAt)
-                    try db.execute(
-                        sql: "UPDATE \(quoted) SET \(quotedUpdatedAt) = ? WHERE \(quotedPK) = ?",
-                        arguments: [ts, result.id]
-                    )
-                }
-                if let serverDeletedAt = result.serverDeletedAt {
-                    let quotedDeletedAt = SQLiteHelpers.quoteIdentifier(schema.deletedAtColumn)
-                    let ts = formatter.string(from: serverDeletedAt)
-                    try db.execute(
-                        sql: "UPDATE \(quoted) SET \(quotedDeletedAt) = ? WHERE \(quotedPK) = ?",
-                        arguments: [ts, result.id]
-                    )
-                }
-            }
-
-            try SynchroMeta.setSyncLock(db, locked: false)
-        }
-
-        return []
-    }
-
-    func applyAccepted(accepted: [VNextAcceptedMutation], syncedTables: [LocalSchemaTable]) throws -> [ConflictEvent] {
+    func applyAccepted(accepted: [AcceptedMutation], syncedTables: [LocalSchemaTable]) throws -> [ConflictEvent] {
         guard !accepted.isEmpty else { return [] }
         let tableMap = Dictionary(uniqueKeysWithValues: syncedTables.map { ($0.tableName, $0) })
 
-        try database.writeTransaction { db in
-            try SynchroMeta.setSyncLock(db, locked: true)
-            defer { try? SynchroMeta.setSyncLock(db, locked: false) }
-
+        try database.writeSyncLockedTransaction { db in
             for mutation in accepted {
                 guard let schema = tableMap[mutation.table] else { continue }
                 let recordID = try recordID(from: mutation.pk, schema: schema)
@@ -183,112 +123,22 @@ final class PushProcessor: @unchecked Sendable {
         return []
     }
 
-    func applyAccepted(accepted: [VNextAcceptedMutation], syncedTables: [SchemaTable]) throws -> [ConflictEvent] {
-        try applyAccepted(accepted: accepted, syncedTables: syncedTables.map(\.localSchema))
-    }
-
-    func applyAccepted(accepted: [PushResult], syncedTables: [SchemaTable]) throws -> [ConflictEvent] {
-        try applyAccepted(accepted: accepted, syncedTables: syncedTables.map(\.localSchema))
-    }
-
     private struct RejectedOutcome {
         var conflicts: [ConflictEvent]
         var hasRetryableRejections: Bool
     }
 
-    func applyRejected(rejected: [PushResult], syncedTables: [LocalSchemaTable]) throws -> [ConflictEvent] {
+    func applyRejected(rejected: [RejectedMutation], syncedTables: [LocalSchemaTable]) throws -> [ConflictEvent] {
         try applyRejectedOutcome(rejected: rejected, syncedTables: syncedTables).conflicts
     }
 
-    func applyRejected(rejected: [PushResult], syncedTables: [SchemaTable]) throws -> [ConflictEvent] {
-        try applyRejected(rejected: rejected, syncedTables: syncedTables.map(\.localSchema))
-    }
-
-    func applyRejected(rejected: [VNextRejectedMutation], syncedTables: [LocalSchemaTable]) throws -> [ConflictEvent] {
-        try applyRejectedOutcome(rejected: rejected, syncedTables: syncedTables).conflicts
-    }
-
-    func applyRejected(rejected: [VNextRejectedMutation], syncedTables: [SchemaTable]) throws -> [ConflictEvent] {
-        try applyRejected(rejected: rejected, syncedTables: syncedTables.map(\.localSchema))
-    }
-
-    private func applyRejectedOutcome(rejected: [PushResult], syncedTables: [LocalSchemaTable]) throws -> RejectedOutcome {
+    private func applyRejectedOutcome(rejected: [RejectedMutation], syncedTables: [LocalSchemaTable]) throws -> RejectedOutcome {
         guard !rejected.isEmpty else { return RejectedOutcome(conflicts: [], hasRetryableRejections: false) }
         let tableMap = Dictionary(uniqueKeysWithValues: syncedTables.map { ($0.tableName, $0) })
         var conflicts: [ConflictEvent] = []
         var hasRetryableRejections = false
 
-        try database.writeTransaction { db in
-            try SynchroMeta.setSyncLock(db, locked: true)
-            defer { try? SynchroMeta.setSyncLock(db, locked: false) }
-
-            for result in rejected {
-                if result.status == PushStatus.rejectedRetryable {
-                    hasRetryableRejections = true
-                    continue
-                }
-
-                try db.execute(
-                    sql: "DELETE FROM _synchro_pending_changes WHERE table_name = ? AND record_id = ?",
-                    arguments: [result.tableName, result.id]
-                )
-
-                // Apply server version if provided
-                if let serverVersion = result.serverVersion, let schema = tableMap[result.tableName] {
-                    let pkCol = schema.primaryKey.first ?? "id"
-                    let columns = schema.columns.map(\.name)
-                    let quoted = SQLiteHelpers.quoteIdentifier(result.tableName)
-                    let quotedPK = SQLiteHelpers.quoteIdentifier(pkCol)
-
-                    let dbValues = columns.map { col -> DatabaseValue in
-                        if let anyCodable = serverVersion.data[col] {
-                            return SQLiteHelpers.databaseValue(from: anyCodable)
-                        } else if col == pkCol {
-                            return serverVersion.id.databaseValue
-                        } else {
-                            return .null
-                        }
-                    }
-
-                    let quotedColumns = columns.map { SQLiteHelpers.quoteIdentifier($0) }.joined(separator: ", ")
-                    let placeholders = SQLiteHelpers.placeholders(count: columns.count)
-                    let updateClauses = columns
-                        .filter { $0 != pkCol }
-                        .map { "\(SQLiteHelpers.quoteIdentifier($0)) = excluded.\(SQLiteHelpers.quoteIdentifier($0))" }
-                        .joined(separator: ", ")
-
-                    try db.execute(
-                        sql: "INSERT INTO \(quoted) (\(quotedColumns)) VALUES (\(placeholders)) ON CONFLICT (\(quotedPK)) DO UPDATE SET \(updateClauses)",
-                        arguments: StatementArguments(dbValues)
-                    )
-                }
-
-                if result.status == PushStatus.conflict {
-                    conflicts.append(ConflictEvent(
-                        table: result.tableName,
-                        recordID: result.id,
-                        clientData: nil,
-                        serverData: result.serverVersion?.data
-                    ))
-                }
-            }
-
-            try SynchroMeta.setSyncLock(db, locked: false)
-        }
-
-        return RejectedOutcome(conflicts: conflicts, hasRetryableRejections: hasRetryableRejections)
-    }
-
-    private func applyRejectedOutcome(rejected: [VNextRejectedMutation], syncedTables: [LocalSchemaTable]) throws -> RejectedOutcome {
-        guard !rejected.isEmpty else { return RejectedOutcome(conflicts: [], hasRetryableRejections: false) }
-        let tableMap = Dictionary(uniqueKeysWithValues: syncedTables.map { ($0.tableName, $0) })
-        var conflicts: [ConflictEvent] = []
-        var hasRetryableRejections = false
-
-        try database.writeTransaction { db in
-            try SynchroMeta.setSyncLock(db, locked: true)
-            defer { try? SynchroMeta.setSyncLock(db, locked: false) }
-
+        try database.writeSyncLockedTransaction { db in
             for mutation in rejected {
                 if mutation.status == .rejectedRetryable {
                     hasRetryableRejections = true

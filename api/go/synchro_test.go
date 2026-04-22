@@ -45,11 +45,8 @@ func testServerWithConfig(t *testing.T, configure func(*Config)) *httptest.Serve
 		t.Fatalf("pinging database: %v", err)
 	}
 
-	var extExists bool
-	if err := db.QueryRow(
-		"SELECT EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'synchro_pg')",
-	).Scan(&extExists); err != nil || !extExists {
-		t.Skip("synchro_pg extension not installed")
+	if err := RequireCompatibleExtension(context.Background(), db); err != nil {
+		t.Fatalf("verifying compatible synchro_pg extension: %v", err)
 	}
 
 	_, _ = db.ExecContext(context.Background(),
@@ -133,7 +130,7 @@ func TestConnectPassthrough(t *testing.T) {
 	token := testToken("user-1")
 
 	status, body := doJSON(t, "POST", srv.URL+"/sync/connect", token, map[string]any{
-		"client_id":         "test-vnext-connect-client",
+		"client_id":         "test-canonical-connect-client",
 		"platform":          "ios",
 		"app_version":       "1.0.0",
 		"protocol_version":  1,
@@ -156,6 +153,27 @@ func TestConnectPassthrough(t *testing.T) {
 	}
 }
 
+func TestRequireCompatibleExtension(t *testing.T) {
+	dbURL := os.Getenv("TEST_DATABASE_URL")
+	if dbURL == "" {
+		t.Skip("TEST_DATABASE_URL not set (requires PG with synchro_pg extension)")
+	}
+
+	db, err := sql.Open("pgx", dbURL)
+	if err != nil {
+		t.Fatalf("opening database: %v", err)
+	}
+	defer db.Close()
+
+	if err := db.PingContext(context.Background()); err != nil {
+		t.Fatalf("pinging database: %v", err)
+	}
+
+	if err := RequireCompatibleExtension(context.Background(), db); err != nil {
+		t.Fatalf("expected compatible synchro_pg extension, got %v", err)
+	}
+}
+
 func TestConnectPassthroughTrustedUpstreamAuth(t *testing.T) {
 	srv := testServerWithConfig(t, func(cfg *Config) {
 		cfg.UserIDResolver = func(r *http.Request) (string, error) {
@@ -164,7 +182,7 @@ func TestConnectPassthroughTrustedUpstreamAuth(t *testing.T) {
 	})
 
 	status, body := doJSON(t, "POST", srv.URL+"/sync/connect", "", map[string]any{
-		"client_id":         "test-vnext-connect-upstream-client",
+		"client_id":         "test-canonical-connect-upstream-client",
 		"platform":          "ios",
 		"app_version":       "1.0.0",
 		"protocol_version":  1,
@@ -186,7 +204,7 @@ func TestConnectUpgradeRequired426(t *testing.T) {
 	token := testToken("user-1")
 
 	status, body := doJSON(t, "POST", srv.URL+"/sync/connect", token, map[string]any{
-		"client_id":         "test-vnext-upgrade-client",
+		"client_id":         "test-canonical-upgrade-client",
 		"platform":          "ios",
 		"app_version":       "1.0.0",
 		"protocol_version":  99,
@@ -211,10 +229,10 @@ func TestConnectUpgradeRequired426(t *testing.T) {
 func TestPullPassthrough(t *testing.T) {
 	srv := testServer(t)
 	token := testToken("user-1")
-	connectClient(t, srv, token, "test-vnext-pull-client")
+	connectClient(t, srv, token, "test-canonical-pull-client")
 
 	status, body := doJSON(t, "POST", srv.URL+"/sync/pull", token, map[string]any{
-		"client_id":         "test-vnext-pull-client",
+		"client_id":         "test-canonical-pull-client",
 		"schema":            map[string]any{"version": 0, "hash": ""},
 		"scope_set_version": 0,
 		"scopes":            map[string]any{},
@@ -235,10 +253,10 @@ func TestPullPassthrough(t *testing.T) {
 func TestPushPassthrough(t *testing.T) {
 	srv := testServer(t)
 	token := testToken("user-1")
-	connectClient(t, srv, token, "test-vnext-push-client")
+	connectClient(t, srv, token, "test-canonical-push-client")
 
 	status, body := doJSON(t, "POST", srv.URL+"/sync/push", token, map[string]any{
-		"client_id": "test-vnext-push-client",
+		"client_id": "test-canonical-push-client",
 		"batch_id":  "batch-1",
 		"schema":    map[string]any{"version": 0, "hash": ""},
 		"mutations": []map[string]any{},
@@ -257,10 +275,10 @@ func TestPushPassthrough(t *testing.T) {
 func TestRebuildPassthrough(t *testing.T) {
 	srv := testServer(t)
 	token := testToken("user-1")
-	connectClient(t, srv, token, "test-vnext-rebuild-client")
+	connectClient(t, srv, token, "test-canonical-rebuild-client")
 
 	status, body := doJSON(t, "POST", srv.URL+"/sync/rebuild", token, map[string]any{
-		"client_id": "test-vnext-rebuild-client",
+		"client_id": "test-canonical-rebuild-client",
 		"scope":     "user:user-1",
 		"limit":     100,
 	})
@@ -283,8 +301,8 @@ func TestSchemaNoAuth(t *testing.T) {
 	if status != 200 {
 		t.Fatalf("expected 200, got %d: %v", status, body)
 	}
-	if body["tables"] == nil {
-		t.Error("response missing 'tables'")
+	if body["manifest"] == nil {
+		t.Error("response missing 'manifest'")
 	}
 }
 
@@ -318,7 +336,7 @@ func TestTrustedUpstreamAuthRequiresUser(t *testing.T) {
 	})
 
 	status, body := doJSON(t, "POST", srv.URL+"/sync/connect", "", map[string]any{
-		"client_id":         "test-vnext-connect-missing-upstream-user",
+		"client_id":         "test-canonical-connect-missing-upstream-user",
 		"platform":          "ios",
 		"app_version":       "1.0.0",
 		"protocol_version":  1,
@@ -440,7 +458,7 @@ func TestSQLError503(t *testing.T) {
 	}
 }
 
-func TestMapPGErrorVNextStatusMapping(t *testing.T) {
+func TestMapPGErrorProtocolStatusMapping(t *testing.T) {
 	tests := []struct {
 		name           string
 		raw            string

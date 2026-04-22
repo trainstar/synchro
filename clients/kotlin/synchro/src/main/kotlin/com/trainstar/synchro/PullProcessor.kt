@@ -26,15 +26,10 @@ class PullProcessor(private val database: SynchroDatabase) {
         if (changes.isEmpty()) return
         val tableMap = syncedTables.associateBy { it.tableName }
 
-        database.writeTransaction { db ->
-            SynchroMeta.setSyncLock(db, true)
-            try {
-                for (record in changes) {
-                    val schema = tableMap[record.tableName] ?: continue
-                    upsertRecord(db, record, schema)
-                }
-            } finally {
-                SynchroMeta.setSyncLock(db, false)
+        database.writeSyncLockedTransaction { db ->
+            for (record in changes) {
+                val schema = tableMap[record.tableName] ?: continue
+                upsertRecord(db, record, schema)
             }
         }
     }
@@ -43,13 +38,8 @@ class PullProcessor(private val database: SynchroDatabase) {
         if (deletes.isEmpty()) return
         val tableMap = syncedTables.associateBy { it.tableName }
 
-        database.writeTransaction { db ->
-            SynchroMeta.setSyncLock(db, true)
-            try {
-                applyDeletesInTransaction(db, deletes, tableMap)
-            } finally {
-                SynchroMeta.setSyncLock(db, false)
-            }
+        database.writeSyncLockedTransaction { db ->
+            applyDeletesInTransaction(db, deletes, tableMap)
         }
     }
 
@@ -66,17 +56,12 @@ class PullProcessor(private val database: SynchroDatabase) {
         if (changes.isEmpty() && deletes.isEmpty()) return
         val tableMap = syncedTables.associateBy { it.tableName }
 
-        database.writeTransaction { db ->
-            SynchroMeta.setSyncLock(db, true)
-            try {
-                for (record in changes) {
-                    val schema = tableMap[record.tableName] ?: continue
-                    upsertRecord(db, record, schema)
-                }
-                applyDeletesInTransaction(db, deletes, tableMap)
-            } finally {
-                SynchroMeta.setSyncLock(db, false)
+        database.writeSyncLockedTransaction { db ->
+            for (record in changes) {
+                val schema = tableMap[record.tableName] ?: continue
+                upsertRecord(db, record, schema)
             }
+            applyDeletesInTransaction(db, deletes, tableMap)
         }
     }
 
@@ -114,7 +99,7 @@ class PullProcessor(private val database: SynchroDatabase) {
     }
 
     fun applyScopeChanges(
-        changes: List<VNextChangeRecord>,
+        changes: List<ChangeRecord>,
         syncedTables: List<LocalSchemaTable>,
         scopeCursors: Map<String, String>,
         checksums: Map<String, String>?
@@ -122,41 +107,29 @@ class PullProcessor(private val database: SynchroDatabase) {
         if (changes.isEmpty() && scopeCursors.isEmpty()) return
         val tableMap = syncedTables.associateBy { it.tableName }
 
-        database.writeTransaction { db ->
-            SynchroMeta.setSyncLock(db, true)
-            try {
-                for (change in changes) {
-                    val schema = tableMap[change.table] ?: continue
-                    val recordId = scopeRecordID(change.pk, schema)
+        database.writeSyncLockedTransaction { db ->
+            for (change in changes) {
+                val schema = tableMap[change.table] ?: continue
+                val recordId = scopeRecordID(change.pk, schema)
 
-                    when (change.op) {
-                        VNextOperation.DELETE -> {
-                            if (change.row != null) {
-                                val record = scopeRecord(change, schema)
-                                upsertRecord(db, record, schema)
-                            }
-                            SynchroMeta.deleteScopeRow(db, change.scope, change.table, recordId)
-                            softDeleteIfOrphaned(db, change.table, recordId, schema)
-                        }
-                        VNextOperation.INSERT, VNextOperation.UPSERT, VNextOperation.UPDATE -> {
-                            val record = scopeRecord(change, schema)
-                            upsertRecord(db, record, schema)
-                            val generation = SynchroMeta.getScopeGeneration(db, change.scope)
-                            SynchroMeta.upsertScopeRow(db, change.scope, change.table, recordId, generation)
-                        }
+                when (change.op) {
+                    Operation.DELETE -> applyScopeDeleteChange(db, change, recordId, schema)
+                    Operation.INSERT, Operation.UPSERT, Operation.UPDATE -> {
+                        val record = scopeRecord(change, schema)
+                        upsertRecord(db, record, schema)
+                        val generation = SynchroMeta.getScopeGeneration(db, change.scope)
+                        SynchroMeta.upsertScopeRow(db, change.scope, change.table, recordId, generation)
                     }
                 }
+            }
 
-                for ((scopeId, cursor) in scopeCursors) {
-                    SynchroMeta.upsertScope(
-                        db,
-                        scopeId = scopeId,
-                        cursor = cursor,
-                        checksum = checksums?.get(scopeId)
-                    )
-                }
-            } finally {
-                SynchroMeta.setSyncLock(db, false)
+            for ((scopeId, cursor) in scopeCursors) {
+                SynchroMeta.upsertScope(
+                    db,
+                    scopeId = scopeId,
+                    cursor = cursor,
+                    checksum = checksums?.get(scopeId)
+                )
             }
         }
     }
@@ -167,22 +140,17 @@ class PullProcessor(private val database: SynchroDatabase) {
         }
     }
 
-    fun applyScopeRebuildPage(scopeId: String, generation: Long, records: List<VNextRebuildRecord>, syncedTables: List<LocalSchemaTable>) {
+    fun applyScopeRebuildPage(scopeId: String, generation: Long, records: List<RebuildRecord>, syncedTables: List<LocalSchemaTable>) {
         if (records.isEmpty()) return
         val tableMap = syncedTables.associateBy { it.tableName }
 
-        database.writeTransaction { db ->
-            SynchroMeta.setSyncLock(db, true)
-            try {
-                for (record in records) {
-                    val schema = tableMap[record.table] ?: continue
-                    val recordId = scopeRecordID(record.pk, schema)
-                    val scopedRecord = scopeRecord(record, schema)
-                    upsertRecord(db, scopedRecord, schema)
-                    SynchroMeta.upsertScopeRow(db, scopeId, record.table, recordId, generation)
-                }
-            } finally {
-                SynchroMeta.setSyncLock(db, false)
+        database.writeSyncLockedTransaction { db ->
+            for (record in records) {
+                val schema = tableMap[record.table] ?: continue
+                val recordId = scopeRecordID(record.pk, schema)
+                val scopedRecord = scopeRecord(record, schema)
+                upsertRecord(db, scopedRecord, schema)
+                SynchroMeta.upsertScopeRow(db, scopeId, record.table, recordId, generation)
             }
         }
     }
@@ -190,13 +158,13 @@ class PullProcessor(private val database: SynchroDatabase) {
     fun finalizeScopeRebuild(scopeId: String, generation: Long, finalCursor: String, checksum: String, syncedTables: List<LocalSchemaTable>) {
         val tableMap = syncedTables.associateBy { it.tableName }
 
-        database.writeTransaction { db ->
+        database.writeSyncLockedTransaction { db ->
             val staleRows = SynchroMeta.getStaleScopeRows(db, scopeId, generation)
             SynchroMeta.deleteStaleScopeRows(db, scopeId, generation)
 
             for ((tableName, recordId) in staleRows) {
                 val schema = tableMap[tableName] ?: continue
-                softDeleteIfOrphaned(db, tableName, recordId, schema)
+                removeLocalRowIfUnreferenced(db, tableName, recordId, schema)
             }
 
             SynchroMeta.upsertScope(db, scopeId, finalCursor, checksum, generation)
@@ -206,14 +174,14 @@ class PullProcessor(private val database: SynchroDatabase) {
     fun removeScope(scopeId: String, syncedTables: List<LocalSchemaTable>) {
         val tableMap = syncedTables.associateBy { it.tableName }
 
-        database.writeTransaction { db ->
+        database.writeSyncLockedTransaction { db ->
             val scopeRows = SynchroMeta.getScopeRows(db, scopeId)
             SynchroMeta.deleteScopeRows(db, scopeId)
             SynchroMeta.deleteScope(db, scopeId)
 
             for ((tableName, recordId) in scopeRows) {
                 val schema = tableMap[tableName] ?: continue
-                softDeleteIfOrphaned(db, tableName, recordId, schema)
+                removeLocalRowIfUnreferenced(db, tableName, recordId, schema)
             }
         }
     }
@@ -247,18 +215,12 @@ class PullProcessor(private val database: SynchroDatabase) {
         if (records.isEmpty()) return
         val tableMap = syncedTables.associateBy { it.tableName }
 
-        database.writeTransaction { db ->
-            SynchroMeta.setSyncLock(db, true)
-            try {
-                for (record in records) {
-                    val schema = tableMap[record.tableName] ?: continue
-                    upsertRecord(db, record, schema)
-                    // Use server-provided checksum if available, fall back to local CRC32.
-                    val checksum = record.checksum?.toLong() ?: crc32Checksum(record.data)
-                    SynchroMeta.setBucketMember(db, bucketId, record.tableName, record.id, checksum)
-                }
-            } finally {
-                SynchroMeta.setSyncLock(db, false)
+        database.writeSyncLockedTransaction { db ->
+            for (record in records) {
+                val schema = tableMap[record.tableName] ?: continue
+                upsertRecord(db, record, schema)
+                val checksum = requiredRecordChecksum(record)
+                SynchroMeta.setBucketMember(db, bucketId, record.tableName, record.id, checksum)
             }
         }
     }
@@ -270,6 +232,20 @@ class PullProcessor(private val database: SynchroDatabase) {
     fun clearBucketMembers(bucketId: String) {
         database.writeTransaction { db ->
             SynchroMeta.clearBucketMembers(db, bucketId)
+        }
+    }
+
+    fun deleteBucketOrphanedRecords(bucketId: String, syncedTables: List<LocalSchemaTable>) {
+        val tableMap = syncedTables.associateBy { it.tableName }
+
+        database.writeSyncLockedTransaction { db ->
+            val members = SynchroMeta.getBucketMembers(db, bucketId)
+            SynchroMeta.clearBucketMembers(db, bucketId)
+
+            for ((tableName, recordId) in members) {
+                val schema = tableMap[tableName] ?: continue
+                removeLocalRowIfUnreferenced(db, tableName, recordId, schema)
+            }
         }
     }
 
@@ -300,8 +276,7 @@ class PullProcessor(private val database: SynchroDatabase) {
 
         database.writeTransaction { db ->
             for ((record, bucketId) in entries) {
-                // Use server-provided checksum if available, fall back to local CRC32.
-                val checksum = record.checksum?.toLong() ?: crc32Checksum(record.data)
+                val checksum = requiredRecordChecksum(record)
                 SynchroMeta.setBucketMember(db, bucketId, record.tableName, record.id, checksum)
             }
         }
@@ -362,43 +337,11 @@ class PullProcessor(private val database: SynchroDatabase) {
         }
     }
 
-    /**
-     * Computes CRC32 (IEEE) checksum from record data. Used as fallback when
-     * the server does not provide a checksum (backwards compatibility).
-     * Serializes with sorted keys to match the server's canonical JSON.
-     */
-    private fun crc32Checksum(data: Map<String, AnyCodable>): Long {
-        return try {
-            // Sort keys for deterministic output matching server's json.Marshal.
-            val sorted = data.toSortedMap()
-            val obj = kotlinx.serialization.json.buildJsonObject {
-                for ((key, value) in sorted) {
-                    put(key, toJsonElement(value.value))
-                }
-            }
-            val json = obj.toString()
-            val crc = java.util.zip.CRC32()
-            crc.update(json.toByteArray(Charsets.UTF_8))
-            crc.value
-        } catch (_: Exception) {
-            0L
-        }
-    }
-
-    private fun toJsonElement(value: Any?): kotlinx.serialization.json.JsonElement = when (value) {
-        null -> kotlinx.serialization.json.JsonNull
-        is Boolean -> kotlinx.serialization.json.JsonPrimitive(value)
-        is Int -> kotlinx.serialization.json.JsonPrimitive(value)
-        is Long -> kotlinx.serialization.json.JsonPrimitive(value)
-        is Double -> kotlinx.serialization.json.JsonPrimitive(value)
-        is Float -> kotlinx.serialization.json.JsonPrimitive(value.toDouble())
-        is String -> kotlinx.serialization.json.JsonPrimitive(value)
-        is List<*> -> kotlinx.serialization.json.JsonArray(value.map { toJsonElement(it) })
-        is Map<*, *> -> kotlinx.serialization.json.buildJsonObject {
-            for ((k, v) in value) put(k.toString(), toJsonElement(v))
-        }
-        is AnyCodable -> toJsonElement(value.value)
-        else -> kotlinx.serialization.json.JsonPrimitive(value.toString())
+    private fun requiredRecordChecksum(record: Record): Long {
+        return record.checksum?.toLong()
+            ?: throw SynchroError.InvalidResponse(
+                "missing record checksum for bucket membership ${record.tableName}/${record.id}"
+            )
     }
 
     // MARK: - Private
@@ -463,13 +406,13 @@ class PullProcessor(private val database: SynchroDatabase) {
         }
     }
 
-    private fun scopeRecord(change: VNextChangeRecord, schema: LocalSchemaTable): Record {
+    private fun scopeRecord(change: ChangeRecord, schema: LocalSchemaTable): Record {
         val row = change.row ?: throw SynchroError.InvalidResponse("missing row for ${change.table} ${change.op}")
         val recordId = scopeRecordID(change.pk, schema)
         return scopeRecord(change.table, recordId, jsonObjectToAnyMap(row), schema)
     }
 
-    private fun scopeRecord(rebuild: VNextRebuildRecord, schema: LocalSchemaTable): Record {
+    private fun scopeRecord(rebuild: RebuildRecord, schema: LocalSchemaTable): Record {
         val row = rebuild.row ?: throw SynchroError.InvalidResponse("missing rebuild row for ${rebuild.table}")
         val recordId = scopeRecordID(rebuild.pk, schema)
         return scopeRecord(rebuild.table, recordId, jsonObjectToAnyMap(row), schema)
@@ -531,23 +474,46 @@ class PullProcessor(private val database: SynchroDatabase) {
         is JsonObject -> element.mapValues { (_, value) -> fromJsonElement(value) }
     }
 
-    private fun softDeleteIfOrphaned(
+    private fun applyScopeDeleteChange(
+        db: SQLiteDatabase,
+        change: ChangeRecord,
+        recordId: String,
+        schema: LocalSchemaTable
+    ) {
+        change.row?.let { row ->
+            val deletedAt = row[schema.deletedAtColumn]
+            if (deletedAt == null || deletedAt is JsonNull) {
+                throw SynchroError.InvalidResponse(
+                    "delete change for ${change.table} $recordId included a row without ${schema.deletedAtColumn}"
+                )
+            }
+            val record = scopeRecord(change, schema)
+            upsertRecord(db, record, schema)
+        }
+
+        SynchroMeta.deleteScopeRow(db, change.scope, change.table, recordId)
+
+        if (change.row == null) {
+            removeLocalRowIfUnreferenced(db, change.table, recordId, schema)
+        }
+    }
+
+    private fun removeLocalRowIfUnreferenced(
         db: SQLiteDatabase,
         tableName: String,
         recordId: String,
         schema: LocalSchemaTable
     ) {
-        if (SynchroMeta.hasScopeRows(db, tableName, recordId)) {
+        if (SynchroMeta.hasScopeRows(db, tableName, recordId) || SynchroMeta.hasBucketMembers(db, tableName, recordId)) {
             return
         }
 
         val pkCol = schema.primaryKey.firstOrNull() ?: "id"
         val quoted = SQLiteHelpers.quoteIdentifier(tableName)
         val quotedPK = SQLiteHelpers.quoteIdentifier(pkCol)
-        val quotedDeletedAt = SQLiteHelpers.quoteIdentifier(schema.deletedAtColumn)
 
         val stmt = db.compileStatement(
-            "UPDATE $quoted SET $quotedDeletedAt = ${SQLiteHelpers.timestampNow()} WHERE $quotedPK = ? AND $quotedDeletedAt IS NULL"
+            "DELETE FROM $quoted WHERE $quotedPK = ?"
         )
         try {
             stmt.bindString(1, recordId)

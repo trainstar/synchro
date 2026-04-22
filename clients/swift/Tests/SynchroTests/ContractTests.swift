@@ -2,11 +2,11 @@ import XCTest
 import Foundation
 @testable import Synchro
 
-final class VNextContractTests: XCTestCase {
+final class ContractTests: XCTestCase {
     private let decoder = JSONDecoder.synchroDecoder()
 
     func testConnectNoneFixtureDecodesAndValidates() throws {
-        let response: VNextConnectResponse = try decodeFixtureValue(
+        let response: ConnectResponse = try decodeFixtureValue(
             path: "conformance/protocol/connect-none.json",
             jsonPath: ["expected", "response"]
         )
@@ -18,7 +18,7 @@ final class VNextContractTests: XCTestCase {
     }
 
     func testConnectRebuildLocalFixtureDecodesAndValidates() throws {
-        let response: VNextConnectResponse = try decodeFixtureValue(
+        let response: ConnectResponse = try decodeFixtureValue(
             path: "conformance/protocol/connect-rebuild-local.json",
             jsonPath: ["expected", "response"]
         )
@@ -30,11 +30,11 @@ final class VNextContractTests: XCTestCase {
     }
 
     func testPullRequiredChecksumsFixtureDecodesAndValidates() throws {
-        let request: VNextPullRequest = try decodeFixtureValue(
+        let request: PullRequest = try decodeFixtureValue(
             path: "conformance/protocol/pull-required-checksums.json",
             jsonPath: ["input", "request"]
         )
-        let response: VNextPullResponse = try decodeFixtureValue(
+        let response: PullResponse = try decodeFixtureValue(
             path: "conformance/protocol/pull-required-checksums.json",
             jsonPath: ["expected", "response"]
         )
@@ -46,7 +46,7 @@ final class VNextContractTests: XCTestCase {
     }
 
     func testRebuildFixturePagesDecodeAndValidate() throws {
-        let pages: [VNextRebuildResponse] = try decodeFixtureValue(
+        let pages: [RebuildResponse] = try decodeFixtureValue(
             path: "conformance/scopes/rebuild-single-scope.json",
             jsonPath: ["expected", "pages"]
         )
@@ -58,7 +58,7 @@ final class VNextContractTests: XCTestCase {
     }
 
     func testPortableSchemaManifestFixtureDecodesAndValidates() throws {
-        let manifest: VNextSchemaManifest = try decodeFixtureValue(
+        let manifest: SchemaManifest = try decodeFixtureValue(
             path: "conformance/schema/schema-manifest-portable.json",
             jsonPath: ["manifest"]
         )
@@ -71,7 +71,7 @@ final class VNextContractTests: XCTestCase {
     }
 
     func testPortableSchemaManifestConvertsToLocalSchemaTables() throws {
-        let manifest: VNextSchemaManifest = try decodeFixtureValue(
+        let manifest: SchemaManifest = try decodeFixtureValue(
             path: "conformance/schema/schema-manifest-portable.json",
             jsonPath: ["manifest"]
         )
@@ -88,7 +88,7 @@ final class VNextContractTests: XCTestCase {
     }
 
     func testPortableSchemaManifestFixtureUsesCanonicalTypeNames() throws {
-        let manifest: VNextSchemaManifest = try decodeFixtureValue(
+        let manifest: SchemaManifest = try decodeFixtureValue(
             path: "conformance/schema/schema-manifest-portable.json",
             jsonPath: ["manifest"]
         )
@@ -109,7 +109,7 @@ final class VNextContractTests: XCTestCase {
     }
 
     func testUpgradeRequiredErrorFixtureDecodes() throws {
-        let errorResponse: VNextErrorResponse = try decodeFixtureValue(
+        let errorResponse: ErrorResponse = try decodeFixtureValue(
             path: "conformance/protocol/error-upgrade-required.json",
             jsonPath: ["expected", "response"]
         )
@@ -136,14 +136,14 @@ final class VNextContractTests: XCTestCase {
             }
             current = current.deletingLastPathComponent()
         }
-        throw NSError(domain: "VNextContractTests", code: 1, userInfo: [NSLocalizedDescriptionKey: "fixture not found: \(path)"])
+        throw NSError(domain: "ContractTests", code: 1, userInfo: [NSLocalizedDescriptionKey: "fixture not found: \(path)"])
     }
 
     private func value(at jsonPath: [String], in root: Any) throws -> Any {
         var current = root
         for key in jsonPath {
             guard let object = current as? [String: Any], let next = object[key] else {
-                throw NSError(domain: "VNextContractTests", code: 2, userInfo: [NSLocalizedDescriptionKey: "missing json path component \(key)"])
+                throw NSError(domain: "ContractTests", code: 2, userInfo: [NSLocalizedDescriptionKey: "missing json path component \(key)"])
             }
             current = next
         }

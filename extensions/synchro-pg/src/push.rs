@@ -6,18 +6,13 @@ use synchro_core::conflict::{
 };
 use synchro_core::contract::{
     AcceptedMutation, Mutation, MutationRejectionCode, MutationStatus, ProtocolErrorCode,
-    PushRequest, PushResponse, RejectedMutation, VNextOperation,
+    PushRequest, PushResponse, RejectedMutation, Operation,
 };
 
-use crate::client::{protocol_error_response, validate_schema, validate_schema_vnext};
+use crate::client::{protocol_error_response, validate_schema_ref};
 use crate::materialize::sync_record_change;
-use crate::pull::{get_latest_schema, load_client_buckets, pg_quote_ident};
+use crate::pull::{load_client_buckets, pg_quote_ident};
 use crate::registry::{PushPolicy, TableRegistration};
-
-const PUSH_STATUS_APPLIED: &str = "applied";
-const PUSH_STATUS_CONFLICT: &str = "conflict";
-const PUSH_STATUS_REJECTED_TERMINAL: &str = "rejected_terminal";
-const PUSH_STATUS_REJECTED_RETRYABLE: &str = "rejected_retryable";
 
 #[derive(Clone, Copy)]
 struct WriteTimestamps {
@@ -37,151 +32,38 @@ struct WritePayload<'a> {
     valid_columns: &'a std::collections::HashSet<String>,
 }
 
+enum PushMutationResult {
+    Applied {
+        server_updated_at: Option<String>,
+        server_deleted_at: Option<String>,
+    },
+    Conflict {
+        message: String,
+        server_row: Option<serde_json::Value>,
+        server_version: Option<String>,
+    },
+    RejectedTerminal {
+        code: MutationRejectionCode,
+        message: String,
+    },
+    RejectedRetryable {
+        code: MutationRejectionCode,
+        message: String,
+    },
+}
+
+impl PushMutationResult {
+    fn is_applied(&self) -> bool {
+        matches!(self, Self::Applied { .. })
+    }
+}
+
 // Clock skew tolerance is read from the synchro.clock_skew_tolerance_ms GUC
 // (registered in lib.rs). Accessed via crate::CLOCK_SKEW_TOLERANCE_MS_GUC.
 
-/// Push client changes to the server.
-///
-/// Returns JSONB with per-record results: status, reason, server timestamps.
-/// Each record is processed independently within the same transaction.
-/// RLS context is set via SET LOCAL app.user_id.
-#[pg_extern]
-fn synchro_push(
-    p_user_id: &str,
-    p_client_id: &str,
-    p_changes: pgrx::JsonB,
-    p_schema_version: default!(i64, "0"),
-    p_schema_hash: default!(&str, "''"),
-) -> pgrx::JsonB {
-    // Validate schema if provided.
-    if p_schema_version > 0 || !p_schema_hash.is_empty() {
-        if let Err(err_json) = validate_schema(p_schema_version, p_schema_hash) {
-            return err_json;
-        }
-    }
-
-    // Parse changes array.
-    let changes: Vec<serde_json::Value> = match p_changes.0 {
-        serde_json::Value::Array(arr) => arr,
-        _ => pgrx::error!("p_changes must be a JSON array"),
-    };
-
-    Spi::connect_mut(|client| {
-        // Set RLS context (propagate error, do not discard).
-        client
-            .update(
-                "SELECT set_config('app.user_id', $1, true)",
-                None,
-                &[p_user_id.into()],
-            )
-            .unwrap_or_else(|e| pgrx::error!("setting RLS context: {}", e));
-
-        // Validate client exists.
-        if let Err(err_json) = load_client_buckets(client, p_user_id, p_client_id) {
-            return err_json;
-        }
-
-        // Load registry.
-        let registry = load_registry_inner(client);
-
-        // Check if write_protect function exists.
-        let has_write_protect = check_write_protect_exists(client);
-
-        // Process each change, annotating results with record identity.
-        let mut results: Vec<serde_json::Value> = Vec::with_capacity(changes.len());
-        for change in &changes {
-            let id = change.get("id").and_then(|v| v.as_str()).unwrap_or("");
-            let table_name = change
-                .get("table_name")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            let operation = change
-                .get("operation")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            let parsed_operation = ChangeOperation::parse_legacy_wire(operation);
-
-            let mut result =
-                process_record(client, p_user_id, change, &registry, has_write_protect);
-
-            if result.get("status").and_then(|value| value.as_str()) == Some(PUSH_STATUS_APPLIED) {
-                let op = parsed_operation.unwrap_or(ChangeOperation::Update);
-                if let Err(err) = sync_record_change(client, &registry, table_name, id, op) {
-                    pgrx::error!(
-                        "materializing sync metadata for {}.{}: {}",
-                        table_name,
-                        id,
-                        err
-                    );
-                }
-            }
-
-            // Annotate with record identity for the wire protocol.
-            if let Some(obj) = result.as_object_mut() {
-                obj.insert("id".into(), serde_json::json!(id));
-                obj.insert("table_name".into(), serde_json::json!(table_name));
-                obj.insert("operation".into(), serde_json::json!(operation));
-            }
-
-            results.push(result);
-        }
-
-        // Split results into accepted (applied/conflict) and rejected.
-        let mut accepted: Vec<serde_json::Value> = Vec::new();
-        let mut rejected: Vec<serde_json::Value> = Vec::new();
-        for result in results {
-            let status = result.get("status").and_then(|v| v.as_str()).unwrap_or("");
-            match status {
-                "applied" => accepted.push(result),
-                _ => rejected.push(result),
-            }
-        }
-
-        // Update client sync timestamp and get checkpoint + server time.
-        let mut checkpoint: i64 = 0;
-        let mut server_time = String::new();
-        if let Ok(tup) = client.update(
-            "WITH touched AS (
-                UPDATE sync_clients
-                   SET last_push_at = now(), last_sync_at = now(), updated_at = now()
-                 WHERE user_id = $1 AND client_id = $2
-                 RETURNING 1
-             )
-             SELECT COALESCE((SELECT MAX(seq) FROM sync_changelog), 0) AS checkpoint,
-                    to_char(timezone('UTC', now()), 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') AS server_time
-             FROM touched",
-            None,
-            &[p_user_id.into(), p_client_id.into()],
-        ) {
-            for row in tup {
-                checkpoint = row
-                    .get_by_name::<i64, &str>("checkpoint")
-                    .unwrap_or(None)
-                    .unwrap_or(0);
-                server_time = row
-                    .get_by_name::<String, &str>("server_time")
-                    .unwrap_or(None)
-                    .unwrap_or_default();
-            }
-        }
-
-        // Get schema info.
-        let (schema_version, schema_hash) = get_latest_schema(client);
-
-        pgrx::JsonB(serde_json::json!({
-            "accepted": accepted,
-            "rejected": rejected,
-            "checkpoint": checkpoint,
-            "server_time": server_time,
-            "schema_version": schema_version,
-            "schema_hash": schema_hash,
-        }))
-    })
-}
-
-/// Push vNext mutations through the existing extension write path.
-#[pg_extern]
-fn synchro_push_vnext(p_user_id: &str, p_request: pgrx::JsonB) -> pgrx::JsonB {
+/// Push canonical mutations through the extension write path.
+#[pg_extern(name = "synchro_push")]
+fn synchro_push_contract(p_user_id: &str, p_request: pgrx::JsonB) -> pgrx::JsonB {
     let request: PushRequest = match serde_json::from_value(p_request.0) {
         Ok(request) => request,
         Err(err) => {
@@ -193,7 +75,15 @@ fn synchro_push_vnext(p_user_id: &str, p_request: pgrx::JsonB) -> pgrx::JsonB {
         }
     };
 
-    if let Err(err_json) = validate_schema_vnext(&request.schema) {
+    if let Err(err) = request.validate() {
+        return protocol_error_response(
+            ProtocolErrorCode::InvalidRequest,
+            format!("invalid push request: {err}"),
+            false,
+        );
+    }
+
+    if let Err(err_json) = validate_schema_ref(&request.schema) {
         return err_json;
     }
 
@@ -242,35 +132,41 @@ fn synchro_push_vnext(p_user_id: &str, p_request: pgrx::JsonB) -> pgrx::JsonB {
                 }
             };
 
-            let legacy_change = match legacy_change_from_mutation(client, mutation, table_reg) {
-                Ok(change) => change,
-                Err(rejected_mutation) => {
-                    rejected.push(*rejected_mutation);
-                    continue;
-                }
-            };
+            let record_id =
+                match extract_mutation_record_id(&mutation.pk, &table_reg.pk_column) {
+                    Some(record_id) => record_id,
+                    None => {
+                        rejected.push(RejectedMutation {
+                            mutation_id: mutation.mutation_id.clone(),
+                            table: mutation.table.clone(),
+                            pk: mutation.pk.clone(),
+                            status: MutationStatus::RejectedTerminal,
+                            code: MutationRejectionCode::ValidationFailed,
+                            message: Some(format!(
+                                "primary key payload must contain string field {}",
+                                table_reg.pk_column
+                            )),
+                            server_row: None,
+                            server_version: None,
+                        });
+                        continue;
+                    }
+                };
+            let operation = resolve_mutation_operation(client, mutation, &record_id, table_reg);
 
-            let result = process_record(
+            let result = process_mutation(
                 client,
                 p_user_id,
-                &legacy_change,
-                &registry,
+                mutation,
+                table_reg,
                 has_write_protect,
+                &record_id,
+                operation,
             );
 
-            if result.get("status").and_then(|value| value.as_str()) == Some(PUSH_STATUS_APPLIED) {
-                let record_id = legacy_change
-                    .get("id")
-                    .and_then(|value| value.as_str())
-                    .unwrap_or_default();
-                let operation = legacy_change
-                    .get("operation")
-                    .and_then(|value| value.as_str())
-                    .and_then(ChangeOperation::parse_legacy_wire)
-                    .unwrap_or(ChangeOperation::Update);
-
+            if result.is_applied() {
                 if let Err(err) =
-                    sync_record_change(client, &registry, &mutation.table, record_id, operation)
+                    sync_record_change(client, &registry, &mutation.table, &record_id, operation)
                 {
                     pgrx::error!(
                         "materializing sync metadata for {}.{}: {}",
@@ -281,11 +177,11 @@ fn synchro_push_vnext(p_user_id: &str, p_request: pgrx::JsonB) -> pgrx::JsonB {
                 }
             }
 
-            classify_vnext_push_result(
+            classify_push_result(
                 client,
                 mutation,
                 table_reg,
-                &result,
+                result,
                 &response_server_time.to_rfc3339(),
                 &mut accepted,
                 &mut rejected,
@@ -303,77 +199,43 @@ fn synchro_push_vnext(p_user_id: &str, p_request: pgrx::JsonB) -> pgrx::JsonB {
     })
 }
 
-// ---------------------------------------------------------------------------
-// Per-record processing
-// ---------------------------------------------------------------------------
-
-fn process_record(
+fn process_mutation(
     client: &mut SpiClient<'_>,
     user_id: &str,
-    change: &serde_json::Value,
-    registry: &[TableRegistration],
+    mutation: &Mutation,
+    table_reg: &TableRegistration,
     has_write_protect: bool,
-) -> serde_json::Value {
-    // Parse record fields.
-    let id = match change.get("id").and_then(|v| v.as_str()) {
-        Some(s) => s,
-        None => return reject_terminal("invalid_data", "missing 'id' field"),
-    };
-    let table_name = match change.get("table_name").and_then(|v| v.as_str()) {
-        Some(s) => s,
-        None => return reject_terminal("invalid_data", "missing 'table_name' field"),
-    };
-    let op_str = match change.get("operation").and_then(|v| v.as_str()) {
-        Some(s) => s,
-        None => return reject_terminal("invalid_data", "missing 'operation' field"),
-    };
-    let operation = match ChangeOperation::parse_legacy_wire(op_str) {
-        Some(op) => op,
-        None => {
-            return reject_terminal(
-                "invalid_operation",
-                &format!("unknown operation: {}", op_str),
-            )
-        }
-    };
-
-    // Find table in registry.
-    let table_reg = match registry.iter().find(|t| t.table_name == table_name) {
-        Some(t) => t,
-        None => {
-            return reject_terminal(
-                "table_not_registered",
-                &format!("table {:?} not registered", table_name),
-            )
-        }
-    };
-
-    // Check push policy.
+    record_id: &str,
+    operation: ChangeOperation,
+) -> PushMutationResult {
     if table_reg.push_policy == PushPolicy::ReadOnly {
         return reject_terminal(
-            "table_read_only",
-            &format!("table {:?} is read-only", table_name),
+            MutationRejectionCode::PolicyRejected,
+            format!("table {:?} is read-only", mutation.table),
         );
     }
 
-    // Get client data.
-    let mut data = match change.get("data") {
-        Some(d) if d.is_object() => d.clone(),
-        _ => serde_json::json!({}),
-    };
-
-    // Strip protected and non-synced columns before policy hooks run.
+    let mut data = mutation
+        .columns
+        .clone()
+        .unwrap_or_else(|| serde_json::json!({}));
     strip_protected_columns(&mut data, table_reg);
 
-    // Call write_protect function if it exists.
     if has_write_protect {
-        match call_write_protect(client, user_id, table_name, op_str, &data) {
+        match call_write_protect(
+            client,
+            user_id,
+            &mutation.table,
+            write_protect_operation_name(operation),
+            &data,
+        ) {
             Ok(transformed) => {
                 data = transformed;
-                // Re-strip protected columns in case write_protect re-introduced them.
                 strip_protected_columns(&mut data, table_reg);
             }
-            Err(msg) => return reject_terminal("write_protect_rejected", &msg),
+            Err(msg) => {
+                return reject_terminal(MutationRejectionCode::PolicyRejected, msg);
+            }
         }
     }
 
@@ -382,88 +244,27 @@ fn process_record(
         .iter()
         .cloned()
         .collect::<std::collections::HashSet<_>>();
-
-    // Parse client timestamps for conflict resolution.
     let timestamps = WriteTimestamps {
-        client_updated_at: change
-            .get("client_updated_at")
-            .and_then(|v| v.as_str())
+        client_updated_at: mutation
+            .client_version
+            .as_deref()
             .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
             .map(|dt| dt.with_timezone(&chrono::Utc)),
-        base_updated_at: change
-            .get("base_updated_at")
-            .and_then(|v| v.as_str())
+        base_updated_at: mutation
+            .base_version
+            .as_deref()
             .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
             .map(|dt| dt.with_timezone(&chrono::Utc)),
     };
-
-    // Dispatch by operation.
     let payload = WritePayload {
         data: &data,
         valid_columns: &valid_columns,
     };
+
     match operation {
-        ChangeOperation::Insert => push_create(client, id, table_reg, payload, timestamps),
-        ChangeOperation::Update => push_update(client, id, table_reg, payload, timestamps),
-        ChangeOperation::Delete => push_delete(client, id, table_reg),
-    }
-}
-
-fn legacy_change_from_mutation(
-    client: &SpiClient<'_>,
-    mutation: &Mutation,
-    table_reg: &TableRegistration,
-) -> Result<serde_json::Value, Box<RejectedMutation>> {
-    let record_id =
-        extract_mutation_record_id(&mutation.pk, &table_reg.pk_column).ok_or_else(|| {
-            Box::new(RejectedMutation {
-                mutation_id: mutation.mutation_id.clone(),
-                table: mutation.table.clone(),
-                pk: mutation.pk.clone(),
-                status: MutationStatus::RejectedTerminal,
-                code: MutationRejectionCode::ValidationFailed,
-                message: Some(format!(
-                    "primary key payload must contain string field {}",
-                    table_reg.pk_column
-                )),
-                server_row: None,
-                server_version: None,
-            })
-        })?;
-    let operation = legacy_operation_for_mutation(client, mutation, &record_id, table_reg);
-
-    let mut change = serde_json::json!({
-        "id": record_id,
-        "table_name": mutation.table,
-        "operation": operation,
-        "data": mutation.columns.clone().unwrap_or_else(|| serde_json::json!({})),
-    });
-
-    if let Some(base_version) = &mutation.base_version {
-        change["base_updated_at"] = serde_json::json!(base_version);
-        change["client_updated_at"] = serde_json::json!(base_version);
-    }
-
-    Ok(change)
-}
-
-fn legacy_operation_for_mutation(
-    client: &SpiClient<'_>,
-    mutation: &Mutation,
-    record_id: &str,
-    table_reg: &TableRegistration,
-) -> &'static str {
-    match mutation.op {
-        VNextOperation::Insert => "create",
-        VNextOperation::Update => "update",
-        VNextOperation::Delete => "delete",
-        VNextOperation::Upsert => {
-            if load_existing_record(client, record_id, table_reg).is_some() {
-                "update"
-            } else {
-                "create"
-            }
-        }
+        ChangeOperation::Insert => push_create(client, record_id, table_reg, payload, timestamps),
+        ChangeOperation::Update => push_update(client, record_id, table_reg, payload, timestamps),
+        ChangeOperation::Delete => push_delete(client, record_id, table_reg),
     }
 }
 
@@ -473,28 +274,60 @@ fn extract_mutation_record_id(pk: &serde_json::Value, pk_column: &str) -> Option
         .map(|value| value.to_string())
 }
 
-fn classify_vnext_push_result(
+fn resolve_mutation_operation(
+    client: &SpiClient<'_>,
+    mutation: &Mutation,
+    record_id: &str,
+    table_reg: &TableRegistration,
+) -> ChangeOperation {
+    match mutation.op {
+        Operation::Insert => ChangeOperation::Insert,
+        Operation::Update => ChangeOperation::Update,
+        Operation::Delete => ChangeOperation::Delete,
+        Operation::Upsert => {
+            if load_existing_record(client, record_id, table_reg).is_some() {
+                ChangeOperation::Update
+            } else {
+                ChangeOperation::Insert
+            }
+        }
+    }
+}
+
+fn write_protect_operation_name(operation: ChangeOperation) -> &'static str {
+    match operation {
+        ChangeOperation::Insert => "insert",
+        ChangeOperation::Update => "update",
+        ChangeOperation::Delete => "delete",
+    }
+}
+
+fn classify_push_result(
     client: &SpiClient<'_>,
     mutation: &Mutation,
     table_reg: &TableRegistration,
-    result: &serde_json::Value,
+    result: PushMutationResult,
     fallback_server_version: &str,
     accepted: &mut Vec<AcceptedMutation>,
     rejected: &mut Vec<RejectedMutation>,
 ) {
-    let status = result
-        .get("status")
-        .and_then(|value| value.as_str())
-        .unwrap_or("");
-    match status {
-        PUSH_STATUS_APPLIED => {
+    match result {
+        PushMutationResult::Applied {
+            server_updated_at,
+            server_deleted_at,
+        } => {
             let server_row = load_current_server_row_json(
                 client,
                 extract_mutation_record_id(&mutation.pk, &table_reg.pk_column).as_deref(),
                 table_reg,
             );
             let server_version =
-                applied_server_version(result, server_row.as_ref(), fallback_server_version);
+                applied_server_version(
+                    server_updated_at.as_deref(),
+                    server_deleted_at.as_deref(),
+                    server_row.as_ref(),
+                    fallback_server_version,
+                );
             accepted.push(AcceptedMutation {
                 mutation_id: mutation.mutation_id.clone(),
                 table: mutation.table.clone(),
@@ -504,85 +337,40 @@ fn classify_vnext_push_result(
                 server_version,
             });
         }
-        PUSH_STATUS_CONFLICT => rejected.push(RejectedMutation {
+        PushMutationResult::Conflict {
+            message,
+            server_row,
+            server_version,
+        } => rejected.push(RejectedMutation {
             mutation_id: mutation.mutation_id.clone(),
             table: mutation.table.clone(),
             pk: mutation.pk.clone(),
             status: MutationStatus::Conflict,
             code: MutationRejectionCode::VersionConflict,
-            message: result
-                .get("message")
-                .and_then(|value| value.as_str())
-                .map(|value| value.to_string()),
-            server_row: result.get("server_version").cloned(),
-            server_version: result
-                .get("server_updated_at")
-                .and_then(|value| value.as_str())
-                .map(|value| value.to_string()),
+            message: Some(message),
+            server_row,
+            server_version,
         }),
-        PUSH_STATUS_REJECTED_TERMINAL => rejected.push(RejectedMutation {
+        PushMutationResult::RejectedTerminal { code, message } => rejected.push(RejectedMutation {
             mutation_id: mutation.mutation_id.clone(),
             table: mutation.table.clone(),
             pk: mutation.pk.clone(),
             status: MutationStatus::RejectedTerminal,
-            code: map_legacy_rejection_code(
-                result
-                    .get("reason_code")
-                    .and_then(|value| value.as_str())
-                    .unwrap_or("invalid_data"),
-                false,
-            ),
-            message: result
-                .get("message")
-                .and_then(|value| value.as_str())
-                .map(|value| value.to_string()),
+            code,
+            message: Some(message),
             server_row: None,
             server_version: None,
         }),
-        PUSH_STATUS_REJECTED_RETRYABLE => rejected.push(RejectedMutation {
+        PushMutationResult::RejectedRetryable { code, message } => rejected.push(RejectedMutation {
             mutation_id: mutation.mutation_id.clone(),
             table: mutation.table.clone(),
             pk: mutation.pk.clone(),
             status: MutationStatus::RejectedRetryable,
-            code: map_legacy_rejection_code(
-                result
-                    .get("reason_code")
-                    .and_then(|value| value.as_str())
-                    .unwrap_or("server_retryable"),
-                true,
-            ),
-            message: result
-                .get("message")
-                .and_then(|value| value.as_str())
-                .map(|value| value.to_string()),
+            code,
+            message: Some(message),
             server_row: None,
             server_version: None,
         }),
-        _ => rejected.push(RejectedMutation {
-            mutation_id: mutation.mutation_id.clone(),
-            table: mutation.table.clone(),
-            pk: mutation.pk.clone(),
-            status: MutationStatus::RejectedTerminal,
-            code: MutationRejectionCode::ValidationFailed,
-            message: Some("unknown legacy push status".to_string()),
-            server_row: None,
-            server_version: None,
-        }),
-    }
-}
-
-fn map_legacy_rejection_code(reason_code: &str, retryable: bool) -> MutationRejectionCode {
-    if retryable {
-        return MutationRejectionCode::ServerRetryable;
-    }
-
-    match reason_code {
-        "table_not_registered" => MutationRejectionCode::TableNotSynced,
-        "table_read_only" | "write_protect_rejected" => MutationRejectionCode::PolicyRejected,
-        "record_exists" | "record_deleted" | "server_won_conflict" => {
-            MutationRejectionCode::VersionConflict
-        }
-        _ => MutationRejectionCode::ValidationFailed,
     }
 }
 
@@ -600,20 +388,15 @@ fn load_current_server_row_json(
 }
 
 fn applied_server_version(
-    result: &serde_json::Value,
+    server_updated_at: Option<&str>,
+    server_deleted_at: Option<&str>,
     server_row: Option<&serde_json::Value>,
     fallback_server_version: &str,
 ) -> String {
-    if let Some(updated_at) = result
-        .get("server_updated_at")
-        .and_then(|value| value.as_str())
-    {
+    if let Some(updated_at) = server_updated_at {
         return updated_at.to_string();
     }
-    if let Some(deleted_at) = result
-        .get("server_deleted_at")
-        .and_then(|value| value.as_str())
-    {
+    if let Some(deleted_at) = server_deleted_at {
         return deleted_at.to_string();
     }
     if let Some(server_row) = server_row {
@@ -673,18 +456,13 @@ fn push_create(
     table_reg: &TableRegistration,
     payload: WritePayload<'_>,
     timestamps: WriteTimestamps,
-) -> serde_json::Value {
+) -> PushMutationResult {
     // Check if record already exists.
     let existing = load_existing_record(client, id, table_reg);
 
     if let Some(ref ex) = existing {
         if ex.deleted_at.is_none() {
-            return conflict_result(
-                "record_exists",
-                "record already exists",
-                &table_reg.table_name,
-                ex,
-            );
+            return conflict_result("record already exists".to_string(), ex);
         }
         // Exists but soft-deleted: resurrection via update path.
         return push_update_inner(
@@ -701,12 +479,21 @@ fn push_create(
     // Insert new record.
     let columns = allowed_columns(payload.data, table_reg, payload.valid_columns);
     if columns.is_empty() {
-        return reject_terminal("invalid_data", "no allowed columns for insert");
+        return reject_terminal(
+            MutationRejectionCode::ValidationFailed,
+            "no allowed columns for insert".to_string(),
+        );
     }
+
+    let canonical_client_updated_at = canonical_client_updated_at(timestamps);
 
     // Build INSERT SQL. Column names are validated against pg_catalog.
     let col_list: String = std::iter::once(pg_quote_ident(&table_reg.pk_column))
         .chain(columns.iter().map(|c| pg_quote_ident(c)))
+        .chain(
+            (table_reg.has_updated_at && canonical_client_updated_at.is_some())
+                .then(|| pg_quote_ident(&table_reg.updated_at_col)),
+        )
         .collect::<Vec<_>>()
         .join(", ");
 
@@ -719,8 +506,8 @@ fn push_create(
             .unwrap_or(true);
         if missing {
             return reject_terminal(
-                "invalid_data",
-                &format!("missing required column {}", column),
+                MutationRejectionCode::ValidationFailed,
+                format!("missing required column {}", column),
             );
         }
     }
@@ -728,6 +515,11 @@ fn push_create(
     // Use jsonb_populate_record for automatic type coercion (handles numeric, uuid, etc.).
     let select_list: String = std::iter::once(format!("$1::{}", table_reg.pk_type))
         .chain(columns.iter().map(|c| format!("r.{}", pg_quote_ident(c))))
+        .chain(
+            canonical_client_updated_at
+                .as_ref()
+                .map(|_| "$3::timestamptz".to_string()),
+        )
         .collect::<Vec<_>>()
         .join(", ");
 
@@ -750,16 +542,22 @@ fn push_create(
     );
 
     let data_jsonb = pgrx::JsonB(payload.data.clone());
-    match client.update(&sql, None, &[id.into(), data_jsonb.into()]) {
+    let insert_result = if let Some(updated_at) = canonical_client_updated_at.as_deref() {
+        client.update(&sql, None, &[id.into(), data_jsonb.into(), updated_at.into()])
+    } else {
+        client.update(&sql, None, &[id.into(), data_jsonb.into()])
+    };
+
+    match insert_result {
         Ok(tup) => {
             let server_updated_at = if table_reg.has_updated_at {
                 tup.first().get_one::<String>().ok().flatten()
             } else {
                 None
             };
-            applied_result(server_updated_at.as_deref(), None)
+            applied_result(server_updated_at, None)
         }
-        Err(e) => reject_retryable("create_failed", &format!("{}", e)),
+        Err(e) => reject_retryable(MutationRejectionCode::ServerRetryable, e.to_string()),
     }
 }
 
@@ -773,7 +571,7 @@ fn push_update(
     table_reg: &TableRegistration,
     payload: WritePayload<'_>,
     timestamps: WriteTimestamps,
-) -> serde_json::Value {
+) -> PushMutationResult {
     let existing = load_existing_record(client, id, table_reg);
     push_update_inner(
         client,
@@ -794,20 +592,20 @@ fn push_update_inner(
     timestamps: WriteTimestamps,
     existing: Option<ExistingRecord>,
     mode: UpdateMode,
-) -> serde_json::Value {
+) -> PushMutationResult {
     let existing = match existing {
-        Some(ex) => ex,
-        None => return reject_terminal("record_not_found", "record does not exist"),
+        Some(existing) => existing,
+        None => {
+            return reject_terminal(
+                MutationRejectionCode::ValidationFailed,
+                "record does not exist".to_string(),
+            );
+        }
     };
 
     // If soft-deleted and not a resurrection: conflict.
     if existing.deleted_at.is_some() && !matches!(mode, UpdateMode::Resurrection) {
-        return conflict_result(
-            "record_deleted",
-            "record has been deleted",
-            &table_reg.table_name,
-            &existing,
-        );
+        return conflict_result("record has been deleted".to_string(), &existing);
     }
 
     // Conflict resolution via LWW (if table has updated_at).
@@ -832,29 +630,32 @@ fn push_update_inner(
                 let resolution = resolver.resolve(&conflict);
 
                 if resolution.winner == TimestampResolutionWinner::Server {
-                    return conflict_result(
-                        "server_won_conflict",
-                        resolution.reason,
-                        &table_reg.table_name,
-                        &existing,
-                    );
+                    return conflict_result(resolution.reason.to_string(), &existing);
                 }
             }
         }
     }
 
+    let canonical_client_updated_at = canonical_client_updated_at(timestamps);
+
     // Build UPDATE SQL.
     let columns = allowed_columns(payload.data, table_reg, payload.valid_columns);
     if columns.is_empty() && !matches!(mode, UpdateMode::Resurrection) {
-        return applied_result(existing.updated_at.as_deref(), None);
+        return applied_result(existing.updated_at.clone(), None);
     }
 
     let server_updated_at = if !columns.is_empty() {
-        let set_clause: String = columns
+        let mut set_clause = columns
             .iter()
             .map(|c| format!("{} = r.{}", pg_quote_ident(c), pg_quote_ident(c)))
-            .collect::<Vec<_>>()
-            .join(", ");
+            .collect::<Vec<_>>();
+        if table_reg.has_updated_at && canonical_client_updated_at.is_some() {
+            set_clause.push(format!(
+                "{} = $3::timestamptz",
+                pg_quote_ident(&table_reg.updated_at_col)
+            ));
+        }
+        let set_clause = set_clause.join(", ");
 
         let returning = if table_reg.has_updated_at {
             format!(
@@ -876,7 +677,13 @@ fn push_update_inner(
         );
 
         let data_jsonb = pgrx::JsonB(payload.data.clone());
-        match client.update(&sql, None, &[data_jsonb.into(), id.into()]) {
+        let update_result = if let Some(updated_at) = canonical_client_updated_at.as_deref() {
+            client.update(&sql, None, &[data_jsonb.into(), id.into(), updated_at.into()])
+        } else {
+            client.update(&sql, None, &[data_jsonb.into(), id.into()])
+        };
+
+        match update_result {
             Ok(tup) => {
                 if table_reg.has_updated_at {
                     tup.first().get_one::<String>().ok().flatten()
@@ -884,7 +691,9 @@ fn push_update_inner(
                     None
                 }
             }
-            Err(e) => return reject_retryable("update_failed", &format!("{}", e)),
+            Err(e) => {
+                return reject_retryable(MutationRejectionCode::ServerRetryable, e.to_string());
+            }
         }
     } else {
         existing.updated_at.clone()
@@ -893,14 +702,26 @@ fn push_update_inner(
     // Resurrection: clear deleted_at.
     if matches!(mode, UpdateMode::Resurrection) && table_reg.has_deleted_at {
         let resurrection_sql = if table_reg.has_updated_at {
-            format!(
-                "UPDATE {} SET {} = NULL WHERE {} = $1::{} RETURNING {}::text AS updated_at",
-                pg_quote_ident(&table_reg.table_name),
-                pg_quote_ident(&table_reg.deleted_at_col),
-                pg_quote_ident(&table_reg.pk_column),
-                table_reg.pk_type,
-                pg_quote_ident(&table_reg.updated_at_col),
-            )
+            if canonical_client_updated_at.is_some() {
+                format!(
+                    "UPDATE {} SET {} = NULL, {} = $2::timestamptz WHERE {} = $1::{} RETURNING {}::text AS updated_at",
+                    pg_quote_ident(&table_reg.table_name),
+                    pg_quote_ident(&table_reg.deleted_at_col),
+                    pg_quote_ident(&table_reg.updated_at_col),
+                    pg_quote_ident(&table_reg.pk_column),
+                    table_reg.pk_type,
+                    pg_quote_ident(&table_reg.updated_at_col),
+                )
+            } else {
+                format!(
+                    "UPDATE {} SET {} = NULL WHERE {} = $1::{} RETURNING {}::text AS updated_at",
+                    pg_quote_ident(&table_reg.table_name),
+                    pg_quote_ident(&table_reg.deleted_at_col),
+                    pg_quote_ident(&table_reg.pk_column),
+                    table_reg.pk_type,
+                    pg_quote_ident(&table_reg.updated_at_col),
+                )
+            }
         } else {
             format!(
                 "UPDATE {} SET {} = NULL WHERE {} = $1::{}",
@@ -911,20 +732,28 @@ fn push_update_inner(
             )
         };
 
-        match client.update(&resurrection_sql, None, &[id.into()]) {
+        let resurrection_result = if let Some(updated_at) = canonical_client_updated_at.as_deref() {
+            client.update(&resurrection_sql, None, &[id.into(), updated_at.into()])
+        } else {
+            client.update(&resurrection_sql, None, &[id.into()])
+        };
+
+        match resurrection_result {
             Ok(tup) => {
                 let ua = if table_reg.has_updated_at {
                     tup.first().get_one::<String>().ok().flatten()
                 } else {
                     None
                 };
-                return applied_result(ua.as_deref(), None);
+                return applied_result(ua, None);
             }
-            Err(e) => return reject_retryable("resurrection_failed", &format!("{}", e)),
+            Err(e) => {
+                return reject_retryable(MutationRejectionCode::ServerRetryable, e.to_string());
+            }
         }
     }
 
-    applied_result(server_updated_at.as_deref(), None)
+    applied_result(server_updated_at, None)
 }
 
 // ---------------------------------------------------------------------------
@@ -935,7 +764,7 @@ fn push_delete(
     client: &mut SpiClient<'_>,
     id: &str,
     table_reg: &TableRegistration,
-) -> serde_json::Value {
+) -> PushMutationResult {
     let existing = load_existing_record(client, id, table_reg);
 
     if table_reg.has_deleted_at {
@@ -950,12 +779,17 @@ fn push_soft_delete(
     id: &str,
     table_reg: &TableRegistration,
     existing: Option<ExistingRecord>,
-) -> serde_json::Value {
+) -> PushMutationResult {
     match &existing {
-        None => return reject_terminal("record_not_found", "record does not exist"),
+        None => {
+            return reject_terminal(
+                MutationRejectionCode::ValidationFailed,
+                "record does not exist".to_string(),
+            );
+        }
         Some(ex) if ex.deleted_at.is_some() => {
             // Already soft-deleted: idempotent success.
-            return applied_result(None, ex.deleted_at.as_deref());
+            return applied_result(None, ex.deleted_at.clone());
         }
         _ => {}
     }
@@ -972,9 +806,9 @@ fn push_soft_delete(
     match client.update(&sql, None, &[id.into()]) {
         Ok(tup) => {
             let deleted_at = tup.first().get_one::<String>().ok().flatten();
-            applied_result(None, deleted_at.as_deref())
+            applied_result(None, deleted_at)
         }
-        Err(e) => reject_retryable("delete_failed", &format!("{}", e)),
+        Err(e) => reject_retryable(MutationRejectionCode::ServerRetryable, e.to_string()),
     }
 }
 
@@ -982,7 +816,7 @@ fn push_hard_delete(
     client: &mut SpiClient<'_>,
     id: &str,
     table_reg: &TableRegistration,
-) -> serde_json::Value {
+) -> PushMutationResult {
     let sql = format!(
         "DELETE FROM {} WHERE {} = $1::{}",
         pg_quote_ident(&table_reg.table_name),
@@ -992,7 +826,7 @@ fn push_hard_delete(
 
     match client.update(&sql, None, &[id.into()]) {
         Ok(_) => applied_result(None, None),
-        Err(e) => reject_retryable("delete_failed", &format!("{}", e)),
+        Err(e) => reject_retryable(MutationRejectionCode::ServerRetryable, e.to_string()),
     }
 }
 
@@ -1221,91 +1055,68 @@ fn load_registry_inner(client: &SpiClient<'_>) -> Vec<TableRegistration> {
 // ---------------------------------------------------------------------------
 
 fn applied_result(
-    server_updated_at: Option<&str>,
-    server_deleted_at: Option<&str>,
-) -> serde_json::Value {
-    let mut r = serde_json::json!({
-        "status": PUSH_STATUS_APPLIED,
-    });
-    if let Some(ua) = server_updated_at {
-        r["server_updated_at"] = serde_json::json!(canonical_timestamp(ua));
+    server_updated_at: Option<String>,
+    server_deleted_at: Option<String>,
+) -> PushMutationResult {
+    PushMutationResult::Applied {
+        server_updated_at: server_updated_at.map(|value| canonical_timestamp(&value)),
+        server_deleted_at: server_deleted_at.map(|value| canonical_timestamp(&value)),
     }
-    if let Some(da) = server_deleted_at {
-        r["server_deleted_at"] = serde_json::json!(canonical_timestamp(da));
-    }
-    r
 }
 
-fn conflict_result(
-    reason_code: &str,
-    message: &str,
-    table_name: &str,
-    existing: &ExistingRecord,
-) -> serde_json::Value {
-    let mut r = serde_json::json!({
-        "status": PUSH_STATUS_CONFLICT,
-        "reason_code": reason_code,
-        "message": message,
-    });
-    if let Some(ua) = &existing.updated_at {
-        r["server_updated_at"] = serde_json::json!(canonical_timestamp(ua));
-    }
-    if let Some(da) = &existing.deleted_at {
-        r["server_deleted_at"] = serde_json::json!(canonical_timestamp(da));
-    }
-    // Include server version data so clients can perform merge resolution.
-    if let Some(data_str) = &existing.data {
-        if let Ok(mut data) = serde_json::from_str::<serde_json::Value>(data_str) {
-            if let Some(obj) = data.as_object_mut() {
-                if let Some(updated_at) = obj.get("updated_at").and_then(|value| value.as_str()) {
-                    obj.insert(
-                        "updated_at".into(),
-                        serde_json::json!(canonical_timestamp(updated_at)),
-                    );
-                }
-                if let Some(deleted_at) = obj.get("deleted_at").and_then(|value| value.as_str()) {
-                    obj.insert(
-                        "deleted_at".into(),
-                        serde_json::json!(canonical_timestamp(deleted_at)),
-                    );
-                }
-            }
-            let id = data
-                .get("id")
-                .and_then(|value| value.as_str())
-                .unwrap_or_default()
-                .to_string();
-            let mut record = serde_json::json!({
-                "id": id,
-                "table_name": table_name,
-                "data": data,
-            });
-            if let Some(ua) = &existing.updated_at {
-                record["updated_at"] = serde_json::json!(canonical_timestamp(ua));
-            }
-            if let Some(da) = &existing.deleted_at {
-                record["deleted_at"] = serde_json::json!(canonical_timestamp(da));
-            }
-            r["server_version"] = record;
-        }
-    }
-    r
+fn canonical_client_updated_at(timestamps: WriteTimestamps) -> Option<String> {
+    timestamps
+        .client_updated_at
+        .map(|value| canonical_timestamp(&value.to_rfc3339()))
 }
 
-fn reject_terminal(reason_code: &str, message: &str) -> serde_json::Value {
-    serde_json::json!({
-        "status": PUSH_STATUS_REJECTED_TERMINAL,
-        "reason_code": reason_code,
-        "message": message,
-    })
+fn conflict_result(message: String, existing: &ExistingRecord) -> PushMutationResult {
+    PushMutationResult::Conflict {
+        message,
+        server_row: existing_server_row(existing),
+        server_version: existing_server_version(existing),
+    }
 }
 
-fn reject_retryable(reason_code: &str, message: &str) -> serde_json::Value {
-    serde_json::json!({
-        "status": PUSH_STATUS_REJECTED_RETRYABLE,
-        "reason_code": reason_code,
-        "message": message,
-    })
+fn reject_terminal(code: MutationRejectionCode, message: String) -> PushMutationResult {
+    PushMutationResult::RejectedTerminal { code, message }
+}
+
+fn reject_retryable(code: MutationRejectionCode, message: String) -> PushMutationResult {
+    PushMutationResult::RejectedRetryable { code, message }
+}
+
+fn existing_server_row(existing: &ExistingRecord) -> Option<serde_json::Value> {
+    let mut row = serde_json::from_str::<serde_json::Value>(existing.data.as_ref()?).ok()?;
+    canonicalize_existing_row(&mut row);
+    Some(row)
+}
+
+fn existing_server_version(existing: &ExistingRecord) -> Option<String> {
+    existing
+        .deleted_at
+        .as_deref()
+        .map(canonical_timestamp)
+        .or_else(|| existing.updated_at.as_deref().map(canonical_timestamp))
+}
+
+fn canonicalize_existing_row(row: &mut serde_json::Value) {
+    let Some(obj) = row.as_object_mut() else {
+        return;
+    };
+
+    if let Some(updated_at) = obj.get("updated_at").and_then(|value| value.as_str()) {
+        obj.insert(
+            "updated_at".into(),
+            serde_json::json!(canonical_timestamp(updated_at)),
+        );
+    }
+    if let Some(deleted_at) = obj.get("deleted_at").and_then(|value| value.as_str()) {
+        obj.insert(
+            "deleted_at".into(),
+            serde_json::json!(canonical_timestamp(deleted_at)),
+        );
+    }
 }
 
 /// Parse a PostgreSQL timestamptz text representation into a chrono DateTime<Utc>.

@@ -172,6 +172,21 @@ async function waitForPendingDrain(client: SynchroClient, timeoutMs = 5000) {
   return false;
 }
 
+async function waitForCondition(
+  condition: () => Promise<boolean>,
+  timeoutMs = 5000,
+  intervalMs = 250
+) {
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < timeoutMs) {
+    if (await condition()) {
+      return true;
+    }
+    await new Promise((resolve) => setTimeout(resolve, intervalMs));
+  }
+  return false;
+}
+
 async function waitForWAL(delayMs = 1000) {
   await new Promise((resolve) => setTimeout(resolve, delayMs));
 }
@@ -517,11 +532,21 @@ export default function App() {
       markStep('conflict:initial-sync');
       await waitForPendingDrain(client);
 
+      await stopSync();
+      markStep('conflict:stopped');
+
+      const localVersion = '2026-01-01T00:00:00.000Z';
+      await client.execute(
+        'UPDATE customers SET name = ?, updated_at = ? WHERE id = ?',
+        ['client-version', localVersion, recordID]
+      );
+      markStep('conflict:updated-local');
+
       const clientBID = `rn-conflict-client-${uuid()}`;
       const connect = await connectManualClient(USER1_JWT, clientBID);
       markStep('conflict:manual-connected');
 
-      const now = new Date().toISOString();
+      const serverVersion = '2030-01-01T00:00:00.000Z';
       await syncHTTP('POST', '/sync/push', USER1_JWT, {
         client_id: clientBID,
         batch_id: `batch-${recordID}`,
@@ -537,35 +562,35 @@ export default function App() {
             columns: {
               user_id: USER1_ID,
               name: 'server-version',
-              updated_at: now,
+              updated_at: serverVersion,
             },
-            client_updated_at: now,
+            client_version: serverVersion,
           },
         ],
       });
       markStep('conflict:manual-pushed');
 
-      await waitForWAL();
+      await waitForWAL(1500);
       markStep('conflict:wal-1');
 
-      await client.execute(
-        "UPDATE customers SET name = ?, updated_at = datetime('now') WHERE id = ?",
-        ['client-version', recordID]
-      );
-      markStep('conflict:updated-local');
       await client.syncNow();
       markStep('conflict:resynced');
-      await waitForWAL(1500);
-      markStep('conflict:wal-2');
 
-      const row = await client.queryOne(
-        'SELECT name FROM customers WHERE id = ?',
-        [recordID]
-      );
-      const conflictFired = conflictsRef.current.some(
-        (event) => event.recordID === recordID
-      );
-      update('conflict', conflictFired || row !== null);
+      const conflictResolved = await waitForCondition(async () => {
+        const row = await client.queryOne(
+          'SELECT name FROM customers WHERE id = ?',
+          [recordID]
+        );
+        const conflictEvent = conflictsRef.current.find(
+          (event) => event.recordID === recordID
+        );
+        return (
+          conflictEvent?.serverData?.name === 'server-version' &&
+          row?.name === 'server-version' &&
+          (await client.pendingChangeCount()) === 0
+        );
+      }, 10000);
+      update('conflict', conflictResolved);
     } catch (error) {
       captureError('conflict', error);
       update('conflict', false);

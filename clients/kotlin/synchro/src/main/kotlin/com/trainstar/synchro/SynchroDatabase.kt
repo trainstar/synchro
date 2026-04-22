@@ -228,6 +228,24 @@ class SynchroDatabase(context: Context, dbPath: String) :
         }
     }
 
+    fun <T> writeSyncLockedTransaction(block: (SQLiteDatabase) -> T): T {
+        return writeTransaction { db ->
+            SynchroMeta.setSyncLock(db, true)
+            try {
+                val result = block(db)
+                SynchroMeta.setSyncLock(db, false)
+                result
+            } catch (error: Throwable) {
+                try {
+                    SynchroMeta.setSyncLock(db, false)
+                } catch (unlockError: Throwable) {
+                    error.addSuppressed(unlockError)
+                }
+                throw error
+            }
+        }
+    }
+
     // MARK: - Batch
 
     fun executeBatch(statements: List<SQLStatement>): Int {

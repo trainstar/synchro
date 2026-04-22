@@ -64,7 +64,7 @@ class SchemaManager(private val database: SynchroDatabase) {
     }
 
     internal fun createSyncedTablesInTransaction(db: android.database.sqlite.SQLiteDatabase, schema: SchemaResponse) {
-        createSyncedTablesInTransaction(db, schema.tables.map { it.localSchema })
+        createSyncedTablesInTransaction(db, schema.localTables())
     }
 
     internal fun createSyncedTablesInTransaction(db: android.database.sqlite.SQLiteDatabase, tables: List<LocalSchemaTable>) {
@@ -80,7 +80,7 @@ class SchemaManager(private val database: SynchroDatabase) {
     }
 
     fun migrateSchema(newSchema: SchemaResponse) {
-        migrateLocalSchema(newSchema.tables.map { it.localSchema })
+        migrateLocalSchema(newSchema.localTables())
     }
 
     fun migrateLocalSchema(newTables: List<LocalSchemaTable>) {
@@ -202,7 +202,7 @@ class SchemaManager(private val database: SynchroDatabase) {
     }
 
     internal fun dropSyncedTablesInTransaction(db: android.database.sqlite.SQLiteDatabase, schema: SchemaResponse) {
-        dropSyncedTablesInTransaction(db, schema.tables.map { it.localSchema })
+        dropSyncedTablesInTransaction(db, schema.localTables())
     }
 
     internal fun dropSyncedTablesInTransaction(db: android.database.sqlite.SQLiteDatabase, tables: List<LocalSchemaTable>) {

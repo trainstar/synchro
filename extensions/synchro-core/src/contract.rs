@@ -6,7 +6,7 @@ use std::convert::TryFrom;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum VNextOperation {
+pub enum Operation {
     Insert,
     Upsert,
     Update,
@@ -14,21 +14,21 @@ pub enum VNextOperation {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct LegacyOperationConversionError {
-    pub operation: VNextOperation,
+pub struct ChangeOperationConversionError {
+    pub operation: Operation,
 }
 
-impl std::fmt::Display for LegacyOperationConversionError {
+impl std::fmt::Display for ChangeOperationConversionError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "vNext operation {:?} cannot be represented by the legacy operation model",
+            "canonical operation {:?} cannot be represented by the local change-operation model",
             self.operation
         )
     }
 }
 
-impl std::error::Error for LegacyOperationConversionError {}
+impl std::error::Error for ChangeOperationConversionError {}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ContractViolation {
@@ -85,6 +85,9 @@ pub enum ContractViolation {
         table_name: String,
         index_name: String,
         column_name: String,
+    },
+    MissingMutationClientVersion {
+        mutation_id: String,
     },
     RequiredChecksumsMissing,
     FinalRebuildCursorMissing,
@@ -175,6 +178,10 @@ impl std::fmt::Display for ContractViolation {
                 f,
                 "schema manifest table {table_name} index {index_name} references unknown column {column_name}"
             ),
+            Self::MissingMutationClientVersion { mutation_id } => write!(
+                f,
+                "push mutation {mutation_id} must include client_version for insert, update, or upsert"
+            ),
             Self::RequiredChecksumsMissing => {
                 f.write_str("pull response is missing required checksums")
             }
@@ -196,7 +203,7 @@ impl std::fmt::Display for ContractViolation {
 
 impl std::error::Error for ContractViolation {}
 
-impl From<crate::change::ChangeOperation> for VNextOperation {
+impl From<crate::change::ChangeOperation> for Operation {
     fn from(value: crate::change::ChangeOperation) -> Self {
         match value {
             crate::change::ChangeOperation::Insert => Self::Insert,
@@ -206,15 +213,15 @@ impl From<crate::change::ChangeOperation> for VNextOperation {
     }
 }
 
-impl TryFrom<VNextOperation> for crate::change::ChangeOperation {
-    type Error = LegacyOperationConversionError;
+impl TryFrom<Operation> for crate::change::ChangeOperation {
+    type Error = ChangeOperationConversionError;
 
-    fn try_from(value: VNextOperation) -> Result<Self, Self::Error> {
+    fn try_from(value: Operation) -> Result<Self, Self::Error> {
         match value {
-            VNextOperation::Insert => Ok(crate::change::ChangeOperation::Insert),
-            VNextOperation::Update => Ok(crate::change::ChangeOperation::Update),
-            VNextOperation::Delete => Ok(crate::change::ChangeOperation::Delete),
-            VNextOperation::Upsert => Err(LegacyOperationConversionError { operation: value }),
+            Operation::Insert => Ok(crate::change::ChangeOperation::Insert),
+            Operation::Update => Ok(crate::change::ChangeOperation::Update),
+            Operation::Delete => Ok(crate::change::ChangeOperation::Delete),
+            Operation::Upsert => Err(ChangeOperationConversionError { operation: value }),
         }
     }
 }
@@ -584,12 +591,35 @@ impl ConnectResponse {
 pub struct Mutation {
     pub mutation_id: String,
     pub table: String,
-    pub op: VNextOperation,
+    pub op: Operation,
     pub pk: Value,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base_version: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_version: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub columns: Option<Value>,
+}
+
+impl Mutation {
+    pub fn validate(&self) -> Result<(), ContractViolation> {
+        if matches!(
+            self.op,
+            Operation::Insert | Operation::Update | Operation::Upsert
+        ) && self
+            .client_version
+            .as_deref()
+            .map(str::trim)
+            .unwrap_or_default()
+            .is_empty()
+        {
+            return Err(ContractViolation::MissingMutationClientVersion {
+                mutation_id: self.mutation_id.clone(),
+            });
+        }
+
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -598,6 +628,15 @@ pub struct PushRequest {
     pub batch_id: String,
     pub schema: SchemaRef,
     pub mutations: Vec<Mutation>,
+}
+
+impl PushRequest {
+    pub fn validate(&self) -> Result<(), ContractViolation> {
+        for mutation in &self.mutations {
+            mutation.validate()?;
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -648,7 +687,7 @@ pub struct PullRequest {
 pub struct ChangeRecord {
     pub scope: String,
     pub table: String,
-    pub op: VNextOperation,
+    pub op: Operation,
     pub pk: Value,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub row: Option<Value>,
@@ -844,8 +883,8 @@ mod tests {
         let response: PushResponse =
             serde_json::from_value(doc["expected"]["response"].clone()).unwrap();
 
-        assert_eq!(request.mutations[0].op, VNextOperation::Insert);
-        assert_eq!(request.mutations[1].op, VNextOperation::Delete);
+        assert_eq!(request.mutations[0].op, Operation::Insert);
+        assert_eq!(request.mutations[1].op, Operation::Delete);
         assert_eq!(response.accepted[0].status, MutationStatus::Applied);
         assert_eq!(response.rejected[0].status, MutationStatus::Conflict);
         assert_eq!(
@@ -864,7 +903,7 @@ mod tests {
         response.validate_for_request(&request).unwrap();
         assert_eq!(request.checksum_mode, Some(ChecksumMode::Requested));
         assert_eq!(response.scope_set_version, 14);
-        assert_eq!(response.changes[0].op, VNextOperation::Upsert);
+        assert_eq!(response.changes[0].op, Operation::Upsert);
         assert!(response.requests_rebuild());
     }
 
@@ -954,14 +993,14 @@ mod tests {
     }
 
     #[test]
-    fn legacy_operation_converts_to_vnext() {
-        let converted = VNextOperation::from(crate::change::ChangeOperation::Insert);
-        assert_eq!(converted, VNextOperation::Insert);
+    fn change_operation_converts_to_operation() {
+        let converted = Operation::from(crate::change::ChangeOperation::Insert);
+        assert_eq!(converted, Operation::Insert);
     }
 
     #[test]
-    fn vnext_upsert_rejects_legacy_conversion() {
-        let converted = crate::change::ChangeOperation::try_from(VNextOperation::Upsert);
+    fn upsert_rejects_change_operation_conversion() {
+        let converted = crate::change::ChangeOperation::try_from(Operation::Upsert);
         assert!(converted.is_err());
     }
 

@@ -1,22 +1,22 @@
 package synchroapi
 
-// ConnectRequestVNext is the request body for POST /sync/connect.
-type ConnectRequestVNext struct {
+// ConnectRequest is the request body for POST /sync/connect.
+type ConnectRequest struct {
 	ClientID string `json:"client_id"`
 }
 
-// PullRequestVNext is the minimal validated request envelope for vNext pull.
-type PullRequestVNext struct {
+// PullRequest is the minimal validated request envelope for pull.
+type PullRequest struct {
 	ClientID string `json:"client_id"`
 }
 
-// PushRequestVNext is the minimal validated request envelope for vNext push.
-type PushRequestVNext struct {
+// PushRequest is the minimal validated request envelope for push.
+type PushRequest struct {
 	ClientID string `json:"client_id"`
 }
 
-// RebuildRequestVNext is the minimal validated request envelope for vNext rebuild.
-type RebuildRequestVNext struct {
+// RebuildRequest is the minimal validated request envelope for rebuild.
+type RebuildRequest struct {
 	ClientID string `json:"client_id"`
 	Scope    string `json:"scope"`
 }

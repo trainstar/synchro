@@ -247,6 +247,67 @@ class SyncEngineTests {
     }
 
     @Test
+    fun testScopeRemovalDeletesLocalRowWithoutQueueingPendingDelete() = runTest {
+        var pullCallCount = 0
+
+        val (engine, db) = makeIntegrationEnv { request ->
+            val path = request.path ?: ""
+            when {
+                path.endsWith("/sync/connect") -> mockResponse(connectJSON)
+                path.endsWith("/sync/rebuild") -> mockResponse(
+                    rebuildJSON(
+                        records = """
+                            [
+                                {
+                                    "table": "orders",
+                                    "pk": {"id": "w1"},
+                                    "row": {"id": "w1", "ship_address": "Seeded", "user_id": "u1", "updated_at": "2026-01-01T12:00:00.000Z", "deleted_at": null},
+                                    "server_version": "sv_1"
+                                }
+                            ]
+                        """.trimIndent(),
+                        finalCursor = "scope_cursor_1"
+                    )
+                )
+                path.endsWith("/sync/pull") -> {
+                    pullCallCount++
+                    if (pullCallCount == 1) {
+                        mockResponse(scopePullJSON(cursor = "scope_cursor_2"))
+                    } else {
+                        mockResponse(
+                            """
+                                {
+                                    "changes": [],
+                                    "scope_set_version": 2,
+                                    "scope_cursors": {"$scopeID": "scope_cursor_3"},
+                                    "scope_updates": {"add": [], "remove": ["$scopeID"]},
+                                    "rebuild": [],
+                                    "has_more": false,
+                                    "checksums": {}
+                                }
+                            """.trimIndent()
+                        )
+                    }
+                }
+                else -> mockResponse("""{"error":"unexpected"}""", 500)
+            }
+        }
+
+        try {
+            engine.start()
+            engine.syncNow()
+
+            val row = db.queryOne("SELECT id FROM orders WHERE id = ?", arrayOf("w1"))
+            assertNull(row)
+
+            val tracker = ChangeTracker(db)
+            assertFalse(tracker.hasPendingChanges())
+        } finally {
+            engine.stop()
+        }
+    }
+
+    @Test
     fun testPullPagesUntilComplete() = runTest {
         var pullCallCount = 0
 

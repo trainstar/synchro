@@ -65,7 +65,7 @@ final class SchemaManager: @unchecked Sendable {
     }
 
     func createSyncedTablesInTransaction(_ db: GRDB.Database, schema: SchemaResponse) throws {
-        try createSyncedTablesInTransaction(db, tables: schema.tables.map(\.localSchema))
+        try createSyncedTablesInTransaction(db, tables: try schema.localTables())
     }
 
     func createSyncedTablesInTransaction(_ db: GRDB.Database, tables: [LocalSchemaTable]) throws {
@@ -81,7 +81,7 @@ final class SchemaManager: @unchecked Sendable {
     }
 
     func migrateSchema(newSchema: SchemaResponse) throws {
-        try migrateLocalSchema(newTables: newSchema.tables.map(\.localSchema))
+        try migrateLocalSchema(newTables: try newSchema.localTables())
     }
 
     func migrateLocalSchema(newTables: [LocalSchemaTable]) throws {
@@ -172,7 +172,7 @@ final class SchemaManager: @unchecked Sendable {
     }
 
     func dropSyncedTablesInTransaction(_ db: GRDB.Database, schema: SchemaResponse) throws {
-        try dropSyncedTablesInTransaction(db, tables: schema.tables.map(\.localSchema))
+        try dropSyncedTablesInTransaction(db, tables: try schema.localTables())
     }
 
     func dropSyncedTablesInTransaction(_ db: GRDB.Database, tables: [LocalSchemaTable]) throws {

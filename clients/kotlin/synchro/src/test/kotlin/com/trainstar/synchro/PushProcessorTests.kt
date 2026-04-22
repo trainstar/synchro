@@ -200,16 +200,25 @@ class PushProcessorTests {
         assertTrue(tracker.hasPendingChanges())
 
         val accepted = listOf(
-            PushResult(
-                id = "w1",
-                tableName = "orders",
-                operation = "create",
-                status = PushStatus.APPLIED,
-                serverUpdatedAt = "2026-01-01T12:00:00.000Z"
+            AcceptedMutation(
+                mutationID = "m1",
+                table = "orders",
+                pk = JsonObject(mapOf("id" to JsonPrimitive("w1"))),
+                status = MutationStatus.APPLIED,
+                serverRow = JsonObject(
+                    mapOf(
+                        "id" to JsonPrimitive("w1"),
+                        "ship_address" to JsonPrimitive("123 Main St"),
+                        "user_id" to JsonPrimitive("u1"),
+                        "updated_at" to JsonPrimitive("2026-01-01T12:00:00.000Z"),
+                        "deleted_at" to JsonNull,
+                    )
+                ),
+                serverVersion = "2026-01-01T12:00:00.000Z"
             )
         )
 
-        processor.applyLegacyAccepted(accepted, listOf(localTestTable))
+        processor.applyAccepted(accepted, listOf(localTestTable))
 
         // Pending should be drained
         assertFalse(tracker.hasPendingChanges())
@@ -231,16 +240,24 @@ class PushProcessorTests {
         assertTrue(tracker.hasPendingChanges())
 
         val accepted = listOf(
-            PushResult(
-                id = "ci1",
-                tableName = "custom_items",
-                operation = "create",
-                status = PushStatus.APPLIED,
-                serverUpdatedAt = "2026-01-01T14:00:00.000Z"
+            AcceptedMutation(
+                mutationID = "m1",
+                table = "custom_items",
+                pk = JsonObject(mapOf("item_id" to JsonPrimitive("ci1"))),
+                status = MutationStatus.APPLIED,
+                serverRow = JsonObject(
+                    mapOf(
+                        "item_id" to JsonPrimitive("ci1"),
+                        "title" to JsonPrimitive("My Item"),
+                        "modified_at" to JsonPrimitive("2026-01-01T14:00:00.000Z"),
+                        "removed_at" to JsonNull,
+                    )
+                ),
+                serverVersion = "2026-01-01T14:00:00.000Z"
             )
         )
 
-        processor.applyLegacyAccepted(accepted, listOf(localCustomTable))
+        processor.applyAccepted(accepted, listOf(localCustomTable))
 
         // RYOW should write to "modified_at", not "updated_at"
         val row = db.queryOne("SELECT modified_at FROM custom_items WHERE item_id = ?", arrayOf("ci1"))
@@ -261,16 +278,25 @@ class PushProcessorTests {
         assertTrue(tracker.hasPendingChanges())
 
         val accepted = listOf(
-            PushResult(
-                id = "w1",
-                tableName = "orders",
-                operation = "delete",
-                status = PushStatus.APPLIED,
-                serverDeletedAt = "2026-01-01T12:00:00.000Z"
+            AcceptedMutation(
+                mutationID = "m1",
+                table = "orders",
+                pk = JsonObject(mapOf("id" to JsonPrimitive("w1"))),
+                status = MutationStatus.APPLIED,
+                serverRow = JsonObject(
+                    mapOf(
+                        "id" to JsonPrimitive("w1"),
+                        "ship_address" to JsonPrimitive("123 Main St"),
+                        "user_id" to JsonPrimitive("u1"),
+                        "updated_at" to JsonPrimitive("2026-01-01T10:00:00.000Z"),
+                        "deleted_at" to JsonPrimitive("2026-01-01T12:00:00.000Z"),
+                    )
+                ),
+                serverVersion = "2026-01-01T12:00:00.000Z"
             )
         )
 
-        processor.applyLegacyAccepted(accepted, listOf(localTestTable))
+        processor.applyAccepted(accepted, listOf(localTestTable))
 
         assertFalse(tracker.hasPendingChanges())
 
@@ -288,23 +314,32 @@ class PushProcessorTests {
         )
 
         val accepted = listOf(
-            PushResult(
-                id = "w1",
-                tableName = "orders",
-                operation = "create",
-                status = PushStatus.APPLIED,
-                serverUpdatedAt = "2026-01-01T12:00:00.000Z"
+            AcceptedMutation(
+                mutationID = "m1",
+                table = "orders",
+                pk = JsonObject(mapOf("id" to JsonPrimitive("w1"))),
+                status = MutationStatus.APPLIED,
+                serverRow = JsonObject(
+                    mapOf(
+                        "id" to JsonPrimitive("w1"),
+                        "ship_address" to JsonPrimitive("123 Main St"),
+                        "user_id" to JsonPrimitive("u1"),
+                        "updated_at" to JsonPrimitive("2026-01-01T12:00:00.000Z"),
+                        "deleted_at" to JsonNull,
+                    )
+                ),
+                serverVersion = "2026-01-01T12:00:00.000Z"
             )
         )
 
-        processor.applyLegacyAccepted(accepted, listOf(localTestTable))
+        processor.applyAccepted(accepted, listOf(localTestTable))
 
         // Pending queue should be empty — sync_lock prevented the RYOW update from re-queuing
         assertFalse(tracker.hasPendingChanges())
     }
 
     @Test
-    fun testApplyAcceptedVNextAppliesCanonicalServerRow() {
+    fun testApplyAcceptedAppliesCanonicalServerRow() {
         val (db, tracker, processor) = makeTestEnv()
 
         db.execute(
@@ -313,11 +348,11 @@ class PushProcessorTests {
         )
 
         val accepted = listOf(
-            VNextAcceptedMutation(
+            AcceptedMutation(
                 mutationID = "m1",
                 table = "orders",
                 pk = JsonObject(mapOf("id" to JsonPrimitive("w1"))),
-                status = VNextMutationStatus.APPLIED,
+                status = MutationStatus.APPLIED,
                 serverRow = JsonObject(
                     mapOf(
                         "id" to JsonPrimitive("w1"),
@@ -353,30 +388,27 @@ class PushProcessorTests {
 
         assertTrue(tracker.hasPendingChanges())
 
-        val serverVersion = Record(
-            id = "w1",
-            tableName = "orders",
-            data = mapOf(
-                "id" to AnyCodable("w1"),
-                "ship_address" to AnyCodable("Server Address"),
-                "user_id" to AnyCodable("u1"),
-                "updated_at" to AnyCodable("2026-01-01T11:00:00.000Z"),
-            ),
-            updatedAt = "2026-01-01T11:00:00.000Z"
-        )
-
         val rejected = listOf(
-            PushResult(
-                id = "w1",
-                tableName = "orders",
-                operation = "update",
-                status = PushStatus.CONFLICT,
-                reason = "server version is newer",
-                serverVersion = serverVersion
+            RejectedMutation(
+                mutationID = "m1",
+                table = "orders",
+                pk = JsonObject(mapOf("id" to JsonPrimitive("w1"))),
+                status = MutationStatus.CONFLICT,
+                code = MutationRejectionCode.VERSION_CONFLICT,
+                message = "server version is newer",
+                serverRow = JsonObject(
+                    mapOf(
+                        "id" to JsonPrimitive("w1"),
+                        "ship_address" to JsonPrimitive("Server Address"),
+                        "user_id" to JsonPrimitive("u1"),
+                        "updated_at" to JsonPrimitive("2026-01-01T11:00:00.000Z"),
+                    )
+                ),
+                serverVersion = "2026-01-01T11:00:00.000Z"
             )
         )
 
-        val conflicts = processor.applyLegacyRejected(rejected, listOf(localTestTable))
+        val conflicts = processor.applyRejected(rejected, listOf(localTestTable))
 
         // Pending should be drained
         assertFalse(tracker.hasPendingChanges())
@@ -403,16 +435,19 @@ class PushProcessorTests {
         )
 
         val rejected = listOf(
-            PushResult(
-                id = "w1",
-                tableName = "orders",
-                operation = "update",
-                status = PushStatus.REJECTED_TERMINAL,
-                reason = "ownership violation"
+            RejectedMutation(
+                mutationID = "m1",
+                table = "orders",
+                pk = JsonObject(mapOf("id" to JsonPrimitive("w1"))),
+                status = MutationStatus.REJECTED_TERMINAL,
+                code = MutationRejectionCode.POLICY_REJECTED,
+                message = "ownership violation",
+                serverRow = null,
+                serverVersion = null
             )
         )
 
-        val conflicts = processor.applyLegacyRejected(rejected, listOf(localTestTable))
+        val conflicts = processor.applyRejected(rejected, listOf(localTestTable))
 
         // Pending drained
         assertFalse(tracker.hasPendingChanges())
@@ -426,7 +461,7 @@ class PushProcessorTests {
     }
 
     @Test
-    fun testApplyRejectedVNextConflictAppliesCanonicalServerRow() {
+    fun testApplyRejectedConflictAppliesCanonicalServerRow() {
         val (db, tracker, processor) = makeTestEnv()
 
         db.execute(
@@ -435,12 +470,12 @@ class PushProcessorTests {
         )
 
         val rejected = listOf(
-            VNextRejectedMutation(
+            RejectedMutation(
                 mutationID = "m1",
                 table = "orders",
                 pk = JsonObject(mapOf("id" to JsonPrimitive("w1"))),
-                status = VNextMutationStatus.CONFLICT,
-                code = VNextMutationRejectionCode.VERSION_CONFLICT,
+                status = MutationStatus.CONFLICT,
+                code = MutationRejectionCode.VERSION_CONFLICT,
                 message = "server version is newer",
                 serverRow = JsonObject(
                     mapOf(
@@ -475,30 +510,27 @@ class PushProcessorTests {
             arrayOf("w1", "Client Address", "u1", "2026-01-01T10:00:00.000Z")
         )
 
-        val serverVersion = Record(
-            id = "w1",
-            tableName = "orders",
-            data = mapOf(
-                "id" to AnyCodable("w1"),
-                "ship_address" to AnyCodable("Server Address"),
-                "user_id" to AnyCodable("u1"),
-                "updated_at" to AnyCodable("2026-01-01T11:00:00.000Z"),
-            ),
-            updatedAt = "2026-01-01T11:00:00.000Z"
-        )
-
         val rejected = listOf(
-            PushResult(
-                id = "w1",
-                tableName = "orders",
-                operation = "update",
-                status = PushStatus.CONFLICT,
-                reason = "server version is newer",
-                serverVersion = serverVersion
+            RejectedMutation(
+                mutationID = "m1",
+                table = "orders",
+                pk = JsonObject(mapOf("id" to JsonPrimitive("w1"))),
+                status = MutationStatus.CONFLICT,
+                code = MutationRejectionCode.VERSION_CONFLICT,
+                message = "server version is newer",
+                serverRow = JsonObject(
+                    mapOf(
+                        "id" to JsonPrimitive("w1"),
+                        "ship_address" to JsonPrimitive("Server Address"),
+                        "user_id" to JsonPrimitive("u1"),
+                        "updated_at" to JsonPrimitive("2026-01-01T11:00:00.000Z"),
+                    )
+                ),
+                serverVersion = "2026-01-01T11:00:00.000Z"
             )
         )
 
-        processor.applyLegacyRejected(rejected, listOf(localTestTable))
+        processor.applyRejected(rejected, listOf(localTestTable))
 
         // sync_lock should have prevented CDC triggers from re-queuing
         assertFalse(tracker.hasPendingChanges())

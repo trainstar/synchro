@@ -49,7 +49,6 @@ CREATE TABLE IF NOT EXISTS sync_clients (
     last_sync_at TIMESTAMPTZ,
     last_pull_at TIMESTAMPTZ,
     last_push_at TIMESTAMPTZ,
-    last_pull_seq BIGINT,
     is_active BOOLEAN NOT NULL DEFAULT true,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),

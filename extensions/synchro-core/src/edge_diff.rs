@@ -1,7 +1,7 @@
-//! Legacy edge-diff helpers for scope materialization.
+//! Edge-diff helpers for scope materialization.
 //!
-//! The current PostgreSQL extension still uses bucket terminology. In vNext,
-//! these bucket identifiers correspond to deterministic scope instance ids.
+//! The current PostgreSQL extension still uses bucket terminology. These bucket
+//! identifiers correspond to deterministic scope instance ids.
 
 use crate::change::ChangeOperation;
 use std::collections::HashSet;

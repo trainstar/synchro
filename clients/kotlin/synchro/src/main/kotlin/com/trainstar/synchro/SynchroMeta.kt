@@ -142,6 +142,15 @@ object SynchroMeta {
         return result
     }
 
+    fun hasBucketMembers(db: SQLiteDatabase, tableName: String, recordId: String): Boolean {
+        db.rawQuery(
+            "SELECT 1 FROM _synchro_bucket_members WHERE table_name = ? AND record_id = ? LIMIT 1",
+            arrayOf(tableName, recordId)
+        ).use { cursor ->
+            return cursor.moveToFirst()
+        }
+    }
+
     // MARK: - Scope State
 
     fun getAllScopes(db: SQLiteDatabase): List<LocalScopeState> {

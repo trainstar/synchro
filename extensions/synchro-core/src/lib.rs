@@ -1,6 +1,6 @@
 //! Synchro shared Rust core.
 //!
-//! For vNext contract work, the authoritative shared surfaces are:
+//! The authoritative shared surfaces are:
 //!
 //! - `change`
 //! - `contract`
@@ -8,7 +8,7 @@
 //! - `state`
 //!
 //! `conflict` still contains timestamp-specific helpers used by the current
-//! PostgreSQL extension. It is not the authoritative vNext conflict contract.
+//! PostgreSQL extension. It is not the authoritative wire contract for conflicts.
 
 pub mod change;
 pub mod checksum;

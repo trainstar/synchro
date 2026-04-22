@@ -88,13 +88,13 @@ class IntegrationTests {
         )
     }
 
-    private fun makeConnectRequest(clientID: String): VNextConnectRequest {
-        return VNextConnectRequest(
+    private fun makeConnectRequest(clientID: String): ConnectRequest {
+        return ConnectRequest(
             clientID = clientID,
             platform = "android",
             appVersion = "1.0.0",
             protocolVersion = 1,
-            schema = VNextSchemaRef(version = 0, hash = ""),
+            schema = SchemaRef(version = 0, hash = ""),
             scopeSetVersion = 0,
             knownScopes = emptyMap()
         )

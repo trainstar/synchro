@@ -10,7 +10,7 @@ sealed class SynchroError(message: String, cause: Throwable? = null) : Exception
     class SchemaMismatch(val serverVersion: Long, val serverHash: String) :
         SynchroError("Schema mismatch: server version $serverVersion, hash $serverHash")
 
-    class PushRejected(val results: List<VNextRejectedMutation>) :
+    class PushRejected(val results: List<RejectedMutation>) :
         SynchroError("Push rejected: ${results.size} mutation(s)")
 
     class NetworkError(val underlying: Throwable) :
