@@ -12,8 +12,8 @@ import type { ConflictEvent } from '@trainstar/synchro-react-native';
 
 const SYNCHRO_TEST_URL =
   Platform.OS === 'android'
-    ? 'http://10.0.2.2:8081'
-    : 'http://127.0.0.1:8081';
+    ? 'http://10.0.2.2:8091'
+    : 'http://127.0.0.1:8091';
 
 const USER1_JWT =
   'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJhMTExMTExMS0xMTExLTExMTEtMTExMS0xMTExMTExMTExMTEiLCJleHAiOjQxMDI0NDQ4MDB9.ZPjufmc-mgkQC6rc6GVNzH9V3jhqQZMl2AuF0Cleuz8';
@@ -195,36 +195,6 @@ async function waitForCondition(
 
 async function waitForWAL(delayMs = 1000) {
   await new Promise((resolve) => setTimeout(resolve, delayMs));
-}
-
-async function startAndWaitForCycle(client: SynchroClient) {
-  let sawActive = false;
-  let unsubscribe: (() => void) | null = null;
-
-  const cycle = new Promise<void>((resolve, reject) => {
-    unsubscribe = client.onStatusChange((status) => {
-      if (status.status === 'connecting' || status.status === 'syncing') {
-        sawActive = true;
-        return;
-      }
-      if (status.status === 'error') {
-        unsubscribe?.();
-        reject(new Error('sync status entered error state'));
-        return;
-      }
-      if (sawActive && status.status === 'idle') {
-        unsubscribe?.();
-        resolve();
-      }
-    });
-  });
-
-  try {
-    await client.start();
-    await cycle;
-  } finally {
-    unsubscribe?.();
-  }
 }
 
 async function insertCustomer(
@@ -521,13 +491,18 @@ export default function App() {
 
   const runStart = useCallback(async () => {
     try {
+      setLastError(null);
+      markStep('start:start');
       await ensureStarted();
+      markStep('start:started');
       await stopSync();
+      markStep('start:stopped');
       update('start', true);
-    } catch {
+    } catch (error) {
+      captureError('start', error);
       update('start', false);
     }
-  }, [ensureStarted, stopSync, update]);
+  }, [captureError, ensureStarted, markStep, stopSync, update]);
 
   const runPushPull = useCallback(async () => {
     try {
@@ -684,15 +659,20 @@ export default function App() {
 
   const runStop = useCallback(async () => {
     try {
+      setLastError(null);
+      markStep('stop:start');
       await ensureStarted();
+      markStep('stop:started');
       await stopSync();
+      markStep('stop:stopped');
       update('stop', true);
-    } catch {
+    } catch (error) {
+      captureError('stop', error);
       update('stop', false);
     } finally {
       startedRef.current = false;
     }
-  }, [ensureStarted, stopSync, update]);
+  }, [captureError, ensureStarted, markStep, stopSync, update]);
 
   const runErrorMap = useCallback(async () => {
     try {
@@ -749,7 +729,8 @@ export default function App() {
         pushDebounce: TEST_PUSH_DEBOUNCE_SECONDS,
       });
       await syncClient.initialize();
-      await startAndWaitForCycle(syncClient);
+      await syncClient.start();
+      await syncClient.syncNow();
 
       const pendingAfterSync = await syncClient.pendingChangeCount();
       const localRow = await syncClient.queryOne(
@@ -880,7 +861,7 @@ export default function App() {
         [seededCategoryID]
       );
 
-      await startAndWaitForCycle(seedClient);
+      await seedClient.start();
 
       const resumedScope = await seedClient.queryOne(
         'SELECT scope_id, cursor, checksum, generation FROM _synchro_scopes WHERE scope_id = ?',
@@ -1018,7 +999,7 @@ export default function App() {
         pushDebounce: TEST_PUSH_DEBOUNCE_SECONDS,
       });
       await repairClient.initialize();
-      await startAndWaitForCycle(repairClient);
+      await repairClient.start();
 
       const repairedScope = await repairClient.queryOne(
         'SELECT scope_id, cursor, checksum, generation FROM _synchro_scopes WHERE scope_id = ?',
@@ -1121,10 +1102,6 @@ export default function App() {
           <Text>Reset Harness</Text>
         </TouchableOpacity>
 
-        {Object.entries(results).map(([key, value]) => (
-          <StatusBadge key={key} label={key} ok={value} />
-        ))}
-
         <View style={styles.buttons}>
           <TouchableOpacity style={styles.button} onPress={runInit} testID="btn-init">
             <Text>Initialize</Text>
@@ -1181,6 +1158,10 @@ export default function App() {
             <Text>Seed Repair</Text>
           </TouchableOpacity>
         </View>
+
+        {Object.entries(results).map(([key, value]) => (
+          <StatusBadge key={key} label={key} ok={value} />
+        ))}
       </ScrollView>
       <View style={styles.lastResult} testID="last-result">
         <Text testID="last-result-key">{lastResult.key ?? 'none'}</Text>

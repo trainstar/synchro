@@ -78,7 +78,7 @@ ADAPTER_TEST_DB ?= synchro_adapter_test
 ADAPTER_TEST_URL ?= postgres://$(USER)@localhost:$(PGRX_PORT)/$(ADAPTER_TEST_DB)?sslmode=disable
 REPLICATION_URL ?= postgres://$(USER)@localhost:$(PGRX_PORT)/$(ADAPTER_TEST_DB)?replication=database&sslmode=disable
 
-SYNCHROD_PG_PORT ?= 8081
+SYNCHROD_PG_PORT ?= 8091
 SYNCHRO_TEST_HOST ?= localhost
 SYNCHRO_TEST_PORT ?= $(SYNCHROD_PG_PORT)
 SYNCHRO_TEST_URL ?= http://$(SYNCHRO_TEST_HOST):$(SYNCHRO_TEST_PORT)
@@ -433,6 +433,13 @@ test-adapter: test-adapter-setup
 
 synchrod-pg-test-start: build-seed
 	@set -e; \
+	for PID in $$(lsof -tiTCP:$(SYNCHROD_PG_PORT) -sTCP:LISTEN 2>/dev/null); do \
+		kill "$$PID" 2>/dev/null || true; \
+		sleep 1; \
+		if kill -0 "$$PID" 2>/dev/null; then \
+			kill -9 "$$PID" 2>/dev/null || true; \
+		fi; \
+	done; \
 	if [ -f "$(SYNCHROD_PG_PID_FILE)" ] && kill -0 "$$(cat "$(SYNCHROD_PG_PID_FILE)")" 2>/dev/null; then \
 		echo "synchrod-pg already running"; \
 		exit 0; \
@@ -541,6 +548,10 @@ synchrod-pg-test-stop:
 		PID="$$(cat "$(SYNCHROD_PG_PID_FILE)")"; \
 		if kill -0 "$$PID" 2>/dev/null; then \
 			kill "$$PID"; \
+			sleep 1; \
+			if kill -0 "$$PID" 2>/dev/null; then \
+				kill -9 "$$PID" 2>/dev/null || true; \
+			fi; \
 			wait "$$PID" 2>/dev/null || true; \
 			echo "synchrod-pg stopped"; \
 			STOPPED=1; \
@@ -549,6 +560,10 @@ synchrod-pg-test-stop:
 	fi; \
 	for PID in $$(lsof -tiTCP:$(SYNCHROD_PG_PORT) -sTCP:LISTEN 2>/dev/null); do \
 		kill "$$PID" 2>/dev/null || true; \
+		sleep 1; \
+		if kill -0 "$$PID" 2>/dev/null; then \
+			kill -9 "$$PID" 2>/dev/null || true; \
+		fi; \
 		wait "$$PID" 2>/dev/null || true; \
 		STOPPED=1; \
 	done; \

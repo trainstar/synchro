@@ -33,7 +33,7 @@ apply plugin: "kotlin-android"
 
 apply plugin: "com.facebook.react"
 
-def defaultSynchroVersion = "0.2.0"
+def defaultSynchroVersion = "0.3.0"
 def resolvedSynchroVersion = findProperty("synchroVersion")?.toString() ?: defaultSynchroVersion
 
 android {
