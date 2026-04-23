@@ -10,7 +10,7 @@ import java.util.concurrent.CopyOnWriteArraySet
 typealias Row = Map<String, Any?>
 
 class SynchroDatabase(context: Context, dbPath: String) :
-    SQLiteOpenHelper(context, dbPath, null, 2) {
+    SQLiteOpenHelper(context, dbPath, null, 3) {
 
     val path: String = dbPath
     private val changeNotifier = ChangeNotifier()
@@ -82,6 +82,26 @@ class SynchroDatabase(context: Context, dbPath: String) :
             ON _synchro_scope_rows (table_name, record_id)
         """.trimIndent())
 
+        db.execSQL("""
+            CREATE TABLE IF NOT EXISTS _synchro_rejected_mutations (
+                mutation_id TEXT PRIMARY KEY,
+                table_name TEXT NOT NULL,
+                record_id TEXT NOT NULL,
+                status TEXT NOT NULL,
+                code TEXT NOT NULL,
+                message TEXT,
+                server_row_json TEXT,
+                server_version TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+        """.trimIndent())
+
+        db.execSQL("""
+            CREATE INDEX IF NOT EXISTS idx_synchro_rejected_mutations_record
+            ON _synchro_rejected_mutations (table_name, record_id)
+        """.trimIndent())
+
         db.execSQL("INSERT OR IGNORE INTO _synchro_meta (key, value) VALUES ('sync_lock', '0')")
         db.execSQL("INSERT OR IGNORE INTO _synchro_meta (key, value) VALUES ('checkpoint', '0')")
     }
@@ -89,6 +109,9 @@ class SynchroDatabase(context: Context, dbPath: String) :
     override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
         if (oldVersion < 2) {
             migrateScopeIntegrity(db)
+        }
+        if (oldVersion < 3) {
+            migrateRejectedMutations(db)
         }
     }
 
@@ -142,29 +165,56 @@ class SynchroDatabase(context: Context, dbPath: String) :
             ON _synchro_scope_rows (table_name, record_id)
         """.trimIndent())
         migrateScopeIntegrity(db)
+        migrateRejectedMutations(db)
     }
 
     private fun migrateScopeIntegrity(db: SQLiteDatabase) {
+        var schemaChanged = false
         if (!hasColumn(db, "_synchro_scopes", "local_checksum")) {
             db.execSQL(
                 "ALTER TABLE _synchro_scopes ADD COLUMN local_checksum INTEGER NOT NULL DEFAULT 0"
             )
+            schemaChanged = true
         }
         if (!hasColumn(db, "_synchro_scope_rows", "checksum")) {
             db.execSQL(
                 "ALTER TABLE _synchro_scope_rows ADD COLUMN checksum INTEGER NOT NULL DEFAULT 0"
             )
+            schemaChanged = true
         }
-        db.execSQL(
-            """
-            UPDATE _synchro_scopes
-            SET cursor = NULL,
-                checksum = NULL,
-                generation = 0,
-                local_checksum = 0
-            """.trimIndent()
-        )
-        db.execSQL("DELETE FROM _synchro_scope_rows")
+        if (schemaChanged) {
+            db.execSQL(
+                """
+                UPDATE _synchro_scopes
+                SET cursor = NULL,
+                    checksum = NULL,
+                    generation = 0,
+                    local_checksum = 0
+                """.trimIndent()
+            )
+            db.execSQL("DELETE FROM _synchro_scope_rows")
+        }
+    }
+
+    private fun migrateRejectedMutations(db: SQLiteDatabase) {
+        db.execSQL("""
+            CREATE TABLE IF NOT EXISTS _synchro_rejected_mutations (
+                mutation_id TEXT PRIMARY KEY,
+                table_name TEXT NOT NULL,
+                record_id TEXT NOT NULL,
+                status TEXT NOT NULL,
+                code TEXT NOT NULL,
+                message TEXT,
+                server_row_json TEXT,
+                server_version TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+        """.trimIndent())
+        db.execSQL("""
+            CREATE INDEX IF NOT EXISTS idx_synchro_rejected_mutations_record
+            ON _synchro_rejected_mutations (table_name, record_id)
+        """.trimIndent())
     }
 
     private fun hasColumn(db: SQLiteDatabase, tableName: String, columnName: String): Boolean {

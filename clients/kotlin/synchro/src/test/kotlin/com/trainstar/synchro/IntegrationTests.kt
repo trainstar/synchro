@@ -7,7 +7,6 @@ import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.fail
-import org.junit.Assume.assumeNotNull
 import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -20,18 +19,17 @@ import javax.crypto.spec.SecretKeySpec
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [28])
 class IntegrationTests {
-    private var serverURL: String? = null
-    private var jwtSecret: String? = null
+    private lateinit var serverURL: String
+    private lateinit var jwtSecret: String
 
     @Before
     fun setUp() {
-        serverURL = System.getenv("SYNCHRO_TEST_URL")
-        jwtSecret = System.getenv("SYNCHRO_TEST_JWT_SECRET")
-    }
-
-    private fun skipIfNoServer() {
-        assumeNotNull("SYNCHRO_TEST_URL not set", serverURL)
-        assumeNotNull("SYNCHRO_TEST_JWT_SECRET not set", jwtSecret)
+        serverURL = checkNotNull(System.getenv("SYNCHRO_TEST_URL")) {
+            "SYNCHRO_TEST_URL must be set for integration tests"
+        }
+        jwtSecret = checkNotNull(System.getenv("SYNCHRO_TEST_JWT_SECRET")) {
+            "SYNCHRO_TEST_JWT_SECRET must be set for integration tests"
+        }
     }
 
     private fun signTestJWT(userID: String): String {
@@ -43,7 +41,7 @@ class IntegrationTests {
         val headerB64 = base64URLEncode(header.toByteArray())
         val payloadB64 = base64URLEncode(payload.toByteArray())
         val signingInput = "$headerB64.$payloadB64"
-        val signature = hmacSHA256(jwtSecret!!.toByteArray(), signingInput.toByteArray())
+        val signature = hmacSHA256(jwtSecret.toByteArray(), signingInput.toByteArray())
         return "$signingInput.${base64URLEncode(signature)}"
     }
 
@@ -67,7 +65,7 @@ class IntegrationTests {
         val token = signTestJWT(userID)
         return SynchroConfig(
             dbPath = dbPath,
-            serverURL = serverURL!!,
+            serverURL = serverURL,
             authProvider = { token },
             clientID = clientID,
             appVersion = "1.0.0",
@@ -79,7 +77,7 @@ class IntegrationTests {
     private fun makeBadTokenConfig(clientID: String = UUID.randomUUID().toString()): SynchroConfig {
         return SynchroConfig(
             dbPath = "bad_${UUID.randomUUID()}.sqlite",
-            serverURL = serverURL!!,
+            serverURL = serverURL,
             authProvider = { "bad.token" },
             clientID = clientID,
             appVersion = "1.0.0",
@@ -118,6 +116,7 @@ class IntegrationTests {
         )
     }
 
+
     private suspend fun waitForCondition(timeoutMs: Long = 5000, intervalMs: Long = 250, condition: suspend () -> Boolean) {
         val deadline = System.currentTimeMillis() + timeoutMs
         while (true) {
@@ -133,8 +132,6 @@ class IntegrationTests {
 
     @Test
     fun testAuthFailure() = runTest {
-        skipIfNoServer()
-
         val config = makeBadTokenConfig()
         val http = HttpClient(config)
 
@@ -148,8 +145,6 @@ class IntegrationTests {
 
     @Test
     fun testPushPullBetweenTwoClients() = runTest {
-        skipIfNoServer()
-
         val userID = UUID.randomUUID().toString()
         val clientA = SynchroClient(makeConfig(userID = userID), context)
         val clientB = SynchroClient(makeConfig(userID = userID), context)
@@ -177,8 +172,6 @@ class IntegrationTests {
 
     @Test
     fun testFreshClientBootstrapsExistingServerState() = runTest {
-        skipIfNoServer()
-
         val userID = UUID.randomUUID().toString()
         val writer = SynchroClient(makeConfig(userID = userID), context)
         val reader = SynchroClient(makeConfig(userID = userID), context)
@@ -206,8 +199,6 @@ class IntegrationTests {
 
     @Test
     fun testSoftDeletePropagatesBetweenClients() = runTest {
-        skipIfNoServer()
-
         val userID = UUID.randomUUID().toString()
         val clientA = SynchroClient(makeConfig(userID = userID), context)
         val clientB = SynchroClient(makeConfig(userID = userID), context)
@@ -220,7 +211,10 @@ class IntegrationTests {
             clientA.syncNow()
 
             clientB.start()
-            clientB.syncNow()
+            waitForCondition {
+                val row = clientB.queryOne("SELECT ship_address FROM orders WHERE id = ?", arrayOf(orderID))
+                row?.get("ship_address") == "Delete Me"
+            }
 
             clientA.execute(
                 "UPDATE orders SET deleted_at = ?, updated_at = ? WHERE id = ?",
@@ -244,4 +238,5 @@ class IntegrationTests {
             clientB.close()
         }
     }
+
 }

@@ -38,7 +38,10 @@ type ResultKey =
   | 'multiUser'
   | 'stop'
   | 'errorMap'
-  | 'seedInit';
+  | 'offlineFirst'
+  | 'seedInit'
+  | 'seedResume'
+  | 'seedRepair';
 
 type TestResult = boolean | null;
 type Results = Record<ResultKey, TestResult>;
@@ -60,7 +63,10 @@ function createEmptyResults(): Results {
     multiUser: null,
     stop: null,
     errorMap: null,
+    offlineFirst: null,
     seedInit: null,
+    seedResume: null,
+    seedRepair: null,
   };
 }
 
@@ -189,6 +195,36 @@ async function waitForCondition(
 
 async function waitForWAL(delayMs = 1000) {
   await new Promise((resolve) => setTimeout(resolve, delayMs));
+}
+
+async function startAndWaitForCycle(client: SynchroClient) {
+  let sawActive = false;
+  let unsubscribe: (() => void) | null = null;
+
+  const cycle = new Promise<void>((resolve, reject) => {
+    unsubscribe = client.onStatusChange((status) => {
+      if (status.status === 'connecting' || status.status === 'syncing') {
+        sawActive = true;
+        return;
+      }
+      if (status.status === 'error') {
+        unsubscribe?.();
+        reject(new Error('sync status entered error state'));
+        return;
+      }
+      if (sawActive && status.status === 'idle') {
+        unsubscribe?.();
+        resolve();
+      }
+    });
+  });
+
+  try {
+    await client.start();
+    await cycle;
+  } finally {
+    unsubscribe?.();
+  }
 }
 
 async function insertCustomer(
@@ -668,10 +704,103 @@ export default function App() {
     }
   }, [client, ensureInitialized, update]);
 
+  const runOfflineFirst = useCallback(async () => {
+    const runID = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    const dbPath = `synchro-offline-first-${runID}.db`;
+    const clientID = `rn-offline-first-device-${runID}`;
+    const verifyClientID = `rn-offline-first-verify-${runID}`;
+    const customerID = uuid();
+    let offlineClient: SynchroClient | null = null;
+    let syncClient: SynchroClient | null = null;
+    try {
+      setLastError(null);
+      markStep('offlineFirst:offline');
+      offlineClient = new SynchroClient({
+        dbPath,
+        serverURL: SYNCHRO_TEST_URL,
+        authProvider: async () => USER1_JWT,
+        clientID,
+        appVersion: '1.0.0',
+        syncInterval: TEST_SYNC_INTERVAL_SECONDS,
+        pushDebounce: TEST_PUSH_DEBOUNCE_SECONDS,
+        seedDatabasePath: 'seed.db',
+      });
+      await offlineClient.initialize();
+      await offlineClient.execute(
+        "INSERT INTO customers (id, user_id, name, balance, is_active, created_at, updated_at) VALUES (?, ?, ?, 0, 1, ?, ?)",
+        [customerID, USER1_ID, 'offline-first-customer', '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z']
+      );
+      const pendingBeforeRestart = await offlineClient.pendingChangeCount();
+      const offlineRow = await offlineClient.queryOne(
+        'SELECT name FROM customers WHERE id = ?',
+        [customerID]
+      );
+      await offlineClient.close();
+      offlineClient = null;
+
+      markStep('offlineFirst:first-connect');
+      syncClient = new SynchroClient({
+        dbPath,
+        serverURL: SYNCHRO_TEST_URL,
+        authProvider: async () => USER1_JWT,
+        clientID,
+        appVersion: '1.0.0',
+        syncInterval: TEST_SYNC_INTERVAL_SECONDS,
+        pushDebounce: TEST_PUSH_DEBOUNCE_SECONDS,
+      });
+      await syncClient.initialize();
+      await startAndWaitForCycle(syncClient);
+
+      const pendingAfterSync = await syncClient.pendingChangeCount();
+      const localRow = await syncClient.queryOne(
+        'SELECT name FROM customers WHERE id = ?',
+        [customerID]
+      );
+      const rejectedAfterSync = await syncClient.query(
+        'SELECT mutation_id FROM _synchro_rejected_mutations'
+      );
+
+      update(
+        'offlineFirst',
+        pendingBeforeRestart === 1 &&
+          offlineRow?.name === 'offline-first-customer' &&
+          pendingAfterSync === 0 &&
+          localRow?.name === 'offline-first-customer' &&
+          rejectedAfterSync.length === 0
+      );
+    } catch (error) {
+      captureError('offlineFirst', error);
+      update('offlineFirst', false);
+    } finally {
+      try {
+        await offlineClient?.stop();
+      } catch {
+        // Best-effort cleanup.
+      }
+      try {
+        await offlineClient?.close();
+      } catch {
+        // Best-effort cleanup.
+      }
+      try {
+        await syncClient?.stop();
+      } catch {
+        // Best-effort cleanup.
+      }
+      try {
+        await syncClient?.close();
+      } catch {
+        // Best-effort cleanup.
+      }
+    }
+  }, [captureError, markStep, update]);
+
   const runSeedInit = useCallback(async () => {
     const seedID = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
     let seedClient: SynchroClient | null = null;
     try {
+      const seededCategoryID = '10000000-0000-0000-0000-000000000006';
+      const insertedCategoryID = uuid();
       seedClient = new SynchroClient({
         dbPath: `synchro-seed-test-${seedID}.db`,
         serverURL: SYNCHRO_TEST_URL,
@@ -682,29 +811,286 @@ export default function App() {
       });
       await seedClient.initialize();
 
-      // Verify the orders table exists from the seed
-      const rows = await seedClient.query('SELECT * FROM orders');
-      const tableExists = Array.isArray(rows);
+      const seededScope = await seedClient.queryOne(
+        'SELECT scope_id, cursor, checksum, generation FROM _synchro_scopes WHERE scope_id = ?',
+        ['global']
+      );
+      const seededRow = await seedClient.queryOne(
+        'SELECT id, name FROM categories WHERE id = ?',
+        [seededCategoryID]
+      );
 
-      // Insert a row into orders
-      const orderID = uuid();
+      // Insert into a seeded synced table to prove local CDC is installed.
       await seedClient.execute(
-        "INSERT INTO orders (id, user_id, ship_address, created_at, updated_at) VALUES (?, ?, ?, datetime('now'), datetime('now'))",
-        [orderID, USER1_ID, 'seed-test']
+        "INSERT INTO categories (id, name, sort_order, created_at, updated_at) VALUES (?, ?, ?, datetime('now'), datetime('now'))",
+        [insertedCategoryID, 'Seed Init Category', 999]
       );
 
-      // Verify the CDC trigger fired
-      const pending = await seedClient.query(
-        'SELECT * FROM _synchro_pending_changes WHERE record_id = ?',
-        [orderID]
+      const pending = await seedClient.queryOne(
+        'SELECT table_name, operation FROM _synchro_pending_changes WHERE record_id = ?',
+        [insertedCategoryID]
       );
 
-      update('seedInit', tableExists && pending.length > 0);
+      update(
+        'seedInit',
+        seededScope?.scope_id === 'global' &&
+          typeof seededScope?.cursor === 'string' &&
+          seededScope.cursor.length > 0 &&
+          typeof seededScope?.checksum === 'string' &&
+          seededScope.checksum.length > 0 &&
+          seededRow?.id === seededCategoryID &&
+          seededRow?.name === 'Seed Category' &&
+          pending?.table_name === 'categories' &&
+          pending?.operation === 'create'
+      );
     } catch {
       update('seedInit', false);
     } finally {
       try {
         await seedClient?.close();
+      } catch {
+        // Best-effort cleanup.
+      }
+    }
+  }, [update]);
+
+  const runSeedResume = useCallback(async () => {
+    const seedID = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    let seedClient: SynchroClient | null = null;
+    try {
+      const seededCategoryID = '10000000-0000-0000-0000-000000000006';
+      seedClient = new SynchroClient({
+        dbPath: `synchro-seed-resume-${seedID}.db`,
+        serverURL: SYNCHRO_TEST_URL,
+        authProvider: async () => USER1_JWT,
+        clientID: `rn-seed-resume-device-${seedID}`,
+        appVersion: '1.0.0',
+        syncInterval: TEST_SYNC_INTERVAL_SECONDS,
+        pushDebounce: TEST_PUSH_DEBOUNCE_SECONDS,
+        seedDatabasePath: 'seed.db',
+      });
+      await seedClient.initialize();
+
+      const initialScope = await seedClient.queryOne(
+        'SELECT scope_id, cursor, checksum, generation FROM _synchro_scopes WHERE scope_id = ?',
+        ['global']
+      );
+      const initialRow = await seedClient.queryOne(
+        'SELECT name FROM categories WHERE id = ?',
+        [seededCategoryID]
+      );
+
+      await startAndWaitForCycle(seedClient);
+
+      const resumedScope = await seedClient.queryOne(
+        'SELECT scope_id, cursor, checksum, generation FROM _synchro_scopes WHERE scope_id = ?',
+        ['global']
+      );
+      const resumedRow = await seedClient.queryOne(
+        'SELECT name FROM categories WHERE id = ?',
+        [seededCategoryID]
+      );
+      const pendingCount = await seedClient.pendingChangeCount();
+
+      update(
+        'seedResume',
+        initialScope?.scope_id === 'global' &&
+          resumedScope?.scope_id === 'global' &&
+          typeof initialScope?.cursor === 'string' &&
+          initialScope.cursor.length > 0 &&
+          typeof resumedScope?.cursor === 'string' &&
+          resumedScope.cursor.length > 0 &&
+          typeof initialScope?.checksum === 'string' &&
+          initialScope.checksum.length > 0 &&
+          typeof resumedScope?.checksum === 'string' &&
+          resumedScope.checksum.length > 0 &&
+          String(initialScope?.generation) === String(resumedScope?.generation) &&
+          initialRow?.name === 'Seed Category' &&
+          resumedRow?.name === 'Seed Category' &&
+          pendingCount === 0
+      );
+    } catch {
+      update('seedResume', false);
+    } finally {
+      try {
+        await seedClient?.stop();
+      } catch {
+        // Best-effort cleanup.
+      }
+      try {
+        await seedClient?.close();
+      } catch {
+        // Best-effort cleanup.
+      }
+    }
+  }, [update]);
+
+  const runSeedRepair = useCallback(async () => {
+    const seedID = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    const dbPath = `synchro-seed-repair-${seedID}.db`;
+    let bootstrapClient: SynchroClient | null = null;
+    let corruptClient: SynchroClient | null = null;
+    let repairClient: SynchroClient | null = null;
+    try {
+      setLastError(null);
+      markStep('seedRepair:bootstrap');
+      const seededCategoryID = '10000000-0000-0000-0000-000000000006';
+      const seededCategoryName = 'Seed Category';
+      bootstrapClient = new SynchroClient({
+        dbPath,
+        serverURL: SYNCHRO_TEST_URL,
+        authProvider: async () => USER1_JWT,
+        clientID: `rn-seed-repair-device-${seedID}`,
+        appVersion: '1.0.0',
+        syncInterval: TEST_SYNC_INTERVAL_SECONDS,
+        pushDebounce: TEST_PUSH_DEBOUNCE_SECONDS,
+        seedDatabasePath: 'seed.db',
+      });
+      await bootstrapClient.initialize();
+
+      const initialScope = await bootstrapClient.queryOne(
+        'SELECT scope_id, cursor, checksum, generation FROM _synchro_scopes WHERE scope_id = ?',
+        ['global']
+      );
+      const initialRow = await bootstrapClient.queryOne(
+        'SELECT name FROM categories WHERE id = ?',
+        [seededCategoryID]
+      );
+      await bootstrapClient.close();
+      bootstrapClient = null;
+
+      markStep('seedRepair:corrupt');
+      corruptClient = new SynchroClient({
+        dbPath,
+        serverURL: SYNCHRO_TEST_URL,
+        authProvider: async () => USER1_JWT,
+        clientID: `rn-seed-repair-corrupt-${seedID}`,
+        appVersion: '1.0.0',
+      });
+      await corruptClient.initialize();
+      await corruptClient.writeTransaction(async (tx) => {
+        await tx.execute(
+          "UPDATE _synchro_meta SET value = '1' WHERE key = 'sync_lock'"
+        );
+        try {
+          const scopeRow = await tx.queryOne(
+            'SELECT checksum FROM _synchro_scope_rows WHERE scope_id = ? AND table_name = ? AND record_id = ?',
+            ['global', 'categories', seededCategoryID]
+          );
+          const scopeMeta = await tx.queryOne(
+            'SELECT local_checksum FROM _synchro_scopes WHERE scope_id = ?',
+            ['global']
+          );
+          const existingChecksum = Number(scopeRow?.checksum ?? 0);
+          const existingLocalChecksum = Number(scopeMeta?.local_checksum ?? 0);
+
+          await tx.execute(
+            'DELETE FROM _synchro_scope_rows WHERE scope_id = ? AND table_name = ? AND record_id = ?',
+            ['global', 'categories', seededCategoryID]
+          );
+          await tx.execute(
+            'UPDATE _synchro_scopes SET local_checksum = ? WHERE scope_id = ?',
+            [existingLocalChecksum ^ existingChecksum, 'global']
+          );
+          await tx.execute(
+            'DELETE FROM categories WHERE id = ?',
+            [seededCategoryID]
+          );
+        } finally {
+          await tx.execute(
+            "UPDATE _synchro_meta SET value = '0' WHERE key = 'sync_lock'"
+          );
+        }
+      });
+
+      const pendingBeforeStart = await corruptClient.pendingChangeCount();
+      await corruptClient.close();
+      corruptClient = null;
+
+      markStep('seedRepair:repair-start');
+      repairClient = new SynchroClient({
+        dbPath,
+        serverURL: SYNCHRO_TEST_URL,
+        authProvider: async () => USER1_JWT,
+        clientID: `rn-seed-repair-repair-${seedID}`,
+        appVersion: '1.0.0',
+        syncInterval: TEST_SYNC_INTERVAL_SECONDS,
+        pushDebounce: TEST_PUSH_DEBOUNCE_SECONDS,
+      });
+      await repairClient.initialize();
+      await startAndWaitForCycle(repairClient);
+
+      const repairedScope = await repairClient.queryOne(
+        'SELECT scope_id, cursor, checksum, generation FROM _synchro_scopes WHERE scope_id = ?',
+        ['global']
+      );
+      const repairedRow = await repairClient.queryOne(
+        'SELECT name FROM categories WHERE id = ?',
+        [seededCategoryID]
+      );
+      const pendingAfterStart = await repairClient.pendingChangeCount();
+      const repairOK =
+        initialScope?.scope_id === 'global' &&
+        typeof initialScope?.cursor === 'string' &&
+        initialScope.cursor.length > 0 &&
+        typeof initialScope?.checksum === 'string' &&
+        initialScope.checksum.length > 0 &&
+        initialRow?.name === seededCategoryName &&
+        pendingBeforeStart === 0 &&
+        repairedScope?.scope_id === 'global' &&
+        typeof repairedScope?.cursor === 'string' &&
+        repairedScope.cursor.length > 0 &&
+        typeof repairedScope?.checksum === 'string' &&
+        repairedScope.checksum.length > 0 &&
+        Number(repairedScope?.generation ?? 0) >= Number(initialScope?.generation ?? 0) &&
+        repairedRow?.name === seededCategoryName &&
+        pendingAfterStart === 0;
+
+      if (!repairOK) {
+        setLastError(
+          JSON.stringify({
+            pendingBeforeStart,
+            pendingAfterStart,
+            initialScope,
+            repairedScope,
+            initialRow,
+            repairedRow,
+          })
+        );
+      }
+
+      update('seedRepair', repairOK);
+    } catch (error) {
+      captureError('seedRepair', error);
+      update('seedRepair', false);
+    } finally {
+      try {
+        await bootstrapClient?.stop();
+      } catch {
+        // Best-effort cleanup.
+      }
+      try {
+        await bootstrapClient?.close();
+      } catch {
+        // Best-effort cleanup.
+      }
+      try {
+        await corruptClient?.stop();
+      } catch {
+        // Best-effort cleanup.
+      }
+      try {
+        await corruptClient?.close();
+      } catch {
+        // Best-effort cleanup.
+      }
+      try {
+        await repairClient?.stop();
+      } catch {
+        // Best-effort cleanup.
+      }
+      try {
+        await repairClient?.close();
       } catch {
         // Best-effort cleanup.
       }
@@ -782,8 +1168,17 @@ export default function App() {
           <TouchableOpacity style={styles.button} onPress={runErrorMap} testID="btn-errorMap">
             <Text>Error Mapping</Text>
           </TouchableOpacity>
+          <TouchableOpacity style={styles.button} onPress={runOfflineFirst} testID="btn-offlineFirst">
+            <Text>Offline First</Text>
+          </TouchableOpacity>
           <TouchableOpacity style={styles.button} onPress={runSeedInit} testID="btn-seedInit">
             <Text>Seed Init</Text>
+          </TouchableOpacity>
+          <TouchableOpacity style={styles.button} onPress={runSeedResume} testID="btn-seedResume">
+            <Text>Seed Resume</Text>
+          </TouchableOpacity>
+          <TouchableOpacity style={styles.button} onPress={runSeedRepair} testID="btn-seedRepair">
+            <Text>Seed Repair</Text>
           </TouchableOpacity>
         </View>
       </ScrollView>

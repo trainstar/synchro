@@ -17,6 +17,13 @@ import (
 
 var ErrOutputExists = errors.New("seed output already exists")
 
+var clientCompatibleMigrationIdentifiers = []string{
+	"synchro_v1",
+	"synchro_v2_buckets",
+	"synchro_v3_scopes",
+	"synchro_v4_scope_integrity",
+}
+
 type GenerateOptions struct {
 	OutputPath string
 	Overwrite  bool
@@ -195,7 +202,24 @@ func Generate(ctx context.Context, pg *sql.DB, opts GenerateOptions) error {
 	if _, err := sqliteDB.ExecContext(ctx, "PRAGMA wal_checkpoint(TRUNCATE)"); err != nil {
 		return fmt.Errorf("checkpointing sqlite seed: %w", err)
 	}
+	if err := sqliteDB.Close(); err != nil {
+		return fmt.Errorf("closing sqlite seed output: %w", err)
+	}
+	sqliteDB = nil
+	if err := removeSQLiteSidecars(opts.OutputPath); err != nil {
+		return err
+	}
 
+	return nil
+}
+
+func removeSQLiteSidecars(path string) error {
+	for _, suffix := range []string{"-wal", "-shm"} {
+		sidecar := path + suffix
+		if err := os.Remove(sidecar); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("removing sqlite sidecar %s: %w", sidecar, err)
+		}
+	}
 	return nil
 }
 
@@ -368,6 +392,9 @@ func createInternalTables(ctx context.Context, tx *sql.Tx) error {
 			key TEXT PRIMARY KEY,
 			value TEXT NOT NULL
 		)`,
+		`CREATE TABLE IF NOT EXISTS grdb_migrations (
+			identifier TEXT NOT NULL PRIMARY KEY
+		)`,
 		`CREATE TABLE IF NOT EXISTS _synchro_bucket_members (
 			bucket_id TEXT NOT NULL,
 			table_name TEXT NOT NULL,
@@ -383,17 +410,33 @@ func createInternalTables(ctx context.Context, tx *sql.Tx) error {
 			scope_id TEXT PRIMARY KEY,
 			cursor TEXT,
 			checksum TEXT,
-			generation INTEGER NOT NULL DEFAULT 0
+			generation INTEGER NOT NULL DEFAULT 0,
+			local_checksum INTEGER NOT NULL DEFAULT 0
 		)`,
 		`CREATE TABLE IF NOT EXISTS _synchro_scope_rows (
 			scope_id TEXT NOT NULL,
 			table_name TEXT NOT NULL,
 			record_id TEXT NOT NULL,
+			checksum INTEGER NOT NULL DEFAULT 0,
 			generation INTEGER NOT NULL DEFAULT 0,
 			PRIMARY KEY (scope_id, table_name, record_id)
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_synchro_scope_rows_record
 			ON _synchro_scope_rows (table_name, record_id)`,
+		`CREATE TABLE IF NOT EXISTS _synchro_rejected_mutations (
+			mutation_id TEXT PRIMARY KEY,
+			table_name TEXT NOT NULL,
+			record_id TEXT NOT NULL,
+			status TEXT NOT NULL,
+			code TEXT NOT NULL,
+			message TEXT,
+			server_row_json TEXT,
+			server_version TEXT,
+			created_at TEXT NOT NULL,
+			updated_at TEXT NOT NULL
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_synchro_rejected_mutations_record
+			ON _synchro_rejected_mutations (table_name, record_id)`,
 		`INSERT OR IGNORE INTO _synchro_meta (key, value) VALUES ('sync_lock', '0')`,
 		`INSERT OR IGNORE INTO _synchro_meta (key, value) VALUES ('checkpoint', '0')`,
 	}
@@ -401,6 +444,16 @@ func createInternalTables(ctx context.Context, tx *sql.Tx) error {
 	for _, stmt := range statements {
 		if _, err := tx.ExecContext(ctx, stmt); err != nil {
 			return fmt.Errorf("creating sqlite internals: %w", err)
+		}
+	}
+
+	for _, identifier := range clientCompatibleMigrationIdentifiers {
+		if _, err := tx.ExecContext(
+			ctx,
+			`INSERT OR IGNORE INTO grdb_migrations (identifier) VALUES (?)`,
+			identifier,
+		); err != nil {
+			return fmt.Errorf("recording client migration %s: %w", identifier, err)
 		}
 	}
 
@@ -444,17 +497,20 @@ func writePortableSeedData(
 			return errors.New("portable seed manifest contains an empty scope id")
 		}
 		generation := int64(0)
+		localChecksum := int64(0)
 		if _, err := tx.ExecContext(
 			ctx,
-			`INSERT INTO _synchro_scopes (scope_id, cursor, checksum, generation) VALUES (?, ?, ?, ?)
+			`INSERT INTO _synchro_scopes (scope_id, cursor, checksum, generation, local_checksum) VALUES (?, ?, ?, ?, ?)
 			 ON CONFLICT (scope_id) DO UPDATE SET
 			    cursor = excluded.cursor,
 			    checksum = excluded.checksum,
-			    generation = excluded.generation`,
+			    generation = excluded.generation,
+			    local_checksum = excluded.local_checksum`,
 			scope.ID,
 			scope.Cursor,
 			scope.Checksum,
 			generation,
+			localChecksum,
 		); err != nil {
 			return fmt.Errorf("writing portable scope %s: %w", scope.ID, err)
 		}
@@ -470,21 +526,29 @@ func writePortableSeedData(
 				if !ok {
 					return fmt.Errorf("portable seed record references unknown table %s", record.Table)
 				}
+				checksum, err := requiredPortableSeedChecksum(scope.ID, record)
+				if err != nil {
+					return err
+				}
 				if err := upsertPortableRecord(ctx, tx, table, record); err != nil {
 					return err
 				}
 				if _, err := tx.ExecContext(
 					ctx,
-					`INSERT INTO _synchro_scope_rows (scope_id, table_name, record_id, generation)
-					 VALUES (?, ?, ?, ?)
-					 ON CONFLICT (scope_id, table_name, record_id) DO UPDATE SET generation = excluded.generation`,
+					`INSERT INTO _synchro_scope_rows (scope_id, table_name, record_id, checksum, generation)
+					 VALUES (?, ?, ?, ?, ?)
+					 ON CONFLICT (scope_id, table_name, record_id) DO UPDATE SET
+					    checksum = excluded.checksum,
+					    generation = excluded.generation`,
 					scope.ID,
 					record.Table,
 					record.RecordID,
+					checksum,
 					generation,
 				); err != nil {
 					return fmt.Errorf("writing portable scope row %s/%s/%s: %w", scope.ID, record.Table, record.RecordID, err)
 				}
+				localChecksum = xorSeedChecksums(localChecksum, checksum)
 			}
 
 			if !page.HasMore {
@@ -495,9 +559,36 @@ func writePortableSeedData(
 			}
 			cursor = *page.Cursor
 		}
+
+		if _, err := tx.ExecContext(
+			ctx,
+			`UPDATE _synchro_scopes
+			 SET local_checksum = ?
+			 WHERE scope_id = ?`,
+			localChecksum,
+			scope.ID,
+		); err != nil {
+			return fmt.Errorf("writing portable scope local checksum for %s: %w", scope.ID, err)
+		}
 	}
 
 	return nil
+}
+
+func requiredPortableSeedChecksum(scopeID string, record portableSeedRecord) (int64, error) {
+	if record.Checksum == nil {
+		return 0, fmt.Errorf(
+			"portable seed row for scope %s table %s record %s is missing checksum",
+			scopeID,
+			record.Table,
+			record.RecordID,
+		)
+	}
+	return int64(int32(*record.Checksum)), nil
+}
+
+func xorSeedChecksums(lhs, rhs int64) int64 {
+	return int64(int32(lhs) ^ int32(rhs))
 }
 
 func upsertPortableRecord(ctx context.Context, tx *sql.Tx, table localSchemaTable, record portableSeedRecord) error {

@@ -21,6 +21,19 @@ struct LocalScopeState: Sendable, Equatable {
     let localChecksum: Int32
 }
 
+struct LocalRejectedMutation: Sendable, Equatable {
+    let mutationID: String
+    let tableName: String
+    let recordID: String
+    let status: String
+    let code: String
+    let message: String?
+    let serverRowJSON: String?
+    let serverVersion: String?
+    let createdAt: String
+    let updatedAt: String
+}
+
 enum SynchroMeta {
     static func get(_ db: GRDB.Database, key: MetaKey) throws -> String? {
         try String.fetchOne(db, sql: "SELECT value FROM _synchro_meta WHERE key = ?", arguments: [key.rawValue])
@@ -252,6 +265,83 @@ enum SynchroMeta {
         try db.execute(sql: "UPDATE _synchro_scopes SET local_checksum = 0")
     }
 
+    // MARK: - Rejected Mutations
+
+    static func upsertRejectedMutation(
+        _ db: GRDB.Database,
+        mutationID: String,
+        tableName: String,
+        recordID: String,
+        status: String,
+        code: String,
+        message: String?,
+        serverRow: [String: AnyCodable]?,
+        serverVersion: String?
+    ) throws {
+        let now = timestampNow()
+        let serverRowJSON = try serverRow.flatMap { row -> String? in
+            let data = try JSONEncoder.synchroEncoder().encode(row)
+            return String(data: data, encoding: .utf8)
+        }
+        try db.execute(
+            sql: """
+                INSERT INTO _synchro_rejected_mutations
+                    (mutation_id, table_name, record_id, status, code, message, server_row_json, server_version, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT (mutation_id) DO UPDATE SET
+                    table_name = excluded.table_name,
+                    record_id = excluded.record_id,
+                    status = excluded.status,
+                    code = excluded.code,
+                    message = excluded.message,
+                    server_row_json = excluded.server_row_json,
+                    server_version = excluded.server_version,
+                    updated_at = excluded.updated_at
+                """,
+            arguments: [mutationID, tableName, recordID, status, code, message, serverRowJSON, serverVersion, now, now]
+        )
+    }
+
+    static func listRejectedMutations(_ db: GRDB.Database) throws -> [LocalRejectedMutation] {
+        let rows = try Row.fetchAll(
+            db,
+            sql: """
+                SELECT mutation_id, table_name, record_id, status, code, message, server_row_json, server_version, created_at, updated_at
+                FROM _synchro_rejected_mutations
+                ORDER BY created_at, mutation_id
+                """
+        )
+        return rows.compactMap { row in
+            guard
+                let mutationID: String = row["mutation_id"],
+                let tableName: String = row["table_name"],
+                let recordID: String = row["record_id"],
+                let status: String = row["status"],
+                let code: String = row["code"],
+                let createdAt: String = row["created_at"],
+                let updatedAt: String = row["updated_at"]
+            else {
+                return nil
+            }
+            return LocalRejectedMutation(
+                mutationID: mutationID,
+                tableName: tableName,
+                recordID: recordID,
+                status: status,
+                code: code,
+                message: row["message"],
+                serverRowJSON: row["server_row_json"],
+                serverVersion: row["server_version"],
+                createdAt: createdAt,
+                updatedAt: updatedAt
+            )
+        }
+    }
+
+    static func clearRejectedMutations(_ db: GRDB.Database) throws {
+        try db.execute(sql: "DELETE FROM _synchro_rejected_mutations")
+    }
+
     // MARK: - Scope Rows
 
     static func upsertScopeRow(
@@ -404,5 +494,16 @@ enum SynchroMeta {
 
     private static func xorChecksum(_ lhs: Int32, _ rhs: Int32) -> Int32 {
         lhs ^ rhs
+    }
+
+    private static let rejectedMutationTimestampFormatter: ISO8601DateFormatter = {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        formatter.timeZone = TimeZone(secondsFromGMT: 0)
+        return formatter
+    }()
+
+    private static func timestampNow() -> String {
+        rejectedMutationTimestampFormatter.string(from: Date())
     }
 }

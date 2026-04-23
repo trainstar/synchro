@@ -9,20 +9,21 @@ final class IntegrationTests: XCTestCase {
     private var serverURL: URL!
     private var jwtSecret: String!
 
-    override func setUp() {
-        super.setUp()
-        guard let url = ProcessInfo.processInfo.environment["SYNCHRO_TEST_URL"],
-              let secret = ProcessInfo.processInfo.environment["SYNCHRO_TEST_JWT_SECRET"] else {
-            return
-        }
-        serverURL = URL(string: url)!
+    override func setUpWithError() throws {
+        try super.setUpWithError()
+        let urlString = try XCTUnwrap(
+            ProcessInfo.processInfo.environment["SYNCHRO_TEST_URL"],
+            "SYNCHRO_TEST_URL must be set for integration tests"
+        )
+        let secret = try XCTUnwrap(
+            ProcessInfo.processInfo.environment["SYNCHRO_TEST_JWT_SECRET"],
+            "SYNCHRO_TEST_JWT_SECRET must be set for integration tests"
+        )
+        serverURL = try XCTUnwrap(
+            URL(string: urlString),
+            "SYNCHRO_TEST_URL must be a valid URL"
+        )
         jwtSecret = secret
-    }
-
-    private func skipIfNoServer() throws {
-        if serverURL == nil || jwtSecret == nil {
-            throw XCTSkip("SYNCHRO_TEST_URL or SYNCHRO_TEST_JWT_SECRET not set")
-        }
     }
 
     private func signTestJWT(userID: String) -> String {
@@ -112,6 +113,7 @@ final class IntegrationTests: XCTestCase {
         )
     }
 
+
     private func stopAndClose(_ client: SynchroClient?) {
         client?.stop()
         try? client?.close()
@@ -136,8 +138,6 @@ final class IntegrationTests: XCTestCase {
     }
 
     func testAuthFailure() async throws {
-        try skipIfNoServer()
-
         let config = makeBadTokenConfig()
         let http = HttpClient(config: config)
 
@@ -155,8 +155,6 @@ final class IntegrationTests: XCTestCase {
     }
 
     func testPushPullBetweenTwoClients() async throws {
-        try skipIfNoServer()
-
         let userID = UUID().uuidString.lowercased()
         let clientAConfig = makeConfig(userID: userID, dbPath: tempDBPath())
         let clientBConfig = makeConfig(userID: userID, dbPath: tempDBPath())
@@ -183,8 +181,6 @@ final class IntegrationTests: XCTestCase {
     }
 
     func testFreshClientBootstrapsExistingServerState() async throws {
-        try skipIfNoServer()
-
         let userID = UUID().uuidString.lowercased()
         let writerConfig = makeConfig(userID: userID, dbPath: tempDBPath())
         let readerConfig = makeConfig(userID: userID, dbPath: tempDBPath())
@@ -211,8 +207,6 @@ final class IntegrationTests: XCTestCase {
     }
 
     func testSoftDeletePropagatesBetweenClients() async throws {
-        try skipIfNoServer()
-
         let userID = UUID().uuidString.lowercased()
         let clientAConfig = makeConfig(userID: userID, dbPath: tempDBPath())
         let clientBConfig = makeConfig(userID: userID, dbPath: tempDBPath())
@@ -231,7 +225,10 @@ final class IntegrationTests: XCTestCase {
         try await clientA.syncNow()
 
         try await clientB.start()
-        try await clientB.syncNow()
+        try await waitForCondition {
+            let row = try clientB.queryOne("SELECT ship_address FROM orders WHERE id = ?", params: [orderID])
+            return (row?["ship_address"] as? String) == "Delete Me"
+        }
 
         _ = try clientA.execute(
             "UPDATE orders SET deleted_at = ?, updated_at = ? WHERE id = ?",
@@ -249,4 +246,5 @@ final class IntegrationTests: XCTestCase {
             return (row?["deleted_at"] as? String) == expectedDeletedAt
         }
     }
+
 }

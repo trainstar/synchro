@@ -238,4 +238,51 @@ class SynchroClientTests {
 
         client.close()
     }
+
+    @Test
+    fun testEnsureScopeTablesPreservesCurrentScopeState() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val dbName = "synchro_scope_preserve_${UUID.randomUUID()}.sqlite"
+
+        val db = SynchroDatabase(context, dbName)
+        db.writeTransaction { rawDb ->
+            SynchroMeta.upsertScope(
+                rawDb,
+                scopeId = "global",
+                cursor = "opaque_cursor_token",
+                checksum = "7",
+                generation = 0,
+                localChecksum = 7
+            )
+            SynchroMeta.upsertScopeRow(
+                rawDb,
+                scopeId = "global",
+                tableName = "categories",
+                recordId = "seed-category",
+                checksum = 7,
+                generation = 0
+            )
+        }
+        db.close()
+
+        val reopened = SynchroDatabase(context, dbName)
+        try {
+            reopened.ensureScopeTables()
+
+            val scope = reopened.readTransaction { rawDb ->
+                SynchroMeta.getScope(rawDb, "global")
+            }
+            assertEquals("opaque_cursor_token", scope?.cursor)
+            assertEquals("7", scope?.checksum)
+            assertEquals(0L, scope?.generation)
+            assertEquals(7, scope?.localChecksum)
+
+            val scopeRows = reopened.readTransaction { rawDb ->
+                SynchroMeta.getScopeRows(rawDb, "global")
+            }
+            assertEquals(listOf("categories" to "seed-category"), scopeRows)
+        } finally {
+            reopened.close()
+        }
+    }
 }

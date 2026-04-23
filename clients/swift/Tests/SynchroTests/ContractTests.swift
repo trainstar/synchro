@@ -29,6 +29,18 @@ final class ContractTests: XCTestCase {
         try response.validate()
     }
 
+    func testConnectUnsupportedFixtureDecodesAndValidates() throws {
+        let response: ConnectResponse = try decodeFixtureValue(
+            path: "conformance/protocol/connect-unsupported.json",
+            jsonPath: ["expected", "response"]
+        )
+
+        XCTAssertEqual(response.schema.action, .unsupported)
+        XCTAssertNil(response.schemaDefinition)
+        XCTAssertTrue(response.scopes.add.isEmpty)
+        try response.validate()
+    }
+
     func testPullRequiredChecksumsFixtureDecodesAndValidates() throws {
         let response: PullResponse = try decodeFixtureValue(
             path: "conformance/protocol/pull-required-checksums.json",

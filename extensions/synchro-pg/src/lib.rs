@@ -957,6 +957,83 @@ mod tests {
     }
 
     #[pg_test]
+    fn test_connect_server_only_change_keeps_schema_none() {
+        setup_test_tables();
+        let (schema_version, schema_hash) = latest_schema_ref();
+
+        Spi::run(
+            "ALTER TABLE test_orders
+             ADD CONSTRAINT test_orders_ship_address_len
+             CHECK (char_length(coalesce(title, '')) >= 0)",
+        )
+        .unwrap();
+
+        let resp = connect_client(
+            "user1",
+            json!({
+                "client_id": "client1",
+                "platform": "ios",
+                "app_version": "1.0.0",
+                "protocol_version": 2,
+                "schema": {
+                    "version": schema_version,
+                    "hash": schema_hash
+                },
+                "scope_set_version": 1,
+                "known_scopes": {
+                    "user:user1": scope_cursor_ref("user:user1", 1)
+                }
+            }),
+        );
+
+        assert_eq!(resp["schema"]["action"].as_str(), Some("none"));
+        assert!(resp.get("schema_definition").is_none());
+        assert_eq!(resp["scope_set_version"].as_i64(), Some(1));
+    }
+
+    #[pg_test]
+    fn test_connect_removes_client_invented_scope_from_known_scopes() {
+        setup_test_tables();
+        let (schema_version, schema_hash) = latest_schema_ref();
+
+        let resp = connect_client(
+            "user1",
+            json!({
+                "client_id": "client1",
+                "platform": "ios",
+                "app_version": "1.0.0",
+                "protocol_version": 2,
+                "schema": {
+                    "version": schema_version,
+                    "hash": schema_hash
+                },
+                "scope_set_version": 1,
+                "known_scopes": {
+                    "user:user1": scope_cursor_ref("user:user1", 1),
+                    "client:invented": scope_cursor_ref("client:invented", 1)
+                }
+            }),
+        );
+
+        assert_eq!(resp["schema"]["action"].as_str(), Some("none"));
+        assert_eq!(resp["scope_set_version"].as_i64(), Some(1));
+        assert_eq!(resp["scopes"]["add"].as_array().unwrap().len(), 0);
+
+        let removed = resp["scopes"]["remove"].as_array().unwrap();
+        assert_eq!(removed.len(), 1);
+        assert_eq!(removed[0].as_str(), Some("client:invented"));
+
+        let subs: Option<Vec<String>> = Spi::get_one_with_args(
+            "SELECT bucket_subs FROM sync_clients WHERE user_id = $1 AND client_id = $2",
+            &["user1".into(), "client1".into()],
+        )
+        .unwrap();
+        let subs = subs.unwrap();
+        assert!(subs.contains(&"user:user1".to_string()));
+        assert!(!subs.contains(&"client:invented".to_string()));
+    }
+
+    #[pg_test]
     fn test_connect_rejects_unsupported_protocol_version() {
         setup_test_tables();
 
@@ -1522,6 +1599,107 @@ mod tests {
     }
 
     #[pg_test]
+    fn test_push_rejects_malformed_client_version_timestamp() {
+        setup_test_tables();
+        connect_client(
+            "user1",
+            json!({
+                "client_id": "client1",
+                "platform": "ios",
+                "app_version": "1.0.0",
+                "protocol_version": 2,
+                "schema": { "version": 0, "hash": "" },
+                "scope_set_version": 0,
+                "known_scopes": {}
+            }),
+        );
+
+        let (schema_version, schema_hash) = latest_schema_ref();
+        let resp: Option<pgrx::JsonB> = Spi::get_one_with_args(
+            "SELECT synchro_push($1, $2::jsonb)",
+            &[
+                "user1".into(),
+                json!({
+                    "client_id": "client1",
+                    "batch_id": "batch-invalid-client-version",
+                    "schema": { "version": schema_version, "hash": schema_hash },
+                    "mutations": [
+                        {
+                            "mutation_id": "m-invalid-client-version",
+                            "table": "test_orders",
+                            "op": "update",
+                            "pk": { "id": "99990000-0000-0000-0000-000000000001" },
+                            "client_version": "not-a-timestamp",
+                            "columns": {
+                                "title": "Should Fail"
+                            }
+                        }
+                    ]
+                })
+                .to_string()
+                .into(),
+            ],
+        )
+        .unwrap();
+        let resp = resp.unwrap().0;
+
+        assert_eq!(resp["error"]["code"].as_str(), Some("invalid_request"));
+        assert!(resp["error"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("invalid client_version"));
+    }
+
+    #[pg_test]
+    fn test_push_rejects_malformed_base_version_timestamp() {
+        setup_test_tables();
+        connect_client(
+            "user1",
+            json!({
+                "client_id": "client1",
+                "platform": "ios",
+                "app_version": "1.0.0",
+                "protocol_version": 2,
+                "schema": { "version": 0, "hash": "" },
+                "scope_set_version": 0,
+                "known_scopes": {}
+            }),
+        );
+
+        let (schema_version, schema_hash) = latest_schema_ref();
+        let resp: Option<pgrx::JsonB> = Spi::get_one_with_args(
+            "SELECT synchro_push($1, $2::jsonb)",
+            &[
+                "user1".into(),
+                json!({
+                    "client_id": "client1",
+                    "batch_id": "batch-invalid-base-version",
+                    "schema": { "version": schema_version, "hash": schema_hash },
+                    "mutations": [
+                        {
+                            "mutation_id": "m-invalid-base-version",
+                            "table": "test_orders",
+                            "op": "delete",
+                            "pk": { "id": "99990000-0000-0000-0000-000000000001" },
+                            "base_version": "still-not-a-timestamp"
+                        }
+                    ]
+                })
+                .to_string()
+                .into(),
+            ],
+        )
+        .unwrap();
+        let resp = resp.unwrap().0;
+
+        assert_eq!(resp["error"]["code"].as_str(), Some("invalid_request"));
+        assert!(resp["error"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("invalid base_version"));
+    }
+
+    #[pg_test]
     fn test_push_update_uses_client_version_for_lww() {
         setup_test_tables();
         connect_client(
@@ -1699,6 +1877,100 @@ mod tests {
         )
         .unwrap();
         assert_eq!(changelog_count, Some(1));
+    }
+
+    #[pg_test]
+    fn test_push_canonicalizes_uuid_record_ids_for_sync_metadata() {
+        setup_test_tables();
+        connect_client(
+            "user1",
+            json!({
+                "client_id": "client1",
+                "platform": "ios",
+                "app_version": "1.0.0",
+                "protocol_version": 2,
+                "schema": { "version": 0, "hash": "" },
+                "scope_set_version": 0,
+                "known_scopes": {}
+            }),
+        );
+
+        let (schema_version, schema_hash) = latest_schema_ref();
+        let upper_record_id = "91919191-9191-9191-9191-9191919191AB";
+        let lower_record_id = upper_record_id.to_ascii_lowercase();
+
+        let resp: Option<pgrx::JsonB> = Spi::get_one_with_args(
+            "SELECT synchro_push($1, $2::jsonb)",
+            &[
+                "user1".into(),
+                json!({
+                    "client_id": "client1",
+                    "batch_id": "batch-canonicalize-1",
+                    "schema": { "version": schema_version, "hash": schema_hash },
+                    "mutations": [
+                        {
+                            "mutation_id": "m-canonicalize-1",
+                            "table": "test_orders",
+                            "op": "insert",
+                            "pk": { "id": upper_record_id },
+                            "client_version": "2026-01-04T00:00:00Z",
+                            "columns": {
+                                "user_id": "user1",
+                                "title": "Canonicalized Insert",
+                                "amount": 15
+                            }
+                        }
+                    ]
+                })
+                .to_string()
+                .into(),
+            ],
+        )
+        .unwrap();
+        let resp = resp.unwrap().0;
+        assert_eq!(resp["accepted"][0]["status"].as_str(), Some("applied"));
+
+        let edge_ids: Vec<String> = Spi::connect(|client| {
+            let rows = client
+                .select(
+                    "SELECT record_id FROM sync_bucket_edges
+                     WHERE table_name = 'test_orders'
+                     ORDER BY record_id",
+                    None,
+                    &[],
+                )
+                .unwrap();
+            let mut ids = Vec::new();
+            for row in rows {
+                if let Some(record_id) = row.get_by_name::<String, &str>("record_id").unwrap() {
+                    ids.push(record_id);
+                }
+            }
+            Ok::<Vec<String>, pgrx::spi::Error>(ids)
+        })
+        .unwrap();
+        assert_eq!(edge_ids, vec![lower_record_id.clone()]);
+
+        let changelog_ids: Vec<String> = Spi::connect(|client| {
+            let rows = client
+                .select(
+                    "SELECT record_id FROM sync_changelog
+                     WHERE table_name = 'test_orders'
+                     ORDER BY record_id",
+                    None,
+                    &[],
+                )
+                .unwrap();
+            let mut ids = Vec::new();
+            for row in rows {
+                if let Some(record_id) = row.get_by_name::<String, &str>("record_id").unwrap() {
+                    ids.push(record_id);
+                }
+            }
+            Ok::<Vec<String>, pgrx::spi::Error>(ids)
+        })
+        .unwrap();
+        assert_eq!(changelog_ids, vec![lower_record_id]);
     }
 
     fn setup_pull_fixtures() {
@@ -2534,6 +2806,31 @@ mod tests {
         })
         .unwrap();
         assert_eq!(stored, Some(parsed_checkpoint));
+    }
+
+    #[pg_test]
+    fn test_rotated_cursor_secret_marks_existing_cursor_stale() {
+        setup_test_tables();
+
+        let issued = issued_scope_cursor("global", 0);
+
+        Spi::run(
+            "UPDATE sync_runtime_state
+             SET cursor_secret = 'rotated-secret-for-test',
+                 updated_at = now()
+             WHERE singleton = true",
+        )
+        .unwrap();
+
+        let parsed = Spi::connect(|client| {
+            crate::cursor_token::parse_scope_cursor(client, "global", &issued)
+        })
+        .unwrap();
+
+        assert!(matches!(
+            parsed,
+            crate::cursor_token::ParsedScopeCursor::Stale
+        ));
     }
 
     #[pg_test]

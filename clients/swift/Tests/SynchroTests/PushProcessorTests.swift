@@ -273,6 +273,37 @@ final class PushProcessorTests: XCTestCase {
         XCTAssertEqual(row?["deleted_at"] as String?, "2026-01-01T12:00:00.000Z")
     }
 
+    func testApplyAcceptedSupportsOpaqueServerVersion() throws {
+        let (db, tracker, processor) = try makeTestEnv()
+
+        _ = try db.execute(
+            "INSERT INTO orders (id, ship_address, user_id, updated_at) VALUES (?, ?, ?, ?)",
+            params: ["w1", "123 Main St", "u1", "2026-01-01T10:00:00.000Z"]
+        )
+
+        let accepted = [AcceptedMutation(
+            mutationID: "m1",
+            table: "orders",
+            pk: ["id": AnyCodable("w1")],
+            status: .applied,
+            serverRow: [
+                "id": AnyCodable("w1"),
+                "ship_address": AnyCodable("Opaque Version Address"),
+                "user_id": AnyCodable("u1"),
+                "updated_at": AnyCodable("2026-01-01T12:00:00.000Z"),
+                "deleted_at": AnyCodable(NSNull())
+            ],
+            serverVersion: "sv::opaque::1"
+        )]
+
+        _ = try processor.applyAccepted(accepted: accepted, syncedTables: [testTable])
+
+        XCTAssertFalse(try tracker.hasPendingChanges())
+        let row = try db.queryOne("SELECT ship_address, updated_at FROM orders WHERE id = ?", params: ["w1"])
+        XCTAssertEqual(row?["ship_address"] as String?, "Opaque Version Address")
+        XCTAssertEqual(row?["updated_at"] as String?, "2026-01-01T12:00:00.000Z")
+    }
+
     func testApplyAcceptedDoesNotTriggerCDC() throws {
         let (db, tracker, processor) = try makeTestEnv()
 
@@ -388,6 +419,15 @@ final class PushProcessorTests: XCTestCase {
         XCTAssertEqual(conflicts[0].table, "orders")
         XCTAssertEqual(conflicts[0].recordID, "w1")
         XCTAssertEqual(conflicts[0].serverData?["ship_address"], AnyCodable("Server Address"))
+
+        let storedRejections = try db.readTransaction { db in
+            try SynchroMeta.listRejectedMutations(db)
+        }
+        XCTAssertEqual(storedRejections.count, 1)
+        XCTAssertEqual(storedRejections[0].mutationID, "m1")
+        XCTAssertEqual(storedRejections[0].status, MutationStatus.conflict.rawValue)
+        XCTAssertEqual(storedRejections[0].code, MutationRejectionCode.versionConflict.rawValue)
+        XCTAssertEqual(storedRejections[0].serverVersion, "2026-01-01T11:00:00.000Z")
     }
 
     func testApplyRejectedWithoutServerVersion() throws {
@@ -420,6 +460,15 @@ final class PushProcessorTests: XCTestCase {
 
         // Error status, not conflict — no conflict event
         XCTAssertEqual(conflicts.count, 0)
+
+        let storedRejections = try db.readTransaction { db in
+            try SynchroMeta.listRejectedMutations(db)
+        }
+        XCTAssertEqual(storedRejections.count, 1)
+        XCTAssertEqual(storedRejections[0].mutationID, "m1")
+        XCTAssertEqual(storedRejections[0].status, MutationStatus.rejectedTerminal.rawValue)
+        XCTAssertEqual(storedRejections[0].code, MutationRejectionCode.policyRejected.rawValue)
+        XCTAssertEqual(storedRejections[0].message, "ownership violation")
     }
 
     func testApplyRejectedConflictAppliesCanonicalServerRow() throws {

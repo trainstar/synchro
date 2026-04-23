@@ -5,6 +5,12 @@
 -- Reference tables: global bucket, read-only
 -- =========================================================================
 
+UPDATE sync_runtime_state
+SET stream_generation = 'test-stream-v1',
+    cursor_secret = '4b5c0c5a7f2e6f66d0f214f5fd50d6997b4f313f24dbed75670d3217ee8088d1',
+    updated_at = now()
+WHERE singleton = true;
+
 SELECT synchro_register_shared_scope('global', true);
 
 SELECT synchro_register_table(

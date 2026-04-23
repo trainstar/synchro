@@ -1,6 +1,8 @@
 package com.trainstar.synchro
 
 import android.database.sqlite.SQLiteDatabase
+import java.time.Instant
+import java.time.format.DateTimeFormatter
 
 enum class MetaKey(val key: String) {
     CHECKPOINT("checkpoint"),
@@ -20,6 +22,19 @@ data class LocalScopeState(
     val checksum: String?,
     val generation: Long,
     val localChecksum: Int,
+)
+
+data class LocalRejectedMutation(
+    val mutationID: String,
+    val tableName: String,
+    val recordID: String,
+    val status: String,
+    val code: String,
+    val message: String?,
+    val serverRowJson: String?,
+    val serverVersion: String?,
+    val createdAt: String,
+    val updatedAt: String,
 )
 
 object SynchroMeta {
@@ -256,6 +271,84 @@ object SynchroMeta {
         db.execSQL("UPDATE _synchro_scopes SET local_checksum = 0")
     }
 
+    // MARK: - Rejected Mutations
+
+    fun upsertRejectedMutation(
+        db: SQLiteDatabase,
+        mutationID: String,
+        tableName: String,
+        recordId: String,
+        status: String,
+        code: String,
+        message: String?,
+        serverRowJson: String?,
+        serverVersion: String?
+    ) {
+        val now = timestampNow()
+        db.execSQL(
+            """
+            INSERT INTO _synchro_rejected_mutations
+                (mutation_id, table_name, record_id, status, code, message, server_row_json, server_version, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT (mutation_id) DO UPDATE SET
+                table_name = excluded.table_name,
+                record_id = excluded.record_id,
+                status = excluded.status,
+                code = excluded.code,
+                message = excluded.message,
+                server_row_json = excluded.server_row_json,
+                server_version = excluded.server_version,
+                updated_at = excluded.updated_at
+            """.trimIndent(),
+            arrayOf(
+                mutationID,
+                tableName,
+                recordId,
+                status,
+                code,
+                message,
+                serverRowJson,
+                serverVersion,
+                now,
+                now,
+            )
+        )
+    }
+
+    fun listRejectedMutations(db: SQLiteDatabase): List<LocalRejectedMutation> {
+        val result = mutableListOf<LocalRejectedMutation>()
+        db.rawQuery(
+            """
+            SELECT mutation_id, table_name, record_id, status, code, message, server_row_json, server_version, created_at, updated_at
+            FROM _synchro_rejected_mutations
+            ORDER BY created_at, mutation_id
+            """.trimIndent(),
+            null
+        ).use { cursor ->
+            while (cursor.moveToNext()) {
+                result.add(
+                    LocalRejectedMutation(
+                        mutationID = cursor.getString(0),
+                        tableName = cursor.getString(1),
+                        recordID = cursor.getString(2),
+                        status = cursor.getString(3),
+                        code = cursor.getString(4),
+                        message = if (cursor.isNull(5)) null else cursor.getString(5),
+                        serverRowJson = if (cursor.isNull(6)) null else cursor.getString(6),
+                        serverVersion = if (cursor.isNull(7)) null else cursor.getString(7),
+                        createdAt = cursor.getString(8),
+                        updatedAt = cursor.getString(9),
+                    )
+                )
+            }
+        }
+        return result
+    }
+
+    fun clearRejectedMutations(db: SQLiteDatabase) {
+        db.execSQL("DELETE FROM _synchro_rejected_mutations")
+    }
+
     // MARK: - Scope Rows
 
     fun upsertScopeRow(
@@ -384,4 +477,7 @@ object SynchroMeta {
     }
 
     private fun xorChecksum(lhs: Int, rhs: Int): Int = lhs xor rhs
+
+    private fun timestampNow(): String =
+        DateTimeFormatter.ISO_INSTANT.format(Instant.now())
 }

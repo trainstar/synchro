@@ -7,26 +7,38 @@ import CommonCrypto
 
 /// Integration tests for schema reconciliation and seed database loading.
 /// Requires SYNCHRO_TEST_URL and SYNCHRO_TEST_JWT_SECRET environment variables.
-/// Skips when env vars are not set.
 final class SchemaIntegrationTests: XCTestCase {
 
     private var serverURL: URL!
     private var jwtSecret: String!
+    private var canonicalSeedPath: String!
 
-    override func setUp() {
-        super.setUp()
-        guard let url = ProcessInfo.processInfo.environment["SYNCHRO_TEST_URL"],
-              let secret = ProcessInfo.processInfo.environment["SYNCHRO_TEST_JWT_SECRET"] else {
-            return
+    override func setUpWithError() throws {
+        try super.setUpWithError()
+        let urlString = try XCTUnwrap(
+            ProcessInfo.processInfo.environment["SYNCHRO_TEST_URL"],
+            "SYNCHRO_TEST_URL must be set for schema integration tests"
+        )
+        let secret = try XCTUnwrap(
+            ProcessInfo.processInfo.environment["SYNCHRO_TEST_JWT_SECRET"],
+            "SYNCHRO_TEST_JWT_SECRET must be set for schema integration tests"
+        )
+        canonicalSeedPath = try XCTUnwrap(
+            ProcessInfo.processInfo.environment["SYNCHRO_TEST_SEED_PATH"],
+            "SYNCHRO_TEST_SEED_PATH must be set for schema integration tests"
+        )
+        guard FileManager.default.fileExists(atPath: canonicalSeedPath) else {
+            throw NSError(
+                domain: "SchemaIntegrationTests",
+                code: 1,
+                userInfo: [NSLocalizedDescriptionKey: "SYNCHRO_TEST_SEED_PATH must point to an existing bundled seed database"]
+            )
         }
-        serverURL = URL(string: url)!
+        serverURL = try XCTUnwrap(
+            URL(string: urlString),
+            "SYNCHRO_TEST_URL must be a valid URL"
+        )
         jwtSecret = secret
-    }
-
-    private func skipIfNoServer() throws {
-        if serverURL == nil || jwtSecret == nil {
-            throw XCTSkip("SYNCHRO_TEST_URL or SYNCHRO_TEST_JWT_SECRET not set")
-        }
     }
 
     // MARK: - JWT Helper
@@ -138,10 +150,8 @@ final class SchemaIntegrationTests: XCTestCase {
     // MARK: - 1. testAdditiveSchemaChangePreservesData
 
     func testAdditiveSchemaChangePreservesData() async throws {
-        try skipIfNoServer()
-
         let serverSchema = try await fetchServerSchema()
-        let userID = UUID().uuidString
+        let userID = UUID().uuidString.lowercased()
         let clientID = UUID().uuidString
         let dbPath = tempDBPath()
 
@@ -200,8 +210,6 @@ final class SchemaIntegrationTests: XCTestCase {
     // MARK: - 2. testLocalOnlyTablesSurviveReconnect
 
     func testLocalOnlyTablesSurviveReconnect() async throws {
-        try skipIfNoServer()
-
         let userID = UUID().uuidString
         let dbPath = tempDBPath()
 
@@ -253,8 +261,6 @@ final class SchemaIntegrationTests: XCTestCase {
     // MARK: - 3. testSeedDatabaseWorksOffline
 
     func testSeedDatabaseWorksOffline() async throws {
-        try skipIfNoServer()
-
         // Fetch server schema to build a correct seed
         let serverSchema = try await fetchServerSchema()
         let seedPath = try createSeedDB(
@@ -300,11 +306,67 @@ final class SchemaIntegrationTests: XCTestCase {
         try client.close()
     }
 
+    func testOfflineWritesBeforeFirstConnectArePushedOnFirstSync() async throws {
+        let userID = UUID().uuidString.lowercased()
+        let clientID = UUID().uuidString
+        let dbPath = tempDBPath()
+        let customerID = UUID().uuidString
+
+        let offlineClient = try SynchroClient(
+            config: makeConfigWithClientID(
+                userID: userID,
+                clientID: clientID,
+                dbPath: dbPath,
+                seedPath: canonicalSeedPath
+            )
+        )
+
+        _ = try offlineClient.execute(
+            "INSERT INTO customers (id, user_id, name, balance, is_active, created_at, updated_at) VALUES (?, ?, ?, 0, 1, ?, ?)",
+            params: [customerID, userID, "Offline First Customer", "2026-01-01T00:00:00.000Z", "2026-01-01T00:00:00.000Z"]
+        )
+
+        let pendingBeforeConnect = try offlineClient.query(
+            "SELECT table_name, record_id FROM _synchro_pending_changes ORDER BY table_name, record_id",
+            params: nil
+        )
+        let offlineRow = try offlineClient.queryOne(
+            "SELECT name FROM customers WHERE id = ?",
+            params: [customerID]
+        )
+        try offlineClient.close()
+
+        let onlineClient = try SynchroClient(
+            config: makeConfigWithClientID(userID: userID, clientID: clientID, dbPath: dbPath)
+        )
+        try await onlineClient.start()
+        try await onlineClient.syncNow()
+
+        let pendingAfterConnect = try onlineClient.query(
+            "SELECT record_id FROM _synchro_pending_changes",
+            params: nil
+        )
+        let localRow = try onlineClient.queryOne(
+            "SELECT name FROM customers WHERE id = ?",
+            params: [customerID]
+        )
+        let rejectedAfterConnect = try onlineClient.query(
+            "SELECT mutation_id FROM _synchro_rejected_mutations",
+            params: nil
+        )
+        onlineClient.stop()
+        try onlineClient.close()
+
+        XCTAssertEqual(pendingBeforeConnect.count, 1)
+        XCTAssertEqual(offlineRow?["name"] as? String, "Offline First Customer")
+        XCTAssertEqual(pendingAfterConnect.count, 0)
+        XCTAssertEqual(localRow?["name"] as? String, "Offline First Customer")
+        XCTAssertTrue(rejectedAfterConnect.isEmpty)
+    }
+
     // MARK: - 4. testSeedDatabaseReconcilesOnConnect
 
     func testSeedDatabaseReconcilesOnConnect() async throws {
-        try skipIfNoServer()
-
         let serverSchema = try await fetchServerSchema()
 
         guard let ordersTable = serverSchema.tables.first(where: { $0.tableName == "orders" }) else {
@@ -353,6 +415,268 @@ final class SchemaIntegrationTests: XCTestCase {
         let row = try client.queryOne("SELECT ship_address FROM orders WHERE id = ?", params: [orderID])
         XCTAssertNotNil(row)
         XCTAssertEqual(row?["ship_address"] as? String, "post-reconcile insert")
+
+        client.stop()
+        try client.close()
+    }
+
+    // MARK: - 5. testBundledSeedRepairsPortableScopeCorruptionOnConnect
+
+    func testBundledSeedRepairsPortableScopeCorruptionOnConnect() async throws {
+        let dbPath = tempDBPath()
+        let bootstrap = try SynchroClient(
+            config: makeConfig(userID: UUID().uuidString, dbPath: dbPath, seedPath: canonicalSeedPath)
+        )
+
+        let seededCategoryID = "10000000-0000-0000-0000-000000000006"
+        let seededCategoryName = "Seed Category"
+
+        let seededScope = try bootstrap.readTransaction { db in
+            try SynchroMeta.getScope(db, scopeID: "global")
+        }
+        XCTAssertEqual(seededScope?.scopeID, "global")
+        XCTAssertFalse((seededScope?.cursor ?? "").isEmpty)
+        XCTAssertFalse((seededScope?.checksum ?? "").isEmpty)
+
+        let seededRow = try bootstrap.queryOne(
+            "SELECT name FROM categories WHERE id = ?",
+            params: [seededCategoryID]
+        )
+        XCTAssertEqual(seededRow?["name"] as? String, seededCategoryName)
+
+        try bootstrap.close()
+
+        let rawDb = try SynchroDatabase(path: dbPath)
+        try rawDb.writeSyncLockedTransaction { db in
+            try SynchroMeta.deleteScopeRow(
+                db,
+                scopeID: "global",
+                tableName: "categories",
+                recordID: seededCategoryID
+            )
+            try db.execute(
+                sql: "DELETE FROM categories WHERE id = ?",
+                arguments: [seededCategoryID]
+            )
+        }
+        try rawDb.close()
+
+        let client = try SynchroClient(
+            config: makeConfig(userID: UUID().uuidString, dbPath: dbPath)
+        )
+        try await client.start()
+
+        let repairedRow = try client.queryOne(
+            "SELECT name FROM categories WHERE id = ?",
+            params: [seededCategoryID]
+        )
+        XCTAssertEqual(repairedRow?["name"] as? String, seededCategoryName)
+
+        let repairedScope = try client.readTransaction { db in
+            try SynchroMeta.getScope(db, scopeID: "global")
+        }
+        XCTAssertEqual(repairedScope?.scopeID, "global")
+        XCTAssertFalse((repairedScope?.cursor ?? "").isEmpty)
+        XCTAssertFalse((repairedScope?.checksum ?? "").isEmpty)
+
+        let pendingCount = try client.queryOne(
+            "SELECT COUNT(*) AS count FROM _synchro_pending_changes",
+            params: nil
+        )
+        XCTAssertEqual(pendingCount?["count"] as? Int64, 0)
+
+        client.stop()
+        try client.close()
+    }
+
+    // MARK: - 6. testBundledSeedContinuesIncrementallyWithoutRebuild
+
+    func testBundledSeedContinuesIncrementallyWithoutRebuild() async throws {
+        let dbPath = tempDBPath()
+        let client = try SynchroClient(
+            config: makeConfig(
+                userID: UUID().uuidString,
+                dbPath: dbPath,
+                seedPath: canonicalSeedPath
+            )
+        )
+
+        let seededCategoryID = "10000000-0000-0000-0000-000000000006"
+        let initialScope = try client.readTransaction { db in
+            try SynchroMeta.getScope(db, scopeID: "global")
+        }
+        XCTAssertEqual(initialScope?.scopeID, "global")
+        XCTAssertFalse((initialScope?.cursor ?? "").isEmpty)
+        XCTAssertFalse((initialScope?.checksum ?? "").isEmpty)
+
+        let initialGeneration = initialScope?.generation
+        let initialCategory = try client.queryOne(
+            "SELECT name FROM categories WHERE id = ?",
+            params: [seededCategoryID]
+        )
+        XCTAssertEqual(initialCategory?["name"] as? String, "Seed Category")
+
+        try await client.start()
+
+        let resumedScope = try client.readTransaction { db in
+            try SynchroMeta.getScope(db, scopeID: "global")
+        }
+        XCTAssertEqual(resumedScope?.scopeID, "global")
+        XCTAssertEqual(resumedScope?.generation, initialGeneration)
+        XCTAssertFalse((resumedScope?.cursor ?? "").isEmpty)
+        XCTAssertFalse((resumedScope?.checksum ?? "").isEmpty)
+
+        let resumedCategory = try client.queryOne(
+            "SELECT name FROM categories WHERE id = ?",
+            params: [seededCategoryID]
+        )
+        XCTAssertEqual(resumedCategory?["name"] as? String, "Seed Category")
+
+        let pendingCount = try client.queryOne(
+            "SELECT COUNT(*) AS count FROM _synchro_pending_changes",
+            params: nil
+        )
+        XCTAssertEqual(pendingCount?["count"] as? Int64, 0)
+
+        client.stop()
+        try client.close()
+    }
+
+    // MARK: - 7. testGlobalScopeRepairLeavesUserRowsUntouched
+
+    func testGlobalScopeRepairLeavesUserRowsUntouched() async throws {
+        let userID = UUID().uuidString
+        let clientID = UUID().uuidString
+        let dbPath = tempDBPath()
+        let seededCategoryID = "10000000-0000-0000-0000-000000000006"
+        let customerID = UUID().uuidString
+        let orderID = UUID().uuidString
+
+        let bootstrap = try SynchroClient(
+            config: makeConfigWithClientID(
+                userID: userID,
+                clientID: clientID,
+                dbPath: dbPath,
+                seedPath: canonicalSeedPath
+            )
+        )
+
+        try await bootstrap.start()
+        _ = try bootstrap.execute(
+            "INSERT INTO customers (id, user_id, name, balance, is_active, created_at, updated_at) VALUES (?, ?, ?, 0, 1, ?, ?)",
+            params: [customerID, userID, "Scoped Repair Customer", "2026-01-06T00:00:00.000Z", "2026-01-06T00:00:00.000Z"]
+        )
+        _ = try bootstrap.execute(
+            "INSERT INTO orders (id, customer_id, status, total_price, currency, ship_address, created_at, updated_at) VALUES (?, ?, 'pending', 0, 'USD', ?, ?, ?)",
+            params: [orderID, customerID, "User Scope Row", "2026-01-06T00:00:00.000Z", "2026-01-06T00:00:00.000Z"]
+        )
+        try await bootstrap.syncNow()
+        bootstrap.stop()
+        try bootstrap.close()
+
+        let rawDb = try SynchroDatabase(path: dbPath)
+        try rawDb.writeSyncLockedTransaction { db in
+            try SynchroMeta.deleteScopeRow(
+                db,
+                scopeID: "global",
+                tableName: "categories",
+                recordID: seededCategoryID
+            )
+            try db.execute(
+                sql: "DELETE FROM categories WHERE id = ?",
+                arguments: [seededCategoryID]
+            )
+        }
+        try rawDb.close()
+
+        let client = try SynchroClient(
+            config: makeConfigWithClientID(
+                userID: userID,
+                clientID: clientID,
+                dbPath: dbPath
+            )
+        )
+        try await client.start()
+
+        let repairedCategory = try client.queryOne(
+            "SELECT name FROM categories WHERE id = ?",
+            params: [seededCategoryID]
+        )
+        XCTAssertEqual(repairedCategory?["name"] as? String, "Seed Category")
+
+        let preservedOrder = try client.queryOne(
+            "SELECT ship_address FROM orders WHERE id = ?",
+            params: [orderID]
+        )
+        XCTAssertEqual(preservedOrder?["ship_address"] as? String, "User Scope Row")
+
+        let pendingCount = try client.queryOne(
+            "SELECT COUNT(*) AS count FROM _synchro_pending_changes",
+            params: nil
+        )
+        XCTAssertEqual(pendingCount?["count"] as? Int64, 0)
+
+        client.stop()
+        try client.close()
+    }
+
+    // MARK: - 8. testSharedSeedRowsStayInSharedScopeOnly
+
+    func testSharedSeedRowsStayInSharedScopeOnly() async throws {
+        let userID = UUID().uuidString.lowercased()
+        let clientID = UUID().uuidString
+        let dbPath = tempDBPath()
+        let seededCategoryID = "10000000-0000-0000-0000-000000000006"
+        let customerID = UUID().uuidString
+        let orderID = UUID().uuidString
+
+        let client = try SynchroClient(
+            config: makeConfigWithClientID(
+                userID: userID,
+                clientID: clientID,
+                dbPath: dbPath,
+                seedPath: canonicalSeedPath
+            )
+        )
+
+        try await client.start()
+        _ = try client.execute(
+            "INSERT INTO customers (id, user_id, name, balance, is_active, created_at, updated_at) VALUES (?, ?, ?, 0, 1, ?, ?)",
+            params: [customerID, userID, "Shared Scope Customer", "2026-01-07T00:00:00.000Z", "2026-01-07T00:00:00.000Z"]
+        )
+        _ = try client.execute(
+            "INSERT INTO orders (id, customer_id, status, total_price, currency, ship_address, created_at, updated_at) VALUES (?, ?, 'pending', 0, 'USD', ?, ?, ?)",
+            params: [orderID, customerID, "User Scoped Order", "2026-01-07T00:00:00.000Z", "2026-01-07T00:00:00.000Z"]
+        )
+        try await client.syncNow()
+
+        let categoryScopes = try client.query(
+            """
+            SELECT scope_id
+            FROM _synchro_scope_rows
+            WHERE table_name = 'categories' AND record_id = ?
+            ORDER BY scope_id
+            """,
+            params: [seededCategoryID]
+        )
+        XCTAssertEqual(categoryScopes.count, 1)
+        XCTAssertEqual(categoryScopes.first?["scope_id"] as? String, "global")
+
+        let duplicatedCategoryScopes = try client.queryOne(
+            """
+            SELECT COUNT(*) AS count
+            FROM _synchro_scope_rows
+            WHERE table_name = 'categories' AND record_id = ? AND scope_id != 'global'
+            """,
+            params: [seededCategoryID]
+        )
+        XCTAssertEqual(duplicatedCategoryScopes?["count"] as? Int64, 0)
+
+        let orderRow = try client.queryOne(
+            "SELECT ship_address FROM orders WHERE id = ?",
+            params: [orderID]
+        )
+        XCTAssertEqual(orderRow?["ship_address"] as? String, "User Scoped Order")
 
         client.stop()
         try client.close()

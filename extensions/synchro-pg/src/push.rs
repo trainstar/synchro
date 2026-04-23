@@ -132,26 +132,45 @@ fn synchro_push_contract(p_user_id: &str, p_request: pgrx::JsonB) -> pgrx::JsonB
                 }
             };
 
-            let record_id =
-                match extract_mutation_record_id(&mutation.pk, &table_reg.pk_column) {
-                    Some(record_id) => record_id,
-                    None => {
-                        rejected.push(RejectedMutation {
-                            mutation_id: mutation.mutation_id.clone(),
-                            table: mutation.table.clone(),
-                            pk: mutation.pk.clone(),
-                            status: MutationStatus::RejectedTerminal,
-                            code: MutationRejectionCode::ValidationFailed,
-                            message: Some(format!(
-                                "primary key payload must contain string field {}",
-                                table_reg.pk_column
-                            )),
-                            server_row: None,
-                            server_version: None,
-                        });
-                        continue;
-                    }
-                };
+            let raw_record_id = match extract_mutation_record_id(&mutation.pk, &table_reg.pk_column)
+            {
+                Some(record_id) => record_id,
+                None => {
+                    rejected.push(RejectedMutation {
+                        mutation_id: mutation.mutation_id.clone(),
+                        table: mutation.table.clone(),
+                        pk: mutation.pk.clone(),
+                        status: MutationStatus::RejectedTerminal,
+                        code: MutationRejectionCode::ValidationFailed,
+                        message: Some(format!(
+                            "primary key payload must contain string field {}",
+                            table_reg.pk_column
+                        )),
+                        server_row: None,
+                        server_version: None,
+                    });
+                    continue;
+                }
+            };
+            let record_id = match canonicalize_record_id(client, &raw_record_id, table_reg) {
+                Ok(record_id) => record_id,
+                Err(message) => {
+                    rejected.push(RejectedMutation {
+                        mutation_id: mutation.mutation_id.clone(),
+                        table: mutation.table.clone(),
+                        pk: mutation.pk.clone(),
+                        status: MutationStatus::RejectedTerminal,
+                        code: MutationRejectionCode::ValidationFailed,
+                        message: Some(format!(
+                            "primary key {:?} is invalid for table {:?}: {}",
+                            raw_record_id, mutation.table, message
+                        )),
+                        server_row: None,
+                        server_version: None,
+                    });
+                    continue;
+                }
+            };
             let operation = resolve_mutation_operation(client, mutation, &record_id, table_reg);
 
             let result = process_mutation(
@@ -272,6 +291,22 @@ fn extract_mutation_record_id(pk: &serde_json::Value, pk_column: &str) -> Option
     pk.get(pk_column)
         .and_then(|value| value.as_str())
         .map(|value| value.to_string())
+}
+
+fn canonicalize_record_id(
+    client: &SpiClient<'_>,
+    record_id: &str,
+    table_reg: &TableRegistration,
+) -> Result<String, String> {
+    let sql = format!("SELECT ($1::{})::text AS record_id", table_reg.pk_type);
+    let rows = client
+        .select(&sql, None, &[record_id.into()])
+        .map_err(|err| format!("canonicalizing record id: {err}"))?;
+
+    rows.into_iter()
+        .next()
+        .and_then(|row| row.get_by_name::<String, &str>("record_id").ok().flatten())
+        .ok_or_else(|| "canonicalizing record id returned no row".to_string())
 }
 
 fn resolve_mutation_operation(

@@ -99,7 +99,8 @@ TEST_ENV = \
 	TEST_DATABASE_URL="$(ADAPTER_TEST_URL)" \
 	TEST_REPLICATION_URL="$(REPLICATION_URL)" \
 	SYNCHRO_TEST_URL="$(SYNCHRO_TEST_URL)" \
-	SYNCHRO_TEST_JWT_SECRET="$(SYNCHRO_TEST_JWT_SECRET)"
+	SYNCHRO_TEST_JWT_SECRET="$(SYNCHRO_TEST_JWT_SECRET)" \
+	SYNCHRO_TEST_SEED_PATH="$(CURDIR)/clients/react-native/example/seed.db"
 
 help:
 	@echo "Available targets:"
@@ -430,7 +431,7 @@ test-adapter: test-adapter-setup
 	$(MAKE) test-adapter-teardown; \
 	exit $$status
 
-synchrod-pg-test-start:
+synchrod-pg-test-start: build-seed
 	@set -e; \
 	if [ -f "$(SYNCHROD_PG_PID_FILE)" ] && kill -0 "$$(cat "$(SYNCHROD_PG_PID_FILE)")" 2>/dev/null; then \
 		echo "synchrod-pg already running"; \
@@ -475,27 +476,64 @@ synchrod-pg-test-start:
 		LAST_ERR="$$PROBE_OUTPUT"; \
 		sleep 1; \
 	done; \
-	if [ "$$READY" -ne 1 ]; then \
-		echo "pgrx postgres did not become writable in $(PGRX_READY_TIMEOUT)s after re-enabling the worker"; \
-		if [ -n "$$LAST_ERR" ]; then echo "$$LAST_ERR"; fi; \
-		if [ -f "$(PGRX_LOG_FILE)" ]; then tail -n 200 "$(PGRX_LOG_FILE)"; fi; \
-		exit 1; \
-	fi; \
-	echo "Starting synchrod-pg on :$(SYNCHROD_PG_PORT)..."; \
-	nohup env \
-		DATABASE_URL="$(ADAPTER_TEST_URL)" \
-		JWT_SECRET="$(SYNCHRO_TEST_JWT_SECRET)" \
-		MIN_CLIENT_VERSION="$(MIN_CLIENT_VERSION)" \
+		if [ "$$READY" -ne 1 ]; then \
+			echo "pgrx postgres did not become writable in $(PGRX_READY_TIMEOUT)s after re-enabling the worker"; \
+			if [ -n "$$LAST_ERR" ]; then echo "$$LAST_ERR"; fi; \
+			if [ -f "$(PGRX_LOG_FILE)" ]; then tail -n 200 "$(PGRX_LOG_FILE)"; fi; \
+			exit 1; \
+		fi; \
+		MANIFEST_READY=0; \
+		for attempt in $$(seq 1 $(PGRX_READY_TIMEOUT)); do \
+			MANIFEST_OUTPUT=$$($(PGRX_PSQL) -h "$(PGRX_ADMIN_HOST)" -p $(PGRX_PORT) -U "$(PGRX_ADMIN_USER)" -d $(ADAPTER_TEST_DB) -Atqc "SELECT CASE WHEN EXISTS (SELECT 1 FROM jsonb_array_elements((synchro_schema_manifest()->'manifest'->'tables')) table_def WHERE table_def->>'name' = 'orders') THEN '1' ELSE '0' END" 2>&1 || true); \
+			CONNECT_OUTPUT=$$($(PGRX_PSQL) -h "$(PGRX_ADMIN_HOST)" -p $(PGRX_PORT) -U "$(PGRX_ADMIN_USER)" -d $(ADAPTER_TEST_DB) -Atqc "SELECT CASE WHEN synchro_connect('readiness-user', '{\"client_id\":\"readiness-client\",\"platform\":\"android\",\"app_version\":\"1.0.0\",\"protocol_version\":2,\"schema\":{\"version\":0,\"hash\":\"\"},\"scope_set_version\":0,\"known_scopes\":{}}'::jsonb)->'schema'->>'action' = 'replace' THEN '1' ELSE '0' END" 2>&1 || true); \
+			if [ "$$MANIFEST_OUTPUT" = "1" ] && [ "$$CONNECT_OUTPUT" = "1" ]; then \
+				MANIFEST_READY=1; \
+				break; \
+			fi; \
+			sleep 1; \
+		done; \
+		if [ "$$MANIFEST_READY" -ne 1 ]; then \
+			echo "synchro schema/connect readiness did not converge in $(PGRX_READY_TIMEOUT)s"; \
+			echo "manifest readiness: $$MANIFEST_OUTPUT"; \
+			echo "connect readiness: $$CONNECT_OUTPUT"; \
+			if [ -f "$(PGRX_LOG_FILE)" ]; then tail -n 200 "$(PGRX_LOG_FILE)"; fi; \
+			exit 1; \
+		fi; \
+		echo "Starting synchrod-pg on :$(SYNCHROD_PG_PORT)..."; \
+		nohup env \
+			DATABASE_URL="$(ADAPTER_TEST_URL)" \
+			JWT_SECRET="$(SYNCHRO_TEST_JWT_SECRET)" \
+			MIN_CLIENT_VERSION="$(MIN_CLIENT_VERSION)" \
 		LISTEN_ADDR=":$(SYNCHROD_PG_PORT)" \
 		sh -c 'cd "$(CURDIR)/api/go" && GOWORK=off go run ./cmd/synchrod-pg' >"$(SYNCHROD_PG_LOG_FILE)" 2>&1 </dev/null & echo $$! >"$(SYNCHROD_PG_PID_FILE)"; \
 	sleep 2; \
-	if ! kill -0 "$$(cat "$(SYNCHROD_PG_PID_FILE)")" 2>/dev/null; then \
-		echo "synchrod-pg failed to start:"; \
-		cat "$(SYNCHROD_PG_LOG_FILE)"; \
-		rm -f "$(SYNCHROD_PG_PID_FILE)"; \
-		exit 1; \
-	fi; \
-	echo "synchrod-pg running on http://localhost:$(SYNCHROD_PG_PORT)"
+		if ! kill -0 "$$(cat "$(SYNCHROD_PG_PID_FILE)")" 2>/dev/null; then \
+			echo "synchrod-pg failed to start:"; \
+			cat "$(SYNCHROD_PG_LOG_FILE)"; \
+			rm -f "$(SYNCHROD_PG_PID_FILE)"; \
+			exit 1; \
+		fi; \
+		HTTP_READY=0; \
+		for attempt in $$(seq 1 30); do \
+			if curl -fsS -o /dev/null "http://localhost:$(SYNCHROD_PG_PORT)/sync/schema" 2>/dev/null; then \
+				HTTP_READY=1; \
+				break; \
+			fi; \
+			sleep 1; \
+		done; \
+		if [ "$$HTTP_READY" -ne 1 ]; then \
+			echo "synchrod-pg HTTP schema endpoint did not become ready"; \
+			if [ -f "$(SYNCHROD_PG_LOG_FILE)" ]; then cat "$(SYNCHROD_PG_LOG_FILE)"; fi; \
+			rm -f "$(SYNCHROD_PG_PID_FILE)"; \
+			exit 1; \
+		fi; \
+		echo "Refreshing canonical seed asset..."; \
+		DATABASE_URL="$(ADAPTER_TEST_URL)" "$(CURDIR)/$(SEED_BINARY)" --output "$(CURDIR)/clients/react-native/example/seed.db" --overwrite || { \
+			if [ -f "$(SYNCHROD_PG_LOG_FILE)" ]; then cat "$(SYNCHROD_PG_LOG_FILE)"; fi; \
+			rm -f "$(SYNCHROD_PG_PID_FILE)"; \
+			exit 1; \
+		}; \
+		echo "synchrod-pg running on http://localhost:$(SYNCHROD_PG_PORT)"
 
 synchrod-pg-test-stop:
 	@STOPPED=0; \

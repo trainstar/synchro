@@ -160,6 +160,18 @@ class PushProcessor(
                 val schema = tableMap[mutation.table] ?: continue
                 val recordID = recordID(mutation.pk, schema)
 
+                SynchroMeta.upsertRejectedMutation(
+                    db = db,
+                    mutationID = mutation.mutationID,
+                    tableName = mutation.table,
+                    recordId = recordID,
+                    status = mutation.status.name.lowercase(),
+                    code = mutation.code.name.lowercase(),
+                    message = mutation.message,
+                    serverRowJson = mutation.serverRow?.toString(),
+                    serverVersion = mutation.serverVersion
+                )
+
                 mutation.serverRow?.let { row ->
                     upsertServerRow(
                         db = db,

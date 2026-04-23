@@ -11,6 +11,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/google/go-cmp/cmp"
 	_ "github.com/jackc/pgx/v5/stdlib"
 )
 
@@ -96,6 +97,11 @@ func TestGenerateCreatesClientCompatibleSeedDatabase(t *testing.T) {
 		Overwrite:  false,
 	}); err != nil {
 		t.Fatalf("generate seed database: %v", err)
+	}
+	for _, suffix := range []string{"-wal", "-shm"} {
+		if _, err := os.Stat(outputPath + suffix); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("expected generated seed to avoid runtime sidecar %s", suffix)
+		}
 	}
 
 	sqliteDB, err := sql.Open("sqlite", outputPath)
@@ -331,9 +337,10 @@ func TestGenerateHydratesPortableRowsAndScopeState(t *testing.T) {
 
 	var scopeCursor string
 	var scopeChecksum string
+	var localChecksum int64
 	if err := sqliteDB.QueryRow(
-		"SELECT cursor, checksum FROM _synchro_scopes WHERE scope_id = 'global'",
-	).Scan(&scopeCursor, &scopeChecksum); err != nil {
+		"SELECT cursor, checksum, local_checksum FROM _synchro_scopes WHERE scope_id = 'global'",
+	).Scan(&scopeCursor, &scopeChecksum, &localChecksum); err != nil {
 		t.Fatalf("reading portable scope state: %v", err)
 	}
 	if scopeCursor == "" {
@@ -341,6 +348,9 @@ func TestGenerateHydratesPortableRowsAndScopeState(t *testing.T) {
 	}
 	if scopeChecksum == "" {
 		t.Fatal("expected non-empty portable scope checksum")
+	}
+	if localChecksum != 12345 {
+		t.Fatalf("expected local scope checksum 12345, got %d", localChecksum)
 	}
 
 	var checkpointRows int64
@@ -366,15 +376,19 @@ func TestGenerateHydratesPortableRowsAndScopeState(t *testing.T) {
 	}
 
 	var scopeRowCount int64
+	var scopeRowChecksum int64
 	if err := sqliteDB.QueryRow(
-		"SELECT count(*) FROM _synchro_scope_rows WHERE scope_id = 'global' AND table_name = ? AND record_id = ?",
+		"SELECT count(*), COALESCE(MAX(checksum), 0) FROM _synchro_scope_rows WHERE scope_id = 'global' AND table_name = ? AND record_id = ?",
 		tableName,
 		recordID,
-	).Scan(&scopeRowCount); err != nil {
+	).Scan(&scopeRowCount, &scopeRowChecksum); err != nil {
 		t.Fatalf("reading portable scope row: %v", err)
 	}
 	if scopeRowCount != 1 {
 		t.Fatalf("expected one portable scope row, got %d", scopeRowCount)
+	}
+	if scopeRowChecksum != 12345 {
+		t.Fatalf("expected portable scope row checksum 12345, got %d", scopeRowChecksum)
 	}
 
 	var snapshotComplete string
@@ -410,6 +424,27 @@ func TestGenerateHydratesPortableRowsAndScopeState(t *testing.T) {
 	}
 	if pendingCount != 0 {
 		t.Fatalf("expected portable seed to start with an empty pending queue, got %d rows", pendingCount)
+	}
+
+	rows, err := sqliteDB.Query("SELECT identifier FROM grdb_migrations ORDER BY identifier")
+	if err != nil {
+		t.Fatalf("reading grdb migrations: %v", err)
+	}
+	defer rows.Close()
+
+	var identifiers []string
+	for rows.Next() {
+		var identifier string
+		if err := rows.Scan(&identifier); err != nil {
+			t.Fatalf("scanning grdb migration identifier: %v", err)
+		}
+		identifiers = append(identifiers, identifier)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterating grdb migration identifiers: %v", err)
+	}
+	if diff := cmp.Diff(clientCompatibleMigrationIdentifiers, identifiers); diff != "" {
+		t.Fatalf("unexpected grdb migration identifiers (-want +got):\n%s", diff)
 	}
 }
 

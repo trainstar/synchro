@@ -3,7 +3,7 @@ package com.trainstar.synchro
 import android.content.Context
 import androidx.test.core.app.ApplicationProvider
 import kotlinx.coroutines.test.runTest
-import org.junit.Assume.assumeNotNull
+import kotlinx.coroutines.delay
 import org.junit.Assert.*
 import org.junit.Before
 import org.junit.Test
@@ -16,23 +16,28 @@ import javax.crypto.spec.SecretKeySpec
 
 /// Integration tests for schema reconciliation and seed database loading.
 /// Requires SYNCHRO_TEST_URL and SYNCHRO_TEST_JWT_SECRET environment variables.
-/// Skips when env vars are not set.
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [28])
 class SchemaIntegrationTests {
 
-    private var serverURL: String? = null
-    private var jwtSecret: String? = null
+    private lateinit var serverURL: String
+    private lateinit var jwtSecret: String
+    private lateinit var canonicalSeedPath: String
 
     @Before
     fun setUp() {
-        serverURL = System.getenv("SYNCHRO_TEST_URL")
-        jwtSecret = System.getenv("SYNCHRO_TEST_JWT_SECRET")
-    }
-
-    private fun skipIfNoServer() {
-        assumeNotNull("SYNCHRO_TEST_URL not set", serverURL)
-        assumeNotNull("SYNCHRO_TEST_JWT_SECRET not set", jwtSecret)
+        serverURL = checkNotNull(System.getenv("SYNCHRO_TEST_URL")) {
+            "SYNCHRO_TEST_URL must be set for schema integration tests"
+        }
+        jwtSecret = checkNotNull(System.getenv("SYNCHRO_TEST_JWT_SECRET")) {
+            "SYNCHRO_TEST_JWT_SECRET must be set for schema integration tests"
+        }
+        canonicalSeedPath = checkNotNull(System.getenv("SYNCHRO_TEST_SEED_PATH")) {
+            "SYNCHRO_TEST_SEED_PATH must be set for schema integration tests"
+        }
+        check(java.io.File(canonicalSeedPath).exists()) {
+            "SYNCHRO_TEST_SEED_PATH must point to an existing bundled seed database"
+        }
     }
 
     // -- JWT Helper --
@@ -47,7 +52,7 @@ class SchemaIntegrationTests {
         val payloadB64 = base64URLEncode(payload.toByteArray())
         val signingInput = "$headerB64.$payloadB64"
 
-        val signature = hmacSHA256(jwtSecret!!.toByteArray(), signingInput.toByteArray())
+        val signature = hmacSHA256(jwtSecret.toByteArray(), signingInput.toByteArray())
         return "$signingInput.${base64URLEncode(signature)}"
     }
 
@@ -74,7 +79,7 @@ class SchemaIntegrationTests {
         val token = signTestJWT(userID)
         return SynchroConfig(
             dbPath = dbPath,
-            serverURL = serverURL!!,
+            serverURL = serverURL,
             authProvider = { token },
             clientID = clientID,
             appVersion = "1.0.0",
@@ -114,10 +119,8 @@ class SchemaIntegrationTests {
 
     @Test
     fun testAdditiveSchemaChangePreservesData() = runTest {
-        skipIfNoServer()
-
         val serverSchema = fetchServerSchema()
-        val userID = UUID.randomUUID().toString()
+        val userID = UUID.randomUUID().toString().lowercase()
         val clientID = UUID.randomUUID().toString()
         val dbPath = "schema_integ_1_${UUID.randomUUID()}.sqlite"
 
@@ -183,8 +186,6 @@ class SchemaIntegrationTests {
 
     @Test
     fun testLocalOnlyTablesSurviveReconnect() = runTest {
-        skipIfNoServer()
-
         val userID = UUID.randomUUID().toString()
         val dbPath = "schema_integ_2_${UUID.randomUUID()}.sqlite"
 
@@ -230,8 +231,6 @@ class SchemaIntegrationTests {
 
     @Test
     fun testSeedDatabaseWorksOffline() = runTest {
-        skipIfNoServer()
-
         // Fetch server schema to build a correct seed
         val serverSchema = fetchServerSchema()
         val seedPath = createSeedDB(
@@ -274,12 +273,66 @@ class SchemaIntegrationTests {
         client.close()
     }
 
+    @Test
+    fun testOfflineWritesBeforeFirstConnectArePushedOnFirstSync() = runTest {
+        val userID = UUID.randomUUID().toString().lowercase()
+        val clientID = UUID.randomUUID().toString()
+        val dbPath = "schema_integ_offline_${UUID.randomUUID()}.sqlite"
+        val customerID = UUID.randomUUID().toString()
+
+        val offlineClient = SynchroClient(
+            makeConfig(
+                userID = userID,
+                dbPath = dbPath,
+                seedPath = canonicalSeedPath,
+                clientID = clientID
+            ),
+            context
+        )
+
+        offlineClient.execute(
+            "INSERT INTO customers (id, user_id, name, balance, is_active, created_at, updated_at) VALUES (?, ?, ?, 0, 1, ?, ?)",
+            arrayOf(customerID, userID, "Offline First Customer", "2026-01-01T00:00:00.000Z", "2026-01-01T00:00:00.000Z")
+        )
+
+        val pendingBeforeConnect = offlineClient.query(
+            "SELECT table_name, record_id FROM _synchro_pending_changes ORDER BY table_name, record_id"
+        )
+        val offlineRow = offlineClient.queryOne(
+            "SELECT name FROM customers WHERE id = ?",
+            arrayOf(customerID)
+        )
+        offlineClient.close()
+
+        val onlineClient = SynchroClient(
+            makeConfig(userID = userID, dbPath = dbPath, clientID = clientID),
+            context
+        )
+        onlineClient.start()
+        onlineClient.syncNow()
+
+        val pendingAfterConnect = onlineClient.query("SELECT record_id FROM _synchro_pending_changes")
+        val localRow = onlineClient.queryOne(
+            "SELECT name FROM customers WHERE id = ?",
+            arrayOf(customerID)
+        )
+        val rejectedAfterConnect = onlineClient.query(
+            "SELECT mutation_id FROM _synchro_rejected_mutations"
+        )
+        onlineClient.stop()
+        onlineClient.close()
+
+        assertEquals(1, pendingBeforeConnect.size)
+        assertEquals("Offline First Customer", offlineRow?.get("name"))
+        assertEquals(0, pendingAfterConnect.size)
+        assertEquals("Offline First Customer", localRow?.get("name"))
+        assertTrue(rejectedAfterConnect.isEmpty())
+    }
+
     // -- 4. testSeedDatabaseReconcilesOnConnect --
 
     @Test
     fun testSeedDatabaseReconcilesOnConnect() = runTest {
-        skipIfNoServer()
-
         val serverSchema = fetchServerSchema()
         val ordersTable = serverSchema.tables.firstOrNull { it.tableName == "orders" }
             ?: return@runTest fail("server schema must include 'orders' table")
@@ -330,6 +383,249 @@ class SchemaIntegrationTests {
         val row = client.queryOne("SELECT ship_address FROM orders WHERE id = ?", arrayOf(orderID))
         assertNotNull(row)
         assertEquals("post-reconcile insert", row?.get("ship_address"))
+
+        client.stop()
+        client.close()
+    }
+
+    @Test
+    fun testBundledSeedRepairsPortableScopeCorruptionOnConnect() = runTest {
+        val dbPath = "schema_integ_5_${UUID.randomUUID()}.sqlite"
+        val bootstrap = SynchroClient(
+            makeConfig(
+                userID = UUID.randomUUID().toString(),
+                dbPath = dbPath,
+                seedPath = canonicalSeedPath
+            ),
+            context
+        )
+
+        val seededCategoryID = "10000000-0000-0000-0000-000000000006"
+        val seededCategoryName = "Seed Category"
+
+        val seededScope = bootstrap.readTransaction { db ->
+            SynchroMeta.getScope(db, "global")
+        }
+        assertEquals("global", seededScope?.scopeID)
+        assertTrue((seededScope?.cursor ?: "").isNotEmpty())
+        assertTrue((seededScope?.checksum ?: "").isNotEmpty())
+
+        val seededRow = bootstrap.queryOne(
+            "SELECT name FROM categories WHERE id = ?",
+            arrayOf(seededCategoryID)
+        )
+        assertEquals(seededCategoryName, seededRow?.get("name"))
+
+        bootstrap.close()
+
+        val rawDb = SynchroDatabase(context, dbPath)
+        rawDb.writeSyncLockedTransaction { db ->
+            SynchroMeta.deleteScopeRow(db, "global", "categories", seededCategoryID)
+            db.execSQL("DELETE FROM categories WHERE id = ?", arrayOf(seededCategoryID))
+        }
+        rawDb.close()
+
+        val client = SynchroClient(
+            makeConfig(userID = UUID.randomUUID().toString(), dbPath = dbPath),
+            context
+        )
+        client.start()
+
+        val repairedRow = client.queryOne(
+            "SELECT name FROM categories WHERE id = ?",
+            arrayOf(seededCategoryID)
+        )
+        assertEquals(seededCategoryName, repairedRow?.get("name"))
+
+        val repairedScope = client.readTransaction { db ->
+            SynchroMeta.getScope(db, "global")
+        }
+        assertEquals("global", repairedScope?.scopeID)
+        assertTrue((repairedScope?.cursor ?: "").isNotEmpty())
+        assertTrue((repairedScope?.checksum ?: "").isNotEmpty())
+
+        val pending = client.queryOne("SELECT COUNT(*) AS count FROM _synchro_pending_changes")
+        assertEquals(0L, (pending?.get("count") as Number).toLong())
+
+        client.stop()
+        client.close()
+    }
+
+    @Test
+    fun testBundledSeedContinuesIncrementallyWithoutRebuild() = runTest {
+        val dbPath = "schema_integ_6_${UUID.randomUUID()}.sqlite"
+        val client = SynchroClient(
+            makeConfig(
+                userID = UUID.randomUUID().toString(),
+                dbPath = dbPath,
+                seedPath = canonicalSeedPath
+            ),
+            context
+        )
+
+        val seededCategoryID = "10000000-0000-0000-0000-000000000006"
+        val initialScope = client.readTransaction { db ->
+            SynchroMeta.getScope(db, "global")
+        }
+        assertEquals("global", initialScope?.scopeID)
+        assertTrue((initialScope?.cursor ?: "").isNotEmpty())
+        assertTrue((initialScope?.checksum ?: "").isNotEmpty())
+
+        val initialGeneration = initialScope?.generation
+        val initialCategory = client.queryOne(
+            "SELECT name FROM categories WHERE id = ?",
+            arrayOf(seededCategoryID)
+        )
+        assertEquals("Seed Category", initialCategory?.get("name"))
+
+        client.start()
+
+        val resumedScope = client.readTransaction { db ->
+            SynchroMeta.getScope(db, "global")
+        }
+        assertEquals("global", resumedScope?.scopeID)
+        assertEquals(initialGeneration, resumedScope?.generation)
+        assertTrue((resumedScope?.cursor ?: "").isNotEmpty())
+        assertTrue((resumedScope?.checksum ?: "").isNotEmpty())
+
+        val resumedCategory = client.queryOne(
+            "SELECT name FROM categories WHERE id = ?",
+            arrayOf(seededCategoryID)
+        )
+        assertEquals("Seed Category", resumedCategory?.get("name"))
+
+        val pending = client.queryOne("SELECT COUNT(*) AS count FROM _synchro_pending_changes")
+        assertEquals(0L, (pending?.get("count") as Number).toLong())
+
+        client.stop()
+        client.close()
+    }
+
+    @Test
+    fun testGlobalScopeRepairLeavesUserRowsUntouched() = runTest {
+        val userID = UUID.randomUUID().toString()
+        val clientID = UUID.randomUUID().toString()
+        val dbPath = "schema_integ_7_${UUID.randomUUID()}.sqlite"
+        val seededCategoryID = "10000000-0000-0000-0000-000000000006"
+        val customerID = UUID.randomUUID().toString()
+        val orderID = UUID.randomUUID().toString()
+
+        val bootstrap = SynchroClient(
+            makeConfig(
+                userID = userID,
+                clientID = clientID,
+                dbPath = dbPath,
+                seedPath = canonicalSeedPath
+            ),
+            context
+        )
+
+        bootstrap.start()
+        bootstrap.execute(
+            "INSERT INTO customers (id, user_id, name, balance, is_active, created_at, updated_at) VALUES (?, ?, ?, 0, 1, ?, ?)",
+            arrayOf(customerID, userID, "Scoped Repair Customer", "2026-01-06T00:00:00.000Z", "2026-01-06T00:00:00.000Z")
+        )
+        bootstrap.execute(
+            "INSERT INTO orders (id, customer_id, status, total_price, currency, ship_address, created_at, updated_at) VALUES (?, ?, 'pending', 0, 'USD', ?, ?, ?)",
+            arrayOf(orderID, customerID, "User Scope Row", "2026-01-06T00:00:00.000Z", "2026-01-06T00:00:00.000Z")
+        )
+        bootstrap.syncNow()
+        bootstrap.stop()
+        bootstrap.close()
+
+        val rawDb = SynchroDatabase(context, dbPath)
+        rawDb.writeSyncLockedTransaction { db ->
+            SynchroMeta.deleteScopeRow(db, "global", "categories", seededCategoryID)
+            db.execSQL("DELETE FROM categories WHERE id = ?", arrayOf(seededCategoryID))
+        }
+        rawDb.close()
+
+        val client = SynchroClient(
+            makeConfig(
+                userID = userID,
+                clientID = clientID,
+                dbPath = dbPath
+            ),
+            context
+        )
+        client.start()
+
+        val repairedCategory = client.queryOne(
+            "SELECT name FROM categories WHERE id = ?",
+            arrayOf(seededCategoryID)
+        )
+        assertEquals("Seed Category", repairedCategory?.get("name"))
+
+        val preservedOrder = client.queryOne(
+            "SELECT ship_address FROM orders WHERE id = ?",
+            arrayOf(orderID)
+        )
+        assertEquals("User Scope Row", preservedOrder?.get("ship_address"))
+
+        val pending = client.queryOne("SELECT COUNT(*) AS count FROM _synchro_pending_changes")
+        assertEquals(0L, (pending?.get("count") as Number).toLong())
+
+        client.stop()
+        client.close()
+    }
+
+    @Test
+    fun testSharedSeedRowsStayInSharedScopeOnly() = runTest {
+        val userID = UUID.randomUUID().toString().lowercase()
+        val clientID = UUID.randomUUID().toString()
+        val dbPath = "schema_integ_8_${UUID.randomUUID()}.sqlite"
+        val seededCategoryID = "10000000-0000-0000-0000-000000000006"
+        val customerID = UUID.randomUUID().toString()
+        val orderID = UUID.randomUUID().toString()
+
+        val client = SynchroClient(
+            makeConfig(
+                userID = userID,
+                clientID = clientID,
+                dbPath = dbPath,
+                seedPath = canonicalSeedPath
+            ),
+            context
+        )
+
+        client.start()
+        client.execute(
+            "INSERT INTO customers (id, user_id, name, balance, is_active, created_at, updated_at) VALUES (?, ?, ?, 0, 1, ?, ?)",
+            arrayOf(customerID, userID, "Shared Scope Customer", "2026-01-07T00:00:00.000Z", "2026-01-07T00:00:00.000Z")
+        )
+        client.execute(
+            "INSERT INTO orders (id, customer_id, status, total_price, currency, ship_address, created_at, updated_at) VALUES (?, ?, 'pending', 0, 'USD', ?, ?, ?)",
+            arrayOf(orderID, customerID, "User Scoped Order", "2026-01-07T00:00:00.000Z", "2026-01-07T00:00:00.000Z")
+        )
+        client.syncNow()
+
+        val categoryScopes = client.query(
+            """
+            SELECT scope_id
+            FROM _synchro_scope_rows
+            WHERE table_name = 'categories' AND record_id = ?
+            ORDER BY scope_id
+            """.trimIndent(),
+            arrayOf(seededCategoryID)
+        )
+        assertEquals(1, categoryScopes.size)
+        assertEquals("global", categoryScopes.first()["scope_id"])
+
+        val duplicatedCategoryScopes = client.queryOne(
+            """
+            SELECT COUNT(*) AS count
+            FROM _synchro_scope_rows
+            WHERE table_name = 'categories' AND record_id = ? AND scope_id != 'global'
+            """.trimIndent(),
+            arrayOf(seededCategoryID)
+        )
+        assertEquals(0L, (duplicatedCategoryScopes?.get("count") as Number).toLong())
+
+        val orderRow = client.queryOne(
+            "SELECT ship_address FROM orders WHERE id = ?",
+            arrayOf(orderID)
+        )
+        assertEquals("User Scoped Order", orderRow?.get("ship_address"))
 
         client.stop()
         client.close()

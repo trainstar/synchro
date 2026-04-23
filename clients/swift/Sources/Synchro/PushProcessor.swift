@@ -148,6 +148,18 @@ final class PushProcessor: @unchecked Sendable {
                 guard let schema = tableMap[mutation.table] else { continue }
                 let recordID = try recordID(from: mutation.pk, schema: schema)
 
+                try SynchroMeta.upsertRejectedMutation(
+                    db,
+                    mutationID: mutation.mutationID,
+                    tableName: mutation.table,
+                    recordID: recordID,
+                    status: mutation.status.rawValue,
+                    code: mutation.code.rawValue,
+                    message: mutation.message,
+                    serverRow: mutation.serverRow,
+                    serverVersion: mutation.serverVersion
+                )
+
                 if let serverRow = mutation.serverRow {
                     try upsertServerRow(
                         db: db,

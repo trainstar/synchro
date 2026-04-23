@@ -305,6 +305,42 @@ class PushProcessorTests {
     }
 
     @Test
+    fun testApplyAcceptedSupportsOpaqueServerVersion() {
+        val (db, tracker, processor) = makeTestEnv()
+
+        db.execute(
+            "INSERT INTO orders (id, ship_address, user_id, updated_at) VALUES (?, ?, ?, ?)",
+            arrayOf("w1", "123 Main St", "u1", "2026-01-01T10:00:00.000Z")
+        )
+
+        val accepted = listOf(
+            AcceptedMutation(
+                mutationID = "m1",
+                table = "orders",
+                pk = JsonObject(mapOf("id" to JsonPrimitive("w1"))),
+                status = MutationStatus.APPLIED,
+                serverRow = JsonObject(
+                    mapOf(
+                        "id" to JsonPrimitive("w1"),
+                        "ship_address" to JsonPrimitive("Opaque Version Address"),
+                        "user_id" to JsonPrimitive("u1"),
+                        "updated_at" to JsonPrimitive("2026-01-01T12:00:00.000Z"),
+                        "deleted_at" to JsonNull
+                    )
+                ),
+                serverVersion = "sv::opaque::1"
+            )
+        )
+
+        processor.applyAccepted(accepted, listOf(localTestTable))
+
+        assertFalse(tracker.hasPendingChanges())
+        val row = db.queryOne("SELECT ship_address, updated_at FROM orders WHERE id = ?", arrayOf("w1"))
+        assertEquals("Opaque Version Address", row?.get("ship_address"))
+        assertEquals("2026-01-01T12:00:00.000Z", row?.get("updated_at"))
+    }
+
+    @Test
     fun testApplyAcceptedDoesNotTriggerCDC() {
         val (db, tracker, processor) = makeTestEnv()
 
@@ -423,6 +459,13 @@ class PushProcessorTests {
         assertEquals("orders", conflicts[0].table)
         assertEquals("w1", conflicts[0].recordID)
         assertEquals(AnyCodable("Server Address"), conflicts[0].serverData?.get("ship_address"))
+
+        val rejectedState = db.readTransaction { conn -> SynchroMeta.listRejectedMutations(conn) }
+        assertEquals(1, rejectedState.size)
+        assertEquals("m1", rejectedState[0].mutationID)
+        assertEquals("conflict", rejectedState[0].status)
+        assertEquals("version_conflict", rejectedState[0].code)
+        assertEquals("2026-01-01T11:00:00.000Z", rejectedState[0].serverVersion)
     }
 
     @Test
@@ -458,6 +501,13 @@ class PushProcessorTests {
 
         // Error status, not conflict — no conflict event
         assertEquals(0, conflicts.size)
+
+        val rejectedState = db.readTransaction { conn -> SynchroMeta.listRejectedMutations(conn) }
+        assertEquals(1, rejectedState.size)
+        assertEquals("m1", rejectedState[0].mutationID)
+        assertEquals("rejected_terminal", rejectedState[0].status)
+        assertEquals("policy_rejected", rejectedState[0].code)
+        assertEquals("ownership violation", rejectedState[0].message)
     }
 
     @Test

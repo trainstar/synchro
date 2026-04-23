@@ -109,6 +109,27 @@ func doJSON(t *testing.T, method, url, token string, body any) (int, map[string]
 	return resp.StatusCode, result
 }
 
+func doRawJSON(t *testing.T, method, url, token string, raw string) (int, map[string]any) {
+	t.Helper()
+	req, err := http.NewRequest(method, url, bytes.NewBufferString(raw))
+	if err != nil {
+		t.Fatalf("creating request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("sending request: %v", err)
+	}
+	defer resp.Body.Close()
+	rawResp, _ := io.ReadAll(resp.Body)
+	var result map[string]any
+	_ = json.Unmarshal(rawResp, &result)
+	return resp.StatusCode, result
+}
+
 func connectClient(t *testing.T, srv *httptest.Server, token, clientID string) {
 	t.Helper()
 	status, body := doJSON(t, "POST", srv.URL+"/sync/connect", token, map[string]any{
@@ -247,6 +268,9 @@ func TestPullPassthrough(t *testing.T) {
 			t.Errorf("response missing '%s'", field)
 		}
 	}
+	if _, ok := body["checksums"]; !ok {
+		t.Error("response missing 'checksums'")
+	}
 }
 
 func TestPushPassthrough(t *testing.T) {
@@ -285,7 +309,7 @@ func TestRebuildPassthrough(t *testing.T) {
 	if status != 200 {
 		t.Fatalf("expected 200, got %d: %v", status, body)
 	}
-	for _, field := range []string{"scope", "records", "has_more"} {
+	for _, field := range []string{"scope", "records", "has_more", "final_scope_cursor", "checksum"} {
 		if body[field] == nil {
 			t.Errorf("response missing '%s'", field)
 		}
@@ -324,6 +348,139 @@ func TestDebugRequiresAuth(t *testing.T) {
 	status, _ := doJSON(t, "GET", srv.URL+"/sync/debug?client_id=test", "", nil)
 	if status != 401 {
 		t.Errorf("expected 401, got %d", status)
+	}
+}
+
+func TestDebugSuccess(t *testing.T) {
+	srv := testServer(t)
+	token := testToken("user-1")
+	connectClient(t, srv, token, "test-debug-client")
+
+	status, body := doJSON(t, "GET", srv.URL+"/sync/debug?client_id=test-debug-client", token, nil)
+	if status != 200 {
+		t.Fatalf("expected 200, got %d: %v", status, body)
+	}
+
+	client, ok := body["client"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected client object, got %T", body["client"])
+	}
+	if client["client_id"] != "test-debug-client" {
+		t.Fatalf("expected client_id test-debug-client, got %v", client["client_id"])
+	}
+	if body["buckets"] == nil {
+		t.Fatal("expected buckets in debug response")
+	}
+	if body["changelog_stats"] == nil {
+		t.Fatal("expected changelog_stats in debug response")
+	}
+}
+
+func TestInvalidRequestBodiesReturn400(t *testing.T) {
+	srv := testServer(t)
+	token := testToken("user-1")
+
+	tests := []struct {
+		name string
+		path string
+		body string
+	}{
+		{
+			name: "connect missing client id",
+			path: "/sync/connect",
+			body: `{"platform":"ios","app_version":"1.0.0","protocol_version":2,"schema":{"version":0,"hash":""},"scope_set_version":0,"known_scopes":{}}`,
+		},
+		{
+			name: "pull missing client id",
+			path: "/sync/pull",
+			body: `{"schema":{"version":0,"hash":""},"scope_set_version":0,"scopes":{},"limit":100}`,
+		},
+		{
+			name: "push invalid body type",
+			path: "/sync/push",
+			body: `{"client_id":1,"batch_id":"batch-1","schema":{"version":0,"hash":""},"mutations":[]}`,
+		},
+		{
+			name: "rebuild missing scope",
+			path: "/sync/rebuild",
+			body: `{"client_id":"test-rebuild-client","limit":100}`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			status, body := doRawJSON(t, "POST", srv.URL+tt.path, token, tt.body)
+			if status != http.StatusBadRequest {
+				t.Fatalf("expected 400, got %d: %v", status, body)
+			}
+			if _, ok := body["error"].(string); !ok {
+				t.Fatalf("expected string error body, got %T", body["error"])
+			}
+		})
+	}
+}
+
+func TestPushRejectsMalformedVersionTimestamps(t *testing.T) {
+	srv := testServer(t)
+	token := testToken("user-1")
+	connectClient(t, srv, token, "test-invalid-timestamp-client")
+
+	tests := []struct {
+		name string
+		body string
+	}{
+		{
+			name: "invalid client_version",
+			body: `{
+				"client_id":"test-invalid-timestamp-client",
+				"batch_id":"batch-invalid-client-version",
+				"schema":{"version":0,"hash":""},
+				"mutations":[
+					{
+						"mutation_id":"m-invalid-client-version",
+						"table":"orders",
+						"op":"update",
+						"pk":{"id":"00000000-0000-0000-0000-000000000001"},
+						"client_version":"not-a-timestamp",
+						"columns":{"ship_address":"bad"}
+					}
+				]
+			}`,
+		},
+		{
+			name: "invalid base_version",
+			body: `{
+				"client_id":"test-invalid-timestamp-client",
+				"batch_id":"batch-invalid-base-version",
+				"schema":{"version":0,"hash":""},
+				"mutations":[
+					{
+						"mutation_id":"m-invalid-base-version",
+						"table":"orders",
+						"op":"delete",
+						"pk":{"id":"00000000-0000-0000-0000-000000000001"},
+						"base_version":"still-not-a-timestamp"
+					}
+				]
+			}`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			status, body := doRawJSON(t, "POST", srv.URL+"/sync/push", token, tt.body)
+			if status != http.StatusBadRequest {
+				t.Fatalf("expected 400, got %d: %v", status, body)
+			}
+
+			errBody, ok := body["error"].(map[string]any)
+			if !ok {
+				t.Fatalf("expected nested error object, got %T", body["error"])
+			}
+			if errBody["code"] != "invalid_request" {
+				t.Fatalf("expected error.code=invalid_request, got %v", errBody["code"])
+			}
+		})
 	}
 }
 
@@ -432,6 +589,73 @@ func TestSchemaMismatch422Body(t *testing.T) {
 	}
 }
 
+func TestPullSchemaMismatch422Body(t *testing.T) {
+	dbURL := os.Getenv("TEST_DATABASE_URL")
+	if dbURL == "" {
+		t.Skip("TEST_DATABASE_URL not set")
+	}
+
+	db, err := sql.Open("pgx", dbURL)
+	if err != nil {
+		t.Fatalf("opening database: %v", err)
+	}
+	defer db.Close()
+
+	handler := Routes(Config{
+		DB:        db,
+		JWTSecret: []byte("test-secret-for-integration-tests"),
+	})
+	srv := httptest.NewServer(handler)
+	defer srv.Close()
+
+	token := testToken("user-1")
+	connectClient(t, srv, token, "pull-mismatch-client")
+
+	status, body := doJSON(t, "POST", srv.URL+"/sync/pull", token, map[string]any{
+		"client_id":         "pull-mismatch-client",
+		"schema":            map[string]any{"version": 999, "hash": "definitely_wrong_hash"},
+		"scope_set_version": 0,
+		"scopes":            map[string]any{},
+		"limit":             100,
+	})
+
+	if status != http.StatusUnprocessableEntity {
+		t.Fatalf("expected 422, got %d: %v", status, body)
+	}
+
+	errBody, ok := body["error"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected nested error object, got %v", body["error"])
+	}
+	if errBody["code"] != "schema_mismatch" {
+		t.Errorf("expected error.code=schema_mismatch, got %v", errBody["code"])
+	}
+}
+
+func TestRebuildUnsubscribedScopeReturns400(t *testing.T) {
+	srv := testServer(t)
+	token := testToken("user-1")
+	connectClient(t, srv, token, "rebuild-unsubscribed-client")
+
+	status, body := doJSON(t, "POST", srv.URL+"/sync/rebuild", token, map[string]any{
+		"client_id": "rebuild-unsubscribed-client",
+		"scope":     "team:other",
+		"limit":     100,
+	})
+
+	if status != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d: %v", status, body)
+	}
+
+	errBody, ok := body["error"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected nested error object, got %v", body["error"])
+	}
+	if errBody["code"] != "invalid_request" {
+		t.Errorf("expected error.code=invalid_request, got %v", errBody["code"])
+	}
+}
+
 func TestSQLError503(t *testing.T) {
 	dbURL := os.Getenv("TEST_DATABASE_URL")
 	if dbURL == "" {
@@ -452,6 +676,31 @@ func TestSQLError503(t *testing.T) {
 	defer srv.Close()
 
 	status, body := doJSON(t, "GET", srv.URL+"/sync/schema", "", nil)
+	if status != 500 && status != 503 {
+		t.Errorf("expected 500 or 503, got %d: %v", status, body)
+	}
+}
+
+func TestTablesSQLError503(t *testing.T) {
+	dbURL := os.Getenv("TEST_DATABASE_URL")
+	if dbURL == "" {
+		t.Skip("TEST_DATABASE_URL not set")
+	}
+
+	db, err := sql.Open("pgx", dbURL)
+	if err != nil {
+		t.Fatalf("opening database: %v", err)
+	}
+	_ = db.Close()
+
+	handler := Routes(Config{
+		DB:        db,
+		JWTSecret: []byte("test-secret-for-integration-tests"),
+	})
+	srv := httptest.NewServer(handler)
+	defer srv.Close()
+
+	status, body := doJSON(t, "GET", srv.URL+"/sync/tables", "", nil)
 	if status != 500 && status != 503 {
 		t.Errorf("expected 500 or 503, got %d: %v", status, body)
 	}

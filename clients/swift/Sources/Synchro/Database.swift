@@ -272,6 +272,27 @@ final class SynchroDatabase: @unchecked Sendable {
                 """)
             try db.execute(sql: "DELETE FROM _synchro_scope_rows")
         }
+        migrator.registerMigration("synchro_v5_rejected_mutations") { db in
+            try db.execute(sql: """
+                CREATE TABLE IF NOT EXISTS _synchro_rejected_mutations (
+                    mutation_id TEXT PRIMARY KEY,
+                    table_name TEXT NOT NULL,
+                    record_id TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    code TEXT NOT NULL,
+                    message TEXT,
+                    server_row_json TEXT,
+                    server_version TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )
+                """)
+
+            try db.execute(sql: """
+                CREATE INDEX IF NOT EXISTS idx_synchro_rejected_mutations_record
+                ON _synchro_rejected_mutations (table_name, record_id)
+                """)
+        }
         try migrator.migrate(dbPool)
     }
 }

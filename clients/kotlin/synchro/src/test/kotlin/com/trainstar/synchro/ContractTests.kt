@@ -42,6 +42,19 @@ class ContractTests {
     }
 
     @Test
+    fun testConnectUnsupportedFixtureDecodesAndValidates() {
+        val response = decodeFixtureValue<ConnectResponse>(
+            "conformance/protocol/connect-unsupported.json",
+            listOf("expected", "response")
+        )
+
+        assertEquals(SchemaAction.UNSUPPORTED, response.schema.action)
+        assertEquals(null, response.schemaDefinition)
+        assertTrue(response.scopes.add.isEmpty())
+        response.validate()
+    }
+
+    @Test
     fun testPullRequiredChecksumsFixtureDecodesAndValidates() {
         val response = decodeFixtureValue<PullResponse>(
             "conformance/protocol/pull-required-checksums.json",

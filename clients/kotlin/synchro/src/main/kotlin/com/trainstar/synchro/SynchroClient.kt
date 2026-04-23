@@ -10,12 +10,6 @@ class SynchroClient(private val config: SynchroConfig, context: Context) {
             if (!dbFile.exists() && seedFile.exists()) {
                 dbFile.parentFile?.mkdirs()
                 seedFile.copyTo(dbFile)
-                // Copy WAL/SHM files if they exist alongside the seed
-                for (suffix in listOf("-wal", "-shm")) {
-                    val src = java.io.File(seedPath + suffix)
-                    val dst = java.io.File(dbFile.path + suffix)
-                    if (src.exists()) src.copyTo(dst)
-                }
             }
         }
     }

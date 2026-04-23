@@ -89,6 +89,14 @@ pub enum ContractViolation {
     MissingMutationClientVersion {
         mutation_id: String,
     },
+    InvalidMutationClientVersionFormat {
+        mutation_id: String,
+        value: String,
+    },
+    InvalidMutationBaseVersionFormat {
+        mutation_id: String,
+        value: String,
+    },
     FinalPullChecksumsMissing,
     FinalRebuildCursorMissing,
     FinalRebuildChecksumMissing,
@@ -181,6 +189,14 @@ impl std::fmt::Display for ContractViolation {
             Self::MissingMutationClientVersion { mutation_id } => write!(
                 f,
                 "push mutation {mutation_id} must include client_version for insert, update, or upsert"
+            ),
+            Self::InvalidMutationClientVersionFormat { mutation_id, value } => write!(
+                f,
+                "push mutation {mutation_id} has invalid client_version timestamp {value}"
+            ),
+            Self::InvalidMutationBaseVersionFormat { mutation_id, value } => write!(
+                f,
+                "push mutation {mutation_id} has invalid base_version timestamp {value}"
             ),
             Self::FinalPullChecksumsMissing => {
                 f.write_str("final pull page must include checksums")
@@ -594,6 +610,16 @@ pub struct Mutation {
 
 impl Mutation {
     pub fn validate(&self) -> Result<(), ContractViolation> {
+        if let Some(base_version) = self.base_version.as_deref() {
+            let trimmed = base_version.trim();
+            if chrono::DateTime::parse_from_rfc3339(trimmed).is_err() {
+                return Err(ContractViolation::InvalidMutationBaseVersionFormat {
+                    mutation_id: self.mutation_id.clone(),
+                    value: trimmed.to_string(),
+                });
+            }
+        }
+
         if matches!(
             self.op,
             Operation::Insert | Operation::Update | Operation::Upsert
@@ -607,6 +633,16 @@ impl Mutation {
             return Err(ContractViolation::MissingMutationClientVersion {
                 mutation_id: self.mutation_id.clone(),
             });
+        }
+
+        if let Some(client_version) = self.client_version.as_deref() {
+            let trimmed = client_version.trim();
+            if chrono::DateTime::parse_from_rfc3339(trimmed).is_err() {
+                return Err(ContractViolation::InvalidMutationClientVersionFormat {
+                    mutation_id: self.mutation_id.clone(),
+                    value: trimmed.to_string(),
+                });
+            }
         }
 
         Ok(())
@@ -881,6 +917,64 @@ mod tests {
         assert_eq!(
             response.rejected[0].code,
             MutationRejectionCode::VersionConflict
+        );
+    }
+
+    #[test]
+    fn push_request_rejects_invalid_client_version_timestamp() {
+        let request = PushRequest {
+            client_id: "client-1".into(),
+            batch_id: "batch-1".into(),
+            schema: SchemaRef {
+                version: 1,
+                hash: "hash".into(),
+            },
+            mutations: vec![Mutation {
+                mutation_id: "m-1".into(),
+                table: "orders".into(),
+                op: Operation::Update,
+                pk: serde_json::json!({ "id": "o1" }),
+                base_version: None,
+                client_version: Some("not-a-timestamp".into()),
+                columns: Some(serde_json::json!({ "title": "broken" })),
+            }],
+        };
+
+        assert_eq!(
+            request.validate(),
+            Err(ContractViolation::InvalidMutationClientVersionFormat {
+                mutation_id: "m-1".into(),
+                value: "not-a-timestamp".into(),
+            })
+        );
+    }
+
+    #[test]
+    fn push_request_rejects_invalid_base_version_timestamp() {
+        let request = PushRequest {
+            client_id: "client-1".into(),
+            batch_id: "batch-1".into(),
+            schema: SchemaRef {
+                version: 1,
+                hash: "hash".into(),
+            },
+            mutations: vec![Mutation {
+                mutation_id: "m-2".into(),
+                table: "orders".into(),
+                op: Operation::Delete,
+                pk: serde_json::json!({ "id": "o1" }),
+                base_version: Some("still-not-a-timestamp".into()),
+                client_version: None,
+                columns: None,
+            }],
+        };
+
+        assert_eq!(
+            request.validate(),
+            Err(ContractViolation::InvalidMutationBaseVersionFormat {
+                mutation_id: "m-2".into(),
+                value: "still-not-a-timestamp".into(),
+            })
         );
     }
 

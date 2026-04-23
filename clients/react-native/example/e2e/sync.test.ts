@@ -51,9 +51,17 @@ async function expectBadge(label: string, text = 'PASS', timeout = 5000) {
   await waitFor(element(by.id('last-result-key')))
     .toHaveText(label)
     .withTimeout(timeout);
-  await waitFor(element(by.id('last-result-status')))
-    .toHaveText(text)
-    .withTimeout(timeout);
+  try {
+    await waitFor(element(by.id('last-result-status')))
+      .toHaveText(text)
+      .withTimeout(timeout);
+  } catch (error) {
+    const step = await element(by.id('step-value')).getAttributes();
+    const detail = await element(by.id('error-value')).getAttributes();
+    throw new Error(
+      `badge ${label} did not reach ${text}; step=${String(step.text)} error=${String(detail.text)} original=${String(error)}`
+    );
+  }
 }
 
 async function runAction(label: string, timeout = 5000) {
@@ -161,7 +169,19 @@ describe('Synchro RN E2E', () => {
     await runAction('errorMap', 10000);
   });
 
+  it('preserves offline writes before first connect and reconciles them on first sync', async () => {
+    await runAction('offlineFirst', 20000);
+  });
+
   it('seed database initializes offline with schema and CDC triggers', async () => {
     await runAction('seedInit', 10000);
+  });
+
+  it('seed database resumes incrementally without rebuilding shared scope', async () => {
+    await runAction('seedResume', 15000);
+  });
+
+  it('seed database repairs portable-scope corruption without queueing local mutations', async () => {
+    await runAction('seedRepair', 20000);
   });
 });
