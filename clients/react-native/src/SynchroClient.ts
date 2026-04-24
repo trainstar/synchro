@@ -7,6 +7,7 @@ import type {
   ExecResult,
   BatchResult,
   SQLStatement,
+  SQLiteBindValue,
   ColumnDef,
   TableOptions,
   Transaction,
@@ -20,6 +21,10 @@ import type {
 let observerCounter = 0;
 function nextObserverID(): string {
   return `obs_${++observerCounter}_${Date.now()}`;
+}
+
+function nullableRow(row: unknown): Row | null {
+  return row == null ? null : (row as Row);
 }
 
 export class SynchroClient {
@@ -68,38 +73,27 @@ export class SynchroClient {
     }
   }
 
-  // -- Core SQL --
+  // Core SQL
 
-  async query(sql: string, params?: unknown[]): Promise<Row[]> {
+  async query(sql: string, params?: readonly SQLiteBindValue[]): Promise<Row[]> {
     try {
-      const json = await this.native.query(
-        sql,
-        JSON.stringify(params ?? [])
-      );
-      return JSON.parse(json) as Row[];
+      return [...(await this.native.query(sql, params ?? []))] as Row[];
     } catch (error) {
       throw mapNativeError(error);
     }
   }
 
-  async queryOne(sql: string, params?: unknown[]): Promise<Row | null> {
+  async queryOne(sql: string, params?: readonly SQLiteBindValue[]): Promise<Row | null> {
     try {
-      const json = await this.native.queryOne(
-        sql,
-        JSON.stringify(params ?? [])
-      );
-      return json ? (JSON.parse(json) as Row) : null;
+      return nullableRow(await this.native.queryOne(sql, params ?? []));
     } catch (error) {
       throw mapNativeError(error);
     }
   }
 
-  async execute(sql: string, params?: unknown[]): Promise<ExecResult> {
+  async execute(sql: string, params?: readonly SQLiteBindValue[]): Promise<ExecResult> {
     try {
-      return await this.native.execute(
-        sql,
-        JSON.stringify(params ?? [])
-      );
+      return await this.native.execute(sql, params ?? []);
     } catch (error) {
       throw mapNativeError(error);
     }
@@ -111,13 +105,13 @@ export class SynchroClient {
         sql: s.sql,
         params: s.params ?? [],
       }));
-      return await this.native.executeBatch(JSON.stringify(payload));
+      return await this.native.executeBatch(payload);
     } catch (error) {
       throw mapNativeError(error);
     }
   }
 
-  // -- Transactions --
+  // Transactions
 
   async writeTransaction<T>(
     callback: (tx: Transaction) => Promise<T>
@@ -132,27 +126,13 @@ export class SynchroClient {
     try {
       const tx: Transaction = {
         query: async (sql, params) => {
-          const json = await this.native.txQuery(
-            txID,
-            sql,
-            JSON.stringify(params ?? [])
-          );
-          return JSON.parse(json) as Row[];
+          return [...(await this.native.txQuery(txID, sql, params ?? []))] as Row[];
         },
         queryOne: async (sql, params) => {
-          const json = await this.native.txQueryOne(
-            txID,
-            sql,
-            JSON.stringify(params ?? [])
-          );
-          return json ? (JSON.parse(json) as Row) : null;
+          return nullableRow(await this.native.txQueryOne(txID, sql, params ?? []));
         },
         execute: async (sql, params) => {
-          return await this.native.txExecute(
-            txID,
-            sql,
-            JSON.stringify(params ?? [])
-          );
+          return await this.native.txExecute(txID, sql, params ?? []);
         },
       };
       const result = await callback(tx);
@@ -181,27 +161,13 @@ export class SynchroClient {
     try {
       const tx: Transaction = {
         query: async (sql, params) => {
-          const json = await this.native.txQuery(
-            txID,
-            sql,
-            JSON.stringify(params ?? [])
-          );
-          return JSON.parse(json) as Row[];
+          return [...(await this.native.txQuery(txID, sql, params ?? []))] as Row[];
         },
         queryOne: async (sql, params) => {
-          const json = await this.native.txQueryOne(
-            txID,
-            sql,
-            JSON.stringify(params ?? [])
-          );
-          return json ? (JSON.parse(json) as Row) : null;
+          return nullableRow(await this.native.txQueryOne(txID, sql, params ?? []));
         },
         execute: async (sql, params) => {
-          return await this.native.txExecute(
-            txID,
-            sql,
-            JSON.stringify(params ?? [])
-          );
+          return await this.native.txExecute(txID, sql, params ?? []);
         },
       };
       const result = await callback(tx);
@@ -217,7 +183,7 @@ export class SynchroClient {
     }
   }
 
-  // -- Schema (local-only) --
+  // Schema, local-only
 
   async createTable(
     name: string,
@@ -255,7 +221,7 @@ export class SynchroClient {
     }
   }
 
-  // -- Observation --
+  // Observation
 
   onChange(tables: string[], callback: () => void): Unsubscribe {
     const observerID = nextObserverID();
@@ -278,16 +244,16 @@ export class SynchroClient {
 
   watch(
     sql: string,
-    params: unknown[] | undefined,
+    params: readonly SQLiteBindValue[] | undefined,
     tables: string[],
     callback: (rows: Row[]) => void
   ): Unsubscribe {
     const observerID = nextObserverID();
 
     const subscription = this.native.onQueryResult(
-      (event: { observerID: string; rowsJson: string }) => {
+      (event) => {
         if (event.observerID === observerID) {
-          callback(JSON.parse(event.rowsJson) as Row[]);
+          callback([...(event.rows as readonly Row[])]);
         }
       }
     );
@@ -295,7 +261,7 @@ export class SynchroClient {
     this.native.addQueryObserver(
       observerID,
       sql,
-      JSON.stringify(params ?? []),
+      params ?? [],
       tables
     );
 
@@ -305,7 +271,7 @@ export class SynchroClient {
     };
   }
 
-  // -- Lifecycle --
+  // Lifecycle
 
   async close(): Promise<void> {
     try {
@@ -331,7 +297,7 @@ export class SynchroClient {
     }
   }
 
-  // -- Sync --
+  // Sync
 
   async start(): Promise<void> {
     try {
@@ -357,7 +323,7 @@ export class SynchroClient {
     }
   }
 
-  // -- Status & Events --
+  // Status and events
 
   onStatusChange(callback: (status: SyncStatus) => void): Unsubscribe {
     const subscription = this.native.onStatusChange(

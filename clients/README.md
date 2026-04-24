@@ -7,7 +7,7 @@ Mobile and cross-platform SDKs for the Synchro sync library. Each SDK wraps a pl
 | SDK | Platform | Wraps | Status |
 |-----|----------|-------|--------|
 | **Swift** | iOS / macOS | GRDB | In Progress |
-| **Kotlin** | Android | Room | In Progress |
+| **Kotlin** | Android | Android SQLite APIs | In Progress |
 | **React Native** | iOS + Android | Swift + Kotlin | In Progress |
 
 ## Architecture
@@ -16,8 +16,8 @@ All SDKs implement the same interface contract. See [ARCHITECTURE.md](./ARCHITEC
 
 ### Layer Model
 
-- **Layer 1 (Native)**: Swift wraps GRDB, Kotlin wraps Room. SQLite triggers on synced tables auto-track all writes (CDC). HTTP sync orchestration talks to the Synchro server.
-- **Layer 2 (React Native)**: TurboModule bridge wraps both Layer 1 SDKs. SQL strings down, JSON rows up, typed events up.
+- **Layer 1 (Native)**: Swift wraps GRDB, Kotlin wraps Android SQLite APIs. SQLite triggers on synced tables auto-track all writes (CDC). HTTP sync orchestration talks to the Synchro server.
+- **Layer 2 (React Native)**: TurboModule bridge wraps both Layer 1 SDKs. SQL strings and typed bind params go down, native row objects and typed events come up.
 
 ### Change Detection
 
@@ -28,7 +28,7 @@ Client-side CDC mirrors the server's WAL approach using SQLite triggers:
 - Pending queue deduplicates via `ON CONFLICT DO UPDATE`
 - On push, current record data is hydrated from the local table
 - `BEFORE DELETE` triggers convert hard deletes to soft deletes
-- No special write API needed -- standard GRDB/Room API works
+- No special write API is needed, standard native SQL APIs work
 
 ## Build
 

@@ -1,7 +1,7 @@
 package com.trainstar.synchro
 
 import android.database.sqlite.SQLiteDatabase
-import android.database.sqlite.SQLiteStatement
+import android.database.sqlite.SQLiteProgram
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonNull
@@ -624,18 +624,18 @@ internal fun executeWithTypedBindings(db: SQLiteDatabase, sql: String, values: L
     }
 }
 
-internal fun bindTypedValues(stmt: SQLiteStatement, values: List<Any?>) {
+internal fun bindTypedValues(stmt: SQLiteProgram, values: List<Any?>) {
     for (i in values.indices) {
         val bindIndex = i + 1
-        when (val value = values[i]) {
+        when (val value = sqliteBindValue(values[i], i)) {
             null -> stmt.bindNull(bindIndex)
             is Long -> stmt.bindLong(bindIndex, value)
-            is Int -> stmt.bindLong(bindIndex, value.toLong())
             is Double -> stmt.bindDouble(bindIndex, value)
-            is Float -> stmt.bindDouble(bindIndex, value.toDouble())
             is ByteArray -> stmt.bindBlob(bindIndex, value)
-            is Boolean -> stmt.bindLong(bindIndex, if (value) 1L else 0L)
-            else -> stmt.bindString(bindIndex, value.toString())
+            is String -> stmt.bindString(bindIndex, value)
+            else -> throw IllegalArgumentException(
+                "Unsupported SQL bind value at index $i: ${value::class.java.name}"
+            )
         }
     }
 }

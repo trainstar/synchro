@@ -1,5 +1,10 @@
 package com.trainstar.synchro.rn
 
+import android.database.Cursor
+import android.database.sqlite.SQLiteCursor
+import android.database.sqlite.SQLiteDatabase
+import android.database.sqlite.SQLiteProgram
+import android.util.Base64
 import com.facebook.react.bridge.*
 import com.trainstar.synchro.*
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -185,44 +190,41 @@ class SynchroModule(reactContext: ReactApplicationContext) :
     // MARK: - Core SQL
 
     @ReactMethod
-    override fun query(sql: String, paramsJson: String, promise: Promise) {
+    override fun query(sql: String, params: ReadableArray, promise: Promise) {
         val c = client ?: run {
             promise.reject("NOT_CONNECTED", "Client not initialized")
             return
         }
         try {
-            val params = parseParams(paramsJson)
-            val rows = c.query(sql, params)
-            promise.resolve(rowsToJson(rows))
+            val rows = c.query(sql, parseParams(params))
+            promise.resolve(rowsToWritableArray(rows))
         } catch (e: Exception) {
             rejectWithError(promise, e)
         }
     }
 
     @ReactMethod
-    override fun queryOne(sql: String, paramsJson: String, promise: Promise) {
+    override fun queryOne(sql: String, params: ReadableArray, promise: Promise) {
         val c = client ?: run {
             promise.reject("NOT_CONNECTED", "Client not initialized")
             return
         }
         try {
-            val params = parseParams(paramsJson)
-            val row = c.queryOne(sql, params)
-            promise.resolve(row?.let { rowToJson(it) })
+            val row = c.queryOne(sql, parseParams(params))
+            promise.resolve(row?.let { rowToWritableMap(it) })
         } catch (e: Exception) {
             rejectWithError(promise, e)
         }
     }
 
     @ReactMethod
-    override fun execute(sql: String, paramsJson: String, promise: Promise) {
+    override fun execute(sql: String, params: ReadableArray, promise: Promise) {
         val c = client ?: run {
             promise.reject("NOT_CONNECTED", "Client not initialized")
             return
         }
         try {
-            val params = parseParams(paramsJson)
-            val result = c.execute(sql, params)
+            val result = c.execute(sql, parseParams(params))
             val map = Arguments.createMap().apply {
                 putInt("rowsAffected", result.rowsAffected)
             }
@@ -233,20 +235,19 @@ class SynchroModule(reactContext: ReactApplicationContext) :
     }
 
     @ReactMethod
-    override fun executeBatch(statementsJson: String, promise: Promise) {
+    override fun executeBatch(statements: ReadableArray, promise: Promise) {
         val c = client ?: run {
             promise.reject("NOT_CONNECTED", "Client not initialized")
             return
         }
         try {
-            val array = JSONArray(statementsJson)
-            val statements = (0 until array.length()).map { i ->
-                val obj = array.getJSONObject(i)
-                val sql = obj.getString("sql")
-                val params = obj.optJSONArray("params")?.let { parseJsonArray(it) } ?: emptyArray()
-                SQLStatement(sql, params)
+            val nativeStatements = (0 until statements.size()).map { i ->
+                val item = statements.getMap(i) ?: throw IllegalArgumentException("Invalid SQL statement at index $i")
+                val sql = item.getString("sql") ?: throw IllegalArgumentException("Missing SQL at index $i")
+                val params = if (item.hasKey("params")) item.getArray("params") else null
+                SQLStatement(sql, params?.let { parseParams(it) } ?: emptyArray())
             }
-            val total = c.executeBatch(statements)
+            val total = c.executeBatch(nativeStatements)
             val map = Arguments.createMap().apply {
                 putInt("totalRowsAffected", total)
             }
@@ -263,8 +264,8 @@ class SynchroModule(reactContext: ReactApplicationContext) :
     }
 
     private sealed class TransactionOp {
-        data class Query(val sql: String, val params: Array<Any?>, val deferred: CompletableDeferred<String>) : TransactionOp()
-        data class QueryOne(val sql: String, val params: Array<Any?>, val deferred: CompletableDeferred<String?>) : TransactionOp()
+        data class Query(val sql: String, val params: Array<Any?>, val deferred: CompletableDeferred<WritableArray>) : TransactionOp()
+        data class QueryOne(val sql: String, val params: Array<Any?>, val deferred: CompletableDeferred<WritableMap?>) : TransactionOp()
         data class Execute(val sql: String, val params: Array<Any?>, val deferred: CompletableDeferred<WritableMap>) : TransactionOp()
         class Commit(val deferred: CompletableDeferred<Unit>) : TransactionOp()
         class Rollback(val deferred: CompletableDeferred<Unit>) : TransactionOp()
@@ -293,8 +294,9 @@ class SynchroModule(reactContext: ReactApplicationContext) :
         sessions[txID] = session
 
         scope.launch {
+            var finalDeferred: CompletableDeferred<Unit>? = null
             try {
-                val txBlock: (android.database.sqlite.SQLiteDatabase) -> Unit = { db ->
+                val txBlock: (SQLiteDatabase) -> Unit = { db ->
                     promise.resolve(txID)
                     runBlocking {
                         withTimeout(5000) {
@@ -303,7 +305,7 @@ class SynchroModule(reactContext: ReactApplicationContext) :
                                     is TransactionOp.Query -> {
                                         try {
                                             val rows = queryOnDb(db, op.sql, op.params)
-                                            op.deferred.complete(rowsToJson(rows))
+                                            op.deferred.complete(rowsToWritableArray(rows))
                                         } catch (e: Exception) {
                                             op.deferred.completeExceptionally(e)
                                         }
@@ -311,14 +313,14 @@ class SynchroModule(reactContext: ReactApplicationContext) :
                                     is TransactionOp.QueryOne -> {
                                         try {
                                             val rows = queryOnDb(db, op.sql, op.params)
-                                            op.deferred.complete(if (rows.isNotEmpty()) rowToJson(rows[0]) else null)
+                                            op.deferred.complete(rows.firstOrNull()?.let { rowToWritableMap(it) })
                                         } catch (e: Exception) {
                                             op.deferred.completeExceptionally(e)
                                         }
                                     }
                                     is TransactionOp.Execute -> {
                                         try {
-                                            db.execSQL(op.sql, op.params)
+                                            executeOnDb(db, op.sql, op.params)
                                             val cursor = db.rawQuery("SELECT changes() as c", null)
                                             val count = cursor.use {
                                                 if (it.moveToFirst()) it.getInt(0) else 0
@@ -332,12 +334,12 @@ class SynchroModule(reactContext: ReactApplicationContext) :
                                         }
                                     }
                                     is TransactionOp.Commit -> {
-                                        op.deferred.complete(Unit)
+                                        finalDeferred = op.deferred
                                         session.operations.close()
                                         break@transactionLoop
                                     }
                                     is TransactionOp.Rollback -> {
-                                        op.deferred.complete(Unit)
+                                        finalDeferred = op.deferred
                                         session.operations.close()
                                         throw TransactionRollbackException()
                                     }
@@ -352,20 +354,23 @@ class SynchroModule(reactContext: ReactApplicationContext) :
                 } else {
                     c.readTransaction { db -> txBlock(db) }
                 }
-            } catch (_: TimeoutCancellationException) {
-                // Auto-rollback on timeout
+                finalDeferred?.complete(Unit)
+            } catch (e: TimeoutCancellationException) {
+                finalDeferred?.completeExceptionally(e)
             } catch (_: TransactionRollbackException) {
-                // Intentional rollback
-            } catch (_: Exception) {
-                // Transaction ended
+                finalDeferred?.complete(Unit)
+            } catch (e: Exception) {
+                finalDeferred?.completeExceptionally(e)
             }
             sessions.remove(txID)
         }
     }
 
-    private fun queryOnDb(db: android.database.sqlite.SQLiteDatabase, sql: String, params: Array<Any?>): List<Row> {
-        val stringParams = params.map { it?.toString() }.toTypedArray()
-        val cursor = db.rawQuery(sql, stringParams)
+    private fun queryOnDb(db: SQLiteDatabase, sql: String, params: Array<Any?>): List<Row> {
+        val cursor = db.rawQueryWithFactory({ _, driver, editTable, query ->
+            bindStatementParams(query, params)
+            SQLiteCursor(driver, editTable, query)
+        }, sql, emptyArray(), "")
         val rows = mutableListOf<Row>()
         cursor.use {
             while (it.moveToNext()) {
@@ -373,10 +378,10 @@ class SynchroModule(reactContext: ReactApplicationContext) :
                 for (i in 0 until it.columnCount) {
                     val name = it.getColumnName(i)
                     row[name] = when (it.getType(i)) {
-                        android.database.Cursor.FIELD_TYPE_NULL -> null
-                        android.database.Cursor.FIELD_TYPE_INTEGER -> it.getLong(i)
-                        android.database.Cursor.FIELD_TYPE_FLOAT -> it.getDouble(i)
-                        android.database.Cursor.FIELD_TYPE_BLOB -> it.getBlob(i)
+                        Cursor.FIELD_TYPE_NULL -> null
+                        Cursor.FIELD_TYPE_INTEGER -> it.getLong(i)
+                        Cursor.FIELD_TYPE_FLOAT -> it.getDouble(i)
+                        Cursor.FIELD_TYPE_BLOB -> it.getBlob(i)
                         else -> it.getString(i)
                     }
                 }
@@ -386,17 +391,26 @@ class SynchroModule(reactContext: ReactApplicationContext) :
         return rows
     }
 
+    private fun executeOnDb(db: SQLiteDatabase, sql: String, params: Array<Any?>) {
+        val stmt = db.compileStatement(sql)
+        try {
+            bindStatementParams(stmt, params)
+            stmt.executeUpdateDelete()
+        } finally {
+            stmt.close()
+        }
+    }
+
     @ReactMethod
-    override fun txQuery(txID: String, sql: String, paramsJson: String, promise: Promise) {
+    override fun txQuery(txID: String, sql: String, params: ReadableArray, promise: Promise) {
         val session = sessions[txID] ?: run {
             promise.reject("TRANSACTION_TIMEOUT", "Transaction not found or expired")
             return
         }
         scope.launch {
             try {
-                val params = parseParams(paramsJson)
-                val deferred = CompletableDeferred<String>()
-                session.operations.send(TransactionOp.Query(sql, params, deferred))
+                val deferred = CompletableDeferred<WritableArray>()
+                session.operations.send(TransactionOp.Query(sql, parseParams(params), deferred))
                 promise.resolve(deferred.await())
             } catch (e: Exception) {
                 rejectWithError(promise, e)
@@ -405,16 +419,15 @@ class SynchroModule(reactContext: ReactApplicationContext) :
     }
 
     @ReactMethod
-    override fun txQueryOne(txID: String, sql: String, paramsJson: String, promise: Promise) {
+    override fun txQueryOne(txID: String, sql: String, params: ReadableArray, promise: Promise) {
         val session = sessions[txID] ?: run {
             promise.reject("TRANSACTION_TIMEOUT", "Transaction not found or expired")
             return
         }
         scope.launch {
             try {
-                val params = parseParams(paramsJson)
-                val deferred = CompletableDeferred<String?>()
-                session.operations.send(TransactionOp.QueryOne(sql, params, deferred))
+                val deferred = CompletableDeferred<WritableMap?>()
+                session.operations.send(TransactionOp.QueryOne(sql, parseParams(params), deferred))
                 promise.resolve(deferred.await())
             } catch (e: Exception) {
                 rejectWithError(promise, e)
@@ -423,16 +436,15 @@ class SynchroModule(reactContext: ReactApplicationContext) :
     }
 
     @ReactMethod
-    override fun txExecute(txID: String, sql: String, paramsJson: String, promise: Promise) {
+    override fun txExecute(txID: String, sql: String, params: ReadableArray, promise: Promise) {
         val session = sessions[txID] ?: run {
             promise.reject("TRANSACTION_TIMEOUT", "Transaction not found or expired")
             return
         }
         scope.launch {
             try {
-                val params = parseParams(paramsJson)
                 val deferred = CompletableDeferred<WritableMap>()
-                session.operations.send(TransactionOp.Execute(sql, params, deferred))
+                session.operations.send(TransactionOp.Execute(sql, parseParams(params), deferred))
                 promise.resolve(deferred.await())
             } catch (e: Exception) {
                 rejectWithError(promise, e)
@@ -547,7 +559,7 @@ class SynchroModule(reactContext: ReactApplicationContext) :
     override fun addQueryObserver(
         observerID: String,
         sql: String,
-        paramsJson: String,
+        params: ReadableArray,
         tables: ReadableArray,
         promise: Promise
     ) {
@@ -556,12 +568,12 @@ class SynchroModule(reactContext: ReactApplicationContext) :
             return
         }
         try {
-            val params = parseParams(paramsJson)
+            val nativeParams = parseParams(params)
             val tableList = (0 until tables.size()).mapNotNull { tables.getString(it) }
-            val cancellable = c.watch(sql, params, tableList) { rows ->
+            val cancellable = c.watch(sql, nativeParams, tableList) { rows ->
                 val eventParams = Arguments.createMap().apply {
                     putString("observerID", observerID)
-                    putString("rowsJson", rowsToJson(rows))
+                    putArray("rows", rowsToWritableArray(rows))
                 }
                 emitOnQueryResult(eventParams)
             }
@@ -775,18 +787,45 @@ class SynchroModule(reactContext: ReactApplicationContext) :
         else -> value.toString()
     }
 
-    private fun parseParams(json: String): Array<Any?> {
-        val array = JSONArray(json)
-        return Array(array.length()) { i ->
-            val v = array.get(i)
-            if (v == JSONObject.NULL) null else v
+    private fun parseParams(params: ReadableArray): Array<Any?> {
+        return Array(params.size()) { i ->
+            when (params.getType(i)) {
+                ReadableType.Null -> null
+                ReadableType.Boolean -> params.getBoolean(i)
+                ReadableType.Number -> sqliteNumberParam(params.getDouble(i), i)
+                ReadableType.String -> params.getString(i)
+                else -> throw IllegalArgumentException("Unsupported SQL bind value at index $i")
+            }
         }
     }
 
-    private fun parseJsonArray(array: JSONArray): Array<Any?> {
-        return Array(array.length()) { i ->
-            val v = array.get(i)
-            if (v == JSONObject.NULL) null else v
+    private fun sqliteNumberParam(value: Double, index: Int): Any {
+        if (!value.isFinite()) {
+            throw IllegalArgumentException("Invalid SQL number bind value at index $index")
+        }
+        return if (value % 1.0 == 0.0 && value >= Long.MIN_VALUE.toDouble() && value <= Long.MAX_VALUE.toDouble()) {
+            value.toLong()
+        } else {
+            value
+        }
+    }
+
+    private fun bindStatementParams(stmt: SQLiteProgram, params: Array<Any?>) {
+        for (i in params.indices) {
+            val bindIndex = i + 1
+            when (val value = params[i]) {
+                null -> stmt.bindNull(bindIndex)
+                is Long -> stmt.bindLong(bindIndex, value)
+                is Int -> stmt.bindLong(bindIndex, value.toLong())
+                is Double -> stmt.bindDouble(bindIndex, value)
+                is Float -> stmt.bindDouble(bindIndex, value.toDouble())
+                is ByteArray -> stmt.bindBlob(bindIndex, value)
+                is Boolean -> stmt.bindLong(bindIndex, if (value) 1L else 0L)
+                is String -> stmt.bindString(bindIndex, value)
+                else -> throw IllegalArgumentException(
+                    "Unsupported SQL bind value at index $i: ${value::class.java.name}"
+                )
+            }
         }
     }
 
@@ -812,23 +851,33 @@ class SynchroModule(reactContext: ReactApplicationContext) :
         )
     }
 
-    private fun rowToJson(row: Row): String {
-        val obj = JSONObject()
+    private fun rowToWritableMap(row: Row): WritableMap {
+        val map = Arguments.createMap()
         for ((k, v) in row) {
-            obj.put(k, v ?: JSONObject.NULL)
+            putSQLiteValue(map, k, v)
         }
-        return obj.toString()
+        return map
     }
 
-    private fun rowsToJson(rows: List<Row>): String {
-        val array = JSONArray()
+    private fun rowsToWritableArray(rows: List<Row>): WritableArray {
+        val array = Arguments.createArray()
         for (row in rows) {
-            val obj = JSONObject()
-            for ((k, v) in row) {
-                obj.put(k, v ?: JSONObject.NULL)
-            }
-            array.put(obj)
+            array.pushMap(rowToWritableMap(row))
         }
-        return array.toString()
+        return array
+    }
+
+    private fun putSQLiteValue(map: WritableMap, key: String, value: Any?) {
+        when (value) {
+            null -> map.putNull(key)
+            is Boolean -> map.putBoolean(key, value)
+            is Int -> map.putInt(key, value)
+            is Long -> map.putDouble(key, value.toDouble())
+            is Float -> map.putDouble(key, value.toDouble())
+            is Double -> map.putDouble(key, value)
+            is String -> map.putString(key, value)
+            is ByteArray -> map.putString(key, Base64.encodeToString(value, Base64.NO_WRAP))
+            else -> map.putString(key, value.toString())
+        }
     }
 }

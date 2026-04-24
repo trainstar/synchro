@@ -4,6 +4,7 @@ import android.content.Context
 import android.database.Cursor
 import android.database.sqlite.SQLiteDatabase
 import android.database.sqlite.SQLiteOpenHelper
+import android.database.sqlite.SQLiteCursor
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CopyOnWriteArraySet
 
@@ -232,60 +233,18 @@ class SynchroDatabase(context: Context, dbPath: String) :
     // MARK: - Queries
 
     fun query(sql: String, params: Array<out Any?>? = null): List<Row> {
-        val stringParams = bindableParams(params)
-        readableDatabase.rawQuery(sql, stringParams).use { cursor ->
-            val rows = mutableListOf<Row>()
-            while (cursor.moveToNext()) {
-                rows.add(cursorToRow(cursor))
-            }
-            return rows
-        }
+        return queryWithTypedBindings(readableDatabase, sql, params)
     }
 
     fun queryOne(sql: String, params: Array<out Any?>? = null): Row? {
-        val stringParams = bindableParams(params)
-        readableDatabase.rawQuery(sql, stringParams).use { cursor ->
-            return if (cursor.moveToFirst()) cursorToRow(cursor) else null
-        }
-    }
-
-    /**
-     * Converts params to String array suitable for rawQuery.
-     * Android's rawQuery only accepts String[], so we must convert types properly:
-     * - null stays null (rawQuery binds NULL for null entries)
-     * - Boolean → "1" or "0" (matches SQLite INTEGER convention)
-     * - everything else → toString()
-     */
-    private fun bindableParams(params: Array<out Any?>?): Array<String?>? {
-        return params?.map { value ->
-            when (value) {
-                null -> null
-                is Boolean -> if (value) "1" else "0"
-                else -> value.toString()
-            }
-        }?.toTypedArray()
+        return queryOneWithTypedBindings(readableDatabase, sql, params)
     }
 
     fun execute(sql: String, params: Array<out Any?>? = null): ExecResult {
         val db = writableDatabase
         val stmt = db.compileStatement(sql)
-        if (params != null) {
-            for (i in params.indices) {
-                val value = params[i]
-                val bindIndex = i + 1 // SQLite bind indices are 1-based
-                when (value) {
-                    null -> stmt.bindNull(bindIndex)
-                    is Long -> stmt.bindLong(bindIndex, value)
-                    is Int -> stmt.bindLong(bindIndex, value.toLong())
-                    is Double -> stmt.bindDouble(bindIndex, value)
-                    is Float -> stmt.bindDouble(bindIndex, value.toDouble())
-                    is ByteArray -> stmt.bindBlob(bindIndex, value)
-                    is Boolean -> stmt.bindLong(bindIndex, if (value) 1L else 0L)
-                    else -> stmt.bindString(bindIndex, value.toString())
-                }
-            }
-        }
         val changes = try {
+            bindTypedValues(stmt, params?.toList() ?: emptyList())
             stmt.executeUpdateDelete()
         } finally {
             stmt.close()
@@ -347,11 +306,7 @@ class SynchroDatabase(context: Context, dbPath: String) :
         try {
             var total = 0
             for (stmt in statements) {
-                if (stmt.params != null && stmt.params.isNotEmpty()) {
-                    db.execSQL(stmt.sql, stmt.params)
-                } else {
-                    db.execSQL(stmt.sql)
-                }
+                executeBatchStatement(db, stmt)
                 total += queryChangesCount(db)
                 affectedTables.addAll(extractTablesFromSQL(stmt.sql))
             }
@@ -467,20 +422,20 @@ class SynchroDatabase(context: Context, dbPath: String) :
         }
     }
 
-    private fun cursorToRow(cursor: Cursor): Row {
-        val row = mutableMapOf<String, Any?>()
-        for (i in 0 until cursor.columnCount) {
-            val name = cursor.getColumnName(i)
-            row[name] = when (cursor.getType(i)) {
-                Cursor.FIELD_TYPE_NULL -> null
-                Cursor.FIELD_TYPE_INTEGER -> cursor.getLong(i)
-                Cursor.FIELD_TYPE_FLOAT -> cursor.getDouble(i)
-                Cursor.FIELD_TYPE_STRING -> cursor.getString(i)
-                Cursor.FIELD_TYPE_BLOB -> cursor.getBlob(i)
-                else -> null
-            }
+    private fun executeBatchStatement(db: SQLiteDatabase, stmt: SQLStatement) {
+        val params = stmt.params
+        if (params == null || params.isEmpty()) {
+            db.execSQL(stmt.sql)
+            return
         }
-        return row
+
+        val compiled = db.compileStatement(stmt.sql)
+        try {
+            bindTypedValues(compiled, params.toList())
+            compiled.execute()
+        } finally {
+            compiled.close()
+        }
     }
 
     private fun extractTablesFromSQL(sql: String): Set<String> {
@@ -498,6 +453,76 @@ class SynchroDatabase(context: Context, dbPath: String) :
         }
         return tables
     }
+}
+
+internal fun queryWithTypedBindings(
+    db: SQLiteDatabase,
+    sql: String,
+    params: Array<out Any?>? = null
+): List<Row> {
+    db.rawQueryWithFactory({ _, driver, editTable, query ->
+        bindTypedValues(query, params?.toList() ?: emptyList())
+        SQLiteCursor(driver, editTable, query)
+    }, sql, emptyArray(), "").use { cursor ->
+        val rows = mutableListOf<Row>()
+        while (cursor.moveToNext()) {
+            rows.add(cursorToRow(cursor))
+        }
+        return rows
+    }
+}
+
+internal fun queryOneWithTypedBindings(
+    db: SQLiteDatabase,
+    sql: String,
+    params: Array<out Any?>? = null
+): Row? {
+    db.rawQueryWithFactory({ _, driver, editTable, query ->
+        bindTypedValues(query, params?.toList() ?: emptyList())
+        SQLiteCursor(driver, editTable, query)
+    }, sql, emptyArray(), "").use { cursor ->
+        return if (cursor.moveToFirst()) cursorToRow(cursor) else null
+    }
+}
+
+internal fun sqliteBindValue(value: Any?, index: Int): Any? {
+    return when (value) {
+        null -> null
+        is String -> value
+        is ByteArray -> value
+        is Boolean -> if (value) 1L else 0L
+        is Byte -> value.toLong()
+        is Short -> value.toLong()
+        is Int -> value.toLong()
+        is Long -> value
+        is Float -> {
+            require(value.isFinite()) { "Invalid SQL bind number at index $index" }
+            value.toDouble()
+        }
+        is Double -> {
+            require(value.isFinite()) { "Invalid SQL bind number at index $index" }
+            value
+        }
+        else -> throw IllegalArgumentException(
+            "Unsupported SQL bind value at index $index: ${value::class.java.name}"
+        )
+    }
+}
+
+private fun cursorToRow(cursor: Cursor): Row {
+    val row = mutableMapOf<String, Any?>()
+    for (i in 0 until cursor.columnCount) {
+        val name = cursor.getColumnName(i)
+        row[name] = when (cursor.getType(i)) {
+            Cursor.FIELD_TYPE_NULL -> null
+            Cursor.FIELD_TYPE_INTEGER -> cursor.getLong(i)
+            Cursor.FIELD_TYPE_FLOAT -> cursor.getDouble(i)
+            Cursor.FIELD_TYPE_STRING -> cursor.getString(i)
+            Cursor.FIELD_TYPE_BLOB -> cursor.getBlob(i)
+            else -> null
+        }
+    }
+    return row
 }
 
 // MARK: - ChangeNotifier

@@ -96,30 +96,30 @@
 }
 
 - (void)query:(NSString *)sql
-   paramsJson:(NSString *)paramsJson
+       params:(NSArray *)params
       resolve:(RCTPromiseResolveBlock)resolve
        reject:(RCTPromiseRejectBlock)reject {
-    [self.impl query:sql paramsJson:paramsJson resolve:resolve reject:reject];
+    [self.impl query:sql params:params resolve:resolve reject:reject];
 }
 
 - (void)queryOne:(NSString *)sql
-      paramsJson:(NSString *)paramsJson
+          params:(NSArray *)params
          resolve:(RCTPromiseResolveBlock)resolve
           reject:(RCTPromiseRejectBlock)reject {
-    [self.impl queryOne:sql paramsJson:paramsJson resolve:resolve reject:reject];
+    [self.impl queryOne:sql params:params resolve:resolve reject:reject];
 }
 
 - (void)execute:(NSString *)sql
-     paramsJson:(NSString *)paramsJson
+         params:(NSArray *)params
         resolve:(RCTPromiseResolveBlock)resolve
          reject:(RCTPromiseRejectBlock)reject {
-    [self.impl execute:sql paramsJson:paramsJson resolve:resolve reject:reject];
+    [self.impl execute:sql params:params resolve:resolve reject:reject];
 }
 
-- (void)executeBatch:(NSString *)statementsJson
-             resolve:(RCTPromiseResolveBlock)resolve
-              reject:(RCTPromiseRejectBlock)reject {
-    [self.impl executeBatch:statementsJson resolve:resolve reject:reject];
+- (void)executeBatch:(NSArray *)statements
+	             resolve:(RCTPromiseResolveBlock)resolve
+	              reject:(RCTPromiseRejectBlock)reject {
+    [self.impl executeBatch:statements resolve:resolve reject:reject];
 }
 
 - (void)beginWriteTransaction:(RCTPromiseResolveBlock)resolve
@@ -134,26 +134,26 @@
 
 - (void)txQuery:(NSString *)txID
             sql:(NSString *)sql
-     paramsJson:(NSString *)paramsJson
+         params:(NSArray *)params
         resolve:(RCTPromiseResolveBlock)resolve
          reject:(RCTPromiseRejectBlock)reject {
-    [self.impl txQuery:txID sql:sql paramsJson:paramsJson resolve:resolve reject:reject];
+    [self.impl txQuery:txID sql:sql params:params resolve:resolve reject:reject];
 }
 
 - (void)txQueryOne:(NSString *)txID
                sql:(NSString *)sql
-        paramsJson:(NSString *)paramsJson
+            params:(NSArray *)params
            resolve:(RCTPromiseResolveBlock)resolve
             reject:(RCTPromiseRejectBlock)reject {
-    [self.impl txQueryOne:txID sql:sql paramsJson:paramsJson resolve:resolve reject:reject];
+    [self.impl txQueryOne:txID sql:sql params:params resolve:resolve reject:reject];
 }
 
 - (void)txExecute:(NSString *)txID
               sql:(NSString *)sql
-       paramsJson:(NSString *)paramsJson
+           params:(NSArray *)params
           resolve:(RCTPromiseResolveBlock)resolve
            reject:(RCTPromiseRejectBlock)reject {
-    [self.impl txExecute:txID sql:sql paramsJson:paramsJson resolve:resolve reject:reject];
+    [self.impl txExecute:txID sql:sql params:params resolve:resolve reject:reject];
 }
 
 - (void)commitTransaction:(NSString *)txID
@@ -200,11 +200,11 @@
 
 - (void)addQueryObserver:(NSString *)observerID
                      sql:(NSString *)sql
-              paramsJson:(NSString *)paramsJson
+                  params:(NSArray *)params
                   tables:(NSArray *)tables
                  resolve:(RCTPromiseResolveBlock)resolve
                   reject:(RCTPromiseRejectBlock)reject {
-    [self.impl addQueryObserver:observerID sql:sql paramsJson:paramsJson tables:tables resolve:resolve reject:reject];
+    [self.impl addQueryObserver:observerID sql:sql params:params tables:tables resolve:resolve reject:reject];
 }
 
 - (void)removeObserver:(NSString *)observerID
@@ -269,18 +269,18 @@ RCT_EXTERN_METHOD(close:(RCTPromiseResolveBlock)resolve
 RCT_EXTERN_METHOD(getPath:(RCTPromiseResolveBlock)resolve
                   reject:(RCTPromiseRejectBlock)reject)
 RCT_EXTERN_METHOD(query:(NSString *)sql
-                  paramsJson:(NSString *)paramsJson
+                  params:(NSArray *)params
                   resolve:(RCTPromiseResolveBlock)resolve
                   reject:(RCTPromiseRejectBlock)reject)
 RCT_EXTERN_METHOD(queryOne:(NSString *)sql
-                  paramsJson:(NSString *)paramsJson
+                  params:(NSArray *)params
                   resolve:(RCTPromiseResolveBlock)resolve
                   reject:(RCTPromiseRejectBlock)reject)
 RCT_EXTERN_METHOD(execute:(NSString *)sql
-                  paramsJson:(NSString *)paramsJson
+                  params:(NSArray *)params
                   resolve:(RCTPromiseResolveBlock)resolve
                   reject:(RCTPromiseRejectBlock)reject)
-RCT_EXTERN_METHOD(executeBatch:(NSString *)statementsJson
+RCT_EXTERN_METHOD(executeBatch:(NSArray *)statements
                   resolve:(RCTPromiseResolveBlock)resolve
                   reject:(RCTPromiseRejectBlock)reject)
 RCT_EXTERN_METHOD(beginWriteTransaction:(RCTPromiseResolveBlock)resolve
@@ -289,17 +289,17 @@ RCT_EXTERN_METHOD(beginReadTransaction:(RCTPromiseResolveBlock)resolve
                   reject:(RCTPromiseRejectBlock)reject)
 RCT_EXTERN_METHOD(txQuery:(NSString *)txID
                   sql:(NSString *)sql
-                  paramsJson:(NSString *)paramsJson
+                  params:(NSArray *)params
                   resolve:(RCTPromiseResolveBlock)resolve
                   reject:(RCTPromiseRejectBlock)reject)
 RCT_EXTERN_METHOD(txQueryOne:(NSString *)txID
                   sql:(NSString *)sql
-                  paramsJson:(NSString *)paramsJson
+                  params:(NSArray *)params
                   resolve:(RCTPromiseResolveBlock)resolve
                   reject:(RCTPromiseRejectBlock)reject)
 RCT_EXTERN_METHOD(txExecute:(NSString *)txID
                   sql:(NSString *)sql
-                  paramsJson:(NSString *)paramsJson
+                  params:(NSArray *)params
                   resolve:(RCTPromiseResolveBlock)resolve
                   reject:(RCTPromiseRejectBlock)reject)
 RCT_EXTERN_METHOD(commitTransaction:(NSString *)txID
@@ -328,7 +328,7 @@ RCT_EXTERN_METHOD(addChangeObserver:(NSString *)observerID
                   reject:(RCTPromiseRejectBlock)reject)
 RCT_EXTERN_METHOD(addQueryObserver:(NSString *)observerID
                   sql:(NSString *)sql
-                  paramsJson:(NSString *)paramsJson
+                  params:(NSArray *)params
                   tables:(NSArray<NSString *> *)tables
                   resolve:(RCTPromiseResolveBlock)resolve
                   reject:(RCTPromiseRejectBlock)reject)

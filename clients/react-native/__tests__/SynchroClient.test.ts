@@ -42,27 +42,39 @@ describe('SynchroClient', () => {
   });
 
   describe('query', () => {
-    it('serializes params and deserializes rows', async () => {
+    it('passes typed params and returns rows', async () => {
       const rows = [{ id: '1', name: 'test' }];
-      mockNativeModule.query.mockResolvedValueOnce(JSON.stringify(rows));
+      mockNativeModule.query.mockResolvedValueOnce(rows);
 
       const client = makeClient();
       const result = await client.query('SELECT * FROM items WHERE id = ?', ['1']);
 
       expect(mockNativeModule.query).toHaveBeenCalledWith(
         'SELECT * FROM items WHERE id = ?',
-        '["1"]'
+        ['1']
       );
       expect(result).toEqual(rows);
     });
 
     it('handles empty params', async () => {
-      mockNativeModule.query.mockResolvedValueOnce('[]');
+      mockNativeModule.query.mockResolvedValueOnce([]);
 
       const client = makeClient();
       await client.query('SELECT 1');
 
-      expect(mockNativeModule.query).toHaveBeenCalledWith('SELECT 1', '[]');
+      expect(mockNativeModule.query).toHaveBeenCalledWith('SELECT 1', []);
+    });
+
+    it('passes null bind params without removing positional slots', async () => {
+      mockNativeModule.query.mockResolvedValueOnce([]);
+
+      const client = makeClient();
+      await client.query('SELECT * FROM items WHERE deleted_at IS ? AND name = ?', [null, 'x']);
+
+      expect(mockNativeModule.query).toHaveBeenCalledWith(
+        'SELECT * FROM items WHERE deleted_at IS ? AND name = ?',
+        [null, 'x']
+      );
     });
   });
 
@@ -76,9 +88,18 @@ describe('SynchroClient', () => {
       expect(result).toBeNull();
     });
 
+    it('returns null when iOS native returns undefined for no row', async () => {
+      mockNativeModule.queryOne.mockResolvedValueOnce(undefined);
+
+      const client = makeClient();
+      const result = await client.queryOne('SELECT * FROM items WHERE id = ?', ['missing']);
+
+      expect(result).toBeNull();
+    });
+
     it('deserializes single row', async () => {
       const row = { id: '1', name: 'test' };
-      mockNativeModule.queryOne.mockResolvedValueOnce(JSON.stringify(row));
+      mockNativeModule.queryOne.mockResolvedValueOnce(row);
 
       const client = makeClient();
       const result = await client.queryOne('SELECT * FROM items LIMIT 1');
@@ -96,30 +117,45 @@ describe('SynchroClient', () => {
 
       expect(result.rowsAffected).toBe(3);
     });
+
+    it('passes null bind params to execute without removing positional slots', async () => {
+      mockNativeModule.execute.mockResolvedValueOnce({ rowsAffected: 1 });
+
+      const client = makeClient();
+      await client.execute(
+        'INSERT INTO items (id, deleted_at, name) VALUES (?, ?, ?)',
+        ['1', null, 'x']
+      );
+
+      expect(mockNativeModule.execute).toHaveBeenCalledWith(
+        'INSERT INTO items (id, deleted_at, name) VALUES (?, ?, ?)',
+        ['1', null, 'x']
+      );
+    });
   });
 
   describe('executeBatch', () => {
-    it('serializes statements array', async () => {
+    it('passes statements array with typed params', async () => {
       mockNativeModule.executeBatch.mockResolvedValueOnce({ totalRowsAffected: 2 });
 
       const client = makeClient();
       const result = await client.executeBatch([
-        { sql: 'INSERT INTO items (id) VALUES (?)', params: ['a'] },
-        { sql: 'INSERT INTO items (id) VALUES (?)', params: ['b'] },
+        { sql: 'INSERT INTO items (id, deleted_at) VALUES (?, ?)', params: ['a', null] },
+        { sql: 'INSERT INTO items (id, deleted_at) VALUES (?, ?)', params: ['b', null] },
       ]);
 
       expect(result.totalRowsAffected).toBe(2);
-      const call = mockNativeModule.executeBatch.mock.calls[0][0];
-      const parsed = JSON.parse(call);
-      expect(parsed).toHaveLength(2);
-      expect(parsed[0].sql).toBe('INSERT INTO items (id) VALUES (?)');
+      expect(mockNativeModule.executeBatch).toHaveBeenCalledWith([
+        { sql: 'INSERT INTO items (id, deleted_at) VALUES (?, ?)', params: ['a', null] },
+        { sql: 'INSERT INTO items (id, deleted_at) VALUES (?, ?)', params: ['b', null] },
+      ]);
     });
   });
 
   describe('writeTransaction', () => {
     it('begins, executes, and commits', async () => {
       mockNativeModule.txExecute.mockResolvedValueOnce({ rowsAffected: 1 });
-      mockNativeModule.txQuery.mockResolvedValueOnce(JSON.stringify([{ count: 1 }]));
+      mockNativeModule.txQuery.mockResolvedValueOnce([{ count: 1 }]);
 
       const client = makeClient();
       const result = await client.writeTransaction(async (tx) => {
@@ -129,9 +165,26 @@ describe('SynchroClient', () => {
       });
 
       expect(mockNativeModule.beginWriteTransaction).toHaveBeenCalled();
-      expect(mockNativeModule.txExecute).toHaveBeenCalledWith('tx-1', expect.any(String), expect.any(String));
+      expect(mockNativeModule.txExecute).toHaveBeenCalledWith('tx-1', expect.any(String), expect.any(Array));
       expect(mockNativeModule.commitTransaction).toHaveBeenCalledWith('tx-1');
       expect(result).toBe(1);
+    });
+
+    it('normalizes transaction queryOne missing rows to null', async () => {
+      mockNativeModule.txQueryOne.mockResolvedValueOnce(undefined);
+
+      const client = makeClient();
+      const result = await client.writeTransaction(async (tx) => {
+        return await tx.queryOne('SELECT * FROM items WHERE id = ?', ['missing']);
+      });
+
+      expect(mockNativeModule.txQueryOne).toHaveBeenCalledWith(
+        'tx-1',
+        'SELECT * FROM items WHERE id = ?',
+        ['missing']
+      );
+      expect(mockNativeModule.commitTransaction).toHaveBeenCalledWith('tx-1');
+      expect(result).toBeNull();
     });
 
     it('rolls back on error', async () => {
@@ -142,24 +195,34 @@ describe('SynchroClient', () => {
       const client = makeClient();
       await expect(
         client.writeTransaction(async (tx) => {
-          await tx.execute('INSERT INTO items (id) VALUES (?)', ['dup']);
+          await tx.execute('INSERT INTO items (id, deleted_at) VALUES (?, ?)', ['dup', null]);
         })
       ).rejects.toThrow();
 
+      expect(mockNativeModule.txExecute).toHaveBeenCalledWith(
+        'tx-1',
+        'INSERT INTO items (id, deleted_at) VALUES (?, ?)',
+        ['dup', null]
+      );
       expect(mockNativeModule.rollbackTransaction).toHaveBeenCalledWith('tx-1');
     });
   });
 
   describe('readTransaction', () => {
     it('begins read, executes, and commits', async () => {
-      mockNativeModule.txQuery.mockResolvedValueOnce(JSON.stringify([{ id: '1' }]));
+      mockNativeModule.txQuery.mockResolvedValueOnce([{ id: '1' }]);
 
       const client = makeClient();
       const result = await client.readTransaction(async (tx) => {
-        return await tx.query('SELECT * FROM items');
+        return await tx.query('SELECT * FROM items WHERE deleted_at IS ?', [null]);
       });
 
       expect(mockNativeModule.beginReadTransaction).toHaveBeenCalled();
+      expect(mockNativeModule.txQuery).toHaveBeenCalledWith(
+        'tx-1',
+        'SELECT * FROM items WHERE deleted_at IS ?',
+        [null]
+      );
       expect(mockNativeModule.commitTransaction).toHaveBeenCalledWith('tx-1');
       expect(result).toEqual([{ id: '1' }]);
     });

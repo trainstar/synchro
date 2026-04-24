@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import type { SynchroClient } from '../SynchroClient';
-import type { Row } from '../types';
+import type { Row, SQLiteBindValue } from '../types';
 import type { SynchroError } from '../errors';
 
 interface UseQueryResult {
@@ -34,7 +34,7 @@ function useStableArray<T>(value?: readonly T[]): readonly T[] | undefined {
 export function useQuery(
   client: SynchroClient,
   sql: string,
-  params?: unknown[],
+  params?: SQLiteBindValue[],
   tables?: string[]
 ): UseQueryResult {
   const [data, setData] = useState<Row[]>([]);
@@ -55,7 +55,7 @@ export function useQuery(
       // Reactive mode: use watch()
       setLoading(true);
       let firstResult = true;
-      const unsubscribe = client.watch(sql, stableParams as unknown[] | undefined, stableTables as string[], (rows) => {
+      const unsubscribe = client.watch(sql, stableParams, stableTables as string[], (rows) => {
         setData(rows);
         setError(null);
         if (firstResult) {
@@ -69,7 +69,7 @@ export function useQuery(
       let cancelled = false;
       setLoading(true);
       client
-        .query(sql, stableParams as unknown[] | undefined)
+        .query(sql, stableParams)
         .then((rows) => {
           if (!cancelled) {
             setData(rows);

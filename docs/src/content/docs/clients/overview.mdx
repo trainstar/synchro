@@ -29,6 +29,8 @@ They do not define server sync semantics. They execute the server contract local
 
 React Native exposes the same product surface as the native SDKs, but it must remain a bridge.
 
+SQL calls cross the bridge as SQL strings plus native typed bind arrays. Query results come back as native row objects. The bridge does not serialize SQL params or SQL rows through JSON, so positional `null` bind values are preserved on iOS and Android.
+
 It does not own:
 
 - queue semantics

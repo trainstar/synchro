@@ -45,6 +45,8 @@ const rows = await client.query('SELECT * FROM tasks WHERE done = ?', [0]);
 await client.execute('UPDATE tasks SET done = ? WHERE id = ?', [1, rows[0].id]);
 ```
 
+SQL bind params are passed as native typed arrays, not as JSON strings. Supported React Native bind values are `null`, `string`, `number`, and `boolean`. Positional `null` values are preserved across iOS and Android for direct queries, batch execution, transactions, and query observers.
+
 ## Public API
 
 Core methods:

@@ -322,6 +322,7 @@ export default function App() {
     await client.createTable('test_items', [
       { name: 'id', type: 'TEXT', primaryKey: true },
       { name: 'name', type: 'TEXT' },
+      { name: 'note', type: 'TEXT' },
     ]);
   }, [client, ensureInitialized]);
 
@@ -370,11 +371,16 @@ export default function App() {
   const runExecute = useCallback(async () => {
     try {
       await ensureLocalTable();
+      const recordID = uuid();
       const result = await client.execute(
-        'INSERT INTO test_items (id, name) VALUES (?, ?)',
-        [uuid(), 'test']
+        'INSERT INTO test_items (id, name, note) VALUES (?, ?, ?)',
+        [recordID, 'test', null]
       );
-      update('execute', result.rowsAffected === 1);
+      const row = await client.queryOne(
+        'SELECT id FROM test_items WHERE id = ? AND note IS ?',
+        [recordID, null]
+      );
+      update('execute', result.rowsAffected === 1 && row?.id === recordID);
     } catch {
       update('execute', false);
     }
@@ -386,12 +392,12 @@ export default function App() {
       const recordID = uuid();
       const value = await client.writeTransaction(async (tx) => {
         await tx.execute(
-          'INSERT INTO test_items (id, name) VALUES (?, ?)',
-          [recordID, 'txtest']
+          'INSERT INTO test_items (id, name, note) VALUES (?, ?, ?)',
+          [recordID, 'txtest', null]
         );
         const rows = await tx.query(
-          'SELECT name FROM test_items WHERE id = ?',
-          [recordID]
+          'SELECT name FROM test_items WHERE id = ? AND note IS ?',
+          [recordID, null]
         );
         return rows[0]?.name;
       });
@@ -408,8 +414,8 @@ export default function App() {
       try {
         await client.writeTransaction(async (tx) => {
           await tx.execute(
-            'INSERT INTO test_items (id, name) VALUES (?, ?)',
-            [rollbackID, 'should-not-persist']
+            'INSERT INTO test_items (id, name, note) VALUES (?, ?, ?)',
+            [rollbackID, 'should-not-persist', null]
           );
           throw new Error('intentional rollback');
         });
@@ -432,11 +438,14 @@ export default function App() {
       await ensureLocalTable();
       const seedID = uuid();
       await client.execute(
-        'INSERT INTO test_items (id, name) VALUES (?, ?)',
-        [seedID, 'read-seed']
+        'INSERT INTO test_items (id, name, note) VALUES (?, ?, ?)',
+        [seedID, 'read-seed', null]
       );
       const rows = await client.readTransaction((tx) =>
-        tx.query('SELECT * FROM test_items WHERE id = ?', [seedID])
+        tx.query(
+          'SELECT * FROM test_items WHERE id = ? AND note IS ?',
+          [seedID, null]
+        )
       );
       update('readTx', rows.length === 1 && rows[0].id === seedID);
     } catch {
@@ -473,12 +482,12 @@ export default function App() {
 
       const recoveryID = uuid();
       const result = await client.execute(
-        'INSERT INTO test_items (id, name) VALUES (?, ?)',
-        [recoveryID, 'recovered']
+        'INSERT INTO test_items (id, name, note) VALUES (?, ?, ?)',
+        [recoveryID, 'recovered', null]
       );
       const row = await client.queryOne(
-        'SELECT name FROM test_items WHERE id = ?',
-        [recoveryID]
+        'SELECT name FROM test_items WHERE id = ? AND note IS ?',
+        [recoveryID, null]
       );
       update(
         'txRecovery',

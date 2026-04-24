@@ -144,9 +144,9 @@ public struct ExecResult: Sendable {
 
 public struct SQLStatement: @unchecked Sendable {
     public let sql: String
-    public let params: [any DatabaseValueConvertible]?
+    public let params: [(any DatabaseValueConvertible)?]?
 
-    public init(sql: String, params: [any DatabaseValueConvertible]? = nil) {
+    public init(sql: String, params: [(any DatabaseValueConvertible)?]? = nil) {
         self.sql = sql
         self.params = params
     }

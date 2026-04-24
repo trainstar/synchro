@@ -8,7 +8,7 @@ private struct ObservedRows: @unchecked Sendable {
 }
 
 private struct ObservedQueryParams: @unchecked Sendable {
-    let values: [any DatabaseValueConvertible]?
+    let values: [(any DatabaseValueConvertible)?]?
 }
 
 final class SynchroDatabase: @unchecked Sendable {
@@ -25,19 +25,19 @@ final class SynchroDatabase: @unchecked Sendable {
 
     // MARK: - Queries
 
-    func query(_ sql: String, params: [any DatabaseValueConvertible]?) throws -> [Row] {
+    func query(_ sql: String, params: [(any DatabaseValueConvertible)?]?) throws -> [Row] {
         try dbPool.read { db in
             try Row.fetchAll(db, sql: sql, arguments: StatementArguments(params ?? []))
         }
     }
 
-    func queryOne(_ sql: String, params: [any DatabaseValueConvertible]?) throws -> Row? {
+    func queryOne(_ sql: String, params: [(any DatabaseValueConvertible)?]?) throws -> Row? {
         try dbPool.read { db in
             try Row.fetchOne(db, sql: sql, arguments: StatementArguments(params ?? []))
         }
     }
 
-    func execute(_ sql: String, params: [any DatabaseValueConvertible]?) throws -> ExecResult {
+    func execute(_ sql: String, params: [(any DatabaseValueConvertible)?]?) throws -> ExecResult {
         try dbPool.write { db in
             try db.execute(sql: sql, arguments: StatementArguments(params ?? []))
             return ExecResult(rowsAffected: db.changesCount)
@@ -148,7 +148,7 @@ final class SynchroDatabase: @unchecked Sendable {
         return cancellable
     }
 
-    func watch(_ sql: String, params: [any DatabaseValueConvertible]?, tables: [String], callback: @escaping ([Row]) -> Void) -> DatabaseCancellable {
+    func watch(_ sql: String, params: [(any DatabaseValueConvertible)?]?, tables: [String], callback: @escaping ([Row]) -> Void) -> DatabaseCancellable {
         let observedParams = ObservedQueryParams(values: params)
         let observation = ValueObservation.tracking(regions: tables.map { Table($0) }, fetch: { db -> ObservedRows in
             ObservedRows(rows: try Row.fetchAll(db, sql: sql, arguments: StatementArguments(observedParams.values ?? [])))

@@ -38,15 +38,15 @@ public final class SynchroClient: @unchecked Sendable {
 
     // MARK: - Core SQL
 
-    public func query(_ sql: String, params: [any DatabaseValueConvertible]? = nil) throws -> [Row] {
+    public func query(_ sql: String, params: [(any DatabaseValueConvertible)?]? = nil) throws -> [Row] {
         try database.query(sql, params: params)
     }
 
-    public func queryOne(_ sql: String, params: [any DatabaseValueConvertible]? = nil) throws -> Row? {
+    public func queryOne(_ sql: String, params: [(any DatabaseValueConvertible)?]? = nil) throws -> Row? {
         try database.queryOne(sql, params: params)
     }
 
-    public func execute(_ sql: String, params: [any DatabaseValueConvertible]? = nil) throws -> ExecResult {
+    public func execute(_ sql: String, params: [(any DatabaseValueConvertible)?]? = nil) throws -> ExecResult {
         try database.execute(sql, params: params)
     }
 
@@ -102,7 +102,7 @@ public final class SynchroClient: @unchecked Sendable {
         DatabaseCancellableWrapper(database.onChange(tables: tables, callback: callback))
     }
 
-    public func watch(_ sql: String, params: [any DatabaseValueConvertible]? = nil, tables: [String], callback: @escaping ([Row]) -> Void) -> any Cancellable {
+    public func watch(_ sql: String, params: [(any DatabaseValueConvertible)?]? = nil, tables: [String], callback: @escaping ([Row]) -> Void) -> any Cancellable {
         DatabaseCancellableWrapper(database.watch(sql, params: params, tables: tables, callback: callback))
     }
 

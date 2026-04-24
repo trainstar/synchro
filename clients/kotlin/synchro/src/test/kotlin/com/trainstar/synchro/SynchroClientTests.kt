@@ -66,6 +66,18 @@ class SynchroClientTests {
         val one = client.queryOne("SELECT * FROM local_notes WHERE id = ?", arrayOf("n1"))
         assertNotNull(one)
 
+        val nullResult = client.execute(
+            "INSERT INTO local_notes (id, body) VALUES (?, ?)",
+            arrayOf("n2", null)
+        )
+        assertEquals(1, nullResult.rowsAffected)
+
+        val nullRows = client.query(
+            "SELECT id FROM local_notes WHERE id = ? AND body IS ?",
+            arrayOf("n2", null)
+        )
+        assertEquals(1, nullRows.size)
+
         client.close()
     }
 
@@ -81,12 +93,15 @@ class SynchroClientTests {
         val total = client.executeBatch(listOf(
             SQLStatement("INSERT INTO orders (id, value) VALUES (?, ?)", arrayOf("a", 1)),
             SQLStatement("INSERT INTO orders (id, value) VALUES (?, ?)", arrayOf("b", 2)),
-            SQLStatement("INSERT INTO orders (id, value) VALUES (?, ?)", arrayOf("c", 3)),
+            SQLStatement("INSERT INTO orders (id, value) VALUES (?, ?)", arrayOf("c", null)),
         ))
         assertEquals(3, total)
 
         val rows = client.query("SELECT COUNT(*) as cnt FROM orders")
         assertEquals(3L, rows[0]["cnt"])
+
+        val nullRows = client.query("SELECT id FROM orders WHERE value IS ?", arrayOf(null))
+        assertEquals("c", nullRows.first()["id"])
 
         client.close()
     }
@@ -172,6 +187,36 @@ class SynchroClientTests {
         client.close()
     }
 
+    @Test
+    fun testWatchPreservesNullBindSlots() {
+        val client = makeClient()
+
+        client.createTable("nullable_counters", listOf(
+            ColumnDef(name = "id", type = "TEXT", nullable = false, primaryKey = true),
+            ColumnDef(name = "note", type = "TEXT"),
+        ))
+
+        client.execute(
+            "INSERT INTO nullable_counters (id, note) VALUES (?, ?)",
+            arrayOf("c1", null)
+        )
+
+        val latch = CountDownLatch(1)
+        val cancellable = client.watch(
+            "SELECT id FROM nullable_counters WHERE id = ? AND note IS ?",
+            arrayOf("c1", null),
+            listOf("nullable_counters")
+        ) { rows ->
+            if (rows.firstOrNull()?.get("id") == "c1") {
+                latch.countDown()
+            }
+        }
+
+        assertTrue(latch.await(2, TimeUnit.SECONDS))
+        cancellable.cancel()
+        client.close()
+    }
+
     // MARK: - Schema
 
     @Test
@@ -246,21 +291,19 @@ class SynchroClientTests {
 
         val db = SynchroDatabase(context, dbName)
         db.writeTransaction { rawDb ->
-            SynchroMeta.upsertScope(
-                rawDb,
-                scopeId = "global",
-                cursor = "opaque_cursor_token",
-                checksum = "7",
-                generation = 0,
-                localChecksum = 7
+            rawDb.execSQL(
+                """
+                INSERT INTO _synchro_scopes (scope_id, cursor, checksum, generation, local_checksum)
+                VALUES (?, ?, ?, ?, ?)
+                """.trimIndent(),
+                arrayOf("global", "opaque_cursor_token", "7", "0", "7")
             )
-            SynchroMeta.upsertScopeRow(
-                rawDb,
-                scopeId = "global",
-                tableName = "categories",
-                recordId = "seed-category",
-                checksum = 7,
-                generation = 0
+            rawDb.execSQL(
+                """
+                INSERT INTO _synchro_scope_rows (scope_id, table_name, record_id, checksum, generation)
+                VALUES (?, ?, ?, ?, ?)
+                """.trimIndent(),
+                arrayOf("global", "categories", "seed-category", "7", "0")
             )
         }
         db.close()

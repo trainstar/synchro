@@ -12,20 +12,55 @@ import Synchro
 // MARK: - Transaction Session
 
 private class TransactionSession {
-    let semaphore = DispatchSemaphore(value: 0)
-    var pendingOp: TransactionOp?
-    var committed = false
-    var rolledBack = false
+    private let condition = NSCondition()
+    private var operations: [TransactionOp] = []
+    private var closed = false
+    var finalCompletion: ((Result<Void, Error>) -> Void)?
     let isWrite: Bool
 
     init(isWrite: Bool) {
         self.isWrite = isWrite
     }
+
+    func enqueue(_ op: TransactionOp) -> Bool {
+        condition.lock()
+        defer { condition.unlock() }
+        guard !closed else {
+            return false
+        }
+        operations.append(op)
+        condition.signal()
+        return true
+    }
+
+    func nextOperation(timeout: TimeInterval) throws -> TransactionOp? {
+        condition.lock()
+        defer { condition.unlock() }
+
+        let deadline = Date().addingTimeInterval(timeout)
+        while operations.isEmpty && !closed {
+            if !condition.wait(until: deadline) {
+                throw TransactionTimeoutError()
+            }
+        }
+
+        guard !operations.isEmpty else {
+            return nil
+        }
+        return operations.removeFirst()
+    }
+
+    func close() {
+        condition.lock()
+        closed = true
+        condition.broadcast()
+        condition.unlock()
+    }
 }
 
 private enum TransactionOp {
-    case query(sql: String, params: [Any], completion: (Result<String, Error>) -> Void)
-    case queryOne(sql: String, params: [Any], completion: (Result<String?, Error>) -> Void)
+    case query(sql: String, params: [Any], completion: (Result<[[String: Any]], Error>) -> Void)
+    case queryOne(sql: String, params: [Any], completion: (Result<[String: Any]?, Error>) -> Void)
     case execute(sql: String, params: [Any], completion: (Result<[String: Any], Error>) -> Void)
     case commit(completion: (Result<Void, Error>) -> Void)
     case rollback(completion: (Result<Void, Error>) -> Void)
@@ -236,7 +271,7 @@ public class SynchroModuleImpl: NSObject {
     @objc
     public func query(
         _ sql: String,
-        paramsJson: String,
+        params: [Any],
         resolve: @escaping RCTPromiseResolveBlock,
         reject: @escaping RCTPromiseRejectBlock
     ) {
@@ -245,9 +280,8 @@ public class SynchroModuleImpl: NSObject {
             return
         }
         do {
-            let params = try parseParams(paramsJson)
-            let rows = try client.query(sql, params: params)
-            resolve(try rowsToJson(rows))
+            let rows = try client.query(sql, params: try bridgeParams(params))
+            resolve(rowsToBridgeRows(rows))
         } catch {
             rejectWithError(reject, error)
         }
@@ -256,7 +290,7 @@ public class SynchroModuleImpl: NSObject {
     @objc
     public func queryOne(
         _ sql: String,
-        paramsJson: String,
+        params: [Any],
         resolve: @escaping RCTPromiseResolveBlock,
         reject: @escaping RCTPromiseRejectBlock
     ) {
@@ -265,12 +299,11 @@ public class SynchroModuleImpl: NSObject {
             return
         }
         do {
-            let params = try parseParams(paramsJson)
-            let row = try client.queryOne(sql, params: params)
+            let row = try client.queryOne(sql, params: try bridgeParams(params))
             if let row = row {
-                resolve(try rowToJson(row))
+                resolve(rowToBridgeRow(row))
             } else {
-                resolve(nil)
+                resolve(NSNull())
             }
         } catch {
             rejectWithError(reject, error)
@@ -280,7 +313,7 @@ public class SynchroModuleImpl: NSObject {
     @objc
     public func execute(
         _ sql: String,
-        paramsJson: String,
+        params: [Any],
         resolve: @escaping RCTPromiseResolveBlock,
         reject: @escaping RCTPromiseRejectBlock
     ) {
@@ -289,8 +322,7 @@ public class SynchroModuleImpl: NSObject {
             return
         }
         do {
-            let params = try parseParams(paramsJson)
-            let result = try client.execute(sql, params: params)
+            let result = try client.execute(sql, params: try bridgeParams(params))
             resolve(["rowsAffected": result.rowsAffected])
         } catch {
             rejectWithError(reject, error)
@@ -299,7 +331,7 @@ public class SynchroModuleImpl: NSObject {
 
     @objc
     public func executeBatch(
-        _ statementsJson: String,
+        _ statements: [[String: Any]],
         resolve: @escaping RCTPromiseResolveBlock,
         reject: @escaping RCTPromiseRejectBlock
     ) {
@@ -308,14 +340,17 @@ public class SynchroModuleImpl: NSObject {
             return
         }
         do {
-            let data = statementsJson.data(using: .utf8)!
-            let array = try JSONSerialization.jsonObject(with: data) as! [[String: Any]]
-            let statements: [Synchro.SQLStatement] = array.map { item in
+            let nativeStatements: [Synchro.SQLStatement] = try statements.map { item in
                 let sql = item["sql"] as! String
-                let params = (item["params"] as? [Any])?.compactMap { jsonValueToParam($0) }
+                let params: [(any DatabaseValueConvertible)?]?
+                if let bridgeValues = item["params"] as? [Any] {
+                    params = try bridgeParams(bridgeValues)
+                } else {
+                    params = nil
+                }
                 return Synchro.SQLStatement(sql: sql, params: params)
             }
-            let total = try client.executeBatch(statements)
+            let total = try client.executeBatch(nativeStatements)
             resolve(["totalRowsAffected": total])
         } catch {
             rejectWithError(reject, error)
@@ -360,43 +395,39 @@ public class SynchroModuleImpl: NSObject {
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             do {
                 let txBlock: (GRDB.Database) throws -> Void = { db in
+                    guard let self else {
+                        throw NSError(domain: "SynchroModule", code: 0, userInfo: [NSLocalizedDescriptionKey: "module released"])
+                    }
                     resolve(txID)
 
                     while true {
-                        let result = session.semaphore.wait(timeout: .now() + 5)
-                        if result == .timedOut {
-                            throw TransactionTimeoutError()
-                        }
-
-                        guard let op = session.pendingOp else {
+                        guard let op = try session.nextOperation(timeout: 5) else {
                             break
                         }
-                        session.pendingOp = nil
 
                         switch op {
                         case .query(let sql, let params, let completion):
                             do {
-                                let args = StatementArguments(params.compactMap { self?.jsonValueToParam($0) }) ?? StatementArguments()
+                                let args = StatementArguments(try self.bridgeParams(params))
                                 let rows = try Row.fetchAll(db, sql: sql, arguments: args)
-                                let json = try self?.rowsToJson(rows) ?? "[]"
-                                completion(.success(json))
+                                completion(.success(self.rowsToBridgeRows(rows)))
                             } catch {
                                 completion(.failure(error))
                             }
 
                         case .queryOne(let sql, let params, let completion):
                             do {
-                                let args = StatementArguments(params.compactMap { self?.jsonValueToParam($0) }) ?? StatementArguments()
+                                let args = StatementArguments(try self.bridgeParams(params))
                                 let row = try Row.fetchOne(db, sql: sql, arguments: args)
-                                let json = row != nil ? try self?.rowToJson(row!) : nil
-                                completion(.success(json))
+                                let payload = row.map { self.rowToBridgeRow($0) }
+                                completion(.success(payload))
                             } catch {
                                 completion(.failure(error))
                             }
 
                         case .execute(let sql, let params, let completion):
                             do {
-                                let args = StatementArguments(params.compactMap { self?.jsonValueToParam($0) }) ?? StatementArguments()
+                                let args = StatementArguments(try self.bridgeParams(params))
                                 try db.execute(sql: sql, arguments: args)
                                 let changes = db.changesCount
                                 completion(.success(["rowsAffected": changes]))
@@ -405,31 +436,35 @@ public class SynchroModuleImpl: NSObject {
                             }
 
                         case .commit(let completion):
-                            session.committed = true
-                            completion(.success(()))
+                            session.close()
+                            session.finalCompletion = completion
                             return
 
                         case .rollback(let completion):
-                            session.rolledBack = true
-                            completion(.success(()))
+                            session.close()
+                            session.finalCompletion = completion
                             throw TransactionRollbackError()
                         }
                     }
                 }
 
+                let finalResult: Result<Void, Error>
                 if isWrite {
                     try client.writeTransaction { db in try txBlock(db) }
                 } else {
                     try client.readTransaction { db in try txBlock(db) }
                 }
+                finalResult = .success(())
+                session.finalCompletion?(finalResult)
             } catch is TransactionTimeoutError {
-                // auto-rollback
+                session.finalCompletion?(.failure(TransactionTimeoutError()))
             } catch is TransactionRollbackError {
-                // intentional rollback
+                session.finalCompletion?(.success(()))
             } catch {
-                // other failure
+                session.finalCompletion?(.failure(error))
             }
 
+            session.close()
             self?.sessionsLock.lock()
             self?.sessions.removeValue(forKey: txID)
             self?.sessionsLock.unlock()
@@ -440,7 +475,7 @@ public class SynchroModuleImpl: NSObject {
     public func txQuery(
         _ txID: String,
         sql: String,
-        paramsJson: String,
+        params: [Any],
         resolve: @escaping RCTPromiseResolveBlock,
         reject: @escaping RCTPromiseRejectBlock
     ) {
@@ -448,17 +483,15 @@ public class SynchroModuleImpl: NSObject {
             reject("TRANSACTION_TIMEOUT", "Transaction not found or expired", nil)
             return
         }
-        do {
-            let params = try parseParamsRaw(paramsJson)
-            session.pendingOp = .query(sql: sql, params: params) { result in
-                switch result {
-                case .success(let json): resolve(json)
-                case .failure(let error): reject("DATABASE_ERROR", error.localizedDescription, error)
-                }
+        let op = TransactionOp.query(sql: sql, params: params) { result in
+            switch result {
+            case .success(let rows): resolve(rows)
+            case .failure(let error): reject("DATABASE_ERROR", error.localizedDescription, error)
             }
-            session.semaphore.signal()
-        } catch {
-            rejectWithError(reject, error)
+        }
+        guard session.enqueue(op) else {
+            reject("TRANSACTION_TIMEOUT", "Transaction not found or expired", nil)
+            return
         }
     }
 
@@ -466,7 +499,7 @@ public class SynchroModuleImpl: NSObject {
     public func txQueryOne(
         _ txID: String,
         sql: String,
-        paramsJson: String,
+        params: [Any],
         resolve: @escaping RCTPromiseResolveBlock,
         reject: @escaping RCTPromiseRejectBlock
     ) {
@@ -474,17 +507,15 @@ public class SynchroModuleImpl: NSObject {
             reject("TRANSACTION_TIMEOUT", "Transaction not found or expired", nil)
             return
         }
-        do {
-            let params = try parseParamsRaw(paramsJson)
-            session.pendingOp = .queryOne(sql: sql, params: params) { result in
-                switch result {
-                case .success(let json): resolve(json)
-                case .failure(let error): reject("DATABASE_ERROR", error.localizedDescription, error)
-                }
+        let op = TransactionOp.queryOne(sql: sql, params: params) { result in
+            switch result {
+            case .success(let row): resolve(row ?? NSNull())
+            case .failure(let error): reject("DATABASE_ERROR", error.localizedDescription, error)
             }
-            session.semaphore.signal()
-        } catch {
-            rejectWithError(reject, error)
+        }
+        guard session.enqueue(op) else {
+            reject("TRANSACTION_TIMEOUT", "Transaction not found or expired", nil)
+            return
         }
     }
 
@@ -492,7 +523,7 @@ public class SynchroModuleImpl: NSObject {
     public func txExecute(
         _ txID: String,
         sql: String,
-        paramsJson: String,
+        params: [Any],
         resolve: @escaping RCTPromiseResolveBlock,
         reject: @escaping RCTPromiseRejectBlock
     ) {
@@ -500,17 +531,15 @@ public class SynchroModuleImpl: NSObject {
             reject("TRANSACTION_TIMEOUT", "Transaction not found or expired", nil)
             return
         }
-        do {
-            let params = try parseParamsRaw(paramsJson)
-            session.pendingOp = .execute(sql: sql, params: params) { result in
-                switch result {
-                case .success(let dict): resolve(dict)
-                case .failure(let error): reject("DATABASE_ERROR", error.localizedDescription, error)
-                }
+        let op = TransactionOp.execute(sql: sql, params: params) { result in
+            switch result {
+            case .success(let dict): resolve(dict)
+            case .failure(let error): reject("DATABASE_ERROR", error.localizedDescription, error)
             }
-            session.semaphore.signal()
-        } catch {
-            rejectWithError(reject, error)
+        }
+        guard session.enqueue(op) else {
+            reject("TRANSACTION_TIMEOUT", "Transaction not found or expired", nil)
+            return
         }
     }
 
@@ -524,13 +553,16 @@ public class SynchroModuleImpl: NSObject {
             reject("TRANSACTION_TIMEOUT", "Transaction not found or expired", nil)
             return
         }
-        session.pendingOp = .commit { result in
+        let op = TransactionOp.commit { result in
             switch result {
             case .success: resolve(nil)
             case .failure(let error): reject("DATABASE_ERROR", error.localizedDescription, error)
             }
         }
-        session.semaphore.signal()
+        guard session.enqueue(op) else {
+            reject("TRANSACTION_TIMEOUT", "Transaction not found or expired", nil)
+            return
+        }
     }
 
     @objc
@@ -543,13 +575,16 @@ public class SynchroModuleImpl: NSObject {
             resolve(nil)
             return
         }
-        session.pendingOp = .rollback { result in
+        let op = TransactionOp.rollback { result in
             switch result {
             case .success: resolve(nil)
             case .failure(let error): reject("DATABASE_ERROR", error.localizedDescription, error)
             }
         }
-        session.semaphore.signal()
+        guard session.enqueue(op) else {
+            resolve(nil)
+            return
+        }
     }
 
     private func getSession(_ txID: String) -> TransactionSession? {
@@ -581,8 +616,10 @@ public class SynchroModuleImpl: NSObject {
         observers.removeAll()
 
         sessionsLock.lock()
+        let activeSessions = Array(sessions.values)
         sessions.removeAll()
         sessionsLock.unlock()
+        activeSessions.forEach { $0.close() }
 
         authLock.lock()
         let authContinuations = pendingAuthContinuations
@@ -773,7 +810,7 @@ public class SynchroModuleImpl: NSObject {
     public func addQueryObserver(
         _ observerID: String,
         sql: String,
-        paramsJson: String,
+        params: [Any],
         tables: [String],
         resolve: @escaping RCTPromiseResolveBlock,
         reject: @escaping RCTPromiseRejectBlock
@@ -783,10 +820,10 @@ public class SynchroModuleImpl: NSObject {
             return
         }
         do {
-            let params = try parseParams(paramsJson)
-            let cancellable = client.watch(sql, params: params, tables: tables) { [weak self] rows in
-                if let json = try? self?.rowsToJson(rows) {
-                    self?.emit("onQueryResult", ["observerID": observerID, "rowsJson": json])
+            let nativeParams = try bridgeParams(params)
+            let cancellable = client.watch(sql, params: nativeParams, tables: tables) { [weak self] rows in
+                if let payload = self?.rowsToBridgeRows(rows) {
+                    self?.emit("onQueryResult", ["observerID": observerID, "rows": payload])
                 }
             }
             observers[observerID] = cancellable
@@ -887,32 +924,61 @@ public class SynchroModuleImpl: NSObject {
 
     // MARK: - Helpers
 
-    private func jsonValueToParam(_ value: Any) -> (any DatabaseValueConvertible)? {
-        switch value {
-        case is NSNull:
-            return nil
-        case let intVal as Int:
-            return intVal
-        case let doubleVal as Double:
-            return doubleVal
-        case let stringVal as String:
-            return stringVal
-        case let boolVal as Bool:
-            return boolVal ? 1 : 0
-        default:
-            return String(describing: value)
+    private enum BridgeParamError: LocalizedError {
+        case invalidNumber(index: Int)
+        case unsupported(index: Int, type: String)
+
+        var errorDescription: String? {
+            switch self {
+            case .invalidNumber(let index):
+                return "Invalid SQL bind number at index \(index)"
+            case .unsupported(let index, let type):
+                return "Unsupported SQL bind value at index \(index): \(type)"
+            }
         }
     }
 
-    private func parseParams(_ json: String) throws -> [any DatabaseValueConvertible] {
-        let data = json.data(using: .utf8)!
-        let array = try JSONSerialization.jsonObject(with: data) as? [Any] ?? []
-        return array.compactMap { jsonValueToParam($0) }
+    private func bridgeValueToParam(_ value: Any, index: Int) throws -> (any DatabaseValueConvertible)? {
+        switch value {
+        case is NSNull:
+            return nil
+        case let boolVal as Bool:
+            return boolVal ? 1 : 0
+        case let intVal as Int:
+            return intVal
+        case let int64Val as Int64:
+            return int64Val
+        case let doubleVal as Double:
+            guard doubleVal.isFinite else {
+                throw BridgeParamError.invalidNumber(index: index)
+            }
+            return doubleVal
+        case let stringVal as String:
+            return stringVal
+        case let numberVal as NSNumber:
+            if CFGetTypeID(numberVal) == CFBooleanGetTypeID() {
+                return numberVal.boolValue ? 1 : 0
+            }
+            let doubleValue = numberVal.doubleValue
+            guard doubleValue.isFinite else {
+                throw BridgeParamError.invalidNumber(index: index)
+            }
+            if doubleValue.isFinite,
+               doubleValue.rounded(.towardZero) == doubleValue,
+               doubleValue >= Double(Int64.min),
+               doubleValue <= Double(Int64.max) {
+                return Int64(doubleValue)
+            }
+            return doubleValue
+        default:
+            throw BridgeParamError.unsupported(index: index, type: String(describing: type(of: value)))
+        }
     }
 
-    private func parseParamsRaw(_ json: String) throws -> [Any] {
-        let data = json.data(using: .utf8)!
-        return try JSONSerialization.jsonObject(with: data) as? [Any] ?? []
+    private func bridgeParams(_ values: [Any]) throws -> [(any DatabaseValueConvertible)?] {
+        try values.enumerated().map { index, value in
+            try bridgeValueToParam(value, index: index)
+        }
     }
 
     private func parseColumns(_ json: String) throws -> [ColumnDef] {
@@ -953,26 +1019,16 @@ public class SynchroModuleImpl: NSObject {
         }
     }
 
-    private func rowToJson(_ row: Row) throws -> String {
+    private func rowToBridgeRow(_ row: Row) -> [String: Any] {
         var dict: [String: Any] = [:]
         for column in row.columnNames {
             let dbValue: DatabaseValue = row[column]
             dict[column] = databaseValueToFoundation(dbValue)
         }
-        let data = try JSONSerialization.data(withJSONObject: dict)
-        return String(data: data, encoding: .utf8)!
+        return dict
     }
 
-    private func rowsToJson(_ rows: [Row]) throws -> String {
-        let array: [[String: Any]] = rows.map { row in
-            var dict: [String: Any] = [:]
-            for column in row.columnNames {
-                let dbValue: DatabaseValue = row[column]
-                dict[column] = databaseValueToFoundation(dbValue)
-            }
-            return dict
-        }
-        let data = try JSONSerialization.data(withJSONObject: array)
-        return String(data: data, encoding: .utf8)!
+    private func rowsToBridgeRows(_ rows: [Row]) -> [[String: Any]] {
+        rows.map { rowToBridgeRow($0) }
     }
 }

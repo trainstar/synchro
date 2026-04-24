@@ -1,5 +1,7 @@
 export type Row = Record<string, unknown>;
 
+export type SQLiteBindValue = null | string | number | boolean;
+
 export interface ExecResult {
   rowsAffected: number;
 }
@@ -10,7 +12,7 @@ export interface BatchResult {
 
 export interface SQLStatement {
   sql: string;
-  params?: unknown[];
+  params?: readonly SQLiteBindValue[];
 }
 
 export interface ColumnDef {
@@ -27,9 +29,9 @@ export interface TableOptions {
 }
 
 export interface Transaction {
-  query(sql: string, params?: unknown[]): Promise<Row[]>;
-  queryOne(sql: string, params?: unknown[]): Promise<Row | null>;
-  execute(sql: string, params?: unknown[]): Promise<ExecResult>;
+  query(sql: string, params?: readonly SQLiteBindValue[]): Promise<Row[]>;
+  queryOne(sql: string, params?: readonly SQLiteBindValue[]): Promise<Row | null>;
+  execute(sql: string, params?: readonly SQLiteBindValue[]): Promise<ExecResult>;
 }
 
 export type SyncStatusType =

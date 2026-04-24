@@ -136,23 +136,29 @@ describe('Event routing', () => {
     const results: unknown[] = [];
 
     const unsub = client.watch(
-      'SELECT * FROM items',
-      undefined,
+      'SELECT * FROM items WHERE deleted_at IS ?',
+      [null],
       ['items'],
       (rows) => results.push(rows)
     );
 
     const obsID = mockNativeModule.addQueryObserver.mock.calls[0]?.[0];
+    expect(mockNativeModule.addQueryObserver).toHaveBeenCalledWith(
+      obsID,
+      'SELECT * FROM items WHERE deleted_at IS ?',
+      [null],
+      ['items']
+    );
 
     emitNativeEvent('onQueryResult', {
       observerID: obsID,
-      rowsJson: '[{"id":"1","name":"test"}]',
+      rows: [{ id: '1', name: 'test' }],
     });
 
     // Event with different observer ID should not be routed
     emitNativeEvent('onQueryResult', {
       observerID: 'other-observer',
-      rowsJson: '[{"id":"2"}]',
+      rows: [{ id: '2' }],
     });
 
     expect(results).toHaveLength(1);

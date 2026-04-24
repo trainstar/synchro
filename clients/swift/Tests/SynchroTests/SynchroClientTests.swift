@@ -48,6 +48,19 @@ final class SynchroClientTests: XCTestCase {
         let one = try client.queryOne("SELECT * FROM local_notes WHERE id = ?", params: ["n1"])
         XCTAssertNotNil(one)
 
+        let nullBody: String? = nil
+        let nullResult = try client.execute(
+            "INSERT INTO local_notes (id, body) VALUES (?, ?)",
+            params: ["n2", nullBody]
+        )
+        XCTAssertEqual(nullResult.rowsAffected, 1)
+
+        let nullRows = try client.query(
+            "SELECT id FROM local_notes WHERE id = ? AND body IS ?",
+            params: ["n2", nullBody]
+        )
+        XCTAssertEqual(nullRows.count, 1)
+
         try client.close()
     }
 
@@ -63,12 +76,15 @@ final class SynchroClientTests: XCTestCase {
         let total = try client.executeBatch([
             SQLStatement(sql: "INSERT INTO orders (id, value) VALUES (?, ?)", params: ["a", 1]),
             SQLStatement(sql: "INSERT INTO orders (id, value) VALUES (?, ?)", params: ["b", 2]),
-            SQLStatement(sql: "INSERT INTO orders (id, value) VALUES (?, ?)", params: ["c", 3]),
+            SQLStatement(sql: "INSERT INTO orders (id, value) VALUES (?, ?)", params: ["c", nil as Int?]),
         ])
         XCTAssertEqual(total, 3)
 
         let rows = try client.query("SELECT COUNT(*) as cnt FROM orders", params: nil)
         XCTAssertEqual(rows[0]["cnt"] as? Int64, 3)
+
+        let nullRows = try client.query("SELECT id FROM orders WHERE value IS ?", params: [nil as Int?])
+        XCTAssertEqual(nullRows.first?["id"] as? String, "c")
 
         try client.close()
     }
@@ -167,6 +183,37 @@ final class SynchroClientTests: XCTestCase {
         try client.close()
     }
 
+    func testWatchPreservesNullBindSlots() throws {
+        let config = makeConfig()
+        let client = try SynchroClient(config: config)
+
+        try client.createTable("nullable_counters", columns: [
+            ColumnDef(name: "id", type: "TEXT", nullable: false, primaryKey: true),
+            ColumnDef(name: "note", type: "TEXT"),
+        ])
+
+        let nullNote: String? = nil
+        _ = try client.execute(
+            "INSERT INTO nullable_counters (id, note) VALUES (?, ?)",
+            params: ["c1", nullNote]
+        )
+
+        let expectation = XCTestExpectation(description: "watch fires with null bind")
+        let cancellable = client.watch(
+            "SELECT id FROM nullable_counters WHERE id = ? AND note IS ?",
+            params: ["c1", nullNote],
+            tables: ["nullable_counters"]
+        ) { rows in
+            if rows.first?["id"] as? String == "c1" {
+                expectation.fulfill()
+            }
+        }
+
+        wait(for: [expectation], timeout: 2.0)
+        cancellable.cancel()
+        try client.close()
+    }
+
     // MARK: - Schema
 
     func testAlterTable() throws {
@@ -211,6 +258,18 @@ final class SynchroClientTests: XCTestCase {
             return row?["val"]
         }
         XCTAssertEqual(value, "hello")
+
+        enum IntentionalRollback: Error {
+            case rollback
+        }
+
+        XCTAssertThrowsError(try client.writeTransaction { db -> Void in
+            try db.execute(sql: "INSERT INTO txtest (id, val) VALUES (?, ?)", arguments: ["t2", "rolled-back"])
+            throw IntentionalRollback.rollback
+        })
+
+        let rolledBackRow = try client.queryOne("SELECT val FROM txtest WHERE id = ?", params: ["t2"])
+        XCTAssertNil(rolledBackRow)
 
         try client.close()
     }

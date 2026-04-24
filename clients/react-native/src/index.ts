@@ -7,6 +7,7 @@ export type {
   Row,
   ExecResult,
   BatchResult,
+  SQLiteBindValue,
   SQLStatement,
   ColumnDef,
   TableOptions,
