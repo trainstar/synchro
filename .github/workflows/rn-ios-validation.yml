@@ -21,16 +21,16 @@ jobs:
     steps:
       - uses: actions/checkout@v6.0.2
 
-      - uses: actions/setup-go@v6.3.0
+      - uses: actions/setup-go@v6.4.0
         with:
           go-version-file: api/go/go.mod
           cache-dependency-path: api/go/go.sum
 
-      - uses: actions/setup-node@v6.3.0
+      - uses: actions/setup-node@v6.4.0
         with:
           node-version: '22'
 
-      - uses: actions/cache@v5.0.4
+      - uses: actions/cache@v5.0.5
         with:
           path: |
             clients/react-native/node_modules
@@ -47,19 +47,19 @@ jobs:
           workspaces: |
             extensions -> target
 
-      - uses: actions/cache@v5.0.4
+      - uses: actions/cache@v5.0.5
         with:
           path: ~/.pgrx
           key: pgrx-${{ runner.os }}-0.17.0-pg18
 
-      - uses: actions/cache@v5.0.4
+      - uses: actions/cache@v5.0.5
         with:
           path: |
             ~/Library/Caches/CocoaPods
             clients/react-native/example/ios/Pods
           key: cocoapods-${{ runner.os }}-${{ hashFiles('clients/react-native/example/ios/Podfile.lock', 'Synchro.podspec', 'clients/react-native/SynchroReactNative.podspec') }}
 
-      - uses: actions/cache@v5.0.4
+      - uses: actions/cache@v5.0.5
         with:
           path: |
             ~/.cargo/bin/cargo-pgrx

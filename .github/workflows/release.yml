@@ -23,12 +23,12 @@ jobs:
     steps:
       - uses: actions/checkout@v6.0.2
 
-      - uses: actions/setup-go@v6.3.0
+      - uses: actions/setup-go@v6.4.0
         with:
           go-version-file: api/go/go.mod
           cache-dependency-path: api/go/go.sum
 
-      - uses: actions/setup-node@v6.3.0
+      - uses: actions/setup-node@v6.4.0
         with:
           node-version: '22'
 
@@ -49,16 +49,16 @@ jobs:
     steps:
       - uses: actions/checkout@v6.0.2
 
-      - uses: actions/setup-go@v6.3.0
+      - uses: actions/setup-go@v6.4.0
         with:
           go-version-file: api/go/go.mod
           cache-dependency-path: api/go/go.sum
 
-      - uses: actions/setup-node@v6.3.0
+      - uses: actions/setup-node@v6.4.0
         with:
           node-version: '22'
 
-      - uses: actions/cache@v5.0.4
+      - uses: actions/cache@v5.0.5
         with:
           path: |
             clients/react-native/node_modules
@@ -139,12 +139,12 @@ jobs:
             xsltproc \
             zlib1g-dev
 
-      - uses: actions/cache@v5.0.4
+      - uses: actions/cache@v5.0.5
         with:
           path: ~/.pgrx
           key: pgrx-${{ runner.os }}-0.17.0-pg18
 
-      - uses: actions/cache@v5.0.4
+      - uses: actions/cache@v5.0.5
         with:
           path: |
             ~/.cargo/bin/cargo-pgrx
@@ -169,7 +169,7 @@ jobs:
       - name: Archive PG18 pgrx runtime
         run: tar -C "$HOME" -cf "$RUNNER_TEMP/pgrx-pg18-linux.tar" .pgrx
 
-      - uses: actions/upload-artifact@v7.0.0
+      - uses: actions/upload-artifact@v7.0.1
         with:
           name: pgrx-pg18-linux
           path: ${{ runner.temp }}/pgrx-pg18-linux.tar
@@ -181,7 +181,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6.0.2
 
-      - uses: actions/setup-go@v6.3.0
+      - uses: actions/setup-go@v6.4.0
         with:
           go-version-file: api/go/go.mod
           cache-dependency-path: api/go/go.sum
@@ -212,7 +212,7 @@ jobs:
             xsltproc \
             zlib1g-dev
 
-      - uses: actions/cache@v5.0.4
+      - uses: actions/cache@v5.0.5
         with:
           path: |
             ~/.cargo/bin/cargo-pgrx
@@ -257,7 +257,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6.0.2
 
-      - uses: actions/setup-go@v6.3.0
+      - uses: actions/setup-go@v6.4.0
         with:
           go-version-file: api/go/go.mod
           cache-dependency-path: api/go/go.sum
@@ -269,12 +269,12 @@ jobs:
           workspaces: |
             extensions -> target
 
-      - uses: actions/cache@v5.0.4
+      - uses: actions/cache@v5.0.5
         with:
           path: ~/.pgrx
           key: pgrx-${{ runner.os }}-0.17.0-pg18
 
-      - uses: actions/cache@v5.0.4
+      - uses: actions/cache@v5.0.5
         with:
           path: |
             ~/.cargo/bin/cargo-pgrx
@@ -323,16 +323,16 @@ jobs:
     steps:
       - uses: actions/checkout@v6.0.2
 
-      - uses: actions/setup-go@v6.3.0
+      - uses: actions/setup-go@v6.4.0
         with:
           go-version-file: api/go/go.mod
           cache-dependency-path: api/go/go.sum
 
-      - uses: actions/setup-node@v6.3.0
+      - uses: actions/setup-node@v6.4.0
         with:
           node-version: '22'
 
-      - uses: actions/cache@v5.0.4
+      - uses: actions/cache@v5.0.5
         with:
           path: |
             clients/react-native/node_modules
@@ -349,19 +349,19 @@ jobs:
           workspaces: |
             extensions -> target
 
-      - uses: actions/cache@v5.0.4
+      - uses: actions/cache@v5.0.5
         with:
           path: ~/.pgrx
           key: pgrx-${{ runner.os }}-0.17.0-pg18
 
-      - uses: actions/cache@v5.0.4
+      - uses: actions/cache@v5.0.5
         with:
           path: |
             ~/Library/Caches/CocoaPods
             clients/react-native/example/ios/Pods
           key: cocoapods-${{ runner.os }}-${{ hashFiles('clients/react-native/example/ios/Podfile.lock', 'Synchro.podspec', 'clients/react-native/SynchroReactNative.podspec') }}
 
-      - uses: actions/cache@v5.0.4
+      - uses: actions/cache@v5.0.5
         with:
           path: |
             ~/.cargo/bin/cargo-pgrx
@@ -431,7 +431,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6.0.2
 
-      - uses: actions/setup-go@v6.3.0
+      - uses: actions/setup-go@v6.4.0
         with:
           go-version-file: api/go/go.mod
           cache-dependency-path: api/go/go.sum
@@ -468,7 +468,7 @@ jobs:
             xsltproc \
             zlib1g-dev
 
-      - uses: actions/cache@v5.0.4
+      - uses: actions/cache@v5.0.5
         with:
           path: |
             ~/.cargo/bin/cargo-pgrx
@@ -530,7 +530,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6.0.2
 
-      - uses: actions/setup-go@v6.3.0
+      - uses: actions/setup-go@v6.4.0
         with:
           go-version-file: api/go/go.mod
           cache-dependency-path: api/go/go.sum
@@ -541,11 +541,11 @@ jobs:
           java-version: '17'
           cache: gradle
 
-      - uses: actions/setup-node@v6.3.0
+      - uses: actions/setup-node@v6.4.0
         with:
           node-version: '22'
 
-      - uses: actions/cache@v5.0.4
+      - uses: actions/cache@v5.0.5
         with:
           path: |
             clients/react-native/node_modules
@@ -581,7 +581,7 @@ jobs:
             xsltproc \
             zlib1g-dev
 
-      - uses: actions/cache@v5.0.4
+      - uses: actions/cache@v5.0.5
         with:
           path: |
             ~/.cargo/bin/cargo-pgrx
@@ -649,7 +649,7 @@ jobs:
 
       - name: Cache Android AVD
         id: rn-android-avd-cache
-        uses: actions/cache@v5.0.4
+        uses: actions/cache@v5.0.5
         with:
           path: |
             ~/.android/avd/*
@@ -693,7 +693,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6.0.2
 
-      - uses: actions/setup-node@v6.3.0
+      - uses: actions/setup-node@v6.4.0
         with:
           node-version: '22'
           cache: npm
@@ -752,7 +752,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6.0.2
 
-      - uses: actions/setup-go@v6.3.0
+      - uses: actions/setup-go@v6.4.0
         with:
           go-version-file: api/go/go.mod
 
@@ -767,7 +767,7 @@ jobs:
           GOWORK=off go build -ldflags="-s -w" -o "../../dist/synchrod-pg-${{ matrix.goos }}-${{ matrix.goarch }}" ./cmd/synchrod-pg
           GOWORK=off go build -ldflags="-s -w" -o "../../dist/synchro-seed-${{ matrix.goos }}-${{ matrix.goarch }}" ./cmd/synchro-seed
 
-      - uses: actions/upload-artifact@v7.0.0
+      - uses: actions/upload-artifact@v7.0.1
         with:
           name: go-binaries-${{ matrix.goos }}-${{ matrix.goarch }}
           path: |
@@ -817,12 +817,12 @@ jobs:
             brew list --versions "$formula" >/dev/null 2>&1 || brew install "$formula"
           done
 
-      - uses: actions/cache@v5.0.4
+      - uses: actions/cache@v5.0.5
         with:
           path: ~/.pgrx
           key: pgrx-${{ runner.os }}-0.17.0-pg18
 
-      - uses: actions/cache@v5.0.4
+      - uses: actions/cache@v5.0.5
         with:
           path: |
             ~/.cargo/bin/cargo-pgrx
@@ -855,7 +855,7 @@ jobs:
           cd "${GITHUB_WORKSPACE}/dist"
           tar -czf "synchro-pg-pg18-${{ runner.os }}-${{ runner.arch }}.tar.gz" synchro-pg-pg18
 
-      - uses: actions/upload-artifact@v7.0.0
+      - uses: actions/upload-artifact@v7.0.1
         with:
           name: synchro-pg-pg18-${{ runner.os }}-${{ runner.arch }}
           path: dist/synchro-pg-pg18-${{ runner.os }}-${{ runner.arch }}.tar.gz
@@ -892,12 +892,12 @@ jobs:
     steps:
       - uses: actions/checkout@v6.0.2
 
-      - uses: actions/setup-node@v6.3.0
+      - uses: actions/setup-node@v6.4.0
         with:
           node-version: '22'
           registry-url: 'https://registry.npmjs.org'
 
-      - uses: actions/cache@v5.0.4
+      - uses: actions/cache@v5.0.5
         with:
           path: |
             clients/react-native/node_modules
