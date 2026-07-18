@@ -8,6 +8,7 @@ cover.out
 
 # macOS / IDE
 .DS_Store
+.watchman-cookie-*
 .idea/
 .vscode/
 *.swp
@@ -64,6 +65,7 @@ extensions/target/
 # AI config
 AGENTS.md
 CLAUDE.md
+.opencode/
 synchrod-pg
 !api/go/cmd/
 !api/go/cmd/synchrod-pg/

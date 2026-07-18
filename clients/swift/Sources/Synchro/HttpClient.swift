@@ -84,7 +84,7 @@ final class HttpClient: @unchecked Sendable {
             do {
                 return try decoder.decode(Resp.self, from: data)
             } catch {
-                debugLogHTTPFailure(request: req, statusCode: httpResponse.statusCode, responseData: data)
+                debugLogHTTPFailure(request: req, statusCode: httpResponse.statusCode)
                 throw SynchroError.invalidResponse(message: "decode failed: \(error.localizedDescription)")
             }
 
@@ -120,18 +120,16 @@ final class HttpClient: @unchecked Sendable {
             )
 
         default:
-            debugLogHTTPFailure(request: req, statusCode: httpResponse.statusCode, responseData: data)
+            debugLogHTTPFailure(request: req, statusCode: httpResponse.statusCode)
             let msg = errorMessage(from: data) ?? "HTTP \(httpResponse.statusCode)"
             throw SynchroError.serverError(status: httpResponse.statusCode, message: msg)
         }
     }
 
-    private func debugLogHTTPFailure(request: URLRequest, statusCode: Int, responseData: Data) {
+    private func debugLogHTTPFailure(request: URLRequest, statusCode: Int) {
 #if DEBUG
         let path = request.url?.path ?? "<unknown>"
-        let requestBody = request.httpBody.flatMap { String(data: $0, encoding: .utf8) } ?? "<empty>"
-        let responseBody = String(data: responseData, encoding: .utf8) ?? "<non-utf8>"
-        NSLog("Synchro HTTP failure path=%@ status=%d request=%@ response=%@", path, statusCode, requestBody, responseBody)
+        NSLog("Synchro HTTP failure path=%@ status=%d", path, statusCode)
 #endif
     }
 

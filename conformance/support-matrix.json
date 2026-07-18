@@ -1,0 +1,126 @@
+{
+  "$schema": "./schemas/support-matrix.schema.json",
+  "schema_version": 1,
+  "release": "0.3.0",
+  "current_track_policy": {
+    "selector": "current-stable",
+    "resolve_at": "release-candidate-start",
+    "record_exact_versions_in": "rc-manifest"
+  },
+  "cells": [
+    {
+      "id": "SUP-PG-014",
+      "component": "postgresql-server",
+      "platform": "postgresql",
+      "platform_version": { "kind": "exact", "value": "14" },
+      "policy": "excluded",
+      "note": "PostgreSQL 14 is outside v0.3.0 certification."
+    },
+    {
+      "id": "SUP-PG-015",
+      "component": "postgresql-server",
+      "platform": "postgresql",
+      "platform_version": { "kind": "exact", "value": "15" },
+      "policy": "excluded",
+      "note": "PostgreSQL 15 is outside v0.3.0 certification."
+    },
+    {
+      "id": "SUP-PG-016",
+      "component": "postgresql-server",
+      "platform": "postgresql",
+      "platform_version": { "kind": "exact", "value": "16" },
+      "policy": "excluded",
+      "note": "PostgreSQL 16 is outside v0.3.0 certification."
+    },
+    {
+      "id": "SUP-PG-017",
+      "component": "postgresql-server",
+      "platform": "postgresql",
+      "platform_version": { "kind": "exact", "value": "17" },
+      "policy": "excluded",
+      "note": "PostgreSQL 17 is outside v0.3.0 certification."
+    },
+    {
+      "id": "SUP-PG-018",
+      "component": "postgresql-server",
+      "platform": "postgresql",
+      "platform_version": { "kind": "exact", "value": "18" },
+      "policy": "required"
+    },
+    {
+      "id": "SUP-IOS-MIN-001",
+      "component": "swift-client",
+      "platform": "ios",
+      "platform_version": { "kind": "minimum", "value": "16" },
+      "policy": "required"
+    },
+    {
+      "id": "SUP-IOS-CURRENT-001",
+      "component": "swift-client",
+      "platform": "ios",
+      "platform_version": { "kind": "current-stable" },
+      "policy": "required"
+    },
+    {
+      "id": "SUP-MACOS-MIN-001",
+      "component": "swift-client",
+      "platform": "macos",
+      "platform_version": { "kind": "minimum", "value": "13" },
+      "policy": "required"
+    },
+    {
+      "id": "SUP-MACOS-CURRENT-001",
+      "component": "swift-client",
+      "platform": "macos",
+      "platform_version": { "kind": "current-stable" },
+      "policy": "required"
+    },
+    {
+      "id": "SUP-ANDROID-MIN-001",
+      "component": "kotlin-client",
+      "platform": "android",
+      "platform_version": { "kind": "minimum", "value": "24" },
+      "policy": "required",
+      "note": "The minimum selector is an Android API level."
+    },
+    {
+      "id": "SUP-ANDROID-CURRENT-001",
+      "component": "kotlin-client",
+      "platform": "android",
+      "platform_version": { "kind": "current-stable" },
+      "policy": "required"
+    },
+    {
+      "id": "SUP-RN-IOS-MIN-001",
+      "component": "react-native-client",
+      "platform": "ios",
+      "platform_version": { "kind": "minimum", "value": "16" },
+      "runtime_version": { "kind": "series", "value": "0.83.x" },
+      "policy": "required"
+    },
+    {
+      "id": "SUP-RN-IOS-CURRENT-001",
+      "component": "react-native-client",
+      "platform": "ios",
+      "platform_version": { "kind": "current-stable" },
+      "runtime_version": { "kind": "series", "value": "0.83.x" },
+      "policy": "required"
+    },
+    {
+      "id": "SUP-RN-ANDROID-MIN-001",
+      "component": "react-native-client",
+      "platform": "android",
+      "platform_version": { "kind": "minimum", "value": "24" },
+      "runtime_version": { "kind": "series", "value": "0.83.x" },
+      "policy": "required"
+    },
+    {
+      "id": "SUP-RN-ANDROID-CURRENT-001",
+      "component": "react-native-client",
+      "platform": "android",
+      "platform_version": { "kind": "current-stable" },
+      "runtime_version": { "kind": "series", "value": "0.83.x" },
+      "policy": "required"
+    }
+  ]
+}

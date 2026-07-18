@@ -708,6 +708,12 @@ jobs:
       publish_kotlin: ${{ steps.gates.outputs.publish_kotlin }}
       publish_npm: ${{ steps.gates.outputs.publish_npm }}
     steps:
+      - name: Block uncertified v0.3 publication
+        if: startsWith(github.ref, 'refs/tags/v0.3.')
+        run: |
+          echo "v0.3 publication is disabled until immutable RC evidence and exact-artifact promotion are implemented."
+          exit 1
+
       - id: gates
         env:
           MAVEN_CENTRAL_USERNAME: ${{ secrets.MAVEN_CENTRAL_USERNAME }}
@@ -921,7 +927,7 @@ jobs:
         run: npm publish --access public --provenance
 
   create-release:
-    needs: [build-adapter-binaries, package-extension]
+    needs: [build-adapter-binaries, package-extension, release-gates]
     runs-on: ubuntu-24.04
     if: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') }}
     steps:

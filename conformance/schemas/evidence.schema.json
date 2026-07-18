@@ -1,0 +1,347 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://synchro.dev/conformance/schemas/evidence.schema.json",
+  "title": "Synchro generated assertion evidence",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "$schema",
+    "schema_version",
+    "evidence_id",
+    "candidate_id",
+    "support_cell_id",
+    "scenario_id",
+    "requirement_ids",
+    "proof_type",
+    "source_commit",
+    "generator",
+    "run",
+    "environment",
+    "assertions",
+    "attachments",
+    "artifact_ids",
+    "negative_control",
+    "seed"
+  ],
+  "properties": {
+    "$schema": { "const": "https://synchro.dev/conformance/schemas/evidence.schema.json" },
+    "schema_version": { "const": 1 },
+    "evidence_id": { "$ref": "#/$defs/evidenceId" },
+    "candidate_id": { "$ref": "#/$defs/candidateId" },
+    "support_cell_id": {
+      "oneOf": [
+        { "$ref": "#/$defs/supportCellId" },
+        { "type": "null" }
+      ]
+    },
+    "scenario_id": { "$ref": "#/$defs/scenarioId" },
+    "requirement_ids": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/requirementId" }
+    },
+    "proof_type": { "$ref": "#/$defs/proofType" },
+    "source_commit": { "$ref": "#/$defs/commitHash" },
+    "generator": { "$ref": "#/$defs/generator" },
+    "run": { "$ref": "#/$defs/run" },
+    "environment": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/nameValue" }
+    },
+    "assertions": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/assertionOutcome" }
+    },
+    "attachments": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/attachment" }
+    },
+    "artifact_ids": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/artifactId" }
+    },
+    "negative_control": {
+      "oneOf": [
+        { "$ref": "#/$defs/negativeControl" },
+        { "type": "null" }
+      ]
+    },
+    "seed": {
+      "oneOf": [
+        { "type": "string", "minLength": 1 },
+        { "type": "null" }
+      ]
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": { "proof_type": { "const": "native-e2e" } },
+        "required": ["proof_type"]
+      },
+      "then": {
+        "properties": {
+          "support_cell_id": { "$ref": "#/$defs/supportCellId" }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "run": {
+            "properties": { "exit_code": { "const": 0 } },
+            "required": ["exit_code"]
+          }
+        },
+        "required": ["run"]
+      },
+      "then": {
+        "properties": {
+          "assertions": {
+            "items": {
+              "properties": {
+                "outcome": { "enum": ["passed", "skipped"] }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": { "proof_type": { "const": "negative-control" } },
+        "required": ["proof_type"]
+      },
+      "then": {
+        "properties": {
+          "negative_control": { "$ref": "#/$defs/negativeControl" }
+        }
+      },
+      "else": {
+        "properties": {
+          "negative_control": { "type": "null" }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "evidenceId": {
+      "type": "string",
+      "pattern": "^EVD-[A-Z0-9]+(?:-[A-Z0-9]+)*-[0-9]{3}$"
+    },
+    "candidateId": {
+      "type": "string",
+      "pattern": "^RC-0\\.3\\.0-[0-9]{8}T[0-9]{6}Z-[a-f0-9]{7,64}$"
+    },
+    "supportCellId": {
+      "type": "string",
+      "pattern": "^SUP-[A-Z0-9]+(?:-[A-Z0-9]+)*-[0-9]{3}$"
+    },
+    "scenarioId": {
+      "type": "string",
+      "pattern": "^SCN-[A-Z0-9]+(?:-[A-Z0-9]+)*-[0-9]{3}$"
+    },
+    "requirementId": {
+      "type": "string",
+      "pattern": "^SYNC-[A-Z][A-Z0-9]*(?:-[A-Z][A-Z0-9]*)*-[0-9]{3}$"
+    },
+    "assertionId": {
+      "type": "string",
+      "pattern": "^ASSERT-[A-Z0-9]+(?:-[A-Z0-9]+)*-[0-9]{3}$"
+    },
+    "artifactId": {
+      "type": "string",
+      "pattern": "^ART-[A-Z0-9]+(?:-[A-Z0-9]+)*-[0-9]{3}$"
+    },
+    "attachmentId": {
+      "type": "string",
+      "pattern": "^ATT-[A-Z0-9]+(?:-[A-Z0-9]+)*-[0-9]{3}$"
+    },
+    "controlSubjectId": {
+      "type": "string",
+      "pattern": "^CTRL-[A-Z0-9]+(?:-[A-Z0-9]+)*-[0-9]{3}$"
+    },
+    "faultId": {
+      "type": "string",
+      "pattern": "^FAULT-[A-Z0-9]+(?:-[A-Z0-9]+)*-[0-9]{3}$"
+    },
+    "runId": {
+      "type": "string",
+      "pattern": "^RUN-[A-Z0-9]+(?:-[A-Z0-9]+)*-[0-9]{3}$"
+    },
+    "commitHash": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{40}(?:[a-f0-9]{24})?$"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "proofType": {
+      "type": "string",
+      "enum": [
+        "reference-model",
+        "server-black-box",
+        "native-e2e",
+        "fault-injection",
+        "negative-control"
+      ]
+    },
+    "generator": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "version", "binary_sha256"],
+      "properties": {
+        "name": { "type": "string", "minLength": 1 },
+        "version": { "type": "string", "minLength": 1 },
+        "binary_sha256": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "run": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "url",
+        "attempt",
+        "started_at",
+        "completed_at",
+        "exit_code",
+        "previous_evidence_id",
+        "rerun_reason",
+        "rerun_diagnosis",
+        "corrective_change"
+      ],
+      "properties": {
+        "id": { "$ref": "#/$defs/runId" },
+        "url": { "type": "string", "format": "uri" },
+        "attempt": { "type": "integer", "minimum": 1 },
+        "started_at": { "type": "string", "format": "date-time" },
+        "completed_at": { "type": "string", "format": "date-time" },
+        "exit_code": { "type": "integer", "minimum": 0 },
+        "previous_evidence_id": {
+          "oneOf": [
+            { "$ref": "#/$defs/evidenceId" },
+            { "type": "null" }
+          ]
+        },
+        "rerun_reason": {
+          "oneOf": [
+            { "type": "string", "minLength": 1 },
+            { "type": "null" }
+          ]
+        },
+        "rerun_diagnosis": {
+          "oneOf": [
+            { "type": "string", "minLength": 1 },
+            { "type": "null" }
+          ]
+        },
+        "corrective_change": {
+          "oneOf": [
+            { "type": "string", "minLength": 1 },
+            { "type": "null" }
+          ]
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": { "attempt": { "minimum": 2 } },
+            "required": ["attempt"]
+          },
+          "then": {
+            "properties": {
+              "previous_evidence_id": { "$ref": "#/$defs/evidenceId" },
+              "rerun_reason": { "type": "string", "minLength": 1 },
+              "rerun_diagnosis": { "type": "string", "minLength": 1 },
+              "corrective_change": { "type": "string", "minLength": 1 }
+            }
+          },
+          "else": {
+            "properties": {
+              "previous_evidence_id": { "type": "null" },
+              "rerun_reason": { "type": "null" },
+              "rerun_diagnosis": { "type": "null" },
+              "corrective_change": { "type": "null" }
+            }
+          }
+        }
+      ]
+    },
+    "nameValue": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "value"],
+      "properties": {
+        "name": { "type": "string", "minLength": 1 },
+        "value": { "type": "string", "minLength": 1 }
+      }
+    },
+    "assertionOutcome": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["assertion_id", "outcome"],
+      "properties": {
+        "assertion_id": { "$ref": "#/$defs/assertionId" },
+        "outcome": {
+          "type": "string",
+          "enum": ["passed", "failed", "skipped", "error"]
+        },
+        "detail": { "type": "string", "minLength": 1 }
+      }
+    },
+    "attachment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "path", "media_type", "sha256"],
+      "properties": {
+        "id": { "$ref": "#/$defs/attachmentId" },
+        "path": { "type": "string", "minLength": 1 },
+        "media_type": { "type": "string", "minLength": 1 },
+        "sha256": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "negativeControl": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "fault_id",
+        "control_subject_id",
+        "control_subject_type",
+        "detected_by",
+        "outcome",
+        "attachment_ids"
+      ],
+      "properties": {
+        "fault_id": { "$ref": "#/$defs/faultId" },
+        "control_subject_id": { "$ref": "#/$defs/controlSubjectId" },
+        "control_subject_type": {
+          "type": "string",
+          "enum": ["mutant", "synthetic-fault", "known-defect"]
+        },
+        "detected_by": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/assertionId" }
+        },
+        "outcome": { "const": "detected" },
+        "attachment_ids": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/attachmentId" }
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,34 @@
+---
+title: Verification Overview
+description: How Synchro separates release requirements from generated candidate evidence.
+---
+
+# Verification Overview
+
+Synchro's verification model separates the contract from proof of a particular release candidate.
+
+## What Is Authored
+
+The specification, requirements catalog, support matrix, and scenarios are reviewed source material. They define behavior, proof obligations, required environments, and expected outcomes. They do not contain hand-maintained coverage or release-readiness results.
+
+The public matrix for v0.3.0 requires PostgreSQL 18, iOS 16 and current stable iOS, macOS 13 and current stable macOS, Android API 24 and current stable Android API, and React Native 0.83.x on both the iOS 16/current and Android API 24/current tracks. PostgreSQL 14 through 17 are excluded.
+
+## What Is Generated
+
+The release workflow will generate immutable evidence for an identified candidate. Evidence records exact environments, requirement and scenario IDs, results, logs, replay information, and artifact hashes. The RC manifest resolves moving current-stable selectors to exact versions.
+
+Tooling computes release eligibility from that evidence. Documentation, fixture presence, and the current handwritten test inventory do not certify a release.
+
+## Evidence Standard
+
+Release-critical proofs use independent expected results, real packaged components for happy paths, meaningful negative controls, and replayable fault or randomized cases. Implementation-derived fixtures and tautological assertions do not establish semantic correctness.
+
+Every required test must run. Skips, ignored tests, unexplained flakes, and retry-only passes block promotion. Reruns remain linked to their original failures with a recorded reason and diagnosis.
+
+Security evidence may be access-controlled while a finding is unresolved. Public reports describe scope and disposition without publishing exploit instructions.
+
+## Candidate Promotion
+
+Final-version artifacts are built once, hashed, and tested in clean environments. Approval promotes the exact tested bytes from the unchanged candidate commit. Any source, package metadata, build input, or artifact change creates a new candidate and invalidates earlier evidence.
+
+Read the [Support Policy](/synchro/reference/support-policy/) for required environments and [Release Verification](/synchro/spec/07-release-verification/) for the normative evidence rules.

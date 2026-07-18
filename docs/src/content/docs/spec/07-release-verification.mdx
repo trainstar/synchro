@@ -1,0 +1,75 @@
+---
+title: Release Verification
+description: Normative rules for candidate evidence, anti-gaming controls, and exact-artifact promotion.
+---
+
+# Release Verification
+
+## Purpose
+
+This document defines how Synchro turns the behavioral specification into release evidence. The specification remains the authority for behavior. Tests and generated reports provide evidence that one exact release candidate conforms to it.
+
+## Authored Contract
+
+Authored verification files define obligations, not outcomes:
+
+- the specification defines normative behavior
+- the requirements catalog identifies release-blocking claims and required proof types
+- the support policy identifies required and excluded environments
+- scenarios define inputs and semantic expectations
+
+Authored requirements must not be edited to report that a candidate passed. A scenario's expected result must be derived from the contract, not captured from the implementation under test.
+
+## Generated Evidence
+
+Evidence is generated from actual executions against an identified candidate. It must bind results to:
+
+- the candidate ID and source commit
+- exact artifact hashes
+- exact operating system, PostgreSQL, SDK, IDE, emulator or simulator, and toolchain versions
+- requirement, support-cell, and scenario IDs
+- proof type, result, logs, traces, and replay data
+
+Generated evidence and the RC manifest are immutable. Release eligibility is computed by tooling and represented by process exit status. It is not a manually maintained readiness claim.
+
+The authored `current-stable` platform selectors move over time. At the start of an RC, each selector is resolved to exact versions in the generated manifest. That resolution remains fixed for the candidate.
+
+## Required Proof Types
+
+The verification contract uses complementary proof types:
+
+- **Reference model:** an independent executable interpretation of normative semantics
+- **Server black box:** real HTTP requests through the adapter, extension, and PostgreSQL
+- **Native end to end:** real client storage, transport, lifecycle, and server integration
+- **Fault injection:** controlled failures at durability and state-transition boundaries
+- **Negative control:** a demonstrated defect or mutant that the claimed proof rejects
+
+No single proof type substitutes for all others when a requirement calls for more than one.
+
+## Anti-Gaming Rules
+
+- Current implementation output cannot define expected behavior.
+- Implementation-generated fixtures do not count as independent semantic proof.
+- Field-presence and round-trip-only assertions do not prove the meaning of a protocol operation.
+- Release-critical proofs require meaningful negative controls or demonstrated mutants.
+- Happy-path release evidence cannot replace real components with mocks.
+- Internal metadata seeding cannot count as black-box proof.
+- Every required test must execute. Skipped, ignored, filtered, or quarantined required tests block the candidate.
+- Required tests must have zero unexplained flakes. Retry-based green results are not accepted as proof.
+- Failed attempts remain part of the evidence record. A rerun must link to the original attempt and record its reason, diagnosis, changes, candidate identity, and artifact hashes.
+- Infrastructure-only reruns may use unchanged artifacts, but they do not erase the failed attempt.
+- Randomized scenarios must record replayable seeds. Production defects must become permanent minimized scenarios.
+
+The release gate also requires zero unresolved critical or high findings. Details for unresolved security findings may remain access-controlled. Public evidence must communicate scope and disposition without exposing exploit instructions.
+
+## Exact-Artifact Promotion
+
+Release packages retain the final version number and are associated with an RC candidate ID. They are built once into staging, hashed, and installed into clean consumer environments. Every required support cell tests those exact files.
+
+After approval, the final tag points to the unchanged candidate commit and publication promotes the exact tested bytes. Published hashes must match tested hashes. Any source, package metadata, build input, or artifact change invalidates the candidate and requires a new build and complete verification run.
+
+## Release Decision
+
+The release gate computes eligibility from validated evidence for every authored requirement and required support cell. Missing evidence, a required skip, an unexplained flake, an unresolved blocking finding, or an artifact mismatch causes a nonzero exit status.
+
+The current handwritten test inventory and fixture corpus are not release certification. Generated evidence becomes authoritative only after the verification pipeline executes the complete contract against a candidate.

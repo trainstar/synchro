@@ -7,11 +7,16 @@
     "start": "astro dev",
     "build": "astro build",
     "preview": "astro preview",
-    "astro": "astro"
+    "astro": "astro",
+    "verify:contract": "node ./scripts/verify-contract.mjs"
   },
   "dependencies": {
-    "@astrojs/starlight": "^0.38.2",
-    "astro": "^6.0.8",
-    "sharp": "^0.34.2"
+    "@astrojs/starlight": "^0.41.3",
+    "astro": "^7.1.1",
+    "sharp": "^0.35.3"
+  },
+  "devDependencies": {
+    "ajv": "8.20.0",
+    "ajv-formats": "3.0.1"
   }
 }

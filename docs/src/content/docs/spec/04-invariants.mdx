@@ -108,6 +108,16 @@ If the server sends an authoritative tombstone row, clients may preserve that ca
 
 If cleanup is only removing stale local materialization with no authoritative tombstone from the server, the client removes the row locally instead of creating a new delete mutation.
 
+## Server Change Capture Invariants
+
+### No Silent Server Change Loss
+
+Every committed change affecting registered data must remain eligible for sync until it is durably represented in authoritative sync state.
+
+Capture progress, including WAL acknowledgement, must not advance past an unapplied change unless that change is durably recorded as a blocking, operator-visible failure.
+
+This invariant defines required behavior without prescribing a change-capture mechanism or processing architecture.
+
 ## Scope Invariants
 
 ### Deterministic Scope Membership

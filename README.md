@@ -41,10 +41,11 @@ Synchro is not the right fit when:
 ### Runtime Support
 
 - PostgreSQL 18
-- iOS 16 or later
-- macOS 13 or later
-- Android API 24 or later
-- React Native through the native Apple and Android SDKs
+- iOS 16 and current stable iOS
+- macOS 13 and current stable macOS
+- Android API 24 and current stable Android API
+- React Native 0.83.x on iOS 16 and current stable iOS
+- React Native 0.83.x on Android API 24 and current stable Android API
 
 ### Local Validation and Development
 
@@ -52,7 +53,7 @@ Synchro is not the right fit when:
 - Go 1.25 for `api/go`
 - Xcode and Swift for Apple SDK validation
 - JDK 17 and Android SDK for Kotlin and Android validation
-- Node.js 22 and Yarn for React Native validation
+- Node.js 22.12 or later and Yarn for React Native validation
 - CocoaPods for React Native iOS validation
 
 The `Makefile` is the supported entry point for validation. Android targets expect `ANDROID_HOME` and `ANDROID_JAVA_HOME` to be set correctly.
@@ -65,6 +66,8 @@ The `Makefile` is the supported entry point for validation. Android targets expe
 - issue tracker: [github.com/trainstar/synchro/issues](https://github.com/trainstar/synchro/issues)
 - license: [LICENSE](LICENSE)
 
+The v0.3.0 support matrix is required policy, not a claim that candidate evidence already exists. Release certification will come from generated, immutable evidence tied to exact artifacts. The current test inventory is not certification. See [Release verification](https://trainstar.github.io/synchro/verification/overview/) and [Support policy](https://trainstar.github.io/synchro/reference/support-policy/).
+
 ## What This Repository Contains
 
 - `extensions/synchro-core`: shared deterministic sync semantics in Rust
@@ -73,7 +76,7 @@ The `Makefile` is the supported entry point for validation. Android targets expe
 - `clients/swift`: native Apple SDK
 - `clients/kotlin`: native Android SDK
 - `clients/react-native`: React Native bridge over the native SDKs
-- `conformance/`: shared executable contract fixtures
+- `conformance/`: authored release contract and conformance assets
 - `docs/`: published docs site and specification
 
 ## Why Synchro
@@ -109,7 +112,7 @@ Start the extension-backed local adapter:
 make synchrod-pg-test-start
 ```
 
-The default local test URL is `http://localhost:8081`.
+The default local test URL is `http://localhost:8091`.
 
 Stop it when you are done:
 
@@ -153,6 +156,8 @@ Start here if you are evaluating the system:
 - [Client contract](https://trainstar.github.io/synchro/spec/02-client-contract/)
 - [State machines](https://trainstar.github.io/synchro/spec/03-state-machines/)
 - [Schema evolution](https://trainstar.github.io/synchro/spec/05-schema-evolution/)
+- [Release verification](https://trainstar.github.io/synchro/spec/07-release-verification/)
+- [Support policy](https://trainstar.github.io/synchro/reference/support-policy/)
 - [Conformance fixtures](conformance/)
 
 ## Repository Layout
@@ -162,7 +167,7 @@ api/go/                 Reference Go host library and release utilities
 clients/swift/          Apple SDK
 clients/kotlin/         Android SDK
 clients/react-native/   React Native bridge
-conformance/            Shared contract fixtures
+conformance/            Release contract and conformance assets
 docs/                   Published docs site
 extensions/synchro-core Shared Rust sync semantics
 extensions/synchro-pg   PostgreSQL extension

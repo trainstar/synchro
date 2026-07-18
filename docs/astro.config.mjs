@@ -59,6 +59,19 @@ export default defineConfig({
 						{ label: 'Invariants', slug: 'spec/04-invariants' },
 						{ label: 'Schema Evolution', slug: 'spec/05-schema-evolution' },
 						{ label: 'Conformance Plan', slug: 'spec/06-conformance-plan' },
+						{ label: 'Release Verification', slug: 'spec/07-release-verification' },
+					],
+				},
+				{
+					label: 'Verification',
+					items: [
+						{ label: 'Overview', slug: 'verification/overview' },
+					],
+				},
+				{
+					label: 'Reference',
+					items: [
+						{ label: 'Support Policy', slug: 'reference/support-policy' },
 					],
 				},
 			],

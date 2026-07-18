@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
+	"log"
 	"net/http"
 )
 
@@ -263,8 +265,14 @@ func (h *Handler) queryJSONB(ctx context.Context, query string, args ...any) ([]
 // writeRawJSON writes pre-encoded JSON bytes as an HTTP response.
 func writeRawJSON(w http.ResponseWriter, status int, data []byte) {
 	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Content-Length", fmt.Sprintf("%d", len(data)))
 	w.WriteHeader(status)
-	_, _ = w.Write(data)
+	n, err := w.Write(data)
+	if err != nil {
+		log.Printf("[synchro] writeRawJSON error: wrote %d/%d bytes, err=%v", n, len(data), err)
+	} else if n != len(data) {
+		log.Printf("[synchro] writeRawJSON partial write: wrote %d/%d bytes", n, len(data))
+	}
 }
 
 func decodeJSONBodyObject(w http.ResponseWriter, r *http.Request) ([]byte, map[string]json.RawMessage, bool) {

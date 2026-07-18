@@ -35,7 +35,7 @@
     "clean": "del-cli android/build example/android/build example/android/app/build example/ios/build lib",
     "prepare": "bob build",
     "pack:dry-run": "npm pack --dry-run",
-    "test:unit": "jest --runInBand",
+    "test:unit": "jest --runInBand --watchman=false",
     "typecheck": "tsc",
     "lint": "eslint src/ __tests__/",
     "test": "jest"
@@ -78,8 +78,8 @@
     "typescript": "^5.9.2"
   },
   "peerDependencies": {
-    "react": "*",
-    "react-native": "*"
+    "react": ">=19.2.0 <20.0.0",
+    "react-native": ">=0.83.0 <0.84.0"
   },
   "workspaces": [
     "example"

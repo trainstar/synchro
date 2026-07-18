@@ -10,6 +10,7 @@
 	run \
 	docs-build \
 	docs-dev \
+	verify-contract \
 	lint-go \
 	lint-rn \
 	lint-rust-core \
@@ -112,8 +113,9 @@ help:
 	@echo "  build-seed            - Build the seed database generator binary"
 	@echo "  build-check           - Build the Go adapter module"
 	@echo "  run                   - Run synchrod-pg locally with current env"
-	@echo "  docs-build            - Install docs dependencies and build the docs site"
+	@echo "  docs-build            - Verify the contract and build the docs site"
 	@echo "  docs-dev              - Run the docs site locally"
+	@echo "  verify-contract       - Validate the machine-readable release contract"
 	@echo "  lint-go               - Run Go formatting checks and go vet"
 	@echo "  lint-rn               - Run React Native typecheck and ESLint"
 	@echo "  lint-rust-core        - Run Rust fmt and clippy for the shared core"
@@ -170,18 +172,21 @@ build-check:
 run:
 	cd api/go && GOWORK=off go run ./cmd/synchrod-pg
 
-docs-build:
-	cd docs && npm ci
+docs-build: verify-contract
 	cd docs && npm run build
 
 docs-dev:
 	cd docs && npm run dev
 
+verify-contract:
+	cd docs && npm ci
+	cd docs && npm run verify:contract
+
 lint-rn:
 	cd clients/react-native && yarn typecheck
 	cd clients/react-native && yarn lint
 
-test: test-rust-core test-adapter test-swift-unit test-kotlin-unit test-rn-unit docs-build
+test: test-rust-core test-adapter test-swift-unit test-kotlin-unit test-rn-unit verify-contract docs-build
 
 test-swift-unit:
 	cd clients/swift && swift test --skip IntegrationTests --skip SchemaIntegrationTests
@@ -273,7 +278,7 @@ release-pods-check: version-check
 	swift package dump-package >/dev/null
 	@echo "Apple package metadata validated."
 
-release-check: version-check release-pods-check build build-seed build-check release-kotlin-local release-npm-dry-run lint-go lint-rust-core lint-rn test-rust-core test-rust-pg test-adapter test-swift test-kotlin test-rn docs-build
+release-check: version-check release-pods-check build build-seed build-check release-kotlin-local release-npm-dry-run lint-go lint-rust-core lint-rn test-rust-core test-rust-pg test-adapter test-swift test-kotlin test-rn verify-contract docs-build
 	@echo "Release validation passed."
 
 release-kotlin-local: version-check

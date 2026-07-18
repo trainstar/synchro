@@ -8,11 +8,14 @@ import (
 	"database/sql"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strconv"
 	"testing"
 
 	_ "github.com/jackc/pgx/v5/stdlib"
@@ -755,6 +758,91 @@ func TestMapPGErrorProtocolStatusMapping(t *testing.T) {
 			}
 			if got := w.Header().Get("Retry-After"); got != tt.wantRetryAfter {
 				t.Fatalf("Retry-After = %q, want %q", got, tt.wantRetryAfter)
+			}
+		})
+	}
+}
+
+func TestWriteRawJSON(t *testing.T) {
+	w := httptest.NewRecorder()
+	payload := []byte(`{"ok":true, "message":"raw"}
+`)
+
+	writeRawJSON(w, http.StatusAccepted, payload)
+
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want %d", w.Code, http.StatusAccepted)
+	}
+	if got := w.Header().Get("Content-Type"); got != "application/json" {
+		t.Fatalf("Content-Type = %q, want %q", got, "application/json")
+	}
+	if got := w.Header().Get("Content-Length"); got != strconv.Itoa(len(payload)) {
+		t.Fatalf("Content-Length = %q, want %q", got, strconv.Itoa(len(payload)))
+	}
+	if got := w.Body.Bytes(); !bytes.Equal(got, payload) {
+		t.Fatalf("body = %q, want %q", got, payload)
+	}
+}
+
+type writeResultResponseWriter struct {
+	header http.Header
+	write  func([]byte) (int, error)
+}
+
+func (w *writeResultResponseWriter) Header() http.Header {
+	return w.header
+}
+
+func (w *writeResultResponseWriter) WriteHeader(int) {}
+
+func (w *writeResultResponseWriter) Write(data []byte) (int, error) {
+	return w.write(data)
+}
+
+func TestWriteRawJSONLogsWriteResults(t *testing.T) {
+	originalWriter := log.Writer()
+	originalFlags := log.Flags()
+	originalPrefix := log.Prefix()
+	var logs bytes.Buffer
+	log.SetOutput(&logs)
+	log.SetFlags(0)
+	log.SetPrefix("")
+	t.Cleanup(func() {
+		log.SetOutput(originalWriter)
+		log.SetFlags(originalFlags)
+		log.SetPrefix(originalPrefix)
+	})
+
+	tests := []struct {
+		name  string
+		write func([]byte) (int, error)
+	}{
+		{
+			name: "write error",
+			write: func([]byte) (int, error) {
+				return 0, errors.New("write failed")
+			},
+		},
+		{
+			name: "short write",
+			write: func(data []byte) (int, error) {
+				return len(data) - 1, nil
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			logs.Reset()
+			w := &writeResultResponseWriter{
+				header: make(http.Header),
+				write:  tt.write,
+			}
+
+			writeRawJSON(w, http.StatusAccepted, []byte(`{"ok":true}`))
+
+			if logs.Len() == 0 {
+				t.Fatal("expected write result to be logged")
 			}
 		})
 	}

@@ -1,0 +1,335 @@
+{
+  "$schema": "./schemas/requirements.schema.json",
+  "schema_version": 1,
+  "release": "0.3.0",
+  "requirements": [
+    {
+      "id": "SYNC-TIME-001",
+      "title": "Canonical wire time",
+      "category": "protocol",
+      "statement": "Every timestamp on the wire uses RFC 3339 UTC encoding.",
+      "required_proof_types": ["server-black-box", "native-e2e", "negative-control"],
+      "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#canonical-time-format" }]
+    },
+    {
+      "id": "SYNC-CURSOR-001",
+      "title": "Opaque scope cursors",
+      "category": "protocol",
+      "statement": "Clients preserve non-null server-issued scope cursors without parsing, ordering, or assigning semantic meaning to their encoding, and reserve null for no usable resumable state.",
+      "required_proof_types": ["reference-model", "native-e2e", "negative-control"],
+      "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#opaque-cursor-invariant" }]
+    },
+    {
+      "id": "SYNC-VERSION-001",
+      "title": "Opaque server versions",
+      "category": "protocol",
+      "statement": "Clients preserve server_version as an opaque optimistic-precondition and reconciliation token without sorting, incrementing, or parsing it.",
+      "required_proof_types": ["reference-model", "native-e2e", "negative-control"],
+      "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#opaque-server-version-invariant" }]
+    },
+    {
+      "id": "SYNC-SCOPE-001",
+      "title": "Server-authoritative scope assignment",
+      "category": "scope",
+      "statement": "The server determines each client's authoritative scope set and rejects client-invented scope instances.",
+      "required_proof_types": ["server-black-box", "native-e2e", "negative-control"],
+      "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#scope-assignment-authority" }]
+    },
+    {
+      "id": "SYNC-SCOPE-002",
+      "title": "Monotonic scope set version",
+      "category": "scope",
+      "statement": "scope_set_version moves forward only when the authoritative assigned scope set changes.",
+      "required_proof_types": ["reference-model", "server-black-box", "native-e2e", "negative-control"],
+      "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#scope-set-version-monotonicity" }]
+    },
+    {
+      "id": "SYNC-SCHEMA-001",
+      "title": "Server-authoritative schema decisions",
+      "category": "schema",
+      "statement": "The server determines schema compatibility and schema actions, and clients execute the returned action without substituting a client-defined compatibility decision.",
+      "required_proof_types": ["server-black-box", "native-e2e", "negative-control"],
+      "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#schema-authority" }]
+    },
+    {
+      "id": "SYNC-LOCALSQL-001",
+      "title": "Local SQL application surface",
+      "category": "boundary",
+      "statement": "Applications can read and write every synced CRUD operation through local SQLite without a separate application write API.",
+      "required_proof_types": ["native-e2e", "negative-control"],
+      "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#local-sql-is-the-app-surface" }]
+    },
+    {
+      "id": "SYNC-CRUD-001",
+      "title": "Synchro-owned row CRUD",
+      "category": "data-correctness",
+      "statement": "The Synchro protocol handles create, update, and delete operations for every registered synced table.",
+      "required_proof_types": ["reference-model", "server-black-box", "native-e2e", "negative-control"],
+      "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#synced-crud-authority" }]
+    },
+    {
+      "id": "SYNC-MUTATION-001",
+      "title": "Mutation outcome conservation",
+      "category": "data-correctness",
+      "statement": "Every local mutation remains pending or reaches one accepted or inspectable rejected outcome, and no local intent disappears without one of those states.",
+      "required_proof_types": ["reference-model", "native-e2e", "fault-injection", "negative-control"],
+      "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#no-silent-mutation-loss" }]
+    },
+    {
+      "id": "SYNC-MUTATION-002",
+      "title": "Canonical mutation reconciliation",
+      "category": "data-correctness",
+      "statement": "Clients reconcile accepted and rejected mutations to any authoritative row state and server version returned by the server.",
+      "required_proof_types": ["reference-model", "server-black-box", "native-e2e", "negative-control"],
+      "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#canonical-server-outcome" }]
+    },
+    {
+      "id": "SYNC-MUTATION-003",
+      "title": "No duplicate local intent",
+      "category": "data-correctness",
+      "statement": "Replay and read-your-own-write reconciliation never apply one logical local action twice.",
+      "required_proof_types": ["reference-model", "native-e2e", "fault-injection", "negative-control"],
+      "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#no-duplicate-local-intent" }]
+    },
+    {
+      "id": "SYNC-APPLY-001",
+      "title": "No server-apply echo loop",
+      "category": "data-correctness",
+      "statement": "Applying server-originated state never enqueues that state as new client-originated intent.",
+      "required_proof_types": ["native-e2e", "negative-control"],
+      "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#no-silent-server-apply-echo-loop" }]
+    },
+    {
+      "id": "SYNC-VERSION-002",
+      "title": "Accepted writes advance canonical version",
+      "category": "data-correctness",
+      "statement": "Accepted insert and update mutations persist the canonical row version from client_version where updated_at semantics apply, never from a writable payload updated_at field or an unchanged prior value.",
+      "required_proof_types": ["server-black-box", "native-e2e", "negative-control"],
+      "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#accepted-writes-advance-canonical-row-version" }]
+    },
+    {
+      "id": "SYNC-CLEANUP-001",
+      "title": "No synthetic cleanup tombstones",
+      "category": "data-correctness",
+      "statement": "Scope loss and rebuild pruning remove stale local materialization without creating a new delete mutation unless the server supplied an authoritative tombstone.",
+      "required_proof_types": ["native-e2e", "negative-control"],
+      "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#no-synthetic-cleanup-tombstones" }]
+    },
+    {
+      "id": "SYNC-WAL-001",
+      "title": "No silent server change loss",
+      "category": "change-capture",
+      "statement": "Every committed change affecting registered data remains eligible for sync until durably represented, and capture progress including WAL acknowledgement never advances past an unapplied change unless it is durably recorded as a blocking operator-visible failure.",
+      "required_proof_types": ["server-black-box", "fault-injection", "negative-control"],
+      "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#no-silent-server-change-loss" }]
+    },
+    {
+      "id": "SYNC-SCOPE-003",
+      "title": "Deterministic scope membership",
+      "category": "scope",
+      "statement": "Repeated evaluation of the same authoritative row and server state produces the same set of scope instances.",
+      "required_proof_types": ["reference-model", "server-black-box", "negative-control"],
+      "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#deterministic-scope-membership" }]
+    },
+    {
+      "id": "SYNC-REBUILD-001",
+      "title": "Scope-local rebuild",
+      "category": "cursor-rebuild",
+      "statement": "Rebuilding one scope leaves unrelated local scope data and local-only data intact.",
+      "required_proof_types": ["reference-model", "server-black-box", "native-e2e", "negative-control"],
+      "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#scope-local-rebuild" }]
+    },
+    {
+      "id": "SYNC-CURSOR-002",
+      "title": "Per-scope cursor apply ordering",
+      "category": "cursor-rebuild",
+      "statement": "A scope cursor advances only after all corresponding incremental changes for that scope are durably and successfully applied locally.",
+      "required_proof_types": ["reference-model", "native-e2e", "fault-injection", "negative-control"],
+      "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#per-scope-cursor-correctness" }]
+    },
+    {
+      "id": "SYNC-INTEGRITY-001",
+      "title": "Progress and integrity separation",
+      "category": "cursor-rebuild",
+      "statement": "A valid cursor alone never marks local materialization healthy; health also requires independent authoritative checksum verification.",
+      "required_proof_types": ["reference-model", "server-black-box", "native-e2e", "negative-control"],
+      "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#progress-and-integrity-separation" }]
+    },
+    {
+      "id": "SYNC-INTEGRITY-002",
+      "title": "Final pull checksums",
+      "category": "cursor-rebuild",
+      "statement": "Every terminal pull page includes authoritative checksums for all active scopes, and clients verify them before treating those scopes as healthy.",
+      "required_proof_types": ["server-black-box", "native-e2e", "negative-control"],
+      "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#final-pull-checksum-requirement" }]
+    },
+    {
+      "id": "SYNC-REBUILD-002",
+      "title": "Rebuild finality",
+      "category": "cursor-rebuild",
+      "statement": "A rebuild completes only after all pages apply, stale scope provenance is pruned, unjustified rows are removed, the final checksum matches, and the final cursor is installed.",
+      "required_proof_types": ["reference-model", "server-black-box", "native-e2e", "fault-injection", "negative-control"],
+      "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#rebuild-finality" }]
+    },
+    {
+      "id": "SYNC-PROVENANCE-001",
+      "title": "Preserve overlapping data during rebuild",
+      "category": "cursor-rebuild",
+      "statement": "Rebuilding one scope never deletes a local row while another valid scope provenance edge remains.",
+      "required_proof_types": ["reference-model", "native-e2e", "negative-control"],
+      "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#rebuild-does-not-erase-valid-overlapping-data" }]
+    },
+    {
+      "id": "SYNC-REBUILD-003",
+      "title": "First sync uses rebuild semantics",
+      "category": "startup",
+      "statement": "A scope with no usable cursor follows the same authoritative rebuild rules during initial materialization as during later recovery.",
+      "required_proof_types": ["server-black-box", "native-e2e", "negative-control"],
+      "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#first-sync-uses-rebuild-semantics" }]
+    },
+    {
+      "id": "SYNC-QUEUE-001",
+      "title": "Durable mutation queue",
+      "category": "local-metadata",
+      "statement": "Queued mutations and their stable identifiers survive process death and restart.",
+      "required_proof_types": ["native-e2e", "fault-injection", "negative-control"],
+      "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#durable-queue-invariant" }]
+    },
+    {
+      "id": "SYNC-REBUILD-004",
+      "title": "Durable rebuild state",
+      "category": "local-metadata",
+      "statement": "A rebuild interrupted by process death remains recoverable from durable local metadata without installing false final state.",
+      "required_proof_types": ["native-e2e", "fault-injection", "negative-control"],
+      "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#durable-rebuild-state-invariant" }]
+    },
+    {
+      "id": "SYNC-CURSOR-003",
+      "title": "Durable atomic cursor advancement",
+      "category": "local-metadata",
+      "statement": "Per-scope cursor advancement is durable and atomic with successful local apply.",
+      "required_proof_types": ["native-e2e", "fault-injection", "negative-control"],
+      "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#durable-cursor-invariant" }]
+    },
+    {
+      "id": "SYNC-MUTATION-004",
+      "title": "Inspectable rejection retention",
+      "category": "local-metadata",
+      "statement": "Rejected mutations and their reasons remain inspectable across restart until explicit client policy clears them.",
+      "required_proof_types": ["native-e2e", "fault-injection", "negative-control"],
+      "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#rejection-inspectability" }]
+    },
+    {
+      "id": "SYNC-PROVENANCE-002",
+      "title": "Accurate multi-scope provenance",
+      "category": "local-metadata",
+      "statement": "For multi-scope tables, local metadata records exactly the scopes that currently justify each local row.",
+      "required_proof_types": ["reference-model", "native-e2e", "negative-control"],
+      "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#provenance-correctness" }]
+    },
+    {
+      "id": "SYNC-SEED-001",
+      "title": "Seed database is a cache",
+      "category": "startup",
+      "statement": "A seeded database follows the normal connect, delta, checksum, and rebuild protocol and never bypasses server authority through a separate sync mode.",
+      "required_proof_types": ["server-black-box", "native-e2e", "negative-control"],
+      "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#seeded-db-is-cache-only" }]
+    },
+    {
+      "id": "SYNC-SEED-002",
+      "title": "Portable seed authority",
+      "category": "startup",
+      "statement": "Seed export contains data only from server-declared portable scopes, and clients do not infer portability from row presence.",
+      "required_proof_types": ["server-black-box", "native-e2e", "negative-control"],
+      "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#portable-seed-authority" }]
+    },
+    {
+      "id": "SYNC-SEED-003",
+      "title": "Seed continuation correctness",
+      "category": "startup",
+      "statement": "Portable seeded data includes the continuation metadata required to resume normal delta sync from the seeded state.",
+      "required_proof_types": ["server-black-box", "native-e2e", "fault-injection", "negative-control"],
+      "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#seed-resume-correctness" }]
+    },
+    {
+      "id": "SYNC-QUEUE-002",
+      "title": "Offline writes before first connect",
+      "category": "startup",
+      "statement": "Native clients accept offline writes before first successful connect and preserve them in the same durable mutation queue used after connect.",
+      "required_proof_types": ["native-e2e", "fault-injection", "negative-control"],
+      "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#offline-writes-before-first-connect" }]
+    },
+    {
+      "id": "SYNC-FAILURE-001",
+      "title": "Retryable failures preserve state",
+      "category": "failure",
+      "statement": "Retryable transport and availability failures leave local sync metadata unchanged except for durable retry bookkeeping.",
+      "required_proof_types": ["native-e2e", "fault-injection", "negative-control"],
+      "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#retryable-failures-do-not-corrupt-state" }]
+    },
+    {
+      "id": "SYNC-FAILURE-002",
+      "title": "Explicit non-retryable failures",
+      "category": "failure",
+      "statement": "Every non-retryable failure produces an explicit client error state rather than continuing in silent degraded operation.",
+      "required_proof_types": ["server-black-box", "native-e2e", "negative-control"],
+      "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#non-retryable-failures-are-explicit" }]
+    },
+    {
+      "id": "SYNC-REBUILD-005",
+      "title": "Automatic rebuild default",
+      "category": "failure",
+      "statement": "With default client configuration, a server-requested scope rebuild proceeds without application approval or app-owned rebuild orchestration.",
+      "required_proof_types": ["native-e2e", "negative-control"],
+      "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#automatic-rebuild-default" }]
+    },
+    {
+      "id": "SYNC-BOUNDARY-001",
+      "title": "Thin server adapter",
+      "category": "boundary",
+      "statement": "Each Go sync endpoint delegates its semantic operation to the extension and contains no independent scope, conflict, rebuild, or synced-write decision implementation.",
+      "required_proof_types": ["server-black-box", "negative-control"],
+      "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#thin-adapter-invariant" }]
+    },
+    {
+      "id": "SYNC-BOUNDARY-002",
+      "title": "Thin React Native bridge",
+      "category": "boundary",
+      "statement": "React Native delegates queue, cursor, conflict, and rebuild behavior to the native clients on both iOS and Android and contains no independent implementation of those semantics.",
+      "required_proof_types": ["native-e2e", "negative-control"],
+      "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#thin-react-native-invariant" }]
+    },
+    {
+      "id": "SYNC-BOUNDARY-003",
+      "title": "Native responsibility boundary",
+      "category": "boundary",
+      "statement": "Native clients implement local database integration, queueing, scheduling, and safe apply while accepting server decisions for scope membership and conflict outcomes.",
+      "required_proof_types": ["native-e2e", "negative-control"],
+      "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#native-client-responsibility-boundary" }]
+    },
+    {
+      "id": "SYNC-CRUD-002",
+      "title": "No custom backend write requirement",
+      "category": "boundary",
+      "statement": "A client can complete create, update, and delete synchronization through local SQL and the Synchro protocol without an application-defined upload endpoint.",
+      "required_proof_types": ["server-black-box", "native-e2e", "negative-control"],
+      "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#no-mandatory-custom-backend-write-contract" }]
+    },
+    {
+      "id": "SYNC-SCOPE-005",
+      "title": "No client-defined replication model",
+      "category": "scope",
+      "statement": "Sync requests accept only server-assigned scope identifiers and reject arbitrary client-authored replication predicates.",
+      "required_proof_types": ["server-black-box", "negative-control"],
+      "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#no-arbitrary-client-defined-replication-model" }]
+    },
+    {
+      "id": "SYNC-PERFORMANCE-001",
+      "title": "No extra core sync network hop",
+      "category": "performance",
+      "statement": "The production core sync request path calls the PostgreSQL extension directly and contains no outbound network or RPC client for a separate sync service.",
+      "required_proof_types": ["server-black-box", "negative-control"],
+      "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#no-extra-hot-path-network-hop-for-core-sync-logic" }]
+    }
+  ]
+}
