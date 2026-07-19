@@ -1,0 +1,505 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://synchro.dev/conformance/schemas/scenario-v2.schema.json",
+  "title": "Synchro semantic conformance scenario",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "$schema",
+    "schema_version",
+    "id",
+    "title",
+    "requirement_ids",
+    "normative_references",
+    "proof_types",
+    "proof_obligations",
+    "model",
+    "barrier_plan",
+    "fault_plans",
+    "replay",
+    "performance_budget_ids",
+    "required_measurement_ids",
+    "negative_controls",
+    "steps",
+    "wire_expectations",
+    "assertions"
+  ],
+  "properties": {
+    "$schema": { "const": "https://synchro.dev/conformance/schemas/scenario-v2.schema.json" },
+    "schema_version": { "const": 2 },
+    "id": { "$ref": "#/$defs/scenarioId" },
+    "title": { "type": "string", "minLength": 1 },
+    "description": { "type": "string", "minLength": 1 },
+    "requirement_ids": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/requirementId" }
+    },
+    "normative_references": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/normativeReference" }
+    },
+    "proof_types": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/proofType" }
+    },
+    "proof_obligations": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/proofObligation" }
+    },
+    "model": { "$ref": "#/$defs/model" },
+    "barrier_plan": { "$ref": "#/$defs/barrierPlan" },
+    "fault_plans": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/faultPlan" }
+    },
+    "replay": { "$ref": "#/$defs/replay" },
+    "performance_budget_ids": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/budgetId" }
+    },
+    "required_measurement_ids": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/measurementId" }
+    },
+    "negative_controls": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/catalogControl" }
+    },
+    "steps": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/step" }
+    },
+    "wire_expectations": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/wireExpectation" }
+    },
+    "assertions": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/assertion" }
+    }
+  },
+  "$defs": {
+    "scenarioId": {
+      "type": "string",
+      "pattern": "^SCN-[A-Z0-9]+(?:-[A-Z0-9]+)*-[0-9]{3}$"
+    },
+    "requirementId": {
+      "type": "string",
+      "pattern": "^SYNC-[A-Z][A-Z0-9]*(?:-[A-Z][A-Z0-9]*)*-[0-9]{3}$"
+    },
+    "stepId": {
+      "type": "string",
+      "pattern": "^STEP-[A-Z0-9]+(?:-[A-Z0-9]+)*-[0-9]{3}$"
+    },
+    "assertionId": {
+      "type": "string",
+      "pattern": "^ASSERT-[A-Z0-9]+(?:-[A-Z0-9]+)*-[0-9]{3}$"
+    },
+    "faultId": {
+      "type": "string",
+      "pattern": "^FAULT-[A-Z0-9]+(?:-[A-Z0-9]+)*-[0-9]{3}$"
+    },
+    "controlId": {
+      "type": "string",
+      "pattern": "^CTRL-[A-Z0-9]+(?:-[A-Z0-9]+)*-[0-9]{3}$"
+    },
+    "faultPlanId": {
+      "type": "string",
+      "pattern": "^FPL-[A-Z0-9]+(?:-[A-Z0-9]+)*-[0-9]{3}$"
+    },
+    "barrierId": {
+      "type": "string",
+      "pattern": "^BAR-[A-Z0-9]+(?:-[A-Z0-9]+)*-[0-9]{3}$"
+    },
+    "expectationId": {
+      "type": "string",
+      "pattern": "^EXPECT-[A-Z0-9]+(?:-[A-Z0-9]+)*-[0-9]{3}$"
+    },
+    "supportCellId": {
+      "type": "string",
+      "pattern": "^SUP-[A-Z0-9]+(?:-[A-Z0-9]+)*-[0-9]{3}$"
+    },
+    "artifactInventoryId": {
+      "type": "string",
+      "pattern": "^ARTDEF-[A-Z0-9]+(?:-[A-Z0-9]+)*-[0-9]{3}$"
+    },
+    "budgetId": {
+      "type": "string",
+      "pattern": "^BUD-[A-Z0-9]+(?:-[A-Z0-9]+)*-[0-9]{3}$"
+    },
+    "measurementId": {
+      "type": "string",
+      "pattern": "^MEAS-[A-Z0-9]+(?:-[A-Z0-9]+)*-[0-9]{3}$"
+    },
+    "obligationId": {
+      "type": "string",
+      "pattern": "^OBL-[A-Z0-9]+(?:-[A-Z0-9]+)*-[0-9]{3}$"
+    },
+    "normativeReference": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "anchor"],
+      "properties": {
+        "path": { "type": "string", "pattern": "^docs/src/content/docs/[a-z0-9_./-]+\\.mdx$" },
+        "anchor": { "type": "string", "pattern": "^#[a-z0-9]+(?:-[a-z0-9]+)*$" }
+      }
+    },
+    "proofType": {
+      "type": "string",
+      "enum": [
+        "reference-model",
+        "server-black-box",
+        "native-e2e",
+        "fault-injection",
+        "negative-control"
+      ]
+    },
+    "operation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["contract_operation", "name", "payload"],
+      "properties": {
+        "contract_operation": {
+          "type": "string",
+          "enum": ["connect", "push", "pull", "rebuild", "local", "artifact", "process", "model"]
+        },
+        "name": { "type": "string", "minLength": 1 },
+        "payload": true
+      }
+    },
+    "proofObligation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["obligation_id", "requirement_ids", "assertion_ids", "proof_type", "support_cell_id", "artifact_inventory_ids", "make_target", "argv"],
+      "properties": {
+        "obligation_id": { "$ref": "#/$defs/obligationId" },
+        "requirement_ids": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/requirementId" }
+        },
+        "assertion_ids": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/assertionId" }
+        },
+        "proof_type": { "$ref": "#/$defs/proofType" },
+        "support_cell_id": {
+          "oneOf": [
+            { "$ref": "#/$defs/supportCellId" },
+            { "type": "null" }
+          ]
+        },
+        "artifact_inventory_ids": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/artifactInventoryId" }
+        },
+        "make_target": { "$ref": "#/$defs/makeTarget" },
+        "argv": { "$ref": "#/$defs/canonicalMakeArgv" }
+      }
+    },
+    "makeTarget": {
+      "type": "string",
+      "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_.-]*$"
+    },
+    "canonicalMakeArgv": {
+      "type": "array",
+      "minItems": 2,
+      "maxItems": 2,
+      "prefixItems": [
+        { "const": "make" },
+        { "$ref": "#/$defs/makeTarget" }
+      ],
+      "items": false
+    },
+    "model": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["setup", "expected_state"],
+      "properties": {
+        "setup": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/operation" } },
+        "expected_state": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/modelExpectation" } }
+      }
+    },
+    "modelExpectation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "predicate"],
+      "properties": {
+        "id": { "$ref": "#/$defs/expectationId" },
+        "predicate": { "$ref": "#/$defs/predicate" }
+      }
+    },
+    "barrierPlan": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["barriers"],
+      "properties": {
+        "barriers": { "type": "array", "items": { "$ref": "#/$defs/barrier" } }
+      }
+    },
+    "barrier": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "name", "release_order", "participants"],
+      "properties": {
+        "id": { "$ref": "#/$defs/barrierId" },
+        "name": { "type": "string", "minLength": 1 },
+        "release_order": { "type": "integer", "minimum": 1 },
+        "participants": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "type": "string", "minLength": 1 } }
+      }
+    },
+    "faultPlan": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "requirement_id", "fault_id", "control_id", "barrier_id", "expected_assertion_ids", "injection"],
+      "properties": {
+        "id": { "$ref": "#/$defs/faultPlanId" },
+        "requirement_id": { "$ref": "#/$defs/requirementId" },
+        "fault_id": { "$ref": "#/$defs/faultId" },
+        "control_id": { "$ref": "#/$defs/controlId" },
+        "barrier_id": { "$ref": "#/$defs/barrierId" },
+        "expected_assertion_ids": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "$ref": "#/$defs/assertionId" } },
+        "injection": { "$ref": "#/$defs/injectionRecipe" }
+      }
+    },
+    "injectionRecipe": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mechanism", "target", "operator", "parameters"],
+      "properties": {
+        "mechanism": { "type": "string", "enum": ["source-mutant", "wire-fault", "state-fault", "process-fault", "infrastructure-fault", "artifact-tamper"] },
+        "target": { "type": "string", "minLength": 1 },
+        "operator": { "type": "string", "enum": ["replace", "inject", "omit", "duplicate", "reorder", "replay", "misbind", "bypass", "truncate", "crash", "corrupt", "reroute", "expose", "delay"] },
+        "parameters": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["scenario", "defect"],
+          "properties": {
+            "scenario": { "type": "string", "minLength": 1 },
+            "defect": { "type": "string", "minLength": 1 },
+            "precondition": { "type": "string", "minLength": 1 }
+          }
+        }
+      }
+    },
+    "replay": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mode", "seed_required", "barrier_trace_required"],
+      "properties": {
+        "mode": { "type": "string", "enum": ["deterministic", "randomized"] },
+        "seed_required": { "type": "boolean" },
+        "barrier_trace_required": { "type": "boolean" }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": { "mode": { "const": "randomized" } },
+            "required": ["mode"]
+          },
+          "then": {
+            "properties": { "seed_required": { "const": true } }
+          }
+        }
+      ]
+    },
+    "catalogControl": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["control_id", "requirement_id", "fault_id", "subject_artifact_inventory_ids", "detected_by"],
+      "properties": {
+        "control_id": { "$ref": "#/$defs/controlId" },
+        "requirement_id": { "$ref": "#/$defs/requirementId" },
+        "fault_id": { "$ref": "#/$defs/faultId" },
+        "subject_artifact_inventory_ids": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/artifactInventoryId" }
+        },
+        "detected_by": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "$ref": "#/$defs/assertionId" } }
+      }
+    },
+    "predicate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["contract_predicate", "name", "payload"],
+      "properties": {
+        "contract_predicate": {
+          "type": "string",
+          "enum": ["state-equality", "wire-outcome", "state-transition", "artifact-integrity", "performance-measurement", "negative-control-detection"]
+        },
+        "name": {
+          "type": "string",
+          "enum": [
+            "state-equals-authored-model",
+            "state-unchanged",
+            "canonical-wire-outcome",
+            "legal-state-transition",
+            "artifact-policy-satisfied",
+            "performance-contract-satisfied",
+            "negative-control-detected"
+          ]
+        },
+        "payload": { "type": "object", "maxProperties": 0 }
+      },
+      "oneOf": [
+        {
+          "properties": {
+            "contract_predicate": { "const": "state-equality" },
+            "name": { "enum": ["state-equals-authored-model", "state-unchanged"] }
+          }
+        },
+        {
+          "properties": {
+            "contract_predicate": { "const": "wire-outcome" },
+            "name": { "const": "canonical-wire-outcome" }
+          }
+        },
+        {
+          "properties": {
+            "contract_predicate": { "const": "state-transition" },
+            "name": { "const": "legal-state-transition" }
+          }
+        },
+        {
+          "properties": {
+            "contract_predicate": { "const": "artifact-integrity" },
+            "name": { "const": "artifact-policy-satisfied" }
+          }
+        },
+        {
+          "properties": {
+            "contract_predicate": { "const": "performance-measurement" },
+            "name": { "const": "performance-contract-satisfied" }
+          }
+        },
+        {
+          "properties": {
+            "contract_predicate": { "const": "negative-control-detection" },
+            "name": { "const": "negative-control-detected" }
+          }
+        }
+      ]
+    },
+    "step": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "phase", "transport", "operation"],
+      "properties": {
+        "id": { "$ref": "#/$defs/stepId" },
+        "phase": { "type": "string", "enum": ["setup", "exercise", "cleanup"] },
+        "transport": { "type": "string", "enum": ["http", "local", "artifact", "process", "model"] },
+        "description": { "type": "string", "minLength": 1 },
+        "operation": { "$ref": "#/$defs/operation" }
+      }
+    },
+    "wireExpectation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["step_id", "assertion_id", "contract_case", "http_status", "error_code", "retryable"],
+      "properties": {
+        "step_id": { "$ref": "#/$defs/stepId" },
+        "assertion_id": { "$ref": "#/$defs/assertionId" },
+        "contract_case": {
+          "type": "string",
+          "enum": [
+            "connect_success",
+            "push_success",
+            "pull_success",
+            "rebuild_success",
+            "invalid_request",
+            "invalid_schema_reference",
+            "auth_required",
+            "idempotency_conflict",
+            "client_retired",
+            "client_generation_expired",
+            "rebuild_restart_required",
+            "schema_mismatch",
+            "upgrade_required",
+            "retry_later",
+            "sync_integrity_failure",
+            "capture_pending",
+            "temporary_unavailable"
+          ]
+        },
+        "http_status": { "type": "integer", "minimum": 100, "maximum": 599 },
+        "error_code": {
+          "oneOf": [
+            { "type": "string", "pattern": "^[a-z][a-z0-9_]*$" },
+            { "type": "null" }
+          ]
+        },
+        "retryable": { "type": "boolean" }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": { "http_status": { "maximum": 399 } },
+            "required": ["http_status"]
+          },
+          "then": { "properties": { "error_code": { "type": "null" } } },
+          "else": { "properties": { "error_code": { "type": "string", "pattern": "^[a-z][a-z0-9_]*$" } } }
+        }
+      ]
+    },
+    "assertion": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "requirement_ids", "description", "expectation_ids", "predicate", "oracle", "detects_control_ids"],
+      "properties": {
+        "id": { "$ref": "#/$defs/assertionId" },
+        "requirement_ids": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/requirementId" }
+        },
+        "description": { "type": "string", "minLength": 1 },
+        "expectation_ids": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "$ref": "#/$defs/expectationId" } },
+        "predicate": { "$ref": "#/$defs/predicate" },
+        "oracle": { "$ref": "#/$defs/oracle" },
+        "detects_control_ids": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/controlId" }
+        }
+      }
+    },
+    "oracle": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "expected_source", "observed_source"],
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": ["model-state-equality", "wire-contract", "state-transition", "artifact-policy", "performance-budget", "negative-control-detection"]
+        },
+        "expected_source": { "const": "authored-model" },
+        "observed_source": {
+          "type": "string",
+          "enum": ["system-under-test", "generated-artifact"]
+        }
+      }
+    }
+  }
+}

@@ -1,292 +1,733 @@
 ---
 title: Conformance Plan
-description: Shared fixtures, layer-by-layer validation, and the performance budget for Synchro.
+description: Executable protocol version 3 conformance, independent proof, and performance budgets for Synchro.
 ---
 
 # Conformance Plan
 
 ## Purpose
 
-This document defines the executable validation strategy for Synchro.
+This document defines the executable conformance contract for Synchro. It
+defines what must be modeled, executed, observed, and recorded before a
+protocol version 3 release candidate can be considered for release
+verification.
 
-The goal is to turn the spec into a real contract that every layer must prove, not a prose document that each implementation interprets differently.
+This document defines proof obligations. It does not define new sync
+semantics, declare a test result, or replace a normative specification.
 
-## Core Rule
+## Behavioral Authority
 
-The source of truth is:
+The behavioral authority is, in order of scope:
 
-- `00-principles`
-- `01-wire-protocol`
-- `02-client-contract`
-- `03-state-machines`
-- `04-invariants`
-- `05-schema-evolution`
+- `docs/src/content/docs/spec/00-principles.mdx`
+- `docs/src/content/docs/spec/01-wire-protocol.mdx`
+- `docs/src/content/docs/spec/02-client-contract.mdx`
+- `docs/src/content/docs/spec/03-state-machines.mdx`
+- `docs/src/content/docs/spec/04-invariants.mdx`
+- `docs/src/content/docs/spec/05-schema-evolution.mdx`
+- Accepted ADR 001, WAL Change Stream
+- Accepted ADR 002, Mutation Idempotency and Conflict Semantics
+- Accepted ADR 003, Pull, Cursor, and Rebuild Semantics
+- Accepted ADR 004, Membership, Schema, and Retention
+- Accepted ADR 005, Integrity, Authorization, and Portable Seeds
 
-Current implementation behavior is not baseline.
+The five accepted ADRs are binding for protocol version 3. They resolve
+semantic ambiguity in earlier examples without changing the role of the
+specification as the behavioral authority. The requirement catalog identifies
+claims and proof types. The support matrix identifies certification scope.
+Neither file is an implementation oracle.
 
-If code disagrees with the spec, the code is wrong unless the spec is deliberately changed.
+Current implementation output never defines an expected result. If an
+implementation disagrees with the contract, the scenario fails or the
+contract is deliberately revised before new evidence is accepted.
 
-## What Conformance Must Prove
+## Release Scope
 
-Conformance must prove:
+This conformance plan applies to release `0.3.0` and protocol version `3`.
+Required certification scope is exactly:
 
-- wire compatibility
-- deterministic sync semantics
-- correct state-machine behavior
-- correct rebuild behavior
-- correct schema evolution behavior
-- correct local metadata and queue durability
-- parity across adapters and end clients
-- performance characteristics that justify the architecture
+- PostgreSQL `18` for the extension-backed server
+- iOS `16` and current stable for Swift
+- macOS `13` and current stable for Swift
+- Android API `24` and current stable for Kotlin
+- React Native `0.83.x` on iOS and Android
 
-## Test Asset Model
+PostgreSQL 14 through 17 are explicitly excluded from v0.3.0 certification.
+MySQL is not a v0.3.0 deliverable. Current-stable selectors are resolved at
+release-candidate start and recorded as exact versions in the RC manifest.
+These rules are the support scope in `conformance/support-matrix.json`; this
+document does not widen it.
 
-The conformance suite should use shared executable assets, not only handwritten tests per layer.
+## Evidence Boundary
 
-Recommended shared asset groups:
+The plan is not a pass report. A scenario is not passing, covered, or
+certified until its required command has executed and generated a schema-valid
+evidence record bound to the candidate. Authored scenario definitions,
+fixtures, source code, test names, and planned commands do not count as
+execution evidence.
 
-- protocol fixtures
-- schema fixtures
-- scope and rebuild fixtures
-- mutation and conflict fixtures
-- state-machine traces
-- performance scenarios
+Every evidence record must identify:
 
-Recommended repository shape:
+- release `0.3.0` and protocol version `3`
+- candidate ID, source commit, and contract snapshot hash
+- requirement IDs, scenario ID, proof-obligation ID, selected support-cell ID,
+  and proof type
+- exact artifacts, artifact-inventory roles, and artifact hashes
+- exact OS, PostgreSQL, SDK, IDE, emulator or simulator, and toolchain
+- command, result, duration, logs, traces, and replay data
+- one typed trace attachment for every authored barrier, the exact pre-authored
+  fault recipe when used, and the randomized seed when required
+- all attempts in the one execution lineage for that candidate, scenario,
+  obligation, and support cell, including typed infrastructure disposition and
+  approval for every permitted rerun
 
-```text
-conformance/
-  protocol/
-  schema/
-  scopes/
-  mutations/
-  traces/
-  performance/
-```
+The evidence schema requires release `0.3.0`, protocol version `3`, the aggregate
+contract snapshot digest, the exact authored proof obligation and two-element
+`["make", target]` command, consistent timestamps and duration, result and exit
+code, complete proof-obligation assertion IDs, and content-addressed typed log,
+trace, replay, barrier, fault, and performance attachments. Evidence requirement
+IDs equal the proof-obligation set; its selected support cell, command, and resolved
+artifact-inventory roles must satisfy the named obligation exactly. The RC
+manifest schema requires the exact ordered specification and Accepted ADR file
+set, requirements, support matrix, scenario catalog, vector catalog, complete
+fault catalog, performance budgets and required measurements, artifact
+inventory, versioned schemas, per-file hashes, and the same aggregate digest.
+Verification recomputes those values from candidate source bytes and rejects
+missing, reordered, substituted, partial, non-Accepted, or mixed-revision
+inputs.
 
-These assets should be reusable by:
+The generated inventory is the only status view. A hand-maintained coverage
+claim is not evidence.
 
-- `extensions/synchro-core`
-- `extensions/synchro-pg`
-- `api/go`
-- Swift client tests
-- Kotlin client tests
-- React Native bridge tests where relevant
+## Independent Verification System
 
-## Conformance Layers
+### Reference Model
 
-### Layer 1: Shared Fixture Validation
+The reference model is a standalone executable interpretation of the protocol
+version 3 contract. It must import no production Synchro package, `api/go`,
+production Rust binding, pgrx module, native sync engine, adapter internal, or
+implementation fixture. A build check must reject those dependencies.
 
-These are golden inputs and expected outputs that define contract truth.
+The model maintains at least this state:
 
-Examples:
+- protocol gate, authenticated identities, clients, client generations, and
+  irreversible retirement markers
+- immutable schema manifests, schema hashes, schema classes, logical IDs, and
+  authored mutation schemas
+- registered relations, registry generations, physical identity, primary-key
+  contract, replica identity, capture-only dependency projections, scope
+  functions, dependency impacts, membership generations, and retention floors
+- authoritative rows, deleted fences, opaque row versions, write fences,
+  source transactions, WAL event positions, replay identities, materialized
+  projections, scope effects, and checksums
+- batch and mutation identities, canonical fingerprints, sealed requests,
+  terminal outcomes, and response replay state
+- client local rows, local-only rows, per-scope assignments, scope-set version,
+  opaque cursors, checksums, provenance edges, queued mutations, rejection
+  records, schema state, and rebuild sessions
+- readiness checks, worker progress, slot acknowledgement, poison state,
+  seed export state, installation state, and authorization capability state
+- client state-machine state and external events such as response loss,
+  process death, restart, backgrounding, connectivity loss, and recovery
 
-- `connect` request and response pairs
-- `push` acceptance and rejection cases
-- `pull` delta and rebuild requests
-- schema action cases
-- state transition traces
+Model operations include connect, local SQL write, direct server write, push,
+pull, rebuild, schema transition, scope reassignment, membership backfill,
+compaction, worker restart, WAL replay, response loss, transport failure,
+local apply failure, process death, and restart. Each operation produces a
+semantic state transition and an expected observable outcome. The model does
+not compare opaque token bytes or implementation-specific internal order.
+
+### Scenario Inputs and Expected Results
+
+Every scenario is an authored contract input with a stable scenario ID and:
+
+- normative references and requirement IDs
+- uniquely identified proof obligations with exact requirement and assertion
+  IDs, proof type, one exact support cell or null for support-neutral proof,
+  exact artifact-inventory IDs, Make target, and the exact two-element canonical
+  argument vector
+- independent model setup, operations, and expected durable state
+- typed step transport and contract operation classes, with every HTTP step
+  bound to one canonical contract case, exact status, stable error code or null,
+  retryability, and a wire-contract assertion
+- deterministic barriers and release order when concurrency is exercised
+- authored fault plans bound to catalog fault and control IDs and an exact typed
+  pre-execution injection recipe
+- deterministic or randomized replay requirements and seed policy
+- expected HTTP status and stable error code where the wire contract defines
+  them
+- expected durable state, row contents, provenance, queue state, cursor state,
+  rebuild state, readiness state, and checksum result
+- performance-budget and required-characterization-measurement IDs, including
+  explicit empty lists when unused
+
+Expected results are calculated from the normative contract and independent
+model state. They are never captured from a running adapter, extension, client,
+or generated fixture. Field-presence assertions, serializer round trips, and
+implementation-derived golden files cannot prove semantic conformance.
+
+Every assertion binds exact requirement IDs and at least one authored model
+expectation, and every model expectation is referenced by an assertion. A proof
+obligation's requirement IDs equal the union owned by its exact assertion set,
+so an unrelated passing assertion cannot prove another scenario requirement.
+Each assertion uses a closed contract-predicate name with no free-form payload,
+and that predicate class must be compatible with its independent oracle. An
+arbitrary always-true predicate cannot be relabeled as a wire, state, artifact,
+performance, or negative-control proof.
+Every fault plan binds one declared barrier, one single-requirement catalog
+control, the control's exact fault and injection recipe, and exactly the
+detection assertion set declared by that control. Scenario
+validation rejects duplicate logical IDs and resolves requirements, normative
+anchors, support cells, artifact inventory, faults, controls, barriers,
+expectations, budgets, and required measurements before execution; an unknown,
+excluded, missing, or mismatched binding is invalid. Randomized replay always
+requires a seed, and any authored barrier requires a corresponding barrier
+trace.
+
+Proof type is an enforced execution policy, not a label. Each requirement
+declares its applicable server and client components; the gate expands those
+components to every required support cell. Each proof type has an allowlist of
+release-capable Make targets and required and permitted artifact roles. For
+example, `native-e2e` requires the PostgreSQL extension, adapter, and applicable
+native or bridge package and cannot use a documentation target, direct pgrx
+target, or adapter-unit target. `reference-model` uses only the independently
+built conformance-runner artifact; `negative-control` also binds that runner and
+one or more explicit mutated subject artifacts. Evidence records the resolved
+subject artifact IDs, and they must exactly match the authored control. Evidence
+environment entries exactly equal the dimensions and exact versions frozen for
+the obligation's resolved support cell. Support-neutral evidence has no
+environment dimensions. Across all scenarios selected by an RC manifest, each
+requirement must have terminal passing evidence for every proof type listed by
+that requirement; splitting obligations among scenarios cannot omit a required
+proof type.
+
+## Required Proof Layers
+
+### Layer 1: Independent Protocol 3 Scenarios
+
+The scenario runner must execute independent protocol version 3 scenarios for
+all four endpoints and their dispatch boundaries. Each endpoint must have
+success, malformed request, authentication failure, protocol incompatibility,
+the defined schema or generation incompatibility dispatch, retryable failure,
+and state-integrity coverage. The scenario set must include at least:
+
+- connect with the fresh sentinel, exact current schema, compatible Class 2
+  history, Class 3 with and without affected assigned scopes, Class 4
+  unsupported and explicit reset recovery, and unsupported protocol
+- push with insert, update, delete, mixed accepted and terminal outcomes,
+  exact response replay, fingerprint conflict, response loss, and whole-request
+  operational rollback
+- pull with divergent per-scope cursors, page limits, scope add and remove,
+  stale and forged cursors, same-position current-schema replacement for
+  unaffected scopes, null invalidation for affected scopes, terminal checksums,
+  capture pending, and no partial progress on failure
+- rebuild with multiple pages, concurrent writes after the snapshot boundary,
+  exact page replay, expiry or invalidation, forged or misbound continuation,
+  final checksum verification, and unrelated scope isolation
+
+The model and the black-box result must agree on semantic outcomes. Opaque
+cursor, server-version, HMAC, and page-token contents are treated as opaque;
+their required bindings, dispatch, and state effects are verified instead.
 
 ### Layer 2: Rust Core Deterministic Semantics
 
-`extensions/synchro-core` should prove:
+`extensions/synchro-core` must consume the authored corpus and independently
+prove portable contract behavior for:
 
-- cursor semantics
-- version-token handling rules
-- checksum behavior
-- diff and dedup behavior
-- mutation outcome normalization
-- state-machine transition logic that belongs in shared semantics
+- strict protocol and operation-shape validation
+- typed canonical encoding, SHA-256 row identity, row digest, and scope digest
+- normalized RFC 8785 batch and mutation fingerprint arrays and SHA-256 domains
+- opaque cursor and server-version handling
+- typed scope deduplication and deterministic merge
+- mutation fingerprint, outcome, conflict, and state normalization
+- schema action and client state transition validation
 
-These tests should be mostly pure and fixture-driven.
+The Rust tests are not sufficient by themselves. Their evidence must be
+compared with the independent model and the shared cross-language vectors.
 
-### Layer 3: PostgreSQL Extension Integration
+### Layer 3: Real PostgreSQL 18 Extension and WAL Pipeline
 
-`extensions/synchro-pg` should prove:
+Extension conformance must run against a real PostgreSQL 18 instance with the
+packaged extension and the configured worker. The required change-capture path
+is:
 
-- WAL or CDC-driven change capture
-- deterministic scope materialization
-- low-fanout shared-scope behavior
-- per-scope incremental serving
-- rebuild correctness
-- synced CRUD application
-- schema manifest generation
-- schema action selection
+```text
+committed source SQL
+  -> logical replication slot and decoder
+  -> WAL worker
+  -> durable transaction and event replay records
+  -> materialized projections, membership, versions, and effects
+  -> HTTP pull response
+```
 
-These tests must run against real PostgreSQL.
+The tests must exercise direct application writes and accepted push writes
+through this path. They must not seed changelog rows, scope edges, captured
+projections, slot positions, or replay ledgers to manufacture expected pull
+effects. An observer may inspect authoritative rows and explicitly permitted
+sanitized sync metadata, but it may not create the effect under test.
 
-### Layer 4: HTTP Adapter Conformance
+Required WAL scenarios cover commit order, source transaction and event replay
+identity, worker restart before and after acknowledgement, missing or invalid
+version fences, decode or materialization failure, blocking quarantine,
+registry generation activation, qualified relation identity, unsupported
+truncate or replica identity, and fail-closed readiness. A successful push
+must not be treated as proof that its WAL effect is pull-visible before
+materialization. A pending fence must exercise the specified retryable pull
+response with no cursor or checksum advancement.
 
-`api/go` should prove:
+### Layer 4: Real HTTP Adapter Black Box
 
-- exact endpoint behavior from `01-wire-protocol`
-- auth and version-gating integration
-- error translation
-- idempotency behavior
-- compression and transport behavior where supported
+Adapter conformance sends real HTTP requests to the Go adapter and observes
+only its public responses and permitted external effects. The adapter must
+call the canonical extension functions and must not be replaced by a mock for
+happy-path connect, push, pull, rebuild, seed continuation, or schema action
+tests.
 
-These tests should treat the adapter as a black box over the extension.
+The layer must prove authentication identity binding, protocol gating, exact
+status and error translation, request validation, retry headers, declared
+compression behavior, idempotent replay, and absence of an extra core sync
+network hop. Direct SQL calls are limited to setup, controlled fault injection,
+and sanitized observation; they are not a substitute for HTTP proof.
 
-The adapter should not need its own semantic test universe.
+### Layer 5: Native and Bridge End to End
 
-### Layer 5: Native Client Conformance
+Swift and Kotlin must use real local SQLite, public local SQL operations, real
+HTTP transport, and the extension-backed adapter. Their shared scenarios must
+prove:
 
-Swift and Kotlin should prove:
+- empty and seeded startup, including schema-only and portable-data seeds
+- offline SQL writes before first connect and normal queue replay
+- push before pull, canonical accepted and rejected reconciliation, and no
+  server-apply echo loop
+- durable queues, rejection records, scope assignments, cursors, checksums,
+  provenance, schema state, and rebuild state
+- assignment removal while unresolved authored intent protects an
+  application-visible local row until its explicit outcome
+- scope-local rebuild, overlapping scope preservation, checksum failure, and
+  schema-incompatible queued intent
+- retryable and non-retryable failures, typed status, and legal state
+  transitions
 
-- local SQLite materialization
-- queue durability
-- safe apply without echo-loop
-- push before pull ordering
-- rebuild correctness
-- schema migration behavior
-- seeded DB warm-start behavior
-- offline writes before first connect
-- typed status and error surface
+React Native must exercise the public bridge on both iOS and Android and prove
+typed method, event, error, and status parity with the native engines. The
+bridge must not contain an independent queue, cursor, conflict, rebuild, or
+protocol implementation.
 
-These tests should use the same shared contract scenarios wherever possible.
+## Deterministic Concurrency and Fault Injection
 
-### Layer 6: React Native Bridge Conformance
+Timing sleeps are not concurrency evidence. The harness must provide named,
+deterministic barriers and release them under a recorded schedule. Required
+barriers include:
 
-React Native should prove:
+- source transaction begin, source commit, WAL decode, materialization begin,
+  materialization commit, and slot acknowledgement
+- write-fence allocation, push ledger commit, response release, pull snapshot,
+  cursor acknowledgement, and checksum construction
+- rebuild snapshot creation, staged page read, local page apply, final digest
+  verification, final cursor installation, and local metadata commit
+- schema or membership generation staging, activation, and client observation
+- local queue insertion, queue resolution, rejection persistence, process
+  termination, restart, and durable recovery
 
-- parity of the public SDK surface
-- typed event and error forwarding
-- no independent sync semantics
+The harness must record barrier names, transaction identities, source positions,
+operation order, and release decisions. Repeated execution of one scenario and
+seed must produce a replayable schedule, not a race-dependent approximation.
 
-React Native does not need a separate deep sync logic suite if native clients already prove the semantics.
+Fault injection must cover response loss after commit, connection timeout,
+retry and duplicate delivery, worker interruption, decoder failure,
+materialization failure, database availability failure, local apply failure,
+process death at every durable transition, corrupted or incomplete page input,
+stale generation, and seed artifact verification failure. A fault is valid
+only when the expected contract state remains independently asserted. Fault
+injection must not use a hidden implementation result as its oracle.
 
-## Scenario Matrix
+## Phase 2 Contract Negative Controls
 
-Every major spec area should map to automated scenarios.
+The conformance catalog must contain a deliberate negative control for every
+release-critical rule frozen by the Phase 2 contract and Accepted ADRs. Each
+control must fail when the corresponding defect or mutant is introduced. The
+minimum catalog is:
 
-### Wire Protocol Scenarios
+### Protocol and Mutation Controls
 
-- successful `connect` with no schema change
-- `connect` with `replace`
-- `connect` with `rebuild_local`
-- `connect` with `unsupported`
-- successful `push`
-- mixed accepted and rejected `push`
-- `pull` with delta only
-- `pull` with scope add and remove
-- `pull` requesting rebuild
-- paged `rebuild`
+- protocol versions other than 3, malformed fresh schema references, and any
+  `fetch` action are rejected by the version 3 dispatch
+- unknown members, duplicate members, invalid UUIDs, duplicate mutation IDs,
+  invalid limits, absent versus null fields, empty patches, unknown operations,
+  `upsert`, implicit insert, and implicit resurrection are rejected
+- portable JSON integer boundaries round trip exactly across every language;
+  out-of-range, rounded, wrapped, negative-for-positive, and overflow allocation
+  controls fail
+- push body, mutation count, normalized mutation size, and authored column
+  limits fail before ledger allocation, fingerprinting, policy, or source DML
+- client-authored scope IDs, parsed cursors, sorted or generated server
+  versions, timestamp winner selection, and client identity substitution do
+  not affect authoritative semantics
+- same-identity replay returns the stored canonical response, changed
+  fingerprint returns `idempotency_conflict`, and a completed replay does no
+  new source work
+- first execution and replay bind every mutation outcome to its immutable
+  outcome schema; historical checksum verification never uses the current
+  manifest or overwrites incompatible current-schema local state
+- concurrent compare-and-swap, insert reservation, update, and delete races
+  cannot both succeed from one old state
+- operational failure rolls back the whole first push transaction and never
+  creates a per-mutation retryable outcome
+- protected or incompatible authored fields are not silently removed, and
+  schema-incompatible queued intent remains complete and inspectable
+- offline insert-update and insert-delete chains normalize before sealing,
+  sealed-predecessor dependents wait for an authoritative version or become
+  inspectably blocked, and clients without a verified manifest do not invent
+  table or field identities
+- generation-expired first execution creates no ledger claim, and reconnect
+  creates a new-generation successor batch that retains unchanged mutation IDs
+  without editing or resending the rejected sealed batch
 
-### State-Machine Scenarios
+### WAL, Pull, and Rebuild Controls
 
-- empty first startup
-- seeded startup from schema-only seed
-- seeded startup from portable-data seed
-- offline write before first connect
-- push then pull steady state
-- retryable failure during connect
-- retryable failure during pull
-- non-retryable incompatibility
-- stop during rebuild
+- synchronous push publication, per-event or noncontiguous slot acknowledgement,
+  log-and-skip poison handling, missing fence correlation, and acknowledgement
+  around a failed transaction are rejected
+- missing, duplicate, and cross-transaction version-fence correlation blocks
+  capture, and a pending accepted fence blocks both pull and rebuild without
+  progress
+- reordered or reused fence IDs and ordinals, including repeated same-row DML
+  in one transaction, block capture rather than collapsing transitions
+- actual-operation `AFTER` fences cover `ON CONFLICT DO UPDATE` and `DO NOTHING`
+  without speculative extra fences, and capture-dependency messages omit table ID
+- one source event producing multiple same-scope effects can paginate between
+  deterministic effect ordinals without looping or skipping a sibling effect
+- unqualified relation lookup, unsupported truncate, replica identity drift,
+  trigger bypass, and direct changelog or edge publication block or fail as
+  specified
+- direct and synced updates that change a registered primary-key value fail
+  before version, fence, logical-message, or source-row effects
+- source snapshots not causally bound to a durable materialization boundary,
+  live dependency reads, missing capture-only dependency registration, and
+  later-state membership evaluation are rejected
+- stream reset from incomplete old projections or an independent live query is
+  rejected; reset must export a new-slot snapshot, stage every projection and
+  digest, catch up through one barrier, and atomically activate a new generation
+- reset uses a permanent candidate slot and durable active-slot handoff, survives
+  process death, and covers each accepted fence exactly once by imported
+  baseline or candidate-slot WAL before activation
+- applying a global raw page limit before per-scope eligibility, deduplicating
+  without scope identity, hydrating from a live row instead of a captured
+  projection, or advancing a cursor for a missing outcome is rejected
+- malformed or misbound cursors and rebuild tokens have the specified `400`
+  dispatch, while valid stale lineage has the specified rebuild or restart
+  behavior
+- live requery across rebuild pages, lexical page keys, partial terminal
+  checksum maps, final checksum omission, and advancement of an unrelated
+  scope checkpoint are rejected
+- any accepted write after rebuild staging advances the client epoch and makes
+  every older stored page return `rebuild_restart_required` before replay
 
-### Invariant Scenarios
+### Membership, Schema, and Retention Controls
 
-- no silent mutation loss
-- no server-apply echo loop
-- cursor advances only after durable apply
-- rebuild does not erase overlapping valid rows
-- rejected mutation remains inspectable
-- scope assignment remains server-authoritative
+- incomplete dependency impact, volatile or undeclared scope dependencies,
+  invalid scope results, duplicate normalization errors, and bound violations
+  do not become empty membership
+- mutable manifests, version-order-only compatibility, wrong affected scopes,
+  omitted Class 3 rebuilds, empty rebuild actions, Class 4 continuation without
+  reset, queue-destructive reset, and protocol 3 `fetch` are rejected
+- a known, continuing, restored, or expired client cannot pair a generation
+  with the fresh schema sentinel or omit its generation to bypass incompatible
+  lineage and explicit reset
+- live delete-and-rebuild backfill, global retention floors, empty-log cursor
+  assumptions, stale client reuse, and silent limit normalization are rejected
+- Class 3 migration commits target DDL and rebuild markers, reconciles eligible
+  queued intent under the target schema, and only then rebuilds; rebuilding
+  before push-first reconciliation is rejected
+- Class 3 projection bootstrap rejects temporary or mismatched slots,
+  independent live snapshots, omitted catch-up transactions, early manifest
+  exposure, partial activation, and process-death resume from another boundary
+- a compatible schema transition reissues the exact position under the current
+  schema for each unaffected scope, while affected or otherwise stale scopes
+  receive null; local token relabeling and needless unaffected-scope rebuild are
+  rejected
+- local migration crash controls cover missing or altered target manifests,
+  missing or nondeterministic typed plans, repeated DDL, restart-time schema
+  fetch, and mixed physical and active schema state
 
-### Schema Evolution Scenarios
+### Integrity, State, Authorization, Seed, and Install Controls
 
-- additive column
-- additive table with historical rows
-- single-scope to multi-scope transition
-- scope-logic change without structural schema change
-- phased rollout preserving queued mutations
-- unsupported destructive change
-- portable seed generated on old schema, then reconciled after connect
+- changing schema, logical IDs, key type or value, field type, null state, row
+  value, opaque server version, scope ID, row pairing, or cardinality changes
+  the expected digest
+- decimal values do not pass through binary64, int64 boundaries round trip,
+  portable types remain distinct, canonical JSON ordering converges, and
+  invalid duplicate or noncanonical values fail
+- CRC32, XOR, additive, constant, missing-row, duplicate-row, omitted-scope,
+  and extra-scope digest mutants fail
+- every unlisted client state transition is rejected without durable state
+  mutation, including `stopped` to `pulling`
+- SemVer prerelease, numeric prerelease, build metadata, malformed version, and
+  leading `v` cases follow the required precedence and validation
+- `PUBLIC` and wrong runtime roles cannot access protected functions or
+  metadata, while intended roles have only their declared capability
+- the sole dedicated worker login has `LOGIN REPLICATION NOINHERIT`, belongs
+  only to the `synchro_worker` group, uses explicit `SET ROLE` for SQL access,
+  and every other runtime login lacks replication authority
+- missing worker, stale heartbeat, poison state, invalid progress, unknown or
+  excessive lag, and invalid finite limits make readiness unready
+- canary row and identity values do not appear in logs, traces, health output,
+  or quarantine text
+- seed pages are snapshot-bound and token-bound, modified, replayed
+  outside-transaction, cross-scope, and cross-export page-token use fails, and
+  concurrent commits do not change the export
+- missing rows, altered rows, missing or stale row versions, wrong digests,
+  incomplete pages, stale receipts, corrupt SQLite, nonempty queues, or sidecar
+  files prevent seed publication
+- a verified seed supplies the opaque base version required for an offline
+  update or delete without a preliminary row redownload
+- receipt conversion installs runtime cursors but not row versions, and
+  unassigned or stale receipt handling preserves pending authored intent and
+  local row state for push-first reconciliation
+- ordinary assignment removal likewise preserves the application-visible local
+  row for unresolved authored intent while removing only server provenance and
+  continuation state
+- stale or hand-edited generated SQL fails regeneration checks, while a clean
+  PostgreSQL 18 install from the pgrx-generated `0.3.0` SQL proves ownership,
+  grants, and runtime-role access
 
-### Shared Versus Private Scope Scenarios
+The negative-control inventory must link every control to the requirement,
+normative reference, typed pre-authored injection recipe, expected failure, and
+evidence record. Every release requirement must resolve to at least one catalog
+control before execution. Unknown requirement or normative IDs, a control whose
+fault is absent, a scenario recipe that differs from its catalog recipe, or a
+control that only checks field presence or repeats the production algorithm is
+invalid.
 
-- one private scope per row
-- shared public scope with many subscribers
-- row present in both shared and private scopes
-- public-row update with low server-side fanout
-- portable seeded public row updated incrementally after login
+Faults and controls resolve through `conformance/faults/catalog.json`. Executed
+fault-injection and negative-control evidence binds the authored scenario fault
+plan, catalog subject type, exact detection assertions, and byte-equivalent
+typed injection recipe, and includes a content-addressed `fault-plan`
+attachment. Negative-control evidence also includes a typed
+`negative-control` attachment. Free-form IDs or a passed assertion without
+catalog and injection-plan closure are not evidence.
 
-## Performance Conformance
+## Exact Schema-Class Conformance
 
-Correctness is primary, but performance claims must also be tested.
+Schema scenarios must exercise the complete protocol version 3 class table from
+ADR 004:
 
-### Round-Trip Budget
+| Class | Required setup | Required connect result |
+| --- | --- | --- |
+| Class 1 | Server-only policy or membership configuration with no client shape change | `none` when the schema reference is exact |
+| Class 2 | Compatible additive shape change with no historical rematerialization | `replace` with the current inline manifest |
+| Class 3 with nonempty affected assigned intersection | Existing historical rows, composition change, additive historical field, or membership materialization change | `rebuild_local` with the current inline manifest and exactly that nonempty intersection |
+| Class 3 with empty affected assigned intersection | Same transition for a client assigned to no affected scope | `replace`, with `affected_scopes` forbidden |
+| Class 4 | Removed or renamed field contract, incompatible type, removed table, or primary-key identity change | `unsupported` with HTTP 200 |
 
-The suite should assert the intended hot-path request budget:
+The suite must also prove the exact fresh sentinel, exact current schema gate,
+known lineage handling, immutable manifest body and hash, sorted affected
+scopes, and authored-schema retention for queued mutations. Protocol version 3
+does not emit `fetch`. Push and pull with a non-current schema return the
+specified `422 schema_mismatch` without partial work.
 
-- warm connect: 1 request
-- steady-state sync with no pending local mutations: 1 pull request per cycle
-- steady-state sync with pending local mutations: 1 push request plus 1 pull request per cycle
-- rebuild: explicit extra requests only for rebuild pagination
+## Cross-Language Canonical Vectors
 
-### Server-Side Workload Expectations
+One authored vector set must be consumed independently by Rust, Go, Swift, and
+Kotlin. The vector set must include source values and expected canonical bytes
+and digests, not values captured from a production encoder. It must cover:
 
-The suite should measure and report:
+- every portable type, SQL null, Unicode without normalization, and empty and
+  nonempty values
+- int and int64 boundaries, negative zero rules, decimal normalization and
+  exact precision, finite binary64 boundaries, dates, times, datetimes, bytes,
+  booleans, and canonical nested JSON numbers
+- schema manifest hashing, stable field ordering, row identity, row digest,
+  empty scope digest, nonempty scope digest, cardinality, duplicate identity,
+  and scope ordering
+- typed primary-key ordering, absent versus null presence, invalid encodings,
+  duplicate JSON members, and noncanonical JSON or base64 forms
 
-- per-row fanout distribution
-- shared-scope versus duplicated-private-scope behavior
-- rebuild cost by scope size
-- schema-check handshake cost
+Each language must independently recompute the canonical bytes and SHA-256
+results and compare them to the authored expected values. Rust, Go, Swift, and
+Kotlin evidence must use the same vector-set hash. React Native bridge evidence
+must show that both native platforms use the native vector implementation. A
+vector generated by the implementation under test is not an oracle.
 
-### Client-Side Expectations
+## Client Lifecycle and Process Death
 
-The suite should measure and report:
+Lifecycle scenarios must run on real client processes and real SQLite files.
+They must cover start, stop, restart, foreground, background, connectivity
+loss, offline writes before first connect, response loss, retry, and recovery.
+Process termination must be injected before and after:
 
-- seeded startup versus empty startup
-- portable seeded startup versus schema-only seed startup
-- queue replay cost
-- rebuild apply cost
-- local provenance overhead for multi-scope tables
+- durable queue insertion and queue resolution
+- push ledger reconciliation
+- pull page apply and cursor commit
+- terminal checksum verification and metadata commit
+- rebuild page apply, provenance pruning, final checksum, and final cursor
+- schema migration progress and rejection persistence
 
-## Required Test Style
+After restart, the model comparison must prove no mutation loss, no duplicate
+local intent, no false cursor or checksum health, no lost rejection, no false
+rebuild finality, and correct legal state transitions. A process exit that is
+not controlled and recorded is not a lifecycle proof.
 
-### Shared Fixtures First
+## Authentication, Readiness, Seed, and Installation Evidence
 
-Every important semantic rule should exist first as a fixture or scenario definition, then as layer-specific tests consuming it.
+These are release-critical black-box and role-boundary scenarios, not optional
+operational checks.
 
-### End-To-End For Silent Failure Zones
+### Authentication and Authorization
 
-For silent failure zones, tests should prefer full-flow validation over brittle unit isolation.
+The harness must prove missing and invalid authentication, trusted canonical
+user binding, client ownership, generation binding, scope authority, schema
+gates, least-privilege function grants, and sanitized public error output.
+Runtime operations must be exercised as the intended non-superuser adapter
+role. Seed, monitor, operator, and worker capabilities must be checked against
+their declared boundaries.
 
-Key silent-failure zones include:
+### Readiness
 
-- synced CRUD reconciliation
-- rebuild
-- schema migration
-- provenance pruning
-- scope cursor durability
-- offline queue replay
+Readiness evidence must use the canonical extension readiness result. A database
+ping is not capture readiness. The required checks include configured database,
+protocol and extension, registry and schema generations, worker identity and
+fresh heartbeat, exact publication relations, usable logical replication slot,
+enabled version-fence triggers, no poison or relation drift, contiguous durable
+progress, and known finite heartbeat and WAL lag limits. Missing or unknown
+checks are unready. Public readiness output remains generic and redacted.
 
-### Black-Box Adapter Validation
+### Portable Seeds
 
-`api/go` should be validated through HTTP behavior, not by poking internal helpers.
+Seed evidence must use one `SERIALIZABLE READ ONLY DEFERRABLE` transaction,
+server-declared portable scopes, authenticated opaque page tokens, recomputed
+schema, row, and scope digests, exact cardinality and ordering, atomic SQLite
+publication, empty pending queue, complete provenance, read-only reopen,
+`PRAGMA integrity_check`, no required sidecar files, and normal authenticated
+connect continuation. Seeded data is a cache and never grants authorization.
 
-### Real SQLite And Real PostgreSQL
+### Clean Installation
 
-Native client tests should use real SQLite.
+Installation evidence must build a clean PostgreSQL 18 database, install the
+pgrx-generated `synchro_pg` `0.3.0` baseline in the fixed `synchro` schema,
+verify generated SQL has no drift, verify ownership, revokes, grants, roles,
+publication, slot, and readiness, and exercise contract functions as
+non-superuser runtime roles. The generated pgrx source is the only installation
+source. A parallel hand-maintained SQL definition is not an accepted artifact.
 
-Extension tests should use real PostgreSQL.
+## Executable Performance Budgets
 
-Do not substitute fake databases for the contract path.
+Performance scenarios must fail the command when a declared budget is missing,
+violated, or selected after execution. Each budget has a stable ID, scenario,
+support cells, artifact-inventory IDs, metric, unit, exact or bounded comparator,
+limit, typed data profile, and typed measurement method in the authored
+machine-readable manifest. The runner records raw measurements in a typed
+content-addressed attachment, binds the unchanged authored fields into evidence,
+and exits nonzero on violation. Manual benchmark commentary is not a
+performance result.
 
-## Exit Criteria
+The following request budgets are fixed contract assertions:
 
-Conformance is not complete until all of the following are true:
+- warm connect uses exactly one HTTP request
+- steady-state sync with no pending mutations uses exactly one pull request
+  per cycle
+- steady-state sync with pending mutations uses exactly one push and one pull
+  request per cycle
+- rebuild uses only connect, pull, and the explicit number of rebuild page
+  requests required by the returned pages, with no schema fetch round trip
+- protocol core sync has no outbound network or RPC hop from the adapter to a
+  separate sync service
 
-- every invariant in `04-invariants` maps to at least one automated test
-- every endpoint in `01-wire-protocol` has success, failure, and incompatibility coverage
-- every schema change class in `05-schema-evolution` has automated coverage
-- Swift and Kotlin pass the same core behavior corpus
-- React Native proves bridge parity where applicable
-- zero skipped contract tests
-- zero failing contract tests
+Each request-producing scenario includes explicit budgets for every permitted
+request class and an exact zero budget for every forbidden or unexpected request
+class. Evidence records complete typed counts for connect, push, pull, rebuild
+page, schema fetch, and other requests, plus returned rebuild pages and outbound
+RPC hops; the verifier derives every budget value from those counters. A
+scenario must author proof obligations for every support cell named by each
+selected budget, and those obligations must contain the exact artifact set for
+that cell. Evidence from a subset of the declared cells or from a different
+artifact set does not satisfy the budget.
 
-## Open Follow-Up Questions
+No unapproved latency or throughput ceiling is invented for v0.3.0. Instead,
+the same manifest separately freezes required characterization measurements for
+per-row fanout, shared-scope versus duplicated-private-scope behavior, rebuild
+cost by scope cardinality, schema-check cost, seeded versus empty startup, queue
+replay, rebuild apply, and multi-scope provenance overhead. Each measurement
+binds scenario, support cells, artifacts, typed profile and method, metric set,
+an explicit finite set of workload strata, and minimum sample count per stratum.
+Evidence reports every authored stratum separately with its exact parameter
+object, one uniquely identified observation per claimed sample, and one numeric
+value for every authored metric in every observation. A sample count without
+those observations, a missing metric, or one aggregate replacing the strata is
+invalid. Configured positive
+bounds for fanout, impact rows,
+pull, rebuild, compaction, and backfill are exercised at lower, upper, and
+invalid boundaries. Missing samples, changed profiles or metrics, or absent
+typed measurement attachments fail the gate. The same exact artifacts and
+support-cell environments used for functional proof are used for release
+performance evidence.
 
-- whether the shared fixture corpus should live in JSON only or use a richer typed manifest format
-- which performance budgets should block CI versus run in scheduled benchmark jobs
+## Generated Inventory
+
+The evidence tool must generate the conformance inventory from:
+
+- `conformance/requirements.json` and its JSON Schema
+- `conformance/support-matrix.json` and its JSON Schema
+- the authored scenario catalog and scenario JSON Schema
+- the vector-set manifest, fault catalog, and performance budget manifest
+- executed evidence records and the RC contract snapshot
+
+Each inventory row includes requirement ID, scenario ID, support-cell ID, proof
+type, protocol version, result, attempt history, artifact hashes, environment,
+seed, logs, traces, and linked negative controls. The generator must detect
+missing requirements, missing proof types, missing negative controls, missing
+support cells, skipped or filtered execution, stale artifact hashes, and
+unresolved attempts. It emits no passing row without an executed evidence
+record.
+
+## Required Makefile Execution
+
+All tests and evidence commands run through Makefile targets. The candidate
+must provide and execute these Makefile targets:
+
+```bash
+make verify-contract
+make test-conformance
+make test-blackbox
+make test-rust-core
+make test-rust-pg
+make test-adapter
+make test-swift
+make test-kotlin
+make test-rn
+make docs-build
+```
+
+Release evidence executes the exact two-element command authored by its proof
+obligation: `make` followed by one target. Make command-line assignments,
+additional goals, wrappers, filters, and shell substitutions do not produce
+release evidence. Focused engineering runs may use documented Makefile
+variables, but they cannot satisfy an unfiltered release obligation. Direct
+language test commands never produce release evidence.
+
+## Conformance Exit Gate
+
+The conformance gate fails unless all of the following are true for the same
+candidate and contract snapshot:
+
+- every requirement in `requirements.json` has all listed proof types,
+  including a meaningful negative control
+- every invariant, endpoint, dispatch rule, state transition, and exact schema
+  class has an independent scenario
+- real HTTP, PostgreSQL 18, the extension, the WAL pipeline, real SQLite, and
+  native client processes were exercised for every proof layer named by its
+  requirement
+- all Phase 2 negative controls and all required mutants fail as expected
+- Rust, Go, Swift, and Kotlin pass the same canonical vector set
+- Swift, Kotlin, and React Native pass lifecycle and process-death scenarios
+- authentication, readiness, portable seed, clean installation, and
+  non-superuser authorization evidence is present
+- every declared performance budget executed and passed
+- generated inventory and all evidence validate against their schemas
+- no required test is skipped, ignored, filtered, quarantined, or accepted
+  after an unexplained flake
+- no critical or high finding remains unresolved and no release-critical mutant
+  survives without a documented contract-based disposition
+
+Until these commands execute and emit valid evidence for the exact candidate,
+this document makes no conformance or release-readiness claim.

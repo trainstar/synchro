@@ -1,14 +1,15 @@
 {
-  "$schema": "./schemas/requirements.schema.json",
-  "schema_version": 1,
+  "$schema": "./schemas/requirements-v2.schema.json",
+  "schema_version": 2,
   "release": "0.3.0",
   "requirements": [
     {
       "id": "SYNC-TIME-001",
       "title": "Canonical wire time",
       "category": "protocol",
-      "statement": "Every timestamp on the wire uses RFC 3339 UTC encoding.",
+      "statement": "Every wire timestamp uses its field's canonical RFC 3339 UTC representation, including exact microsecond Z form for portable datetime values.",
       "required_proof_types": ["server-black-box", "native-e2e", "negative-control"],
+      "applicable_components": ["postgresql-server", "swift-client", "kotlin-client", "react-native-client"],
       "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#canonical-time-format" }]
     },
     {
@@ -17,6 +18,7 @@
       "category": "protocol",
       "statement": "Clients preserve non-null server-issued scope cursors without parsing, ordering, or assigning semantic meaning to their encoding, and reserve null for no usable resumable state.",
       "required_proof_types": ["reference-model", "native-e2e", "negative-control"],
+      "applicable_components": ["swift-client", "kotlin-client", "react-native-client"],
       "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#opaque-cursor-invariant" }]
     },
     {
@@ -25,6 +27,7 @@
       "category": "protocol",
       "statement": "Clients preserve server_version as an opaque optimistic-precondition and reconciliation token without sorting, incrementing, or parsing it.",
       "required_proof_types": ["reference-model", "native-e2e", "negative-control"],
+      "applicable_components": ["swift-client", "kotlin-client", "react-native-client"],
       "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#opaque-server-version-invariant" }]
     },
     {
@@ -33,6 +36,7 @@
       "category": "scope",
       "statement": "The server determines each client's authoritative scope set and rejects client-invented scope instances.",
       "required_proof_types": ["server-black-box", "native-e2e", "negative-control"],
+      "applicable_components": ["postgresql-server", "swift-client", "kotlin-client", "react-native-client"],
       "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#scope-assignment-authority" }]
     },
     {
@@ -41,14 +45,16 @@
       "category": "scope",
       "statement": "scope_set_version moves forward only when the authoritative assigned scope set changes.",
       "required_proof_types": ["reference-model", "server-black-box", "native-e2e", "negative-control"],
+      "applicable_components": ["postgresql-server", "swift-client", "kotlin-client", "react-native-client"],
       "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#scope-set-version-monotonicity" }]
     },
     {
       "id": "SYNC-SCHEMA-001",
       "title": "Server-authoritative schema decisions",
       "category": "schema",
-      "statement": "The server determines schema compatibility and schema actions, and clients execute the returned action without substituting a client-defined compatibility decision.",
+      "statement": "The server determines schema compatibility and schema actions, clients execute them without substitution, and the fresh sentinel is accepted only for a client identity with no prior generation or installed schema so it cannot bypass incompatible reset.",
       "required_proof_types": ["server-black-box", "native-e2e", "negative-control"],
+      "applicable_components": ["postgresql-server", "swift-client", "kotlin-client", "react-native-client"],
       "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#schema-authority" }]
     },
     {
@@ -57,6 +63,7 @@
       "category": "boundary",
       "statement": "Applications can read and write every synced CRUD operation through local SQLite without a separate application write API.",
       "required_proof_types": ["native-e2e", "negative-control"],
+      "applicable_components": ["swift-client", "kotlin-client", "react-native-client"],
       "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#local-sql-is-the-app-surface" }]
     },
     {
@@ -65,14 +72,16 @@
       "category": "data-correctness",
       "statement": "The Synchro protocol handles create, update, and delete operations for every registered synced table.",
       "required_proof_types": ["reference-model", "server-black-box", "native-e2e", "negative-control"],
+      "applicable_components": ["postgresql-server", "swift-client", "kotlin-client", "react-native-client"],
       "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#synced-crud-authority" }]
     },
     {
       "id": "SYNC-MUTATION-001",
       "title": "Mutation outcome conservation",
       "category": "data-correctness",
-      "statement": "Every local mutation remains pending or reaches one accepted or inspectable rejected outcome, and no local intent disappears without one of those states.",
+      "statement": "Every local mutation remains pending or reaches one durable accepted, server-rejected, superseded-before-send, cancelled-before-send, or blocked-by-predecessor outcome, and every local outcome remains inspectable and linked.",
       "required_proof_types": ["reference-model", "native-e2e", "fault-injection", "negative-control"],
+      "applicable_components": ["swift-client", "kotlin-client", "react-native-client"],
       "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#no-silent-mutation-loss" }]
     },
     {
@@ -81,6 +90,7 @@
       "category": "data-correctness",
       "statement": "Clients reconcile accepted and rejected mutations to any authoritative row state and server version returned by the server.",
       "required_proof_types": ["reference-model", "server-black-box", "native-e2e", "negative-control"],
+      "applicable_components": ["postgresql-server", "swift-client", "kotlin-client", "react-native-client"],
       "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#canonical-server-outcome" }]
     },
     {
@@ -89,6 +99,7 @@
       "category": "data-correctness",
       "statement": "Replay and read-your-own-write reconciliation never apply one logical local action twice.",
       "required_proof_types": ["reference-model", "native-e2e", "fault-injection", "negative-control"],
+      "applicable_components": ["swift-client", "kotlin-client", "react-native-client"],
       "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#no-duplicate-local-intent" }]
     },
     {
@@ -97,14 +108,16 @@
       "category": "data-correctness",
       "statement": "Applying server-originated state never enqueues that state as new client-originated intent.",
       "required_proof_types": ["native-e2e", "negative-control"],
+      "applicable_components": ["swift-client", "kotlin-client", "react-native-client"],
       "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#no-silent-server-apply-echo-loop" }]
     },
     {
       "id": "SYNC-VERSION-002",
-      "title": "Accepted writes advance canonical version",
+      "title": "Accepted transitions mint new server versions",
       "category": "data-correctness",
-      "statement": "Accepted insert and update mutations persist the canonical row version from client_version where updated_at semantics apply, never from a writable payload updated_at field or an unchanged prior value.",
+      "statement": "Every accepted authoritative row transition mints a new opaque server-generated version through the version-fence path, never from client_version, a writable updated_at value, or the unchanged prior version.",
       "required_proof_types": ["server-black-box", "native-e2e", "negative-control"],
+      "applicable_components": ["postgresql-server", "swift-client", "kotlin-client", "react-native-client"],
       "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#accepted-writes-advance-canonical-row-version" }]
     },
     {
@@ -113,14 +126,16 @@
       "category": "data-correctness",
       "statement": "Scope loss and rebuild pruning remove stale local materialization without creating a new delete mutation unless the server supplied an authoritative tombstone.",
       "required_proof_types": ["native-e2e", "negative-control"],
+      "applicable_components": ["swift-client", "kotlin-client", "react-native-client"],
       "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#no-synthetic-cleanup-tombstones" }]
     },
     {
       "id": "SYNC-WAL-001",
       "title": "No silent server change loss",
       "category": "change-capture",
-      "statement": "Every committed change affecting registered data remains eligible for sync until durably represented, and capture progress including WAL acknowledgement never advances past an unapplied change unless it is durably recorded as a blocking operator-visible failure.",
+      "statement": "Every committed change affecting registered data remains eligible until its complete pull-visible representation is durable, and any representation failure creates blocking quarantine without advancing later processing or WAL acknowledgement.",
       "required_proof_types": ["server-black-box", "fault-injection", "negative-control"],
+      "applicable_components": ["postgresql-server"],
       "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#no-silent-server-change-loss" }]
     },
     {
@@ -129,6 +144,7 @@
       "category": "scope",
       "statement": "Repeated evaluation of the same authoritative row and server state produces the same set of scope instances.",
       "required_proof_types": ["reference-model", "server-black-box", "negative-control"],
+      "applicable_components": ["postgresql-server"],
       "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#deterministic-scope-membership" }]
     },
     {
@@ -137,6 +153,7 @@
       "category": "cursor-rebuild",
       "statement": "Rebuilding one scope leaves unrelated local scope data and local-only data intact.",
       "required_proof_types": ["reference-model", "server-black-box", "native-e2e", "negative-control"],
+      "applicable_components": ["postgresql-server", "swift-client", "kotlin-client", "react-native-client"],
       "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#scope-local-rebuild" }]
     },
     {
@@ -145,6 +162,7 @@
       "category": "cursor-rebuild",
       "statement": "A scope cursor advances only after all corresponding incremental changes for that scope are durably and successfully applied locally.",
       "required_proof_types": ["reference-model", "native-e2e", "fault-injection", "negative-control"],
+      "applicable_components": ["swift-client", "kotlin-client", "react-native-client"],
       "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#per-scope-cursor-correctness" }]
     },
     {
@@ -153,6 +171,7 @@
       "category": "cursor-rebuild",
       "statement": "A valid cursor alone never marks local materialization healthy; health also requires independent authoritative checksum verification.",
       "required_proof_types": ["reference-model", "server-black-box", "native-e2e", "negative-control"],
+      "applicable_components": ["postgresql-server", "swift-client", "kotlin-client", "react-native-client"],
       "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#progress-and-integrity-separation" }]
     },
     {
@@ -161,6 +180,7 @@
       "category": "cursor-rebuild",
       "statement": "Every terminal pull page includes authoritative checksums for all active scopes, and clients verify them before treating those scopes as healthy.",
       "required_proof_types": ["server-black-box", "native-e2e", "negative-control"],
+      "applicable_components": ["postgresql-server", "swift-client", "kotlin-client", "react-native-client"],
       "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#final-pull-checksum-requirement" }]
     },
     {
@@ -169,6 +189,7 @@
       "category": "cursor-rebuild",
       "statement": "A rebuild completes only after all pages apply, stale scope provenance is pruned, unjustified rows are removed, the final checksum matches, and the final cursor is installed.",
       "required_proof_types": ["reference-model", "server-black-box", "native-e2e", "fault-injection", "negative-control"],
+      "applicable_components": ["postgresql-server", "swift-client", "kotlin-client", "react-native-client"],
       "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#rebuild-finality" }]
     },
     {
@@ -177,6 +198,7 @@
       "category": "cursor-rebuild",
       "statement": "Rebuilding one scope never deletes a local row while another valid scope provenance edge remains.",
       "required_proof_types": ["reference-model", "native-e2e", "negative-control"],
+      "applicable_components": ["swift-client", "kotlin-client", "react-native-client"],
       "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#rebuild-does-not-erase-valid-overlapping-data" }]
     },
     {
@@ -185,6 +207,7 @@
       "category": "startup",
       "statement": "A scope with no usable cursor follows the same authoritative rebuild rules during initial materialization as during later recovery.",
       "required_proof_types": ["server-black-box", "native-e2e", "negative-control"],
+      "applicable_components": ["postgresql-server", "swift-client", "kotlin-client", "react-native-client"],
       "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#first-sync-uses-rebuild-semantics" }]
     },
     {
@@ -193,6 +216,7 @@
       "category": "local-metadata",
       "statement": "Queued mutations and their stable identifiers survive process death and restart.",
       "required_proof_types": ["native-e2e", "fault-injection", "negative-control"],
+      "applicable_components": ["swift-client", "kotlin-client", "react-native-client"],
       "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#durable-queue-invariant" }]
     },
     {
@@ -201,6 +225,7 @@
       "category": "local-metadata",
       "statement": "A rebuild interrupted by process death remains recoverable from durable local metadata without installing false final state.",
       "required_proof_types": ["native-e2e", "fault-injection", "negative-control"],
+      "applicable_components": ["swift-client", "kotlin-client", "react-native-client"],
       "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#durable-rebuild-state-invariant" }]
     },
     {
@@ -209,6 +234,7 @@
       "category": "local-metadata",
       "statement": "Per-scope cursor advancement is durable and atomic with successful local apply.",
       "required_proof_types": ["native-e2e", "fault-injection", "negative-control"],
+      "applicable_components": ["swift-client", "kotlin-client", "react-native-client"],
       "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#durable-cursor-invariant" }]
     },
     {
@@ -217,6 +243,7 @@
       "category": "local-metadata",
       "statement": "Rejected mutations and their reasons remain inspectable across restart until explicit client policy clears them.",
       "required_proof_types": ["native-e2e", "fault-injection", "negative-control"],
+      "applicable_components": ["swift-client", "kotlin-client", "react-native-client"],
       "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#rejection-inspectability" }]
     },
     {
@@ -225,6 +252,7 @@
       "category": "local-metadata",
       "statement": "For multi-scope tables, local metadata records exactly the scopes that currently justify each local row.",
       "required_proof_types": ["reference-model", "native-e2e", "negative-control"],
+      "applicable_components": ["swift-client", "kotlin-client", "react-native-client"],
       "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#provenance-correctness" }]
     },
     {
@@ -233,6 +261,7 @@
       "category": "startup",
       "statement": "A seeded database follows the normal connect, delta, checksum, and rebuild protocol and never bypasses server authority through a separate sync mode.",
       "required_proof_types": ["server-black-box", "native-e2e", "negative-control"],
+      "applicable_components": ["postgresql-server", "swift-client", "kotlin-client", "react-native-client"],
       "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#seeded-db-is-cache-only" }]
     },
     {
@@ -241,6 +270,7 @@
       "category": "startup",
       "statement": "Seed export contains data only from server-declared portable scopes, and clients do not infer portability from row presence.",
       "required_proof_types": ["server-black-box", "native-e2e", "negative-control"],
+      "applicable_components": ["postgresql-server", "swift-client", "kotlin-client", "react-native-client"],
       "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#portable-seed-authority" }]
     },
     {
@@ -249,14 +279,16 @@
       "category": "startup",
       "statement": "Portable seeded data includes the continuation metadata required to resume normal delta sync from the seeded state.",
       "required_proof_types": ["server-black-box", "native-e2e", "fault-injection", "negative-control"],
+      "applicable_components": ["postgresql-server", "swift-client", "kotlin-client", "react-native-client"],
       "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#seed-resume-correctness" }]
     },
     {
       "id": "SYNC-QUEUE-002",
       "title": "Offline writes before first connect",
       "category": "startup",
-      "statement": "Native clients accept offline writes before first successful connect and preserve them in the same durable mutation queue used after connect.",
+      "statement": "Native clients initialized with a verified bundled or seeded protocol 3 manifest accept offline synced-table writes before first connect and preserve them in the durable queue; portable-data seeds install verified row versions as compare-and-swap bases but no runtime cursors, unassigned or stale receipt handling preserves authored intent, and clients without a verified manifest delay synced-table writes.",
       "required_proof_types": ["native-e2e", "fault-injection", "negative-control"],
+      "applicable_components": ["swift-client", "kotlin-client", "react-native-client"],
       "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#offline-writes-before-first-connect" }]
     },
     {
@@ -265,6 +297,7 @@
       "category": "failure",
       "statement": "Retryable transport and availability failures leave local sync metadata unchanged except for durable retry bookkeeping.",
       "required_proof_types": ["native-e2e", "fault-injection", "negative-control"],
+      "applicable_components": ["swift-client", "kotlin-client", "react-native-client"],
       "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#retryable-failures-do-not-corrupt-state" }]
     },
     {
@@ -273,6 +306,7 @@
       "category": "failure",
       "statement": "Every non-retryable failure produces an explicit client error state rather than continuing in silent degraded operation.",
       "required_proof_types": ["server-black-box", "native-e2e", "negative-control"],
+      "applicable_components": ["postgresql-server", "swift-client", "kotlin-client", "react-native-client"],
       "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#non-retryable-failures-are-explicit" }]
     },
     {
@@ -281,6 +315,7 @@
       "category": "failure",
       "statement": "With default client configuration, a server-requested scope rebuild proceeds without application approval or app-owned rebuild orchestration.",
       "required_proof_types": ["native-e2e", "negative-control"],
+      "applicable_components": ["swift-client", "kotlin-client", "react-native-client"],
       "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#automatic-rebuild-default" }]
     },
     {
@@ -289,6 +324,7 @@
       "category": "boundary",
       "statement": "Each Go sync endpoint delegates its semantic operation to the extension and contains no independent scope, conflict, rebuild, or synced-write decision implementation.",
       "required_proof_types": ["server-black-box", "negative-control"],
+      "applicable_components": ["postgresql-server"],
       "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#thin-adapter-invariant" }]
     },
     {
@@ -297,6 +333,7 @@
       "category": "boundary",
       "statement": "React Native delegates queue, cursor, conflict, and rebuild behavior to the native clients on both iOS and Android and contains no independent implementation of those semantics.",
       "required_proof_types": ["native-e2e", "negative-control"],
+      "applicable_components": ["react-native-client"],
       "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#thin-react-native-invariant" }]
     },
     {
@@ -305,6 +342,7 @@
       "category": "boundary",
       "statement": "Native clients implement local database integration, queueing, scheduling, and safe apply while accepting server decisions for scope membership and conflict outcomes.",
       "required_proof_types": ["native-e2e", "negative-control"],
+      "applicable_components": ["swift-client", "kotlin-client", "react-native-client"],
       "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#native-client-responsibility-boundary" }]
     },
     {
@@ -313,6 +351,7 @@
       "category": "boundary",
       "statement": "A client can complete create, update, and delete synchronization through local SQL and the Synchro protocol without an application-defined upload endpoint.",
       "required_proof_types": ["server-black-box", "native-e2e", "negative-control"],
+      "applicable_components": ["postgresql-server", "swift-client", "kotlin-client", "react-native-client"],
       "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#no-mandatory-custom-backend-write-contract" }]
     },
     {
@@ -321,6 +360,7 @@
       "category": "scope",
       "statement": "Sync requests accept only server-assigned scope identifiers and reject arbitrary client-authored replication predicates.",
       "required_proof_types": ["server-black-box", "negative-control"],
+      "applicable_components": ["postgresql-server"],
       "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#no-arbitrary-client-defined-replication-model" }]
     },
     {
@@ -329,7 +369,638 @@
       "category": "performance",
       "statement": "The production core sync request path calls the PostgreSQL extension directly and contains no outbound network or RPC client for a separate sync service.",
       "required_proof_types": ["server-black-box", "negative-control"],
+      "applicable_components": ["postgresql-server"],
       "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#no-extra-hot-path-network-hop-for-core-sync-logic" }]
+    },
+    {
+      "id": "SYNC-VOCAB-001",
+      "title": "Canonical operation vocabulary",
+      "category": "protocol",
+      "statement": "Push accepts only insert, update, and delete, while pull emits only upsert and delete; push create, push upsert, implicit resurrection, and every other operation are rejected.",
+      "required_proof_types": ["reference-model", "server-black-box", "negative-control"],
+      "applicable_components": ["postgresql-server"],
+      "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#canonical-operation-vocabulary" }]
+    },
+    {
+      "id": "SYNC-WAL-002",
+      "title": "WAL-only pull visibility",
+      "category": "change-capture",
+      "statement": "Direct writes and accepted push writes become pull-visible only through durable WAL materialization, never through a synchronous second publication path or without a WAL replay identity.",
+      "required_proof_types": ["server-black-box", "fault-injection", "negative-control"],
+      "applicable_components": ["postgresql-server"],
+      "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#wal-is-the-only-pull-visible-capture-path" }]
+    },
+    {
+      "id": "SYNC-WAL-003",
+      "title": "Commit-safe WAL order",
+      "category": "change-capture",
+      "statement": "Within one stream generation, the worker orders source transactions by commit LSN and events by pre-filter source ordinal, never by sequence, timestamp, notification, table name, or poll order.",
+      "required_proof_types": ["reference-model", "server-black-box", "fault-injection", "negative-control"],
+      "applicable_components": ["postgresql-server"],
+      "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#commit-safe-wal-order" }]
+    },
+    {
+      "id": "SYNC-WAL-004",
+      "title": "Idempotent WAL replay",
+      "category": "change-capture",
+      "statement": "Each committed source transaction is one atomic replay unit with stable transaction and event identities, and every retry produces exactly one materialized result without duplicate versions, edges, effects, or split durability.",
+      "required_proof_types": ["server-black-box", "fault-injection", "negative-control"],
+      "applicable_components": ["postgresql-server"],
+      "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#idempotent-wal-replay" }]
+    },
+    {
+      "id": "SYNC-WAL-005",
+      "title": "Contiguous WAL acknowledgement",
+      "category": "change-capture",
+      "statement": "The logical slot advances only after materialization commits and only to the end LSN of the largest contiguous prefix of completely durable source transactions, never past an incomplete or noncontiguous transaction.",
+      "required_proof_types": ["server-black-box", "fault-injection", "negative-control"],
+      "applicable_components": ["postgresql-server"],
+      "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#contiguous-wal-acknowledgement" }]
+    },
+    {
+      "id": "SYNC-WAL-006",
+      "title": "Blocking poison quarantine",
+      "category": "change-capture",
+      "statement": "An undecodable, invalid, or unmaterializable source transaction creates durable redacted quarantine and blocks progress until same-identity retry succeeds or an authorized reset builds and catches up a complete verified projection baseline from a new logical-slot exported snapshot, atomically activates a new generation, and forces rebuild.",
+      "required_proof_types": ["server-black-box", "fault-injection", "negative-control"],
+      "applicable_components": ["postgresql-server"],
+      "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#blocking-poison-quarantine" }]
+    },
+    {
+      "id": "SYNC-WAL-007",
+      "title": "Commit-ordered registry activation",
+      "category": "change-capture",
+      "statement": "Each source transaction uses exactly the latest validated registry generation activated before it in commit order, and all events in that transaction use that one generation.",
+      "required_proof_types": ["server-black-box", "fault-injection", "negative-control"],
+      "applicable_components": ["postgresql-server"],
+      "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#commit-ordered-registry-activation" }]
+    },
+    {
+      "id": "SYNC-REGISTRY-001",
+      "title": "Qualified registered relation identity",
+      "category": "schema",
+      "statement": "Registry, catalog, publication, decoder, hydration, and scope-function lookups use immutable logical identity and exact schema-qualified physical identity with OID drift detection, never bare names, search_path, or automatic rebinding.",
+      "required_proof_types": ["server-black-box", "fault-injection", "negative-control"],
+      "applicable_components": ["postgresql-server"],
+      "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#qualified-registered-relation-identity" }]
+    },
+    {
+      "id": "SYNC-REGISTRY-002",
+      "title": "Registered key and replica identity",
+      "category": "schema",
+      "statement": "An active registered relation has exactly one non-null declared primary-key column of portable type string, int, or int64 and REPLICA IDENTITY DEFAULT backed by that key; nonconforming registration or later drift cannot remain active, and any key-value update fails before fence or row effects.",
+      "required_proof_types": ["server-black-box", "negative-control"],
+      "applicable_components": ["postgresql-server"],
+      "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#registered-key-and-replica-identity" }]
+    },
+    {
+      "id": "SYNC-WAL-008",
+      "title": "Capture readiness",
+      "category": "change-capture",
+      "statement": "Capture reports ready only for the configured database when its worker, heartbeat, validated registry, required triggers, exact publication, usable slot, poison state, and contiguous progress checks are healthy.",
+      "required_proof_types": ["server-black-box", "fault-injection", "negative-control"],
+      "applicable_components": ["postgresql-server"],
+      "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#capture-readiness" }]
+    },
+    {
+      "id": "SYNC-IDEMPOTENCY-001",
+      "title": "Exact batch replay",
+      "category": "data-correctness",
+      "statement": "A completed batch replay with the same scoped identity and fingerprint returns the original HTTP status and exact canonical response without mutation work, while a different fingerprint returns 409 idempotency_conflict without mutation work.",
+      "required_proof_types": ["reference-model", "server-black-box", "native-e2e", "fault-injection", "negative-control"],
+      "applicable_components": ["postgresql-server", "swift-client", "kotlin-client", "react-native-client"],
+      "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#exact-batch-replay" }]
+    },
+    {
+      "id": "SYNC-IDEMPOTENCY-002",
+      "title": "Mutation replay across batches",
+      "category": "data-correctness",
+      "statement": "When a mutation identity appears in a different new batch, an equal fingerprint contributes its exact stored outcome without re-execution, while a different fingerprint fails the whole request with 409 idempotency_conflict.",
+      "required_proof_types": ["reference-model", "server-black-box", "native-e2e", "negative-control"],
+      "applicable_components": ["postgresql-server", "swift-client", "kotlin-client", "react-native-client"],
+      "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#mutation-replay-across-batches" }]
+    },
+    {
+      "id": "SYNC-IDEMPOTENCY-003",
+      "title": "Idempotency ledger retention",
+      "category": "data-correctness",
+      "statement": "Batch and mutation ledger entries never expire from age, inactivity, schema change, cursor retention, or compaction and may be deleted only after durable irreversible client retirement that permanently prevents identity reuse.",
+      "required_proof_types": ["server-black-box", "fault-injection", "negative-control"],
+      "applicable_components": ["postgresql-server"],
+      "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#idempotency-ledger-retention" }]
+    },
+    {
+      "id": "SYNC-ATOMICITY-001",
+      "title": "Atomic push durability",
+      "category": "data-correctness",
+      "statement": "A first push execution commits its batch response, every mutation outcome, accepted source write, server-version transition, and write fence in one database transaction or rolls all of them back.",
+      "required_proof_types": ["server-black-box", "fault-injection", "negative-control"],
+      "applicable_components": ["postgresql-server"],
+      "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#atomic-push-durability" }]
+    },
+    {
+      "id": "SYNC-OUTCOME-001",
+      "title": "Complete mutation outcome partition",
+      "category": "data-correctness",
+      "statement": "An HTTP 200 first execution places every requested mutation exactly once in accepted or rejected, preserves request-relative order within each array, and uses only the specified statuses and required fields.",
+      "required_proof_types": ["reference-model", "server-black-box", "native-e2e", "negative-control"],
+      "applicable_components": ["postgresql-server", "swift-client", "kotlin-client", "react-native-client"],
+      "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#complete-mutation-outcome-partition" }]
+    },
+    {
+      "id": "SYNC-CONFLICT-001",
+      "title": "Atomic version compare-and-swap",
+      "category": "data-correctness",
+      "statement": "Update and delete lock row and version identity, verify byte-for-byte base-version equality, and atomically perform source and version-fence transitions, while insert atomically reserves an absent row identity.",
+      "required_proof_types": ["reference-model", "server-black-box", "fault-injection", "negative-control"],
+      "applicable_components": ["postgresql-server"],
+      "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#atomic-version-compare-and-swap" }]
+    },
+    {
+      "id": "SYNC-CONFLICT-002",
+      "title": "Concurrent update-delete conservation",
+      "category": "data-correctness",
+      "statement": "Of concurrent update and delete attempts using the same current base version, at most one applies, every loser receives the current authoritative conflict outcome, and the winning transition is preserved.",
+      "required_proof_types": ["reference-model", "server-black-box", "fault-injection", "negative-control"],
+      "applicable_components": ["postgresql-server"],
+      "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#concurrent-update-delete-conservation" }]
+    },
+    {
+      "id": "SYNC-TIME-002",
+      "title": "Client time has no conflict authority",
+      "category": "data-correctness",
+      "statement": "client_version is a diagnostic RFC 3339 UTC timestamp and never affects conflict choice, row version, source updated_at, write order, or outcomes when client time is equal, past, or future.",
+      "required_proof_types": ["reference-model", "server-black-box", "negative-control"],
+      "applicable_components": ["postgresql-server"],
+      "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#client-time-has-no-conflict-authority" }]
+    },
+    {
+      "id": "SYNC-SCHEMA-002",
+      "title": "Schema-incompatible intent is preserved",
+      "category": "schema",
+      "statement": "A schema_incompatible outcome preserves the original mutation UUID, complete authored payload and schema, base version, client version, and local order in a durable inspectable blocked state without automatic retry.",
+      "required_proof_types": ["server-black-box", "native-e2e", "fault-injection", "negative-control"],
+      "applicable_components": ["postgresql-server", "swift-client", "kotlin-client", "react-native-client"],
+      "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#schema-incompatible-intent-is-preserved" }]
+    },
+    {
+      "id": "SYNC-FAILURE-003",
+      "title": "Sealed batch retry",
+      "category": "failure",
+      "statement": "A batch is sealed before first transmission, and retries after response loss, HTTP 429, or HTTP 503 reuse the same batch identity, mutation order, and canonical content.",
+      "required_proof_types": ["server-black-box", "native-e2e", "fault-injection", "negative-control"],
+      "applicable_components": ["postgresql-server", "swift-client", "kotlin-client", "react-native-client"],
+      "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#sealed-batch-retry" }]
+    },
+    {
+      "id": "SYNC-QUEUE-003",
+      "title": "Successor mutation preservation",
+      "category": "local-metadata",
+      "statement": "Changed intent receives a new mutation UUID while the original remains inspectable, and unchanged queued intent retains its UUID and complete authored content until explicit policy clears it.",
+      "required_proof_types": ["native-e2e", "fault-injection", "negative-control"],
+      "applicable_components": ["swift-client", "kotlin-client", "react-native-client"],
+      "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#successor-mutation-preservation" }]
+    },
+    {
+      "id": "SYNC-PULL-001",
+      "title": "Per-scope pull eligibility",
+      "category": "cursor-rebuild",
+      "statement": "For one read-consistent boundary, the server resolves and deduplicates every valid scope's complete eligible candidate stream before applying the global page limit.",
+      "required_proof_types": ["reference-model", "server-black-box", "negative-control"],
+      "applicable_components": ["postgresql-server"],
+      "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#per-scope-pull-eligibility" }]
+    },
+    {
+      "id": "SYNC-PULL-002",
+      "title": "Deterministic cross-scope pull merge",
+      "category": "cursor-rebuild",
+      "statement": "The server merges per-scope candidate streams by the specified typed tuple, computes has_more from every remaining stream head, and makes starvation-free progress at each finite boundary.",
+      "required_proof_types": ["reference-model", "server-black-box", "negative-control"],
+      "applicable_components": ["postgresql-server"],
+      "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#deterministic-cross-scope-pull-merge" }]
+    },
+    {
+      "id": "SYNC-PULL-003",
+      "title": "Explicit pull candidate outcomes",
+      "category": "cursor-rebuild",
+      "statement": "Every selected pull candidate yields one canonical upsert or delete from its WAL-captured projection, or the whole page fails without cursor, checksum, or checkpoint advancement.",
+      "required_proof_types": ["reference-model", "server-black-box", "fault-injection", "negative-control"],
+      "applicable_components": ["postgresql-server"],
+      "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#explicit-pull-candidate-outcomes" }]
+    },
+    {
+      "id": "SYNC-PULL-004",
+      "title": "Scope-inclusive typed deduplication",
+      "category": "cursor-rebuild",
+      "statement": "Pull deduplicates by the typed tuple of scope ID, logical table ID, and primary key, retaining the greatest eligible stream position for that key within its scope without cross-scope collapse.",
+      "required_proof_types": ["reference-model", "server-black-box", "negative-control"],
+      "applicable_components": ["postgresql-server"],
+      "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#scope-inclusive-typed-deduplication" }]
+    },
+    {
+      "id": "SYNC-CURSOR-004",
+      "title": "Client-presented cursor acknowledgement",
+      "category": "cursor-rebuild",
+      "statement": "The server advances a durable scope checkpoint monotonically only when a later successful client request presents a valid cursor for that scope, never from selection, response construction, token issuance, rebuild paging, or an older token.",
+      "required_proof_types": ["server-black-box", "native-e2e", "fault-injection", "negative-control"],
+      "applicable_components": ["postgresql-server", "swift-client", "kotlin-client", "react-native-client"],
+      "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#client-presented-cursor-acknowledgement" }]
+    },
+    {
+      "id": "SYNC-CURSOR-005",
+      "title": "Complete cursor bindings",
+      "category": "cursor-rebuild",
+      "statement": "Every incremental cursor authenticates all required identity, generation, scope, schema, retention, stream-position, issue-time, and key bindings and distinguishes stale authenticated state from forged or misbound state.",
+      "required_proof_types": ["reference-model", "server-black-box", "native-e2e", "negative-control"],
+      "applicable_components": ["postgresql-server", "swift-client", "kotlin-client", "react-native-client"],
+      "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#complete-cursor-bindings" }]
+    },
+    {
+      "id": "SYNC-REBUILD-006",
+      "title": "Immutable rebuild snapshot",
+      "category": "cursor-rebuild",
+      "statement": "The first rebuild request atomically stages one complete immutable snapshot and digest at boundary B, and every later page reads only that stage without live requery or mutable ordering.",
+      "required_proof_types": ["reference-model", "server-black-box", "native-e2e", "fault-injection", "negative-control"],
+      "applicable_components": ["postgresql-server", "swift-client", "kotlin-client", "react-native-client"],
+      "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#immutable-rebuild-snapshot" }]
+    },
+    {
+      "id": "SYNC-REBUILD-007",
+      "title": "Authenticated rebuild continuation",
+      "category": "cursor-rebuild",
+      "statement": "Every rebuild continuation authenticates all common and rebuild-specific bindings, including session, rebuild ID, boundary, ordinal, page limit, and fixed 24-hour expiry, and rejects forged, cross-context, resized, expired, or expiry-extending use.",
+      "required_proof_types": ["server-black-box", "native-e2e", "negative-control"],
+      "applicable_components": ["postgresql-server", "swift-client", "kotlin-client", "react-native-client"],
+      "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#authenticated-rebuild-continuation" }]
+    },
+    {
+      "id": "SYNC-REBUILD-008",
+      "title": "Post-boundary change delivery",
+      "category": "cursor-rebuild",
+      "statement": "Writes, deletes, and membership changes after rebuild boundary B stay out of the staged snapshot and remain eligible for incremental delivery after the client presents the final cursor.",
+      "required_proof_types": ["reference-model", "server-black-box", "native-e2e", "negative-control"],
+      "applicable_components": ["postgresql-server", "swift-client", "kotlin-client", "react-native-client"],
+      "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#post-boundary-change-delivery" }]
+    },
+    {
+      "id": "SYNC-REBUILD-009",
+      "title": "Rebuild page replay",
+      "category": "cursor-rebuild",
+      "statement": "Repeating a valid first, intermediate, or final rebuild page request returns its exact stored page without creating a snapshot, querying live state, changing ordinals, recomputing digests, or affecting checkpoints.",
+      "required_proof_types": ["server-black-box", "native-e2e", "fault-injection", "negative-control"],
+      "applicable_components": ["postgresql-server", "swift-client", "kotlin-client", "react-native-client"],
+      "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#rebuild-page-replay" }]
+    },
+    {
+      "id": "SYNC-REBUILD-010",
+      "title": "Scope-local rebuild checkpoints",
+      "category": "cursor-rebuild",
+      "statement": "A rebuild request changes only its session, immutable stage, and replay outcomes, never any incremental checkpoint, another scope's state, or the scope-set version before later pull acknowledgement.",
+      "required_proof_types": ["server-black-box", "native-e2e", "fault-injection", "negative-control"],
+      "applicable_components": ["postgresql-server", "swift-client", "kotlin-client", "react-native-client"],
+      "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#scope-local-rebuild-checkpoints" }]
+    },
+    {
+      "id": "SYNC-INTEGRITY-003",
+      "title": "Canonical typed row encoding",
+      "category": "data-correctness",
+      "statement": "The same immutable manifest and complete authoritative row produce identical canonical typed bytes on every implementation, and receivers reject unknown, duplicate, omitted, mistyped, primary-key-mismatched, aliased, alternate-case, or physical-database type forms before apply.",
+      "required_proof_types": ["reference-model", "server-black-box", "native-e2e", "negative-control"],
+      "applicable_components": ["postgresql-server", "swift-client", "kotlin-client", "react-native-client"],
+      "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#canonical-typed-row-encoding" }]
+    },
+    {
+      "id": "SYNC-INTEGRITY-004",
+      "title": "Row digest binding",
+      "category": "data-correctness",
+      "statement": "Every row-bearing push outcome, pull change, rebuild record, and seed record carries an opaque server version and a SHA-256 digest binding the exact schema hash, logical table, typed primary key, complete canonical row, server version, and required domains; version or digest failure prevents reconciliation and cursor advancement.",
+      "required_proof_types": ["reference-model", "server-black-box", "native-e2e", "negative-control"],
+      "applicable_components": ["postgresql-server", "swift-client", "kotlin-client", "react-native-client"],
+      "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#row-digest-binding" }]
+    },
+    {
+      "id": "SYNC-INTEGRITY-005",
+      "title": "Scope digest binding",
+      "category": "data-correctness",
+      "statement": "Every authoritative scope digest is the specified streaming SHA-256 over the exact schema, scope ID, cardinality, and canonically sorted row-identity and row-digest pairs, and no duplicate, omission, altered pairing, or implementation-defined aggregate is accepted.",
+      "required_proof_types": ["reference-model", "server-black-box", "native-e2e", "negative-control"],
+      "applicable_components": ["postgresql-server", "swift-client", "kotlin-client", "react-native-client"],
+      "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#scope-digest-binding" }]
+    },
+    {
+      "id": "SYNC-INTEGRITY-006",
+      "title": "Complete terminal checksum maps",
+      "category": "cursor-rebuild",
+      "statement": "A nonterminal pull page omits checksums, while a terminal page includes exactly the complete active scope set after updates, including rebuild scopes and excluding removed scopes; any invalid map fails the page without cursor advancement.",
+      "required_proof_types": ["reference-model", "server-black-box", "native-e2e", "negative-control"],
+      "applicable_components": ["postgresql-server", "swift-client", "kotlin-client", "react-native-client"],
+      "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#complete-terminal-checksum-maps" }]
+    },
+    {
+      "id": "SYNC-STATE-001",
+      "title": "Legal client state transitions",
+      "category": "local-metadata",
+      "statement": "Clients permit only the complete state adjacency map, and unknown states or unlisted transitions fail as non-retryable local contract errors without mutating durable sync state.",
+      "required_proof_types": ["reference-model", "native-e2e", "negative-control"],
+      "applicable_components": ["swift-client", "kotlin-client", "react-native-client"],
+      "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#legal-client-state-transitions" }]
+    },
+    {
+      "id": "SYNC-CLIENT-VERSION-001",
+      "title": "Semantic version precedence",
+      "category": "protocol",
+      "statement": "Application and minimum-client versions parse and compare exactly by Semantic Versioning 2.0.0, while protocol negotiation remains the separate integer 3 and malformed or leading-v versions are rejected.",
+      "required_proof_types": ["reference-model", "server-black-box", "negative-control"],
+      "applicable_components": ["postgresql-server"],
+      "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#semantic-version-precedence" }]
+    },
+    {
+      "id": "SYNC-DBAUTH-001",
+      "title": "Database default deny",
+      "category": "boundary",
+      "statement": "The fixed synchro schema and every extension-owned object revoke PUBLIC authority and grant only explicitly required capabilities, with no public execution or direct adapter, seed, or monitor access to metadata tables or sequences.",
+      "required_proof_types": ["server-black-box", "negative-control"],
+      "applicable_components": ["postgresql-server"],
+      "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#database-default-deny" }]
+    },
+    {
+      "id": "SYNC-DBAUTH-002",
+      "title": "Database role separation",
+      "category": "boundary",
+      "statement": "Owner, adapter, seed, monitor, operator, and worker SQL authority remains split among six least-privilege NOLOGIN NOREPLICATION groups; exactly one dedicated LOGIN REPLICATION NOINHERIT worker credential belongs only to the worker group, uses explicit SET ROLE, and is restricted by HBA and external secret management.",
+      "required_proof_types": ["server-black-box", "negative-control"],
+      "applicable_components": ["postgresql-server"],
+      "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#database-role-separation" }]
+    },
+    {
+      "id": "SYNC-HEALTH-001",
+      "title": "Capture health readiness",
+      "category": "failure",
+      "statement": "The adapter derives readiness from the canonical extension result for its configured database and reports ready only when every required tri-state check is ok, without exposing the detailed check map publicly.",
+      "required_proof_types": ["server-black-box", "fault-injection", "negative-control"],
+      "applicable_components": ["postgresql-server"],
+      "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#capture-health-readiness" }]
+    },
+    {
+      "id": "SYNC-HEALTH-002",
+      "title": "Finite capture lag",
+      "category": "failure",
+      "statement": "Worker heartbeat age, WAL lag bytes, and oldest-unmaterialized-commit age are known, finite, nonnegative, and within configured finite positive maxima; invalid limits or observations make readiness unready.",
+      "required_proof_types": ["server-black-box", "fault-injection", "negative-control"],
+      "applicable_components": ["postgresql-server"],
+      "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#finite-capture-lag" }]
+    },
+    {
+      "id": "SYNC-LOGGING-001",
+      "title": "Operational data redaction",
+      "category": "boundary",
+      "statement": "Logs, metric labels, traces, readiness output, and quarantine text never contain synced values, protected identities, mutation bodies, tokens, credentials, raw requests, raw WAL, SQL text, or unbounded errors.",
+      "required_proof_types": ["server-black-box", "fault-injection", "negative-control"],
+      "applicable_components": ["postgresql-server"],
+      "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#operational-data-redaction" }]
+    },
+    {
+      "id": "SYNC-SEED-004",
+      "title": "Snapshot-consistent portable seeds",
+      "category": "startup",
+      "statement": "All manifest, scope, row, digest, boundary, retention, and receipt reads for one seed artifact use one physical connection in one enforced SERIALIZABLE READ ONLY DEFERRABLE transaction.",
+      "required_proof_types": ["server-black-box", "native-e2e", "fault-injection", "negative-control"],
+      "applicable_components": ["postgresql-server", "swift-client", "kotlin-client", "react-native-client"],
+      "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#snapshot-consistent-portable-seeds" }]
+    },
+    {
+      "id": "SYNC-SEED-005",
+      "title": "Bound portable seed continuation",
+      "category": "startup",
+      "statement": "Seed page tokens authenticate every export, transaction, scope, generation, boundary, ordinal, and limit binding, and seed receipts become client-bound cursors only through authenticated connect after current assignment and state validation.",
+      "required_proof_types": ["server-black-box", "native-e2e", "fault-injection", "negative-control"],
+      "applicable_components": ["postgresql-server", "swift-client", "kotlin-client", "react-native-client"],
+      "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#bound-portable-seed-continuation" }]
+    },
+    {
+      "id": "SYNC-SEED-006",
+      "title": "Verified portable seed artifacts",
+      "category": "startup",
+      "statement": "The exporter verifies every required row and scope digest, page sequence, receipt, SQLite integrity property, queue and provenance condition, and final artifact hash before atomic publication, and any failed or skipped check produces no artifact.",
+      "required_proof_types": ["server-black-box", "native-e2e", "fault-injection", "negative-control"],
+      "applicable_components": ["postgresql-server", "swift-client", "kotlin-client", "react-native-client"],
+      "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#verified-portable-seed-artifacts" }]
+    },
+    {
+      "id": "SYNC-INSTALL-001",
+      "title": "pgrx installation authority",
+      "category": "boundary",
+      "statement": "pgrx annotations and extension_sql! declarations are the sole authored source for extension DDL, grants, revokes, comments, and membership, and any tracked generated SQL regenerates byte-for-byte.",
+      "required_proof_types": ["server-black-box", "negative-control"],
+      "applicable_components": ["postgresql-server"],
+      "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#pgrx-installation-authority" }]
+    },
+    {
+      "id": "SYNC-INSTALL-002",
+      "title": "Extension migration baseline",
+      "category": "schema",
+      "statement": "Version 0.3.0 is the first supported extension migration baseline, proven by a clean PostgreSQL 18 install and non-superuser role checks, with no in-place pre-0.3.0 update or IF NOT EXISTS migration logic.",
+      "required_proof_types": ["server-black-box", "negative-control"],
+      "applicable_components": ["postgresql-server"],
+      "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#extension-migration-baseline" }]
+    },
+    {
+      "id": "SYNC-SCOPE-004",
+      "title": "Deterministic scope function contract",
+      "category": "scope",
+      "statement": "Membership, impact, and assignment functions satisfy the registered signatures and restrictions, including schema qualification, LANGUAGE SQL, STABLE, SECURITY INVOKER, declared dependencies, and positive bounds, before activation and throughout use.",
+      "required_proof_types": ["reference-model", "server-black-box", "negative-control"],
+      "applicable_components": ["postgresql-server"],
+      "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#deterministic-scope-function-contract" }]
+    },
+    {
+      "id": "SYNC-MEMBERSHIP-001",
+      "title": "Dependency-driven membership propagation",
+      "category": "scope",
+      "statement": "Every declared external dependency change uses its impact function over old and new state to reevaluate every affected source row, including removals, revocations, reassignment, and deletion.",
+      "required_proof_types": ["reference-model", "server-black-box", "fault-injection", "negative-control"],
+      "applicable_components": ["postgresql-server"],
+      "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#dependency-driven-membership-propagation" }]
+    },
+    {
+      "id": "SYNC-MEMBERSHIP-002",
+      "title": "Membership generation invalidation",
+      "category": "scope",
+      "statement": "A membership rule, dependency, composition, or controlled relation change mints the affected membership generation, stales only affected cursors and rebuild sessions, and requires only affected scopes to rebuild.",
+      "required_proof_types": ["server-black-box", "native-e2e", "fault-injection", "negative-control"],
+      "applicable_components": ["postgresql-server", "swift-client", "kotlin-client", "react-native-client"],
+      "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#membership-generation-invalidation" }]
+    },
+    {
+      "id": "SYNC-MEMBERSHIP-003",
+      "title": "Staged membership backfill",
+      "category": "scope",
+      "statement": "Membership reconfiguration builds and catches up a complete staged edge set before atomic activation, retains the prior generation while active continuation state requires it, and never exposes an in-place or partial backfill.",
+      "required_proof_types": ["server-black-box", "fault-injection", "negative-control"],
+      "applicable_components": ["postgresql-server"],
+      "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#staged-membership-backfill" }]
+    },
+    {
+      "id": "SYNC-SCHEMA-003",
+      "title": "Immutable schema manifest",
+      "category": "schema",
+      "statement": "A published schema manifest body, hash, positive version, class, compatibility floor, composition, table IDs, and field IDs are stored atomically and never changed in place or served from a live catalog under an existing identity.",
+      "required_proof_types": ["reference-model", "server-black-box", "native-e2e", "fault-injection", "negative-control"],
+      "applicable_components": ["postgresql-server", "swift-client", "kotlin-client", "react-native-client"],
+      "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#immutable-schema-manifest" }]
+    },
+    {
+      "id": "SYNC-SCHEMA-004",
+      "title": "Deterministic schema class dispatch",
+      "category": "schema",
+      "statement": "Connect applies exact per-client Class 1 through Class 4 dispatch and queue-preserving explicit reset after unsupported, including replace when Class 3 affects no assigned scope; push, pull, and rebuild require the exact current manifest, and protocol version 3 never emits fetch or partial schema-mismatch work.",
+      "required_proof_types": ["reference-model", "server-black-box", "native-e2e", "negative-control"],
+      "applicable_components": ["postgresql-server", "swift-client", "kotlin-client", "react-native-client"],
+      "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#deterministic-schema-class-dispatch" }]
+    },
+    {
+      "id": "SYNC-RETENTION-001",
+      "title": "Durable scope retention floor",
+      "category": "cursor-rebuild",
+      "statement": "Each scope retains a durable inclusive resume floor and lineage even when no effects remain; cursors below the floor rebuild, while otherwise valid cursors at or above an ordinarily advanced floor remain eligible.",
+      "required_proof_types": ["reference-model", "server-black-box", "fault-injection", "negative-control"],
+      "applicable_components": ["postgresql-server"],
+      "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#durable-scope-retention-floor" }]
+    },
+    {
+      "id": "SYNC-RETENTION-002",
+      "title": "Expired client rebuild",
+      "category": "cursor-rebuild",
+      "statement": "Client expiry uses the finite positive stale interval and cursor-acknowledgement activity; reconnect issues a new generation with null affected cursors, preserves queue and ledgers, and moves unchanged authored mutations after a no-ledger generation rejection into a new-generation successor batch without editing or resending the old batch.",
+      "required_proof_types": ["server-black-box", "native-e2e", "fault-injection", "negative-control"],
+      "applicable_components": ["postgresql-server", "swift-client", "kotlin-client", "react-native-client"],
+      "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#expired-client-rebuild" }]
+    },
+    {
+      "id": "SYNC-RETENTION-003",
+      "title": "Scope-local compaction",
+      "category": "cursor-rebuild",
+      "statement": "Compaction uses each scope's minimum acknowledged position among nonexpired assigned clients, or its durable high-watermark when none are assigned, honors rebuild pins, and atomically deletes effects with monotonic floor advancement.",
+      "required_proof_types": ["server-black-box", "fault-injection", "negative-control"],
+      "applicable_components": ["postgresql-server"],
+      "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#scope-local-compaction" }]
+    },
+    {
+      "id": "SYNC-LIMIT-001",
+      "title": "Strict positive limits",
+      "category": "protocol",
+      "statement": "Every request, push body, mutation count, mutation size, column count, compaction, backfill, fanout, and impact limit stays within its positive fixed or configured maximum; push limits fail before ledger allocation, and no invalid value is defaulted, clamped, or truncated.",
+      "required_proof_types": ["reference-model", "server-black-box", "negative-control"],
+      "applicable_components": ["postgresql-server"],
+      "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#strict-positive-limits" }]
+    },
+    {
+      "id": "SYNC-QUEUE-004",
+      "title": "Pre-wire mutation dependency resolution",
+      "category": "local-metadata",
+      "statement": "Same-row intent without a legal server precondition is normalized or blocked before transmission, every original action remains linked and inspectable, no fabricated base version is sent, and an unsealed insert followed by delete creates no transient server row.",
+      "required_proof_types": ["reference-model", "native-e2e", "fault-injection", "negative-control"],
+      "applicable_components": ["swift-client", "kotlin-client", "react-native-client"],
+      "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#pre-wire-mutation-dependency-resolution" }]
+    },
+    {
+      "id": "SYNC-WAL-009",
+      "title": "One-to-one version fence correlation",
+      "category": "change-capture",
+      "statement": "Every actual registered row operation emits exactly one row-level AFTER fence correlated by registration kind, fence ID, DML ordinal, relation, operation, keys, and version; ON CONFLICT emits only its final actual operation, synced and capture-dependency identities remain distinct, any mismatch blocks capture, and uncovered accepted fences make pull and rebuild return capture_pending without progress.",
+      "required_proof_types": ["server-black-box", "fault-injection", "negative-control"],
+      "applicable_components": ["postgresql-server"],
+      "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#one-to-one-version-fence-correlation" }]
+    },
+    {
+      "id": "SYNC-PROTOCOL-004",
+      "title": "Portable wire integer range",
+      "category": "protocol",
+      "statement": "Every protocol-envelope JSON integer is exactly representable in the portable safe-integer range with its required sign, server counter allocation fails before overflow, and opaque-token decimal-string counters remain distinct from envelope integers.",
+      "required_proof_types": ["reference-model", "server-black-box", "native-e2e", "negative-control"],
+      "applicable_components": ["postgresql-server", "swift-client", "kotlin-client", "react-native-client"],
+      "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#portable-wire-integer-range" }]
+    },
+    {
+      "id": "SYNC-OUTCOME-002",
+      "title": "Mutation outcome schema binding",
+      "category": "data-correctness",
+      "statement": "Every mutation outcome binds the immutable schema used for classification and checksum encoding; replay preserves that historical binding, clients verify with that manifest, and unsafe projection into current local schema cannot discard outcomes or later intent.",
+      "required_proof_types": ["reference-model", "server-black-box", "native-e2e", "negative-control"],
+      "applicable_components": ["postgresql-server", "swift-client", "kotlin-client", "react-native-client"],
+      "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#mutation-outcome-schema-binding" }]
+    },
+    {
+      "id": "SYNC-WAL-010",
+      "title": "Durable reset slot lifecycle",
+      "category": "change-capture",
+      "statement": "Stream reset uses one permanent candidate logical slot and imported exported snapshot, persists its complete lifecycle, survives process death, and atomically switches the durable active-slot pointer only after verified gap-free catch-up.",
+      "required_proof_types": ["server-black-box", "fault-injection", "negative-control"],
+      "applicable_components": ["postgresql-server"],
+      "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#durable-reset-slot-lifecycle" }]
+    },
+    {
+      "id": "SYNC-WAL-011",
+      "title": "Reset baseline fence coverage",
+      "category": "change-capture",
+      "statement": "Every accepted fence through reset activation is covered exactly once by imported-snapshot baseline state or candidate-slot WAL materialization, and no synthetic event, omission, guessed coverage, or permanent pending state is accepted.",
+      "required_proof_types": ["server-black-box", "fault-injection", "negative-control"],
+      "applicable_components": ["postgresql-server"],
+      "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#reset-baseline-fence-coverage" }]
+    },
+    {
+      "id": "SYNC-PULL-005",
+      "title": "Effect-level pull progress",
+      "category": "cursor-rebuild",
+      "statement": "Each derived scope effect has a deterministic persisted delivery ordinal under its source event, and cursors stop and resume between sibling effects without replay loops, skips, or changing WAL replay identity.",
+      "required_proof_types": ["reference-model", "server-black-box", "native-e2e", "negative-control"],
+      "applicable_components": ["postgresql-server", "swift-client", "kotlin-client", "react-native-client"],
+      "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#effect-level-pull-progress" }]
+    },
+    {
+      "id": "SYNC-REBUILD-011",
+      "title": "Accepted write invalidates older rebuild",
+      "category": "cursor-rebuild",
+      "statement": "Rebuild sessions bind a durable client accepted-write epoch, accepted first execution advances it atomically, and every later page or replay with an older epoch returns rebuild_restart_required without records or progress.",
+      "required_proof_types": ["reference-model", "server-black-box", "native-e2e", "fault-injection", "negative-control"],
+      "applicable_components": ["postgresql-server", "swift-client", "kotlin-client", "react-native-client"],
+      "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#accepted-write-invalidates-older-rebuild" }]
+    },
+    {
+      "id": "SYNC-SCHEMA-005",
+      "title": "Causally bound Class 3 projection bootstrap",
+      "category": "schema",
+      "statement": "Class 3 data absent from active projections is staged from one permanent candidate-slot exported snapshot, caught up through the main worker's matching barrier, and atomically activated with manifest, generations, projections, and invalidation; failure cannot expose partial state.",
+      "required_proof_types": ["reference-model", "server-black-box", "fault-injection", "negative-control"],
+      "applicable_components": ["postgresql-server"],
+      "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#causally-bound-class-3-projection-bootstrap" }]
+    },
+    {
+      "id": "SYNC-SCHEMA-006",
+      "title": "Crash-safe client schema migration",
+      "category": "schema",
+      "statement": "Before DDL, clients persist the verified target manifest and deterministic typed migration plan; restart resumes without schema fetch or repeated DDL, preserves queues and local data, and rejects every inconsistent physical, reference, body, plan, or phase state.",
+      "required_proof_types": ["reference-model", "native-e2e", "fault-injection", "negative-control"],
+      "applicable_components": ["swift-client", "kotlin-client", "react-native-client"],
+      "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#crash-safe-client-schema-migration" }]
+    },
+    {
+      "id": "SYNC-SCOPE-006",
+      "title": "Scope cleanup preserves pending intent",
+      "category": "data-correctness",
+      "statement": "Assignment removal, seed cleanup, and rebuild pruning delete server provenance and unprotected cache state without creating a mutation, while every row protected by unresolved authored intent remains application-visible until normal reconciliation or explicit policy resolves it.",
+      "required_proof_types": ["reference-model", "native-e2e", "fault-injection", "negative-control"],
+      "applicable_components": ["swift-client", "kotlin-client", "react-native-client"],
+      "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#scope-cleanup-preserves-pending-intent" }]
+    },
+    {
+      "id": "SYNC-SCHEMA-007",
+      "title": "Schema cursor continuity",
+      "category": "schema",
+      "statement": "Connect reissues an otherwise valid historical cursor at the same position under the current schema only for scopes unaffected by the complete compatible lineage, nulls affected or stale scopes, and clients atomically install only the server-issued replacement with target-manifest activation.",
+      "required_proof_types": ["reference-model", "server-black-box", "native-e2e", "negative-control"],
+      "applicable_components": ["postgresql-server", "swift-client", "kotlin-client", "react-native-client"],
+      "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#schema-cursor-continuity" }]
     }
   ]
 }

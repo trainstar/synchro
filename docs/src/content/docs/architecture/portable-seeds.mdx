@@ -13,13 +13,16 @@ The generator lives at:
 
 The portable seed generator is trusted tooling. It connects directly to PostgreSQL and builds a SQLite database that native clients can open immediately.
 
-Current release behavior:
+Protocol version 3 generation rules:
 
-- always builds the synced-table SQLite schema from `synchro_schema_manifest()`
-- installs the same local CDC triggers the native SDKs use
-- exports only explicitly server-declared portable scopes
-- writes continuation metadata into `_synchro_scopes` and `_synchro_scope_rows`
-- writes `_synchro_meta` values such as `schema_version`, `schema_hash`, `local_schema`, `scope_set_version`, `known_buckets`, and `snapshot_complete`
+- the entire export uses one `SERIALIZABLE READ ONLY DEFERRABLE` PostgreSQL transaction
+- the export reads WAL-materialized projections at one durable stream boundary, never independent live pages
+- the SQLite schema comes from one verified immutable schema manifest
+- only explicitly server-declared portable shared scopes are exported
+- every seeded row includes its opaque server version and verified SHA-256 row digest
+- every portable scope includes verified cardinality, scope digest, provenance, and an opaque portable seed receipt
+- publication occurs atomically only after row, scope, metadata, and SQLite integrity verification
+- the finalized database requires no WAL or shared-memory sidecar file
 
 If no portable scopes are configured, the generator falls back to a schema-only seed.
 
@@ -48,7 +51,12 @@ When clients open a portable seed:
 
 - they keep the seeded schema
 - they keep the seeded portable rows
-- they continue sync from the embedded opaque scope cursor and checksum state
+- they use each verified seeded row version as the compare-and-swap base for offline update or delete capture
+- they treat each embedded continuation value as a portable seed receipt, not a runtime cursor
+- authenticated `connect` verifies the receipt, current assignment, schema, generations, boundary, cardinality, and checksum
+- only successful validation converts the receipt into a user-bound and client-bound incremental cursor
+- an unassigned seeded scope loses seed provenance and only unchanged zero-provenance cache rows; pending authored intent and its application-visible local row state remain for normal authorization and explicit outcome
+- an assigned stale or unverifiable scope loses only continuation state, reconciles eligible pending intent under push-first ordering, and then rebuilds
 - auth-scoped user data arrives through normal sync after login
 
 This is a warm-start path, not a second protocol.
@@ -64,7 +72,7 @@ Portable seeds are useful when you want:
 
 ## Relationship to scope modeling
 
-Portable seeds should contain the same shared runtime scopes clients keep syncing later.
+Portable seeds contain the same shared runtime scopes clients keep syncing later.
 
 Do not invent seed-only scope copies for bundling. If a dataset belongs in a shared runtime scope, that is the scope the seed should export.
 

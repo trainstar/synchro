@@ -1,0 +1,235 @@
+---
+title: "ADR 001: WAL Change Stream"
+description: "Accepted rules for WAL-only pull-visible change capture, commit-safe ordering, and capture readiness."
+status: Accepted
+---
+
+# ADR 001: WAL Change Stream
+
+## Context
+
+Synchro needs one authoritative source of pull-visible server changes. A committed application write can affect multiple scopes, be retried after worker interruption, and arrive near registry changes or relation DDL. PostgreSQL sequences, wall-clock timestamps, and notification delivery do not establish a commit-safe replay order. A database connection alone also does not prove that capture can safely serve sync traffic.
+
+This decision defines the protocol version 3 change stream. The rules in this ADR are normative. It disposes of audit findings S-01, S-06, S-07, S-21, S-25, and S-26 at the contract level. It does not claim that the current implementation already conforms.
+
+## Decision
+
+WAL is the only path that creates pull-visible changes. A committed write to a registered relation becomes eligible for pull only when the WAL worker durably materializes the committed source transaction. This rule applies equally to direct application writes and accepted push writes.
+
+Push performs authoritative row writes, durable write-fence creation, and opaque server-version allocation. Push does not synchronously append changelog rows, membership edges, or other pull-visible effects. A successful push response is authoritative for that mutation outcome, but it does not make a separate synchronous pull-publication path legal.
+
+The worker processes committed source transactions in commit order, gives every transaction and event a durable replay identity, and advances the logical replication slot only after a contiguous durable prefix. Any decode, validation, or application failure blocks the stream until it is repaired and retried or reset by an authorized operator.
+
+## Commit-safe stream position
+
+A stream position is `(stream_generation, point)`, where `point` is exactly one
+of:
+
+```text
+generation_start
+effect(commit_lsn, event_ordinal, effect_ordinal)
+transaction_end(commit_lsn)
+```
+
+- `stream_generation` is an opaque stream-lineage identifier. It changes only through an authorized stream reset.
+- `generation_start` is the initial position of an empty stream generation. It is ordered before every committed transaction.
+- `commit_lsn` is the PostgreSQL logical-decoding commit LSN for the committed source transaction.
+- `event_ordinal` is the zero-based ordinal of a row-change event within that source transaction. It is assigned in decoded source order before filtering and is never renumbered on retry, scope expansion, or registry reload.
+- `effect_ordinal` is the zero-based delivery ordinal of one derived pull effect within one source event and scope. It is assigned deterministically after final membership evaluation in canonical `(logical_table_id, typed_primary_key, operation_rank)` order and persisted with that effect.
+- `transaction_end(commit_lsn)` is ordered after every event in that transaction and before every point with a later commit LSN. It exists even when the transaction has no applicable event.
+
+Within one `stream_generation`, delivery positions compare by commit LSN, event ordinal, and effect ordinal, with the transaction-end sentinel after every effect in that transaction. `generation_start` is lower than every committed point. Positions from different stream generations are not comparable for incremental resume. A new stream generation invalidates every incremental cursor from the prior generation and requires rebuild.
+
+Every pull-visible effect carries its source event replay identity and its separate deterministic delivery position. A page may stop between effects derived from one event and resume after the last delivered effect without replaying or skipping another effect. A fully processed transaction advances the durable materialization high-watermark to its transaction-end point. A synthetic sequence, timestamp, row version, notification order, or worker poll order must not replace or refine this position.
+
+## Transaction and event replay identity
+
+The replay identity for one committed source transaction is `(stream_generation, commit_lsn)`. The replay identity for one source event is `(stream_generation, commit_lsn, event_ordinal)`.
+
+The worker must treat one source transaction as one replay unit. Before that transaction can contribute to the durable contiguous prefix, it must durably record the transaction identity and every applicable event identity. The transaction record, event records, row-version records, synchronized row projections, capture-only dependency projections, membership edges, write-fence reconciliation, pull-visible effects, and transaction-end high-watermark must commit atomically in one materialization transaction.
+
+On replay, an already durable transaction or event identity must yield the same materialized result and must not create duplicate versions, edges, or effects. A source transaction must not be split into independently acknowledged replay units. A source transaction with no applicable events must still have a durable completed transaction record so that it can participate in contiguous acknowledgement without inventing an event.
+
+Materialization transactions execute serially in source commit order. The
+worker first applies every captured synchronized-row and dependency-row image
+for the source transaction to its transaction-local projected state. It then
+evaluates the union of impacted synchronized rows against that final projected
+state, writes net membership and pull effects, and advances the progress row to
+the transaction-end point. Membership evaluation, pull, rebuild, backfill, and
+seed export must not query later live application rows as a substitute for this
+commit-ordered projected state.
+
+## Slot acknowledgement
+
+The logical replication slot may advance only to the `end_lsn` of the largest contiguous sequence of source transactions for which the transaction records, event records, versions, edges, and effects have all committed durably. `end_lsn` is an acknowledgement boundary, not a pull cursor position.
+
+Acknowledgement must occur after the materialization transaction commits. It must not advance to an individual event, an arbitrary decoder batch maximum, a later noncontiguous transaction, or a source transaction whose durable work is incomplete. If processing stops after durable materialization but before slot acknowledgement, replay must recognize the durable replay identity and acknowledgement may resume from the contiguous prefix without duplicating effects.
+
+A decode or application failure blocks acknowledgement at the prior contiguous boundary and blocks later source-transaction processing. The worker must not acknowledge around a failed transaction.
+
+## Poison-event quarantine and recovery
+
+A source transaction that cannot be decoded, validated, or materialized is a blocking poison transaction. The system must persist a durable quarantine record that identifies the stream generation, source transaction position, bounded failure class, and applicable logical relation identifier. The record must be redacted: it must not retain row payloads, decoded field values, credentials, or unbounded error text.
+
+Poison quarantine is blocking. The worker must not log and skip the transaction, publish a partial effect, acknowledge past it, or continue with later transactions.
+
+Recovery has exactly two paths:
+
+1. Repair the blocking cause and retry the same source transaction with the same replay identities.
+2. Perform an operator-authorized stream reset that creates a new stream generation, invalidates all incremental cursors, and requires rebuild.
+
+No recovery path may silently discard, synthesize, or reinterpret a poisoned source transaction.
+
+### Causally Bound Projection Baseline And Stream Reset
+
+A stream reset does not reuse the incomplete old projections and does not query
+live source state independently. Through PostgreSQL's replication protocol it
+creates a permanent candidate logical slot with an exported snapshot and keeps
+the creating replication connection open until the baseline transaction imports
+that snapshot. The slot's consistent point and exported snapshot form one source
+boundary after every transaction already committed at snapshot creation,
+including the transaction that poisoned the old stream.
+
+Under that exported snapshot, the reset builder stages the complete registered
+source projections, capture-only dependency projections, row-version fences,
+membership edges, row digests, and scope digests. It then consumes the new slot
+from its consistent point and applies every later source transaction to the
+staged state in commit order through a chosen transaction-end activation
+barrier. Baseline copy and catch-up use the same registered projection,
+membership, impact, version, and integrity rules as ordinary materialization.
+
+Every accepted fence visible in the imported snapshot receives an immutable
+`reset_baseline` coverage record bound to its fence ID, reset ID, candidate slot,
+snapshot boundary, and target stream generation. A later fence is covered only
+by normal candidate-slot WAL materialization. Activation is forbidden until
+every accepted fence through the activation barrier is either exactly
+WAL-materialized or represented by verified baseline coverage and complete
+projected row/version state. Baseline coverage creates no synthetic WAL event or
+incremental effect; the new generation's baseline is delivered by rebuild.
+
+Activation requires the staged state to be complete and verified, the new slot
+to have no gap through the barrier, and the old stream to remain blocked. One
+operator transaction then installs the staged state, creates the new stream
+generation whose `generation_start` denotes the complete baseline through that
+barrier, invalidates all old cursors and rebuild sessions, and switches a durable
+active-slot pointer to the permanent candidate slot. The worker reads that
+pointer after restart or loop re-entry. No pre-activation catch-up effect is exposed incrementally;
+every client rebuilds from the complete new-generation baseline and later WAL
+transactions resume after `generation_start`. Failed staging or catch-up leaves
+the old stream blocked and changes no active state. The old slot and projections
+are retained until activation is durable and audited, then retired by controlled
+cleanup. Reset state durably records the reset ID, candidate slot name, database,
+plugin, consistent point, snapshot boundary, activation barrier, and lifecycle
+phase. Process death before activation either resumes from that same permanent
+slot and boundary or discards the stage and restarts with a new candidate; it
+never activates a session-scoped or missing slot.
+
+The same exported-snapshot and staged-catch-up mechanism is the required
+bootstrap whenever a pending registry or schema generation introduces a table,
+field, dependency, or projection value that the active materialized projections
+do not contain. Such a bootstrap activates at the main worker's matching durable
+transaction-end boundary; it does not create a new stream generation unless the
+operation is a stream reset.
+
+## Registry activation and relation drift
+
+Each registered relation has an immutable logical table identifier and a schema-qualified physical relation identity. Registry, catalog, publication, and decoder lookups must use that exact qualified identity. Bare relation names, `search_path` lookup, and name-only publication checks are not permitted.
+
+A registry change must create a durable, validated registry generation with a commit-ordered activation boundary. Notification, polling, worker restart, or signal handling may prompt a reload, but none of them activates a registry generation by itself. The worker must load the durable activation state.
+
+For each source transaction, the worker must select exactly one validated registry generation: the latest generation whose activation precedes that source transaction in commit order. All events in that transaction use that generation. A worker must complete or retry an in-progress transaction under its selected generation before using a later generation for a later transaction.
+
+Direct rename, schema move, drop and recreate, primary-key change, or replica-identity drift of a registered relation is unsupported. Detection of any such drift blocks capture and readiness until controlled reconfiguration and required rebuild complete. It must not be treated as an ordinary registry reload or as a different unqualified relation with the same name.
+
+## TRUNCATE and replica identity
+
+`TRUNCATE` on a registered relation is unsupported in protocol version 3. A decoded truncate record for a registered relation is a blocking capture failure. The system must not silently ignore it, convert it to inferred row deletes, or acknowledge beyond it. Recovery requires an operator-authorized stream reset followed by controlled reconfiguration and rebuild.
+
+Registration and every registry activation must validate exactly one non-null declared primary-key column. Its portable type must be `string`, `int`, or `int64`. Composite keys, partial keys, floating-point keys, timestamp keys, JSON keys, nullable keys, and key substitutions are unsupported.
+
+The only allowed replica identity is `REPLICA IDENTITY DEFAULT` backed by that validated primary key. `REPLICA IDENTITY FULL`, `REPLICA IDENTITY NOTHING`, and `REPLICA IDENTITY USING INDEX` are unsupported. Any nonconforming identity at registration is rejected. Any later drift blocks capture until controlled reconfiguration and required rebuild complete.
+
+## Write fences and opaque row versions
+
+Every registered relation has mandatory row-level `AFTER INSERT`, `AFTER UPDATE`, and `AFTER DELETE` version-fence triggers. A side-effect-free `BEFORE UPDATE` guard rejects primary-key value changes. For each row operation that actually occurs, exactly one matching `AFTER` trigger locks or confirms the canonical identity reservation, allocates one opaque transition version and immutable canonical UUID `fence_id`, increments the transaction-local registered-DML ordinal, records the transition, and emits one transactional logical message. `INSERT ... ON CONFLICT DO UPDATE` therefore emits only the final update fence, and `ON CONFLICT DO NOTHING` emits none. Moving identity requires an explicit delete and insert under normal policy and version rules. The source row change and fence commit or roll back together. These triggers create no pull-visible effect.
+
+The message includes `registration_kind`, immutable `relation_id`, qualified
+physical relation identity, operation, old and new registered key identity as
+applicable, transition version, fence ID, and registered-DML ordinal. A `synced`
+registration also includes its logical `table_id` and typed primary key. A
+`capture_dependency` registration has no client-visible table ID and instead
+includes its registered capture-key identity; `table_id` must be absent. The
+worker never derives a dependency table ID from a relation ID.
+
+For each accepted push write, the push transaction supplies its mutation identity to the same trigger path and persists an immutable write fence in the same transaction as the authoritative row change and mutation outcome. The fence binds the accepted write to its logical row identity and allocated version until WAL materialization durably reconciles it. Push conflict evaluation locks the same row-version identity and source row, so a direct write and a push cannot both advance one prior version.
+
+The WAL worker buffers source row events and fence messages for one transaction, counts actual registered DML in source order, and reconciles each event with exactly one fence by registration kind, registered-DML ordinal, relation identity, operation, keys, transition version, and unique fence ID. Repeated changes to the same row remain distinct by ordinal and fence ID. The worker marks that exact fence materialized in the same durable materialization transaction as the corresponding versions, edges, and pull-visible effects. A missing, duplicate, reordered, reused, conditionally malformed, or inconsistent correlation is a blocking failure, not a reason to publish directly from push or guess an effect.
+
+Server versions are opaque, server-generated equality tokens. Clients may present a prior version as a compare-and-swap precondition and may store the returned version, but they must not sort, increment, parse, or derive meaning from it. Client timestamps, PostgreSQL sequences, commit LSNs, and clocks do not select a winner or define server-version order.
+
+Direct application writes use the mandatory trigger fence and remain subject to the same WAL-only publication rule. Their pull-visible version must be opaque and server-generated, never supplied by a client timestamp or a synchronous changelog path. Registration and readiness must prove that the required triggers are installed and enabled. Bypassing a required trigger causes the unmatched WAL event to block capture.
+
+A client with an accepted push fence that is not yet satisfied by exact WAL
+materialization or activated verified `reset_baseline` coverage must not receive
+a pull page, rebuild snapshot, or terminal checksum that pretends the fence is
+already represented. Pull and rebuild return retryable HTTP 503
+`capture_pending` without page, session, cursor, checkpoint, or checksum
+advancement until every accepted fence for that client through the requested
+operation has one of those two coverage modes. Baseline coverage is eligible
+only after its reset generation activates; staged or failed-reset coverage does
+not clear the gate.
+
+## Readiness
+
+Readiness is fail-closed. A database ping is a liveness check only and must not report Synchro capture as ready.
+
+A readiness result is ready only when all of the following are known and healthy:
+
+- the required database is reachable;
+- the configured WAL worker is running and owns a fresh heartbeat;
+- the active registry generation is durable, validated, and free of relation drift;
+- every registered relation has its required enabled version-fence triggers;
+- the publication contains the exact registered qualified relations;
+- the required logical replication slot exists and is usable;
+- no blocking poison transaction exists;
+- durable materialization progress and slot acknowledgement prove the required contiguous ordering;
+- the worker heartbeat age is within a finite configured limit; and
+- capture lag is known and within a finite configured limit.
+
+Synchro v0.3 supports one explicitly configured Synchro database per PostgreSQL cluster worker topology. A worker connected to another database is unready.
+
+Missing, stale, inconsistent, unbounded, or unavailable readiness data is unready. In particular, an omitted or infinite lag limit is unready.
+
+## Rejected alternatives
+
+- A hybrid design that synchronously publishes changelog effects during push and also publishes from WAL is rejected because it creates two pull-visibility authorities.
+- PostgreSQL sequences, timestamps, client clocks, notification order, and decoder poll order are rejected as stream ordering mechanisms because they do not establish committed source order.
+- Per-event or noncontiguous slot acknowledgement is rejected because it can acknowledge past incomplete durable work.
+- Log-and-skip poison handling is rejected because it permits silent loss and divergent materialization.
+- Notification-only registry reload is rejected because notification delivery does not define durable activation order.
+- Unqualified relation lookup is rejected because equal relation names in different schemas are distinct physical relations.
+- Silent truncate handling is rejected because a truncate has no safe implicit row-by-row pull interpretation.
+- Unsupported key shapes and replica identities are rejected because they do not provide the fixed row identity required for deterministic capture.
+- Treating a database ping as capture readiness is rejected because it does not prove worker, slot, registry, poison, ordering, heartbeat, or lag health.
+
+## Consequences
+
+- Pull visibility follows durable WAL materialization, not the synchronous push write path.
+- Clients must treat the push result as the authoritative mutation outcome and continue normal incremental pull using opaque cursors.
+- The server requires durable replay ledgers, write fences, poison state, registry activation state, and readiness telemetry.
+- Worker interruption and post-commit retry preserve exactly one source transaction and event identity instead of creating duplicate pull effects.
+- Registered relation changes require controlled reconfiguration and rebuild. Direct relation drift deliberately stops capture rather than risking ambiguous replication.
+- Operator recovery is explicit and auditable. A stream reset invalidates all incremental cursors and forces rebuild.
+
+## Audit disposition
+
+| Finding | Normative disposition |
+| --- | --- |
+| S-01 | WAL-only pull visibility and typed generation-start, event, and transaction-end positions replace sequence and hybrid ordering. |
+| S-06 | Acknowledgement is contiguous and durable; decode or application poison blocks rather than being skipped. |
+| S-07 | Registry activation is durable and commit-ordered; notification alone has no activation semantics. |
+| S-21 | WAL is the sole pull-visible path, so real source writes through transaction decode and replay are mandatory evidence. |
+| S-25 | Direct `TRUNCATE`, unsupported replica identity, and registered-relation drift block capture pending controlled recovery. |
+| S-26 | Readiness proves the configured database, worker, triggers, registry, publication, slot, progress, heartbeat, and finite lag. |
+
+These are contract dispositions. Implementation remediation and independent verification remain required before any release-readiness claim.

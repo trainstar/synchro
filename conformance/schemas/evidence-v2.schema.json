@@ -1,0 +1,741 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://synchro.dev/conformance/schemas/evidence-v2.schema.json",
+  "title": "Synchro generated assertion evidence",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "$schema",
+    "schema_version",
+    "evidence_id",
+    "candidate_id",
+    "release_version",
+    "protocol_version",
+    "contract_snapshot_sha256",
+    "support_cell_id",
+    "scenario_id",
+    "proof_obligation_id",
+    "requirement_ids",
+    "proof_type",
+    "source_commit",
+    "generator",
+    "run",
+    "environment",
+    "assertions",
+    "attachments",
+    "execution_artifacts",
+    "replay",
+    "fault_execution",
+    "performance_results",
+    "required_measurement_results",
+    "artifact_ids",
+    "negative_control",
+    "seed"
+  ],
+  "properties": {
+    "$schema": { "const": "https://synchro.dev/conformance/schemas/evidence-v2.schema.json" },
+    "schema_version": { "const": 2 },
+    "evidence_id": { "$ref": "#/$defs/evidenceId" },
+    "candidate_id": { "$ref": "#/$defs/candidateId" },
+    "release_version": { "const": "0.3.0" },
+    "protocol_version": { "const": 3 },
+    "contract_snapshot_sha256": { "$ref": "#/$defs/sha256" },
+    "support_cell_id": {
+      "oneOf": [
+        { "$ref": "#/$defs/supportCellId" },
+        { "type": "null" }
+      ]
+    },
+    "scenario_id": { "$ref": "#/$defs/scenarioId" },
+    "proof_obligation_id": { "$ref": "#/$defs/obligationId" },
+    "requirement_ids": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/requirementId" }
+    },
+    "proof_type": { "$ref": "#/$defs/proofType" },
+    "source_commit": { "$ref": "#/$defs/commitHash" },
+    "generator": { "$ref": "#/$defs/generator" },
+    "run": { "$ref": "#/$defs/run" },
+    "environment": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/nameValue" }
+    },
+    "assertions": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/assertionOutcome" }
+    },
+    "attachments": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/attachment" }
+    },
+    "execution_artifacts": { "$ref": "#/$defs/executionArtifacts" },
+    "replay": { "$ref": "#/$defs/replayEvidence" },
+    "fault_execution": {
+      "oneOf": [
+        { "$ref": "#/$defs/faultExecution" },
+        { "type": "null" }
+      ]
+    },
+    "performance_results": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/performanceResult" }
+    },
+    "required_measurement_results": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/requiredMeasurementResult" }
+    },
+    "artifact_ids": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/artifactId" }
+    },
+    "negative_control": {
+      "oneOf": [
+        { "$ref": "#/$defs/negativeControl" },
+        { "type": "null" }
+      ]
+    },
+    "seed": {
+      "oneOf": [
+        { "type": "string", "minLength": 1 },
+        { "type": "null" }
+      ]
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": { "proof_type": { "const": "native-e2e" } },
+        "required": ["proof_type"]
+      },
+      "then": {
+        "properties": {
+          "support_cell_id": { "$ref": "#/$defs/supportCellId" }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "run": {
+            "properties": { "exit_code": { "const": 0 } },
+            "required": ["exit_code"]
+          }
+        },
+        "required": ["run"]
+      },
+      "then": {
+        "properties": {
+          "assertions": {
+            "items": {
+              "properties": {
+                "outcome": { "enum": ["passed", "skipped"] }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": { "proof_type": { "const": "negative-control" } },
+        "required": ["proof_type"]
+      },
+      "then": {
+        "properties": {
+          "negative_control": { "$ref": "#/$defs/negativeControl" },
+          "fault_execution": { "$ref": "#/$defs/faultExecution" }
+        }
+      },
+      "else": {
+        "properties": {
+          "negative_control": { "type": "null" }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "proof_type": { "enum": ["fault-injection", "negative-control"] }
+        },
+        "required": ["proof_type"]
+      },
+      "then": {
+        "properties": {
+          "fault_execution": { "$ref": "#/$defs/faultExecution" }
+        }
+      },
+      "else": {
+        "properties": {
+          "fault_execution": { "type": "null" }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "evidenceId": {
+      "type": "string",
+      "pattern": "^EVD-[A-Z0-9]+(?:-[A-Z0-9]+)*-[0-9]{3}$"
+    },
+    "candidateId": {
+      "type": "string",
+      "pattern": "^RC-0\\.3\\.0-[0-9]{8}T[0-9]{6}Z-[a-f0-9]{7,64}$"
+    },
+    "supportCellId": {
+      "type": "string",
+      "pattern": "^SUP-[A-Z0-9]+(?:-[A-Z0-9]+)*-[0-9]{3}$"
+    },
+    "scenarioId": {
+      "type": "string",
+      "pattern": "^SCN-[A-Z0-9]+(?:-[A-Z0-9]+)*-[0-9]{3}$"
+    },
+    "obligationId": {
+      "type": "string",
+      "pattern": "^OBL-[A-Z0-9]+(?:-[A-Z0-9]+)*-[0-9]{3}$"
+    },
+    "requirementId": {
+      "type": "string",
+      "pattern": "^SYNC-[A-Z][A-Z0-9]*(?:-[A-Z][A-Z0-9]*)*-[0-9]{3}$"
+    },
+    "assertionId": {
+      "type": "string",
+      "pattern": "^ASSERT-[A-Z0-9]+(?:-[A-Z0-9]+)*-[0-9]{3}$"
+    },
+    "artifactId": {
+      "type": "string",
+      "pattern": "^ART-[A-Z0-9]+(?:-[A-Z0-9]+)*-[0-9]{3}$"
+    },
+    "attachmentId": {
+      "type": "string",
+      "pattern": "^ATT-[A-Z0-9]+(?:-[A-Z0-9]+)*-[0-9]{3}$"
+    },
+    "controlSubjectId": {
+      "type": "string",
+      "pattern": "^CTRL-[A-Z0-9]+(?:-[A-Z0-9]+)*-[0-9]{3}$"
+    },
+    "faultId": {
+      "type": "string",
+      "pattern": "^FAULT-[A-Z0-9]+(?:-[A-Z0-9]+)*-[0-9]{3}$"
+    },
+    "runId": {
+      "type": "string",
+      "pattern": "^RUN-[A-Z0-9]+(?:-[A-Z0-9]+)*-[0-9]{3}$"
+    },
+    "executionLineageId": {
+      "type": "string",
+      "pattern": "^EXEC-[A-Z0-9]+(?:-[A-Z0-9]+)*-[0-9]{3}$"
+    },
+    "commitHash": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{40}(?:[a-f0-9]{24})?$"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "relativePath": {
+      "type": "string",
+      "pattern": "^(?!/)(?!\\.(?:/|$))(?!.*\/\\.(?:/|$))(?!\\.\\.(?:/|$))(?!.*\/\\.\\.(?:/|$))(?!.*\\\\)[A-Za-z0-9._-]+(?:/[A-Za-z0-9._-]+)*$"
+    },
+    "proofType": {
+      "type": "string",
+      "enum": [
+        "reference-model",
+        "server-black-box",
+        "native-e2e",
+        "fault-injection",
+        "negative-control"
+      ]
+    },
+    "generator": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "version", "binary_sha256"],
+      "properties": {
+        "name": { "type": "string", "minLength": 1 },
+        "version": { "type": "string", "minLength": 1 },
+        "binary_sha256": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "run": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "execution_lineage_id",
+        "url",
+        "make_target",
+        "argv",
+        "attempt",
+        "started_at",
+        "completed_at",
+        "duration_ms",
+        "result",
+        "exit_code",
+        "previous_evidence_id",
+        "rerun_cause",
+        "rerun_diagnosis",
+        "corrective_action",
+        "rerun_approval"
+      ],
+      "properties": {
+        "id": { "$ref": "#/$defs/runId" },
+        "execution_lineage_id": { "$ref": "#/$defs/executionLineageId" },
+        "url": { "type": "string", "format": "uri" },
+        "make_target": {
+          "type": "string",
+          "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_.-]*$"
+        },
+        "argv": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 2,
+          "prefixItems": [
+            { "const": "make" },
+            { "type": "string", "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_.-]*$" }
+          ],
+          "items": false
+        },
+        "attempt": { "type": "integer", "minimum": 1 },
+        "started_at": { "type": "string", "format": "date-time" },
+        "completed_at": { "type": "string", "format": "date-time" },
+        "duration_ms": { "type": "integer", "minimum": 0 },
+        "result": {
+          "type": "string",
+          "enum": ["passed", "failed", "error"]
+        },
+        "exit_code": { "type": "integer", "minimum": 0 },
+        "previous_evidence_id": {
+          "oneOf": [
+            { "$ref": "#/$defs/evidenceId" },
+            { "type": "null" }
+          ]
+        },
+        "rerun_cause": {
+          "oneOf": [
+            {
+              "type": "string",
+              "enum": [
+                "ci-orchestrator-failure",
+                "compute-host-failure",
+                "network-infrastructure-outage",
+                "device-or-simulator-failure",
+                "artifact-registry-outage"
+              ]
+            },
+            { "type": "null" }
+          ]
+        },
+        "rerun_diagnosis": {
+          "oneOf": [
+            { "type": "string", "minLength": 1 },
+            { "type": "null" }
+          ]
+        },
+        "corrective_action": {
+          "oneOf": [
+            { "type": "string", "minLength": 1 },
+            { "type": "null" }
+          ]
+        },
+        "rerun_approval": {
+          "oneOf": [
+            { "$ref": "#/$defs/rerunApproval" },
+            { "type": "null" }
+          ]
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": { "exit_code": { "const": 0 } },
+            "required": ["exit_code"]
+          },
+          "then": {
+            "properties": { "result": { "const": "passed" } }
+          },
+          "else": {
+            "properties": { "result": { "enum": ["failed", "error"] } }
+          }
+        },
+        {
+          "if": {
+            "properties": { "attempt": { "minimum": 2 } },
+            "required": ["attempt"]
+          },
+          "then": {
+            "properties": {
+              "previous_evidence_id": { "$ref": "#/$defs/evidenceId" },
+              "rerun_cause": {
+                "type": "string",
+                "enum": [
+                  "ci-orchestrator-failure",
+                  "compute-host-failure",
+                  "network-infrastructure-outage",
+                  "device-or-simulator-failure",
+                  "artifact-registry-outage"
+                ]
+              },
+              "rerun_diagnosis": { "type": "string", "minLength": 1 },
+              "corrective_action": { "type": "string", "minLength": 1 },
+              "rerun_approval": { "$ref": "#/$defs/rerunApproval" }
+            }
+          },
+          "else": {
+            "properties": {
+              "previous_evidence_id": { "type": "null" },
+              "rerun_cause": { "type": "null" },
+              "rerun_diagnosis": { "type": "null" },
+              "corrective_action": { "type": "null" },
+              "rerun_approval": { "type": "null" }
+            }
+          }
+        }
+      ]
+    },
+    "rerunApproval": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["approver_identity", "approved_at", "uri"],
+      "properties": {
+        "approver_identity": { "type": "string", "pattern": "^github:[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$" },
+        "approved_at": { "type": "string", "format": "date-time" },
+        "uri": { "type": "string", "format": "uri" }
+      }
+    },
+    "nameValue": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "value"],
+      "properties": {
+        "name": { "type": "string", "minLength": 1 },
+        "value": { "type": "string", "minLength": 1 }
+      }
+    },
+    "assertionOutcome": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["assertion_id", "outcome"],
+      "properties": {
+        "assertion_id": { "$ref": "#/$defs/assertionId" },
+        "outcome": {
+          "type": "string",
+          "enum": ["passed", "failed", "skipped", "error"]
+        },
+        "detail": { "type": "string", "minLength": 1 }
+      }
+    },
+    "attachment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "kind", "path", "media_type", "sha256"],
+      "properties": {
+        "id": { "$ref": "#/$defs/attachmentId" },
+        "kind": {
+          "type": "string",
+          "enum": [
+            "log",
+            "trace",
+            "replay-data",
+            "barrier-trace",
+            "fault-plan",
+            "negative-control",
+            "performance-measurements",
+            "report"
+          ]
+        },
+        "path": { "$ref": "#/$defs/relativePath" },
+        "media_type": { "type": "string", "minLength": 1 },
+        "sha256": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "executionArtifacts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "log_attachment_ids",
+        "trace_attachment_ids",
+        "replay_data_attachment_ids"
+        ,"barrier_trace_attachment_ids"
+      ],
+      "properties": {
+        "log_attachment_ids": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/attachmentId" }
+        },
+        "trace_attachment_ids": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/attachmentId" }
+        },
+        "replay_data_attachment_ids": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/attachmentId" }
+        },
+        "barrier_trace_attachment_ids": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/attachmentId" }
+        }
+      }
+    },
+    "replayEvidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["seed", "barrier_traces"],
+      "properties": {
+        "seed": { "oneOf": [{ "type": "string", "minLength": 1 }, { "type": "null" }] },
+        "barrier_traces": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/barrierTrace" }
+        }
+      }
+    },
+    "barrierTrace": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["barrier_id", "attachment_id"],
+      "properties": {
+        "barrier_id": { "type": "string", "pattern": "^BAR-[A-Z0-9]+(?:-[A-Z0-9]+)*-[0-9]{3}$" },
+        "attachment_id": { "$ref": "#/$defs/attachmentId" }
+      }
+    },
+    "faultExecution": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["fault_plan_id", "fault_id", "control_id", "fault_plan_attachment_id", "subject_type", "detected_by", "injection"],
+      "properties": {
+        "fault_plan_id": { "type": "string", "pattern": "^FPL-[A-Z0-9]+(?:-[A-Z0-9]+)*-[0-9]{3}$" },
+        "fault_id": { "$ref": "#/$defs/faultId" },
+        "control_id": { "$ref": "#/$defs/controlSubjectId" },
+        "fault_plan_attachment_id": { "$ref": "#/$defs/attachmentId" },
+        "subject_type": { "$ref": "#/$defs/controlSubjectType" },
+        "detected_by": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/assertionId" }
+        },
+        "injection": { "$ref": "#/$defs/injectionRecipe" }
+      }
+    },
+    "performanceResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["budget_id", "outcome", "measurement_attachment_id", "metric", "unit", "comparator", "limit", "observed_value", "measurement", "data_profile", "measurement_method"],
+      "properties": {
+        "budget_id": { "type": "string", "pattern": "^BUD-[A-Z0-9]+(?:-[A-Z0-9]+)*-[0-9]{3}$" },
+        "outcome": { "type": "string", "enum": ["passed", "failed", "error"] },
+        "measurement_attachment_id": { "$ref": "#/$defs/attachmentId" },
+        "metric": { "type": "string", "minLength": 1 },
+        "unit": { "type": "string", "minLength": 1 },
+        "comparator": { "type": "string", "enum": ["eq", "lte", "gte"] },
+        "limit": { "type": "number", "minimum": 0 },
+        "observed_value": { "type": "number" },
+        "measurement": { "$ref": "#/$defs/performanceMeasurement" },
+        "data_profile": { "$ref": "#/$defs/dataProfile" },
+        "measurement_method": { "$ref": "#/$defs/measurementMethod" }
+      }
+    },
+    "requiredMeasurementResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["measurement_id", "outcome", "measurement_attachment_id", "data_profile", "measurement_method", "metrics", "strata"],
+      "properties": {
+        "measurement_id": { "type": "string", "pattern": "^MEAS-[A-Z0-9]+(?:-[A-Z0-9]+)*-[0-9]{3}$" },
+        "outcome": { "type": "string", "enum": ["passed", "failed", "error"] },
+        "measurement_attachment_id": { "$ref": "#/$defs/attachmentId" },
+        "data_profile": { "$ref": "#/$defs/dataProfile" },
+        "measurement_method": { "$ref": "#/$defs/measurementMethod" },
+        "metrics": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/metric" }
+        },
+        "strata": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/stratumResult" }
+        }
+      }
+    },
+    "scalar": { "type": ["string", "number", "boolean", "null"] },
+    "dataProfile": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["profile_type", "parameters"],
+      "properties": {
+        "profile_type": { "type": "string", "enum": ["request-cycle", "rebuild", "scope-fanout", "scope-topology", "startup", "queue-replay", "rebuild-apply", "provenance", "configured-boundary"] },
+        "parameters": {
+          "type": "object",
+          "minProperties": 1,
+          "additionalProperties": { "$ref": "#/$defs/scalar" }
+        }
+      }
+    },
+    "measurementMethod": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["method_type", "instrumentation", "aggregation"],
+      "properties": {
+        "method_type": { "type": "string", "enum": ["request-trace", "dependency-audit", "workload-sampling", "boundary-exercise"] },
+        "instrumentation": { "type": "string", "enum": ["http-request-trace", "protocol-trace", "adapter-dependency-audit", "server-metrics", "native-profiler"] },
+        "aggregation": { "type": "string", "enum": ["exact-single-run", "per-sample", "distribution"] }
+      }
+    },
+    "metric": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "name", "unit"],
+      "properties": {
+        "id": { "type": "string", "pattern": "^MET-[A-Z0-9]+(?:-[A-Z0-9]+)*-[0-9]{3}$" },
+        "name": { "type": "string", "minLength": 1 },
+        "unit": { "type": "string", "minLength": 1 }
+      }
+    },
+    "stratumResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["stratum_id", "parameters", "sample_count", "observations"],
+      "properties": {
+        "stratum_id": { "type": "string", "pattern": "^STR-[A-Z0-9]+(?:-[A-Z0-9]+)*-[0-9]{3}$" },
+        "parameters": {
+          "type": "object",
+          "minProperties": 1,
+          "additionalProperties": { "$ref": "#/$defs/scalar" }
+        },
+        "sample_count": { "type": "integer", "minimum": 1 },
+        "observations": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/measurementObservation" }
+        }
+      }
+    },
+    "performanceMeasurement": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["request_counts", "returned_rebuild_page_count", "outbound_network_or_rpc_hops"],
+      "properties": {
+        "request_counts": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["connect", "push", "pull", "rebuild_page", "schema_fetch", "other"],
+          "properties": {
+            "connect": { "type": "integer", "minimum": 0 },
+            "push": { "type": "integer", "minimum": 0 },
+            "pull": { "type": "integer", "minimum": 0 },
+            "rebuild_page": { "type": "integer", "minimum": 0 },
+            "schema_fetch": { "type": "integer", "minimum": 0 },
+            "other": { "type": "integer", "minimum": 0 }
+          }
+        },
+        "returned_rebuild_page_count": { "type": "integer", "minimum": 0 },
+        "outbound_network_or_rpc_hops": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "measurementObservation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sample_id", "metric_values"],
+      "properties": {
+        "sample_id": { "type": "string", "pattern": "^SAMPLE-[A-Z0-9]+(?:-[A-Z0-9]+)*-[0-9]{3}$" },
+        "metric_values": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/metricValue" }
+        }
+      }
+    },
+    "metricValue": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["metric_id", "value"],
+      "properties": {
+        "metric_id": { "type": "string", "pattern": "^MET-[A-Z0-9]+(?:-[A-Z0-9]+)*-[0-9]{3}$" },
+        "value": { "type": "number" }
+      }
+    },
+    "controlSubjectType": {
+      "type": "string",
+      "enum": ["mutant", "synthetic-fault", "known-defect", "source-mutant", "wire-fault", "state-fault", "process-fault", "infrastructure-fault", "artifact-tamper"]
+    },
+    "injectionRecipe": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mechanism", "target", "operator", "parameters"],
+      "properties": {
+        "mechanism": { "type": "string", "enum": ["source-mutant", "wire-fault", "state-fault", "process-fault", "infrastructure-fault", "artifact-tamper"] },
+        "target": { "type": "string", "minLength": 1 },
+        "operator": { "type": "string", "enum": ["replace", "inject", "omit", "duplicate", "reorder", "replay", "misbind", "bypass", "truncate", "crash", "corrupt", "reroute", "expose", "delay"] },
+        "parameters": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["scenario", "defect"],
+          "properties": {
+            "scenario": { "type": "string", "minLength": 1 },
+            "defect": { "type": "string", "minLength": 1 },
+            "precondition": { "type": "string", "minLength": 1 }
+          }
+        }
+      }
+    },
+    "negativeControl": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "fault_id",
+        "control_id",
+        "fault_plan_id",
+        "fault_plan_attachment_id",
+        "control_subject_id",
+        "control_subject_type",
+        "control_subject_artifact_ids",
+        "detected_by",
+        "outcome",
+        "attachment_ids"
+      ],
+      "properties": {
+        "fault_id": { "$ref": "#/$defs/faultId" },
+        "control_id": { "$ref": "#/$defs/controlSubjectId" },
+        "fault_plan_id": { "type": "string", "pattern": "^FPL-[A-Z0-9]+(?:-[A-Z0-9]+)*-[0-9]{3}$" },
+        "fault_plan_attachment_id": { "$ref": "#/$defs/attachmentId" },
+        "control_subject_id": { "$ref": "#/$defs/controlSubjectId" },
+        "control_subject_type": { "$ref": "#/$defs/controlSubjectType" },
+        "control_subject_artifact_ids": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/artifactId" }
+        },
+        "detected_by": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/assertionId" }
+        },
+        "outcome": { "const": "detected" },
+        "attachment_ids": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/attachmentId" }
+        }
+      }
+    }
+  }
+}

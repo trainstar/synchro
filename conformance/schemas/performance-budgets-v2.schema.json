@@ -1,0 +1,155 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://synchro.dev/conformance/schemas/performance-budgets-v2.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["$schema", "schema_version", "release", "budgets", "required_measurements"],
+  "properties": {
+    "$schema": { "const": "https://synchro.dev/conformance/schemas/performance-budgets-v2.schema.json" },
+    "schema_version": { "const": 2 },
+    "release": { "const": "0.3.0" },
+    "budgets": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/budget" }
+    },
+    "required_measurements": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/requiredMeasurement" }
+    }
+  },
+  "$defs": {
+    "budgetId": { "type": "string", "pattern": "^BUD-[A-Z0-9]+(?:-[A-Z0-9]+)*-[0-9]{3}$" },
+    "measurementId": { "type": "string", "pattern": "^MEAS-[A-Z0-9]+(?:-[A-Z0-9]+)*-[0-9]{3}$" },
+    "metricId": { "type": "string", "pattern": "^MET-[A-Z0-9]+(?:-[A-Z0-9]+)*-[0-9]{3}$" },
+    "stratumId": { "type": "string", "pattern": "^STR-[A-Z0-9]+(?:-[A-Z0-9]+)*-[0-9]{3}$" },
+    "scenarioId": { "type": "string", "pattern": "^SCN-[A-Z0-9]+(?:-[A-Z0-9]+)*-[0-9]{3}$" },
+    "supportCellId": { "type": "string", "pattern": "^SUP-[A-Z0-9]+(?:-[A-Z0-9]+)*-[0-9]{3}$" },
+    "artifactInventoryId": { "type": "string", "pattern": "^ARTDEF-[A-Z0-9]+(?:-[A-Z0-9]+)*-[0-9]{3}$" },
+    "supportCellIds": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/supportCellId" }
+    },
+    "artifactInventoryIds": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/artifactInventoryId" }
+    },
+    "scalar": { "type": ["string", "number", "boolean", "null"] },
+    "dataProfile": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["profile_type", "parameters"],
+      "properties": {
+        "profile_type": {
+          "type": "string",
+          "enum": ["request-cycle", "rebuild", "scope-fanout", "scope-topology", "startup", "queue-replay", "rebuild-apply", "provenance", "configured-boundary"]
+        },
+        "parameters": {
+          "type": "object",
+          "minProperties": 1,
+          "additionalProperties": { "$ref": "#/$defs/scalar" }
+        }
+      }
+    },
+    "measurementMethod": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["method_type", "instrumentation", "aggregation"],
+      "properties": {
+        "method_type": { "type": "string", "enum": ["request-trace", "dependency-audit", "workload-sampling", "boundary-exercise"] },
+        "instrumentation": { "type": "string", "enum": ["http-request-trace", "protocol-trace", "adapter-dependency-audit", "server-metrics", "native-profiler"] },
+        "aggregation": { "type": "string", "enum": ["exact-single-run", "per-sample", "distribution"] }
+      }
+    },
+    "metric": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "name", "unit"],
+      "properties": {
+        "id": { "$ref": "#/$defs/metricId" },
+        "name": { "type": "string", "minLength": 1 },
+        "unit": { "type": "string", "minLength": 1 }
+      }
+    },
+    "stratum": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["stratum_id", "parameters"],
+      "properties": {
+        "stratum_id": { "$ref": "#/$defs/stratumId" },
+        "parameters": {
+          "type": "object",
+          "minProperties": 1,
+          "additionalProperties": { "$ref": "#/$defs/scalar" }
+        }
+      }
+    },
+    "budget": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "scenario_id", "support_cell_ids", "artifact_inventory_ids", "metric", "unit", "comparator", "limit", "data_profile", "measurement_method"],
+      "properties": {
+        "id": { "$ref": "#/$defs/budgetId" },
+        "scenario_id": { "$ref": "#/$defs/scenarioId" },
+        "support_cell_ids": { "$ref": "#/$defs/supportCellIds" },
+        "artifact_inventory_ids": { "$ref": "#/$defs/artifactInventoryIds" },
+        "metric": {
+          "type": "string",
+          "enum": [
+            "warm_connect_http_requests",
+            "warm_connect_non_connect_http_requests",
+            "steady_state_pull_http_requests_per_cycle",
+            "steady_state_pull_non_pull_http_requests_per_cycle",
+            "pending_cycle_push_http_requests",
+            "pending_cycle_pull_http_requests",
+            "pending_cycle_non_push_or_pull_http_requests",
+            "rebuild_connect_http_requests",
+            "rebuild_pull_http_requests",
+            "rebuild_page_request_count_minus_returned_page_count",
+            "rebuild_schema_fetch_http_requests",
+            "rebuild_unexpected_http_requests",
+            "core_sync_outbound_network_or_rpc_hops"
+          ]
+        },
+        "unit": { "type": "string", "enum": ["requests", "hops"] },
+        "comparator": { "type": "string", "enum": ["eq", "lte", "gte"] },
+        "limit": { "type": "number", "minimum": 0 },
+        "data_profile": { "$ref": "#/$defs/dataProfile" },
+        "measurement_method": { "$ref": "#/$defs/measurementMethod" }
+      }
+    },
+    "requiredMeasurement": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "scenario_id", "support_cell_ids", "artifact_inventory_ids", "data_profile", "measurement_method", "metrics", "strata", "minimum_sample_count_per_stratum"],
+      "properties": {
+        "id": { "$ref": "#/$defs/measurementId" },
+        "scenario_id": { "$ref": "#/$defs/scenarioId" },
+        "support_cell_ids": { "$ref": "#/$defs/supportCellIds" },
+        "artifact_inventory_ids": { "$ref": "#/$defs/artifactInventoryIds" },
+        "data_profile": { "$ref": "#/$defs/dataProfile" },
+        "measurement_method": { "$ref": "#/$defs/measurementMethod" },
+        "metrics": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/metric" }
+        },
+        "strata": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/stratum" }
+        },
+        "minimum_sample_count_per_stratum": { "type": "integer", "minimum": 1 }
+      }
+    }
+  }
+}

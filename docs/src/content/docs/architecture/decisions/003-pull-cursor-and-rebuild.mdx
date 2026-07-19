@@ -1,0 +1,788 @@
+---
+title: "ADR 003: Pull, Cursor, and Rebuild Semantics"
+description: Accepted v0.3.0 decision for deterministic pull pagination, authenticated cursors, and snapshot-bound rebuilds.
+status: Accepted
+---
+
+# ADR 003: Pull, Cursor, and Rebuild Semantics
+
+**Status:** Accepted
+**Date:** 2026-07-18
+**Scope:** Protocol version 3 incremental pull and single-scope rebuild
+
+## Context
+
+Pull progress is a data-integrity boundary. A response can contain changes for
+several scopes, and one local table can be justified by more than one scope.
+The server therefore cannot treat a global changelog window, a row key, or an
+issued token as proof that a client received and applied every change it needs.
+
+The server audit identified four related failures in the earlier design:
+
+- the global page limit was applied before per-scope eligibility was resolved;
+- selected entries could advance a scope cursor even when hydration produced no
+  change record;
+- rebuild pages queried live state and accepted an unbound lexical page key;
+- completing one rebuild could advance checkpoints for other scopes.
+
+These failures can omit data without producing a transport error. This ADR
+freezes the pull and rebuild contract before implementation remediation. It is
+normative for protocol version 3. The client treats every cursor as opaque and
+the server is the authority for all cursor, scope, snapshot, and digest state.
+
+## Decision
+
+### Stream position and common terms
+
+The pull stream has a named `stream_generation`. Within one generation, the
+authoritative point is one of:
+
+```text
+generation_start
+effect(commit_lsn, event_ordinal, effect_ordinal)
+transaction_end(commit_lsn)
+```
+
+`generation_start` precedes every transaction. Effect points compare by typed
+WAL commit LSN, source event ordinal, and deterministic per-scope effect ordinal.
+A transaction-end point follows every effect at that commit LSN and exists even
+when the transaction has no applicable event. Source replay identity remains
+`(commit_lsn, event_ordinal)`; `effect_ordinal` is a delivery tie-breaker, not a
+WAL identity. Timestamps, PostgreSQL sequence values, table names, and lexical
+strings are not stream order. Positions from different stream generations are
+not comparable.
+
+An incremental cursor is a server-issued token for one scope position. A
+rebuild cursor is a server-issued continuation token for one immutable rebuild
+session. The two token kinds are not interchangeable.
+
+`null` means that a scope has no usable incremental state and requires a
+rebuild. A non-null token is usable only after the server authenticates it and
+checks all of its bindings.
+
+### Pull request rules
+
+`POST /sync/pull` requires an authenticated request with this exact JSON
+object:
+
+```json
+{
+  "client_id": "ios-device-123",
+  "client_generation": 4,
+  "schema": {
+    "version": 8,
+    "hash": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+  },
+  "scope_set_version": 13,
+  "scopes": {
+    "templates_public": {
+      "cursor": "opaque-server-token"
+    },
+    "documents_user:u_123": {
+      "cursor": null
+    }
+  },
+  "limit": 500
+}
+```
+
+The request rules are:
+
+1. `client_id` is a nonempty identifier for the authenticated user's client.
+2. `client_generation` is the exact current positive generation returned by connect.
+3. `schema.version` and `schema.hash` must identify the exact current schema
+   manifest. A stale or mismatched schema is rejected before pull processing.
+4. `scope_set_version` is the client's last applied authoritative assignment
+   version. A value greater than the server's version is invalid.
+5. Every `scopes` value contains a `cursor` member whose value is either
+   `null` or an opaque string. The client does not parse a cursor.
+6. A scope that was never assigned to this client generation is invalid. A
+   previously assigned scope that has since been removed is accepted so the
+   server can report the removal normally.
+7. `limit` is an integer in the inclusive range `1` through the server's
+   configured maximum. The server does not silently clamp zero, negative, or
+   over-limit values.
+8. A malformed JSON body, missing required member, wrong JSON type, unknown
+   scope, future scope-set version, or invalid limit returns an error and does
+   not process any scope.
+
+The authenticated user identity is transport context. It is not taken from a
+JSON field and cannot be replaced by a client-supplied value.
+
+### Pull response rules
+
+A successful pull returns this exact response shape:
+
+```json
+{
+  "changes": [],
+  "scope_set_version": 13,
+  "scope_cursors": {
+    "templates_public": "opaque-next-scope-token"
+  },
+  "scope_updates": {
+    "add": [],
+    "remove": []
+  },
+  "rebuild": ["documents_user:u_123"],
+  "has_more": false,
+  "checksums": {
+    "templates_public": {
+      "algorithm": "sha256",
+      "version": 1,
+      "encoding": "hex",
+      "digest": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+    },
+    "documents_user:u_123": {
+      "algorithm": "sha256",
+      "version": 1,
+      "encoding": "hex",
+      "digest": "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+    }
+  }
+}
+```
+
+The response rules are:
+
+- `changes` is ordered by the deterministic merge defined below. Each change
+  has one scope, one logical table, one typed primary key, one pull operation
+  (`upsert` or `delete`), and one opaque `server_version`.
+- An `upsert` has a row and its canonical `row_checksum`. A `delete` may omit
+  the row when the outcome is local scope removal. If it includes a row, that
+  row is an authoritative tombstone and includes its checksum.
+- `scope_cursors` is a delta map. A scope receives a token only through the
+  greatest safe progress position. Every eligible effect at or before that
+  position is either represented by an explicit delivered candidate, or is
+  deduplication-suppressed by the retained later candidate for the same typed
+  scope key. A retained covering candidate after the issued position remains
+  eligible on the next request; the cursor cannot advance past it until it is
+  delivered. A scope fully proven to have no eligible effect through the
+  request boundary may advance to that boundary. A scope blocked by the page
+  limit is not advanced past its last selected candidate except for earlier
+  effects covered by a retained later candidate. A scope listed in `rebuild`
+  has no new incremental cursor in this response.
+- `scope_set_version` and `scope_updates` are authoritative together. An add
+  contains a `null` cursor and requires rebuild materialization. A remove
+  causes local provenance cleanup and does not create a client mutation.
+- `rebuild` lists assigned scopes whose incremental state is stale or absent.
+  A stale scope is not silently resumed.
+- `has_more` is true exactly when an eligible candidate remains for at least
+  one incrementally valid scope after the returned page. It is computed after
+  per-scope eligibility and candidate selection, not from a pre-filtered SQL
+  window.
+- When `has_more` is false, `checksums` is required and contains the
+  authoritative digest for every currently assigned scope. A scope listed in
+  `rebuild` is not healthy merely because its digest is present; rebuild takes
+  precedence. When `has_more` is true, `checksums` is absent.
+- A successful response never contains a cursor that is ahead of an
+  unaccounted eligible effect or an undelivered retained candidate. A failed
+  request contains no partial success response.
+
+### Per-scope eligibility before the limit
+
+The server opens one repeatable-read transaction for a pull request. Its first
+authoritative read loads the durable materialization progress row and fixes
+boundary `B` to that visible generation-start or transaction-end point. The WAL
+worker commits synchronized projections, dependency projections, scope effects,
+and that progress row atomically and serially in commit order. PostgreSQL MVCC
+therefore makes the materialized state visible to this pull exactly the state
+through `B`. Pull reads only that materialized state and never live source
+tables. Source commits or later materialization transactions after `B` are not
+part of the response.
+
+For each assigned scope with a valid current cursor `C`, the server performs
+these steps independently:
+
+1. Validate the cursor bindings and obtain its position `C`.
+2. Select all effects for that scope with delivery positions greater than `C` and no
+   greater than `B`.
+3. Read the WAL-materialized scope effects and captured row projections for
+   those events from the same durable materialization state.
+4. Deduplicate the eligible effects by the scope-inclusive typed key.
+5. Keep the greatest stream position for each key and retain the resulting
+   per-scope candidate stream in position order.
+
+Only after every valid scope has its candidate stream does the server apply
+the global `limit`. A query plan can use bounded scans or a k-way merge, but
+its result must be equivalent to this full eligibility-before-limit model.
+No scope's eligible candidates may be discarded merely because another scope
+filled an earlier raw query window.
+
+### Deterministic, starvation-free merge
+
+The global page is a deterministic k-way merge of the per-scope candidate
+streams. The next candidate is the smallest tuple:
+
+```text
+(stream_position, scope_id_bytes, logical_table_id_bytes,
+ typed_primary_key_bytes, operation_rank)
+```
+
+`stream_position` compares by `(commit_lsn, event_ordinal, effect_ordinal)`. The remaining
+components are unsigned canonical bytes. `operation_rank` is a fixed protocol
+constant used only if all preceding components compare equal.
+
+This merge is starvation-free for the fixed transaction boundary: an eligible
+candidate cannot be passed forever by candidates from a different scope,
+because every returned page consumes the least remaining ordered candidates
+and the boundary is finite. Newly committed events have positions after `B`
+and cannot displace an older eligible candidate in the current request.
+
+The server computes `has_more` from the remaining heads of all per-scope
+retained candidate streams. A scope with an unselected candidate receives no
+position at or beyond that candidate. It may advance through an earlier raw
+effect suppressed by that same retained candidate, which remains after the new
+cursor and is selected on a later page unless an even later candidate for the
+same key replaces it. A scope with no remaining candidate through `B` may
+receive a cursor at `B`, including when it had no eligible change. On a terminal
+page, every incrementally valid scope is fully accounted through `B` and
+receives a cursor at `B`; scopes requiring rebuild receive no cursor.
+
+### Scope-inclusive typed deduplication
+
+The deduplication key is the tuple:
+
+```text
+(scope_id, logical_table_id, typed_primary_key)
+```
+
+The primary key is compared and encoded according to its declared portable
+type. The key is not made by concatenating strings with a delimiter.
+
+The scope component is mandatory. The same row in two scopes therefore
+produces two independent candidate identities and can produce two independent
+outcomes. Deduplication in one scope never consumes progress in another scope.
+For one typed key in one scope, only the greatest eligible delivery position is
+retained in the page candidate stream. Every earlier eligible effect for that
+key is explicitly covered by the retained candidate for cursor accounting. If
+the retained candidate is not selected because of the global limit, it remains
+strictly after any cursor issued for that scope. This suppression rule is the
+only way an eligible raw effect can be accounted without its own wire outcome.
+
+### Explicit candidate outcomes and captured projections
+
+Every candidate selected for a page has exactly one of these outcomes:
+
+1. An explicit `upsert` change with a complete authoritative row,
+   `row_checksum`, and opaque `server_version`.
+2. An explicit `delete` change. The row is absent only when the server has an
+   authoritative deletion or scope-removal outcome that requires local
+   removal. An authoritative tombstone may be included instead.
+3. No response, because the entire page fails.
+
+There is no silent candidate omission and no per-candidate success that hides a
+missing projection. The WAL materialization transaction stores the complete
+synced row projection, row digest, scope effect, and opaque server version that
+belong to the source event. Pull reads that captured projection. It does not
+hydrate a selected historical event from the current live source row.
+
+Changelog selection, captured projection reads, row checksum validation, and
+candidate outcome construction use one read snapshot over durable
+materialization state. A transient database or availability failure returns
+`503 temporary_unavailable`. A missing projection, authorization inconsistency,
+digest mismatch, or impossible materialization state returns non-retryable
+`500 sync_integrity_failure` and makes readiness unready. Both failures return
+no partial page, no cursor, no checksum, and no committed acknowledgement.
+
+If the client has an accepted push fence that is not yet satisfied by exact WAL
+materialization or activated verified reset-baseline coverage, pull returns
+retryable `503 capture_pending`. It returns no partial page, cursor, checksum, or
+checkpoint advancement. Rebuild applies the same gate before creating or
+replaying a session. Staged or failed-reset coverage does not clear the gate.
+This prevents a page or terminal checksum from describing state older than the
+client's accepted push.
+
+### Cursor issuance and server acknowledgement
+
+The token issued in `scope_cursors` represents the greatest safe progress
+position for that scope under the explicit-outcome and retained-candidate
+suppression rules above. Issuing that token does not acknowledge it on the
+server.
+
+The durable server checkpoint for a scope advances only when a later
+successful client request presents that token, or a newer valid token, for
+that same scope. The server then advances the checkpoint monotonically to the
+presented position. It never advances a checkpoint because it selected an
+event, built a response, committed a rebuild page, or issued a token.
+
+The acknowledgement rules are:
+
+- A presented cursor acknowledges the client's prior delivery claim only after
+  its bindings and stream position validate.
+- A request transaction can acknowledge presented cursors and return a new
+  page, but a whole-page failure commits neither the acknowledgement nor a new
+  page cursor.
+- An older valid cursor never moves a checkpoint backwards. It can replay
+  already delivered changes without changing the durable checkpoint.
+- A rebuild final cursor is not an acknowledgement. It becomes an
+  acknowledgement only when a later `/sync/pull` request presents it in the
+  scope map.
+- A rebuild request never writes an incremental server checkpoint.
+
+This delayed acknowledgement makes response loss safe. The server records
+only progress that the client later presents, not progress inferred from a
+response that might not have reached the client.
+
+### Incremental cursor bindings
+
+Every incremental cursor contains these authenticated fields:
+
+```text
+kind
+token_version
+key_id
+stream_generation
+position_kind
+user_binding
+client_binding
+client_generation
+scope_id
+schema_hash
+membership_generation
+retention_generation
+commit_lsn when position_kind is effect or transaction_end
+event_ordinal only when position_kind is effect
+effect_ordinal only when position_kind is effect
+issued_at
+mac
+```
+
+The token is opaque to clients. The server computes `mac` with HMAC-SHA-256
+over a canonical serialization of the token kind, version, key identifier,
+all bindings, and position fields. `key_id` selects the server verification
+key. Verification uses a constant-time MAC comparison before any token field
+is trusted.
+
+The bindings have these meanings:
+
+- `user_binding` is the authenticated user identity binding.
+- `client_binding` identifies the client under that user.
+- `client_generation` changes when client continuation state is retired or
+  replaced.
+- `scope_id` is the exact server-assigned scope instance.
+- `schema_hash` is the exact schema manifest hash used for the page. Pull
+  accepts only the current hash. Connect may replace an authenticated
+  historical-schema cursor at the same position with a current-schema cursor
+  only through the compatible unaffected-scope bridge in ADR 004; clients never
+  edit or relabel the token.
+- `membership_generation` identifies the scope membership rule and its
+  materialized generation.
+- `retention_generation` identifies the retained stream lineage and resume
+  floor. A cursor at or above an ordinarily advanced floor remains valid; a
+  cursor below the floor is stale.
+- `stream_generation` binds the token to the current stream lineage.
+- `issued_at` is the server issue time in UTC and is covered by the MAC.
+
+The server never accepts a token based on its apparent text, length, lexical
+order, or decoded primary-key-like content.
+
+### Stale versus forged cursor dispatch
+
+An authenticated incremental cursor is stale when its MAC is valid but its
+stream generation, client generation, schema lineage, membership generation,
+or retention position is no longer current. The only exception is connect-time
+replacement of an otherwise valid historical-schema cursor through ADR 004's
+compatible unaffected-scope bridge. Outside that bridge, stale cursor state is
+recoverable scope state, not a malformed request. Pull returns HTTP `200` with
+that scope in `rebuild`, omits a new cursor for it, and does not acknowledge it.
+
+A cursor is forged or misbound when it is malformed, has an unsupported token
+kind or version, uses an unknown key, fails MAC verification, or does not bind
+to the authenticated user, client, expected scope, or request context. The
+server returns HTTP `400` with `invalid_request`. It does not reveal which
+binding failed and does not process any scope in that request.
+
+## Normal scope movement
+
+Scope assignment is evaluated by the server on every connect and pull. Scope
+movement has these exact outcomes:
+
+- A newly assigned scope appears in `scope_updates.add` with `cursor: null` and
+  in `rebuild`. It has no incremental progress until its rebuild finality is
+  verified locally.
+- A removed scope appears in `scope_updates.remove`. The response contains no
+  new change or cursor for that scope. The client removes only stale local
+  provenance and creates no synthetic mutation.
+- A row entering an existing scope produces a normal scoped `upsert` outcome.
+- A row leaving an existing scope produces a normal scoped `delete` outcome
+  without an invented local tombstone when no authoritative tombstone exists.
+- A row present in more than one scope produces independent outcomes and
+  provenance changes. Processing one scope cannot remove the row while
+  another valid scope still justifies it.
+- A membership-rule or dependency configuration change advances the affected
+  membership generation. Its affected scope cursors become stale and are
+  rebuilt rather than being interpreted under the new rule.
+
+The server returns the authoritative `scope_set_version` with the assignment
+delta. Clients apply the delta, changes, cursor updates, and terminal checksum
+as one local metadata transition.
+
+## Rebuild contract
+
+### Rebuild request rules
+
+`POST /sync/rebuild` requires an authenticated request with this exact JSON
+object:
+
+```json
+{
+  "client_id": "ios-device-123",
+  "client_generation": 4,
+  "schema": {
+    "version": 8,
+    "hash": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+  },
+  "scope": "templates_public",
+  "rebuild_id": "0197e83a-f7e8-7e21-92c0-c621732bd5de",
+  "cursor": null,
+  "limit": 1000
+}
+```
+
+The request rules are:
+
+1. `client_id` identifies the authenticated client.
+2. `client_generation` is the exact current positive generation.
+3. `schema` is the exact current immutable schema reference.
+4. `scope` is a currently assigned server scope. A continuation for a scope
+   whose assignment or membership generation was invalidated is stale and
+   cannot continue.
+5. `rebuild_id` is a client-generated canonical UUID that remains immutable
+   for one rebuild attempt. A new attempt uses a new UUID.
+6. `cursor` is `null` for the first request or an opaque rebuild continuation
+   token for every later request. A client-supplied lexical row key is never a
+   valid cursor.
+7. `limit` is an integer in the inclusive range `1` through the server's
+   configured rebuild maximum.
+8. A continuation request uses the page size bound to its token. A different
+   limit is invalid and cannot change page identity during replay.
+
+### Durable immutable staged rebuild snapshot
+
+The first request with `cursor: null` creates or reuses the unexpired rebuild
+session for the authenticated user, client generation, scope, schema hash,
+membership generation, retention generation, stream generation, current
+`accepted_write_epoch`, and supplied
+`rebuild_id`. Session
+creation performs these steps in one transaction:
+
+1. Lock and read the client state, reject `capture_pending`, record the current
+   `accepted_write_epoch`, then open the materialized read snapshot and read the durable materialization
+   progress row first, and set snapshot boundary `B` to that visible
+   generation-start or transaction-end point.
+2. Evaluate the complete authoritative contents of the requested scope from
+   synchronized projections and membership edges visible in that same
+   materialized snapshot through `B`.
+3. Read every staged row from that projection snapshot and calculate its
+   canonical row digest.
+4. Store the rows, typed row identities, row digests, ordering ordinals,
+   snapshot metadata, and final scope digest in a durable staged snapshot.
+5. Assign a server-generated `session_id` bound to the client-supplied
+   `rebuild_id`.
+
+The staged snapshot is immutable. Its row order is the unsigned canonical
+order of `(logical_table_id, typed_primary_key)` and its `next_row_ordinal`
+is a position in that stored order. Every subsequent page reads the staged
+snapshot, never the live scope edges or live application tables.
+
+If any source candidate cannot be represented as an explicit staged row or
+authoritative absence during session creation, the first request fails as a
+whole with `503 temporary_unavailable`. It does not create a usable partial
+session. A later staged-read failure also fails the whole page and does not
+advance page state.
+
+The snapshot boundary is the final incremental transaction-end or
+generation-start position returned by the
+rebuild. Writes, deletes, and membership changes after `B` are not inserted
+into the staged snapshot. They are delivered by normal incremental pull after
+the client presents the final scope cursor. This includes writes that occur
+while the client is applying rebuild pages.
+
+### Rebuild HMAC token bindings and 24-hour expiry
+
+Every rebuild continuation token contains the common authenticated cursor
+bindings plus these rebuild fields:
+
+```text
+kind = rebuild
+token_version
+key_id
+stream_generation
+user_binding
+client_binding
+client_generation
+scope_id
+schema_hash
+membership_generation
+retention_generation
+session_id
+rebuild_id
+snapshot_boundary including position kind
+next_row_ordinal
+page_limit
+accepted_write_epoch
+issued_at
+expires_at
+mac
+```
+
+`snapshot_boundary` is the typed generation-start or transaction-end point. The
+token is HMAC-SHA-256 authenticated over all fields, including the session, rebuild,
+ordinal, page limit, accepted-write epoch, and expiry. The session expires exactly 24 hours after
+creation. Issuing or replaying a page does not extend that expiry.
+
+### Rebuild response rules
+
+An intermediate page has this shape:
+
+```json
+{
+  "scope": "templates_public",
+  "records": [
+    {
+      "table": "templates",
+      "pk": { "id": "e_1" },
+      "row": { "id": "e_1", "name": "Squat" },
+      "row_checksum": {
+        "algorithm": "sha256",
+        "version": 1,
+        "encoding": "hex",
+        "digest": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+      },
+      "server_version": "opaque-row-version"
+    }
+  ],
+  "cursor": "opaque-rebuild-token",
+  "has_more": true
+}
+```
+
+The final page has this shape:
+
+```json
+{
+  "scope": "templates_public",
+  "records": [],
+  "cursor": null,
+  "has_more": false,
+  "final_scope_cursor": "opaque-incremental-token-at-boundary",
+  "checksum": {
+    "algorithm": "sha256",
+    "version": 1,
+    "encoding": "hex",
+    "digest": "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+  }
+}
+```
+
+The response rules are:
+
+- Every `records` entry comes from the immutable stage and has a complete row,
+  typed primary key, row checksum, and opaque server version.
+- An intermediate page has `has_more: true`, a non-null rebuild `cursor`, and
+  neither `final_scope_cursor` nor `checksum`.
+- A final page has `has_more: false`, `cursor: null`, a non-null
+  `final_scope_cursor`, and a non-null `checksum`. The final page can contain
+  records, including the last records in the snapshot.
+- The final `checksum` is computed from the immutable staged snapshot, not
+  from live rows, live edges, or a later query. It covers the exact staged
+  scope contents at `B`.
+- `final_scope_cursor` is an incremental cursor at `B`. It is not installed in
+  server checkpoint state by this response. The client installs it locally
+  only after all pages apply and the snapshot digest verifies.
+- The server does not return a lexical page key, a client-selected checkpoint,
+  or a cursor that depends on current live row order.
+
+### Rebuild token dispatch and expiry
+
+The endpoint first applies its outer request gates. A missing or stale presented
+client generation returns `409 client_generation_expired`, and a noncurrent
+request schema returns `422 schema_mismatch`, before rebuild-token validation.
+After reconnect and schema reconciliation, a request using the current envelope
+and an older authentic continuation reaches token validation.
+
+For a rebuild token under a current request envelope, the server distinguishes
+these cases:
+
+- Expiry, stream-generation change, token-bound client-generation change,
+  token-bound schema change,
+  membership-generation change, retention-lineage change, accepted-write epoch
+  change, or snapshot
+  invalidation returns HTTP `409` with code `rebuild_restart_required`. The
+  client discards the continuation token and starts a new rebuild from
+  `cursor: null`.
+- A malformed token, unsupported token kind or version, unknown key, failed
+  MAC, wrong user binding, wrong client binding, wrong scope binding, or
+  wrong request context returns HTTP `400` with code `invalid_request`.
+- A valid token with a page-size mismatch returns HTTP `400` with code
+  `invalid_request`.
+
+The `409` and `400` paths do not return records, final cursors, or checksums.
+The server does not disclose which authentication or binding check failed.
+
+### Idempotent first, intermediate, and final replay
+
+Rebuild page requests are idempotent and response-loss safe only while the
+session's accepted-write epoch remains current. The epoch is checked before
+stored-page replay:
+
+- Repeating the first request with the same `rebuild_id` and `cursor: null`
+  during the same unexpired session returns the exact stored first page. It
+  does not create a second
+  snapshot or move any checkpoint. An empty snapshot replays its stored final
+  page the same way.
+- Repeating an intermediate request with the same valid continuation token
+  returns the exact stored page for that session, ordinal, and page limit. It
+  does not requery live state or advance the ordinal.
+- Repeating the request that produced the final page returns the exact stored
+  final records, snapshot digest, and final scope cursor. It does not install a
+  checkpoint or recompute the digest.
+- A replay of an earlier valid page is permitted before session expiry and has
+  no server checkpoint effect. The client remains responsible for applying
+  each page once locally.
+- After 24 hours, replay uses the stale-session `409` dispatch. A new null
+  cursor request then creates a new session with a new snapshot boundary.
+
+### Rebuild checkpoint and scope isolation
+
+Rebuild persistence is limited to the rebuild session, its immutable staged
+snapshot, and replay outcomes. A rebuild request never mutates:
+
+- the requested scope's durable incremental checkpoint;
+- any other scope's durable incremental checkpoint;
+- another scope's cursor, retention, membership, or assignment state;
+- the client's scope-set version; or
+- unrelated rebuild sessions.
+
+The final cursor is acknowledged only by a later successful `/sync/pull`
+request that presents it for the rebuilt scope. That later pull can acknowledge
+only the presented cursor for each scope and cannot use the rebuild to advance
+unrelated scope checkpoints.
+
+## Error rules
+
+All protocol errors use this JSON body:
+
+```json
+{
+  "error": {
+    "code": "invalid_request",
+    "message": "request is invalid",
+    "retryable": false
+  }
+}
+```
+
+The status and dispatch table is:
+
+| Condition | HTTP status | Code | Retryable | State effect |
+| --- | ---: | --- | --- | --- |
+| Invalid JSON, required-field or type error, invalid limit, unknown scope, future scope-set version, or forged or misbound token | 400 | `invalid_request` | false | No pull or rebuild state changes |
+| Missing or invalid authenticated identity | 401 | `auth_required` | false | No pull or rebuild state changes |
+| Fresh request does not identify the exact current schema | 422 | `schema_mismatch` | false | No pull or rebuild state changes |
+| Authenticated incremental cursor is stale | 200 | No error body | N/A | Scope is listed in `rebuild`; no cursor acknowledgement |
+| Rebuild session is expired or invalidated by a generation or boundary change | 409 | `rebuild_restart_required` | false | Continuation is discarded; checkpoints remain unchanged |
+| Transient materialization read, staged snapshot creation, or staged page read failure | 503 | `temporary_unavailable` | true | No partial page, cursor, or checkpoint is committed |
+| Accepted push fence lacks exact WAL materialization or activated verified reset-baseline coverage | 503 | `capture_pending` | true | No partial page, cursor, checksum, or checkpoint is committed |
+| Missing projection, digest mismatch, authorization inconsistency, or impossible durable state | 500 | `sync_integrity_failure` | false | No partial page, cursor, or checkpoint is committed; readiness becomes unready |
+| Negotiated protocol version is unsupported | 426 | `upgrade_required` | false | No pull or rebuild state changes |
+
+For a `503`, the adapter can supply its standard retry delay header, but the
+body code and the no-partial-page rule are fixed. Error messages do not expose
+row contents, token contents, or internal authorization details.
+
+## Rejected alternatives
+
+### Apply the limit before per-scope eligibility
+
+Rejected because raw rows from a scope that has already progressed can consume
+the query window and conceal eligible rows from another scope. The contract
+requires complete per-scope eligibility before the global limit.
+
+### Use a global minimum checkpoint and filter later
+
+Rejected because filtering after a limited global query has the same progress
+failure in a different form. The server uses independent per-scope streams and
+a deterministic merge.
+
+### Advance cursors for selected rows before projection validation
+
+Rejected because selection is not delivery. Every selected candidate must have
+an explicit captured outcome, or the whole page fails without cursor
+advancement.
+
+### Hydrate historical effects from live source rows
+
+Rejected because a later live row can differ from the row that produced an
+earlier stream position. Pull uses the projection captured by WAL
+materialization, and rebuild pages use one durable staged snapshot.
+
+### Use a lexical table-and-row page cursor
+
+Rejected because a client-controlled lexical key is not an authenticated
+snapshot position and cannot identify the state used by later pages. Rebuild
+uses HMAC-authenticated row ordinals in an immutable session.
+
+### Recompute the rebuild scope on every page
+
+Rejected because concurrent writes can change membership, row contents, and the
+final digest between pages. One durable snapshot is reused for the session.
+
+### Treat a signed incremental cursor as a rebuild cursor
+
+Rejected because incremental progress and rebuild page position have different
+state, replay, expiry, and boundary requirements. Token kind is authenticated
+and dispatch is endpoint-specific.
+
+### Acknowledge an issued cursor or finalize a rebuild server-side
+
+Rejected because a response can be lost before local apply. Only a later
+client-presented cursor acknowledges progress.
+
+### Advance every client scope at rebuild completion
+
+Rejected because scope checkpoints are independent. Rebuilding one scope has
+no authority to acknowledge another scope or alter its retention safety.
+
+### Deduplicate only by table and primary key
+
+Rejected because it collapses independent scope provenance. The scope is part
+of the typed deduplication key.
+
+## Consequences
+
+Positive consequences:
+
+- Divergent scope checkpoints cannot hide eligible changes behind a global
+  pre-limit window.
+- A cursor proves only explicitly represented delivery, and server checkpoint
+  state reflects only later client acknowledgement.
+- Pull hydration and rebuild pages have a stable source state, making retries
+  and final digest verification meaningful.
+- Rebuild replay is deterministic across process restarts and response loss.
+- Writes after a rebuild boundary remain incremental changes instead of being
+  lost or mixed into the historical snapshot.
+- Scope movement and overlapping local rows preserve independent provenance.
+
+Costs and obligations:
+
+- The server stores rebuild sessions, immutable staged rows, replay metadata,
+  and HMAC key state for at least the 24-hour session lifetime.
+- A hydration or snapshot failure retries the whole page instead of returning
+  a partial page. Clients must retain the presented cursors and rebuild state.
+- Server checkpoint acknowledgement can lag response generation by one client
+  request, so compaction must use the last presented position conservatively.
+- Clients must apply rebuild pages durably, verify the final snapshot digest,
+  and present the final scope cursor in a later pull.
+- Implementations must preserve typed ordering and canonical token bindings
+  across Rust, PostgreSQL, Go, Swift, Kotlin, and React Native boundaries.
+
+## Audit disposition: S-02 through S-05
+
+| Finding | Accepted disposition | Observable proof requirement |
+| --- | --- | --- |
+| S-02, multi-scope pagination can report completion with unread changes | Resolve eligibility independently for every scope, then perform the deterministic starvation-free merge and compute `has_more` from all remaining scope streams | A divergent-checkpoint scenario must consume pages to completion and show that every eligible scope event is delivered |
+| S-03, cursor can advance without a delivered change | Use WAL-captured projections and one read snapshot over durable materialization. Every candidate produces an explicit change outcome or the entire page fails. Issue a scope cursor only through fully accounted progress | A missing-projection, authorization, digest, or concurrent-row case must show no silent omission and no cursor acknowledgement on page failure |
+| S-04, rebuild pagination is live and forgeable | Materialize one durable immutable staged snapshot, bind continuation tokens with HMAC to the session and snapshot, use typed row ordinals, enforce expiry, and dispatch stale separately from forged tokens | A multi-page rebuild with concurrent writes, replay, stale generation, and invalid binding must preserve the snapshot and return the specified statuses |
+| S-05, one rebuild advances unrelated checkpoints | Rebuild writes only its session and staged snapshot. The final scope cursor is acknowledged only by a later pull that presents it, and no unrelated scope state is changed | Rebuilding one scope while another has unread history must leave the other scope checkpoint and subsequent delivery unchanged |

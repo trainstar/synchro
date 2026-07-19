@@ -1,0 +1,600 @@
+---
+title: "ADR 005: Integrity, Authorization, and Portable Seeds"
+description: "Accepted protocol version 3 rules for canonical integrity, client states, database authorization, readiness, portable seeds, and extension installation."
+status: Accepted
+---
+
+# ADR 005: Integrity, Authorization, and Portable Seeds
+
+## Context
+
+Synchro needs one integrity result that independent PostgreSQL, Rust, Go, Swift, Kotlin, and React Native implementations can reproduce. A checksum over implementation-native JSON is not portable, and a small error-detection code combined with a commutative accumulator is not an authoritative state digest. Integrity also depends on strict protocol states, correct version precedence, a sealed database trust boundary, operational readiness that proves capture health, snapshot-consistent portable seeds, and one installation source.
+
+This decision defines those rules for protocol version 3. The rules are normative. They dispose of audit findings S-13, S-14, S-18 through S-20, S-22, S-23, S-27, and S-28 at the contract level, plus the audit observations about SemVer ordering and payload-bearing failure logs. They do not claim that the current implementation already conforms.
+
+## Decision
+
+Protocol version 3 is the only protocol governed by this ADR. A peer that does not support version 3 is rejected through the protocol compatibility dispatch. Version 2 numeric checksums, serializer-derived checksums, raw seed page keys, and permissive state transitions have no compatibility mode in version 3.
+
+The integrity authority is SHA-256 over the canonical typed binary grammar below. Row digests bind the immutable schema hash, logical table identity, primary-key identity, complete authoritative row, and opaque server version. Scope digests bind the schema hash, scope identity, exact cardinality, and the sorted sequence of canonical row identities paired with their row digests.
+
+PostgreSQL objects live in the fixed, nonrelocatable `synchro` schema. Access is default-deny and is split among owner, adapter, seed, monitor, operator, and worker roles. Readiness fails closed. Portable seed export uses one enforced `SERIALIZABLE READ ONLY DEFERRABLE` PostgreSQL transaction, authenticated page tokens, end-to-end digest verification, and a verified SQLite artifact. pgrx-generated SQL is the sole extension installation source, with `0.3.0` as the first extension migration baseline.
+
+## Portable type system and wire JSON
+
+The protocol version 3 portable logical types are:
+
+```text
+string, int, int64, decimal, float, boolean,
+datetime, date, time, json, bytes
+```
+
+`decimal` and `float` are different types. PostgreSQL `numeric` and `decimal` map to portable `decimal`, never to `float`. Portable `float` is IEEE 754 binary64 and is used only for binary floating-point source types.
+
+Every registered relation has exactly one non-null primary-key field. Its portable type is exactly `string`, `int`, or `int64`. Composite, partial, decimal, float, boolean, temporal, JSON, bytes, and nullable primary keys are rejected at registration and whenever registry state is revalidated.
+
+The schema manifest determines the type of every row field. A complete authoritative row contains every synced field exactly once, including the primary-key field, and represents SQL null as JSON `null`. Unknown fields, duplicate fields, omitted fields, and a row primary key that differs from the separate `pk` value are contract violations.
+
+Canonical wire representations are:
+
+| Portable type | Canonical JSON representation |
+| --- | --- |
+| `string` | A JSON string whose decoded value is valid Unicode scalar values. No Unicode normalization is applied. |
+| `int` | A JSON integer number in `[-2147483648, 2147483647]`, with no fraction or exponent. Zero is `0`, never `-0`. |
+| `int64` | A JSON string containing a base-10 integer in `[-9223372036854775808, 9223372036854775807]`. It has no leading `+`, no leading zero except `0`, and no `-0`. |
+| `decimal` | A JSON string containing the canonical exact decimal form defined below. |
+| `float` | A finite JSON number whose canonical text is the RFC 8785 number serialization of its IEEE 754 binary64 value. NaN and infinities are rejected, and negative zero is canonicalized to positive zero. |
+| `boolean` | JSON `true` or `false`. Numeric and string substitutes are rejected. |
+| `datetime` | A JSON string in UTC with exactly microsecond precision: `YYYY-MM-DDTHH:MM:SS.ffffffZ`. Leap seconds and offsets other than `Z` are rejected on the wire. |
+| `date` | A JSON string `YYYY-MM-DD` containing a valid Gregorian date. |
+| `time` | A JSON string with exactly microsecond precision: `HH:MM:SS.ffffff`. Leap seconds and time-zone suffixes are rejected. |
+| `json` | A JSON string whose decoded contents are one complete RFC 8785 canonical JSON value encoded in UTF-8. This distinguishes SQL null from the JSON value `null`. |
+| `bytes` | A JSON string containing RFC 4648 base64url without padding. Noncanonical encodings are rejected. |
+
+Canonical exact decimal text has this grammar:
+
+```text
+decimal = "0" | ["-"] positive-decimal
+positive-decimal = nonzero-digit {digit} ["." {digit} nonzero-digit]
+                 | "0." {digit} nonzero-digit
+nonzero-digit = "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9"
+digit = "0" | nonzero-digit
+```
+
+The decimal has no exponent, leading `+`, leading integer zero, trailing fractional zero, trailing decimal point, or negative zero. Source exponent notation is converted exactly before encoding. For example, the exact values represented by `1.2300`, `123e-2`, and `0.01230e2` all encode as `"1.23"`. Precision and scale constraints declared by the schema are validated before canonicalization. Implementations must use exact decimal arithmetic and must not pass a decimal through binary floating point.
+
+The contents of a portable `json` string must satisfy I-JSON constraints and RFC 8785. Object member names are unique, member sorting and escaping follow RFC 8785, and every nested number is serialized by the RFC 8785 number rule. Equivalent nested spellings such as `1`, `1.0`, and `1e0` therefore have the same canonical JSON bytes. Data requiring precision outside the I-JSON number domain must represent that value as a JSON string. An implementation-native object serializer is not a canonicalization algorithm.
+
+## Immutable schema hash
+
+The schema manifest is canonicalized with RFC 8785 after every semantically
+unordered collection is sorted by its immutable logical ID. The canonical body
+omits its own `schema_hash` and operational values such as generation time. The
+hash input is:
+
+```text
+SHA-256(
+  ASCII("synchro:v3:schema-manifest:v1") || 0x00 ||
+  RFC8785_UTF8(canonical_manifest_without_schema_hash)
+)
+```
+
+The wire `schema_hash` is the resulting 32 octets encoded as exactly 64
+lowercase hexadecimal characters. Schema version, hash, and body are read from
+one immutable manifest record. A live catalog body paired with a stored hash or
+version is invalid.
+
+## Canonical typed binary grammar
+
+All terms below denote octets, not host-language strings or integers. Concatenation is written `||`.
+
+```text
+u8(x)       = one unsigned octet
+u32be(x)    = four-octet unsigned integer, most significant octet first
+u64be(x)    = eight-octet unsigned integer, most significant octet first
+i32be(x)    = four-octet two's-complement integer, most significant octet first
+i64be(x)    = eight-octet two's-complement integer, most significant octet first
+blob(x)     = u64be(octet_length(x)) || x
+text(x)     = blob(UTF-8(x))
+```
+
+Lengths and counts are unsigned. A value that exceeds a protocol or schema limit is rejected before encoding. Text must be valid UTF-8, and no Unicode normalization is performed.
+
+Type tags are fixed:
+
+```text
+0x01 string
+0x02 int
+0x03 int64
+0x04 decimal
+0x05 float
+0x06 boolean
+0x07 datetime
+0x08 date
+0x09 time
+0x0a json
+0x0b bytes
+```
+
+A typed value is:
+
+```text
+typed_value = type_tag || presence || payload
+presence    = 0x00 for SQL null, 0x01 for non-null
+```
+
+For `presence = 0x00`, payload is empty. A primary-key value must use `presence = 0x01`. Any other presence octet is invalid. Non-null payloads are:
+
+| Type | Binary payload |
+| --- | --- |
+| `string` | `text(decoded_string)` |
+| `int` | `i32be(value)` |
+| `int64` | `i64be(value)` |
+| `decimal` | `blob(ASCII(canonical_decimal))` |
+| `float` | Eight octets containing the IEEE 754 binary64 bits, most significant octet first. `-0` uses the `+0` bits. NaN and infinity bit patterns are invalid. |
+| `boolean` | One octet, `0x00` for false or `0x01` for true. |
+| `datetime` | `blob(ASCII(canonical_datetime))` |
+| `date` | `blob(ASCII(canonical_date))` |
+| `time` | `blob(ASCII(canonical_time))` |
+| `json` | `blob(RFC8785_UTF8(decoded_json_text))` |
+| `bytes` | `blob(decoded_bytes)` |
+
+For binary64 conversion, a wire number is rounded to the nearest representable binary64 value with ties to even before its bits are encoded. This is the same value whose text is emitted by the RFC 8785 number rule.
+
+The canonical row body uses immutable stable field IDs from the schema manifest, not mutable field names or database column order:
+
+```text
+row_body =
+  u32be(field_count) ||
+  repeated(text(field_id) || typed_value)
+```
+
+Entries are ordered by unsigned lexicographic comparison of the UTF-8 octets of `field_id`. Every synced field ID appears exactly once. `field_count` equals the manifest's synced field count for that table.
+
+The exact domain prefixes are the listed ASCII bytes followed by one zero octet:
+
+```text
+ROW_ID_DOMAIN     = ASCII("synchro:v3:row-identity:v1") || 0x00
+ROW_DIGEST_DOMAIN = ASCII("synchro:v3:row-digest:v1")   || 0x00
+SCOPE_DOMAIN      = ASCII("synchro:v3:scope-digest:v1") || 0x00
+```
+
+Domain strings are protocol constants. The terminating zero octet is part of each domain. They must not be replaced by implementation labels or omitted.
+
+## Row identity and row digest
+
+`table_id` and `pk_field_id` are immutable logical IDs from the exact schema manifest referenced by the page. A canonical row identity is:
+
+```text
+row_identity =
+  ROW_ID_DOMAIN ||
+  text(table_id) ||
+  text(pk_field_id) ||
+  typed_value
+```
+
+The final `typed_value` uses the manifest's primary-key type tag, `presence = 0x01`, and the canonical payload of the primary-key value.
+
+The schema hash on the wire is exactly 64 lowercase hexadecimal characters representing the 32 raw octets of the immutable manifest SHA-256 hash. `schema_hash_raw` below means those decoded 32 octets.
+
+The row digest is:
+
+```text
+row_digest = SHA-256(
+  ROW_DIGEST_DOMAIN ||
+  schema_hash_raw ||
+  u64be(octet_length(row_identity)) || row_identity ||
+  u64be(octet_length(row_body)) || row_body ||
+  text(server_version)
+)
+```
+
+`server_version` is the exact nonempty opaque wire string encoded as UTF-8
+without interpretation or normalization. This framing binds schema, logical
+table, primary-key field and type, primary-key value, field identities and
+types, nulls, every authoritative row value, and the version used for later
+compare-and-swap. Changing any one of them changes the digest input. The
+primary-key value encoded in `row_body` must equal the value encoded in
+`row_identity`; a mismatch is rejected before hashing.
+
+A receiver recomputes each row digest from the referenced manifest, row payload,
+and accompanying `server_version` before applying that state or advancing any
+cursor. A row-bearing push outcome, pull change, rebuild record, or seed record
+without both its opaque version and matching digest is invalid. A rowless delete
+omits the row digest but retains the deletion-fence server version. A delete
+carrying an authoritative tombstone row carries and verifies the digest of that
+tombstone row and version.
+
+## Scope digest
+
+A scope state contains one entry for each distinct canonical row identity materialized in that scope at the stated boundary. Duplicate row identities are invalid. `cardinality` is the exact number of entries and is encoded as `u64be`.
+
+Rows are ordered by unsigned lexicographic comparison of the complete `row_identity` octet strings. For each ordered row, the paired `row_digest` is exactly 32 raw SHA-256 octets. The scope ID term is `text(scope_id)`.
+
+The authoritative scope digest is the standard streaming SHA-256 result:
+
+```text
+scope_digest = SHA-256(
+  SCOPE_DOMAIN ||
+  schema_hash_raw ||
+  text(scope_id) ||
+  u64be(cardinality) ||
+  ordered(
+    u64be(octet_length(row_identity)) ||
+    row_identity ||
+    row_digest
+  )
+)
+```
+
+An implementation initializes one standard SHA-256 context, updates it with those octets in that order, and finalizes it once. It does not hash each entry into an undocumented tree or combine independently finalized hashes. Implementations may cache verified row digests, maintain an ordered index, or cache a complete scope digest while its inputs are unchanged, but the wire result must equal the formula above.
+
+The scope digest includes row identity and cardinality by construction. It is not MuHash, XOR, CRC32, an additive accumulator, a serializer-native JSON digest, or any other implementation-defined aggregate.
+
+## Wire checksum objects and terminal maps
+
+Every row or scope digest on the protocol version 3 wire uses this exact object shape:
+
+```json
+{
+  "algorithm": "sha256",
+  "version": 1,
+  "encoding": "hex",
+  "digest": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+}
+```
+
+All four fields are required. No additional fields are permitted in version 3. `digest` is exactly 64 lowercase hexadecimal characters. A receiver rejects a different algorithm, version, encoding, length, alphabet, or object shape. Context determines whether the object contains a row digest or a scope digest, and the corresponding domain is mandatory.
+
+The wire field names remain explicit:
+
+- `row_checksum` contains a row-digest object on every row-bearing push outcome, pull change, rebuild record, and seed record.
+- `checksums` contains the terminal pull map from scope ID to scope-digest object.
+- `checksum` contains the final rebuild scope-digest object.
+- Each portable seed scope manifest entry contains its scope-digest object and cardinality.
+
+Terminal rules are exact:
+
+1. A pull page with `has_more = true` omits `checksums` entirely.
+2. A pull page with `has_more = false` includes `checksums`.
+3. The terminal pull map's key set equals the client's complete authoritative active scope set after applying that response's scope updates. It includes active scopes already marked for rebuild and excludes removed scopes. Missing and extra keys are invalid, including on an empty no-change page.
+4. Every terminal pull digest is calculated at the same schema and stream boundary represented by that terminal response. A digest from another page, schema, or boundary is invalid.
+5. A rebuild page with `has_more = true` omits both `final_scope_cursor` and `checksum`.
+6. A rebuild page with `has_more = false` includes both fields. Its `checksum` is for exactly the requested scope and the immutable rebuild snapshot represented by `final_scope_cursor`.
+
+Clients verify row digests before apply. After atomically applying a terminal page, clients recompute each applicable local scope digest. A mismatch invalidates only that scope's resumable state and requires its rebuild. A client does not install the terminal cursor or authoritative digest for a scope until verification succeeds. A missing, malformed, incomplete, or extra terminal map is a whole-page contract failure and advances no cursor.
+
+## Legal client state transitions
+
+The protocol version 3 client states are exactly:
+
+```text
+uninitialized, local_ready, connecting, schema_applying, ready,
+pushing, pulling, rebuilding, backoff, error, stopped
+```
+
+The complete legal adjacency map is:
+
+| From | Allowed `to` states |
+| --- | --- |
+| `uninitialized` | `local_ready`, `error`, `stopped` |
+| `local_ready` | `connecting`, `error`, `stopped` |
+| `connecting` | `schema_applying`, `ready`, `backoff`, `error`, `stopped` |
+| `schema_applying` | `ready`, `rebuilding`, `error`, `stopped` |
+| `ready` | `connecting`, `pushing`, `pulling`, `rebuilding`, `error`, `stopped` |
+| `pushing` | `pushing`, `ready`, `pulling`, `connecting`, `backoff`, `error`, `stopped` |
+| `pulling` | `pulling`, `ready`, `rebuilding`, `connecting`, `backoff`, `error`, `stopped` |
+| `rebuilding` | `rebuilding`, `ready`, `connecting`, `backoff`, `error`, `stopped` |
+| `backoff` | `connecting`, `pushing`, `pulling`, `rebuilding`, `error`, `stopped` |
+| `error` | `local_ready`, `stopped` |
+| `stopped` | `local_ready` |
+
+The `pushing`, `pulling`, and `rebuilding` self-transitions represent another sealed batch or another page. `backoff` returns only to the interrupted operation or to `connecting`. `error -> local_ready` requires an explicit reset or retry action. `stopped -> local_ready` requires an explicit new start and local metadata validation. In particular, `stopped -> pulling`, `error -> ready`, and all unlisted pairs are illegal.
+
+Unknown states and illegal transitions are non-retryable local contract errors. They must not mutate durable queue, cursor, rebuild, or schema state. Parsing two recognized state names is not transition validation.
+
+## SemVer 2.0 precedence
+
+Application and minimum-client versions use exact Semantic Versioning 2.0.0 syntax and precedence. A valid version has `MAJOR.MINOR.PATCH`, optional `-PRERELEASE`, and optional `+BUILD`.
+
+- Major, minor, and patch are nonnegative decimal integers with no leading zero unless the value is zero.
+- A leading `v`, missing component, whitespace, sign, or non-ASCII identifier is invalid.
+- Prerelease and build identifiers are nonempty dot-separated strings of ASCII letters, digits, and hyphen.
+- A numeric prerelease identifier has no leading zero unless it is `0`.
+- Core numbers compare numerically without fixed-width overflow.
+- A release has higher precedence than a prerelease with the same core.
+- Prerelease identifiers compare left to right. Numeric identifiers compare numerically. Numeric identifiers have lower precedence than nonnumeric identifiers. Nonnumeric identifiers compare by ASCII lexical order. If all shared identifiers are equal, the shorter list has lower precedence.
+- Build metadata is ignored for precedence.
+
+Consequently, `1.2.3-beta < 1.2.3`, `1.2.3-beta.2 < 1.2.3-beta.11`, and `1.2.3+one` has the same precedence as `1.2.3+two`. Malformed versions fail closed. Protocol version negotiation remains the separate integer value `3` and must not be inferred from SemVer.
+
+## PostgreSQL schema and authorization
+
+The extension is nonrelocatable and installs all extension-owned functions, tables, sequences, and types in the fixed `synchro` schema. Every internal and adapter SQL reference is schema-qualified. Neither `search_path` nor the `public` schema selects a Synchro object or a registered application relation.
+
+The fixed group roles are:
+
+| Role | Authority |
+| --- | --- |
+| `synchro_owner` | NOLOGIN owner of the extension schema and objects. It is never used by an application or runtime connection. |
+| `synchro_adapter` | Executes only canonical runtime contract, schema, and sanitized readiness functions. It is the only runtime role allowed to invoke identity-bearing connect, push, pull, and rebuild entry points. |
+| `synchro_seed` | Executes only schema-manifest and portable-seed export functions. It cannot invoke identity-bearing sync, debug, registry, compaction, or recovery functions. |
+| `synchro_monitor` | Executes only sanitized and detailed health functions. It has no direct metadata-table access and no sync or seed execution authority. |
+| `synchro_operator` | Executes bounded registry, shared-scope, backfill, compaction, quarantine recovery, stream-reset, and operator-debug functions. It cannot invoke identity-bearing runtime functions. |
+| `synchro_worker` | NOLOGIN group role containing only the SQL object privileges required for WAL consumption and capture materialization. It has no client-facing function grants. |
+
+All six group roles are `NOLOGIN`, `NOSUPERUSER`, `NOCREATEDB`,
+`NOCREATEROLE`, `NOBYPASSRLS`, and `NOREPLICATION`. Deployment adapter, seed,
+monitor, and operator login principals are members of exactly their required
+group role. No runtime group or login is a member of `synchro_owner` or another
+runtime group.
+
+The worker uses one dedicated deployment login principal with `LOGIN`,
+`REPLICATION`, `NOSUPERUSER`, `NOCREATEDB`, `NOCREATEROLE`, `NOBYPASSRLS`, and
+`NOINHERIT`. It is a member only of `synchro_worker` and uses explicit `SET ROLE
+synchro_worker` for its SQL object access. Its own replication attribute
+authorizes logical replication because PostgreSQL does not inherit role
+attributes through membership. No other login principal has `REPLICATION`.
+
+The worker credential is provisioned outside the extension, stored outside the
+database and repository, rotated by deployment tooling, and restricted by
+`pg_hba.conf` to the configured database, expected host or local transport, and
+SCRAM-SHA-256 or certificate authentication. Readiness verifies the configured
+worker login OID and that it remains the sole runtime replication principal.
+
+The installation applies all of these default-deny rules:
+
+```sql
+REVOKE ALL ON SCHEMA synchro FROM PUBLIC;
+REVOKE ALL ON ALL TABLES IN SCHEMA synchro FROM PUBLIC;
+REVOKE ALL ON ALL SEQUENCES IN SCHEMA synchro FROM PUBLIC;
+REVOKE EXECUTE ON ALL FUNCTIONS IN SCHEMA synchro FROM PUBLIC;
+ALTER DEFAULT PRIVILEGES FOR ROLE synchro_owner IN SCHEMA synchro
+  REVOKE ALL ON TABLES FROM PUBLIC;
+ALTER DEFAULT PRIVILEGES FOR ROLE synchro_owner IN SCHEMA synchro
+  REVOKE ALL ON SEQUENCES FROM PUBLIC;
+ALTER DEFAULT PRIVILEGES FOR ROLE synchro_owner IN SCHEMA synchro
+  REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC;
+ALTER DEFAULT PRIVILEGES FOR ROLE synchro_owner IN SCHEMA synchro
+  REVOKE USAGE ON TYPES FROM PUBLIC;
+```
+
+The generated installation SQL explicitly revokes `PUBLIC` usage from every extension-owned type, then grants `USAGE` on `synchro`, type usage where required, and `EXECUTE` on each allowed function signature to the corresponding role. It does not use `GRANT EXECUTE ON ALL FUNCTIONS` for a runtime role. Tables and sequences remain inaccessible directly to adapter, seed, and monitor roles.
+
+Privileged functions are owned by `synchro_owner`, use a fixed safe function `search_path` of `pg_catalog, synchro`, resolve application relations by validated schema-qualified identity, and use parameterized values. Required application-relation privileges and RLS policies are granted explicitly during controlled registration. Registration fails closed when those privileges, policies, or relation identities are not valid.
+
+## Fail-closed readiness
+
+Readiness extends the capture requirements in ADR 001. A PostgreSQL ping is liveness only. The adapter reports ready only from the canonical extension readiness result for its configured database.
+
+Each detailed readiness check has exactly one state: `ok`, `failed`, or `unknown`. Overall status is `ready` only when every required check is `ok`. `failed`, `unknown`, query error, absent state, or inconsistent state makes the result `unready`.
+
+Required checks are:
+
+- the adapter is connected to the configured database containing the expected `synchro_pg` extension, SQL contract, and protocol version 3;
+- the current registry and schema generations are durable and valid;
+- the worker has applied the current registry generation;
+- the publication exists and contains exactly the registered schema-qualified relations;
+- the logical replication slot exists, uses the expected plugin and database, and is usable by the configured worker;
+- the configured worker is running against this database;
+- no blocking poison transaction or relation drift exists;
+- durable materialization progress and slot acknowledgement form the required contiguous order;
+- worker heartbeat age is known and no greater than a configured finite positive maximum;
+- WAL lag bytes and oldest-unmaterialized-commit age are both known and no greater than configured finite positive maxima.
+
+Heartbeat, byte-lag, and time-lag maxima are mandatory. Zero, negative, absent, non-finite, or unparseable limits are invalid configuration and make readiness unready. A missing lag observation is not interpreted as zero.
+
+Detailed health returns bounded reason codes and nonnegative observations such as heartbeat age, lag bytes, and lag seconds to `synchro_monitor` and `synchro_operator`. It does not return row data, primary keys, user or client identifiers, scope instances, mutation payloads, tokens, secrets, raw WAL, SQL text, or unbounded database errors. An unauthenticated HTTP readiness route returns only a generic ready response or a generic `503` response. It does not expose the detailed check map.
+
+## Logging and failure-state redaction
+
+Logs, metrics labels, traces, readiness output, and durable quarantine error text must not contain synced row values or identity payloads. Prohibited data includes row bodies, decoded WAL tuples, primary-key values, record IDs, user IDs, client IDs, scope instance IDs, mutation bodies, cursor or page tokens, credentials, and raw request bodies.
+
+Permitted operational fields are bounded reason codes, operation class, stable low-cardinality logical relation ID, source commit LSN and event ordinal, registry generation, counts, durations, and an independently generated request correlation ID. Quarantine state stores only the source coordinates and bounded metadata needed to block and retry the same event. It does not copy the row payload. Errors are classified before persistence, and unbounded downstream error strings are not stored or logged.
+
+## Snapshot-bound portable seed export
+
+Portable seeds are trusted build artifacts for explicitly declared portable shared scopes. They never contain auth-scoped user data, never accept a user JWT, and never create a second runtime sync mode.
+
+All PostgreSQL reads for one seed artifact occur on one physical connection in one transaction started as:
+
+```sql
+BEGIN ISOLATION LEVEL SERIALIZABLE READ ONLY DEFERRABLE;
+```
+
+The first authoritative read loads the durable WAL materialization progress row.
+Because the worker commits commit-ordered synchronized projections, dependency
+projections, membership, effects, and that progress row atomically, the
+transaction snapshot contains exactly the materialized state through the
+visible generation-start or transaction-end boundary. The schema manifest,
+portable-scope declaration set, registry and membership generations, rows, row
+digests, scope digests, cardinalities, stream boundary, retention state, and
+continuation receipts all come from that projected state in the one snapshot.
+Seed export never reads live application relations. The seed functions verify
+`serializable`, `transaction_read_only = on`, and `transaction_deferrable = on`
+on every call. The first manifest call creates transaction-local export state.
+Every page call must present that export identity. A call outside that
+transaction, on another connection, after transaction end, or under weaker
+transaction characteristics is rejected.
+
+The exporter does not use multiple transactions, an exported snapshot reopened later, live keyset pagination, or a fresh manifest query after paging. Concurrent commits after the snapshot is selected are invisible to every page and are delivered later through normal authenticated incremental sync.
+
+### Seed page token
+
+Every seed page record contains the logical table ID, typed primary key,
+complete authoritative row, opaque `server_version`, and `row_checksum` bound
+to that version. A seed record without its version cannot support later offline
+update or delete and is invalid.
+
+Seed page tokens are HMAC-SHA-256 authenticated and opaque to the exporter. Their wire form is:
+
+```text
+sp1.base64url(rfc8785_payload).base64url(mac)
+```
+
+Both base64url segments use RFC 4648 without padding. The MAC is the full 32-octet HMAC-SHA-256 result over:
+
+```text
+ASCII("synchro:v3:seed-page:v1") || 0x00 || rfc8785_payload
+```
+
+The payload contains exactly these bindings:
+
+```text
+kind = "portable_seed_page"
+version = 1
+key_id
+export_id
+transaction_nonce
+export_manifest_hash
+schema_hash
+scope_id
+registry_generation
+membership_generation
+retention_generation
+stream_generation
+snapshot_boundary = generation_start or transaction_end(commit_lsn)
+next_row_ordinal
+page_limit
+```
+
+The export manifest hash binds the exact portable scope set, each scope cardinality and digest, and the continuation boundary. Generation and ordinal integers use canonical unsigned decimal strings in the token JSON so they cannot lose precision. `transaction_nonce` is random for the transaction and is retained only in transaction-local server state. Page-token HMAC keys are purpose-specific and are not reused for runtime cursors, seed continuation receipts, schema hashes, or row and scope digests.
+
+`export_manifest_hash` is 64 lowercase hexadecimal characters computed as:
+
+```text
+SHA-256(
+  ASCII("synchro:v3:seed-export-manifest:v1") || 0x00 ||
+  RFC8785_UTF8(export_manifest_without_hash_or_page_tokens)
+)
+```
+
+`export_id` is a canonical lowercase UUID. `transaction_nonce` is base64url without padding for 32 random octets. `key_id`, hashes, scope and stream identities, boundary fields, generations, cardinalities, digests, and limits in the manifest are all covered by this hash.
+
+The server verifies the MAC in constant time and verifies every binding against transaction-local export state. A changed, cross-scope, cross-export, cross-transaction, or post-transaction token is invalid. Replaying an unchanged page token in the same export transaction returns the same ordered page. The next token is based on the next row ordinal in unsigned canonical row-identity order, not a client-supplied table name or primary key.
+
+### Seed continuation receipt
+
+A portable scope stores a seed continuation receipt rather than an incremental cursor. Its wire form is:
+
+```text
+sc1.base64url(rfc8785_payload).base64url(mac)
+```
+
+The full 32-octet HMAC-SHA-256 MAC covers:
+
+```text
+ASCII("synchro:v3:seed-continuation:v1") || 0x00 || rfc8785_payload
+```
+
+Both receipt segments use RFC 4648 base64url without padding. The receipt payload contains exactly:
+
+```text
+kind = "portable_seed_continuation"
+version = 1
+key_id
+export_id
+export_manifest_hash
+schema_hash
+scope_id
+registry_generation
+membership_generation
+retention_generation
+stream_generation
+snapshot_boundary = generation_start or transaction_end(commit_lsn)
+cardinality
+checksum = scope-digest object
+issued_at
+```
+
+It contains no user or client binding. Generation, boundary, and cardinality integers use canonical unsigned decimal strings, and `issued_at` uses canonical `datetime`. The receipt key is purpose-specific and different from page-token and runtime-cursor keys. A receipt is accepted only by authenticated `connect`, which verifies its MAC in constant time and revalidates every current schema, assignment, generation, retention, boundary, cardinality, and digest condition before issuing a user-bound and client-bound incremental cursor.
+
+### Seed verification and artifact publication
+
+The exporter must verify all of the following before publishing an artifact:
+
+1. The RFC 8785 schema manifest body matches its declared SHA-256 schema hash.
+2. The portable scope set is exact and contains no undeclared, missing, or duplicate scope.
+3. Every page is bound to this export, schema, scope, generations, boundary, and expected next ordinal.
+4. Every row has a supported table and field set, a matching primary key, an opaque server version, and a row digest that recomputes over that version under the canonical typed grammar.
+5. Row identities are strictly ordered with no duplicate or gap in page ordinals.
+6. Each observed scope cardinality and recomputed standard streaming scope digest matches the export manifest.
+7. Each seed continuation receipt matches the same schema, scope, generations, stream boundary, cardinality, and scope digest.
+8. The SQLite output is built atomically with server-apply capture suppressed, an empty pending queue, complete provenance, every seeded row's verified opaque server version installed as its local compare-and-swap base, verified schema metadata, and no partially installed scope cursor.
+9. A read-only reopen, SQLite `PRAGMA integrity_check`, local row-digest recomputation, local scope-digest recomputation, and metadata comparison all succeed.
+10. The finalized database has no required WAL or shared-memory sidecar, and the release pipeline records SHA-256 of the final artifact bytes in its evidence manifest.
+
+Generation writes to a temporary output and atomically publishes it only after every check succeeds. Any mismatch aborts both transactions, removes the temporary output, and produces no seed artifact. `snapshot_complete` is set only in the verified final artifact.
+
+The seed stores portable seed continuation receipts, not ordinary client cursors. Verified row versions are installed with the seed so offline update and delete capture can retain a real compare-and-swap base; a version is row metadata, not scope authority or a pull cursor. On first authenticated `connect`, the server validates each receipt, confirms that the authenticated client is currently assigned that still-portable scope, confirms schema and generation compatibility, and returns a normal user-bound and client-bound protocol version 3 scope cursor at the seed boundary. Until that succeeds, the client does not use seeded continuation state for pull. For an unassigned scope, the client removes seed provenance and unchanged zero-provenance cache rows, but preserves every pending authored mutation and its local row state for normal server authorization and explicit outcome. A stale or unverifiable assigned scope is rebuilt only after pending intent follows normal push-first scheduling. Seeded rows remain a cache and never grant authorization.
+
+## Installation and migration baseline
+
+`synchro_pg` is nonrelocatable and its control metadata fixes installation to the `synchro` schema. pgrx annotations and `extension_sql!` declarations in the Rust extension source are the sole authored source for extension DDL, functions, revokes, grants, comments, and extension membership.
+
+The packaged `synchro_pg--0.3.0.sql` is generated from that pgrx source during the release build. A generated SQL file may be tracked only when CI regenerates it byte for byte and rejects drift. A hand-maintained or stale parallel SQL definition is not shipped and is not accepted as an installation path.
+
+Version `0.3.0` is the first supported extension migration baseline. Installation is proven by creating a clean PostgreSQL 18 database, provisioning or validating the fixed roles, installing the packaged extension, checking ownership and grants, and exercising the canonical contract and readiness functions as non-superuser runtime roles. The deleted non-extension architecture and experimental pre-`0.3.0` extension state have no in-place `ALTER EXTENSION UPDATE` path. They require controlled export, clean installation, and rebuild. Future extension versions require explicit generated and reviewed upgrade scripts from the `0.3.0` baseline. `CREATE TABLE IF NOT EXISTS` is not a substitute for a migration.
+
+## Rejected alternatives
+
+- CRC32 is rejected as an authoritative row or scope integrity primitive because it is an error-detection code with an insufficient collision domain.
+- XOR, additive accumulation, custom arithmetic, and cancellation-prone aggregates are rejected because they do not securely bind the exact set and cardinality.
+- MuHash and undocumented hash trees are rejected as the wire authority. They would create another algorithm and cross-language implementation surface instead of the specified standard streaming SHA-256 result.
+- Hashing implementation-native JSON, PostgreSQL JSONB text, or language-specific object serialization is rejected because key, number, escaping, null, and binary representations can diverge.
+- Treating exact decimal as binary float is rejected because it loses precision. Emitting full-width `int64` as a JSON number is rejected because common JSON runtimes cannot preserve every value.
+- Composite or nonportable primary keys are rejected in version 3 because they expand row identity and cross-client storage semantics beyond the fixed contract.
+- Partial terminal checksum maps and presence-only checksum validation are rejected because they can mark an unverified scope healthy.
+- Permissive state parsing is rejected because two recognized names do not prove a legal transition.
+- Stripping prerelease data, accepting a leading `v`, or comparing only three numeric SemVer components is rejected because it reverses valid SemVer precedence.
+- `PUBLIC` execution, a shared runtime role, broad table grants, and `search_path` resolution are rejected because identity-bearing functions and metadata form a database trust boundary.
+- Database-ping readiness, unknown lag interpreted as zero, and absent or infinite lag limits are rejected because they can report healthy while capture cannot make safe progress.
+- Payload-bearing logs and failure rows are rejected because operational diagnostics do not require row or identity data.
+- Multiple seed transactions, repeatable-read live pagination, unsigned page keys, client-supplied page identities, and unverified SQLite output are rejected because they can combine different source states or publish incomplete artifacts.
+- Embedding an unbound runtime cursor in a portable seed is rejected because authorization and client assignment do not exist at seed-build time.
+- Hand-maintained installation SQL, opportunistic `IF NOT EXISTS` upgrades, and an implied upgrade from pre-baseline architectures are rejected because they create divergent schemas and unverifiable migrations.
+
+## Consequences
+
+- Every implementation must provide the same typed encoder, strict wire validator, and fixed SHA-256 vectors. Cross-language vectors include every type, null, boundary integer, decimal normalization, binary64 edge case, nested JSON number, Unicode string, row-identity ordering, and empty and nonempty scope.
+- Decimal values remain exact and normally require a decimal library or canonical text storage on clients. JSON data outside the I-JSON number domain must encode high-precision values as strings.
+- Scope verification is a standard ordered streaming hash. Implementations may index and cache inputs, but they cannot substitute a different wire aggregate for speed.
+- Strict terminal maps and transition validation turn malformed or incomplete responses into explicit failures before cursor advancement.
+- Database deployment requires fixed roles, explicit application-relation grants and RLS policy, generated revokes and grants, and non-superuser authorization tests.
+- Readiness can remain unready during worker startup, stale heartbeat, unknown lag, registry drift, or poison recovery. This is intentional fail-closed behavior.
+- Deferrable serializable seed export can wait for a safe snapshot and holds one transaction for the export duration. Export limits and operational scheduling must account for that cost.
+- Portable seeds are independently verified caches. They become resumable only after authenticated assignment validation issues client-bound cursors.
+- Existing version 2 checksums, seed cursors, public-schema installs, stale SQL, and permissive SemVer or state behavior are not accepted by the version 3 release.
+
+## Required negative controls
+
+Release evidence must demonstrate at least these negative controls:
+
+- changing schema, table ID, key field, key type, key value, field type, null state, row value, server version, scope ID, row pairing, or cardinality changes or invalidates the expected digest;
+- decimal values do not pass through binary64, `int64` boundaries round trip, and decimal, float, int, and int64 remain type-distinct;
+- reordered JSON object members converge, while invalid nested number handling, duplicate members, and implementation-native serialization are rejected;
+- CRC32, XOR, additive, constant-digest, missing-row, duplicate-row, omitted-scope, and extra-scope mutants fail;
+- every unlisted state transition, including `stopped -> pulling`, is rejected without durable state mutation;
+- prerelease precedence, numeric prerelease ordering, build metadata, malformed versions, and a leading `v` match SemVer 2.0.0 exactly;
+- `PUBLIC` and each wrong runtime role cannot execute protected functions or read metadata, while each intended role can perform only its granted capability;
+- missing worker, stale heartbeat, poison state, invalid progress, unknown lag, exceeded lag, and invalid finite limits each make readiness unready without exposing detailed public state;
+- canary row and identity values never appear in logs, traces, health output, or quarantine error text;
+- concurrent source writes cannot alter later pages of one seed export, and modified, replayed-outside-transaction, cross-scope, and cross-export page tokens are rejected;
+- a missing row, altered row, missing or stale server version, wrong digest, incomplete page sequence, stale receipt, corrupt SQLite file, or nonempty pending queue prevents artifact publication or seed continuation; and
+- stale or hand-edited SQL fails regeneration checks, while a clean PostgreSQL 18 install from the packaged pgrx-generated `0.3.0` SQL passes ownership and role checks.
+
+## Audit disposition
+
+| Finding | Normative disposition |
+| --- | --- |
+| S-13 | Canonical typed row bytes, SHA-256 row binding, and sorted cardinality-bound scope SHA-256 replace CRC32, XOR, and native JSON serialization. |
+| S-14 | Structured row digests, complete terminal maps, strict verification, and the complete legal client transition matrix reject invalid integrity and state combinations. Mutation outcome combinations are governed by ADR 002. |
+| S-18 | Conformance fixtures must contain source values and independently computed canonical digests. Decorative checksum values and decoder-only success are not evidence. |
+| S-19 | Semantic derivation, complete maps, cross-language vectors, and demonstrated mutants replace field-presence and self-derived coverage claims. |
+| S-20 | The standard streaming algorithm and finite operational limits provide one measurable contract; executable budgets and evidence must exercise it. |
+| S-22 | Integrity, authorization, readiness, seed, clean-install, and SQL-generation checks are mandatory release evidence for every published artifact. |
+| S-23 | The fixed `synchro` schema, `PUBLIC` revocation, exact function grants, and six distinct least-privilege roles seal the database trust boundary. |
+| S-27 | One enforced deferrable serializable snapshot, transaction-bound HMAC page tokens, full digest verification, and authenticated continuation replace independent live seed queries. |
+| S-28 | pgrx-generated SQL is the sole installation source, stale parallel SQL is excluded, and `0.3.0` is the clean extension migration baseline. |
+
+The lower-severity SemVer and logging findings are disposed by exact SemVer 2.0.0 precedence and the prohibition on row and identity payloads in operational output. Implementation remediation and independent verification remain required before any release-readiness claim.

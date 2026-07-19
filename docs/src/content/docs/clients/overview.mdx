@@ -68,8 +68,8 @@ Current seed rules:
 
 - the generator may include schema plus explicitly server-declared portable scopes
 - if no portable scopes are declared, the generator produces schema-only output
-- the SDKs keep seeded portable rows after login
-- the first authenticated sync continues from the seeded continuation metadata instead of wiping the DB
+- the SDKs keep rows for assigned valid portable scopes; unassigned scopes lose seed provenance and only unchanged cache rows while pending authored intent and application-visible local row state remain for explicit server outcome
+- first authenticated connect validates each seed receipt before issuing a user-bound and client-bound runtime cursor; stale assigned scopes lose only continuation state and rebuild after push-first intent reconciliation
 - auth-scoped user data still arrives through normal sync after login
 
 ## React Native on iOS

@@ -1,287 +1,522 @@
 ---
 title: Invariants
-description: Rules that must always hold if Synchro is correct.
+description: Authoritative, falsifiable correctness rules for Synchro.
 ---
 
 # Invariants
 
 ## Purpose
 
-This document defines the rules that must always hold if Synchro is correct.
-
-These invariants are the basis for:
-
-- conformance testing
-- implementation audits
-- debugging
-- performance validation
+This catalog defines the observable conditions that every conforming Synchro protocol version 3 implementation MUST satisfy.
 
 ## Authority
 
-If implementation behavior conflicts with these invariants, the implementation is wrong unless the invariant is deliberately changed.
+`MUST` and `MUST NOT` are normative. Failing a `MUST`, observing behavior forbidden by a `MUST NOT`, or accepting an invalid state identified below is a conformance violation. The Accepted ADRs define the exact shapes, bindings, ordering rules, matrices, and dispatch behavior referenced here and MUST NOT be weakened by an implementation-specific interpretation.
+
+[ADR 001]: ../architecture/decisions/001-wal-change-stream/
+[ADR 002]: ../architecture/decisions/002-mutation-idempotency-and-conflicts/
+[ADR 003]: ../architecture/decisions/003-pull-cursor-and-rebuild/
+[ADR 004]: ../architecture/decisions/004-membership-schema-and-retention/
+[ADR 005]: ../architecture/decisions/005-integrity-authorization-and-seeds/
+
+For v0.3.0, every level-three invariant heading in this document maps to
+exactly one requirement record, and every requirement maps through exactly one
+normative reference to a level-three invariant here. Supplemental references do
+not replace that binding. Orphaned, duplicate, or non-invariant mappings are
+invalid.
 
 ## Protocol Invariants
 
 ### Canonical Time Format
 
-All wire timestamps use RFC 3339 in UTC.
+Every wire timestamp MUST use the canonical RFC 3339 UTC representation assigned to its field, including the exact microsecond `Z` form for portable `datetime`. Emitting or accepting a non-UTC or noncanonical timestamp is a violation. The field representations are defined under Portable type system and wire JSON in [ADR 005].
+
+### Portable Wire Integer Range
+
+Every protocol-envelope JSON integer MUST remain in the exact portable range `-9007199254740991..9007199254740991`, and every field declared nonnegative or positive MUST satisfy that narrower range. Server counter allocation MUST fail before overflow. Emitting, accepting, rounding, wrapping, or sign-changing a value outside its range is a violation of the protocol integer contract; opaque-token decimal-string counters are not envelope integers.
 
 ### Opaque Cursor Invariant
 
-Clients must treat scope cursors as opaque values.
-
-No client may infer ordering or meaning from cursor encoding.
-
-`null` is reserved for no usable resumable state.
-
-Any non-null cursor is a valid server-issued resume token.
+Clients MUST preserve each non-null server-issued cursor byte-for-byte and MUST NOT parse, order, alter, or assign meaning to its encoding. `null` MUST mean no usable resumable state, and a server MUST authenticate every non-null token before use. Client reinterpretation or server acceptance of a forged or misbound token is a violation under the cursor rules in [ADR 003].
 
 ### Opaque Server Version Invariant
 
-Clients must treat `server_version` as opaque.
-
-No client may sort, increment, or inspect it semantically.
+`server_version` MUST be a nonempty server-generated equality token. Clients and adapters MUST NOT parse, sort, increment, timestamp-compare, or generate it. Any such operation, or any server version derived from client data, is a violation of the version rules in [ADR 001] and [ADR 002].
 
 ### Scope Assignment Authority
 
-The server is authoritative for scope assignment.
-
-Clients may cache scope assignment state but may not invent scope instances locally.
+Only the server MUST determine the authoritative scope set for an authenticated client. A client-authored scope instance or replication predicate MUST be rejected, and accepting one is a violation of the assignment rules in [ADR 003] and [ADR 004].
 
 ### Scope Set Version Monotonicity
 
-`scope_set_version` must only move forward when the client’s authoritative assigned scope set changes.
+`scope_set_version` MUST advance strictly when, and only when, the client's authoritative assigned scope set changes. Reusing a version for a different set, moving backward, or advancing for an unchanged set is a violation of Normal scope movement in [ADR 003].
 
 ### Schema Authority
 
-The server is authoritative for schema compatibility decisions and schema action responses.
+The server MUST select schema compatibility and the resulting action from the immutable schema lineage, and clients MUST execute that action without substituting a local compatibility decision. The fresh sentinel MUST be accepted only for a client identity with no prior generation or installed schema; a continuing client cannot use it to bypass `unsupported` or explicit reset. Continuing normal sync after `unsupported`, accepting a continuing-client fresh sentinel, or choosing a different action is a violation of Protocol 3 Schema Dispatch in [ADR 004].
 
-## Data Correctness Invariants
+### Canonical Operation Vocabulary
+
+Push MUST accept only `insert`, `update`, and `delete`; pull MUST emit only `upsert` and `delete`. Accepting push `create`, push `upsert`, an implicit resurrection, or any other operation is a violation of Push vocabulary in [ADR 002].
+
+## Mutation And Data Correctness Invariants
 
 ### Local SQL Is The App Surface
 
-The application reads and writes local SQLite.
-
-The sync engine must not require the app to use a separate write path for synced CRUD.
+Applications MUST be able to perform every synced CRUD operation by reading and writing local SQLite. Requiring a separate application write API for any registered synced table is a violation of the native client boundary defined by [ADR 002].
 
 ### Synced CRUD Authority
 
-Row-level synced CRUD semantics are defined by Synchro, not by app-specific transport contracts.
+Synchro MUST define and execute create, update, and delete synchronization for every registered table through its canonical mutation contract. Delegating those semantics to an application-specific transport contract is a violation of the operation and outcome rules in [ADR 002].
 
 ### No Silent Mutation Loss
 
-A local mutation must never disappear silently.
-
-It must end in one of these states:
-
-- pending
-- accepted
-- rejected with inspectable reason
+Every captured local mutation MUST remain durably pending or reach exactly one durable accepted, server-rejected, `superseded_before_send`, `cancelled_before_send`, or `blocked_by_predecessor` outcome. The three local outcomes MUST remain inspectable and linked to the normalized or predecessor intent. Removing intent without one of those states or explicit client policy is a violation of the queue and outcome rules in [ADR 002] and [ADR 004].
 
 ### Canonical Server Outcome
 
-When the server accepts or rejects a mutation with authoritative row state, that server state is authoritative.
-
-Clients must reconcile to it.
+When a mutation outcome contains an authoritative row state or `server_version`, the client MUST reconcile its canonical local base to that state while preserving any later local intent. Marking the mutation terminal while retaining a conflicting canonical base or version is a violation of Complete outcome partition in [ADR 002].
 
 ### No Duplicate Local Intent
 
-A local user action should not be duplicated by sync replay.
-
-Read-your-own-write behavior must not produce double-apply of the same logical mutation.
+One logical local action MUST create one stable mutation identity and MUST NOT be applied or enqueued again because of request replay, response replay, or authoritative echo delivery. A duplicate queue entry or duplicate local transition is a violation of Exact replay in [ADR 002].
 
 ### No Silent Server Apply Echo Loop
 
-When clients apply server-originated state, local change capture must not re-enqueue it as new client intent.
+Applying pull, rebuild, seed, or push-response state MUST suppress local change capture for that server-originated apply. Any new client mutation caused solely by applying authoritative state is a violation of the client apply boundary in [ADR 002] and [ADR 005].
 
 ### Accepted Writes Advance Canonical Row Version
 
-When the server accepts a row mutation on a table with `updated_at`, it must advance the authoritative row version stored in that row.
-
-For accepted `insert` and `update` mutations, the persisted row version must come from `client_version`, not from a client-supplied `updated_at` column and not from leaving the prior row version unchanged.
+Every accepted authoritative row transition MUST allocate a new opaque server-generated version through the version-fence path. The version MUST NOT come from `client_version`, a writable `updated_at` value, or an unchanged prior version. Observing any such ownership or reuse is a violation of Opaque server versions and atomic compare-and-swap in [ADR 002].
 
 ### No Synthetic Cleanup Tombstones
 
-SDK-owned cleanup for scope loss, rebuild pruning, or equivalent local provenance maintenance must not synthesize a new local delete tombstone.
+Scope removal and rebuild pruning MUST remove stale local provenance and unjustified materialization without enqueuing a delete unless the server supplied an authoritative tombstone. A cleanup-created mutation or invented tombstone is a violation of Normal scope movement in [ADR 003].
 
-If the server sends an authoritative tombstone row, clients may preserve that canonical row state during incremental apply.
+### Exact Batch Replay
 
-If cleanup is only removing stale local materialization with no authoritative tombstone from the server, the client removes the row locally instead of creating a new delete mutation.
+A completed batch replay with the same scoped identity and fingerprint MUST return the original HTTP status and exact canonical response without executing mutation work; a different fingerprint MUST return `409 idempotency_conflict` without mutation work. Any changed response field or repeated side effect is a violation of Exact replay in [ADR 002].
+
+### Mutation Replay Across Batches
+
+When a mutation identity appears in a different new batch, an equal mutation fingerprint MUST contribute its exact stored outcome without re-execution, and a different fingerprint MUST fail the whole request with `409 idempotency_conflict`. Reclassifying or reapplying that mutation is a violation of Exact replay in [ADR 002].
+
+### Idempotency Ledger Retention
+
+Batch and mutation ledger entries MUST NOT expire because of age, inactivity, schema change, cursor retention, or compaction. Deletion is permitted only after the permanent marker for an irreversible client retirement is durable, so deletion or client ID reuse outside that path is a violation of Ledger retention and irreversible client retirement in [ADR 002].
+
+### Atomic Push Durability
+
+A first push execution MUST commit its batch response, every mutation outcome, every accepted source write, every server-version transition, and every write fence in one database transaction, or roll all of them back. A retryable operational response beside any committed subset is a violation of First-execution transaction boundary in [ADR 002].
+
+### Complete Mutation Outcome Partition
+
+An HTTP 200 first execution MUST place every requested mutation exactly once in `accepted` or `rejected`, preserve request-relative order within each array, and use only the statuses and required fields defined by [ADR 002]. An omitted, duplicated, cross-listed, or retryable per-mutation outcome is a violation of Complete outcome partition.
+
+### Mutation Outcome Schema Binding
+
+Every mutation outcome MUST carry the exact immutable `outcome_schema` used for classification and row checksum encoding. First execution uses the current request schema; exact and cross-batch replay preserve the original stored binding. A client MUST verify historical rows under that manifest and MUST NOT apply an unsafe historical row as current-schema state. Missing, rewritten, unavailable, or checksum-inconsistent binding, or loss of later local intent during historical reconciliation, is a violation of Exact replay and Complete outcome partition in [ADR 002].
+
+### Atomic Version Compare And Swap
+
+Update and delete MUST lock the row and row-version identity, verify byte-for-byte `base_version` equality, and perform the source transition and version-fence transition atomically; insert MUST atomically reserve an absent row identity. An unlocked check followed by a write, a write after a failed comparison, or two successful reservations is a violation of Opaque server versions and atomic compare-and-swap in [ADR 002].
+
+### Concurrent Update Delete Conservation
+
+Of concurrent update and delete attempts using the same current `base_version`, at most one MUST apply and every loser MUST receive the current authoritative conflict outcome. Two successes, a missing outcome, or loss of the winning transition is a violation of the complete operation and row-state matrix in [ADR 002].
+
+### Client Time Has No Conflict Authority
+
+`client_version` MUST remain a diagnostic RFC 3339 UTC timestamp and MUST NOT affect conflict choice, row version, source `updated_at`, or write order. Different outcomes caused only by equal, past, or future client time are a violation of Exact mutation shapes in [ADR 002].
+
+### Schema Incompatible Intent Is Preserved
+
+A `schema_incompatible` outcome MUST retain the original mutation UUID, complete authored payload, authored schema, base version, client version, and local order in a durable inspectable blocked state. Dropping or rewriting an incompatible field, deleting the intent, or automatically retrying it is a violation of Schema-incompatible queued intent in [ADR 002].
+
+### Sealed Batch Retry
+
+A batch MUST be sealed before first transmission, and retries after response loss, HTTP 429, or HTTP 503 MUST reuse the same batch identity, mutation order, and canonical content. Reusing the batch ID with changed content or retrying operational failure as a different execution is a violation of Scoped immutable identity and Whole-request failures in [ADR 002].
+
+### Successor Mutation Preservation
+
+Schema or application reconciliation MUST give changed intent a new mutation UUID and MUST leave the original intent inspectable; an unchanged queued mutation MUST retain its UUID and complete authored content. Folding a successor into the original mutation or deleting either without explicit policy is a violation of Schema-incompatible queued intent in [ADR 002].
+
+### Pre Wire Mutation Dependency Resolution
+
+Before transmission, a same-row insert, update, and delete chain without a legal server precondition MUST be normalized or blocked exactly as defined by [ADR 002]. Every original local action MUST remain linked and inspectable, no dependent mutation may be sent with a fabricated base version, and an insert followed by delete before sealing MUST create no transient server row.
 
 ## Server Change Capture Invariants
 
 ### No Silent Server Change Loss
 
-Every committed change affecting registered data must remain eligible for sync until it is durably represented in authoritative sync state.
+Every committed change affecting registered data MUST remain eligible until its complete pull-visible representation is durable. If representation fails, the source transaction MUST be durably quarantined and MUST block later processing and acknowledgement. Dropping the change or advancing or serving later progress is a violation of the WAL decision in [ADR 001].
 
-Capture progress, including WAL acknowledgement, must not advance past an unapplied change unless that change is durably recorded as a blocking, operator-visible failure.
+### Wal Is The Only Pull Visible Capture Path
 
-This invariant defines required behavior without prescribing a change-capture mechanism or processing architecture.
+Direct writes and accepted push writes MUST become pull-visible only through durable WAL materialization. A synchronous push changelog, membership update, or other second publication path, or a pull-visible effect without a WAL replay identity, is a violation of Decision in [ADR 001].
 
-## Scope Invariants
+### Commit Safe WAL Order
+
+The worker MUST order source transactions by commit LSN and events by their pre-filter source ordinal within one stream generation, MUST represent an empty generation with `generation_start`, and MUST represent every fully processed transaction with its transaction-end point. Ordering or refining pull visibility by sequence, timestamp, notification, table name, or poll order, or issuing a boundary with no defined point, is a violation of Commit-safe stream position in [ADR 001].
+
+### Idempotent WAL Replay
+
+One committed source transaction MUST be one atomic replay unit with stable transaction and event identities, and retry MUST reproduce exactly one materialized result. Duplicate versions, edges, effects, or a transaction split into independently durable replay units is a violation of Transaction and event replay identity in [ADR 001].
+
+### Contiguous WAL Acknowledgement
+
+The logical slot MUST advance only after materialization commits and only to the `end_lsn` of the largest contiguous prefix of completely durable source transactions. Acknowledging an event, batch maximum, later noncontiguous transaction, or incomplete transaction is a violation of Slot acknowledgement in [ADR 001].
+
+### Blocking Poison Quarantine
+
+A source transaction that cannot be decoded, validated, or materialized MUST create a durable redacted quarantine record and MUST block later processing and acknowledgement until same-identity retry succeeds or an authorized stream reset establishes a complete verified projection baseline from a new logical slot's exported snapshot, catches it up through an activation barrier, atomically creates a new generation, and forces rebuild. Reusing incomplete projections, taking an independent live snapshot, exposing pre-baseline catch-up incrementally, logging and skipping, partial publication, or acknowledgement around the poison transaction is a violation of Poison-event quarantine and recovery in [ADR 001].
+
+### Durable Reset Slot Lifecycle
+
+A stream reset MUST use a permanent candidate logical slot created through the replication protocol, import its exported snapshot while the creating connection remains valid, persist its exact slot and boundary lifecycle, and atomically switch a durable active-slot pointer only after complete catch-up and verification. Activating a temporary, missing, wrong-database, wrong-plugin, gapped, or unrecoverable slot, or losing WAL continuity across process death, is a violation of Causally Bound Projection Baseline And Stream Reset in [ADR 001].
+
+### Commit Ordered Registry Activation
+
+Each source transaction MUST use exactly the latest validated registry generation whose activation precedes it in commit order, and all events in that transaction MUST use that generation. Activation by notification alone or switching generation within a transaction is a violation of Registry activation and relation drift in [ADR 001].
+
+### Qualified Registered Relation Identity
+
+Every registry, catalog, publication, decoder, hydration, and scope-function lookup MUST use the immutable logical identity and exact schema-qualified physical identity, including OID drift detection. Bare-name or `search_path` resolution, or automatic rebinding after relation drift, is a violation of [ADR 001] and Logical and Physical Relation Identity in [ADR 004].
+
+### Registered Key And Replica Identity
+
+An active registered relation MUST have exactly one non-null declared primary-key column of portable type `string`, `int`, or `int64`, with `REPLICA IDENTITY DEFAULT` backed by that key. Synced mutation validation and the source trigger MUST reject any update that changes the key value before fence or row effects. Accepting any other key shape or replica identity, continuing capture after drift, or capturing a key-value update as one event is a violation of Primary key and replica identity contract in [ADR 004].
+
+### Capture Readiness
+
+Capture MUST report ready only for the configured database when the worker, heartbeat, validated registry, required triggers, exact publication, usable slot, poison state, and contiguous progress checks in [ADR 001] are healthy. A database ping alone, a worker on another database, or ready status with any missing or unhealthy required check is a violation of Readiness.
+
+### One To One Version Fence Correlation
+
+Every actual registered source row operation MUST emit exactly one row-level `AFTER` fence and correlate by registration kind, unique fence ID, registered-DML ordinal, relation identity, operation, keys, and transition version. Repeated same-row DML remains distinct; `ON CONFLICT DO UPDATE` emits only its final update fence and `DO NOTHING` emits none. A synced fence requires table identity, while a capture-dependency fence forbids it and uses registered capture-key identity. Any missing, duplicate, extra, reordered, reused, or malformed correlation MUST block capture. Pull or rebuild while an accepted fence lacks WAL materialization or activated reset-baseline coverage MUST return `503 capture_pending` without progress.
+
+### Reset Baseline Fence Coverage
+
+During reset, every accepted fence visible in the imported candidate-slot snapshot MUST have immutable verified baseline coverage and complete projected row/version state, while every later fence MUST reconcile through candidate-slot WAL. Activation MUST wait until every accepted fence through the barrier has exactly one of those coverage modes. Clearing a fence by LSN guess, fabricating an event, omitting a pre-boundary accepted write, or leaving a covered fence permanently pending is a violation of Causally Bound Projection Baseline And Stream Reset in [ADR 001].
+
+## Scope And Membership Invariants
 
 ### Deterministic Scope Membership
 
-For a given server state, scope membership must be deterministic.
+Repeated evaluation of the same authoritative row and dependency state MUST produce the same normalized scope set. A different set, or treating evaluation failure as an empty set, is a violation of Deterministic Scope Membership in [ADR 004].
 
-The same authoritative row state must map to the same set of scope instances.
+### Deterministic Scope Function Contract
 
-### Low-Fanout Design Principle
+Membership, impact, and assignment functions MUST satisfy the exact registered signatures and restrictions in [ADR 004], including schema qualification, `LANGUAGE SQL`, `STABLE`, `SECURITY INVOKER`, declared dependencies, capture-only dependency registrations, commit-ordered projection access, and positive bounds. A function that reads a live application relation, or activation after any contract violation, is a conformance violation.
 
-High total scope count is acceptable.
+### Dependency Driven Membership Propagation
 
-The dangerous scaling pattern is high fanout, where a single row change must update large numbers of scope instances.
+Every declared external dependency change MUST be captured through a synced or capture-only dependency registration, use its captured old and new image to identify every affected source row, and evaluate membership against the final commit-ordered projected state of that source transaction. Missing an affected row, reading later live state, or treating impact failure as no impact is a violation of Function restrictions in [ADR 004].
 
-The system should preserve correctness under high fanout, but product and configuration defaults should minimize it.
+### Membership Generation Invalidation
 
-### Shared Data Modeling
+A membership rule, dependency, composition, or controlled relation change MUST mint the affected membership generation, stale only affected cursors and rebuild sessions, and require affected scopes to rebuild. Interpreting an old cursor under changed rules or invalidating unrelated scopes is a violation of Registry and Membership Generations in [ADR 004].
 
-Shared or public data should preferably live in shared scopes with many subscribers, not by being copied into many private scopes.
+### Staged Membership Backfill
 
-Preferred example:
+Membership reconfiguration MUST build and catch up a complete staged edge set before atomic activation, while retaining the prior generation as required by active continuation state. Rebuilding live edges in place or exposing a partially backfilled generation is a violation of Staged membership backfill in [ADR 004].
 
-- `templates_public` for the shared template catalog
-- `templates_user:{user_id}` for user-created templates
+### Causally Bound Class 3 Projection Bootstrap
 
-Both may justify rows in the same local `templates` table. The shared rows should not be duplicated into each private scope.
+When Class 3 requires any table, field, dependency, or projection absent from active materialization, the server MUST use one permanent candidate logical slot and imported exported snapshot, stage complete pending source, dependency, version, membership, and integrity projections, replay every later transaction through a barrier also reached by the main worker, and atomically activate the manifest, generations, projections, and affected-scope invalidation. Early manifest exposure, an independent live query, omitted catch-up, partial activation, mismatched barriers, or process-death recovery from another slot is a violation of Staged membership backfill and Causally Bound Projection Baseline in [ADR 001] and [ADR 004].
 
-### Scope-Local Rebuild
+### Crash Safe Client Schema Migration
 
-Rebuild must be scope-local.
+Before local schema DDL, the client MUST persist the complete verified target manifest and a versioned deterministic typed migration plan bound to source and target references, action, affected scopes, and phase. Restart MUST resume from that journal without schema fetch, avoid repeating committed DDL, preserve queues and local-only data, and enter explicit error for inconsistent physical, reference, body, plan, or phase state. Missing journal inputs, raw unvalidated SQL, network-dependent recovery, mixed physical and active schema, or false completion is a violation of Crash-safe local schema application in [ADR 004].
 
-Rebuilding one scope must not require wiping unrelated local data.
+## Pull, Cursor, And Rebuild Invariants
 
-## Cursor And Rebuild Invariants
+### Per Scope Pull Eligibility
+
+For one read-consistent pull boundary, the server MUST resolve and deduplicate each valid scope's complete eligible candidate stream before applying the global page limit. Applying the limit to raw global rows so that an eligible scope candidate is hidden is a violation of Per-scope eligibility before the limit in [ADR 003].
+
+### Deterministic Cross Scope Pull Merge
+
+The server MUST merge per-scope candidate streams by the exact typed tuple in [ADR 003], compute `has_more` from all remaining stream heads, and make finite-boundary progress starvation-free. Different candidate selection or order for the same fixed streams and boundary, premature completion, or indefinite bypass of an eligible candidate is a violation of Deterministic, starvation-free merge.
+
+### Effect Level Pull Progress
+
+Every derived pull effect MUST have a deterministic persisted delivery position
+`(commit_lsn, event_ordinal, effect_ordinal)` within its scope, and a page cursor
+MUST be able to stop and resume between effects from one source event. An
+earlier deduplication-suppressed effect MAY be covered by the retained later
+candidate for the same typed scope key, but an issued cursor MUST remain before
+that retained candidate until it is explicitly delivered. Replaying the first
+selected candidate forever, advancing past an undelivered retained or sibling
+candidate, deriving ordinal order nondeterministically, or using the effect
+ordinal as WAL replay identity is a violation of Commit-safe stream position
+and Deterministic, starvation-free merge.
+
+### Explicit Pull Candidate Outcomes
+
+Every selected pull candidate MUST yield one explicit canonical `upsert` or `delete` from its WAL-captured projection, or the whole page MUST fail without cursor, checksum, or checkpoint advancement. Silent omission, live-row hydration of a historical effect, or partial-page success is a violation of Explicit candidate outcomes and captured projections in [ADR 003].
+
+### Scope Inclusive Typed Deduplication
+
+Pull deduplication MUST key on `(scope_id, logical_table_id, typed_primary_key)` and retain the greatest eligible stream position for that key within its scope. String concatenation, cross-scope collapse, or progress consumption in another scope is a violation of Scope-inclusive typed deduplication in [ADR 003].
 
 ### Per-Scope Cursor Correctness
 
-A scope cursor may advance only after the corresponding incremental changes for that scope have been durably applied locally.
+A client MUST advance a scope cursor only after every corresponding incremental outcome has been validated and durably applied for that scope. Cursor advancement before apply completion, or advancement caused by another scope, is a violation of Pull response rules in [ADR 003].
+
+### Client Presented Cursor Acknowledgement
+
+The server MUST advance a durable scope checkpoint only when a later successful client request presents a valid cursor for that scope, and MUST do so monotonically. Selection, response construction, token issuance, rebuild paging, or an older token MUST NOT advance it, as specified by Cursor issuance and server acknowledgement in [ADR 003].
+
+### Complete Cursor Bindings
+
+Every incremental cursor MUST authenticate all identity, generation, scope, schema, retention, stream-position, issue-time, and key bindings listed in [ADR 003]. Accepting a token with an omitted or mismatched binding, or failing to distinguish stale authenticated state from forged or misbound state, is a violation of Incremental cursor bindings and Stale versus forged cursor dispatch.
+
+### Scope-Local Rebuild
+
+Rebuilding one scope MUST preserve unrelated synced scope materialization and local-only data. Wiping or rematerializing unrelated data solely because another scope rebuilds is a violation of the single-scope rebuild contract in [ADR 003].
+
+### Immutable Rebuild Snapshot
+
+The first rebuild request MUST atomically stage one complete immutable snapshot and digest from WAL-materialized projections exactly through boundary `B`, and every later page MUST read only that stage. A source snapshot not causally bound to `B`, requerying live rows or edges, changing staged order or content, or exposing a partial session is a violation of Durable immutable staged rebuild snapshot in [ADR 003].
+
+### Authenticated Rebuild Continuation
+
+Every rebuild continuation MUST authenticate all common and rebuild-specific bindings in [ADR 003], including session, rebuild ID, boundary, ordinal, page limit, and fixed 24-hour expiry. Accepting a forged, cross-context, resized, or expired token, or extending expiry on use, is a violation of Rebuild HMAC token bindings and 24-hour expiry.
+
+### Post Boundary Change Delivery
+
+Writes, deletes, and membership changes after rebuild boundary `B` MUST be excluded from the staged snapshot and remain eligible for normal incremental delivery after the client presents the final cursor. Inserting them into the snapshot or omitting them from subsequent pull is a violation of Durable immutable staged rebuild snapshot in [ADR 003].
+
+### Rebuild Page Replay
+
+Repeating a valid first, intermediate, or final rebuild page request MUST return its exact stored page without a new snapshot, live query, ordinal change, digest recomputation, or checkpoint effect, but only while its accepted-write epoch remains current. Any changed replay output or side effect is a violation of Idempotent first, intermediate, and final replay in [ADR 003].
+
+### Accepted Write Invalidates Older Rebuild
+
+Every rebuild session and continuation MUST bind the client's durable accepted-write epoch. A first execution accepting any source write increments that epoch atomically; rejected mutations and exact replay do not. Every page and stored replay MUST check it before returning data, and a mismatch MUST return `409 rebuild_restart_required` without records or progress. Replaying a snapshot staged before a later accepted write, including after that write is WAL-materialized, is a violation of the rebuild snapshot contract in [ADR 003].
+
+### Scope Local Rebuild Checkpoints
+
+A rebuild request MUST modify only its session, immutable stage, and replay outcomes, and MUST NOT change any incremental checkpoint, another scope's state, or the scope-set version. Any such state change before a later pull presents the final cursor is a violation of Rebuild checkpoint and scope isolation in [ADR 003].
 
 ### Progress And Integrity Separation
 
-A scope cursor proves resumable progress only.
-
-A scope cursor does not prove local materialization integrity.
-
-Scope integrity must be validated separately through authoritative checksum verification.
+A valid cursor MUST prove only resumable progress and MUST NOT by itself mark local materialization healthy. Treating a scope as healthy without independent authoritative digest verification is a violation of the checksum contract in [ADR 005].
 
 ### Final Pull Checksum Requirement
 
-Terminal pull pages must include authoritative scope checksums for all active scopes.
+Every terminal pull page MUST include authoritative scope checksums, and a client MUST verify each applicable local scope before treating it as healthy or installing terminal progress. A terminal page accepted without that verification is a violation of Wire checksum objects and terminal maps in [ADR 005].
 
-Clients must verify those checksums against local scope state before treating the scope as healthy.
+### Complete Terminal Checksum Maps
+
+A pull page with `has_more: true` MUST omit `checksums`; a terminal page MUST include a map whose keys exactly equal the complete active scope set after scope updates, including scopes marked for rebuild and excluding removed scopes. Missing, extra, malformed, or wrong-bound entries MUST fail the whole page without cursor advancement under [ADR 005].
 
 ### Rebuild Finality
 
-A rebuild is complete only when:
-
-- all rebuild pages for the scope are applied
-- stale provenance for that scope is pruned
-- rows with zero remaining provenance are removed from local materialization
-- the final authoritative checksum matches local scope state
-- the final authoritative cursor is installed
+A client MUST complete a rebuild only after every page is durably applied, stale provenance is pruned, zero-provenance rows are removed, the immutable snapshot digest matches, and the final cursor is atomically installed. Declaring completion before any one condition is a violation of Rebuild response rules in [ADR 003].
 
 ### Rebuild Does Not Erase Valid Overlapping Data
 
-If a local row belongs to multiple scopes, rebuilding one scope must not delete that row while another valid provenance edge remains.
+Rebuilding a scope MUST NOT remove a local row while any other valid scope provenance edge still justifies it. Deleting such a row is a violation of Normal scope movement in [ADR 003].
 
 ### First Sync Uses Rebuild Semantics
 
-Initial materialization for a scope with no usable cursor follows the same correctness rules as any later rebuild.
+A scope with no usable cursor MUST use the same authenticated, snapshot-bound, digest-verified rebuild contract for first materialization as for recovery. Incrementally resuming or installing unverified state for that scope is a violation of [ADR 003].
+
+## Integrity Invariants
+
+### Canonical Typed Row Encoding
+
+The same immutable manifest and complete authoritative row MUST produce identical canonical typed bytes on every implementation, and receivers MUST reject unknown, duplicate, omitted, mistyped, or primary-key-mismatched fields before apply. Manifest type aliases, alternate casing, and PostgreSQL or SQLite physical type names MUST be rejected rather than normalized. Divergent bytes or accepted malformed rows violate Canonical typed binary grammar in [ADR 005].
+
+### Row Digest Binding
+
+Every row-bearing push outcome, pull change, rebuild record, and seed record MUST carry an opaque server version and a SHA-256 row digest that binds the exact schema hash, logical table, typed primary-key identity, complete canonical row, server version, and domains defined in [ADR 005]. A changed bound value with an unchanged accepted digest, a missing or stale version, outcome reconciliation or cursor advancement after digest failure, or a checksum without a row is a violation of Row identity and row digest.
+
+### Scope Digest Binding
+
+Every authoritative scope digest MUST be the standard streaming SHA-256 over the exact schema, scope ID, cardinality, and canonically sorted row-identity and row-digest pairs defined in [ADR 005]. Accepting a duplicate, omission, changed pairing, changed cardinality, or implementation-defined aggregate with the same claimed digest is a violation of Scope digest.
 
 ## Local Metadata Invariants
 
 ### Durable Queue Invariant
 
-Queued mutations must survive process death and restart.
+Queued mutations, immutable identities, authored content, and ordering metadata MUST be persisted before first transmission and survive process death and restart. Losing or regenerating any of them after restart is a violation of Scoped immutable identity in [ADR 002].
 
 ### Durable Rebuild State Invariant
 
-If a client process crashes during rebuild, the rebuild-in-progress state must remain recoverable from durable metadata.
+Rebuild session, page-apply, provenance, and verification state MUST survive process death without installing a false final cursor or checksum. Restarting from an unverifiable partial state as though rebuild completed is a violation of the client obligations in [ADR 003].
 
 ### Durable Cursor Invariant
 
-Scope cursor advancement must be durable and atomic with successful apply.
+Local cursor advancement MUST commit atomically with successful validation and local apply for that scope. A crash state containing the new cursor without all corresponding data, or all data without its transactionally paired cursor decision, is a violation of [ADR 003].
 
 ### Rejection Inspectability
 
-Rejected mutations must remain inspectable until cleared by explicit client policy.
+Rejected mutations and their canonical reasons MUST remain durably inspectable across restart until explicit client policy clears them. Automatic deletion, including deletion during schema reconciliation, is a violation of Schema-incompatible queued intent in [ADR 002].
 
 ### Provenance Correctness
 
-For tables that support multi-scope composition, local provenance metadata must accurately reflect which scopes currently justify each local row.
+For a multi-scope table, local metadata MUST record exactly the active scopes that currently justify each row. Missing, stale, or cross-row provenance, or removal of a row with nonempty valid provenance, is a violation of Normal scope movement in [ADR 003].
 
-## Startup And Warm-Start Invariants
+### Scope Cleanup Preserves Pending Intent
+
+Assignment removal, seed cleanup, and rebuild reset or final pruning MUST delete
+only server provenance, continuation state, and zero-provenance cache
+materialization that is not protected by unresolved authored local intent. When
+pending or inspectably blocked intent addresses a row, every cleanup path MUST
+preserve its application-visible local row state outside server provenance until
+normal push-first reconciliation or explicit application policy resolves it.
+Removing that row before its outcome, converting cleanup into a mutation, or
+treating lost assignment or rebuild as authorization to discard intent is a
+violation of Scope assignment changes and Rebuild finality in the client
+contract.
+
+## Schema And Retention Invariants
+
+### Immutable Schema Manifest
+
+A published schema manifest body, hash, positive version, class, compatibility floor, composition, table IDs, and field IDs MUST be stored atomically and MUST NOT change in place. Serving a live-catalog body under an existing hash or version is a violation of Immutable Schema Manifests in [ADR 004].
+
+### Deterministic Schema Class Dispatch
+
+Connect MUST apply the exact per-client Class 1 through Class 4 action dispatch and explicit incompatible-schema reset in [ADR 004], including `replace` for Class 3 with no affected assigned scope and queue-preserving reset after `unsupported`; push, pull, and rebuild MUST require the exact current manifest, and protocol version 3 MUST NOT emit `fetch`. A different action, an empty `rebuild_local`, no recovery path, or partial work after schema mismatch is a violation of Protocol 3 Schema Dispatch and Exact Current Schema Gate.
+
+### Schema Cursor Continuity
+
+Every schema-changing connect MUST replace each otherwise valid
+historical-schema cursor for an unaffected existing scope with a server-issued
+current-schema token at the exact same position, while returning `null` for an
+affected or otherwise stale scope. Replacement MUST require a known compatible
+lineage, no Class 3 effect on that scope, and current identity, generation,
+membership, retention, stream, and resume-floor bindings. The client MUST
+install the replacement only with successful target-manifest activation and
+MUST NOT relabel the old token. Rebuilding an unaffected scope solely because
+the manifest hash changed, accepting an old-schema cursor on pull, or carrying
+an affected scope forward is a violation of Protocol 3 Schema Dispatch in [ADR
+004].
+
+### Durable Scope Retention Floor
+
+Each scope MUST retain a durable inclusive resume floor and retention lineage even when no effects remain. A cursor below the floor MUST rebuild, a cursor at or above an ordinarily advanced floor MUST remain eligible if its other bindings are valid, and inferring validity from an empty log is a violation of Per-Scope Retention in [ADR 004].
+
+### Expired Client Rebuild
+
+Client expiry MUST use the finite positive stale interval and cursor-acknowledgement activity defined in [ADR 004]; reconnect MUST issue a new generation with null affected cursors and preserve the durable mutation queue and idempotency ledgers. A first-execution generation rejection MUST allocate no ledger state, after which unchanged authored mutations move to a new successor batch and retain their mutation IDs while the old sealed batch remains immutable and unsent. Reusing the expired generation, editing or resending the rejected batch, changing content under an existing mutation ID, or deleting its idempotency ledgers is a violation of Explicit client generation and expiry.
+
+### Scope Local Compaction
+
+Compaction MUST use the minimum acknowledged position among nonexpired clients assigned a scope, or that scope's durable high-watermark when none are assigned, honor active rebuild pins, and commit effect deletion atomically with monotonic floor advancement. A global or unrelated checkpoint, inferred floor, or one-sided commit is a violation of Scope-local compaction in [ADR 004].
+
+### Strict Positive Limits
+
+Every request, push body, mutation count, mutation size, column count, compaction, backfill, fanout, and impact limit named in [ADR 002] and [ADR 004] MUST be within its positive fixed or configured maximum. Push byte and count limits MUST fail before ledger allocation or semantic work. Defaulting, clamping, truncating, or doing work after an invalid value is a violation of Strict Positive Limits.
+
+## Startup And Portable Seed Invariants
 
 ### Seeded DB Is Cache Only
 
-A seeded or preinitialized local database is a warm-start optimization only.
-
-It is not a separate sync mode and does not weaken server authority.
+A seeded database MUST enter the normal authenticated connect, delta, checksum, and rebuild protocol and MUST NOT use a separate authority or sync mode. Treating seeded contents or metadata as authorization is a violation of Snapshot-bound portable seed export in [ADR 005].
 
 ### Portable Seed Authority
 
-Only server-declared portable scopes may be exported into a bundled seed.
-
-The client must not infer that a seeded row is portable.
+An exported seed MUST contain only scopes explicitly declared portable shared scopes by the server and MUST NOT contain auth-scoped user data. Inferring portability from row presence or exporting an undeclared scope is a violation of Snapshot-bound portable seed export in [ADR 005].
 
 ### Seed Resume Correctness
 
-If a bundled seed contains portable scope data, it must also contain the continuation metadata required for normal delta sync from that state.
+Every seeded portable scope MUST contain verified continuation metadata for the exact seeded schema, generations, boundary, cardinality, and digest. Treating seeded rows as incrementally resumable without that metadata is a violation of Seed continuation receipt in [ADR 005].
+
+### Snapshot Consistent Portable Seeds
+
+All manifest, scope, row, digest, boundary, retention, and receipt reads for one seed artifact MUST occur on one physical connection in one enforced `SERIALIZABLE READ ONLY DEFERRABLE` transaction over WAL-materialized projections exactly through its visible durable boundary. Mixing transactions, connections, source-table state not causally bound to that boundary, or live post-snapshot reads is a violation of Snapshot-bound portable seed export in [ADR 005].
+
+### Bound Portable Seed Continuation
+
+Seed page tokens MUST authenticate every export, transaction, scope, generation, boundary, ordinal, and limit binding in [ADR 005], and seed receipts MUST become client-bound cursors only through authenticated connect after current assignment and state validation. Accepting a cross-context token or using a receipt directly as a runtime cursor is a violation of Seed page token and Seed continuation receipt.
+
+### Verified Portable Seed Artifacts
+
+The exporter MUST verify every row and scope digest, page sequence, receipt, SQLite integrity property, queue and provenance condition, and final artifact hash required by [ADR 005] before atomic publication. Any failed or skipped check MUST produce no artifact, so publishing a partial, corrupt, sidecar-dependent, or unverified seed is a violation of Seed verification and artifact publication.
 
 ### Offline Writes Before First Connect
 
-Offline writes before first successful connect are allowed.
+Native clients with a verified bundled or seeded protocol 3 manifest MUST accept local SQLite writes before first successful connect and preserve them in the same durable mutation queue used later. A portable-data seed MUST install each verified opaque row version as local compare-and-swap base before writes are exposed, while withholding runtime cursors until authenticated receipt conversion. Unassigned-scope cleanup or stale-receipt rebuild MUST preserve pending authored intent and local row state. A client without a verified manifest MUST delay synced-table writes because it has no authoritative table or field identities. Losing eligible offline intent, fabricating a base version, treating a version as authorization, or storing intent outside the durable queue is a violation of the queue contract in [ADR 002], [ADR 004], and [ADR 005].
 
-They must be preserved and reconciled through the same durable mutation queue as any later offline writes.
-
-## Retry And Failure Invariants
+## Failure, State, And Version Invariants
 
 ### Retryable Failures Do Not Corrupt State
 
-Retryable transport or availability failures must not corrupt local sync metadata.
+Retryable transport or availability failure MUST preserve queue, schema, assignment, cursor, rebuild, and apply state except for durable retry bookkeeping, and a failed page MUST expose no partial success. Any other durable transition is a violation of Whole-request failures in [ADR 002] and Error rules in [ADR 003].
 
 ### Non-Retryable Failures Are Explicit
 
-Non-retryable failures must surface as explicit error state, not silent degraded behavior.
+Every non-retryable protocol or local contract failure MUST enter an explicit typed error or blocked state and MUST NOT continue silent degraded synchronization. Continuing push, pull, or rebuild as though the failure succeeded is a violation of the dispatch rules in [ADR 002], [ADR 003], and [ADR 004].
 
 ### Automatic Rebuild Default
 
-Scope rebuild should be automatic by default.
+Under default client configuration, a server-required scope rebuild MUST proceed without application approval or app-owned orchestration. A default client that waits indefinitely for mediation is a violation of the rebuild contract in [ADR 003].
 
-If a product chooses to require app mediation, that must be an explicit product decision, not an implementation accident.
+### Legal Client State Transitions
+
+A client MUST permit only the complete state adjacency map in [ADR 005]; unknown states and unlisted transitions MUST fail as non-retryable local contract errors without mutating durable sync state. Accepting any other transition, including `stopped -> pulling` or `error -> ready`, is a violation of Legal client state transitions.
+
+### Semantic Version Precedence
+
+Application and minimum-client versions MUST parse and compare by Semantic Versioning 2.0.0 exactly, while protocol negotiation MUST remain the separate integer `3`. Accepting malformed syntax, a leading `v`, or precedence that mishandles prerelease or build metadata is a violation of SemVer 2.0 precedence in [ADR 005].
+
+## Authorization, Readiness, And Operations Invariants
+
+### Database Default Deny
+
+The fixed `synchro` schema and every extension-owned object MUST revoke `PUBLIC` authority and grant only explicitly required schema, type, and function capabilities. Any public execution or direct adapter, seed, or monitor access to metadata tables or sequences is a violation of PostgreSQL schema and authorization in [ADR 005].
+
+### Database Role Separation
+
+Owner, adapter, seed, monitor, operator, and worker SQL authority MUST remain split among the six least-privilege `NOLOGIN`, `NOREPLICATION` group roles in [ADR 005]. Exactly one dedicated `LOGIN REPLICATION NOINHERIT` worker credential MAY belong only to the worker group and MUST use explicit `SET ROLE` for SQL access under restricted HBA and external credential management. A runtime role inheriting owner or another runtime role, broad function grants, or any other replication-capable login is a violation of Database role separation.
+
+### Capture Health Readiness
+
+The adapter MUST derive readiness from the canonical extension result for its configured database, and overall status MUST be ready only when every required tri-state check is `ok`. Reporting ready for `failed`, `unknown`, absent, inconsistent, or query-error state, or exposing the detailed check map publicly, is a violation of Fail-closed readiness in [ADR 005].
+
+### Finite Capture Lag
+
+Worker heartbeat age, WAL lag bytes, and oldest-unmaterialized-commit age MUST be known, finite, nonnegative, and no greater than configured finite positive maxima. A missing, zero, negative, non-finite, or unparseable maximum, or a missing, negative, non-finite, unparseable, or exceeded observation, MUST make readiness unready under [ADR 005].
+
+### Operational Data Redaction
+
+Logs, metrics labels, traces, readiness output, and quarantine text MUST NOT contain synced values, primary keys, user or client IDs, scope instances, mutation bodies, tokens, credentials, raw requests, raw WAL, SQL text, or unbounded errors. Observing any prohibited value is a violation of Logging and failure-state redaction in [ADR 005].
+
+### Pgrx Installation Authority
+
+pgrx annotations and `extension_sql!` declarations in the Rust extension source MUST be the sole authored source for extension DDL, grants, revokes, comments, and membership. Shipping hand-maintained parallel SQL or generated SQL that does not regenerate byte-for-byte is a violation of Installation and migration baseline in [ADR 005].
+
+### Extension Migration Baseline
+
+Version `0.3.0` MUST be the first supported extension migration baseline, proven by a clean PostgreSQL 18 install and non-superuser role checks. Claiming an in-place update from deleted or experimental pre-`0.3.0` state, or using `IF NOT EXISTS` as migration logic, is a violation of Installation and migration baseline in [ADR 005].
 
 ## Adapter And Client Boundary Invariants
 
 ### Thin Adapter Invariant
 
-Server adapters such as `api/go` must not define sync semantics.
+Each Go sync endpoint MUST delegate its semantic operation to the canonical extension function and MUST NOT implement independent scope, conflict, rebuild, or synced-write decisions. A second semantic implementation or outbound sync-service dependency in the adapter is a violation of the extension authority established by [ADR 001] through [ADR 005].
 
 ### Thin React Native Invariant
 
-React Native must not become a separate sync engine with divergent semantics.
+React Native MUST delegate queue, cursor, conflict, apply, and rebuild behavior to the native clients on both platforms and MUST NOT implement a third sync engine in JavaScript. Any divergent JavaScript-owned semantic transition is a violation of the cross-language boundary required by [ADR 005].
 
 ### Native Client Responsibility Boundary
 
-Native clients own local database integration, queueing, scheduling, and safe apply.
-
-They do not own server sync semantics.
-
-## Competitive Invariants
+Native clients MUST own local SQLite integration, durable queueing, scheduling, verification, and safe apply while accepting server authority for assignment, schema, conflict outcomes, cursors, and rebuild state. A native client overriding a server decision or delegating durable semantics to JavaScript is a violation of [ADR 002], [ADR 003], and [ADR 004].
 
 ### No Mandatory Custom Backend Write Contract
 
-Using Synchro for synced CRUD must not require every application to invent a custom backend upload protocol.
+A client MUST be able to synchronize create, update, and delete through local SQL and the canonical Synchro protocol without an application-defined upload endpoint. Requiring such an endpoint for any registered table is a violation of Push vocabulary and First-execution transaction boundary in [ADR 002].
 
 ### No Arbitrary Client-Defined Replication Model
 
-The primary sync model must not depend on arbitrary client-authored replication predicates.
+Sync requests MUST accept only server-assigned scope identifiers and MUST NOT accept client-authored predicates or ad hoc scope SQL. Executing such input is a violation of Deterministic Scope Membership in [ADR 004].
 
 ### No Extra Hot-Path Network Hop For Core Sync Logic
 
-Core sync semantics should execute close to the data, not through an extra server-to-service hot-path hop.
-
-## Open Follow-Up Questions
-
-- whether checksum verification becomes a required invariant in more cases or remains selective
-- whether certain configuration classes should declare maximum expected fanout for observability and validation
+The production core sync request path MUST call the PostgreSQL extension directly and MUST NOT make an outbound RPC to a separate sync service for core semantics. Observing that extra dependency in a connect, push, pull, or rebuild path is a violation of the extension-authoritative execution defined by [ADR 001] through [ADR 005].

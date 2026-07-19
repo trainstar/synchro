@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://synchro.dev/conformance/schemas/artifact-inventory-v1.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["$schema", "schema_version", "release", "artifacts"],
+  "properties": {
+    "$schema": { "const": "https://synchro.dev/conformance/schemas/artifact-inventory-v1.schema.json" },
+    "schema_version": { "const": 1 },
+    "release": { "const": "0.3.0" },
+    "artifacts": {
+      "type": "array",
+      "minItems": 10,
+      "maxItems": 10,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "role", "name"],
+        "properties": {
+          "id": { "type": "string", "pattern": "^ARTDEF-[A-Z0-9]+(?:-[A-Z0-9]+)*-[0-9]{3}$" },
+          "role": {
+            "type": "string",
+            "enum": ["conformance-runner", "pg-extension", "pg-install-sql", "adapter", "seed-tool", "swift-spm", "cocoapods", "kotlin-maven", "react-native-npm", "portable-seed"]
+          },
+          "name": { "type": "string", "minLength": 1 }
+        }
+      }
+    }
+  }
+}

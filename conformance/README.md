@@ -29,6 +29,11 @@ If the corpus outgrows plain JSON later, the format can evolve deliberately.
 - `mutations/`: mutation acceptance, rejection, and reconciliation fixtures
 - `traces/`: client and server state-machine traces
 - `performance/`: budgets and measurement scenario definitions
+- `artifacts/`: exact candidate artifact roles, including the independent
+  conformance runner
+- `faults/`: one requirement-owned negative control and typed fault recipe per
+  release requirement
+- `schemas/`: versioned authored-contract and generated-evidence schemas
 - `test-inventory.md`: notice describing the transition from the former manual inventory to generated evidence
 
 ## Current Seed Corpus
@@ -62,6 +67,10 @@ The repo has two test tiers:
 - `make release-check`: release validation entry point
 
 Neither command alone is proof unless it produces the complete validated evidence required by the release contract for the exact candidate artifacts. Required release tests permit zero skips and zero unexplained flakes.
+
+`make release-check` intentionally fails closed while the Phase 3 conformance,
+black-box, and evidence targets or the Phase 6 RC verification target remain
+unimplemented. A partial repository state cannot report a release pass.
 
 The representative relational corpus under `extensions/testdata/`, and the bundled `clients/react-native/example/seed.db` generated from it, are the canonical seeded end-to-end fixtures for:
 

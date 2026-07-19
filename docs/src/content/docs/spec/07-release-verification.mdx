@@ -1,75 +1,535 @@
 ---
 title: Release Verification
-description: Normative rules for candidate evidence, anti-gaming controls, and exact-artifact promotion.
+description: Normative rules for protocol version 3 evidence, exact artifacts, and verified candidate promotion.
 ---
 
 # Release Verification
 
 ## Purpose
 
-This document defines how Synchro turns the behavioral specification into release evidence. The specification remains the authority for behavior. Tests and generated reports provide evidence that one exact release candidate conforms to it.
+This document defines the release gate for Synchro `0.3.0`. It turns the
+behavioral contract into evidence for one exact release candidate. The
+specification and accepted architecture decisions remain the authority for
+behavior. This document defines evidence identity, proof composition, artifact
+integrity, and release eligibility.
 
-## Authored Contract
+Before the verification pipeline executes, this document is only an authored
+obligation. It contains no candidate result. A planned test, authored fixture,
+source tree, or manual status cannot satisfy a release requirement.
 
-Authored verification files define obligations, not outcomes:
+## Contract and Scope Binding
 
-- the specification defines normative behavior
-- the requirements catalog identifies release-blocking claims and required proof types
-- the support policy identifies required and excluded environments
-- scenarios define inputs and semantic expectations
+Every RC evidence bundle is for exactly:
 
-Authored requirements must not be edited to report that a candidate passed. A scenario's expected result must be derived from the contract, not captured from the implementation under test.
+- release `0.3.0`
+- protocol version `3`
+- the immutable behavioral specification snapshot
+- Accepted ADR 001 through Accepted ADR 005
+- `conformance/requirements.json`, schema version `2`
+- `conformance/support-matrix.json`, schema version `1`
+- scenario, evidence, and RC manifest schema version `2`
 
-## Generated Evidence
+The behavioral snapshot includes:
 
-Evidence is generated from actual executions against an identified candidate. It must bind results to:
+- `docs/src/content/docs/spec/00-principles.mdx`
+- `docs/src/content/docs/spec/01-wire-protocol.mdx`
+- `docs/src/content/docs/spec/02-client-contract.mdx`
+- `docs/src/content/docs/spec/03-state-machines.mdx`
+- `docs/src/content/docs/spec/04-invariants.mdx`
+- `docs/src/content/docs/spec/05-schema-evolution.mdx`
+- `docs/src/content/docs/architecture/decisions/001-wal-change-stream.mdx`
+- `docs/src/content/docs/architecture/decisions/002-mutation-idempotency-and-conflicts.mdx`
+- `docs/src/content/docs/architecture/decisions/003-pull-cursor-and-rebuild.mdx`
+- `docs/src/content/docs/architecture/decisions/004-membership-schema-and-retention.mdx`
+- `docs/src/content/docs/architecture/decisions/005-integrity-authorization-and-seeds.mdx`
 
-- the candidate ID and source commit
-- exact artifact hashes
-- exact operating system, PostgreSQL, SDK, IDE, emulator or simulator, and toolchain versions
-- requirement, support-cell, and scenario IDs
-- proof type, result, logs, traces, and replay data
+The RC manifest must record the SHA-256 hash of every contract file, the
+release and protocol version, and the status `Accepted` for each ADR. Every
+scenario, requirement result, vector result, performance result, and support
+cell result must reference this same contract snapshot. A changed file,
+missing ADR, non-accepted ADR status, unresolved normative reference, or
+protocol mismatch invalidates the candidate evidence.
 
-Generated evidence and the RC manifest are immutable. Release eligibility is computed by tooling and represented by process exit status. It is not a manually maintained readiness claim.
+The `contract_snapshot_sha256` is
+`SHA256(RFC8785_UTF8(snapshot_binding))`, where `snapshot_binding` is the exact
+object containing `release_version`, `protocol_version`, the path and SHA-256
+for `conformance/requirements.json`, the path and SHA-256 for
+`conformance/support-matrix.json`, the ordered `behavioral_files` entries listed
+above, and `verification_inputs`. The latter contains exact path and hash
+objects for `conformance/catalog.json`, `conformance/vectors/catalog.json`,
+`conformance/faults/catalog.json`, and
+`conformance/performance/budgets.json`, plus
+`conformance/artifacts/inventory.json`. `schema_files` contains the exact
+versioned contract schemas named below. Each behavioral entry contains exactly
+`path`, `sha256`, and `status`; specification status is null and every ADR status
+is `Accepted`. Paths use these repository-relative strings, hashes are lowercase
+hex, and behavioral file order is the list order above. Evidence records carry
+the same release, protocol, source commit, candidate ID, and contract snapshot
+digest as their RC manifest. A verifier recomputes every file hash and the
+aggregate digest from bytes in the candidate source tree; trusting supplied
+hashes is invalid.
 
-The authored `current-stable` platform selectors move over time. At the start of an RC, each selector is resolved to exact versions in the generated manifest. That resolution remains fixed for the candidate.
+The snapshot also hashes the exact versioned requirements, support-matrix,
+scenario, evidence, RC-manifest, fault-catalog, artifact-inventory, and
+performance-budget schemas. A candidate cannot reinterpret an authored record
+under a later schema revision.
+
+### ADR Consistency Gate
+
+The verifier must resolve every scenario and requirement reference to the same
+five ADR files and must compare their recorded hashes and `Accepted` statuses
+with the candidate contract snapshot. Evidence from a mixed ADR revision,
+missing decision, changed decision status, or protocol version other than `3`
+is invalid even when the test result is otherwise successful. The verifier
+must report the inconsistency and return a nonzero exit status.
+
+The support scope is exactly the matrix in
+`conformance/support-matrix.json`:
+
+- required PostgreSQL cell: `SUP-PG-018`, PostgreSQL `18`
+- required Swift cells: iOS `16` minimum and current stable, macOS `13`
+  minimum and current stable
+- required Kotlin cells: Android API `24` minimum and current stable
+- required React Native cells: iOS and Android minimum and current stable on
+  React Native `0.83.x`
+- excluded PostgreSQL cells: `SUP-PG-014` through `SUP-PG-017`
+
+Current-stable selectors are resolved at RC start and the exact OS, SDK, IDE,
+emulator or simulator, runtime, and toolchain versions are frozen in the RC
+manifest. React Native iOS cells include the native Swift compiler and CocoaPods
+CLI, and React Native Android cells include the native Kotlin compiler, in
+addition to their bridge toolchains. No excluded platform or database version
+can be used to expand the v0.3.0 certification claim.
+
+## Authored Contract Files
+
+Authored files define obligations and semantic expectations, never outcomes:
+
+- normative specifications and accepted ADRs define behavior
+- `requirements.json` identifies release-blocking claims, proof types, and
+  applicable server and client components
+- `support-matrix.json` identifies required and excluded cells
+- scenario definitions identify inputs, model operations, barriers, faults, and
+  typed transport and contract operations, canonical wire outcomes, and
+  semantic expectations
+- proof obligations identify exact requirement and assertion IDs, proof type,
+  one support cell or null, artifact-inventory roles, Make target, and
+  two-element command before execution
+- the fault catalog contains typed pre-execution recipes covering every release
+  requirement
+- canonical vector inputs identify source values and independently computed
+  expected bytes and digests
+- performance budgets identify metrics, units, comparators, and limits before
+  measurement, while required characterization entries freeze workload,
+  method, metric set, and minimum sample count without inventing unapproved
+  latency ceilings
+
+The requirements catalog and support matrix must validate against their JSON
+Schemas. Authored files cannot be edited to report that a candidate passed.
+Expected results must come from the contract and independent model, not from
+the implementation under test.
+
+## RC Contract Snapshot and Evidence Identity
+
+The generated RC manifest must bind at least:
+
+- candidate ID, release, protocol version, source commit, and build inputs
+- hashes for all behavioral specs, all five ADRs, requirements, support
+  matrix, scenario catalog, vector set, fault catalog, and performance budget
+  manifest
+- requirement IDs, scenario IDs, proof-obligation IDs, selected support-cell
+  IDs, and proof types
+- exact artifact names, versions, digests, SBOMs, and provenance attestations
+- exact execution environments and resolved current-stable versions
+- command lines, Makefile target, start and end times, result, duration, logs,
+  traces, replay seeds, and attempt history
+- mutation and negative-control identities with expected failure results
+
+Evidence records are content-addressed and immutable after generation. The RC
+manifest is generated once for a candidate, signed or attested by the release
+pipeline, and stored with its digest. Failed attempts remain linked records.
+They cannot be deleted, overwritten, or replaced by a later green retry.
+
+Every evidence record contains the exact proof obligation, Makefile target and
+canonical `make` argument vector, start and completion timestamps, matching
+millisecond duration, result, exit code, and content-addressed attachments. Its
+execution-artifact binding names at least one log, trace, and replay-data
+attachment, and each referenced attachment has the corresponding typed kind.
+Every authored barrier resolves to one typed barrier trace. Fault plans,
+negative controls, budgets, and required measurements resolve transitively to
+attachments of the required kind and to unchanged authored metadata. Evidence
+assertion IDs equal the complete assertion set owned by its proof obligation,
+with no missing, unknown, or duplicate ID. The obligation's requirement IDs
+equal the union owned by those assertions. Its requirement set, support cell,
+command, and actual artifact inventory roles exactly satisfy the named proof
+obligation. A zero exit code may report only `passed`; promotion also requires
+every assertion, budget, and required-measurement outcome to be `passed`.
+
+The verifier applies a fixed policy for each proof type: allowed release Make
+targets, required and permitted artifact roles, and whether the proof is
+support-neutral or must name one resolved support cell. Direct pgrx and
+adapter-unit targets cannot prove server black-box behavior. The reference
+model uses a separately hashed independent conformance-runner artifact. The
+evidence environment must exactly equal
+the selected cell's frozen dimensions and versions. A target that merely exits
+zero, an irrelevant artifact set, an omitted platform dimension, or a substituted
+environment cannot satisfy the obligation. Requirement closure is computed over
+all selected scenarios and terminal evidence, and every proof type listed by a
+requirement must be present even when its obligations are distributed among
+multiple scenarios.
+
+Every HTTP step names one canonical contract case. The verifier derives and
+checks its exact HTTP status, stable error code or null, retryability, permitted
+endpoint operation, and wire-contract assertion. Assertions also bind a typed
+contract predicate from the closed vocabulary, with no free-form predicate
+payload, compatible with their oracle. Negative-control evidence
+binds the conformance runner and the exact mutated subject artifacts authored by
+the requirement-owned control.
+
+The authoritative release command identity has exactly two elements: element
+zero is `make` and element one is the target pre-authored by the proof
+obligation. Make command-line assignments, prefix-matched targets, additional
+goals, wrappers, shell separators, filters, and display strings are not release
+command identity.
+
+The RC manifest contains every loaded evidence record and the transitive closure
+of every retry chain. One execution key is the tuple of candidate, scenario,
+proof obligation, and support cell, and it has exactly one execution lineage.
+Within that lineage, attempt numbers are unique and linear, each rerun references
+the immediately prior attempt, and approval occurs strictly after predecessor
+completion and before rerun start. A rerun is permitted only when the predecessor
+is a typed infrastructure error with nonzero exit and no failed or skipped
+semantic assertion, artifacts and all contract bindings remain unchanged, and
+the rerun carries an allowed infrastructure-cause code, diagnosis, corrective
+action, approver identity, approval time, and approval URI. Starting a new
+lineage, omitting a predecessor, or relabeling a semantic failure as
+infrastructure makes the candidate ineligible.
+
+The RC manifest freezes the allowlist of trusted rerun approver identities.
+Every rerun approval identity uses the canonical `github:<login>` form and must
+be present in that allowlist. Self-declared free-form approver text cannot
+authorize a retry.
 
 ## Required Proof Types
 
-The verification contract uses complementary proof types:
+The requirements schema permits and the release gate recognizes these proof
+types:
 
-- **Reference model:** an independent executable interpretation of normative semantics
-- **Server black box:** real HTTP requests through the adapter, extension, and PostgreSQL
-- **Native end to end:** real client storage, transport, lifecycle, and server integration
-- **Fault injection:** controlled failures at durability and state-transition boundaries
-- **Negative control:** a demonstrated defect or mutant that the claimed proof rejects
+- `reference-model`: an executable interpretation independent of production
+  sync semantics
+- `server-black-box`: real HTTP through the Go adapter, extension, and
+  PostgreSQL 18
+- `native-e2e`: real SQLite, native client process, transport, lifecycle, and
+  server integration
+- `fault-injection`: controlled failure at a durability, transaction, WAL,
+  transport, local apply, or process boundary
+- `negative-control`: an intentional defect or mutant that the claimed proof
+  rejects
 
-No single proof type substitutes for all others when a requirement calls for more than one.
+No proof type substitutes for another proof type named by a requirement. Every
+requirement record must contain the listed proof types and a linked evidence
+record for each one.
 
-## Anti-Gaming Rules
+## Independent Conformance Requirement
 
-- Current implementation output cannot define expected behavior.
-- Implementation-generated fixtures do not count as independent semantic proof.
-- Field-presence and round-trip-only assertions do not prove the meaning of a protocol operation.
-- Release-critical proofs require meaningful negative controls or demonstrated mutants.
-- Happy-path release evidence cannot replace real components with mocks.
-- Internal metadata seeding cannot count as black-box proof.
-- Every required test must execute. Skipped, ignored, filtered, or quarantined required tests block the candidate.
-- Required tests must have zero unexplained flakes. Retry-based green results are not accepted as proof.
-- Failed attempts remain part of the evidence record. A rerun must link to the original attempt and record its reason, diagnosis, changes, candidate identity, and artifact hashes.
-- Infrastructure-only reruns may use unchanged artifacts, but they do not erase the failed attempt.
-- Randomized scenarios must record replayable seeds. Production defects must become permanent minimized scenarios.
+Release verification consumes the conformance plan in
+`06-conformance-plan.mdx`. The reference model must have no production
+dependency. Protocol version 3 scenarios must execute through the real HTTP
+adapter and PostgreSQL 18. Server change-capture evidence must traverse the
+real WAL pipeline from committed source write through decoder, worker,
+durable materialization, and pull. Native evidence must use real SQLite and
+real client processes. Deterministic barriers must record concurrency order,
+and fault injection must record replayable schedules and seeds.
 
-The release gate also requires zero unresolved critical or high findings. Details for unresolved security findings may remain access-controlled. Public evidence must communicate scope and disposition without exposing exploit instructions.
+The black-box harness may observe only documented public behavior and
+permitted sanitized state. Direct changelog, scope-edge, captured-projection,
+cursor, or ledger seeding cannot create evidence for the operation under test.
+
+## Cross-Language Canonical Vectors
+
+The same immutable vector-set hash is required in Rust, Go, Swift, and Kotlin
+results. Each implementation must independently calculate canonical typed
+bytes, schema hashes, row identities, row digests, and scope digests and match
+the authored expected values.
+
+The vector evidence must cover every protocol portable type, SQL null, Unicode,
+integer boundaries, int64 string encoding, exact decimal normalization,
+binary64 edge values, date and time forms, bytes, booleans, nested canonical
+JSON, stable field ordering, typed primary-key ordering, empty and nonempty
+scope state, cardinality, duplicate identities, invalid encodings, and
+presence distinctions. A vector generated by any implementation under test is
+not an expected-value source. React Native evidence must demonstrate that its
+iOS and Android bridge paths use the corresponding native implementation.
+
+Missing language coverage, a vector-set hash mismatch, or a surviving
+canonicalization mutant blocks the RC.
+
+## Negative Controls and Mutants
+
+Every release-critical proof must include a meaningful negative control. The
+control must fail under a demonstrated defect and must not remain green when
+the claimed invariant is broken. The complete Phase 2 negative-control set in
+`06-conformance-plan.mdx` is release-required, including controls for:
+
+- protocol 3 dispatch, strict shapes, opaque tokens and versions, exact replay,
+  compare-and-swap conflicts, and mutation outcome conservation
+- WAL-only publication, contiguous acknowledgement, poison blocking, qualified
+  relation identity, trigger and replica identity validation, and readiness
+- per-scope pull eligibility, typed deduplication, captured projections,
+  cursor acknowledgement, snapshot-bound rebuild, token binding, and scope
+  isolation
+- deterministic dependency impacts, immutable manifests, all four schema
+  classes, authored queued intent, client generations, retention floors, and
+  strict positive limits
+- canonical digest type and ordering rules, terminal checksum maps, legal
+  client transitions, SemVer precedence, least-privilege authorization,
+  redacted diagnostics, seed transaction and token binding, modified or
+  cross-context seed page tokens, and generated SQL installation
+
+Mutation testing must include cursor advancement, WAL acknowledgement,
+mutation conservation, checksum correctness, schema dispatch, scope
+isolation, queue durability, and rebuild finality. A release-critical mutant
+that survives without a contract-based disposition is a release failure.
+Decorative checksums, field-presence checks, implementation-derived fixtures,
+and self-referential expected values are not negative controls.
+
+## Authentication, Readiness, Seed, and Installation Gates
+
+### Authentication and Authorization
+
+Evidence must prove missing and invalid authentication, trusted canonical user
+identity, client ownership, client-generation binding, server-authoritative
+scope assignment, exact schema gates, and non-superuser execution. The role
+matrix must prove that `PUBLIC` and wrong runtime roles cannot invoke protected
+functions or read protected metadata, while adapter, seed, monitor, operator,
+worker, and owner capabilities remain limited to their ADR-defined authority.
+Public errors and operational output must not expose row, identity, token,
+credential, or raw request data.
+
+### Fail-Closed Readiness
+
+Evidence must execute the canonical readiness checks, not a database ping. The
+checks must cover the configured database and protocol, durable registry and
+schema generations, worker database identity and fresh heartbeat, exact
+publication relations, usable logical replication slot, enabled version-fence
+triggers, no poison or relation drift, contiguous durable progress, and known
+finite heartbeat and WAL lag limits. Missing, unknown, stale, inconsistent, or
+excessive values must produce unready status. Public readiness responses must
+remain generic while detailed role-bound evidence remains bounded and
+redacted.
+
+### Portable Seed
+
+Seed evidence must use one `SERIALIZABLE READ ONLY DEFERRABLE` PostgreSQL
+transaction and only server-declared portable scopes. It must verify the
+immutable manifest, authenticated page-token bindings, page order, row and
+scope digests, cardinality, continuation receipts, atomic SQLite output,
+empty pending queue, complete provenance, read-only reopen, SQLite integrity,
+local digest recomputation, and absence of required WAL or shared-memory
+sidecars. The first authenticated connect must validate the receipt and issue
+normal client-bound continuation state. Seed contents never grant
+authorization and never create a second sync mode.
+
+### Clean Installation
+
+Installation evidence must use a clean PostgreSQL 18 database and the
+pgrx-generated `synchro_pg` `0.3.0` baseline in the fixed `synchro` schema.
+It must prove generated SQL regeneration without drift, ownership, default
+denials, exact role grants, publication, logical slot, triggers, readiness,
+and contract functions as non-superuser runtime roles. The pgrx source is the
+sole installation source. A hand-maintained or stale parallel SQL artifact is
+not accepted.
+
+## Client Lifecycle and Platform Evidence
+
+Each required Swift and Kotlin support cell must execute the shared scenario
+corpus against the exact candidate artifacts. The scenarios must use public
+local SQL and real local SQLite and must include empty startup, schema-only
+seed, portable-data seed, offline write before connect, push before pull,
+response loss, retry, background and foreground transitions, stop and restart,
+process death, scope reassignment, schema change with queued mutation,
+checksum failure, rebuild interruption, and rejection inspection.
+
+Process death must be injected before and after queue insertion, queue
+resolution, local page apply, cursor commit, checksum commit, rebuild page
+state, final rebuild state, schema migration state, and rejection persistence.
+The recovered database must match the independent model without lost intent,
+duplicate intent, false health, false finality, or illegal state transition.
+
+React Native must pass the bridge scenario corpus on both required iOS and
+Android cells. It must prove public API, typed status, event, and error parity
+without introducing a third sync engine.
+
+## Executable Performance and Soak Gates
+
+Every performance budget is authored before execution and is evaluated by a
+command that exits nonzero on a missing or violated budget. The evidence must
+include raw measurements, metric definitions, data profile, support cell,
+artifact hashes, and budget ID. Required request budgets are:
+
+- warm connect: exactly one HTTP request
+- steady state without pending mutations: exactly one pull request per cycle
+- steady state with pending mutations: exactly one push and one pull per cycle
+- rebuild: only the explicit rebuild page requests returned by the server,
+  with no schema fetch round trip
+- core sync path: no outbound network or RPC client for a separate sync tier
+
+Every request budget value is derived from complete typed request-class counts,
+returned rebuild-page counts, or outbound RPC-hop counts rather than a reported
+scalar alone. Release performance evidence must also complete every authored required
+characterization for fanout, shared-scope behavior, rebuild cost by scope size,
+schema-check cost, seeded and empty startup, queue replay, rebuild apply, and
+multi-scope provenance. These records report the frozen metric set and minimum
+sample count for every explicit workload stratum. Each claimed sample has a
+unique observation containing every authored metric value; counts without
+observations and aggregate replacement of strata are invalid. These records do
+not pretend an unapproved latency threshold exists.
+Positive configured limits for pull, rebuild, compaction, backfill, fanout, and
+impact rows are tested at valid and invalid boundaries.
+
+The RC gate must execute a 72-hour randomized soak with recorded replay seeds,
+real candidate artifacts, and zero unexplained model divergence. It must also
+execute a real consumer application canary covering offline use, process
+death, backgrounding, upgrade, seed continuation, and conflict behavior over
+the canary period. A planned soak or canary does not satisfy this gate.
 
 ## Exact-Artifact Promotion
 
-Release packages retain the final version number and are associated with an RC candidate ID. They are built once into staging, hashed, and installed into clean consumer environments. Every required support cell tests those exact files.
+Final package metadata remains version `0.3.0`. A candidate ID identifies the
+certification run; it does not create a second package version.
 
-After approval, the final tag points to the unchanged candidate commit and publication promotes the exact tested bytes. Published hashes must match tested hashes. Any source, package metadata, build input, or artifact change invalidates the candidate and requires a new build and complete verification run.
+The release pipeline must:
 
-## Release Decision
+1. build the extension archive and pgrx-generated installation SQL, Go adapter
+   binaries, Swift package inputs and CocoaPods metadata, Kotlin Maven
+   artifacts, React Native `0.83.x` npm tarball, seed artifacts, SBOMs, and
+   provenance attestations once into staging;
+2. calculate SHA-256 hashes before any support-cell test;
+3. install those exact bytes into clean PostgreSQL, native, bridge, and
+   consumer environments;
+4. run every required support cell, conformance scenario, negative control,
+   mutation gate, performance budget, and operational gate against those bytes;
+5. recalculate hashes after testing and require equality with the staged
+   hashes; and
+6. publish only the unchanged staged bytes after approval.
 
-The release gate computes eligibility from validated evidence for every authored requirement and required support cell. Missing evidence, a required skip, an unexplained flake, an unresolved blocking finding, or an artifact mismatch causes a nonzero exit status.
+Any source, package metadata, build input, generated SQL, dependency lockfile,
+or artifact change invalidates the candidate and requires a new build and a
+complete verification run. The final tag must point to the unchanged
+certified commit. Published artifact hashes must equal tested artifact hashes.
 
-The current handwritten test inventory and fixture corpus are not release certification. Generated evidence becomes authoritative only after the verification pipeline executes the complete contract against a candidate.
+Consumer applications must resolve packaged artifacts, not workspace source
+paths or unbuilt local modules.
+
+Every primary artifact resolves exactly once to
+`conformance/artifacts/inventory.json`, carries release and package version
+`0.3.0`, and contains one or more hashed payloads. The inventory is exactly the
+independent conformance runner, PostgreSQL extension archive, generated
+installation SQL, adapter, seed tool, Swift SPM bundle, CocoaPods metadata,
+Kotlin Maven bundle, React Native npm tarball, and portable seed. Every file
+uses a normalized repository-relative path with no traversal, and no two
+artifacts, evidence records, evidence attachments, attestations, or bundles may
+claim one file path across the complete candidate bundle.
+Each primary artifact has exactly one SBOM and one
+provenance attestation bound to its artifact ID and exact payload
+path-and-digest set. An SBOM declares SPDX JSON or CycloneDX JSON with the
+matching media type; provenance declares SLSA provenance v1 in an in-toto JSON
+envelope. Each attestation and its Sigstore bundle are content-addressed, and
+the manifest records verification by GitHub Actions OIDC issuer
+`https://token.actions.githubusercontent.com` and the approved workflow identity
+`https://github.com/trainstar/synchro/.github/workflows/release.yml@refs/tags/v0.3.0`,
+plus verification time and record URI. The verified bundle must contain and
+bind the attestation SHA-256, the exact artifact payload path-and-digest subject
+set, and successful Rekor inclusion verification. Changing an attestation,
+payload, certificate identity, or signed subject without a new valid bundle
+invalidates the candidate. A file merely labeled as an SBOM or provenance
+record is not an attestation.
+
+## Immutable RC Evidence
+
+The RC manifest, evidence records, generated inventory, artifact manifest,
+logs, traces, seeds, and attestations are immutable after generation. A failed
+attempt remains linked to every later attempt, and a later result cannot erase
+or rewrite it. Any change to the contract snapshot, candidate source, build
+input, artifact bytes, or evidence record creates a new candidate identity.
+
+## No-Skip and No-Flake Policy
+
+Every required test and support cell must execute. Skipped, ignored, filtered,
+quarantined, expected-failure, disabled, or environment-substituted required
+tests block the candidate. A retry that turns a failure into green does not
+erase the original attempt and is permitted only under the typed, approved,
+unchanged-artifact infrastructure lineage rules above. A semantic failure
+requires remediation and a new candidate rather than a rerun disposition.
+Required tests must have zero unexplained flakes.
+
+Randomized executions must record their seeds and barrier schedules. Every
+production defect must become a permanent minimized scenario. Failed attempts,
+logs, traces, and diagnoses remain in the immutable evidence bundle.
+
+## Findings and Release Eligibility
+
+The release gate requires:
+
+- zero unresolved critical findings
+- zero unresolved high findings
+- zero unexplained release-critical mutation survivors
+- zero missing requirement proof records
+- zero missing required support-cell records
+- zero skipped, filtered, ignored, quarantined, or unexplained flaky tests
+- zero artifact hash mismatches
+- zero contract snapshot, protocol version, ADR status, or vector-set hash
+  mismatches
+- zero unexplained divergence in the required soak and consumer canary
+
+Security and authorization evidence may be access-controlled, but public
+release metadata must state its scope and disposition without exposing
+sensitive exploit detail, credentials, payloads, or identity data.
+
+## Generated Inventory and Release Decision
+
+The evidence tool generates the inventory from the requirements catalog,
+support matrix, scenario catalog, vector set, fault catalog, performance
+budgets, exact-artifact manifest, and executed evidence. It must not read a
+handwritten `covered` claim as proof.
+
+Each inventory row binds requirement ID, proof type, scenario ID, support cell,
+protocol version, contract snapshot, result, artifact hashes, environment,
+attempt history, logs, traces, seed, and linked negative control. The tool
+must reject missing records, stale hashes, missing proof types, missing
+negative controls, unresolved attempts, and any status that is not backed by
+an executed evidence record.
+
+Eligibility is computed by the verification pipeline and represented by its
+exit status. Missing evidence, a required skip, unexplained flake, failed
+negative control, surviving release-critical mutant, unresolved critical or
+high finding, contract mismatch, performance-budget failure, soak divergence,
+or artifact mismatch produces a nonzero exit status.
+
+The RC manifest and all generated evidence are immutable and retained with
+their content hashes, logs, traces, SBOMs, and attestations. Only the exact
+candidate whose immutable evidence passes every gate may be promoted. No
+manual readiness statement can override a failed or missing gate.
+
+## Required Makefile Targets
+
+Release verification runs through Makefile targets:
+
+```bash
+make verify-contract
+make test-conformance
+make test-blackbox
+make test-rust-core
+make test-rust-pg
+make test-adapter
+make test-swift
+make test-kotlin
+make test-rn
+make rc-check-pg18
+make release-check
+make evidence
+make docs-build
+```
+
+The RC gate must fail if any required target is absent, broken, skipped, or
+replaced by a direct language test command.

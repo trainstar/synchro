@@ -1,507 +1,1067 @@
 ---
 title: Schema Evolution
-description: Canonical schema manifests, compatibility classes, and rollout rules.
+description: Protocol version 3 schema, registration, lineage, and migration contract.
 ---
 
 # Schema Evolution
 
-## Purpose
+## Scope And Authority
 
-This document defines how Synchro handles schema discovery, schema compatibility, local migration, and rebuild during structural change.
+This document is the Protocol version 3 contract for registered relations,
+schema manifests, schema lineage, local SQLite materialization, and schema
+migration. The PostgreSQL extension is the schema authority. The adapter
+forwards canonical extension results and does not classify schema changes,
+construct manifests, or reinterpret schema errors.
 
-The goal is:
+The protocol has four independent version surfaces:
 
-- low startup cost
-- low protocol chatter
-- safe rollouts across multiple client versions
-- automatic local migration for synced tables where possible
-- explicit rebuild when structure or semantics require it
+| Surface | Authority | Meaning |
+| --- | --- | --- |
+| `protocol_version` | Protocol contract | The supported wire contract. This document applies only when the value is `3`. |
+| Schema reference | Immutable manifest record | The client-visible table, field, type, composition, and local-index contract. A reference is the exact pair `(version, hash)`. |
+| `scope_set_version` | Assignment state | The authoritative assigned scope set for one client. It does not identify a schema. |
+| `membership_generation` | Scope materialization state | The membership rule and materialized-edge generation for one affected scope. It does not identify a schema. |
 
-## Core Position
+The server owns every schema compatibility decision. A client can only apply a
+server-issued action. A client never derives compatibility from a version
+number, a table name, a field name, a physical PostgreSQL type, or local DDL.
 
-Synchro should treat schema evolution as a first-class product feature, not an afterthought.
+The following terms are normative:
 
-The system should be better than alternatives by making schema change:
+- A **relation** is a registered PostgreSQL source relation.
+- A **table** is one client-visible logical synced table represented by one
+  relation in a manifest.
+- A **field** is one client-visible column of a logical table.
+- A **manifest** is one immutable stored schema record and its canonical
+  client-visible definition.
+- A **schema reference** is an exact manifest `version` and `hash` pair.
+- A **scope** is a server-defined selective-sync unit identified by `scope_id`.
+- A **generation** is a positive server-issued value that is never reused for a
+  different state.
 
-- predictable
-- explicit
-- cheap in the normal case
-- non-destructive when older clients still exist
+Every manifest version and generation exposed as a JSON integer is at most
+`9007199254740991`, so Swift, Kotlin, Go, Rust, and JavaScript preserve it
+exactly. Allocation fails before overflow; no counter wraps or changes sign.
+Authenticated opaque-token payloads encode their specified unsigned counters as
+canonical decimal strings instead.
 
-## Versioning Layers
+## Registered Relation Identity
 
-Synchro uses separate version surfaces for separate concerns.
+### Logical Identity
 
-### Protocol Version
+Each physical relation is registered as `synced` or `capture_dependency` and
+receives an immutable `relation_id`. When a synced relation is first registered,
+the server also issues immutable client-visible logical IDs:
 
-The protocol version defines wire compatibility.
+| ID | Scope | Rule |
+| --- | --- | --- |
+| `relation_id` | Registered source relation | Identifies the server-side relation contract. |
+| `table_id` | Client-visible table | A Protocol version 3 synced relation represents exactly one logical table. |
+| `field_id` | Field within one table | Identifies one client-visible field. |
 
-It changes only when the HTTP and JSON contract changes incompatibly.
+Logical IDs are opaque server-issued strings. They are never derived from
+human-readable names, never reassigned, and never changed in place. A table or
+field name is descriptive manifest data, not a row identity key. A field or
+table rename is a schema transition, not a mutation of an existing logical ID.
 
-### Schema Version And Hash
+A `capture_dependency` relation has no client table or fields in the schema
+manifest and is never a push, pull, rebuild, or seed target. Registration stores
+only its qualified physical identity, complete capture key, captured fields
+needed by declared impact functions, replica identity, trigger-fence state, and
+dependent scope rules. Its projected rows are protected internal state.
 
-The schema version and hash define the client-visible synced data shape and related local materialization contract.
+### Physical Identity
 
-They change when the client must understand a different synced schema shape or local materialization rule.
+Each validated registry generation stores this immutable physical relation
+identity for each `relation_id`:
 
-### Scope Set Version
+```text
+physical_schema
+physical_relation
+physical_relation_oid
+replica_identity
+capture_key_column
+primary_key_field_id for synced registrations
+primary_key_type
+```
 
-`scope_set_version` tracks authoritative scope assignment changes for one client.
+`physical_schema` and `physical_relation` are exact PostgreSQL catalog names.
+Catalog lookup, publication membership, relation hydration, function
+resolution, trigger installation, and WAL decoder lookup use the qualified
+identity. `search_path`, a bare relation name, and a name-only publication
+check are invalid lookup mechanisms. `physical_relation_oid` detects a drop and
+recreate at the same qualified name.
 
-It does not represent structural schema change.
+Two relations with the same unqualified name in different schemas are distinct
+relations. A registration request that does not identify exactly one qualified
+physical relation fails with `invalid_registration` and reason
+`ambiguous_physical_relation`.
 
-### Rebuild State
+## Registration Contract
 
-Rebuild state is per scope.
+Registration creates a validated pending registry generation. It becomes active
+only when the complete generation, its manifest, required capture triggers,
+scope functions, dependencies, and positive bounds have validated and committed
+atomically. A relation is never active with partially validated metadata.
 
-It represents data re-materialization requirements, not protocol or structural schema versioning.
+For a synced relation, registration defines one resolved synced projection. The projection contains
+only client-visible fields. Server-only physical columns are absent from the
+manifest, pull rows, push rows, rebuild rows, and portable seeds. Every synced
+field has one immutable `field_id`, one canonical portable type, nullability,
+and writability. The primary-key and server-owned lifecycle fields are included
+in the projection and are not writable.
 
-## Canonical Schema Model
+### Primary Key And Replica Identity
 
-The server should expose a canonical portable schema manifest for synced tables.
+A Protocol version 3 registration has exactly one primary-key column. The
+column is non-null, is the sole member of the relation's declared primary-key
+constraint, is part of the synced projection, and has portable type `string`,
+`int`, or `int64`.
 
-The manifest should not be raw PostgreSQL DDL.
+The only accepted PostgreSQL replica identity is `DEFAULT` backed by that
+validated primary key. `FULL`, `NOTHING`, and `USING INDEX` are invalid.
 
-It should be a transport-friendly structural model that future adapters and clients can implement consistently.
+The registry rejects all of the following:
 
-At minimum, the schema manifest should define:
+- no primary key
+- a nullable primary-key column
+- more than one primary-key column
+- an expression key
+- a partial key
+- a non-primary unique index offered as a key
+- a primary key with a portable type other than `string`, `int`, or `int64`
+- a replica identity other than `DEFAULT` backed by the validated primary key
 
-- synced table names
-- primary keys
-- updated-at semantics
-- deleted-at or soft-delete semantics where applicable
-- columns
-- portable column types
-- nullability
-- local composition class, for example single-scope or multi-scope
-- recommended local indexes where needed for expected query performance
+The primary-key field ID and its declared portable type define every typed row
+identity. An update patch never writes the primary-key field. The mandatory
+source trigger also rejects direct SQL `UPDATE` that changes the key value before
+version allocation, fence state, logical-message emission, or source-row change.
+Identity movement requires an explicit delete and insert under normal policy and
+version rules.
 
-## Table Registration And Column Selection
+### Deterministic Membership Registration
 
-The server defines the synced shape for each registered PostgreSQL table.
+Each synced relation has one registered membership function bound to its `relation_id`,
+`table_id`, exact primary-key SQL type, immutable function identity, declared
+dependencies, and positive fanout and impact bounds. Its conceptual signature
+is:
 
-For an existing table, the preferred contract is an explicit synced column set at registration time.
+```text
+membership_function(p_row_key <registered primary-key SQL type>)
+  RETURNS SETOF text
+```
 
-That means:
+The result is the complete set of `scope_id` values containing the row in the
+worker's final commit-ordered projected state for that source transaction.
+Every returned scope ID is non-null and valid. Duplicate values are removed and
+the retained set is ordered by unsigned UTF-8 byte comparison before edge
+materialization.
 
-- the PostgreSQL table may contain additional server-only columns
-- the registered synced shape names the columns that replicate to clients
-- the schema manifest contains only that resolved synced shape
-- pull, push, rebuild, and seed export all use the same resolved synced shape
+Every dependency outside the source relation has a registered impact function:
 
-Synchro should not require shadow tables just to sync a subset of columns from an existing PostgreSQL table.
+```text
+impact_function(p_old_row jsonb, p_new_row jsonb)
+  RETURNS SETOF synchro_row_ref
+```
 
-Recommended registration surfaces:
+`p_old_row` is null for an insert and `p_new_row` is null for a delete. Each
+returned `synchro_row_ref` contains the declared target `table_id`, a primary-key
+type of `string`, `int`, or `int64`, and the typed primary-key value to
+reevaluate. The impact contract covers old and new dependency state. A
+revocation, deletion, reassignment, or parent change that can remove membership
+must identify removed as well as added members.
 
-- `p_sync_columns` as the primary contract when the synced shape is a subset of the table
-- `p_exclude_columns` only as convenience when most columns sync and a few should not
+Membership, impact, and assignment functions are schema-qualified `LANGUAGE
+SQL`, `STABLE`, and `SECURITY INVOKER`. Impact functions receive captured old
+and new dependency images. Membership functions can access only declared,
+schema-qualified extension projection views for synchronized rows and
+capture-only dependencies in the worker's current materialization transaction.
+They never read live application relations. They cannot depend on volatile
+values, session identity, session settings, temporary objects, sequence state,
+random values, wall-clock time, or dynamic SQL.
 
-Those two inputs are mutually exclusive. The server resolves them to one authoritative synced column set.
+The validator verifies each exact signature and return type, every declared
+dependency, required impact function, privilege, bound, and referenced field.
+All configured fanout, impact, pull, rebuild, and backfill bounds are positive
+integers within their configured maximum. A failed function evaluation, an
+undeclared dependency, a bad result type, a null or invalid scope ID, or an
+exceeded bound blocks capture. It is never interpreted as an empty membership or
+impact result.
 
-Required sync columns must still be present in that set:
+### Registration Errors
 
-- primary key
-- `updated_at` when the table uses update timestamps
-- `deleted_at` when the table uses soft delete semantics
-
-Example shape:
+Administrative registration errors use this shape and contain no row payload:
 
 ```json
 {
-  "version": 8,
-  "hash": "8b21d2a1",
+  "error": {
+    "code": "invalid_registration",
+    "reason": "unsupported_primary_key_type",
+    "relation_id": "optional logical relation ID",
+    "field_id": "optional logical field ID"
+  }
+}
+```
+
+`relation_id` and `field_id` are present only when already assigned. `reason`
+is exactly one of:
+
+```text
+ambiguous_physical_relation
+missing_primary_key
+nullable_primary_key
+composite_primary_key
+partial_primary_key
+unsupported_primary_key_type
+unsupported_replica_identity
+invalid_scope_function
+undeclared_dependency
+invalid_limit
+```
+
+Administrative entry points reject an invalid bound with SQLSTATE `22023`. A
+wire request with an invalid positive limit returns HTTP 400 `invalid_request`.
+
+## Canonical Schema Model
+
+The schema manifest is a portable structural model. It is not PostgreSQL DDL,
+does not expose physical schema or relation names, and does not expose
+server-only columns. Pull, push, rebuild, local SQLite migration, integrity
+validation, and seed generation use the same resolved manifest.
+
+The canonical schema definition has this shape:
+
+```json
+{
+  "schema_version": 42,
+  "schema_hash": "5dc97fc5ea571dd7555d877e08cecc102113c6efd63976d37d498341c8b32d51",
+  "parent_schema": {
+    "version": 41,
+    "hash": "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+  },
+  "transition_class": "class_3",
+  "compatibility_floor": 42,
   "tables": [
     {
+      "table_id": "tbl_documents",
+      "relation_id": "rel_documents",
       "name": "documents",
-      "primary_key": ["id"],
-      "updated_at_column": "updated_at",
-      "deleted_at_column": "deleted_at",
-      "composition": "single_scope",
-      "columns": [
-        { "name": "id", "type": "string", "nullable": false },
-        { "name": "user_id", "type": "string", "nullable": false },
-        { "name": "name", "type": "string", "nullable": false },
-        { "name": "updated_at", "type": "datetime", "nullable": false },
-        { "name": "deleted_at", "type": "datetime", "nullable": true },
-        { "name": "started_at", "type": "datetime", "nullable": true }
+      "composition": "multi_scope",
+      "primary_key_field_id": "fld_documents_id",
+      "lifecycle": {
+        "created_at_field_id": null,
+        "updated_at_field_id": null,
+        "deleted_at_field_id": null
+      },
+      "fields": [
+        {
+          "field_id": "fld_documents_amount",
+          "name": "amount",
+          "type": "decimal",
+          "nullable": false,
+          "writable": true,
+          "precision": 18,
+          "scale": 4
+        },
+        {
+          "field_id": "fld_documents_id",
+          "name": "id",
+          "type": "string",
+          "nullable": false,
+          "writable": false
+        }
       ],
       "indexes": [
-        { "name": "idx_documents_started_at", "columns": ["started_at"] }
+        {
+          "index_id": "idx_documents_amount",
+          "name": "idx_documents_amount",
+          "field_ids": ["fld_documents_amount"],
+          "unique": false
+        }
       ]
     }
   ]
 }
 ```
 
-## What Counts As Schema Change
-
-Schema version and hash should change only for client-observable structural change.
-
-Examples that should change schema version and hash:
-
-- add or remove synced table
-- add or remove synced column
-- change column type or nullability in a client-visible way
-- change local composition class for a table
-- change local index recommendations that the client is expected to apply
-
-Examples that should not require schema version change by themselves:
-
-- server-only write validation logic
-- server-only auth policy changes
-- scope assignment changes for one client
-- row membership changes that require rebuild but do not change local table shape
-
-Those should use scope rebuild or normal incremental sync, not fake schema version bumps.
-
-## Schema Change Classes
-
-Schema evolution should be classified into a small number of operational classes.
-
-### Class 1: Server-Only Change
-
-Examples:
-
-- write policy adjustment
-- auth policy adjustment
-- server-side conflict rule refinement
-
-Expected action:
-
-- no schema action
-- no local DDL
-- optional rebuild only if materialized membership semantics changed
-
-### Class 2: Compatible Additive Change
-
-Examples:
-
-- add nullable column
-- add optional synced table
-- add local index
-
-Expected action:
-
-- `replace` or `fetch`
-- local DDL update
-- rebuild only affected scopes if existing rows must be materialized under the new shape
-
-### Class 3: Compatible But Rebuild-Requiring Change
-
-Examples:
-
-- change table from single-scope to multi-scope composition
-- change membership semantics for a scope-backed table
-- add an existing synced table with historical rows that must appear locally
-
-Expected action:
-
-- `rebuild_local`
-- apply schema update
-- rebuild affected scopes explicitly
-
-### Class 4: Incompatible Structural Change
-
-Examples:
-
-- drop column that older clients may still read or write
-- rename column in place
-- change type incompatibly in place
-- remove table still used by live clients
-
-Expected action:
-
-- use phased rollout instead of in-place breakage
-- if compatibility cannot be preserved, return `unsupported`
-
-## Connect-Time Schema Decision
-
-Schema compatibility is decided during `POST /sync/connect`.
-
-The server is authoritative and returns one of:
-
-- `none`
-- `fetch`
-- `replace`
-- `rebuild_local`
-- `unsupported`
-
-### `none`
-
-Use when the client schema is already acceptable.
-
-### `fetch`
-
-Use when the client needs the canonical schema but the server wants to avoid returning a large schema body in the `connect` response.
-
-This is a bandwidth optimization only.
-
-It must not change semantics.
-
-### `replace`
-
-Use when the client can apply the new schema locally and then continue normal sync.
-
-### `rebuild_local`
-
-Use when the client must apply schema changes and then rebuild affected local synced state before normal incremental pull can safely resume.
-
-### `unsupported`
-
-Use when the client app or client runtime is too old to safely operate against the new server-side contract.
-
-## Client Migration Rules
-
-### Synchro Owns Synced-Table DDL
-
-For synced tables, Synchro should own local SQLite structural migration from the canonical schema manifest.
-
-This reduces drift between server and client.
-
-Applications may still own:
-
-- local-only tables
-- local-only indexes
-- local-only views
-- app-specific caches unrelated to synced-table correctness
-
-### Migration Ordering
-
-When schema action is not `none`, the client should:
-
-1. pause normal push and pull
-2. persist migration intent durably
-3. apply schema DDL locally
-4. update schema version and hash metadata
-5. rebuild affected scopes if required
-6. resume normal sync
-
-### Migration Atomicity
-
-Where local SQLite behavior allows it, schema migration and schema metadata update should be transactional.
-
-If fully transactional migration is not possible, the client must persist enough durable progress state to resume safely after crash.
-
-## Queue Compatibility Rules
-
-Schema evolution must not silently invalidate queued local mutations.
-
-### Required Rule
-
-If a queued mutation targets a table or column being removed or changed incompatibly, the server should not force the client through that breakage invisibly.
-
-The rollout must instead be one of:
-
-- phased compatible rollout
-- authoritative rejection with explicit inspectable reason
-- `unsupported` response requiring app upgrade
-
-### Best Practice
-
-Destructive schema changes should use expand-then-contract rollout:
-
-1. add new shape compatibly
-2. dual-read or dual-write as needed
-3. backfill
-4. migrate active clients
-5. remove old shape only after old clients are retired
-
-## Scope And Schema Interaction
-
-Scope semantics and schema semantics are related, but they are not the same thing.
-
-### Scope Change Without Schema Change
-
-Examples:
-
-- move a row from one scope instance to another
-- change who is assigned a scope
-- change public versus private membership logic without changing local table shape
-
-Expected handling:
-
-- normal incremental sync if possible
-- explicit scope rebuild when needed
-- no structural schema version bump just to signal data movement
-
-### Schema Change Affecting Scope Composition
-
-If a table changes from single-scope to multi-scope composition, or vice versa, that is a structural local materialization change.
-
-That should bump schema version and usually require `rebuild_local`.
-
-## Seeded And Preinitialized Databases
-
-Seeded databases must carry:
-
-- schema version
-- schema hash
-- local metadata version if distinct
-- continuation metadata for any bundled portable scopes
-
-At first `connect`, the server compares those values exactly as it would for any other client.
-
-Seeded databases are warm caches only.
-
-They do not relax schema compatibility rules.
-
-Current release surface:
-
-- `api/go/cmd/synchro-seed` generates a client-compatible SQLite seed from the canonical `synchro_schema_manifest()` output plus any server-declared portable scopes
+Every definition contains these required semantics:
+
+- `schema_version` is a positive, never-reused manifest version.
+- `schema_hash` is exactly 64 lowercase hexadecimal characters representing the
+  manifest SHA-256 digest.
+- `parent_schema` is `null` for the initial manifest and otherwise contains the
+  exact immutable parent version and hash.
+- `transition_class` is exactly `initial`, `class_2`, `class_3`, or `class_4`.
+  Class 1 does not publish a manifest.
+- `compatibility_floor` is the positive version number of the earliest manifest
+  in the current contiguous Class 2 lineage.
+- `tables` contains every registered logical table exactly once.
+- A table contains immutable `table_id` and `relation_id`, one current local
+  `name`, explicit `composition`, exactly one `primary_key_field_id`, and every
+  synced field exactly once.
+- A field contains immutable `field_id`, its current local `name`, one canonical
+  `type`, `nullable`, and `writable`.
+- A `decimal` field contains positive `precision` and an integer `scale` in the
+  inclusive range `0..precision`. Non-decimal fields omit `precision` and
+  `scale`.
+- A lifecycle member is either the field ID of the declared lifecycle field or
+  `null` when that lifecycle field is not declared. A declared lifecycle field
+  has type `datetime` and `writable: false`.
+- `indexes` is the complete client-owned index set for the table. Each index has
+  an immutable `index_id`, a local `name`, an ordered nonempty `field_ids` list,
+  and `unique`. Index field order is semantic and is not sorted.
+
+The collections `tables`, `fields`, and `indexes` are semantically unordered
+and are canonicalized in unsigned UTF-8 byte order by `table_id`, `field_id`,
+and `index_id`. A field's `name`, a table's `name`, and an index's `name` do not
+replace its immutable ID in canonical ordering, row identity, mutation identity,
+or migration bookkeeping.
+
+## Immutable Manifest Body, Hash, And Lineage
+
+A published manifest is one immutable record containing:
+
+```text
+schema_version
+schema_hash
+canonical_manifest_body
+parent_schema
+transition_class
+compatibility_floor
+```
+
+`canonical_manifest_body` contains `schema_version`, `parent_schema`,
+`transition_class`, `compatibility_floor`, and the complete client-visible
+definition shown above, excluding `schema_hash`. The initial manifest has
+`parent_schema: null` and `transition_class: "initial"`. Every later manifest
+records the exact schema reference of its immediate immutable parent. Versions
+advance monotonically in this stored lineage and are never reused. A client or
+server never infers the parent from numeric version order alone.
+
+`transition_class` is the deterministic Class 2, Class 3, or Class 4 transition
+from the parent manifest. Class 1 does not mint a manifest. The initial record
+uses `initial`. `compatibility_floor` is the earliest manifest version reachable
+through the current contiguous sequence of Class 2 transitions. It equals the
+manifest's own version after an initial, Class 3, or Class 4 boundary. The
+immutable manifest history resolves that version to its exact hash. The server
+evaluates the complete known lineage between a client reference and the current
+reference. It never decides compatibility from `compatibility_floor` or version
+ordering alone.
+
+The record body, hash, version, parent reference, transition class,
+compatibility floor, table IDs, field IDs, composition, and index definitions
+are inserted atomically. No member of a published record is updated in place.
+Historical references always resolve to their original immutable record. A live
+catalog query is never substituted for a historical manifest.
+
+The schema hash is:
+
+```text
+SHA-256(
+  ASCII("synchro:v3:schema-manifest:v1") || 0x00 ||
+  RFC8785_UTF8(canonical_manifest_body)
+)
+```
+
+The manifest body is canonicalized with RFC 8785 after every semantically
+unordered collection is sorted by immutable logical ID. The hash input excludes
+`schema_hash` and operational values such as generation time. The server reads
+the body, hash, and version from the same immutable record. A live body paired
+with a stored hash or version is invalid.
 
 ## Portable Type System
 
-The schema manifest uses one canonical portable logical type enum.
+The only Protocol version 3 manifest types are:
 
-Allowed manifest types:
+```text
+string
+int
+int64
+decimal
+float
+boolean
+datetime
+date
+time
+json
+bytes
+```
 
-- `string`
-- `int`
-- `int64`
-- `float`
-- `boolean`
-- `datetime`
-- `date`
-- `time`
-- `json`
-- `bytes`
+A manifest `type` is exactly one value from this list. The server never emits a
+database type name, parameterized type spelling, array annotation, alternate
+case, or type alias in a manifest. A client rejects a manifest with any other
+type value. Registration resolves each synced physical field to one of these
+types before activation. A source value that cannot be represented by its
+declared portable type is invalid for the registered projection.
 
-The server must emit only those canonical names in `synchro_schema_manifest()`.
+`decimal` and `float` are distinct. Exact base-10 values use `decimal`; binary
+floating-point values use `float`. PostgreSQL `numeric` and `decimal` values
+map to `decimal`, never `float`.
 
-### PostgreSQL To Portable Mapping
+### Canonical Wire Values
 
-| PostgreSQL source type | Portable manifest type |
+| Type | Canonical wire value |
 | --- | --- |
-| `uuid`, `text`, `varchar`, `character varying`, `character` | `string` |
-| `smallint`, `integer` | `int` |
-| `bigint` | `int64` |
-| `numeric`, `numeric(p,s)`, `decimal`, `real`, `double precision` | `float` |
-| `boolean` | `boolean` |
-| `timestamp with time zone`, `timestamp without time zone` | `datetime` |
-| `date` | `date` |
-| `time`, `time without time zone` | `time` |
-| `interval`, network types, XML, geometric types, range types | `string` |
-| `json`, `jsonb` | `json` |
-| PostgreSQL arrays such as `text[]`, `integer[]`, `uuid[]` | `json` |
-| `bytea` | `bytes` |
+| `string` | JSON string containing valid Unicode scalar values. No Unicode normalization occurs. |
+| `int` | JSON integer in `[-2147483648, 2147483647]`, with no fraction or exponent. Zero is `0`, never `-0`. |
+| `int64` | JSON string containing a base-10 signed 64-bit integer with no leading `+`, no leading zero except `0`, and no negative zero. |
+| `decimal` | JSON string containing canonical exact decimal text. |
+| `float` | Finite JSON number representing IEEE 754 binary64 with RFC 8785 number serialization. NaN and infinities are invalid; negative zero is canonical positive zero. |
+| `boolean` | JSON `true` or `false`. |
+| `datetime` | JSON UTC string with exactly microsecond precision: `YYYY-MM-DDTHH:MM:SS.ffffffZ`. Leap seconds and non-UTC offsets are invalid. |
+| `date` | JSON string `YYYY-MM-DD` containing a valid Gregorian date. |
+| `time` | JSON string with exactly microsecond precision: `HH:MM:SS.ffffff`. Leap seconds and time-zone suffixes are invalid. |
+| `json` | JSON string whose decoded content is one complete I-JSON value in RFC 8785 canonical UTF-8 form. |
+| `bytes` | JSON string containing unpadded RFC 4648 base64url. Noncanonical encodings are invalid. |
+
+Canonical decimal text has no exponent, leading `+`, leading zero in a nonzero
+integer part, trailing fractional zero, trailing decimal point, or negative
+zero. Precision and scale are validated against the field declaration before
+canonicalization. Decimal arithmetic and conversion use an exact decimal
+implementation. A decimal value never passes through binary floating point.
+
+The decoded content of a `json` value has unique object member names and uses
+RFC 8785 ordering, escaping, and nested-number serialization. A value outside
+the I-JSON numeric domain is represented as a JSON string. An
+implementation-native object serializer is not a canonicalization algorithm.
 
 ### Portable To SQLite Mapping
 
-| Portable manifest type | SQLite column type |
+SQLite stores the manifest's logical type, not an inferred SQLite affinity. The
+client validates and binds values according to this table on every local write,
+server apply, migration copy, seed import, and readback used for protocol
+encoding or integrity verification.
+
+| Portable type | SQLite declaration | Binding and preservation rule |
+| --- | --- | --- |
+| `string` | `TEXT` | Bind and read UTF-8 text. |
+| `int` | `INTEGER` | Bind and read a signed 32-bit integer. |
+| `int64` | `INTEGER` | Bind and read a native signed 64-bit integer. The wire value remains text, and no bridge converts it through a binary64 or JavaScript number. |
+| `decimal` | `TEXT` | Bind and read canonical decimal text. Do not use `REAL`, `NUMERIC`, or floating-point conversion. |
+| `float` | `REAL` | Bind and read finite IEEE 754 binary64 values. |
+| `boolean` | `INTEGER` | Bind only `0` or `1`, and decode only those values as false or true. |
+| `datetime` | `TEXT` | Bind and read the canonical UTC microsecond string. |
+| `date` | `TEXT` | Bind and read the canonical date string. |
+| `time` | `TEXT` | Bind and read the canonical microsecond time string. |
+| `json` | `TEXT` | Bind and read the canonical JSON string without reparsing through an implementation-native serializer. |
+| `bytes` | `BLOB` | Bind and read raw bytes; encode base64url only at the wire boundary. |
+
+SQLite's signed `INTEGER` storage preserves every `int64` value when native
+64-bit bindings are used. `decimal` uses `TEXT` because SQLite numeric affinity
+can coerce exact decimal text to a lossy binary value. A client bridge carries
+`int64` as its canonical string or a native signed 64-bit value and carries
+`decimal` as canonical text. It never carries either value as an untyped JSON
+number.
+
+## Explicit Local Composition
+
+Every table declares exactly one `composition` value:
+
+| Value | Local materialization contract |
 | --- | --- |
-| `string` | `TEXT` |
-| `int` | `INTEGER` |
-| `int64` | `INTEGER` |
-| `float` | `REAL` |
-| `boolean` | `INTEGER` |
-| `datetime` | `TEXT` |
-| `date` | `TEXT` |
-| `time` | `TEXT` |
-| `json` | `TEXT` |
-| `bytes` | `BLOB` |
+| `single_scope` | At most one active scope provenance edge justifies a local row identity. |
+| `multi_scope` | More than one active scope provenance edge can justify the same local row identity. |
 
-### Alias Hardening
+`multi_scope` requires durable local provenance keyed by
+`(scope_id, table_id, typed_primary_key)`. Removing one provenance edge removes
+the local row only when no other valid edge remains. `single_scope` does not
+permit a client to infer or synthesize a second scope justification. The server
+is authoritative for every provenance edge.
 
-Clients should normalize older alias values such as `uuid`, `text`, `integer`, `numeric(5,1)`, `varchar(255)`, `text[]`, and `timestamp` to the canonical enum before local type mapping or destructive rebuild decisions.
+Composition is manifest data, not a client optimization hint. A client rejects
+a manifest with an absent or unknown composition value. A table's composition
+is part of local schema identity, migration planning, row cleanup, rebuild
+behavior, and schema hashing.
 
-That alias handling is defensive compatibility only.
+## Schema Change Classes
 
-The server contract itself is still canonical-only.
+The server assigns exactly one class to every change. Classification is derived
+from the parent and child manifest plus the membership materialization contract;
+an operator, client, or adapter cannot select a different class for the same
+transition.
 
-If a server-side type cannot be represented safely in the portable schema model, the server must either:
+Classification uses this ordered decision:
 
-- map it explicitly to a supported portable type, or
-- reject it as unsupported for synced-table materialization
+1. A change that leaves the current manifest unchanged is Class 1.
+2. A change that removes or renames a table or field, changes a field type or
+   primary-key identity, tightens nullability, or removes writability is Class 4.
+3. A remaining compatible change that requires authoritative historical
+   rematerialization is Class 3.
+4. A remaining additive or permissive compatible change that requires no
+   historical rematerialization is Class 2.
+5. Every remaining client-visible change is Class 4.
 
-## Rollout Patterns
+### Class 1: Server-Only Change
 
-### Preferred Pattern: Expand, Migrate, Contract
+A Class 1 change does not alter the client-visible schema definition. Examples
+include a server-side policy change and a membership rule or dependency change
+that leaves table shape and composition unchanged. Class 1 changes registry or
+membership state and do not mint a new schema manifest. For an exact schema
+reference, connect returns `none`.
 
-This should be the default guidance for all non-trivial schema evolution.
+A Class 1 membership change still advances the affected
+`membership_generation`, invalidates only the affected scope cursors, and
+requires those scopes to rebuild. It does not use a schema version bump to
+signal data movement.
 
-Example:
+### Class 2: Compatible Additive Change
 
-1. add `session_started_at`
-2. keep `started_at`
-3. dual-write or backfill
-4. update clients to read new field
-5. retire old field only after old clients are gone
+A Class 2 change is a client-visible additive change that requires no
+historical rematerialization. It mints a new immutable manifest. The complete
+path from the client manifest to the current manifest must contain only
+compatible Class 2 transitions for connect to return `replace`.
 
-### Avoid In-Place Rename
+Class 2 changes include these changes when they do not require historical
+materialization:
 
-Column rename should not be treated as a magical first-class sync diff.
+- add a nullable field with no required backfill
+- add an empty table
+- add a declared local index
+- change `nullable` from `false` to `true` or `writable` from `false` to `true`
+  while every earlier field and table contract remains valid
 
-In practice, a rename across real deployed clients behaves like add-new then retire-old.
+### Class 3: Compatible Rebuild-Requiring Change
 
-### Avoid In-Place Incompatible Type Change
+A Class 3 change preserves a representable client contract but requires
+authoritative local rematerialization for affected scopes. It mints a new
+immutable manifest. For one connect response, the server intersects the
+transition's affected scopes with that client's authoritative assigned set. A
+nonempty intersection returns `rebuild_local` with exactly that set; an empty
+intersection returns `replace` and forbids `affected_scopes`.
 
-Type changes that alter client serialization or queued mutation compatibility should use phased rollout, not forced in-place mutation of old clients.
+Class 3 changes include:
 
-## Performance Rules
+- add a table that already has authoritative rows
+- add a field whose historical values must be materialized
+- change `single_scope` to `multi_scope` or `multi_scope` to `single_scope`
+- change membership materialization in a way that changes local provenance or
+  requires a new local materialization contract
+- perform controlled physical relation reconfiguration, even when the logical
+  table and fields remain equivalent
 
-Schema evolution must preserve the performance goals from `00-principles`.
+A Class 3 manifest requiring a table, field, dependency, or projection value
+that the active materialized projections do not contain remains pending. Before
+publication, the server creates a permanent candidate logical slot through the
+replication protocol with an exported
+snapshot, stages the complete pending projections and membership state from
+that snapshot, consumes the slot in commit order through a transaction-end
+barrier also reached by the main worker, verifies the staged state, and
+atomically activates the manifest, registry, membership generations,
+projections, and affected-scope invalidation. Connect cannot return that
+manifest before activation, and rebuild never substitutes an independent live
+source query for this baseline.
 
-That means:
+Bootstrap state durably binds the permanent candidate slot, database, plugin,
+consistent point, imported snapshot, target manifest, catch-up barrier, and
+phase. Process death before activation either resumes from that exact slot and
+boundary or discards the complete stage and begins with a new slot and snapshot.
+It never exposes the target manifest, partially activates projections, or
+changes prior connect dispatch before one atomic verified activation.
 
-- schema checks should be cheap hash and version comparisons at `connect`
-- full schema bodies should be sent only when needed
-- local DDL should stay off the steady-state hot path
-- rebuild should target affected scopes only
-- schema change should not imply full local wipe unless correctness truly requires it
+### Class 4: Incompatible Structural Or Identity Change
 
-## Worked Examples
+A Class 4 change is incompatible with at least one earlier client schema. It
+mints a new immutable manifest and starts an incompatible lineage. Connect
+returns `unsupported` for a known history that crosses this boundary.
 
-### Example 1: Add Nullable Column
+Class 4 changes include:
 
-Change:
+- remove or rename a table or field
+- change a field's portable type
+- tighten a field from nullable to non-null
+- remove writability from a field that earlier manifests accepted as writable
+- change a primary-key field, primary-key type, or primary-key identity
 
-- add nullable `notes` column to `documents`
+Any client-visible transition not listed as Class 1, Class 2, or Class 3 is
+Class 4. An in-place rename and an incompatible in-place type conversion are
+Class 4 transitions.
 
-Expected handling:
+## Connect-Time Schema Decision
 
-- bump schema version and hash
-- `replace` or `fetch`
-- local SQLite adds column
-- no rebuild unless existing authoritative rows need special materialization treatment
+`POST /sync/connect` is the only operation that accepts a historical schema
+reference to select a schema action. Protocol compatibility is evaluated before
+schema lineage.
 
-### Example 2: Add Public Table With Existing Data
+The fresh schema sentinel is exactly:
 
-Change:
+```json
+{
+  "version": 0,
+  "hash": ""
+}
+```
 
-- add synced `template_categories` table with existing server rows
+Every non-fresh reference has a positive JSON integer `version` and a 64
+lowercase-hexadecimal-character `hash`. A reference with an invalid version or
+hash, a zero version other than the fresh sentinel, or an empty hash other than
+the fresh sentinel is malformed and returns HTTP 400
+`invalid_schema_reference`.
 
-Expected handling:
+The fresh sentinel is valid only when `client_generation` is absent and the
+authenticated client identity has no prior generation or installed schema. A
+continuing, restored, or expired client presents its actual installed schema.
+Pairing any generation with the sentinel, or omitting the generation for a
+previously known client identity, returns `400 invalid_schema_reference` before
+lineage dispatch. This cannot be used to bypass Class 4 `unsupported` or the
+explicit reset contract.
 
-- bump schema version and hash
-- apply schema locally
-- rebuild affected public scopes so historical rows appear
+For Protocol version 3, dispatch is exactly:
 
-### Example 3: Public And Private Union Refactor
+```text
+protocol incompatible -> HTTP 426 upgrade_required
+fresh sentinel with generation or prior client state -> HTTP 400 invalid_schema_reference
+fresh client identity and fresh schema sentinel -> HTTP 200 replace with inline current manifest
+exact current schema -> HTTP 200 none
+known lineage containing only compatible Class 2 transitions -> HTTP 200 replace with inline current manifest
+known lineage containing a Class 3 transition and no Class 4 transition, with affected assigned scopes -> HTTP 200 rebuild_local with inline current manifest and affected scopes
+known Class 3 lineage with no affected assigned scope -> HTTP 200 replace with inline current manifest
+unknown lineage or a lineage containing a Class 4 transition without explicit reset -> HTTP 200 unsupported
+valid explicit reset with assigned scopes -> HTTP 200 rebuild_local with inline current manifest and all assigned scopes
+valid explicit reset with no assigned scope -> HTTP 200 replace with inline current manifest
+```
 
-Change:
+`fetch` is not a Protocol version 3 action. Connect never emits `fetch`, and no
+follow-up schema endpoint participates in this state transition.
 
-- split `templates` from one coarse scope design into `templates_public` and `templates_user:<id>`
+The response `schema` object always contains exactly the current manifest
+reference and one action:
 
-Expected handling:
+```json
+{
+  "schema": {
+    "version": 42,
+    "hash": "5dc97fc5ea571dd7555d877e08cecc102113c6efd63976d37d498341c8b32d51",
+    "action": "rebuild_local"
+  },
+  "schema_definition": {
+    "schema_version": 42,
+    "schema_hash": "5dc97fc5ea571dd7555d877e08cecc102113c6efd63976d37d498341c8b32d51",
+    "parent_schema": {
+      "version": 41,
+      "hash": "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+    },
+    "transition_class": "class_3",
+    "compatibility_floor": 42,
+    "tables": [
+      {
+        "table_id": "tbl_documents",
+        "relation_id": "rel_documents",
+        "name": "documents",
+        "composition": "multi_scope",
+        "primary_key_field_id": "fld_documents_id",
+        "lifecycle": {
+          "created_at_field_id": null,
+          "updated_at_field_id": null,
+          "deleted_at_field_id": null
+        },
+        "fields": [
+          {
+            "field_id": "fld_documents_amount",
+            "name": "amount",
+            "type": "decimal",
+            "nullable": false,
+            "writable": true,
+            "precision": 18,
+            "scale": 4
+          },
+          {
+            "field_id": "fld_documents_id",
+            "name": "id",
+            "type": "string",
+            "nullable": false,
+            "writable": false
+          }
+        ],
+        "indexes": [
+          {
+            "index_id": "idx_documents_amount",
+            "name": "idx_documents_amount",
+            "field_ids": ["fld_documents_amount"],
+            "unique": false
+          }
+        ]
+      }
+    ]
+  },
+  "affected_scopes": ["scope_a", "scope_b"]
+}
+```
 
-- no fake global wipe
-- if local composition metadata changes, bump schema version
-- rebuild affected scopes
-- preserve local rows that still have valid provenance
+Action-specific members are exact:
 
-### Example 4: Breaking Rename
+| Action | Required members | Forbidden members |
+| --- | --- | --- |
+| `none` | `schema.version`, `schema.hash`, `schema.action` | `schema_definition`, `affected_scopes` |
+| `replace` | `schema_definition` containing the complete current immutable manifest | `affected_scopes` |
+| `rebuild_local` | `schema_definition` containing the complete current immutable manifest; nonempty `affected_scopes` | None of the required members can be omitted. |
+| `unsupported` | `schema.version`, `schema.hash`, `schema.action`, and `schema.reason` equal to `unknown_schema_lineage` or `incompatible_schema_transition` | `schema_definition`, `affected_scopes` |
 
-Change:
+`affected_scopes` is the complete deduplicated list of assigned scopes affected
+by the transition, ordered by unsigned UTF-8 byte comparison. A client applies
+the manifest before rebuilding only those scopes. `unsupported` is a successful
+HTTP 200 response that moves the client to an upgrade-required local state. It
+does not permit normal push, pull, rebuild, schema guessing, or a schema fetch.
 
-- rename `started_at` to `session_started_at`
+The standard connect envelope also contains a `scope_cursor_updates` delta for
+existing assignments. For every presented historical-schema cursor, the server
+issues a current-schema cursor at the exact same position after proving the
+entire lineage compatible and the scope unaffected by every Class 3 transition.
+It returns `null` only when the scope is affected or another binding or the
+resume floor is stale. Added and removed scopes stay in the
+assignment delta. The client installs a replacement only with target-manifest
+activation, and pull never accepts the historical token. This explicit bridge
+is what permits Class 2 and unaffected Class 3 scopes to continue while exact
+schema-hash cursor binding remains mandatory.
 
-Expected handling:
+### Explicit Incompatible-Schema Reset
 
-- do not rename in place for live clients
-- use phased rollout
-- return `unsupported` only if compatibility window is intentionally closed
+After application upgrade or explicit operator-approved recovery, a continuing
+client can request a synchronized-schema reset by sending its current positive
+`client_generation`, the schema reference actually installed locally, and
+`schema_reset: true`. The reset is accepted only when protocol 3 and the current
+minimum client runtime are satisfied. A fresh sentinel cannot be combined with
+reset.
 
-## Open Follow-Up Questions
+The server returns the complete current inline manifest. If any scope is
+assigned, the action is `rebuild_local`, `affected_scopes` is exactly the full
+assigned set, and all affected cursors are null. If no scope is assigned, the
+action is `replace`. The client replaces synced-table materialization and
+protocol state while preserving local-only data, complete authored mutation
+records, sealed batch history, and inspectable outcomes. Queued fields remain
+subject to authored-schema compatibility and are never silently removed.
 
-- whether local index definitions should be fully carried in the canonical schema manifest or only hinted
-- whether the portable type system should include a first-class enum representation or require enums to map to portable scalar types
+## Exact Current Schema Gate
+
+Push, pull, and rebuild require the exact current immutable schema reference:
+
+```text
+request.schema.version == current.schema_version
+request.schema.hash == current.schema_hash
+```
+
+Both comparisons are required. A matching version with another hash, a matching
+hash with another version, a historical manifest, and an unknown manifest are
+all mismatches. The server performs no partial push, pull, rebuild, cursor
+acknowledgement, checkpoint update, or scope update before returning HTTP 422:
+
+```json
+{
+  "error": {
+    "code": "schema_mismatch",
+    "message": "the request schema is not current",
+    "retryable": false,
+    "current_schema": {
+      "version": 42,
+      "hash": "5dc97fc5ea571dd7555d877e08cecc102113c6efd63976d37d498341c8b32d51"
+    },
+    "received_schema": {
+      "version": 31,
+      "hash": "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+    }
+  }
+}
+```
+
+The client reconnects, executes the returned schema action, and sends the exact
+current reference in a later operation. A historical schema reference is valid
+only in connect lineage dispatch.
+
+## Authored-Schema Queued Mutations
+
+Each queued mutation remains a durable record of the original local intent. It
+contains at least:
+
+```text
+batch_id
+mutation_id
+table_id
+typed_primary_key
+operation
+base_version
+client_version
+columns: ordered field_id and value entries
+authored_schema: version and hash
+local_order
+```
+
+The queue retains presence and absence distinctions, every authored field ID and
+value, the original base version, and the original local order. The request-level
+`schema` is the exact current reference; `authored_schema` identifies the
+immutable manifest under which the local intent was captured.
+
+The client does not rename a queued field, drop an unknown field, overwrite
+`authored_schema`, or alter a sealed mutation to fit a newer manifest. The
+server evaluates preserved table and field IDs against the current manifest
+after the request-level exact-current schema gate. If each referenced field is
+still writable and compatible, the server evaluates the mutation under the
+current request schema. If a retained table or field cannot be represented, the
+server returns this terminal per-mutation outcome in an HTTP 200 push response:
+
+```json
+{
+  "mutation_id": "0197e83a-f7e8-7e21-92c0-c621732bd5de",
+  "outcome_schema": {
+    "version": 42,
+    "hash": "5dc97fc5ea571dd7555d877e08cecc102113c6efd63976d37d498341c8b32d51"
+  },
+  "status": "rejected_terminal",
+  "code": "schema_incompatible",
+  "message": "authored mutation cannot be represented by the current schema",
+  "retryable": false,
+  "authored_schema": {
+    "version": 31,
+    "hash": "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+  },
+  "current_schema": {
+    "version": 42,
+    "hash": "5dc97fc5ea571dd7555d877e08cecc102113c6efd63976d37d498341c8b32d51"
+  },
+  "incompatible_field_ids": ["fld_documents_legacy_name"]
+}
+```
+
+`incompatible_field_ids` contains every incompatible authored field ID in
+unsigned UTF-8 byte order. For a delete that is incompatible only because its
+table no longer exists, the array is empty. Field values never appear in this
+outcome.
+
+`schema_incompatible` has `retryable: false`. The client stores the complete
+original mutation and outcome durably in a blocked, inspectable state and
+excludes it from automatic retry. A replacement or mapped user intent has a new
+mutation ID and exists only after explicit application or user reconciliation.
+
+For a request-level `schema_mismatch`, the sealed batch and every mutation stay
+unresolved. A successor batch has a new batch ID and the exact current request
+schema. An unchanged mutation keeps its mutation ID, complete payload, and
+authored-schema reference. Any mutation whose authored identity or content
+changes has a new mutation ID. The original intent remains inspectable.
+
+## Client Migration Rules
+
+Synchro owns SQLite DDL for synced tables and Synchro metadata. Applications own
+only local-only tables, indexes, views, caches, and data outside the synced-table
+contract. An application does not independently migrate a synced table.
+
+### Durable Migration State
+
+Before local schema DDL begins, the client writes a durable migration journal
+containing `journal_version`, source and target schema references, the complete
+verified target `schema_definition` and canonical manifest body, action, exact
+affected scopes, `migration_plan_version`, a complete ordered typed DDL and
+synchronized-metadata operation plan, and migration phase. The structured plan
+is deterministically derived from the persisted source and target manifests,
+contains no unvalidated raw SQL, and is hash-bound to both references. The
+journal and schema metadata are part of the local sync database.
+
+The client performs these transitions in order:
+
+1. Pause normal push and pull.
+2. Verify and persist the complete migration journal and operation plan before any synced-table DDL.
+3. Apply the manifest-defined SQLite DDL and synchronized metadata update in
+   one SQLite transaction.
+4. Persist the target schema reference only with the successful DDL commit.
+5. In that commit, install server-issued current-schema cursor replacements for
+   unaffected existing scopes and mark every null cursor update
+   rebuild-required. Never copy or relabel a historical token locally.
+6. For `rebuild_local`, durably mark every `affected_scopes` entry as requiring
+   rebuild before any normal incremental cursor can advance for that scope.
+7. Resume only push scheduling under the target schema. Preserve authored schema
+   identities, create successor batches where required, and drive every
+   push-eligible queued intent to an applied, conflict, terminal rejection, or
+   inspectably blocked state before rebuild. Pull remains paused.
+8. Rebuild each affected scope and verify its final checksum before installing
+   its final scope cursor. The rebuild snapshot therefore includes every
+   accepted write whose fence is satisfied by exact WAL materialization or
+   activated verified reset-baseline coverage and cannot overwrite unresolved
+   local intent. Rebuild pruning preserves the application-visible local row for
+   such intent outside the rebuilt server-provenance layer.
+9. Clear the migration journal only after the required local DDL, metadata, and
+   any required rebuild state, provenance, checksums, and final cursors are
+   durable.
+10. Resume normal pull and ordinary scheduling.
+
+SQLite DDL, target schema metadata, queue preservation, affected-scope markers,
+and the migration phase commit atomically. A failed transaction leaves the
+previous physical schema and previous active schema reference intact. A process
+restart reads the durable journal before issuing a sync request. When the source
+schema is active, it revalidates the persisted target body and executes the
+persisted plan transactionally. When the target schema and rebuild markers are
+already durable, it does not repeat DDL and resumes push-first reconciliation
+and rebuild. Any other physical schema, active reference, body, plan, or phase
+combination preserves queues and local-only data, issues no sync request, and
+enters an explicit non-retryable local error. Recovery never fetches schema;
+protocol version 3 has no such operation.
+
+The durable journal makes process death safe at every boundary. A crash before
+the SQLite transaction leaves a pending journal and no target schema. A crash
+after the transaction leaves a target schema with durable rebuild requirements.
+A crash during rebuild uses the durable rebuild page state and does not install
+a final cursor or checksum before verification. Queue entries remain complete
+through every migration phase.
+
+### Schema Change Affecting Scope Composition
+
+Changing `single_scope` and `multi_scope` changes the local materialization
+model and is always Class 3. The client applies the new manifest, creates or
+removes the required provenance structures transactionally, marks the listed
+scopes for rebuild, and preserves a row while any valid `multi_scope` provenance
+edge remains. It does not perform a global local wipe or create a local delete
+mutation during provenance cleanup.
+
+### Schema Change Without Structural Change
+
+Scope assignment changes, row movement between scopes, and membership-rule
+changes with unchanged table shape and composition do not mint a schema
+manifest. They use `scope_set_version`, membership generation invalidation,
+normal scoped changes, or scope rebuild as applicable. A schema version is not
+used as a substitute for scope movement.
+
+## Expand, Migrate, Contract Rollout
+
+Every destructive or semantic schema transition uses this exact rollout:
+
+1. **Expand:** Publish a new compatible field or table with new immutable IDs.
+   Keep the prior field or table contract available.
+2. **Migrate:** Dual-read, dual-write, and backfill under server-controlled
+   logic until the new representation is authoritative and active clients have
+   crossed the compatible lineage.
+3. **Contract:** Publish the Class 4 removal, rename retirement, type retirement,
+   or identity retirement only after the old contract is no longer served to
+   active compatible clients. Clients on the old side receive `unsupported` or
+   terminal `schema_incompatible` outcomes for preserved queued intent.
+
+An in-place field rename is not a rollout mechanism. A rename expands with a
+new field ID, migrates data and readers, then contracts by retiring the prior
+field. An incompatible type change follows the same sequence. A primary-key
+change creates a new logical table identity and is Class 4.
+
+## Membership Generations And Controlled Reconfiguration
+
+`registry_generation` is a positive monotonic generation for the complete
+registered-relation configuration. It changes when an activated relation,
+physical identity, function identity, dependency declaration, replica identity,
+or configured bound changes. A worker selects one validated registry generation
+for each source transaction and does not combine metadata from generations.
+
+`membership_generation` is a positive monotonic generation for the
+materialization contract of one affected scope. Incremental cursors and rebuild
+sessions bind the exact membership generation. Ordinary row changes under an
+unchanged membership contract do not advance it.
+
+Rule changes, dependency changes, composition changes, and controlled relation
+reconfiguration use this sequence:
+
+1. Persist a complete validated pending registry generation and intended
+   membership generation.
+2. When active projections contain every value needed by the pending contract,
+   open one repeatable-read snapshot of them, read its visible durable
+   transaction-end boundary, and stage the new edge set in bounded positive-size
+   batches. When any required table, field, dependency, or projection is absent,
+   use the logical-slot exported-snapshot bootstrap defined above to stage the
+   complete pending projections and edges.
+3. Apply every source and dependency transaction after that boundary to the
+   staged projections and edge set through the same functions until a later
+   transaction-end activation boundary also reached by the main worker is fully
+   caught up.
+4. Verify the staged edge set and atomically activate the registry and
+   membership generations.
+5. Mark only affected scopes for rebuild and retain the prior generation for
+   active cursor, rebuild-session, and retention-lineage obligations.
+
+The live edge set is never deleted and rebuilt in place. A client never receives
+a partially backfilled edge set. Unaffected scopes keep their resumable state.
+
+### Relation Drift
+
+Direct relation rename, schema move, drop, recreation, primary-key change, or
+replica-identity change is unsupported while a relation is registered. Detecting
+any such drift records durable `registered_relation_drift` state and transitions
+the relation to `capture_blocked`. Capture does not acknowledge or skip affected
+source changes, and readiness is unready until recovery completes.
+
+The public response for an operation blocked by this state is HTTP 503:
+
+```json
+{
+  "error": {
+    "code": "temporary_unavailable",
+    "retryable": true,
+    "reason": "capture_blocked"
+  }
+}
+```
+
+The response contains no physical relation name, row data, or worker detail.
+There is no automatic rebinding by unqualified name, qualified name, or relation
+OID.
+
+### Controlled Relation Reconfiguration
+
+Recovery from relation drift requires a controlled reconfiguration. The operator
+submits a new complete registration, validates the new qualified physical
+identity, stages membership under a new generation, creates the required
+immutable manifest, invalidates affected scope generations, and requires
+affected scope rebuild before capture resumes. The reconfiguration retains an
+existing relation, table, or field logical ID only when its logical contract and
+one-column primary-key contract remain valid. A key change creates a new logical
+table ID and a Class 4 transition. An explicitly reconfigured but otherwise
+equivalent relation still requires affected scopes to rebuild.
+
+## Seed Schema Reconciliation
+
+Portable seeds are verified caches for explicitly declared portable shared
+scopes. A seed includes the immutable schema definition and exact schema
+reference, complete SQLite schema metadata, scope provenance, scope digests,
+cardinalities, and portable seed continuation receipts. It contains no ordinary
+client-bound cursor and does not grant authorization.
+
+The seed generator creates the SQLite artifact atomically with server-apply
+capture suppressed, an empty mutation queue, complete provenance, every
+verified opaque row version installed as local compare-and-swap base, verified
+schema metadata, and no partially installed scope cursor. It verifies the
+manifest hash, every row digest, every scope digest, SQLite integrity, and
+read-only reopen before publication.
+
+On the first authenticated connect, the server validates each seed receipt
+against the current schema, assigned scope, registry generation, membership
+generation, retention generation, stream boundary, cardinality, and scope
+digest. For an assigned portable scope with a valid exact schema, the server
+issues a normal user-bound and client-bound incremental cursor at the seed
+boundary. An unassigned scope loses seed provenance and unchanged cache rows,
+but pending authored mutation and local row state survive for normal server
+authorization. A stale, unverifiable, or schema-mismatched assigned scope is
+rebuilt after pending intent follows push-first scheduling. A seed whose manifest differs
+from the current manifest follows normal connect dispatch: `replace`,
+`rebuild_local`, or `unsupported`.
+
+A seed never bypasses schema lineage, assignment validation, checksum
+verification, migration journaling, or rebuild. It is not a second sync mode.
+
+## Exact Error And Action Dispatch
+
+All schema-related dispatch is fixed by this table. Error messages are bounded
+diagnostics; clients branch on HTTP status, code or action, required fields, and
+retryability.
+
+| Condition | HTTP status | Code or action | Required fields | Retryable |
+| --- | ---: | --- | --- | --- |
+| Protocol version is not `3` | 426 | `upgrade_required` | `required_protocol_version`, `received_protocol_version` | false |
+| Connect schema reference is malformed | 400 | `invalid_schema_reference` | `received_schema` | false |
+| Connect schema reference is the fresh sentinel | 200 | `schema.action: "replace"` | `schema_definition` | Not applicable |
+| Connect schema reference is exact current | 200 | `schema.action: "none"` | `schema.version`, `schema.hash` | Not applicable |
+| Known compatible Class 2 lineage | 200 | `schema.action: "replace"` | `schema_definition` | Not applicable |
+| Known lineage with Class 3, no Class 4, and affected assigned scopes | 200 | `schema.action: "rebuild_local"` | `schema_definition`, nonempty `affected_scopes` | Not applicable |
+| Known Class 3 lineage with no affected assigned scope | 200 | `schema.action: "replace"` | `schema_definition` | Not applicable |
+| Unknown lineage or a lineage with Class 4 without explicit reset | 200 | `schema.action: "unsupported"` | `schema.version`, `schema.hash`, `schema.reason` | Not applicable |
+| Valid explicit reset with assigned scopes | 200 | `schema.action: "rebuild_local"` | `schema_definition`, all assigned `affected_scopes` | Not applicable |
+| Valid explicit reset with no assigned scope | 200 | `schema.action: "replace"` | `schema_definition` | Not applicable |
+| Push, pull, or rebuild schema reference is not exact current | 422 | `schema_mismatch` | `current_schema`, `received_schema` | false |
+| First-execution push, pull, or rebuild has missing, stale, or expired client generation | 409 | `client_generation_expired` | `current_client_generation` | false |
+| Rebuild continuation is invalidated by schema, membership, retention, stream, or client generation change | 409 | `rebuild_restart_required` | `scope_id` | false |
+| Registered relation drift or membership evaluation blocks capture | 503 | `temporary_unavailable` | `reason: "capture_blocked"` | true |
+| Retained queued intent contains an incompatible table or field | 200 | Per-mutation `schema_incompatible` | `authored_schema`, `current_schema`, `incompatible_field_ids` | false |
+| Limit is absent, non-integer, nonpositive, or above its configured maximum | 400 | `invalid_request` | `field`, `minimum`, `maximum` | false |
+
+`none`, `replace`, `rebuild_local`, and `unsupported` are schema actions, not
+error codes. `schema_incompatible` is a terminal per-mutation outcome, not a
+whole-request error. `fetch` is absent from Protocol version 3.

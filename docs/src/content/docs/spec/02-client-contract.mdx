@@ -1,291 +1,994 @@
 ---
 title: Client Contract
-description: Required client responsibilities, forbidden behavior, and the intended public SDK surface.
+description: Normative protocol version 3 contract for native clients and the React Native bridge.
 ---
 
 # Client Contract
 
-## Purpose
+## Scope and authority
 
-This document defines the proposed responsibilities and boundaries for Synchro end clients:
+This document is normative for protocol version 3 native clients:
 
-- Swift
-- Kotlin
-- React Native
+- Swift on Apple platforms
+- Kotlin on Android
+- React Native through the native Swift and Kotlin clients
 
-The goal is thin clients with strong local UX, not fake-thin clients that push complexity into apps.
+The server and its PostgreSQL extension define protocol semantics. Native
+clients own the local SQLite store, durable local state, scheduling, transport
+execution, and safe application of server results. An application owns its
+local SQL reads and writes and its product response to reported outcomes. An
+application does not own sync conflict rules, cursor rules, scope rules,
+rebuild rules, or protocol retries.
 
-## Client Types
+Protocol version 3 uses the following authoritative boundaries:
 
-### Swift
+- The server assigns scopes and determines scope membership.
+- The server assigns schema actions and determines schema compatibility.
+- The server assigns opaque row versions and evaluates compare-and-swap
+  conflicts.
+- WAL materialization is the only source of pull-visible server changes.
+- The native client records local intent, retains it durably, and applies
+  authoritative server results without creating new intent.
+- React Native forwards the native contract and contains no second sync engine.
 
-Native iOS and Apple-platform client using local SQLite.
+## Client types and local boundary
 
-### Kotlin
+### Native clients
 
-Native Android client using local SQLite.
+Each native client exposes one local SQLite database as the application data
+store. Application code reads and writes synced tables through local SQL. The
+client captures those writes locally and later sends protocol mutations. The
+application does not need a separate upload endpoint or a custom backend write
+contract for synced CRUD.
+
+The native client also owns:
+
+- local SQLite initialization and schema application
+- row-level local change capture for registered synced tables
+- durable mutation identity and queue storage
+- sealed batch creation and exact request replay
+- push, pull, rebuild, and connect scheduling
+- retry and backoff for retryable transport and availability failures
+- server-result application, provenance, checksum, and cursor state
+- durable process-death recovery
+- typed status, errors, and sync events
 
 ### React Native
 
-Thin bridge over the native Swift and Kotlin clients.
-
-React Native must not become a third sync engine.
-
-## What End Clients Must Do
-
-### Local SQLite
-
-Each native client must expose a local SQLite database as the application’s main offline store.
-
-The application reads and writes local SQL.
-
-### Local Change Capture
-
-Each native client must capture row-level local mutations for synced tables and enqueue them for push.
-
-This is client-owned because the network is not on the interaction path.
-
-### Mutation Queue
-
-Each native client must maintain a durable local mutation queue with stable mutation identifiers.
-
-Required properties:
-
-- survives app restarts
-- preserves order
-- allows replay after transient failures
-- supports canonical reconciliation from server responses
-
-### Local Sync Metadata
-
-Each native client must persist local sync metadata.
-
-At minimum:
-
-- schema version and hash
-- assigned scopes
-- per-scope cursors
-- per-scope authoritative checksum state
-- per-row server versions or equivalent reconciliation metadata
-- mutation queue state
-
-### Scheduling And Retry
-
-Each native client must own:
-
-- background sync scheduling
-- foreground sync triggers
-- debounce after local writes
-- retry policy for transient failures
-
-### Apply Server State Safely
-
-Each native client must apply pull and rebuild results without turning those writes back into client-originated mutations.
-
-### Status Reporting
-
-Each native client must expose sync status to the app in a stable, productized way.
-
-## What End Clients Must Not Do
-
-### No Sync Semantics Ownership
-
-Clients must not define:
-
-- scope membership rules
-- conflict semantics
-- synced-table write semantics
-- rebuild decision semantics
-- schema compatibility policy beyond executing the server contract
-
-### No Arbitrary Backend Write Contract
-
-Clients must not require each app to invent a custom sync write API.
-
-Clients speak the Synchro wire protocol.
-
-### No Client-Defined Replication Predicates
-
-Clients must not send arbitrary replication predicates to the server.
-
-They sync server-assigned scope instances.
-
-## Local Storage Model
-
-The client local database consists of:
-
-- synced application tables
-- local-only application tables
-- Synchro metadata tables
-
-Synchro metadata is not part of the app domain model.
-
-## Proposed Metadata Responsibilities
-
-### Required Metadata
-
-- scope assignment table with `scope_set_version`
-- per-scope cursor table
-- mutation queue table
-- mutation failure or rejection table
-- per-row server version table or equivalent side metadata
-- schema state table
-- local client identity table or equivalent metadata
-- sync status table or in-memory equivalent
-
-### Preferred Principle
-
-Avoid polluting synced application tables with protocol bookkeeping unless there is a strong performance reason.
-
-Prefer side metadata tables.
-
-### Minimum Guarantees
-
-The metadata model must guarantee:
-
-- queued mutations survive process death
-- scope cursor advancement is atomic with successful apply
-- scope checksum verification is atomic with successful final pull or rebuild apply
-- rebuild state is durable across restarts
-- rejected mutations remain inspectable until explicitly cleared
-- seeded portable scope state can be resumed without forcing a full local wipe
-
-## Sync Loop Responsibilities
-
-The native client sync loop should follow this order:
-
-1. ensure connection and schema state
-2. push pending mutations
-3. pull incremental changes
-4. rebuild any scope explicitly requested by the server
-5. publish final status
-
-Push before pull is preferred for read-your-own-write behavior and simpler reconciliation.
-
-## Rebuild Responsibilities
-
-Clients must support server-requested scope rebuild.
-
-Client responsibilities during rebuild:
-
-- pause normal incremental advancement for that scope
-- clear the local materialized membership for that scope
-- page rebuild results
-- verify the final authoritative checksum against local scope state
-- install the final authoritative cursor and checksum only after verification succeeds
-- resume normal incremental pull
-
-Rebuild should be automatic by default.
-
-Application-mediated rebuild approval should be the exception, not the default, because it hurts DX and makes the sync engine less dependable.
-
-## Conflict And Rejection Handling
-
-Clients must distinguish:
-
-- transient transport failures
-- per-mutation semantic rejection
-- per-mutation conflict
-- whole-request incompatibility or upgrade errors
-
-Clients must not guess how to resolve semantic conflicts.
-
-The server response is authoritative.
-
-Rejected mutations should remain observable to the application through either:
-
-- a typed event stream, or
-- a stable inspection API over local metadata
-
-## Public SDK Surface
-
-The public SDK surface should remain small and stable.
-
-Expected top-level capabilities:
-
-- open or initialize local database
-- query and execute SQL
-- start sync
-- stop sync
-- trigger sync now
-- inspect sync status
-- observe sync events
-
-Recommended concrete surface:
-
-- `startSync()`
-- `stopSync()`
-- `syncNow()`
-- `query(...)`
-- `execute(...)`
-- `transaction(...)`
-- `observeSyncStatus(...)`
-- `observeSyncEvents(...)`
-- `inspectPendingMutations()` or equivalent
-
-The app should not need to reason about protocol internals to use the SDK.
-
-Transient startup failures must not force the host app to become a retry supervisor.
-
-Required startup behavior:
-
-- retryable startup failures stay inside the native SDK retry and backoff loop
-- the app should not need to re-call `startSync()` after transient transport or availability failures
-- non-retryable bootstrap failures may still surface immediately and require explicit application action
-- first-sync completion should be observable through stable status or callback surfaces, not by forcing app-owned retry orchestration
-
-## React Native Contract
-
-React Native should expose:
-
-- the same logical SDK surface as native clients
-- typed errors
-- typed status events
-- typed conflict and rebuild events where retained
-
-React Native should not duplicate:
-
-- queue semantics
-- local metadata semantics
-- conflict handling logic
-- rebuild logic
-
-## Error And Status Surface
-
-Clients should expose a productized status model, not raw transport noise.
-
-Suggested states:
-
-- stopped
-- connecting
-- ready
-- syncing
-- rebuilding
-- backoff
-- error
-
-Suggested event categories:
-
-- mutation accepted
-- mutation rejected
-- rebuild requested
-- schema replaced
-- upgrade required
-
-Expose productized typed errors, not raw HTTP or transport errors by default.
-
-Transport details may be attached as diagnostic metadata.
-
-## Competitive Design Intent
-
-This client contract is intended to beat alternatives by ensuring:
-
-- local SQL remains the primary developer experience
-- apps do not invent custom backend write contracts
-- clients are simpler than systems centered on arbitrary replication subscriptions
-- React Native is a real bridge, not a separate half-implemented client
-
-## Open Follow-Up Questions
-
-- whether clients expose row-level rejection events directly or through queue inspection
-- whether per-row server versions are stored in side tables only or may be embedded in synced tables when advantageous
+React Native is a typed bridge over the native client for the current platform.
+The bridge exposes the native database and sync engine through one logical SDK
+surface. JavaScript does not implement mutation queues, request fingerprints,
+batch replay, server-version comparison, cursor handling, scope provenance,
+checksum calculation, rebuild paging, schema compatibility, or retry
+classification.
+
+The iOS bridge delegates to Swift and the Android bridge delegates to Kotlin.
+Both native implementations consume the same protocol 3 rules. A bridge call
+does not create a second local queue or a second copy of durable sync metadata.
+
+### Server-defined scope model
+
+Clients send only server-assigned scope identifiers and the opaque cursors
+issued for those scopes. A client never sends an arbitrary replication
+predicate, creates a scope instance, or changes a scope's membership rule.
+
+Scope assignment, `scope_set_version`, scope membership, and membership
+generations are server authority. A client stores them for continuation and
+applies the server's assignment delta. It does not infer assignment from rows
+already present in SQLite.
+
+## Local database and durable metadata
+
+The local database contains three categories of state:
+
+1. Synced application tables.
+2. Application-owned local-only tables.
+3. Synchro metadata tables that are not part of the application domain model.
+
+Synchro metadata is stored in durable SQLite state. It includes, at minimum:
+
+- the registered `client_id` and current server-issued `client_generation`
+- the exact applied schema version and schema hash
+- the authoritative `scope_set_version`
+- assigned scope records and scope removal state
+- one opaque incremental cursor per scope
+- one verified authoritative checksum per healthy scope
+- scope membership provenance for composed local tables
+- per-row server-version and deletion metadata
+- mutation records, authored payloads, queue state, batch state, and outcomes
+- retry attempt and next-attempt state
+- rebuild attempt, page, session, and finality state
+- portable seed continuation receipts and their validation state
+- typed client status and durable error state where required for recovery
+
+The client keeps protocol bookkeeping in side metadata rather than changing
+the meaning of application columns. A server version can be stored beside a
+row even when the local table has no corresponding timestamp column.
+
+Every durable metadata transition is atomic with the local application state
+that it describes. A process may stop between transactions, but it cannot
+leave a committed row apply without its corresponding queue, provenance,
+checksum, cursor, schema, or rebuild metadata transition.
+
+## Durable mutation identity
+
+### Client and mutation identifiers
+
+`batch_id` and `mutation_id` are non-nil UUIDs in canonical lowercase,
+hyphenated text form. A `rebuild_id` has the same UUID requirements.
+
+The server scopes a batch identity by:
+
+```text
+(authenticated_user_id, client_id, batch_id)
+```
+
+The server scopes a mutation identity by:
+
+```text
+(authenticated_user_id, client_id, mutation_id)
+```
+
+The authenticated identity comes from the adapter authentication boundary. A
+client does not place a substitute user identity in the protocol request.
+
+The native client generates each UUID once and persists it before the request
+can be transmitted. A mutation UUID identifies one authored intent for the
+lifetime of that client identity. It is never assigned to different content,
+reused for a later local action, or regenerated because a response was lost.
+Mutation identity is unique across all batches for the scoped client.
+
+The client persists enough identity state to survive restart, backup restore
+handling, network loss, and response loss. A retired client identity is not
+reused for a new installation.
+
+### Immutable authored payloads
+
+Every queued mutation retains its complete authored representation, including:
+
+- `mutation_id`
+- logical `table_id`
+- one typed primary-key value
+- `operation`, which is `insert`, `update`, or `delete`
+- `authored_schema` version and hash
+- `base_version` when the operation requires one
+- required `client_version`
+- every authored writable field ID and its typed value
+- field presence, including the distinction between absent and SQL `null`
+- durable local ordering metadata
+
+The authored payload contains logical table and field IDs from the immutable
+schema manifest. It does not depend on mutable field names or current local
+column order. Primary-key, generated, server-owned, creation-time,
+update-time, deletion-time, and version fields are not writable mutation
+fields.
+
+The client does not remove an unknown, removed, renamed, or incompatible field
+from an authored payload. It does not rewrite a table ID, field ID, primary
+key, operation, client timestamp, or authored schema to fit a new manifest. A
+retained payload remains inspectable until explicit policy clears it.
+
+Before a mutation enters any sealed batch, reconciliation of an earlier
+accepted mutation for the same row may refresh only that pending mutation's
+server-owned `base_version`. This preserves its UUID and authored intent. Once
+the mutation is sealed or transmitted, its base version and all other request
+content are immutable and it is never rebased in place.
+
+The operation presence matrix is fixed:
+
+| Operation | `base_version` | `columns` | `client_version` |
+| --- | --- | --- | --- |
+| `insert` | absent | nonempty authored writable fields | required |
+| `update` | required opaque token | nonempty authored writable patch | required |
+| `delete` | required opaque token | absent | required |
+
+The client rejects an empty patch, an unknown operation, a missing required
+value, a present forbidden value, or a duplicate mutation ID within one batch
+before sending it. The server remains authoritative for schema, policy, value,
+and row state validation.
+
+### Local capture and offline writes
+
+For a write to a synced table, the client commits the application row change,
+the capture record, and the durable mutation identity in one local SQLite
+transaction. If that transaction fails, neither the application write nor the
+queued intent is committed.
+
+Offline writes before the first successful `connect` use this same transaction
+and this same durable queue. They are not stored in a temporary pre-connect
+queue and are not discarded when schema or scope negotiation begins.
+
+Synced-table writes before the first successful connect require a locally
+verified protocol 3 manifest supplied by an application bundle, a verified
+schema-only seed, or a verified portable-data seed. The client verifies that
+manifest's canonical hash before creating synced tables or authored intent. A
+fresh empty client with only the zero-version sentinel and no verified manifest
+can accept local-only writes but cannot identify synced tables or field IDs and
+therefore does not expose synced-table writes until connect installs a manifest.
+
+The local capture layer records explicit protocol operations. It does not turn
+an application update into an implicit upsert, turn a delete into a
+resurrection, or create a second mutation for a server-originated apply.
+
+### Pre-wire same-row dependencies
+
+Every local action keeps an immutable intent record and stable mutation ID.
+Before any action in one same-row chain is sealed, the client can normalize the
+chain into a new linked wire mutation:
+
+- insert plus updates becomes one insert with the final authored fields;
+- insert plus delete becomes no server mutation;
+- update plus updates becomes one update from the original known server base;
+- update plus delete becomes one delete from that original base.
+
+Original records become durable inspectable `superseded_before_send` or
+`cancelled_before_send` outcomes linked to the normalized mutation or
+cancellation. A delete plus update is not normalized because protocol version 3
+has no resurrection.
+
+When a predecessor is already sealed or transmitted, a later update or delete
+without a usable server version remains a durable dependent intent and is not
+sent. If the predecessor is accepted, the client creates a new normal mutation
+using the returned opaque version. If the predecessor conflicts or is rejected,
+the dependent intent becomes inspectable `blocked_by_predecessor`. These local
+states are never encoded as push operations and never fabricate a base version.
+
+## Sealed immutable batches
+
+### Batch creation
+
+A batch contains the bound `client_id`, positive `client_generation`, one
+`batch_id`, the exact request schema reference, and a nonempty ordered list of
+mutations. The client persists the complete batch before its first network
+transmission.
+
+Sealing fixes all of the following:
+
+- batch UUID
+- request schema version and hash
+- mutation order
+- mutation UUIDs
+- complete authored payloads
+- all field presence and null distinctions
+- local ordering represented by the request
+
+The server computes batch and mutation SHA-256 fingerprints from the exact
+normalized RFC 8785 arrays in ADR 002. The client preserves canonical wire
+values, absent-versus-null presence, bytewise field ordering, request mutation
+order, schema identity, and opaque versions for that computation. Raw HTTP
+bytes, serializer-specific object order, or an authored field omitted during
+serialization are not a valid replacement for the sealed content.
+
+After sealing, the client cannot add, remove, reorder, or edit a mutation in
+that batch. Every retry of that batch uses the same identity and the same
+canonical content. A request-level failure does not authorize the client to
+change the sealed request.
+
+An unchanged queued mutation can be carried into a new sealed successor batch
+after schema reconciliation or client-generation renewal with its original UUID
+and complete authored payload. The successor has a new batch UUID, the current
+request schema and generation, and only mutations whose authored fingerprint is
+unchanged. The original sealed batch remains an immutable record and is never
+sent again after a first-execution generation rejection. A mutation
+whose authored content, table, fields, operation, base version, or schema
+identity changes receives a new mutation UUID and remains linked to the
+original intent for inspection.
+
+### Exact replay
+
+The client retries a sealed batch after a lost response using the same batch
+UUID, mutation UUIDs, order, schema, and authored values. It never reconstructs
+the request from current row state for a retry.
+
+For an already completed batch with matching content, the server returns the
+original HTTP status and exact canonical response body. The response retains
+the original server time, outcome order, rows, versions, codes, and messages.
+The server performs no source write, policy hook, version allocation, scope
+materialization, or mutation reclassification during exact replay.
+
+If the server reports `idempotency_conflict`, the client does not retry with
+the same batch identity or attempt to repair the content. It enters an
+explicit non-retryable error state while retaining the sealed request and its
+identities for inspection.
+
+HTTP 429 and 503 responses contain no mutation outcomes. The client retains the
+sealed batch unchanged and retries it after the prescribed delay. A request
+level `schema_mismatch` also retains the sealed batch unchanged. A new batch
+identity is required for a reconciled request schema.
+
+## Exact-ID reconciliation
+
+### Outcome partition
+
+A successful first push execution returns HTTP 200 and accounts for every
+request mutation exactly once. Each mutation ID appears in exactly one of
+`accepted` or `rejected`, in relative request order within its array. No
+mutation is omitted, duplicated, or present in both arrays.
+
+The client indexes reconciliation by the scoped `mutation_id`, not by array
+position, row order, local timestamp, or current local state. It verifies that
+the returned table and typed primary key match the queued mutation and that
+every outcome carries an exact immutable `outcome_schema` before
+applying an outcome. An unknown, duplicate, missing, or mismatched outcome is
+a non-retryable local protocol error and does not advance queue state.
+
+The client retains immutable manifests needed by unresolved sealed batches and
+mutation ledgers. It verifies each row and checksum under `outcome_schema`, not
+the current request schema. A historical replay is stored exactly. If its row
+cannot be projected safely into the current local schema, the client preserves
+later local intent, updates no incompatible row in place, and marks every
+affected assigned scope for current-schema rebuild.
+
+### Accepted outcomes
+
+For an accepted insert or update, the outcome contains the complete canonical
+`server_row`, matching `row_checksum`, and new opaque `server_version`. For an
+accepted delete, the outcome contains the new opaque version and either the
+authoritative source tombstone with its matching checksum or no row and no
+checksum for a fence-only delete.
+
+The client verifies any row checksum, applies the canonical row or deletion
+state, stores the returned opaque server version, records the accepted outcome,
+and removes the mutation from the sendable queue in one local transaction. A
+completed mutation is not applied again when its exact replay response is
+received.
+
+If later unresolved mutations for the same typed row exist, reconciliation
+updates the authoritative server base and then reapplies those unresolved local
+intents in their durable local order. An unsealed successor refreshes only its
+server-owned base precondition. A sealed or transmitted successor remains
+unchanged and receives its own authoritative server outcome. The client
+preserves each local projection and UUID without changing authored operation,
+fields, values, schema, timestamp, or local order.
+
+### Conflict and terminal outcomes
+
+A row conflict is a per-mutation HTTP 200 outcome. The server evaluates the
+authoritative row state and returns `conflict` with one of the server-defined
+codes, including `version_conflict`, `row_already_exists`, `row_deleted`, or
+`row_not_found` as applicable. A terminal semantic rejection uses
+`rejected_terminal` and a terminal code such as `policy_rejected`,
+`validation_failed`, `table_not_synced`, or `schema_incompatible`.
+
+When an outcome includes a canonical row or tombstone, matching checksum, and
+server version, the client verifies and applies that state in the same
+reconciliation transaction. When the
+outcome describes true absence, the client removes only the local materialized
+state justified by the server result and stores the outcome. A fence-only
+delete retains the server version metadata needed for authoritative
+reconciliation.
+
+If later unresolved mutations for the same typed row exist, this transaction
+updates the authoritative server base and reapplies those local intents in
+durable local order. A conflict or terminal rejection never authorizes an
+automatic base-version refresh. The local projection does not change the
+rejected outcome, its authored payload, or the server's conflict decision.
+
+The original authored mutation and its exact outcome remain inspectable after
+a conflict or terminal rejection until explicit client policy clears them.
+The rejected mutation is excluded from automatic retry. There is no per-
+mutation retryable outcome in protocol version 3.
+
+### Successor intent preservation
+
+The client never treats a rejected mutation as resolved by deleting its
+authored intent. A later application write creates a new mutation UUID even
+when it targets the same row. A schema mapping, field replacement, user
+decision, or other changed intent also creates a new mutation UUID. The
+original payload, identity, authored schema, base version, timestamp, and
+outcome remain separately inspectable.
+
+The client does not automatically merge, rebase, choose a winner, retry a
+conflict with a new base version, resurrect a deleted row, or convert one
+operation into another. Any successor content is explicit application intent
+captured through local SQL or an explicit SDK operation that uses the same
+capture rules.
+
+Pre-wire normalization and cancellation are not server conflict resolution.
+They preserve every local action record and represent the net unsent row intent
+before any server identity or fingerprint exists.
+
+## Opaque versions and diagnostic timestamps
+
+`server_version` is a nonempty, server-generated equality token. A native
+client stores and forwards it byte-for-byte as an optimistic precondition and
+reconciliation value. It does not parse, sort, increment, compare as a
+timestamp, generate, or derive meaning from it.
+
+`base_version` has exactly one client meaning: update and delete require
+byte-for-byte equality with the server version from which the local intent was
+authored. Insert has no `base_version`. The client does not perform a local
+version comparison as a substitute for server compare-and-swap.
+
+`client_version` is a required client-authored RFC 3339 UTC timestamp that
+identifies the local intent for diagnostics. It is not a row precondition,
+server version, source-row timestamp, ordering key, conflict input, or
+last-write-wins value. Client clock skew, equal timestamps, and future
+timestamps do not change server conflict authority. The client never uses
+`client_version` to select or overwrite a server version.
+
+The client does not treat an application `updated_at` value as a protocol
+version. Server-owned timestamp and version fields remain server authoritative.
+
+## Connection and schema actions
+
+### Connect
+
+`startSync()` initializes local metadata and enters the client state machine.
+The native client calls `POST /sync/connect` with the current client identity,
+client generation when known, protocol version, schema reference, scope-set
+version, assigned scope state, and portable seed receipts when present.
+
+Connect is the only operation that evaluates a historical schema reference.
+Protocol version 3 uses this exact fresh schema sentinel:
+
+```json
+{
+  "version": 0,
+  "hash": ""
+}
+```
+
+The server returns one authoritative schema action:
+
+| Condition | Action | Client behavior |
+| --- | --- | --- |
+| Exact current schema | `none` | Continue with the current local schema. |
+| Server-confirmed fresh identity using the fresh sentinel, or known Class 2 lineage | `replace` | Apply the inline immutable manifest and update schema metadata. |
+| Fresh sentinel used with a generation, reset, or durable prior client identity | HTTP 400 `invalid_schema_reference` | Preserve all local state and enter an explicit non-retryable connection error. |
+| Known Class 3 lineage with affected assigned scopes | `rebuild_local` | Apply the inline immutable manifest, then rebuild only the returned affected scopes. |
+| Known Class 3 lineage with no affected assigned scope | `replace` | Apply the inline immutable manifest; no empty rebuild action is emitted. |
+| Unknown lineage or Class 4 boundary | `unsupported` | Enter an explicit upgrade-required error state and stop normal sync until an upgraded client explicitly requests schema reset. |
+
+Protocol version 3 never emits `fetch`. The connect response includes the
+selected manifest when an action requires it. The client does not call a
+separate schema endpoint, invent a compatibility result, or continue with an
+old manifest after `unsupported`.
+
+After application upgrade or an explicit operator-approved recovery, a
+continuing client can reconnect with `schema_reset: true`, its current client
+generation, and the schema reference actually installed locally. A valid reset
+returns the complete current manifest. The client preserves local-only data,
+all authored mutation and sealed-batch records, and inspectable outcomes while
+replacing synced materialization. It rebuilds all assigned scopes when any are
+assigned. A client never sets reset automatically merely because a lineage is
+unknown.
+
+Schema DDL, schema metadata, authored-queue compatibility state, and any
+durable migration checkpoint are committed as one local migration transition.
+An interrupted migration leaves a durable migration marker and blocks normal
+sync until the same migration resumes or enters the explicit error state.
+
+The connect response's `scope_cursor_updates` map applies only to existing
+assignments. During Class 2 or Class 3 migration, the client installs each
+non-null server-issued current-schema replacement atomically with successful
+target-manifest activation, without parsing either token. A `null` update marks
+that scope rebuild-required. The client never carries an old-schema cursor into
+pull, installs a replacement before target DDL and metadata are durable, or
+treats cursor replacement as assignment change or server acknowledgement.
+
+### Exact current schema gate
+
+Push, pull, and rebuild requests use exactly the current immutable schema
+version and hash. A stale or mismatched request receives HTTP 422
+`schema_mismatch` with current and received schema references and no partial
+operation. The client reconnects, applies the returned schema action, and
+retries using a new sealed batch where a new batch is required.
+
+The request schema changes during reconciliation, but each queued mutation's
+`authored_schema` remains the immutable manifest under which it was captured.
+The server applies an older authored payload only when its table and field IDs
+remain compatible with the current manifest.
+
+### Scope assignment changes
+
+The client applies the server's assignment delta atomically with the returned
+`scope_set_version`.
+
+- An added scope has no usable cursor and enters rebuild state.
+- A removed scope loses local provenance and scope metadata. This cleanup
+  creates no client mutation and no synthetic tombstone.
+- A row that remains justified by another scope remains in the local table.
+- A row that has no remaining valid provenance and no unresolved local authored
+  intent is removed from server-authoritative local materialization without
+  creating a local delete mutation.
+- If unresolved local authored intent addresses the row, assignment cleanup
+  removes only server scope provenance and continuation metadata. It preserves
+  the mutation's application-visible local row state in the local-intent layer
+  until push-first reconciliation produces an explicit outcome or application
+  policy resolves it.
+
+The client never invents an assignment, advances `scope_set_version` from a
+local observation, or uses a removed scope's cursor for another scope.
+
+`scope_set_version` advances only from an authoritative assignment response
+that changes the assigned scope set. The client rejects a future value,
+preserves the current value when the assignment set is unchanged, and commits
+the accepted value with the corresponding assignment delta.
+
+## Sync ordering
+
+### Push before pull
+
+The normal native sync loop is:
+
+1. Open and validate local metadata.
+2. Connect and execute the authoritative schema action.
+3. Push every eligible sealed batch in durable queue order.
+4. Reconcile each successful push response by exact mutation ID.
+5. Rebuild scopes with no usable cursor or an explicit rebuild requirement.
+6. Pull incremental changes for assigned scopes.
+7. Apply changes, assignment updates, checksums, and cursors atomically.
+8. Rebuild scopes listed by pull, then continue incremental pull.
+9. Publish final typed status and events.
+
+Push precedes pull whenever both operations are ready. This provides local
+read-your-own-write reconciliation before a later WAL echo arrives. A pull
+echo is authoritative server state and is not a second local mutation.
+
+The client drains `has_more` pages before declaring incremental work current.
+A rebuild is scope-local and does not permit the client to advance an
+unrelated scope.
+
+### WAL lag and `capture_pending`
+
+An accepted push can commit its source row and opaque version before the WAL
+worker materializes the corresponding pull-visible effect. If a client has an
+accepted push fence that is not yet satisfied by exact WAL materialization or
+activated verified reset-baseline coverage, pull or rebuild returns HTTP 503
+with code `capture_pending` and `retryable: true`.
+
+On `capture_pending`, the client:
+
+- retains all presented pull cursors and scope metadata unchanged
+- installs no new cursor, checkpoint, checksum, or assignment progress from
+  the failed page
+- retains the accepted canonical local row and its server version
+- does not synthesize a pull change, duplicate the push, or create a rebuild
+  session from state older than the accepted write
+- schedules the same pull operation through native backoff
+
+The client does not interpret capture lag as a conflict or as proof that the
+accepted write was lost. A later successful pull observes the WAL-materialized
+effect in normal stream order, and a later rebuild snapshot includes it when it
+falls at or before the rebuild boundary.
+
+## Incremental pull application, checksums, and cursors
+
+### Response validation
+
+The client treats cursors as opaque strings. `null` means no usable resumable
+state and requires rebuild. A non-null cursor is stored exactly as returned and
+is never parsed, sorted, truncated, decoded, or compared lexically.
+
+Before changing local state, the client validates the complete pull response:
+
+- every change has one assigned scope, logical table, typed primary key, and
+  operation
+- every row-bearing upsert or delete has an opaque server version and a valid canonical row checksum bound to that version
+- every row primary key matches its separate typed primary key
+- every row contains the complete current manifest field set
+- scope updates and cursor deltas refer only to server-assigned scopes
+- a terminal page has a checksum for every active scope after its assignment
+  delta and no missing or extra checksum key
+- an intermediate page omits the terminal checksum map
+- a scope listed for rebuild receives no incremental cursor in that response
+
+A malformed, incomplete, forged, misbound, or semantically inconsistent
+response is a non-retryable local protocol error. It produces no partial row,
+provenance, checksum, cursor, or assignment commit.
+
+### Atomic page application
+
+The client applies one successful pull page in one SQLite transaction. The
+transaction includes:
+
+- authoritative upserts and deletes
+- scope provenance additions and removals
+- local cleanup for scope removal or scope loss
+- the returned assignment delta and `scope_set_version`
+- all eligible per-scope cursor updates
+- terminal checksum verification results and healthy checksum metadata
+
+For a row-bearing upsert, the client recomputes the canonical row digest from
+the exact manifest, logical IDs, typed values, null state, and row identity
+before writing. For a row-bearing delete tombstone, it performs the same
+verification. A rowless delete removes only the server-supplied scope
+provenance and never creates a local mutation.
+
+A scope cursor is installed only after every corresponding change for that
+scope has been applied successfully. A failed transaction installs no cursor.
+An older valid cursor never moves local progress backward. The client does
+not manufacture a cursor from a row key, timestamp, page count, or local
+clock.
+
+Issuing a cursor does not acknowledge it on the server. The client presents a
+successfully installed cursor in a later pull request, and only that later
+request can acknowledge the presented position for that scope.
+
+### Terminal checksum verification
+
+When `has_more` is false, the client recomputes the canonical scope digest for
+every active scope named by the terminal checksum map, including scopes with no
+row change in the page. The digest uses the protocol 3 typed SHA-256 grammar,
+the exact schema hash, scope ID, cardinality, sorted row identities, and row
+digests. A cursor alone never marks a scope healthy.
+
+For each scope whose recomputed digest matches, the client commits the
+verified checksum and eligible cursor with the page transaction. If one scope
+digest differs, that scope's resumable state is invalidated and marked for
+rebuild; the client does not install that scope's terminal cursor or checksum.
+Other scopes retain only state that was independently applied and verified.
+
+A missing, malformed, incomplete, or extra terminal checksum key fails the
+whole page and advances no cursor. A row digest or checksum mismatch never
+causes the client to accept unverified state.
+
+## Durable rebuild state
+
+### Rebuild attempts and session records
+
+A rebuild is required when a scope has no usable cursor, when pull or connect
+requests it, when schema action `rebuild_local` names it, or when local
+checksum or provenance validation invalidates its state. First synchronization
+uses this same rebuild contract.
+
+With default configuration, a server-requested rebuild starts automatically
+without application approval or application-owned rebuild orchestration.
+
+At the start of an attempt, the client marks the scope as rebuilding, pauses
+incremental advancement for that scope, and resets only that scope's local
+materialization provenance. Rows with another valid scope provenance and all
+local-only data remain. A row left with no valid provenance is removed without
+creating a mutation only when no unresolved authored local intent protects its
+application-visible local row state. Protected intent remains in the
+local-intent layer outside attempt-scoped server provenance until reconciliation
+or explicit application policy resolves it. The reset and active rebuild record
+commit together before the first page request.
+
+For each scope, the client stores a durable rebuild record containing:
+
+- the scope ID and target schema reference
+- one immutable canonical `rebuild_id` UUID for the attempt
+- the bound client generation and membership, retention, and stream lineage
+  references
+- the fixed page limit for the attempt
+- the exact last request page token, including the initial null token
+- the exact next page token returned by the server
+- the server session binding represented by the continuation token
+- durable identities for pages already applied
+- whether the attempt is active, awaiting retry, finalizing, complete, or
+  restart-required
+- final scope cursor and checksum only after verified finality
+
+The client stores tokens and session values as opaque data. It does not derive
+an ordinal, row key, snapshot boundary, or scope identity from token text.
+
+The client generates and persists `rebuild_id` before the first request. A
+response loss, process death, 429, or 503 reuses the same rebuild ID and
+continuation token. A new rebuild ID is created only for a new attempt after
+`rebuild_restart_required`, local invalidation, or explicit restart policy.
+
+### Immutable server session and page token
+
+The server binds every rebuild continuation to its immutable staged snapshot,
+client, generation, scope, schema, membership, retention, stream, snapshot
+boundary, page position, page size, and expiry. The client sends the exact
+opaque token returned for the prior page and never sends a lexical row key as a
+continuation.
+
+The first null-cursor request creates or reuses the server's unexpired session
+for that `rebuild_id`. Intermediate and final pages come from that immutable
+server snapshot. A token expiry or generation invalidation returns HTTP 409
+`rebuild_restart_required`; the client discards only that scope's continuation
+and starts a new scope-local attempt. A malformed or misbound token returns
+HTTP 400 `invalid_request` and is not repaired by changing token text.
+
+The server session expires exactly 24 hours after creation. Page replay and
+token issuance do not extend that expiry. The client treats an expired session
+as restart-required and does not retain it as resumable state.
+
+### Idempotent page apply
+
+Every rebuild page is applied in one local transaction. The transaction
+contains the page identity, all row and provenance writes, and the next page
+state. A page identity binds the rebuild ID, the exact request token, the
+associated server session, and the canonical page content.
+
+If the same page is received again, the client finds its durable page record,
+verifies that the content is identical, and returns the previously committed
+local result without applying rows or provenance twice. A changed response
+for an existing page identity is a non-retryable integrity error. A process
+death before commit leaves no page record and no page apply. A process death
+after commit leaves both the row apply and next-page state durable.
+
+An intermediate page stores its returned continuation token only with its
+committed row and provenance apply. It does not install a final cursor or
+checksum. The client then requests the next page with that exact token and
+fixed page limit.
+
+### Rebuild finality
+
+The final page is applied in one transaction that:
+
+1. Applies all final records and verifies every row checksum.
+2. Prunes stale provenance for that scope.
+3. Removes local rows with zero remaining valid provenance only when unresolved
+   authored local intent does not protect their application-visible state.
+4. Recomputes the scope digest from the resulting local state.
+5. Verifies the server checksum.
+6. Installs the final opaque incremental cursor and verified checksum for that
+   scope.
+7. Clears the active rebuild continuation and records completion.
+
+No final cursor or checksum is installed before all pages, pruning, and digest
+verification succeed. A digest mismatch leaves the scope without healthy
+final state and schedules a new rebuild. Rebuilding one scope never changes an
+unrelated scope checkpoint, cursor, checksum, provenance edge, assignment, or
+rebuild session.
+
+The final rebuild cursor is not a server checkpoint acknowledgement. The
+client presents it in a later successful pull request for that scope. Writes
+after the immutable rebuild boundary arrive through normal incremental pull.
+
+## Schema-incompatible queued intent
+
+The server evaluates a queued mutation's preserved authored table and field
+IDs against the current immutable schema. If the intent cannot be represented,
+the push response contains an HTTP 200 terminal outcome with code
+`schema_incompatible`, `retryable: false`, `authored_schema`, `current_schema`,
+and bytewise-sorted `incompatible_field_ids`.
+
+On this outcome, the client:
+
+- stores the complete original mutation and exact outcome durably
+- marks the mutation blocked and excludes it from automatic retry
+- retains the authored schema, base version, client timestamp, field values,
+  field presence, operation, and local order
+- exposes the rejection through typed inspection and event surfaces
+- does not drop a removed field, guess a rename, change a field ID, or replace
+  the authored schema
+
+The client does not require or invent a server row or server version for a
+`schema_incompatible` outcome. The retained authored payload is the source of
+truth for later explicit application reconciliation.
+
+An application-created replacement is a successor mutation with a new UUID.
+It is not folded into or substituted for the incompatible mutation. The old
+intent remains inspectable until explicit policy clears it.
+
+## Portable seed receipts and assignment validation
+
+A portable seed is a verified warm cache for server-declared portable scopes.
+It is not an authorization grant and it is not a second sync mode. Seed export
+contains no user-scoped data and does not accept a user JWT as seed authority.
+
+A seed artifact contains the immutable schema reference, only the declared
+portable scope set, complete typed rows, opaque server versions, row checksums, scope checksums and
+cardinalities, and one opaque seed continuation receipt for each bundled
+scope. The client stores the receipt exactly as supplied. It does not use a
+seed receipt as a runtime cursor or infer portability from a row's presence.
+
+At the first authenticated connect, the server validates each receipt's
+integrity and its schema, scope, registry, membership, retention, stream,
+boundary, cardinality, and checksum bindings. It also validates that the
+authenticated client is currently assigned the scope. For an assigned and
+valid receipt, the server issues a normal user-bound, client-bound incremental
+cursor at the seed boundary. Seed installation already stored every verified
+seeded row's opaque version as local compare-and-swap base, so offline update or
+delete capture has an exact precondition before connect. Authenticated receipt
+validation installs only the assignment and runtime cursor; possession of a row
+version grants neither scope access nor write authority.
+
+For an unassigned seed scope, the client removes seed provenance and unchanged
+zero-provenance cache rows and does not request that scope. It preserves pending
+authored mutations and their local row state for normal server authorization and
+an explicit mutation outcome. For an assigned scope with a stale or
+unverifiable receipt, the client discards the receipt's continuation state and
+rebuilds the scope only after pending intent follows normal push-first
+scheduling. Seeded rows remain local cache data and never authorize access to a
+scope.
+
+Seed installation is atomic and verified before publication. A valid seeded
+database has no partially installed cursor, no pending queue created by seed
+rows, complete provenance, verified schema metadata, and no server-apply echo.
+
+## Errors and backoff
+
+### Strict dispatch
+
+The client handles the following protocol dispatch without substituting a
+different outcome:
+
+| HTTP | Code or condition | Client handling |
+| ---: | --- | --- |
+| 400 | `invalid_request` or `invalid_schema_reference` | Non-retryable protocol error. Preserve unresolved local state. |
+| 401 | `auth_required` | Non-retryable authentication error. Enter explicit error state. |
+| 409 | `idempotency_conflict` or `client_retired` | Non-retryable identity error. Preserve the sealed request and surface it. |
+| 409 | `client_generation_expired` | Reconnect, accept the new generation and assigned rebuild state, then resume through the normal loop. |
+| 409 | `rebuild_restart_required` | Discard only the invalidated rebuild continuation and start a new rebuild ID for that scope. |
+| 422 | `schema_mismatch` | Reconnect and apply the authoritative inline schema action. Do not edit the sealed batch. |
+| 426 | `upgrade_required` | Non-retryable protocol or runtime upgrade error. Stop normal sync. |
+| 429 | `retry_later` | Retry the exact interrupted request after `Retry-After` through native backoff. |
+| 500 | `sync_integrity_failure` | Non-retryable integrity error. Preserve local state and enter explicit error state. |
+| 503 | `temporary_unavailable` or `capture_pending` | Retry the exact interrupted request after `Retry-After` through native backoff. |
+
+The adapter's error body, status, and `retryable` value are authoritative. A
+client does not convert a per-mutation conflict into HTTP 409, convert a
+terminal rejection into a retry, or invent a `server_retryable` mutation
+outcome. A malformed response, invalid checksum, invalid state transition,
+unknown operation, or impossible local metadata state is a non-retryable local
+contract error.
+
+### Native backoff
+
+The native SDK owns retry scheduling after transport timeouts, connectivity
+loss, HTTP 429, and retryable HTTP 503. It honors a valid `Retry-After` value
+as the minimum delay and uses bounded exponential backoff with jitter for
+repeated failures. The next retry time and attempt class are durable retry
+metadata.
+
+Pull and rebuild page limits are positive integers within the configured
+server maximum. The client rejects an invalid local limit before transmission
+and never replaces zero, negative, non-integer, or over-limit values with a
+default or a clamped value.
+
+Retryable failure changes only retry bookkeeping. It does not clear or rewrite
+queued mutations, sealed batches, presented cursors, rebuild tokens, schema
+references, provenance, checksums, or final state. The SDK retries the same
+operation and request identity. The host application does not provide retry
+timers, connectivity supervisors, or repeated `startSync()` calls.
+
+Every non-retryable failure enters an explicit typed `error` state except the
+three defined recovery dispatches. `schema_mismatch` and
+`client_generation_expired` automatically transition the interrupted operation
+to `connecting`; `rebuild_restart_required` starts a new scope-local attempt in
+`rebuilding`. The client does not continue in silent degraded mode. Any other
+error requires the explicit recovery transition defined by the state machine.
+
+## Process-death guarantees
+
+The following boundaries are durable and atomic:
+
+| Boundary | Required result after process death |
+| --- | --- |
+| Local SQL write and capture | Both application row and mutation record commit, or neither commits. |
+| Batch sealing | A complete immutable batch exists before transmission, or no batch was sent. |
+| Lost push response | The sealed request and all mutation identities remain retryable with exact content. |
+| Push outcome apply | Canonical row, server version, queue state, and outcome record commit together. |
+| Pull page apply | Rows, provenance, assignment delta, checksum result, and cursor commit together. |
+| Rebuild page apply | Rows, provenance, applied-page record, and next token commit together. |
+| Rebuild finality | Pruning, digest verification, final cursor, checksum, and completion state commit together. |
+| Schema migration | Local DDL, schema metadata, and migration progress resume without accepting an old or partial schema. |
+| Stop or cancellation | In-flight cancellation leaves all last committed queue, cursor, checksum, schema, and rebuild state intact. |
+
+After restart, the client resumes an incomplete operation from its durable
+state. It never advances a cursor because a response was received but not
+applied, installs a final rebuild state because a final page was only partly
+processed, or deletes an authored mutation because a request was interrupted.
+
+## No echo loop
+
+The client has an explicit server-apply mode for push reconciliation, pull
+apply, rebuild apply, scope cleanup, seed installation, and schema-driven
+materialization. Local change capture is suppressed for writes in this mode.
+
+An applied server row, tombstone, provenance cleanup, or seed row therefore
+does not create a new mutation, a new local timestamp, or a new batch. The
+client records the authoritative server version and outcome metadata directly.
+An incremental WAL echo of an already reconciled push is applied by row
+identity and server state without producing another client mutation.
+
+## Client state and lifecycle
+
+Protocol version 3 client states are exactly:
+
+```text
+uninitialized, local_ready, connecting, schema_applying, ready,
+pushing, pulling, rebuilding, backoff, error, stopped
+```
+
+The legal state adjacency is:
+
+| From | Allowed states |
+| --- | --- |
+| `uninitialized` | `local_ready`, `error`, `stopped` |
+| `local_ready` | `connecting`, `error`, `stopped` |
+| `connecting` | `schema_applying`, `ready`, `backoff`, `error`, `stopped` |
+| `schema_applying` | `ready`, `rebuilding`, `error`, `stopped` |
+| `ready` | `connecting`, `pushing`, `pulling`, `rebuilding`, `error`, `stopped` |
+| `pushing` | `pushing`, `ready`, `pulling`, `connecting`, `backoff`, `error`, `stopped` |
+| `pulling` | `pulling`, `ready`, `rebuilding`, `connecting`, `backoff`, `error`, `stopped` |
+| `rebuilding` | `rebuilding`, `ready`, `connecting`, `backoff`, `error`, `stopped` |
+| `backoff` | `connecting`, `pushing`, `pulling`, `rebuilding`, `error`, `stopped` |
+| `error` | `local_ready`, `stopped` |
+| `stopped` | `local_ready` |
+
+The operation self-transitions represent another sealed batch or page. An
+illegal transition is a non-retryable local contract error and does not
+mutate queue, cursor, rebuild, or schema state.
+
+An empty database and a seeded database both enter `local_ready` and use the
+same connect, schema, push, pull, checksum, and rebuild protocol. A seeded
+database is a warm start, not a bypass of server authority.
+
+## Public native SDK surface
+
+The native SDK exposes a small stable surface with equivalent Swift and Kotlin
+semantics:
+
+- `open` or initialization of the local SQLite database and metadata
+- `query(sql, parameters)` for local reads
+- `execute(sql, parameters)` for local writes
+- `transaction(...)` for application-local transactions
+- `startSync()` to arm the client-owned lifecycle
+- `stopSync()` to stop network work without clearing durable state
+- `syncNow()` to request an immediate cycle through the native scheduler
+- `getSyncStatus()` for the current typed state and bounded diagnostics
+- `observeSyncStatus(...)` for typed state changes
+- `observeSyncEvents(...)` for typed sync events
+- `inspectPendingMutations()` for durable unresolved queue records
+- `inspectRejectedMutations()` for durable terminal outcomes and authored data
+- an explicit policy operation to clear retained rejected records
+
+The SDK does not expose a method that lets an application set a cursor, server
+version, scope assignment, checksum, client generation, rebuild token, or
+mutation identity for an unrelated intent. It does not require the application
+to construct HTTP requests for synced CRUD.
+
+Status events include state changes, backoff, schema application, mutation
+accepted, mutation rejected, rebuild requested, rebuild completed, and typed
+errors. Mutation events identify the authoritative mutation outcome and its
+stable ID. They do not expose a client-defined conflict policy.
+
+Typed errors include operation, stable code, retryability, and bounded
+diagnostic metadata. They do not expose credentials, request bodies, row
+payloads, tokens, or raw internal authorization details by default.
+
+## React Native bridge boundary
+
+The React Native TurboModule exposes the same logical capabilities as the
+native SDK:
+
+- open and close the native local database
+- query, execute, and transact with typed SQL parameters and rows
+- start, stop, and trigger sync
+- read and observe typed status
+- observe typed mutation, schema, rebuild, backoff, and error events
+- inspect pending and rejected mutations through native inspection APIs
+
+Bridge serialization preserves native typed SQL values, null presence, typed
+rows, UUID strings, opaque versions, opaque cursors, checksums, and typed error
+codes. The bridge does not decode or sort server tokens.
+
+JavaScript cannot provide an alternate queue, retry loop, conflict resolver,
+scope selector, rebuild pager, schema fetcher, or checksum implementation.
+The native client remains the only owner of those semantics on both platforms.
+Process death, restart, offline writes, response replay, capture pending,
+schema incompatibility, and rebuild recovery have the same durable behavior
+through the bridge as through the native API.
+
+## Required client behavior summary
+
+Every protocol 3 client:
+
+- stores UUID mutation and batch identities before transmission
+- preserves complete authored payloads and immutable authored schema references
+- seals batches before first transmission and replays them exactly
+- reconciles outcomes by exact mutation ID and preserves successor intent
+- treats server versions and cursors as opaque
+- treats client timestamps as diagnostic only
+- pushes before pulling and handles WAL lag as retryable `capture_pending`
+- applies rows, provenance, checksums, and cursors atomically
+- persists rebuild IDs, page tokens, session state, and idempotent page receipts
+- executes inline schema actions and never requests `fetch`
+- retains schema-incompatible intent and exposes it for explicit resolution
+- validates portable seed receipts through authenticated assignment
+- uses strict error dispatch and native-owned backoff
+- survives process death without silent mutation loss or false progress
+- suppresses server-apply capture to prevent echo loops
+- exposes local SQL and a typed public status and inspection surface
+- keeps React Native as a bridge over native semantics
+
+No client rule in this contract assigns a conflict winner, interprets a server
+version, invents a scope, or silently discards local intent.

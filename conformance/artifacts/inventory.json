@@ -1,0 +1,17 @@
+{
+  "$schema": "https://synchro.dev/conformance/schemas/artifact-inventory-v1.schema.json",
+  "schema_version": 1,
+  "release": "0.3.0",
+  "artifacts": [
+    { "id": "ARTDEF-CONFORMANCE-RUNNER-001", "role": "conformance-runner", "name": "Independent conformance runner binary" },
+    { "id": "ARTDEF-PG-EXTENSION-001", "role": "pg-extension", "name": "PostgreSQL extension archive" },
+    { "id": "ARTDEF-PG-SQL-001", "role": "pg-install-sql", "name": "pgrx-generated installation SQL" },
+    { "id": "ARTDEF-ADAPTER-001", "role": "adapter", "name": "synchrod-pg adapter binary" },
+    { "id": "ARTDEF-SEED-TOOL-001", "role": "seed-tool", "name": "synchro-seed binary" },
+    { "id": "ARTDEF-SWIFT-SPM-001", "role": "swift-spm", "name": "Swift Package Manager source bundle" },
+    { "id": "ARTDEF-COCOAPODS-001", "role": "cocoapods", "name": "CocoaPods metadata" },
+    { "id": "ARTDEF-KOTLIN-MAVEN-001", "role": "kotlin-maven", "name": "Kotlin Maven publication bundle" },
+    { "id": "ARTDEF-RN-NPM-001", "role": "react-native-npm", "name": "React Native npm tarball" },
+    { "id": "ARTDEF-PORTABLE-SEED-001", "role": "portable-seed", "name": "Portable SQLite seed artifact" }
+  ]
+}

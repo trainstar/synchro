@@ -1,520 +1,1093 @@
 ---
 title: Wire Protocol
-description: Canonical HTTP and JSON contract for connect, push, pull, and rebuild.
+description: Normative protocol version 3 HTTP and JSON contract for connect, push, pull, and rebuild.
 ---
 
 # Wire Protocol
 
-## Purpose
+## Normative scope
 
-This document defines the canonical HTTP and JSON contract between end clients and a Synchro server adapter such as `api/go`.
+This document defines the complete client-visible HTTP and JSON contract for Synchro protocol version 3. The terms MUST, MUST NOT, REQUIRED, and MAY are normative.
 
-The contract is designed for:
+The five Accepted architecture decisions are locked dependencies of this contract:
 
-- native mobile clients with local SQLite
-- deterministic server-defined scopes
-- end-to-end synced CRUD
-- low hot-path round trips
-- thin server adapters
+- ADR 001 defines WAL-only pull visibility, commit-safe ordering, opaque row versions, and capture readiness.
+- ADR 002 defines immutable push identity, exact replay, operation shapes, atomic conflict handling, and outcome dispatch.
+- ADR 003 defines incremental pull, opaque cursors, immutable rebuild snapshots, and rebuild replay.
+- ADR 004 defines immutable logical identities, schema actions, client generations, membership generations, and retention.
+- ADR 005 defines canonical portable values, SHA-256 integrity, authorization boundaries, and portable seed continuation.
 
-All timestamps on the wire use RFC 3339 in UTC, for example `2026-03-20T18:22:11Z`.
+If an implementation behavior differs from this document or an Accepted ADR, the implementation is nonconforming. Protocol version 2 wire values are not accepted as protocol version 3 values.
 
-## Transport Rules
+## Transport, authentication, and adapter boundary
 
-- JSON over HTTP
-- UTF-8
-- gzip or brotli compression recommended
-- bearer-token authentication handled by the adapter
-- idempotency required for mutation replay safety
+The four runtime endpoints are:
 
-## Core Concepts
+| Endpoint | Purpose |
+| --- | --- |
+| `POST /sync/connect` | Negotiate protocol, client generation, schema action, and scope assignments. |
+| `POST /sync/push` | Submit one immutable batch of client mutations. |
+| `POST /sync/pull` | Read one incremental page across assigned scopes. |
+| `POST /sync/rebuild` | Read one page from an immutable single-scope rebuild snapshot. |
 
-### Scope
+Requests and responses use HTTPS, UTF-8 JSON, and `Content-Type: application/json`. Every request uses `Authorization: Bearer <credential>`. The credential is opaque to the sync protocol.
 
-A scope is a server-defined selective-sync unit.
+The adapter either validates the bearer credential or trusts an upstream component that has already validated it. In both cases, the adapter resolves exactly one canonical authenticated user identity. That identity is transport context and MUST NOT be accepted from a JSON request member. A `client_id` MUST be bound to that authenticated user.
 
-Examples:
+The adapter is a thin boundary. It authenticates, applies transport and protocol gates, invokes the canonical extension function for the endpoint, and forwards the canonical status and JSON result. It MUST NOT implement mutation conflict rules, scope evaluation, cursor interpretation, checksum calculation, rebuild pagination, or schema lineage decisions. Endpoint work uses one canonical extension call rather than adapter-side database orchestration.
 
-- `documents_user:u_123`
-- `templates_public`
-- `project:p_42`
+Credentials, cursor values, rebuild continuation values, request bodies, row values, and authenticated identity values MUST NOT be written to operational logs.
 
-### Scope Cursor
+## Common JSON rules
 
-A scope cursor is an opaque token representing incremental progress for one scope instance.
+Each endpoint request is an exact JSON object. Duplicate member names, unknown envelope members, missing required members, noncanonical UUIDs, wrong envelope or identity types, and values outside declared request limits produce `400 invalid_request`, except that a malformed connect schema reference produces `400 invalid_schema_reference`. Push field compatibility and value validation use the terminal outcomes defined in the Push section.
 
-Clients treat cursors as opaque strings.
+An optional member is optional only where this document says it is optional. JSON `null` does not satisfy an absent-member requirement or a required non-null value.
 
-`null` means the client has no usable resumable state for that scope and must rebuild.
+Every JSON integer in a protocol envelope is in the portable exact range
+`[-9007199254740991, 9007199254740991]`. Fields declared nonnegative or positive
+use `0..9007199254740991` or `1..9007199254740991` respectively. Server-issued
+schema versions, client generations, scope-set versions, registry generations,
+membership generations, retention generations, cardinalities, ordinals, and
+other counters fail before overflow and never wrap, become negative, or leave
+this range. Opaque token payloads that explicitly define unsigned decimal
+strings retain that string encoding and their stated `u64` range; clients never
+convert those token internals to JSON numbers.
 
-Any non-null cursor is a valid opaque resume token issued by the server. The token may encode stream lineage and checkpoint state internally, but clients must not parse or inspect it.
+### Client and request identities
 
-### Server Version
+- `client_id` is a nonempty client identifier scoped to the authenticated user. It is not a user identity.
+- `client_generation` is a positive server-issued integer. Connect returns it. Push, pull, and rebuild require the exact current value.
+- `batch_id`, `mutation_id`, and `rebuild_id` are non-nil UUIDs in canonical lowercase hyphenated form.
+- A retired `client_id` can never be reused. Requests for it return `409 client_retired`.
 
-Each synced row carries an opaque `server_version`.
+### Schema references
 
-Clients use this for optimistic preconditions on updates and deletes.
+A normal schema reference has this exact shape:
 
-Clients do not interpret the value.
+```json
+{
+  "version": 8,
+  "hash": "21d56a4f2191820e954f008ea32ba8da8568a952cd01a45fd1a3fe16bbe8aaea"
+}
+```
 
-### Mutation
+`version` is a positive integer. `hash` is exactly 64 lowercase hexadecimal characters containing the SHA-256 hash of one immutable manifest.
 
-A mutation is a client-originated create, update, or delete for a synced table row.
+Connect also accepts exactly one fresh-client sentinel:
 
-### Rebuild
+```json
+{
+  "version": 0,
+  "hash": ""
+}
+```
 
-A rebuild is a full authoritative re-materialization of one scope instance.
+No other zero version or empty hash is valid. Push, pull, and rebuild never accept the fresh sentinel. They require the exact current schema version and hash. A well-formed but noncurrent reference returns `422 schema_mismatch`; a malformed reference returns `400 invalid_request`.
 
-Rebuild is exceptional, not the normal hot path.
+### Logical table, field, and row identity
 
-## Adapter Auth Boundary
+Wire member `table` contains an immutable logical `table_id`, not a physical relation name. Member names in `pk`, `columns`, and row objects are immutable logical `field_id` values. Human-readable table and field names in a schema manifest are attributes and MUST NOT be used as identity.
 
-The wire protocol assumes authenticated sync requests reach the adapter with one canonical resolved user identity.
+Every registered table has exactly one non-null primary-key field. A `pk` object contains exactly that one field ID. Its portable type is `string`, `int`, or `int64`, and its value uses the canonical representation for that type. Composite, null, decimal, float, temporal, JSON, and bytes primary keys are invalid.
 
-Adapters may satisfy that boundary by:
+A complete authoritative row contains every synced field exactly once, including the primary-key field. Its primary-key value MUST equal the separate `pk` value. SQL null is JSON `null`.
 
-- validating bearer tokens directly, for example with JWT verification
-- trusting an upstream API layer that already validated identity and resolved the internal user ID
+### Portable value representations
 
-The protocol does not require every adapter to implement the same identity-provider logic.
+The immutable manifest determines each field's portable type. Protocol version 3 uses these canonical JSON representations:
 
-## Endpoint Set
+| Type | JSON representation |
+| --- | --- |
+| `string` | JSON string containing valid Unicode scalar values. No normalization is applied. |
+| `int` | JSON integer from `-2147483648` through `2147483647`, without fraction, exponent, or negative zero. |
+| `int64` | Canonical base-10 JSON string from `-9223372036854775808` through `9223372036854775807`. |
+| `decimal` | Canonical exact decimal JSON string without exponent, leading plus, insignificant zeros, or negative zero. |
+| `float` | Finite IEEE 754 binary64 JSON number serialized by the RFC 8785 number rule. |
+| `boolean` | JSON `true` or `false`. |
+| `datetime` | UTC JSON string with exactly microsecond precision, such as `2026-07-18T14:00:00.000000Z`. |
+| `date` | Valid Gregorian date string in `YYYY-MM-DD` form. |
+| `time` | Time string with exactly microsecond precision in `HH:MM:SS.ffffff` form. |
+| `json` | JSON string whose decoded content is one complete RFC 8785 canonical JSON value. |
+| `bytes` | RFC 4648 base64url JSON string without padding. |
 
-### `POST /sync/connect`
+NaN, infinities, noncanonical integer strings, imprecise decimal conversion, duplicate JSON object members, and values that do not match the manifest type are invalid.
 
-Establishes or resumes sync state for a client.
+### Opaque values
 
-Responsibilities:
+`server_version` is a nonempty server-generated equality token. Clients store and return it only as a compare-and-swap precondition. Clients and adapters MUST NOT parse, sort, increment, generate, or infer time or stream order from it.
 
-- registers the client if needed
-- negotiates protocol version
-- negotiates schema state
-- returns authoritative scope assignment state
-- returns full schema only when required
+Incremental cursors and rebuild continuation values are opaque server-issued strings. Clients MUST persist and return them unchanged to the endpoint and scope that issued them. Clients MUST NOT decode, compare, edit, synthesize, or derive a row key or checkpoint from them. ADR 003 defines their authenticated server-side bindings and construction. Those internals are not part of client behavior.
 
-This endpoint does not return normal change data.
+### Checksum object
 
-This replaces a separate mandatory bootstrap dance between registration and schema fetch.
+Every protocol version 3 row or scope digest uses this exact object with no additional members:
 
-### `POST /sync/push`
+```json
+{
+  "algorithm": "sha256",
+  "version": 1,
+  "encoding": "hex",
+  "digest": "0011223344556677001122334455667700112233445566770011223344556677"
+}
+```
 
-Uploads a batch of client mutations for synced tables.
+All four members are required. `digest` is exactly 64 lowercase hexadecimal characters. A different algorithm, version, encoding, shape, length, or alphabet is invalid.
 
-Responsibilities:
+`row_checksum` is the ADR 005 SHA-256 row digest over the exact schema, logical row identity, complete authoritative row, and accompanying opaque `server_version`. `checksum` and values in `checksums` are ADR 005 SHA-256 scope digests over the exact schema, scope identity, cardinality, and ordered set of row identities paired with row digests. Numeric checksums and serializer-native digests are not protocol version 3 values.
 
-- accepts row-level synced CRUD mutations
-- carries both `client_version` and optional `base_version` for conflict resolution
-- applies policy and validation
-- returns per-mutation outcomes
-- returns canonical server rows for accepted mutations when appropriate
+## Connect
 
-### `POST /sync/pull`
-
-Fetches incremental updates for assigned scopes.
-
-Responsibilities:
-
-- advances per-scope cursors
-- returns upserts and deletes
-- returns scope assignment changes
-- requests rebuild for stale or invalid scope state
-- returns authoritative scope checksums on the final page
-
-### `POST /sync/rebuild`
-
-Returns an authoritative rebuild stream for one scope instance.
-
-Responsibilities:
-
-- returns the current contents of the scope
-- pages results with a rebuild cursor
-- returns the final authoritative scope cursor and checksum
-
-### Optional Non-Core Endpoints
-
-These are useful, but not required by the client hot path:
-
-- `GET /sync/schema`
-- `GET /sync/debug`
-
-Clients should not require them in the normal steady-state flow.
-
-## Connection Handshake
+Connect registers or resumes a client, negotiates protocol version 3, returns the current client generation, selects exactly one schema action, and reconciles authoritative scope assignments. It does not return normal row changes or acknowledge incremental cursors. Incremental cursor validation and acknowledgement occur on pull.
 
 ### Request
 
 ```json
 {
   "client_id": "ios-device-123",
+  "client_generation": 4,
   "platform": "ios",
-  "app_version": "1.4.0",
-  "protocol_version": 2,
+  "app_version": "3.0.1",
+  "protocol_version": 3,
+  "schema_reset": false,
   "schema": {
     "version": 7,
-    "hash": "3b6f9f2f"
+    "hash": "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"
   },
   "scope_set_version": 12,
   "known_scopes": {
-    "documents_user:u_123": { "cursor": "v2.eyJzY29wZV9pZCI6ImRvY3VtZW50c191c2VyOnVfMTIzIiwic3RyZWFtX2dlbmVyYXRpb24iOiJnZW5fNyIsImNoZWNrcG9pbnQiOjg4OX0.sig" },
-    "templates_public": { "cursor": "v2.eyJzY29wZV9pZCI6InRlbXBsYXRlc19wdWJsaWMiLCJzdHJlYW1fZ2VuZXJhdGlvbiI6Imdlbl83IiwiY2hlY2twb2ludCI6MjAxfQ.sig" }
+    "documents_user:u_123": {
+      "cursor": "opaque-incremental-cursor-a"
+    },
+    "templates_public": {
+      "cursor": "opaque-incremental-cursor-c"
+    },
+    "project:p_old": {
+      "cursor": "opaque-incremental-cursor-b"
+    }
   }
 }
 ```
 
-### Response
+The request members are:
+
+| Member | Rule |
+| --- | --- |
+| `client_id` | Required nonempty identifier bound to the authenticated user. |
+| `client_generation` | Required positive integer for a continuing local client. It MAY be absent only when the local client is fresh. |
+| `platform` | Required nonempty platform identifier. |
+| `app_version` | Required valid SemVer 2.0.0 string. |
+| `protocol_version` | Required integer `3`. |
+| `schema_reset` | Optional boolean. It is `true` only for an explicit incompatible-schema recovery by a continuing upgraded client and otherwise is absent or `false`. |
+| `schema` | Required historical or current immutable reference. The exact fresh sentinel is allowed only when `client_generation` is absent and the server confirms this client identity has no prior generation or installed schema. |
+| `scope_set_version` | Required nonnegative integer for the last locally applied assignment set. A fresh client sends `0`. |
+| `known_scopes` | Required map from every locally known scope ID to an object containing `cursor`, which is an opaque string or `null`. |
+| `seed_receipts` | Optional nonempty map from seeded scope ID to an opaque portable seed receipt. It is sent only while converting seed continuation state on authenticated connect. |
+
+Omitting `client_generation` asserts a fresh local client. A continuing or restored client MUST present its persisted generation and actual installed schema, including after generation expiry. Pairing a current, stale, or expired generation with the fresh sentinel, or omitting the generation for a previously known client identity, returns `400 invalid_schema_reference` without schema dispatch. Connect can replace an expired generation, but it cannot revive a permanently retired client identity.
+
+### Response example
+
+This example is the response for known Class 3 schema history plus an assignment change:
 
 ```json
 {
-  "server_time": "2026-03-20T18:22:11Z",
-  "protocol_version": 2,
+  "server_time": "2026-07-18T14:00:00.000000Z",
+  "protocol_version": 3,
+  "client_generation": 4,
   "scope_set_version": 13,
   "schema": {
     "version": 8,
-    "hash": "8b21d2a1",
-    "action": "replace"
+    "hash": "21d56a4f2191820e954f008ea32ba8da8568a952cd01a45fd1a3fe16bbe8aaea",
+    "action": "rebuild_local"
   },
   "scopes": {
     "add": [
-      { "id": "documents_user:u_123", "cursor": null },
-      { "id": "templates_public", "cursor": null },
-      { "id": "templates_user:u_123", "cursor": null }
+      {
+        "id": "documents_shared",
+        "cursor": null
+      }
     ],
-    "remove": []
+    "remove": [
+      "project:p_old"
+    ]
+  },
+  "scope_cursor_updates": {
+    "documents_user:u_123": null,
+    "templates_public": "opaque-current-schema-cursor-at-same-position"
   },
   "schema_definition": {
-    "tables": []
-  }
+    "schema_version": 8,
+    "schema_hash": "21d56a4f2191820e954f008ea32ba8da8568a952cd01a45fd1a3fe16bbe8aaea",
+    "parent_schema": {
+      "version": 7,
+      "hash": "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"
+    },
+    "transition_class": "class_3",
+    "compatibility_floor": 8,
+    "tables": [
+      {
+        "table_id": "tbl_documents",
+        "relation_id": "rel_documents",
+        "name": "documents",
+        "composition": "multi_scope",
+        "primary_key_field_id": "fld_documents_id",
+        "lifecycle": {
+          "created_at_field_id": null,
+          "updated_at_field_id": "fld_documents_updated_at",
+          "deleted_at_field_id": "fld_documents_deleted_at"
+        },
+        "fields": [
+          {
+            "field_id": "fld_documents_deleted_at",
+            "name": "deleted_at",
+            "type": "datetime",
+            "nullable": true,
+            "writable": false
+          },
+          {
+            "field_id": "fld_documents_id",
+            "name": "id",
+            "type": "string",
+            "nullable": false,
+            "writable": false
+          },
+          {
+            "field_id": "fld_documents_title",
+            "name": "title",
+            "type": "string",
+            "nullable": false,
+            "writable": true
+          },
+          {
+            "field_id": "fld_documents_updated_at",
+            "name": "updated_at",
+            "type": "datetime",
+            "nullable": false,
+            "writable": false
+          }
+        ],
+        "indexes": []
+      }
+    ]
+  },
+  "affected_scopes": [
+    "documents_shared",
+    "documents_user:u_123"
+  ]
 }
 ```
 
-### Schema Actions
+`server_time` is an RFC 3339 UTC diagnostic value. `client_generation` is the
+exact positive generation that subsequent first-execution push, pull, and
+rebuild requests MUST use. `scope_set_version` and `scopes` are one
+authoritative assignment transition. Additions normally have `cursor: null` and
+require authoritative materialization. The only initial non-null addition
+cursor is one issued after successful portable seed receipt validation.
+Removals contain scope IDs and require local provenance cleanup without creating
+a mutation. `scope_cursor_updates` is a required delta map for existing
+assignments and is present as `{}` when empty. It never adds or removes a scope.
 
-- `none`: client schema is acceptable, no schema body returned
-- `fetch`: client should fetch schema from `GET /sync/schema`
-- `replace`: schema body is included and client should replace local synced schema metadata
-- `rebuild_local`: schema body is included and client must rebuild local synced state after applying schema
-- `unsupported`: client is too old or incompatible
+### Exact schema action dispatch
 
-### Scope Assignment Rules
+Protocol compatibility is evaluated before schema lineage. Connect uses exactly this dispatch:
 
-- the server is authoritative for scope assignment
-- `scope_set_version` changes whenever the client’s assigned scope set changes
-- if the client’s `scope_set_version` matches and the server does not need to send a diff, the server may return empty `add` and `remove`
-- clients must not invent scope instances locally
+| Condition | HTTP | Action or code |
+| --- | ---: | --- |
+| Protocol version or required client runtime is incompatible | 426 | `upgrade_required` error |
+| Fresh sentinel is paired with a generation or a previously known client identity | 400 | `invalid_schema_reference` |
+| Schema reference is the exact fresh sentinel and the client identity has no prior generation or schema | 200 | `replace` |
+| Schema reference is the exact current manifest | 200 | `none` |
+| Reference is known compatible Class 2 history | 200 | `replace` |
+| Reference is known Class 3 history and affected assigned scopes are nonempty | 200 | `rebuild_local` |
+| Reference is known Class 3 history and no assigned scope is affected | 200 | `replace` |
+| Reference is unknown lineage or known Class 4 history without explicit reset | 200 | `unsupported` |
+| Valid explicit reset with assigned scopes | 200 | `rebuild_local` for all assigned scopes |
+| Valid explicit reset with no assigned scope | 200 | `replace` |
 
-## Mutation Model
+The `schema` response object always contains the current `version`, current 64-hex `hash`, and exactly one `action`.
 
-### Server Version Semantics
+| Action | Required response members | Forbidden response members |
+| --- | --- | --- |
+| `none` | Standard connect envelope | `schema_definition`, `affected_scopes` |
+| `replace` | Current inline `schema_definition` | `affected_scopes` |
+| `rebuild_local` | Current inline `schema_definition` and nonempty `affected_scopes` | None of the required members may be omitted. |
+| `unsupported` | Standard connect envelope and `schema.reason` equal to `unknown_schema_lineage` or `incompatible_schema_transition` | `schema_definition`, `affected_scopes` |
 
-`server_version` is an opaque server-generated row version token.
+`affected_scopes` is a deduplicated list of assigned scope IDs in unsigned UTF-8 byte order. The client applies the inline manifest and rebuilds exactly those scopes. `unsupported` is a successful typed connect result, but the client MUST NOT issue normal push, pull, or rebuild requests under that schema lineage.
 
-Required semantics:
+For a Class 2 or Class 3 action, every existing assignment with a presented
+historical-schema cursor receives a `scope_cursor_updates` entry. The server
+MUST replace it with a current-schema token at the exact same position when the
+complete known lineage is compatible, every Class 3 transition leaves that
+scope unaffected, and every other authenticated cursor binding and the resume
+floor remain current. Only an affected or otherwise stale scope receives `null` and
+requires rebuild. Added and removed scopes are excluded from this map. Connect
+does not acknowledge either the presented or replacement cursor. Pull accepts
+only the current-schema replacement; the client cannot relabel the old token.
 
-- it changes whenever the authoritative synced row changes
-- clients may use it only for optimistic preconditions and reconciliation
-- clients must not sort, increment, or parse it
+A client in `unsupported` state can recover only after an explicit application
+upgrade or operator-approved reset action. It reconnects with its current
+positive client generation, its actual installed schema reference, and
+`schema_reset: true`. The server requires protocol 3 and the current minimum
+runtime, returns the complete current inline manifest, and either rebuilds all
+assigned scopes or uses `replace` when none are assigned. The client preserves
+local-only data, complete authored queue data, sealed-batch history, and
+inspectable outcomes. A fresh sentinel with `schema_reset: true` is invalid.
 
-### Push Request
+Protocol version 3 has no `fetch` schema action and no schema-fetch step in the connect flow.
+
+### Scope assignment and generation rules
+
+- The server is the sole authority for assigned scope IDs.
+- `scope_set_version` changes whenever the authoritative assignment set changes.
+- A response with no assignment change has empty `scopes.add` and `scopes.remove` arrays. Schema cursor replacement remains a separate `scope_cursor_updates` delta and does not advance `scope_set_version`.
+- A new or invalidated assignment has a null cursor and requires rebuild.
+- An expired client reconnect receives a new positive `client_generation` and null cursors for affected assignments. Its durable mutation queue is preserved.
+- Client-generation expiry does not delete push replay outcomes and does not permit reuse of `client_id`.
+
+### Portable seed receipt handoff
+
+A portable seed receipt is opaque and is not an incremental cursor. The client can return each stored receipt only in `seed_receipts` on authenticated connect. ADR 005 defines the receipt's internal bindings and server validation. Clients and adapters MUST NOT decode or edit it.
+
+For an assigned portable scope with a valid receipt under the selected schema and current server state, connect returns a normal user-bound and client-bound incremental cursor in that scope's `scopes.add` entry. For an assigned scope with a stale or unverifiable receipt, connect returns the scope with `cursor: null` and requires rebuild. For an unassigned scope, connect places the scope ID in `scopes.remove`. A receipt never grants assignment, and it is never sent to pull or rebuild as a cursor.
+
+## Push
+
+Push submits one nonempty, ordered, immutable batch. Push operations are exactly `insert`, `update`, and `delete`. `upsert` is a pull operation and is invalid in a push request. Protocol version 3 has no resurrection operation.
+
+The decoded push JSON body is at most 1,048,576 octets, contains `1..1000`
+mutations, and each normalized mutation is at most 65,536 octets with at most
+256 authored columns. The adapter and extension reject an exceeded limit with
+`400 invalid_request` before ledger allocation, fingerprinting, policy
+execution, or source DML. Limits are never clamped.
+
+The wire contains only mutations with a legal operation-specific precondition.
+Native clients keep insert successors and other pre-wire dependencies in local
+durable state until they can normalize them or obtain the predecessor's server
+version. `depends_on_mutation_id`, local supersession, and local cancellation
+states are not push wire members.
+
+The push envelope contains exactly `client_id`, `client_generation`, `batch_id`, `schema`, and a nonempty `mutations` array. First execution requires the exact current generation and schema. Exact replay uses the sealed values stored with the completed batch.
+
+### Request example
 
 ```json
 {
   "client_id": "ios-device-123",
-  "batch_id": "b_20260320_001",
+  "client_generation": 4,
+  "batch_id": "018f2b5e-7c42-7a1d-9d31-8a95bd674001",
   "schema": {
     "version": 8,
-    "hash": "8b21d2a1"
+    "hash": "21d56a4f2191820e954f008ea32ba8da8568a952cd01a45fd1a3fe16bbe8aaea"
   },
   "mutations": [
     {
-      "mutation_id": "m_001",
-      "table": "documents",
+      "mutation_id": "018f2b5e-7c42-7a1d-9d31-8a95bd674011",
+      "table": "tbl_documents",
+      "pk": {
+        "fld_documents_id": "doc-100"
+      },
+      "authored_schema": {
+        "version": 8,
+        "hash": "21d56a4f2191820e954f008ea32ba8da8568a952cd01a45fd1a3fe16bbe8aaea"
+      },
       "op": "insert",
-      "pk": { "id": "w_1" },
-      "client_version": "2026-03-20T18:21:54Z",
+      "client_version": "2026-07-18T13:59:01.000000Z",
       "columns": {
-        "user_id": "u_123",
-        "name": "Lower Body",
-        "started_at": "2026-03-20T18:00:00Z"
+        "fld_documents_title": "Lower Body"
       }
     },
     {
-      "mutation_id": "m_002",
-      "table": "documents",
+      "mutation_id": "018f2b5e-7c42-7a1d-9d31-8a95bd674012",
+      "table": "tbl_documents",
+      "pk": {
+        "fld_documents_id": "doc-101"
+      },
+      "authored_schema": {
+        "version": 8,
+        "hash": "21d56a4f2191820e954f008ea32ba8da8568a952cd01a45fd1a3fe16bbe8aaea"
+      },
       "op": "update",
-      "pk": { "id": "w_2" },
-      "client_version": "2026-03-20T18:22:00Z",
-      "base_version": "sv_902",
+      "base_version": "opaque-row-version-101",
+      "client_version": "2026-07-18T13:59:02.000000Z",
       "columns": {
-        "name": "Upper Body"
+        "fld_documents_title": "Upper Body"
       }
     },
     {
-      "mutation_id": "m_003",
-      "table": "documents",
+      "mutation_id": "018f2b5e-7c42-7a1d-9d31-8a95bd674013",
+      "table": "tbl_documents",
+      "pk": {
+        "fld_documents_id": "doc-102"
+      },
+      "authored_schema": {
+        "version": 8,
+        "hash": "21d56a4f2191820e954f008ea32ba8da8568a952cd01a45fd1a3fe16bbe8aaea"
+      },
       "op": "delete",
-      "pk": { "id": "w_3" },
-      "base_version": "sv_777"
+      "base_version": "opaque-row-version-102",
+      "client_version": "2026-07-18T13:59:03.000000Z"
+    },
+    {
+      "mutation_id": "018f2b5e-7c42-7a1d-9d31-8a95bd674014",
+      "table": "tbl_documents",
+      "pk": {
+        "fld_documents_id": "doc-103"
+      },
+      "authored_schema": {
+        "version": 8,
+        "hash": "21d56a4f2191820e954f008ea32ba8da8568a952cd01a45fd1a3fe16bbe8aaea"
+      },
+      "op": "update",
+      "base_version": "opaque-stale-version-103",
+      "client_version": "2026-07-18T13:59:04.000000Z",
+      "columns": {
+        "fld_documents_title": "Tempo Run"
+      }
+    },
+    {
+      "mutation_id": "018f2b5e-7c42-7a1d-9d31-8a95bd674015",
+      "table": "tbl_documents",
+      "pk": {
+        "fld_documents_id": "doc-104"
+      },
+      "authored_schema": {
+        "version": 5,
+        "hash": "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
+      },
+      "op": "update",
+      "base_version": "opaque-row-version-104",
+      "client_version": "2026-07-18T13:59:05.000000Z",
+      "columns": {
+        "fld_documents_legacy_summary": "Preserve this authored value"
+      }
     }
   ]
 }
 ```
 
-`client_version` carries the client-side write timestamp for the mutation.
-`base_version` carries the authoritative server row version the client branched from, when known.
-For `insert`, `update`, and `upsert`, `client_version` is required.
+The request-level `schema` is the exact current manifest. Each `authored_schema` is the immutable manifest under which that mutation was created. A client MUST retain the authored reference and every authored field and value. It MUST NOT make queued intent appear compatible by changing the authored schema, dropping a field, or reusing an ID for changed content.
 
-For accepted `insert` and `update` mutations on tables with an `updated_at` column, the server persists the canonical row version from `client_version`.
-Clients must not treat a row payload's `updated_at` field as writable input.
-The authoritative row version comes from protocol version fields, not from client-supplied timestamp columns.
+`client_version` is a required client-authored RFC 3339 UTC diagnostic timestamp. It identifies local intent only. It is not a precondition, stream position, server version, row timestamp source, conflict input, or winner-selection value. Equal, past, and future client timestamps have no conflict authority.
 
-### Push Response
+### Exact operation shapes
+
+Every mutation requires `mutation_id`, `table`, one-field typed `pk`, `authored_schema`, `op`, and `client_version`. The operation-specific members are exact:
+
+| Operation | `base_version` | `columns` |
+| --- | --- | --- |
+| `insert` | MUST be absent | REQUIRED nonempty object keyed by fields writable under `authored_schema` |
+| `update` | REQUIRED nonempty opaque token | REQUIRED nonempty patch keyed by fields writable under `authored_schema` |
+| `delete` | REQUIRED nonempty opaque token | MUST be absent |
+
+Empty `columns`, unknown operations, duplicate mutation IDs, duplicate field members, and presence-matrix violations make the whole request `400 invalid_request`.
+
+The server inspects every submitted field after structural validation. A known current primary-key, generated, version, creation-time, update-time, deletion-time, or other non-writable field produces terminal `validation_failed`. An invalid value or failed current domain constraint also produces terminal `validation_failed`. A retained authored table or field that cannot be represented by the current manifest produces terminal `schema_incompatible`. The server MUST NOT remove any submitted field and report the mutation as applied.
+
+### Response example
+
+Every HTTP 200 push response requires `batch_id`, `server_time`, `accepted`, and `rejected`. The batch ID equals the request batch ID. Both arrays are present even when empty. Every request mutation appears exactly once in one array, and the relative request order is preserved within each array. Every outcome echoes `mutation_id`, logical `table`, typed `pk`, and exact `outcome_schema`.
 
 ```json
 {
-  "server_time": "2026-03-20T18:22:11Z",
+  "batch_id": "018f2b5e-7c42-7a1d-9d31-8a95bd674001",
+  "server_time": "2026-07-18T14:00:01.000000Z",
   "accepted": [
     {
-      "mutation_id": "m_001",
-      "table": "documents",
-      "pk": { "id": "w_1" },
+      "mutation_id": "018f2b5e-7c42-7a1d-9d31-8a95bd674011",
+      "table": "tbl_documents",
+      "pk": {
+        "fld_documents_id": "doc-100"
+      },
+      "outcome_schema": {
+        "version": 8,
+        "hash": "21d56a4f2191820e954f008ea32ba8da8568a952cd01a45fd1a3fe16bbe8aaea"
+      },
       "status": "applied",
       "server_row": {
-        "id": "w_1",
-        "user_id": "u_123",
-        "name": "Lower Body",
-        "started_at": "2026-03-20T18:00:00Z",
-        "updated_at": "2026-03-20T18:22:11Z"
+        "fld_documents_deleted_at": null,
+        "fld_documents_id": "doc-100",
+        "fld_documents_title": "Lower Body",
+        "fld_documents_updated_at": "2026-07-18T14:00:01.000000Z"
       },
-      "server_version": "sv_903"
+      "row_checksum": {
+        "algorithm": "sha256",
+        "version": 1,
+        "encoding": "hex",
+        "digest": "63c3b7ae6054827a3e0d2ca334f8147ae3da135a4b91338daf5d99e704cd3976"
+      },
+      "server_version": "opaque-new-version-100"
+    },
+    {
+      "mutation_id": "018f2b5e-7c42-7a1d-9d31-8a95bd674012",
+      "table": "tbl_documents",
+      "pk": {
+        "fld_documents_id": "doc-101"
+      },
+      "outcome_schema": {
+        "version": 8,
+        "hash": "21d56a4f2191820e954f008ea32ba8da8568a952cd01a45fd1a3fe16bbe8aaea"
+      },
+      "status": "applied",
+      "server_row": {
+        "fld_documents_deleted_at": null,
+        "fld_documents_id": "doc-101",
+        "fld_documents_title": "Upper Body",
+        "fld_documents_updated_at": "2026-07-18T14:00:01.000000Z"
+      },
+      "row_checksum": {
+        "algorithm": "sha256",
+        "version": 1,
+        "encoding": "hex",
+        "digest": "5c67d69839a65937e02ae3d898cd34a5a5cb3793706e248ddb604942edb676b4"
+      },
+      "server_version": "opaque-new-version-101"
+    },
+    {
+      "mutation_id": "018f2b5e-7c42-7a1d-9d31-8a95bd674013",
+      "table": "tbl_documents",
+      "pk": {
+        "fld_documents_id": "doc-102"
+      },
+      "outcome_schema": {
+        "version": 8,
+        "hash": "21d56a4f2191820e954f008ea32ba8da8568a952cd01a45fd1a3fe16bbe8aaea"
+      },
+      "status": "applied",
+      "server_row": {
+        "fld_documents_deleted_at": "2026-07-18T14:00:01.000000Z",
+        "fld_documents_id": "doc-102",
+        "fld_documents_title": "Archived Plan",
+        "fld_documents_updated_at": "2026-07-18T14:00:01.000000Z"
+      },
+      "row_checksum": {
+        "algorithm": "sha256",
+        "version": 1,
+        "encoding": "hex",
+        "digest": "a7653f643b34a717990175b8e3017488640f833dc4c281079fa34d82e0f11ac5"
+      },
+      "server_version": "opaque-new-version-102"
     }
   ],
   "rejected": [
     {
-      "mutation_id": "m_003",
-      "table": "documents",
-      "pk": { "id": "w_3" },
+      "mutation_id": "018f2b5e-7c42-7a1d-9d31-8a95bd674014",
+      "table": "tbl_documents",
+      "pk": {
+        "fld_documents_id": "doc-103"
+      },
+      "outcome_schema": {
+        "version": 8,
+        "hash": "21d56a4f2191820e954f008ea32ba8da8568a952cd01a45fd1a3fe16bbe8aaea"
+      },
       "status": "conflict",
       "code": "version_conflict",
-      "message": "row version no longer matches",
+      "message": "the base version does not match the current row",
       "server_row": {
-        "id": "w_3",
-        "user_id": "u_123",
-        "name": "Leg Day",
-        "updated_at": "2026-03-20T18:21:01Z"
+        "fld_documents_deleted_at": null,
+        "fld_documents_id": "doc-103",
+        "fld_documents_title": "Current Plan",
+        "fld_documents_updated_at": "2026-07-18T13:58:00.000000Z"
       },
-      "server_version": "sv_778"
+      "row_checksum": {
+        "algorithm": "sha256",
+        "version": 1,
+        "encoding": "hex",
+        "digest": "184ee9357371ae6a66f89c5e51152350d0a2a0a1b4c20e0a7756f89cb2331dd6"
+      },
+      "server_version": "opaque-current-version-103"
+    },
+    {
+      "mutation_id": "018f2b5e-7c42-7a1d-9d31-8a95bd674015",
+      "table": "tbl_documents",
+      "pk": {
+        "fld_documents_id": "doc-104"
+      },
+      "outcome_schema": {
+        "version": 8,
+        "hash": "21d56a4f2191820e954f008ea32ba8da8568a952cd01a45fd1a3fe16bbe8aaea"
+      },
+      "status": "rejected_terminal",
+      "code": "schema_incompatible",
+      "message": "authored mutation cannot be represented by the current schema",
+      "retryable": false,
+      "authored_schema": {
+        "version": 5,
+        "hash": "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
+      },
+      "current_schema": {
+        "version": 8,
+        "hash": "21d56a4f2191820e954f008ea32ba8da8568a952cd01a45fd1a3fe16bbe8aaea"
+      },
+      "incompatible_field_ids": [
+        "fld_documents_legacy_summary"
+      ]
     }
   ]
 }
 ```
 
-## Incremental Pull Model
+### Exact outcome partition
 
-### Pull Request
+HTTP 200 push success has only these per-mutation statuses:
+
+| Status | Array | Codes | Required authoritative data |
+| --- | --- | --- | --- |
+| `applied` | `accepted` | No `code` | Insert and update require full `server_row`, matching `row_checksum`, and new `server_version`. Delete requires new `server_version`; it includes a full tombstone row and matching checksum for a source tombstone and omits both for a fence-only delete. |
+| `conflict` | `rejected` | `version_conflict`, `row_already_exists`, `row_deleted`, `row_not_found` | `message` plus current authoritative state. A live row or source tombstone includes row, matching checksum, and version. A fence-only delete includes version without row or checksum. True absence includes neither. |
+| `rejected_terminal` | `rejected` | `schema_incompatible`, `table_not_synced`, `policy_rejected`, `validation_failed` | `message`; no `server_row` or `server_version`. `schema_incompatible` also requires `retryable: false`, authored and current schema references, and sorted `incompatible_field_ids`. |
+
+Every row in this table also requires `outcome_schema`. A first execution uses
+the current request schema. Exact batch replay and a completed mutation reused
+in a newer batch preserve the original historical binding, so outcomes in one
+response need not share a schema. The client verifies any row and checksum with
+that immutable manifest. An unavailable manifest, mismatched digest binding, or
+unsafe projection into the current local schema fails reconciliation without
+discarding the outcome or later local intent and requires current-schema
+rebuild where applicable.
+
+Terminal codes have one meaning:
+
+- `schema_incompatible`: preserved authored table or field identity cannot be represented by the current synced schema.
+- `table_not_synced`: the target has never been a synced table in this contract.
+- `policy_rejected`: deterministic authenticated write policy denies the mutation.
+- `validation_failed`: a known current field is non-writable, a value is invalid, or a current domain constraint fails.
+
+The complete conflict matrix after structural, schema, policy, and value validation is:
+
+| Current row state | Version relation | `insert` | `update` | `delete` |
+| --- | --- | --- | --- | --- |
+| `absent` | No current version | `applied` | `row_not_found` conflict | `row_not_found` conflict |
+| `live` | Base equals current | `row_already_exists` conflict | `applied` | `applied` |
+| `live` | Base differs from current | `row_already_exists` conflict | `version_conflict` | `version_conflict` |
+| `deleted` | Any permitted base relation | `row_deleted` conflict | `row_deleted` conflict | `row_deleted` conflict |
+
+Insert atomically reserves an absent row identity. Update and delete lock the authoritative row and version identity, compare `base_version` for byte-for-byte equality, and perform the state transition and new version allocation as one compare-and-swap. An unlocked check followed by an unconditional write is invalid. Concurrent operations cannot both advance the same prior version.
+
+When multiple terminal semantic rules apply, classification order is `schema_incompatible`, `table_not_synced`, `policy_rejected`, then `validation_failed`. Conflict evaluation occurs only after those checks pass.
+
+No per-mutation retryable status or code exists. Operational uncertainty is always a whole-request 429 or 503 response with no `accepted` or `rejected` arrays.
+
+### Immutable identity and exact replay
+
+Before first transmission, the client persists every UUID, seals the batch, and preserves mutation order and all presence distinctions. A retry sends the exact same batch content.
+
+The server scopes batch and mutation identity to the authenticated user and client, computes canonical SHA-256 request fingerprints, and retains terminal ledger outcomes until irreversible client retirement. The batch fingerprint covers the authenticated scope, client generation, batch UUID, exact request schema, mutation order, and complete mutations. Each mutation fingerprint covers its authenticated scope, UUID, logical table and typed key, operation, authored schema, field presence and values, base version, and client version.
+
+- Repeating a completed `batch_id` with the identical fingerprint returns the original HTTP status and exact canonical response body, including original time, order, rows, versions, codes, and messages. It performs no mutation work.
+- Reusing a completed batch or mutation ID for different content returns `409 idempotency_conflict` and performs no mutation work.
+- Reusing an unchanged completed mutation in a different new batch contributes its exact stored outcome without re-execution.
+- Exact completed replay occurs before current client-generation and schema gates, but after authentication, protocol, structural, and permanent-retirement gates.
+- Concurrent requests with one batch identity and fingerprint serialize to one first execution. Later callers receive its exact completed response or a whole-request retryable error, never a second execution.
+
+For first execution, all accepted source writes, opaque version transitions, write fences, mutation outcomes, and the complete replay response commit in one database transaction. Semantic rejections can coexist with accepted mutations. An operational failure rolls back the entire first execution and returns no per-mutation outcomes.
+
+### Push visibility
+
+An accepted push response is authoritative for immediate client reconciliation. Push does not synchronously publish pull-visible changes or advance a pull cursor. WAL materialization is the only path that creates pull-visible effects. A later pull delivers the authoritative echo using the same server-owned version transition.
+
+## Pull
+
+Pull reads one bounded incremental page across assigned scopes. Scope eligibility is resolved before the global limit, and every selected candidate becomes an explicit change or the whole page fails.
+
+### Request
 
 ```json
 {
   "client_id": "ios-device-123",
+  "client_generation": 4,
   "schema": {
     "version": 8,
-    "hash": "8b21d2a1"
+    "hash": "21d56a4f2191820e954f008ea32ba8da8568a952cd01a45fd1a3fe16bbe8aaea"
   },
   "scope_set_version": 13,
   "scopes": {
-    "documents_user:u_123": { "cursor": "v2.eyJzY29wZV9pZCI6ImRvY3VtZW50c191c2VyOnVfMTIzIiwic3RyZWFtX2dlbmVyYXRpb24iOiJnZW5fNyIsImNoZWNrcG9pbnQiOjg4OX0.sig" },
-    "templates_public": { "cursor": "v2.eyJzY29wZV9pZCI6InRlbXBsYXRlc19wdWJsaWMiLCJzdHJlYW1fZ2VuZXJhdGlvbiI6Imdlbl83IiwiY2hlY2twb2ludCI6MjAxfQ.sig" },
-    "templates_user:u_123": { "cursor": "v2.eyJzY29wZV9pZCI6InRlbXBsYXRlc191c2VyOnVfMTIzIiwic3RyZWFtX2dlbmVyYXRpb24iOiJnZW5fNyIsImNoZWNrcG9pbnQiOjUwfQ.sig" }
+    "documents_shared": {
+      "cursor": "opaque-incremental-cursor-c"
+    },
+    "documents_user:u_123": {
+      "cursor": "opaque-incremental-cursor-d"
+    }
   },
   "limit": 500
 }
 ```
 
-### Pull Response
+The exact request rules are:
+
+1. `client_id` and `client_generation` identify the current authenticated client generation.
+2. `schema` is the exact current immutable reference.
+3. `scope_set_version` is the last locally applied assignment version. A value greater than the server version is invalid.
+4. `scopes` contains each locally active or previously assigned scope being reconciled. Every value has exactly one `cursor` member containing an opaque string or `null`.
+5. `null` means no usable incremental state and requests rebuild for that scope.
+6. A never-assigned or invented scope is invalid. A previously assigned scope that was removed is accepted for authoritative removal dispatch.
+7. `limit` is an integer from `1` through the configured pull maximum. It is never defaulted or clamped.
+
+### Terminal response example
 
 ```json
 {
   "changes": [
     {
       "scope": "documents_user:u_123",
-      "table": "documents",
+      "table": "tbl_documents",
       "op": "upsert",
-      "pk": { "id": "w_9" },
-      "row": {
-        "id": "w_9",
-        "user_id": "u_123",
-        "name": "Tempo Run",
-        "updated_at": "2026-03-20T18:20:00Z"
+      "pk": {
+        "fld_documents_id": "doc-200"
       },
-      "row_checksum": 131313,
-      "server_version": "sv_991"
+      "row": {
+        "fld_documents_deleted_at": null,
+        "fld_documents_id": "doc-200",
+        "fld_documents_title": "Tempo Run",
+        "fld_documents_updated_at": "2026-07-18T14:01:00.000000Z"
+      },
+      "row_checksum": {
+        "algorithm": "sha256",
+        "version": 1,
+        "encoding": "hex",
+        "digest": "6f5d85950d90b017b28373562c0f0a2c538abd1d455aaef86289095cc138fcbb"
+      },
+      "server_version": "opaque-pull-version-200"
     },
     {
-      "scope": "templates_public",
-      "table": "templates",
+      "scope": "documents_shared",
+      "table": "tbl_documents",
       "op": "delete",
-      "pk": { "id": "e_7" },
-      "server_version": "sv_400"
+      "pk": {
+        "fld_documents_id": "doc-201"
+      },
+      "server_version": "opaque-pull-version-201"
     }
   ],
   "scope_set_version": 14,
   "scope_cursors": {
-    "documents_user:u_123": "v2.eyJzY29wZV9pZCI6ImRvY3VtZW50c191c2VyOnVfMTIzIiwic3RyZWFtX2dlbmVyYXRpb24iOiJnZW5fNyIsImNoZWNrcG9pbnQiOjg5MH0.sig",
-    "templates_public": "v2.eyJzY29wZV9pZCI6InRlbXBsYXRlc19wdWJsaWMiLCJzdHJlYW1fZ2VuZXJhdGlvbiI6Imdlbl83IiwiY2hlY2twb2ludCI6MjAyfQ.sig",
-    "templates_user:u_123": "v2.eyJzY29wZV9pZCI6InRlbXBsYXRlc191c2VyOnVfMTIzIiwic3RyZWFtX2dlbmVyYXRpb24iOiJnZW5fNyIsImNoZWNrcG9pbnQiOjUwfQ.sig"
+    "documents_shared": "opaque-next-incremental-cursor-c",
+    "documents_user:u_123": "opaque-next-incremental-cursor-d"
   },
   "scope_updates": {
-    "add": [],
+    "add": [
+      {
+        "id": "documents_team:t_9",
+        "cursor": null
+      }
+    ],
     "remove": []
   },
-  "rebuild": [],
+  "rebuild": [
+    "documents_team:t_9"
+  ],
   "has_more": false,
   "checksums": {
-    "documents_user:u_123": "cs_a19d",
-    "templates_public": "cs_0f22",
-    "templates_user:u_123": "cs_7771"
+    "documents_shared": {
+      "algorithm": "sha256",
+      "version": 1,
+      "encoding": "hex",
+      "digest": "2233445566778899223344556677889922334455667788992233445566778899"
+    },
+    "documents_team:t_9": {
+      "algorithm": "sha256",
+      "version": 1,
+      "encoding": "hex",
+      "digest": "33445566778899aa33445566778899aa33445566778899aa33445566778899aa"
+    },
+    "documents_user:u_123": {
+      "algorithm": "sha256",
+      "version": 1,
+      "encoding": "hex",
+      "digest": "1122334455667788112233445566778811223344556677881122334455667788"
+    }
   }
 }
 ```
 
-### Delete Change Semantics
+Every HTTP 200 pull response requires `changes`, `scope_set_version`, `scope_cursors`, `scope_updates`, `rebuild`, and `has_more`. Arrays and maps are present when empty. `checksums` follows only the terminal presence rule below.
 
-- A delete change may omit `row` when the server only needs the client to remove local materialization for that scope.
-- A delete change may include `row` when the server is returning an authoritative tombstone. In that case `row.deleted_at` must be non-null and canonical.
-- Clients must not synthesize a new local tombstone when `row` is absent. Scope cleanup without an authoritative tombstone is local removal, not a new local delete mutation.
-- Row-bearing pull changes must include `row_checksum`.
+Pull operations are exactly `upsert` and `delete`.
 
-`scope_set_version` in pull responses is authoritative after any returned `scope_updates`. Clients must persist it atomically with the applied scope delta.
+- An `upsert` requires a complete authoritative `row`, matching `row_checksum`, and opaque `server_version`.
+- A `delete` without `row` is an authoritative local removal for that scope. The client MUST NOT create a local mutation or invent a tombstone.
+- A `delete` with a source tombstone requires the complete tombstone row, matching `row_checksum`, and opaque `server_version`.
+- Every change carries exactly one scope ID, logical table ID, and typed primary key.
 
-### Final Pull Integrity
+### Page construction and ordering
 
-Final pull pages must include authoritative scope checksums for all active scopes, even when there are no row changes in the page.
+The server opens one repeatable-read snapshot, reads the durable materialization
+progress row first, and fixes its boundary to the visible generation-start or
+transaction-end point. Synchronized projections, scope effects, and that
+progress row were committed atomically by the serial WAL materializer, so the
+snapshot contains exactly materialized state through that boundary. Within the
+generation, source events are ordered by commit LSN and event ordinal as defined
+by ADR 001 and ADR 003. Clients do not receive or construct those coordinates,
+and pull never hydrates from later live source state.
 
-Clients must verify those checksums against local materialization state.
+For each incrementally valid assigned scope, the server determines all eligible
+effects after its presented cursor and through the fixed boundary. Every effect
+has a persisted delivery position `(commit_lsn, event_ordinal,
+effect_ordinal)`, so a page can stop between sibling effects from one source
+event. It deduplicates by `(scope_id, logical_table_id, typed_primary_key)`,
+retaining the greatest eligible effect for each key. Each earlier effect for
+that key is covered by that retained candidate for progress accounting. Only
+then does it apply the global `limit` through the deterministic ADR 003 merge
+order.
 
-If a final pull checksum does not match local scope state, the client must invalidate the local cursor for that scope and rebuild it.
+The merge is starvation-free at the fixed boundary. Repeated pages consume the least remaining eligible candidates, so activity in one scope cannot indefinitely conceal an older eligible candidate in another scope.
 
-## Design Notes
+Every selected candidate has exactly one result:
 
-### Schema Fetch Minimization
+1. A complete `upsert` from the captured WAL projection.
+2. An explicit `delete` from an authoritative deletion or scope-removal effect.
+3. No response because the whole page failed.
 
-The server should not return full schema on every connect.
+The server MUST NOT hydrate a historical candidate from a later live row, silently omit a selected candidate, or advance beyond an unrepresented effect.
 
-Use `schema.action` plus optional inline schema payload to avoid unnecessary bootstrap round trips without turning `connect` into a heavy steady-state endpoint.
+`has_more` is true exactly when at least one eligible candidate remains for an incrementally valid scope at the fixed boundary. It is not inferred from the number of raw database rows read.
 
-### Explicit Rebuild
+### Scope cursor and acknowledgement semantics
 
-Rebuild is a dedicated flow, not hidden incremental behavior.
+`scope_cursors` is a delta map of newly issued incremental cursors.
 
-### First-Class Synced CRUD
+- A scope receives a cursor only through its greatest safe progress position. Every earlier raw effect is either explicitly delivered or covered by the retained later candidate for the same typed key.
+- An unselected retained candidate remains strictly after the issued cursor and keeps `has_more` true; a cursor never passes it. This prevents a suppressed earlier effect from blocking the same selected candidate forever while preserving eventual delivery of the retained state.
+- A scope blocked by the page limit is not advanced beyond its last represented candidate.
+- On a terminal page, every incrementally valid active scope is accounted through the response boundary and receives a cursor at that boundary.
+- A scope listed in `rebuild` receives no new incremental cursor.
+- Issuing a cursor does not acknowledge it on the server.
+- A durable server checkpoint advances only when a later successful pull presents that cursor, or a newer valid cursor, for the same scope.
+- An older valid cursor can replay data but never moves a checkpoint backward.
+- A whole-page failure commits neither acknowledgement of presented cursors nor new progress.
 
-The protocol owns row-level synced CRUD instead of delegating the write contract to arbitrary app backend APIs.
-```
+This delayed acknowledgement makes response loss safe. Selection, response construction, cursor issuance, and rebuild completion do not prove local apply.
 
-## Rebuild Model
+### Scope updates and rebuild dispatch
 
-### Rebuild Request
+`scope_set_version` and `scope_updates` form one authoritative assignment transition.
+
+- A new assignment appears in `scope_updates.add` with `cursor: null` and also appears in `rebuild`.
+- A removed assignment appears in `scope_updates.remove` and receives no change or cursor in that response.
+- A row entering an existing scope is a normal scoped `upsert`.
+- A row leaving an existing scope is a normal scoped `delete`.
+- The same row in multiple scopes has independent provenance and independent outcomes.
+- A membership contract change invalidates only affected scope generations and lists those scopes in `rebuild`.
+
+The client applies assignment updates, changes, cursor deltas, and terminal integrity results as one local metadata transition.
+
+### Exact terminal checksum map
+
+Checksum presence and key sets are exact:
+
+1. If `has_more` is `true`, `checksums` MUST be absent.
+2. If `has_more` is `false`, `checksums` is REQUIRED, including on an empty no-change page.
+3. The terminal map key set equals the complete authoritative active scope set after applying that response's `scope_updates`.
+4. The map includes active scopes listed in `rebuild` and excludes removed scopes.
+5. Every value is the exact structured SHA-256 scope checksum at the schema and stream boundary represented by that response.
+6. Missing, extra, malformed, or boundary-mismatched entries invalidate the whole page and advance no local cursor.
+
+A checksum for a scope in `rebuild` does not make that scope healthy. Rebuild takes precedence. For every other active scope, the client verifies row checksums before apply and recomputes the terminal local scope checksum before installing the new cursor. A mismatch invalidates only that scope's resumable state and requires rebuild.
+
+### Stale, forged, and pending dispatch
+
+An opaque incremental cursor that the server authenticates but recognizes as no longer current is stale. Pull returns HTTP 200, lists that scope in `rebuild`, omits a new cursor for it, and does not acknowledge it. Other valid scopes in the request can be processed normally.
+
+Ordinary retention-floor movement preserves a cursor at or above the new floor
+and makes a cursor below the floor stale. A server-recognized obsolete stream,
+client, schema, membership, or retention lineage also makes the cursor stale
+rather than forged. An otherwise valid historical-schema cursor avoids rebuild
+only when connect issues a same-position current-schema replacement through the
+compatible unaffected-scope bridge; pull never accepts the historical token.
+
+A malformed, forged, misbound, wrong-kind, or unsupported cursor is `400 invalid_request`. The entire request fails, no scope is processed, and the response does not identify the failed cursor check.
+
+If an accepted push fence for this client is not yet satisfied by exact WAL
+materialization or activated verified reset-baseline coverage, pull returns
+retryable `503 capture_pending`. It returns no changes, assignment update,
+cursor, checksum, or checkpoint advancement. Rebuild uses the same gate and
+creates no session or page while such a fence is pending. Staged or failed-reset
+coverage does not clear the gate. A page or terminal checksum can never claim
+state older than the client's accepted push.
+
+A transient read failure returns retryable `503 temporary_unavailable`. A missing captured projection, digest mismatch, authorization inconsistency, or impossible durable state returns non-retryable `500 sync_integrity_failure` and makes readiness unready. Both paths return no partial page or progress.
+
+## Rebuild
+
+Rebuild materializes exactly one currently assigned scope from one durable immutable staged snapshot. It does not query live scope state independently for each page.
+
+### First request
 
 ```json
 {
   "client_id": "ios-device-123",
-  "scope": "templates_public",
+  "client_generation": 4,
+  "schema": {
+    "version": 8,
+    "hash": "21d56a4f2191820e954f008ea32ba8da8568a952cd01a45fd1a3fe16bbe8aaea"
+  },
+  "scope": "documents_shared",
+  "rebuild_id": "018f2b5e-7c42-7a1d-9d31-8a95bd674101",
   "cursor": null,
   "limit": 1000
 }
 ```
 
-### Rebuild Response
+`scope` MUST be currently assigned. `rebuild_id` is generated and persisted by the client for one rebuild attempt. A new attempt uses a new UUID. `cursor` is `null` only on the first request. `limit` is an integer from `1` through the configured rebuild maximum and is fixed for the session.
+
+The first request creates or reuses a session for this exact rebuild identity,
+current accepted-write epoch,
+and context. In one repeatable-read transaction, the server reads the durable
+materialization progress row first, fixes the visible generation-start or
+transaction-end boundary, stages the complete scope from synchronized
+projections and membership at exactly that boundary, and stores row digests and
+the final scope checksum in canonical row-identity order. It never stages from
+live application rows. The staged data and page order are immutable. The
+session expires exactly 24 hours after creation, and page issuance or replay
+does not extend it. If complete staging fails, the request returns `503
+temporary_unavailable` and creates no usable partial session.
+
+### Intermediate response
 
 ```json
 {
-  "scope": "templates_public",
+  "scope": "documents_shared",
   "records": [
     {
-      "table": "templates",
-      "pk": { "id": "e_1" },
-      "row": {
-        "id": "e_1",
-        "user_id": null,
-        "name": "Squat"
+      "table": "tbl_documents",
+      "pk": {
+        "fld_documents_id": "doc-300"
       },
-      "row_checksum": 424242,
-      "server_version": "sv_100"
+      "row": {
+        "fld_documents_deleted_at": null,
+        "fld_documents_id": "doc-300",
+        "fld_documents_title": "Shared Plan",
+        "fld_documents_updated_at": "2026-07-18T14:02:00.000000Z"
+      },
+      "row_checksum": {
+        "algorithm": "sha256",
+        "version": 1,
+        "encoding": "hex",
+        "digest": "81d1d576ff6bf0614a821e1c423f672f35a05aa1d4b391e8adaa447473949d2a"
+      },
+      "server_version": "opaque-rebuild-version-300"
     }
   ],
-  "cursor": "rb_002",
+  "cursor": "opaque-rebuild-continuation-a",
   "has_more": true
 }
 ```
 
-Final rebuild page:
+An intermediate page has `has_more: true`, a non-null opaque rebuild continuation in `cursor`, and no `final_scope_cursor` or `checksum`.
+
+### Continuation request
 
 ```json
 {
-  "scope": "templates_public",
-  "records": [],
-  "cursor": null,
-  "has_more": false,
-  "final_scope_cursor": "v2.eyJzY29wZV9pZCI6InRlbXBsYXRlc19wdWJsaWMiLCJzdHJlYW1fZ2VuZXJhdGlvbiI6Imdlbl83IiwiY2hlY2twb2ludCI6MjAyfQ.sig",
-  "checksum": "cs_0f22"
+  "client_id": "ios-device-123",
+  "client_generation": 4,
+  "schema": {
+    "version": 8,
+    "hash": "21d56a4f2191820e954f008ea32ba8da8568a952cd01a45fd1a3fe16bbe8aaea"
+  },
+  "scope": "documents_shared",
+  "rebuild_id": "018f2b5e-7c42-7a1d-9d31-8a95bd674101",
+  "cursor": "opaque-rebuild-continuation-a",
+  "limit": 1000
 }
 ```
 
-## Error Model
+A continuation repeats the same client, generation, schema, scope, rebuild UUID, and limit. Only `cursor` changes to the exact opaque continuation returned by the preceding page. A raw row key, table name, ordinal, or incremental cursor is invalid.
 
-### HTTP Status Use
-
-- `400` invalid request
-- `401` auth required or invalid auth
-- `409` semantic conflict that prevented the requested operation as a whole
-- `422` schema or contract violation
-- `426` client upgrade required
-- `429` retry later
-- `503` temporary server unavailability
-
-### Error Body
+### Final response
 
 ```json
 {
-  "error": {
-    "code": "upgrade_required",
-    "message": "client version is below the minimum supported version",
-    "retryable": false
+  "scope": "documents_shared",
+  "records": [],
+  "cursor": null,
+  "has_more": false,
+  "final_scope_cursor": "opaque-incremental-cursor-at-rebuild-boundary",
+  "checksum": {
+    "algorithm": "sha256",
+    "version": 1,
+    "encoding": "hex",
+    "digest": "25ac19f2bf10bb573ba407d20c254cc2a1a65e5eaaa98f62489b1b4717ebd463"
   }
 }
 ```
 
-### Per-Mutation Rejection Codes
+A final page has `has_more: false`, `cursor: null`, a non-null opaque incremental `final_scope_cursor`, and the structured SHA-256 `checksum` for exactly the immutable staged scope. The final page MAY also contain the last records.
 
-- `version_conflict`
-- `policy_rejected`
-- `validation_failed`
-- `table_not_synced`
-- `unknown_scope_effect`
-- `server_retryable`
+Every record has a logical table ID, typed primary key, complete row, matching `row_checksum`, and opaque `server_version`. The client verifies every row before apply. It installs `final_scope_cursor` only after all pages are durably applied and the recomputed complete scope checksum matches.
 
-## Design Choices
+The rebuild endpoint never writes an incremental server checkpoint. A later successful pull acknowledges the final cursor only when the client presents it for this same scope. Rebuild does not change another scope's checkpoint, assignment, cursor, membership, retention, or rebuild state.
 
-### No Arbitrary Client Shapes
+### Idempotent page replay
 
-Clients never send raw replication predicates to define what data should sync.
+- Repeating the exact first request with the same `rebuild_id` and null cursor during the unexpired session returns the exact stored first page and does not create another snapshot.
+- Repeating a valid intermediate continuation returns the exact stored page for that continuation and limit.
+- Repeating the request that produced the final page returns the exact stored final records, checksum, and final cursor.
+- Replaying any page does not requery live state, extend expiry, or update an incremental checkpoint.
+- Writes after the staged boundary are excluded from the snapshot and arrive through later incremental pull.
 
-### No Mandatory Separate Schema Round Trip
+### Rebuild continuation dispatch
 
-`/sync/connect` can return schema when needed, which reduces bootstrap round trips.
+The outer request generation and schema gates run before continuation validation. A stale presented generation returns `client_generation_expired`, and a noncurrent request schema returns `schema_mismatch`. Once the request envelope is current, an authentic rebuild continuation that is expired or invalidated by its token-bound generation, schema, membership, retention, stream, accepted-write epoch, or snapshot state returns `409 rebuild_restart_required` before stored-page replay. The response contains no records, final cursor, or checksum. The client discards the continuation and starts a new attempt with a new `rebuild_id` and `cursor: null`.
 
-### Opaque Cursors And Versions
+A malformed, forged, misbound, wrong-kind, or unsupported continuation returns `400 invalid_request`. A limit different from the session limit also returns `400 invalid_request`. The response does not identify the failed continuation check.
 
-Clients must not interpret cursors or server versions.
+## Error and HTTP dispatch
 
-### Rebuild Is Explicit
+### Error envelope
 
-Rebuild is a dedicated flow, not an overloaded pull response pretending to be incremental.
+Every non-200 response uses this envelope:
 
-### Synced CRUD Is First-Class
+```json
+{
+  "error": {
+    "code": "capture_pending",
+    "message": "accepted writes are awaiting capture",
+    "retryable": true
+  }
+}
+```
 
-The protocol owns row-level synced CRUD instead of delegating the write contract to arbitrary app backend APIs.
+`code`, `message`, and `retryable` are required. Clients branch on HTTP status, `code`, and `retryable`, not on message text. Messages are bounded and contain no row, mutation, identity, credential, cursor, or continuation value. Error responses contain no success envelope, mutation outcomes, changes, records, cursors, or checksums.
 
-## Open Follow-Up Questions
+### Complete status and code table
 
-- whether `/sync/connect` should remain named `connect` or `register`
-- whether rebuild should support multiple scopes per request in the future
+| HTTP | Code or action | Retryable | Exact use |
+| ---: | --- | --- | --- |
+| 200 | Connect schema action | Not an error | Exactly `none`, `replace`, `rebuild_local`, or `unsupported`. |
+| 200 | Push outcome partition | Not an error | Complete `accepted` and `rejected` terminal partition, including mixed semantic results, or exact replay. |
+| 200 | Pull or rebuild page | Not an error | Complete page only. An authentic stale incremental cursor is represented by `rebuild`, not an error body. |
+| 400 | `invalid_request` | false | Malformed JSON; duplicate or unknown envelope member; invalid envelope or identity type, typed primary key, UUID, operation shape, scope, or limit; or malformed, forged, or misbound cursor. |
+| 400 | `invalid_schema_reference` | false | Connect schema reference is neither a normal immutable reference nor the exact fresh sentinel. The error includes `received_schema`. |
+| 401 | `auth_required` | false | Bearer authentication is absent or invalid, or `client_id` is not bound to the authenticated user. |
+| 409 | `idempotency_conflict` | false | A push batch or mutation identity has a different canonical fingerprint. |
+| 409 | `client_retired` | false | The client identity was irreversibly retired. |
+| 409 | `client_generation_expired` | false | First-execution push, pull, or rebuild did not carry the exact current generation. The error includes numeric `current_client_generation`. |
+| 409 | `rebuild_restart_required` | false | An authentic rebuild session or continuation is expired or invalidated. The error includes `scope_id`. |
+| 422 | `schema_mismatch` | false | First-execution push, pull, or rebuild carries a well-formed schema reference that is not exact current. The error includes `current_schema` and `received_schema`. |
+| 426 | `upgrade_required` | false | Protocol version or required client runtime is incompatible. A protocol mismatch includes `required_protocol_version` and `received_protocol_version`; a runtime mismatch includes `minimum_client_version` and `received_client_version`. |
+| 429 | `retry_later` | true | Admission control or rate limiting prevents execution. |
+| 500 | `sync_integrity_failure` | false | Durable materialization or staged state violates the integrity contract. Readiness becomes unready. |
+| 503 | `capture_pending` | true | Pull or rebuild cannot include an accepted push until its fence is durably WAL-materialized or represented by activated verified reset-baseline coverage. |
+| 503 | `temporary_unavailable` | true | An operational failure prevents a complete operation. Capture blocking uses bounded `reason: "capture_blocked"`. |
+
+HTTP 429 and 503 responses include a valid `Retry-After` header. A client retries only when `retryable` is `true`, and it preserves the exact sealed push request, presented pull cursors, or rebuild page state for that retry. `rebuild_restart_required` is non-retryable for the same continuation and requires a new rebuild attempt.
+
+Row and version conflicts are HTTP 200 per-mutation `conflict` outcomes. They are never HTTP 409. `schema_incompatible` is an HTTP 200 terminal mutation outcome when the request-level schema is exact current. `unsupported` is a connect schema action, not an error code. No schema action is inferred from `schema_mismatch`.
+
+### Dispatch precedence
+
+When more than one condition is present, the server uses this order:
+
+1. Authenticate the bearer context and bind `client_id`. Failure is `401 auth_required`.
+2. Apply protocol and required-runtime compatibility gates. Failure is `426 upgrade_required`.
+3. Parse and structurally validate the exact endpoint object. Connect uses `invalid_schema_reference` for its malformed schema reference; other structural failures use `invalid_request`.
+4. Reject irreversible client retirement with `409 client_retired`.
+5. For push only, perform completed batch and mutation replay lookup. Equal fingerprints replay exactly; unequal fingerprints return `409 idempotency_conflict`.
+6. Apply the current client-generation gate, then the current-schema gate for first execution. Connect renews an expired generation and performs its schema-action dispatch instead.
+7. For pull, validate incremental cursors. Authentic stale state becomes HTTP 200 rebuild dispatch; malformed, forged, or misbound state becomes `400 invalid_request`. For rebuild, authentic stale state becomes `409 rebuild_restart_required`; malformed, forged, or misbound state becomes `400 invalid_request`.
+8. Apply admission control. Failure is `429 retry_later`.
+9. Execute the complete extension operation. Operational rollback is `503 temporary_unavailable`; pending WAL visibility is `503 capture_pending`; an impossible durable state is `500 sync_integrity_failure`.
+
+An exact completed push replay therefore remains exact after later schema or client-generation changes. No failed first execution creates a completed batch response. No pull or rebuild error acknowledges a cursor or installs partial state.

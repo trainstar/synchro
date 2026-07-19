@@ -11,6 +11,10 @@
 	docs-build \
 	docs-dev \
 	verify-contract \
+	test-conformance \
+	test-blackbox \
+	rc-check-pg18 \
+	evidence \
 	lint-go \
 	lint-rn \
 	lint-rust-core \
@@ -116,6 +120,10 @@ help:
 	@echo "  docs-build            - Verify the contract and build the docs site"
 	@echo "  docs-dev              - Run the docs site locally"
 	@echo "  verify-contract       - Validate the machine-readable release contract"
+	@echo "  test-conformance      - Run the independent protocol conformance suite"
+	@echo "  test-blackbox         - Run the packaged server black-box suite"
+	@echo "  rc-check-pg18         - Verify the packaged PostgreSQL 18 candidate"
+	@echo "  evidence              - Generate and verify immutable RC evidence"
 	@echo "  lint-go               - Run Go formatting checks and go vet"
 	@echo "  lint-rn               - Run React Native typecheck and ESLint"
 	@echo "  lint-rust-core        - Run Rust fmt and clippy for the shared core"
@@ -181,6 +189,10 @@ docs-dev:
 verify-contract:
 	cd docs && npm ci
 	cd docs && npm run verify:contract
+
+test-conformance test-blackbox rc-check-pg18 evidence:
+	@echo "$@ is unavailable until its required verification phase is implemented; release promotion is blocked." >&2
+	@exit 1
 
 lint-rn:
 	cd clients/react-native && yarn typecheck
@@ -278,7 +290,7 @@ release-pods-check: version-check
 	swift package dump-package >/dev/null
 	@echo "Apple package metadata validated."
 
-release-check: version-check release-pods-check build build-seed build-check release-kotlin-local release-npm-dry-run lint-go lint-rust-core lint-rn test-rust-core test-rust-pg test-adapter test-swift test-kotlin test-rn verify-contract docs-build
+release-check: evidence test-conformance test-blackbox rc-check-pg18 version-check release-pods-check build build-seed build-check release-kotlin-local release-npm-dry-run lint-go lint-rust-core lint-rn test-rust-core test-rust-pg test-adapter test-swift test-kotlin test-rn verify-contract docs-build
 	@echo "Release validation passed."
 
 release-kotlin-local: version-check

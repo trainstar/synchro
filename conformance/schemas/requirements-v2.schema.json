@@ -1,14 +1,14 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://synchro.dev/conformance/schemas/requirements.schema.json",
+  "$id": "https://synchro.dev/conformance/schemas/requirements-v2.schema.json",
   "title": "Synchro release requirements",
   "type": "object",
   "additionalProperties": false,
   "required": ["$schema", "schema_version", "release", "requirements"],
   "properties": {
-    "$schema": { "const": "./schemas/requirements.schema.json" },
-    "schema_version": { "const": 1 },
-    "release": { "type": "string", "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$" },
+    "$schema": { "const": "./schemas/requirements-v2.schema.json" },
+    "schema_version": { "const": 2 },
+    "release": { "const": "0.3.0" },
     "requirements": {
       "type": "array",
       "minItems": 1,
@@ -54,6 +54,7 @@
         "category",
         "statement",
         "required_proof_types",
+        "applicable_components",
         "normative_references"
       ],
       "properties": {
@@ -82,6 +83,20 @@
           "uniqueItems": true,
           "items": { "$ref": "#/$defs/proofType" },
           "contains": { "const": "negative-control" }
+        },
+        "applicable_components": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "enum": [
+              "postgresql-server",
+              "swift-client",
+              "kotlin-client",
+              "react-native-client"
+            ]
+          }
         },
         "normative_references": {
           "type": "array",

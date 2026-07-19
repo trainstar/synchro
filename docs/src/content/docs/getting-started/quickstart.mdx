@@ -92,21 +92,25 @@ GOWORK=off go run ./cmd/synchro-seed \
 
 Use this when you want to bundle a warm-start database with the app so clients begin with the correct synced-table schema and any portable or public reference data before the first `connect`.
 
-Current release behavior:
+Protocol version 3 behavior:
 
-- the generator always builds the synced-table SQLite schema from `synchro_schema_manifest()`
-- it exports only server-declared portable scopes, never auth-scoped data
-- it installs the same local CDC triggers the native SDKs use
-- it writes portable scope continuation state into `_synchro_scopes`, `_synchro_scope_rows`, and `_synchro_bucket_checkpoints`
-- it writes seed metadata such as `schema_version`, `schema_hash`, `local_schema`, `scope_set_version`, `known_buckets`, and `snapshot_complete`
-- if no portable scopes are configured, the output is schema-only
-- it does not create a separate sync mode, clients still log in and reconcile with the server on first `connect`
+- one `SERIALIZABLE READ ONLY DEFERRABLE` transaction exports one WAL-materialized snapshot boundary
+- the generator verifies the immutable schema manifest and exports only server-declared portable scopes, never auth-scoped data
+- every seeded row carries its opaque server version and verified row digest
+- every seeded scope carries verified provenance, cardinality, scope digest, and an opaque portable seed receipt
+- the SQLite file is published atomically only after digest and integrity verification
+- if no portable scopes are configured, the output is a verified schema-only seed
+- the receipt is not a runtime cursor and grants no authorization
+- first authenticated `connect` validates current assignment and state before issuing a client-bound incremental cursor
+- an unassigned scope loses seed provenance and only unchanged zero-provenance cache rows; pending authored intent and its application-visible local row state remain for normal authorization and explicit outcome
+- an assigned stale scope loses only continuation state, reconciles eligible pending intent under push-first ordering, and then rebuilds
+- seed use does not create a separate sync mode
 
 Operational rules:
 
 - the generator is trusted tooling, not a client bootstrap API
 - it does not accept a JWT
-- clients keep the seeded schema and portable data after login, then sync forward from that state
+- clients keep valid seeded schema and portable data after authenticated receipt conversion, then sync forward from the issued cursor
 
 See [Portable seeds](/synchro/architecture/portable-seeds/) for the detailed rules.
 

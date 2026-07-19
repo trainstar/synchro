@@ -43,6 +43,16 @@ export default defineConfig({
 					],
 				},
 				{
+					label: 'Architecture Decisions',
+					items: [
+						{ label: 'ADR 001: WAL Change Stream', slug: 'architecture/decisions/001-wal-change-stream' },
+						{ label: 'ADR 002: Mutation Idempotency', slug: 'architecture/decisions/002-mutation-idempotency-and-conflicts' },
+						{ label: 'ADR 003: Pull And Rebuild', slug: 'architecture/decisions/003-pull-cursor-and-rebuild' },
+						{ label: 'ADR 004: Membership And Schema', slug: 'architecture/decisions/004-membership-schema-and-retention' },
+						{ label: 'ADR 005: Integrity And Seeds', slug: 'architecture/decisions/005-integrity-authorization-and-seeds' },
+					],
+				},
+				{
 					label: 'Client SDKs',
 					items: [
 						{ label: 'Overview', slug: 'clients/overview' },
