@@ -28,6 +28,7 @@ Every RC evidence bundle is for exactly:
 - `conformance/requirements.json`, schema version `2`
 - `conformance/support-matrix.json`, schema version `1`
 - scenario, evidence, and RC manifest schema version `2`
+- vector catalog schema version `1`
 
 The behavioral snapshot includes:
 
@@ -70,9 +71,9 @@ aggregate digest from bytes in the candidate source tree; trusting supplied
 hashes is invalid.
 
 The snapshot also hashes the exact versioned requirements, support-matrix,
-scenario, evidence, RC-manifest, fault-catalog, artifact-inventory, and
-performance-budget schemas. A candidate cannot reinterpret an authored record
-under a later schema revision.
+scenario, evidence, RC-manifest, fault-catalog, artifact-inventory,
+performance-budget, and vector-catalog schemas. A candidate cannot reinterpret
+an authored record under a later schema revision.
 
 ### ADR Consistency Gate
 
@@ -112,9 +113,21 @@ Authored files define obligations and semantic expectations, never outcomes:
 - scenario definitions identify inputs, model operations, barriers, faults, and
   typed transport and contract operations, canonical wire outcomes, and
   semantic expectations
+- each scenario contains a closed ownership table enumerating every and only
+  scenario, requirement, proof-obligation, assertion, proof-type, and
+  support-cell tuple
 - proof obligations identify exact requirement and assertion IDs, proof type,
-  one support cell or null, artifact-inventory roles, Make target, and
-  two-element command before execution
+  one support cell or null, artifact-inventory roles, per-obligation
+  performance-budget IDs, required-measurement IDs, required vector-set IDs,
+  Make target, two-element command, and nullable fault-plan and control IDs
+  before execution. All three arrays are required, including when empty;
+  fault-bearing obligations require both IDs and all others require null
+- scenario references include every requirement anchor. Additional references
+  are allowed only within the 11 frozen behavioral contract files. Fault
+  catalog controls retain exact normative-reference equality
+- fault-injection and negative-control obligations own exactly one requirement,
+  one assertion, and one matching fault plan. A negative-control obligation also owns
+  exactly one matching scenario control and one matching catalog control
 - the fault catalog contains typed pre-execution recipes covering every release
   requirement
 - canonical vector inputs identify source values and independently computed
@@ -141,6 +154,9 @@ The generated RC manifest must bind at least:
   IDs, and proof types
 - exact artifact names, versions, digests, SBOMs, and provenance attestations
 - exact execution environments and resolved current-stable versions
+- only the finite support-cell environment dimension names and their exact
+  versions, with no extra dimensions, secrets, tokens, credentials, private
+  keys, or user-owned values
 - command lines, Makefile target, start and end times, result, duration, logs,
   traces, replay seeds, and attempt history
 - mutation and negative-control identities with expected failure results
@@ -156,14 +172,15 @@ millisecond duration, result, exit code, and content-addressed attachments. Its
 execution-artifact binding names at least one log, trace, and replay-data
 attachment, and each referenced attachment has the corresponding typed kind.
 Every authored barrier resolves to one typed barrier trace. Fault plans,
-negative controls, budgets, and required measurements resolve transitively to
-attachments of the required kind and to unchanged authored metadata. Evidence
+negative controls, budgets, required measurements, and vector results resolve
+transitively to attachments of the required kind and to unchanged authored metadata. Evidence
 assertion IDs equal the complete assertion set owned by its proof obligation,
 with no missing, unknown, or duplicate ID. The obligation's requirement IDs
 equal the union owned by those assertions. Its requirement set, support cell,
 command, and actual artifact inventory roles exactly satisfy the named proof
-obligation. A zero exit code may report only `passed`; promotion also requires
-every assertion, budget, and required-measurement outcome to be `passed`.
+obligation. A zero exit code may report only `passed` or `skipped`; promotion
+requires every assertion, budget, required-measurement, and vector outcome to be
+`passed`.
 
 The verifier applies a fixed policy for each proof type: allowed release Make
 targets, required and permitted artifact roles, and whether the proof is
@@ -251,6 +268,14 @@ The same immutable vector-set hash is required in Rust, Go, Swift, and Kotlin
 results. Each implementation must independently calculate canonical typed
 bytes, schema hashes, row identities, row digests, and scope digests and match
 the authored expected values.
+
+Each executed vector result is a typed `vector_results` entry bound to the
+current proof obligation. It records the vector-set ID and SHA-256, language,
+realized execution artifact, typed `vector-results` attachment, outcome, and
+coherent executed, passed, and failed counts. The result set must exactly match
+the obligation's required vector-set IDs. Phase 3 validation additionally
+recomputes the catalog and vector-file hashes from disk rather than trusting
+these recorded values.
 
 The vector evidence must cover every protocol portable type, SQL null, Unicode,
 integer boundaries, int64 string encoding, exact decimal normalization,

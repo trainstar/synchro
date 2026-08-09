@@ -1,6 +1,7 @@
-import { readFile, realpath, stat } from "node:fs/promises";
+import { mkdtemp, readFile, realpath, rm, stat, writeFile } from "node:fs/promises";
 import { createHash } from "node:crypto";
-import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
+import { tmpdir } from "node:os";
+import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { isDeepStrictEqual } from "node:util";
 
@@ -22,6 +23,7 @@ const schemaFiles = {
   faultCatalog: "fault-catalog-v1.schema.json",
   artifactInventory: "artifact-inventory-v1.schema.json",
   performanceBudgets: "performance-budgets-v2.schema.json",
+  vectorCatalog: "vector-catalog-v1.schema.json",
 };
 
 function fail(message) {
@@ -49,11 +51,145 @@ function parseMakeTargets(source) {
   return targets;
 }
 
-async function readJson(path, label) {
+function parseJsonStrict(bytes) {
+  const source = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+  let index = 0;
+
+  const skipWhitespace = () => {
+    while (/[\u0020\u0009\u000a\u000d]/.test(source[index] ?? "")) {
+      index += 1;
+    }
+  };
+  const syntaxError = (message) => {
+    throw new SyntaxError(`${message} at character offset ${index}`);
+  };
+
+  function consumeString() {
+    if (source[index] !== '"') syntaxError("expected JSON string");
+    const start = index;
+    index += 1;
+    while (index < source.length) {
+      const character = source[index++];
+      if (character === '"') {
+        return JSON.parse(source.slice(start, index));
+      }
+      if (character === "\\") {
+        const escaped = source[index++];
+        if (escaped === "u") {
+          const code = source.slice(index, index + 4);
+          if (!/^[0-9a-fA-F]{4}$/.test(code)) {
+            syntaxError("invalid JSON Unicode escape");
+          }
+          index += 4;
+        } else {
+          if (!['"', "\\", "/", "b", "f", "n", "r", "t"].includes(escaped)) {
+            syntaxError("invalid JSON string escape");
+          }
+        }
+      } else {
+        if (character <= "\u001f") syntaxError("unescaped JSON control character");
+      }
+    }
+    syntaxError("unterminated JSON string");
+  }
+
+  function consumeNumber() {
+    const match = source
+      .slice(index)
+      .match(/^-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?/);
+    if (!match) syntaxError("invalid JSON number");
+    index += match[0].length;
+  }
+
+  function consumeLiteral(literal) {
+    if (!source.startsWith(literal, index)) {
+      syntaxError(`expected JSON literal ${literal}`);
+    }
+    index += literal.length;
+  }
+
+  function parseValue() {
+    skipWhitespace();
+    const character = source[index];
+    if (character === '"') {
+      consumeString();
+      return;
+    }
+    if (character === "{") return parseObject();
+    if (character === "[") return parseArray();
+    if (character === "-" || /[0-9]/.test(character ?? "")) {
+      consumeNumber();
+      return;
+    }
+    if (character === "t") return consumeLiteral("true");
+    if (character === "f") return consumeLiteral("false");
+    if (character === "n") return consumeLiteral("null");
+    syntaxError("expected JSON value");
+  }
+
+  function parseObject() {
+    index += 1;
+    skipWhitespace();
+    const keys = new Set();
+    if (source[index] === "}") {
+      index += 1;
+      return;
+    }
+    while (index < source.length) {
+      skipWhitespace();
+      const key = consumeString();
+      if (keys.has(key)) {
+        syntaxError(`duplicate JSON object member ${JSON.stringify(key)}`);
+      }
+      keys.add(key);
+      skipWhitespace();
+      if (source[index] !== ":") syntaxError("expected JSON object member separator");
+      index += 1;
+      parseValue();
+      skipWhitespace();
+      if (source[index] === "}") {
+        index += 1;
+        return;
+      }
+      if (source[index] !== ",") syntaxError("expected JSON object separator");
+      index += 1;
+    }
+    syntaxError("unterminated JSON object");
+  }
+
+  function parseArray() {
+    index += 1;
+    skipWhitespace();
+    if (source[index] === "]") {
+      index += 1;
+      return;
+    }
+    while (index < source.length) {
+      parseValue();
+      skipWhitespace();
+      if (source[index] === "]") {
+        index += 1;
+        return;
+      }
+      if (source[index] !== ",") syntaxError("expected JSON array separator");
+      index += 1;
+    }
+    syntaxError("unterminated JSON array");
+  }
+
+  parseValue();
+  skipWhitespace();
+  if (index !== source.length) {
+    syntaxError("trailing data after JSON value");
+  }
+  return JSON.parse(source);
+}
+
+async function readJson(path, label, report = fail) {
   try {
-    return JSON.parse(await readFile(path, "utf8"));
+    return parseJsonStrict(await readFile(path));
   } catch (error) {
-    fail(`${label} could not be parsed: ${error.message}`);
+    report(`${label} could not be parsed: ${error.message}`);
     return null;
   }
 }
@@ -124,6 +260,21 @@ function duplicateLogicalIdErrors(items, idKey, collection) {
     }
   }
   return errors;
+}
+
+function vectorCatalogSemanticErrors(catalog) {
+  return [
+    ...duplicateLogicalIdErrors(
+      catalog.vector_sets,
+      "vector_set_id",
+      "Vector catalog vector sets",
+    ),
+    ...duplicateLogicalIdErrors(
+      catalog.vector_sets,
+      "path",
+      "Vector catalog vector-set paths",
+    ),
+  ];
 }
 
 function authoredIdErrors(requirements, supportMatrix) {
@@ -750,6 +901,20 @@ function scenarioSemanticErrors(scenario) {
       "obligation_id",
       "Scenario proof obligations",
     ),
+    ...duplicateLogicalIdErrors(
+      scenario.ownership.map((owner) => ({
+        ownership_key: [
+          owner.scenario_id,
+          owner.requirement_id,
+          owner.proof_obligation_id,
+          owner.assertion_id,
+          owner.proof_type,
+          owner.support_cell_id ?? "null",
+        ].join("|"),
+      })),
+      "ownership_key",
+      "Scenario ownership",
+    ),
   ];
   const assertionIds = new Set(scenario.assertions.map(({ id }) => id));
   const stepsById = new Map(scenario.steps.map((step) => [step.id, step]));
@@ -878,6 +1043,18 @@ function scenarioSemanticErrors(scenario) {
         `${obligation.obligation_id} requirement IDs do not exactly match its assertions`,
       );
     }
+    if (['fault-injection', 'negative-control'].includes(obligation.proof_type)) {
+      if (obligation.requirement_ids.length !== 1) {
+        errors.push(
+          `${obligation.obligation_id} ${obligation.proof_type} must own exactly one requirement`,
+        );
+      }
+      if (obligation.assertion_ids.length !== 1) {
+        errors.push(
+          `${obligation.obligation_id} ${obligation.proof_type} must own exactly one assertion`,
+        );
+      }
+    }
   }
   if (
     !stringSetsEqual(scenario.requirement_ids, [...obligationRequirementIds])
@@ -990,6 +1167,108 @@ function scenarioSemanticErrors(scenario) {
       );
     }
   }
+  const plansById = new Map(
+    scenario.fault_plans.map((faultPlan) => [faultPlan.id, faultPlan]),
+  );
+  const referencedFaultPlanIds = new Set();
+  const negativeControlObligationCount = new Map();
+  const obligationProofKeys = new Map();
+  for (const obligation of scenario.proof_obligations) {
+    for (const requirementId of obligation.requirement_ids) {
+      const proofKey = [
+        requirementId,
+        obligation.proof_type,
+        obligation.support_cell_id ?? "null",
+      ].join("|");
+      if (obligationProofKeys.has(proofKey)) {
+        errors.push(
+          `${scenario.id} has duplicate obligation proof key ${proofKey} in ${obligationProofKeys.get(proofKey)} and ${obligation.obligation_id}`,
+        );
+      } else {
+        obligationProofKeys.set(proofKey, obligation.obligation_id);
+      }
+    }
+    const isFaultObligation = ["fault-injection", "negative-control"].includes(
+      obligation.proof_type,
+    );
+    if (!isFaultObligation) {
+      if (obligation.fault_plan_id !== null || obligation.control_id !== null) {
+        errors.push(
+          `${obligation.obligation_id} non-fault proof must bind null fault_plan_id and control_id`,
+        );
+      }
+      continue;
+    }
+    if (obligation.fault_plan_id === null || obligation.control_id === null) {
+      errors.push(
+        `${obligation.obligation_id} ${obligation.proof_type} must bind a fault plan and control`,
+      );
+      continue;
+    }
+    referencedFaultPlanIds.add(obligation.fault_plan_id);
+    if (obligation.proof_type === "negative-control") {
+      negativeControlObligationCount.set(
+        obligation.control_id,
+        (negativeControlObligationCount.get(obligation.control_id) ?? 0) + 1,
+      );
+    }
+    const plan = plansById.get(obligation.fault_plan_id);
+    const control = controlsById.get(obligation.control_id);
+    if (!plan) {
+      errors.push(
+        `${obligation.obligation_id} references unknown fault plan ${obligation.fault_plan_id}`,
+      );
+    }
+    if (!control) {
+      errors.push(
+        `${obligation.obligation_id} references unknown scenario control ${obligation.control_id}`,
+      );
+    }
+    if (plan && plan.control_id !== obligation.control_id) {
+      errors.push(
+        `${obligation.obligation_id} fault plan ${plan.id} does not exactly bind control ${obligation.control_id}`,
+      );
+    }
+    if (
+      plan &&
+      !stringSetsEqual(obligation.assertion_ids, plan.expected_assertion_ids)
+    ) {
+      errors.push(
+        `${obligation.obligation_id} assertions do not exactly match fault plan ${plan.id}`,
+      );
+    }
+    if (
+      plan &&
+      obligation.requirement_ids.length === 1 &&
+      plan.requirement_id !== obligation.requirement_ids[0]
+    ) {
+      errors.push(
+        `${obligation.obligation_id} fault plan ${plan.id} does not exactly bind requirement ${obligation.requirement_ids[0]}`,
+      );
+    }
+    if (
+      control &&
+      obligation.requirement_ids.length === 1 &&
+      control.requirement_id !== obligation.requirement_ids[0]
+    ) {
+      errors.push(
+        `${obligation.obligation_id} control ${control.control_id} does not exactly bind requirement ${obligation.requirement_ids[0]}`,
+      );
+    }
+    if (
+      control &&
+      !stringSetsEqual(obligation.assertion_ids, control.detected_by)
+    ) {
+      errors.push(
+        `${obligation.obligation_id} assertions do not exactly match control ${control.control_id} detected_by`,
+      );
+    }
+  }
+  for (const faultPlan of scenario.fault_plans) {
+    if (!referencedFaultPlanIds.has(faultPlan.id)) {
+      errors.push(`${faultPlan.id} is not referenced by a fault obligation`);
+    }
+  }
   for (const control of scenario.negative_controls) {
     if (!scenarioRequirementIds.has(control.requirement_id)) {
       errors.push(
@@ -1007,6 +1286,13 @@ function scenarioSemanticErrors(scenario) {
     if (plans.length !== 1) {
       errors.push(
         `Negative control ${control.control_id} must have exactly one authored fault plan, found ${plans.length}`,
+      );
+    }
+    const negativeObligationCount =
+      negativeControlObligationCount.get(control.control_id) ?? 0;
+    if (negativeObligationCount !== 1) {
+      errors.push(
+        `Negative control ${control.control_id} must be referenced by exactly one negative-control obligation, found ${negativeObligationCount}`,
       );
     }
     for (const assertionId of control.detected_by) {
@@ -1032,6 +1318,80 @@ function scenarioSemanticErrors(scenario) {
           `${assertion.id} detection of ${controlId} is not reciprocally authored`,
         );
       }
+    }
+  }
+  const expectedOwnership = [];
+  for (const obligation of scenario.proof_obligations) {
+    for (const assertionId of obligation.assertion_ids) {
+      const assertion = assertionsById.get(assertionId);
+      if (!assertion) continue;
+      for (const requirementId of assertion.requirement_ids) {
+        expectedOwnership.push(
+          [
+            scenario.id,
+            requirementId,
+            obligation.obligation_id,
+            assertionId,
+            obligation.proof_type,
+            obligation.support_cell_id ?? "null",
+          ].join("|"),
+        );
+      }
+    }
+  }
+  const actualOwnership = scenario.ownership.map((owner) =>
+    [
+      owner.scenario_id,
+      owner.requirement_id,
+      owner.proof_obligation_id,
+      owner.assertion_id,
+      owner.proof_type,
+      owner.support_cell_id ?? "null",
+    ].join("|"),
+  );
+  if (
+    actualOwnership.length !== expectedOwnership.length ||
+    !stringSetsEqual(actualOwnership, expectedOwnership)
+  ) {
+    errors.push(
+      `${scenario.id} ownership does not enumerate every and only obligation, assertion, and assertion-requirement tuple`,
+    );
+  }
+  return errors;
+}
+
+function crossScenarioNegativeControlOwnershipErrors(scenarios) {
+  const errors = [];
+  const requirementOwners = new Map();
+  const controlOwners = new Map();
+  for (const scenario of scenarios) {
+    for (const obligation of scenario.proof_obligations) {
+      if (obligation.proof_type !== "negative-control") continue;
+      if (obligation.requirement_ids.length === 1) {
+        const requirementId = obligation.requirement_ids[0];
+        const owners = requirementOwners.get(requirementId) ?? [];
+        owners.push(`${scenario.id}/${obligation.obligation_id}`);
+        requirementOwners.set(requirementId, owners);
+      }
+      if (obligation.control_id !== null) {
+        const owners = controlOwners.get(obligation.control_id) ?? [];
+        owners.push(`${scenario.id}/${obligation.obligation_id}`);
+        controlOwners.set(obligation.control_id, owners);
+      }
+    }
+  }
+  for (const [requirementId, owners] of requirementOwners) {
+    if (owners.length > 1) {
+      errors.push(
+        `Selected scenarios contain ${owners.length} negative-control obligations for ${requirementId}: ${owners.join(", ")}`,
+      );
+    }
+  }
+  for (const [controlId, owners] of controlOwners) {
+    if (owners.length > 1) {
+      errors.push(
+        `Selected scenarios reuse negative control ${controlId} across obligations: ${owners.join(", ")}`,
+      );
     }
   }
   return errors;
@@ -1159,6 +1519,7 @@ function performanceArtifactIdsForSupportCell(
   supportCell,
   inventoryRoles,
 ) {
+  if (!supportCell) return [];
   const clientRoles = new Set([
     "swift-spm",
     "cocoapods",
@@ -1186,6 +1547,20 @@ function performanceArtifactIdsForSupportCell(
   });
 }
 
+const frozenBehavioralContractPaths = new Set([
+  "docs/src/content/docs/spec/00-principles.mdx",
+  "docs/src/content/docs/spec/01-wire-protocol.mdx",
+  "docs/src/content/docs/spec/02-client-contract.mdx",
+  "docs/src/content/docs/spec/03-state-machines.mdx",
+  "docs/src/content/docs/spec/04-invariants.mdx",
+  "docs/src/content/docs/spec/05-schema-evolution.mdx",
+  "docs/src/content/docs/architecture/decisions/001-wal-change-stream.mdx",
+  "docs/src/content/docs/architecture/decisions/002-mutation-idempotency-and-conflicts.mdx",
+  "docs/src/content/docs/architecture/decisions/003-pull-cursor-and-rebuild.mdx",
+  "docs/src/content/docs/architecture/decisions/004-membership-schema-and-retention.mdx",
+  "docs/src/content/docs/architecture/decisions/005-integrity-authorization-and-seeds.mdx",
+]);
+
 function authoredScenarioBindingErrors(
   scenario,
   requirements,
@@ -1193,6 +1568,7 @@ function authoredScenarioBindingErrors(
   artifactInventory,
   faultCatalog,
   performanceBudgets,
+  vectorCatalog,
 ) {
   const errors = [];
   const requirementIds = new Set(requirements.requirements.map(({ id }) => id));
@@ -1217,10 +1593,88 @@ function authoredScenarioBindingErrors(
   const measurementIds = new Set(
     performanceBudgets.required_measurements.map(({ id }) => id),
   );
+  const vectorSetIds = new Set(
+    (vectorCatalog?.vector_sets ?? []).map(({ vector_set_id }) => vector_set_id),
+  );
+  const assertionsById = new Map(
+    scenario.assertions.map((assertion) => [assertion.id, assertion]),
+  );
+  const faultPlansById = new Map(
+    scenario.fault_plans.map((plan) => [plan.id, plan]),
+  );
+  const scenarioControlsById = new Map(
+    scenario.negative_controls.map((control) => [control.control_id, control]),
+  );
+  const catalogControlsById = new Map(
+    faultCatalog.controls.map((control) => [control.id, control]),
+  );
   for (const id of scenario.requirement_ids) {
     if (!requirementIds.has(id)) errors.push(`${scenario.id} references unknown requirement ${id}`);
   }
   for (const obligation of scenario.proof_obligations) {
+    if (['fault-injection', 'negative-control'].includes(obligation.proof_type)) {
+      if (obligation.requirement_ids.length !== 1) {
+        errors.push(
+          `${scenario.id} obligation ${obligation.obligation_id} ${obligation.proof_type} must own exactly one requirement`,
+        );
+      } else {
+        const requirementId = obligation.requirement_ids[0];
+        const plan = faultPlansById.get(obligation.fault_plan_id);
+        const scenarioControl = scenarioControlsById.get(obligation.control_id);
+        const catalogControl = catalogControlsById.get(obligation.control_id);
+        if (!plan || plan.requirement_id !== requirementId) {
+          errors.push(
+            `${scenario.id} obligation ${obligation.obligation_id} does not exactly bind a fault plan for ${requirementId}`,
+          );
+        }
+        if (
+          !scenarioControl ||
+          scenarioControl.requirement_id !== requirementId ||
+          plan?.control_id !== obligation.control_id
+        ) {
+          errors.push(
+            `${scenario.id} obligation ${obligation.obligation_id} does not exactly bind its scenario control ${obligation.control_id}`,
+          );
+        }
+        if (
+          !catalogControl ||
+          catalogControl.requirement_ids.length !== 1 ||
+          catalogControl.requirement_ids[0] !== requirementId ||
+          plan?.fault_id !== catalogControl.fault_id
+        ) {
+          errors.push(
+            `${scenario.id} obligation ${obligation.obligation_id} does not exactly bind its catalog control ${obligation.control_id}`,
+          );
+        }
+      }
+    }
+    for (const id of obligation.performance_budget_ids) {
+      if (!budgetIds.has(id)) {
+        errors.push(`${scenario.id} references unknown performance budget ${id}`);
+      }
+    }
+    for (const id of obligation.required_measurement_ids) {
+      if (!measurementIds.has(id)) {
+        errors.push(`${scenario.id} references unknown required measurement ${id}`);
+      }
+    }
+    for (const id of obligation.required_vector_set_ids) {
+      if (!vectorSetIds.has(id)) {
+        errors.push(`${scenario.id} references unknown vector set ${id}`);
+      }
+    }
+    if (
+      (obligation.performance_budget_ids.length > 0 ||
+        obligation.required_measurement_ids.length > 0) &&
+      !obligation.assertion_ids.some(
+        (assertionId) =>
+          assertionsById.get(assertionId)?.oracle.kind === 'performance-budget',
+      )
+    ) {
+      errors.push(
+        `${scenario.id} obligation ${obligation.obligation_id} performance ownership requires at least one performance-budget assertion`,
+      );
+    }
     for (const requirementId of obligation.requirement_ids) {
       const requirement = requirementsById.get(requirementId);
       if (!scenario.requirement_ids.includes(requirementId)) {
@@ -1339,27 +1793,31 @@ function authoredScenarioBindingErrors(
     }
   }
 
-  const expectedNormativeReferences = new Set();
+  const requiredNormativeReferences = new Set();
   for (const requirementId of scenario.requirement_ids) {
     const requirement = requirements.requirements.find(
       ({ id }) => id === requirementId,
     );
     for (const reference of requirement?.normative_references ?? []) {
-      expectedNormativeReferences.add(`${reference.path}${reference.anchor}`);
+      requiredNormativeReferences.add(`${reference.path}${reference.anchor}`);
     }
   }
   const scenarioNormativeReferences = scenario.normative_references.map(
     ({ path, anchor }) => `${path}${anchor}`,
   );
-  if (
-    !stringSetsEqual(
-      scenarioNormativeReferences,
-      [...expectedNormativeReferences],
-    )
-  ) {
-    errors.push(
-      `${scenario.id} normative references do not exactly match its requirements`,
-    );
+  for (const requiredReference of requiredNormativeReferences) {
+    if (!scenarioNormativeReferences.includes(requiredReference)) {
+      errors.push(
+        `${scenario.id} normative references omit mandatory requirement anchor ${requiredReference}`,
+      );
+    }
+  }
+  for (const reference of scenario.normative_references) {
+    if (!frozenBehavioralContractPaths.has(reference.path)) {
+      errors.push(
+        `${scenario.id} normative reference ${reference.path}${reference.anchor} is outside the frozen behavioral contract snapshot`,
+      );
+    }
   }
   for (const plan of scenario.fault_plans) {
     if (!faultIds.has(plan.fault_id)) errors.push(`${scenario.id} references unknown fault ${plan.fault_id}`);
@@ -1441,66 +1899,82 @@ function authoredScenarioBindingErrors(
       );
     }
   }
-  for (const id of scenario.performance_budget_ids) {
-    if (!budgetIds.has(id)) errors.push(`${scenario.id} references unknown performance budget ${id}`);
-  }
-  for (const id of scenario.required_measurement_ids) {
-    if (!measurementIds.has(id)) {
-      errors.push(`${scenario.id} references unknown required measurement ${id}`);
-    }
-  }
-  const catalogBudgetIds = performanceBudgets.budgets
-    .filter(({ scenario_id }) => scenario_id === scenario.id)
-    .map(({ id }) => id);
-  if (!stringSetsEqual(scenario.performance_budget_ids, catalogBudgetIds)) {
-    errors.push(
-      `${scenario.id} performance budget declarations do not exactly match the authored catalog`,
-    );
-  }
-  const catalogMeasurementIds = performanceBudgets.required_measurements
-    .filter(({ scenario_id }) => scenario_id === scenario.id)
-    .map(({ id }) => id);
-  if (
-    !stringSetsEqual(
-      scenario.required_measurement_ids,
-      catalogMeasurementIds,
-    )
-  ) {
-    errors.push(
-      `${scenario.id} required measurement declarations do not exactly match the authored catalog`,
-    );
-  }
-  for (const performanceItem of [
+  const performanceItems = [
     ...performanceBudgets.budgets.filter(
       ({ scenario_id }) => scenario_id === scenario.id,
     ),
     ...performanceBudgets.required_measurements.filter(
       ({ scenario_id }) => scenario_id === scenario.id,
     ),
-  ]) {
+  ];
+  for (const performanceItem of performanceItems) {
+    const declarationField = performanceBudgets.budgets.includes(performanceItem)
+      ? 'performance_budget_ids'
+      : 'required_measurement_ids';
     for (const supportCellId of performanceItem.support_cell_ids) {
-      const obligations = scenario.proof_obligations.filter(
-        ({ support_cell_id }) => support_cell_id === supportCellId,
+      const declaringObligations = scenario.proof_obligations.filter(
+        (obligation) =>
+          obligation.support_cell_id === supportCellId &&
+          obligation[declarationField].includes(performanceItem.id),
       );
-      if (obligations.length === 0) {
+      if (declaringObligations.length !== 1) {
         errors.push(
-          `${scenario.id} ${performanceItem.id} has no proof obligation for support cell ${supportCellId}`,
+          `${scenario.id} ${performanceItem.id} must be declared by exactly one obligation for support cell ${supportCellId}, found ${declaringObligations.length}`,
         );
+        continue;
       }
+      const obligation = declaringObligations[0];
       const expectedArtifactIds = performanceArtifactIdsForSupportCell(
         performanceItem,
         supportCells.get(supportCellId),
         inventoryRoles,
       );
-      for (const obligation of obligations) {
+      if (!stringSetsEqual(obligation.artifact_inventory_ids, expectedArtifactIds)) {
+        errors.push(
+          `${scenario.id} ${performanceItem.id} obligation ${obligation.obligation_id} artifacts do not exactly match support cell ${supportCellId}`,
+        );
+      }
+      if (
+        !obligation.assertion_ids.some(
+          (assertionId) =>
+            assertionsById.get(assertionId)?.oracle.kind === 'performance-budget',
+        )
+      ) {
+        errors.push(
+          `${scenario.id} ${performanceItem.id} declaring obligation ${obligation.obligation_id} must own a performance-budget assertion`,
+        );
+      }
+    }
+  }
+  for (const obligation of scenario.proof_obligations) {
+    for (const [field, items] of [
+      ['performance_budget_ids', performanceBudgets.budgets],
+      ['required_measurement_ids', performanceBudgets.required_measurements],
+    ]) {
+      for (const id of obligation[field]) {
+        const performanceItem = items.find((item) => item.id === id);
+        if (!performanceItem) continue;
+        if (performanceItem.scenario_id !== scenario.id) {
+          errors.push(
+            `${scenario.id} obligation ${obligation.obligation_id} declares ${id} authored for scenario ${performanceItem.scenario_id}`,
+          );
+        }
         if (
-          !stringSetsEqual(
-            obligation.artifact_inventory_ids,
-            expectedArtifactIds,
-          )
+          obligation.support_cell_id === null ||
+          !performanceItem.support_cell_ids.includes(obligation.support_cell_id)
         ) {
           errors.push(
-            `${scenario.id} ${performanceItem.id} obligation ${obligation.obligation_id} artifacts do not exactly match support cell ${supportCellId}`,
+            `${scenario.id} ${id} obligation ${obligation.obligation_id} uses an unauthorized support cell ${obligation.support_cell_id}`,
+          );
+        }
+        const expectedArtifactIds = performanceArtifactIdsForSupportCell(
+          performanceItem,
+          supportCells.get(obligation.support_cell_id),
+          inventoryRoles,
+        );
+        if (!stringSetsEqual(obligation.artifact_inventory_ids, expectedArtifactIds)) {
+          errors.push(
+            `${scenario.id} ${id} obligation ${obligation.obligation_id} artifacts do not exactly match its declared support cell`,
           );
         }
       }
@@ -1554,6 +2028,7 @@ function evidenceScenarioSemanticErrors(
   manifest,
   artifactInventory,
   performanceBudgets,
+  vectorCatalog,
 ) {
   const errors = [
     ...duplicateLogicalIdErrors(
@@ -1576,6 +2051,13 @@ function evidenceScenarioSemanticErrors(
       evidence.required_measurement_results,
       "measurement_id",
       "Evidence required measurement results",
+    ),
+    ...duplicateLogicalIdErrors(
+      evidence.vector_results.map((result) => ({
+        vector_result_id: `${result.vector_set_id}|${result.language}`,
+      })),
+      "vector_result_id",
+      "Evidence vector results",
     ),
   ];
   if (evidence.scenario_id !== scenario.id) {
@@ -1808,14 +2290,18 @@ function evidenceScenarioSemanticErrors(
   if (scenario.replay.barrier_trace_required && replayBarrierIds.length === 0) {
     errors.push(`${evidence.evidence_id} is missing its required barrier trace`);
   }
-  const expectedBudgets = new Set(scenario.performance_budget_ids);
+  const expectedBudgets = new Set(
+    obligation?.performance_budget_ids ?? [],
+  );
   const actualBudgets = new Set(
     evidence.performance_results.map(({ budget_id }) => budget_id),
   );
   if (!stringSetsEqual([...expectedBudgets], [...actualBudgets])) {
-    errors.push(`${evidence.evidence_id} performance budget results do not match scenario`);
+    errors.push(`${evidence.evidence_id} performance budget results do not match obligation`);
   }
-  const expectedMeasurements = new Set(scenario.required_measurement_ids);
+  const expectedMeasurements = new Set(
+    obligation?.required_measurement_ids ?? [],
+  );
   const actualMeasurements = new Set(
     evidence.required_measurement_results.map(
       ({ measurement_id }) => measurement_id,
@@ -1823,7 +2309,7 @@ function evidenceScenarioSemanticErrors(
   );
   if (!stringSetsEqual([...expectedMeasurements], [...actualMeasurements])) {
     errors.push(
-      `${evidence.evidence_id} required measurement results do not match scenario`,
+      `${evidence.evidence_id} required measurement results do not match obligation`,
     );
   }
   for (const result of evidence.performance_results) {
@@ -2022,6 +2508,105 @@ function evidenceScenarioSemanticErrors(
     }
   }
 
+  const expectedVectorSets = new Set(obligation?.required_vector_set_ids ?? []);
+  const vectorSetsById = new Map(
+    (vectorCatalog?.vector_sets ?? []).map((vectorSet) => [
+      vectorSet.vector_set_id,
+      vectorSet,
+    ]),
+  );
+  const manifestArtifactsById = new Map(
+    manifest.artifacts.map((artifact) => [artifact.id, artifact]),
+  );
+  const inventoryById = new Map(
+    artifactInventory.artifacts.map((artifact) => [artifact.id, artifact]),
+  );
+  const vectorArtifactRoles = new Map([
+    ["go", new Set(["conformance-runner"])],
+    ["rust", new Set(["pg-extension"])],
+    ["swift", new Set(["swift-spm", "cocoapods"])],
+    ["kotlin", new Set(["kotlin-maven"])],
+  ]);
+  const actualVectorSets = new Set(
+    evidence.vector_results.map(({ vector_set_id }) => vector_set_id),
+  );
+  if (!stringSetsEqual([...expectedVectorSets], [...actualVectorSets])) {
+    errors.push(
+      `${evidence.evidence_id} vector results do not exactly match obligation ${obligation?.obligation_id ?? evidence.proof_obligation_id}`,
+    );
+  }
+  for (const result of evidence.vector_results) {
+    const vectorSet = vectorSetsById.get(result.vector_set_id);
+    if (!vectorSet) {
+      errors.push(
+        `${evidence.evidence_id} vector result references unknown catalog set ${result.vector_set_id}`,
+      );
+    } else {
+      if (result.source_sha256 !== vectorSet.source_sha256) {
+        errors.push(
+          `${evidence.evidence_id} vector result ${result.vector_set_id}/${result.language} source hash does not match the vector catalog`,
+        );
+      }
+      if (result.aggregate_sha256 !== vectorSet.aggregate_sha256) {
+        errors.push(
+          `${evidence.evidence_id} vector result ${result.vector_set_id}/${result.language} aggregate hash does not match the vector catalog`,
+        );
+      }
+      if (result.executed_count !== vectorSet.vector_count) {
+        errors.push(
+          `${evidence.evidence_id} vector result ${result.vector_set_id}/${result.language} executed count does not match catalog vector count`,
+        );
+      }
+      if (!vectorSet.required_languages.includes(result.language)) {
+        errors.push(
+          `${evidence.evidence_id} vector result ${result.vector_set_id}/${result.language} is not a required catalog language`,
+        );
+      }
+    }
+    if (!evidence.artifact_ids.includes(result.artifact_id)) {
+      errors.push(
+        `${evidence.evidence_id} vector result ${result.vector_set_id}/${result.language} artifact ${result.artifact_id} is not an execution artifact`,
+      );
+    }
+    const attachment = attachmentsById.get(result.result_attachment_id);
+    if (!attachment || attachment.kind !== "vector-results") {
+      errors.push(
+        `${evidence.evidence_id} vector result ${result.vector_set_id}/${result.language} lacks its typed vector-results attachment`,
+      );
+    }
+    const artifact = manifestArtifactsById.get(result.artifact_id);
+    const artifactRole = artifact
+      ? inventoryById.get(artifact.inventory_id)?.role
+      : undefined;
+    if (!vectorArtifactRoles.get(result.language)?.has(artifactRole)) {
+      errors.push(
+        `${evidence.evidence_id} vector result ${result.vector_set_id}/${result.language} requires a realized ${result.language} artifact role`,
+      );
+    }
+    if (
+      result.passed_count + result.failed_count !== result.executed_count
+    ) {
+      errors.push(
+        `${evidence.evidence_id} vector result ${result.vector_set_id}/${result.language} counts are not coherent`,
+      );
+    }
+    if (
+      result.outcome === "passed" &&
+      (result.executed_count < 1 ||
+        result.passed_count !== result.executed_count ||
+        result.failed_count !== 0)
+    ) {
+      errors.push(
+        `${evidence.evidence_id} vector result ${result.vector_set_id}/${result.language} passed outcome does not match counts`,
+      );
+    }
+    if (result.outcome === "failed" && result.failed_count < 1) {
+      errors.push(
+        `${evidence.evidence_id} vector result ${result.vector_set_id}/${result.language} failed outcome does not match counts`,
+      );
+    }
+  }
+
   if (evidence.proof_type !== "negative-control") return errors;
   const evidenceControl = evidence.negative_control;
   const scenarioControl = scenario.negative_controls.find(
@@ -2104,6 +2689,9 @@ function faultExecutionCatalogErrors(evidence, scenario, faultCatalog) {
   }
   const metadata = evidence.negative_control;
   const execution = evidence.fault_execution;
+  const obligation = scenario.proof_obligations.find(
+    ({ obligation_id }) => obligation_id === evidence.proof_obligation_id,
+  );
   const scenarioPlan = scenario.fault_plans.find(
     ({ id }) => id === execution?.fault_plan_id,
   );
@@ -2119,6 +2707,55 @@ function faultExecutionCatalogErrors(evidence, scenario, faultCatalog) {
   if (!execution) {
     errors.push(`${evidence.evidence_id} lacks fault execution metadata`);
     return errors;
+  }
+  if (!obligation) {
+    errors.push(
+      `${evidence.evidence_id} fault execution has no matching proof obligation`,
+    );
+  } else if (obligation.requirement_ids.length !== 1) {
+    errors.push(
+      `${evidence.evidence_id} fault proof obligation must own exactly one requirement`,
+    );
+  } else {
+    if (execution?.fault_plan_id !== obligation.fault_plan_id) {
+      errors.push(
+        `${evidence.evidence_id} fault execution plan does not exactly match obligation ${obligation.obligation_id}`,
+      );
+    }
+    if (execution?.control_id !== obligation.control_id) {
+      errors.push(
+        `${evidence.evidence_id} fault execution control does not exactly match obligation ${obligation.obligation_id}`,
+      );
+    }
+    const requirementId = obligation.requirement_ids[0];
+    if (!stringSetsEqual(evidence.requirement_ids, [requirementId])) {
+      errors.push(
+        `${evidence.evidence_id} fault evidence requirement IDs do not equal its singleton obligation requirement`,
+      );
+    }
+    if (scenarioPlan?.requirement_id !== requirementId) {
+      errors.push(
+        `${evidence.evidence_id} fault plan does not match singleton obligation requirement ${requirementId}`,
+      );
+    }
+    if (
+      evidence.proof_type === "negative-control" &&
+      scenarioControl?.requirement_id !== requirementId
+    ) {
+      errors.push(
+        `${evidence.evidence_id} negative-control ownership does not match singleton obligation requirement ${requirementId}`,
+      );
+    }
+    if (
+      evidence.proof_type === "negative-control" &&
+      (!catalogControl ||
+        catalogControl.requirement_ids.length !== 1 ||
+        catalogControl.requirement_ids[0] !== requirementId)
+    ) {
+      errors.push(
+        `${evidence.evidence_id} negative-control catalog ownership does not match singleton obligation requirement ${requirementId}`,
+      );
+    }
   }
   if (!scenarioControl) errors.push(`${evidence.evidence_id} control is not authored by scenario`);
   if (!scenarioPlan) errors.push(`${evidence.evidence_id} fault plan is not authored by scenario`);
@@ -2244,6 +2881,13 @@ function evidencePromotionEligibilityErrors(evidence) {
     if (result.outcome !== "passed") {
       errors.push(
         `${evidence.evidence_id} is not promotion-eligible because required measurement ${result.measurement_id} has outcome ${result.outcome}, not passed`,
+      );
+    }
+  }
+  for (const result of evidence.vector_results) {
+    if (result.outcome !== "passed") {
+      errors.push(
+        `${evidence.evidence_id} is not promotion-eligible because vector result ${result.vector_set_id}/${result.language} has outcome ${result.outcome}, not passed`,
       );
     }
   }
@@ -2549,14 +3193,138 @@ function evidenceManifestBindingErrors(evidence, manifest) {
   return errors;
 }
 
+function candidateVectorLanguageClosureErrors(
+  selectedScenarios,
+  terminalEvidence,
+  vectorCatalog,
+  manifest,
+  artifactInventory,
+  { requireEveryCatalogSet = false } = {},
+) {
+  const errors = [];
+  const catalogById = new Map(
+    (vectorCatalog?.vector_sets ?? []).map((vectorSet) => [
+      vectorSet.vector_set_id,
+      vectorSet,
+    ]),
+  );
+  const requiredSetIds = new Set();
+  for (const scenario of selectedScenarios) {
+    for (const obligation of scenario.proof_obligations) {
+      for (const vectorSetId of obligation.required_vector_set_ids) {
+        requiredSetIds.add(vectorSetId);
+      }
+    }
+  }
+  for (const vectorSetId of requiredSetIds) {
+    if (!catalogById.has(vectorSetId)) {
+      errors.push(
+        `Selected proof obligations require unknown vector catalog set ${vectorSetId}`,
+      );
+    }
+  }
+  if (requireEveryCatalogSet) {
+    for (const vectorSetId of catalogById.keys()) {
+      if (!requiredSetIds.has(vectorSetId)) {
+        errors.push(
+          `Strict candidate vector validation rejects unreferenced catalog set ${vectorSetId}`,
+        );
+      }
+    }
+  }
+  const resultCounts = new Map();
+  const artifactsById = new Map(
+    (manifest?.artifacts ?? []).map((artifact) => [artifact.id, artifact]),
+  );
+  const inventoryRoles = new Map(
+    (artifactInventory?.artifacts ?? []).map((artifact) => [
+      artifact.id,
+      artifact.role,
+    ]),
+  );
+  const vectorArtifactRoles = new Map([
+    ["go", new Set(["conformance-runner"])],
+    ["rust", new Set(["pg-extension"])],
+    ["swift", new Set(["swift-spm", "cocoapods"])],
+    ["kotlin", new Set(["kotlin-maven"])],
+  ]);
+  for (const evidence of terminalEvidence) {
+    if (evidencePromotionEligibilityErrors(evidence).length !== 0) continue;
+    for (const result of evidence.vector_results) {
+      if (!requiredSetIds.has(result.vector_set_id)) continue;
+      const vectorSet = catalogById.get(result.vector_set_id);
+      const artifact = artifactsById.get(result.artifact_id);
+      const artifactRole = artifact
+        ? inventoryRoles.get(artifact.inventory_id)
+        : undefined;
+      const validResult =
+        vectorSet !== undefined &&
+        result.source_sha256 === vectorSet.source_sha256 &&
+        result.aggregate_sha256 === vectorSet.aggregate_sha256 &&
+        result.executed_count === vectorSet.vector_count &&
+        result.passed_count === vectorSet.vector_count &&
+        result.failed_count === 0 &&
+        vectorSet.required_languages.includes(result.language) &&
+        evidence.artifact_ids.includes(result.artifact_id) &&
+        vectorArtifactRoles.get(result.language)?.has(artifactRole);
+      if (!validResult) {
+        errors.push(
+          `Candidate vector closure rejects invalid terminal ${result.language} result for ${result.vector_set_id}`,
+        );
+        continue;
+      }
+      const key = `${result.vector_set_id}|${result.language}`;
+      resultCounts.set(key, (resultCounts.get(key) ?? 0) + 1);
+    }
+  }
+  for (const vectorSetId of requiredSetIds) {
+    const vectorSet = catalogById.get(vectorSetId);
+    if (!vectorSet) continue;
+    for (const language of vectorSet.required_languages) {
+      const key = `${vectorSetId}|${language}`;
+      const count = resultCounts.get(key) ?? 0;
+      if (count === 0) {
+        errors.push(
+          `Candidate vector closure is missing terminal ${language} evidence for ${vectorSetId}`,
+        );
+      } else if (count > 1) {
+        errors.push(
+          `Candidate vector closure has duplicate terminal ${language} evidence for ${vectorSetId}`,
+        );
+      }
+    }
+  }
+  return errors;
+}
+
+function strictCandidateVectorCatalogErrors(
+  selectedScenarios,
+  terminalEvidence,
+  vectorCatalog,
+  manifest,
+  artifactInventory,
+) {
+  return candidateVectorLanguageClosureErrors(
+    selectedScenarios,
+    terminalEvidence,
+    vectorCatalog,
+    manifest,
+    artifactInventory,
+    { requireEveryCatalogSet: true },
+  );
+}
+
 function manifestEvidenceClosureErrors(
   manifest,
   evidenceBundle,
   scenarioBundle,
   requirements,
   supportMatrix,
+  vectorCatalog,
+  artifactInventoryForVectors,
 ) {
   const errors = [];
+  errors.push(...crossScenarioNegativeControlOwnershipErrors(scenarioBundle));
   const candidatePathOwners = new Map();
   const recordCandidatePath = (path, owner) => {
     if (candidatePathOwners.has(path)) {
@@ -2731,6 +3499,7 @@ function manifestEvidenceClosureErrors(
       .filter((evidenceId) => evidenceId !== null),
   );
   const terminalProofKeys = new Set();
+  const terminalEvidenceRecords = [];
   for (const scenario of scenarioBundle) {
     if (!manifestScenarioIds.has(scenario.id)) continue;
     for (const obligation of scenario.proof_obligations) {
@@ -2770,6 +3539,7 @@ function manifestEvidenceClosureErrors(
           `RC manifest scenario ${scenario.id} obligation ${obligation.obligation_id} terminal evidence claims different requirements`,
         );
       } else {
+        terminalEvidenceRecords.push(terminalEvidence[0]);
         for (const requirementId of obligation.requirement_ids) {
           terminalProofKeys.add(
             `${requirementId}|${obligation.proof_type}|${obligation.support_cell_id ?? "neutral"}`,
@@ -2797,6 +3567,15 @@ function manifestEvidenceClosureErrors(
       }
     }
   }
+  errors.push(
+    ...candidateVectorLanguageClosureErrors(
+      scenarioBundle.filter(({ id }) => manifestScenarioIds.has(id)),
+      terminalEvidenceRecords,
+      vectorCatalog,
+      manifest,
+      artifactInventoryForVectors,
+    ),
+  );
   return errors;
 }
 
@@ -2906,12 +3685,21 @@ function resolvedSupportDimensionErrors(resolvedCell, authoredCell) {
   if (!authoredCell || authoredCell.policy !== "required") return errors;
 
   const dimensionPolicyKey = `${authoredCell.component}|${authoredCell.platform}`;
-  for (const name of requiredResolvedDimensions.get(dimensionPolicyKey) ?? []) {
+  const requiredDimensionNames =
+    requiredResolvedDimensions.get(dimensionPolicyKey) ?? [];
+  for (const name of requiredDimensionNames) {
     if (!dimensionsByName.has(name)) {
       errors.push(
         `${resolvedCell.support_cell_id} is missing required resolved dimension ${JSON.stringify(name)}`,
       );
     }
+  }
+  if (
+    !stringSetsEqual([...dimensionsByName.keys()], requiredDimensionNames)
+  ) {
+    errors.push(
+      `${resolvedCell.support_cell_id} resolved dimension names do not exactly match its support policy`,
+    );
   }
 
   const platformDimensionName =
@@ -3197,8 +3985,13 @@ const validScenario = {
         "ARTDEF-PG-EXTENSION-001",
         "ARTDEF-ADAPTER-001",
       ],
+      performance_budget_ids: [],
+      required_measurement_ids: [],
+      required_vector_set_ids: [],
       make_target: "test-blackbox",
       argv: ["make", "test-blackbox"],
+      fault_plan_id: null,
+      control_id: null,
     },
     {
       obligation_id: "OBL-NATIVE-001",
@@ -3213,8 +4006,13 @@ const validScenario = {
         "ARTDEF-COCOAPODS-001",
         "ARTDEF-RN-NPM-001",
       ],
+      performance_budget_ids: [],
+      required_measurement_ids: [],
+      required_vector_set_ids: [],
       make_target: "test-rn-e2e-ios",
       argv: ["make", "test-rn-e2e-ios"],
+      fault_plan_id: null,
+      control_id: null,
     },
     {
       obligation_id: "OBL-FAULT-001",
@@ -3226,8 +4024,13 @@ const validScenario = {
         "ARTDEF-PG-EXTENSION-001",
         "ARTDEF-ADAPTER-001",
       ],
+      performance_budget_ids: [],
+      required_measurement_ids: [],
+      required_vector_set_ids: [],
       make_target: "test-blackbox",
       argv: ["make", "test-blackbox"],
+      fault_plan_id: "FPL-TIME-001",
+      control_id: "CTRL-TIMESTAMP-001",
     },
     {
       obligation_id: "OBL-NEGATIVE-001",
@@ -3239,8 +4042,47 @@ const validScenario = {
         "ARTDEF-CONFORMANCE-RUNNER-001",
         "ARTDEF-RN-NPM-001",
       ],
+      performance_budget_ids: [],
+      required_measurement_ids: [],
+      required_vector_set_ids: [],
       make_target: "test-conformance",
       argv: ["make", "test-conformance"],
+      fault_plan_id: "FPL-TIME-001",
+      control_id: "CTRL-TIMESTAMP-001",
+    },
+  ],
+  ownership: [
+    {
+      scenario_id: "SCN-TIME-001",
+      requirement_id: "SYNC-TIME-001",
+      proof_obligation_id: "OBL-SERVER-001",
+      assertion_id: "ASSERT-TIME-001",
+      proof_type: "server-black-box",
+      support_cell_id: "SUP-PG-018",
+    },
+    {
+      scenario_id: "SCN-TIME-001",
+      requirement_id: "SYNC-TIME-001",
+      proof_obligation_id: "OBL-NATIVE-001",
+      assertion_id: "ASSERT-TIME-001",
+      proof_type: "native-e2e",
+      support_cell_id: "SUP-RN-IOS-MIN-001",
+    },
+    {
+      scenario_id: "SCN-TIME-001",
+      requirement_id: "SYNC-TIME-001",
+      proof_obligation_id: "OBL-FAULT-001",
+      assertion_id: "ASSERT-TIME-001",
+      proof_type: "fault-injection",
+      support_cell_id: "SUP-PG-018",
+    },
+    {
+      scenario_id: "SCN-TIME-001",
+      requirement_id: "SYNC-TIME-001",
+      proof_obligation_id: "OBL-NEGATIVE-001",
+      assertion_id: "ASSERT-TIME-001",
+      proof_type: "negative-control",
+      support_cell_id: null,
     },
   ],
   model: {
@@ -3288,8 +4130,6 @@ const validScenario = {
     seed_required: false,
     barrier_trace_required: true,
   },
-  performance_budget_ids: [],
-  required_measurement_ids: [],
   negative_controls: [
     {
       control_id: "CTRL-TIMESTAMP-001",
@@ -3370,6 +4210,23 @@ const validClosureSupportMatrix = {
       id: "SUP-RN-IOS-MIN-001",
       component: "react-native-client",
       policy: "required",
+    },
+  ],
+};
+
+const validVectorCatalog = {
+  $schema:
+    "https://synchro.dev/conformance/schemas/vector-catalog-v1.schema.json",
+  schema_version: 1,
+  release: "0.3.0",
+  vector_sets: [
+    {
+      vector_set_id: "VSET-CANONICAL-001",
+      path: "conformance/vectors/canonical-v1.json",
+      source_sha256: "a".repeat(64),
+      vector_count: 1,
+      aggregate_sha256: "b".repeat(64),
+      required_languages: ["go", "rust", "swift", "kotlin"],
     },
   ],
 };
@@ -3490,6 +4347,7 @@ const validEvidence = {
   fault_execution: null,
   performance_results: [],
   required_measurement_results: [],
+  vector_results: [],
   artifact_ids: [
     "ART-PG-EXTENSION-001",
     "ART-ADAPTER-001",
@@ -3785,6 +4643,7 @@ const validManifest = {
       fault_catalog: { path: "conformance/schemas/fault-catalog-v1.schema.json", sha256: "6".repeat(64) },
       artifact_inventory: { path: "conformance/schemas/artifact-inventory-v1.schema.json", sha256: "7".repeat(64) },
       performance_budgets: { path: "conformance/schemas/performance-budgets-v2.schema.json", sha256: "8".repeat(64) },
+      vector_catalog: { path: "conformance/schemas/vector-catalog-v1.schema.json", sha256: "9".repeat(64) },
     },
   },
   scenarios: [
@@ -3979,6 +4838,65 @@ const validManifest = {
 async function main() {
   const ajv = new Ajv2020({ allErrors: true, strict: false, validateSchema: true });
   addFormats(ajv, { formats: ["date-time", "uri"], mode: "full" });
+  const strictJsonEncoder = new TextEncoder();
+  const expectStrictJsonFailure = (bytes, label, expectedMessage) => {
+    try {
+      parseJsonStrict(bytes);
+      fail(`Strict JSON parser self-test unexpectedly accepted ${label}`);
+    } catch (error) {
+      if (expectedMessage && !error.message.includes(expectedMessage)) {
+        fail(
+          `Strict JSON parser self-test rejected ${label} for an unexpected reason: ${error.message}`,
+        );
+      }
+    }
+  };
+  for (const [label, source] of [
+    ["nested duplicate member", '{"outer":{"member":1,"member":2}}'],
+    ["nested array duplicate member", '[{"outer":{"member":1,"member":2}}]'],
+    ["varied duplicate key", '{"member":1,"member":2}'],
+    ["escaped-equivalent duplicate key", '{"\\u006dember":1,"member":2}'],
+    ["Unicode escaped-equivalent duplicate key", '{"😀":1,"\\ud83d\\ude00":2}'],
+  ]) {
+    expectStrictJsonFailure(
+      strictJsonEncoder.encode(source),
+      label,
+      "duplicate JSON object member",
+    );
+  }
+  for (const [label, source] of [
+    ["malformed object", '{"member":}'],
+    ["trailing document", '{"member":1} {"other":2}'],
+  ]) {
+    expectStrictJsonFailure(strictJsonEncoder.encode(source), label);
+  }
+  expectStrictJsonFailure(
+    new Uint8Array([0x7b, 0x22, 0x6d, 0x22, 0x3a, 0xff, 0x7d]),
+    "invalid UTF-8",
+  );
+  const strictJsonDirectory = await mkdtemp(
+    join(tmpdir(), "synchro-contract-json-"),
+  );
+  try {
+    const duplicatePath = join(strictJsonDirectory, "duplicate.json");
+    await writeFile(duplicatePath, '{"outer":{"first":1,"first":2}}');
+    const reports = [];
+    const value = await readJson(
+      duplicatePath,
+      "Strict JSON read integration self-test",
+      (message) => reports.push(message),
+    );
+    if (
+      value !== null ||
+      !reports.some((message) =>
+        message.includes('duplicate JSON object member "first"'),
+      )
+    ) {
+      fail("readJson did not enforce strict duplicate-member rejection");
+    }
+  } finally {
+    await rm(strictJsonDirectory, { recursive: true, force: true });
+  }
   repositoryMakeTargets = parseMakeTargets(
     await readFile(resolve(repoRoot, "Makefile"), "utf8"),
   );
@@ -3993,6 +4911,101 @@ async function main() {
     } catch (error) {
       fail(`Schema ${fileName} failed compilation or meta-validation: ${error.message}`);
     }
+  }
+
+  if (
+    validateInstance(
+      validators.vectorCatalog,
+      validVectorCatalog,
+      "Valid vector catalog schema self-test",
+    )
+  ) {
+    expectSemanticValid(
+      vectorCatalogSemanticErrors(validVectorCatalog),
+      "Valid vector catalog semantic self-test",
+    );
+    const vectorCatalogWithUnknownMember = structuredClone(validVectorCatalog);
+    vectorCatalogWithUnknownMember.vector_sets[0].unexpected = true;
+    expectInvalid(
+      validators.vectorCatalog,
+      vectorCatalogWithUnknownMember,
+      "Vector catalog with an unknown member self-test",
+      (errors) =>
+        errors.some(
+          (error) =>
+            error.instancePath === "/vector_sets/0" &&
+            error.keyword === "additionalProperties",
+        ),
+    );
+    const vectorCatalogWithWrongLanguageSet = structuredClone(validVectorCatalog);
+    vectorCatalogWithWrongLanguageSet.vector_sets[0].required_languages = [
+      "go",
+      "rust",
+      "swift",
+    ];
+    expectInvalid(
+      validators.vectorCatalog,
+      vectorCatalogWithWrongLanguageSet,
+      "Vector catalog with an incomplete required language set self-test",
+      (errors) =>
+        errors.some(
+          (error) =>
+            error.instancePath === "/vector_sets/0/required_languages" &&
+            error.keyword === "minItems",
+      ),
+    );
+    const vectorCatalogWithDuplicateId = structuredClone(validVectorCatalog);
+    const duplicateIdEntry = structuredClone(
+      vectorCatalogWithDuplicateId.vector_sets[0],
+    );
+    duplicateIdEntry.path = "conformance/vectors/duplicate-id.json";
+    vectorCatalogWithDuplicateId.vector_sets.push(duplicateIdEntry);
+    if (
+      validateInstance(
+        validators.vectorCatalog,
+        vectorCatalogWithDuplicateId,
+        "Schema-valid duplicate vector_set_id control",
+      )
+    ) {
+      expectSemanticInvalid(
+        vectorCatalogSemanticErrors(vectorCatalogWithDuplicateId),
+        "Duplicate vector_set_id control",
+        (error) => error.includes("Vector catalog vector sets contains duplicate logical ID"),
+      );
+    }
+    const vectorCatalogWithDuplicatePath = structuredClone(validVectorCatalog);
+    const duplicatePathEntry = structuredClone(
+      vectorCatalogWithDuplicatePath.vector_sets[0],
+    );
+    duplicatePathEntry.vector_set_id = "VSET-OTHER-001";
+    vectorCatalogWithDuplicatePath.vector_sets.push(duplicatePathEntry);
+    if (
+      validateInstance(
+        validators.vectorCatalog,
+        vectorCatalogWithDuplicatePath,
+        "Schema-valid duplicate vector path control",
+      )
+    ) {
+      expectSemanticInvalid(
+        vectorCatalogSemanticErrors(vectorCatalogWithDuplicatePath),
+        "Duplicate vector path control",
+        (error) => error.includes("Vector catalog vector-set paths contains duplicate logical ID"),
+      );
+    }
+    const vectorCatalogWithTraversalPath = structuredClone(validVectorCatalog);
+    vectorCatalogWithTraversalPath.vector_sets[0].path =
+      "conformance/vectors/../outside.json";
+    expectInvalid(
+      validators.vectorCatalog,
+      vectorCatalogWithTraversalPath,
+      "Vector catalog path traversal self-test",
+      (errors) =>
+        errors.some(
+          (error) =>
+            error.instancePath === "/vector_sets/0/path" &&
+            error.keyword === "pattern",
+        ),
+    );
   }
 
   const requirements = await readJson(
@@ -4439,6 +5452,164 @@ async function main() {
     }
   }
 
+  const scenarioWithoutOwnership = structuredClone(validScenario);
+  delete scenarioWithoutOwnership.ownership;
+  expectInvalid(
+    validators.scenario,
+    scenarioWithoutOwnership,
+    "Scenario without required ownership table",
+    (errors) =>
+      errors.some(
+        (error) =>
+          error.instancePath === "" &&
+          error.keyword === "required" &&
+          error.params.missingProperty === "ownership",
+      ),
+  );
+  const scenarioWithDuplicateOwner = structuredClone(validScenario);
+  scenarioWithDuplicateOwner.ownership.push(
+    structuredClone(scenarioWithDuplicateOwner.ownership[0]),
+  );
+  expectSemanticInvalid(
+    scenarioSemanticErrors(scenarioWithDuplicateOwner),
+    "Duplicate scenario ownership control",
+    (error) => error.includes("Scenario ownership contains duplicate logical ID"),
+  );
+  const scenarioWithOwnershipOmission = structuredClone(validScenario);
+  scenarioWithOwnershipOmission.ownership.pop();
+  expectSemanticInvalid(
+    scenarioSemanticErrors(scenarioWithOwnershipOmission),
+    "Scenario ownership omission control",
+    (error) => error.includes("ownership does not enumerate every and only"),
+  );
+  const scenarioWithDuplicateProofKey = structuredClone(validScenario);
+  const duplicateProofObligation = structuredClone(
+    scenarioWithDuplicateProofKey.proof_obligations[0],
+  );
+  duplicateProofObligation.obligation_id = "OBL-SERVER-002";
+  scenarioWithDuplicateProofKey.proof_obligations.push(duplicateProofObligation);
+  scenarioWithDuplicateProofKey.ownership.push({
+    ...structuredClone(scenarioWithDuplicateProofKey.ownership[0]),
+    proof_obligation_id: "OBL-SERVER-002",
+  });
+  expectSemanticInvalid(
+    scenarioSemanticErrors(scenarioWithDuplicateProofKey),
+    "Duplicate obligation proof key control",
+    (error) => error.includes("duplicate obligation proof key"),
+  );
+  const scenarioWithOrphanFaultPlan = structuredClone(validScenario);
+  const orphanFaultPlan = structuredClone(scenarioWithOrphanFaultPlan.fault_plans[0]);
+  orphanFaultPlan.id = "FPL-ORPHAN-001";
+  scenarioWithOrphanFaultPlan.fault_plans.push(orphanFaultPlan);
+  expectSemanticInvalid(
+    scenarioSemanticErrors(scenarioWithOrphanFaultPlan),
+    "Orphan fault plan control",
+    (error) => error.includes("FPL-ORPHAN-001 is not referenced by a fault obligation"),
+  );
+  const scenarioWithOrphanControl = structuredClone(validScenario);
+  const orphanControl = structuredClone(
+    scenarioWithOrphanControl.negative_controls[0],
+  );
+  orphanControl.control_id = "CTRL-ORPHAN-001";
+  scenarioWithOrphanControl.negative_controls.push(orphanControl);
+  expectSemanticInvalid(
+    scenarioSemanticErrors(scenarioWithOrphanControl),
+    "Orphan negative control control",
+    (error) =>
+      error.includes("CTRL-ORPHAN-001") &&
+      error.includes("exactly one negative-control obligation"),
+  );
+  const scenarioWithWrongFaultPlan = structuredClone(validScenario);
+  const alternateControl = structuredClone(
+    scenarioWithWrongFaultPlan.negative_controls[0],
+  );
+  alternateControl.control_id = "CTRL-ALTERNATE-001";
+  scenarioWithWrongFaultPlan.negative_controls.push(alternateControl);
+  const alternatePlan = structuredClone(scenarioWithWrongFaultPlan.fault_plans[0]);
+  alternatePlan.id = "FPL-ALTERNATE-001";
+  alternatePlan.control_id = "CTRL-ALTERNATE-001";
+  scenarioWithWrongFaultPlan.fault_plans.push(alternatePlan);
+  scenarioWithWrongFaultPlan.proof_obligations.find(
+    ({ obligation_id }) => obligation_id === "OBL-FAULT-001",
+  ).fault_plan_id = "FPL-ALTERNATE-001";
+  expectSemanticInvalid(
+    scenarioSemanticErrors(scenarioWithWrongFaultPlan),
+    "Wrong fault plan binding control",
+    (error) => error.includes("does not exactly bind control CTRL-TIMESTAMP-001"),
+  );
+
+  const scenarioWithWrongFaultAssertion = structuredClone(validScenario);
+  scenarioWithWrongFaultAssertion.assertions.push({
+    ...structuredClone(scenarioWithWrongFaultAssertion.assertions[0]),
+    id: "ASSERT-TIME-002",
+  });
+  scenarioWithWrongFaultAssertion.proof_obligations.find(
+    ({ obligation_id }) => obligation_id === "OBL-FAULT-001",
+  ).assertion_ids = ["ASSERT-TIME-002"];
+  const faultOwnership = scenarioWithWrongFaultAssertion.ownership.find(
+    ({ proof_obligation_id }) => proof_obligation_id === "OBL-FAULT-001",
+  );
+  faultOwnership.assertion_id = "ASSERT-TIME-002";
+  expectSemanticInvalid(
+    scenarioSemanticErrors(scenarioWithWrongFaultAssertion),
+    "Fault obligation with a non-detector assertion control",
+    (error) => error.includes("assertions do not exactly match fault plan"),
+  );
+
+  const duplicateNegativeControlScenario = structuredClone(validScenario);
+  duplicateNegativeControlScenario.id = "SCN-TIME-002";
+  for (const owner of duplicateNegativeControlScenario.ownership) {
+    owner.scenario_id = duplicateNegativeControlScenario.id;
+  }
+  const duplicateNegativeControlOwnershipErrors =
+    crossScenarioNegativeControlOwnershipErrors([
+      validScenario,
+      duplicateNegativeControlScenario,
+    ]);
+  expectSemanticInvalid(
+    duplicateNegativeControlOwnershipErrors,
+    "Cross-scenario duplicate negative-control ownership control",
+    (error) => error.includes("2 negative-control obligations for SYNC-TIME-001"),
+  );
+  expectSemanticInvalid(
+    duplicateNegativeControlOwnershipErrors,
+    "Cross-scenario reused negative-control ID control",
+    (error) => error.includes("reuse negative control CTRL-TIMESTAMP-001"),
+  );
+
+  const faultObligationWithMultipleRequirements = structuredClone(validScenario);
+  faultObligationWithMultipleRequirements.proof_obligations.find(
+    ({ obligation_id }) => obligation_id === "OBL-FAULT-001",
+  ).requirement_ids.push("SYNC-TIME-002");
+  expectInvalid(
+    validators.scenario,
+    faultObligationWithMultipleRequirements,
+    "Fault-injection obligation owned by multiple requirements",
+    (errors) =>
+      errors.some(
+        (error) =>
+          error.instancePath ===
+            "/proof_obligations/2/requirement_ids" &&
+          error.keyword === "maxItems",
+      ),
+  );
+
+  const faultObligationWithMultipleAssertions = structuredClone(validScenario);
+  faultObligationWithMultipleAssertions.proof_obligations.find(
+    ({ obligation_id }) => obligation_id === "OBL-FAULT-001",
+  ).assertion_ids.push("ASSERT-TIME-002");
+  expectInvalid(
+    validators.scenario,
+    faultObligationWithMultipleAssertions,
+    "Fault-injection obligation owned by multiple assertions",
+    (errors) =>
+      errors.some(
+        (error) =>
+          error.instancePath === "/proof_obligations/2/assertion_ids" &&
+          error.keyword === "maxItems",
+      ),
+  );
+
   const scenarioWithObligationOverclaim = structuredClone(validScenario);
   scenarioWithObligationOverclaim.proof_obligations[0].requirement_ids.push(
     "SYNC-TIME-002",
@@ -4683,7 +5854,25 @@ async function main() {
         performanceBudgets,
       ),
       "Scenario with a different requirement normative reference control",
-      (error) => error.includes("normative references do not exactly match"),
+      (error) => error.includes("omit mandatory requirement anchor"),
+    );
+
+    const scenarioWithOutsideSnapshotReference = structuredClone(validScenario);
+    scenarioWithOutsideSnapshotReference.normative_references.push({
+      path: "docs/src/content/docs/getting-started/quickstart.mdx",
+      anchor: "#prerequisites",
+    });
+    expectSemanticInvalid(
+      authoredScenarioBindingErrors(
+        scenarioWithOutsideSnapshotReference,
+        requirements,
+        supportMatrix,
+        artifactInventory,
+        faultCatalog,
+        performanceBudgets,
+      ),
+      "Scenario with an outside-snapshot normative reference control",
+      (error) => error.includes("outside the frozen behavioral contract snapshot"),
     );
 
     const scenarioWithWrongRequirementControl = structuredClone(validScenario);
@@ -4937,7 +6126,7 @@ async function main() {
     );
 
     const scenarioWithUndeclaredMeasurement = structuredClone(validScenario);
-    scenarioWithUndeclaredMeasurement.required_measurement_ids = [
+    scenarioWithUndeclaredMeasurement.proof_obligations[0].required_measurement_ids = [
       "MEAS-FANOUT-001",
     ];
     expectSemanticInvalid(
@@ -4952,7 +6141,7 @@ async function main() {
       "Scenario required measurement exact declaration control",
       (error) =>
         error.includes(
-          "required measurement declarations do not exactly match the authored catalog",
+          "declares MEAS-FANOUT-001 authored for scenario",
         ),
     );
   }
@@ -4979,6 +6168,359 @@ async function main() {
       "Passing evidence-to-manifest binding self-test",
     );
   }
+
+  const vectorScenario = structuredClone(validScenario);
+  const vectorObligation = vectorScenario.proof_obligations[0];
+  vectorObligation.required_vector_set_ids = [
+    "VSET-CANONICAL-001",
+  ];
+  vectorObligation.proof_type = "reference-model";
+  vectorObligation.support_cell_id = null;
+  vectorObligation.artifact_inventory_ids = ["ARTDEF-CONFORMANCE-RUNNER-001"];
+  vectorObligation.make_target = "test-conformance";
+  vectorObligation.argv = ["make", "test-conformance"];
+  vectorScenario.ownership[0].proof_type = "reference-model";
+  vectorScenario.ownership[0].support_cell_id = null;
+  vectorScenario.model.expected_state.push({
+    id: "EXPECT-VECTOR-001",
+    predicate: {
+      contract_predicate: "state-equality",
+      name: "state-unchanged",
+      payload: {},
+    },
+  });
+  vectorScenario.assertions.push({
+    id: "ASSERT-VECTOR-001",
+    requirement_ids: ["SYNC-TIME-001"],
+    description: "The canonical vector set passes independently.",
+    expectation_ids: ["EXPECT-VECTOR-001"],
+    predicate: {
+      contract_predicate: "artifact-integrity",
+      name: "artifact-policy-satisfied",
+      payload: {},
+    },
+    oracle: {
+      kind: "artifact-policy",
+      expected_source: "authored-model",
+      observed_source: "generated-artifact",
+    },
+    detects_control_ids: [],
+  });
+  vectorScenario.proof_obligations[0].assertion_ids.push(
+    "ASSERT-VECTOR-001",
+  );
+  const vectorEvidence = structuredClone(validServerEvidence);
+  vectorEvidence.evidence_id = "EVD-VECTOR-001";
+  vectorEvidence.proof_type = "reference-model";
+  vectorEvidence.proof_obligation_id = "OBL-SERVER-001";
+  vectorEvidence.support_cell_id = null;
+  vectorEvidence.environment = [];
+  vectorEvidence.artifact_ids = ["ART-CONFORMANCE-RUNNER-001"];
+  vectorEvidence.run.make_target = "test-conformance";
+  vectorEvidence.run.argv = ["make", "test-conformance"];
+  vectorEvidence.assertions.push({
+    assertion_id: "ASSERT-VECTOR-001",
+    outcome: "passed",
+  });
+  vectorEvidence.attachments.push({
+    id: "ATT-VECTOR-001",
+    kind: "vector-results",
+    path: "evidence/vector-results.json",
+    media_type: "application/json",
+    sha256: "2".repeat(64),
+  });
+  vectorEvidence.vector_results = [
+    {
+      vector_set_id: "VSET-CANONICAL-001",
+      source_sha256: "a".repeat(64),
+      aggregate_sha256: "b".repeat(64),
+      language: "go",
+      artifact_id: "ART-CONFORMANCE-RUNNER-001",
+      outcome: "passed",
+      result_attachment_id: "ATT-VECTOR-001",
+      executed_count: 1,
+      passed_count: 1,
+      failed_count: 0,
+    },
+  ];
+  if (
+    validateInstance(
+      validators.evidence,
+      vectorEvidence,
+      "Valid typed vector evidence self-test",
+    )
+  ) {
+    expectSemanticValid(
+      evidenceScenarioSemanticErrors(
+        vectorEvidence,
+        vectorScenario,
+        validManifest,
+        artifactInventory,
+        performanceBudgets,
+        validVectorCatalog,
+      ),
+      "Valid typed vector evidence binding self-test",
+    );
+    expectSemanticValid(
+      evidencePromotionEligibilityErrors(vectorEvidence),
+      "Passing vector evidence promotion self-test",
+    );
+  }
+  const vectorEvidenceWithWrongSet = structuredClone(vectorEvidence);
+  vectorEvidenceWithWrongSet.vector_results[0].vector_set_id =
+    "VSET-OTHER-001";
+  expectSemanticInvalid(
+    evidenceScenarioSemanticErrors(
+      vectorEvidenceWithWrongSet,
+      vectorScenario,
+      validManifest,
+      artifactInventory,
+      performanceBudgets,
+      validVectorCatalog,
+    ),
+    "Vector evidence with an undeclared vector set control",
+    (error) => error.includes("vector results do not exactly match obligation"),
+  );
+  const vectorEvidenceWithForeignArtifact = structuredClone(vectorEvidence);
+  vectorEvidenceWithForeignArtifact.vector_results[0].artifact_id =
+    "ART-PORTABLE-SEED-001";
+  expectSemanticInvalid(
+    evidenceScenarioSemanticErrors(
+      vectorEvidenceWithForeignArtifact,
+      vectorScenario,
+      validManifest,
+      artifactInventory,
+      performanceBudgets,
+      validVectorCatalog,
+    ),
+    "Vector evidence with an artifact outside the obligation control",
+    (error) => error.includes("is not an execution artifact"),
+  );
+  const vectorEvidenceWithWrongSourceHash = structuredClone(vectorEvidence);
+  vectorEvidenceWithWrongSourceHash.vector_results[0].source_sha256 =
+    "c".repeat(64);
+  expectSemanticInvalid(
+    evidenceScenarioSemanticErrors(
+      vectorEvidenceWithWrongSourceHash,
+      vectorScenario,
+      validManifest,
+      artifactInventory,
+      performanceBudgets,
+      validVectorCatalog,
+    ),
+    "Vector evidence with a wrong source hash control",
+    (error) => error.includes("source hash does not match the vector catalog"),
+  );
+  const vectorEvidenceWithWrongAggregateHash = structuredClone(vectorEvidence);
+  vectorEvidenceWithWrongAggregateHash.vector_results[0].aggregate_sha256 =
+    "c".repeat(64);
+  expectSemanticInvalid(
+    evidenceScenarioSemanticErrors(
+      vectorEvidenceWithWrongAggregateHash,
+      vectorScenario,
+      validManifest,
+      artifactInventory,
+      performanceBudgets,
+      validVectorCatalog,
+    ),
+    "Vector evidence with a wrong aggregate hash control",
+    (error) => error.includes("aggregate hash does not match the vector catalog"),
+  );
+  const vectorEvidenceWithTruncatedCount = structuredClone(vectorEvidence);
+  vectorEvidenceWithTruncatedCount.vector_results[0].executed_count = 0;
+  vectorEvidenceWithTruncatedCount.vector_results[0].passed_count = 0;
+  expectSemanticInvalid(
+    evidenceScenarioSemanticErrors(
+      vectorEvidenceWithTruncatedCount,
+      vectorScenario,
+      validManifest,
+      artifactInventory,
+      performanceBudgets,
+      validVectorCatalog,
+    ),
+    "Vector evidence with a truncated count control",
+    (error) => error.includes("executed count does not match catalog vector count"),
+  );
+  const vectorEvidenceWithWrongLanguageArtifact = structuredClone(vectorEvidence);
+  vectorEvidenceWithWrongLanguageArtifact.artifact_ids.push("ART-ADAPTER-001");
+  vectorEvidenceWithWrongLanguageArtifact.vector_results[0].artifact_id =
+    "ART-ADAPTER-001";
+  const vectorScenarioWithWrongLanguageArtifact = structuredClone(vectorScenario);
+  vectorScenarioWithWrongLanguageArtifact.proof_obligations[0].artifact_inventory_ids.push(
+    "ARTDEF-ADAPTER-001",
+  );
+  expectSemanticInvalid(
+    evidenceScenarioSemanticErrors(
+      vectorEvidenceWithWrongLanguageArtifact,
+      vectorScenarioWithWrongLanguageArtifact,
+      validManifest,
+      artifactInventory,
+      performanceBudgets,
+      validVectorCatalog,
+    ),
+    "Vector evidence with a wrong language artifact control",
+    (error) => error.includes("requires a realized go artifact role"),
+  );
+  const vectorEvidenceWithWrongAttachment = structuredClone(vectorEvidence);
+  vectorEvidenceWithWrongAttachment.attachments.find(
+    ({ id }) => id === "ATT-VECTOR-001",
+  ).kind = "report";
+  expectSemanticInvalid(
+    evidenceScenarioSemanticErrors(
+      vectorEvidenceWithWrongAttachment,
+      vectorScenario,
+      validManifest,
+      artifactInventory,
+      performanceBudgets,
+      validVectorCatalog,
+    ),
+    "Vector evidence with a mistyped result attachment control",
+    (error) => error.includes("typed vector-results attachment"),
+  );
+  const vectorEvidenceWithIncoherentCounts = structuredClone(vectorEvidence);
+  vectorEvidenceWithIncoherentCounts.vector_results[0].passed_count = 0;
+  expectSemanticInvalid(
+    evidenceScenarioSemanticErrors(
+      vectorEvidenceWithIncoherentCounts,
+      vectorScenario,
+      validManifest,
+      artifactInventory,
+      performanceBudgets,
+      validVectorCatalog,
+    ),
+    "Vector evidence with incoherent counts control",
+    (error) => error.includes("counts are not coherent"),
+  );
+  const failedVectorEvidence = structuredClone(vectorEvidence);
+  failedVectorEvidence.run.exit_code = 1;
+  failedVectorEvidence.run.result = "failed";
+  failedVectorEvidence.vector_results[0].outcome = "failed";
+  failedVectorEvidence.vector_results[0].passed_count = 0;
+  failedVectorEvidence.vector_results[0].failed_count = 1;
+  expectSemanticInvalid(
+    evidencePromotionEligibilityErrors(failedVectorEvidence),
+    "Failed vector evidence promotion control",
+    (error) => error.includes("vector result VSET-CANONICAL-001/go has outcome failed"),
+  );
+  if (
+    !validateInstance(
+      validators.evidence,
+      failedVectorEvidence,
+      "Nonzero failed vector evidence self-test",
+    )
+  ) {
+    fail("Failed vector evidence must remain schema-valid when its run exits nonzero");
+  }
+  const zeroExitFailedVectorEvidence = structuredClone(failedVectorEvidence);
+  zeroExitFailedVectorEvidence.run.exit_code = 0;
+  zeroExitFailedVectorEvidence.run.result = "passed";
+  expectInvalid(
+    validators.evidence,
+    zeroExitFailedVectorEvidence,
+    "Zero-exit evidence with a failed vector outcome",
+    (errors) =>
+      errors.some(
+        (error) =>
+          error.instancePath === "/vector_results/0/outcome" &&
+          error.keyword === "const",
+      ),
+  );
+  const duplicateVectorEvidence = structuredClone(vectorEvidence);
+  duplicateVectorEvidence.vector_results.push(
+    structuredClone(duplicateVectorEvidence.vector_results[0]),
+  );
+  expectSemanticInvalid(
+    evidenceScenarioSemanticErrors(
+      duplicateVectorEvidence,
+      vectorScenario,
+      validManifest,
+      artifactInventory,
+      performanceBudgets,
+      validVectorCatalog,
+    ),
+    "Duplicate typed vector result control",
+    (error) => error.includes("Evidence vector results contains duplicate logical ID"),
+  );
+  const terminalVectorEvidence = structuredClone(vectorEvidence);
+  const vectorArtifactsByLanguage = new Map([
+    ["go", "ART-CONFORMANCE-RUNNER-001"],
+    ["rust", "ART-PG-EXTENSION-001"],
+    ["swift", "ART-SWIFT-001"],
+    ["kotlin", "ART-KOTLIN-MAVEN-001"],
+  ]);
+  terminalVectorEvidence.artifact_ids = [
+    ...vectorArtifactsByLanguage.values(),
+  ];
+  terminalVectorEvidence.vector_results = ["go", "rust", "swift", "kotlin"].map(
+    (language) => ({
+      ...structuredClone(terminalVectorEvidence.vector_results[0]),
+      language,
+      artifact_id: vectorArtifactsByLanguage.get(language),
+    }),
+  );
+  expectSemanticValid(
+    candidateVectorLanguageClosureErrors(
+      [vectorScenario],
+      [terminalVectorEvidence],
+      validVectorCatalog,
+      validManifest,
+      artifactInventory,
+    ),
+    "Four-language candidate vector closure self-test",
+  );
+  const terminalVectorEvidenceWithMissingLanguage = structuredClone(
+    terminalVectorEvidence,
+  );
+  terminalVectorEvidenceWithMissingLanguage.vector_results.pop();
+  expectSemanticInvalid(
+    candidateVectorLanguageClosureErrors(
+      [vectorScenario],
+      [terminalVectorEvidenceWithMissingLanguage],
+      validVectorCatalog,
+      validManifest,
+      artifactInventory,
+    ),
+    "Missing candidate vector language closure control",
+    (error) => error.includes("missing terminal kotlin evidence"),
+  );
+  const terminalVectorEvidenceWithDuplicateLanguage = [
+    structuredClone(terminalVectorEvidence),
+  ];
+  terminalVectorEvidenceWithDuplicateLanguage[0].vector_results.push(
+    structuredClone(terminalVectorEvidenceWithDuplicateLanguage[0].vector_results[0]),
+  );
+  expectSemanticInvalid(
+    candidateVectorLanguageClosureErrors(
+      [vectorScenario],
+      terminalVectorEvidenceWithDuplicateLanguage,
+      validVectorCatalog,
+      validManifest,
+      artifactInventory,
+    ),
+    "Duplicate candidate vector language closure control",
+    (error) => error.includes("duplicate terminal go evidence"),
+  );
+  expectSemanticValid(
+    candidateVectorLanguageClosureErrors(
+      [validScenario],
+      [],
+      validVectorCatalog,
+      validManifest,
+      artifactInventory,
+    ),
+    "Phase 2 vector closure permits unreferenced catalog sets self-test",
+  );
+  expectSemanticInvalid(
+    strictCandidateVectorCatalogErrors(
+      [validScenario],
+      [],
+      validVectorCatalog,
+      validManifest,
+      artifactInventory,
+    ),
+    "Phase 3 strict vector catalog closure control",
+    (error) => error.includes("rejects unreferenced catalog set VSET-CANONICAL-001"),
+  );
 
   const wrongProtocolEvidence = structuredClone(validEvidence);
   wrongProtocolEvidence.protocol_version = 2;
@@ -5370,7 +6912,7 @@ async function main() {
     );
     const incompleteAllCellScenario = structuredClone(validScenario);
     incompleteAllCellScenario.id = "SCN-PERF-WARM-CONNECT-001";
-    incompleteAllCellScenario.performance_budget_ids = allCellBudgets.map(
+    incompleteAllCellScenario.proof_obligations[0].performance_budget_ids = allCellBudgets.map(
       ({ id }) => id,
     );
     expectSemanticInvalid(
@@ -5383,7 +6925,7 @@ async function main() {
         performanceBudgets,
       ),
       "Performance scenario missing required support cells control",
-      (error) => error.includes("has no proof obligation for support cell"),
+      (error) => error.includes("must be declared by exactly one obligation for support cell"),
     );
 
     const budget = performanceBudgets.budgets.find(
@@ -5391,12 +6933,40 @@ async function main() {
     );
     const performanceScenario = structuredClone(validScenario);
     performanceScenario.id = budget.scenario_id;
-    performanceScenario.performance_budget_ids = [budget.id];
+    performanceScenario.proof_obligations[0].performance_budget_ids = [budget.id];
     performanceScenario.proof_obligations[0].support_cell_id = "SUP-PG-018";
     performanceScenario.proof_obligations[0].artifact_inventory_ids = [
       "ARTDEF-PG-EXTENSION-001",
       "ARTDEF-ADAPTER-001",
     ];
+    performanceScenario.model.expected_state.push({
+      id: "EXPECT-PERFORMANCE-001",
+      predicate: {
+        contract_predicate: "state-equality",
+        name: "state-unchanged",
+        payload: {},
+      },
+    });
+    performanceScenario.assertions.push({
+      id: "ASSERT-PERFORMANCE-001",
+      requirement_ids: ["SYNC-TIME-001"],
+      description: "The request budget is measured from typed counters.",
+      expectation_ids: ["EXPECT-PERFORMANCE-001"],
+      predicate: {
+        contract_predicate: "performance-measurement",
+        name: "performance-contract-satisfied",
+        payload: {},
+      },
+      oracle: {
+        kind: "performance-budget",
+        expected_source: "authored-model",
+        observed_source: "generated-artifact",
+      },
+      detects_control_ids: [],
+    });
+    performanceScenario.proof_obligations[0].assertion_ids.push(
+      "ASSERT-PERFORMANCE-001",
+    );
     const performanceEvidence = structuredClone(validServerEvidence);
     performanceEvidence.evidence_id = "EVD-PERFORMANCE-001";
     performanceEvidence.scenario_id = performanceScenario.id;
@@ -5405,6 +6975,10 @@ async function main() {
       "ART-PG-EXTENSION-001",
       "ART-ADAPTER-001",
     ];
+    performanceEvidence.assertions.push({
+      assertion_id: "ASSERT-PERFORMANCE-001",
+      outcome: "passed",
+    });
     performanceEvidence.attachments.push({
       id: "ATT-PERFORMANCE-001",
       kind: "performance-measurements",
@@ -5457,6 +7031,95 @@ async function main() {
       );
     }
 
+    const performanceNegativeControlEvidence = structuredClone(
+      validNegativeControlEvidence,
+    );
+    performanceNegativeControlEvidence.evidence_id =
+      "EVD-PERFORMANCE-NEGATIVE-001";
+    performanceNegativeControlEvidence.scenario_id = performanceScenario.id;
+    performanceNegativeControlEvidence.vector_results = [];
+    expectSemanticValid(
+      evidenceScenarioSemanticErrors(
+        performanceNegativeControlEvidence,
+        performanceScenario,
+        validManifest,
+        artifactInventory,
+        performanceBudgets,
+      ),
+      "Negative-control performance evidence with empty performance arrays self-test",
+    );
+
+    const omittedPerformanceResult = structuredClone(performanceEvidence);
+    omittedPerformanceResult.performance_results = [];
+    expectSemanticInvalid(
+      evidenceScenarioSemanticErrors(
+        omittedPerformanceResult,
+        performanceScenario,
+        validManifest,
+        artifactInventory,
+        performanceBudgets,
+      ),
+      "Performance budget omission control",
+      (error) => error.includes("performance budget results do not match"),
+    );
+
+    const borrowedPerformanceResult = structuredClone(performanceEvidence);
+    borrowedPerformanceResult.proof_obligation_id = "OBL-NATIVE-001";
+    borrowedPerformanceResult.proof_type = "native-e2e";
+    borrowedPerformanceResult.support_cell_id = "SUP-RN-IOS-MIN-001";
+    expectSemanticInvalid(
+      evidenceScenarioSemanticErrors(
+        borrowedPerformanceResult,
+        performanceScenario,
+        validManifest,
+        artifactInventory,
+        performanceBudgets,
+      ),
+      "Cross-obligation performance result borrowing control",
+      (error) => error.includes("performance budget results do not match"),
+    );
+
+    const wrongSupportPerformanceEvidence = structuredClone(performanceEvidence);
+    wrongSupportPerformanceEvidence.support_cell_id = "SUP-RN-IOS-MIN-001";
+    expectSemanticInvalid(
+      evidenceScenarioSemanticErrors(
+        wrongSupportPerformanceEvidence,
+        performanceScenario,
+        validManifest,
+        artifactInventory,
+        performanceBudgets,
+      ),
+      "Performance result wrong support-cell control",
+      (error) =>
+        error.includes("does not match obligation") ||
+        error.includes("does not authorize support cell"),
+    );
+
+    const duplicatePerformanceOwnerScenario = structuredClone(
+      performanceScenario,
+    );
+    duplicatePerformanceOwnerScenario.proof_obligations[1].support_cell_id =
+      "SUP-PG-018";
+    duplicatePerformanceOwnerScenario.proof_obligations[1].artifact_inventory_ids = [
+      "ARTDEF-PG-EXTENSION-001",
+      "ARTDEF-ADAPTER-001",
+    ];
+    duplicatePerformanceOwnerScenario.proof_obligations[1].performance_budget_ids = [
+      budget.id,
+    ];
+    expectSemanticInvalid(
+      authoredScenarioBindingErrors(
+        duplicatePerformanceOwnerScenario,
+        requirements,
+        supportMatrix,
+        artifactInventory,
+        faultCatalog,
+        performanceBudgets,
+      ),
+      "Duplicate performance budget ownership control",
+      (error) => error.includes("must be declared by exactly one obligation"),
+    );
+
     const duplicatePerformanceResult = structuredClone(performanceEvidence);
     const secondPerformanceResult = structuredClone(
       duplicatePerformanceResult.performance_results[0],
@@ -5504,6 +7167,17 @@ async function main() {
       "Failed performance budget promotion control",
       (error) => error.includes("has outcome failed, not passed"),
     );
+    expectInvalid(
+      validators.evidence,
+      failedPerformanceEvidence,
+      "Zero-exit evidence with a failed performance outcome",
+      (errors) =>
+        errors.some(
+          (error) =>
+            error.instancePath === "/performance_results/0/outcome" &&
+            error.keyword === "const",
+        ),
+    );
     expectSemanticInvalid(
       evidenceScenarioSemanticErrors(
         failedPerformanceEvidence,
@@ -5521,12 +7195,42 @@ async function main() {
     );
     const measurementScenario = structuredClone(validScenario);
     measurementScenario.id = measurement.scenario_id;
-    measurementScenario.required_measurement_ids = [measurement.id];
+    measurementScenario.proof_obligations[0].required_measurement_ids = [
+      measurement.id,
+    ];
     measurementScenario.proof_obligations[0].support_cell_id = "SUP-PG-018";
     measurementScenario.proof_obligations[0].artifact_inventory_ids = [
       "ARTDEF-PG-EXTENSION-001",
       "ARTDEF-ADAPTER-001",
     ];
+    measurementScenario.model.expected_state.push({
+      id: "EXPECT-MEASUREMENT-001",
+      predicate: {
+        contract_predicate: "state-equality",
+        name: "state-unchanged",
+        payload: {},
+      },
+    });
+    measurementScenario.assertions.push({
+      id: "ASSERT-MEASUREMENT-001",
+      requirement_ids: ["SYNC-TIME-001"],
+      description: "The characterization measurement is recorded by stratum.",
+      expectation_ids: ["EXPECT-MEASUREMENT-001"],
+      predicate: {
+        contract_predicate: "performance-measurement",
+        name: "performance-contract-satisfied",
+        payload: {},
+      },
+      oracle: {
+        kind: "performance-budget",
+        expected_source: "authored-model",
+        observed_source: "generated-artifact",
+      },
+      detects_control_ids: [],
+    });
+    measurementScenario.proof_obligations[0].assertion_ids.push(
+      "ASSERT-MEASUREMENT-001",
+    );
     const measurementEvidence = structuredClone(validServerEvidence);
     measurementEvidence.evidence_id = "EVD-MEASUREMENT-001";
     measurementEvidence.scenario_id = measurementScenario.id;
@@ -5535,6 +7239,10 @@ async function main() {
       "ART-PG-EXTENSION-001",
       "ART-ADAPTER-001",
     ];
+    measurementEvidence.assertions.push({
+      assertion_id: "ASSERT-MEASUREMENT-001",
+      outcome: "passed",
+    });
     measurementEvidence.attachments.push({
       id: "ATT-MEASUREMENT-001",
       kind: "performance-measurements",
@@ -5587,6 +7295,20 @@ async function main() {
         "Valid required measurement evidence semantic self-test",
       );
     }
+
+    const failedMeasurementEvidence = structuredClone(measurementEvidence);
+    failedMeasurementEvidence.required_measurement_results[0].outcome = "failed";
+    expectInvalid(
+      validators.evidence,
+      failedMeasurementEvidence,
+      "Zero-exit evidence with a failed required measurement outcome",
+      (errors) =>
+        errors.some(
+          (error) =>
+            error.instancePath === "/required_measurement_results/0/outcome" &&
+            error.keyword === "const",
+        ),
+    );
 
     const changedRequiredMeasurement = structuredClone(measurementEvidence);
     changedRequiredMeasurement.required_measurement_results[0].strata[0].sample_count =
@@ -6502,6 +8224,21 @@ async function main() {
       ),
   );
 
+  const manifestWithoutVectorCatalogSchema = structuredClone(validManifest);
+  delete manifestWithoutVectorCatalogSchema.contract.schema_files.vector_catalog;
+  expectInvalid(
+    validators.rcManifest,
+    manifestWithoutVectorCatalogSchema,
+    "RC manifest without the vector catalog schema binding",
+    (errors) =>
+      errors.some(
+        (error) =>
+          error.instancePath === "/contract/schema_files" &&
+          error.keyword === "required" &&
+          error.params.missingProperty === "vector_catalog",
+      ),
+  );
+
   for (const [binding, mutate] of [
     ["release_version", (evidence) => (evidence.release_version = "0.3.1")],
     ["protocol_version", (evidence) => (evidence.protocol_version = 4)],
@@ -6614,7 +8351,7 @@ async function main() {
         const cell = manifest.resolved_support_cells.find(
           ({ support_cell_id }) => support_cell_id === "SUP-IOS-MIN-001",
         );
-        cell.dimensions.find(({ name }) => name === "ios").name = "iphone-os";
+        cell.dimensions.find(({ name }) => name === "ios").name = "macos";
       },
       (error) =>
         error.includes("SUP-IOS-MIN-001 is missing required resolved dimension") &&
@@ -6631,6 +8368,17 @@ async function main() {
       (error) =>
         error.includes("SUP-IOS-MIN-001 contains duplicate dimension name") &&
         error.includes('"ios"'),
+    ],
+    [
+      "extra support dimension",
+      (manifest) => {
+        const cell = manifest.resolved_support_cells.find(
+          ({ support_cell_id }) => support_cell_id === "SUP-IOS-MIN-001",
+        );
+        cell.dimensions.push({ name: "node", version: "99.0.0+1.1" });
+      },
+      (error) =>
+        error.includes("SUP-IOS-MIN-001 resolved dimension names do not exactly match"),
     ],
     [
       "PostgreSQL 17 in PG18 cell",
@@ -6665,6 +8413,23 @@ async function main() {
       );
     }
   }
+
+  const manifestWithCredentialDimension = structuredClone(validManifest);
+  manifestWithCredentialDimension.resolved_support_cells[0].dimensions.push({
+    name: "credential",
+    version: "1.0.0",
+  });
+  expectInvalid(
+    validators.rcManifest,
+    manifestWithCredentialDimension,
+    "RC manifest credential environment dimension control",
+    (errors) =>
+      errors.some(
+        (error) =>
+          error.instancePath === "/resolved_support_cells/0/dimensions/4/name" &&
+          error.keyword === "enum",
+      ),
+  );
 
   const movingVersionManifest = structuredClone(validManifest);
   movingVersionManifest.resolved_support_cells[0].dimensions[0].version =
@@ -6892,7 +8657,7 @@ async function main() {
   const manifestWithUnknownCell = structuredClone(validManifest);
   manifestWithUnknownCell.resolved_support_cells[0] = {
     support_cell_id: "SUP-UNKNOWN-001",
-    dimensions: [{ name: "unknown", version: "1.0.0" }],
+    dimensions: [{ name: "postgresql", version: "1.0.0" }],
   };
   if (
     validateInstance(

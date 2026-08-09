@@ -28,6 +28,7 @@
     "fault_execution",
     "performance_results",
     "required_measurement_results",
+    "vector_results",
     "artifact_ids",
     "negative_control",
     "seed"
@@ -90,6 +91,10 @@
       "type": "array",
       "items": { "$ref": "#/$defs/requiredMeasurementResult" }
     },
+    "vector_results": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/vectorResult" }
+    },
     "artifact_ids": {
       "type": "array",
       "minItems": 1,
@@ -139,6 +144,15 @@
                 "outcome": { "enum": ["passed", "skipped"] }
               }
             }
+          },
+          "performance_results": {
+            "items": { "properties": { "outcome": { "const": "passed" } } }
+          },
+          "required_measurement_results": {
+            "items": { "properties": { "outcome": { "const": "passed" } } }
+          },
+          "vector_results": {
+            "items": { "properties": { "outcome": { "const": "passed" } } }
           }
         }
       }
@@ -207,6 +221,10 @@
     "assertionId": {
       "type": "string",
       "pattern": "^ASSERT-[A-Z0-9]+(?:-[A-Z0-9]+)*-[0-9]{3}$"
+    },
+    "vectorSetId": {
+      "type": "string",
+      "pattern": "^VSET-[A-Z0-9]+(?:-[A-Z0-9]+)*-[0-9]{3}$"
     },
     "artifactId": {
       "type": "string",
@@ -415,7 +433,10 @@
       "additionalProperties": false,
       "required": ["name", "value"],
       "properties": {
-        "name": { "type": "string", "minLength": 1 },
+        "name": {
+          "type": "string",
+          "enum": ["postgresql", "os", "rust", "pgrx", "ios", "xcode", "apple-sdk", "simulator-runtime", "swift", "macos", "android-api", "android-sdk", "emulator-image", "jdk", "kotlin", "gradle", "node", "yarn", "react", "react-native", "cocoapods"]
+        },
         "value": { "type": "string", "minLength": 1 }
       }
     },
@@ -448,6 +469,7 @@
             "fault-plan",
             "negative-control",
             "performance-measurements",
+            "vector-results",
             "report"
           ]
         },
@@ -571,6 +593,23 @@
           "uniqueItems": true,
           "items": { "$ref": "#/$defs/stratumResult" }
         }
+      }
+    },
+    "vectorResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["vector_set_id", "source_sha256", "aggregate_sha256", "language", "artifact_id", "outcome", "result_attachment_id", "executed_count", "passed_count", "failed_count"],
+      "properties": {
+        "vector_set_id": { "$ref": "#/$defs/vectorSetId" },
+        "source_sha256": { "$ref": "#/$defs/sha256" },
+        "aggregate_sha256": { "$ref": "#/$defs/sha256" },
+        "language": { "type": "string", "enum": ["go", "rust", "swift", "kotlin"] },
+        "artifact_id": { "$ref": "#/$defs/artifactId" },
+        "outcome": { "type": "string", "enum": ["passed", "failed", "error"] },
+        "result_attachment_id": { "$ref": "#/$defs/attachmentId" },
+        "executed_count": { "type": "integer", "minimum": 0 },
+        "passed_count": { "type": "integer", "minimum": 0 },
+        "failed_count": { "type": "integer", "minimum": 0 }
       }
     },
     "scalar": { "type": ["string", "number", "boolean", "null"] },

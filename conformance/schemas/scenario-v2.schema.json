@@ -13,12 +13,11 @@
     "normative_references",
     "proof_types",
     "proof_obligations",
+    "ownership",
     "model",
     "barrier_plan",
     "fault_plans",
     "replay",
-    "performance_budget_ids",
-    "required_measurement_ids",
     "negative_controls",
     "steps",
     "wire_expectations",
@@ -53,6 +52,12 @@
       "minItems": 1,
       "items": { "$ref": "#/$defs/proofObligation" }
     },
+    "ownership": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/ownership" }
+    },
     "model": { "$ref": "#/$defs/model" },
     "barrier_plan": { "$ref": "#/$defs/barrierPlan" },
     "fault_plans": {
@@ -60,16 +65,6 @@
       "items": { "$ref": "#/$defs/faultPlan" }
     },
     "replay": { "$ref": "#/$defs/replay" },
-    "performance_budget_ids": {
-      "type": "array",
-      "uniqueItems": true,
-      "items": { "$ref": "#/$defs/budgetId" }
-    },
-    "required_measurement_ids": {
-      "type": "array",
-      "uniqueItems": true,
-      "items": { "$ref": "#/$defs/measurementId" }
-    },
     "negative_controls": {
       "type": "array",
       "items": { "$ref": "#/$defs/catalogControl" }
@@ -145,6 +140,10 @@
       "type": "string",
       "pattern": "^MEAS-[A-Z0-9]+(?:-[A-Z0-9]+)*-[0-9]{3}$"
     },
+    "vectorSetId": {
+      "type": "string",
+      "pattern": "^VSET-[A-Z0-9]+(?:-[A-Z0-9]+)*-[0-9]{3}$"
+    },
     "obligationId": {
       "type": "string",
       "pattern": "^OBL-[A-Z0-9]+(?:-[A-Z0-9]+)*-[0-9]{3}$"
@@ -184,7 +183,7 @@
     "proofObligation": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["obligation_id", "requirement_ids", "assertion_ids", "proof_type", "support_cell_id", "artifact_inventory_ids", "make_target", "argv"],
+      "required": ["obligation_id", "requirement_ids", "assertion_ids", "proof_type", "support_cell_id", "artifact_inventory_ids", "performance_budget_ids", "required_measurement_ids", "required_vector_set_ids", "make_target", "argv", "fault_plan_id", "control_id"],
       "properties": {
         "obligation_id": { "$ref": "#/$defs/obligationId" },
         "requirement_ids": {
@@ -212,8 +211,77 @@
           "uniqueItems": true,
           "items": { "$ref": "#/$defs/artifactInventoryId" }
         },
+        "performance_budget_ids": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/budgetId" }
+        },
+        "required_measurement_ids": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/measurementId" }
+        },
+        "required_vector_set_ids": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/vectorSetId" }
+        },
         "make_target": { "$ref": "#/$defs/makeTarget" },
-        "argv": { "$ref": "#/$defs/canonicalMakeArgv" }
+        "argv": { "$ref": "#/$defs/canonicalMakeArgv" },
+        "fault_plan_id": {
+          "oneOf": [
+            { "$ref": "#/$defs/faultPlanId" },
+            { "type": "null" }
+          ]
+        },
+        "control_id": {
+          "oneOf": [
+            { "$ref": "#/$defs/controlId" },
+            { "type": "null" }
+          ]
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "proof_type": { "enum": ["fault-injection", "negative-control"] }
+            },
+            "required": ["proof_type"]
+          },
+          "then": {
+            "properties": {
+              "requirement_ids": { "minItems": 1, "maxItems": 1 },
+              "assertion_ids": { "minItems": 1, "maxItems": 1 },
+              "fault_plan_id": { "$ref": "#/$defs/faultPlanId" },
+              "control_id": { "$ref": "#/$defs/controlId" }
+            }
+          },
+          "else": {
+            "properties": {
+              "fault_plan_id": { "type": "null" },
+              "control_id": { "type": "null" }
+            }
+          }
+        }
+      ]
+    },
+    "ownership": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["scenario_id", "requirement_id", "proof_obligation_id", "assertion_id", "proof_type", "support_cell_id"],
+      "properties": {
+        "scenario_id": { "$ref": "#/$defs/scenarioId" },
+        "requirement_id": { "$ref": "#/$defs/requirementId" },
+        "proof_obligation_id": { "$ref": "#/$defs/obligationId" },
+        "assertion_id": { "$ref": "#/$defs/assertionId" },
+        "proof_type": { "$ref": "#/$defs/proofType" },
+        "support_cell_id": {
+          "oneOf": [
+            { "$ref": "#/$defs/supportCellId" },
+            { "type": "null" }
+          ]
+        }
       }
     },
     "makeTarget": {

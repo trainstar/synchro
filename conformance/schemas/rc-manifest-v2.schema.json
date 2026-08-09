@@ -363,7 +363,7 @@
         "schema_files": {
           "type": "object",
           "additionalProperties": false,
-          "required": ["requirements", "support_matrix", "scenario", "evidence", "rc_manifest", "fault_catalog", "artifact_inventory", "performance_budgets"],
+          "required": ["requirements", "support_matrix", "scenario", "evidence", "rc_manifest", "fault_catalog", "artifact_inventory", "performance_budgets", "vector_catalog"],
           "properties": {
             "requirements": { "allOf": [{ "$ref": "#/$defs/contractFile" }, { "properties": { "path": { "const": "conformance/schemas/requirements-v2.schema.json" } } }] },
             "support_matrix": { "allOf": [{ "$ref": "#/$defs/contractFile" }, { "properties": { "path": { "const": "conformance/schemas/support-matrix.schema.json" } } }] },
@@ -372,7 +372,8 @@
             "rc_manifest": { "allOf": [{ "$ref": "#/$defs/contractFile" }, { "properties": { "path": { "const": "conformance/schemas/rc-manifest-v2.schema.json" } } }] },
             "fault_catalog": { "allOf": [{ "$ref": "#/$defs/contractFile" }, { "properties": { "path": { "const": "conformance/schemas/fault-catalog-v1.schema.json" } } }] },
             "artifact_inventory": { "allOf": [{ "$ref": "#/$defs/contractFile" }, { "properties": { "path": { "const": "conformance/schemas/artifact-inventory-v1.schema.json" } } }] },
-            "performance_budgets": { "allOf": [{ "$ref": "#/$defs/contractFile" }, { "properties": { "path": { "const": "conformance/schemas/performance-budgets-v2.schema.json" } } }] }
+            "performance_budgets": { "allOf": [{ "$ref": "#/$defs/contractFile" }, { "properties": { "path": { "const": "conformance/schemas/performance-budgets-v2.schema.json" } } }] },
+            "vector_catalog": { "allOf": [{ "$ref": "#/$defs/contractFile" }, { "properties": { "path": { "const": "conformance/schemas/vector-catalog-v1.schema.json" } } }] }
           }
         }
       }
@@ -411,7 +412,10 @@
       "additionalProperties": false,
       "required": ["name", "version"],
       "properties": {
-        "name": { "type": "string", "minLength": 1 },
+        "name": {
+          "type": "string",
+          "enum": ["postgresql", "os", "rust", "pgrx", "ios", "xcode", "apple-sdk", "simulator-runtime", "swift", "macos", "android-api", "android-sdk", "emulator-image", "jdk", "kotlin", "gradle", "node", "yarn", "react", "react-native", "cocoapods"]
+        },
         "version": { "$ref": "#/$defs/exactVersion" }
       }
     },

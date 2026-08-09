@@ -74,6 +74,8 @@ Every evidence record must identify:
   and proof type
 - exact artifacts, artifact-inventory roles, and artifact hashes
 - exact OS, PostgreSQL, SDK, IDE, emulator or simulator, and toolchain
+- recorded environment names and exact versions only, never secrets, tokens,
+  credentials, private keys, or user-owned values
 - command, result, duration, logs, traces, and replay data
 - one typed trace attachment for every authored barrier, the exact pre-authored
   fault recipe when used, and the randomized seed when required
@@ -142,10 +144,16 @@ not compare opaque token bytes or implementation-specific internal order.
 Every scenario is an authored contract input with a stable scenario ID and:
 
 - normative references and requirement IDs
+- a closed ownership table enumerating every and only scenario, requirement,
+  proof-obligation, assertion, proof-type, and support-cell tuple
 - uniquely identified proof obligations with exact requirement and assertion
   IDs, proof type, one exact support cell or null for support-neutral proof,
-  exact artifact-inventory IDs, Make target, and the exact two-element canonical
-  argument vector
+  exact artifact-inventory IDs, per-obligation performance-budget IDs,
+  required-measurement IDs, required vector-set IDs, Make target, and the exact
+  two-element canonical argument vector, plus nullable fault-plan and control
+  IDs. All three per-obligation ID arrays are required, including when they are
+  empty. Fault-bearing obligations require both IDs; all other obligations
+  require null.
 - independent model setup, operations, and expected durable state
 - typed step transport and contract operation classes, with every HTTP step
   bound to one canonical contract case, exact status, stable error code or null,
@@ -158,8 +166,14 @@ Every scenario is an authored contract input with a stable scenario ID and:
   them
 - expected durable state, row contents, provenance, queue state, cursor state,
   rebuild state, readiness state, and checksum result
-- performance-budget and required-characterization-measurement IDs, including
-  explicit empty lists when unused
+- performance-budget and required-characterization-measurement IDs on each
+  proof obligation, including explicit empty lists when unused, plus required
+  vector-set IDs with the same rule
+
+Scenario normative references must include every anchor named by every scenario
+requirement. Additional scenario references are permitted only when their path
+is one of the 11 frozen behavioral contract files. Fault-catalog controls retain
+exact normative-reference equality with their singleton requirement.
 
 Expected results are calculated from the normative contract and independent
 model state. They are never captured from a running adapter, extension, client,
@@ -174,6 +188,10 @@ Each assertion uses a closed contract-predicate name with no free-form payload,
 and that predicate class must be compatible with its independent oracle. An
 arbitrary always-true predicate cannot be relabeled as a wire, state, artifact,
 performance, or negative-control proof.
+Every fault-injection and negative-control obligation owns exactly one
+requirement, exactly one assertion, and exactly one matching fault plan for that requirement.
+The negative-control obligation additionally resolves exactly one matching
+scenario control and exactly one matching single-requirement catalog control.
 Every fault plan binds one declared barrier, one single-requirement catalog
 control, the control's exact fault and injection recipe, and exactly the
 detection assertion set declared by that control. Scenario
@@ -194,12 +212,14 @@ target, or adapter-unit target. `reference-model` uses only the independently
 built conformance-runner artifact; `negative-control` also binds that runner and
 one or more explicit mutated subject artifacts. Evidence records the resolved
 subject artifact IDs, and they must exactly match the authored control. Evidence
-environment entries exactly equal the dimensions and exact versions frozen for
-the obligation's resolved support cell. Support-neutral evidence has no
-environment dimensions. Across all scenarios selected by an RC manifest, each
-requirement must have terminal passing evidence for every proof type listed by
-that requirement; splitting obligations among scenarios cannot omit a required
-proof type.
+environment entries exactly equal the finite dimension-name allowlist and exact
+versions frozen for the obligation's resolved support cell. Extra dimensions are
+invalid. Recorded environment values contain no secrets, tokens, credentials,
+private keys, or user-owned values. Support-neutral
+evidence has no environment dimensions. Across all scenarios selected by an RC
+manifest, each requirement must have terminal passing evidence for every proof
+type listed by that requirement; splitting obligations among scenarios cannot
+omit a required proof type.
 
 ## Required Proof Layers
 
@@ -637,11 +657,14 @@ Each request-producing scenario includes explicit budgets for every permitted
 request class and an exact zero budget for every forbidden or unexpected request
 class. Evidence records complete typed counts for connect, push, pull, rebuild
 page, schema fetch, and other requests, plus returned rebuild pages and outbound
-RPC hops; the verifier derives every budget value from those counters. A
-scenario must author proof obligations for every support cell named by each
-selected budget, and those obligations must contain the exact artifact set for
-that cell. Evidence from a subset of the declared cells or from a different
-artifact set does not satisfy the budget.
+RPC hops; the verifier derives every budget value from those counters. Every
+budget and required measurement is declared on a proof obligation, not merely
+on the scenario. For every catalog entry and every authorized support cell,
+exactly one obligation must declare the entry, use that cell, use its exact
+authorized artifacts, and own at least one performance-budget assertion.
+Non-declaring obligations must produce empty performance result arrays. Omitted
+declarations, cross-obligation borrowing, wrong support cells, duplicate
+ownership, and false-green negative-control evidence are rejected.
 
 No unapproved latency or throughput ceiling is invented for v0.3.0. Instead,
 the same manifest separately freezes required characterization measurements for
@@ -661,6 +684,16 @@ invalid boundaries. Missing samples, changed profiles or metrics, or absent
 typed measurement attachments fail the gate. The same exact artifacts and
 support-cell environments used for functional proof are used for release
 performance evidence.
+
+Cross-language vector evidence is a typed `vector_results` array. Each result
+binds one vector-set ID, its recorded SHA-256, one language from Go, Rust,
+Swift, or Kotlin, one realized artifact ID, a `vector-results` attachment, an
+outcome, and coherent executed, passed, and failed counts. Result set IDs must
+equal the current obligation's required vector-set IDs, every artifact must be
+an execution artifact, and every result must be promotion-passed. Phase 2
+defines the vector catalog schema and records the supplied vector-set hash, but
+does not resolve that hash against vector files on disk. Disk and catalog hash
+binding are deferred to Phase 3.
 
 ## Generated Inventory
 
