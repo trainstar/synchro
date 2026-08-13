@@ -1,0 +1,529 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://synchro.dev/conformance/schemas/rc-candidate-lock-v1.schema.json",
+  "title": "Synchro immutable pre-execution release candidate lock",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "$schema",
+    "schema_version",
+    "candidate_id",
+    "release_version",
+    "protocol_version",
+    "source_commit",
+    "runner_digest",
+    "created_at",
+    "generator",
+    "trusted_rerun_approvers",
+    "contract",
+    "scenarios",
+    "resolved_support_cells",
+    "artifacts",
+    "attestations"
+  ],
+  "properties": {
+    "$schema": { "const": "https://synchro.dev/conformance/schemas/rc-candidate-lock-v1.schema.json" },
+    "schema_version": { "const": 1 },
+    "candidate_id": { "$ref": "#/$defs/candidateId" },
+    "release_version": { "const": "0.3.0" },
+    "protocol_version": { "const": 3 },
+    "source_commit": { "$ref": "#/$defs/commitHash" },
+    "runner_digest": { "$ref": "#/$defs/sha256" },
+    "created_at": { "type": "string", "format": "date-time" },
+    "generator": { "$ref": "#/$defs/generator" },
+    "trusted_rerun_approvers": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": { "type": "string", "pattern": "^github:[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$" }
+    },
+    "contract": { "$ref": "#/$defs/contract" },
+    "scenarios": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/scenarioReference" }
+    },
+    "resolved_support_cells": {
+      "type": "array",
+      "minItems": 11,
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/resolvedSupportCell" }
+    },
+    "artifacts": {
+      "type": "array",
+      "minItems": 10,
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/artifact" }
+    },
+    "attestations": {
+      "type": "array",
+      "minItems": 20,
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/attestation" }
+    }
+  },
+  "$defs": {
+    "candidateId": {
+      "type": "string",
+      "pattern": "^RC-0\\.3\\.0-[0-9]{8}T[0-9]{6}Z-[a-f0-9]{7,64}$"
+    },
+    "scenarioId": {
+      "type": "string",
+      "pattern": "^SCN-[A-Z0-9]+(?:-[A-Z0-9]+)*-[0-9]{3}$"
+    },
+    "supportCellId": {
+      "type": "string",
+      "pattern": "^SUP-[A-Z0-9]+(?:-[A-Z0-9]+)*-[0-9]{3}$"
+    },
+    "artifactId": {
+      "type": "string",
+      "pattern": "^ART-[A-Z0-9]+(?:-[A-Z0-9]+)*-[0-9]{3}$"
+    },
+    "attestationId": {
+      "type": "string",
+      "pattern": "^ATTST-[A-Z0-9]+(?:-[A-Z0-9]+)*-[0-9]{3}$"
+    },
+    "commitHash": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{40}(?:[a-f0-9]{24})?$"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "relativePath": {
+      "type": "string",
+      "pattern": "^(?!/)(?!\\.(?:/|$))(?!.*\/\\.(?:/|$))(?!\\.\\.(?:/|$))(?!.*\/\\.\\.(?:/|$))(?!.*\\\\)[A-Za-z0-9._-]+(?:/[A-Za-z0-9._-]+)*$"
+    },
+    "exactVersion": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^[vV]?[0-9]+(?:\\.[0-9]+)*(?:\\+[0-9][0-9A-Za-z]*(?:[.-][0-9][0-9A-Za-z]*)*)?$",
+      "allOf": [
+        { "not": { "pattern": "^(?:[Cc]urrent-[Ss]table|[Cc]urrent|[Ll]atest)$" } },
+        { "not": { "pattern": "(?:[Cc][Uu][Rr][Rr][Ee][Nn][Tt]|[Ll][Aa][Tt][Ee][Ss][Tt]|[Ss][Tt][Aa][Bb][Ll][Ee]|[Nn][Ii][Gg][Hh][Tt][Ll][Yy]|[Ss][Nn][Aa][Pp][Ss][Hh][Oo][Tt]|[Hh][Ee][Aa][Dd]|[Mm][Aa][Ii][Nn]|[Mm][Aa][Ss][Tt][Ee][Rr]|[Dd][Ee][Vv]|[Cc][Aa][Nn][Aa][Rr][Yy]|[Nn][Ee][Xx][Tt]|[Tt][Rr][Uu][Nn][Kk]|[Pp][Rr][Ee][Vv][Ii][Ee][Ww]|[Ee][Dd][Gg][Ee]|[Rr][Oo][Ll][Ll][Ii][Nn][Gg])" } },
+        { "not": { "pattern": "(?:^|\\.)(?:x|X)(?:\\.|$)" } },
+        { "not": { "pattern": "[*<>=^~|,]" } },
+        { "not": { "pattern": "\\+$" } },
+        { "not": { "pattern": "\\s" } },
+        { "not": { "pattern": "^[0-9]+(?:\\.[0-9]+)*-[0-9]+(?:\\.[0-9]+)*$" } }
+      ]
+    },
+    "generator": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "version", "binary_sha256"],
+      "properties": {
+        "name": { "type": "string", "minLength": 1 },
+        "version": { "$ref": "#/$defs/exactVersion" },
+        "binary_sha256": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "contractFile": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "sha256"],
+      "properties": {
+        "path": { "$ref": "#/$defs/relativePath" },
+        "sha256": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "behavioralContractFile": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "sha256", "status"],
+      "properties": {
+        "path": { "$ref": "#/$defs/relativePath" },
+        "sha256": { "$ref": "#/$defs/sha256" },
+        "status": {
+          "oneOf": [
+            { "const": "Accepted" },
+            { "type": "null" }
+          ]
+        }
+      }
+    },
+    "contract": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "snapshot_sha256",
+        "requirements",
+        "support_matrix",
+        "behavioral_files",
+        "verification_inputs",
+        "schema_files"
+      ],
+      "properties": {
+        "snapshot_sha256": { "$ref": "#/$defs/sha256" },
+        "requirements": {
+          "allOf": [
+            { "$ref": "#/$defs/contractFile" },
+            { "properties": { "path": { "const": "conformance/requirements.json" } } }
+          ]
+        },
+        "support_matrix": {
+          "allOf": [
+            { "$ref": "#/$defs/contractFile" },
+            { "properties": { "path": { "const": "conformance/support-matrix.json" } } }
+          ]
+        },
+        "behavioral_files": {
+          "type": "array",
+          "minItems": 11,
+          "maxItems": 11,
+          "prefixItems": [
+            {
+              "allOf": [
+                { "$ref": "#/$defs/behavioralContractFile" },
+                {
+                  "properties": {
+                    "path": { "const": "docs/src/content/docs/spec/00-principles.mdx" },
+                    "status": { "type": "null" }
+                  }
+                }
+              ]
+            },
+            {
+              "allOf": [
+                { "$ref": "#/$defs/behavioralContractFile" },
+                {
+                  "properties": {
+                    "path": { "const": "docs/src/content/docs/spec/01-wire-protocol.mdx" },
+                    "status": { "type": "null" }
+                  }
+                }
+              ]
+            },
+            {
+              "allOf": [
+                { "$ref": "#/$defs/behavioralContractFile" },
+                {
+                  "properties": {
+                    "path": { "const": "docs/src/content/docs/spec/02-client-contract.mdx" },
+                    "status": { "type": "null" }
+                  }
+                }
+              ]
+            },
+            {
+              "allOf": [
+                { "$ref": "#/$defs/behavioralContractFile" },
+                {
+                  "properties": {
+                    "path": { "const": "docs/src/content/docs/spec/03-state-machines.mdx" },
+                    "status": { "type": "null" }
+                  }
+                }
+              ]
+            },
+            {
+              "allOf": [
+                { "$ref": "#/$defs/behavioralContractFile" },
+                {
+                  "properties": {
+                    "path": { "const": "docs/src/content/docs/spec/04-invariants.mdx" },
+                    "status": { "type": "null" }
+                  }
+                }
+              ]
+            },
+            {
+              "allOf": [
+                { "$ref": "#/$defs/behavioralContractFile" },
+                {
+                  "properties": {
+                    "path": { "const": "docs/src/content/docs/spec/05-schema-evolution.mdx" },
+                    "status": { "type": "null" }
+                  }
+                }
+              ]
+            },
+            {
+              "allOf": [
+                { "$ref": "#/$defs/behavioralContractFile" },
+                {
+                  "properties": {
+                    "path": { "const": "docs/src/content/docs/architecture/decisions/001-wal-change-stream.mdx" },
+                    "status": { "const": "Accepted" }
+                  }
+                }
+              ]
+            },
+            {
+              "allOf": [
+                { "$ref": "#/$defs/behavioralContractFile" },
+                {
+                  "properties": {
+                    "path": { "const": "docs/src/content/docs/architecture/decisions/002-mutation-idempotency-and-conflicts.mdx" },
+                    "status": { "const": "Accepted" }
+                  }
+                }
+              ]
+            },
+            {
+              "allOf": [
+                { "$ref": "#/$defs/behavioralContractFile" },
+                {
+                  "properties": {
+                    "path": { "const": "docs/src/content/docs/architecture/decisions/003-pull-cursor-and-rebuild.mdx" },
+                    "status": { "const": "Accepted" }
+                  }
+                }
+              ]
+            },
+            {
+              "allOf": [
+                { "$ref": "#/$defs/behavioralContractFile" },
+                {
+                  "properties": {
+                    "path": { "const": "docs/src/content/docs/architecture/decisions/004-membership-schema-and-retention.mdx" },
+                    "status": { "const": "Accepted" }
+                  }
+                }
+              ]
+            },
+            {
+              "allOf": [
+                { "$ref": "#/$defs/behavioralContractFile" },
+                {
+                  "properties": {
+                    "path": { "const": "docs/src/content/docs/architecture/decisions/005-integrity-authorization-and-seeds.mdx" },
+                    "status": { "const": "Accepted" }
+                  }
+                }
+              ]
+            }
+          ],
+          "items": false
+        },
+        "verification_inputs": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "scenario_catalog",
+            "vector_catalog",
+            "fault_catalog",
+            "performance_budgets",
+            "artifact_inventory"
+          ],
+          "properties": {
+            "scenario_catalog": {
+              "allOf": [
+                { "$ref": "#/$defs/contractFile" },
+                { "properties": { "path": { "const": "conformance/catalog.json" } } }
+              ]
+            },
+            "vector_catalog": {
+              "allOf": [
+                { "$ref": "#/$defs/contractFile" },
+                { "properties": { "path": { "const": "conformance/vectors/catalog.json" } } }
+              ]
+            },
+            "fault_catalog": {
+              "allOf": [
+                { "$ref": "#/$defs/contractFile" },
+                { "properties": { "path": { "const": "conformance/faults/catalog.json" } } }
+              ]
+            },
+            "performance_budgets": {
+              "allOf": [
+                { "$ref": "#/$defs/contractFile" },
+                { "properties": { "path": { "const": "conformance/performance/budgets.json" } } }
+              ]
+            },
+            "artifact_inventory": {
+              "allOf": [
+                { "$ref": "#/$defs/contractFile" },
+                { "properties": { "path": { "const": "conformance/artifacts/inventory.json" } } }
+              ]
+            }
+          }
+        },
+        "schema_files": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["requirements", "support_matrix", "scenario", "evidence", "rc_candidate_lock", "rc_manifest", "fault_catalog", "artifact_inventory", "performance_budgets", "vector_catalog"],
+          "properties": {
+            "requirements": { "allOf": [{ "$ref": "#/$defs/contractFile" }, { "properties": { "path": { "const": "conformance/schemas/requirements-v2.schema.json" } } }] },
+            "support_matrix": { "allOf": [{ "$ref": "#/$defs/contractFile" }, { "properties": { "path": { "const": "conformance/schemas/support-matrix.schema.json" } } }] },
+            "scenario": { "allOf": [{ "$ref": "#/$defs/contractFile" }, { "properties": { "path": { "const": "conformance/schemas/scenario-v2.schema.json" } } }] },
+            "evidence": { "allOf": [{ "$ref": "#/$defs/contractFile" }, { "properties": { "path": { "const": "conformance/schemas/evidence-v2.schema.json" } } }] },
+            "rc_candidate_lock": { "allOf": [{ "$ref": "#/$defs/contractFile" }, { "properties": { "path": { "const": "conformance/schemas/rc-candidate-lock-v1.schema.json" } } }] },
+            "rc_manifest": { "allOf": [{ "$ref": "#/$defs/contractFile" }, { "properties": { "path": { "const": "conformance/schemas/rc-manifest-v2.schema.json" } } }] },
+            "fault_catalog": { "allOf": [{ "$ref": "#/$defs/contractFile" }, { "properties": { "path": { "const": "conformance/schemas/fault-catalog-v1.schema.json" } } }] },
+            "artifact_inventory": { "allOf": [{ "$ref": "#/$defs/contractFile" }, { "properties": { "path": { "const": "conformance/schemas/artifact-inventory-v1.schema.json" } } }] },
+            "performance_budgets": { "allOf": [{ "$ref": "#/$defs/contractFile" }, { "properties": { "path": { "const": "conformance/schemas/performance-budgets-v2.schema.json" } } }] },
+            "vector_catalog": { "allOf": [{ "$ref": "#/$defs/contractFile" }, { "properties": { "path": { "const": "conformance/schemas/vector-catalog-v1.schema.json" } } }] }
+          }
+        }
+      }
+    },
+    "scenarioReference": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["scenario_id", "path", "sha256"],
+      "properties": {
+        "scenario_id": { "$ref": "#/$defs/scenarioId" },
+        "path": { "$ref": "#/$defs/relativePath" },
+        "sha256": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "resolvedDimension": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "version"],
+      "properties": {
+        "name": {
+          "type": "string",
+          "enum": ["postgresql", "os", "rust", "pgrx", "ios", "xcode", "apple-sdk", "simulator-runtime", "swift", "macos", "android-api", "android-sdk", "emulator-image", "jdk", "kotlin", "gradle", "node", "yarn", "react", "react-native", "cocoapods"]
+        },
+        "version": { "$ref": "#/$defs/exactVersion" }
+      }
+    },
+    "resolvedSupportCell": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["support_cell_id", "dimensions"],
+      "properties": {
+        "support_cell_id": { "$ref": "#/$defs/supportCellId" },
+        "dimensions": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/resolvedDimension" }
+        }
+      }
+    },
+    "artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "inventory_id", "release_version", "package_version", "payloads"],
+      "properties": {
+        "id": { "$ref": "#/$defs/artifactId" },
+        "inventory_id": { "type": "string", "pattern": "^ARTDEF-[A-Z0-9]+(?:-[A-Z0-9]+)*-[0-9]{3}$" },
+        "release_version": { "const": "0.3.0" },
+        "package_version": { "const": "0.3.0" },
+        "payloads": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["path", "media_type", "size_bytes", "sha256"],
+            "properties": {
+              "path": { "$ref": "#/$defs/relativePath" },
+              "media_type": { "type": "string", "minLength": 1 },
+              "size_bytes": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 },
+              "sha256": { "$ref": "#/$defs/sha256" }
+            }
+          }
+        }
+      }
+    },
+    "attestation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "kind", "format", "media_type", "subject_artifact_id", "subject_payloads", "path", "sha256", "sigstore_verification"],
+      "properties": {
+        "id": { "$ref": "#/$defs/attestationId" },
+        "kind": { "type": "string", "enum": ["sbom", "provenance"] },
+        "format": {
+          "type": "string",
+          "enum": ["spdx-json", "cyclonedx-json", "slsa-provenance-v1"]
+        },
+        "media_type": {
+          "type": "string",
+          "enum": [
+            "application/spdx+json",
+            "application/vnd.cyclonedx+json",
+            "application/vnd.in-toto+json"
+          ]
+        },
+        "subject_artifact_id": { "$ref": "#/$defs/artifactId" },
+        "subject_payloads": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/attestationSubject" }
+        },
+        "path": { "$ref": "#/$defs/relativePath" },
+        "sha256": { "$ref": "#/$defs/sha256" },
+        "sigstore_verification": { "$ref": "#/$defs/sigstoreVerification" }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": { "kind": { "const": "provenance" } },
+            "required": ["kind"]
+          },
+          "then": {
+            "properties": {
+              "format": { "const": "slsa-provenance-v1" },
+              "media_type": { "const": "application/vnd.in-toto+json" }
+            }
+          },
+          "else": {
+            "oneOf": [
+              {
+                "properties": {
+                  "format": { "const": "spdx-json" },
+                  "media_type": { "const": "application/spdx+json" }
+                }
+              },
+              {
+                "properties": {
+                  "format": { "const": "cyclonedx-json" },
+                  "media_type": { "const": "application/vnd.cyclonedx+json" }
+                }
+              }
+            ]
+          }
+        }
+      ]
+    },
+    "attestationSubject": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "sha256"],
+      "properties": {
+        "path": { "$ref": "#/$defs/relativePath" },
+        "sha256": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "sigstoreVerification": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["bundle_path", "bundle_media_type", "bundle_sha256", "signed_attestation_sha256", "signed_subjects", "certificate_issuer", "certificate_identity", "verifier", "verified_at", "verification_uri"],
+      "properties": {
+        "bundle_path": { "$ref": "#/$defs/relativePath" },
+        "bundle_media_type": { "const": "application/vnd.dev.sigstore.bundle+json;version=0.3" },
+        "bundle_sha256": { "$ref": "#/$defs/sha256" },
+        "signed_attestation_sha256": { "$ref": "#/$defs/sha256" },
+        "signed_subjects": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/attestationSubject" }
+        },
+        "certificate_issuer": { "const": "https://token.actions.githubusercontent.com" },
+        "certificate_identity": { "const": "https://github.com/trainstar/synchro/.github/workflows/release.yml@refs/tags/v0.3.0" },
+        "verifier": { "$ref": "#/$defs/sigstoreVerifier" },
+        "verified_at": { "type": "string", "format": "date-time" },
+        "verification_uri": { "type": "string", "pattern": "^https://search\\.sigstore\\.dev/\\?logIndex=[0-9]+$" }
+      }
+    },
+    "sigstoreVerifier": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "version", "binary_sha256"],
+      "properties": {
+        "name": { "const": "cosign" },
+        "version": { "$ref": "#/$defs/exactVersion" },
+        "binary_sha256": { "$ref": "#/$defs/sha256" }
+      }
+    }
+  }
+}

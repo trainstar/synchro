@@ -1,0 +1,1349 @@
+{
+  "$schema": "https://synchro.dev/conformance/schemas/scenario-v2.schema.json",
+  "schema_version": 2,
+  "id": "SCN-PULL-DIVERGENT-CHECKPOINTS-001",
+  "title": "Divergent per-scope pull checkpoints",
+  "description": "Two finite pages resolve complete per-scope streams, preserve typed scope-inclusive ordering, and atomically apply divergent cursors.",
+  "requirement_ids": [
+    "SYNC-PULL-001",
+    "SYNC-PULL-002"
+  ],
+  "normative_references": [
+    {
+      "path": "docs/src/content/docs/spec/04-invariants.mdx",
+      "anchor": "#per-scope-pull-eligibility"
+    },
+    {
+      "path": "docs/src/content/docs/spec/04-invariants.mdx",
+      "anchor": "#deterministic-cross-scope-pull-merge"
+    }
+  ],
+  "proof_types": [
+    "reference-model",
+    "server-black-box",
+    "negative-control"
+  ],
+  "proof_obligations": [
+    {
+      "obligation_id": "OBL-PULL-DIVERGENT-RM-001",
+      "requirement_ids": [
+        "SYNC-PULL-001",
+        "SYNC-PULL-002"
+      ],
+      "assertion_ids": [
+        "ASSERT-PULL-DIVERGENT-SEMANTIC-001"
+      ],
+      "proof_type": "reference-model",
+      "support_cell_id": null,
+      "artifact_inventory_ids": [
+        "ARTDEF-CONFORMANCE-RUNNER-001"
+      ],
+      "performance_budget_ids": [],
+      "required_measurement_ids": [],
+      "required_vector_set_ids": [],
+      "make_target": "test-conformance",
+      "argv": [
+        "make",
+        "test-conformance"
+      ],
+      "fault_plan_id": null,
+      "control_id": null
+    },
+    {
+      "obligation_id": "OBL-PULL-DIVERGENT-PG-001",
+      "requirement_ids": [
+        "SYNC-PULL-001",
+        "SYNC-PULL-002"
+      ],
+      "assertion_ids": [
+        "ASSERT-PULL-DIVERGENT-SEMANTIC-001"
+      ],
+      "proof_type": "server-black-box",
+      "support_cell_id": "SUP-PG-018",
+      "artifact_inventory_ids": [
+        "ARTDEF-PG-EXTENSION-001",
+        "ARTDEF-ADAPTER-001"
+      ],
+      "performance_budget_ids": [],
+      "required_measurement_ids": [],
+      "required_vector_set_ids": [],
+      "make_target": "test-blackbox",
+      "argv": [
+        "make",
+        "test-blackbox"
+      ],
+      "fault_plan_id": null,
+      "control_id": null
+    },
+    {
+      "obligation_id": "OBL-PULL-DIVERGENT-PULL-001-CONTROL-001",
+      "requirement_ids": [
+        "SYNC-PULL-001"
+      ],
+      "assertion_ids": [
+        "ASSERT-PULL-DIVERGENT-PULL-001-CONTROL-001"
+      ],
+      "proof_type": "negative-control",
+      "support_cell_id": null,
+      "artifact_inventory_ids": [
+        "ARTDEF-CONFORMANCE-RUNNER-001",
+        "ARTDEF-PG-EXTENSION-001"
+      ],
+      "performance_budget_ids": [],
+      "required_measurement_ids": [],
+      "required_vector_set_ids": [],
+      "make_target": "test-conformance",
+      "argv": [
+        "make",
+        "test-conformance"
+      ],
+      "fault_plan_id": "FPL-PULL-DIVERGENT-PULL-001-001",
+      "control_id": "CTRL-PULL-001"
+    },
+    {
+      "obligation_id": "OBL-PULL-DIVERGENT-PULL-002-CONTROL-001",
+      "requirement_ids": [
+        "SYNC-PULL-002"
+      ],
+      "assertion_ids": [
+        "ASSERT-PULL-DIVERGENT-PULL-002-CONTROL-001"
+      ],
+      "proof_type": "negative-control",
+      "support_cell_id": null,
+      "artifact_inventory_ids": [
+        "ARTDEF-CONFORMANCE-RUNNER-001",
+        "ARTDEF-PG-EXTENSION-001"
+      ],
+      "performance_budget_ids": [],
+      "required_measurement_ids": [],
+      "required_vector_set_ids": [],
+      "make_target": "test-conformance",
+      "argv": [
+        "make",
+        "test-conformance"
+      ],
+      "fault_plan_id": "FPL-PULL-DIVERGENT-PULL-002-001",
+      "control_id": "CTRL-PULL-002"
+    }
+  ],
+  "ownership": [
+    {
+      "scenario_id": "SCN-PULL-DIVERGENT-CHECKPOINTS-001",
+      "requirement_id": "SYNC-PULL-001",
+      "proof_obligation_id": "OBL-PULL-DIVERGENT-RM-001",
+      "assertion_id": "ASSERT-PULL-DIVERGENT-SEMANTIC-001",
+      "proof_type": "reference-model",
+      "support_cell_id": null
+    },
+    {
+      "scenario_id": "SCN-PULL-DIVERGENT-CHECKPOINTS-001",
+      "requirement_id": "SYNC-PULL-002",
+      "proof_obligation_id": "OBL-PULL-DIVERGENT-RM-001",
+      "assertion_id": "ASSERT-PULL-DIVERGENT-SEMANTIC-001",
+      "proof_type": "reference-model",
+      "support_cell_id": null
+    },
+    {
+      "scenario_id": "SCN-PULL-DIVERGENT-CHECKPOINTS-001",
+      "requirement_id": "SYNC-PULL-001",
+      "proof_obligation_id": "OBL-PULL-DIVERGENT-PG-001",
+      "assertion_id": "ASSERT-PULL-DIVERGENT-SEMANTIC-001",
+      "proof_type": "server-black-box",
+      "support_cell_id": "SUP-PG-018"
+    },
+    {
+      "scenario_id": "SCN-PULL-DIVERGENT-CHECKPOINTS-001",
+      "requirement_id": "SYNC-PULL-002",
+      "proof_obligation_id": "OBL-PULL-DIVERGENT-PG-001",
+      "assertion_id": "ASSERT-PULL-DIVERGENT-SEMANTIC-001",
+      "proof_type": "server-black-box",
+      "support_cell_id": "SUP-PG-018"
+    },
+    {
+      "scenario_id": "SCN-PULL-DIVERGENT-CHECKPOINTS-001",
+      "requirement_id": "SYNC-PULL-001",
+      "proof_obligation_id": "OBL-PULL-DIVERGENT-PULL-001-CONTROL-001",
+      "assertion_id": "ASSERT-PULL-DIVERGENT-PULL-001-CONTROL-001",
+      "proof_type": "negative-control",
+      "support_cell_id": null
+    },
+    {
+      "scenario_id": "SCN-PULL-DIVERGENT-CHECKPOINTS-001",
+      "requirement_id": "SYNC-PULL-002",
+      "proof_obligation_id": "OBL-PULL-DIVERGENT-PULL-002-CONTROL-001",
+      "assertion_id": "ASSERT-PULL-DIVERGENT-PULL-002-CONTROL-001",
+      "proof_type": "negative-control",
+      "support_cell_id": null
+    }
+  ],
+  "model": {
+    "setup": [
+      {
+        "contract_operation": "model",
+        "name": "install-current-contract",
+        "payload": {
+          "installation": {
+            "installed": true,
+            "schema_name": "synchro",
+            "extension_version": "0.3.0",
+            "protocol_version": 3,
+            "minimum_client_runtime": 3,
+            "stale_client_interval_milliseconds": 3600000,
+            "endpoints": [
+              "connect",
+              "push",
+              "pull",
+              "rebuild"
+            ],
+            "capabilities": [
+              {
+                "capability_id": "protocol-3",
+                "enabled": true
+              }
+            ]
+          },
+          "initial_schema": {
+            "schema": {
+              "version": 1,
+              "hash": "07904a21452931ca3c189218ad44ad9b7c45c888dff6156e5ac669560025f17b"
+            },
+            "body": "{\"compatibility_floor\":1,\"parent_schema\":null,\"schema_hash\":\"07904a21452931ca3c189218ad44ad9b7c45c888dff6156e5ac669560025f17b\",\"schema_version\":1,\"tables\":[{\"composition\":\"multi_scope\",\"fields\":[{\"field_id\":\"id\",\"name\":\"id\",\"nullable\":false,\"type\":\"string\",\"writable\":false},{\"field_id\":\"value\",\"name\":\"value\",\"nullable\":false,\"type\":\"string\",\"writable\":true}],\"indexes\":[{\"field_ids\":[\"id\"],\"index_id\":\"items-a-pk\",\"name\":\"items_a_pk\",\"unique\":true}],\"lifecycle\":{\"created_at_field_id\":null,\"deleted_at_field_id\":null,\"updated_at_field_id\":null},\"name\":\"items_a\",\"primary_key_field_id\":\"id\",\"relation_id\":\"public.items_a\",\"table_id\":\"items-a\"},{\"composition\":\"multi_scope\",\"fields\":[{\"field_id\":\"id\",\"name\":\"id\",\"nullable\":false,\"type\":\"string\",\"writable\":false},{\"field_id\":\"value\",\"name\":\"value\",\"nullable\":false,\"type\":\"string\",\"writable\":true}],\"indexes\":[{\"field_ids\":[\"id\"],\"index_id\":\"items-b-pk\",\"name\":\"items_b_pk\",\"unique\":true}],\"lifecycle\":{\"created_at_field_id\":null,\"deleted_at_field_id\":null,\"updated_at_field_id\":null},\"name\":\"items_b\",\"primary_key_field_id\":\"id\",\"relation_id\":\"public.items_b\",\"table_id\":\"items-b\"}],\"transition_class\":\"initial\"}",
+            "transition_class": "initial",
+            "compatibility_floor": 1,
+            "tables": [
+              {
+                "table_id": "items-a",
+                "relation_id": "public.items_a",
+                "name": "items_a",
+                "composition": "multi_scope",
+                "primary_key_field_id": "id",
+                "created_at_field_id": null,
+                "updated_at_field_id": null,
+                "deleted_at_field_id": null,
+                "fields": [
+                  {
+                    "field_id": "id",
+                    "name": "id",
+                    "type": "string",
+                    "primary_key": true,
+                    "nullable": false,
+                    "writable": false,
+                    "decimal_precision": null,
+                    "decimal_scale": null,
+                    "default_wire_json": null
+                  },
+                  {
+                    "field_id": "value",
+                    "name": "value",
+                    "type": "string",
+                    "primary_key": false,
+                    "nullable": false,
+                    "writable": true,
+                    "decimal_precision": null,
+                    "decimal_scale": null,
+                    "default_wire_json": "\"\""
+                  }
+                ],
+                "indexes": [
+                  {
+                    "index_id": "items-a-pk",
+                    "name": "items_a_pk",
+                    "field_ids": [
+                      "id"
+                    ],
+                    "unique": true
+                  }
+                ]
+              },
+              {
+                "table_id": "items-b",
+                "relation_id": "public.items_b",
+                "name": "items_b",
+                "composition": "multi_scope",
+                "primary_key_field_id": "id",
+                "created_at_field_id": null,
+                "updated_at_field_id": null,
+                "deleted_at_field_id": null,
+                "fields": [
+                  {
+                    "field_id": "id",
+                    "name": "id",
+                    "type": "string",
+                    "primary_key": true,
+                    "nullable": false,
+                    "writable": false,
+                    "decimal_precision": null,
+                    "decimal_scale": null,
+                    "default_wire_json": null
+                  },
+                  {
+                    "field_id": "value",
+                    "name": "value",
+                    "type": "string",
+                    "primary_key": false,
+                    "nullable": false,
+                    "writable": true,
+                    "decimal_precision": null,
+                    "decimal_scale": null,
+                    "default_wire_json": "\"\""
+                  }
+                ],
+                "indexes": [
+                  {
+                    "index_id": "items-b-pk",
+                    "name": "items_b_pk",
+                    "field_ids": [
+                      "id"
+                    ],
+                    "unique": true
+                  }
+                ]
+              }
+            ],
+            "affected_scopes": []
+          },
+          "initial_registry": {
+            "registry_generation": 1,
+            "relations": [
+              {
+                "relation": "public.items_a",
+                "registration_kind": "synced",
+                "table_id": "items-a",
+                "physical": {
+                  "schema": "public",
+                  "name": "items_a",
+                  "oid": 101,
+                  "replica_identity": "default"
+                },
+                "primary_key_field_id": "id",
+                "primary_key_physical_column": "id",
+                "primary_key_portable_type": "string",
+                "capture_key_field_ids": [],
+                "captured_field_ids": [
+                  "id",
+                  "value"
+                ],
+                "membership_function": "synchro.scope_items_a",
+                "positive_fanout_bound": 8,
+                "dependency_impact_function": null,
+                "dependency_captured_field_ids": [],
+                "positive_dependency_row_bound": null
+              },
+              {
+                "relation": "public.items_b",
+                "registration_kind": "synced",
+                "table_id": "items-b",
+                "physical": {
+                  "schema": "public",
+                  "name": "items_b",
+                  "oid": 102,
+                  "replica_identity": "default"
+                },
+                "primary_key_field_id": "id",
+                "primary_key_physical_column": "id",
+                "primary_key_portable_type": "string",
+                "capture_key_field_ids": [],
+                "captured_field_ids": [
+                  "id",
+                  "value"
+                ],
+                "membership_function": "synchro.scope_items_b",
+                "positive_fanout_bound": 8,
+                "dependency_impact_function": null,
+                "dependency_captured_field_ids": [],
+                "positive_dependency_row_bound": null
+              }
+            ],
+            "capture_dependencies": [],
+            "scope_rules": [
+              {
+                "scope_rule_id": "scope-items-a-001",
+                "relation": "public.items_a",
+                "membership_function": "synchro.scope_items_a",
+                "positive_fanout_bound": 8,
+                "evaluations": [
+                  {
+                    "row": {
+                      "canonical_identity_bytes": "typed-string:row-a",
+                      "table_id": "items-a",
+                      "primary_key_field_id": "id",
+                      "portable_type": "string",
+                      "canonical_wire_json": "\"row-a\""
+                    },
+                    "scopes": [
+                      "scope-a"
+                    ]
+                  },
+                  {
+                    "row": {
+                      "canonical_identity_bytes": "typed-string:row-b",
+                      "table_id": "items-a",
+                      "primary_key_field_id": "id",
+                      "portable_type": "string",
+                      "canonical_wire_json": "\"row-b\""
+                    },
+                    "scopes": [
+                      "scope-b"
+                    ]
+                  }
+                ]
+              },
+              {
+                "scope_rule_id": "scope-items-b-001",
+                "relation": "public.items_b",
+                "membership_function": "synchro.scope_items_b",
+                "positive_fanout_bound": 8,
+                "evaluations": [
+                  {
+                    "row": {
+                      "canonical_identity_bytes": "typed-string:row-a",
+                      "table_id": "items-b",
+                      "primary_key_field_id": "id",
+                      "portable_type": "string",
+                      "canonical_wire_json": "\"row-a\""
+                    },
+                    "scopes": [
+                      "scope-a"
+                    ]
+                  }
+                ]
+              }
+            ],
+            "dependency_impacts": []
+          },
+          "stream": {
+            "stream_generation": "stream-1",
+            "database": "synchro",
+            "worker_id": "worker-1",
+            "slot_id": "slot-1"
+          },
+          "empty_scopes": [
+            {
+              "scope_id": "scope-a",
+              "membership_generation": 1,
+              "retention_generation": 1
+            },
+            {
+              "scope_id": "scope-b",
+              "membership_generation": 1,
+              "retention_generation": 1
+            }
+          ],
+          "clients": [
+            {
+              "user_id": "user-a",
+              "client_id": "client-a",
+              "client_generation": 1,
+              "scope_set_version": 1,
+              "accepted_write_epoch": 0,
+              "last_cursor_acknowledged_at": null,
+              "assigned_scope_ids": [
+                "scope-a",
+                "scope-b"
+              ],
+              "local_schema": {
+                "version": 1,
+                "hash": "07904a21452931ca3c189218ad44ad9b7c45c888dff6156e5ac669560025f17b"
+              },
+              "local_lifecycle": "local_ready"
+            }
+          ],
+          "write_policies": [
+            {
+              "user_id": "user-a",
+              "table_id": "items-a",
+              "allowed": true
+            },
+            {
+              "user_id": "user-a",
+              "table_id": "items-b",
+              "allowed": true
+            }
+          ],
+          "configured_limits": {
+            "max_scope_fanout": 8,
+            "max_impact_rows": 1000,
+            "pull_maximum": 1000,
+            "rebuild_maximum": 1000,
+            "compaction_batch_maximum": 10000,
+            "backfill_batch_maximum": 1000
+          }
+        }
+      }
+    ],
+    "expected_state": [
+      {
+        "id": "EXPECT-PULL-DIVERGENT-SEMANTIC-001",
+        "predicate": {
+          "contract_predicate": "state-equality",
+          "name": "state-equals-authored-model",
+          "payload": {}
+        },
+        "state_facts": {
+          "clients": [
+            {
+              "user_id": "user-a",
+              "client_id": "client-a",
+              "row_count": 3,
+              "provenance_count": 3,
+              "checkpoint_count": 2,
+              "provenance": [
+                {
+                  "table_id": "items-a",
+                  "canonical_wire_json": "\"row-a\"",
+                  "scopes": ["scope-a"],
+                  "version": "a-v2"
+                },
+                {
+                  "table_id": "items-b",
+                  "canonical_wire_json": "\"row-a\"",
+                  "scopes": ["scope-a"],
+                  "version": "collision-v1"
+                },
+                {
+                  "table_id": "items-a",
+                  "canonical_wire_json": "\"row-b\"",
+                  "scopes": ["scope-b"],
+                  "version": "b-v1"
+                }
+              ],
+              "checkpoints": [
+                {
+                  "scope_id": "scope-a",
+                  "has_cursor": true,
+                  "has_checksum": true,
+                  "verified": true
+                },
+                {
+                  "scope_id": "scope-b",
+                  "has_cursor": true,
+                  "has_checksum": true,
+                  "verified": true
+                }
+              ]
+            }
+          ]
+        }
+      },
+      {
+        "id": "EXPECT-PULL-DIVERGENT-WIRE-001",
+        "predicate": {
+          "contract_predicate": "wire-outcome",
+          "name": "canonical-wire-outcome",
+          "payload": {}
+        }
+      },
+      {
+        "id": "EXPECT-PULL-DIVERGENT-PULL-001-CONTROL-001",
+        "predicate": {
+          "contract_predicate": "negative-control-detection",
+          "name": "negative-control-detected",
+          "payload": {}
+        }
+      },
+      {
+        "id": "EXPECT-PULL-DIVERGENT-PULL-002-CONTROL-001",
+        "predicate": {
+          "contract_predicate": "negative-control-detection",
+          "name": "negative-control-detected",
+          "payload": {}
+        }
+      }
+    ]
+  },
+  "barrier_plan": {
+    "barriers": [
+      {
+        "id": "BAR-PULL-DIVERGENT-PULL-001-CONTROL-001",
+        "name": "Before per-scope eligibility",
+        "release_order": 1,
+        "participants": [
+          "runner",
+          "pull-handler"
+        ]
+      },
+      {
+        "id": "BAR-PULL-DIVERGENT-PULL-002-CONTROL-001",
+        "name": "Before cross-scope merge",
+        "release_order": 2,
+        "participants": [
+          "runner",
+          "pull-handler"
+        ]
+      }
+    ]
+  },
+  "fault_plans": [
+    {
+      "id": "FPL-PULL-DIVERGENT-PULL-001-001",
+      "requirement_id": "SYNC-PULL-001",
+      "fault_id": "FAULT-PULL-001",
+      "control_id": "CTRL-PULL-001",
+      "barrier_id": "BAR-PULL-DIVERGENT-PULL-001-CONTROL-001",
+      "expected_assertion_ids": [
+        "ASSERT-PULL-DIVERGENT-PULL-001-CONTROL-001"
+      ],
+      "injection": {
+        "mechanism": "source-mutant",
+        "target": "pull candidate selection and global page limit",
+        "operator": "replace",
+        "parameters": {
+          "scenario": "give two valid scopes eligible candidates where one has more raw rows",
+          "defect": "apply the global limit before complete per-scope resolution and hide the other scope candidate"
+        }
+      }
+    },
+    {
+      "id": "FPL-PULL-DIVERGENT-PULL-002-001",
+      "requirement_id": "SYNC-PULL-002",
+      "fault_id": "FAULT-PULL-002",
+      "control_id": "CTRL-PULL-002",
+      "barrier_id": "BAR-PULL-DIVERGENT-PULL-002-CONTROL-001",
+      "expected_assertion_ids": [
+        "ASSERT-PULL-DIVERGENT-PULL-002-CONTROL-001"
+      ],
+      "injection": {
+        "mechanism": "source-mutant",
+        "target": "cross-scope pull merge comparator",
+        "operator": "reorder",
+        "parameters": {
+          "scenario": "merge fixed typed stream heads at a finite page boundary",
+          "defect": "use lexical or unstable ordering or compute has_more without every remaining stream head"
+        }
+      }
+    }
+  ],
+  "replay": {
+    "mode": "deterministic",
+    "seed_required": false,
+    "barrier_trace_required": true
+  },
+  "negative_controls": [
+    {
+      "control_id": "CTRL-PULL-001",
+      "requirement_id": "SYNC-PULL-001",
+      "fault_id": "FAULT-PULL-001",
+      "subject_artifact_inventory_ids": [
+        "ARTDEF-PG-EXTENSION-001"
+      ],
+      "detected_by": [
+        "ASSERT-PULL-DIVERGENT-PULL-001-CONTROL-001"
+      ]
+    },
+    {
+      "control_id": "CTRL-PULL-002",
+      "requirement_id": "SYNC-PULL-002",
+      "fault_id": "FAULT-PULL-002",
+      "subject_artifact_inventory_ids": [
+        "ARTDEF-PG-EXTENSION-001"
+      ],
+      "detected_by": [
+        "ASSERT-PULL-DIVERGENT-PULL-002-CONTROL-001"
+      ]
+    }
+  ],
+  "steps": [
+    {
+      "id": "STEP-PULL-DIVERGENT-REBUILD-A-BEGIN-001",
+      "phase": "setup",
+      "transport": "local",
+      "description": "Begin an empty scope A rebuild that can issue a lawful generation-start cursor.",
+      "operation": {
+        "contract_operation": "local",
+        "name": "begin-rebuild",
+        "payload": {
+          "user_id": "user-a",
+          "client_id": "client-a",
+          "client_generation": 1,
+          "schema": {
+            "version": 1,
+            "hash": "07904a21452931ca3c189218ad44ad9b7c45c888dff6156e5ac669560025f17b"
+          },
+          "scope_id": "scope-a",
+          "rebuild_id": "00000000-0000-4000-8000-0000000000a1",
+          "limit": 2
+        }
+      },
+      "expected_outcome": {
+        "disposition": "success"
+      }
+    },
+    {
+      "id": "STEP-PULL-DIVERGENT-REBUILD-A-REQUEST-001",
+      "phase": "setup",
+      "transport": "http",
+      "description": "Request the terminal empty scope A rebuild page at the generation-start boundary.",
+      "operation": {
+        "contract_operation": "rebuild",
+        "name": "request-page",
+        "payload": {
+          "user_id": "user-a",
+          "client_id": "client-a",
+          "client_generation": 1,
+          "schema": {
+            "version": 1,
+            "hash": "07904a21452931ca3c189218ad44ad9b7c45c888dff6156e5ac669560025f17b"
+          },
+          "scope_id": "scope-a",
+          "rebuild_id": "00000000-0000-4000-8000-0000000000a1",
+          "cursor_source": "none",
+          "limit": 2
+        }
+      },
+      "expected_outcome": {
+        "disposition": "success"
+      }
+    },
+    {
+      "id": "STEP-PULL-DIVERGENT-REBUILD-A-APPLY-001",
+      "phase": "setup",
+      "transport": "local",
+      "description": "Apply the terminal empty scope A page without a continuation token.",
+      "operation": {
+        "contract_operation": "local",
+        "name": "apply-rebuild-page",
+        "payload": {
+          "user_id": "user-a",
+          "client_id": "client-a",
+          "scope_id": "scope-a",
+          "rebuild_id": "00000000-0000-4000-8000-0000000000a1",
+          "page_ordinal": 1,
+          "request_token_source": "none"
+        }
+      },
+      "expected_outcome": {
+        "disposition": "success"
+      }
+    },
+    {
+      "id": "STEP-PULL-DIVERGENT-REBUILD-A-FINALIZE-001",
+      "phase": "setup",
+      "transport": "local",
+      "description": "Verify the empty scope A digest and install its generation-start cursor atomically.",
+      "operation": {
+        "contract_operation": "local",
+        "name": "finalize-rebuild",
+        "payload": {
+          "user_id": "user-a",
+          "client_id": "client-a",
+          "scope_id": "scope-a",
+          "rebuild_id": "00000000-0000-4000-8000-0000000000a1"
+        }
+      },
+      "expected_outcome": {
+        "disposition": "success"
+      }
+    },
+    {
+      "id": "STEP-PULL-DIVERGENT-REBUILD-B-BEGIN-001",
+      "phase": "setup",
+      "transport": "local",
+      "description": "Begin an empty scope B rebuild that can issue a lawful generation-start cursor.",
+      "operation": {
+        "contract_operation": "local",
+        "name": "begin-rebuild",
+        "payload": {
+          "user_id": "user-a",
+          "client_id": "client-a",
+          "client_generation": 1,
+          "schema": {
+            "version": 1,
+            "hash": "07904a21452931ca3c189218ad44ad9b7c45c888dff6156e5ac669560025f17b"
+          },
+          "scope_id": "scope-b",
+          "rebuild_id": "00000000-0000-4000-8000-0000000000b2",
+          "limit": 2
+        }
+      },
+      "expected_outcome": {
+        "disposition": "success"
+      }
+    },
+    {
+      "id": "STEP-PULL-DIVERGENT-REBUILD-B-REQUEST-001",
+      "phase": "setup",
+      "transport": "http",
+      "description": "Request the terminal empty scope B rebuild page at the generation-start boundary.",
+      "operation": {
+        "contract_operation": "rebuild",
+        "name": "request-page",
+        "payload": {
+          "user_id": "user-a",
+          "client_id": "client-a",
+          "client_generation": 1,
+          "schema": {
+            "version": 1,
+            "hash": "07904a21452931ca3c189218ad44ad9b7c45c888dff6156e5ac669560025f17b"
+          },
+          "scope_id": "scope-b",
+          "rebuild_id": "00000000-0000-4000-8000-0000000000b2",
+          "cursor_source": "none",
+          "limit": 2
+        }
+      },
+      "expected_outcome": {
+        "disposition": "success"
+      }
+    },
+    {
+      "id": "STEP-PULL-DIVERGENT-REBUILD-B-APPLY-001",
+      "phase": "setup",
+      "transport": "local",
+      "description": "Apply the terminal empty scope B page without a continuation token.",
+      "operation": {
+        "contract_operation": "local",
+        "name": "apply-rebuild-page",
+        "payload": {
+          "user_id": "user-a",
+          "client_id": "client-a",
+          "scope_id": "scope-b",
+          "rebuild_id": "00000000-0000-4000-8000-0000000000b2",
+          "page_ordinal": 1,
+          "request_token_source": "none"
+        }
+      },
+      "expected_outcome": {
+        "disposition": "success"
+      }
+    },
+    {
+      "id": "STEP-PULL-DIVERGENT-REBUILD-B-FINALIZE-001",
+      "phase": "setup",
+      "transport": "local",
+      "description": "Verify the empty scope B digest and install its generation-start cursor atomically.",
+      "operation": {
+        "contract_operation": "local",
+        "name": "finalize-rebuild",
+        "payload": {
+          "user_id": "user-a",
+          "client_id": "client-a",
+          "scope_id": "scope-b",
+          "rebuild_id": "00000000-0000-4000-8000-0000000000b2"
+        }
+      },
+      "expected_outcome": {
+        "disposition": "success"
+      }
+    },
+    {
+      "id": "STEP-PULL-DIVERGENT-COMMIT-002-001",
+      "phase": "setup",
+      "transport": "model",
+      "description": "Commit the scope A row-a insertion at source position (2,1).",
+      "operation": {
+        "contract_operation": "model",
+        "name": "commit-source-transaction",
+        "payload": {
+          "stream_generation": "stream-1",
+          "commit_lsn": "2",
+          "end_lsn": "2",
+          "events": [
+            {
+              "event_ordinal": 1,
+              "relation": "public.items_a",
+              "operation": "insert",
+              "before": null,
+              "after": {
+                "identity": {
+                  "kind": "synced",
+                  "synced_row": {
+                    "canonical_identity_bytes": "typed-string:row-a",
+                    "table_id": "items-a",
+                    "primary_key_field_id": "id",
+                    "portable_type": "string",
+                    "canonical_wire_json": "\"row-a\""
+                  },
+                  "capture_key": null
+                },
+                "fields": [
+                  {
+                    "field": "id",
+                    "type": "string",
+                    "wire_json": "\"row-a\""
+                  },
+                  {
+                    "field": "value",
+                    "type": "string",
+                    "wire_json": "\"scope-a-old\""
+                  }
+                ],
+                "version": "a-v1",
+                "checksum": "2222222222222222222222222222222222222222222222222222222222222222",
+                "deleted": false
+              }
+            }
+          ]
+        }
+      },
+      "expected_outcome": {
+        "disposition": "success"
+      }
+    },
+    {
+      "id": "STEP-PULL-DIVERGENT-MATERIALIZE-002-001",
+      "phase": "setup",
+      "transport": "process",
+      "description": "Materialize exactly one scope A effect at position (2,1,1).",
+      "operation": {
+        "contract_operation": "process",
+        "name": "materialize-source-transaction",
+        "payload": {
+          "stream_generation": "stream-1",
+          "commit_lsn": "2"
+        }
+      },
+      "expected_outcome": {
+        "disposition": "success"
+      }
+    },
+    {
+      "id": "STEP-PULL-DIVERGENT-COMMIT-003-001",
+      "phase": "setup",
+      "transport": "model",
+      "description": "Commit the scope B row-b insertion at source position (3,1).",
+      "operation": {
+        "contract_operation": "model",
+        "name": "commit-source-transaction",
+        "payload": {
+          "stream_generation": "stream-1",
+          "commit_lsn": "3",
+          "end_lsn": "3",
+          "events": [
+            {
+              "event_ordinal": 1,
+              "relation": "public.items_a",
+              "operation": "insert",
+              "before": null,
+              "after": {
+                "identity": {
+                  "kind": "synced",
+                  "synced_row": {
+                    "canonical_identity_bytes": "typed-string:row-b",
+                    "table_id": "items-a",
+                    "primary_key_field_id": "id",
+                    "portable_type": "string",
+                    "canonical_wire_json": "\"row-b\""
+                  },
+                  "capture_key": null
+                },
+                "fields": [
+                  {
+                    "field": "id",
+                    "type": "string",
+                    "wire_json": "\"row-b\""
+                  },
+                  {
+                    "field": "value",
+                    "type": "string",
+                    "wire_json": "\"scope-b-only\""
+                  }
+                ],
+                "version": "b-v1",
+                "checksum": "3333333333333333333333333333333333333333333333333333333333333333",
+                "deleted": false
+              }
+            }
+          ]
+        }
+      },
+      "expected_outcome": {
+        "disposition": "success"
+      }
+    },
+    {
+      "id": "STEP-PULL-DIVERGENT-MATERIALIZE-003-001",
+      "phase": "setup",
+      "transport": "process",
+      "description": "Materialize exactly one scope B effect at position (3,1,1).",
+      "operation": {
+        "contract_operation": "process",
+        "name": "materialize-source-transaction",
+        "payload": {
+          "stream_generation": "stream-1",
+          "commit_lsn": "3"
+        }
+      },
+      "expected_outcome": {
+        "disposition": "success"
+      }
+    },
+    {
+      "id": "STEP-PULL-DIVERGENT-COMMIT-004-001",
+      "phase": "setup",
+      "transport": "model",
+      "description": "Commit the second-table row-a insertion at source position (4,1).",
+      "operation": {
+        "contract_operation": "model",
+        "name": "commit-source-transaction",
+        "payload": {
+          "stream_generation": "stream-1",
+          "commit_lsn": "4",
+          "end_lsn": "4",
+          "events": [
+            {
+              "event_ordinal": 1,
+              "relation": "public.items_b",
+              "operation": "insert",
+              "before": null,
+              "after": {
+                "identity": {
+                  "kind": "synced",
+                  "synced_row": {
+                    "canonical_identity_bytes": "typed-string:row-a",
+                    "table_id": "items-b",
+                    "primary_key_field_id": "id",
+                    "portable_type": "string",
+                    "canonical_wire_json": "\"row-a\""
+                  },
+                  "capture_key": null
+                },
+                "fields": [
+                  {
+                    "field": "id",
+                    "type": "string",
+                    "wire_json": "\"row-a\""
+                  },
+                  {
+                    "field": "value",
+                    "type": "string",
+                    "wire_json": "\"typed-table-collision\""
+                  }
+                ],
+                "version": "collision-v1",
+                "checksum": "4444444444444444444444444444444444444444444444444444444444444444",
+                "deleted": false
+              }
+            }
+          ]
+        }
+      },
+      "expected_outcome": {
+        "disposition": "success"
+      }
+    },
+    {
+      "id": "STEP-PULL-DIVERGENT-MATERIALIZE-004-001",
+      "phase": "setup",
+      "transport": "process",
+      "description": "Materialize the distinct table-ID effect at scope A position (4,1,1).",
+      "operation": {
+        "contract_operation": "process",
+        "name": "materialize-source-transaction",
+        "payload": {
+          "stream_generation": "stream-1",
+          "commit_lsn": "4"
+        }
+      },
+      "expected_outcome": {
+        "disposition": "success"
+      }
+    },
+    {
+      "id": "STEP-PULL-DIVERGENT-COMMIT-005-001",
+      "phase": "setup",
+      "transport": "model",
+      "description": "Commit the newer scope A row-a update at source position (5,1).",
+      "operation": {
+        "contract_operation": "model",
+        "name": "commit-source-transaction",
+        "payload": {
+          "stream_generation": "stream-1",
+          "commit_lsn": "5",
+          "end_lsn": "5",
+          "events": [
+            {
+              "event_ordinal": 1,
+              "relation": "public.items_a",
+              "operation": "update",
+              "before": {
+                "identity": {
+                  "kind": "synced",
+                  "synced_row": {
+                    "canonical_identity_bytes": "typed-string:row-a",
+                    "table_id": "items-a",
+                    "primary_key_field_id": "id",
+                    "portable_type": "string",
+                    "canonical_wire_json": "\"row-a\""
+                  },
+                  "capture_key": null
+                },
+                "fields": [
+                  {
+                    "field": "id",
+                    "type": "string",
+                    "wire_json": "\"row-a\""
+                  },
+                  {
+                    "field": "value",
+                    "type": "string",
+                    "wire_json": "\"scope-a-old\""
+                  }
+                ],
+                "version": "a-v1",
+                "checksum": "2222222222222222222222222222222222222222222222222222222222222222",
+                "deleted": false
+              },
+              "after": {
+                "identity": {
+                  "kind": "synced",
+                  "synced_row": {
+                    "canonical_identity_bytes": "typed-string:row-a",
+                    "table_id": "items-a",
+                    "primary_key_field_id": "id",
+                    "portable_type": "string",
+                    "canonical_wire_json": "\"row-a\""
+                  },
+                  "capture_key": null
+                },
+                "fields": [
+                  {
+                    "field": "id",
+                    "type": "string",
+                    "wire_json": "\"row-a\""
+                  },
+                  {
+                    "field": "value",
+                    "type": "string",
+                    "wire_json": "\"scope-a-new\""
+                  }
+                ],
+                "version": "a-v2",
+                "checksum": "5555555555555555555555555555555555555555555555555555555555555555",
+                "deleted": false
+              }
+            }
+          ]
+        }
+      },
+      "expected_outcome": {
+        "disposition": "success"
+      }
+    },
+    {
+      "id": "STEP-PULL-DIVERGENT-MATERIALIZE-005-001",
+      "phase": "setup",
+      "transport": "process",
+      "description": "Materialize the newer scope A effect at position (5,1,1).",
+      "operation": {
+        "contract_operation": "process",
+        "name": "materialize-source-transaction",
+        "payload": {
+          "stream_generation": "stream-1",
+          "commit_lsn": "5"
+        }
+      },
+      "expected_outcome": {
+        "disposition": "success"
+      }
+    },
+    {
+      "id": "STEP-PULL-DIVERGENT-PAGE-001",
+      "phase": "exercise",
+      "transport": "http",
+      "description": "Request both scope streams from generation-start cursors with the global limit of two.",
+      "operation": {
+        "contract_operation": "pull",
+        "name": "request-page",
+        "payload": {
+          "user_id": "user-a",
+          "client_id": "client-a",
+          "client_generation": 1,
+          "schema": {
+            "version": 1,
+            "hash": "07904a21452931ca3c189218ad44ad9b7c45c888dff6156e5ac669560025f17b"
+          },
+          "scope_set_version": 1,
+          "scopes": [
+            {
+              "scope_id": "scope-a",
+              "cursor_source": "local_checkpoint"
+            },
+            {
+              "scope_id": "scope-b",
+              "cursor_source": "local_checkpoint"
+            }
+          ],
+          "limit": 2
+        }
+      },
+      "expected_outcome": {
+        "disposition": "success"
+      }
+    },
+    {
+      "id": "STEP-PULL-DIVERGENT-APPLY-001",
+      "phase": "exercise",
+      "transport": "local",
+      "description": "Apply page one rows, provenance, and both issued divergent cursors in one local transaction.",
+      "operation": {
+        "contract_operation": "local",
+        "name": "apply-pull-page",
+        "payload": {
+          "user_id": "user-a",
+          "client_id": "client-a",
+          "source_step_id": "STEP-PULL-DIVERGENT-PAGE-001"
+        }
+      },
+      "expected_outcome": {
+        "disposition": "success"
+      }
+    },
+    {
+      "id": "STEP-PULL-DIVERGENT-PAGE-002",
+      "phase": "exercise",
+      "transport": "http",
+      "description": "Request both scope streams again from the atomically applied divergent cursors with limit two.",
+      "operation": {
+        "contract_operation": "pull",
+        "name": "request-page",
+        "payload": {
+          "user_id": "user-a",
+          "client_id": "client-a",
+          "client_generation": 1,
+          "schema": {
+            "version": 1,
+            "hash": "07904a21452931ca3c189218ad44ad9b7c45c888dff6156e5ac669560025f17b"
+          },
+          "scope_set_version": 1,
+          "scopes": [
+            {
+              "scope_id": "scope-a",
+              "cursor_source": "local_checkpoint"
+            },
+            {
+              "scope_id": "scope-b",
+              "cursor_source": "local_checkpoint"
+            }
+          ],
+          "limit": 2
+        }
+      },
+      "expected_outcome": {
+        "disposition": "success"
+      }
+    },
+    {
+      "id": "STEP-PULL-DIVERGENT-APPLY-002",
+      "phase": "exercise",
+      "transport": "local",
+      "description": "Apply the terminal row, provenance, checksums, and both terminal cursors in one local transaction.",
+      "operation": {
+        "contract_operation": "local",
+        "name": "apply-pull-page",
+        "payload": {
+          "user_id": "user-a",
+          "client_id": "client-a",
+          "source_step_id": "STEP-PULL-DIVERGENT-PAGE-002"
+        }
+      },
+      "expected_outcome": {
+        "disposition": "success"
+      }
+    }
+  ],
+  "wire_expectations": [
+    {
+      "step_id": "STEP-PULL-DIVERGENT-REBUILD-A-REQUEST-001",
+      "assertion_id": "ASSERT-PULL-DIVERGENT-SEMANTIC-001",
+      "contract_case": "rebuild_success",
+      "http_status": 200,
+      "error_code": null,
+      "retryable": false
+    },
+    {
+      "step_id": "STEP-PULL-DIVERGENT-REBUILD-B-REQUEST-001",
+      "assertion_id": "ASSERT-PULL-DIVERGENT-SEMANTIC-001",
+      "contract_case": "rebuild_success",
+      "http_status": 200,
+      "error_code": null,
+      "retryable": false
+    },
+    {
+      "step_id": "STEP-PULL-DIVERGENT-PAGE-001",
+      "assertion_id": "ASSERT-PULL-DIVERGENT-SEMANTIC-001",
+      "contract_case": "pull_success",
+      "http_status": 200,
+      "error_code": null,
+      "retryable": false
+    },
+    {
+      "step_id": "STEP-PULL-DIVERGENT-PAGE-002",
+      "assertion_id": "ASSERT-PULL-DIVERGENT-SEMANTIC-001",
+      "contract_case": "pull_success",
+      "http_status": 200,
+      "error_code": null,
+      "retryable": false
+    }
+  ],
+  "assertions": [
+    {
+      "id": "ASSERT-PULL-DIVERGENT-SEMANTIC-001",
+      "requirement_ids": [
+        "SYNC-PULL-001",
+        "SYNC-PULL-002"
+      ],
+      "description": "Four lawful WAL effects occupy scope A positions (2,1,1), (4,1,1), and (5,1,1), plus scope B position (3,1,1). Scope A deduplicates positions 2 and 5 by typed scoped row identity before limiting. Page one returns B position 3, then A position 4, with has_more true and no checksums. Its atomic apply installs divergent cursors B3 and A4 with matching rows and provenance. Page two returns A position 5 with has_more false and both scope checksums. Its atomic apply installs both terminal cursors, verifies checksums, and preserves the table-ID collision.",
+      "expectation_ids": [
+        "EXPECT-PULL-DIVERGENT-SEMANTIC-001",
+        "EXPECT-PULL-DIVERGENT-WIRE-001"
+      ],
+      "predicate": {
+        "contract_predicate": "wire-outcome",
+        "name": "canonical-wire-outcome",
+        "payload": {}
+      },
+      "oracle": {
+        "kind": "wire-contract",
+        "expected_source": "authored-model",
+        "observed_source": "system-under-test"
+      },
+      "detects_control_ids": []
+    },
+    {
+      "id": "ASSERT-PULL-DIVERGENT-PULL-001-CONTROL-001",
+      "requirement_ids": [
+        "SYNC-PULL-001"
+      ],
+      "description": "The control detects applying the global limit before complete per-scope resolution hides another valid scope candidate.",
+      "expectation_ids": [
+        "EXPECT-PULL-DIVERGENT-PULL-001-CONTROL-001"
+      ],
+      "predicate": {
+        "contract_predicate": "negative-control-detection",
+        "name": "negative-control-detected",
+        "payload": {}
+      },
+      "oracle": {
+        "kind": "negative-control-detection",
+        "expected_source": "authored-model",
+        "observed_source": "system-under-test"
+      },
+      "detects_control_ids": [
+        "CTRL-PULL-001"
+      ]
+    },
+    {
+      "id": "ASSERT-PULL-DIVERGENT-PULL-002-CONTROL-001",
+      "requirement_ids": [
+        "SYNC-PULL-002"
+      ],
+      "description": "The control detects lexical or unstable merge order, premature completion, and starvation at a finite boundary.",
+      "expectation_ids": [
+        "EXPECT-PULL-DIVERGENT-PULL-002-CONTROL-001"
+      ],
+      "predicate": {
+        "contract_predicate": "negative-control-detection",
+        "name": "negative-control-detected",
+        "payload": {}
+      },
+      "oracle": {
+        "kind": "negative-control-detection",
+        "expected_source": "authored-model",
+        "observed_source": "system-under-test"
+      },
+      "detects_control_ids": [
+        "CTRL-PULL-002"
+      ]
+    }
+  ]
+}

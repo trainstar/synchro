@@ -8,6 +8,7 @@
     "$schema",
     "schema_version",
     "evidence_id",
+    "receipt_id",
     "candidate_id",
     "release_version",
     "protocol_version",
@@ -23,20 +24,27 @@
     "environment",
     "assertions",
     "attachments",
+    "attachment_ids",
     "execution_artifacts",
     "replay",
     "fault_execution",
     "performance_results",
     "required_measurement_results",
     "vector_results",
-    "artifact_ids",
+    "artifact_bindings",
+    "http_observations",
+    "counters",
+    "observations",
     "negative_control",
-    "seed"
+    "seed",
+    "runner_digest",
+    "receipt"
   ],
   "properties": {
     "$schema": { "const": "https://synchro.dev/conformance/schemas/evidence-v2.schema.json" },
     "schema_version": { "const": 2 },
     "evidence_id": { "$ref": "#/$defs/evidenceId" },
+    "receipt_id": { "$ref": "#/$defs/receiptId" },
     "candidate_id": { "$ref": "#/$defs/candidateId" },
     "release_version": { "const": "0.3.0" },
     "protocol_version": { "const": 3 },
@@ -75,6 +83,12 @@
       "minItems": 1,
       "items": { "$ref": "#/$defs/attachment" }
     },
+    "attachment_ids": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/attachmentId" }
+    },
     "execution_artifacts": { "$ref": "#/$defs/executionArtifacts" },
     "replay": { "$ref": "#/$defs/replayEvidence" },
     "fault_execution": {
@@ -95,11 +109,20 @@
       "type": "array",
       "items": { "$ref": "#/$defs/vectorResult" }
     },
-    "artifact_ids": {
+    "artifact_bindings": {
       "type": "array",
       "minItems": 1,
       "uniqueItems": true,
-      "items": { "$ref": "#/$defs/artifactId" }
+      "items": { "$ref": "#/$defs/artifactBinding" }
+    },
+    "http_observations": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/httpObservation" }
+    },
+    "counters": { "$ref": "#/$defs/counters" },
+    "observations": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/observation" }
     },
     "negative_control": {
       "oneOf": [
@@ -112,7 +135,9 @@
         { "type": "string", "minLength": 1 },
         { "type": "null" }
       ]
-    }
+    },
+    "runner_digest": { "$ref": "#/$defs/sha256" },
+    "receipt": { "$ref": "#/$defs/receiptProjection" }
   },
   "allOf": [
     {
@@ -140,9 +165,7 @@
         "properties": {
           "assertions": {
             "items": {
-              "properties": {
-                "outcome": { "enum": ["passed", "skipped"] }
-              }
+              "properties": { "outcome": { "const": "passed" } }
             }
           },
           "performance_results": {
@@ -230,6 +253,10 @@
       "type": "string",
       "pattern": "^ART-[A-Z0-9]+(?:-[A-Z0-9]+)*-[0-9]{3}$"
     },
+    "receiptId": {
+      "type": "string",
+      "pattern": "^receipt-sha256:[a-f0-9]{64}$"
+    },
     "attachmentId": {
       "type": "string",
       "pattern": "^ATT-[A-Z0-9]+(?:-[A-Z0-9]+)*-[0-9]{3}$"
@@ -297,6 +324,7 @@
         "duration_ms",
         "result",
         "exit_code",
+        "command_observation",
         "previous_evidence_id",
         "rerun_cause",
         "rerun_diagnosis",
@@ -330,6 +358,7 @@
           "enum": ["passed", "failed", "error"]
         },
         "exit_code": { "type": "integer", "minimum": 0 },
+        "command_observation": { "$ref": "#/$defs/commandObservation" },
         "previous_evidence_id": {
           "oneOf": [
             { "$ref": "#/$defs/evidenceId" },
@@ -449,14 +478,13 @@
         "outcome": {
           "type": "string",
           "enum": ["passed", "failed", "skipped", "error"]
-        },
-        "detail": { "type": "string", "minLength": 1 }
+        }
       }
     },
     "attachment": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["id", "kind", "path", "media_type", "sha256"],
+      "required": ["id", "kind", "path", "media_type", "size_bytes", "sha256"],
       "properties": {
         "id": { "$ref": "#/$defs/attachmentId" },
         "kind": {
@@ -475,6 +503,7 @@
         },
         "path": { "$ref": "#/$defs/relativePath" },
         "media_type": { "type": "string", "minLength": 1 },
+        "size_bytes": { "type": "integer", "minimum": 0 },
         "sha256": { "$ref": "#/$defs/sha256" }
       }
     },
@@ -512,6 +541,349 @@
           "items": { "$ref": "#/$defs/attachmentId" }
         }
       }
+    },
+    "artifactBinding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["inventory_id", "artifact_id", "path", "media_type", "size_bytes", "sha256"],
+      "properties": {
+        "inventory_id": { "type": "string", "pattern": "^ARTDEF-[A-Z0-9]+(?:-[A-Z0-9]+)*-[0-9]{3}$" },
+        "artifact_id": { "$ref": "#/$defs/artifactId" },
+        "role": { "type": "string", "minLength": 1 },
+        "path": { "$ref": "#/$defs/relativePath" },
+        "media_type": { "type": "string", "minLength": 1 },
+        "size_bytes": { "type": "integer", "minimum": 0 },
+        "sha256": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "httpHeader": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "values"],
+      "properties": {
+        "name": { "type": "string", "enum": ["content-type", "etag", "retry-after", "x-synchro-protocol-version"] },
+        "values": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 32,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096,
+            "pattern": "^[^\\r\\n]+$"
+          }
+        }
+      }
+    },
+    "httpObservation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["request_class", "status", "headers", "duration_nanoseconds"],
+      "properties": {
+        "request_class": { "type": "string", "minLength": 1 },
+        "status": { "type": "integer", "minimum": 0, "maximum": 599 },
+        "headers": {
+          "type": "array",
+          "maxItems": 32,
+          "items": { "$ref": "#/$defs/httpHeader" }
+        },
+        "duration_nanoseconds": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "requestCounts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["connect", "push", "pull", "rebuild_page", "schema_fetch", "other"],
+      "properties": {
+        "connect": { "type": "integer", "minimum": 0 },
+        "push": { "type": "integer", "minimum": 0 },
+        "pull": { "type": "integer", "minimum": 0 },
+        "rebuild_page": { "type": "integer", "minimum": 0 },
+        "schema_fetch": { "type": "integer", "minimum": 0 },
+        "other": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "counters": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["request_counts", "returned_rebuild_page_count", "outbound_network_or_rpc_hops"],
+      "properties": {
+        "request_counts": { "$ref": "#/$defs/requestCounts" },
+        "returned_rebuild_page_count": { "type": "integer", "minimum": 0 },
+        "outbound_network_or_rpc_hops": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "observation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "value"],
+      "properties": {
+        "name": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "value": { "type": "string", "minLength": 1, "maxLength": 4096 }
+      }
+    },
+    "receiptAuthentication": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["runner_public_key", "nonce", "signature"],
+      "properties": {
+        "runner_public_key": { "$ref": "#/$defs/base64UrlPublicKey" },
+        "nonce": { "$ref": "#/$defs/base64UrlNonce" },
+        "signature": { "$ref": "#/$defs/base64UrlSignature" }
+      }
+    },
+    "commandObservation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "argv",
+        "exit_code",
+        "started_at",
+        "completed_at",
+        "make_executable_sha256",
+        "source_snapshot_sha256"
+      ],
+      "properties": {
+        "argv": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 2,
+          "prefixItems": [
+            { "const": "make" },
+            { "type": "string", "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_.-]*$" }
+          ],
+          "items": false
+        },
+        "exit_code": { "type": "integer", "minimum": 0 },
+        "started_at": { "type": "string", "format": "date-time" },
+        "completed_at": { "type": "string", "format": "date-time" },
+        "make_executable_sha256": { "$ref": "#/$defs/sha256" },
+        "source_snapshot_sha256": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "receiptFields": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "receipt_id",
+        "scenario_id",
+        "proof_obligation_id",
+        "make_target",
+        "argv",
+        "started_at",
+        "completed_at",
+        "exit_code",
+        "result",
+        "command_observation",
+        "assertions",
+        "vector_results",
+        "artifact_bindings",
+        "environment_dimensions",
+        "attachment_ids",
+        "runner_digest",
+        "candidate_lock_sha256",
+        "runner_artifact_sha256",
+        "runner_executable_sha256",
+        "generator_name",
+        "generator_version",
+        "generator_binary_sha256",
+        "run_id",
+        "execution_lineage_id",
+        "run_url",
+        "attempt",
+        "previous_evidence_id",
+        "rerun_cause",
+        "rerun_diagnosis",
+        "corrective_action",
+        "rerun_approval",
+        "attachments",
+        "http_observations",
+        "counters",
+        "observations",
+        "execution_artifacts",
+        "replay",
+        "fault_execution",
+        "performance_results",
+        "required_measurement_results",
+        "negative_control",
+        "seed"
+      ],
+      "properties": {
+        "receipt_id": { "$ref": "#/$defs/receiptId" },
+        "scenario_id": { "$ref": "#/$defs/scenarioId" },
+        "proof_obligation_id": { "$ref": "#/$defs/obligationId" },
+        "make_target": {
+          "type": "string",
+          "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_.-]*$"
+        },
+        "argv": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 2,
+          "prefixItems": [
+            { "const": "make" },
+            { "type": "string", "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_.-]*$" }
+          ],
+          "items": false
+        },
+        "started_at": { "type": "string", "format": "date-time" },
+        "completed_at": { "type": "string", "format": "date-time" },
+        "exit_code": { "type": "integer", "minimum": 0 },
+        "result": { "type": "string", "enum": ["passed", "failed", "error"] },
+        "command_observation": { "$ref": "#/$defs/commandObservation" },
+        "assertions": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/assertionOutcome" }
+        },
+        "vector_results": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/vectorResult" }
+        },
+        "artifact_bindings": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/artifactBinding" }
+        },
+        "environment_dimensions": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/nameValue" }
+        },
+        "attachment_ids": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/attachmentId" }
+        },
+        "runner_digest": { "$ref": "#/$defs/sha256" },
+        "candidate_lock_sha256": { "$ref": "#/$defs/sha256" },
+        "runner_artifact_sha256": { "$ref": "#/$defs/sha256" },
+        "runner_executable_sha256": { "$ref": "#/$defs/sha256" },
+        "generator_name": { "type": "string", "minLength": 1 },
+        "generator_version": { "type": "string", "minLength": 1 },
+        "generator_binary_sha256": { "$ref": "#/$defs/sha256" },
+        "run_id": {
+          "oneOf": [
+            { "$ref": "#/$defs/runId" },
+            { "const": "" }
+          ]
+        },
+        "execution_lineage_id": {
+          "oneOf": [
+            { "$ref": "#/$defs/executionLineageId" },
+            { "const": "" }
+          ]
+        },
+        "run_url": {
+          "oneOf": [
+            { "type": "string", "format": "uri" },
+            { "const": "" }
+          ]
+        },
+        "attempt": { "type": "integer", "minimum": 0 },
+        "previous_evidence_id": {
+          "oneOf": [{ "$ref": "#/$defs/evidenceId" }, { "type": "null" }]
+        },
+        "rerun_cause": {
+          "oneOf": [
+            {
+              "type": "string",
+              "enum": [
+                "ci-orchestrator-failure",
+                "compute-host-failure",
+                "network-infrastructure-outage",
+                "device-or-simulator-failure",
+                "artifact-registry-outage"
+              ]
+            },
+            { "type": "null" }
+          ]
+        },
+        "rerun_diagnosis": {
+          "oneOf": [{ "type": "string", "minLength": 1 }, { "type": "null" }]
+        },
+        "corrective_action": {
+          "oneOf": [{ "type": "string", "minLength": 1 }, { "type": "null" }]
+        },
+        "rerun_approval": {
+          "oneOf": [{ "$ref": "#/$defs/rerunApproval" }, { "type": "null" }]
+        },
+        "attachments": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/attachment" }
+        },
+        "http_observations": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/httpObservation" }
+        },
+        "counters": {
+          "oneOf": [
+            { "$ref": "#/$defs/counters" },
+            { "type": "null" }
+          ]
+        },
+        "observations": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/observation" }
+        },
+        "execution_artifacts": {
+          "oneOf": [
+            { "$ref": "#/$defs/executionArtifacts" },
+            { "type": "null" }
+          ]
+        },
+        "replay": {
+          "oneOf": [
+            { "$ref": "#/$defs/replayEvidence" },
+            { "type": "null" }
+          ]
+        },
+        "fault_execution": {
+          "oneOf": [
+            { "$ref": "#/$defs/faultExecution" },
+            { "type": "null" }
+          ]
+        },
+        "performance_results": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/performanceResult" }
+        },
+        "required_measurement_results": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/requiredMeasurementResult" }
+        },
+        "negative_control": {
+          "oneOf": [
+            { "$ref": "#/$defs/negativeControl" },
+            { "type": "null" }
+          ]
+        },
+        "seed": {
+          "oneOf": [
+            { "type": "string", "minLength": 1 },
+            { "type": "null" }
+          ]
+        }
+      }
+    },
+    "receiptProjection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["fields", "authentication"],
+      "properties": {
+        "fields": { "$ref": "#/$defs/receiptFields" },
+        "authentication": { "$ref": "#/$defs/receiptAuthentication" }
+      }
+    },
+    "base64UrlPublicKey": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_-]{43}$"
+    },
+    "base64UrlNonce": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_-]{43}$"
+    },
+    "base64UrlSignature": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_-]{86}$"
     },
     "replayEvidence": {
       "type": "object",

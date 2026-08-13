@@ -1,0 +1,726 @@
+{
+  "$schema": "https://synchro.dev/conformance/schemas/scenario-v2.schema.json",
+  "schema_version": 2,
+  "id": "SCN-WAL-DECODE-FAILURE-001",
+  "title": "WAL decode poison blocks and repairs in commit order",
+  "description": "A decode failure creates durable redacted quarantine until the same source transaction repairs and unblocks the contiguous prefix.",
+  "requirement_ids": [
+    "SYNC-WAL-006"
+  ],
+  "normative_references": [
+    {
+      "path": "docs/src/content/docs/spec/04-invariants.mdx",
+      "anchor": "#blocking-poison-quarantine"
+    }
+  ],
+  "proof_types": [
+    "server-black-box",
+    "fault-injection",
+    "negative-control"
+  ],
+  "proof_obligations": [
+    {
+      "obligation_id": "OBL-WAL-DECODE-PG-001",
+      "requirement_ids": [
+        "SYNC-WAL-006"
+      ],
+      "assertion_ids": [
+        "ASSERT-WAL-DECODE-SEMANTIC-001"
+      ],
+      "proof_type": "server-black-box",
+      "support_cell_id": "SUP-PG-018",
+      "artifact_inventory_ids": [
+        "ARTDEF-PG-EXTENSION-001",
+        "ARTDEF-ADAPTER-001"
+      ],
+      "performance_budget_ids": [],
+      "required_measurement_ids": [],
+      "required_vector_set_ids": [],
+      "make_target": "test-blackbox",
+      "argv": [
+        "make",
+        "test-blackbox"
+      ],
+      "fault_plan_id": null,
+      "control_id": null
+    },
+    {
+      "obligation_id": "OBL-WAL-DECODE-FAULT-001",
+      "requirement_ids": [
+        "SYNC-WAL-006"
+      ],
+      "assertion_ids": [
+        "ASSERT-WAL-DECODE-CONTROL-001"
+      ],
+      "proof_type": "fault-injection",
+      "support_cell_id": "SUP-PG-018",
+      "artifact_inventory_ids": [
+        "ARTDEF-PG-EXTENSION-001",
+        "ARTDEF-ADAPTER-001"
+      ],
+      "performance_budget_ids": [],
+      "required_measurement_ids": [],
+      "required_vector_set_ids": [],
+      "make_target": "test-blackbox",
+      "argv": [
+        "make",
+        "test-blackbox"
+      ],
+      "fault_plan_id": "FPL-WAL-DECODE-001",
+      "control_id": "CTRL-WAL-006"
+    },
+    {
+      "obligation_id": "OBL-WAL-DECODE-CONTROL-001",
+      "requirement_ids": [
+        "SYNC-WAL-006"
+      ],
+      "assertion_ids": [
+        "ASSERT-WAL-DECODE-CONTROL-001"
+      ],
+      "proof_type": "negative-control",
+      "support_cell_id": null,
+      "artifact_inventory_ids": [
+        "ARTDEF-CONFORMANCE-RUNNER-001",
+        "ARTDEF-PG-EXTENSION-001"
+      ],
+      "performance_budget_ids": [],
+      "required_measurement_ids": [],
+      "required_vector_set_ids": [],
+      "make_target": "test-conformance",
+      "argv": [
+        "make",
+        "test-conformance"
+      ],
+      "fault_plan_id": "FPL-WAL-DECODE-001",
+      "control_id": "CTRL-WAL-006"
+    }
+  ],
+  "ownership": [
+    {
+      "scenario_id": "SCN-WAL-DECODE-FAILURE-001",
+      "requirement_id": "SYNC-WAL-006",
+      "proof_obligation_id": "OBL-WAL-DECODE-PG-001",
+      "assertion_id": "ASSERT-WAL-DECODE-SEMANTIC-001",
+      "proof_type": "server-black-box",
+      "support_cell_id": "SUP-PG-018"
+    },
+    {
+      "scenario_id": "SCN-WAL-DECODE-FAILURE-001",
+      "requirement_id": "SYNC-WAL-006",
+      "proof_obligation_id": "OBL-WAL-DECODE-FAULT-001",
+      "assertion_id": "ASSERT-WAL-DECODE-CONTROL-001",
+      "proof_type": "fault-injection",
+      "support_cell_id": "SUP-PG-018"
+    },
+    {
+      "scenario_id": "SCN-WAL-DECODE-FAILURE-001",
+      "requirement_id": "SYNC-WAL-006",
+      "proof_obligation_id": "OBL-WAL-DECODE-CONTROL-001",
+      "assertion_id": "ASSERT-WAL-DECODE-CONTROL-001",
+      "proof_type": "negative-control",
+      "support_cell_id": null
+    }
+  ],
+  "model": {
+    "setup": [
+      {
+        "contract_operation": "model",
+        "name": "install-current-contract",
+        "payload": {
+          "installation": {
+            "installed": true,
+            "schema_name": "synchro",
+            "extension_version": "0.3.0",
+            "protocol_version": 3,
+            "minimum_client_runtime": 3,
+            "stale_client_interval_milliseconds": 3600000,
+            "endpoints": [
+              "connect",
+              "push",
+              "pull",
+              "rebuild"
+            ],
+            "capabilities": [
+              {
+                "capability_id": "protocol-3",
+                "enabled": true
+              }
+            ]
+          },
+          "initial_schema": {
+            "schema": {
+              "version": 1,
+              "hash": "721d2c95e6f34cd9733feea9f5118fba391eee10d07663dad066cfc59439fa44"
+            },
+            "body": "{\"compatibility_floor\":1,\"parent_schema\":null,\"schema_hash\":\"721d2c95e6f34cd9733feea9f5118fba391eee10d07663dad066cfc59439fa44\",\"schema_version\":1,\"tables\":[{\"composition\":\"multi_scope\",\"fields\":[{\"field_id\":\"id\",\"name\":\"id\",\"nullable\":false,\"type\":\"string\",\"writable\":false},{\"field_id\":\"value\",\"name\":\"value\",\"nullable\":false,\"type\":\"string\",\"writable\":true}],\"indexes\":[{\"field_ids\":[\"id\"],\"index_id\":\"items-pk\",\"name\":\"items_pk\",\"unique\":true}],\"lifecycle\":{\"created_at_field_id\":null,\"deleted_at_field_id\":null,\"updated_at_field_id\":null},\"name\":\"items\",\"primary_key_field_id\":\"id\",\"relation_id\":\"public.items\",\"table_id\":\"items\"}],\"transition_class\":\"initial\"}",
+            "transition_class": "initial",
+            "compatibility_floor": 1,
+            "tables": [
+              {
+                "table_id": "items",
+                "relation_id": "public.items",
+                "name": "items",
+                "composition": "multi_scope",
+                "primary_key_field_id": "id",
+                "created_at_field_id": null,
+                "updated_at_field_id": null,
+                "deleted_at_field_id": null,
+                "fields": [
+                  {
+                    "field_id": "id",
+                    "name": "id",
+                    "type": "string",
+                    "primary_key": true,
+                    "nullable": false,
+                    "writable": false,
+                    "decimal_precision": null,
+                    "decimal_scale": null,
+                    "default_wire_json": null
+                  },
+                  {
+                    "field_id": "value",
+                    "name": "value",
+                    "type": "string",
+                    "primary_key": false,
+                    "nullable": false,
+                    "writable": true,
+                    "decimal_precision": null,
+                    "decimal_scale": null,
+                    "default_wire_json": "\"\""
+                  }
+                ],
+                "indexes": [
+                  {
+                    "index_id": "items-pk",
+                    "name": "items_pk",
+                    "field_ids": [
+                      "id"
+                    ],
+                    "unique": true
+                  }
+                ]
+              }
+            ],
+            "affected_scopes": []
+          },
+          "initial_registry": {
+            "registry_generation": 1,
+            "relations": [
+              {
+                "relation": "public.items",
+                "registration_kind": "synced",
+                "table_id": "items",
+                "physical": {
+                  "schema": "public",
+                  "name": "items",
+                  "oid": 101,
+                  "replica_identity": "default"
+                },
+                "primary_key_field_id": "id",
+                "primary_key_physical_column": "id",
+                "primary_key_portable_type": "string",
+                "capture_key_field_ids": [],
+                "captured_field_ids": [
+                  "id",
+                  "value"
+                ],
+                "membership_function": "synchro.scope_items",
+                "positive_fanout_bound": 8,
+                "dependency_impact_function": null,
+                "dependency_captured_field_ids": [],
+                "positive_dependency_row_bound": null
+              }
+            ],
+            "capture_dependencies": [],
+            "scope_rules": [
+              {
+                "scope_rule_id": "scope-items",
+                "relation": "public.items",
+                "membership_function": "synchro.scope_items",
+                "positive_fanout_bound": 8,
+                "evaluations": [
+                  {
+                    "row": {
+                      "canonical_identity_bytes": "items:id:poison-row",
+                      "table_id": "items",
+                      "primary_key_field_id": "id",
+                      "portable_type": "string",
+                      "canonical_wire_json": "\"poison-row\""
+                    },
+                    "scopes": [
+                      "scope-a"
+                    ]
+                  },
+                  {
+                    "row": {
+                      "canonical_identity_bytes": "items:id:valid-row",
+                      "table_id": "items",
+                      "primary_key_field_id": "id",
+                      "portable_type": "string",
+                      "canonical_wire_json": "\"valid-row\""
+                    },
+                    "scopes": [
+                      "scope-a"
+                    ]
+                  }
+                ]
+              }
+            ],
+            "dependency_impacts": []
+          },
+          "stream": {
+            "stream_generation": "stream-1",
+            "database": "synchro",
+            "worker_id": "worker-1",
+            "slot_id": "slot-1"
+          },
+          "empty_scopes": [
+            {
+              "scope_id": "scope-a",
+              "membership_generation": 1,
+              "retention_generation": 1
+            }
+          ],
+          "clients": [
+            {
+              "user_id": "user-a",
+              "client_id": "client-a",
+              "client_generation": 1,
+              "scope_set_version": 1,
+              "accepted_write_epoch": 0,
+              "last_cursor_acknowledged_at": null,
+              "assigned_scope_ids": [
+                "scope-a"
+              ],
+              "local_schema": {
+                "version": 1,
+                "hash": "721d2c95e6f34cd9733feea9f5118fba391eee10d07663dad066cfc59439fa44"
+              },
+              "local_lifecycle": "local_ready"
+            }
+          ],
+          "write_policies": [
+            {
+              "user_id": "user-a",
+              "table_id": "items",
+              "allowed": true
+            }
+          ],
+          "configured_limits": {
+            "max_scope_fanout": 8,
+            "max_impact_rows": 1000,
+            "pull_maximum": 1000,
+            "rebuild_maximum": 1000,
+            "compaction_batch_maximum": 10000,
+            "backfill_batch_maximum": 1000
+          }
+        }
+      }
+    ],
+    "expected_state": [
+      {
+        "id": "EXPECT-WAL-DECODE-STATE-001",
+        "predicate": {
+          "contract_predicate": "state-equality",
+          "name": "state-equals-authored-model",
+          "payload": {}
+        },
+        "state_facts": {
+          "transaction_count": 2,
+          "row_count": 2,
+          "stream": {
+            "materialized_stream_generation": "stream-1",
+            "materialized_kind": "transaction_end",
+            "materialized_commit_lsn": "20",
+            "acknowledged_end_lsn": "21"
+          },
+          "transactions": [
+            {
+              "stream_generation": "stream-1",
+              "commit_lsn": "10",
+              "end_lsn": "11",
+              "registry_generation": 1,
+              "lifecycle": "materialized",
+              "event_ordinals": [1]
+            },
+            {
+              "stream_generation": "stream-1",
+              "commit_lsn": "20",
+              "end_lsn": "21",
+              "registry_generation": 1,
+              "lifecycle": "materialized",
+              "event_ordinals": [2]
+            }
+          ],
+          "rows": [
+            {
+              "table_id": "items",
+              "canonical_wire_json": "\"poison-row\"",
+              "version": "v1",
+              "checksum": "2222222222222222222222222222222222222222222222222222222222222222"
+            },
+            {
+              "table_id": "items",
+              "canonical_wire_json": "\"valid-row\"",
+              "version": "v1",
+              "checksum": "3333333333333333333333333333333333333333333333333333333333333333"
+            }
+          ],
+          "poison": [
+            {
+              "stream_generation": "stream-1",
+              "commit_lsn": "10",
+              "relation": "public.items",
+              "reason": "decode_failed",
+              "lifecycle": "repaired"
+            }
+          ]
+        }
+      },
+      {
+        "id": "EXPECT-WAL-DECODE-TRANSITION-001",
+        "predicate": {
+          "contract_predicate": "state-transition",
+          "name": "legal-state-transition",
+          "payload": {}
+        }
+      },
+      {
+        "id": "EXPECT-WAL-DECODE-CONTROL-001",
+        "predicate": {
+          "contract_predicate": "negative-control-detection",
+          "name": "negative-control-detected",
+          "payload": {}
+        }
+      }
+    ]
+  },
+  "barrier_plan": {
+    "barriers": [
+      {
+        "id": "BAR-WAL-DECODE-CONTROL-001",
+        "name": "Before decode of LSN 10",
+        "release_order": 1,
+        "participants": [
+          "runner",
+          "wal-worker"
+        ]
+      }
+    ]
+  },
+  "fault_plans": [
+    {
+      "id": "FPL-WAL-DECODE-001",
+      "requirement_id": "SYNC-WAL-006",
+      "fault_id": "FAULT-WAL-006",
+      "control_id": "CTRL-WAL-006",
+      "barrier_id": "BAR-WAL-DECODE-CONTROL-001",
+      "expected_assertion_ids": [
+        "ASSERT-WAL-DECODE-CONTROL-001"
+      ],
+      "injection": {
+        "mechanism": "process-fault",
+        "target": "poison transaction decode and quarantine",
+        "operator": "bypass",
+        "parameters": {
+          "scenario": "deliver an undecodable source transaction followed by valid transactions",
+          "defect": "log and skip poison or acknowledge later progress without durable redacted quarantine and blocking"
+        }
+      }
+    }
+  ],
+  "replay": {
+    "mode": "deterministic",
+    "seed_required": false,
+    "barrier_trace_required": true
+  },
+  "negative_controls": [
+    {
+      "control_id": "CTRL-WAL-006",
+      "requirement_id": "SYNC-WAL-006",
+      "fault_id": "FAULT-WAL-006",
+      "subject_artifact_inventory_ids": [
+        "ARTDEF-PG-EXTENSION-001"
+      ],
+      "detected_by": [
+        "ASSERT-WAL-DECODE-CONTROL-001"
+      ]
+    }
+  ],
+  "steps": [
+    {
+      "id": "STEP-WAL-DECODE-COMMIT-POISON-001",
+      "phase": "exercise",
+      "transport": "model",
+      "description": "Commit the poison source transaction at LSN 10.",
+      "operation": {
+        "contract_operation": "model",
+        "name": "commit-source-transaction",
+        "payload": {
+          "stream_generation": "stream-1",
+          "commit_lsn": "10",
+          "end_lsn": "11",
+          "events": [
+            {
+              "event_ordinal": 1,
+              "relation": "public.items",
+              "operation": "insert",
+              "before": null,
+              "after": {
+                "identity": {
+                  "kind": "synced",
+                  "synced_row": {
+                    "canonical_identity_bytes": "items:id:poison-row",
+                    "table_id": "items",
+                    "primary_key_field_id": "id",
+                    "portable_type": "string",
+                    "canonical_wire_json": "\"poison-row\""
+                  },
+                  "capture_key": null
+                },
+                "fields": [
+                  {
+                    "field": "id",
+                    "type": "string",
+                    "wire_json": "\"poison-row\""
+                  },
+                  {
+                    "field": "value",
+                    "type": "string",
+                    "wire_json": "\"poison\""
+                  }
+                ],
+                "version": "v1",
+                "checksum": "2222222222222222222222222222222222222222222222222222222222222222",
+                "deleted": false
+              }
+            }
+          ]
+        }
+      },
+      "expected_outcome": {
+        "disposition": "success"
+      }
+    },
+    {
+      "id": "STEP-WAL-DECODE-COMMIT-VALID-001",
+      "phase": "exercise",
+      "transport": "model",
+      "description": "Commit the later valid source transaction at LSN 20.",
+      "operation": {
+        "contract_operation": "model",
+        "name": "commit-source-transaction",
+        "payload": {
+          "stream_generation": "stream-1",
+          "commit_lsn": "20",
+          "end_lsn": "21",
+          "events": [
+            {
+              "event_ordinal": 2,
+              "relation": "public.items",
+              "operation": "insert",
+              "before": null,
+              "after": {
+                "identity": {
+                  "kind": "synced",
+                  "synced_row": {
+                    "canonical_identity_bytes": "items:id:valid-row",
+                    "table_id": "items",
+                    "primary_key_field_id": "id",
+                    "portable_type": "string",
+                    "canonical_wire_json": "\"valid-row\""
+                  },
+                  "capture_key": null
+                },
+                "fields": [
+                  {
+                    "field": "id",
+                    "type": "string",
+                    "wire_json": "\"valid-row\""
+                  },
+                  {
+                    "field": "value",
+                    "type": "string",
+                    "wire_json": "\"valid\""
+                  }
+                ],
+                "version": "v1",
+                "checksum": "3333333333333333333333333333333333333333333333333333333333333333",
+                "deleted": false
+              }
+            }
+          ]
+        }
+      },
+      "expected_outcome": {
+        "disposition": "success"
+      }
+    },
+    {
+      "id": "STEP-WAL-DECODE-MATERIALIZE-POISON-001",
+      "phase": "exercise",
+      "transport": "process",
+      "description": "Fail decode for LSN 10 and create durable redacted quarantine.",
+      "operation": {
+        "contract_operation": "process",
+        "name": "materialize-source-transaction",
+        "payload": {
+          "stream_generation": "stream-1",
+          "commit_lsn": "10",
+          "failure_class": "decode_failed"
+        }
+      },
+      "expected_outcome": {
+        "disposition": "success"
+      }
+    },
+    {
+      "id": "STEP-WAL-DECODE-BLOCKED-001",
+      "phase": "exercise",
+      "transport": "process",
+      "description": "Reject LSN 20 because the active LSN 10 poison blocks later materialization.",
+      "operation": {
+        "contract_operation": "process",
+        "name": "materialize-source-transaction",
+        "payload": {
+          "stream_generation": "stream-1",
+          "commit_lsn": "20"
+        }
+      },
+      "expected_outcome": {
+        "disposition": "error",
+        "error_code": "source_transaction_poison_blocked"
+      }
+    },
+    {
+      "id": "STEP-WAL-DECODE-ACK-BLOCKED-001",
+      "phase": "exercise",
+      "transport": "process",
+      "description": "Acknowledge only the contiguous durable prefix before LSN 10.",
+      "operation": {
+        "contract_operation": "process",
+        "name": "acknowledge-contiguous-prefix",
+        "payload": {
+          "stream_generation": "stream-1"
+        }
+      },
+      "expected_outcome": {
+        "disposition": "success"
+      }
+    },
+    {
+      "id": "STEP-WAL-DECODE-RESTART-001",
+      "phase": "exercise",
+      "transport": "process",
+      "description": "Restart worker 1 without losing quarantine or durable work.",
+      "operation": {
+        "contract_operation": "process",
+        "name": "restart-wal-worker",
+        "payload": {
+          "worker_id": "worker-1"
+        }
+      },
+      "expected_outcome": {
+        "disposition": "success"
+      }
+    },
+    {
+      "id": "STEP-WAL-DECODE-REPAIR-001",
+      "phase": "exercise",
+      "transport": "process",
+      "description": "Repair and retry the same LSN 10 transaction identity.",
+      "operation": {
+        "contract_operation": "process",
+        "name": "repair-and-retry-source-transaction",
+        "payload": {
+          "stream_generation": "stream-1",
+          "commit_lsn": "10"
+        }
+      },
+      "expected_outcome": {
+        "disposition": "success"
+      }
+    },
+    {
+      "id": "STEP-WAL-DECODE-MATERIALIZE-VALID-001",
+      "phase": "exercise",
+      "transport": "process",
+      "description": "Materialize LSN 20 only after same-identity repair succeeds.",
+      "operation": {
+        "contract_operation": "process",
+        "name": "materialize-source-transaction",
+        "payload": {
+          "stream_generation": "stream-1",
+          "commit_lsn": "20"
+        }
+      },
+      "expected_outcome": {
+        "disposition": "success"
+      }
+    },
+    {
+      "id": "STEP-WAL-DECODE-ACK-FINAL-001",
+      "phase": "exercise",
+      "transport": "process",
+      "description": "Acknowledge the repaired contiguous prefix through end LSN 21.",
+      "operation": {
+        "contract_operation": "process",
+        "name": "acknowledge-contiguous-prefix",
+        "payload": {
+          "stream_generation": "stream-1"
+        }
+      },
+      "expected_outcome": {
+        "disposition": "success"
+      }
+    }
+  ],
+  "wire_expectations": [],
+  "assertions": [
+    {
+      "id": "ASSERT-WAL-DECODE-SEMANTIC-001",
+      "requirement_ids": [
+        "SYNC-WAL-006"
+      ],
+      "description": "LSN 10 remains redacted quarantined across restart, blocks LSN 20, repairs under the same identity, and permits acknowledgement through end LSN 21.",
+      "expectation_ids": [
+        "EXPECT-WAL-DECODE-STATE-001",
+        "EXPECT-WAL-DECODE-TRANSITION-001"
+      ],
+      "predicate": {
+        "contract_predicate": "state-equality",
+        "name": "state-equals-authored-model",
+        "payload": {}
+      },
+      "oracle": {
+        "kind": "model-state-equality",
+        "expected_source": "authored-model",
+        "observed_source": "system-under-test"
+      },
+      "detects_control_ids": []
+    },
+    {
+      "id": "ASSERT-WAL-DECODE-CONTROL-001",
+      "requirement_ids": [
+        "SYNC-WAL-006"
+      ],
+      "description": "The control detects skipped poison, missing redacted quarantine, later materialization, and acknowledgement past poison.",
+      "expectation_ids": [
+        "EXPECT-WAL-DECODE-CONTROL-001"
+      ],
+      "predicate": {
+        "contract_predicate": "negative-control-detection",
+        "name": "negative-control-detected",
+        "payload": {}
+      },
+      "oracle": {
+        "kind": "negative-control-detection",
+        "expected_source": "authored-model",
+        "observed_source": "system-under-test"
+      },
+      "detects_control_ids": [
+        "CTRL-WAL-006"
+      ]
+    }
+  ]
+}

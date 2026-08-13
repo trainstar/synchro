@@ -1,0 +1,887 @@
+{
+  "$schema": "https://synchro.dev/conformance/schemas/scenario-v2.schema.json",
+  "schema_version": 2,
+  "id": "SCN-MEMBERSHIP-REASSIGNMENT-001",
+  "title": "Dependency-driven scope reassignment",
+  "description": "Materialize a synchronized row and two dependency changes in commit order without changing the row version or retaining stale membership.",
+  "requirement_ids": [
+    "SYNC-MEMBERSHIP-001"
+  ],
+  "normative_references": [
+    {
+      "path": "docs/src/content/docs/spec/04-invariants.mdx",
+      "anchor": "#dependency-driven-membership-propagation"
+    }
+  ],
+  "proof_types": [
+    "reference-model",
+    "server-black-box",
+    "fault-injection",
+    "negative-control"
+  ],
+  "proof_obligations": [
+    {
+      "obligation_id": "OBL-MEMBERSHIP-REASSIGNMENT-RM-001",
+      "requirement_ids": [
+        "SYNC-MEMBERSHIP-001"
+      ],
+      "assertion_ids": [
+        "ASSERT-MEMBERSHIP-REASSIGNMENT-SEMANTIC-001"
+      ],
+      "proof_type": "reference-model",
+      "support_cell_id": null,
+      "artifact_inventory_ids": [
+        "ARTDEF-CONFORMANCE-RUNNER-001"
+      ],
+      "performance_budget_ids": [],
+      "required_measurement_ids": [],
+      "required_vector_set_ids": [],
+      "make_target": "test-conformance",
+      "argv": [
+        "make",
+        "test-conformance"
+      ],
+      "fault_plan_id": null,
+      "control_id": null
+    },
+    {
+      "obligation_id": "OBL-MEMBERSHIP-REASSIGNMENT-PG-001",
+      "requirement_ids": [
+        "SYNC-MEMBERSHIP-001"
+      ],
+      "assertion_ids": [
+        "ASSERT-MEMBERSHIP-REASSIGNMENT-SEMANTIC-001"
+      ],
+      "proof_type": "server-black-box",
+      "support_cell_id": "SUP-PG-018",
+      "artifact_inventory_ids": [
+        "ARTDEF-PG-EXTENSION-001",
+        "ARTDEF-ADAPTER-001"
+      ],
+      "performance_budget_ids": [],
+      "required_measurement_ids": [],
+      "required_vector_set_ids": [],
+      "make_target": "test-blackbox",
+      "argv": [
+        "make",
+        "test-blackbox"
+      ],
+      "fault_plan_id": null,
+      "control_id": null
+    },
+    {
+      "obligation_id": "OBL-MEMBERSHIP-REASSIGNMENT-FAULT-001",
+      "requirement_ids": [
+        "SYNC-MEMBERSHIP-001"
+      ],
+      "assertion_ids": [
+        "ASSERT-MEMBERSHIP-REASSIGNMENT-CONTROL-001"
+      ],
+      "proof_type": "fault-injection",
+      "support_cell_id": "SUP-PG-018",
+      "artifact_inventory_ids": [
+        "ARTDEF-PG-EXTENSION-001",
+        "ARTDEF-ADAPTER-001"
+      ],
+      "performance_budget_ids": [],
+      "required_measurement_ids": [],
+      "required_vector_set_ids": [],
+      "make_target": "test-blackbox",
+      "argv": [
+        "make",
+        "test-blackbox"
+      ],
+      "fault_plan_id": "FPL-MEMBERSHIP-REASSIGNMENT-001",
+      "control_id": "CTRL-MEMBERSHIP-001"
+    },
+    {
+      "obligation_id": "OBL-MEMBERSHIP-REASSIGNMENT-CONTROL-001",
+      "requirement_ids": [
+        "SYNC-MEMBERSHIP-001"
+      ],
+      "assertion_ids": [
+        "ASSERT-MEMBERSHIP-REASSIGNMENT-CONTROL-001"
+      ],
+      "proof_type": "negative-control",
+      "support_cell_id": null,
+      "artifact_inventory_ids": [
+        "ARTDEF-CONFORMANCE-RUNNER-001",
+        "ARTDEF-PG-EXTENSION-001"
+      ],
+      "performance_budget_ids": [],
+      "required_measurement_ids": [],
+      "required_vector_set_ids": [],
+      "make_target": "test-conformance",
+      "argv": [
+        "make",
+        "test-conformance"
+      ],
+      "fault_plan_id": "FPL-MEMBERSHIP-REASSIGNMENT-001",
+      "control_id": "CTRL-MEMBERSHIP-001"
+    }
+  ],
+  "ownership": [
+    {
+      "scenario_id": "SCN-MEMBERSHIP-REASSIGNMENT-001",
+      "requirement_id": "SYNC-MEMBERSHIP-001",
+      "proof_obligation_id": "OBL-MEMBERSHIP-REASSIGNMENT-RM-001",
+      "assertion_id": "ASSERT-MEMBERSHIP-REASSIGNMENT-SEMANTIC-001",
+      "proof_type": "reference-model",
+      "support_cell_id": null
+    },
+    {
+      "scenario_id": "SCN-MEMBERSHIP-REASSIGNMENT-001",
+      "requirement_id": "SYNC-MEMBERSHIP-001",
+      "proof_obligation_id": "OBL-MEMBERSHIP-REASSIGNMENT-PG-001",
+      "assertion_id": "ASSERT-MEMBERSHIP-REASSIGNMENT-SEMANTIC-001",
+      "proof_type": "server-black-box",
+      "support_cell_id": "SUP-PG-018"
+    },
+    {
+      "scenario_id": "SCN-MEMBERSHIP-REASSIGNMENT-001",
+      "requirement_id": "SYNC-MEMBERSHIP-001",
+      "proof_obligation_id": "OBL-MEMBERSHIP-REASSIGNMENT-FAULT-001",
+      "assertion_id": "ASSERT-MEMBERSHIP-REASSIGNMENT-CONTROL-001",
+      "proof_type": "fault-injection",
+      "support_cell_id": "SUP-PG-018"
+    },
+    {
+      "scenario_id": "SCN-MEMBERSHIP-REASSIGNMENT-001",
+      "requirement_id": "SYNC-MEMBERSHIP-001",
+      "proof_obligation_id": "OBL-MEMBERSHIP-REASSIGNMENT-CONTROL-001",
+      "assertion_id": "ASSERT-MEMBERSHIP-REASSIGNMENT-CONTROL-001",
+      "proof_type": "negative-control",
+      "support_cell_id": null
+    }
+  ],
+  "model": {
+    "setup": [
+      {
+        "contract_operation": "model",
+        "name": "install-current-contract",
+        "payload": {
+          "installation": {
+            "installed": true,
+            "schema_name": "synchro",
+            "extension_version": "0.3.0",
+            "protocol_version": 3,
+            "minimum_client_runtime": 3,
+            "stale_client_interval_milliseconds": 3600000,
+            "endpoints": [
+              "pull"
+            ],
+            "capabilities": []
+          },
+          "initial_schema": {
+            "schema": {
+              "version": 1,
+              "hash": "72a2f32c8974700dd92ac0effabd8d1a98f8fafb0d512f84b683884abbe5fe21"
+            },
+            "body": "{\"compatibility_floor\":1,\"parent_schema\":null,\"schema_hash\":\"72a2f32c8974700dd92ac0effabd8d1a98f8fafb0d512f84b683884abbe5fe21\",\"schema_version\":1,\"tables\":[{\"composition\":\"single_scope\",\"fields\":[{\"field_id\":\"id\",\"name\":\"id\",\"nullable\":false,\"type\":\"string\",\"writable\":false},{\"field_id\":\"value\",\"name\":\"value\",\"nullable\":false,\"type\":\"string\",\"writable\":true}],\"indexes\":[{\"field_ids\":[\"id\"],\"index_id\":\"rows-pk\",\"name\":\"rows_pkey\",\"unique\":true}],\"lifecycle\":{\"created_at_field_id\":null,\"deleted_at_field_id\":null,\"updated_at_field_id\":null},\"name\":\"rows\",\"primary_key_field_id\":\"id\",\"relation_id\":\"rows\",\"table_id\":\"rows\"}],\"transition_class\":\"initial\"}",
+            "transition_class": "initial",
+            "compatibility_floor": 1,
+            "tables": [
+              {
+                "table_id": "rows",
+                "relation_id": "rows",
+                "name": "rows",
+                "composition": "single_scope",
+                "primary_key_field_id": "id",
+                "created_at_field_id": null,
+                "updated_at_field_id": null,
+                "deleted_at_field_id": null,
+                "fields": [
+                  {
+                    "field_id": "id",
+                    "name": "id",
+                    "type": "string",
+                    "primary_key": true,
+                    "nullable": false,
+                    "writable": false,
+                    "decimal_precision": null,
+                    "decimal_scale": null,
+                    "default_wire_json": null
+                  },
+                  {
+                    "field_id": "value",
+                    "name": "value",
+                    "type": "string",
+                    "primary_key": false,
+                    "nullable": false,
+                    "writable": true,
+                    "decimal_precision": null,
+                    "decimal_scale": null,
+                    "default_wire_json": null
+                  }
+                ],
+                "indexes": [
+                  {
+                    "index_id": "rows-pk",
+                    "name": "rows_pkey",
+                    "field_ids": [
+                      "id"
+                    ],
+                    "unique": true
+                  }
+                ]
+              }
+            ],
+            "affected_scopes": []
+          },
+          "initial_registry": {
+            "registry_generation": 1,
+            "relations": [
+              {
+                "relation": "rows",
+                "registration_kind": "synced",
+                "table_id": "rows",
+                "physical": {
+                  "schema": "app",
+                  "name": "rows",
+                  "oid": 101,
+                  "replica_identity": "default"
+                },
+                "primary_key_field_id": "id",
+                "primary_key_physical_column": "id",
+                "primary_key_portable_type": "string",
+                "capture_key_field_ids": [],
+                "captured_field_ids": [
+                  "id",
+                  "value"
+                ],
+                "membership_function": "rows-membership",
+                "positive_fanout_bound": 8,
+                "dependency_impact_function": null,
+                "dependency_captured_field_ids": [],
+                "positive_dependency_row_bound": null
+              },
+              {
+                "relation": "dependencies",
+                "registration_kind": "capture_dependency",
+                "table_id": null,
+                "physical": {
+                  "schema": "app",
+                  "name": "dependencies",
+                  "oid": 102,
+                  "replica_identity": "default"
+                },
+                "primary_key_field_id": null,
+                "primary_key_physical_column": null,
+                "primary_key_portable_type": null,
+                "capture_key_field_ids": [
+                  "dependency_id"
+                ],
+                "captured_field_ids": [
+                  "dependency_id",
+                  "owner"
+                ],
+                "membership_function": null,
+                "positive_fanout_bound": 8,
+                "dependency_impact_function": "dependency-impact",
+                "dependency_captured_field_ids": [
+                  "owner"
+                ],
+                "positive_dependency_row_bound": 1
+              }
+            ],
+            "capture_dependencies": [
+              {
+                "capture_dependency_id": "dependency-rows",
+                "relation": "dependencies",
+                "depends_on": "rows"
+              }
+            ],
+            "scope_rules": [
+              {
+                "scope_rule_id": "rows-rule",
+                "relation": "rows",
+                "membership_function": "rows-membership",
+                "positive_fanout_bound": 8,
+                "evaluations": [
+                  {
+                    "row": {
+                      "canonical_identity_bytes": "row:row-a",
+                      "table_id": "rows",
+                      "primary_key_field_id": "id",
+                      "portable_type": "string",
+                      "canonical_wire_json": "\"row-a\""
+                    },
+                    "scopes": [
+                      "scope-a"
+                    ]
+                  }
+                ]
+              }
+            ],
+            "dependency_impacts": [
+              {
+                "dependency_impact_id": "dependency-impact",
+                "relation": "dependencies",
+                "function": "dependency-impact",
+                "captured_field_ids": [
+                  "owner"
+                ],
+                "positive_row_bound": 1,
+                "affected_rows": [
+                  {
+                    "canonical_identity_bytes": "row:row-a",
+                    "table_id": "rows",
+                    "primary_key_field_id": "id",
+                    "portable_type": "string",
+                    "canonical_wire_json": "\"row-a\""
+                  }
+                ],
+                "requires_rebuild": false
+              }
+            ]
+          },
+          "stream": {
+            "stream_generation": "stream-1",
+            "database": "conformance",
+            "worker_id": "worker-1",
+            "slot_id": "slot-1"
+          },
+          "empty_scopes": [
+            {
+              "scope_id": "scope-a",
+              "membership_generation": 1,
+              "retention_generation": 1
+            },
+            {
+              "scope_id": "scope-b",
+              "membership_generation": 1,
+              "retention_generation": 1
+            }
+          ],
+          "clients": [],
+          "write_policies": [],
+          "configured_limits": {
+            "max_scope_fanout": 8,
+            "max_impact_rows": 1000,
+            "pull_maximum": 1000,
+            "rebuild_maximum": 1000,
+            "compaction_batch_maximum": 10000,
+            "backfill_batch_maximum": 1000
+          }
+        }
+      }
+    ],
+    "expected_state": [
+      {
+        "id": "EXPECT-MEMBERSHIP-REASSIGNMENT-SEMANTIC-001",
+        "predicate": {
+          "contract_predicate": "state-transition",
+          "name": "legal-state-transition",
+          "payload": {}
+        }
+      },
+      {
+        "id": "EXPECT-MEMBERSHIP-REASSIGNMENT-CONTROL-001",
+        "predicate": {
+          "contract_predicate": "negative-control-detection",
+          "name": "negative-control-detected",
+          "payload": {}
+        }
+      }
+    ]
+  },
+  "barrier_plan": {
+    "barriers": [
+      {
+        "id": "BAR-MEMBERSHIP-REASSIGNMENT-CONTROL-001",
+        "name": "before dependency impact evaluation",
+        "release_order": 1,
+        "participants": [
+          "wal-worker",
+          "dependency-impact"
+        ]
+      }
+    ]
+  },
+  "fault_plans": [
+    {
+      "id": "FPL-MEMBERSHIP-REASSIGNMENT-001",
+      "requirement_id": "SYNC-MEMBERSHIP-001",
+      "fault_id": "FAULT-MEMBERSHIP-001",
+      "control_id": "CTRL-MEMBERSHIP-001",
+      "barrier_id": "BAR-MEMBERSHIP-REASSIGNMENT-CONTROL-001",
+      "expected_assertion_ids": [
+        "ASSERT-MEMBERSHIP-REASSIGNMENT-CONTROL-001"
+      ],
+      "injection": {
+        "mechanism": "source-mutant",
+        "target": "dependency impact propagation old/new projection",
+        "operator": "omit",
+        "parameters": {
+          "scenario": "revoke, reassign, delete, and update a declared external dependency in one commit",
+          "defect": "skip an affected source row or evaluate against later live state instead of captured old/new images"
+        }
+      }
+    }
+  ],
+  "replay": {
+    "mode": "deterministic",
+    "seed_required": false,
+    "barrier_trace_required": true
+  },
+  "negative_controls": [
+    {
+      "control_id": "CTRL-MEMBERSHIP-001",
+      "requirement_id": "SYNC-MEMBERSHIP-001",
+      "fault_id": "FAULT-MEMBERSHIP-001",
+      "subject_artifact_inventory_ids": [
+        "ARTDEF-PG-EXTENSION-001"
+      ],
+      "detected_by": [
+        "ASSERT-MEMBERSHIP-REASSIGNMENT-CONTROL-001"
+      ]
+    }
+  ],
+  "steps": [
+    {
+      "id": "STEP-MEMBERSHIP-REASSIGNMENT-COMMIT-010",
+      "phase": "exercise",
+      "transport": "model",
+      "description": "Commit the source row at LSN 10 with version v1.",
+      "operation": {
+        "contract_operation": "model",
+        "name": "commit-source-transaction",
+        "payload": {
+          "stream_generation": "stream-1",
+          "commit_lsn": "10",
+          "end_lsn": "11",
+          "events": [
+            {
+              "event_ordinal": 1,
+              "relation": "rows",
+              "operation": "insert",
+              "before": null,
+              "after": {
+                "identity": {
+                  "kind": "synced",
+                  "synced_row": {
+                    "canonical_identity_bytes": "row:row-a",
+                    "table_id": "rows",
+                    "primary_key_field_id": "id",
+                    "portable_type": "string",
+                    "canonical_wire_json": "\"row-a\""
+                  },
+                  "capture_key": null
+                },
+                "fields": [
+                  {
+                    "field": "id",
+                    "type": "string",
+                    "wire_json": "\"row-a\""
+                  },
+                  {
+                    "field": "value",
+                    "type": "string",
+                    "wire_json": "\"source\""
+                  }
+                ],
+                "version": "v1",
+                "checksum": "0000000000000000000000000000000000000000000000000000000000000000",
+                "deleted": false
+              }
+            }
+          ]
+        }
+      },
+      "expected_outcome": {
+        "disposition": "success"
+      }
+    },
+    {
+      "id": "STEP-MEMBERSHIP-REASSIGNMENT-MATERIALIZE-010",
+      "phase": "exercise",
+      "transport": "process",
+      "description": "Materialize the source row at LSN 10.",
+      "operation": {
+        "contract_operation": "process",
+        "name": "materialize-source-transaction",
+        "payload": {
+          "stream_generation": "stream-1",
+          "commit_lsn": "10"
+        }
+      },
+      "expected_outcome": {
+        "disposition": "success"
+      }
+    },
+    {
+      "id": "STEP-MEMBERSHIP-REASSIGNMENT-STAGE-002",
+      "phase": "exercise",
+      "transport": "model",
+      "description": "Stage generation two after LSN 10 with row-a assigned to scope B.",
+      "operation": {
+        "contract_operation": "model",
+        "name": "stage-registry-membership-generation",
+        "payload": {
+		  "batch_size": 1000,
+          "registry_generation": 2,
+          "membership_generation": 2,
+          "activation_boundary": {
+            "stream_generation": "stream-1",
+            "kind": "transaction_end",
+            "commit_lsn": "10"
+          },
+          "affected_scopes": [
+            "scope-a",
+            "scope-b"
+          ],
+          "scope_rules": [
+            {
+              "scope_rule_id": "rows-rule",
+              "relation": "rows",
+              "membership_function": "rows-membership",
+              "positive_fanout_bound": 8,
+              "evaluations": [
+                {
+                  "row": {
+                    "canonical_identity_bytes": "row:row-a",
+                    "table_id": "rows",
+                    "primary_key_field_id": "id",
+                    "portable_type": "string",
+                    "canonical_wire_json": "\"row-a\""
+                  },
+                  "scopes": [
+                    "scope-b"
+                  ]
+                }
+              ]
+            }
+          ],
+          "dependency_impacts": [
+            {
+              "dependency_impact_id": "dependency-impact",
+              "relation": "dependencies",
+              "function": "dependency-impact",
+              "captured_field_ids": [
+                "owner"
+              ],
+              "positive_row_bound": 1,
+              "affected_rows": [
+                {
+                  "canonical_identity_bytes": "row:row-a",
+                  "table_id": "rows",
+                  "primary_key_field_id": "id",
+                  "portable_type": "string",
+                  "canonical_wire_json": "\"row-a\""
+                }
+              ],
+              "requires_rebuild": false
+            }
+          ]
+        }
+      },
+      "expected_outcome": {
+        "disposition": "success"
+      }
+    },
+    {
+      "id": "STEP-MEMBERSHIP-REASSIGNMENT-ACTIVATE-002",
+      "phase": "exercise",
+      "transport": "model",
+      "description": "Activate generation two before the first dependency change.",
+      "operation": {
+        "contract_operation": "model",
+        "name": "activate-registry-membership-generation",
+        "payload": {
+          "registry_generation": 2
+        }
+      },
+      "expected_outcome": {
+        "disposition": "success"
+      }
+    },
+    {
+      "id": "STEP-MEMBERSHIP-REASSIGNMENT-COMMIT-020",
+      "phase": "exercise",
+      "transport": "model",
+      "description": "Commit the dependency insertion at LSN 20 and causal ordinal 5.",
+      "operation": {
+        "contract_operation": "model",
+        "name": "commit-source-transaction",
+        "payload": {
+          "stream_generation": "stream-1",
+          "commit_lsn": "20",
+          "end_lsn": "21",
+          "events": [
+            {
+              "event_ordinal": 5,
+              "relation": "dependencies",
+              "operation": "insert",
+              "before": null,
+              "after": {
+                "identity": {
+                  "kind": "capture_dependency",
+                  "synced_row": null,
+                  "capture_key": {
+                    "canonical_key_bytes": "dependency-1"
+                  }
+                },
+                "fields": [
+                  {
+                    "field": "dependency_id",
+                    "type": "string",
+                    "wire_json": "\"dependency-1\""
+                  },
+                  {
+                    "field": "owner",
+                    "type": "string",
+                    "wire_json": "\"owner-a\""
+                  }
+                ],
+                "version": "d1",
+                "checksum": null,
+                "deleted": false
+              }
+            }
+          ]
+        }
+      },
+      "expected_outcome": {
+        "disposition": "success"
+      }
+    },
+    {
+      "id": "STEP-MEMBERSHIP-REASSIGNMENT-MATERIALIZE-020",
+      "phase": "exercise",
+      "transport": "process",
+      "description": "Materialize the dependency insertion and emit scope-A delete then scope-B upsert at ordinal 5.",
+      "operation": {
+        "contract_operation": "process",
+        "name": "materialize-source-transaction",
+        "payload": {
+          "stream_generation": "stream-1",
+          "commit_lsn": "20"
+        }
+      },
+      "expected_outcome": {
+        "disposition": "success"
+      }
+    },
+    {
+      "id": "STEP-MEMBERSHIP-REASSIGNMENT-STAGE-003",
+      "phase": "exercise",
+      "transport": "model",
+      "description": "Stage generation three after LSN 20 with row-a removed from all scopes.",
+      "operation": {
+        "contract_operation": "model",
+        "name": "stage-registry-membership-generation",
+        "payload": {
+		  "batch_size": 1000,
+          "registry_generation": 3,
+          "membership_generation": 3,
+          "activation_boundary": {
+            "stream_generation": "stream-1",
+            "kind": "transaction_end",
+            "commit_lsn": "20"
+          },
+          "affected_scopes": [
+            "scope-a",
+            "scope-b"
+          ],
+          "scope_rules": [
+            {
+              "scope_rule_id": "rows-rule",
+              "relation": "rows",
+              "membership_function": "rows-membership",
+              "positive_fanout_bound": 8,
+              "evaluations": [
+                {
+                  "row": {
+                    "canonical_identity_bytes": "row:row-a",
+                    "table_id": "rows",
+                    "primary_key_field_id": "id",
+                    "portable_type": "string",
+                    "canonical_wire_json": "\"row-a\""
+                  },
+                  "scopes": []
+                }
+              ]
+            }
+          ],
+          "dependency_impacts": [
+            {
+              "dependency_impact_id": "dependency-impact",
+              "relation": "dependencies",
+              "function": "dependency-impact",
+              "captured_field_ids": [
+                "owner"
+              ],
+              "positive_row_bound": 1,
+              "affected_rows": [
+                {
+                  "canonical_identity_bytes": "row:row-a",
+                  "table_id": "rows",
+                  "primary_key_field_id": "id",
+                  "portable_type": "string",
+                  "canonical_wire_json": "\"row-a\""
+                }
+              ],
+              "requires_rebuild": false
+            }
+          ]
+        }
+      },
+      "expected_outcome": {
+        "disposition": "success"
+      }
+    },
+    {
+      "id": "STEP-MEMBERSHIP-REASSIGNMENT-ACTIVATE-003",
+      "phase": "exercise",
+      "transport": "model",
+      "description": "Activate generation three before the dependency reassignment.",
+      "operation": {
+        "contract_operation": "model",
+        "name": "activate-registry-membership-generation",
+        "payload": {
+          "registry_generation": 3
+        }
+      },
+      "expected_outcome": {
+        "disposition": "success"
+      }
+    },
+    {
+      "id": "STEP-MEMBERSHIP-REASSIGNMENT-COMMIT-030",
+      "phase": "exercise",
+      "transport": "model",
+      "description": "Commit the dependency reassignment at LSN 30 and causal ordinal 8.",
+      "operation": {
+        "contract_operation": "model",
+        "name": "commit-source-transaction",
+        "payload": {
+          "stream_generation": "stream-1",
+          "commit_lsn": "30",
+          "end_lsn": "31",
+          "events": [
+            {
+              "event_ordinal": 8,
+              "relation": "dependencies",
+              "operation": "update",
+              "before": {
+                "identity": {
+                  "kind": "capture_dependency",
+                  "synced_row": null,
+                  "capture_key": {
+                    "canonical_key_bytes": "dependency-1"
+                  }
+                },
+                "fields": [
+                  {
+                    "field": "dependency_id",
+                    "type": "string",
+                    "wire_json": "\"dependency-1\""
+                  },
+                  {
+                    "field": "owner",
+                    "type": "string",
+                    "wire_json": "\"owner-a\""
+                  }
+                ],
+                "version": "d1",
+                "checksum": null,
+                "deleted": false
+              },
+              "after": {
+                "identity": {
+                  "kind": "capture_dependency",
+                  "synced_row": null,
+                  "capture_key": {
+                    "canonical_key_bytes": "dependency-1"
+                  }
+                },
+                "fields": [
+                  {
+                    "field": "dependency_id",
+                    "type": "string",
+                    "wire_json": "\"dependency-1\""
+                  },
+                  {
+                    "field": "owner",
+                    "type": "string",
+                    "wire_json": "\"owner-b\""
+                  }
+                ],
+                "version": "d2",
+                "checksum": null,
+                "deleted": false
+              }
+            }
+          ]
+        }
+      },
+      "expected_outcome": {
+        "disposition": "success"
+      }
+    },
+    {
+      "id": "STEP-MEMBERSHIP-REASSIGNMENT-MATERIALIZE-030",
+      "phase": "cleanup",
+      "transport": "process",
+      "description": "Materialize the dependency reassignment and emit the scope-B delete at ordinal 8.",
+      "operation": {
+        "contract_operation": "process",
+        "name": "materialize-source-transaction",
+        "payload": {
+          "stream_generation": "stream-1",
+          "commit_lsn": "30"
+        }
+      },
+      "expected_outcome": {
+        "disposition": "success"
+      }
+    }
+  ],
+  "wire_expectations": [],
+  "assertions": [
+    {
+      "id": "ASSERT-MEMBERSHIP-REASSIGNMENT-SEMANTIC-001",
+      "requirement_ids": [
+        "SYNC-MEMBERSHIP-001"
+      ],
+      "description": "Source row version v1 survives both dependency changes, while effects are scope-A delete at ordinal 5, scope-B upsert at ordinal 5, and scope-B delete at ordinal 8.",
+      "expectation_ids": [
+        "EXPECT-MEMBERSHIP-REASSIGNMENT-SEMANTIC-001"
+      ],
+      "predicate": {
+        "contract_predicate": "state-transition",
+        "name": "legal-state-transition",
+        "payload": {}
+      },
+      "oracle": {
+        "kind": "state-transition",
+        "expected_source": "authored-model",
+        "observed_source": "system-under-test"
+      },
+      "detects_control_ids": []
+    },
+    {
+      "id": "ASSERT-MEMBERSHIP-REASSIGNMENT-CONTROL-001",
+      "requirement_ids": [
+        "SYNC-MEMBERSHIP-001"
+      ],
+      "description": "The control detects an omitted old or new dependency image, skipped source row, or live-state reassignment.",
+      "expectation_ids": [
+        "EXPECT-MEMBERSHIP-REASSIGNMENT-CONTROL-001"
+      ],
+      "predicate": {
+        "contract_predicate": "negative-control-detection",
+        "name": "negative-control-detected",
+        "payload": {}
+      },
+      "oracle": {
+        "kind": "negative-control-detection",
+        "expected_source": "authored-model",
+        "observed_source": "system-under-test"
+      },
+      "detects_control_ids": [
+        "CTRL-MEMBERSHIP-001"
+      ]
+    }
+  ]
+}

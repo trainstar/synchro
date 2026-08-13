@@ -19,6 +19,37 @@ permissions:
   contents: read
 
 jobs:
+  conformance-quality:
+    runs-on: ubuntu-24.04
+    env:
+      GOWORK: 'off'
+    steps:
+      - uses: actions/checkout@v6.0.2
+
+      - uses: actions/setup-go@v6.3.0
+        with:
+          go-version: '1.25.0'
+          cache: false
+
+      - uses: actions/cache@v5.0.4
+        with:
+          path: |
+            ~/go/pkg/mod
+            ~/.cache/go-build
+          key: conformance-go-${{ runner.os }}-1.25.0-${{ hashFiles('conformance/go.mod', 'conformance/go.sum') }}
+          restore-keys: |
+            conformance-go-${{ runner.os }}-1.25.0-
+
+      - name: Run conformance lint checks
+        env:
+          GOWORK: 'off'
+        run: make lint-conformance
+
+      - name: Run conformance tests
+        env:
+          GOWORK: 'off'
+        run: make test-conformance
+
   metadata:
     runs-on: ubuntu-24.04
     steps:
@@ -261,6 +292,114 @@ jobs:
 
       - name: Run adapter integration tests
         run: make test-adapter
+
+  conformance-pg18:
+    runs-on: ubuntu-24.04
+    needs: metadata
+    concurrency:
+      group: conformance-pg18-installation
+      cancel-in-progress: false
+    env:
+      GOWORK: 'off'
+      PGRX_VERSION: '0.17.0'
+      POSTGRESQL_VERSION: '18.3'
+      RUST_TOOLCHAIN: '1.92.0'
+      PGRX_TARGET_DIR: ${{ github.workspace }}/.pgrx-target
+    steps:
+      - uses: actions/checkout@v6.0.2
+
+      - uses: actions/setup-go@v6.3.0
+        with:
+          go-version: '1.25.0'
+          cache: false
+
+      - uses: dtolnay/rust-toolchain@1.92.0
+
+      - name: Install PostgreSQL extension build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            bison \
+            build-essential \
+            clang \
+            flex \
+            libclang-dev \
+            libreadline-dev \
+            libssl-dev \
+            libxml2-dev \
+            libxml2-utils \
+            libxslt-dev \
+            pkg-config \
+            xsltproc \
+            zlib1g-dev
+
+      - uses: actions/cache@v5.0.4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            ${{ github.workspace }}/.pgrx-target
+          key: conformance-cargo-${{ runner.os }}-${{ env.RUST_TOOLCHAIN }}-${{ hashFiles('extensions/Cargo.lock') }}-pg${{ env.POSTGRESQL_VERSION }}-pgrx${{ env.PGRX_VERSION }}
+          restore-keys: |
+            conformance-cargo-${{ runner.os }}-${{ env.RUST_TOOLCHAIN }}-${{ hashFiles('extensions/Cargo.lock') }}-pg${{ env.POSTGRESQL_VERSION }}-pgrx${{ env.PGRX_VERSION }}-
+
+      - name: Install exact cargo-pgrx
+        run: cargo install --locked cargo-pgrx --version "$PGRX_VERSION"
+
+      - name: Initialize and verify exact PostgreSQL 18 runtime
+        run: |
+          cargo pgrx init --pg18 download
+          PG_CONFIG="$(awk -F'\"' '/^pg18[[:space:]]*=/ { print $2 }' "$HOME/.pgrx/config.toml")"
+          test -x "$PG_CONFIG"
+          PG_BINDIR="$(dirname "$PG_CONFIG")"
+          for program in initdb pg_ctl postgres psql pg_isready pg_config; do
+            output="$("$PG_BINDIR/$program" --version)"
+            version="${output##* }"
+            test "$version" = "$POSTGRESQL_VERSION"
+          done
+
+      - name: Build immutable conformance artifacts
+        run: |
+          make conformance-adapter-artifact
+          make conformance-pg18-extension-artifact
+
+      - name: Verify artifact manifests and hashes
+        run: |
+          test "$(shasum -a 256 dist/conformance/synchrod-pg-adapter/synchrod-pg | cut -d ' ' -f 1)" = "$(tr -d '[:space:]' < dist/conformance/synchrod-pg-adapter/synchrod-pg.sha256)"
+          test -f dist/conformance/synchro-pg-pg18/artifact-manifest.json
+          test "$(shasum -a 256 dist/conformance/synchro-pg-pg18/artifact-manifest.json | cut -d ' ' -f 1)" = "$(tr -d '[:space:]' < dist/conformance/synchro-pg-pg18/artifact-manifest.json.sha256)"
+
+      - name: Create isolated conformance secrets
+        run: |
+          umask 077
+          SECRETS_DIR="$RUNNER_TEMP/synchro-conformance-secrets"
+          mkdir "$SECRETS_DIR"
+          openssl rand -hex 32 > "$SECRETS_DIR/admin-password"
+          openssl rand -hex 32 > "$SECRETS_DIR/adapter-password"
+          openssl rand -hex 32 > "$SECRETS_DIR/observer-password"
+          openssl rand -hex 32 > "$SECRETS_DIR/jwt-secret"
+          chmod 0600 "$SECRETS_DIR"/*
+          PG_CONFIG="$(awk -F'\"' '/^pg18[[:space:]]*=/ { print $2 }' "$HOME/.pgrx/config.toml")"
+          test -x "$PG_CONFIG"
+          {
+            echo "SYNCHRO_CONFORMANCE_PG18_BINDIR=$(dirname "$PG_CONFIG")"
+            echo "SYNCHRO_CONFORMANCE_EXTENSION_ARTIFACT=$GITHUB_WORKSPACE/dist/conformance/synchro-pg-pg18"
+            echo "SYNCHRO_CONFORMANCE_ADAPTER_ARTIFACT=$GITHUB_WORKSPACE/dist/conformance/synchrod-pg-adapter/synchrod-pg"
+            echo "SYNCHRO_CONFORMANCE_ADMIN_USER=synchro_cf_admin"
+            echo "SYNCHRO_CONFORMANCE_ADMIN_PASSWORD_FILE=$SECRETS_DIR/admin-password"
+            echo "SYNCHRO_CONFORMANCE_ADAPTER_USER=synchro_cf_adapter"
+            echo "SYNCHRO_CONFORMANCE_ADAPTER_PASSWORD_FILE=$SECRETS_DIR/adapter-password"
+            echo "SYNCHRO_CONFORMANCE_OBSERVER_USER=synchro_cf_observer"
+            echo "SYNCHRO_CONFORMANCE_OBSERVER_PASSWORD_FILE=$SECRETS_DIR/observer-password"
+            echo "SYNCHRO_CONFORMANCE_JWT_SECRET_FILE=$SECRETS_DIR/jwt-secret"
+            echo "SYNCHRO_CONFORMANCE_INSTALL_LOCK=$RUNNER_TEMP/synchro-conformance-install.lock"
+          } >> "$GITHUB_ENV"
+
+      - name: Run isolated PostgreSQL 18 baseline
+        env:
+          GOWORK: 'off'
+        run: make test-blackbox
 
   swift-sdk:
     needs: metadata

@@ -1,0 +1,704 @@
+{
+  "$schema": "https://synchro.dev/conformance/schemas/scenario-v2.schema.json",
+  "schema_version": 2,
+  "id": "SCN-PERF-FANOUT-001",
+  "title": "Deterministic scope function contract performance scenario",
+  "description": "The ordered workload proves the authored semantic outcome and performance declaration.",
+  "requirement_ids": [
+    "SYNC-SCOPE-004"
+  ],
+  "normative_references": [
+    {
+      "path": "docs/src/content/docs/spec/04-invariants.mdx",
+      "anchor": "#deterministic-scope-function-contract"
+    }
+  ],
+  "proof_types": [
+    "reference-model",
+    "server-black-box",
+    "negative-control"
+  ],
+  "proof_obligations": [
+    {
+      "obligation_id": "OBL-PERF-FANOUT-RM-001",
+      "requirement_ids": [
+        "SYNC-SCOPE-004"
+      ],
+      "assertion_ids": [
+        "ASSERT-PERF-FANOUT-SEMANTIC-001"
+      ],
+      "proof_type": "reference-model",
+      "support_cell_id": null,
+      "artifact_inventory_ids": [
+        "ARTDEF-CONFORMANCE-RUNNER-001"
+      ],
+      "performance_budget_ids": [],
+      "required_measurement_ids": [],
+      "required_vector_set_ids": [],
+      "make_target": "test-conformance",
+      "argv": [
+        "make",
+        "test-conformance"
+      ],
+      "fault_plan_id": null,
+      "control_id": null
+    },
+    {
+      "obligation_id": "OBL-PERF-FANOUT-PG-001",
+      "requirement_ids": [
+        "SYNC-SCOPE-004"
+      ],
+      "assertion_ids": [
+        "ASSERT-PERF-FANOUT-SEMANTIC-001",
+        "ASSERT-PERF-FANOUT-PERFORMANCE-001"
+      ],
+      "proof_type": "server-black-box",
+      "support_cell_id": "SUP-PG-018",
+      "artifact_inventory_ids": [
+        "ARTDEF-PG-EXTENSION-001",
+        "ARTDEF-ADAPTER-001"
+      ],
+      "performance_budget_ids": [],
+      "required_measurement_ids": [
+        "MEAS-FANOUT-001"
+      ],
+      "required_vector_set_ids": [],
+      "make_target": "test-blackbox",
+      "argv": [
+        "make",
+        "test-blackbox"
+      ],
+      "fault_plan_id": null,
+      "control_id": null
+    },
+    {
+      "obligation_id": "OBL-PERF-FANOUT-CONTROL-001",
+      "requirement_ids": [
+        "SYNC-SCOPE-004"
+      ],
+      "assertion_ids": [
+        "ASSERT-PERF-FANOUT-CONTROL-001"
+      ],
+      "proof_type": "negative-control",
+      "support_cell_id": null,
+      "artifact_inventory_ids": [
+        "ARTDEF-CONFORMANCE-RUNNER-001",
+        "ARTDEF-PG-EXTENSION-001"
+      ],
+      "performance_budget_ids": [],
+      "required_measurement_ids": [],
+      "required_vector_set_ids": [],
+      "make_target": "test-conformance",
+      "argv": [
+        "make",
+        "test-conformance"
+      ],
+      "fault_plan_id": "FPL-PERF-FANOUT-001",
+      "control_id": "CTRL-SCOPE-004"
+    }
+  ],
+  "ownership": [
+    {
+      "scenario_id": "SCN-PERF-FANOUT-001",
+      "requirement_id": "SYNC-SCOPE-004",
+      "proof_obligation_id": "OBL-PERF-FANOUT-RM-001",
+      "assertion_id": "ASSERT-PERF-FANOUT-SEMANTIC-001",
+      "proof_type": "reference-model",
+      "support_cell_id": null
+    },
+    {
+      "scenario_id": "SCN-PERF-FANOUT-001",
+      "requirement_id": "SYNC-SCOPE-004",
+      "proof_obligation_id": "OBL-PERF-FANOUT-PG-001",
+      "assertion_id": "ASSERT-PERF-FANOUT-SEMANTIC-001",
+      "proof_type": "server-black-box",
+      "support_cell_id": "SUP-PG-018"
+    },
+    {
+      "scenario_id": "SCN-PERF-FANOUT-001",
+      "requirement_id": "SYNC-SCOPE-004",
+      "proof_obligation_id": "OBL-PERF-FANOUT-PG-001",
+      "assertion_id": "ASSERT-PERF-FANOUT-PERFORMANCE-001",
+      "proof_type": "server-black-box",
+      "support_cell_id": "SUP-PG-018"
+    },
+    {
+      "scenario_id": "SCN-PERF-FANOUT-001",
+      "requirement_id": "SYNC-SCOPE-004",
+      "proof_obligation_id": "OBL-PERF-FANOUT-CONTROL-001",
+      "assertion_id": "ASSERT-PERF-FANOUT-CONTROL-001",
+      "proof_type": "negative-control",
+      "support_cell_id": null
+    }
+  ],
+  "model": {
+    "setup": [
+      {
+        "contract_operation": "model",
+        "name": "install-current-contract",
+        "payload": {
+          "installation": {
+            "installed": true,
+            "schema_name": "synchro",
+            "extension_version": "0.3.0",
+            "protocol_version": 3,
+            "minimum_client_runtime": 3,
+            "stale_client_interval_milliseconds": 3600000,
+            "endpoints": [
+              "connect",
+              "push",
+              "pull",
+              "rebuild"
+            ],
+            "capabilities": [
+              {
+                "capability_id": "protocol-3",
+                "enabled": true
+              }
+            ]
+          },
+          "initial_schema": {
+            "schema": {
+              "version": 1,
+              "hash": "721d2c95e6f34cd9733feea9f5118fba391eee10d07663dad066cfc59439fa44"
+            },
+            "body": "{\"compatibility_floor\":1,\"parent_schema\":null,\"schema_hash\":\"721d2c95e6f34cd9733feea9f5118fba391eee10d07663dad066cfc59439fa44\",\"schema_version\":1,\"tables\":[{\"composition\":\"multi_scope\",\"fields\":[{\"field_id\":\"id\",\"name\":\"id\",\"nullable\":false,\"type\":\"string\",\"writable\":false},{\"field_id\":\"value\",\"name\":\"value\",\"nullable\":false,\"type\":\"string\",\"writable\":true}],\"indexes\":[{\"field_ids\":[\"id\"],\"index_id\":\"items-pk\",\"name\":\"items_pk\",\"unique\":true}],\"lifecycle\":{\"created_at_field_id\":null,\"deleted_at_field_id\":null,\"updated_at_field_id\":null},\"name\":\"items\",\"primary_key_field_id\":\"id\",\"relation_id\":\"public.items\",\"table_id\":\"items\"}],\"transition_class\":\"initial\"}",
+            "transition_class": "initial",
+            "compatibility_floor": 1,
+            "tables": [
+              {
+                "table_id": "items",
+                "relation_id": "public.items",
+                "name": "items",
+                "composition": "multi_scope",
+                "primary_key_field_id": "id",
+                "created_at_field_id": null,
+                "updated_at_field_id": null,
+                "deleted_at_field_id": null,
+                "fields": [
+                  {
+                    "field_id": "id",
+                    "name": "id",
+                    "type": "string",
+                    "primary_key": true,
+                    "nullable": false,
+                    "writable": false,
+                    "decimal_precision": null,
+                    "decimal_scale": null,
+                    "default_wire_json": null
+                  },
+                  {
+                    "field_id": "value",
+                    "name": "value",
+                    "type": "string",
+                    "primary_key": false,
+                    "nullable": false,
+                    "writable": true,
+                    "decimal_precision": null,
+                    "decimal_scale": null,
+                    "default_wire_json": "\"\""
+                  }
+                ],
+                "indexes": [
+                  {
+                    "index_id": "items-pk",
+                    "name": "items_pk",
+                    "field_ids": [
+                      "id"
+                    ],
+                    "unique": true
+                  }
+                ]
+              }
+            ],
+            "affected_scopes": []
+          },
+          "initial_registry": {
+            "registry_generation": 1,
+            "relations": [
+              {
+                "relation": "public.items",
+                "registration_kind": "synced",
+                "table_id": "items",
+                "physical": {
+                  "schema": "public",
+                  "name": "items",
+                  "oid": 101,
+                  "replica_identity": "default"
+                },
+                "primary_key_field_id": "id",
+                "primary_key_physical_column": "id",
+                "primary_key_portable_type": "string",
+                "capture_key_field_ids": [],
+                "captured_field_ids": [
+                  "id",
+                  "value"
+                ],
+                "membership_function": "synchro.scope_items",
+                "positive_fanout_bound": 8,
+                "dependency_impact_function": null,
+                "dependency_captured_field_ids": [],
+                "positive_dependency_row_bound": null
+              },
+              {
+                "relation": "public.item_impacts",
+                "registration_kind": "capture_dependency",
+                "table_id": null,
+                "physical": {
+                  "schema": "public",
+                  "name": "item_impacts",
+                  "oid": 102,
+                  "replica_identity": "default"
+                },
+                "primary_key_field_id": null,
+                "primary_key_physical_column": null,
+                "primary_key_portable_type": null,
+                "capture_key_field_ids": [
+                  "scope_key"
+                ],
+                "captured_field_ids": [
+                  "scope_key"
+                ],
+                "membership_function": null,
+                "positive_fanout_bound": 8,
+                "dependency_impact_function": "synchro.impact_items",
+                "dependency_captured_field_ids": [
+                  "scope_key"
+                ],
+                "positive_dependency_row_bound": 1000
+              }
+            ],
+            "capture_dependencies": [
+              {
+                "capture_dependency_id": "items-impact-dependency",
+                "relation": "public.item_impacts",
+                "depends_on": "public.items"
+              }
+            ],
+            "scope_rules": [
+              {
+                "scope_rule_id": "items-topology-membership",
+                "relation": "public.items",
+                "membership_function": "synchro.scope_items",
+                "positive_fanout_bound": 8,
+                "evaluations": []
+              }
+            ],
+            "dependency_impacts": [
+              {
+                "dependency_impact_id": "items-topology-impact",
+                "relation": "public.item_impacts",
+                "function": "synchro.impact_items",
+                "captured_field_ids": [
+                  "scope_key"
+                ],
+                "positive_row_bound": 1000,
+                "affected_rows": [],
+                "requires_rebuild": false
+              }
+            ]
+          },
+          "stream": {
+            "stream_generation": "stream-1",
+            "database": "synchro",
+            "worker_id": "worker-1",
+            "slot_id": "slot-1"
+          },
+          "empty_scopes": [
+            {
+              "scope_id": "scope-a",
+              "membership_generation": 1,
+              "retention_generation": 1
+            },
+            {
+              "scope_id": "scope-b",
+              "membership_generation": 1,
+              "retention_generation": 1
+            },
+            {
+              "scope_id": "scope-c",
+              "membership_generation": 1,
+              "retention_generation": 1
+            },
+            {
+              "scope_id": "scope-d",
+              "membership_generation": 1,
+              "retention_generation": 1
+            },
+            {
+              "scope_id": "scope-e",
+              "membership_generation": 1,
+              "retention_generation": 1
+            },
+            {
+              "scope_id": "scope-f",
+              "membership_generation": 1,
+              "retention_generation": 1
+            },
+            {
+              "scope_id": "scope-g",
+              "membership_generation": 1,
+              "retention_generation": 1
+            },
+            {
+              "scope_id": "scope-h",
+              "membership_generation": 1,
+              "retention_generation": 1
+            }
+          ],
+          "clients": [
+            {
+              "user_id": "user-a",
+              "client_id": "client-a",
+              "client_generation": 1,
+              "scope_set_version": 1,
+              "accepted_write_epoch": 0,
+              "last_cursor_acknowledged_at": null,
+              "assigned_scope_ids": [
+                "scope-a"
+              ],
+              "local_schema": {
+                "version": 1,
+                "hash": "721d2c95e6f34cd9733feea9f5118fba391eee10d07663dad066cfc59439fa44"
+              },
+              "local_lifecycle": "local_ready"
+            }
+          ],
+          "write_policies": [
+            {
+              "user_id": "user-a",
+              "table_id": "items",
+              "allowed": true
+            }
+          ],
+          "configured_limits": {
+            "max_scope_fanout": 8,
+            "max_impact_rows": 1000,
+            "pull_maximum": 1000,
+            "rebuild_maximum": 1000,
+            "compaction_batch_maximum": 10000,
+            "backfill_batch_maximum": 1000
+          }
+        }
+      }
+    ],
+    "expected_state": [
+      {
+        "id": "EXPECT-PERF-FANOUT-SEMANTIC-001",
+        "predicate": {
+          "contract_predicate": "state-equality",
+          "name": "state-equals-authored-model",
+          "payload": {}
+        },
+        "state_facts": {
+          "transaction_count": 18,
+          "row_count": 8,
+          "scope_count": 8,
+          "registry": {
+            "current_generation": 10
+          }
+        }
+      },
+      {
+        "id": "EXPECT-PERF-FANOUT-PERFORMANCE-001",
+        "predicate": {
+          "contract_predicate": "performance-measurement",
+          "name": "performance-contract-satisfied",
+          "payload": {}
+        }
+      },
+      {
+        "id": "EXPECT-PERF-FANOUT-CONTROL-001",
+        "predicate": {
+          "contract_predicate": "negative-control-detection",
+          "name": "negative-control-detected",
+          "payload": {}
+        }
+      }
+    ]
+  },
+  "barrier_plan": {
+    "barriers": [
+      {
+        "id": "BAR-PERF-FANOUT-CONTROL-001",
+        "name": "Before the controlled semantic decision",
+        "release_order": 1,
+        "participants": [
+          "runner",
+          "system-under-test"
+        ]
+      }
+    ]
+  },
+  "fault_plans": [
+    {
+      "id": "FPL-PERF-FANOUT-001",
+      "requirement_id": "SYNC-SCOPE-004",
+      "fault_id": "FAULT-SCOPE-004",
+      "control_id": "CTRL-SCOPE-004",
+      "barrier_id": "BAR-PERF-FANOUT-CONTROL-001",
+      "expected_assertion_ids": [
+        "ASSERT-PERF-FANOUT-CONTROL-001"
+      ],
+      "injection": {
+        "mechanism": "artifact-tamper",
+        "target": "registered membership, impact, and assignment function definitions",
+        "operator": "replace",
+        "parameters": {
+          "scenario": "register a scope function with an unqualified read, volatile language, invoker violation, undeclared dependency, or nonpositive bound",
+          "defect": "activate it despite a signature or restriction violation"
+        }
+      }
+    }
+  ],
+  "replay": {
+    "mode": "deterministic",
+    "seed_required": false,
+    "barrier_trace_required": true
+  },
+  "negative_controls": [
+    {
+      "control_id": "CTRL-SCOPE-004",
+      "requirement_id": "SYNC-SCOPE-004",
+      "fault_id": "FAULT-SCOPE-004",
+      "subject_artifact_inventory_ids": [
+        "ARTDEF-PG-EXTENSION-001"
+      ],
+      "detected_by": [
+        "ASSERT-PERF-FANOUT-CONTROL-001"
+      ]
+    }
+  ],
+  "steps": [
+    {
+      "id": "STEP-PERF-FANOUT-001",
+      "phase": "exercise",
+      "transport": "model",
+      "description": "Execute the authored workload operation.",
+      "operation": {
+        "contract_operation": "workload",
+        "name": "prepare",
+        "payload": {
+          "profile": "scope_topology",
+          "scope_fanout": 1,
+          "impact_rows": 1
+        }
+      },
+      "expected_outcome": {
+        "disposition": "success"
+      }
+    },
+    {
+      "id": "STEP-PERF-FANOUT-002",
+      "phase": "exercise",
+      "transport": "model",
+      "description": "Execute the authored workload operation.",
+      "operation": {
+        "contract_operation": "workload",
+        "name": "prepare",
+        "payload": {
+          "profile": "scope_topology",
+          "scope_fanout": 1,
+          "impact_rows": 1
+        }
+      },
+      "expected_outcome": {
+        "disposition": "success"
+      }
+    },
+    {
+      "id": "STEP-PERF-FANOUT-003",
+      "phase": "exercise",
+      "transport": "model",
+      "description": "Execute the authored workload operation.",
+      "operation": {
+        "contract_operation": "workload",
+        "name": "prepare",
+        "payload": {
+          "profile": "scope_topology",
+          "scope_fanout": 1,
+          "impact_rows": 1
+        }
+      },
+      "expected_outcome": {
+        "disposition": "success"
+      }
+    },
+    {
+      "id": "STEP-PERF-FANOUT-004",
+      "phase": "exercise",
+      "transport": "model",
+      "description": "Execute the authored workload operation.",
+      "operation": {
+        "contract_operation": "workload",
+        "name": "prepare",
+        "payload": {
+          "profile": "scope_topology",
+          "scope_fanout": 2,
+          "impact_rows": 2
+        }
+      },
+      "expected_outcome": {
+        "disposition": "success"
+      }
+    },
+    {
+      "id": "STEP-PERF-FANOUT-005",
+      "phase": "exercise",
+      "transport": "model",
+      "description": "Execute the authored workload operation.",
+      "operation": {
+        "contract_operation": "workload",
+        "name": "prepare",
+        "payload": {
+          "profile": "scope_topology",
+          "scope_fanout": 2,
+          "impact_rows": 2
+        }
+      },
+      "expected_outcome": {
+        "disposition": "success"
+      }
+    },
+    {
+      "id": "STEP-PERF-FANOUT-006",
+      "phase": "exercise",
+      "transport": "model",
+      "description": "Execute the authored workload operation.",
+      "operation": {
+        "contract_operation": "workload",
+        "name": "prepare",
+        "payload": {
+          "profile": "scope_topology",
+          "scope_fanout": 2,
+          "impact_rows": 2
+        }
+      },
+      "expected_outcome": {
+        "disposition": "success"
+      }
+    },
+    {
+      "id": "STEP-PERF-FANOUT-007",
+      "phase": "exercise",
+      "transport": "model",
+      "description": "Execute the authored workload operation.",
+      "operation": {
+        "contract_operation": "workload",
+        "name": "prepare",
+        "payload": {
+          "profile": "scope_topology",
+          "scope_fanout": 8,
+          "impact_rows": 8
+        }
+      },
+      "expected_outcome": {
+        "disposition": "success"
+      }
+    },
+    {
+      "id": "STEP-PERF-FANOUT-008",
+      "phase": "exercise",
+      "transport": "model",
+      "description": "Execute the authored workload operation.",
+      "operation": {
+        "contract_operation": "workload",
+        "name": "prepare",
+        "payload": {
+          "profile": "scope_topology",
+          "scope_fanout": 8,
+          "impact_rows": 8
+        }
+      },
+      "expected_outcome": {
+        "disposition": "success"
+      }
+    },
+    {
+      "id": "STEP-PERF-FANOUT-009",
+      "phase": "exercise",
+      "transport": "model",
+      "description": "Execute the authored workload operation.",
+      "operation": {
+        "contract_operation": "workload",
+        "name": "prepare",
+        "payload": {
+          "profile": "scope_topology",
+          "scope_fanout": 8,
+          "impact_rows": 8
+        }
+      },
+      "expected_outcome": {
+        "disposition": "success"
+      }
+    }
+  ],
+  "wire_expectations": [],
+  "assertions": [
+    {
+      "id": "ASSERT-PERF-FANOUT-SEMANTIC-001",
+      "requirement_ids": [
+        "SYNC-SCOPE-004"
+      ],
+      "description": "The ordered workload produces the complete authored durable semantic outcome without partial state.",
+      "expectation_ids": [
+        "EXPECT-PERF-FANOUT-SEMANTIC-001"
+      ],
+      "predicate": {
+        "contract_predicate": "state-equality",
+        "name": "state-equals-authored-model",
+        "payload": {}
+      },
+      "oracle": {
+        "kind": "model-state-equality",
+        "expected_source": "authored-model",
+        "observed_source": "system-under-test"
+      },
+      "detects_control_ids": []
+    },
+    {
+      "id": "ASSERT-PERF-FANOUT-PERFORMANCE-001",
+      "requirement_ids": [
+        "SYNC-SCOPE-004"
+      ],
+      "description": "Every declared budget or measurement records all configured strata and required metrics.",
+      "expectation_ids": [
+        "EXPECT-PERF-FANOUT-PERFORMANCE-001"
+      ],
+      "predicate": {
+        "contract_predicate": "performance-measurement",
+        "name": "performance-contract-satisfied",
+        "payload": {}
+      },
+      "oracle": {
+        "kind": "performance-budget",
+        "expected_source": "authored-model",
+        "observed_source": "system-under-test"
+      },
+      "detects_control_ids": []
+    },
+    {
+      "id": "ASSERT-PERF-FANOUT-CONTROL-001",
+      "requirement_ids": [
+        "SYNC-SCOPE-004"
+      ],
+      "description": "The negative control detects the exact catalog defect before invalid durable work completes.",
+      "expectation_ids": [
+        "EXPECT-PERF-FANOUT-CONTROL-001"
+      ],
+      "predicate": {
+        "contract_predicate": "negative-control-detection",
+        "name": "negative-control-detected",
+        "payload": {}
+      },
+      "oracle": {
+        "kind": "negative-control-detection",
+        "expected_source": "authored-model",
+        "observed_source": "system-under-test"
+      },
+      "detects_control_ids": [
+        "CTRL-SCOPE-004"
+      ]
+    }
+  ]
+}

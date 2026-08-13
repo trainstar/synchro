@@ -1,0 +1,649 @@
+{
+  "$schema": "https://synchro.dev/conformance/schemas/scenario-v2.schema.json",
+  "schema_version": 2,
+  "id": "SCN-PERF-CORE-SYNC-PATH-001",
+  "title": "Core sync direct extension path",
+  "description": "Connect, push, pull, and rebuild use the direct PostgreSQL extension path without outbound RPC hops.",
+  "requirement_ids": [
+    "SYNC-PERFORMANCE-001"
+  ],
+  "normative_references": [
+    {
+      "path": "docs/src/content/docs/spec/04-invariants.mdx",
+      "anchor": "#no-extra-hot-path-network-hop-for-core-sync-logic"
+    }
+  ],
+  "proof_types": [
+    "server-black-box",
+    "negative-control"
+  ],
+  "proof_obligations": [
+    {
+      "obligation_id": "OBL-PERF-CORE-SYNC-PATH-PG-001",
+      "requirement_ids": [
+        "SYNC-PERFORMANCE-001"
+      ],
+      "assertion_ids": [
+        "ASSERT-PERF-CORE-SYNC-PATH-SEMANTIC-001",
+        "ASSERT-PERF-CORE-SYNC-PATH-PERFORMANCE-001"
+      ],
+      "proof_type": "server-black-box",
+      "support_cell_id": "SUP-PG-018",
+      "artifact_inventory_ids": [
+        "ARTDEF-PG-EXTENSION-001",
+        "ARTDEF-ADAPTER-001"
+      ],
+      "performance_budget_ids": [
+        "BUD-CORE-SYNC-RPC-001"
+      ],
+      "required_measurement_ids": [],
+      "required_vector_set_ids": [],
+      "make_target": "test-blackbox",
+      "argv": [
+        "make",
+        "test-blackbox"
+      ],
+      "fault_plan_id": null,
+      "control_id": null
+    },
+    {
+      "obligation_id": "OBL-PERF-CORE-SYNC-PATH-CONTROL-001",
+      "requirement_ids": [
+        "SYNC-PERFORMANCE-001"
+      ],
+      "assertion_ids": [
+        "ASSERT-PERF-CORE-SYNC-PATH-CONTROL-001"
+      ],
+      "proof_type": "negative-control",
+      "support_cell_id": null,
+      "artifact_inventory_ids": [
+        "ARTDEF-CONFORMANCE-RUNNER-001",
+        "ARTDEF-ADAPTER-001"
+      ],
+      "performance_budget_ids": [],
+      "required_measurement_ids": [],
+      "required_vector_set_ids": [],
+      "make_target": "test-conformance",
+      "argv": [
+        "make",
+        "test-conformance"
+      ],
+      "fault_plan_id": "FPL-PERF-CORE-SYNC-PATH-001",
+      "control_id": "CTRL-PERFORMANCE-001"
+    }
+  ],
+  "ownership": [
+    {
+      "scenario_id": "SCN-PERF-CORE-SYNC-PATH-001",
+      "requirement_id": "SYNC-PERFORMANCE-001",
+      "proof_obligation_id": "OBL-PERF-CORE-SYNC-PATH-PG-001",
+      "assertion_id": "ASSERT-PERF-CORE-SYNC-PATH-SEMANTIC-001",
+      "proof_type": "server-black-box",
+      "support_cell_id": "SUP-PG-018"
+    },
+    {
+      "scenario_id": "SCN-PERF-CORE-SYNC-PATH-001",
+      "requirement_id": "SYNC-PERFORMANCE-001",
+      "proof_obligation_id": "OBL-PERF-CORE-SYNC-PATH-PG-001",
+      "assertion_id": "ASSERT-PERF-CORE-SYNC-PATH-PERFORMANCE-001",
+      "proof_type": "server-black-box",
+      "support_cell_id": "SUP-PG-018"
+    },
+    {
+      "scenario_id": "SCN-PERF-CORE-SYNC-PATH-001",
+      "requirement_id": "SYNC-PERFORMANCE-001",
+      "proof_obligation_id": "OBL-PERF-CORE-SYNC-PATH-CONTROL-001",
+      "assertion_id": "ASSERT-PERF-CORE-SYNC-PATH-CONTROL-001",
+      "proof_type": "negative-control",
+      "support_cell_id": null
+    }
+  ],
+  "model": {
+    "setup": [
+      {
+        "contract_operation": "model",
+        "name": "install-current-contract",
+        "payload": {
+          "installation": {
+            "installed": true,
+            "schema_name": "synchro",
+            "extension_version": "0.3.0",
+            "protocol_version": 3,
+            "minimum_client_runtime": 3,
+            "stale_client_interval_milliseconds": 3600000,
+            "endpoints": [
+              "connect",
+              "push",
+              "pull",
+              "rebuild"
+            ],
+            "capabilities": [
+              {
+                "capability_id": "protocol-3",
+                "enabled": true
+              }
+            ]
+          },
+          "initial_schema": {
+            "schema": {
+              "version": 1,
+              "hash": "721d2c95e6f34cd9733feea9f5118fba391eee10d07663dad066cfc59439fa44"
+            },
+            "body": "{\"compatibility_floor\":1,\"parent_schema\":null,\"schema_hash\":\"721d2c95e6f34cd9733feea9f5118fba391eee10d07663dad066cfc59439fa44\",\"schema_version\":1,\"tables\":[{\"composition\":\"multi_scope\",\"fields\":[{\"field_id\":\"id\",\"name\":\"id\",\"nullable\":false,\"type\":\"string\",\"writable\":false},{\"field_id\":\"value\",\"name\":\"value\",\"nullable\":false,\"type\":\"string\",\"writable\":true}],\"indexes\":[{\"field_ids\":[\"id\"],\"index_id\":\"items-pk\",\"name\":\"items_pk\",\"unique\":true}],\"lifecycle\":{\"created_at_field_id\":null,\"deleted_at_field_id\":null,\"updated_at_field_id\":null},\"name\":\"items\",\"primary_key_field_id\":\"id\",\"relation_id\":\"public.items\",\"table_id\":\"items\"}],\"transition_class\":\"initial\"}",
+            "transition_class": "initial",
+            "compatibility_floor": 1,
+            "tables": [
+              {
+                "table_id": "items",
+                "relation_id": "public.items",
+                "name": "items",
+                "composition": "multi_scope",
+                "primary_key_field_id": "id",
+                "created_at_field_id": null,
+                "updated_at_field_id": null,
+                "deleted_at_field_id": null,
+                "fields": [
+                  {
+                    "field_id": "id",
+                    "name": "id",
+                    "type": "string",
+                    "primary_key": true,
+                    "nullable": false,
+                    "writable": false,
+                    "decimal_precision": null,
+                    "decimal_scale": null,
+                    "default_wire_json": null
+                  },
+                  {
+                    "field_id": "value",
+                    "name": "value",
+                    "type": "string",
+                    "primary_key": false,
+                    "nullable": false,
+                    "writable": true,
+                    "decimal_precision": null,
+                    "decimal_scale": null,
+                    "default_wire_json": "\"\""
+                  }
+                ],
+                "indexes": [
+                  {
+                    "index_id": "items-pk",
+                    "name": "items_pk",
+                    "field_ids": [
+                      "id"
+                    ],
+                    "unique": true
+                  }
+                ]
+              }
+            ],
+            "affected_scopes": []
+          },
+          "initial_registry": {
+            "registry_generation": 1,
+            "relations": [
+              {
+                "relation": "public.items",
+                "registration_kind": "synced",
+                "table_id": "items",
+                "physical": {
+                  "schema": "public",
+                  "name": "items",
+                  "oid": 101,
+                  "replica_identity": "default"
+                },
+                "primary_key_field_id": "id",
+                "primary_key_physical_column": "id",
+                "primary_key_portable_type": "string",
+                "capture_key_field_ids": [],
+                "captured_field_ids": [
+                  "id",
+                  "value"
+                ],
+                "membership_function": "synchro.scope_items",
+                "positive_fanout_bound": 8,
+                "dependency_impact_function": null,
+                "dependency_captured_field_ids": [],
+                "positive_dependency_row_bound": null
+              }
+            ],
+            "capture_dependencies": [],
+            "scope_rules": [
+              {
+                "scope_rule_id": "scope-items-core-001",
+                "relation": "public.items",
+                "membership_function": "synchro.scope_items",
+                "positive_fanout_bound": 8,
+                "evaluations": [
+                  {
+                    "row": {
+                      "canonical_identity_bytes": "synchro:v3:row-identity:v1\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0005items\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0002id\u0001\u0001\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0008core-row",
+                      "table_id": "items",
+                      "primary_key_field_id": "id",
+                      "portable_type": "string",
+                      "canonical_wire_json": "\"core-row\""
+                    },
+                    "scopes": [
+                      "scope-a"
+                    ]
+                  }
+                ]
+              }
+            ],
+            "dependency_impacts": []
+          },
+          "stream": {
+            "stream_generation": "stream-1",
+            "database": "synchro",
+            "worker_id": "worker-1",
+            "slot_id": "slot-1"
+          },
+          "empty_scopes": [
+            {
+              "scope_id": "scope-a",
+              "membership_generation": 1,
+              "retention_generation": 1
+            }
+          ],
+          "clients": [
+            {
+              "user_id": "user-a",
+              "client_id": "client-a",
+              "client_generation": 1,
+              "scope_set_version": 1,
+              "accepted_write_epoch": 0,
+              "last_cursor_acknowledged_at": null,
+              "assigned_scope_ids": [
+                "scope-a"
+              ],
+              "local_schema": {
+                "version": 1,
+                "hash": "721d2c95e6f34cd9733feea9f5118fba391eee10d07663dad066cfc59439fa44"
+              },
+              "local_lifecycle": "local_ready"
+            }
+          ],
+          "write_policies": [
+            {
+              "user_id": "user-a",
+              "table_id": "items",
+              "allowed": true
+            }
+          ],
+          "configured_limits": {
+            "max_scope_fanout": 8,
+            "max_impact_rows": 1000,
+            "pull_maximum": 1000,
+            "rebuild_maximum": 1000,
+            "compaction_batch_maximum": 10000,
+            "backfill_batch_maximum": 1000
+          }
+        }
+      }
+    ],
+    "expected_state": [
+      {
+        "id": "EXPECT-PERF-CORE-SYNC-PATH-SEMANTIC-001",
+        "predicate": {
+          "contract_predicate": "wire-outcome",
+          "name": "canonical-wire-outcome",
+          "payload": {}
+        }
+      },
+      {
+        "id": "EXPECT-PERF-CORE-SYNC-PATH-PERFORMANCE-001",
+        "predicate": {
+          "contract_predicate": "performance-measurement",
+          "name": "performance-contract-satisfied",
+          "payload": {}
+        }
+      },
+      {
+        "id": "EXPECT-PERF-CORE-SYNC-PATH-CONTROL-001",
+        "predicate": {
+          "contract_predicate": "negative-control-detection",
+          "name": "negative-control-detected",
+          "payload": {}
+        }
+      }
+    ]
+  },
+  "barrier_plan": {
+    "barriers": [
+      {
+        "id": "BAR-PERF-CORE-SYNC-PATH-CONTROL-001",
+        "name": "Before adapter extension dispatch",
+        "release_order": 1,
+        "participants": [
+          "runner",
+          "adapter"
+        ]
+      }
+    ]
+  },
+  "fault_plans": [
+    {
+      "id": "FPL-PERF-CORE-SYNC-PATH-001",
+      "requirement_id": "SYNC-PERFORMANCE-001",
+      "fault_id": "FAULT-PERFORMANCE-001",
+      "control_id": "CTRL-PERFORMANCE-001",
+      "barrier_id": "BAR-PERF-CORE-SYNC-PATH-CONTROL-001",
+      "expected_assertion_ids": [
+        "ASSERT-PERF-CORE-SYNC-PATH-CONTROL-001"
+      ],
+      "injection": {
+        "mechanism": "source-mutant",
+        "target": "production Go-to-PostgreSQL sync request path",
+        "operator": "reroute",
+        "parameters": {
+          "scenario": "trace a production connect, push, pull, and rebuild request",
+          "defect": "call a separate outbound sync-service RPC instead of the PostgreSQL extension directly"
+        }
+      }
+    }
+  ],
+  "replay": {
+    "mode": "deterministic",
+    "seed_required": false,
+    "barrier_trace_required": true
+  },
+  "negative_controls": [
+    {
+      "control_id": "CTRL-PERFORMANCE-001",
+      "requirement_id": "SYNC-PERFORMANCE-001",
+      "fault_id": "FAULT-PERFORMANCE-001",
+      "subject_artifact_inventory_ids": [
+        "ARTDEF-ADAPTER-001"
+      ],
+      "detected_by": [
+        "ASSERT-PERF-CORE-SYNC-PATH-CONTROL-001"
+      ]
+    }
+  ],
+  "steps": [
+    {
+      "id": "STEP-PERF-CORE-SYNC-PATH-CONNECT-001",
+      "phase": "exercise",
+      "transport": "http",
+      "description": "Dispatch a valid connect directly to the extension.",
+      "operation": {
+        "contract_operation": "connect",
+        "name": "send",
+        "payload": {
+          "user_id": "user-a",
+          "client_id": "client-a",
+          "runtime_version": 3,
+          "protocol_version": 3,
+          "client_generation": 1,
+          "schema_reset": false,
+          "schema": {
+            "version": 1,
+            "hash": "721d2c95e6f34cd9733feea9f5118fba391eee10d07663dad066cfc59439fa44"
+          },
+          "scope_set_version": 1,
+          "known_scopes": [
+            {
+              "scope_id": "scope-a"
+            }
+          ]
+        }
+      },
+      "expected_outcome": {
+        "disposition": "success"
+      }
+    },
+    {
+      "id": "STEP-PERF-CORE-SYNC-PATH-WRITE-001",
+      "phase": "exercise",
+      "transport": "local",
+      "description": "Create one canonical local insert for the push path.",
+      "operation": {
+        "contract_operation": "local",
+        "name": "write",
+        "payload": {
+          "authenticated_user_id": "user-a",
+          "client_id": "client-a",
+          "mutation_id": "00000000-0000-4000-8000-000000003001",
+          "table_id": "items",
+          "pk": {
+            "id": "core-row"
+          },
+          "authored_schema": {
+            "version": 1,
+            "hash": "721d2c95e6f34cd9733feea9f5118fba391eee10d07663dad066cfc59439fa44"
+          },
+          "operation": "insert",
+          "client_version": "2026-08-11T00:00:00.000000Z",
+          "columns": {
+            "value": "core"
+          },
+          "origin": "application"
+        }
+      },
+      "expected_outcome": {
+        "disposition": "success"
+      }
+    },
+    {
+      "id": "STEP-PERF-CORE-SYNC-PATH-PUSH-001",
+      "phase": "exercise",
+      "transport": "http",
+      "description": "Dispatch one valid push directly to the extension.",
+      "operation": {
+        "contract_operation": "push",
+        "name": "submit",
+        "payload": {
+          "authenticated_user_id": "user-a",
+          "request": {
+            "client_id": "client-a",
+            "client_generation": 1,
+            "batch_id": "00000000-0000-4000-8000-000000003002",
+            "schema": {
+              "version": 1,
+              "hash": "721d2c95e6f34cd9733feea9f5118fba391eee10d07663dad066cfc59439fa44"
+            },
+            "mutations": [
+              {
+                "mutation_id": "00000000-0000-4000-8000-000000003001",
+                "table": "items",
+                "pk": {
+                  "id": "core-row"
+                },
+                "authored_schema": {
+                  "version": 1,
+                  "hash": "721d2c95e6f34cd9733feea9f5118fba391eee10d07663dad066cfc59439fa44"
+                },
+                "op": "insert",
+                "client_version": "2026-08-11T00:00:00.000000Z",
+                "columns": {
+                  "value": "core"
+                }
+              }
+            ]
+          },
+          "delivery": "apply",
+          "commit_lsn": "10",
+          "end_lsn": "11"
+        }
+      },
+      "expected_outcome": {
+        "disposition": "success"
+      }
+    },
+    {
+      "id": "STEP-PERF-CORE-SYNC-PATH-MATERIALIZE-001",
+      "phase": "exercise",
+      "transport": "process",
+      "description": "Materialize the accepted write before the client pulls its server version.",
+      "operation": {
+        "contract_operation": "process",
+        "name": "materialize-source-transaction",
+        "payload": {
+          "stream_generation": "stream-1",
+          "commit_lsn": "10"
+        }
+      },
+      "expected_outcome": {
+        "disposition": "success"
+      }
+    },
+    {
+      "id": "STEP-PERF-CORE-SYNC-PATH-PULL-001",
+      "phase": "exercise",
+      "transport": "http",
+      "description": "Dispatch one valid pull directly to the extension.",
+      "operation": {
+        "contract_operation": "pull",
+        "name": "request-page",
+        "payload": {
+          "user_id": "user-a",
+          "client_id": "client-a",
+          "client_generation": 1,
+          "schema": {
+            "version": 1,
+            "hash": "721d2c95e6f34cd9733feea9f5118fba391eee10d07663dad066cfc59439fa44"
+          },
+          "scope_set_version": 1,
+          "scopes": [
+            {
+              "scope_id": "scope-a",
+              "cursor_source": "none"
+            }
+          ],
+          "limit": 1
+        }
+      },
+      "expected_outcome": {
+        "disposition": "success"
+      }
+    },
+    {
+      "id": "STEP-PERF-CORE-SYNC-PATH-REBUILD-001",
+      "phase": "exercise",
+      "transport": "http",
+      "description": "Dispatch one valid rebuild request directly to the extension.",
+      "operation": {
+        "contract_operation": "rebuild",
+        "name": "request-page",
+        "payload": {
+          "user_id": "user-a",
+          "client_id": "client-a",
+          "client_generation": 1,
+          "schema": {
+            "version": 1,
+            "hash": "721d2c95e6f34cd9733feea9f5118fba391eee10d07663dad066cfc59439fa44"
+          },
+          "scope_id": "scope-a",
+          "rebuild_id": "00000000-0000-4000-8000-000000003003",
+          "cursor_source": "none",
+          "limit": 1
+        }
+      },
+      "expected_outcome": {
+        "disposition": "success"
+      }
+    }
+  ],
+  "wire_expectations": [
+    {
+      "step_id": "STEP-PERF-CORE-SYNC-PATH-CONNECT-001",
+      "assertion_id": "ASSERT-PERF-CORE-SYNC-PATH-SEMANTIC-001",
+      "contract_case": "connect_success",
+      "http_status": 200,
+      "error_code": null,
+      "retryable": false
+    },
+    {
+      "step_id": "STEP-PERF-CORE-SYNC-PATH-PUSH-001",
+      "assertion_id": "ASSERT-PERF-CORE-SYNC-PATH-SEMANTIC-001",
+      "contract_case": "push_success",
+      "http_status": 200,
+      "error_code": null,
+      "retryable": false
+    },
+    {
+      "step_id": "STEP-PERF-CORE-SYNC-PATH-PULL-001",
+      "assertion_id": "ASSERT-PERF-CORE-SYNC-PATH-SEMANTIC-001",
+      "contract_case": "pull_success",
+      "http_status": 200,
+      "error_code": null,
+      "retryable": false
+    },
+    {
+      "step_id": "STEP-PERF-CORE-SYNC-PATH-REBUILD-001",
+      "assertion_id": "ASSERT-PERF-CORE-SYNC-PATH-SEMANTIC-001",
+      "contract_case": "rebuild_success",
+      "http_status": 200,
+      "error_code": null,
+      "retryable": false
+    }
+  ],
+  "assertions": [
+    {
+      "id": "ASSERT-PERF-CORE-SYNC-PATH-SEMANTIC-001",
+      "requirement_ids": [
+        "SYNC-PERFORMANCE-001"
+      ],
+      "description": "All four canonical endpoint operations complete through the direct extension dispatch path.",
+      "expectation_ids": [
+        "EXPECT-PERF-CORE-SYNC-PATH-SEMANTIC-001"
+      ],
+      "predicate": {
+        "contract_predicate": "wire-outcome",
+        "name": "canonical-wire-outcome",
+        "payload": {}
+      },
+      "oracle": {
+        "kind": "wire-contract",
+        "expected_source": "authored-model",
+        "observed_source": "system-under-test"
+      },
+      "detects_control_ids": []
+    },
+    {
+      "id": "ASSERT-PERF-CORE-SYNC-PATH-PERFORMANCE-001",
+      "requirement_ids": [
+        "SYNC-PERFORMANCE-001"
+      ],
+      "description": "The dependency audit records zero outbound network or RPC hops.",
+      "expectation_ids": [
+        "EXPECT-PERF-CORE-SYNC-PATH-PERFORMANCE-001"
+      ],
+      "predicate": {
+        "contract_predicate": "performance-measurement",
+        "name": "performance-contract-satisfied",
+        "payload": {}
+      },
+      "oracle": {
+        "kind": "performance-budget",
+        "expected_source": "authored-model",
+        "observed_source": "system-under-test"
+      },
+      "detects_control_ids": []
+    },
+    {
+      "id": "ASSERT-PERF-CORE-SYNC-PATH-CONTROL-001",
+      "requirement_ids": [
+        "SYNC-PERFORMANCE-001"
+      ],
+      "description": "The control detects an outbound sync-service RPC in the adapter path.",
+      "expectation_ids": [
+        "EXPECT-PERF-CORE-SYNC-PATH-CONTROL-001"
+      ],
+      "predicate": {
+        "contract_predicate": "negative-control-detection",
+        "name": "negative-control-detected",
+        "payload": {}
+      },
+      "oracle": {
+        "kind": "negative-control-detection",
+        "expected_source": "authored-model",
+        "observed_source": "system-under-test"
+      },
+      "detects_control_ids": [
+        "CTRL-PERFORMANCE-001"
+      ]
+    }
+  ]
+}

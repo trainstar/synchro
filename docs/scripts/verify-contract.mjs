@@ -19,6 +19,7 @@ const schemaFiles = {
   supportMatrix: "support-matrix.schema.json",
   scenario: "scenario-v2.schema.json",
   evidence: "evidence-v2.schema.json",
+  rcCandidateLock: "rc-candidate-lock-v1.schema.json",
   rcManifest: "rc-manifest-v2.schema.json",
   faultCatalog: "fault-catalog-v1.schema.json",
   artifactInventory: "artifact-inventory-v1.schema.json",
@@ -404,7 +405,7 @@ function performanceCatalogSemanticErrors(
     artifactInventory.artifacts.map(({ id }) => id),
   );
   const lockedCatalogDigest =
-    "ace9daa85f00ad7307ddc3244f37058555a15b8031ceeef3f0bc787af7158fb4";
+    "b5ea8bf7d4e12ebc1c11e20d15e2f33d34ec1a23978eceed0b38d7105118b800";
   const actualCatalogDigest = createHash("sha256")
     .update(
       JSON.stringify({
@@ -2031,6 +2032,7 @@ function evidenceScenarioSemanticErrors(
   vectorCatalog,
 ) {
   const errors = [
+    ...evidenceReceiptProjectionErrors(evidence),
     ...duplicateLogicalIdErrors(
       evidence.assertions,
       "assertion_id",
@@ -2058,6 +2060,21 @@ function evidenceScenarioSemanticErrors(
       })),
       "vector_result_id",
       "Evidence vector results",
+    ),
+    ...duplicateLogicalIdErrors(
+      evidence.artifact_bindings,
+      "artifact_id",
+      "Evidence artifact bindings",
+    ),
+    ...duplicateLogicalIdErrors(
+      evidence.artifact_bindings,
+      "inventory_id",
+      "Evidence artifact binding inventory IDs",
+    ),
+    ...duplicateLogicalIdErrors(
+      evidence.artifact_bindings,
+      "path",
+      "Evidence artifact binding paths",
     ),
   ];
   if (evidence.scenario_id !== scenario.id) {
@@ -2105,14 +2122,46 @@ function evidenceScenarioSemanticErrors(
       artifactInventory.artifacts.map((artifact) => [artifact.id, artifact]),
     );
     const actualInventoryIds = [];
-    for (const artifactId of evidence.artifact_ids) {
-      const artifact = manifestArtifactsById.get(artifactId);
-      if (artifact) {
-        actualInventoryIds.push(artifact.inventory_id);
-      } else {
-        actualInventoryIds.push(`unresolved:${artifactId}`);
+    const actualRoles = [];
+    for (const binding of evidence.artifact_bindings) {
+      const artifact = manifestArtifactsById.get(binding.artifact_id);
+      if (!artifact) {
+        actualInventoryIds.push(`unresolved:${binding.artifact_id}`);
         errors.push(
-          `${evidence.evidence_id} artifact ${artifactId} does not resolve through the RC manifest`,
+          `${evidence.evidence_id} artifact ${binding.artifact_id} does not resolve through the RC manifest`,
+        );
+        continue;
+      }
+      actualInventoryIds.push(binding.inventory_id);
+      if (binding.inventory_id !== artifact.inventory_id) {
+        errors.push(
+          `${evidence.evidence_id} artifact ${binding.artifact_id} inventory binding does not match the RC manifest`,
+        );
+      }
+      const inventory = inventoryById.get(binding.inventory_id);
+      if (!inventory) {
+        errors.push(
+          `${evidence.evidence_id} artifact binding ${binding.inventory_id} does not resolve through the artifact inventory`,
+        );
+      } else {
+        actualRoles.push(binding.role ?? inventory.role);
+        if (binding.role !== undefined && binding.role !== inventory.role) {
+          errors.push(
+            `${evidence.evidence_id} artifact ${binding.artifact_id} role does not match the artifact inventory`,
+          );
+        }
+      }
+      const payload = artifact.payloads.find(
+        ({ path }) => path === binding.path,
+      );
+      if (
+        !payload ||
+        binding.media_type !== payload.media_type ||
+        binding.size_bytes !== payload.size_bytes ||
+        binding.sha256 !== payload.sha256
+      ) {
+        errors.push(
+          `${evidence.evidence_id} artifact ${binding.artifact_id} payload binding does not match the RC manifest`,
         );
       }
     }
@@ -2123,9 +2172,6 @@ function evidenceScenarioSemanticErrors(
         `${evidence.evidence_id} resolved artifact inventory IDs do not exactly match obligation ${obligation.obligation_id}`,
       );
     }
-    const actualRoles = actualInventoryIds
-      .map((id) => inventoryById.get(id)?.role)
-      .filter(Boolean);
     const requiredRoles = obligation.artifact_inventory_ids
       .map((id) => inventoryById.get(id)?.role)
       .filter(Boolean);
@@ -2339,9 +2385,9 @@ function evidenceScenarioSemanticErrors(
     const budgetArtifactInventoryIds = new Set(
       budget.artifact_inventory_ids,
     );
-    for (const artifactId of evidence.artifact_ids) {
+    for (const binding of evidence.artifact_bindings) {
       const inventoryId = manifest.artifacts.find(
-        ({ id }) => id === artifactId,
+        ({ id }) => id === binding.artifact_id,
       )?.inventory_id;
       if (
         inventoryId !== undefined &&
@@ -2417,9 +2463,9 @@ function evidenceScenarioSemanticErrors(
     const measurementArtifactInventoryIds = new Set(
       measurement.artifact_inventory_ids,
     );
-    for (const artifactId of evidence.artifact_ids) {
+    for (const binding of evidence.artifact_bindings) {
       const inventoryId = manifest.artifacts.find(
-        ({ id }) => id === artifactId,
+        ({ id }) => id === binding.artifact_id,
       )?.inventory_id;
       if (
         inventoryId !== undefined &&
@@ -2563,7 +2609,7 @@ function evidenceScenarioSemanticErrors(
         );
       }
     }
-    if (!evidence.artifact_ids.includes(result.artifact_id)) {
+    if (!evidenceArtifactIds(evidence).includes(result.artifact_id)) {
       errors.push(
         `${evidence.evidence_id} vector result ${result.vector_set_id}/${result.language} artifact ${result.artifact_id} is not an execution artifact`,
       );
@@ -2625,7 +2671,7 @@ function evidenceScenarioSemanticErrors(
   }
   const subjectInventoryIds = [];
   for (const artifactId of evidenceControl.control_subject_artifact_ids) {
-    if (!evidence.artifact_ids.includes(artifactId)) {
+    if (!evidenceArtifactIds(evidence).includes(artifactId)) {
       errors.push(
         `${evidence.evidence_id} negative-control subject artifact ${artifactId} is not an execution artifact`,
       );
@@ -3074,11 +3120,13 @@ function evidenceBundleSemanticErrors(evidenceBundle) {
     }
     for (const [binding, previousValues, currentValues] of [
       ["requirement_ids", previous.requirement_ids, evidence.requirement_ids],
-      ["artifact_ids", previous.artifact_ids, evidence.artifact_ids],
     ]) {
       if (!stringSetsEqual(previousValues, currentValues)) {
         errors.push(`${evidence.evidence_id} rerun changed ${binding}`);
       }
+    }
+    if (!isDeepStrictEqual(previous.artifact_bindings, evidence.artifact_bindings)) {
+      errors.push(`${evidence.evidence_id} rerun changed artifact_bindings`);
     }
     if (evidencePromotionEligibilityErrors(previous).length === 0) {
       errors.push(
@@ -3173,10 +3221,10 @@ function evidenceManifestBindingErrors(evidence, manifest) {
     manifest.artifacts.map((artifact) => [artifact.id, artifact]),
   );
   const artifactIds = new Set(artifactsById.keys());
-  for (const artifactId of evidence.artifact_ids) {
-    if (!artifactIds.has(artifactId)) {
+  for (const binding of evidence.artifact_bindings) {
+    if (!artifactIds.has(binding.artifact_id)) {
       errors.push(
-        `${evidence.evidence_id} artifact ${artifactId} is not bound by the RC manifest`,
+        `${evidence.evidence_id} artifact ${binding.artifact_id} is not bound by the RC manifest`,
       );
     }
   }
@@ -3232,7 +3280,8 @@ function candidateVectorLanguageClosureErrors(
       }
     }
   }
-  const resultCounts = new Map();
+  const coveredLanguagePairs = new Set();
+  const executionVectorKeys = new Set();
   const artifactsById = new Map(
     (manifest?.artifacts ?? []).map((artifact) => [artifact.id, artifact]),
   );
@@ -3252,6 +3301,21 @@ function candidateVectorLanguageClosureErrors(
     if (evidencePromotionEligibilityErrors(evidence).length !== 0) continue;
     for (const result of evidence.vector_results) {
       if (!requiredSetIds.has(result.vector_set_id)) continue;
+      const executionVectorKey = [
+        evidence.candidate_id,
+        evidence.scenario_id,
+        evidence.proof_obligation_id,
+        evidence.support_cell_id ?? "null",
+        result.vector_set_id,
+        result.language,
+      ].join("|");
+      if (executionVectorKeys.has(executionVectorKey)) {
+        errors.push(
+          `Candidate vector closure has duplicate terminal evidence within execution vector key ${executionVectorKey}`,
+        );
+        continue;
+      }
+      executionVectorKeys.add(executionVectorKey);
       const vectorSet = catalogById.get(result.vector_set_id);
       const artifact = artifactsById.get(result.artifact_id);
       const artifactRole = artifact
@@ -3265,7 +3329,7 @@ function candidateVectorLanguageClosureErrors(
         result.passed_count === vectorSet.vector_count &&
         result.failed_count === 0 &&
         vectorSet.required_languages.includes(result.language) &&
-        evidence.artifact_ids.includes(result.artifact_id) &&
+        evidenceArtifactIds(evidence).includes(result.artifact_id) &&
         vectorArtifactRoles.get(result.language)?.has(artifactRole);
       if (!validResult) {
         errors.push(
@@ -3273,8 +3337,7 @@ function candidateVectorLanguageClosureErrors(
         );
         continue;
       }
-      const key = `${result.vector_set_id}|${result.language}`;
-      resultCounts.set(key, (resultCounts.get(key) ?? 0) + 1);
+      coveredLanguagePairs.add(`${result.vector_set_id}|${result.language}`);
     }
   }
   for (const vectorSetId of requiredSetIds) {
@@ -3282,14 +3345,9 @@ function candidateVectorLanguageClosureErrors(
     if (!vectorSet) continue;
     for (const language of vectorSet.required_languages) {
       const key = `${vectorSetId}|${language}`;
-      const count = resultCounts.get(key) ?? 0;
-      if (count === 0) {
+      if (!coveredLanguagePairs.has(key)) {
         errors.push(
           `Candidate vector closure is missing terminal ${language} evidence for ${vectorSetId}`,
-        );
-      } else if (count > 1) {
-        errors.push(
-          `Candidate vector closure has duplicate terminal ${language} evidence for ${vectorSetId}`,
         );
       }
     }
@@ -3335,6 +3393,7 @@ function manifestEvidenceClosureErrors(
       candidatePathOwners.set(path, owner);
     }
   };
+  recordCandidatePath(manifest.candidate_lock.path, "candidate lock");
   for (const scenario of manifest.scenarios) {
     recordCandidatePath(scenario.path, `scenario ${scenario.scenario_id}`);
   }
@@ -3793,7 +3852,7 @@ function manifestSemanticErrors(manifest, supportMatrix, artifactInventory) {
   };
   for (const [items, idKey, collection] of [
     [manifest.scenarios, "scenario_id", "Manifest scenarios"],
-    [manifest.evidence, "evidence_id", "Manifest evidence"],
+    [manifest.evidence ?? [], "evidence_id", "Manifest evidence"],
     [
       manifest.resolved_support_cells,
       "support_cell_id",
@@ -3804,10 +3863,13 @@ function manifestSemanticErrors(manifest, supportMatrix, artifactInventory) {
   ]) {
     errors.push(...duplicateLogicalIdErrors(items, idKey, collection));
   }
+  if (manifest.candidate_lock) {
+    recordFilePath(manifest.candidate_lock.path, "candidate lock");
+  }
   for (const scenario of manifest.scenarios) {
     recordFilePath(scenario.path, `scenario ${scenario.scenario_id}`);
   }
-  for (const evidence of manifest.evidence) {
+  for (const evidence of manifest.evidence ?? []) {
     recordFilePath(evidence.path, `evidence ${evidence.evidence_id}`);
   }
 
@@ -3939,6 +4001,52 @@ function manifestSemanticErrors(manifest, supportMatrix, artifactInventory) {
           `Artifact ${artifactId} requires exactly one ${kind} attestation, found ${count}`,
         );
       }
+    }
+  }
+  return errors;
+}
+
+function candidateLockManifestBindingErrors(candidateLock, candidateLockBytes, manifest) {
+  const errors = [];
+  const actualLockDigest = createHash("sha256")
+    .update(candidateLockBytes)
+    .digest("hex");
+  if (manifest.candidate_lock.sha256 !== actualLockDigest) {
+    errors.push(
+      `RC manifest candidate lock SHA-256 ${manifest.candidate_lock.sha256} does not match ${actualLockDigest}`,
+    );
+  }
+  for (const [binding, lockValue, manifestValue] of [
+    ["candidate_id", candidateLock.candidate_id, manifest.candidate_id],
+    ["release_version", candidateLock.release_version, manifest.release_version],
+    ["protocol_version", candidateLock.protocol_version, manifest.protocol_version],
+    ["source_commit", candidateLock.source_commit, manifest.source_commit],
+    ["runner_digest", candidateLock.runner_digest, manifest.runner_digest],
+  ]) {
+    if (lockValue !== manifestValue) {
+      errors.push(
+        `RC manifest ${binding} does not match the immutable candidate lock`,
+      );
+    }
+  }
+  for (const [binding, lockValue, manifestValue] of [
+    [
+      "trusted_rerun_approvers",
+      candidateLock.trusted_rerun_approvers,
+      manifest.trusted_rerun_approvers,
+    ],
+    ["contract", candidateLock.contract, manifest.contract],
+    ["scenarios", candidateLock.scenarios, manifest.scenarios],
+    [
+      "resolved_support_cells",
+      candidateLock.resolved_support_cells,
+      manifest.resolved_support_cells,
+    ],
+    ["artifacts", candidateLock.artifacts, manifest.artifacts],
+    ["attestations", candidateLock.attestations, manifest.attestations],
+  ]) {
+    if (!isDeepStrictEqual(lockValue, manifestValue)) {
+      errors.push(`RC manifest ${binding} changed after the candidate lock`);
     }
   }
   return errors;
@@ -4149,6 +4257,7 @@ const validScenario = {
         name: "send-timestamp",
         payload: { value: "not-a-time" },
       },
+      expected_outcome: { disposition: "success" },
     },
   ],
   wire_expectations: [
@@ -4231,10 +4340,162 @@ const validVectorCatalog = {
   ],
 };
 
+const fixtureArtifactDefinitions = new Map([
+  ["ART-CONFORMANCE-RUNNER-001", ["ARTDEF-CONFORMANCE-RUNNER-001", "conformance-runner", 1]],
+  ["ART-PG-EXTENSION-001", ["ARTDEF-PG-EXTENSION-001", "pg-extension", 2]],
+  ["ART-PG-SQL-001", ["ARTDEF-PG-SQL-001", "pg-install-sql", 3]],
+  ["ART-ADAPTER-001", ["ARTDEF-ADAPTER-001", "adapter", 4]],
+  ["ART-SEED-TOOL-001", ["ARTDEF-SEED-TOOL-001", "seed-tool", 5]],
+  ["ART-SWIFT-001", ["ARTDEF-SWIFT-SPM-001", "swift-spm", 6]],
+  ["ART-COCOAPODS-001", ["ARTDEF-COCOAPODS-001", "cocoapods", 7]],
+  ["ART-KOTLIN-MAVEN-001", ["ARTDEF-KOTLIN-MAVEN-001", "kotlin-maven", 8]],
+  ["ART-RN-NPM-001", ["ARTDEF-RN-NPM-001", "react-native-npm", 9]],
+  ["ART-PORTABLE-SEED-001", ["ARTDEF-PORTABLE-SEED-001", "portable-seed", 10]],
+]);
+
+function fixtureArtifactBindings(artifactIds) {
+  return artifactIds.map((artifactId) => {
+    const definition = fixtureArtifactDefinitions.get(artifactId);
+    if (!definition) {
+      return {
+        inventory_id: `ARTDEF-UNKNOWN-${artifactId.slice(-3)}`,
+        artifact_id: artifactId,
+        role: "unknown",
+        path: "artifacts/unknown.bin",
+        media_type: "application/octet-stream",
+        size_bytes: 1,
+        sha256: "0".repeat(64),
+      };
+    }
+    const [inventoryId, role, ordinal] = definition;
+    return {
+      inventory_id: inventoryId,
+      artifact_id: artifactId,
+      role,
+      path: `artifacts/${inventoryId.toLowerCase()}.bin`,
+      media_type: "application/octet-stream",
+      size_bytes: ordinal,
+      sha256: ordinal.toString(16).repeat(64),
+    };
+  });
+}
+
+function evidenceArtifactIds(evidence) {
+  return evidence.artifact_bindings.map(({ artifact_id }) => artifact_id);
+}
+
+let fixtureCandidateLockSHA256 = "0".repeat(64);
+
+function receiptProjectionFor(evidence) {
+  const fields = {
+    receipt_id: evidence.receipt_id,
+    scenario_id: evidence.scenario_id,
+    proof_obligation_id: evidence.proof_obligation_id,
+    make_target: evidence.run.make_target,
+    argv: structuredClone(evidence.run.argv),
+    started_at: evidence.run.started_at,
+    completed_at: evidence.run.completed_at,
+    exit_code: evidence.run.exit_code,
+    result: evidence.run.result,
+    command_observation: structuredClone(evidence.run.command_observation),
+    assertions: structuredClone(evidence.assertions),
+    vector_results: structuredClone(evidence.vector_results),
+    artifact_bindings: structuredClone(evidence.artifact_bindings),
+    environment_dimensions: structuredClone(evidence.environment),
+    attachment_ids: structuredClone(evidence.attachment_ids),
+    runner_digest: evidence.runner_digest,
+    candidate_lock_sha256: fixtureCandidateLockSHA256,
+    runner_artifact_sha256: "d".repeat(64),
+    runner_executable_sha256: "e".repeat(64),
+    generator_name: evidence.generator.name,
+    generator_version: evidence.generator.version,
+    generator_binary_sha256: evidence.generator.binary_sha256,
+    run_id: evidence.run.id,
+    execution_lineage_id: evidence.run.execution_lineage_id,
+    run_url: evidence.run.url,
+    attempt: evidence.run.attempt,
+    previous_evidence_id: evidence.run.previous_evidence_id,
+    rerun_cause: evidence.run.rerun_cause,
+    rerun_diagnosis: evidence.run.rerun_diagnosis,
+    corrective_action: evidence.run.corrective_action,
+    rerun_approval: structuredClone(evidence.run.rerun_approval),
+    attachments: structuredClone(evidence.attachments),
+    http_observations: structuredClone(evidence.http_observations),
+    counters: structuredClone(evidence.counters),
+    observations: structuredClone(evidence.observations),
+    execution_artifacts: structuredClone(evidence.execution_artifacts),
+    replay: structuredClone(evidence.replay),
+    fault_execution: structuredClone(evidence.fault_execution),
+    performance_results: structuredClone(evidence.performance_results),
+    required_measurement_results: structuredClone(
+      evidence.required_measurement_results,
+    ),
+    negative_control: structuredClone(evidence.negative_control),
+    seed: evidence.seed,
+  };
+  return {
+    fields,
+    authentication: {
+      runner_public_key: "A".repeat(43),
+      nonce: "B".repeat(43),
+      signature: "C".repeat(86),
+    },
+  };
+}
+
+function syncReceiptProjection(evidence) {
+  if (!evidence.run.command_observation) {
+    evidence.run.command_observation = {
+      argv: structuredClone(evidence.run.argv),
+      exit_code: evidence.run.result === "passed" ? 0 : evidence.run.exit_code,
+      started_at: evidence.run.started_at,
+      completed_at: evidence.run.completed_at,
+      make_executable_sha256: "e".repeat(64),
+      source_snapshot_sha256: "f".repeat(64),
+    };
+  }
+  evidence.receipt = receiptProjectionFor(evidence);
+}
+
+function evidenceReceiptProjectionErrors(evidence) {
+  const errors = [];
+  if (!evidence.receipt || typeof evidence.receipt !== "object") {
+    return [`${evidence.evidence_id} is missing its receipt projection`];
+  }
+  const expectedFields = receiptProjectionFor(evidence).fields;
+  if (!isDeepStrictEqual(evidence.receipt.fields, expectedFields)) {
+    errors.push(
+      `${evidence.evidence_id} receipt fields do not exactly mirror the public receipt projection`,
+    );
+  }
+  const authenticationKeys = Object.keys(
+    evidence.receipt.authentication ?? {},
+  ).sort();
+  if (
+    !isDeepStrictEqual(authenticationKeys, [
+      "nonce",
+      "runner_public_key",
+      "signature",
+    ])
+  ) {
+    errors.push(
+      `${evidence.evidence_id} receipt authentication does not exactly mirror public authentication fields`,
+    );
+  }
+  if (evidence.receipt.fields?.receipt_id !== evidence.receipt_id) {
+    errors.push(`${evidence.evidence_id} receipt ID projection does not match`);
+  }
+  if (evidence.receipt.fields?.runner_digest !== evidence.runner_digest) {
+    errors.push(`${evidence.evidence_id} receipt runner digest projection does not match`);
+  }
+  return errors;
+}
+
 const validEvidence = {
   $schema: "https://synchro.dev/conformance/schemas/evidence-v2.schema.json",
   schema_version: 2,
   evidence_id: "EVD-NATIVE-002",
+  receipt_id: `receipt-sha256:${"a".repeat(64)}`,
   candidate_id: "RC-0.3.0-20260717T120000Z-abcdef0",
   release_version: "0.3.0",
   protocol_version: 3,
@@ -4291,6 +4552,7 @@ const validEvidence = {
       kind: "log",
       path: "evidence/run.log",
       media_type: "text/plain",
+      size_bytes: 1,
       sha256: "c".repeat(64),
     },
     {
@@ -4298,6 +4560,7 @@ const validEvidence = {
       kind: "trace",
       path: "evidence/trace.json",
       media_type: "application/json",
+      size_bytes: 2,
       sha256: "d".repeat(64),
     },
     {
@@ -4305,6 +4568,7 @@ const validEvidence = {
       kind: "replay-data",
       path: "evidence/replay.json",
       media_type: "application/json",
+      size_bytes: 3,
       sha256: "e".repeat(64),
     },
     {
@@ -4312,6 +4576,7 @@ const validEvidence = {
       kind: "barrier-trace",
       path: "evidence/barrier-trace.json",
       media_type: "application/json",
+      size_bytes: 4,
       sha256: "f".repeat(64),
     },
     {
@@ -4319,6 +4584,7 @@ const validEvidence = {
       kind: "fault-plan",
       path: "evidence/fault-plan.json",
       media_type: "application/json",
+      size_bytes: 5,
       sha256: "0".repeat(64),
     },
     {
@@ -4326,8 +4592,17 @@ const validEvidence = {
       kind: "negative-control",
       path: "evidence/negative-control.json",
       media_type: "application/json",
+      size_bytes: 6,
       sha256: "1".repeat(64),
     },
+  ],
+  attachment_ids: [
+    "ATT-LOG-001",
+    "ATT-TRACE-001",
+    "ATT-REPLAY-001",
+    "ATT-BARRIER-001",
+    "ATT-FAULT-001",
+    "ATT-NEGATIVE-001",
   ],
   execution_artifacts: {
     log_attachment_ids: ["ATT-LOG-001"],
@@ -4348,16 +4623,33 @@ const validEvidence = {
   performance_results: [],
   required_measurement_results: [],
   vector_results: [],
-  artifact_ids: [
+  artifact_bindings: fixtureArtifactBindings([
     "ART-PG-EXTENSION-001",
     "ART-ADAPTER-001",
     "ART-SWIFT-001",
     "ART-COCOAPODS-001",
     "ART-RN-NPM-001",
-  ],
+  ]),
+  http_observations: [],
+  counters: {
+    request_counts: {
+      connect: 0,
+      push: 0,
+      pull: 0,
+      rebuild_page: 0,
+      schema_fetch: 0,
+      other: 0,
+    },
+    returned_rebuild_page_count: 0,
+    outbound_network_or_rpc_hops: 0,
+  },
+  observations: [],
   negative_control: null,
   seed: null,
+  runner_digest: "9".repeat(64),
+  receipt: null,
 };
+syncReceiptProjection(validEvidence);
 
 function prefixEvidenceAttachmentPaths(evidence, prefix) {
   for (const attachment of evidence.attachments) {
@@ -4366,6 +4658,7 @@ function prefixEvidenceAttachmentPaths(evidence, prefix) {
   }
 }
 prefixEvidenceAttachmentPaths(validEvidence, "native-attempt-2");
+syncReceiptProjection(validEvidence);
 
 const failedEvidenceAttemptOne = structuredClone(validEvidence);
 prefixEvidenceAttachmentPaths(failedEvidenceAttemptOne, "native-attempt-1");
@@ -4391,6 +4684,9 @@ failedEvidenceAttemptOne.run = {
 failedEvidenceAttemptOne.assertions = [
   { assertion_id: "ASSERT-TIME-001", outcome: "error" },
 ];
+failedEvidenceAttemptOne.receipt_id = `receipt-sha256:${"b".repeat(64)}`;
+  failedEvidenceAttemptOne.runner_digest = "9".repeat(64);
+syncReceiptProjection(failedEvidenceAttemptOne);
 
 const validNegativeControlEvidence = structuredClone(validEvidence);
 prefixEvidenceAttachmentPaths(validNegativeControlEvidence, "negative-control");
@@ -4416,10 +4712,10 @@ validNegativeControlEvidence.run = {
   corrective_action: null,
   rerun_approval: null,
 };
-validNegativeControlEvidence.artifact_ids = [
-  "ART-CONFORMANCE-RUNNER-001",
-  "ART-RN-NPM-001",
-];
+  validNegativeControlEvidence.artifact_bindings = fixtureArtifactBindings([
+    "ART-CONFORMANCE-RUNNER-001",
+    "ART-RN-NPM-001",
+  ]);
 validNegativeControlEvidence.environment = [];
 validNegativeControlEvidence.negative_control = {
   fault_id: "FAULT-TIME-001",
@@ -4433,15 +4729,18 @@ validNegativeControlEvidence.negative_control = {
   outcome: "detected",
   attachment_ids: ["ATT-NEGATIVE-001"],
 };
-validNegativeControlEvidence.fault_execution = {
+  validNegativeControlEvidence.fault_execution = {
   fault_plan_id: "FPL-TIME-001",
   fault_id: "FAULT-TIME-001",
   control_id: "CTRL-TIMESTAMP-001",
   fault_plan_attachment_id: "ATT-FAULT-001",
   subject_type: "synthetic-fault",
   detected_by: ["ASSERT-TIME-001"],
-  injection: validInjectionRecipe,
-};
+    injection: validInjectionRecipe,
+  };
+  validNegativeControlEvidence.receipt_id = `receipt-sha256:${"c".repeat(64)}`;
+  validNegativeControlEvidence.runner_digest = "9".repeat(64);
+  syncReceiptProjection(validNegativeControlEvidence);
 
 const validFaultInjectionEvidence = structuredClone(
   validNegativeControlEvidence,
@@ -4451,10 +4750,10 @@ validFaultInjectionEvidence.evidence_id = "EVD-FAULT-001";
 validFaultInjectionEvidence.proof_type = "fault-injection";
 validFaultInjectionEvidence.proof_obligation_id = "OBL-FAULT-001";
 validFaultInjectionEvidence.support_cell_id = "SUP-PG-018";
-validFaultInjectionEvidence.artifact_ids = [
-  "ART-PG-EXTENSION-001",
-  "ART-ADAPTER-001",
-];
+  validFaultInjectionEvidence.artifact_bindings = fixtureArtifactBindings([
+    "ART-PG-EXTENSION-001",
+    "ART-ADAPTER-001",
+  ]);
 validFaultInjectionEvidence.environment = [
   { name: "postgresql", value: "18.99" },
   { name: "os", value: "99.0.0+16F6" },
@@ -4467,6 +4766,9 @@ validFaultInjectionEvidence.run.execution_lineage_id = "EXEC-FAULT-001";
 validFaultInjectionEvidence.run.url = "https://ci.example.test/runs/fault-1";
 validFaultInjectionEvidence.run.make_target = "test-blackbox";
 validFaultInjectionEvidence.run.argv = ["make", "test-blackbox"];
+validFaultInjectionEvidence.receipt_id = `receipt-sha256:${"e".repeat(64)}`;
+validFaultInjectionEvidence.runner_digest = "9".repeat(64);
+syncReceiptProjection(validFaultInjectionEvidence);
 
 const validServerEvidence = structuredClone(validNegativeControlEvidence);
 prefixEvidenceAttachmentPaths(validServerEvidence, "server-blackbox");
@@ -4474,10 +4776,10 @@ validServerEvidence.evidence_id = "EVD-SERVER-001";
 validServerEvidence.proof_type = "server-black-box";
 validServerEvidence.proof_obligation_id = "OBL-SERVER-001";
 validServerEvidence.support_cell_id = "SUP-PG-018";
-validServerEvidence.artifact_ids = [
-  "ART-PG-EXTENSION-001",
-  "ART-ADAPTER-001",
-];
+  validServerEvidence.artifact_bindings = fixtureArtifactBindings([
+    "ART-PG-EXTENSION-001",
+    "ART-ADAPTER-001",
+  ]);
 validServerEvidence.environment = structuredClone(
   validFaultInjectionEvidence.environment,
 );
@@ -4487,7 +4789,10 @@ validServerEvidence.run.id = "RUN-SERVER-001";
 validServerEvidence.run.execution_lineage_id = "EXEC-SERVER-001";
 validServerEvidence.run.url = "https://ci.example.test/runs/server-1";
 validServerEvidence.run.make_target = "test-blackbox";
-validServerEvidence.run.argv = ["make", "test-blackbox"];
+  validServerEvidence.run.argv = ["make", "test-blackbox"];
+  validServerEvidence.receipt_id = `receipt-sha256:${"d".repeat(64)}`;
+  validServerEvidence.runner_digest = "9".repeat(64);
+  syncReceiptProjection(validServerEvidence);
 
 const validEvidenceBundle = [
   failedEvidenceAttemptOne,
@@ -4520,6 +4825,7 @@ const validArtifacts = validArtifactBindings.map(
       {
         path: `artifacts/${inventory_id.toLowerCase()}.bin`,
         media_type: "application/octet-stream",
+        size_bytes: index + 1,
         sha256: (index + 1).toString(16).repeat(64),
       },
     ],
@@ -4566,7 +4872,6 @@ const validAttestations = validArtifacts.flatMap((artifact, index) =>
       },
       verified_at: "2026-07-17T11:50:00Z",
       verification_uri: `https://search.sigstore.dev/?logIndex=${index * 2 + kindIndex + 1}`,
-      verified: true,
     },
   })),
 );
@@ -4578,11 +4883,16 @@ const validManifest = {
   release_version: "0.3.0",
   protocol_version: 3,
   source_commit: "a".repeat(40),
+  runner_digest: "9".repeat(64),
   created_at: "2026-07-17T12:00:00Z",
   generator: {
     name: "rc-generator",
     version: "1.0.0",
     binary_sha256: "b".repeat(64),
+  },
+  candidate_lock: {
+    path: "candidate/rc-candidate-lock.json",
+    sha256: "0".repeat(64),
   },
   trusted_rerun_approvers: ["github:release-manager"],
   contract: {
@@ -4639,6 +4949,7 @@ const validManifest = {
       support_matrix: { path: "conformance/schemas/support-matrix.schema.json", sha256: "2".repeat(64) },
       scenario: { path: "conformance/schemas/scenario-v2.schema.json", sha256: "3".repeat(64) },
       evidence: { path: "conformance/schemas/evidence-v2.schema.json", sha256: "4".repeat(64) },
+      rc_candidate_lock: { path: "conformance/schemas/rc-candidate-lock-v1.schema.json", sha256: "a".repeat(64) },
       rc_manifest: { path: "conformance/schemas/rc-manifest-v2.schema.json", sha256: "5".repeat(64) },
       fault_catalog: { path: "conformance/schemas/fault-catalog-v1.schema.json", sha256: "6".repeat(64) },
       artifact_inventory: { path: "conformance/schemas/artifact-inventory-v1.schema.json", sha256: "7".repeat(64) },
@@ -4834,6 +5145,41 @@ const validManifest = {
   artifacts: validArtifacts,
   attestations: validAttestations,
 };
+
+const validCandidateLock = {
+  $schema:
+    "https://synchro.dev/conformance/schemas/rc-candidate-lock-v1.schema.json",
+  schema_version: 1,
+  candidate_id: validManifest.candidate_id,
+  release_version: validManifest.release_version,
+  protocol_version: validManifest.protocol_version,
+  source_commit: validManifest.source_commit,
+  runner_digest: validManifest.runner_digest,
+  created_at: "2026-07-17T11:45:00Z",
+  generator: {
+    name: "rc-candidate-lock-generator",
+    version: "1.0.0",
+    binary_sha256: "c".repeat(64),
+  },
+  trusted_rerun_approvers: structuredClone(
+    validManifest.trusted_rerun_approvers,
+  ),
+  contract: structuredClone(validManifest.contract),
+  scenarios: structuredClone(validManifest.scenarios),
+  resolved_support_cells: structuredClone(validManifest.resolved_support_cells),
+  artifacts: structuredClone(validManifest.artifacts),
+  attestations: structuredClone(validManifest.attestations),
+};
+const validCandidateLockBytes = new TextEncoder().encode(
+  `${JSON.stringify(validCandidateLock, null, 2)}\n`,
+);
+validManifest.candidate_lock.sha256 = createHash("sha256")
+  .update(validCandidateLockBytes)
+  .digest("hex");
+fixtureCandidateLockSHA256 = validManifest.candidate_lock.sha256;
+for (const evidence of validEvidenceBundle) {
+  syncReceiptProjection(evidence);
+}
 
 async function main() {
   const ajv = new Ajv2020({ allErrors: true, strict: false, validateSchema: true });
@@ -5964,8 +6310,9 @@ async function main() {
     operation: {
       contract_operation: "local",
       name: "reset-clock",
-      payload: null,
+      payload: {},
     },
+    expected_outcome: { disposition: "success" },
   });
   if (
     validateInstance(
@@ -5986,7 +6333,6 @@ async function main() {
       "model expectation",
       (scenario) => {
         const duplicate = structuredClone(scenario.model.expected_state[0]);
-        duplicate.predicate.name = "state-equals-authored-model";
         scenario.model.expected_state.push(duplicate);
       },
       "Scenario model expectations contains duplicate logical ID",
@@ -6150,6 +6496,10 @@ async function main() {
     validateInstance(validators.evidence, validEvidence, "Valid evidence self-test")
   ) {
     expectSemanticValid(
+      evidenceReceiptProjectionErrors(validEvidence),
+      "Valid receipt projection self-test",
+    );
+    expectSemanticValid(
       evidencePromotionEligibilityErrors(validEvidence),
       "Passing evidence promotion-eligibility self-test",
     );
@@ -6168,6 +6518,99 @@ async function main() {
       "Passing evidence-to-manifest binding self-test",
     );
   }
+
+  const evidenceWithReceiptDetail = structuredClone(validEvidence);
+  evidenceWithReceiptDetail.receipt.fields.assertions[0].detail =
+    "secret-bearing detail";
+  expectInvalid(
+    validators.evidence,
+    evidenceWithReceiptDetail,
+    "Evidence receipt assertion with forbidden detail",
+    (errors) =>
+      errors.some(
+        (error) =>
+          error.instancePath === "/receipt/fields/assertions/0" &&
+          error.keyword === "additionalProperties" &&
+          error.params.additionalProperty === "detail",
+      ),
+  );
+
+  const evidenceWithoutCandidateLockReceiptBinding = structuredClone(validEvidence);
+  delete evidenceWithoutCandidateLockReceiptBinding.receipt.fields
+    .candidate_lock_sha256;
+  expectInvalid(
+    validators.evidence,
+    evidenceWithoutCandidateLockReceiptBinding,
+    "Evidence receipt without its candidate-lock digest",
+    (errors) =>
+      errors.some(
+        (error) =>
+          error.instancePath === "/receipt/fields" &&
+          error.keyword === "required" &&
+          error.params.missingProperty === "candidate_lock_sha256",
+      ),
+  );
+
+  const evidenceWithChangedCandidateLockReceiptBinding = structuredClone(
+    validEvidence,
+  );
+  evidenceWithChangedCandidateLockReceiptBinding.receipt.fields.candidate_lock_sha256 =
+    "f".repeat(64);
+  expectSemanticInvalid(
+    evidenceReceiptProjectionErrors(
+      evidenceWithChangedCandidateLockReceiptBinding,
+    ),
+    "Evidence receipt with a changed candidate-lock digest",
+    (error) => error.includes("receipt fields do not exactly mirror"),
+  );
+  const evidenceWithSelfDeclaredVerified = structuredClone(validEvidence);
+  evidenceWithSelfDeclaredVerified.verified = true;
+  expectInvalid(
+    validators.evidence,
+    evidenceWithSelfDeclaredVerified,
+    "Evidence with self-declared verified status",
+    (errors) =>
+      errors.some(
+        (error) =>
+          error.instancePath === "" &&
+          error.keyword === "additionalProperties" &&
+          error.params.additionalProperty === "verified",
+      ),
+  );
+  const evidenceWithSecretField = structuredClone(validEvidence);
+  evidenceWithSecretField.receipt.authentication.authorization = "Bearer secret";
+  expectInvalid(
+    validators.evidence,
+    evidenceWithSecretField,
+    "Evidence receipt authentication with secret-bearing field",
+    (errors) =>
+      errors.some(
+        (error) =>
+          error.instancePath === "/receipt/authentication" &&
+          error.keyword === "additionalProperties" &&
+          error.params.additionalProperty === "authorization",
+      ),
+  );
+  const evidenceWithForbiddenHeader = structuredClone(validEvidence);
+  evidenceWithForbiddenHeader.http_observations = [
+    {
+      request_class: "connect",
+      status: 200,
+      headers: [{ name: "authorization", values: ["Bearer secret"] }],
+      duration_nanoseconds: 1,
+    },
+  ];
+  expectInvalid(
+    validators.evidence,
+    evidenceWithForbiddenHeader,
+    "Evidence HTTP observation with forbidden header",
+    (errors) =>
+      errors.some(
+        (error) =>
+          error.instancePath === "/http_observations/0/headers/0/name" &&
+          error.keyword === "enum",
+      ),
+  );
 
   const vectorScenario = structuredClone(validScenario);
   const vectorObligation = vectorScenario.proof_obligations[0];
@@ -6215,7 +6658,9 @@ async function main() {
   vectorEvidence.proof_obligation_id = "OBL-SERVER-001";
   vectorEvidence.support_cell_id = null;
   vectorEvidence.environment = [];
-  vectorEvidence.artifact_ids = ["ART-CONFORMANCE-RUNNER-001"];
+  vectorEvidence.artifact_bindings = fixtureArtifactBindings([
+    "ART-CONFORMANCE-RUNNER-001",
+  ]);
   vectorEvidence.run.make_target = "test-conformance";
   vectorEvidence.run.argv = ["make", "test-conformance"];
   vectorEvidence.assertions.push({
@@ -6227,8 +6672,10 @@ async function main() {
     kind: "vector-results",
     path: "evidence/vector-results.json",
     media_type: "application/json",
+    size_bytes: 7,
     sha256: "2".repeat(64),
   });
+  vectorEvidence.attachment_ids.push("ATT-VECTOR-001");
   vectorEvidence.vector_results = [
     {
       vector_set_id: "VSET-CANONICAL-001",
@@ -6243,6 +6690,9 @@ async function main() {
       failed_count: 0,
     },
   ];
+  vectorEvidence.receipt_id = `receipt-sha256:${"f".repeat(64)}`;
+  vectorEvidence.runner_digest = "4".repeat(64);
+  syncReceiptProjection(vectorEvidence);
   if (
     validateInstance(
       validators.evidence,
@@ -6342,7 +6792,9 @@ async function main() {
     (error) => error.includes("executed count does not match catalog vector count"),
   );
   const vectorEvidenceWithWrongLanguageArtifact = structuredClone(vectorEvidence);
-  vectorEvidenceWithWrongLanguageArtifact.artifact_ids.push("ART-ADAPTER-001");
+  vectorEvidenceWithWrongLanguageArtifact.artifact_bindings.push(
+    ...fixtureArtifactBindings(["ART-ADAPTER-001"]),
+  );
   vectorEvidenceWithWrongLanguageArtifact.vector_results[0].artifact_id =
     "ART-ADAPTER-001";
   const vectorScenarioWithWrongLanguageArtifact = structuredClone(vectorScenario);
@@ -6448,9 +6900,9 @@ async function main() {
     ["swift", "ART-SWIFT-001"],
     ["kotlin", "ART-KOTLIN-MAVEN-001"],
   ]);
-  terminalVectorEvidence.artifact_ids = [
+  terminalVectorEvidence.artifact_bindings = fixtureArtifactBindings([
     ...vectorArtifactsByLanguage.values(),
-  ];
+  ]);
   terminalVectorEvidence.vector_results = ["go", "rust", "swift", "kotlin"].map(
     (language) => ({
       ...structuredClone(terminalVectorEvidence.vector_results[0]),
@@ -6458,6 +6910,9 @@ async function main() {
       artifact_id: vectorArtifactsByLanguage.get(language),
     }),
   );
+  terminalVectorEvidence.receipt_id = `receipt-sha256:${"1".repeat(64)}`;
+  terminalVectorEvidence.runner_digest = "3".repeat(64);
+  syncReceiptProjection(terminalVectorEvidence);
   expectSemanticValid(
     candidateVectorLanguageClosureErrors(
       [vectorScenario],
@@ -6498,7 +6953,33 @@ async function main() {
       artifactInventory,
     ),
     "Duplicate candidate vector language closure control",
-    (error) => error.includes("duplicate terminal go evidence"),
+    (error) => error.includes("duplicate terminal evidence within execution vector key"),
+  );
+  const repeatedLanguageScenario = structuredClone(vectorScenario);
+  const repeatedLanguageObligation = structuredClone(
+    repeatedLanguageScenario.proof_obligations[0],
+  );
+  repeatedLanguageObligation.obligation_id = "OBL-VECTOR-REPEAT-001";
+  repeatedLanguageScenario.proof_obligations.push(repeatedLanguageObligation);
+  const repeatedLanguageEvidence = structuredClone(terminalVectorEvidence);
+  repeatedLanguageEvidence.evidence_id = "EVD-VECTOR-REPEAT-001";
+  repeatedLanguageEvidence.proof_obligation_id = "OBL-VECTOR-REPEAT-001";
+  repeatedLanguageEvidence.run.execution_lineage_id = "EXEC-VECTOR-REPEAT-001";
+  repeatedLanguageEvidence.vector_results = [
+    structuredClone(terminalVectorEvidence.vector_results[0]),
+  ];
+  repeatedLanguageEvidence.receipt_id = `receipt-sha256:${"2".repeat(64)}`;
+  repeatedLanguageEvidence.runner_digest = "2".repeat(64);
+  syncReceiptProjection(repeatedLanguageEvidence);
+  expectSemanticValid(
+    candidateVectorLanguageClosureErrors(
+      [repeatedLanguageScenario],
+      [terminalVectorEvidence, repeatedLanguageEvidence],
+      validVectorCatalog,
+      validManifest,
+      artifactInventory,
+    ),
+    "Repeated vector language across distinct obligation keys self-test",
   );
   expectSemanticValid(
     candidateVectorLanguageClosureErrors(
@@ -6722,7 +7203,10 @@ async function main() {
     ],
     [
       "wrong obligation artifact role",
-      (evidence) => (evidence.artifact_ids = ["ART-SWIFT-001"]),
+      (evidence) =>
+        (evidence.artifact_bindings = fixtureArtifactBindings([
+          "ART-SWIFT-001",
+        ])),
       "resolved artifact inventory IDs do not exactly match obligation",
     ],
     [
@@ -6971,10 +7455,10 @@ async function main() {
     performanceEvidence.evidence_id = "EVD-PERFORMANCE-001";
     performanceEvidence.scenario_id = performanceScenario.id;
     performanceEvidence.support_cell_id = "SUP-PG-018";
-    performanceEvidence.artifact_ids = [
+    performanceEvidence.artifact_bindings = fixtureArtifactBindings([
       "ART-PG-EXTENSION-001",
       "ART-ADAPTER-001",
-    ];
+    ]);
     performanceEvidence.assertions.push({
       assertion_id: "ASSERT-PERFORMANCE-001",
       outcome: "passed",
@@ -6984,8 +7468,10 @@ async function main() {
       kind: "performance-measurements",
       path: "evidence/performance.json",
       media_type: "application/json",
+      size_bytes: 8,
       sha256: "2".repeat(64),
     });
+    performanceEvidence.attachment_ids.push("ATT-PERFORMANCE-001");
     performanceEvidence.performance_results = [
       {
         budget_id: budget.id,
@@ -7012,6 +7498,9 @@ async function main() {
         measurement_method: budget.measurement_method,
       },
     ];
+    performanceEvidence.receipt_id = `receipt-sha256:${"3".repeat(64)}`;
+    performanceEvidence.runner_digest = "1".repeat(64);
+    syncReceiptProjection(performanceEvidence);
     if (
       validateInstance(
         validators.evidence,
@@ -7038,6 +7527,7 @@ async function main() {
       "EVD-PERFORMANCE-NEGATIVE-001";
     performanceNegativeControlEvidence.scenario_id = performanceScenario.id;
     performanceNegativeControlEvidence.vector_results = [];
+    syncReceiptProjection(performanceNegativeControlEvidence);
     expectSemanticValid(
       evidenceScenarioSemanticErrors(
         performanceNegativeControlEvidence,
@@ -7235,10 +7725,10 @@ async function main() {
     measurementEvidence.evidence_id = "EVD-MEASUREMENT-001";
     measurementEvidence.scenario_id = measurementScenario.id;
     measurementEvidence.support_cell_id = "SUP-PG-018";
-    measurementEvidence.artifact_ids = [
+    measurementEvidence.artifact_bindings = fixtureArtifactBindings([
       "ART-PG-EXTENSION-001",
       "ART-ADAPTER-001",
-    ];
+    ]);
     measurementEvidence.assertions.push({
       assertion_id: "ASSERT-MEASUREMENT-001",
       outcome: "passed",
@@ -7248,8 +7738,10 @@ async function main() {
       kind: "performance-measurements",
       path: "evidence/measurement.json",
       media_type: "application/json",
+      size_bytes: 9,
       sha256: "3".repeat(64),
     });
+    measurementEvidence.attachment_ids.push("ATT-MEASUREMENT-001");
     measurementEvidence.required_measurement_results = [
       {
         measurement_id: measurement.id,
@@ -7277,6 +7769,9 @@ async function main() {
         ),
       },
     ];
+    measurementEvidence.receipt_id = `receipt-sha256:${"4".repeat(64)}`;
+    measurementEvidence.runner_digest = "0".repeat(64);
+    syncReceiptProjection(measurementEvidence);
     if (
       validateInstance(
         validators.evidence,
@@ -7399,14 +7894,12 @@ async function main() {
   const skippedEvidence = structuredClone(failedEvidenceAttemptOne);
   skippedEvidence.evidence_id = "EVD-NATIVE-SKIP-001";
   skippedEvidence.run.id = "RUN-NATIVE-SKIP-001";
-  skippedEvidence.run.exit_code = 0;
-  skippedEvidence.run.result = "passed";
   skippedEvidence.assertions[0].outcome = "skipped";
   if (
     validateInstance(
       validators.evidence,
       skippedEvidence,
-      "Schema-valid skipped evidence self-test",
+      "Schema-valid nonzero skipped evidence self-test",
     )
   ) {
     expectSemanticInvalid(
@@ -7415,6 +7908,23 @@ async function main() {
       (error) => error.includes("outcome skipped, not passed"),
     );
   }
+
+  const zeroExitSkippedEvidence = structuredClone(skippedEvidence);
+  zeroExitSkippedEvidence.evidence_id = "EVD-NATIVE-ZERO-SKIP-001";
+  zeroExitSkippedEvidence.run.id = "RUN-NATIVE-ZERO-SKIP-001";
+  zeroExitSkippedEvidence.run.exit_code = 0;
+  zeroExitSkippedEvidence.run.result = "passed";
+  expectInvalid(
+    validators.evidence,
+    zeroExitSkippedEvidence,
+    "Zero-exit skipped evidence control",
+    (errors) =>
+      errors.some(
+        (error) =>
+          error.instancePath === "/assertions/0/outcome" &&
+          error.keyword === "const",
+      ),
+  );
 
   const rerunAfterSkippedEvidence = structuredClone(validEvidence);
   rerunAfterSkippedEvidence.run.previous_evidence_id =
@@ -7859,7 +8369,13 @@ async function main() {
       "requirement_ids",
       (evidence) => (evidence.requirement_ids = ["SYNC-TIME-002"]),
     ],
-    ["artifact_ids", (evidence) => (evidence.artifact_ids = ["ART-SWIFT-002"])],
+    [
+      "artifact_bindings",
+      (evidence) =>
+        (evidence.artifact_bindings = fixtureArtifactBindings([
+          "ART-SWIFT-001",
+        ])),
+    ],
   ];
   for (const [binding, mutate] of evidenceBindingControls) {
     const driftedEvidence = structuredClone(validEvidence);
@@ -7882,6 +8398,127 @@ async function main() {
 
   if (
     validateInstance(
+      validators.rcCandidateLock,
+      validCandidateLock,
+      "Valid pre-execution RC candidate lock self-test",
+    ) &&
+    supportMatrixValid &&
+    artifactInventoryValid
+  ) {
+    expectSemanticValid(
+      manifestSemanticErrors(
+        validCandidateLock,
+        supportMatrix,
+        artifactInventory,
+      ),
+      "Valid RC candidate lock semantic self-test",
+    );
+    expectSemanticValid(
+      candidateLockManifestBindingErrors(
+        validCandidateLock,
+        validCandidateLockBytes,
+        validManifest,
+      ),
+      "Valid final manifest candidate-lock binding self-test",
+    );
+  }
+
+  for (const [field, value] of [
+    ["evidence", []],
+    ["final_evidence_paths", ["evidence/final.json"]],
+    ["final_evidence_hashes", ["a".repeat(64)]],
+  ]) {
+    const candidateLockWithEvidence = structuredClone(validCandidateLock);
+    candidateLockWithEvidence[field] = value;
+    expectInvalid(
+      validators.rcCandidateLock,
+      candidateLockWithEvidence,
+      `RC candidate lock with forbidden ${field}`,
+      (errors) =>
+        errors.some(
+          (error) =>
+            error.instancePath === "" &&
+            error.keyword === "additionalProperties" &&
+            error.params.additionalProperty === field,
+        ),
+    );
+  }
+
+  const candidateLockWithoutArtifactSize = structuredClone(validCandidateLock);
+  delete candidateLockWithoutArtifactSize.artifacts[0].payloads[0].size_bytes;
+  expectInvalid(
+    validators.rcCandidateLock,
+    candidateLockWithoutArtifactSize,
+    "RC candidate lock without an artifact payload size",
+    (errors) =>
+      errors.some(
+        (error) =>
+          error.instancePath === "/artifacts/0/payloads/0" &&
+          error.keyword === "required" &&
+          error.params.missingProperty === "size_bytes",
+      ),
+  );
+
+  const candidateLockWithoutRunnerDigest = structuredClone(validCandidateLock);
+  delete candidateLockWithoutRunnerDigest.runner_digest;
+  expectInvalid(
+    validators.rcCandidateLock,
+    candidateLockWithoutRunnerDigest,
+    "RC candidate lock without its authorized runner digest",
+    (errors) =>
+      errors.some(
+        (error) =>
+          error.instancePath === "" &&
+          error.keyword === "required" &&
+          error.params.missingProperty === "runner_digest",
+      ),
+  );
+
+  const candidateLockWithSelfDeclaredVerification = structuredClone(
+    validCandidateLock,
+  );
+  candidateLockWithSelfDeclaredVerification.attestations[0].sigstore_verification.verified =
+    true;
+  expectInvalid(
+    validators.rcCandidateLock,
+    candidateLockWithSelfDeclaredVerification,
+    "RC candidate lock with self-declared Sigstore verification",
+    (errors) =>
+      errors.some(
+        (error) =>
+          error.instancePath ===
+            "/attestations/0/sigstore_verification" &&
+          error.keyword === "additionalProperties" &&
+          error.params.additionalProperty === "verified",
+      ),
+  );
+
+  const manifestWithChangedCandidateLockHash = structuredClone(validManifest);
+  manifestWithChangedCandidateLockHash.candidate_lock.sha256 = "f".repeat(64);
+  expectSemanticInvalid(
+    candidateLockManifestBindingErrors(
+      validCandidateLock,
+      validCandidateLockBytes,
+      manifestWithChangedCandidateLockHash,
+    ),
+    "Final RC manifest with a changed candidate-lock hash control",
+    (error) => error.includes("candidate lock SHA-256"),
+  );
+
+  const manifestWithChangedRunnerDigest = structuredClone(validManifest);
+  manifestWithChangedRunnerDigest.runner_digest = "f".repeat(64);
+  expectSemanticInvalid(
+    candidateLockManifestBindingErrors(
+      validCandidateLock,
+      validCandidateLockBytes,
+      manifestWithChangedRunnerDigest,
+    ),
+    "Final RC manifest with a changed runner digest control",
+    (error) => error.includes("runner_digest"),
+  );
+
+  if (
+    validateInstance(
       validators.rcManifest,
       validManifest,
       "Valid RC manifest self-test",
@@ -7900,6 +8537,53 @@ async function main() {
       "Valid RC manifest retry-chain closure self-test",
     );
   }
+
+  const manifestWithoutCandidateLock = structuredClone(validManifest);
+  delete manifestWithoutCandidateLock.candidate_lock;
+  expectInvalid(
+    validators.rcManifest,
+    manifestWithoutCandidateLock,
+    "Final RC manifest without its candidate-lock binding",
+    (errors) =>
+      errors.some(
+        (error) =>
+          error.instancePath === "" &&
+          error.keyword === "required" &&
+          error.params.missingProperty === "candidate_lock",
+      ),
+  );
+
+  const manifestWithoutArtifactSize = structuredClone(validManifest);
+  delete manifestWithoutArtifactSize.artifacts[0].payloads[0].size_bytes;
+  expectInvalid(
+    validators.rcManifest,
+    manifestWithoutArtifactSize,
+    "Final RC manifest without an artifact payload size",
+    (errors) =>
+      errors.some(
+        (error) =>
+          error.instancePath === "/artifacts/0/payloads/0" &&
+          error.keyword === "required" &&
+          error.params.missingProperty === "size_bytes",
+      ),
+  );
+
+  const manifestWithSelfDeclaredVerification = structuredClone(validManifest);
+  manifestWithSelfDeclaredVerification.attestations[0].sigstore_verification.verified =
+    true;
+  expectInvalid(
+    validators.rcManifest,
+    manifestWithSelfDeclaredVerification,
+    "Final RC manifest with self-declared Sigstore verification",
+    (errors) =>
+      errors.some(
+        (error) =>
+          error.instancePath ===
+            "/attestations/0/sigstore_verification" &&
+          error.keyword === "additionalProperties" &&
+          error.params.additionalProperty === "verified",
+      ),
+  );
 
   const bundleWithCrossCollectionPathCollision = structuredClone(
     validEvidenceBundle,
@@ -8152,7 +8836,9 @@ async function main() {
   );
 
   const evidenceWithUnknownArtifact = structuredClone(validEvidence);
-  evidenceWithUnknownArtifact.artifact_ids = ["ART-UNKNOWN-001"];
+  evidenceWithUnknownArtifact.artifact_bindings = fixtureArtifactBindings([
+    "ART-UNKNOWN-001",
+  ]);
   expectSemanticInvalid(
     evidenceManifestBindingErrors(evidenceWithUnknownArtifact, validManifest),
     "Evidence with an artifact absent from the RC manifest control",

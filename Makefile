@@ -11,6 +11,24 @@
 	docs-build \
 	docs-dev \
 	verify-contract \
+	conformance-mod-download \
+	lint-conformance \
+	test-conformance-module \
+	test-conformance-imports \
+	test-conformance-contract \
+	update-conformance-catalog \
+	check-conformance-catalog \
+	test-conformance-scenarios \
+	test-vectors \
+	test-reference \
+	test-conformance-faults \
+	test-blackbox-harness \
+	test-blackbox-components \
+	conformance-adapter-artifact \
+	conformance-pg18-extension-artifact \
+	test-evidence \
+	test-inventory \
+	test-mutants \
 	test-conformance \
 	test-blackbox \
 	rc-check-pg18 \
@@ -79,6 +97,8 @@ PGRX_PG_CONFIG ?= $(shell awk -F'"' '/^$(PGRX_PG)[[:space:]]*=/ { print $$2 }' $
 PGRX_PG_BIN_DIR ?= $(dir $(PGRX_PG_CONFIG))
 PGRX_PSQL ?= $(PGRX_PG_BIN_DIR)psql
 PGRX_TARGET_DIR ?= $(CURDIR)/.pgrx-target
+CONFORMANCE_ADAPTER_ARTIFACT_DIR ?= $(CURDIR)/dist/conformance/synchrod-pg-adapter
+CONFORMANCE_EXTENSION_ARTIFACT ?= $(CURDIR)/dist/conformance/synchro-pg-pg18
 ADAPTER_TEST_DB ?= synchro_adapter_test
 ADAPTER_TEST_URL ?= postgres://$(USER)@localhost:$(PGRX_PORT)/$(ADAPTER_TEST_DB)?sslmode=disable
 REPLICATION_URL ?= postgres://$(USER)@localhost:$(PGRX_PORT)/$(ADAPTER_TEST_DB)?replication=database&sslmode=disable
@@ -120,7 +140,18 @@ help:
 	@echo "  docs-build            - Verify the contract and build the docs site"
 	@echo "  docs-dev              - Run the docs site locally"
 	@echo "  verify-contract       - Validate the machine-readable release contract"
+	@echo "  conformance-mod-download - Download standalone conformance dependencies"
+	@echo "  lint-conformance      - Format and vet the standalone conformance module"
+	@echo "  test-conformance-module - Test standalone conformance module policy"
+	@echo "  test-conformance-imports - Test standalone conformance import policy"
+	@echo "  test-conformance-contract - Test strict contract loading and snapshots"
+	@echo "  update-conformance-catalog - Write the deterministic scenario catalog"
+	@echo "  check-conformance-catalog - Check the deterministic scenario catalog"
+	@echo "  test-conformance-scenarios - Test strict scenario loading and catalog generation"
+	@echo "  test-vectors          - Test canonical protocol 3 vectors"
+	@echo "  test-reference        - Test the independent protocol 3 reference model"
 	@echo "  test-conformance      - Run the independent protocol conformance suite"
+	@echo "  test-inventory        - Test generated evidence inventory"
 	@echo "  test-blackbox         - Run the packaged server black-box suite"
 	@echo "  rc-check-pg18         - Verify the packaged PostgreSQL 18 candidate"
 	@echo "  evidence              - Generate and verify immutable RC evidence"
@@ -190,9 +221,137 @@ verify-contract:
 	cd docs && npm ci
 	cd docs && npm run verify:contract
 
-test-conformance test-blackbox rc-check-pg18 evidence:
+conformance-mod-download:
+	cd conformance && GOFLAGS= GOWORK=off go mod download all
+
+lint-conformance: conformance-mod-download
+	@test -z "$$(find conformance -name '*.go' -print0 | xargs -0 gofmt -l)"
+	cd conformance && GOFLAGS= GOWORK=off go vet ./...
+
+test-conformance-module:
+	cd conformance && GOFLAGS= GOWORK=off go test ./internal/importguard -count=1 -run 'TestModulePolicy'
+
+test-conformance-imports:
+	cd conformance && GOFLAGS= GOWORK=off go test ./internal/importguard -count=1
+
+test-conformance-contract:
+	cd conformance && GOFLAGS= GOWORK=off go test ./internal/jsonstrict ./internal/schemavalidator ./internal/contract -count=1
+
+update-conformance-catalog:
+	cd conformance && GOFLAGS= GOWORK=off go run ./cmd/synchro-conformance catalog --repo-root .. --write
+
+check-conformance-catalog:
+	cd conformance && GOFLAGS= GOWORK=off go run ./cmd/synchro-conformance catalog --repo-root .. --check
+
+test-conformance-scenarios:
+	cd conformance && GOFLAGS= GOWORK=off go test ./scenarios/... ./modelrunner ./cmd/synchro-conformance -count=1
+
+test-vectors:
+	cd conformance && GOFLAGS= GOWORK=off go test ./vectors -count=1
+
+test-reference:
+	cd conformance && GOFLAGS= GOWORK=off go test ./reference -count=1
+
+test-conformance-faults:
+	cd conformance && GOFLAGS= GOWORK=off go test ./barriers ./faults -count=1
+
+test-blackbox-harness:
+	cd conformance && GOFLAGS= GOWORK=off go test ./blackbox -count=1
+
+test-blackbox-components:
+	cd conformance && GOFLAGS= GOWORK=off go test ./observer -count=1
+	cd conformance && GOFLAGS= GOWORK=off go test ./blackbox/baseline -count=1
+
+conformance-adapter-artifact:
+	@set -eu; \
+		final="$(CONFORMANCE_ADAPTER_ARTIFACT_DIR)"; \
+		parent="$$(dirname "$$final")"; \
+		stage="$$final.tmp.$$$$"; \
+		lock="$$final.publish-lock"; \
+		mkdir -p "$$parent"; \
+		mkdir "$$lock" || { echo "adapter artifact publication is locked" >&2; exit 1; }; \
+		cleanup() { rm -rf "$$stage"; rmdir "$$lock" 2>/dev/null || true; }; \
+		trap cleanup EXIT HUP INT TERM; \
+		test ! -e "$$final" || { echo "$$final already exists" >&2; exit 1; }; \
+		mkdir "$$stage"; \
+		(cd api/go && GOWORK=off go build -o "$$stage/synchrod-pg" ./cmd/synchrod-pg); \
+		test -x "$$stage/synchrod-pg"; \
+		digest="$$(shasum -a 256 "$$stage/synchrod-pg" | cut -d ' ' -f 1)"; \
+		test -n "$$digest"; \
+		printf '%s\n' "$$digest" > "$$stage/synchrod-pg.sha256.tmp"; \
+		mv "$$stage/synchrod-pg.sha256.tmp" "$$stage/synchrod-pg.sha256"; \
+		mv "$$stage" "$$final"; \
+		rmdir "$$lock"; \
+		trap - EXIT HUP INT TERM
+
+conformance-pg18-extension-artifact:
+	@test -n "$(PGRX_PG_CONFIG)" || (echo "PGRX_PG_CONFIG is required" >&2; exit 1)
+	@test "$$($(PGRX_PG_CONFIG) --version)" = "PostgreSQL 18.3" || (echo "PGRX_PG_CONFIG must select PostgreSQL 18.3" >&2; exit 1)
+	@set -eu; \
+		final="$(CONFORMANCE_EXTENSION_ARTIFACT)"; \
+		parent="$$(dirname "$$final")"; \
+		out="$$final.tmp.$$$$"; \
+		lock="$$final.publish-lock"; \
+		mkdir -p "$$parent"; \
+		mkdir "$$lock" || { echo "extension artifact publication is locked" >&2; exit 1; }; \
+		cleanup() { rm -rf "$$out"; rmdir "$$lock" 2>/dev/null || true; }; \
+		trap cleanup EXIT HUP INT TERM; \
+		test ! -e "$$final" || { echo "$$final already exists" >&2; exit 1; }; \
+		(cd extensions/synchro-pg && CARGO_TARGET_DIR="$(PGRX_TARGET_DIR)" cargo pgrx package --pg-config "$(PGRX_PG_CONFIG)" --out-dir "$$out"); \
+		pkglibdir="$$($(PGRX_PG_CONFIG) --pkglibdir)"; \
+		sharedir="$$($(PGRX_PG_CONFIG) --sharedir)"; \
+		case "$$(uname -s)" in Darwin) suffix=dylib ;; *) suffix=so ;; esac; \
+		library="$$out$$pkglibdir/synchro_pg.$$suffix"; \
+		control="$$out$$sharedir/extension/synchro_pg.control"; \
+		sql="$$out$$sharedir/extension/synchro_pg--0.3.0.sql"; \
+		test -f "$$library" && test -f "$$control" && test -f "$$sql"; \
+		library_path="$${library#"$$out"/}"; \
+		control_path="$${control#"$$out"/}"; \
+		sql_path="$${sql#"$$out"/}"; \
+		library_hash="$$(shasum -a 256 "$$library" | cut -d ' ' -f 1)"; \
+		control_hash="$$(shasum -a 256 "$$control" | cut -d ' ' -f 1)"; \
+		sql_hash="$$(shasum -a 256 "$$sql" | cut -d ' ' -f 1)"; \
+		printf '%s\n' \
+			'{' \
+			'  "format": "synchro-pg18-extension-bundle-v1",' \
+			'  "postgresql_major": 18,' \
+			'  "postgresql_version": "18.3",' \
+			'  "files": [' \
+			"    {\"path\": \"$$library_path\", \"destination\": \"pkglibdir/synchro_pg.$$suffix\", \"sha256\": \"$$library_hash\"}," \
+			"    {\"path\": \"$$control_path\", \"destination\": \"sharedir/extension/synchro_pg.control\", \"sha256\": \"$$control_hash\"}," \
+			"    {\"path\": \"$$sql_path\", \"destination\": \"sharedir/extension/synchro_pg--0.3.0.sql\", \"sha256\": \"$$sql_hash\"}" \
+			'  ]' \
+			'}' > "$$out/artifact-manifest.json.tmp"; \
+		mv "$$out/artifact-manifest.json.tmp" "$$out/artifact-manifest.json"; \
+		manifest_digest="$$(shasum -a 256 "$$out/artifact-manifest.json" | cut -d ' ' -f 1)"; \
+		test -n "$$manifest_digest"; \
+		printf '%s\n' "$$manifest_digest" > "$$out/artifact-manifest.json.sha256.tmp"; \
+		mv "$$out/artifact-manifest.json.sha256.tmp" "$$out/artifact-manifest.json.sha256"; \
+		mv "$$out" "$$final"; \
+		rmdir "$$lock"; \
+		trap - EXIT HUP INT TERM
+
+test-mutants:
+	cd conformance && GOFLAGS= GOWORK=off go test ./mutants -count=1
+
+test-evidence:
+	cd conformance && GOFLAGS= GOWORK=off go test ./execution ./evidence ./cmd/synchro-evidence -count=1
+
+test-inventory:
+	cd conformance && GOFLAGS= GOWORK=off go test ./inventory -count=1
+
+test-blackbox: conformance-mod-download test-blackbox-harness test-blackbox-components
+	cd conformance && GOFLAGS= GOWORK=off go test ./blackbox/integration -count=1 -args --provision --install
+
+test-conformance: conformance-mod-download test-conformance-module test-conformance-imports test-conformance-contract test-conformance-scenarios check-conformance-catalog test-vectors test-reference test-conformance-faults test-blackbox-harness test-evidence test-inventory test-mutants
+
+rc-check-pg18:
 	@echo "$@ is unavailable until its required verification phase is implemented; release promotion is blocked." >&2
 	@exit 1
+
+evidence:
+	@test -n "$(RC_CANDIDATE_DIR)" || (echo "RC_CANDIDATE_DIR is required" >&2; exit 1)
+	cd conformance && GOFLAGS= GOWORK=off go run ./cmd/synchro-evidence validate --repo-root .. --candidate-dir "$(RC_CANDIDATE_DIR)"
 
 lint-rn:
 	cd clients/react-native && yarn typecheck
@@ -290,7 +449,7 @@ release-pods-check: version-check
 	swift package dump-package >/dev/null
 	@echo "Apple package metadata validated."
 
-release-check: evidence test-conformance test-blackbox rc-check-pg18 version-check release-pods-check build build-seed build-check release-kotlin-local release-npm-dry-run lint-go lint-rust-core lint-rn test-rust-core test-rust-pg test-adapter test-swift test-kotlin test-rn verify-contract docs-build
+release-check: evidence test-conformance test-blackbox rc-check-pg18 version-check release-pods-check build build-seed build-check release-kotlin-local release-npm-dry-run lint-go lint-rust-core lint-rust-pg lint-rn test-rust-core test-rust-pg test-adapter test-swift test-kotlin test-rn verify-contract docs-build
 	@echo "Release validation passed."
 
 release-kotlin-local: version-check
