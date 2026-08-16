@@ -25,41 +25,27 @@ fun SchemaManifest.localTables(): List<LocalSchemaTable> {
     validate()
 
     return tables.map { table ->
-        val primaryKey = table.primaryKey?.takeIf { it.isNotEmpty() }
-            ?: throw ContractException("missing primary key for ${table.name}")
-        val updatedAtColumn = table.updatedAtColumn?.takeIf { it.isNotEmpty() }
-            ?: throw ContractException("missing updated_at_column for ${table.name}")
-        val deletedAtColumn = table.deletedAtColumn?.takeIf { it.isNotEmpty() }
-            ?: throw ContractException("missing deleted_at_column for ${table.name}")
-        val columns = table.columns?.takeIf { it.isNotEmpty() }
+        val fieldsByID = table.fields.associateBy { it.fieldID }
+        val primaryKey = fieldsByID[table.primaryKeyFieldID]
+            ?: throw ContractException("missing primary key field for ${table.name}")
+        val updatedAtColumn = table.lifecycle.updatedAtFieldID?.let(fieldsByID::get)?.name.orEmpty()
+        val deletedAtColumn = table.lifecycle.deletedAtFieldID?.let(fieldsByID::get)?.name.orEmpty()
+        val columns = table.fields.takeIf { it.isNotEmpty() }
             ?: throw ContractException("missing columns for ${table.name}")
-
-        val columnNames = columns.map { it.name }.toSet()
-        for (columnName in primaryKey) {
-            if (columnName !in columnNames) {
-                throw ContractException("unknown primary key column ${table.name}.$columnName")
-            }
-        }
-        if (updatedAtColumn !in columnNames) {
-            throw ContractException("unknown updated_at column ${table.name}.$updatedAtColumn")
-        }
-        if (deletedAtColumn !in columnNames) {
-            throw ContractException("unknown deleted_at column ${table.name}.$deletedAtColumn")
-        }
 
         LocalSchemaTable(
             tableName = table.name,
             updatedAtColumn = updatedAtColumn,
             deletedAtColumn = deletedAtColumn,
             composition = table.composition,
-            primaryKey = primaryKey,
+            primaryKey = listOf(primaryKey.name),
             columns = columns.map { column ->
                 LocalSchemaColumn(
                     name = column.name,
                     logicalType = SQLiteSchema.normalizedLogicalType(column.typeName),
                     nullable = column.nullable,
                     sqliteDefaultSQL = null,
-                    isPrimaryKey = column.name in primaryKey,
+                    isPrimaryKey = column.fieldID == table.primaryKeyFieldID,
                 )
             },
         )

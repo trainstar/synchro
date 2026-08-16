@@ -80,17 +80,29 @@ final class HttpClientTests: XCTestCase {
             "schema_hash": "def456",
             "server_time": "2026-01-01T12:00:00.000Z",
             "manifest": [
+                "schema_version": 3,
+                "schema_hash": "def456",
+                "parent_schema": NSNull(),
+                "transition_class": "initial",
+                "compatibility_floor": 3,
                 "tables": [
                     [
+                        "table_id": "table-orders",
+                        "relation_id": "relation-orders",
                         "name": "orders",
-                        "primary_key": ["id"],
-                        "updated_at_column": "updated_at",
-                        "deleted_at_column": "deleted_at",
-                        "columns": [
-                            ["name": "id", "type": "string", "nullable": false],
-                            ["name": "updated_at", "type": "datetime", "nullable": false],
-                            ["name": "deleted_at", "type": "datetime", "nullable": true]
-                        ]
+                        "primary_key_field_id": "field-id",
+                        "lifecycle": [
+                            "created_at_field_id": NSNull(),
+                            "updated_at_field_id": "field-updated-at",
+                            "deleted_at_field_id": "field-deleted-at",
+                        ],
+                        "composition": "single_scope",
+                        "fields": [
+                            ["field_id": "field-id", "name": "id", "type": "string", "nullable": false, "writable": false],
+                            ["field_id": "field-updated-at", "name": "updated_at", "type": "datetime", "nullable": false, "writable": false],
+                            ["field_id": "field-deleted-at", "name": "deleted_at", "type": "datetime", "nullable": true, "writable": false]
+                        ],
+                        "indexes": []
                     ] as [String: Any]
                 ]
             ],

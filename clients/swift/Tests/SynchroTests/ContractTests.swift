@@ -72,8 +72,8 @@ final class ContractTests: XCTestCase {
 
         XCTAssertEqual(manifest.tables.count, 2)
         XCTAssertEqual(manifest.tables[1].composition, .multiScope)
-        XCTAssertEqual(manifest.tables[0].updatedAtColumn, "updated_at")
-        XCTAssertEqual(manifest.tables[0].deletedAtColumn, "deleted_at")
+        XCTAssertEqual(manifest.tables[0].lifecycle.updatedAtFieldID, "fld_workouts_updated_at")
+        XCTAssertEqual(manifest.tables[0].lifecycle.deletedAtFieldID, "fld_workouts_deleted_at")
         try manifest.validate()
     }
 
@@ -101,7 +101,7 @@ final class ContractTests: XCTestCase {
         )
 
         let allowed: Set<String> = ["string", "int", "int64", "float", "boolean", "datetime", "date", "time", "json", "bytes"]
-        let emittedTypes = Set(manifest.tables.flatMap { $0.columns ?? [] }.map(\.type))
+        let emittedTypes = Set(manifest.tables.flatMap(\.fields).map(\.type))
 
         XCTAssertFalse(emittedTypes.isEmpty)
         XCTAssertTrue(emittedTypes.isSubset(of: allowed), "fixture emitted non-canonical portable types: \(emittedTypes.subtracting(allowed))")

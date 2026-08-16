@@ -22,28 +22,14 @@ extension SchemaManifest {
         try validate()
 
         return try tables.map { table in
-            guard let primaryKey = table.primaryKey, !primaryKey.isEmpty else {
+            let fieldsByID = Dictionary(uniqueKeysWithValues: table.fields.map { ($0.fieldID, $0) })
+            guard let primaryKeyField = fieldsByID[table.primaryKeyFieldID] else {
                 throw ContractViolation.missingPrimaryKey(tableName: table.name)
             }
-            guard let updatedAtColumn = table.updatedAtColumn, !updatedAtColumn.isEmpty else {
-                throw ContractViolation.missingUpdatedAtColumn(tableName: table.name)
-            }
-            guard let deletedAtColumn = table.deletedAtColumn, !deletedAtColumn.isEmpty else {
-                throw ContractViolation.missingDeletedAtColumn(tableName: table.name)
-            }
-            guard let columns = table.columns, !columns.isEmpty else {
+            let updatedAtColumn = table.lifecycle.updatedAtFieldID.flatMap { fieldsByID[$0]?.name } ?? ""
+            let deletedAtColumn = table.lifecycle.deletedAtFieldID.flatMap { fieldsByID[$0]?.name } ?? ""
+            guard !table.fields.isEmpty else {
                 throw ContractViolation.missingColumns(tableName: table.name)
-            }
-
-            let columnNames = Set(columns.map(\.name))
-            for columnName in primaryKey where !columnNames.contains(columnName) {
-                throw ContractViolation.unknownPrimaryKeyColumn(tableName: table.name, columnName: columnName)
-            }
-            if !columnNames.contains(updatedAtColumn) {
-                throw ContractViolation.unknownUpdatedAtColumn(tableName: table.name, columnName: updatedAtColumn)
-            }
-            if !columnNames.contains(deletedAtColumn) {
-                throw ContractViolation.unknownDeletedAtColumn(tableName: table.name, columnName: deletedAtColumn)
             }
 
             return LocalSchemaTable(
@@ -51,14 +37,14 @@ extension SchemaManifest {
                 updatedAtColumn: updatedAtColumn,
                 deletedAtColumn: deletedAtColumn,
                 composition: table.composition,
-                primaryKey: primaryKey,
-                columns: columns.map { column in
+                primaryKey: [primaryKeyField.name],
+                columns: table.fields.map { field in
                     LocalSchemaColumn(
-                        name: column.name,
-                        logicalType: SQLiteSchema.normalizedLogicalType(column.type),
-                        nullable: column.nullable,
+                        name: field.name,
+                        logicalType: SQLiteSchema.normalizedLogicalType(field.type),
+                        nullable: field.nullable,
                         sqliteDefaultSQL: nil,
-                        isPrimaryKey: primaryKey.contains(column.name)
+                        isPrimaryKey: field.fieldID == table.primaryKeyFieldID
                     )
                 }
             )

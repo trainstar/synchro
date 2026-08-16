@@ -1578,20 +1578,31 @@ class SyncEngineTests {
                 "remove": []
             },
             "schema_definition": {
+                "schema_version": 1,
+                "schema_hash": "test",
+                "parent_schema": null,
+                "transition_class": "initial",
+                "compatibility_floor": 1,
                 "tables": [
                     {
+                        "table_id": "table-orders",
+                        "relation_id": "relation-orders",
                         "name": "orders",
-                        "primary_key": ["id"],
-                        "updated_at_column": "updated_at",
-                        "deleted_at_column": "deleted_at",
+                        "primary_key_field_id": "field-id",
+                        "lifecycle": {
+                            "created_at_field_id": null,
+                            "updated_at_field_id": "field-updated-at",
+                            "deleted_at_field_id": "field-deleted-at"
+                        },
                         "composition": "single_scope",
-                        "columns": [
-                            {"name":"id","type":"string","nullable":false},
-                            {"name":"ship_address","type":"string","nullable":true},
-                            {"name":"user_id","type":"string","nullable":false},
-                            {"name":"updated_at","type":"datetime","nullable":false},
-                            {"name":"deleted_at","type":"datetime","nullable":true}
-                        ]
+                        "fields": [
+                            {"field_id":"field-id","name":"id","type":"string","nullable":false,"writable":false},
+                            {"field_id":"field-ship-address","name":"ship_address","type":"string","nullable":true,"writable":true},
+                            {"field_id":"field-user-id","name":"user_id","type":"string","nullable":false,"writable":true},
+                            {"field_id":"field-updated-at","name":"updated_at","type":"datetime","nullable":false,"writable":false},
+                            {"field_id":"field-deleted-at","name":"deleted_at","type":"datetime","nullable":true,"writable":false}
+                        ],
+                        "indexes": []
                     }
                 ]
             }
@@ -1635,21 +1646,32 @@ class SyncEngineTests {
                 "remove": []
             },
             "schema_definition": {
+                "schema_version": 2,
+                "schema_hash": "test_v2",
+                "parent_schema": {"version":1,"hash":"test"},
+                "transition_class": "class_3",
+                "compatibility_floor": 2,
                 "tables": [
                     {
+                        "table_id": "table-orders",
+                        "relation_id": "relation-orders",
                         "name": "orders",
-                        "primary_key": ["id"],
-                        "updated_at_column": "updated_at",
-                        "deleted_at_column": "deleted_at",
+                        "primary_key_field_id": "field-id",
+                        "lifecycle": {
+                            "created_at_field_id": null,
+                            "updated_at_field_id": "field-updated-at",
+                            "deleted_at_field_id": "field-deleted-at"
+                        },
                         "composition": "single_scope",
-                        "columns": [
-                            {"name":"id","type":"string","nullable":false},
-                            {"name":"ship_address","type":"string","nullable":true},
-                            {"name":"user_id","type":"string","nullable":false},
-                            {"name":"notes","type":"string","nullable":true},
-                            {"name":"updated_at","type":"datetime","nullable":false},
-                            {"name":"deleted_at","type":"datetime","nullable":true}
-                        ]
+                        "fields": [
+                            {"field_id":"field-id","name":"id","type":"string","nullable":false,"writable":false},
+                            {"field_id":"field-ship-address","name":"ship_address","type":"string","nullable":true,"writable":true},
+                            {"field_id":"field-user-id","name":"user_id","type":"string","nullable":false,"writable":true},
+                            {"field_id":"field-notes","name":"notes","type":"string","nullable":true,"writable":true},
+                            {"field_id":"field-updated-at","name":"updated_at","type":"datetime","nullable":false,"writable":false},
+                            {"field_id":"field-deleted-at","name":"deleted_at","type":"datetime","nullable":true,"writable":false}
+                        ],
+                        "indexes": []
                     }
                 ]
             }

@@ -114,30 +114,49 @@ data class SchemaDescriptor(
 
 @Serializable
 data class ColumnSchema(
+    @SerialName("field_id") val fieldID: String,
     val name: String,
     @SerialName("type") val typeName: String,
     val nullable: Boolean,
+    val writable: Boolean,
+    val precision: Int? = null,
+    val scale: Int? = null,
 )
 
 @Serializable
 data class IndexSchema(
+    @SerialName("index_id") val indexID: String,
     val name: String,
-    val columns: List<String>,
+    @SerialName("field_ids") val fieldIDs: List<String>,
+    val unique: Boolean,
+)
+
+@Serializable
+data class LifecycleSchema(
+    @SerialName("created_at_field_id") val createdAtFieldID: String? = null,
+    @SerialName("updated_at_field_id") val updatedAtFieldID: String? = null,
+    @SerialName("deleted_at_field_id") val deletedAtFieldID: String? = null,
 )
 
 @Serializable
 data class TableSchema(
+    @SerialName("table_id") val tableID: String,
+    @SerialName("relation_id") val relationID: String,
     val name: String,
-    @SerialName("primary_key") val primaryKey: List<String>? = null,
-    @SerialName("updated_at_column") val updatedAtColumn: String? = null,
-    @SerialName("deleted_at_column") val deletedAtColumn: String? = null,
-    val composition: CompositionClass? = null,
-    val columns: List<ColumnSchema>? = null,
-    val indexes: List<IndexSchema>? = null,
+    @SerialName("primary_key_field_id") val primaryKeyFieldID: String,
+    val lifecycle: LifecycleSchema,
+    val composition: CompositionClass,
+    val fields: List<ColumnSchema>,
+    val indexes: List<IndexSchema>,
 )
 
 @Serializable
 data class SchemaManifest(
+    @SerialName("schema_version") val schemaVersion: Long,
+    @SerialName("schema_hash") val schemaHash: String,
+    @SerialName("parent_schema") val parentSchema: SchemaRef? = null,
+    @SerialName("transition_class") val transitionClass: String,
+    @SerialName("compatibility_floor") val compatibilityFloor: Long,
     val tables: List<TableSchema>,
 ) {
     fun validate() {
@@ -148,40 +167,27 @@ data class SchemaManifest(
                 throw ContractException("duplicate table ${table.name}")
             }
 
-            val columnNames = mutableSetOf<String>()
-            for (column in table.columns.orEmpty()) {
-                require(column.name.isNotEmpty()) { "column name must not be empty for ${table.name}" }
-                if (!columnNames.add(column.name)) {
-                    throw ContractException("duplicate column ${table.name}.${column.name}")
+            val fieldIDs = mutableSetOf<String>()
+            val fieldNames = mutableSetOf<String>()
+            for (field in table.fields) {
+                require(field.fieldID.isNotEmpty() && field.name.isNotEmpty()) { "field identity must not be empty for ${table.name}" }
+                if (!fieldIDs.add(field.fieldID) || !fieldNames.add(field.name)) {
+                    throw ContractException("duplicate field ${table.name}.${field.name}")
                 }
             }
-            table.primaryKey?.forEach { columnName ->
-                if (columnName !in columnNames) {
-                    throw ContractException("unknown primary key column ${table.name}.$columnName")
-                }
-            }
-            table.updatedAtColumn?.let { columnName ->
-                if (columnName !in columnNames) {
-                    throw ContractException("unknown updated_at column ${table.name}.$columnName")
-                }
-            }
-            table.deletedAtColumn?.let { columnName ->
-                if (columnName !in columnNames) {
-                    throw ContractException("unknown deleted_at column ${table.name}.$columnName")
-                }
+            if (table.primaryKeyFieldID !in fieldIDs) {
+                throw ContractException("unknown primary key field ${table.name}.${table.primaryKeyFieldID}")
             }
 
             val indexNames = mutableSetOf<String>()
-            for (index in table.indexes.orEmpty()) {
-                require(index.name.isNotEmpty()) { "index name must not be empty for ${table.name}" }
-                if (!indexNames.add(index.name)) {
+            for (index in table.indexes) {
+                require(index.indexID.isNotEmpty() && index.name.isNotEmpty()) { "index identity must not be empty for ${table.name}" }
+                if (!indexNames.add(index.indexID)) {
                     throw ContractException("duplicate index ${table.name}.${index.name}")
                 }
-                if (columnNames.isNotEmpty()) {
-                    for (columnName in index.columns) {
-                        if (!columnNames.contains(columnName)) {
-                            throw ContractException("unknown index column ${table.name}.${index.name} -> $columnName")
-                        }
+                for (fieldID in index.fieldIDs) {
+                    if (!fieldIDs.contains(fieldID)) {
+                        throw ContractException("unknown index field ${table.name}.${index.name} -> $fieldID")
                     }
                 }
             }

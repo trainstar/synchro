@@ -28,6 +28,51 @@ data class SchemaTable(
     val columns: List<SchemaColumn>,
 )
 
+fun ColumnSchema(name: String, typeName: String, nullable: Boolean): ColumnSchema =
+    ColumnSchema(
+        fieldID = "field-$name",
+        name = name,
+        typeName = typeName,
+        nullable = nullable,
+        writable = name != "id" && name != "updated_at" && name != "deleted_at",
+    )
+
+fun TableSchema(
+    name: String,
+    primaryKey: List<String>,
+    updatedAtColumn: String,
+    deletedAtColumn: String,
+    composition: CompositionClass,
+    columns: List<ColumnSchema>,
+    indexes: List<IndexSchema>?,
+): TableSchema {
+    val fieldsByName = columns.associate { it.name to it.fieldID }
+    return TableSchema(
+        tableID = "table-$name",
+        relationID = "relation-$name",
+        name = name,
+        primaryKeyFieldID = fieldsByName.getValue(primaryKey.single()),
+        lifecycle = LifecycleSchema(
+            createdAtFieldID = fieldsByName["created_at"],
+            updatedAtFieldID = fieldsByName[updatedAtColumn],
+            deletedAtFieldID = fieldsByName[deletedAtColumn],
+        ),
+        composition = composition,
+        fields = columns,
+        indexes = indexes.orEmpty(),
+    )
+}
+
+fun SchemaManifest(tables: List<TableSchema>): SchemaManifest =
+    SchemaManifest(
+        schemaVersion = 1,
+        schemaHash = "0".repeat(64),
+        parentSchema = null,
+        transitionClass = "initial",
+        compatibilityFloor = 1,
+        tables = tables,
+    )
+
 val SchemaTable.localSchema: LocalSchemaTable
     get() = LocalSchemaTable(
         tableName = tableName,
@@ -52,7 +97,7 @@ private fun SchemaTable.toManifestTable(): TableSchema =
         primaryKey = primaryKey,
         updatedAtColumn = updatedAtColumn,
         deletedAtColumn = deletedAtColumn,
-        composition = null,
+        composition = CompositionClass.SINGLE_SCOPE,
         columns = columns.map { column ->
             ColumnSchema(
                 name = column.name,
@@ -65,18 +110,19 @@ private fun SchemaTable.toManifestTable(): TableSchema =
 
 val com.trainstar.synchro.SchemaResponse.tables: List<SchemaTable>
     get() = manifest.tables.map { table ->
+        val fieldsByID = table.fields.associateBy { it.fieldID }
         SchemaTable(
             tableName = table.name,
-            updatedAtColumn = table.updatedAtColumn.orEmpty(),
-            deletedAtColumn = table.deletedAtColumn.orEmpty(),
-            primaryKey = table.primaryKey.orEmpty(),
-            columns = table.columns.orEmpty().map { column ->
+            updatedAtColumn = table.lifecycle.updatedAtFieldID?.let(fieldsByID::get)?.name.orEmpty(),
+            deletedAtColumn = table.lifecycle.deletedAtFieldID?.let(fieldsByID::get)?.name.orEmpty(),
+            primaryKey = listOf(fieldsByID.getValue(table.primaryKeyFieldID).name),
+            columns = table.fields.map { column ->
                 SchemaColumn(
                     name = column.name,
                     dbType = column.typeName,
                     logicalType = SQLiteSchema.normalizedLogicalType(column.typeName),
                     nullable = column.nullable,
-                    isPrimaryKey = table.primaryKey.orEmpty().contains(column.name),
+                    isPrimaryKey = column.fieldID == table.primaryKeyFieldID,
                 )
             },
         )

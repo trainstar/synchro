@@ -135,38 +135,89 @@ public struct SchemaDescriptor: Codable, Sendable, Equatable {
 }
 
 public struct ColumnSchema: Codable, Sendable, Equatable {
+    public var fieldID: String
     public var name: String
     public var type: String
     public var nullable: Bool
+    public var writable: Bool
+    public var precision: Int?
+    public var scale: Int?
+
+    enum CodingKeys: String, CodingKey {
+        case fieldID = "field_id"
+        case name
+        case type
+        case nullable
+        case writable
+        case precision
+        case scale
+    }
 }
 
 public struct IndexSchema: Codable, Sendable, Equatable {
+    public var indexID: String
     public var name: String
-    public var columns: [String]
+    public var fieldIDs: [String]
+    public var unique: Bool
+
+    enum CodingKeys: String, CodingKey {
+        case indexID = "index_id"
+        case name
+        case fieldIDs = "field_ids"
+        case unique
+    }
+}
+
+public struct LifecycleSchema: Codable, Sendable, Equatable {
+    public var createdAtFieldID: String?
+    public var updatedAtFieldID: String?
+    public var deletedAtFieldID: String?
+
+    enum CodingKeys: String, CodingKey {
+        case createdAtFieldID = "created_at_field_id"
+        case updatedAtFieldID = "updated_at_field_id"
+        case deletedAtFieldID = "deleted_at_field_id"
+    }
 }
 
 public struct TableSchema: Codable, Sendable, Equatable {
+    public var tableID: String
+    public var relationID: String
     public var name: String
-    public var primaryKey: [String]?
-    public var updatedAtColumn: String?
-    public var deletedAtColumn: String?
-    public var composition: CompositionClass?
-    public var columns: [ColumnSchema]?
-    public var indexes: [IndexSchema]?
+    public var primaryKeyFieldID: String
+    public var lifecycle: LifecycleSchema
+    public var composition: CompositionClass
+    public var fields: [ColumnSchema]
+    public var indexes: [IndexSchema]
 
     enum CodingKeys: String, CodingKey {
+        case tableID = "table_id"
+        case relationID = "relation_id"
         case name
-        case primaryKey = "primary_key"
-        case updatedAtColumn = "updated_at_column"
-        case deletedAtColumn = "deleted_at_column"
+        case primaryKeyFieldID = "primary_key_field_id"
+        case lifecycle
         case composition
-        case columns
+        case fields
         case indexes
     }
 }
 
 public struct SchemaManifest: Codable, Sendable, Equatable {
+    public var schemaVersion: Int64
+    public var schemaHash: String
+    public var parentSchema: SchemaRef?
+    public var transitionClass: String
+    public var compatibilityFloor: Int64
     public var tables: [TableSchema]
+
+    enum CodingKeys: String, CodingKey {
+        case schemaVersion = "schema_version"
+        case schemaHash = "schema_hash"
+        case parentSchema = "parent_schema"
+        case transitionClass = "transition_class"
+        case compatibilityFloor = "compatibility_floor"
+        case tables
+    }
 
     public func validate() throws {
         var tableNames = Set<String>()
@@ -178,44 +229,31 @@ public struct SchemaManifest: Codable, Sendable, Equatable {
                 throw ContractViolation.duplicateTableName(table.name)
             }
 
-            var columnNames = Set<String>()
-            if let columns = table.columns {
-                for column in columns {
-                    if column.name.isEmpty {
+            var fieldIDs = Set<String>()
+            var fieldNames = Set<String>()
+            for field in table.fields {
+                    if field.fieldID.isEmpty || field.name.isEmpty {
                         throw ContractViolation.emptyColumnName(tableName: table.name)
                     }
-                    if !columnNames.insert(column.name).inserted {
-                        throw ContractViolation.duplicateColumnName(tableName: table.name, columnName: column.name)
+                    if !fieldIDs.insert(field.fieldID).inserted || !fieldNames.insert(field.name).inserted {
+                        throw ContractViolation.duplicateColumnName(tableName: table.name, columnName: field.name)
                     }
-                }
-                if let primaryKey = table.primaryKey {
-                    for columnName in primaryKey where !columnNames.contains(columnName) {
-                        throw ContractViolation.unknownPrimaryKeyColumn(tableName: table.name, columnName: columnName)
-                    }
-                }
-                if let updatedAtColumn = table.updatedAtColumn, !columnNames.contains(updatedAtColumn) {
-                    throw ContractViolation.unknownUpdatedAtColumn(tableName: table.name, columnName: updatedAtColumn)
-                }
-                if let deletedAtColumn = table.deletedAtColumn, !columnNames.contains(deletedAtColumn) {
-                    throw ContractViolation.unknownDeletedAtColumn(tableName: table.name, columnName: deletedAtColumn)
-                }
+            }
+            if !fieldIDs.contains(table.primaryKeyFieldID) {
+                throw ContractViolation.unknownPrimaryKeyColumn(tableName: table.name, columnName: table.primaryKeyFieldID)
             }
 
             var indexNames = Set<String>()
-            if let indexes = table.indexes {
-                for index in indexes {
-                    if index.name.isEmpty {
+            for index in table.indexes {
+                    if index.indexID.isEmpty || index.name.isEmpty {
                         throw ContractViolation.emptyIndexName(tableName: table.name)
                     }
-                    if !indexNames.insert(index.name).inserted {
+                    if !indexNames.insert(index.indexID).inserted {
                         throw ContractViolation.duplicateIndexName(tableName: table.name, indexName: index.name)
                     }
-                    if !columnNames.isEmpty {
-                        for columnName in index.columns where !columnNames.contains(columnName) {
-                            throw ContractViolation.unknownIndexColumn(tableName: table.name, indexName: index.name, columnName: columnName)
+                    for fieldID in index.fieldIDs where !fieldIDs.contains(fieldID) {
+                            throw ContractViolation.unknownIndexColumn(tableName: table.name, indexName: index.name, columnName: fieldID)
                         }
-                    }
-                }
             }
         }
     }

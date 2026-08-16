@@ -88,8 +88,8 @@ class ContractTests {
 
         assertEquals(2, manifest.tables.size)
         assertEquals(CompositionClass.MULTI_SCOPE, manifest.tables[1].composition)
-        assertEquals("updated_at", manifest.tables[0].updatedAtColumn)
-        assertEquals("deleted_at", manifest.tables[0].deletedAtColumn)
+        assertEquals("fld_workouts_updated_at", manifest.tables[0].lifecycle.updatedAtFieldID)
+        assertEquals("fld_workouts_deleted_at", manifest.tables[0].lifecycle.deletedAtFieldID)
         manifest.validate()
     }
 
@@ -119,7 +119,7 @@ class ContractTests {
         )
 
         val allowed = setOf("string", "int", "int64", "float", "boolean", "datetime", "date", "time", "json", "bytes")
-        val emittedTypes = manifest.tables.flatMap { it.columns.orEmpty() }.map { it.typeName }.toSet()
+        val emittedTypes = manifest.tables.flatMap { it.fields }.map { it.typeName }.toSet()
 
         assertTrue(emittedTypes.isNotEmpty())
         assertTrue("fixture emitted non-canonical portable types: ${emittedTypes - allowed}", emittedTypes.subtract(allowed).isEmpty())

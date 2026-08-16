@@ -4,6 +4,61 @@ import Foundation
 typealias SchemaColumn = LocalSchemaColumn
 typealias SchemaTable = LocalSchemaTable
 
+extension ColumnSchema {
+    init(name: String, type: String, nullable: Bool) {
+        self.init(
+            fieldID: "field-\(name)",
+            name: name,
+            type: type,
+            nullable: nullable,
+            writable: name != "id" && name != "updated_at" && name != "deleted_at",
+            precision: nil,
+            scale: nil
+        )
+    }
+}
+
+extension TableSchema {
+    init(
+        name: String,
+        primaryKey: [String],
+        updatedAtColumn: String,
+        deletedAtColumn: String,
+        composition: CompositionClass,
+        columns: [ColumnSchema],
+        indexes: [IndexSchema]?
+    ) {
+        let fieldsByName = Dictionary(uniqueKeysWithValues: columns.map { ($0.name, $0.fieldID) })
+        self.init(
+            tableID: "table-\(name)",
+            relationID: "relation-\(name)",
+            name: name,
+            primaryKeyFieldID: fieldsByName[primaryKey[0]]!,
+            lifecycle: LifecycleSchema(
+                createdAtFieldID: fieldsByName["created_at"],
+                updatedAtFieldID: fieldsByName[updatedAtColumn],
+                deletedAtFieldID: fieldsByName[deletedAtColumn]
+            ),
+            composition: composition,
+            fields: columns,
+            indexes: indexes ?? []
+        )
+    }
+}
+
+extension SchemaManifest {
+    init(tables: [TableSchema]) {
+        self.init(
+            schemaVersion: 1,
+            schemaHash: String(repeating: "0", count: 64),
+            parentSchema: nil,
+            transitionClass: "initial",
+            compatibilityFloor: 1,
+            tables: tables
+        )
+    }
+}
+
 extension LocalSchemaColumn {
     init(
         name: String,
@@ -64,19 +119,20 @@ extension LocalSchemaTable {
     }
 
     fileprivate var testManifestTable: TableSchema {
-        TableSchema(
+        let manifestColumns = columns.map { column in
+            ColumnSchema(
+                name: column.name,
+                type: column.logicalType,
+                nullable: column.nullable
+            )
+        }
+        return TableSchema(
             name: tableName,
             primaryKey: primaryKey,
             updatedAtColumn: updatedAtColumn,
             deletedAtColumn: deletedAtColumn,
-            composition: composition,
-            columns: columns.map { column in
-                ColumnSchema(
-                    name: column.name,
-                    type: column.logicalType,
-                    nullable: column.nullable
-                )
-            },
+            composition: composition ?? .singleScope,
+            columns: manifestColumns,
             indexes: nil
         )
     }
