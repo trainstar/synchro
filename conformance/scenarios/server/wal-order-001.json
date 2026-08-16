@@ -75,7 +75,7 @@
         "SYNC-WAL-003"
       ],
       "assertion_ids": [
-        "ASSERT-WAL-ORDER-CONTROL-001"
+        "ASSERT-WAL-ORDER-SEMANTIC-001"
       ],
       "proof_type": "fault-injection",
       "support_cell_id": "SUP-PG-018",
@@ -100,7 +100,7 @@
         "SYNC-WAL-003"
       ],
       "assertion_ids": [
-        "ASSERT-WAL-ORDER-CONTROL-001"
+        "ASSERT-WAL-ORDER-SEMANTIC-001"
       ],
       "proof_type": "negative-control",
       "support_cell_id": null,
@@ -141,7 +141,7 @@
       "scenario_id": "SCN-WAL-ORDER-001",
       "requirement_id": "SYNC-WAL-003",
       "proof_obligation_id": "OBL-WAL-ORDER-FAULT-001",
-      "assertion_id": "ASSERT-WAL-ORDER-CONTROL-001",
+      "assertion_id": "ASSERT-WAL-ORDER-SEMANTIC-001",
       "proof_type": "fault-injection",
       "support_cell_id": "SUP-PG-018"
     },
@@ -149,7 +149,7 @@
       "scenario_id": "SCN-WAL-ORDER-001",
       "requirement_id": "SYNC-WAL-003",
       "proof_obligation_id": "OBL-WAL-ORDER-CONTROL-001",
-      "assertion_id": "ASSERT-WAL-ORDER-CONTROL-001",
+      "assertion_id": "ASSERT-WAL-ORDER-SEMANTIC-001",
       "proof_type": "negative-control",
       "support_cell_id": null
     }
@@ -392,14 +392,6 @@
           "name": "state-unchanged",
           "payload": {}
         }
-      },
-      {
-        "id": "EXPECT-WAL-ORDER-CONTROL-001",
-        "predicate": {
-          "contract_predicate": "negative-control-detection",
-          "name": "negative-control-detected",
-          "payload": {}
-        }
       }
     ]
   },
@@ -424,7 +416,7 @@
       "control_id": "CTRL-WAL-003",
       "barrier_id": "BAR-WAL-ORDER-CONTROL-001",
       "expected_assertion_ids": [
-        "ASSERT-WAL-ORDER-CONTROL-001"
+        "ASSERT-WAL-ORDER-SEMANTIC-001"
       ],
       "injection": {
         "mechanism": "source-mutant",
@@ -451,7 +443,7 @@
         "ARTDEF-PG-EXTENSION-001"
       ],
       "detected_by": [
-        "ASSERT-WAL-ORDER-CONTROL-001"
+        "ASSERT-WAL-ORDER-SEMANTIC-001"
       ]
     }
   ],
@@ -663,27 +655,6 @@
       },
       "oracle": {
         "kind": "model-state-equality",
-        "expected_source": "authored-model",
-        "observed_source": "system-under-test"
-      },
-      "detects_control_ids": []
-    },
-    {
-      "id": "ASSERT-WAL-ORDER-CONTROL-001",
-      "requirement_ids": [
-        "SYNC-WAL-003"
-      ],
-      "description": "The control detects ordering by timestamp, notification, table, sequence, or poll order instead of commit LSN and source ordinal.",
-      "expectation_ids": [
-        "EXPECT-WAL-ORDER-CONTROL-001"
-      ],
-      "predicate": {
-        "contract_predicate": "negative-control-detection",
-        "name": "negative-control-detected",
-        "payload": {}
-      },
-      "oracle": {
-        "kind": "negative-control-detection",
         "expected_source": "authored-model",
         "observed_source": "system-under-test"
       },

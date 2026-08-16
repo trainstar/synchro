@@ -1,0 +1,21 @@
+diff --git a/extensions/synchro-pg/src/bgworker.rs b/extensions/synchro-pg/src/bgworker.rs
+--- a/extensions/synchro-pg/src/bgworker.rs
++++ b/extensions/synchro-pg/src/bgworker.rs
+@@ -4326,7 +4326,7 @@ fn advance_slot(
+     end_lsn: u64,
+     worker_role_oid: pg_sys::Oid,
+ ) -> Result<(), PoisonFailure> {
+-    let requested = format_lsn(end_lsn);
++    let requested = format_lsn(commit_lsn);
+     run_replication_transaction(worker_role_oid, || {
+         Spi::connect_mut(|client| {
+             let actual = client
+@@ -4342,7 +4342,7 @@ fn advance_slot(
+                 .map_err(|_| failure("transaction_commit_failed", commit_lsn))?
+                 .and_then(|value| parse_lsn(&value))
+                 .ok_or_else(|| failure("transaction_commit_failed", commit_lsn))?;
+-            if actual != end_lsn {
++            if actual != commit_lsn {
+                 return Err(failure("transaction_commit_failed", commit_lsn));
+             }
+             activate_worker_role(worker_role_oid);

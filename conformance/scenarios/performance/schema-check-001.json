@@ -378,7 +378,7 @@
         "SYNC-SCHEMA-004"
       ],
       "assertion_ids": [
-        "ASSERT-PERF-SCHEMA-CHECK-CONTROL-001"
+        "ASSERT-PERF-SCHEMA-CHECK-SEMANTIC-001"
       ],
       "proof_type": "negative-control",
       "support_cell_id": null,
@@ -592,7 +592,7 @@
       "scenario_id": "SCN-PERF-SCHEMA-CHECK-001",
       "requirement_id": "SYNC-SCHEMA-004",
       "proof_obligation_id": "OBL-PERF-SCHEMA-CHECK-CONTROL-001",
-      "assertion_id": "ASSERT-PERF-SCHEMA-CHECK-CONTROL-001",
+      "assertion_id": "ASSERT-PERF-SCHEMA-CHECK-SEMANTIC-001",
       "proof_type": "negative-control",
       "support_cell_id": null
     }
@@ -781,14 +781,6 @@
           "name": "performance-contract-satisfied",
           "payload": {}
         }
-      },
-      {
-        "id": "EXPECT-PERF-SCHEMA-CHECK-CONTROL-001",
-        "predicate": {
-          "contract_predicate": "negative-control-detection",
-          "name": "negative-control-detected",
-          "payload": {}
-        }
       }
     ]
   },
@@ -813,7 +805,7 @@
       "control_id": "CTRL-SCHEMA-004",
       "barrier_id": "BAR-PERF-SCHEMA-CHECK-CONTROL-001",
       "expected_assertion_ids": [
-        "ASSERT-PERF-SCHEMA-CHECK-CONTROL-001"
+        "ASSERT-PERF-SCHEMA-CHECK-SEMANTIC-001"
       ],
       "injection": {
         "mechanism": "wire-fault",
@@ -845,7 +837,7 @@
         "ARTDEF-RN-NPM-001"
       ],
       "detected_by": [
-        "ASSERT-PERF-SCHEMA-CHECK-CONTROL-001"
+        "ASSERT-PERF-SCHEMA-CHECK-SEMANTIC-001"
       ]
     }
   ],
@@ -1575,7 +1567,9 @@
         "expected_source": "authored-model",
         "observed_source": "system-under-test"
       },
-      "detects_control_ids": []
+      "detects_control_ids": [
+        "CTRL-SCHEMA-004"
+      ]
     },
     {
       "id": "ASSERT-PERF-SCHEMA-CHECK-PERFORMANCE-001",
@@ -1597,29 +1591,6 @@
         "observed_source": "system-under-test"
       },
       "detects_control_ids": []
-    },
-    {
-      "id": "ASSERT-PERF-SCHEMA-CHECK-CONTROL-001",
-      "requirement_ids": [
-        "SYNC-SCHEMA-004"
-      ],
-      "description": "The negative control detects the exact catalog defect before invalid durable work completes.",
-      "expectation_ids": [
-        "EXPECT-PERF-SCHEMA-CHECK-CONTROL-001"
-      ],
-      "predicate": {
-        "contract_predicate": "negative-control-detection",
-        "name": "negative-control-detected",
-        "payload": {}
-      },
-      "oracle": {
-        "kind": "negative-control-detection",
-        "expected_source": "authored-model",
-        "observed_source": "system-under-test"
-      },
-      "detects_control_ids": [
-        "CTRL-SCHEMA-004"
-      ]
     }
   ]
 }

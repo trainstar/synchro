@@ -2,92 +2,126 @@
   "fixture_version": 1,
   "name": "portable_schema_manifest",
   "kind": "schema.manifest",
-  "summary": "Portable schema manifest for synced tables, including composition class and portable column types.",
+  "summary": "Portable schema manifest for synced tables, including immutable identities, composition, lifecycle fields, and portable types.",
   "spec_refs": [
     "05-schema-evolution: Canonical Schema Model",
     "05-schema-evolution: Portable Type System"
   ],
   "manifest": {
+    "schema_version": 1,
+    "schema_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+    "parent_schema": null,
+    "transition_class": "initial",
+    "compatibility_floor": 1,
     "tables": [
       {
+        "table_id": "tbl_workouts",
+        "relation_id": "rel_workouts",
         "name": "workouts",
-        "primary_key": [
-          "id"
-        ],
-        "updated_at_column": "updated_at",
-        "deleted_at_column": "deleted_at",
+        "primary_key_field_id": "fld_workouts_id",
+        "lifecycle": {
+          "created_at_field_id": null,
+          "updated_at_field_id": "fld_workouts_updated_at",
+          "deleted_at_field_id": "fld_workouts_deleted_at"
+        },
         "composition": "single_scope",
-        "columns": [
+        "fields": [
           {
+            "field_id": "fld_workouts_id",
             "name": "id",
             "type": "string",
-            "nullable": false
+            "nullable": false,
+            "writable": false
           },
           {
+            "field_id": "fld_workouts_name",
             "name": "name",
             "type": "string",
-            "nullable": false
+            "nullable": false,
+            "writable": true
           },
           {
+            "field_id": "fld_workouts_updated_at",
             "name": "updated_at",
             "type": "datetime",
-            "nullable": false
+            "nullable": false,
+            "writable": false
           },
           {
+            "field_id": "fld_workouts_deleted_at",
             "name": "deleted_at",
             "type": "datetime",
-            "nullable": true
+            "nullable": true,
+            "writable": false
           },
           {
+            "field_id": "fld_workouts_started_at",
             "name": "started_at",
             "type": "datetime",
-            "nullable": true
+            "nullable": true,
+            "writable": true
           }
         ],
         "indexes": [
           {
+            "index_id": "idx_workouts_started_at",
             "name": "idx_workouts_started_at",
-            "columns": [
-              "started_at"
-            ]
+            "field_ids": [
+              "fld_workouts_started_at"
+            ],
+            "unique": false
           }
         ]
       },
       {
+        "table_id": "tbl_exercises",
+        "relation_id": "rel_exercises",
         "name": "exercises",
-        "primary_key": [
-          "id"
-        ],
-        "updated_at_column": "updated_at",
-        "deleted_at_column": "deleted_at",
+        "primary_key_field_id": "fld_exercises_id",
+        "lifecycle": {
+          "created_at_field_id": null,
+          "updated_at_field_id": "fld_exercises_updated_at",
+          "deleted_at_field_id": "fld_exercises_deleted_at"
+        },
         "composition": "multi_scope",
-        "columns": [
+        "fields": [
           {
+            "field_id": "fld_exercises_id",
             "name": "id",
             "type": "string",
-            "nullable": false
+            "nullable": false,
+            "writable": false
           },
           {
+            "field_id": "fld_exercises_user_id",
             "name": "user_id",
             "type": "string",
-            "nullable": true
+            "nullable": true,
+            "writable": true
           },
           {
+            "field_id": "fld_exercises_name",
             "name": "name",
             "type": "string",
-            "nullable": false
+            "nullable": false,
+            "writable": true
           },
           {
+            "field_id": "fld_exercises_updated_at",
             "name": "updated_at",
             "type": "datetime",
-            "nullable": false
+            "nullable": false,
+            "writable": false
           },
           {
+            "field_id": "fld_exercises_deleted_at",
             "name": "deleted_at",
             "type": "datetime",
-            "nullable": true
+            "nullable": true,
+            "writable": false
           }
-        ]
+        ],
+        "indexes": []
       }
     ]
   }

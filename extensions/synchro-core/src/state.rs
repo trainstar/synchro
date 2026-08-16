@@ -20,8 +20,8 @@ pub enum ClientSyncState {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ClientTransition {
-    pub from: ClientSyncState,
-    pub to: ClientSyncState,
+    from: ClientSyncState,
+    to: ClientSyncState,
 }
 
 impl fmt::Display for ClientSyncState {
@@ -65,6 +65,93 @@ impl FromStr for ClientSyncState {
 }
 
 impl ClientTransition {
+    pub fn new(from: ClientSyncState, to: ClientSyncState) -> Result<Self, String> {
+        if Self::is_legal(from, to) {
+            Ok(Self { from, to })
+        } else {
+            Err(format!("illegal client sync transition: {from} -> {to}"))
+        }
+    }
+
+    pub const fn is_legal(from: ClientSyncState, to: ClientSyncState) -> bool {
+        matches!(
+            (from, to),
+            (
+                ClientSyncState::Uninitialized,
+                ClientSyncState::LocalReady | ClientSyncState::Error | ClientSyncState::Stopped
+            ) | (
+                ClientSyncState::LocalReady,
+                ClientSyncState::Connecting | ClientSyncState::Error | ClientSyncState::Stopped
+            ) | (
+                ClientSyncState::Connecting,
+                ClientSyncState::SchemaApplying
+                    | ClientSyncState::Ready
+                    | ClientSyncState::Backoff
+                    | ClientSyncState::Error
+                    | ClientSyncState::Stopped
+            ) | (
+                ClientSyncState::SchemaApplying,
+                ClientSyncState::Ready
+                    | ClientSyncState::Rebuilding
+                    | ClientSyncState::Error
+                    | ClientSyncState::Stopped
+            ) | (
+                ClientSyncState::Ready,
+                ClientSyncState::Connecting
+                    | ClientSyncState::Pushing
+                    | ClientSyncState::Pulling
+                    | ClientSyncState::Rebuilding
+                    | ClientSyncState::Error
+                    | ClientSyncState::Stopped
+            ) | (
+                ClientSyncState::Pushing,
+                ClientSyncState::Pushing
+                    | ClientSyncState::Ready
+                    | ClientSyncState::Pulling
+                    | ClientSyncState::Connecting
+                    | ClientSyncState::Backoff
+                    | ClientSyncState::Error
+                    | ClientSyncState::Stopped
+            ) | (
+                ClientSyncState::Pulling,
+                ClientSyncState::Pulling
+                    | ClientSyncState::Ready
+                    | ClientSyncState::Rebuilding
+                    | ClientSyncState::Connecting
+                    | ClientSyncState::Backoff
+                    | ClientSyncState::Error
+                    | ClientSyncState::Stopped
+            ) | (
+                ClientSyncState::Rebuilding,
+                ClientSyncState::Rebuilding
+                    | ClientSyncState::Ready
+                    | ClientSyncState::Connecting
+                    | ClientSyncState::Backoff
+                    | ClientSyncState::Error
+                    | ClientSyncState::Stopped
+            ) | (
+                ClientSyncState::Backoff,
+                ClientSyncState::Connecting
+                    | ClientSyncState::Pushing
+                    | ClientSyncState::Pulling
+                    | ClientSyncState::Rebuilding
+                    | ClientSyncState::Error
+                    | ClientSyncState::Stopped
+            ) | (
+                ClientSyncState::Error,
+                ClientSyncState::LocalReady | ClientSyncState::Stopped
+            ) | (ClientSyncState::Stopped, ClientSyncState::LocalReady)
+        )
+    }
+
+    pub const fn from(&self) -> ClientSyncState {
+        self.from
+    }
+
+    pub const fn to(&self) -> ClientSyncState {
+        self.to
+    }
+
     pub fn parse(raw: &str) -> Result<Self, String> {
         let parts: Vec<&str> = raw.split("->").collect();
         if parts.len() != 2 {
@@ -72,7 +159,7 @@ impl ClientTransition {
         }
         let from = parts[0].trim().parse()?;
         let to = parts[1].trim().parse()?;
-        Ok(Self { from, to })
+        Self::new(from, to)
     }
 }
 
@@ -82,10 +169,12 @@ mod tests {
     use serde_json::Value;
 
     fn trace_fixture() -> Value {
-        serde_json::from_str(include_str!(
-            "../../../conformance/traces/offline-write-before-first-connect.json"
-        ))
-        .unwrap()
+        let path = std::env::var_os("SYNCHRO_REPO_ROOT")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../.."))
+            .join("conformance/traces/offline-write-before-first-connect.json");
+        let authored = std::fs::read_to_string(path).expect("authored trace must be readable");
+        serde_json::from_str(&authored).expect("authored trace must be valid JSON")
     }
 
     #[test]
@@ -120,17 +209,100 @@ mod tests {
 
         assert_eq!(
             parsed[0],
-            ClientTransition {
-                from: ClientSyncState::Uninitialized,
-                to: ClientSyncState::LocalReady
-            }
+            ClientTransition::new(ClientSyncState::Uninitialized, ClientSyncState::LocalReady)
+                .unwrap()
         );
         assert_eq!(
             parsed[3],
-            ClientTransition {
-                from: ClientSyncState::Ready,
-                to: ClientSyncState::Pushing
-            }
+            ClientTransition::new(ClientSyncState::Ready, ClientSyncState::Pushing).unwrap()
         );
+    }
+
+    #[test]
+    fn legal_adjacency_map_is_exact() {
+        let states = [
+            ClientSyncState::Uninitialized,
+            ClientSyncState::LocalReady,
+            ClientSyncState::Connecting,
+            ClientSyncState::SchemaApplying,
+            ClientSyncState::Ready,
+            ClientSyncState::Pushing,
+            ClientSyncState::Pulling,
+            ClientSyncState::Rebuilding,
+            ClientSyncState::Backoff,
+            ClientSyncState::Error,
+            ClientSyncState::Stopped,
+        ];
+        let legal = [
+            (ClientSyncState::Uninitialized, ClientSyncState::LocalReady),
+            (ClientSyncState::Uninitialized, ClientSyncState::Error),
+            (ClientSyncState::Uninitialized, ClientSyncState::Stopped),
+            (ClientSyncState::LocalReady, ClientSyncState::Connecting),
+            (ClientSyncState::LocalReady, ClientSyncState::Error),
+            (ClientSyncState::LocalReady, ClientSyncState::Stopped),
+            (ClientSyncState::Connecting, ClientSyncState::SchemaApplying),
+            (ClientSyncState::Connecting, ClientSyncState::Ready),
+            (ClientSyncState::Connecting, ClientSyncState::Backoff),
+            (ClientSyncState::Connecting, ClientSyncState::Error),
+            (ClientSyncState::Connecting, ClientSyncState::Stopped),
+            (ClientSyncState::SchemaApplying, ClientSyncState::Ready),
+            (ClientSyncState::SchemaApplying, ClientSyncState::Rebuilding),
+            (ClientSyncState::SchemaApplying, ClientSyncState::Error),
+            (ClientSyncState::SchemaApplying, ClientSyncState::Stopped),
+            (ClientSyncState::Ready, ClientSyncState::Connecting),
+            (ClientSyncState::Ready, ClientSyncState::Pushing),
+            (ClientSyncState::Ready, ClientSyncState::Pulling),
+            (ClientSyncState::Ready, ClientSyncState::Rebuilding),
+            (ClientSyncState::Ready, ClientSyncState::Error),
+            (ClientSyncState::Ready, ClientSyncState::Stopped),
+            (ClientSyncState::Pushing, ClientSyncState::Pushing),
+            (ClientSyncState::Pushing, ClientSyncState::Ready),
+            (ClientSyncState::Pushing, ClientSyncState::Pulling),
+            (ClientSyncState::Pushing, ClientSyncState::Connecting),
+            (ClientSyncState::Pushing, ClientSyncState::Backoff),
+            (ClientSyncState::Pushing, ClientSyncState::Error),
+            (ClientSyncState::Pushing, ClientSyncState::Stopped),
+            (ClientSyncState::Pulling, ClientSyncState::Pulling),
+            (ClientSyncState::Pulling, ClientSyncState::Ready),
+            (ClientSyncState::Pulling, ClientSyncState::Rebuilding),
+            (ClientSyncState::Pulling, ClientSyncState::Connecting),
+            (ClientSyncState::Pulling, ClientSyncState::Backoff),
+            (ClientSyncState::Pulling, ClientSyncState::Error),
+            (ClientSyncState::Pulling, ClientSyncState::Stopped),
+            (ClientSyncState::Rebuilding, ClientSyncState::Rebuilding),
+            (ClientSyncState::Rebuilding, ClientSyncState::Ready),
+            (ClientSyncState::Rebuilding, ClientSyncState::Connecting),
+            (ClientSyncState::Rebuilding, ClientSyncState::Backoff),
+            (ClientSyncState::Rebuilding, ClientSyncState::Error),
+            (ClientSyncState::Rebuilding, ClientSyncState::Stopped),
+            (ClientSyncState::Backoff, ClientSyncState::Connecting),
+            (ClientSyncState::Backoff, ClientSyncState::Pushing),
+            (ClientSyncState::Backoff, ClientSyncState::Pulling),
+            (ClientSyncState::Backoff, ClientSyncState::Rebuilding),
+            (ClientSyncState::Backoff, ClientSyncState::Error),
+            (ClientSyncState::Backoff, ClientSyncState::Stopped),
+            (ClientSyncState::Error, ClientSyncState::LocalReady),
+            (ClientSyncState::Error, ClientSyncState::Stopped),
+            (ClientSyncState::Stopped, ClientSyncState::LocalReady),
+        ];
+
+        for from in states {
+            for to in states {
+                assert_eq!(
+                    ClientTransition::is_legal(from, to),
+                    legal.contains(&(from, to)),
+                    "{from} -> {to}"
+                );
+                assert_eq!(
+                    ClientTransition::new(from, to).is_ok(),
+                    legal.contains(&(from, to))
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn parsing_rejects_illegal_transition() {
+        assert!(ClientTransition::parse("stopped -> pulling").is_err());
     }
 }

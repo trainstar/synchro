@@ -221,6 +221,7 @@ func newCommandFixture(t *testing.T, recipe string) commandFixture {
 func commandFields(exitCode int, result Result, assertionOutcome string) ReceiptFields {
 	started := time.Date(2026, time.August, 13, 12, 0, 0, 0, time.UTC)
 	return ReceiptFields{
+		EvidenceClass:     EvidenceClassCandidate,
 		ScenarioID:        "SCN-COMMAND-001",
 		ProofObligationID: "OBL-COMMAND-001",
 		MakeTarget:        "proof",

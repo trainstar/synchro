@@ -376,7 +376,7 @@
         "SYNC-REBUILD-002"
       ],
       "assertion_ids": [
-        "ASSERT-PERF-REBUILD-APPLY-CONTROL-001"
+        "ASSERT-PERF-REBUILD-APPLY-SEMANTIC-001"
       ],
       "proof_type": "fault-injection",
       "support_cell_id": "SUP-IOS-MIN-001",
@@ -402,7 +402,7 @@
         "SYNC-REBUILD-002"
       ],
       "assertion_ids": [
-        "ASSERT-PERF-REBUILD-APPLY-CONTROL-001"
+        "ASSERT-PERF-REBUILD-APPLY-SEMANTIC-001"
       ],
       "proof_type": "negative-control",
       "support_cell_id": null,
@@ -606,7 +606,7 @@
       "scenario_id": "SCN-PERF-REBUILD-APPLY-001",
       "requirement_id": "SYNC-REBUILD-002",
       "proof_obligation_id": "OBL-PERF-REBUILD-APPLY-FAULT-001",
-      "assertion_id": "ASSERT-PERF-REBUILD-APPLY-CONTROL-001",
+      "assertion_id": "ASSERT-PERF-REBUILD-APPLY-SEMANTIC-001",
       "proof_type": "fault-injection",
       "support_cell_id": "SUP-IOS-MIN-001"
     },
@@ -614,7 +614,7 @@
       "scenario_id": "SCN-PERF-REBUILD-APPLY-001",
       "requirement_id": "SYNC-REBUILD-002",
       "proof_obligation_id": "OBL-PERF-REBUILD-APPLY-CONTROL-001",
-      "assertion_id": "ASSERT-PERF-REBUILD-APPLY-CONTROL-001",
+      "assertion_id": "ASSERT-PERF-REBUILD-APPLY-SEMANTIC-001",
       "proof_type": "negative-control",
       "support_cell_id": null
     }
@@ -840,14 +840,6 @@
           "name": "performance-contract-satisfied",
           "payload": {}
         }
-      },
-      {
-        "id": "EXPECT-PERF-REBUILD-APPLY-CONTROL-001",
-        "predicate": {
-          "contract_predicate": "negative-control-detection",
-          "name": "negative-control-detected",
-          "payload": {}
-        }
       }
     ]
   },
@@ -872,7 +864,7 @@
       "control_id": "CTRL-REBUILD-002",
       "barrier_id": "BAR-PERF-REBUILD-APPLY-CONTROL-001",
       "expected_assertion_ids": [
-        "ASSERT-PERF-REBUILD-APPLY-CONTROL-001"
+        "ASSERT-PERF-REBUILD-APPLY-SEMANTIC-001"
       ],
       "injection": {
         "mechanism": "state-fault",
@@ -902,7 +894,7 @@
         "ARTDEF-RN-NPM-001"
       ],
       "detected_by": [
-        "ASSERT-PERF-REBUILD-APPLY-CONTROL-001"
+        "ASSERT-PERF-REBUILD-APPLY-SEMANTIC-001"
       ]
     }
   ],
@@ -1100,7 +1092,9 @@
         "expected_source": "authored-model",
         "observed_source": "system-under-test"
       },
-      "detects_control_ids": []
+      "detects_control_ids": [
+        "CTRL-REBUILD-002"
+      ]
     },
     {
       "id": "ASSERT-PERF-REBUILD-APPLY-PERFORMANCE-001",
@@ -1122,29 +1116,6 @@
         "observed_source": "system-under-test"
       },
       "detects_control_ids": []
-    },
-    {
-      "id": "ASSERT-PERF-REBUILD-APPLY-CONTROL-001",
-      "requirement_ids": [
-        "SYNC-REBUILD-002"
-      ],
-      "description": "The negative control detects the exact catalog defect before invalid durable work completes.",
-      "expectation_ids": [
-        "EXPECT-PERF-REBUILD-APPLY-CONTROL-001"
-      ],
-      "predicate": {
-        "contract_predicate": "negative-control-detection",
-        "name": "negative-control-detected",
-        "payload": {}
-      },
-      "oracle": {
-        "kind": "negative-control-detection",
-        "expected_source": "authored-model",
-        "observed_source": "system-under-test"
-      },
-      "detects_control_ids": [
-        "CTRL-REBUILD-002"
-      ]
     }
   ]
 }

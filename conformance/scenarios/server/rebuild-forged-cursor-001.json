@@ -316,7 +316,7 @@
         "SYNC-REBUILD-007"
       ],
       "assertion_ids": [
-        "ASSERT-REBUILD-FORGED-CURSOR-CONTROL-001"
+        "ASSERT-REBUILD-FORGED-CURSOR-SEMANTIC-001"
       ],
       "proof_type": "negative-control",
       "support_cell_id": null,
@@ -430,7 +430,7 @@
       "scenario_id": "SCN-REBUILD-FORGED-CURSOR-001",
       "requirement_id": "SYNC-REBUILD-007",
       "proof_obligation_id": "OBL-REBUILD-FORGED-CURSOR-CONTROL-001",
-      "assertion_id": "ASSERT-REBUILD-FORGED-CURSOR-CONTROL-001",
+      "assertion_id": "ASSERT-REBUILD-FORGED-CURSOR-SEMANTIC-001",
       "proof_type": "negative-control",
       "support_cell_id": null
     }
@@ -670,14 +670,6 @@
             }
           ]
         }
-      },
-      {
-        "id": "EXPECT-REBUILD-FORGED-CURSOR-CONTROL-001",
-        "predicate": {
-          "contract_predicate": "negative-control-detection",
-          "name": "negative-control-detected",
-          "payload": {}
-        }
       }
     ]
   },
@@ -702,7 +694,7 @@
       "control_id": "CTRL-REBUILD-007",
       "barrier_id": "BAR-REBUILD-FORGED-CURSOR-CONTROL-001",
       "expected_assertion_ids": [
-        "ASSERT-REBUILD-FORGED-CURSOR-CONTROL-001"
+        "ASSERT-REBUILD-FORGED-CURSOR-SEMANTIC-001"
       ],
       "injection": {
         "mechanism": "wire-fault",
@@ -730,7 +722,7 @@
         "ARTDEF-ADAPTER-001"
       ],
       "detected_by": [
-        "ASSERT-REBUILD-FORGED-CURSOR-CONTROL-001"
+        "ASSERT-REBUILD-FORGED-CURSOR-SEMANTIC-001"
       ]
     }
   ],
@@ -981,27 +973,6 @@
       },
       "oracle": {
         "kind": "wire-contract",
-        "expected_source": "authored-model",
-        "observed_source": "system-under-test"
-      },
-      "detects_control_ids": []
-    },
-    {
-      "id": "ASSERT-REBUILD-FORGED-CURSOR-CONTROL-001",
-      "requirement_ids": [
-        "SYNC-REBUILD-007"
-      ],
-      "description": "The catalog control detects acceptance of a forged, cross-context, resized, expired, or expiry-extended continuation.",
-      "expectation_ids": [
-        "EXPECT-REBUILD-FORGED-CURSOR-CONTROL-001"
-      ],
-      "predicate": {
-        "contract_predicate": "negative-control-detection",
-        "name": "negative-control-detected",
-        "payload": {}
-      },
-      "oracle": {
-        "kind": "negative-control-detection",
         "expected_source": "authored-model",
         "observed_source": "system-under-test"
       },

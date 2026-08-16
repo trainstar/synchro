@@ -661,7 +661,7 @@
       "properties": {
         "contract_predicate": {
           "type": "string",
-          "enum": ["state-equality", "wire-outcome", "state-transition", "artifact-integrity", "performance-measurement", "negative-control-detection"]
+          "enum": ["state-equality", "wire-outcome", "state-transition", "artifact-integrity", "performance-measurement"]
         },
         "name": {
           "type": "string",
@@ -671,8 +671,7 @@
             "canonical-wire-outcome",
             "legal-state-transition",
             "artifact-policy-satisfied",
-            "performance-contract-satisfied",
-            "negative-control-detected"
+            "performance-contract-satisfied"
           ]
         },
         "payload": { "type": "object", "maxProperties": 0 }
@@ -707,12 +706,6 @@
             "contract_predicate": { "const": "performance-measurement" },
             "name": { "const": "performance-contract-satisfied" }
           }
-        },
-        {
-          "properties": {
-            "contract_predicate": { "const": "negative-control-detection" },
-            "name": { "const": "negative-control-detected" }
-          }
         }
       ]
     },
@@ -743,6 +736,7 @@
             "push_success",
             "pull_success",
             "rebuild_success",
+            "transport_failure",
             "invalid_request",
             "invalid_schema_reference",
             "auth_required",
@@ -758,7 +752,12 @@
             "temporary_unavailable"
           ]
         },
-        "http_status": { "type": "integer", "minimum": 100, "maximum": 599 },
+        "http_status": {
+          "oneOf": [
+            { "const": 0 },
+            { "type": "integer", "minimum": 100, "maximum": 599 }
+          ]
+        },
         "error_code": {
           "oneOf": [
             { "type": "string", "pattern": "^[a-z][a-z0-9_]*$" },
@@ -768,6 +767,31 @@
         "retryable": { "type": "boolean" }
       },
       "allOf": [
+        {
+          "if": {
+            "properties": { "contract_case": { "const": "transport_failure" } },
+            "required": ["contract_case"]
+          },
+          "then": {
+            "properties": {
+              "http_status": { "const": 0 },
+              "error_code": { "type": "null" },
+              "retryable": { "const": true }
+            }
+          },
+          "else": {
+            "properties": { "http_status": { "minimum": 100, "maximum": 599 } }
+          }
+        },
+        {
+          "if": {
+            "properties": { "http_status": { "const": 0 } },
+            "required": ["http_status"]
+          },
+          "then": {
+            "properties": { "contract_case": { "const": "transport_failure" } }
+          }
+        },
         {
           "if": {
             "properties": { "http_status": { "maximum": 399 } },
@@ -808,7 +832,7 @@
       "properties": {
         "kind": {
           "type": "string",
-          "enum": ["model-state-equality", "wire-contract", "state-transition", "artifact-policy", "performance-budget", "negative-control-detection"]
+          "enum": ["model-state-equality", "wire-contract", "state-transition", "artifact-policy", "performance-budget"]
         },
         "expected_source": { "const": "authored-model" },
         "observed_source": {

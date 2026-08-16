@@ -1072,7 +1072,6 @@ function scenarioSemanticErrors(scenario) {
     ["state-transition", "state-transition"],
     ["artifact-policy", "artifact-integrity"],
     ["performance-budget", "performance-measurement"],
-    ["negative-control-detection", "negative-control-detection"],
   ]);
   for (const assertion of scenario.assertions) {
     if (!obligationAssertionIds.has(assertion.id)) {
@@ -2904,6 +2903,11 @@ function faultExecutionCatalogErrors(evidence, scenario, faultCatalog) {
 
 function evidencePromotionEligibilityErrors(evidence) {
   const errors = [];
+  if (evidence.evidence_class !== "candidate") {
+    errors.push(
+      `${evidence.evidence_id} is not promotion-eligible because evidence_class is ${evidence.evidence_class}, not candidate`,
+    );
+  }
   if (evidence.run.exit_code !== 0) {
     errors.push(
       `${evidence.evidence_id} is not promotion-eligible because exit_code is ${evidence.run.exit_code}, not 0`,
@@ -4389,6 +4393,7 @@ let fixtureCandidateLockSHA256 = "0".repeat(64);
 function receiptProjectionFor(evidence) {
   const fields = {
     receipt_id: evidence.receipt_id,
+    evidence_class: evidence.evidence_class,
     scenario_id: evidence.scenario_id,
     proof_obligation_id: evidence.proof_obligation_id,
     make_target: evidence.run.make_target,
@@ -4485,6 +4490,9 @@ function evidenceReceiptProjectionErrors(evidence) {
   if (evidence.receipt.fields?.receipt_id !== evidence.receipt_id) {
     errors.push(`${evidence.evidence_id} receipt ID projection does not match`);
   }
+  if (evidence.receipt.fields?.evidence_class !== evidence.evidence_class) {
+    errors.push(`${evidence.evidence_id} receipt evidence class does not match`);
+  }
   if (evidence.receipt.fields?.runner_digest !== evidence.runner_digest) {
     errors.push(`${evidence.evidence_id} receipt runner digest projection does not match`);
   }
@@ -4496,6 +4504,7 @@ const validEvidence = {
   schema_version: 2,
   evidence_id: "EVD-NATIVE-002",
   receipt_id: `receipt-sha256:${"a".repeat(64)}`,
+  evidence_class: "candidate",
   candidate_id: "RC-0.3.0-20260717T120000Z-abcdef0",
   release_version: "0.3.0",
   protocol_version: 3,

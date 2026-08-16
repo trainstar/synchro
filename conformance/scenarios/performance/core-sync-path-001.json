@@ -52,7 +52,7 @@
         "SYNC-PERFORMANCE-001"
       ],
       "assertion_ids": [
-        "ASSERT-PERF-CORE-SYNC-PATH-CONTROL-001"
+        "ASSERT-PERF-CORE-SYNC-PATH-SEMANTIC-001"
       ],
       "proof_type": "negative-control",
       "support_cell_id": null,
@@ -93,7 +93,7 @@
       "scenario_id": "SCN-PERF-CORE-SYNC-PATH-001",
       "requirement_id": "SYNC-PERFORMANCE-001",
       "proof_obligation_id": "OBL-PERF-CORE-SYNC-PATH-CONTROL-001",
-      "assertion_id": "ASSERT-PERF-CORE-SYNC-PATH-CONTROL-001",
+      "assertion_id": "ASSERT-PERF-CORE-SYNC-PATH-SEMANTIC-001",
       "proof_type": "negative-control",
       "support_cell_id": null
     }
@@ -298,14 +298,6 @@
           "name": "performance-contract-satisfied",
           "payload": {}
         }
-      },
-      {
-        "id": "EXPECT-PERF-CORE-SYNC-PATH-CONTROL-001",
-        "predicate": {
-          "contract_predicate": "negative-control-detection",
-          "name": "negative-control-detected",
-          "payload": {}
-        }
       }
     ]
   },
@@ -330,7 +322,7 @@
       "control_id": "CTRL-PERFORMANCE-001",
       "barrier_id": "BAR-PERF-CORE-SYNC-PATH-CONTROL-001",
       "expected_assertion_ids": [
-        "ASSERT-PERF-CORE-SYNC-PATH-CONTROL-001"
+        "ASSERT-PERF-CORE-SYNC-PATH-SEMANTIC-001"
       ],
       "injection": {
         "mechanism": "source-mutant",
@@ -357,7 +349,7 @@
         "ARTDEF-ADAPTER-001"
       ],
       "detected_by": [
-        "ASSERT-PERF-CORE-SYNC-PATH-CONTROL-001"
+        "ASSERT-PERF-CORE-SYNC-PATH-SEMANTIC-001"
       ]
     }
   ],
@@ -599,7 +591,9 @@
         "expected_source": "authored-model",
         "observed_source": "system-under-test"
       },
-      "detects_control_ids": []
+      "detects_control_ids": [
+        "CTRL-PERFORMANCE-001"
+      ]
     },
     {
       "id": "ASSERT-PERF-CORE-SYNC-PATH-PERFORMANCE-001",
@@ -621,29 +615,6 @@
         "observed_source": "system-under-test"
       },
       "detects_control_ids": []
-    },
-    {
-      "id": "ASSERT-PERF-CORE-SYNC-PATH-CONTROL-001",
-      "requirement_ids": [
-        "SYNC-PERFORMANCE-001"
-      ],
-      "description": "The control detects an outbound sync-service RPC in the adapter path.",
-      "expectation_ids": [
-        "EXPECT-PERF-CORE-SYNC-PATH-CONTROL-001"
-      ],
-      "predicate": {
-        "contract_predicate": "negative-control-detection",
-        "name": "negative-control-detected",
-        "payload": {}
-      },
-      "oracle": {
-        "kind": "negative-control-detection",
-        "expected_source": "authored-model",
-        "observed_source": "system-under-test"
-      },
-      "detects_control_ids": [
-        "CTRL-PERFORMANCE-001"
-      ]
     }
   ]
 }

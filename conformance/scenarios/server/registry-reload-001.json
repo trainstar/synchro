@@ -50,7 +50,7 @@
         "SYNC-WAL-007"
       ],
       "assertion_ids": [
-        "ASSERT-REGISTRY-RELOAD-CONTROL-001"
+        "ASSERT-REGISTRY-RELOAD-SEMANTIC-001"
       ],
       "proof_type": "fault-injection",
       "support_cell_id": "SUP-PG-018",
@@ -75,7 +75,7 @@
         "SYNC-WAL-007"
       ],
       "assertion_ids": [
-        "ASSERT-REGISTRY-RELOAD-CONTROL-001"
+        "ASSERT-REGISTRY-RELOAD-SEMANTIC-001"
       ],
       "proof_type": "negative-control",
       "support_cell_id": null,
@@ -108,7 +108,7 @@
       "scenario_id": "SCN-REGISTRY-RELOAD-001",
       "requirement_id": "SYNC-WAL-007",
       "proof_obligation_id": "OBL-REGISTRY-RELOAD-FAULT-001",
-      "assertion_id": "ASSERT-REGISTRY-RELOAD-CONTROL-001",
+      "assertion_id": "ASSERT-REGISTRY-RELOAD-SEMANTIC-001",
       "proof_type": "fault-injection",
       "support_cell_id": "SUP-PG-018"
     },
@@ -116,7 +116,7 @@
       "scenario_id": "SCN-REGISTRY-RELOAD-001",
       "requirement_id": "SYNC-WAL-007",
       "proof_obligation_id": "OBL-REGISTRY-RELOAD-CONTROL-001",
-      "assertion_id": "ASSERT-REGISTRY-RELOAD-CONTROL-001",
+      "assertion_id": "ASSERT-REGISTRY-RELOAD-SEMANTIC-001",
       "proof_type": "negative-control",
       "support_cell_id": null
     }
@@ -357,14 +357,6 @@
             }
           ]
         }
-      },
-      {
-        "id": "EXPECT-REGISTRY-RELOAD-CONTROL-001",
-        "predicate": {
-          "contract_predicate": "negative-control-detection",
-          "name": "negative-control-detected",
-          "payload": {}
-        }
       }
     ]
   },
@@ -389,7 +381,7 @@
       "control_id": "CTRL-WAL-007",
       "barrier_id": "BAR-REGISTRY-RELOAD-CONTROL-001",
       "expected_assertion_ids": [
-        "ASSERT-REGISTRY-RELOAD-CONTROL-001"
+        "ASSERT-REGISTRY-RELOAD-SEMANTIC-001"
       ],
       "injection": {
         "mechanism": "state-fault",
@@ -416,7 +408,7 @@
         "ARTDEF-PG-EXTENSION-001"
       ],
       "detected_by": [
-        "ASSERT-REGISTRY-RELOAD-CONTROL-001"
+        "ASSERT-REGISTRY-RELOAD-SEMANTIC-001"
       ]
     }
   ],
@@ -737,27 +729,6 @@
       },
       "oracle": {
         "kind": "model-state-equality",
-        "expected_source": "authored-model",
-        "observed_source": "system-under-test"
-      },
-      "detects_control_ids": []
-    },
-    {
-      "id": "ASSERT-REGISTRY-RELOAD-CONTROL-001",
-      "requirement_ids": [
-        "SYNC-WAL-007"
-      ],
-      "description": "The registry activation control detects notification-selected or mixed-generation WAL materialization.",
-      "expectation_ids": [
-        "EXPECT-REGISTRY-RELOAD-CONTROL-001"
-      ],
-      "predicate": {
-        "contract_predicate": "negative-control-detection",
-        "name": "negative-control-detected",
-        "payload": {}
-      },
-      "oracle": {
-        "kind": "negative-control-detection",
         "expected_source": "authored-model",
         "observed_source": "system-under-test"
       },

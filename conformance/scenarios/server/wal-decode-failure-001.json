@@ -50,7 +50,7 @@
         "SYNC-WAL-006"
       ],
       "assertion_ids": [
-        "ASSERT-WAL-DECODE-CONTROL-001"
+        "ASSERT-WAL-DECODE-SEMANTIC-001"
       ],
       "proof_type": "fault-injection",
       "support_cell_id": "SUP-PG-018",
@@ -75,7 +75,7 @@
         "SYNC-WAL-006"
       ],
       "assertion_ids": [
-        "ASSERT-WAL-DECODE-CONTROL-001"
+        "ASSERT-WAL-DECODE-SEMANTIC-001"
       ],
       "proof_type": "negative-control",
       "support_cell_id": null,
@@ -108,7 +108,7 @@
       "scenario_id": "SCN-WAL-DECODE-FAILURE-001",
       "requirement_id": "SYNC-WAL-006",
       "proof_obligation_id": "OBL-WAL-DECODE-FAULT-001",
-      "assertion_id": "ASSERT-WAL-DECODE-CONTROL-001",
+      "assertion_id": "ASSERT-WAL-DECODE-SEMANTIC-001",
       "proof_type": "fault-injection",
       "support_cell_id": "SUP-PG-018"
     },
@@ -116,7 +116,7 @@
       "scenario_id": "SCN-WAL-DECODE-FAILURE-001",
       "requirement_id": "SYNC-WAL-006",
       "proof_obligation_id": "OBL-WAL-DECODE-CONTROL-001",
-      "assertion_id": "ASSERT-WAL-DECODE-CONTROL-001",
+      "assertion_id": "ASSERT-WAL-DECODE-SEMANTIC-001",
       "proof_type": "negative-control",
       "support_cell_id": null
     }
@@ -384,14 +384,6 @@
           "name": "legal-state-transition",
           "payload": {}
         }
-      },
-      {
-        "id": "EXPECT-WAL-DECODE-CONTROL-001",
-        "predicate": {
-          "contract_predicate": "negative-control-detection",
-          "name": "negative-control-detected",
-          "payload": {}
-        }
       }
     ]
   },
@@ -416,7 +408,7 @@
       "control_id": "CTRL-WAL-006",
       "barrier_id": "BAR-WAL-DECODE-CONTROL-001",
       "expected_assertion_ids": [
-        "ASSERT-WAL-DECODE-CONTROL-001"
+        "ASSERT-WAL-DECODE-SEMANTIC-001"
       ],
       "injection": {
         "mechanism": "process-fault",
@@ -443,7 +435,7 @@
         "ARTDEF-PG-EXTENSION-001"
       ],
       "detected_by": [
-        "ASSERT-WAL-DECODE-CONTROL-001"
+        "ASSERT-WAL-DECODE-SEMANTIC-001"
       ]
     }
   ],
@@ -694,27 +686,6 @@
       },
       "oracle": {
         "kind": "model-state-equality",
-        "expected_source": "authored-model",
-        "observed_source": "system-under-test"
-      },
-      "detects_control_ids": []
-    },
-    {
-      "id": "ASSERT-WAL-DECODE-CONTROL-001",
-      "requirement_ids": [
-        "SYNC-WAL-006"
-      ],
-      "description": "The control detects skipped poison, missing redacted quarantine, later materialization, and acknowledgement past poison.",
-      "expectation_ids": [
-        "EXPECT-WAL-DECODE-CONTROL-001"
-      ],
-      "predicate": {
-        "contract_predicate": "negative-control-detection",
-        "name": "negative-control-detected",
-        "payload": {}
-      },
-      "oracle": {
-        "kind": "negative-control-detection",
         "expected_source": "authored-model",
         "observed_source": "system-under-test"
       },

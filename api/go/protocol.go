@@ -20,3 +20,44 @@ type RebuildRequest struct {
 	ClientID string `json:"client_id"`
 	Scope    string `json:"scope"`
 }
+
+// Request member lists are the transport-level allowlists for each endpoint.
+// Semantic validation remains the responsibility of the extension.
+var (
+	connectRequestMembers = []string{
+		"client_id",
+		"client_generation",
+		"platform",
+		"app_version",
+		"protocol_version",
+		"schema_reset",
+		"schema",
+		"scope_set_version",
+		"known_scopes",
+		"seed_receipts",
+	}
+	pullRequestMembers = []string{
+		"client_id",
+		"client_generation",
+		"schema",
+		"scope_set_version",
+		"scopes",
+		"limit",
+	}
+	pushRequestMembers = []string{
+		"client_id",
+		"client_generation",
+		"batch_id",
+		"schema",
+		"mutations",
+	}
+	rebuildRequestMembers = []string{
+		"client_id",
+		"client_generation",
+		"schema",
+		"scope",
+		"rebuild_id",
+		"cursor",
+		"limit",
+	}
+)

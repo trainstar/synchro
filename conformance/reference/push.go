@@ -434,15 +434,16 @@ func executePush(ctx context.Context, model *Model, envelope pushSubmitEnvelope,
 	if client.Retirement != nil {
 		return pushFailureResult(key, ReplayDispositionExecuted, 409, pushHTTPClientRetired, false, nil), nil
 	}
+
+	existing, batchExists := model.state.Batches[key]
+	if batchExists && !equalFingerprintRecord(existing.Fingerprint, fingerprintRecord(pushBatchDomain, batch.Fingerprint)) {
+		return pushFailureResult(key, ReplayDispositionExecuted, 409, pushHTTPIdempotencyConflict, false, nil), nil
+	}
 	if err := ensureLocalSealedBatch(model, batch, key); err != nil {
 		recordLocalPushIntegrityFailure(model, key.Client, "local_seal_invalid")
 		return pushFailureResult(key, ReplayDispositionExecuted, 400, pushHTTPInvalidRequest, false, nil), nil
 	}
-
-	if existing, exists := model.state.Batches[key]; exists {
-		if !equalFingerprintRecord(existing.Fingerprint, fingerprintRecord(pushBatchDomain, batch.Fingerprint)) {
-			return pushFailureResult(key, ReplayDispositionExecuted, 409, pushHTTPIdempotencyConflict, false, nil), nil
-		}
+	if batchExists {
 		if existing.Execution != BatchExecutionCompleted {
 			markLocalPushBackoff(model, key, RetryClassificationUnavailable)
 			return pushFailureResult(key, ReplayDispositionExecuted, 503, pushHTTPTemporaryUnavailable, true, nil), nil
@@ -491,12 +492,12 @@ func executePush(ctx context.Context, model *Model, envelope pushSubmitEnvelope,
 	}
 	model.state = server.state
 	if envelope.Delivery == "drop_after_server" {
-		if err := markLocalBatchResponseLost(model, batch, key, 503); err != nil {
+		if err := markLocalBatchResponseLost(model, batch, key, 0); err != nil {
 			return StepResult{}, err
 		}
 		markLocalPushBackoff(model, key, RetryClassificationTransport)
 		appendPushEvent(model, clientKey, ModelEventResponseLoss, "response_lost", transactionForBatch(model, key))
-		return pushFailureResult(key, ReplayDispositionExecuted, 503, pushHTTPTemporaryUnavailable, true, nil), nil
+		return pushTransportFailureResult(key, ReplayDispositionExecuted), nil
 	}
 	if err := reconcileLocalBatchFromOutcomes(model, batch, key, response, outcomes, true); err != nil {
 		recordLocalPushIntegrityFailure(model, key.Client, "push_reconciliation_failed")
@@ -1172,12 +1173,12 @@ func replayCompletedBatch(model *Model, envelope pushSubmitEnvelope, batch parse
 		return pushFailureResult(key, ReplayDispositionReplayed, 503, pushHTTPTemporaryUnavailable, true, nil), nil
 	}
 	if envelope.Delivery == "drop_after_server" {
-		if err := markLocalBatchResponseLost(model, batch, key, ledger.HTTPStatus); err != nil {
+		if err := markLocalBatchResponseLost(model, batch, key, 0); err != nil {
 			return StepResult{}, err
 		}
 		markLocalPushBackoff(model, key, RetryClassificationTransport)
 		appendPushEvent(model, key.Client, ModelEventResponseLoss, "response_lost", transactionForBatch(model, key))
-		return pushFailureResult(key, ReplayDispositionReplayed, 503, pushHTTPTemporaryUnavailable, true, nil), nil
+		return pushTransportFailureResult(key, ReplayDispositionReplayed), nil
 	}
 	if ledger.HTTPStatus != 200 || len(ledger.SealedCanonicalResponse) == 0 {
 		markLocalPushBackoff(model, key, RetryClassificationUnavailable)
@@ -2026,6 +2027,10 @@ func outcomeFenceID(state State, event EventReplayKey) FenceID {
 
 func pushHTTPResult(batch BatchKey, replay ReplayDisposition, http HTTPObservation, mutations []MutationObservation) StepResult {
 	return StepResult{Kind: StepResultKindPush, HTTP: &http, Push: &PushObservation{Batch: batch, Replay: replay, Mutations: mutations}}
+}
+
+func pushTransportFailureResult(batch BatchKey, replay ReplayDisposition) StepResult {
+	return pushHTTPResult(batch, replay, HTTPObservation{Retryable: true}, nil)
 }
 
 func pushFailureResult(batch BatchKey, replay ReplayDisposition, status int, code HTTPCode, retryable bool, details *pushErrorWire) StepResult {

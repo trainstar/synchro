@@ -27,7 +27,8 @@ Every RC evidence bundle is for exactly:
 - Accepted ADR 001 through Accepted ADR 005
 - `conformance/requirements.json`, schema version `2`
 - `conformance/support-matrix.json`, schema version `1`
-- scenario, evidence, and RC manifest schema version `2`
+- RC candidate lock schema version `1`
+- scenario, evidence, and final RC manifest schema version `2`
 - vector catalog schema version `1`
 
 The behavioral snapshot includes:
@@ -44,12 +45,11 @@ The behavioral snapshot includes:
 - `docs/src/content/docs/architecture/decisions/004-membership-schema-and-retention.mdx`
 - `docs/src/content/docs/architecture/decisions/005-integrity-authorization-and-seeds.mdx`
 
-The RC manifest must record the SHA-256 hash of every contract file, the
-release and protocol version, and the status `Accepted` for each ADR. Every
-scenario, requirement result, vector result, performance result, and support
-cell result must reference this same contract snapshot. A changed file,
-missing ADR, non-accepted ADR status, unresolved normative reference, or
-protocol mismatch invalidates the candidate evidence.
+The RC candidate lock records the SHA-256 hash of every contract file. It also
+records the release, protocol version, and status `Accepted` for each ADR. The
+final RC manifest binds that lock by path and SHA-256. Every scenario and
+evidence result must reference the same contract snapshot. A changed file,
+missing ADR, unresolved reference, or protocol mismatch invalidates evidence.
 
 The `contract_snapshot_sha256` is
 `SHA256(RFC8785_UTF8(snapshot_binding))`, where `snapshot_binding` is the exact
@@ -66,14 +66,14 @@ versioned contract schemas named below. Each behavioral entry contains exactly
 is `Accepted`. Paths use these repository-relative strings, hashes are lowercase
 hex, and behavioral file order is the list order above. Evidence records carry
 the same release, protocol, source commit, candidate ID, and contract snapshot
-digest as their RC manifest. A verifier recomputes every file hash and the
-aggregate digest from bytes in the candidate source tree; trusting supplied
-hashes is invalid.
+digest as the candidate lock and final RC manifest. A verifier recomputes every
+file hash and aggregate digest from candidate source bytes. Supplied hashes are
+not authoritative.
 
-The snapshot also hashes the exact versioned requirements, support-matrix,
-scenario, evidence, RC-manifest, fault-catalog, artifact-inventory,
-performance-budget, and vector-catalog schemas. A candidate cannot reinterpret
-an authored record under a later schema revision.
+The snapshot also hashes the exact versioned requirements and support-matrix
+schemas. It hashes scenario, evidence, candidate-lock, RC-manifest,
+fault-catalog, artifact-inventory, performance-budget, and vector-catalog
+schemas. A candidate cannot reinterpret a record under a later schema revision.
 
 ### ADR Consistency Gate
 
@@ -95,12 +95,10 @@ The support scope is exactly the matrix in
   React Native `0.83.x`
 - excluded PostgreSQL cells: `SUP-PG-014` through `SUP-PG-017`
 
-Current-stable selectors are resolved at RC start and the exact OS, SDK, IDE,
-emulator or simulator, runtime, and toolchain versions are frozen in the RC
-manifest. React Native iOS cells include the native Swift compiler and CocoaPods
-CLI, and React Native Android cells include the native Kotlin compiler, in
-addition to their bridge toolchains. No excluded platform or database version
-can be used to expand the v0.3.0 certification claim.
+Current-stable selectors are resolved at RC start. The candidate lock freezes
+the exact OS, SDK, IDE, emulator, simulator, runtime, and toolchain versions.
+React Native iOS cells include Swift and CocoaPods. React Native Android cells
+include Kotlin. No excluded platform or database version expands certification.
 
 ## Authored Contract Files
 
@@ -142,29 +140,38 @@ Schemas. Authored files cannot be edited to report that a candidate passed.
 Expected results must come from the contract and independent model, not from
 the implementation under test.
 
-## RC Contract Snapshot and Evidence Identity
+## RC Candidate Lock, Contract Snapshot, and Evidence Identity
 
-The generated RC manifest must bind at least:
+The release pipeline generates `rc-candidate-lock-v1` before execution. The
+lock must bind at least:
 
-- candidate ID, release, protocol version, source commit, and build inputs
-- hashes for all behavioral specs, all five ADRs, requirements, support
-  matrix, scenario catalog, vector set, fault catalog, and performance budget
-  manifest
-- requirement IDs, scenario IDs, proof-obligation IDs, selected support-cell
-  IDs, and proof types
-- exact artifact names, versions, digests, SBOMs, and provenance attestations
-- exact execution environments and resolved current-stable versions
-- only the finite support-cell environment dimension names and their exact
-  versions, with no extra dimensions, secrets, tokens, credentials, private
-  keys, or user-owned values
-- command lines, Makefile target, start and end times, result, duration, logs,
-  traces, replay seeds, and attempt history
+- candidate ID, release, protocol version, and source commit
+- hashes for all behavioral specifications, ADRs, catalogs, and schemas
+- exact scenario paths and SHA-256 values
+- each resolved support cell and its finite exact environment dimensions
+- each artifact inventory realization, version, payload path, media type,
+  `size_bytes`, and SHA-256
+- each structural SBOM, provenance attestation, and Sigstore bundle binding
+- the trusted rerun approver identities
+
+The candidate lock contains no evidence records. It contains no final evidence
+paths or final evidence hashes. It contains no `verified` boolean. The release
+pipeline stores the immutable lock with its SHA-256 before execution starts.
+
+The pipeline generates `rc-manifest-v2` after execution. The final manifest
+must bind the candidate lock by path and SHA-256. It must retain all locked
+candidate fields unchanged. It then adds:
+
+- requirement IDs, scenario IDs, obligation IDs, support-cell IDs, and proof
+  types
+- command, Make target, timestamps, result, duration, logs, traces, seeds, and
+  complete attempt history
 - mutation and negative-control identities with expected failure results
+- every evidence record and every transitive retry predecessor
 
-Evidence records are content-addressed and immutable after generation. The RC
-manifest is generated once for a candidate, signed or attested by the release
-pipeline, and stored with its digest. Failed attempts remain linked records.
-They cannot be deleted, overwritten, or replaced by a later green retry.
+Evidence records are content-addressed and immutable after generation. Failed
+attempts remain linked records. A later passing retry cannot delete, overwrite,
+or replace them.
 
 Every evidence record contains the exact proof obligation, Makefile target and
 canonical `make` argument vector, start and completion timestamps, matching
@@ -181,6 +188,12 @@ command, and actual artifact inventory roles exactly satisfy the named proof
 obligation. A zero exit code may report only `passed` or `skipped`; promotion
 requires every assertion, budget, required-measurement, and vector outcome to be
 `passed`.
+
+Each signed execution receipt has a closed `evidence_class`. The values are
+`candidate` and `harness-only`. Synthetic harness execution must emit
+`harness-only`. The evidence builder and verifier must reject `harness-only`
+receipts and projections. An authenticated `harness-only` receipt supports only
+harness self-tests.
 
 The verifier applies a fixed policy for each proof type: allowed release Make
 targets, required and permitted artifact roles, and whether the proof is
@@ -222,10 +235,9 @@ action, approver identity, approval time, and approval URI. Starting a new
 lineage, omitting a predecessor, or relabeling a semantic failure as
 infrastructure makes the candidate ineligible.
 
-The RC manifest freezes the allowlist of trusted rerun approver identities.
-Every rerun approval identity uses the canonical `github:<login>` form and must
-be present in that allowlist. Self-declared free-form approver text cannot
-authorize a retry.
+The candidate lock freezes the trusted rerun approver identities. The final
+manifest retains that allowlist unchanged. Every approval uses the canonical
+`github:<login>` form. Free-form approver text cannot authorize a retry.
 
 ## Required Proof Types
 
@@ -276,6 +288,12 @@ coherent executed, passed, and failed counts. The result set must exactly match
 the obligation's required vector-set IDs. Phase 3 validation additionally
 recomputes the catalog and vector-file hashes from disk rather than trusting
 these recorded values.
+
+The verifier rejects a duplicate only within one complete execution vector
+key. That key contains candidate, scenario, obligation, support cell, vector
+set, and language. Different obligations and support cells can repeat one
+language. Candidate closure needs at least one valid terminal result for each
+required vector-set and language pair.
 
 The vector evidence must cover every protocol portable type, SQL null, Unicode,
 integer boundaries, int64 string encoding, exact decimal normalization,
@@ -428,15 +446,17 @@ The release pipeline must:
 1. build the extension archive and pgrx-generated installation SQL, Go adapter
    binaries, Swift package inputs and CocoaPods metadata, Kotlin Maven
    artifacts, React Native `0.83.x` npm tarball, seed artifacts, SBOMs, and
-   provenance attestations once into staging;
-2. calculate SHA-256 hashes before any support-cell test;
-3. install those exact bytes into clean PostgreSQL, native, bridge, and
-   consumer environments;
-4. run every required support cell, conformance scenario, negative control,
-   mutation gate, performance budget, and operational gate against those bytes;
-5. recalculate hashes after testing and require equality with the staged
-   hashes; and
-6. publish only the unchanged staged bytes after approval.
+   provenance attestations once into staging.
+2. calculate byte sizes and SHA-256 hashes before any support-cell test.
+3. generate and store the immutable RC candidate lock.
+4. install those exact bytes into clean PostgreSQL, native, bridge, and
+   consumer environments.
+5. run every required support cell, conformance scenario, negative control,
+   mutation gate, performance budget, and operational gate against those bytes.
+6. recalculate sizes and hashes after testing and require staged equality.
+7. generate the final RC manifest with the candidate-lock and evidence
+   bindings.
+8. publish only the unchanged staged bytes after approval.
 
 Any source, package metadata, build input, generated SQL, dependency lockfile,
 or artifact change invalidates the candidate and requires a new build and a
@@ -452,31 +472,33 @@ Every primary artifact resolves exactly once to
 independent conformance runner, PostgreSQL extension archive, generated
 installation SQL, adapter, seed tool, Swift SPM bundle, CocoaPods metadata,
 Kotlin Maven bundle, React Native npm tarball, and portable seed. Every file
-uses a normalized repository-relative path with no traversal, and no two
+binds its normalized path, media type, exact byte size, and SHA-256. No two
 artifacts, evidence records, evidence attachments, attestations, or bundles may
 claim one file path across the complete candidate bundle.
 Each primary artifact has exactly one SBOM and one
 provenance attestation bound to its artifact ID and exact payload
 path-and-digest set. An SBOM declares SPDX JSON or CycloneDX JSON with the
-matching media type; provenance declares SLSA provenance v1 in an in-toto JSON
-envelope. Each attestation and its Sigstore bundle are content-addressed, and
-the manifest records verification by GitHub Actions OIDC issuer
+matching media type. Provenance declares SLSA provenance v1 in an in-toto JSON
+envelope. Each attestation and its Sigstore bundle are content-addressed. The
+candidate lock freezes their structural bindings before execution. The final
+manifest retains those bindings. It records the GitHub Actions OIDC issuer
 `https://token.actions.githubusercontent.com` and the approved workflow identity
 `https://github.com/trainstar/synchro/.github/workflows/release.yml@refs/tags/v0.3.0`,
-plus verification time and record URI. The verified bundle must contain and
-bind the attestation SHA-256, the exact artifact payload path-and-digest subject
-set, and successful Rekor inclusion verification. Changing an attestation,
-payload, certificate identity, or signed subject without a new valid bundle
-invalidates the candidate. A file merely labeled as an SBOM or provenance
-record is not an attestation.
+plus verification time and record URI. Neither candidate document contains a
+`verified` boolean. Phase 6 verifier output owns the trust disposition.
+
+The Phase 6 verifier must bind the attestation SHA-256 and exact artifact
+subject set. It must verify the signature, certificate identity, and Rekor
+inclusion. A changed attestation, payload, identity, or subject invalidates the
+candidate. A file label alone does not make an attestation.
 
 ## Immutable RC Evidence
 
-The RC manifest, evidence records, generated inventory, artifact manifest,
-logs, traces, seeds, and attestations are immutable after generation. A failed
-attempt remains linked to every later attempt, and a later result cannot erase
-or rewrite it. Any change to the contract snapshot, candidate source, build
-input, artifact bytes, or evidence record creates a new candidate identity.
+The candidate lock is immutable before execution. The final RC manifest,
+evidence, inventory, logs, traces, seeds, and attestations are immutable after
+generation. A later result cannot erase a failed attempt. Any change to locked
+source, contract, scenario, support, artifact, or attestation bytes creates a
+new candidate identity.
 
 ## No-Skip and No-Flake Policy
 
@@ -503,6 +525,7 @@ The release gate requires:
 - zero missing required support-cell records
 - zero skipped, filtered, ignored, quarantined, or unexplained flaky tests
 - zero artifact hash mismatches
+- zero candidate-lock path, hash, or locked-field mismatches
 - zero contract snapshot, protocol version, ADR status, or vector-set hash
   mismatches
 - zero unexplained divergence in the required soak and consumer canary
@@ -515,8 +538,8 @@ sensitive exploit detail, credentials, payloads, or identity data.
 
 The evidence tool generates the inventory from the requirements catalog,
 support matrix, scenario catalog, vector set, fault catalog, performance
-budgets, exact-artifact manifest, and executed evidence. It must not read a
-handwritten `covered` claim as proof.
+budgets, candidate lock, final RC manifest, and executed evidence. It must not
+read a handwritten `covered` claim as proof.
 
 Each inventory row binds requirement ID, proof type, scenario ID, support cell,
 protocol version, contract snapshot, result, artifact hashes, environment,
@@ -531,10 +554,10 @@ negative control, surviving release-critical mutant, unresolved critical or
 high finding, contract mismatch, performance-budget failure, soak divergence,
 or artifact mismatch produces a nonzero exit status.
 
-The RC manifest and all generated evidence are immutable and retained with
-their content hashes, logs, traces, SBOMs, and attestations. Only the exact
-candidate whose immutable evidence passes every gate may be promoted. No
-manual readiness statement can override a failed or missing gate.
+The candidate lock, final RC manifest, and generated evidence are retained with
+their content hashes. Phase 6 emits the separate cryptographic trust
+disposition. Only the exact candidate that passes every gate can be promoted.
+No manual readiness statement can override a failed or missing gate.
 
 ## Required Makefile Targets
 

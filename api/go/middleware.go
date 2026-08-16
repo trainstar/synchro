@@ -34,10 +34,9 @@ func UserIDFromContext(ctx context.Context) string {
 	return ""
 }
 
-// WithUserID returns a new context with the user ID set.
-// UUIDs are normalized to lowercase per RFC 4122 / PostgreSQL convention.
+// WithUserID returns a new context with the resolved canonical user ID set.
 func WithUserID(ctx context.Context, userID string) context.Context {
-	return context.WithValue(ctx, userIDKey, strings.ToLower(userID))
+	return context.WithValue(ctx, userIDKey, userID)
 }
 
 // RequestContextUserIDResolver resolves a user ID previously stored in the
@@ -51,11 +50,22 @@ func RequestContextUserIDResolver(r *http.Request) (string, error) {
 }
 
 func authMiddleware(cfg Config, next http.Handler) http.Handler {
+	authModes := 0
+	if cfg.UserIDResolver != nil {
+		authModes++
+	}
+	if len(cfg.JWTSecret) > 0 {
+		authModes++
+	}
+	if cfg.JWKSURL != "" {
+		authModes++
+	}
+	if authModes > 1 {
+		panic("synchroapi: UserIDResolver, JWTSecret, and JWKSURL are mutually exclusive")
+	}
+
 	switch {
 	case cfg.UserIDResolver != nil:
-		if len(cfg.JWTSecret) > 0 || cfg.JWKSURL != "" {
-			panic("synchroapi: UserIDResolver is mutually exclusive with JWTSecret and JWKSURL")
-		}
 		return resolverMiddleware(cfg.UserIDResolver, next)
 	case len(cfg.JWTSecret) > 0 || cfg.JWKSURL != "":
 		return jwtMiddleware(cfg, next)
@@ -91,20 +101,25 @@ func jwtMiddleware(cfg Config, next http.Handler) http.Handler {
 		userClaim = cfg.JWTUserClaim
 	}
 
-	keyFunc, err := buildKeyFunc(cfg)
+	keyFuncForContext, err := buildKeyFunc(cfg)
 	if err != nil {
 		panic(fmt.Sprintf("synchroapi: jwt config: %v", err))
 	}
 
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		authHeader := r.Header.Get("Authorization")
+		authorizationValues := r.Header.Values("Authorization")
+		if len(authorizationValues) != 1 {
+			writeJSONError(w, http.StatusUnauthorized, "missing or malformed authorization header")
+			return
+		}
+		authHeader := authorizationValues[0]
 		if !strings.HasPrefix(authHeader, "Bearer ") {
 			writeJSONError(w, http.StatusUnauthorized, "missing or malformed authorization header")
 			return
 		}
 		tokenStr := strings.TrimPrefix(authHeader, "Bearer ")
 
-		token, err := jwt.Parse(tokenStr, keyFunc, jwt.WithValidMethods(validMethods(cfg)))
+		token, err := jwt.Parse(tokenStr, keyFuncForContext(r.Context()), jwt.WithValidMethods(validMethods(cfg)))
 		if err != nil || !token.Valid {
 			writeJSONError(w, http.StatusUnauthorized, "invalid token")
 			return
@@ -127,21 +142,26 @@ func jwtMiddleware(cfg Config, next http.Handler) http.Handler {
 	})
 }
 
-func buildKeyFunc(cfg Config) (jwt.Keyfunc, error) {
+func buildKeyFunc(cfg Config) (func(context.Context) jwt.Keyfunc, error) {
 	switch {
 	case len(cfg.JWTSecret) > 0:
-		return func(token *jwt.Token) (any, error) {
-			if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
-				return nil, fmt.Errorf("unexpected signing method: %v", token.Header["alg"])
+		return func(context.Context) jwt.Keyfunc {
+			return func(token *jwt.Token) (any, error) {
+				if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
+					return nil, fmt.Errorf("unexpected signing method: %v", token.Header["alg"])
+				}
+				return cfg.JWTSecret, nil
 			}
-			return cfg.JWTSecret, nil
 		}, nil
 	case cfg.JWKSURL != "":
-		jwks, err := keyfunc.NewDefault([]string{cfg.JWKSURL})
+		if cfg.JWKSContext == nil {
+			return nil, fmt.Errorf("JWKSContext is required when JWKSURL is set")
+		}
+		jwks, err := keyfunc.NewDefaultCtx(cfg.JWKSContext, []string{cfg.JWKSURL})
 		if err != nil {
 			return nil, fmt.Errorf("fetching JWKS: %w", err)
 		}
-		return jwks.KeyfuncCtx(context.Background()), nil
+		return jwks.KeyfuncCtx, nil
 	default:
 		return nil, fmt.Errorf("JWTSecret or JWKSURL is required")
 	}
@@ -149,9 +169,9 @@ func buildKeyFunc(cfg Config) (jwt.Keyfunc, error) {
 
 func validMethods(cfg Config) []string {
 	if len(cfg.JWTSecret) > 0 {
-		return []string{"HS256", "HS384", "HS512"}
+		return []string{"HS256"}
 	}
-	return []string{"RS256", "RS384", "RS512", "ES256", "ES384", "ES512"}
+	return []string{"RS256", "ES256"}
 }
 
 // versionCheckMiddleware rejects requests with a client version below the minimum.
@@ -160,15 +180,15 @@ func versionCheckMiddleware(minVersion string, next http.Handler) http.Handler {
 		return next
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		clientVersion := r.Header.Get("X-Client-Version")
-		if clientVersion == "" {
-			clientVersion = r.Header.Get("X-App-Version")
+		versions := append([]string(nil), r.Header.Values("X-Client-Version")...)
+		versions = append(versions, r.Header.Values("X-App-Version")...)
+		if len(versions) != 1 {
+			writeJSONError(w, http.StatusUpgradeRequired, "client upgrade required")
+			return
 		}
-		if clientVersion != "" {
-			if err := checkVersion(clientVersion, minVersion); err != nil {
-				writeJSONError(w, http.StatusUpgradeRequired, "client upgrade required")
-				return
-			}
+		if err := checkVersion(versions[0], minVersion); err != nil {
+			writeJSONError(w, http.StatusUpgradeRequired, "client upgrade required")
+			return
 		}
 		next.ServeHTTP(w, r)
 	})

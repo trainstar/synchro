@@ -1,21 +1,33 @@
 package synchroapi
 
 import (
+	"context"
+	"database/sql"
+	"database/sql/driver"
 	"encoding/json"
+	"errors"
+	"net"
 	"net/http"
 	"strings"
 )
+
+type protocolErrorEnvelope struct {
+	Error protocolError `json:"error"`
+}
+
+type protocolError struct {
+	Code      string `json:"code"`
+	Message   string `json:"message"`
+	Retryable bool   `json:"retryable"`
+}
+
+var errAdapterQueryTimeout = errors.New("adapter database query timeout")
 
 // mapPGError inspects the raw JSONB response from a synchro_*() call.
 // If the response contains an "error" key, it writes the appropriate HTTP
 // status and returns true. Otherwise it returns false and the caller should
 // forward the raw JSONB as a success response.
 func mapPGError(w http.ResponseWriter, raw []byte) bool {
-	// Quick check: avoid parsing if the response is clearly not an error.
-	if len(raw) == 0 || raw[0] != '{' {
-		return false
-	}
-
 	var probe struct {
 		Error json.RawMessage `json:"error"`
 	}
@@ -31,8 +43,7 @@ func mapPGError(w http.ResponseWriter, raw []byte) bool {
 	if retryAfter != "" {
 		w.Header().Set("Retry-After", retryAfter)
 	}
-	w.WriteHeader(status)
-	_, _ = w.Write(raw)
+	writeRawJSON(w, status, raw)
 	return true
 }
 
@@ -51,18 +62,22 @@ func classifyPGError(raw json.RawMessage) (int, string, bool) {
 
 func classifyProtocolError(code string, retryable bool) int {
 	switch strings.ToLower(code) {
-	case "invalid_request":
+	case "invalid_request", "invalid_schema_reference":
 		return http.StatusBadRequest
 	case "auth_required":
 		return http.StatusUnauthorized
+	case "idempotency_conflict", "client_retired", "client_generation_expired", "rebuild_restart_required":
+		return http.StatusConflict
 	case "schema_mismatch":
 		return http.StatusUnprocessableEntity
 	case "upgrade_required":
 		return http.StatusUpgradeRequired
 	case "retry_later":
 		return http.StatusTooManyRequests
-	case "temporary_unavailable":
+	case "capture_pending", "temporary_unavailable":
 		return http.StatusServiceUnavailable
+	case "sync_integrity_failure":
+		return http.StatusInternalServerError
 	default:
 		if retryable {
 			return http.StatusServiceUnavailable
@@ -73,7 +88,7 @@ func classifyProtocolError(code string, retryable bool) int {
 
 func retryAfterForCode(code string) string {
 	switch strings.ToLower(code) {
-	case "retry_later", "temporary_unavailable":
+	case "retry_later", "capture_pending", "temporary_unavailable":
 		return "5"
 	default:
 		return ""
@@ -87,32 +102,71 @@ func mapSQLError(w http.ResponseWriter, err error) bool {
 		return false
 	}
 
-	msg := err.Error()
-
-	switch {
-	case strings.Contains(msg, "schema mismatch") || strings.Contains(msg, "schema version"):
-		writeJSONError(w, http.StatusConflict, "schema mismatch")
-	case strings.Contains(msg, "not found") || strings.Contains(msg, "inactive"):
-		writeJSONError(w, http.StatusNotFound, "not found")
-	case strings.Contains(msg, "read_only"):
-		writeJSONError(w, http.StatusForbidden, "read only")
-	case isTransientError(msg):
+	if isTransientError(err) {
 		w.Header().Set("Retry-After", "5")
-		writeJSONError(w, http.StatusServiceUnavailable, "service temporarily unavailable")
-	default:
-		writeJSONError(w, http.StatusInternalServerError, "internal error")
+		writeProtocolError(w, http.StatusServiceUnavailable, "temporary_unavailable", "service temporarily unavailable", true)
+		return true
 	}
+	writeProtocolError(w, http.StatusInternalServerError, "sync_integrity_failure", "sync operation failed", false)
 	return true
 }
 
-func isTransientError(msg string) bool {
-	return strings.Contains(msg, "connection") ||
-		strings.Contains(msg, "timeout") ||
-		strings.Contains(msg, "database is closed")
+func isTransientError(err error) bool {
+	if errors.Is(err, errAdapterQueryTimeout) ||
+		errors.Is(err, context.DeadlineExceeded) ||
+		errors.Is(err, sql.ErrConnDone) ||
+		errors.Is(err, driver.ErrBadConn) {
+		return true
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, sql.ErrNoRows) || errors.Is(err, sql.ErrTxDone) {
+		return false
+	}
+
+	var networkError net.Error
+	if errors.As(err, &networkError) && (networkError.Timeout() || networkError.Temporary()) {
+		return true
+	}
+
+	var stateError interface{ SQLState() string }
+	if !errors.As(err, &stateError) {
+		return false
+	}
+	state := stateError.SQLState()
+	if len(state) != 5 {
+		return false
+	}
+	switch state {
+	case "08000", "08001", "08003", "08004", "08006", "08007", "08P01",
+		"40001", "40P01", "53300", "55P03", "57P01", "57P02", "57P03":
+		return true
+	default:
+		return false
+	}
 }
 
 func writeJSONError(w http.ResponseWriter, status int, msg string) {
+	code := "invalid_request"
+	retryable := false
+	switch status {
+	case http.StatusUnauthorized:
+		code = "auth_required"
+	case http.StatusUpgradeRequired:
+		code = "upgrade_required"
+	case http.StatusServiceUnavailable:
+		code = "temporary_unavailable"
+		retryable = true
+	case http.StatusInternalServerError:
+		code = "sync_integrity_failure"
+	}
+	writeProtocolError(w, status, code, msg, retryable)
+}
+
+func writeProtocolError(w http.ResponseWriter, status int, code, message string, retryable bool) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(map[string]string{"error": msg})
+	_ = json.NewEncoder(w).Encode(protocolErrorEnvelope{Error: protocolError{
+		Code:      code,
+		Message:   message,
+		Retryable: retryable,
+	}})
 }

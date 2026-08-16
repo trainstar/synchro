@@ -152,6 +152,51 @@ func TestValidateRejectsSemanticMutants(t *testing.T) {
 	}
 }
 
+func TestValidateTransportFailureWireCaseIsClosed(t *testing.T) {
+	bundle, err := contract.Load(context.Background(), "../../")
+	if err != nil {
+		t.Fatalf("load authored contract: %v", err)
+	}
+	base := authoredTimeScenario()
+	base.WireExpectations[0] = WireExpectation{
+		StepID:       "STEP-TIME-001",
+		AssertionID:  "ASSERT-TIME-PG-001",
+		ContractCase: "transport_failure",
+		HTTPStatus:   0,
+		ErrorCode:    nil,
+		Retryable:    true,
+	}
+	if err := Validate(base, bundle); err != nil {
+		t.Fatalf("validate transport failure wire case: %v", err)
+	}
+
+	tests := []struct {
+		name   string
+		mutate func(*WireExpectation)
+	}{
+		{"response status", func(wire *WireExpectation) { wire.HTTPStatus = 503 }},
+		{"error code", func(wire *WireExpectation) { wire.ErrorCode = stringPointer("temporary_unavailable") }},
+		{"not retryable", func(wire *WireExpectation) { wire.Retryable = false }},
+		{"zero status success", func(wire *WireExpectation) {
+			wire.ContractCase = "pull_success"
+			wire.Retryable = false
+		}},
+		{"response error without code", func(wire *WireExpectation) {
+			wire.ContractCase = "temporary_unavailable"
+			wire.HTTPStatus = 503
+		}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			mutant := cloneScenario(base)
+			test.mutate(&mutant.WireExpectations[0])
+			if err := requireErrorCategory(Validate(mutant, bundle), "canonical status, error code, and retryability"); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
 func TestValidatePerformanceClosureAndValidateAll(t *testing.T) {
 	bundle, err := contract.Load(context.Background(), "../../")
 	if err != nil {
@@ -386,16 +431,15 @@ func authoredTimeScenario() Scenario {
 		makeTargets: validationMakeTargets(),
 	}
 
-	assertionIDs := make([]contract.AssertionID, 0, 12)
+	assertionIDs := make([]contract.AssertionID, 0, 11)
 	addAssertion := func(id contract.AssertionID, kind, predicate, expectation string, detects []contract.ControlID) {
 		assertionIDs = append(assertionIDs, id)
 		s.Assertions = append(s.Assertions, Assertion{ID: id, RequirementIDs: []contract.RequirementID{requirementID}, Description: "assertion", ExpectationIDs: []ExpectationID{ExpectationID(expectation)}, Predicate: Predicate{ContractPredicate: predicate, Name: predicateName(predicate, kind)}, Oracle: Oracle{Kind: kind, ExpectedSource: "authored-model", ObservedSource: "system-under-test"}, DetectsControlIDs: detects})
 	}
-	addAssertion("ASSERT-TIME-PG-001", "wire-contract", "wire-outcome", "EXPECT-TIME-001", nil)
+	addAssertion("ASSERT-TIME-PG-001", "wire-contract", "wire-outcome", "EXPECT-TIME-001", []contract.ControlID{"CTRL-TIMESTAMP-001"})
 	for index := range clientCells {
 		addAssertion(contract.AssertionID("ASSERT-TIME-CLIENT-"+formatThree(index+1)), "model-state-equality", "state-equality", "EXPECT-TIME-001", nil)
 	}
-	addAssertion("ASSERT-TIME-NC-001", "negative-control-detection", "negative-control-detection", "EXPECT-TIME-001", []contract.ControlID{"CTRL-TIMESTAMP-001"})
 
 	addObligation := func(id contract.ObligationID, proof string, support *contract.SupportCellID, target string, artifacts []contract.ArtifactInventoryID, assertion contract.AssertionID, plan *contract.FaultPlanID, control *contract.ControlID) {
 		s.ProofObligations = append(s.ProofObligations, ProofObligation{ObligationID: id, RequirementIDs: []contract.RequirementID{requirementID}, AssertionIDs: []contract.AssertionID{assertion}, ProofType: proof, SupportCellID: support, ArtifactInventoryIDs: artifacts, PerformanceBudgetIDs: []contract.BudgetID{}, RequiredMeasurementIDs: []contract.MeasurementID{}, RequiredVectorSetIDs: []contract.VectorSetID{}, MakeTarget: target, Argv: []string{"make", target}, FaultPlanID: plan, ControlID: control})
@@ -418,9 +462,9 @@ func authoredTimeScenario() Scenario {
 	}
 	planID := contract.FaultPlanID("FPL-TIMESTAMP-001")
 	controlID := contract.ControlID("CTRL-TIMESTAMP-001")
-	addObligation("OBL-TIME-NC-001", "negative-control", nil, "test-conformance", []contract.ArtifactInventoryID{"ARTDEF-CONFORMANCE-RUNNER-001", "ARTDEF-ADAPTER-001"}, assertionIDs[len(assertionIDs)-1], &planID, &controlID)
-	s.FaultPlans = []FaultPlan{{ID: planID, RequirementID: requirementID, FaultID: "FAULT-TIME-001", ControlID: controlID, BarrierID: "BAR-TIME-001", ExpectedAssertionIDs: []contract.AssertionID{assertionIDs[len(assertionIDs)-1]}, Injection: InjectionRecipe{Mechanism: "wire-fault", Target: "push.client_version timestamp decoder", Operator: "replace", Parameters: InjectionParameters{Scenario: "portable datetime mutation with a timestamp offset and missing microseconds", Defect: "accept the non-UTC or noncanonical representation instead of rejecting before mutation state changes"}}}}
-	s.NegativeControls = []NegativeControl{{ControlID: controlID, RequirementID: requirementID, FaultID: "FAULT-TIME-001", SubjectArtifactInventoryIDs: []contract.ArtifactInventoryID{"ARTDEF-ADAPTER-001"}, DetectedBy: []contract.AssertionID{assertionIDs[len(assertionIDs)-1]}}}
+	addObligation("OBL-TIME-NC-001", "negative-control", nil, "test-conformance", []contract.ArtifactInventoryID{"ARTDEF-CONFORMANCE-RUNNER-001", "ARTDEF-ADAPTER-001"}, assertionIDs[0], &planID, &controlID)
+	s.FaultPlans = []FaultPlan{{ID: planID, RequirementID: requirementID, FaultID: "FAULT-TIME-001", ControlID: controlID, BarrierID: "BAR-TIME-001", ExpectedAssertionIDs: []contract.AssertionID{assertionIDs[0]}, Injection: InjectionRecipe{Mechanism: "wire-fault", Target: "push.client_version timestamp decoder", Operator: "replace", Parameters: InjectionParameters{Scenario: "portable datetime mutation with a timestamp offset and missing microseconds", Defect: "accept the non-UTC or noncanonical representation instead of rejecting before mutation state changes"}}}}
+	s.NegativeControls = []NegativeControl{{ControlID: controlID, RequirementID: requirementID, FaultID: "FAULT-TIME-001", SubjectArtifactInventoryIDs: []contract.ArtifactInventoryID{"ARTDEF-ADAPTER-001"}, DetectedBy: []contract.AssertionID{assertionIDs[0]}}}
 	s.WireExpectations = []WireExpectation{{StepID: "STEP-TIME-001", AssertionID: assertionIDs[0], ContractCase: "pull_success", HTTPStatus: 200, ErrorCode: nil, Retryable: false}}
 	return s
 }
@@ -439,9 +483,6 @@ const minimalInstallPayload = `{
 func predicateName(predicate, oracle string) string {
 	if oracle == "wire-contract" {
 		return "canonical-wire-outcome"
-	}
-	if oracle == "negative-control-detection" {
-		return "negative-control-detected"
 	}
 	return "state-equals-authored-model"
 }
@@ -497,8 +538,8 @@ func authoredTimeScenarioWithFaultInjection() Scenario {
 	scenario.ProofTypes = append(scenario.ProofTypes, "fault-injection")
 	plan := scenario.FaultPlans[0]
 	supportID := contract.SupportCellID("SUP-PG-018")
-	obligation := ProofObligation{ObligationID: "OBL-TIME-FI-001", RequirementIDs: []contract.RequirementID{"SYNC-TIME-001"}, AssertionIDs: []contract.AssertionID{"ASSERT-TIME-NC-001"}, ProofType: "fault-injection", SupportCellID: &supportID, ArtifactInventoryIDs: []contract.ArtifactInventoryID{"ARTDEF-PG-EXTENSION-001", "ARTDEF-ADAPTER-001"}, PerformanceBudgetIDs: []contract.BudgetID{}, RequiredMeasurementIDs: []contract.MeasurementID{}, RequiredVectorSetIDs: []contract.VectorSetID{}, MakeTarget: "test-blackbox", Argv: []string{"make", "test-blackbox"}, FaultPlanID: &plan.ID, ControlID: &plan.ControlID}
+	obligation := ProofObligation{ObligationID: "OBL-TIME-FI-001", RequirementIDs: []contract.RequirementID{"SYNC-TIME-001"}, AssertionIDs: []contract.AssertionID{"ASSERT-TIME-PG-001"}, ProofType: "fault-injection", SupportCellID: &supportID, ArtifactInventoryIDs: []contract.ArtifactInventoryID{"ARTDEF-PG-EXTENSION-001", "ARTDEF-ADAPTER-001"}, PerformanceBudgetIDs: []contract.BudgetID{}, RequiredMeasurementIDs: []contract.MeasurementID{}, RequiredVectorSetIDs: []contract.VectorSetID{}, MakeTarget: "test-blackbox", Argv: []string{"make", "test-blackbox"}, FaultPlanID: &plan.ID, ControlID: &plan.ControlID}
 	scenario.ProofObligations = append(scenario.ProofObligations, obligation)
-	scenario.Ownership = append(scenario.Ownership, Ownership{ScenarioID: scenario.ID, RequirementID: "SYNC-TIME-001", ProofObligationID: obligation.ObligationID, AssertionID: "ASSERT-TIME-NC-001", ProofType: obligation.ProofType, SupportCellID: obligation.SupportCellID})
+	scenario.Ownership = append(scenario.Ownership, Ownership{ScenarioID: scenario.ID, RequirementID: "SYNC-TIME-001", ProofObligationID: obligation.ObligationID, AssertionID: "ASSERT-TIME-PG-001", ProofType: obligation.ProofType, SupportCellID: obligation.SupportCellID})
 	return scenario
 }

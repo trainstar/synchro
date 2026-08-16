@@ -317,7 +317,7 @@
         "SYNC-SCHEMA-002"
       ],
       "assertion_ids": [
-        "ASSERT-SCHEMA-QUEUED-MUTATION-CONTROL-001"
+        "ASSERT-SCHEMA-QUEUED-MUTATION-SEMANTIC-001"
       ],
       "proof_type": "fault-injection",
       "support_cell_id": "SUP-IOS-MIN-001",
@@ -343,7 +343,7 @@
         "SYNC-SCHEMA-002"
       ],
       "assertion_ids": [
-        "ASSERT-SCHEMA-QUEUED-MUTATION-CONTROL-001"
+        "ASSERT-SCHEMA-QUEUED-MUTATION-SEMANTIC-001"
       ],
       "proof_type": "negative-control",
       "support_cell_id": null,
@@ -459,7 +459,7 @@
       "scenario_id": "SCN-SCHEMA-QUEUED-MUTATION-001",
       "requirement_id": "SYNC-SCHEMA-002",
       "proof_obligation_id": "OBL-SCHEMA-QUEUED-MUTATION-FAULT-001",
-      "assertion_id": "ASSERT-SCHEMA-QUEUED-MUTATION-CONTROL-001",
+      "assertion_id": "ASSERT-SCHEMA-QUEUED-MUTATION-SEMANTIC-001",
       "proof_type": "fault-injection",
       "support_cell_id": "SUP-IOS-MIN-001"
     },
@@ -467,7 +467,7 @@
       "scenario_id": "SCN-SCHEMA-QUEUED-MUTATION-001",
       "requirement_id": "SYNC-SCHEMA-002",
       "proof_obligation_id": "OBL-SCHEMA-QUEUED-MUTATION-CONTROL-001",
-      "assertion_id": "ASSERT-SCHEMA-QUEUED-MUTATION-CONTROL-001",
+      "assertion_id": "ASSERT-SCHEMA-QUEUED-MUTATION-SEMANTIC-001",
       "proof_type": "negative-control",
       "support_cell_id": null
     }
@@ -721,14 +721,6 @@
             }
           ]
         }
-      },
-      {
-        "id": "EXPECT-SCHEMA-QUEUED-MUTATION-CONTROL-001",
-        "predicate": {
-          "contract_predicate": "negative-control-detection",
-          "name": "negative-control-detected",
-          "payload": {}
-        }
       }
     ]
   },
@@ -753,7 +745,7 @@
       "control_id": "CTRL-SCHEMA-002",
       "barrier_id": "BAR-SCHEMA-QUEUED-MUTATION-CONTROL-001",
       "expected_assertion_ids": [
-        "ASSERT-SCHEMA-QUEUED-MUTATION-CONTROL-001"
+        "ASSERT-SCHEMA-QUEUED-MUTATION-SEMANTIC-001"
       ],
       "injection": {
         "mechanism": "state-fault",
@@ -783,7 +775,7 @@
         "ARTDEF-RN-NPM-001"
       ],
       "detected_by": [
-        "ASSERT-SCHEMA-QUEUED-MUTATION-CONTROL-001"
+        "ASSERT-SCHEMA-QUEUED-MUTATION-SEMANTIC-001"
       ]
     }
   ],
@@ -1184,27 +1176,6 @@
       },
       "oracle": {
         "kind": "wire-contract",
-        "expected_source": "authored-model",
-        "observed_source": "system-under-test"
-      },
-      "detects_control_ids": []
-    },
-    {
-      "id": "ASSERT-SCHEMA-QUEUED-MUTATION-CONTROL-001",
-      "requirement_ids": [
-        "SYNC-SCHEMA-002"
-      ],
-      "description": "The catalog control detects any loss, rewrite, or automatic retry of the complete blocked S1 intent.",
-      "expectation_ids": [
-        "EXPECT-SCHEMA-QUEUED-MUTATION-CONTROL-001"
-      ],
-      "predicate": {
-        "contract_predicate": "negative-control-detection",
-        "name": "negative-control-detected",
-        "payload": {}
-      },
-      "oracle": {
-        "kind": "negative-control-detection",
         "expected_source": "authored-model",
         "observed_source": "system-under-test"
       },

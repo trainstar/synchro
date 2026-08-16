@@ -139,6 +139,9 @@ func (b *Builder) Build(ctx context.Context, receipt execution.Receipt) (Evidenc
 	if err != nil {
 		return Evidence{}, fmt.Errorf("%w: receipt fields: %v", ErrInvalidEvidence, err)
 	}
+	if fields.EvidenceClass != execution.EvidenceClassCandidate {
+		return Evidence{}, fmt.Errorf("%w: receipt evidence class", ErrInvalidEvidence)
+	}
 	if fields.RunnerDigest != b.candidate.RunnerDigest || fields.CandidateLockSHA256 != b.candidate.LockSHA256 || fields.RunnerArtifactSHA256 != b.issuer.RunnerArtifactSHA256() || fields.RunnerExecutableSHA256 != b.issuer.RunnerExecutableSHA256() {
 		return Evidence{}, fmt.Errorf("%w: receipt runner is foreign", ErrInvalidEvidence)
 	}
@@ -179,6 +182,9 @@ func (b *Builder) validateReceipt(ctx context.Context, fields execution.ReceiptF
 func validateReceiptSemantics(ctx context.Context, repoRoot string, candidate Candidate, fields execution.ReceiptFields) error {
 	if err := verifyCandidateRoot(candidate); err != nil {
 		return fmt.Errorf("%w: candidate root changed: %v", ErrInvalidEvidence, err)
+	}
+	if fields.EvidenceClass != execution.EvidenceClassCandidate {
+		return fmt.Errorf("%w: receipt evidence class", ErrInvalidEvidence)
 	}
 	if err := validateReceiptAuthority(candidate, fields); err != nil {
 		return err
@@ -522,6 +528,7 @@ func (b *Builder) projectEvidence(receipt execution.Receipt, fields execution.Re
 		SchemaVersion:              2,
 		EvidenceID:                 evidenceID(fields),
 		ReceiptID:                  fields.ReceiptID,
+		EvidenceClass:              fields.EvidenceClass,
 		CandidateID:                b.candidate.ID,
 		ReleaseVersion:             b.candidate.ReleaseVersion,
 		ProtocolVersion:            b.candidate.ProtocolVersion,
@@ -1330,7 +1337,7 @@ func cloneBuilderConfig(cfg BuilderConfig) BuilderConfig {
 }
 
 func validateEvidenceShape(evidence Evidence) error {
-	if evidence.ReceiptID == "" || evidence.RunnerDigest == "" || evidence.Receipt.Fields.RunnerArtifactSHA256 == "" || evidence.Receipt.Fields.RunnerExecutableSHA256 == "" || evidence.Receipt.Fields.GeneratorName == "" || evidence.Receipt.Fields.GeneratorVersion == "" || evidence.Receipt.Fields.GeneratorBinarySHA256 == "" || len(evidence.ArtifactBindings) == 0 || len(evidence.AttachmentIDs) == 0 {
+	if evidence.EvidenceClass != execution.EvidenceClassCandidate || evidence.ReceiptID == "" || evidence.RunnerDigest == "" || evidence.Receipt.Fields.RunnerArtifactSHA256 == "" || evidence.Receipt.Fields.RunnerExecutableSHA256 == "" || evidence.Receipt.Fields.GeneratorName == "" || evidence.Receipt.Fields.GeneratorVersion == "" || evidence.Receipt.Fields.GeneratorBinarySHA256 == "" || len(evidence.ArtifactBindings) == 0 || len(evidence.AttachmentIDs) == 0 {
 		return fmt.Errorf("%w: evidence projection", ErrInvalidEvidence)
 	}
 	return nil

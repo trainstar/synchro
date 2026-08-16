@@ -424,6 +424,7 @@ func (r *Runner) completeReceipt(ctx context.Context, issuer execution.ReceiptIs
 		argv = append([]string(nil), commandResult.Argv...)
 	}
 	fields := execution.ReceiptFields{
+		EvidenceClass:         execution.EvidenceClassHarnessOnly,
 		ScenarioID:            string(scenario.ID),
 		ProofObligationID:     string(obligation.ObligationID),
 		MakeTarget:            makeTarget,

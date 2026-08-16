@@ -292,7 +292,7 @@ func TestBuilderRejectsInvalidReceipts(t *testing.T) {
 	})
 }
 
-func TestSyntheticRunnerBuildsAndValidatesEvidence(t *testing.T) {
+func TestSyntheticRunnerIssuesAuthenticatedHarnessOnlyReceipt(t *testing.T) {
 	fixture := newBuilderFixtureFor(t, true, "SCN-MEMBERSHIP-REASSIGNMENT-001", "OBL-MEMBERSHIP-REASSIGNMENT-PG-001")
 	receipt, runResult, err, system := runSyntheticEvidence(t, fixture, blackbox.SyntheticCompliant)
 	if err != nil {
@@ -304,13 +304,44 @@ func TestSyntheticRunnerBuildsAndValidatesEvidence(t *testing.T) {
 	if !runResult.Passed || system.RequestCount() == 0 {
 		t.Fatal("synthetic runner did not complete the authenticated evidence execution")
 	}
-	projected, err := fixture.builder.Build(context.Background(), receipt)
+	fields, err := receipt.Fields()
 	if err != nil {
-		t.Fatalf("build synthetic evidence: %v", err)
+		t.Fatalf("read synthetic receipt fields: %v", err)
 	}
-	path := fixture.writeEvidence(t, projected, "evidence/synthetic-compliant.json")
-	if err := ValidateEvidence(context.Background(), fixture.repoRoot, fixture.root, path); err != nil {
-		t.Fatalf("validate synthetic evidence: %v", err)
+	if fields.EvidenceClass != execution.EvidenceClassHarnessOnly {
+		t.Fatalf("synthetic receipt evidence class = %q, want %q", fields.EvidenceClass, execution.EvidenceClassHarnessOnly)
+	}
+	serialized, err := receipt.AuthenticatedBytes()
+	if err != nil {
+		t.Fatalf("serialize synthetic receipt: %v", err)
+	}
+	parsed, err := execution.ParseReceipt(serialized)
+	if err != nil {
+		t.Fatalf("parse synthetic receipt: %v", err)
+	}
+	parsedFields, err := parsed.Fields()
+	if err != nil {
+		t.Fatalf("read parsed synthetic receipt fields: %v", err)
+	}
+	if parsedFields.EvidenceClass != execution.EvidenceClassHarnessOnly {
+		t.Fatalf("parsed synthetic receipt evidence class = %q, want %q", parsedFields.EvidenceClass, execution.EvidenceClassHarnessOnly)
+	}
+	var document map[string]any
+	decodeJSON(t, serialized, &document)
+	document["evidence_class"] = string(execution.EvidenceClassCandidate)
+	if _, err := execution.ParseReceipt(marshalJSON(t, document)); err == nil {
+		t.Fatal("synthetic receipt accepted a changed evidence class")
+	}
+	if _, err := fixture.builder.Build(context.Background(), receipt); !errors.Is(err, ErrInvalidEvidence) {
+		t.Fatalf("Build() error = %v, want %v", err, ErrInvalidEvidence)
+	}
+	projected, err := fixture.builder.projectEvidence(receipt, fields)
+	if err != nil {
+		t.Fatalf("project harness receipt: %v", err)
+	}
+	path := fixture.writeEvidence(t, projected, "evidence/synthetic-harness-only.json")
+	if err := ValidateEvidence(context.Background(), fixture.repoRoot, fixture.root, path); !errors.Is(err, ErrInvalidEvidence) {
+		t.Fatalf("ValidateEvidence() error = %v, want %v", err, ErrInvalidEvidence)
 	}
 }
 
@@ -411,13 +442,11 @@ func TestSyntheticFailureProducesAuthenticatedTerminalReceipt(t *testing.T) {
 	if fields.ExitCode == 0 || fields.Result != execution.ResultFailed || fields.Command.ExitCode != 0 {
 		t.Fatalf("failed receipt result = (%d, %q, command %d)", fields.ExitCode, fields.Result, fields.Command.ExitCode)
 	}
-	evidence, err := fixture.builder.Build(context.Background(), receipt)
-	if err != nil {
-		t.Fatalf("build failed terminal evidence: %v", err)
+	if fields.EvidenceClass != execution.EvidenceClassHarnessOnly {
+		t.Fatalf("failed synthetic receipt evidence class = %q, want %q", fields.EvidenceClass, execution.EvidenceClassHarnessOnly)
 	}
-	path := fixture.writeEvidence(t, evidence, "evidence/synthetic-failed.json")
-	if err := ValidateEvidence(context.Background(), fixture.repoRoot, fixture.root, path); err != nil {
-		t.Fatalf("validate failed terminal evidence: %v", err)
+	if _, err := fixture.builder.Build(context.Background(), receipt); !errors.Is(err, ErrInvalidEvidence) {
+		t.Fatalf("Build() error = %v, want %v", err, ErrInvalidEvidence)
 	}
 }
 
@@ -949,6 +978,7 @@ func TestValidateTerminalLineageRejectsChangedRerunBindings(t *testing.T) {
 		name   string
 		mutate func(*Evidence)
 	}{
+		{name: "evidence class", mutate: func(item *Evidence) { item.EvidenceClass = execution.EvidenceClassHarnessOnly }},
 		{name: "runner", mutate: func(item *Evidence) { item.RunnerDigest = strings.Repeat("c", 64) }},
 		{name: "runner artifact", mutate: func(item *Evidence) { item.Receipt.Fields.RunnerArtifactSHA256 = strings.Repeat("d", 64) }},
 		{name: "runner executable", mutate: func(item *Evidence) { item.Receipt.Fields.RunnerExecutableSHA256 = strings.Repeat("e", 64) }},
@@ -992,6 +1022,7 @@ func TestValidateTerminalLineageRejectsFailedPredecessorProof(t *testing.T) {
 func rerunEvidencePair() (Evidence, Evidence) {
 	predecessor := Evidence{
 		EvidenceID:                 "EVD-INFRASTRUCTURE-001",
+		EvidenceClass:              execution.EvidenceClassCandidate,
 		CandidateID:                "candidate",
 		ReleaseVersion:             "0.3.0",
 		ProtocolVersion:            3,
@@ -1022,7 +1053,7 @@ func rerunEvidencePair() (Evidence, Evidence) {
 			Result:             execution.ResultError,
 			ExitCode:           1,
 		},
-		Receipt: ReceiptProjection{Fields: execution.ReceiptFields{RunnerArtifactSHA256: strings.Repeat("2", 64)}},
+		Receipt: ReceiptProjection{Fields: execution.ReceiptFields{EvidenceClass: execution.EvidenceClassCandidate, RunnerArtifactSHA256: strings.Repeat("2", 64)}},
 	}
 	previous := predecessor.EvidenceID
 	successor := predecessor
@@ -1371,6 +1402,7 @@ func (fixture *candidateFixture) validFields(t *testing.T, builder *Builder, sce
 	t.Helper()
 	attachments := fixture.makeRunAttachments(t)
 	fields := execution.ReceiptFields{
+		EvidenceClass:      execution.EvidenceClassCandidate,
 		ScenarioID:         string(scenario.ID),
 		ProofObligationID:  string(obligation.ObligationID),
 		MakeTarget:         obligation.MakeTarget,

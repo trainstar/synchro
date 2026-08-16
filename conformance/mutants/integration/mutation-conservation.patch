@@ -1,0 +1,15 @@
+diff --git a/extensions/synchro-pg/src/push.rs b/extensions/synchro-pg/src/push.rs
+--- a/extensions/synchro-pg/src/push.rs
++++ b/extensions/synchro-pg/src/push.rs
+@@ -1800,7 +1800,10 @@ fn build_push_response(
+ ) -> PushResponse {
+     let mut accepted = Vec::new();
+     let mut rejected = Vec::new();
+-    for evaluation in evaluated {
++    for evaluation in evaluated
++        .iter()
++        .take(evaluated.len().saturating_sub(1))
++    {
+         if evaluation.accepted {
+             accepted.push(
+                 serde_json::from_value::<AcceptedMutation>(evaluation.outcome.clone())

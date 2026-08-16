@@ -63,6 +63,78 @@ func TestVerifyAdapterArtifactRejectsTampering(t *testing.T) {
 	}
 }
 
+func TestLoadEnvironmentRequiresFiveDistinctRoleCredentials(t *testing.T) {
+	root := t.TempDir()
+	passwordFiles := make(map[string]string)
+	for _, role := range []string{"admin", "adapter", "observer", "worker", "operator"} {
+		path := filepath.Join(root, role+"-password")
+		if err := os.WriteFile(path, []byte(role+"-secret"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		passwordFiles[role] = path
+	}
+	jwtPath := filepath.Join(root, "jwt-secret")
+	if err := os.WriteFile(jwtPath, []byte("jwt-secret"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	adapterPath := filepath.Join(root, "synchrod-pg")
+	adapterData := []byte("adapter")
+	if err := os.WriteFile(adapterPath, adapterData, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	adapterDigest := sha256.Sum256(adapterData)
+	if err := os.WriteFile(adapterPath+".sha256", []byte(hex.EncodeToString(adapterDigest[:])), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	values := map[string]string{
+		"SYNCHRO_CONFORMANCE_PG18_BINDIR":            writePostgresVersionFixtures(t, nil),
+		"SYNCHRO_CONFORMANCE_EXTENSION_ARTIFACT":     writeExtensionBundleFixture(t),
+		"SYNCHRO_CONFORMANCE_ADAPTER_ARTIFACT":       adapterPath,
+		"SYNCHRO_CONFORMANCE_ADMIN_USER":             "cf_admin",
+		"SYNCHRO_CONFORMANCE_ADMIN_PASSWORD_FILE":    passwordFiles["admin"],
+		"SYNCHRO_CONFORMANCE_ADAPTER_USER":           "cf_adapter",
+		"SYNCHRO_CONFORMANCE_ADAPTER_PASSWORD_FILE":  passwordFiles["adapter"],
+		"SYNCHRO_CONFORMANCE_OBSERVER_USER":          "cf_observer",
+		"SYNCHRO_CONFORMANCE_OBSERVER_PASSWORD_FILE": passwordFiles["observer"],
+		"SYNCHRO_CONFORMANCE_WORKER_USER":            "cf_worker",
+		"SYNCHRO_CONFORMANCE_WORKER_PASSWORD_FILE":   passwordFiles["worker"],
+		"SYNCHRO_CONFORMANCE_OPERATOR_USER":          "cf_operator",
+		"SYNCHRO_CONFORMANCE_OPERATOR_PASSWORD_FILE": passwordFiles["operator"],
+		"SYNCHRO_CONFORMANCE_JWT_SECRET_FILE":        jwtPath,
+		"SYNCHRO_CONFORMANCE_INSTALL_LOCK":           filepath.Join(root, "install.lock"),
+	}
+	lookup := func(key string) (string, bool) {
+		value, ok := values[key]
+		return value, ok
+	}
+	config, err := loadEnvironment(lookup)
+	if err != nil {
+		t.Fatalf("valid five-role environment rejected: %v", err)
+	}
+	if config.Operator.Username != "cf_operator" {
+		t.Fatalf("operator username = %q", config.Operator.Username)
+	}
+
+	values["SYNCHRO_CONFORMANCE_OPERATOR_USER"] = values["SYNCHRO_CONFORMANCE_ADMIN_USER"]
+	if _, err := loadEnvironment(lookup); err == nil || !strings.Contains(err.Error(), "roles must be distinct") {
+		t.Fatalf("duplicate role username was accepted: %v", err)
+	}
+}
+
+func TestLoadEnvironmentRequiresOperatorCredentialVariables(t *testing.T) {
+	lookup := func(key string) (string, bool) {
+		if key == "SYNCHRO_CONFORMANCE_OPERATOR_USER" || key == "SYNCHRO_CONFORMANCE_OPERATOR_PASSWORD_FILE" {
+			return "", false
+		}
+		return "fixture", true
+	}
+	_, err := loadEnvironment(lookup)
+	if err == nil || !strings.Contains(err.Error(), "SYNCHRO_CONFORMANCE_OPERATOR_USER") ||
+		!strings.Contains(err.Error(), "SYNCHRO_CONFORMANCE_OPERATOR_PASSWORD_FILE") {
+		t.Fatalf("missing operator credential variables were not reported: %v", err)
+	}
+}
+
 func TestVerifyExtensionBundleRejectsTamperingAndWrongDestinations(t *testing.T) {
 	t.Run("valid", func(t *testing.T) {
 		if _, err := verifyExtensionBundle(writeExtensionBundleFixture(t)); err != nil {

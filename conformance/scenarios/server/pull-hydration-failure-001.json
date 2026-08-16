@@ -75,7 +75,7 @@
         "SYNC-PULL-003"
       ],
       "assertion_ids": [
-        "ASSERT-PULL-HYDRATION-CONTROL-001"
+        "ASSERT-PULL-HYDRATION-SEMANTIC-001"
       ],
       "proof_type": "fault-injection",
       "support_cell_id": "SUP-PG-018",
@@ -100,7 +100,7 @@
         "SYNC-PULL-003"
       ],
       "assertion_ids": [
-        "ASSERT-PULL-HYDRATION-CONTROL-001"
+        "ASSERT-PULL-HYDRATION-SEMANTIC-001"
       ],
       "proof_type": "negative-control",
       "support_cell_id": null,
@@ -141,7 +141,7 @@
       "scenario_id": "SCN-PULL-HYDRATION-FAILURE-001",
       "requirement_id": "SYNC-PULL-003",
       "proof_obligation_id": "OBL-PULL-HYDRATION-FAULT-001",
-      "assertion_id": "ASSERT-PULL-HYDRATION-CONTROL-001",
+      "assertion_id": "ASSERT-PULL-HYDRATION-SEMANTIC-001",
       "proof_type": "fault-injection",
       "support_cell_id": "SUP-PG-018"
     },
@@ -149,7 +149,7 @@
       "scenario_id": "SCN-PULL-HYDRATION-FAILURE-001",
       "requirement_id": "SYNC-PULL-003",
       "proof_obligation_id": "OBL-PULL-HYDRATION-CONTROL-001",
-      "assertion_id": "ASSERT-PULL-HYDRATION-CONTROL-001",
+      "assertion_id": "ASSERT-PULL-HYDRATION-SEMANTIC-001",
       "proof_type": "negative-control",
       "support_cell_id": null
     }
@@ -354,14 +354,6 @@
           "name": "state-unchanged",
           "payload": {}
         }
-      },
-      {
-        "id": "EXPECT-PULL-HYDRATION-CONTROL-001",
-        "predicate": {
-          "contract_predicate": "negative-control-detection",
-          "name": "negative-control-detected",
-          "payload": {}
-        }
       }
     ]
   },
@@ -386,7 +378,7 @@
       "control_id": "CTRL-PULL-003",
       "barrier_id": "BAR-PULL-HYDRATION-CONTROL-001",
       "expected_assertion_ids": [
-        "ASSERT-PULL-HYDRATION-CONTROL-001"
+        "ASSERT-PULL-HYDRATION-SEMANTIC-001"
       ],
       "injection": {
         "mechanism": "wire-fault",
@@ -413,7 +405,7 @@
         "ARTDEF-PG-EXTENSION-001"
       ],
       "detected_by": [
-        "ASSERT-PULL-HYDRATION-CONTROL-001"
+        "ASSERT-PULL-HYDRATION-SEMANTIC-001"
       ]
     }
   ],
@@ -647,27 +639,6 @@
       },
       "oracle": {
         "kind": "wire-contract",
-        "expected_source": "authored-model",
-        "observed_source": "system-under-test"
-      },
-      "detects_control_ids": []
-    },
-    {
-      "id": "ASSERT-PULL-HYDRATION-CONTROL-001",
-      "requirement_ids": [
-        "SYNC-PULL-003"
-      ],
-      "description": "The control detects projection omission, live-row hydration, candidate omission, and partial-page progress.",
-      "expectation_ids": [
-        "EXPECT-PULL-HYDRATION-CONTROL-001"
-      ],
-      "predicate": {
-        "contract_predicate": "negative-control-detection",
-        "name": "negative-control-detected",
-        "payload": {}
-      },
-      "oracle": {
-        "kind": "negative-control-detection",
         "expected_source": "authored-model",
         "observed_source": "system-under-test"
       },

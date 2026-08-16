@@ -1,0 +1,8 @@
+diff --git a/extensions/synchro-pg/src/pull.rs b/extensions/synchro-pg/src/pull.rs
+--- a/extensions/synchro-pg/src/pull.rs
++++ b/extensions/synchro-pg/src/pull.rs
+@@ -810,3 +810,3 @@ fn query_scope_candidates(
+                   AND p.image_kind = c.projection_image
+-                 WHERE c.bucket_id = $1
++                 WHERE (c.bucket_id = $1 OR true)
+                    AND c.stream_generation = $2

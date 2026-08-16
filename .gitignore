@@ -57,6 +57,7 @@ docs/.astro/
 
 # Rust build artifacts
 extensions/target/
+extensions/mutants.out.old/
 .pgrx-target/
 
 # Local-only

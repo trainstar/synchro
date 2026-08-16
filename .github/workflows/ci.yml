@@ -287,8 +287,17 @@ jobs:
       - name: Run PostgreSQL extension lint checks
         run: make lint-rust-pg
 
+      - name: Install exact Rust mutation runner
+        run: cargo install --locked cargo-mutants --version 27.1.0
+
+      - name: Run targeted Rust mutation tests
+        run: make test-rust-mutants
+
       - name: Run PostgreSQL extension tests
         run: make test-rust-pg
+
+      - name: Verify generated PostgreSQL SQL
+        run: make check-pg-sql
 
       - name: Run adapter integration tests
         run: make test-adapter
@@ -377,8 +386,10 @@ jobs:
           mkdir "$SECRETS_DIR"
           openssl rand -hex 32 > "$SECRETS_DIR/admin-password"
           openssl rand -hex 32 > "$SECRETS_DIR/adapter-password"
-          openssl rand -hex 32 > "$SECRETS_DIR/observer-password"
-          openssl rand -hex 32 > "$SECRETS_DIR/jwt-secret"
+           openssl rand -hex 32 > "$SECRETS_DIR/observer-password"
+           openssl rand -hex 32 > "$SECRETS_DIR/worker-password"
+           openssl rand -hex 32 > "$SECRETS_DIR/operator-password"
+           openssl rand -hex 32 > "$SECRETS_DIR/jwt-secret"
           chmod 0600 "$SECRETS_DIR"/*
           PG_CONFIG="$(awk -F'\"' '/^pg18[[:space:]]*=/ { print $2 }' "$HOME/.pgrx/config.toml")"
           test -x "$PG_CONFIG"
@@ -392,7 +403,11 @@ jobs:
             echo "SYNCHRO_CONFORMANCE_ADAPTER_PASSWORD_FILE=$SECRETS_DIR/adapter-password"
             echo "SYNCHRO_CONFORMANCE_OBSERVER_USER=synchro_cf_observer"
             echo "SYNCHRO_CONFORMANCE_OBSERVER_PASSWORD_FILE=$SECRETS_DIR/observer-password"
-            echo "SYNCHRO_CONFORMANCE_JWT_SECRET_FILE=$SECRETS_DIR/jwt-secret"
+             echo "SYNCHRO_CONFORMANCE_WORKER_USER=synchro_cf_worker"
+             echo "SYNCHRO_CONFORMANCE_WORKER_PASSWORD_FILE=$SECRETS_DIR/worker-password"
+             echo "SYNCHRO_CONFORMANCE_OPERATOR_USER=synchro_cf_operator"
+             echo "SYNCHRO_CONFORMANCE_OPERATOR_PASSWORD_FILE=$SECRETS_DIR/operator-password"
+             echo "SYNCHRO_CONFORMANCE_JWT_SECRET_FILE=$SECRETS_DIR/jwt-secret"
             echo "SYNCHRO_CONFORMANCE_INSTALL_LOCK=$RUNNER_TEMP/synchro-conformance-install.lock"
           } >> "$GITHUB_ENV"
 
@@ -400,6 +415,9 @@ jobs:
         env:
           GOWORK: 'off'
         run: make test-blackbox
+
+      - name: Run curated integration mutation gate
+        run: make test-integration-mutants
 
   swift-sdk:
     needs: metadata

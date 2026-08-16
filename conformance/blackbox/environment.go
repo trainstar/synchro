@@ -48,6 +48,10 @@ var RequiredEnvironmentVariables = []string{
 	"SYNCHRO_CONFORMANCE_ADAPTER_PASSWORD_FILE",
 	"SYNCHRO_CONFORMANCE_OBSERVER_USER",
 	"SYNCHRO_CONFORMANCE_OBSERVER_PASSWORD_FILE",
+	"SYNCHRO_CONFORMANCE_WORKER_USER",
+	"SYNCHRO_CONFORMANCE_WORKER_PASSWORD_FILE",
+	"SYNCHRO_CONFORMANCE_OPERATOR_USER",
+	"SYNCHRO_CONFORMANCE_OPERATOR_PASSWORD_FILE",
 	"SYNCHRO_CONFORMANCE_JWT_SECRET_FILE",
 	"SYNCHRO_CONFORMANCE_INSTALL_LOCK",
 }
@@ -71,24 +75,37 @@ type EnvironmentConfig struct {
 	Admin             RoleCredential
 	Adapter           RoleCredential
 	Observer          RoleCredential
+	Worker            RoleCredential
+	Operator          RoleCredential
 	JWTSecretFile     string
 	InstallationLock  string
 
 	jwtSecret       []byte
 	jwtDigest       string
 	adapterSHA256   string
+	adapterIdentity adapterArtifactIdentity
 	postgresVersion string
 	extension       extensionBundle
 	verified        bool
 }
 
+type adapterArtifactIdentity struct {
+	path           string
+	digestPath     string
+	sha256         string
+	digestSHA256   string
+	executableInfo os.FileInfo
+	digestInfo     os.FileInfo
+}
+
 type extensionBundle struct {
-	root               string
-	rootInfo           os.FileInfo
-	manifestInfo       os.FileInfo
-	manifestDigestInfo os.FileInfo
-	manifestSHA256     string
-	files              []extensionBundleFile
+	root                 string
+	rootInfo             os.FileInfo
+	manifestInfo         os.FileInfo
+	manifestDigestInfo   os.FileInfo
+	manifestSHA256       string
+	manifestDigestSHA256 string
+	files                []extensionBundleFile
 }
 
 type extensionBundleManifest struct {
@@ -137,7 +154,7 @@ func loadEnvironment(lookup func(string) (string, bool)) (EnvironmentConfig, err
 	if err != nil {
 		return EnvironmentConfig{}, err
 	}
-	adapterPath, adapterDigest, err := verifyAdapterArtifact(values["SYNCHRO_CONFORMANCE_ADAPTER_ARTIFACT"])
+	adapterIdentity, err := loadAdapterArtifactIdentity(values["SYNCHRO_CONFORMANCE_ADAPTER_ARTIFACT"])
 	if err != nil {
 		return EnvironmentConfig{}, err
 	}
@@ -165,7 +182,30 @@ func loadEnvironment(lookup func(string) (string, bool)) (EnvironmentConfig, err
 	if err != nil {
 		return EnvironmentConfig{}, err
 	}
-	if admin.Username == adapter.Username || admin.Username == observer.Username || adapter.Username == observer.Username {
+	worker, err := loadRoleCredential(
+		values["SYNCHRO_CONFORMANCE_WORKER_USER"],
+		values["SYNCHRO_CONFORMANCE_WORKER_PASSWORD_FILE"],
+		"SYNCHRO_CONFORMANCE_WORKER",
+	)
+	if err != nil {
+		return EnvironmentConfig{}, err
+	}
+	operator, err := loadRoleCredential(
+		values["SYNCHRO_CONFORMANCE_OPERATOR_USER"],
+		values["SYNCHRO_CONFORMANCE_OPERATOR_PASSWORD_FILE"],
+		"SYNCHRO_CONFORMANCE_OPERATOR",
+	)
+	if err != nil {
+		return EnvironmentConfig{}, err
+	}
+	roleNames := map[string]struct{}{
+		admin.Username:    {},
+		adapter.Username:  {},
+		observer.Username: {},
+		worker.Username:   {},
+		operator.Username: {},
+	}
+	if len(roleNames) != 5 {
 		return EnvironmentConfig{}, errors.New("conformance roles must be distinct")
 	}
 	jwtSecret, jwtPath, jwtDigest, err := loadSecretFile(values["SYNCHRO_CONFORMANCE_JWT_SECRET_FILE"], "SYNCHRO_CONFORMANCE_JWT_SECRET_FILE")
@@ -180,15 +220,18 @@ func loadEnvironment(lookup func(string) (string, bool)) (EnvironmentConfig, err
 	return EnvironmentConfig{
 		PG18BinDir:        pgBinDir,
 		ExtensionArtifact: extension.root,
-		AdapterArtifact:   adapterPath,
+		AdapterArtifact:   adapterIdentity.path,
 		Admin:             admin,
 		Adapter:           adapter,
 		Observer:          observer,
+		Worker:            worker,
+		Operator:          operator,
 		JWTSecretFile:     jwtPath,
 		InstallationLock:  installationLock,
 		jwtSecret:         jwtSecret,
 		jwtDigest:         jwtDigest,
-		adapterSHA256:     adapterDigest,
+		adapterSHA256:     adapterIdentity.sha256,
+		adapterIdentity:   adapterIdentity,
 		postgresVersion:   version,
 		extension:         extension,
 		verified:          true,
@@ -301,26 +344,58 @@ func postgresBinaryVersion(path string) (string, error) {
 }
 
 func verifyAdapterArtifact(path string) (string, string, error) {
-	absolute, err := filepath.Abs(path)
-	if err != nil {
-		return "", "", errors.New("SYNCHRO_CONFORMANCE_ADAPTER_ARTIFACT path is invalid")
-	}
-	info, err := os.Lstat(absolute)
-	if err != nil || info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() || info.Mode().Perm()&0o111 == 0 {
-		return "", "", errors.New("SYNCHRO_CONFORMANCE_ADAPTER_ARTIFACT must be an executable regular file")
-	}
-	expected, err := readAdapterDigest(absolute + ".sha256")
+	identity, err := loadAdapterArtifactIdentity(path)
 	if err != nil {
 		return "", "", err
 	}
+	return identity.path, identity.sha256, nil
+}
+
+func loadAdapterArtifactIdentity(path string) (adapterArtifactIdentity, error) {
+	absolute, err := filepath.Abs(path)
+	if err != nil {
+		return adapterArtifactIdentity{}, errors.New("SYNCHRO_CONFORMANCE_ADAPTER_ARTIFACT path is invalid")
+	}
+	info, err := os.Lstat(absolute)
+	if err != nil || info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() || info.Mode().Perm()&0o111 == 0 {
+		return adapterArtifactIdentity{}, errors.New("SYNCHRO_CONFORMANCE_ADAPTER_ARTIFACT must be an executable regular file")
+	}
+	digestPath := absolute + ".sha256"
+	digestInfo, err := os.Lstat(digestPath)
+	if err != nil || digestInfo.Mode()&os.ModeSymlink != 0 || !digestInfo.Mode().IsRegular() {
+		return adapterArtifactIdentity{}, errors.New("adapter artifact digest file is required")
+	}
+	expected, err := readAdapterDigest(digestPath)
+	if err != nil {
+		return adapterArtifactIdentity{}, err
+	}
+	digestSHA256, err := fileSHA256(digestPath)
+	if err != nil {
+		return adapterArtifactIdentity{}, errors.New("adapter artifact digest file cannot be verified")
+	}
 	actual, err := fileSHA256(absolute)
 	if err != nil {
-		return "", "", errors.New("adapter artifact hash cannot be verified")
+		return adapterArtifactIdentity{}, errors.New("adapter artifact hash cannot be verified")
 	}
 	if actual != expected {
-		return "", "", errors.New("adapter artifact hash does not match its manifest")
+		return adapterArtifactIdentity{}, errors.New("adapter artifact hash does not match its manifest")
 	}
-	return absolute, actual, nil
+	currentInfo, err := os.Lstat(absolute)
+	if err != nil || !os.SameFile(info, currentInfo) {
+		return adapterArtifactIdentity{}, errors.New("adapter artifact identity changed during verification")
+	}
+	currentDigestInfo, err := os.Lstat(digestPath)
+	if err != nil || !os.SameFile(digestInfo, currentDigestInfo) {
+		return adapterArtifactIdentity{}, errors.New("adapter artifact digest identity changed during verification")
+	}
+	return adapterArtifactIdentity{
+		path:           absolute,
+		digestPath:     digestPath,
+		sha256:         actual,
+		digestSHA256:   digestSHA256,
+		executableInfo: currentInfo,
+		digestInfo:     currentDigestInfo,
+	}, nil
 }
 
 func readAdapterDigest(path string) (string, error) {
@@ -373,6 +448,10 @@ func verifyExtensionBundle(path string) (extensionBundle, error) {
 	if err != nil || expectedManifestDigest != manifestDigest {
 		return extensionBundle{}, errors.New("extension artifact manifest digest does not match")
 	}
+	manifestDigestSHA256, err := fileSHA256(manifestDigestPath)
+	if err != nil {
+		return extensionBundle{}, errors.New("extension artifact manifest digest cannot be verified")
+	}
 	var manifest extensionBundleManifest
 	if err := decodeStrictManifest(manifestData, &manifest); err != nil {
 		return extensionBundle{}, errors.New("extension artifact manifest is invalid")
@@ -420,12 +499,13 @@ func verifyExtensionBundle(path string) (extensionBundle, error) {
 		return extensionBundle{}, errors.New("extension artifact is incomplete")
 	}
 	return extensionBundle{
-		root:               root,
-		rootInfo:           rootInfo,
-		manifestInfo:       manifestInfo,
-		manifestDigestInfo: manifestDigestInfo,
-		manifestSHA256:     manifestDigest,
-		files:              files,
+		root:                 root,
+		rootInfo:             rootInfo,
+		manifestInfo:         manifestInfo,
+		manifestDigestInfo:   manifestDigestInfo,
+		manifestSHA256:       manifestDigest,
+		manifestDigestSHA256: manifestDigestSHA256,
+		files:                files,
 	}, nil
 }
 
@@ -455,6 +535,7 @@ func readArtifactDigest(path, description string) (string, error) {
 
 func sameExtensionBundleIdentity(left, right extensionBundle) bool {
 	if left.root != right.root || left.manifestSHA256 != right.manifestSHA256 ||
+		left.manifestDigestSHA256 != right.manifestDigestSHA256 ||
 		!os.SameFile(left.rootInfo, right.rootInfo) ||
 		!os.SameFile(left.manifestInfo, right.manifestInfo) ||
 		!os.SameFile(left.manifestDigestInfo, right.manifestDigestInfo) ||
@@ -470,6 +551,28 @@ func sameExtensionBundleIdentity(left, right extensionBundle) bool {
 		}
 	}
 	return true
+}
+
+func sameAdapterArtifactIdentity(left, right adapterArtifactIdentity) bool {
+	return left.path != "" && left.path == right.path &&
+		left.digestPath == right.digestPath && left.sha256 == right.sha256 &&
+		left.digestSHA256 == right.digestSHA256 &&
+		left.executableInfo != nil && right.executableInfo != nil &&
+		left.digestInfo != nil && right.digestInfo != nil &&
+		os.SameFile(left.executableInfo, right.executableInfo) &&
+		os.SameFile(left.digestInfo, right.digestInfo)
+}
+
+func verifyEnvironmentArtifactIdentity(environment EnvironmentConfig) error {
+	extension, err := verifyExtensionBundle(environment.ExtensionArtifact)
+	if err != nil || !sameExtensionBundleIdentity(environment.extension, extension) {
+		return errors.New("candidate extension artifact identity changed after execution")
+	}
+	adapter, err := loadAdapterArtifactIdentity(environment.AdapterArtifact)
+	if err != nil || !sameAdapterArtifactIdentity(environment.adapterIdentity, adapter) {
+		return errors.New("candidate adapter artifact identity changed after execution")
+	}
+	return nil
 }
 
 func decodeStrictManifest(data []byte, destination *extensionBundleManifest) error {

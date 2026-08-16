@@ -85,7 +85,7 @@ func TestExpandPendingMutationsWorkloadCreatesExactDurablePartitions(t *testing.
 				}
 			}
 			after := model.Snapshot()
-			if len(pushResults) != 2 || pushResults[0].HTTP == nil || pushResults[0].HTTP.Status != 503 || pushResults[0].Push == nil || pushResults[0].Push.Replay != reference.ReplayDispositionExecuted {
+			if len(pushResults) != 2 || pushResults[0].HTTP == nil || pushResults[0].HTTP.Status != 0 || pushResults[0].HTTP.HasCode || !pushResults[0].HTTP.Retryable || pushResults[0].Push == nil || pushResults[0].Push.Replay != reference.ReplayDispositionExecuted {
 				t.Fatalf("first response-loss push = %#v", pushResults)
 			}
 			if pushResults[1].HTTP == nil || pushResults[1].HTTP.Status != 200 || pushResults[1].Push == nil || pushResults[1].Push.Replay != reference.ReplayDispositionReplayed {

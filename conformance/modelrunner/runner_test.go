@@ -110,6 +110,28 @@ func TestExpectedErrorMatchingUsesCanonicalErrorCodeOnly(t *testing.T) {
 	}
 }
 
+func TestTransportFailureWireExpectationRejectsReceivedHTTPResponse(t *testing.T) {
+	scenario := scenarios.Scenario{WireExpectations: []scenarios.WireExpectation{{
+		StepID:       "STEP-TRANSPORT-001",
+		AssertionID:  "ASSERT-TRANSPORT-001",
+		ContractCase: "transport_failure",
+		HTTPStatus:   0,
+		Retryable:    true,
+	}}}
+	execution := OperationExecution{
+		StepID: "STEP-TRANSPORT-001",
+		Result: reference.StepResult{HTTP: &reference.HTTPObservation{Retryable: true}},
+	}
+	if err := evaluateWireExpectations(scenario, []OperationExecution{execution}); err != nil {
+		t.Fatalf("validate transport failure without response: %v", err)
+	}
+
+	execution.Result.HTTP.Body = []byte(`{"error":"fabricated"}`)
+	if err := evaluateWireExpectations(scenario, []OperationExecution{execution}); err == nil {
+		t.Fatal("transport failure accepted a fabricated HTTP response")
+	}
+}
+
 func TestPortableSeedCorruptionFailsClosed(t *testing.T) {
 	fixture := reference.PortableSeedFixture{
 		FixtureID: PortableSeedFixtureID, ArtifactDefinitionID: PortableSeedArtifactID,

@@ -366,7 +366,7 @@
         "SYNC-IDEMPOTENCY-001"
       ],
       "assertion_ids": [
-        "ASSERT-PUSH-RESPONSE-LOSS-CONTROL-001"
+        "ASSERT-PUSH-RESPONSE-LOSS-SEMANTIC-001"
       ],
       "proof_type": "fault-injection",
       "support_cell_id": "SUP-PG-018",
@@ -391,7 +391,7 @@
         "SYNC-IDEMPOTENCY-001"
       ],
       "assertion_ids": [
-        "ASSERT-PUSH-RESPONSE-LOSS-CONTROL-001"
+        "ASSERT-PUSH-RESPONSE-LOSS-SEMANTIC-001"
       ],
       "proof_type": "negative-control",
       "support_cell_id": null,
@@ -513,7 +513,7 @@
       "scenario_id": "SCN-PUSH-RESPONSE-LOSS-001",
       "requirement_id": "SYNC-IDEMPOTENCY-001",
       "proof_obligation_id": "OBL-PUSH-RESPONSE-LOSS-FAULT-001",
-      "assertion_id": "ASSERT-PUSH-RESPONSE-LOSS-CONTROL-001",
+      "assertion_id": "ASSERT-PUSH-RESPONSE-LOSS-SEMANTIC-001",
       "proof_type": "fault-injection",
       "support_cell_id": "SUP-PG-018"
     },
@@ -521,7 +521,7 @@
       "scenario_id": "SCN-PUSH-RESPONSE-LOSS-001",
       "requirement_id": "SYNC-IDEMPOTENCY-001",
       "proof_obligation_id": "OBL-PUSH-RESPONSE-LOSS-CONTROL-001",
-      "assertion_id": "ASSERT-PUSH-RESPONSE-LOSS-CONTROL-001",
+      "assertion_id": "ASSERT-PUSH-RESPONSE-LOSS-SEMANTIC-001",
       "proof_type": "negative-control",
       "support_cell_id": null
     }
@@ -702,14 +702,6 @@
           "name": "canonical-wire-outcome",
           "payload": {}
         }
-      },
-      {
-        "id": "EXPECT-PUSH-RESPONSE-LOSS-CONTROL-001",
-        "predicate": {
-          "contract_predicate": "negative-control-detection",
-          "name": "negative-control-detected",
-          "payload": {}
-        }
       }
     ]
   },
@@ -734,7 +726,7 @@
       "control_id": "CTRL-IDEMPOTENCY-001",
       "barrier_id": "BAR-PUSH-RESPONSE-LOSS-CONTROL-001",
       "expected_assertion_ids": [
-        "ASSERT-PUSH-RESPONSE-LOSS-CONTROL-001"
+        "ASSERT-PUSH-RESPONSE-LOSS-SEMANTIC-001"
       ],
       "injection": {
         "mechanism": "wire-fault",
@@ -762,7 +754,7 @@
         "ARTDEF-ADAPTER-001"
       ],
       "detected_by": [
-        "ASSERT-PUSH-RESPONSE-LOSS-CONTROL-001"
+        "ASSERT-PUSH-RESPONSE-LOSS-SEMANTIC-001"
       ]
     }
   ],
@@ -955,15 +947,61 @@
       "expected_outcome": {
         "disposition": "success"
       }
+    },
+    {
+      "id": "STEP-PUSH-RESPONSE-LOSS-006",
+      "phase": "exercise",
+      "transport": "http",
+      "description": "Submit changed content under the completed batch identity and require an idempotency conflict.",
+      "operation": {
+        "contract_operation": "push",
+        "name": "submit",
+        "payload": {
+          "authenticated_user_id": "user-a",
+          "request": {
+            "client_id": "client-a",
+            "client_generation": 1,
+            "batch_id": "00000000-0000-4000-8000-000000001041",
+            "schema": {
+              "version": 1,
+              "hash": "721d2c95e6f34cd9733feea9f5118fba391eee10d07663dad066cfc59439fa44"
+            },
+            "mutations": [
+              {
+                "mutation_id": "00000000-0000-4000-8000-000000001040",
+                "table": "items",
+                "pk": {
+                  "id": "response-loss"
+                },
+                "authored_schema": {
+                  "version": 1,
+                  "hash": "721d2c95e6f34cd9733feea9f5118fba391eee10d07663dad066cfc59439fa44"
+                },
+                "op": "insert",
+                "client_version": "2032-01-02T03:04:05.000000Z",
+                "columns": {
+                  "value": "response-loss-changed"
+                }
+              }
+            ]
+          },
+          "delivery": "apply",
+          "commit_lsn": "1043",
+          "end_lsn": "1044"
+        }
+      },
+      "expected_outcome": {
+        "disposition": "success"
+      }
     }
   ],
   "wire_expectations": [
     {
       "step_id": "STEP-PUSH-RESPONSE-LOSS-002",
       "assertion_id": "ASSERT-PUSH-RESPONSE-LOSS-SEMANTIC-001",
-      "contract_case": "temporary_unavailable",
-      "http_status": 503,
-      "error_code": "temporary_unavailable",
+      "contract_case": "transport_failure",
+      "http_status": 0,
+      "error_code": null,
       "retryable": true
     },
     {
@@ -981,6 +1019,14 @@
       "http_status": 200,
       "error_code": null,
       "retryable": false
+    },
+    {
+      "step_id": "STEP-PUSH-RESPONSE-LOSS-006",
+      "assertion_id": "ASSERT-PUSH-RESPONSE-LOSS-SEMANTIC-001",
+      "contract_case": "idempotency_conflict",
+      "http_status": 409,
+      "error_code": "idempotency_conflict",
+      "retryable": false
     }
   ],
   "assertions": [
@@ -989,7 +1035,7 @@
       "requirement_ids": [
         "SYNC-IDEMPOTENCY-001"
       ],
-      "description": "The first execution commits once, response loss changes only retry bookkeeping, and both equal replays return the stored canonical response.",
+      "description": "The first execution commits once, response loss changes only retry bookkeeping, equal replays return the stored response, and changed content returns 409.",
       "expectation_ids": [
         "EXPECT-PUSH-RESPONSE-LOSS-SEMANTIC-001"
       ],
@@ -1000,27 +1046,6 @@
       },
       "oracle": {
         "kind": "wire-contract",
-        "expected_source": "authored-model",
-        "observed_source": "system-under-test"
-      },
-      "detects_control_ids": []
-    },
-    {
-      "id": "ASSERT-PUSH-RESPONSE-LOSS-CONTROL-001",
-      "requirement_ids": [
-        "SYNC-IDEMPOTENCY-001"
-      ],
-      "description": "The changed-fingerprint control detects mutation work or a noncanonical response under the fixed batch identity.",
-      "expectation_ids": [
-        "EXPECT-PUSH-RESPONSE-LOSS-CONTROL-001"
-      ],
-      "predicate": {
-        "contract_predicate": "negative-control-detection",
-        "name": "negative-control-detected",
-        "payload": {}
-      },
-      "oracle": {
-        "kind": "negative-control-detection",
         "expected_source": "authored-model",
         "observed_source": "system-under-test"
       },

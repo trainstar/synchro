@@ -31,7 +31,8 @@
         "SYNC-PULL-002"
       ],
       "assertion_ids": [
-        "ASSERT-PULL-DIVERGENT-SEMANTIC-001"
+        "ASSERT-PULL-DIVERGENT-SEMANTIC-001",
+        "ASSERT-PULL-DIVERGENT-MERGE-SEMANTIC-001"
       ],
       "proof_type": "reference-model",
       "support_cell_id": null,
@@ -56,7 +57,8 @@
         "SYNC-PULL-002"
       ],
       "assertion_ids": [
-        "ASSERT-PULL-DIVERGENT-SEMANTIC-001"
+        "ASSERT-PULL-DIVERGENT-SEMANTIC-001",
+        "ASSERT-PULL-DIVERGENT-MERGE-SEMANTIC-001"
       ],
       "proof_type": "server-black-box",
       "support_cell_id": "SUP-PG-018",
@@ -81,7 +83,7 @@
         "SYNC-PULL-001"
       ],
       "assertion_ids": [
-        "ASSERT-PULL-DIVERGENT-PULL-001-CONTROL-001"
+        "ASSERT-PULL-DIVERGENT-SEMANTIC-001"
       ],
       "proof_type": "negative-control",
       "support_cell_id": null,
@@ -106,7 +108,7 @@
         "SYNC-PULL-002"
       ],
       "assertion_ids": [
-        "ASSERT-PULL-DIVERGENT-PULL-002-CONTROL-001"
+        "ASSERT-PULL-DIVERGENT-MERGE-SEMANTIC-001"
       ],
       "proof_type": "negative-control",
       "support_cell_id": null,
@@ -139,7 +141,7 @@
       "scenario_id": "SCN-PULL-DIVERGENT-CHECKPOINTS-001",
       "requirement_id": "SYNC-PULL-002",
       "proof_obligation_id": "OBL-PULL-DIVERGENT-RM-001",
-      "assertion_id": "ASSERT-PULL-DIVERGENT-SEMANTIC-001",
+      "assertion_id": "ASSERT-PULL-DIVERGENT-MERGE-SEMANTIC-001",
       "proof_type": "reference-model",
       "support_cell_id": null
     },
@@ -155,7 +157,7 @@
       "scenario_id": "SCN-PULL-DIVERGENT-CHECKPOINTS-001",
       "requirement_id": "SYNC-PULL-002",
       "proof_obligation_id": "OBL-PULL-DIVERGENT-PG-001",
-      "assertion_id": "ASSERT-PULL-DIVERGENT-SEMANTIC-001",
+      "assertion_id": "ASSERT-PULL-DIVERGENT-MERGE-SEMANTIC-001",
       "proof_type": "server-black-box",
       "support_cell_id": "SUP-PG-018"
     },
@@ -163,7 +165,7 @@
       "scenario_id": "SCN-PULL-DIVERGENT-CHECKPOINTS-001",
       "requirement_id": "SYNC-PULL-001",
       "proof_obligation_id": "OBL-PULL-DIVERGENT-PULL-001-CONTROL-001",
-      "assertion_id": "ASSERT-PULL-DIVERGENT-PULL-001-CONTROL-001",
+      "assertion_id": "ASSERT-PULL-DIVERGENT-SEMANTIC-001",
       "proof_type": "negative-control",
       "support_cell_id": null
     },
@@ -171,7 +173,7 @@
       "scenario_id": "SCN-PULL-DIVERGENT-CHECKPOINTS-001",
       "requirement_id": "SYNC-PULL-002",
       "proof_obligation_id": "OBL-PULL-DIVERGENT-PULL-002-CONTROL-001",
-      "assertion_id": "ASSERT-PULL-DIVERGENT-PULL-002-CONTROL-001",
+      "assertion_id": "ASSERT-PULL-DIVERGENT-MERGE-SEMANTIC-001",
       "proof_type": "negative-control",
       "support_cell_id": null
     }
@@ -532,22 +534,6 @@
           "name": "canonical-wire-outcome",
           "payload": {}
         }
-      },
-      {
-        "id": "EXPECT-PULL-DIVERGENT-PULL-001-CONTROL-001",
-        "predicate": {
-          "contract_predicate": "negative-control-detection",
-          "name": "negative-control-detected",
-          "payload": {}
-        }
-      },
-      {
-        "id": "EXPECT-PULL-DIVERGENT-PULL-002-CONTROL-001",
-        "predicate": {
-          "contract_predicate": "negative-control-detection",
-          "name": "negative-control-detected",
-          "payload": {}
-        }
       }
     ]
   },
@@ -581,7 +567,7 @@
       "control_id": "CTRL-PULL-001",
       "barrier_id": "BAR-PULL-DIVERGENT-PULL-001-CONTROL-001",
       "expected_assertion_ids": [
-        "ASSERT-PULL-DIVERGENT-PULL-001-CONTROL-001"
+        "ASSERT-PULL-DIVERGENT-SEMANTIC-001"
       ],
       "injection": {
         "mechanism": "source-mutant",
@@ -600,7 +586,7 @@
       "control_id": "CTRL-PULL-002",
       "barrier_id": "BAR-PULL-DIVERGENT-PULL-002-CONTROL-001",
       "expected_assertion_ids": [
-        "ASSERT-PULL-DIVERGENT-PULL-002-CONTROL-001"
+        "ASSERT-PULL-DIVERGENT-MERGE-SEMANTIC-001"
       ],
       "injection": {
         "mechanism": "source-mutant",
@@ -627,7 +613,7 @@
         "ARTDEF-PG-EXTENSION-001"
       ],
       "detected_by": [
-        "ASSERT-PULL-DIVERGENT-PULL-001-CONTROL-001"
+        "ASSERT-PULL-DIVERGENT-SEMANTIC-001"
       ]
     },
     {
@@ -638,7 +624,7 @@
         "ARTDEF-PG-EXTENSION-001"
       ],
       "detected_by": [
-        "ASSERT-PULL-DIVERGENT-PULL-002-CONTROL-001"
+        "ASSERT-PULL-DIVERGENT-MERGE-SEMANTIC-001"
       ]
     }
   ],
@@ -1279,8 +1265,7 @@
     {
       "id": "ASSERT-PULL-DIVERGENT-SEMANTIC-001",
       "requirement_ids": [
-        "SYNC-PULL-001",
-        "SYNC-PULL-002"
+        "SYNC-PULL-001"
       ],
       "description": "Four lawful WAL effects occupy scope A positions (2,1,1), (4,1,1), and (5,1,1), plus scope B position (3,1,1). Scope A deduplicates positions 2 and 5 by typed scoped row identity before limiting. Page one returns B position 3, then A position 4, with has_more true and no checksums. Its atomic apply installs divergent cursors B3 and A4 with matching rows and provenance. Page two returns A position 5 with has_more false and both scope checksums. Its atomic apply installs both terminal cursors, verifies checksums, and preserves the table-ID collision.",
       "expectation_ids": [
@@ -1297,47 +1282,27 @@
         "expected_source": "authored-model",
         "observed_source": "system-under-test"
       },
-      "detects_control_ids": []
-    },
-    {
-      "id": "ASSERT-PULL-DIVERGENT-PULL-001-CONTROL-001",
-      "requirement_ids": [
-        "SYNC-PULL-001"
-      ],
-      "description": "The control detects applying the global limit before complete per-scope resolution hides another valid scope candidate.",
-      "expectation_ids": [
-        "EXPECT-PULL-DIVERGENT-PULL-001-CONTROL-001"
-      ],
-      "predicate": {
-        "contract_predicate": "negative-control-detection",
-        "name": "negative-control-detected",
-        "payload": {}
-      },
-      "oracle": {
-        "kind": "negative-control-detection",
-        "expected_source": "authored-model",
-        "observed_source": "system-under-test"
-      },
       "detects_control_ids": [
         "CTRL-PULL-001"
       ]
     },
     {
-      "id": "ASSERT-PULL-DIVERGENT-PULL-002-CONTROL-001",
+      "id": "ASSERT-PULL-DIVERGENT-MERGE-SEMANTIC-001",
       "requirement_ids": [
         "SYNC-PULL-002"
       ],
-      "description": "The control detects lexical or unstable merge order, premature completion, and starvation at a finite boundary.",
+      "description": "The cross-scope merge preserves the authored order, completion, and finite-page fairness.",
       "expectation_ids": [
-        "EXPECT-PULL-DIVERGENT-PULL-002-CONTROL-001"
+        "EXPECT-PULL-DIVERGENT-SEMANTIC-001",
+        "EXPECT-PULL-DIVERGENT-WIRE-001"
       ],
       "predicate": {
-        "contract_predicate": "negative-control-detection",
-        "name": "negative-control-detected",
+        "contract_predicate": "wire-outcome",
+        "name": "canonical-wire-outcome",
         "payload": {}
       },
       "oracle": {
-        "kind": "negative-control-detection",
+        "kind": "wire-contract",
         "expected_source": "authored-model",
         "observed_source": "system-under-test"
       },

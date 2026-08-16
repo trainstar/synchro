@@ -375,7 +375,7 @@
         "SYNC-SEED-001"
       ],
       "assertion_ids": [
-        "ASSERT-PERF-SEEDED-EMPTY-STARTUP-CONTROL-001"
+        "ASSERT-PERF-SEEDED-EMPTY-STARTUP-SEMANTIC-001"
       ],
       "proof_type": "negative-control",
       "support_cell_id": null,
@@ -583,7 +583,7 @@
       "scenario_id": "SCN-PERF-SEEDED-EMPTY-STARTUP-001",
       "requirement_id": "SYNC-SEED-001",
       "proof_obligation_id": "OBL-PERF-SEEDED-EMPTY-STARTUP-CONTROL-001",
-      "assertion_id": "ASSERT-PERF-SEEDED-EMPTY-STARTUP-CONTROL-001",
+      "assertion_id": "ASSERT-PERF-SEEDED-EMPTY-STARTUP-SEMANTIC-001",
       "proof_type": "negative-control",
       "support_cell_id": null
     }
@@ -834,14 +834,6 @@
           "name": "performance-contract-satisfied",
           "payload": {}
         }
-      },
-      {
-        "id": "EXPECT-PERF-SEEDED-EMPTY-STARTUP-CONTROL-001",
-        "predicate": {
-          "contract_predicate": "negative-control-detection",
-          "name": "negative-control-detected",
-          "payload": {}
-        }
       }
     ]
   },
@@ -866,7 +858,7 @@
       "control_id": "CTRL-SEED-001",
       "barrier_id": "BAR-PERF-SEEDED-EMPTY-STARTUP-CONTROL-001",
       "expected_assertion_ids": [
-        "ASSERT-PERF-SEEDED-EMPTY-STARTUP-CONTROL-001"
+        "ASSERT-PERF-SEEDED-EMPTY-STARTUP-SEMANTIC-001"
       ],
       "injection": {
         "mechanism": "source-mutant",
@@ -900,7 +892,7 @@
         "ARTDEF-RN-NPM-001"
       ],
       "detected_by": [
-        "ASSERT-PERF-SEEDED-EMPTY-STARTUP-CONTROL-001"
+        "ASSERT-PERF-SEEDED-EMPTY-STARTUP-SEMANTIC-001"
       ]
     }
   ],
@@ -1336,7 +1328,9 @@
         "expected_source": "authored-model",
         "observed_source": "system-under-test"
       },
-      "detects_control_ids": []
+      "detects_control_ids": [
+        "CTRL-SEED-001"
+      ]
     },
     {
       "id": "ASSERT-PERF-SEEDED-EMPTY-STARTUP-PERFORMANCE-001",
@@ -1358,29 +1352,6 @@
         "observed_source": "system-under-test"
       },
       "detects_control_ids": []
-    },
-    {
-      "id": "ASSERT-PERF-SEEDED-EMPTY-STARTUP-CONTROL-001",
-      "requirement_ids": [
-        "SYNC-SEED-001"
-      ],
-      "description": "The negative control detects the exact catalog defect before invalid durable work completes.",
-      "expectation_ids": [
-        "EXPECT-PERF-SEEDED-EMPTY-STARTUP-CONTROL-001"
-      ],
-      "predicate": {
-        "contract_predicate": "negative-control-detection",
-        "name": "negative-control-detected",
-        "payload": {}
-      },
-      "oracle": {
-        "kind": "negative-control-detection",
-        "expected_source": "authored-model",
-        "observed_source": "system-under-test"
-      },
-      "detects_control_ids": [
-        "CTRL-SEED-001"
-      ]
     }
   ]
 }

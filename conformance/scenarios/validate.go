@@ -28,6 +28,7 @@ var wireCases = map[string]wireCase{
 	"push_success":              {status: 200, operations: []string{"push"}},
 	"pull_success":              {status: 200, operations: []string{"pull"}},
 	"rebuild_success":           {status: 200, operations: []string{"rebuild"}},
+	"transport_failure":         {status: 0, retryable: true, operations: []string{"connect", "push", "pull", "rebuild"}},
 	"invalid_request":           {status: 400, errorCode: "invalid_request", hasCode: true, operations: []string{"connect", "push", "pull", "rebuild"}},
 	"invalid_schema_reference":  {status: 400, errorCode: "invalid_schema_reference", hasCode: true, operations: []string{"connect"}},
 	"auth_required":             {status: 401, errorCode: "auth_required", hasCode: true, operations: []string{"connect", "push", "pull", "rebuild"}},
@@ -56,21 +57,19 @@ var operationTransport = map[string]string{
 }
 
 var predicateNames = map[string]map[string]struct{}{
-	"state-equality":             {"state-equals-authored-model": {}, "state-unchanged": {}},
-	"wire-outcome":               {"canonical-wire-outcome": {}},
-	"state-transition":           {"legal-state-transition": {}},
-	"artifact-integrity":         {"artifact-policy-satisfied": {}},
-	"performance-measurement":    {"performance-contract-satisfied": {}},
-	"negative-control-detection": {"negative-control-detected": {}},
+	"state-equality":          {"state-equals-authored-model": {}, "state-unchanged": {}},
+	"wire-outcome":            {"canonical-wire-outcome": {}},
+	"state-transition":        {"legal-state-transition": {}},
+	"artifact-integrity":      {"artifact-policy-satisfied": {}},
+	"performance-measurement": {"performance-contract-satisfied": {}},
 }
 
 var predicateByOracle = map[string]string{
-	"model-state-equality":       "state-equality",
-	"wire-contract":              "wire-outcome",
-	"state-transition":           "state-transition",
-	"artifact-policy":            "artifact-integrity",
-	"performance-budget":         "performance-measurement",
-	"negative-control-detection": "negative-control-detection",
+	"model-state-equality": "state-equality",
+	"wire-contract":        "wire-outcome",
+	"state-transition":     "state-transition",
+	"artifact-policy":      "artifact-integrity",
+	"performance-budget":   "performance-measurement",
 }
 
 var proofTargetPolicy = map[string]map[string]struct{}{

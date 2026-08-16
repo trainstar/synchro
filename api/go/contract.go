@@ -4,13 +4,15 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 )
 
 const (
-	ExpectedProtocolVersion    = 2
+	ExpectedProtocolVersion    = 3
 	ExpectedSQLContractVersion = 1
+	ExpectedExtensionSchema    = "synchro"
 )
 
 type ExtensionContractInfo struct {
@@ -24,19 +26,30 @@ func RequireCompatibleExtension(ctx context.Context, db *sql.DB) error {
 		return fmt.Errorf("synchroapi: database is required")
 	}
 
-	var extExists bool
-	if err := db.QueryRowContext(
+	var extensionSchema string
+	err := db.QueryRowContext(
 		ctx,
-		"SELECT EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'synchro_pg')",
-	).Scan(&extExists); err != nil {
+		`SELECT n.nspname
+		 FROM pg_catalog.pg_extension e
+		 JOIN pg_catalog.pg_namespace n ON n.oid = e.extnamespace
+		 WHERE e.extname = 'synchro_pg'`,
+	).Scan(&extensionSchema)
+	if errors.Is(err, sql.ErrNoRows) {
+		return fmt.Errorf("synchro_pg extension is not installed")
+	}
+	if err != nil {
 		return fmt.Errorf("checking synchro_pg extension: %w", err)
 	}
-	if !extExists {
-		return fmt.Errorf("synchro_pg extension is not installed")
+	if extensionSchema != ExpectedExtensionSchema {
+		return fmt.Errorf(
+			"synchro_pg extension schema mismatch: expected %s, got %s",
+			ExpectedExtensionSchema,
+			extensionSchema,
+		)
 	}
 
 	var raw []byte
-	if err := db.QueryRowContext(ctx, "SELECT synchro_contract_info()").Scan(&raw); err != nil {
+	if err := db.QueryRowContext(ctx, "SELECT synchro.synchro_contract_info()").Scan(&raw); err != nil {
 		return fmt.Errorf("loading synchro_pg contract info: %w", err)
 	}
 
@@ -63,20 +76,20 @@ func RequireCompatibleExtension(ctx context.Context, db *sql.DB) error {
 	}
 
 	required := []string{
-		"synchro_connect(text, jsonb)",
-		"synchro_pull(text, jsonb)",
-		"synchro_push(text, jsonb)",
-		"synchro_rebuild(text, jsonb)",
-		"synchro_schema_manifest()",
-		"synchro_tables()",
-		"synchro_debug(text, text)",
+		"synchro.synchro_connect(pg_catalog.text, pg_catalog.jsonb)",
+		"synchro.synchro_pull(pg_catalog.text, pg_catalog.jsonb)",
+		"synchro.synchro_push(pg_catalog.text, pg_catalog.jsonb)",
+		"synchro.synchro_rebuild(pg_catalog.text, pg_catalog.jsonb)",
+		"synchro.synchro_schema_manifest()",
+		"synchro.synchro_tables()",
+		"synchro.synchro_readiness()",
 	}
 	missing := make([]string, 0)
 	for _, signature := range required {
 		var exists bool
 		if err := db.QueryRowContext(
 			ctx,
-			"SELECT to_regprocedure($1) IS NOT NULL",
+			"SELECT pg_catalog.to_regprocedure($1) IS NOT NULL",
 			signature,
 		).Scan(&exists); err != nil {
 			return fmt.Errorf("checking synchro_pg function %s: %w", signature, err)

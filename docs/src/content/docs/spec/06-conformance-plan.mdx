@@ -54,8 +54,9 @@ Required certification scope is exactly:
 
 PostgreSQL 14 through 17 are explicitly excluded from v0.3.0 certification.
 MySQL is not a v0.3.0 deliverable. Current-stable selectors are resolved at
-release-candidate start and recorded as exact versions in the RC manifest.
-These rules are the support scope in `conformance/support-matrix.json`; this
+release-candidate start. The immutable RC candidate lock records their exact
+versions before execution. The final RC manifest retains the same values.
+These rules are the support scope in `conformance/support-matrix.json`. This
 document does not widen it.
 
 ## Evidence Boundary
@@ -83,20 +84,32 @@ Every evidence record must identify:
   obligation, and support cell, including typed infrastructure disposition and
   approval for every permitted rerun
 
-The evidence schema requires release `0.3.0`, protocol version `3`, the aggregate
-contract snapshot digest, the exact authored proof obligation and two-element
-`["make", target]` command, consistent timestamps and duration, result and exit
-code, complete proof-obligation assertion IDs, and content-addressed typed log,
-trace, replay, barrier, fault, and performance attachments. Evidence requirement
-IDs equal the proof-obligation set; its selected support cell, command, and resolved
-artifact-inventory roles must satisfy the named obligation exactly. The RC
-manifest schema requires the exact ordered specification and Accepted ADR file
-set, requirements, support matrix, scenario catalog, vector catalog, complete
-fault catalog, performance budgets and required measurements, artifact
-inventory, versioned schemas, per-file hashes, and the same aggregate digest.
-Verification recomputes those values from candidate source bytes and rejects
-missing, reordered, substituted, partial, non-Accepted, or mixed-revision
-inputs.
+The evidence schema requires release `0.3.0`, protocol version `3`, and the
+aggregate contract snapshot digest. It also requires the exact authored proof
+obligation and two-element `["make", target]` command. Timestamps, duration,
+result, exit code, and proof-obligation assertion IDs must be consistent.
+Content-addressed attachments bind logs, traces, replay data, barriers, faults,
+and performance results. Evidence requirement IDs equal the proof-obligation
+set. Its support cell, command, and artifact roles must satisfy that obligation.
+
+The immutable `rc-candidate-lock-v1` document exists before execution. It binds
+candidate identity, source commit, contract snapshot, exact scenarios, resolved
+support cells, artifacts, attestations, bundles, and trusted rerun approvers.
+Each artifact payload binds path, media type, byte size, and SHA-256. The lock
+contains no evidence, final evidence paths, final evidence hashes, or `verified`
+boolean.
+
+The final `rc-manifest-v2` document exists after execution. It binds the exact
+candidate lock by path and SHA-256. It then adds the complete evidence set and
+its transitive retry chains. A changed candidate-lock byte invalidates the
+manifest binding.
+
+Both candidate documents bind the ordered specification and Accepted ADR file
+set. They also bind requirements, support matrix, scenario and vector catalogs,
+fault catalog, performance inputs, artifact inventory, and versioned schemas.
+Verification recomputes all values from candidate source and candidate bundle
+bytes. It rejects missing, reordered, substituted, partial, non-Accepted, or
+mixed-revision inputs.
 
 The generated inventory is the only status view. A hand-maintained coverage
 claim is not evidence.
@@ -695,6 +708,12 @@ defines the vector catalog schema and records the supplied vector-set hash, but
 does not resolve that hash against vector files on disk. Disk and catalog hash
 binding are deferred to Phase 3.
 
+Vector-result uniqueness uses the complete execution key. That key contains
+candidate, scenario, obligation, support cell, vector set, and language.
+Different obligations or support cells can repeat one language. Candidate
+closure requires at least one valid terminal result for each required
+vector-set and language pair.
+
 ## Generated Inventory
 
 The evidence tool must generate the conformance inventory from:
@@ -740,8 +759,8 @@ language test commands never produce release evidence.
 
 ## Conformance Exit Gate
 
-The conformance gate fails unless all of the following are true for the same
-candidate and contract snapshot:
+The conformance gate fails unless all conditions are true for the same
+candidate, candidate lock, and contract snapshot:
 
 - every requirement in `requirements.json` has all listed proof types,
   including a meaningful negative control

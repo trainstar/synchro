@@ -364,7 +364,7 @@
         "SYNC-SCOPE-001"
       ],
       "assertion_ids": [
-        "ASSERT-PERF-WARM-CONNECT-CONTROL-001"
+        "ASSERT-PERF-WARM-CONNECT-SEMANTIC-001"
       ],
       "proof_type": "negative-control",
       "support_cell_id": null,
@@ -566,7 +566,7 @@
       "scenario_id": "SCN-PERF-WARM-CONNECT-001",
       "requirement_id": "SYNC-SCOPE-001",
       "proof_obligation_id": "OBL-PERF-WARM-CONNECT-CONTROL-001",
-      "assertion_id": "ASSERT-PERF-WARM-CONNECT-CONTROL-001",
+      "assertion_id": "ASSERT-PERF-WARM-CONNECT-SEMANTIC-001",
       "proof_type": "negative-control",
       "support_cell_id": null
     }
@@ -755,14 +755,6 @@
           "name": "performance-contract-satisfied",
           "payload": {}
         }
-      },
-      {
-        "id": "EXPECT-PERF-WARM-CONNECT-CONTROL-001",
-        "predicate": {
-          "contract_predicate": "negative-control-detection",
-          "name": "negative-control-detected",
-          "payload": {}
-        }
       }
     ]
   },
@@ -787,7 +779,7 @@
       "control_id": "CTRL-SCOPE-001",
       "barrier_id": "BAR-PERF-WARM-CONNECT-CONTROL-001",
       "expected_assertion_ids": [
-        "ASSERT-PERF-WARM-CONNECT-CONTROL-001"
+        "ASSERT-PERF-WARM-CONNECT-SEMANTIC-001"
       ],
       "injection": {
         "mechanism": "wire-fault",
@@ -815,7 +807,7 @@
         "ARTDEF-ADAPTER-001"
       ],
       "detected_by": [
-        "ASSERT-PERF-WARM-CONNECT-CONTROL-001"
+        "ASSERT-PERF-WARM-CONNECT-SEMANTIC-001"
       ]
     }
   ],
@@ -882,7 +874,9 @@
         "expected_source": "authored-model",
         "observed_source": "system-under-test"
       },
-      "detects_control_ids": []
+      "detects_control_ids": [
+        "CTRL-SCOPE-001"
+      ]
     },
     {
       "id": "ASSERT-PERF-WARM-CONNECT-PERFORMANCE-001",
@@ -904,29 +898,6 @@
         "observed_source": "system-under-test"
       },
       "detects_control_ids": []
-    },
-    {
-      "id": "ASSERT-PERF-WARM-CONNECT-CONTROL-001",
-      "requirement_ids": [
-        "SYNC-SCOPE-001"
-      ],
-      "description": "The control detects acceptance of a client-invented scope before assignment changes.",
-      "expectation_ids": [
-        "EXPECT-PERF-WARM-CONNECT-CONTROL-001"
-      ],
-      "predicate": {
-        "contract_predicate": "negative-control-detection",
-        "name": "negative-control-detected",
-        "payload": {}
-      },
-      "oracle": {
-        "kind": "negative-control-detection",
-        "expected_source": "authored-model",
-        "observed_source": "system-under-test"
-      },
-      "detects_control_ids": [
-        "CTRL-SCOPE-001"
-      ]
     }
   ]
 }

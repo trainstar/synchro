@@ -822,7 +822,7 @@ func TestTask6PushResponseLossRetainsAndReplaysSealedRequest(t *testing.T) {
 	request := pushOpsRequest(t, schema, string(batchID), pushOpsWireMutation(string(mutationID), table.ID, "response-loss", schema, DMLOperationInsert, nil, columns))
 
 	dropped := pushOpsSubmit(t, model, request, "drop_after_server", 1040)
-	pushOpsRequirePushFailure(t, dropped, 503, pushHTTPTemporaryUnavailable, true)
+	pushOpsRequireTransportFailure(t, dropped)
 	if dropped.Push.Replay != ReplayDispositionExecuted {
 		t.Fatalf("dropped first delivery replay = %q", dropped.Push.Replay)
 	}
@@ -833,7 +833,7 @@ func TestTask6PushResponseLossRetainsAndReplaysSealedRequest(t *testing.T) {
 	}
 	droppedLocal := pushOpsLocalSnapshot(t, droppedSnapshot, pushOpsClientKey())
 	droppedSealed := pushOpsSealedBatch(t, droppedLocal, batchID)
-	if droppedSealed.State != LocalSealedBatchStateResponseLost || droppedSealed.HasCanonicalResponse || len(droppedSealed.CanonicalResponse) != 0 || !bytes.Equal(droppedSealed.CanonicalRequest, pushOpsBatchSnapshot(t, droppedSnapshot, key).SealedCanonicalRequest) {
+	if droppedSealed.State != LocalSealedBatchStateResponseLost || droppedSealed.HTTPStatus != 0 || droppedSealed.HasCanonicalResponse || len(droppedSealed.CanonicalResponse) != 0 || !bytes.Equal(droppedSealed.CanonicalRequest, pushOpsBatchSnapshot(t, droppedSnapshot, key).SealedCanonicalRequest) {
 		t.Fatalf("drop-after-server local sealed batch = %#v", droppedSealed)
 	}
 	if droppedLocal.Backoff == nil || droppedLocal.Backoff.Retry != RetryClassificationTransport || droppedLocal.Backoff.Attempt != 1 || !droppedLocal.Backoff.Work.HasBatch || droppedLocal.Backoff.Work.Batch != key || len(droppedLocal.Outcomes) != 0 {
@@ -870,6 +870,16 @@ func TestTask6PushResponseLossRetainsAndReplaysSealedRequest(t *testing.T) {
 	pushOpsRequirePushSuccess(t, pushOpsSubmit(t, model, request, "apply", 1042), ReplayDispositionReplayed, 1)
 	if afterSecondReplay := pushOpsLocalSnapshot(t, model.Snapshot(), pushOpsClientKey()); !reflect.DeepEqual(afterSecondReplay, localAfterFirstReplay) {
 		t.Fatal("a second completed replay reconciled the local batch again")
+	}
+
+	beforeConflict := model.Snapshot()
+	changedColumns := map[string]any{string(pushOpsValueField): "response-loss-changed"}
+	changedRequest := pushOpsRequest(t, schema, string(batchID), pushOpsWireMutation(string(mutationID), table.ID, "response-loss", schema, DMLOperationInsert, nil, changedColumns))
+	conflict := pushOpsSubmit(t, model, changedRequest, "apply", 1043)
+	pushOpsRequirePushFailure(t, conflict, 409, pushHTTPIdempotencyConflict, false)
+	pushOpsRequireCanonicalErrorBody(t, conflict, pushHTTPIdempotencyConflict, false)
+	if afterConflict := model.Snapshot(); !reflect.DeepEqual(afterConflict, beforeConflict) {
+		t.Fatal("changed response-loss batch content changed server or local state")
 	}
 }
 
@@ -1533,6 +1543,16 @@ func pushOpsRequirePushFailure(t *testing.T, result StepResult, status int, code
 	var body pushErrorEnvelope
 	if err := json.Unmarshal(result.HTTP.Body, &body); err != nil || body.Error.Code != string(code) || body.Error.Retryable != retryable {
 		t.Fatalf("push failure body = %s", result.HTTP.Body)
+	}
+}
+
+func pushOpsRequireTransportFailure(t *testing.T, result StepResult) {
+	t.Helper()
+	if result.Kind != StepResultKindPush || result.HTTP == nil || result.Push == nil {
+		t.Fatalf("transport failure has incomplete observations: %#v", result)
+	}
+	if result.HTTP.Status != 0 || result.HTTP.HasCode || result.HTTP.Code != "" || !result.HTTP.Retryable || len(result.HTTP.Body) != 0 || result.HTTP.HasRetryAfterMilliseconds || result.HTTP.RetryAfterMilliseconds != 0 || len(result.Push.Mutations) != 0 {
+		t.Fatalf("transport failure observation = %#v", result)
 	}
 }
 

@@ -77,7 +77,7 @@
         "SYNC-SCOPE-004"
       ],
       "assertion_ids": [
-        "ASSERT-PERF-FANOUT-CONTROL-001"
+        "ASSERT-PERF-FANOUT-SEMANTIC-001"
       ],
       "proof_type": "negative-control",
       "support_cell_id": null,
@@ -126,7 +126,7 @@
       "scenario_id": "SCN-PERF-FANOUT-001",
       "requirement_id": "SYNC-SCOPE-004",
       "proof_obligation_id": "OBL-PERF-FANOUT-CONTROL-001",
-      "assertion_id": "ASSERT-PERF-FANOUT-CONTROL-001",
+      "assertion_id": "ASSERT-PERF-FANOUT-SEMANTIC-001",
       "proof_type": "negative-control",
       "support_cell_id": null
     }
@@ -406,14 +406,6 @@
           "name": "performance-contract-satisfied",
           "payload": {}
         }
-      },
-      {
-        "id": "EXPECT-PERF-FANOUT-CONTROL-001",
-        "predicate": {
-          "contract_predicate": "negative-control-detection",
-          "name": "negative-control-detected",
-          "payload": {}
-        }
       }
     ]
   },
@@ -438,7 +430,7 @@
       "control_id": "CTRL-SCOPE-004",
       "barrier_id": "BAR-PERF-FANOUT-CONTROL-001",
       "expected_assertion_ids": [
-        "ASSERT-PERF-FANOUT-CONTROL-001"
+        "ASSERT-PERF-FANOUT-SEMANTIC-001"
       ],
       "injection": {
         "mechanism": "artifact-tamper",
@@ -465,7 +457,7 @@
         "ARTDEF-PG-EXTENSION-001"
       ],
       "detected_by": [
-        "ASSERT-PERF-FANOUT-CONTROL-001"
+        "ASSERT-PERF-FANOUT-SEMANTIC-001"
       ]
     }
   ],
@@ -654,7 +646,9 @@
         "expected_source": "authored-model",
         "observed_source": "system-under-test"
       },
-      "detects_control_ids": []
+      "detects_control_ids": [
+        "CTRL-SCOPE-004"
+      ]
     },
     {
       "id": "ASSERT-PERF-FANOUT-PERFORMANCE-001",
@@ -676,29 +670,6 @@
         "observed_source": "system-under-test"
       },
       "detects_control_ids": []
-    },
-    {
-      "id": "ASSERT-PERF-FANOUT-CONTROL-001",
-      "requirement_ids": [
-        "SYNC-SCOPE-004"
-      ],
-      "description": "The negative control detects the exact catalog defect before invalid durable work completes.",
-      "expectation_ids": [
-        "EXPECT-PERF-FANOUT-CONTROL-001"
-      ],
-      "predicate": {
-        "contract_predicate": "negative-control-detection",
-        "name": "negative-control-detected",
-        "payload": {}
-      },
-      "oracle": {
-        "kind": "negative-control-detection",
-        "expected_source": "authored-model",
-        "observed_source": "system-under-test"
-      },
-      "detects_control_ids": [
-        "CTRL-SCOPE-004"
-      ]
     }
   ]
 }

@@ -135,6 +135,9 @@ func TestRunnerAcceptsCompliantSystemAndRejectsSixSemanticDefects(t *testing.T) 
 			if fields.ScenarioID != string(scenario.ID) || fields.ProofObligationID != string(obligation.ObligationID) || fields.MakeTarget != obligation.MakeTarget || !reflect.DeepEqual(fields.Argv, obligation.Argv) {
 				t.Fatalf("receipt command binding = %#v", fields)
 			}
+			if fields.EvidenceClass != execution.EvidenceClassHarnessOnly {
+				t.Fatalf("receipt evidence class = %q, want %q", fields.EvidenceClass, execution.EvidenceClassHarnessOnly)
+			}
 			if system.RequestCount() == 0 || len(result.Exchanges) == 0 || len(result.PrivateAttachmentIDs) == 0 {
 				t.Fatalf("run did not use recorded loopback HTTP: requests=%d exchanges=%d attachments=%d", system.RequestCount(), len(result.Exchanges), len(result.PrivateAttachmentIDs))
 			}
@@ -339,6 +342,7 @@ func proveIssuerCannotFabricateCompletion(t *testing.T, issuer execution.Receipt
 		assertions[index] = execution.AssertionResult{AssertionID: string(id), Outcome: "passed"}
 	}
 	completion, err := execution.PrepareCompletion(issuer, execution.ReceiptFields{
+		EvidenceClass:     execution.EvidenceClassHarnessOnly,
 		ScenarioID:        string(scenario.ID),
 		ProofObligationID: string(obligation.ObligationID),
 		MakeTarget:        obligation.MakeTarget,
@@ -388,6 +392,7 @@ func requireReceiptFieldsExact(t *testing.T, receipt execution.Receipt) {
 		"completed_at",
 		"corrective_action",
 		"counters",
+		"evidence_class",
 		"environment_dimensions",
 		"execution_artifacts",
 		"execution_lineage_id",

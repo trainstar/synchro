@@ -1,0 +1,12 @@
+diff --git a/extensions/synchro-core/src/checksum.rs b/extensions/synchro-core/src/checksum.rs
+--- a/extensions/synchro-core/src/checksum.rs
++++ b/extensions/synchro-core/src/checksum.rs
+@@ -665,7 +665,7 @@ pub fn scope_digest_preimage(
+     append_text(&mut preimage, scope_id)?;
+     append_u64(
+         &mut preimage,
+-        u64::try_from(ordered.len())
++        u64::try_from(ordered.len().saturating_sub(1))
+             .map_err(|_| DigestError::new("scope cardinality exceeds u64"))?,
+     );
+     for entry in ordered {

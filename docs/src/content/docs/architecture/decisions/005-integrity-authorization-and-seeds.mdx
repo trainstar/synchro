@@ -342,6 +342,13 @@ database and repository, rotated by deployment tooling, and restricted by
 SCRAM-SHA-256 or certificate authentication. Readiness verifies the configured
 worker login OID and that it remains the sole runtime replication principal.
 
+Release verification receives the worker login through
+`SYNCHRO_CONFORMANCE_WORKER_USER`. It receives the secret through
+`SYNCHRO_CONFORMANCE_WORKER_PASSWORD_FILE`. The harness does not create or copy
+the credential. It installs a database-specific SCRAM-SHA-256 rule before a
+worker-specific rejection rule. Negative controls reject a wrong secret,
+another database, and passwordless local access.
+
 The installation applies all of these default-deny rules:
 
 ```sql

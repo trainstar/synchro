@@ -1,6 +1,6 @@
 // Package synchroapi provides a standalone HTTP adapter for the synchro PostgreSQL
 // extension. It is a thin passthrough layer: parse HTTP request, call
-// SELECT synchro_*() via database/sql, forward the JSONB response.
+// SELECT synchro.synchro_*() via database/sql, forward the JSONB response.
 //
 // This package has zero dependency on the synchro engine module. Users bring
 // their own *sql.DB (pgx/v5 stdlib recommended) and auth integration.
@@ -23,8 +23,19 @@
 package synchroapi
 
 import (
+	"context"
 	"database/sql"
+	"encoding/json"
 	"net/http"
+	"time"
+)
+
+const (
+	maxReadinessResultBytes = 64
+
+	// DefaultDatabaseQueryTimeout bounds one canonical extension call. It remains
+	// below the standalone server write timeout.
+	DefaultDatabaseQueryTimeout = 25 * time.Second
 )
 
 // Config configures the sync HTTP handler.
@@ -46,18 +57,28 @@ type Config struct {
 	// Mutually exclusive with JWTSecret and UserIDResolver.
 	JWKSURL string
 
+	// JWKSContext controls the JWKS refresh lifecycle. It is required when
+	// JWKSURL is set. Cancel it when the handler is no longer in use.
+	JWKSContext context.Context
+
 	// JWTUserClaim is the JWT claim containing the user ID (default: "sub").
 	JWTUserClaim string
 
 	// MinClientVersion is the minimum client version allowed (semver).
-	// When set, requests with X-App-Version below this are rejected with 426.
+	// When set, authenticated sync requests must send exactly one
+	// X-Client-Version or X-App-Version header at or above this version.
 	// Leave empty to skip version checking.
 	MinClientVersion string
+
+	// DatabaseQueryTimeout bounds one canonical extension call. A zero value uses
+	// DefaultDatabaseQueryTimeout. A negative value is invalid.
+	DatabaseQueryTimeout time.Duration
 }
 
 // Handler holds the database connection and serves sync endpoints.
 type Handler struct {
-	db *sql.DB
+	db           *sql.DB
+	queryTimeout time.Duration
 }
 
 // Routes returns an http.Handler with all sync endpoints mounted.
@@ -74,19 +95,30 @@ type Handler struct {
 //	POST /sync/rebuild  (auth required)
 //	GET  /sync/schema   (no auth)
 //	GET  /sync/tables   (no auth)
-//	GET  /sync/debug    (auth required)
+//	GET  /ready         (no auth)
 func Routes(cfg Config) http.Handler {
 	if cfg.DB == nil {
 		panic("synchroapi: Config.DB is required")
 	}
+	if cfg.DatabaseQueryTimeout < 0 {
+		panic("synchroapi: Config.DatabaseQueryTimeout must not be negative")
+	}
+	queryTimeout := cfg.DatabaseQueryTimeout
+	if queryTimeout == 0 {
+		queryTimeout = DefaultDatabaseQueryTimeout
+	}
+	if queryTimeout <= 0 {
+		panic("synchroapi: effective database query timeout must be positive")
+	}
 
-	h := &Handler{db: cfg.DB}
+	h := &Handler{db: cfg.DB, queryTimeout: queryTimeout}
 
 	mux := http.NewServeMux()
 
 	// Unauthenticated endpoints.
 	mux.HandleFunc("/sync/schema", h.serveSchema)
 	mux.HandleFunc("/sync/tables", h.serveTables)
+	mux.HandleFunc("/ready", h.serveReadiness)
 
 	// Authenticated endpoints wrapped in JWT middleware.
 	authMux := http.NewServeMux()
@@ -94,15 +126,41 @@ func Routes(cfg Config) http.Handler {
 	authMux.HandleFunc("/sync/pull", h.servePull)
 	authMux.HandleFunc("/sync/push", h.servePush)
 	authMux.HandleFunc("/sync/rebuild", h.serveRebuild)
-	authMux.HandleFunc("/sync/debug", h.serveDebug)
 
-	authed := authMiddleware(cfg, authMux)
+	authed := authMiddleware(cfg, versionCheckMiddleware(cfg.MinClientVersion, authMux))
 	mux.Handle("/sync/connect", authed)
 	mux.Handle("/sync/pull", authed)
 	mux.Handle("/sync/push", authed)
 	mux.Handle("/sync/rebuild", authed)
-	mux.Handle("/sync/debug", authed)
 
-	// Apply version check as outermost middleware.
-	return versionCheckMiddleware(cfg.MinClientVersion, mux)
+	return mux
+}
+
+func (h *Handler) serveReadiness(w http.ResponseWriter, r *http.Request) {
+	if !requireMethod(w, r, http.MethodGet) {
+		return
+	}
+
+	raw, err := h.queryJSONB(r.Context(), "SELECT synchro.synchro_readiness()")
+	if err != nil || !strictReadiness(raw) {
+		writeRawJSON(w, http.StatusServiceUnavailable, []byte(`{"ready":false}`))
+		return
+	}
+	writeRawJSON(w, http.StatusOK, []byte(`{"ready":true}`))
+}
+
+func strictReadiness(raw []byte) bool {
+	if len(raw) == 0 || len(raw) > maxReadinessResultBytes || validateJSONObjectJSON(raw) != nil {
+		return false
+	}
+	var result map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &result); err != nil || len(result) != 1 {
+		return false
+	}
+	encodedReady, ok := result["ready"]
+	if !ok {
+		return false
+	}
+	var ready bool
+	return json.Unmarshal(encodedReady, &ready) == nil && ready
 }

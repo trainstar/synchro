@@ -109,7 +109,7 @@ func decodeClosedEvidence(data []byte, destination *Evidence) error {
 		return fmt.Errorf("%w: decode inventory evidence: %v", ErrInvalidEvidence, err)
 	}
 	allowed := map[string]struct{}{
-		"$schema": {}, "schema_version": {}, "evidence_id": {}, "receipt_id": {}, "candidate_id": {},
+		"$schema": {}, "schema_version": {}, "evidence_id": {}, "receipt_id": {}, "evidence_class": {}, "candidate_id": {},
 		"release_version": {}, "protocol_version": {}, "contract_snapshot_sha256": {}, "support_cell_id": {},
 		"scenario_id": {}, "proof_obligation_id": {}, "requirement_ids": {}, "proof_type": {}, "source_commit": {},
 		"generator": {}, "run": {}, "environment": {}, "assertions": {}, "attachments": {}, "attachment_ids": {},

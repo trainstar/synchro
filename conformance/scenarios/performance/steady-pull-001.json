@@ -364,7 +364,7 @@
         "SYNC-INTEGRITY-002"
       ],
       "assertion_ids": [
-        "ASSERT-PERF-STEADY-PULL-CONTROL-001"
+        "ASSERT-PERF-STEADY-PULL-SEMANTIC-001"
       ],
       "proof_type": "negative-control",
       "support_cell_id": null,
@@ -568,7 +568,7 @@
       "scenario_id": "SCN-PERF-STEADY-PULL-001",
       "requirement_id": "SYNC-INTEGRITY-002",
       "proof_obligation_id": "OBL-PERF-STEADY-PULL-CONTROL-001",
-      "assertion_id": "ASSERT-PERF-STEADY-PULL-CONTROL-001",
+      "assertion_id": "ASSERT-PERF-STEADY-PULL-SEMANTIC-001",
       "proof_type": "negative-control",
       "support_cell_id": null
     }
@@ -757,14 +757,6 @@
           "name": "performance-contract-satisfied",
           "payload": {}
         }
-      },
-      {
-        "id": "EXPECT-PERF-STEADY-PULL-CONTROL-001",
-        "predicate": {
-          "contract_predicate": "negative-control-detection",
-          "name": "negative-control-detected",
-          "payload": {}
-        }
       }
     ]
   },
@@ -789,7 +781,7 @@
       "control_id": "CTRL-INTEGRITY-002",
       "barrier_id": "BAR-PERF-STEADY-PULL-CONTROL-001",
       "expected_assertion_ids": [
-        "ASSERT-PERF-STEADY-PULL-CONTROL-001"
+        "ASSERT-PERF-STEADY-PULL-SEMANTIC-001"
       ],
       "injection": {
         "mechanism": "wire-fault",
@@ -819,7 +811,7 @@
         "ARTDEF-RN-NPM-001"
       ],
       "detected_by": [
-        "ASSERT-PERF-STEADY-PULL-CONTROL-001"
+        "ASSERT-PERF-STEADY-PULL-SEMANTIC-001"
       ]
     }
   ],
@@ -903,7 +895,9 @@
         "expected_source": "authored-model",
         "observed_source": "system-under-test"
       },
-      "detects_control_ids": []
+      "detects_control_ids": [
+        "CTRL-INTEGRITY-002"
+      ]
     },
     {
       "id": "ASSERT-PERF-STEADY-PULL-PERFORMANCE-001",
@@ -925,29 +919,6 @@
         "observed_source": "system-under-test"
       },
       "detects_control_ids": []
-    },
-    {
-      "id": "ASSERT-PERF-STEADY-PULL-CONTROL-001",
-      "requirement_ids": [
-        "SYNC-INTEGRITY-002"
-      ],
-      "description": "The negative control detects the exact catalog defect before invalid durable work completes.",
-      "expectation_ids": [
-        "EXPECT-PERF-STEADY-PULL-CONTROL-001"
-      ],
-      "predicate": {
-        "contract_predicate": "negative-control-detection",
-        "name": "negative-control-detected",
-        "payload": {}
-      },
-      "oracle": {
-        "kind": "negative-control-detection",
-        "expected_source": "authored-model",
-        "observed_source": "system-under-test"
-      },
-      "detects_control_ids": [
-        "CTRL-INTEGRITY-002"
-      ]
     }
   ]
 }

@@ -34,7 +34,7 @@
       "scope_set_version": 13,
       "schema": {
         "version": 8,
-        "hash": "8b21d2a1",
+        "hash": "0000000000000000000000000000000000000000000000000000000000000000",
         "action": "rebuild_local"
       },
       "scopes": {
@@ -51,10 +51,36 @@
         "remove": []
       },
       "schema_definition": {
+        "schema_version": 8,
+        "schema_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+        "parent_schema": {
+          "version": 7,
+          "hash": "3b6f9f2f00000000000000000000000000000000000000000000000000000000"
+        },
+        "transition_class": "class_3",
+        "compatibility_floor": 8,
         "tables": [
           {
+            "table_id": "tbl_exercises",
+            "relation_id": "rel_exercises",
             "name": "exercises",
-            "composition": "multi_scope"
+            "primary_key_field_id": "fld_exercises_id",
+            "lifecycle": {
+              "created_at_field_id": null,
+              "updated_at_field_id": null,
+              "deleted_at_field_id": null
+            },
+            "composition": "multi_scope",
+            "fields": [
+              {
+                "field_id": "fld_exercises_id",
+                "name": "id",
+                "type": "string",
+                "nullable": false,
+                "writable": false
+              }
+            ],
+            "indexes": []
           }
         ]
       }

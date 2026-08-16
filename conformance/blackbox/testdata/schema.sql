@@ -40,6 +40,14 @@ CREATE TABLE cf_document_members (
 CREATE INDEX cf_document_members_document_id_idx ON cf_document_members (document_id);
 CREATE INDEX cf_document_members_member_id_idx ON cf_document_members (member_id);
 
+CREATE TABLE cf_document_access (
+    id UUID PRIMARY KEY,
+    document_id UUID NOT NULL REFERENCES cf_documents (id),
+    owner_id TEXT NOT NULL
+);
+
+CREATE INDEX cf_document_access_document_id_idx ON cf_document_access (document_id);
+
 CREATE TABLE cf_document_notes (
     id UUID PRIMARY KEY,
     document_id UUID NOT NULL REFERENCES cf_documents (id),

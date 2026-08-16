@@ -552,6 +552,7 @@ func reservedCandidatePaths(candidate Candidate, manifest FinalManifest) map[str
 
 func unchangedLineageBindings(predecessor, successor Evidence) bool {
 	return predecessor.CandidateID == successor.CandidateID &&
+		predecessor.EvidenceClass == successor.EvidenceClass &&
 		predecessor.ReleaseVersion == successor.ReleaseVersion &&
 		predecessor.ProtocolVersion == successor.ProtocolVersion &&
 		predecessor.ContractSnapshotSHA256 == successor.ContractSnapshotSHA256 &&

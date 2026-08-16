@@ -1,0 +1,14 @@
+diff --git a/extensions/synchro-pg/src/pull.rs b/extensions/synchro-pg/src/pull.rs
+--- a/extensions/synchro-pg/src/pull.rs
++++ b/extensions/synchro-pg/src/pull.rs
+@@ -234,9 +234,9 @@ pub(crate) fn pull(user_id: &str, request: PullRequest) -> PullResponse {
+                 .get(scope_id)
+                 .is_some_and(|candidates| candidates.len() > selected.len());
+             let safe_position = if remaining {
+                 selected.last().map(|candidate| &candidate.entry.position)
+             } else {
+-                Some(&boundary.position)
++                selected.last().map(|candidate| &candidate.entry.position)
+             };
+             if let Some(safe_position) = safe_position {
+                 let context = ScopeCursorContext::new(

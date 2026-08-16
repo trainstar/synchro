@@ -42,14 +42,17 @@ impl ChangelogEntry {
 /// Entries are assumed to be ordered by seq (ascending). For duplicate records,
 /// the later entry replaces the earlier one **at the same position** in the
 /// output slice, preserving the original order of first appearance.
-///
-/// Matches Go `deduplicateEntries` exactly.
 pub fn deduplicate_entries(entries: &[ChangelogEntry]) -> Vec<RecordRef> {
-    let mut seen = std::collections::HashMap::<String, usize>::with_capacity(entries.len());
+    let mut seen =
+        std::collections::HashMap::<(String, String, String), usize>::with_capacity(entries.len());
     let mut refs: Vec<RecordRef> = Vec::with_capacity(entries.len());
 
     for e in entries {
-        let key = format!("{}:{}", e.table_name, e.record_id);
+        let key = (
+            e.bucket_id.clone(),
+            e.table_name.clone(),
+            e.record_id.clone(),
+        );
         if let Some(&idx) = seen.get(&key) {
             refs[idx] = RecordRef {
                 table_name: e.table_name.clone(),
@@ -192,19 +195,22 @@ mod tests {
     }
 
     #[test]
-    fn different_buckets_same_record_deduped() {
-        // Same table+record appearing in different buckets. Dedup key is
-        // (table_name, record_id), NOT (table_name, record_id, bucket_id).
-        // The later entry replaces the earlier regardless of bucket.
+    fn different_scopes_same_record_are_preserved() {
+        // A record can appear in more than one scope. Each scope needs its
+        // own entry for selective synchronization.
         let entries = vec![
             entry(1, "items", "a", "bucket_x", ChangeOperation::Insert),
             entry(2, "items", "a", "bucket_y", ChangeOperation::Update),
         ];
         let refs = deduplicate_entries(&entries);
-        assert_eq!(refs.len(), 1);
-        assert_eq!(refs[0].seq, 2);
-        assert_eq!(refs[0].bucket_id, "bucket_y");
-        assert_eq!(refs[0].scope_id(), "bucket_y");
-        assert_eq!(refs[0].operation, ChangeOperation::Update);
+        assert_eq!(refs.len(), 2);
+        assert_eq!(refs[0].seq, 1);
+        assert_eq!(refs[0].bucket_id, "bucket_x");
+        assert_eq!(refs[0].scope_id(), "bucket_x");
+        assert_eq!(refs[0].operation, ChangeOperation::Insert);
+        assert_eq!(refs[1].seq, 2);
+        assert_eq!(refs[1].bucket_id, "bucket_y");
+        assert_eq!(refs[1].scope_id(), "bucket_y");
+        assert_eq!(refs[1].operation, ChangeOperation::Update);
     }
 }

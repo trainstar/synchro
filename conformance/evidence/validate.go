@@ -48,13 +48,13 @@ func validateEvidence(ctx context.Context, repoRoot string, candidate Candidate,
 	if err := verifyCandidateRoot(candidate); err != nil {
 		return fmt.Errorf("%w: candidate root changed: %v", ErrInvalidEvidence, err)
 	}
-	if evidence.SchemaURI != "https://synchro.dev/conformance/schemas/evidence-v2.schema.json" || evidence.SchemaVersion != 2 || evidence.CandidateID != candidate.ID || evidence.ReleaseVersion != candidate.ReleaseVersion || evidence.ProtocolVersion != candidate.ProtocolVersion || evidence.ContractSnapshotSHA256 != candidate.ContractSnapshotSHA256 || evidence.SourceCommit != candidate.SourceCommit || evidence.ReceiptID == "" || evidence.RunnerDigest != candidate.RunnerDigest {
+	if evidence.SchemaURI != "https://synchro.dev/conformance/schemas/evidence-v2.schema.json" || evidence.SchemaVersion != 2 || evidence.EvidenceClass != execution.EvidenceClassCandidate || evidence.CandidateID != candidate.ID || evidence.ReleaseVersion != candidate.ReleaseVersion || evidence.ProtocolVersion != candidate.ProtocolVersion || evidence.ContractSnapshotSHA256 != candidate.ContractSnapshotSHA256 || evidence.SourceCommit != candidate.SourceCommit || evidence.ReceiptID == "" || evidence.RunnerDigest != candidate.RunnerDigest {
 		return fmt.Errorf("%w: evidence candidate binding", ErrInvalidEvidence)
 	}
 	if evidence.Run.DurationMS != evidence.Run.CompletedAt.Sub(evidence.Run.StartedAt).Milliseconds() || evidence.Run.MakeTarget == "" || len(evidence.Run.Argv) != 2 || evidence.Run.Argv[0] != "make" || evidence.Run.Argv[1] != evidence.Run.MakeTarget {
 		return fmt.Errorf("%w: evidence run projection", ErrInvalidEvidence)
 	}
-	if evidence.Receipt.Fields.ReceiptID != evidence.ReceiptID || evidence.Receipt.Fields.RunnerDigest != evidence.RunnerDigest || evidence.Receipt.Fields.CandidateLockSHA256 != candidate.LockSHA256 || evidence.Receipt.Fields.RunnerExecutableSHA256 == "" {
+	if evidence.Receipt.Fields.ReceiptID != evidence.ReceiptID || evidence.Receipt.Fields.EvidenceClass != execution.EvidenceClassCandidate || evidence.Receipt.Fields.RunnerDigest != evidence.RunnerDigest || evidence.Receipt.Fields.CandidateLockSHA256 != candidate.LockSHA256 || evidence.Receipt.Fields.RunnerExecutableSHA256 == "" {
 		return fmt.Errorf("%w: receipt projection", ErrInvalidEvidence)
 	}
 	if evidence.EvidenceID != evidenceID(evidence.Receipt.Fields) {
@@ -97,7 +97,7 @@ func validateEvidence(ctx context.Context, repoRoot string, candidate Candidate,
 }
 
 func compareEvidenceToReceipt(evidence Evidence, fields execution.ReceiptFields) error {
-	if evidence.ReceiptID != fields.ReceiptID || evidence.RunnerDigest != fields.RunnerDigest ||
+	if evidence.ReceiptID != fields.ReceiptID || evidence.EvidenceClass != fields.EvidenceClass || evidence.RunnerDigest != fields.RunnerDigest ||
 		evidence.Generator.Name != fields.GeneratorName || evidence.Generator.Version != fields.GeneratorVersion || evidence.Generator.BinarySHA256 != fields.GeneratorBinarySHA256 ||
 		evidence.ScenarioID != fields.ScenarioID || evidence.ProofObligationID != fields.ProofObligationID ||
 		evidence.Run.ID != fields.RunID || evidence.Run.ExecutionLineageID != fields.ExecutionLineageID ||

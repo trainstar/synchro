@@ -145,9 +145,6 @@ pub fn build_edge_diff_entries(
 ///
 /// Matches Go `dedupeBuckets`.
 pub fn dedup_buckets(buckets: &[String]) -> Vec<String> {
-    if buckets.len() < 2 {
-        return buckets.iter().filter(|b| !b.is_empty()).cloned().collect();
-    }
     let mut seen = HashSet::with_capacity(buckets.len());
     let mut out = Vec::with_capacity(buckets.len());
     for b in buckets {
@@ -295,6 +292,11 @@ mod tests {
     fn dedup_buckets_empty() {
         let result: Vec<String> = dedup_buckets(&[]);
         assert!(result.is_empty());
+    }
+
+    #[test]
+    fn dedup_buckets_two_equal_items() {
+        assert_eq!(dedup_buckets(&[s("x"), s("x")]), vec![s("x")]);
     }
 
     // Multi-bucket reassignment and fan-out/fan-in edge cases.

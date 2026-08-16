@@ -1,0 +1,360 @@
+    #[pg_test]
+    fn test_push_preserves_transaction_wide_fence_ordinals() {
+        setup_test_tables();
+        let user_id = "ordinal-user";
+        let client_id = "c1";
+        let direct_id = "e0000000-0000-4000-8000-000000000004";
+        let first_push_id = "e0000000-0000-4000-8000-000000000005";
+        let second_push_id = "e0000000-0000-4000-8000-000000000006";
+        register_client(user_id, client_id);
+        Spi::run_with_args(
+            "INSERT INTO test_orders (id, user_id, title) VALUES ($1::uuid, $2, 'direct')",
+            &[direct_id.into(), user_id.into()],
+        )
+        .unwrap();
+
+        for (label, record_id) in [
+            ("ordinal-first", first_push_id),
+            ("ordinal-second", second_push_id),
+        ] {
+            let response = push_client(
+                user_id,
+                client_id,
+                label,
+                vec![push_mutation(
+                    user_id,
+                    client_id,
+                    label,
+                    "test_orders",
+                    "insert",
+                    record_id,
+                    None,
+                    Some(&[("user_id", json!(user_id)), ("title", json!(label))]),
+                )],
+            );
+            assert_eq!(response.json["accepted"][0]["status"], "applied");
+        }
+
+        let ordered: Option<bool> = Spi::get_one_with_args(
+            "SELECT direct.dml_ordinal < first_push.dml_ordinal
+                    AND first_push.dml_ordinal < second_push.dml_ordinal
+             FROM sync_write_fences direct
+             CROSS JOIN sync_write_fences first_push
+             CROSS JOIN sync_write_fences second_push
+             WHERE direct.new_record_id = $1
+               AND first_push.new_record_id = $2
+               AND second_push.new_record_id = $3",
+            &[
+                direct_id.into(),
+                first_push_id.into(),
+                second_push_id.into(),
+            ],
+        )
+        .unwrap();
+        assert_eq!(ordered, Some(true));
+    }
+
+    #[pg_test]
+    fn test_backfill_bucket_edges_populates_existing_rows() {
+        setup_test_tables();
+        Spi::run(
+            "INSERT INTO test_products (id, name, price)
+             VALUES ('13131313-1313-1313-1313-131313131313', 'Backfill Product', 12)",
+        )
+        .unwrap();
+        insert_changelog(
+            "global",
+            "test_products",
+            "13131313-1313-1313-1313-131313131313",
+            1,
+        );
+
+        let resp: Option<pgrx::JsonB> =
+            Spi::get_one("SELECT synchro_backfill_bucket_edges()").unwrap();
+        let resp = resp.unwrap().0;
+        assert!(resp["edges"].as_i64().unwrap_or(0) > 0);
+
+        let edge_count: Option<i64> = Spi::get_one(
+            "SELECT count(*) FROM sync_bucket_edges
+             WHERE table_name = 'test_products'
+               AND record_id = '13131313-1313-1313-1313-131313131313'
+               AND bucket_id = 'global'",
+        )
+        .unwrap();
+        assert_eq!(edge_count, Some(1));
+
+        let row_version: Option<String> = Spi::get_one(
+            "SELECT row_version::text
+             FROM sync_bucket_edges
+             WHERE table_name = 'test_products'
+               AND record_id = '13131313-1313-1313-1313-131313131313'
+               AND bucket_id = 'global'",
+        )
+        .unwrap();
+        assert!(row_version.is_some());
+    }
+
+    #[pg_test]
+    fn test_backfill_digest_failure_does_not_replace_live_edges() {
+        setup_test_tables();
+        let record_id = "15151515-1515-1515-1515-151515151515";
+        Spi::run(&format!(
+            "INSERT INTO test_products (id, name, price)
+             VALUES ('{record_id}', 'Atomic Product', 12)"
+        ))
+        .unwrap();
+        insert_changelog("global", "test_products", record_id, 1);
+        insert_edge("test_products", record_id, "global");
+        let generation_before = backfill_scope_generation("global");
+
+        Spi::run_with_args(
+            "UPDATE sync_captured_rows
+             SET row_data = jsonb_set(row_data, '{name}', to_jsonb('corrupted'::text))
+             WHERE record_id = $1",
+            &[record_id.into()],
+        )
+        .unwrap();
+        Spi::run(
+            "DO $test$
+             DECLARE failed BOOLEAN := false;
+             BEGIN
+                 BEGIN
+                     PERFORM synchro_backfill_bucket_edges();
+                 EXCEPTION WHEN OTHERS THEN
+                     failed := true;
+                 END;
+                 IF NOT failed THEN
+                     RAISE EXCEPTION 'backfill unexpectedly succeeded';
+                 END IF;
+             END
+             $test$",
+        )
+        .unwrap();
+
+        let edge_count: Option<i64> = Spi::get_one_with_args(
+            "SELECT count(*)
+             FROM sync_bucket_edges
+             WHERE table_name = 'test_products' AND record_id = $1 AND bucket_id = 'global'",
+            &[record_id.into()],
+        )
+        .unwrap();
+        assert_eq!(edge_count, Some(1));
+        assert_eq!(backfill_scope_generation("global"), generation_before);
+    }
+
+    #[pg_test]
+    fn test_backfill_invalidates_changed_scope_cursors() {
+        setup_test_tables();
+        register_client("u1", "c1");
+        register_client("u2", "c2");
+        let record_id = "16161616-1616-1616-1616-161616161616";
+        Spi::run_with_args(
+            "INSERT INTO test_orders (id, user_id, title)
+             VALUES ($1::uuid, 'u1', 'Moved')",
+            &[record_id.into()],
+        )
+        .unwrap();
+        insert_changelog("user:u1", "test_orders", record_id, 1);
+        insert_edge("test_orders", record_id, "user:u1");
+        let old_cursor = scope_cursor_ref("u1", "c1", "user:u1", 0);
+        let old_generation = backfill_scope_generation("user:u1");
+
+        Spi::run_with_args(
+            "UPDATE test_orders SET user_id = 'u2' WHERE id = $1::uuid",
+            &[record_id.into()],
+        )
+        .unwrap();
+        insert_changelog("user:u2", "test_orders", record_id, 2);
+
+        let response: Option<pgrx::JsonB> =
+            Spi::get_one("SELECT synchro_backfill_bucket_edges()").unwrap();
+        let response = response.unwrap().0;
+        assert_eq!(
+            response["affected_scopes"].as_array().unwrap(),
+            &vec![json!("user:u1"), json!("user:u2")]
+        );
+        assert!(backfill_scope_generation("user:u1") > old_generation);
+        assert!(backfill_scope_generation("user:u2") > 0);
+
+        let pull = pull_client("u1", "c1", 1, json!({ "user:u1": old_cursor }), 100);
+        assert_eq!(pull["changes"].as_array().unwrap().len(), 0);
+        assert_eq!(pull["rebuild"].as_array().unwrap(), &vec![json!("user:u1")]);
+    }
+
+    #[pg_test]
+    fn test_backfill_preserves_unrelated_scope_generation() {
+        setup_test_tables();
+        register_client("u1", "c1");
+        register_client("u2", "c2");
+        register_client("u3", "c3");
+        let changed_id = "17171717-1717-1717-1717-171717171717";
+        let unchanged_id = "18181818-1818-1818-1818-181818181818";
+        Spi::run_with_args(
+            "INSERT INTO test_orders (id, user_id, title) VALUES
+                 ($1::uuid, 'u1', 'Moved'),
+                 ($2::uuid, 'u3', 'Stable')",
+            &[changed_id.into(), unchanged_id.into()],
+        )
+        .unwrap();
+        insert_changelog("user:u1", "test_orders", changed_id, 1);
+        insert_changelog("user:u3", "test_orders", unchanged_id, 1);
+        insert_edge("test_orders", changed_id, "user:u1");
+        insert_edge("test_orders", unchanged_id, "user:u3");
+        let unchanged_generation = backfill_scope_generation("user:u3");
+
+        Spi::run_with_args(
+            "UPDATE test_orders SET user_id = 'u2' WHERE id = $1::uuid",
+            &[changed_id.into()],
+        )
+        .unwrap();
+        insert_changelog("user:u2", "test_orders", changed_id, 2);
+        let _: Option<pgrx::JsonB> =
+            Spi::get_one("SELECT synchro_backfill_bucket_edges()").unwrap();
+
+        assert_eq!(
+            backfill_scope_generation("user:u3"),
+            unchanged_generation
+        );
+        assert_eq!(
+            backfill_edge_count("test_orders", unchanged_id, "user:u3"),
+            1
+        );
+        assert_eq!(
+            backfill_edge_count("test_orders", changed_id, "user:u1"),
+            0
+        );
+        assert_eq!(
+            backfill_edge_count("test_orders", changed_id, "user:u2"),
+            1
+        );
+    }
+
+    #[pg_test]
+    fn test_backfill_atomically_replaces_old_and_new_edges() {
+        setup_test_tables();
+        let record_id = "19191919-1919-1919-1919-191919191919";
+        Spi::run_with_args(
+            "INSERT INTO test_orders (id, user_id, title) VALUES
+                 ($1::uuid, 'before', 'Replacement')",
+            &[record_id.into()],
+        )
+        .unwrap();
+        insert_changelog("user:before", "test_orders", record_id, 1);
+        insert_edge("test_orders", record_id, "user:before");
+        Spi::run_with_args(
+            "UPDATE test_orders SET user_id = 'after' WHERE id = $1::uuid",
+            &[record_id.into()],
+        )
+        .unwrap();
+        insert_changelog("user:after", "test_orders", record_id, 2);
+
+        let response: Option<pgrx::JsonB> =
+            Spi::get_one("SELECT synchro_backfill_bucket_edges()").unwrap();
+        assert_eq!(response.unwrap().0["edges"].as_i64(), Some(1));
+        assert_eq!(
+            backfill_edge_count("test_orders", record_id, "user:before"),
+            0
+        );
+        assert_eq!(
+            backfill_edge_count("test_orders", record_id, "user:after"),
+            1
+        );
+        let installed = Spi::connect(|client| {
+            let row = client
+                .select(
+                    "SELECT row_version::text AS row_version, encode(checksum, 'hex') AS checksum
+                     FROM sync_bucket_edges
+                     WHERE table_name = 'test_orders' AND record_id = $1 AND bucket_id = 'user:after'",
+                    None,
+                    &[record_id.into()],
+                )?
+                .first();
+            Ok::<_, pgrx::spi::Error>((
+                row.get_by_name::<String, &str>("row_version")?,
+                row.get_by_name::<String, &str>("checksum")?,
+            ))
+        })
+        .unwrap();
+        assert!(installed.0.is_some());
+        assert_eq!(installed.1.as_deref().map(str::len), Some(64));
+    }
+
+    #[pg_test]
+    fn test_pull_malformed_typed_effect_fails_without_progress() {
+        setup_pull_fixtures();
+        Spi::run(
+            "UPDATE sync_changelog
+             SET effect_ordinal = NULL
+             WHERE bucket_id = 'user:u1'
+               AND seq = (SELECT MIN(seq) FROM sync_changelog WHERE bucket_id = 'user:u1');
+             UPDATE sync_wal_progress
+             SET materialized_commit_lsn = NULL, materialized_end_lsn = NULL
+             WHERE singleton = true",
+        )
+        .unwrap();
+
+        let response = pull_client(
+            "u1",
+            "c1",
+            1,
+            json!({ "user:u1": scope_cursor_ref("u1", "c1", "user:u1", 0) }),
+            100,
+        );
+
+        assert_eq!(
+            response["error"]["code"].as_str(),
+            Some("sync_integrity_failure")
+        );
+        let checkpoint: Option<String> = Spi::get_one(
+            "SELECT position_kind FROM sync_client_checkpoints
+             WHERE user_id = 'u1' AND client_id = 'c1' AND bucket_id = 'user:u1'",
+        )
+        .unwrap();
+        assert_eq!(checkpoint.as_deref(), Some("generation_start"));
+    }
+
+    #[pg_test]
+    fn test_direct_write_advances_opaque_version() {
+        setup_test_tables();
+        register_client("u1", "c1");
+
+        Spi::run(
+            "INSERT INTO test_orders (id, user_id, title, updated_at) VALUES
+             ('00c5e571-1111-1111-1111-111111111111', 'u1', 'GUC Test',
+              '2025-06-15T12:00:00.000Z')",
+        )
+        .unwrap();
+        let first_version =
+            current_row_version("test_orders", "00c5e571-1111-1111-1111-111111111111");
+        Spi::run(
+            "UPDATE test_orders
+             SET title = 'Direct update'
+             WHERE id = '00c5e571-1111-1111-1111-111111111111'",
+        )
+        .unwrap();
+        let second_version =
+            current_row_version("test_orders", "00c5e571-1111-1111-1111-111111111111");
+        assert_ne!(second_version, first_version);
+    }
+
+    fn backfill_scope_generation(scope_id: &str) -> i64 {
+        Spi::get_one_with_args(
+            "SELECT membership_generation
+             FROM sync_scope_state
+             WHERE scope_id = $1",
+            &[scope_id.into()],
+        )
+        .unwrap()
+        .expect("backfill scope generation")
+    }
+
+    fn backfill_edge_count(table_name: &str, record_id: &str, bucket_id: &str) -> i64 {
+        Spi::get_one_with_args(
+            "SELECT count(*)
+             FROM sync_bucket_edges
+             WHERE table_name = $1 AND record_id = $2 AND bucket_id = $3",
+            &[table_name.into(), record_id.into(), bucket_id.into()],
+        )
+        .unwrap()
+        .expect("backfill edge count")
+    }

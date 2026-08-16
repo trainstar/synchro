@@ -3,4 +3,4 @@ default_version = '0.3.0'
 module_pathname = '$libdir/synchro_pg'
 relocatable = false
 superuser = true
-schema = 'public'
+schema = 'synchro'

@@ -23,7 +23,6 @@ import (
 	"github.com/trainstar/synchro/conformance/blackbox/baseline"
 	"github.com/trainstar/synchro/conformance/execution"
 	"github.com/trainstar/synchro/conformance/modelrunner"
-	"github.com/trainstar/synchro/conformance/mutants"
 	"github.com/trainstar/synchro/conformance/scenarios"
 )
 
@@ -55,8 +54,6 @@ func run(ctx context.Context, args []string) error {
 		return runBlackbox(ctx, args[1:])
 	case "baseline":
 		return runBaselineCommand(ctx, args[1:])
-	case "mutants":
-		return runMutants(ctx, args[1:])
 	default:
 		return errors.New("unknown command")
 	}
@@ -170,51 +167,6 @@ func runBaselineCommand(ctx context.Context, args []string) error {
 		return errors.New("baseline requires --output PATH")
 	}
 	return runDiagnosticBaseline(ctx, *repoRoot, *output)
-}
-
-func runMutants(ctx context.Context, args []string) error {
-	flags := newFlagSet("mutants")
-	repoRoot := flags.String("repo-root", "", "repository root")
-	if err := flags.Parse(args); err != nil {
-		return errors.New("mutants flags are invalid")
-	}
-	if flags.NArg() != 0 {
-		return errors.New("mutants does not accept positional arguments")
-	}
-	if *repoRoot == "" {
-		return errors.New("mutants requires --repo-root PATH")
-	}
-	fixtures := []mutantFixture{
-		{path: "conformance/scenarios/performance/pending-cycle-001.json", newMutant: func(subject mutants.Subject) mutants.Mutant { return mutants.NewOmitMutation(subject) }},
-		{path: "conformance/scenarios/performance/steady-pull-001.json", newMutant: func(subject mutants.Subject) mutants.Mutant { return mutants.NewConstantChecksum(subject) }},
-		{path: "conformance/scenarios/server/pull-divergent-checkpoints-001.json", newMutant: func(subject mutants.Subject) mutants.Mutant { return mutants.NewDuplicateDelivery(subject) }},
-		{path: "conformance/scenarios/server/pull-divergent-checkpoints-001.json", newMutant: func(subject mutants.Subject) mutants.Mutant { return mutants.NewWrongScope(subject) }},
-	}
-	results := make([]mutants.Result, 0, len(fixtures))
-	for index, fixture := range fixtures {
-		scenario, err := scenarios.LoadFile(ctx, *repoRoot, fixture.path)
-		if err != nil {
-			return operationError(ctx, "mutants load", err)
-		}
-		base, err := mutants.NewBase(int64(index + 1))
-		if err != nil {
-			return operationError(ctx, "mutants initialize", err)
-		}
-		result, err := mutants.Run(ctx, scenario, fixture.newMutant(base))
-		if err != nil {
-			return operationError(ctx, "mutants execute", err)
-		}
-		results = append(results, result)
-	}
-	if err := mutants.RequireAllDetected(results); err != nil {
-		return operationError(ctx, "mutants verify", err)
-	}
-	return nil
-}
-
-type mutantFixture struct {
-	path      string
-	newMutant func(mutants.Subject) mutants.Mutant
 }
 
 func runSyntheticHarness(ctx context.Context, repoRoot string) error {

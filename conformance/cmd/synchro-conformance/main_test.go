@@ -33,8 +33,6 @@ func TestRunRejectsInvalidCommandsAndFlags(t *testing.T) {
 		{"blackbox invalid mode", []string{"blackbox", "--repo-root", ".", "--mode", "other"}, "blackbox requires --mode"},
 		{"baseline missing root", []string{"baseline", "--output", "baseline-test"}, "baseline requires --repo-root PATH"},
 		{"baseline missing output", []string{"baseline", "--repo-root", "."}, "baseline requires --output PATH"},
-		{"mutants missing root", []string{"mutants"}, "mutants requires --repo-root PATH"},
-		{"mutants positional extra", []string{"mutants", "--repo-root", ".", "extra"}, "does not accept positional"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -66,13 +64,6 @@ func TestRunSyntheticHarnessDetectsSemanticFaults(t *testing.T) {
 	err := run(context.Background(), []string{"blackbox", "--repo-root", repositoryRoot(t), "--mode", "harness"})
 	if err != nil {
 		t.Fatalf("run synthetic harness: %v", err)
-	}
-}
-
-func TestRunMutantsRequiresAllFourSemanticDetections(t *testing.T) {
-	err := run(context.Background(), []string{"mutants", "--repo-root", repositoryRoot(t)})
-	if err != nil {
-		t.Fatalf("run mutants: %v", err)
 	}
 }
 

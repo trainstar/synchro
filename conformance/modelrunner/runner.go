@@ -560,6 +560,9 @@ func evaluateWireExpectations(scenario scenarios.Scenario, executions []Operatio
 			}
 			return &RunError{Kind: RunErrorPredicate, StepID: expectation.StepID, AssertionID: string(expectation.AssertionID), Err: fmt.Errorf("wire status, retryability, and code = %d/%t/%q, want %d/%t", status, retryable, code, expectation.HTTPStatus, expectation.Retryable)}
 		}
+		if expectation.HTTPStatus == 0 && (len(observation.Body) != 0 || observation.HasRetryAfterMilliseconds || observation.RetryAfterMilliseconds != 0) {
+			return &RunError{Kind: RunErrorPredicate, StepID: expectation.StepID, AssertionID: string(expectation.AssertionID), Err: errors.New("transport failure contains a received HTTP response")}
+		}
 		wantCode := ""
 		if expectation.ErrorCode != nil {
 			wantCode = *expectation.ErrorCode
@@ -584,9 +587,6 @@ func evaluateModelPredicates(scenario scenarios.Scenario, result Result) ([]Pred
 	}
 	results := make([]PredicateResult, 0, len(scenario.Model.ExpectedState))
 	for _, expectation := range scenario.Model.ExpectedState {
-		if expectation.Predicate.Name == "negative-control-detected" {
-			continue
-		}
 		if err := validatePredicate(expectation.Predicate); err != nil {
 			return results, &RunError{Kind: RunErrorPredicate, Expectation: expectation.ID, Err: err}
 		}
@@ -613,7 +613,7 @@ func validatePredicate(predicate scenarios.Predicate) error {
 		return errors.New("predicate payload must be an empty object")
 	}
 	switch predicate.Name {
-	case "state-equals-authored-model", "state-unchanged", "canonical-wire-outcome", "legal-state-transition", "artifact-policy-satisfied", "performance-contract-satisfied", "negative-control-detected":
+	case "state-equals-authored-model", "state-unchanged", "canonical-wire-outcome", "legal-state-transition", "artifact-policy-satisfied", "performance-contract-satisfied":
 	default:
 		return errors.New("predicate name is not in the closed authored set")
 	}
@@ -655,8 +655,6 @@ func evaluatePredicate(expectation scenarios.ModelExpectation, result Result) (b
 		return false, "no portable seed installation was executed"
 	case "performance-contract-satisfied":
 		return performanceContractSatisfied(result.ScenarioID, result), "the authored performance trace did not satisfy its closed contract"
-	case "negative-control-detected":
-		return false, "negative-control predicates require a named control run"
 	default:
 		return false, "predicate is not implemented"
 	}

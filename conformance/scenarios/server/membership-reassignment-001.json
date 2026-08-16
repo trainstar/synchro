@@ -75,7 +75,7 @@
         "SYNC-MEMBERSHIP-001"
       ],
       "assertion_ids": [
-        "ASSERT-MEMBERSHIP-REASSIGNMENT-CONTROL-001"
+        "ASSERT-MEMBERSHIP-REASSIGNMENT-SEMANTIC-001"
       ],
       "proof_type": "fault-injection",
       "support_cell_id": "SUP-PG-018",
@@ -100,7 +100,7 @@
         "SYNC-MEMBERSHIP-001"
       ],
       "assertion_ids": [
-        "ASSERT-MEMBERSHIP-REASSIGNMENT-CONTROL-001"
+        "ASSERT-MEMBERSHIP-REASSIGNMENT-SEMANTIC-001"
       ],
       "proof_type": "negative-control",
       "support_cell_id": null,
@@ -141,7 +141,7 @@
       "scenario_id": "SCN-MEMBERSHIP-REASSIGNMENT-001",
       "requirement_id": "SYNC-MEMBERSHIP-001",
       "proof_obligation_id": "OBL-MEMBERSHIP-REASSIGNMENT-FAULT-001",
-      "assertion_id": "ASSERT-MEMBERSHIP-REASSIGNMENT-CONTROL-001",
+      "assertion_id": "ASSERT-MEMBERSHIP-REASSIGNMENT-SEMANTIC-001",
       "proof_type": "fault-injection",
       "support_cell_id": "SUP-PG-018"
     },
@@ -149,7 +149,7 @@
       "scenario_id": "SCN-MEMBERSHIP-REASSIGNMENT-001",
       "requirement_id": "SYNC-MEMBERSHIP-001",
       "proof_obligation_id": "OBL-MEMBERSHIP-REASSIGNMENT-CONTROL-001",
-      "assertion_id": "ASSERT-MEMBERSHIP-REASSIGNMENT-CONTROL-001",
+      "assertion_id": "ASSERT-MEMBERSHIP-REASSIGNMENT-SEMANTIC-001",
       "proof_type": "negative-control",
       "support_cell_id": null
     }
@@ -374,14 +374,6 @@
           "name": "legal-state-transition",
           "payload": {}
         }
-      },
-      {
-        "id": "EXPECT-MEMBERSHIP-REASSIGNMENT-CONTROL-001",
-        "predicate": {
-          "contract_predicate": "negative-control-detection",
-          "name": "negative-control-detected",
-          "payload": {}
-        }
       }
     ]
   },
@@ -406,7 +398,7 @@
       "control_id": "CTRL-MEMBERSHIP-001",
       "barrier_id": "BAR-MEMBERSHIP-REASSIGNMENT-CONTROL-001",
       "expected_assertion_ids": [
-        "ASSERT-MEMBERSHIP-REASSIGNMENT-CONTROL-001"
+        "ASSERT-MEMBERSHIP-REASSIGNMENT-SEMANTIC-001"
       ],
       "injection": {
         "mechanism": "source-mutant",
@@ -433,7 +425,7 @@
         "ARTDEF-PG-EXTENSION-001"
       ],
       "detected_by": [
-        "ASSERT-MEMBERSHIP-REASSIGNMENT-CONTROL-001"
+        "ASSERT-MEMBERSHIP-REASSIGNMENT-SEMANTIC-001"
       ]
     }
   ],
@@ -855,27 +847,6 @@
       },
       "oracle": {
         "kind": "state-transition",
-        "expected_source": "authored-model",
-        "observed_source": "system-under-test"
-      },
-      "detects_control_ids": []
-    },
-    {
-      "id": "ASSERT-MEMBERSHIP-REASSIGNMENT-CONTROL-001",
-      "requirement_ids": [
-        "SYNC-MEMBERSHIP-001"
-      ],
-      "description": "The control detects an omitted old or new dependency image, skipped source row, or live-state reassignment.",
-      "expectation_ids": [
-        "EXPECT-MEMBERSHIP-REASSIGNMENT-CONTROL-001"
-      ],
-      "predicate": {
-        "contract_predicate": "negative-control-detection",
-        "name": "negative-control-detected",
-        "payload": {}
-      },
-      "oracle": {
-        "kind": "negative-control-detection",
         "expected_source": "authored-model",
         "observed_source": "system-under-test"
       },

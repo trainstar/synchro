@@ -25,20 +25,39 @@ synchro-conformance model --repo-root PATH [--scenario ID]
 
 The command loads authored scenarios. It fails if any selected scenario does not pass the reference model. A model pass validates the model execution only. It does not prove a production candidate.
 
-## Phase 3 Negative Controls
+## Real PostgreSQL Scenarios
 
-Phase 3 preserves all authored control metadata for later production-owning phases. It does not emulate those controls by changing completed model traces.
+Run the real PostgreSQL black-box tests with:
 
-Phase 3 proves independent detector behavior with four typed harness self-mutants:
+```text
+make test-blackbox
+```
 
-- omitted mutation outcome
-- constant digest
-- duplicate delivered effect
-- wrong-scope row
+The integration package runs direct semantic tests against packaged PostgreSQL and adapter artifacts. The scenario catalog separately binds the authored scenario bytes. Server tests do not satisfy native-client proof obligations.
 
-Each self-mutant changes one eligible semantic outcome. Its requirement-owned assertion must detect that change for the intended contract reason.
+The model runner remains a separate authored-contract check. It validates model execution only and does not replace the real PostgreSQL tests.
 
-Production-artifact control execution and evidence belong to the later phase that owns each production artifact.
+## Negative Controls
+
+Each control binds its fault plan, control metadata, and one requirement-owned semantic assertion.
+
+The same assertion evaluates baseline and mutated subjects.
+
+Production-artifact control execution and evidence belong to the phase that owns each production artifact.
+
+## Server Mutation Gate
+
+Run the Phase 4 production mutation gate with:
+
+```text
+make test-integration-mutants
+```
+
+The gate copies the current worktree into isolated temporary directories. It applies five exact production-source mutations for cursor advancement, WAL acknowledgment, mutation conservation, checksum correctness, and scope isolation.
+
+Each mutant must compile and fail its approved focused PostgreSQL 18 test. A surviving mutant, stale patch, build failure, or harness failure fails the gate.
+
+The WAL mutant uses the real packaged extension and black-box environment. It requires the same `SYNCHRO_CONFORMANCE_*` variables as `make test-blackbox`.
 
 ## Synthetic Harness Proof
 
@@ -48,7 +67,9 @@ Run the loopback synthetic harness with:
 synchro-conformance blackbox --repo-root PATH --mode harness
 ```
 
-This command proves that the protocol 3 harness detects and compares typed HTTP behavior. It uses a synthetic reference system. It is not real adapter, extension, or PostgreSQL proof. It cannot create release evidence.
+This command proves that the protocol 3 harness detects and compares typed HTTP behavior. It uses a synthetic reference system. It is not real adapter, extension, or PostgreSQL proof.
+
+The harness emits signed `harness-only` receipts. These receipts support harness self-tests. They cannot enter `evidence-v2` or candidate evidence.
 
 ## Protocol 2 Baseline Diagnostics
 

@@ -173,6 +173,7 @@ type Evidence struct {
 	SchemaVersion              int                                   `json:"schema_version"`
 	EvidenceID                 string                                `json:"evidence_id"`
 	ReceiptID                  string                                `json:"receipt_id"`
+	EvidenceClass              execution.EvidenceClass               `json:"evidence_class"`
 	CandidateID                string                                `json:"candidate_id"`
 	ReleaseVersion             string                                `json:"release_version"`
 	ProtocolVersion            int                                   `json:"protocol_version"`

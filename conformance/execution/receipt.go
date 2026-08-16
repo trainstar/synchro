@@ -43,6 +43,14 @@ const (
 	ResultError  Result = "error"
 )
 
+// EvidenceClass limits the use of a signed execution receipt.
+type EvidenceClass string
+
+const (
+	EvidenceClassCandidate   EvidenceClass = "candidate"
+	EvidenceClassHarnessOnly EvidenceClass = "harness-only"
+)
+
 // AssertionResult binds one authored assertion to its terminal outcome.
 type AssertionResult struct {
 	AssertionID string `json:"assertion_id"`
@@ -300,6 +308,7 @@ type ReceiptAuthentication struct {
 // A ReceiptFields value is not evidence of execution.
 type ReceiptFields struct {
 	ReceiptID              string                 `json:"receipt_id"`
+	EvidenceClass          EvidenceClass          `json:"evidence_class"`
 	ScenarioID             string                 `json:"scenario_id"`
 	ProofObligationID      string                 `json:"proof_obligation_id"`
 	MakeTarget             string                 `json:"make_target"`
@@ -1085,6 +1094,9 @@ func validateReceiptFields(fields ReceiptFields, requireID bool) error {
 	if fields.ScenarioID == "" || fields.ProofObligationID == "" || fields.MakeTarget == "" {
 		return fmt.Errorf("%w: run identity", ErrInvalidCompletion)
 	}
+	if !validEvidenceClass(fields.EvidenceClass) {
+		return fmt.Errorf("%w: evidence class", ErrInvalidCompletion)
+	}
 	if len(fields.Argv) != 2 || fields.Argv[0] != "make" || fields.Argv[1] != fields.MakeTarget {
 		return fmt.Errorf("%w: command binding", ErrInvalidCompletion)
 	}
@@ -1147,6 +1159,15 @@ func validateReceiptFields(fields ReceiptFields, requireID bool) error {
 		return err
 	}
 	return nil
+}
+
+func validEvidenceClass(value EvidenceClass) bool {
+	switch value {
+	case EvidenceClassCandidate, EvidenceClassHarnessOnly:
+		return true
+	default:
+		return false
+	}
 }
 
 func validateCommandObservation(fields ReceiptFields) error {

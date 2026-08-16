@@ -13,6 +13,7 @@
 	verify-contract \
 	conformance-mod-download \
 	lint-conformance \
+	test-conformance-testresult \
 	test-conformance-module \
 	test-conformance-imports \
 	test-conformance-contract \
@@ -24,11 +25,13 @@
 	test-conformance-faults \
 	test-blackbox-harness \
 	test-blackbox-components \
+	test-blackbox-wal \
+	test-blackbox-mutation-control \
+	parse-testresult \
 	conformance-adapter-artifact \
 	conformance-pg18-extension-artifact \
 	test-evidence \
 	test-inventory \
-	test-mutants \
 	test-conformance \
 	test-blackbox \
 	rc-check-pg18 \
@@ -40,6 +43,8 @@
 	lint-rust \
 	test \
 	test-rust-core \
+	test-rust-mutants \
+	test-integration-mutants \
 	test-rust-pg \
 	test-rust-pg-all \
 	test-adapter \
@@ -69,6 +74,8 @@
 	release-kotlin-local \
 	release-npm-dry-run \
 	local-consumer-artifacts \
+	generate-pg-sql \
+	check-pg-sql \
 	clean
 
 ANDROID_HOME ?= /opt/homebrew/share/android-commandlinetools
@@ -93,10 +100,16 @@ PGRX_ADMIN_HOST ?= $(if $(filter Darwin,$(shell uname -s)),$(PGRX_SOCKET_DIR),lo
 PGRX_ADMIN_USER ?= $(shell id -un)
 PGRX_LOG_FILE ?= $(HOME)/.pgrx/$(PGRX_PG_MAJOR).log
 PGRX_AUTOSTART ?= on
+PGRX_WORKER_LOGIN ?= synchro_test_worker_login
 PGRX_PG_CONFIG ?= $(shell awk -F'"' '/^$(PGRX_PG)[[:space:]]*=/ { print $$2 }' $(HOME)/.pgrx/config.toml)
 PGRX_PG_BIN_DIR ?= $(dir $(PGRX_PG_CONFIG))
 PGRX_PSQL ?= $(PGRX_PG_BIN_DIR)psql
 PGRX_TARGET_DIR ?= $(CURDIR)/.pgrx-target
+PGRX_TEST_NAME ?=
+MUTATION_CONTROL_TEST ?=
+TESTRESULT_TEST_NAME ?=
+BLACKBOX_TEST_PATTERN ?= .
+BLACKBOX_TEST_COUNT ?= 1
 CONFORMANCE_ADAPTER_ARTIFACT_DIR ?= $(CURDIR)/dist/conformance/synchrod-pg-adapter
 CONFORMANCE_EXTENSION_ARTIFACT ?= $(CURDIR)/dist/conformance/synchro-pg-pg18
 ADAPTER_TEST_DB ?= synchro_adapter_test
@@ -142,6 +155,7 @@ help:
 	@echo "  verify-contract       - Validate the machine-readable release contract"
 	@echo "  conformance-mod-download - Download standalone conformance dependencies"
 	@echo "  lint-conformance      - Format and vet the standalone conformance module"
+	@echo "  test-conformance-testresult - Test the structured Go test-result parser"
 	@echo "  test-conformance-module - Test standalone conformance module policy"
 	@echo "  test-conformance-imports - Test standalone conformance import policy"
 	@echo "  test-conformance-contract - Test strict contract loading and snapshots"
@@ -153,6 +167,7 @@ help:
 	@echo "  test-conformance      - Run the independent protocol conformance suite"
 	@echo "  test-inventory        - Test generated evidence inventory"
 	@echo "  test-blackbox         - Run the packaged server black-box suite"
+	@echo "  test-blackbox-mutation-control - Run one structured real mutation control"
 	@echo "  rc-check-pg18         - Verify the packaged PostgreSQL 18 candidate"
 	@echo "  evidence              - Generate and verify immutable RC evidence"
 	@echo "  lint-go               - Run Go formatting checks and go vet"
@@ -162,6 +177,8 @@ help:
 	@echo "  lint-rust             - Run all Rust fmt and clippy checks"
 	@echo "  test                  - Run the default local validation set"
 	@echo "  test-rust-core        - Run synchro-core unit tests"
+	@echo "  test-rust-mutants     - Run targeted synchro-core mutation tests"
+	@echo "  test-integration-mutants - Run curated production integration mutants"
 	@echo "  test-rust-pg          - Run pgrx integration tests on PG 18"
 	@echo "  test-rust-pg-all      - Run pgrx tests on PG 14 through PG 18"
 	@echo "  test-adapter          - Run Go adapter integration tests (override GO_TEST_PKGS to focus)"
@@ -182,6 +199,7 @@ help:
 	@echo "  release-kotlin-local  - Publish Kotlin SDK to mavenLocal"
 	@echo "  release-npm-dry-run   - Dry-run npm pack for the React Native package"
 	@echo "  local-consumer-artifacts - Build local-consumer artifacts for RN, Kotlin, and Apple"
+	@echo "  check-pg-sql          - Verify tracked SQL matches pgrx generation"
 	@echo "  clean                 - Remove local build and server artifacts"
 
 version-print:
@@ -228,6 +246,9 @@ lint-conformance: conformance-mod-download
 	@test -z "$$(find conformance -name '*.go' -print0 | xargs -0 gofmt -l)"
 	cd conformance && GOFLAGS= GOWORK=off go vet ./...
 
+test-conformance-testresult:
+	cd conformance && GOFLAGS= GOWORK=off go test ./cmd/testresult -count=1
+
 test-conformance-module:
 	cd conformance && GOFLAGS= GOWORK=off go test ./internal/importguard -count=1 -run 'TestModulePolicy'
 
@@ -261,6 +282,21 @@ test-blackbox-harness:
 test-blackbox-components:
 	cd conformance && GOFLAGS= GOWORK=off go test ./observer -count=1
 	cd conformance && GOFLAGS= GOWORK=off go test ./blackbox/baseline -count=1
+
+test-blackbox-wal: conformance-mod-download test-blackbox-harness
+	cd conformance && GOFLAGS= GOWORK=off go test ./blackbox/integration -run '^TestRealWALPipeline$$' -count=1 -args --provision --install
+
+test-blackbox-mutation-control:
+	@test -n "$(MUTATION_CONTROL_TEST)" || { echo "MUTATION_CONTROL_TEST is required" >&2; exit 1; }
+	@case "$(MUTATION_CONTROL_TEST)" in \
+		TestRealMutationControlCursorAdvancement|TestRealMutationControlWALAcknowledgement|TestRealMutationControlMutationConservation|TestRealMutationControlChecksumCorrectness|TestRealMutationControlScopeIsolation) ;; \
+		*) echo "MUTATION_CONTROL_TEST is not a supported mutation control" >&2; exit 1 ;; \
+	esac
+	@cd conformance && GOFLAGS= GOWORK=off go test -json ./blackbox/integration -count=1 -run "^$(MUTATION_CONTROL_TEST)$$" -args --provision --install
+
+parse-testresult:
+	@test -n "$(TESTRESULT_TEST_NAME)" || { echo "TESTRESULT_TEST_NAME is required" >&2; exit 1; }
+	@cd conformance && GOFLAGS= GOWORK=off go run ./cmd/testresult --test "$(TESTRESULT_TEST_NAME)"
 
 conformance-adapter-artifact:
 	@set -eu; \
@@ -331,9 +367,6 @@ conformance-pg18-extension-artifact:
 		rmdir "$$lock"; \
 		trap - EXIT HUP INT TERM
 
-test-mutants:
-	cd conformance && GOFLAGS= GOWORK=off go test ./mutants -count=1
-
 test-evidence:
 	cd conformance && GOFLAGS= GOWORK=off go test ./execution ./evidence ./cmd/synchro-evidence -count=1
 
@@ -341,9 +374,9 @@ test-inventory:
 	cd conformance && GOFLAGS= GOWORK=off go test ./inventory -count=1
 
 test-blackbox: conformance-mod-download test-blackbox-harness test-blackbox-components
-	cd conformance && GOFLAGS= GOWORK=off go test ./blackbox/integration -count=1 -args --provision --install
+	cd conformance && GOFLAGS= GOWORK=off go test ./blackbox/integration -count=$(BLACKBOX_TEST_COUNT) -run '$(BLACKBOX_TEST_PATTERN)' -args --provision --install
 
-test-conformance: conformance-mod-download test-conformance-module test-conformance-imports test-conformance-contract test-conformance-scenarios check-conformance-catalog test-vectors test-reference test-conformance-faults test-blackbox-harness test-evidence test-inventory test-mutants
+test-conformance: conformance-mod-download test-conformance-testresult test-conformance-module test-conformance-imports test-conformance-contract test-conformance-scenarios check-conformance-catalog test-vectors test-reference test-conformance-faults test-blackbox-harness test-evidence test-inventory
 
 rc-check-pg18:
 	@echo "$@ is unavailable until its required verification phase is implemented; release promotion is blocked." >&2
@@ -449,7 +482,7 @@ release-pods-check: version-check
 	swift package dump-package >/dev/null
 	@echo "Apple package metadata validated."
 
-release-check: evidence test-conformance test-blackbox rc-check-pg18 version-check release-pods-check build build-seed build-check release-kotlin-local release-npm-dry-run lint-go lint-rust-core lint-rust-pg lint-rn test-rust-core test-rust-pg test-adapter test-swift test-kotlin test-rn verify-contract docs-build
+release-check: evidence test-conformance test-blackbox rc-check-pg18 version-check release-pods-check build build-seed build-check release-kotlin-local release-npm-dry-run lint-go lint-rust-core lint-rust-pg lint-rn test-rust-core test-rust-mutants test-integration-mutants test-rust-pg test-adapter test-swift test-kotlin test-rn verify-contract check-pg-sql docs-build
 	@echo "Release validation passed."
 
 release-kotlin-local: version-check
@@ -477,6 +510,26 @@ local-consumer-artifacts: version-check release-pods-check release-kotlin-local
 ext-build:
 	cd extensions/synchro-pg && cargo build
 
+generate-pg-sql:
+	cd extensions/synchro-pg && CARGO_TARGET_DIR="$(PGRX_TARGET_DIR)" cargo pgrx schema pg18 --pg-config "$(PGRX_PG_CONFIG)" --out sql/synchro_pg--0.3.0.sql
+	perl -pi -e 's/[ \t]+$$//' extensions/synchro-pg/sql/synchro_pg--0.3.0.sql
+	perl -0pi -e 's/\n+\z/\n/' extensions/synchro-pg/sql/synchro_pg--0.3.0.sql
+
+check-pg-sql:
+	@set -eu; \
+		tmp="$$(mktemp -d "$${TMPDIR:-/tmp}/synchro-pg-sql.XXXXXX")"; \
+		trap 'rm -rf "$$tmp"' EXIT HUP INT TERM; \
+		generated="$$tmp/synchro_pg--0.3.0.sql"; \
+		cd extensions/synchro-pg; \
+		CARGO_TARGET_DIR="$(PGRX_TARGET_DIR)" cargo pgrx schema pg18 --pg-config "$(PGRX_PG_CONFIG)" --out "$$generated"; \
+		perl -pi -e 's/[ \t]+$$//' "$$generated"; \
+		perl -0pi -e 's/\n+\z/\n/' "$$generated"; \
+		if ! cmp -s sql/synchro_pg--0.3.0.sql "$$generated"; then \
+			diff -u sql/synchro_pg--0.3.0.sql "$$generated" || true; \
+			printf '%s\n' 'tracked PostgreSQL SQL differs from pgrx generation' >&2; \
+			exit 1; \
+		fi
+
 ext-install:
 	cd extensions/synchro-pg && CARGO_TARGET_DIR="$(PGRX_TARGET_DIR)" cargo pgrx install --pg-config "$(PGRX_PG_CONFIG)"
 
@@ -488,8 +541,22 @@ ext-seed:
 test-rust-core:
 	cd extensions && cargo test -p synchro-core
 
+test-rust-mutants:
+	@command -v cargo-mutants >/dev/null || (echo "cargo-mutants 27.1.0 is required" >&2; exit 1)
+	@test "$$(cargo mutants --version)" = "cargo-mutants 27.1.0" || (echo "cargo-mutants 27.1.0 is required" >&2; exit 1)
+	cd extensions && SYNCHRO_REPO_ROOT="$(CURDIR)" cargo mutants \
+		-p synchro-core \
+		--config .cargo/mutants.toml \
+		--baseline run \
+		--jobs 4 \
+		--timeout 120 \
+		--no-shuffle
+
+test-integration-mutants: test-conformance-testresult
+	sh conformance/mutants/integration_gate.sh "$(CURDIR)"
+
 test-rust-pg:
-	cd extensions/synchro-pg && CARGO_TARGET_DIR="$(PGRX_TARGET_DIR)" cargo pgrx test $(PGRX_PG)
+	cd extensions/synchro-pg && CARGO_TARGET_DIR="$(PGRX_TARGET_DIR)" cargo pgrx test $(PGRX_PG) $(PGRX_TEST_NAME)
 
 test-rust-pg-all:
 	@for v in 14 15 16 17 18; do \
@@ -558,6 +625,9 @@ test-adapter-setup: ext-install
 	@$(PGRX_PSQL) -h "$(PGRX_ADMIN_HOST)" -p $(PGRX_PORT) -U "$(PGRX_ADMIN_USER)" -d postgres -c "DROP DATABASE IF EXISTS $(ADAPTER_TEST_DB)" 2>/dev/null || true
 	@$(PGRX_PSQL) -h "$(PGRX_ADMIN_HOST)" -p $(PGRX_PORT) -U "$(PGRX_ADMIN_USER)" -d postgres -c "CREATE DATABASE $(ADAPTER_TEST_DB)"
 	@$(PGRX_PSQL) -h "$(PGRX_ADMIN_HOST)" -p $(PGRX_PORT) -U "$(PGRX_ADMIN_USER)" -d $(ADAPTER_TEST_DB) -c "CREATE EXTENSION IF NOT EXISTS synchro_pg CASCADE"
+	@$(PGRX_PSQL) -v ON_ERROR_STOP=1 -h "$(PGRX_ADMIN_HOST)" -p $(PGRX_PORT) -U "$(PGRX_ADMIN_USER)" -d postgres -c "DROP ROLE IF EXISTS $(PGRX_WORKER_LOGIN)"
+	@$(PGRX_PSQL) -v ON_ERROR_STOP=1 -h "$(PGRX_ADMIN_HOST)" -p $(PGRX_PORT) -U "$(PGRX_ADMIN_USER)" -d postgres -c "CREATE ROLE $(PGRX_WORKER_LOGIN) LOGIN REPLICATION NOINHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS"
+	@$(PGRX_PSQL) -v ON_ERROR_STOP=1 -h "$(PGRX_ADMIN_HOST)" -p $(PGRX_PORT) -U "$(PGRX_ADMIN_USER)" -d postgres -c "GRANT synchro_worker TO $(PGRX_WORKER_LOGIN)"
 	@if grep -q "^synchro.auto_start" "$(PGRX_DATA_DIR)/postgresql.conf"; then \
 		perl -0pi -e "s/^synchro\.auto_start\s*=.*$$/synchro.auto_start = $(PGRX_AUTOSTART)/m" "$(PGRX_DATA_DIR)/postgresql.conf"; \
 	else \
@@ -567,6 +637,11 @@ test-adapter-setup: ext-install
 		perl -0pi -e "s/^synchro\.database\s*=.*$$/synchro.database = '$(ADAPTER_TEST_DB)'/m" "$(PGRX_DATA_DIR)/postgresql.conf"; \
 	else \
 		printf "\nsynchro.database = '$(ADAPTER_TEST_DB)'\n" >> "$(PGRX_DATA_DIR)/postgresql.conf"; \
+	fi
+	@if grep -q "^synchro.worker_login" "$(PGRX_DATA_DIR)/postgresql.conf"; then \
+		perl -0pi -e "s/^synchro\.worker_login\s*=.*$$/synchro.worker_login = '$(PGRX_WORKER_LOGIN)'/m" "$(PGRX_DATA_DIR)/postgresql.conf"; \
+	else \
+		printf "\nsynchro.worker_login = '$(PGRX_WORKER_LOGIN)'\n" >> "$(PGRX_DATA_DIR)/postgresql.conf"; \
 	fi
 	@cd extensions/synchro-pg && CARGO_TARGET_DIR="$(PGRX_TARGET_DIR)" cargo pgrx stop $(PGRX_PG)
 	@cd extensions/synchro-pg && CARGO_TARGET_DIR="$(PGRX_TARGET_DIR)" cargo pgrx start $(PGRX_PG)
@@ -620,16 +695,23 @@ synchrod-pg-test-start: build-seed
 		echo "synchrod-pg already running"; \
 		exit 0; \
 	fi; \
-	$(MAKE) test-adapter-setup PGRX_AUTOSTART=off; \
+	$(MAKE) test-adapter-setup; \
 	echo "Loading schema and registering tables..."; \
 	$(PGRX_PSQL) -v ON_ERROR_STOP=1 -h "$(PGRX_ADMIN_HOST)" -p $(PGRX_PORT) -U "$(PGRX_ADMIN_USER)" -d $(ADAPTER_TEST_DB) -f extensions/testdata/schema.sql || { if [ -f "$(PGRX_LOG_FILE)" ]; then tail -n 200 "$(PGRX_LOG_FILE)"; fi; exit 1; }; \
 	$(PGRX_PSQL) -v ON_ERROR_STOP=1 -h "$(PGRX_ADMIN_HOST)" -p $(PGRX_PORT) -U "$(PGRX_ADMIN_USER)" -d $(ADAPTER_TEST_DB) -f extensions/testdata/register.sql || { if [ -f "$(PGRX_LOG_FILE)" ]; then tail -n 200 "$(PGRX_LOG_FILE)"; fi; exit 1; }; \
+	REGISTRY_READY=0; \
+	for attempt in $$(seq 1 $(PGRX_READY_TIMEOUT)); do \
+		REGISTRY_OUTPUT=$$($(PGRX_PSQL) -h "$(PGRX_ADMIN_HOST)" -p $(PGRX_PORT) -U "$(PGRX_ADMIN_USER)" -d $(ADAPTER_TEST_DB) -Atqc "SELECT CASE WHEN EXISTS (SELECT 1 FROM synchro.sync_registry registry JOIN synchro.sync_registry_generations generation ON generation.generation = registry.registry_generation WHERE generation.state = 'active' AND registry.table_name = 'orders') THEN '1' ELSE '0' END" 2>&1 || true); \
+		if [ "$$REGISTRY_OUTPUT" = "1" ]; then REGISTRY_READY=1; break; fi; \
+		sleep 1; \
+	done; \
+	if [ "$$REGISTRY_READY" -ne 1 ]; then echo "synchro registry did not activate"; exit 1; fi; \
 	if [ -f extensions/testdata/seed.sql ]; then \
 		echo "Loading seed data (this may take a minute)..."; \
 		$(PGRX_PSQL) -v ON_ERROR_STOP=1 -h "$(PGRX_ADMIN_HOST)" -p $(PGRX_PORT) -U "$(PGRX_ADMIN_USER)" -d $(ADAPTER_TEST_DB) -f extensions/testdata/seed.sql || { if [ -f "$(PGRX_LOG_FILE)" ]; then tail -n 200 "$(PGRX_LOG_FILE)"; fi; exit 1; }; \
 		echo "Waiting for bgworker to observe seeded rows..."; \
 		for attempt in $$(seq 1 60); do \
-			EDGE_COUNT=$$($(PGRX_PSQL) -h "$(PGRX_ADMIN_HOST)" -p $(PGRX_PORT) -U "$(PGRX_ADMIN_USER)" -d $(ADAPTER_TEST_DB) -Atqc "SELECT count(*) FROM sync_bucket_edges" 2>/dev/null || echo 0); \
+			EDGE_COUNT=$$($(PGRX_PSQL) -h "$(PGRX_ADMIN_HOST)" -p $(PGRX_PORT) -U "$(PGRX_ADMIN_USER)" -d $(ADAPTER_TEST_DB) -Atqc "SELECT count(*) FROM synchro.sync_bucket_edges" 2>/dev/null || echo 0); \
 			if [ "$$EDGE_COUNT" -gt 0 ] 2>/dev/null; then \
 				break; \
 			fi; \
@@ -639,7 +721,7 @@ synchrod-pg-test-start: build-seed
 		echo "No seed.sql found. Run 'make ext-seed' to generate test data."; \
 	fi; \
 	echo "Backfilling scope edges..."; \
-	$(PGRX_PSQL) -v ON_ERROR_STOP=1 -h "$(PGRX_ADMIN_HOST)" -p $(PGRX_PORT) -U "$(PGRX_ADMIN_USER)" -d $(ADAPTER_TEST_DB) -c "SELECT synchro_backfill_bucket_edges()" || { if [ -f "$(PGRX_LOG_FILE)" ]; then tail -n 200 "$(PGRX_LOG_FILE)"; fi; exit 1; }; \
+	$(PGRX_PSQL) -v ON_ERROR_STOP=1 -h "$(PGRX_ADMIN_HOST)" -p $(PGRX_PORT) -U "$(PGRX_ADMIN_USER)" -d $(ADAPTER_TEST_DB) -c "SELECT synchro.synchro_backfill_bucket_edges()" || { if [ -f "$(PGRX_LOG_FILE)" ]; then tail -n 200 "$(PGRX_LOG_FILE)"; fi; exit 1; }; \
 	echo "Restarting PostgreSQL with bgworker enabled..."; \
 	if grep -q "^synchro.auto_start" "$(PGRX_DATA_DIR)/postgresql.conf"; then \
 		perl -0pi -e "s/^synchro\.auto_start\s*=.*$$/synchro.auto_start = on/m" "$(PGRX_DATA_DIR)/postgresql.conf"; \
@@ -667,8 +749,8 @@ synchrod-pg-test-start: build-seed
 		fi; \
 		MANIFEST_READY=0; \
 		for attempt in $$(seq 1 $(PGRX_READY_TIMEOUT)); do \
-			MANIFEST_OUTPUT=$$($(PGRX_PSQL) -h "$(PGRX_ADMIN_HOST)" -p $(PGRX_PORT) -U "$(PGRX_ADMIN_USER)" -d $(ADAPTER_TEST_DB) -Atqc "SELECT CASE WHEN EXISTS (SELECT 1 FROM jsonb_array_elements((synchro_schema_manifest()->'manifest'->'tables')) table_def WHERE table_def->>'name' = 'orders') THEN '1' ELSE '0' END" 2>&1 || true); \
-			CONNECT_OUTPUT=$$($(PGRX_PSQL) -h "$(PGRX_ADMIN_HOST)" -p $(PGRX_PORT) -U "$(PGRX_ADMIN_USER)" -d $(ADAPTER_TEST_DB) -Atqc "SELECT CASE WHEN synchro_connect('readiness-user', '{\"client_id\":\"readiness-client\",\"platform\":\"android\",\"app_version\":\"1.0.0\",\"protocol_version\":2,\"schema\":{\"version\":0,\"hash\":\"\"},\"scope_set_version\":0,\"known_scopes\":{}}'::jsonb)->'schema'->>'action' = 'replace' THEN '1' ELSE '0' END" 2>&1 || true); \
+			MANIFEST_OUTPUT=$$($(PGRX_PSQL) -h "$(PGRX_ADMIN_HOST)" -p $(PGRX_PORT) -U "$(PGRX_ADMIN_USER)" -d $(ADAPTER_TEST_DB) -Atqc "SELECT CASE WHEN EXISTS (SELECT 1 FROM pg_catalog.jsonb_array_elements((synchro.synchro_schema_manifest()->'manifest'->'tables')) table_def WHERE table_def->>'name' = 'orders') THEN '1' ELSE '0' END" 2>&1 || true); \
+			CONNECT_OUTPUT=$$($(PGRX_PSQL) -h "$(PGRX_ADMIN_HOST)" -p $(PGRX_PORT) -U "$(PGRX_ADMIN_USER)" -d $(ADAPTER_TEST_DB) -Atqc "SELECT CASE WHEN synchro.synchro_connect('readiness-user', '{\"client_id\":\"readiness-client\",\"platform\":\"android\",\"app_version\":\"1.0.0\",\"protocol_version\":3,\"schema\":{\"version\":0,\"hash\":\"\"},\"scope_set_version\":0,\"known_scopes\":{}}'::pg_catalog.jsonb)->'schema'->>'action' = 'replace' THEN '1' ELSE '0' END" 2>&1 || true); \
 			if [ "$$MANIFEST_OUTPUT" = "1" ] && [ "$$CONNECT_OUTPUT" = "1" ]; then \
 				MANIFEST_READY=1; \
 				break; \
