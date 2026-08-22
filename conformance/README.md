@@ -25,6 +25,21 @@ synchro-conformance model --repo-root PATH [--scenario ID]
 
 The command loads authored scenarios. It fails if any selected scenario does not pass the reference model. A model pass validates the model execution only. It does not prove a production candidate.
 
+## Native Execution Manifests
+
+Select one catalog-bound native obligation with:
+
+```text
+synchro-conformance native --repo-root PATH --scenario ID --support-cell ID
+```
+
+The command validates the complete scenario corpus and prints one JSON manifest.
+The manifest contains the exact action order and resolved scenario operations.
+
+The `nativeexecution` package dispatches these actions through five closed actor
+drivers. It rejects missing drivers, reordered bindings, and unauthored results.
+Manifest generation does not execute a platform or create release evidence.
+
 ## Real PostgreSQL Scenarios
 
 Run the real PostgreSQL black-box tests with:
@@ -70,19 +85,6 @@ synchro-conformance blackbox --repo-root PATH --mode harness
 This command proves that the protocol 3 harness detects and compares typed HTTP behavior. It uses a synthetic reference system. It is not real adapter, extension, or PostgreSQL proof.
 
 The harness emits signed `harness-only` receipts. These receipts support harness self-tests. They cannot enter `evidence-v2` or candidate evidence.
-
-## Protocol 2 Baseline Diagnostics
-
-Run current-production diagnostics with:
-
-```text
-synchro-conformance baseline --repo-root PATH --output PATH
-synchro-conformance blackbox --repo-root PATH --mode baseline
-```
-
-The baseline sends only protocol 2 diagnostic requests. It records known production divergences in `baseline-report-v1` output. Every report and attachment is permanently `non_release_diagnostic`.
-
-Baseline output cannot satisfy a proof obligation. It cannot enter `evidence-v2`, an inventory, or a candidate directory. It does not define protocol behavior.
 
 Strict real protocol 3 black-box execution is unavailable. The `blackbox --mode strict` command fails closed. It creates no release evidence.
 
@@ -136,7 +138,7 @@ The specification, authored requirements, support matrix, and scenarios define w
 
 Generated `evidence-v2` records results for an exact candidate, resolved environment versions, and artifact hashes. Release tooling computes eligibility from immutable evidence. A manually maintained coverage table cannot substitute for it.
 
-The current fixtures, model runs, harness proof, and baseline diagnostics are not v0.3.0 certification. See `test-inventory.md` and [Release Verification](../docs/src/content/docs/spec/07-release-verification.mdx).
+The current fixtures, model runs, and harness proof are not v0.3.0 certification. See `test-inventory.md` and [Release Verification](../docs/src/content/docs/spec/07-release-verification.mdx).
 
 ## Gate Model
 

@@ -1274,7 +1274,7 @@ pub(crate) fn synced_row_projection_sql(table_reg: &TableRegistration, row_alias
                 ),
                 "date" => format!("to_jsonb(to_char({column}, 'YYYY-MM-DD'))"),
                 "time" => format!("to_jsonb(to_char({column}, 'HH24:MI:SS.US'))"),
-                "json" => format!("to_jsonb(({column})::text)"),
+                "json" => format!("to_jsonb(to_jsonb({column})::text)"),
                 "bytes" => format!(
                     "to_jsonb(translate(rtrim(replace(encode(({column})::bytea, 'base64'), E'\\n', ''), '='), '+/', '-_'))"
                 ),

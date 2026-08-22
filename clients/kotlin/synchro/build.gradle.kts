@@ -19,6 +19,7 @@ android {
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_1_8
         targetCompatibility = JavaVersion.VERSION_1_8
+        isCoreLibraryDesugaringEnabled = true
     }
 
     kotlinOptions {
@@ -33,6 +34,7 @@ android {
 }
 
 dependencies {
+    coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.0.4")
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
     implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.6.3")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.8.0")
@@ -47,7 +49,9 @@ dependencies {
 
 mavenPublishing {
     publishToMavenCentral(com.vanniktech.maven.publish.SonatypeHost.CENTRAL_PORTAL)
-    val localPublish = gradle.startParameter.taskNames.any { it.contains("MavenLocal") }
+    val localPublish = gradle.startParameter.taskNames.any {
+        it.contains("MavenLocal") || it.contains("ConsumerRepository")
+    }
     if (!localPublish) {
         signAllPublications()
     }
@@ -75,6 +79,17 @@ mavenPublishing {
             url.set("https://github.com/trainstar/synchro")
             connection.set("scm:git:git://github.com/trainstar/synchro.git")
             developerConnection.set("scm:git:ssh://github.com/trainstar/synchro.git")
+        }
+    }
+}
+
+providers.environmentVariable("SYNCHRO_CONSUMER_MAVEN_REPOSITORY").orNull?.let { repositoryPath ->
+    publishing {
+        repositories {
+            maven {
+                name = "consumer"
+                url = uri(repositoryPath)
+            }
         }
     }
 }

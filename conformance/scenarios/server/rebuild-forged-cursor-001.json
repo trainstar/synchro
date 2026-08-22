@@ -980,5 +980,150 @@
         "CTRL-REBUILD-007"
       ]
     }
-  ]
+  ],
+  "native_execution": {
+    "version": 1,
+    "clients": [
+      {
+        "key": "client_a",
+        "user_id": "user-a",
+        "client_id": "client-a",
+        "database_key": "rebuild_forged_cursor_a"
+      }
+    ],
+    "actions": [
+      {
+        "id": "NACT-REBUILD-FORGED-CURSOR-001",
+        "phase": "setup",
+        "actor": "controller",
+        "command": "install-model",
+        "covers_step_ids": [],
+        "parameters": {}
+      },
+      {
+        "id": "NACT-REBUILD-FORGED-CURSOR-002",
+        "phase": "setup",
+        "actor": "client",
+        "command": "open",
+        "covers_step_ids": [],
+        "parameters": {
+          "client_key": "client_a",
+          "database_mode": "create",
+          "initialization": "current",
+          "seed_step_id": null
+        }
+      },
+      {
+        "id": "NACT-REBUILD-FORGED-CURSOR-003",
+        "phase": "setup",
+        "actor": "client",
+        "command": "execute-step",
+        "covers_step_ids": [
+          "STEP-REBUILD-FORGED-CURSOR-001"
+        ],
+        "parameters": {
+          "client_key": "client_a"
+        }
+      },
+      {
+        "id": "NACT-REBUILD-FORGED-CURSOR-004",
+        "phase": "setup",
+        "actor": "client",
+        "command": "execute-step",
+        "covers_step_ids": [
+          "STEP-REBUILD-FORGED-CURSOR-002"
+        ],
+        "parameters": {
+          "client_key": "client_a"
+        }
+      },
+      {
+        "id": "NACT-REBUILD-FORGED-CURSOR-005",
+        "phase": "setup",
+        "actor": "client",
+        "command": "begin-call",
+        "covers_step_ids": [
+          "STEP-REBUILD-FORGED-CURSOR-003"
+        ],
+        "parameters": {
+          "client_key": "client_a",
+          "call_id": "forged_rebuild",
+          "method": "start"
+        }
+      },
+      {
+        "id": "NACT-REBUILD-FORGED-CURSOR-006",
+        "phase": "setup",
+        "actor": "process",
+        "command": "execute-step",
+        "covers_step_ids": [
+          "STEP-REBUILD-FORGED-CURSOR-004"
+        ],
+        "parameters": {
+          "client_key": null
+        }
+      },
+      {
+        "id": "NACT-REBUILD-FORGED-CURSOR-007",
+        "phase": "exercise",
+        "actor": "observer",
+        "command": "await-step",
+        "covers_step_ids": [
+          "STEP-REBUILD-FORGED-CURSOR-005"
+        ],
+        "parameters": {
+          "client_key": "client_a",
+          "call_id": "forged_rebuild"
+        }
+      },
+      {
+        "id": "NACT-REBUILD-FORGED-CURSOR-008",
+        "phase": "exercise",
+        "actor": "observer",
+        "command": "await-step",
+        "covers_step_ids": [
+          "STEP-REBUILD-FORGED-CURSOR-006"
+        ],
+        "parameters": {
+          "client_key": "client_a",
+          "call_id": "forged_rebuild"
+        }
+      },
+      {
+        "id": "NACT-REBUILD-FORGED-CURSOR-008-001",
+        "phase": "exercise",
+        "actor": "client",
+        "command": "await-call",
+        "covers_step_ids": [],
+        "parameters": {
+          "client_key": "client_a",
+          "call_id": "forged_rebuild",
+          "completion": "error"
+        }
+      },
+      {
+        "id": "NACT-REBUILD-FORGED-CURSOR-009",
+        "phase": "verify",
+        "actor": "observer",
+        "command": "capture",
+        "covers_step_ids": [],
+        "parameters": {
+          "client_keys": [
+            "client_a"
+          ],
+          "sources": [
+            "application-rows",
+            "rebuild-state",
+            "checkpoints",
+            "request-trace",
+            "server-state"
+          ],
+          "expectation_ids": [
+            "EXPECT-REBUILD-FORGED-CURSOR-WIRE-001",
+            "EXPECT-REBUILD-FORGED-CURSOR-STATE-001"
+          ]
+        }
+      }
+    ]
+  }
 }

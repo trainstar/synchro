@@ -227,7 +227,7 @@ fn synchro_connect(p_user_id: &str, p_request: pgrx::JsonB) -> pgrx::JsonB {
             return response;
         }
         let seed_positions = match request.seed_receipts.as_ref() {
-            Some(receipts) if request.schema.is_fresh_sentinel() && prior.is_none() => {
+            Some(receipts) if prior.is_none() && request.client_generation.is_none() => {
                 match crate::portable_seed::validate_seed_receipts(
                     client,
                     receipts,
@@ -280,20 +280,17 @@ fn synchro_connect(p_user_id: &str, p_request: pgrx::JsonB) -> pgrx::JsonB {
             let Some(position) = seed_positions.get(&scope.id) else {
                 continue;
             };
-            let context = crate::cursor_token::ScopeCursorContext::new(
+            scope.cursor = Some(issue_seed_scope_cursor(
+                client,
                 p_user_id,
                 &request.client_id,
                 ensured.state.client_generation,
                 &scope.id,
                 &current_manifest.schema_hash,
-            )
-            .unwrap_or_else(|error| pgrx::error!("building seed scope cursor: {}", error));
-            scope.cursor = Some(
-                crate::cursor_token::issue_scope_cursor(client, &context, position)
-                    .unwrap_or_else(|error| pgrx::error!("issuing seed scope cursor: {}", error)),
-            );
+                position,
+            ));
         }
-        let scope_cursor_updates = match build_scope_cursor_updates(
+        let mut scope_cursor_updates = match build_scope_cursor_updates(
             client,
             ScopeCursorUpdateInput {
                 user_id: p_user_id,
@@ -310,6 +307,23 @@ fn synchro_connect(p_user_id: &str, p_request: pgrx::JsonB) -> pgrx::JsonB {
             Ok(updates) => updates,
             Err(response) => return response,
         };
+        for (scope_id, position) in &seed_positions {
+            if !request.known_scopes.contains_key(scope_id) || !assigned_scopes.contains(scope_id) {
+                continue;
+            }
+            scope_cursor_updates.insert(
+                scope_id.clone(),
+                Some(issue_seed_scope_cursor(
+                    client,
+                    p_user_id,
+                    &request.client_id,
+                    ensured.state.client_generation,
+                    scope_id,
+                    &current_manifest.schema_hash,
+                    position,
+                )),
+            );
+        }
 
         let response = ConnectResponse {
             server_time: canonical_server_time(),
@@ -336,6 +350,27 @@ fn synchro_connect(p_user_id: &str, p_request: pgrx::JsonB) -> pgrx::JsonB {
 
         pgrx::JsonB(canonical_connect_response_value(&response).unwrap())
     })
+}
+
+fn issue_seed_scope_cursor(
+    client: &SpiClient<'_>,
+    user_id: &str,
+    client_id: &str,
+    client_generation: i64,
+    scope_id: &str,
+    schema_hash: &str,
+    position: &crate::stream_position::StreamPosition,
+) -> String {
+    let context = crate::cursor_token::ScopeCursorContext::new(
+        user_id,
+        client_id,
+        client_generation,
+        scope_id,
+        schema_hash,
+    )
+    .unwrap_or_else(|error| pgrx::error!("building seed scope cursor: {}", error));
+    crate::cursor_token::issue_scope_cursor(client, &context, position)
+        .unwrap_or_else(|error| pgrx::error!("issuing seed scope cursor: {}", error))
 }
 
 fn canonical_server_time() -> chrono::DateTime<Utc> {

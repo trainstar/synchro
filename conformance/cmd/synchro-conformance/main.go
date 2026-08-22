@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -16,13 +17,12 @@ import (
 	"path/filepath"
 	"strings"
 	"syscall"
-	"time"
 	"unicode/utf8"
 
 	"github.com/trainstar/synchro/conformance/blackbox"
-	"github.com/trainstar/synchro/conformance/blackbox/baseline"
 	"github.com/trainstar/synchro/conformance/execution"
 	"github.com/trainstar/synchro/conformance/modelrunner"
+	"github.com/trainstar/synchro/conformance/nativeexecution"
 	"github.com/trainstar/synchro/conformance/scenarios"
 )
 
@@ -52,11 +52,44 @@ func run(ctx context.Context, args []string) error {
 		return runModel(ctx, args[1:])
 	case "blackbox":
 		return runBlackbox(ctx, args[1:])
-	case "baseline":
-		return runBaselineCommand(ctx, args[1:])
+	case "native":
+		return runNative(ctx, args[1:], os.Stdout)
 	default:
 		return errors.New("unknown command")
 	}
+}
+
+func runNative(ctx context.Context, args []string, output io.Writer) error {
+	flags := newFlagSet("native")
+	repoRoot := flags.String("repo-root", "", "repository root")
+	scenarioID := flags.String("scenario", "", "authored scenario ID")
+	supportCellID := flags.String("support-cell", "", "native support-cell ID")
+	if err := flags.Parse(args); err != nil {
+		return errors.New("native flags are invalid")
+	}
+	if flags.NArg() != 0 {
+		return errors.New("native does not accept positional arguments")
+	}
+	if *repoRoot == "" || *scenarioID == "" || *supportCellID == "" {
+		return errors.New("native requires --repo-root PATH, --scenario ID, and --support-cell ID")
+	}
+	if output == nil {
+		return errors.New("native output is nil")
+	}
+	selection, err := nativeexecution.Select(ctx, *repoRoot, *scenarioID, *supportCellID)
+	if err != nil {
+		return operationError(ctx, "native select", err)
+	}
+	manifest, err := nativeexecution.BuildManifest(selection)
+	if err != nil {
+		return operationError(ctx, "native manifest", err)
+	}
+	encoder := json.NewEncoder(output)
+	encoder.SetEscapeHTML(false)
+	if err := encoder.Encode(manifest); err != nil {
+		return operationError(ctx, "native manifest encode", err)
+	}
+	return nil
 }
 
 func runCatalog(ctx context.Context, args []string) error {
@@ -141,32 +174,11 @@ func runBlackbox(ctx context.Context, args []string) error {
 	switch *mode {
 	case "harness":
 		return runSyntheticHarness(ctx, *repoRoot)
-	case "baseline":
-		return runDiagnosticBaseline(ctx, *repoRoot, "")
 	case "strict":
 		return errors.New("strict protocol 3 black-box execution is unavailable")
 	default:
-		return errors.New("blackbox requires --mode harness, baseline, or strict")
+		return errors.New("blackbox requires --mode harness or strict")
 	}
-}
-
-func runBaselineCommand(ctx context.Context, args []string) error {
-	flags := newFlagSet("baseline")
-	repoRoot := flags.String("repo-root", "", "repository root")
-	output := flags.String("output", "", "non-release diagnostic output")
-	if err := flags.Parse(args); err != nil {
-		return errors.New("baseline flags are invalid")
-	}
-	if flags.NArg() != 0 {
-		return errors.New("baseline does not accept positional arguments")
-	}
-	if *repoRoot == "" {
-		return errors.New("baseline requires --repo-root PATH")
-	}
-	if *output == "" {
-		return errors.New("baseline requires --output PATH")
-	}
-	return runDiagnosticBaseline(ctx, *repoRoot, *output)
 }
 
 func runSyntheticHarness(ctx context.Context, repoRoot string) error {
@@ -280,61 +292,6 @@ func syntheticArtifactBindings(obligation scenarios.ProofObligation) []execution
 		}
 	}
 	return bindings
-}
-
-func runDiagnosticBaseline(ctx context.Context, repoRoot, outputPath string) (returnedErr error) {
-	if _, err := loadAuthoredScenarios(ctx, repoRoot); err != nil {
-		return operationError(ctx, "baseline load", err)
-	}
-	removeOutput := false
-	if outputPath == "" {
-		outputPath, returnedErr = os.MkdirTemp("", "baseline-")
-		if returnedErr != nil {
-			return operationError(ctx, "baseline initialize", returnedErr)
-		}
-		removeOutput = true
-	}
-	if removeOutput {
-		defer os.RemoveAll(outputPath)
-	}
-	output, err := baseline.NewOutputPath(outputPath)
-	if err != nil {
-		return operationError(ctx, "baseline output", err)
-	}
-	environment, err := blackbox.LoadEnvironment()
-	if err != nil {
-		return operationError(ctx, "baseline environment", err)
-	}
-	harness, err := blackbox.Provision(ctx, blackbox.HarnessConfig{Environment: environment})
-	if err != nil {
-		return operationError(ctx, "baseline provision", err)
-	}
-	defer func() {
-		cleanupContext, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer cancel()
-		if err := harness.Close(cleanupContext); err != nil {
-			returnedErr = errors.Join(returnedErr, operationError(cleanupContext, "baseline cleanup", err))
-		}
-	}()
-	token, err := harness.DiagnosticBearerToken(time.Now())
-	if err != nil {
-		return operationError(ctx, "baseline token", err)
-	}
-	runner, err := baseline.NewRunner(baseline.RunnerConfig{
-		BaseURL: harness.AdapterURL(), HTTPClient: &http.Client{Timeout: 30 * time.Second}, BearerToken: token,
-		Source: harness.Source(), Operator: harness.Operator(), Output: output,
-	})
-	if err != nil {
-		return operationError(ctx, "baseline runner", err)
-	}
-	report, err := runner.Run(ctx)
-	if err != nil {
-		return operationError(ctx, "baseline execute", err)
-	}
-	if err := report.Validate(); err != nil {
-		return operationError(ctx, "baseline validate", err)
-	}
-	return nil
 }
 
 func loadAuthoredScenarios(ctx context.Context, repoRoot string) ([]scenarios.Scenario, error) {

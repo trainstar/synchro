@@ -837,6 +837,356 @@
       }
     ]
   },
+  "native_execution": {
+    "version": 1,
+    "clients": [
+      {
+        "key": "seeded-1",
+        "user_id": "user-seeded-1",
+        "client_id": "client-seeded-1",
+        "database_key": "db-seeded-1"
+      },
+      {
+        "key": "seeded-2",
+        "user_id": "user-seeded-2",
+        "client_id": "client-seeded-2",
+        "database_key": "db-seeded-2"
+      },
+      {
+        "key": "seeded-3",
+        "user_id": "user-seeded-3",
+        "client_id": "client-seeded-3",
+        "database_key": "db-seeded-3"
+      },
+      {
+        "key": "empty-1",
+        "user_id": "user-empty-1",
+        "client_id": "client-empty-1",
+        "database_key": "db-empty-1"
+      },
+      {
+        "key": "empty-2",
+        "user_id": "user-empty-2",
+        "client_id": "client-empty-2",
+        "database_key": "db-empty-2"
+      },
+      {
+        "key": "empty-3",
+        "user_id": "user-empty-3",
+        "client_id": "client-empty-3",
+        "database_key": "db-empty-3"
+      }
+    ],
+    "actions": [
+      {
+        "id": "NACT-PERF-SEEDED-EMPTY-STARTUP-001",
+        "phase": "setup",
+        "actor": "controller",
+        "command": "install-model",
+        "covers_step_ids": [],
+        "parameters": {}
+      },
+      {
+        "id": "NACT-PERF-SEEDED-EMPTY-STARTUP-002",
+        "phase": "exercise",
+        "actor": "artifact",
+        "command": "stage-step",
+        "covers_step_ids": [
+          "STEP-PERF-SEEDED-EMPTY-STARTUP-001"
+        ],
+        "parameters": {
+          "client_key": "seeded-1"
+        }
+      },
+      {
+        "id": "NACT-PERF-SEEDED-EMPTY-STARTUP-003",
+        "phase": "setup",
+        "actor": "client",
+        "command": "open",
+        "covers_step_ids": [],
+        "parameters": {
+          "client_key": "seeded-1",
+          "database_mode": "reuse",
+          "initialization": "seed",
+          "seed_step_id": "STEP-PERF-SEEDED-EMPTY-STARTUP-001"
+        }
+      },
+      {
+        "id": "NACT-PERF-SEEDED-EMPTY-STARTUP-004",
+        "phase": "setup",
+        "actor": "controller",
+        "command": "apply-step",
+        "covers_step_ids": [
+          "STEP-PERF-SEEDED-EMPTY-STARTUP-002"
+        ],
+        "parameters": {}
+      },
+      {
+        "id": "NACT-PERF-SEEDED-EMPTY-STARTUP-005",
+        "phase": "exercise",
+        "actor": "client",
+        "command": "synchronize-step",
+        "covers_step_ids": [
+          "STEP-PERF-SEEDED-EMPTY-STARTUP-003"
+        ],
+        "parameters": {
+          "client_key": "seeded-1",
+          "method": "start",
+          "completion": "idle"
+        }
+      },
+      {
+        "id": "NACT-PERF-SEEDED-EMPTY-STARTUP-006",
+        "phase": "exercise",
+        "actor": "artifact",
+        "command": "stage-step",
+        "covers_step_ids": [
+          "STEP-PERF-SEEDED-EMPTY-STARTUP-004"
+        ],
+        "parameters": {
+          "client_key": "seeded-2"
+        }
+      },
+      {
+        "id": "NACT-PERF-SEEDED-EMPTY-STARTUP-007",
+        "phase": "setup",
+        "actor": "client",
+        "command": "open",
+        "covers_step_ids": [],
+        "parameters": {
+          "client_key": "seeded-2",
+          "database_mode": "reuse",
+          "initialization": "seed",
+          "seed_step_id": "STEP-PERF-SEEDED-EMPTY-STARTUP-004"
+        }
+      },
+      {
+        "id": "NACT-PERF-SEEDED-EMPTY-STARTUP-008",
+        "phase": "setup",
+        "actor": "controller",
+        "command": "apply-step",
+        "covers_step_ids": [
+          "STEP-PERF-SEEDED-EMPTY-STARTUP-005"
+        ],
+        "parameters": {}
+      },
+      {
+        "id": "NACT-PERF-SEEDED-EMPTY-STARTUP-009",
+        "phase": "exercise",
+        "actor": "client",
+        "command": "synchronize-step",
+        "covers_step_ids": [
+          "STEP-PERF-SEEDED-EMPTY-STARTUP-006"
+        ],
+        "parameters": {
+          "client_key": "seeded-2",
+          "method": "start",
+          "completion": "idle"
+        }
+      },
+      {
+        "id": "NACT-PERF-SEEDED-EMPTY-STARTUP-010",
+        "phase": "exercise",
+        "actor": "artifact",
+        "command": "stage-step",
+        "covers_step_ids": [
+          "STEP-PERF-SEEDED-EMPTY-STARTUP-007"
+        ],
+        "parameters": {
+          "client_key": "seeded-3"
+        }
+      },
+      {
+        "id": "NACT-PERF-SEEDED-EMPTY-STARTUP-011",
+        "phase": "setup",
+        "actor": "client",
+        "command": "open",
+        "covers_step_ids": [],
+        "parameters": {
+          "client_key": "seeded-3",
+          "database_mode": "reuse",
+          "initialization": "seed",
+          "seed_step_id": "STEP-PERF-SEEDED-EMPTY-STARTUP-007"
+        }
+      },
+      {
+        "id": "NACT-PERF-SEEDED-EMPTY-STARTUP-012",
+        "phase": "setup",
+        "actor": "controller",
+        "command": "apply-step",
+        "covers_step_ids": [
+          "STEP-PERF-SEEDED-EMPTY-STARTUP-008"
+        ],
+        "parameters": {}
+      },
+      {
+        "id": "NACT-PERF-SEEDED-EMPTY-STARTUP-013",
+        "phase": "exercise",
+        "actor": "client",
+        "command": "synchronize-step",
+        "covers_step_ids": [
+          "STEP-PERF-SEEDED-EMPTY-STARTUP-009"
+        ],
+        "parameters": {
+          "client_key": "seeded-3",
+          "method": "start",
+          "completion": "idle"
+        }
+      },
+      {
+        "id": "NACT-PERF-SEEDED-EMPTY-STARTUP-014",
+        "phase": "setup",
+        "actor": "controller",
+        "command": "apply-step",
+        "covers_step_ids": [
+          "STEP-PERF-SEEDED-EMPTY-STARTUP-010"
+        ],
+        "parameters": {}
+      },
+      {
+        "id": "NACT-PERF-SEEDED-EMPTY-STARTUP-015",
+        "phase": "setup",
+        "actor": "client",
+        "command": "open",
+        "covers_step_ids": [],
+        "parameters": {
+          "client_key": "empty-1",
+          "database_mode": "create",
+          "initialization": "empty",
+          "seed_step_id": null
+        }
+      },
+      {
+        "id": "NACT-PERF-SEEDED-EMPTY-STARTUP-016",
+        "phase": "exercise",
+        "actor": "client",
+        "command": "synchronize-step",
+        "covers_step_ids": [
+          "STEP-PERF-SEEDED-EMPTY-STARTUP-011"
+        ],
+        "parameters": {
+          "client_key": "empty-1",
+          "method": "start",
+          "completion": "idle"
+        }
+      },
+      {
+        "id": "NACT-PERF-SEEDED-EMPTY-STARTUP-017",
+        "phase": "setup",
+        "actor": "controller",
+        "command": "apply-step",
+        "covers_step_ids": [
+          "STEP-PERF-SEEDED-EMPTY-STARTUP-012"
+        ],
+        "parameters": {}
+      },
+      {
+        "id": "NACT-PERF-SEEDED-EMPTY-STARTUP-018",
+        "phase": "setup",
+        "actor": "client",
+        "command": "open",
+        "covers_step_ids": [],
+        "parameters": {
+          "client_key": "empty-2",
+          "database_mode": "create",
+          "initialization": "empty",
+          "seed_step_id": null
+        }
+      },
+      {
+        "id": "NACT-PERF-SEEDED-EMPTY-STARTUP-019",
+        "phase": "exercise",
+        "actor": "client",
+        "command": "synchronize-step",
+        "covers_step_ids": [
+          "STEP-PERF-SEEDED-EMPTY-STARTUP-013"
+        ],
+        "parameters": {
+          "client_key": "empty-2",
+          "method": "start",
+          "completion": "idle"
+        }
+      },
+      {
+        "id": "NACT-PERF-SEEDED-EMPTY-STARTUP-020",
+        "phase": "setup",
+        "actor": "controller",
+        "command": "apply-step",
+        "covers_step_ids": [
+          "STEP-PERF-SEEDED-EMPTY-STARTUP-014"
+        ],
+        "parameters": {}
+      },
+      {
+        "id": "NACT-PERF-SEEDED-EMPTY-STARTUP-021",
+        "phase": "setup",
+        "actor": "client",
+        "command": "open",
+        "covers_step_ids": [],
+        "parameters": {
+          "client_key": "empty-3",
+          "database_mode": "create",
+          "initialization": "empty",
+          "seed_step_id": null
+        }
+      },
+      {
+        "id": "NACT-PERF-SEEDED-EMPTY-STARTUP-022",
+        "phase": "exercise",
+        "actor": "client",
+        "command": "synchronize-step",
+        "covers_step_ids": [
+          "STEP-PERF-SEEDED-EMPTY-STARTUP-015"
+        ],
+        "parameters": {
+          "client_key": "empty-3",
+          "method": "start",
+          "completion": "idle"
+        }
+      },
+      {
+        "id": "NACT-PERF-SEEDED-EMPTY-STARTUP-023",
+        "phase": "verify",
+        "actor": "observer",
+        "command": "capture",
+        "covers_step_ids": [],
+        "parameters": {
+          "client_keys": [
+            "seeded-1",
+            "seeded-2",
+            "seeded-3",
+            "empty-1",
+            "empty-2",
+            "empty-3"
+          ],
+          "sources": [
+            "application-rows",
+            "artifact-state",
+            "scope-state",
+            "sync-status",
+            "request-trace"
+          ],
+          "expectation_ids": [
+            "EXPECT-PERF-SEEDED-EMPTY-STARTUP-SEMANTIC-001",
+            "EXPECT-PERF-SEEDED-EMPTY-STARTUP-PERFORMANCE-001"
+          ]
+        }
+      },
+      {
+        "id": "NACT-PERF-SEEDED-EMPTY-STARTUP-024",
+        "phase": "verify",
+        "actor": "observer",
+        "command": "measure",
+        "covers_step_ids": [],
+        "parameters": {
+          "performance_budget_ids": [],
+          "measurement_ids": [
+            "MEAS-SEEDED-EMPTY-STARTUP-001"
+          ]
+        }
+      }
+    ]
+  },
   "barrier_plan": {
     "barriers": [
       {
@@ -943,6 +1293,7 @@
       "phase": "exercise",
       "transport": "http",
       "description": "Connect the seeded client through the authenticated protocol.",
+      "measurement_sample": { "measurement_id": "MEAS-SEEDED-EMPTY-STARTUP-001", "stratum_id": "STR-STARTUP-SEEDED-001", "sample_id": "SAMPLE-SEEDED-EMPTY-STARTUP-SEEDED-001", "parameters": { "startup_state": "seeded" } },
       "operation": {
         "contract_operation": "connect",
         "name": "send",
@@ -1014,6 +1365,7 @@
       "phase": "exercise",
       "transport": "http",
       "description": "Connect the seeded client through the authenticated protocol.",
+      "measurement_sample": { "measurement_id": "MEAS-SEEDED-EMPTY-STARTUP-001", "stratum_id": "STR-STARTUP-SEEDED-001", "sample_id": "SAMPLE-SEEDED-EMPTY-STARTUP-SEEDED-002", "parameters": { "startup_state": "seeded" } },
       "operation": {
         "contract_operation": "connect",
         "name": "send",
@@ -1085,6 +1437,7 @@
       "phase": "exercise",
       "transport": "http",
       "description": "Connect the seeded client through the authenticated protocol.",
+      "measurement_sample": { "measurement_id": "MEAS-SEEDED-EMPTY-STARTUP-001", "stratum_id": "STR-STARTUP-SEEDED-001", "sample_id": "SAMPLE-SEEDED-EMPTY-STARTUP-SEEDED-003", "parameters": { "startup_state": "seeded" } },
       "operation": {
         "contract_operation": "connect",
         "name": "send",
@@ -1137,6 +1490,7 @@
       "phase": "exercise",
       "transport": "http",
       "description": "Connect the empty client through the authenticated protocol.",
+      "measurement_sample": { "measurement_id": "MEAS-SEEDED-EMPTY-STARTUP-001", "stratum_id": "STR-STARTUP-EMPTY-001", "sample_id": "SAMPLE-SEEDED-EMPTY-STARTUP-EMPTY-001", "parameters": { "startup_state": "empty" } },
       "operation": {
         "contract_operation": "connect",
         "name": "send",
@@ -1186,6 +1540,7 @@
       "phase": "exercise",
       "transport": "http",
       "description": "Connect the empty client through the authenticated protocol.",
+      "measurement_sample": { "measurement_id": "MEAS-SEEDED-EMPTY-STARTUP-001", "stratum_id": "STR-STARTUP-EMPTY-001", "sample_id": "SAMPLE-SEEDED-EMPTY-STARTUP-EMPTY-002", "parameters": { "startup_state": "empty" } },
       "operation": {
         "contract_operation": "connect",
         "name": "send",
@@ -1235,6 +1590,7 @@
       "phase": "exercise",
       "transport": "http",
       "description": "Connect the empty client through the authenticated protocol.",
+      "measurement_sample": { "measurement_id": "MEAS-SEEDED-EMPTY-STARTUP-001", "stratum_id": "STR-STARTUP-EMPTY-001", "sample_id": "SAMPLE-SEEDED-EMPTY-STARTUP-EMPTY-003", "parameters": { "startup_state": "empty" } },
       "operation": {
         "contract_operation": "connect",
         "name": "send",

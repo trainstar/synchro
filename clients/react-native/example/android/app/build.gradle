@@ -81,6 +81,12 @@ android {
     buildToolsVersion rootProject.ext.buildToolsVersion
     compileSdk rootProject.ext.compileSdkVersion
 
+    compileOptions {
+        coreLibraryDesugaringEnabled true
+        sourceCompatibility JavaVersion.VERSION_1_8
+        targetCompatibility JavaVersion.VERSION_1_8
+    }
+
     namespace "trainstar.synchroreactnative.example"
     defaultConfig {
         applicationId "trainstar.synchroreactnative.example"
@@ -133,6 +139,7 @@ tasks.named("preBuild").configure {
 dependencies {
     // The version of react-native is set by the React Native Gradle Plugin
     implementation("com.facebook.react:react-android")
+    coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.0.4")
     androidTestImplementation("com.wix:detox:20.47.0")
     androidTestImplementation("androidx.test:core:1.7.0")
     androidTestImplementation("androidx.test:core-ktx:1.7.0")

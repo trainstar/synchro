@@ -305,6 +305,35 @@ jobs:
             cargo pgrx init --pg18 download
           fi
 
+      - name: Configure native Swift conformance
+        run: |
+          make conformance-adapter-artifact
+          make conformance-pg18-extension-artifact
+          umask 077
+          SECRETS_DIR="$RUNNER_TEMP/synchro-conformance-secrets"
+          mkdir "$SECRETS_DIR"
+          for name in admin adapter observer worker operator jwt; do
+            openssl rand -hex 32 > "$SECRETS_DIR/$name-password"
+          done
+          PG_CONFIG="$(awk -F'"' '/^pg18[[:space:]]*=/ { print $2 }' "$HOME/.pgrx/config.toml")"
+          {
+            echo "SYNCHRO_CONFORMANCE_PG18_BINDIR=$(dirname "$PG_CONFIG")"
+            echo "SYNCHRO_CONFORMANCE_EXTENSION_ARTIFACT=$GITHUB_WORKSPACE/dist/conformance/synchro-pg-pg18"
+            echo "SYNCHRO_CONFORMANCE_ADAPTER_ARTIFACT=$GITHUB_WORKSPACE/dist/conformance/synchrod-pg-adapter/synchrod-pg"
+            echo "SYNCHRO_CONFORMANCE_ADMIN_USER=synchro_cf_admin"
+            echo "SYNCHRO_CONFORMANCE_ADMIN_PASSWORD_FILE=$SECRETS_DIR/admin-password"
+            echo "SYNCHRO_CONFORMANCE_ADAPTER_USER=synchro_cf_adapter"
+            echo "SYNCHRO_CONFORMANCE_ADAPTER_PASSWORD_FILE=$SECRETS_DIR/adapter-password"
+            echo "SYNCHRO_CONFORMANCE_OBSERVER_USER=synchro_cf_observer"
+            echo "SYNCHRO_CONFORMANCE_OBSERVER_PASSWORD_FILE=$SECRETS_DIR/observer-password"
+            echo "SYNCHRO_CONFORMANCE_WORKER_USER=synchro_cf_worker"
+            echo "SYNCHRO_CONFORMANCE_WORKER_PASSWORD_FILE=$SECRETS_DIR/worker-password"
+            echo "SYNCHRO_CONFORMANCE_OPERATOR_USER=synchro_cf_operator"
+            echo "SYNCHRO_CONFORMANCE_OPERATOR_PASSWORD_FILE=$SECRETS_DIR/operator-password"
+            echo "SYNCHRO_CONFORMANCE_JWT_SECRET_FILE=$SECRETS_DIR/jwt-password"
+            echo "SYNCHRO_CONFORMANCE_INSTALL_LOCK=$RUNNER_TEMP/synchro-conformance-install.lock"
+          } >> "$GITHUB_ENV"
+
       - name: Ensure CocoaPods is available
         run: |
           if ! command -v pod >/dev/null 2>&1; then
@@ -316,6 +345,9 @@ jobs:
 
       - name: Validate Swift SDK
         run: make test-swift
+
+      - name: Validate native Swift conformance
+        run: make test-native-swift
 
   validate-rn-ios:
     needs: validate-metadata

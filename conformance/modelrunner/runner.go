@@ -255,6 +255,14 @@ func executeStep(ctx context.Context, model *reference.Model, scenario scenarios
 	execution.Result = cloneStepResult(operationResult)
 	execution.Err = operationErr
 	execution.After = model.Snapshot()
+	if step.MeasurementSample != nil {
+		measurement, err := deriveSchemaDispatchMeasurementSample(*step.MeasurementSample, execution)
+		if err != nil {
+			execution.Err = err
+			return execution, nil, &RunError{Kind: RunErrorOperation, StepID: step.ID, OperationKey: key, Err: err}
+		}
+		execution.SchemaDispatchMeasurement = &measurement
+	}
 	if err := matchExpectedOutcome(step.ExpectedOutcome, operationErr); err != nil {
 		return execution, nil, &RunError{
 			Kind:         RunErrorExpectedOutcome,
@@ -608,14 +616,19 @@ func validatePredicate(predicate scenarios.Predicate) error {
 	if err := jsonstrict.ValidateValue(predicate.Payload); err != nil {
 		return fmt.Errorf("predicate payload is invalid: %w", err)
 	}
-	var object map[string]json.RawMessage
-	if err := json.Unmarshal(predicate.Payload, &object); err != nil || object == nil || len(object) != 0 {
-		return errors.New("predicate payload must be an empty object")
-	}
 	switch predicate.Name {
+	case "schema-dispatch-observations-satisfied", "schema-dispatch-measurement-satisfied":
+		if _, err := scenarios.DecodeSchemaDispatchMeasurementPlan(predicate.Payload); err != nil {
+			return err
+		}
+		return nil
 	case "state-equals-authored-model", "state-unchanged", "canonical-wire-outcome", "legal-state-transition", "artifact-policy-satisfied", "performance-contract-satisfied":
 	default:
 		return errors.New("predicate name is not in the closed authored set")
+	}
+	var object map[string]json.RawMessage
+	if err := json.Unmarshal(predicate.Payload, &object); err != nil || object == nil || len(object) != 0 {
+		return errors.New("predicate payload must be an empty object")
 	}
 	return nil
 }
@@ -646,6 +659,12 @@ func evaluatePredicate(expectation scenarios.ModelExpectation, result Result) (b
 	case "legal-state-transition":
 		reason := transitionSemanticFailure(result)
 		return reason == "", reason
+	case "schema-dispatch-observations-satisfied":
+		plan, err := scenarios.DecodeSchemaDispatchMeasurementPlan(expectation.Predicate.Payload)
+		if err != nil {
+			return false, "schema-dispatch predicate payload is invalid"
+		}
+		return schemaDispatchObservationsSatisfied(result, plan)
 	case "artifact-policy-satisfied":
 		for _, step := range result.Steps {
 			if step.OperationKey == "artifact/install-portable-seed" {
@@ -655,6 +674,12 @@ func evaluatePredicate(expectation scenarios.ModelExpectation, result Result) (b
 		return false, "no portable seed installation was executed"
 	case "performance-contract-satisfied":
 		return performanceContractSatisfied(result.ScenarioID, result), "the authored performance trace did not satisfy its closed contract"
+	case "schema-dispatch-measurement-satisfied":
+		plan, err := scenarios.DecodeSchemaDispatchMeasurementPlan(expectation.Predicate.Payload)
+		if err != nil {
+			return false, "schema-dispatch predicate payload is invalid"
+		}
+		return schemaDispatchMeasurementSatisfied(result, plan)
 	default:
 		return false, "predicate is not implemented"
 	}

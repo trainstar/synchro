@@ -1,12 +1,15 @@
 package scenarios
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
+	"reflect"
 	"sort"
 	"strings"
 
 	"github.com/trainstar/synchro/conformance/internal/contract"
+	"github.com/trainstar/synchro/conformance/internal/jsonstrict"
 )
 
 // VectorSetLookup provides the catalog boundary for scenario vector sets.
@@ -59,9 +62,9 @@ var operationTransport = map[string]string{
 var predicateNames = map[string]map[string]struct{}{
 	"state-equality":          {"state-equals-authored-model": {}, "state-unchanged": {}},
 	"wire-outcome":            {"canonical-wire-outcome": {}},
-	"state-transition":        {"legal-state-transition": {}},
+	"state-transition":        {"legal-state-transition": {}, "schema-dispatch-observations-satisfied": {}},
 	"artifact-integrity":      {"artifact-policy-satisfied": {}},
-	"performance-measurement": {"performance-contract-satisfied": {}},
+	"performance-measurement": {"performance-contract-satisfied": {}, "schema-dispatch-measurement-satisfied": {}},
 }
 
 var predicateByOracle = map[string]string{
@@ -76,7 +79,7 @@ var proofTargetPolicy = map[string]map[string]struct{}{
 	"reference-model":  {"test-conformance": {}},
 	"server-black-box": {"test-blackbox": {}},
 	"native-e2e": {
-		"test-swift": {}, "test-kotlin": {}, "test-rn-e2e-ios": {}, "test-rn-e2e-android": {},
+		"test-swift": {}, "test-native-swift-schema-queue": {}, "test-native-swift-steady-pull": {}, "test-native-swift-rebuild-requests": {}, "test-kotlin": {}, "test-rn-e2e-ios": {}, "test-rn-e2e-android": {},
 	},
 	"fault-injection": {
 		"test-blackbox": {}, "test-swift": {}, "test-kotlin": {}, "test-rn-e2e-ios": {}, "test-rn-e2e-android": {},
@@ -92,29 +95,38 @@ type targetRule struct {
 }
 
 var targetRules = map[string]targetRule{
-	"test-conformance":    {},
-	"test-blackbox":       {component: "postgresql-server", hasComponent: true},
-	"test-swift":          {component: "swift-client", hasComponent: true},
-	"test-kotlin":         {component: "kotlin-client", hasComponent: true},
-	"test-rn-e2e-ios":     {component: "react-native-client", platform: "ios", hasComponent: true, hasPlatform: true},
-	"test-rn-e2e-android": {component: "react-native-client", platform: "android", hasComponent: true, hasPlatform: true},
+	"test-conformance":                   {},
+	"test-blackbox":                      {component: "postgresql-server", hasComponent: true},
+	"test-swift":                         {component: "swift-client", hasComponent: true},
+	"test-native-swift-schema-queue":     {component: "swift-client", platform: "macos", hasComponent: true, hasPlatform: true},
+	"test-native-swift-steady-pull":      {component: "swift-client", platform: "macos", hasComponent: true, hasPlatform: true},
+	"test-native-swift-rebuild-requests": {component: "swift-client", platform: "macos", hasComponent: true, hasPlatform: true},
+	"test-kotlin":                        {component: "kotlin-client", hasComponent: true},
+	"test-rn-e2e-ios":                    {component: "react-native-client", platform: "ios", hasComponent: true, hasPlatform: true},
+	"test-rn-e2e-android":                {component: "react-native-client", platform: "android", hasComponent: true, hasPlatform: true},
 }
 
 var targetRequiredRoles = map[string]map[string]struct{}{
-	"test-conformance":    {"conformance-runner": {}},
-	"test-blackbox":       {"pg-extension": {}, "adapter": {}},
-	"test-swift":          {"pg-extension": {}, "adapter": {}, "swift-spm": {}},
-	"test-kotlin":         {"pg-extension": {}, "adapter": {}, "kotlin-maven": {}},
-	"test-rn-e2e-ios":     {"pg-extension": {}, "adapter": {}, "swift-spm": {}, "cocoapods": {}, "react-native-npm": {}},
-	"test-rn-e2e-android": {"pg-extension": {}, "adapter": {}, "kotlin-maven": {}, "react-native-npm": {}},
+	"test-conformance":                   {"conformance-runner": {}},
+	"test-blackbox":                      {"pg-extension": {}, "adapter": {}},
+	"test-swift":                         {"pg-extension": {}, "adapter": {}, "swift-spm": {}},
+	"test-native-swift-schema-queue":     {"pg-extension": {}, "adapter": {}, "swift-spm": {}},
+	"test-native-swift-steady-pull":      {"pg-extension": {}, "adapter": {}, "swift-spm": {}},
+	"test-native-swift-rebuild-requests": {"pg-extension": {}, "adapter": {}, "swift-spm": {}},
+	"test-kotlin":                        {"pg-extension": {}, "adapter": {}, "kotlin-maven": {}},
+	"test-rn-e2e-ios":                    {"pg-extension": {}, "adapter": {}, "swift-spm": {}, "cocoapods": {}, "react-native-npm": {}},
+	"test-rn-e2e-android":                {"pg-extension": {}, "adapter": {}, "kotlin-maven": {}, "react-native-npm": {}},
 }
 
 var targetAllowedRoles = map[string]map[string]struct{}{
-	"test-blackbox":       {"pg-extension": {}, "pg-install-sql": {}, "adapter": {}, "seed-tool": {}, "portable-seed": {}},
-	"test-swift":          {"pg-extension": {}, "adapter": {}, "seed-tool": {}, "swift-spm": {}, "cocoapods": {}, "portable-seed": {}},
-	"test-kotlin":         {"pg-extension": {}, "adapter": {}, "seed-tool": {}, "kotlin-maven": {}, "portable-seed": {}},
-	"test-rn-e2e-ios":     {"pg-extension": {}, "adapter": {}, "seed-tool": {}, "swift-spm": {}, "cocoapods": {}, "react-native-npm": {}, "portable-seed": {}},
-	"test-rn-e2e-android": {"pg-extension": {}, "adapter": {}, "seed-tool": {}, "kotlin-maven": {}, "react-native-npm": {}, "portable-seed": {}},
+	"test-blackbox":                      {"pg-extension": {}, "pg-install-sql": {}, "adapter": {}, "seed-tool": {}, "portable-seed": {}},
+	"test-swift":                         {"pg-extension": {}, "adapter": {}, "seed-tool": {}, "swift-spm": {}, "cocoapods": {}, "portable-seed": {}},
+	"test-native-swift-schema-queue":     {"pg-extension": {}, "adapter": {}, "swift-spm": {}, "cocoapods": {}},
+	"test-native-swift-steady-pull":      {"pg-extension": {}, "adapter": {}, "swift-spm": {}, "cocoapods": {}},
+	"test-native-swift-rebuild-requests": {"pg-extension": {}, "adapter": {}, "swift-spm": {}, "cocoapods": {}},
+	"test-kotlin":                        {"pg-extension": {}, "adapter": {}, "seed-tool": {}, "kotlin-maven": {}, "portable-seed": {}},
+	"test-rn-e2e-ios":                    {"pg-extension": {}, "adapter": {}, "seed-tool": {}, "swift-spm": {}, "cocoapods": {}, "react-native-npm": {}, "portable-seed": {}},
+	"test-rn-e2e-android":                {"pg-extension": {}, "adapter": {}, "seed-tool": {}, "kotlin-maven": {}, "react-native-npm": {}, "portable-seed": {}},
 }
 
 // Validate checks all semantic bindings in one scenario. It does not execute
@@ -335,6 +347,7 @@ func (v *scenarioValidator) validate() {
 	v.validateTargetsAndArtifacts()
 	v.validateRequiredProofs()
 	v.validatePerformance()
+	v.validateNativeExecution()
 	v.validateOwnership()
 }
 
@@ -1071,6 +1084,7 @@ func (v *scenarioValidator) validatePerformance() {
 		}
 		v.validatePerformanceItem(string(item.ID), item.SupportCellIDs, item.ArtifactInventoryIDs, budgets, measurements, supportCells, artifactRoles, false)
 	}
+	v.validateMeasurementSampleBindings(measurements)
 	for _, obligation := range v.scenario.ProofObligations {
 		for _, id := range obligation.PerformanceBudgetIDs {
 			item, exists := budgets[id]
@@ -1089,6 +1103,166 @@ func (v *scenarioValidator) validatePerformance() {
 			v.validateDeclaredPerformance(string(id), item.ScenarioID, item.SupportCellIDs, item.ArtifactInventoryIDs, obligation, supportCells, artifactRoles)
 		}
 	}
+}
+
+type boundMeasurementSample struct {
+	step Step
+	item MeasurementSample
+}
+
+func (v *scenarioValidator) validateMeasurementSampleBindings(measurements map[contract.MeasurementID]contract.RequiredMeasurement) {
+	bound := make(map[contract.MeasurementID][]boundMeasurementSample)
+	seenSamples := make(map[string]struct{})
+	for _, step := range v.scenario.Steps {
+		if step.MeasurementSample == nil {
+			continue
+		}
+		sample := *step.MeasurementSample
+		if step.Phase != "exercise" {
+			v.add("%s measurement sample %s must execute in the exercise phase", v.scenario.ID, step.ID)
+		}
+		if sample.MeasurementID == "" || sample.StratumID == "" || sample.SampleID == "" {
+			v.add("%s measurement sample %s has an incomplete binding", v.scenario.ID, step.ID)
+			continue
+		}
+		item, found := measurements[sample.MeasurementID]
+		if !found {
+			v.add("%s measurement sample %s references unknown measurement %s", v.scenario.ID, step.ID, sample.MeasurementID)
+			continue
+		}
+		if item.ScenarioID != v.scenario.ID {
+			v.add("%s measurement sample %s binds measurement %s from scenario %s", v.scenario.ID, step.ID, sample.MeasurementID, item.ScenarioID)
+			continue
+		}
+		key := strings.Join([]string{string(sample.MeasurementID), string(sample.StratumID), sample.SampleID}, "|")
+		if _, duplicate := seenSamples[key]; duplicate {
+			v.add("%s measurement sample %s duplicates sample ID %s in stratum %s", v.scenario.ID, step.ID, sample.SampleID, sample.StratumID)
+		} else {
+			seenSamples[key] = struct{}{}
+		}
+		stratum, found := measurementStratum(item, sample.StratumID)
+		if !found {
+			v.add("%s measurement sample %s references unknown stratum %s", v.scenario.ID, step.ID, sample.StratumID)
+			continue
+		}
+		if !sameMeasurementParameters(sample.Parameters, stratum.Parameters) {
+			v.add("%s measurement sample %s parameters do not match stratum %s", v.scenario.ID, step.ID, sample.StratumID)
+		}
+		bound[sample.MeasurementID] = append(bound[sample.MeasurementID], boundMeasurementSample{step: step, item: sample})
+	}
+
+	for measurementID, item := range measurements {
+		if item.ScenarioID != v.scenario.ID {
+			continue
+		}
+		samples := bound[measurementID]
+		minimum, err := item.MinimumSampleCountPerStratum.Int64()
+		if err != nil || minimum <= 0 {
+			v.add("%s measurement %s has an invalid minimum sample count", v.scenario.ID, measurementID)
+			continue
+		}
+		counts := make(map[contract.StratumID]int, len(item.Strata))
+		for _, sample := range samples {
+			counts[sample.item.StratumID]++
+		}
+		for _, stratum := range item.Strata {
+			if counts[stratum.StratumID] < int(minimum) {
+				v.add("%s measurement %s stratum %s has %d bound samples, want at least %d", v.scenario.ID, measurementID, stratum.StratumID, counts[stratum.StratumID], minimum)
+			}
+		}
+	}
+
+	v.validateSchemaDispatchMeasurementPlans(measurements, bound)
+}
+
+func (v *scenarioValidator) validateSchemaDispatchMeasurementPlans(measurements map[contract.MeasurementID]contract.RequiredMeasurement, bound map[contract.MeasurementID][]boundMeasurementSample) {
+	var expected *SchemaDispatchMeasurementPlan
+	for _, predicate := range scenarioPredicates(v.scenario) {
+		if predicate.Name != "schema-dispatch-observations-satisfied" && predicate.Name != "schema-dispatch-measurement-satisfied" {
+			continue
+		}
+		plan, err := DecodeSchemaDispatchMeasurementPlan(predicate.Payload)
+		if err != nil {
+			v.add("%s schema-dispatch predicate is invalid: %v", v.scenario.ID, err)
+			continue
+		}
+		item, found := measurements[plan.MeasurementID]
+		if !found || item.ScenarioID != v.scenario.ID {
+			v.add("%s schema-dispatch predicate references an unavailable measurement %s", v.scenario.ID, plan.MeasurementID)
+			continue
+		}
+		minimum, err := item.MinimumSampleCountPerStratum.Int64()
+		if err != nil || minimum <= 0 || uint64(minimum) != plan.MinimumSampleCountPerStratum {
+			v.add("%s schema-dispatch predicate does not match measurement %s minimum sample count", v.scenario.ID, plan.MeasurementID)
+		}
+		strata, err := schemaStrataForMeasurement(item)
+		if err != nil || !reflect.DeepEqual(plan.Strata, strata) {
+			v.add("%s schema-dispatch predicate does not match measurement %s strata", v.scenario.ID, plan.MeasurementID)
+		}
+		if len(bound[plan.MeasurementID]) == 0 {
+			v.add("%s schema-dispatch predicate has no bound executable samples", v.scenario.ID)
+		}
+		if expected == nil {
+			copy := plan
+			expected = &copy
+		} else if !reflect.DeepEqual(*expected, plan) {
+			v.add("%s schema-dispatch predicates do not share one measurement plan", v.scenario.ID)
+		}
+	}
+}
+
+func scenarioPredicates(scenario Scenario) []Predicate {
+	predicates := make([]Predicate, 0, len(scenario.Model.ExpectedState)+len(scenario.Assertions))
+	for _, expectation := range scenario.Model.ExpectedState {
+		predicates = append(predicates, expectation.Predicate)
+	}
+	for _, assertion := range scenario.Assertions {
+		predicates = append(predicates, assertion.Predicate)
+	}
+	return predicates
+}
+
+func measurementStratum(item contract.RequiredMeasurement, wanted contract.StratumID) (contract.PerformanceStratum, bool) {
+	for _, stratum := range item.Strata {
+		if stratum.StratumID == wanted {
+			return stratum, true
+		}
+	}
+	return contract.PerformanceStratum{}, false
+}
+
+func sameMeasurementParameters(left, right json.RawMessage) bool {
+	var leftValue any
+	var rightValue any
+	if jsonstrict.Decode(left, &leftValue) != nil || jsonstrict.Decode(right, &rightValue) != nil {
+		return false
+	}
+	return reflect.DeepEqual(leftValue, rightValue)
+}
+
+func schemaStrataForMeasurement(item contract.RequiredMeasurement) ([]SchemaDispatchMeasurementStratum, error) {
+	strata := make([]SchemaDispatchMeasurementStratum, 0, len(item.Strata))
+	seen := make(map[string]struct{}, len(item.Strata))
+	for _, stratum := range item.Strata {
+		var parameters map[string]json.RawMessage
+		if err := jsonstrict.Decode(stratum.Parameters, &parameters); err != nil || len(parameters) != 1 {
+			return nil, errors.New("schema measurement stratum parameters are invalid")
+		}
+		raw, found := parameters["schema_case"]
+		if !found {
+			return nil, errors.New("schema measurement stratum has no schema_case")
+		}
+		var schemaCase string
+		if err := json.Unmarshal(raw, &schemaCase); err != nil || schemaCase == "" {
+			return nil, errors.New("schema measurement stratum schema_case is invalid")
+		}
+		if _, duplicate := seen[schemaCase]; duplicate {
+			return nil, errors.New("schema measurement stratum schema_case is duplicated")
+		}
+		seen[schemaCase] = struct{}{}
+		strata = append(strata, SchemaDispatchMeasurementStratum{StratumID: stratum.StratumID, SchemaCase: schemaCase})
+	}
+	return strata, nil
 }
 
 func (v *scenarioValidator) validatePerformanceItem(id string, itemSupport []contract.SupportCellID, itemArtifacts []contract.ArtifactInventoryID, budgets map[contract.BudgetID]contract.PerformanceBudget, measurements map[contract.MeasurementID]contract.RequiredMeasurement, supportCells map[contract.SupportCellID]contract.SupportCell, artifactRoles map[contract.ArtifactInventoryID]string, isBudget bool) {

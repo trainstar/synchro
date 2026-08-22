@@ -1069,5 +1069,120 @@
       },
       "detects_control_ids": []
     }
-  ]
+  ],
+  "native_execution": {
+    "version": 1,
+    "clients": [
+      {
+        "key": "client_a",
+        "user_id": "user-a",
+        "client_id": "client-a",
+        "database_key": "db_pending_cycle"
+      }
+    ],
+    "actions": [
+      {
+        "id": "NACT-PC-001",
+        "phase": "setup",
+        "actor": "controller",
+        "command": "install-model",
+        "covers_step_ids": [],
+        "parameters": {}
+      },
+      {
+        "id": "NACT-PC-002",
+        "phase": "setup",
+        "actor": "client",
+        "command": "open",
+        "covers_step_ids": [],
+        "parameters": {
+          "client_key": "client_a",
+          "database_mode": "create",
+          "initialization": "current",
+          "seed_step_id": null
+        }
+      },
+      {
+        "id": "NACT-PC-003",
+        "phase": "exercise",
+        "actor": "client",
+        "command": "execute-step",
+        "covers_step_ids": ["STEP-PERF-PENDING-CYCLE-001"],
+        "parameters": {
+          "client_key": "client_a"
+        }
+      },
+      {
+        "id": "NACT-PC-004",
+        "phase": "exercise",
+        "actor": "client",
+        "command": "synchronize-step",
+        "covers_step_ids": ["STEP-PERF-PENDING-CYCLE-002"],
+        "parameters": {
+          "client_key": "client_a",
+          "method": "start",
+          "completion": "idle"
+        }
+      },
+      {
+        "id": "NACT-PC-005",
+        "phase": "exercise",
+        "actor": "process",
+        "command": "execute-step",
+        "covers_step_ids": ["STEP-PERF-PENDING-CYCLE-MATERIALIZE-001"],
+        "parameters": {
+          "client_key": null
+        }
+      },
+      {
+        "id": "NACT-PC-006",
+        "phase": "exercise",
+        "actor": "client",
+        "command": "synchronize-step",
+        "covers_step_ids": ["STEP-PERF-PENDING-CYCLE-003"],
+        "parameters": {
+          "client_key": "client_a",
+          "method": "sync-now",
+          "completion": "idle"
+        }
+      },
+      {
+        "id": "NACT-PC-007",
+        "phase": "verify",
+        "actor": "observer",
+        "command": "capture",
+        "covers_step_ids": [],
+        "parameters": {
+          "client_keys": ["client_a"],
+          "sources": [
+            "application-rows",
+            "pending-mutations",
+            "rejected-mutations",
+            "sync-status",
+            "request-trace",
+            "server-state"
+          ],
+          "expectation_ids": [
+            "EXPECT-PERF-PENDING-CYCLE-SEMANTIC-001",
+            "EXPECT-PERF-PENDING-CYCLE-PERFORMANCE-001"
+          ]
+        }
+      },
+      {
+        "id": "NACT-PC-008",
+        "phase": "verify",
+        "actor": "observer",
+        "command": "measure",
+        "covers_step_ids": [],
+        "parameters": {
+          "performance_budget_ids": [
+            "BUD-PENDING-CYCLE-UNEXPECTED-001",
+            "BUD-PENDING-PULL-001",
+            "BUD-PENDING-PUSH-001"
+          ],
+          "measurement_ids": []
+        }
+      }
+    ]
+  }
 }

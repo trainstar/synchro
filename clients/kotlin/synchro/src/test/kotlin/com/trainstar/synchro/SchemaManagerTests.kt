@@ -2,6 +2,10 @@ package com.trainstar.synchro
 
 import android.content.Context
 import androidx.test.core.app.ApplicationProvider
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonNull
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 import org.junit.After
 import org.junit.Assert.*
 import org.junit.Test
@@ -21,6 +25,25 @@ class SchemaManagerTests {
 
     private fun makeManifest(tables: List<TableSchema>): SchemaManifest =
         SchemaManifest(tables)
+
+    private fun assertCDCTriggers(db: SynchroDatabase, tableName: String) {
+        val triggers = db.query(
+            "SELECT name, sql FROM sqlite_master WHERE type='trigger' AND name LIKE '_synchro_cdc_%$tableName' ORDER BY name",
+        )
+        assertEquals(
+            setOf(
+                "_synchro_cdc_delete_$tableName",
+                "_synchro_cdc_insert_$tableName",
+                "_synchro_cdc_pk_guard_$tableName",
+                "_synchro_cdc_update_$tableName",
+            ),
+            triggers.map { it.getValue("name") }.toSet(),
+        )
+        val guardSQL = triggers.single { it["name"] == "_synchro_cdc_pk_guard_$tableName" }["sql"] as String
+        assertTrue(guardSQL.contains("BEFORE UPDATE OF"))
+        assertTrue(guardSQL.contains("NEW.\"id\" IS NOT OLD.\"id\""))
+        assertTrue(guardSQL.contains("RAISE(ABORT, 'synced primary key cannot change')"))
+    }
 
     @After
     fun tearDown() {
@@ -59,8 +82,7 @@ class SchemaManagerTests {
         assertEquals(1, rows.size)
 
         // Verify triggers exist
-        val triggers = db.query("SELECT name FROM sqlite_master WHERE type='trigger' AND name LIKE '_synchro_cdc_%orders'")
-        assertEquals(3, triggers.size)
+        assertCDCTriggers(db, "orders")
     }
 
     @Test
@@ -89,7 +111,7 @@ class SchemaManagerTests {
         manager.reconcileLocalSchema(schemaVersion = 7, schemaHash = "portable-v1", tables = manifest.localTables())
 
         assertEquals(1, db.query("SELECT name FROM sqlite_master WHERE type='table' AND name='workouts'").size)
-        assertEquals(3, db.query("SELECT name FROM sqlite_master WHERE type='trigger' AND name LIKE '_synchro_cdc_%workouts'").size)
+        assertCDCTriggers(db, "workouts")
 
         db.readTransaction { rawDb ->
             assertEquals(7L, SynchroMeta.getInt64(rawDb, MetaKey.SCHEMA_VERSION))
@@ -149,69 +171,6 @@ class SchemaManagerTests {
         assertNotNull(row)
         assertEquals("Morning Run", row?.get("name"))
         assertNull(row?.get("notes"))
-    }
-
-    @Test
-    fun testPortableManifestAliasTypesNormalizeWithoutTriggeringRebuild() {
-        val db = makeTestDB()
-        val manager = SchemaManager(db)
-
-        val canonical = makeManifest(
-            listOf(
-                TableSchema(
-                    name = "metrics",
-                    primaryKey = listOf("id"),
-                    updatedAtColumn = "updated_at",
-                    deletedAtColumn = "deleted_at",
-                    composition = CompositionClass.SINGLE_SCOPE,
-                    columns = listOf(
-                        ColumnSchema(name = "id", typeName = "string", nullable = false),
-                        ColumnSchema(name = "score", typeName = "int", nullable = true),
-                        ColumnSchema(name = "updated_at", typeName = "datetime", nullable = false),
-                        ColumnSchema(name = "deleted_at", typeName = "datetime", nullable = true),
-                    ),
-                    indexes = null,
-                )
-            )
-        )
-        manager.reconcileLocalSchema(schemaVersion = 1, schemaHash = "canonical-v1", tables = canonical.localTables())
-        db.execute("INSERT INTO metrics (id, score, updated_at) VALUES ('m-1', 7, '2026-01-01T00:00:00Z')")
-        db.writeTransaction { rawDb ->
-            SynchroMeta.set(rawDb, MetaKey.SNAPSHOT_COMPLETE, "1")
-        }
-
-        val aliasManifest = makeManifest(
-            listOf(
-                TableSchema(
-                    name = "metrics",
-                    primaryKey = listOf("id"),
-                    updatedAtColumn = "updated_at",
-                    deletedAtColumn = "deleted_at",
-                    composition = CompositionClass.SINGLE_SCOPE,
-                    columns = listOf(
-                        ColumnSchema(name = "id", typeName = "uuid", nullable = false),
-                        ColumnSchema(name = "score", typeName = "integer", nullable = true),
-                        ColumnSchema(name = "updated_at", typeName = "timestamp", nullable = false),
-                        ColumnSchema(name = "deleted_at", typeName = "timestamp", nullable = true),
-                    ),
-                    indexes = null,
-                )
-            )
-        )
-
-        val normalizedTables = aliasManifest.localTables()
-        assertEquals(listOf("string", "int", "datetime", "datetime"), normalizedTables[0].columns.map { it.logicalType })
-
-        manager.reconcileLocalSchema(schemaVersion = 2, schemaHash = "alias-v2", tables = normalizedTables)
-
-        val row = db.queryOne("SELECT score FROM metrics WHERE id = ?", arrayOf("m-1"))
-        assertNotNull(row)
-        assertEquals(7L, row?.get("score"))
-
-        val snapshotComplete = db.readTransaction { rawDb ->
-            SynchroMeta.get(rawDb, MetaKey.SNAPSHOT_COMPLETE)
-        }
-        assertEquals("1", snapshotComplete)
     }
 
     @Test
@@ -300,7 +259,7 @@ class SchemaManagerTests {
 
         // Verify table and triggers exist
         assertEquals(1, db.query("SELECT name FROM sqlite_master WHERE type='table' AND name='orders'").size)
-        assertEquals(3, db.query("SELECT name FROM sqlite_master WHERE type='trigger' AND name LIKE '_synchro_cdc_%orders'").size)
+        assertCDCTriggers(db, "orders")
 
         // Drop
         manager.dropSyncedTables(schema)
@@ -589,8 +548,7 @@ class SchemaManagerTests {
         assertEquals(1, itemsTables.size)
 
         // Verify second table has triggers
-        val itemsTriggers = db.query("SELECT name FROM sqlite_master WHERE type='trigger' AND name LIKE '_synchro_cdc_%items'")
-        assertEquals(3, itemsTriggers.size)
+        assertCDCTriggers(db, "items")
 
         // Verify second table is usable
         db.execute("INSERT INTO items (id, order_id, product_name, updated_at) VALUES ('itm-1', 'ord-1', 'Widget', '2026-01-01T00:00:00Z')")
@@ -775,8 +733,7 @@ class SchemaManagerTests {
         assertTrue("title column should exist", columns.contains("title"))
 
         // Verify triggers are installed
-        val triggers = db.query("SELECT name FROM sqlite_master WHERE type='trigger' AND name LIKE '_synchro_cdc_%orders'")
-        assertEquals(3, triggers.size)
+        assertCDCTriggers(db, "orders")
 
         // Verify existing data is preserved
         val row = db.queryOne("SELECT id, updated_at FROM orders WHERE id = ?", arrayOf("ord-1"))
@@ -790,11 +747,10 @@ class SchemaManagerTests {
     }
 
     @Test
-    fun testColumnTypeIncompatibilityTriggersRebuild() {
+    fun testIncompatibleTypeRejectsWholeMultiTableMigrationWithoutStateChange() {
         val db = makeTestDB()
         val manager = SchemaManager(db)
 
-        // Create v1 where "score" is TEXT type (logicalType "string")
         val v1 = SchemaResponse(
             schemaVersion = 1,
             schemaHash = "v1",
@@ -812,27 +768,88 @@ class SchemaManagerTests {
                         SchemaColumn(name = "updated_at", dbType = "timestamp with time zone", logicalType = "datetime", nullable = false, isPrimaryKey = false),
                         SchemaColumn(name = "deleted_at", dbType = "timestamp with time zone", logicalType = "datetime", nullable = true, isPrimaryKey = false),
                     )
+                ),
+                SchemaTable(
+                    tableName = "profiles",
+                    pushPolicy = "owner_only",
+                    updatedAtColumn = "updated_at",
+                    deletedAtColumn = "deleted_at",
+                    primaryKey = listOf("id"),
+                    columns = listOf(
+                        SchemaColumn(name = "id", dbType = "uuid", logicalType = "string", nullable = false, isPrimaryKey = true),
+                        SchemaColumn(name = "display_name", dbType = "text", logicalType = "string", nullable = true, isPrimaryKey = false),
+                        SchemaColumn(name = "updated_at", dbType = "timestamp with time zone", logicalType = "datetime", nullable = false, isPrimaryKey = false),
+                        SchemaColumn(name = "deleted_at", dbType = "timestamp with time zone", logicalType = "datetime", nullable = true, isPrimaryKey = false),
+                    )
                 )
             )
         )
         manager.createSyncedTables(v1)
 
-        // Insert data and set a non-zero checkpoint to detect rebuild
-        db.execute("INSERT INTO orders (id, score, updated_at) VALUES ('ord-1', 'high', '2026-01-01T00:00:00Z')")
         db.writeTransaction { rawDb ->
+            rawDb.execSQL("ALTER TABLE orders ADD COLUMN local_note TEXT")
+            rawDb.execSQL("CREATE TABLE app_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+            rawDb.execSQL("INSERT INTO app_settings (key, value) VALUES ('theme', 'dark')")
             SynchroMeta.setInt64(rawDb, MetaKey.CHECKPOINT, 42L)
+            SynchroMeta.set(rawDb, MetaKey.SNAPSHOT_COMPLETE, "1")
+        }
+        db.execute(
+            "INSERT INTO orders (id, score, local_note, updated_at) VALUES (?, ?, ?, ?)",
+            arrayOf("ord-1", "high", "local-order-data", "2026-01-01T00:00:00Z"),
+        )
+        db.execute(
+            "INSERT INTO profiles (id, display_name, updated_at) VALUES (?, ?, ?)",
+            arrayOf("profile-1", "Ada", "2026-01-01T00:00:00Z"),
+        )
+        db.writeTransaction { rawDb ->
+            rawDb.execSQL(
+                "INSERT INTO _synchro_row_versions (table_name, record_id, server_version, row_checksum) VALUES (?, ?, ?, ?)",
+                arrayOf("orders", "ord-1", "server-v1", "row-checksum-v1"),
+            )
+            rawDb.execSQL(
+                "INSERT INTO _synchro_scopes (scope_id, cursor, checksum, generation, local_checksum) VALUES (?, ?, ?, ?, ?)",
+                arrayOf("orders:user-1", "cursor-v1", "scope-checksum-v1", 3, "local-checksum-v1"),
+            )
+            rawDb.execSQL(
+                "INSERT INTO _synchro_scope_rows (scope_id, table_name, record_id, checksum, generation) VALUES (?, ?, ?, ?, ?)",
+                arrayOf("orders:user-1", "orders", "ord-1", "row-checksum-v1", 3),
+            )
         }
 
-        // Verify checkpoint is set before migration
-        val checkpointBefore = db.readTransaction { rawDb -> SynchroMeta.getInt64(rawDb, MetaKey.CHECKPOINT) }
-        assertEquals(42L, checkpointBefore)
+        val stateQueries = listOf(
+            "SELECT type, name, tbl_name, sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name",
+            "SELECT * FROM orders ORDER BY id",
+            "SELECT * FROM profiles ORDER BY id",
+            "SELECT * FROM app_settings ORDER BY key",
+            "SELECT * FROM _synchro_meta ORDER BY key",
+            "SELECT * FROM _synchro_schema_archives ORDER BY schema_version, schema_hash",
+            "SELECT * FROM _synchro_pending_changes ORDER BY local_order",
+            "SELECT * FROM _synchro_mutation_values ORDER BY mutation_id, field_id",
+            "SELECT * FROM _synchro_row_versions ORDER BY table_name, record_id",
+            "SELECT * FROM _synchro_scopes ORDER BY scope_id",
+            "SELECT * FROM _synchro_scope_rows ORDER BY scope_id, table_name, record_id",
+        )
+        val stateBefore = stateQueries.associateWith(db::query)
 
-        // Migrate to v2 where "score" is logicalType "int" (INTEGER)
         val v2 = SchemaResponse(
             schemaVersion = 2,
             schemaHash = "v2",
             serverTime = "2026-01-01T12:00:00.000Z",
             tables = listOf(
+                SchemaTable(
+                    tableName = "profiles",
+                    pushPolicy = "owner_only",
+                    updatedAtColumn = "updated_at",
+                    deletedAtColumn = "deleted_at",
+                    primaryKey = listOf("id"),
+                    columns = listOf(
+                        SchemaColumn(name = "id", dbType = "uuid", logicalType = "string", nullable = false, isPrimaryKey = true),
+                        SchemaColumn(name = "display_name", dbType = "text", logicalType = "string", nullable = true, isPrimaryKey = false),
+                        SchemaColumn(name = "nickname", dbType = "text", logicalType = "string", nullable = true, isPrimaryKey = false),
+                        SchemaColumn(name = "updated_at", dbType = "timestamp with time zone", logicalType = "datetime", nullable = false, isPrimaryKey = false),
+                        SchemaColumn(name = "deleted_at", dbType = "timestamp with time zone", logicalType = "datetime", nullable = true, isPrimaryKey = false),
+                    )
+                ),
                 SchemaTable(
                     tableName = "orders",
                     pushPolicy = "owner_only",
@@ -848,27 +865,316 @@ class SchemaManagerTests {
                 )
             )
         )
-        manager.migrateSchema(v2)
+        val error = assertThrows(SynchroError.InvalidResponse::class.java) {
+            manager.reconcileLocalSchema(
+                schemaVersion = v2.schemaVersion,
+                schemaHash = v2.schemaHash,
+                tables = v2.localTables(),
+                scopeCursorUpdates = mapOf("orders:user-1" to null),
+                affectedScopes = listOf("orders:user-1"),
+            )
+        }
+        assertTrue(error.details.contains("SQLite type"))
 
-        // Verify destructive rebuild occurred: checkpoint reset to 0
-        val checkpointAfter = db.readTransaction { rawDb -> SynchroMeta.getInt64(rawDb, MetaKey.CHECKPOINT) }
-        assertEquals(0L, checkpointAfter)
+        stateQueries.forEach { query ->
+            assertEquals("migration changed state for: $query", stateBefore.getValue(query), db.query(query))
+        }
+        assertEquals(0, db.query("SELECT name FROM pragma_table_info('profiles') WHERE name = 'nickname'").size)
+        assertEquals("v1", db.readTransaction { SynchroMeta.get(it, MetaKey.SCHEMA_HASH) })
+        assertEquals(2, db.query("SELECT mutation_id FROM _synchro_pending_changes").size)
+        assertEquals("local-order-data", db.queryOne("SELECT local_note FROM orders WHERE id = 'ord-1'")?.get("local_note"))
+    }
 
-        // Verify table was recreated (old data is gone due to destructive rebuild)
-        val rows = db.query("SELECT * FROM orders")
-        assertEquals(0, rows.size)
+    @Test
+    fun testPrimaryKeyShapeChangeIsRejectedWithoutReplacingRowsOrMetadata() {
+        val db = makeTestDB()
+        val manager = SchemaManager(db)
+        val v1 = SchemaResponse(
+            schemaVersion = 1,
+            schemaHash = "pk-v1",
+            serverTime = "2026-01-01T12:00:00.000Z",
+            tables = listOf(
+                SchemaTable(
+                    tableName = "orders",
+                    pushPolicy = "owner_only",
+                    updatedAtColumn = "updated_at",
+                    deletedAtColumn = "deleted_at",
+                    primaryKey = listOf("id"),
+                    columns = listOf(
+                        SchemaColumn(name = "id", dbType = "uuid", logicalType = "string", nullable = false, isPrimaryKey = true),
+                        SchemaColumn(name = "alternate_id", dbType = "uuid", logicalType = "string", nullable = false, isPrimaryKey = false),
+                        SchemaColumn(name = "updated_at", dbType = "timestamp", logicalType = "datetime", nullable = false, isPrimaryKey = false),
+                        SchemaColumn(name = "deleted_at", dbType = "timestamp", logicalType = "datetime", nullable = true, isPrimaryKey = false),
+                    ),
+                )
+            ),
+        )
+        manager.createSyncedTables(v1)
+        db.execute(
+            "INSERT INTO orders (id, alternate_id, updated_at) VALUES (?, ?, ?)",
+            arrayOf("order-1", "alternate-1", "2026-01-01T00:00:00Z"),
+        )
+        val rowsBefore = db.query("SELECT * FROM orders")
+        val metadataBefore = db.query("SELECT * FROM _synchro_meta ORDER BY key")
+        val queueBefore = db.query("SELECT * FROM _synchro_pending_changes ORDER BY local_order")
 
-        // Verify table exists with correct schema and triggers
-        val tableRows = db.query("SELECT name FROM sqlite_master WHERE type='table' AND name='orders'")
-        assertEquals(1, tableRows.size)
+        val v2 = SchemaResponse(
+            schemaVersion = 2,
+            schemaHash = "pk-v2",
+            serverTime = "2026-01-01T12:00:00.000Z",
+            tables = listOf(
+                SchemaTable(
+                    tableName = "orders",
+                    pushPolicy = "owner_only",
+                    updatedAtColumn = "updated_at",
+                    deletedAtColumn = "deleted_at",
+                    primaryKey = listOf("alternate_id"),
+                    columns = listOf(
+                        SchemaColumn(name = "id", dbType = "uuid", logicalType = "string", nullable = false, isPrimaryKey = false),
+                        SchemaColumn(name = "alternate_id", dbType = "uuid", logicalType = "string", nullable = false, isPrimaryKey = true),
+                        SchemaColumn(name = "updated_at", dbType = "timestamp", logicalType = "datetime", nullable = false, isPrimaryKey = false),
+                        SchemaColumn(name = "deleted_at", dbType = "timestamp", logicalType = "datetime", nullable = true, isPrimaryKey = false),
+                    ),
+                )
+            ),
+        )
 
-        val triggers = db.query("SELECT name FROM sqlite_master WHERE type='trigger' AND name LIKE '_synchro_cdc_%orders'")
-        assertEquals(3, triggers.size)
+        val error = assertThrows(SynchroError.InvalidResponse::class.java) {
+            manager.migrateSchema(v2)
+        }
+        assertTrue(error.details.contains("primary key"))
+        assertEquals(rowsBefore, db.query("SELECT * FROM orders"))
+        assertEquals(metadataBefore, db.query("SELECT * FROM _synchro_meta ORDER BY key"))
+        assertEquals(queueBefore, db.query("SELECT * FROM _synchro_pending_changes ORDER BY local_order"))
+        assertEquals(0, db.query("SELECT 1 FROM _synchro_schema_archives WHERE schema_hash = 'pk-v2'").size)
+    }
 
-        // Verify "score" column now accepts integers
-        db.execute("INSERT INTO orders (id, score, updated_at) VALUES ('ord-2', 99, '2026-01-02T00:00:00Z')")
-        val newRow = db.queryOne("SELECT score FROM orders WHERE id = ?", arrayOf("ord-2"))
-        assertNotNull(newRow)
-        assertEquals(99L, newRow?.get("score"))
+    @Test
+    fun testAdditiveDdlFailureRollsBackEarlierDdlAndTargetMetadata() {
+        val db = makeTestDB()
+        val manager = SchemaManager(db)
+        val baseTables = makeManifest(
+            listOf(
+                TableSchema(
+                    name = "orders", primaryKey = listOf("id"), updatedAtColumn = "updated_at",
+                    deletedAtColumn = "deleted_at", composition = CompositionClass.SINGLE_SCOPE,
+                    columns = listOf(
+                        ColumnSchema(name = "id", typeName = "string", nullable = false),
+                        ColumnSchema(name = "updated_at", typeName = "datetime", nullable = false),
+                        ColumnSchema(name = "deleted_at", typeName = "datetime", nullable = true),
+                    ), indexes = null,
+                ),
+                TableSchema(
+                    name = "items", primaryKey = listOf("id"), updatedAtColumn = "updated_at",
+                    deletedAtColumn = "deleted_at", composition = CompositionClass.SINGLE_SCOPE,
+                    columns = listOf(
+                        ColumnSchema(name = "id", typeName = "string", nullable = false),
+                        ColumnSchema(name = "updated_at", typeName = "datetime", nullable = false),
+                        ColumnSchema(name = "deleted_at", typeName = "datetime", nullable = true),
+                    ), indexes = null,
+                ),
+            )
+        ).localTables()
+        manager.reconcileLocalSchema(1, "ddl-v1", baseTables)
+
+        val validColumn = LocalSchemaColumn(
+            fieldID = "field-orders-notes", name = "notes", logicalType = "string",
+            nullable = true, writable = true, isPrimaryKey = false,
+        )
+        val invalidColumn = LocalSchemaColumn(
+            fieldID = "field-items-broken", name = "broken", logicalType = "string",
+            nullable = false, writable = true, sqliteDefaultSQL = "'", isPrimaryKey = false,
+        )
+        val targetTables = listOf(
+            baseTables[0].copy(columns = baseTables[0].columns + validColumn),
+            baseTables[1].copy(columns = baseTables[1].columns + invalidColumn),
+        )
+        val schemaBefore = db.query(
+            "SELECT type, name, tbl_name, sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name"
+        )
+        val metadataBefore = db.query("SELECT * FROM _synchro_meta ORDER BY key")
+        val archivesBefore = db.query("SELECT * FROM _synchro_schema_archives ORDER BY schema_version, schema_hash")
+
+        assertThrows(android.database.sqlite.SQLiteException::class.java) {
+            manager.reconcileLocalSchema(2, "ddl-v2", targetTables)
+        }
+
+        assertEquals(
+            schemaBefore,
+            db.query("SELECT type, name, tbl_name, sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name"),
+        )
+        assertEquals(metadataBefore, db.query("SELECT * FROM _synchro_meta ORDER BY key"))
+        assertEquals(archivesBefore, db.query("SELECT * FROM _synchro_schema_archives ORDER BY schema_version, schema_hash"))
+        assertEquals(0, db.query("SELECT name FROM pragma_table_info('orders') WHERE name = 'notes'").size)
+        assertEquals(0, db.query("SELECT name FROM pragma_table_info('items') WHERE name = 'broken'").size)
+    }
+
+    @Test
+    fun testConnectScopeCursorUpdatesAndAffectedScopesAreApplied() {
+        val db = makeTestDB()
+        val manager = SchemaManager(db)
+        val schema = SchemaResponse(
+            schemaVersion = 1,
+            schemaHash = PROTOCOL_TEST_SCHEMA_HASH,
+            serverTime = "2026-01-01T12:00:00.000Z",
+            tables = listOf(
+                SchemaTable(
+                    tableName = "orders",
+                    pushPolicy = "owner_only",
+                    updatedAtColumn = "updated_at",
+                    deletedAtColumn = "deleted_at",
+                    primaryKey = listOf("id"),
+                    columns = listOf(
+                        SchemaColumn(name = "id", dbType = "uuid", logicalType = "string", nullable = false, isPrimaryKey = true),
+                        SchemaColumn(name = "updated_at", dbType = "timestamp", logicalType = "datetime", nullable = false, isPrimaryKey = false),
+                        SchemaColumn(name = "deleted_at", dbType = "timestamp", logicalType = "datetime", nullable = true, isPrimaryKey = false),
+                    ),
+                )
+            ),
+        )
+        val tables = schema.localTables()
+        manager.reconcileLocalSchema(1, PROTOCOL_TEST_SCHEMA_HASH, tables)
+        db.writeTransaction { connection ->
+            SynchroMeta.upsertScope(connection, "orders:existing", "old", "old")
+            SynchroMeta.upsertScope(connection, "orders:affected", "old", "old")
+        }
+
+        manager.reconcileLocalSchema(
+            schemaVersion = 2,
+            schemaHash = "1".repeat(64),
+            tables = tables,
+            scopeCursorUpdates = mapOf("orders:existing" to "new-current-schema", "orders:affected" to null),
+            affectedScopes = listOf("orders:affected"),
+        )
+
+        val existing = db.readTransaction { SynchroMeta.getScope(it, "orders:existing") }
+        val affected = db.readTransaction { SynchroMeta.getScope(it, "orders:affected") }
+        assertEquals("new-current-schema", existing?.cursor)
+        assertNull(existing?.checksum)
+        assertNull(affected?.cursor)
+        assertEquals(1L, affected?.generation)
+    }
+
+    @Test
+    fun testConnectCursorUpdateRecomputesRetainedProvenanceForTargetFieldIDs() {
+        fun localTable(fieldSuffix: String): LocalSchemaTable {
+            val columns = listOf(
+                LocalSchemaColumn(
+                    fieldID = "field-id-$fieldSuffix", name = "id", logicalType = "string",
+                    nullable = false, writable = false, isPrimaryKey = true,
+                ),
+                LocalSchemaColumn(
+                    fieldID = "field-title-$fieldSuffix", name = "title", logicalType = "string",
+                    nullable = false, writable = true, isPrimaryKey = false,
+                ),
+                LocalSchemaColumn(
+                    fieldID = "field-updated-$fieldSuffix", name = "updated_at", logicalType = "datetime",
+                    nullable = false, writable = false, isPrimaryKey = false,
+                ),
+                LocalSchemaColumn(
+                    fieldID = "field-deleted-$fieldSuffix", name = "deleted_at", logicalType = "datetime",
+                    nullable = true, writable = false, isPrimaryKey = false,
+                ),
+            )
+            return LocalSchemaTable(
+                tableID = "table-orders",
+                relationID = "relation-orders",
+                tableName = "orders",
+                primaryKeyFieldID = "field-id-$fieldSuffix",
+                updatedAtFieldID = "field-updated-$fieldSuffix",
+                deletedAtFieldID = "field-deleted-$fieldSuffix",
+                updatedAtColumn = "updated_at",
+                deletedAtColumn = "deleted_at",
+                composition = CompositionClass.SINGLE_SCOPE,
+                primaryKey = listOf("id"),
+                columns = columns,
+            )
+        }
+
+        val db = makeTestDB()
+        val manager = SchemaManager(db)
+        val oldTable = localTable("old")
+        val targetTable = localTable("target")
+        val oldHash = "0".repeat(64)
+        val targetHash = "1".repeat(64)
+        val scopeID = "orders:user-1"
+        val serverVersion = "server-version-1"
+        manager.reconcileLocalSchema(1, oldHash, listOf(oldTable))
+
+        val oldRow = JsonObject(
+            mapOf(
+                "field-id-old" to JsonPrimitive("r1"),
+                "field-title-old" to JsonPrimitive("retained"),
+                "field-updated-old" to JsonPrimitive("2026-01-01T00:00:00.000000Z"),
+                "field-deleted-old" to JsonNull,
+            )
+        )
+        val oldDigest = Integrity.rowDigest(
+            oldHash,
+            oldTable,
+            JsonObject(mapOf("field-id-old" to JsonPrimitive("r1"))),
+            oldRow,
+            serverVersion,
+        )
+        db.writeSyncLockedTransaction { connection ->
+            connection.execSQL(
+                "INSERT INTO orders (id, title, updated_at, deleted_at) VALUES (?, ?, ?, NULL)",
+                arrayOf("r1", "retained", "2026-01-01T00:00:00.000000Z"),
+            )
+            SynchroMeta.upsertRowVersion(
+                connection,
+                "orders",
+                "r1",
+                serverVersion,
+                oldDigest.checksum,
+            )
+            SynchroMeta.upsertScope(connection, scopeID, "old-cursor", null)
+            SynchroMeta.upsertScopeRow(
+                connection,
+                scopeID,
+                "orders",
+                "r1",
+                oldDigest.checksum.digest,
+                0,
+            )
+        }
+
+        manager.reconcileLocalSchema(
+            schemaVersion = 2,
+            schemaHash = targetHash,
+            tables = listOf(targetTable),
+            scopeCursorUpdates = mapOf(scopeID to "target-cursor"),
+        )
+
+        val targetRow = JsonObject(
+            mapOf(
+                "field-id-target" to JsonPrimitive("r1"),
+                "field-title-target" to JsonPrimitive("retained"),
+                "field-updated-target" to JsonPrimitive("2026-01-01T00:00:00.000000Z"),
+                "field-deleted-target" to JsonNull,
+            )
+        )
+        val targetDigest = Integrity.rowDigest(
+            targetHash,
+            targetTable,
+            JsonObject(mapOf("field-id-target" to JsonPrimitive("r1"))),
+            targetRow,
+            serverVersion,
+        )
+        val targetScopeDigest = Integrity.scopeDigest(
+            targetHash,
+            scopeID,
+            listOf(targetDigest.identity to targetDigest.checksum),
+        )
+        assertNotEquals(oldDigest.checksum, targetDigest.checksum)
+
+        val storedRows = db.readTransaction { SynchroMeta.getScopeRowChecksums(it, scopeID) }
+        val storedScope = db.readTransaction { SynchroMeta.getScope(it, scopeID) }
+        assertEquals(targetDigest.checksum.digest, storedRows.single().checksum)
+        assertEquals("target-cursor", storedScope?.cursor)
+        assertEquals(
+            targetScopeDigest,
+            Json.decodeFromString<ChecksumObject>(storedScope!!.localChecksum),
+        )
     }
 }

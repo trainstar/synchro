@@ -105,6 +105,11 @@
           "enum": [
             "warm_connect_http_requests",
             "warm_connect_non_connect_http_requests",
+            "warm_connect_pull_http_requests",
+            "warm_connect_push_http_requests",
+            "warm_connect_rebuild_page_http_requests",
+            "warm_connect_schema_fetch_http_requests",
+            "warm_connect_other_http_requests",
             "steady_state_pull_http_requests_per_cycle",
             "steady_state_pull_non_pull_http_requests_per_cycle",
             "pending_cycle_push_http_requests",

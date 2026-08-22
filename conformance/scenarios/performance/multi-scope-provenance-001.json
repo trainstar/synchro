@@ -919,6 +919,7 @@
       "phase": "exercise",
       "transport": "model",
       "description": "Execute the authored workload operation.",
+      "measurement_sample": { "measurement_id": "MEAS-MULTI-SCOPE-PROVENANCE-001", "stratum_id": "STR-PROVENANCE-ONE-001", "sample_id": "SAMPLE-MULTI-SCOPE-PROVENANCE-ONE-001", "parameters": { "provenance_scope_count": 1 } },
       "operation": {
         "contract_operation": "workload",
         "name": "prepare",
@@ -937,6 +938,7 @@
       "phase": "exercise",
       "transport": "model",
       "description": "Execute the authored workload operation.",
+      "measurement_sample": { "measurement_id": "MEAS-MULTI-SCOPE-PROVENANCE-001", "stratum_id": "STR-PROVENANCE-ONE-001", "sample_id": "SAMPLE-MULTI-SCOPE-PROVENANCE-ONE-002", "parameters": { "provenance_scope_count": 1 } },
       "operation": {
         "contract_operation": "workload",
         "name": "prepare",
@@ -955,6 +957,7 @@
       "phase": "exercise",
       "transport": "model",
       "description": "Execute the authored workload operation.",
+      "measurement_sample": { "measurement_id": "MEAS-MULTI-SCOPE-PROVENANCE-001", "stratum_id": "STR-PROVENANCE-ONE-001", "sample_id": "SAMPLE-MULTI-SCOPE-PROVENANCE-ONE-003", "parameters": { "provenance_scope_count": 1 } },
       "operation": {
         "contract_operation": "workload",
         "name": "prepare",
@@ -973,6 +976,7 @@
       "phase": "exercise",
       "transport": "model",
       "description": "Execute the authored workload operation.",
+      "measurement_sample": { "measurement_id": "MEAS-MULTI-SCOPE-PROVENANCE-001", "stratum_id": "STR-PROVENANCE-MULTIPLE-001", "sample_id": "SAMPLE-MULTI-SCOPE-PROVENANCE-MULTIPLE-001", "parameters": { "provenance_scope_count": 2 } },
       "operation": {
         "contract_operation": "workload",
         "name": "prepare",
@@ -991,6 +995,7 @@
       "phase": "exercise",
       "transport": "model",
       "description": "Execute the authored workload operation.",
+      "measurement_sample": { "measurement_id": "MEAS-MULTI-SCOPE-PROVENANCE-001", "stratum_id": "STR-PROVENANCE-MULTIPLE-001", "sample_id": "SAMPLE-MULTI-SCOPE-PROVENANCE-MULTIPLE-002", "parameters": { "provenance_scope_count": 2 } },
       "operation": {
         "contract_operation": "workload",
         "name": "prepare",
@@ -1009,6 +1014,7 @@
       "phase": "exercise",
       "transport": "model",
       "description": "Execute the authored workload operation.",
+      "measurement_sample": { "measurement_id": "MEAS-MULTI-SCOPE-PROVENANCE-001", "stratum_id": "STR-PROVENANCE-MULTIPLE-001", "sample_id": "SAMPLE-MULTI-SCOPE-PROVENANCE-MULTIPLE-003", "parameters": { "provenance_scope_count": 2 } },
       "operation": {
         "contract_operation": "workload",
         "name": "prepare",
@@ -1094,5 +1100,132 @@
       },
       "detects_control_ids": []
     }
-  ]
+  ],
+  "native_execution": {
+    "version": 1,
+    "clients": [
+      {
+        "key": "client_a",
+        "user_id": "user-a",
+        "client_id": "client-a",
+        "database_key": "db_multi_scope_provenance"
+      }
+    ],
+    "actions": [
+      {
+        "id": "NACT-MSP-001",
+        "phase": "setup",
+        "actor": "controller",
+        "command": "install-model",
+        "covers_step_ids": [],
+        "parameters": {}
+      },
+      {
+        "id": "NACT-MSP-008",
+        "phase": "setup",
+        "actor": "client",
+        "command": "open",
+        "covers_step_ids": [],
+        "parameters": {
+          "client_key": "client_a",
+          "database_mode": "create",
+          "initialization": "current",
+          "seed_step_id": null
+        }
+      },
+      {
+        "id": "NACT-MSP-002",
+        "phase": "exercise",
+        "actor": "controller",
+        "command": "apply-step",
+        "covers_step_ids": ["STEP-PERF-MULTI-SCOPE-PROVENANCE-001"],
+        "parameters": {}
+      },
+      {
+        "id": "NACT-MSP-003",
+        "phase": "exercise",
+        "actor": "controller",
+        "command": "apply-step",
+        "covers_step_ids": ["STEP-PERF-MULTI-SCOPE-PROVENANCE-002"],
+        "parameters": {}
+      },
+      {
+        "id": "NACT-MSP-004",
+        "phase": "exercise",
+        "actor": "controller",
+        "command": "apply-step",
+        "covers_step_ids": ["STEP-PERF-MULTI-SCOPE-PROVENANCE-003"],
+        "parameters": {}
+      },
+      {
+        "id": "NACT-MSP-005",
+        "phase": "exercise",
+        "actor": "controller",
+        "command": "apply-step",
+        "covers_step_ids": ["STEP-PERF-MULTI-SCOPE-PROVENANCE-004"],
+        "parameters": {}
+      },
+      {
+        "id": "NACT-MSP-006",
+        "phase": "exercise",
+        "actor": "controller",
+        "command": "apply-step",
+        "covers_step_ids": ["STEP-PERF-MULTI-SCOPE-PROVENANCE-005"],
+        "parameters": {}
+      },
+      {
+        "id": "NACT-MSP-007",
+        "phase": "exercise",
+        "actor": "controller",
+        "command": "apply-step",
+        "covers_step_ids": ["STEP-PERF-MULTI-SCOPE-PROVENANCE-006"],
+        "parameters": {}
+      },
+      {
+        "id": "NACT-MSP-010",
+        "phase": "exercise",
+        "actor": "observer",
+        "command": "await-step",
+        "covers_step_ids": ["STEP-PERF-MULTI-SCOPE-PROVENANCE-007"],
+        "parameters": {
+          "client_key": "client_a"
+        }
+      },
+      {
+        "id": "NACT-MSP-011",
+        "phase": "verify",
+        "actor": "observer",
+        "command": "capture",
+        "covers_step_ids": [],
+        "parameters": {
+          "client_keys": ["client_a"],
+          "sources": [
+            "application-rows",
+            "sync-status",
+            "scope-state",
+            "checkpoints",
+            "provenance",
+            "rebuild-state",
+            "request-trace",
+            "server-state"
+          ],
+          "expectation_ids": [
+            "EXPECT-PERF-MULTI-SCOPE-PROVENANCE-SEMANTIC-001",
+            "EXPECT-PERF-MULTI-SCOPE-PROVENANCE-PERFORMANCE-001"
+          ]
+        }
+      },
+      {
+        "id": "NACT-MSP-012",
+        "phase": "verify",
+        "actor": "observer",
+        "command": "measure",
+        "covers_step_ids": [],
+        "parameters": {
+          "performance_budget_ids": [],
+          "measurement_ids": ["MEAS-MULTI-SCOPE-PROVENANCE-001"]
+        }
+      }
+    ]
+  }
 }

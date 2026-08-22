@@ -9,8 +9,13 @@ import {
   PushRejectedError,
   NetworkError,
   ServerError,
+  ProtocolError,
+  SyncBlockedError,
+  UnsupportedSchemaError,
+  InvalidStateTransitionError,
   DatabaseError,
   InvalidResponseError,
+  InvalidSeedError,
   AlreadyStartedError,
   NotStartedError,
   TransactionTimeoutError,
@@ -111,6 +116,66 @@ describe('mapNativeError', () => {
     expect(err.message).toBe('Server error 502: bad gateway');
   });
 
+  it('maps PROTOCOL_ERROR with its canonical protocol code', () => {
+    const err = mapNativeError({
+      code: 'PROTOCOL_ERROR',
+      message: 'Protocol error',
+      userInfo: {
+        status: '422',
+        protocolCode: 'invalid_schema_reference',
+        message: 'schema reference is invalid',
+      },
+    });
+    expect(err).toBeInstanceOf(ProtocolError);
+    expect(err).toMatchObject({
+      code: 'PROTOCOL_ERROR',
+      status: 422,
+      protocolCode: 'invalid_schema_reference',
+    });
+  });
+
+  it('maps SYNC_BLOCKED and preserves recovery metadata', () => {
+    const err = mapNativeError({
+      code: 'SYNC_BLOCKED',
+      message: 'sync is blocked',
+      userInfo: {
+        failure: JSON.stringify({
+          operation: 'schema',
+          code: 'unsupported_schema',
+          retryable: false,
+          message: 'reset required',
+          recoveryAction: 'schema_reset',
+          metadata: { reason: 'incompatible_schema_transition' },
+        }),
+      },
+    });
+    expect(err).toBeInstanceOf(SyncBlockedError);
+    expect((err as SyncBlockedError).failure).toEqual({
+      operation: 'schema',
+      code: 'unsupported_schema',
+      retryable: false,
+      message: 'reset required',
+      recoveryAction: 'schema_reset',
+      metadata: { reason: 'incompatible_schema_transition' },
+    });
+  });
+
+  it('maps unsupported schema and invalid state transitions', () => {
+    const unsupported = mapNativeError({
+      code: 'UNSUPPORTED_SCHEMA',
+      userInfo: { reason: 'unknown_schema_lineage' },
+    });
+    const transition = mapNativeError({
+      code: 'INVALID_STATE_TRANSITION',
+      userInfo: { from: 'ready', to: 'connecting' },
+    });
+
+    expect(unsupported).toBeInstanceOf(UnsupportedSchemaError);
+    expect((unsupported as UnsupportedSchemaError).reason).toBe('unknown_schema_lineage');
+    expect(transition).toBeInstanceOf(InvalidStateTransitionError);
+    expect(transition).toMatchObject({ from: 'ready', to: 'connecting' });
+  });
+
   it('maps DATABASE_ERROR using userInfo.message (no double prefix)', () => {
     const err = mapNativeError({
       code: 'DATABASE_ERROR',
@@ -131,6 +196,12 @@ describe('mapNativeError', () => {
     expect(err.message).toBe('Invalid response: bad json');
   });
 
+  it('maps INVALID_SEED to a typed initialization error', () => {
+    const err = mapNativeError({ code: 'INVALID_SEED', message: 'invalid seed' });
+    expect(err).toBeInstanceOf(InvalidSeedError);
+    expect(err.code).toBe('INVALID_SEED');
+  });
+
   it('maps ALREADY_STARTED', () => {
     const err = mapNativeError({ code: 'ALREADY_STARTED', message: '' });
     expect(err).toBeInstanceOf(AlreadyStartedError);
@@ -149,7 +220,7 @@ describe('mapNativeError', () => {
   it('returns SynchroError for unknown codes', () => {
     const err = mapNativeError({ code: 'WEIRD_ERROR', message: 'something' });
     expect(err).toBeInstanceOf(SynchroError);
-    expect(err.code).toBe('WEIRD_ERROR');
+    expect(err.code).toBe('UNKNOWN');
   });
 
   it('passes through existing SynchroError instances', () => {

@@ -1,9 +1,47 @@
-import type { Row } from './types';
+import {
+  PROTOCOL_ERROR_CODES,
+  SYNC_FAILURE_CODES,
+  SYNC_OPERATION_KINDS,
+  SYNC_RECOVERY_ACTIONS,
+  SYNC_STATUS_TYPES,
+} from './types';
+import type {
+  ProtocolErrorCode,
+  Row,
+  SyncFailure,
+  SyncStatusType,
+} from './types';
+
+export const NATIVE_ERROR_CODES = [
+  'NOT_CONNECTED',
+  'SCHEMA_NOT_LOADED',
+  'TABLE_NOT_SYNCED',
+  'UPGRADE_REQUIRED',
+  'SCHEMA_MISMATCH',
+  'PUSH_REJECTED',
+  'NETWORK_ERROR',
+  'SERVER_ERROR',
+  'PROTOCOL_ERROR',
+  'DATABASE_ERROR',
+  'INVALID_RESPONSE',
+  'INVALID_SEED',
+  'SYNC_BLOCKED',
+  'UNSUPPORTED_SCHEMA',
+  'INVALID_STATE_TRANSITION',
+  'ALREADY_STARTED',
+  'NOT_STARTED',
+  'TRANSACTION_TIMEOUT',
+  'INVALID_CONFIG',
+  'CLIENT_ALREADY_ACTIVE',
+  'UNKNOWN',
+] as const;
+
+export type NativeErrorCode = (typeof NATIVE_ERROR_CODES)[number];
 
 export class SynchroError extends Error {
-  readonly code: string;
+  readonly code: NativeErrorCode;
 
-  constructor(code: string, message: string) {
+  constructor(code: NativeErrorCode, message: string) {
     super(message);
     this.code = code;
     this.name = 'SynchroError';
@@ -116,6 +154,64 @@ export class InvalidResponseError extends SynchroError {
   }
 }
 
+export const SCHEMA_UNSUPPORTED_REASONS = [
+  'unknown_schema_lineage',
+  'incompatible_schema_transition',
+] as const;
+
+export type SchemaUnsupportedReason = (typeof SCHEMA_UNSUPPORTED_REASONS)[number];
+
+export class ProtocolError extends SynchroError {
+  readonly status: number;
+  readonly protocolCode: ProtocolErrorCode;
+
+  constructor(status: number, protocolCode: ProtocolErrorCode, message: string) {
+    super('PROTOCOL_ERROR', `Protocol error ${status} ${protocolCode}: ${message}`);
+    this.name = 'ProtocolError';
+    this.status = status;
+    this.protocolCode = protocolCode;
+  }
+}
+
+export class SyncBlockedError extends SynchroError {
+  readonly failure: SyncFailure;
+
+  constructor(failure: SyncFailure) {
+    super('SYNC_BLOCKED', failure.message);
+    this.name = 'SyncBlockedError';
+    this.failure = failure;
+  }
+}
+
+export class UnsupportedSchemaError extends SynchroError {
+  readonly reason: SchemaUnsupportedReason;
+
+  constructor(reason: SchemaUnsupportedReason) {
+    super('UNSUPPORTED_SCHEMA', `Schema recovery is required: ${reason}`);
+    this.name = 'UnsupportedSchemaError';
+    this.reason = reason;
+  }
+}
+
+export class InvalidStateTransitionError extends SynchroError {
+  readonly from: SyncStatusType;
+  readonly to: SyncStatusType;
+
+  constructor(from: SyncStatusType, to: SyncStatusType) {
+    super('INVALID_STATE_TRANSITION', `Invalid sync state transition from ${from} to ${to}`);
+    this.name = 'InvalidStateTransitionError';
+    this.from = from;
+    this.to = to;
+  }
+}
+
+export class InvalidSeedError extends SynchroError {
+  constructor() {
+    super('INVALID_SEED', 'Seed database failed validation');
+    this.name = 'InvalidSeedError';
+  }
+}
+
 export class AlreadyStartedError extends SynchroError {
   constructor() {
     super('ALREADY_STARTED', 'Sync has already been started');
@@ -140,7 +236,104 @@ export class TransactionTimeoutError extends SynchroError {
 interface NativeErrorLike {
   code?: string;
   message?: string;
-  userInfo?: Record<string, string>;
+  userInfo?: Record<string, unknown>;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function parseJSONValue(value: unknown, name: string): unknown {
+  if (typeof value !== 'string') {
+    return value;
+  }
+  try {
+    return JSON.parse(value) as unknown;
+  } catch {
+    throw new InvalidResponseError(`Native bridge returned invalid ${name}`);
+  }
+}
+
+function requiredString(value: unknown, name: string): string {
+  if (typeof value !== 'string' || value.length === 0) {
+    throw new InvalidResponseError(`Native bridge returned an invalid ${name}`);
+  }
+  return value;
+}
+
+function requiredBoolean(value: unknown, name: string): boolean {
+  if (typeof value === 'boolean') {
+    return value;
+  }
+  if (value === 'true') {
+    return true;
+  }
+  if (value === 'false') {
+    return false;
+  }
+  throw new InvalidResponseError(`Native bridge returned an invalid ${name}`);
+}
+
+function optionalString(value: unknown): string {
+  return typeof value === 'string' ? value : '';
+}
+
+function requiredEnum<T extends string>(value: unknown, values: readonly T[], name: string): T {
+  if (typeof value === 'string' && values.includes(value as T)) {
+    return value as T;
+  }
+  throw new InvalidResponseError(`Native bridge returned an invalid ${name}`);
+}
+
+export function parseSyncFailure(value: unknown): SyncFailure {
+  const parsed = parseJSONValue(value, 'sync failure');
+  if (!isRecord(parsed)) {
+    throw new InvalidResponseError('Native bridge returned an invalid sync failure');
+  }
+
+  const message = requiredString(parsed.message, 'sync failure message');
+  if (message.length > 256) {
+    throw new InvalidResponseError('Native bridge returned an invalid sync failure message');
+  }
+
+  const metadataValue = parsed.metadata == null ? {} : parseJSONValue(parsed.metadata, 'sync failure metadata');
+  if (!isRecord(metadataValue) || Object.keys(metadataValue).length > 8) {
+    throw new InvalidResponseError('Native bridge returned invalid sync failure metadata');
+  }
+  const metadata: Record<string, string> = {};
+  Object.entries(metadataValue).forEach(([key, item]) => {
+    if (key.length === 0 || key.length > 64 || typeof item !== 'string' || item.length > 128) {
+      throw new InvalidResponseError('Native bridge returned invalid sync failure metadata');
+    }
+    metadata[key] = item;
+  });
+
+  return {
+    operation: requiredEnum(parsed.operation, SYNC_OPERATION_KINDS, 'sync failure operation'),
+    code: requiredEnum(parsed.code, SYNC_FAILURE_CODES, 'sync failure code'),
+    retryable: requiredBoolean(parsed.retryable, 'sync failure retry flag'),
+    message,
+    recoveryAction: requiredEnum(
+      parsed.recoveryAction,
+      SYNC_RECOVERY_ACTIONS,
+      'sync failure recovery action'
+    ),
+    metadata,
+  };
+}
+
+function syncFailureFromUserInfo(userInfo: Record<string, unknown>, fallbackMessage: string): SyncFailure {
+  if (userInfo.failure != null) {
+    return parseSyncFailure(userInfo.failure);
+  }
+  return parseSyncFailure({
+    operation: userInfo.failureOperation,
+    code: userInfo.failureCode,
+    retryable: userInfo.failureRetryable,
+    message: userInfo.failureMessage ?? fallbackMessage,
+    recoveryAction: userInfo.failureRecoveryAction,
+    metadata: userInfo.failureMetadata ?? {},
+  });
 }
 
 export function mapNativeError(error: unknown): SynchroError {
@@ -159,37 +352,85 @@ export function mapNativeError(error: unknown): SynchroError {
     case 'SCHEMA_NOT_LOADED':
       return new SchemaNotLoadedError();
     case 'TABLE_NOT_SYNCED':
-      return new TableNotSyncedError(userInfo.table ?? '');
+      return new TableNotSyncedError(optionalString(userInfo.table));
     case 'UPGRADE_REQUIRED':
       return new UpgradeRequiredError(
-        userInfo.currentVersion ?? '',
-        userInfo.minimumVersion ?? ''
+        optionalString(userInfo.currentVersion),
+        optionalString(userInfo.minimumVersion)
       );
     case 'SCHEMA_MISMATCH':
       return new SchemaMismatchError(
-        parseInt(userInfo.serverVersion ?? '0', 10),
-        userInfo.serverHash ?? ''
+        parseInt(optionalString(userInfo.serverVersion), 10),
+        optionalString(userInfo.serverHash)
       );
     case 'PUSH_REJECTED': {
-      let results: PushRejectedMutation[] = [];
       try {
-        results = JSON.parse(userInfo.results ?? '[]');
-      } catch {
-        // leave empty
+        const parsed = parseJSONValue(userInfo.results ?? [], 'push rejection results');
+        if (!Array.isArray(parsed)) {
+          return new InvalidResponseError('Native bridge returned invalid push rejection results');
+        }
+        return new PushRejectedError(parsed as PushRejectedMutation[]);
+      } catch (parseError) {
+        return parseError instanceof SynchroError
+          ? parseError
+          : new InvalidResponseError('Native bridge returned invalid push rejection results');
       }
-      return new PushRejectedError(results);
     }
     case 'NETWORK_ERROR':
-      return new NetworkError(userInfo.message ?? message);
+      return new NetworkError(typeof userInfo.message === 'string' ? userInfo.message : message);
     case 'SERVER_ERROR':
       return new ServerError(
-        parseInt(userInfo.status ?? '0', 10),
-        userInfo.message ?? message
+        Number.parseInt(String(userInfo.status ?? '0'), 10),
+        typeof userInfo.message === 'string' ? userInfo.message : message
       );
+    case 'PROTOCOL_ERROR': {
+      const status = Number.parseInt(String(userInfo.status ?? '0'), 10);
+      const protocolCode = requiredEnum(
+        userInfo.protocolCode,
+        PROTOCOL_ERROR_CODES,
+        'protocol error code'
+      );
+      return new ProtocolError(
+        status,
+        protocolCode,
+        typeof userInfo.message === 'string' ? userInfo.message : message
+      );
+    }
     case 'DATABASE_ERROR':
-      return new DatabaseError(userInfo.message ?? message);
+      return new DatabaseError(typeof userInfo.message === 'string' ? userInfo.message : message);
     case 'INVALID_RESPONSE':
-      return new InvalidResponseError(userInfo.message ?? message);
+      return new InvalidResponseError(typeof userInfo.message === 'string' ? userInfo.message : message);
+    case 'INVALID_SEED':
+      return new InvalidSeedError();
+    case 'SYNC_BLOCKED':
+      try {
+        return new SyncBlockedError(syncFailureFromUserInfo(userInfo, message));
+      } catch (parseError) {
+        return parseError instanceof SynchroError
+          ? parseError
+          : new InvalidResponseError('Native bridge returned invalid blocking failure details');
+      }
+    case 'UNSUPPORTED_SCHEMA':
+      try {
+        return new UnsupportedSchemaError(
+          requiredEnum(userInfo.reason, SCHEMA_UNSUPPORTED_REASONS, 'unsupported schema reason')
+        );
+      } catch (parseError) {
+        return parseError instanceof SynchroError
+          ? parseError
+          : new InvalidResponseError('Native bridge returned invalid unsupported schema details');
+      }
+    case 'INVALID_STATE_TRANSITION':
+      try {
+        return new InvalidStateTransitionError(
+          requiredEnum(userInfo.from, SYNC_STATUS_TYPES, 'state transition source'),
+          requiredEnum(userInfo.to, SYNC_STATUS_TYPES, 'state transition target')
+        );
+      } catch (parseError) {
+        return parseError instanceof SynchroError
+          ? parseError
+          : new InvalidResponseError('Native bridge returned invalid state transition details');
+      }
     case 'ALREADY_STARTED':
       return new AlreadyStartedError();
     case 'NOT_STARTED':
@@ -197,6 +438,6 @@ export function mapNativeError(error: unknown): SynchroError {
     case 'TRANSACTION_TIMEOUT':
       return new TransactionTimeoutError();
     default:
-      return new SynchroError(code ?? 'UNKNOWN', message);
+      return new SynchroError('UNKNOWN', message);
   }
 }

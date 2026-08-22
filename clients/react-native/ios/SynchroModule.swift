@@ -1,4 +1,5 @@
 import Foundation
+import Darwin
 import React
 import GRDB
 import Synchro
@@ -15,7 +16,10 @@ private class TransactionSession {
     private let condition = NSCondition()
     private var operations: [TransactionOp] = []
     private var closed = false
-    var finalCompletion: ((Result<Void, Error>) -> Void)?
+    private var abortError: Error?
+    private var finalCompletion: ((Result<Void, Error>) -> Void)?
+    private var finished = false
+    private var finishWaiters: [CheckedContinuation<Void, Never>] = []
     let isWrite: Bool
 
     init(isWrite: Bool) {
@@ -40,21 +44,91 @@ private class TransactionSession {
         let deadline = Date().addingTimeInterval(timeout)
         while operations.isEmpty && !closed {
             if !condition.wait(until: deadline) {
+                closed = true
                 throw TransactionTimeoutError()
             }
         }
 
+        if let abortError {
+            throw abortError
+        }
         guard !operations.isEmpty else {
             return nil
         }
         return operations.removeFirst()
     }
 
-    func close() {
+    @discardableResult
+    func close() -> Bool {
         condition.lock()
+        guard !closed else {
+            condition.unlock()
+            return false
+        }
         closed = true
+        let pending = operations
+        operations.removeAll()
         condition.broadcast()
         condition.unlock()
+        let error = TransactionAbortedError(message: "Transaction already completed")
+        pending.forEach { $0.fail(error) }
+        return true
+    }
+
+    func abort(_ error: Error) {
+        condition.lock()
+        guard !closed else {
+            condition.unlock()
+            return
+        }
+        closed = true
+        abortError = error
+        let pending = operations
+        operations.removeAll()
+        condition.broadcast()
+        condition.unlock()
+        pending.forEach { $0.fail(error) }
+    }
+
+    func currentAbortError() -> Error? {
+        condition.lock()
+        defer { condition.unlock() }
+        return abortError
+    }
+
+    func setFinalCompletion(_ completion: @escaping (Result<Void, Error>) -> Void) {
+        condition.lock()
+        finalCompletion = completion
+        condition.unlock()
+    }
+
+    func completeFinal(_ result: Result<Void, Error>) {
+        condition.lock()
+        let completion = finalCompletion
+        condition.unlock()
+        completion?(result)
+    }
+
+    func markFinished() {
+        condition.lock()
+        finished = true
+        let waiters = finishWaiters
+        finishWaiters.removeAll()
+        condition.unlock()
+        waiters.forEach { $0.resume() }
+    }
+
+    func waitUntilFinished() async {
+        await withCheckedContinuation { continuation in
+            condition.lock()
+            if finished {
+                condition.unlock()
+                continuation.resume()
+            } else {
+                finishWaiters.append(continuation)
+                condition.unlock()
+            }
+        }
     }
 }
 
@@ -64,10 +138,51 @@ private enum TransactionOp {
     case execute(sql: String, params: [Any], completion: (Result<[String: Any], Error>) -> Void)
     case commit(completion: (Result<Void, Error>) -> Void)
     case rollback(completion: (Result<Void, Error>) -> Void)
+
+    func fail(_ error: Error) {
+        switch self {
+        case .query(_, _, let completion): completion(.failure(error))
+        case .queryOne(_, _, let completion): completion(.failure(error))
+        case .execute(_, _, let completion): completion(.failure(error))
+        case .commit(let completion): completion(.failure(error))
+        case .rollback(let completion): completion(.failure(error))
+        }
+    }
 }
 
 private struct TransactionTimeoutError: Error {}
 private struct TransactionRollbackError: Error {}
+private struct TransactionAbortedError: LocalizedError {
+    let message: String
+
+    var errorDescription: String? { message }
+}
+private struct TransactionReadOnlyError: LocalizedError {
+    var errorDescription: String? { "Read transactions cannot execute SQL" }
+}
+
+private actor LifecycleMutex {
+    private var locked = false
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+
+    func lock() async {
+        if !locked {
+            locked = true
+            return
+        }
+        await withCheckedContinuation { continuation in
+            waiters.append(continuation)
+        }
+    }
+
+    func unlock() {
+        if waiters.isEmpty {
+            locked = false
+        } else {
+            waiters.removeFirst().resume()
+        }
+    }
+}
 
 // MARK: - Implementation
 
@@ -76,11 +191,18 @@ public class SynchroModuleImpl: NSObject {
     @objc public weak var eventDelegate: SynchroEventEmitting?
 
     private var client: SynchroClient?
+    private let lifecycleMutex = LifecycleMutex()
     private var sessions: [String: TransactionSession] = [:]
     private let sessionsLock = NSLock()
+    private var acceptingTransactions = false
     private var observers: [String: any Synchro.Cancellable] = [:]
     private var statusSubscription: (any Synchro.Cancellable)?
+    private var syncEventSubscription: (any Synchro.Cancellable)?
     private var conflictSubscription: (any Synchro.Cancellable)?
+    private let statusDetailsLock = NSLock()
+    private var cachedBackoff: SyncBackoffEvent?
+    private var cachedFailure: SyncFailure?
+    private var transportObservations: TransportObservationCollector?
 
     private var pendingAuthContinuations: [String: CheckedContinuation<String, Error>] = [:]
     private let authLock = NSLock()
@@ -102,6 +224,8 @@ public class SynchroModuleImpl: NSObject {
             ))
         } else if error is TransactionTimeoutError {
             reject("TRANSACTION_TIMEOUT", "Transaction timed out due to inactivity", nil)
+        } else if error is TransactionAbortedError {
+            reject("NOT_CONNECTED", "Client closed during transaction", error)
         } else {
             reject("UNKNOWN", error.localizedDescription, error)
         }
@@ -125,10 +249,29 @@ public class SynchroModuleImpl: NSObject {
             return ("NETWORK_ERROR", ["message": underlying.localizedDescription])
         case .serverError(let status, let msg):
             return ("SERVER_ERROR", ["status": "\(status)", "message": msg])
+        case .protocolError(let status, let code, let msg):
+            return (
+                "PROTOCOL_ERROR",
+                ["status": "\(status)", "protocolCode": code.rawValue, "message": msg]
+            )
         case .databaseError(let underlying):
             return ("DATABASE_ERROR", ["message": underlying.localizedDescription])
         case .invalidResponse(let msg):
             return ("INVALID_RESPONSE", ["message": msg])
+        case .blocked(let failure):
+            return (
+                "SYNC_BLOCKED",
+                [
+                    "failure": failurePayload(failure),
+                ]
+            )
+        case .unsupportedSchema(let reason):
+            return ("UNSUPPORTED_SCHEMA", ["reason": reason.rawValue])
+        case .invalidStateTransition(let from, let to):
+            return (
+                "INVALID_STATE_TRANSITION",
+                ["from": from.rawValue, "to": to.rawValue]
+            )
         case .alreadyStarted:
             return ("ALREADY_STARTED", [:])
         case .notStarted:
@@ -168,6 +311,12 @@ public class SynchroModuleImpl: NSObject {
         let pullPageSize = config["pullPageSize"] as? Int ?? 100
         let pushBatchSize = config["pushBatchSize"] as? Int ?? 100
         let seedDatabasePath = config["seedDatabasePath"] as? String
+        let configuredTransportCapacity = config["transportObservationCapacity"] as? Int ?? 0
+        if configuredTransportCapacity < 0 || configuredTransportCapacity > 512 {
+            reject("INVALID_CONFIG", "Transport observation capacity is invalid", nil)
+            return
+        }
+        let transportCapacity = configuredTransportCapacity == 0 ? nil : configuredTransportCapacity
 
         let resolvedSeedPath: String?
         if let seedPath = seedDatabasePath {
@@ -189,37 +338,53 @@ public class SynchroModuleImpl: NSObject {
             resolvedSeedPath = nil
         }
 
-        do {
-            let synchroConfig = SynchroConfig(
-                dbPath: resolvedDbPath,
-                serverURL: url,
-                authProvider: { [weak self] in
-                    return try await withCheckedThrowingContinuation { continuation in
-                        let requestID = UUID().uuidString
-                        self?.authLock.lock()
-                        self?.pendingAuthContinuations[requestID] = continuation
-                        self?.authLock.unlock()
-                        self?.emit("onAuthRequest", ["requestID": requestID])
+        let transportObservations = transportCapacity.map(TransportObservationCollector.init(capacity:))
+        let synchroConfig = SynchroConfig(
+            dbPath: resolvedDbPath,
+            serverURL: url,
+            authProvider: { [weak self] in
+                try await withCheckedThrowingContinuation { continuation in
+                    let requestID = UUID().uuidString
+                    self?.authLock.lock()
+                    self?.pendingAuthContinuations[requestID] = continuation
+                    self?.authLock.unlock()
+                    self?.emit("onAuthRequest", ["requestID": requestID])
+                }
+            },
+            clientID: clientID,
+            platform: platform,
+            appVersion: appVersion,
+            syncInterval: syncInterval,
+            pushDebounce: pushDebounce,
+            maxRetryAttempts: maxRetryAttempts,
+            pullPageSize: pullPageSize,
+            pushBatchSize: pushBatchSize,
+            seedDatabasePath: resolvedSeedPath,
+            transportObservationCollector: transportObservations
+        )
+        Task { [weak self] in
+            guard let self else { return }
+            do {
+                try await self.withLifecycleLock {
+                    await self.clearRuntimeState()
+                    try await self.client?.close()
+                    let client = try SynchroClient(config: synchroConfig)
+                    self.setClient(client, acceptingTransactions: true)
+                    self.transportObservations = transportObservations
+                    self.wireClientEvents(client)
+                }
+                DispatchQueue.main.async {
+                    resolve(nil)
+                }
+            } catch {
+                DispatchQueue.main.async {
+                    if resolvedSeedPath != nil {
+                        reject("INVALID_SEED", "Seed database failed validation", error)
+                    } else {
+                        self.rejectWithError(reject, error)
                     }
-                },
-                clientID: clientID,
-                platform: platform,
-                appVersion: appVersion,
-                syncInterval: syncInterval,
-                pushDebounce: pushDebounce,
-                maxRetryAttempts: maxRetryAttempts,
-                pullPageSize: pullPageSize,
-                pushBatchSize: pushBatchSize,
-                seedDatabasePath: resolvedSeedPath
-            )
-            try client?.close()
-            clearRuntimeState()
-            let client = try SynchroClient(config: synchroConfig)
-            self.client = client
-            wireClientEvents(client)
-            resolve(nil)
-        } catch {
-            rejectWithError(reject, error)
+                }
+            }
         }
     }
 
@@ -244,13 +409,22 @@ public class SynchroModuleImpl: NSObject {
         _ resolve: @escaping RCTPromiseResolveBlock,
         reject: @escaping RCTPromiseRejectBlock
     ) {
-        do {
-            try client?.close()
-            clearRuntimeState()
-            client = nil
-            resolve(nil)
-        } catch {
-            rejectWithError(reject, error)
+        Task { [weak self] in
+            guard let self else { return }
+            do {
+                try await self.withLifecycleLock {
+                    await self.clearRuntimeState()
+                    try await self.client?.close()
+                    self.setClient(nil, acceptingTransactions: false)
+                }
+                DispatchQueue.main.async {
+                    resolve(nil)
+                }
+            } catch {
+                DispatchQueue.main.async {
+                    self.rejectWithError(reject, error)
+                }
+            }
         }
     }
 
@@ -375,99 +549,164 @@ public class SynchroModuleImpl: NSObject {
         beginTransaction(isWrite: false, resolve: resolve, reject: reject)
     }
 
+    private func runTransactionLoop(
+        session: TransactionSession,
+        txID: String,
+        resolve: @escaping RCTPromiseResolveBlock,
+        query: (String, [(any DatabaseValueConvertible)?]) throws -> [Row],
+        queryOne: (String, [(any DatabaseValueConvertible)?]) throws -> Row?,
+        execute: ((String, [(any DatabaseValueConvertible)?]) throws -> Int)?
+    ) throws {
+        resolve(txID)
+
+        while true {
+            guard let op = try session.nextOperation(timeout: 5) else {
+                break
+            }
+
+            switch op {
+            case .query(let sql, let params, let completion):
+                do {
+                    let rows = try query(sql, try bridgeParams(params))
+                    if let abortError = session.currentAbortError() {
+                        throw abortError
+                    }
+                    completion(.success(rowsToBridgeRows(rows)))
+                } catch {
+                    completion(.failure(error))
+                }
+
+            case .queryOne(let sql, let params, let completion):
+                do {
+                    let row = try queryOne(sql, try bridgeParams(params))
+                    if let abortError = session.currentAbortError() {
+                        throw abortError
+                    }
+                    completion(.success(row.map(rowToBridgeRow)))
+                } catch {
+                    completion(.failure(error))
+                }
+
+            case .execute(let sql, let params, let completion):
+                do {
+                    guard let execute else {
+                        throw TransactionReadOnlyError()
+                    }
+                    let rowsAffected = try execute(sql, try bridgeParams(params))
+                    if let abortError = session.currentAbortError() {
+                        throw abortError
+                    }
+                    completion(.success(["rowsAffected": rowsAffected]))
+                } catch {
+                    completion(.failure(error))
+                }
+
+            case .commit(let completion):
+                guard session.close() else {
+                    let error = session.currentAbortError()
+                        ?? TransactionAbortedError(message: "Transaction already completed")
+                    completion(.failure(error))
+                    throw error
+                }
+                session.setFinalCompletion(completion)
+                return
+
+            case .rollback(let completion):
+                guard session.close() else {
+                    let error = session.currentAbortError()
+                        ?? TransactionAbortedError(message: "Transaction already completed")
+                    completion(.failure(error))
+                    throw error
+                }
+                session.setFinalCompletion(completion)
+                throw TransactionRollbackError()
+            }
+        }
+    }
+
     private func beginTransaction(
         isWrite: Bool,
         resolve: @escaping RCTPromiseResolveBlock,
         reject: @escaping RCTPromiseRejectBlock
     ) {
-        guard let client = client else {
+        sessionsLock.lock()
+        guard acceptingTransactions, let client = client else {
+            sessionsLock.unlock()
             reject("NOT_CONNECTED", "Client not initialized", nil)
             return
         }
 
         let txID = UUID().uuidString
         let session = TransactionSession(isWrite: isWrite)
-
-        sessionsLock.lock()
         sessions[txID] = session
         sessionsLock.unlock()
 
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+        DispatchQueue.global(qos: .userInitiated).async {
+            defer {
+                session.close()
+                self.sessionsLock.lock()
+                self.sessions.removeValue(forKey: txID)
+                self.sessionsLock.unlock()
+                session.markFinished()
+            }
             do {
-                let txBlock: (GRDB.Database) throws -> Void = { db in
-                    guard let self else {
-                        throw NSError(domain: "SynchroModule", code: 0, userInfo: [NSLocalizedDescriptionKey: "module released"])
-                    }
-                    resolve(txID)
-
-                    while true {
-                        guard let op = try session.nextOperation(timeout: 5) else {
-                            break
-                        }
-
-                        switch op {
-                        case .query(let sql, let params, let completion):
-                            do {
-                                let args = StatementArguments(try self.bridgeParams(params))
-                                let rows = try Row.fetchAll(db, sql: sql, arguments: args)
-                                completion(.success(self.rowsToBridgeRows(rows)))
-                            } catch {
-                                completion(.failure(error))
-                            }
-
-                        case .queryOne(let sql, let params, let completion):
-                            do {
-                                let args = StatementArguments(try self.bridgeParams(params))
-                                let row = try Row.fetchOne(db, sql: sql, arguments: args)
-                                let payload = row.map { self.rowToBridgeRow($0) }
-                                completion(.success(payload))
-                            } catch {
-                                completion(.failure(error))
-                            }
-
-                        case .execute(let sql, let params, let completion):
-                            do {
-                                let args = StatementArguments(try self.bridgeParams(params))
-                                try db.execute(sql: sql, arguments: args)
-                                let changes = db.changesCount
-                                completion(.success(["rowsAffected": changes]))
-                            } catch {
-                                completion(.failure(error))
-                            }
-
-                        case .commit(let completion):
-                            session.close()
-                            session.finalCompletion = completion
-                            return
-
-                        case .rollback(let completion):
-                            session.close()
-                            session.finalCompletion = completion
-                            throw TransactionRollbackError()
-                        }
-                    }
-                }
-
                 let finalResult: Result<Void, Error>
                 if isWrite {
-                    try client.writeTransaction { db in try txBlock(db) }
+                    try client.writeTransaction { transaction in
+                        try self.runTransactionLoop(
+                            session: session,
+                            txID: txID,
+                            resolve: resolve,
+                            query: { sql, params in
+                                try transaction.query(sql, params: params)
+                            },
+                            queryOne: { sql, params in
+                                try transaction.queryOne(sql, params: params)
+                            },
+                            execute: { sql, params in
+                                try transaction.execute(sql, params: params).rowsAffected
+                            }
+                        )
+                    }
                 } else {
-                    try client.readTransaction { db in try txBlock(db) }
+                    try client.readTransaction { db in
+                        try self.runTransactionLoop(
+                            session: session,
+                            txID: txID,
+                            resolve: resolve,
+                            query: { sql, params in
+                                let statement = try db.makeStatement(sql: sql)
+                                guard statement.isReadonly else {
+                                    throw TransactionReadOnlyError()
+                                }
+                                return try Row.fetchAll(
+                                    statement,
+                                    arguments: StatementArguments(params)
+                                )
+                            },
+                            queryOne: { sql, params in
+                                let statement = try db.makeStatement(sql: sql)
+                                guard statement.isReadonly else {
+                                    throw TransactionReadOnlyError()
+                                }
+                                return try Row.fetchOne(
+                                    statement,
+                                    arguments: StatementArguments(params)
+                                )
+                            },
+                            execute: nil
+                        )
+                    }
                 }
                 finalResult = .success(())
-                session.finalCompletion?(finalResult)
+                session.completeFinal(finalResult)
             } catch is TransactionTimeoutError {
-                session.finalCompletion?(.failure(TransactionTimeoutError()))
+                session.completeFinal(.failure(TransactionTimeoutError()))
             } catch is TransactionRollbackError {
-                session.finalCompletion?(.success(()))
+                session.completeFinal(.success(()))
             } catch {
-                session.finalCompletion?(.failure(error))
+                session.completeFinal(.failure(error))
             }
-
-            session.close()
-            self?.sessionsLock.lock()
-            self?.sessions.removeValue(forKey: txID)
-            self?.sessionsLock.unlock()
         }
     }
 
@@ -529,6 +768,10 @@ public class SynchroModuleImpl: NSObject {
     ) {
         guard let session = getSession(txID) else {
             reject("TRANSACTION_TIMEOUT", "Transaction not found or expired", nil)
+            return
+        }
+        guard session.isWrite else {
+            reject("DATABASE_ERROR", "Read transactions cannot execute SQL", nil)
             return
         }
         let op = TransactionOp.execute(sql: sql, params: params) { result in
@@ -595,10 +838,31 @@ public class SynchroModuleImpl: NSObject {
 
     private func wireClientEvents(_ client: SynchroClient) {
         statusSubscription?.cancel()
+        syncEventSubscription?.cancel()
         conflictSubscription?.cancel()
+        statusDetailsLock.lock()
+        cachedBackoff = nil
+        cachedFailure = nil
+        statusDetailsLock.unlock()
 
         statusSubscription = client.onStatusChange { [weak self] status in
+            guard status != .backoff, status != .error else { return }
             self?.emit("onStatusChange", self?.statusPayload(status) ?? [:])
+        }
+
+        syncEventSubscription = client.onSyncEvent { [weak self] event in
+            guard let self else { return }
+            self.recordStatusDetails(event)
+            self.emit("onSyncEvent", self.syncEventPayload(event))
+            switch event {
+            case .backoff, .failure:
+                self.emit(
+                    "onStatusChange",
+                    self.statusPayload(client.getSyncStatus())
+                )
+            default:
+                break
+            }
         }
 
         conflictSubscription = client.onConflict { [weak self] event in
@@ -606,20 +870,46 @@ public class SynchroModuleImpl: NSObject {
         }
     }
 
-    private func clearRuntimeState() {
+    private func setClient(_ client: SynchroClient?, acceptingTransactions: Bool) {
+        sessionsLock.lock()
+        self.client = client
+        self.acceptingTransactions = acceptingTransactions
+        sessionsLock.unlock()
+    }
+
+    private func withLifecycleLock(_ operation: () async throws -> Void) async throws {
+        await lifecycleMutex.lock()
+        do {
+            try await operation()
+            await lifecycleMutex.unlock()
+        } catch {
+            await lifecycleMutex.unlock()
+            throw error
+        }
+    }
+
+    private func detachRuntimeState() -> [TransactionSession] {
         statusSubscription?.cancel()
+        syncEventSubscription?.cancel()
         conflictSubscription?.cancel()
         statusSubscription = nil
+        syncEventSubscription = nil
         conflictSubscription = nil
+        transportObservations?.cancelPauseBarrier()
+        transportObservations = nil
+        statusDetailsLock.lock()
+        cachedBackoff = nil
+        cachedFailure = nil
+        statusDetailsLock.unlock()
 
         observers.values.forEach { $0.cancel() }
         observers.removeAll()
 
         sessionsLock.lock()
+        acceptingTransactions = false
         let activeSessions = Array(sessions.values)
         sessions.removeAll()
         sessionsLock.unlock()
-        activeSessions.forEach { $0.close() }
 
         authLock.lock()
         let authContinuations = pendingAuthContinuations
@@ -632,25 +922,155 @@ public class SynchroModuleImpl: NSObject {
                 userInfo: [NSLocalizedDescriptionKey: "client closed"]
             ))
         }
+        return activeSessions
+    }
+
+    private func clearRuntimeState() async {
+        let activeSessions = detachRuntimeState()
+        activeSessions.forEach {
+            $0.abort(TransactionAbortedError(message: "Client closed during transaction"))
+        }
+        for session in activeSessions {
+            await session.waitUntilFinished()
+        }
     }
 
     private func statusPayload(_ status: SyncStatus) -> [String: Any] {
+        var payload: [String: Any] = [
+            "status": status.rawValue,
+            "retryAt": NSNull(),
+            "operation": NSNull(),
+            "failure": NSNull(),
+        ]
+        switch status {
+        case .uninitialized, .localReady, .connecting, .schemaApplying, .ready, .pushing, .pulling, .rebuilding, .stopped:
+            break
+        case .backoff:
+            statusDetailsLock.lock()
+            let backoff = cachedBackoff
+            statusDetailsLock.unlock()
+            if let backoff {
+                payload["retryAt"] = iso8601String(backoff.retryAt)
+                payload["operation"] = backoff.operation.rawValue
+            }
+        case .error:
+            statusDetailsLock.lock()
+            let cachedFailure = self.cachedFailure
+            statusDetailsLock.unlock()
+            let persistedFailure: SyncFailure?
+            if let client = self.client {
+                persistedFailure = try? client.getBlockingFailure()
+            } else {
+                persistedFailure = nil
+            }
+            if let failure = cachedFailure ?? persistedFailure {
+                payload["failure"] = failurePayload(failure)
+            }
+        }
+        return payload
+    }
+
+    private func recordStatusDetails(_ event: SyncEvent) {
+        statusDetailsLock.lock()
+        defer { statusDetailsLock.unlock() }
+        switch event {
+        case .backoff(let backoff):
+            cachedBackoff = backoff
+            cachedFailure = nil
+        case .failure(let failure):
+            cachedFailure = failure
+            cachedBackoff = nil
+        default:
+            break
+        }
+    }
+
+    private func schemaPayload(_ schema: SchemaRef) -> [String: Any] {
+        ["version": schema.version, "hash": schema.hash]
+    }
+
+    private func failurePayload(_ failure: SyncFailure) -> [String: Any] {
+        [
+            "operation": failure.operation.rawValue,
+            "code": failure.code.rawValue,
+            "retryable": failure.retryable,
+            "message": failure.message,
+            "recoveryAction": failure.recoveryAction.rawValue,
+            "metadata": failure.metadata,
+        ]
+    }
+
+    private func iso8601String(_ date: Date) -> String {
         let formatter = ISO8601DateFormatter()
         formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return formatter.string(from: date)
+    }
 
-        switch status {
-        case .idle:
-            return ["status": "idle", "retryAt": NSNull()]
-        case .syncing:
-            return ["status": "syncing", "retryAt": NSNull()]
-        case .stopped:
-            return ["status": "stopped", "retryAt": NSNull()]
-        case .error(let retryAt):
-            return [
-                "status": "error",
-                "retryAt": retryAt.map { formatter.string(from: $0) } ?? NSNull()
-            ]
+    private func syncEventPayload(_ event: SyncEvent) -> [String: Any] {
+        var payload: [String: Any] = [
+            "type": "",
+            "from": NSNull(),
+            "to": NSNull(),
+            "operation": NSNull(),
+            "attempt": NSNull(),
+            "retryAt": NSNull(),
+            "source": NSNull(),
+            "target": NSNull(),
+            "action": NSNull(),
+            "mutationID": NSNull(),
+            "tableID": NSNull(),
+            "mutationStatus": NSNull(),
+            "rejectionCode": NSNull(),
+            "scopeID": NSNull(),
+            "rebuildID": NSNull(),
+            "failure": NSNull(),
+        ]
+
+        switch event {
+        case .stateChanged(let state):
+            payload["type"] = "state_changed"
+            payload["from"] = state.from.rawValue
+            payload["to"] = state.to.rawValue
+        case .backoff(let backoff):
+            payload["type"] = "backoff"
+            payload["operation"] = backoff.operation.rawValue
+            payload["attempt"] = backoff.attempt
+            payload["retryAt"] = iso8601String(backoff.retryAt)
+        case .schemaApplying(let schema):
+            payload["type"] = "schema_applying"
+            payload["source"] = schemaPayload(schema.source)
+            payload["target"] = schemaPayload(schema.target)
+            payload["action"] = schema.action.rawValue
+        case .schemaApplied(let schema):
+            payload["type"] = "schema_applied"
+            payload["source"] = schemaPayload(schema.source)
+            payload["target"] = schemaPayload(schema.target)
+            payload["action"] = schema.action.rawValue
+        case .mutationAccepted(let mutation):
+            payload["type"] = "mutation_accepted"
+            payload["mutationID"] = mutation.mutationID
+            payload["tableID"] = mutation.tableID
+            payload["mutationStatus"] = mutation.status.rawValue
+            payload["rejectionCode"] = mutation.rejectionCode?.rawValue ?? NSNull()
+        case .mutationRejected(let mutation):
+            payload["type"] = "mutation_rejected"
+            payload["mutationID"] = mutation.mutationID
+            payload["tableID"] = mutation.tableID
+            payload["mutationStatus"] = mutation.status.rawValue
+            payload["rejectionCode"] = mutation.rejectionCode?.rawValue ?? NSNull()
+        case .rebuildRequested(let rebuild):
+            payload["type"] = "rebuild_requested"
+            payload["scopeID"] = rebuild.scopeID
+            payload["rebuildID"] = rebuild.rebuildID
+        case .rebuildCompleted(let rebuild):
+            payload["type"] = "rebuild_completed"
+            payload["scopeID"] = rebuild.scopeID
+            payload["rebuildID"] = rebuild.rebuildID
+        case .failure(let failure):
+            payload["type"] = "failure"
+            payload["failure"] = failurePayload(failure)
         }
+        return payload
     }
 
     private func conflictPayload(_ event: ConflictEvent) -> [String: Any] {
@@ -670,7 +1090,7 @@ public class SynchroModuleImpl: NSObject {
                 "pk": anyCodableMapToJSONObject(result.pk),
                 "status": result.status.rawValue,
                 "code": result.code.rawValue,
-                "message": result.message ?? NSNull(),
+                "message": result.message,
                 "serverRow": anyCodableMapToJSONObject(result.serverRow),
                 "serverVersion": result.serverVersion ?? NSNull()
             ] as [String: Any]
@@ -693,6 +1113,8 @@ public class SynchroModuleImpl: NSObject {
     private func anyCodableToJSONObject(_ value: Any?) -> Any {
         switch value {
         case nil:
+            return NSNull()
+        case is NSNull:
             return NSNull()
         case let value as String:
             return value
@@ -877,9 +1299,97 @@ public class SynchroModuleImpl: NSObject {
             reject("NOT_CONNECTED", "Client not initialized", nil)
             return
         }
-        client.stop()
-        DispatchQueue.main.async {
-            resolve(nil)
+        Task {
+            await client.stop()
+            DispatchQueue.main.async {
+                resolve(nil)
+            }
+        }
+    }
+
+    @objc
+    public func enterBackground(
+        _ resolve: @escaping RCTPromiseResolveBlock,
+        reject: @escaping RCTPromiseRejectBlock
+    ) {
+        guard let client = client else {
+            reject("NOT_CONNECTED", "Client not initialized", nil)
+            return
+        }
+        Task {
+            await client.enterBackground()
+            DispatchQueue.main.async {
+                resolve(nil)
+            }
+        }
+    }
+
+    @objc
+    public func enterForeground(
+        _ resolve: @escaping RCTPromiseResolveBlock,
+        reject: @escaping RCTPromiseRejectBlock
+    ) {
+        guard let client = client else {
+            reject("NOT_CONNECTED", "Client not initialized", nil)
+            return
+        }
+        Task {
+            do {
+                try await client.enterForeground()
+                DispatchQueue.main.async {
+                    resolve(nil)
+                }
+            } catch {
+                DispatchQueue.main.async {
+                    self.rejectWithError(reject, error)
+                }
+            }
+        }
+    }
+
+    @objc
+    public func retryAfterError(
+        _ resolve: @escaping RCTPromiseResolveBlock,
+        reject: @escaping RCTPromiseRejectBlock
+    ) {
+        guard let client = client else {
+            reject("NOT_CONNECTED", "Client not initialized", nil)
+            return
+        }
+        Task {
+            do {
+                try await client.retryAfterError()
+                DispatchQueue.main.async {
+                    resolve(nil)
+                }
+            } catch {
+                DispatchQueue.main.async {
+                    self.rejectWithError(reject, error)
+                }
+            }
+        }
+    }
+
+    @objc
+    public func resetSchemaAndStart(
+        _ resolve: @escaping RCTPromiseResolveBlock,
+        reject: @escaping RCTPromiseRejectBlock
+    ) {
+        guard let client = client else {
+            reject("NOT_CONNECTED", "Client not initialized", nil)
+            return
+        }
+        Task {
+            do {
+                try await client.resetSchemaAndStart()
+                DispatchQueue.main.async {
+                    resolve(nil)
+                }
+            } catch {
+                DispatchQueue.main.async {
+                    self.rejectWithError(reject, error)
+                }
+            }
         }
     }
 
@@ -922,19 +1432,356 @@ public class SynchroModuleImpl: NSObject {
         }
     }
 
+    @objc
+    public func getSyncStatus(
+        _ resolve: @escaping RCTPromiseResolveBlock,
+        reject: @escaping RCTPromiseRejectBlock
+    ) {
+        guard let client = client else {
+            reject("NOT_CONNECTED", "Client not initialized", nil)
+            return
+        }
+        do {
+            resolve(try encodeBridgeJSON(statusPayload(client.getSyncStatus())))
+        } catch {
+            rejectWithError(reject, error)
+        }
+    }
+
+    @objc
+    public func inspectPendingMutations(
+        _ resolve: @escaping RCTPromiseResolveBlock,
+        reject: @escaping RCTPromiseRejectBlock
+    ) {
+        guard let client = client else {
+            reject("NOT_CONNECTED", "Client not initialized", nil)
+            return
+        }
+        do {
+            let payload = try client.inspectPendingMutations().map(pendingMutationPayload)
+            resolve(try encodeBridgeJSON(payload))
+        } catch {
+            rejectWithError(reject, error)
+        }
+    }
+
+    @objc
+    public func inspectRejectedMutations(
+        _ resolve: @escaping RCTPromiseResolveBlock,
+        reject: @escaping RCTPromiseRejectBlock
+    ) {
+        guard let client = client else {
+            reject("NOT_CONNECTED", "Client not initialized", nil)
+            return
+        }
+        do {
+            let payload = try client.inspectRejectedMutations().map(rejectedMutationPayload)
+            resolve(try encodeBridgeJSON(payload))
+        } catch {
+            rejectWithError(reject, error)
+        }
+    }
+
+    @objc
+    public func inspectClientState(
+        _ resolve: @escaping RCTPromiseResolveBlock,
+        reject: @escaping RCTPromiseRejectBlock
+    ) {
+        guard let client else {
+            reject("NOT_CONNECTED", "Client not initialized", nil)
+            return
+        }
+        do {
+            let schema: Any = try client.inspectCurrentSchema().map { value in
+                ["version": value.version, "hash": value.hash]
+            } ?? NSNull()
+            let scopeStates = try client.inspectScopeStates().map { value in
+                [
+                    "scope_id": value.scopeID,
+                    "cursor": value.cursor ?? NSNull(),
+                    "checksum": value.checksum ?? NSNull(),
+                    "local_checksum": value.localChecksum,
+                    "generation": value.generation,
+                ] as [String: Any]
+            }
+            let scopeRows = try client.inspectScopeRows().map { value in
+                [
+                    "scope_id": value.scopeID,
+                    "table_name": value.tableName,
+                    "record_id": value.recordID,
+                    "checksum": value.checksum,
+                    "generation": value.generation,
+                ] as [String: Any]
+            }
+            let attempts = try client.inspectRebuildAttempts().map { value in
+                [
+                    "scope_id": value.scopeID,
+                    "rebuild_id": value.rebuildID,
+                    "client_generation": value.clientGeneration,
+                    "schema_version": value.schemaVersion,
+                    "schema_hash": value.schemaHash,
+                    "generation": value.generation,
+                    "cursor": value.cursor ?? NSNull(),
+                    "page_limit": value.pageLimit,
+                ] as [String: Any]
+            }
+            resolve(try encodeBridgeJSON([
+                "schema": schema,
+                "scope_states": scopeStates,
+                "scope_rows": scopeRows,
+                "rebuild_attempts": attempts,
+            ]))
+        } catch {
+            rejectWithError(reject, error)
+        }
+    }
+
+    @objc
+    public func inspectTransportObservations(
+        _ resolve: @escaping RCTPromiseResolveBlock,
+        reject: @escaping RCTPromiseRejectBlock
+    ) {
+        guard let transportObservations else {
+            reject("NOT_CONNECTED", "Transport observation is not configured", nil)
+            return
+        }
+        do {
+            let data = try JSONEncoder().encode(transportObservations.snapshot())
+            guard let value = String(data: data, encoding: .utf8) else {
+                throw SynchroError.invalidResponse(message: "transport observation encoding failed")
+            }
+            resolve(value)
+        } catch {
+            rejectWithError(reject, error)
+        }
+    }
+
+    @objc
+    public func armTransportPause(
+        _ operationClass: String,
+        resolve: @escaping RCTPromiseResolveBlock,
+        reject: @escaping RCTPromiseRejectBlock
+    ) {
+        guard let collector = transportObservations,
+              let operation = TransportOperationClass(rawValue: operationClass) else {
+            reject("INVALID_CONFIG", "Transport pause operation is invalid", nil)
+            return
+        }
+        do {
+            try collector.armPause(for: operation)
+            resolve(nil)
+        } catch {
+            rejectWithError(reject, error)
+        }
+    }
+
+    @objc
+    public func awaitTransportPause(
+        _ operationClass: String,
+        timeoutMs: Double,
+        resolve: @escaping RCTPromiseResolveBlock,
+        reject: @escaping RCTPromiseRejectBlock
+    ) {
+        guard let collector = transportObservations,
+              let operation = TransportOperationClass(rawValue: operationClass),
+              timeoutMs.isFinite, timeoutMs >= 1, timeoutMs <= 60_000 else {
+            reject("INVALID_CONFIG", "Transport pause wait is invalid", nil)
+            return
+        }
+        Task {
+            do {
+                try await collector.awaitPause(for: operation, timeout: timeoutMs / 1_000)
+                DispatchQueue.main.async { resolve(nil) }
+            } catch {
+                DispatchQueue.main.async { self.rejectWithError(reject, error) }
+            }
+        }
+    }
+
+    @objc
+    public func resumeTransportPause(
+        _ resolve: @escaping RCTPromiseResolveBlock,
+        reject: @escaping RCTPromiseRejectBlock
+    ) {
+        guard let collector = transportObservations else {
+            reject("NOT_CONNECTED", "Transport observation is not configured", nil)
+            return
+        }
+        do {
+            try collector.resumePause()
+            resolve(nil)
+        } catch {
+            rejectWithError(reject, error)
+        }
+    }
+
+    @objc
+    public func getProcessIdentity(
+        _ resolve: @escaping RCTPromiseResolveBlock,
+        reject: @escaping RCTPromiseRejectBlock
+    ) {
+        resolve("ios-app:\(getpid())")
+    }
+
+    @objc
+    public func clearRejectedMutations(
+        _ resolve: @escaping RCTPromiseResolveBlock,
+        reject: @escaping RCTPromiseRejectBlock
+    ) {
+        guard let client = client else {
+            reject("NOT_CONNECTED", "Client not initialized", nil)
+            return
+        }
+        do {
+            try client.clearRejectedMutations()
+            resolve(nil)
+        } catch {
+            rejectWithError(reject, error)
+        }
+    }
+
     // MARK: - Helpers
+
+    private func encodeBridgeJSON(_ value: Any) throws -> String {
+        guard JSONSerialization.isValidJSONObject(value) else {
+            throw SynchroError.invalidResponse(message: "bridge JSON value is invalid")
+        }
+        let data = try JSONSerialization.data(withJSONObject: value, options: [.sortedKeys])
+        guard let json = String(data: data, encoding: .utf8) else {
+            throw SynchroError.invalidResponse(message: "bridge JSON encoding failed")
+        }
+        return json
+    }
+
+    private func pendingMutationPayload(_ mutation: PendingMutationInspection) -> [String: Any] {
+        [
+            "mutationID": mutation.mutationID,
+            "localOrder": mutation.localOrder,
+            "tableID": mutation.tableID,
+            "tableName": mutation.tableName,
+            "recordID": mutation.recordID,
+            "primaryKeyFieldID": mutation.primaryKeyFieldID,
+            "primaryKeyLogicalType": mutation.primaryKeyLogicalType,
+            "operation": mutation.operation.rawValue,
+            "authoredSchema": [
+                "version": mutation.authoredSchema.version,
+                "hash": mutation.authoredSchema.hash
+            ],
+            "baseVersion": mutation.baseVersion ?? NSNull(),
+            "clientVersion": mutation.clientVersion,
+            "status": mutation.status.rawValue,
+            "sourceKind": mutation.sourceKind,
+            "dependsOnMutationID": mutation.dependsOnMutationID ?? NSNull(),
+            "normalizedMutationID": mutation.normalizedMutationID ?? NSNull(),
+            "sealedBatchID": mutation.sealedBatchID ?? NSNull(),
+            "sealedOrdinal": mutation.sealedOrdinal ?? NSNull(),
+            "authoredFields": mutation.authoredFields.map { field in
+                [
+                    "fieldID": field.fieldID,
+                    "logicalType": field.logicalType,
+                    "value": anyCodableToJSONObject(field.value.value)
+                ] as [String: Any]
+            }
+        ]
+    }
+
+    private func rejectedMutationPayload(_ mutation: RejectedMutationInspection) -> [String: Any] {
+        [
+            "mutationID": mutation.mutationID,
+            "tableName": mutation.tableName,
+            "recordID": mutation.recordID,
+            "status": mutation.status.rawValue,
+            "code": mutation.code.rawValue,
+            "message": mutation.message ?? NSNull(),
+            "serverRowJSON": mutation.serverRowJSON ?? NSNull(),
+            "serverVersion": mutation.serverVersion ?? NSNull(),
+            "mutationJSON": mutation.mutationJSON,
+            "rejectionJSON": mutation.rejectionJSON,
+            "createdAt": mutation.createdAt,
+            "updatedAt": mutation.updatedAt
+        ]
+    }
 
     private enum BridgeParamError: LocalizedError {
         case invalidNumber(index: Int)
+        case invalidTag(index: Int, reason: String)
         case unsupported(index: Int, type: String)
 
         var errorDescription: String? {
             switch self {
             case .invalidNumber(let index):
                 return "Invalid SQL bind number at index \(index)"
+            case .invalidTag(let index, let reason):
+                return "Invalid SQL bind tag at index \(index): \(reason)"
             case .unsupported(let index, let type):
                 return "Unsupported SQL bind value at index \(index): \(type)"
             }
+        }
+    }
+
+    private static let maxSafeInteger: Int64 = 9_007_199_254_740_991
+    private static let minSafeInteger: Int64 = -9_007_199_254_740_991
+
+    private func canonicalBase64URL(_ data: Data) -> String {
+        data.base64EncodedString()
+            .replacingOccurrences(of: "+", with: "-")
+            .replacingOccurrences(of: "/", with: "_")
+            .replacingOccurrences(of: "=", with: "")
+    }
+
+    private func decodeCanonicalBase64URL(_ value: String, index: Int) throws -> Data {
+        guard value.utf8.allSatisfy({ byte in
+            (byte >= 65 && byte <= 90) ||
+            (byte >= 97 && byte <= 122) ||
+            (byte >= 48 && byte <= 57) ||
+            byte == 45 || byte == 95
+        }) else {
+            throw BridgeParamError.invalidTag(index: index, reason: "bytes must use base64url")
+        }
+
+        let remainder = value.utf8.count % 4
+        guard remainder != 1 else {
+            throw BridgeParamError.invalidTag(index: index, reason: "bytes have invalid base64url length")
+        }
+
+        let translated = value
+            .replacingOccurrences(of: "-", with: "+")
+            .replacingOccurrences(of: "_", with: "/")
+        let padded = translated + String(repeating: "=", count: (4 - remainder) % 4)
+        guard let data = Data(base64Encoded: padded), canonicalBase64URL(data) == value else {
+            throw BridgeParamError.invalidTag(index: index, reason: "bytes are not canonical base64url")
+        }
+        return data
+    }
+
+    private func decodeCanonicalInt64(_ value: String, index: Int) throws -> Int64 {
+        guard value == "0" || value.range(of: "^-?[1-9][0-9]*$", options: .regularExpression) != nil,
+              let parsed = Int64(value), String(parsed) == value else {
+            throw BridgeParamError.invalidTag(index: index, reason: "int64 is not canonical or is out of range")
+        }
+        return parsed
+    }
+
+    private func bridgeTagToParam(_ value: Any, index: Int) throws -> (any DatabaseValueConvertible)? {
+        guard let tag = value as? NSDictionary,
+              tag.count == 2,
+              let type = tag["type"] as? String else {
+            throw BridgeParamError.invalidTag(index: index, reason: "tag must contain exactly type and payload fields")
+        }
+
+        switch type {
+        case "bytes":
+            guard let base64 = tag["base64"] as? String, tag["value"] == nil else {
+                throw BridgeParamError.invalidTag(index: index, reason: "bytes tag must contain base64")
+            }
+            return try decodeCanonicalBase64URL(base64, index: index)
+        case "int64":
+            guard let value = tag["value"] as? String, tag["base64"] == nil else {
+                throw BridgeParamError.invalidTag(index: index, reason: "int64 tag must contain value")
+            }
+            return try decodeCanonicalInt64(value, index: index)
+        default:
+            throw BridgeParamError.invalidTag(index: index, reason: "unknown tag type")
         }
     }
 
@@ -945,16 +1792,28 @@ public class SynchroModuleImpl: NSObject {
         case let boolVal as Bool:
             return boolVal ? 1 : 0
         case let intVal as Int:
+            guard Int64(intVal) >= Self.minSafeInteger && Int64(intVal) <= Self.maxSafeInteger else {
+                throw BridgeParamError.invalidNumber(index: index)
+            }
             return intVal
         case let int64Val as Int64:
+            guard int64Val >= Self.minSafeInteger && int64Val <= Self.maxSafeInteger else {
+                throw BridgeParamError.invalidNumber(index: index)
+            }
             return int64Val
         case let doubleVal as Double:
             guard doubleVal.isFinite else {
                 throw BridgeParamError.invalidNumber(index: index)
             }
+            if doubleVal.rounded(.towardZero) == doubleVal,
+               (doubleVal < Double(Self.minSafeInteger) || doubleVal > Double(Self.maxSafeInteger)) {
+                throw BridgeParamError.invalidNumber(index: index)
+            }
             return doubleVal
         case let stringVal as String:
             return stringVal
+        case let dictionary as NSDictionary:
+            return try bridgeTagToParam(dictionary, index: index)
         case let numberVal as NSNumber:
             if CFGetTypeID(numberVal) == CFBooleanGetTypeID() {
                 return numberVal.boolValue ? 1 : 0
@@ -965,9 +1824,12 @@ public class SynchroModuleImpl: NSObject {
             }
             if doubleValue.isFinite,
                doubleValue.rounded(.towardZero) == doubleValue,
-               doubleValue >= Double(Int64.min),
-               doubleValue <= Double(Int64.max) {
+               doubleValue >= Double(Self.minSafeInteger),
+               doubleValue <= Double(Self.maxSafeInteger) {
                 return Int64(doubleValue)
+            }
+            if doubleValue.rounded(.towardZero) == doubleValue {
+                throw BridgeParamError.invalidNumber(index: index)
             }
             return doubleValue
         default:
@@ -1009,13 +1871,16 @@ public class SynchroModuleImpl: NSObject {
         case .null:
             return NSNull()
         case .int64(let v):
-            return NSNumber(value: v)
+            if v >= Self.minSafeInteger && v <= Self.maxSafeInteger {
+                return NSNumber(value: v)
+            }
+            return ["type": "int64", "value": String(v)]
         case .double(let v):
             return NSNumber(value: v)
         case .string(let v):
             return v
         case .blob(let v):
-            return v.base64EncodedString()
+            return ["type": "bytes", "base64": canonicalBase64URL(v)]
         }
     }
 

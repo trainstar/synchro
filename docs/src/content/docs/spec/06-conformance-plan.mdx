@@ -215,6 +215,111 @@ excluded, missing, or mismatched binding is invalid. Randomized replay always
 requires a seed, and any authored barrier requires a corresponding barrier
 trace.
 
+### Native Execution Plans
+
+A scenario with a `native-e2e` obligation must contain one
+`native_execution` plan. A scenario without that obligation must not contain
+the plan. The same plan applies to every native support cell for the scenario.
+
+The plan declares stable client keys, user identities, client identities, and
+database keys. A database key identifies one SQLite file across termination and
+relaunch. It never contains a host path.
+
+The plan contains one ordered action list. Each action has a stable action ID,
+phase, actor, command, covered scenario-step IDs, and a closed parameter object.
+The actors are `controller`, `artifact`, `client`, `process`, and `observer`.
+
+The closed commands are:
+
+| Actor | Commands |
+| --- | --- |
+| `controller` | `install-model`, `apply-step` |
+| `artifact` | `stage-step` |
+| `client` | `open`, `execute-step`, `synchronize-step`, `lifecycle` |
+| `process` | `execute-step`, `terminate`, `relaunch` |
+| `observer` | `await-step`, `capture`, `measure` |
+
+`controller/install-model` installs the scenario model setup through public
+operator and source-data boundaries. It must not insert synchronization
+ledgers, cursors, changelogs, projections, or expected local state.
+
+`controller/apply-step` executes one covered `model` or `workload` operation.
+It uses normal source writes and approved operator functions for model work.
+For a workload, it expands the closed operation and routes each result through
+the applicable public controller, artifact, client, process, or observer
+driver. Every workload client opens before expansion. The controller must not
+expose a production HTTP test backdoor.
+
+`artifact/stage-step` prepares one covered artifact operation for one declared
+client outside the application process. The client consumes that artifact
+through its normal initialization API.
+
+`client/open` creates or reuses the database for one declared client key.
+`client/execute-step` performs one covered `local/write` operation through the
+public application SQL API. `client/synchronize-step` drives one public engine
+cycle until its ordered covered HTTP operations reach one terminal completion.
+
+`client/lifecycle` invokes only public start, stop, retry, reset, background, or
+foreground behavior. It does not cover a model step.
+
+`process/execute-step` performs one covered process operation through an
+external supervisor. Its client key is null for a server process operation.
+An operation that contains a client identity requires that declared client key.
+`process/terminate` kills the application without client cleanup.
+`process/relaunch` starts a new process with the same declared database and
+client identity. Each boundary action names an earlier action. A terminate
+action occurs after that action's durable boundary. A relaunch action names the
+matching terminate action.
+
+`observer/await-step` waits for one covered internal local-apply effect without
+calling an internal apply API. `observer/capture` records declared public local,
+transport, process, artifact, and sanitized server observations. It names every
+client that contributes local observations. Its client list is empty for a
+server-only observation.
+`observer/measure` records the exact performance budget IDs and required
+measurement IDs owned by native obligations.
+
+Every authored scenario step must be covered by exactly one action. Setup,
+lifecycle, process-death, capture, and measurement actions can cover no step.
+An action must not cover an unknown step or a step assigned to another action.
+All covered steps follow the authored scenario order. A synchronize action can
+cover multiple ordered HTTP steps that one public engine cycle performs.
+Other step-covering actions cover exactly one step.
+
+The covered step phase must equal the action phase. `controller/install-model`
+and `client/open` use `setup`. `observer/capture` and `observer/measure` use
+`verify`. Other no-step actions use `setup`, `exercise`, or `cleanup`.
+
+The command-to-operation mapping is closed. `controller/apply-step` covers
+`model` and `workload`. `artifact/stage-step` covers `artifact`.
+`client/execute-step` covers only `local/write`. `client/synchronize-step`
+covers HTTP operations. `process/execute-step` covers `process`.
+`observer/await-step` covers the remaining local apply operations.
+
+A synchronize action uses `idle` for a successful response. It uses `blocked`
+for a retryable response or transport failure. It uses `error` for a terminal
+error response. All steps in one synchronize action use the same completion.
+
+Client keys, client identity pairs, and database keys are unique. Every client
+action names a declared client. Each declared client opens once before use.
+A reuse open names one earlier artifact step for the same client. A create open
+does not name a seed step. Each plan contains exactly one `install-model`
+action. All covered steps follow it. Capture and measurement actions follow all
+covered steps.
+
+The capture actions must cover every model expectation owned by a native
+obligation. Measurement actions must exactly cover every performance budget and
+required measurement owned by those obligations. Extra bindings are invalid.
+
+The runner executes actions in authored order. It resolves step payloads from
+the immutable scenario instead of copying them into the native plan. It records
+the exact action IDs, command order, step coverage, observations, process
+boundaries, and measurement results in signed execution evidence.
+
+A platform driver implements only the closed commands. Swift and Kotlin use
+their public native APIs. React Native uses public JavaScript APIs and remains a
+bridge over the corresponding native client.
+
 Proof type is an enforced execution policy, not a label. Each requirement
 declares its applicable server and client components; the gate expands those
 components to every required support cell. Each proof type has an allowlist of
@@ -656,7 +761,8 @@ performance result.
 
 The following request budgets are fixed contract assertions:
 
-- warm connect uses exactly one HTTP request
+- a warm public startup uses exactly one connect request and one pull request,
+  with zero push, rebuild page, schema fetch, or other requests
 - steady-state sync with no pending mutations uses exactly one pull request
   per cycle
 - steady-state sync with pending mutations uses exactly one push and one pull

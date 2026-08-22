@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -11,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/trainstar/synchro/conformance/internal/contract"
+	"github.com/trainstar/synchro/conformance/nativeexecution"
 	"github.com/trainstar/synchro/conformance/scenarios"
 )
 
@@ -31,8 +33,8 @@ func TestRunRejectsInvalidCommandsAndFlags(t *testing.T) {
 		{"model malformed flag", []string{"model", "--unknown"}, "model flags are invalid"},
 		{"blackbox missing mode", []string{"blackbox", "--repo-root", "."}, "blackbox requires --mode"},
 		{"blackbox invalid mode", []string{"blackbox", "--repo-root", ".", "--mode", "other"}, "blackbox requires --mode"},
-		{"baseline missing root", []string{"baseline", "--output", "baseline-test"}, "baseline requires --repo-root PATH"},
-		{"baseline missing output", []string{"baseline", "--repo-root", "."}, "baseline requires --output PATH"},
+		{"native missing selection", []string{"native", "--repo-root", "."}, "native requires"},
+		{"native malformed flag", []string{"native", "--unknown"}, "native flags are invalid"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -41,6 +43,35 @@ func TestRunRejectsInvalidCommandsAndFlags(t *testing.T) {
 				t.Fatalf("run error = %v, want %q", err, test.want)
 			}
 		})
+	}
+}
+
+func TestRunNativeWritesCatalogBoundManifest(t *testing.T) {
+	var output bytes.Buffer
+	err := runNative(context.Background(), []string{
+		"--repo-root", repositoryRoot(t),
+		"--scenario", "SCN-PERF-WARM-CONNECT-001",
+		"--support-cell", "SUP-IOS-MIN-001",
+	}, &output)
+	if err != nil {
+		t.Fatalf("run native manifest: %v", err)
+	}
+	var manifest nativeexecution.Manifest
+	if err := json.Unmarshal(output.Bytes(), &manifest); err != nil {
+		t.Fatalf("decode native manifest: %v", err)
+	}
+	if manifest.ScenarioID != "SCN-PERF-WARM-CONNECT-001" || manifest.SupportCellID != "SUP-IOS-MIN-001" || manifest.MakeTarget != "test-swift" {
+		t.Fatalf("native manifest selection = %+v", manifest)
+	}
+	found := false
+	for _, action := range manifest.Actions {
+		if action.Action.ID == "NACT-PERF-WARM-CONNECT-011" {
+			found = len(action.Steps) == 2
+			break
+		}
+	}
+	if !found {
+		t.Fatal("native manifest omitted the measured warm synchronization")
 	}
 }
 

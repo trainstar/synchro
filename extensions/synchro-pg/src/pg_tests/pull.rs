@@ -88,6 +88,79 @@
     }
 
     #[pg_test]
+    fn test_synced_projection_serializes_json_values_as_canonical_text() {
+        setup_portable_type_contract_table();
+        let record_id = "10101010-1010-4010-8010-101010101010";
+        Spi::run_with_args(
+            "INSERT INTO test_portable_type_contract (
+                 id, user_id, label, col_json, col_text_array, col_int_array
+             ) VALUES (
+                 $1::uuid, 'projection-user', 'portable JSON',
+                 '{\"b\":2,\"a\":1}'::jsonb, ARRAY['alpha', 'beta'], ARRAY[1, 2]
+             )",
+            &[record_id.into()],
+        )
+        .unwrap();
+
+        let row_data = Spi::connect(|client| {
+            let registry = crate::registry::load_registry_from_client(client)?;
+            let table = registry
+                .iter()
+                .find(|table| table.table_name == "test_portable_type_contract")
+                .expect("portable type registration");
+            assert!(
+                table
+                    .fields
+                    .iter()
+                    .find(|field| field.physical_column == "col_json")
+                    .expect("native JSON field")
+                    .native_json
+            );
+            assert!(
+                table
+                    .fields
+                    .iter()
+                    .filter(|field| {
+                        matches!(
+                            field.physical_column.as_str(),
+                            "col_text_array" | "col_int_array"
+                        )
+                    })
+                    .all(|field| !field.native_json)
+            );
+            let projection = crate::pull::synced_row_projection_sql(table, "source");
+            let query = format!(
+                "SELECT {projection} AS row_data
+                 FROM test_portable_type_contract source
+                 WHERE source.id = $1::uuid"
+            );
+            let mut row_data = client
+                .select(&query, None, &[record_id.into()])?
+                .first()
+                .get_by_name::<pgrx::JsonB, &str>("row_data")?
+                .expect("projected row")
+                .0;
+            crate::pull::canonicalize_synced_row_data(table, &mut row_data)
+                .expect("canonical projected row");
+            Ok::<_, pgrx::spi::Error>(row_data)
+        })
+        .unwrap();
+
+        assert_eq!(
+            row_data[field_id("test_portable_type_contract", "col_json")].as_str(),
+            Some("{\"a\":1,\"b\":2}")
+        );
+        assert_eq!(
+            row_data[field_id("test_portable_type_contract", "col_text_array")].as_str(),
+            Some("[\"alpha\",\"beta\"]")
+        );
+        assert_eq!(
+            row_data[field_id("test_portable_type_contract", "col_int_array")].as_str(),
+            Some("[1,2]")
+        );
+    }
+
+    #[pg_test]
     fn test_pull_reads_immutable_captured_projection() {
         setup_test_tables();
         register_client("u1", "c1");

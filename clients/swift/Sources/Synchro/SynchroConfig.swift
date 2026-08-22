@@ -17,6 +17,7 @@ public struct SynchroConfig: Sendable {
     /// Path to a pre-built seed database for offline-first bootstrap.
     /// If set and no database exists at `dbPath`, the seed file is copied before opening.
     public let seedDatabasePath: String?
+    public let transportObservationCollector: TransportObservationCollector?
 
     public init(
         dbPath: String,
@@ -30,7 +31,8 @@ public struct SynchroConfig: Sendable {
         maxRetryAttempts: Int = 5,
         pullPageSize: Int = 100,
         pushBatchSize: Int = 100,
-        seedDatabasePath: String? = nil
+        seedDatabasePath: String? = nil,
+        transportObservationCollector: TransportObservationCollector? = nil
     ) {
         self.dbPath = dbPath
         self.serverURL = serverURL
@@ -44,5 +46,6 @@ public struct SynchroConfig: Sendable {
         self.pullPageSize = min(pullPageSize, 1000)
         self.pushBatchSize = pushBatchSize
         self.seedDatabasePath = seedDatabasePath
+        self.transportObservationCollector = transportObservationCollector
     }
 }

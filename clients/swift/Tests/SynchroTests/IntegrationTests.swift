@@ -95,7 +95,7 @@ final class IntegrationTests: XCTestCase {
             clientID: clientID,
             platform: "ios",
             appVersion: "1.0.0",
-            protocolVersion: 2,
+            protocolVersion: 3,
             schema: .init(version: 0, hash: ""),
             scopeSetVersion: 0,
             knownScopes: [:]
@@ -108,15 +108,15 @@ final class IntegrationTests: XCTestCase {
             params: [customerID, userID, "Integration Customer", updatedAt, updatedAt]
         )
         _ = try client.execute(
-            "INSERT INTO orders (id, customer_id, status, total_price, currency, ship_address, created_at, updated_at) VALUES (?, ?, 'pending', 0, 'USD', ?, ?, ?)",
-            params: [orderID, customerID, shipAddress, updatedAt, updatedAt]
+            "INSERT INTO orders (id, customer_id, user_id, status, total_price, currency, ship_address, created_at, updated_at) VALUES (?, ?, ?, 'pending', 0, 'USD', ?, ?, ?)",
+            params: [orderID, customerID, userID, shipAddress, updatedAt, updatedAt]
         )
     }
 
 
-    private func stopAndClose(_ client: SynchroClient?) {
-        client?.stop()
-        try? client?.close()
+    private func stopAndClose(_ client: SynchroClient?) async {
+        await client?.stop()
+        try? await client?.close()
     }
 
     private func waitForCondition(
@@ -146,10 +146,11 @@ final class IntegrationTests: XCTestCase {
             XCTFail("Expected auth failure")
         } catch let error as SynchroError {
             switch error {
-            case .serverError(let status, _):
+            case .protocolError(let status, let code, _):
                 XCTAssertEqual(status, 401)
+                XCTAssertEqual(code, .authRequired)
             default:
-                XCTFail("Expected serverError(401), got \(error)")
+                XCTFail("Expected authRequired protocol error, got \(error)")
             }
         }
     }
@@ -163,20 +164,20 @@ final class IntegrationTests: XCTestCase {
 
         let clientA = try SynchroClient(config: clientAConfig)
         let clientB = try SynchroClient(config: clientBConfig)
-        defer {
-            stopAndClose(clientA)
-            stopAndClose(clientB)
+        addTeardownBlock {
+            await self.stopAndClose(clientA)
+            await self.stopAndClose(clientB)
         }
 
         try await clientA.start()
-        try seedOrder(clientA, userID: userID, customerID: customerID, orderID: orderID, shipAddress: "123 Main St", updatedAt: "2026-01-01T00:00:00.000Z")
+        try seedOrder(clientA, userID: userID, customerID: customerID, orderID: orderID, shipAddress: #"{"street":"123 Main St"}"#, updatedAt: "2026-01-01T00:00:00.000Z")
         try await clientA.syncNow()
 
         try await clientB.start()
         try await waitForCondition {
             try await clientB.syncNow()
             let row = try clientB.queryOne("SELECT ship_address FROM orders WHERE id = ?", params: [orderID])
-            return (row?["ship_address"] as? String) == "123 Main St"
+            return (row?["ship_address"] as? String) == #"{"street":"123 Main St"}"#
         }
     }
 
@@ -188,21 +189,21 @@ final class IntegrationTests: XCTestCase {
         let orderID = UUID().uuidString.lowercased()
 
         let writer = try SynchroClient(config: writerConfig)
-        defer { stopAndClose(writer) }
+        addTeardownBlock { await self.stopAndClose(writer) }
 
         try await writer.start()
-        try seedOrder(writer, userID: userID, customerID: customerID, orderID: orderID, shipAddress: "Bootstrap Ave", updatedAt: "2026-01-02T00:00:00.000Z")
+        try seedOrder(writer, userID: userID, customerID: customerID, orderID: orderID, shipAddress: #"{"street":"Bootstrap Ave"}"#, updatedAt: "2026-01-02T00:00:00.000Z")
         try await writer.syncNow()
-        writer.stop()
-        try writer.close()
+        await writer.stop()
+        try await writer.close()
 
         let reader = try SynchroClient(config: readerConfig)
-        defer { stopAndClose(reader) }
+        addTeardownBlock { await self.stopAndClose(reader) }
         try await reader.start()
         try await waitForCondition {
             try await reader.syncNow()
             let row = try reader.queryOne("SELECT ship_address FROM orders WHERE id = ?", params: [orderID])
-            return (row?["ship_address"] as? String) == "Bootstrap Ave"
+            return (row?["ship_address"] as? String) == #"{"street":"Bootstrap Ave"}"#
         }
     }
 
@@ -215,19 +216,19 @@ final class IntegrationTests: XCTestCase {
 
         let clientA = try SynchroClient(config: clientAConfig)
         let clientB = try SynchroClient(config: clientBConfig)
-        defer {
-            stopAndClose(clientA)
-            stopAndClose(clientB)
+        addTeardownBlock {
+            await self.stopAndClose(clientA)
+            await self.stopAndClose(clientB)
         }
 
         try await clientA.start()
-        try seedOrder(clientA, userID: userID, customerID: customerID, orderID: orderID, shipAddress: "Delete Me", updatedAt: "2026-01-03T00:00:00.000Z")
+        try seedOrder(clientA, userID: userID, customerID: customerID, orderID: orderID, shipAddress: #"{"street":"Delete Me"}"#, updatedAt: "2026-01-03T00:00:00.000Z")
         try await clientA.syncNow()
 
         try await clientB.start()
         try await waitForCondition {
             let row = try clientB.queryOne("SELECT ship_address FROM orders WHERE id = ?", params: [orderID])
-            return (row?["ship_address"] as? String) == "Delete Me"
+            return (row?["ship_address"] as? String) == #"{"street":"Delete Me"}"#
         }
 
         _ = try clientA.execute(

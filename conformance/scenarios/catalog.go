@@ -37,12 +37,20 @@ type ScenarioEntry struct {
 
 // GenerateCatalog verifies loaded source files and builds a sorted catalog.
 func GenerateCatalog(repoRoot string, scenarios []Scenario) (Catalog, error) {
+	return GenerateCatalogContext(context.Background(), repoRoot, scenarios)
+}
+
+// GenerateCatalogContext verifies loaded source files with cancellation support.
+func GenerateCatalogContext(ctx context.Context, repoRoot string, scenarios []Scenario) (Catalog, error) {
+	if err := checkContext(ctx); err != nil {
+		return Catalog{}, err
+	}
 	_, root, err := openRepositoryRoot(repoRoot)
 	if err != nil {
 		return Catalog{}, err
 	}
 	defer root.Close()
-	return generateCatalogRooted(context.Background(), root, scenarios)
+	return generateCatalogRooted(ctx, root, scenarios)
 }
 
 func generateCatalogRooted(ctx context.Context, root *os.Root, scenarios []Scenario) (Catalog, error) {

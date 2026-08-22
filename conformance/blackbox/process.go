@@ -46,7 +46,7 @@ const (
 //go:embed testdata/schema.sql
 var diagnosticSchemaSQL string
 
-//go:embed testdata/register-diagnostic-v2.sql
+//go:embed testdata/register-diagnostic.sql
 var diagnosticRegistrationSQL string
 
 var diagnosticUUIDPattern = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
@@ -133,6 +133,23 @@ type SourceExecutor struct {
 // OperatorExecutor exposes only the fixed administrative controls used by diagnostics.
 type OperatorExecutor struct {
 	harness *Harness
+}
+
+// PrepareNativeRebuildRequests prepares the fixed native rebuild-requests fixture.
+func (executor *OperatorExecutor) PrepareNativeRebuildRequests(ctx context.Context) error {
+	if ctx == nil {
+		return errors.New("native rebuild requests context is required")
+	}
+	if err := ctx.Err(); err != nil {
+		return errors.New("native rebuild requests context expired")
+	}
+	if err := executor.exec(ctx, "SELECT synchro.synchro_unregister_shared_scope('cf:global')"); err != nil {
+		return errors.New("prepare native rebuild requests failed")
+	}
+	if err := ctx.Err(); err != nil {
+		return errors.New("native rebuild requests context expired")
+	}
+	return nil
 }
 
 // SourceTransaction owns one source-DML transaction.
@@ -1257,7 +1274,7 @@ func (h *Harness) applyIndependentSourceSetup(ctx context.Context) error {
 	if err := h.grantWorkerReplicationSourceAccess(ctx); err != nil {
 		return err
 	}
-	if err := h.executeSourceScript(ctx, "register-diagnostic-v2.sql", diagnosticRegistrationSQL); err != nil {
+	if err := h.executeSourceScript(ctx, "register-diagnostic.sql", diagnosticRegistrationSQL); err != nil {
 		return err
 	}
 	h.sourceReady = true
@@ -1623,6 +1640,7 @@ func (h *Harness) FailureDiagnostics() string {
 		"synchro WAL",
 		"stream reset",
 		"projection bootstrap",
+		"rebuild staging snapshot failed",
 		"background worker",
 		"PANIC:",
 		"FATAL:",

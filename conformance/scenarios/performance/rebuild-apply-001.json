@@ -904,6 +904,7 @@
       "phase": "exercise",
       "transport": "model",
       "description": "Execute the authored workload operation.",
+      "measurement_sample": { "measurement_id": "MEAS-REBUILD-APPLY-001", "stratum_id": "STR-APPLY-SMALL-001", "sample_id": "SAMPLE-REBUILD-APPLY-SMALL-001", "parameters": { "rebuild_record_count": 1, "page_size": 100 } },
       "operation": {
         "contract_operation": "workload",
         "name": "prepare",
@@ -923,6 +924,7 @@
       "phase": "exercise",
       "transport": "model",
       "description": "Execute the authored workload operation.",
+      "measurement_sample": { "measurement_id": "MEAS-REBUILD-APPLY-001", "stratum_id": "STR-APPLY-SMALL-001", "sample_id": "SAMPLE-REBUILD-APPLY-SMALL-002", "parameters": { "rebuild_record_count": 1, "page_size": 100 } },
       "operation": {
         "contract_operation": "workload",
         "name": "prepare",
@@ -942,6 +944,7 @@
       "phase": "exercise",
       "transport": "model",
       "description": "Execute the authored workload operation.",
+      "measurement_sample": { "measurement_id": "MEAS-REBUILD-APPLY-001", "stratum_id": "STR-APPLY-SMALL-001", "sample_id": "SAMPLE-REBUILD-APPLY-SMALL-003", "parameters": { "rebuild_record_count": 1, "page_size": 100 } },
       "operation": {
         "contract_operation": "workload",
         "name": "prepare",
@@ -961,6 +964,7 @@
       "phase": "exercise",
       "transport": "model",
       "description": "Execute the authored workload operation.",
+      "measurement_sample": { "measurement_id": "MEAS-REBUILD-APPLY-001", "stratum_id": "STR-APPLY-MEDIUM-001", "sample_id": "SAMPLE-REBUILD-APPLY-MEDIUM-001", "parameters": { "rebuild_record_count": 101, "page_size": 100 } },
       "operation": {
         "contract_operation": "workload",
         "name": "prepare",
@@ -980,6 +984,7 @@
       "phase": "exercise",
       "transport": "model",
       "description": "Execute the authored workload operation.",
+      "measurement_sample": { "measurement_id": "MEAS-REBUILD-APPLY-001", "stratum_id": "STR-APPLY-MEDIUM-001", "sample_id": "SAMPLE-REBUILD-APPLY-MEDIUM-002", "parameters": { "rebuild_record_count": 101, "page_size": 100 } },
       "operation": {
         "contract_operation": "workload",
         "name": "prepare",
@@ -999,6 +1004,7 @@
       "phase": "exercise",
       "transport": "model",
       "description": "Execute the authored workload operation.",
+      "measurement_sample": { "measurement_id": "MEAS-REBUILD-APPLY-001", "stratum_id": "STR-APPLY-MEDIUM-001", "sample_id": "SAMPLE-REBUILD-APPLY-MEDIUM-003", "parameters": { "rebuild_record_count": 101, "page_size": 100 } },
       "operation": {
         "contract_operation": "workload",
         "name": "prepare",
@@ -1018,6 +1024,7 @@
       "phase": "exercise",
       "transport": "model",
       "description": "Execute the authored workload operation.",
+      "measurement_sample": { "measurement_id": "MEAS-REBUILD-APPLY-001", "stratum_id": "STR-APPLY-LARGE-001", "sample_id": "SAMPLE-REBUILD-APPLY-LARGE-001", "parameters": { "rebuild_record_count": 1000, "page_size": 100 } },
       "operation": {
         "contract_operation": "workload",
         "name": "prepare",
@@ -1037,6 +1044,7 @@
       "phase": "exercise",
       "transport": "model",
       "description": "Execute the authored workload operation.",
+      "measurement_sample": { "measurement_id": "MEAS-REBUILD-APPLY-001", "stratum_id": "STR-APPLY-LARGE-001", "sample_id": "SAMPLE-REBUILD-APPLY-LARGE-002", "parameters": { "rebuild_record_count": 1000, "page_size": 100 } },
       "operation": {
         "contract_operation": "workload",
         "name": "prepare",
@@ -1056,6 +1064,7 @@
       "phase": "exercise",
       "transport": "model",
       "description": "Execute the authored workload operation.",
+      "measurement_sample": { "measurement_id": "MEAS-REBUILD-APPLY-001", "stratum_id": "STR-APPLY-LARGE-001", "sample_id": "SAMPLE-REBUILD-APPLY-LARGE-003", "parameters": { "rebuild_record_count": 1000, "page_size": 100 } },
       "operation": {
         "contract_operation": "workload",
         "name": "prepare",
@@ -1117,5 +1126,146 @@
       },
       "detects_control_ids": []
     }
-  ]
+  ],
+  "native_execution": {
+    "version": 1,
+    "clients": [
+      {
+        "key": "client_a",
+        "user_id": "user-a",
+        "client_id": "client-a",
+        "database_key": "db_rebuild_apply"
+      }
+    ],
+    "actions": [
+      {
+        "id": "NACT-RA-001",
+        "phase": "setup",
+        "actor": "controller",
+        "command": "install-model",
+        "covers_step_ids": [],
+        "parameters": {}
+      },
+      {
+        "id": "NACT-RA-011",
+        "phase": "setup",
+        "actor": "client",
+        "command": "open",
+        "covers_step_ids": [],
+        "parameters": {
+          "client_key": "client_a",
+          "database_mode": "create",
+          "initialization": "current",
+          "seed_step_id": null
+        }
+      },
+      {
+        "id": "NACT-RA-002",
+        "phase": "exercise",
+        "actor": "controller",
+        "command": "apply-step",
+        "covers_step_ids": ["STEP-PERF-REBUILD-APPLY-001"],
+        "parameters": {}
+      },
+      {
+        "id": "NACT-RA-003",
+        "phase": "exercise",
+        "actor": "controller",
+        "command": "apply-step",
+        "covers_step_ids": ["STEP-PERF-REBUILD-APPLY-002"],
+        "parameters": {}
+      },
+      {
+        "id": "NACT-RA-004",
+        "phase": "exercise",
+        "actor": "controller",
+        "command": "apply-step",
+        "covers_step_ids": ["STEP-PERF-REBUILD-APPLY-003"],
+        "parameters": {}
+      },
+      {
+        "id": "NACT-RA-005",
+        "phase": "exercise",
+        "actor": "controller",
+        "command": "apply-step",
+        "covers_step_ids": ["STEP-PERF-REBUILD-APPLY-004"],
+        "parameters": {}
+      },
+      {
+        "id": "NACT-RA-006",
+        "phase": "exercise",
+        "actor": "controller",
+        "command": "apply-step",
+        "covers_step_ids": ["STEP-PERF-REBUILD-APPLY-005"],
+        "parameters": {}
+      },
+      {
+        "id": "NACT-RA-007",
+        "phase": "exercise",
+        "actor": "controller",
+        "command": "apply-step",
+        "covers_step_ids": ["STEP-PERF-REBUILD-APPLY-006"],
+        "parameters": {}
+      },
+      {
+        "id": "NACT-RA-008",
+        "phase": "exercise",
+        "actor": "controller",
+        "command": "apply-step",
+        "covers_step_ids": ["STEP-PERF-REBUILD-APPLY-007"],
+        "parameters": {}
+      },
+      {
+        "id": "NACT-RA-009",
+        "phase": "exercise",
+        "actor": "controller",
+        "command": "apply-step",
+        "covers_step_ids": ["STEP-PERF-REBUILD-APPLY-008"],
+        "parameters": {}
+      },
+      {
+        "id": "NACT-RA-010",
+        "phase": "exercise",
+        "actor": "controller",
+        "command": "apply-step",
+        "covers_step_ids": ["STEP-PERF-REBUILD-APPLY-009"],
+        "parameters": {}
+      },
+      {
+        "id": "NACT-RA-013",
+        "phase": "verify",
+        "actor": "observer",
+        "command": "capture",
+        "covers_step_ids": [],
+        "parameters": {
+          "client_keys": ["client_a"],
+          "sources": [
+            "application-rows",
+            "sync-status",
+            "scope-state",
+            "checkpoints",
+            "provenance",
+            "rebuild-state",
+            "request-trace",
+            "server-state"
+          ],
+          "expectation_ids": [
+            "EXPECT-PERF-REBUILD-APPLY-SEMANTIC-001",
+            "EXPECT-PERF-REBUILD-APPLY-PERFORMANCE-001"
+          ]
+        }
+      },
+      {
+        "id": "NACT-RA-014",
+        "phase": "verify",
+        "actor": "observer",
+        "command": "measure",
+        "covers_step_ids": [],
+        "parameters": {
+          "performance_budget_ids": [],
+          "measurement_ids": ["MEAS-REBUILD-APPLY-001"]
+        }
+      }
+    ]
+  }
 }

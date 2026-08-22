@@ -11,7 +11,7 @@ internal class TestDatabaseTracker {
     }
 
     fun open(context: Context, dbPath: String): SynchroDatabase {
-        val db = SynchroDatabase(context, dbPath)
+        val db = SynchroDatabase.open(context, dbPath)
         databases += db
         return db
     }

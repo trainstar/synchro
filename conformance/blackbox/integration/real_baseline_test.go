@@ -964,18 +964,18 @@ func TestRealHTTPHarness(t *testing.T) {
 		"client_id":         "blackbox-http-client",
 		"platform":          "conformance",
 		"app_version":       "0.3.0",
-		"protocol_version":  2,
+		"protocol_version":  99,
 		"schema":            map[string]any{"version": 0, "hash": ""},
 		"scope_set_version": 0,
 		"known_scopes":      map[string]any{},
 	}
 	status, response := postConnect(t, ctx, harness.AdapterURL(), token, request)
 	if status != http.StatusUpgradeRequired {
-		t.Fatalf("protocol 2 connect status = %d, want 426: %#v", status, response)
+		t.Fatalf("unsupported protocol connect status = %d, want 426: %#v", status, response)
 	}
 	errorBody, ok := response["error"].(map[string]any)
 	if !ok || errorBody["code"] != "upgrade_required" {
-		t.Fatalf("protocol 2 connect error is invalid: %#v", response)
+		t.Fatalf("unsupported protocol connect error is invalid: %#v", response)
 	}
 
 	request["protocol_version"] = 3

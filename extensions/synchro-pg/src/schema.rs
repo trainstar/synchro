@@ -246,6 +246,14 @@ pub(crate) fn publish_schema_manifest(client: &mut SpiClient<'_>) -> Result<(), 
     });
     let transition_class =
         classify_transition(client, registry_generation, parent.as_ref(), &tables)?;
+    if transition_class == SchemaTransitionClass::Class4 {
+        validate_class_4_projection_transition(
+            client,
+            registry_generation,
+            parent.as_ref(),
+            &tables,
+        )?;
+    }
     let affected_scopes = if transition_class == SchemaTransitionClass::Class3 {
         load_current_scope_ids(client)?
     } else {
@@ -296,9 +304,12 @@ pub(crate) fn publish_schema_manifest(client: &mut SpiClient<'_>) -> Result<(), 
             affected_scopes.into(),
         ],
     )?;
-    if transition_class == SchemaTransitionClass::Class2 {
-        crate::materialize::migrate_class_2_schema_digests(client, registry_generation)
-            .unwrap_or_else(|error| pgrx::error!("migrating class 2 schema digests: {}", error));
+    if matches!(
+        transition_class,
+        SchemaTransitionClass::Class2 | SchemaTransitionClass::Class4
+    ) {
+        crate::materialize::migrate_schema_digests(client, registry_generation)
+            .unwrap_or_else(|error| pgrx::error!("migrating schema digests: {}", error));
     }
     Ok(())
 }
@@ -485,28 +496,28 @@ pub(crate) fn generation_requires_projection_bootstrap(
                OR source.sync_columns IS DISTINCT FROM target.sync_columns
                OR source.capture_key_columns IS DISTINCT FROM target.capture_key_columns
                OR EXISTS (
-                   (SELECT field_id, physical_column, portable_type,
+                   (SELECT field_id, physical_column, portable_type, native_json,
                            decimal_precision, decimal_scale, nullable,
                            writable, primary_key
                     FROM synchro.sync_registry_fields
                     WHERE registry_generation = $1
                       AND relation_id = target.relation_id
                     EXCEPT
-                    SELECT field_id, physical_column, portable_type,
+                     SELECT field_id, physical_column, portable_type, native_json,
                            decimal_precision, decimal_scale, nullable,
                            writable, primary_key
                     FROM synchro.sync_registry_fields
                     WHERE registry_generation = active.generation
                       AND relation_id = target.relation_id)
                    UNION ALL
-                   (SELECT field_id, physical_column, portable_type,
+                    (SELECT field_id, physical_column, portable_type, native_json,
                            decimal_precision, decimal_scale, nullable,
                            writable, primary_key
                     FROM synchro.sync_registry_fields
                     WHERE registry_generation = active.generation
                       AND relation_id = target.relation_id
                     EXCEPT
-                    SELECT field_id, physical_column, portable_type,
+                     SELECT field_id, physical_column, portable_type, native_json,
                            decimal_precision, decimal_scale, nullable,
                            writable, primary_key
                     FROM synchro.sync_registry_fields
@@ -896,6 +907,71 @@ fn classify_transition(
     } else {
         Ok(SchemaTransitionClass::Class2)
     }
+}
+
+fn validate_class_4_projection_transition(
+    client: &SpiClient<'_>,
+    registry_generation: i64,
+    parent: Option<&StoredManifest>,
+    tables: &[TableSchema],
+) -> Result<(), spi::Error> {
+    let Some(parent) = parent else {
+        return Ok(());
+    };
+    let parent_tables: std::collections::HashMap<&str, &TableSchema> = parent
+        .body
+        .tables
+        .iter()
+        .map(|table| (table.table_id.as_str(), table))
+        .collect();
+    for table in tables {
+        let requires_baseline = parent_tables
+            .get(table.table_id.as_str())
+            .is_none_or(|prior| prior != &table && !is_field_removal_only(prior, table));
+        if requires_baseline
+            && (manifest_relation_is_nonempty(client, registry_generation, &table.relation_id)?
+                || relation_has_retained_projection(client, &table.relation_id)?)
+        {
+            pgrx::error!("class 4 transition requires projection bootstrap");
+        }
+    }
+    Ok(())
+}
+
+fn is_field_removal_only(parent: &TableSchema, child: &TableSchema) -> bool {
+    parent.table_id == child.table_id
+        && parent.relation_id == child.relation_id
+        && parent.name == child.name
+        && parent.primary_key_field_id == child.primary_key_field_id
+        && parent.lifecycle == child.lifecycle
+        && parent.composition == child.composition
+        && parent.indexes == child.indexes
+        && child.fields.len() < parent.fields.len()
+        && child
+            .fields
+            .iter()
+            .all(|field| parent.fields.contains(field))
+}
+
+fn relation_has_retained_projection(
+    client: &SpiClient<'_>,
+    relation_id: &str,
+) -> Result<bool, spi::Error> {
+    client
+        .select(
+            "SELECT EXISTS (
+                 SELECT relation_id FROM synchro.sync_captured_rows
+                 WHERE relation_id = $1::uuid
+                 UNION ALL
+                 SELECT relation_id FROM synchro.sync_captured_projections
+                 WHERE relation_id = $1::uuid
+             ) AS present",
+            None,
+            &[relation_id.into()],
+        )?
+        .first()
+        .get_by_name::<bool, &str>("present")
+        .map(|value| value.unwrap_or(false))
 }
 
 fn manifest_relation_is_nonempty(

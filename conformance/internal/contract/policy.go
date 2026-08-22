@@ -25,7 +25,7 @@ const (
 	artifactSchemaURI     = "https://synchro.dev/conformance/schemas/artifact-inventory-v1.schema.json"
 	performanceSchemaURI  = "https://synchro.dev/conformance/schemas/performance-budgets-v2.schema.json"
 
-	lockedPerformanceDigest = "b5ea8bf7d4e12ebc1c11e20d15e2f33d34ec1a23978eceed0b38d7105118b800"
+	lockedPerformanceDigest = "1ab4d515558dfd92694527142bb539fe6ad344ee58f18751a3075ada4a41b4aa"
 )
 
 var lockedSupportCells = map[SupportCellID]supportTuple{
@@ -74,7 +74,11 @@ type supportTuple struct {
 
 var lockedBudgetTriples = map[BudgetID]budgetTriple{
 	"BUD-WARM-CONNECT-001":             {"warm_connect_http_requests", "eq", "1"},
-	"BUD-WARM-CONNECT-NONCONNECT-001":  {"warm_connect_non_connect_http_requests", "eq", "0"},
+	"BUD-WARM-CONNECT-PULL-001":        {"warm_connect_pull_http_requests", "eq", "1"},
+	"BUD-WARM-CONNECT-PUSH-001":        {"warm_connect_push_http_requests", "eq", "0"},
+	"BUD-WARM-CONNECT-REBUILD-001":     {"warm_connect_rebuild_page_http_requests", "eq", "0"},
+	"BUD-WARM-CONNECT-SCHEMA-001":      {"warm_connect_schema_fetch_http_requests", "eq", "0"},
+	"BUD-WARM-CONNECT-OTHER-001":       {"warm_connect_other_http_requests", "eq", "0"},
 	"BUD-STEADY-PULL-001":              {"steady_state_pull_http_requests_per_cycle", "eq", "1"},
 	"BUD-STEADY-PULL-NONPULL-001":      {"steady_state_pull_non_pull_http_requests_per_cycle", "eq", "0"},
 	"BUD-PENDING-PUSH-001":             {"pending_cycle_push_http_requests", "eq", "1"},

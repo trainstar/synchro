@@ -239,12 +239,12 @@ pub(crate) fn activate_staged_membership_generation(
     Ok(())
 }
 
-pub(crate) fn migrate_class_2_schema_digests(
+pub(crate) fn migrate_schema_digests(
     client: &mut SpiClient<'_>,
     target_generation: i64,
 ) -> Result<(), String> {
     if target_generation <= 0 {
-        return Err("class 2 target registry generation is invalid".to_string());
+        return Err("target registry generation is invalid".to_string());
     }
 
     // Public readers must observe the child manifest and its migrated digest
@@ -260,11 +260,12 @@ pub(crate) fn migrate_class_2_schema_digests(
                 None,
                 &[],
             )
-            .map_err(|error| format!("locking {table} for class 2 migration: {error}"))?;
+            .map_err(|error| format!("locking {table} for schema migration: {error}"))?;
     }
 
     let target_registry = load_registry_generation_from_client(client, target_generation)
-        .map_err(|error| format!("loading class 2 target registry: {error}"))?;
+        .map_err(|error| format!("loading target registry for schema migration: {error}"))?;
+    retire_removed_schema_rows(client, target_generation)?;
     let rows = client
         .select(
             "SELECT captured.relation_id::text AS relation_id,
@@ -281,7 +282,7 @@ pub(crate) fn migrate_class_2_schema_digests(
             None,
             &[target_generation.into()],
         )
-        .map_err(|error| format!("loading retained class 2 rows: {error}"))?;
+        .map_err(|error| format!("loading retained schema rows: {error}"))?;
     let mut records = Vec::with_capacity(rows.len());
     for row in rows {
         records.push(SchemaDigestRecord {
@@ -311,7 +312,7 @@ pub(crate) fn migrate_class_2_schema_digests(
                 record.registry_generation,
                 target_generation,
             )
-            .map_err(|error| format!("loading class 2 source registry: {error}"))?;
+            .map_err(|error| format!("loading source registry for schema migration: {error}"))?;
             entry.insert(registry);
         }
         let source = source_registries
@@ -331,7 +332,7 @@ pub(crate) fn migrate_class_2_schema_digests(
             || typed_primary_key_bytes(source, &record.record_id)?
                 != typed_primary_key_bytes(target, &record.record_id)?
         {
-            return Err("class 2 migration changed row identity".to_string());
+            return Err("schema migration changed row identity".to_string());
         }
 
         let source_digest = synced_row_digest(
@@ -345,7 +346,7 @@ pub(crate) fn migrate_class_2_schema_digests(
             return Err("retained row source checksum does not match".to_string());
         }
 
-        let (child_row, child_digest) = migrate_class_2_row(
+        let (child_row, child_digest) = migrate_schema_row(
             client,
             source,
             target,
@@ -375,10 +376,10 @@ pub(crate) fn migrate_class_2_schema_digests(
                     record.registry_generation.into(),
                 ],
             )
-            .map_err(|error| format!("migrating retained class 2 row: {error}"))?
+            .map_err(|error| format!("migrating retained schema row: {error}"))?
             .len();
         if updated != 1 {
-            return Err("retained row changed during class 2 migration".to_string());
+            return Err("retained row changed during schema migration".to_string());
         }
         client
             .update(
@@ -396,7 +397,7 @@ pub(crate) fn migrate_class_2_schema_digests(
                     record.row_version.as_str().into(),
                 ],
             )
-            .map_err(|error| format!("migrating retained class 2 edges: {error}"))?;
+            .map_err(|error| format!("migrating retained schema edges: {error}"))?;
     }
 
     let projection_rows = client
@@ -423,7 +424,7 @@ pub(crate) fn migrate_class_2_schema_digests(
             None,
             &[target_generation.into()],
         )
-        .map_err(|error| format!("loading retained class 2 projections: {error}"))?;
+        .map_err(|error| format!("loading retained schema projections: {error}"))?;
     let mut projections = Vec::with_capacity(projection_rows.len());
     for row in projection_rows {
         projections.push(CapturedProjectionRecord {
@@ -459,7 +460,7 @@ pub(crate) fn migrate_class_2_schema_digests(
                 projection.registry_generation,
                 target_generation,
             )
-            .map_err(|error| format!("loading class 2 projection source registry: {error}"))?;
+            .map_err(|error| format!("loading projection source registry: {error}"))?;
             entry.insert(registry);
         }
         let source = source_registries
@@ -474,7 +475,7 @@ pub(crate) fn migrate_class_2_schema_digests(
             .iter()
             .find(|table| table.relation_id == projection.relation_id && table.is_synced())
             .ok_or_else(|| "retained projection target registration is missing".to_string())?;
-        let (child_row, child_digest) = migrate_class_2_row(
+        let (child_row, child_digest) = migrate_schema_row(
             client,
             source,
             target,
@@ -513,10 +514,10 @@ pub(crate) fn migrate_class_2_schema_digests(
                     projection.registry_generation.into(),
                 ],
             )
-            .map_err(|error| format!("migrating retained class 2 projection: {error}"))?
+            .map_err(|error| format!("migrating retained schema projection: {error}"))?
             .len();
         if updated != 1 {
-            return Err("retained projection changed during class 2 migration".to_string());
+            return Err("retained projection changed during schema migration".to_string());
         }
     }
 
@@ -542,18 +543,53 @@ pub(crate) fn migrate_class_2_schema_digests(
             None,
             &[target_generation.into()],
         )
-        .map_err(|error| format!("verifying class 2 digest migration: {error}"))?
+        .map_err(|error| format!("verifying schema digest migration: {error}"))?
         .first()
         .get_by_name::<bool, &str>("invalid")
-        .map_err(|error| format!("reading class 2 digest verification: {error}"))?
+        .map_err(|error| format!("reading schema digest verification: {error}"))?
         .unwrap_or(true);
     if invalid {
-        return Err("class 2 digest migration left invalid retained edges".to_string());
+        return Err("schema digest migration left invalid retained edges".to_string());
     }
     Ok(())
 }
 
-fn migrate_class_2_row(
+fn retire_removed_schema_rows(
+    client: &mut SpiClient<'_>,
+    target_generation: i64,
+) -> Result<(), String> {
+    client
+        .update(
+            "DELETE FROM synchro.sync_bucket_edges edge
+             WHERE NOT EXISTS (
+                 SELECT 1
+                 FROM synchro.sync_registry target
+                 WHERE target.registry_generation = $1
+                   AND target.relation_id = edge.relation_id
+                   AND target.registration_kind = 'synced'
+             )",
+            None,
+            &[target_generation.into()],
+        )
+        .map_err(|error| format!("retiring removed schema edges: {error}"))?;
+    client
+        .update(
+            "DELETE FROM synchro.sync_captured_rows captured
+             WHERE NOT EXISTS (
+                 SELECT 1
+                 FROM synchro.sync_registry target
+                 WHERE target.registry_generation = $1
+                   AND target.relation_id = captured.relation_id
+                   AND target.registration_kind = 'synced'
+             )",
+            None,
+            &[target_generation.into()],
+        )
+        .map_err(|error| format!("retiring removed schema rows: {error}"))?;
+    Ok(())
+}
+
+fn migrate_schema_row(
     client: &SpiClient<'_>,
     source: &TableRegistration,
     target: &TableRegistration,
@@ -567,7 +603,7 @@ fn migrate_class_2_row(
         || typed_primary_key_bytes(source, record_id)?
             != typed_primary_key_bytes(target, record_id)?
     {
-        return Err("class 2 migration changed row identity".to_string());
+        return Err("schema migration changed row identity".to_string());
     }
 
     let source_digest = synced_row_digest(client, source, &row_data, record_id, row_version)?;
@@ -579,6 +615,12 @@ fn migrate_class_2_row(
     let child_fields = row_data
         .as_object_mut()
         .ok_or_else(|| "retained row is not an object".to_string())?;
+    child_fields.retain(|field_id, _| {
+        target
+            .fields
+            .iter()
+            .any(|field| field.field_id == field_id.as_str())
+    });
     for field in &target.fields {
         if child_fields.contains_key(&field.field_id) {
             continue;
@@ -589,7 +631,7 @@ fn migrate_class_2_row(
             .any(|source_field| source_field.field_id == field.field_id)
             || !field.nullable
         {
-            return Err("class 2 child row omits a retained field".to_string());
+            return Err("child schema row omits a retained field".to_string());
         }
         child_fields.insert(field.field_id.clone(), serde_json::Value::Null);
     }

@@ -1,41 +1,6 @@
 import Foundation
 @preconcurrency import GRDB
 
-public struct Record: Codable, Sendable {
-    public var id: String
-    public var tableName: String
-    public var data: [String: AnyCodable]
-    public var updatedAt: Date
-    public var deletedAt: Date?
-    public var bucketID: String?
-    public var checksum: Int32?
-
-    enum CodingKeys: String, CodingKey {
-        case id
-        case tableName = "table_name"
-        case data
-        case updatedAt = "updated_at"
-        case deletedAt = "deleted_at"
-        case bucketID = "bucket_id"
-        case checksum
-    }
-}
-
-public struct DeleteEntry: Codable, Sendable {
-    public var id: String
-    public var tableName: String
-
-    enum CodingKeys: String, CodingKey {
-        case id
-        case tableName = "table_name"
-    }
-}
-
-public struct BucketUpdate: Codable, Sendable {
-    public var added: [String]?
-    public var removed: [String]?
-}
-
 // MARK: - Push
 
 public struct PushRecord: Codable, Sendable {
@@ -43,8 +8,10 @@ public struct PushRecord: Codable, Sendable {
     public var tableName: String
     public var operation: String
     public var data: [String: AnyCodable]?
-    public var clientUpdatedAt: Date
-    public var baseUpdatedAt: Date?
+    public var clientUpdatedAt: String
+    public var baseUpdatedAt: String?
+    var localRevision: Int64 = 0
+    var fieldValuesByID: [String: StoredFieldValue]? = nil
 
     enum CodingKeys: String, CodingKey {
         case id
@@ -53,6 +20,26 @@ public struct PushRecord: Codable, Sendable {
         case data
         case clientUpdatedAt = "client_updated_at"
         case baseUpdatedAt = "base_updated_at"
+    }
+
+    init(
+        id: String,
+        tableName: String,
+        operation: String,
+        data: [String: AnyCodable]?,
+        clientUpdatedAt: String,
+        baseUpdatedAt: String?,
+        localRevision: Int64,
+        fieldValuesByID: [String: StoredFieldValue]? = nil
+    ) {
+        self.id = id
+        self.tableName = tableName
+        self.operation = operation
+        self.data = data
+        self.clientUpdatedAt = clientUpdatedAt
+        self.baseUpdatedAt = baseUpdatedAt
+        self.localRevision = localRevision
+        self.fieldValuesByID = fieldValuesByID
     }
 }
 
@@ -78,57 +65,391 @@ public struct SchemaResponse: Codable, Sendable {
 
 // MARK: - Table Meta
 
-public struct TableMetaResponse: Codable, Sendable {
-    public var tables: [TableMeta]
-    public var serverTime: Date
-    public var schemaVersion: Int64
-    public var schemaHash: String
-
-    enum CodingKeys: String, CodingKey {
-        case tables
-        case serverTime = "server_time"
-        case schemaVersion = "schema_version"
-        case schemaHash = "schema_hash"
-    }
-}
-
-public struct TableMeta: Codable, Sendable {
-    public var tableName: String
-    public var pushPolicy: String
-    public var dependencies: [String]
-    public var parentTable: String?
-    public var parentFKCol: String?
-    public var updatedAtColumn: String?
-    public var deletedAtColumn: String?
-    public var bucketByColumn: String?
-    public var bucketPrefix: String?
-    public var globalWhenBucketNull: Bool?
-    public var allowGlobalRead: Bool?
-    public var bucketFunction: String?
-
-    enum CodingKeys: String, CodingKey {
-        case tableName = "table_name"
-        case pushPolicy = "push_policy"
-        case dependencies
-        case parentTable = "parent_table"
-        case parentFKCol = "parent_fk_col"
-        case updatedAtColumn = "updated_at_column"
-        case deletedAtColumn = "deleted_at_column"
-        case bucketByColumn = "bucket_by_column"
-        case bucketPrefix = "bucket_prefix"
-        case globalWhenBucketNull = "global_when_bucket_null"
-        case allowGlobalRead = "allow_global_read"
-        case bucketFunction = "bucket_function"
-    }
-}
-
 // MARK: - SDK Types
 
-public enum SyncStatus: Sendable {
-    case idle
-    case syncing
-    case error(retryAt: Date?)
+public enum SyncStatus: String, Codable, CaseIterable, Sendable, Equatable {
+    case uninitialized
+    case localReady = "local_ready"
+    case connecting
+    case schemaApplying = "schema_applying"
+    case ready
+    case pushing
+    case pulling
+    case rebuilding
+    case backoff
+    case error
     case stopped
+
+    public func permitsTransition(to next: SyncStatus) -> Bool {
+        switch self {
+        case .uninitialized:
+            return [.localReady, .error, .stopped].contains(next)
+        case .localReady:
+            return [.connecting, .error, .stopped].contains(next)
+        case .connecting:
+            return [.schemaApplying, .ready, .backoff, .error, .stopped].contains(next)
+        case .schemaApplying:
+            return [.ready, .rebuilding, .error, .stopped].contains(next)
+        case .ready:
+            return [.connecting, .pushing, .pulling, .rebuilding, .error, .stopped].contains(next)
+        case .pushing:
+            return [.pushing, .ready, .pulling, .connecting, .backoff, .error, .stopped].contains(next)
+        case .pulling:
+            return [.pulling, .ready, .rebuilding, .connecting, .backoff, .error, .stopped].contains(next)
+        case .rebuilding:
+            return [.rebuilding, .ready, .connecting, .backoff, .error, .stopped].contains(next)
+        case .backoff:
+            return [.connecting, .pushing, .pulling, .rebuilding, .error, .stopped].contains(next)
+        case .error:
+            return [.localReady, .stopped].contains(next)
+        case .stopped:
+            return next == .localReady
+        }
+    }
+}
+
+public enum SyncOperationKind: String, Codable, Sendable, Equatable {
+    case opening
+    case connecting
+    case schema
+    case pushing
+    case pulling
+    case rebuilding
+    case lifecycle
+    case database
+}
+
+public enum SyncRecoveryAction: String, Codable, Sendable, Equatable {
+    case retry
+    case schemaReset = "schema_reset"
+    case none
+}
+
+public enum SyncFailureCode: String, Codable, Sendable, Equatable {
+    case authenticationRequired = "auth_required"
+    case clientRetired = "client_retired"
+    case idempotencyConflict = "idempotency_conflict"
+    case invalidRequest = "invalid_request"
+    case invalidResponse = "invalid_response"
+    case invalidSchemaReference = "invalid_schema_reference"
+    case invalidStateTransition = "invalid_state_transition"
+    case localDatabase = "local_database"
+    case schemaApplicationFailed = "schema_application_failed"
+    case syncIntegrityFailure = "sync_integrity_failure"
+    case unsupportedSchema = "unsupported_schema"
+    case upgradeRequired = "upgrade_required"
+}
+
+public struct SyncFailure: Codable, Sendable, Equatable {
+    public let operation: SyncOperationKind
+    public let code: SyncFailureCode
+    public let retryable: Bool
+    public let message: String
+    public let recoveryAction: SyncRecoveryAction
+    public let metadata: [String: String]
+
+    public init(
+        operation: SyncOperationKind,
+        code: SyncFailureCode,
+        retryable: Bool,
+        message: String,
+        recoveryAction: SyncRecoveryAction,
+        metadata: [String: String] = [:]
+    ) {
+        self.operation = operation
+        self.code = code
+        self.retryable = retryable
+        self.message = String(message.prefix(256))
+        self.recoveryAction = recoveryAction
+        self.metadata = Dictionary(
+            uniqueKeysWithValues: metadata.prefix(8).map {
+                (String($0.key.prefix(64)), String($0.value.prefix(128)))
+            }
+        )
+    }
+}
+
+public struct SyncStateChangeEvent: Sendable, Equatable {
+    public let from: SyncStatus
+    public let to: SyncStatus
+}
+
+public struct SyncBackoffEvent: Sendable, Equatable {
+    public let operation: SyncOperationKind
+    public let attempt: Int64
+    public let retryAt: Date
+}
+
+public struct SyncSchemaEvent: Sendable, Equatable {
+    public let source: SchemaRef
+    public let target: SchemaRef
+    public let action: SchemaAction
+}
+
+public struct SyncMutationEvent: Sendable, Equatable {
+    public let mutationID: String
+    public let tableID: String
+    public let status: MutationStatus
+    public let rejectionCode: MutationRejectionCode?
+}
+
+public struct SyncRebuildEvent: Sendable, Equatable {
+    public let scopeID: String
+    public let rebuildID: String
+}
+
+public enum SyncEvent: Sendable, Equatable {
+    case stateChanged(SyncStateChangeEvent)
+    case backoff(SyncBackoffEvent)
+    case schemaApplying(SyncSchemaEvent)
+    case schemaApplied(SyncSchemaEvent)
+    case mutationAccepted(SyncMutationEvent)
+    case mutationRejected(SyncMutationEvent)
+    case rebuildRequested(SyncRebuildEvent)
+    case rebuildCompleted(SyncRebuildEvent)
+    case failure(SyncFailure)
+}
+
+public enum LocalMutationStatus: String, Codable, Sendable, Equatable {
+    case pending
+    case sealed
+    case serverRejected = "server_rejected"
+    case supersededBeforeSend = "superseded_before_send"
+    case cancelledBeforeSend = "cancelled_before_send"
+    case blockedByPredecessor = "blocked_by_predecessor"
+}
+
+public struct AuthoredMutationField: Sendable, Equatable {
+    public let fieldID: String
+    public let logicalType: String
+    public let value: AnyCodable
+
+    public init(fieldID: String, logicalType: String, value: AnyCodable) {
+        self.fieldID = fieldID
+        self.logicalType = logicalType
+        self.value = value
+    }
+}
+
+public struct ScopeStateInspection: Sendable, Equatable {
+    public let scopeID: String
+    public let cursor: String?
+    public let checksum: String?
+    public let localChecksum: String
+    public let generation: Int64
+
+    public init(scopeID: String, cursor: String?, checksum: String?, localChecksum: String, generation: Int64) {
+        self.scopeID = scopeID
+        self.cursor = cursor
+        self.checksum = checksum
+        self.localChecksum = localChecksum
+        self.generation = generation
+    }
+}
+
+public struct ScopeRowInspection: Sendable, Equatable {
+    public let scopeID: String
+    public let tableName: String
+    public let recordID: String
+    public let checksum: String
+    public let generation: Int64
+
+    public init(scopeID: String, tableName: String, recordID: String, checksum: String, generation: Int64) {
+        self.scopeID = scopeID
+        self.tableName = tableName
+        self.recordID = recordID
+        self.checksum = checksum
+        self.generation = generation
+    }
+}
+
+public struct RowMetadataInspection: Sendable, Equatable {
+    public let tableName: String
+    public let recordID: String
+    public let serverVersion: String
+    public let rowChecksum: String?
+
+    public init(tableName: String, recordID: String, serverVersion: String, rowChecksum: String?) {
+        self.tableName = tableName
+        self.recordID = recordID
+        self.serverVersion = serverVersion
+        self.rowChecksum = rowChecksum
+    }
+}
+
+public struct RebuildAttemptInspection: Sendable, Equatable {
+    public let scopeID: String
+    public let rebuildID: String
+    public let clientGeneration: Int64
+    public let schemaVersion: Int64
+    public let schemaHash: String
+    public let generation: Int64
+    public let cursor: String?
+    public let pageLimit: Int
+
+    public init(
+        scopeID: String,
+        rebuildID: String,
+        clientGeneration: Int64,
+        schemaVersion: Int64,
+        schemaHash: String,
+        generation: Int64,
+        cursor: String?,
+        pageLimit: Int
+    ) {
+        self.scopeID = scopeID
+        self.rebuildID = rebuildID
+        self.clientGeneration = clientGeneration
+        self.schemaVersion = schemaVersion
+        self.schemaHash = schemaHash
+        self.generation = generation
+        self.cursor = cursor
+        self.pageLimit = pageLimit
+    }
+}
+
+public struct RebuildReceiptProofInspection: Sendable, Equatable {
+    public let rebuildIDFingerprint: String
+    public let pageCount: Int
+    public let returnedRecordCount: Int
+    public let requestChainValid: Bool
+    public let recordsInCanonicalOrder: Bool
+    public let rowChecksumsValid: Bool
+    public let scopeChecksumValid: Bool
+    public let finalChecksumMatchesLocal: Bool
+
+    public init(
+        rebuildIDFingerprint: String,
+        pageCount: Int,
+        returnedRecordCount: Int,
+        requestChainValid: Bool,
+        recordsInCanonicalOrder: Bool,
+        rowChecksumsValid: Bool,
+        scopeChecksumValid: Bool,
+        finalChecksumMatchesLocal: Bool
+    ) {
+        self.rebuildIDFingerprint = rebuildIDFingerprint
+        self.pageCount = pageCount
+        self.returnedRecordCount = returnedRecordCount
+        self.requestChainValid = requestChainValid
+        self.recordsInCanonicalOrder = recordsInCanonicalOrder
+        self.rowChecksumsValid = rowChecksumsValid
+        self.scopeChecksumValid = scopeChecksumValid
+        self.finalChecksumMatchesLocal = finalChecksumMatchesLocal
+    }
+}
+
+public struct PendingMutationInspection: Sendable, Equatable {
+    public let mutationID: String
+    public let localOrder: Int64
+    public let tableID: String
+    public let tableName: String
+    public let recordID: String
+    public let primaryKeyFieldID: String
+    public let primaryKeyLogicalType: String
+    public let operation: Operation
+    public let authoredSchema: SchemaRef
+    public let baseVersion: String?
+    public let clientVersion: String
+    public let status: LocalMutationStatus
+    public let sourceKind: String
+    public let dependsOnMutationID: String?
+    public let normalizedMutationID: String?
+    public let sealedBatchID: String?
+    public let sealedOrdinal: Int?
+    public let authoredFields: [AuthoredMutationField]
+
+    public init(
+        mutationID: String,
+        localOrder: Int64,
+        tableID: String,
+        tableName: String,
+        recordID: String,
+        primaryKeyFieldID: String,
+        primaryKeyLogicalType: String,
+        operation: Operation,
+        authoredSchema: SchemaRef,
+        baseVersion: String?,
+        clientVersion: String,
+        status: LocalMutationStatus,
+        sourceKind: String,
+        dependsOnMutationID: String?,
+        normalizedMutationID: String?,
+        sealedBatchID: String?,
+        sealedOrdinal: Int?,
+        authoredFields: [AuthoredMutationField]
+    ) {
+        self.mutationID = mutationID
+        self.localOrder = localOrder
+        self.tableID = tableID
+        self.tableName = tableName
+        self.recordID = recordID
+        self.primaryKeyFieldID = primaryKeyFieldID
+        self.primaryKeyLogicalType = primaryKeyLogicalType
+        self.operation = operation
+        self.authoredSchema = authoredSchema
+        self.baseVersion = baseVersion
+        self.clientVersion = clientVersion
+        self.status = status
+        self.sourceKind = sourceKind
+        self.dependsOnMutationID = dependsOnMutationID
+        self.normalizedMutationID = normalizedMutationID
+        self.sealedBatchID = sealedBatchID
+        self.sealedOrdinal = sealedOrdinal
+        self.authoredFields = authoredFields
+    }
+}
+
+public struct RejectedMutationInspection: Sendable, Equatable {
+    public let mutationID: String
+    public let localOrder: Int64
+    public let tableName: String
+    public let recordID: String
+    public let status: MutationStatus
+    public let code: MutationRejectionCode
+    public let message: String?
+    public let serverRowJSON: String?
+    public let serverVersion: String?
+    public let mutationJSON: String
+    public let rejectionJSON: String
+    public let mutation: Mutation
+    public let rejection: RejectedMutation
+    public let createdAt: String
+    public let updatedAt: String
+
+    public init(
+        mutationID: String,
+        localOrder: Int64,
+        tableName: String,
+        recordID: String,
+        status: MutationStatus,
+        code: MutationRejectionCode,
+        message: String?,
+        serverRowJSON: String?,
+        serverVersion: String?,
+        mutationJSON: String,
+        rejectionJSON: String,
+        mutation: Mutation,
+        rejection: RejectedMutation,
+        createdAt: String,
+        updatedAt: String
+    ) {
+        self.mutationID = mutationID
+        self.localOrder = localOrder
+        self.tableName = tableName
+        self.recordID = recordID
+        self.status = status
+        self.code = code
+        self.message = message
+        self.serverRowJSON = serverRowJSON
+        self.serverVersion = serverVersion
+        self.mutationJSON = mutationJSON
+        self.rejectionJSON = rejectionJSON
+        self.mutation = mutation
+        self.rejection = rejection
+        self.createdAt = createdAt
+        self.updatedAt = updatedAt
+    }
 }
 
 public struct ConflictEvent: Sendable {
@@ -254,15 +575,6 @@ public struct AnyCodable: Codable, @unchecked Sendable, Equatable {
     }
 }
 
-// MARK: - Push Status Constants
-
-public enum PushStatus {
-    public static let applied = "applied"
-    public static let conflict = "conflict"
-    public static let rejectedTerminal = "rejected_terminal"
-    public static let rejectedRetryable = "rejected_retryable"
-}
-
 // MARK: - JSON Date Coding
 
 extension JSONDecoder {
@@ -283,6 +595,7 @@ extension JSONDecoder {
 extension JSONEncoder {
     static func synchroEncoder() -> JSONEncoder {
         let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
         encoder.dateEncodingStrategy = .custom { date, encoder in
             var container = encoder.singleValueContainer()
             try container.encode(SynchroDateCoding.string(from: date))

@@ -129,6 +129,7 @@ pub struct FieldRegistration {
     pub field_id: String,
     pub physical_column: String,
     pub portable_type: String,
+    pub native_json: bool,
     pub decimal_precision: Option<i32>,
     pub decimal_scale: Option<i32>,
     pub nullable: bool,
@@ -2368,11 +2369,11 @@ fn create_next_generation(
     client.update(
         "INSERT INTO synchro.sync_registry_fields (
              registry_generation, relation_id, field_id, physical_column,
-             portable_type, decimal_precision, decimal_scale,
+             portable_type, native_json, decimal_precision, decimal_scale,
              nullable, writable, primary_key
          )
          SELECT $1, relation_id, field_id, physical_column,
-                portable_type, decimal_precision, decimal_scale,
+                 portable_type, native_json, decimal_precision, decimal_scale,
                 nullable, writable, primary_key
           FROM synchro.sync_registry_fields
          WHERE registry_generation = $2",
@@ -2751,6 +2752,7 @@ fn build_field_registrations(
                 .unwrap_or_else(|| new_logical_id(client, "field")),
             physical_column,
             portable_type,
+            native_json: matches!(sql_type.as_str(), "json" | "jsonb"),
             decimal_precision,
             decimal_scale,
             nullable,
@@ -2842,9 +2844,9 @@ fn insert_field_registrations(
         client.update(
             "INSERT INTO synchro.sync_registry_fields (
                  registry_generation, relation_id, field_id, physical_column,
-                 portable_type, decimal_precision, decimal_scale,
+                 portable_type, native_json, decimal_precision, decimal_scale,
                  nullable, writable, primary_key
-             ) VALUES ($1, $2::uuid, $3::uuid, $4, $5, $6, $7, $8, $9, $10)",
+             ) VALUES ($1, $2::uuid, $3::uuid, $4, $5, $6, $7, $8, $9, $10, $11)",
             None,
             &[
                 generation.into(),
@@ -2852,6 +2854,7 @@ fn insert_field_registrations(
                 field.field_id.as_str().into(),
                 field.physical_column.as_str().into(),
                 field.portable_type.as_str().into(),
+                field.native_json.into(),
                 field.decimal_precision.into(),
                 field.decimal_scale.into(),
                 field.nullable.into(),
@@ -2897,7 +2900,7 @@ fn load_field_registrations(
     let rows = client.select(
         "SELECT field_id::text AS field_id,
                 physical_column::text AS physical_column,
-                portable_type, decimal_precision, decimal_scale,
+                portable_type, native_json, decimal_precision, decimal_scale,
                 nullable, writable, primary_key
          FROM synchro.sync_registry_fields
          WHERE registry_generation = $1 AND relation_id = $2::uuid
@@ -2917,6 +2920,9 @@ fn load_field_registrations(
             portable_type: row
                 .get_by_name::<String, &str>("portable_type")?
                 .unwrap_or_else(|| pgrx::error!("registry field has no portable type")),
+            native_json: row
+                .get_by_name::<bool, &str>("native_json")?
+                .unwrap_or_else(|| pgrx::error!("registry field has no native JSON state")),
             decimal_precision: row.get_by_name::<i32, &str>("decimal_precision")?,
             decimal_scale: row.get_by_name::<i32, &str>("decimal_scale")?,
             nullable: row

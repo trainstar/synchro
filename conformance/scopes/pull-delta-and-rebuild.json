@@ -11,20 +11,21 @@
   "input": {
     "request": {
       "client_id": "ios-device-123",
+      "client_generation": 1,
       "schema": {
         "version": 8,
-        "hash": "8b21d2a1"
+        "hash": "8b21d2a100000000000000000000000000000000000000000000000000000000"
       },
       "scope_set_version": 13,
       "scopes": {
         "workouts_user:u_123": {
-          "cursor": "v2.workouts_user_u_123_889.sig"
+          "cursor": "workouts_user_u_123_889.sig"
         },
         "exercises_public": {
-          "cursor": "v2.exercises_public_201.sig"
+          "cursor": "exercises_public_201.sig"
         },
         "exercises_user:u_123": {
-          "cursor": "v2.exercises_user_u_123_050.sig"
+          "cursor": "exercises_user_u_123_050.sig"
         }
       },
       "limit": 500
@@ -35,20 +36,27 @@
       "changes": [
         {
           "scope": "workouts_user:u_123",
-          "table": "workouts",
+          "table": "tbl_workouts",
           "op": "upsert",
           "pk": {
-            "id": "w_9"
+            "fld_workouts_id": "w_9"
           },
-          "row_checksum": 131313,
+          "row": {
+            "fld_workouts_id": "w_9"
+          },
+          "row_checksum": {
+            "algorithm": "sha256",
+            "version": 1,
+            "encoding": "hex",
+            "digest": "1313131313131313131313131313131313131313131313131313131313131313"
+          },
           "server_version": "sv_991"
         }
       ],
       "scope_set_version": 14,
       "scope_cursors": {
-        "workouts_user:u_123": "v2.workouts_user_u_123_890.sig",
-        "exercises_public": "v2.exercises_public_202.sig",
-        "exercises_user:u_123": "v2.exercises_user_u_123_050.sig"
+        "workouts_user:u_123": "workouts_user_u_123_890.sig",
+        "exercises_public": "exercises_public_202.sig"
       },
       "scope_updates": {
         "add": [
@@ -60,13 +68,35 @@
         "remove": []
       },
       "rebuild": [
-        "exercises_user:u_123"
+        "exercises_user:u_123",
+        "workout_templates_public"
       ],
       "has_more": false,
       "checksums": {
-        "workouts_user:u_123": "cs_a19d",
-        "exercises_public": "cs_0f22",
-        "exercises_user:u_123": "cs_7771"
+        "workouts_user:u_123": {
+          "algorithm": "sha256",
+          "version": 1,
+          "encoding": "hex",
+          "digest": "a19da19da19da19da19da19da19da19da19da19da19da19da19da19da19da19d"
+        },
+        "exercises_public": {
+          "algorithm": "sha256",
+          "version": 1,
+          "encoding": "hex",
+          "digest": "0f220f220f220f220f220f220f220f220f220f220f220f220f220f220f220f22"
+        },
+        "exercises_user:u_123": {
+          "algorithm": "sha256",
+          "version": 1,
+          "encoding": "hex",
+          "digest": "7771777177717771777177717771777177717771777177717771777177717771"
+        },
+        "workout_templates_public": {
+          "algorithm": "sha256",
+          "version": 1,
+          "encoding": "hex",
+          "digest": "abcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcd"
+        }
       }
     },
     "assertions": [

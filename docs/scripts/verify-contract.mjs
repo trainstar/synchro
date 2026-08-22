@@ -405,7 +405,7 @@ function performanceCatalogSemanticErrors(
     artifactInventory.artifacts.map(({ id }) => id),
   );
   const lockedCatalogDigest =
-    "b5ea8bf7d4e12ebc1c11e20d15e2f33d34ec1a23978eceed0b38d7105118b800";
+    "1ab4d515558dfd92694527142bb539fe6ad344ee58f18751a3075ada4a41b4aa";
   const actualCatalogDigest = createHash("sha256")
     .update(
       JSON.stringify({
@@ -421,7 +421,11 @@ function performanceCatalogSemanticErrors(
   }
   const lockedBudgets = new Map([
     ["BUD-WARM-CONNECT-001", ["warm_connect_http_requests", "eq", 1]],
-    ["BUD-WARM-CONNECT-NONCONNECT-001", ["warm_connect_non_connect_http_requests", "eq", 0]],
+    ["BUD-WARM-CONNECT-PULL-001", ["warm_connect_pull_http_requests", "eq", 1]],
+    ["BUD-WARM-CONNECT-PUSH-001", ["warm_connect_push_http_requests", "eq", 0]],
+    ["BUD-WARM-CONNECT-REBUILD-001", ["warm_connect_rebuild_page_http_requests", "eq", 0]],
+    ["BUD-WARM-CONNECT-SCHEMA-001", ["warm_connect_schema_fetch_http_requests", "eq", 0]],
+    ["BUD-WARM-CONNECT-OTHER-001", ["warm_connect_other_http_requests", "eq", 0]],
     ["BUD-STEADY-PULL-001", ["steady_state_pull_http_requests_per_cycle", "eq", 1]],
     ["BUD-STEADY-PULL-NONPULL-001", ["steady_state_pull_non_pull_http_requests_per_cycle", "eq", 0]],
     ["BUD-PENDING-PUSH-001", ["pending_cycle_push_http_requests", "eq", 1]],
@@ -868,6 +872,521 @@ const wireCasePolicy = new Map([
   ["capture_pending", [503, "capture_pending", true, ["pull", "rebuild"]]],
   ["temporary_unavailable", [503, "temporary_unavailable", true, ["connect", "push", "pull", "rebuild"]]],
 ]);
+
+const nativeCommandsByActor = new Map([
+  ["controller", new Set(["install-model", "apply-step", "request-step"])],
+  ["artifact", new Set(["stage-step"])],
+  ["client", new Set(["open", "execute-step", "synchronize-step", "begin-call", "await-call", "lifecycle"])],
+  ["process", new Set(["execute-step", "terminate", "relaunch"])],
+  ["observer", new Set(["await-step", "capture", "measure"])],
+]);
+
+const nativeStepCommands = new Set([
+  "controller/apply-step",
+  "controller/request-step",
+  "artifact/stage-step",
+  "client/execute-step",
+  "client/synchronize-step",
+  "process/execute-step",
+  "observer/await-step",
+]);
+
+function nativeCommandSupportsStep(action, step) {
+  const command = `${action.actor}/${action.command}`;
+  if (command === "controller/apply-step") {
+    return ["model", "workload"].includes(step.operation.contract_operation);
+  }
+  if (command === "controller/request-step") return step.transport === "http";
+  if (command === "artifact/stage-step") {
+    return step.operation.contract_operation === "artifact";
+  }
+  if (command === "client/execute-step") {
+    return (
+      step.operation.contract_operation === "local" &&
+      step.operation.name === "write"
+    );
+  }
+  if (command === "client/synchronize-step") return step.transport === "http";
+  if (command === "process/execute-step") {
+    return step.operation.contract_operation === "process";
+  }
+  if (command === "observer/await-step") {
+    return step.transport === "http" || (
+      step.operation.contract_operation === "local" &&
+      step.operation.name !== "write"
+    );
+  }
+  return false;
+}
+
+function nativeStepIdentity(step) {
+  const payload = step.operation.payload;
+  if (["artifact", "connect", "pull", "rebuild"].includes(step.operation.contract_operation)) {
+    return payload.user_id && payload.client_id
+      ? [payload.user_id, payload.client_id]
+      : null;
+  }
+  if (step.operation.contract_operation === "local") {
+    const userId =
+      step.operation.name === "write"
+        ? payload.authenticated_user_id
+        : payload.user_id;
+    return userId && payload.client_id ? [userId, payload.client_id] : null;
+  }
+  if (step.operation.contract_operation === "push") {
+    return payload.authenticated_user_id && payload.request?.client_id
+      ? [payload.authenticated_user_id, payload.request.client_id]
+      : null;
+  }
+  if (step.operation.contract_operation === "process") {
+    if (step.operation.name === "response-loss") {
+      return payload.authenticated_user_id && payload.client_id
+        ? [payload.authenticated_user_id, payload.client_id]
+        : null;
+    }
+    if (step.operation.name === "restart-client") {
+      return payload.user_id && payload.client_id
+        ? [payload.user_id, payload.client_id]
+        : null;
+    }
+  }
+  if (step.operation.contract_operation === "workload") {
+    return payload.user_id && payload.client_id
+      ? [payload.user_id, payload.client_id]
+      : null;
+  }
+  return null;
+}
+
+function nativeExecutionErrors(scenario, stepsById, assertionsById) {
+  const errors = [];
+  const nativeObligations = scenario.proof_obligations.filter(
+    ({ proof_type }) => proof_type === "native-e2e",
+  );
+  if (nativeObligations.length === 0) {
+    if (scenario.native_execution !== undefined) {
+      errors.push(`${scenario.id} has native_execution without a native-e2e obligation`);
+    }
+    return errors;
+  }
+  const plan = scenario.native_execution;
+  if (!plan) {
+    errors.push(`${scenario.id} native-e2e obligations require native_execution`);
+    return errors;
+  }
+
+  errors.push(
+    ...duplicateLogicalIdErrors(plan.clients, "key", "Native clients"),
+    ...duplicateLogicalIdErrors(plan.actions, "id", "Native actions"),
+  );
+  const clientsByKey = new Map(plan.clients.map((client) => [client.key, client]));
+  const identityOwners = new Map();
+  const databaseOwners = new Map();
+  for (const client of plan.clients) {
+    const identity = `${client.user_id}\u0000${client.client_id}`;
+    if (identityOwners.has(identity)) {
+      errors.push(
+        `${scenario.id} native clients ${identityOwners.get(identity)} and ${client.key} share one identity`,
+      );
+    } else {
+      identityOwners.set(identity, client.key);
+    }
+    if (databaseOwners.has(client.database_key)) {
+      errors.push(
+        `${scenario.id} native clients ${databaseOwners.get(client.database_key)} and ${client.key} share database ${client.database_key}`,
+      );
+    } else {
+      databaseOwners.set(client.database_key, client.key);
+    }
+  }
+
+  const actionsById = new Map(plan.actions.map((action, index) => [action.id, index]));
+  const wireByStep = new Map(
+    scenario.wire_expectations.map((wire) => [wire.step_id, wire]),
+  );
+  const stepCoverage = new Map(scenario.steps.map((step) => [step.id, []]));
+  const capturedExpectations = new Map();
+  const measuredBudgets = new Map();
+  const measured = new Map();
+  const opened = new Set();
+  const alive = new Set();
+  const used = new Set();
+  const staged = new Map();
+  const lastTermination = new Map();
+  const calls = new Map();
+  const activeCalls = new Map();
+  const closedCalls = new Set();
+  let installCount = 0;
+  let installIndex = -1;
+  let lastCoveredIndex = -1;
+  let lastCoveredStepIndex = -1;
+
+  for (const [index, action] of plan.actions.entries()) {
+    const commandKey = `${action.actor}/${action.command}`;
+    if (!nativeCommandsByActor.get(action.actor)?.has(action.command)) {
+      errors.push(`${scenario.id} native action ${action.id} has incompatible actor and command`);
+    }
+    const coversStep = nativeStepCommands.has(commandKey);
+    const validStepCount =
+      commandKey === "client/synchronize-step"
+        ? action.covers_step_ids.length > 0
+        : action.covers_step_ids.length === 1;
+    if (coversStep !== validStepCount) {
+      errors.push(
+        `${scenario.id} native action ${action.id} has invalid scenario-step coverage`,
+      );
+    }
+    if (action.covers_step_ids.length > 0) lastCoveredIndex = index;
+    for (const stepId of action.covers_step_ids) {
+      const step = stepsById.get(stepId);
+      if (!step) {
+        errors.push(`${scenario.id} native action ${action.id} covers unknown step ${stepId}`);
+        continue;
+      }
+      const stepIndex = scenario.steps.findIndex(({ id }) => id === stepId);
+      if (stepIndex <= lastCoveredStepIndex) {
+        errors.push(
+          `${scenario.id} native action ${action.id} covers step ${stepId} outside authored step order`,
+        );
+      } else {
+        lastCoveredStepIndex = stepIndex;
+      }
+      stepCoverage.get(stepId).push(action.id);
+      if (action.phase !== step.phase) {
+        errors.push(
+          `${scenario.id} native action ${action.id} phase does not match step ${stepId}`,
+        );
+      }
+      if (!nativeCommandSupportsStep(action, step)) {
+        errors.push(
+          `${scenario.id} native action ${action.id} cannot execute step ${stepId}`,
+        );
+      }
+      const identity = nativeStepIdentity(step);
+      const stepClientKey = action.parameters.client_key;
+      if (identity && stepClientKey !== undefined && stepClientKey !== null) {
+        const client = clientsByKey.get(stepClientKey);
+        if (
+          client &&
+          (client.user_id !== identity[0] || client.client_id !== identity[1])
+        ) {
+          errors.push(
+            `${scenario.id} native action ${action.id} client does not match step ${stepId}`,
+          );
+        }
+      } else if (identity && action.actor === "process") {
+        errors.push(
+          `${scenario.id} native action ${action.id} must declare the client for step ${stepId}`,
+        );
+      } else if (!identity && stepClientKey && action.actor === "process") {
+        errors.push(
+          `${scenario.id} native action ${action.id} declares a client for identity-free step ${stepId}`,
+        );
+      }
+      if (commandKey === "client/synchronize-step") {
+        const wire = wireByStep.get(stepId);
+        if (wire) {
+          const expectedCompletion =
+            wire.http_status >= 200 && wire.http_status < 300
+              ? "idle"
+              : wire.retryable || wire.http_status === 0
+                ? "blocked"
+                : "error";
+          if (action.parameters.completion !== expectedCompletion) {
+            errors.push(
+              `${scenario.id} native action ${action.id} completion does not match step ${stepId}`,
+            );
+          }
+        }
+      }
+      if (commandKey === "observer/await-step") {
+        const callId = action.parameters.call_id;
+        if (step.transport === "http" && !callId) {
+          errors.push(
+            `${scenario.id} native action ${action.id} observes HTTP step ${stepId} without a call ID`,
+          );
+        }
+        if (callId && activeCalls.get(action.parameters.client_key) !== callId) {
+          errors.push(
+            `${scenario.id} native action ${action.id} observes inactive call ${callId}`,
+          );
+        }
+      }
+    }
+
+    if (commandKey === "controller/install-model") {
+      installCount += 1;
+      if (installIndex === -1) installIndex = index;
+      if (action.phase !== "setup") {
+        errors.push(`${scenario.id} native action ${action.id} must use setup phase`);
+      }
+    } else if (commandKey === "client/open") {
+      if (action.phase !== "setup") {
+        errors.push(`${scenario.id} native action ${action.id} must use setup phase`);
+      }
+    } else if (["observer/capture", "observer/measure"].includes(commandKey)) {
+      if (action.phase !== "verify") {
+        errors.push(`${scenario.id} native action ${action.id} must use verify phase`);
+      }
+    } else if (action.covers_step_ids.length === 0 && action.phase === "verify") {
+      errors.push(`${scenario.id} native action ${action.id} cannot use verify phase`);
+    }
+
+    const clientKey = action.parameters.client_key;
+    if (clientKey !== undefined && clientKey !== null && !clientsByKey.has(clientKey)) {
+      errors.push(`${scenario.id} native action ${action.id} references unknown client ${clientKey}`);
+    }
+    if (commandKey === "artifact/stage-step") {
+      for (const stepId of action.covers_step_ids) {
+        staged.set(stepId, { clientKey, index });
+      }
+      continue;
+    }
+    if (commandKey === "client/open") {
+      if (opened.has(clientKey)) {
+        errors.push(`${scenario.id} native client ${clientKey} opens more than once`);
+      }
+      if (action.parameters.database_mode === "create") {
+        if (action.parameters.seed_step_id !== null) {
+          errors.push(`${scenario.id} native create open ${action.id} names a seed step`);
+        }
+      } else {
+        const seed = staged.get(action.parameters.seed_step_id);
+        if (!seed || seed.index >= index || seed.clientKey !== clientKey) {
+          errors.push(`${scenario.id} native reuse open ${action.id} has no matching staged seed`);
+        }
+      }
+      opened.add(clientKey);
+      alive.add(clientKey);
+      continue;
+    }
+    if (commandKey === "client/begin-call") {
+      const callId = action.parameters.call_id;
+      if (!opened.has(clientKey) || !alive.has(clientKey)) {
+        errors.push(`${scenario.id} native action ${action.id} cannot begin call for client ${clientKey}`);
+      }
+      if (calls.has(callId) || activeCalls.has(clientKey)) {
+        errors.push(`${scenario.id} native action ${action.id} duplicates active call ${callId}`);
+      }
+      calls.set(callId, clientKey);
+      activeCalls.set(clientKey, callId);
+      used.add(clientKey);
+      continue;
+    }
+    if (commandKey === "client/await-call") {
+      const callId = action.parameters.call_id;
+      if (
+        calls.get(callId) !== clientKey ||
+        activeCalls.get(clientKey) !== callId ||
+        closedCalls.has(callId)
+      ) {
+        errors.push(`${scenario.id} native action ${action.id} awaits inactive call ${callId}`);
+      } else {
+        activeCalls.delete(clientKey);
+        closedCalls.add(callId);
+      }
+      used.add(clientKey);
+      continue;
+    }
+    if (commandKey === "process/terminate") {
+      if (!opened.has(clientKey) || !alive.has(clientKey)) {
+        errors.push(`${scenario.id} native action ${action.id} cannot terminate client ${clientKey}`);
+      }
+      const afterIndex = actionsById.get(action.parameters.after_action_id);
+      if (afterIndex === undefined || afterIndex >= index) {
+        errors.push(`${scenario.id} native action ${action.id} has no earlier boundary action`);
+      } else {
+        const priorClientKey = plan.actions[afterIndex].parameters.client_key;
+        if (
+          priorClientKey !== undefined &&
+          priorClientKey !== null &&
+          priorClientKey !== clientKey
+        ) {
+          errors.push(
+            `${scenario.id} native action ${action.id} boundary action belongs to another client`,
+          );
+        }
+      }
+      alive.delete(clientKey);
+      used.add(clientKey);
+      lastTermination.set(clientKey, {
+        actionId: action.id,
+        boundary: action.parameters.boundary,
+      });
+      continue;
+    }
+    if (commandKey === "process/relaunch") {
+      const termination = lastTermination.get(clientKey);
+      if (
+        !opened.has(clientKey) ||
+        alive.has(clientKey) ||
+        !termination ||
+        termination.actionId !== action.parameters.after_action_id ||
+        termination.boundary !== action.parameters.boundary
+      ) {
+        errors.push(`${scenario.id} native action ${action.id} does not match the latest termination`);
+      }
+      alive.add(clientKey);
+      used.add(clientKey);
+      continue;
+    }
+
+    if (commandKey === "controller/apply-step") {
+      const step = stepsById.get(action.covers_step_ids[0]);
+      if (step?.operation.contract_operation === "workload") {
+        for (const client of plan.clients) {
+          if (!opened.has(client.key) || !alive.has(client.key)) {
+            errors.push(
+              `${scenario.id} native action ${action.id} executes workload for client ${client.key} before open`,
+            );
+          }
+          used.add(client.key);
+        }
+      }
+    }
+    if (clientKey !== undefined && clientKey !== null) {
+      if (!opened.has(clientKey) || !alive.has(clientKey)) {
+        errors.push(`${scenario.id} native action ${action.id} uses client ${clientKey} before open`);
+      }
+      if (commandKey !== "observer/capture") used.add(clientKey);
+    }
+    if (commandKey === "observer/capture") {
+      const localSources = new Set([
+        "application-rows",
+        "pending-mutations",
+        "rejected-mutations",
+        "sync-status",
+        "sync-events",
+        "scope-state",
+        "checkpoints",
+        "provenance",
+        "rebuild-state",
+      ]);
+      if (
+        action.parameters.client_keys.length === 0 &&
+        action.parameters.sources.some((source) => localSources.has(source))
+      ) {
+        errors.push(
+          `${scenario.id} native action ${action.id} local capture sources require a client`,
+        );
+      }
+      for (const captureClientKey of action.parameters.client_keys) {
+        if (
+          !clientsByKey.has(captureClientKey) ||
+          !opened.has(captureClientKey) ||
+          !alive.has(captureClientKey)
+        ) {
+          errors.push(
+            `${scenario.id} native action ${action.id} cannot observe client ${captureClientKey}`,
+          );
+        }
+      }
+      for (const expectationId of action.parameters.expectation_ids) {
+        const actions = capturedExpectations.get(expectationId) ?? [];
+        actions.push(action.id);
+        capturedExpectations.set(expectationId, actions);
+      }
+    }
+    if (commandKey === "observer/measure") {
+      for (const budgetId of action.parameters.performance_budget_ids) {
+        const actions = measuredBudgets.get(budgetId) ?? [];
+        actions.push(action.id);
+        measuredBudgets.set(budgetId, actions);
+      }
+      for (const measurementId of action.parameters.measurement_ids) {
+        const actions = measured.get(measurementId) ?? [];
+        actions.push(action.id);
+        measured.set(measurementId, actions);
+      }
+    }
+  }
+
+  if (installCount !== 1) {
+    errors.push(`${scenario.id} native execution has ${installCount} install-model actions`);
+  }
+  for (const [index, action] of plan.actions.entries()) {
+    if (action.covers_step_ids.length > 0 && index < installIndex) {
+      errors.push(`${scenario.id} native action ${action.id} covers a step before install-model`);
+    }
+    if (
+      ["capture", "measure"].includes(action.command) &&
+      index <= lastCoveredIndex
+    ) {
+      errors.push(`${scenario.id} native observation ${action.id} occurs before all steps complete`);
+    }
+  }
+  for (const [stepId, actions] of stepCoverage) {
+    if (actions.length !== 1) {
+      errors.push(`${scenario.id} native step ${stepId} has ${actions.length} covering actions`);
+    }
+  }
+  for (const client of plan.clients) {
+    if (!opened.has(client.key)) {
+      errors.push(`${scenario.id} native client ${client.key} is never opened`);
+    }
+    if (!used.has(client.key)) {
+      errors.push(`${scenario.id} native client ${client.key} performs no client operation`);
+    }
+  }
+  for (const [clientKey, callId] of activeCalls) {
+    errors.push(`${scenario.id} native call ${callId} for client ${clientKey} is not awaited`);
+  }
+
+  const requiredExpectations = new Set();
+  const requiredBudgets = new Set();
+  const requiredMeasurements = new Set();
+  for (const obligation of nativeObligations) {
+    for (const assertionId of obligation.assertion_ids) {
+      const assertion = assertionsById.get(assertionId);
+      for (const expectationId of assertion?.expectation_ids ?? []) {
+        requiredExpectations.add(expectationId);
+      }
+    }
+    for (const measurementId of obligation.required_measurement_ids) {
+      requiredMeasurements.add(measurementId);
+    }
+    for (const budgetId of obligation.performance_budget_ids) {
+      requiredBudgets.add(budgetId);
+    }
+  }
+  const observedExpectationIds = new Set([
+    ...requiredExpectations,
+    ...capturedExpectations.keys(),
+  ]);
+  for (const expectationId of observedExpectationIds) {
+    const count = capturedExpectations.get(expectationId)?.length ?? 0;
+    if (!requiredExpectations.has(expectationId)) {
+      errors.push(`${scenario.id} native capture includes extra expectation ${expectationId}`);
+    } else if (count !== 1) {
+      errors.push(`${scenario.id} native expectation ${expectationId} has ${count} capture actions`);
+    }
+  }
+  const observedBudgetIds = new Set([
+    ...requiredBudgets,
+    ...measuredBudgets.keys(),
+  ]);
+  for (const budgetId of observedBudgetIds) {
+    const count = measuredBudgets.get(budgetId)?.length ?? 0;
+    if (!requiredBudgets.has(budgetId)) {
+      errors.push(`${scenario.id} native measure includes extra budget ${budgetId}`);
+    } else if (count !== 1) {
+      errors.push(`${scenario.id} native budget ${budgetId} has ${count} measure actions`);
+    }
+  }
+  const observedMeasurementIds = new Set([
+    ...requiredMeasurements,
+    ...measured.keys(),
+  ]);
+  for (const measurementId of observedMeasurementIds) {
+    const count = measured.get(measurementId)?.length ?? 0;
+    if (!requiredMeasurements.has(measurementId)) {
+      errors.push(`${scenario.id} native measure includes extra measurement ${measurementId}`);
+    } else if (count !== 1) {
+      errors.push(`${scenario.id} native measurement ${measurementId} has ${count} measure actions`);
+    }
+  }
+  return errors;
+}
 
 function scenarioSemanticErrors(scenario) {
   const errors = [
@@ -1357,6 +1876,7 @@ function scenarioSemanticErrors(scenario) {
       `${scenario.id} ownership does not enumerate every and only obligation, assertion, and assertion-requirement tuple`,
     );
   }
+  errors.push(...nativeExecutionErrors(scenario, stepsById, assertionsById));
   return errors;
 }
 
@@ -4293,6 +4813,63 @@ const validScenario = {
       detects_control_ids: ["CTRL-TIMESTAMP-001"],
     },
   ],
+  native_execution: {
+    version: 1,
+    clients: [
+      {
+        key: "client-a",
+        user_id: "user-a",
+        client_id: "client-a",
+        database_key: "database-a",
+      },
+    ],
+    actions: [
+      {
+        id: "NACT-TIME-INSTALL-001",
+        phase: "setup",
+        actor: "controller",
+        command: "install-model",
+        covers_step_ids: [],
+        parameters: {},
+      },
+      {
+        id: "NACT-TIME-OPEN-001",
+        phase: "setup",
+        actor: "client",
+        command: "open",
+        covers_step_ids: [],
+        parameters: {
+          client_key: "client-a",
+          database_mode: "create",
+          seed_step_id: null,
+        },
+      },
+      {
+        id: "NACT-TIME-SYNC-001",
+        phase: "exercise",
+        actor: "client",
+        command: "synchronize-step",
+        covers_step_ids: ["STEP-TIME-001"],
+        parameters: {
+          client_key: "client-a",
+          method: "start",
+          completion: "error",
+        },
+      },
+      {
+        id: "NACT-TIME-CAPTURE-001",
+        phase: "verify",
+        actor: "observer",
+        command: "capture",
+        covers_step_ids: [],
+        parameters: {
+          client_keys: ["client-a"],
+          sources: ["request-trace"],
+          expectation_ids: ["EXPECT-TIME-001"],
+        },
+      },
+    ],
+  },
 };
 
 const validRequirementSubset = {
@@ -6335,6 +6912,205 @@ async function main() {
       "Duplicate step ID semantic control",
       (error) => error.includes("Scenario steps contains duplicate logical ID"),
     );
+  }
+
+  const groupedNativeScenario = structuredClone(validScenario);
+  const groupedStep = structuredClone(groupedNativeScenario.steps[0]);
+  groupedStep.id = "STEP-TIME-002";
+  groupedNativeScenario.steps.push(groupedStep);
+  const groupedWire = structuredClone(groupedNativeScenario.wire_expectations[0]);
+  groupedWire.step_id = groupedStep.id;
+  groupedNativeScenario.wire_expectations.push(groupedWire);
+  groupedNativeScenario.native_execution.actions[2].covers_step_ids.push(groupedStep.id);
+  if (
+    validateInstance(
+      validators.scenario,
+      groupedNativeScenario,
+      "Valid grouped native synchronization self-test",
+    )
+  ) {
+    recordSemanticErrors(
+      nativeExecutionErrors(
+        groupedNativeScenario,
+        new Map(groupedNativeScenario.steps.map((step) => [step.id, step])),
+        new Map(groupedNativeScenario.assertions.map((assertion) => [assertion.id, assertion])),
+      ),
+      "Valid grouped native synchronization self-test",
+    );
+  }
+
+  for (const [label, mutate, expectedError] of [
+    [
+      "reversed grouped native steps",
+      (scenario) => {
+        scenario.native_execution.actions[2].covers_step_ids.reverse();
+      },
+      "outside authored step order",
+    ],
+    [
+      "grouped native second-step phase mismatch",
+      (scenario) => {
+        scenario.steps[1].phase = "setup";
+      },
+      "phase does not match step STEP-TIME-002",
+    ],
+    [
+      "grouped native second-step transport mismatch",
+      (scenario) => {
+        scenario.steps[1].transport = "local";
+      },
+      "cannot execute step STEP-TIME-002",
+    ],
+    [
+      "grouped native second-step completion mismatch",
+      (scenario) => {
+        Object.assign(scenario.wire_expectations[1], {
+          contract_case: "temporary_unavailable",
+          http_status: 503,
+          error_code: "temporary_unavailable",
+          retryable: true,
+        });
+      },
+      "completion does not match step STEP-TIME-002",
+    ],
+  ]) {
+    const scenario = structuredClone(groupedNativeScenario);
+    mutate(scenario);
+    if (
+      validateInstance(
+        validators.scenario,
+        scenario,
+        `Schema-valid ${label} control`,
+      )
+    ) {
+      expectSemanticInvalid(
+        scenarioSemanticErrors(scenario),
+        `${label} semantic control`,
+        (error) => error.includes(expectedError),
+      );
+    }
+  }
+
+  const groupedNonSynchronization = structuredClone(groupedNativeScenario);
+  groupedNonSynchronization.native_execution.actions[2].command = "execute-step";
+  groupedNonSynchronization.native_execution.actions[2].parameters = {
+    client_key: "client-a",
+  };
+  expectInvalid(
+    validators.scenario,
+    groupedNonSynchronization,
+    "Multiple-step non-synchronization schema control",
+    (errors) => errors.some((error) => error.keyword === "maxItems"),
+  );
+
+  for (const [label, mutate, expectedError] of [
+    [
+      "omitted native step",
+      (scenario) => {
+        scenario.native_execution.actions =
+          scenario.native_execution.actions.filter(
+            ({ id }) => id !== "NACT-TIME-SYNC-001",
+          );
+      },
+      "native step STEP-TIME-001 has 0 covering actions",
+    ],
+    [
+      "duplicate native action",
+      (scenario) => {
+        scenario.native_execution.actions.push(
+          structuredClone(scenario.native_execution.actions[2]),
+        );
+      },
+      "Native actions contains duplicate logical ID",
+    ],
+    [
+      "unknown native step",
+      (scenario) => {
+        scenario.native_execution.actions[2].covers_step_ids = [
+          "STEP-TIME-UNKNOWN-001",
+        ];
+      },
+      "covers unknown step STEP-TIME-UNKNOWN-001",
+    ],
+    [
+      "mismatched native command",
+      (scenario) => {
+        scenario.native_execution.actions[2].command = "execute-step";
+        scenario.native_execution.actions[2].parameters = {
+          client_key: "client-a",
+        };
+      },
+      "cannot execute step STEP-TIME-001",
+    ],
+    [
+      "mismatched native client identity",
+      (scenario) => {
+        scenario.steps[0].operation.payload = {
+          authenticated_user_id: "user-b",
+          request: { client_id: "client-b" },
+        };
+      },
+      "client does not match step STEP-TIME-001",
+    ],
+    [
+      "extra native expectation",
+      (scenario) => {
+        scenario.native_execution.actions[3].parameters.expectation_ids = [
+          "EXPECT-TIME-UNKNOWN-001",
+        ];
+      },
+      "native capture includes extra expectation EXPECT-TIME-UNKNOWN-001",
+    ],
+    [
+      "local native capture without a client",
+      (scenario) => {
+        scenario.native_execution.actions[3].parameters.client_keys = [];
+        scenario.native_execution.actions[3].parameters.sources = ["sync-status"];
+      },
+      "local capture sources require a client",
+    ],
+    [
+      "missing native performance budget",
+      (scenario) => {
+        scenario.proof_obligations.find(
+          ({ obligation_id }) => obligation_id === "OBL-NATIVE-001",
+        ).performance_budget_ids = ["BUD-TIME-MISSING-001"];
+      },
+      "native budget BUD-TIME-MISSING-001 has 0 measure actions",
+    ],
+    [
+      "extra native performance budget",
+      (scenario) => {
+        scenario.native_execution.actions.push({
+          id: "NACT-TIME-MEASURE-001",
+          phase: "verify",
+          actor: "observer",
+          command: "measure",
+          covers_step_ids: [],
+          parameters: {
+            performance_budget_ids: ["BUD-TIME-EXTRA-001"],
+            measurement_ids: [],
+          },
+        });
+      },
+      "native measure includes extra budget BUD-TIME-EXTRA-001",
+    ],
+  ]) {
+    const scenario = structuredClone(validScenario);
+    mutate(scenario);
+    if (
+      validateInstance(
+        validators.scenario,
+        scenario,
+        `Schema-valid ${label} control`,
+      )
+    ) {
+      expectSemanticInvalid(
+        scenarioSemanticErrors(scenario),
+        `${label} semantic control`,
+        (error) => error.includes(expectedError),
+      );
+    }
   }
 
   for (const [label, mutate, expectedError] of [

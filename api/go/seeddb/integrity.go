@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -69,6 +70,7 @@ func portableSeedInternalTableSpecs() []sqliteInternalTableSpec {
 				{name: "operation", typeName: "TEXT", notNull: true},
 				{name: "base_updated_at", typeName: "TEXT"},
 				{name: "client_updated_at", typeName: "TEXT", notNull: true},
+				{name: "local_revision", typeName: "INTEGER", notNull: true, defaultSQL: sqliteDefault("0")},
 			},
 		},
 		{
@@ -82,22 +84,6 @@ func portableSeedInternalTableSpecs() []sqliteInternalTableSpec {
 			name: "grdb_migrations",
 			columns: []sqliteInternalColumnSpec{
 				{name: "identifier", typeName: "TEXT", notNull: true, pkOrdinal: 1},
-			},
-		},
-		{
-			name: "_synchro_bucket_members",
-			columns: []sqliteInternalColumnSpec{
-				{name: "bucket_id", typeName: "TEXT", notNull: true, pkOrdinal: 1},
-				{name: "table_name", typeName: "TEXT", notNull: true, pkOrdinal: 2},
-				{name: "record_id", typeName: "TEXT", notNull: true, pkOrdinal: 3},
-				{name: "checksum", typeName: "INTEGER", notNull: true, defaultSQL: sqliteDefault("0")},
-			},
-		},
-		{
-			name: "_synchro_bucket_checkpoints",
-			columns: []sqliteInternalColumnSpec{
-				{name: "bucket_id", typeName: "TEXT", pkOrdinal: 1},
-				{name: "checkpoint", typeName: "INTEGER", notNull: true, defaultSQL: sqliteDefault("0")},
 			},
 		},
 		{
@@ -146,7 +132,32 @@ func portableSeedInternalTableSpecs() []sqliteInternalTableSpec {
 				{name: "table_name", typeName: "TEXT", notNull: true, pkOrdinal: 1},
 				{name: "record_id", typeName: "TEXT", notNull: true, pkOrdinal: 2},
 				{name: "server_version", typeName: "TEXT", notNull: true},
-				{name: "row_checksum", typeName: "TEXT", notNull: true},
+				{name: "row_checksum", typeName: "TEXT"},
+			},
+		},
+		{
+			name: "_synchro_rebuild_attempts",
+			columns: []sqliteInternalColumnSpec{
+				{name: "scope_id", typeName: "TEXT", pkOrdinal: 1},
+				{name: "rebuild_id", typeName: "TEXT", notNull: true},
+				{name: "client_generation", typeName: "INTEGER", notNull: true},
+				{name: "schema_version", typeName: "INTEGER", notNull: true},
+				{name: "schema_hash", typeName: "TEXT", notNull: true},
+				{name: "generation", typeName: "INTEGER", notNull: true},
+				{name: "cursor", typeName: "TEXT"},
+				{name: "page_limit", typeName: "INTEGER", notNull: true},
+			},
+		},
+		{
+			name: "_synchro_push_batches",
+			columns: []sqliteInternalColumnSpec{
+				{name: "batch_id", typeName: "TEXT", pkOrdinal: 1},
+				{name: "request_json", typeName: "TEXT", notNull: true},
+				{name: "pending_json", typeName: "TEXT", notNull: true},
+				{name: "schema_json", typeName: "TEXT", notNull: true},
+				{name: "state", typeName: "TEXT", notNull: true},
+				{name: "created_at", typeName: "TEXT", notNull: true},
+				{name: "completed_at", typeName: "TEXT"},
 			},
 		},
 		{
@@ -432,10 +443,14 @@ func digestCanonical(domain, canonical []byte) string {
 }
 
 func schemaManifestHashBody(manifest schemaManifest) map[string]any {
-	canonicalTables := make([]any, 0, len(manifest.Tables))
-	for _, table := range manifest.Tables {
+	tables := append([]tableSchema(nil), manifest.Tables...)
+	sort.Slice(tables, func(i, j int) bool { return bytes.Compare([]byte(tables[i].ID), []byte(tables[j].ID)) < 0 })
+	canonicalTables := make([]any, 0, len(tables))
+	for _, table := range tables {
+		fields := append([]fieldSchema(nil), table.Fields...)
+		sort.Slice(fields, func(i, j int) bool { return bytes.Compare([]byte(fields[i].ID), []byte(fields[j].ID)) < 0 })
 		canonicalFields := make([]any, 0, len(table.Fields))
-		for _, field := range table.Fields {
+		for _, field := range fields {
 			value := map[string]any{
 				"field_id": field.ID,
 				"name":     field.Name,
@@ -452,8 +467,10 @@ func schemaManifestHashBody(manifest schemaManifest) map[string]any {
 			canonicalFields = append(canonicalFields, value)
 		}
 
-		canonicalIndexes := make([]any, 0, len(table.Indexes))
-		for _, index := range table.Indexes {
+		indexes := append([]indexSchema(nil), table.Indexes...)
+		sort.Slice(indexes, func(i, j int) bool { return bytes.Compare([]byte(indexes[i].ID), []byte(indexes[j].ID)) < 0 })
+		canonicalIndexes := make([]any, 0, len(indexes))
+		for _, index := range indexes {
 			fieldIDs := make([]any, len(index.FieldIDs))
 			for i, fieldID := range index.FieldIDs {
 				fieldIDs[i] = fieldID

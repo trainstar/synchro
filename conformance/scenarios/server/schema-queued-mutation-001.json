@@ -141,10 +141,10 @@
       "performance_budget_ids": [],
       "required_measurement_ids": [],
       "required_vector_set_ids": [],
-      "make_target": "test-swift",
+      "make_target": "test-native-swift-schema-queue",
       "argv": [
         "make",
-        "test-swift"
+        "test-native-swift-schema-queue"
       ],
       "fault_plan_id": null,
       "control_id": null
@@ -1183,5 +1183,186 @@
         "CTRL-SCHEMA-002"
       ]
     }
-  ]
+  ],
+  "native_execution": {
+    "version": 1,
+    "clients": [
+      {
+        "key": "client_a",
+        "user_id": "user-a",
+        "client_id": "client-a",
+        "database_key": "schema_queued_mutation_a"
+      }
+    ],
+    "actions": [
+      {
+        "id": "NACT-SCHEMA-QUEUED-MUTATION-001",
+        "phase": "setup",
+        "actor": "controller",
+        "command": "install-model",
+        "covers_step_ids": [],
+        "parameters": {}
+      },
+      {
+        "id": "NACT-SCHEMA-QUEUED-MUTATION-002",
+        "phase": "setup",
+        "actor": "client",
+        "command": "open",
+        "covers_step_ids": [],
+        "parameters": {
+          "client_key": "client_a",
+          "database_mode": "create",
+          "initialization": "empty",
+          "seed_step_id": null
+        }
+      },
+      {
+        "id": "NACT-SCHEMA-QUEUED-MUTATION-003",
+        "phase": "setup",
+        "actor": "controller",
+        "command": "apply-step",
+        "covers_step_ids": [
+          "STEP-SCHEMA-QUEUED-MUTATION-001"
+        ],
+        "parameters": {}
+      },
+      {
+        "id": "NACT-SCHEMA-QUEUED-MUTATION-004",
+        "phase": "setup",
+        "actor": "process",
+        "command": "execute-step",
+        "covers_step_ids": [
+          "STEP-SCHEMA-QUEUED-MUTATION-002"
+        ],
+        "parameters": {
+          "client_key": null
+        }
+      },
+      {
+        "id": "NACT-SCHEMA-QUEUED-MUTATION-005",
+        "phase": "setup",
+        "actor": "client",
+        "command": "synchronize-step",
+        "covers_step_ids": [
+          "STEP-SCHEMA-QUEUED-MUTATION-003"
+        ],
+        "parameters": {
+          "client_key": "client_a",
+          "method": "start",
+          "completion": "idle"
+        }
+      },
+      {
+        "id": "NACT-SCHEMA-QUEUED-MUTATION-006",
+        "phase": "setup",
+        "actor": "observer",
+        "command": "await-step",
+        "covers_step_ids": [
+          "STEP-SCHEMA-QUEUED-MUTATION-BASELINE-BEGIN-001"
+        ],
+        "parameters": {
+          "client_key": "client_a"
+        }
+      },
+      {
+        "id": "NACT-SCHEMA-QUEUED-MUTATION-007",
+        "phase": "setup",
+        "actor": "observer",
+        "command": "await-step",
+        "covers_step_ids": [
+          "STEP-SCHEMA-QUEUED-MUTATION-004"
+        ],
+        "parameters": {
+          "client_key": "client_a"
+        }
+      },
+      {
+        "id": "NACT-SCHEMA-QUEUED-MUTATION-008",
+        "phase": "setup",
+        "actor": "observer",
+        "command": "await-step",
+        "covers_step_ids": [
+          "STEP-SCHEMA-QUEUED-MUTATION-BASELINE-FINALIZE-001"
+        ],
+        "parameters": {
+          "client_key": "client_a"
+        }
+      },
+      {
+        "id": "NACT-SCHEMA-QUEUED-MUTATION-009",
+        "phase": "exercise",
+        "actor": "client",
+        "command": "execute-step",
+        "covers_step_ids": [
+          "STEP-SCHEMA-QUEUED-MUTATION-005"
+        ],
+        "parameters": {
+          "client_key": "client_a"
+        }
+      },
+      {
+        "id": "NACT-SCHEMA-QUEUED-MUTATION-010",
+        "phase": "exercise",
+        "actor": "controller",
+        "command": "apply-step",
+        "covers_step_ids": [
+          "STEP-SCHEMA-QUEUED-MUTATION-006"
+        ],
+        "parameters": {}
+      },
+      {
+        "id": "NACT-SCHEMA-QUEUED-MUTATION-011",
+        "phase": "exercise",
+        "actor": "client",
+        "command": "synchronize-step",
+        "covers_step_ids": [
+          "STEP-SCHEMA-QUEUED-MUTATION-007",
+          "STEP-SCHEMA-QUEUED-MUTATION-008"
+        ],
+        "parameters": {
+          "client_key": "client_a",
+          "method": "reset-schema-and-start",
+          "completion": "idle"
+        }
+      },
+      {
+        "id": "NACT-SCHEMA-QUEUED-MUTATION-015",
+        "phase": "exercise",
+        "actor": "process",
+        "command": "execute-step",
+        "covers_step_ids": [
+          "STEP-SCHEMA-QUEUED-MUTATION-009"
+        ],
+        "parameters": {
+          "client_key": "client_a"
+        }
+      },
+      {
+        "id": "NACT-SCHEMA-QUEUED-MUTATION-016",
+        "phase": "verify",
+        "actor": "observer",
+        "command": "capture",
+        "covers_step_ids": [],
+        "parameters": {
+          "client_keys": [
+            "client_a"
+          ],
+          "sources": [
+            "application-rows",
+            "pending-mutations",
+            "rejected-mutations",
+            "sync-status",
+            "sync-events",
+            "request-trace",
+            "server-state",
+            "process-trace"
+          ],
+          "expectation_ids": [
+            "EXPECT-SCHEMA-QUEUED-MUTATION-WIRE-001",
+            "EXPECT-SCHEMA-QUEUED-MUTATION-STATE-001"
+          ]
+        }
+      }
+    ]
+  }
 }

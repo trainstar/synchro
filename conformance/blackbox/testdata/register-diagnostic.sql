@@ -1,4 +1,4 @@
--- Independent public registration setup for protocol 2 diagnostics.
+-- Independent public registration setup for protocol 3 verification.
 -- Run only after schema.sql and CREATE EXTENSION synchro_pg.
 
 \set QUIET 1

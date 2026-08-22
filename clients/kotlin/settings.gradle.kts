@@ -16,3 +16,4 @@ dependencyResolutionManagement {
 
 rootProject.name = "synchro-kotlin"
 include(":synchro")
+include(":conformance-app")

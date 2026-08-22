@@ -60,11 +60,6 @@ var defaultProtected = []string{
 	modulePath + "/cmd/synchro-evidence",
 }
 
-var diagnosticBaselineImporters = map[string]struct{}{
-	modulePath + "/blackbox/integration":    {},
-	modulePath + "/cmd/synchro-conformance": {},
-}
-
 var diagnosticBlackboxImporters = map[string]struct{}{
 	modulePath + "/blackbox/integration":    {},
 	modulePath + "/cmd/synchro-conformance": {},
@@ -174,9 +169,6 @@ func Check(ctx context.Context, policy Policy) error {
 	for packagePath, imports := range sourceGraph {
 		sourceGraph[packagePath] = uniqueSorted(imports)
 	}
-	if err := checkBaselineImporters(sourceGraph); err != nil {
-		return fmt.Errorf("all-source dependency graph: %w", err)
-	}
 	if err := checkBlackboxImporters(sourceGraph); err != nil {
 		return fmt.Errorf("all-source dependency graph: %w", err)
 	}
@@ -244,39 +236,9 @@ func validateResolvedPackageModule(pkg listedPackage) error {
 	return nil
 }
 
-func checkBaselineImporters(graph map[string][]string) error {
-	baseline := modulePath + "/blackbox/baseline"
-	for source := range graph {
-		if forbiddenPath(source, []string{baseline}) {
-			continue
-		}
-		if _, allowed := diagnosticBaselineImporters[source]; allowed {
-			continue
-		}
-		seen := map[string]bool{source: true}
-		queue := append([]string(nil), graph[source]...)
-		for len(queue) != 0 {
-			target := queue[0]
-			queue = queue[1:]
-			if forbiddenPath(target, []string{baseline}) {
-				return fmt.Errorf("package %q reaches diagnostic baseline package %q", source, target)
-			}
-			if seen[target] {
-				continue
-			}
-			seen[target] = true
-			queue = append(queue, graph[target]...)
-		}
-	}
-	return nil
-}
-
 func checkBlackboxImporters(graph map[string][]string) error {
 	blackbox := modulePath + "/blackbox"
 	for source := range graph {
-		if forbiddenPath(source, []string{blackbox + "/baseline"}) {
-			continue
-		}
 		if _, allowed := diagnosticBlackboxImporters[source]; allowed {
 			continue
 		}
@@ -425,7 +387,7 @@ func (p Policy) forbiddenEdges() []string {
 	if len(p.ForbiddenEdges) != 0 {
 		return p.ForbiddenEdges
 	}
-	return []string{modulePath + "/blackbox", modulePath + "/blackbox/baseline"}
+	return []string{modulePath + "/blackbox"}
 }
 
 type modFile struct {

@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   Platform,
+  SafeAreaView,
   ScrollView,
   StyleSheet,
   Text,
@@ -8,7 +9,11 @@ import {
   View,
 } from 'react-native';
 import { SynchroClient } from '@trainstar/synchro-react-native';
-import type { ConflictEvent } from '@trainstar/synchro-react-native';
+import type {
+  ConflictEvent,
+  SyncEvent,
+} from '@trainstar/synchro-react-native';
+import { ConformanceHarness } from './conformance/ConformanceHarness';
 
 const SYNCHRO_TEST_URL =
   Platform.OS === 'android'
@@ -18,10 +23,11 @@ const SYNCHRO_TEST_URL =
 const USER1_JWT =
   'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJhMTExMTExMS0xMTExLTExMTEtMTExMS0xMTExMTExMTExMTEiLCJleHAiOjQxMDI0NDQ4MDB9.ZPjufmc-mgkQC6rc6GVNzH9V3jhqQZMl2AuF0Cleuz8';
 const USER1_ID = 'a1111111-1111-1111-1111-111111111111';
-const USER2_JWT =
-  'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJiMjIyMjIyMi0yMjIyLTIyMjItMjIyMi0yMjIyMjIyMjIyMjIiLCJleHAiOjQxMDI0NDQ4MDB9.md1BWZARNDofCHihSjDmFY6Wr2L1MBf9r-BDc5zrhFE';
 const TEST_SYNC_INTERVAL_SECONDS = 300;
 const TEST_PUSH_DEBOUNCE_SECONDS = 60;
+interface AppProps {
+  conformanceDetox?: boolean;
+}
 
 type ResultKey =
   | 'init'
@@ -33,6 +39,7 @@ type ResultKey =
   | 'txTimeout'
   | 'txRecovery'
   | 'start'
+  | 'lifecycle'
   | 'pushPull'
   | 'conflict'
   | 'multiUser'
@@ -41,7 +48,7 @@ type ResultKey =
   | 'offlineFirst'
   | 'seedInit'
   | 'seedResume'
-  | 'seedRepair';
+  | 'seedCorrupt';
 
 type TestResult = boolean | null;
 type Results = Record<ResultKey, TestResult>;
@@ -58,6 +65,7 @@ function createEmptyResults(): Results {
     txTimeout: null,
     txRecovery: null,
     start: null,
+    lifecycle: null,
     pushPull: null,
     conflict: null,
     multiUser: null,
@@ -66,7 +74,7 @@ function createEmptyResults(): Results {
     offlineFirst: null,
     seedInit: null,
     seedResume: null,
-    seedRepair: null,
+    seedCorrupt: null,
   };
 }
 
@@ -89,82 +97,6 @@ function createClient(): SynchroClient {
     syncInterval: TEST_SYNC_INTERVAL_SECONDS,
     pushDebounce: TEST_PUSH_DEBOUNCE_SECONDS,
   });
-}
-
-async function syncHTTP(
-  method: string,
-  path: string,
-  token: string,
-  body?: object
-): Promise<any> {
-  const res = await fetch(`${SYNCHRO_TEST_URL}${path}`, {
-    method,
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${token}`,
-    },
-    body: body ? JSON.stringify(body) : undefined,
-  });
-  if (!res.ok) {
-    throw new Error(`HTTP ${res.status}: ${await res.text()}`);
-  }
-  return res.json();
-}
-
-async function connectManualClient(token: string, clientID: string): Promise<any> {
-  return syncHTTP('POST', '/sync/connect', token, {
-    client_id: clientID,
-    platform: 'test',
-    app_version: '1.0.0',
-    protocol_version: 2,
-    schema: {
-      version: 0,
-      hash: '',
-    },
-    scope_set_version: 0,
-    known_scopes: {},
-  });
-}
-
-function schemaRefFromConnect(connect: any) {
-  return {
-    version: connect.schema.version,
-    hash: connect.schema.hash,
-  };
-}
-
-async function rebuildAllAssignedScopes(
-  token: string,
-  clientID: string,
-  connect: any
-): Promise<any[]> {
-  const records: any[] = [];
-  const scopes = Array.isArray(connect.scopes?.add) ? connect.scopes.add : [];
-
-  for (const scope of scopes) {
-    let cursor = scope.cursor ?? null;
-
-    while (true) {
-      const rebuild = await syncHTTP('POST', '/sync/rebuild', token, {
-        client_id: clientID,
-        scope: scope.id,
-        cursor,
-        limit: 100,
-      });
-
-      if (Array.isArray(rebuild.records)) {
-        records.push(...rebuild.records);
-      }
-
-      if (!rebuild.has_more) {
-        break;
-      }
-
-      cursor = rebuild.cursor ?? null;
-    }
-  }
-
-  return records;
 }
 
 async function waitForPendingDrain(client: SynchroClient, timeoutMs = 5000) {
@@ -193,8 +125,27 @@ async function waitForCondition(
   return false;
 }
 
-async function waitForWAL(delayMs = 1000) {
-  await new Promise((resolve) => setTimeout(resolve, delayMs));
+async function waitForSyncedTable(
+  client: SynchroClient,
+  tableName: string,
+  timeoutMs = 15000
+) {
+  return waitForCondition(async () => {
+    try {
+      await client.query(`SELECT 1 FROM ${tableName} LIMIT 1`);
+      return true;
+    } catch {
+      return false;
+    }
+  }, timeoutMs, 250);
+}
+
+async function releaseClient(client: SynchroClient | null) {
+  try {
+    await client?.close();
+  } catch {
+    // Ownership release remains best-effort during harness cleanup.
+  }
 }
 
 async function insertCustomer(
@@ -226,18 +177,38 @@ function StatusBadge({ label, ok }: { label: string; ok: TestResult }) {
   );
 }
 
-export default function App() {
+export default function App({ conformanceDetox = false }: AppProps) {
+  if (conformanceDetox) {
+    return (
+      <ConformanceHarness
+        appVersion="1.0.0"
+        authToken={USER1_JWT}
+        serverURL={SYNCHRO_TEST_URL}
+      />
+    );
+  }
+
+  return <StandardApp />;
+}
+
+function StandardApp() {
   const [client, setClient] = useState(() => createClient());
+  const clientRef = useRef(client);
   const initializedRef = useRef(false);
   const startedRef = useRef(false);
   const statusSubscriptionRef = useRef<(() => void) | null>(null);
   const conflictSubscriptionRef = useRef<(() => void) | null>(null);
   const conflictsRef = useRef<ConflictEvent[]>([]);
+  const pendingConflictRecordRef = useRef<string | null>(null);
+  const pendingMultiUserRecordRef = useRef<string | null>(null);
   const currentStepRef = useRef('idle');
 
   const [results, setResults] = useState<Results>(() => createEmptyResults());
-  const [displayStatus, setDisplayStatus] = useState('idle');
+  const [harnessGeneration, setHarnessGeneration] = useState(0);
+  const [displayStatus, setDisplayStatus] = useState('uninitialized');
   const [currentStep, setCurrentStep] = useState('idle');
+  const [pendingConflictRecordID, setPendingConflictRecordID] = useState<string | null>(null);
+  const [pendingMultiUserRecordID, setPendingMultiUserRecordID] = useState<string | null>(null);
   const [lastError, setLastError] = useState<string | null>(null);
   const [lastResult, setLastResult] = useState<LastResult>({
     key: null,
@@ -245,14 +216,20 @@ export default function App() {
   });
 
   useEffect(() => {
-    return () => {
-      statusSubscriptionRef.current?.();
-      conflictSubscriptionRef.current?.();
-      void client.close().catch(() => {
-        // Cleanup is best-effort when Detox terminates the app.
-      });
-    };
+    clientRef.current = client;
   }, [client]);
+
+  useEffect(() => {
+    return () => {
+      const statusSubscription = statusSubscriptionRef.current;
+      const conflictSubscription = conflictSubscriptionRef.current;
+      statusSubscriptionRef.current = null;
+      conflictSubscriptionRef.current = null;
+      statusSubscription?.();
+      conflictSubscription?.();
+      void releaseClient(clientRef.current);
+    };
+  }, []);
 
   const update = useCallback((key: ResultKey, ok: boolean) => {
     setResults((prev) => ({ ...prev, [key]: ok }));
@@ -297,7 +274,7 @@ export default function App() {
       conflictsRef.current.push(event);
     });
     initializedRef.current = true;
-    setDisplayStatus('idle');
+    setDisplayStatus('local_ready');
   }, [client]);
 
   const ensureStarted = useCallback(async () => {
@@ -326,27 +303,41 @@ export default function App() {
     ]);
   }, [client, ensureInitialized]);
 
+  const releaseHarnessClient = useCallback(async () => {
+    statusSubscriptionRef.current?.();
+    statusSubscriptionRef.current = null;
+    conflictSubscriptionRef.current?.();
+    conflictSubscriptionRef.current = null;
+    await releaseClient(client);
+    initializedRef.current = false;
+    startedRef.current = false;
+  }, [client]);
+
   const resetHarness = useCallback(async () => {
-    try {
-      statusSubscriptionRef.current?.();
-      statusSubscriptionRef.current = null;
-      conflictSubscriptionRef.current?.();
-      conflictSubscriptionRef.current = null;
-      await client.close();
-    } catch {
-      // Best-effort reset for the harness.
-    }
+    currentStepRef.current = 'reset:start';
+    setCurrentStep('reset:start');
+    setDisplayStatus('resetting');
+    statusSubscriptionRef.current?.();
+    statusSubscriptionRef.current = null;
+    conflictSubscriptionRef.current?.();
+    conflictSubscriptionRef.current = null;
+    await releaseClient(client);
 
     conflictsRef.current = [];
+    pendingConflictRecordRef.current = null;
+    pendingMultiUserRecordRef.current = null;
     initializedRef.current = false;
     startedRef.current = false;
     setResults(createEmptyResults());
     setLastResult({ key: null, ok: null });
-    setDisplayStatus('idle');
-    setCurrentStep('idle');
-    currentStepRef.current = 'idle';
+    setDisplayStatus('uninitialized');
+    setCurrentStep('reset:complete');
+    currentStepRef.current = 'reset:complete';
+    setPendingConflictRecordID(null);
+    setPendingMultiUserRecordID(null);
     setLastError(null);
     setClient(createClient());
+    setHarnessGeneration((generation) => generation + 1);
   }, [client]);
 
   const runInit = useCallback(async () => {
@@ -436,6 +427,23 @@ export default function App() {
   const runReadTx = useCallback(async () => {
     try {
       await ensureLocalTable();
+      const rejectedWriteID = uuid();
+      let rejectedWrite = false;
+      try {
+        await client.readTransaction((tx) =>
+          tx.query(
+            'INSERT INTO test_items (id, name, note) VALUES (?, ?, ?) RETURNING id',
+            [rejectedWriteID, 'must-not-persist', null]
+          )
+        );
+      } catch {
+        rejectedWrite = true;
+      }
+      const rejectedWriteRow = await client.queryOne(
+        'SELECT id FROM test_items WHERE id = ?',
+        [rejectedWriteID]
+      );
+
       const seedID = uuid();
       await client.execute(
         'INSERT INTO test_items (id, name, note) VALUES (?, ?, ?)',
@@ -447,7 +455,13 @@ export default function App() {
           [seedID, null]
         )
       );
-      update('readTx', rows.length === 1 && rows[0].id === seedID);
+      update(
+        'readTx',
+        rejectedWrite &&
+          rejectedWriteRow === null &&
+          rows.length === 1 &&
+          rows[0].id === seedID
+      );
     } catch {
       update('readTx', false);
     }
@@ -472,13 +486,58 @@ export default function App() {
   const runTxRecovery = useCallback(async () => {
     try {
       await ensureLocalTable();
-      try {
-        await client.writeTransaction(async () => {
-          await new Promise((resolve) => setTimeout(resolve, 6000));
+      const interruptWrite = async (
+        recordID: string,
+        interrupt: () => Promise<void>
+      ) => {
+        let releaseTransaction!: () => void;
+        let markTransactionStarted!: () => void;
+        const transactionGate = new Promise<void>((resolve) => {
+          releaseTransaction = resolve;
         });
-      } catch {
-        // expected timeout
-      }
+        const transactionStarted = new Promise<void>((resolve) => {
+          markTransactionStarted = resolve;
+        });
+        const transaction = client.writeTransaction(async (tx) => {
+          await tx.execute(
+            'INSERT INTO test_items (id, name, note) VALUES (?, ?, ?)',
+            [recordID, 'must-rollback', null]
+          );
+          markTransactionStarted();
+          await transactionGate;
+        });
+        const rejected = transaction.then(
+          () => false,
+          () => true
+        );
+
+        await transactionStarted;
+        try {
+          await interrupt();
+        } finally {
+          releaseTransaction();
+        }
+        return rejected;
+      };
+
+      const closeID = uuid();
+      const closeRejected = await interruptWrite(closeID, () => client.close());
+      await client.initialize();
+
+      const reinitializeID = uuid();
+      const reinitializeRejected = await interruptWrite(
+        reinitializeID,
+        () => client.initialize()
+      );
+
+      const closeRow = await client.queryOne(
+        'SELECT id FROM test_items WHERE id = ?',
+        [closeID]
+      );
+      const reinitializeRow = await client.queryOne(
+        'SELECT id FROM test_items WHERE id = ?',
+        [reinitializeID]
+      );
 
       const recoveryID = uuid();
       const result = await client.execute(
@@ -491,7 +550,12 @@ export default function App() {
       );
       update(
         'txRecovery',
-        result.rowsAffected === 1 && row?.name === 'recovered'
+        closeRejected &&
+          reinitializeRejected &&
+          closeRow === null &&
+          reinitializeRow === null &&
+          result.rowsAffected === 1 &&
+          row?.name === 'recovered'
       );
     } catch {
       update('txRecovery', false);
@@ -518,13 +582,31 @@ export default function App() {
       setLastError(null);
       markStep('pushPull:start');
       await ensureStarted();
+      await client.syncNow();
+      if (!(await waitForSyncedTable(client, 'customers'))) {
+        throw new Error('customers table was not ready after starting sync');
+      }
       markStep('pushPull:started');
       const customerID = uuid();
       await insertCustomer(client, customerID, USER1_ID, 'push-test-customer');
       markStep('pushPull:inserted');
       await client.syncNow();
       markStep('pushPull:synced');
-      update('pushPull', await waitForPendingDrain(client));
+      const pendingDrained = await waitForPendingDrain(client);
+      const rejection = (await client.inspectRejectedMutations()).find(
+        (mutation) => mutation.tableName === 'customers' && mutation.recordID === customerID
+      );
+      if (!pendingDrained || rejection !== undefined) {
+        throw new Error('push/pull mutation did not complete without rejection');
+      }
+      const localRow = await client.queryOne(
+        'SELECT name FROM customers WHERE id = ?',
+        [customerID]
+      );
+      if (localRow?.name !== 'push-test-customer') {
+        throw new Error('accepted push/pull customer row is missing locally');
+      }
+      update('pushPull', true);
     } catch (error) {
       captureError('pushPull', error);
       update('pushPull', false);
@@ -541,68 +623,51 @@ export default function App() {
     try {
       setLastError(null);
       markStep('conflict:start');
+      const pendingRecordID = pendingConflictRecordRef.current;
+      if (pendingRecordID === null) {
+        await ensureStarted();
+        await client.syncNow();
+        if (!(await waitForSyncedTable(client, 'customers'))) {
+          throw new Error('customers table was not ready after starting sync');
+        }
+        conflictsRef.current = [];
+        markStep('conflict:started');
+
+        const recordID = uuid();
+        await insertCustomer(client, recordID, USER1_ID, 'original');
+        markStep('conflict:inserted');
+        await client.syncNow();
+        markStep('conflict:initial-sync');
+        if (!(await waitForPendingDrain(client))) {
+          throw new Error('initial conflict mutation did not drain');
+        }
+
+        await stopSync();
+        markStep('conflict:stopped');
+
+        const localVersion = '2026-01-01T00:00:00.000Z';
+        await client.execute(
+          'UPDATE customers SET name = ?, updated_at = ? WHERE id = ?',
+          ['client-version', localVersion, recordID]
+        );
+        pendingConflictRecordRef.current = recordID;
+        setPendingConflictRecordID(recordID);
+        markStep('conflict:awaiting-server');
+        return;
+      }
+
       await ensureStarted();
-      conflictsRef.current = [];
-      markStep('conflict:started');
-
-      const recordID = uuid();
-      await insertCustomer(client, recordID, USER1_ID, 'original');
-      markStep('conflict:inserted');
-      await client.syncNow();
-      markStep('conflict:initial-sync');
-      await waitForPendingDrain(client);
-
-      await stopSync();
-      markStep('conflict:stopped');
-
-      const localVersion = '2026-01-01T00:00:00.000Z';
-      await client.execute(
-        'UPDATE customers SET name = ?, updated_at = ? WHERE id = ?',
-        ['client-version', localVersion, recordID]
-      );
-      markStep('conflict:updated-local');
-
-      const clientBID = `rn-conflict-client-${uuid()}`;
-      const connect = await connectManualClient(USER1_JWT, clientBID);
-      markStep('conflict:manual-connected');
-
-      const serverVersion = '2030-01-01T00:00:00.000Z';
-      await syncHTTP('POST', '/sync/push', USER1_JWT, {
-        client_id: clientBID,
-        batch_id: `batch-${recordID}`,
-        schema: schemaRefFromConnect(connect),
-        mutations: [
-          {
-            mutation_id: `mutation-${recordID}`,
-            table: 'customers',
-            op: 'update',
-            pk: {
-              id: recordID,
-            },
-            columns: {
-              user_id: USER1_ID,
-              name: 'server-version',
-              updated_at: serverVersion,
-            },
-            client_version: serverVersion,
-          },
-        ],
-      });
-      markStep('conflict:manual-pushed');
-
-      await waitForWAL(1500);
-      markStep('conflict:wal-1');
-
+      markStep('conflict:resync-started');
       await client.syncNow();
       markStep('conflict:resynced');
 
       const conflictResolved = await waitForCondition(async () => {
         const row = await client.queryOne(
           'SELECT name FROM customers WHERE id = ?',
-          [recordID]
+          [pendingRecordID]
         );
         const conflictEvent = conflictsRef.current.find(
-          (event) => event.recordID === recordID
+          (event) => event.recordID === pendingRecordID
         );
         return (
           conflictEvent?.serverData?.name === 'server-version' &&
@@ -610,6 +675,20 @@ export default function App() {
           (await client.pendingChangeCount()) === 0
         );
       }, 10000);
+      if (!conflictResolved) {
+        setLastError(
+          JSON.stringify({
+            conflicts: conflictsRef.current,
+            row: await client.queryOne(
+              'SELECT name, updated_at FROM customers WHERE id = ?',
+              [pendingRecordID]
+            ),
+            pendingCount: await client.pendingChangeCount(),
+          })
+        );
+      }
+      pendingConflictRecordRef.current = null;
+      setPendingConflictRecordID(null);
       update('conflict', conflictResolved);
     } catch (error) {
       captureError('conflict', error);
@@ -627,33 +706,49 @@ export default function App() {
     try {
       setLastError(null);
       markStep('multiUser:start');
-      await ensureStarted();
-      markStep('multiUser:started');
+      const pendingRecordID = pendingMultiUserRecordRef.current;
+      if (pendingRecordID === null) {
+        await ensureStarted();
+        await client.syncNow();
+        if (!(await waitForSyncedTable(client, 'customers'))) {
+          throw new Error('customers table was not ready after starting sync');
+        }
+        markStep('multiUser:started');
 
-      const isolationID = uuid();
-      await insertCustomer(client, isolationID, USER1_ID, 'user1-only');
-      markStep('multiUser:inserted');
-      await client.syncNow();
-      markStep('multiUser:synced');
-      await waitForPendingDrain(client);
-      await waitForWAL();
-      markStep('multiUser:wal');
+        const isolationID = uuid();
+        await insertCustomer(client, isolationID, USER1_ID, 'user1-only');
+        markStep('multiUser:inserted');
+        await client.syncNow();
+        markStep('multiUser:synced');
+        const pendingDrained = await waitForPendingDrain(client);
+        const rejection = (await client.inspectRejectedMutations()).find(
+          (mutation) => mutation.tableName === 'customers' && mutation.recordID === isolationID
+        );
+        if (!pendingDrained || rejection !== undefined) {
+          throw new Error('isolation mutation did not complete without rejection');
+        }
 
-      const client2ID = `rn-isolation-client-${uuid()}`;
-      const connect = await connectManualClient(USER2_JWT, client2ID);
-      markStep('multiUser:user2-connected');
-      const rebuiltRecords = await rebuildAllAssignedScopes(
-        USER2_JWT,
-        client2ID,
-        connect
+        await stopSync();
+        pendingMultiUserRecordRef.current = isolationID;
+        setPendingMultiUserRecordID(isolationID);
+        markStep('multiUser:awaiting-server');
+        return;
+      }
+
+      const localRow = await client.queryOne(
+        'SELECT user_id, name FROM customers WHERE id = ?',
+        [pendingRecordID]
       );
-      markStep('multiUser:user2-rebuilt');
-
-      const hasUser1Record = rebuiltRecords.some(
-        (record: any) =>
-          record.table === 'customers' && record.pk?.id === isolationID
+      const localMutation = (await client.inspectRejectedMutations()).find(
+        (mutation) => mutation.tableName === 'customers' && mutation.recordID === pendingRecordID
       );
-      update('multiUser', !hasUser1Record);
+      const isolationVerified =
+        localRow?.user_id === USER1_ID &&
+        localRow?.name === 'user1-only' &&
+        localMutation === undefined;
+      pendingMultiUserRecordRef.current = null;
+      setPendingMultiUserRecordID(null);
+      update('multiUser', isolationVerified);
     } catch (error) {
       captureError('multiUser', error);
       update('multiUser', false);
@@ -683,6 +778,36 @@ export default function App() {
     }
   }, [captureError, ensureStarted, markStep, stopSync, update]);
 
+  const runLifecycle = useCallback(async () => {
+    try {
+      setLastError(null);
+      markStep('lifecycle:start');
+      await ensureStarted();
+      markStep('lifecycle:started');
+      await client.enterBackground();
+      markStep('lifecycle:background');
+      await client.enterForeground();
+      markStep('lifecycle:foreground');
+      await client.syncNow();
+      const resumedStatus = await client.getSyncStatus();
+      if (resumedStatus.status !== 'ready') {
+        throw new Error(`foreground did not resume ready state: ${resumedStatus.status}`);
+      }
+      await stopSync();
+      const stoppedStatus = await client.getSyncStatus();
+      if (stoppedStatus.status !== 'stopped') {
+        throw new Error(`stop did not drain to stopped state: ${stoppedStatus.status}`);
+      }
+      markStep('lifecycle:stopped');
+      update('lifecycle', true);
+    } catch (error) {
+      captureError('lifecycle', error);
+      update('lifecycle', false);
+    } finally {
+      startedRef.current = false;
+    }
+  }, [captureError, client, ensureStarted, markStep, stopSync, update]);
+
   const runErrorMap = useCallback(async () => {
     try {
       await ensureInitialized();
@@ -697,13 +822,13 @@ export default function App() {
     const runID = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
     const dbPath = `synchro-offline-first-${runID}.db`;
     const clientID = `rn-offline-first-device-${runID}`;
-    const verifyClientID = `rn-offline-first-verify-${runID}`;
     const customerID = uuid();
     let offlineClient: SynchroClient | null = null;
     let syncClient: SynchroClient | null = null;
     try {
       setLastError(null);
       markStep('offlineFirst:offline');
+      await releaseHarnessClient();
       offlineClient = new SynchroClient({
         dbPath,
         serverURL: SYNCHRO_TEST_URL,
@@ -746,9 +871,7 @@ export default function App() {
         'SELECT name FROM customers WHERE id = ?',
         [customerID]
       );
-      const rejectedAfterSync = await syncClient.query(
-        'SELECT mutation_id FROM _synchro_rejected_mutations'
-      );
+      const rejectedAfterSync = await syncClient.inspectRejectedMutations();
 
       update(
         'offlineFirst',
@@ -762,33 +885,16 @@ export default function App() {
       captureError('offlineFirst', error);
       update('offlineFirst', false);
     } finally {
-      try {
-        await offlineClient?.stop();
-      } catch {
-        // Best-effort cleanup.
-      }
-      try {
-        await offlineClient?.close();
-      } catch {
-        // Best-effort cleanup.
-      }
-      try {
-        await syncClient?.stop();
-      } catch {
-        // Best-effort cleanup.
-      }
-      try {
-        await syncClient?.close();
-      } catch {
-        // Best-effort cleanup.
-      }
+      await releaseClient(offlineClient);
+      await releaseClient(syncClient);
     }
-  }, [captureError, markStep, update]);
+  }, [captureError, markStep, releaseHarnessClient, update]);
 
   const runSeedInit = useCallback(async () => {
     const seedID = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
     let seedClient: SynchroClient | null = null;
     try {
+      await releaseHarnessClient();
       const seededCategoryID = '10000000-0000-0000-0000-000000000006';
       const insertedCategoryID = uuid();
       seedClient = new SynchroClient({
@@ -801,10 +907,7 @@ export default function App() {
       });
       await seedClient.initialize();
 
-      const seededScope = await seedClient.queryOne(
-        'SELECT scope_id, cursor, checksum, generation FROM _synchro_scopes WHERE scope_id = ?',
-        ['global']
-      );
+      const initialStatus = await seedClient.getSyncStatus();
       const seededRow = await seedClient.queryOne(
         'SELECT id, name FROM categories WHERE id = ?',
         [seededCategoryID]
@@ -816,38 +919,41 @@ export default function App() {
         [insertedCategoryID, 'Seed Init Category', 999]
       );
 
-      const pending = await seedClient.queryOne(
-        'SELECT table_name, operation FROM _synchro_pending_changes WHERE record_id = ?',
-        [insertedCategoryID]
+      const pending = (await seedClient.inspectPendingMutations()).find(
+        (mutation) =>
+          mutation.tableName === 'categories' && mutation.recordID === insertedCategoryID
       );
+      const seedInitOK =
+        (initialStatus.status === 'uninitialized' || initialStatus.status === 'local_ready') &&
+        seededRow?.id === seededCategoryID &&
+        seededRow?.name === 'Seed Category' &&
+        pending?.tableName === 'categories' &&
+        pending?.operation === 'insert';
 
-      update(
-        'seedInit',
-        seededScope?.scope_id === 'global' &&
-          typeof seededScope?.cursor === 'string' &&
-          seededScope.cursor.length > 0 &&
-          typeof seededScope?.checksum === 'string' &&
-          seededScope.checksum.length > 0 &&
-          seededRow?.id === seededCategoryID &&
-          seededRow?.name === 'Seed Category' &&
-          pending?.table_name === 'categories' &&
-          pending?.operation === 'create'
-      );
+      if (!seedInitOK) {
+        setLastError(
+          JSON.stringify({
+            initialStatus,
+            seededRow,
+            pending,
+          })
+        );
+      }
+
+      update('seedInit', seedInitOK);
     } catch {
       update('seedInit', false);
     } finally {
-      try {
-        await seedClient?.close();
-      } catch {
-        // Best-effort cleanup.
-      }
+      await releaseClient(seedClient);
     }
-  }, [update]);
+  }, [releaseHarnessClient, update]);
 
   const runSeedResume = useCallback(async () => {
     const seedID = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
     let seedClient: SynchroClient | null = null;
+    let unsubscribe: (() => void) | null = null;
     try {
+      await releaseHarnessClient();
       const seededCategoryID = '10000000-0000-0000-0000-000000000006';
       seedClient = new SynchroClient({
         dbPath: `synchro-seed-resume-${seedID}.db`,
@@ -861,235 +967,168 @@ export default function App() {
       });
       await seedClient.initialize();
 
-      const initialScope = await seedClient.queryOne(
-        'SELECT scope_id, cursor, checksum, generation FROM _synchro_scopes WHERE scope_id = ?',
-        ['global']
-      );
+      const initialStatus = await seedClient.getSyncStatus();
       const initialRow = await seedClient.queryOne(
         'SELECT name FROM categories WHERE id = ?',
         [seededCategoryID]
       );
 
+      const syncEvents: SyncEvent[] = [];
+      unsubscribe = seedClient.onSyncEvent((event) => syncEvents.push(event));
       await seedClient.start();
+      await seedClient.syncNow();
 
-      const resumedScope = await seedClient.queryOne(
-        'SELECT scope_id, cursor, checksum, generation FROM _synchro_scopes WHERE scope_id = ?',
-        ['global']
-      );
+      unsubscribe();
+      unsubscribe = null;
+      const resumedStatus = await seedClient.getSyncStatus();
       const resumedRow = await seedClient.queryOne(
         'SELECT name FROM categories WHERE id = ?',
         [seededCategoryID]
       );
       const pendingCount = await seedClient.pendingChangeCount();
-
-      update(
-        'seedResume',
-        initialScope?.scope_id === 'global' &&
-          resumedScope?.scope_id === 'global' &&
-          typeof initialScope?.cursor === 'string' &&
-          initialScope.cursor.length > 0 &&
-          typeof resumedScope?.cursor === 'string' &&
-          resumedScope.cursor.length > 0 &&
-          typeof initialScope?.checksum === 'string' &&
-          initialScope.checksum.length > 0 &&
-          typeof resumedScope?.checksum === 'string' &&
-          resumedScope.checksum.length > 0 &&
-          String(initialScope?.generation) === String(resumedScope?.generation) &&
-          initialRow?.name === 'Seed Category' &&
-          resumedRow?.name === 'Seed Category' &&
-          pendingCount === 0
+      const rejectedMutations = await seedClient.inspectRejectedMutations();
+      const rebuiltSharedScope = syncEvents.some(
+        (event) =>
+          (event.type === 'rebuild_requested' || event.type === 'rebuild_completed') &&
+          event.scopeID === 'global'
       );
-    } catch {
-      update('seedResume', false);
-    } finally {
-      try {
-        await seedClient?.stop();
-      } catch {
-        // Best-effort cleanup.
-      }
-      try {
-        await seedClient?.close();
-      } catch {
-        // Best-effort cleanup.
-      }
-    }
-  }, [update]);
+      const resumeOK =
+        (initialStatus.status === 'uninitialized' || initialStatus.status === 'local_ready') &&
+        resumedStatus.status === 'ready' &&
+        initialRow?.name === 'Seed Category' &&
+        resumedRow?.name === 'Seed Category' &&
+        pendingCount === 0 &&
+        rejectedMutations.length === 0 &&
+        !rebuiltSharedScope;
 
-  const runSeedRepair = useCallback(async () => {
-    const seedID = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
-    const dbPath = `synchro-seed-repair-${seedID}.db`;
-    let bootstrapClient: SynchroClient | null = null;
-    let corruptClient: SynchroClient | null = null;
-    let repairClient: SynchroClient | null = null;
-    try {
-      setLastError(null);
-      markStep('seedRepair:bootstrap');
-      const seededCategoryID = '10000000-0000-0000-0000-000000000006';
-      const seededCategoryName = 'Seed Category';
-      bootstrapClient = new SynchroClient({
-        dbPath,
-        serverURL: SYNCHRO_TEST_URL,
-        authProvider: async () => USER1_JWT,
-        clientID: `rn-seed-repair-device-${seedID}`,
-        appVersion: '1.0.0',
-        syncInterval: TEST_SYNC_INTERVAL_SECONDS,
-        pushDebounce: TEST_PUSH_DEBOUNCE_SECONDS,
-        seedDatabasePath: 'seed.db',
-      });
-      await bootstrapClient.initialize();
-
-      const initialScope = await bootstrapClient.queryOne(
-        'SELECT scope_id, cursor, checksum, generation FROM _synchro_scopes WHERE scope_id = ?',
-        ['global']
-      );
-      const initialRow = await bootstrapClient.queryOne(
-        'SELECT name FROM categories WHERE id = ?',
-        [seededCategoryID]
-      );
-      await bootstrapClient.close();
-      bootstrapClient = null;
-
-      markStep('seedRepair:corrupt');
-      corruptClient = new SynchroClient({
-        dbPath,
-        serverURL: SYNCHRO_TEST_URL,
-        authProvider: async () => USER1_JWT,
-        clientID: `rn-seed-repair-corrupt-${seedID}`,
-        appVersion: '1.0.0',
-      });
-      await corruptClient.initialize();
-      await corruptClient.writeTransaction(async (tx) => {
-        await tx.execute(
-          "UPDATE _synchro_meta SET value = '1' WHERE key = 'sync_lock'"
-        );
-        try {
-          const scopeRow = await tx.queryOne(
-            'SELECT checksum FROM _synchro_scope_rows WHERE scope_id = ? AND table_name = ? AND record_id = ?',
-            ['global', 'categories', seededCategoryID]
-          );
-          const scopeMeta = await tx.queryOne(
-            'SELECT local_checksum FROM _synchro_scopes WHERE scope_id = ?',
-            ['global']
-          );
-          const existingChecksum = Number(scopeRow?.checksum ?? 0);
-          const existingLocalChecksum = Number(scopeMeta?.local_checksum ?? 0);
-
-          await tx.execute(
-            'DELETE FROM _synchro_scope_rows WHERE scope_id = ? AND table_name = ? AND record_id = ?',
-            ['global', 'categories', seededCategoryID]
-          );
-          await tx.execute(
-            'UPDATE _synchro_scopes SET local_checksum = ? WHERE scope_id = ?',
-            [existingLocalChecksum ^ existingChecksum, 'global']
-          );
-          await tx.execute(
-            'DELETE FROM categories WHERE id = ?',
-            [seededCategoryID]
-          );
-        } finally {
-          await tx.execute(
-            "UPDATE _synchro_meta SET value = '0' WHERE key = 'sync_lock'"
-          );
-        }
-      });
-
-      const pendingBeforeStart = await corruptClient.pendingChangeCount();
-      await corruptClient.close();
-      corruptClient = null;
-
-      markStep('seedRepair:repair-start');
-      repairClient = new SynchroClient({
-        dbPath,
-        serverURL: SYNCHRO_TEST_URL,
-        authProvider: async () => USER1_JWT,
-        clientID: `rn-seed-repair-repair-${seedID}`,
-        appVersion: '1.0.0',
-        syncInterval: TEST_SYNC_INTERVAL_SECONDS,
-        pushDebounce: TEST_PUSH_DEBOUNCE_SECONDS,
-      });
-      await repairClient.initialize();
-      await repairClient.start();
-
-      const repairedScope = await repairClient.queryOne(
-        'SELECT scope_id, cursor, checksum, generation FROM _synchro_scopes WHERE scope_id = ?',
-        ['global']
-      );
-      const repairedRow = await repairClient.queryOne(
-        'SELECT name FROM categories WHERE id = ?',
-        [seededCategoryID]
-      );
-      const pendingAfterStart = await repairClient.pendingChangeCount();
-      const repairOK =
-        initialScope?.scope_id === 'global' &&
-        typeof initialScope?.cursor === 'string' &&
-        initialScope.cursor.length > 0 &&
-        typeof initialScope?.checksum === 'string' &&
-        initialScope.checksum.length > 0 &&
-        initialRow?.name === seededCategoryName &&
-        pendingBeforeStart === 0 &&
-        repairedScope?.scope_id === 'global' &&
-        typeof repairedScope?.cursor === 'string' &&
-        repairedScope.cursor.length > 0 &&
-        typeof repairedScope?.checksum === 'string' &&
-        repairedScope.checksum.length > 0 &&
-        Number(repairedScope?.generation ?? 0) >= Number(initialScope?.generation ?? 0) &&
-        repairedRow?.name === seededCategoryName &&
-        pendingAfterStart === 0;
-
-      if (!repairOK) {
+      if (!resumeOK) {
         setLastError(
           JSON.stringify({
-            pendingBeforeStart,
-            pendingAfterStart,
-            initialScope,
-            repairedScope,
+            initialStatus,
+            resumedStatus,
             initialRow,
-            repairedRow,
+            resumedRow,
+            pendingCount,
+            rejectedMutations,
+            syncEvents,
           })
         );
       }
 
-      update('seedRepair', repairOK);
-    } catch (error) {
-      captureError('seedRepair', error);
-      update('seedRepair', false);
+      update('seedResume', resumeOK);
+    } catch {
+      update('seedResume', false);
     } finally {
-      try {
-        await bootstrapClient?.stop();
-      } catch {
-        // Best-effort cleanup.
-      }
-      try {
-        await bootstrapClient?.close();
-      } catch {
-        // Best-effort cleanup.
-      }
-      try {
-        await corruptClient?.stop();
-      } catch {
-        // Best-effort cleanup.
-      }
-      try {
-        await corruptClient?.close();
-      } catch {
-        // Best-effort cleanup.
-      }
-      try {
-        await repairClient?.stop();
-      } catch {
-        // Best-effort cleanup.
-      }
-      try {
-        await repairClient?.close();
-      } catch {
-        // Best-effort cleanup.
-      }
+      unsubscribe?.();
+      await releaseClient(seedClient);
     }
-  }, [update]);
+  }, [releaseHarnessClient, update]);
+
+  const runSeedCorrupt = useCallback(async () => {
+    const seedID = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    const dbPath = `synchro-seed-corrupt-${seedID}.db`;
+    let corruptClient: SynchroClient | null = null;
+    let recoveryClient: SynchroClient | null = null;
+    try {
+      setLastError(null);
+      await releaseHarnessClient();
+      markStep('seedCorrupt:start');
+      corruptClient = new SynchroClient({
+        dbPath,
+        serverURL: SYNCHRO_TEST_URL,
+        authProvider: async () => USER1_JWT,
+        clientID: `rn-seed-corrupt-device-${seedID}`,
+        appVersion: '1.0.0',
+        seedDatabasePath: 'corrupt-seed.db',
+      });
+      let initializationCode: string | null = null;
+      try {
+        await corruptClient.initialize();
+      } catch (error: any) {
+        initializationCode = typeof error?.code === 'string' ? error.code : null;
+      }
+      if (initializationCode !== 'INVALID_SEED') {
+        throw new Error(`corrupt seed did not fail with INVALID_SEED: ${initializationCode ?? 'none'}`);
+      }
+      markStep('seedCorrupt:invalid-seed');
+
+      recoveryClient = new SynchroClient({
+        dbPath,
+        serverURL: SYNCHRO_TEST_URL,
+        authProvider: async () => USER1_JWT,
+        clientID: `rn-seed-corrupt-recovery-${seedID}`,
+        appVersion: '1.0.0',
+      });
+      await recoveryClient.initialize();
+      markStep('seedCorrupt:recovery');
+
+      let categoriesAvailable = true;
+      try {
+        await recoveryClient.query('SELECT 1 FROM categories LIMIT 1');
+      } catch {
+        categoriesAvailable = false;
+      }
+      const recoveryStatus = await recoveryClient.getSyncStatus();
+      const pendingCount = await recoveryClient.pendingChangeCount();
+      await recoveryClient.createTable('seed_corrupt_probe', [
+        { name: 'id', type: 'TEXT', primaryKey: true },
+        { name: 'value', type: 'TEXT' },
+      ]);
+      const writeResult = await recoveryClient.execute(
+        'INSERT INTO seed_corrupt_probe (id, value) VALUES (?, ?)',
+        ['probe', 'ordinary-local-sql']
+      );
+      const probeRow = await recoveryClient.queryOne(
+        'SELECT value FROM seed_corrupt_probe WHERE id = ?',
+        ['probe']
+      );
+      const recoveryOK =
+        (recoveryStatus.status === 'uninitialized' || recoveryStatus.status === 'local_ready') &&
+        !categoriesAvailable &&
+        pendingCount === 0 &&
+        writeResult.rowsAffected === 1 &&
+        probeRow?.value === 'ordinary-local-sql';
+
+      if (!recoveryOK) {
+        setLastError(
+          JSON.stringify({
+            initializationCode,
+            recoveryStatus,
+            categoriesAvailable,
+            pendingCount,
+            writeResult,
+            probeRow,
+          })
+        );
+      }
+
+      update('seedCorrupt', recoveryOK);
+    } catch (error) {
+      captureError('seedCorrupt', error);
+      update('seedCorrupt', false);
+    } finally {
+      await releaseClient(corruptClient);
+      await releaseClient(recoveryClient);
+    }
+  }, [captureError, markStep, releaseHarnessClient, update]);
 
   return (
-    <View style={styles.container}>
-      <ScrollView testID="test-scroll" contentContainerStyle={styles.scroll}>
+    <SafeAreaView style={styles.container}>
+      <TouchableOpacity
+        style={[styles.button, styles.resetButton]}
+        onPress={() => {
+          void resetHarness();
+        }}
+        testID="btn-reset"
+      >
+        <Text>Reset Harness</Text>
+      </TouchableOpacity>
+      <ScrollView
+        key={harnessGeneration}
+        testID="test-scroll"
+        style={styles.scroller}
+        contentContainerStyle={styles.scroll}
+      >
         <Text style={styles.header} testID="header">
           Synchro RN Test Harness
         </Text>
@@ -1100,16 +1139,8 @@ export default function App() {
         </View>
         <Text testID="step-value">{currentStep}</Text>
         <Text testID="error-value">{lastError ?? 'none'}</Text>
-
-        <TouchableOpacity
-          style={styles.button}
-          onPress={() => {
-            void resetHarness();
-          }}
-          testID="btn-reset"
-        >
-          <Text>Reset Harness</Text>
-        </TouchableOpacity>
+        <Text testID="conflict-record-id">{pendingConflictRecordID ?? 'none'}</Text>
+        <Text testID="multi-user-record-id">{pendingMultiUserRecordID ?? 'none'}</Text>
 
         <View style={styles.buttons}>
           <TouchableOpacity style={styles.button} onPress={runInit} testID="btn-init">
@@ -1139,6 +1170,9 @@ export default function App() {
           <TouchableOpacity style={styles.button} onPress={runStart} testID="btn-start">
             <Text>Start Sync</Text>
           </TouchableOpacity>
+          <TouchableOpacity style={styles.button} onPress={runLifecycle} testID="btn-lifecycle">
+            <Text>Lifecycle</Text>
+          </TouchableOpacity>
           <TouchableOpacity style={styles.button} onPress={runPushPull} testID="btn-pushPull">
             <Text>Push/Pull</Text>
           </TouchableOpacity>
@@ -1163,8 +1197,8 @@ export default function App() {
           <TouchableOpacity style={styles.button} onPress={runSeedResume} testID="btn-seedResume">
             <Text>Seed Resume</Text>
           </TouchableOpacity>
-          <TouchableOpacity style={styles.button} onPress={runSeedRepair} testID="btn-seedRepair">
-            <Text>Seed Repair</Text>
+          <TouchableOpacity style={styles.button} onPress={runSeedCorrupt} testID="btn-seedCorrupt">
+            <Text>Seed Corrupt</Text>
           </TouchableOpacity>
         </View>
 
@@ -1182,12 +1216,14 @@ export default function App() {
               : 'FAIL'}
         </Text>
       </View>
-    </View>
+    </SafeAreaView>
   );
 }
 
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: '#fff' },
+  scroller: { flex: 1 },
+  resetButton: { marginHorizontal: 20, marginTop: 20 },
   scroll: { padding: 20, paddingBottom: 120 },
   header: { fontSize: 20, fontWeight: 'bold', marginBottom: 16 },
   statusRow: {
@@ -1221,6 +1257,7 @@ const styles = StyleSheet.create({
   },
   button: {
     backgroundColor: '#e0e0e0',
+    minHeight: 44,
     padding: 12,
     borderRadius: 6,
     marginBottom: 8,

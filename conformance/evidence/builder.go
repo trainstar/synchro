@@ -6,7 +6,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"math"
 	"math/big"
 	"reflect"
 	"sort"
@@ -16,6 +15,7 @@ import (
 	"github.com/trainstar/synchro/conformance/execution"
 	"github.com/trainstar/synchro/conformance/internal/contract"
 	"github.com/trainstar/synchro/conformance/internal/jsonstrict"
+	"github.com/trainstar/synchro/conformance/internal/performance"
 	"github.com/trainstar/synchro/conformance/scenarios"
 	"github.com/trainstar/synchro/conformance/vectors"
 )
@@ -844,12 +844,15 @@ func validatePerformanceResult(result execution.PerformanceResult, budget contra
 	if limitErr != nil || resultLimit.Cmp(limit) != 0 {
 		return fmt.Errorf("%w: performance limit", ErrInvalidEvidence)
 	}
-	derived := observedPerformanceValue(result.Metric, result.Measurement)
-	derivedNumber, err := exactFloat(derived)
+	evaluation, err := performance.EvaluateBudget(budget, result.Measurement)
+	if err != nil {
+		return fmt.Errorf("%w: performance measurement: %v", ErrInvalidEvidence, err)
+	}
+	derivedNumber, err := exactFloat(evaluation.ObservedValue)
 	if err != nil || derivedNumber.Cmp(observed) != 0 {
 		return fmt.Errorf("%w: performance observed value is not derived", ErrInvalidEvidence)
 	}
-	passed := compareNumbers(observed, limit, result.Comparator)
+	passed := evaluation.Passed
 	if (result.Outcome == "passed" && !passed) || (result.Outcome == "failed" && passed) {
 		return fmt.Errorf("%w: performance outcome", ErrInvalidEvidence)
 	}
@@ -943,41 +946,6 @@ func expectedMetricsForMeasurement(metrics []contract.PerformanceMetric) map[str
 	return result
 }
 
-func observedPerformanceValue(metric string, measurement execution.PerformanceMeasurement) float64 {
-	counts := measurement.RequestCounts
-	sum := func(values ...int) int {
-		total := 0
-		for _, value := range values {
-			total += value
-		}
-		return total
-	}
-	switch metric {
-	case "warm_connect_http_requests", "rebuild_connect_http_requests":
-		return float64(counts.Connect)
-	case "warm_connect_non_connect_http_requests":
-		return float64(sum(counts.Push, counts.Pull, counts.RebuildPage, counts.SchemaFetch, counts.Other))
-	case "steady_state_pull_http_requests_per_cycle", "pending_cycle_pull_http_requests", "rebuild_pull_http_requests":
-		return float64(counts.Pull)
-	case "steady_state_pull_non_pull_http_requests_per_cycle":
-		return float64(sum(counts.Connect, counts.Push, counts.RebuildPage, counts.SchemaFetch, counts.Other))
-	case "pending_cycle_push_http_requests":
-		return float64(counts.Push)
-	case "pending_cycle_non_push_or_pull_http_requests":
-		return float64(sum(counts.Connect, counts.RebuildPage, counts.SchemaFetch, counts.Other))
-	case "rebuild_page_request_count_minus_returned_page_count":
-		return float64(counts.RebuildPage - measurement.ReturnedRebuildPageCount)
-	case "rebuild_schema_fetch_http_requests":
-		return float64(counts.SchemaFetch)
-	case "rebuild_unexpected_http_requests":
-		return float64(sum(counts.Push, counts.SchemaFetch, counts.Other))
-	case "core_sync_outbound_network_or_rpc_hops":
-		return float64(measurement.OutboundNetworkOrRPCHops)
-	default:
-		return math.NaN()
-	}
-}
-
 func exactNumber(value string) (*big.Rat, error) {
 	parsed := new(big.Rat)
 	if _, ok := parsed.SetString(value); !ok {
@@ -994,20 +962,7 @@ func exactFloat(value float64) (*big.Rat, error) {
 }
 
 func finiteNumber(value float64) bool {
-	return !math.IsNaN(value) && !math.IsInf(value, 0)
-}
-
-func compareNumbers(left, right *big.Rat, comparator string) bool {
-	switch comparator {
-	case "eq":
-		return left.Cmp(right) == 0
-	case "lte":
-		return left.Cmp(right) <= 0
-	case "gte":
-		return left.Cmp(right) >= 0
-	default:
-		return false
-	}
+	return performance.IsFinite(value)
 }
 
 func semanticJSONEqual(left, right json.RawMessage) bool {

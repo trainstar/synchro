@@ -91,7 +91,7 @@ final class SchemaIntegrationTests: XCTestCase {
             dbPath: dbPath,
             serverURL: serverURL,
             authProvider: { token },
-            clientID: UUID().uuidString,
+            clientID: UUID().uuidString.lowercased(),
             appVersion: "1.0.0",
             syncInterval: 999,
             maxRetryAttempts: 1,
@@ -115,36 +115,9 @@ final class SchemaIntegrationTests: XCTestCase {
 
     /// Fetch the live schema from the test server.
     private func fetchServerSchema() async throws -> SchemaResponse {
-        let config = makeConfig(userID: UUID().uuidString, dbPath: tempDBPath())
+        let config = makeConfig(userID: UUID().uuidString.lowercased(), dbPath: tempDBPath())
         let http = HttpClient(config: config)
         return try await http.fetchSchema()
-    }
-
-    /// Create a copy of a SchemaTable with different columns.
-    private func withColumns(_ table: SchemaTable, columns: [SchemaColumn]) -> SchemaTable {
-        SchemaTable(
-            tableName: table.tableName,
-            updatedAtColumn: table.updatedAtColumn,
-            deletedAtColumn: table.deletedAtColumn,
-            primaryKey: table.primaryKey,
-            columns: columns
-        )
-    }
-
-    /// Create a seed database file with the given tables.
-    /// Returns the path to the seed file.
-    private func createSeedDB(tables: [SchemaTable], schemaVersion: Int64 = 1, schemaHash: String = "seed") throws -> String {
-        let seedPath = tempDBPath()
-        let db = try SynchroDatabase(path: seedPath)
-        let schemaManager = SchemaManager(database: db)
-        let schema = SchemaResponse(schemaVersion: schemaVersion, schemaHash: schemaHash, serverTime: Date(), tables: tables)
-        try schemaManager.createSyncedTables(schema: schema)
-        try db.writeTransaction { grdb in
-            try SynchroMeta.setInt64(grdb, key: .schemaVersion, value: schemaVersion)
-            try SynchroMeta.set(grdb, key: .schemaHash, value: schemaHash)
-        }
-        try db.close()
-        return seedPath
     }
 
     // MARK: - 1. testAdditiveSchemaChangePreservesData
@@ -152,7 +125,7 @@ final class SchemaIntegrationTests: XCTestCase {
     func testAdditiveSchemaChangePreservesData() async throws {
         let serverSchema = try await fetchServerSchema()
         let userID = UUID().uuidString.lowercased()
-        let clientID = UUID().uuidString
+        let clientID = UUID().uuidString.lowercased()
         let dbPath = tempDBPath()
 
         guard let ordersTable = serverSchema.tables.first(where: { $0.tableName == "orders" }) else {
@@ -165,56 +138,51 @@ final class SchemaIntegrationTests: XCTestCase {
         try await client1.start()
 
         // 2. Insert customer (required FK for orders) and order, push to server
-        let custID = UUID().uuidString
+        let custID = UUID().uuidString.lowercased()
         _ = try client1.execute(
             "INSERT INTO customers (id, user_id, name, balance, is_active, created_at, updated_at) VALUES (?, ?, ?, 0, 1, ?, ?)",
             params: [custID, userID, "Schema Test Customer", "2026-01-01T00:00:00.000Z", "2026-01-01T00:00:00.000Z"]
         )
-        let orderID = UUID().uuidString
+        let orderID = UUID().uuidString.lowercased()
         _ = try client1.execute(
-            "INSERT INTO orders (id, customer_id, status, total_price, currency, ship_address, created_at, updated_at) VALUES (?, ?, 'pending', 0, 'USD', ?, ?, ?)",
-            params: [orderID, custID, "123 Main St", "2026-01-01T00:00:00.000Z", "2026-01-01T00:00:00.000Z"]
+            "INSERT INTO orders (id, customer_id, user_id, status, total_price, currency, ship_address, created_at, updated_at) VALUES (?, ?, ?, 'pending', 0, 'USD', ?, ?, ?)",
+            params: [orderID, custID, userID, #"{"street":"123 Main St"}"#, "2026-01-01T00:00:00.000Z", "2026-01-01T00:00:00.000Z"]
         )
         try await client1.syncNow()
 
-        client1.stop()
-        try client1.close()
+        await client1.stop()
+        try await client1.close()
 
-        // 3. Force schema re-fetch by resetting version/hash
-        let rawDb = try SynchroDatabase(path: dbPath)
-        _ = try rawDb.execute("UPDATE _synchro_meta SET value = '0' WHERE key = 'schema_version'", params: nil)
-        _ = try rawDb.execute("UPDATE _synchro_meta SET value = '' WHERE key = 'schema_hash'", params: nil)
-        try rawDb.close()
-
-        // 4. Reconnect with SAME clientID — schema re-fetched, reconciled additively, incremental pull
+        // 3. Reconnect with the same client identity and installed schema.
         let config2 = makeConfigWithClientID(userID: userID, clientID: clientID, dbPath: dbPath)
         let client2 = try SynchroClient(config: config2)
         try await client2.start()
 
-        // 5. Data pushed in step 2 should still be there (persisted on server, pulled back)
+        // 4. Data pushed before restart remains available.
         let row = try client2.queryOne("SELECT id, ship_address FROM orders WHERE id = ?", params: [orderID])
         XCTAssertNotNil(row, "pushed data should survive schema reconciliation on reconnect")
-        XCTAssertEqual(row?["ship_address"] as? String, "123 Main St")
+        XCTAssertEqual(row?["ship_address"] as? String, #"{"street":"123 Main St"}"#)
 
-        // 6. All server columns still exist locally
+        // 5. All server columns still exist locally.
         let colRows = try client2.query("PRAGMA table_info(orders)", params: nil)
         let colNames = Set(colRows.map { $0["name"] as! String })
         for serverCol in ordersTable.columns {
             XCTAssertTrue(colNames.contains(serverCol.name), "column '\(serverCol.name)' should exist after reconciliation")
         }
 
-        client2.stop()
-        try client2.close()
+        await client2.stop()
+        try await client2.close()
     }
 
     // MARK: - 2. testLocalOnlyTablesSurviveReconnect
 
     func testLocalOnlyTablesSurviveReconnect() async throws {
-        let userID = UUID().uuidString
+        let userID = UUID().uuidString.lowercased()
+        let clientID = UUID().uuidString.lowercased()
         let dbPath = tempDBPath()
 
         // Connect, sync (creates synced tables from server schema)
-        let client1 = try SynchroClient(config: makeConfig(userID: userID, dbPath: dbPath))
+        let client1 = try SynchroClient(config: makeConfigWithClientID(userID: userID, clientID: clientID, dbPath: dbPath))
         try await client1.start()
 
         // Create a local-only table with data
@@ -231,19 +199,11 @@ final class SchemaIntegrationTests: XCTestCase {
             params: ["locale", "en"]
         )
 
-        client1.stop()
-        try client1.close()
+        await client1.stop()
+        try await client1.close()
 
-        // Force schema re-check by resetting hash
-        let rawDb = try SynchroDatabase(path: dbPath)
-        _ = try rawDb.execute(
-            "UPDATE _synchro_meta SET value = '' WHERE key = 'schema_hash'",
-            params: nil
-        )
-        try rawDb.close()
-
-        // Reconnect — schema re-fetched and reconciled
-        let client2 = try SynchroClient(config: makeConfig(userID: userID, dbPath: dbPath))
+        // Reconnect with the same client identity.
+        let client2 = try SynchroClient(config: makeConfigWithClientID(userID: userID, clientID: clientID, dbPath: dbPath))
         try await client2.start()
 
         // Verify local-only table and data survived
@@ -254,45 +214,63 @@ final class SchemaIntegrationTests: XCTestCase {
         XCTAssertEqual(settings[1]["key"] as? String, "theme")
         XCTAssertEqual(settings[1]["value"] as? String, "dark")
 
-        client2.stop()
-        try client2.close()
+        await client2.stop()
+        try await client2.close()
     }
 
-    // MARK: - 3. testSeedDatabaseWorksOffline
+    // MARK: - 3. portable seed installation
 
-    func testSeedDatabaseWorksOffline() async throws {
-        // Fetch server schema to build a correct seed
-        let serverSchema = try await fetchServerSchema()
-        let seedPath = try createSeedDB(
-            tables: serverSchema.tables,
-            schemaVersion: serverSchema.schemaVersion,
-            schemaHash: serverSchema.schemaHash
+    func testCanonicalGoSeedMigratesAndInstallsWithoutMutatingSource() async throws {
+        let dbPath = tempDBPath()
+        let sourceBeforeInstall = try Data(contentsOf: URL(fileURLWithPath: canonicalSeedPath))
+        let client = try SynchroClient(
+            config: makeConfig(
+                userID: UUID().uuidString.lowercased(),
+                dbPath: dbPath,
+                seedPath: canonicalSeedPath
+            )
         )
 
-        // Create SynchroClient with seed — do NOT call start()
-        let dbPath = tempDBPath()
-        let client = try SynchroClient(config: makeConfig(userID: UUID().uuidString, dbPath: dbPath, seedPath: seedPath))
+        let migrations = try client.query("SELECT identifier FROM grdb_migrations", params: nil)
+        let identifiers = Set(migrations.compactMap { $0["identifier"] as? String })
+        XCTAssertTrue(identifiers.contains("synchro_v9_mutation_ledger"))
+        XCTAssertTrue(identifiers.contains("synchro_v10_rebuild_page_receipts"))
+        XCTAssertTrue(identifiers.contains("synchro_v11_durable_backoff"))
+        XCTAssertTrue(identifiers.contains("synchro_v12_gate2_recovery"))
+        XCTAssertEqual(
+            try Data(contentsOf: URL(fileURLWithPath: canonicalSeedPath)),
+            sourceBeforeInstall
+        )
+        for suffix in ["-journal", "-wal", "-shm"] {
+            XCTAssertFalse(FileManager.default.fileExists(atPath: canonicalSeedPath + suffix))
+        }
 
-        // Tables should be queryable immediately (offline)
-        let orders = try client.query("SELECT * FROM orders", params: nil)
-        XCTAssertEqual(orders.count, 0, "seed DB should have empty tables")
+        try await client.close()
+    }
+
+    func testCanonicalSeedWorksOffline() async throws {
+        let dbPath = tempDBPath()
+        let userID = UUID().uuidString.lowercased()
+        let client = try SynchroClient(
+            config: makeConfig(userID: userID, dbPath: dbPath, seedPath: canonicalSeedPath)
+        )
 
         // Insert customer (FK required) and order offline — CDC triggers should fire
-        let custID = UUID().uuidString
+        let custID = UUID().uuidString.lowercased()
         _ = try client.execute(
             "INSERT INTO customers (id, user_id, name, balance, is_active, created_at, updated_at) VALUES (?, ?, ?, 0, 1, ?, ?)",
-            params: [custID, UUID().uuidString, "Offline Customer", "2026-01-01T00:00:00.000Z", "2026-01-01T00:00:00.000Z"]
+            params: [custID, userID, "Offline Customer", "2026-01-01T00:00:00.000Z", "2026-01-01T00:00:00.000Z"]
         )
-        let orderID = UUID().uuidString
+        let orderID = UUID().uuidString.lowercased()
         _ = try client.execute(
-            "INSERT INTO orders (id, customer_id, status, total_price, currency, ship_address, created_at, updated_at) VALUES (?, ?, 'pending', 0, 'USD', ?, ?, ?)",
-            params: [orderID, custID, "456 Oak Ave", "2026-01-01T00:00:00.000Z", "2026-01-01T00:00:00.000Z"]
+            "INSERT INTO orders (id, customer_id, user_id, status, total_price, currency, ship_address, created_at, updated_at) VALUES (?, ?, ?, 'pending', 0, 'USD', ?, ?, ?)",
+            params: [orderID, custID, userID, #"{"street":"456 Oak Ave"}"#, "2026-01-01T00:00:00.000Z", "2026-01-01T00:00:00.000Z"]
         )
 
         // Query back
         let row = try client.queryOne("SELECT ship_address FROM orders WHERE id = ?", params: [orderID])
         XCTAssertNotNil(row)
-        XCTAssertEqual(row?["ship_address"] as? String, "456 Oak Ave")
+        XCTAssertEqual(row?["ship_address"] as? String, #"{"street":"456 Oak Ave"}"#)
 
         // Verify CDC trigger fired (pending change exists)
         let pending = try client.query(
@@ -301,16 +279,16 @@ final class SchemaIntegrationTests: XCTestCase {
         )
         XCTAssertEqual(pending.count, 1)
         XCTAssertEqual(pending[0]["record_id"] as? String, orderID)
-        XCTAssertEqual(pending[0]["operation"] as? String, "create")
+        XCTAssertEqual(pending[0]["operation"] as? String, "insert")
 
-        try client.close()
+        try await client.close()
     }
 
     func testOfflineWritesBeforeFirstConnectArePushedOnFirstSync() async throws {
         let userID = UUID().uuidString.lowercased()
-        let clientID = UUID().uuidString
+        let clientID = UUID().uuidString.lowercased()
         let dbPath = tempDBPath()
-        let customerID = UUID().uuidString
+        let customerID = UUID().uuidString.lowercased()
 
         let offlineClient = try SynchroClient(
             config: makeConfigWithClientID(
@@ -334,7 +312,7 @@ final class SchemaIntegrationTests: XCTestCase {
             "SELECT name FROM customers WHERE id = ?",
             params: [customerID]
         )
-        try offlineClient.close()
+        try await offlineClient.close()
 
         let onlineClient = try SynchroClient(
             config: makeConfigWithClientID(userID: userID, clientID: clientID, dbPath: dbPath)
@@ -343,7 +321,7 @@ final class SchemaIntegrationTests: XCTestCase {
         try await onlineClient.syncNow()
 
         let pendingAfterConnect = try onlineClient.query(
-            "SELECT record_id FROM _synchro_pending_changes",
+            "SELECT record_id FROM _synchro_pending_changes WHERE lifecycle_state NOT IN ('accepted', 'rejected', 'superseded_before_send', 'cancelled_before_send')",
             params: nil
         )
         let localRow = try onlineClient.queryOne(
@@ -354,8 +332,8 @@ final class SchemaIntegrationTests: XCTestCase {
             "SELECT mutation_id FROM _synchro_rejected_mutations",
             params: nil
         )
-        onlineClient.stop()
-        try onlineClient.close()
+        await onlineClient.stop()
+        try await onlineClient.close()
 
         XCTAssertEqual(pendingBeforeConnect.count, 1)
         XCTAssertEqual(offlineRow?["name"] as? String, "Offline First Customer")
@@ -364,60 +342,27 @@ final class SchemaIntegrationTests: XCTestCase {
         XCTAssertTrue(rejectedAfterConnect.isEmpty)
     }
 
-    // MARK: - 4. testSeedDatabaseReconcilesOnConnect
+    // MARK: - 4. invalid seed rejection
 
-    func testSeedDatabaseReconcilesOnConnect() async throws {
-        let serverSchema = try await fetchServerSchema()
-
-        guard let ordersTable = serverSchema.tables.first(where: { $0.tableName == "orders" }) else {
-            return XCTFail("server schema must include 'orders' table")
-        }
-
-        // Create a STALE seed: only the orders table with minimal columns (no other tables)
-        let minimalColumns = ordersTable.columns.filter {
-            ["id", "customer_id", "ship_address", "updated_at", "deleted_at"].contains($0.name)
-        }
-        let staleOrders = withColumns(ordersTable, columns: minimalColumns)
-        let seedPath = try createSeedDB(tables: [staleOrders], schemaVersion: 0, schemaHash: "stale-seed")
-
-        // Create SynchroClient with stale seed, then connect to server
+    func testIncompleteSeedIsRejectedBeforeConnect() throws {
+        let seedPath = tempDBPath()
         let dbPath = tempDBPath()
-        let client = try SynchroClient(config: makeConfig(userID: UUID().uuidString, dbPath: dbPath, seedPath: seedPath))
-        try await client.start()
+        let seed = try SynchroDatabase(path: seedPath)
+        try seed.close()
 
-        // Verify missing columns were added by reconciliation
-        let colRows = try client.query("PRAGMA table_info(orders)", params: nil)
-        let colNames = Set(colRows.map { $0["name"] as! String })
-        for serverCol in ordersTable.columns {
-            XCTAssertTrue(colNames.contains(serverCol.name), "column '\(serverCol.name)' should be added by reconciliation")
-        }
-
-        // Verify tables from server that weren't in the seed were also created
-        for serverTable in serverSchema.tables {
-            let tableRows = try client.query(
-                "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
-                params: [serverTable.tableName]
+        XCTAssertThrowsError(
+            try SynchroClient(
+                config: makeConfig(
+                    userID: UUID().uuidString.lowercased(),
+                    dbPath: dbPath,
+                    seedPath: seedPath
+                )
             )
-            XCTAssertEqual(tableRows.count, 1, "table '\(serverTable.tableName)' should exist after reconciliation")
+        )
+        XCTAssertFalse(FileManager.default.fileExists(atPath: dbPath))
+        for suffix in ["-journal", "-wal", "-shm"] {
+            XCTAssertFalse(FileManager.default.fileExists(atPath: dbPath + suffix))
         }
-
-        // Verify sync works — can insert and push after reconciliation
-        let custID = UUID().uuidString
-        _ = try client.execute(
-            "INSERT INTO customers (id, user_id, name, balance, is_active, created_at, updated_at) VALUES (?, ?, ?, 0, 1, ?, ?)",
-            params: [custID, UUID().uuidString, "Reconcile Customer", "2026-01-01T00:00:00.000Z", "2026-01-01T00:00:00.000Z"]
-        )
-        let orderID = UUID().uuidString
-        _ = try client.execute(
-            "INSERT INTO orders (id, customer_id, status, total_price, currency, ship_address, created_at, updated_at) VALUES (?, ?, 'pending', 0, 'USD', ?, ?, ?)",
-            params: [orderID, custID, "post-reconcile insert", "2026-01-01T00:00:00.000Z", "2026-01-01T00:00:00.000Z"]
-        )
-        let row = try client.queryOne("SELECT ship_address FROM orders WHERE id = ?", params: [orderID])
-        XCTAssertNotNil(row)
-        XCTAssertEqual(row?["ship_address"] as? String, "post-reconcile insert")
-
-        client.stop()
-        try client.close()
     }
 
     // MARK: - 5. testBundledSeedRepairsPortableScopeCorruptionOnConnect
@@ -425,7 +370,7 @@ final class SchemaIntegrationTests: XCTestCase {
     func testBundledSeedRepairsPortableScopeCorruptionOnConnect() async throws {
         let dbPath = tempDBPath()
         let bootstrap = try SynchroClient(
-            config: makeConfig(userID: UUID().uuidString, dbPath: dbPath, seedPath: canonicalSeedPath)
+            config: makeConfig(userID: UUID().uuidString.lowercased(), dbPath: dbPath, seedPath: canonicalSeedPath)
         )
 
         let seededCategoryID = "10000000-0000-0000-0000-000000000006"
@@ -435,7 +380,7 @@ final class SchemaIntegrationTests: XCTestCase {
             try SynchroMeta.getScope(db, scopeID: "global")
         }
         XCTAssertEqual(seededScope?.scopeID, "global")
-        XCTAssertFalse((seededScope?.cursor ?? "").isEmpty)
+        XCTAssertNil(seededScope?.cursor)
         XCTAssertFalse((seededScope?.checksum ?? "").isEmpty)
 
         let seededRow = try bootstrap.queryOne(
@@ -443,8 +388,12 @@ final class SchemaIntegrationTests: XCTestCase {
             params: [seededCategoryID]
         )
         XCTAssertEqual(seededRow?["name"] as? String, seededCategoryName)
+        let seedReceipts = try bootstrap.readTransaction { db in
+            try SynchroMeta.getSeedReceipts(db)
+        }
+        XCTAssertNotNil(seedReceipts["global"])
 
-        try bootstrap.close()
+        try await bootstrap.close()
 
         let rawDb = try SynchroDatabase(path: dbPath)
         try rawDb.writeSyncLockedTransaction { db in
@@ -462,7 +411,7 @@ final class SchemaIntegrationTests: XCTestCase {
         try rawDb.close()
 
         let client = try SynchroClient(
-            config: makeConfig(userID: UUID().uuidString, dbPath: dbPath)
+            config: makeConfig(userID: UUID().uuidString.lowercased(), dbPath: dbPath)
         )
         try await client.start()
 
@@ -478,15 +427,19 @@ final class SchemaIntegrationTests: XCTestCase {
         XCTAssertEqual(repairedScope?.scopeID, "global")
         XCTAssertFalse((repairedScope?.cursor ?? "").isEmpty)
         XCTAssertFalse((repairedScope?.checksum ?? "").isEmpty)
+        let remainingReceipts = try client.readTransaction { db in
+            try SynchroMeta.getSeedReceipts(db)
+        }
+        XCTAssertTrue(remainingReceipts.isEmpty)
 
         let pendingCount = try client.queryOne(
-            "SELECT COUNT(*) AS count FROM _synchro_pending_changes",
+            "SELECT COUNT(*) AS count FROM _synchro_pending_changes WHERE lifecycle_state NOT IN ('accepted', 'rejected', 'superseded_before_send', 'cancelled_before_send')",
             params: nil
         )
         XCTAssertEqual(pendingCount?["count"] as? Int64, 0)
 
-        client.stop()
-        try client.close()
+        await client.stop()
+        try await client.close()
     }
 
     // MARK: - 6. testBundledSeedContinuesIncrementallyWithoutRebuild
@@ -506,7 +459,7 @@ final class SchemaIntegrationTests: XCTestCase {
             try SynchroMeta.getScope(db, scopeID: "global")
         }
         XCTAssertEqual(initialScope?.scopeID, "global")
-        XCTAssertFalse((initialScope?.cursor ?? "").isEmpty)
+        XCTAssertNil(initialScope?.cursor)
         XCTAssertFalse((initialScope?.checksum ?? "").isEmpty)
 
         let initialGeneration = initialScope?.generation
@@ -533,24 +486,24 @@ final class SchemaIntegrationTests: XCTestCase {
         XCTAssertEqual(resumedCategory?["name"] as? String, "Seed Category")
 
         let pendingCount = try client.queryOne(
-            "SELECT COUNT(*) AS count FROM _synchro_pending_changes",
+            "SELECT COUNT(*) AS count FROM _synchro_pending_changes WHERE lifecycle_state NOT IN ('accepted', 'rejected', 'superseded_before_send', 'cancelled_before_send')",
             params: nil
         )
         XCTAssertEqual(pendingCount?["count"] as? Int64, 0)
 
-        client.stop()
-        try client.close()
+        await client.stop()
+        try await client.close()
     }
 
     // MARK: - 7. testGlobalScopeRepairLeavesUserRowsUntouched
 
     func testGlobalScopeRepairLeavesUserRowsUntouched() async throws {
-        let userID = UUID().uuidString
-        let clientID = UUID().uuidString
+        let userID = UUID().uuidString.lowercased()
+        let clientID = UUID().uuidString.lowercased()
         let dbPath = tempDBPath()
         let seededCategoryID = "10000000-0000-0000-0000-000000000006"
-        let customerID = UUID().uuidString
-        let orderID = UUID().uuidString
+        let customerID = UUID().uuidString.lowercased()
+        let orderID = UUID().uuidString.lowercased()
 
         let bootstrap = try SynchroClient(
             config: makeConfigWithClientID(
@@ -561,20 +514,22 @@ final class SchemaIntegrationTests: XCTestCase {
             )
         )
 
-        try await bootstrap.start()
+        // Keep the portable receipt pending while local intent is captured.
         _ = try bootstrap.execute(
             "INSERT INTO customers (id, user_id, name, balance, is_active, created_at, updated_at) VALUES (?, ?, ?, 0, 1, ?, ?)",
             params: [customerID, userID, "Scoped Repair Customer", "2026-01-06T00:00:00.000Z", "2026-01-06T00:00:00.000Z"]
         )
         _ = try bootstrap.execute(
-            "INSERT INTO orders (id, customer_id, status, total_price, currency, ship_address, created_at, updated_at) VALUES (?, ?, 'pending', 0, 'USD', ?, ?, ?)",
-            params: [orderID, customerID, "User Scope Row", "2026-01-06T00:00:00.000Z", "2026-01-06T00:00:00.000Z"]
+            "INSERT INTO orders (id, customer_id, user_id, status, total_price, currency, ship_address, created_at, updated_at) VALUES (?, ?, ?, 'pending', 0, 'USD', ?, ?, ?)",
+            params: [orderID, customerID, userID, #"{"street":"User Scope Row"}"#, "2026-01-06T00:00:00.000Z", "2026-01-06T00:00:00.000Z"]
         )
-        try await bootstrap.syncNow()
-        bootstrap.stop()
-        try bootstrap.close()
+        try await bootstrap.close()
 
         let rawDb = try SynchroDatabase(path: dbPath)
+        let pendingReceipt = try rawDb.readTransaction { db in
+            try SynchroMeta.getSeedReceipts(db)
+        }
+        XCTAssertNotNil(pendingReceipt["global"])
         try rawDb.writeSyncLockedTransaction { db in
             try SynchroMeta.deleteScopeRow(
                 db,
@@ -608,27 +563,32 @@ final class SchemaIntegrationTests: XCTestCase {
             "SELECT ship_address FROM orders WHERE id = ?",
             params: [orderID]
         )
-        XCTAssertEqual(preservedOrder?["ship_address"] as? String, "User Scope Row")
+        XCTAssertEqual(preservedOrder?["ship_address"] as? String, #"{"street":"User Scope Row"}"#)
+
+        let remainingReceipts = try client.readTransaction { db in
+            try SynchroMeta.getSeedReceipts(db)
+        }
+        XCTAssertTrue(remainingReceipts.isEmpty)
 
         let pendingCount = try client.queryOne(
-            "SELECT COUNT(*) AS count FROM _synchro_pending_changes",
+            "SELECT COUNT(*) AS count FROM _synchro_pending_changes WHERE lifecycle_state NOT IN ('accepted', 'rejected', 'superseded_before_send', 'cancelled_before_send')",
             params: nil
         )
         XCTAssertEqual(pendingCount?["count"] as? Int64, 0)
 
-        client.stop()
-        try client.close()
+        await client.stop()
+        try await client.close()
     }
 
     // MARK: - 8. testSharedSeedRowsStayInSharedScopeOnly
 
     func testSharedSeedRowsStayInSharedScopeOnly() async throws {
         let userID = UUID().uuidString.lowercased()
-        let clientID = UUID().uuidString
+        let clientID = UUID().uuidString.lowercased()
         let dbPath = tempDBPath()
         let seededCategoryID = "10000000-0000-0000-0000-000000000006"
-        let customerID = UUID().uuidString
-        let orderID = UUID().uuidString
+        let customerID = UUID().uuidString.lowercased()
+        let orderID = UUID().uuidString.lowercased()
 
         let client = try SynchroClient(
             config: makeConfigWithClientID(
@@ -645,8 +605,8 @@ final class SchemaIntegrationTests: XCTestCase {
             params: [customerID, userID, "Shared Scope Customer", "2026-01-07T00:00:00.000Z", "2026-01-07T00:00:00.000Z"]
         )
         _ = try client.execute(
-            "INSERT INTO orders (id, customer_id, status, total_price, currency, ship_address, created_at, updated_at) VALUES (?, ?, 'pending', 0, 'USD', ?, ?, ?)",
-            params: [orderID, customerID, "User Scoped Order", "2026-01-07T00:00:00.000Z", "2026-01-07T00:00:00.000Z"]
+            "INSERT INTO orders (id, customer_id, user_id, status, total_price, currency, ship_address, created_at, updated_at) VALUES (?, ?, ?, 'pending', 0, 'USD', ?, ?, ?)",
+            params: [orderID, customerID, userID, #"{"street":"User Scoped Order"}"#, "2026-01-07T00:00:00.000Z", "2026-01-07T00:00:00.000Z"]
         )
         try await client.syncNow()
 
@@ -676,9 +636,9 @@ final class SchemaIntegrationTests: XCTestCase {
             "SELECT ship_address FROM orders WHERE id = ?",
             params: [orderID]
         )
-        XCTAssertEqual(orderRow?["ship_address"] as? String, "User Scoped Order")
+        XCTAssertEqual(orderRow?["ship_address"] as? String, #"{"street":"User Scoped Order"}"#)
 
-        client.stop()
-        try client.close()
+        await client.stop()
+        try await client.close()
     }
 }

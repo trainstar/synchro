@@ -249,24 +249,24 @@ func TestCheckRejectsProtectedDirectAndTransitiveEdges(t *testing.T) {
 			"protected/direct.go":  "package protected\nimport _ \"github.com/trainstar/synchro/conformance/blackbox\"\n",
 		}, root: modulePath + "/protected"},
 		{name: "transitive", files: map[string]string{
-			"blackbox/baseline/base.go": "package baseline\n",
-			"shared/shared.go":          "package shared\nimport _ \"github.com/trainstar/synchro/conformance/blackbox/baseline\"\n",
-			"protected/transitive.go":   "package protected\nimport _ \"github.com/trainstar/synchro/conformance/shared\"\n",
+			"blackbox/transport/base.go": "package transport\n",
+			"shared/shared.go":           "package shared\nimport _ \"github.com/trainstar/synchro/conformance/blackbox/transport\"\n",
+			"protected/transitive.go":    "package protected\nimport _ \"github.com/trainstar/synchro/conformance/shared\"\n",
 		}, root: modulePath + "/protected"},
 		{name: "inactive-build-tag", files: map[string]string{
-			"blackbox/baseline/base.go": "package baseline\n",
-			"shared/shared.go":          "package shared\nimport _ \"github.com/trainstar/synchro/conformance/blackbox/baseline\"\n",
-			"protected/hidden.go":       "//go:build synchro_never\n\npackage protected\nimport _ \"github.com/trainstar/synchro/conformance/shared\"\n",
+			"blackbox/transport/base.go": "package transport\n",
+			"shared/shared.go":           "package shared\nimport _ \"github.com/trainstar/synchro/conformance/blackbox/transport\"\n",
+			"protected/hidden.go":        "//go:build synchro_never\n\npackage protected\nimport _ \"github.com/trainstar/synchro/conformance/shared\"\n",
 		}, root: modulePath + "/protected"},
 		{name: "inactive-platform", files: map[string]string{
-			"blackbox/baseline/base.go": "package baseline\n",
-			"protected/hidden_plan9.go": "package protected\nimport _ \"github.com/trainstar/synchro/conformance/blackbox/baseline\"\n",
+			"blackbox/transport/base.go": "package transport\n",
+			"protected/hidden_plan9.go":  "package protected\nimport _ \"github.com/trainstar/synchro/conformance/blackbox/transport\"\n",
 		}, root: modulePath + "/protected"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			test.files["go.mod"] = testModuleFile
 			root := tempModule(t, test.files)
-			policy := Policy{ModuleRoot: root, Protected: []string{test.root}, ForbiddenEdges: []string{modulePath + "/blackbox", modulePath + "/blackbox/baseline"}}
+			policy := Policy{ModuleRoot: root, Protected: []string{test.root}, ForbiddenEdges: []string{modulePath + "/blackbox"}}
 			if err := Check(context.Background(), policy); err == nil {
 				t.Fatal("protected forbidden edge was accepted")
 			}
@@ -301,26 +301,11 @@ func TestDefaultPolicyRejectsProtectedBlackboxEdges(t *testing.T) {
 			},
 		},
 		{
-			name: "direct baseline",
-			files: map[string]string{
-				"blackbox/baseline/base.go": "package baseline\n",
-				"protected/direct.go":       "package protected\nimport _ \"github.com/trainstar/synchro/conformance/blackbox/baseline\"\n",
-			},
-		},
-		{
 			name: "transitive blackbox",
 			files: map[string]string{
 				"blackbox/blackbox.go":    "package blackbox\n",
 				"shared/shared.go":        "package shared\nimport _ \"github.com/trainstar/synchro/conformance/blackbox\"\n",
 				"protected/transitive.go": "package protected\nimport _ \"github.com/trainstar/synchro/conformance/shared\"\n",
-			},
-		},
-		{
-			name: "transitive baseline",
-			files: map[string]string{
-				"blackbox/baseline/base.go": "package baseline\n",
-				"shared/shared.go":          "package shared\nimport _ \"github.com/trainstar/synchro/conformance/blackbox/baseline\"\n",
-				"protected/transitive.go":   "package protected\nimport _ \"github.com/trainstar/synchro/conformance/shared\"\n",
 			},
 		},
 	} {
@@ -331,34 +316,6 @@ func TestDefaultPolicyRejectsProtectedBlackboxEdges(t *testing.T) {
 				t.Fatal("default policy accepted a protected blackbox edge")
 			}
 		})
-	}
-}
-
-func TestBaselineImportsAreLimitedToDiagnosticIntegration(t *testing.T) {
-	baseline := modulePath + "/blackbox/baseline"
-	for allowed := range diagnosticBaselineImporters {
-		if err := checkBaselineImporters(map[string][]string{
-			allowed:  {baseline},
-			baseline: nil,
-		}); err != nil {
-			t.Fatalf("diagnostic integration %q was rejected: %v", allowed, err)
-		}
-	}
-
-	for _, graph := range []map[string][]string{
-		{
-			modulePath + "/modelrunner": {baseline},
-			baseline:                    nil,
-		},
-		{
-			modulePath + "/evidence": {modulePath + "/shared"},
-			modulePath + "/shared":   {baseline},
-			baseline:                 nil,
-		},
-	} {
-		if err := checkBaselineImporters(graph); err == nil {
-			t.Fatal("non-diagnostic baseline dependency was accepted")
-		}
 	}
 }
 

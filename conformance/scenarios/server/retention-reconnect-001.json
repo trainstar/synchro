@@ -1285,5 +1285,180 @@
         "CTRL-RETENTION-003"
       ]
     }
-  ]
+  ],
+  "native_execution": {
+    "version": 1,
+    "clients": [
+      {
+        "key": "client_a",
+        "user_id": "user-a",
+        "client_id": "client-a",
+        "database_key": "retention_reconnect_a"
+      }
+    ],
+    "actions": [
+      {
+        "id": "NACT-RETENTION-RECONNECT-001",
+        "phase": "setup",
+        "actor": "controller",
+        "command": "install-model",
+        "covers_step_ids": [],
+        "parameters": {}
+      },
+      {
+        "id": "NACT-RETENTION-RECONNECT-002",
+        "phase": "setup",
+        "actor": "client",
+        "command": "open",
+        "covers_step_ids": [],
+        "parameters": {
+          "client_key": "client_a",
+          "database_mode": "create",
+          "initialization": "current",
+          "seed_step_id": null
+        }
+      },
+      {
+        "id": "NACT-RETENTION-RECONNECT-004",
+        "phase": "exercise",
+        "actor": "client",
+        "command": "execute-step",
+        "covers_step_ids": [
+          "STEP-RETENTION-RECONNECT-LOCAL-WRITE-001"
+        ],
+        "parameters": {
+          "client_key": "client_a"
+        }
+      },
+      {
+        "id": "NACT-RETENTION-RECONNECT-005",
+        "phase": "exercise",
+        "actor": "client",
+        "command": "synchronize-step",
+        "covers_step_ids": [
+          "STEP-RETENTION-RECONNECT-SEAL-OLD-BATCH-001"
+        ],
+        "parameters": {
+          "client_key": "client_a",
+          "method": "start",
+          "completion": "blocked"
+        }
+      },
+      {
+        "id": "NACT-RETENTION-RECONNECT-006",
+        "phase": "exercise",
+        "actor": "controller",
+        "command": "apply-step",
+        "covers_step_ids": [
+          "STEP-RETENTION-RECONNECT-COMMIT-001"
+        ],
+        "parameters": {}
+      },
+      {
+        "id": "NACT-RETENTION-RECONNECT-007",
+        "phase": "exercise",
+        "actor": "process",
+        "command": "execute-step",
+        "covers_step_ids": [
+          "STEP-RETENTION-RECONNECT-MATERIALIZE-001"
+        ],
+        "parameters": {
+          "client_key": null
+        }
+      },
+      {
+        "id": "NACT-RETENTION-RECONNECT-008",
+        "phase": "exercise",
+        "actor": "controller",
+        "command": "request-step",
+        "covers_step_ids": [
+          "STEP-RETENTION-RECONNECT-REBUILD-PIN-001"
+        ],
+        "parameters": {}
+      },
+      {
+        "id": "NACT-RETENTION-RECONNECT-009",
+        "phase": "exercise",
+        "actor": "controller",
+        "command": "apply-step",
+        "covers_step_ids": [
+          "STEP-RETENTION-RECONNECT-EXPIRE-001"
+        ],
+        "parameters": {}
+      },
+      {
+        "id": "NACT-RETENTION-RECONNECT-010",
+        "phase": "exercise",
+        "actor": "client",
+        "command": "begin-call",
+        "covers_step_ids": [
+          "STEP-RETENTION-RECONNECT-REJECT-OLD-001"
+        ],
+        "parameters": {
+          "client_key": "client_a",
+          "call_id": "generation_renewal",
+          "method": "retry-after-error"
+        }
+      },
+      {
+        "id": "NACT-RETENTION-RECONNECT-011",
+        "phase": "exercise",
+        "actor": "observer",
+        "command": "await-step",
+        "covers_step_ids": [
+          "STEP-RETENTION-RECONNECT-RENEW-001"
+        ],
+        "parameters": {
+          "client_key": "client_a",
+          "call_id": "generation_renewal"
+        }
+      },
+      {
+        "id": "NACT-RETENTION-RECONNECT-011-001",
+        "phase": "exercise",
+        "actor": "client",
+        "command": "await-call",
+        "covers_step_ids": [],
+        "parameters": {
+          "client_key": "client_a",
+          "call_id": "generation_renewal",
+          "completion": "idle"
+        }
+      },
+      {
+        "id": "NACT-RETENTION-RECONNECT-012",
+        "phase": "cleanup",
+        "actor": "controller",
+        "command": "apply-step",
+        "covers_step_ids": [
+          "STEP-RETENTION-RECONNECT-COMPACT-001"
+        ],
+        "parameters": {}
+      },
+      {
+        "id": "NACT-RETENTION-RECONNECT-013",
+        "phase": "verify",
+        "actor": "observer",
+        "command": "capture",
+        "covers_step_ids": [],
+        "parameters": {
+          "client_keys": [
+            "client_a"
+          ],
+          "sources": [
+            "application-rows",
+            "pending-mutations",
+            "sync-status",
+            "scope-state",
+            "rebuild-state",
+            "request-trace",
+            "server-state"
+          ],
+          "expectation_ids": [
+            "EXPECT-RETENTION-RECONNECT-EXPIRY-001"
+          ]
+        }
+      }
+    ]
+  }
 }

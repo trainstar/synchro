@@ -151,6 +151,7 @@ CREATE TABLE IF NOT EXISTS sync_registry_fields (
     field_id UUID NOT NULL REFERENCES sync_logical_ids(logical_id),
     physical_column NAME NOT NULL,
     portable_type TEXT NOT NULL,
+    native_json BOOLEAN NOT NULL,
     decimal_precision INTEGER,
     decimal_scale INTEGER,
     nullable BOOLEAN NOT NULL,
@@ -161,6 +162,7 @@ CREATE TABLE IF NOT EXISTS sync_registry_fields (
     FOREIGN KEY (registry_generation, relation_id)
         REFERENCES sync_registry(registry_generation, relation_id) ON DELETE CASCADE,
     CHECK (NOT primary_key OR (NOT nullable AND NOT writable)),
+    CHECK (NOT native_json OR portable_type = 'json'),
     CHECK (
         (portable_type = 'decimal' AND decimal_precision > 0 AND decimal_scale >= 0 AND decimal_scale <= decimal_precision)
         OR (portable_type <> 'decimal' AND decimal_precision IS NULL AND decimal_scale IS NULL)
@@ -1927,7 +1929,7 @@ AS 'MODULE_PATHNAME', 'synchro_prepare_projection_bootstrap_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- synchro-pg/src/registry.rs:185
+-- synchro-pg/src/registry.rs:186
 -- synchro_pg::registry::synchro_prepare_projection_view
 CREATE  FUNCTION "synchro_prepare_projection_view"(
 	"p_relation_name" TEXT, /* &str */
@@ -2007,7 +2009,7 @@ AS 'MODULE_PATHNAME', 'synchro_rebuild_contract_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- synchro-pg/src/registry.rs:622
+-- synchro-pg/src/registry.rs:623
 -- synchro_pg::registry::synchro_register_capture_dependency
 CREATE  FUNCTION "synchro_register_capture_dependency"(
 	"p_relation_name" TEXT, /* &str */
@@ -2020,7 +2022,7 @@ AS 'MODULE_PATHNAME', 'synchro_register_capture_dependency_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- synchro-pg/src/registry.rs:848
+-- synchro-pg/src/registry.rs:849
 -- synchro_pg::registry::synchro_register_membership_dependency
 CREATE  FUNCTION "synchro_register_membership_dependency"(
 	"p_dependency_table_name" TEXT, /* &str */
@@ -2047,7 +2049,7 @@ AS 'MODULE_PATHNAME', 'synchro_register_shared_scope_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- synchro-pg/src/registry.rs:339
+-- synchro-pg/src/registry.rs:340
 -- synchro_pg::registry::synchro_register_table
 CREATE  FUNCTION "synchro_register_table"(
 	"p_table_name" TEXT, /* &str */
@@ -2152,7 +2154,7 @@ AS 'MODULE_PATHNAME', 'synchro_unregister_shared_scope_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- synchro-pg/src/registry.rs:805
+-- synchro-pg/src/registry.rs:806
 -- synchro_pg::registry::synchro_unregister_table
 CREATE  FUNCTION "synchro_unregister_table"(
 	"p_table_name" TEXT /* &str */
@@ -2163,7 +2165,7 @@ AS 'MODULE_PATHNAME', 'synchro_unregister_table_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- synchro-pg/src/lib.rs:1755
+-- synchro-pg/src/lib.rs:1757
 -- finalize
 
 DO $roles$

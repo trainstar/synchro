@@ -11,7 +11,13 @@
   "input": {
     "request": {
       "client_id": "ios-device-123",
+      "client_generation": 1,
+      "schema": {
+        "version": 8,
+        "hash": "8b21d2a100000000000000000000000000000000000000000000000000000000"
+      },
       "scope": "exercises_public",
+      "rebuild_id": "00000000-0000-4000-8000-000000000001",
       "cursor": null,
       "limit": 1000
     }
@@ -22,11 +28,19 @@
         "scope": "exercises_public",
         "records": [
           {
-            "table": "exercises",
+            "table": "tbl_exercises",
             "pk": {
-              "id": "e_1"
+              "fld_exercises_id": "e_1"
             },
-            "row_checksum": 424242,
+            "row": {
+              "fld_exercises_id": "e_1"
+            },
+            "row_checksum": {
+              "algorithm": "sha256",
+              "version": 1,
+              "encoding": "hex",
+              "digest": "4242424242424242424242424242424242424242424242424242424242424242"
+            },
             "server_version": "sv_100"
           }
         ],
@@ -38,8 +52,13 @@
         "records": [],
         "cursor": null,
         "has_more": false,
-        "final_scope_cursor": "v2.exercises_public_202.sig",
-        "checksum": "cs_0f22"
+        "final_scope_cursor": "exercises_public_202.sig",
+        "checksum": {
+          "algorithm": "sha256",
+          "version": 1,
+          "encoding": "hex",
+          "digest": "0f220f220f220f220f220f220f220f220f220f220f220f220f220f220f220f22"
+        }
       }
     ],
     "assertions": [

@@ -2810,9 +2810,10 @@ fn projection_bootstrap_affected_scopes(
                          AND target_field.relation_id = target.relation_id
                          AND (
                              source_field.field_id IS NULL
-                             OR source_field.physical_column IS DISTINCT FROM target_field.physical_column
-                             OR source_field.portable_type IS DISTINCT FROM target_field.portable_type
-                             OR source_field.nullable IS DISTINCT FROM target_field.nullable
+                              OR source_field.physical_column IS DISTINCT FROM target_field.physical_column
+                              OR source_field.portable_type IS DISTINCT FROM target_field.portable_type
+                              OR source_field.native_json IS DISTINCT FROM target_field.native_json
+                              OR source_field.nullable IS DISTINCT FROM target_field.nullable
                              OR source_field.writable IS DISTINCT FROM target_field.writable
                          )
                    )

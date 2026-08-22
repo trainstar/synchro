@@ -9,9 +9,10 @@ import (
 
 // Stable identifiers that are local to the scenario schema.
 type (
-	StepID        string
-	ExpectationID string
-	BarrierID     string
+	StepID         string
+	ExpectationID  string
+	BarrierID      string
+	NativeActionID string
 )
 
 // Scenario is one schema-valid authored conformance scenario.
@@ -34,10 +35,98 @@ type Scenario struct {
 	Steps               []Step                        `json:"steps"`
 	WireExpectations    []WireExpectation             `json:"wire_expectations"`
 	Assertions          []Assertion                   `json:"assertions"`
+	NativeExecution     *NativeExecutionPlan          `json:"native_execution,omitempty"`
 
 	sourcePath  string
 	sourceBytes []byte
 	makeTargets map[string]struct{}
+}
+
+// NativeExecutionPlan is the shared public-driver plan for every native support cell.
+type NativeExecutionPlan struct {
+	Version int            `json:"version"`
+	Clients []NativeClient `json:"clients"`
+	Actions []NativeAction `json:"actions"`
+}
+
+// NativeClient binds a stable scenario identity to one durable SQLite database.
+type NativeClient struct {
+	Key         string `json:"key"`
+	UserID      string `json:"user_id"`
+	ClientID    string `json:"client_id"`
+	DatabaseKey string `json:"database_key"`
+}
+
+// NativeAction is one ordered call through a closed platform-driver boundary.
+type NativeAction struct {
+	ID            NativeActionID  `json:"id"`
+	Phase         string          `json:"phase"`
+	Actor         string          `json:"actor"`
+	Command       string          `json:"command"`
+	CoversStepIDs []StepID        `json:"covers_step_ids"`
+	Parameters    json.RawMessage `json:"parameters"`
+}
+
+type NativeClientOpenParameters struct {
+	ClientKey    string  `json:"client_key"`
+	DatabaseMode string  `json:"database_mode"`
+	Initialization string `json:"initialization"`
+	SeedStepID   *StepID `json:"seed_step_id"`
+}
+
+type NativeClientParameters struct {
+	ClientKey string `json:"client_key"`
+}
+
+type NativeSynchronizeParameters struct {
+	ClientKey  string `json:"client_key"`
+	Method     string `json:"method"`
+	Completion string `json:"completion"`
+}
+
+type NativeCallID string
+
+type NativeBeginCallParameters struct {
+	ClientKey string       `json:"client_key"`
+	CallID    NativeCallID `json:"call_id"`
+	Method    string       `json:"method"`
+}
+
+type NativeAwaitCallParameters struct {
+	ClientKey  string       `json:"client_key"`
+	CallID     NativeCallID `json:"call_id"`
+	Completion string       `json:"completion"`
+}
+
+type NativeAwaitStepParameters struct {
+	ClientKey string        `json:"client_key"`
+	CallID    *NativeCallID `json:"call_id,omitempty"`
+}
+
+type NativeLifecycleParameters struct {
+	ClientKey string `json:"client_key"`
+	Operation string `json:"operation"`
+}
+
+type NativeProcessStepParameters struct {
+	ClientKey *string `json:"client_key"`
+}
+
+type NativeProcessBoundaryParameters struct {
+	ClientKey     string         `json:"client_key"`
+	Boundary      string         `json:"boundary"`
+	AfterActionID NativeActionID `json:"after_action_id"`
+}
+
+type NativeCaptureParameters struct {
+	ClientKeys     []string        `json:"client_keys"`
+	Sources        []string        `json:"sources"`
+	ExpectationIDs []ExpectationID `json:"expectation_ids"`
+}
+
+type NativeMeasureParameters struct {
+	PerformanceBudgetIDs []contract.BudgetID      `json:"performance_budget_ids"`
+	MeasurementIDs       []contract.MeasurementID `json:"measurement_ids"`
 }
 
 type Operation struct {
@@ -198,10 +287,11 @@ type ProvenanceFact struct {
 }
 
 type CheckpointFact struct {
-	ScopeID     string `json:"scope_id"`
-	HasCursor   bool   `json:"has_cursor"`
-	HasChecksum bool   `json:"has_checksum"`
-	Verified    bool   `json:"verified"`
+	ScopeID     string  `json:"scope_id"`
+	HasCursor   bool    `json:"has_cursor"`
+	HasChecksum bool    `json:"has_checksum"`
+	Checksum    *string `json:"checksum,omitempty"`
+	Verified    bool    `json:"verified"`
 }
 
 type QueuedMutationFact struct {
@@ -233,6 +323,30 @@ type Predicate struct {
 	ContractPredicate string          `json:"contract_predicate"`
 	Name              string          `json:"name"`
 	Payload           json.RawMessage `json:"payload"`
+}
+
+// SchemaDispatchMeasurementPlan binds a schema-dispatch predicate to the
+// authored performance measurement and its required semantic cases.
+type SchemaDispatchMeasurementPlan struct {
+	MeasurementID                contract.MeasurementID             `json:"measurement_id"`
+	MinimumSampleCountPerStratum uint64                             `json:"minimum_sample_count_per_stratum"`
+	Strata                       []SchemaDispatchMeasurementStratum `json:"strata"`
+}
+
+// SchemaDispatchMeasurementStratum binds one authored stratum to its semantic
+// schema-dispatch case.
+type SchemaDispatchMeasurementStratum struct {
+	StratumID  contract.StratumID `json:"stratum_id"`
+	SchemaCase string             `json:"schema_case"`
+}
+
+// MeasurementSample binds one executable step to one authored measurement
+// stratum and its exact parameter set.
+type MeasurementSample struct {
+	MeasurementID contract.MeasurementID `json:"measurement_id"`
+	StratumID     contract.StratumID     `json:"stratum_id"`
+	SampleID      string                 `json:"sample_id"`
+	Parameters    json.RawMessage        `json:"parameters"`
 }
 
 type BarrierPlan struct {
@@ -284,12 +398,13 @@ type NegativeControl struct {
 }
 
 type Step struct {
-	ID              StepID          `json:"id"`
-	Phase           string          `json:"phase"`
-	Transport       string          `json:"transport"`
-	Description     string          `json:"description,omitempty"`
-	Operation       Operation       `json:"operation"`
-	ExpectedOutcome ExpectedOutcome `json:"expected_outcome"`
+	ID                StepID             `json:"id"`
+	Phase             string             `json:"phase"`
+	Transport         string             `json:"transport"`
+	Description       string             `json:"description,omitempty"`
+	MeasurementSample *MeasurementSample `json:"measurement_sample,omitempty"`
+	Operation         Operation          `json:"operation"`
+	ExpectedOutcome   ExpectedOutcome    `json:"expected_outcome"`
 }
 
 type ExpectedOutcome struct {

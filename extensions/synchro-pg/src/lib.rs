@@ -176,6 +176,7 @@ CREATE TABLE IF NOT EXISTS sync_registry_fields (
     field_id UUID NOT NULL REFERENCES sync_logical_ids(logical_id),
     physical_column NAME NOT NULL,
     portable_type TEXT NOT NULL,
+    native_json BOOLEAN NOT NULL,
     decimal_precision INTEGER,
     decimal_scale INTEGER,
     nullable BOOLEAN NOT NULL,
@@ -186,6 +187,7 @@ CREATE TABLE IF NOT EXISTS sync_registry_fields (
     FOREIGN KEY (registry_generation, relation_id)
         REFERENCES sync_registry(registry_generation, relation_id) ON DELETE CASCADE,
     CHECK (NOT primary_key OR (NOT nullable AND NOT writable)),
+    CHECK (NOT native_json OR portable_type = 'json'),
     CHECK (
         (portable_type = 'decimal' AND decimal_precision > 0 AND decimal_scale >= 0 AND decimal_scale <= decimal_precision)
         OR (portable_type <> 'decimal' AND decimal_precision IS NULL AND decimal_scale IS NULL)

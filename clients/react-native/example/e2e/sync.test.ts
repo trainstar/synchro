@@ -1,49 +1,13 @@
 import { by, device, element, expect, waitFor } from 'detox';
+import { loadScenario } from './scenarioLoader';
+import { assertUserIsolation, prepareConflict } from './serverSetup';
 
 async function scrollToAndTap(buttonId: string) {
-  try {
-    await waitFor(element(by.id(buttonId)))
-      .toBeVisible()
-      .whileElement(by.id('test-scroll'))
-      .scroll(200, 'down');
-  } catch {
-    for (let i = 0; i < 10; i += 1) {
-      try {
-        await expect(element(by.id(buttonId))).toBeVisible();
-        break;
-      } catch {
-        await element(by.id('test-scroll')).swipe('up', 'slow', 0.5);
-      }
-    }
-  }
-
+  await waitFor(element(by.id(buttonId)))
+    .toBeVisible()
+    .whileElement(by.id('test-scroll'))
+    .scroll(200, 'down');
   await waitFor(element(by.id(buttonId))).toBeVisible().withTimeout(3000);
-  await element(by.id(buttonId)).tap();
-}
-
-async function scrollToBadge(label: string) {
-  const badge = element(by.id(`badge-${label}`));
-  for (let i = 0; i < 8; i += 1) {
-    try {
-      await expect(badge).toBeVisible();
-      return;
-    } catch {
-      await element(by.id('test-scroll')).swipe('down', 'slow', 0.5);
-    }
-  }
-}
-
-async function scrollToTopAndTap(buttonId: string) {
-  for (let i = 0; i < 10; i += 1) {
-    try {
-      await expect(element(by.id(buttonId))).toBeVisible();
-      break;
-    } catch {
-      await element(by.id('test-scroll')).swipe('down', 'slow', 0.75);
-    }
-  }
-
-  await waitFor(element(by.id(buttonId))).toBeVisible().withTimeout(5000);
   await element(by.id(buttonId)).tap();
 }
 
@@ -64,14 +28,60 @@ async function expectBadge(label: string, text = 'PASS', timeout = 5000) {
   }
 }
 
+describe('shared scenario catalog', () => {
+  it('loads an authored scenario by ID', () => {
+    const scenario = loadScenario('SCN-SCHEMA-QUEUED-MUTATION-001');
+    if (scenario.id !== 'SCN-SCHEMA-QUEUED-MUTATION-001') {
+      throw new Error('loaded scenario identity changed');
+    }
+  });
+});
+
 async function runAction(label: string, timeout = 5000) {
   await scrollToAndTap(`btn-${label}`);
   await expectBadge(label, 'PASS', timeout);
 }
 
-async function waitForIdleStatus(timeout = 15000) {
+async function readPendingRecord(testID: string): Promise<string> {
+  const attributes = await element(by.id(testID)).getAttributes();
+  const recordID = String(attributes.text ?? '');
+  if (!recordID || recordID === 'none') {
+    throw new Error(`${testID} did not expose a pending record ID`);
+  }
+  return recordID;
+}
+
+async function runConflictAction(timeout = 30000) {
+  await scrollToAndTap('btn-conflict');
+  try {
+    await waitFor(element(by.id('step-value')))
+      .toHaveText('conflict:awaiting-server')
+      .withTimeout(15000);
+  } catch (error) {
+    const step = await element(by.id('step-value')).getAttributes();
+    const detail = await element(by.id('error-value')).getAttributes();
+    throw new Error(
+      `conflict setup did not reach server handoff; step=${String(step.text)} error=${String(detail.text)} original=${String(error)}`
+    );
+  }
+  await prepareConflict(await readPendingRecord('conflict-record-id'));
+  await scrollToAndTap('btn-conflict');
+  await expectBadge('conflict', 'PASS', timeout);
+}
+
+async function runMultiUserAction(timeout = 25000) {
+  await scrollToAndTap('btn-multiUser');
+  await waitFor(element(by.id('step-value')))
+    .toHaveText('multiUser:awaiting-server')
+    .withTimeout(15000);
+  await assertUserIsolation(await readPendingRecord('multi-user-record-id'));
+  await scrollToAndTap('btn-multiUser');
+  await expectBadge('multiUser', 'PASS', timeout);
+}
+
+async function waitForUninitializedStatus(timeout = 15000) {
   await waitFor(element(by.id('status-value')))
-    .toHaveText('idle')
+    .toHaveText('uninitialized')
     .withTimeout(timeout);
   await waitFor(element(by.id('sync-status')))
     .toBeVisible()
@@ -80,20 +90,32 @@ async function waitForIdleStatus(timeout = 15000) {
 }
 
 async function relaunchToIdle() {
-  await device.launchApp({ newInstance: true, delete: true });
-  await waitForIdleStatus(10000);
+  await device.launchApp({ newInstance: true, delete: false });
+  await waitForUninitializedStatus(10000);
   await waitFor(element(by.id('btn-reset'))).toBeVisible().withTimeout(5000);
 }
 
 async function resetHarnessForTest() {
-  await scrollToTopAndTap('btn-reset');
+  await waitFor(element(by.id('btn-reset'))).toBeVisible().withTimeout(5000);
+  await element(by.id('btn-reset')).tap();
+  try {
+    await waitFor(element(by.id('step-value')))
+      .toHaveText('reset:complete')
+      .withTimeout(30000);
+  } catch (error) {
+    const step = await element(by.id('step-value')).getAttributes();
+    const detail = await element(by.id('error-value')).getAttributes();
+    throw new Error(
+      `reset did not complete; step=${String(step.text)} error=${String(detail.text)} original=${String(error)}`
+    );
+  }
   if (device.getPlatform() !== 'ios') {
-    await waitForIdleStatus(15000);
+    await waitForUninitializedStatus(15000);
     return;
   }
 
   try {
-    await waitForIdleStatus(4000);
+    await waitForUninitializedStatus(4000);
   } catch {
     await relaunchToIdle();
   }
@@ -141,7 +163,7 @@ describe('Synchro RN E2E', () => {
     await runAction('txTimeout', 15000);
   });
 
-  it('transaction error recovery, write lock released after timeout', async () => {
+  it('close and reinitialize roll back active writes and release the lock', async () => {
     await runAction('txRecovery', 20000);
   });
 
@@ -149,16 +171,20 @@ describe('Synchro RN E2E', () => {
     await runAction('start', 15000);
   });
 
+  it('awaits native background, foreground, and stop lifecycle transitions', async () => {
+    await runAction('lifecycle', 30000);
+  });
+
   it('push/pull round trip, pending changes drain after sync', async () => {
     await runAction('pushPull', 25000);
   });
 
   it('conflict resolution, detects server-side conflict', async () => {
-    await runAction('conflict', 30000);
+    await runConflictAction(30000);
   });
 
   it('multi-user isolation, user 2 cannot see user 1 data', async () => {
-    await runAction('multiUser', 25000);
+    await runMultiUserAction(25000);
   });
 
   it('stops sync', async () => {
@@ -181,7 +207,7 @@ describe('Synchro RN E2E', () => {
     await runAction('seedResume', 15000);
   });
 
-  it('seed database repairs portable-scope corruption without queueing local mutations', async () => {
-    await runAction('seedRepair', 20000);
+  it('rejects a corrupt seed without publishing partial state', async () => {
+    await runAction('seedCorrupt', 20000);
   });
 });

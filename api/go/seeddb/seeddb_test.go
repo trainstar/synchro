@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"testing"
@@ -381,6 +382,14 @@ func TestGenerateCreatesClientCompatibleSeedDatabase(t *testing.T) {
 		t.Fatalf("expected non-zero schema_version, got %q", schemaVersion)
 	}
 
+	var userVersion int
+	if err := sqliteDB.QueryRow("PRAGMA user_version").Scan(&userVersion); err != nil {
+		t.Fatalf("reading sqlite user_version: %v", err)
+	}
+	if userVersion != sqliteUserVersion {
+		t.Fatalf("expected sqlite user_version=%d, got %d", sqliteUserVersion, userVersion)
+	}
+
 	var scopeSetVersion string
 	if err := sqliteDB.QueryRow("SELECT value FROM _synchro_meta WHERE key = 'scope_set_version'").Scan(&scopeSetVersion); err != nil {
 		t.Fatalf("reading scope_set_version: %v", err)
@@ -441,6 +450,13 @@ func TestGenerateCreatesClientCompatibleSeedDatabase(t *testing.T) {
 	if pendingCount != 0 {
 		t.Fatalf("expected generated seed to start with an empty pending queue, got %d rows", pendingCount)
 	}
+	var pushBatchCount int
+	if err := sqliteDB.QueryRow("SELECT COUNT(*) FROM _synchro_push_batches").Scan(&pushBatchCount); err != nil {
+		t.Fatalf("reading sealed push batch count: %v", err)
+	}
+	if pushBatchCount != 0 {
+		t.Fatalf("expected generated seed to start with no sealed push batches, got %d rows", pushBatchCount)
+	}
 
 	_, err = sqliteDB.Exec(
 		fmt.Sprintf("INSERT INTO %s (id, user_id, title, updated_at, deleted_at) VALUES (?, ?, ?, ?, NULL)", quoteIdentifier(tableName)),
@@ -453,16 +469,19 @@ func TestGenerateCreatesClientCompatibleSeedDatabase(t *testing.T) {
 		t.Fatalf("inserting into generated table: %v", err)
 	}
 
-	var operation string
+	var operation, clientUpdatedAt string
 	if err := sqliteDB.QueryRow(
-		"SELECT operation FROM _synchro_pending_changes WHERE table_name = ? AND record_id = ?",
+		"SELECT operation, client_updated_at FROM _synchro_pending_changes WHERE table_name = ? AND record_id = ?",
 		tableName,
 		"00000000-0000-0000-0000-000000000001",
-	).Scan(&operation); err != nil {
+	).Scan(&operation, &clientUpdatedAt); err != nil {
 		t.Fatalf("reading pending change: %v", err)
 	}
 	if operation != "create" {
 		t.Fatalf("expected pending operation=create, got %q", operation)
+	}
+	if !regexp.MustCompile(`^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{6}Z$`).MatchString(clientUpdatedAt) {
+		t.Fatalf("expected canonical microsecond client_updated_at, got %q", clientUpdatedAt)
 	}
 }
 
@@ -522,6 +541,122 @@ func TestCDCTriggerSQLSupportsTablesWithoutDeletedAt(t *testing.T) {
 	}
 	if strings.Contains(statements[5], `SET "" =`) {
 		t.Fatalf("delete trigger should not reference an empty deleted_at column: %q", statements[5])
+	}
+	if !strings.Contains(statements[5], "_synchro_row_versions") {
+		t.Fatalf("delete trigger should capture the opaque server version: %q", statements[5])
+	}
+	if strings.Contains(statements[5], `OLD."updated_at"`) {
+		t.Fatalf("delete trigger should not capture the application updated_at value: %q", statements[5])
+	}
+	if !strings.Contains(statements[5], "local_revision = _synchro_pending_changes.local_revision + 1") {
+		t.Fatalf("delete trigger should increment local_revision on conflict: %q", statements[5])
+	}
+}
+
+func TestCDCTriggersIncrementLocalRevisionAndCaptureOpaqueBaseVersion(t *testing.T) {
+	ctx := context.Background()
+	db, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatalf("open sqlite database: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	softDeleteTable := localSchemaTable{
+		TableName:       "test_items",
+		UpdatedAtColumn: "updated_at",
+		DeletedAtColumn: "deleted_at",
+		PrimaryKey:      []string{"id"},
+		Columns: []localSchemaColumn{
+			{Name: "id", LogicalType: "string", IsPrimaryKey: true},
+			{Name: "title", LogicalType: "string"},
+			{Name: "updated_at", LogicalType: "datetime"},
+			{Name: "deleted_at", LogicalType: "datetime", Nullable: true},
+		},
+	}
+	hardDeleteTable := localSchemaTable{
+		TableName:  "test_hard_items",
+		PrimaryKey: []string{"id"},
+		Columns: []localSchemaColumn{
+			{Name: "id", LogicalType: "string", IsPrimaryKey: true},
+			{Name: "title", LogicalType: "string"},
+		},
+	}
+
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("begin sqlite schema transaction: %v", err)
+	}
+	if err := createInternalTables(ctx, tx); err != nil {
+		_ = tx.Rollback()
+		t.Fatalf("create sqlite internal schema: %v", err)
+	}
+	if err := createSyncedTables(ctx, tx, []localSchemaTable{softDeleteTable, hardDeleteTable}); err != nil {
+		_ = tx.Rollback()
+		t.Fatalf("create sqlite synced tables: %v", err)
+	}
+	if err := createSyncedTableTriggers(ctx, tx, []localSchemaTable{softDeleteTable, hardDeleteTable}); err != nil {
+		_ = tx.Rollback()
+		t.Fatalf("create sqlite cdc triggers: %v", err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("commit sqlite schema transaction: %v", err)
+	}
+
+	if _, err := db.ExecContext(ctx, `UPDATE _synchro_meta SET value = '1' WHERE key = 'sync_lock'`); err != nil {
+		t.Fatalf("lock cdc triggers: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, `INSERT INTO test_items (id, title, updated_at, deleted_at) VALUES (?, ?, ?, NULL)`, "item-1", "first", "application-v1"); err != nil {
+		t.Fatalf("insert soft-delete row: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, `INSERT INTO test_hard_items (id, title) VALUES (?, ?)`, "hard-1", "first"); err != nil {
+		t.Fatalf("insert hard-delete row: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, `INSERT INTO _synchro_row_versions (table_name, record_id, server_version) VALUES (?, ?, ?), (?, ?, ?)`, "test_items", "item-1", "opaque-soft-v1", "test_hard_items", "hard-1", "opaque-hard-v1"); err != nil {
+		t.Fatalf("insert opaque row versions: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, `UPDATE _synchro_meta SET value = '0' WHERE key = 'sync_lock'`); err != nil {
+		t.Fatalf("unlock cdc triggers: %v", err)
+	}
+
+	if _, err := db.ExecContext(ctx, `UPDATE test_items SET title = ?, updated_at = ? WHERE id = ?`, "second", "application-v2", "item-1"); err != nil {
+		t.Fatalf("update soft-delete row: %v", err)
+	}
+	assertPendingChange(t, db, "test_items", "item-1", "update", "opaque-soft-v1", 0)
+
+	if _, err := db.ExecContext(ctx, `UPDATE test_items SET title = ?, updated_at = ? WHERE id = ?`, "third", "application-v3", "item-1"); err != nil {
+		t.Fatalf("update soft-delete row again: %v", err)
+	}
+	assertPendingChange(t, db, "test_items", "item-1", "update", "opaque-soft-v1", 1)
+
+	if _, err := db.ExecContext(ctx, `DELETE FROM test_items WHERE id = ?`, "item-1"); err != nil {
+		t.Fatalf("soft-delete row: %v", err)
+	}
+	assertPendingChange(t, db, "test_items", "item-1", "delete", "opaque-soft-v1", 2)
+
+	if _, err := db.ExecContext(ctx, `UPDATE test_hard_items SET title = ? WHERE id = ?`, "second", "hard-1"); err != nil {
+		t.Fatalf("update hard-delete row: %v", err)
+	}
+	assertPendingChange(t, db, "test_hard_items", "hard-1", "update", "opaque-hard-v1", 0)
+	if _, err := db.ExecContext(ctx, `DELETE FROM test_hard_items WHERE id = ?`, "hard-1"); err != nil {
+		t.Fatalf("hard-delete row: %v", err)
+	}
+	assertPendingChange(t, db, "test_hard_items", "hard-1", "delete", "opaque-hard-v1", 1)
+}
+
+func assertPendingChange(t *testing.T, db *sql.DB, tableName, recordID, operation, baseUpdatedAt string, localRevision int) {
+	t.Helper()
+	var gotOperation, gotBaseUpdatedAt string
+	var gotLocalRevision int
+	if err := db.QueryRow(
+		`SELECT operation, COALESCE(base_updated_at, ''), local_revision
+		 FROM _synchro_pending_changes WHERE table_name = ? AND record_id = ?`,
+		tableName,
+		recordID,
+	).Scan(&gotOperation, &gotBaseUpdatedAt, &gotLocalRevision); err != nil {
+		t.Fatalf("read pending change %s/%s: %v", tableName, recordID, err)
+	}
+	if gotOperation != operation || gotBaseUpdatedAt != baseUpdatedAt || gotLocalRevision != localRevision {
+		t.Fatalf("pending change %s/%s = operation %q, base %q, local_revision %d, want operation %q, base %q, local_revision %d", tableName, recordID, gotOperation, gotBaseUpdatedAt, gotLocalRevision, operation, baseUpdatedAt, localRevision)
 	}
 }
 
@@ -752,28 +887,6 @@ func TestGenerateHydratesPortableRowsAndScopeState(t *testing.T) {
 		t.Fatal("local scope checksum does not match the verified authoritative checksum")
 	}
 
-	var checkpointRows int64
-	if err := sqliteDB.QueryRow(
-		"SELECT COUNT(*) FROM _synchro_bucket_checkpoints WHERE bucket_id = 'global'",
-	).Scan(&checkpointRows); err != nil {
-		t.Fatalf("reading portable bucket checkpoint rows: %v", err)
-	}
-	if checkpointRows != 0 {
-		t.Fatalf("expected no portable bucket checkpoint rows, got %d", checkpointRows)
-	}
-
-	var memberRows int64
-	if err := sqliteDB.QueryRow(
-		"SELECT COUNT(*) FROM _synchro_bucket_members WHERE bucket_id = 'global' AND table_name = ? AND record_id = ?",
-		tableName,
-		recordID,
-	).Scan(&memberRows); err != nil {
-		t.Fatalf("reading portable bucket member rows: %v", err)
-	}
-	if memberRows != 0 {
-		t.Fatalf("expected no portable bucket member rows, got %d", memberRows)
-	}
-
 	var scopeRowCount int64
 	var scopeRowChecksum string
 	if err := sqliteDB.QueryRow(
@@ -819,25 +932,6 @@ func TestGenerateHydratesPortableRowsAndScopeState(t *testing.T) {
 	}
 	if snapshotComplete != "1" {
 		t.Fatalf("expected snapshot_complete=1, got %q", snapshotComplete)
-	}
-
-	var knownBucketsRaw string
-	if err := sqliteDB.QueryRow("SELECT value FROM _synchro_meta WHERE key = 'known_buckets'").Scan(&knownBucketsRaw); err != nil {
-		t.Fatalf("reading known_buckets: %v", err)
-	}
-	var knownBuckets []string
-	if err := json.Unmarshal([]byte(knownBucketsRaw), &knownBuckets); err != nil {
-		t.Fatalf("decoding known_buckets: %v", err)
-	}
-	foundGlobal := false
-	for _, bucketID := range knownBuckets {
-		if bucketID == "global" {
-			foundGlobal = true
-			break
-		}
-	}
-	if !foundGlobal {
-		t.Fatalf("expected known_buckets to contain global, got %v", knownBuckets)
 	}
 
 	var pendingCount int

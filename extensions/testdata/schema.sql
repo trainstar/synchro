@@ -110,6 +110,7 @@ CREATE INDEX IF NOT EXISTS idx_customers_user_id ON customers(user_id);
 CREATE TABLE IF NOT EXISTS orders (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     customer_id UUID NOT NULL REFERENCES customers(id),
+    user_id TEXT NOT NULL,
     status TEXT NOT NULL DEFAULT 'pending',
     total_price NUMERIC(15,2) NOT NULL DEFAULT 0,
     currency CHAR(3) NOT NULL DEFAULT 'USD',
@@ -124,6 +125,24 @@ CREATE TABLE IF NOT EXISTS orders (
 );
 
 CREATE INDEX IF NOT EXISTS idx_orders_customer_id ON orders(customer_id);
+
+CREATE OR REPLACE FUNCTION test_set_order_user_id()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    SELECT customer.user_id
+    INTO STRICT NEW.user_id
+    FROM public.customers AS customer
+    WHERE customer.id = NEW.customer_id;
+    RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS test_set_order_user_id ON orders;
+CREATE TRIGGER test_set_order_user_id
+BEFORE INSERT OR UPDATE OF customer_id ON orders
+FOR EACH ROW EXECUTE FUNCTION test_set_order_user_id();
 
 CREATE TABLE IF NOT EXISTS line_items (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),

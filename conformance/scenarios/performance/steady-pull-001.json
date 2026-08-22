@@ -26,6 +26,7 @@
       ],
       "assertion_ids": [
         "ASSERT-PERF-STEADY-PULL-SEMANTIC-001",
+        "ASSERT-PERF-STEADY-PULL-WIRE-001",
         "ASSERT-PERF-STEADY-PULL-PERFORMANCE-001"
       ],
       "proof_type": "server-black-box",
@@ -164,10 +165,10 @@
       ],
       "required_measurement_ids": [],
       "required_vector_set_ids": [],
-      "make_target": "test-swift",
+      "make_target": "test-native-swift-steady-pull",
       "argv": [
         "make",
-        "test-swift"
+        "test-native-swift-steady-pull"
       ],
       "fault_plan_id": null,
       "control_id": null
@@ -393,6 +394,14 @@
       "requirement_id": "SYNC-INTEGRITY-002",
       "proof_obligation_id": "OBL-PERF-STEADY-PULL-PG-001",
       "assertion_id": "ASSERT-PERF-STEADY-PULL-SEMANTIC-001",
+      "proof_type": "server-black-box",
+      "support_cell_id": "SUP-PG-018"
+    },
+    {
+      "scenario_id": "SCN-PERF-STEADY-PULL-001",
+      "requirement_id": "SYNC-INTEGRITY-002",
+      "proof_obligation_id": "OBL-PERF-STEADY-PULL-PG-001",
+      "assertion_id": "ASSERT-PERF-STEADY-PULL-WIRE-001",
       "proof_type": "server-black-box",
       "support_cell_id": "SUP-PG-018"
     },
@@ -684,7 +693,28 @@
               }
             ],
             "capture_dependencies": [],
-            "scope_rules": [],
+            "scope_rules": [
+              {
+                "scope_rule_id": "scope-items",
+                "relation": "public.items",
+                "membership_function": "synchro.scope_items",
+                "positive_fanout_bound": 8,
+                "evaluations": [
+                  {
+                    "row": {
+                      "canonical_identity_bytes": "synchro:v3:row-identity:v1\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0005items\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0002id\u0001\u0001\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0005row-a",
+                      "table_id": "items",
+                      "primary_key_field_id": "id",
+                      "portable_type": "string",
+                      "canonical_wire_json": "\"row-a\""
+                    },
+                    "scopes": [
+                      "scope-a"
+                    ]
+                  }
+                ]
+              }
+            ],
             "dependency_impacts": []
           },
           "stream": {
@@ -745,6 +775,83 @@
       {
         "id": "EXPECT-PERF-STEADY-PULL-SEMANTIC-001",
         "predicate": {
+          "contract_predicate": "state-equality",
+          "name": "state-equals-authored-model",
+          "payload": {}
+        },
+        "state_facts": {
+          "transaction_count": 1,
+          "row_count": 1,
+          "scope_count": 2,
+          "transactions": [
+            {
+              "stream_generation": "stream-1",
+              "commit_lsn": "10",
+              "end_lsn": "11",
+              "registry_generation": 1,
+              "lifecycle": "materialized",
+              "event_ordinals": [
+                1
+              ]
+            }
+          ],
+          "rows": [
+            {
+              "table_id": "items",
+              "canonical_wire_json": "\"row-a\"",
+              "version": "v1",
+              "checksum": "153c8d456b46248d141c1168cb9668aa69fdf57a1f43be6c51f4b9a89fb758b8"
+            }
+          ],
+          "scopes": [
+            {
+              "scope_id": "scope-a",
+              "membership_generation": 1,
+              "cardinality": 1,
+              "effect_versions": [
+                "v1"
+              ]
+            },
+            {
+              "scope_id": "scope-b",
+              "membership_generation": 1,
+              "cardinality": 0,
+              "effect_versions": []
+            }
+          ],
+          "clients": [
+            {
+              "user_id": "user-a",
+              "client_id": "client-a",
+              "row_count": 1,
+              "provenance_count": 1,
+              "checkpoint_count": 1,
+              "provenance": [
+                {
+                  "table_id": "items",
+                  "canonical_wire_json": "\"row-a\"",
+                  "scopes": [
+                    "scope-a"
+                  ],
+                  "version": "v1"
+                }
+              ],
+              "checkpoints": [
+                {
+                  "scope_id": "scope-a",
+                  "has_cursor": true,
+                  "has_checksum": true,
+                  "checksum": "b40438d24d6da2efa4787b6494c111daa45fe418c6ab1bb522cc9940d4d8e5d1",
+                  "verified": true
+                }
+              ]
+            }
+          ]
+        }
+      },
+      {
+        "id": "EXPECT-PERF-STEADY-PULL-WIRE-001",
+        "predicate": {
           "contract_predicate": "wire-outcome",
           "name": "canonical-wire-outcome",
           "payload": {}
@@ -756,6 +863,175 @@
           "contract_predicate": "performance-measurement",
           "name": "performance-contract-satisfied",
           "payload": {}
+        }
+      }
+    ]
+  },
+  "native_execution": {
+    "version": 1,
+    "clients": [
+      {
+        "key": "client-a",
+        "user_id": "user-a",
+        "client_id": "client-a",
+        "database_key": "db-client-a"
+      }
+    ],
+    "actions": [
+      {
+        "id": "NACT-PERF-STEADY-PULL-001",
+        "phase": "setup",
+        "actor": "controller",
+        "command": "install-model",
+        "covers_step_ids": [],
+        "parameters": {}
+      },
+      {
+        "id": "NACT-PERF-STEADY-PULL-002",
+        "phase": "setup",
+        "actor": "client",
+        "command": "open",
+        "covers_step_ids": [],
+        "parameters": {
+          "client_key": "client-a",
+          "database_mode": "create",
+          "initialization": "empty",
+          "seed_step_id": null
+        }
+      },
+      {
+        "id": "NACT-PERF-STEADY-PULL-003",
+        "phase": "setup",
+        "actor": "client",
+        "command": "synchronize-step",
+        "covers_step_ids": [
+          "STEP-PERF-STEADY-PULL-BASELINE-REQUEST-001"
+        ],
+        "parameters": {
+          "client_key": "client-a",
+          "method": "start",
+          "completion": "idle"
+        }
+      },
+      {
+        "id": "NACT-PERF-STEADY-PULL-004",
+        "phase": "setup",
+        "actor": "observer",
+        "command": "await-step",
+        "covers_step_ids": [
+          "STEP-PERF-STEADY-PULL-BASELINE-BEGIN-001"
+        ],
+        "parameters": {
+          "client_key": "client-a"
+        }
+      },
+      {
+        "id": "NACT-PERF-STEADY-PULL-005",
+        "phase": "setup",
+        "actor": "observer",
+        "command": "await-step",
+        "covers_step_ids": [
+          "STEP-PERF-STEADY-PULL-BASELINE-APPLY-001"
+        ],
+        "parameters": {
+          "client_key": "client-a"
+        }
+      },
+      {
+        "id": "NACT-PERF-STEADY-PULL-006",
+        "phase": "setup",
+        "actor": "observer",
+        "command": "await-step",
+        "covers_step_ids": [
+          "STEP-PERF-STEADY-PULL-BASELINE-FINALIZE-001"
+        ],
+        "parameters": {
+          "client_key": "client-a"
+        }
+      },
+      {
+        "id": "NACT-PERF-STEADY-PULL-007",
+        "phase": "setup",
+        "actor": "controller",
+        "command": "apply-step",
+        "covers_step_ids": [
+          "STEP-PERF-STEADY-PULL-COMMIT-001"
+        ],
+        "parameters": {}
+      },
+      {
+        "id": "NACT-PERF-STEADY-PULL-008",
+        "phase": "setup",
+        "actor": "process",
+        "command": "execute-step",
+        "covers_step_ids": [
+          "STEP-PERF-STEADY-PULL-MATERIALIZE-001"
+        ],
+        "parameters": {
+          "client_key": null
+        }
+      },
+      {
+        "id": "NACT-PERF-STEADY-PULL-009",
+        "phase": "exercise",
+        "actor": "client",
+        "command": "synchronize-step",
+        "covers_step_ids": [
+          "STEP-PERF-STEADY-PULL-001"
+        ],
+        "parameters": {
+          "client_key": "client-a",
+          "method": "sync-now",
+          "completion": "idle"
+        }
+      },
+      {
+        "id": "NACT-PERF-STEADY-PULL-010",
+        "phase": "exercise",
+        "actor": "observer",
+        "command": "await-step",
+        "covers_step_ids": [
+          "STEP-PERF-STEADY-PULL-002"
+        ],
+        "parameters": {
+          "client_key": "client-a"
+        }
+      },
+      {
+        "id": "NACT-PERF-STEADY-PULL-011",
+        "phase": "verify",
+        "actor": "observer",
+        "command": "capture",
+        "covers_step_ids": [],
+        "parameters": {
+          "client_keys": [
+            "client-a"
+          ],
+          "sources": [
+            "application-rows",
+            "checkpoints",
+            "scope-state",
+            "sync-status",
+            "request-trace"
+          ],
+          "expectation_ids": [
+            "EXPECT-PERF-STEADY-PULL-SEMANTIC-001",
+            "EXPECT-PERF-STEADY-PULL-PERFORMANCE-001"
+          ]
+        }
+      },
+      {
+        "id": "NACT-PERF-STEADY-PULL-012",
+        "phase": "verify",
+        "actor": "observer",
+        "command": "measure",
+        "covers_step_ids": [],
+        "parameters": {
+          "performance_budget_ids": [
+            "BUD-STEADY-PULL-001",
+            "BUD-STEADY-PULL-NONPULL-001"
+          ],
+          "measurement_ids": []
         }
       }
     ]
@@ -817,10 +1093,172 @@
   ],
   "steps": [
     {
+      "id": "STEP-PERF-STEADY-PULL-BASELINE-REQUEST-001",
+      "phase": "setup",
+      "transport": "http",
+      "description": "Request the terminal empty scope A baseline page.",
+      "operation": {
+        "contract_operation": "rebuild",
+        "name": "request-page",
+        "payload": {
+          "user_id": "user-a",
+          "client_id": "client-a",
+          "client_generation": 1,
+          "schema": {
+            "version": 1,
+            "hash": "721d2c95e6f34cd9733feea9f5118fba391eee10d07663dad066cfc59439fa44"
+          },
+          "scope_id": "scope-a",
+          "rebuild_id": "00000000-0000-4000-8000-000000008001",
+          "cursor_source": "none",
+          "limit": 100
+        }
+      },
+      "expected_outcome": {
+        "disposition": "success"
+      }
+    },
+    {
+      "id": "STEP-PERF-STEADY-PULL-BASELINE-BEGIN-001",
+      "phase": "setup",
+      "transport": "local",
+      "description": "Begin the empty scope A baseline rebuild.",
+      "operation": {
+        "contract_operation": "local",
+        "name": "begin-rebuild",
+        "payload": {
+          "user_id": "user-a",
+          "client_id": "client-a",
+          "client_generation": 1,
+          "schema": {
+            "version": 1,
+            "hash": "721d2c95e6f34cd9733feea9f5118fba391eee10d07663dad066cfc59439fa44"
+          },
+          "scope_id": "scope-a",
+          "rebuild_id": "00000000-0000-4000-8000-000000008001",
+          "limit": 100
+        }
+      },
+      "expected_outcome": {
+        "disposition": "success"
+      }
+    },
+    {
+      "id": "STEP-PERF-STEADY-PULL-BASELINE-APPLY-001",
+      "phase": "setup",
+      "transport": "local",
+      "description": "Apply the terminal empty scope A baseline page.",
+      "operation": {
+        "contract_operation": "local",
+        "name": "apply-rebuild-page",
+        "payload": {
+          "user_id": "user-a",
+          "client_id": "client-a",
+          "scope_id": "scope-a",
+          "rebuild_id": "00000000-0000-4000-8000-000000008001",
+          "page_ordinal": 1,
+          "request_token_source": "none"
+        }
+      },
+      "expected_outcome": {
+        "disposition": "success"
+      }
+    },
+    {
+      "id": "STEP-PERF-STEADY-PULL-BASELINE-FINALIZE-001",
+      "phase": "setup",
+      "transport": "local",
+      "description": "Finalize the empty scope A baseline checkpoint.",
+      "operation": {
+        "contract_operation": "local",
+        "name": "finalize-rebuild",
+        "payload": {
+          "user_id": "user-a",
+          "client_id": "client-a",
+          "scope_id": "scope-a",
+          "rebuild_id": "00000000-0000-4000-8000-000000008001"
+        }
+      },
+      "expected_outcome": {
+        "disposition": "success"
+      }
+    },
+    {
+      "id": "STEP-PERF-STEADY-PULL-COMMIT-001",
+      "phase": "setup",
+      "transport": "model",
+      "description": "Commit one source insert after the empty baseline.",
+      "operation": {
+        "contract_operation": "model",
+        "name": "commit-source-transaction",
+        "payload": {
+          "stream_generation": "stream-1",
+          "commit_lsn": "10",
+          "end_lsn": "11",
+          "events": [
+            {
+              "event_ordinal": 1,
+              "relation": "public.items",
+              "operation": "insert",
+              "before": null,
+              "after": {
+                "identity": {
+                  "kind": "synced",
+                  "synced_row": {
+                    "canonical_identity_bytes": "synchro:v3:row-identity:v1\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0005items\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0002id\u0001\u0001\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0005row-a",
+                    "table_id": "items",
+                    "primary_key_field_id": "id",
+                    "portable_type": "string",
+                    "canonical_wire_json": "\"row-a\""
+                  },
+                  "capture_key": null
+                },
+                "fields": [
+                  {
+                    "field": "id",
+                    "type": "string",
+                    "wire_json": "\"row-a\""
+                  },
+                  {
+                    "field": "value",
+                    "type": "string",
+                    "wire_json": "\"steady-pull\""
+                  }
+                ],
+                "version": "v1",
+                "checksum": "153c8d456b46248d141c1168cb9668aa69fdf57a1f43be6c51f4b9a89fb758b8",
+                "deleted": false
+              }
+            }
+          ]
+        }
+      },
+      "expected_outcome": {
+        "disposition": "success"
+      }
+    },
+    {
+      "id": "STEP-PERF-STEADY-PULL-MATERIALIZE-001",
+      "phase": "setup",
+      "transport": "process",
+      "description": "Materialize the source insert before the measured pull.",
+      "operation": {
+        "contract_operation": "process",
+        "name": "materialize-source-transaction",
+        "payload": {
+          "stream_generation": "stream-1",
+          "commit_lsn": "10"
+        }
+      },
+      "expected_outcome": {
+        "disposition": "success"
+      }
+    },
+    {
       "id": "STEP-PERF-STEADY-PULL-001",
       "phase": "exercise",
       "transport": "http",
-      "description": "Execute the authored workload operation.",
+      "description": "Request the measured terminal delta from the local baseline checkpoint.",
       "operation": {
         "contract_operation": "pull",
         "name": "request-page",
@@ -836,7 +1274,7 @@
           "scopes": [
             {
               "scope_id": "scope-a",
-              "cursor_source": "none"
+              "cursor_source": "local_checkpoint"
             }
           ],
           "limit": 100
@@ -850,7 +1288,7 @@
       "id": "STEP-PERF-STEADY-PULL-002",
       "phase": "exercise",
       "transport": "local",
-      "description": "Execute the authored workload operation.",
+      "description": "Apply the terminal row, cursor, and verified checksum locally.",
       "operation": {
         "contract_operation": "local",
         "name": "apply-pull-page",
@@ -867,8 +1305,16 @@
   ],
   "wire_expectations": [
     {
+      "step_id": "STEP-PERF-STEADY-PULL-BASELINE-REQUEST-001",
+      "assertion_id": "ASSERT-PERF-STEADY-PULL-WIRE-001",
+      "contract_case": "rebuild_success",
+      "http_status": 200,
+      "error_code": null,
+      "retryable": false
+    },
+    {
       "step_id": "STEP-PERF-STEADY-PULL-001",
-      "assertion_id": "ASSERT-PERF-STEADY-PULL-SEMANTIC-001",
+      "assertion_id": "ASSERT-PERF-STEADY-PULL-WIRE-001",
       "contract_case": "pull_success",
       "http_status": 200,
       "error_code": null,
@@ -886,6 +1332,29 @@
         "EXPECT-PERF-STEADY-PULL-SEMANTIC-001"
       ],
       "predicate": {
+        "contract_predicate": "state-equality",
+        "name": "state-equals-authored-model",
+        "payload": {}
+      },
+      "oracle": {
+        "kind": "model-state-equality",
+        "expected_source": "authored-model",
+        "observed_source": "system-under-test"
+      },
+      "detects_control_ids": [
+        "CTRL-INTEGRITY-002"
+      ]
+    },
+    {
+      "id": "ASSERT-PERF-STEADY-PULL-WIRE-001",
+      "requirement_ids": [
+        "SYNC-INTEGRITY-002"
+      ],
+      "description": "The baseline rebuild and measured pull return their canonical successful wire outcomes.",
+      "expectation_ids": [
+        "EXPECT-PERF-STEADY-PULL-WIRE-001"
+      ],
+      "predicate": {
         "contract_predicate": "wire-outcome",
         "name": "canonical-wire-outcome",
         "payload": {}
@@ -895,9 +1364,7 @@
         "expected_source": "authored-model",
         "observed_source": "system-under-test"
       },
-      "detects_control_ids": [
-        "CTRL-INTEGRITY-002"
-      ]
+      "detects_control_ids": []
     },
     {
       "id": "ASSERT-PERF-STEADY-PULL-PERFORMANCE-001",

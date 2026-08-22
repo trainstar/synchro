@@ -3770,26 +3770,48 @@ fn capture_after_projection(
         .ok_or_else(|| "source event has no after image".to_string())?;
     let prior_data = prior.and_then(|row| row.row_data.as_object());
     let mut raw = serde_json::Map::new();
-    for column in &event.registration.sync_columns {
+    let mut native_json_values = serde_json::Map::new();
+    for field in &event.registration.fields {
+        let column = &field.physical_column;
         let value = image
             .get(column)
             .ok_or_else(|| format!("source after image omits synced column {column}"))?;
         let value = match value {
-            TupleValue::Null => serde_json::Value::Null,
-            TupleValue::Text(bytes) => serde_json::Value::String(
-                std::str::from_utf8(bytes)
+            TupleValue::Null => {
+                if field.native_json {
+                    native_json_values.insert(field.field_id.clone(), serde_json::Value::Null);
+                }
+                serde_json::Value::Null
+            }
+            TupleValue::Text(bytes) => {
+                let text = std::str::from_utf8(bytes)
                     .map_err(|_| format!("synced column {column} has invalid text"))?
-                    .to_string(),
-            ),
+                    .to_string();
+                if field.native_json {
+                    native_json_values.insert(
+                        field.field_id.clone(),
+                        serde_json::Value::String(text.clone()),
+                    );
+                }
+                serde_json::Value::String(text)
+            }
             TupleValue::Binary(_) => {
                 return Err(format!(
                     "synced column {column} uses unsupported binary output"
                 ))
             }
-            TupleValue::Unchanged => prior_data
-                .and_then(|data| data.get(column))
-                .cloned()
-                .ok_or_else(|| format!("unchanged synced column {column} has no prior value"))?,
+            TupleValue::Unchanged => {
+                let prior_value = prior_data
+                    .and_then(|data| data.get(&field.field_id))
+                    .cloned()
+                    .ok_or_else(|| {
+                        format!("unchanged synced column {column} has no prior value")
+                    })?;
+                if field.native_json {
+                    native_json_values.insert(field.field_id.clone(), prior_value.clone());
+                }
+                prior_value
+            }
         };
         raw.insert(column.clone(), value);
     }
@@ -3811,11 +3833,20 @@ fn capture_after_projection(
         .map_err(|_| "reading canonical captured row failed".to_string())?
         .ok_or_else(|| "canonical captured row is missing".to_string())?
         .0;
+    let row_object = row_data
+        .as_object_mut()
+        .ok_or_else(|| "canonical captured row is not an object".to_string())?;
+    row_object.extend(native_json_values);
     crate::pull::canonicalize_synced_row_data(event.registration, &mut row_data)?;
-    let deleted = event.registration.has_deleted_at
-        && row_data
-            .get(&event.registration.deleted_at_col)
-            .is_some_and(|value| !value.is_null());
+    let deleted = if event.registration.has_deleted_at {
+        captured_row_deleted(
+            &event.registration.fields,
+            &event.registration.deleted_at_col,
+            &row_data,
+        )?
+    } else {
+        false
+    };
     let digest = synced_row_digest(
         client,
         event.registration,
@@ -3830,6 +3861,21 @@ fn capture_after_projection(
         deleted,
         registry_generation: event.registration.registry_generation,
     })
+}
+
+fn captured_row_deleted(
+    fields: &[crate::registry::FieldRegistration],
+    deleted_at_col: &str,
+    row_data: &serde_json::Value,
+) -> Result<bool, String> {
+    let field = fields
+        .iter()
+        .find(|field| field.physical_column == deleted_at_col)
+        .ok_or_else(|| "registered deletion field is missing".to_string())?;
+    let value = row_data
+        .get(&field.field_id)
+        .ok_or_else(|| "captured deletion field is missing".to_string())?;
+    Ok(!value.is_null())
 }
 
 fn persist_projection(
@@ -4793,4 +4839,33 @@ fn run_replication_transaction<R, E, F: FnOnce() -> Result<R, E> + UnwindSafe + 
     let result = run_worker_transaction(body);
     activate_worker_role(worker_role_oid);
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn captured_row_deletion_uses_logical_field_identity() {
+        let field = crate::registry::FieldRegistration {
+            field_id: "field-deleted-at".to_string(),
+            physical_column: "deleted_at".to_string(),
+            portable_type: "datetime".to_string(),
+            native_json: false,
+            decimal_precision: None,
+            decimal_scale: None,
+            nullable: true,
+            writable: false,
+            primary_key: false,
+        };
+
+        assert_eq!(
+            captured_row_deleted(
+                &[field],
+                "deleted_at",
+                &serde_json::json!({ "field-deleted-at": "2026-08-17T02:31:43.476060Z" }),
+            ),
+            Ok(true)
+        );
+    }
 }

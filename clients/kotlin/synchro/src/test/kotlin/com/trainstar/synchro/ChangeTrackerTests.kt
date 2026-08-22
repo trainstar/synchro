@@ -2,8 +2,12 @@ package com.trainstar.synchro
 
 import android.content.Context
 import androidx.test.core.app.ApplicationProvider
+import java.util.UUID
 import org.junit.After
-import org.junit.Assert.*
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
@@ -14,207 +18,136 @@ import org.robolectric.annotation.Config
 class ChangeTrackerTests {
     private val databases = TestDatabaseTracker()
 
-    private val testSchema = SchemaResponse(
-        schemaVersion = 1,
-        schemaHash = "test",
-        serverTime = "2026-01-01T12:00:00.000Z",
-        tables = listOf(
-            SchemaTable(
-                tableName = "orders",
-                pushPolicy = "owner_only",
-                updatedAtColumn = "updated_at",
-                deletedAtColumn = "deleted_at",
-                primaryKey = listOf("id"),
-                columns = listOf(
-                    SchemaColumn(name = "id", dbType = "uuid", logicalType = "string", nullable = false, isPrimaryKey = true),
-                    SchemaColumn(name = "ship_address", dbType = "text", logicalType = "string", nullable = true, isPrimaryKey = false),
-                    SchemaColumn(name = "user_id", dbType = "uuid", logicalType = "string", nullable = false, isPrimaryKey = false),
-                    SchemaColumn(name = "created_at", dbType = "timestamp with time zone", logicalType = "datetime", nullable = false, isPrimaryKey = false),
-                    SchemaColumn(name = "updated_at", dbType = "timestamp with time zone", logicalType = "datetime", nullable = false, isPrimaryKey = false),
-                    SchemaColumn(name = "deleted_at", dbType = "timestamp with time zone", logicalType = "datetime", nullable = true, isPrimaryKey = false),
-                )
-            )
-        )
+    private val table = SchemaTable(
+        tableName = "orders",
+        updatedAtColumn = "updated_at",
+        deletedAtColumn = "deleted_at",
+        primaryKey = listOf("id"),
+        columns = listOf(
+            SchemaColumn("id", logicalType = "string", nullable = false, isPrimaryKey = true),
+            SchemaColumn("title", logicalType = "string"),
+            SchemaColumn("enabled", logicalType = "boolean"),
+            SchemaColumn("quantity", logicalType = "int"),
+            SchemaColumn("large_quantity", logicalType = "int64"),
+            SchemaColumn("amount", logicalType = "decimal", precision = 6, scale = 2),
+            SchemaColumn("document", logicalType = "json"),
+            SchemaColumn("score", logicalType = "float"),
+            SchemaColumn("payload", logicalType = "bytes"),
+            SchemaColumn("updated_at", logicalType = "datetime", nullable = false),
+            SchemaColumn("deleted_at", logicalType = "datetime"),
+        ),
     )
 
-    private fun makeTestEnv(): Triple<SynchroDatabase, ChangeTracker, SchemaManager> {
+    private fun environment(): Pair<SynchroDatabase, ChangeTracker> {
         val context = ApplicationProvider.getApplicationContext<Context>()
-        val db = databases.create(context)
-        val tracker = ChangeTracker(db)
-        val manager = SchemaManager(db)
-        manager.createSyncedTables(testSchema)
-        return Triple(db, tracker, manager)
+        val database = databases.create(context)
+        SchemaManager(database).createSyncedTables(
+            SchemaResponse(1, PROTOCOL_TEST_SCHEMA_HASH, "2026-01-01T00:00:00.000000Z", listOf(table)),
+        )
+        return database to ChangeTracker(database)
     }
 
     @After
-    fun tearDown() {
-        databases.closeAll()
+    fun tearDown() = databases.closeAll()
+
+    @Test
+    fun captureAppendsImmutableTypedValues() {
+        val (database, tracker) = environment()
+        database.execute(
+            """
+            INSERT INTO orders (id, title, enabled, quantity, large_quantity, amount, document, score, payload, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """.trimIndent(),
+            arrayOf(
+                "o1", null, 1L, 7L, 9_007_199_254_740_991L, "123.45", "{\"a\":1,\"b\":true}",
+                2.5, byteArrayOf(1, 2, 3), "2026-01-01T00:00:00.000000Z",
+            ),
+        )
+        database.execute("UPDATE orders SET title = ?, score = ? WHERE id = ?", arrayOf("after", 3.5, "o1"))
+        database.execute("UPDATE orders SET title = ? WHERE id = ?", arrayOf("later", "o1"))
+
+        val ledger = database.query(
+            "SELECT mutation_id, local_order, operation, depends_on_mutation_id FROM _synchro_pending_changes ORDER BY local_order",
+        )
+        assertEquals(3, ledger.size)
+        assertEquals(listOf("insert", "update", "update"), ledger.map { it.getValue("operation") })
+        ledger.forEach { assertEquals(it.getValue("mutation_id"), UUID.fromString(it.getValue("mutation_id") as String).toString()) }
+        assertNotNull(ledger[1]["depends_on_mutation_id"])
+        assertEquals(ledger[1]["mutation_id"], ledger[2]["depends_on_mutation_id"])
+
+        val insertID = ledger.first().getValue("mutation_id") as String
+        val updateID = ledger[1].getValue("mutation_id") as String
+        val insertValues = database.query(
+            "SELECT field_id, logical_type, value_kind, value_integer, value_real, value_blob FROM _synchro_mutation_values WHERE mutation_id = ? ORDER BY field_id",
+            arrayOf(insertID),
+        )
+        assertEquals(8, insertValues.size)
+        assertEquals("null", insertValues.single { it["field_id"] == "title" }["value_kind"])
+        assertEquals("boolean", insertValues.single { it["field_id"] == "enabled" }["value_kind"])
+        assertEquals("integer", insertValues.single { it["field_id"] == "quantity" }["value_kind"])
+        assertEquals("integer", insertValues.single { it["field_id"] == "large_quantity" }["value_kind"])
+        assertEquals("text", insertValues.single { it["field_id"] == "amount" }["value_kind"])
+        assertEquals("text", insertValues.single { it["field_id"] == "document" }["value_kind"])
+        assertEquals("real", insertValues.single { it["field_id"] == "score" }["value_kind"])
+        assertEquals("blob", insertValues.single { it["field_id"] == "payload" }["value_kind"])
+
+        val updateFields = database.query(
+            "SELECT field_id FROM _synchro_mutation_values WHERE mutation_id = ? ORDER BY field_id",
+            arrayOf(updateID),
+        ).map { it.getValue("field_id") }
+        assertEquals(listOf("score", "title"), updateFields)
+        val hydrated = tracker.hydratePendingForPush(listOf(tracker.pendingChanges().first()), listOf(table.localSchema)).single()
+        assertEquals(AnyCodable(7L), hydrated.data?.get("quantity"))
+        assertEquals(AnyCodable("9007199254740991"), hydrated.data?.get("large_quantity"))
+        assertEquals(AnyCodable("123.45"), hydrated.data?.get("amount"))
+        assertEquals(AnyCodable("{\"a\":1,\"b\":true}"), hydrated.data?.get("document"))
+        assertEquals(AnyCodable(true), hydrated.data?.get("enabled"))
+        assertEquals(AnyCodable(2.5), hydrated.data?.get("score"))
+        assertEquals(AnyCodable("AQID"), hydrated.data?.get("payload"))
+        assertEquals(AnyCodable(null), hydrated.data?.get("title"))
+        assertEquals(3, tracker.pendingChangeCount())
     }
 
     @Test
-    fun testInsertTriggerCreatesEntry() {
-        val (db, tracker, _) = makeTestEnv()
-
-        db.execute(
-            "INSERT INTO orders (id, ship_address, user_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
-            arrayOf("w1", "123 Main St", "u1", "2026-01-01T00:00:00Z", "2026-01-01T00:00:00Z")
+    fun deleteAppendsAColumnFreeIntentWithoutCoalescingSources() {
+        val (database, _) = environment()
+        database.execute(
+            "INSERT INTO orders (id, title, updated_at) VALUES (?, ?, ?)",
+            arrayOf("o1", "first", "2026-01-01T00:00:00.000000Z"),
         )
+        database.execute("UPDATE orders SET title = ? WHERE id = ?", arrayOf("second", "o1"))
+        database.execute("DELETE FROM orders WHERE id = ?", arrayOf("o1"))
 
-        val pending = tracker.pendingChanges()
-        assertEquals(1, pending.size)
-        assertEquals("w1", pending[0].recordID)
-        assertEquals("orders", pending[0].tableName)
-        assertEquals("create", pending[0].operation)
+        val changes = database.query("SELECT mutation_id, operation FROM _synchro_pending_changes ORDER BY local_order")
+        assertEquals(listOf("insert", "update", "delete"), changes.map { it.getValue("operation") })
+        val deleteID = changes.last().getValue("mutation_id") as String
+        assertTrue(database.query("SELECT field_id FROM _synchro_mutation_values WHERE mutation_id = ?", arrayOf(deleteID)).isEmpty())
+        assertNotNull(database.queryOne("SELECT deleted_at FROM orders WHERE id = ?", arrayOf("o1"))?.get("deleted_at"))
     }
 
     @Test
-    fun testUpdateTriggerCreatesEntry() {
-        val (db, tracker, _) = makeTestEnv()
-
-        db.execute(
-            "INSERT INTO orders (id, ship_address, user_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
-            arrayOf("w1", "123 Main St", "u1", "2026-01-01T00:00:00Z", "2026-01-01T00:00:00Z")
+    fun syncLockAndMissingArchivePreventCaptureAtomically() {
+        val (database, tracker) = environment()
+        database.writeTransaction { SynchroMeta.setSyncLock(it, true) }
+        database.execute(
+            "INSERT INTO orders (id, title, updated_at) VALUES (?, ?, ?)",
+            arrayOf("locked", "no intent", "2026-01-01T00:00:00.000000Z"),
         )
-        tracker.clearAll()
-
-        db.execute("UPDATE orders SET ship_address = ? WHERE id = ?", arrayOf("456 Oak Ave", "w1"))
-
-        val pending = tracker.pendingChanges()
-        assertEquals(1, pending.size)
-        assertEquals("update", pending[0].operation)
-        assertNotNull(pending[0].baseUpdatedAt)
-    }
-
-    @Test
-    fun testDeleteTriggerConvertsSoftDelete() {
-        val (db, tracker, _) = makeTestEnv()
-
-        db.execute(
-            "INSERT INTO orders (id, ship_address, user_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
-            arrayOf("w1", "123 Main St", "u1", "2026-01-01T00:00:00Z", "2026-01-01T00:00:00Z")
-        )
-        tracker.clearAll()
-
-        // Hard DELETE should be intercepted by BEFORE DELETE trigger
-        db.execute("DELETE FROM orders WHERE id = ?", arrayOf("w1"))
-
-        // Record should still exist with deleted_at set
-        val row = db.queryOne("SELECT deleted_at FROM orders WHERE id = ?", arrayOf("w1"))
-        assertNotNull(row)
-        assertNotNull(row?.get("deleted_at"))
-
-        // Pending queue should have a delete operation
-        val pending = tracker.pendingChanges()
-        assertEquals(1, pending.size)
-        assertEquals("delete", pending[0].operation)
-    }
-
-    @Test
-    fun testDedupCreateThenUpdate() {
-        val (db, tracker, _) = makeTestEnv()
-
-        db.execute(
-            "INSERT INTO orders (id, ship_address, user_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
-            arrayOf("w1", "123 Main St", "u1", "2026-01-01T00:00:00Z", "2026-01-01T00:00:00Z")
-        )
-        db.execute("UPDATE orders SET ship_address = ? WHERE id = ?", arrayOf("789 Updated Blvd", "w1"))
-
-        val pending = tracker.pendingChanges()
-        assertEquals(1, pending.size)
-        // create + update = still create
-        assertEquals("create", pending[0].operation)
-    }
-
-    @Test
-    fun testDedupCreateThenDeleteRemovesEntry() {
-        val (db, tracker, _) = makeTestEnv()
-
-        db.execute(
-            "INSERT INTO orders (id, ship_address, user_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
-            arrayOf("w1", "123 Main St", "u1", "2026-01-01T00:00:00Z", "2026-01-01T00:00:00Z")
-        )
-        db.execute("DELETE FROM orders WHERE id = ?", arrayOf("w1"))
-
-        // create + delete = removed entirely (never reached server)
-        val pending = tracker.pendingChanges()
-        assertEquals(0, pending.size)
-    }
-
-    @Test
-    fun testSyncLockPreventsTracking() {
-        val (db, tracker, _) = makeTestEnv()
-
-        db.writeTransaction { dbConn ->
-            SynchroMeta.setSyncLock(dbConn, true)
-        }
-
-        db.execute(
-            "INSERT INTO orders (id, ship_address, user_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
-            arrayOf("w1", "123 Main St", "u1", "2026-01-01T00:00:00Z", "2026-01-01T00:00:00Z")
-        )
-
-        val pending = tracker.pendingChanges()
-        assertEquals(0, pending.size)
-
-        db.writeTransaction { dbConn ->
-            SynchroMeta.setSyncLock(dbConn, false)
-        }
-    }
-
-    @Test
-    fun testClearAll() {
-        val (db, tracker, _) = makeTestEnv()
-
-        db.execute(
-            "INSERT INTO orders (id, ship_address, user_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
-            arrayOf("w1", "123 Main St", "u1", "2026-01-01T00:00:00Z", "2026-01-01T00:00:00Z")
-        )
-
-        assertTrue(tracker.hasPendingChanges())
-        tracker.clearAll()
         assertFalse(tracker.hasPendingChanges())
-    }
 
-    @Test
-    fun testDedupUpdateThenDelete() {
-        val (db, tracker, _) = makeTestEnv()
-
-        // Insert and clear (simulate already-pushed create)
-        db.execute(
-            "INSERT INTO orders (id, ship_address, user_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
-            arrayOf("w1", "123 Main St", "u1", "2026-01-01T00:00:00Z", "2026-01-01T00:00:00Z")
+        database.writeTransaction {
+            SynchroMeta.setSyncLock(it, false)
+            it.execSQL("DELETE FROM _synchro_schema_archives")
+        }
+        assertTrue(
+            runCatching {
+                database.execute(
+                    "INSERT INTO orders (id, title, updated_at) VALUES (?, ?, ?)",
+                    arrayOf("blocked", "no row", "2026-01-01T00:00:00.000000Z"),
+                )
+            }.isFailure,
         )
-        tracker.clearAll()
-
-        // Update then delete — should dedup to "delete"
-        db.execute("UPDATE orders SET ship_address = ? WHERE id = ?", arrayOf("111 Renamed St", "w1"))
-        db.execute("DELETE FROM orders WHERE id = ?", arrayOf("w1"))
-
-        val pending = tracker.pendingChanges()
-        assertEquals(1, pending.size)
-        assertEquals("delete", pending[0].operation)
-        // base_updated_at should be preserved from the update
-        assertNotNull(pending[0].baseUpdatedAt)
-    }
-
-    @Test
-    fun testDedupUpdateThenUpdate() {
-        val (db, tracker, _) = makeTestEnv()
-
-        // Insert and clear (simulate already-pushed create)
-        db.execute(
-            "INSERT INTO orders (id, ship_address, user_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
-            arrayOf("w1", "123 Main St", "u1", "2026-01-01T00:00:00Z", "2026-01-01T00:00:00Z")
-        )
-        tracker.clearAll()
-
-        // Two sequential updates — should dedup to single "update"
-        db.execute("UPDATE orders SET ship_address = ? WHERE id = ?", arrayOf("222 First St", "w1"))
-        db.execute("UPDATE orders SET ship_address = ? WHERE id = ?", arrayOf("333 Second Ave", "w1"))
-
-        val pending = tracker.pendingChanges()
-        assertEquals(1, pending.size)
-        assertEquals("update", pending[0].operation)
-        assertNotNull(pending[0].baseUpdatedAt)
+        assertTrue(database.query("SELECT id FROM orders WHERE id = 'blocked'").isEmpty())
+        assertEquals(0L, database.queryOne("SELECT COUNT(*) AS count FROM _synchro_pending_changes")?.get("count"))
     }
 }

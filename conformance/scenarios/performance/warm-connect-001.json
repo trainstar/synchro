@@ -2,8 +2,8 @@
   "$schema": "https://synchro.dev/conformance/schemas/scenario-v2.schema.json",
   "schema_version": 2,
   "id": "SCN-PERF-WARM-CONNECT-001",
-  "title": "Warm connect request count and authoritative assignment",
-  "description": "A warm client sends one connect request and retains only the server-authoritative scope set.",
+  "title": "Warm startup request count and semantic convergence",
+  "description": "A warm public startup sends one connect and one pull, then converges on the server-authoritative scope state.",
   "requirement_ids": [
     "SYNC-SCOPE-001"
   ],
@@ -26,6 +26,7 @@
       ],
       "assertion_ids": [
         "ASSERT-PERF-WARM-CONNECT-SEMANTIC-001",
+        "ASSERT-PERF-WARM-CONNECT-WIRE-001",
         "ASSERT-PERF-WARM-CONNECT-PERFORMANCE-001"
       ],
       "proof_type": "server-black-box",
@@ -36,7 +37,11 @@
       ],
       "performance_budget_ids": [
         "BUD-WARM-CONNECT-001",
-        "BUD-WARM-CONNECT-NONCONNECT-001"
+        "BUD-WARM-CONNECT-PULL-001",
+        "BUD-WARM-CONNECT-PUSH-001",
+        "BUD-WARM-CONNECT-REBUILD-001",
+        "BUD-WARM-CONNECT-SCHEMA-001",
+        "BUD-WARM-CONNECT-OTHER-001"
       ],
       "required_measurement_ids": [],
       "required_vector_set_ids": [],
@@ -67,7 +72,11 @@
       ],
       "performance_budget_ids": [
         "BUD-WARM-CONNECT-001",
-        "BUD-WARM-CONNECT-NONCONNECT-001"
+        "BUD-WARM-CONNECT-PULL-001",
+        "BUD-WARM-CONNECT-PUSH-001",
+        "BUD-WARM-CONNECT-REBUILD-001",
+        "BUD-WARM-CONNECT-SCHEMA-001",
+        "BUD-WARM-CONNECT-OTHER-001"
       ],
       "required_measurement_ids": [],
       "required_vector_set_ids": [],
@@ -98,7 +107,11 @@
       ],
       "performance_budget_ids": [
         "BUD-WARM-CONNECT-001",
-        "BUD-WARM-CONNECT-NONCONNECT-001"
+        "BUD-WARM-CONNECT-PULL-001",
+        "BUD-WARM-CONNECT-PUSH-001",
+        "BUD-WARM-CONNECT-REBUILD-001",
+        "BUD-WARM-CONNECT-SCHEMA-001",
+        "BUD-WARM-CONNECT-OTHER-001"
       ],
       "required_measurement_ids": [],
       "required_vector_set_ids": [],
@@ -129,7 +142,11 @@
       ],
       "performance_budget_ids": [
         "BUD-WARM-CONNECT-001",
-        "BUD-WARM-CONNECT-NONCONNECT-001"
+        "BUD-WARM-CONNECT-PULL-001",
+        "BUD-WARM-CONNECT-PUSH-001",
+        "BUD-WARM-CONNECT-REBUILD-001",
+        "BUD-WARM-CONNECT-SCHEMA-001",
+        "BUD-WARM-CONNECT-OTHER-001"
       ],
       "required_measurement_ids": [],
       "required_vector_set_ids": [],
@@ -160,7 +177,11 @@
       ],
       "performance_budget_ids": [
         "BUD-WARM-CONNECT-001",
-        "BUD-WARM-CONNECT-NONCONNECT-001"
+        "BUD-WARM-CONNECT-PULL-001",
+        "BUD-WARM-CONNECT-PUSH-001",
+        "BUD-WARM-CONNECT-REBUILD-001",
+        "BUD-WARM-CONNECT-SCHEMA-001",
+        "BUD-WARM-CONNECT-OTHER-001"
       ],
       "required_measurement_ids": [],
       "required_vector_set_ids": [],
@@ -190,7 +211,11 @@
       ],
       "performance_budget_ids": [
         "BUD-WARM-CONNECT-001",
-        "BUD-WARM-CONNECT-NONCONNECT-001"
+        "BUD-WARM-CONNECT-PULL-001",
+        "BUD-WARM-CONNECT-PUSH-001",
+        "BUD-WARM-CONNECT-REBUILD-001",
+        "BUD-WARM-CONNECT-SCHEMA-001",
+        "BUD-WARM-CONNECT-OTHER-001"
       ],
       "required_measurement_ids": [],
       "required_vector_set_ids": [],
@@ -220,7 +245,11 @@
       ],
       "performance_budget_ids": [
         "BUD-WARM-CONNECT-001",
-        "BUD-WARM-CONNECT-NONCONNECT-001"
+        "BUD-WARM-CONNECT-PULL-001",
+        "BUD-WARM-CONNECT-PUSH-001",
+        "BUD-WARM-CONNECT-REBUILD-001",
+        "BUD-WARM-CONNECT-SCHEMA-001",
+        "BUD-WARM-CONNECT-OTHER-001"
       ],
       "required_measurement_ids": [],
       "required_vector_set_ids": [],
@@ -252,7 +281,11 @@
       ],
       "performance_budget_ids": [
         "BUD-WARM-CONNECT-001",
-        "BUD-WARM-CONNECT-NONCONNECT-001"
+        "BUD-WARM-CONNECT-PULL-001",
+        "BUD-WARM-CONNECT-PUSH-001",
+        "BUD-WARM-CONNECT-REBUILD-001",
+        "BUD-WARM-CONNECT-SCHEMA-001",
+        "BUD-WARM-CONNECT-OTHER-001"
       ],
       "required_measurement_ids": [],
       "required_vector_set_ids": [],
@@ -284,7 +317,11 @@
       ],
       "performance_budget_ids": [
         "BUD-WARM-CONNECT-001",
-        "BUD-WARM-CONNECT-NONCONNECT-001"
+        "BUD-WARM-CONNECT-PULL-001",
+        "BUD-WARM-CONNECT-PUSH-001",
+        "BUD-WARM-CONNECT-REBUILD-001",
+        "BUD-WARM-CONNECT-SCHEMA-001",
+        "BUD-WARM-CONNECT-OTHER-001"
       ],
       "required_measurement_ids": [],
       "required_vector_set_ids": [],
@@ -315,7 +352,11 @@
       ],
       "performance_budget_ids": [
         "BUD-WARM-CONNECT-001",
-        "BUD-WARM-CONNECT-NONCONNECT-001"
+        "BUD-WARM-CONNECT-PULL-001",
+        "BUD-WARM-CONNECT-PUSH-001",
+        "BUD-WARM-CONNECT-REBUILD-001",
+        "BUD-WARM-CONNECT-SCHEMA-001",
+        "BUD-WARM-CONNECT-OTHER-001"
       ],
       "required_measurement_ids": [],
       "required_vector_set_ids": [],
@@ -346,7 +387,11 @@
       ],
       "performance_budget_ids": [
         "BUD-WARM-CONNECT-001",
-        "BUD-WARM-CONNECT-NONCONNECT-001"
+        "BUD-WARM-CONNECT-PULL-001",
+        "BUD-WARM-CONNECT-PUSH-001",
+        "BUD-WARM-CONNECT-REBUILD-001",
+        "BUD-WARM-CONNECT-SCHEMA-001",
+        "BUD-WARM-CONNECT-OTHER-001"
       ],
       "required_measurement_ids": [],
       "required_vector_set_ids": [],
@@ -391,6 +436,14 @@
       "requirement_id": "SYNC-SCOPE-001",
       "proof_obligation_id": "OBL-PERF-WARM-CONNECT-PG-001",
       "assertion_id": "ASSERT-PERF-WARM-CONNECT-SEMANTIC-001",
+      "proof_type": "server-black-box",
+      "support_cell_id": "SUP-PG-018"
+    },
+    {
+      "scenario_id": "SCN-PERF-WARM-CONNECT-001",
+      "requirement_id": "SYNC-SCOPE-001",
+      "proof_obligation_id": "OBL-PERF-WARM-CONNECT-PG-001",
+      "assertion_id": "ASSERT-PERF-WARM-CONNECT-WIRE-001",
       "proof_type": "server-black-box",
       "support_cell_id": "SUP-PG-018"
     },
@@ -682,7 +735,28 @@
               }
             ],
             "capture_dependencies": [],
-            "scope_rules": [],
+            "scope_rules": [
+              {
+                "scope_rule_id": "scope-items",
+                "relation": "public.items",
+                "membership_function": "synchro.scope_items",
+                "positive_fanout_bound": 8,
+                "evaluations": [
+                  {
+                    "row": {
+                      "canonical_identity_bytes": "synchro:v3:row-identity:v1\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0005items\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0002id\u0001\u0001\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0005row-a",
+                      "table_id": "items",
+                      "primary_key_field_id": "id",
+                      "portable_type": "string",
+                      "canonical_wire_json": "\"row-a\""
+                    },
+                    "scopes": [
+                      "scope-a"
+                    ]
+                  }
+                ]
+              }
+            ],
             "dependency_impacts": []
           },
           "stream": {
@@ -703,24 +777,7 @@
               "retention_generation": 1
             }
           ],
-          "clients": [
-            {
-              "user_id": "user-a",
-              "client_id": "client-a",
-              "client_generation": 1,
-              "scope_set_version": 1,
-              "accepted_write_epoch": 0,
-              "last_cursor_acknowledged_at": null,
-              "assigned_scope_ids": [
-                "scope-a"
-              ],
-              "local_schema": {
-                "version": 1,
-                "hash": "721d2c95e6f34cd9733feea9f5118fba391eee10d07663dad066cfc59439fa44"
-              },
-              "local_lifecycle": "local_ready"
-            }
-          ],
+          "clients": [],
           "write_policies": [
             {
               "user_id": "user-a",
@@ -743,6 +800,92 @@
       {
         "id": "EXPECT-PERF-WARM-CONNECT-SEMANTIC-001",
         "predicate": {
+          "contract_predicate": "state-equality",
+          "name": "state-equals-authored-model",
+          "payload": {}
+        },
+        "state_facts": {
+          "transaction_count": 1,
+          "row_count": 1,
+          "scope_count": 2,
+          "rebuild_count": 1,
+          "transactions": [
+            {
+              "stream_generation": "stream-1",
+              "commit_lsn": "10",
+              "end_lsn": "11",
+              "registry_generation": 1,
+              "lifecycle": "materialized",
+              "event_ordinals": [
+                1
+              ]
+            }
+          ],
+          "rows": [
+            {
+              "table_id": "items",
+              "canonical_wire_json": "\"row-a\"",
+              "version": "v1",
+              "checksum": "153c8d456b46248d141c1168cb9668aa69fdf57a1f43be6c51f4b9a89fb758b8"
+            }
+          ],
+          "scopes": [
+            {
+              "scope_id": "scope-a",
+              "membership_generation": 1,
+              "cardinality": 1,
+              "effect_versions": [
+                "v1"
+              ]
+            },
+            {
+              "scope_id": "scope-b",
+              "membership_generation": 1,
+              "cardinality": 0,
+              "effect_versions": []
+            }
+          ],
+          "clients": [
+            {
+              "user_id": "user-a",
+              "client_id": "client-a",
+              "current_schema": {
+                "version": 1,
+                "hash": "721d2c95e6f34cd9733feea9f5118fba391eee10d07663dad066cfc59439fa44"
+              },
+              "row_count": 1,
+              "provenance_count": 1,
+              "checkpoint_count": 1,
+              "queue_count": 0,
+              "outcome_count": 0,
+              "sealed_batch_count": 0,
+              "rebuild_attempt_count": 1,
+              "provenance": [
+                {
+                  "table_id": "items",
+                  "canonical_wire_json": "\"row-a\"",
+                  "scopes": [
+                    "scope-a"
+                  ],
+                  "version": "v1"
+                }
+              ],
+              "checkpoints": [
+                {
+                  "scope_id": "scope-a",
+                  "has_cursor": true,
+                  "has_checksum": true,
+                  "checksum": "b40438d24d6da2efa4787b6494c111daa45fe418c6ab1bb522cc9940d4d8e5d1",
+                  "verified": true
+                }
+              ]
+            }
+          ]
+        }
+      },
+      {
+        "id": "EXPECT-PERF-WARM-CONNECT-WIRE-001",
+        "predicate": {
           "contract_predicate": "wire-outcome",
           "name": "canonical-wire-outcome",
           "payload": {}
@@ -754,6 +897,255 @@
           "contract_predicate": "performance-measurement",
           "name": "performance-contract-satisfied",
           "payload": {}
+        }
+      }
+    ]
+  },
+  "native_execution": {
+    "version": 1,
+    "clients": [
+      {
+        "key": "client-a",
+        "user_id": "user-a",
+        "client_id": "client-a",
+        "database_key": "db-client-a"
+      }
+    ],
+    "actions": [
+      {
+        "id": "NACT-PERF-WARM-CONNECT-001",
+        "phase": "setup",
+        "actor": "controller",
+        "command": "install-model",
+        "covers_step_ids": [],
+        "parameters": {}
+      },
+      {
+        "id": "NACT-PERF-WARM-CONNECT-002",
+        "phase": "setup",
+        "actor": "client",
+        "command": "open",
+        "covers_step_ids": [],
+        "parameters": {
+          "client_key": "client-a",
+          "database_mode": "create",
+          "initialization": "empty",
+          "seed_step_id": null
+        }
+      },
+      {
+        "id": "NACT-PERF-WARM-CONNECT-003",
+        "phase": "setup",
+        "actor": "controller",
+        "command": "apply-step",
+        "covers_step_ids": [
+          "STEP-PERF-WARM-CONNECT-ASSIGN-001"
+        ],
+        "parameters": {}
+      },
+      {
+        "id": "NACT-PERF-WARM-CONNECT-004",
+        "phase": "setup",
+        "actor": "client",
+        "command": "begin-call",
+        "covers_step_ids": [
+          "STEP-PERF-WARM-CONNECT-BOOTSTRAP-CONNECT-001"
+        ],
+        "parameters": {
+          "client_key": "client-a",
+          "call_id": "warm_bootstrap",
+          "method": "start"
+        }
+      },
+      {
+        "id": "NACT-PERF-WARM-CONNECT-004-002",
+        "phase": "setup",
+        "actor": "observer",
+        "command": "await-step",
+        "covers_step_ids": [
+          "STEP-PERF-WARM-CONNECT-BASELINE-REBUILD-001"
+        ],
+        "parameters": {
+          "client_key": "client-a",
+          "call_id": "warm_bootstrap"
+        }
+      },
+      {
+        "id": "NACT-PERF-WARM-CONNECT-005",
+        "phase": "setup",
+        "actor": "observer",
+        "command": "await-step",
+        "covers_step_ids": [
+          "STEP-PERF-WARM-CONNECT-BASELINE-BEGIN-001"
+        ],
+        "parameters": {
+          "client_key": "client-a",
+          "call_id": "warm_bootstrap"
+        }
+      },
+      {
+        "id": "NACT-PERF-WARM-CONNECT-006",
+        "phase": "setup",
+        "actor": "observer",
+        "command": "await-step",
+        "covers_step_ids": [
+          "STEP-PERF-WARM-CONNECT-BASELINE-APPLY-001"
+        ],
+        "parameters": {
+          "client_key": "client-a",
+          "call_id": "warm_bootstrap"
+        }
+      },
+      {
+        "id": "NACT-PERF-WARM-CONNECT-007",
+        "phase": "setup",
+        "actor": "observer",
+        "command": "await-step",
+        "covers_step_ids": [
+          "STEP-PERF-WARM-CONNECT-BASELINE-FINALIZE-001"
+        ],
+        "parameters": {
+          "client_key": "client-a",
+          "call_id": "warm_bootstrap"
+        }
+      },
+      {
+        "id": "NACT-PERF-WARM-CONNECT-007-ACK-000",
+        "phase": "setup",
+        "actor": "observer",
+        "command": "await-step",
+        "covers_step_ids": [
+          "STEP-PERF-WARM-CONNECT-BASELINE-ACK-001"
+        ],
+        "parameters": {
+          "client_key": "client-a",
+          "call_id": "warm_bootstrap"
+        }
+      },
+      {
+        "id": "NACT-PERF-WARM-CONNECT-007-ACK-001",
+        "phase": "setup",
+        "actor": "observer",
+        "command": "await-step",
+        "covers_step_ids": [
+          "STEP-PERF-WARM-CONNECT-BASELINE-ACK-APPLY-001"
+        ],
+        "parameters": {
+          "client_key": "client-a",
+          "call_id": "warm_bootstrap"
+        }
+      },
+      {
+        "id": "NACT-PERF-WARM-CONNECT-007-ACK-002",
+        "phase": "setup",
+        "actor": "client",
+        "command": "await-call",
+        "covers_step_ids": [],
+        "parameters": {
+          "client_key": "client-a",
+          "call_id": "warm_bootstrap",
+          "completion": "idle"
+        }
+      },
+      {
+        "id": "NACT-PERF-WARM-CONNECT-008",
+        "phase": "setup",
+        "actor": "client",
+        "command": "lifecycle",
+        "covers_step_ids": [],
+        "parameters": {
+          "client_key": "client-a",
+          "operation": "stop"
+        }
+      },
+      {
+        "id": "NACT-PERF-WARM-CONNECT-009",
+        "phase": "setup",
+        "actor": "controller",
+        "command": "apply-step",
+        "covers_step_ids": [
+          "STEP-PERF-WARM-CONNECT-COMMIT-001"
+        ],
+        "parameters": {}
+      },
+      {
+        "id": "NACT-PERF-WARM-CONNECT-010",
+        "phase": "setup",
+        "actor": "process",
+        "command": "execute-step",
+        "covers_step_ids": [
+          "STEP-PERF-WARM-CONNECT-MATERIALIZE-001"
+        ],
+        "parameters": {
+          "client_key": null
+        }
+      },
+      {
+        "id": "NACT-PERF-WARM-CONNECT-011",
+        "phase": "exercise",
+        "actor": "client",
+        "command": "synchronize-step",
+        "covers_step_ids": [
+          "STEP-PERF-WARM-CONNECT-001",
+          "STEP-PERF-WARM-CONNECT-002"
+        ],
+        "parameters": {
+          "client_key": "client-a",
+          "method": "start",
+          "completion": "idle"
+        }
+      },
+      {
+        "id": "NACT-PERF-WARM-CONNECT-012",
+        "phase": "exercise",
+        "actor": "observer",
+        "command": "await-step",
+        "covers_step_ids": [
+          "STEP-PERF-WARM-CONNECT-003"
+        ],
+        "parameters": {
+          "client_key": "client-a"
+        }
+      },
+      {
+        "id": "NACT-PERF-WARM-CONNECT-013",
+        "phase": "verify",
+        "actor": "observer",
+        "command": "capture",
+        "covers_step_ids": [],
+        "parameters": {
+          "client_keys": [
+            "client-a"
+          ],
+          "sources": [
+            "application-rows",
+            "checkpoints",
+            "scope-state",
+            "sync-status",
+            "request-trace"
+          ],
+          "expectation_ids": [
+            "EXPECT-PERF-WARM-CONNECT-SEMANTIC-001",
+            "EXPECT-PERF-WARM-CONNECT-PERFORMANCE-001"
+          ]
+        }
+      },
+      {
+        "id": "NACT-PERF-WARM-CONNECT-014",
+        "phase": "verify",
+        "actor": "observer",
+        "command": "measure",
+        "covers_step_ids": [],
+        "parameters": {
+          "performance_budget_ids": [
+            "BUD-WARM-CONNECT-001",
+            "BUD-WARM-CONNECT-PULL-001",
+            "BUD-WARM-CONNECT-PUSH-001",
+            "BUD-WARM-CONNECT-REBUILD-001",
+            "BUD-WARM-CONNECT-SCHEMA-001",
+            "BUD-WARM-CONNECT-OTHER-001"
+          ],
+          "measurement_ids": []
         }
       }
     ]
@@ -813,10 +1205,269 @@
   ],
   "steps": [
     {
+      "id": "STEP-PERF-WARM-CONNECT-ASSIGN-001",
+      "phase": "setup",
+      "transport": "model",
+      "description": "Assign scope A before the client establishes its durable baseline.",
+      "operation": {
+        "contract_operation": "model",
+        "name": "set-client-assignments",
+        "payload": {
+          "user_id": "user-a",
+          "client_id": "client-a",
+          "assignments": [
+            {
+              "scope_id": "scope-a"
+            }
+          ]
+        }
+      },
+      "expected_outcome": {
+        "disposition": "success"
+      }
+    },
+    {
+      "id": "STEP-PERF-WARM-CONNECT-BOOTSTRAP-CONNECT-001",
+      "phase": "setup",
+      "transport": "http",
+      "description": "Start the public client once to establish the durable empty scope baseline.",
+      "operation": {
+        "contract_operation": "connect",
+        "name": "send",
+        "payload": {
+          "user_id": "user-a",
+          "client_id": "client-a",
+          "runtime_version": 3,
+          "protocol_version": 3,
+          "client_generation": null,
+          "schema_reset": false,
+          "schema": {
+            "version": 0,
+            "hash": ""
+          },
+          "scope_set_version": 0,
+          "known_scopes": []
+        }
+      },
+      "expected_outcome": {
+        "disposition": "success"
+      }
+    },
+    {
+      "id": "STEP-PERF-WARM-CONNECT-BASELINE-REBUILD-001",
+      "phase": "setup",
+      "transport": "http",
+      "description": "Read the terminal empty scope page that establishes the durable baseline cursor.",
+      "operation": {
+        "contract_operation": "rebuild",
+        "name": "request-page",
+        "payload": {
+          "user_id": "user-a",
+          "client_id": "client-a",
+          "client_generation": 1,
+          "schema": {
+            "version": 1,
+            "hash": "721d2c95e6f34cd9733feea9f5118fba391eee10d07663dad066cfc59439fa44"
+          },
+          "scope_id": "scope-a",
+          "rebuild_id": "00000000-0000-4000-8000-000000009001",
+          "cursor_source": "none",
+          "limit": 100
+        }
+      },
+      "expected_outcome": {
+        "disposition": "success"
+      }
+    },
+    {
+      "id": "STEP-PERF-WARM-CONNECT-BASELINE-BEGIN-001",
+      "phase": "setup",
+      "transport": "local",
+      "description": "Begin the local empty scope baseline rebuild.",
+      "operation": {
+        "contract_operation": "local",
+        "name": "begin-rebuild",
+        "payload": {
+          "user_id": "user-a",
+          "client_id": "client-a",
+          "client_generation": 1,
+          "schema": {
+            "version": 1,
+            "hash": "721d2c95e6f34cd9733feea9f5118fba391eee10d07663dad066cfc59439fa44"
+          },
+          "scope_id": "scope-a",
+          "rebuild_id": "00000000-0000-4000-8000-000000009001",
+          "limit": 100
+        }
+      },
+      "expected_outcome": {
+        "disposition": "success"
+      }
+    },
+    {
+      "id": "STEP-PERF-WARM-CONNECT-BASELINE-APPLY-001",
+      "phase": "setup",
+      "transport": "local",
+      "description": "Apply the terminal empty scope baseline page.",
+      "operation": {
+        "contract_operation": "local",
+        "name": "apply-rebuild-page",
+        "payload": {
+          "user_id": "user-a",
+          "client_id": "client-a",
+          "scope_id": "scope-a",
+          "rebuild_id": "00000000-0000-4000-8000-000000009001",
+          "page_ordinal": 1,
+          "request_token_source": "none"
+        }
+      },
+      "expected_outcome": {
+        "disposition": "success"
+      }
+    },
+    {
+      "id": "STEP-PERF-WARM-CONNECT-BASELINE-FINALIZE-001",
+      "phase": "setup",
+      "transport": "local",
+      "description": "Finalize the local empty scope baseline cursor and checksum.",
+      "operation": {
+        "contract_operation": "local",
+        "name": "finalize-rebuild",
+        "payload": {
+          "user_id": "user-a",
+          "client_id": "client-a",
+          "scope_id": "scope-a",
+          "rebuild_id": "00000000-0000-4000-8000-000000009001"
+        }
+      },
+      "expected_outcome": {
+        "disposition": "success"
+      }
+    },
+    {
+      "id": "STEP-PERF-WARM-CONNECT-BASELINE-ACK-001",
+      "phase": "setup",
+      "transport": "http",
+      "description": "Acknowledge the terminal rebuild cursor before the measured warm startup.",
+      "operation": {
+        "contract_operation": "pull",
+        "name": "request-page",
+        "payload": {
+          "user_id": "user-a",
+          "client_id": "client-a",
+          "client_generation": 1,
+          "schema": {
+            "version": 1,
+            "hash": "721d2c95e6f34cd9733feea9f5118fba391eee10d07663dad066cfc59439fa44"
+          },
+          "scope_set_version": 1,
+          "scopes": [
+            {
+              "scope_id": "scope-a",
+              "cursor_source": "local_checkpoint"
+            }
+          ],
+          "limit": 100
+        }
+      },
+      "expected_outcome": {
+        "disposition": "success"
+      }
+    },
+    {
+      "id": "STEP-PERF-WARM-CONNECT-BASELINE-ACK-APPLY-001",
+      "phase": "setup",
+      "transport": "local",
+      "description": "Apply the bootstrap pull acknowledgement through the client engine.",
+      "operation": {
+        "contract_operation": "local",
+        "name": "apply-pull-page",
+        "payload": {
+          "user_id": "user-a",
+          "client_id": "client-a",
+          "source_step_id": "STEP-PERF-WARM-CONNECT-BASELINE-ACK-001"
+        }
+      },
+      "expected_outcome": {
+        "disposition": "success"
+      }
+    },
+    {
+      "id": "STEP-PERF-WARM-CONNECT-COMMIT-001",
+      "phase": "setup",
+      "transport": "model",
+      "description": "Commit one source insert after the client stops at its durable baseline.",
+      "operation": {
+        "contract_operation": "model",
+        "name": "commit-source-transaction",
+        "payload": {
+          "stream_generation": "stream-1",
+          "commit_lsn": "10",
+          "end_lsn": "11",
+          "events": [
+            {
+              "event_ordinal": 1,
+              "relation": "public.items",
+              "operation": "insert",
+              "before": null,
+              "after": {
+                "identity": {
+                  "kind": "synced",
+                  "synced_row": {
+                    "canonical_identity_bytes": "synchro:v3:row-identity:v1\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0005items\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0002id\u0001\u0001\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0005row-a",
+                    "table_id": "items",
+                    "primary_key_field_id": "id",
+                    "portable_type": "string",
+                    "canonical_wire_json": "\"row-a\""
+                  },
+                  "capture_key": null
+                },
+                "fields": [
+                  {
+                    "field": "id",
+                    "type": "string",
+                    "wire_json": "\"row-a\""
+                  },
+                  {
+                    "field": "value",
+                    "type": "string",
+                    "wire_json": "\"steady-pull\""
+                  }
+                ],
+                "version": "v1",
+                "checksum": "153c8d456b46248d141c1168cb9668aa69fdf57a1f43be6c51f4b9a89fb758b8",
+                "deleted": false
+              }
+            }
+          ]
+        }
+      },
+      "expected_outcome": {
+        "disposition": "success"
+      }
+    },
+    {
+      "id": "STEP-PERF-WARM-CONNECT-MATERIALIZE-001",
+      "phase": "setup",
+      "transport": "process",
+      "description": "Materialize the source insert before the measured warm startup.",
+      "operation": {
+        "contract_operation": "process",
+        "name": "materialize-source-transaction",
+        "payload": {
+          "stream_generation": "stream-1",
+          "commit_lsn": "10"
+        }
+      },
+      "expected_outcome": {
+        "disposition": "success"
+      }
+    },
+    {
       "id": "STEP-PERF-WARM-CONNECT-001",
       "phase": "exercise",
       "transport": "http",
-      "description": "Send the only measured HTTP request for the warm connection.",
+      "description": "Start the warm public client and reconnect with its durable scope checkpoint.",
       "operation": {
         "contract_operation": "connect",
         "name": "send",
@@ -842,13 +1493,93 @@
       "expected_outcome": {
         "disposition": "success"
       }
+    },
+    {
+      "id": "STEP-PERF-WARM-CONNECT-002",
+      "phase": "exercise",
+      "transport": "http",
+      "description": "Pull the terminal delta with the durable scope checkpoint.",
+      "operation": {
+        "contract_operation": "pull",
+        "name": "request-page",
+        "payload": {
+          "user_id": "user-a",
+          "client_id": "client-a",
+          "client_generation": 1,
+          "schema": {
+            "version": 1,
+            "hash": "721d2c95e6f34cd9733feea9f5118fba391eee10d07663dad066cfc59439fa44"
+          },
+          "scope_set_version": 1,
+          "scopes": [
+            {
+              "scope_id": "scope-a",
+              "cursor_source": "local_checkpoint"
+            }
+          ],
+          "limit": 100
+        }
+      },
+      "expected_outcome": {
+        "disposition": "success"
+      }
+    },
+    {
+      "id": "STEP-PERF-WARM-CONNECT-003",
+      "phase": "exercise",
+      "transport": "local",
+      "description": "Apply the pulled row, cursor, and verified terminal checksum through the client engine.",
+      "operation": {
+        "contract_operation": "local",
+        "name": "apply-pull-page",
+        "payload": {
+          "user_id": "user-a",
+          "client_id": "client-a",
+          "source_step_id": "STEP-PERF-WARM-CONNECT-002"
+        }
+      },
+      "expected_outcome": {
+        "disposition": "success"
+      }
     }
   ],
   "wire_expectations": [
     {
-      "step_id": "STEP-PERF-WARM-CONNECT-001",
-      "assertion_id": "ASSERT-PERF-WARM-CONNECT-SEMANTIC-001",
+      "step_id": "STEP-PERF-WARM-CONNECT-BOOTSTRAP-CONNECT-001",
+      "assertion_id": "ASSERT-PERF-WARM-CONNECT-WIRE-001",
       "contract_case": "connect_success",
+      "http_status": 200,
+      "error_code": null,
+      "retryable": false
+    },
+    {
+      "step_id": "STEP-PERF-WARM-CONNECT-BASELINE-REBUILD-001",
+      "assertion_id": "ASSERT-PERF-WARM-CONNECT-WIRE-001",
+      "contract_case": "rebuild_success",
+      "http_status": 200,
+      "error_code": null,
+      "retryable": false
+    },
+    {
+      "step_id": "STEP-PERF-WARM-CONNECT-BASELINE-ACK-001",
+      "assertion_id": "ASSERT-PERF-WARM-CONNECT-WIRE-001",
+      "contract_case": "pull_success",
+      "http_status": 200,
+      "error_code": null,
+      "retryable": false
+    },
+    {
+      "step_id": "STEP-PERF-WARM-CONNECT-001",
+      "assertion_id": "ASSERT-PERF-WARM-CONNECT-WIRE-001",
+      "contract_case": "connect_success",
+      "http_status": 200,
+      "error_code": null,
+      "retryable": false
+    },
+    {
+      "step_id": "STEP-PERF-WARM-CONNECT-002",
+      "assertion_id": "ASSERT-PERF-WARM-CONNECT-WIRE-001",
+      "contract_case": "pull_success",
       "http_status": 200,
       "error_code": null,
       "retryable": false
@@ -860,9 +1591,32 @@
       "requirement_ids": [
         "SYNC-SCOPE-001"
       ],
-      "description": "The response keeps scope A assigned and never accepts a client-invented scope.",
+      "description": "The warm startup preserves the server assignment and converges the local row, provenance, cursor, and checksum state.",
       "expectation_ids": [
         "EXPECT-PERF-WARM-CONNECT-SEMANTIC-001"
+      ],
+      "predicate": {
+        "contract_predicate": "state-equality",
+        "name": "state-equals-authored-model",
+        "payload": {}
+      },
+      "oracle": {
+        "kind": "model-state-equality",
+        "expected_source": "authored-model",
+        "observed_source": "system-under-test"
+      },
+      "detects_control_ids": [
+        "CTRL-SCOPE-001"
+      ]
+    },
+    {
+      "id": "ASSERT-PERF-WARM-CONNECT-WIRE-001",
+      "requirement_ids": [
+        "SYNC-SCOPE-001"
+      ],
+      "description": "The bootstrap and warm startup HTTP operations return their canonical successful wire outcomes.",
+      "expectation_ids": [
+        "EXPECT-PERF-WARM-CONNECT-WIRE-001"
       ],
       "predicate": {
         "contract_predicate": "wire-outcome",
@@ -874,16 +1628,14 @@
         "expected_source": "authored-model",
         "observed_source": "system-under-test"
       },
-      "detects_control_ids": [
-        "CTRL-SCOPE-001"
-      ]
+      "detects_control_ids": []
     },
     {
       "id": "ASSERT-PERF-WARM-CONNECT-PERFORMANCE-001",
       "requirement_ids": [
         "SYNC-SCOPE-001"
       ],
-      "description": "The exercise records exactly one connect request and zero non-connect requests.",
+      "description": "One warm startup records one connect and one pull, with zero push, rebuild, schema, and other requests.",
       "expectation_ids": [
         "EXPECT-PERF-WARM-CONNECT-PERFORMANCE-001"
       ],

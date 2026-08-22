@@ -179,10 +179,10 @@
       ],
       "required_measurement_ids": [],
       "required_vector_set_ids": [],
-      "make_target": "test-swift",
+      "make_target": "test-native-swift-rebuild-requests",
       "argv": [
         "make",
-        "test-swift"
+        "test-native-swift-rebuild-requests"
       ],
       "fault_plan_id": null,
       "control_id": null
@@ -719,7 +719,52 @@
               }
             ],
             "capture_dependencies": [],
-            "scope_rules": [],
+            "scope_rules": [
+              {
+                "scope_rule_id": "scope-items-rebuild-requests-001",
+                "relation": "public.items",
+                "membership_function": "synchro.scope_items",
+                "positive_fanout_bound": 8,
+                "evaluations": [
+                  {
+                    "row": {
+                      "canonical_identity_bytes": "synchro:v3:row-identity:v1\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0005items\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0002id\u0001\u0001\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0005row-a",
+                      "table_id": "items",
+                      "primary_key_field_id": "id",
+                      "portable_type": "string",
+                      "canonical_wire_json": "\"row-a\""
+                    },
+                    "scopes": [
+                      "scope-a"
+                    ]
+                  },
+                  {
+                    "row": {
+                      "canonical_identity_bytes": "synchro:v3:row-identity:v1\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0005items\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0002id\u0001\u0001\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0005row-b",
+                      "table_id": "items",
+                      "primary_key_field_id": "id",
+                      "portable_type": "string",
+                      "canonical_wire_json": "\"row-b\""
+                    },
+                    "scopes": [
+                      "scope-a"
+                    ]
+                  },
+                  {
+                    "row": {
+                      "canonical_identity_bytes": "synchro:v3:row-identity:v1\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0005items\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0002id\u0001\u0001\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0005row-c",
+                      "table_id": "items",
+                      "primary_key_field_id": "id",
+                      "portable_type": "string",
+                      "canonical_wire_json": "\"row-c\""
+                    },
+                    "scopes": [
+                      "scope-a"
+                    ]
+                  }
+                ]
+              }
+            ],
             "dependency_impacts": []
           },
           "stream": {
@@ -740,24 +785,7 @@
               "retention_generation": 1
             }
           ],
-          "clients": [
-            {
-              "user_id": "user-a",
-              "client_id": "client-a",
-              "client_generation": 1,
-              "scope_set_version": 1,
-              "accepted_write_epoch": 0,
-              "last_cursor_acknowledged_at": null,
-              "assigned_scope_ids": [
-                "scope-a"
-              ],
-              "local_schema": {
-                "version": 1,
-                "hash": "721d2c95e6f34cd9733feea9f5118fba391eee10d07663dad066cfc59439fa44"
-              },
-              "local_lifecycle": "local_ready"
-            }
-          ],
+          "clients": [],
           "write_policies": [
             {
               "user_id": "user-a",
@@ -791,6 +819,250 @@
           "contract_predicate": "performance-measurement",
           "name": "performance-contract-satisfied",
           "payload": {}
+        }
+      }
+    ]
+  },
+  "native_execution": {
+    "version": 1,
+    "clients": [
+      {
+        "key": "client-a",
+        "user_id": "user-a",
+        "client_id": "client-a",
+        "database_key": "db-client-a"
+      }
+    ],
+    "actions": [
+      {
+        "id": "NACT-PERF-REBUILD-REQUESTS-001",
+        "phase": "setup",
+        "actor": "controller",
+        "command": "install-model",
+        "covers_step_ids": [],
+        "parameters": {}
+      },
+      {
+        "id": "NACT-PERF-REBUILD-REQUESTS-002",
+        "phase": "setup",
+        "actor": "client",
+        "command": "open",
+        "covers_step_ids": [],
+        "parameters": {
+          "client_key": "client-a",
+          "database_mode": "create",
+          "initialization": "empty",
+          "seed_step_id": null
+        }
+      },
+      {
+        "id": "NACT-PERF-REBUILD-REQUESTS-003",
+        "phase": "setup",
+        "actor": "controller",
+        "command": "apply-step",
+        "covers_step_ids": [
+          "STEP-PERF-REBUILD-REQUESTS-INITIAL-COMMIT-001"
+        ],
+        "parameters": {}
+      },
+      {
+        "id": "NACT-PERF-REBUILD-REQUESTS-004",
+        "phase": "setup",
+        "actor": "process",
+        "command": "execute-step",
+        "covers_step_ids": [
+          "STEP-PERF-REBUILD-REQUESTS-INITIAL-MATERIALIZE-001"
+        ],
+        "parameters": {
+          "client_key": null
+        }
+      },
+      {
+        "id": "NACT-PERF-REBUILD-REQUESTS-005",
+        "phase": "setup",
+        "actor": "controller",
+        "command": "apply-step",
+        "covers_step_ids": [
+          "STEP-PERF-REBUILD-REQUESTS-ASSIGN-001"
+        ],
+        "parameters": {}
+      },
+      {
+        "id": "NACT-PERF-REBUILD-REQUESTS-006",
+        "phase": "exercise",
+        "actor": "client",
+        "command": "begin-call",
+        "covers_step_ids": [
+          "STEP-PERF-REBUILD-REQUESTS-001"
+        ],
+        "parameters": {
+          "client_key": "client-a",
+          "call_id": "rebuild_cycle",
+          "method": "start"
+        }
+      },
+      {
+        "id": "NACT-PERF-REBUILD-REQUESTS-007",
+        "phase": "exercise",
+        "actor": "observer",
+        "command": "await-step",
+        "covers_step_ids": [
+          "STEP-PERF-REBUILD-REQUESTS-BEGIN-001"
+        ],
+        "parameters": {
+          "client_key": "client-a",
+          "call_id": "rebuild_cycle"
+        }
+      },
+      {
+        "id": "NACT-PERF-REBUILD-REQUESTS-008",
+        "phase": "exercise",
+        "actor": "observer",
+        "command": "await-step",
+        "covers_step_ids": [
+          "STEP-PERF-REBUILD-REQUESTS-003"
+        ],
+        "parameters": {
+          "client_key": "client-a",
+          "call_id": "rebuild_cycle"
+        }
+      },
+      {
+        "id": "NACT-PERF-REBUILD-REQUESTS-009",
+        "phase": "exercise",
+        "actor": "controller",
+        "command": "apply-step",
+        "covers_step_ids": [
+          "STEP-PERF-REBUILD-REQUESTS-CONCURRENT-COMMIT-001"
+        ],
+        "parameters": {}
+      },
+      {
+        "id": "NACT-PERF-REBUILD-REQUESTS-010",
+        "phase": "exercise",
+        "actor": "process",
+        "command": "execute-step",
+        "covers_step_ids": [
+          "STEP-PERF-REBUILD-REQUESTS-CONCURRENT-MATERIALIZE-001"
+        ],
+        "parameters": {
+          "client_key": null
+        }
+      },
+      {
+        "id": "NACT-PERF-REBUILD-REQUESTS-011",
+        "phase": "exercise",
+        "actor": "observer",
+        "command": "await-step",
+        "covers_step_ids": [
+          "STEP-PERF-REBUILD-REQUESTS-APPLY-001"
+        ],
+        "parameters": {
+          "client_key": "client-a",
+          "call_id": "rebuild_cycle"
+        }
+      },
+      {
+        "id": "NACT-PERF-REBUILD-REQUESTS-012",
+        "phase": "exercise",
+        "actor": "observer",
+        "command": "await-step",
+        "covers_step_ids": [
+          "STEP-PERF-REBUILD-REQUESTS-004"
+        ],
+        "parameters": {
+          "client_key": "client-a",
+          "call_id": "rebuild_cycle"
+        }
+      },
+      {
+        "id": "NACT-PERF-REBUILD-REQUESTS-013",
+        "phase": "exercise",
+        "actor": "observer",
+        "command": "await-step",
+        "covers_step_ids": [
+          "STEP-PERF-REBUILD-REQUESTS-APPLY-002"
+        ],
+        "parameters": {
+          "client_key": "client-a",
+          "call_id": "rebuild_cycle"
+        }
+      },
+      {
+        "id": "NACT-PERF-REBUILD-REQUESTS-014",
+        "phase": "exercise",
+        "actor": "observer",
+        "command": "await-step",
+        "covers_step_ids": [
+          "STEP-PERF-REBUILD-REQUESTS-FINALIZE-001"
+        ],
+        "parameters": {
+          "client_key": "client-a",
+          "call_id": "rebuild_cycle"
+        }
+      },
+      {
+        "id": "NACT-PERF-REBUILD-REQUESTS-015",
+        "phase": "exercise",
+        "actor": "observer",
+        "command": "await-step",
+        "covers_step_ids": [
+          "STEP-PERF-REBUILD-REQUESTS-002"
+        ],
+        "parameters": {
+          "client_key": "client-a",
+          "call_id": "rebuild_cycle"
+        }
+      },
+      {
+        "id": "NACT-PERF-REBUILD-REQUESTS-015-001",
+        "phase": "exercise",
+        "actor": "client",
+        "command": "await-call",
+        "covers_step_ids": [],
+        "parameters": {
+          "client_key": "client-a",
+          "call_id": "rebuild_cycle",
+          "completion": "idle"
+        }
+      },
+      {
+        "id": "NACT-PERF-REBUILD-REQUESTS-016",
+        "phase": "verify",
+        "actor": "observer",
+        "command": "capture",
+        "covers_step_ids": [],
+        "parameters": {
+          "client_keys": [
+            "client-a"
+          ],
+          "sources": [
+            "request-trace",
+            "rebuild-state",
+            "server-state",
+            "sync-status"
+          ],
+          "expectation_ids": [
+            "EXPECT-PERF-REBUILD-REQUESTS-SEMANTIC-001",
+            "EXPECT-PERF-REBUILD-REQUESTS-PERFORMANCE-001"
+          ]
+        }
+      },
+      {
+        "id": "NACT-PERF-REBUILD-REQUESTS-017",
+        "phase": "verify",
+        "actor": "observer",
+        "command": "measure",
+        "covers_step_ids": [],
+        "parameters": {
+          "performance_budget_ids": [
+            "BUD-REBUILD-CONNECT-001",
+            "BUD-REBUILD-PAGE-001",
+            "BUD-REBUILD-PULL-001",
+            "BUD-REBUILD-SCHEMA-FETCH-001",
+            "BUD-REBUILD-UNEXPECTED-001"
+          ],
+          "measurement_ids": []
         }
       }
     ]
@@ -854,6 +1126,133 @@
   ],
   "steps": [
     {
+      "id": "STEP-PERF-REBUILD-REQUESTS-INITIAL-COMMIT-001",
+      "phase": "setup",
+      "transport": "model",
+      "description": "Commit the two rows that form the immutable rebuild snapshot.",
+      "operation": {
+        "contract_operation": "model",
+        "name": "commit-source-transaction",
+        "payload": {
+          "stream_generation": "stream-1",
+          "commit_lsn": "10",
+          "end_lsn": "11",
+          "events": [
+            {
+              "event_ordinal": 1,
+              "relation": "public.items",
+              "operation": "insert",
+              "before": null,
+              "after": {
+                "identity": {
+                  "kind": "synced",
+                  "synced_row": {
+                    "canonical_identity_bytes": "synchro:v3:row-identity:v1\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0005items\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0002id\u0001\u0001\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0005row-a",
+                    "table_id": "items",
+                    "primary_key_field_id": "id",
+                    "portable_type": "string",
+                    "canonical_wire_json": "\"row-a\""
+                  },
+                  "capture_key": null
+                },
+                "fields": [
+                  {
+                    "field": "id",
+                    "type": "string",
+                    "wire_json": "\"row-a\""
+                  },
+                  {
+                    "field": "value",
+                    "type": "string",
+                    "wire_json": "\"rebuild-snapshot-a\""
+                  }
+                ],
+                "version": "v1-a",
+                "checksum": "5abfa6424b69cac1bfb7b44c7d405e2644a804dff6a5a9ac331dacc042c65274",
+                "deleted": false
+              }
+            },
+            {
+              "event_ordinal": 2,
+              "relation": "public.items",
+              "operation": "insert",
+              "before": null,
+              "after": {
+                "identity": {
+                  "kind": "synced",
+                  "synced_row": {
+                    "canonical_identity_bytes": "synchro:v3:row-identity:v1\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0005items\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0002id\u0001\u0001\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0005row-b",
+                    "table_id": "items",
+                    "primary_key_field_id": "id",
+                    "portable_type": "string",
+                    "canonical_wire_json": "\"row-b\""
+                  },
+                  "capture_key": null
+                },
+                "fields": [
+                  {
+                    "field": "id",
+                    "type": "string",
+                    "wire_json": "\"row-b\""
+                  },
+                  {
+                    "field": "value",
+                    "type": "string",
+                    "wire_json": "\"rebuild-snapshot-b\""
+                  }
+                ],
+                "version": "v1-b",
+                "checksum": "f74abaf3f1613d591ea4881dcdd69c8ccfb867723c1515e98207526aef4ad9fb",
+                "deleted": false
+              }
+            }
+          ]
+        }
+      },
+      "expected_outcome": {
+        "disposition": "success"
+      }
+    },
+    {
+      "id": "STEP-PERF-REBUILD-REQUESTS-INITIAL-MATERIALIZE-001",
+      "phase": "setup",
+      "transport": "process",
+      "description": "Materialize the two snapshot rows before the first client request.",
+      "operation": {
+        "contract_operation": "process",
+        "name": "materialize-source-transaction",
+        "payload": {
+          "stream_generation": "stream-1",
+          "commit_lsn": "10"
+        }
+      },
+      "expected_outcome": {
+        "disposition": "success"
+      }
+    },
+    {
+      "id": "STEP-PERF-REBUILD-REQUESTS-ASSIGN-001",
+      "phase": "setup",
+      "transport": "model",
+      "description": "Assign the authoritative scope before the fresh client connects.",
+      "operation": {
+        "contract_operation": "model",
+        "name": "set-client-assignments",
+        "payload": {
+          "user_id": "user-a",
+          "client_id": "client-a",
+          "assignments": [
+            {
+              "scope_id": "scope-a"
+            }
+          ]
+        }
+      },
+      "expected_outcome": {
+        "disposition": "success"
+      }
+    },
+    {
       "id": "STEP-PERF-REBUILD-REQUESTS-001",
       "phase": "exercise",
       "transport": "http",
@@ -866,18 +1265,14 @@
           "client_id": "client-a",
           "runtime_version": 3,
           "protocol_version": 3,
-          "client_generation": 1,
+          "client_generation": null,
           "schema_reset": false,
           "schema": {
-            "version": 1,
-            "hash": "721d2c95e6f34cd9733feea9f5118fba391eee10d07663dad066cfc59439fa44"
+            "version": 0,
+            "hash": ""
           },
-          "scope_set_version": 1,
-          "known_scopes": [
-            {
-              "scope_id": "scope-a"
-            }
-          ]
+          "scope_set_version": 0,
+          "known_scopes": []
         }
       },
       "expected_outcome": {
@@ -885,13 +1280,13 @@
       }
     },
     {
-      "id": "STEP-PERF-REBUILD-REQUESTS-002",
+      "id": "STEP-PERF-REBUILD-REQUESTS-BEGIN-001",
       "phase": "exercise",
-      "transport": "http",
-      "description": "Execute the authored workload operation.",
+      "transport": "local",
+      "description": "Begin the first materialization rebuild before its first page request.",
       "operation": {
-        "contract_operation": "pull",
-        "name": "request-page",
+        "contract_operation": "local",
+        "name": "begin-rebuild",
         "payload": {
           "user_id": "user-a",
           "client_id": "client-a",
@@ -900,14 +1295,9 @@
             "version": 1,
             "hash": "721d2c95e6f34cd9733feea9f5118fba391eee10d07663dad066cfc59439fa44"
           },
-          "scope_set_version": 1,
-          "scopes": [
-            {
-              "scope_id": "scope-a",
-              "cursor_source": "none"
-            }
-          ],
-          "limit": 100
+          "scope_id": "scope-a",
+          "rebuild_id": "00000000-0000-4000-8000-000000004003",
+          "limit": 1
         }
       },
       "expected_outcome": {
@@ -933,7 +1323,195 @@
           "scope_id": "scope-a",
           "rebuild_id": "00000000-0000-4000-8000-000000004003",
           "cursor_source": "none",
-          "limit": 100
+          "limit": 1
+        }
+      },
+      "expected_outcome": {
+        "disposition": "success"
+      }
+    },
+    {
+      "id": "STEP-PERF-REBUILD-REQUESTS-CONCURRENT-COMMIT-001",
+      "phase": "exercise",
+      "transport": "model",
+      "description": "Commit one same-scope row after the first rebuild page.",
+      "operation": {
+        "contract_operation": "model",
+        "name": "commit-source-transaction",
+        "payload": {
+          "stream_generation": "stream-1",
+          "commit_lsn": "20",
+          "end_lsn": "21",
+          "events": [
+            {
+              "event_ordinal": 1,
+              "relation": "public.items",
+              "operation": "insert",
+              "before": null,
+              "after": {
+                "identity": {
+                  "kind": "synced",
+                  "synced_row": {
+                    "canonical_identity_bytes": "synchro:v3:row-identity:v1\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0005items\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0002id\u0001\u0001\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0005row-c",
+                    "table_id": "items",
+                    "primary_key_field_id": "id",
+                    "portable_type": "string",
+                    "canonical_wire_json": "\"row-c\""
+                  },
+                  "capture_key": null
+                },
+                "fields": [
+                  {
+                    "field": "id",
+                    "type": "string",
+                    "wire_json": "\"row-c\""
+                  },
+                  {
+                    "field": "value",
+                    "type": "string",
+                    "wire_json": "\"rebuild-concurrent-c\""
+                  }
+                ],
+                "version": "v2-c",
+                "checksum": "bb6ca0371f5ca2dabe23858f4fc8a548cc3d1e2b32880e4b9a4b11cd057af7eb",
+                "deleted": false
+              }
+            }
+          ]
+        }
+      },
+      "expected_outcome": {
+        "disposition": "success"
+      }
+    },
+    {
+      "id": "STEP-PERF-REBUILD-REQUESTS-CONCURRENT-MATERIALIZE-001",
+      "phase": "exercise",
+      "transport": "process",
+      "description": "Materialize the concurrent row before requesting the final frozen page.",
+      "operation": {
+        "contract_operation": "process",
+        "name": "materialize-source-transaction",
+        "payload": {
+          "stream_generation": "stream-1",
+          "commit_lsn": "20"
+        }
+      },
+      "expected_outcome": {
+        "disposition": "success"
+      }
+    },
+    {
+      "id": "STEP-PERF-REBUILD-REQUESTS-APPLY-001",
+      "phase": "exercise",
+      "transport": "local",
+      "description": "Apply the first immutable rebuild page after the concurrent source change materializes.",
+      "operation": {
+        "contract_operation": "local",
+        "name": "apply-rebuild-page",
+        "payload": {
+          "user_id": "user-a",
+          "client_id": "client-a",
+          "scope_id": "scope-a",
+          "rebuild_id": "00000000-0000-4000-8000-000000004003",
+          "page_ordinal": 1,
+          "request_token_source": "none"
+        }
+      },
+      "expected_outcome": {
+        "disposition": "success"
+      }
+    },
+    {
+      "id": "STEP-PERF-REBUILD-REQUESTS-004",
+      "phase": "exercise",
+      "transport": "http",
+      "description": "Request the final page through the staged continuation.",
+      "operation": {
+        "contract_operation": "rebuild",
+        "name": "request-page",
+        "payload": {
+          "user_id": "user-a",
+          "client_id": "client-a",
+          "client_generation": 1,
+          "schema": {
+            "version": 1,
+            "hash": "721d2c95e6f34cd9733feea9f5118fba391eee10d07663dad066cfc59439fa44"
+          },
+          "scope_id": "scope-a",
+          "rebuild_id": "00000000-0000-4000-8000-000000004003",
+          "cursor_source": "local_rebuild_continuation",
+          "limit": 1
+        }
+      },
+      "expected_outcome": {
+        "disposition": "success"
+      }
+    },
+    {
+      "id": "STEP-PERF-REBUILD-REQUESTS-APPLY-002",
+      "phase": "exercise",
+      "transport": "local",
+      "description": "Apply the final immutable rebuild page.",
+      "operation": {
+        "contract_operation": "local",
+        "name": "apply-rebuild-page",
+        "payload": {
+          "user_id": "user-a",
+          "client_id": "client-a",
+          "scope_id": "scope-a",
+          "rebuild_id": "00000000-0000-4000-8000-000000004003",
+          "page_ordinal": 2,
+          "request_token_source": "local_rebuild_continuation"
+        }
+      },
+      "expected_outcome": {
+        "disposition": "success"
+      }
+    },
+    {
+      "id": "STEP-PERF-REBUILD-REQUESTS-FINALIZE-001",
+      "phase": "exercise",
+      "transport": "local",
+      "description": "Finalize the verified two-page rebuild before incremental pull.",
+      "operation": {
+        "contract_operation": "local",
+        "name": "finalize-rebuild",
+        "payload": {
+          "user_id": "user-a",
+          "client_id": "client-a",
+          "scope_id": "scope-a",
+          "rebuild_id": "00000000-0000-4000-8000-000000004003"
+        }
+      },
+      "expected_outcome": {
+        "disposition": "success"
+      }
+    },
+    {
+      "id": "STEP-PERF-REBUILD-REQUESTS-002",
+      "phase": "exercise",
+      "transport": "http",
+      "description": "Pull incremental changes after the first materialization rebuild completes.",
+      "operation": {
+        "contract_operation": "pull",
+        "name": "request-page",
+        "payload": {
+          "user_id": "user-a",
+          "client_id": "client-a",
+          "client_generation": 1,
+          "schema": {
+            "version": 1,
+            "hash": "721d2c95e6f34cd9733feea9f5118fba391eee10d07663dad066cfc59439fa44"
+          },
+          "scope_set_version": 1,
+          "scopes": [
+            {
+              "scope_id": "scope-a",
+              "cursor_source": "local_checkpoint"
+            }
+          ],
+          "limit": 1
         }
       },
       "expected_outcome": {
@@ -960,6 +1538,14 @@
     },
     {
       "step_id": "STEP-PERF-REBUILD-REQUESTS-003",
+      "assertion_id": "ASSERT-PERF-REBUILD-REQUESTS-SEMANTIC-001",
+      "contract_case": "rebuild_success",
+      "http_status": 200,
+      "error_code": null,
+      "retryable": false
+    },
+    {
+      "step_id": "STEP-PERF-REBUILD-REQUESTS-004",
       "assertion_id": "ASSERT-PERF-REBUILD-REQUESTS-SEMANTIC-001",
       "contract_case": "rebuild_success",
       "http_status": 200,

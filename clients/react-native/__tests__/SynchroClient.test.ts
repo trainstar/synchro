@@ -38,6 +38,7 @@ describe('SynchroClient', () => {
         pullPageSize: 100,
         pushBatchSize: 100,
       });
+      await client.close();
     });
   });
 
@@ -209,11 +210,12 @@ describe('SynchroClient', () => {
   });
 
   describe('readTransaction', () => {
-    it('begins read, executes, and commits', async () => {
+    it('exposes queries only and commits', async () => {
       mockNativeModule.txQuery.mockResolvedValueOnce([{ id: '1' }]);
 
       const client = makeClient();
       const result = await client.readTransaction(async (tx) => {
+        expect(tx).not.toHaveProperty('execute');
         return await tx.query('SELECT * FROM items WHERE deleted_at IS ?', [null]);
       });
 
@@ -224,13 +226,15 @@ describe('SynchroClient', () => {
         [null]
       );
       expect(mockNativeModule.commitTransaction).toHaveBeenCalledWith('tx-1');
+      expect(mockNativeModule.txExecute).not.toHaveBeenCalled();
       expect(result).toEqual([{ id: '1' }]);
     });
   });
 
   describe('auth callback', () => {
     it('resolves auth requests from native', async () => {
-      makeClient();
+      const client = makeClient();
+      await client.initialize();
 
       // Simulate native requesting auth
       emitNativeEvent('onAuthRequest', { requestID: 'auth-1' });
@@ -242,10 +246,11 @@ describe('SynchroClient', () => {
         'auth-1',
         'test-token'
       );
+      await client.close();
     });
 
     it('rejects auth requests when provider throws', async () => {
-      new SynchroClient({
+      const client = new SynchroClient({
         dbPath: '/test.db',
         serverURL: 'http://localhost:8080',
         authProvider: async () => {
@@ -254,6 +259,7 @@ describe('SynchroClient', () => {
         clientID: 'test-client',
         appVersion: '1.0.0',
       });
+      await client.initialize();
 
       emitNativeEvent('onAuthRequest', { requestID: 'auth-2' });
       await new Promise((r) => setTimeout(r, 10));
@@ -262,6 +268,42 @@ describe('SynchroClient', () => {
         'auth-2',
         'auth failed'
       );
+      await client.close();
+    });
+
+    it('prevents stale clients from answering a replacement client auth request', async () => {
+      const first = makeClient();
+      const second = new SynchroClient({
+        dbPath: '/second.db',
+        serverURL: 'http://localhost:8080',
+        authProvider: async () => 'second-token',
+        clientID: 'second-client',
+        appVersion: '1.0.0',
+      });
+
+      await first.initialize();
+      await expect(second.initialize()).rejects.toMatchObject({
+        code: 'CLIENT_ALREADY_ACTIVE',
+      });
+
+      emitNativeEvent('onAuthRequest', { requestID: 'auth-first' });
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      expect(mockNativeModule.resolveAuthRequest).toHaveBeenLastCalledWith(
+        'auth-first',
+        'test-token'
+      );
+
+      await first.close();
+      mockNativeModule.resolveAuthRequest.mockClear();
+      await second.initialize();
+      emitNativeEvent('onAuthRequest', { requestID: 'auth-second' });
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      expect(mockNativeModule.resolveAuthRequest).toHaveBeenCalledTimes(1);
+      expect(mockNativeModule.resolveAuthRequest).toHaveBeenCalledWith(
+        'auth-second',
+        'second-token'
+      );
+      await second.close();
     });
   });
 
@@ -274,19 +316,29 @@ describe('SynchroClient', () => {
       const unsub1 = client.onStatusChange((s) => a.push(s));
       const unsub2 = client.onStatusChange((s) => b.push(s));
 
-      emitNativeEvent('onStatusChange', { status: 'syncing', retryAt: null });
+      emitNativeEvent('onStatusChange', {
+        status: 'connecting',
+        retryAt: null,
+        operation: null,
+        failure: null,
+      });
 
       expect(a).toHaveLength(1);
       expect(b).toHaveLength(1);
-      expect(a[0].status).toBe('syncing');
-      expect(b[0].status).toBe('syncing');
+      expect(a[0].status).toBe('connecting');
+      expect(b[0].status).toBe('connecting');
 
       unsub1();
-      emitNativeEvent('onStatusChange', { status: 'idle', retryAt: null });
+      emitNativeEvent('onStatusChange', {
+        status: 'ready',
+        retryAt: null,
+        operation: null,
+        failure: null,
+      });
 
       expect(a).toHaveLength(1); // unsubscribed, no new event
       expect(b).toHaveLength(2);
-      expect(b[1].status).toBe('idle');
+      expect(b[1].status).toBe('ready');
 
       unsub2();
     });
@@ -295,6 +347,7 @@ describe('SynchroClient', () => {
   describe('close', () => {
     it('calls native close', async () => {
       const client = makeClient();
+      await client.initialize();
       await client.close();
       expect(mockNativeModule.close).toHaveBeenCalled();
     });
@@ -317,15 +370,26 @@ describe('SynchroClient', () => {
 
       emitNativeEvent('onStatusChange', {
         status: 'error',
-        retryAt: '2026-01-01T00:00:00.000Z',
+        retryAt: null,
+        operation: null,
+        failure: {
+          operation: 'connecting',
+          code: 'network_error',
+          retryable: true,
+          message: 'temporary network failure',
+          recoveryAction: 'retry',
+          metadata: {},
+        },
       });
       emitNativeEvent('onStatusChange', {
-        status: 'idle',
+        status: 'ready',
         retryAt: null,
+        operation: null,
+        failure: null,
       });
 
       expect(mockNativeModule.start).toHaveBeenCalledTimes(1);
-      expect(statuses.map((status) => status.status)).toEqual(['error', 'idle']);
+      expect(statuses.map((status) => status.status)).toEqual(['error', 'ready']);
     });
 
     it('stop calls native stop', async () => {
@@ -334,10 +398,184 @@ describe('SynchroClient', () => {
       expect(mockNativeModule.stop).toHaveBeenCalled();
     });
 
+    it('does not resolve stop before native drain completes', async () => {
+      let resolveStop: (() => void) | undefined;
+      mockNativeModule.stop.mockImplementationOnce(
+        () => new Promise<void>((resolve) => {
+          resolveStop = resolve;
+        })
+      );
+      const client = makeClient();
+      let settled = false;
+      const stopPromise = client.stop().then(() => {
+        settled = true;
+      });
+
+      await Promise.resolve();
+      expect(settled).toBe(false);
+      resolveStop!();
+      await stopPromise;
+      expect(settled).toBe(true);
+    });
+
+    it.each([
+      ['enterBackground', () => makeClient().enterBackground()],
+      ['enterForeground', () => makeClient().enterForeground()],
+      ['retryAfterError', () => makeClient().retryAfterError()],
+      ['resetSchemaAndStart', () => makeClient().resetSchemaAndStart()],
+    ])('forwards %s as a thin native lifecycle call', async (method, invoke) => {
+      await invoke();
+      expect(mockNativeModule[method]).toHaveBeenCalledTimes(1);
+    });
+
     it('syncNow calls native syncNow', async () => {
       const client = makeClient();
       await client.syncNow();
       expect(mockNativeModule.syncNow).toHaveBeenCalled();
+    });
+  });
+
+  describe('status and mutation inspection', () => {
+      it('maps the native status JSON', async () => {
+        mockNativeModule.getSyncStatus.mockResolvedValueOnce(
+        '{"status":"error","retryAt":null,"operation":null,"failure":{"operation":"connecting","code":"network_error","retryable":true,"message":"temporary network failure","recoveryAction":"retry","metadata":{"source":"native"}}}'
+      );
+
+      const status = await makeClient().getSyncStatus();
+
+      expect(mockNativeModule.getSyncStatus).toHaveBeenCalledTimes(1);
+      expect(status).toEqual({
+        status: 'error',
+        retryAt: null,
+        operation: null,
+        failure: {
+          operation: 'connecting',
+          code: 'network_error',
+          retryable: true,
+          message: 'temporary network failure',
+          recoveryAction: 'retry',
+          metadata: { source: 'native' },
+        },
+      });
+    });
+
+    it('maps pending mutation inspection JSON', async () => {
+      const pending = {
+        mutationID: 'mutation-1',
+        localOrder: 7,
+        tableID: 'table-1',
+        tableName: 'items',
+        recordID: 'record-1',
+        primaryKeyFieldID: 'field-id',
+        primaryKeyLogicalType: 'uuid',
+        operation: 'update',
+        authoredSchema: { version: 3, hash: 'a'.repeat(64) },
+        baseVersion: 'server-v1',
+        clientVersion: 'client-v2',
+        status: 'sealed',
+        sourceKind: 'local_write',
+        dependsOnMutationID: null,
+        normalizedMutationID: 'mutation-0',
+        sealedBatchID: 'batch-1',
+        sealedOrdinal: 2,
+        authoredFields: [
+          { fieldID: 'field-name', logicalType: 'string', value: 'updated' },
+        ],
+      };
+      mockNativeModule.inspectPendingMutations.mockResolvedValueOnce(
+        JSON.stringify([pending])
+      );
+
+      await expect(makeClient().inspectPendingMutations()).resolves.toEqual([
+        pending,
+      ]);
+      expect(mockNativeModule.inspectPendingMutations).toHaveBeenCalledTimes(1);
+    });
+
+    it('maps rejected mutation inspection JSON without parsing retained JSON', async () => {
+      const mutationJSON = '{ "operation": "update", "value": 1 }';
+      const rejectionJSON = '{ "code": "version_conflict" }';
+      const rejected = {
+        mutationID: 'mutation-2',
+        tableName: 'items',
+        recordID: 'record-2',
+        status: 'conflict',
+        code: 'version_conflict',
+        message: null,
+        serverRowJSON: '{"id":"record-2"}',
+        serverVersion: 'server-v3',
+        mutationJSON,
+        rejectionJSON,
+        createdAt: '2026-08-17T10:00:00.000Z',
+        updatedAt: '2026-08-17T10:01:00.000Z',
+      };
+      mockNativeModule.inspectRejectedMutations.mockResolvedValueOnce(
+        JSON.stringify([rejected])
+      );
+
+      const result = await makeClient().inspectRejectedMutations();
+
+      expect(result).toEqual([rejected]);
+      expect(result[0].mutationJSON).toBe(mutationJSON);
+      expect(result[0].rejectionJSON).toBe(rejectionJSON);
+    });
+
+    it.each([
+      ['getSyncStatus', () => makeClient().getSyncStatus()],
+      ['inspectPendingMutations', () => makeClient().inspectPendingMutations()],
+      ['inspectRejectedMutations', () => makeClient().inspectRejectedMutations()],
+    ])('rejects malformed JSON from %s', async (method, invoke) => {
+      mockNativeModule[method].mockResolvedValueOnce('{invalid');
+
+      await expect(invoke()).rejects.toMatchObject({
+        code: 'INVALID_RESPONSE',
+      });
+    });
+
+    it.each([
+      ['inspectPendingMutations', () => makeClient().inspectPendingMutations()],
+      ['inspectRejectedMutations', () => makeClient().inspectRejectedMutations()],
+    ])('rejects structurally invalid JSON from %s', async (method, invoke) => {
+      mockNativeModule[method].mockResolvedValueOnce('{}');
+
+      await expect(invoke()).rejects.toMatchObject({
+        code: 'INVALID_RESPONSE',
+      });
+    });
+
+    it('passes rejected mutation clearing to native', async () => {
+      await makeClient().clearRejectedMutations();
+
+      expect(mockNativeModule.clearRejectedMutations).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe('native ownership', () => {
+    it('does not release ownership until asynchronous close completes', async () => {
+      let resolveClose: (() => void) | undefined;
+      mockNativeModule.close.mockImplementationOnce(
+        () => new Promise<void>((resolve) => {
+          resolveClose = resolve;
+        })
+      );
+      const first = makeClient();
+      const second = new SynchroClient({
+        dbPath: '/second.db',
+        serverURL: 'http://localhost:8080',
+        authProvider: async () => 'second-token',
+        clientID: 'second-client',
+        appVersion: '1.0.0',
+      });
+
+      await first.initialize();
+      const closePromise = first.close();
+      await expect(second.initialize()).rejects.toMatchObject({
+        code: 'CLIENT_ALREADY_ACTIVE',
+      });
+      resolveClose!();
+      await closePromise;
+      await second.initialize();
+      await second.close();
     });
   });
 });

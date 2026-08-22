@@ -872,6 +872,7 @@
       "phase": "exercise",
       "transport": "model",
       "description": "Create two durable mutations and replay one terminal rejection after restart and response loss.",
+      "measurement_sample": { "measurement_id": "MEAS-QUEUE-REPLAY-001", "stratum_id": "STR-QUEUE-SMALL-001", "sample_id": "SAMPLE-QUEUE-REPLAY-SMALL-001", "parameters": { "pending_mutation_count": 2, "accepted_count": 1, "rejected_count": 1 } },
       "operation": {
         "contract_operation": "workload",
         "name": "prepare",
@@ -893,6 +894,7 @@
       "phase": "exercise",
       "transport": "model",
       "description": "Repeat the two-mutation restart and replay sample.",
+      "measurement_sample": { "measurement_id": "MEAS-QUEUE-REPLAY-001", "stratum_id": "STR-QUEUE-SMALL-001", "sample_id": "SAMPLE-QUEUE-REPLAY-SMALL-002", "parameters": { "pending_mutation_count": 2, "accepted_count": 1, "rejected_count": 1 } },
       "operation": {
         "contract_operation": "workload",
         "name": "prepare",
@@ -914,6 +916,7 @@
       "phase": "exercise",
       "transport": "model",
       "description": "Repeat the two-mutation restart and replay sample.",
+      "measurement_sample": { "measurement_id": "MEAS-QUEUE-REPLAY-001", "stratum_id": "STR-QUEUE-SMALL-001", "sample_id": "SAMPLE-QUEUE-REPLAY-SMALL-003", "parameters": { "pending_mutation_count": 2, "accepted_count": 1, "rejected_count": 1 } },
       "operation": {
         "contract_operation": "workload",
         "name": "prepare",
@@ -935,6 +938,7 @@
       "phase": "exercise",
       "transport": "model",
       "description": "Create 100 durable mutations and replay one terminal rejection after restart and response loss.",
+      "measurement_sample": { "measurement_id": "MEAS-QUEUE-REPLAY-001", "stratum_id": "STR-QUEUE-MEDIUM-001", "sample_id": "SAMPLE-QUEUE-REPLAY-MEDIUM-001", "parameters": { "pending_mutation_count": 100, "accepted_count": 99, "rejected_count": 1 } },
       "operation": {
         "contract_operation": "workload",
         "name": "prepare",
@@ -956,6 +960,7 @@
       "phase": "exercise",
       "transport": "model",
       "description": "Repeat the 100-mutation restart and replay sample.",
+      "measurement_sample": { "measurement_id": "MEAS-QUEUE-REPLAY-001", "stratum_id": "STR-QUEUE-MEDIUM-001", "sample_id": "SAMPLE-QUEUE-REPLAY-MEDIUM-002", "parameters": { "pending_mutation_count": 100, "accepted_count": 99, "rejected_count": 1 } },
       "operation": {
         "contract_operation": "workload",
         "name": "prepare",
@@ -977,6 +982,7 @@
       "phase": "exercise",
       "transport": "model",
       "description": "Repeat the 100-mutation restart and replay sample.",
+      "measurement_sample": { "measurement_id": "MEAS-QUEUE-REPLAY-001", "stratum_id": "STR-QUEUE-MEDIUM-001", "sample_id": "SAMPLE-QUEUE-REPLAY-MEDIUM-003", "parameters": { "pending_mutation_count": 100, "accepted_count": 99, "rejected_count": 1 } },
       "operation": {
         "contract_operation": "workload",
         "name": "prepare",
@@ -998,6 +1004,7 @@
       "phase": "exercise",
       "transport": "model",
       "description": "Create 1000 durable mutations and replay one terminal rejection after restart and response loss.",
+      "measurement_sample": { "measurement_id": "MEAS-QUEUE-REPLAY-001", "stratum_id": "STR-QUEUE-LARGE-001", "sample_id": "SAMPLE-QUEUE-REPLAY-LARGE-001", "parameters": { "pending_mutation_count": 1000, "accepted_count": 999, "rejected_count": 1 } },
       "operation": {
         "contract_operation": "workload",
         "name": "prepare",
@@ -1019,6 +1026,7 @@
       "phase": "exercise",
       "transport": "model",
       "description": "Repeat the 1000-mutation restart and replay sample.",
+      "measurement_sample": { "measurement_id": "MEAS-QUEUE-REPLAY-001", "stratum_id": "STR-QUEUE-LARGE-001", "sample_id": "SAMPLE-QUEUE-REPLAY-LARGE-002", "parameters": { "pending_mutation_count": 1000, "accepted_count": 999, "rejected_count": 1 } },
       "operation": {
         "contract_operation": "workload",
         "name": "prepare",
@@ -1040,6 +1048,7 @@
       "phase": "exercise",
       "transport": "model",
       "description": "Repeat the 1000-mutation restart and replay sample.",
+      "measurement_sample": { "measurement_id": "MEAS-QUEUE-REPLAY-001", "stratum_id": "STR-QUEUE-LARGE-001", "sample_id": "SAMPLE-QUEUE-REPLAY-LARGE-003", "parameters": { "pending_mutation_count": 1000, "accepted_count": 999, "rejected_count": 1 } },
       "operation": {
         "contract_operation": "workload",
         "name": "prepare",
@@ -1103,5 +1112,145 @@
       },
       "detects_control_ids": []
     }
-  ]
+  ],
+  "native_execution": {
+    "version": 1,
+    "clients": [
+      {
+        "key": "client_a",
+        "user_id": "user-a",
+        "client_id": "client-a",
+        "database_key": "db_queue_replay"
+      }
+    ],
+    "actions": [
+      {
+        "id": "NACT-QR-001",
+        "phase": "setup",
+        "actor": "controller",
+        "command": "install-model",
+        "covers_step_ids": [],
+        "parameters": {}
+      },
+      {
+        "id": "NACT-QR-011",
+        "phase": "setup",
+        "actor": "client",
+        "command": "open",
+        "covers_step_ids": [],
+        "parameters": {
+          "client_key": "client_a",
+          "database_mode": "create",
+          "initialization": "current",
+          "seed_step_id": null
+        }
+      },
+      {
+        "id": "NACT-QR-002",
+        "phase": "exercise",
+        "actor": "controller",
+        "command": "apply-step",
+        "covers_step_ids": ["STEP-PERF-QUEUE-REPLAY-001"],
+        "parameters": {}
+      },
+      {
+        "id": "NACT-QR-003",
+        "phase": "exercise",
+        "actor": "controller",
+        "command": "apply-step",
+        "covers_step_ids": ["STEP-PERF-QUEUE-REPLAY-002"],
+        "parameters": {}
+      },
+      {
+        "id": "NACT-QR-004",
+        "phase": "exercise",
+        "actor": "controller",
+        "command": "apply-step",
+        "covers_step_ids": ["STEP-PERF-QUEUE-REPLAY-003"],
+        "parameters": {}
+      },
+      {
+        "id": "NACT-QR-005",
+        "phase": "exercise",
+        "actor": "controller",
+        "command": "apply-step",
+        "covers_step_ids": ["STEP-PERF-QUEUE-REPLAY-004"],
+        "parameters": {}
+      },
+      {
+        "id": "NACT-QR-006",
+        "phase": "exercise",
+        "actor": "controller",
+        "command": "apply-step",
+        "covers_step_ids": ["STEP-PERF-QUEUE-REPLAY-005"],
+        "parameters": {}
+      },
+      {
+        "id": "NACT-QR-007",
+        "phase": "exercise",
+        "actor": "controller",
+        "command": "apply-step",
+        "covers_step_ids": ["STEP-PERF-QUEUE-REPLAY-006"],
+        "parameters": {}
+      },
+      {
+        "id": "NACT-QR-008",
+        "phase": "exercise",
+        "actor": "controller",
+        "command": "apply-step",
+        "covers_step_ids": ["STEP-PERF-QUEUE-REPLAY-007"],
+        "parameters": {}
+      },
+      {
+        "id": "NACT-QR-009",
+        "phase": "exercise",
+        "actor": "controller",
+        "command": "apply-step",
+        "covers_step_ids": ["STEP-PERF-QUEUE-REPLAY-008"],
+        "parameters": {}
+      },
+      {
+        "id": "NACT-QR-010",
+        "phase": "exercise",
+        "actor": "controller",
+        "command": "apply-step",
+        "covers_step_ids": ["STEP-PERF-QUEUE-REPLAY-009"],
+        "parameters": {}
+      },
+      {
+        "id": "NACT-QR-013",
+        "phase": "verify",
+        "actor": "observer",
+        "command": "capture",
+        "covers_step_ids": [],
+        "parameters": {
+          "client_keys": ["client_a"],
+          "sources": [
+            "application-rows",
+            "pending-mutations",
+            "rejected-mutations",
+            "sync-status",
+            "request-trace",
+            "process-trace",
+            "server-state"
+          ],
+          "expectation_ids": [
+            "EXPECT-PERF-QUEUE-REPLAY-SEMANTIC-001",
+            "EXPECT-PERF-QUEUE-REPLAY-PERFORMANCE-001"
+          ]
+        }
+      },
+      {
+        "id": "NACT-QR-014",
+        "phase": "verify",
+        "actor": "observer",
+        "command": "measure",
+        "covers_step_ids": [],
+        "parameters": {
+          "performance_budget_ids": [],
+          "measurement_ids": ["MEAS-QUEUE-REPLAY-001"]
+        }
+      }
+    ]
+  }
 }

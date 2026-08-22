@@ -14,12 +14,12 @@ Consumers should switch dependency source only. Package identity and runtime beh
 
 | Surface | Local development | Published release |
 | --- | --- | --- |
-| Native Apple SDK | local SPM package path to the repo root | tagged SPM release from the repo root |
-| Apple pod surface | `pod 'Synchro', :path => '/absolute/path/to/synchro'` | `pod 'Synchro', :git => 'https://github.com/trainstar/synchro.git', :tag => 'v<version>'` |
-| Kotlin SDK | `mavenLocal()`, then `mavenCentral()` | Maven Central |
+| Native Apple SDK | local SPM path to `dist/local-consumer/apple/Synchro` | tagged SPM release from the repo root |
+| Apple pod surface | `pod 'Synchro', :path => '/absolute/path/to/dist/local-consumer/apple/Synchro'` | `pod 'Synchro', :git => 'https://github.com/trainstar/synchro.git', :tag => 'v<version>'` |
+| Kotlin SDK | Maven repository at `dist/local-consumer/maven` | Maven Central |
 | React Native package | local packed `.tgz` from `make local-consumer-artifacts` | npm |
-| RN iOS native dependency | local pod path to the repo root `Synchro.podspec` | tagged git pod `v<version>` |
-| RN Android native dependency | `mavenLocal()`, then `mavenCentral()`, optional `synchroVersion=<version>` override | Maven Central |
+| RN iOS native dependency | local pod path to the staged Apple package | tagged git pod `v<version>` |
+| RN Android native dependency | staged Maven repository and `synchroVersion=<version>` | Maven Central |
 
 ## Supported local-consumer workflow
 
@@ -32,11 +32,14 @@ make local-consumer-artifacts
 That flow:
 
 - checks repo version alignment first
-- packs the React Native bridge into `dist/local-consumer/`
-- publishes the Kotlin SDK to `mavenLocal()`
-- validates the Apple local-consumer surfaces from the repo root
+- stages the Apple package inputs and CocoaPods metadata
+- publishes the Kotlin SDK into `dist/local-consumer/maven`
+- packs the React Native bridge into `dist/local-consumer/npm`
+- records SHA-256 hashes for every staged file
 
 This is the supported pre-release integration path. Raw sibling-source linking may still work, but it is not the documented primary contract.
+
+Run `make test-packaged-consumers` to build isolated applications from these staged artifacts.
 
 ## Versioning
 

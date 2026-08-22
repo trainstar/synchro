@@ -1053,5 +1053,135 @@
         "CTRL-IDEMPOTENCY-001"
       ]
     }
-  ]
+  ],
+  "native_execution": {
+    "version": 1,
+    "clients": [
+      {
+        "key": "client_a",
+        "user_id": "user-a",
+        "client_id": "client-a",
+        "database_key": "push_response_loss_a"
+      }
+    ],
+    "actions": [
+      {
+        "id": "NACT-PUSH-RESPONSE-LOSS-001",
+        "phase": "setup",
+        "actor": "controller",
+        "command": "install-model",
+        "covers_step_ids": [],
+        "parameters": {}
+      },
+      {
+        "id": "NACT-PUSH-RESPONSE-LOSS-002",
+        "phase": "setup",
+        "actor": "client",
+        "command": "open",
+        "covers_step_ids": [],
+        "parameters": {
+          "client_key": "client_a",
+          "database_mode": "create",
+          "initialization": "current",
+          "seed_step_id": null
+        }
+      },
+      {
+        "id": "NACT-PUSH-RESPONSE-LOSS-003",
+        "phase": "exercise",
+        "actor": "client",
+        "command": "execute-step",
+        "covers_step_ids": [
+          "STEP-PUSH-RESPONSE-LOSS-001"
+        ],
+        "parameters": {
+          "client_key": "client_a"
+        }
+      },
+      {
+        "id": "NACT-PUSH-RESPONSE-LOSS-004",
+        "phase": "exercise",
+        "actor": "client",
+        "command": "synchronize-step",
+        "covers_step_ids": [
+          "STEP-PUSH-RESPONSE-LOSS-002"
+        ],
+        "parameters": {
+          "client_key": "client_a",
+          "method": "start",
+          "completion": "blocked"
+        }
+      },
+      {
+        "id": "NACT-PUSH-RESPONSE-LOSS-005",
+        "phase": "exercise",
+        "actor": "process",
+        "command": "execute-step",
+        "covers_step_ids": [
+          "STEP-PUSH-RESPONSE-LOSS-003"
+        ],
+        "parameters": {
+          "client_key": "client_a"
+        }
+      },
+      {
+        "id": "NACT-PUSH-RESPONSE-LOSS-006",
+        "phase": "exercise",
+        "actor": "client",
+        "command": "synchronize-step",
+        "covers_step_ids": [
+          "STEP-PUSH-RESPONSE-LOSS-004"
+        ],
+        "parameters": {
+          "client_key": "client_a",
+          "method": "retry-after-error",
+          "completion": "idle"
+        }
+      },
+      {
+        "id": "NACT-PUSH-RESPONSE-LOSS-007",
+        "phase": "exercise",
+        "actor": "controller",
+        "command": "request-step",
+        "covers_step_ids": [
+          "STEP-PUSH-RESPONSE-LOSS-005"
+        ],
+        "parameters": {}
+      },
+      {
+        "id": "NACT-PUSH-RESPONSE-LOSS-008",
+        "phase": "exercise",
+        "actor": "controller",
+        "command": "request-step",
+        "covers_step_ids": [
+          "STEP-PUSH-RESPONSE-LOSS-006"
+        ],
+        "parameters": {}
+      },
+      {
+        "id": "NACT-PUSH-RESPONSE-LOSS-009",
+        "phase": "verify",
+        "actor": "observer",
+        "command": "capture",
+        "covers_step_ids": [],
+        "parameters": {
+          "client_keys": [
+            "client_a"
+          ],
+          "sources": [
+            "application-rows",
+            "pending-mutations",
+            "sync-status",
+            "sync-events",
+            "request-trace",
+            "server-state",
+            "process-trace"
+          ],
+          "expectation_ids": [
+            "EXPECT-PUSH-RESPONSE-LOSS-SEMANTIC-001"
+          ]
+        }
+      }
+    ]
+  }
 }

@@ -1133,6 +1133,287 @@
     }
 
     #[pg_test]
+    fn test_class_4_field_removal_keeps_rebuild_valid() {
+        setup_test_tables();
+        let user_id = "class-4-digest-user";
+        let client_id = "class-4-digest-client";
+        let scope_id = "user:class-4-digest-user";
+        let record_id = "c4000000-0000-4000-8000-000000000001";
+        register_client(user_id, client_id);
+        Spi::run_with_args(
+            "INSERT INTO test_orders (id, user_id, title)
+             VALUES ($1::uuid, $2, 'retired class 4 field')",
+            &[record_id.into(), user_id.into()],
+        )
+        .unwrap();
+        insert_edge("test_orders", record_id, scope_id);
+        insert_changelog(scope_id, "test_orders", record_id, 1);
+
+        let retired_field_id: String = Spi::get_one(
+            "SELECT field.field_id::text
+             FROM sync_registry_fields field
+             JOIN sync_registry_generations generation
+               ON generation.generation = field.registry_generation
+             JOIN sync_registry registry
+               ON registry.registry_generation = field.registry_generation
+              AND registry.relation_id = field.relation_id
+             WHERE generation.state = 'active'
+               AND registry.table_name = 'test_orders'
+               AND field.physical_column = 'title'",
+        )
+        .unwrap()
+        .expect("retired class 4 field identity");
+
+        Spi::run(
+            "SELECT tests.register_legacy_test_table(
+                 p_table_name := 'test_orders',
+                 p_bucket_sql := $$SELECT ARRAY['user:' || user_id] FROM test_orders WHERE id = $1::uuid$$,
+                 p_composition := 'single_scope',
+                 p_pk_column := 'id',
+                 p_updated_at_col := 'updated_at',
+                 p_deleted_at_col := 'deleted_at',
+                 p_push_policy := 'enabled',
+                 p_sync_columns := ARRAY[
+                     'id', 'user_id', 'amount', 'created_at', 'updated_at', 'deleted_at'
+                 ]
+             )",
+        )
+        .unwrap();
+        activate_pending_registry_for_test();
+
+        let (schema_version, schema_hash) = latest_schema_ref();
+        let transition: String = Spi::get_one_with_args(
+            "SELECT transition_class
+             FROM sync_schema_manifest
+             WHERE schema_version = $1 AND schema_hash = $2",
+            &[schema_version.into(), schema_hash.as_str().into()],
+        )
+        .unwrap()
+        .expect("class 4 field removal transition");
+        assert_eq!(transition, "class_4");
+
+        let migrated: pgrx::JsonB = Spi::get_one_with_args(
+            "SELECT jsonb_build_object(
+                 'row_data', captured.row_data,
+                 'row_checksum', encode(captured.checksum, 'hex'),
+                 'edge_checksum', encode(edge.checksum, 'hex'),
+                 'current_generation', generation.generation,
+                 'row_generation', captured.registry_generation
+             )
+             FROM sync_captured_rows captured
+             JOIN sync_bucket_edges edge
+               ON edge.relation_id = captured.relation_id
+              AND edge.record_id = captured.record_id
+             CROSS JOIN LATERAL (
+                 SELECT generation
+                 FROM sync_registry_generations
+                 WHERE state = 'active'
+             ) generation
+             WHERE captured.record_id = $1 AND edge.bucket_id = $2",
+            &[record_id.into(), scope_id.into()],
+        )
+        .unwrap()
+        .expect("migrated class 4 projection");
+        assert!(migrated.0["row_data"].get(&retired_field_id).is_none());
+        assert_eq!(migrated.0["row_checksum"], migrated.0["edge_checksum"]);
+        assert_eq!(migrated.0["row_generation"], migrated.0["current_generation"]);
+
+        let rebuilt = rebuild_client(user_id, client_id, scope_id, None, 100);
+        assert!(rebuilt.get("error").is_none(), "{rebuilt}");
+        assert_eq!(rebuilt["records"].as_array().map(Vec::len), Some(1));
+        assert!(rebuilt["records"][0]["row"]
+            .get(&retired_field_id)
+            .is_none());
+    }
+
+    #[pg_test]
+    fn test_class_4_table_removal_retires_live_projection() {
+        setup_test_tables();
+        let user_id = "class-4-table-user";
+        let client_id = "class-4-table-client";
+        let scope_id = "user:class-4-table-user";
+        let record_id = "c4000000-0000-4000-8000-000000000002";
+        let initial = register_client(user_id, client_id);
+        Spi::run_with_args(
+            "INSERT INTO test_orders (id, user_id, title)
+             VALUES ($1::uuid, $2, 'retired class 4 table')",
+            &[record_id.into(), user_id.into()],
+        )
+        .unwrap();
+        insert_edge("test_orders", record_id, scope_id);
+        insert_changelog(scope_id, "test_orders", record_id, 1);
+
+        Spi::run("SELECT synchro_unregister_table('test_orders')").unwrap();
+        activate_pending_registry_for_test();
+
+        let live_state: pgrx::JsonB = Spi::get_one_with_args(
+            "SELECT jsonb_build_object(
+                 'rows', (SELECT count(*) FROM sync_captured_rows WHERE record_id = $1),
+                 'edges', (SELECT count(*) FROM sync_bucket_edges WHERE record_id = $1)
+             )",
+            &[record_id.into()],
+        )
+        .unwrap()
+        .expect("retired class 4 live projection state");
+        assert_eq!(live_state.0["rows"], 0);
+        assert_eq!(live_state.0["edges"], 0);
+
+        let reset = connect_client(
+            user_id,
+            json!({
+                "client_id": client_id,
+                "client_generation": 1,
+                "platform": "ios",
+                "app_version": "1.0.0",
+                "protocol_version": 3,
+                "schema_reset": true,
+                "schema": {
+                    "version": initial["schema"]["version"],
+                    "hash": initial["schema"]["hash"]
+                },
+                "scope_set_version": 1,
+                "known_scopes": { (scope_id): { "cursor": null } }
+            }),
+        );
+        assert_eq!(reset["schema"]["action"], "rebuild_local");
+        let rebuilt = rebuild_client(user_id, client_id, scope_id, None, 100);
+        assert!(rebuilt.get("error").is_none(), "{rebuilt}");
+        assert!(rebuilt["records"].as_array().is_some_and(Vec::is_empty));
+    }
+
+    #[pg_test]
+    fn test_class_4_live_type_change_requires_bootstrap() {
+        setup_test_tables();
+        let record_id = "c4000000-0000-4000-8000-000000000003";
+        register_client("class-4-type-user", "class-4-type-client");
+        Spi::run_with_args(
+            "INSERT INTO test_orders (id, user_id, title)
+             VALUES ($1::uuid, 'class-4-type-user', '42')",
+            &[record_id.into()],
+        )
+        .unwrap();
+        insert_edge("test_orders", record_id, "user:class-4-type-user");
+        insert_changelog("user:class-4-type-user", "test_orders", record_id, 1);
+        Spi::run(
+            "ALTER TABLE test_orders ALTER COLUMN title DROP DEFAULT;
+             ALTER TABLE test_orders ALTER COLUMN title TYPE bigint USING title::bigint",
+        )
+        .unwrap();
+        Spi::run(
+            "SELECT tests.register_legacy_test_table(
+                 'test_orders',
+                 $$SELECT ARRAY['user:' || user_id] FROM test_orders WHERE id = $1::uuid$$,
+                 'single_scope', 'id', 'updated_at', 'deleted_at', 'enabled',
+                 ARRAY['internal_notes']
+             )",
+        )
+        .unwrap();
+
+        let result = std::panic::catch_unwind(activate_pending_registry_for_test);
+        assert!(result.is_err(), "live Class 4 type change must require bootstrap");
+    }
+
+    #[pg_test]
+    fn test_class_4_historical_type_change_requires_bootstrap() {
+        setup_test_tables();
+        let record_id = "c4000000-0000-4000-8000-000000000005";
+        register_client("class-4-history-user", "class-4-history-client");
+        Spi::run_with_args(
+            "INSERT INTO test_orders (id, user_id, title)
+             VALUES ($1::uuid, 'class-4-history-user', '42')",
+            &[record_id.into()],
+        )
+        .unwrap();
+        insert_edge("test_orders", record_id, "user:class-4-history-user");
+        insert_changelog("user:class-4-history-user", "test_orders", record_id, 1);
+        Spi::run("SET LOCAL session_replication_role = replica").unwrap();
+        Spi::run_with_args(
+            "DELETE FROM test_orders WHERE id = $1::uuid",
+            &[record_id.into()],
+        )
+        .unwrap();
+        Spi::run("SET LOCAL session_replication_role = origin").unwrap();
+        Spi::run_with_args(
+            "DELETE FROM sync_bucket_edges WHERE record_id = $1",
+            &[record_id.into()],
+        )
+        .unwrap();
+        Spi::run_with_args(
+            "DELETE FROM sync_captured_rows WHERE record_id = $1",
+            &[record_id.into()],
+        )
+        .unwrap();
+        let historical_count: i64 = Spi::get_one_with_args(
+            "SELECT count(*) FROM sync_captured_projections WHERE record_id = $1",
+            &[record_id.into()],
+        )
+        .unwrap()
+        .expect("historical Class 4 projection count");
+        assert!(historical_count > 0);
+
+        Spi::run(
+            "ALTER TABLE test_orders ALTER COLUMN title DROP DEFAULT;
+             ALTER TABLE test_orders ALTER COLUMN title TYPE bigint USING title::bigint",
+        )
+        .unwrap();
+        Spi::run(
+            "SELECT tests.register_legacy_test_table(
+                 'test_orders',
+                 $$SELECT ARRAY['user:' || user_id] FROM test_orders WHERE id = $1::uuid$$,
+                 'single_scope', 'id', 'updated_at', 'deleted_at', 'enabled',
+                 ARRAY['internal_notes']
+             )",
+        )
+        .unwrap();
+
+        let result = std::panic::catch_unwind(activate_pending_registry_for_test);
+        assert!(
+            result.is_err(),
+            "historical Class 4 type change must require bootstrap"
+        );
+    }
+
+    #[pg_test]
+    fn test_class_4_live_lifecycle_change_is_rejected() {
+        setup_test_tables();
+        let record_id = "c4000000-0000-4000-8000-000000000004";
+        register_client("class-4-lifecycle-user", "class-4-lifecycle-client");
+        Spi::run_with_args(
+            "INSERT INTO test_orders (id, user_id, title)
+             VALUES ($1::uuid, 'class-4-lifecycle-user', 'retained')",
+            &[record_id.into()],
+        )
+        .unwrap();
+        insert_edge(
+            "test_orders",
+            record_id,
+            "user:class-4-lifecycle-user",
+        );
+        insert_changelog(
+            "user:class-4-lifecycle-user",
+            "test_orders",
+            record_id,
+            1,
+        );
+        Spi::run("ALTER TABLE test_orders DROP COLUMN deleted_at").unwrap();
+        let result = std::panic::catch_unwind(|| {
+            Spi::run(
+                "SELECT tests.register_legacy_test_table(
+                     'test_orders',
+                     $$SELECT ARRAY['user:' || user_id] FROM test_orders WHERE id = $1::uuid$$,
+                     'single_scope', 'id', 'updated_at', '', 'enabled',
+                     ARRAY['internal_notes']
+                 )",
+            )
+            .unwrap();
+        });
+        assert!(
+            result.is_err(),
+            "live Class 4 lifecycle change must be rejected"
+        );
+    }
+
+    #[pg_test]
     fn test_added_nonempty_table_is_class_3_with_bootstrap() {
         setup_test_tables();
         register_client("nonempty-table-user", "nonempty-table-client");

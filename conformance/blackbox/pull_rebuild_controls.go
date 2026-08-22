@@ -27,6 +27,17 @@ type RebuildSessionObservation struct {
 	Expired                bool
 }
 
+// ClientScopeAssignmentObservation is one bounded latest assignment row.
+type ClientScopeAssignmentObservation struct {
+	ScopeID              string
+	ClientGeneration     int64
+	ScopeSetVersion      int64
+	Assigned             bool
+	AssignmentSource     string
+	MembershipGeneration int64
+	RetentionGeneration  int64
+}
+
 // WALRecordStageObservation contains bounded stage counts for fixed diagnostic
 // records when pull-visible materialization does not complete.
 type WALRecordStageObservation struct {
@@ -299,6 +310,52 @@ func (executor *OperatorExecutor) ObserveRebuildSession(
 		}
 	default:
 		return RebuildSessionObservation{}, errors.New("rebuild session boundary observation is invalid")
+	}
+	return observation, nil
+}
+
+// ObserveClientScopeAssignment returns the latest assignment for one diagnostic scope.
+func (executor *OperatorExecutor) ObserveClientScopeAssignment(ctx context.Context, clientID, scopeID string) (ClientScopeAssignmentObservation, error) {
+	if executor == nil || executor.harness == nil || !executor.harness.sourceReady {
+		return ClientScopeAssignmentObservation{}, errors.New("operator executor is unavailable")
+	}
+	if ctx == nil || clientID == "" || len(clientID) > 128 || scopeID == "" || len(scopeID) > 256 {
+		return ClientScopeAssignmentObservation{}, errors.New("client scope assignment observation input is invalid")
+	}
+	database, err := executor.harness.openDatabase(ctx, executor.harness.names.Database, executor.harness.env.Admin, false)
+	if err != nil {
+		return ClientScopeAssignmentObservation{}, errors.New("open client scope assignment observation connection failed")
+	}
+	defer database.Close()
+	var observation ClientScopeAssignmentObservation
+	err = database.QueryRowContext(ctx, `
+		SELECT scope_id, client_generation, scope_set_version, assigned,
+		       assignment_source, membership_generation, retention_generation
+		FROM synchro.sync_client_scope_history
+		WHERE user_id = 'diagnostic-user' AND client_id = $1 AND scope_id = $2
+		ORDER BY scope_set_version DESC
+		LIMIT 1`, clientID, scopeID).Scan(
+		&observation.ScopeID,
+		&observation.ClientGeneration,
+		&observation.ScopeSetVersion,
+		&observation.Assigned,
+		&observation.AssignmentSource,
+		&observation.MembershipGeneration,
+		&observation.RetentionGeneration,
+	)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ClientScopeAssignmentObservation{}, errors.New("client scope assignment observation is missing")
+	}
+	if err != nil {
+		return ClientScopeAssignmentObservation{}, errors.New("read client scope assignment observation failed")
+	}
+	if observation.ScopeID != scopeID || observation.ClientGeneration <= 0 || observation.ScopeSetVersion <= 0 || !observation.Assigned || observation.MembershipGeneration <= 0 || observation.RetentionGeneration <= 0 {
+		return ClientScopeAssignmentObservation{}, errors.New("client scope assignment observation is invalid")
+	}
+	switch observation.AssignmentSource {
+	case "identity", "shared", "assignment_rule":
+	default:
+		return ClientScopeAssignmentObservation{}, errors.New("client scope assignment source is invalid")
 	}
 	return observation, nil
 }

@@ -2098,6 +2098,7 @@ fn build_dml_data(
 
 fn sql_wire_value(field: &FieldRegistration, value: &serde_json::Value) -> serde_json::Value {
     match field.portable_type.as_str() {
+        "json" if value.is_null() => serde_json::Value::Null,
         "json" => value
             .as_str()
             .and_then(|text| serde_json::from_str(text).ok())

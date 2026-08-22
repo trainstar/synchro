@@ -1,65 +1,29 @@
 import Foundation
 @preconcurrency import GRDB
 
+struct RebuildChecksumMismatchError: Error, Sendable, Equatable {
+    let scopeID: String
+}
+
+struct PendingRebuildFinality: Sendable, Equatable {
+    let finalCursor: String
+    let checksum: ChecksumObject
+}
+
+private struct SeedReceiptForConnect {
+    let scopeID: String
+    let receipt: String
+    let schemaVersion: Int64?
+    let schemaHash: String?
+    let cardinality: Int64?
+    let checksum: ChecksumObject?
+}
+
 final class PullProcessor: @unchecked Sendable {
     private let database: SynchroDatabase
-    private let formatter: ISO8601DateFormatter = {
-        let formatter = ISO8601DateFormatter()
-        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        return formatter
-    }()
 
     init(database: SynchroDatabase) {
         self.database = database
-    }
-
-    func applyPullPage(changes: [Record], deletes: [DeleteEntry], syncedTables: [LocalSchemaTable]) throws {
-        guard !changes.isEmpty || !deletes.isEmpty else { return }
-        let tableMap = Dictionary(uniqueKeysWithValues: syncedTables.map { ($0.tableName, $0) })
-
-        try database.writeSyncLockedTransaction { db in
-            for record in changes {
-                guard let schema = tableMap[record.tableName] else { continue }
-                try upsertRecord(db: db, record: record, schema: schema)
-            }
-            try applyDeletesInTransaction(db: db, deletes: deletes, tableMap: tableMap)
-        }
-    }
-
-    func applyChanges(changes: [Record], syncedTables: [LocalSchemaTable]) throws {
-        guard !changes.isEmpty else { return }
-        let tableMap = Dictionary(uniqueKeysWithValues: syncedTables.map { ($0.tableName, $0) })
-
-        try database.writeSyncLockedTransaction { db in
-            for record in changes {
-                guard let schema = tableMap[record.tableName] else { continue }
-                try upsertRecord(db: db, record: record, schema: schema)
-            }
-        }
-    }
-
-    func applyDeletes(deletes: [DeleteEntry], syncedTables: [LocalSchemaTable]) throws {
-        guard !deletes.isEmpty else { return }
-        let tableMap = Dictionary(uniqueKeysWithValues: syncedTables.map { ($0.tableName, $0) })
-
-        try database.writeSyncLockedTransaction { db in
-            try applyDeletesInTransaction(db: db, deletes: deletes, tableMap: tableMap)
-        }
-    }
-
-    private func applyDeletesInTransaction(db: GRDB.Database, deletes: [DeleteEntry], tableMap: [String: LocalSchemaTable]) throws {
-        for entry in deletes {
-            guard let schema = tableMap[entry.tableName] else { continue }
-            let pkCol = schema.primaryKey.first ?? "id"
-            let quoted = SQLiteHelpers.quoteIdentifier(entry.tableName)
-            let quotedPK = SQLiteHelpers.quoteIdentifier(pkCol)
-            let quotedDeletedAt = SQLiteHelpers.quoteIdentifier(schema.deletedAtColumn)
-
-            try db.execute(
-                sql: "UPDATE \(quoted) SET \(quotedDeletedAt) = \(SQLiteHelpers.timestampNow()) WHERE \(quotedPK) = ? AND \(quotedDeletedAt) IS NULL",
-                arguments: [entry.id]
-            )
-        }
     }
 
     func updateCheckpoint(_ checkpoint: Int64) throws {
@@ -71,37 +35,109 @@ final class PullProcessor: @unchecked Sendable {
         }
     }
 
+    /// Removes only seed receipts that no longer describe the local scope state.
+    /// Invalidated scopes remain assigned and rebuild after the first connect.
+    func prepareSeedReceiptsForConnect() throws {
+        try database.writeSyncLockedTransaction { db in
+            let receipts = try loadSeedReceiptsForConnect(db)
+            guard !receipts.isEmpty else { return }
+
+            let schema = try localSchemaReference(db)
+            let tablesByName = try localTablesByName(db)
+            for receipt in receipts {
+                guard try !seedReceiptMatches(
+                    receipt,
+                    db: db,
+                    schema: schema,
+                    tablesByName: tablesByName
+                ) else {
+                    continue
+                }
+
+                try SynchroMeta.deleteSeedReceipt(db, scopeID: receipt.scopeID)
+                if try SynchroMeta.getScope(db, scopeID: receipt.scopeID) != nil {
+                    _ = try SynchroMeta.bumpScopeGeneration(db, scopeID: receipt.scopeID)
+                }
+            }
+        }
+    }
+
     func applyScopeChanges(
         changes: [ChangeRecord],
         syncedTables: [LocalSchemaTable],
         scopeCursors: [String: String],
-        checksums: [String: String]?
+        checksums: [String: ChecksumObject]?,
+        schemaHash: String,
+        scopeUpdates: ScopeAssignmentDelta = ScopeAssignmentDelta(add: [], remove: []),
+        scopeSetVersion: Int64? = nil,
+        rebuildScopes: Set<String> = [],
+        completedPullRequestJSON: String? = nil
     ) throws {
         let checksumMap = checksums ?? [:]
-        guard !changes.isEmpty || !scopeCursors.isEmpty || !checksumMap.isEmpty else { return }
-        let tableMap = Dictionary(uniqueKeysWithValues: syncedTables.map { ($0.tableName, $0) })
+        guard !changes.isEmpty || !scopeCursors.isEmpty || !checksumMap.isEmpty ||
+              !scopeUpdates.add.isEmpty || !scopeUpdates.remove.isEmpty || scopeSetVersion != nil ||
+              completedPullRequestJSON != nil else { return }
+        if let completedPullRequestJSON {
+            guard !completedPullRequestJSON.isEmpty else {
+                throw SynchroError.invalidResponse(message: "completed pull request identity is invalid")
+            }
+            try Integrity.validateCanonicalWireJSON(Data(completedPullRequestJSON.utf8))
+        }
+        let tablesByID = Dictionary(uniqueKeysWithValues: syncedTables.map { ($0.tableID, $0) })
+        let tablesByName = Dictionary(uniqueKeysWithValues: syncedTables.map { ($0.tableName, $0) })
 
         try database.writeSyncLockedTransaction { db in
             for change in changes {
-                guard let schema = tableMap[change.table] else { continue }
+                guard let schema = tablesByID[change.table] else {
+                    throw SynchroError.invalidResponse(message: "unknown logical table \(change.table)")
+                }
                 let recordID = try scopeRecordID(pk: change.pk, schema: schema)
 
                 switch change.op {
+                case .insert, .update:
+                    throw SynchroError.invalidResponse(message: "invalid pull operation \(change.op.rawValue)")
                 case .delete:
                     try applyScopeDeleteChange(
                         db: db,
                         change: change,
                         recordID: recordID,
+                        schema: schema,
+                        schemaHash: schemaHash
+                    )
+                case .upsert:
+                    let localRow = try validatedLocalRow(
+                        tableID: change.table,
+                        recordID: recordID,
+                        pk: change.pk,
+                        row: change.row,
+                        rowChecksum: change.rowChecksum,
+                        serverVersion: change.serverVersion,
+                        schemaHash: schemaHash,
                         schema: schema
                     )
-                case .insert, .upsert, .update:
-                    let record = try scopeRecord(from: change, schema: schema)
-                    try upsertRecord(db: db, record: record, schema: schema)
+                    let protected = try Self.isProtectedApplicationRow(
+                        db: db,
+                        tableName: schema.tableName,
+                        recordID: recordID
+                    )
+                    if !protected {
+                        try upsertRecord(db: db, recordID: recordID, data: localRow, schema: schema)
+                    }
+                    guard let rowChecksum = change.rowChecksum else {
+                        throw SynchroError.invalidResponse(message: "missing row checksum for \(change.table)/\(recordID)")
+                    }
+                    try SynchroMeta.upsertRowVersion(
+                        db,
+                        tableName: schema.tableName,
+                        recordID: recordID,
+                        serverVersion: change.serverVersion,
+                        rowChecksum: rowChecksum
+                    )
                     let generation = try SynchroMeta.getScopeGeneration(db, scopeID: change.scope)
                     try SynchroMeta.upsertScopeRow(
                         db,
                         scopeID: change.scope,
-                        tableName: change.table,
+                        tableName: schema.tableName,
                         recordID: recordID,
                         checksum: try requiredScopeRowChecksum(
                             change.rowChecksum,
@@ -113,23 +149,53 @@ final class PullProcessor: @unchecked Sendable {
                 }
             }
 
+            for scopeID in scopeUpdates.remove {
+                try removeScope(db: db, scopeID: scopeID, tablesByName: tablesByName)
+            }
+            for scope in scopeUpdates.add {
+                try SynchroMeta.upsertScope(
+                    db,
+                    scopeID: scope.id,
+                    cursor: nil,
+                    checksum: nil
+                )
+            }
+
             let scopeIDs = Set(scopeCursors.keys).union(checksumMap.keys)
             for scopeID in scopeIDs {
                 guard let existingScope = try SynchroMeta.getScope(db, scopeID: scopeID) else {
                     continue
                 }
                 let nextCursor = scopeCursors[scopeID] ?? existingScope.cursor
-                let localChecksum = try SynchroMeta.getScopeLocalChecksum(db, scopeID: scopeID)
+                let localChecksum = try computeScopeChecksum(
+                    db: db,
+                    scopeID: scopeID,
+                    schemaHash: schemaHash,
+                    tablesByName: tablesByName
+                )
+                if rebuildScopes.contains(scopeID) {
+                    try SynchroMeta.upsertScope(
+                        db,
+                        scopeID: scopeID,
+                        cursor: nil,
+                        checksum: nil,
+                        generation: existingScope.generation,
+                        localChecksum: try checksumJSON(localChecksum)
+                    )
+                    continue
+                }
                 if let serverChecksum = checksumMap[scopeID] {
-                    let expectedChecksum = try parseScopeChecksum(scopeID: scopeID, checksum: serverChecksum)
-                    if localChecksum == expectedChecksum {
+                    try serverChecksum.validate()
+                    let localChecksumJSON = try checksumJSON(localChecksum)
+                    let serverChecksumJSON = try checksumJSON(serverChecksum)
+                    if localChecksum == serverChecksum {
                         try SynchroMeta.upsertScope(
                             db,
                             scopeID: scopeID,
                             cursor: nextCursor,
-                            checksum: serverChecksum,
+                            checksum: serverChecksumJSON,
                             generation: existingScope.generation,
-                            localChecksum: localChecksum
+                            localChecksum: localChecksumJSON
                         )
                     } else {
                         try SynchroMeta.upsertScope(
@@ -138,7 +204,7 @@ final class PullProcessor: @unchecked Sendable {
                             cursor: nil,
                             checksum: nil,
                             generation: existingScope.generation,
-                            localChecksum: localChecksum
+                            localChecksum: localChecksumJSON
                         )
                     }
                     continue
@@ -149,50 +215,298 @@ final class PullProcessor: @unchecked Sendable {
                     cursor: nextCursor,
                     checksum: existingScope.checksum,
                     generation: existingScope.generation,
-                    localChecksum: localChecksum
+                    localChecksum: try checksumJSON(localChecksum)
+                )
+            }
+            if let scopeSetVersion {
+                try SynchroMeta.setInt64(db, key: .scopeSetVersion, value: scopeSetVersion)
+            }
+            if let completedPullRequestJSON {
+                try SynchroMeta.clearMatchingBackoffRecord(
+                    db,
+                    resumeState: .pulling,
+                    workIdentity: completedPullRequestJSON
                 )
             }
         }
     }
 
-    func beginScopeRebuild(scopeID: String) throws -> Int64 {
-        try database.writeTransaction { db in
-            try SynchroMeta.bumpScopeGeneration(db, scopeID: scopeID)
+    func beginScopeRebuild(
+        scopeID: String,
+        clientGeneration: Int64,
+        schemaVersion: Int64,
+        schemaHash: String,
+        pageLimit: Int,
+        syncedTables: [LocalSchemaTable]
+    ) throws -> LocalRebuildAttempt {
+        let tablesByName = Dictionary(uniqueKeysWithValues: syncedTables.map { ($0.tableName, $0) })
+        return try database.writeSyncLockedTransaction { db in
+            guard try SynchroMeta.getScope(db, scopeID: scopeID) != nil else {
+                throw SynchroError.invalidResponse(message: "rebuild targets an unknown scope \(scopeID)")
+            }
+            let scopeGeneration = try SynchroMeta.getScopeGeneration(db, scopeID: scopeID)
+            if let existing = try SynchroMeta.getRebuildAttempt(db, scopeID: scopeID),
+               existing.clientGeneration == clientGeneration,
+               existing.schemaVersion == schemaVersion,
+               existing.schemaHash == schemaHash,
+               existing.pageLimit == pageLimit,
+               existing.generation == scopeGeneration {
+                return existing
+            }
+            return try startScopeRebuildAttempt(
+                db: db,
+                scopeID: scopeID,
+                clientGeneration: clientGeneration,
+                schemaVersion: schemaVersion,
+                schemaHash: schemaHash,
+                pageLimit: pageLimit,
+                tablesByName: tablesByName
+            )
         }
     }
 
-    func applyScopeRebuildPage(scopeID: String, generation: Int64, records: [RebuildRecord], syncedTables: [LocalSchemaTable]) throws {
-        guard !records.isEmpty else { return }
-        let tableMap = Dictionary(uniqueKeysWithValues: syncedTables.map { ($0.tableName, $0) })
+    func restartScopeRebuild(
+        scopeID: String,
+        clientGeneration: Int64,
+        schemaVersion: Int64,
+        schemaHash: String,
+        pageLimit: Int,
+        syncedTables: [LocalSchemaTable]
+    ) throws -> LocalRebuildAttempt {
+        let tablesByName = Dictionary(uniqueKeysWithValues: syncedTables.map { ($0.tableName, $0) })
+        return try database.writeSyncLockedTransaction { db in
+            try startScopeRebuildAttempt(
+                db: db,
+                scopeID: scopeID,
+                clientGeneration: clientGeneration,
+                schemaVersion: schemaVersion,
+                schemaHash: schemaHash,
+                pageLimit: pageLimit,
+                tablesByName: tablesByName
+            )
+        }
+    }
 
-        try database.writeSyncLockedTransaction { db in
-            for record in records {
-                guard let schema = tableMap[record.table] else { continue }
+    func applyScopeRebuildPage(
+        attempt: LocalRebuildAttempt,
+        request: RebuildRequest,
+        requestBody: Data,
+        response: RebuildResponse,
+        responseBody: Data,
+        syncedTables: [LocalSchemaTable]
+    ) throws -> LocalRebuildAttempt {
+        let tableMap = Dictionary(uniqueKeysWithValues: syncedTables.map { ($0.tableID, $0) })
+        try response.validate(for: request)
+        if !response.hasMore {
+            guard let checksum = response.checksum else {
+                throw SynchroError.invalidResponse(message: "final rebuild page checksum is missing")
+            }
+            try checksum.validate()
+        }
+        let requestJSON = try rebuildRequestJSON(request, body: requestBody)
+        let responseJSON = try rebuildResponseJSON(response, body: responseBody)
+
+        return try database.writeSyncLockedTransaction { db in
+            guard request.scope == attempt.scopeID,
+                  request.rebuildID == attempt.rebuildID,
+                  request.clientGeneration == attempt.clientGeneration,
+                  request.schema == SchemaRef(version: attempt.schemaVersion, hash: attempt.schemaHash),
+                  request.limit == attempt.pageLimit,
+                  request.cursor == attempt.cursor else {
+                throw SynchroError.invalidResponse(message: "rebuild page request does not match its attempt")
+            }
+            if let receipt = try SynchroMeta.getRebuildPageReceipt(
+                db,
+                scopeID: attempt.scopeID,
+                rebuildID: attempt.rebuildID,
+                requestCursor: request.cursor
+            ) {
+                guard receipt.requestJSON == requestJSON,
+                      receipt.responseJSON == responseJSON else {
+                    throw SynchroError.invalidResponse(message: "rebuild page replay differs from its receipt")
+                }
+                guard let currentAttempt = try SynchroMeta.getRebuildAttempt(db, scopeID: attempt.scopeID),
+                      currentAttempt.scopeID == attempt.scopeID,
+                      currentAttempt.rebuildID == attempt.rebuildID,
+                      currentAttempt.clientGeneration == attempt.clientGeneration,
+                      currentAttempt.schemaVersion == attempt.schemaVersion,
+                      currentAttempt.schemaHash == attempt.schemaHash,
+                      currentAttempt.generation == attempt.generation,
+                      currentAttempt.pageLimit == attempt.pageLimit else {
+                    throw SynchroError.invalidResponse(message: "rebuild page receipt has no active attempt")
+                }
+                return currentAttempt
+            }
+
+            guard let currentAttempt = try SynchroMeta.getRebuildAttempt(db, scopeID: attempt.scopeID),
+                  currentAttempt == attempt else {
+                throw SynchroError.invalidResponse(message: "rebuild attempt is no longer active")
+            }
+
+            for record in response.records {
+                guard let schema = tableMap[record.table] else {
+                    throw SynchroError.invalidResponse(message: "unknown logical table \(record.table)")
+                }
                 let recordID = try scopeRecordID(pk: record.pk, schema: schema)
-                let scopedRecord = try scopeRecord(from: record, schema: schema)
-                try upsertRecord(db: db, record: scopedRecord, schema: schema)
+                let localRow = try validatedLocalRow(
+                    tableID: record.table,
+                    recordID: recordID,
+                    pk: record.pk,
+                    row: record.row,
+                    rowChecksum: record.rowChecksum,
+                    serverVersion: record.serverVersion,
+                    schemaHash: attempt.schemaHash,
+                    schema: schema
+                )
+                let protected = try Self.isProtectedApplicationRow(
+                    db: db,
+                    tableName: schema.tableName,
+                    recordID: recordID
+                )
+                if !protected {
+                    try upsertRecord(db: db, recordID: recordID, data: localRow, schema: schema)
+                }
+                try SynchroMeta.upsertRowVersion(
+                    db,
+                    tableName: schema.tableName,
+                    recordID: recordID,
+                    serverVersion: record.serverVersion,
+                    rowChecksum: record.rowChecksum
+                )
                 try SynchroMeta.upsertScopeRow(
                     db,
-                    scopeID: scopeID,
-                    tableName: record.table,
+                    scopeID: attempt.scopeID,
+                    tableName: schema.tableName,
                     recordID: recordID,
                     checksum: try requiredScopeRowChecksum(
                         record.rowChecksum,
                         tableName: record.table,
                         recordID: recordID
                     ),
-                    generation: generation
+                    generation: attempt.generation
                 )
             }
+            let finalChecksumJSON = try response.checksum.map(checksumJSON)
+            try SynchroMeta.insertRebuildPageReceipt(
+                db,
+                scopeID: attempt.scopeID,
+                rebuildID: attempt.rebuildID,
+                requestCursor: request.cursor,
+                requestJSON: requestJSON,
+                responseJSON: responseJSON,
+                finalScopeCursor: response.finalScopeCursor,
+                finalChecksumJSON: finalChecksumJSON
+            )
+            try SynchroMeta.clearMatchingBackoffRecord(
+                db,
+                resumeState: .rebuilding,
+                workIdentity: requestJSON
+            )
+
+            guard response.hasMore else { return attempt }
+            guard let nextCursor = response.cursor else {
+                throw SynchroError.invalidResponse(message: "intermediate rebuild page cursor is missing")
+            }
+            let nextAttempt = LocalRebuildAttempt(
+                scopeID: attempt.scopeID,
+                rebuildID: attempt.rebuildID,
+                clientGeneration: attempt.clientGeneration,
+                schemaVersion: attempt.schemaVersion,
+                schemaHash: attempt.schemaHash,
+                generation: attempt.generation,
+                cursor: nextCursor,
+                pageLimit: attempt.pageLimit
+            )
+            try SynchroMeta.upsertRebuildAttempt(db, attempt: nextAttempt)
+            return nextAttempt
         }
     }
 
-    func finalizeScopeRebuild(scopeID: String, generation: Int64, finalCursor: String, checksum: String, syncedTables: [LocalSchemaTable]) throws {
+    func pendingRebuildFinality(
+        attempt: LocalRebuildAttempt,
+        request: RebuildRequest,
+        requestBody: Data
+    ) throws -> PendingRebuildFinality? {
+        guard request.scope == attempt.scopeID,
+              request.rebuildID == attempt.rebuildID,
+              request.clientGeneration == attempt.clientGeneration,
+              request.schema == SchemaRef(version: attempt.schemaVersion, hash: attempt.schemaHash),
+              request.limit == attempt.pageLimit,
+              request.cursor == attempt.cursor else {
+            throw SynchroError.invalidResponse(message: "rebuild finality request does not match its attempt")
+        }
+        let requestJSON = try rebuildRequestJSON(request, body: requestBody)
+        return try database.readTransaction { db -> PendingRebuildFinality? in
+            guard let currentAttempt = try SynchroMeta.getRebuildAttempt(db, scopeID: attempt.scopeID),
+                  currentAttempt == attempt,
+                  let receipt = try SynchroMeta.getFinalRebuildPageReceipt(
+                    db,
+                    scopeID: attempt.scopeID,
+                    rebuildID: attempt.rebuildID
+                  ) else {
+                return nil
+            }
+            guard receipt.requestCursor == attempt.cursor,
+                  receipt.requestJSON == requestJSON,
+                  let finalCursor = receipt.finalScopeCursor,
+                  let finalChecksumJSON = receipt.finalChecksumJSON else {
+                throw SynchroError.invalidResponse(message: "final rebuild receipt does not match its request")
+            }
+            let responseBody = Data(receipt.responseJSON.utf8)
+            let response = try JSONDecoder.synchroDecoder().decode(RebuildResponse.self, from: responseBody)
+            _ = try rebuildResponseJSON(response, body: responseBody)
+            try response.validate(for: request)
+            guard response.hasMore == false,
+                  response.finalScopeCursor == finalCursor,
+                  let responseChecksum = response.checksum else {
+                throw SynchroError.invalidResponse(message: "final rebuild receipt does not match its attempt")
+            }
+            let checksum = try JSONDecoder.synchroDecoder().decode(
+                ChecksumObject.self,
+                from: Data(finalChecksumJSON.utf8)
+            )
+            try checksum.validate()
+            guard checksum == responseChecksum else {
+                throw SynchroError.invalidResponse(message: "final rebuild receipt checksum differs from its content")
+            }
+            return PendingRebuildFinality(finalCursor: finalCursor, checksum: checksum)
+        }
+    }
+
+    func finalizeScopeRebuild(
+        attempt: LocalRebuildAttempt,
+        finalCursor: String,
+        checksum: ChecksumObject,
+        syncedTables: [LocalSchemaTable]
+    ) throws {
         let tableMap = Dictionary(uniqueKeysWithValues: syncedTables.map { ($0.tableName, $0) })
 
         try database.writeSyncLockedTransaction { db in
-            let staleRows = try SynchroMeta.getStaleScopeRowRecordIDs(db, scopeID: scopeID, generation: generation)
-            try SynchroMeta.deleteStaleScopeRows(db, scopeID: scopeID, generation: generation)
+            let expectedChecksumJSON = try checksumJSON(checksum)
+            if let currentAttempt = try SynchroMeta.getRebuildAttempt(db, scopeID: attempt.scopeID) {
+                guard currentAttempt == attempt,
+                      try SynchroMeta.getScopeGeneration(db, scopeID: attempt.scopeID) == attempt.generation else {
+                    throw SynchroError.invalidResponse(message: "rebuild finality targets an inactive attempt")
+                }
+                if let receipt = try SynchroMeta.getFinalRebuildPageReceipt(
+                    db,
+                    scopeID: attempt.scopeID,
+                    rebuildID: attempt.rebuildID
+                ) {
+                    guard receipt.requestCursor == attempt.cursor,
+                          receipt.finalScopeCursor == finalCursor,
+                          let finalChecksumJSON = receipt.finalChecksumJSON,
+                          finalChecksumJSON == expectedChecksumJSON else {
+                        throw SynchroError.invalidResponse(message: "rebuild finality differs from its page receipt")
+                    }
+                }
+            }
+            let staleRows = try SynchroMeta.getStaleScopeRowRecordIDs(
+                db,
+                scopeID: attempt.scopeID,
+                generation: attempt.generation
+            )
+            try SynchroMeta.deleteStaleScopeRows(db, scopeID: attempt.scopeID, generation: attempt.generation)
 
             for staleRow in staleRows {
                 guard let schema = tableMap[staleRow.tableName] else { continue }
@@ -204,22 +518,26 @@ final class PullProcessor: @unchecked Sendable {
                 )
             }
 
-            let localChecksum = try SynchroMeta.getScopeLocalChecksum(db, scopeID: scopeID)
-            let expectedChecksum = try parseScopeChecksum(scopeID: scopeID, checksum: checksum)
-            guard localChecksum == expectedChecksum else {
-                throw SynchroError.invalidResponse(
-                    message: "scope checksum mismatch after rebuild for \(scopeID)"
-                )
+            let localChecksum = try computeScopeChecksum(
+                db: db,
+                scopeID: attempt.scopeID,
+                schemaHash: attempt.schemaHash,
+                tablesByName: tableMap
+            )
+            try checksum.validate()
+            guard localChecksum == checksum else {
+                throw RebuildChecksumMismatchError(scopeID: attempt.scopeID)
             }
 
             try SynchroMeta.upsertScope(
                 db,
-                scopeID: scopeID,
+                scopeID: attempt.scopeID,
                 cursor: finalCursor,
-                checksum: checksum,
-                generation: generation,
-                localChecksum: localChecksum
+                checksum: try checksumJSON(checksum),
+                generation: attempt.generation,
+                localChecksum: try checksumJSON(localChecksum)
             )
+            try SynchroMeta.deleteRebuildAttempt(db, scopeID: attempt.scopeID)
         }
     }
 
@@ -227,20 +545,57 @@ final class PullProcessor: @unchecked Sendable {
         let tableMap = Dictionary(uniqueKeysWithValues: syncedTables.map { ($0.tableName, $0) })
 
         try database.writeSyncLockedTransaction { db in
-            let scopeRows = try SynchroMeta.getScopeRowRecordIDs(db, scopeID: scopeID)
-            try SynchroMeta.deleteScopeRows(db, scopeID: scopeID)
-            try SynchroMeta.deleteScope(db, scopeID: scopeID)
-
-            for scopeRow in scopeRows {
-                guard let schema = tableMap[scopeRow.tableName] else { continue }
-                try removeLocalRowIfUnreferenced(
-                    db: db,
-                    tableName: scopeRow.tableName,
-                    recordID: scopeRow.recordID,
-                    schema: schema
-                )
-            }
+            try removeScope(db: db, scopeID: scopeID, tablesByName: tableMap)
         }
+    }
+
+    func installConnectedAssignment(
+        _ delta: ScopeAssignmentDelta,
+        scopeSetVersion: Int64,
+        clientGeneration: Int64,
+        syncedTables: [LocalSchemaTable],
+        scopeCursorUpdates: [String: String?] = [:]
+    ) throws {
+        try database.writeSyncLockedTransaction { db in
+            try installConnectedAssignmentInTransaction(
+                db,
+                delta: delta,
+                scopeSetVersion: scopeSetVersion,
+                clientGeneration: clientGeneration,
+                syncedTables: syncedTables,
+                scopeCursorUpdates: scopeCursorUpdates
+            )
+        }
+    }
+
+    func installConnectedAssignmentInTransaction(
+        _ db: GRDB.Database,
+        delta: ScopeAssignmentDelta,
+        scopeSetVersion: Int64,
+        clientGeneration: Int64,
+        syncedTables: [LocalSchemaTable],
+        scopeCursorUpdates: [String: String?]
+    ) throws {
+        let tableMap = Dictionary(uniqueKeysWithValues: syncedTables.map { ($0.tableName, $0) })
+        try validateSeedReceiptDispositions(
+            db,
+            delta: delta,
+            scopeCursorUpdates: scopeCursorUpdates
+        )
+        for scopeID in delta.remove {
+            try removeScope(db: db, scopeID: scopeID, tablesByName: tableMap)
+        }
+        for scope in delta.add {
+            try SynchroMeta.upsertScope(
+                db,
+                scopeID: scope.id,
+                cursor: scope.cursor,
+                checksum: nil
+            )
+        }
+        try SynchroMeta.setInt64(db, key: .scopeSetVersion, value: scopeSetVersion)
+        try SynchroMeta.setInt64(db, key: .clientGeneration, value: clientGeneration)
+        try SynchroMeta.clearSeedReceipts(db)
     }
 
     func clearAllScopeState() throws {
@@ -250,194 +605,317 @@ final class PullProcessor: @unchecked Sendable {
         }
     }
 
-    func updateBucketCheckpoints(_ bucketCheckpoints: [String: Int64]?) throws {
-        guard let checkpoints = bucketCheckpoints, !checkpoints.isEmpty else { return }
-        try database.writeTransaction { db in
-            for (bucketID, checkpoint) in checkpoints {
-                try SynchroMeta.setBucketCheckpoint(db, bucketID: bucketID, checkpoint: checkpoint)
-            }
-        }
-    }
-
-    func getBucketCheckpoints() throws -> [String: Int64] {
-        try database.readTransaction { db in
-            try SynchroMeta.getAllBucketCheckpoints(db)
-        }
-    }
-
-    func trackBucketMembership(records: [Record], overrideBucketID: String? = nil) throws {
-        let recordsToTrack: [(record: Record, bucketID: String)]
-        if let override = overrideBucketID {
-            recordsToTrack = records.map { ($0, override) }
-        } else {
-            recordsToTrack = records.compactMap { record in
-                guard let bucketID = record.bucketID else { return nil }
-                return (record, bucketID)
-            }
-        }
-        guard !recordsToTrack.isEmpty else { return }
-
-        try database.writeTransaction { db in
-            for (record, bucketID) in recordsToTrack {
-                let checksum = try requiredRecordChecksum(record)
-                try SynchroMeta.upsertBucketMember(
-                    db,
-                    bucketID: bucketID,
-                    tableName: record.tableName,
-                    recordID: record.id,
-                    checksum: checksum
-                )
-            }
-        }
-    }
-
-    func clearBucketMembers(bucketID: String) throws {
-        try database.writeTransaction { db in
-            try SynchroMeta.deleteBucketMembers(db, bucketID: bucketID)
-        }
-    }
-
-    func clearAllBucketData() throws {
-        try database.writeTransaction { db in
-            try SynchroMeta.deleteAllBucketMembers(db)
-            try SynchroMeta.deleteAllBucketCheckpoints(db)
-        }
-    }
-
-    func applyRebuildPage(records: [Record], bucketID: String, syncedTables: [LocalSchemaTable]) throws {
-        guard !records.isEmpty else { return }
-        let tableMap = Dictionary(uniqueKeysWithValues: syncedTables.map { ($0.tableName, $0) })
-
-        try database.writeSyncLockedTransaction { db in
-            for record in records {
-                guard let schema = tableMap[record.tableName] else { continue }
-                try upsertRecord(db: db, record: record, schema: schema)
-
-                let checksum = try requiredRecordChecksum(record)
-                try SynchroMeta.upsertBucketMember(
-                    db,
-                    bucketID: bucketID,
-                    tableName: record.tableName,
-                    recordID: record.id,
-                    checksum: checksum
-                )
-            }
-
-        }
-    }
-
-    func deleteBucketOrphanedRecords(bucketID: String, syncedTables: [LocalSchemaTable]) throws {
-        let tableMap = Dictionary(uniqueKeysWithValues: syncedTables.map { ($0.tableName, $0) })
-
-        try database.writeSyncLockedTransaction { db in
-            let members = try SynchroMeta.getBucketMemberRecordIDs(db, bucketID: bucketID)
-            try SynchroMeta.deleteBucketMembers(db, bucketID: bucketID)
-            for member in members {
-                guard let schema = tableMap[member.tableName] else { continue }
-                try removeLocalRowIfUnreferenced(
-                    db: db,
-                    tableName: member.tableName,
-                    recordID: member.recordID,
-                    schema: schema
-                )
-            }
-        }
-    }
-
-    // MARK: - Bucket Checksum Verification
-
-    /// Computes the aggregate checksum for a bucket by XOR-ing all stored
-    /// per-record checksums from `_synchro_bucket_members`.
-    func computeBucketChecksum(bucketID: String) throws -> Int32 {
-        try database.readTransaction { db in
-            let rows = try Row.fetchAll(
-                db,
-                sql: "SELECT checksum FROM _synchro_bucket_members WHERE bucket_id = ?",
-                arguments: [bucketID]
-            )
-            var xor: Int32 = 0
-            for row in rows {
-                if let cs: Int64 = row["checksum"] {
-                    xor ^= Int32(truncatingIfNeeded: cs)
-                }
-            }
-            return xor
-        }
-    }
-
-    private func requiredRecordChecksum(_ record: Record) throws -> Int32 {
-        guard let checksum = record.checksum else {
-            throw SynchroError.invalidResponse(
-                message: "missing record checksum for bucket membership \(record.tableName)/\(record.id)"
-            )
-        }
-        return checksum
-    }
-
-    private func requiredScopeRowChecksum(_ checksum: Int32?, tableName: String, recordID: String) throws -> Int32 {
+    private func requiredScopeRowChecksum(
+        _ checksum: ChecksumObject?,
+        tableName: String,
+        recordID: String
+    ) throws -> String {
         guard let checksum else {
             throw SynchroError.invalidResponse(
                 message: "missing scope row checksum for \(tableName)/\(recordID)"
             )
         }
-        return checksum
+        try checksum.validate()
+        return checksum.digest
     }
 
-    private func parseScopeChecksum(scopeID: String, checksum: String) throws -> Int32 {
-        guard let parsed = Int32(checksum) else {
-            throw SynchroError.invalidResponse(
-                message: "invalid checksum for scope \(scopeID)"
+    private func loadSeedReceiptsForConnect(_ db: GRDB.Database) throws -> [SeedReceiptForConnect] {
+        let rows = try Row.fetchAll(
+            db,
+            sql: "SELECT scope_id, receipt, schema_version, schema_hash, cardinality, checksum FROM _synchro_seed_receipts ORDER BY scope_id"
+        )
+        var scopeIDs = Set<String>()
+        return try rows.map { row in
+            guard let scopeID: String = row["scope_id"], scopeIDs.insert(scopeID).inserted else {
+                throw SynchroError.invalidResponse(message: "seed receipt scope is malformed")
+            }
+            let receipt: String = row["receipt"] ?? ""
+            let schemaVersion: Int64? = row["schema_version"]
+            let schemaHash: String? = row["schema_hash"]
+            let cardinality: Int64? = row["cardinality"]
+            let checksum: ChecksumObject? = checksumObject(row["checksum"])
+            return SeedReceiptForConnect(
+                scopeID: scopeID,
+                receipt: receipt,
+                schemaVersion: schemaVersion,
+                schemaHash: schemaHash,
+                cardinality: cardinality,
+                checksum: checksum
             )
         }
-        return parsed
     }
 
-    func updateKnownBuckets(bucketUpdates: BucketUpdate?) throws {
-        guard let updates = bucketUpdates else { return }
-        try database.writeTransaction { db in
-            let existing = try SynchroMeta.get(db, key: .knownBuckets) ?? "[]"
-            var buckets = (try? JSONDecoder().decode([String].self, from: Data(existing.utf8))) ?? []
+    private func localSchemaReference(_ db: GRDB.Database) throws -> SchemaRef {
+        let schema = SchemaRef(
+            version: try SynchroMeta.getInt64(db, key: .schemaVersion),
+            hash: try SynchroMeta.get(db, key: .schemaHash) ?? ""
+        )
+        try schema.validate()
+        return schema
+    }
 
-            if let added = updates.added {
-                for b in added where !buckets.contains(b) {
-                    buckets.append(b)
-                }
+    private func localTablesByName(_ db: GRDB.Database) throws -> [String: LocalSchemaTable] {
+        guard let encoded = try SynchroMeta.get(db, key: .localSchema) else {
+            throw SynchroError.invalidResponse(message: "seed receipt validation has no local schema")
+        }
+        let tables = try JSONDecoder.synchroDecoder().decode(
+            [LocalSchemaTable].self,
+            from: Data(encoded.utf8)
+        )
+        var tablesByName: [String: LocalSchemaTable] = [:]
+        for table in tables {
+            guard !table.tableName.isEmpty,
+                  tablesByName.updateValue(table, forKey: table.tableName) == nil else {
+                throw SynchroError.invalidResponse(message: "seed receipt validation has an invalid local schema")
             }
-            if let removed = updates.removed {
-                buckets.removeAll { removed.contains($0) }
-            }
+        }
+        return tablesByName
+    }
 
-            let encoded = try JSONEncoder().encode(buckets)
-            try SynchroMeta.set(db, key: .knownBuckets, value: String(data: encoded, encoding: .utf8) ?? "[]")
+    private func seedReceiptMatches(
+        _ receipt: SeedReceiptForConnect,
+        db: GRDB.Database,
+        schema: SchemaRef,
+        tablesByName: [String: LocalSchemaTable]
+    ) throws -> Bool {
+        guard !receipt.scopeID.isEmpty,
+              !receipt.receipt.isEmpty,
+              receipt.schemaVersion == schema.version,
+              receipt.schemaHash == schema.hash,
+              let cardinality = receipt.cardinality,
+              cardinality >= 0,
+              let expectedChecksum = receipt.checksum,
+              let scope = try SynchroMeta.getScope(db, scopeID: receipt.scopeID),
+              scope.cursor == nil,
+              scope.generation == 0,
+              checksumObject(scope.checksum) == expectedChecksum,
+              checksumObject(scope.localChecksum) == expectedChecksum else {
+            return false
+        }
+
+        guard let scopeRowCount = try Int64.fetchOne(
+            db,
+            sql: "SELECT COUNT(*) FROM _synchro_scope_rows WHERE scope_id = ?",
+            arguments: [receipt.scopeID]
+        ), scopeRowCount == cardinality else {
+            return false
+        }
+        let scopeRows = try SynchroMeta.getScopeRowChecksums(db, scopeID: receipt.scopeID)
+        guard Int64(scopeRows.count) == scopeRowCount,
+              scopeRows.allSatisfy({ $0.generation == 0 }),
+              try scopeRowsMatchStoredVersions(scopeRows, db: db) else {
+            return false
+        }
+
+        do {
+            return try Self.recomputeScopeChecksum(
+                db: db,
+                scopeID: receipt.scopeID,
+                schemaHash: schema.hash,
+                tablesByName: tablesByName
+            ) == expectedChecksum
+        } catch is SynchroError {
+            return false
+        } catch is IntegrityError {
+            return false
+        } catch is ContractViolation {
+            return false
+        }
+    }
+
+    private func scopeRowsMatchStoredVersions(
+        _ scopeRows: [(tableName: String, recordID: String, checksum: String, generation: Int64)],
+        db: GRDB.Database
+    ) throws -> Bool {
+        for scopeRow in scopeRows {
+            guard let expectedChecksum = scopeRowChecksum(scopeRow.checksum),
+                  let versionRow = try Row.fetchOne(
+                      db,
+                      sql: "SELECT server_version, row_checksum FROM _synchro_row_versions WHERE table_name = ? AND record_id = ?",
+                      arguments: [scopeRow.tableName, scopeRow.recordID]
+                  ),
+                  let serverVersion: String = versionRow["server_version"],
+                  !serverVersion.isEmpty,
+                  let rowChecksumJSON: String = versionRow["row_checksum"],
+                  checksumObject(rowChecksumJSON) == expectedChecksum else {
+                return false
+            }
+        }
+        return true
+    }
+
+    private func checksumObject(_ source: String?) -> ChecksumObject? {
+        guard let source else { return nil }
+        do {
+            let data = Data(source.utf8)
+            try Integrity.validateCanonicalWireJSON(data)
+            let checksum = try JSONDecoder.synchroDecoder().decode(ChecksumObject.self, from: data)
+            try checksum.validate()
+            return checksum
+        } catch {
+            return nil
+        }
+    }
+
+    private func scopeRowChecksum(_ digest: String) -> ChecksumObject? {
+        do {
+            let checksum = ChecksumObject(
+                algorithm: "sha256",
+                version: 1,
+                encoding: "hex",
+                digest: digest
+            )
+            try checksum.validate()
+            return checksum
+        } catch {
+            return nil
+        }
+    }
+
+    private func validateSeedReceiptDispositions(
+        _ db: GRDB.Database,
+        delta: ScopeAssignmentDelta,
+        scopeCursorUpdates: [String: String?]
+    ) throws {
+        let receiptScopeIDs = try Set(SynchroMeta.getSeedReceipts(db).keys)
+        for scopeID in receiptScopeIDs {
+            if delta.remove.contains(scopeID) {
+                continue
+            }
+            guard scopeCursorUpdates.keys.contains(scopeID) else {
+                throw SynchroError.invalidResponse(
+                    message: "seed receipt scope has no cursor disposition \(scopeID)"
+                )
+            }
+        }
+    }
+
+    private func startScopeRebuildAttempt(
+        db: GRDB.Database,
+        scopeID: String,
+        clientGeneration: Int64,
+        schemaVersion: Int64,
+        schemaHash: String,
+        pageLimit: Int,
+        tablesByName: [String: LocalSchemaTable]
+    ) throws -> LocalRebuildAttempt {
+        guard pageLimit > 0 else {
+            throw SynchroError.invalidResponse(message: "rebuild page limit is invalid")
+        }
+        guard try SynchroMeta.getScope(db, scopeID: scopeID) != nil else {
+            throw SynchroError.invalidResponse(message: "rebuild targets an unknown scope \(scopeID)")
+        }
+        try SynchroMeta.deleteRebuildPageReceipts(db, scopeID: scopeID)
+        try SynchroMeta.deleteRebuildAttempt(db, scopeID: scopeID)
+        try resetScopeProvenanceForRebuild(
+            db: db,
+            scopeID: scopeID,
+            tablesByName: tablesByName
+        )
+        let generation = try SynchroMeta.bumpScopeGeneration(db, scopeID: scopeID)
+        let attempt = LocalRebuildAttempt(
+            scopeID: scopeID,
+            rebuildID: UUID().uuidString.lowercased(),
+            clientGeneration: clientGeneration,
+            schemaVersion: schemaVersion,
+            schemaHash: schemaHash,
+            generation: generation,
+            cursor: nil,
+            pageLimit: pageLimit
+        )
+        try SynchroMeta.upsertRebuildAttempt(db, attempt: attempt)
+        return attempt
+    }
+
+    private func resetScopeProvenanceForRebuild(
+        db: GRDB.Database,
+        scopeID: String,
+        tablesByName: [String: LocalSchemaTable]
+    ) throws {
+        let scopeRows = try SynchroMeta.getScopeRowRecordIDs(db, scopeID: scopeID)
+        try SynchroMeta.deleteScopeRows(db, scopeID: scopeID)
+        for scopeRow in scopeRows {
+            guard let schema = tablesByName[scopeRow.tableName] else { continue }
+            try removeLocalRowIfUnreferenced(
+                db: db,
+                tableName: scopeRow.tableName,
+                recordID: scopeRow.recordID,
+                schema: schema
+            )
+        }
+    }
+
+    private func rebuildRequestJSON(_ request: RebuildRequest, body: Data) throws -> String {
+        try rebuildWireJSON(body, expected: request, name: "request")
+    }
+
+    private func rebuildResponseJSON(_ response: RebuildResponse, body: Data) throws -> String {
+        try rebuildWireJSON(body, expected: response, name: "response")
+    }
+
+    private func rebuildWireJSON<T: Decodable & Equatable>(
+        _ body: Data,
+        expected: T,
+        name: String
+    ) throws -> String {
+        do {
+            try Integrity.validateCanonicalWireJSON(body)
+            let decoded = try JSONDecoder.synchroDecoder().decode(T.self, from: body)
+            guard decoded == expected,
+                  let json = String(data: body, encoding: .utf8) else {
+                throw SynchroError.invalidResponse(message: "rebuild \(name) body differs from its decoded value")
+            }
+            return json
+        } catch let error as SynchroError {
+            throw error
+        } catch {
+            throw SynchroError.invalidResponse(message: "rebuild \(name) body is invalid")
+        }
+    }
+
+    private func removeScope(
+        db: GRDB.Database,
+        scopeID: String,
+        tablesByName: [String: LocalSchemaTable]
+    ) throws {
+        try SynchroMeta.deleteRebuildPageReceipts(db, scopeID: scopeID)
+        try SynchroMeta.deleteRebuildAttempt(db, scopeID: scopeID)
+        try SynchroMeta.clearRebuildingBackoffForScope(db, scopeID: scopeID)
+        let scopeRows = try SynchroMeta.getScopeRowRecordIDs(db, scopeID: scopeID)
+        try SynchroMeta.deleteScopeRows(db, scopeID: scopeID)
+        try SynchroMeta.deleteScope(db, scopeID: scopeID)
+
+        for scopeRow in scopeRows {
+            guard let schema = tablesByName[scopeRow.tableName] else { continue }
+            try removeLocalRowIfUnreferenced(
+                db: db,
+                tableName: scopeRow.tableName,
+                recordID: scopeRow.recordID,
+                schema: schema
+            )
         }
     }
 
     // MARK: - Private
 
-    private func upsertRecord(db: GRDB.Database, record: Record, schema: LocalSchemaTable) throws {
+    private func upsertRecord(
+        db: GRDB.Database,
+        recordID: String,
+        data: [String: AnyCodable],
+        schema: LocalSchemaTable
+    ) throws {
         let pkCol = schema.primaryKey.first ?? "id"
-        let quoted = SQLiteHelpers.quoteIdentifier(record.tableName)
+        let quoted = SQLiteHelpers.quoteIdentifier(schema.tableName)
         let quotedPK = SQLiteHelpers.quoteIdentifier(pkCol)
-        let quotedUpdatedAt = SQLiteHelpers.quoteIdentifier(schema.updatedAtColumn)
-        let quotedDeletedAt = SQLiteHelpers.quoteIdentifier(schema.deletedAtColumn)
-
-        let existingRow = try Row.fetchOne(
-            db,
-            sql: "SELECT \(quotedUpdatedAt), \(quotedDeletedAt) FROM \(quoted) WHERE \(quotedPK) = ?",
-            arguments: [record.id]
-        )
-        if let existing = existingRow {
-            let localUpdatedAt: String? = existing[schema.updatedAtColumn]
-            let localDeletedAt: String? = existing[schema.deletedAtColumn]
-            let localVersion = effectiveSyncDate(updatedAt: localUpdatedAt, deletedAt: localDeletedAt)
-            let serverVersion = record.deletedAt ?? record.updatedAt
-            if let localVersion, localVersion >= serverVersion {
-                return
-            }
-        }
 
         let columns = schema.columns.map(\.name)
-        let dbValues = buildDatabaseValues(columns: columns, pkCol: pkCol, recordID: record.id, data: record.data, schema: schema)
+        let dbValues = try buildDatabaseValues(
+            columns: columns,
+            pkCol: pkCol,
+            recordID: recordID,
+            data: data,
+            schema: schema
+        )
 
         let quotedColumns = columns.map { SQLiteHelpers.quoteIdentifier($0) }.joined(separator: ", ")
         let placeholders = SQLiteHelpers.placeholders(count: columns.count)
@@ -451,10 +929,17 @@ final class PullProcessor: @unchecked Sendable {
         try db.execute(sql: sql, arguments: StatementArguments(dbValues))
     }
 
-    private func buildDatabaseValues(columns: [String], pkCol: String, recordID: String, data: [String: AnyCodable], schema: LocalSchemaTable) -> [DatabaseValue] {
-        columns.map { col in
-            if let anyCodable = data[col] {
-                return SQLiteHelpers.databaseValue(from: anyCodable)
+    private func buildDatabaseValues(
+        columns: [String],
+        pkCol: String,
+        recordID: String,
+        data: [String: AnyCodable],
+        schema: LocalSchemaTable
+    ) throws -> [DatabaseValue] {
+        let columnsByName = Dictionary(uniqueKeysWithValues: schema.columns.map { ($0.name, $0) })
+        return try columns.map { col in
+            if let anyCodable = data[col], let column = columnsByName[col] {
+                return try databaseValue(from: anyCodable, column: column)
             } else if col == pkCol {
                 return recordID.databaseValue
             } else {
@@ -463,115 +948,399 @@ final class PullProcessor: @unchecked Sendable {
         }
     }
 
-    private func scopeRecord(from change: ChangeRecord, schema: LocalSchemaTable) throws -> Record {
-        guard let row = change.row else {
-            throw SynchroError.invalidResponse(message: "missing row for \(change.table) \(change.op)")
+    private func databaseValue(from value: AnyCodable, column: LocalSchemaColumn) throws -> DatabaseValue {
+        if value.value is NSNull {
+            return .null
         }
-        let recordID = try scopeRecordID(pk: change.pk, schema: schema)
-        return try scopeRecord(
-            tableName: change.table,
-            recordID: recordID,
-            row: row,
-            checksum: change.rowChecksum,
-            schema: schema
-        )
+
+        switch column.logicalType {
+        case "string", "decimal", "datetime", "date", "time", "json":
+            guard let text = value.value as? String else {
+                throw SynchroError.invalidResponse(message: "invalid value for \(column.fieldID)")
+            }
+            return text.databaseValue
+        case "int":
+            let integer = try exactInt64(value.value, fieldID: column.fieldID)
+            guard integer >= Int64(Int32.min), integer <= Int64(Int32.max) else {
+                throw SynchroError.invalidResponse(message: "invalid value for \(column.fieldID)")
+            }
+            return integer.databaseValue
+        case "int64":
+            guard let text = value.value as? String,
+                   Self.canonicalInteger(text),
+                  let integer = Int64(text) else {
+                throw SynchroError.invalidResponse(message: "invalid value for \(column.fieldID)")
+            }
+            return integer.databaseValue
+        case "float":
+            let number = try exactDouble(value.value, fieldID: column.fieldID)
+            return number.databaseValue
+        case "boolean":
+            guard let boolean = value.value as? Bool else {
+                throw SynchroError.invalidResponse(message: "invalid value for \(column.fieldID)")
+            }
+            return (boolean ? 1 : 0).databaseValue
+        case "bytes":
+            guard let encoded = value.value as? String,
+                  let decoded = decodeBase64URL(encoded) else {
+                throw SynchroError.invalidResponse(message: "invalid value for \(column.fieldID)")
+            }
+            return decoded.databaseValue
+        default:
+            throw SynchroError.invalidResponse(message: "unsupported portable type \(column.logicalType)")
+        }
     }
 
-    private func scopeRecord(from rebuild: RebuildRecord, schema: LocalSchemaTable) throws -> Record {
-        guard let row = rebuild.row else {
-            throw SynchroError.invalidResponse(message: "missing rebuild row for \(rebuild.table)")
+    private func exactInt64(_ value: Any, fieldID: String) throws -> Int64 {
+        if let integer = value as? Int64 {
+            return integer
         }
-        let recordID = try scopeRecordID(pk: rebuild.pk, schema: schema)
-        return try scopeRecord(
-            tableName: rebuild.table,
-            recordID: recordID,
-            row: row,
-            checksum: rebuild.rowChecksum,
-            schema: schema
-        )
+        if let integer = value as? Int {
+            return Int64(integer)
+        }
+        if let number = value as? NSNumber, CFGetTypeID(number) != CFBooleanGetTypeID() {
+            let integer = number.int64Value
+            if number.doubleValue == Double(integer) {
+                return integer
+            }
+        }
+        throw SynchroError.invalidResponse(message: "invalid value for \(fieldID)")
     }
 
-    private func scopeRecord(
-        tableName: String,
+    private func exactDouble(_ value: Any, fieldID: String) throws -> Double {
+        let number: Double
+        if let value = value as? Double {
+            number = value
+        } else if let value = value as? Float {
+            number = Double(value)
+        } else if let value = value as? Int64 {
+            number = Double(value)
+        } else if let value = value as? Int {
+            number = Double(value)
+        } else if let value = value as? NSNumber, CFGetTypeID(value) != CFBooleanGetTypeID() {
+            number = value.doubleValue
+        } else {
+            throw SynchroError.invalidResponse(message: "invalid value for \(fieldID)")
+        }
+        guard number.isFinite else {
+            throw SynchroError.invalidResponse(message: "invalid value for \(fieldID)")
+        }
+        return number
+    }
+
+    private static func canonicalInteger(_ value: String) -> Bool {
+        if value == "0" { return true }
+        let bytes = Array(value.utf8)
+        let start = bytes.first == 45 ? 1 : 0
+        guard start < bytes.count, bytes[start] != 48 else { return false }
+        return bytes[start...].allSatisfy { $0 >= 48 && $0 <= 57 }
+    }
+
+    private func decodeBase64URL(_ value: String) -> Data? {
+        guard !value.contains("=") else { return nil }
+        var standard = value.replacingOccurrences(of: "-", with: "+")
+            .replacingOccurrences(of: "_", with: "/")
+        standard += String(repeating: "=", count: (4 - standard.count % 4) % 4)
+        guard let decoded = Data(base64Encoded: standard) else { return nil }
+        let canonical = decoded.base64EncodedString()
+            .replacingOccurrences(of: "+", with: "-")
+            .replacingOccurrences(of: "/", with: "_")
+            .replacingOccurrences(of: "=", with: "")
+        return canonical == value ? decoded : nil
+    }
+
+    private func validatedLocalRow(
+        tableID: String,
         recordID: String,
-        row: [String: AnyCodable],
-        checksum: Int32?,
+        pk: [String: AnyCodable],
+        row: [String: AnyCodable]?,
+        rowChecksum: ChecksumObject?,
+        serverVersion: String,
+        schemaHash: String,
         schema: LocalSchemaTable
-    ) throws -> Record {
-        let updatedAtRaw = row[schema.updatedAtColumn]?.value as? String
-        guard let updatedAtRaw, let updatedAt = formatter.date(from: updatedAtRaw) else {
-            throw SynchroError.invalidResponse(message: "missing or invalid \(schema.updatedAtColumn) for \(tableName)")
+    ) throws -> [String: AnyCodable] {
+        guard let row else {
+            throw SynchroError.invalidResponse(message: "missing row for \(tableID)")
+        }
+        guard let rowChecksum else {
+            throw SynchroError.invalidResponse(message: "missing row checksum for \(tableID)/\(recordID)")
+        }
+        let computed = try Integrity.rowDigest(
+            schemaHash: schemaHash,
+            table: schema,
+            pk: pk,
+            row: row,
+            serverVersion: serverVersion
+        ).checksum
+        guard computed == rowChecksum else {
+            throw SynchroError.invalidResponse(message: "row checksum mismatch for \(tableID)/\(recordID)")
         }
 
-        let deletedAt = (row[schema.deletedAtColumn]?.value as? String).flatMap { formatter.date(from: $0) }
-
-        return Record(
-            id: recordID,
-            tableName: tableName,
-            data: row,
-            updatedAt: updatedAt,
-            deletedAt: deletedAt,
-            bucketID: nil,
-            checksum: checksum
-        )
+        let fieldsByID = Dictionary(uniqueKeysWithValues: schema.columns.map { ($0.fieldID, $0.name) })
+        return Dictionary(uniqueKeysWithValues: row.compactMap { fieldID, value in
+            fieldsByID[fieldID].map { ($0, value) }
+        })
     }
 
     private func scopeRecordID(pk: [String: AnyCodable], schema: LocalSchemaTable) throws -> String {
-        guard schema.primaryKey.count == 1, let primaryKey = schema.primaryKey.first else {
-            throw SynchroError.invalidResponse(message: "composite primary keys are not supported for \(schema.tableName)")
-        }
-        guard let value = pk[primaryKey]?.value else {
-            throw SynchroError.invalidResponse(message: "missing primary key \(primaryKey) for \(schema.tableName)")
+        guard let value = pk[schema.primaryKeyFieldID]?.value else {
+            throw SynchroError.invalidResponse(
+                message: "missing primary key \(schema.primaryKeyFieldID) for \(schema.tableName)"
+            )
         }
         return String(describing: value)
-    }
-
-    private func effectiveSyncDate(updatedAt: String?, deletedAt: String?) -> Date? {
-        if let deletedAt, let deletedDate = formatter.date(from: deletedAt) {
-            return deletedDate
-        }
-        if let updatedAt, let updatedDate = formatter.date(from: updatedAt) {
-            return updatedDate
-        }
-        return nil
     }
 
     private func applyScopeDeleteChange(
         db: GRDB.Database,
         change: ChangeRecord,
         recordID: String,
-        schema: LocalSchemaTable
+        schema: LocalSchemaTable,
+        schemaHash: String
     ) throws {
+        let protected = try Self.isProtectedApplicationRow(
+            db: db,
+            tableName: schema.tableName,
+            recordID: recordID
+        )
         if let row = change.row {
-            guard row[schema.deletedAtColumn]?.value as? String != nil else {
+            guard let deletedAtFieldID = schema.deletedAtFieldID,
+                  row[deletedAtFieldID]?.value as? String != nil else {
                 throw SynchroError.invalidResponse(
                     message: "delete change for \(change.table) \(recordID) included a row without \(schema.deletedAtColumn)"
                 )
             }
-            let record = try scopeRecord(from: change, schema: schema)
-            try upsertRecord(db: db, record: record, schema: schema)
+            let localRow = try validatedLocalRow(
+                tableID: change.table,
+                recordID: recordID,
+                pk: change.pk,
+                row: row,
+                rowChecksum: change.rowChecksum,
+                serverVersion: change.serverVersion,
+                schemaHash: schemaHash,
+                schema: schema
+            )
+            if !protected {
+                try upsertRecord(db: db, recordID: recordID, data: localRow, schema: schema)
+            }
+            try SynchroMeta.upsertRowVersion(
+                db,
+                tableName: schema.tableName,
+                recordID: recordID,
+                serverVersion: change.serverVersion,
+                rowChecksum: change.rowChecksum
+            )
+        } else {
+            try SynchroMeta.upsertRowVersion(
+                db,
+                tableName: schema.tableName,
+                recordID: recordID,
+                serverVersion: change.serverVersion,
+                rowChecksum: nil
+            )
         }
 
         try SynchroMeta.deleteScopeRow(
             db,
             scopeID: change.scope,
-            tableName: change.table,
+            tableName: schema.tableName,
             recordID: recordID
         )
 
         if change.row == nil {
             try removeLocalRowIfUnreferenced(
                 db: db,
-                tableName: change.table,
+                tableName: schema.tableName,
                 recordID: recordID,
                 schema: schema
             )
         }
     }
 
+    private func computeScopeChecksum(
+        db: GRDB.Database,
+        scopeID: String,
+        schemaHash: String,
+        tablesByName: [String: LocalSchemaTable]
+    ) throws -> ChecksumObject {
+        try Self.recomputeScopeChecksum(
+            db: db,
+            scopeID: scopeID,
+            schemaHash: schemaHash,
+            tablesByName: tablesByName
+        )
+    }
+
+    static func recomputeScopeChecksum(
+        db: GRDB.Database,
+        scopeID: String,
+        schemaHash: String,
+        tablesByName: [String: LocalSchemaTable]
+    ) throws -> ChecksumObject {
+        let rows = try SynchroMeta.getScopeRowChecksums(db, scopeID: scopeID)
+        var entries: [(identity: Data, digest: ChecksumObject)] = []
+        entries.reserveCapacity(rows.count)
+        for scopeRow in rows {
+            guard let table = tablesByName[scopeRow.tableName] else {
+                throw SynchroError.invalidResponse(message: "scope references unknown table \(scopeRow.tableName)")
+            }
+            let protected = try Self.isProtectedApplicationRow(
+                db: db,
+                tableName: table.tableName,
+                recordID: scopeRow.recordID
+            )
+            if protected {
+                let pk = try Self.primaryKeyValue(recordID: scopeRow.recordID, schema: table)
+                let identity = try Integrity.rowIdentity(table: table, pk: pk)
+                let digest = ChecksumObject(
+                    algorithm: "sha256",
+                    version: 1,
+                    encoding: "hex",
+                    digest: scopeRow.checksum
+                )
+                try digest.validate()
+                entries.append((identity: identity, digest: digest))
+                continue
+            }
+
+            let localRow = try Self.loadWireRow(db: db, table: table, recordID: scopeRow.recordID)
+            let pk = [table.primaryKeyFieldID: localRow[table.primaryKeyFieldID]!]
+            guard let version = try SynchroMeta.getRowVersion(db, tableName: table.tableName, recordID: scopeRow.recordID) else {
+                throw SynchroError.invalidResponse(message: "scope row has no server version")
+            }
+            let computed = try Integrity.rowDigest(
+                schemaHash: schemaHash,
+                table: table,
+                pk: pk,
+                row: localRow,
+                serverVersion: version
+            )
+            guard computed.checksum.digest == scopeRow.checksum else {
+                throw SynchroError.invalidResponse(message: "scope row checksum does not match local row")
+            }
+            entries.append((identity: computed.identity, digest: computed.checksum))
+        }
+        return try Integrity.scopeDigest(schemaHash: schemaHash, scopeID: scopeID, entries: entries)
+    }
+
+    private static func primaryKeyValue(recordID: String, schema: LocalSchemaTable) throws -> [String: AnyCodable] {
+        guard let primaryKey = schema.columns.first(where: { $0.fieldID == schema.primaryKeyFieldID }) else {
+            throw SynchroError.invalidResponse(message: "missing primary key metadata for \(schema.tableName)")
+        }
+        let value: AnyCodable
+        switch primaryKey.logicalType {
+        case "string":
+            value = AnyCodable(recordID)
+        case "int":
+            guard let integer = Int64(recordID), integer >= Int64(Int32.min), integer <= Int64(Int32.max) else {
+                throw SynchroError.invalidResponse(message: "invalid primary key for \(schema.tableName)")
+            }
+            value = AnyCodable(integer)
+        case "int64":
+            guard Self.canonicalInteger(recordID), Int64(recordID) != nil else {
+                throw SynchroError.invalidResponse(message: "invalid primary key for \(schema.tableName)")
+            }
+            value = AnyCodable(recordID)
+        default:
+            throw SynchroError.invalidResponse(message: "unsupported primary key type for \(schema.tableName)")
+        }
+        return [schema.primaryKeyFieldID: value]
+    }
+
+    private static func loadWireRow(
+        db: GRDB.Database,
+        table: LocalSchemaTable,
+        recordID: String
+    ) throws -> [String: AnyCodable] {
+        let columns = table.columns.map { SQLiteHelpers.quoteIdentifier($0.name) }.joined(separator: ", ")
+        let primaryKey = SQLiteHelpers.quoteIdentifier(table.primaryKey.first ?? "id")
+        let relation = SQLiteHelpers.quoteIdentifier(table.tableName)
+        guard let row = try Row.fetchOne(
+            db,
+            sql: "SELECT \(columns) FROM \(relation) WHERE \(primaryKey) = ?",
+            arguments: [recordID]
+        ) else {
+            throw SynchroError.invalidResponse(message: "scope provenance references a missing row")
+        }
+        return try Dictionary(uniqueKeysWithValues: table.columns.map { column in
+            let value: DatabaseValue = row[column.name]
+            return (column.fieldID, try Self.wireValue(value, column: column))
+        })
+    }
+
+    private static func wireValue(_ value: DatabaseValue, column: LocalSchemaColumn) throws -> AnyCodable {
+        switch value.storage {
+        case .null:
+            return AnyCodable(NSNull())
+        case .int64(let value):
+            switch column.logicalType {
+            case "boolean": return AnyCodable(value != 0)
+            case "int64": return AnyCodable(String(value))
+            default: return AnyCodable(value)
+            }
+        case .double(let value):
+            return AnyCodable(value)
+        case .string(let value):
+            return AnyCodable(value)
+        case .blob(let value):
+            return AnyCodable(
+                value.base64EncodedString()
+                    .replacingOccurrences(of: "+", with: "-")
+                    .replacingOccurrences(of: "/", with: "_")
+                    .replacingOccurrences(of: "=", with: "")
+            )
+        }
+    }
+
+    private func checksumJSON(_ checksum: ChecksumObject) throws -> String {
+        let data = try JSONEncoder.synchroEncoder().encode(checksum)
+        guard let value = String(data: data, encoding: .utf8) else {
+            throw SynchroError.invalidResponse(message: "checksum is not UTF-8 JSON")
+        }
+        return value
+    }
+
+    private static func isProtectedApplicationRow(
+        db: GRDB.Database,
+        tableName: String,
+        recordID: String
+    ) throws -> Bool {
+        if try Row.fetchOne(
+            db,
+            sql: """
+                SELECT 1
+                FROM _synchro_pending_changes
+                WHERE table_name = ?
+                  AND record_id = ?
+                  AND lifecycle_state IN ('unsealed', 'sealed', 'blocked_by_predecessor', 'legacy_blocked')
+                LIMIT 1
+                """,
+            arguments: [tableName, recordID]
+        ) != nil {
+            return true
+        }
+
+        return try Row.fetchOne(
+            db,
+            sql: """
+                SELECT 1
+                FROM _synchro_rejected_mutations
+                WHERE table_name = ?
+                  AND record_id = ?
+                  AND status = 'rejected_terminal'
+                  AND server_row_json IS NULL
+                  AND server_version IS NULL
+                LIMIT 1
+                """,
+            arguments: [tableName, recordID]
+        ) != nil
+    }
+
     private func removeLocalRowIfUnreferenced(db: GRDB.Database, tableName: String, recordID: String, schema: LocalSchemaTable) throws {
-        guard try !SynchroMeta.hasScopeRows(db, tableName: tableName, recordID: recordID),
-              try !SynchroMeta.hasBucketMembers(db, tableName: tableName, recordID: recordID) else {
+        guard try !Self.isProtectedApplicationRow(db: db, tableName: tableName, recordID: recordID) else {
+            return
+        }
+        guard try !SynchroMeta.hasScopeRows(db, tableName: tableName, recordID: recordID) else {
             return
         }
 

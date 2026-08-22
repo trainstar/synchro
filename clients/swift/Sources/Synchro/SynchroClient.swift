@@ -1,6 +1,11 @@
 import Foundation
 @preconcurrency import GRDB
 
+private struct RebuildReceiptGroupKey: Hashable {
+    let scopeID: String
+    let rebuildID: String
+}
+
 public final class SynchroClient: @unchecked Sendable {
     private let config: SynchroConfig
     private let database: SynchroDatabase
@@ -10,14 +15,13 @@ public final class SynchroClient: @unchecked Sendable {
     private let pullProcessor: PullProcessor
     private let pushProcessor: PushProcessor
     private let syncEngine: SyncEngine
+    private let closeLock = NSLock()
+    private var closeTask: Task<Void, Error>?
 
     public init(config: SynchroConfig) throws {
         self.config = config
         if let seedPath = config.seedDatabasePath {
-            let fm = FileManager.default
-            if !fm.fileExists(atPath: config.dbPath) && fm.fileExists(atPath: seedPath) {
-                try fm.copyItem(atPath: seedPath, toPath: config.dbPath)
-            }
+            try SeedDatabaseInstaller.installIfNeeded(seedPath: seedPath, databasePath: config.dbPath)
         }
         self.database = try SynchroDatabase(path: config.dbPath)
         self.httpClient = HttpClient(config: config)
@@ -56,8 +60,8 @@ public final class SynchroClient: @unchecked Sendable {
         try database.readTransaction(block)
     }
 
-    public func writeTransaction<T>(_ block: (GRDB.Database) throws -> T) throws -> T {
-        try database.writeTransaction(block)
+    public func writeTransaction<T>(_ block: (ApplicationTransaction) throws -> T) throws -> T {
+        try database.applicationWriteTransaction(block)
     }
 
     // MARK: - Prepared Statements
@@ -70,10 +74,7 @@ public final class SynchroClient: @unchecked Sendable {
     }
 
     public func withWritePreparedStatement<T>(_ sql: String, _ block: (Statement) throws -> T) throws -> T {
-        try database.dbPool.write { db in
-            let statement = try db.makeStatement(sql: sql)
-            return try block(statement)
-        }
+        try database.applicationWritePreparedStatement(sql, block)
     }
 
     // MARK: - Batch
@@ -108,9 +109,22 @@ public final class SynchroClient: @unchecked Sendable {
 
     // MARK: - Lifecycle
 
-    public func close() throws {
-        syncEngine.stop()
-        try database.close()
+    public func close() async throws {
+        let task: Task<Void, Error> = {
+            closeLock.lock()
+            defer { closeLock.unlock() }
+            if let closeTask {
+                return closeTask
+            }
+            let closeTask = Task { [weak self] in
+                guard let self else { return }
+                await self.syncEngine.shutdown()
+                try self.database.close()
+            }
+            self.closeTask = closeTask
+            return closeTask
+        }()
+        try await task.value
     }
 
     public var path: String {
@@ -124,18 +138,205 @@ public final class SynchroClient: @unchecked Sendable {
         try changeTracker.pendingChangeCount()
     }
 
+    public func getSyncStatus() -> SyncStatus {
+        syncEngine.getSyncStatus()
+    }
+
+    public func inspectPendingMutations() throws -> [PendingMutationInspection] {
+        try changeTracker.inspectPendingMutations()
+    }
+
+    public func inspectRetainedMutations() throws -> [PendingMutationInspection] {
+        try changeTracker.inspectRetainedMutations()
+    }
+
+    public func inspectRejectedMutations() throws -> [RejectedMutationInspection] {
+        try database.readTransaction { db in
+            try SynchroMeta.listRejectedMutations(db).map { rejected in
+                guard let status = MutationStatus(rawValue: rejected.status),
+                      status == .conflict || status == .rejectedTerminal,
+                      let code = MutationRejectionCode(rawValue: rejected.code),
+                      let mutationJSON = rejected.mutationJSON,
+                      let rejectionJSON = rejected.rejectedJSON,
+                      let mutationData = mutationJSON.data(using: .utf8),
+                      let rejectionData = rejectionJSON.data(using: .utf8) else {
+                    throw SynchroError.invalidResponse(message: "retained rejection is invalid")
+                }
+                let decoder = JSONDecoder.synchroDecoder()
+                let mutation: Mutation
+                let rejection: RejectedMutation
+                do {
+                    mutation = try decoder.decode(Mutation.self, from: mutationData)
+                    rejection = try decoder.decode(RejectedMutation.self, from: rejectionData)
+                } catch {
+                    throw SynchroError.invalidResponse(message: "retained rejection payload is invalid")
+                }
+                guard mutation.mutationID == rejected.mutationID,
+                      rejection.mutationID == rejected.mutationID,
+                      mutation.table == rejection.table,
+                      mutation.pk == rejection.pk,
+                      rejection.status == status,
+                      rejection.code == code else {
+                    throw SynchroError.invalidResponse(message: "retained rejection identity is inconsistent")
+                }
+                return RejectedMutationInspection(
+                    mutationID: rejected.mutationID,
+                    localOrder: rejected.localOrder,
+                    tableName: rejected.tableName,
+                    recordID: rejected.recordID,
+                    status: status,
+                    code: code,
+                    message: rejected.message,
+                    serverRowJSON: rejected.serverRowJSON,
+                    serverVersion: rejected.serverVersion,
+                    mutationJSON: mutationJSON,
+                    rejectionJSON: rejectionJSON,
+                    mutation: mutation,
+                    rejection: rejection,
+                    createdAt: rejected.createdAt,
+                    updatedAt: rejected.updatedAt
+                )
+            }
+        }
+    }
+
+    public func inspectCurrentSchema() throws -> SchemaRef? {
+        try database.readTransaction { db in
+            let version = try SynchroMeta.getInt64(db, key: .schemaVersion)
+            let hash = try SynchroMeta.get(db, key: .schemaHash) ?? ""
+            if version == 0 && hash.isEmpty {
+                return nil
+            }
+            let schema = SchemaRef(version: version, hash: hash)
+            try schema.validate()
+            return schema
+        }
+    }
+
+    public func inspectScopeStates() throws -> [ScopeStateInspection] {
+        try database.readTransaction { db in
+            try SynchroMeta.getAllScopes(db).map { scope in
+                ScopeStateInspection(
+                    scopeID: scope.scopeID,
+                    cursor: scope.cursor,
+                    checksum: scope.checksum,
+                    localChecksum: scope.localChecksum,
+                    generation: scope.generation
+                )
+            }
+        }
+    }
+
+    public func inspectScopeRows() throws -> [ScopeRowInspection] {
+        try database.readTransaction { db in
+            var result: [ScopeRowInspection] = []
+            for scope in try SynchroMeta.getAllScopes(db) {
+                result.append(contentsOf: try SynchroMeta.getScopeRowChecksums(db, scopeID: scope.scopeID).map { row in
+                    ScopeRowInspection(
+                        scopeID: scope.scopeID,
+                        tableName: row.tableName,
+                        recordID: row.recordID,
+                        checksum: row.checksum,
+                        generation: row.generation
+                    )
+                })
+            }
+            return result.sorted { left, right in
+                let leftKey = [left.scopeID, left.tableName, left.recordID]
+                let rightKey = [right.scopeID, right.tableName, right.recordID]
+                return leftKey.lexicographicallyPrecedes(rightKey)
+            }
+        }
+    }
+
+    public func inspectRowMetadata(tableName: String, recordID: String) throws -> RowMetadataInspection? {
+        try database.readTransaction { db in
+            guard let metadata = try SynchroMeta.getRowMetadata(db, tableName: tableName, recordID: recordID) else {
+                return nil
+            }
+            return RowMetadataInspection(
+                tableName: metadata.tableName,
+                recordID: metadata.recordID,
+                serverVersion: metadata.serverVersion,
+                rowChecksum: metadata.rowChecksum
+            )
+        }
+    }
+
+    public func inspectRebuildAttempts() throws -> [RebuildAttemptInspection] {
+        try database.readTransaction { db in
+            try SynchroMeta.getAllScopes(db).compactMap { scope in
+                guard let attempt = try SynchroMeta.getRebuildAttempt(db, scopeID: scope.scopeID) else {
+                    return nil
+                }
+                return RebuildAttemptInspection(
+                    scopeID: attempt.scopeID,
+                    rebuildID: attempt.rebuildID,
+                    clientGeneration: attempt.clientGeneration,
+                    schemaVersion: attempt.schemaVersion,
+                    schemaHash: attempt.schemaHash,
+                    generation: attempt.generation,
+                    cursor: attempt.cursor,
+                    pageLimit: attempt.pageLimit
+                )
+            }
+        }
+    }
+
+    public func inspectRebuildReceiptProofs() throws -> [RebuildReceiptProofInspection] {
+        try database.readTransaction { db in
+            let receipts = try SynchroMeta.listRebuildPageReceipts(db)
+            let grouped = Dictionary(grouping: receipts) { receipt in
+                RebuildReceiptGroupKey(scopeID: receipt.scopeID, rebuildID: receipt.rebuildID)
+            }
+            return try grouped.keys.sorted { left, right in
+                if left.scopeID == right.scopeID {
+                    return Self.utf8Less(left.rebuildID, right.rebuildID)
+                }
+                return Self.utf8Less(left.scopeID, right.scopeID)
+            }.map { key in
+                try Self.proveRebuildReceipts(
+                    db: db,
+                    receipts: grouped[key] ?? []
+                )
+            }
+        }
+    }
+
+    public func clearRejectedMutations() throws {
+        try database.writeTransaction { db in
+            try SynchroMeta.clearRejectedMutations(db)
+        }
+    }
+
     // MARK: - Sync Control
 
     public func start(options: SyncOptions? = nil) async throws {
         try await syncEngine.start(options: options)
     }
 
-    public func stop() {
-        syncEngine.stop()
+    public func stop() async {
+        await syncEngine.stop()
     }
 
     public func syncNow() async throws {
         try await syncEngine.syncNow()
+    }
+
+    public func enterBackground() async {
+        await syncEngine.enterBackground()
+    }
+
+    public func enterForeground() async throws {
+        try await syncEngine.enterForeground()
+    }
+
+    public func retryAfterError() async throws {
+        try await syncEngine.retryAfterError()
+    }
+
+    public func resetSchemaAndStart() async throws {
+        try await syncEngine.resetSchemaAndStart()
     }
 
     // MARK: - Status
@@ -144,8 +345,304 @@ public final class SynchroClient: @unchecked Sendable {
         syncEngine.onStatusChange(callback)
     }
 
+    public func onSyncEvent(_ callback: @escaping (SyncEvent) -> Void) -> any Cancellable {
+        syncEngine.onEvent(callback)
+    }
+
+    public func getBlockingFailure() throws -> SyncFailure? {
+        try syncEngine.getBlockingFailure()
+    }
+
     public func onConflict(_ callback: @escaping (ConflictEvent) -> Void) -> any Cancellable {
         syncEngine.onConflict(callback)
+    }
+
+    private static func proveRebuildReceipts(
+        db: GRDB.Database,
+        receipts: [LocalRebuildPageReceipt]
+    ) throws -> RebuildReceiptProofInspection {
+        guard let first = receipts.first else {
+            return RebuildReceiptProofInspection(
+                rebuildIDFingerprint: "",
+                pageCount: 0,
+                returnedRecordCount: 0,
+                requestChainValid: false,
+                recordsInCanonicalOrder: false,
+                rowChecksumsValid: false,
+                scopeChecksumValid: false,
+                finalChecksumMatchesLocal: false
+            )
+        }
+
+        let decoder = JSONDecoder.synchroDecoder()
+        var decoded: [(receipt: LocalRebuildPageReceipt, request: RebuildRequest, response: RebuildResponse, finalChecksum: ChecksumObject?)] = []
+        decoded.reserveCapacity(receipts.count)
+        for receipt in receipts {
+            let request = try decodeExactReceiptJSON(receipt.requestJSON, as: RebuildRequest.self, decoder: decoder)
+            let response = try decodeExactReceiptJSON(receipt.responseJSON, as: RebuildResponse.self, decoder: decoder)
+            let finalChecksum: ChecksumObject?
+            if let finalChecksumJSON = receipt.finalChecksumJSON {
+                finalChecksum = try decodeExactReceiptJSON(finalChecksumJSON, as: ChecksumObject.self, decoder: decoder)
+            } else {
+                finalChecksum = nil
+            }
+            decoded.append((receipt, request, response, finalChecksum))
+        }
+
+        var requestChainValid = true
+        var requestCursorIndexes: [String: [Int]] = [:]
+        for (index, item) in decoded.enumerated() {
+            let requestKey = cursorKey(item.receipt.requestCursor)
+            requestCursorIndexes[requestKey, default: []].append(index)
+            guard item.request.scope == item.receipt.scopeID,
+                  item.request.rebuildID == item.receipt.rebuildID,
+                  item.request.cursor == item.receipt.requestCursor,
+                  item.response.scope == item.receipt.scopeID,
+                  item.receipt.isFinal == !item.response.hasMore,
+                  item.receipt.finalScopeCursor == (item.response.hasMore ? nil : item.response.finalScopeCursor),
+                  item.receipt.finalChecksumJSON == nil || item.finalChecksum == item.response.checksum else {
+                requestChainValid = false
+                continue
+            }
+            if item.response.hasMore {
+                if item.response.cursor == nil
+                    || item.response.finalScopeCursor != nil
+                    || item.response.checksum != nil
+                    || item.receipt.finalChecksumJSON != nil {
+                    requestChainValid = false
+                }
+            } else {
+                if item.response.cursor != nil
+                    || item.response.finalScopeCursor == nil
+                    || item.response.checksum == nil
+                    || item.receipt.finalScopeCursor == nil
+                    || item.receipt.finalChecksumJSON == nil {
+                    requestChainValid = false
+                }
+            }
+        }
+
+        var orderedIndexes: [Int] = []
+        var consumed = Set<Int>()
+        var expectedCursor: String? = nil
+        var finalPageCount = 0
+        while let indexes = requestCursorIndexes[cursorKey(expectedCursor)], indexes.count == 1,
+              let index = indexes.first, consumed.insert(index).inserted {
+            let item = decoded[index]
+            orderedIndexes.append(index)
+            if item.response.hasMore {
+                guard let nextCursor = item.response.cursor else {
+                    requestChainValid = false
+                    break
+                }
+                expectedCursor = nextCursor
+            } else {
+                finalPageCount += 1
+                expectedCursor = nil
+                break
+            }
+        }
+        if orderedIndexes.isEmpty || consumed.count != decoded.count || finalPageCount != 1 {
+            requestChainValid = false
+        }
+        if let finalIndex = orderedIndexes.last,
+           decoded[finalIndex].response.hasMore {
+            requestChainValid = false
+        }
+
+        let traversalIndexes: [Int]
+        if consumed.count == decoded.count {
+            traversalIndexes = orderedIndexes
+        } else {
+            traversalIndexes = decoded.indices.sorted { left, right in
+                let leftKey = cursorKey(decoded[left].receipt.requestCursor)
+                let rightKey = cursorKey(decoded[right].receipt.requestCursor)
+                return leftKey.utf8.lexicographicallyPrecedes(rightKey.utf8)
+            }
+        }
+
+        var returnedRecordCount = 0
+        var recordsInCanonicalOrder = true
+        var rowChecksumsValid = true
+        var previousIdentity: Data?
+        var entries: [(identity: Data, digest: ChecksumObject)] = []
+        var schemaCache: [String: [String: LocalSchemaTable]] = [:]
+        for index in traversalIndexes {
+            let item = decoded[index]
+            returnedRecordCount += item.response.records.count
+            let schemaKey = "\(item.request.schema.version):\(item.request.schema.hash)"
+            let tables: [String: LocalSchemaTable]
+            if let cached = schemaCache[schemaKey] {
+                tables = cached
+            } else {
+                guard let archived = try SynchroMeta.getArchivedSchemaTables(
+                    db,
+                    version: item.request.schema.version,
+                    hash: item.request.schema.hash
+                ) else {
+                    throw SynchroError.invalidResponse(message: "rebuild receipt schema archive is missing")
+                }
+                var tableMap: [String: LocalSchemaTable] = [:]
+                for table in archived {
+                    guard tableMap.updateValue(table, forKey: table.tableID) == nil else {
+                        throw SynchroError.invalidResponse(message: "rebuild receipt schema archive is invalid")
+                    }
+                }
+                tables = tableMap
+                schemaCache[schemaKey] = tableMap
+            }
+            for record in item.response.records {
+                guard let table = tables[record.table] else {
+                    throw SynchroError.invalidResponse(message: "rebuild receipt table metadata is missing")
+                }
+                let digest: (identity: Data, checksum: ChecksumObject)
+                do {
+                    digest = try Integrity.rowDigest(
+                        schemaHash: item.request.schema.hash,
+                        table: table,
+                        pk: record.pk,
+                        row: record.row,
+                        serverVersion: record.serverVersion
+                    )
+                } catch {
+                    throw SynchroError.invalidResponse(message: "rebuild receipt record metadata is invalid")
+                }
+                if let previousIdentity, !previousIdentity.lexicographicallyPrecedes(digest.identity) {
+                    recordsInCanonicalOrder = false
+                }
+                previousIdentity = digest.identity
+                if digest.checksum != record.rowChecksum {
+                    rowChecksumsValid = false
+                }
+                entries.append((identity: digest.identity, digest: digest.checksum))
+            }
+        }
+
+        let finalIndexes = decoded.indices.filter { !decoded[$0].response.hasMore }
+        let finalChecksum: ChecksumObject? = finalIndexes.count == 1 ? decoded[finalIndexes[0]].response.checksum : nil
+        let scopeChecksumValid: Bool
+        if let finalChecksum,
+           (try? finalChecksum.validate()) != nil,
+           let computed = try? Integrity.scopeDigest(
+               schemaHash: decoded[finalIndexes[0]].request.schema.hash,
+               scopeID: first.scopeID,
+               entries: entries
+           ) {
+            scopeChecksumValid = computed == finalChecksum
+        } else {
+            scopeChecksumValid = false
+        }
+        let finalChecksumMatchesLocal: Bool
+        if let finalChecksum,
+           (try? finalChecksum.validate()) != nil,
+           let scope = try SynchroMeta.getScope(db, scopeID: first.scopeID) {
+            let stored = scope.checksum.flatMap { try? decodeExactReceiptJSON($0, as: ChecksumObject.self, decoder: decoder) }
+            let local = try? decodeExactReceiptJSON(scope.localChecksum, as: ChecksumObject.self, decoder: decoder)
+            finalChecksumMatchesLocal = stored == finalChecksum && local == finalChecksum
+        } else {
+            finalChecksumMatchesLocal = false
+        }
+
+        return RebuildReceiptProofInspection(
+            rebuildIDFingerprint: TransportObservationCollector.cursorFingerprint(first.rebuildID),
+            pageCount: receipts.count,
+            returnedRecordCount: returnedRecordCount,
+            requestChainValid: requestChainValid,
+            recordsInCanonicalOrder: recordsInCanonicalOrder,
+            rowChecksumsValid: rowChecksumsValid,
+            scopeChecksumValid: scopeChecksumValid,
+            finalChecksumMatchesLocal: finalChecksumMatchesLocal
+        )
+    }
+
+    private static func decodeExactReceiptJSON<T: Codable & Equatable>(
+        _ source: String,
+        as type: T.Type,
+        decoder: JSONDecoder
+    ) throws -> T {
+        guard let data = source.data(using: .utf8) else {
+            throw SynchroError.invalidResponse(message: "rebuild receipt JSON is invalid")
+        }
+        do {
+            try Integrity.validateCanonicalWireJSON(data)
+            try validateReceiptJSONShape(data, as: type)
+            let value = try decoder.decode(type, from: data)
+            return value
+        } catch is SynchroError {
+            throw SynchroError.invalidResponse(message: "rebuild receipt JSON is invalid")
+        } catch {
+            throw SynchroError.invalidResponse(message: "rebuild receipt JSON is invalid")
+        }
+    }
+
+    private static func validateReceiptJSONShape<T>(_ data: Data, as type: T.Type) throws {
+        guard let object = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            throw SynchroError.invalidResponse(message: "rebuild receipt JSON shape is invalid")
+        }
+        if type == RebuildRequest.self {
+            try requireReceiptKeys(
+                object,
+                required: ["client_id", "client_generation", "schema", "scope", "rebuild_id", "limit"],
+                optional: ["cursor"]
+            )
+            guard let schema = object["schema"] as? [String: Any] else {
+                throw SynchroError.invalidResponse(message: "rebuild receipt request schema is invalid")
+            }
+            try requireReceiptKeys(schema, required: ["version", "hash"])
+            return
+        }
+        if type == RebuildResponse.self {
+            try requireReceiptKeys(
+                object,
+                required: ["scope", "records", "has_more"],
+                optional: ["cursor", "final_scope_cursor", "checksum"]
+            )
+            guard let records = object["records"] as? [[String: Any]] else {
+                throw SynchroError.invalidResponse(message: "rebuild receipt records are invalid")
+            }
+            for record in records {
+                try requireReceiptKeys(
+                    record,
+                    required: ["table", "pk", "row", "row_checksum", "server_version"]
+                )
+                guard record["pk"] is [String: Any], record["row"] is [String: Any],
+                      let checksum = record["row_checksum"] as? [String: Any] else {
+                    throw SynchroError.invalidResponse(message: "rebuild receipt record shape is invalid")
+                }
+                try requireReceiptKeys(checksum, required: ["algorithm", "version", "encoding", "digest"])
+            }
+            if let checksum = object["checksum"], !(checksum is NSNull) {
+                guard let checksum = checksum as? [String: Any] else {
+                    throw SynchroError.invalidResponse(message: "rebuild receipt checksum shape is invalid")
+                }
+                try requireReceiptKeys(checksum, required: ["algorithm", "version", "encoding", "digest"])
+            }
+            return
+        }
+        if type == ChecksumObject.self {
+            try requireReceiptKeys(object, required: ["algorithm", "version", "encoding", "digest"])
+            return
+        }
+        throw SynchroError.invalidResponse(message: "rebuild receipt JSON type is invalid")
+    }
+
+    private static func requireReceiptKeys(
+        _ object: [String: Any],
+        required: Set<String>,
+        optional: Set<String> = []
+    ) throws {
+        let keys = Set(object.keys)
+        guard required.isSubset(of: keys), keys.isSubset(of: required.union(optional)) else {
+            throw SynchroError.invalidResponse(message: "rebuild receipt JSON members are invalid")
+        }
+    }
+
+    private static func cursorKey(_ cursor: String?) -> String {
+        cursor.map { "value:\($0)" } ?? "null"
+    }
+
+    private static func utf8Less(_ lhs: String, _ rhs: String) -> Bool {
+        lhs.utf8.lexicographicallyPrecedes(rhs.utf8)
     }
 
 }

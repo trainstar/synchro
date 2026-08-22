@@ -1182,11 +1182,13 @@ fn validate_seed_receipts_inner(
         .select(
             "SELECT shared.scope_id, state.stream_generation,
                     state.membership_generation, state.retention_generation,
-                    runtime.registry_generation
+                    progress.registry_generation
              FROM sync_shared_scopes shared
              JOIN sync_scope_state state ON state.scope_id = shared.scope_id
-             CROSS JOIN sync_runtime_state runtime
-             WHERE shared.portable = true AND runtime.singleton = true
+             JOIN sync_wal_progress progress
+               ON progress.singleton = true
+              AND progress.stream_generation = state.stream_generation
+             WHERE shared.portable = true
              ORDER BY shared.scope_id",
             None,
             &[],

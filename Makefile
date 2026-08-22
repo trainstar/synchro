@@ -27,6 +27,10 @@
 	test-blackbox-components \
 	test-blackbox-wal \
 	test-blackbox-mutation-control \
+	test-native-swift \
+	test-native-swift-schema-queue \
+	test-native-swift-steady-pull \
+	test-native-swift-rebuild-requests \
 	parse-testresult \
 	conformance-adapter-artifact \
 	conformance-pg18-extension-artifact \
@@ -54,6 +58,8 @@
 	ext-install \
 	ext-test \
 	ext-seed \
+	build-swift-native-runner \
+	build-kotlin-conformance-app \
 	test-swift-unit \
 	test-swift \
 	test-kotlin-unit \
@@ -61,9 +67,15 @@
 	test-kotlin-integration \
 	test-rn-unit \
 	rn-seed-asset \
+	rn-e2e-server-seed \
+	rn-watchman-reset \
 	rn-ios-pods \
 	rn-android-emulator-reset \
+	test-rn-e2e-ios-build \
+	test-rn-e2e-ios-run \
 	test-rn-e2e-ios \
+	test-rn-e2e-android-build \
+	test-rn-e2e-android-run \
 	test-rn-e2e-android \
 	test-rn \
 	synchrod-pg-test-start \
@@ -73,7 +85,19 @@
 	release-check \
 	release-kotlin-local \
 	release-npm-dry-run \
+	client-consumer-apple-artifact \
+	client-consumer-kotlin-artifact \
+	client-consumer-rn-artifact \
+	client-consumer-artifacts \
 	local-consumer-artifacts \
+	test-consumer-swift \
+	test-consumer-swift-ios \
+	test-consumer-kotlin \
+	test-consumer-kotlin-device \
+	test-consumer-rn-ios \
+	test-consumer-rn-android \
+	test-client-platforms \
+	test-packaged-consumers \
 	generate-pg-sql \
 	check-pg-sql \
 	clean
@@ -89,6 +113,7 @@ ANDROID_JAVA_HOME ?= $(shell \
 		fi; \
 	fi)
 RN_ANDROID_DETOX_CONFIG ?= android.emu.release
+SWIFT_NATIVE_RUNNER ?= $(CURDIR)/clients/swift/.build/debug/synchro-native-runner
 
 PGRX_PG ?= pg18
 PGRX_PORT ?= 28818
@@ -130,7 +155,8 @@ SEED_BINARY ?= bin/synchro-seed
 GO_TEST_ARGS ?= -v -count=1 -p 1
 GO_TEST_PKGS ?= ./...
 GRADLE_TEST_ARGS ?= --rerun-tasks
-LOCAL_CONSUMER_DIR ?= $(CURDIR)/dist/local-consumer
+CLIENT_ARTIFACT_DIR ?= $(CURDIR)/dist/local-consumer
+LOCAL_CONSUMER_DIR ?= $(CLIENT_ARTIFACT_DIR)
 CURRENT_VERSION := $(shell cat VERSION 2>/dev/null)
 
 TEST_ENV = \
@@ -168,6 +194,10 @@ help:
 	@echo "  test-inventory        - Test generated evidence inventory"
 	@echo "  test-blackbox         - Run the packaged server black-box suite"
 	@echo "  test-blackbox-mutation-control - Run one structured real mutation control"
+	@echo "  test-native-swift     - Run implemented real macOS native scenarios"
+	@echo "  test-native-swift-schema-queue - Run the real macOS schema-queue scenario"
+	@echo "  test-native-swift-steady-pull - Run the real macOS steady-pull scenario"
+	@echo "  test-native-swift-rebuild-requests - Run the real macOS rebuild-requests scenario"
 	@echo "  rc-check-pg18         - Verify the packaged PostgreSQL 18 candidate"
 	@echo "  evidence              - Generate and verify immutable RC evidence"
 	@echo "  lint-go               - Run Go formatting checks and go vet"
@@ -182,6 +212,8 @@ help:
 	@echo "  test-rust-pg          - Run pgrx integration tests on PG 18"
 	@echo "  test-rust-pg-all      - Run pgrx tests on PG 14 through PG 18"
 	@echo "  test-adapter          - Run Go adapter integration tests (override GO_TEST_PKGS to focus)"
+	@echo "  build-swift-native-runner - Build the macOS native conformance process"
+	@echo "  build-kotlin-conformance-app - Build the Android native conformance test APK"
 	@echo "  test-swift-unit       - Run Swift unit tests"
 	@echo "  test-swift            - Run Swift integration tests against the local adapter"
 	@echo "  test-kotlin-unit      - Run Kotlin unit tests"
@@ -198,7 +230,16 @@ help:
 	@echo "  release-check         - Run the full release validation matrix"
 	@echo "  release-kotlin-local  - Publish Kotlin SDK to mavenLocal"
 	@echo "  release-npm-dry-run   - Dry-run npm pack for the React Native package"
+	@echo "  client-consumer-artifacts - Stage Apple, Kotlin, and React Native consumer artifacts"
 	@echo "  local-consumer-artifacts - Build local-consumer artifacts for RN, Kotlin, and Apple"
+	@echo "  test-consumer-swift   - Run the packaged Swift consumer"
+	@echo "  test-consumer-swift-ios - Run the packaged Swift consumer on an iOS simulator"
+	@echo "  test-consumer-kotlin  - Build the packaged Kotlin app and instrumentation APK"
+	@echo "  test-consumer-kotlin-device - Run the packaged Kotlin consumer on a connected Android device"
+	@echo "  test-consumer-rn-ios  - Build an isolated RN iOS consumer from packaged artifacts"
+	@echo "  test-consumer-rn-android - Build an isolated RN Android consumer from packaged artifacts"
+	@echo "  test-client-platforms - Run one packaged client support cell (SUPPORT_CELL_ID required)"
+	@echo "  test-packaged-consumers - Run all packaged consumer checks"
 	@echo "  check-pg-sql          - Verify tracked SQL matches pgrx generation"
 	@echo "  clean                 - Remove local build and server artifacts"
 
@@ -265,7 +306,7 @@ check-conformance-catalog:
 	cd conformance && GOFLAGS= GOWORK=off go run ./cmd/synchro-conformance catalog --repo-root .. --check
 
 test-conformance-scenarios:
-	cd conformance && GOFLAGS= GOWORK=off go test ./scenarios/... ./modelrunner ./cmd/synchro-conformance -count=1
+	cd conformance && GOFLAGS= GOWORK=off go test ./scenarios/... ./nativeexecution ./nativeharness ./modelrunner ./cmd/synchro-conformance -count=1
 
 test-vectors:
 	cd conformance && GOFLAGS= GOWORK=off go test ./vectors -count=1
@@ -281,7 +322,6 @@ test-blackbox-harness:
 
 test-blackbox-components:
 	cd conformance && GOFLAGS= GOWORK=off go test ./observer -count=1
-	cd conformance && GOFLAGS= GOWORK=off go test ./blackbox/baseline -count=1
 
 test-blackbox-wal: conformance-mod-download test-blackbox-harness
 	cd conformance && GOFLAGS= GOWORK=off go test ./blackbox/integration -run '^TestRealWALPipeline$$' -count=1 -args --provision --install
@@ -293,6 +333,20 @@ test-blackbox-mutation-control:
 		*) echo "MUTATION_CONTROL_TEST is not a supported mutation control" >&2; exit 1 ;; \
 	esac
 	@cd conformance && GOFLAGS= GOWORK=off go test -json ./blackbox/integration -count=1 -run "^$(MUTATION_CONTROL_TEST)$$" -args --provision --install
+
+test-native-swift-schema-queue: conformance-mod-download test-blackbox-harness build-swift-native-runner
+	@test -x "$(SWIFT_NATIVE_RUNNER)" || { echo "SWIFT_NATIVE_RUNNER must be executable" >&2; exit 1; }
+	cd conformance && GOFLAGS= GOWORK=off SWIFT_NATIVE_RUNNER="$(SWIFT_NATIVE_RUNNER)" go test ./blackbox/integration -count=1 -run '^TestNativeSwiftSchemaQueuedMutationPersistsAcrossSIGKILL$$' -args --provision --install
+
+test-native-swift-steady-pull: conformance-mod-download test-blackbox-harness test-conformance-scenarios build-swift-native-runner release-pods-check
+	@test -x "$(SWIFT_NATIVE_RUNNER)" || { echo "SWIFT_NATIVE_RUNNER must be executable" >&2; exit 1; }
+	cd conformance && GOFLAGS= GOWORK=off SWIFT_NATIVE_RUNNER="$(SWIFT_NATIVE_RUNNER)" go test ./blackbox/integration -count=1 -run '^TestNativeSwiftSteadyPull$$' -args --provision --install
+
+test-native-swift-rebuild-requests: conformance-mod-download test-blackbox-harness test-conformance-scenarios build-swift-native-runner release-pods-check
+	@test -x "$(SWIFT_NATIVE_RUNNER)" || { echo "SWIFT_NATIVE_RUNNER must be executable" >&2; exit 1; }
+	cd conformance && GOFLAGS= GOWORK=off SWIFT_NATIVE_RUNNER="$(SWIFT_NATIVE_RUNNER)" go test ./blackbox/integration -count=1 -run '^TestNativeSwiftRebuildRequests$$' -args --provision --install
+
+test-native-swift: test-native-swift-schema-queue test-native-swift-steady-pull test-native-swift-rebuild-requests
 
 parse-testresult:
 	@test -n "$(TESTRESULT_TEST_NAME)" || { echo "TESTRESULT_TEST_NAME is required" >&2; exit 1; }
@@ -392,11 +446,19 @@ lint-rn:
 
 test: test-rust-core test-adapter test-swift-unit test-kotlin-unit test-rn-unit verify-contract docs-build
 
+build-swift-native-runner:
+	cd clients/swift && swift build --product synchro-native-runner
+
+build-kotlin-conformance-app:
+	@test -n "$(ANDROID_JAVA_HOME)" || (echo "Android builds require JDK 17. Set ANDROID_JAVA_HOME to a JDK 17 install."; exit 1)
+	@test -d "$(ANDROID_HOME)" || (echo "Android SDK not found at $(ANDROID_HOME). Set ANDROID_HOME to a valid SDK install."; exit 1)
+	cd clients/kotlin && ANDROID_HOME="$(ANDROID_HOME)" ANDROID_SDK_ROOT="$(ANDROID_HOME)" JAVA_HOME="$(ANDROID_JAVA_HOME)" PATH="$(ANDROID_JAVA_HOME)/bin:$$PATH" ./gradlew $(GRADLE_TEST_ARGS) :conformance-app:assembleDebug :conformance-app:assembleDebugAndroidTest
+
 test-swift-unit:
-	cd clients/swift && swift test --skip IntegrationTests --skip SchemaIntegrationTests
+	cd clients/swift && swift test --skip IntegrationTests --skip SchemaIntegrationTests $(SWIFT_TEST_ARGS)
 
 test-swift: synchrod-pg-test-restart
-	cd clients/swift && $(TEST_ENV) swift test
+	cd clients/swift && $(TEST_ENV) swift test $(SWIFT_TEST_ARGS)
 
 test-kotlin-unit:
 	@test -n "$(ANDROID_JAVA_HOME)" || (echo "Android builds require JDK 17. Set ANDROID_JAVA_HOME to a JDK 17 install."; exit 1)
@@ -420,6 +482,9 @@ rn-seed-asset:
 		cp clients/react-native/example/seed.db clients/react-native/example/android/app/src/main/assets/seed.db; \
 	fi
 
+rn-e2e-server-seed: synchrod-pg-test-restart
+	@$(MAKE) rn-seed-asset
+
 rn-watchman-reset:
 	@if command -v watchman >/dev/null 2>&1; then \
 		watchman watch-del "$(PWD)/clients/react-native" >/dev/null 2>&1 || true; \
@@ -428,8 +493,13 @@ rn-watchman-reset:
 
 rn-ios-pods:
 	cd clients/react-native/example/ios && \
-		if [ ! -f Pods/Manifest.lock ] || [ ! -f SynchroReactNativeExample.xcworkspace/contents.xcworkspacedata ] || ! cmp -s Podfile.lock Pods/Manifest.lock || [ Podfile -nt Pods/Manifest.lock ] || [ ../../../SynchroReactNative.podspec -nt Pods/Manifest.lock ] || [ ../../../../Synchro.podspec -nt Pods/Manifest.lock ]; then \
-			pod install; \
+		STAMP=.synchro-pods.stamp; \
+		SOURCE_DIGEST="$$( ( \
+			find ../../../../clients/swift/Sources/Synchro -type f -name '*.swift' -exec shasum -a 256 {} +; \
+			find ../../ios -type f \( -name '*.swift' -o -name '*.m' -o -name '*.mm' -o -name '*.h' -o -name '*.cpp' \) -exec shasum -a 256 {} + \
+		) | LC_ALL=C sort | shasum -a 256 | cut -d ' ' -f 1)"; \
+		if [ ! -f "$$STAMP" ] || [ ! -f Pods/Manifest.lock ] || [ ! -f SynchroReactNativeExample.xcworkspace/contents.xcworkspacedata ] || ! cmp -s Podfile.lock Pods/Manifest.lock || [ Podfile -nt "$$STAMP" ] || [ Podfile.lock -nt "$$STAMP" ] || [ ../../SynchroReactNative.podspec -nt "$$STAMP" ] || [ ../../../../Synchro.podspec -nt "$$STAMP" ] || ! grep -qx "$$SOURCE_DIGEST" "$$STAMP"; then \
+			pod install && printf '%s\n' "$$SOURCE_DIGEST" > "$$STAMP"; \
 		else \
 			echo "React Native iOS pods already match Podfile.lock"; \
 		fi
@@ -450,21 +520,28 @@ rn-android-emulator-reset:
 		sleep 5; \
 	fi
 
-test-rn-e2e-ios-build: rn-seed-asset rn-watchman-reset rn-ios-pods
+test-rn-e2e-ios-build: rn-watchman-reset rn-ios-pods
+	@$(MAKE) rn-e2e-server-seed
 	cd clients/react-native/example && npx detox build --configuration ios.sim.debug
 
-test-rn-e2e-ios-run: synchrod-pg-test-restart
+test-rn-e2e-ios-run:
 	cd clients/react-native/example && \
 		$(TEST_ENV) npx detox test --configuration ios.sim.debug $(DETOX_ARGS)
 
-test-rn-e2e-ios: test-rn-e2e-ios-build test-rn-e2e-ios-run
+test-rn-e2e-ios:
+	@$(MAKE) test-rn-e2e-ios-build
+	@$(MAKE) test-rn-e2e-ios-run
 
-test-rn-e2e-android-build: release-kotlin-local rn-seed-asset rn-watchman-reset rn-android-emulator-reset
+test-rn-e2e-android-build:
+	@$(MAKE) release-kotlin-local
+	@$(MAKE) rn-watchman-reset
+	@$(MAKE) rn-android-emulator-reset
+	@$(MAKE) rn-e2e-server-seed
 	@test -n "$(ANDROID_JAVA_HOME)" || (echo "Android Detox requires JDK 17. Set ANDROID_JAVA_HOME to a JDK 17 install."; exit 1)
 	@test -d "$(ANDROID_HOME)" || (echo "Android SDK not found at $(ANDROID_HOME). Set ANDROID_HOME to a valid SDK install."; exit 1)
 	cd clients/react-native/example && ANDROID_HOME="$(ANDROID_HOME)" ANDROID_SDK_ROOT="$(ANDROID_HOME)" JAVA_HOME="$(ANDROID_JAVA_HOME)" PATH="$(ANDROID_JAVA_HOME)/bin:$$PATH" npx detox build --configuration $(RN_ANDROID_DETOX_CONFIG)
 
-test-rn-e2e-android-run: synchrod-pg-test-restart rn-android-emulator-reset
+test-rn-e2e-android-run:
 	@test -n "$(ANDROID_JAVA_HOME)" || (echo "Android Detox requires JDK 17. Set ANDROID_JAVA_HOME to a JDK 17 install."; exit 1)
 	@test -d "$(ANDROID_HOME)" || (echo "Android SDK not found at $(ANDROID_HOME). Set ANDROID_HOME to a valid SDK install."; exit 1)
 	cd clients/react-native/example && \
@@ -472,9 +549,13 @@ test-rn-e2e-android-run: synchrod-pg-test-restart rn-android-emulator-reset
 		JAVA_HOME="$(ANDROID_JAVA_HOME)" PATH="$(ANDROID_JAVA_HOME)/bin:$$PATH" \
 		$(TEST_ENV) npx detox test --configuration $(RN_ANDROID_DETOX_CONFIG) $(DETOX_ARGS)
 
-test-rn-e2e-android: test-rn-e2e-android-build test-rn-e2e-android-run
+test-rn-e2e-android:
+	@$(MAKE) test-rn-e2e-android-build
+	@$(MAKE) test-rn-e2e-android-run
 
-test-rn: test-rn-e2e-ios test-rn-e2e-android
+test-rn:
+	@$(MAKE) test-rn-e2e-ios
+	@$(MAKE) test-rn-e2e-android
 
 release-pods-check: version-check
 	@command -v pod >/dev/null 2>&1 || (echo "CocoaPods CLI is required for release-pods-check."; exit 1)
@@ -482,7 +563,7 @@ release-pods-check: version-check
 	swift package dump-package >/dev/null
 	@echo "Apple package metadata validated."
 
-release-check: evidence test-conformance test-blackbox rc-check-pg18 version-check release-pods-check build build-seed build-check release-kotlin-local release-npm-dry-run lint-go lint-rust-core lint-rust-pg lint-rn test-rust-core test-rust-mutants test-integration-mutants test-rust-pg test-adapter test-swift test-kotlin test-rn verify-contract check-pg-sql docs-build
+release-check: evidence test-conformance test-blackbox rc-check-pg18 version-check release-pods-check build build-seed build-check release-kotlin-local release-npm-dry-run lint-go lint-rust-core lint-rust-pg lint-rn test-rust-core test-rust-mutants test-integration-mutants test-rust-pg test-adapter test-swift test-native-swift test-kotlin test-rn test-packaged-consumers verify-contract check-pg-sql docs-build
 	@echo "Release validation passed."
 
 release-kotlin-local: version-check
@@ -496,16 +577,176 @@ release-npm-dry-run: version-check
 	cd clients/react-native && yarn install --immutable
 	cd clients/react-native && npm pack --dry-run
 
-local-consumer-artifacts: version-check release-pods-check release-kotlin-local
-	@mkdir -p "$(LOCAL_CONSUMER_DIR)"
-	@TARBALL=$$(cd clients/react-native && corepack enable >/dev/null 2>&1 && yarn install --immutable >/dev/null && npm pack --silent --pack-destination "$(LOCAL_CONSUMER_DIR)"); \
-		echo "Local consumer artifacts ready for Synchro $(CURRENT_VERSION)"; \
-		echo "React Native tarball: $(LOCAL_CONSUMER_DIR)/$$TARBALL"; \
-		echo "Kotlin SDK: published to mavenLocal() at fit.trainstar:synchro:$(CURRENT_VERSION)"; \
-		echo "Native Apple local path: $(CURDIR)"; \
-		echo "React Native iOS Podfile entry: pod 'Synchro', :path => '$(CURDIR)'"; \
-		echo "Android repository order: mavenLocal(), then mavenCentral()"; \
-		echo "If a consumer overrides the native Android SDK version, set synchroVersion=$(CURRENT_VERSION)"
+client-consumer-apple-artifact: version-check release-pods-check
+	@set -eu; \
+		final="$(abspath $(CLIENT_ARTIFACT_DIR))/apple"; \
+		stage="$$final.tmp.$$$$"; \
+		cleanup() { rm -rf "$$stage"; }; \
+		trap cleanup EXIT HUP INT TERM; \
+		rm -rf "$$stage"; \
+		mkdir -p "$$stage/Synchro/clients/swift"; \
+		cp Package.swift Package.resolved Synchro.podspec LICENSE "$$stage/Synchro/"; \
+		cp -R clients/swift/Sources "$$stage/Synchro/clients/swift/"; \
+		COPYFILE_DISABLE=1 tar -czf "$$stage/synchro-spm-$(CURRENT_VERSION).tar.gz" -C "$$stage" Synchro; \
+		mkdir -p "$$(dirname "$$final")"; \
+		rm -rf "$$final"; \
+		mv "$$stage" "$$final"; \
+		trap - EXIT HUP INT TERM
+
+client-consumer-kotlin-artifact: version-check
+	@test -n "$(ANDROID_JAVA_HOME)" || (echo "Android builds require JDK 17. Set ANDROID_JAVA_HOME to a JDK 17 install."; exit 1)
+	@test -d "$(ANDROID_HOME)" || (echo "Android SDK not found at $(ANDROID_HOME). Set ANDROID_HOME to a valid SDK install."; exit 1)
+	@set -eu; \
+		final="$(abspath $(CLIENT_ARTIFACT_DIR))/maven"; \
+		stage="$$final.tmp.$$$$"; \
+		cleanup() { rm -rf "$$stage"; }; \
+		trap cleanup EXIT HUP INT TERM; \
+		rm -rf "$$stage"; \
+		mkdir -p "$$stage"; \
+		(cd clients/kotlin && \
+			ANDROID_HOME="$(ANDROID_HOME)" ANDROID_SDK_ROOT="$(ANDROID_HOME)" \
+			JAVA_HOME="$(ANDROID_JAVA_HOME)" PATH="$(ANDROID_JAVA_HOME)/bin:$$PATH" \
+			SYNCHRO_CONSUMER_MAVEN_REPOSITORY="$$stage" \
+			./gradlew -Pversion="$(CURRENT_VERSION)" :synchro:publishAllPublicationsToConsumerRepository); \
+		test -f "$$stage/fit/trainstar/synchro/$(CURRENT_VERSION)/synchro-$(CURRENT_VERSION).aar"; \
+		mkdir -p "$$(dirname "$$final")"; \
+		rm -rf "$$final"; \
+		mv "$$stage" "$$final"; \
+		trap - EXIT HUP INT TERM
+
+client-consumer-rn-artifact: version-check
+	@set -eu; \
+		final="$(abspath $(CLIENT_ARTIFACT_DIR))/npm"; \
+		stage="$$final.tmp.$$$$"; \
+		cleanup() { rm -rf "$$stage"; }; \
+		trap cleanup EXIT HUP INT TERM; \
+		rm -rf "$$stage"; \
+		mkdir -p "$$stage"; \
+		(cd clients/react-native && \
+			corepack enable >/dev/null 2>&1 && \
+			yarn install --immutable && \
+			yarn prepare && \
+			npm pack --ignore-scripts --silent --pack-destination "$$stage"); \
+		test -f "$$stage/trainstar-synchro-react-native-$(CURRENT_VERSION).tgz"; \
+		mkdir -p "$$(dirname "$$final")"; \
+		rm -rf "$$final"; \
+		mv "$$stage" "$$final"; \
+		trap - EXIT HUP INT TERM
+
+client-consumer-artifacts: client-consumer-apple-artifact client-consumer-kotlin-artifact client-consumer-rn-artifact
+	@set -eu; \
+		final="$(abspath $(CLIENT_ARTIFACT_DIR))"; \
+		(cd "$$final" && find . -type f ! -name artifacts.sha256 -print0 | LC_ALL=C sort -z | xargs -0 shasum -a 256 > artifacts.sha256); \
+		echo "Client consumer artifacts ready at $$final"
+
+local-consumer-artifacts: client-consumer-artifacts
+
+test-consumer-swift: client-consumer-apple-artifact
+	@set -eu; \
+		artifact="$(abspath $(CLIENT_ARTIFACT_DIR))/apple/Synchro"; \
+		tmp="$$(mktemp -d "$${TMPDIR:-/tmp}/synchro-swift-consumer.XXXXXX")"; \
+		trap 'rm -rf "$$tmp"' EXIT HUP INT TERM; \
+		SYNCHRO_SWIFT_PACKAGE_PATH="$$artifact" swift package \
+			--package-path verification/consumers/swift \
+			--scratch-path "$$tmp/build" \
+			show-dependencies --format json > "$$tmp/dependencies.json"; \
+		grep -F "$$artifact" "$$tmp/dependencies.json" >/dev/null; \
+		if grep -F "$(CURDIR)/clients/swift" "$$tmp/dependencies.json" >/dev/null; then \
+			echo "Swift consumer resolved workspace client sources" >&2; \
+			exit 1; \
+		fi; \
+		SYNCHRO_SWIFT_PACKAGE_PATH="$$artifact" swift run \
+			--package-path verification/consumers/swift \
+			--scratch-path "$$tmp/build" \
+			SynchroConsumer
+
+test-consumer-swift-ios: client-consumer-apple-artifact
+	SUPPORT_PLATFORM_VERSION="$(SUPPORT_PLATFORM_VERSION)" \
+		sh verification/consumers/swift-ios/test-consumer.sh "$(abspath $(CLIENT_ARTIFACT_DIR))"
+
+test-consumer-kotlin: client-consumer-kotlin-artifact
+	@test -n "$(ANDROID_JAVA_HOME)" || (echo "Android builds require JDK 17. Set ANDROID_JAVA_HOME to a JDK 17 install."; exit 1)
+	@test -d "$(ANDROID_HOME)" || (echo "Android SDK not found at $(ANDROID_HOME). Set ANDROID_HOME to a valid SDK install."; exit 1)
+	@set -eu; \
+		tmp="$$(mktemp -d "$${TMPDIR:-/tmp}/synchro-kotlin-consumer.XXXXXX")"; \
+		trap 'rm -rf "$$tmp"' EXIT HUP INT TERM; \
+		SYNCHRO_CONSUMER_MAVEN_REPOSITORY="$(abspath $(CLIENT_ARTIFACT_DIR))/maven" \
+		ANDROID_HOME="$(ANDROID_HOME)" ANDROID_SDK_ROOT="$(ANDROID_HOME)" \
+		JAVA_HOME="$(ANDROID_JAVA_HOME)" PATH="$(ANDROID_JAVA_HOME)/bin:$$PATH" \
+		clients/kotlin/gradlew --project-dir verification/consumers/kotlin --no-daemon \
+			-PsynchroVersion="$(CURRENT_VERSION)" \
+			:app:assembleDebug :app:assembleDebugAndroidTest; \
+		SYNCHRO_CONSUMER_MAVEN_REPOSITORY="$(abspath $(CLIENT_ARTIFACT_DIR))/maven" \
+		ANDROID_HOME="$(ANDROID_HOME)" ANDROID_SDK_ROOT="$(ANDROID_HOME)" \
+		JAVA_HOME="$(ANDROID_JAVA_HOME)" PATH="$(ANDROID_JAVA_HOME)/bin:$$PATH" \
+		clients/kotlin/gradlew --project-dir verification/consumers/kotlin --no-daemon \
+			-PsynchroVersion="$(CURRENT_VERSION)" \
+			:app:dependencyInsight --dependency fit.trainstar:synchro \
+			--configuration debugRuntimeClasspath > "$$tmp/dependencies.txt"; \
+		grep -F "fit.trainstar:synchro:$(CURRENT_VERSION)" "$$tmp/dependencies.txt" >/dev/null; \
+		if grep -F "project :synchro" "$$tmp/dependencies.txt" >/dev/null; then \
+			echo "Kotlin consumer resolved the workspace client project" >&2; \
+			exit 1; \
+		fi; \
+		SYNCHRO_CONSUMER_MAVEN_REPOSITORY="$(abspath $(CLIENT_ARTIFACT_DIR))/maven" \
+		ANDROID_HOME="$(ANDROID_HOME)" ANDROID_SDK_ROOT="$(ANDROID_HOME)" \
+		JAVA_HOME="$(ANDROID_JAVA_HOME)" PATH="$(ANDROID_JAVA_HOME)/bin:$$PATH" \
+		sh verification/consumers/kotlin/test-internal-api-rejection.sh \
+			"$(CURDIR)/clients/kotlin/gradlew" "$(CURRENT_VERSION)"
+
+test-consumer-kotlin-device: client-consumer-kotlin-artifact
+	@test -n "$(ANDROID_JAVA_HOME)" || (echo "Android builds require JDK 17. Set ANDROID_JAVA_HOME to a JDK 17 install."; exit 1)
+	@test -d "$(ANDROID_HOME)" || (echo "Android SDK not found at $(ANDROID_HOME). Set ANDROID_HOME to a valid SDK install."; exit 1)
+	SYNCHRO_CONSUMER_MAVEN_REPOSITORY="$(abspath $(CLIENT_ARTIFACT_DIR))/maven" \
+		ANDROID_HOME="$(ANDROID_HOME)" ANDROID_SDK_ROOT="$(ANDROID_HOME)" \
+		JAVA_HOME="$(ANDROID_JAVA_HOME)" PATH="$(ANDROID_JAVA_HOME)/bin:$$PATH" \
+		clients/kotlin/gradlew --project-dir verification/consumers/kotlin --no-daemon \
+			-PsynchroVersion="$(CURRENT_VERSION)" \
+			:app:connectedDebugAndroidTest
+
+test-consumer-rn-ios: client-consumer-apple-artifact client-consumer-rn-artifact
+	SUPPORT_PLATFORM_VERSION="$(SUPPORT_PLATFORM_VERSION)" \
+		sh verification/consumers/react-native/test-consumer.sh ios "$(abspath $(CLIENT_ARTIFACT_DIR))" "$(CURRENT_VERSION)"
+
+test-consumer-rn-android: client-consumer-kotlin-artifact client-consumer-rn-artifact
+	ANDROID_HOME="$(ANDROID_HOME)" ANDROID_JAVA_HOME="$(ANDROID_JAVA_HOME)" \
+		sh verification/consumers/react-native/test-consumer.sh android "$(abspath $(CLIENT_ARTIFACT_DIR))" "$(CURRENT_VERSION)"
+
+test-client-platforms:
+	@test -n "$(SUPPORT_CELL_ID)" || (echo "SUPPORT_CELL_ID is required" >&2; exit 1)
+	@case "$(SUPPORT_CELL_ID)" in \
+		SUP-IOS-MIN-001) \
+			test "$(SUPPORT_PLATFORM_VERSION)" = "16" || { echo "SUPPORT_PLATFORM_VERSION must be 16" >&2; exit 1; }; \
+			$(MAKE) test-consumer-swift-ios ;; \
+		SUP-IOS-CURRENT-001) \
+			test -n "$(SUPPORT_PLATFORM_VERSION)" || { echo "SUPPORT_PLATFORM_VERSION is required" >&2; exit 1; }; \
+			$(MAKE) test-consumer-swift-ios ;; \
+		SUP-MACOS-MIN-001) \
+			test "$(SUPPORT_PLATFORM_VERSION)" = "13" || { echo "SUPPORT_PLATFORM_VERSION must be 13" >&2; exit 1; }; \
+			test "$$(sw_vers -productVersion | cut -d. -f1)" = "13" || { echo "macOS 13 is required" >&2; exit 1; }; \
+			$(MAKE) test-consumer-swift ;; \
+		SUP-MACOS-CURRENT-001) \
+			test -n "$(SUPPORT_PLATFORM_VERSION)" || { echo "SUPPORT_PLATFORM_VERSION is required" >&2; exit 1; }; \
+			test "$$(sw_vers -productVersion)" = "$(SUPPORT_PLATFORM_VERSION)" || { echo "macOS runtime does not match SUPPORT_PLATFORM_VERSION" >&2; exit 1; }; \
+			$(MAKE) test-consumer-swift ;; \
+		SUP-ANDROID-MIN-001|SUP-RN-ANDROID-MIN-001) \
+			test "$(SUPPORT_PLATFORM_VERSION)" = "24" || { echo "SUPPORT_PLATFORM_VERSION must be 24" >&2; exit 1; }; \
+			test "$$($(ANDROID_HOME)/platform-tools/adb shell getprop ro.build.version.sdk | tr -d '\r')" = "24" || { echo "Android API 24 is required" >&2; exit 1; }; \
+			if [ "$(SUPPORT_CELL_ID)" = "SUP-ANDROID-MIN-001" ]; then $(MAKE) test-consumer-kotlin-device; else $(MAKE) test-consumer-rn-android; fi ;; \
+		SUP-ANDROID-CURRENT-001|SUP-RN-ANDROID-CURRENT-001) \
+			test -n "$(SUPPORT_PLATFORM_VERSION)" || { echo "SUPPORT_PLATFORM_VERSION is required" >&2; exit 1; }; \
+			test "$$($(ANDROID_HOME)/platform-tools/adb shell getprop ro.build.version.sdk | tr -d '\r')" = "$(SUPPORT_PLATFORM_VERSION)" || { echo "Android runtime does not match SUPPORT_PLATFORM_VERSION" >&2; exit 1; }; \
+			if [ "$(SUPPORT_CELL_ID)" = "SUP-ANDROID-CURRENT-001" ]; then $(MAKE) test-consumer-kotlin-device; else $(MAKE) test-consumer-rn-android; fi ;; \
+		SUP-RN-IOS-MIN-001) \
+			test "$(SUPPORT_PLATFORM_VERSION)" = "16" || { echo "SUPPORT_PLATFORM_VERSION must be 16" >&2; exit 1; }; \
+			$(MAKE) test-consumer-rn-ios ;; \
+		SUP-RN-IOS-CURRENT-001) \
+			test -n "$(SUPPORT_PLATFORM_VERSION)" || { echo "SUPPORT_PLATFORM_VERSION is required" >&2; exit 1; }; \
+			$(MAKE) test-consumer-rn-ios ;; \
+		*) echo "unknown client support cell: $(SUPPORT_CELL_ID)" >&2; exit 1 ;; \
+	esac
+
+test-packaged-consumers: test-consumer-swift test-consumer-swift-ios test-consumer-kotlin test-consumer-kotlin-device test-consumer-rn-ios test-consumer-rn-android
 
 ext-build:
 	cd extensions/synchro-pg && cargo build
@@ -701,7 +942,7 @@ synchrod-pg-test-start: build-seed
 	$(PGRX_PSQL) -v ON_ERROR_STOP=1 -h "$(PGRX_ADMIN_HOST)" -p $(PGRX_PORT) -U "$(PGRX_ADMIN_USER)" -d $(ADAPTER_TEST_DB) -f extensions/testdata/register.sql || { if [ -f "$(PGRX_LOG_FILE)" ]; then tail -n 200 "$(PGRX_LOG_FILE)"; fi; exit 1; }; \
 	REGISTRY_READY=0; \
 	for attempt in $$(seq 1 $(PGRX_READY_TIMEOUT)); do \
-		REGISTRY_OUTPUT=$$($(PGRX_PSQL) -h "$(PGRX_ADMIN_HOST)" -p $(PGRX_PORT) -U "$(PGRX_ADMIN_USER)" -d $(ADAPTER_TEST_DB) -Atqc "SELECT CASE WHEN EXISTS (SELECT 1 FROM synchro.sync_registry registry JOIN synchro.sync_registry_generations generation ON generation.generation = registry.registry_generation WHERE generation.state = 'active' AND registry.table_name = 'orders') THEN '1' ELSE '0' END" 2>&1 || true); \
+		REGISTRY_OUTPUT=$$($(PGRX_PSQL) -h "$(PGRX_ADMIN_HOST)" -p $(PGRX_PORT) -U "$(PGRX_ADMIN_USER)" -d $(ADAPTER_TEST_DB) -Atqc "SELECT CASE WHEN EXISTS (SELECT 1 FROM synchro.sync_registry_generations generation WHERE generation.state = 'active' AND (SELECT count(*) FROM synchro.sync_registry registry WHERE registry.registry_generation = generation.generation) = 13 AND EXISTS (SELECT 1 FROM synchro.sync_registry registry WHERE registry.registry_generation = generation.generation AND registry.table_name = 'line_items' AND registry.membership_function_name = 'test_line_items_membership') AND EXISTS (SELECT 1 FROM synchro.sync_registry registry WHERE registry.registry_generation = generation.generation AND registry.table_name = 'document_comments' AND registry.membership_function_name = 'test_document_comments_membership')) AND NOT EXISTS (SELECT 1 FROM synchro.sync_registry_generations generation WHERE generation.state = 'pending' AND generation.validated) THEN '1' ELSE '0' END" 2>&1 || true); \
 		if [ "$$REGISTRY_OUTPUT" = "1" ]; then REGISTRY_READY=1; break; fi; \
 		sleep 1; \
 	done; \
@@ -712,11 +953,20 @@ synchrod-pg-test-start: build-seed
 		echo "Waiting for bgworker to observe seeded rows..."; \
 		for attempt in $$(seq 1 60); do \
 			EDGE_COUNT=$$($(PGRX_PSQL) -h "$(PGRX_ADMIN_HOST)" -p $(PGRX_PORT) -U "$(PGRX_ADMIN_USER)" -d $(ADAPTER_TEST_DB) -Atqc "SELECT count(*) FROM synchro.sync_bucket_edges" 2>/dev/null || echo 0); \
-			if [ "$$EDGE_COUNT" -gt 0 ] 2>/dev/null; then \
+			if [ "$$EDGE_COUNT" -ge 6 ] 2>/dev/null; then \
 				break; \
 			fi; \
 			sleep 1; \
 		done; \
+		if [ "$$EDGE_COUNT" -lt 6 ] 2>/dev/null; then \
+			echo "synchro worker did not materialize all canonical seed rows"; \
+			exit 1; \
+		fi; \
+		JSON_OUTPUT=$$($(PGRX_PSQL) -h "$(PGRX_ADMIN_HOST)" -p $(PGRX_PORT) -U "$(PGRX_ADMIN_USER)" -d $(ADAPTER_TEST_DB) -Atqc "SELECT CASE WHEN count(*) = 5 THEN '1' ELSE '0' END FROM (VALUES ('nations', 'metadata', '{\"source\":\"seed\"}'), ('suppliers', 'tags', '[\"seed\"]'), ('parts', 'specifications', '{\"color\":\"blue\"}'), ('parts', 'tags', '[\"seed\"]'), ('categories', 'metadata', '{\"source\":\"seed\"}')) expected(table_name, column_name, wire_value) JOIN synchro.sync_registry_generations generation ON generation.state = 'active' JOIN synchro.sync_registry registry ON registry.registry_generation = generation.generation AND registry.table_name = expected.table_name JOIN synchro.sync_registry_fields field ON field.registry_generation = registry.registry_generation AND field.relation_id = registry.relation_id AND field.physical_column = expected.column_name JOIN synchro.sync_captured_rows captured ON captured.relation_id = registry.relation_id WHERE captured.row_data -> field.field_id::text = to_jsonb(expected.wire_value)" 2>&1 || true); \
+		if [ "$$JSON_OUTPUT" != "1" ]; then \
+			echo "synchro worker did not preserve canonical seed JSON values"; \
+			exit 1; \
+		fi; \
 	else \
 		echo "No seed.sql found. Run 'make ext-seed' to generate test data."; \
 	fi; \
@@ -793,6 +1043,11 @@ synchrod-pg-test-start: build-seed
 			exit 1; \
 		fi; \
 		echo "Refreshing canonical seed asset..."; \
+		if lsof "$(CURDIR)/clients/react-native/example/seed.db" "$(CURDIR)/clients/react-native/example/seed.db-wal" "$(CURDIR)/clients/react-native/example/seed.db-shm" >/dev/null 2>&1; then \
+			echo "canonical seed asset is in use"; \
+			exit 1; \
+		fi; \
+		rm -f "$(CURDIR)/clients/react-native/example/seed.db-wal" "$(CURDIR)/clients/react-native/example/seed.db-shm"; \
 		DATABASE_URL="$(ADAPTER_TEST_URL)" "$(CURDIR)/$(SEED_BINARY)" --output "$(CURDIR)/clients/react-native/example/seed.db" --overwrite || { \
 			if [ -f "$(SYNCHROD_PG_LOG_FILE)" ]; then cat "$(SYNCHROD_PG_LOG_FILE)"; fi; \
 			rm -f "$(SYNCHROD_PG_PID_FILE)"; \

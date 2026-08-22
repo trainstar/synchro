@@ -805,6 +805,7 @@
                 id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
                 user_id TEXT NOT NULL,
                 document JSONB NOT NULL,
+                optional_document JSONB,
                 updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
                 deleted_at TIMESTAMPTZ
             )",
@@ -838,7 +839,11 @@
                 "insert",
                 record_id,
                 None,
-                Some(&[("user_id", json!(user_id)), ("document", json!(document))]),
+                Some(&[
+                    ("user_id", json!(user_id)),
+                    ("document", json!(document)),
+                    ("optional_document", serde_json::Value::Null),
+                ]),
             )],
         );
         let outcome = &response.json["accepted"][0];
@@ -847,6 +852,7 @@
             outcome["server_row"][field_id("test_json_orders", "document")].as_str(),
             Some(document)
         );
+        assert!(outcome["server_row"][field_id("test_json_orders", "optional_document")].is_null());
         assert_checksum_object(outcome);
         assert_row_outcome_matches_source(outcome, "test_json_orders", record_id);
     }

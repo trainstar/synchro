@@ -263,7 +263,7 @@ func TestConnectGateOrder(t *testing.T) {
 	t.Run("protocol precedes retirement and schema dispatch", func(t *testing.T) {
 		model := task6Model(t, task6ExistingState(first, first, task6ScopeA), clock)
 		task6Apply(t, model, "model", "retire-client", task6ClientPayload())
-		payload := `{"user_id":"task6-user","client_id":"task6-client","runtime_version":3,"protocol_version":2,"schema_reset":false,"schema":{"version":0,"hash":""},"scope_set_version":0,"known_scopes":[]}`
+		payload := `{"user_id":"task6-user","client_id":"task6-client","runtime_version":3,"protocol_version":99,"schema_reset":false,"schema":{"version":0,"hash":""},"scope_set_version":0,"known_scopes":[]}`
 		result := task6Apply(t, model, "connect", "send", payload)
 		if result.HTTP.Status != 426 || result.HTTP.Code != HTTPCode("upgrade_required") {
 			t.Fatalf("protocol gate result = %#v", result.HTTP)
