@@ -4,7 +4,9 @@ import android.content.Context
 import androidx.test.core.app.ApplicationProvider
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.test.runTest
@@ -35,6 +37,8 @@ import java.util.UUID
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
+import kotlin.concurrent.thread
+import kotlin.coroutines.CoroutineContext
 
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [28])
@@ -198,6 +202,104 @@ class SyncEngineTests {
         } finally {
             callback.cancel()
             engine.stop()
+        }
+    }
+
+    @Test
+    fun concurrentSecondStopWaitsForStoppedPublication() {
+        val (engine, _) = makeSyncEngine()
+        val publicationEntered = CountDownLatch(1)
+        val releasePublication = CountDownLatch(1)
+        val stoppedCallbacks = AtomicInteger()
+        val registration = engine.onStatusChange { status ->
+            if (status is SyncStatus.Stopped && stoppedCallbacks.getAndIncrement() == 0) {
+                publicationEntered.countDown()
+                releasePublication.await(5, TimeUnit.SECONDS)
+            }
+        }
+        val firstStop = thread { runBlocking { engine.stop() } }
+
+        try {
+            assertTrue(publicationEntered.await(2, TimeUnit.SECONDS))
+            val secondReturned = CountDownLatch(1)
+            val secondStop = thread {
+                runBlocking { engine.stop() }
+                secondReturned.countDown()
+            }
+
+            assertFalse(
+                "a concurrent stop returned before the first stopped publication completed",
+                secondReturned.await(200, TimeUnit.MILLISECONDS),
+            )
+            releasePublication.countDown()
+            firstStop.join(2_000)
+            secondStop.join(2_000)
+            assertFalse(firstStop.isAlive)
+            assertFalse(secondStop.isAlive)
+        } finally {
+            releasePublication.countDown()
+            firstStop.join(2_000)
+            registration.cancel()
+            runBlocking { engine.stop() }
+        }
+    }
+
+    @Test
+    fun lifecycleCallInsideApplicationTransactionFailsBeforeLockAcquisition() {
+        val (engine, database) = makeSyncEngine()
+
+        try {
+            val error = assertThrows(IllegalStateException::class.java) {
+                database.applicationTransaction {
+                    runBlocking { engine.stop() }
+                }
+            }
+            assertTrue(error.message.orEmpty().contains("application transaction"))
+        } finally {
+            runBlocking { engine.stop() }
+        }
+    }
+
+    @Test
+    fun stopClearsDebounceJobInstalledDuringSchedulingRace() {
+        val (engine, _) = makeSyncEngine()
+        val dispatchEntered = CountDownLatch(1)
+        val releaseDispatch = CountDownLatch(1)
+        val dispatchCount = AtomicInteger()
+        val dispatcher = object : CoroutineDispatcher() {
+            override fun dispatch(context: CoroutineContext, block: Runnable) {
+                if (dispatchCount.getAndIncrement() == 0) {
+                    dispatchEntered.countDown()
+                    releaseDispatch.await(5, TimeUnit.SECONDS)
+                }
+                block.run()
+            }
+        }
+        val scopeField = SyncEngine::class.java.getDeclaredField("scope").apply { isAccessible = true }
+        val debounceField = SyncEngine::class.java.getDeclaredField("debounceJob").apply { isAccessible = true }
+        val schedule = SyncEngine::class.java.getDeclaredMethod("scheduleDebouncedPush").apply { isAccessible = true }
+        scopeField.set(engine, CoroutineScope(SupervisorJob() + dispatcher))
+        val scheduler = thread { schedule.invoke(engine) }
+
+        try {
+            assertTrue(dispatchEntered.await(2, TimeUnit.SECONDS))
+            val stopReturned = CountDownLatch(1)
+            val stop = thread {
+                runBlocking { engine.stop() }
+                stopReturned.countDown()
+            }
+            stopReturned.await(200, TimeUnit.MILLISECONDS)
+            releaseDispatch.countDown()
+            scheduler.join(2_000)
+            stop.join(2_000)
+
+            assertFalse(scheduler.isAlive)
+            assertFalse(stop.isAlive)
+            assertNull(debounceField.get(engine))
+        } finally {
+            releaseDispatch.countDown()
+            scheduler.join(2_000)
+            runBlocking { engine.stop() }
         }
     }
 
