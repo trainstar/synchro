@@ -3010,7 +3010,7 @@ final class SyncEngineTests: XCTestCase {
                     url: request.url!,
                     statusCode: 503,
                     httpVersion: nil,
-                    headerFields: ["Retry-After": "1e308"]
+                    headerFields: ["Retry-After": "1" + String(repeating: "0", count: 308)]
                 )!
                 return (response, data)
             }
