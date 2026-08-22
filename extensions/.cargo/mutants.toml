@@ -22,10 +22,16 @@ examine_re = [
 ]
 
 exclude_re = [
+  # Serde expecting methods only format diagnostic text, which is not contract output.
   "::expecting -> fmt::Result",
+  # These Display implementations have no production wire consumer. Named serializers own wire values.
   "<impl fmt::Display",
+  # Transport-boundary tests own error-envelope validation, so this core set excludes its aggregate validator.
   "ErrorBody::validate",
+  # ErrorResponse::validate only delegates to the separately excluded ErrorBody matrix.
   "ErrorResponse::validate",
+  # context_only has no consumer outside the excluded ErrorBody validator.
   "context_only",
+  # OR and XOR are equivalent here because the shifted bit fields do not overlap.
   "replace \\| with \\^ in (decode_base64url|decode_lower_hex)",
 ]
