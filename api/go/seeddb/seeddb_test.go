@@ -24,6 +24,7 @@ import (
 type manifestMutationConnector struct {
 	connector driver.Connector
 	mutate    func([]byte) ([]byte, error)
+	before    func(context.Context) error
 }
 
 func (c *manifestMutationConnector) Connect(ctx context.Context) (driver.Conn, error) {
@@ -31,7 +32,7 @@ func (c *manifestMutationConnector) Connect(ctx context.Context) (driver.Conn, e
 	if err != nil {
 		return nil, err
 	}
-	return &manifestMutationConn{Conn: conn, mutate: c.mutate}, nil
+	return &manifestMutationConn{Conn: conn, mutate: c.mutate, before: c.before}, nil
 }
 
 func (c *manifestMutationConnector) Driver() driver.Driver {
@@ -41,6 +42,7 @@ func (c *manifestMutationConnector) Driver() driver.Driver {
 type manifestMutationConn struct {
 	driver.Conn
 	mutate func([]byte) ([]byte, error)
+	before func(context.Context) error
 }
 
 func (c *manifestMutationConn) QueryContext(
@@ -52,8 +54,14 @@ func (c *manifestMutationConn) QueryContext(
 	if !ok {
 		return nil, driver.ErrSkip
 	}
+	isPortableManifest := strings.Contains(query, "synchro_portable_seed_manifest")
+	if isPortableManifest && c.before != nil {
+		if err := c.before(ctx); err != nil {
+			return nil, err
+		}
+	}
 	rows, err := queryer.QueryContext(ctx, query, args)
-	if err != nil || !strings.Contains(query, "synchro_portable_seed_manifest") {
+	if err != nil || !isPortableManifest || c.mutate == nil {
 		return rows, err
 	}
 	return &manifestMutationRows{Rows: rows, mutate: c.mutate}, nil
@@ -961,6 +969,147 @@ func TestGenerateHydratesPortableRowsAndScopeState(t *testing.T) {
 	}
 	if diff := cmp.Diff(clientCompatibleMigrationIdentifiers, identifiers); diff != "" {
 		t.Fatalf("unexpected grdb migration identifiers (-want +got):\n%s", diff)
+	}
+}
+
+func TestGenerateUsesOneSnapshotDuringConcurrentSourceWrites(t *testing.T) {
+	db := testPostgres(t)
+	tableName := "test_seed_concurrent_snapshot"
+	registerSeedTestTable(t, db, tableName)
+	registerSharedScope(t, db, "global", true)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	initialID := "00000000-0000-0000-0000-000000000101"
+	if _, err := db.ExecContext(
+		ctx,
+		fmt.Sprintf(
+			"INSERT INTO %s (id, user_id, title, updated_at, deleted_at) VALUES ($1, $2, $3, '2026-03-23T00:00:00Z'::timestamptz, NULL)",
+			quotePGIdent(tableName),
+		),
+		initialID,
+		"user-1",
+		"before snapshot",
+	); err != nil {
+		t.Fatalf("inserting initial portable row: %v", err)
+	}
+	if !waitForPortableEdge(ctx, db, tableName, initialID) {
+		t.Fatal("initial portable row did not become WAL-materialized")
+	}
+
+	dbURL := os.Getenv("TEST_DATABASE_URL")
+	config, err := pgx.ParseConfig(dbURL)
+	if err != nil {
+		t.Fatalf("parsing postgres database URL: %v", err)
+	}
+	snapshotStarted := make(chan struct{})
+	continueExport := make(chan struct{})
+	released := false
+	exportDB := sql.OpenDB(&manifestMutationConnector{
+		connector: pgxstdlib.GetConnector(*config),
+		before: func(ctx context.Context) error {
+			close(snapshotStarted)
+			select {
+			case <-continueExport:
+				return nil
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		},
+	})
+	t.Cleanup(func() { _ = exportDB.Close() })
+
+	outputPath := filepath.Join(t.TempDir(), "concurrent-snapshot.db")
+	generateResult := make(chan error, 1)
+	go func() {
+		generateResult <- Generate(ctx, exportDB, GenerateOptions{OutputPath: outputPath})
+	}()
+	exportFinished := false
+	defer func() {
+		if !released {
+			close(continueExport)
+		}
+		cancel()
+		if !exportFinished {
+			select {
+			case <-generateResult:
+			case <-time.After(30 * time.Second):
+				t.Error("seed export did not stop during test cleanup")
+			}
+		}
+	}()
+
+	select {
+	case <-snapshotStarted:
+	case <-time.After(10 * time.Second):
+		t.Fatal("seed export did not reach the portable manifest boundary")
+	}
+
+	concurrentID := "00000000-0000-0000-0000-000000000102"
+	if _, err := db.ExecContext(
+		ctx,
+		fmt.Sprintf(
+			"INSERT INTO %s (id, user_id, title, updated_at, deleted_at) VALUES ($1, $2, $3, '2026-03-23T00:00:01Z'::timestamptz, NULL)",
+			quotePGIdent(tableName),
+		),
+		concurrentID,
+		"user-1",
+		"after snapshot",
+	); err != nil {
+		t.Fatalf("inserting concurrent portable row: %v", err)
+	}
+	if !waitForPortableEdge(ctx, db, tableName, concurrentID) {
+		t.Fatal("concurrent portable row did not become WAL-materialized")
+	}
+	close(continueExport)
+	released = true
+
+	select {
+	case err := <-generateResult:
+		exportFinished = true
+		if err != nil {
+			t.Fatalf("generate portable seed database: %v", err)
+		}
+	case <-time.After(30 * time.Second):
+		t.Fatal("seed export did not complete")
+	}
+
+	sqliteDB, err := sql.Open("sqlite", outputPath)
+	if err != nil {
+		t.Fatalf("opening generated portable seed database: %v", err)
+	}
+	defer sqliteDB.Close()
+
+	var initialCount, concurrentCount, rowVersionCount, scopeRowCount int
+	query := fmt.Sprintf("SELECT COUNT(*) FROM %s WHERE id = ?", quoteIdentifier(tableName))
+	if err := sqliteDB.QueryRow(query, initialID).Scan(&initialCount); err != nil {
+		t.Fatalf("reading initial portable row: %v", err)
+	}
+	if err := sqliteDB.QueryRow(query, concurrentID).Scan(&concurrentCount); err != nil {
+		t.Fatalf("reading concurrent portable row: %v", err)
+	}
+	if err := sqliteDB.QueryRow(
+		"SELECT COUNT(*) FROM _synchro_row_versions WHERE table_name = ? AND record_id = ?",
+		tableName,
+		concurrentID,
+	).Scan(&rowVersionCount); err != nil {
+		t.Fatalf("reading concurrent row version: %v", err)
+	}
+	if err := sqliteDB.QueryRow(
+		"SELECT COUNT(*) FROM _synchro_scope_rows WHERE scope_id = 'global' AND table_name = ? AND record_id = ?",
+		tableName,
+		concurrentID,
+	).Scan(&scopeRowCount); err != nil {
+		t.Fatalf("reading concurrent scope row: %v", err)
+	}
+	if initialCount != 1 || concurrentCount != 0 || rowVersionCount != 0 || scopeRowCount != 0 {
+		t.Fatalf(
+			"portable snapshot row counts = initial %d, concurrent %d, version %d, scope %d; want 1, 0, 0, 0",
+			initialCount,
+			concurrentCount,
+			rowVersionCount,
+			scopeRowCount,
+		)
 	}
 }
 
