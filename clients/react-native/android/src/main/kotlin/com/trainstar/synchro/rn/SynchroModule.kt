@@ -10,6 +10,9 @@ import kotlinx.coroutines.*
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.serialization.ExperimentalSerializationApi
+import kotlinx.serialization.encodeToString
+import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonNull
@@ -28,7 +31,7 @@ import java.security.MessageDigest
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 
-@OptIn(ExperimentalCoroutinesApi::class)
+@OptIn(ExperimentalCoroutinesApi::class, ExperimentalSerializationApi::class)
 class SynchroModule(reactContext: ReactApplicationContext) :
     NativeSynchroSpec(reactContext) {
 
@@ -50,7 +53,7 @@ class SynchroModule(reactContext: ReactApplicationContext) :
     private var statusSubscription: Cancellable? = null
     private var syncEventSubscription: Cancellable? = null
     private var conflictSubscription: Cancellable? = null
-    private var transportProxy: TransportObservationProxy? = null
+    private var transportObservationCollector: TransportObservationCollector? = null
 
     private fun rejectWithError(promise: Promise, error: Throwable) {
         when (error) {
@@ -149,10 +152,10 @@ class SynchroModule(reactContext: ReactApplicationContext) :
                 0
             }
             require(transportCapacity in 0..512) { "Invalid transport observation capacity" }
-            val nextTransportProxy = if (transportCapacity == 0) {
+            val nextTransportObservationCollector = if (transportCapacity == 0) {
                 null
             } else {
-                TransportObservationProxy(serverURL, transportCapacity)
+                TransportObservationCollector(transportCapacity)
             }
 
             val seedDatabasePath = rawSeedPath?.let { seedPath ->
@@ -165,7 +168,7 @@ class SynchroModule(reactContext: ReactApplicationContext) :
 
             val synchroConfig = SynchroConfig(
                 dbPath = dbPath,
-                serverURL = nextTransportProxy?.localURL ?: serverURL,
+                serverURL = serverURL,
                 authProvider = {
                     suspendCancellableCoroutine { continuation ->
                         val requestID = UUID.randomUUID().toString()
@@ -188,7 +191,8 @@ class SynchroModule(reactContext: ReactApplicationContext) :
                 maxRetryAttempts = maxRetryAttempts,
                 pullPageSize = pullPageSize,
                 pushBatchSize = pushBatchSize,
-                seedDatabasePath = seedDatabasePath
+                seedDatabasePath = seedDatabasePath,
+                transportObservationCollector = nextTransportObservationCollector,
             )
 
             scope.launch {
@@ -201,11 +205,11 @@ class SynchroModule(reactContext: ReactApplicationContext) :
                             client = nextClient
                             acceptingTransactions = true
                         }
-                        transportProxy = nextTransportProxy
+                        transportObservationCollector = nextTransportObservationCollector
                         wireClientEvents(nextClient)
                         promise.resolve(null)
                     } catch (e: Exception) {
-                        nextTransportProxy?.close()
+                        nextTransportObservationCollector?.cancelPauseBarrier()
                         if (rawSeedPath != null) {
                             promise.reject("INVALID_SEED", "Seed database failed validation", e)
                         } else {
@@ -1023,18 +1027,23 @@ class SynchroModule(reactContext: ReactApplicationContext) :
 
     @ReactMethod
     override fun inspectTransportObservations(promise: Promise) {
-        val proxy = transportProxy ?: run {
+        val collector = transportObservationCollector ?: run {
             promise.reject("NOT_CONNECTED", "Transport observation is not configured")
             return
         }
-        promise.resolve(proxy.snapshot())
+        promise.resolve(
+            Json { explicitNulls = false }.encodeToString(
+                TransportObservationSnapshot.serializer(),
+                collector.snapshot(),
+            ),
+        )
     }
 
     @ReactMethod
     override fun armTransportPause(operationClass: String, promise: Promise) {
         try {
-            val proxy = transportProxy ?: error("Transport observation is not configured")
-            proxy.arm(operationClass)
+            val collector = transportObservationCollector ?: error("Transport observation is not configured")
+            collector.armPause(transportOperationClass(operationClass))
             promise.resolve(null)
         } catch (error: Exception) {
             rejectWithError(promise, error)
@@ -1051,8 +1060,8 @@ class SynchroModule(reactContext: ReactApplicationContext) :
                         timeoutMs <= 60_000 &&
                         timeoutMs % 1.0 == 0.0,
                 ) { "Transport pause timeout is invalid" }
-                val proxy = transportProxy ?: error("Transport observation is not configured")
-                proxy.await(operationClass, timeoutMs.toLong())
+                val collector = transportObservationCollector ?: error("Transport observation is not configured")
+                collector.awaitPause(transportOperationClass(operationClass), timeoutMs.toLong())
                 promise.resolve(null)
             } catch (error: Exception) {
                 rejectWithError(promise, error)
@@ -1063,8 +1072,8 @@ class SynchroModule(reactContext: ReactApplicationContext) :
     @ReactMethod
     override fun resumeTransportPause(promise: Promise) {
         try {
-            val proxy = transportProxy ?: error("Transport observation is not configured")
-            proxy.resume()
+            val collector = transportObservationCollector ?: error("Transport observation is not configured")
+            collector.resumePause()
             promise.resolve(null)
         } catch (error: Exception) {
             rejectWithError(promise, error)
@@ -1130,8 +1139,8 @@ class SynchroModule(reactContext: ReactApplicationContext) :
         statusSubscription = null
         syncEventSubscription = null
         conflictSubscription = null
-        transportProxy?.close()
-        transportProxy = null
+        transportObservationCollector?.cancelPauseBarrier()
+        transportObservationCollector = null
         observers.values.forEach { it.cancel() }
         observers.clear()
         val activeSessions = synchronized(transactionLock) {
@@ -1143,6 +1152,9 @@ class SynchroModule(reactContext: ReactApplicationContext) :
         pendingAuthContinuations.values.forEach { it.cancel(CancellationException("client closed")) }
         pendingAuthContinuations.clear()
     }
+
+    private fun transportOperationClass(value: String): TransportOperationClass =
+        TransportOperationClass.fromWire(value) ?: error("transport operation is invalid")
 
     private fun rejectedMutationsJson(results: List<RejectedMutation>): String {
         return JSONArray(results.map { result ->

@@ -1,10 +1,13 @@
 package com.trainstar.synchro
 
 import kotlinx.coroutines.async
+import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.supervisorScope
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertSame
+import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.util.concurrent.TimeUnit
@@ -16,6 +19,8 @@ class TransportObservationTests {
         assertEquals(TransportOperationClass.PULL, TransportOperationClass.classify("/v1/sync/pull"))
         assertEquals(TransportOperationClass.SCHEMAS, TransportOperationClass.classify("/sync/schema"))
         assertEquals(TransportOperationClass.OTHER, TransportOperationClass.classify("/other/pull"))
+        assertEquals(TransportOperationClass.PULL, TransportOperationClass.fromWire("pull"))
+        assertEquals(null, TransportOperationClass.fromWire("PULL"))
     }
 
     @Test
@@ -58,6 +63,110 @@ class TransportObservationTests {
         assertFalse(request.isCompleted)
         collector.resumePause()
         request.await()
+    }
+
+    @Test
+    fun secondArmFailsTheBarrierClosed() {
+        val collector = TransportObservationCollector()
+        collector.armPause(TransportOperationClass.PULL)
+
+        val failure = assertThrows(TransportPauseBarrierException::class.java) {
+            collector.armPause(TransportOperationClass.PUSH)
+        }
+        assertEquals(TransportPauseBarrierError.ALREADY_ARMED, failure.error)
+        assertSame(
+            failure,
+            assertThrows(TransportPauseBarrierException::class.java) { collector.resumePause() },
+        )
+    }
+
+    @Test
+    fun secondQueuedArmFailsThePausedRequestClosed() = runTest {
+        supervisorScope {
+            val collector = TransportObservationCollector()
+            collector.armPause(TransportOperationClass.PULL)
+            val request = async { collector.pauseIfArmed(TransportOperationClass.PULL) }
+            collector.awaitPause(TransportOperationClass.PULL, TimeUnit.SECONDS.toMillis(1))
+            collector.armPause(TransportOperationClass.PUSH)
+
+            val failure = assertThrows(TransportPauseBarrierException::class.java) {
+                collector.armPause(TransportOperationClass.CONNECT)
+            }
+            assertEquals(TransportPauseBarrierError.ALREADY_ARMED, failure.error)
+            try {
+                request.await()
+                throw AssertionError("Expected the paused request to fail")
+            } catch (error: TransportPauseBarrierException) {
+                assertSame(failure, error)
+            }
+        }
+    }
+
+    @Test
+    fun wrongAwaitOperationFailsTheBarrierClosed() = runTest {
+        val collector = TransportObservationCollector()
+        collector.armPause(TransportOperationClass.PULL)
+
+        val failure = try {
+            collector.awaitPause(TransportOperationClass.PUSH, TimeUnit.SECONDS.toMillis(1))
+            throw AssertionError("Expected the wrong operation to fail")
+        } catch (error: TransportPauseBarrierException) {
+            error
+        }
+        assertEquals(TransportPauseBarrierError.WRONG_OPERATION, failure.error)
+        assertSame(
+            failure,
+            assertThrows(TransportPauseBarrierException::class.java) {
+                collector.armPause(TransportOperationClass.PULL)
+            },
+        )
+    }
+
+    @Test
+    fun invalidPauseTimeoutFailsTheBarrierClosed() = runTest {
+        val collector = TransportObservationCollector()
+        collector.armPause(TransportOperationClass.PULL)
+
+        val failure = try {
+            collector.awaitPause(TransportOperationClass.PULL, 0)
+            throw AssertionError("Expected the invalid timeout to fail")
+        } catch (error: TransportPauseBarrierException) {
+            error
+        }
+        assertEquals(TransportPauseBarrierError.TIMED_OUT, failure.error)
+        assertSame(
+            failure,
+            assertThrows(TransportPauseBarrierException::class.java) {
+                collector.armPause(TransportOperationClass.PULL)
+            },
+        )
+    }
+
+    @Test
+    fun resumeWhileIdleFailsTheBarrierClosed() {
+        val collector = TransportObservationCollector()
+
+        val failure = assertThrows(TransportPauseBarrierException::class.java) { collector.resumePause() }
+        assertEquals(TransportPauseBarrierError.NOT_PAUSED, failure.error)
+        assertSame(
+            failure,
+            assertThrows(TransportPauseBarrierException::class.java) {
+                collector.armPause(TransportOperationClass.PULL)
+            },
+        )
+    }
+
+    @Test
+    fun cancellingPausedTransportCancelsTheBarrier() = runTest {
+        val collector = TransportObservationCollector()
+        collector.armPause(TransportOperationClass.PULL)
+        val request = async { collector.pauseIfArmed(TransportOperationClass.PULL) }
+        collector.awaitPause(TransportOperationClass.PULL, TimeUnit.SECONDS.toMillis(1))
+
+        request.cancelAndJoin()
+
+        val failure = assertThrows(TransportPauseBarrierException::class.java) { collector.resumePause() }
+        assertEquals(TransportPauseBarrierError.CANCELLED, failure.error)
     }
 
     @Test

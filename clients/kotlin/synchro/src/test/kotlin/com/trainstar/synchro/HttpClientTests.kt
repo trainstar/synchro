@@ -9,6 +9,7 @@ import org.junit.Assert.*
 import org.junit.Before
 import org.junit.Test
 import kotlinx.serialization.json.Json
+import java.net.ServerSocket
 
 class HttpClientTests {
 
@@ -34,6 +35,20 @@ class HttpClientTests {
     fun tearDown() {
         server.shutdown()
     }
+
+    private fun observedHttpClient(
+        collector: TransportObservationCollector,
+        serverURL: String = server.url("/").toString().trimEnd('/'),
+    ): HttpClient = HttpClient(
+        SynchroConfig(
+            dbPath = "",
+            serverURL = serverURL,
+            authProvider = { "test-token" },
+            clientID = "test-device",
+            appVersion = "1.0.0",
+            transportObservationCollector = collector,
+        ),
+    )
 
     @Test
     fun testFetchSchemaSuccess() = runTest {
@@ -100,6 +115,25 @@ class HttpClientTests {
         } catch (error: SynchroError.NetworkError) {
             assertNotNull(error.underlying)
         }
+    }
+
+    @Test
+    fun testNetworkFailureRecordsSafeTransportObservation() = runTest {
+        val collector = TransportObservationCollector()
+        val unavailablePort = ServerSocket(0).use { it.localPort }
+        val observedClient = observedHttpClient(collector, "http://127.0.0.1:$unavailablePort")
+
+        try {
+            observedClient.fetchSchema()
+            fail("Expected a network error")
+        } catch (_: SynchroError.NetworkError) {
+        }
+
+        val observation = collector.snapshot().observations.single()
+        assertEquals(TransportOperationClass.SCHEMAS, observation.operationClass)
+        assertEquals(0, observation.statusCode)
+        assertTrue(observation.durationNanoseconds > 0)
+        assertNull(observation.requestFacts)
     }
 
     @Test
@@ -231,6 +265,48 @@ class HttpClientTests {
         assertEquals("\"test-device\"", body["client_id"].toString())
         assertEquals("13", body["scope_set_version"].toString())
         assertNull(body["checksum_mode"])
+    }
+
+    @Test
+    fun testPullRecordsDeduplicatedSafeTransportFacts() = runTest {
+        val responseBody = """
+            {
+                "changes": [],
+                "scope_set_version": 13,
+                "scope_cursors": {},
+                "scope_updates": {"add": [], "remove": []},
+                "rebuild": [],
+                "has_more": false,
+                "checksums": {}
+            }
+        """.trimIndent()
+        server.enqueue(MockResponse().setBody(responseBody).setResponseCode(200))
+        val collector = TransportObservationCollector()
+        val observedClient = observedHttpClient(collector)
+        val cursor = "private-cursor"
+
+        observedClient.pull(
+            PullRequest(
+                clientID = "test-device",
+                clientGeneration = 4,
+                schema = SchemaRef(version = 8, hash = "8b21d2a1"),
+                scopeSetVersion = 13,
+                scopes = mapOf(
+                    "orders_user:u_123" to ScopeCursorRef(cursor = cursor),
+                    "workouts_user:u_123" to ScopeCursorRef(cursor = cursor),
+                ),
+                limit = 100,
+            ),
+        )
+
+        val observation = collector.snapshot().observations.single()
+        assertEquals(TransportOperationClass.PULL, observation.operationClass)
+        assertEquals(200, observation.statusCode)
+        assertTrue(observation.durationNanoseconds > 0)
+        assertEquals(listOf(TransportObservationCollector.cursorFingerprint(cursor)), observation.cursorFingerprints)
+        assertEquals(true, observation.cursorFingerprintsComplete)
+        assertEquals(2, observation.requestFacts?.scopeCount)
+        assertEquals(0, observation.pullResponseFacts?.changeCount)
     }
 
     @Test

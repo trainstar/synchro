@@ -67,6 +67,7 @@ class HttpClient(
             "/sync/connect",
             validatedRequestJSON,
             RetryContext(RetryOperation.CONNECTING, validatedRequestJSON),
+            requestFacts = transportRequestFacts(request),
         )
     }
 
@@ -78,10 +79,14 @@ class HttpClient(
 
     internal suspend fun pullExact(request: PullRequest, requestJSON: String): PullResponse {
         val validatedRequestJSON = validateExactRequestJSON(request, requestJSON)
+        val cursorObservation = pullCursorObservation(request)
         return post(
             "/sync/pull",
             validatedRequestJSON,
             RetryContext(RetryOperation.PULLING, validatedRequestJSON),
+            cursorFingerprints = cursorObservation?.fingerprints,
+            cursorFingerprintsComplete = cursorObservation?.complete,
+            requestFacts = transportRequestFacts(request),
         )
     }
 
@@ -118,6 +123,8 @@ class HttpClient(
             "/sync/rebuild",
             requestJSON,
             RetryContext(RetryOperation.REBUILDING, requestJSON),
+            requestFacts = transportRequestFacts(request),
+            rebuildRequestedScope = request.scope,
         )
         return RawRebuildResponse(result.value, requestJSON, result.bodyJSON)
     }
@@ -131,12 +138,28 @@ class HttpClient(
         path: String,
         body: String,
         retryContext: RetryContext,
-    ): Resp = postWithBody<Resp>(path, body, retryContext).value
+        cursorFingerprints: List<String>? = null,
+        cursorFingerprintsComplete: Boolean? = null,
+        requestFacts: TransportRequestFacts? = null,
+        rebuildRequestedScope: String? = null,
+    ): Resp = postWithBody<Resp>(
+        path,
+        body,
+        retryContext,
+        cursorFingerprints,
+        cursorFingerprintsComplete,
+        requestFacts,
+        rebuildRequestedScope,
+    ).value
 
     private suspend inline fun <reified Resp> postWithBody(
         path: String,
         body: String,
         retryContext: RetryContext,
+        cursorFingerprints: List<String>? = null,
+        cursorFingerprintsComplete: Boolean? = null,
+        requestFacts: TransportRequestFacts? = null,
+        rebuildRequestedScope: String? = null,
     ): HTTPResult<Resp> {
         val url = config.serverURL.trimEnd('/') + path
         val request = Request.Builder()
@@ -144,7 +167,14 @@ class HttpClient(
             .post(body.toRequestBody("application/json".toMediaType()))
             .header("Content-Type", "application/json")
             .build()
-        return performWithBody(request, retryContext)
+        return performWithBody(
+            request,
+            retryContext,
+            cursorFingerprints,
+            cursorFingerprintsComplete,
+            requestFacts,
+            rebuildRequestedScope,
+        )
     }
 
     private suspend inline fun <reified Resp> get(path: String, retryContext: RetryContext?): Resp {
@@ -163,6 +193,10 @@ class HttpClient(
     private suspend inline fun <reified Resp> performWithBody(
         request: Request,
         retryContext: RetryContext?,
+        cursorFingerprints: List<String>? = null,
+        cursorFingerprintsComplete: Boolean? = null,
+        requestFacts: TransportRequestFacts? = null,
+        rebuildRequestedScope: String? = null,
     ): HTTPResult<Resp> {
         val token = config.authProvider()
         val authedRequest = request.newBuilder()
@@ -170,145 +204,284 @@ class HttpClient(
             .header("X-App-Version", config.appVersion)
             .build()
 
-        val response: Response
+        val operationClass = TransportOperationClass.classify(authedRequest.url.encodedPath)
+        val attemptStarted = System.nanoTime()
+        var observedStatusCode = 0
+        var observationRecorded = false
+
         try {
-            response = client.suspendEnqueue(authedRequest)
-        } catch (e: IOException) {
-            val underlying = SynchroError.NetworkError(e)
-            if (retryContext == null) throw underlying
-            throw RetryableError(
-                underlying = underlying,
-                retryAfter = null,
-                interruptedOperation = retryContext.interruptedOperation,
-                workIdentity = retryContext.workIdentity,
-                retryClassification = RetryClassification.NETWORK,
-            )
-        }
-
-        val responseContent = response.body
-        val declaredCharset = responseContent?.contentType()?.charset(Charsets.UTF_8)
-        if (declaredCharset != null && declaredCharset != Charsets.UTF_8) {
-            responseContent.close()
-            throw SynchroError.InvalidResponse("response is not UTF-8 JSON")
-        }
-        val bodyBytes = try {
-            readBoundedBody(responseContent)
-        } catch (e: IOException) {
-            val underlying = SynchroError.NetworkError(e)
-            if (retryContext == null) throw underlying
-            throw RetryableError(
-                underlying = underlying,
-                retryAfter = null,
-                interruptedOperation = retryContext.interruptedOperation,
-                workIdentity = retryContext.workIdentity,
-                retryClassification = RetryClassification.NETWORK,
-            )
-        }
-        val responseBody = try {
-            Integrity.decodeCanonicalWireJSON(bodyBytes)
-        } catch (e: Exception) {
-            throw SynchroError.InvalidResponse("decode failed: ${e.message}")
-        }
-
-        when (response.code) {
-            200 -> {
-                try {
-                    return HTTPResult(json.decodeFromString<Resp>(responseBody), responseBody)
-                } catch (e: Exception) {
-                    throw SynchroError.InvalidResponse("decode failed: ${e.message}")
-                }
-            }
-
-            409 -> {
-                val error = decodeProtocolError(responseBody)
-                if (error?.code == ProtocolErrorCode.CLIENT_GENERATION_EXPIRED) {
-                    val currentGeneration = error.currentClientGeneration
-                    if (error.retryable || currentGeneration == null || currentGeneration <= 0) {
-                        throw SynchroError.InvalidResponse("client generation expiry response is invalid")
-                    }
-                    throw ClientGenerationExpiredException(currentGeneration)
-                }
-                if (error?.code == ProtocolErrorCode.REBUILD_RESTART_REQUIRED) {
-                    val scopeID = error.scopeID
-                    if (error.retryable || scopeID.isNullOrEmpty()) {
-                        throw SynchroError.InvalidResponse("rebuild restart response is invalid")
-                    }
-                    throw RebuildRestartRequiredException(scopeID)
-                }
-                val msg = errorMessage(responseBody) ?: "semantic conflict"
-                throw SynchroError.ServerError(status = response.code, serverMessage = msg)
-            }
-
-            422 -> {
-                val error = decodeProtocolError(responseBody)
-                    ?: throw SynchroError.InvalidResponse("schema mismatch response is invalid")
-                if (error.code == ProtocolErrorCode.SCHEMA_MISMATCH) {
-                    val currentSchema = error.currentSchema
-                    val receivedSchema = error.receivedSchema
-                    if (error.retryable || currentSchema == null || receivedSchema == null) {
-                        throw SynchroError.InvalidResponse("schema mismatch response is invalid")
-                    }
-                    try {
-                        currentSchema.validate()
-                        receivedSchema.validate()
-                    } catch (_: ContractException) {
-                        throw SynchroError.InvalidResponse("schema mismatch response has an invalid schema reference")
-                    }
-                    throw SynchroError.SchemaMismatch(
-                        serverVersion = currentSchema.version,
-                        serverHash = currentSchema.hash,
-                    )
-                }
-                val msg = errorMessage(responseBody) ?: "schema or contract violation"
-                throw SynchroError.ServerError(status = response.code, serverMessage = msg)
-            }
-
-            426 -> {
-                val msg = errorMessage(responseBody) ?: "client upgrade required"
-                throw SynchroError.UpgradeRequired(
-                    currentVersion = config.appVersion,
-                    minimumVersion = msg
-                )
-            }
-
-            429, 503 -> {
-                val error = decodeRetryableProtocolError(responseBody)
-                    ?: throw SynchroError.InvalidResponse("retryable error response is invalid")
-                val validEnvelope = when (response.code) {
-                    429 -> error.code == ProtocolErrorCode.RETRY_LATER && error.retryable
-                    else -> error.code in setOf(
-                        ProtocolErrorCode.CAPTURE_PENDING,
-                        ProtocolErrorCode.TEMPORARY_UNAVAILABLE,
-                    ) && error.retryable
-                }
-                if (!validEnvelope) {
-                    throw SynchroError.InvalidResponse("retryable error response is invalid")
-                }
-                val retryAfter = parseRetryAfter(response.header("Retry-After"))
-                    ?: throw SynchroError.InvalidResponse("retryable error response has an invalid Retry-After")
-                val underlying = SynchroError.ServerError(
-                    status = response.code,
-                    serverMessage = error.message,
-                )
+            val response: Response
+            try {
+                response = client.suspendEnqueue(authedRequest)
+            } catch (e: IOException) {
+                val underlying = SynchroError.NetworkError(e)
                 if (retryContext == null) throw underlying
                 throw RetryableError(
                     underlying = underlying,
-                    retryAfter = retryAfter.delaySeconds,
+                    retryAfter = null,
                     interruptedOperation = retryContext.interruptedOperation,
                     workIdentity = retryContext.workIdentity,
-                    retryClassification = if (response.code == 429) {
-                        RetryClassification.HTTP_429
-                    } else {
-                        RetryClassification.HTTP_503
-                    },
-                    retryAfterDeadlineMs = retryAfter.deadlineMs,
+                    retryClassification = RetryClassification.NETWORK,
                 )
             }
+            observedStatusCode = response.code
 
-            else -> {
-                val msg = errorMessage(responseBody) ?: "HTTP ${response.code}"
-                throw SynchroError.ServerError(status = response.code, serverMessage = msg)
+            val responseContent = response.body
+            val declaredCharset = responseContent?.contentType()?.charset(Charsets.UTF_8)
+            if (declaredCharset != null && declaredCharset != Charsets.UTF_8) {
+                responseContent.close()
+                throw SynchroError.InvalidResponse("response is not UTF-8 JSON")
             }
+            val bodyBytes = try {
+                readBoundedBody(responseContent)
+            } catch (e: IOException) {
+                val underlying = SynchroError.NetworkError(e)
+                if (retryContext == null) throw underlying
+                throw RetryableError(
+                    underlying = underlying,
+                    retryAfter = null,
+                    interruptedOperation = retryContext.interruptedOperation,
+                    workIdentity = retryContext.workIdentity,
+                    retryClassification = RetryClassification.NETWORK,
+                )
+            }
+            val responseBody = try {
+                Integrity.decodeCanonicalWireJSON(bodyBytes)
+            } catch (e: Exception) {
+                throw SynchroError.InvalidResponse("decode failed: ${e.message}")
+            }
+
+            recordTransportObservation(
+                operationClass = operationClass,
+                statusCode = observedStatusCode,
+                attemptStarted = attemptStarted,
+                cursorFingerprints = cursorFingerprints,
+                cursorFingerprintsComplete = cursorFingerprintsComplete,
+                requestFacts = requestFacts,
+                responseBody = if (observedStatusCode == 200) responseBody else null,
+                rebuildRequestedScope = rebuildRequestedScope,
+            )
+            observationRecorded = true
+            config.transportObservationCollector?.pauseIfArmed(operationClass)
+
+            when (response.code) {
+                200 -> {
+                    try {
+                        return HTTPResult(json.decodeFromString<Resp>(responseBody), responseBody)
+                    } catch (e: Exception) {
+                        throw SynchroError.InvalidResponse("decode failed: ${e.message}")
+                    }
+                }
+
+                409 -> {
+                    val error = decodeProtocolError(responseBody)
+                    if (error?.code == ProtocolErrorCode.CLIENT_GENERATION_EXPIRED) {
+                        val currentGeneration = error.currentClientGeneration
+                        if (error.retryable || currentGeneration == null || currentGeneration <= 0) {
+                            throw SynchroError.InvalidResponse("client generation expiry response is invalid")
+                        }
+                        throw ClientGenerationExpiredException(currentGeneration)
+                    }
+                    if (error?.code == ProtocolErrorCode.REBUILD_RESTART_REQUIRED) {
+                        val scopeID = error.scopeID
+                        if (error.retryable || scopeID.isNullOrEmpty()) {
+                            throw SynchroError.InvalidResponse("rebuild restart response is invalid")
+                        }
+                        throw RebuildRestartRequiredException(scopeID)
+                    }
+                    val msg = errorMessage(responseBody) ?: "semantic conflict"
+                    throw SynchroError.ServerError(status = response.code, serverMessage = msg)
+                }
+
+                422 -> {
+                    val error = decodeProtocolError(responseBody)
+                        ?: throw SynchroError.InvalidResponse("schema mismatch response is invalid")
+                    if (error.code == ProtocolErrorCode.SCHEMA_MISMATCH) {
+                        val currentSchema = error.currentSchema
+                        val receivedSchema = error.receivedSchema
+                        if (error.retryable || currentSchema == null || receivedSchema == null) {
+                            throw SynchroError.InvalidResponse("schema mismatch response is invalid")
+                        }
+                        try {
+                            currentSchema.validate()
+                            receivedSchema.validate()
+                        } catch (_: ContractException) {
+                            throw SynchroError.InvalidResponse("schema mismatch response has an invalid schema reference")
+                        }
+                        throw SynchroError.SchemaMismatch(
+                            serverVersion = currentSchema.version,
+                            serverHash = currentSchema.hash,
+                        )
+                    }
+                    val msg = errorMessage(responseBody) ?: "schema or contract violation"
+                    throw SynchroError.ServerError(status = response.code, serverMessage = msg)
+                }
+
+                426 -> {
+                    val msg = errorMessage(responseBody) ?: "client upgrade required"
+                    throw SynchroError.UpgradeRequired(
+                        currentVersion = config.appVersion,
+                        minimumVersion = msg
+                    )
+                }
+
+                429, 503 -> {
+                    val error = decodeRetryableProtocolError(responseBody)
+                        ?: throw SynchroError.InvalidResponse("retryable error response is invalid")
+                    val validEnvelope = when (response.code) {
+                        429 -> error.code == ProtocolErrorCode.RETRY_LATER && error.retryable
+                        else -> error.code in setOf(
+                            ProtocolErrorCode.CAPTURE_PENDING,
+                            ProtocolErrorCode.TEMPORARY_UNAVAILABLE,
+                        ) && error.retryable
+                    }
+                    if (!validEnvelope) {
+                        throw SynchroError.InvalidResponse("retryable error response is invalid")
+                    }
+                    val retryAfter = parseRetryAfter(response.header("Retry-After"))
+                        ?: throw SynchroError.InvalidResponse("retryable error response has an invalid Retry-After")
+                    val underlying = SynchroError.ServerError(
+                        status = response.code,
+                        serverMessage = error.message,
+                    )
+                    if (retryContext == null) throw underlying
+                    throw RetryableError(
+                        underlying = underlying,
+                        retryAfter = retryAfter.delaySeconds,
+                        interruptedOperation = retryContext.interruptedOperation,
+                        workIdentity = retryContext.workIdentity,
+                        retryClassification = if (response.code == 429) {
+                            RetryClassification.HTTP_429
+                        } else {
+                            RetryClassification.HTTP_503
+                        },
+                        retryAfterDeadlineMs = retryAfter.deadlineMs,
+                    )
+                }
+
+                else -> {
+                    val msg = errorMessage(responseBody) ?: "HTTP ${response.code}"
+                    throw SynchroError.ServerError(status = response.code, serverMessage = msg)
+                }
+            }
+        } finally {
+            if (!observationRecorded) {
+                recordTransportObservation(
+                    operationClass = operationClass,
+                    statusCode = observedStatusCode,
+                    attemptStarted = attemptStarted,
+                    cursorFingerprints = cursorFingerprints,
+                    cursorFingerprintsComplete = cursorFingerprintsComplete,
+                    requestFacts = requestFacts,
+                    rebuildRequestedScope = rebuildRequestedScope,
+                )
+            }
+        }
+    }
+
+    private fun recordTransportObservation(
+        operationClass: TransportOperationClass,
+        statusCode: Int,
+        attemptStarted: Long,
+        cursorFingerprints: List<String>?,
+        cursorFingerprintsComplete: Boolean?,
+        requestFacts: TransportRequestFacts?,
+        responseBody: String? = null,
+        rebuildRequestedScope: String? = null,
+    ) {
+        val duration = (System.nanoTime() - attemptStarted).coerceAtLeast(1)
+        config.transportObservationCollector?.record(
+            operationClass = operationClass,
+            statusCode = statusCode,
+            durationNanoseconds = duration,
+            cursorFingerprints = if (operationClass == TransportOperationClass.PULL) {
+                cursorFingerprints ?: emptyList()
+            } else {
+                null
+            },
+            cursorFingerprintsComplete = if (operationClass == TransportOperationClass.PULL) {
+                cursorFingerprintsComplete ?: false
+            } else {
+                null
+            },
+            requestFacts = requestFacts,
+            rebuildResponseFacts = if (operationClass == TransportOperationClass.REBUILD) {
+                rebuildResponseFacts(responseBody, rebuildRequestedScope)
+            } else {
+                null
+            },
+            pullResponseFacts = if (operationClass == TransportOperationClass.PULL) {
+                pullResponseFacts(responseBody)
+            } else {
+                null
+            },
+        )
+    }
+
+    private fun transportRequestFacts(request: ConnectRequest): TransportRequestFacts = TransportRequestFacts(
+        clientGeneration = request.clientGeneration,
+        schemaVersion = request.schema.version,
+        schemaHash = request.schema.hash,
+        protocolVersion = request.protocolVersion,
+        scopeSetVersion = request.scopeSetVersion,
+        scopeCount = request.knownScopes.size,
+    )
+
+    private fun transportRequestFacts(request: PullRequest): TransportRequestFacts = TransportRequestFacts(
+        clientGeneration = request.clientGeneration,
+        schemaVersion = request.schema.version,
+        schemaHash = request.schema.hash,
+        scopeSetVersion = request.scopeSetVersion,
+        scopeCount = request.scopes.size,
+        limit = request.limit,
+    )
+
+    private fun transportRequestFacts(request: RebuildRequest): TransportRequestFacts = TransportRequestFacts(
+        clientGeneration = request.clientGeneration,
+        schemaVersion = request.schema.version,
+        schemaHash = request.schema.hash,
+        limit = request.limit,
+        rebuildIDFingerprint = TransportObservationCollector.cursorFingerprint(request.rebuildID),
+        cursorFingerprint = request.cursor?.let(TransportObservationCollector::cursorFingerprint),
+        cursorPresent = request.cursor != null,
+    )
+
+    private fun pullCursorObservation(request: PullRequest): PullCursorObservation? {
+        if (config.transportObservationCollector == null) return null
+        val fingerprints = request.scopes.values.mapNotNull { it.cursor }
+            .map(TransportObservationCollector::cursorFingerprint)
+            .distinct()
+            .sorted()
+        return PullCursorObservation(
+            fingerprints = fingerprints.take(TransportObservationCollector.maximumCursorFingerprints),
+            complete = fingerprints.size <= TransportObservationCollector.maximumCursorFingerprints,
+        )
+    }
+
+    private fun rebuildResponseFacts(
+        responseBody: String?,
+        requestedScope: String?,
+    ): TransportRebuildResponseFacts? = responseBody?.let { body ->
+        runCatching { json.decodeFromString<RebuildResponse>(body) }.getOrNull()?.let { response ->
+            TransportRebuildResponseFacts(
+                recordCount = response.records.size,
+                hasMore = response.hasMore,
+                hasCursor = response.cursor != null,
+                hasFinalScopeCursor = response.finalScopeCursor != null,
+                hasChecksum = response.checksum != null,
+                scopeMatchesRequest = response.scope == requestedScope,
+            )
+        }
+    }
+
+    private fun pullResponseFacts(responseBody: String?): TransportPullResponseFacts? = responseBody?.let { body ->
+        runCatching { json.decodeFromString<PullResponse>(body) }.getOrNull()?.let { response ->
+            TransportPullResponseFacts(
+                changeCount = response.changes.size,
+                hasMore = response.hasMore,
+                rebuildScopeCount = response.rebuild.size,
+                checksumCount = response.checksums?.size ?: 0,
+            )
         }
     }
 
@@ -378,6 +551,7 @@ class HttpClient(
     }
 
     private data class HTTPResult<T>(val value: T, val bodyJSON: String)
+    private data class PullCursorObservation(val fingerprints: List<String>, val complete: Boolean)
     private data class RetryContext(val interruptedOperation: String, val workIdentity: String)
 }
 

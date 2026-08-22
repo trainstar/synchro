@@ -12,7 +12,8 @@ data class SynchroConfig(
     val maxRetryAttempts: Int = 5,
     val pullPageSize: Int = 100,
     val pushBatchSize: Int = 100,
-    val seedDatabasePath: String? = null
+    val seedDatabasePath: String? = null,
+    val transportObservationCollector: TransportObservationCollector? = null,
 ) {
     init {
         require(pullPageSize in 1..1000) { "pullPageSize must be between 1 and 1000" }
