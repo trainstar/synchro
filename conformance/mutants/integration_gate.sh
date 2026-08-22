@@ -208,6 +208,10 @@ run_category \
 	scope-isolation \
 	conformance/mutants/integration/scope-isolation.patch \
 	TestRealMutationControlScopeIsolation
+run_category \
+	progress-order \
+	conformance/mutants/integration/progress-order.patch \
+	TestRealMutationControlProgressOrder
 
 gate_passed=1
-printf '%s\n' 'Integration mutation gate passed: 5 killed, 0 survived'
+printf '%s\n' 'Integration mutation gate passed: 6 killed, 0 survived'

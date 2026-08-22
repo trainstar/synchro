@@ -230,6 +230,17 @@ type WALProgressObservation struct {
 	AcknowledgedEndLSN string
 }
 
+// WALProgressOrderObservation is bounded evidence for one persisted ordering violation.
+type WALProgressOrderObservation struct {
+	PoisonActive              bool
+	FailureClass              string
+	RelationIDMatchesRegistry bool
+	SourceRowPresent          bool
+	ProgressCommitAtOrAhead   bool
+	RecordMaterialized        bool
+	WorkerBlocked             bool
+}
+
 // WALPoisonObservation is bounded evidence for one blocking source transaction.
 type WALPoisonObservation struct {
 	FailureClass              string
@@ -3466,6 +3477,133 @@ func (executor *OperatorExecutor) WorkerPeekDiagnostics(ctx context.Context) (st
 		return "", errors.New("worker replication diagnostic query failed")
 	}
 	return fmt.Sprintf("message_count=%d", count), nil
+}
+
+// CreateWALProgressOrderViolation commits one source row behind persisted progress.
+func (executor *OperatorExecutor) CreateWALProgressOrderViolation(ctx context.Context, recordID string) error {
+	if executor == nil || executor.harness == nil || !executor.harness.sourceReady {
+		return errors.New("operator executor is unavailable")
+	}
+	if ctx == nil || !diagnosticUUIDPattern.MatchString(recordID) {
+		return errors.New("WAL progress order control identity is invalid")
+	}
+	database, err := executor.harness.openDatabase(ctx, executor.harness.names.Database, executor.harness.env.Admin, false)
+	if err != nil {
+		return errors.New("open WAL progress order control connection failed")
+	}
+	defer database.Close()
+	tx, err := database.BeginTx(ctx, nil)
+	if err != nil {
+		return errors.New("begin WAL progress order control failed")
+	}
+	defer tx.Rollback()
+	var clean bool
+	if err := tx.QueryRowContext(ctx, `
+		SELECT NOT EXISTS (
+			       SELECT 1 FROM synchro.sync_wal_poison WHERE lifecycle = 'active'
+		       )
+		   AND NOT EXISTS (
+			       SELECT 1 FROM cf_items WHERE id = $1
+		       )`, recordID).Scan(&clean); err != nil || !clean {
+		return errors.New("WAL progress order control precondition failed")
+	}
+	if _, err := tx.ExecContext(ctx, "SET LOCAL ROLE "+quoteIdentifier(executor.harness.sourceRole)); err != nil {
+		return errors.New("activate WAL progress order source role failed")
+	}
+	if _, err := tx.ExecContext(
+		ctx,
+		"INSERT INTO cf_items (id, owner_id, value) VALUES ($1, $2, $3)",
+		recordID,
+		"diagnostic-user",
+		"mutation-progress-order",
+	); err != nil {
+		return errors.New("create WAL progress order source row failed")
+	}
+	if _, err := tx.ExecContext(ctx, "RESET ROLE"); err != nil {
+		return errors.New("restore WAL progress order operator role failed")
+	}
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE synchro.sync_wal_progress
+		SET materialized_commit_lsn = 'FFFFFFFF/FFFFFFFF'::pg_lsn,
+		    materialized_end_lsn = 'FFFFFFFF/FFFFFFFF'::pg_lsn,
+		    updated_at = now()
+		WHERE singleton`); err != nil {
+		return errors.New("persist WAL progress order violation failed")
+	}
+	if err := tx.Commit(); err != nil {
+		return errors.New("commit WAL progress order control failed")
+	}
+	return nil
+}
+
+// ObserveWALProgressOrder returns durable ordering-violation handling evidence.
+func (executor *OperatorExecutor) ObserveWALProgressOrder(ctx context.Context, recordID string) (WALProgressOrderObservation, error) {
+	if executor == nil || executor.harness == nil || !executor.harness.sourceReady {
+		return WALProgressOrderObservation{}, errors.New("operator executor is unavailable")
+	}
+	if ctx == nil || !diagnosticUUIDPattern.MatchString(recordID) {
+		return WALProgressOrderObservation{}, errors.New("WAL progress order observation identity is invalid")
+	}
+	database, err := executor.harness.openDatabase(ctx, executor.harness.names.Database, executor.harness.env.Admin, false)
+	if err != nil {
+		return WALProgressOrderObservation{}, errors.New("open WAL progress order observation connection failed")
+	}
+	defer database.Close()
+	var observation WALProgressOrderObservation
+	err = database.QueryRowContext(ctx, `
+		WITH poison AS (
+			SELECT commit_lsn, failure_class, relation_id
+			FROM synchro.sync_wal_poison
+			WHERE lifecycle = 'active'
+		)
+		SELECT EXISTS (
+			       SELECT 1 FROM poison
+		       ),
+		       COALESCE((
+			       SELECT failure_class FROM poison LIMIT 1
+		       ), ''),
+		       EXISTS (
+			       SELECT 1
+			       FROM poison
+			       JOIN synchro.sync_registry registry
+			         ON registry.relation_id::uuid = poison.relation_id
+			       JOIN synchro.sync_registry_generations generation
+			         ON generation.generation = registry.registry_generation
+			       WHERE registry.table_name = 'cf_items'
+			         AND generation.state = 'active'
+		       ),
+		       EXISTS (
+			       SELECT 1 FROM cf_items
+			       WHERE id = $1
+			         AND owner_id = 'diagnostic-user'
+			         AND value = 'mutation-progress-order'
+		       ),
+		       COALESCE((
+			       SELECT progress.materialized_commit_lsn >= poison.commit_lsn
+			       FROM poison
+			       CROSS JOIN synchro.sync_wal_progress progress
+			       WHERE progress.singleton
+		       ), false),
+		       EXISTS (
+			       SELECT 1 FROM synchro.sync_changelog
+			       WHERE table_name = 'cf_items' AND record_id = $2
+		       ),
+		       COALESCE((
+			       SELECT state = 'blocked' FROM synchro.sync_wal_worker_state
+			       WHERE worker_id = 'synchro_wal_consumer'
+		       ), false)`, recordID, recordID).Scan(
+		&observation.PoisonActive,
+		&observation.FailureClass,
+		&observation.RelationIDMatchesRegistry,
+		&observation.SourceRowPresent,
+		&observation.ProgressCommitAtOrAhead,
+		&observation.RecordMaterialized,
+		&observation.WorkerBlocked,
+	)
+	if err != nil {
+		return WALProgressOrderObservation{}, errors.New("read WAL progress order observation failed")
+	}
+	return observation, nil
 }
 
 // ObserveWALProgress returns the durable replication acknowledgement position.

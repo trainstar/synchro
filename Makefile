@@ -333,7 +333,7 @@ test-blackbox-wal: conformance-mod-download test-blackbox-harness
 test-blackbox-mutation-control:
 	@test -n "$(MUTATION_CONTROL_TEST)" || { echo "MUTATION_CONTROL_TEST is required" >&2; exit 1; }
 	@case "$(MUTATION_CONTROL_TEST)" in \
-		TestRealMutationControlCursorAdvancement|TestRealMutationControlWALAcknowledgement|TestRealMutationControlMutationConservation|TestRealMutationControlChecksumCorrectness|TestRealMutationControlScopeIsolation) ;; \
+		TestRealMutationControlCursorAdvancement|TestRealMutationControlWALAcknowledgement|TestRealMutationControlMutationConservation|TestRealMutationControlChecksumCorrectness|TestRealMutationControlScopeIsolation|TestRealMutationControlProgressOrder) ;; \
 		*) echo "MUTATION_CONTROL_TEST is not a supported mutation control" >&2; exit 1 ;; \
 	esac
 	@case "$(MUTATION_CONTROL_EXPECT)" in \

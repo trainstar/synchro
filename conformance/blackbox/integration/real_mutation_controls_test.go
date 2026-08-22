@@ -127,6 +127,47 @@ func TestRealMutationControlWALAcknowledgement(t *testing.T) {
 	})
 }
 
+func TestRealMutationControlProgressOrder(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	defer cancel()
+	harness, _ := provisionRealProofHarness(t, ctx)
+	recordID := "00000000-0000-4000-8c06-000000000001"
+	if err := harness.Operator().CreateWALProgressOrderViolation(ctx, recordID); err != nil {
+		t.Fatalf("create persisted WAL progress order violation: %v", err)
+	}
+
+	var observation blackbox.WALProgressOrderObservation
+	deadline := time.Now().Add(30 * time.Second)
+	for time.Now().Before(deadline) {
+		var err error
+		observation, err = harness.Operator().ObserveWALProgressOrder(ctx, recordID)
+		if err != nil {
+			t.Fatalf("observe WAL progress order control: %v", err)
+		}
+		if observation.PoisonActive || observation.RecordMaterialized {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	t.Run("assertion", func(t *testing.T) {
+		if !observation.PoisonActive || observation.FailureClass != "validation_failed" ||
+			!observation.RelationIDMatchesRegistry || !observation.SourceRowPresent ||
+			!observation.ProgressCommitAtOrAhead || observation.RecordMaterialized || !observation.WorkerBlocked {
+			t.Fatalf(
+				"predicate persisted_progress_order failed: poison=%t class=%q relation=%t source=%t ahead=%t materialized=%t blocked=%t",
+				observation.PoisonActive,
+				observation.FailureClass,
+				observation.RelationIDMatchesRegistry,
+				observation.SourceRowPresent,
+				observation.ProgressCommitAtOrAhead,
+				observation.RecordMaterialized,
+				observation.WorkerBlocked,
+			)
+		}
+	})
+}
+
 func TestRealMutationControlMutationConservation(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
