@@ -144,7 +144,7 @@ func TestRealMutationControlProgressOrder(t *testing.T) {
 		if err != nil {
 			t.Fatalf("observe WAL progress order control: %v", err)
 		}
-		if observation.PoisonActive || observation.RecordMaterialized {
+		if observation.RecordMaterialized || (observation.PoisonActive && observation.WorkerBlocked) {
 			break
 		}
 		time.Sleep(50 * time.Millisecond)
