@@ -514,6 +514,42 @@ jobs:
       - name: Run packaged Swift consumer
         run: make test-consumer-swift
 
+  rn-ios-parity:
+    if: github.event_name == 'pull_request'
+    needs: metadata
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v6.0.2
+
+      - uses: actions/setup-node@v6.3.0
+        with:
+          node-version: '22'
+
+      - uses: actions/cache@v5.0.4
+        with:
+          path: |
+            clients/react-native/node_modules
+            clients/react-native/example/node_modules
+            clients/react-native/.yarn/install-state.gz
+          key: rn-deps-${{ runner.os }}-${{ hashFiles('clients/react-native/yarn.lock', 'clients/react-native/package.json', 'clients/react-native/example/package.json') }}
+          restore-keys: |
+            rn-deps-${{ runner.os }}-
+
+      - name: Install React Native dependencies
+        working-directory: clients/react-native
+        run: |
+          corepack enable
+          yarn install --immutable
+
+      - name: Ensure CocoaPods is available
+        run: |
+          if ! command -v pod >/dev/null 2>&1; then
+            sudo gem install cocoapods
+          fi
+
+      - name: Compile React Native iOS TurboModule parity
+        run: make test-rn-ios-parity
+
   kotlin-sdk:
     runs-on: ubuntu-24.04
     needs: [metadata, linux-pgrx-runtime]
