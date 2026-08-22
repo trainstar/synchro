@@ -577,7 +577,7 @@ function decodeSelectors(value: unknown): RowSelector[] {
     return {
       table_name: requiredIdentifier(selector.table_name),
       primary_key_field: requiredIdentifier(selector.primary_key_field),
-      primary_key,
+      primary_key: primaryKey,
     };
   });
   if (new Set(selectors.map((selector) => `${selector.table_name}\u0000${selector.primary_key_field}\u0000${String(selector.primary_key)}`)).size !== selectors.length) {
@@ -620,7 +620,7 @@ function rawFailure(failure: SyncFailure): RawFailure {
 }
 
 function rawEvents(events: SyncEvent[]): RawEvent[] {
-  return events.map((event) => {
+  return events.map((event): RawEvent => {
     switch (event.type) {
       case 'state_changed':
         return { type: event.type, from: event.from, to: event.to };
@@ -675,6 +675,14 @@ function requiredArray(value: unknown): unknown[] {
     throw new ConformanceCommandError('invalid_command');
   }
   return value;
+}
+
+function requiredStringArray(value: unknown): string[] {
+  const result = requiredArray(value).map(requiredString);
+  if (new Set(result).size !== result.length) {
+    throw new ConformanceCommandError('invalid_command');
+  }
+  return result;
 }
 
 function requiredString(value: unknown): string {

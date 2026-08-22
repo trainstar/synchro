@@ -68,10 +68,10 @@ type NativeAction struct {
 }
 
 type NativeClientOpenParameters struct {
-	ClientKey    string  `json:"client_key"`
-	DatabaseMode string  `json:"database_mode"`
-	Initialization string `json:"initialization"`
-	SeedStepID   *StepID `json:"seed_step_id"`
+	ClientKey      string  `json:"client_key"`
+	DatabaseMode   string  `json:"database_mode"`
+	Initialization string  `json:"initialization"`
+	SeedStepID     *StepID `json:"seed_step_id"`
 }
 
 type NativeClientParameters struct {

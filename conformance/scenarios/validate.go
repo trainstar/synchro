@@ -79,7 +79,7 @@ var proofTargetPolicy = map[string]map[string]struct{}{
 	"reference-model":  {"test-conformance": {}},
 	"server-black-box": {"test-blackbox": {}},
 	"native-e2e": {
-		"test-swift": {}, "test-native-swift-schema-queue": {}, "test-native-swift-steady-pull": {}, "test-native-swift-rebuild-requests": {}, "test-kotlin": {}, "test-rn-e2e-ios": {}, "test-rn-e2e-android": {},
+		"test-swift": {}, "test-kotlin": {}, "test-rn-e2e-ios": {}, "test-rn-e2e-android": {},
 	},
 	"fault-injection": {
 		"test-blackbox": {}, "test-swift": {}, "test-kotlin": {}, "test-rn-e2e-ios": {}, "test-rn-e2e-android": {},
@@ -95,38 +95,29 @@ type targetRule struct {
 }
 
 var targetRules = map[string]targetRule{
-	"test-conformance":                   {},
-	"test-blackbox":                      {component: "postgresql-server", hasComponent: true},
-	"test-swift":                         {component: "swift-client", hasComponent: true},
-	"test-native-swift-schema-queue":     {component: "swift-client", platform: "macos", hasComponent: true, hasPlatform: true},
-	"test-native-swift-steady-pull":      {component: "swift-client", platform: "macos", hasComponent: true, hasPlatform: true},
-	"test-native-swift-rebuild-requests": {component: "swift-client", platform: "macos", hasComponent: true, hasPlatform: true},
-	"test-kotlin":                        {component: "kotlin-client", hasComponent: true},
-	"test-rn-e2e-ios":                    {component: "react-native-client", platform: "ios", hasComponent: true, hasPlatform: true},
-	"test-rn-e2e-android":                {component: "react-native-client", platform: "android", hasComponent: true, hasPlatform: true},
+	"test-conformance":    {},
+	"test-blackbox":       {component: "postgresql-server", hasComponent: true},
+	"test-swift":          {component: "swift-client", hasComponent: true},
+	"test-kotlin":         {component: "kotlin-client", hasComponent: true},
+	"test-rn-e2e-ios":     {component: "react-native-client", platform: "ios", hasComponent: true, hasPlatform: true},
+	"test-rn-e2e-android": {component: "react-native-client", platform: "android", hasComponent: true, hasPlatform: true},
 }
 
 var targetRequiredRoles = map[string]map[string]struct{}{
-	"test-conformance":                   {"conformance-runner": {}},
-	"test-blackbox":                      {"pg-extension": {}, "adapter": {}},
-	"test-swift":                         {"pg-extension": {}, "adapter": {}, "swift-spm": {}},
-	"test-native-swift-schema-queue":     {"pg-extension": {}, "adapter": {}, "swift-spm": {}},
-	"test-native-swift-steady-pull":      {"pg-extension": {}, "adapter": {}, "swift-spm": {}},
-	"test-native-swift-rebuild-requests": {"pg-extension": {}, "adapter": {}, "swift-spm": {}},
-	"test-kotlin":                        {"pg-extension": {}, "adapter": {}, "kotlin-maven": {}},
-	"test-rn-e2e-ios":                    {"pg-extension": {}, "adapter": {}, "swift-spm": {}, "cocoapods": {}, "react-native-npm": {}},
-	"test-rn-e2e-android":                {"pg-extension": {}, "adapter": {}, "kotlin-maven": {}, "react-native-npm": {}},
+	"test-conformance":    {"conformance-runner": {}},
+	"test-blackbox":       {"pg-extension": {}, "adapter": {}},
+	"test-swift":          {"pg-extension": {}, "adapter": {}, "swift-spm": {}},
+	"test-kotlin":         {"pg-extension": {}, "adapter": {}, "kotlin-maven": {}},
+	"test-rn-e2e-ios":     {"pg-extension": {}, "adapter": {}, "swift-spm": {}, "cocoapods": {}, "react-native-npm": {}},
+	"test-rn-e2e-android": {"pg-extension": {}, "adapter": {}, "kotlin-maven": {}, "react-native-npm": {}},
 }
 
 var targetAllowedRoles = map[string]map[string]struct{}{
-	"test-blackbox":                      {"pg-extension": {}, "pg-install-sql": {}, "adapter": {}, "seed-tool": {}, "portable-seed": {}},
-	"test-swift":                         {"pg-extension": {}, "adapter": {}, "seed-tool": {}, "swift-spm": {}, "cocoapods": {}, "portable-seed": {}},
-	"test-native-swift-schema-queue":     {"pg-extension": {}, "adapter": {}, "swift-spm": {}, "cocoapods": {}},
-	"test-native-swift-steady-pull":      {"pg-extension": {}, "adapter": {}, "swift-spm": {}, "cocoapods": {}},
-	"test-native-swift-rebuild-requests": {"pg-extension": {}, "adapter": {}, "swift-spm": {}, "cocoapods": {}},
-	"test-kotlin":                        {"pg-extension": {}, "adapter": {}, "seed-tool": {}, "kotlin-maven": {}, "portable-seed": {}},
-	"test-rn-e2e-ios":                    {"pg-extension": {}, "adapter": {}, "seed-tool": {}, "swift-spm": {}, "cocoapods": {}, "react-native-npm": {}, "portable-seed": {}},
-	"test-rn-e2e-android":                {"pg-extension": {}, "adapter": {}, "seed-tool": {}, "kotlin-maven": {}, "react-native-npm": {}, "portable-seed": {}},
+	"test-blackbox":       {"pg-extension": {}, "pg-install-sql": {}, "adapter": {}, "seed-tool": {}, "portable-seed": {}},
+	"test-swift":          {"pg-extension": {}, "adapter": {}, "seed-tool": {}, "swift-spm": {}, "cocoapods": {}, "portable-seed": {}},
+	"test-kotlin":         {"pg-extension": {}, "adapter": {}, "seed-tool": {}, "kotlin-maven": {}, "portable-seed": {}},
+	"test-rn-e2e-ios":     {"pg-extension": {}, "adapter": {}, "seed-tool": {}, "swift-spm": {}, "cocoapods": {}, "react-native-npm": {}, "portable-seed": {}},
+	"test-rn-e2e-android": {"pg-extension": {}, "adapter": {}, "seed-tool": {}, "kotlin-maven": {}, "react-native-npm": {}, "portable-seed": {}},
 }
 
 // Validate checks all semantic bindings in one scenario. It does not execute

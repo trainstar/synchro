@@ -173,7 +173,7 @@ type nativeInstallPayload struct {
 	InitialRegistry struct {
 		RegistryGeneration uint64                   `json:"registry_generation"`
 		Relations          []nativeAuthoredRelation `json:"relations"`
-		ScopeRules          []nativeScopeRule        `json:"scope_rules"`
+		ScopeRules         []nativeScopeRule        `json:"scope_rules"`
 	} `json:"initial_registry"`
 	Stream struct {
 		StreamGeneration string `json:"stream_generation"`

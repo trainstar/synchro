@@ -100,19 +100,19 @@ private enum RunnerJSONValue: Decodable {
             self = .null
             return
         }
-        if let value = tryDecode(Bool.self, from: scalar) {
+        if let value = Self.tryDecode(Bool.self, from: scalar) {
             self = .boolean(value)
             return
         }
-        if let value = tryDecode(Int64.self, from: scalar) {
+        if let value = Self.tryDecode(Int64.self, from: scalar) {
             self = .integer(value)
             return
         }
-        if let value = tryDecode(Double.self, from: scalar), value.isFinite {
+        if let value = Self.tryDecode(Double.self, from: scalar), value.isFinite {
             self = .double(value)
             return
         }
-        if let value = tryDecode(String.self, from: scalar) {
+        if let value = Self.tryDecode(String.self, from: scalar) {
             self = .string(value)
             return
         }
@@ -173,7 +173,7 @@ private enum RunnerJSONValue: Decodable {
         }
     }
 
-    private func tryDecode<T: Decodable>(
+    private static func tryDecode<T: Decodable>(
         _ type: T.Type,
         from container: SingleValueDecodingContainer
     ) -> T? {

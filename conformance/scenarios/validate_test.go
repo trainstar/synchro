@@ -268,7 +268,7 @@ func TestValidateRejectsSemanticMutants(t *testing.T) {
 			s.NativeExecution.Actions[2].Parameters = json.RawMessage(`{"client_key":"client-a","method":"start","completion":"idle","extra":true}`)
 		}, "unknown member"},
 		{"native reuse without seed", authoredTimeScenario, func(s *Scenario) {
-				s.NativeExecution.Actions[1].Parameters = json.RawMessage(`{"client_key":"client-a","database_mode":"reuse","initialization":"empty","seed_step_id":null}`)
+			s.NativeExecution.Actions[1].Parameters = json.RawMessage(`{"client_key":"client-a","database_mode":"reuse","initialization":"empty","seed_step_id":null}`)
 		}, "reuse open requires a seed step"},
 		{"duplicate native database", authoredTimeScenario, func(s *Scenario) {
 			s.NativeExecution.Clients = append(s.NativeExecution.Clients, NativeClient{Key: "client-b", UserID: "user-b", ClientID: "client-b", DatabaseKey: "database-a"})
@@ -708,15 +708,12 @@ func cloneScenario(s Scenario) Scenario {
 
 func validationMakeTargets() map[string]struct{} {
 	return map[string]struct{}{
-		"test-conformance":                   {},
-		"test-blackbox":                      {},
-		"test-swift":                         {},
-		"test-native-swift-schema-queue":     {},
-		"test-native-swift-steady-pull":      {},
-		"test-native-swift-rebuild-requests": {},
-		"test-kotlin":                        {},
-		"test-rn-e2e-ios":                    {},
-		"test-rn-e2e-android":                {},
+		"test-conformance":    {},
+		"test-blackbox":       {},
+		"test-swift":          {},
+		"test-kotlin":         {},
+		"test-rn-e2e-ios":     {},
+		"test-rn-e2e-android": {},
 	}
 }
 

@@ -192,11 +192,11 @@ func (e *Executor) executeOpen(ctx context.Context, request nativeexecution.Exec
 		return nativeexecution.ActionResult{}, errors.New("native open client is not declared")
 	}
 	if err := e.Platform.Open(ctx, OpenRequest{
-		Client:       client,
-		ClientKey:    parameters.ClientKey,
-		DatabaseMode: parameters.DatabaseMode,
+		Client:         client,
+		ClientKey:      parameters.ClientKey,
+		DatabaseMode:   parameters.DatabaseMode,
 		Initialization: parameters.Initialization,
-		SeedStepID:   cloneStepID(parameters.SeedStepID),
+		SeedStepID:     cloneStepID(parameters.SeedStepID),
 	}); err != nil {
 		return nativeexecution.ActionResult{}, fmt.Errorf("native platform open failed: %w", err)
 	}

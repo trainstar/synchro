@@ -49,13 +49,13 @@ type Manifest struct {
 
 // ManifestAction resolves one native action to its immutable scenario input.
 type ManifestAction struct {
-	Sequence         int                          `json:"sequence"`
-	Action           scenarios.NativeAction       `json:"action"`
-	SetupOperation   *scenarios.Operation         `json:"setup_operation,omitempty"`
-	Steps            []scenarios.Step             `json:"steps,omitempty"`
+	Sequence           int                                        `json:"sequence"`
+	Action             scenarios.NativeAction                     `json:"action"`
+	SetupOperation     *scenarios.Operation                       `json:"setup_operation,omitempty"`
+	Steps              []scenarios.Step                           `json:"steps,omitempty"`
 	WorkloadExpansions map[scenarios.StepID][]scenarios.Operation `json:"workload_expansions,omitempty"`
-	WireExpectations []scenarios.WireExpectation  `json:"wire_expectations,omitempty"`
-	Expectations     []scenarios.ModelExpectation `json:"expectations,omitempty"`
+	WireExpectations   []scenarios.WireExpectation                `json:"wire_expectations,omitempty"`
+	Expectations       []scenarios.ModelExpectation               `json:"expectations,omitempty"`
 }
 
 // BuildManifest resolves a validated selection into one transport-neutral plan.
@@ -188,12 +188,12 @@ type ExecutionAction struct {
 
 // ExecutionStep contains one operation without its expected outcome.
 type ExecutionStep struct {
-	ID                scenarios.StepID
-	Phase             string
-	Transport         string
-	Operation         scenarios.Operation
+	ID                 scenarios.StepID
+	Phase              string
+	Transport          string
+	Operation          scenarios.Operation
 	ExpandedOperations []scenarios.Operation
-	MeasurementSample *scenarios.MeasurementSample
+	MeasurementSample  *scenarios.MeasurementSample
 }
 
 // BudgetInstruction contains the authored instrumentation input without its verdict limit.
@@ -216,12 +216,12 @@ type MeasurementInstruction struct {
 
 // ExecuteRequest supplies one sanitized action to the native executor.
 type ExecuteRequest struct {
-	Action              ExecutionAction
-	SetupOperation      *scenarios.Operation
-	Steps               []ExecutionStep
-	BudgetInstructions  []BudgetInstruction
+	Action                  ExecutionAction
+	SetupOperation          *scenarios.Operation
+	Steps                   []ExecutionStep
+	BudgetInstructions      []BudgetInstruction
 	MeasurementInstructions []MeasurementInstruction
-	Clients             []scenarios.NativeClient
+	Clients                 []scenarios.NativeClient
 }
 
 // WireObservation records the raw wire result for one covered step.

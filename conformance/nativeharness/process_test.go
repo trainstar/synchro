@@ -93,7 +93,7 @@ func TestValidateRunnerResponseRejectsInvalidShapes(t *testing.T) {
 }
 
 func TestValidateRunnerResponseValidatesRawTransportObservations(t *testing.T) {
-	valid := `{"schema_version":1,"outcome":"passed","result":{"transport_observations":{"observations":[{"sequence":1,"operation_class":"pull","status_code":200,"duration_nanoseconds":1,"cursor_fingerprints":["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"],"cursor_fingerprints_complete":true,"request_facts":{"client_generation":1,"schema_version":1,"schema_hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","scope_set_version":1,"scope_count":1,"limit":1},"pull_response_facts":{"change_count":1,"has_more":false,"rebuild_scope_count":0,"checksum_count":1}}],"overflowed":false,"sequence_checkpoint":1}},"error_code":null}`
+	valid := `{"schema_version":1,"outcome":"passed","result":{"transport_observations":{"observations":[{"sequence":1,"operation_class":"pull","status_code":200,"retryable":false,"duration_nanoseconds":1,"cursor_fingerprints":["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"],"cursor_fingerprints_complete":true,"request_facts":{"client_generation":1,"schema_version":1,"schema_hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","scope_set_version":1,"scope_count":1,"limit":1},"pull_response_facts":{"change_count":1,"has_more":false,"rebuild_scope_count":0,"checksum_count":1}}],"overflowed":false,"sequence_checkpoint":1}},"error_code":null}`
 	if _, err := validateRunnerResponse([]byte(valid)); err != nil {
 		t.Fatalf("valid transport observations rejected: %v", err)
 	}
@@ -161,9 +161,9 @@ func TestValidateRunnerResponseRequiresStrictEnvelope(t *testing.T) {
 func TestValidateRunnerCommandUsesCurrentOnlyProtocol(t *testing.T) {
 	command := runnerCommand{
 		SchemaVersion: 1,
-		Operation: "begin-call",
-		CallID:    "sync_cycle",
-		Method:    "retry-after-error",
+		Operation:     "begin-call",
+		CallID:        "sync_cycle",
+		Method:        "retry-after-error",
 	}
 	if err := validateRunnerCommand(command); err != nil {
 		t.Fatalf("validate current begin-call command: %v", err)

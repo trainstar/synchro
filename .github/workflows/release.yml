@@ -346,9 +346,6 @@ jobs:
       - name: Validate Swift SDK
         run: make test-swift
 
-      - name: Validate native Swift conformance
-        run: make test-native-swift
-
   validate-rn-ios:
     needs: validate-metadata
     runs-on: macos-15
@@ -548,6 +545,9 @@ jobs:
 
       - name: Set Android Java home
         run: echo "ANDROID_JAVA_HOME=${JAVA_HOME}" >> "$GITHUB_ENV"
+
+      - name: Validate Kotlin unit tests
+        run: make test-kotlin-unit
 
       - name: Validate Kotlin SDK
         run: make test-kotlin
@@ -921,7 +921,7 @@ jobs:
         run: ./gradlew publishAndReleaseToMavenCentral
 
   publish-npm:
-    needs: [validate-rn-ios, validate-rn-android, release-gates]
+    needs: [validate-quality, validate-rn-ios, validate-rn-android, release-gates]
     runs-on: ubuntu-24.04
     if: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') && needs.release-gates.outputs.publish_npm == 'true' }}
     permissions:

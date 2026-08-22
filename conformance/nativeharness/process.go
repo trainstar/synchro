@@ -33,23 +33,23 @@ const (
 )
 
 type runnerCommand struct {
-	SchemaVersion      int             `json:"schema_version"`
-	Operation          string          `json:"operation"`
-	DatabasePath       string          `json:"database_path,omitempty"`
-	ServerURL          string          `json:"server_url,omitempty"`
-	AuthToken          string          `json:"auth_token,omitempty"`
-	ClientID           string          `json:"client_id,omitempty"`
-	SeedDatabasePath   string          `json:"seed_database_path,omitempty"`
-	Platform           string          `json:"platform,omitempty"`
-	AppVersion         string          `json:"app_version,omitempty"`
-	PullPageSize       int             `json:"pull_page_size,omitempty"`
-	TransportCapacity  int             `json:"transport_capacity,omitempty"`
-	LocalAction        *runnerLocalAction   `json:"local_action,omitempty"`
-	LifecycleOperation string               `json:"lifecycle_operation,omitempty"`
-	TransportOperation string               `json:"transport_operation,omitempty"`
-	CallID             string               `json:"call_id,omitempty"`
-	Method             string               `json:"method,omitempty"`
-	RowSelectors       []runnerRowSelector  `json:"row_selectors,omitempty"`
+	SchemaVersion      int                 `json:"schema_version"`
+	Operation          string              `json:"operation"`
+	DatabasePath       string              `json:"database_path,omitempty"`
+	ServerURL          string              `json:"server_url,omitempty"`
+	AuthToken          string              `json:"auth_token,omitempty"`
+	ClientID           string              `json:"client_id,omitempty"`
+	SeedDatabasePath   string              `json:"seed_database_path,omitempty"`
+	Platform           string              `json:"platform,omitempty"`
+	AppVersion         string              `json:"app_version,omitempty"`
+	PullPageSize       int                 `json:"pull_page_size,omitempty"`
+	TransportCapacity  int                 `json:"transport_capacity,omitempty"`
+	LocalAction        *runnerLocalAction  `json:"local_action,omitempty"`
+	LifecycleOperation string              `json:"lifecycle_operation,omitempty"`
+	TransportOperation string              `json:"transport_operation,omitempty"`
+	CallID             string              `json:"call_id,omitempty"`
+	Method             string              `json:"method,omitempty"`
+	RowSelectors       []runnerRowSelector `json:"row_selectors,omitempty"`
 }
 
 type runnerLocalAction struct {
@@ -86,13 +86,13 @@ type runnerResult struct {
 	RowsAffected          *int                          `json:"rows_affected"`
 	PendingChangeCount    *int                          `json:"pending_change_count"`
 	Schema                *schemaRef                    `json:"schema"`
-	ApplicationRows       []map[string]json.RawMessage `json:"application_rows"`
+	ApplicationRows       []map[string]json.RawMessage  `json:"application_rows"`
 	RetainedMutations     []retainedMutation            `json:"retained_mutations"`
 	RejectedMutations     []retainedRejection           `json:"rejected_mutations"`
 	ScopeStates           []scopeStateRecord            `json:"scope_states"`
 	ScopeRows             []scopeRowRecord              `json:"scope_rows"`
 	RowMetadata           *rowMetadataRecord            `json:"row_metadata"`
-	RowMetadataRecords    []rowMetadataRecord          `json:"row_metadata_records"`
+	RowMetadataRecords    []rowMetadataRecord           `json:"row_metadata_records"`
 	RebuildAttempts       []rebuildAttemptRecord        `json:"rebuild_attempts"`
 	RebuildReceiptProofs  []rebuildReceiptProofRecord   `json:"rebuild_receipt_proofs"`
 	Events                []eventRecord                 `json:"events"`
@@ -115,12 +115,12 @@ type runnerFailure struct {
 
 func (f *runnerFailure) UnmarshalJSON(data []byte) error {
 	var raw struct {
-		Operation      *string           `json:"operation"`
-		Code           *string           `json:"code"`
-		Retryable      *bool             `json:"retryable"`
-		Message        *string           `json:"message"`
-		RecoveryAction *string           `json:"recoveryAction"`
-		Metadata       *map[string]string  `json:"metadata"`
+		Operation      *string            `json:"operation"`
+		Code           *string            `json:"code"`
+		Retryable      *bool              `json:"retryable"`
+		Message        *string            `json:"message"`
+		RecoveryAction *string            `json:"recoveryAction"`
+		Metadata       *map[string]string `json:"metadata"`
 	}
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	decoder.DisallowUnknownFields()
@@ -503,17 +503,17 @@ type wireRejection struct {
 }
 
 type eventRecord struct {
-	Type          string          `json:"type"`
-	Status        *string         `json:"status"`
-	MutationID    *string         `json:"mutation_id"`
-	TableID       *string         `json:"table_id"`
-	RejectionCode *string         `json:"rejection_code"`
-	SourceSchema  *schemaRef      `json:"source_schema"`
-	TargetSchema  *schemaRef      `json:"target_schema"`
-	SchemaAction  *string         `json:"schema_action"`
-	ScopeID       *string         `json:"scope_id"`
-	RebuildID     *string         `json:"rebuild_id"`
-	Failure       *runnerFailure  `json:"failure"`
+	Type          string         `json:"type"`
+	Status        *string        `json:"status"`
+	MutationID    *string        `json:"mutation_id"`
+	TableID       *string        `json:"table_id"`
+	RejectionCode *string        `json:"rejection_code"`
+	SourceSchema  *schemaRef     `json:"source_schema"`
+	TargetSchema  *schemaRef     `json:"target_schema"`
+	SchemaAction  *string        `json:"schema_action"`
+	ScopeID       *string        `json:"scope_id"`
+	RebuildID     *string        `json:"rebuild_id"`
+	Failure       *runnerFailure `json:"failure"`
 }
 
 type runnerProcess struct {

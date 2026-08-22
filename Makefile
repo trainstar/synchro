@@ -12,6 +12,7 @@
 	docs-dev \
 	verify-contract \
 	conformance-mod-download \
+	build-conformance \
 	lint-conformance \
 	test-conformance-testresult \
 	test-conformance-module \
@@ -27,10 +28,6 @@
 	test-blackbox-components \
 	test-blackbox-wal \
 	test-blackbox-mutation-control \
-	test-native-swift \
-	test-native-swift-schema-queue \
-	test-native-swift-steady-pull \
-	test-native-swift-rebuild-requests \
 	parse-testresult \
 	conformance-adapter-artifact \
 	conformance-pg18-extension-artifact \
@@ -66,6 +63,9 @@
 	test-kotlin \
 	test-kotlin-integration \
 	test-rn-unit \
+	test-rn-android-parity \
+	test-rn-ios-parity \
+	test-rn-native-parity \
 	rn-seed-asset \
 	rn-e2e-server-seed \
 	rn-watchman-reset \
@@ -113,8 +113,6 @@ ANDROID_JAVA_HOME ?= $(shell \
 		fi; \
 	fi)
 RN_ANDROID_DETOX_CONFIG ?= android.emu.release
-SWIFT_NATIVE_RUNNER ?= $(CURDIR)/clients/swift/.build/debug/synchro-native-runner
-
 PGRX_PG ?= pg18
 PGRX_PORT ?= 28818
 PGRX_READY_TIMEOUT ?= 90
@@ -130,10 +128,9 @@ PGRX_PG_CONFIG ?= $(shell awk -F'"' '/^$(PGRX_PG)[[:space:]]*=/ { print $$2 }' $
 PGRX_PG_BIN_DIR ?= $(dir $(PGRX_PG_CONFIG))
 PGRX_PSQL ?= $(PGRX_PG_BIN_DIR)psql
 PGRX_TARGET_DIR ?= $(CURDIR)/.pgrx-target
-PGRX_TEST_NAME ?=
 MUTATION_CONTROL_TEST ?=
+MUTATION_CONTROL_EXPECT ?= target_pass
 TESTRESULT_TEST_NAME ?=
-BLACKBOX_TEST_PATTERN ?= .
 BLACKBOX_TEST_COUNT ?= 1
 CONFORMANCE_ADAPTER_ARTIFACT_DIR ?= $(CURDIR)/dist/conformance/synchrod-pg-adapter
 CONFORMANCE_EXTENSION_ARTIFACT ?= $(CURDIR)/dist/conformance/synchro-pg-pg18
@@ -180,6 +177,7 @@ help:
 	@echo "  docs-dev              - Run the docs site locally"
 	@echo "  verify-contract       - Validate the machine-readable release contract"
 	@echo "  conformance-mod-download - Download standalone conformance dependencies"
+	@echo "  build-conformance     - Build every standalone conformance package"
 	@echo "  lint-conformance      - Format and vet the standalone conformance module"
 	@echo "  test-conformance-testresult - Test the structured Go test-result parser"
 	@echo "  test-conformance-module - Test standalone conformance module policy"
@@ -194,10 +192,6 @@ help:
 	@echo "  test-inventory        - Test generated evidence inventory"
 	@echo "  test-blackbox         - Run the packaged server black-box suite"
 	@echo "  test-blackbox-mutation-control - Run one structured real mutation control"
-	@echo "  test-native-swift     - Run implemented real macOS native scenarios"
-	@echo "  test-native-swift-schema-queue - Run the real macOS schema-queue scenario"
-	@echo "  test-native-swift-steady-pull - Run the real macOS steady-pull scenario"
-	@echo "  test-native-swift-rebuild-requests - Run the real macOS rebuild-requests scenario"
 	@echo "  rc-check-pg18         - Verify the packaged PostgreSQL 18 candidate"
 	@echo "  evidence              - Generate and verify immutable RC evidence"
 	@echo "  lint-go               - Run Go formatting checks and go vet"
@@ -219,6 +213,9 @@ help:
 	@echo "  test-kotlin-unit      - Run Kotlin unit tests"
 	@echo "  test-kotlin           - Run Kotlin integration tests against the local adapter"
 	@echo "  test-rn-unit          - Run React Native Jest tests"
+	@echo "  test-rn-android-parity - Regenerate the TurboModule spec and compile the Android implementation"
+	@echo "  test-rn-ios-parity     - Compile the iOS implementation against the generated TurboModule spec"
+	@echo "  test-rn-native-parity  - Compile both native implementations against one TurboModule spec"
 	@echo "  test-rn-e2e-ios       - Run React Native Detox tests on iOS"
 	@echo "  test-rn-e2e-android   - Run React Native Detox tests on Android ($(RN_ANDROID_DETOX_CONFIG))"
 	@echo "  test-rn               - Run React Native Detox tests on both platforms"
@@ -283,21 +280,28 @@ verify-contract:
 conformance-mod-download:
 	cd conformance && GOFLAGS= GOWORK=off go mod download all
 
+build-conformance: conformance-mod-download
+	cd conformance && GOFLAGS= GOWORK=off go build ./...
+
 lint-conformance: conformance-mod-download
 	@test -z "$$(find conformance -name '*.go' -print0 | xargs -0 gofmt -l)"
 	cd conformance && GOFLAGS= GOWORK=off go vet ./...
 
 test-conformance-testresult:
-	cd conformance && GOFLAGS= GOWORK=off go test ./cmd/testresult -count=1
+	cd conformance && GOFLAGS= GOWORK=off go run ./cmd/testresult suite -- go test -json ./cmd/testresult -count=1
+	@cd conformance && if GOFLAGS= GOWORK=off go run ./cmd/testresult suite -- go test -json ./cmd/testresult -count=1 -run '^TestDoesNotExist$$'; then \
+		echo "testresult accepted a zero-match run" >&2; \
+		exit 1; \
+	fi
 
 test-conformance-module:
-	cd conformance && GOFLAGS= GOWORK=off go test ./internal/importguard -count=1 -run 'TestModulePolicy'
+	cd conformance && GOFLAGS= GOWORK=off go run ./cmd/testresult suite -- go test -json ./internal/importguard -count=1 -run '^TestModulePolicy$$'
 
 test-conformance-imports:
-	cd conformance && GOFLAGS= GOWORK=off go test ./internal/importguard -count=1
+	cd conformance && GOFLAGS= GOWORK=off go run ./cmd/testresult suite -- go test -json ./internal/importguard -count=1
 
 test-conformance-contract:
-	cd conformance && GOFLAGS= GOWORK=off go test ./internal/jsonstrict ./internal/schemavalidator ./internal/contract -count=1
+	cd conformance && GOFLAGS= GOWORK=off go run ./cmd/testresult suite -- go test -json ./internal/jsonstrict ./internal/schemavalidator ./internal/contract -count=1
 
 update-conformance-catalog:
 	cd conformance && GOFLAGS= GOWORK=off go run ./cmd/synchro-conformance catalog --repo-root .. --write
@@ -306,25 +310,25 @@ check-conformance-catalog:
 	cd conformance && GOFLAGS= GOWORK=off go run ./cmd/synchro-conformance catalog --repo-root .. --check
 
 test-conformance-scenarios:
-	cd conformance && GOFLAGS= GOWORK=off go test ./scenarios/... ./nativeexecution ./nativeharness ./modelrunner ./cmd/synchro-conformance -count=1
+	cd conformance && GOFLAGS= GOWORK=off go run ./cmd/testresult suite -- go test -json ./scenarios/... ./nativeexecution ./nativeharness ./modelrunner ./cmd/synchro-conformance -count=1
 
 test-vectors:
-	cd conformance && GOFLAGS= GOWORK=off go test ./vectors -count=1
+	cd conformance && GOFLAGS= GOWORK=off go run ./cmd/testresult suite -- go test -json ./vectors -count=1
 
 test-reference:
-	cd conformance && GOFLAGS= GOWORK=off go test ./reference -count=1
+	cd conformance && GOFLAGS= GOWORK=off go run ./cmd/testresult suite -- go test -json ./reference -count=1
 
 test-conformance-faults:
-	cd conformance && GOFLAGS= GOWORK=off go test ./barriers ./faults -count=1
+	cd conformance && GOFLAGS= GOWORK=off go run ./cmd/testresult suite -- go test -json ./barriers ./faults -count=1
 
 test-blackbox-harness:
-	cd conformance && GOFLAGS= GOWORK=off go test ./blackbox -count=1
+	cd conformance && GOFLAGS= GOWORK=off go run ./cmd/testresult suite -- go test -json ./blackbox -count=1
 
 test-blackbox-components:
-	cd conformance && GOFLAGS= GOWORK=off go test ./observer -count=1
+	cd conformance && GOFLAGS= GOWORK=off go run ./cmd/testresult suite -- go test -json ./observer -count=1
 
 test-blackbox-wal: conformance-mod-download test-blackbox-harness
-	cd conformance && GOFLAGS= GOWORK=off go test ./blackbox/integration -run '^TestRealWALPipeline$$' -count=1 -args --provision --install
+	cd conformance && GOFLAGS= GOWORK=off go run ./cmd/testresult suite -- go test -json ./blackbox/integration -run '^TestRealWALPipeline$$' -count=1 -args --provision --install
 
 test-blackbox-mutation-control:
 	@test -n "$(MUTATION_CONTROL_TEST)" || { echo "MUTATION_CONTROL_TEST is required" >&2; exit 1; }
@@ -332,21 +336,14 @@ test-blackbox-mutation-control:
 		TestRealMutationControlCursorAdvancement|TestRealMutationControlWALAcknowledgement|TestRealMutationControlMutationConservation|TestRealMutationControlChecksumCorrectness|TestRealMutationControlScopeIsolation) ;; \
 		*) echo "MUTATION_CONTROL_TEST is not a supported mutation control" >&2; exit 1 ;; \
 	esac
-	@cd conformance && GOFLAGS= GOWORK=off go test -json ./blackbox/integration -count=1 -run "^$(MUTATION_CONTROL_TEST)$$" -args --provision --install
-
-test-native-swift-schema-queue: conformance-mod-download test-blackbox-harness build-swift-native-runner
-	@test -x "$(SWIFT_NATIVE_RUNNER)" || { echo "SWIFT_NATIVE_RUNNER must be executable" >&2; exit 1; }
-	cd conformance && GOFLAGS= GOWORK=off SWIFT_NATIVE_RUNNER="$(SWIFT_NATIVE_RUNNER)" go test ./blackbox/integration -count=1 -run '^TestNativeSwiftSchemaQueuedMutationPersistsAcrossSIGKILL$$' -args --provision --install
-
-test-native-swift-steady-pull: conformance-mod-download test-blackbox-harness test-conformance-scenarios build-swift-native-runner release-pods-check
-	@test -x "$(SWIFT_NATIVE_RUNNER)" || { echo "SWIFT_NATIVE_RUNNER must be executable" >&2; exit 1; }
-	cd conformance && GOFLAGS= GOWORK=off SWIFT_NATIVE_RUNNER="$(SWIFT_NATIVE_RUNNER)" go test ./blackbox/integration -count=1 -run '^TestNativeSwiftSteadyPull$$' -args --provision --install
-
-test-native-swift-rebuild-requests: conformance-mod-download test-blackbox-harness test-conformance-scenarios build-swift-native-runner release-pods-check
-	@test -x "$(SWIFT_NATIVE_RUNNER)" || { echo "SWIFT_NATIVE_RUNNER must be executable" >&2; exit 1; }
-	cd conformance && GOFLAGS= GOWORK=off SWIFT_NATIVE_RUNNER="$(SWIFT_NATIVE_RUNNER)" go test ./blackbox/integration -count=1 -run '^TestNativeSwiftRebuildRequests$$' -args --provision --install
-
-test-native-swift: test-native-swift-schema-queue test-native-swift-steady-pull test-native-swift-rebuild-requests
+	@case "$(MUTATION_CONTROL_EXPECT)" in \
+		target_pass|target_semantic_test_failure) ;; \
+		*) echo "MUTATION_CONTROL_EXPECT is invalid" >&2; exit 1 ;; \
+	esac
+	@cd conformance && GOFLAGS= GOWORK=off go run ./cmd/testresult exact \
+		-test "$(MUTATION_CONTROL_TEST)" \
+		-expect "$(MUTATION_CONTROL_EXPECT)" \
+		-- go test -json ./blackbox/integration -count=1 -run "^$(MUTATION_CONTROL_TEST)$$" -args --provision --install
 
 parse-testresult:
 	@test -n "$(TESTRESULT_TEST_NAME)" || { echo "TESTRESULT_TEST_NAME is required" >&2; exit 1; }
@@ -422,13 +419,13 @@ conformance-pg18-extension-artifact:
 		trap - EXIT HUP INT TERM
 
 test-evidence:
-	cd conformance && GOFLAGS= GOWORK=off go test ./execution ./evidence ./cmd/synchro-evidence -count=1
+	cd conformance && GOFLAGS= GOWORK=off go run ./cmd/testresult suite -- go test -json ./execution ./evidence ./cmd/synchro-evidence -count=1
 
 test-inventory:
-	cd conformance && GOFLAGS= GOWORK=off go test ./inventory -count=1
+	cd conformance && GOFLAGS= GOWORK=off go run ./cmd/testresult suite -- go test -json ./inventory -count=1
 
 test-blackbox: conformance-mod-download test-blackbox-harness test-blackbox-components
-	cd conformance && GOFLAGS= GOWORK=off go test ./blackbox/integration -count=$(BLACKBOX_TEST_COUNT) -run '$(BLACKBOX_TEST_PATTERN)' -args --provision --install
+	cd conformance && GOFLAGS= GOWORK=off go run ./cmd/testresult suite -- go test -json ./blackbox/integration -count=$(BLACKBOX_TEST_COUNT) -args --provision --install
 
 test-conformance: conformance-mod-download test-conformance-testresult test-conformance-module test-conformance-imports test-conformance-contract test-conformance-scenarios check-conformance-catalog test-vectors test-reference test-conformance-faults test-blackbox-harness test-evidence test-inventory
 
@@ -455,25 +452,50 @@ build-kotlin-conformance-app:
 	cd clients/kotlin && ANDROID_HOME="$(ANDROID_HOME)" ANDROID_SDK_ROOT="$(ANDROID_HOME)" JAVA_HOME="$(ANDROID_JAVA_HOME)" PATH="$(ANDROID_JAVA_HOME)/bin:$$PATH" ./gradlew $(GRADLE_TEST_ARGS) :conformance-app:assembleDebug :conformance-app:assembleDebugAndroidTest
 
 test-swift-unit:
-	cd clients/swift && swift test --skip IntegrationTests --skip SchemaIntegrationTests $(SWIFT_TEST_ARGS)
+	rm -rf clients/swift/.build/test-results/unit.xcresult
+	mkdir -p clients/swift/.build/test-results
+	cd clients/swift && xcodebuild test -quiet -scheme Synchro-Package -destination 'platform=macOS' -skip-testing:SynchroTests/IntegrationTests -skip-testing:SynchroTests/SchemaIntegrationTests -resultBundlePath .build/test-results/unit.xcresult
+	cd conformance && GOFLAGS= GOWORK=off go run ./cmd/testresult xcresult -path ../clients/swift/.build/test-results/unit.xcresult
 
 test-swift: synchrod-pg-test-restart
-	cd clients/swift && $(TEST_ENV) swift test $(SWIFT_TEST_ARGS)
+	rm -rf clients/swift/.build/test-results/integration.xcresult
+	mkdir -p clients/swift/.build/test-results
+	cd clients/swift && $(TEST_ENV) xcodebuild test -quiet -scheme Synchro-Package -destination 'platform=macOS' -resultBundlePath .build/test-results/integration.xcresult
+	cd conformance && GOFLAGS= GOWORK=off go run ./cmd/testresult xcresult -path ../clients/swift/.build/test-results/integration.xcresult
 
 test-kotlin-unit:
 	@test -n "$(ANDROID_JAVA_HOME)" || (echo "Android builds require JDK 17. Set ANDROID_JAVA_HOME to a JDK 17 install."; exit 1)
 	@test -d "$(ANDROID_HOME)" || (echo "Android SDK not found at $(ANDROID_HOME). Set ANDROID_HOME to a valid SDK install."; exit 1)
+	rm -rf clients/kotlin/synchro/build/test-results
 	cd clients/kotlin && ANDROID_HOME="$(ANDROID_HOME)" ANDROID_SDK_ROOT="$(ANDROID_HOME)" JAVA_HOME="$(ANDROID_JAVA_HOME)" PATH="$(ANDROID_JAVA_HOME)/bin:$$PATH" ./gradlew $(GRADLE_TEST_ARGS) -PsynchroTestSuite=unit :synchro:test
+	cd conformance && GOFLAGS= GOWORK=off go run ./cmd/testresult junit -path ../clients/kotlin/synchro/build/test-results
 
 test-kotlin: synchrod-pg-test-restart
 	@test -n "$(ANDROID_JAVA_HOME)" || (echo "Android builds require JDK 17. Set ANDROID_JAVA_HOME to a JDK 17 install."; exit 1)
 	@test -d "$(ANDROID_HOME)" || (echo "Android SDK not found at $(ANDROID_HOME). Set ANDROID_HOME to a valid SDK install."; exit 1)
+	rm -rf clients/kotlin/synchro/build/test-results
 	cd clients/kotlin && ANDROID_HOME="$(ANDROID_HOME)" ANDROID_SDK_ROOT="$(ANDROID_HOME)" JAVA_HOME="$(ANDROID_JAVA_HOME)" PATH="$(ANDROID_JAVA_HOME)/bin:$$PATH" $(TEST_ENV) ./gradlew $(GRADLE_TEST_ARGS) -PsynchroTestSuite=integration :synchro:test
+	cd conformance && GOFLAGS= GOWORK=off go run ./cmd/testresult junit -path ../clients/kotlin/synchro/build/test-results
 
 test-kotlin-integration: test-kotlin
 
 test-rn-unit:
-	cd clients/react-native && yarn test:unit
+	rm -f clients/react-native/example/artifacts/unit-test-results.json
+	mkdir -p clients/react-native/example/artifacts
+	cd clients/react-native && yarn test:unit --json --outputFile example/artifacts/unit-test-results.json
+	cd conformance && GOFLAGS= GOWORK=off go run ./cmd/testresult jest -path ../clients/react-native/example/artifacts/unit-test-results.json
+
+test-rn-android-parity: release-kotlin-local
+	@test -n "$(ANDROID_JAVA_HOME)" || (echo "Android builds require JDK 17. Set ANDROID_JAVA_HOME to a JDK 17 install."; exit 1)
+	@test -d "$(ANDROID_HOME)" || (echo "Android SDK not found at $(ANDROID_HOME). Set ANDROID_HOME to a valid SDK install."; exit 1)
+	cd clients/react-native/example/android && ANDROID_HOME="$(ANDROID_HOME)" ANDROID_SDK_ROOT="$(ANDROID_HOME)" JAVA_HOME="$(ANDROID_JAVA_HOME)" PATH="$(ANDROID_JAVA_HOME)/bin:$$PATH" ./gradlew :trainstar_synchro-react-native:clean :trainstar_synchro-react-native:generateCodegenArtifactsFromSchema :trainstar_synchro-react-native:compileDebugKotlin --rerun-tasks
+
+test-rn-ios-parity: rn-watchman-reset rn-ios-pods
+	cd clients/react-native/example && xcodebuild -quiet -workspace ios/SynchroReactNativeExample.xcworkspace -scheme SynchroReactNative -configuration Debug -sdk iphonesimulator -destination 'generic/platform=iOS Simulator' -derivedDataPath ios/build/parity ONLY_ACTIVE_ARCH=YES clean build
+
+test-rn-native-parity:
+	@$(MAKE) test-rn-android-parity
+	@$(MAKE) test-rn-ios-parity
 
 rn-seed-asset:
 	@test -f clients/react-native/example/seed.db || (echo "Missing clients/react-native/example/seed.db bundled seed asset"; exit 1)
@@ -495,6 +517,8 @@ rn-ios-pods:
 	cd clients/react-native/example/ios && \
 		STAMP=.synchro-pods.stamp; \
 		SOURCE_DIGEST="$$( ( \
+			shasum -a 256 ../../package.json; \
+			find ../../src -type f \( -name '*.ts' -o -name '*.tsx' \) -exec shasum -a 256 {} +; \
 			find ../../../../clients/swift/Sources/Synchro -type f -name '*.swift' -exec shasum -a 256 {} +; \
 			find ../../ios -type f \( -name '*.swift' -o -name '*.m' -o -name '*.mm' -o -name '*.h' -o -name '*.cpp' \) -exec shasum -a 256 {} + \
 		) | LC_ALL=C sort | shasum -a 256 | cut -d ' ' -f 1)"; \
@@ -525,15 +549,18 @@ test-rn-e2e-ios-build: rn-watchman-reset rn-ios-pods
 	cd clients/react-native/example && npx detox build --configuration ios.sim.debug
 
 test-rn-e2e-ios-run:
+	rm -f clients/react-native/example/artifacts/ios-test-results.json
+	mkdir -p clients/react-native/example/artifacts
 	cd clients/react-native/example && \
-		$(TEST_ENV) npx detox test --configuration ios.sim.debug $(DETOX_ARGS)
+		$(TEST_ENV) npx detox test --configuration ios.sim.debug $(DETOX_ARGS) --json --outputFile artifacts/ios-test-results.json
+	cd conformance && GOFLAGS= GOWORK=off go run ./cmd/testresult jest -path ../clients/react-native/example/artifacts/ios-test-results.json
 
 test-rn-e2e-ios:
-	@$(MAKE) test-rn-e2e-ios-build
-	@$(MAKE) test-rn-e2e-ios-run
+	@$(MAKE) DETOX_ARGS="$(DETOX_ARGS)" test-rn-e2e-ios-build
+	@$(MAKE) DETOX_ARGS="$(DETOX_ARGS)" test-rn-e2e-ios-run
 
 test-rn-e2e-android-build:
-	@$(MAKE) release-kotlin-local
+	@$(MAKE) test-rn-android-parity
 	@$(MAKE) rn-watchman-reset
 	@$(MAKE) rn-android-emulator-reset
 	@$(MAKE) rn-e2e-server-seed
@@ -544,18 +571,21 @@ test-rn-e2e-android-build:
 test-rn-e2e-android-run:
 	@test -n "$(ANDROID_JAVA_HOME)" || (echo "Android Detox requires JDK 17. Set ANDROID_JAVA_HOME to a JDK 17 install."; exit 1)
 	@test -d "$(ANDROID_HOME)" || (echo "Android SDK not found at $(ANDROID_HOME). Set ANDROID_HOME to a valid SDK install."; exit 1)
+	rm -f clients/react-native/example/artifacts/android-test-results.json
+	mkdir -p clients/react-native/example/artifacts
 	cd clients/react-native/example && \
 		ANDROID_HOME="$(ANDROID_HOME)" ANDROID_SDK_ROOT="$(ANDROID_HOME)" \
 		JAVA_HOME="$(ANDROID_JAVA_HOME)" PATH="$(ANDROID_JAVA_HOME)/bin:$$PATH" \
-		$(TEST_ENV) npx detox test --configuration $(RN_ANDROID_DETOX_CONFIG) $(DETOX_ARGS)
+		$(TEST_ENV) npx detox test --configuration $(RN_ANDROID_DETOX_CONFIG) $(DETOX_ARGS) --json --outputFile artifacts/android-test-results.json
+	cd conformance && GOFLAGS= GOWORK=off go run ./cmd/testresult jest -path ../clients/react-native/example/artifacts/android-test-results.json
 
 test-rn-e2e-android:
-	@$(MAKE) test-rn-e2e-android-build
-	@$(MAKE) test-rn-e2e-android-run
+	@$(MAKE) DETOX_ARGS="$(DETOX_ARGS)" test-rn-e2e-android-build
+	@$(MAKE) DETOX_ARGS="$(DETOX_ARGS)" test-rn-e2e-android-run
 
 test-rn:
-	@$(MAKE) test-rn-e2e-ios
-	@$(MAKE) test-rn-e2e-android
+	@$(MAKE) DETOX_ARGS="$(DETOX_ARGS)" test-rn-e2e-ios
+	@$(MAKE) DETOX_ARGS="$(DETOX_ARGS)" test-rn-e2e-android
 
 release-pods-check: version-check
 	@command -v pod >/dev/null 2>&1 || (echo "CocoaPods CLI is required for release-pods-check."; exit 1)
@@ -563,7 +593,11 @@ release-pods-check: version-check
 	swift package dump-package >/dev/null
 	@echo "Apple package metadata validated."
 
-release-check: evidence test-conformance test-blackbox rc-check-pg18 version-check release-pods-check build build-seed build-check release-kotlin-local release-npm-dry-run lint-go lint-rust-core lint-rust-pg lint-rn test-rust-core test-rust-mutants test-integration-mutants test-rust-pg test-adapter test-swift test-native-swift test-kotlin test-rn test-packaged-consumers verify-contract check-pg-sql docs-build
+release-check: override GO_TEST_ARGS := -v -count=1 -p 1
+release-check: override GO_TEST_PKGS := ./...
+release-check: override GRADLE_TEST_ARGS := --rerun-tasks
+release-check: override DETOX_ARGS :=
+release-check: evidence build-conformance test-conformance test-blackbox rc-check-pg18 version-check release-pods-check build build-seed build-check release-kotlin-local release-npm-dry-run lint-go lint-rust-core lint-rust-pg lint-rn test-rust-core test-rust-mutants test-integration-mutants test-rust-pg test-adapter test-swift test-kotlin-unit test-kotlin test-rn-unit test-rn-native-parity test-rn test-packaged-consumers verify-contract check-pg-sql docs-build
 	@echo "Release validation passed."
 
 release-kotlin-local: version-check
@@ -780,7 +814,7 @@ ext-seed:
 	python3 extensions/testdata/generate/generate.py
 
 test-rust-core:
-	cd extensions && cargo test -p synchro-core
+	cd conformance && GOFLAGS= GOWORK=off go run ./cmd/testresult rust -dir ../extensions -- cargo test -p synchro-core
 
 test-rust-mutants:
 	@command -v cargo-mutants >/dev/null || (echo "cargo-mutants 27.1.0 is required" >&2; exit 1)
@@ -797,13 +831,12 @@ test-integration-mutants: test-conformance-testresult
 	sh conformance/mutants/integration_gate.sh "$(CURDIR)"
 
 test-rust-pg:
-	cd extensions/synchro-pg && CARGO_TARGET_DIR="$(PGRX_TARGET_DIR)" cargo pgrx test $(PGRX_PG) $(PGRX_TEST_NAME)
+	cd conformance && GOFLAGS= GOWORK=off CARGO_TARGET_DIR="$(PGRX_TARGET_DIR)" go run ./cmd/testresult rust -dir ../extensions/synchro-pg -- cargo pgrx test $(PGRX_PG)
 
 test-rust-pg-all:
 	@for v in 14 15 16 17 18; do \
 		echo "=== PG $$v ==="; \
-		cd extensions/synchro-pg && CARGO_TARGET_DIR="$(PGRX_TARGET_DIR)" cargo pgrx test pg$$v || exit 1; \
-		cd ../..; \
+		(cd conformance && GOFLAGS= GOWORK=off CARGO_TARGET_DIR="$(PGRX_TARGET_DIR)" go run ./cmd/testresult rust -dir ../extensions/synchro-pg -- cargo pgrx test pg$$v) || exit 1; \
 	done
 	@echo "All PG versions passed."
 
@@ -915,7 +948,7 @@ test-adapter: test-adapter-setup
 	@echo "Running adapter integration tests..."
 	@set -e; \
 	status=0; \
-	if (cd api/go && GOWORK=off TEST_DATABASE_URL="$(ADAPTER_TEST_URL)" go test $(GO_TEST_ARGS) $(GO_TEST_PKGS)); then \
+	if (cd conformance && GOFLAGS= GOWORK=off TEST_DATABASE_URL="$(ADAPTER_TEST_URL)" go run ./cmd/testresult suite -dir ../api/go -- go test -json $(GO_TEST_ARGS) $(GO_TEST_PKGS)); then \
 		status=0; \
 	else \
 		status=$$?; \

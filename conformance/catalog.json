@@ -24,42 +24,42 @@
     {
       "scenario_id": "SCN-PERF-MULTI-SCOPE-PROVENANCE-001",
       "path": "conformance/scenarios/performance/multi-scope-provenance-001.json",
-      "sha256": "1ae3e4fd0515e3aa4afddc2af090f30eb1a266c4eb405fe38d752a22660c4f99"
+      "sha256": "58e1240388b66a16c6d5e4ac27a1b6b633851dfd2543568ac535bd082080b010"
     },
     {
       "scenario_id": "SCN-PERF-PENDING-CYCLE-001",
       "path": "conformance/scenarios/performance/pending-cycle-001.json",
-      "sha256": "f89bbb24ebb0d9411c2e0456ce8a9cc5166d8354c52b6a1f60d42e61dc51b8dd"
+      "sha256": "404067f47fee8f00b4bd658a34d39a6d997b3d2e08ab3bb0b6401d7c127d58cc"
     },
     {
       "scenario_id": "SCN-PERF-QUEUE-REPLAY-001",
       "path": "conformance/scenarios/performance/queue-replay-001.json",
-      "sha256": "18f06540827b6ff820608442d58c55dc85f84050ab60f3e2f4e5e3b7c37836f3"
+      "sha256": "2ce67028123be45f5d382218ad708133d2cfe097b458e66482f1ecf3d4ee8f21"
     },
     {
       "scenario_id": "SCN-PERF-REBUILD-APPLY-001",
       "path": "conformance/scenarios/performance/rebuild-apply-001.json",
-      "sha256": "ea7fb6c91389389ccdd3c8f879893f96a028839275db9a953add689979554535"
+      "sha256": "0c13c6515016868473140fd060f71ae0099bf0b5c4dc81eb6bd2e9500457c932"
     },
     {
       "scenario_id": "SCN-PERF-REBUILD-CARDINALITY-001",
       "path": "conformance/scenarios/performance/rebuild-cardinality-001.json",
-      "sha256": "5091c4ebc9739e6311ab8f1ee4c2d9628fe6657dc247f5948f1cefc6a43a1b13"
+      "sha256": "25c680c4c0f2bd83b3c33701f8bed2a0a71ecf10d0770477ca411c432c5b862c"
     },
     {
       "scenario_id": "SCN-PERF-REBUILD-REQUESTS-001",
       "path": "conformance/scenarios/performance/rebuild-requests-001.json",
-      "sha256": "8c45bc0e43a979960705c294e055b09678a4acf4806a3438747315127b0679b6"
+      "sha256": "e06303bc7a5991e664e8c3c1f5db1c14011cc9a6769aee949358c28f6e7ec710"
     },
     {
       "scenario_id": "SCN-PERF-SCHEMA-CHECK-001",
       "path": "conformance/scenarios/performance/schema-check-001.json",
-      "sha256": "d2a3a2d98492eea3ef411971cbc2065dc5daab0e86f038a9022fa9be77f0803d"
+      "sha256": "6f9cb447ff33a547a9bd5ad24353ce7f3b208b0e25c320415d4c7c0d7541faa3"
     },
     {
       "scenario_id": "SCN-PERF-SEEDED-EMPTY-STARTUP-001",
       "path": "conformance/scenarios/performance/seeded-empty-startup-001.json",
-      "sha256": "d823ff4c9a87a13f5bfda8397ca81d32a2b8080b4375732387e7f964bba40444"
+      "sha256": "d668e8c9d33707a4e8ec6d38f03e31ed64d3b108dbccb81fc1af22c6afde3563"
     },
     {
       "scenario_id": "SCN-PERF-SHARED-PRIVATE-SCOPES-001",
@@ -69,12 +69,12 @@
     {
       "scenario_id": "SCN-PERF-STEADY-PULL-001",
       "path": "conformance/scenarios/performance/steady-pull-001.json",
-      "sha256": "70ece18b1474731860c2c72b661978cf7ccdb63f83c362b03cbe7331586ad616"
+      "sha256": "eca223d2a6c8cc55f28c604eadb3c9c1c5c92d16dbc7944ed6e9c33e5b62bc61"
     },
     {
       "scenario_id": "SCN-PERF-WARM-CONNECT-001",
       "path": "conformance/scenarios/performance/warm-connect-001.json",
-      "sha256": "13023c2898f1ae7320015855452143a53e73a92feebb21b0f2ebc8a07043dc95"
+      "sha256": "f8bd1acf5903c50d5d98fab27dce2350c69fdcb3223cb5a3a078ddd9b035fb1c"
     },
     {
       "scenario_id": "SCN-PULL-DIVERGENT-CHECKPOINTS-001",
@@ -89,12 +89,12 @@
     {
       "scenario_id": "SCN-PUSH-RESPONSE-LOSS-001",
       "path": "conformance/scenarios/server/push-response-loss-001.json",
-      "sha256": "35863d6bb7844ad7d0bed1b876158995bb7e29fe7f6f3f3c397cf3f90c0d364d"
+      "sha256": "c362204939009414d0ec3ccaf6d57effb34b35a81b5f2fbed29475a027012236"
     },
     {
       "scenario_id": "SCN-REBUILD-FORGED-CURSOR-001",
       "path": "conformance/scenarios/server/rebuild-forged-cursor-001.json",
-      "sha256": "53b11dd7a7641e530915bc0eb1934d477dd1a55f09af9a0f3704ea3ee8129dd2"
+      "sha256": "01beb9f4547c1582042a11e33709cdb846c92f88a258543d745cf752aa43f869"
     },
     {
       "scenario_id": "SCN-REGISTRY-RELOAD-001",
@@ -104,12 +104,12 @@
     {
       "scenario_id": "SCN-RETENTION-RECONNECT-001",
       "path": "conformance/scenarios/server/retention-reconnect-001.json",
-      "sha256": "0dde7de289df08ecc10356aadeb85b78edc5d520a4b36f56e15c1c6cd9ca8a63"
+      "sha256": "ad506eb50437ab964ff2fa3847f72ac3cccdbdc5887664104a6471ee03c5f4ea"
     },
     {
       "scenario_id": "SCN-SCHEMA-QUEUED-MUTATION-001",
       "path": "conformance/scenarios/server/schema-queued-mutation-001.json",
-      "sha256": "75922b201e896da959de213b5ef7ddfc5af49febd90025afec5a91be1139d87e"
+      "sha256": "a156667993e1c1f0a0961855c194fc90e081455a7a5d0ad1fe293a663f8e1326"
     },
     {
       "scenario_id": "SCN-WAL-DECODE-FAILURE-001",

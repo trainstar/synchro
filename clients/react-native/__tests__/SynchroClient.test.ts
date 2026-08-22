@@ -37,6 +37,8 @@ describe('SynchroClient', () => {
         maxRetryAttempts: 5,
         pullPageSize: 100,
         pushBatchSize: 100,
+        seedDatabasePath: undefined,
+        transportObservationCapacity: 0,
       });
       await client.close();
     });

@@ -38,11 +38,11 @@ type StepRequest struct {
 
 // OpenRequest contains one client identity and generic open parameters.
 type OpenRequest struct {
-	Client       scenarios.NativeClient
-	ClientKey    string
-	DatabaseMode string
+	Client         scenarios.NativeClient
+	ClientKey      string
+	DatabaseMode   string
 	Initialization string
-	SeedStepID   *scenarios.StepID
+	SeedStepID     *scenarios.StepID
 }
 
 // LocalActionRequest contains one client-local operation.

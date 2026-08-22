@@ -27,6 +27,12 @@ export interface ScenarioStep {
   operation: ScenarioOperation;
 }
 
+export interface RowSelector {
+  table_name: string;
+  primary_key_field: string;
+  primary_key: JSONScalar;
+}
+
 export interface ConformanceAction {
   actor: string;
   command: string;

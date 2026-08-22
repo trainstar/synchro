@@ -511,9 +511,6 @@ jobs:
       - name: Run Swift integration tests
         run: make test-swift
 
-      - name: Run native Swift conformance
-        run: make test-native-swift
-
       - name: Run packaged Swift consumer
         run: make test-consumer-swift
 
@@ -612,6 +609,9 @@ jobs:
 
       - name: Set Android Java home
         run: echo "ANDROID_JAVA_HOME=${JAVA_HOME}" >> "$GITHUB_ENV"
+
+      - name: Run Kotlin unit tests
+        run: make test-kotlin-unit
 
       - name: Run Kotlin integration tests
         run: make test-kotlin
