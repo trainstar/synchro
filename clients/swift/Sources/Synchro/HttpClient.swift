@@ -506,14 +506,20 @@ final class HttpClient: @unchecked Sendable {
     static func parseRetryAfter(_ rawValue: String, now: Date = Date()) -> TimeInterval? {
         let value = rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !value.isEmpty else { return nil }
-        if let seconds = Double(value), seconds.isFinite, seconds >= 0 {
+        let isDeltaSeconds = value.range(
+            of: #"^(?:0|[1-9][0-9]*)(?:\.[0-9]+)?$"#,
+            options: .regularExpression
+        ) != nil
+        if isDeltaSeconds, let seconds = Double(value), seconds.isFinite {
             return seconds
         }
+        if isDeltaSeconds { return nil }
 
         let formatter = DateFormatter()
         formatter.locale = Locale(identifier: "en_US_POSIX")
         formatter.timeZone = TimeZone(secondsFromGMT: 0)
         formatter.dateFormat = "EEE',' dd MMM yyyy HH':'mm':'ss zzz"
+        formatter.isLenient = false
         guard let date = formatter.date(from: value) else {
             return nil
         }
