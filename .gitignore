@@ -73,3 +73,9 @@ synchrod-pg
 !api/go/cmd/synchrod-pg/main.go
 .synchrod-pg-test.log
 .synchrod-pg-test.pid
+
+# Consumer verification build outputs
+verification/consumers/**/.gradle/
+verification/consumers/**/build/
+verification/consumers/**/*.apk
+verification/consumers/**/*.dex
