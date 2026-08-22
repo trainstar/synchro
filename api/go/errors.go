@@ -37,7 +37,8 @@ func mapPGError(w http.ResponseWriter, raw []byte) bool {
 
 	status, retryAfter, ok := classifyPGError(probe.Error)
 	if !ok {
-		return false
+		writeJSONError(w, http.StatusInternalServerError, "sync operation failed")
+		return true
 	}
 	w.Header().Set("Content-Type", "application/json")
 	if retryAfter != "" {
