@@ -550,6 +550,12 @@
         let mut incompatible_columns = serde_json::Map::new();
         incompatible_columns.insert(legacy_field_id, json!("preserved authored value"));
         incompatible["columns"] = Value::Object(incompatible_columns);
+        let incompatible_intent = incompatible.clone();
+        let incompatible_mutation_id = incompatible["mutation_id"]
+            .as_str()
+            .expect("schema-incompatible mutation ID")
+            .to_string();
+        let submitted_schema = schema_ref_value();
 
         let epoch_before = accepted_write_epoch(user_id, client_id);
         let response = push_client(
@@ -661,6 +667,51 @@
             ]
         );
         assert_eq!(accepted_write_epoch(user_id, client_id), epoch_before + 1);
+
+        let ledger: Option<pgrx::JsonB> = Spi::get_one_with_args(
+            "SELECT jsonb_build_object(
+                 'request_ordinal', request_ordinal,
+                 'authored_schema', jsonb_build_object(
+                     'version', authored_schema_version,
+                     'hash', authored_schema_hash
+                 ),
+                 'submitted_schema', jsonb_build_object(
+                     'version', submitted_schema_version,
+                     'hash', submitted_schema_hash
+                 ),
+                 'outcome_schema', jsonb_build_object(
+                     'version', outcome_schema_version,
+                     'hash', outcome_schema_hash
+                 ),
+                 'outcome_status', outcome_status,
+                 'rejection_code', rejection_code,
+                 'sealed_request', convert_from(sealed_canonical_request, 'UTF8')::jsonb,
+                 'sealed_response', convert_from(sealed_canonical_response, 'UTF8')::jsonb
+             )
+             FROM sync_push_mutations
+             WHERE user_id = $1 AND client_id = $2 AND mutation_id = $3::uuid",
+            &[
+                user_id.into(),
+                client_id.into(),
+                incompatible_mutation_id.clone().into(),
+            ],
+        )
+        .unwrap();
+        let ledger = ledger.expect("schema-incompatible mutation ledger").0;
+        let incompatible_outcome = rejected
+            .iter()
+            .find(|outcome| {
+                outcome["mutation_id"].as_str() == Some(incompatible_mutation_id.as_str())
+            })
+            .expect("schema-incompatible outcome");
+        assert_eq!(ledger["request_ordinal"], json!(7));
+        assert_eq!(ledger["authored_schema"], incompatible_intent["authored_schema"]);
+        assert_eq!(ledger["submitted_schema"], submitted_schema);
+        assert_eq!(ledger["outcome_schema"], submitted_schema);
+        assert_eq!(ledger["outcome_status"], json!("rejected_terminal"));
+        assert_eq!(ledger["rejection_code"], json!("schema_incompatible"));
+        assert_eq!(ledger["sealed_request"], incompatible_intent);
+        assert_eq!(ledger["sealed_response"], *incompatible_outcome);
     }
 
     #[pg_test]
