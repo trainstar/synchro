@@ -500,6 +500,10 @@ final class HttpClient: @unchecked Sendable {
         guard let rawValue = response.value(forHTTPHeaderField: "Retry-After") else {
             return nil
         }
+        return Self.parseRetryAfter(rawValue)
+    }
+
+    static func parseRetryAfter(_ rawValue: String, now: Date = Date()) -> TimeInterval? {
         let value = rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !value.isEmpty else { return nil }
         if let seconds = Double(value), seconds.isFinite, seconds >= 0 {
@@ -513,7 +517,7 @@ final class HttpClient: @unchecked Sendable {
         guard let date = formatter.date(from: value) else {
             return nil
         }
-        return max(0, date.timeIntervalSinceNow)
+        return max(0, date.timeIntervalSince(now))
     }
 
     private func requireProtocolError(

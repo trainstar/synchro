@@ -1072,7 +1072,7 @@ Every non-200 response uses this envelope:
 | 503 | `capture_pending` | true | Pull or rebuild cannot include an accepted push until its fence is durably WAL-materialized or represented by activated verified reset-baseline coverage. |
 | 503 | `temporary_unavailable` | true | An operational failure prevents a complete operation. Capture blocking uses bounded `reason: "capture_blocked"`. |
 
-HTTP 429 and 503 responses include a valid `Retry-After` header. A client retries only when `retryable` is `true`, and it preserves the exact sealed push request, presented pull cursors, or rebuild page state for that retry. `rebuild_restart_required` is non-retryable for the same continuation and requires a new rebuild attempt.
+HTTP 429 and 503 responses include a valid `Retry-After` header. A valid value is an IMF-fixdate or delta seconds that match `(?:0|[1-9][0-9]*)(?:\.[0-9]+)?` after optional whitespace is removed. Exponents, signs, leading zeros, and missing integer or fractional digits are invalid. A client retries only when `retryable` is `true`, and it preserves the exact sealed push request, presented pull cursors, or rebuild page state for that retry. `rebuild_restart_required` is non-retryable for the same continuation and requires a new rebuild attempt.
 
 Row and version conflicts are HTTP 200 per-mutation `conflict` outcomes. They are never HTTP 409. `schema_incompatible` is an HTTP 200 terminal mutation outcome when the request-level schema is exact current. `unsupported` is a connect schema action, not an error code. No schema action is inferred from `schema_mismatch`.
 

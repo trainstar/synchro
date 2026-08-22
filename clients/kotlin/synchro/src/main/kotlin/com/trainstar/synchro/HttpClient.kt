@@ -360,25 +360,6 @@ class HttpClient(
         }
     }
 
-    private fun parseRetryAfter(value: String?): RetryAfter? {
-        val encoded = value?.trim()?.takeIf { it.isNotEmpty() } ?: return null
-        if (encoded.matches(RETRY_AFTER_DELAY_PATTERN)) {
-            encoded.toDoubleOrNull()?.takeIf { it.isFinite() }?.let {
-                return RetryAfter(delaySeconds = it, deadlineMs = null)
-            }
-        }
-        return try {
-            RetryAfter(
-                delaySeconds = null,
-                deadlineMs = ZonedDateTime.parse(encoded, DateTimeFormatter.RFC_1123_DATE_TIME)
-                    .toInstant()
-                    .toEpochMilli(),
-            )
-        } catch (_: Exception) {
-            null
-        }
-    }
-
     private inline fun <reified RequestType> validateExactRequestJSON(
         request: RequestType,
         requestJSON: String,
@@ -397,8 +378,28 @@ class HttpClient(
     }
 
     private data class HTTPResult<T>(val value: T, val bodyJSON: String)
-    private data class RetryAfter(val delaySeconds: Double?, val deadlineMs: Long?)
     private data class RetryContext(val interruptedOperation: String, val workIdentity: String)
+}
+
+internal data class RetryAfter(val delaySeconds: Double?, val deadlineMs: Long?)
+
+internal fun parseRetryAfter(value: String?): RetryAfter? {
+    val encoded = value?.trim()?.takeIf { it.isNotEmpty() } ?: return null
+    if (encoded.matches(RETRY_AFTER_DELAY_PATTERN)) {
+        encoded.toDoubleOrNull()?.takeIf { it.isFinite() }?.let {
+            return RetryAfter(delaySeconds = it, deadlineMs = null)
+        }
+    }
+    return try {
+        RetryAfter(
+            delaySeconds = null,
+            deadlineMs = ZonedDateTime.parse(encoded, DateTimeFormatter.RFC_1123_DATE_TIME)
+                .toInstant()
+                .toEpochMilli(),
+        )
+    } catch (_: Exception) {
+        null
+    }
 }
 
 private val RETRY_AFTER_DELAY_PATTERN = Regex("(?:0|[1-9][0-9]*)(?:\\.[0-9]+)?")

@@ -387,8 +387,6 @@ class HttpClientTests {
             MockResponse().setResponseCode(429).setBody(RETRYABLE_429_ERROR_JSON),
             MockResponse().setResponseCode(429).setHeader("Retry-After", "not-a-delay")
                 .setBody(RETRYABLE_429_ERROR_JSON),
-            MockResponse().setResponseCode(429).setHeader("Retry-After", "1e3")
-                .setBody(RETRYABLE_429_ERROR_JSON),
             MockResponse().setResponseCode(503).setHeader("Retry-After", "1").setBody(
                 """{"error":{"code":"retry_later","message":"wrong code","retryable":true}}"""
             ),

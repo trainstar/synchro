@@ -6,6 +6,7 @@ import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
+import kotlinx.serialization.Serializable
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
@@ -503,6 +504,24 @@ class ContractTests {
         assertFalse(response.error.retryable)
     }
 
+    @Test
+    fun testRetryAfterFixtureMatchesAuthoredGrammar() {
+        val fixture = json.decodeFromString<RetryAfterFixture>(
+            String(Files.readAllBytes(findFixture("conformance/protocol/retry-after-v1.json")))
+        )
+
+        assertEquals(1, fixture.version)
+        assertEquals("(?:0|[1-9][0-9]*)(?:\\.[0-9]+)?", fixture.grammar.deltaSeconds)
+        assertEquals("IMF-fixdate", fixture.grammar.httpDate)
+        fixture.cases.forEach { testCase ->
+            assertEquals(
+                "Retry-After case ${testCase.value}",
+                testCase.valid,
+                parseRetryAfter(testCase.value) != null,
+            )
+        }
+    }
+
     private inline fun <reified T> decodeFixtureValue(path: String, jsonPath: List<String>): T {
         val root = json.parseToJsonElement(String(Files.readAllBytes(findFixture(path))))
         val nested = valueAt(root, jsonPath)
@@ -566,3 +585,19 @@ class ContractTests {
         error("fixture not found: $relativePath from ${Paths.get("").toAbsolutePath()}")
     }
 }
+
+@Serializable
+private data class RetryAfterFixture(
+    val version: Int,
+    val grammar: RetryAfterGrammar,
+    val cases: List<RetryAfterCase>,
+)
+
+@Serializable
+private data class RetryAfterGrammar(
+    @kotlinx.serialization.SerialName("delta_seconds") val deltaSeconds: String,
+    @kotlinx.serialization.SerialName("http_date") val httpDate: String,
+)
+
+@Serializable
+private data class RetryAfterCase(val value: String, val valid: Boolean)

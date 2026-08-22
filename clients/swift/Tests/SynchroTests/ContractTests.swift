@@ -495,6 +495,23 @@ final class ContractTests: XCTestCase {
         XCTAssertFalse(errorResponse.error.retryable)
     }
 
+    func testRetryAfterFixtureMatchesAuthoredGrammar() throws {
+        let data = try Data(contentsOf: fixtureURL(path: "conformance/protocol/retry-after-v1.json"))
+        let fixture = try decoder.decode(RetryAfterFixture.self, from: data)
+        let now = try XCTUnwrap(ISO8601DateFormatter().date(from: "2026-01-01T00:00:00Z"))
+
+        XCTAssertEqual(fixture.version, 1)
+        XCTAssertEqual(fixture.grammar.deltaSeconds, "(?:0|[1-9][0-9]*)(?:\\.[0-9]+)?")
+        XCTAssertEqual(fixture.grammar.httpDate, "IMF-fixdate")
+        for testCase in fixture.cases {
+            XCTAssertEqual(
+                HttpClient.parseRetryAfter(testCase.value, now: now) != nil,
+                testCase.valid,
+                "Retry-After case \(testCase.value.debugDescription)"
+            )
+        }
+    }
+
     private func decodeFixtureValue<T: Decodable>(path: String, jsonPath: [String]) throws -> T {
         let fixtureURL = try fixtureURL(path: path)
         let data = try Data(contentsOf: fixtureURL)
@@ -578,4 +595,25 @@ final class ContractTests: XCTestCase {
         }
         return current
     }
+}
+
+private struct RetryAfterFixture: Decodable {
+    let version: Int
+    let grammar: RetryAfterGrammar
+    let cases: [RetryAfterCase]
+}
+
+private struct RetryAfterGrammar: Decodable {
+    let deltaSeconds: String
+    let httpDate: String
+
+    enum CodingKeys: String, CodingKey {
+        case deltaSeconds = "delta_seconds"
+        case httpDate = "http_date"
+    }
+}
+
+private struct RetryAfterCase: Decodable {
+    let value: String
+    let valid: Bool
 }
