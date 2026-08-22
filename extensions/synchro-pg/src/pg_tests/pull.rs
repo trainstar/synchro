@@ -701,6 +701,32 @@
     }
 
     #[pg_test]
+    fn test_pull_scope_updates_removed() {
+        setup_test_tables();
+        register_shared_scope("shared:public", false);
+        register_client("u1", "c1");
+
+        let scopes = client_scope_ids("u1", "c1")
+            .into_iter()
+            .map(|scope_id| {
+                let cursor = issued_scope_cursor("u1", "c1", &scope_id, 0);
+                (scope_id, json!({ "cursor": cursor }))
+            })
+            .collect::<serde_json::Map<String, Value>>();
+        Spi::run_with_args(
+            "SELECT synchro_unregister_shared_scope($1)",
+            &["shared:public".into()],
+        )
+        .unwrap();
+
+        let resp = pull_client("u1", "c1", 1, Value::Object(scopes), 100);
+
+        assert_eq!(resp["scope_set_version"].as_i64(), Some(2));
+        assert_eq!(resp["scope_updates"]["add"], json!([]));
+        assert_eq!(resp["scope_updates"]["remove"], json!(["shared:public"]));
+    }
+
+    #[pg_test]
     fn test_pull_rejects_scope_without_assignment_history() {
         setup_test_tables();
         register_client("u1", "c1");
