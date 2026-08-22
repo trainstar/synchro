@@ -72,6 +72,7 @@ internal class SyncEngine(
     private var appInForeground = true
     private var activeOperations = 0
     private var operationsDrained = CompletableDeferred<Unit>().apply { complete(Unit) }
+    private var stoppedPublished = CompletableDeferred<Unit>().apply { complete(Unit) }
     private var lifecycleGeneration = 0L
 
     init {
@@ -85,10 +86,14 @@ internal class SyncEngine(
 
     // MARK: - Lifecycle
 
-    suspend fun start(options: SyncOptions? = null) = startInternal(options, schemaReset = false, recoveringError = false)
+    suspend fun start(options: SyncOptions? = null) {
+        database.requireOutsideApplicationTransaction("start")
+        startInternal(options, schemaReset = false, recoveringError = false)
+    }
 
     /** Explicitly acknowledges a remediated non-schema blocking error. */
     suspend fun retry(options: SyncOptions? = null) {
+        database.requireOutsideApplicationTransaction("retry")
         database.writeTransaction { db ->
             val state = SynchroMeta.getClientState(db)
             if (state.failure?.recoveryAction == SyncRecoveryAction.SCHEMA_RESET) {
@@ -101,6 +106,7 @@ internal class SyncEngine(
 
     /** Requests the contract-defined incompatible-schema recovery. */
     suspend fun resetSchema(options: SyncOptions? = null) {
+        database.requireOutsideApplicationTransaction("resetSchema")
         database.writeTransaction { db ->
             val state = SynchroMeta.getClientState(db)
             if (state.failure?.recoveryAction != SyncRecoveryAction.SCHEMA_RESET) {
@@ -190,32 +196,41 @@ internal class SyncEngine(
     }
 
     /** Cancels lifecycle-owned work and does not return before it drains. */
-    suspend fun stop() = stopInternal(permanent = false)
+    suspend fun stop() {
+        database.requireOutsideApplicationTransaction("stop")
+        stopInternal(permanent = false)
+    }
 
     /** Cancels managed work and waits until every managed job has completed. */
     suspend fun shutdown() {
+        database.requireOutsideApplicationTransaction("shutdown")
         stopInternal(permanent = true)
     }
 
     private suspend fun stopInternal(permanent: Boolean) {
         val jobs: List<Job>
         val drained: CompletableDeferred<Unit>?
+        val publication: CompletableDeferred<Unit>
         val publishStopped: Boolean
         synchronized(lifecycleLock) {
             if (permanent) shutdownRequested = true
             if (shutdownInProgress) {
                 jobs = emptyList()
                 drained = if (activeOperations == 0) null else operationsDrained
+                publication = stoppedPublished
                 publishStopped = false
             } else if (currentStatus.state == SyncLifecycleState.STOPPED && !started.get()) {
                 jobs = emptyList()
                 drained = null
+                publication = stoppedPublished
                 publishStopped = false
             } else {
                 shutdownInProgress = true
                 explicitStopRequested = true
                 jobs = (listOfNotNull(syncJob, debounceJob) + ownedCycleJobs).distinct()
                 drained = if (activeOperations == 0) null else operationsDrained
+                publication = CompletableDeferred()
+                stoppedPublished = publication
                 cancelLifecycleLocked()
                 publishStopped = true
             }
@@ -226,13 +241,21 @@ internal class SyncEngine(
             if (job != currentCoroutineContext()[Job]) job.join()
         }
         if (!publishStopped) {
+            publication.await()
             if (currentStatus is SyncStatus.Stopped) publishStatusSnapshot(SyncStatus.Stopped)
             return
         }
         // Keep the stop barrier set until observers have received stopped.
-        transitionTo(SyncStatus.Stopped)
-        synchronized(lifecycleLock) {
-            if (!permanent && !shutdownRequested) shutdownInProgress = false
+        try {
+            transitionTo(SyncStatus.Stopped)
+            publication.complete(Unit)
+        } catch (error: Throwable) {
+            publication.completeExceptionally(error)
+            throw error
+        } finally {
+            synchronized(lifecycleLock) {
+                if (!permanent && !shutdownRequested) shutdownInProgress = false
+            }
         }
     }
 
@@ -278,6 +301,7 @@ internal class SyncEngine(
      * its waiter. It does not cancel the durable sync operation.
      */
     suspend fun syncNow() {
+        database.requireOutsideApplicationTransaction("syncNow")
         val job = scheduleEngineOwnedCycle()
         job.await()
     }
@@ -329,6 +353,7 @@ internal class SyncEngine(
 
     /** Native activity state controls automatic work without a bridge callback. */
     fun onApplicationForeground() {
+        database.requireOutsideApplicationTransaction("onApplicationForeground")
         val immediateCycle: Deferred<Unit>? = synchronized(lifecycleLock) {
             appInForeground = true
             if (explicitStopRequested || shutdownRequested || shutdownInProgress ||
@@ -344,6 +369,7 @@ internal class SyncEngine(
 
     /** Backgrounding prevents new automatic cycles. Durable work remains intact. */
     fun onApplicationBackground() {
+        database.requireOutsideApplicationTransaction("onApplicationBackground")
         synchronized(lifecycleLock) {
             appInForeground = false
             debounceJob?.cancel()
@@ -1213,20 +1239,22 @@ internal class SyncEngine(
     }
 
     private fun scheduleDebouncedPush() {
-        if (!isApplicationForeground()) return
-        debounceJob?.cancel()
-        debounceJob = scope?.launch {
-            if (!beginOperation()) return@launch
-            try {
-                delay((config.pushDebounce * 1000).toLong())
-                if (!isActive || !isApplicationForeground()) return@launch
-                runSyncCycleWithRetry()
-            } catch (e: CancellationException) {
-                throw e
-            } catch (_: Exception) {
-                // Debounced sync failed, so the managed loop retries it later.
-            } finally {
-                endOperation()
+        synchronized(lifecycleLock) {
+            if (!appInForeground) return
+            debounceJob?.cancel()
+            debounceJob = scope?.launch {
+                if (!beginOperation()) return@launch
+                try {
+                    delay((config.pushDebounce * 1000).toLong())
+                    if (!isActive || !isApplicationForeground()) return@launch
+                    runSyncCycleWithRetry()
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (_: Exception) {
+                    // Debounced sync failed, so the managed loop retries it later.
+                } finally {
+                    endOperation()
+                }
             }
         }
     }

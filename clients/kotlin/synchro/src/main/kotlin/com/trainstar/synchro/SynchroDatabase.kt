@@ -23,6 +23,7 @@ internal class SynchroDatabase private constructor(context: Context, dbPath: Str
     val path: String = dbPath
     private val changeNotifier = ChangeNotifier()
     private val writeOwnership = ReentrantLock(true)
+    private val applicationTransactionDepth = ThreadLocal<Int>()
     private val helper = object : SQLiteOpenHelper(context, dbPath, null, DATABASE_VERSION) {
         override fun onCreate(db: SQLiteDatabase) = createDatabase(db)
 
@@ -701,12 +702,28 @@ internal class SynchroDatabase private constructor(context: Context, dbPath: Str
         var changedTables = emptySet<String>()
         val result = writeTransaction { db ->
             val transaction = ApplicationTransaction(db)
-            val value = block(transaction)
-            changedTables = transaction.changedTables()
-            value
+            val previousDepth = applicationTransactionDepth.get() ?: 0
+            applicationTransactionDepth.set(previousDepth + 1)
+            try {
+                val value = block(transaction)
+                changedTables = transaction.changedTables()
+                value
+            } finally {
+                if (previousDepth == 0) {
+                    applicationTransactionDepth.remove()
+                } else {
+                    applicationTransactionDepth.set(previousDepth)
+                }
+            }
         }
         notifyTablesChanged(changedTables)
         return result
+    }
+
+    internal fun requireOutsideApplicationTransaction(operation: String) {
+        check((applicationTransactionDepth.get() ?: 0) == 0) {
+            "$operation cannot run inside an application transaction"
+        }
     }
 
     // MARK: - Transactions

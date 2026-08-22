@@ -931,6 +931,11 @@ semantics:
 - `inspectRejectedMutations()` for durable terminal outcomes and authored data
 - an explicit policy operation to clear retained rejected records
 
+An application transaction callback must return before the application calls a
+sync lifecycle method. A client rejects this call before it acquires a lifecycle
+lock. This rule prevents opposite lock acquisition between application writes
+and durable lifecycle transitions.
+
 The SDK does not expose a method that lets an application set a cursor, server
 version, scope assignment, checksum, client generation, rebuild token, or
 mutation identity for an unrelated intent. It does not require the application
