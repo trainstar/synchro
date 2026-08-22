@@ -97,7 +97,6 @@ export const SYNC_FAILURE_CODES = [
   'sync_integrity_failure',
   'unsupported_schema',
   'upgrade_required',
-  'retry_exhausted',
   'schema_mismatch',
   'server_error',
   'network_error',

@@ -363,7 +363,7 @@ internal class SyncEngine(
             } catch (e: CancellationException) {
                 throw e
             } catch (_: Exception) {
-                // Error already handled in runSyncCycleWithRetry
+                Unit
             }
         }
     }
@@ -1279,14 +1279,6 @@ internal class SyncEngine(
     }
 
     private fun failureFor(error: Exception, operation: SyncOperationKind): SyncFailure = when (error) {
-        is RetryableError -> SyncFailure(
-            operation = retryOperationKind(error.interruptedOperation),
-            code = SyncFailureCode.RETRY_EXHAUSTED,
-            retryable = true,
-            message = "The sync operation exhausted its retry attempts.",
-            recoveryAction = SyncRecoveryAction.RETRY,
-            metadata = mapOf("classification" to error.retryClassification),
-        )
         is SynchroError.UpgradeRequired -> SyncFailure(
             operation = SyncOperationKind.CONNECTING,
             code = SyncFailureCode.UPGRADE_REQUIRED,

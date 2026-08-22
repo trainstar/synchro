@@ -93,7 +93,6 @@ enum class SyncFailureCode(val wireName: String) {
     SYNC_INTEGRITY_FAILURE("sync_integrity_failure"),
     UNSUPPORTED_SCHEMA("unsupported_schema"),
     UPGRADE_REQUIRED("upgrade_required"),
-    RETRY_EXHAUSTED("retry_exhausted"),
     SCHEMA_MISMATCH("schema_mismatch"),
     SERVER_ERROR("server_error"),
     NETWORK_ERROR("network_error"),

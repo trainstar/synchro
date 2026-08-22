@@ -192,9 +192,12 @@ function parseDate(value: unknown, name: string): Date | null {
   return date;
 }
 
-function parseStatus(value: unknown): SyncStatus {
-  if (!isRecord(value) || !SYNC_STATUS_TYPES.includes(value.status as SyncStatusType)) {
+function parseStatus(value: unknown): SyncStatus | null {
+  if (!isRecord(value) || typeof value.status !== 'string') {
     throw new InvalidResponseError('Native bridge returned an invalid sync status');
+  }
+  if (!SYNC_STATUS_TYPES.includes(value.status as SyncStatusType)) {
+    return null;
   }
   const status = value.status as SyncStatusType;
   const retryAt = parseDate(value.retryAt, 'retryAt');
@@ -260,19 +263,27 @@ function parseSchemaAction(value: unknown): SchemaAction {
   return value as SchemaAction;
 }
 
-function parseSyncEvent(value: NativeSyncEvent): SyncEvent {
+function parseSyncEvent(value: NativeSyncEvent): SyncEvent | null {
+  if (typeof value.type !== 'string') {
+    throw new InvalidResponseError('Native bridge returned an invalid sync event');
+  }
   if (!SYNC_EVENT_TYPES.includes(value.type as SyncEventType)) {
-    throw new InvalidResponseError('Native bridge returned an unknown sync event');
+    return null;
   }
   switch (value.type as SyncEventType) {
     case 'state_changed': {
+      if (typeof value.from !== 'string' || typeof value.to !== 'string') {
+        throw new InvalidResponseError('Native bridge returned an invalid lifecycle event');
+      }
+      if (
+        !SYNC_STATUS_TYPES.includes(value.from as SyncStatusType) ||
+        !SYNC_STATUS_TYPES.includes(value.to as SyncStatusType)
+      ) {
+        return null;
+      }
       const from = value.from as SyncStatusType;
       const to = value.to as SyncStatusType;
-      if (
-        !SYNC_STATUS_TYPES.includes(from) ||
-        !SYNC_STATUS_TYPES.includes(to) ||
-        !LEGAL_SYNC_STATUS_TRANSITIONS[from].includes(to)
-      ) {
+      if (!LEGAL_SYNC_STATUS_TRANSITIONS[from].includes(to)) {
         throw new InvalidResponseError('Native bridge returned an invalid lifecycle event');
       }
       return {
@@ -890,7 +901,11 @@ export class SynchroClient {
       const status = parseNativeDTO<NativeSyncStatus>(
         await this.native.getSyncStatus()
       );
-      return parseStatus(status);
+      const parsed = parseStatus(status);
+      if (parsed === null) {
+        throw new InvalidResponseError('Native bridge returned an unknown sync status');
+      }
+      return parsed;
     } catch (error) {
       throw mapNativeError(error);
     }
@@ -1045,15 +1060,17 @@ export class SynchroClient {
   // Status and events
 
   onStatusChange(callback: (status: SyncStatus) => void): Unsubscribe {
-    const subscription = this.native.onStatusChange(
-      (event) => callback(parseStatus(event))
-    );
+    const subscription = this.native.onStatusChange((event) => {
+      const status = parseStatus(event);
+      if (status !== null) callback(status);
+    });
     return () => subscription.remove();
   }
 
   onSyncEvent(callback: (event: SyncEvent) => void): Unsubscribe {
     const subscription = this.native.onSyncEvent((event) => {
-      callback(parseSyncEvent(event));
+      const parsed = parseSyncEvent(event);
+      if (parsed !== null) callback(parsed);
     });
     return () => subscription.remove();
   }
