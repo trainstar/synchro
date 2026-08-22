@@ -19,6 +19,7 @@ import {
   AlreadyStartedError,
   NotStartedError,
   TransactionTimeoutError,
+  parseSyncFailure,
 } from '../src/errors';
 
 import { resetNativeModuleMockState } from './__mocks__/react-native';
@@ -227,5 +228,18 @@ describe('mapNativeError', () => {
     const original = new NotConnectedError();
     const err = mapNativeError(original);
     expect(err).toBe(original);
+  });
+});
+
+describe('parseSyncFailure', () => {
+  it('rejects the unreachable retry_exhausted failure code', () => {
+    expect(() => parseSyncFailure({
+      operation: 'pulling',
+      code: 'retry_exhausted',
+      retryable: true,
+      message: 'retry attempts ended',
+      recoveryAction: 'retry',
+      metadata: {},
+    })).toThrow('invalid sync failure code');
   });
 });

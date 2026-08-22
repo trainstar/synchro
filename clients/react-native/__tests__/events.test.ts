@@ -285,6 +285,40 @@ describe('Event routing', () => {
     ).toThrow('invalid lifecycle event');
   });
 
+  it('drops unknown sync event types and keeps the subscription active', () => {
+    const client = makeClient();
+    const events: SyncEvent[] = [];
+    client.onSyncEvent((event) => events.push(event));
+
+    expect(() => emitNativeEvent('onSyncEvent', { type: 'future_event' })).not.toThrow();
+    emitNativeEvent('onSyncEvent', {
+      type: 'state_changed',
+      from: 'connecting',
+      to: 'ready',
+    });
+
+    expect(events).toEqual([{ type: 'state_changed', from: 'connecting', to: 'ready' }]);
+  });
+
+  it('drops unknown lifecycle names and keeps the subscription active', () => {
+    const client = makeClient();
+    const events: SyncEvent[] = [];
+    client.onSyncEvent((event) => events.push(event));
+
+    expect(() => emitNativeEvent('onSyncEvent', {
+      type: 'state_changed',
+      from: 'future_state',
+      to: 'ready',
+    })).not.toThrow();
+    emitNativeEvent('onSyncEvent', {
+      type: 'state_changed',
+      from: 'connecting',
+      to: 'ready',
+    });
+
+    expect(events).toEqual([{ type: 'state_changed', from: 'connecting', to: 'ready' }]);
+  });
+
   it('accepts exactly the normative lifecycle adjacency map', () => {
     const client = makeClient();
     client.onSyncEvent(() => {});
@@ -318,15 +352,22 @@ describe('Event routing', () => {
     }
   });
 
-  it('rejects an omitted or unknown native status value', () => {
+  it('drops an unknown native status and keeps the subscription active', () => {
     const client = makeClient();
     const statuses: SyncStatus[] = [];
     client.onStatusChange((status) => statuses.push(status));
 
-    expect(() => emitNativeEvent('onStatusChange', { status: 'idle' })).toThrow(
-      'invalid sync status'
-    );
-    expect(statuses).toHaveLength(0);
+    expect(() => emitNativeEvent('onStatusChange', detailFreeStatus('future_state'))).not.toThrow();
+    emitNativeEvent('onStatusChange', detailFreeStatus('ready'));
+
+    expect(statuses.map((status) => status.status)).toEqual(['ready']);
+  });
+
+  it('rejects an omitted native status discriminator', () => {
+    const client = makeClient();
+    client.onStatusChange(() => {});
+
+    expect(() => emitNativeEvent('onStatusChange', {})).toThrow('invalid sync status');
   });
 
   it('routes onChange events by observer ID', async () => {

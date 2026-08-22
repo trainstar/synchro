@@ -522,6 +522,11 @@ class ContractTests {
         }
     }
 
+    @Test
+    fun retryExhaustedIsNotAPublicFailureCode() {
+        assertEquals(null, SyncFailureCode.fromWireName("retry_exhausted"))
+    }
+
     private inline fun <reified T> decodeFixtureValue(path: String, jsonPath: List<String>): T {
         val root = json.parseToJsonElement(String(Files.readAllBytes(findFixture(path))))
         val nested = valueAt(root, jsonPath)
