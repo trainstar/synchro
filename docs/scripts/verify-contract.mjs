@@ -4841,6 +4841,7 @@ const validScenario = {
         parameters: {
           client_key: "client-a",
           database_mode: "create",
+          initialization: "empty",
           seed_step_id: null,
         },
       },
