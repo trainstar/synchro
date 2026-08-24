@@ -857,8 +857,8 @@ func r1WALRecordCount(t *testing.T, ctx context.Context, harness *blackbox.Harne
 		t.Fatalf("observe R1 WAL record count: %v", err)
 	}
 	if len(observation.Records) == 0 || !observation.WorkerRunning || observation.BlockingPoison ||
-		!observation.ContiguousAcknowledged || !observation.AcknowledgementMatchesObservedEnd ||
-		!observation.SlotMatchesObservedEnd {
+		!observation.ContiguousAcknowledged || observation.AcknowledgedEndLSN == "" ||
+		observation.AcknowledgedEndLSN != observation.SlotConfirmedFlushLSN {
 		t.Fatal("R1 WAL record count observation is incomplete")
 	}
 	return len(observation.Records)
