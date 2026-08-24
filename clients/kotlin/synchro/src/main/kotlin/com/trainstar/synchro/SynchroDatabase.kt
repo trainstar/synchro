@@ -992,6 +992,7 @@ class ApplicationTransaction internal constructor(
     private val database: SQLiteDatabase,
 ) {
     private val changed = linkedSetOf<String>()
+    private var triggerSetValidated = false
 
     fun query(sql: String, params: Array<out Any?>? = null): List<Row> {
         ApplicationSql.authorizeRead(sql)
@@ -1006,7 +1007,12 @@ class ApplicationTransaction internal constructor(
     fun execute(sql: String, params: Array<out Any?>? = null): ExecResult {
         val statement = ApplicationSql.authorizeWrite(sql)
         val target = requireNotNull(statement.writeTarget)
-        ApplicationWriteGuard.requireWritableTarget(database, target)
+        ApplicationWriteGuard.requireWritableTarget(
+            database,
+            target,
+            validateTriggerSet = !triggerSetValidated,
+        )
+        triggerSetValidated = true
         val compiled = database.compileStatement(sql)
         val changes = try {
             bindTypedValues(compiled, params?.toList() ?: emptyList())
@@ -1030,7 +1036,11 @@ class ApplicationTransaction internal constructor(
  * receives an application DML statement.
  */
 internal object ApplicationWriteGuard {
-    fun requireWritableTarget(db: SQLiteDatabase, target: String) {
+    fun requireWritableTarget(
+        db: SQLiteDatabase,
+        target: String,
+        validateTriggerSet: Boolean = true,
+    ) {
         ApplicationSql.requireApplicationObject(target)
         val exists = db.rawQuery(
             "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ? COLLATE NOCASE",
@@ -1039,7 +1049,9 @@ internal object ApplicationWriteGuard {
             cursor.moveToFirst()
         }
         if (!exists) throw IllegalArgumentException("Application writes require an application table")
-        requireExactAllowedTriggerSet(db, loadSyncedTables(db))
+        if (validateTriggerSet) {
+            requireExactAllowedTriggerSet(db, loadSyncedTables(db))
+        }
     }
 
     internal fun loadSyncedTables(db: SQLiteDatabase): List<LocalSchemaTable> {

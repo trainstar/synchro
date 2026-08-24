@@ -118,6 +118,53 @@ class ApplicationSqlBoundaryTests {
     }
 
     @Test
+    fun applicationTransactionCachesTriggerValidationButRechecksLaterTransaction() {
+        val dbName = databaseName()
+        createSyncedDatabase(dbName)
+        val client = SynchroClient(config(dbName), context)
+        try {
+            client.transaction { transaction ->
+                transaction.execute(
+                    "INSERT INTO orders (id, ship_address, user_id, updated_at) VALUES (?, ?, ?, ?)",
+                    arrayOf("first", "Address 1", "u1", "2026-01-01T00:00:00.000000Z"),
+                )
+                transaction.execute(
+                    "INSERT INTO orders (id, ship_address, user_id, updated_at) VALUES (?, ?, ?, ?)",
+                    arrayOf("second", "Address 2", "u1", "2026-01-01T00:00:01.000000Z"),
+                )
+            }
+        } finally {
+            client.close()
+        }
+
+        val captured = SynchroDatabase.open(context, dbName)
+        try {
+            assertEquals(
+                2L,
+                captured.queryOne("SELECT COUNT(*) AS count FROM _synchro_pending_changes")?.get("count"),
+            )
+            captured.execute("DROP TRIGGER _synchro_cdc_insert_orders")
+        } finally {
+            captured.close()
+        }
+
+        val tamperedClient = SynchroClient(config(dbName), context)
+        try {
+            assertThrows(IllegalStateException::class.java) {
+                tamperedClient.transaction { transaction ->
+                    transaction.execute(
+                        "INSERT INTO orders (id, ship_address, user_id, updated_at) VALUES (?, ?, ?, ?)",
+                        arrayOf("third", "Address 3", "u1", "2026-01-01T00:00:02.000000Z"),
+                    )
+                }
+            }
+        } finally {
+            tamperedClient.close()
+            context.deleteDatabase(dbName)
+        }
+    }
+
+    @Test
     fun applicationWriteRejectsLocalAfterTriggerThatCanReachReservedState() {
         val dbName = databaseName()
         createSyncedDatabase(dbName) { database ->
