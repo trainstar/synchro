@@ -66,6 +66,8 @@ fn synchro_pull_contract(p_user_id: &str, p_request: pgrx::JsonB) -> pgrx::JsonB
         );
 
         acquire_client_identity_lock(client, p_user_id, &request.client_id);
+        // The worker commits edges and this boundary together.
+        // The lock keeps terminal checksums at the selected boundary.
         client
             .update("LOCK TABLE sync_wal_progress IN SHARE MODE", None, &[])
             .unwrap_or_else(|error| pgrx::error!("locking materialization boundary: {}", error));
@@ -761,36 +763,45 @@ fn query_scope_candidates(
     boundary: &StreamBoundary,
     limit: i64,
 ) -> Result<Vec<PullCandidate>, String> {
+    let after_lsn = after.commit_lsn().unwrap_or_else(|| "0/0".to_string());
+    let boundary_lsn = boundary.position.commit_lsn();
     let malformed = client
         .select(
             "SELECT EXISTS (
                  SELECT 1
                  FROM sync_changelog
-                 WHERE bucket_id = $1
-                   AND (stream_generation IS NULL
-                        OR stream_generation = $2 AND (
-                            commit_lsn IS NULL
-                            OR event_ordinal IS NULL
-                            OR event_ordinal < 0
-                            OR effect_ordinal IS NULL
-                            OR effect_ordinal < 0
-                            OR relation_id IS NULL
-                            OR row_version IS NULL
-                            OR NOT EXISTS (
-                                SELECT 1
-                                FROM sync_wal_events event
-                                JOIN sync_wal_transactions transaction
-                                  ON transaction.stream_generation = event.stream_generation
-                                 AND transaction.commit_lsn = event.commit_lsn
-                                WHERE event.stream_generation = sync_changelog.stream_generation
-                                  AND event.commit_lsn = sync_changelog.commit_lsn
-                                  AND event.event_ordinal = sync_changelog.event_ordinal
-                                  AND event.relation_id = sync_changelog.relation_id
-                            )
-                        ))
-             ) AS malformed",
+                  WHERE bucket_id = $1
+                    AND (stream_generation IS NULL
+                         OR stream_generation = $2 AND (
+                             commit_lsn IS NULL
+                             OR (commit_lsn >= $3::pg_lsn
+                                 AND ($4::pg_lsn IS NULL OR commit_lsn <= $4::pg_lsn)
+                                 AND (event_ordinal IS NULL
+                                      OR event_ordinal < 0
+                                      OR effect_ordinal IS NULL
+                                      OR effect_ordinal < 0
+                                      OR relation_id IS NULL
+                                      OR row_version IS NULL
+                                      OR NOT EXISTS (
+                                          SELECT 1
+                                          FROM sync_wal_events event
+                                          JOIN sync_wal_transactions transaction
+                                            ON transaction.stream_generation = event.stream_generation
+                                           AND transaction.commit_lsn = event.commit_lsn
+                                          WHERE event.stream_generation = sync_changelog.stream_generation
+                                            AND event.commit_lsn = sync_changelog.commit_lsn
+                                            AND event.event_ordinal = sync_changelog.event_ordinal
+                                            AND event.relation_id = sync_changelog.relation_id
+                                      )))
+                         ))
+              ) AS malformed",
             None,
-            &[scope_id.into(), boundary.stream_generation.as_str().into()],
+            &[
+                scope_id.into(),
+                boundary.stream_generation.as_str().into(),
+                after_lsn.as_str().into(),
+                boundary_lsn.as_deref().into(),
+            ],
         )
         .map_err(|error| format!("validating scope changelog: {error}"))?
         .first()
@@ -803,13 +814,10 @@ fn query_scope_candidates(
     let StreamPosition::TransactionEnd { .. } = boundary.position else {
         return Ok(Vec::new());
     };
-    let after_lsn = after.commit_lsn().unwrap_or_else(|| "0/0".to_string());
     let after_event = after.event_ordinal().unwrap_or(0);
     let after_effect = after.effect_ordinal().unwrap_or(0);
-    let boundary_lsn = boundary
-        .position
-        .commit_lsn()
-        .ok_or_else(|| "materialization boundary has no commit LSN".to_string())?;
+    let boundary_lsn =
+        boundary_lsn.ok_or_else(|| "materialization boundary has no commit LSN".to_string())?;
     let tup_table = client
         .select(
             "WITH eligible AS (

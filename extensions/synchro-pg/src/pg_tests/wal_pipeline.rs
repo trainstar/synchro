@@ -314,6 +314,39 @@
     }
 
     #[pg_test]
+    fn test_pull_ignores_malformed_effect_beyond_boundary() {
+        setup_pull_fixtures();
+        Spi::run(
+            "INSERT INTO sync_changelog (
+                 bucket_id, table_name, record_id, operation, stream_generation,
+                 commit_lsn, event_ordinal, effect_ordinal, relation_id, row_version
+             )
+             SELECT 'user:u1', 'test_orders',
+                    'f0000000-0000-4000-8000-000000000001', 1,
+                    runtime.stream_generation, 'FFFFFFFF/FFFFFFFE'::pg_lsn,
+                    NULL, 0, registry.relation_id, gen_random_uuid()
+             FROM sync_runtime_state runtime
+             JOIN sync_registry registry ON registry.table_name = 'test_orders'
+             JOIN sync_registry_generations generation
+               ON generation.generation = registry.registry_generation
+              AND generation.state = 'active'
+             WHERE runtime.singleton",
+        )
+        .unwrap();
+
+        let response = pull_client(
+            "u1",
+            "c1",
+            1,
+            json!({ "user:u1": scope_cursor_ref("u1", "c1", "user:u1", 0) }),
+            100,
+        );
+
+        assert!(response.get("error").is_none());
+        assert!(!response["changes"].as_array().unwrap().is_empty());
+    }
+
+    #[pg_test]
     fn test_direct_write_advances_opaque_version() {
         setup_test_tables();
         register_client("u1", "c1");
