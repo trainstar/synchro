@@ -58,13 +58,13 @@ const r1InsertRowsStatement = `
 	SELECT ('00000000-0000-4000-' || lpad($1::text, 4, '0') || '-' || lpad(value::text, 12, '0'))::uuid,
 	       'diagnostic-user',
 	       $2 || '-' || lpad(value::text, 4, '0')
-	FROM generate_series(1, $3) value`
+	FROM generate_series(1, $3::integer) value`
 
 const r1UpdateRowsStatement = `
 	UPDATE cf_items AS item
 	SET value = $2 || '-' || lpad(source.value::text, 4, '0'),
 	    updated_at = clock_timestamp()
-	FROM generate_series(1, $3) source(value)
+	FROM generate_series(1, $3::integer) source(value)
 	WHERE item.id = ('00000000-0000-4000-' || lpad($1::text, 4, '0') || '-' || lpad(source.value::text, 12, '0'))::uuid`
 
 const r1UpdateOneRowStatement = `
