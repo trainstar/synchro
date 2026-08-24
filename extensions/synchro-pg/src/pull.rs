@@ -670,6 +670,7 @@ pub(crate) fn schema_hash_for_generation(
                  FROM synchro.sync_stream_resets
                  WHERE operation_kind = 'projection_bootstrap'
                    AND target_registry_generation = $1
+                   AND target_schema_hash IS NOT NULL
                    AND lifecycle IN ('preparing', 'baseline_staged', 'catching_up', 'activated')
              ) schema_reference
              ORDER BY registry_generation DESC, schema_version DESC
@@ -720,6 +721,17 @@ pub(crate) fn synced_row_digest(
     record_id: &str,
     server_version: &str,
 ) -> Result<Sha256Digest, String> {
+    let schema_hash = schema_hash_for_generation(client, table_reg.registry_generation)?;
+    synced_row_digest_with_schema_hash(table_reg, data, record_id, server_version, schema_hash)
+}
+
+fn synced_row_digest_with_schema_hash(
+    table_reg: &TableRegistration,
+    data: &serde_json::Value,
+    record_id: &str,
+    server_version: &str,
+    schema_hash: SchemaHash,
+) -> Result<Sha256Digest, String> {
     let mut canonical = data.clone();
     canonicalize_synced_row_data(table_reg, &mut canonical)?;
     let table = canonical_table(table_reg)?;
@@ -731,7 +743,6 @@ pub(crate) fn synced_row_digest(
             .map_err(|error| format!("encoding wire row: {error}"))?,
     )
     .map_err(|error| format!("canonical row is invalid: {error}"))?;
-    let schema_hash = schema_hash_for_generation(client, table_reg.registry_generation)?;
     row_digest(schema_hash, &table, &row, server_version)
         .map_err(|error| format!("computing row digest: {error}"))
 }
@@ -1023,6 +1034,9 @@ fn build_contract_changes(
     entries: &[RawChangelogEntry],
 ) -> Result<Vec<ChangeRecord>, String> {
     let mut changes = Vec::with_capacity(entries.len());
+    let mut registries_by_generation =
+        std::collections::HashMap::<i64, Vec<TableRegistration>>::new();
+    let mut schema_hashes_by_generation = std::collections::HashMap::<i64, SchemaHash>::new();
     for entry in entries {
         let table = registry
             .iter()
@@ -1057,20 +1071,40 @@ fn build_contract_changes(
                     entry.projection_registry_generation.ok_or_else(|| {
                         "pull upsert projection registry generation is missing".to_string()
                     })?;
-                let projection_table = crate::registry::load_registry_generation_from_client(
-                    client,
-                    projection_generation,
-                )
-                .map_err(|_| "pull upsert projection registry is unavailable".to_string())?
-                .into_iter()
-                .find(|candidate| candidate.table_name == entry.table_name)
-                .ok_or_else(|| "pull upsert projection table is unavailable".to_string())?;
-                let computed = synced_row_digest(
-                    client,
-                    &projection_table,
+                if let std::collections::hash_map::Entry::Vacant(entry) =
+                    registries_by_generation.entry(projection_generation)
+                {
+                    entry.insert(
+                        crate::registry::load_registry_generation_from_client(
+                            client,
+                            projection_generation,
+                        )
+                        .map_err(|_| {
+                            "pull upsert projection registry is unavailable".to_string()
+                        })?,
+                    );
+                }
+                let projection_table = registries_by_generation
+                    .get(&projection_generation)
+                    .expect("projection registry generation was loaded")
+                    .iter()
+                    .find(|candidate| candidate.table_name == entry.table_name)
+                    .ok_or_else(|| "pull upsert projection table is unavailable".to_string())?;
+                let schema_hash = match schema_hashes_by_generation.get(&projection_generation) {
+                    Some(schema_hash) => *schema_hash,
+                    None => {
+                        let schema_hash =
+                            schema_hash_for_generation(client, projection_generation)?;
+                        schema_hashes_by_generation.insert(projection_generation, schema_hash);
+                        schema_hash
+                    }
+                };
+                let computed = synced_row_digest_with_schema_hash(
+                    projection_table,
                     &row,
                     &entry.record_id,
                     &server_version,
+                    schema_hash,
                 )?;
                 if computed != checksum {
                     return Err("pull upsert projection row digest does not match".to_string());
@@ -1104,20 +1138,41 @@ fn build_contract_changes(
                         entry.projection_registry_generation.ok_or_else(|| {
                             "pull delete projection registry generation is missing".to_string()
                         })?;
-                    let projection_table = crate::registry::load_registry_generation_from_client(
-                        client,
-                        projection_generation,
-                    )
-                    .map_err(|_| "pull delete projection registry is unavailable".to_string())?
-                    .into_iter()
-                    .find(|candidate| candidate.table_name == entry.table_name)
-                    .ok_or_else(|| "pull delete projection table is unavailable".to_string())?;
-                    let computed = synced_row_digest(
-                        client,
-                        &projection_table,
+                    if let std::collections::hash_map::Entry::Vacant(entry) =
+                        registries_by_generation.entry(projection_generation)
+                    {
+                        entry.insert(
+                            crate::registry::load_registry_generation_from_client(
+                                client,
+                                projection_generation,
+                            )
+                            .map_err(|_| {
+                                "pull delete projection registry is unavailable".to_string()
+                            })?,
+                        );
+                    }
+                    let projection_table = registries_by_generation
+                        .get(&projection_generation)
+                        .expect("projection registry generation was loaded")
+                        .iter()
+                        .find(|candidate| candidate.table_name == entry.table_name)
+                        .ok_or_else(|| "pull delete projection table is unavailable".to_string())?;
+                    let schema_hash = match schema_hashes_by_generation.get(&projection_generation)
+                    {
+                        Some(schema_hash) => *schema_hash,
+                        None => {
+                            let schema_hash =
+                                schema_hash_for_generation(client, projection_generation)?;
+                            schema_hashes_by_generation.insert(projection_generation, schema_hash);
+                            schema_hash
+                        }
+                    };
+                    let computed = synced_row_digest_with_schema_hash(
+                        projection_table,
                         &row,
                         &entry.record_id,
                         &server_version,
+                        schema_hash,
                     )?;
                     if computed != checksum {
                         return Err("pull delete projection row digest does not match".to_string());
@@ -1205,6 +1260,7 @@ pub(crate) fn hydrate_records(
         )
         .map_err(|error| format!("hydration failed for table {table_name}: {error}"))?;
 
+    let schema_hash = schema_hash_for_generation(client, table_reg.registry_generation)?;
     let mut records = Vec::new();
     for row in tup_table {
         let id: String = row
@@ -1232,8 +1288,9 @@ pub(crate) fn hydrate_records(
             .map_err(|error| format!("row {table_name}.{id} is invalid JSON: {error}"))?;
         canonicalize_synced_row_data(table_reg, &mut data)
             .map_err(|error| format!("row {table_name}.{id} is not canonical: {error}"))?;
-        let digest = synced_row_digest(client, table_reg, &data, &id, &row_version)
-            .map_err(|error| format!("row {table_name}.{id} digest failed: {error}"))?;
+        let digest =
+            synced_row_digest_with_schema_hash(table_reg, &data, &id, &row_version, schema_hash)
+                .map_err(|error| format!("row {table_name}.{id} digest failed: {error}"))?;
         let row_checksum = ChecksumObject::new(digest);
 
         let mut record = serde_json::json!({

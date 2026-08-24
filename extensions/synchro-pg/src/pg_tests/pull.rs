@@ -88,6 +88,46 @@
     }
 
     #[pg_test]
+    fn test_same_schema_bootstrap_uses_manifest_hash() {
+        setup_test_tables();
+        let table = create_capture_dependency_table(true);
+        Spi::run(&format!(
+            "SELECT synchro.synchro_register_capture_dependency(
+                 'public.{table}', ARRAY['id']::text[], ARRAY['target_id']::text[]
+             )"
+        ))
+        .expect("stage same-schema projection bootstrap generation");
+        configure_reset_test_slot("synchro_same_schema_old");
+
+        let target_generation: i64 = Spi::get_one(&format!(
+            "SELECT generation.generation
+             FROM synchro.sync_registry registry
+             JOIN synchro.sync_registry_generations generation
+               ON generation.generation = registry.registry_generation
+             WHERE registry.physical_relation_oid = 'public.{table}'::regclass
+               AND generation.state = 'pending' AND generation.validated"
+        ))
+        .expect("load same-schema projection bootstrap generation")
+        .expect("same-schema projection bootstrap generation");
+        let (_, expected_hash) = latest_schema_ref();
+        let prepared = Spi::connect_mut(|client| {
+            crate::stream_reset::prepare_projection_bootstrap_for_test(
+                client,
+                target_generation,
+                "synchro_same_schema_candidate",
+            )
+        })
+        .expect("prepare same-schema projection bootstrap");
+        assert!(prepared["schema_hash"].is_null());
+
+        let actual_hash = Spi::connect(|client| {
+            crate::pull::schema_hash_for_generation(client, target_generation)
+        })
+        .expect("load inherited schema hash");
+        assert_eq!(actual_hash.to_lower_hex(), expected_hash);
+    }
+
+    #[pg_test]
     fn test_synced_projection_serializes_json_values_as_canonical_text() {
         setup_portable_type_contract_table();
         let record_id = "10101010-1010-4010-8010-101010101010";
