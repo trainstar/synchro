@@ -247,6 +247,59 @@
     }
 
     #[pg_test]
+    fn test_pull_matches_projection_record_with_shared_event() {
+        setup_pull_fixtures();
+        let first_id = "a1111111-1111-1111-1111-111111111111";
+        let second_id = "a2222222-2222-2222-2222-222222222222";
+
+        Spi::run_with_args(
+            "UPDATE sync_captured_projections target
+             SET commit_lsn = source.commit_lsn,
+                 event_ordinal = source.event_ordinal
+             FROM sync_captured_projections source
+             WHERE source.record_id = $1
+               AND target.record_id = $2
+               AND source.image_kind = 'after'
+               AND target.image_kind = 'after';
+             UPDATE sync_changelog target
+             SET commit_lsn = source.commit_lsn,
+                 event_ordinal = source.event_ordinal,
+                 effect_ordinal = 1
+             FROM sync_changelog source
+             WHERE source.record_id = $1
+               AND target.record_id = $2;
+             UPDATE sync_wal_transactions transaction
+             SET effect_count = 2
+             FROM sync_changelog source
+             WHERE source.record_id = $1
+               AND transaction.stream_generation = source.stream_generation
+               AND transaction.commit_lsn = source.commit_lsn",
+            &[first_id.into(), second_id.into()],
+        )
+        .unwrap();
+
+        let response = pull_client(
+            "u1",
+            "c1",
+            1,
+            json!({ "user:u1": scope_cursor_ref("u1", "c1", "user:u1", 0) }),
+            100,
+        );
+        assert!(response.get("error").is_none(), "{response}");
+        let changes = response["changes"].as_array().expect("pull changes");
+        assert_eq!(changes.len(), 2);
+        let id_field = field_id("test_orders", "id");
+        let title_field = field_id("test_orders", "title");
+        for (record_id, title) in [(first_id, "Order 1"), (second_id, "Order 2")] {
+            let change = changes
+                .iter()
+                .find(|change| change["row"][&id_field].as_str() == Some(record_id))
+                .expect("pull change for shared-event record");
+            assert_eq!(change["row"][&title_field].as_str(), Some(title));
+        }
+    }
+
+    #[pg_test]
     fn test_pull_missing_projection_fails_without_progress() {
         setup_test_tables();
         register_client("u1", "c1");

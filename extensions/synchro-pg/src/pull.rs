@@ -837,6 +837,7 @@ fn query_scope_candidates(
                   AND p.event_ordinal = c.event_ordinal
                   AND p.relation_id = c.relation_id
                   AND p.image_kind = c.projection_image
+                  AND p.record_id = c.record_id
                  WHERE c.bucket_id = $1
                    AND c.stream_generation = $2
                    AND c.commit_lsn IS NOT NULL

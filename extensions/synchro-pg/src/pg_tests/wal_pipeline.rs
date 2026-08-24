@@ -95,6 +95,144 @@
     }
 
     #[pg_test]
+    fn test_reevaluation_projection_batch_boundary() {
+        setup_test_tables();
+        let projections: pgrx::JsonB = Spi::get_one(
+            "WITH context AS (
+                 SELECT runtime.stream_generation, registry.relation_id,
+                        registry.registry_generation
+                 FROM sync_runtime_state runtime
+                 JOIN sync_registry_generations generation
+                   ON generation.stream_generation = runtime.stream_generation
+                  AND generation.state = 'active'
+                 JOIN sync_registry registry
+                   ON registry.registry_generation = generation.generation
+                  AND registry.table_name = 'test_orders'
+                 WHERE runtime.singleton
+             ), inserted AS (
+                 INSERT INTO sync_captured_rows (
+                     relation_id, record_id, row_data, row_version, checksum, deleted,
+                     source_stream_generation, source_commit_lsn, source_event_ordinal,
+                     registry_generation
+                 )
+                 SELECT context.relation_id,
+                        '00000000-0000-4000-8001-' || lpad(series::text, 12, '0'),
+                        jsonb_build_object('sequence', series),
+                        ('00000000-0000-4000-8002-' || lpad(series::text, 12, '0'))::uuid,
+                        decode(lpad(to_hex(series), 64, '0'), 'hex'), false,
+                        context.stream_generation, '0/10'::pg_lsn, 0,
+                        context.registry_generation
+                 FROM context
+                 CROSS JOIN generate_series(1, 501) AS series
+                 RETURNING relation_id, record_id, registry_generation,
+                           row_version, checksum, deleted
+             )
+             SELECT jsonb_agg(jsonb_build_object(
+                        'event_ordinal', 7,
+                        'relation_id', relation_id,
+                        'registry_generation', registry_generation,
+                        'record_id', record_id,
+                        'row_version', row_version,
+                        'checksum_hex', encode(checksum, 'hex'),
+                        'deleted', deleted
+                    ) ORDER BY record_id)
+             FROM inserted",
+        )
+        .unwrap()
+        .expect("reevaluation projection batch inputs");
+        let mut projections = projections
+            .0
+            .as_array()
+            .expect("projection input array")
+            .clone();
+        let stream_generation: String = Spi::get_one(
+            "SELECT stream_generation FROM sync_runtime_state WHERE singleton",
+        )
+        .unwrap()
+        .expect("stream generation");
+
+        Spi::connect_mut(|client| {
+            for (field, value) in [
+                ("registry_generation", json!(-1)),
+                (
+                    "row_version",
+                    json!("ffffffff-ffff-4fff-8fff-ffffffffffff"),
+                ),
+                ("checksum_hex", json!("f".repeat(64))),
+                ("deleted", json!(true)),
+            ] {
+                let mut invalid = projections[..2].to_vec();
+                invalid[1][field] = value;
+                assert!(crate::bgworker::persist_reevaluation_projection_batch(
+                    client,
+                    &stream_generation,
+                    0x20,
+                    invalid,
+                )
+                .is_err());
+            }
+            assert!(crate::bgworker::persist_reevaluation_projection_batch(
+                client,
+                &stream_generation,
+                0x20,
+                projections.clone(),
+            )
+            .is_err());
+            let inserted_before_valid_batches = client
+                .select(
+                    "SELECT count(*)::bigint AS count
+                     FROM sync_captured_projections
+                     WHERE commit_lsn = '0/20'::pg_lsn AND event_ordinal = 7",
+                    None,
+                    &[],
+                )?
+                .first()
+                .get_by_name::<i64, &str>("count")?;
+            assert_eq!(inserted_before_valid_batches, Some(0));
+            let final_batch = projections.split_off(500);
+            crate::bgworker::persist_reevaluation_projection_batch(
+                client,
+                &stream_generation,
+                0x20,
+                projections,
+            )
+            .expect("first reevaluation projection batch");
+            crate::bgworker::persist_reevaluation_projection_batch(
+                client,
+                &stream_generation,
+                0x20,
+                final_batch,
+            )
+            .expect("second reevaluation projection batch");
+            Ok::<_, pgrx::spi::Error>(())
+        })
+        .unwrap();
+
+        let counts: pgrx::JsonB = Spi::get_one(
+            "SELECT jsonb_build_object(
+                 'rows', count(*),
+                 'matches', bool_and(
+                     projection.row_data = captured.row_data
+                     AND projection.row_version = captured.row_version
+                     AND projection.checksum = captured.checksum
+                     AND projection.deleted = captured.deleted
+                     AND projection.registry_generation = captured.registry_generation
+                 )
+             )
+             FROM sync_captured_projections projection
+             JOIN sync_captured_rows captured
+               ON captured.relation_id = projection.relation_id
+              AND captured.record_id = projection.record_id
+             WHERE projection.commit_lsn = '0/20'::pg_lsn
+               AND projection.event_ordinal = 7",
+        )
+        .unwrap()
+        .expect("reevaluation projection batch counts");
+        assert_eq!(counts.0["rows"], json!(501));
+        assert_eq!(counts.0["matches"], json!(true));
+    }
+
+    #[pg_test]
     fn test_backfill_digest_failure_does_not_replace_live_edges() {
         setup_test_tables();
         let record_id = "15151515-1515-1515-1515-151515151515";

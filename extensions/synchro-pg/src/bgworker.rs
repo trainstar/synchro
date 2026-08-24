@@ -4112,6 +4112,7 @@ fn collect_membership_impacts(
             )
         })
         .collect();
+    let mut reevaluation_projections = Vec::new();
 
     for event in persisted.dependency_events {
         for dependency in dependencies
@@ -4145,19 +4146,39 @@ fn collect_membership_impacts(
                 else {
                     continue;
                 };
-                if let Some(impact) = impacts.get_mut(&key) {
-                    if event.event_ordinal <= impact.event_ordinal {
-                        continue;
+                if impacts
+                    .get(&key)
+                    .is_some_and(|impact| event.event_ordinal <= impact.event_ordinal)
+                {
+                    continue;
+                }
+                if let ProjectionTarget::Active { stream_generation } = target {
+                    let event_ordinal = i64::try_from(event.event_ordinal)
+                        .map_err(|_| failure("validation_failed", transaction.commit_lsn))?;
+                    reevaluation_projections.push(serde_json::json!({
+                        "event_ordinal": event_ordinal,
+                        "relation_id": target_registration.relation_id,
+                        "registry_generation": captured.registry_generation,
+                        "record_id": record_id,
+                        "row_version": captured.row_version,
+                        "checksum_hex": captured.digest.to_lower_hex(),
+                        "deleted": captured.deleted,
+                    }));
+                    if reevaluation_projections.len() == JSONB_BATCH_SIZE {
+                        let projections = std::mem::replace(
+                            &mut reevaluation_projections,
+                            Vec::with_capacity(JSONB_BATCH_SIZE),
+                        );
+                        persist_reevaluation_projection_batch(
+                            client,
+                            stream_generation,
+                            transaction.commit_lsn,
+                            projections,
+                        )
+                        .map_err(|_| failure("projection_write_failed", transaction.commit_lsn))?;
                     }
-                    persist_reevaluation_projection(
-                        client,
-                        target,
-                        transaction,
-                        target_registration,
-                        event.event_ordinal,
-                        &record_id,
-                        &captured,
-                    )?;
+                }
+                if let Some(impact) = impacts.get_mut(&key) {
                     impact.event_ordinal = event.event_ordinal;
                     if !impact.direct_change {
                         impact.operation = if captured.deleted {
@@ -4171,15 +4192,6 @@ fn collect_membership_impacts(
                     }
                     continue;
                 }
-                persist_reevaluation_projection(
-                    client,
-                    target,
-                    transaction,
-                    target_registration,
-                    event.event_ordinal,
-                    &record_id,
-                    &captured,
-                )?;
                 impacts.insert(
                     key,
                     ImpactedRow {
@@ -4199,6 +4211,15 @@ fn collect_membership_impacts(
                 );
             }
         }
+    }
+    if let ProjectionTarget::Active { stream_generation } = target {
+        persist_reevaluation_projection_batch(
+            client,
+            stream_generation,
+            transaction.commit_lsn,
+            reevaluation_projections,
+        )
+        .map_err(|_| failure("projection_write_failed", transaction.commit_lsn))?;
     }
 
     let mut keyed_impacts = impacts
@@ -4228,45 +4249,80 @@ fn collect_membership_impacts(
         .collect())
 }
 
-fn persist_reevaluation_projection(
+pub(super) fn persist_reevaluation_projection_batch(
     client: &mut SpiClient<'_>,
-    target: ProjectionTarget<'_>,
-    transaction: &WalTransaction,
-    registration: &TableRegistration,
-    event_ordinal: u64,
-    record_id: &str,
-    captured: &CapturedRow,
-) -> Result<(), PoisonFailure> {
-    let ProjectionTarget::Active { stream_generation } = target else {
+    stream_generation: &str,
+    commit_lsn: u64,
+    projections: Vec<serde_json::Value>,
+) -> Result<(), ()> {
+    if projections.is_empty() {
         return Ok(());
-    };
-    client
+    }
+    if projections.len() > JSONB_BATCH_SIZE {
+        return Err(());
+    }
+    let expected = i64::try_from(projections.len()).map_err(|_| ())?;
+    let counts = client
         .update(
-            "INSERT INTO synchro.sync_captured_projections (
-                 stream_generation, commit_lsn, event_ordinal, relation_id,
-                 image_kind, registry_generation, record_id, row_data,
-                 row_version, checksum, deleted
-             ) VALUES (
-                 $1, $2::pg_lsn, $3, $4::uuid, 'after', $5, $6, $7,
-                 $8::uuid, $9, $10
-             )",
+            "WITH projection_input AS (
+                 SELECT event_ordinal, relation_id, registry_generation,
+                        record_id, row_version, checksum_hex, deleted
+                 FROM jsonb_to_recordset($1::jsonb) AS input(
+                     event_ordinal bigint,
+                     relation_id text,
+                     registry_generation bigint,
+                     record_id text,
+                     row_version text,
+                     checksum_hex text,
+                     deleted boolean
+                 )
+             ), matched AS (
+                 SELECT input.event_ordinal, input.relation_id, input.record_id,
+                        captured.registry_generation, captured.row_data,
+                        captured.row_version, captured.checksum, captured.deleted
+                 FROM projection_input input
+                 JOIN synchro.sync_captured_rows captured
+                   ON captured.relation_id = input.relation_id::uuid
+                  AND captured.record_id = input.record_id
+                  AND captured.registry_generation = input.registry_generation
+                  AND captured.row_version = input.row_version::uuid
+                  AND captured.checksum = decode(input.checksum_hex, 'hex')
+                  AND captured.deleted = input.deleted
+             ), inserted AS (
+                 INSERT INTO synchro.sync_captured_projections (
+                     stream_generation, commit_lsn, event_ordinal, relation_id,
+                     image_kind, registry_generation, record_id, row_data,
+                     row_version, checksum, deleted
+                 )
+                 SELECT $2, $3::pg_lsn, matched.event_ordinal,
+                        matched.relation_id::uuid, 'after',
+                        matched.registry_generation, matched.record_id,
+                        matched.row_data, matched.row_version, matched.checksum,
+                        matched.deleted
+                 FROM matched
+                 WHERE (SELECT count(*) FROM matched) = $4
+                 RETURNING record_id
+             )
+             SELECT (SELECT count(*) FROM matched) = $4
+                    AND (SELECT count(*) FROM inserted) = $4 AS complete",
             None,
             &[
+                pgrx::JsonB(serde_json::Value::Array(projections)).into(),
                 stream_generation.into(),
-                format_lsn(transaction.commit_lsn).as_str().into(),
-                i64::try_from(event_ordinal)
-                    .map_err(|_| failure("validation_failed", transaction.commit_lsn))?
-                    .into(),
-                registration.relation_id.as_str().into(),
-                captured.registry_generation.into(),
-                record_id.into(),
-                pgrx::JsonB(captured.row_data.clone()).into(),
-                captured.row_version.as_str().into(),
-                captured.digest.as_bytes().to_vec().into(),
-                captured.deleted.into(),
+                format_lsn(commit_lsn).as_str().into(),
+                expected.into(),
             ],
         )
-        .map_err(|_| failure("projection_write_failed", transaction.commit_lsn))?;
+        .map_err(|_| ())?;
+    if counts.len() != 1
+        || counts
+            .first()
+            .get_by_name::<bool, &str>("complete")
+            .map_err(|_| ())?
+            != Some(true)
+    {
+        return Err(());
+    }
     Ok(())
 }
 
