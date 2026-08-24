@@ -3649,6 +3649,39 @@ func (executor *OperatorExecutor) ObserveWALProgress(ctx context.Context) (WALPr
 	return observation, nil
 }
 
+// CurrentWALWorkerPID returns the unique current WAL consumer process ID.
+func (executor *OperatorExecutor) CurrentWALWorkerPID(ctx context.Context) (int, error) {
+	if executor == nil || executor.harness == nil || !executor.harness.sourceReady {
+		return 0, errors.New("operator executor is unavailable")
+	}
+	if ctx == nil {
+		return 0, errors.New("WAL worker process context is required")
+	}
+	if err := ctx.Err(); err != nil {
+		return 0, errors.New("WAL worker process context expired")
+	}
+	observationContext, cancel := context.WithTimeout(ctx, environmentCommandTimeout)
+	defer cancel()
+	database, err := executor.harness.openDatabase(observationContext, executor.harness.names.Database, executor.harness.env.Admin, false)
+	if err != nil {
+		return 0, errors.New("open WAL worker process observation connection failed")
+	}
+	defer database.Close()
+	var count int
+	var pid int
+	if err := database.QueryRowContext(observationContext, `
+		SELECT count(*), COALESCE(min(pid), 0)
+		FROM pg_catalog.pg_stat_activity
+		WHERE datname = current_database()
+		  AND backend_type = 'synchro WAL consumer'`).Scan(&count, &pid); err != nil {
+		return 0, errors.New("read WAL worker process observation failed")
+	}
+	if count != 1 || pid <= 0 {
+		return 0, errors.New("unique WAL worker process is unavailable")
+	}
+	return pid, nil
+}
+
 // RunWALReplayRestartControl forces a worker exit after durable materialization and before acknowledgement.
 func (executor *OperatorExecutor) RunWALReplayRestartControl(ctx context.Context, recordID string) (observation WALReplayRestartObservation, returnedErr error) {
 	if executor == nil || executor.harness == nil || !executor.harness.sourceReady {

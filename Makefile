@@ -28,6 +28,10 @@
 	test-blackbox-components \
 	test-blackbox-wal \
 	test-blackbox-mutation-control \
+	test-r1-benchmark-units \
+	record-r1-benchmark \
+	test-r1-benchmark \
+	_run-r1-benchmark \
 	parse-testresult \
 	conformance-adapter-artifact \
 	conformance-pg18-extension-artifact \
@@ -137,6 +141,7 @@ CONFORMANCE_EXTENSION_ARTIFACT ?= $(CURDIR)/dist/conformance/synchro-pg-pg18
 ADAPTER_TEST_DB ?= synchro_adapter_test
 ADAPTER_TEST_URL ?= postgres://$(USER)@localhost:$(PGRX_PORT)/$(ADAPTER_TEST_DB)?sslmode=disable
 REPLICATION_URL ?= postgres://$(USER)@localhost:$(PGRX_PORT)/$(ADAPTER_TEST_DB)?replication=database&sslmode=disable
+override R1_BENCHMARK_BASELINE := $(CURDIR)/conformance/blackbox/integration/testdata/r1-benchmark-baseline.json
 
 SYNCHROD_PG_PORT ?= 8091
 SYNCHRO_TEST_HOST ?= localhost
@@ -192,6 +197,8 @@ help:
 	@echo "  test-inventory        - Test generated evidence inventory"
 	@echo "  test-blackbox         - Run the packaged server black-box suite"
 	@echo "  test-blackbox-mutation-control - Run one structured real mutation control"
+	@echo "  record-r1-benchmark   - Record one R1 benchmark candidate"
+	@echo "  test-r1-benchmark     - Compare R1 benchmark results with the tracked baseline"
 	@echo "  rc-check-pg18         - Verify the packaged PostgreSQL 18 candidate"
 	@echo "  evidence              - Generate and verify immutable RC evidence"
 	@echo "  lint-go               - Run Go formatting checks and go vet"
@@ -344,6 +351,55 @@ test-blackbox-mutation-control:
 		-test "$(MUTATION_CONTROL_TEST)" \
 		-expect "$(MUTATION_CONTROL_EXPECT)" \
 		-- go test -json ./blackbox/integration -count=1 -run "^$(MUTATION_CONTROL_TEST)$$" -args --provision --install
+
+test-r1-benchmark-units:
+	cd conformance && GOFLAGS= GOWORK=off go run ./cmd/testresult suite -- go test -tags r1benchmark -json ./blackbox/integration -count=1 -run '^TestR1Benchmark(StrictParser|ThresholdLogic|ResultPathSafety)$$'
+
+record-r1-benchmark: test-r1-benchmark-units
+	@$(MAKE) --no-print-directory _run-r1-benchmark R1_BENCHMARK_RUN_MODE=record
+
+test-r1-benchmark: test-r1-benchmark-units
+	@$(MAKE) --no-print-directory _run-r1-benchmark R1_BENCHMARK_RUN_MODE=compare
+
+_run-r1-benchmark:
+	@case "$(R1_BENCHMARK_RUN_MODE)" in record|compare) ;; *) echo "R1 benchmark run mode is invalid" >&2; exit 1 ;; esac
+	@test -n "$(R1_BENCHMARK_RESULT)" || { echo "R1_BENCHMARK_RESULT is required" >&2; exit 1; }
+	@test "$(abspath $(R1_BENCHMARK_RESULT))" != "$(R1_BENCHMARK_BASELINE)" || { echo "R1_BENCHMARK_RESULT must not replace the baseline" >&2; exit 1; }
+	@result="$(abspath $(R1_BENCHMARK_RESULT))"; repo="$(CURDIR)"; \
+		case "$$result" in "$$repo"|"$$repo"/*) echo "R1_BENCHMARK_RESULT must be outside the repository" >&2; exit 1 ;; esac
+	@test -z "$$(git status --porcelain --untracked-files=normal)" || { echo "R1 benchmark requires a clean worktree" >&2; exit 1; }
+	@git ls-files --error-unmatch -- "conformance/blackbox/integration/real_r1_benchmark_test.go" >/dev/null 2>&1 || { echo "R1 benchmark definition is not tracked" >&2; exit 1; }
+	@if [ "$(R1_BENCHMARK_RUN_MODE)" = compare ]; then \
+		test -f "$(R1_BENCHMARK_BASELINE)" || { echo "tracked R1 benchmark baseline is missing" >&2; exit 1; }; \
+		git ls-files --error-unmatch -- "conformance/blackbox/integration/testdata/r1-benchmark-baseline.json" >/dev/null 2>&1 || { echo "R1 benchmark baseline is not tracked" >&2; exit 1; }; \
+	fi
+	@set -eu; \
+		revision="$$(git rev-parse --verify HEAD)"; \
+		test "$${#revision}" -eq 40; \
+		repo="$$(pwd -P)"; \
+		temp_parent="$${TMPDIR:-/tmp}"; \
+		temp_parent="$$(cd "$$temp_parent" && pwd -P)"; \
+		case "$$temp_parent" in "$$repo"|"$$repo"/*) echo "R1 benchmark temporary directory must be outside the repository" >&2; exit 1 ;; esac; \
+		artifact_root="$$(mktemp -d "$$temp_parent/synchro-r1-$$revision.XXXXXX")"; \
+		cleanup() { rm -rf "$$artifact_root"; }; \
+		trap cleanup EXIT HUP INT TERM; \
+		adapter_bundle="$$artifact_root/adapter"; \
+		extension_bundle="$$artifact_root/extension"; \
+		$(MAKE) --no-print-directory conformance-adapter-artifact CONFORMANCE_ADAPTER_ARTIFACT_DIR="$$adapter_bundle"; \
+		$(MAKE) --no-print-directory conformance-pg18-extension-artifact CONFORMANCE_EXTENSION_ARTIFACT="$$extension_bundle" PGRX_TARGET_DIR="$$artifact_root/cargo-target"; \
+		test -z "$$(git status --porcelain --untracked-files=normal)" || { echo "R1 artifact packaging changed the worktree" >&2; exit 1; }; \
+		test "$$(git rev-parse --verify HEAD)" = "$$revision" || { echo "R1 benchmark revision changed during packaging" >&2; exit 1; }; \
+		cd conformance; \
+		SYNCHRO_CONFORMANCE_ADAPTER_ARTIFACT="$$adapter_bundle/synchrod-pg" \
+		SYNCHRO_CONFORMANCE_EXTENSION_ARTIFACT="$$extension_bundle" \
+		R1_BENCHMARK_MODE="$(R1_BENCHMARK_RUN_MODE)" \
+		R1_BENCHMARK_REVISION="$$revision" \
+		R1_BENCHMARK_RESULT="$(abspath $(R1_BENCHMARK_RESULT))" \
+		GOFLAGS= GOWORK=off go run ./cmd/testresult exact \
+			-test TestRealR1PerformanceBenchmark \
+			-expect target_pass \
+			-- go test -tags r1benchmark -json ./blackbox/integration -count=1 -timeout=20m \
+			-run '^TestRealR1PerformanceBenchmark$$' -args --provision --install
 
 parse-testresult:
 	@test -n "$(TESTRESULT_TEST_NAME)" || { echo "TESTRESULT_TEST_NAME is required" >&2; exit 1; }
@@ -597,7 +653,7 @@ release-check: override GO_TEST_ARGS := -v -count=1 -p 1
 release-check: override GO_TEST_PKGS := ./...
 release-check: override GRADLE_TEST_ARGS := --rerun-tasks
 release-check: override DETOX_ARGS :=
-release-check: evidence build-conformance test-conformance test-blackbox rc-check-pg18 version-check release-pods-check build build-seed build-check release-kotlin-local release-npm-dry-run lint-go lint-rust-core lint-rust-pg lint-rn test-rust-core test-rust-mutants test-integration-mutants test-rust-pg test-adapter test-swift test-kotlin-unit test-kotlin test-rn-unit test-rn-native-parity test-rn test-packaged-consumers verify-contract check-pg-sql docs-build
+release-check: evidence build-conformance test-conformance test-blackbox test-r1-benchmark rc-check-pg18 version-check release-pods-check build build-seed build-check release-kotlin-local release-npm-dry-run lint-go lint-rust-core lint-rust-pg lint-rn test-rust-core test-rust-mutants test-integration-mutants test-rust-pg test-adapter test-swift test-kotlin-unit test-kotlin test-rn-unit test-rn-native-parity test-rn test-packaged-consumers verify-contract check-pg-sql docs-build
 	@echo "Release validation passed."
 
 release-kotlin-local: version-check
