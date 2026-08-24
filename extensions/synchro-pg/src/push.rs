@@ -422,17 +422,14 @@ fn synchro_push_contract(p_user_id: &str, p_request: pgrx::JsonB) -> String {
                     .unwrap_or_else(|_| pgrx::error!("push mutation ordinal overflow")),
             });
         }
-        for (index, ledger) in mutation_ledgers.iter().enumerate() {
-            let digest = fingerprints
-                .mutations
-                .iter()
-                .zip(request.mutations.iter())
-                .find(|(_, mutation)| mutation.mutation_id == ledger.mutation.mutation_id)
-                .map(|(digest, _)| digest.as_slice())
-                .unwrap_or_else(|| pgrx::error!("push mutation fingerprint is missing"));
-            insert_mutation_ledger(client, p_user_id, &request, ledger, digest, index)
-                .unwrap_or_else(|_| pgrx::error!("writing push mutation ledger failed"));
-        }
+        insert_mutation_ledgers(
+            client,
+            p_user_id,
+            &request,
+            &mutation_ledgers,
+            &fingerprints.mutations,
+        )
+        .unwrap_or_else(|_| pgrx::error!("writing push mutation ledger failed"));
 
         complete_batch_ledger(client, p_user_id, &request, server_time, &response_bytes)
             .unwrap_or_else(|_| pgrx::error!("writing completed push batch ledger failed"));
@@ -831,24 +828,63 @@ fn complete_batch_ledger(
     Ok(())
 }
 
-fn insert_mutation_ledger(
+fn insert_mutation_ledgers(
     client: &mut SpiClient<'_>,
     user_id: &str,
     request: &PushRequest,
-    ledger: &MutationLedgerInsert,
-    digest: &[u8],
-    _index: usize,
+    ledgers: &[MutationLedgerInsert],
+    fingerprints: &[Vec<u8>],
 ) -> Result<(), spi::Error> {
-    let status = ledger
-        .outcome
-        .get("status")
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or_else(|| pgrx::error!("push outcome has no status"));
-    let code = ledger
-        .outcome
-        .get("code")
-        .and_then(serde_json::Value::as_str);
-    client.update(
+    if ledgers.is_empty() {
+        return Ok(());
+    }
+    let rows = ledgers
+        .iter()
+        .map(|ledger| {
+            let fingerprint = usize::try_from(ledger.ordinal - 1)
+                .ok()
+                .and_then(|index| fingerprints.get(index))
+                .unwrap_or_else(|| pgrx::error!("push mutation fingerprint is missing"));
+            let status = ledger
+                .outcome
+                .get("status")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_else(|| pgrx::error!("push outcome has no status"));
+            let code = ledger
+                .outcome
+                .get("code")
+                .and_then(serde_json::Value::as_str);
+            let sealed_request = String::from_utf8(
+                canonical_json_bytes(&ledger.mutation)
+                    .unwrap_or_else(|_| pgrx::error!("canonicalizing mutation request failed")),
+            )
+            .unwrap_or_else(|_| pgrx::error!("canonical mutation request is not UTF-8"));
+            let sealed_response = String::from_utf8(ledger.outcome_bytes.clone())
+                .unwrap_or_else(|_| pgrx::error!("canonical mutation outcome is not UTF-8"));
+            serde_json::json!({
+                "mutation_id": ledger.mutation.mutation_id,
+                "fingerprint_digest": base64::engine::general_purpose::STANDARD.encode(fingerprint),
+                "request_ordinal": ledger.ordinal,
+                "authored_schema_version": ledger.mutation.authored_schema.version,
+                "authored_schema_hash": ledger.mutation.authored_schema.hash,
+                "outcome_schema_version": ledger.outcome_schema.version,
+                "outcome_schema_hash": ledger.outcome_schema.hash,
+                "table_id": ledger.table_id,
+                "primary_key_field_id": ledger.primary_key_field_id,
+                "primary_key_type": ledger.primary_key_type,
+                "primary_key_value": ledger.primary_key_value,
+                "row_identity": ledger.row_identity.as_ref().map(|identity| {
+                    base64::engine::general_purpose::STANDARD.encode(identity)
+                }),
+                "operation": operation_name(ledger.mutation.op),
+                "outcome_status": status,
+                "rejection_code": code,
+                "sealed_canonical_request": sealed_request,
+                "sealed_canonical_response": sealed_response,
+            })
+        })
+        .collect::<Vec<_>>();
+    let inserted = client.update(
         "INSERT INTO sync_push_mutations (
              user_id, client_id, mutation_id, fingerprint_algorithm,
              fingerprint_version, fingerprint_domain, fingerprint_digest,
@@ -857,44 +893,49 @@ fn insert_mutation_ledger(
              outcome_schema_version, outcome_schema_hash, table_id,
              primary_key_field_id, primary_key_type, primary_key_value,
              row_identity, operation, outcome_status, rejection_code,
-             sealed_canonical_request, sealed_canonical_response,
-             created_at, completed_at
-         ) VALUES (
-             $1, $2, $3::uuid, $4, $5, $6, $7, $8::uuid, $9,
-             $10, $11, $12, $13, $14, $15, $16, $17, $18, $19::jsonb,
-             $20, $21, $22, $23, $24, $25, now(), now()
-         )",
+              sealed_canonical_request, sealed_canonical_response,
+              created_at, completed_at
+          )
+          SELECT $1, $2, ledger.mutation_id::uuid, $4, $5, $6,
+                 decode(ledger.fingerprint_digest, 'base64'), $3::uuid,
+                 ledger.request_ordinal, ledger.authored_schema_version,
+                 ledger.authored_schema_hash, $7, $8,
+                 ledger.outcome_schema_version, ledger.outcome_schema_hash,
+                 ledger.table_id, ledger.primary_key_field_id,
+                 ledger.primary_key_type, ledger.primary_key_value,
+                 CASE WHEN ledger.row_identity IS NULL THEN NULL
+                      ELSE decode(ledger.row_identity, 'base64') END,
+                 ledger.operation, ledger.outcome_status, ledger.rejection_code,
+                 convert_to(ledger.sealed_canonical_request, 'UTF8'),
+                 convert_to(ledger.sealed_canonical_response, 'UTF8'),
+                 now(), now()
+          FROM jsonb_to_recordset($9::jsonb) AS ledger(
+              mutation_id text, fingerprint_digest text, request_ordinal integer,
+              authored_schema_version bigint, authored_schema_hash text,
+              outcome_schema_version bigint, outcome_schema_hash text,
+              table_id text, primary_key_field_id text, primary_key_type text,
+              primary_key_value jsonb, row_identity text, operation text,
+              outcome_status text, rejection_code text,
+              sealed_canonical_request text, sealed_canonical_response text
+          )
+          ORDER BY ledger.request_ordinal
+          RETURNING mutation_id",
         None,
         &[
             user_id.into(),
             request.client_id.as_str().into(),
-            ledger.mutation.mutation_id.as_str().into(),
+            request.batch_id.as_str().into(),
             FINGERPRINT_ALGORITHM.into(),
             FINGERPRINT_VERSION.into(),
             MUTATION_FINGERPRINT_DOMAIN.into(),
-            digest.to_vec().into(),
-            request.batch_id.as_str().into(),
-            ledger.ordinal.into(),
-            ledger.mutation.authored_schema.version.into(),
-            ledger.mutation.authored_schema.hash.as_str().into(),
             request.schema.version.into(),
             request.schema.hash.as_str().into(),
-            ledger.outcome_schema.version.into(),
-            ledger.outcome_schema.hash.as_str().into(),
-            ledger.table_id.as_str().into(),
-            ledger.primary_key_field_id.as_str().into(),
-            ledger.primary_key_type.as_str().into(),
-            pgrx::JsonB(ledger.primary_key_value.clone()).into(),
-            ledger.row_identity.clone().into(),
-            operation_name(ledger.mutation.op).into(),
-            status.into(),
-            code.into(),
-            canonical_json_bytes(&ledger.mutation)
-                .unwrap_or_else(|_| pgrx::error!("canonicalizing mutation request failed"))
-                .into(),
-            ledger.outcome_bytes.clone().into(),
+            pgrx::JsonB(serde_json::Value::Array(rows)).into(),
         ],
     )?;
+    if inserted.len() != ledgers.len() {
+        pgrx::error!("writing push mutation ledger affected an unexpected row count")
+    }
     Ok(())
 }
 
@@ -2021,7 +2062,29 @@ fn load_current_server_row_json(
     record_id: &str,
     table_reg: &TableRegistration,
 ) -> Option<serde_json::Value> {
-    load_existing_record(client, record_id, table_reg).and_then(|row| row.data)
+    let sql = format!(
+        "SELECT ({projection})::text AS data
+         FROM {table} t WHERE {pk} = $1::{pk_type}",
+        projection = synced_row_projection_sql(table_reg, "t"),
+        table = qualified_relation_name(&table_reg.physical_schema, &table_reg.physical_relation),
+        pk = pg_quote_ident(&table_reg.pk_column),
+        pk_type = table_reg.pk_type,
+    );
+    client
+        .select(&sql, None, &[record_id.into()])
+        .unwrap_or_else(|_| pgrx::error!("loading accepted authoritative row failed"))
+        .next()
+        .and_then(|row| {
+            row.get_by_name::<String, &str>("data")
+                .unwrap_or_else(|_| pgrx::error!("reading accepted authoritative row failed"))
+        })
+        .map(|data| {
+            let mut data: serde_json::Value = serde_json::from_str(&data)
+                .unwrap_or_else(|_| pgrx::error!("accepted authoritative row is not JSON"));
+            crate::pull::canonicalize_synced_row_data(table_reg, &mut data)
+                .unwrap_or_else(|_| pgrx::error!("accepted authoritative row is not canonical"));
+            data
+        })
 }
 
 fn load_current_fence_version(
