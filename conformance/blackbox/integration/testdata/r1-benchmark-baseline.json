@@ -1,0 +1,120 @@
+{
+  "format": "synchro-r1-benchmark-v1",
+  "revision": "80f5067d59b28ae756d63b2dfd6ebc707ae36776",
+  "definition_sha256": "c9883b11eab0ddda975e0dc4cc9d6dd3e33e3294e9bb984e0cce56cc2405a214",
+  "environment": {
+    "goos": "darwin",
+    "goarch": "arm64",
+    "logical_cpu_count": 8,
+    "hardware_fingerprint_sha256": "7a658321e9547b513a99ed759e5dcd77822e3946162f96ab49613e5f944e48a4",
+    "adapter_sha256": "e5e2a27dd79a4de7def38011dd25ba30c157f24cad4d7b117656d97ecbb43a43",
+    "extension_manifest_sha256": "afb7b6577b69eaa9203be51a4dac66302f0fb75f9b402b515e4fc6ad7e2e7d9b"
+  },
+  "workload": {
+    "warmup_samples": 2,
+    "measured_samples": 10,
+    "total_source_rows": 2300,
+    "pull_fixture_rows": 1000,
+    "changed_pull_rows": 100,
+    "push_existing_rows": 100,
+    "push_batch_mutations": 100,
+    "wal_observer_rows": 100,
+    "wal_transaction_rows": 100,
+    "acknowledgement_rows": 100,
+    "acknowledgement_transactions": 100,
+    "worker_rss_rows": 1000
+  },
+  "metrics": {
+    "terminal_steady_state_pull_latency_ns": {
+      "samples": [
+        164264292,
+        166943625,
+        163121292,
+        165762750,
+        163523584,
+        165050375,
+        166708292,
+        167013916,
+        168989916,
+        165229667
+      ],
+      "median": 165496208
+    },
+    "changed_pull_latency_ns": {
+      "samples": [
+        7356321750,
+        7432175375,
+        7411544250,
+        7334738584,
+        7376032208,
+        7492785375,
+        7367172750,
+        7365523583,
+        7300422000,
+        7381418542
+      ],
+      "median": 7371602479
+    },
+    "push_latency_ns": {
+      "samples": [
+        294986250,
+        296796750,
+        292095292,
+        316445875,
+        294807791,
+        296028791,
+        298779000,
+        297180917,
+        305528208,
+        302908583
+      ],
+      "median": 296988833
+    },
+    "wal_commit_to_acknowledgement_observer_detection_latency_ns": {
+      "samples": [
+        592717292,
+        598970042,
+        599296292,
+        626197083,
+        616750000,
+        601134042,
+        601601208,
+        601599500,
+        705022208,
+        604912083
+      ],
+      "median": 601600354
+    },
+    "one_row_transaction_batch_to_final_contiguous_acknowledgement_observer_detection_latency_ns": {
+      "samples": [
+        16273582458,
+        16374985333,
+        16163870667,
+        16448055916,
+        16644105542,
+        16561717750,
+        16128194750,
+        16160909792,
+        16201147334,
+        16307603500
+      ],
+      "median": 16290592979
+    },
+    "wal_worker_maximum_observed_rss_bytes": {
+      "samples": [
+        181436416,
+        189595648,
+        192299008,
+        198197248,
+        204357632,
+        209813504,
+        222871552,
+        219004928,
+        220839936,
+        206585856
+      ],
+      "maximum": 222871552
+    },
+    "push_throughput_milli_mutations_per_second": 333827
+  }
+}
