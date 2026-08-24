@@ -385,6 +385,13 @@ _run-r1-benchmark:
 		trap cleanup EXIT HUP INT TERM; \
 		adapter_bundle="$$artifact_root/adapter"; \
 		extension_bundle="$$artifact_root/extension"; \
+		secrets_dir="$$artifact_root/secrets"; \
+		mkdir "$$secrets_dir"; \
+		umask 077; \
+		for name in admin adapter observer worker operator jwt; do openssl rand -hex 32 > "$$secrets_dir/$$name-password"; done; \
+		pg_config="$$(while IFS= read -r line; do case "$$line" in 'pg18 = '* ) value="$${line#*= }"; value="$${value#\"}"; value="$${value%\"}"; printf '%s\n' "$$value"; break ;; esac; done < "$$HOME/.pgrx/config.toml")"; \
+		test -x "$$pg_config" || { echo "pgrx PostgreSQL 18 configuration is unavailable" >&2; exit 1; }; \
+		pg_bindir="$$(dirname "$$pg_config")"; \
 		$(MAKE) --no-print-directory conformance-adapter-artifact CONFORMANCE_ADAPTER_ARTIFACT_DIR="$$adapter_bundle"; \
 		$(MAKE) --no-print-directory conformance-pg18-extension-artifact CONFORMANCE_EXTENSION_ARTIFACT="$$extension_bundle" PGRX_TARGET_DIR="$$artifact_root/cargo-target"; \
 		test -z "$$(git status --porcelain --untracked-files=normal)" || { echo "R1 artifact packaging changed the worktree" >&2; exit 1; }; \
@@ -392,6 +399,19 @@ _run-r1-benchmark:
 		cd conformance; \
 		SYNCHRO_CONFORMANCE_ADAPTER_ARTIFACT="$$adapter_bundle/synchrod-pg" \
 		SYNCHRO_CONFORMANCE_EXTENSION_ARTIFACT="$$extension_bundle" \
+		SYNCHRO_CONFORMANCE_PG18_BINDIR="$$pg_bindir" \
+		SYNCHRO_CONFORMANCE_ADMIN_USER="synchro_cf_admin" \
+		SYNCHRO_CONFORMANCE_ADMIN_PASSWORD_FILE="$$secrets_dir/admin-password" \
+		SYNCHRO_CONFORMANCE_ADAPTER_USER="synchro_cf_adapter" \
+		SYNCHRO_CONFORMANCE_ADAPTER_PASSWORD_FILE="$$secrets_dir/adapter-password" \
+		SYNCHRO_CONFORMANCE_OBSERVER_USER="synchro_cf_observer" \
+		SYNCHRO_CONFORMANCE_OBSERVER_PASSWORD_FILE="$$secrets_dir/observer-password" \
+		SYNCHRO_CONFORMANCE_WORKER_USER="synchro_cf_worker" \
+		SYNCHRO_CONFORMANCE_WORKER_PASSWORD_FILE="$$secrets_dir/worker-password" \
+		SYNCHRO_CONFORMANCE_OPERATOR_USER="synchro_cf_operator" \
+		SYNCHRO_CONFORMANCE_OPERATOR_PASSWORD_FILE="$$secrets_dir/operator-password" \
+		SYNCHRO_CONFORMANCE_JWT_SECRET_FILE="$$secrets_dir/jwt-password" \
+		SYNCHRO_CONFORMANCE_INSTALL_LOCK="$$artifact_root/install.lock" \
 		R1_BENCHMARK_MODE="$(R1_BENCHMARK_RUN_MODE)" \
 		R1_BENCHMARK_REVISION="$$revision" \
 		R1_BENCHMARK_RESULT="$(abspath $(R1_BENCHMARK_RESULT))" \
