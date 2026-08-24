@@ -20,6 +20,8 @@ private struct SeedReceiptForConnect {
 }
 
 final class PullProcessor: @unchecked Sendable {
+    private static let protectionLookupChunkSize = 400
+
     private let database: SynchroDatabase
 
     init(database: SynchroDatabase) {
@@ -343,6 +345,14 @@ final class PullProcessor: @unchecked Sendable {
                 throw SynchroError.invalidResponse(message: "rebuild attempt is no longer active")
             }
 
+            var pageRecords: [(
+                record: RebuildRecord,
+                schema: LocalSchemaTable,
+                recordID: String,
+                databaseValues: [DatabaseValue],
+                scopeRowChecksum: String
+            )] = []
+            pageRecords.reserveCapacity(response.records.count)
             for record in response.records {
                 guard let schema = tableMap[record.table] else {
                     throw SynchroError.invalidResponse(message: "unknown logical table \(record.table)")
@@ -358,31 +368,102 @@ final class PullProcessor: @unchecked Sendable {
                     schemaHash: attempt.schemaHash,
                     schema: schema
                 )
-                let protected = try Self.isProtectedApplicationRow(
-                    db: db,
-                    tableName: schema.tableName,
-                    recordID: recordID
+                let databaseValues = try buildDatabaseValues(
+                    columns: schema.columns.map(\.name),
+                    pkCol: schema.primaryKey.first ?? "id",
+                    recordID: recordID,
+                    data: localRow,
+                    schema: schema
                 )
+                pageRecords.append((
+                    record: record,
+                    schema: schema,
+                    recordID: recordID,
+                    databaseValues: databaseValues,
+                    scopeRowChecksum: try requiredScopeRowChecksum(
+                        record.rowChecksum,
+                        tableName: record.table,
+                        recordID: recordID
+                    )
+                ))
+            }
+
+            var protectedRecordIDsByTable: [String: Set<String>] = [:]
+            var requestedRecordIDsByTable: [String: Set<String>] = [:]
+            var protectionKeys: [(tableName: String, recordID: String)] = []
+            protectionKeys.reserveCapacity(pageRecords.count)
+            for pageRecord in pageRecords {
+                let tableName = pageRecord.schema.tableName
+                if requestedRecordIDsByTable[tableName, default: []].insert(pageRecord.recordID).inserted {
+                    protectionKeys.append((tableName: tableName, recordID: pageRecord.recordID))
+                }
+            }
+            for start in stride(from: 0, to: protectionKeys.count, by: Self.protectionLookupChunkSize) {
+                let end = min(start + Self.protectionLookupChunkSize, protectionKeys.count)
+                let chunk = protectionKeys[start..<end]
+                let values = Array(repeating: "(?, ?)", count: chunk.count).joined(separator: ", ")
+                var arguments: [DatabaseValue] = []
+                arguments.reserveCapacity(chunk.count * 2)
+                for key in chunk {
+                    arguments.append(key.tableName.databaseValue)
+                    arguments.append(key.recordID.databaseValue)
+                }
+                let protectedRows = try Row.fetchAll(
+                    db,
+                    sql: """
+                        WITH requested(table_name, record_id) AS (VALUES \(values))
+                        SELECT pending.table_name, pending.record_id
+                        FROM _synchro_pending_changes AS pending
+                        JOIN requested
+                          ON requested.table_name = pending.table_name
+                         AND requested.record_id = pending.record_id
+                        WHERE pending.lifecycle_state IN ('unsealed', 'sealed', 'blocked_by_predecessor', 'legacy_blocked')
+                        UNION
+                        SELECT rejected.table_name, rejected.record_id
+                        FROM _synchro_rejected_mutations AS rejected
+                        JOIN requested
+                          ON requested.table_name = rejected.table_name
+                         AND requested.record_id = rejected.record_id
+                        WHERE rejected.status = 'rejected_terminal'
+                          AND rejected.server_row_json IS NULL
+                          AND rejected.server_version IS NULL
+                        """,
+                    arguments: StatementArguments(arguments)
+                )
+                for row in protectedRows {
+                    let tableName: String = row["table_name"]
+                    let recordID: String = row["record_id"]
+                    protectedRecordIDsByTable[tableName, default: []].insert(recordID)
+                }
+            }
+
+            var upsertStatements: [String: Statement] = [:]
+            for pageRecord in pageRecords {
+                let protected = protectedRecordIDsByTable[pageRecord.schema.tableName]?.contains(pageRecord.recordID) == true
                 if !protected {
-                    try upsertRecord(db: db, recordID: recordID, data: localRow, schema: schema)
+                    let statement: Statement
+                    if let existing = upsertStatements[pageRecord.schema.tableName] {
+                        statement = existing
+                    } else {
+                        let prepared = try db.makeStatement(sql: upsertSQL(schema: pageRecord.schema))
+                        upsertStatements[pageRecord.schema.tableName] = prepared
+                        statement = prepared
+                    }
+                    try statement.execute(arguments: StatementArguments(pageRecord.databaseValues))
                 }
                 try SynchroMeta.upsertRowVersion(
                     db,
-                    tableName: schema.tableName,
-                    recordID: recordID,
-                    serverVersion: record.serverVersion,
-                    rowChecksum: record.rowChecksum
+                    tableName: pageRecord.schema.tableName,
+                    recordID: pageRecord.recordID,
+                    serverVersion: pageRecord.record.serverVersion,
+                    rowChecksum: pageRecord.record.rowChecksum
                 )
                 try SynchroMeta.upsertScopeRow(
                     db,
                     scopeID: attempt.scopeID,
-                    tableName: schema.tableName,
-                    recordID: recordID,
-                    checksum: try requiredScopeRowChecksum(
-                        record.rowChecksum,
-                        tableName: record.table,
-                        recordID: recordID
-                    ),
+                    tableName: pageRecord.schema.tableName,
+                    recordID: pageRecord.recordID,
+                    checksum: pageRecord.scopeRowChecksum,
                     generation: attempt.generation
                 )
             }
@@ -904,19 +985,22 @@ final class PullProcessor: @unchecked Sendable {
         data: [String: AnyCodable],
         schema: LocalSchemaTable
     ) throws {
-        let pkCol = schema.primaryKey.first ?? "id"
-        let quoted = SQLiteHelpers.quoteIdentifier(schema.tableName)
-        let quotedPK = SQLiteHelpers.quoteIdentifier(pkCol)
-
         let columns = schema.columns.map(\.name)
         let dbValues = try buildDatabaseValues(
             columns: columns,
-            pkCol: pkCol,
+            pkCol: schema.primaryKey.first ?? "id",
             recordID: recordID,
             data: data,
             schema: schema
         )
+        try db.execute(sql: upsertSQL(schema: schema), arguments: StatementArguments(dbValues))
+    }
 
+    private func upsertSQL(schema: LocalSchemaTable) -> String {
+        let pkCol = schema.primaryKey.first ?? "id"
+        let quoted = SQLiteHelpers.quoteIdentifier(schema.tableName)
+        let quotedPK = SQLiteHelpers.quoteIdentifier(pkCol)
+        let columns = schema.columns.map(\.name)
         let quotedColumns = columns.map { SQLiteHelpers.quoteIdentifier($0) }.joined(separator: ", ")
         let placeholders = SQLiteHelpers.placeholders(count: columns.count)
         let updateClauses = columns
@@ -924,9 +1008,7 @@ final class PullProcessor: @unchecked Sendable {
             .map { "\(SQLiteHelpers.quoteIdentifier($0)) = excluded.\(SQLiteHelpers.quoteIdentifier($0))" }
             .joined(separator: ", ")
 
-        let sql = "INSERT INTO \(quoted) (\(quotedColumns)) VALUES (\(placeholders)) ON CONFLICT (\(quotedPK)) DO UPDATE SET \(updateClauses)"
-
-        try db.execute(sql: sql, arguments: StatementArguments(dbValues))
+        return "INSERT INTO \(quoted) (\(quotedColumns)) VALUES (\(placeholders)) ON CONFLICT (\(quotedPK)) DO UPDATE SET \(updateClauses)"
     }
 
     private func buildDatabaseValues(

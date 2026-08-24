@@ -1031,6 +1031,137 @@ final class PullProcessorTests: XCTestCase {
         )
     }
 
+    func testRebuildPageBatchesMixedProtectionAcrossChunkBoundary() throws {
+        let (db, processor) = try makeTestEnv()
+        let scopeID = "orders:user1"
+        try db.writeTransaction { connection in
+            try SynchroMeta.upsertScope(connection, scopeID: scopeID, cursor: nil, checksum: nil)
+        }
+        let attempt = try processor.beginScopeRebuild(
+            scopeID: scopeID,
+            clientGeneration: 1,
+            schemaVersion: 1,
+            schemaHash: protocolTestSchemaHash,
+            pageLimit: 402,
+            syncedTables: [testTable.localSchema]
+        )
+        let serverVersion = "2026-01-02T00:00:00.000000Z"
+        let records = try (0..<402).map { index in
+            let recordID = String(format: "row-%03d", index)
+            let row: [String: AnyCodable] = [
+                "id": AnyCodable(recordID),
+                "ship_address": AnyCodable("server-\(index)"),
+                "updated_at": AnyCodable(serverVersion),
+                "deleted_at": AnyCodable(NSNull()),
+            ]
+            let rowChecksum = try Integrity.rowDigest(
+                schemaHash: protocolTestSchemaHash,
+                table: testTable.localSchema,
+                pk: ["id": AnyCodable(recordID)],
+                row: row,
+                serverVersion: serverVersion
+            ).checksum
+            return RebuildRecord(
+                table: testTable.tableID,
+                pk: ["id": AnyCodable(recordID)],
+                row: row,
+                rowChecksum: rowChecksum,
+                serverVersion: serverVersion
+            )
+        }
+        for index in 398...401 {
+            try insertOrder(
+                db,
+                id: String(format: "row-%03d", index),
+                shipAddress: "local-\(index)",
+                updatedAt: "2026-01-01T00:00:00.000000Z"
+            )
+        }
+        try addPendingIntent(db, table: testTable, recordID: "row-399", state: "sealed")
+        try addPendingIntent(db, table: testTable, recordID: "row-401", state: "accepted")
+        try db.writeTransaction { connection in
+            try SynchroMeta.upsertRejectedMutation(
+                connection,
+                mutationID: UUID().uuidString.lowercased(),
+                tableName: testTable.tableName,
+                recordID: "row-400",
+                status: "rejected_terminal",
+                code: "policy_rejected",
+                message: "not allowed",
+                serverRow: nil,
+                serverVersion: nil
+            )
+            try SynchroMeta.upsertRejectedMutation(
+                connection,
+                mutationID: UUID().uuidString.lowercased(),
+                tableName: testTable.tableName,
+                recordID: "row-398",
+                status: "rejected_terminal",
+                code: "policy_rejected",
+                message: "canonical row supplied",
+                serverRow: nil,
+                serverVersion: "server-version"
+            )
+        }
+        let request = RebuildRequest(
+            clientID: "test-client",
+            clientGeneration: attempt.clientGeneration,
+            schema: SchemaRef(version: attempt.schemaVersion, hash: attempt.schemaHash),
+            scope: scopeID,
+            rebuildID: attempt.rebuildID,
+            cursor: attempt.cursor,
+            limit: attempt.pageLimit
+        )
+        let response = RebuildResponse(
+            scope: scopeID,
+            records: records,
+            cursor: "page-2",
+            hasMore: true,
+            finalScopeCursor: nil,
+            checksum: nil
+        )
+
+        let continuedAttempt = try processor.applyScopeRebuildPage(
+            attempt: attempt,
+            request: request,
+            requestBody: try rebuildRequestBody(request),
+            response: response,
+            responseBody: try rebuildResponseBody(response),
+            syncedTables: [testTable.localSchema]
+        )
+
+        XCTAssertEqual(continuedAttempt.cursor, "page-2")
+        XCTAssertEqual(
+            try db.queryOne("SELECT ship_address FROM orders WHERE id = 'row-398'", params: nil)?["ship_address"] as String?,
+            "server-398"
+        )
+        XCTAssertEqual(
+            try db.queryOne("SELECT ship_address FROM orders WHERE id = 'row-399'", params: nil)?["ship_address"] as String?,
+            "local-399"
+        )
+        XCTAssertEqual(
+            try db.queryOne("SELECT ship_address FROM orders WHERE id = 'row-400'", params: nil)?["ship_address"] as String?,
+            "local-400"
+        )
+        XCTAssertEqual(
+            try db.queryOne("SELECT ship_address FROM orders WHERE id = 'row-401'", params: nil)?["ship_address"] as String?,
+            "server-401"
+        )
+        XCTAssertEqual(
+            try db.query("SELECT record_id FROM _synchro_scope_rows WHERE scope_id = ?", params: [scopeID]).count,
+            records.count
+        )
+        for recordID in ["row-399", "row-400"] {
+            XCTAssertEqual(
+                try db.queryOne(
+                    "SELECT server_version FROM _synchro_row_versions WHERE table_name = ? AND record_id = ?",
+                    params: [testTable.tableName, recordID]
+                )?["server_version"] as String?,
+                serverVersion
+            )
+        }
+    }
+
     func testIntermediateRebuildReceiptSurvivesRestartAndSkipsExactReplay() throws {
         let (db, processor) = try makeTestEnv()
         let path = db.path
