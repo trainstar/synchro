@@ -55,23 +55,23 @@ const (
 
 const r1InsertRowsStatement = `
 	INSERT INTO cf_items (id, owner_id, value)
-	SELECT ('00000000-0000-4000-' || lpad($1::text, 4, '0') || '-' || lpad(value::text, 12, '0'))::uuid,
+	SELECT ('00000000-0000-4000-' || lpad(($1::integer)::text, 4, '0') || '-' || lpad(value::text, 12, '0'))::uuid,
 	       'diagnostic-user',
-	       $2 || '-' || lpad(value::text, 4, '0')
+	       $2::text || '-' || lpad(value::text, 4, '0')
 	FROM generate_series(1, $3::integer) value`
 
 const r1UpdateRowsStatement = `
 	UPDATE cf_items AS item
-	SET value = $2 || '-' || lpad(source.value::text, 4, '0'),
+	SET value = $2::text || '-' || lpad(source.value::text, 4, '0'),
 	    updated_at = clock_timestamp()
 	FROM generate_series(1, $3::integer) source(value)
-	WHERE item.id = ('00000000-0000-4000-' || lpad($1::text, 4, '0') || '-' || lpad(source.value::text, 12, '0'))::uuid`
+	WHERE item.id = ('00000000-0000-4000-' || lpad(($1::integer)::text, 4, '0') || '-' || lpad(source.value::text, 12, '0'))::uuid`
 
 const r1UpdateOneRowStatement = `
 	UPDATE cf_items
-	SET value = $2 || '-' || lpad($3::text, 4, '0'),
+	SET value = $2::text || '-' || lpad(($3::integer)::text, 4, '0'),
 	    updated_at = clock_timestamp()
-	WHERE id = ('00000000-0000-4000-' || lpad($1::text, 4, '0') || '-' || lpad($3::text, 12, '0'))::uuid`
+	WHERE id = ('00000000-0000-4000-' || lpad(($1::integer)::text, 4, '0') || '-' || lpad(($3::integer)::text, 12, '0'))::uuid`
 
 var (
 	r1RevisionPattern         = regexp.MustCompile(`^[0-9a-f]{40}$`)
