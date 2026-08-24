@@ -673,8 +673,12 @@ release-check: override GO_TEST_ARGS := -v -count=1 -p 1
 release-check: override GO_TEST_PKGS := ./...
 release-check: override GRADLE_TEST_ARGS := --rerun-tasks
 release-check: override DETOX_ARGS :=
-release-check: evidence build-conformance test-conformance test-blackbox test-r1-benchmark rc-check-pg18 version-check release-pods-check build build-seed build-check release-kotlin-local release-npm-dry-run lint-go lint-rust-core lint-rust-pg lint-rn test-rust-core test-rust-mutants test-integration-mutants test-rust-pg test-adapter test-swift test-kotlin-unit test-kotlin test-rn-unit test-rn-native-parity test-rn test-packaged-consumers verify-contract check-pg-sql docs-build
+# test-r1-benchmark is a separate required release gate. Its baseline is
+# fingerprint-bound to the pinned benchmark host, so it runs there, not
+# inside release-check. Release evidence requires both results.
+release-check: evidence build-conformance test-conformance test-blackbox rc-check-pg18 version-check release-pods-check build build-seed build-check release-kotlin-local release-npm-dry-run lint-go lint-rust-core lint-rust-pg lint-rn test-rust-core test-rust-mutants test-integration-mutants test-rust-pg test-adapter test-swift test-kotlin-unit test-kotlin test-rn-unit test-rn-native-parity test-rn test-packaged-consumers verify-contract check-pg-sql docs-build
 	@echo "Release validation passed."
+	@echo "Reminder: run make test-r1-benchmark on the pinned benchmark host. It is a separate required release gate."
 
 release-kotlin-local: version-check
 	@test -n "$(ANDROID_JAVA_HOME)" || (echo "Android builds require JDK 17. Set ANDROID_JAVA_HOME to a JDK 17 install."; exit 1)
