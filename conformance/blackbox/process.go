@@ -211,6 +211,7 @@ type WALRecordObservation struct {
 	EffectOrdinal int32
 	FenceCoverage string
 	RowVersion    string
+	ReplayCount   int64
 }
 
 // WALPipelineObservation is bounded operational evidence for the WAL pipeline.
@@ -227,7 +228,20 @@ type WALPipelineObservation struct {
 
 // WALProgressObservation is bounded durable acknowledgement state.
 type WALProgressObservation struct {
-	AcknowledgedEndLSN string
+	AcknowledgedEndLSN    string
+	SlotConfirmedFlushLSN string
+	SlotMatchesProgress   bool
+}
+
+// WALReplayRestartObservation contains bounded state around one worker restart.
+type WALReplayRestartObservation struct {
+	PriorProgress                     WALProgressObservation
+	BeforeRestart                     WALPipelineObservation
+	AfterRestart                      WALPipelineObservation
+	BeforeStages                      WALRecordStageObservation
+	AfterStages                       WALRecordStageObservation
+	WorkerExitedBeforeAcknowledgement bool
+	WorkerRestarted                   bool
 }
 
 // WALProgressOrderObservation is bounded evidence for one persisted ordering violation.
@@ -3618,10 +3632,225 @@ func (executor *OperatorExecutor) ObserveWALProgress(ctx context.Context) (WALPr
 	defer database.Close()
 	var observation WALProgressObservation
 	if err := database.QueryRowContext(ctx, `
-		SELECT COALESCE(acknowledged_end_lsn::text, '')
-		FROM synchro.sync_wal_progress
-		WHERE singleton`).Scan(&observation.AcknowledgedEndLSN); err != nil {
+		SELECT COALESCE(progress.acknowledged_end_lsn::text, ''),
+		       COALESCE(slot.confirmed_flush_lsn::text, ''),
+		       COALESCE(progress.acknowledged_end_lsn = slot.confirmed_flush_lsn, false)
+		FROM synchro.sync_wal_progress progress
+		JOIN synchro.sync_runtime_state runtime ON runtime.singleton
+		JOIN pg_catalog.pg_replication_slots slot
+		  ON slot.slot_name = runtime.active_slot_name
+		WHERE progress.singleton`).Scan(
+		&observation.AcknowledgedEndLSN,
+		&observation.SlotConfirmedFlushLSN,
+		&observation.SlotMatchesProgress,
+	); err != nil {
 		return WALProgressObservation{}, errors.New("read WAL progress observation failed")
+	}
+	return observation, nil
+}
+
+// RunWALReplayRestartControl forces a worker exit after durable materialization and before acknowledgement.
+func (executor *OperatorExecutor) RunWALReplayRestartControl(ctx context.Context, recordID string) (observation WALReplayRestartObservation, returnedErr error) {
+	if executor == nil || executor.harness == nil || !executor.harness.sourceReady {
+		return WALReplayRestartObservation{}, errors.New("operator executor is unavailable")
+	}
+	if ctx == nil || !diagnosticUUIDPattern.MatchString(recordID) {
+		return WALReplayRestartObservation{}, errors.New("WAL replay restart identity is invalid")
+	}
+	harness := executor.harness
+	database, err := harness.openDatabase(ctx, harness.names.Database, harness.env.Admin, false)
+	if err != nil {
+		return WALReplayRestartObservation{}, errors.New("open WAL replay restart connection failed")
+	}
+	defer database.Close()
+
+	observation.PriorProgress, err = executor.ObserveWALProgress(ctx)
+	if err != nil || observation.PriorProgress.AcknowledgedEndLSN == "" ||
+		observation.PriorProgress.SlotConfirmedFlushLSN == "" ||
+		!observation.PriorProgress.SlotMatchesProgress {
+		return WALReplayRestartObservation{}, errors.New("WAL replay restart precondition failed")
+	}
+
+	var lockTransaction *sql.Tx
+	var replicationConnection *pgconn.PgConn
+	defer func() {
+		cleanupContext, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		var cleanupErrors []error
+		if replicationConnection != nil {
+			if err := replicationConnection.Close(cleanupContext); err != nil {
+				cleanupErrors = append(cleanupErrors, errors.New("close WAL replay restart replication connection failed"))
+			}
+		}
+		if lockTransaction != nil {
+			if err := lockTransaction.Rollback(); err != nil && !errors.Is(err, sql.ErrTxDone) {
+				cleanupErrors = append(cleanupErrors, errors.New("rollback WAL replay restart lock failed"))
+			}
+		}
+		returnedErr = errors.Join(returnedErr, errors.Join(cleanupErrors...))
+	}()
+
+	lockTransaction, err = database.BeginTx(ctx, nil)
+	if err != nil {
+		return WALReplayRestartObservation{}, errors.New("begin WAL replay restart lock failed")
+	}
+	if _, err := lockTransaction.ExecContext(ctx, "LOCK TABLE synchro.sync_wal_transactions IN ACCESS EXCLUSIVE MODE"); err != nil {
+		return WALReplayRestartObservation{}, errors.New("lock WAL replay materialization failed")
+	}
+	if err := (&SourceExecutor{harness: harness}).ExecContext(
+		ctx,
+		"INSERT INTO cf_items (id, owner_id, value) VALUES ($1, $2, $3)",
+		recordID,
+		"diagnostic-user",
+		"restart-before-acknowledgement",
+	); err != nil {
+		return WALReplayRestartObservation{}, errors.New("commit WAL replay restart source row failed")
+	}
+
+	var workerPID int64
+	blockedContext, blockedCancel := context.WithTimeout(ctx, 20*time.Second)
+	err = waitUntil(blockedContext, func(attemptContext context.Context) (bool, error) {
+		err := database.QueryRowContext(attemptContext, `
+			SELECT activity.pid
+			FROM pg_catalog.pg_stat_activity activity
+			JOIN pg_catalog.pg_locks waiting
+			  ON waiting.pid = activity.pid AND NOT waiting.granted
+			WHERE activity.datname = current_database()
+			  AND activity.backend_type = 'synchro WAL consumer'
+			  AND waiting.relation = 'synchro.sync_wal_transactions'::regclass
+			LIMIT 1`).Scan(&workerPID)
+		if errors.Is(err, sql.ErrNoRows) {
+			return false, nil
+		}
+		return err == nil && workerPID > 0, err
+	})
+	blockedCancel()
+	if err != nil {
+		return WALReplayRestartObservation{}, errors.New("wait for blocked WAL materialization failed")
+	}
+
+	replicationDSN := postgresDSN("127.0.0.1", harness.port, harness.names.Database, harness.worker, true) + " replication=database"
+	replicationConnection, err = pgconn.Connect(ctx, replicationDSN)
+	if err != nil {
+		return WALReplayRestartObservation{}, errors.New("open WAL replay restart replication connection failed")
+	}
+	replicationCommand := "START_REPLICATION SLOT " + quoteIdentifier(harness.names.ReplicationSlot) +
+		" LOGICAL " + observation.PriorProgress.SlotConfirmedFlushLSN +
+		" (proto_version '1', publication_names " + quotePostgresLiteral(harness.names.Publication) + ", messages 'true')"
+	// Slot ownership prevents acknowledgement while the worker commits materialization.
+	replicationConnection.Exec(ctx, replicationCommand)
+	replicationPID := int64(replicationConnection.PID())
+	slotContext, slotCancel := context.WithTimeout(ctx, 10*time.Second)
+	err = waitUntil(slotContext, func(attemptContext context.Context) (bool, error) {
+		var activePID sql.NullInt64
+		if err := database.QueryRowContext(attemptContext, `
+			SELECT active_pid
+			FROM pg_catalog.pg_replication_slots
+			WHERE slot_name = $1`, harness.names.ReplicationSlot).Scan(&activePID); err != nil {
+			return false, err
+		}
+		return activePID.Valid && activePID.Int64 == replicationPID, nil
+	})
+	slotCancel()
+	if err != nil {
+		return WALReplayRestartObservation{}, errors.New("hold WAL slot before acknowledgement failed")
+	}
+
+	if err := lockTransaction.Commit(); err != nil {
+		return WALReplayRestartObservation{}, errors.New("release WAL replay materialization failed")
+	}
+	lockTransaction = nil
+
+	materializedContext, materializedCancel := context.WithTimeout(ctx, 20*time.Second)
+	err = waitUntil(materializedContext, func(attemptContext context.Context) (bool, error) {
+		pipeline, err := executor.ObserveWALRecords(attemptContext, []string{recordID})
+		if err != nil {
+			return false, err
+		}
+		stages, err := executor.ObserveWALRecordStages(attemptContext, "cf_items", []string{recordID})
+		if err != nil {
+			return false, err
+		}
+		observation.BeforeRestart = pipeline
+		observation.BeforeStages = stages
+		return len(pipeline.Records) == 1 &&
+			pipeline.Records[0].FenceCoverage == "materialized" &&
+			!pipeline.ContiguousAcknowledged &&
+			pipeline.AcknowledgedEndLSN == observation.PriorProgress.AcknowledgedEndLSN &&
+			pipeline.SlotConfirmedFlushLSN == observation.PriorProgress.SlotConfirmedFlushLSN &&
+			stages.PendingFences == 0 && stages.EventCount > 0 && stages.ChangeCount > 0, nil
+	})
+	materializedCancel()
+	if err != nil {
+		return WALReplayRestartObservation{}, errors.New("wait for unacknowledged WAL materialization failed")
+	}
+	workerExitContext, workerExitCancel := context.WithTimeout(ctx, 20*time.Second)
+	err = waitUntil(workerExitContext, func(attemptContext context.Context) (bool, error) {
+		var workerPresent bool
+		if err := database.QueryRowContext(attemptContext, `
+			SELECT EXISTS (
+				SELECT 1
+				FROM pg_catalog.pg_stat_activity
+				WHERE datname = current_database()
+				  AND backend_type = 'synchro WAL consumer'
+				  AND pid = $1
+			)`, workerPID).Scan(&workerPresent); err != nil {
+			return false, err
+		}
+		return !workerPresent, nil
+	})
+	workerExitCancel()
+	if err != nil {
+		return WALReplayRestartObservation{}, errors.New("wait for WAL worker exit before acknowledgement failed")
+	}
+	observation.WorkerExitedBeforeAcknowledgement = true
+
+	if err := replicationConnection.Close(ctx); err != nil {
+		return WALReplayRestartObservation{}, errors.New("release WAL replay restart slot failed")
+	}
+	replicationConnection = nil
+
+	workerContext, workerCancel := context.WithTimeout(ctx, 20*time.Second)
+	err = waitUntil(workerContext, func(attemptContext context.Context) (bool, error) {
+		var replacementPID int64
+		err := database.QueryRowContext(attemptContext, `
+			SELECT pid
+			FROM pg_catalog.pg_stat_activity
+			WHERE datname = current_database()
+			  AND backend_type = 'synchro WAL consumer'
+			  AND pid <> $1`, workerPID).Scan(&replacementPID)
+		if errors.Is(err, sql.ErrNoRows) {
+			return false, nil
+		}
+		if err != nil {
+			return false, err
+		}
+		observation.WorkerRestarted = replacementPID > 0
+		return observation.WorkerRestarted, nil
+	})
+	workerCancel()
+	if err != nil {
+		return WALReplayRestartObservation{}, errors.New("wait for WAL worker restart failed")
+	}
+
+	replayedContext, replayedCancel := context.WithTimeout(ctx, 20*time.Second)
+	err = waitUntil(replayedContext, func(attemptContext context.Context) (bool, error) {
+		pipeline, err := executor.ObserveWALRecords(attemptContext, []string{recordID})
+		if err != nil {
+			return false, err
+		}
+		stages, err := executor.ObserveWALRecordStages(attemptContext, "cf_items", []string{recordID})
+		if err != nil {
+			return false, err
+		}
+		observation.AfterRestart = pipeline
+		observation.AfterStages = stages
+		return len(pipeline.Records) == 1 && pipeline.ContiguousAcknowledged &&
+			pipeline.AcknowledgementMatchesObservedEnd && pipeline.SlotMatchesObservedEnd, nil
+	})
+	replayedCancel()
+	if err != nil {
+		return WALReplayRestartObservation{}, errors.New("wait for WAL replay after worker restart failed")
 	}
 	return observation, nil
 }
@@ -3651,7 +3880,8 @@ func (executor *OperatorExecutor) ObserveWALRecords(ctx context.Context, recordI
 		       c.event_ordinal,
 		       c.effect_ordinal,
 		       fence.coverage,
-		       c.row_version::text
+		       c.row_version::text,
+		       transaction.replay_count
 		FROM synchro.sync_changelog c
 		JOIN synchro.sync_wal_transactions transaction
 		  ON transaction.stream_generation = c.stream_generation
@@ -3660,6 +3890,7 @@ func (executor *OperatorExecutor) ObserveWALRecords(ctx context.Context, recordI
 		  ON event.stream_generation = c.stream_generation
 		 AND event.commit_lsn = c.commit_lsn
 		 AND event.event_ordinal = c.event_ordinal
+		 AND event.relation_id = c.relation_id
 		JOIN synchro.sync_write_fences fence ON fence.fence_id = event.fence_id
 		WHERE c.table_name = 'cf_items'
 		  AND c.record_id = ANY($1)
@@ -3679,6 +3910,7 @@ func (executor *OperatorExecutor) ObserveWALRecords(ctx context.Context, recordI
 			&record.EffectOrdinal,
 			&record.FenceCoverage,
 			&record.RowVersion,
+			&record.ReplayCount,
 		); err != nil {
 			return WALPipelineObservation{}, errors.New("scan WAL record observation failed")
 		}

@@ -156,7 +156,8 @@ func (executor *OperatorExecutor) ObserveWALRecordsForTable(
 		       c.event_ordinal,
 		       c.effect_ordinal,
 		       fence.coverage,
-		       c.row_version::text
+		       c.row_version::text,
+		       transaction.replay_count
 		FROM synchro.sync_changelog c
 		JOIN synchro.sync_wal_transactions transaction
 		  ON transaction.stream_generation = c.stream_generation
@@ -186,6 +187,7 @@ func (executor *OperatorExecutor) ObserveWALRecordsForTable(
 			&record.EffectOrdinal,
 			&record.FenceCoverage,
 			&record.RowVersion,
+			&record.ReplayCount,
 		); err != nil {
 			return WALPipelineObservation{}, errors.New("scan WAL record observation failed")
 		}

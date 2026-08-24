@@ -288,7 +288,7 @@ func TestRealWALPipeline(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load real harness environment: %v", err)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
 	harness, err := blackbox.Provision(ctx, blackbox.HarnessConfig{Environment: environment})
 	if err != nil {
@@ -347,6 +347,47 @@ func TestRealWALPipeline(t *testing.T) {
 		if !uuidPattern.MatchString(record.RowVersion) {
 			t.Fatalf("WAL row version is not opaque UUID: %q", record.RowVersion)
 		}
+	}
+
+	restartID := "00000000-0000-0000-0000-000000009103"
+	restart, err := harness.Operator().RunWALReplayRestartControl(ctx, restartID)
+	if err != nil {
+		t.Fatalf("restart WAL worker before acknowledgement: %v; %s", err, harness.FailureDiagnostics())
+	}
+	if !restart.WorkerExitedBeforeAcknowledgement || !restart.WorkerRestarted || !restart.PriorProgress.SlotMatchesProgress {
+		t.Fatalf("WAL replay restart boundary is invalid: %#v", restart)
+	}
+	if len(restart.BeforeRestart.Records) != 1 ||
+		restart.BeforeRestart.BlockingPoison || restart.BeforeRestart.ContiguousAcknowledged ||
+		restart.BeforeRestart.AcknowledgedEndLSN != restart.PriorProgress.AcknowledgedEndLSN ||
+		restart.BeforeRestart.SlotConfirmedFlushLSN != restart.PriorProgress.SlotConfirmedFlushLSN {
+		t.Fatalf("WAL replay advanced before worker restart: %#v", restart.BeforeRestart)
+	}
+	restartRecord := restart.BeforeRestart.Records[0]
+	if restartRecord.RecordID != restartID || restartRecord.CommitLSN == "" || restartRecord.EndLSN == "" ||
+		restartRecord.CommitLSN == restartRecord.EndLSN || restartRecord.FenceCoverage != "materialized" ||
+		!uuidPattern.MatchString(restartRecord.RowVersion) || restartRecord.ReplayCount != 0 {
+		t.Fatalf("WAL replay materialization is incomplete: %#v", restartRecord)
+	}
+	wantStages := blackbox.WALRecordStageObservation{
+		FenceCount: 1, EventCount: 1, ProjectionCount: 1,
+		CapturedCount: 1, EdgeCount: 1, ChangeCount: 1,
+	}
+	if restart.BeforeStages != wantStages {
+		t.Fatalf("WAL replay materialization stages = %#v, want %#v", restart.BeforeStages, wantStages)
+	}
+	if len(restart.AfterRestart.Records) != 1 {
+		t.Fatalf("WAL replay after worker restart is missing: %#v", restart)
+	}
+	replayedRecord := restart.AfterRestart.Records[0]
+	replayedRecord.ReplayCount = restartRecord.ReplayCount
+	if replayedRecord != restartRecord || restart.AfterRestart.Records[0].ReplayCount != 1 ||
+		restart.AfterStages != restart.BeforeStages || !restart.AfterRestart.WorkerRunning ||
+		restart.AfterRestart.BlockingPoison || !restart.AfterRestart.ContiguousAcknowledged ||
+		!restart.AfterRestart.AcknowledgementMatchesObservedEnd || !restart.AfterRestart.SlotMatchesObservedEnd ||
+		restart.AfterRestart.AcknowledgedEndLSN != restartRecord.EndLSN ||
+		restart.AfterRestart.SlotConfirmedFlushLSN != restartRecord.EndLSN {
+		t.Fatalf("WAL replay after worker restart is not idempotent: %#v", restart)
 	}
 
 	documentID := "00000000-0000-0000-0000-000000009201"

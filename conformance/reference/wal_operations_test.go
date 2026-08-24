@@ -139,35 +139,6 @@ func TestWALMaterializationFailureRollsBackAllPartialProjectionState(t *testing.
 	}
 }
 
-func TestWALReplayBeforeAcknowledgementIsIdempotent(t *testing.T) {
-	row := walOpsRow("replay")
-	generation := walOpsGeneration(1, walOpsGenerationStart(), map[RowIdentity][]ScopeID{row: {walOpsScopeA}}, nil)
-	model := walOpsModel(t, walOpsState(generation))
-	walOpsCommitInsert(t, model, "10", "11", 3, row, "replay-v1")
-	walOpsApply(t, model, "process", "materialize-source-transaction", walOpsMaterializePayload("10", nil))
-	first := model.Snapshot()
-	if first.Stream.Authority.AcknowledgedEndLSN != 0 {
-		t.Fatal("materialization acknowledged the logical slot")
-	}
-
-	result := walOpsApply(t, model, "process", "materialize-source-transaction", walOpsMaterializePayload("10", nil))
-	if result.WAL == nil || result.WAL.PriorMaterialization != result.WAL.NewMaterialization || result.WAL.NewAcknowledgement != 0 {
-		t.Fatal("materialization replay changed progress or acknowledgement")
-	}
-	second := model.Snapshot()
-	if len(second.Rows) != len(first.Rows) || len(second.Projections) != len(first.Projections) || len(walOpsScopeSnapshot(t, second, walOpsScopeA).Effects) != len(walOpsScopeSnapshot(t, first, walOpsScopeA).Effects) || len(second.Fences) != len(first.Fences) {
-		t.Fatal("materialization replay duplicated durable work")
-	}
-	if !second.Stream.TransactionReplays[0].Replayed || !second.Stream.EventReplays[0].Replayed {
-		t.Fatal("materialization replay identity was not observed")
-	}
-	walOpsApply(t, model, "process", "acknowledge-contiguous-prefix", map[string]any{"stream_generation": walOpsStream})
-	acknowledged := model.Snapshot()
-	if acknowledged.Stream.Authority.AcknowledgedEndLSN != 11 || len(acknowledged.Stream.Acknowledgements) != 1 || acknowledged.Stream.Acknowledgements[0].EndLSN != 11 {
-		t.Fatal("acknowledgement did not use the transaction end LSN")
-	}
-}
-
 func TestWALAcknowledgementStopsAtBlockedContiguousPrefix(t *testing.T) {
 	rowA := walOpsRow("ack-a")
 	rowB := walOpsRow("ack-b")
