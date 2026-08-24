@@ -2245,6 +2245,7 @@ fn poll_and_process(
     .map_err(|_| PollFailure::Transient("lag_record"))?;
 
     let mut previous = None;
+    let mut acknowledged_boundary = None;
     for (index, transaction) in transactions.iter().enumerate() {
         if previous.is_some_and(|commit_lsn| commit_lsn >= transaction.commit_lsn) {
             return Err(PollFailure::Poison(PoisonFailure {
@@ -2262,13 +2263,7 @@ fn poll_and_process(
                 PollFailure::Poison(failure)
             }
         })?;
-        advance_slot(
-            slot,
-            transaction.commit_lsn,
-            materialized.end_lsn,
-            worker_role_oid,
-        )
-        .map_err(|_| PollFailure::Transient("slot_advance"))?;
+        acknowledged_boundary = Some((transaction.commit_lsn, materialized.end_lsn));
         record_oldest_unmaterialized_commit(
             transactions
                 .get(index + 1)
@@ -2276,6 +2271,10 @@ fn poll_and_process(
                 .or_else(|| decoder.pending_commit_timestamp()),
         )
         .map_err(|_| PollFailure::Transient("lag_record"))?;
+    }
+    if let Some((commit_lsn, end_lsn)) = acknowledged_boundary {
+        advance_slot(slot, commit_lsn, end_lsn, worker_role_oid)
+            .map_err(|_| PollFailure::Transient("slot_advance"))?;
     }
 
     Ok(message_count)
