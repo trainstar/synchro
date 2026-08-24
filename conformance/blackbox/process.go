@@ -1756,7 +1756,7 @@ func (executor *SourceExecutor) ExecContext(ctx context.Context, statement strin
 		return errors.New("activate source role failed")
 	}
 	if _, err := tx.ExecContext(ctx, statement, arguments...); err != nil {
-		return errors.New("source mutation failed")
+		return sourceMutationError("source mutation failed", err)
 	}
 	if err := tx.Commit(); err != nil {
 		return errors.New("commit source mutation failed")
@@ -1869,9 +1869,17 @@ func (transaction *SourceTransaction) ExecContext(ctx context.Context, statement
 	}
 	result, err := transaction.tx.ExecContext(ctx, statement, arguments...)
 	if err != nil {
-		return nil, errors.New("source transaction mutation failed")
+		return nil, sourceMutationError("source transaction mutation failed", err)
 	}
 	return result, nil
+}
+
+func sourceMutationError(message string, err error) error {
+	var postgresError *pgconn.PgError
+	if errors.As(err, &postgresError) && len(postgresError.Code) == 5 {
+		return fmt.Errorf("%s (SQLSTATE %s)", message, postgresError.Code)
+	}
+	return errors.New(message)
 }
 
 // Commit commits the source transaction and closes its database handle.

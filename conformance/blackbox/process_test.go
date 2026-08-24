@@ -11,6 +11,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 func TestInstallExtensionRejectsBundleIdentityChangeAfterLoad(t *testing.T) {
@@ -259,6 +261,19 @@ func TestValidateSourceDMLUsesClosedTableSet(t *testing.T) {
 	}
 	if err := validateSourceDML("UPDATE cf_items SET value = $1 WHERE id = $2"); err != nil {
 		t.Fatalf("rejected source DML: %v", err)
+	}
+}
+
+func TestSourceMutationErrorPreservesOnlySQLState(t *testing.T) {
+	errorWithState := sourceMutationError("source mutation failed", &pgconn.PgError{
+		Code:    "42725",
+		Message: "private database detail",
+	})
+	if errorWithState.Error() != "source mutation failed (SQLSTATE 42725)" || strings.Contains(errorWithState.Error(), "private") {
+		t.Fatal("source mutation error did not preserve only SQLSTATE")
+	}
+	if sourceMutationError("source mutation failed", errors.New("private database detail")).Error() != "source mutation failed" {
+		t.Fatal("non-PostgreSQL source mutation error was not redacted")
 	}
 }
 
