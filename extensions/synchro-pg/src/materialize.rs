@@ -640,16 +640,28 @@ fn migrate_schema_row(
 }
 
 fn lock_backfill_state(client: &mut SpiClient<'_>) -> Result<(), String> {
+    client
+        .update(
+            "SELECT 1 FROM synchro.sync_wal_progress WHERE singleton FOR UPDATE",
+            None,
+            &[],
+        )
+        .map_err(|error| format!("locking materialization progress row: {error}"))?;
+    client
+        .update(
+            "LOCK TABLE synchro.sync_wal_progress IN SHARE ROW EXCLUSIVE MODE",
+            None,
+            &[],
+        )
+        .map_err(|error| format!("locking materialization progress table: {error}"))?;
     acquire_backfill_lock(client)?;
-    // Keep this order aligned with the worker: projections, current rows,
-    // edges, scope state, checkpoints, then WAL progress.
+    // Progress serializes the worker and blocks new pulls before these locks.
     for table in [
         "synchro.sync_captured_projections",
         "synchro.sync_captured_rows",
         "synchro.sync_bucket_edges",
         "synchro.sync_scope_state",
         "synchro.sync_client_checkpoints",
-        "synchro.sync_wal_progress",
     ] {
         client
             .update(

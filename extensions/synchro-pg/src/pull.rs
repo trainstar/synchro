@@ -547,7 +547,7 @@ fn acknowledge_scope_positions(
 }
 
 fn final_scope_checksums(
-    client: &SpiClient<'_>,
+    client: &mut SpiClient<'_>,
     scope_ids: &[String],
     has_more: bool,
 ) -> Result<Option<std::collections::BTreeMap<String, ChecksumObject>>, String> {
@@ -1358,22 +1358,9 @@ pub(crate) fn synced_row_projection_sql(table_reg: &TableRegistration, row_alias
 }
 
 pub(crate) fn compute_bucket_checksums(
-    client: &SpiClient<'_>,
+    client: &mut SpiClient<'_>,
     bucket_ids: &[String],
 ) -> Result<std::collections::HashMap<String, ChecksumObject>, String> {
-    let bucket_arr = bucket_ids.to_vec();
-    let tup_table = match client.select(
-        "SELECT bucket_id, relation_id::text AS relation_id, table_name, record_id, checksum \
-         FROM sync_bucket_edges \
-         WHERE bucket_id = ANY($1) \
-         ORDER BY bucket_id, table_name, record_id",
-        None,
-        &[bucket_arr.into()],
-    ) {
-        Ok(t) => t,
-        Err(_) => return Err("loading scope edges failed".to_string()),
-    };
-
     let registry = crate::registry::load_registry_from_client(client)
         .map_err(|_| "loading active registry for scope digest failed".to_string())?;
     let (schema_version, schema_hash) = get_latest_schema(client);
@@ -1382,64 +1369,198 @@ pub(crate) fn compute_bucket_checksums(
     }
     let schema_hash = SchemaHash::from_lower_hex(&schema_hash)
         .map_err(|error| format!("current immutable schema hash is invalid: {error}"))?;
-    let mut entries_by_scope: std::collections::BTreeMap<String, Vec<ScopeDigestEntry>> =
-        bucket_ids
-            .iter()
-            .cloned()
-            .map(|scope_id| (scope_id, Vec::new()))
-            .collect();
-    for row in tup_table {
-        let bid: String = row
-            .get_by_name::<String, &str>("bucket_id")
-            .map_err(|_| "scope edge bucket is malformed".to_string())?
-            .ok_or_else(|| "scope edge bucket is null".to_string())?;
-        let table_name = row
-            .get_by_name::<String, &str>("table_name")
-            .map_err(|_| "scope edge table is malformed".to_string())?
-            .ok_or_else(|| "scope edge table is null".to_string())?;
-        let relation_id = row
-            .get_by_name::<String, &str>("relation_id")
-            .map_err(|_| "scope edge relation identity is malformed".to_string())?
-            .ok_or_else(|| "scope edge relation identity is null".to_string())?;
-        let record_id = row
-            .get_by_name::<String, &str>("record_id")
-            .map_err(|_| "scope edge record identity is malformed".to_string())?
-            .ok_or_else(|| "scope edge record identity is null".to_string())?;
-        let digest = decode_digest(
-            row.get_by_name::<Vec<u8>, &str>("checksum")
-                .map_err(|_| "scope edge row digest is malformed".to_string())?
-                .ok_or_else(|| "scope edge row digest is null".to_string())?,
-            "scope edge row digest",
-        )?;
-        let table = registry
-            .iter()
-            .find(|table| table.relation_id == relation_id && table.table_name == table_name)
-            .ok_or_else(|| {
-                format!(
-                    "scope edge relation {relation_id:?} and table {table_name:?} are not registered together"
-                )
-            })?;
-        let primary_key_json = row_primary_key_json(table, &record_id)?;
-        let canonical_table = canonical_table(table)?;
-        let identity = row_identity(
-            &canonical_table,
-            &serde_json::to_string(&primary_key_json)
-                .map_err(|error| format!("encoding scope row identity: {error}"))?,
-        )
-        .map_err(|error| format!("computing scope row identity: {error}"))?;
-        entries_by_scope
-            .get_mut(&bid)
-            .ok_or_else(|| format!("scope edge belongs to an unknown scope {bid:?}"))?
-            .push(ScopeDigestEntry::new(identity, digest));
-    }
-    entries_by_scope
-        .into_iter()
-        .map(|(scope_id, entries)| {
+    let mut pending: std::collections::BTreeSet<String> = bucket_ids.iter().cloned().collect();
+    let mut checksums = std::collections::HashMap::with_capacity(pending.len());
+    let mut fill_attempts = 0;
+
+    while !pending.is_empty() {
+        let pending_ids = pending.iter().cloned().collect::<Vec<_>>();
+        let cache_rows = client
+            .select(
+                "SELECT scope_id, edge_change_xid::text AS edge_change_xid, schema_hash, digest
+                 FROM synchro.sync_scope_digest_cache
+                 WHERE scope_id = ANY($1)",
+                None,
+                &[pending_ids.into()],
+            )
+            .map_err(|_| "loading scope digest cache failed".to_string())?;
+        let mut cache_by_scope = std::collections::HashMap::with_capacity(cache_rows.len());
+        for row in cache_rows {
+            let scope_id = row
+                .get_by_name::<String, &str>("scope_id")
+                .map_err(|_| "scope digest cache scope is malformed".to_string())?
+                .ok_or_else(|| "scope digest cache scope is null".to_string())?;
+            let edge_change_xid = row
+                .get_by_name::<String, &str>("edge_change_xid")
+                .map_err(|_| "scope digest cache change identity is malformed".to_string())?
+                .ok_or_else(|| "scope digest cache change identity is null".to_string())?;
+            let cached_schema_hash = row
+                .get_by_name::<Vec<u8>, &str>("schema_hash")
+                .map_err(|_| "scope digest cache schema hash is malformed".to_string())?;
+            let cached_digest = row
+                .get_by_name::<Vec<u8>, &str>("digest")
+                .map_err(|_| "scope digest cache value is malformed".to_string())?;
+            cache_by_scope.insert(
+                scope_id,
+                (edge_change_xid, cached_schema_hash, cached_digest),
+            );
+        }
+
+        let mut misses = std::collections::BTreeMap::new();
+        for scope_id in &pending {
+            match cache_by_scope.get(scope_id) {
+                Some((_, Some(cached_schema_hash), Some(cached_digest)))
+                    if cached_schema_hash.as_slice() == schema_hash.as_bytes() =>
+                {
+                    let digest = decode_digest(cached_digest.clone(), "cached scope digest")?;
+                    checksums.insert(scope_id.clone(), ChecksumObject::new(digest));
+                }
+                Some((edge_change_xid, _, _)) => {
+                    misses.insert(scope_id.clone(), Some(edge_change_xid.clone()));
+                }
+                None => {
+                    misses.insert(scope_id.clone(), None);
+                }
+            }
+        }
+        if misses.is_empty() {
+            break;
+        }
+        if fill_attempts == 2 {
+            return Err("scope edges changed while computing digests".to_string());
+        }
+        fill_attempts += 1;
+
+        let miss_ids = misses.keys().cloned().collect::<Vec<_>>();
+        let edge_rows = client
+            .select(
+                "SELECT bucket_id, relation_id::text AS relation_id, table_name, record_id, checksum
+                 FROM synchro.sync_bucket_edges
+                 WHERE bucket_id = ANY($1)
+                 ORDER BY bucket_id, table_name, record_id",
+                None,
+                &[miss_ids.into()],
+            )
+            .map_err(|_| "loading scope edges failed".to_string())?;
+        let mut entries_by_scope: std::collections::BTreeMap<String, Vec<ScopeDigestEntry>> =
+            misses
+                .keys()
+                .cloned()
+                .map(|scope_id| (scope_id, Vec::new()))
+                .collect();
+        for row in edge_rows {
+            let scope_id = row
+                .get_by_name::<String, &str>("bucket_id")
+                .map_err(|_| "scope edge bucket is malformed".to_string())?
+                .ok_or_else(|| "scope edge bucket is null".to_string())?;
+            let table_name = row
+                .get_by_name::<String, &str>("table_name")
+                .map_err(|_| "scope edge table is malformed".to_string())?
+                .ok_or_else(|| "scope edge table is null".to_string())?;
+            let relation_id = row
+                .get_by_name::<String, &str>("relation_id")
+                .map_err(|_| "scope edge relation identity is malformed".to_string())?
+                .ok_or_else(|| "scope edge relation identity is null".to_string())?;
+            let record_id = row
+                .get_by_name::<String, &str>("record_id")
+                .map_err(|_| "scope edge record identity is malformed".to_string())?
+                .ok_or_else(|| "scope edge record identity is null".to_string())?;
+            let digest = decode_digest(
+                row.get_by_name::<Vec<u8>, &str>("checksum")
+                    .map_err(|_| "scope edge row digest is malformed".to_string())?
+                    .ok_or_else(|| "scope edge row digest is null".to_string())?,
+                "scope edge row digest",
+            )?;
+            let table = registry
+                .iter()
+                .find(|table| table.relation_id == relation_id && table.table_name == table_name)
+                .ok_or_else(|| {
+                    format!(
+                        "scope edge relation {relation_id:?} and table {table_name:?} are not registered together"
+                    )
+                })?;
+            let primary_key_json = row_primary_key_json(table, &record_id)?;
+            let canonical_table = canonical_table(table)?;
+            let identity = row_identity(
+                &canonical_table,
+                &serde_json::to_string(&primary_key_json)
+                    .map_err(|error| format!("encoding scope row identity: {error}"))?,
+            )
+            .map_err(|error| format!("computing scope row identity: {error}"))?;
+            entries_by_scope
+                .get_mut(&scope_id)
+                .ok_or_else(|| format!("scope edge belongs to an unknown scope {scope_id:?}"))?
+                .push(ScopeDigestEntry::new(identity, digest));
+        }
+
+        let mut computed = std::collections::HashMap::with_capacity(misses.len());
+        let mut fills = Vec::with_capacity(misses.len());
+        for (scope_id, entries) in entries_by_scope {
             let digest = synchro_core::checksum::scope_digest(schema_hash, &scope_id, &entries)
                 .map_err(|error| format!("computing scope {scope_id:?} digest: {error}"))?;
-            Ok((scope_id, ChecksumObject::new(digest)))
-        })
-        .collect()
+            fills.push(serde_json::json!({
+                "scope_id": scope_id.as_str(),
+                "edge_change_xid": misses.get(&scope_id).expect("cache miss scope"),
+                "schema_hash": schema_hash.to_lower_hex(),
+                "digest": digest.to_lower_hex(),
+            }));
+            computed.insert(scope_id, ChecksumObject::new(digest));
+        }
+        let installed = client
+            .update(
+                "WITH input AS (
+                     SELECT scope_id, edge_change_xid, schema_hash, digest
+                     FROM jsonb_to_recordset($1::jsonb) AS fill(
+                         scope_id text, edge_change_xid text, schema_hash text, digest text
+                     )
+                 ), updated AS (
+                     UPDATE synchro.sync_scope_digest_cache AS cache
+                     SET schema_hash = decode(input.schema_hash, 'hex'),
+                         digest = decode(input.digest, 'hex')
+                     FROM input
+                     WHERE input.edge_change_xid IS NOT NULL
+                       AND cache.scope_id = input.scope_id
+                       AND cache.edge_change_xid = input.edge_change_xid::xid8
+                     RETURNING cache.scope_id
+                 ), inserted AS (
+                     INSERT INTO synchro.sync_scope_digest_cache (
+                         scope_id, edge_change_xid, schema_hash, digest
+                     )
+                     SELECT input.scope_id, pg_current_xact_id(),
+                            decode(input.schema_hash, 'hex'), decode(input.digest, 'hex')
+                     FROM input
+                     WHERE input.edge_change_xid IS NULL
+                     ON CONFLICT (scope_id) DO NOTHING
+                     RETURNING scope_id
+                 )
+                 SELECT scope_id FROM updated
+                 UNION ALL
+                 SELECT scope_id FROM inserted",
+                None,
+                &[pgrx::JsonB(serde_json::Value::Array(fills)).into()],
+            )
+            .map_err(|_| "storing scope digest cache failed".to_string())?;
+        let mut installed_scopes = std::collections::HashSet::with_capacity(installed.len());
+        for row in installed {
+            let scope_id = row
+                .get_by_name::<String, &str>("scope_id")
+                .map_err(|_| "stored scope digest cache key is malformed".to_string())?
+                .ok_or_else(|| "stored scope digest cache key is null".to_string())?;
+            installed_scopes.insert(scope_id);
+        }
+        for scope_id in &installed_scopes {
+            let checksum = computed
+                .remove(scope_id)
+                .ok_or_else(|| format!("stored an unknown scope digest {scope_id:?}"))?;
+            checksums.insert(scope_id.clone(), checksum);
+        }
+        pending = misses
+            .into_keys()
+            .filter(|scope_id| !installed_scopes.contains(scope_id))
+            .collect();
+    }
+
+    Ok(checksums)
 }
 
 pub(crate) fn contract_pk_value(

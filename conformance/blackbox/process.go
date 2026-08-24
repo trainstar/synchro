@@ -69,6 +69,7 @@ var diagnosticLegacyInternalTables = []string{
 	"sync_clients",
 	"sync_shared_scopes",
 	"sync_bucket_edges",
+	"sync_scope_digest_cache",
 	"sync_rule_failures",
 	"sync_schema_manifest",
 	"sync_client_checkpoints",

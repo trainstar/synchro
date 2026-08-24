@@ -23,6 +23,7 @@ use crate::wal_decoder::{
 };
 
 const BATCH_SIZE: i32 = 500;
+const JSONB_BATCH_SIZE: usize = 500;
 const IDLE_POLL_MS: u64 = 100;
 const WORKER_ID: &str = "synchro_wal_consumer";
 const REGISTRY_PREFIX: &str = "synchro_registry";
@@ -3092,90 +3093,144 @@ fn persist_events_and_projections(
 ) -> Result<PersistedEvents, PoisonFailure> {
     let mut impacts = Vec::with_capacity(events.len());
     let mut dependency_events = Vec::with_capacity(events.len());
-    for event in events {
+    for event_chunk_input in events.chunks(JSONB_BATCH_SIZE) {
+        let mut event_rows = Vec::with_capacity(event_chunk_input.len());
+        let mut fence_rows = Vec::with_capacity(event_chunk_input.len());
+        for event in event_chunk_input {
+            let event_ordinal = i64::try_from(event.event.event_ordinal)
+                .map_err(|_| failure("validation_failed", transaction.commit_lsn))?;
+            event_rows.push(serde_json::json!({
+                "write_ordinal": event_ordinal,
+                "event_ordinal": event_ordinal,
+                "bootstrap_id": target.bootstrap_id(),
+                "relation_id": event.registration.relation_id,
+                "registration_kind": event.registration.registration_kind.as_str(),
+                "physical_schema": event.event.relation.namespace,
+                "physical_relation": event.event.relation.name,
+                "physical_relation_oid": i64::from(event.event.relation.oid),
+                "operation": event.operation_name,
+                "fence_id": event.fence_id,
+            }));
+            fence_rows.push(serde_json::json!({
+                "fence_id": event.fence_id,
+                "event_ordinal": event_ordinal,
+            }));
+        }
+
         match target {
             ProjectionTarget::Active { stream_generation } => {
-                client
+                let event_count = event_rows.len();
+                let inserted = client
                     .update(
                         "INSERT INTO synchro.sync_wal_events (
-                     stream_generation, commit_lsn, event_ordinal, relation_id,
-                     registration_kind, physical_schema, physical_relation,
-                     physical_relation_oid, operation, fence_id
-                 ) VALUES (
-                     $1, $2::pg_lsn, $3, $4::uuid, $5, $6, $7, $8::oid, $9, $10::uuid
-                 )",
+                             stream_generation, commit_lsn, event_ordinal, relation_id,
+                             registration_kind, physical_schema, physical_relation,
+                             physical_relation_oid, operation, fence_id
+                         )
+                         SELECT $3, $2::pg_lsn, input.event_ordinal,
+                                input.relation_id::uuid, input.registration_kind,
+                                input.physical_schema, input.physical_relation,
+                                input.physical_relation_oid::oid, input.operation,
+                                input.fence_id::uuid
+                         FROM jsonb_to_recordset($1::jsonb) AS input(
+                             write_ordinal bigint,
+                             event_ordinal bigint,
+                             bootstrap_id text,
+                             relation_id text,
+                             registration_kind text,
+                             physical_schema text,
+                             physical_relation text,
+                             physical_relation_oid bigint,
+                             operation text,
+                             fence_id text
+                         )
+                         ORDER BY input.write_ordinal
+                         RETURNING event_ordinal",
                         None,
                         &[
-                            stream_generation.into(),
+                            pgrx::JsonB(serde_json::Value::Array(event_rows)).into(),
                             format_lsn(transaction.commit_lsn).as_str().into(),
-                            i64::try_from(event.event.event_ordinal)
-                                .map_err(|_| failure("validation_failed", transaction.commit_lsn))?
-                                .into(),
-                            event.registration.relation_id.as_str().into(),
-                            event.registration.registration_kind.as_str().into(),
-                            event.event.relation.namespace.as_str().into(),
-                            event.event.relation.name.as_str().into(),
-                            i64::from(event.event.relation.oid).into(),
-                            event.operation_name.into(),
-                            event.fence_id.as_str().into(),
+                            stream_generation.into(),
                         ],
                     )
                     .map_err(|_| failure("materialization_failed", transaction.commit_lsn))?;
+                if inserted.len() != event_count {
+                    return Err(failure("materialization_failed", transaction.commit_lsn));
+                }
+                let fence_count = fence_rows.len();
                 let covered = client
                     .update(
-                        "UPDATE synchro.sync_write_fences
-                 SET coverage = 'materialized', stream_generation = $1,
-                     commit_lsn = $2::pg_lsn, event_ordinal = $3,
-                     materialized_at = now()
-                 WHERE fence_id = $4::uuid AND coverage = 'pending'",
+                        "UPDATE synchro.sync_write_fences fence
+                         SET coverage = 'materialized', stream_generation = $2,
+                             commit_lsn = $3::pg_lsn, event_ordinal = input.event_ordinal,
+                             materialized_at = now()
+                         FROM jsonb_to_recordset($1::jsonb) AS input(
+                             fence_id text, event_ordinal bigint
+                         )
+                         WHERE fence.fence_id = input.fence_id::uuid
+                           AND fence.coverage = 'pending'
+                         RETURNING fence.fence_id",
                         None,
                         &[
+                            pgrx::JsonB(serde_json::Value::Array(fence_rows)).into(),
                             stream_generation.into(),
                             format_lsn(transaction.commit_lsn).as_str().into(),
-                            i64::try_from(event.event.event_ordinal)
-                                .map_err(|_| failure("validation_failed", transaction.commit_lsn))?
-                                .into(),
-                            event.fence_id.as_str().into(),
                         ],
                     )
                     .map_err(|_| failure("fence_correlation_failed", transaction.commit_lsn))?
                     .len();
-                if covered != 1 {
+                if covered != fence_count {
                     return Err(failure("fence_correlation_failed", transaction.commit_lsn));
                 }
             }
-            ProjectionTarget::Candidate { bootstrap_id, .. } => {
-                client
+            ProjectionTarget::Candidate { .. } => {
+                let event_count = event_rows.len();
+                let inserted = client
                     .update(
                         "INSERT INTO synchro.sync_projection_bootstrap_events (
                              bootstrap_id, commit_lsn, event_ordinal, relation_id,
                              registration_kind, physical_schema, physical_relation,
                              physical_relation_oid, operation, fence_id
-                         ) VALUES (
-                             $1::uuid, $2::pg_lsn, $3, $4::uuid, $5, $6, $7,
-                             $8::oid, $9, $10::uuid
-                         )",
+                         )
+                         SELECT input.bootstrap_id::uuid, $2::pg_lsn, input.event_ordinal,
+                                input.relation_id::uuid, input.registration_kind,
+                                input.physical_schema, input.physical_relation,
+                                input.physical_relation_oid::oid, input.operation,
+                                input.fence_id::uuid
+                         FROM jsonb_to_recordset($1::jsonb) AS input(
+                             write_ordinal bigint,
+                             event_ordinal bigint,
+                             bootstrap_id text,
+                             relation_id text,
+                             registration_kind text,
+                             physical_schema text,
+                             physical_relation text,
+                             physical_relation_oid bigint,
+                             operation text,
+                             fence_id text
+                         )
+                         ORDER BY input.write_ordinal
+                         RETURNING event_ordinal",
                         None,
                         &[
-                            bootstrap_id.into(),
+                            pgrx::JsonB(serde_json::Value::Array(event_rows)).into(),
                             format_lsn(transaction.commit_lsn).as_str().into(),
-                            i64::try_from(event.event.event_ordinal)
-                                .map_err(|_| failure("validation_failed", transaction.commit_lsn))?
-                                .into(),
-                            event.registration.relation_id.as_str().into(),
-                            event.registration.registration_kind.as_str().into(),
-                            event.event.relation.namespace.as_str().into(),
-                            event.event.relation.name.as_str().into(),
-                            i64::from(event.event.relation.oid).into(),
-                            event.operation_name.into(),
-                            event.fence_id.as_str().into(),
                         ],
                     )
                     .map_err(|_| failure("materialization_failed", transaction.commit_lsn))?;
+                if inserted.len() != event_count {
+                    return Err(failure("materialization_failed", transaction.commit_lsn));
+                }
+            }
+        }
+    }
+
+    for event in events {
+        if let ProjectionTarget::Candidate { .. } = target {
+            if event.registration.is_synced() {
                 persist_candidate_row_version(client, target, event, transaction.commit_lsn)?;
             }
         }
-
         if event.registration.is_capture_dependency() {
             let dependency_event =
                 persist_capture_dependency_event(client, target, transaction, event)?;
@@ -4215,6 +4270,161 @@ fn persist_reevaluation_projection(
     Ok(())
 }
 
+fn persist_impact_batch(
+    client: &mut SpiClient<'_>,
+    stream_generation: &str,
+    commit_lsn: u64,
+    changelog_effects: &[serde_json::Value],
+    edge_deletes: &[serde_json::Value],
+    edge_upserts: &[serde_json::Value],
+) -> Result<(), PoisonFailure> {
+    if changelog_effects.len() > JSONB_BATCH_SIZE
+        || edge_deletes.len() > JSONB_BATCH_SIZE
+        || edge_upserts.len() > JSONB_BATCH_SIZE
+    {
+        return Err(failure("validation_failed", commit_lsn));
+    }
+    let expected_effect_count = i64::try_from(changelog_effects.len())
+        .map_err(|_| failure("validation_failed", commit_lsn))?;
+    let expected_edge_delete_count =
+        i64::try_from(edge_deletes.len()).map_err(|_| failure("validation_failed", commit_lsn))?;
+    let expected_edge_upsert_count =
+        i64::try_from(edge_upserts.len()).map_err(|_| failure("validation_failed", commit_lsn))?;
+    let counts = client
+        .update(
+            "WITH effect_input AS (
+                 SELECT write_ordinal, bucket_id, table_name, record_id, operation,
+                        event_ordinal, effect_ordinal, relation_id, row_version,
+                        projection_image
+                 FROM jsonb_to_recordset($1::jsonb) AS input(
+                     write_ordinal bigint,
+                     bucket_id text,
+                     table_name text,
+                     record_id text,
+                     operation smallint,
+                     event_ordinal bigint,
+                     effect_ordinal integer,
+                     relation_id text,
+                     row_version text,
+                     projection_image text
+                 )
+             ), scope_input AS (
+                 SELECT DISTINCT effect.bucket_id AS scope_id
+                 FROM effect_input effect
+             ), scope_inserted AS (
+                 INSERT INTO synchro.sync_scope_state (scope_id, stream_generation)
+                 SELECT scope_id, $4
+                 FROM scope_input
+                 ON CONFLICT (scope_id) DO NOTHING
+                 RETURNING scope_id
+             ), effect_inserted AS (
+                 INSERT INTO synchro.sync_changelog (
+                     bucket_id, table_name, record_id, operation,
+                     stream_generation, commit_lsn, event_ordinal,
+                     effect_ordinal, relation_id, row_version, projection_image
+                 )
+                 SELECT effect.bucket_id, effect.table_name, effect.record_id,
+                        effect.operation, $4, $5::pg_lsn, effect.event_ordinal,
+                        effect.effect_ordinal, effect.relation_id::uuid,
+                        effect.row_version::uuid, effect.projection_image
+                 FROM effect_input effect
+                 ORDER BY effect.write_ordinal
+                 RETURNING seq
+             ), edge_delete_input AS (
+                 SELECT table_name, record_id, bucket_id
+                 FROM jsonb_to_recordset($2::jsonb) AS input(
+                     table_name text, record_id text, bucket_id text
+                 )
+             ), edge_deleted AS (
+                 DELETE FROM synchro.sync_bucket_edges edge
+                 USING edge_delete_input input
+                 WHERE edge.table_name = input.table_name
+                   AND edge.record_id = input.record_id
+                   AND edge.bucket_id = input.bucket_id
+                 RETURNING edge.table_name, edge.record_id, edge.bucket_id
+             ), edge_upsert_input AS (
+                 SELECT relation_id, table_name, record_id, bucket_id,
+                        checksum_hex, row_version
+                 FROM jsonb_to_recordset($3::jsonb) AS input(
+                     relation_id text,
+                     table_name text,
+                     record_id text,
+                     bucket_id text,
+                     checksum_hex text,
+                     row_version text
+                 )
+             ), edge_upserted AS (
+                 INSERT INTO synchro.sync_bucket_edges (
+                     relation_id, table_name, record_id, bucket_id,
+                     checksum, row_version, updated_at
+                 )
+                 SELECT input.relation_id::uuid, input.table_name, input.record_id,
+                        input.bucket_id, decode(input.checksum_hex, 'hex'),
+                        input.row_version::uuid, now()
+                 FROM edge_upsert_input input
+                 ON CONFLICT (table_name, record_id, bucket_id) DO UPDATE SET
+                     relation_id = EXCLUDED.relation_id,
+                     checksum = EXCLUDED.checksum,
+                     row_version = EXCLUDED.row_version,
+                     updated_at = now()
+                 RETURNING table_name, record_id, bucket_id
+             )
+             SELECT (SELECT count(*) FROM effect_input)::bigint AS effect_expected,
+                    (SELECT count(*) FROM effect_inserted)::bigint AS effect_inserted,
+                    (SELECT count(*) FROM edge_delete_input)::bigint AS edge_delete_expected,
+                    (SELECT count(*) FROM edge_deleted)::bigint AS edge_deleted,
+                    (SELECT count(*) FROM edge_upsert_input)::bigint AS edge_upsert_expected,
+                    (SELECT count(*) FROM edge_upserted)::bigint AS edge_upserted",
+            None,
+            &[
+                pgrx::JsonB(serde_json::Value::Array(changelog_effects.to_vec())).into(),
+                pgrx::JsonB(serde_json::Value::Array(edge_deletes.to_vec())).into(),
+                pgrx::JsonB(serde_json::Value::Array(edge_upserts.to_vec())).into(),
+                stream_generation.into(),
+                format_lsn(commit_lsn).as_str().into(),
+            ],
+        )
+        .map_err(|_| failure("materialization_failed", commit_lsn))?;
+    if counts.len() != 1 {
+        return Err(failure("materialization_failed", commit_lsn));
+    }
+    let counts = counts.first();
+    let effect_expected = counts
+        .get_by_name::<i64, &str>("effect_expected")
+        .map_err(|_| failure("materialization_failed", commit_lsn))?
+        .ok_or_else(|| failure("materialization_failed", commit_lsn))?;
+    let effect_inserted = counts
+        .get_by_name::<i64, &str>("effect_inserted")
+        .map_err(|_| failure("materialization_failed", commit_lsn))?
+        .ok_or_else(|| failure("materialization_failed", commit_lsn))?;
+    let edge_delete_expected = counts
+        .get_by_name::<i64, &str>("edge_delete_expected")
+        .map_err(|_| failure("materialization_failed", commit_lsn))?
+        .ok_or_else(|| failure("materialization_failed", commit_lsn))?;
+    let edge_deleted = counts
+        .get_by_name::<i64, &str>("edge_deleted")
+        .map_err(|_| failure("materialization_failed", commit_lsn))?
+        .ok_or_else(|| failure("materialization_failed", commit_lsn))?;
+    let edge_upsert_expected = counts
+        .get_by_name::<i64, &str>("edge_upsert_expected")
+        .map_err(|_| failure("materialization_failed", commit_lsn))?
+        .ok_or_else(|| failure("materialization_failed", commit_lsn))?;
+    let edge_upserted = counts
+        .get_by_name::<i64, &str>("edge_upserted")
+        .map_err(|_| failure("materialization_failed", commit_lsn))?
+        .ok_or_else(|| failure("materialization_failed", commit_lsn))?;
+    if effect_inserted != effect_expected
+        || edge_deleted != edge_delete_expected
+        || edge_upserted != edge_upsert_expected
+        || effect_inserted != expected_effect_count
+        || edge_deleted != expected_edge_delete_count
+        || edge_upserted != expected_edge_upsert_count
+    {
+        return Err(failure("materialization_failed", commit_lsn));
+    }
+    Ok(())
+}
+
 fn materialize_impacts(
     client: &mut SpiClient<'_>,
     target: ProjectionTarget<'_>,
@@ -4230,95 +4440,188 @@ fn materialize_impacts(
     let ProjectionTarget::Active { stream_generation } = target else {
         unreachable!();
     };
+
     let mut effect_count = 0i64;
     let mut next_effect_ordinals: HashMap<(u64, String), i32> = HashMap::new();
-    for impact in impacts {
-        let registration = &registry[impact.registration_index];
-        let existing = load_existing_buckets(client, &registration.table_name, &impact.record_id)
+    for impact_chunk in impacts.chunks(JSONB_BATCH_SIZE) {
+        let impact_keys = impact_chunk
+            .iter()
+            .map(|impact| {
+                serde_json::json!({
+                    "table_name": registry[impact.registration_index].table_name,
+                    "record_id": impact.record_id,
+                })
+            })
+            .collect::<Vec<_>>();
+        let mut existing_buckets = HashMap::<(String, String), Vec<String>>::new();
+        let existing_rows = client
+            .select(
+                "SELECT edge.table_name, edge.record_id, edge.bucket_id
+                     FROM synchro.sync_bucket_edges edge
+                     JOIN jsonb_to_recordset($1::jsonb) AS impact(table_name text, record_id text)
+                       ON impact.table_name = edge.table_name
+                      AND impact.record_id = edge.record_id
+                     ORDER BY edge.table_name, edge.record_id, edge.bucket_id",
+                None,
+                &[pgrx::JsonB(serde_json::Value::Array(impact_keys)).into()],
+            )
             .map_err(|_| failure("scope_evaluation_failed", transaction.commit_lsn))?;
-        let mut desired = if impact.operation == ChangeOperation::Delete {
-            Vec::new()
-        } else {
-            resolve_membership(client, registration, &impact.record_id)
+        for row in existing_rows {
+            let table_name = row
+                .get_by_name::<String, &str>("table_name")
                 .map_err(|_| failure("scope_evaluation_failed", transaction.commit_lsn))?
-        };
-        desired.sort();
-        desired.dedup();
-        let mut existing = existing;
-        existing.sort();
-        existing.dedup();
+                .ok_or_else(|| failure("scope_evaluation_failed", transaction.commit_lsn))?;
+            let record_id = row
+                .get_by_name::<String, &str>("record_id")
+                .map_err(|_| failure("scope_evaluation_failed", transaction.commit_lsn))?
+                .ok_or_else(|| failure("scope_evaluation_failed", transaction.commit_lsn))?;
+            if let Some(bucket_id) = row
+                .get_by_name::<String, &str>("bucket_id")
+                .map_err(|_| failure("scope_evaluation_failed", transaction.commit_lsn))?
+            {
+                existing_buckets
+                    .entry((table_name, record_id))
+                    .or_default()
+                    .push(bucket_id);
+            }
+        }
 
-        let mut entries = build_edge_diff_entries(
-            &registration.table_name,
-            &impact.record_id,
-            impact.operation,
-            &existing,
-            &desired,
-        );
-        if !impact.direct_change {
-            entries.retain(|entry| entry.operation != ChangeOperation::Update);
-        }
-        entries.sort_by(|left, right| {
-            left.bucket_id
-                .cmp(&right.bucket_id)
-                .then_with(|| left.operation.to_i16().cmp(&right.operation.to_i16()))
-        });
-        for entry in &entries {
-            client
-                .update(
-                    "INSERT INTO synchro.sync_scope_state (scope_id, stream_generation)
-                     VALUES ($1, $2)
-                     ON CONFLICT (scope_id) DO NOTHING",
-                    None,
-                    &[entry.bucket_id.as_str().into(), stream_generation.into()],
-                )
-                .map_err(|_| failure("materialization_failed", transaction.commit_lsn))?;
-            let next_effect_ordinal = next_effect_ordinals
-                .entry((impact.event_ordinal, entry.bucket_id.clone()))
-                .or_insert(0);
-            let effect_ordinal = *next_effect_ordinal;
-            *next_effect_ordinal = next_effect_ordinal
-                .checked_add(1)
-                .ok_or_else(|| failure("validation_failed", transaction.commit_lsn))?;
-            let projection_image = if entry.operation == ChangeOperation::Delete {
-                impact.delete_projection_image
+        let mut changelog_effects = Vec::new();
+        let mut edge_deletes = Vec::new();
+        let mut edge_upserts = Vec::new();
+        for impact in impact_chunk {
+            let registration = &registry[impact.registration_index];
+            let mut existing = existing_buckets
+                .remove(&(registration.table_name.clone(), impact.record_id.clone()))
+                .unwrap_or_default();
+            let mut desired = if impact.operation == ChangeOperation::Delete {
+                Vec::new()
             } else {
-                Some("after")
+                resolve_membership(client, registration, &impact.record_id)
+                    .map_err(|_| failure("scope_evaluation_failed", transaction.commit_lsn))?
             };
-            client
-                .update(
-                    "INSERT INTO synchro.sync_changelog (
-                         bucket_id, table_name, record_id, operation,
-                         stream_generation, commit_lsn, event_ordinal,
-                         effect_ordinal, relation_id, row_version, projection_image
-                     ) VALUES (
-                         $1, $2, $3, $4, $5, $6::pg_lsn, $7, $8,
-                         $9::uuid, $10::uuid, $11
-                     )",
-                    None,
-                    &[
-                        entry.bucket_id.as_str().into(),
-                        entry.table_name.as_str().into(),
-                        entry.record_id.as_str().into(),
-                        entry.operation.to_i16().into(),
-                        stream_generation.into(),
-                        format_lsn(transaction.commit_lsn).as_str().into(),
-                        i64::try_from(impact.event_ordinal)
-                            .map_err(|_| failure("validation_failed", transaction.commit_lsn))?
-                            .into(),
-                        effect_ordinal.into(),
-                        registration.relation_id.as_str().into(),
-                        impact.row_version.as_str().into(),
-                        projection_image.into(),
-                    ],
-                )
-                .map_err(|_| failure("materialization_failed", transaction.commit_lsn))?;
-            effect_count = effect_count
-                .checked_add(1)
-                .ok_or_else(|| failure("validation_failed", transaction.commit_lsn))?;
+            desired.sort();
+            desired.dedup();
+            existing.sort();
+            existing.dedup();
+
+            let mut entries = build_edge_diff_entries(
+                &registration.table_name,
+                &impact.record_id,
+                impact.operation,
+                &existing,
+                &desired,
+            );
+            if !impact.direct_change {
+                entries.retain(|entry| entry.operation != ChangeOperation::Update);
+            }
+            entries.sort_by(|left, right| {
+                left.bucket_id
+                    .cmp(&right.bucket_id)
+                    .then_with(|| left.operation.to_i16().cmp(&right.operation.to_i16()))
+            });
+            let mut local_effects = Vec::new();
+            let mut local_edge_deletes = Vec::new();
+            let mut local_edge_upserts = Vec::new();
+            for entry in &entries {
+                let next_effect_ordinal = next_effect_ordinals
+                    .entry((impact.event_ordinal, entry.bucket_id.clone()))
+                    .or_insert(0);
+                let effect_ordinal = *next_effect_ordinal;
+                *next_effect_ordinal = next_effect_ordinal
+                    .checked_add(1)
+                    .ok_or_else(|| failure("validation_failed", transaction.commit_lsn))?;
+                let projection_image = if entry.operation == ChangeOperation::Delete {
+                    impact.delete_projection_image
+                } else {
+                    Some("after")
+                };
+                let write_ordinal = effect_count;
+                let event_ordinal = i64::try_from(impact.event_ordinal)
+                    .map_err(|_| failure("validation_failed", transaction.commit_lsn))?;
+                local_effects.push(serde_json::json!({
+                    "write_ordinal": write_ordinal,
+                    "bucket_id": entry.bucket_id,
+                    "table_name": entry.table_name,
+                    "record_id": entry.record_id,
+                    "operation": entry.operation.to_i16(),
+                    "event_ordinal": event_ordinal,
+                    "effect_ordinal": effect_ordinal,
+                    "relation_id": registration.relation_id,
+                    "row_version": impact.row_version,
+                    "projection_image": projection_image,
+                }));
+                effect_count = effect_count
+                    .checked_add(1)
+                    .ok_or_else(|| failure("validation_failed", transaction.commit_lsn))?;
+            }
+            let diff = diff_bucket_sets(&existing, &desired);
+            if impact.operation == ChangeOperation::Delete {
+                for bucket_id in diff.removed {
+                    local_edge_deletes.push(serde_json::json!({
+                        "table_name": registration.table_name,
+                        "record_id": impact.record_id,
+                        "bucket_id": bucket_id,
+                    }));
+                }
+            } else {
+                let digest = impact
+                    .digest
+                    .ok_or_else(|| failure("materialization_failed", transaction.commit_lsn))?;
+                let checksum_hex = digest.to_lower_hex();
+                for bucket_id in diff.added.iter().chain(diff.kept.iter()) {
+                    local_edge_upserts.push(serde_json::json!({
+                        "relation_id": registration.relation_id,
+                        "table_name": registration.table_name,
+                        "record_id": impact.record_id,
+                        "bucket_id": bucket_id,
+                        "checksum_hex": checksum_hex,
+                        "row_version": impact.row_version,
+                    }));
+                }
+                for bucket_id in diff.removed {
+                    local_edge_deletes.push(serde_json::json!({
+                        "table_name": registration.table_name,
+                        "record_id": impact.record_id,
+                        "bucket_id": bucket_id,
+                    }));
+                }
+            }
+            if local_effects.len() > JSONB_BATCH_SIZE
+                || local_edge_deletes.len() > JSONB_BATCH_SIZE
+                || local_edge_upserts.len() > JSONB_BATCH_SIZE
+            {
+                return Err(failure("scope_evaluation_failed", transaction.commit_lsn));
+            }
+            if local_effects.len() > JSONB_BATCH_SIZE - changelog_effects.len()
+                || local_edge_deletes.len() > JSONB_BATCH_SIZE - edge_deletes.len()
+                || local_edge_upserts.len() > JSONB_BATCH_SIZE - edge_upserts.len()
+            {
+                persist_impact_batch(
+                    client,
+                    stream_generation,
+                    transaction.commit_lsn,
+                    &changelog_effects,
+                    &edge_deletes,
+                    &edge_upserts,
+                )?;
+                changelog_effects.clear();
+                edge_deletes.clear();
+                edge_upserts.clear();
+            }
+            changelog_effects.extend(local_effects);
+            edge_deletes.extend(local_edge_deletes);
+            edge_upserts.extend(local_edge_upserts);
         }
-        apply_edge_diff(client, registration, &impact, &existing, &desired)
-            .map_err(|_| failure("materialization_failed", transaction.commit_lsn))?;
+
+        persist_impact_batch(
+            client,
+            stream_generation,
+            transaction.commit_lsn,
+            &changelog_effects,
+            &edge_deletes,
+            &edge_upserts,
+        )?;
     }
     Ok(effect_count)
 }
@@ -4695,99 +4998,6 @@ const fn operation_rank(operation: ChangeOperation) -> u8 {
         ChangeOperation::Delete => 0,
         ChangeOperation::Insert | ChangeOperation::Update => 1,
     }
-}
-
-fn load_existing_buckets(
-    client: &SpiClient<'_>,
-    table_name: &str,
-    record_id: &str,
-) -> Result<Vec<String>, String> {
-    let rows = client
-        .select(
-            "SELECT bucket_id
-             FROM synchro.sync_bucket_edges
-             WHERE table_name = $1 AND record_id = $2
-             ORDER BY bucket_id",
-            None,
-            &[table_name.into(), record_id.into()],
-        )
-        .map_err(|_| "loading scope edges failed".to_string())?;
-    let mut buckets = Vec::new();
-    for row in rows {
-        if let Some(bucket) = row
-            .get_by_name::<String, &str>("bucket_id")
-            .map_err(|_| "loading scope edges failed".to_string())?
-        {
-            buckets.push(bucket);
-        }
-    }
-    Ok(buckets)
-}
-
-fn apply_edge_diff(
-    client: &mut SpiClient<'_>,
-    registration: &TableRegistration,
-    impact: &ImpactedRow,
-    existing: &[String],
-    desired: &[String],
-) -> Result<(), String> {
-    if impact.operation == ChangeOperation::Delete {
-        client
-            .update(
-                "DELETE FROM synchro.sync_bucket_edges WHERE table_name = $1 AND record_id = $2",
-                None,
-                &[
-                    registration.table_name.as_str().into(),
-                    impact.record_id.as_str().into(),
-                ],
-            )
-            .map_err(|_| "deleting scope edges failed".to_string())?;
-        return Ok(());
-    }
-
-    let digest = impact
-        .digest
-        .ok_or_else(|| "current projected row has no row digest".to_string())?;
-    let diff = diff_bucket_sets(existing, desired);
-    for bucket in diff.added.iter().chain(diff.kept.iter()) {
-        client
-            .update(
-                "INSERT INTO synchro.sync_bucket_edges (
-                     relation_id, table_name, record_id, bucket_id,
-                     checksum, row_version, updated_at
-                 ) VALUES ($1::uuid, $2, $3, $4, $5, $6::uuid, now())
-                 ON CONFLICT (table_name, record_id, bucket_id) DO UPDATE SET
-                     relation_id = EXCLUDED.relation_id,
-                      checksum = EXCLUDED.checksum,
-                     row_version = EXCLUDED.row_version,
-                     updated_at = now()",
-                None,
-                &[
-                    registration.relation_id.as_str().into(),
-                    registration.table_name.as_str().into(),
-                    impact.record_id.as_str().into(),
-                    bucket.as_str().into(),
-                    digest.as_bytes().to_vec().into(),
-                    impact.row_version.as_str().into(),
-                ],
-            )
-            .map_err(|_| "upserting scope edge failed".to_string())?;
-    }
-    for bucket in &diff.removed {
-        client
-            .update(
-                "DELETE FROM synchro.sync_bucket_edges
-                 WHERE table_name = $1 AND record_id = $2 AND bucket_id = $3",
-                None,
-                &[
-                    registration.table_name.as_str().into(),
-                    impact.record_id.as_str().into(),
-                    bucket.as_str().into(),
-                ],
-            )
-            .map_err(|_| "deleting scope edge failed".to_string())?;
-    }
-    Ok(())
 }
 
 fn parse_lsn(value: &str) -> Option<u64> {

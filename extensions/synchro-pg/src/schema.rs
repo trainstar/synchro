@@ -146,7 +146,7 @@ fn synchro_tables() -> pgrx::JsonB {
 /// and changelog statistics.
 #[pg_extern]
 fn synchro_debug(p_user_id: &str, p_client_id: &str) -> pgrx::JsonB {
-    Spi::connect(|client| {
+    Spi::connect_mut(|client| {
         // Load client info.
         let client_info = load_client_debug(client, p_user_id, p_client_id);
 
@@ -1117,7 +1117,7 @@ fn load_client_debug(client: &SpiClient<'_>, user_id: &str, client_id: &str) -> 
 }
 
 fn load_bucket_details(
-    client: &SpiClient<'_>,
+    client: &mut SpiClient<'_>,
     user_id: &str,
     client_id: &str,
     bucket_subs: &[String],

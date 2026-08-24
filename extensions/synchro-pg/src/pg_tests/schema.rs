@@ -47,6 +47,122 @@
         );
     }
 
+    #[pg_test]
+    fn test_backfill_waits_for_progress_before_checkpoint_lock() {
+        Spi::run("CREATE EXTENSION IF NOT EXISTS dblink").expect("install dblink extension");
+        let connection_string: String = Spi::get_one(
+            "SELECT format(
+                        'host=%L port=%s dbname=%I user=%I',
+                        current_setting('unix_socket_directories'),
+                        current_setting('port'),
+                        current_database(),
+                        current_user
+                    )",
+        )
+        .unwrap()
+        .expect("dblink connection string");
+        let pull_name = "synchro_backfill_pull";
+        let backfill_name = "synchro_backfill_contender";
+        Spi::run_with_args(
+            "SELECT public.dblink_connect($1, $2)",
+            &[pull_name.into(), connection_string.as_str().into()],
+        )
+        .unwrap();
+        Spi::run_with_args(
+            "SELECT public.dblink_connect($1, $2)",
+            &[backfill_name.into(), connection_string.as_str().into()],
+        )
+        .unwrap();
+
+        dblink_exec(pull_name, "SET lock_timeout = '5s'");
+        dblink_exec(backfill_name, "SET statement_timeout = '5s'");
+        dblink_exec(pull_name, "BEGIN");
+        dblink_exec(
+            pull_name,
+            "LOCK TABLE synchro.sync_wal_progress IN SHARE MODE",
+        );
+        dblink_exec(backfill_name, "BEGIN");
+        let backfill_pid: i32 = dblink_query(backfill_name, "SELECT pg_backend_pid()")
+            .parse()
+            .expect("parse backfill PID");
+        let sent: i32 = Spi::get_one_with_args(
+            "SELECT public.dblink_send_query($1, $2)",
+            &[
+                backfill_name.into(),
+                "SELECT synchro_backfill_bucket_edges(NULL)".into(),
+            ],
+        )
+        .unwrap()
+        .expect("send backfill query");
+
+        let mut waiting_for_progress = false;
+        for _ in 0..1000 {
+            waiting_for_progress = Spi::get_one_with_args(
+                "SELECT EXISTS (
+                     SELECT 1 FROM pg_locks
+                     WHERE pid = $1
+                       AND relation = 'synchro.sync_wal_progress'::regclass
+                       AND mode = 'ShareRowExclusiveLock'
+                       AND NOT granted
+                 )",
+                &[i64::from(backfill_pid).into()],
+            )
+            .unwrap()
+            .unwrap_or(false);
+            if waiting_for_progress {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        let checkpoint_locked = if waiting_for_progress {
+            Spi::get_one_with_args(
+                "SELECT EXISTS (
+                     SELECT 1 FROM pg_locks
+                     WHERE pid = $1
+                       AND relation = 'synchro.sync_client_checkpoints'::regclass
+                       AND mode = 'ShareRowExclusiveLock'
+                       AND granted
+                 )",
+                &[i64::from(backfill_pid).into()],
+            )
+            .unwrap()
+            .unwrap_or(false)
+        } else {
+            false
+        };
+
+        if waiting_for_progress {
+            dblink_exec(
+                pull_name,
+                "LOCK TABLE synchro.sync_client_checkpoints IN ROW EXCLUSIVE MODE",
+            );
+        }
+        dblink_exec(pull_name, "COMMIT");
+        let result = dblink_get_result(backfill_name);
+        Spi::run_with_args(
+            "SELECT result
+             FROM public.dblink_get_result($1) AS result_row(result text)",
+            &[backfill_name.into()],
+        )
+        .unwrap();
+        dblink_exec(backfill_name, "ROLLBACK");
+        Spi::run_with_args(
+            "SELECT public.dblink_disconnect($1)",
+            &[pull_name.into()],
+        )
+        .unwrap();
+        Spi::run_with_args(
+            "SELECT public.dblink_disconnect($1)",
+            &[backfill_name.into()],
+        )
+        .unwrap();
+
+        assert_eq!(sent, 1);
+        assert!(waiting_for_progress, "backfill did not wait for progress");
+        assert!(!checkpoint_locked, "backfill locked checkpoints before progress");
+        assert!(!result.starts_with("ERROR"), "backfill failed: {result}");
+    }
+
     fn run_source_gated_registration(
         create_table: &str,
         registration: &str,
@@ -1094,7 +1210,7 @@
             "stored row digest must use the current production schema binding"
         );
 
-        let terminal = Spi::connect(|client| {
+        let terminal = Spi::connect_mut(|client| {
             Ok::<_, spi::Error>(
                 crate::pull::compute_bucket_checksums(client, &[scope_id.to_string()])
                     .expect("current class 2 terminal scope digest"),

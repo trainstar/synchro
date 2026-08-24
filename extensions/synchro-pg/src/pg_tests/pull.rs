@@ -309,10 +309,112 @@
         )
         .unwrap();
 
-        let result = Spi::connect(|client| {
+        let result = Spi::connect_mut(|client| {
             crate::pull::compute_bucket_checksums(client, &["user:checksum-user".to_string()])
         });
         assert!(result.is_err(), "checksum calculation must bind table to relation");
+    }
+
+    #[pg_test]
+    fn test_scope_digest_cache_invalidates_edge_changes() {
+        setup_test_tables();
+        let record_id = "16151515-1515-4515-8515-151515151515";
+        Spi::run_with_args(
+            "INSERT INTO test_orders (id, user_id, title)
+             VALUES ($1::uuid, 'cache-user', 'cached row')",
+            &[record_id.into()],
+        )
+        .unwrap();
+        insert_edge("test_orders", record_id, "user:cache-old");
+        let scopes = ["user:cache-old".to_string(), "user:cache-new".to_string()];
+
+        let before =
+            Spi::connect_mut(|client| crate::pull::compute_bucket_checksums(client, &scopes))
+                .expect("compute initial cached scope digests");
+        let valid_cache_rows: i64 = Spi::get_one(
+            "SELECT count(*) FROM sync_scope_digest_cache
+             WHERE scope_id = ANY(ARRAY['user:cache-old', 'user:cache-new'])
+               AND schema_hash IS NOT NULL AND digest IS NOT NULL",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(valid_cache_rows, 2);
+
+        Spi::run_with_args(
+            "UPDATE sync_bucket_edges SET bucket_id = 'user:cache-new'
+             WHERE table_name = 'test_orders' AND record_id = $1",
+            &[record_id.into()],
+        )
+        .unwrap();
+        let invalid_cache_rows: i64 = Spi::get_one(
+            "SELECT count(*) FROM sync_scope_digest_cache
+             WHERE scope_id = ANY(ARRAY['user:cache-old', 'user:cache-new'])
+               AND schema_hash IS NULL AND digest IS NULL",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(invalid_cache_rows, 2);
+
+        let moved =
+            Spi::connect_mut(|client| crate::pull::compute_bucket_checksums(client, &scopes))
+                .expect("recompute moved scope digests");
+        assert_ne!(before["user:cache-old"], moved["user:cache-old"]);
+        assert_ne!(before["user:cache-new"], moved["user:cache-new"]);
+
+        Spi::run_with_args(
+            "DELETE FROM sync_bucket_edges
+             WHERE table_name = 'test_orders' AND record_id = $1",
+            &[record_id.into()],
+        )
+        .unwrap();
+        let digest_is_null: bool = Spi::get_one(
+            "SELECT digest IS NULL FROM sync_scope_digest_cache
+             WHERE scope_id = 'user:cache-new'",
+        )
+        .unwrap()
+        .unwrap();
+        assert!(digest_is_null);
+    }
+
+    #[pg_test]
+    fn test_scope_digest_cache_recomputes_for_schema_hash_mismatch() {
+        setup_test_tables();
+        let scope_id = "user:cache-schema".to_string();
+        let initial = Spi::connect_mut(|client| {
+            crate::pull::compute_bucket_checksums(client, std::slice::from_ref(&scope_id))
+        })
+        .expect("compute initial scope digest");
+        Spi::run_with_args(
+            "UPDATE sync_scope_digest_cache
+             SET schema_hash = decode(repeat('00', 32), 'hex'),
+                 digest = decode(repeat('00', 32), 'hex')
+             WHERE scope_id = $1",
+            &[scope_id.as_str().into()],
+        )
+        .unwrap();
+
+        let recomputed = Spi::connect_mut(|client| {
+            crate::pull::compute_bucket_checksums(client, std::slice::from_ref(&scope_id))
+        })
+        .expect("recompute scope digest for current schema");
+        assert_eq!(initial, recomputed);
+        let (_, schema_hash) = latest_schema_ref();
+        let cached_schema_hash: String = Spi::get_one_with_args(
+            "SELECT encode(schema_hash, 'hex') FROM sync_scope_digest_cache WHERE scope_id = $1",
+            &[scope_id.as_str().into()],
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(cached_schema_hash, schema_hash);
+    }
+
+    #[pg_test]
+    fn test_scope_digest_cache_fill_uses_writable_spi() {
+        let checksums = Spi::connect_mut(|client| {
+            crate::pull::compute_bucket_checksums(client, &["debug:cold".to_string()])
+        })
+        .expect("cold scope digest");
+        assert!(checksums.contains_key("debug:cold"));
     }
 
     #[pg_test]

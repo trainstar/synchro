@@ -390,6 +390,60 @@ func TestRealWALPipeline(t *testing.T) {
 		t.Fatalf("WAL replay after worker restart is not idempotent: %#v", restart)
 	}
 
+	repeatedID := "00000000-0000-0000-0000-000000009104"
+	repeated, err := harness.Source().BeginTx(ctx)
+	if err != nil {
+		t.Fatalf("begin repeated-row source transaction: %v", err)
+	}
+	if _, err := repeated.ExecContext(
+		ctx,
+		"INSERT INTO cf_items (id, owner_id, value) VALUES ($1, $2, $3)",
+		repeatedID, "diagnostic-user", "repeated-insert",
+	); err != nil {
+		_ = repeated.Rollback()
+		t.Fatalf("insert repeated-row source transaction: %v", err)
+	}
+	for _, value := range []string{"repeated-first-update", "repeated-final-update"} {
+		if _, err := repeated.ExecContext(
+			ctx,
+			"UPDATE cf_items SET value = $1, updated_at = clock_timestamp() WHERE id = $2",
+			value, repeatedID,
+		); err != nil {
+			_ = repeated.Rollback()
+			t.Fatalf("update repeated-row source transaction: %v", err)
+		}
+	}
+	if err := repeated.Commit(); err != nil {
+		t.Fatalf("commit repeated-row source transaction: %v", err)
+	}
+
+	var repeatedObservation blackbox.WALPipelineObservation
+	var repeatedStages blackbox.WALRecordStageObservation
+	wantRepeatedStages := blackbox.WALRecordStageObservation{
+		FenceCount: 3, EventCount: 3, ProjectionCount: 5,
+		CapturedCount: 1, EdgeCount: 1, ChangeCount: 1,
+	}
+	deadline = time.Now().Add(20 * time.Second)
+	for time.Now().Before(deadline) {
+		repeatedObservation, err = harness.Operator().ObserveWALRecords(ctx, []string{repeatedID})
+		if err == nil {
+			repeatedStages, err = harness.Operator().ObserveWALRecordStages(ctx, "cf_items", []string{repeatedID})
+		}
+		if err == nil && len(repeatedObservation.Records) == 1 && repeatedObservation.ContiguousAcknowledged && repeatedStages == wantRepeatedStages {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if err != nil || len(repeatedObservation.Records) != 1 || !repeatedObservation.ContiguousAcknowledged {
+		t.Fatalf("repeated-row WAL transaction did not materialize: %#v, %v; %s", repeatedObservation, err, harness.FailureDiagnostics())
+	}
+	if repeatedStages != wantRepeatedStages {
+		t.Fatalf("repeated-row WAL stages = %#v, want %#v", repeatedStages, wantRepeatedStages)
+	}
+	if repeatedObservation.Records[0].EventOrdinal != 2 || repeatedObservation.Records[0].EffectOrdinal != 0 {
+		t.Fatalf("repeated-row final effect is invalid: %#v", repeatedObservation.Records[0])
+	}
+
 	documentID := "00000000-0000-0000-0000-000000009201"
 	firstMemberID := "00000000-0000-0000-0000-000000009202"
 	secondMemberID := "00000000-0000-0000-0000-000000009203"

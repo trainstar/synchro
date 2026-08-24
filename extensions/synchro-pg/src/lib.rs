@@ -614,6 +614,69 @@ CREATE TABLE IF NOT EXISTS sync_bucket_edges (
 );
 CREATE INDEX IF NOT EXISTS idx_sync_bucket_edges_bucket ON sync_bucket_edges (bucket_id, table_name, record_id);
 
+CREATE TABLE IF NOT EXISTS sync_scope_digest_cache (
+    scope_id TEXT PRIMARY KEY,
+    edge_change_xid XID8 NOT NULL,
+    schema_hash BYTEA CHECK (schema_hash IS NULL OR octet_length(schema_hash) = 32),
+    digest BYTEA CHECK (digest IS NULL OR octet_length(digest) = 32),
+    CHECK ((schema_hash IS NULL) = (digest IS NULL))
+);
+
+CREATE OR REPLACE FUNCTION sync_lock_scope_digest_boundary()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, synchro
+AS $$
+BEGIN
+    LOCK TABLE synchro.sync_wal_progress IN ROW EXCLUSIVE MODE;
+    RETURN NULL;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION sync_invalidate_scope_digest()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, synchro
+AS $$
+BEGIN
+    IF TG_OP IN ('UPDATE', 'DELETE') THEN
+        INSERT INTO synchro.sync_scope_digest_cache AS cache (scope_id, edge_change_xid)
+        VALUES (OLD.bucket_id, pg_current_xact_id())
+        ON CONFLICT (scope_id) DO UPDATE
+        SET edge_change_xid = EXCLUDED.edge_change_xid,
+            schema_hash = NULL,
+            digest = NULL
+        WHERE cache.edge_change_xid <> EXCLUDED.edge_change_xid
+           OR cache.digest IS NOT NULL;
+    END IF;
+
+    IF TG_OP = 'INSERT' OR (TG_OP = 'UPDATE' AND NEW.bucket_id IS DISTINCT FROM OLD.bucket_id) THEN
+        INSERT INTO synchro.sync_scope_digest_cache AS cache (scope_id, edge_change_xid)
+        VALUES (NEW.bucket_id, pg_current_xact_id())
+        ON CONFLICT (scope_id) DO UPDATE
+        SET edge_change_xid = EXCLUDED.edge_change_xid,
+            schema_hash = NULL,
+            digest = NULL
+        WHERE cache.edge_change_xid <> EXCLUDED.edge_change_xid
+           OR cache.digest IS NOT NULL;
+    END IF;
+
+    RETURN NULL;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS sync_lock_scope_digest_boundary ON sync_bucket_edges;
+CREATE TRIGGER sync_lock_scope_digest_boundary
+BEFORE INSERT OR UPDATE OR DELETE ON sync_bucket_edges
+FOR EACH STATEMENT EXECUTE FUNCTION sync_lock_scope_digest_boundary();
+
+DROP TRIGGER IF EXISTS sync_invalidate_scope_digest ON sync_bucket_edges;
+CREATE TRIGGER sync_invalidate_scope_digest
+AFTER INSERT OR UPDATE OR DELETE ON sync_bucket_edges
+FOR EACH ROW EXECUTE FUNCTION sync_invalidate_scope_digest();
+
 CREATE TABLE IF NOT EXISTS sync_rule_failures (
     id BIGSERIAL PRIMARY KEY,
     table_name TEXT NOT NULL,
