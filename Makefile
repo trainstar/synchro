@@ -86,6 +86,7 @@
 	synchrod-pg-test-stop \
 	synchrod-pg-test-restart \
 	release-pods-check \
+	validation-check \
 	release-check \
 	release-kotlin-local \
 	release-npm-dry-run \
@@ -669,6 +670,13 @@ release-pods-check: version-check
 	swift package dump-package >/dev/null
 	@echo "Apple package metadata validated."
 
+validation-check: override GO_TEST_ARGS := -v -count=1 -p 1
+validation-check: override GO_TEST_PKGS := ./...
+validation-check: override GRADLE_TEST_ARGS := --rerun-tasks
+validation-check: override DETOX_ARGS :=
+validation-check: build-conformance test-conformance test-blackbox version-check release-pods-check build build-seed build-check release-kotlin-local release-npm-dry-run lint-go lint-rust-core lint-rust-pg lint-rn test-rust-core test-rust-mutants test-integration-mutants test-rust-pg test-adapter test-swift test-kotlin-unit test-kotlin test-rn-unit test-rn-native-parity test-rn test-packaged-consumers verify-contract check-pg-sql docs-build
+	@echo "Validation suite passed."
+
 release-check: override GO_TEST_ARGS := -v -count=1 -p 1
 release-check: override GO_TEST_PKGS := ./...
 release-check: override GRADLE_TEST_ARGS := --rerun-tasks
@@ -676,7 +684,7 @@ release-check: override DETOX_ARGS :=
 # test-r1-benchmark is a separate required release gate. Its baseline is
 # fingerprint-bound to the pinned benchmark host, so it runs there, not
 # inside release-check. Release evidence requires both results.
-release-check: evidence build-conformance test-conformance test-blackbox rc-check-pg18 version-check release-pods-check build build-seed build-check release-kotlin-local release-npm-dry-run lint-go lint-rust-core lint-rust-pg lint-rn test-rust-core test-rust-mutants test-integration-mutants test-rust-pg test-adapter test-swift test-kotlin-unit test-kotlin test-rn-unit test-rn-native-parity test-rn test-packaged-consumers verify-contract check-pg-sql docs-build
+release-check: validation-check evidence rc-check-pg18
 	@echo "Release validation passed."
 	@echo "Reminder: run make test-r1-benchmark on the pinned benchmark host. It is a separate required release gate."
 
