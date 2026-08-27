@@ -25,7 +25,8 @@
         "SYNC-PROVENANCE-002"
       ],
       "assertion_ids": [
-        "ASSERT-PERF-MULTI-SCOPE-PROVENANCE-SEMANTIC-001"
+        "ASSERT-PERF-MULTI-SCOPE-PROVENANCE-SEMANTIC-001",
+        "ASSERT-PERF-MULTI-SCOPE-PROVENANCE-WIRE-001"
       ],
       "proof_type": "reference-model",
       "support_cell_id": null,
@@ -281,6 +282,14 @@
       "requirement_id": "SYNC-PROVENANCE-002",
       "proof_obligation_id": "OBL-PERF-MULTI-SCOPE-PROVENANCE-RM-001",
       "assertion_id": "ASSERT-PERF-MULTI-SCOPE-PROVENANCE-SEMANTIC-001",
+      "proof_type": "reference-model",
+      "support_cell_id": null
+    },
+    {
+      "scenario_id": "SCN-PERF-MULTI-SCOPE-PROVENANCE-001",
+      "requirement_id": "SYNC-PROVENANCE-002",
+      "proof_obligation_id": "OBL-PERF-MULTI-SCOPE-PROVENANCE-RM-001",
+      "assertion_id": "ASSERT-PERF-MULTI-SCOPE-PROVENANCE-WIRE-001",
       "proof_type": "reference-model",
       "support_cell_id": null
     },
@@ -672,6 +681,14 @@
         }
       },
       {
+        "id": "EXPECT-PERF-MULTI-SCOPE-PROVENANCE-WIRE-001",
+        "predicate": {
+          "contract_predicate": "wire-outcome",
+          "name": "canonical-wire-outcome",
+          "payload": {}
+        }
+      },
+      {
         "id": "EXPECT-PERF-MULTI-SCOPE-PROVENANCE-PERFORMANCE-001",
         "predicate": {
           "contract_predicate": "performance-measurement",
@@ -741,7 +758,10 @@
       "id": "STEP-PERF-MULTI-SCOPE-PROVENANCE-001",
       "phase": "exercise",
       "transport": "model",
-      "description": "Execute the authored workload operation.",
+      "description": "Commit the first topology sample marker transaction.",
+      "native_binding": {
+        "kind": "controller"
+      },
       "measurement_sample": {
         "measurement_id": "MEAS-MULTI-SCOPE-PROVENANCE-001",
         "stratum_id": "STR-PROVENANCE-ONE-001",
@@ -759,12 +779,13 @@
         }
       },
       "operation": {
-        "contract_operation": "workload",
-        "name": "prepare",
+        "contract_operation": "model",
+        "name": "commit-source-transaction",
         "payload": {
-          "profile": "scope_topology",
-          "scope_fanout": 1,
-          "impact_rows": 1
+          "stream_generation": "stream-1",
+          "commit_lsn": "10",
+          "end_lsn": "11",
+          "events": []
         }
       },
       "expected_outcome": {
@@ -772,10 +793,82 @@
       }
     },
     {
+      "id": "STEP-PERF-MULTI-SCOPE-PROVENANCE-001-MARKER-MATERIALIZE-001",
+      "phase": "exercise",
+      "transport": "process",
+      "description": "Materialize the first topology sample marker transaction.",
+      "native_binding": {"kind": "controller"},
+      "operation": {"contract_operation": "process", "name": "materialize-source-transaction", "payload": {"stream_generation": "stream-1", "commit_lsn": "10"}},
+      "expected_outcome": {"disposition": "success"}
+    },
+    {
+      "id": "STEP-PERF-MULTI-SCOPE-PROVENANCE-001-STAGE-001",
+      "phase": "exercise",
+      "transport": "model",
+      "description": "Stage the first one-scope membership generation.",
+      "native_binding": {"kind": "controller"},
+      "operation": {
+        "contract_operation": "model",
+        "name": "stage-registry-membership-generation",
+        "payload": {
+          "registry_generation": 2,
+          "membership_generation": 2,
+          "batch_size": 1000,
+          "activation_boundary": {"stream_generation": "stream-1", "kind": "transaction_end", "commit_lsn": "10"},
+          "affected_scopes": ["scope-a"],
+          "scope_rules": [{"scope_rule_id": "items-topology-membership", "relation": "public.items", "membership_function": "synchro.scope_items", "positive_fanout_bound": 8, "evaluations": [{"row": {"canonical_identity_bytes": "synchro:v3:row-identity:v1\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0005items\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0002id\u0001\u0001\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0019scope-topology-row-000001", "table_id": "items", "primary_key_field_id": "id", "portable_type": "string", "canonical_wire_json": "\"scope-topology-row-000001\""}, "scopes": ["scope-a"]}]}],
+          "dependency_impacts": [{"dependency_impact_id": "items-topology-impact", "relation": "public.item_impacts", "function": "synchro.impact_items", "captured_field_ids": ["scope_key"], "positive_row_bound": 1000, "affected_rows": [{"canonical_identity_bytes": "synchro:v3:row-identity:v1\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0005items\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0002id\u0001\u0001\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0019scope-topology-row-000001", "table_id": "items", "primary_key_field_id": "id", "portable_type": "string", "canonical_wire_json": "\"scope-topology-row-000001\""}], "requires_rebuild": false}]
+        }
+      },
+      "expected_outcome": {"disposition": "success"}
+    },
+    {
+      "id": "STEP-PERF-MULTI-SCOPE-PROVENANCE-001-ACTIVATE-001",
+      "phase": "exercise",
+      "transport": "model",
+      "description": "Activate the first one-scope membership generation.",
+      "native_binding": {"kind": "controller"},
+      "operation": {"contract_operation": "model", "name": "activate-registry-membership-generation", "payload": {"registry_generation": 2}},
+      "expected_outcome": {"disposition": "success"}
+    },
+    {
+      "id": "STEP-PERF-MULTI-SCOPE-PROVENANCE-001-DATA-COMMIT-001",
+      "phase": "exercise",
+      "transport": "model",
+      "description": "Commit the first topology sample data transaction.",
+      "native_binding": {"kind": "controller"},
+      "operation": {
+        "contract_operation": "model",
+        "name": "commit-source-transaction",
+        "payload": {
+          "stream_generation": "stream-1",
+          "commit_lsn": "20",
+          "end_lsn": "21",
+          "events": [
+            {"event_ordinal": 1, "relation": "public.items", "operation": "insert", "before": null, "after": {"identity": {"kind": "synced", "synced_row": {"canonical_identity_bytes": "synchro:v3:row-identity:v1\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0005items\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0002id\u0001\u0001\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0019scope-topology-row-000001", "table_id": "items", "primary_key_field_id": "id", "portable_type": "string", "canonical_wire_json": "\"scope-topology-row-000001\""}, "capture_key": null}, "fields": [{"field": "id", "type": "string", "wire_json": "\"scope-topology-row-000001\""}, {"field": "value", "type": "string", "wire_json": "\"scope-topology-000001-value\""}], "version": "scope-topology-v000001", "checksum": "0791717cc0fc7f052783315aac2cf36fe3a6d6385c500b758dfd315ac4a5cba5", "deleted": false}},
+            {"event_ordinal": 2, "relation": "public.item_impacts", "operation": "insert", "before": null, "after": {"identity": {"kind": "capture_dependency", "synced_row": null, "capture_key": {"canonical_key_bytes": "scope-topology-impact-key-000001"}}, "fields": [{"field": "scope_key", "type": "string", "wire_json": "\"scope-topology-impact-key-000001-scope_key\""}], "version": "scope-topology-impact-v000001", "checksum": null, "deleted": false}}
+          ]
+        }
+      },
+      "expected_outcome": {"disposition": "success"}
+    },
+    {
+      "id": "STEP-PERF-MULTI-SCOPE-PROVENANCE-001-DATA-MATERIALIZE-001",
+      "phase": "exercise",
+      "transport": "process",
+      "description": "Materialize the first topology sample data transaction.",
+      "native_binding": {"kind": "controller"},
+      "operation": {"contract_operation": "process", "name": "materialize-source-transaction", "payload": {"stream_generation": "stream-1", "commit_lsn": "20"}},
+      "expected_outcome": {"disposition": "success"}
+    },
+    {
       "id": "STEP-PERF-MULTI-SCOPE-PROVENANCE-002",
       "phase": "exercise",
       "transport": "model",
-      "description": "Execute the authored workload operation.",
+      "description": "Commit the second topology sample marker transaction.",
+      "native_binding": {
+        "kind": "controller"
+      },
       "measurement_sample": {
         "measurement_id": "MEAS-MULTI-SCOPE-PROVENANCE-001",
         "stratum_id": "STR-PROVENANCE-ONE-001",
@@ -793,12 +886,13 @@
         }
       },
       "operation": {
-        "contract_operation": "workload",
-        "name": "prepare",
+        "contract_operation": "model",
+        "name": "commit-source-transaction",
         "payload": {
-          "profile": "scope_topology",
-          "scope_fanout": 1,
-          "impact_rows": 1
+          "stream_generation": "stream-1",
+          "commit_lsn": "30",
+          "end_lsn": "31",
+          "events": []
         }
       },
       "expected_outcome": {
@@ -806,10 +900,70 @@
       }
     },
     {
+      "id": "STEP-PERF-MULTI-SCOPE-PROVENANCE-002-MARKER-MATERIALIZE-001",
+      "phase": "exercise",
+      "transport": "process",
+      "description": "Materialize the second topology sample marker transaction.",
+      "native_binding": {"kind": "controller"},
+      "operation": {"contract_operation": "process", "name": "materialize-source-transaction", "payload": {"stream_generation": "stream-1", "commit_lsn": "30"}},
+      "expected_outcome": {"disposition": "success"}
+    },
+    {
+      "id": "STEP-PERF-MULTI-SCOPE-PROVENANCE-002-STAGE-001",
+      "phase": "exercise",
+      "transport": "model",
+      "description": "Stage the second one-scope membership generation.",
+      "native_binding": {"kind": "controller"},
+      "operation": {
+        "contract_operation": "model",
+        "name": "stage-registry-membership-generation",
+        "payload": {
+          "registry_generation": 3,
+          "membership_generation": 3,
+          "batch_size": 1000,
+          "activation_boundary": {"stream_generation": "stream-1", "kind": "transaction_end", "commit_lsn": "30"},
+          "affected_scopes": ["scope-a"],
+          "scope_rules": [{"scope_rule_id": "items-topology-membership", "relation": "public.items", "membership_function": "synchro.scope_items", "positive_fanout_bound": 8, "evaluations": [{"row": {"canonical_identity_bytes": "synchro:v3:row-identity:v1\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0005items\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0002id\u0001\u0001\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0019scope-topology-row-000001", "table_id": "items", "primary_key_field_id": "id", "portable_type": "string", "canonical_wire_json": "\"scope-topology-row-000001\""}, "scopes": ["scope-a"]}]}],
+          "dependency_impacts": [{"dependency_impact_id": "items-topology-impact", "relation": "public.item_impacts", "function": "synchro.impact_items", "captured_field_ids": ["scope_key"], "positive_row_bound": 1000, "affected_rows": [{"canonical_identity_bytes": "synchro:v3:row-identity:v1\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0005items\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0002id\u0001\u0001\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0019scope-topology-row-000001", "table_id": "items", "primary_key_field_id": "id", "portable_type": "string", "canonical_wire_json": "\"scope-topology-row-000001\""}], "requires_rebuild": false}]
+        }
+      },
+      "expected_outcome": {"disposition": "success"}
+    },
+    {
+      "id": "STEP-PERF-MULTI-SCOPE-PROVENANCE-002-ACTIVATE-001",
+      "phase": "exercise",
+      "transport": "model",
+      "description": "Activate the second one-scope membership generation.",
+      "native_binding": {"kind": "controller"},
+      "operation": {"contract_operation": "model", "name": "activate-registry-membership-generation", "payload": {"registry_generation": 3}},
+      "expected_outcome": {"disposition": "success"}
+    },
+    {
+      "id": "STEP-PERF-MULTI-SCOPE-PROVENANCE-002-DATA-COMMIT-001",
+      "phase": "exercise",
+      "transport": "model",
+      "description": "Commit the second topology sample data transaction.",
+      "native_binding": {"kind": "controller"},
+      "operation": {"contract_operation": "model", "name": "commit-source-transaction", "payload": {"stream_generation": "stream-1", "commit_lsn": "40", "end_lsn": "41", "events": [{"event_ordinal": 1, "relation": "public.item_impacts", "operation": "insert", "before": null, "after": {"identity": {"kind": "capture_dependency", "synced_row": null, "capture_key": {"canonical_key_bytes": "scope-topology-impact-key-000002"}}, "fields": [{"field": "scope_key", "type": "string", "wire_json": "\"scope-topology-impact-key-000002-scope_key\""}], "version": "scope-topology-impact-v000002", "checksum": null, "deleted": false}}]}},
+      "expected_outcome": {"disposition": "success"}
+    },
+    {
+      "id": "STEP-PERF-MULTI-SCOPE-PROVENANCE-002-DATA-MATERIALIZE-001",
+      "phase": "exercise",
+      "transport": "process",
+      "description": "Materialize the second topology sample data transaction.",
+      "native_binding": {"kind": "controller"},
+      "operation": {"contract_operation": "process", "name": "materialize-source-transaction", "payload": {"stream_generation": "stream-1", "commit_lsn": "40"}},
+      "expected_outcome": {"disposition": "success"}
+    },
+    {
       "id": "STEP-PERF-MULTI-SCOPE-PROVENANCE-003",
       "phase": "exercise",
       "transport": "model",
-      "description": "Execute the authored workload operation.",
+      "description": "Commit the third topology sample marker transaction.",
+      "native_binding": {
+        "kind": "controller"
+      },
       "measurement_sample": {
         "measurement_id": "MEAS-MULTI-SCOPE-PROVENANCE-001",
         "stratum_id": "STR-PROVENANCE-ONE-001",
@@ -827,12 +981,13 @@
         }
       },
       "operation": {
-        "contract_operation": "workload",
-        "name": "prepare",
+        "contract_operation": "model",
+        "name": "commit-source-transaction",
         "payload": {
-          "profile": "scope_topology",
-          "scope_fanout": 1,
-          "impact_rows": 1
+          "stream_generation": "stream-1",
+          "commit_lsn": "50",
+          "end_lsn": "51",
+          "events": []
         }
       },
       "expected_outcome": {
@@ -840,10 +995,70 @@
       }
     },
     {
+      "id": "STEP-PERF-MULTI-SCOPE-PROVENANCE-003-MARKER-MATERIALIZE-001",
+      "phase": "exercise",
+      "transport": "process",
+      "description": "Materialize the third topology sample marker transaction.",
+      "native_binding": {"kind": "controller"},
+      "operation": {"contract_operation": "process", "name": "materialize-source-transaction", "payload": {"stream_generation": "stream-1", "commit_lsn": "50"}},
+      "expected_outcome": {"disposition": "success"}
+    },
+    {
+      "id": "STEP-PERF-MULTI-SCOPE-PROVENANCE-003-STAGE-001",
+      "phase": "exercise",
+      "transport": "model",
+      "description": "Stage the third one-scope membership generation.",
+      "native_binding": {"kind": "controller"},
+      "operation": {
+        "contract_operation": "model",
+        "name": "stage-registry-membership-generation",
+        "payload": {
+          "registry_generation": 4,
+          "membership_generation": 4,
+          "batch_size": 1000,
+          "activation_boundary": {"stream_generation": "stream-1", "kind": "transaction_end", "commit_lsn": "50"},
+          "affected_scopes": ["scope-a"],
+          "scope_rules": [{"scope_rule_id": "items-topology-membership", "relation": "public.items", "membership_function": "synchro.scope_items", "positive_fanout_bound": 8, "evaluations": [{"row": {"canonical_identity_bytes": "synchro:v3:row-identity:v1\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0005items\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0002id\u0001\u0001\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0019scope-topology-row-000001", "table_id": "items", "primary_key_field_id": "id", "portable_type": "string", "canonical_wire_json": "\"scope-topology-row-000001\""}, "scopes": ["scope-a"]}]}],
+          "dependency_impacts": [{"dependency_impact_id": "items-topology-impact", "relation": "public.item_impacts", "function": "synchro.impact_items", "captured_field_ids": ["scope_key"], "positive_row_bound": 1000, "affected_rows": [{"canonical_identity_bytes": "synchro:v3:row-identity:v1\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0005items\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0002id\u0001\u0001\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0019scope-topology-row-000001", "table_id": "items", "primary_key_field_id": "id", "portable_type": "string", "canonical_wire_json": "\"scope-topology-row-000001\""}], "requires_rebuild": false}]
+        }
+      },
+      "expected_outcome": {"disposition": "success"}
+    },
+    {
+      "id": "STEP-PERF-MULTI-SCOPE-PROVENANCE-003-ACTIVATE-001",
+      "phase": "exercise",
+      "transport": "model",
+      "description": "Activate the third one-scope membership generation.",
+      "native_binding": {"kind": "controller"},
+      "operation": {"contract_operation": "model", "name": "activate-registry-membership-generation", "payload": {"registry_generation": 4}},
+      "expected_outcome": {"disposition": "success"}
+    },
+    {
+      "id": "STEP-PERF-MULTI-SCOPE-PROVENANCE-003-DATA-COMMIT-001",
+      "phase": "exercise",
+      "transport": "model",
+      "description": "Commit the third topology sample data transaction.",
+      "native_binding": {"kind": "controller"},
+      "operation": {"contract_operation": "model", "name": "commit-source-transaction", "payload": {"stream_generation": "stream-1", "commit_lsn": "60", "end_lsn": "61", "events": [{"event_ordinal": 1, "relation": "public.item_impacts", "operation": "insert", "before": null, "after": {"identity": {"kind": "capture_dependency", "synced_row": null, "capture_key": {"canonical_key_bytes": "scope-topology-impact-key-000003"}}, "fields": [{"field": "scope_key", "type": "string", "wire_json": "\"scope-topology-impact-key-000003-scope_key\""}], "version": "scope-topology-impact-v000003", "checksum": null, "deleted": false}}]}},
+      "expected_outcome": {"disposition": "success"}
+    },
+    {
+      "id": "STEP-PERF-MULTI-SCOPE-PROVENANCE-003-DATA-MATERIALIZE-001",
+      "phase": "exercise",
+      "transport": "process",
+      "description": "Materialize the third topology sample data transaction.",
+      "native_binding": {"kind": "controller"},
+      "operation": {"contract_operation": "process", "name": "materialize-source-transaction", "payload": {"stream_generation": "stream-1", "commit_lsn": "60"}},
+      "expected_outcome": {"disposition": "success"}
+    },
+    {
       "id": "STEP-PERF-MULTI-SCOPE-PROVENANCE-004",
       "phase": "exercise",
       "transport": "model",
-      "description": "Execute the authored workload operation.",
+      "description": "Commit the fourth topology sample marker transaction.",
+      "native_binding": {
+        "kind": "controller"
+      },
       "measurement_sample": {
         "measurement_id": "MEAS-MULTI-SCOPE-PROVENANCE-001",
         "stratum_id": "STR-PROVENANCE-MULTIPLE-001",
@@ -861,12 +1076,13 @@
         }
       },
       "operation": {
-        "contract_operation": "workload",
-        "name": "prepare",
+        "contract_operation": "model",
+        "name": "commit-source-transaction",
         "payload": {
-          "profile": "scope_topology",
-          "scope_fanout": 2,
-          "impact_rows": 2
+          "stream_generation": "stream-1",
+          "commit_lsn": "70",
+          "end_lsn": "71",
+          "events": []
         }
       },
       "expected_outcome": {
@@ -874,10 +1090,154 @@
       }
     },
     {
+      "id": "STEP-PERF-MULTI-SCOPE-PROVENANCE-004-MARKER-MATERIALIZE-001",
+      "phase": "exercise",
+      "transport": "process",
+      "description": "Materialize the fourth topology sample marker transaction.",
+      "native_binding": {"kind": "controller"},
+      "operation": {"contract_operation": "process", "name": "materialize-source-transaction", "payload": {"stream_generation": "stream-1", "commit_lsn": "70"}},
+      "expected_outcome": {"disposition": "success"}
+    },
+    {
+      "id": "STEP-PERF-MULTI-SCOPE-PROVENANCE-004-STAGE-001",
+      "phase": "exercise",
+      "transport": "model",
+      "description": "Stage the fourth two-scope membership generation.",
+      "native_binding": {"kind": "controller"},
+      "operation": {
+        "contract_operation": "model",
+        "name": "stage-registry-membership-generation",
+        "payload": {
+          "registry_generation": 5,
+          "membership_generation": 5,
+          "batch_size": 1000,
+          "activation_boundary": {"stream_generation": "stream-1", "kind": "transaction_end", "commit_lsn": "70"},
+          "affected_scopes": ["scope-a", "scope-b"],
+          "scope_rules": [{"scope_rule_id": "items-topology-membership", "relation": "public.items", "membership_function": "synchro.scope_items", "positive_fanout_bound": 8, "evaluations": [{"row": {"canonical_identity_bytes": "synchro:v3:row-identity:v1\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0005items\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0002id\u0001\u0001\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0019scope-topology-row-000001", "table_id": "items", "primary_key_field_id": "id", "portable_type": "string", "canonical_wire_json": "\"scope-topology-row-000001\""}, "scopes": ["scope-a", "scope-b"]}, {"row": {"canonical_identity_bytes": "synchro:v3:row-identity:v1\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0005items\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0002id\u0001\u0001\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0019scope-topology-row-000002", "table_id": "items", "primary_key_field_id": "id", "portable_type": "string", "canonical_wire_json": "\"scope-topology-row-000002\""}, "scopes": ["scope-a", "scope-b"]}]}],
+          "dependency_impacts": [{"dependency_impact_id": "items-topology-impact", "relation": "public.item_impacts", "function": "synchro.impact_items", "captured_field_ids": ["scope_key"], "positive_row_bound": 1000, "affected_rows": [{"canonical_identity_bytes": "synchro:v3:row-identity:v1\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0005items\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0002id\u0001\u0001\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0019scope-topology-row-000001", "table_id": "items", "primary_key_field_id": "id", "portable_type": "string", "canonical_wire_json": "\"scope-topology-row-000001\""}, {"canonical_identity_bytes": "synchro:v3:row-identity:v1\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0005items\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0002id\u0001\u0001\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0019scope-topology-row-000002", "table_id": "items", "primary_key_field_id": "id", "portable_type": "string", "canonical_wire_json": "\"scope-topology-row-000002\""}], "requires_rebuild": false}]
+        }
+      },
+      "expected_outcome": {"disposition": "success"}
+    },
+    {
+      "id": "STEP-PERF-MULTI-SCOPE-PROVENANCE-004-ACTIVATE-001",
+      "phase": "exercise",
+      "transport": "model",
+      "description": "Activate the fourth two-scope membership generation.",
+      "native_binding": {"kind": "controller"},
+      "operation": {"contract_operation": "model", "name": "activate-registry-membership-generation", "payload": {"registry_generation": 5}},
+      "expected_outcome": {"disposition": "success"}
+    },
+    {
+      "id": "STEP-PERF-MULTI-SCOPE-PROVENANCE-004-DATA-COMMIT-001",
+      "phase": "exercise",
+      "transport": "model",
+      "description": "Commit the fourth topology sample data transaction.",
+      "native_binding": {"kind": "controller"},
+      "operation": {
+        "contract_operation": "model",
+        "name": "commit-source-transaction",
+        "payload": {
+          "stream_generation": "stream-1",
+          "commit_lsn": "80",
+          "end_lsn": "81",
+          "events": [
+            {"event_ordinal": 1, "relation": "public.items", "operation": "insert", "before": null, "after": {"identity": {"kind": "synced", "synced_row": {"canonical_identity_bytes": "synchro:v3:row-identity:v1\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0005items\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0002id\u0001\u0001\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0019scope-topology-row-000002", "table_id": "items", "primary_key_field_id": "id", "portable_type": "string", "canonical_wire_json": "\"scope-topology-row-000002\""}, "capture_key": null}, "fields": [{"field": "id", "type": "string", "wire_json": "\"scope-topology-row-000002\""}, {"field": "value", "type": "string", "wire_json": "\"scope-topology-000002-value\""}], "version": "scope-topology-v000004", "checksum": "8409896fdcc095176c007340dfdc7001945de04173f42901bf2fc03fcd84b9b8", "deleted": false}},
+            {"event_ordinal": 2, "relation": "public.item_impacts", "operation": "insert", "before": null, "after": {"identity": {"kind": "capture_dependency", "synced_row": null, "capture_key": {"canonical_key_bytes": "scope-topology-impact-key-000004"}}, "fields": [{"field": "scope_key", "type": "string", "wire_json": "\"scope-topology-impact-key-000004-scope_key\""}], "version": "scope-topology-impact-v000004", "checksum": null, "deleted": false}}
+          ]
+        }
+      },
+      "expected_outcome": {"disposition": "success"}
+    },
+    {
+      "id": "STEP-PERF-MULTI-SCOPE-PROVENANCE-004-DATA-MATERIALIZE-001",
+      "phase": "exercise",
+      "transport": "process",
+      "description": "Materialize the fourth topology sample data transaction.",
+      "native_binding": {"kind": "controller"},
+      "operation": {"contract_operation": "process", "name": "materialize-source-transaction", "payload": {"stream_generation": "stream-1", "commit_lsn": "80"}},
+      "expected_outcome": {"disposition": "success"}
+    },
+    {
+      "id": "STEP-PERF-MULTI-SCOPE-PROVENANCE-004-REBUILD-A-BEGIN-001",
+      "phase": "exercise",
+      "transport": "local",
+      "description": "Begin the fourth sample scope-A rebuild.",
+      "native_binding": {"kind": "public-call", "user_id": "user-a", "client_id": "client-a", "call_id": "multi_scope_sample_four", "stage": "synchronous", "method": "sync-now", "completion": "idle"},
+      "operation": {"contract_operation": "local", "name": "begin-rebuild", "payload": {"user_id": "user-a", "client_id": "client-a", "client_generation": 1, "schema": {"version": 1, "hash": "721d2c95e6f34cd9733feea9f5118fba391eee10d07663dad066cfc59439fa44"}, "scope_id": "scope-a", "rebuild_id": "00000000-0000-4000-8000-000000009108", "limit": 100}},
+      "expected_outcome": {"disposition": "success"}
+    },
+    {
+      "id": "STEP-PERF-MULTI-SCOPE-PROVENANCE-004-REBUILD-A-REQUEST-001",
+      "phase": "exercise",
+      "transport": "http",
+      "description": "Request the fourth sample scope-A rebuild page.",
+      "native_binding": {"kind": "public-call", "user_id": "user-a", "client_id": "client-a", "call_id": "multi_scope_sample_four", "stage": "synchronous", "method": "sync-now", "completion": "idle"},
+      "operation": {"contract_operation": "rebuild", "name": "request-page", "payload": {"user_id": "user-a", "client_id": "client-a", "client_generation": 1, "schema": {"version": 1, "hash": "721d2c95e6f34cd9733feea9f5118fba391eee10d07663dad066cfc59439fa44"}, "scope_id": "scope-a", "rebuild_id": "00000000-0000-4000-8000-000000009108", "cursor_source": "none", "limit": 100}},
+      "expected_outcome": {"disposition": "success"}
+    },
+    {
+      "id": "STEP-PERF-MULTI-SCOPE-PROVENANCE-004-REBUILD-A-APPLY-001",
+      "phase": "exercise",
+      "transport": "local",
+      "description": "Apply the fourth sample scope-A rebuild page.",
+      "native_binding": {"kind": "public-call", "user_id": "user-a", "client_id": "client-a", "call_id": "multi_scope_sample_four", "stage": "synchronous", "method": "sync-now", "completion": "idle"},
+      "operation": {"contract_operation": "local", "name": "apply-rebuild-page", "payload": {"user_id": "user-a", "client_id": "client-a", "scope_id": "scope-a", "rebuild_id": "00000000-0000-4000-8000-000000009108", "page_ordinal": 1, "request_token_source": "none"}},
+      "expected_outcome": {"disposition": "success"}
+    },
+    {
+      "id": "STEP-PERF-MULTI-SCOPE-PROVENANCE-004-REBUILD-A-FINALIZE-001",
+      "phase": "exercise",
+      "transport": "local",
+      "description": "Finalize the fourth sample scope-A rebuild.",
+      "native_binding": {"kind": "public-call", "user_id": "user-a", "client_id": "client-a", "call_id": "multi_scope_sample_four", "stage": "synchronous", "method": "sync-now", "completion": "idle"},
+      "operation": {"contract_operation": "local", "name": "finalize-rebuild", "payload": {"user_id": "user-a", "client_id": "client-a", "scope_id": "scope-a", "rebuild_id": "00000000-0000-4000-8000-000000009108"}},
+      "expected_outcome": {"disposition": "success"}
+    },
+    {
+      "id": "STEP-PERF-MULTI-SCOPE-PROVENANCE-004-REBUILD-B-BEGIN-001",
+      "phase": "exercise",
+      "transport": "local",
+      "description": "Begin the fourth sample scope-B rebuild.",
+      "native_binding": {"kind": "public-call", "user_id": "user-a", "client_id": "client-a", "call_id": "multi_scope_sample_four", "stage": "synchronous", "method": "sync-now", "completion": "idle"},
+      "operation": {"contract_operation": "local", "name": "begin-rebuild", "payload": {"user_id": "user-a", "client_id": "client-a", "client_generation": 1, "schema": {"version": 1, "hash": "721d2c95e6f34cd9733feea9f5118fba391eee10d07663dad066cfc59439fa44"}, "scope_id": "scope-b", "rebuild_id": "00000000-0000-4000-8000-000000009109", "limit": 100}},
+      "expected_outcome": {"disposition": "success"}
+    },
+    {
+      "id": "STEP-PERF-MULTI-SCOPE-PROVENANCE-004-REBUILD-B-REQUEST-001",
+      "phase": "exercise",
+      "transport": "http",
+      "description": "Request the fourth sample scope-B rebuild page.",
+      "native_binding": {"kind": "public-call", "user_id": "user-a", "client_id": "client-a", "call_id": "multi_scope_sample_four", "stage": "synchronous", "method": "sync-now", "completion": "idle"},
+      "operation": {"contract_operation": "rebuild", "name": "request-page", "payload": {"user_id": "user-a", "client_id": "client-a", "client_generation": 1, "schema": {"version": 1, "hash": "721d2c95e6f34cd9733feea9f5118fba391eee10d07663dad066cfc59439fa44"}, "scope_id": "scope-b", "rebuild_id": "00000000-0000-4000-8000-000000009109", "cursor_source": "none", "limit": 100}},
+      "expected_outcome": {"disposition": "success"}
+    },
+    {
+      "id": "STEP-PERF-MULTI-SCOPE-PROVENANCE-004-REBUILD-B-APPLY-001",
+      "phase": "exercise",
+      "transport": "local",
+      "description": "Apply the fourth sample scope-B rebuild page.",
+      "native_binding": {"kind": "public-call", "user_id": "user-a", "client_id": "client-a", "call_id": "multi_scope_sample_four", "stage": "synchronous", "method": "sync-now", "completion": "idle"},
+      "operation": {"contract_operation": "local", "name": "apply-rebuild-page", "payload": {"user_id": "user-a", "client_id": "client-a", "scope_id": "scope-b", "rebuild_id": "00000000-0000-4000-8000-000000009109", "page_ordinal": 1, "request_token_source": "none"}},
+      "expected_outcome": {"disposition": "success"}
+    },
+    {
+      "id": "STEP-PERF-MULTI-SCOPE-PROVENANCE-004-REBUILD-B-FINALIZE-001",
+      "phase": "exercise",
+      "transport": "local",
+      "description": "Finalize the fourth sample scope-B rebuild.",
+      "native_binding": {"kind": "public-call", "user_id": "user-a", "client_id": "client-a", "call_id": "multi_scope_sample_four", "stage": "synchronous", "method": "sync-now", "completion": "idle"},
+      "operation": {"contract_operation": "local", "name": "finalize-rebuild", "payload": {"user_id": "user-a", "client_id": "client-a", "scope_id": "scope-b", "rebuild_id": "00000000-0000-4000-8000-000000009109"}},
+      "expected_outcome": {"disposition": "success"}
+    },
+    {
       "id": "STEP-PERF-MULTI-SCOPE-PROVENANCE-005",
       "phase": "exercise",
       "transport": "model",
-      "description": "Execute the authored workload operation.",
+      "description": "Commit the fifth topology sample marker transaction.",
+      "native_binding": {
+        "kind": "controller"
+      },
       "measurement_sample": {
         "measurement_id": "MEAS-MULTI-SCOPE-PROVENANCE-001",
         "stratum_id": "STR-PROVENANCE-MULTIPLE-001",
@@ -895,12 +1255,13 @@
         }
       },
       "operation": {
-        "contract_operation": "workload",
-        "name": "prepare",
+        "contract_operation": "model",
+        "name": "commit-source-transaction",
         "payload": {
-          "profile": "scope_topology",
-          "scope_fanout": 2,
-          "impact_rows": 2
+          "stream_generation": "stream-1",
+          "commit_lsn": "90",
+          "end_lsn": "91",
+          "events": []
         }
       },
       "expected_outcome": {
@@ -908,10 +1269,142 @@
       }
     },
     {
+      "id": "STEP-PERF-MULTI-SCOPE-PROVENANCE-005-MARKER-MATERIALIZE-001",
+      "phase": "exercise",
+      "transport": "process",
+      "description": "Materialize the fifth topology sample marker transaction.",
+      "native_binding": {"kind": "controller"},
+      "operation": {"contract_operation": "process", "name": "materialize-source-transaction", "payload": {"stream_generation": "stream-1", "commit_lsn": "90"}},
+      "expected_outcome": {"disposition": "success"}
+    },
+    {
+      "id": "STEP-PERF-MULTI-SCOPE-PROVENANCE-005-STAGE-001",
+      "phase": "exercise",
+      "transport": "model",
+      "description": "Stage the fifth two-scope membership generation.",
+      "native_binding": {"kind": "controller"},
+      "operation": {
+        "contract_operation": "model",
+        "name": "stage-registry-membership-generation",
+        "payload": {
+          "registry_generation": 6,
+          "membership_generation": 6,
+          "batch_size": 1000,
+          "activation_boundary": {"stream_generation": "stream-1", "kind": "transaction_end", "commit_lsn": "90"},
+          "affected_scopes": ["scope-a", "scope-b"],
+          "scope_rules": [{"scope_rule_id": "items-topology-membership", "relation": "public.items", "membership_function": "synchro.scope_items", "positive_fanout_bound": 8, "evaluations": [{"row": {"canonical_identity_bytes": "synchro:v3:row-identity:v1\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0005items\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0002id\u0001\u0001\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0019scope-topology-row-000001", "table_id": "items", "primary_key_field_id": "id", "portable_type": "string", "canonical_wire_json": "\"scope-topology-row-000001\""}, "scopes": ["scope-a", "scope-b"]}, {"row": {"canonical_identity_bytes": "synchro:v3:row-identity:v1\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0005items\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0002id\u0001\u0001\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0019scope-topology-row-000002", "table_id": "items", "primary_key_field_id": "id", "portable_type": "string", "canonical_wire_json": "\"scope-topology-row-000002\""}, "scopes": ["scope-a", "scope-b"]}]}],
+          "dependency_impacts": [{"dependency_impact_id": "items-topology-impact", "relation": "public.item_impacts", "function": "synchro.impact_items", "captured_field_ids": ["scope_key"], "positive_row_bound": 1000, "affected_rows": [{"canonical_identity_bytes": "synchro:v3:row-identity:v1\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0005items\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0002id\u0001\u0001\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0019scope-topology-row-000001", "table_id": "items", "primary_key_field_id": "id", "portable_type": "string", "canonical_wire_json": "\"scope-topology-row-000001\""}, {"canonical_identity_bytes": "synchro:v3:row-identity:v1\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0005items\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0002id\u0001\u0001\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0019scope-topology-row-000002", "table_id": "items", "primary_key_field_id": "id", "portable_type": "string", "canonical_wire_json": "\"scope-topology-row-000002\""}], "requires_rebuild": false}]
+        }
+      },
+      "expected_outcome": {"disposition": "success"}
+    },
+    {
+      "id": "STEP-PERF-MULTI-SCOPE-PROVENANCE-005-ACTIVATE-001",
+      "phase": "exercise",
+      "transport": "model",
+      "description": "Activate the fifth two-scope membership generation.",
+      "native_binding": {"kind": "controller"},
+      "operation": {"contract_operation": "model", "name": "activate-registry-membership-generation", "payload": {"registry_generation": 6}},
+      "expected_outcome": {"disposition": "success"}
+    },
+    {
+      "id": "STEP-PERF-MULTI-SCOPE-PROVENANCE-005-DATA-COMMIT-001",
+      "phase": "exercise",
+      "transport": "model",
+      "description": "Commit the fifth topology sample data transaction.",
+      "native_binding": {"kind": "controller"},
+      "operation": {"contract_operation": "model", "name": "commit-source-transaction", "payload": {"stream_generation": "stream-1", "commit_lsn": "100", "end_lsn": "101", "events": [{"event_ordinal": 1, "relation": "public.item_impacts", "operation": "insert", "before": null, "after": {"identity": {"kind": "capture_dependency", "synced_row": null, "capture_key": {"canonical_key_bytes": "scope-topology-impact-key-000005"}}, "fields": [{"field": "scope_key", "type": "string", "wire_json": "\"scope-topology-impact-key-000005-scope_key\""}], "version": "scope-topology-impact-v000005", "checksum": null, "deleted": false}}]}},
+      "expected_outcome": {"disposition": "success"}
+    },
+    {
+      "id": "STEP-PERF-MULTI-SCOPE-PROVENANCE-005-DATA-MATERIALIZE-001",
+      "phase": "exercise",
+      "transport": "process",
+      "description": "Materialize the fifth topology sample data transaction.",
+      "native_binding": {"kind": "controller"},
+      "operation": {"contract_operation": "process", "name": "materialize-source-transaction", "payload": {"stream_generation": "stream-1", "commit_lsn": "100"}},
+      "expected_outcome": {"disposition": "success"}
+    },
+    {
+      "id": "STEP-PERF-MULTI-SCOPE-PROVENANCE-005-REBUILD-A-BEGIN-001",
+      "phase": "exercise",
+      "transport": "local",
+      "description": "Begin the fifth sample scope-A rebuild.",
+      "native_binding": {"kind": "public-call", "user_id": "user-a", "client_id": "client-a", "call_id": "multi_scope_sample_five", "stage": "synchronous", "method": "sync-now", "completion": "idle"},
+      "operation": {"contract_operation": "local", "name": "begin-rebuild", "payload": {"user_id": "user-a", "client_id": "client-a", "client_generation": 1, "schema": {"version": 1, "hash": "721d2c95e6f34cd9733feea9f5118fba391eee10d07663dad066cfc59439fa44"}, "scope_id": "scope-a", "rebuild_id": "00000000-0000-4000-8000-000000009110", "limit": 100}},
+      "expected_outcome": {"disposition": "success"}
+    },
+    {
+      "id": "STEP-PERF-MULTI-SCOPE-PROVENANCE-005-REBUILD-A-REQUEST-001",
+      "phase": "exercise",
+      "transport": "http",
+      "description": "Request the fifth sample scope-A rebuild page.",
+      "native_binding": {"kind": "public-call", "user_id": "user-a", "client_id": "client-a", "call_id": "multi_scope_sample_five", "stage": "synchronous", "method": "sync-now", "completion": "idle"},
+      "operation": {"contract_operation": "rebuild", "name": "request-page", "payload": {"user_id": "user-a", "client_id": "client-a", "client_generation": 1, "schema": {"version": 1, "hash": "721d2c95e6f34cd9733feea9f5118fba391eee10d07663dad066cfc59439fa44"}, "scope_id": "scope-a", "rebuild_id": "00000000-0000-4000-8000-000000009110", "cursor_source": "none", "limit": 100}},
+      "expected_outcome": {"disposition": "success"}
+    },
+    {
+      "id": "STEP-PERF-MULTI-SCOPE-PROVENANCE-005-REBUILD-A-APPLY-001",
+      "phase": "exercise",
+      "transport": "local",
+      "description": "Apply the fifth sample scope-A rebuild page.",
+      "native_binding": {"kind": "public-call", "user_id": "user-a", "client_id": "client-a", "call_id": "multi_scope_sample_five", "stage": "synchronous", "method": "sync-now", "completion": "idle"},
+      "operation": {"contract_operation": "local", "name": "apply-rebuild-page", "payload": {"user_id": "user-a", "client_id": "client-a", "scope_id": "scope-a", "rebuild_id": "00000000-0000-4000-8000-000000009110", "page_ordinal": 1, "request_token_source": "none"}},
+      "expected_outcome": {"disposition": "success"}
+    },
+    {
+      "id": "STEP-PERF-MULTI-SCOPE-PROVENANCE-005-REBUILD-A-FINALIZE-001",
+      "phase": "exercise",
+      "transport": "local",
+      "description": "Finalize the fifth sample scope-A rebuild.",
+      "native_binding": {"kind": "public-call", "user_id": "user-a", "client_id": "client-a", "call_id": "multi_scope_sample_five", "stage": "synchronous", "method": "sync-now", "completion": "idle"},
+      "operation": {"contract_operation": "local", "name": "finalize-rebuild", "payload": {"user_id": "user-a", "client_id": "client-a", "scope_id": "scope-a", "rebuild_id": "00000000-0000-4000-8000-000000009110"}},
+      "expected_outcome": {"disposition": "success"}
+    },
+    {
+      "id": "STEP-PERF-MULTI-SCOPE-PROVENANCE-005-REBUILD-B-BEGIN-001",
+      "phase": "exercise",
+      "transport": "local",
+      "description": "Begin the fifth sample scope-B rebuild.",
+      "native_binding": {"kind": "public-call", "user_id": "user-a", "client_id": "client-a", "call_id": "multi_scope_sample_five", "stage": "synchronous", "method": "sync-now", "completion": "idle"},
+      "operation": {"contract_operation": "local", "name": "begin-rebuild", "payload": {"user_id": "user-a", "client_id": "client-a", "client_generation": 1, "schema": {"version": 1, "hash": "721d2c95e6f34cd9733feea9f5118fba391eee10d07663dad066cfc59439fa44"}, "scope_id": "scope-b", "rebuild_id": "00000000-0000-4000-8000-000000009111", "limit": 100}},
+      "expected_outcome": {"disposition": "success"}
+    },
+    {
+      "id": "STEP-PERF-MULTI-SCOPE-PROVENANCE-005-REBUILD-B-REQUEST-001",
+      "phase": "exercise",
+      "transport": "http",
+      "description": "Request the fifth sample scope-B rebuild page.",
+      "native_binding": {"kind": "public-call", "user_id": "user-a", "client_id": "client-a", "call_id": "multi_scope_sample_five", "stage": "synchronous", "method": "sync-now", "completion": "idle"},
+      "operation": {"contract_operation": "rebuild", "name": "request-page", "payload": {"user_id": "user-a", "client_id": "client-a", "client_generation": 1, "schema": {"version": 1, "hash": "721d2c95e6f34cd9733feea9f5118fba391eee10d07663dad066cfc59439fa44"}, "scope_id": "scope-b", "rebuild_id": "00000000-0000-4000-8000-000000009111", "cursor_source": "none", "limit": 100}},
+      "expected_outcome": {"disposition": "success"}
+    },
+    {
+      "id": "STEP-PERF-MULTI-SCOPE-PROVENANCE-005-REBUILD-B-APPLY-001",
+      "phase": "exercise",
+      "transport": "local",
+      "description": "Apply the fifth sample scope-B rebuild page.",
+      "native_binding": {"kind": "public-call", "user_id": "user-a", "client_id": "client-a", "call_id": "multi_scope_sample_five", "stage": "synchronous", "method": "sync-now", "completion": "idle"},
+      "operation": {"contract_operation": "local", "name": "apply-rebuild-page", "payload": {"user_id": "user-a", "client_id": "client-a", "scope_id": "scope-b", "rebuild_id": "00000000-0000-4000-8000-000000009111", "page_ordinal": 1, "request_token_source": "none"}},
+      "expected_outcome": {"disposition": "success"}
+    },
+    {
+      "id": "STEP-PERF-MULTI-SCOPE-PROVENANCE-005-REBUILD-B-FINALIZE-001",
+      "phase": "exercise",
+      "transport": "local",
+      "description": "Finalize the fifth sample scope-B rebuild.",
+      "native_binding": {"kind": "public-call", "user_id": "user-a", "client_id": "client-a", "call_id": "multi_scope_sample_five", "stage": "synchronous", "method": "sync-now", "completion": "idle"},
+      "operation": {"contract_operation": "local", "name": "finalize-rebuild", "payload": {"user_id": "user-a", "client_id": "client-a", "scope_id": "scope-b", "rebuild_id": "00000000-0000-4000-8000-000000009111"}},
+      "expected_outcome": {"disposition": "success"}
+    },
+    {
       "id": "STEP-PERF-MULTI-SCOPE-PROVENANCE-006",
       "phase": "exercise",
       "transport": "model",
-      "description": "Execute the authored workload operation.",
+      "description": "Commit the sixth topology sample marker transaction.",
+      "native_binding": {
+        "kind": "controller"
+      },
       "measurement_sample": {
         "measurement_id": "MEAS-MULTI-SCOPE-PROVENANCE-001",
         "stratum_id": "STR-PROVENANCE-MULTIPLE-001",
@@ -929,12 +1422,13 @@
         }
       },
       "operation": {
-        "contract_operation": "workload",
-        "name": "prepare",
+        "contract_operation": "model",
+        "name": "commit-source-transaction",
         "payload": {
-          "profile": "scope_topology",
-          "scope_fanout": 2,
-          "impact_rows": 2
+          "stream_generation": "stream-1",
+          "commit_lsn": "110",
+          "end_lsn": "111",
+          "events": []
         }
       },
       "expected_outcome": {
@@ -942,10 +1436,148 @@
       }
     },
     {
+      "id": "STEP-PERF-MULTI-SCOPE-PROVENANCE-006-MARKER-MATERIALIZE-001",
+      "phase": "exercise",
+      "transport": "process",
+      "description": "Materialize the sixth topology sample marker transaction.",
+      "native_binding": {"kind": "controller"},
+      "operation": {"contract_operation": "process", "name": "materialize-source-transaction", "payload": {"stream_generation": "stream-1", "commit_lsn": "110"}},
+      "expected_outcome": {"disposition": "success"}
+    },
+    {
+      "id": "STEP-PERF-MULTI-SCOPE-PROVENANCE-006-STAGE-001",
+      "phase": "exercise",
+      "transport": "model",
+      "description": "Stage the sixth two-scope membership generation.",
+      "native_binding": {"kind": "controller"},
+      "operation": {
+        "contract_operation": "model",
+        "name": "stage-registry-membership-generation",
+        "payload": {
+          "registry_generation": 7,
+          "membership_generation": 7,
+          "batch_size": 1000,
+          "activation_boundary": {"stream_generation": "stream-1", "kind": "transaction_end", "commit_lsn": "110"},
+          "affected_scopes": ["scope-a", "scope-b"],
+          "scope_rules": [{"scope_rule_id": "items-topology-membership", "relation": "public.items", "membership_function": "synchro.scope_items", "positive_fanout_bound": 8, "evaluations": [{"row": {"canonical_identity_bytes": "synchro:v3:row-identity:v1\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0005items\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0002id\u0001\u0001\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0019scope-topology-row-000001", "table_id": "items", "primary_key_field_id": "id", "portable_type": "string", "canonical_wire_json": "\"scope-topology-row-000001\""}, "scopes": ["scope-a", "scope-b"]}, {"row": {"canonical_identity_bytes": "synchro:v3:row-identity:v1\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0005items\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0002id\u0001\u0001\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0019scope-topology-row-000002", "table_id": "items", "primary_key_field_id": "id", "portable_type": "string", "canonical_wire_json": "\"scope-topology-row-000002\""}, "scopes": ["scope-a", "scope-b"]}]}],
+          "dependency_impacts": [{"dependency_impact_id": "items-topology-impact", "relation": "public.item_impacts", "function": "synchro.impact_items", "captured_field_ids": ["scope_key"], "positive_row_bound": 1000, "affected_rows": [{"canonical_identity_bytes": "synchro:v3:row-identity:v1\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0005items\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0002id\u0001\u0001\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0019scope-topology-row-000001", "table_id": "items", "primary_key_field_id": "id", "portable_type": "string", "canonical_wire_json": "\"scope-topology-row-000001\""}, {"canonical_identity_bytes": "synchro:v3:row-identity:v1\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0005items\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0002id\u0001\u0001\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0019scope-topology-row-000002", "table_id": "items", "primary_key_field_id": "id", "portable_type": "string", "canonical_wire_json": "\"scope-topology-row-000002\""}], "requires_rebuild": false}]
+        }
+      },
+      "expected_outcome": {"disposition": "success"}
+    },
+    {
+      "id": "STEP-PERF-MULTI-SCOPE-PROVENANCE-006-ACTIVATE-001",
+      "phase": "exercise",
+      "transport": "model",
+      "description": "Activate the sixth two-scope membership generation.",
+      "native_binding": {"kind": "controller"},
+      "operation": {"contract_operation": "model", "name": "activate-registry-membership-generation", "payload": {"registry_generation": 7}},
+      "expected_outcome": {"disposition": "success"}
+    },
+    {
+      "id": "STEP-PERF-MULTI-SCOPE-PROVENANCE-006-DATA-COMMIT-001",
+      "phase": "exercise",
+      "transport": "model",
+      "description": "Commit the sixth topology sample data transaction.",
+      "native_binding": {"kind": "controller"},
+      "operation": {"contract_operation": "model", "name": "commit-source-transaction", "payload": {"stream_generation": "stream-1", "commit_lsn": "120", "end_lsn": "121", "events": [{"event_ordinal": 1, "relation": "public.item_impacts", "operation": "insert", "before": null, "after": {"identity": {"kind": "capture_dependency", "synced_row": null, "capture_key": {"canonical_key_bytes": "scope-topology-impact-key-000006"}}, "fields": [{"field": "scope_key", "type": "string", "wire_json": "\"scope-topology-impact-key-000006-scope_key\""}], "version": "scope-topology-impact-v000006", "checksum": null, "deleted": false}}]}},
+      "expected_outcome": {"disposition": "success"}
+    },
+    {
+      "id": "STEP-PERF-MULTI-SCOPE-PROVENANCE-006-DATA-MATERIALIZE-001",
+      "phase": "exercise",
+      "transport": "process",
+      "description": "Materialize the sixth topology sample data transaction.",
+      "native_binding": {"kind": "controller"},
+      "operation": {"contract_operation": "process", "name": "materialize-source-transaction", "payload": {"stream_generation": "stream-1", "commit_lsn": "120"}},
+      "expected_outcome": {"disposition": "success"}
+    },
+    {
+      "id": "STEP-PERF-MULTI-SCOPE-PROVENANCE-006-REBUILD-A-BEGIN-001",
+      "phase": "exercise",
+      "transport": "local",
+      "description": "Begin the sixth sample scope-A rebuild.",
+      "native_binding": {"kind": "public-call", "user_id": "user-a", "client_id": "client-a", "call_id": "multi_scope_sample_six", "stage": "synchronous", "method": "sync-now", "completion": "idle"},
+      "operation": {"contract_operation": "local", "name": "begin-rebuild", "payload": {"user_id": "user-a", "client_id": "client-a", "client_generation": 1, "schema": {"version": 1, "hash": "721d2c95e6f34cd9733feea9f5118fba391eee10d07663dad066cfc59439fa44"}, "scope_id": "scope-a", "rebuild_id": "00000000-0000-4000-8000-000000009112", "limit": 100}},
+      "expected_outcome": {"disposition": "success"}
+    },
+    {
+      "id": "STEP-PERF-MULTI-SCOPE-PROVENANCE-006-REBUILD-A-REQUEST-001",
+      "phase": "exercise",
+      "transport": "http",
+      "description": "Request the sixth sample scope-A rebuild page.",
+      "native_binding": {"kind": "public-call", "user_id": "user-a", "client_id": "client-a", "call_id": "multi_scope_sample_six", "stage": "synchronous", "method": "sync-now", "completion": "idle"},
+      "operation": {"contract_operation": "rebuild", "name": "request-page", "payload": {"user_id": "user-a", "client_id": "client-a", "client_generation": 1, "schema": {"version": 1, "hash": "721d2c95e6f34cd9733feea9f5118fba391eee10d07663dad066cfc59439fa44"}, "scope_id": "scope-a", "rebuild_id": "00000000-0000-4000-8000-000000009112", "cursor_source": "none", "limit": 100}},
+      "expected_outcome": {"disposition": "success"}
+    },
+    {
+      "id": "STEP-PERF-MULTI-SCOPE-PROVENANCE-006-REBUILD-A-APPLY-001",
+      "phase": "exercise",
+      "transport": "local",
+      "description": "Apply the sixth sample scope-A rebuild page.",
+      "native_binding": {"kind": "public-call", "user_id": "user-a", "client_id": "client-a", "call_id": "multi_scope_sample_six", "stage": "synchronous", "method": "sync-now", "completion": "idle"},
+      "operation": {"contract_operation": "local", "name": "apply-rebuild-page", "payload": {"user_id": "user-a", "client_id": "client-a", "scope_id": "scope-a", "rebuild_id": "00000000-0000-4000-8000-000000009112", "page_ordinal": 1, "request_token_source": "none"}},
+      "expected_outcome": {"disposition": "success"}
+    },
+    {
+      "id": "STEP-PERF-MULTI-SCOPE-PROVENANCE-006-REBUILD-A-FINALIZE-001",
+      "phase": "exercise",
+      "transport": "local",
+      "description": "Finalize the sixth sample scope-A rebuild.",
+      "native_binding": {"kind": "public-call", "user_id": "user-a", "client_id": "client-a", "call_id": "multi_scope_sample_six", "stage": "synchronous", "method": "sync-now", "completion": "idle"},
+      "operation": {"contract_operation": "local", "name": "finalize-rebuild", "payload": {"user_id": "user-a", "client_id": "client-a", "scope_id": "scope-a", "rebuild_id": "00000000-0000-4000-8000-000000009112"}},
+      "expected_outcome": {"disposition": "success"}
+    },
+    {
+      "id": "STEP-PERF-MULTI-SCOPE-PROVENANCE-006-REBUILD-B-BEGIN-001",
+      "phase": "exercise",
+      "transport": "local",
+      "description": "Begin the sixth sample scope-B rebuild.",
+      "native_binding": {"kind": "public-call", "user_id": "user-a", "client_id": "client-a", "call_id": "multi_scope_sample_six", "stage": "synchronous", "method": "sync-now", "completion": "idle"},
+      "operation": {"contract_operation": "local", "name": "begin-rebuild", "payload": {"user_id": "user-a", "client_id": "client-a", "client_generation": 1, "schema": {"version": 1, "hash": "721d2c95e6f34cd9733feea9f5118fba391eee10d07663dad066cfc59439fa44"}, "scope_id": "scope-b", "rebuild_id": "00000000-0000-4000-8000-000000009113", "limit": 100}},
+      "expected_outcome": {"disposition": "success"}
+    },
+    {
+      "id": "STEP-PERF-MULTI-SCOPE-PROVENANCE-006-REBUILD-B-REQUEST-001",
+      "phase": "exercise",
+      "transport": "http",
+      "description": "Request the sixth sample scope-B rebuild page.",
+      "native_binding": {"kind": "public-call", "user_id": "user-a", "client_id": "client-a", "call_id": "multi_scope_sample_six", "stage": "synchronous", "method": "sync-now", "completion": "idle"},
+      "operation": {"contract_operation": "rebuild", "name": "request-page", "payload": {"user_id": "user-a", "client_id": "client-a", "client_generation": 1, "schema": {"version": 1, "hash": "721d2c95e6f34cd9733feea9f5118fba391eee10d07663dad066cfc59439fa44"}, "scope_id": "scope-b", "rebuild_id": "00000000-0000-4000-8000-000000009113", "cursor_source": "none", "limit": 100}},
+      "expected_outcome": {"disposition": "success"}
+    },
+    {
+      "id": "STEP-PERF-MULTI-SCOPE-PROVENANCE-006-REBUILD-B-APPLY-001",
+      "phase": "exercise",
+      "transport": "local",
+      "description": "Apply the sixth sample scope-B rebuild page.",
+      "native_binding": {"kind": "public-call", "user_id": "user-a", "client_id": "client-a", "call_id": "multi_scope_sample_six", "stage": "synchronous", "method": "sync-now", "completion": "idle"},
+      "operation": {"contract_operation": "local", "name": "apply-rebuild-page", "payload": {"user_id": "user-a", "client_id": "client-a", "scope_id": "scope-b", "rebuild_id": "00000000-0000-4000-8000-000000009113", "page_ordinal": 1, "request_token_source": "none"}},
+      "expected_outcome": {"disposition": "success"}
+    },
+    {
+      "id": "STEP-PERF-MULTI-SCOPE-PROVENANCE-006-REBUILD-B-FINALIZE-001",
+      "phase": "exercise",
+      "transport": "local",
+      "description": "Finalize the sixth sample scope-B rebuild.",
+      "native_binding": {"kind": "public-call", "user_id": "user-a", "client_id": "client-a", "call_id": "multi_scope_sample_six", "stage": "synchronous", "method": "sync-now", "completion": "idle"},
+      "operation": {"contract_operation": "local", "name": "finalize-rebuild", "payload": {"user_id": "user-a", "client_id": "client-a", "scope_id": "scope-b", "rebuild_id": "00000000-0000-4000-8000-000000009113"}},
+      "expected_outcome": {"disposition": "success"}
+    },
+    {
       "id": "STEP-PERF-MULTI-SCOPE-PROVENANCE-007",
       "phase": "exercise",
       "transport": "local",
       "description": "Remove scope A while scope B continues to justify each local row.",
+      "native_binding": {
+        "kind": "public-call",
+        "user_id": "user-a",
+        "client_id": "client-a",
+        "call_id": "multi_scope_sample_six",
+        "stage": "synchronous",
+        "method": "sync-now",
+        "completion": "idle"
+      },
       "operation": {
         "contract_operation": "local",
         "name": "begin-rebuild",
@@ -967,7 +1599,56 @@
       }
     }
   ],
-  "wire_expectations": [],
+  "wire_expectations": [
+    {
+      "step_id": "STEP-PERF-MULTI-SCOPE-PROVENANCE-004-REBUILD-A-REQUEST-001",
+      "assertion_id": "ASSERT-PERF-MULTI-SCOPE-PROVENANCE-WIRE-001",
+      "contract_case": "rebuild_success",
+      "http_status": 200,
+      "error_code": null,
+      "retryable": false
+    },
+    {
+      "step_id": "STEP-PERF-MULTI-SCOPE-PROVENANCE-004-REBUILD-B-REQUEST-001",
+      "assertion_id": "ASSERT-PERF-MULTI-SCOPE-PROVENANCE-WIRE-001",
+      "contract_case": "rebuild_success",
+      "http_status": 200,
+      "error_code": null,
+      "retryable": false
+    },
+    {
+      "step_id": "STEP-PERF-MULTI-SCOPE-PROVENANCE-005-REBUILD-A-REQUEST-001",
+      "assertion_id": "ASSERT-PERF-MULTI-SCOPE-PROVENANCE-WIRE-001",
+      "contract_case": "rebuild_success",
+      "http_status": 200,
+      "error_code": null,
+      "retryable": false
+    },
+    {
+      "step_id": "STEP-PERF-MULTI-SCOPE-PROVENANCE-005-REBUILD-B-REQUEST-001",
+      "assertion_id": "ASSERT-PERF-MULTI-SCOPE-PROVENANCE-WIRE-001",
+      "contract_case": "rebuild_success",
+      "http_status": 200,
+      "error_code": null,
+      "retryable": false
+    },
+    {
+      "step_id": "STEP-PERF-MULTI-SCOPE-PROVENANCE-006-REBUILD-A-REQUEST-001",
+      "assertion_id": "ASSERT-PERF-MULTI-SCOPE-PROVENANCE-WIRE-001",
+      "contract_case": "rebuild_success",
+      "http_status": 200,
+      "error_code": null,
+      "retryable": false
+    },
+    {
+      "step_id": "STEP-PERF-MULTI-SCOPE-PROVENANCE-006-REBUILD-B-REQUEST-001",
+      "assertion_id": "ASSERT-PERF-MULTI-SCOPE-PROVENANCE-WIRE-001",
+      "contract_case": "rebuild_success",
+      "http_status": 200,
+      "error_code": null,
+      "retryable": false
+    }
+  ],
   "assertions": [
     {
       "id": "ASSERT-PERF-MULTI-SCOPE-PROVENANCE-SEMANTIC-001",
@@ -993,6 +1674,27 @@
       ]
     },
     {
+      "id": "ASSERT-PERF-MULTI-SCOPE-PROVENANCE-WIRE-001",
+      "requirement_ids": [
+        "SYNC-PROVENANCE-002"
+      ],
+      "description": "The six rebuild requests return their canonical successful wire outcomes.",
+      "expectation_ids": [
+        "EXPECT-PERF-MULTI-SCOPE-PROVENANCE-WIRE-001"
+      ],
+      "predicate": {
+        "contract_predicate": "wire-outcome",
+        "name": "canonical-wire-outcome",
+        "payload": {}
+      },
+      "oracle": {
+        "kind": "wire-contract",
+        "expected_source": "authored-model",
+        "observed_source": "system-under-test"
+      },
+      "detects_control_ids": []
+    },
+    {
       "id": "ASSERT-PERF-MULTI-SCOPE-PROVENANCE-PERFORMANCE-001",
       "requirement_ids": [
         "SYNC-PROVENANCE-002"
@@ -1014,149 +1716,189 @@
       "detects_control_ids": []
     }
   ],
-  "native_execution": {
-    "version": 1,
-    "clients": [
-      {
-        "key": "client_a",
-        "user_id": "user-a",
-        "client_id": "client-a",
-        "database_key": "db_multi_scope_provenance"
-      }
-    ],
-    "actions": [
-      {
-        "id": "NACT-MSP-001",
-        "phase": "setup",
-        "actor": "controller",
-        "command": "install-model",
-        "covers_step_ids": [],
-        "parameters": {}
+  "native_identity_aliases": [
+    {
+      "kind": "client-generation",
+      "alias": "client-generation-one",
+      "value": 1,
+      "step_ids": [
+        "STEP-PERF-MULTI-SCOPE-PROVENANCE-007"
+      ],
+      "expectation_ids": []
+    },
+    {
+      "kind": "schema",
+      "alias": "current-schema",
+      "value": {
+        "version": 1,
+        "hash": "721d2c95e6f34cd9733feea9f5118fba391eee10d07663dad066cfc59439fa44"
       },
-      {
-        "id": "NACT-MSP-008",
-        "phase": "setup",
-        "actor": "client",
-        "command": "open",
-        "covers_step_ids": [],
-        "parameters": {
-          "client_key": "client_a",
-          "database_mode": "create",
-          "initialization": "current",
-          "seed_step_id": null
-        }
-      },
-      {
-        "id": "NACT-MSP-002",
-        "phase": "exercise",
-        "actor": "controller",
-        "command": "apply-step",
-        "covers_step_ids": [
-          "STEP-PERF-MULTI-SCOPE-PROVENANCE-001"
-        ],
-        "parameters": {}
-      },
-      {
-        "id": "NACT-MSP-003",
-        "phase": "exercise",
-        "actor": "controller",
-        "command": "apply-step",
-        "covers_step_ids": [
-          "STEP-PERF-MULTI-SCOPE-PROVENANCE-002"
-        ],
-        "parameters": {}
-      },
-      {
-        "id": "NACT-MSP-004",
-        "phase": "exercise",
-        "actor": "controller",
-        "command": "apply-step",
-        "covers_step_ids": [
-          "STEP-PERF-MULTI-SCOPE-PROVENANCE-003"
-        ],
-        "parameters": {}
-      },
-      {
-        "id": "NACT-MSP-005",
-        "phase": "exercise",
-        "actor": "controller",
-        "command": "apply-step",
-        "covers_step_ids": [
-          "STEP-PERF-MULTI-SCOPE-PROVENANCE-004"
-        ],
-        "parameters": {}
-      },
-      {
-        "id": "NACT-MSP-006",
-        "phase": "exercise",
-        "actor": "controller",
-        "command": "apply-step",
-        "covers_step_ids": [
-          "STEP-PERF-MULTI-SCOPE-PROVENANCE-005"
-        ],
-        "parameters": {}
-      },
-      {
-        "id": "NACT-MSP-007",
-        "phase": "exercise",
-        "actor": "controller",
-        "command": "apply-step",
-        "covers_step_ids": [
-          "STEP-PERF-MULTI-SCOPE-PROVENANCE-006"
-        ],
-        "parameters": {}
-      },
-      {
-        "id": "NACT-MSP-010",
-        "phase": "exercise",
-        "actor": "observer",
-        "command": "await-step",
-        "covers_step_ids": [
-          "STEP-PERF-MULTI-SCOPE-PROVENANCE-007"
-        ],
-        "parameters": {
-          "client_key": "client_a"
-        }
-      },
-      {
-        "id": "NACT-MSP-011",
-        "phase": "verify",
-        "actor": "observer",
-        "command": "capture",
-        "covers_step_ids": [],
-        "parameters": {
-          "client_keys": [
-            "client_a"
-          ],
-          "sources": [
-            "application-rows",
-            "sync-status",
-            "scope-state",
-            "checkpoints",
-            "provenance",
-            "rebuild-state",
-            "request-trace",
-            "server-state"
-          ],
-          "expectation_ids": [
-            "EXPECT-PERF-MULTI-SCOPE-PROVENANCE-SEMANTIC-001",
-            "EXPECT-PERF-MULTI-SCOPE-PROVENANCE-PERFORMANCE-001"
-          ]
-        }
-      },
-      {
-        "id": "NACT-MSP-012",
-        "phase": "verify",
-        "actor": "observer",
-        "command": "measure",
-        "covers_step_ids": [],
-        "parameters": {
-          "performance_budget_ids": [],
-          "measurement_ids": [
-            "MEAS-MULTI-SCOPE-PROVENANCE-001"
-          ]
-        }
-      }
-    ]
-  }
+      "step_ids": [
+        "STEP-PERF-MULTI-SCOPE-PROVENANCE-007"
+      ],
+      "expectation_ids": []
+    },
+    {
+      "kind": "scope",
+      "alias": "scope-a",
+      "value": "scope-a",
+      "step_ids": [
+        "STEP-PERF-MULTI-SCOPE-PROVENANCE-001-STAGE-001",
+        "STEP-PERF-MULTI-SCOPE-PROVENANCE-004-REBUILD-A-BEGIN-001",
+        "STEP-PERF-MULTI-SCOPE-PROVENANCE-007"
+      ],
+      "expectation_ids": [
+        "EXPECT-PERF-MULTI-SCOPE-PROVENANCE-SEMANTIC-001"
+      ]
+    },
+    {
+      "kind": "scope",
+      "alias": "scope-b",
+      "value": "scope-b",
+      "step_ids": [
+        "STEP-PERF-MULTI-SCOPE-PROVENANCE-004-STAGE-001",
+        "STEP-PERF-MULTI-SCOPE-PROVENANCE-004-REBUILD-B-BEGIN-001"
+      ],
+      "expectation_ids": [
+        "EXPECT-PERF-MULTI-SCOPE-PROVENANCE-SEMANTIC-001"
+      ]
+    },
+    {
+      "kind": "rebuild-id",
+      "alias": "sample-four-scope-a-rebuild",
+      "value": "00000000-0000-4000-8000-000000009108",
+      "step_ids": [
+        "STEP-PERF-MULTI-SCOPE-PROVENANCE-004-REBUILD-A-BEGIN-001"
+      ],
+      "expectation_ids": []
+    },
+    {
+      "kind": "rebuild-id",
+      "alias": "sample-four-scope-b-rebuild",
+      "value": "00000000-0000-4000-8000-000000009109",
+      "step_ids": [
+        "STEP-PERF-MULTI-SCOPE-PROVENANCE-004-REBUILD-B-BEGIN-001"
+      ],
+      "expectation_ids": []
+    },
+    {
+      "kind": "rebuild-id",
+      "alias": "sample-five-scope-a-rebuild",
+      "value": "00000000-0000-4000-8000-000000009110",
+      "step_ids": [
+        "STEP-PERF-MULTI-SCOPE-PROVENANCE-005-REBUILD-A-BEGIN-001"
+      ],
+      "expectation_ids": []
+    },
+    {
+      "kind": "rebuild-id",
+      "alias": "sample-five-scope-b-rebuild",
+      "value": "00000000-0000-4000-8000-000000009111",
+      "step_ids": [
+        "STEP-PERF-MULTI-SCOPE-PROVENANCE-005-REBUILD-B-BEGIN-001"
+      ],
+      "expectation_ids": []
+    },
+    {
+      "kind": "rebuild-id",
+      "alias": "sample-six-scope-a-rebuild",
+      "value": "00000000-0000-4000-8000-000000009112",
+      "step_ids": [
+        "STEP-PERF-MULTI-SCOPE-PROVENANCE-006-REBUILD-A-BEGIN-001"
+      ],
+      "expectation_ids": []
+    },
+    {
+      "kind": "rebuild-id",
+      "alias": "sample-six-scope-b-rebuild",
+      "value": "00000000-0000-4000-8000-000000009113",
+      "step_ids": [
+        "STEP-PERF-MULTI-SCOPE-PROVENANCE-006-REBUILD-B-BEGIN-001"
+      ],
+      "expectation_ids": []
+    },
+    {
+      "kind": "rebuild-id",
+      "alias": "final-scope-a-rebuild",
+      "value": "00000000-0000-4000-8000-000000009001",
+      "step_ids": [
+        "STEP-PERF-MULTI-SCOPE-PROVENANCE-007"
+      ],
+      "expectation_ids": []
+    },
+    {
+      "kind": "table",
+      "alias": "items-table",
+      "value": "items",
+      "step_ids": [
+        "STEP-PERF-MULTI-SCOPE-PROVENANCE-001-DATA-COMMIT-001",
+        "STEP-PERF-MULTI-SCOPE-PROVENANCE-004-DATA-COMMIT-001"
+      ],
+      "expectation_ids": [
+        "EXPECT-PERF-MULTI-SCOPE-PROVENANCE-SEMANTIC-001"
+      ]
+    },
+    {
+      "kind": "primary-key",
+      "alias": "row-one-primary-key",
+      "value": "scope-topology-row-000001",
+      "step_ids": [
+        "STEP-PERF-MULTI-SCOPE-PROVENANCE-001-DATA-COMMIT-001"
+      ],
+      "expectation_ids": [
+        "EXPECT-PERF-MULTI-SCOPE-PROVENANCE-SEMANTIC-001"
+      ]
+    },
+    {
+      "kind": "primary-key",
+      "alias": "row-two-primary-key",
+      "value": "scope-topology-row-000002",
+      "step_ids": [
+        "STEP-PERF-MULTI-SCOPE-PROVENANCE-004-DATA-COMMIT-001"
+      ],
+      "expectation_ids": [
+        "EXPECT-PERF-MULTI-SCOPE-PROVENANCE-SEMANTIC-001"
+      ]
+    },
+    {
+      "kind": "row-version",
+      "alias": "row-one-version",
+      "value": "scope-topology-v000001",
+      "step_ids": [
+        "STEP-PERF-MULTI-SCOPE-PROVENANCE-001-DATA-COMMIT-001"
+      ],
+      "expectation_ids": [
+        "EXPECT-PERF-MULTI-SCOPE-PROVENANCE-SEMANTIC-001"
+      ]
+    },
+    {
+      "kind": "row-version",
+      "alias": "row-two-version",
+      "value": "scope-topology-v000004",
+      "step_ids": [
+        "STEP-PERF-MULTI-SCOPE-PROVENANCE-004-DATA-COMMIT-001"
+      ],
+      "expectation_ids": [
+        "EXPECT-PERF-MULTI-SCOPE-PROVENANCE-SEMANTIC-001"
+      ]
+    },
+    {
+      "kind": "checksum",
+      "alias": "row-one-checksum",
+      "value": "0791717cc0fc7f052783315aac2cf36fe3a6d6385c500b758dfd315ac4a5cba5",
+      "step_ids": [
+        "STEP-PERF-MULTI-SCOPE-PROVENANCE-001-DATA-COMMIT-001"
+      ],
+      "expectation_ids": []
+    },
+    {
+      "kind": "checksum",
+      "alias": "row-two-checksum",
+      "value": "8409896fdcc095176c007340dfdc7001945de04173f42901bf2fc03fcd84b9b8",
+      "step_ids": [
+        "STEP-PERF-MULTI-SCOPE-PROVENANCE-004-DATA-COMMIT-001"
+      ],
+      "expectation_ids": []
+    }
+  ]
 }
