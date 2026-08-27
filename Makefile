@@ -509,7 +509,7 @@ conformance-adapter-artifact:
 
 conformance-pg18-extension-artifact:
 	@test -n "$(PGRX_PG_CONFIG)" || (echo "PGRX_PG_CONFIG is required" >&2; exit 1)
-	@test "$$($(PGRX_PG_CONFIG) --version)" = "PostgreSQL 18.3" || (echo "PGRX_PG_CONFIG must select PostgreSQL 18.3" >&2; exit 1)
+	@test "$$($(PGRX_PG_CONFIG) --version | awk '{print $$2}')" = "18.3" || (echo "PGRX_PG_CONFIG must select PostgreSQL 18.3, found: $$($(PGRX_PG_CONFIG) --version)" >&2; exit 1)
 	@set -eu; \
 		final="$(CONFORMANCE_EXTENSION_ARTIFACT)"; \
 		parent="$$(dirname "$$final")"; \
@@ -1119,6 +1119,7 @@ lint-rust-core:
 lint-rust-pg:
 	cd extensions && cargo fmt --check -p synchro-pg
 	cd extensions && cargo clippy -p synchro-pg --features pg18 -- -D warnings
+	cd extensions && cargo clippy -p synchro-pg --features pg18,pg_test -- -D warnings
 
 lint-rust: lint-rust-core lint-rust-pg
 
