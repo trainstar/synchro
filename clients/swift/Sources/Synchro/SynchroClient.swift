@@ -212,31 +212,55 @@ public final class SynchroClient: @unchecked Sendable {
         try database.readTransaction(Self.inspectScopeRows)
     }
 
-    func inspectProvenanceMaintenanceWork() -> ProvenanceMaintenanceWorkInspection {
-        database.inspectProvenanceMaintenanceWork()
-    }
-
-    func inspectClientState() throws -> ClientStateInspection {
-        try database.stateInspectionTransaction { db, provenanceMaintenanceWork in
-            ClientStateInspection(
-                schema: try Self.inspectSchema(db),
-                scopeStates: try Self.inspectScopeStates(db),
-                scopeRows: try Self.inspectScopeRows(db),
-                rebuildAttempts: try Self.inspectRebuildAttempts(db),
-                provenanceMaintenanceWorkCursor: provenanceMaintenanceWork.cursor
-            )
+    func inspectClientStateCapture(maximumRecords: Int) throws -> ClientStateCaptureInspection {
+        guard maximumRecords >= 0 else {
+            throw SynchroError.invalidResponse(message: "inspection record limit is invalid")
         }
-    }
-
-    func inspectClientStateCounts() throws -> ClientStateCountsInspection {
-        try database.stateInspectionTransaction { db, provenanceMaintenanceWork in
+        return try database.stateInspectionTransaction { db, provenanceMaintenanceWorkCursor in
             let provenanceCount = try Self.inspectCount(
                 db,
                 sql: "SELECT COUNT(*) FROM (SELECT table_name, record_id FROM _synchro_scope_rows GROUP BY table_name, record_id)"
             )
-            return ClientStateCountsInspection(
+            let scopeStateCount = try Self.inspectCount(db, sql: "SELECT COUNT(*) FROM _synchro_scopes")
+            let scopeRowCount = try Self.inspectCount(db, sql: "SELECT COUNT(*) FROM _synchro_scope_rows")
+            let rebuildAttemptCount = try Self.inspectCount(db, sql: "SELECT COUNT(*) FROM _synchro_rebuild_attempts")
+            let rebuildReceiptCount = try Self.inspectCount(db, sql: "SELECT COUNT(*) FROM _synchro_rebuild_page_receipts")
+            let scopeStates = try Self.inspectScopeStates(db)
+            let scopeRows = try Self.inspectScopeRows(db)
+            let rebuildAttempts = try Self.inspectRebuildAttempts(db)
+            let rebuildReceipts = try Self.inspectRebuildReceipts(db)
+            let rowMetadataCount = try Self.inspectCount(db, sql: "SELECT COUNT(*) FROM _synchro_row_versions")
+            let rowMetadata = try SynchroMeta.listRowMetadata(db, limit: maximumRecords).map { metadata in
+                RowMetadataInspection(
+                    tableName: metadata.tableName,
+                    recordID: metadata.recordID,
+                    serverVersion: metadata.serverVersion,
+                    rowChecksum: metadata.rowChecksum
+                )
+            }
+            let scopeStatesTruncated = scopeStates.count > maximumRecords
+            let scopeRowsTruncated = scopeRows.count > maximumRecords
+            let rebuildAttemptsTruncated = rebuildAttempts.count > maximumRecords
+            let rebuildReceiptsTruncated = rebuildReceipts.count > maximumRecords
+            let rowMetadataTruncated = rowMetadataCount > maximumRecords
+            return ClientStateCaptureInspection(
                 schema: try Self.inspectSchema(db),
-                applicationRowCount: provenanceCount,
+                scopeStates: Array(scopeStates.prefix(maximumRecords)),
+                scopeStatesTruncated: scopeStatesTruncated,
+                scopeRows: Array(scopeRows.prefix(maximumRecords)),
+                scopeRowsTruncated: scopeRowsTruncated,
+                rebuildAttempts: Array(rebuildAttempts.prefix(maximumRecords)),
+                rebuildAttemptsTruncated: rebuildAttemptsTruncated,
+                rebuildReceipts: Array(rebuildReceipts.prefix(maximumRecords)),
+                rebuildReceiptsTruncated: rebuildReceiptsTruncated,
+                rowMetadata: rowMetadata,
+                rowMetadataTruncated: rowMetadataTruncated,
+                overflowed: scopeStatesTruncated
+                    || scopeRowsTruncated
+                    || rebuildAttemptsTruncated
+                    || rebuildReceiptsTruncated
+                    || rowMetadataTruncated,
+                applicationRowCount: try Self.inspectApplicationRowCount(db),
                 mutationLedgerCount: try Self.inspectCount(db, sql: "SELECT COUNT(*) FROM _synchro_pending_changes"),
                 mutationOutcomeCount: try Self.inspectCount(
                     db,
@@ -244,13 +268,13 @@ public final class SynchroClient: @unchecked Sendable {
                 ),
                 sealedBatchCount: try Self.inspectCount(db, sql: "SELECT COUNT(*) FROM _synchro_push_batches"),
                 rejectedMutationCount: try Self.inspectCount(db, sql: "SELECT COUNT(*) FROM _synchro_rejected_mutations"),
-                scopeStateCount: try Self.inspectCount(db, sql: "SELECT COUNT(*) FROM _synchro_scopes"),
-                scopeRowCount: try Self.inspectCount(db, sql: "SELECT COUNT(*) FROM _synchro_scope_rows"),
+                scopeStateCount: scopeStateCount,
+                scopeRowCount: scopeRowCount,
                 provenanceCount: provenanceCount,
-                rowMetadataCount: try Self.inspectCount(db, sql: "SELECT COUNT(*) FROM _synchro_row_versions"),
-                rebuildAttemptCount: try Self.inspectCount(db, sql: "SELECT COUNT(*) FROM _synchro_rebuild_attempts"),
-                rebuildReceiptCount: try Self.inspectCount(db, sql: "SELECT COUNT(*) FROM _synchro_rebuild_page_receipts"),
-                provenanceMaintenanceWorkCursor: provenanceMaintenanceWork.cursor
+                rowMetadataCount: rowMetadataCount,
+                rebuildAttemptCount: rebuildAttemptCount,
+                rebuildReceiptCount: rebuildReceiptCount,
+                provenanceMaintenanceWorkCursor: provenanceMaintenanceWorkCursor
             )
         }
     }
@@ -289,6 +313,32 @@ public final class SynchroClient: @unchecked Sendable {
             throw SynchroError.invalidResponse(message: "durable state count is invalid")
         }
         return Int(count)
+    }
+
+    private static func inspectApplicationRowCount(_ db: GRDB.Database) throws -> Int {
+        guard let encoded = try SynchroMeta.get(db, key: .localSchema),
+              let data = encoded.data(using: .utf8) else {
+            return 0
+        }
+        let tables: [LocalSchemaTable]
+        do {
+            tables = try JSONDecoder().decode([LocalSchemaTable].self, from: data)
+        } catch {
+            throw SynchroError.invalidResponse(message: "stored local schema is invalid")
+        }
+        var total = 0
+        for table in tables {
+            let count = try inspectCount(
+                db,
+                sql: "SELECT COUNT(*) FROM \(SQLiteHelpers.quoteIdentifier(table.tableName))"
+            )
+            let (next, overflow) = total.addingReportingOverflow(count)
+            guard !overflow else {
+                throw SynchroError.invalidResponse(message: "application row count is invalid")
+            }
+            total = next
+        }
+        return total
     }
 
     private static func inspectScopeStates(_ db: GRDB.Database) throws -> [ScopeStateInspection] {
@@ -342,22 +392,24 @@ public final class SynchroClient: @unchecked Sendable {
     }
 
     func inspectRebuildReceipts() throws -> [RebuildReceiptInspection] {
-        try database.readTransaction { db in
-            let receipts = try SynchroMeta.listRebuildPageReceipts(db)
-            let grouped = Dictionary(grouping: receipts) { receipt in
-                RebuildReceiptGroupKey(scopeID: receipt.scopeID, rebuildID: receipt.rebuildID)
+        try database.readTransaction(Self.inspectRebuildReceipts)
+    }
+
+    private static func inspectRebuildReceipts(_ db: GRDB.Database) throws -> [RebuildReceiptInspection] {
+        let receipts = try SynchroMeta.listRebuildPageReceipts(db)
+        let grouped = Dictionary(grouping: receipts) { receipt in
+            RebuildReceiptGroupKey(scopeID: receipt.scopeID, rebuildID: receipt.rebuildID)
+        }
+        return try grouped.keys.sorted { left, right in
+            if left.scopeID == right.scopeID {
+                return Self.utf8Less(left.rebuildID, right.rebuildID)
             }
-            return try grouped.keys.sorted { left, right in
-                if left.scopeID == right.scopeID {
-                    return Self.utf8Less(left.rebuildID, right.rebuildID)
-                }
-                return Self.utf8Less(left.scopeID, right.scopeID)
-            }.map { key in
-                try Self.inspectRebuildReceipts(
-                    db: db,
-                    receipts: grouped[key] ?? []
-                )
-            }
+            return Self.utf8Less(left.scopeID, right.scopeID)
+        }.map { key in
+            try Self.inspectRebuildReceipts(
+                db: db,
+                receipts: grouped[key] ?? []
+            )
         }
     }
 

@@ -67,8 +67,8 @@ type RowMetadata = rowMetadataRecord
 // RebuildAttempt is one captured rebuild attempt record.
 type RebuildAttempt = rebuildAttemptRecord
 
-// RebuildReceiptProof is one captured rebuild receipt proof.
-type RebuildReceiptProof = rebuildReceiptProofRecord
+// RebuildReceipt is one captured raw rebuild receipt.
+type RebuildReceipt = rebuildReceiptRecord
 
 // RetainedMutation is one captured retained mutation.
 type RetainedMutation = retainedMutation

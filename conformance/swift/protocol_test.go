@@ -35,13 +35,13 @@ func TestRunnerClientCallResultRejectsIncompleteResult(t *testing.T) {
 	}
 }
 
-func TestValidateRunnerResponseRejectsMalformedRebuildReceiptProof(t *testing.T) {
-	validProof := `"rebuild_id_fingerprint":"rebuild-fingerprint","page_count":2,"returned_record_count":2,"request_chain_valid":true,"records_in_canonical_order":true,"row_checksums_valid":true,"scope_checksum_valid":true,"final_checksum_matches_local":true`
-	for _, proof := range []string{
-		`"page_count":2,"returned_record_count":2,"request_chain_valid":true,"records_in_canonical_order":true,"row_checksums_valid":true,"scope_checksum_valid":true,"final_checksum_matches_local":true`,
-		validProof + `,"unknown":true`,
+func TestValidateRunnerResponseRejectsMalformedRebuildReceipt(t *testing.T) {
+	validReceipt := `"rebuild_id_fingerprint":"rebuild-fingerprint","page_count":2,"returned_record_count":0,"request_chain_expected":[],"request_chain_observed":[],"record_identities_hex":[],"received_row_checksums":[],"computed_row_checksums":[]`
+	for _, receipt := range []string{
+		`"page_count":2,"returned_record_count":0,"request_chain_expected":[],"request_chain_observed":[],"record_identities_hex":[],"received_row_checksums":[],"computed_row_checksums":[]`,
+		validReceipt + `,"unknown":true`,
 	} {
-		data := `{"schema_version":1,"outcome":"passed","result":{"rebuild_receipt_proofs":[{` + proof + `}],"transport_observations":{"observations":[],"overflowed":false,"sequence_checkpoint":0}},"error_code":null}`
+		data := `{"schema_version":1,"outcome":"passed","result":{"rebuild_receipts":[{` + receipt + `}],"transport_observations":{"observations":[],"overflowed":false,"sequence_checkpoint":0}},"error_code":null}`
 		if _, err := validateRunnerResponse([]byte(data)); err == nil {
 			t.Fatal("accepted malformed rebuild receipt proof")
 		}
@@ -58,6 +58,37 @@ func TestValidateRunnerResponseAcceptsPassedResult(t *testing.T) {
 	}
 	if result.PendingChangeCount == nil || *result.PendingChangeCount != 0 || len(result.ScopeStates) != 1 || len(result.ScopeRows) != 1 || result.RowMetadata == nil || len(result.RebuildAttempts) != 0 {
 		t.Fatal("runner scope inspection was not retained")
+	}
+}
+
+func TestValidateRunnerResponseDecodesAtomicCaptureFacts(t *testing.T) {
+	data := `{"schema_version":1,"outcome":"passed","result":{"status":"ready","pending_change_count":0,"application_row_count":0,"mutation_ledger_count":0,"mutation_outcome_count":0,"sealed_batch_count":0,"rejected_mutation_count":0,"scope_state_count":0,"scope_row_count":0,"provenance_count":0,"row_metadata_count":1,"rebuild_attempt_count":0,"rebuild_receipt_count":0,"application_rows":[],"retained_mutations":[],"rejected_mutations":[],"scope_states":[],"scope_rows":[],"row_metadata_records":[{"table_name":"items","record_id":"row-a","server_version":"version-a","row_checksum":null}],"rebuild_attempts":[],"rebuild_receipts":[],"scope_states_truncated":false,"scope_rows_truncated":false,"rebuild_attempts_truncated":false,"rebuild_receipts_truncated":false,"row_metadata_truncated":false,"capture_overflowed":false,"provenance_maintenance_work_cursor":0,"events":[],"transport_observations":{"observations":[],"overflowed":false,"sequence_checkpoint":0}},"error_code":null}`
+	result, err := validateRunnerResponse([]byte(data))
+	if err != nil {
+		t.Fatalf("decode atomic capture: %v", err)
+	}
+	if err := validateCaptureResult(result); err != nil {
+		t.Fatalf("validate atomic capture: %v", err)
+	}
+	if result.ScopeStatesTruncated == nil || *result.ScopeStatesTruncated || result.CaptureOverflowed == nil || *result.CaptureOverflowed || len(result.RowMetadataRecords) != 1 || result.ProvenanceMaintenanceWorkCursor == nil || *result.ProvenanceMaintenanceWorkCursor != 0 {
+		t.Fatalf("atomic capture facts were not retained: %+v", result)
+	}
+}
+
+func TestValidateRunnerResponseRejectsLegacyOrIncompleteAtomicCapture(t *testing.T) {
+	base := `{"schema_version":1,"outcome":"passed","result":{"status":"ready","pending_change_count":0,"application_row_count":0,"mutation_ledger_count":0,"mutation_outcome_count":0,"sealed_batch_count":0,"rejected_mutation_count":0,"scope_state_count":0,"scope_row_count":0,"provenance_count":0,"row_metadata_count":0,"rebuild_attempt_count":0,"rebuild_receipt_count":0,"application_rows":[],"retained_mutations":[],"rejected_mutations":[],"scope_states":[],"scope_rows":[],"row_metadata_records":[],"rebuild_attempts":[],"rebuild_receipts":[],"scope_states_truncated":false,"scope_rows_truncated":false,"rebuild_attempts_truncated":false,"rebuild_receipts_truncated":false,"row_metadata_truncated":false,"capture_overflowed":false,"provenance_maintenance_work_cursor":0,"events":[],"transport_observations":{"observations":[],"overflowed":false,"sequence_checkpoint":0}},"error_code":null}`
+	for _, data := range []string{
+		strings.Replace(base, `"capture_overflowed":false`, `"capture_overflowed":true`, 1),
+		strings.Replace(base, `,"capture_overflowed":false`, ``, 1),
+		strings.Replace(base, `"rebuild_receipts":[]`, `"rebuild_receipt_proofs":[]`, 1),
+	} {
+		result, err := validateRunnerResponse([]byte(data))
+		if err == nil {
+			err = validateCaptureResult(result)
+		}
+		if err == nil {
+			t.Fatal("accepted incomplete or inconsistent atomic capture")
+		}
 	}
 }
 

@@ -287,7 +287,7 @@ func (p *Platform) warmConnectSnapshot(ctx context.Context, client Client) (runn
 }
 
 func resolveWarmConnectIdentities(controller *blackbox.NativeController, aliases []scenarios.NativeIdentityAlias, bootstrap, warm SynchronizationResult, snapshot runnerResult) ([]blackbox.NativeIdentityResolution, error) {
-	if len(snapshot.ScopeStates) != 1 || len(snapshot.ScopeRows) != 1 || len(snapshot.RowMetadataRecords) != 1 || len(snapshot.RebuildAttempts) != 0 || len(snapshot.RebuildReceiptProofs) != 1 || snapshot.Schema == nil || len(bootstrap.transportObservations) != 3 || bootstrap.transportObservations[1].RequestFacts == nil || bootstrap.transportObservations[1].RequestFacts.ClientGeneration == nil || len(warm.transportObservations) != 2 || warm.transportObservations[0].RequestFacts == nil {
+	if len(snapshot.ScopeStates) != 1 || len(snapshot.ScopeRows) != 1 || len(snapshot.RowMetadataRecords) != 1 || len(snapshot.RebuildAttempts) != 0 || len(snapshot.RebuildReceipts) != 1 || snapshot.Schema == nil || len(bootstrap.transportObservations) != 3 || bootstrap.transportObservations[1].RequestFacts == nil || bootstrap.transportObservations[1].RequestFacts.ClientGeneration == nil || len(warm.transportObservations) != 2 || warm.transportObservations[0].RequestFacts == nil {
 		return nil, errors.New("Swift warm-connect identity state is incomplete")
 	}
 	scope := snapshot.ScopeStates[0]
@@ -423,7 +423,7 @@ func validateWarmConnectTransportIdentities(runtime map[string]json.RawMessage, 
 	if snapshot.Schema == nil || snapshot.Schema.Version != schema.Version || snapshot.Schema.Hash != schema.Hash {
 		return errors.New("Swift warm-connect schema identity differs from durable state")
 	}
-	if len(snapshot.RebuildAttempts) != 0 || len(snapshot.RebuildReceiptProofs) != 1 {
+	if len(snapshot.RebuildAttempts) != 0 || len(snapshot.RebuildReceipts) != 1 {
 		return errors.New("Swift warm-connect completed rebuild evidence is incomplete")
 	}
 	rebuild := bootstrap[1].RebuildResponseFacts
@@ -441,11 +441,27 @@ func validateWarmConnectTransportIdentities(runtime map[string]json.RawMessage, 
 	if !reflect.DeepEqual(warmPull.ScopeCursorFingerprints, []string{cursorFingerprint(*snapshot.ScopeStates[0].Cursor)}) {
 		return errors.New("Swift warm-connect durable cursor is not bound to the warm pull response")
 	}
-	proof := snapshot.RebuildReceiptProofs[0]
-	if proof.RebuildIDFingerprint != rebuildFingerprint || proof.PageCount <= 0 || proof.ReturnedRecordCount != 0 || !proof.RequestChainValid || !proof.RecordsInCanonicalOrder || !proof.RowChecksumsValid || !proof.ScopeChecksumValid {
+	receipt := snapshot.RebuildReceipts[0]
+	if receipt.RebuildIDFingerprint != rebuildFingerprint || receipt.PageCount <= 0 || receipt.ReturnedRecordCount != 0 || !reflect.DeepEqual(receipt.RequestChainExpected, receipt.RequestChainObserved) || !sortedUniqueStrings(receipt.RecordIdentitiesHex) || !reflect.DeepEqual(receipt.ReceivedRowChecksums, receipt.ComputedRowChecksums) || receipt.ComputedScopeChecksum == nil || receipt.FinalScopeChecksum == nil || *receipt.ComputedScopeChecksum != *receipt.FinalScopeChecksum {
 		return errors.New("Swift warm-connect completed rebuild evidence is invalid")
 	}
 	return nil
+}
+
+func sortedUniqueStrings(values []string) bool {
+	previous := ""
+	seen := make(map[string]struct{}, len(values))
+	for _, value := range values {
+		if value == "" || value <= previous {
+			return false
+		}
+		if _, duplicate := seen[value]; duplicate {
+			return false
+		}
+		seen[value] = struct{}{}
+		previous = value
+	}
+	return true
 }
 
 func validateWarmConnectState(expected, server scenarios.StateFacts, captures []CaptureFacts, snapshot runnerResult, applicationIdentity warmConnectApplicationIdentity, resolutions []blackbox.NativeIdentityResolution) error {
@@ -494,7 +510,7 @@ func validateWarmConnectSnapshot(expected scenarios.ClientDurabilityFact, expect
 		return errors.New("Swift warm-connect durable counts differ from the authored model")
 	}
 	if len(expected.Provenance) != 1 || len(expected.Provenance[0].Scopes) != 1 || len(expected.Checkpoints) != 1 || expected.Checkpoints[0].Checksum == nil || expected.CurrentSchema == nil ||
-		len(snapshot.ScopeStates) != 1 || snapshot.ScopeStates[0].Checksum == nil || len(snapshot.ScopeRows) != 1 || len(snapshot.RowMetadataRecords) != 1 || len(snapshot.RebuildAttempts) != 0 || len(snapshot.RebuildReceiptProofs) != 1 || snapshot.Schema == nil {
+		len(snapshot.ScopeStates) != 1 || snapshot.ScopeStates[0].Checksum == nil || len(snapshot.ScopeRows) != 1 || len(snapshot.RowMetadataRecords) != 1 || len(snapshot.RebuildAttempts) != 0 || len(snapshot.RebuildReceipts) != 1 || snapshot.Schema == nil {
 		return errors.New("Swift warm-connect durable detail is incomplete")
 	}
 	scopeChecksum, err := swiftChecksumDigest(snapshot.ScopeStates[0].Checksum)
@@ -514,7 +530,7 @@ func validateWarmConnectSnapshot(expected scenarios.ClientDurabilityFact, expect
 		return err
 	}
 	var rebuildID string
-	if json.Unmarshal(resolved["baseline-rebuild"].RuntimeValue, &rebuildID) != nil || rebuildID == "" || cursorFingerprint(rebuildID) != snapshot.RebuildReceiptProofs[0].RebuildIDFingerprint {
+	if json.Unmarshal(resolved["baseline-rebuild"].RuntimeValue, &rebuildID) != nil || rebuildID == "" || cursorFingerprint(rebuildID) != snapshot.RebuildReceipts[0].RebuildIDFingerprint {
 		return errors.New("Swift warm-connect rebuild identity differs from the authored model")
 	}
 	return nil

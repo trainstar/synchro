@@ -266,40 +266,19 @@ public struct ScopeRowInspection: Sendable, Equatable {
 }
 
 @_spi(Inspection)
-public struct ProvenanceMaintenanceWorkInspection: Sendable, Equatable {
-    public let cursor: Int64
-
-    public init(cursor: Int64) {
-        self.cursor = cursor
-    }
-}
-
-@_spi(Inspection)
-public struct ClientStateInspection: Sendable, Equatable {
+public struct ClientStateCaptureInspection: Sendable, Equatable {
     public let schema: SchemaRef?
     public let scopeStates: [ScopeStateInspection]
+    public let scopeStatesTruncated: Bool
     public let scopeRows: [ScopeRowInspection]
+    public let scopeRowsTruncated: Bool
     public let rebuildAttempts: [RebuildAttemptInspection]
-    public let provenanceMaintenanceWorkCursor: Int64
-
-    public init(
-        schema: SchemaRef?,
-        scopeStates: [ScopeStateInspection],
-        scopeRows: [ScopeRowInspection],
-        rebuildAttempts: [RebuildAttemptInspection],
-        provenanceMaintenanceWorkCursor: Int64
-    ) {
-        self.schema = schema
-        self.scopeStates = scopeStates
-        self.scopeRows = scopeRows
-        self.rebuildAttempts = rebuildAttempts
-        self.provenanceMaintenanceWorkCursor = provenanceMaintenanceWorkCursor
-    }
-}
-
-@_spi(Inspection)
-public struct ClientStateCountsInspection: Sendable, Equatable {
-    public let schema: SchemaRef?
+    public let rebuildAttemptsTruncated: Bool
+    public let rebuildReceipts: [RebuildReceiptInspection]
+    public let rebuildReceiptsTruncated: Bool
+    public let rowMetadata: [RowMetadataInspection]
+    public let rowMetadataTruncated: Bool
+    public let overflowed: Bool
     public let applicationRowCount: Int
     public let mutationLedgerCount: Int
     public let mutationOutcomeCount: Int
@@ -315,6 +294,17 @@ public struct ClientStateCountsInspection: Sendable, Equatable {
 
     public init(
         schema: SchemaRef?,
+        scopeStates: [ScopeStateInspection],
+        scopeStatesTruncated: Bool,
+        scopeRows: [ScopeRowInspection],
+        scopeRowsTruncated: Bool,
+        rebuildAttempts: [RebuildAttemptInspection],
+        rebuildAttemptsTruncated: Bool,
+        rebuildReceipts: [RebuildReceiptInspection],
+        rebuildReceiptsTruncated: Bool,
+        rowMetadata: [RowMetadataInspection],
+        rowMetadataTruncated: Bool,
+        overflowed: Bool,
         applicationRowCount: Int,
         mutationLedgerCount: Int,
         mutationOutcomeCount: Int,
@@ -329,6 +319,17 @@ public struct ClientStateCountsInspection: Sendable, Equatable {
         provenanceMaintenanceWorkCursor: Int64
     ) {
         self.schema = schema
+        self.scopeStates = scopeStates
+        self.scopeStatesTruncated = scopeStatesTruncated
+        self.scopeRows = scopeRows
+        self.scopeRowsTruncated = scopeRowsTruncated
+        self.rebuildAttempts = rebuildAttempts
+        self.rebuildAttemptsTruncated = rebuildAttemptsTruncated
+        self.rebuildReceipts = rebuildReceipts
+        self.rebuildReceiptsTruncated = rebuildReceiptsTruncated
+        self.rowMetadata = rowMetadata
+        self.rowMetadataTruncated = rowMetadataTruncated
+        self.overflowed = overflowed
         self.applicationRowCount = applicationRowCount
         self.mutationLedgerCount = mutationLedgerCount
         self.mutationOutcomeCount = mutationOutcomeCount

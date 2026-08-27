@@ -1503,12 +1503,11 @@ public class SynchroModuleImpl: NSObject {
         }
         do {
             let inspection = SynchroInspection(client: client)
-            let state = try inspection.clientState()
-            let counts = try inspection.clientStateCounts()
-            let schema: Any = state.schema.map { value in
+            let capture = try inspection.captureState(maximumRecords: 512)
+            let schema: Any = capture.schema.map { value in
                 ["version": value.version, "hash": value.hash]
             } ?? NSNull()
-            let scopeStates = state.scopeStates.map { value in
+            let scopeStates = capture.scopeStates.map { value in
                 [
                     "scope_id": value.scopeID,
                     "cursor": value.cursor ?? NSNull(),
@@ -1517,7 +1516,7 @@ public class SynchroModuleImpl: NSObject {
                     "generation": value.generation,
                 ] as [String: Any]
             }
-            let scopeRows = state.scopeRows.map { value in
+            let scopeRows = capture.scopeRows.map { value in
                 [
                     "scope_id": value.scopeID,
                     "table_name": value.tableName,
@@ -1526,7 +1525,7 @@ public class SynchroModuleImpl: NSObject {
                     "generation": value.generation,
                 ] as [String: Any]
             }
-            let attempts = state.rebuildAttempts.map { value in
+            let attempts = capture.rebuildAttempts.map { value in
                 [
                     "scope_id": value.scopeID,
                     "rebuild_id": value.rebuildID,
@@ -1543,19 +1542,25 @@ public class SynchroModuleImpl: NSObject {
                 "scope_states": scopeStates,
                 "scope_rows": scopeRows,
                 "rebuild_attempts": attempts,
-                "application_row_count": counts.applicationRowCount,
-                "mutation_ledger_count": counts.mutationLedgerCount,
-                "mutation_outcome_count": counts.mutationOutcomeCount,
-                "sealed_batch_count": counts.sealedBatchCount,
-                "rejected_mutation_count": counts.rejectedMutationCount,
-                "scope_state_count": counts.scopeStateCount,
-                "scope_row_count": counts.scopeRowCount,
-                "provenance_count": counts.provenanceCount,
-                "row_metadata_count": counts.rowMetadataCount,
-                "rebuild_attempt_count": counts.rebuildAttemptCount,
-                "rebuild_receipt_count": counts.rebuildReceiptCount,
+                "application_row_count": capture.applicationRowCount,
+                "mutation_ledger_count": capture.mutationLedgerCount,
+                "mutation_outcome_count": capture.mutationOutcomeCount,
+                "sealed_batch_count": capture.sealedBatchCount,
+                "rejected_mutation_count": capture.rejectedMutationCount,
+                "scope_state_count": capture.scopeStateCount,
+                "scope_row_count": capture.scopeRowCount,
+                "provenance_count": capture.provenanceCount,
+                "row_metadata_count": capture.rowMetadataCount,
+                "rebuild_attempt_count": capture.rebuildAttemptCount,
+                "rebuild_receipt_count": capture.rebuildReceiptCount,
+                "scope_states_truncated": capture.scopeStatesTruncated,
+                "scope_rows_truncated": capture.scopeRowsTruncated,
+                "rebuild_attempts_truncated": capture.rebuildAttemptsTruncated,
+                "rebuild_receipts_truncated": capture.rebuildReceiptsTruncated,
+                "row_metadata_truncated": capture.rowMetadataTruncated,
+                "capture_overflowed": capture.overflowed,
                 "provenance_maintenance_work_cursor": String(
-                    state.provenanceMaintenanceWorkCursor
+                    capture.provenanceMaintenanceWorkCursor
                 ),
             ]))
         } catch {

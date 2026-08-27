@@ -1422,37 +1422,44 @@ func selectorKey(selector runnerRowSelector) string {
 }
 
 func validateCaptureResult(result runnerResult) error {
-	if result.Status == nil || *result.Status == "" || result.PendingChangeCount == nil || *result.PendingChangeCount < 0 || result.ApplicationRowCount == nil || result.MutationLedgerCount == nil || result.MutationOutcomeCount == nil || result.SealedBatchCount == nil || result.RejectedMutationCount == nil || result.ScopeStateCount == nil || result.ScopeRowCount == nil || result.ProvenanceCount == nil || result.RowMetadataCount == nil || result.RebuildAttemptCount == nil || result.RebuildReceiptCount == nil || result.ProvenanceMaintenanceWorkCursor == nil || *result.ProvenanceMaintenanceWorkCursor < 0 || result.Events == nil {
+	if result.Status == nil || *result.Status == "" || result.PendingChangeCount == nil || *result.PendingChangeCount < 0 || result.ApplicationRowCount == nil || result.MutationLedgerCount == nil || result.MutationOutcomeCount == nil || result.SealedBatchCount == nil || result.RejectedMutationCount == nil || result.ScopeStateCount == nil || result.ScopeRowCount == nil || result.ProvenanceCount == nil || result.RowMetadataCount == nil || result.RebuildAttemptCount == nil || result.RebuildReceiptCount == nil || result.ProvenanceMaintenanceWorkCursor == nil || *result.ProvenanceMaintenanceWorkCursor < 0 || result.Events == nil || result.ScopeStatesTruncated == nil || result.ScopeRowsTruncated == nil || result.RebuildAttemptsTruncated == nil || result.RebuildReceiptsTruncated == nil || result.RowMetadataTruncated == nil || result.CaptureOverflowed == nil {
 		return errors.New("Swift runner capture facts are incomplete")
 	}
+	truncated := *result.ScopeStatesTruncated || *result.ScopeRowsTruncated || *result.RebuildAttemptsTruncated || *result.RebuildReceiptsTruncated || *result.RowMetadataTruncated
 	if (*result.ApplicationRowCount <= maximumRunnerRows) != (result.ApplicationRows != nil) ||
 		(*result.MutationLedgerCount <= maximumRunnerRecords) != (result.RetainedMutations != nil) ||
 		(*result.RejectedMutationCount <= maximumRunnerRecords) != (result.RejectedMutations != nil) ||
+		(*result.ScopeStateCount > maximumRunnerRecords) != *result.ScopeStatesTruncated ||
 		(*result.ScopeStateCount <= maximumRunnerRecords) != (result.ScopeStates != nil) ||
+		(*result.ScopeRowCount > maximumRunnerRecords) != *result.ScopeRowsTruncated ||
 		(*result.ScopeRowCount <= maximumRunnerRecords) != (result.ScopeRows != nil) ||
+		(*result.RowMetadataCount > maximumRunnerRecords) != *result.RowMetadataTruncated ||
 		(*result.RowMetadataCount <= maximumRunnerRecords) != (result.RowMetadataRecords != nil) ||
+		(*result.RebuildAttemptCount > maximumRunnerRecords) != *result.RebuildAttemptsTruncated ||
 		(*result.RebuildAttemptCount <= maximumRunnerRecords) != (result.RebuildAttempts != nil) ||
-		(*result.RebuildReceiptCount <= maximumRunnerRecords) != (result.RebuildReceiptProofs != nil) {
+		(*result.RebuildReceiptCount > maximumRunnerRecords) != *result.RebuildReceiptsTruncated ||
+		(*result.RebuildReceiptCount <= maximumRunnerRecords) != (result.RebuildReceipts != nil) ||
+		*result.CaptureOverflowed != truncated {
 		return errors.New("Swift runner capture detail bounds are inconsistent")
 	}
-	if len(result.ScopeStates) != boundedDetailCount(*result.ScopeStateCount, maximumRunnerRecords) || len(result.ScopeRows) != boundedDetailCount(*result.ScopeRowCount, maximumRunnerRecords) || len(result.RejectedMutations) != boundedDetailCount(*result.RejectedMutationCount, maximumRunnerRecords) || len(result.RebuildAttempts) != boundedDetailCount(*result.RebuildAttemptCount, maximumRunnerRecords) {
+	if len(result.ScopeStates) != boundedDetailCount(*result.ScopeStateCount, maximumRunnerRecords) || len(result.ScopeRows) != boundedDetailCount(*result.ScopeRowCount, maximumRunnerRecords) || len(result.RejectedMutations) != boundedDetailCount(*result.RejectedMutationCount, maximumRunnerRecords) || len(result.RebuildAttempts) != boundedDetailCount(*result.RebuildAttemptCount, maximumRunnerRecords) || len(result.RowMetadataRecords) != boundedDetailCount(*result.RowMetadataCount, maximumRunnerRecords) {
 		return errors.New("Swift runner capture counts do not match detail")
 	}
-	if result.RebuildReceiptProofs != nil {
+	if result.RebuildReceipts != nil {
 		pageCount := 0
-		seenRebuilds := make(map[string]struct{}, len(result.RebuildReceiptProofs))
-		for _, proof := range result.RebuildReceiptProofs {
-			if !validLowerHexDigest(proof.RebuildIDFingerprint) || proof.PageCount <= 0 || proof.ReturnedRecordCount < 0 || proof.PageCount > *result.RebuildReceiptCount-pageCount {
-				return errors.New("Swift runner rebuild receipt proof is invalid")
+		seenRebuilds := make(map[string]struct{}, len(result.RebuildReceipts))
+		for _, receipt := range result.RebuildReceipts {
+			if !validLowerHexDigest(receipt.RebuildIDFingerprint) || receipt.PageCount <= 0 || receipt.ReturnedRecordCount < 0 || receipt.PageCount > *result.RebuildReceiptCount-pageCount || len(receipt.RecordIdentitiesHex) != receipt.ReturnedRecordCount || len(receipt.ReceivedRowChecksums) != receipt.ReturnedRecordCount || len(receipt.ComputedRowChecksums) != receipt.ReturnedRecordCount || len(receipt.RequestChainExpected) != len(receipt.RequestChainObserved) {
+				return errors.New("Swift runner rebuild receipt is invalid")
 			}
-			if _, duplicate := seenRebuilds[proof.RebuildIDFingerprint]; duplicate {
-				return errors.New("Swift runner rebuild receipt proof is duplicated")
+			if _, duplicate := seenRebuilds[receipt.RebuildIDFingerprint]; duplicate {
+				return errors.New("Swift runner rebuild receipt is duplicated")
 			}
-			seenRebuilds[proof.RebuildIDFingerprint] = struct{}{}
-			pageCount += proof.PageCount
+			seenRebuilds[receipt.RebuildIDFingerprint] = struct{}{}
+			pageCount += receipt.PageCount
 		}
 		if pageCount != *result.RebuildReceiptCount {
-			return errors.New("Swift runner rebuild receipt count does not match proof detail")
+			return errors.New("Swift runner rebuild receipt count does not match detail")
 		}
 	}
 	seenScopes := make(map[string]struct{}, len(result.ScopeStates))
@@ -1586,21 +1593,21 @@ func clientFactsForSource(source string, client Client, result runnerResult) (*s
 }
 
 func rebuildAttemptFactCount(result runnerResult) (uint64, error) {
-	if result.RebuildAttempts == nil || result.RebuildReceiptProofs == nil {
+	if result.RebuildAttempts == nil || result.RebuildReceipts == nil {
 		return 0, errors.New("Swift rebuild attempt detail is unavailable")
 	}
-	fingerprints := make(map[string]struct{}, len(result.RebuildAttempts)+len(result.RebuildReceiptProofs))
+	fingerprints := make(map[string]struct{}, len(result.RebuildAttempts)+len(result.RebuildReceipts))
 	for _, attempt := range result.RebuildAttempts {
 		if attempt.RebuildID == "" {
 			return 0, errors.New("Swift rebuild attempt identity is invalid")
 		}
 		fingerprints[cursorFingerprint(attempt.RebuildID)] = struct{}{}
 	}
-	for _, proof := range result.RebuildReceiptProofs {
-		if !validLowerHexDigest(proof.RebuildIDFingerprint) {
+	for _, receipt := range result.RebuildReceipts {
+		if !validLowerHexDigest(receipt.RebuildIDFingerprint) {
 			return 0, errors.New("Swift rebuild receipt identity is invalid")
 		}
-		fingerprints[proof.RebuildIDFingerprint] = struct{}{}
+		fingerprints[receipt.RebuildIDFingerprint] = struct{}{}
 	}
 	return uint64(len(fingerprints)), nil
 }

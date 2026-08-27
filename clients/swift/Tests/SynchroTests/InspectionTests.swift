@@ -4,47 +4,12 @@ import XCTest
 final class InspectionTests: XCTestCase {
     private struct RollbackError: Error {}
 
-    private struct RebuildReceiptProof {
-        let rebuildIDFingerprint: String
-        let pageCount: Int
-        let returnedRecordCount: Int
-        let requestChainValid: Bool
-        let recordsInCanonicalOrder: Bool
-        let rowChecksumsValid: Bool
-        let scopeChecksumValid: Bool
-        let finalChecksumMatchesLocal: Bool
-    }
-
-    private func rebuildReceiptProof(_ value: RebuildReceiptInspection) -> RebuildReceiptProof {
-        RebuildReceiptProof(
-            rebuildIDFingerprint: value.rebuildIDFingerprint,
-            pageCount: value.pageCount,
-            returnedRecordCount: value.returnedRecordCount,
-            requestChainValid: value.requestChainExpected == value.requestChainObserved,
-            recordsInCanonicalOrder: value.recordIdentitiesHex.count == Set(value.recordIdentitiesHex).count
-                && value.recordIdentitiesHex == value.recordIdentitiesHex.sorted(),
-            rowChecksumsValid: value.receivedRowChecksums == value.computedRowChecksums,
-            scopeChecksumValid: value.computedScopeChecksum != nil
-                && value.computedScopeChecksum == value.finalScopeChecksum,
-            finalChecksumMatchesLocal: value.finalScopeChecksum != nil
-                && value.finalScopeChecksum == value.storedScopeChecksum
-                && value.finalScopeChecksum == value.localScopeChecksum
-        )
-    }
-
-    func testProvenanceMaintenanceWorkUsesSignedMaximum() {
-        XCTAssertEqual(
-            ProvenanceMaintenanceWorkInspection(cursor: Int64.max).cursor,
-            Int64.max
-        )
-    }
-
     func testProvenanceMaintenanceWorkCountsCommittedRowsAndKeepsRowCountSeparate() async throws {
         let config = try prepareClientConfig()
         let client = try SynchroClient(config: config)
         let database = try SynchroDatabase(path: config.dbPath)
 
-        XCTAssertEqual(client.inspectProvenanceMaintenanceWork().cursor, 0)
+        XCTAssertEqual(try database.stateInspectionTransaction { _, cursor in cursor }, 0)
         try database.writeTransaction { db in
             try SynchroMeta.upsertScope(
                 db,
@@ -63,7 +28,7 @@ final class InspectionTests: XCTestCase {
                 generation: 1
             )
         }
-        XCTAssertEqual(database.inspectProvenanceMaintenanceWork().cursor, 1)
+        XCTAssertEqual(try database.stateInspectionTransaction { _, cursor in cursor }, 1)
         XCTAssertEqual(try client.inspectScopeRows().count, 1)
 
         try database.writeTransaction { db in
@@ -76,7 +41,7 @@ final class InspectionTests: XCTestCase {
                 generation: 1
             )
         }
-        XCTAssertEqual(database.inspectProvenanceMaintenanceWork().cursor, 2)
+        XCTAssertEqual(try database.stateInspectionTransaction { _, cursor in cursor }, 2)
         XCTAssertEqual(try client.inspectScopeRows().count, 1)
 
         try database.writeTransaction { db in
@@ -87,7 +52,7 @@ final class InspectionTests: XCTestCase {
                 recordID: "order-a"
             )
         }
-        XCTAssertEqual(database.inspectProvenanceMaintenanceWork().cursor, 3)
+        XCTAssertEqual(try database.stateInspectionTransaction { _, cursor in cursor }, 3)
         XCTAssertEqual(try client.inspectScopeRows().count, 0)
 
         try database.close()
@@ -111,7 +76,7 @@ final class InspectionTests: XCTestCase {
             )
             throw RollbackError()
         })
-        XCTAssertEqual(database.inspectProvenanceMaintenanceWork().cursor, 0)
+        XCTAssertEqual(try database.stateInspectionTransaction { _, cursor in cursor }, 0)
         XCTAssertEqual(try client.inspectScopeRows().count, 0)
 
         try database.close()
@@ -260,7 +225,7 @@ final class InspectionTests: XCTestCase {
         removeDatabase(at: config.dbPath)
     }
 
-    func testScopeInspectionReturnsOrderedDurableState() async throws {
+    func testAtomicStateCaptureReturnsOrderedBoundedDurableState() async throws {
         let config = try prepareClientConfig()
         let client = try SynchroClient(config: config)
         let internalDatabase = try SynchroDatabase(path: config.dbPath)
@@ -327,27 +292,32 @@ final class InspectionTests: XCTestCase {
         }
         try internalDatabase.close()
 
-        let clientState = try client.inspectClientState()
-        XCTAssertEqual(clientState.schema, SchemaRef(version: 1, hash: protocolTestSchemaHash))
-        XCTAssertEqual(clientState.scopeStates.map(\.scopeID), ["scope-a", "scope-b"])
-        XCTAssertEqual(clientState.scopeRows.map(\.recordID), ["o1", "o2"])
-        XCTAssertEqual(clientState.rebuildAttempts.map(\.rebuildID), ["rebuild-a"])
-        XCTAssertEqual(clientState.provenanceMaintenanceWorkCursor, 0)
+        let inspection = SynchroInspection(client: client)
+        let capture = try inspection.captureState(maximumRecords: 1)
+        XCTAssertEqual(capture.schema, SchemaRef(version: 1, hash: protocolTestSchemaHash))
+        XCTAssertEqual(capture.scopeStates.map(\.scopeID), ["scope-a"])
+        XCTAssertEqual(capture.scopeRows.map(\.recordID), ["o1"])
+        XCTAssertEqual(capture.rebuildAttempts.map(\.rebuildID), ["rebuild-a"])
+        XCTAssertTrue(capture.scopeStatesTruncated)
+        XCTAssertTrue(capture.scopeRowsTruncated)
+        XCTAssertFalse(capture.rebuildAttemptsTruncated)
+        XCTAssertFalse(capture.rebuildReceiptsTruncated)
+        XCTAssertFalse(capture.rowMetadataTruncated)
+        XCTAssertTrue(capture.overflowed)
+        XCTAssertEqual(capture.provenanceMaintenanceWorkCursor, 0)
 
-        let counts = try client.inspectClientStateCounts()
-        XCTAssertEqual(counts.schema, clientState.schema)
-        XCTAssertEqual(counts.applicationRowCount, 2)
-        XCTAssertEqual(counts.mutationLedgerCount, 0)
-        XCTAssertEqual(counts.mutationOutcomeCount, 0)
-        XCTAssertEqual(counts.sealedBatchCount, 0)
-        XCTAssertEqual(counts.rejectedMutationCount, 0)
-        XCTAssertEqual(counts.scopeStateCount, 2)
-        XCTAssertEqual(counts.scopeRowCount, 2)
-        XCTAssertEqual(counts.provenanceCount, 2)
-        XCTAssertEqual(counts.rowMetadataCount, 1)
-        XCTAssertEqual(counts.rebuildAttemptCount, 1)
-        XCTAssertEqual(counts.rebuildReceiptCount, 0)
-        XCTAssertEqual(counts.provenanceMaintenanceWorkCursor, 0)
+        XCTAssertEqual(capture.applicationRowCount, 0)
+        XCTAssertEqual(capture.mutationLedgerCount, 0)
+        XCTAssertEqual(capture.mutationOutcomeCount, 0)
+        XCTAssertEqual(capture.sealedBatchCount, 0)
+        XCTAssertEqual(capture.rejectedMutationCount, 0)
+        XCTAssertEqual(capture.scopeStateCount, 2)
+        XCTAssertEqual(capture.scopeRowCount, 2)
+        XCTAssertEqual(capture.provenanceCount, 2)
+        XCTAssertEqual(capture.rowMetadataCount, 1)
+        XCTAssertEqual(capture.rowMetadata.map(\.recordID), ["o1"])
+        XCTAssertEqual(capture.rebuildAttemptCount, 1)
+        XCTAssertEqual(capture.rebuildReceiptCount, 0)
 
         XCTAssertEqual(try client.inspectScopeStates().map(\.scopeID), ["scope-a", "scope-b"])
         XCTAssertEqual(try client.inspectScopeRows().map(\.recordID), ["o1", "o2"])
@@ -364,22 +334,138 @@ final class InspectionTests: XCTestCase {
         removeDatabase(at: config.dbPath)
     }
 
-    func testRebuildReceiptProofAcceptsValidTwoPageReceipts() async throws {
-        let fixture = try makeRebuildReceiptFixture()
-        let proof = try XCTUnwrap(fixture.client.inspectRebuildReceipts().first.map(rebuildReceiptProof))
+    func testAtomicStateCaptureIncludesUnscopedRowMetadataAndReportsOverflow() async throws {
+        let config = try prepareClientConfig()
+        let client = try SynchroClient(config: config)
+        let database = try SynchroDatabase(path: config.dbPath)
+        try database.writeTransaction { db in
+            try SynchroMeta.upsertRowVersion(
+                db,
+                tableName: "orders",
+                recordID: "unscoped-a",
+                serverVersion: "version-a",
+                rowChecksum: nil
+            )
+            try SynchroMeta.upsertRowVersion(
+                db,
+                tableName: "orders",
+                recordID: "unscoped-b",
+                serverVersion: "version-b",
+                rowChecksum: nil
+            )
+        }
+        try database.close()
 
-        XCTAssertEqual(proof.rebuildIDFingerprint, TransportObservationCollector.cursorFingerprint("proof-rebuild"))
-        XCTAssertEqual(proof.pageCount, 2)
-        XCTAssertEqual(proof.returnedRecordCount, 3)
-        XCTAssertTrue(proof.requestChainValid)
-        XCTAssertTrue(proof.recordsInCanonicalOrder)
-        XCTAssertTrue(proof.rowChecksumsValid)
-        XCTAssertTrue(proof.scopeChecksumValid)
-        XCTAssertTrue(proof.finalChecksumMatchesLocal)
+        let inspection = SynchroInspection(client: client)
+        let bounded = try inspection.captureState(maximumRecords: 1)
+        XCTAssertEqual(bounded.scopeRows, [])
+        XCTAssertEqual(bounded.rowMetadataCount, 2)
+        XCTAssertEqual(bounded.rowMetadata.map(\.recordID), ["unscoped-a"])
+        XCTAssertTrue(bounded.rowMetadataTruncated)
+        XCTAssertTrue(bounded.overflowed)
+
+        let complete = try inspection.captureState(maximumRecords: 2)
+        XCTAssertEqual(complete.scopeRows, [])
+        XCTAssertEqual(complete.rowMetadata.map(\.recordID), ["unscoped-a", "unscoped-b"])
+        XCTAssertFalse(complete.rowMetadataTruncated)
+        XCTAssertFalse(complete.overflowed)
+
+        try await client.close()
+        removeDatabase(at: config.dbPath)
+    }
+
+    func testAtomicStateCaptureRejectsMixedCommittedGenerations() async throws {
+        let config = try prepareClientConfig()
+        let client = try SynchroClient(config: config)
+        let database = try SynchroDatabase(path: config.dbPath)
+        let inspection = SynchroInspection(client: client)
+        let writerStarted = expectation(description: "writer started")
+        let writer = Task.detached { [database] in
+            writerStarted.fulfill()
+            for generation in 1...200 {
+                try database.writeSyncLockedTransaction { db in
+                    try db.execute(sql: "DELETE FROM _synchro_rebuild_attempts")
+                    try SynchroMeta.clearAllScopeRows(db)
+                    try SynchroMeta.clearAllScopes(db)
+                    guard generation.isMultiple(of: 2) else { return }
+                    let value = Int64(generation)
+                    try SynchroMeta.upsertScope(
+                        db,
+                        scopeID: "scope",
+                        cursor: "cursor-\(generation)",
+                        checksum: "checksum-\(generation)",
+                        generation: value,
+                        localChecksum: "local-\(generation)"
+                    )
+                    try SynchroMeta.upsertScopeRow(
+                        db,
+                        scopeID: "scope",
+                        tableName: "orders",
+                        recordID: "order-\(generation)",
+                        checksum: "row-\(generation)",
+                        generation: value
+                    )
+                    try SynchroMeta.upsertRebuildAttempt(
+                        db,
+                        attempt: LocalRebuildAttempt(
+                            scopeID: "scope",
+                            rebuildID: "rebuild-\(generation)",
+                            clientGeneration: value,
+                            schemaVersion: 1,
+                            schemaHash: protocolTestSchemaHash,
+                            generation: value,
+                            cursor: "cursor-\(generation)",
+                            pageLimit: 100
+                        )
+                    )
+                }
+                await Task.yield()
+            }
+        }
+        await fulfillment(of: [writerStarted], timeout: 1)
+
+        for _ in 1...200 {
+            let capture = try inspection.captureState(maximumRecords: 1)
+            XCTAssertFalse(capture.overflowed)
+            XCTAssertEqual(capture.scopeStateCount, capture.scopeStates.count)
+            XCTAssertEqual(capture.scopeRowCount, capture.scopeRows.count)
+            XCTAssertEqual(capture.rebuildAttemptCount, capture.rebuildAttempts.count)
+            if let scope = capture.scopeStates.first {
+                let row = try XCTUnwrap(capture.scopeRows.first)
+                let attempt = try XCTUnwrap(capture.rebuildAttempts.first)
+                XCTAssertEqual(scope.generation, row.generation)
+                XCTAssertEqual(scope.generation, attempt.generation)
+                XCTAssertEqual(scope.cursor, row.recordID.replacingOccurrences(of: "order-", with: "cursor-"))
+                XCTAssertEqual(scope.cursor, attempt.cursor)
+            }
+            await Task.yield()
+        }
+        try await writer.value
+
+        try database.close()
+        try await client.close()
+        removeDatabase(at: config.dbPath)
+    }
+
+    func testRebuildReceiptStructuralFactsForValidTwoPageReceipts() async throws {
+        let fixture = try makeRebuildReceiptFixture()
+        let receipt = try XCTUnwrap(fixture.client.inspectRebuildReceipts().first)
+
+        XCTAssertEqual(receipt.rebuildIDFingerprint, TransportObservationCollector.cursorFingerprint("proof-rebuild"))
+        XCTAssertEqual(receipt.pageCount, 2)
+        XCTAssertEqual(receipt.returnedRecordCount, 3)
+        XCTAssertEqual(receipt.requestChainExpected, receipt.requestChainObserved)
+        XCTAssertEqual(receipt.recordIdentitiesHex, receipt.recordIdentitiesHex.sorted())
+        XCTAssertEqual(receipt.recordIdentitiesHex.count, Set(receipt.recordIdentitiesHex).count)
+        XCTAssertEqual(receipt.receivedRowChecksums, receipt.computedRowChecksums)
+        XCTAssertNotNil(receipt.computedScopeChecksum)
+        XCTAssertEqual(receipt.computedScopeChecksum, receipt.finalScopeChecksum)
+        XCTAssertEqual(receipt.finalScopeChecksum, receipt.storedScopeChecksum)
+        XCTAssertEqual(receipt.finalScopeChecksum, receipt.localScopeChecksum)
         try await closeRebuildReceiptFixture(fixture)
     }
 
-    func testRebuildReceiptProofAcceptsExplicitNullWireMembers() async throws {
+    func testRebuildReceiptStructuralFactsAcceptExplicitNullWireMembers() async throws {
         let fixture = try makeRebuildReceiptFixture()
         try updateReceiptJSON(fixture.database, column: "request_json", requestCursor: nil) {
             $0["cursor"] = NSNull()
@@ -392,15 +478,17 @@ final class InspectionTests: XCTestCase {
             $0["cursor"] = NSNull()
         }
 
-        let proof = try XCTUnwrap(fixture.client.inspectRebuildReceipts().first.map(rebuildReceiptProof))
-        XCTAssertTrue(proof.requestChainValid)
-        XCTAssertTrue(proof.rowChecksumsValid)
-        XCTAssertTrue(proof.scopeChecksumValid)
-        XCTAssertTrue(proof.finalChecksumMatchesLocal)
+        let receipt = try XCTUnwrap(fixture.client.inspectRebuildReceipts().first)
+        XCTAssertEqual(receipt.requestChainExpected, receipt.requestChainObserved)
+        XCTAssertEqual(receipt.receivedRowChecksums, receipt.computedRowChecksums)
+        XCTAssertNotNil(receipt.computedScopeChecksum)
+        XCTAssertEqual(receipt.computedScopeChecksum, receipt.finalScopeChecksum)
+        XCTAssertEqual(receipt.finalScopeChecksum, receipt.storedScopeChecksum)
+        XCTAssertEqual(receipt.finalScopeChecksum, receipt.localScopeChecksum)
         try await closeRebuildReceiptFixture(fixture)
     }
 
-    func testRebuildReceiptProofRejectsUnknownWireMember() async throws {
+    func testRebuildReceiptStructuralFactsRejectUnknownWireMember() async throws {
         let fixture = try makeRebuildReceiptFixture()
         try updateReceiptJSON(fixture.database, column: "response_json", requestCursor: nil) {
             $0["unexpected"] = true
@@ -409,17 +497,17 @@ final class InspectionTests: XCTestCase {
         try await closeRebuildReceiptFixture(fixture)
     }
 
-    func testRebuildReceiptProofControlsForgedChecksums() async throws {
+    func testRebuildReceiptStructuralFactsControlForgedChecksums() async throws {
         do {
             let fixture = try makeRebuildReceiptFixture()
             try updateReceipt(fixture.database, requestCursor: nil) { response in
                 response.records[0].rowChecksum.digest = String(repeating: "f", count: 64)
             }
-            let proof = try XCTUnwrap(fixture.client.inspectRebuildReceipts().first.map(rebuildReceiptProof))
-            XCTAssertTrue(proof.requestChainValid)
-            XCTAssertTrue(proof.recordsInCanonicalOrder)
-            XCTAssertFalse(proof.rowChecksumsValid)
-            XCTAssertTrue(proof.scopeChecksumValid)
+            let receipt = try XCTUnwrap(fixture.client.inspectRebuildReceipts().first)
+            XCTAssertEqual(receipt.requestChainExpected, receipt.requestChainObserved)
+            XCTAssertEqual(receipt.recordIdentitiesHex, receipt.recordIdentitiesHex.sorted())
+            XCTAssertNotEqual(receipt.receivedRowChecksums, receipt.computedRowChecksums)
+            XCTAssertEqual(receipt.computedScopeChecksum, receipt.finalScopeChecksum)
             try await closeRebuildReceiptFixture(fixture)
         }
         do {
@@ -438,25 +526,25 @@ final class InspectionTests: XCTestCase {
                     )), "proof-scope", "proof-rebuild", "page-2"]
                 )
             }
-            let proof = try XCTUnwrap(fixture.client.inspectRebuildReceipts().first.map(rebuildReceiptProof))
-            XCTAssertTrue(proof.requestChainValid)
-            XCTAssertTrue(proof.rowChecksumsValid)
-            XCTAssertFalse(proof.scopeChecksumValid)
-            XCTAssertFalse(proof.finalChecksumMatchesLocal)
+            let receipt = try XCTUnwrap(fixture.client.inspectRebuildReceipts().first)
+            XCTAssertEqual(receipt.requestChainExpected, receipt.requestChainObserved)
+            XCTAssertEqual(receipt.receivedRowChecksums, receipt.computedRowChecksums)
+            XCTAssertNotEqual(receipt.computedScopeChecksum, receipt.finalScopeChecksum)
+            XCTAssertNotEqual(receipt.finalScopeChecksum, receipt.storedScopeChecksum)
             try await closeRebuildReceiptFixture(fixture)
         }
     }
 
-    func testRebuildReceiptProofControlsOrderAndCursorChain() async throws {
+    func testRebuildReceiptStructuralFactsControlOrderAndCursorChain() async throws {
         do {
             let fixture = try makeRebuildReceiptFixture()
             try updateReceipt(fixture.database, requestCursor: nil) { response in
                 response.records.reverse()
             }
-            let proof = try XCTUnwrap(fixture.client.inspectRebuildReceipts().first.map(rebuildReceiptProof))
-            XCTAssertTrue(proof.requestChainValid)
-            XCTAssertFalse(proof.recordsInCanonicalOrder)
-            XCTAssertTrue(proof.rowChecksumsValid)
+            let receipt = try XCTUnwrap(fixture.client.inspectRebuildReceipts().first)
+            XCTAssertEqual(receipt.requestChainExpected, receipt.requestChainObserved)
+            XCTAssertNotEqual(receipt.recordIdentitiesHex, receipt.recordIdentitiesHex.sorted())
+            XCTAssertEqual(receipt.receivedRowChecksums, receipt.computedRowChecksums)
             try await closeRebuildReceiptFixture(fixture)
         }
         do {
@@ -464,14 +552,14 @@ final class InspectionTests: XCTestCase {
             try updateReceipt(fixture.database, requestCursor: nil) { response in
                 response.cursor = "unconsumed"
             }
-            let proof = try XCTUnwrap(fixture.client.inspectRebuildReceipts().first.map(rebuildReceiptProof))
-            XCTAssertFalse(proof.requestChainValid)
-            XCTAssertTrue(proof.rowChecksumsValid)
+            let receipt = try XCTUnwrap(fixture.client.inspectRebuildReceipts().first)
+            XCTAssertNotEqual(receipt.requestChainExpected, receipt.requestChainObserved)
+            XCTAssertEqual(receipt.receivedRowChecksums, receipt.computedRowChecksums)
             try await closeRebuildReceiptFixture(fixture)
         }
     }
 
-    func testRebuildReceiptProofControlsExtraUnconsumedReceipt() async throws {
+    func testRebuildReceiptStructuralFactsControlExtraUnconsumedReceipt() async throws {
         let fixture = try makeRebuildReceiptFixture()
         let request = RebuildRequest(
             clientID: "inspection-device",
@@ -502,10 +590,10 @@ final class InspectionTests: XCTestCase {
                 finalChecksumJSON: nil
             )
         }
-        let proof = try XCTUnwrap(fixture.client.inspectRebuildReceipts().first.map(rebuildReceiptProof))
-        XCTAssertEqual(proof.pageCount, 3)
-        XCTAssertFalse(proof.requestChainValid)
-        XCTAssertEqual(proof.returnedRecordCount, 3)
+        let receipt = try XCTUnwrap(fixture.client.inspectRebuildReceipts().first)
+        XCTAssertEqual(receipt.pageCount, 3)
+        XCTAssertNotEqual(receipt.requestChainExpected, receipt.requestChainObserved)
+        XCTAssertEqual(receipt.returnedRecordCount, 3)
         try await closeRebuildReceiptFixture(fixture)
     }
 

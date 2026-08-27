@@ -18,16 +18,8 @@ public struct SynchroInspection: Sendable {
         try client.inspectScopeRows()
     }
 
-    public func provenanceMaintenanceWork() -> ProvenanceMaintenanceWorkInspection {
-        client.inspectProvenanceMaintenanceWork()
-    }
-
-    public func clientState() throws -> ClientStateInspection {
-        try client.inspectClientState()
-    }
-
-    public func clientStateCounts() throws -> ClientStateCountsInspection {
-        try client.inspectClientStateCounts()
+    public func captureState(maximumRecords: Int) throws -> ClientStateCaptureInspection {
+        try client.inspectClientStateCapture(maximumRecords: maximumRecords)
     }
 
     public func rowMetadata(tableName: String, recordID: String) throws -> RowMetadataInspection? {

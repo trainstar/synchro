@@ -62,10 +62,10 @@ private final class ProvenanceMaintenanceWorkObserver: TransactionObserver, @unc
         lock.unlock()
     }
 
-    func inspection() -> ProvenanceMaintenanceWorkInspection {
+    func cursor() -> Int64 {
         lock.lock()
         defer { lock.unlock() }
-        return ProvenanceMaintenanceWorkInspection(cursor: committedCursor)
+        return committedCursor
     }
 }
 
@@ -83,6 +83,7 @@ final class SynchroDatabase: @unchecked Sendable {
         self.provenanceMaintenanceWorkObserver = provenanceMaintenanceWorkObserver
         var config = Configuration()
         config.journalMode = .wal
+        config.busyMode = .timeout(5)
         config.prepareDatabase { database in
             database.add(
                 transactionObserver: provenanceMaintenanceWorkObserver,
@@ -155,15 +156,11 @@ final class SynchroDatabase: @unchecked Sendable {
         return result
     }
 
-    func inspectProvenanceMaintenanceWork() -> ProvenanceMaintenanceWorkInspection {
-        provenanceMaintenanceWorkObserver.inspection()
-    }
-
     func stateInspectionTransaction<T>(
-        _ block: (GRDB.Database, ProvenanceMaintenanceWorkInspection) throws -> T
+        _ block: (GRDB.Database, Int64) throws -> T
     ) throws -> T {
         try dbPool.write { db in
-            try block(db, provenanceMaintenanceWorkObserver.inspection())
+            try block(db, provenanceMaintenanceWorkObserver.cursor())
         }
     }
 

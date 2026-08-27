@@ -624,6 +624,32 @@ enum SynchroMeta {
         )
     }
 
+    static func listRowMetadata(_ db: GRDB.Database, limit: Int) throws -> [LocalRowMetadata] {
+        let rows = try Row.fetchAll(
+            db,
+            sql: """
+                SELECT table_name, record_id, server_version, row_checksum
+                FROM _synchro_row_versions
+                ORDER BY table_name, record_id
+                LIMIT ?
+                """,
+            arguments: [limit]
+        )
+        return try rows.map { row in
+            guard let tableName: String = row["table_name"],
+                  let recordID: String = row["record_id"],
+                  let serverVersion: String = row["server_version"] else {
+                throw SynchroError.invalidResponse(message: "row metadata is incomplete")
+            }
+            return LocalRowMetadata(
+                tableName: tableName,
+                recordID: recordID,
+                serverVersion: serverVersion,
+                rowChecksum: row["row_checksum"]
+            )
+        }
+    }
+
     static func getSeedReceipts(_ db: GRDB.Database) throws -> [String: String] {
         let rows = try Row.fetchAll(db, sql: "SELECT scope_id, receipt FROM _synchro_seed_receipts ORDER BY scope_id")
         return Dictionary(uniqueKeysWithValues: rows.compactMap { row in

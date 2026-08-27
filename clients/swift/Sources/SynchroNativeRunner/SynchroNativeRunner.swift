@@ -327,7 +327,13 @@ private struct RunnerResult: Encodable {
     var rowMetadata: RowMetadataRecord? = nil
     var rowMetadataRecords: [RowMetadataRecord]? = nil
     var rebuildAttempts: [RebuildAttemptRecord]? = nil
-    var rebuildReceiptProofs: [RebuildReceiptProofRecord]? = nil
+    var rebuildReceipts: [RebuildReceiptRecord]? = nil
+    var scopeStatesTruncated: Bool? = nil
+    var scopeRowsTruncated: Bool? = nil
+    var rebuildAttemptsTruncated: Bool? = nil
+    var rebuildReceiptsTruncated: Bool? = nil
+    var rowMetadataTruncated: Bool? = nil
+    var captureOverflowed: Bool? = nil
     var provenanceMaintenanceWorkCursor: Int64? = nil
     var events: [EventRecord]? = nil
     var failure: SyncFailure? = nil
@@ -361,7 +367,13 @@ private struct RunnerResult: Encodable {
         case rowMetadata = "row_metadata"
         case rowMetadataRecords = "row_metadata_records"
         case rebuildAttempts = "rebuild_attempts"
-        case rebuildReceiptProofs = "rebuild_receipt_proofs"
+        case rebuildReceipts = "rebuild_receipts"
+        case scopeStatesTruncated = "scope_states_truncated"
+        case scopeRowsTruncated = "scope_rows_truncated"
+        case rebuildAttemptsTruncated = "rebuild_attempts_truncated"
+        case rebuildReceiptsTruncated = "rebuild_receipts_truncated"
+        case rowMetadataTruncated = "row_metadata_truncated"
+        case captureOverflowed = "capture_overflowed"
         case provenanceMaintenanceWorkCursor = "provenance_maintenance_work_cursor"
         case events
         case failure
@@ -481,40 +493,48 @@ private func transportFailureFacts(
     }
 }
 
-private struct RebuildReceiptProofRecord: Encodable {
+private struct RebuildReceiptRecord: Encodable {
     let rebuildIDFingerprint: String
     let pageCount: Int
     let returnedRecordCount: Int
-    let requestChainValid: Bool
-    let recordsInCanonicalOrder: Bool
-    let rowChecksumsValid: Bool
-    let scopeChecksumValid: Bool
-    let finalChecksumMatchesLocal: Bool
+    let requestChainExpected: [String]
+    let requestChainObserved: [String]
+    let recordIdentitiesHex: [String]
+    let receivedRowChecksums: [String]
+    let computedRowChecksums: [String]
+    let computedScopeChecksum: String?
+    let finalScopeChecksum: String?
+    let storedScopeChecksum: String?
+    let localScopeChecksum: String?
 
     enum CodingKeys: String, CodingKey {
         case rebuildIDFingerprint = "rebuild_id_fingerprint"
         case pageCount = "page_count"
         case returnedRecordCount = "returned_record_count"
-        case requestChainValid = "request_chain_valid"
-        case recordsInCanonicalOrder = "records_in_canonical_order"
-        case rowChecksumsValid = "row_checksums_valid"
-        case scopeChecksumValid = "scope_checksum_valid"
-        case finalChecksumMatchesLocal = "final_checksum_matches_local"
+        case requestChainExpected = "request_chain_expected"
+        case requestChainObserved = "request_chain_observed"
+        case recordIdentitiesHex = "record_identities_hex"
+        case receivedRowChecksums = "received_row_checksums"
+        case computedRowChecksums = "computed_row_checksums"
+        case computedScopeChecksum = "computed_scope_checksum"
+        case finalScopeChecksum = "final_scope_checksum"
+        case storedScopeChecksum = "stored_scope_checksum"
+        case localScopeChecksum = "local_scope_checksum"
     }
 
     init(_ receipt: RebuildReceiptInspection) {
         rebuildIDFingerprint = receipt.rebuildIDFingerprint
         pageCount = receipt.pageCount
         returnedRecordCount = receipt.returnedRecordCount
-        requestChainValid = receipt.requestChainExpected == receipt.requestChainObserved
-        recordsInCanonicalOrder = receipt.recordIdentitiesHex.count == Set(receipt.recordIdentitiesHex).count
-            && receipt.recordIdentitiesHex == receipt.recordIdentitiesHex.sorted()
-        rowChecksumsValid = receipt.receivedRowChecksums == receipt.computedRowChecksums
-        scopeChecksumValid = receipt.computedScopeChecksum != nil
-            && receipt.computedScopeChecksum == receipt.finalScopeChecksum
-        finalChecksumMatchesLocal = receipt.finalScopeChecksum != nil
-            && receipt.finalScopeChecksum == receipt.storedScopeChecksum
-            && receipt.finalScopeChecksum == receipt.localScopeChecksum
+        requestChainExpected = receipt.requestChainExpected
+        requestChainObserved = receipt.requestChainObserved
+        recordIdentitiesHex = receipt.recordIdentitiesHex
+        receivedRowChecksums = receipt.receivedRowChecksums
+        computedRowChecksums = receipt.computedRowChecksums
+        computedScopeChecksum = receipt.computedScopeChecksum
+        finalScopeChecksum = receipt.finalScopeChecksum
+        storedScopeChecksum = receipt.storedScopeChecksum
+        localScopeChecksum = receipt.localScopeChecksum
     }
 }
 
@@ -1063,11 +1083,12 @@ private final class Runner: @unchecked Sendable {
               command.rowSelectors.map({ $0.count <= Self.maximumSelectors }) ?? true else {
             throw RunnerError.invalidCommand
         }
-        let counts = try inspection.clientStateCounts()
-        let scopeStates: [ScopeStateInspection]? = counts.scopeStateCount <= maximumBoundedRecords ? try inspection.scopeStates() : nil
-        let scopeRows: [ScopeRowInspection]? = counts.scopeRowCount <= maximumBoundedRecords ? try inspection.scopeRows() : nil
-        let rebuildAttempts: [RebuildAttemptInspection]? = counts.rebuildAttemptCount <= maximumBoundedRecords ? try inspection.rebuildAttempts() : nil
-        let rebuildReceipts: [RebuildReceiptInspection]? = counts.rebuildReceiptCount <= maximumBoundedRecords ? try inspection.rebuildReceipts() : nil
+        let capture = try inspection.captureState(maximumRecords: maximumBoundedRecords)
+        let scopeStates = capture.scopeStatesTruncated ? nil : capture.scopeStates
+        let scopeRows = capture.scopeRowsTruncated ? nil : capture.scopeRows
+        let rebuildAttempts = capture.rebuildAttemptsTruncated ? nil : capture.rebuildAttempts
+        let rebuildReceipts = capture.rebuildReceiptsTruncated ? nil : capture.rebuildReceipts
+        let counts = capture
         let retainedMutations: [RetainedMutation]? = counts.mutationLedgerCount <= maximumBoundedRecords ? try retainedMutationRecords(client.inspectRetainedMutations()) : nil
         let rejectedMutations: [RetainedRejection]? = counts.rejectedMutationCount <= maximumBoundedRecords ? try bounded(
             client.inspectRejectedMutations().map(RetainedRejection.init)
@@ -1115,21 +1136,9 @@ private final class Runner: @unchecked Sendable {
                 }
             }
         }
-        var metadataRecords: [RowMetadataRecord] = []
-        var metadataKeys = Set<String>()
-        for row in scopeRows ?? [] {
-            let key = "\(row.tableName)\u{0}\(row.recordID)"
-            if !metadataKeys.insert(key).inserted {
-                continue
-            }
-            guard let metadata = try inspection.rowMetadata(
-                tableName: row.tableName,
-                recordID: row.recordID
-            ) else {
-                throw RunnerError.captureInspection
-            }
-            metadataRecords.append(RowMetadataRecord(metadata))
-        }
+        let metadataRecords = counts.rowMetadataTruncated
+            ? nil
+            : counts.rowMetadata.map(RowMetadataRecord.init)
         guard capturedApplicationRows.count <= Self.maximumRows else {
             throw RunnerError.outputLimit
         }
@@ -1137,7 +1146,7 @@ private final class Runner: @unchecked Sendable {
             let scopeStateRecords: [ScopeStateRecord]? = try scopeStates.map { try bounded($0.map(ScopeStateRecord.init)) }
             let scopeRowRecords: [ScopeRowRecord]? = try scopeRows.map { try bounded($0.map(ScopeRowRecord.init)) }
             let rebuildAttemptRecords: [RebuildAttemptRecord]? = try rebuildAttempts.map { try bounded($0.map(RebuildAttemptRecord.init)) }
-            let rebuildReceiptRecords: [RebuildReceiptProofRecord]? = try rebuildReceipts.map { try bounded($0.map(RebuildReceiptProofRecord.init)) }
+            let rebuildReceiptRecords: [RebuildReceiptRecord]? = try rebuildReceipts.map { try bounded($0.map(RebuildReceiptRecord.init)) }
             return RunnerResult(
                 status: client.getSyncStatus().rawValue,
                 pendingChangeCount: try client.pendingChangeCount(),
@@ -1158,10 +1167,16 @@ private final class Runner: @unchecked Sendable {
                 rejectedMutations: rejectedMutations,
                 scopeStates: scopeStateRecords,
                 scopeRows: scopeRowRecords,
-                rowMetadata: metadataRecords.first,
-                rowMetadataRecords: counts.rowMetadataCount <= maximumBoundedRecords ? try bounded(metadataRecords) : nil,
+                rowMetadata: metadataRecords?.first,
+                rowMetadataRecords: metadataRecords,
                 rebuildAttempts: rebuildAttemptRecords,
-                rebuildReceiptProofs: rebuildReceiptRecords,
+                rebuildReceipts: rebuildReceiptRecords,
+                scopeStatesTruncated: counts.scopeStatesTruncated,
+                scopeRowsTruncated: counts.scopeRowsTruncated,
+                rebuildAttemptsTruncated: counts.rebuildAttemptsTruncated,
+                rebuildReceiptsTruncated: counts.rebuildReceiptsTruncated,
+                rowMetadataTruncated: counts.rowMetadataTruncated,
+                captureOverflowed: counts.overflowed,
                 provenanceMaintenanceWorkCursor: counts.provenanceMaintenanceWorkCursor,
                 events: events.snapshot(),
                 failure: try client.getBlockingFailure()

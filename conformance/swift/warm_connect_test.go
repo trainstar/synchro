@@ -62,21 +62,23 @@ func TestWarmConnectTransportRequiresCompletedRebuildReceiptProof(t *testing.T) 
 		"baseline-rebuild":      json.RawMessage(`"` + rebuildID + `"`),
 		"current-schema":        json.RawMessage(`{"version":1,"hash":"` + schemaHash + `"}`),
 	}
-	validProof := rebuildReceiptProofRecord{
-		RebuildIDFingerprint:      rebuildFingerprint,
-		PageCount:                 1,
-		ReturnedRecordCount:       0,
-		RequestChainValid:         true,
-		RecordsInCanonicalOrder:   true,
-		RowChecksumsValid:         true,
-		ScopeChecksumValid:        true,
-		FinalChecksumMatchesLocal: false,
+	validReceipt := rebuildReceiptRecord{
+		RebuildIDFingerprint:  rebuildFingerprint,
+		PageCount:             1,
+		ReturnedRecordCount:   0,
+		RequestChainExpected:  []string{"final"},
+		RequestChainObserved:  []string{"final"},
+		RecordIdentitiesHex:   []string{},
+		ReceivedRowChecksums:  []string{},
+		ComputedRowChecksums:  []string{},
+		ComputedScopeChecksum: pointerString("scope-checksum"),
+		FinalScopeChecksum:    pointerString("scope-checksum"),
 	}
 	validSnapshot := runnerResult{
-		Schema:               &schemaRef{Version: 1, Hash: schemaHash},
-		ScopeStates:          []scopeStateRecord{{Cursor: &durableCursor}},
-		RebuildAttempts:      []rebuildAttemptRecord{},
-		RebuildReceiptProofs: []rebuildReceiptProofRecord{validProof},
+		Schema:          &schemaRef{Version: 1, Hash: schemaHash},
+		ScopeStates:     []scopeStateRecord{{Cursor: &durableCursor}},
+		RebuildAttempts: []rebuildAttemptRecord{},
+		RebuildReceipts: []rebuildReceiptRecord{validReceipt},
 	}
 	if err := validateWarmConnectTransportIdentities(runtime, bootstrap, warm, validSnapshot); err != nil {
 		t.Fatalf("valid completed rebuild evidence was rejected: %v", err)
@@ -132,10 +134,10 @@ func TestWarmConnectTransportRequiresCompletedRebuildReceiptProof(t *testing.T) 
 		{
 			name: "active attempt remains",
 			snapshot: runnerResult{
-				Schema:               validSnapshot.Schema,
-				ScopeStates:          validSnapshot.ScopeStates,
-				RebuildAttempts:      []rebuildAttemptRecord{{RebuildID: rebuildID}},
-				RebuildReceiptProofs: validSnapshot.RebuildReceiptProofs,
+				Schema:          validSnapshot.Schema,
+				ScopeStates:     validSnapshot.ScopeStates,
+				RebuildAttempts: []rebuildAttemptRecord{{RebuildID: rebuildID}},
+				RebuildReceipts: validSnapshot.RebuildReceipts,
 			},
 		},
 		{
@@ -144,15 +146,7 @@ func TestWarmConnectTransportRequiresCompletedRebuildReceiptProof(t *testing.T) 
 				Schema:          validSnapshot.Schema,
 				ScopeStates:     validSnapshot.ScopeStates,
 				RebuildAttempts: []rebuildAttemptRecord{},
-				RebuildReceiptProofs: []rebuildReceiptProofRecord{{
-					RebuildIDFingerprint:      cursorFingerprint("00000000-0000-4000-8000-000000009002"),
-					PageCount:                 1,
-					RequestChainValid:         true,
-					RecordsInCanonicalOrder:   true,
-					RowChecksumsValid:         true,
-					ScopeChecksumValid:        true,
-					FinalChecksumMatchesLocal: true,
-				}},
+				RebuildReceipts: []rebuildReceiptRecord{rawReceipt(cursorFingerprint("00000000-0000-4000-8000-000000009002"), true, false)},
 			},
 		},
 		{
@@ -161,15 +155,7 @@ func TestWarmConnectTransportRequiresCompletedRebuildReceiptProof(t *testing.T) 
 				Schema:          validSnapshot.Schema,
 				ScopeStates:     validSnapshot.ScopeStates,
 				RebuildAttempts: []rebuildAttemptRecord{},
-				RebuildReceiptProofs: []rebuildReceiptProofRecord{{
-					RebuildIDFingerprint:      rebuildFingerprint,
-					PageCount:                 1,
-					RequestChainValid:         true,
-					RecordsInCanonicalOrder:   true,
-					RowChecksumsValid:         true,
-					ScopeChecksumValid:        false,
-					FinalChecksumMatchesLocal: false,
-				}},
+				RebuildReceipts: []rebuildReceiptRecord{rawReceipt(rebuildFingerprint, false, false)},
 			},
 		},
 		{
@@ -178,16 +164,7 @@ func TestWarmConnectTransportRequiresCompletedRebuildReceiptProof(t *testing.T) 
 				Schema:          validSnapshot.Schema,
 				ScopeStates:     validSnapshot.ScopeStates,
 				RebuildAttempts: []rebuildAttemptRecord{},
-				RebuildReceiptProofs: []rebuildReceiptProofRecord{{
-					RebuildIDFingerprint:      rebuildFingerprint,
-					PageCount:                 1,
-					ReturnedRecordCount:       1,
-					RequestChainValid:         true,
-					RecordsInCanonicalOrder:   true,
-					RowChecksumsValid:         true,
-					ScopeChecksumValid:        true,
-					FinalChecksumMatchesLocal: false,
-				}},
+				RebuildReceipts: []rebuildReceiptRecord{rawReceipt(rebuildFingerprint, true, true)},
 			},
 		},
 	}
@@ -198,6 +175,27 @@ func TestWarmConnectTransportRequiresCompletedRebuildReceiptProof(t *testing.T) 
 			}
 		})
 	}
+}
+
+func rawReceipt(fingerprint string, scopeMatches, hasRecords bool) rebuildReceiptRecord {
+	receipt := rebuildReceiptRecord{
+		RebuildIDFingerprint:  fingerprint,
+		PageCount:             1,
+		RequestChainExpected:  []string{"final"},
+		RequestChainObserved:  []string{"final"},
+		ComputedScopeChecksum: pointerString("scope-checksum"),
+		FinalScopeChecksum:    pointerString("scope-checksum"),
+	}
+	if !scopeMatches {
+		receipt.FinalScopeChecksum = pointerString("different")
+	}
+	if hasRecords {
+		receipt.ReturnedRecordCount = 1
+		receipt.RecordIdentitiesHex = []string{"record"}
+		receipt.ReceivedRowChecksums = []string{"received"}
+		receipt.ComputedRowChecksums = []string{"computed"}
+	}
+	return receipt
 }
 
 func TestWarmConnectApplicationIdentityRequiresRuntimePrimaryKey(t *testing.T) {

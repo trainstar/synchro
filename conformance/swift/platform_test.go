@@ -165,6 +165,9 @@ func TestCaptureRejectsIncompleteOrAmbiguousDurableFacts(t *testing.T) {
 	zero := 0
 	one := 1
 	maintenanceCursor := int64(4)
+	truncated := false
+	truncatedValue := true
+	overflowed := false
 	complete := runnerResult{
 		Status:                          &status,
 		PendingChangeCount:              &pending,
@@ -186,7 +189,13 @@ func TestCaptureRejectsIncompleteOrAmbiguousDurableFacts(t *testing.T) {
 		ScopeRows:                       []scopeRowRecord{{ScopeID: "scope-a", TableName: "items", RecordID: "row-a", Checksum: "checksum-a", Generation: 1}},
 		RowMetadataRecords:              []rowMetadataRecord{{TableName: "items", RecordID: "row-a", ServerVersion: "version-a"}},
 		RebuildAttempts:                 []rebuildAttemptRecord{},
-		RebuildReceiptProofs:            []rebuildReceiptProofRecord{},
+		RebuildReceipts:                 []rebuildReceiptRecord{},
+		ScopeStatesTruncated:            &truncated,
+		ScopeRowsTruncated:              &truncated,
+		RebuildAttemptsTruncated:        &truncated,
+		RebuildReceiptsTruncated:        &truncated,
+		RowMetadataTruncated:            &truncated,
+		CaptureOverflowed:               &overflowed,
 		ProvenanceMaintenanceWorkCursor: &maintenanceCursor,
 		Events:                          []eventRecord{},
 	}
@@ -231,9 +240,12 @@ func TestCaptureRejectsIncompleteOrAmbiguousDurableFacts(t *testing.T) {
 	bounded.ApplicationRows = nil
 	bounded.ScopeRowCount = &large
 	bounded.ScopeRows = nil
+	bounded.ScopeRowsTruncated = &truncatedValue
 	bounded.ProvenanceCount = &large
 	bounded.RowMetadataCount = &large
 	bounded.RowMetadataRecords = nil
+	bounded.RowMetadataTruncated = &truncatedValue
+	bounded.CaptureOverflowed = &truncatedValue
 	if err := validateCaptureResult(bounded); err != nil {
 		t.Fatalf("bounded aggregate capture was rejected: %v", err)
 	}
@@ -246,15 +258,15 @@ func TestCaptureRejectsIncompleteOrAmbiguousDurableFacts(t *testing.T) {
 	rebuildID := "00000000-0000-4000-8000-000000009001"
 	multiPage := complete
 	multiPage.RebuildReceiptCount = &receiptCount
-	multiPage.RebuildReceiptProofs = []rebuildReceiptProofRecord{{
-		RebuildIDFingerprint:      cursorFingerprint(rebuildID),
-		PageCount:                 2,
-		ReturnedRecordCount:       3,
-		RequestChainValid:         true,
-		RecordsInCanonicalOrder:   true,
-		RowChecksumsValid:         true,
-		ScopeChecksumValid:        true,
-		FinalChecksumMatchesLocal: true,
+	multiPage.RebuildReceipts = []rebuildReceiptRecord{{
+		RebuildIDFingerprint: cursorFingerprint(rebuildID),
+		PageCount:            2,
+		ReturnedRecordCount:  3,
+		RequestChainExpected: []string{"final"},
+		RequestChainObserved: []string{"final"},
+		RecordIdentitiesHex:  []string{"a", "b", "c"},
+		ReceivedRowChecksums: []string{"a", "b", "c"},
+		ComputedRowChecksums: []string{"a", "b", "c"},
 	}}
 	if err := validateCaptureResult(multiPage); err != nil {
 		t.Fatalf("grouped multi-page rebuild proof was rejected: %v", err)
@@ -274,18 +286,18 @@ func TestCaptureRejectsIncompleteOrAmbiguousDurableFacts(t *testing.T) {
 	}
 
 	mismatchedPages := multiPage
-	mismatchedPages.RebuildReceiptProofs = append([]rebuildReceiptProofRecord(nil), multiPage.RebuildReceiptProofs...)
-	mismatchedPages.RebuildReceiptProofs[0].PageCount = 1
+	mismatchedPages.RebuildReceipts = append([]rebuildReceiptRecord(nil), multiPage.RebuildReceipts...)
+	mismatchedPages.RebuildReceipts[0].PageCount = 1
 	if err := validateCaptureResult(mismatchedPages); err == nil {
 		t.Fatal("rebuild receipt page-count mismatch was accepted")
 	}
 
-	duplicatedProof := multiPage.RebuildReceiptProofs[0]
-	duplicatedProof.PageCount = 1
-	duplicatedReceiptProof := multiPage
-	duplicatedReceiptProof.RebuildReceiptProofs = []rebuildReceiptProofRecord{duplicatedProof, duplicatedProof}
-	if err := validateCaptureResult(duplicatedReceiptProof); err == nil {
-		t.Fatal("duplicated rebuild receipt proof was accepted")
+	duplicatedReceipt := multiPage.RebuildReceipts[0]
+	duplicatedReceipt.PageCount = 1
+	duplicatedReceipts := multiPage
+	duplicatedReceipts.RebuildReceipts = []rebuildReceiptRecord{duplicatedReceipt, duplicatedReceipt}
+	if err := validateCaptureResult(duplicatedReceipts); err == nil {
+		t.Fatal("duplicated rebuild receipt was accepted")
 	}
 }
 

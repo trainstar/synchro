@@ -106,7 +106,13 @@ type runnerResult struct {
 	RowMetadata                     *rowMetadataRecord            `json:"row_metadata"`
 	RowMetadataRecords              []rowMetadataRecord           `json:"row_metadata_records"`
 	RebuildAttempts                 []rebuildAttemptRecord        `json:"rebuild_attempts"`
-	RebuildReceiptProofs            []rebuildReceiptProofRecord   `json:"rebuild_receipt_proofs"`
+	RebuildReceipts                 []rebuildReceiptRecord        `json:"rebuild_receipts"`
+	ScopeStatesTruncated            *bool                         `json:"scope_states_truncated"`
+	ScopeRowsTruncated              *bool                         `json:"scope_rows_truncated"`
+	RebuildAttemptsTruncated        *bool                         `json:"rebuild_attempts_truncated"`
+	RebuildReceiptsTruncated        *bool                         `json:"rebuild_receipts_truncated"`
+	RowMetadataTruncated            *bool                         `json:"row_metadata_truncated"`
+	CaptureOverflowed               *bool                         `json:"capture_overflowed"`
 	ProvenanceMaintenanceWorkCursor *int64                        `json:"provenance_maintenance_work_cursor"`
 	Events                          []eventRecord                 `json:"events"`
 	Failure                         *runnerFailure                `json:"failure"`
@@ -438,44 +444,56 @@ type rebuildAttemptRecord struct {
 	PageLimit        int     `json:"page_limit"`
 }
 
-type rebuildReceiptProofRecord struct {
-	RebuildIDFingerprint      string
-	PageCount                 int
-	ReturnedRecordCount       int
-	RequestChainValid         bool
-	RecordsInCanonicalOrder   bool
-	RowChecksumsValid         bool
-	ScopeChecksumValid        bool
-	FinalChecksumMatchesLocal bool
+type rebuildReceiptRecord struct {
+	RebuildIDFingerprint  string
+	PageCount             int
+	ReturnedRecordCount   int
+	RequestChainExpected  []string
+	RequestChainObserved  []string
+	RecordIdentitiesHex   []string
+	ReceivedRowChecksums  []string
+	ComputedRowChecksums  []string
+	ComputedScopeChecksum *string
+	FinalScopeChecksum    *string
+	StoredScopeChecksum   *string
+	LocalScopeChecksum    *string
 }
 
-func (p *rebuildReceiptProofRecord) UnmarshalJSON(data []byte) error {
+func (p *rebuildReceiptRecord) UnmarshalJSON(data []byte) error {
 	var raw struct {
-		RebuildIDFingerprint      *string `json:"rebuild_id_fingerprint"`
-		PageCount                 *int    `json:"page_count"`
-		ReturnedRecordCount       *int    `json:"returned_record_count"`
-		RequestChainValid         *bool   `json:"request_chain_valid"`
-		RecordsInCanonicalOrder   *bool   `json:"records_in_canonical_order"`
-		RowChecksumsValid         *bool   `json:"row_checksums_valid"`
-		ScopeChecksumValid        *bool   `json:"scope_checksum_valid"`
-		FinalChecksumMatchesLocal *bool   `json:"final_checksum_matches_local"`
+		RebuildIDFingerprint  *string   `json:"rebuild_id_fingerprint"`
+		PageCount             *int      `json:"page_count"`
+		ReturnedRecordCount   *int      `json:"returned_record_count"`
+		RequestChainExpected  *[]string `json:"request_chain_expected"`
+		RequestChainObserved  *[]string `json:"request_chain_observed"`
+		RecordIdentitiesHex   *[]string `json:"record_identities_hex"`
+		ReceivedRowChecksums  *[]string `json:"received_row_checksums"`
+		ComputedRowChecksums  *[]string `json:"computed_row_checksums"`
+		ComputedScopeChecksum *string   `json:"computed_scope_checksum"`
+		FinalScopeChecksum    *string   `json:"final_scope_checksum"`
+		StoredScopeChecksum   *string   `json:"stored_scope_checksum"`
+		LocalScopeChecksum    *string   `json:"local_scope_checksum"`
 	}
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&raw); err != nil || requireDecoderEOF(decoder) != nil {
-		return errors.New("decode rebuild receipt proof failed")
+		return errors.New("decode rebuild receipt failed")
 	}
-	if raw.RebuildIDFingerprint == nil || raw.PageCount == nil || raw.ReturnedRecordCount == nil || raw.RequestChainValid == nil || raw.RecordsInCanonicalOrder == nil || raw.RowChecksumsValid == nil || raw.ScopeChecksumValid == nil || raw.FinalChecksumMatchesLocal == nil {
-		return errors.New("rebuild receipt proof is incomplete")
+	if raw.RebuildIDFingerprint == nil || raw.PageCount == nil || raw.ReturnedRecordCount == nil || raw.RequestChainExpected == nil || raw.RequestChainObserved == nil || raw.RecordIdentitiesHex == nil || raw.ReceivedRowChecksums == nil || raw.ComputedRowChecksums == nil {
+		return errors.New("rebuild receipt is incomplete")
 	}
 	p.RebuildIDFingerprint = *raw.RebuildIDFingerprint
 	p.PageCount = *raw.PageCount
 	p.ReturnedRecordCount = *raw.ReturnedRecordCount
-	p.RequestChainValid = *raw.RequestChainValid
-	p.RecordsInCanonicalOrder = *raw.RecordsInCanonicalOrder
-	p.RowChecksumsValid = *raw.RowChecksumsValid
-	p.ScopeChecksumValid = *raw.ScopeChecksumValid
-	p.FinalChecksumMatchesLocal = *raw.FinalChecksumMatchesLocal
+	p.RequestChainExpected = append([]string(nil), (*raw.RequestChainExpected)...)
+	p.RequestChainObserved = append([]string(nil), (*raw.RequestChainObserved)...)
+	p.RecordIdentitiesHex = append([]string(nil), (*raw.RecordIdentitiesHex)...)
+	p.ReceivedRowChecksums = append([]string(nil), (*raw.ReceivedRowChecksums)...)
+	p.ComputedRowChecksums = append([]string(nil), (*raw.ComputedRowChecksums)...)
+	p.ComputedScopeChecksum = raw.ComputedScopeChecksum
+	p.FinalScopeChecksum = raw.FinalScopeChecksum
+	p.StoredScopeChecksum = raw.StoredScopeChecksum
+	p.LocalScopeChecksum = raw.LocalScopeChecksum
 	return nil
 }
 
@@ -977,7 +995,7 @@ func validateRunnerResult(result runnerResult) error {
 			return errors.New("runner state count is invalid")
 		}
 	}
-	if len(result.ApplicationRows) > maximumRunnerRows || len(result.RetainedMutations) > maximumRunnerRecords || len(result.RejectedMutations) > maximumRunnerRecords || len(result.ScopeStates) > maximumRunnerRecords || len(result.ScopeRows) > maximumRunnerRecords || len(result.RowMetadataRecords) > maximumRunnerRecords || len(result.RebuildAttempts) > maximumRunnerRecords || len(result.RebuildReceiptProofs) > maximumRunnerRecords || len(result.Events) > maximumRunnerRecords {
+	if len(result.ApplicationRows) > maximumRunnerRows || len(result.RetainedMutations) > maximumRunnerRecords || len(result.RejectedMutations) > maximumRunnerRecords || len(result.ScopeStates) > maximumRunnerRecords || len(result.ScopeRows) > maximumRunnerRecords || len(result.RowMetadataRecords) > maximumRunnerRecords || len(result.RebuildAttempts) > maximumRunnerRecords || len(result.RebuildReceipts) > maximumRunnerRecords || len(result.Events) > maximumRunnerRecords {
 		return errors.New("runner result is out of bounds")
 	}
 	for _, row := range result.ApplicationRows {

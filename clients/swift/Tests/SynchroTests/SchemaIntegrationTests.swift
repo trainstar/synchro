@@ -653,13 +653,22 @@ final class ClientSchemaIdentityTests: XCTestCase {
     }
 
     func testCanonicalGoSeedDDLConvergesWithFreshSwiftDDL() throws {
-        let migratedPath = tempDBPath()
-        let freshPath = tempDBPath()
-        let seedPath = canonicalSeedPath()
+        let migratedPath = NSTemporaryDirectory() + UUID().uuidString + ".sqlite"
+        let freshPath = NSTemporaryDirectory() + UUID().uuidString + ".sqlite"
+        var clientsDirectory = URL(fileURLWithPath: #filePath)
+        for _ in 0..<4 {
+            clientsDirectory.deleteLastPathComponent()
+        }
+        let seedPath = clientsDirectory
+            .appendingPathComponent("swift/.build/test-results/schema-identity-seed.db")
+            .path
         let sourceBytes = try Data(contentsOf: URL(fileURLWithPath: seedPath))
         addTeardownBlock {
-            self.removeDatabaseFamily(at: migratedPath)
-            self.removeDatabaseFamily(at: freshPath)
+            for path in [migratedPath, freshPath] {
+                for suffix in ["", "-journal", "-wal", "-shm"] {
+                    try? FileManager.default.removeItem(atPath: path + suffix)
+                }
+            }
         }
 
         try SeedDatabaseInstaller.installIfNeeded(
@@ -681,9 +690,16 @@ final class ClientSchemaIdentityTests: XCTestCase {
             )
         }
 
-        XCTAssertEqual(try migrationIdentifiers(migrated), try migrationIdentifiers(fresh))
+        XCTAssertEqual(
+            Set(try migrated.query("SELECT identifier FROM grdb_migrations", params: nil).map { row in
+                row["identifier"] as String
+            }),
+            Set(try fresh.query("SELECT identifier FROM grdb_migrations", params: nil).map { row in
+                row["identifier"] as String
+            })
+        )
         let expected = try schemaCatalog(fresh)
-        assertCatalogEqual(try schemaCatalog(migrated), expected)
+        XCTAssertEqual(try schemaCatalog(migrated), expected)
 
         try migrated.writeTransaction { db in
             try db.execute(sql: "ALTER TABLE _synchro_scopes ADD COLUMN ddl_identity_drift TEXT")
@@ -693,20 +709,6 @@ final class ClientSchemaIdentityTests: XCTestCase {
         for suffix in ["-journal", "-wal", "-shm"] {
             XCTAssertFalse(FileManager.default.fileExists(atPath: seedPath + suffix))
         }
-    }
-
-    private func canonicalSeedPath() -> String {
-        var clientsDirectory = URL(fileURLWithPath: #filePath)
-        for _ in 0..<4 {
-            clientsDirectory.deleteLastPathComponent()
-        }
-        return clientsDirectory
-            .appendingPathComponent("swift/.build/test-results/schema-identity-seed.db")
-            .path
-    }
-
-    private func tempDBPath() -> String {
-        NSTemporaryDirectory() + UUID().uuidString + ".sqlite"
     }
 
     private func schemaCatalog(_ database: SynchroDatabase) throws -> [CatalogEntry] {
@@ -775,36 +777,4 @@ final class ClientSchemaIdentityTests: XCTestCase {
         return output
     }
 
-    private func migrationIdentifiers(_ database: SynchroDatabase) throws -> Set<String> {
-        Set(try database.query(
-            "SELECT identifier FROM grdb_migrations",
-            params: nil
-        ).map { row in row["identifier"] })
-    }
-
-    private func assertCatalogEqual(
-        _ actual: [CatalogEntry],
-        _ expected: [CatalogEntry],
-        file: StaticString = #filePath,
-        line: UInt = #line
-    ) {
-        guard actual.count == expected.count else {
-            XCTFail("catalog entry count \(actual.count) differs from \(expected.count)", file: file, line: line)
-            return
-        }
-        for (actualEntry, expectedEntry) in zip(actual, expected) where actualEntry != expectedEntry {
-            XCTFail(
-                "catalog entry \(actualEntry.type)/\(actualEntry.name) differs: \(actualEntry.sql) != \(expectedEntry.sql)",
-                file: file,
-                line: line
-            )
-            return
-        }
-    }
-
-    private func removeDatabaseFamily(at path: String) {
-        for suffix in ["", "-journal", "-wal", "-shm"] {
-            try? FileManager.default.removeItem(atPath: path + suffix)
-        }
-    }
 }
