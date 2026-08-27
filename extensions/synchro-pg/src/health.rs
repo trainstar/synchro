@@ -106,7 +106,7 @@ worker AS (
 configured_slot AS (
     SELECT slot.*
     FROM pg_catalog.pg_replication_slots slot
-    JOIN runtime ON runtime.active_slot_name = slot.slot_name
+    WHERE slot.slot_name = $3::text
 ),
 configured_publication AS (
     SELECT publication.*
@@ -526,7 +526,7 @@ pub(crate) struct ReadinessConfiguration {
 }
 
 impl ReadinessConfiguration {
-    fn configured() -> Self {
+    pub(crate) fn configured() -> Self {
         Self {
             database: configured_string(&crate::DATABASE_GUC),
             publication: configured_string(&crate::PUBLICATION_NAME_GUC),

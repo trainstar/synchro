@@ -2049,13 +2049,13 @@ ALTER DEFAULT PRIVILEGES FOR ROLE synchro_owner IN SCHEMA synchro REVOKE USAGE O
 // GUC settings (readable from all modules via crate::*)
 // ---------------------------------------------------------------------------
 
-/// Name of the logical replication slot. Defaults to "synchro_slot" when NULL.
+/// Name of the logical replication slot.
 pub(crate) static REPLICATION_SLOT_GUC: GucSetting<Option<CString>> =
-    GucSetting::<Option<CString>>::new(None);
+    GucSetting::<Option<CString>>::new(Some(c"synchro_slot"));
 
-/// Name of the WAL publication. Defaults to "synchro_pub" when NULL.
+/// Name of the WAL publication.
 pub(crate) static PUBLICATION_NAME_GUC: GucSetting<Option<CString>> =
-    GucSetting::<Option<CString>>::new(None);
+    GucSetting::<Option<CString>>::new(Some(c"synchro_pub"));
 
 /// Database the WAL background worker should connect to.
 pub(crate) static DATABASE_GUC: GucSetting<Option<CString>> =
@@ -2069,13 +2069,17 @@ pub(crate) static WORKER_LOGIN_GUC: GucSetting<Option<CString>> =
 pub(crate) static AUTO_START_GUC: GucSetting<bool> = GucSetting::<bool>::new(true);
 
 /// Maximum accepted age of the WAL worker heartbeat, in seconds.
-pub(crate) static MAX_WORKER_HEARTBEAT_AGE_SECONDS_GUC: GucSetting<i32> = GucSetting::<i32>::new(0);
+// Thirty seconds tolerates transient scheduling delays across 30 one-second worker polling cycles.
+pub(crate) static MAX_WORKER_HEARTBEAT_AGE_SECONDS_GUC: GucSetting<i32> =
+    GucSetting::<i32>::new(30);
 
 /// Maximum accepted difference between current WAL and acknowledged WAL, in bytes.
-pub(crate) static MAX_WAL_LAG_BYTES_GUC: GucSetting<i32> = GucSetting::<i32>::new(0);
+// Sixty-four MiB absorbs brief write bursts while bounding unacknowledged WAL growth.
+pub(crate) static MAX_WAL_LAG_BYTES_GUC: GucSetting<i32> = GucSetting::<i32>::new(67_108_864);
 
 /// Maximum accepted age of the oldest unmaterialized registered write, in seconds.
-pub(crate) static MAX_WAL_LAG_SECONDS_GUC: GucSetting<i32> = GucSetting::<i32>::new(0);
+// Thirty seconds permits brief materialization bursts while detecting sustained capture delay.
+pub(crate) static MAX_WAL_LAG_SECONDS_GUC: GucSetting<i32> = GucSetting::<i32>::new(30);
 
 pub(crate) fn configured_worker_login() -> Option<String> {
     WORKER_LOGIN_GUC

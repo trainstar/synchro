@@ -1,0 +1,32 @@
+---
+title: PostgreSQL configuration
+description: Configure the Synchro WAL worker and capture readiness limits.
+---
+
+Set Synchro GUCs in `postgresql.conf` or with the equivalent PostgreSQL configuration mechanism.
+
+Reload PostgreSQL after a `SIGHUP` setting changes. Restart PostgreSQL after a `postmaster` setting changes.
+
+## WAL worker settings
+
+| GUC | Context | Default | Purpose |
+| --- | --- | --- | --- |
+| `synchro.replication_slot` | `SIGHUP` | `synchro_slot` | Names the logical replication slot. |
+| `synchro.publication_name` | `SIGHUP` | `synchro_pub` | Names the publication for registered relations. |
+| `synchro.database` | `postmaster` | Not configured | Selects the worker database. Configure this value for readiness. |
+| `synchro.worker_login` | `postmaster` | Not configured | Selects the dedicated worker login. Configure this value for readiness. |
+| `synchro.auto_start` | `postmaster` | `on` | Starts the WAL worker during server startup. |
+
+An empty publication, slot, database, or worker login makes the related readiness check fail.
+
+## Readiness limits
+
+| GUC | Context | Default | Purpose |
+| --- | --- | --- | --- |
+| `synchro.max_worker_heartbeat_age_seconds` | `SIGHUP` | `30` | Limits the accepted worker heartbeat age. |
+| `synchro.max_wal_lag_bytes` | `SIGHUP` | `67108864` (64 MiB) | Limits current WAL beyond acknowledged WAL. |
+| `synchro.max_wal_lag_seconds` | `SIGHUP` | `30` | Limits the oldest unmaterialized registered write age. |
+
+Each readiness limit must be a positive integer. A zero value makes its readiness check fail with `invalid_limit`.
+
+Use stricter positive limits when your service-level objectives require faster failure detection.

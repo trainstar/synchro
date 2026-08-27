@@ -22,12 +22,8 @@
     }
 
     #[pg_test]
-    fn readiness_rejects_incomplete_capture_health() {
-        let backend_pid: i32 = Spi::get_one("SELECT pg_backend_pid()")
-            .expect("load health test backend PID")
-            .expect("health test backend PID");
-        let slot = format!("synchro_health_missing_{backend_pid}");
-
+    fn default_gucs_are_healthy_and_fail_closed() {
+        let slot = "synchro_slot";
         Spi::run(
             "DROP ROLE IF EXISTS synchro_health_worker;
              CREATE ROLE synchro_health_worker
@@ -37,26 +33,48 @@
         )
         .expect("provision health test identity");
         setup_test_tables();
-        Spi::run_with_args(
-            "UPDATE synchro.sync_runtime_state
-             SET active_slot_name = $1, updated_at = now()
-             WHERE singleton",
-            &[slot.as_str().into()],
+        Spi::run(
+            "SELECT pg_catalog.pg_drop_replication_slot(slot_name)
+             FROM pg_catalog.pg_replication_slots
+             WHERE slot_name = 'synchro_slot';
+             SELECT pg_catalog.pg_create_logical_replication_slot('synchro_slot', 'pgoutput')",
         )
-        .expect("set active health test slot");
+        .expect("create default health test slot");
+        Spi::run_with_args(
+            "WITH slot AS (
+                 SELECT slot_name, confirmed_flush_lsn
+                 FROM pg_catalog.pg_replication_slots
+                 WHERE slot_name = $1
+             ), runtime_update AS (
+                 UPDATE synchro.sync_runtime_state runtime
+                 SET active_slot_name = slot.slot_name, updated_at = now()
+                 FROM slot
+                 WHERE runtime.singleton
+             )
+             UPDATE synchro.sync_wal_progress progress
+             SET generation_start_lsn = slot.confirmed_flush_lsn,
+                 materialized_commit_lsn = NULL,
+                 materialized_end_lsn = NULL,
+                 acknowledged_end_lsn = NULL,
+                 updated_at = now()
+             FROM slot
+             WHERE progress.singleton",
+            &[slot.into()],
+        )
+        .expect("set default health test slot");
         Spi::run(
             "INSERT INTO synchro.sync_wal_worker_state (
                  worker_id, database_oid, database_name, worker_login_oid,
                  backend_pid, state, registry_generation,
                  materialized_commit_lsn, materialized_end_lsn,
-                 heartbeat_at, updated_at
-             )
-             SELECT 'synchro_wal_consumer', database.oid, database.datname,
-                    worker_role.oid, pg_backend_pid(), 'running',
-                    progress.registry_generation,
-                    progress.materialized_commit_lsn, progress.materialized_end_lsn,
-                    now(), now()
-             FROM pg_catalog.pg_database database
+                 wal_observed_at, heartbeat_at, updated_at
+              )
+              SELECT 'synchro_wal_consumer', database.oid, database.datname,
+                     worker_role.oid, pg_backend_pid(), 'running',
+                     progress.registry_generation,
+                     progress.materialized_commit_lsn, progress.materialized_end_lsn,
+                     now(), now(), now()
+              FROM pg_catalog.pg_database database
              CROSS JOIN pg_catalog.pg_roles worker_role
              CROSS JOIN synchro.sync_wal_progress progress
              WHERE database.datname = current_database()
@@ -68,15 +86,39 @@
         let database: String = Spi::get_one("SELECT current_database()::text")
             .expect("load health test database")
             .expect("health test database");
-        let configuration = crate::health::ReadinessConfiguration {
-            database: Some(database),
-            publication: Some("synchro_pub".to_string()),
-            replication_slot: Some(slot.clone()),
-            worker_login: Some("synchro_health_worker".to_string()),
-            max_heartbeat_age_seconds: 30,
-            max_wal_lag_bytes: i32::MAX,
-            max_wal_lag_seconds: 30,
-        };
+        let mut configuration = crate::health::ReadinessConfiguration::configured();
+        configuration.database = Some(database);
+        configuration.worker_login = Some("synchro_health_worker".to_string());
+
+        let publication: String = Spi::get_one("SHOW synchro.publication_name")
+            .expect("show default publication GUC")
+            .expect("default publication GUC");
+        let replication_slot: String = Spi::get_one("SHOW synchro.replication_slot")
+            .expect("show default replication slot GUC")
+            .expect("default replication slot GUC");
+        let limit_defaults_visible: bool = Spi::get_one(
+            "SELECT current_setting('synchro.max_worker_heartbeat_age_seconds') = '30'
+                    AND current_setting('synchro.max_wal_lag_bytes') = '67108864'
+                    AND current_setting('synchro.max_wal_lag_seconds') = '30'",
+        )
+        .expect("load default health limit GUCs")
+        .expect("default health limit comparison");
+        let guc_defaults_visible = publication == "synchro_pub"
+            && replication_slot == "synchro_slot"
+            && limit_defaults_visible;
+        let default_detail = crate::health::load_readiness_status_with_configuration(
+            configuration.clone(),
+        )
+        .detail();
+        let default_capture_checks_ok = [
+            "publication",
+            "replication_slot",
+            "heartbeat",
+            "wal_byte_lag",
+            "wal_time_lag",
+        ]
+        .into_iter()
+        .all(|check| default_detail["checks"][check]["state"].as_str() == Some("ok"));
 
         Spi::run(
             "ALTER TABLE public.test_orders DISABLE TRIGGER synchro_capture_fence",
@@ -176,8 +218,12 @@
             crate::health::load_readiness_status_with_configuration(invalid_limit).detail();
         let invalid_limit_rejected = !invalid_limit_detail["ready"].as_bool().unwrap_or(true)
             && invalid_limit_detail["checks"]["wal_byte_lag"]["state"].as_str()
-                == Some("failed");
+                == Some("failed")
+            && invalid_limit_detail["checks"]["wal_byte_lag"]["reason"].as_str()
+                == Some("invalid_limit");
 
+        Spi::run("SELECT pg_catalog.pg_drop_replication_slot('synchro_slot')")
+            .expect("remove default health test slot");
         let missing_slot_detail = crate::health::load_readiness_status_with_configuration(
             configuration.clone(),
         )
@@ -249,6 +295,8 @@
         )
         .expect("remove health test identity");
 
+        assert!(guc_defaults_visible);
+        assert!(default_capture_checks_ok);
         assert!(disabled_trigger_rejected);
         assert!(extra_publication_relation_rejected);
         assert!(stale_heartbeat_rejected);
@@ -347,7 +395,7 @@
     }
 
     #[pg_test]
-    fn public_readiness_is_generic_and_fail_closed_without_limits() {
+    fn public_readiness_is_generic_and_fail_closed() {
         let readiness: pgrx::JsonB = Spi::get_one("SELECT synchro.synchro_readiness()")
             .expect("query public readiness")
             .expect("public readiness result");
