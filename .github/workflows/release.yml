@@ -745,6 +745,15 @@ jobs:
         with:
           path: artifacts
 
+      - name: Generate and validate Phase 5 CI summary
+        run: make evidence
+
+      - name: Publish Phase 5 CI summary
+        uses: actions/upload-artifact@v7.0.0
+        with:
+          name: phase-5-ci-summary
+          path: dist/verification/phase-5-summary.json
+
       - name: Generate checksums
         run: |
           find artifacts -type f -print0 | sort -z | xargs -0 shasum -a 256 > SHA256SUMS.txt

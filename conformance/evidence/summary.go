@@ -18,6 +18,7 @@ import (
 
 	"github.com/trainstar/synchro/conformance/internal/contract"
 	"github.com/trainstar/synchro/conformance/internal/jsonstrict"
+	"github.com/trainstar/synchro/conformance/internal/schemavalidator"
 	"github.com/trainstar/synchro/conformance/scenarios"
 )
 
@@ -202,6 +203,15 @@ func Validate(ctx context.Context, repoRoot string, summary Summary) error {
 	}
 	if err := validateCoverage(summary.Coverage, expectedCoverage, expected); err != nil {
 		return err
+	}
+	encoded, err := MarshalStrict(summary)
+	if err != nil {
+		return fmt.Errorf("encode CI summary for schema validation: %w", err)
+	}
+	validator := schemavalidator.New(root)
+	defer validator.Close()
+	if err := validator.ValidateBytes(ctx, "conformance/schemas/ci-summary-v1.schema.json", encoded); err != nil {
+		return fmt.Errorf("validate CI summary schema: %w", err)
 	}
 	return nil
 }

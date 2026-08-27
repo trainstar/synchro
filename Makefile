@@ -180,6 +180,7 @@ CLIENT_ARTIFACT_DIR ?= $(CURDIR)/dist/local-consumer
 LOCAL_CONSUMER_DIR ?= $(CLIENT_ARTIFACT_DIR)
 CURRENT_VERSION := $(shell cat VERSION 2>/dev/null)
 PHASE_5_EVIDENCE ?= $(CURDIR)/dist/verification/phase-5-summary.json
+PHASE_5_INPUT ?= $(CURDIR)/dist/verification/phase-5-input.json
 PACKAGED_SMOKE_EVIDENCE ?= $(CURDIR)/dist/verification/packaged-smoke-summary.json
 
 TEST_ENV = \
@@ -224,7 +225,7 @@ help:
 	@echo "  record-r1-benchmark   - Record one R1 benchmark candidate"
 	@echo "  test-r1-benchmark     - Compare R1 benchmark results with the tracked baseline"
 	@echo "  rc-check-pg18         - Verify the packaged PostgreSQL 18 candidate"
-	@echo "  evidence              - Generate and verify immutable RC evidence"
+	@echo "  evidence              - Generate and validate the Phase 5 CI summary"
 	@echo "  lint-go               - Run Go formatting checks and go vet"
 	@echo "  lint-rn               - Run React Native typecheck and ESLint"
 	@echo "  lint-rust-core        - Run Rust fmt and clippy for the shared core"
@@ -551,8 +552,9 @@ rc-check-pg18:
 	@exit 1
 
 evidence:
-	@test -n "$(RC_CANDIDATE_DIR)" || (echo "RC_CANDIDATE_DIR is required" >&2; exit 1)
-	cd conformance && GOFLAGS= GOWORK=off go run ./cmd/synchro-evidence validate --repo-root .. --candidate-dir "$(RC_CANDIDATE_DIR)"
+	@test -f "$(PHASE_5_INPUT)" || (echo "PHASE_5_INPUT is required: $(PHASE_5_INPUT)" >&2; exit 1)
+	cd conformance && GOFLAGS= GOWORK=off go run ./cmd/synchro-evidence generate --repo-root .. --input "$(PHASE_5_INPUT)" --output "$(PHASE_5_EVIDENCE)"
+	cd conformance && GOFLAGS= GOWORK=off go run ./cmd/synchro-evidence validate --repo-root .. --summary "$(PHASE_5_EVIDENCE)"
 
 lint-rn:
 	cd clients/react-native && yarn typecheck
