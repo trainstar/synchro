@@ -29,7 +29,8 @@ const WORKER_ID: &str = "synchro_wal_consumer";
 const REGISTRY_PREFIX: &str = "synchro_registry";
 const FENCE_PREFIX: &str = "synchro_fence";
 const MAX_CONTROL_MESSAGE_BYTES: usize = 4096;
-const MAX_STARTUP_FAILURES: u8 = 5;
+const STARTUP_RETRY_BUDGET: std::time::Duration = std::time::Duration::from_secs(30);
+const STARTUP_RETRY_WAIT: std::time::Duration = std::time::Duration::from_secs(1);
 
 #[derive(Clone)]
 struct PoisonFailure {
@@ -329,35 +330,40 @@ pub fn register_bgworker() {
         .load();
 }
 
-fn startup_retry_exhausted(failures: &mut u8) -> bool {
-    *failures = failures.saturating_add(1);
-    *failures >= MAX_STARTUP_FAILURES
+fn startup_retry_exhausted(started_at: std::time::Instant) -> bool {
+    started_at.elapsed() >= STARTUP_RETRY_BUDGET
 }
 
 #[pg_guard]
 #[no_mangle]
 pub extern "C-unwind" fn synchro_wal_worker_main(_arg: pg_sys::Datum) {
     BackgroundWorker::attach_signal_handlers(SignalWakeFlags::SIGHUP | SignalWakeFlags::SIGTERM);
+    // PostgreSQL restarts this worker only after a nonzero exit status.
+    // Self-heal paths must raise errors. SIGTERM and shutdown return cleanly.
     let Some(worker_login) = crate::configured_worker_login() else {
-        return;
+        pgrx::error!("synchro WAL worker login is unavailable");
     };
     let database = database_name();
     BackgroundWorker::connect_worker_to_spi(Some(&database), Some(&worker_login));
 
-    let mut preparation_failures = 0;
+    let preparation_started_at = std::time::Instant::now();
     let expected_runtime = loop {
         match run_worker_transaction(|| {
             capture_worker_preparation_identity(&database, &worker_login)
         }) {
             Ok(identity) => break identity,
             Err(error) => {
-                if startup_retry_exhausted(&mut preparation_failures) {
+                if startup_retry_exhausted(preparation_started_at) {
                     log!(
-                        "synchro WAL worker preparation failed after {MAX_STARTUP_FAILURES} attempts: {error}"
+                        "synchro WAL worker preparation failed after {} seconds: {error}",
+                        STARTUP_RETRY_BUDGET.as_secs()
                     );
-                    return;
+                    pgrx::error!(
+                        "synchro WAL worker preparation failed after {} seconds: {error}",
+                        STARTUP_RETRY_BUDGET.as_secs()
+                    );
                 }
-                if !BackgroundWorker::wait_latch(Some(std::time::Duration::from_secs(1))) {
+                if !BackgroundWorker::wait_latch(Some(STARTUP_RETRY_WAIT)) {
                     return;
                 }
             }
@@ -366,19 +372,21 @@ pub extern "C-unwind" fn synchro_wal_worker_main(_arg: pg_sys::Datum) {
     let identity = loop {
         if let Err(error) = validate_worker_preparation_identity(&worker_login, &expected_runtime) {
             log!("synchro WAL worker identity changed: {error}");
-            return;
+            pgrx::error!("synchro WAL worker identity changed: {error}");
         }
         match run_worker_transaction(|| prepare_worker(&database, &worker_login)) {
             Ok(identity) => {
                 if identity.startup_runtime != expected_runtime {
                     log!("synchro WAL worker identity changed: worker runtime identity changed");
-                    return;
+                    pgrx::error!(
+                        "synchro WAL worker identity changed: worker runtime identity changed"
+                    );
                 }
                 if let Err(error) =
                     validate_worker_preparation_identity(&worker_login, &expected_runtime)
                 {
                     log!("synchro WAL worker identity changed: {error}");
-                    return;
+                    pgrx::error!("synchro WAL worker identity changed: {error}");
                 }
                 break identity;
             }
@@ -387,15 +395,19 @@ pub extern "C-unwind" fn synchro_wal_worker_main(_arg: pg_sys::Datum) {
                     validate_worker_preparation_identity(&worker_login, &expected_runtime)
                 {
                     log!("synchro WAL worker identity changed: {identity_error}");
-                    return;
+                    pgrx::error!("synchro WAL worker identity changed: {identity_error}");
                 }
-                if startup_retry_exhausted(&mut preparation_failures) {
+                if startup_retry_exhausted(preparation_started_at) {
                     log!(
-                        "synchro WAL worker preparation failed after {MAX_STARTUP_FAILURES} attempts: {error}"
+                        "synchro WAL worker preparation failed after {} seconds: {error}",
+                        STARTUP_RETRY_BUDGET.as_secs()
                     );
-                    return;
+                    pgrx::error!(
+                        "synchro WAL worker preparation failed after {} seconds: {error}",
+                        STARTUP_RETRY_BUDGET.as_secs()
+                    );
                 }
-                if !BackgroundWorker::wait_latch(Some(std::time::Duration::from_secs(1))) {
+                if !BackgroundWorker::wait_latch(Some(STARTUP_RETRY_WAIT)) {
                     return;
                 }
             }
@@ -403,11 +415,11 @@ pub extern "C-unwind" fn synchro_wal_worker_main(_arg: pg_sys::Datum) {
     };
     activate_worker_role(identity.worker_role_oid);
 
-    let mut initialization_failures = 0;
+    let initialization_started_at = std::time::Instant::now();
     loop {
         if let Err(error) = validate_worker_startup_authorization(&worker_login, &identity) {
             log!("synchro WAL worker identity changed: {error}");
-            return;
+            pgrx::error!("synchro WAL worker identity changed: {error}");
         }
         match run_worker_transaction(|| initialize_worker(&database, identity.session_login_oid)) {
             Ok(()) => break,
@@ -416,17 +428,21 @@ pub extern "C-unwind" fn synchro_wal_worker_main(_arg: pg_sys::Datum) {
                     validate_worker_startup_authorization(&worker_login, &identity)
                 {
                     log!("synchro WAL worker identity changed: {identity_error}");
-                    return;
+                    pgrx::error!("synchro WAL worker identity changed: {identity_error}");
                 }
-                if startup_retry_exhausted(&mut initialization_failures) {
+                if startup_retry_exhausted(initialization_started_at) {
                     log!(
-                        "synchro WAL worker initialization failed after {MAX_STARTUP_FAILURES} attempts: {error}"
+                        "synchro WAL worker initialization failed after {} seconds: {error}",
+                        STARTUP_RETRY_BUDGET.as_secs()
                     );
-                    return;
+                    pgrx::error!(
+                        "synchro WAL worker initialization failed after {} seconds: {error}",
+                        STARTUP_RETRY_BUDGET.as_secs()
+                    );
                 }
             }
         }
-        if !BackgroundWorker::wait_latch(Some(std::time::Duration::from_secs(1))) {
+        if !BackgroundWorker::wait_latch(Some(STARTUP_RETRY_WAIT)) {
             return;
         }
     }
@@ -435,7 +451,7 @@ pub extern "C-unwind" fn synchro_wal_worker_main(_arg: pg_sys::Datum) {
     let mut decoder_state = loop {
         if let Err(error) = validate_worker_authorization(&worker_login, &identity) {
             log!("synchro WAL worker identity changed: {error}");
-            return;
+            pgrx::error!("synchro WAL worker identity changed: {error}");
         }
         match fresh_decoder() {
             Ok(state) => break state,
@@ -459,7 +475,7 @@ pub extern "C-unwind" fn synchro_wal_worker_main(_arg: pg_sys::Datum) {
     loop {
         if let Err(error) = validate_worker_authorization(&worker_login, &identity) {
             log!("synchro WAL worker identity changed: {error}");
-            return;
+            pgrx::error!("synchro WAL worker identity changed: {error}");
         }
         if !BackgroundWorker::wait_latch(Some(std::time::Duration::from_millis(IDLE_POLL_MS))) {
             break;
@@ -482,7 +498,7 @@ pub extern "C-unwind" fn synchro_wal_worker_main(_arg: pg_sys::Datum) {
         );
         if let Err(error) = release_worker_poll_gate() {
             log!("synchro WAL poll gate release failed: {error}");
-            return;
+            pgrx::error!("synchro WAL poll gate release failed: {error}");
         }
     }
 
