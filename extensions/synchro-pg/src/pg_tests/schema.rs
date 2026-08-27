@@ -886,7 +886,7 @@
     }
 
     #[pg_test]
-    fn test_added_empty_table_with_stale_statistics_is_class_2_without_bootstrap() {
+    fn test_added_empty_table_with_stale_stats_is_class_2() {
         setup_test_tables();
         register_client("stale-statistics-user", "stale-statistics-client");
         Spi::run(
