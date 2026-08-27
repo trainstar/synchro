@@ -591,7 +591,7 @@ _test-client-schema-identity:
 		-dir ../api/go \
 		-test TestCanonicalClientSeedMatchesSeedDBDDL \
 		-expect target_pass \
-		-- go test -json ./seeddb -count=1 -run '^TestCanonicalClientSeedMatchesSeedDBDDL$$'
+		-- go test -tags ddlidentity -json ./seeddb -count=1 -run '^TestCanonicalClientSeedMatchesSeedDBDDL$$'
 	rm -rf clients/swift/.build/test-results/schema-identity.xcresult
 	cd clients/swift && xcodebuild test -quiet -scheme Synchro-Package -destination 'platform=macOS' \
 		-only-testing:SynchroTests/ClientSchemaIdentityTests/testCanonicalGoSeedDDLConvergesWithFreshSwiftDDL \
