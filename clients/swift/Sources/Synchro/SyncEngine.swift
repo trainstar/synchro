@@ -77,7 +77,7 @@ private actor StartupGate {
     }
 }
 
-final class CycleGate: @unchecked Sendable {
+private final class CycleGate: @unchecked Sendable {
     private struct Entry {
         let task: Task<Void, Error>
     }

@@ -58,40 +58,6 @@ final class SyncEngineTests: XCTestCase {
         XCTAssertEqual(updates2.count, 0, "An idempotent stop does not publish another transition")
     }
 
-    func testCycleGateSerializesEnqueuedOperations() async throws {
-        let gate = CycleGate()
-        let firstStarted = expectation(description: "first operation started")
-        let firstWaiting = expectation(description: "first operation waiting")
-        let releaseFirst = OSAllocatedUnfairLock(
-            initialState: Optional<CheckedContinuation<Void, Never>>.none
-        )
-        let events = OSAllocatedUnfairLock(initialState: [String]())
-        gate.beginGeneration(1)
-
-        let first = try gate.enqueue(generation: 1) {
-            events.withLock { $0.append("first-started") }
-            firstStarted.fulfill()
-            await withCheckedContinuation { continuation in
-                releaseFirst.withLock { $0 = continuation }
-                firstWaiting.fulfill()
-            }
-            events.withLock { $0.append("first-finished") }
-        }
-        await fulfillment(of: [firstStarted, firstWaiting], timeout: 1)
-        let second = try gate.enqueue(generation: 1) {
-            events.withLock { $0.append("second-started") }
-        }
-
-        let continuation = releaseFirst.withLock { value in
-            defer { value = nil }
-            return value
-        }
-        try XCTUnwrap(continuation).resume()
-        try await first.value
-        try await second.value
-        XCTAssertEqual(events.withLock { $0 }, ["first-started", "first-finished", "second-started"])
-    }
-
     func testConcurrentSyncNowCallersEachCompleteTheirOwnCycle() async throws {
         let pullCount = OSAllocatedUnfairLock(initialState: 0)
         MockURLProtocol.requestHandler = { request in
@@ -121,9 +87,12 @@ final class SyncEngineTests: XCTestCase {
 
         let first = Task { try await engine.syncNow() }
         try await collector.awaitPause(for: .pull, timeout: 1)
+        try collector.armPause(for: .pull)
         let second = Task { try await engine.syncNow() }
         try collector.resumePause()
 
+        try await collector.awaitPause(for: .pull, timeout: 1)
+        try collector.resumePause()
         try await first.value
         try await second.value
         XCTAssertEqual(pullCount.withLock { $0 }, 2)
