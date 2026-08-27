@@ -2,11 +2,19 @@ package scenarios
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 )
 
-const maxNativeIdentityInteger = int64(1<<53 - 1)
+const (
+	maxNativeIdentityInteger = int64(1<<53 - 1)
+	maxNativeWorkloadRecords = uint64(1000)
+	maxNativeWorkloadTargets = 8
+	maxNativeWorkloadKinds   = 8
+	maxNativeWorkloadSeed    = uint64(maxNativeIdentityInteger)
+)
 
 var nativePublicMethods = stringSet([]string{
 	"retry-after-error",
@@ -30,6 +38,7 @@ var nativeBindingTransports = map[string]map[string]struct{}{
 	"local-write": {"local": {}},
 	"process":     {"process": {}},
 	"public-call": {"http": {}, "local": {}, "process": {}},
+	"workload":    {"model": {}},
 }
 
 var nativeIdentityKinds = stringSet([]string{
@@ -111,6 +120,7 @@ func (v *scenarioValidator) validateNativeProof() {
 	} else {
 		v.validateNativeIdentityAliases()
 	}
+	v.validateNativeWorkloadBindings()
 	v.validateNativeStepBindings()
 	v.validateNativeLifecycleBoundaries()
 }
@@ -161,6 +171,8 @@ func (v *scenarioValidator) validateNativeIdentityAliases() {
 			seenSteps[stepID] = struct{}{}
 			if _, found := steps[stepID]; !found {
 				v.add("%s native identity alias %q references unknown step %s", v.scenario.ID, identity.Alias, stepID)
+			} else if v.steps[stepID].NativeBinding != nil && v.steps[stepID].NativeBinding.Kind == "workload" {
+				v.add("%s native identity alias %q must not bind generated workload step %s", v.scenario.ID, identity.Alias, stepID)
 			}
 		}
 		seenExpectations := make(map[ExpectationID]struct{}, len(identity.ExpectationIDs))
@@ -174,6 +186,141 @@ func (v *scenarioValidator) validateNativeIdentityAliases() {
 			}
 		}
 	}
+}
+
+func (v *scenarioValidator) validateNativeWorkloadBindings() {
+	for _, step := range v.scenario.Steps {
+		binding := step.NativeBinding
+		if binding == nil || binding.Kind != "workload" {
+			continue
+		}
+		v.validateNativeWorkload(step, *binding)
+	}
+}
+
+func (v *scenarioValidator) validateNativeWorkload(step Step, binding NativeStepBinding) {
+	if binding.Workload == nil {
+		v.add("%s step %s workload native binding requires workload parameters", v.scenario.ID, step.ID)
+		return
+	}
+	parameters := binding.Workload
+	if parameters.RecordCount == 0 || parameters.RecordCount > maxNativeWorkloadRecords {
+		v.add("%s step %s workload record_count must be between 1 and %d", v.scenario.ID, step.ID, maxNativeWorkloadRecords)
+	}
+	if parameters.BatchSize == 0 || parameters.BatchSize > maxNativeWorkloadRecords || parameters.BatchSize > parameters.RecordCount {
+		v.add("%s step %s workload batch_size must be between 1 and record_count", v.scenario.ID, step.ID)
+	}
+	if parameters.Seed == 0 || parameters.Seed > maxNativeWorkloadSeed {
+		v.add("%s step %s workload seed must be nonzero and deterministic", v.scenario.ID, step.ID)
+	}
+	if parameters.AuthoredSchema.Version == 0 || !isNativeSHA256(parameters.AuthoredSchema.Hash) {
+		v.add("%s step %s workload authored_schema is invalid", v.scenario.ID, step.ID)
+	}
+	if parameters.ClientVersion == "" {
+		v.add("%s step %s workload client_version is required", v.scenario.ID, step.ID)
+	}
+	if len(parameters.Targets) == 0 || len(parameters.Targets) > maxNativeWorkloadTargets {
+		v.add("%s step %s workload must have between 1 and %d targets", v.scenario.ID, step.ID, maxNativeWorkloadTargets)
+	}
+	if len(parameters.MutationKinds) == 0 || len(parameters.MutationKinds) > maxNativeWorkloadKinds {
+		v.add("%s step %s workload must have between 1 and %d mutation kinds", v.scenario.ID, step.ID, maxNativeWorkloadKinds)
+	}
+
+	targets := make(map[string]struct{}, len(parameters.Targets))
+	expectedScopes := make(map[string]uint64, len(parameters.Targets))
+	for index, target := range parameters.Targets {
+		if !nativeClientKeyPattern.MatchString(target.ScopeID) || !nativeClientKeyPattern.MatchString(target.TableID) || !nativeClientKeyPattern.MatchString(target.PrimaryKeyFieldID) {
+			v.add("%s step %s workload target %d has invalid scope, table, or primary key field", v.scenario.ID, step.ID, index+1)
+		}
+		key := target.ScopeID + "\x00" + target.TableID + "\x00" + target.PrimaryKeyFieldID
+		if _, duplicate := targets[key]; duplicate {
+			v.add("%s step %s workload repeats target %q", v.scenario.ID, step.ID, key)
+		}
+		targets[key] = struct{}{}
+	}
+	if len(parameters.Targets) != 0 && parameters.RecordCount != 0 {
+		for ordinal := uint64(0); ordinal < parameters.RecordCount; ordinal++ {
+			target := parameters.Targets[ordinal%uint64(len(parameters.Targets))]
+			expectedScopes[target.ScopeID]++
+		}
+	}
+
+	mutationCount := uint64(0)
+	for index, kind := range parameters.MutationKinds {
+		if kind.Operation != "insert" {
+			v.add("%s step %s workload mutation kind %d must be insert", v.scenario.ID, step.ID, index+1)
+		}
+		if kind.Count == 0 || kind.Count > maxNativeWorkloadRecords {
+			v.add("%s step %s workload mutation kind %d count must be between 1 and %d", v.scenario.ID, step.ID, index+1, maxNativeWorkloadRecords)
+		}
+		fields := make(map[string]struct{}, len(kind.FieldIDs))
+		if len(kind.FieldIDs) == 0 {
+			v.add("%s step %s workload mutation kind %d requires writable fields", v.scenario.ID, step.ID, index+1)
+		}
+		for _, fieldID := range kind.FieldIDs {
+			if !nativeClientKeyPattern.MatchString(fieldID) {
+				v.add("%s step %s workload mutation kind %d has invalid field %q", v.scenario.ID, step.ID, index+1, fieldID)
+			}
+			if _, duplicate := fields[fieldID]; duplicate {
+				v.add("%s step %s workload mutation kind %d repeats field %q", v.scenario.ID, step.ID, index+1, fieldID)
+			}
+			fields[fieldID] = struct{}{}
+		}
+		if kind.Count > maxNativeWorkloadRecords || mutationCount > maxNativeWorkloadRecords-kind.Count {
+			v.add("%s step %s workload mutation counts exceed %d", v.scenario.ID, step.ID, maxNativeWorkloadRecords)
+			continue
+		}
+		mutationCount += kind.Count
+	}
+	if mutationCount != parameters.RecordCount {
+		v.add("%s step %s workload mutation counts total %d, want record_count %d", v.scenario.ID, step.ID, mutationCount, parameters.RecordCount)
+	}
+
+	expectation := parameters.Expectation
+	if expectation.OperationCount != parameters.RecordCount {
+		v.add("%s step %s workload expected operation_count %d, want record_count %d", v.scenario.ID, step.ID, expectation.OperationCount, parameters.RecordCount)
+	}
+	if parameters.BatchSize != 0 {
+		wantBatches := (parameters.RecordCount + parameters.BatchSize - 1) / parameters.BatchSize
+		if expectation.BatchCount != wantBatches {
+			v.add("%s step %s workload expected batch_count %d, want %d", v.scenario.ID, step.ID, expectation.BatchCount, wantBatches)
+		}
+	}
+	if !isNativeSHA256(expectation.OperationDigest) {
+		v.add("%s step %s workload expected operation_digest is invalid", v.scenario.ID, step.ID)
+	}
+	actualScopes := make(map[string]uint64, len(expectation.PerScopeCardinalities))
+	seenScopes := make(map[string]struct{}, len(expectation.PerScopeCardinalities))
+	for _, cardinality := range expectation.PerScopeCardinalities {
+		if !nativeClientKeyPattern.MatchString(cardinality.ScopeID) || cardinality.Cardinality == 0 || cardinality.Cardinality > maxNativeWorkloadRecords {
+			v.add("%s step %s workload expected scope cardinality is invalid", v.scenario.ID, step.ID)
+		}
+		if _, duplicate := seenScopes[cardinality.ScopeID]; duplicate {
+			v.add("%s step %s workload repeats expected scope %q", v.scenario.ID, step.ID, cardinality.ScopeID)
+		}
+		seenScopes[cardinality.ScopeID] = struct{}{}
+		actualScopes[cardinality.ScopeID] = cardinality.Cardinality
+	}
+	if !nativeWorkloadScopeCardinalitiesEqual(expectedScopes, actualScopes) {
+		v.add("%s step %s workload expected per-scope cardinalities do not close generated targets", v.scenario.ID, step.ID)
+	}
+}
+
+func nativeWorkloadScopeCardinalitiesEqual(left, right map[string]uint64) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for scopeID, cardinality := range left {
+		if right[scopeID] != cardinality {
+			return false
+		}
+	}
+	return true
+}
+
+func isNativeSHA256(value string) bool {
+	decoded, err := hex.DecodeString(value)
+	return err == nil && len(decoded) == sha256.Size && hex.EncodeToString(decoded) == value
 }
 
 func (v *scenarioValidator) validateNativeLifecycleBoundaries() {
@@ -449,6 +596,8 @@ func nativeBindingOwnsOperation(kind string, step Step) bool {
 		return key == "process/restart-client"
 	case "public-call":
 		return step.Transport == "http" || step.Operation.ContractOperation == "local" && key != "local/write" || key == "process/response-loss"
+	case "workload":
+		return key == "workload/prepare"
 	default:
 		return false
 	}
@@ -494,6 +643,9 @@ func (v *scenarioValidator) validateNativeBindingShape(step Step, binding Native
 	} else if hasCall || binding.Stage != "" || binding.Method != "" || binding.Completion != "" {
 		v.add("%s step %s native binding %q must not contain public call fields", v.scenario.ID, step.ID, binding.Kind)
 	}
+	if binding.Kind != "workload" && binding.Workload != nil {
+		v.add("%s step %s native binding %q must not contain workload parameters", v.scenario.ID, step.ID, binding.Kind)
+	}
 
 	switch binding.Kind {
 	case "artifact", "local-write", "process", "public-call":
@@ -502,6 +654,10 @@ func (v *scenarioValidator) validateNativeBindingShape(step Step, binding Native
 			v.add("%s step %s cannot resolve native client identity: %v", v.scenario.ID, step.ID, err)
 		} else if !hasIdentity || userID != binding.UserID || clientID != binding.ClientID {
 			v.add("%s step %s native binding client identity does not match the authored operation", v.scenario.ID, step.ID)
+		}
+	case "workload":
+		if OperationKey(step.Operation) != "workload/prepare" {
+			v.add("%s step %s workload native binding requires workload/prepare", v.scenario.ID, step.ID)
 		}
 	}
 	if binding.Kind == "controller" && step.Operation.ContractOperation == "workload" {

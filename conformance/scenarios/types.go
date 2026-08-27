@@ -468,13 +468,59 @@ type Step struct {
 // NativeStepBinding maps one authored step to its real native proof boundary.
 // Equal call IDs identify effects from one public client call.
 type NativeStepBinding struct {
-	Kind       string        `json:"kind"`
-	UserID     string        `json:"user_id,omitempty"`
-	ClientID   string        `json:"client_id,omitempty"`
-	CallID     *NativeCallID `json:"call_id,omitempty"`
-	Stage      string        `json:"stage,omitempty"`
-	Method     string        `json:"method,omitempty"`
-	Completion string        `json:"completion,omitempty"`
+	Kind       string                    `json:"kind"`
+	UserID     string                    `json:"user_id,omitempty"`
+	ClientID   string                    `json:"client_id,omitempty"`
+	CallID     *NativeCallID             `json:"call_id,omitempty"`
+	Stage      string                    `json:"stage,omitempty"`
+	Method     string                    `json:"method,omitempty"`
+	Completion string                    `json:"completion,omitempty"`
+	Workload   *NativeWorkloadParameters `json:"workload,omitempty"`
+}
+
+// NativeWorkloadParameters are consumed by validateNativeWorkload and
+// deriveNativeWorkload. They describe one bounded local-write set.
+type NativeWorkloadParameters struct {
+	RecordCount    uint64                       `json:"record_count"`
+	BatchSize      uint64                       `json:"batch_size"`
+	Seed           uint64                       `json:"seed"`
+	AuthoredSchema SchemaFact                   `json:"authored_schema"`
+	ClientVersion  string                       `json:"client_version"`
+	Targets        []NativeWorkloadTarget       `json:"targets"`
+	MutationKinds  []NativeWorkloadMutationKind `json:"mutation_kinds"`
+	Expectation    NativeWorkloadExpectation    `json:"expectation"`
+}
+
+// NativeWorkloadTarget is consumed by validateNativeWorkload and
+// deriveNativeWorkload. It assigns generated records to one scope and table.
+type NativeWorkloadTarget struct {
+	ScopeID           string `json:"scope_id"`
+	TableID           string `json:"table_id"`
+	PrimaryKeyFieldID string `json:"primary_key_field_id"`
+}
+
+// NativeWorkloadMutationKind is consumed by validateNativeWorkload and
+// deriveNativeWorkload. It groups generated insert records by writable fields.
+type NativeWorkloadMutationKind struct {
+	Operation string   `json:"operation"`
+	Count     uint64   `json:"count"`
+	FieldIDs  []string `json:"field_ids"`
+}
+
+// NativeWorkloadExpectation is consumed by validateNativeWorkload and
+// deriveNativeWorkload. It closes the generated set without row aliases.
+type NativeWorkloadExpectation struct {
+	OperationCount        uint64                           `json:"operation_count"`
+	BatchCount            uint64                           `json:"batch_count"`
+	OperationDigest       string                           `json:"operation_digest"`
+	PerScopeCardinalities []NativeWorkloadScopeCardinality `json:"per_scope_cardinalities"`
+}
+
+// NativeWorkloadScopeCardinality is consumed by validateNativeWorkload and
+// deriveNativeWorkload. It binds one generated scope to its record count.
+type NativeWorkloadScopeCardinality struct {
+	ScopeID     string `json:"scope_id"`
+	Cardinality uint64 `json:"cardinality"`
 }
 
 type ExpectedOutcome struct {

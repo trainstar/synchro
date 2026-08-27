@@ -185,13 +185,14 @@
       "additionalProperties": false,
       "required": ["kind"],
       "properties": {
-        "kind": { "type": "string", "enum": ["controller", "artifact", "local-write", "public-call", "process"] },
+        "kind": { "type": "string", "enum": ["controller", "artifact", "local-write", "public-call", "process", "workload"] },
         "user_id": { "type": "string", "minLength": 1 },
         "client_id": { "type": "string", "minLength": 1 },
         "call_id": { "$ref": "#/$defs/nativeCallId" },
         "stage": { "type": "string", "enum": ["synchronous", "begin", "await-step", "await-call"] },
         "method": { "type": "string", "enum": ["start", "sync-now", "retry-after-error", "reset-schema-and-start"] },
-        "completion": { "type": "string", "enum": ["idle", "blocked", "error"] }
+        "completion": { "type": "string", "enum": ["idle", "blocked", "error"] },
+        "workload": { "$ref": "#/$defs/nativeWorkloadParameters" }
       },
       "allOf": [
         {
@@ -256,8 +257,92 @@
               ]
             }
           }
+        },
+        {
+          "if": { "properties": { "kind": { "const": "workload" } }, "required": ["kind"] },
+          "then": { "required": ["workload"] },
+          "else": { "not": { "required": ["workload"] } }
         }
       ]
+    },
+    "nativeWorkloadParameters": {
+      "description": "One bounded deterministic local-write generator. Native manifest derivation consumes this object.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["record_count", "batch_size", "seed", "authored_schema", "client_version", "targets", "mutation_kinds", "expectation"],
+      "properties": {
+        "record_count": { "type": "integer", "minimum": 1, "maximum": 1000 },
+        "batch_size": { "type": "integer", "minimum": 1, "maximum": 1000 },
+        "seed": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 },
+        "authored_schema": { "$ref": "#/$defs/schemaFact" },
+        "client_version": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "targets": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 8,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/nativeWorkloadTarget" }
+        },
+        "mutation_kinds": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 8,
+          "items": { "$ref": "#/$defs/nativeWorkloadMutationKind" }
+        },
+        "expectation": { "$ref": "#/$defs/nativeWorkloadExpectation" }
+      }
+    },
+    "nativeWorkloadTarget": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["scope_id", "table_id", "primary_key_field_id"],
+      "properties": {
+        "scope_id": { "$ref": "#/$defs/nativeClientKey" },
+        "table_id": { "$ref": "#/$defs/nativeClientKey" },
+        "primary_key_field_id": { "$ref": "#/$defs/nativeClientKey" }
+      }
+    },
+    "nativeWorkloadMutationKind": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["operation", "count", "field_ids"],
+      "properties": {
+        "operation": { "const": "insert" },
+        "count": { "type": "integer", "minimum": 1, "maximum": 1000 },
+        "field_ids": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 16,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/nativeClientKey" }
+        }
+      }
+    },
+    "nativeWorkloadExpectation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["operation_count", "batch_count", "operation_digest", "per_scope_cardinalities"],
+      "properties": {
+        "operation_count": { "type": "integer", "minimum": 1, "maximum": 1000 },
+        "batch_count": { "type": "integer", "minimum": 1, "maximum": 1000 },
+        "operation_digest": { "$ref": "#/$defs/sha256" },
+        "per_scope_cardinalities": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 8,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/nativeWorkloadScopeCardinality" }
+        }
+      }
+    },
+    "nativeWorkloadScopeCardinality": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["scope_id", "cardinality"],
+      "properties": {
+        "scope_id": { "$ref": "#/$defs/nativeClientKey" },
+        "cardinality": { "type": "integer", "minimum": 1, "maximum": 1000 }
+      }
     },
     "nativeIdentityAlias": {
       "description": "One typed authored identity value that a native proof resolves to one runtime value.",

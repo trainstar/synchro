@@ -205,6 +205,95 @@ func TestValidateNativeStepBindingsRejectResumedCallAndWorkloadMacro(t *testing.
 	}
 }
 
+func TestValidateNativeWorkloadBindingRejectsBoundAndNondeterministicParameters(t *testing.T) {
+	bundle, err := contract.Load(context.Background(), "../../")
+	if err != nil {
+		t.Fatalf("load authored contract: %v", err)
+	}
+	base := boundNativeWorkloadScenario()
+	if err := Validate(base, bundle); err != nil {
+		t.Fatalf("validate native workload binding: %v", err)
+	}
+
+	tests := []struct {
+		name     string
+		mutate   func(*Scenario)
+		category string
+	}{
+		{"over-bound record count", func(s *Scenario) {
+			s.Steps[0].NativeBinding.Workload.RecordCount = maxNativeWorkloadRecords + 1
+		}, "record_count must be between"},
+		{"nondeterministic seed", func(s *Scenario) {
+			s.Steps[0].NativeBinding.Workload.Seed = 0
+		}, "seed must be nonzero and deterministic"},
+		{"inexact JSON seed", func(s *Scenario) {
+			s.Steps[0].NativeBinding.Workload.Seed = maxNativeWorkloadSeed + 1
+		}, "seed must be nonzero and deterministic"},
+		{"generated row alias", func(s *Scenario) {
+			s.NativeIdentityAliases[0].StepIDs = []StepID{s.Steps[0].ID}
+			s.NativeIdentityAliases[0].ExpectationIDs = nil
+		}, "must not bind generated workload step"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			scenario := cloneScenario(base)
+			test.mutate(&scenario)
+			if err := requireErrorCategory(Validate(scenario, bundle), test.category); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+func TestNativeWorkloadSchemaRejectsOutOfBoundAndNondeterministicParameters(t *testing.T) {
+	base, err := LoadFile(
+		context.Background(),
+		"../../",
+		"conformance/scenarios/performance/queue-replay-001.json",
+	)
+	if err != nil {
+		t.Fatalf("load schema-valid workload source: %v", err)
+	}
+	workloadSource := boundNativeWorkloadScenario()
+	base.NativeExecution = nil
+	base.NativeIdentityAliases = workloadSource.NativeIdentityAliases
+	base.NativeIdentityAliases[0].StepIDs = []StepID{}
+	for index := range base.Steps {
+		base.Steps[index].NativeBinding = &NativeStepBinding{Kind: "controller"}
+	}
+	base.Steps[0].NativeBinding = workloadSource.Steps[0].NativeBinding
+	encode := func(s Scenario) []byte {
+		t.Helper()
+		data, err := json.Marshal(s)
+		if err != nil {
+			t.Fatalf("encode native workload scenario: %v", err)
+		}
+		return data
+	}
+	path := "conformance/scenarios/testing/native-workload.json"
+	if _, err := LoadBytes(context.Background(), "../../", path, encode(base)); err != nil {
+		t.Fatalf("load schema-valid native workload: %v", err)
+	}
+
+	tests := []struct {
+		name   string
+		mutate func(*Scenario)
+	}{
+		{"over-bound count", func(s *Scenario) { s.Steps[0].NativeBinding.Workload.RecordCount = maxNativeWorkloadRecords + 1 }},
+		{"nondeterministic seed", func(s *Scenario) { s.Steps[0].NativeBinding.Workload.Seed = 0 }},
+		{"inexact JSON seed", func(s *Scenario) { s.Steps[0].NativeBinding.Workload.Seed = maxNativeWorkloadSeed + 1 }},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			scenario := cloneScenario(base)
+			test.mutate(&scenario)
+			if _, err := LoadBytes(context.Background(), "../../", path, encode(scenario)); err == nil {
+				t.Fatal("schema accepted invalid native workload parameters")
+			}
+		})
+	}
+}
+
 func TestValidateNativeStepBindingsPermitStagedCallAroundControllerOperations(t *testing.T) {
 	bundle, err := contract.Load(context.Background(), "../../")
 	if err != nil {
@@ -927,6 +1016,46 @@ func boundNativeTimeScenario() Scenario {
 		Method:     "start",
 		Completion: "idle",
 	}
+	return scenario
+}
+
+func boundNativeWorkloadScenario() Scenario {
+	scenario := boundNativeTimeScenario()
+	workload := &NativeWorkloadParameters{
+		RecordCount:    2,
+		BatchSize:      2,
+		Seed:           101,
+		AuthoredSchema: SchemaFact{Version: 1, Hash: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+		ClientVersion:  "2026-08-11T00:00:00.000000Z",
+		Targets: []NativeWorkloadTarget{{
+			ScopeID:           "scope-a",
+			TableID:           "items",
+			PrimaryKeyFieldID: "id",
+		}},
+		MutationKinds: []NativeWorkloadMutationKind{
+			{Operation: "insert", Count: 1, FieldIDs: []string{"value"}},
+			{Operation: "insert", Count: 1, FieldIDs: []string{"obsolete_value"}},
+		},
+		Expectation: NativeWorkloadExpectation{
+			OperationCount:  2,
+			BatchCount:      1,
+			OperationDigest: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+			PerScopeCardinalities: []NativeWorkloadScopeCardinality{{
+				ScopeID:     "scope-a",
+				Cardinality: 2,
+			}},
+		},
+	}
+	scenario.Steps[0].Transport = "model"
+	scenario.Steps[0].Operation = Operation{ContractOperation: "workload", Name: "prepare", Payload: json.RawMessage(`{"profile":"pending_mutations","user_id":"user-a","client_id":"client-a","table_id":"items","accepted_count":1,"rejected_count":1}`)}
+	scenario.Steps[0].NativeBinding = &NativeStepBinding{Kind: "workload", UserID: "user-a", ClientID: "client-a", Workload: workload}
+	scenario.WireExpectations = nil
+	scenario.NativeIdentityAliases = []NativeIdentityAlias{{
+		Kind:           "schema",
+		Alias:          "schema-a",
+		Value:          json.RawMessage(`{"version":1,"hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}`),
+		ExpectationIDs: []ExpectationID{"EXPECT-TIME-001"},
+	}}
 	return scenario
 }
 

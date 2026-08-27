@@ -171,6 +171,17 @@ func deriveNativePlan(scenario scenarios.Scenario, obligation scenarios.ProofObl
 			if err := add(step.Phase, "client", "execute-step", []scenarios.StepID{step.ID}, scenarios.NativeClientParameters{ClientKey: key}); err != nil {
 				return nativePlan{}, err
 			}
+		case "workload":
+			key, err := clientKey(binding)
+			if err != nil {
+				return nativePlan{}, err
+			}
+			if err := ensureOpen(step.Phase, key); err != nil {
+				return nativePlan{}, err
+			}
+			if err := add(step.Phase, "client", "execute-step", []scenarios.StepID{step.ID}, scenarios.NativeClientParameters{ClientKey: key}); err != nil {
+				return nativePlan{}, err
+			}
 		case "process":
 			key, err := clientKey(binding)
 			if err != nil {

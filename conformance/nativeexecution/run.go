@@ -137,7 +137,11 @@ func BuildManifest(selection Selection) (Manifest, error) {
 				}
 				coveredSteps[stepID] = struct{}{}
 				if scenarios.OperationKey(step.Operation) == "workload/prepare" {
-					return Manifest{}, fmt.Errorf("native workload step %s has no direct operation", stepID)
+					expansion, err := deriveNativeWorkload(step)
+					if err != nil {
+						return Manifest{}, err
+					}
+					resolved.WorkloadExpansions = map[scenarios.StepID][]scenarios.Operation{step.ID: expansion}
 				}
 				if sample, found := stepSamples[step.ID]; found {
 					copy := sample
