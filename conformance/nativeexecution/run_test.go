@@ -13,7 +13,7 @@ import (
 )
 
 func TestRunDispatchesByCapabilityInsteadOfActionIdentityOrPosition(t *testing.T) {
-	actions := []scenarios.NativeAction{
+	actions := []Action{
 		{
 			ID:            "NACT-DISPATCH-INSTALL-901",
 			Phase:         "setup",
@@ -67,7 +67,7 @@ func TestRunCentrallyFailsRawStepMismatch(t *testing.T) {
 		Operation:       scenarios.Operation{ContractOperation: "connect", Name: "send", Payload: json.RawMessage(`{}`)},
 		ExpectedOutcome: scenarios.ExpectedOutcome{Disposition: "success"},
 	}
-	action := scenarios.NativeAction{
+	action := Action{
 		ID:            "NACT-CENTRAL-STEP-001",
 		Phase:         "exercise",
 		Actor:         "client",
@@ -76,7 +76,7 @@ func TestRunCentrallyFailsRawStepMismatch(t *testing.T) {
 		Parameters:    json.RawMessage(`{"client_key":"client-secret","method":"start","completion":"idle"}`),
 	}
 	wire := scenarios.WireExpectation{StepID: step.ID, HTTPStatus: 200}
-	selection := testSelection([]scenarios.NativeAction{action}, []scenarios.Step{step}, []scenarios.WireExpectation{wire}, nil)
+	selection := testSelection([]Action{action}, []scenarios.Step{step}, []scenarios.WireExpectation{wire}, nil)
 	executor := executorFunc(func(context.Context, ExecuteRequest) (ActionResult, error) {
 		return ActionResult{
 			StepObservations: []StepObservation{{
@@ -106,7 +106,7 @@ func TestRunRequiresAndCentrallyEvaluatesSynchronizationResult(t *testing.T) {
 		Phase:           "exercise",
 		ExpectedOutcome: scenarios.ExpectedOutcome{Disposition: "success"},
 	}
-	action := scenarios.NativeAction{
+	action := Action{
 		ID:            "NACT-SYNCHRONIZATION-001",
 		Phase:         "exercise",
 		Actor:         "client",
@@ -114,7 +114,7 @@ func TestRunRequiresAndCentrallyEvaluatesSynchronizationResult(t *testing.T) {
 		CoversStepIDs: []scenarios.StepID{step.ID},
 		Parameters:    json.RawMessage(`{"client_key":"client-secret","method":"start","completion":"idle"}`),
 	}
-	selection := testSelection([]scenarios.NativeAction{action}, []scenarios.Step{step}, nil, nil)
+	selection := testSelection([]Action{action}, []scenarios.Step{step}, nil, nil)
 	stepObservation := []StepObservation{{StepID: step.ID, Disposition: "success"}}
 
 	t.Run("missing", func(t *testing.T) {
@@ -155,7 +155,7 @@ func TestRunRequiresAndCentrallyEvaluatesSynchronizationResult(t *testing.T) {
 }
 
 func TestRunRejectsSynchronizationResultOnOtherCommand(t *testing.T) {
-	action := scenarios.NativeAction{
+	action := Action{
 		ID:            "NACT-SYNCHRONIZATION-UNBOUND-001",
 		Phase:         "setup",
 		Actor:         "client",
@@ -166,7 +166,7 @@ func TestRunRejectsSynchronizationResultOnOtherCommand(t *testing.T) {
 	executor := executorFunc(func(context.Context, ExecuteRequest) (ActionResult, error) {
 		return ActionResult{Synchronization: &SynchronizationResult{Completion: "idle"}}, nil
 	})
-	trace, err := Run(context.Background(), testSelection([]scenarios.NativeAction{action}, nil, nil, nil), executor)
+	trace, err := Run(context.Background(), testSelection([]Action{action}, nil, nil, nil), executor)
 	if err == nil || trace.Outcome != OutcomeError {
 		t.Fatalf("unbound synchronization result: trace=%+v err=%v", trace, err)
 	}
@@ -177,7 +177,7 @@ func TestRunRejectsMissingExtraDuplicateAndUnboundStepFacts(t *testing.T) {
 		{ID: "STEP-CLOSURE-001", Phase: "exercise", ExpectedOutcome: scenarios.ExpectedOutcome{Disposition: "success"}},
 		{ID: "STEP-CLOSURE-002", Phase: "exercise", ExpectedOutcome: scenarios.ExpectedOutcome{Disposition: "success"}},
 	}
-	action := scenarios.NativeAction{
+	action := Action{
 		ID:            "NACT-CLOSURE-001",
 		Phase:         "exercise",
 		Actor:         "client",
@@ -185,7 +185,7 @@ func TestRunRejectsMissingExtraDuplicateAndUnboundStepFacts(t *testing.T) {
 		CoversStepIDs: []scenarios.StepID{steps[0].ID, steps[1].ID},
 		Parameters:    json.RawMessage(`{"client_key":"client-secret","method":"start","completion":"idle"}`),
 	}
-	selection := testSelection([]scenarios.NativeAction{action}, steps, nil, nil)
+	selection := testSelection([]Action{action}, steps, nil, nil)
 	tests := []struct {
 		name         string
 		observations []StepObservation
@@ -226,7 +226,7 @@ func TestRunComparesOnlyAuthoredStateFactProjection(t *testing.T) {
 		},
 		StateFacts: &want,
 	}
-	action := scenarios.NativeAction{
+	action := Action{
 		ID:            "NACT-CAPTURE-001",
 		Phase:         "verify",
 		Actor:         "observer",
@@ -234,7 +234,7 @@ func TestRunComparesOnlyAuthoredStateFactProjection(t *testing.T) {
 		CoversStepIDs: []scenarios.StepID{},
 		Parameters:    json.RawMessage(`{"client_keys":[],"sources":["server-state"],"expectation_ids":["EXPECT-CAPTURE-001"]}`),
 	}
-	selection := testSelection([]scenarios.NativeAction{action}, nil, nil, []scenarios.ModelExpectation{expectation})
+	selection := testSelection([]Action{action}, nil, nil, []scenarios.ModelExpectation{expectation})
 	observedCount := uint64(1)
 	observed := scenarios.StateFacts{
 		RowCount: &observedCount,
@@ -274,7 +274,7 @@ func TestRunCentrallyFailsAuthoredStateFactMismatch(t *testing.T) {
 		Predicate:  scenarios.Predicate{ContractPredicate: "state-equality", Name: "state-equals-authored-model", Payload: json.RawMessage(`{}`)},
 		StateFacts: &want,
 	}
-	action := scenarios.NativeAction{
+	action := Action{
 		ID:            "NACT-CAPTURE-FAIL-001",
 		Phase:         "verify",
 		Actor:         "observer",
@@ -282,7 +282,7 @@ func TestRunCentrallyFailsAuthoredStateFactMismatch(t *testing.T) {
 		CoversStepIDs: []scenarios.StepID{},
 		Parameters:    json.RawMessage(`{"client_keys":[],"sources":["server-state"],"expectation_ids":["EXPECT-CAPTURE-FAIL-001"]}`),
 	}
-	selection := testSelection([]scenarios.NativeAction{action}, nil, nil, []scenarios.ModelExpectation{expectation})
+	selection := testSelection([]Action{action}, nil, nil, []scenarios.ModelExpectation{expectation})
 	observedCount := uint64(2)
 	executor := executorFunc(func(context.Context, ExecuteRequest) (ActionResult, error) {
 		return ActionResult{CaptureObservation: &CaptureObservation{
@@ -308,7 +308,7 @@ func TestRunRejectsDuplicateFactsOutsideAuthoredProjection(t *testing.T) {
 		Predicate:  scenarios.Predicate{ContractPredicate: "state-equality", Name: "state-equals-authored-model", Payload: json.RawMessage(`{}`)},
 		StateFacts: &want,
 	}
-	action := scenarios.NativeAction{
+	action := Action{
 		ID:            "NACT-DUPLICATE-001",
 		Phase:         "verify",
 		Actor:         "observer",
@@ -316,7 +316,7 @@ func TestRunRejectsDuplicateFactsOutsideAuthoredProjection(t *testing.T) {
 		CoversStepIDs: []scenarios.StepID{},
 		Parameters:    json.RawMessage(`{"client_keys":[],"sources":["server-state"],"expectation_ids":["EXPECT-DUPLICATE-001"]}`),
 	}
-	selection := testSelection([]scenarios.NativeAction{action}, nil, nil, []scenarios.ModelExpectation{expectation})
+	selection := testSelection([]Action{action}, nil, nil, []scenarios.ModelExpectation{expectation})
 	client := scenarios.ClientDurabilityFact{UserID: "user-owned-secret", ClientID: "client-owned-secret"}
 	executor := executorFunc(func(context.Context, ExecuteRequest) (ActionResult, error) {
 		return ActionResult{CaptureObservation: &CaptureObservation{
@@ -338,7 +338,7 @@ func TestRunRejectsDuplicateFactsOutsideAuthoredProjection(t *testing.T) {
 }
 
 func TestRunRequiresProcessIdentityAndDatabaseContinuityEvidence(t *testing.T) {
-	open := scenarios.NativeAction{
+	open := Action{
 		ID:            "NACT-PROCESS-OPEN-001",
 		Phase:         "setup",
 		Actor:         "client",
@@ -346,7 +346,7 @@ func TestRunRequiresProcessIdentityAndDatabaseContinuityEvidence(t *testing.T) {
 		CoversStepIDs: []scenarios.StepID{},
 		Parameters:    json.RawMessage(`{"client_key":"client-secret","database_mode":"create","seed_step_id":null}`),
 	}
-	terminate := scenarios.NativeAction{
+	terminate := Action{
 		ID:            "NACT-PROCESS-TERMINATE-002",
 		Phase:         "exercise",
 		Actor:         "process",
@@ -354,7 +354,7 @@ func TestRunRequiresProcessIdentityAndDatabaseContinuityEvidence(t *testing.T) {
 		CoversStepIDs: []scenarios.StepID{},
 		Parameters:    json.RawMessage(`{"client_key":"client-secret","boundary":"queue-inserted","after_action_id":"NACT-PROCESS-OPEN-001"}`),
 	}
-	relaunch := scenarios.NativeAction{
+	relaunch := Action{
 		ID:            "NACT-PROCESS-RELAUNCH-003",
 		Phase:         "exercise",
 		Actor:         "process",
@@ -362,7 +362,7 @@ func TestRunRequiresProcessIdentityAndDatabaseContinuityEvidence(t *testing.T) {
 		CoversStepIDs: []scenarios.StepID{},
 		Parameters:    json.RawMessage(`{"client_key":"client-secret","boundary":"queue-inserted","after_action_id":"NACT-PROCESS-TERMINATE-002"}`),
 	}
-	selection := testSelection([]scenarios.NativeAction{open, terminate, relaunch}, nil, nil, nil)
+	selection := testSelection([]Action{open, terminate, relaunch}, nil, nil, nil)
 	fingerprint := strings.Repeat("c", 64)
 	currentProcess := "process-2"
 	executor := executorFunc(func(_ context.Context, request ExecuteRequest) (ActionResult, error) {
@@ -400,7 +400,7 @@ func TestRunRequiresProcessIdentityAndDatabaseContinuityEvidence(t *testing.T) {
 }
 
 func TestRunRejectsEchoOnlyAndDiscontinuousProcessEvidence(t *testing.T) {
-	open := scenarios.NativeAction{
+	open := Action{
 		ID:            "NACT-PROCESS-FAIL-OPEN-001",
 		Phase:         "setup",
 		Actor:         "client",
@@ -408,7 +408,7 @@ func TestRunRejectsEchoOnlyAndDiscontinuousProcessEvidence(t *testing.T) {
 		CoversStepIDs: []scenarios.StepID{},
 		Parameters:    json.RawMessage(`{"client_key":"client-secret","database_mode":"create","seed_step_id":null}`),
 	}
-	terminate := scenarios.NativeAction{
+	terminate := Action{
 		ID:            "NACT-PROCESS-FAIL-TERMINATE-002",
 		Phase:         "exercise",
 		Actor:         "process",
@@ -416,7 +416,7 @@ func TestRunRejectsEchoOnlyAndDiscontinuousProcessEvidence(t *testing.T) {
 		CoversStepIDs: []scenarios.StepID{},
 		Parameters:    json.RawMessage(`{"client_key":"client-secret","boundary":"queue-inserted","after_action_id":"NACT-PROCESS-FAIL-OPEN-001"}`),
 	}
-	relaunch := scenarios.NativeAction{
+	relaunch := Action{
 		ID:            "NACT-PROCESS-FAIL-RELAUNCH-003",
 		Phase:         "exercise",
 		Actor:         "process",
@@ -426,7 +426,7 @@ func TestRunRejectsEchoOnlyAndDiscontinuousProcessEvidence(t *testing.T) {
 	}
 
 	t.Run("echo only termination", func(t *testing.T) {
-		selection := testSelection([]scenarios.NativeAction{open, terminate}, nil, nil, nil)
+		selection := testSelection([]Action{open, terminate}, nil, nil, nil)
 		executor := executorFunc(func(_ context.Context, request ExecuteRequest) (ActionResult, error) {
 			if request.Action.Command == "terminate" {
 				return ActionResult{ProcessBoundary: &ProcessBoundaryResult{
@@ -452,7 +452,7 @@ func TestRunRejectsEchoOnlyAndDiscontinuousProcessEvidence(t *testing.T) {
 		{name: "changed database", currentProcess: "process-2", relaunchFingerprint: strings.Repeat("e", 64)},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			selection := testSelection([]scenarios.NativeAction{open, terminate, relaunch}, nil, nil, nil)
+			selection := testSelection([]Action{open, terminate, relaunch}, nil, nil, nil)
 			terminationFingerprint := strings.Repeat("d", 64)
 			executor := executorFunc(func(_ context.Context, request ExecuteRequest) (ActionResult, error) {
 				switch request.Action.Command {
@@ -515,7 +515,7 @@ func TestRunBoundsExecutorErrorsAndPreservesCause(t *testing.T) {
 	executor := executorFunc(func(context.Context, ExecuteRequest) (ActionResult, error) {
 		return ActionResult{}, cause
 	})
-	action := scenarios.NativeAction{
+	action := Action{
 		ID:            "NACT-ERROR-001",
 		Phase:         "setup",
 		Actor:         "client",
@@ -523,7 +523,7 @@ func TestRunBoundsExecutorErrorsAndPreservesCause(t *testing.T) {
 		CoversStepIDs: []scenarios.StepID{},
 		Parameters:    json.RawMessage(`{"client_key":"client-secret","database_mode":"create","seed_step_id":null}`),
 	}
-	_, err := Run(context.Background(), testSelection([]scenarios.NativeAction{action}, nil, nil, nil), executor)
+	_, err := Run(context.Background(), testSelection([]Action{action}, nil, nil, nil), executor)
 	if err == nil || !errors.Is(err, cause) {
 		t.Fatalf("executor cause = %v", err)
 	}
@@ -538,7 +538,7 @@ func (function executorFunc) Execute(ctx context.Context, request ExecuteRequest
 	return function(ctx, request)
 }
 
-func testSelection(actions []scenarios.NativeAction, steps []scenarios.Step, wire []scenarios.WireExpectation, expectations []scenarios.ModelExpectation) Selection {
+func testSelection(actions []Action, steps []scenarios.Step, wire []scenarios.WireExpectation, expectations []scenarios.ModelExpectation) Selection {
 	supportCell := contract.SupportCellID("SUP-IOS-MIN-001")
 	return Selection{
 		scenario: scenarios.Scenario{
@@ -546,16 +546,6 @@ func testSelection(actions []scenarios.NativeAction, steps []scenarios.Step, wir
 			Model:            scenarios.ModelSpec{Setup: []scenarios.Operation{{ContractOperation: "model", Name: "install-current-contract", Payload: json.RawMessage(`{}`)}}, ExpectedState: expectations},
 			Steps:            steps,
 			WireExpectations: wire,
-			NativeExecution: &scenarios.NativeExecutionPlan{
-				Version: 1,
-				Clients: []scenarios.NativeClient{{
-					Key:         "client-secret",
-					UserID:      "user-owned-secret",
-					ClientID:    "client-owned-secret",
-					DatabaseKey: "database-secret",
-				}},
-				Actions: actions,
-			},
 		},
 		obligation: scenarios.ProofObligation{
 			ObligationID:  "OBL-NATIVE-CENTRAL-001",
@@ -568,5 +558,14 @@ func testSelection(actions []scenarios.NativeAction, steps []scenarios.Step, wir
 		platform:                 "ios",
 		digest:                   strings.Repeat("a", 64),
 		performanceCatalogSHA256: strings.Repeat("b", 64),
+		plan: nativePlan{
+			clients: []scenarios.NativeClient{{
+				Key:         "client-secret",
+				UserID:      "user-owned-secret",
+				ClientID:    "client-owned-secret",
+				DatabaseKey: "database-secret",
+			}},
+			actions: actions,
+		},
 	}
 }

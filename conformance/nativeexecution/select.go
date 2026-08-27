@@ -7,7 +7,6 @@ import (
 	"fmt"
 
 	"github.com/trainstar/synchro/conformance/internal/contract"
-	"github.com/trainstar/synchro/conformance/modelrunner"
 	"github.com/trainstar/synchro/conformance/scenarios"
 	"github.com/trainstar/synchro/conformance/vectors"
 )
@@ -23,7 +22,7 @@ type Selection struct {
 	performanceCatalogSHA256 string
 	performanceBudgets       []contract.PerformanceBudget
 	requiredMeasurements     []contract.RequiredMeasurement
-	workloadExpansions       map[scenarios.StepID][]scenarios.Operation
+	plan                     nativePlan
 }
 
 // Select validates the complete authored corpus and selects one native obligation.
@@ -105,9 +104,6 @@ func Select(ctx context.Context, repoRoot, scenarioID, supportCellID string) (Se
 	if selectedObligation == nil {
 		return Selection{}, fmt.Errorf("native scenario %s has no obligation for support cell %s", scenarioID, supportCellID)
 	}
-	if selectedScenario.NativeExecution == nil {
-		return Selection{}, fmt.Errorf("native scenario %s has no execution plan", scenarioID)
-	}
 	digest := scenarios.SHA256(*selectedScenario)
 	if digest == "" {
 		return Selection{}, fmt.Errorf("native scenario %s lost its catalog binding", scenarioID)
@@ -116,21 +112,9 @@ func Select(ctx context.Context, repoRoot, scenarioID, supportCellID string) (Se
 	if err != nil {
 		return Selection{}, err
 	}
-	modelResult, err := modelrunner.RunScenario(ctx, *selectedScenario)
+	plan, err := deriveNativePlan(*selectedScenario, *selectedObligation)
 	if err != nil {
-		return Selection{}, fmt.Errorf("resolve native workload operations: %w", err)
-	}
-	workloadExpansions := make(map[scenarios.StepID][]scenarios.Operation)
-	for _, execution := range modelResult.Steps {
-		if len(execution.Expanded) == 0 {
-			continue
-		}
-		operations := make([]scenarios.Operation, len(execution.Expanded))
-		for index, operation := range execution.Expanded {
-			operations[index] = operation
-			operations[index].Payload = append([]byte(nil), operation.Payload...)
-		}
-		workloadExpansions[execution.StepID] = operations
+		return Selection{}, fmt.Errorf("derive native actions: %w", err)
 	}
 
 	return Selection{
@@ -143,7 +127,7 @@ func Select(ctx context.Context, repoRoot, scenarioID, supportCellID string) (Se
 		performanceCatalogSHA256: performanceBinding.SHA256(),
 		performanceBudgets:       budgets,
 		requiredMeasurements:     measurements,
-		workloadExpansions:       workloadExpansions,
+		plan:                     plan,
 	}, nil
 }
 

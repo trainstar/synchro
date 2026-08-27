@@ -47,10 +47,21 @@ type Manifest struct {
 	Actions                  []ManifestAction               `json:"actions"`
 }
 
+// Action is one derived native driver operation.
+// It exists only in the generated manifest and is not authored scenario data.
+type Action struct {
+	ID            scenarios.NativeActionID `json:"id"`
+	Phase         string                   `json:"phase"`
+	Actor         string                   `json:"actor"`
+	Command       string                   `json:"command"`
+	CoversStepIDs []scenarios.StepID       `json:"covers_step_ids"`
+	Parameters    json.RawMessage          `json:"parameters"`
+}
+
 // ManifestAction resolves one native action to its immutable scenario input.
 type ManifestAction struct {
 	Sequence           int                                        `json:"sequence"`
-	Action             scenarios.NativeAction                     `json:"action"`
+	Action             Action                                     `json:"action"`
 	SetupOperation     *scenarios.Operation                       `json:"setup_operation,omitempty"`
 	Steps              []scenarios.Step                           `json:"steps,omitempty"`
 	WorkloadExpansions map[scenarios.StepID][]scenarios.Operation `json:"workload_expansions,omitempty"`
@@ -60,7 +71,7 @@ type ManifestAction struct {
 
 // BuildManifest resolves a validated selection into one transport-neutral plan.
 func BuildManifest(selection Selection) (Manifest, error) {
-	if selection.scenario.NativeExecution == nil || selection.obligation.ProofType != "native-e2e" {
+	if selection.obligation.ProofType != "native-e2e" || len(selection.plan.actions) == 0 {
 		return Manifest{}, errors.New("native selection is incomplete")
 	}
 	if selection.scenario.ID == "" || selection.obligation.ObligationID == "" || selection.obligation.SupportCellID == nil || string(*selection.obligation.SupportCellID) != selection.supportCellID {
@@ -102,9 +113,10 @@ func BuildManifest(selection Selection) (Manifest, error) {
 		expectations[expectation.ID] = expectation
 	}
 
-	actions := make([]ManifestAction, 0, len(scenario.NativeExecution.Actions))
+	stepSamples := measurementSamplesByStep(scenario, selection.obligation.RequiredMeasurementIDs)
+	actions := make([]ManifestAction, 0, len(selection.plan.actions))
 	coveredSteps := make(map[scenarios.StepID]struct{}, len(steps))
-	for index, action := range scenario.NativeExecution.Actions {
+	for index, action := range selection.plan.actions {
 		resolved := ManifestAction{Sequence: index + 1, Action: action}
 		switch {
 		case action.Actor == "controller" && action.Command == "install-model":
@@ -124,17 +136,18 @@ func BuildManifest(selection Selection) (Manifest, error) {
 					return Manifest{}, fmt.Errorf("native step %s is covered more than once", stepID)
 				}
 				coveredSteps[stepID] = struct{}{}
-				resolved.Steps = append(resolved.Steps, step)
 				if scenarios.OperationKey(step.Operation) == "workload/prepare" {
-					expanded := selection.workloadExpansions[stepID]
-					if len(expanded) == 0 {
-						return Manifest{}, fmt.Errorf("native workload step %s has no concrete expansion", stepID)
-					}
-					if resolved.WorkloadExpansions == nil {
-						resolved.WorkloadExpansions = make(map[scenarios.StepID][]scenarios.Operation)
-					}
-					resolved.WorkloadExpansions[stepID] = cloneOperations(expanded)
+					return Manifest{}, fmt.Errorf("native workload step %s has no direct operation", stepID)
 				}
+				if sample, found := stepSamples[step.ID]; found {
+					copy := sample
+					copy.Parameters = append([]byte(nil), sample.Parameters...)
+					copy.Operation.Value = append([]byte(nil), sample.Operation.Value...)
+					step.MeasurementSample = &copy
+				} else {
+					step.MeasurementSample = nil
+				}
+				resolved.Steps = append(resolved.Steps, step)
 				if wire, found := wireByStep[stepID]; found {
 					resolved.WireExpectations = append(resolved.WireExpectations, wire)
 				}
@@ -174,7 +187,7 @@ func BuildManifest(selection Selection) (Manifest, error) {
 		MakeTarget:               selection.obligation.MakeTarget,
 		PerformanceBudgets:       budgets,
 		RequiredMeasurements:     measurements,
-		Clients:                  append([]scenarios.NativeClient(nil), scenario.NativeExecution.Clients...),
+		Clients:                  append([]scenarios.NativeClient(nil), selection.plan.clients...),
 		Actions:                  actions,
 	}, nil
 }

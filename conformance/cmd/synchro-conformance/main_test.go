@@ -61,14 +61,15 @@ func TestRunNativeWritesCatalogBoundManifest(t *testing.T) {
 	if manifest.ScenarioID != "SCN-PERF-STEADY-PULL-001" || manifest.SupportCellID != "SUP-IOS-MIN-001" || manifest.MakeTarget != "test-swift" {
 		t.Fatalf("native manifest selection = %+v", manifest)
 	}
-	found := false
+	foundMeasuredStep := false
 	for _, action := range manifest.Actions {
-		if action.Action.ID == "NACT-PERF-STEADY-PULL-009" {
-			found = len(action.Steps) == 1
-			break
+		for _, step := range action.Steps {
+			if step.ID == "STEP-PERF-STEADY-PULL-002" {
+				foundMeasuredStep = true
+			}
 		}
 	}
-	if !found {
+	if !foundMeasuredStep {
 		t.Fatal("native manifest omitted the measured steady pull")
 	}
 }
