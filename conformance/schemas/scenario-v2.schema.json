@@ -91,7 +91,6 @@
       "uniqueItems": true,
       "items": { "$ref": "#/$defs/assertion" }
     },
-    "native_execution": { "$ref": "#/$defs/nativeExecutionPlan" },
     "native_identity_aliases": {
       "type": "array",
       "minItems": 1,
@@ -118,38 +117,18 @@
         "required": ["proof_obligations"]
       },
       "then": {
-        "oneOf": [
-          {
-            "required": ["native_execution"],
-            "not": {
-              "anyOf": [
-                { "required": ["native_identity_aliases"] },
-                { "required": ["native_lifecycle_boundaries"] }
-              ]
-            },
-            "properties": {
-              "steps": {
-                "items": { "not": { "required": ["native_binding"] } }
-              }
-            }
-          },
-          {
-            "required": ["native_identity_aliases"],
-            "not": { "required": ["native_execution"] },
-            "properties": {
-              "steps": {
-                "items": { "required": ["native_binding"] }
-              }
-            }
+        "required": ["native_identity_aliases"],
+        "properties": {
+          "steps": {
+            "items": { "required": ["native_binding"] }
           }
-        ]
+        }
       },
       "else": {
         "allOf": [
           {
             "not": {
               "anyOf": [
-                { "required": ["native_execution"] },
                 { "required": ["native_identity_aliases"] },
                 { "required": ["native_lifecycle_boundaries"] }
               ]
@@ -167,10 +146,6 @@
     }
   ],
   "$defs": {
-    "nativeActionId": {
-      "type": "string",
-      "pattern": "^NACT-[A-Z0-9]+(?:-[A-Z0-9]+)*-[0-9]{3}$"
-    },
     "nativeClientKey": {
       "type": "string",
       "pattern": "^[a-z][a-z0-9_-]*$"
@@ -409,283 +384,6 @@
         "client_id": { "type": "string", "minLength": 1 },
         "method": { "const": "stop" }
       }
-    },
-    "nativeExecutionPlan": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["version", "clients", "actions"],
-      "properties": {
-        "version": { "const": 1 },
-        "clients": {
-          "type": "array",
-          "minItems": 1,
-          "items": { "$ref": "#/$defs/nativeClient" }
-        },
-        "actions": {
-          "type": "array",
-          "minItems": 1,
-          "items": { "$ref": "#/$defs/nativeAction" }
-        }
-      }
-    },
-    "nativeClient": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["key", "user_id", "client_id", "database_key"],
-      "properties": {
-        "key": { "$ref": "#/$defs/nativeClientKey" },
-        "user_id": { "type": "string", "minLength": 1 },
-        "client_id": { "type": "string", "minLength": 1 },
-        "database_key": { "$ref": "#/$defs/nativeClientKey" }
-      }
-    },
-    "nativeAction": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["id", "phase", "actor", "command", "covers_step_ids", "parameters"],
-      "properties": {
-        "id": { "$ref": "#/$defs/nativeActionId" },
-        "phase": { "type": "string", "enum": ["setup", "exercise", "verify", "cleanup"] },
-        "actor": { "type": "string", "enum": ["controller", "artifact", "client", "process", "observer"] },
-        "command": {
-          "type": "string",
-          "enum": ["install-model", "apply-step", "request-step", "stage-step", "open", "execute-step", "synchronize-step", "begin-call", "await-call", "lifecycle", "terminate", "relaunch", "await-step", "capture", "measure"]
-        },
-        "covers_step_ids": {
-          "type": "array",
-          "uniqueItems": true,
-          "items": { "$ref": "#/$defs/stepId" }
-        },
-        "parameters": { "type": "object" }
-      },
-      "allOf": [
-        {
-          "if": { "properties": { "actor": { "const": "controller" } }, "required": ["actor"] },
-          "then": { "properties": { "command": { "enum": ["install-model", "apply-step", "request-step"] } } }
-        },
-        {
-          "if": { "properties": { "actor": { "const": "artifact" } }, "required": ["actor"] },
-          "then": { "properties": { "command": { "const": "stage-step" } } }
-        },
-        {
-          "if": { "properties": { "actor": { "const": "client" } }, "required": ["actor"] },
-          "then": { "properties": { "command": { "enum": ["open", "execute-step", "synchronize-step", "begin-call", "await-call", "lifecycle"] } } }
-        },
-        {
-          "if": { "properties": { "actor": { "const": "process" } }, "required": ["actor"] },
-          "then": { "properties": { "command": { "enum": ["execute-step", "terminate", "relaunch"] } } }
-        },
-        {
-          "if": { "properties": { "actor": { "const": "observer" } }, "required": ["actor"] },
-          "then": { "properties": { "command": { "enum": ["await-step", "capture", "measure"] } } }
-        },
-        {
-          "if": { "properties": { "actor": { "const": "controller" }, "command": { "const": "install-model" } }, "required": ["actor", "command"] },
-          "then": { "properties": { "covers_step_ids": { "maxItems": 0 }, "parameters": { "$ref": "#/$defs/emptyObject" } } }
-        },
-        {
-          "if": { "properties": { "actor": { "const": "controller" }, "command": { "const": "apply-step" } }, "required": ["actor", "command"] },
-          "then": { "properties": { "covers_step_ids": { "minItems": 1, "maxItems": 1 }, "parameters": { "$ref": "#/$defs/emptyObject" } } }
-        },
-        {
-          "if": { "properties": { "actor": { "const": "controller" }, "command": { "const": "request-step" } }, "required": ["actor", "command"] },
-          "then": { "properties": { "covers_step_ids": { "minItems": 1, "maxItems": 1 }, "parameters": { "$ref": "#/$defs/emptyObject" } } }
-        },
-        {
-          "if": { "properties": { "actor": { "const": "artifact" }, "command": { "const": "stage-step" } }, "required": ["actor", "command"] },
-          "then": { "properties": { "covers_step_ids": { "minItems": 1, "maxItems": 1 }, "parameters": { "$ref": "#/$defs/nativeClientParameters" } } }
-        },
-        {
-          "if": { "properties": { "actor": { "const": "client" }, "command": { "const": "open" } }, "required": ["actor", "command"] },
-          "then": { "properties": { "covers_step_ids": { "maxItems": 0 }, "parameters": { "$ref": "#/$defs/nativeClientOpenParameters" } } }
-        },
-        {
-          "if": { "properties": { "actor": { "const": "client" }, "command": { "const": "execute-step" } }, "required": ["actor", "command"] },
-          "then": { "properties": { "covers_step_ids": { "minItems": 1, "maxItems": 1 }, "parameters": { "$ref": "#/$defs/nativeClientParameters" } } }
-        },
-        {
-          "if": { "properties": { "actor": { "const": "client" }, "command": { "const": "synchronize-step" } }, "required": ["actor", "command"] },
-          "then": { "properties": { "covers_step_ids": { "minItems": 1 }, "parameters": { "$ref": "#/$defs/nativeSynchronizeParameters" } } }
-        },
-        {
-          "if": { "properties": { "actor": { "const": "client" }, "command": { "const": "begin-call" } }, "required": ["actor", "command"] },
-          "then": { "properties": { "covers_step_ids": { "minItems": 1, "maxItems": 1 }, "parameters": { "$ref": "#/$defs/nativeBeginCallParameters" } } }
-        },
-        {
-          "if": { "properties": { "actor": { "const": "client" }, "command": { "const": "await-call" } }, "required": ["actor", "command"] },
-          "then": { "properties": { "covers_step_ids": { "maxItems": 0 }, "parameters": { "$ref": "#/$defs/nativeAwaitCallParameters" } } }
-        },
-        {
-          "if": { "properties": { "actor": { "const": "client" }, "command": { "const": "lifecycle" } }, "required": ["actor", "command"] },
-          "then": { "properties": { "covers_step_ids": { "maxItems": 0 }, "parameters": { "$ref": "#/$defs/nativeLifecycleParameters" } } }
-        },
-        {
-          "if": { "properties": { "actor": { "const": "process" }, "command": { "const": "execute-step" } }, "required": ["actor", "command"] },
-          "then": { "properties": { "covers_step_ids": { "minItems": 1, "maxItems": 1 }, "parameters": { "$ref": "#/$defs/nativeProcessStepParameters" } } }
-        },
-        {
-          "if": { "properties": { "actor": { "const": "process" }, "command": { "enum": ["terminate", "relaunch"] } }, "required": ["actor", "command"] },
-          "then": { "properties": { "covers_step_ids": { "maxItems": 0 }, "parameters": { "$ref": "#/$defs/nativeProcessBoundaryParameters" } } }
-        },
-        {
-          "if": { "properties": { "actor": { "const": "observer" }, "command": { "const": "await-step" } }, "required": ["actor", "command"] },
-          "then": { "properties": { "covers_step_ids": { "minItems": 1, "maxItems": 1 }, "parameters": { "$ref": "#/$defs/nativeAwaitStepParameters" } } }
-        },
-        {
-          "if": { "properties": { "actor": { "const": "observer" }, "command": { "const": "capture" } }, "required": ["actor", "command"] },
-          "then": { "properties": { "covers_step_ids": { "maxItems": 0 }, "parameters": { "$ref": "#/$defs/nativeCaptureParameters" } } }
-        },
-        {
-          "if": { "properties": { "actor": { "const": "observer" }, "command": { "const": "measure" } }, "required": ["actor", "command"] },
-          "then": { "properties": { "covers_step_ids": { "maxItems": 0 }, "parameters": { "$ref": "#/$defs/nativeMeasureParameters" } } }
-        }
-      ]
-    },
-    "emptyObject": {
-      "type": "object",
-      "additionalProperties": false,
-      "maxProperties": 0
-    },
-    "nativeClientOpenParameters": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["client_key", "database_mode", "initialization", "seed_step_id"],
-      "properties": {
-        "client_key": { "$ref": "#/$defs/nativeClientKey" },
-        "database_mode": { "type": "string", "enum": ["create", "reuse"] },
-        "initialization": { "type": "string", "enum": ["empty", "current", "seed"] },
-        "seed_step_id": { "oneOf": [{ "$ref": "#/$defs/stepId" }, { "type": "null" }] }
-      },
-      "allOf": [
-        {
-          "if": { "properties": { "seed_step_id": { "type": "null" } }, "required": ["seed_step_id"] },
-          "then": { "properties": { "initialization": { "enum": ["empty", "current"] } } }
-        },
-        {
-          "if": { "properties": { "seed_step_id": { "type": "string" } }, "required": ["seed_step_id"] },
-          "then": { "properties": { "initialization": { "const": "seed" } } }
-        }
-      ]
-    },
-    "nativeClientParameters": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["client_key"],
-      "properties": { "client_key": { "$ref": "#/$defs/nativeClientKey" } }
-    },
-    "nativeSynchronizeParameters": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["client_key", "method", "completion"],
-      "properties": {
-        "client_key": { "$ref": "#/$defs/nativeClientKey" },
-        "method": { "type": "string", "enum": ["start", "sync-now", "retry-after-error", "reset-schema-and-start"] },
-        "completion": { "type": "string", "enum": ["idle", "blocked", "error"] }
-      }
-    },
-    "nativeBeginCallParameters": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["client_key", "call_id", "method"],
-      "properties": {
-        "client_key": { "$ref": "#/$defs/nativeClientKey" },
-        "call_id": { "$ref": "#/$defs/nativeCallId" },
-        "method": { "type": "string", "enum": ["start", "sync-now", "retry-after-error", "reset-schema-and-start"] }
-      }
-    },
-    "nativeAwaitCallParameters": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["client_key", "call_id", "completion"],
-      "properties": {
-        "client_key": { "$ref": "#/$defs/nativeClientKey" },
-        "call_id": { "$ref": "#/$defs/nativeCallId" },
-        "completion": { "type": "string", "enum": ["idle", "blocked", "error"] }
-      }
-    },
-    "nativeAwaitStepParameters": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["client_key"],
-      "properties": {
-        "client_key": { "$ref": "#/$defs/nativeClientKey" },
-        "call_id": { "$ref": "#/$defs/nativeCallId" }
-      }
-    },
-    "nativeLifecycleParameters": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["client_key", "operation"],
-      "properties": {
-        "client_key": { "$ref": "#/$defs/nativeClientKey" },
-        "operation": { "type": "string", "enum": ["stop", "enter-background", "enter-foreground"] }
-      }
-    },
-    "nativeProcessStepParameters": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["client_key"],
-      "properties": {
-        "client_key": { "oneOf": [{ "$ref": "#/$defs/nativeClientKey" }, { "type": "null" }] }
-      }
-    },
-    "nativeProcessBoundaryParameters": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["client_key", "boundary", "after_action_id"],
-      "properties": {
-        "client_key": { "$ref": "#/$defs/nativeClientKey" },
-        "after_action_id": { "$ref": "#/$defs/nativeActionId" },
-        "boundary": {
-          "type": "string",
-          "enum": ["queue-inserted", "queue-resolved", "push-reconciled", "pull-applied", "checksum-committed", "rebuild-page-applied", "provenance-pruned", "rebuild-finalized", "schema-progressed", "rejection-persisted"]
-        }
-      }
-    },
-    "nativeCaptureParameters": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["client_keys", "sources", "expectation_ids"],
-      "properties": {
-        "client_keys": {
-          "type": "array",
-          "uniqueItems": true,
-          "items": { "$ref": "#/$defs/nativeClientKey" }
-        },
-        "sources": {
-          "type": "array",
-          "minItems": 1,
-          "uniqueItems": true,
-          "items": { "type": "string", "enum": ["application-rows", "pending-mutations", "rejected-mutations", "sync-status", "sync-events", "scope-state", "checkpoints", "provenance", "rebuild-state", "request-trace", "server-state", "artifact-state", "process-trace"] }
-        },
-        "expectation_ids": {
-          "type": "array",
-          "minItems": 1,
-          "uniqueItems": true,
-          "items": { "$ref": "#/$defs/expectationId" }
-        }
-      }
-    },
-    "nativeMeasureParameters": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["performance_budget_ids", "measurement_ids"],
-      "properties": {
-        "performance_budget_ids": {
-          "type": "array",
-          "uniqueItems": true,
-          "items": { "$ref": "#/$defs/budgetId" }
-        },
-        "measurement_ids": {
-          "type": "array",
-          "uniqueItems": true,
-          "items": { "$ref": "#/$defs/measurementId" }
-        }
-      },
-      "anyOf": [
-        { "properties": { "performance_budget_ids": { "minItems": 1 } } },
-        { "properties": { "measurement_ids": { "minItems": 1 } } }
-      ]
     },
     "scenarioId": {
       "type": "string",

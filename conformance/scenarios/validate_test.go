@@ -22,57 +22,6 @@ func TestValidateAuthoredTimeScenario(t *testing.T) {
 	}
 }
 
-func TestValidateNativeSynchronizationGroupsOrderedHTTPSteps(t *testing.T) {
-	bundle, err := contract.Load(context.Background(), "../../")
-	if err != nil {
-		t.Fatalf("load authored contract: %v", err)
-	}
-	base := groupedNativeTimeScenario()
-	if err := Validate(base, bundle); err != nil {
-		t.Fatalf("validate grouped native synchronization: %v", err)
-	}
-
-	tests := []struct {
-		name     string
-		mutate   func(*Scenario)
-		category string
-	}{
-		{"reversed grouped steps", func(s *Scenario) {
-			action := &s.NativeExecution.Actions[2]
-			action.CoversStepIDs[0], action.CoversStepIDs[1] = action.CoversStepIDs[1], action.CoversStepIDs[0]
-		}, "outside authored step order"},
-		{"second step identity mismatch", func(s *Scenario) {
-			s.Steps[1].Operation.Payload = json.RawMessage(`{"user_id":"user-b","client_id":"client-b","client_generation":1,"schema":{"version":1,"hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},"scope_set_version":1,"scopes":[],"limit":1}`)
-		}, "does not match step"},
-		{"second step completion mismatch", func(s *Scenario) {
-			s.WireExpectations[1].ContractCase = "temporary_unavailable"
-			s.WireExpectations[1].HTTPStatus = 503
-			s.WireExpectations[1].ErrorCode = stringPointer("temporary_unavailable")
-			s.WireExpectations[1].Retryable = true
-		}, "does not match step"},
-		{"second step phase mismatch", func(s *Scenario) {
-			s.Steps[1].Phase = "setup"
-		}, "phase"},
-		{"second step non-http", func(s *Scenario) {
-			s.Steps[1].Transport = "local"
-		}, "cannot execute step"},
-		{"multiple steps on non-grouping command", func(s *Scenario) {
-			action := &s.NativeExecution.Actions[2]
-			action.Command = "execute-step"
-			action.Parameters = json.RawMessage(`{"client_key":"client-a"}`)
-		}, "must cover exactly one"},
-	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			mutant := cloneScenario(base)
-			test.mutate(&mutant)
-			if err := requireErrorCategory(Validate(mutant, bundle), test.category); err != nil {
-				t.Fatal(err)
-			}
-		})
-	}
-}
-
 func TestValidateNativeStepBindingsGroupOnePublicCall(t *testing.T) {
 	bundle, err := contract.Load(context.Background(), "../../")
 	if err != nil {
@@ -91,9 +40,6 @@ func TestValidateNativeStepBindingsGroupOnePublicCall(t *testing.T) {
 		{"missing binding", func(s *Scenario) {
 			s.Steps[1].NativeBinding = nil
 		}, "native bindings on every step"},
-		{"mixed legacy plan", func(s *Scenario) {
-			s.NativeExecution = authoredTimeScenario().NativeExecution
-		}, "must not mix"},
 		{"missing identity aliases", func(s *Scenario) {
 			s.NativeIdentityAliases = nil
 		}, "require native identity aliases"},
@@ -195,7 +141,7 @@ func TestValidateNativeStepBindingsRejectResumedCallAndWorkloadMacro(t *testing.
 		t.Fatal(err)
 	}
 
-	workload := boundNativeTimeScenario()
+	workload := authoredTimeScenario()
 	workload.Steps[0].Transport = "model"
 	workload.Steps[0].Operation = Operation{ContractOperation: "workload", Name: "prepare", Payload: json.RawMessage(`{}`)}
 	workload.Steps[0].NativeBinding = &NativeStepBinding{Kind: "controller"}
@@ -255,7 +201,6 @@ func TestNativeWorkloadSchemaRejectsOutOfBoundAndNondeterministicParameters(t *t
 		t.Fatalf("load schema-valid workload source: %v", err)
 	}
 	workloadSource := boundNativeWorkloadScenario()
-	base.NativeExecution = nil
 	base.NativeIdentityAliases = workloadSource.NativeIdentityAliases
 	base.NativeIdentityAliases[0].StepIDs = []StepID{}
 	for index := range base.Steps {
@@ -363,7 +308,7 @@ func TestValidateNativeControllerBindingOwnsRawHTTP(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load authored contract: %v", err)
 	}
-	scenario := boundNativeTimeScenario()
+	scenario := authoredTimeScenario()
 	scenario.Steps[0].NativeBinding = &NativeStepBinding{Kind: "controller"}
 	if err := Validate(scenario, bundle); err != nil {
 		t.Fatalf("validate controller-owned HTTP step: %v", err)
@@ -510,100 +455,6 @@ func TestValidateRejectsSemanticMutants(t *testing.T) {
 			index := len(s.ProofObligations) - 1
 			s.ProofObligations[index].AssertionIDs = append(s.ProofObligations[index].AssertionIDs, "ASSERT-TIME-PG-001")
 		}, "fault-injection must own exactly one assertion"},
-		{"missing native execution", authoredTimeScenario, func(s *Scenario) {
-			s.NativeExecution = nil
-		}, "require native_execution"},
-		{"native execution without obligation", authoredTimeScenario, func(s *Scenario) {
-			var obligations []ProofObligation
-			removed := make(map[contract.ObligationID]struct{})
-			for _, obligation := range s.ProofObligations {
-				if obligation.ProofType == "native-e2e" {
-					removed[obligation.ObligationID] = struct{}{}
-					continue
-				}
-				obligations = append(obligations, obligation)
-			}
-			s.ProofObligations = obligations
-			s.ProofTypes = []string{"server-black-box", "negative-control"}
-			var ownership []Ownership
-			for _, item := range s.Ownership {
-				if _, found := removed[item.ProofObligationID]; !found {
-					ownership = append(ownership, item)
-				}
-			}
-			s.Ownership = ownership
-		}, "without a native-e2e proof obligation"},
-		{"duplicate native action", authoredTimeScenario, func(s *Scenario) {
-			duplicate := s.NativeExecution.Actions[2]
-			s.NativeExecution.Actions = append(s.NativeExecution.Actions, duplicate)
-		}, "duplicate native action ID"},
-		{"omitted native step", authoredTimeScenario, func(s *Scenario) {
-			s.NativeExecution.Actions = append(s.NativeExecution.Actions[:2], s.NativeExecution.Actions[3:]...)
-		}, "has 0 covering actions"},
-		{"duplicate native step", authoredTimeScenario, func(s *Scenario) {
-			duplicate := s.NativeExecution.Actions[2]
-			duplicate.ID = "NACT-TIME-SYNC-002"
-			s.NativeExecution.Actions = append(s.NativeExecution.Actions, duplicate)
-		}, "has 2 covering actions"},
-		{"unknown native step", authoredTimeScenario, func(s *Scenario) {
-			s.NativeExecution.Actions[2].CoversStepIDs[0] = "STEP-TIME-UNKNOWN-001"
-		}, "covers unknown step"},
-		{"mismatched native command", authoredTimeScenario, func(s *Scenario) {
-			s.NativeExecution.Actions[2].Command = "execute-step"
-			s.NativeExecution.Actions[2].Parameters = json.RawMessage(`{"client_key":"client-a"}`)
-		}, "cannot execute step"},
-		{"unknown native client", authoredTimeScenario, func(s *Scenario) {
-			s.NativeExecution.Actions[2].Parameters = json.RawMessage(`{"client_key":"client-unknown","method":"start","completion":"idle"}`)
-		}, "references unknown client"},
-		{"native client identity mismatch", authoredTimeScenario, func(s *Scenario) {
-			s.NativeExecution.Clients[0].UserID = "user-b"
-		}, "does not match step"},
-		{"native client use before open", authoredTimeScenario, func(s *Scenario) {
-			s.NativeExecution.Actions[1], s.NativeExecution.Actions[2] = s.NativeExecution.Actions[2], s.NativeExecution.Actions[1]
-		}, "before open"},
-		{"missing native install", authoredTimeScenario, func(s *Scenario) {
-			s.NativeExecution.Actions = s.NativeExecution.Actions[1:]
-		}, "install-model actions"},
-		{"premature native observation", authoredTimeScenario, func(s *Scenario) {
-			s.NativeExecution.Actions[2], s.NativeExecution.Actions[3] = s.NativeExecution.Actions[3], s.NativeExecution.Actions[2]
-		}, "before all scenario steps complete"},
-		{"missing native expectation", authoredTimeScenario, func(s *Scenario) {
-			s.NativeExecution.Actions = s.NativeExecution.Actions[:3]
-		}, "native expectation EXPECT-TIME-001 has 0 capture actions"},
-		{"extra native expectation", authoredTimeScenario, func(s *Scenario) {
-			s.NativeExecution.Actions[3].Parameters = json.RawMessage(`{"client_keys":[],"sources":["server-state"],"expectation_ids":["EXPECT-TIME-UNKNOWN-001"]}`)
-		}, "extra expectation"},
-		{"local native capture without client", authoredTimeScenario, func(s *Scenario) {
-			s.NativeExecution.Actions[3].Parameters = json.RawMessage(`{"client_keys":[],"sources":["sync-status"],"expectation_ids":["EXPECT-TIME-001"]}`)
-		}, "local capture sources require at least one client key"},
-		{"extra native measurement", authoredTimeScenario, func(s *Scenario) {
-			s.NativeExecution.Actions = append(s.NativeExecution.Actions, NativeAction{ID: "NACT-TIME-MEASURE-001", Phase: "verify", Actor: "observer", Command: "measure", CoversStepIDs: []StepID{}, Parameters: json.RawMessage(`{"performance_budget_ids":[],"measurement_ids":["MEAS-TIME-EXTRA-001"]}`)})
-		}, "extra measurement"},
-		{"extra native performance budget", authoredTimeScenario, func(s *Scenario) {
-			s.NativeExecution.Actions = append(s.NativeExecution.Actions, NativeAction{ID: "NACT-TIME-MEASURE-001", Phase: "verify", Actor: "observer", Command: "measure", CoversStepIDs: []StepID{}, Parameters: json.RawMessage(`{"performance_budget_ids":["BUD-TIME-EXTRA-001"],"measurement_ids":[]}`)})
-		}, "extra performance budget"},
-		{"missing native measurement", authoredTimeScenario, func(s *Scenario) {
-			s.ProofObligations[2].RequiredMeasurementIDs = []contract.MeasurementID{"MEAS-TIME-MISSING-001"}
-		}, "native measurement MEAS-TIME-MISSING-001 has 0 measure actions"},
-		{"missing native performance budget", authoredTimeScenario, func(s *Scenario) {
-			s.ProofObligations[2].PerformanceBudgetIDs = []contract.BudgetID{"BUD-TIME-MISSING-001"}
-		}, "native performance budget BUD-TIME-MISSING-001 has 0 measure actions"},
-		{"native completion mismatch", authoredTimeScenario, func(s *Scenario) {
-			s.NativeExecution.Actions[2].Parameters = json.RawMessage(`{"client_key":"client-a","method":"start","completion":"error"}`)
-		}, "does not match step"},
-		{"unknown native parameter", authoredTimeScenario, func(s *Scenario) {
-			s.NativeExecution.Actions[2].Parameters = json.RawMessage(`{"client_key":"client-a","method":"start","completion":"idle","extra":true}`)
-		}, "unknown member"},
-		{"native reuse without seed", authoredTimeScenario, func(s *Scenario) {
-			s.NativeExecution.Actions[1].Parameters = json.RawMessage(`{"client_key":"client-a","database_mode":"reuse","initialization":"empty","seed_step_id":null}`)
-		}, "reuse open requires a seed step"},
-		{"duplicate native database", authoredTimeScenario, func(s *Scenario) {
-			s.NativeExecution.Clients = append(s.NativeExecution.Clients, NativeClient{Key: "client-b", UserID: "user-b", ClientID: "client-b", DatabaseKey: "database-a"})
-		}, "share database key"},
-		{"unknown native process trigger", authoredTimeScenario, func(s *Scenario) {
-			terminate := NativeAction{ID: "NACT-TIME-TERMINATE-001", Phase: "exercise", Actor: "process", Command: "terminate", CoversStepIDs: []StepID{}, Parameters: json.RawMessage(`{"client_key":"client-a","boundary":"queue-resolved","after_action_id":"NACT-TIME-UNKNOWN-001"}`)}
-			s.NativeExecution.Actions = append(s.NativeExecution.Actions[:3], append([]NativeAction{terminate}, s.NativeExecution.Actions[3:]...)...)
-		}, "does not name an earlier boundary action"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -624,26 +475,6 @@ func TestValidateRejectsSemanticMutants(t *testing.T) {
 	}
 }
 
-func TestValidateNativeProcessBoundaryOrdering(t *testing.T) {
-	bundle, err := contract.Load(context.Background(), "../../")
-	if err != nil {
-		t.Fatalf("load authored contract: %v", err)
-	}
-	scenario := authoredTimeScenario()
-	terminate := NativeAction{ID: "NACT-TIME-TERMINATE-001", Phase: "exercise", Actor: "process", Command: "terminate", CoversStepIDs: []StepID{}, Parameters: json.RawMessage(`{"client_key":"client-a","boundary":"queue-resolved","after_action_id":"NACT-TIME-SYNC-001"}`)}
-	relaunch := NativeAction{ID: "NACT-TIME-RELAUNCH-001", Phase: "exercise", Actor: "process", Command: "relaunch", CoversStepIDs: []StepID{}, Parameters: json.RawMessage(`{"client_key":"client-a","boundary":"queue-resolved","after_action_id":"NACT-TIME-TERMINATE-001"}`)}
-	scenario.NativeExecution.Actions = append(scenario.NativeExecution.Actions[:3], append([]NativeAction{terminate, relaunch}, scenario.NativeExecution.Actions[3:]...)...)
-	if err := Validate(scenario, bundle); err != nil {
-		t.Fatalf("validate ordered native process boundary: %v", err)
-	}
-
-	mutant := cloneScenario(scenario)
-	mutant.NativeExecution.Actions[4].Parameters = json.RawMessage(`{"client_key":"client-a","boundary":"queue-resolved","after_action_id":"NACT-TIME-SYNC-001"}`)
-	if err := requireErrorCategory(Validate(mutant, bundle), "does not match the latest termination"); err != nil {
-		t.Fatal(err)
-	}
-}
-
 func TestValidateTransportFailureWireCaseIsClosed(t *testing.T) {
 	bundle, err := contract.Load(context.Background(), "../../")
 	if err != nil {
@@ -658,7 +489,7 @@ func TestValidateTransportFailureWireCaseIsClosed(t *testing.T) {
 		ErrorCode:    nil,
 		Retryable:    true,
 	}
-	base.NativeExecution.Actions[2].Parameters = json.RawMessage(`{"client_key":"client-a","method":"start","completion":"blocked"}`)
+	base.Steps[0].NativeBinding.Completion = "blocked"
 	if err := Validate(base, bundle); err != nil {
 		t.Fatalf("validate transport failure wire case: %v", err)
 	}
@@ -900,6 +731,7 @@ func requireErrorCategory(err error, category string) error {
 func authoredTimeScenario() Scenario {
 	const scenarioID contract.ScenarioID = "SCN-TIME-001"
 	const requirementID contract.RequirementID = "SYNC-TIME-001"
+	callID := NativeCallID("time_sync")
 	clientCells := []struct {
 		id     contract.SupportCellID
 		target string
@@ -927,25 +759,12 @@ func authoredTimeScenario() Scenario {
 			ID:              "STEP-TIME-001",
 			Phase:           "exercise",
 			Transport:       "http",
+			NativeBinding:   &NativeStepBinding{Kind: "public-call", UserID: "user-a", ClientID: "client-a", CallID: &callID, Stage: "synchronous", Method: "start", Completion: "idle"},
 			Operation:       Operation{ContractOperation: "pull", Name: "request-page", Payload: []byte(`{"user_id":"user-a","client_id":"client-a","client_generation":1,"schema":{"version":1,"hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},"scope_set_version":1,"scopes":[],"limit":1}`)},
 			ExpectedOutcome: ExpectedOutcome{Disposition: "success"},
 		}},
-		NativeExecution: &NativeExecutionPlan{
-			Version: 1,
-			Clients: []NativeClient{{
-				Key:         "client-a",
-				UserID:      "user-a",
-				ClientID:    "client-a",
-				DatabaseKey: "database-a",
-			}},
-			Actions: []NativeAction{
-				{ID: "NACT-TIME-INSTALL-001", Phase: "setup", Actor: "controller", Command: "install-model", CoversStepIDs: []StepID{}, Parameters: json.RawMessage(`{}`)},
-				{ID: "NACT-TIME-OPEN-001", Phase: "setup", Actor: "client", Command: "open", CoversStepIDs: []StepID{}, Parameters: json.RawMessage(`{"client_key":"client-a","database_mode":"create","initialization":"empty","seed_step_id":null}`)},
-				{ID: "NACT-TIME-SYNC-001", Phase: "exercise", Actor: "client", Command: "synchronize-step", CoversStepIDs: []StepID{"STEP-TIME-001"}, Parameters: json.RawMessage(`{"client_key":"client-a","method":"start","completion":"idle"}`)},
-				{ID: "NACT-TIME-CAPTURE-001", Phase: "verify", Actor: "observer", Command: "capture", CoversStepIDs: []StepID{}, Parameters: json.RawMessage(`{"client_keys":[],"sources":["server-state"],"expectation_ids":["EXPECT-TIME-001"]}`)},
-			},
-		},
-		makeTargets: validationMakeTargets(),
+		NativeIdentityAliases: []NativeIdentityAlias{{Kind: "scope", Alias: "scope-a", Value: json.RawMessage(`"scope-a"`), StepIDs: []StepID{"STEP-TIME-001"}}},
+		makeTargets:           validationMakeTargets(),
 	}
 
 	assertionIDs := make([]contract.AssertionID, 0, 9)
@@ -987,40 +806,8 @@ func authoredTimeScenario() Scenario {
 	return s
 }
 
-func groupedNativeTimeScenario() Scenario {
-	scenario := authoredTimeScenario()
-	second := scenario.Steps[0]
-	second.ID = "STEP-TIME-002"
-	scenario.Steps = append(scenario.Steps, second)
-	secondWire := scenario.WireExpectations[0]
-	secondWire.StepID = second.ID
-	scenario.WireExpectations = append(scenario.WireExpectations, secondWire)
-	scenario.NativeExecution.Actions[2].CoversStepIDs = append(
-		scenario.NativeExecution.Actions[2].CoversStepIDs,
-		second.ID,
-	)
-	return scenario
-}
-
-func boundNativeTimeScenario() Scenario {
-	scenario := authoredTimeScenario()
-	scenario.NativeExecution = nil
-	scenario.NativeIdentityAliases = []NativeIdentityAlias{{Kind: "scope", Alias: "scope-a", Value: json.RawMessage(`"scope-a"`), StepIDs: []StepID{"STEP-TIME-001"}}}
-	callID := NativeCallID("time_sync")
-	scenario.Steps[0].NativeBinding = &NativeStepBinding{
-		Kind:       "public-call",
-		UserID:     "user-a",
-		ClientID:   "client-a",
-		CallID:     &callID,
-		Stage:      "synchronous",
-		Method:     "start",
-		Completion: "idle",
-	}
-	return scenario
-}
-
 func boundNativeWorkloadScenario() Scenario {
-	scenario := boundNativeTimeScenario()
+	scenario := authoredTimeScenario()
 	workload := &NativeWorkloadParameters{
 		RecordCount:    2,
 		BatchSize:      2,
@@ -1060,7 +847,7 @@ func boundNativeWorkloadScenario() Scenario {
 }
 
 func groupedBoundNativeTimeScenario() Scenario {
-	scenario := boundNativeTimeScenario()
+	scenario := authoredTimeScenario()
 	second := scenario.Steps[0]
 	second.ID = "STEP-TIME-002"
 	callID := *scenario.Steps[0].NativeBinding.CallID

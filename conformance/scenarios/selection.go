@@ -1,13 +1,13 @@
 package scenarios
 
-// IsModelCorpusScenario selects scenarios whose native proof uses the legacy
-// form-A plan or no native plan. Consumer: scenarios/server/scenarios_test.go.
+// IsModelCorpusScenario selects scenarios without native proof bindings.
+// Consumer: scenarios/server/scenarios_test.go.
 func IsModelCorpusScenario(scenario Scenario) bool {
 	return len(scenario.NativeIdentityAliases) == 0
 }
 
-// IsNativeDerivationScenario selects form-B scenarios with bound native steps
-// and at least one selectable native-e2e support-cell obligation. Consumer:
+// IsNativeDerivationScenario selects scenarios with bound native steps and at
+// least one selectable native-e2e support-cell obligation. Consumer:
 // nativeexecution/derive_test.go.
 func IsNativeDerivationScenario(scenario Scenario) bool {
 	if len(scenario.NativeIdentityAliases) == 0 {

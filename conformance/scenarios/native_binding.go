@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"regexp"
 )
 
 const (
@@ -24,6 +25,8 @@ var nativePublicMethods = stringSet([]string{
 })
 
 var nativeLifecycleMethods = stringSet([]string{"stop"})
+
+var nativeClientKeyPattern = regexp.MustCompile(`^[a-z][a-z0-9_-]*$`)
 
 var nativeCallStages = stringSet([]string{
 	"await-call",
@@ -84,9 +87,6 @@ func (v *scenarioValidator) validateNativeProof() {
 		}
 	}
 	if !hasNativeObligation {
-		if v.scenario.NativeExecution != nil {
-			v.add("%s has native_execution without a native-e2e proof obligation", v.scenario.ID)
-		}
 		if boundSteps != 0 {
 			v.add("%s has native bindings without a native-e2e proof obligation", v.scenario.ID)
 		}
@@ -98,22 +98,8 @@ func (v *scenarioValidator) validateNativeProof() {
 		}
 		return
 	}
-	if v.scenario.NativeExecution != nil {
-		if boundSteps != 0 {
-			v.add("%s must not mix native_execution with native step bindings", v.scenario.ID)
-			return
-		}
-		if len(v.scenario.NativeIdentityAliases) != 0 {
-			v.add("%s native_execution must not contain native identity aliases", v.scenario.ID)
-		}
-		if len(v.scenario.NativeLifecycleBoundaries) != 0 {
-			v.add("%s native_execution must not contain native lifecycle boundaries", v.scenario.ID)
-		}
-		v.validateNativeExecution()
-		return
-	}
 	if boundSteps != len(v.scenario.Steps) {
-		v.add("%s native-e2e proof obligations require native_execution or native bindings on every step", v.scenario.ID)
+		v.add("%s native-e2e proof obligations require native bindings on every step", v.scenario.ID)
 	}
 	if len(v.scenario.NativeIdentityAliases) == 0 {
 		v.add("%s native step bindings require native identity aliases", v.scenario.ID)
@@ -729,4 +715,41 @@ func dereferenceNativeCallID(value *NativeCallID) NativeCallID {
 		return ""
 	}
 	return *value
+}
+
+func nativeOperationIdentity(operation Operation) (string, string, bool, error) {
+	object, err := decodePayloadObject(operation.Payload)
+	if err != nil {
+		return "", "", false, err
+	}
+	switch operation.ContractOperation {
+	case "artifact", "connect", "pull", "rebuild":
+		return stringValue(object["user_id"]), stringValue(object["client_id"]), true, nil
+	case "local":
+		userField := "user_id"
+		if operation.Name == "write" {
+			userField = "authenticated_user_id"
+		}
+		return stringValue(object[userField]), stringValue(object["client_id"]), true, nil
+	case "push":
+		request, err := decodePayloadObject(object["request"])
+		if err != nil {
+			return "", "", false, err
+		}
+		return stringValue(object["authenticated_user_id"]), stringValue(request["client_id"]), true, nil
+	case "process":
+		if operation.Name == "response-loss" {
+			return stringValue(object["authenticated_user_id"]), stringValue(object["client_id"]), true, nil
+		}
+		if operation.Name == "restart-client" {
+			return stringValue(object["user_id"]), stringValue(object["client_id"]), true, nil
+		}
+	case "workload":
+		userID := stringValue(object["user_id"])
+		clientID := stringValue(object["client_id"])
+		if userID != "" || clientID != "" {
+			return userID, clientID, true, nil
+		}
+	}
+	return "", "", false, nil
 }

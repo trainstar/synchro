@@ -25,21 +25,6 @@ synchro-conformance model --repo-root PATH [--scenario ID]
 
 The command loads authored scenarios. It fails if any selected scenario does not pass the reference model. A model pass validates the model execution only. It does not prove a production candidate.
 
-## Native Execution Manifests
-
-Select one catalog-bound native obligation with:
-
-```text
-synchro-conformance native --repo-root PATH --scenario ID --support-cell ID
-```
-
-The command validates the complete scenario corpus and prints one JSON manifest.
-The manifest contains the exact action order and resolved scenario operations.
-
-The `nativeexecution` package dispatches these actions through five closed actor
-drivers. It rejects missing drivers, reordered bindings, and unauthored results.
-Manifest generation does not execute a platform or create release evidence.
-
 ## Real PostgreSQL Scenarios
 
 Run the real PostgreSQL black-box tests with:

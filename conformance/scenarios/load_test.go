@@ -70,23 +70,12 @@ func TestScenarioStructJSONTags(t *testing.T) {
 		value any
 		tags  []string
 	}{
-		{Scenario{}, []string{"$schema", "schema_version", "id", "title", "description,omitempty", "requirement_ids", "normative_references", "proof_types", "proof_obligations", "ownership", "model", "barrier_plan", "fault_plans", "replay", "negative_controls", "steps", "wire_expectations", "assertions", "native_execution,omitempty", "native_identity_aliases,omitempty", "native_lifecycle_boundaries,omitempty", "measurement_bindings,omitempty"}},
-		{NativeExecutionPlan{}, []string{"version", "clients", "actions"}},
+		{Scenario{}, []string{"$schema", "schema_version", "id", "title", "description,omitempty", "requirement_ids", "normative_references", "proof_types", "proof_obligations", "ownership", "model", "barrier_plan", "fault_plans", "replay", "negative_controls", "steps", "wire_expectations", "assertions", "native_identity_aliases,omitempty", "native_lifecycle_boundaries,omitempty", "measurement_bindings,omitempty"}},
 		{NativeClient{}, []string{"key", "user_id", "client_id", "database_key"}},
-		{NativeAction{}, []string{"id", "phase", "actor", "command", "covers_step_ids", "parameters"}},
 		{NativeClientOpenParameters{}, []string{"client_key", "database_mode", "initialization", "seed_step_id"}},
 		{NativeClientParameters{}, []string{"client_key"}},
-		{NativeSynchronizeParameters{}, []string{"client_key", "method", "completion"}},
-		{NativeBeginCallParameters{}, []string{"client_key", "call_id", "method"}},
-		{NativeAwaitCallParameters{}, []string{"client_key", "call_id", "completion"}},
-		{NativeAwaitStepParameters{}, []string{"client_key", "call_id,omitempty"}},
-		{NativeLifecycleParameters{}, []string{"client_key", "operation"}},
 		{NativeIdentityAlias{}, []string{"kind", "alias", "value", "step_ids", "expectation_ids"}},
 		{NativeLifecycleBoundary{}, []string{"id", "phase", "after_step_id", "user_id", "client_id", "method"}},
-		{NativeProcessStepParameters{}, []string{"client_key"}},
-		{NativeProcessBoundaryParameters{}, []string{"client_key", "boundary", "after_action_id"}},
-		{NativeCaptureParameters{}, []string{"client_keys", "sources", "expectation_ids"}},
-		{NativeMeasureParameters{}, []string{"performance_budget_ids", "measurement_ids"}},
 		{Operation{}, []string{"contract_operation", "name", "payload"}},
 		{ProofObligation{}, []string{"obligation_id", "requirement_ids", "assertion_ids", "proof_type", "support_cell_id", "artifact_inventory_ids", "performance_budget_ids", "required_measurement_ids", "required_vector_set_ids", "make_target", "argv", "fault_plan_id", "control_id"}},
 		{Ownership{}, []string{"scenario_id", "requirement_id", "proof_obligation_id", "assertion_id", "proof_type", "support_cell_id"}},
@@ -225,6 +214,22 @@ func TestLoadRejectsMalformedDuplicateUnknownAndInvalidDocuments(t *testing.T) {
 				return err
 			})
 		})
+	}
+}
+
+func TestSchemaAndLoaderRejectNativeExecution(t *testing.T) {
+	path := "conformance/scenarios/native-execution.json"
+	valid := scenarioFixture("SCN-NATIVE-EXECUTION-001", "Native execution scenario")
+	data := append(append([]byte(nil), valid[:len(valid)-2]...), []byte(",\n  \"native_execution\": {}\n}\n")...)
+	root := scenarioRepository(t, map[string][]byte{path: data})
+
+	validator := schemavalidator.New(root)
+	defer validator.Close()
+	if err := validator.ValidateBytes(context.Background(), scenarioSchemaPath, data); err == nil {
+		t.Fatal("schema accepted native_execution")
+	}
+	if _, err := LoadBytes(context.Background(), root, path, data); err == nil {
+		t.Fatal("loader accepted native_execution")
 	}
 }
 

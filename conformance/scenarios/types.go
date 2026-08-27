@@ -36,7 +36,6 @@ type Scenario struct {
 	Steps                     []Step                        `json:"steps"`
 	WireExpectations          []WireExpectation             `json:"wire_expectations"`
 	Assertions                []Assertion                   `json:"assertions"`
-	NativeExecution           *NativeExecutionPlan          `json:"native_execution,omitempty"`
 	NativeIdentityAliases     []NativeIdentityAlias         `json:"native_identity_aliases,omitempty"`
 	NativeLifecycleBoundaries []NativeLifecycleBoundary     `json:"native_lifecycle_boundaries,omitempty"`
 	MeasurementBindings       []MeasurementBinding          `json:"measurement_bindings,omitempty"`
@@ -46,29 +45,12 @@ type Scenario struct {
 	makeTargets map[string]struct{}
 }
 
-// NativeExecutionPlan is the shared public-driver plan for every native support cell.
-type NativeExecutionPlan struct {
-	Version int            `json:"version"`
-	Clients []NativeClient `json:"clients"`
-	Actions []NativeAction `json:"actions"`
-}
-
 // NativeClient binds a stable scenario identity to one durable SQLite database.
 type NativeClient struct {
 	Key         string `json:"key"`
 	UserID      string `json:"user_id"`
 	ClientID    string `json:"client_id"`
 	DatabaseKey string `json:"database_key"`
-}
-
-// NativeAction is one ordered call through a closed platform-driver boundary.
-type NativeAction struct {
-	ID            NativeActionID  `json:"id"`
-	Phase         string          `json:"phase"`
-	Actor         string          `json:"actor"`
-	Command       string          `json:"command"`
-	CoversStepIDs []StepID        `json:"covers_step_ids"`
-	Parameters    json.RawMessage `json:"parameters"`
 }
 
 type NativeClientOpenParameters struct {
@@ -80,12 +62,6 @@ type NativeClientOpenParameters struct {
 
 type NativeClientParameters struct {
 	ClientKey string `json:"client_key"`
-}
-
-type NativeSynchronizeParameters struct {
-	ClientKey  string `json:"client_key"`
-	Method     string `json:"method"`
-	Completion string `json:"completion"`
 }
 
 type NativeCallID string
@@ -107,49 +83,6 @@ type NativeLifecycleBoundary struct {
 	UserID      string `json:"user_id"`
 	ClientID    string `json:"client_id"`
 	Method      string `json:"method"`
-}
-
-type NativeBeginCallParameters struct {
-	ClientKey string       `json:"client_key"`
-	CallID    NativeCallID `json:"call_id"`
-	Method    string       `json:"method"`
-}
-
-type NativeAwaitCallParameters struct {
-	ClientKey  string       `json:"client_key"`
-	CallID     NativeCallID `json:"call_id"`
-	Completion string       `json:"completion"`
-}
-
-type NativeAwaitStepParameters struct {
-	ClientKey string        `json:"client_key"`
-	CallID    *NativeCallID `json:"call_id,omitempty"`
-}
-
-type NativeLifecycleParameters struct {
-	ClientKey string `json:"client_key"`
-	Operation string `json:"operation"`
-}
-
-type NativeProcessStepParameters struct {
-	ClientKey *string `json:"client_key"`
-}
-
-type NativeProcessBoundaryParameters struct {
-	ClientKey     string         `json:"client_key"`
-	Boundary      string         `json:"boundary"`
-	AfterActionID NativeActionID `json:"after_action_id"`
-}
-
-type NativeCaptureParameters struct {
-	ClientKeys     []string        `json:"client_keys"`
-	Sources        []string        `json:"sources"`
-	ExpectationIDs []ExpectationID `json:"expectation_ids"`
-}
-
-type NativeMeasureParameters struct {
-	PerformanceBudgetIDs []contract.BudgetID      `json:"performance_budget_ids"`
-	MeasurementIDs       []contract.MeasurementID `json:"measurement_ids"`
 }
 
 type Operation struct {
