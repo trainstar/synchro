@@ -1026,7 +1026,7 @@ test-packaged-smoke:
 
 test-packaged-consumers: test-consumer-swift test-consumer-swift-ios test-consumer-kotlin test-consumer-kotlin-device test-consumer-rn-ios test-consumer-rn-android test-packaged-smoke
 
-phase-5-check: test-conformance test-blackbox test-adapter test-rust-core test-rust-pg test-swift-unit test-kotlin-unit test-kotlin-instrumentation test-rn-unit test-swift test-kotlin test-rn-e2e-ios test-rn-e2e-android test-packaged-consumers
+phase-5-check: test-conformance test-blackbox test-adapter test-rust-core test-rust-pg test-swift-unit test-kotlin-unit test-kotlin-instrumentation test-rn-unit test-swift test-kotlin test-rn-e2e-ios test-rn-e2e-android test-rn-warm-connect-ios test-rn-warm-connect-android test-packaged-consumers
 	@python3 scripts/release-support-check.py --repo-root "$(CURDIR)" --evidence "$(PHASE_5_EVIDENCE)"
 
 ext-build:
