@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"os/exec"
+	"strings"
 )
 
 type suiteSummary struct {
@@ -207,6 +208,13 @@ func acceptSuiteEvent(packages map[string]*suitePackageState, event testEvent) e
 			return fmt.Errorf("test %s in package %s has an invalid %s event", event.Test, event.Package, event.Action)
 		}
 	case "output":
+		if event.Test == "" {
+			if testName, ok := suiteSubtestSummary(event.Output); ok {
+				event.Test = testName
+			} else if !isSuitePackageOutput(event.Output, event.Package) {
+				return errors.New("test output contains an unscoped event")
+			}
+		}
 		if event.Test != "" && !suiteTestRunning(state, event.Test) {
 			return fmt.Errorf("test %s in package %s has output outside its run", event.Test, event.Package)
 		}
@@ -240,6 +248,32 @@ func acceptSuiteEvent(packages map[string]*suitePackageState, event testEvent) e
 		return fmt.Errorf("package %s has unknown action %s", event.Package, event.Action)
 	}
 	return nil
+}
+
+func suiteSubtestSummary(output string) (string, bool) {
+	line := strings.TrimSuffix(output, "\n")
+	for _, prefix := range []string{"--- PASS: ", "--- FAIL: ", "--- SKIP: "} {
+		if !strings.HasPrefix(line, prefix) {
+			continue
+		}
+		fields := strings.Fields(strings.TrimPrefix(line, prefix))
+		if len(fields) == 2 && strings.HasPrefix(fields[1], "(") && strings.HasSuffix(fields[1], "s)") {
+			return fields[0], true
+		}
+	}
+	return "", false
+}
+
+func isSuitePackageOutput(output, packageName string) bool {
+	if output == "PASS\n" || output == "FAIL\n" || strings.Contains(output, "testing: warning: no tests to run") || strings.Contains(output, "[no test files]") || strings.Contains(output, "[no tests to run]") {
+		return true
+	}
+	line := strings.TrimSuffix(output, "\n")
+	fields := strings.Split(line, "\t")
+	if len(fields) != 3 || packageName == "" || fields[1] != packageName {
+		return false
+	}
+	return (fields[0] == "FAIL" || fields[0] == "ok  ") && strings.HasSuffix(fields[2], "s")
 }
 
 func suiteTestRunning(state *suitePackageState, testName string) bool {

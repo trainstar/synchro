@@ -24,7 +24,7 @@
     {
       "scenario_id": "SCN-PERF-MULTI-SCOPE-PROVENANCE-001",
       "path": "conformance/scenarios/performance/multi-scope-provenance-001.json",
-      "sha256": "1502b34185eeba57b67d2f0c772a9e492b19f906d1bd8be38ac24781a72ece40"
+      "sha256": "64f6485e4486b1029eba776431f01bb17461f86b0d2400c494a866233c4c899b"
     },
     {
       "scenario_id": "SCN-PERF-PENDING-CYCLE-001",
@@ -34,17 +34,17 @@
     {
       "scenario_id": "SCN-PERF-QUEUE-REPLAY-001",
       "path": "conformance/scenarios/performance/queue-replay-001.json",
-      "sha256": "7cc9f3bcc31b3eb8b835523180a7bd3e049900cb21802846343ccf3718b3b846"
+      "sha256": "0a5619009aaa9020f7b8138494b9c6a6026624f324a52f9717a13b00cbb2d8e8"
     },
     {
       "scenario_id": "SCN-PERF-REBUILD-APPLY-001",
       "path": "conformance/scenarios/performance/rebuild-apply-001.json",
-      "sha256": "58fda40c324d7a20e5111e9275921be7a88086276006506fbb6936d4c6c5e081"
+      "sha256": "c97dc7d95f43fdc5f20008d88892be8ab219a034253477a14996b4d7722771d3"
     },
     {
       "scenario_id": "SCN-PERF-REBUILD-CARDINALITY-001",
       "path": "conformance/scenarios/performance/rebuild-cardinality-001.json",
-      "sha256": "5fe847eee214f2208a95c60abc6866325400fbfa8dacaa2955ddbea7a82a60af"
+      "sha256": "7197766cda0e17604e8d7c6b11aadf1b11c06aff48d64bff488f840f2cb864dd"
     },
     {
       "scenario_id": "SCN-PERF-REBUILD-REQUESTS-001",

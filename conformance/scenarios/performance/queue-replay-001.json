@@ -676,6 +676,143 @@
       }
     ]
   },
+  "native_identity_aliases": [
+    {
+      "kind": "client-generation",
+      "alias": "client-generation-one",
+      "value": 1,
+      "step_ids": [],
+      "expectation_ids": [
+        "EXPECT-PERF-QUEUE-REPLAY-SEMANTIC-001"
+      ]
+    },
+    {
+      "kind": "schema",
+      "alias": "queue-schema-one",
+      "value": {
+        "version": 1,
+        "hash": "5d50ccf5bfc84302b63c450bd63b6be412373070586e2d3891d76429cb7e9168"
+      },
+      "step_ids": [],
+      "expectation_ids": [
+        "EXPECT-PERF-QUEUE-REPLAY-SEMANTIC-001"
+      ]
+    },
+    {
+      "kind": "schema",
+      "alias": "queue-schema-two",
+      "value": {
+        "version": 2,
+        "hash": "51d53afcdc08fafd4d7a8259a2fca75cf81a1a791c7bacd2e882d97395b7fc4e"
+      },
+      "step_ids": [],
+      "expectation_ids": [
+        "EXPECT-PERF-QUEUE-REPLAY-SEMANTIC-001"
+      ]
+    },
+    {
+      "kind": "schema",
+      "alias": "queue-schema-three",
+      "value": {
+        "version": 3,
+        "hash": "f25b3f1c01d45ac70bae786c4b68f5f05e49276d7c05a055fc5aff766cb35cd4"
+      },
+      "step_ids": [],
+      "expectation_ids": [
+        "EXPECT-PERF-QUEUE-REPLAY-SEMANTIC-001"
+      ]
+    },
+    {
+      "kind": "schema",
+      "alias": "queue-schema-four",
+      "value": {
+        "version": 4,
+        "hash": "7a8b07fcd818e41c669390d23ba6d38150a8fe47c38f54894bbc136df014f5b5"
+      },
+      "step_ids": [],
+      "expectation_ids": [
+        "EXPECT-PERF-QUEUE-REPLAY-SEMANTIC-001"
+      ]
+    },
+    {
+      "kind": "schema",
+      "alias": "queue-schema-five",
+      "value": {
+        "version": 5,
+        "hash": "28f8545a3f271cd2758eaaedff462a440042584a3c0e9ea8db9566b2baa21fd2"
+      },
+      "step_ids": [],
+      "expectation_ids": [
+        "EXPECT-PERF-QUEUE-REPLAY-SEMANTIC-001"
+      ]
+    },
+    {
+      "kind": "schema",
+      "alias": "queue-schema-six",
+      "value": {
+        "version": 6,
+        "hash": "4cf955f728ff6d0fb3de983c4c7d933c6f97be49c127c96d629d6e5ef2160667"
+      },
+      "step_ids": [],
+      "expectation_ids": [
+        "EXPECT-PERF-QUEUE-REPLAY-SEMANTIC-001"
+      ]
+    },
+    {
+      "kind": "schema",
+      "alias": "queue-schema-seven",
+      "value": {
+        "version": 7,
+        "hash": "ef3b6091844ad1fa84f853fc6c3943eabcd11c7eb3d3537c0201f1b9762b103e"
+      },
+      "step_ids": [],
+      "expectation_ids": [
+        "EXPECT-PERF-QUEUE-REPLAY-SEMANTIC-001"
+      ]
+    },
+    {
+      "kind": "schema",
+      "alias": "queue-schema-eight",
+      "value": {
+        "version": 8,
+        "hash": "6f7ff6b970f81c03dd370ba9ef3d088e3346076af777b99319422cf5e02d505d"
+      },
+      "step_ids": [],
+      "expectation_ids": [
+        "EXPECT-PERF-QUEUE-REPLAY-SEMANTIC-001"
+      ]
+    },
+    {
+      "kind": "schema",
+      "alias": "queue-schema-nine",
+      "value": {
+        "version": 9,
+        "hash": "5411483dda2f137159dab37b9efc4599c6f04bdb16b32f3339e49b0c2fd88265"
+      },
+      "step_ids": [],
+      "expectation_ids": [
+        "EXPECT-PERF-QUEUE-REPLAY-SEMANTIC-001"
+      ]
+    },
+    {
+      "kind": "scope",
+      "alias": "scope-a",
+      "value": "scope-a",
+      "step_ids": [],
+      "expectation_ids": [
+        "EXPECT-PERF-QUEUE-REPLAY-SEMANTIC-001"
+      ]
+    },
+    {
+      "kind": "table",
+      "alias": "items-table",
+      "value": "items",
+      "step_ids": [],
+      "expectation_ids": [
+        "EXPECT-PERF-QUEUE-REPLAY-SEMANTIC-001"
+      ]
+    }
+  ],
   "barrier_plan": {
     "barriers": [
       {
@@ -739,6 +876,56 @@
       "phase": "exercise",
       "transport": "model",
       "description": "Create two durable mutations and replay one terminal rejection after restart and response loss.",
+      "native_binding": {
+        "kind": "workload",
+        "user_id": "user-a",
+        "client_id": "client-a",
+        "workload": {
+          "record_count": 2,
+          "batch_size": 2,
+          "seed": 1001,
+          "authored_schema": {
+            "version": 1,
+            "hash": "5d50ccf5bfc84302b63c450bd63b6be412373070586e2d3891d76429cb7e9168"
+          },
+          "client_version": "2026-08-11T00:00:00.000000Z",
+          "targets": [
+            {
+              "scope_id": "scope-a",
+              "table_id": "items",
+              "primary_key_field_id": "id"
+            }
+          ],
+          "mutation_kinds": [
+            {
+              "operation": "insert",
+              "count": 1,
+              "field_ids": [
+                "value"
+              ]
+            },
+            {
+              "operation": "insert",
+              "count": 1,
+              "field_ids": [
+                "obsolete_value",
+                "value"
+              ]
+            }
+          ],
+          "expectation": {
+            "operation_count": 2,
+            "batch_count": 1,
+            "operation_digest": "6aa7e09f287a214ff71d923d5c59d75ab0f497cf2a5e930155f33d391bb96945",
+            "per_scope_cardinalities": [
+              {
+                "scope_id": "scope-a",
+                "cardinality": 2
+              }
+            ]
+          }
+        }
+      },
       "measurement_sample": {
         "measurement_id": "MEAS-QUEUE-REPLAY-001",
         "stratum_id": "STR-QUEUE-SMALL-001",
@@ -780,6 +967,56 @@
       "phase": "exercise",
       "transport": "model",
       "description": "Repeat the two-mutation restart and replay sample.",
+      "native_binding": {
+        "kind": "workload",
+        "user_id": "user-a",
+        "client_id": "client-a",
+        "workload": {
+          "record_count": 2,
+          "batch_size": 2,
+          "seed": 1002,
+          "authored_schema": {
+            "version": 2,
+            "hash": "51d53afcdc08fafd4d7a8259a2fca75cf81a1a791c7bacd2e882d97395b7fc4e"
+          },
+          "client_version": "2026-08-11T00:00:00.000000Z",
+          "targets": [
+            {
+              "scope_id": "scope-a",
+              "table_id": "items",
+              "primary_key_field_id": "id"
+            }
+          ],
+          "mutation_kinds": [
+            {
+              "operation": "insert",
+              "count": 1,
+              "field_ids": [
+                "value"
+              ]
+            },
+            {
+              "operation": "insert",
+              "count": 1,
+              "field_ids": [
+                "queue_value_2",
+                "value"
+              ]
+            }
+          ],
+          "expectation": {
+            "operation_count": 2,
+            "batch_count": 1,
+            "operation_digest": "6fbe530d355e8a3f308708a92e14694dcb0665f81dbb5277d0bb396d3d120a61",
+            "per_scope_cardinalities": [
+              {
+                "scope_id": "scope-a",
+                "cardinality": 2
+              }
+            ]
+          }
+        }
+      },
       "measurement_sample": {
         "measurement_id": "MEAS-QUEUE-REPLAY-001",
         "stratum_id": "STR-QUEUE-SMALL-001",
@@ -821,6 +1058,56 @@
       "phase": "exercise",
       "transport": "model",
       "description": "Repeat the two-mutation restart and replay sample.",
+      "native_binding": {
+        "kind": "workload",
+        "user_id": "user-a",
+        "client_id": "client-a",
+        "workload": {
+          "record_count": 2,
+          "batch_size": 2,
+          "seed": 1003,
+          "authored_schema": {
+            "version": 3,
+            "hash": "f25b3f1c01d45ac70bae786c4b68f5f05e49276d7c05a055fc5aff766cb35cd4"
+          },
+          "client_version": "2026-08-11T00:00:00.000000Z",
+          "targets": [
+            {
+              "scope_id": "scope-a",
+              "table_id": "items",
+              "primary_key_field_id": "id"
+            }
+          ],
+          "mutation_kinds": [
+            {
+              "operation": "insert",
+              "count": 1,
+              "field_ids": [
+                "value"
+              ]
+            },
+            {
+              "operation": "insert",
+              "count": 1,
+              "field_ids": [
+                "queue_value_3",
+                "value"
+              ]
+            }
+          ],
+          "expectation": {
+            "operation_count": 2,
+            "batch_count": 1,
+            "operation_digest": "2f2484884132711b57cadd624dade43d29f8611cba0c3e475221a82c15a1366a",
+            "per_scope_cardinalities": [
+              {
+                "scope_id": "scope-a",
+                "cardinality": 2
+              }
+            ]
+          }
+        }
+      },
       "measurement_sample": {
         "measurement_id": "MEAS-QUEUE-REPLAY-001",
         "stratum_id": "STR-QUEUE-SMALL-001",
@@ -862,6 +1149,56 @@
       "phase": "exercise",
       "transport": "model",
       "description": "Create 100 durable mutations and replay one terminal rejection after restart and response loss.",
+      "native_binding": {
+        "kind": "workload",
+        "user_id": "user-a",
+        "client_id": "client-a",
+        "workload": {
+          "record_count": 100,
+          "batch_size": 100,
+          "seed": 1004,
+          "authored_schema": {
+            "version": 4,
+            "hash": "7a8b07fcd818e41c669390d23ba6d38150a8fe47c38f54894bbc136df014f5b5"
+          },
+          "client_version": "2026-08-11T00:00:00.000000Z",
+          "targets": [
+            {
+              "scope_id": "scope-a",
+              "table_id": "items",
+              "primary_key_field_id": "id"
+            }
+          ],
+          "mutation_kinds": [
+            {
+              "operation": "insert",
+              "count": 99,
+              "field_ids": [
+                "value"
+              ]
+            },
+            {
+              "operation": "insert",
+              "count": 1,
+              "field_ids": [
+                "queue_value_4",
+                "value"
+              ]
+            }
+          ],
+          "expectation": {
+            "operation_count": 100,
+            "batch_count": 1,
+            "operation_digest": "b6059566b633c00d34ea73a9ac616a5fca244c665728419c4f681a5135cd0c19",
+            "per_scope_cardinalities": [
+              {
+                "scope_id": "scope-a",
+                "cardinality": 100
+              }
+            ]
+          }
+        }
+      },
       "measurement_sample": {
         "measurement_id": "MEAS-QUEUE-REPLAY-001",
         "stratum_id": "STR-QUEUE-MEDIUM-001",
@@ -903,6 +1240,56 @@
       "phase": "exercise",
       "transport": "model",
       "description": "Repeat the 100-mutation restart and replay sample.",
+      "native_binding": {
+        "kind": "workload",
+        "user_id": "user-a",
+        "client_id": "client-a",
+        "workload": {
+          "record_count": 100,
+          "batch_size": 100,
+          "seed": 1005,
+          "authored_schema": {
+            "version": 5,
+            "hash": "28f8545a3f271cd2758eaaedff462a440042584a3c0e9ea8db9566b2baa21fd2"
+          },
+          "client_version": "2026-08-11T00:00:00.000000Z",
+          "targets": [
+            {
+              "scope_id": "scope-a",
+              "table_id": "items",
+              "primary_key_field_id": "id"
+            }
+          ],
+          "mutation_kinds": [
+            {
+              "operation": "insert",
+              "count": 99,
+              "field_ids": [
+                "value"
+              ]
+            },
+            {
+              "operation": "insert",
+              "count": 1,
+              "field_ids": [
+                "queue_value_5",
+                "value"
+              ]
+            }
+          ],
+          "expectation": {
+            "operation_count": 100,
+            "batch_count": 1,
+            "operation_digest": "50c6326ae080889dcfcf3a8892dbd045aef5e7e4c957dad9fafd0b91780ce38b",
+            "per_scope_cardinalities": [
+              {
+                "scope_id": "scope-a",
+                "cardinality": 100
+              }
+            ]
+          }
+        }
+      },
       "measurement_sample": {
         "measurement_id": "MEAS-QUEUE-REPLAY-001",
         "stratum_id": "STR-QUEUE-MEDIUM-001",
@@ -944,6 +1331,56 @@
       "phase": "exercise",
       "transport": "model",
       "description": "Repeat the 100-mutation restart and replay sample.",
+      "native_binding": {
+        "kind": "workload",
+        "user_id": "user-a",
+        "client_id": "client-a",
+        "workload": {
+          "record_count": 100,
+          "batch_size": 100,
+          "seed": 1006,
+          "authored_schema": {
+            "version": 6,
+            "hash": "4cf955f728ff6d0fb3de983c4c7d933c6f97be49c127c96d629d6e5ef2160667"
+          },
+          "client_version": "2026-08-11T00:00:00.000000Z",
+          "targets": [
+            {
+              "scope_id": "scope-a",
+              "table_id": "items",
+              "primary_key_field_id": "id"
+            }
+          ],
+          "mutation_kinds": [
+            {
+              "operation": "insert",
+              "count": 99,
+              "field_ids": [
+                "value"
+              ]
+            },
+            {
+              "operation": "insert",
+              "count": 1,
+              "field_ids": [
+                "queue_value_6",
+                "value"
+              ]
+            }
+          ],
+          "expectation": {
+            "operation_count": 100,
+            "batch_count": 1,
+            "operation_digest": "ef8af5fdffda7d0f1f0a584319b1dbb7dc6cbe8c1e7804fe4e1e231f8c22b612",
+            "per_scope_cardinalities": [
+              {
+                "scope_id": "scope-a",
+                "cardinality": 100
+              }
+            ]
+          }
+        }
+      },
       "measurement_sample": {
         "measurement_id": "MEAS-QUEUE-REPLAY-001",
         "stratum_id": "STR-QUEUE-MEDIUM-001",
@@ -985,6 +1422,56 @@
       "phase": "exercise",
       "transport": "model",
       "description": "Create 1000 durable mutations and replay one terminal rejection after restart and response loss.",
+      "native_binding": {
+        "kind": "workload",
+        "user_id": "user-a",
+        "client_id": "client-a",
+        "workload": {
+          "record_count": 1000,
+          "batch_size": 1000,
+          "seed": 1007,
+          "authored_schema": {
+            "version": 7,
+            "hash": "ef3b6091844ad1fa84f853fc6c3943eabcd11c7eb3d3537c0201f1b9762b103e"
+          },
+          "client_version": "2026-08-11T00:00:00.000000Z",
+          "targets": [
+            {
+              "scope_id": "scope-a",
+              "table_id": "items",
+              "primary_key_field_id": "id"
+            }
+          ],
+          "mutation_kinds": [
+            {
+              "operation": "insert",
+              "count": 999,
+              "field_ids": [
+                "value"
+              ]
+            },
+            {
+              "operation": "insert",
+              "count": 1,
+              "field_ids": [
+                "queue_value_7",
+                "value"
+              ]
+            }
+          ],
+          "expectation": {
+            "operation_count": 1000,
+            "batch_count": 1,
+            "operation_digest": "5f274e3896e5920d1b2afb67cd4866cc5ea5ca3985f369b4093f26fd86d5cfe2",
+            "per_scope_cardinalities": [
+              {
+                "scope_id": "scope-a",
+                "cardinality": 1000
+              }
+            ]
+          }
+        }
+      },
       "measurement_sample": {
         "measurement_id": "MEAS-QUEUE-REPLAY-001",
         "stratum_id": "STR-QUEUE-LARGE-001",
@@ -1026,6 +1513,56 @@
       "phase": "exercise",
       "transport": "model",
       "description": "Repeat the 1000-mutation restart and replay sample.",
+      "native_binding": {
+        "kind": "workload",
+        "user_id": "user-a",
+        "client_id": "client-a",
+        "workload": {
+          "record_count": 1000,
+          "batch_size": 1000,
+          "seed": 1008,
+          "authored_schema": {
+            "version": 8,
+            "hash": "6f7ff6b970f81c03dd370ba9ef3d088e3346076af777b99319422cf5e02d505d"
+          },
+          "client_version": "2026-08-11T00:00:00.000000Z",
+          "targets": [
+            {
+              "scope_id": "scope-a",
+              "table_id": "items",
+              "primary_key_field_id": "id"
+            }
+          ],
+          "mutation_kinds": [
+            {
+              "operation": "insert",
+              "count": 999,
+              "field_ids": [
+                "value"
+              ]
+            },
+            {
+              "operation": "insert",
+              "count": 1,
+              "field_ids": [
+                "queue_value_8",
+                "value"
+              ]
+            }
+          ],
+          "expectation": {
+            "operation_count": 1000,
+            "batch_count": 1,
+            "operation_digest": "23017604191a51e3c4842649469ce09ebd370698a97d485be188b903a3f93963",
+            "per_scope_cardinalities": [
+              {
+                "scope_id": "scope-a",
+                "cardinality": 1000
+              }
+            ]
+          }
+        }
+      },
       "measurement_sample": {
         "measurement_id": "MEAS-QUEUE-REPLAY-001",
         "stratum_id": "STR-QUEUE-LARGE-001",
@@ -1067,6 +1604,56 @@
       "phase": "exercise",
       "transport": "model",
       "description": "Repeat the 1000-mutation restart and replay sample.",
+      "native_binding": {
+        "kind": "workload",
+        "user_id": "user-a",
+        "client_id": "client-a",
+        "workload": {
+          "record_count": 1000,
+          "batch_size": 1000,
+          "seed": 1009,
+          "authored_schema": {
+            "version": 9,
+            "hash": "5411483dda2f137159dab37b9efc4599c6f04bdb16b32f3339e49b0c2fd88265"
+          },
+          "client_version": "2026-08-11T00:00:00.000000Z",
+          "targets": [
+            {
+              "scope_id": "scope-a",
+              "table_id": "items",
+              "primary_key_field_id": "id"
+            }
+          ],
+          "mutation_kinds": [
+            {
+              "operation": "insert",
+              "count": 999,
+              "field_ids": [
+                "value"
+              ]
+            },
+            {
+              "operation": "insert",
+              "count": 1,
+              "field_ids": [
+                "queue_value_9",
+                "value"
+              ]
+            }
+          ],
+          "expectation": {
+            "operation_count": 1000,
+            "batch_count": 1,
+            "operation_digest": "b323d834660497f71cac03776fbe55fdcd13a6da3de55f9717f4666b2a513eb8",
+            "per_scope_cardinalities": [
+              {
+                "scope_id": "scope-a",
+                "cardinality": 1000
+              }
+            ]
+          }
+        }
+      },
       "measurement_sample": {
         "measurement_id": "MEAS-QUEUE-REPLAY-001",
         "stratum_id": "STR-QUEUE-LARGE-001",
@@ -1150,167 +1737,5 @@
       },
       "detects_control_ids": []
     }
-  ],
-  "native_execution": {
-    "version": 1,
-    "clients": [
-      {
-        "key": "client_a",
-        "user_id": "user-a",
-        "client_id": "client-a",
-        "database_key": "db_queue_replay"
-      }
-    ],
-    "actions": [
-      {
-        "id": "NACT-QR-001",
-        "phase": "setup",
-        "actor": "controller",
-        "command": "install-model",
-        "covers_step_ids": [],
-        "parameters": {}
-      },
-      {
-        "id": "NACT-QR-011",
-        "phase": "setup",
-        "actor": "client",
-        "command": "open",
-        "covers_step_ids": [],
-        "parameters": {
-          "client_key": "client_a",
-          "database_mode": "create",
-          "initialization": "current",
-          "seed_step_id": null
-        }
-      },
-      {
-        "id": "NACT-QR-002",
-        "phase": "exercise",
-        "actor": "controller",
-        "command": "apply-step",
-        "covers_step_ids": [
-          "STEP-PERF-QUEUE-REPLAY-001"
-        ],
-        "parameters": {}
-      },
-      {
-        "id": "NACT-QR-003",
-        "phase": "exercise",
-        "actor": "controller",
-        "command": "apply-step",
-        "covers_step_ids": [
-          "STEP-PERF-QUEUE-REPLAY-002"
-        ],
-        "parameters": {}
-      },
-      {
-        "id": "NACT-QR-004",
-        "phase": "exercise",
-        "actor": "controller",
-        "command": "apply-step",
-        "covers_step_ids": [
-          "STEP-PERF-QUEUE-REPLAY-003"
-        ],
-        "parameters": {}
-      },
-      {
-        "id": "NACT-QR-005",
-        "phase": "exercise",
-        "actor": "controller",
-        "command": "apply-step",
-        "covers_step_ids": [
-          "STEP-PERF-QUEUE-REPLAY-004"
-        ],
-        "parameters": {}
-      },
-      {
-        "id": "NACT-QR-006",
-        "phase": "exercise",
-        "actor": "controller",
-        "command": "apply-step",
-        "covers_step_ids": [
-          "STEP-PERF-QUEUE-REPLAY-005"
-        ],
-        "parameters": {}
-      },
-      {
-        "id": "NACT-QR-007",
-        "phase": "exercise",
-        "actor": "controller",
-        "command": "apply-step",
-        "covers_step_ids": [
-          "STEP-PERF-QUEUE-REPLAY-006"
-        ],
-        "parameters": {}
-      },
-      {
-        "id": "NACT-QR-008",
-        "phase": "exercise",
-        "actor": "controller",
-        "command": "apply-step",
-        "covers_step_ids": [
-          "STEP-PERF-QUEUE-REPLAY-007"
-        ],
-        "parameters": {}
-      },
-      {
-        "id": "NACT-QR-009",
-        "phase": "exercise",
-        "actor": "controller",
-        "command": "apply-step",
-        "covers_step_ids": [
-          "STEP-PERF-QUEUE-REPLAY-008"
-        ],
-        "parameters": {}
-      },
-      {
-        "id": "NACT-QR-010",
-        "phase": "exercise",
-        "actor": "controller",
-        "command": "apply-step",
-        "covers_step_ids": [
-          "STEP-PERF-QUEUE-REPLAY-009"
-        ],
-        "parameters": {}
-      },
-      {
-        "id": "NACT-QR-013",
-        "phase": "verify",
-        "actor": "observer",
-        "command": "capture",
-        "covers_step_ids": [],
-        "parameters": {
-          "client_keys": [
-            "client_a"
-          ],
-          "sources": [
-            "application-rows",
-            "pending-mutations",
-            "rejected-mutations",
-            "sync-status",
-            "request-trace",
-            "process-trace",
-            "server-state"
-          ],
-          "expectation_ids": [
-            "EXPECT-PERF-QUEUE-REPLAY-SEMANTIC-001",
-            "EXPECT-PERF-QUEUE-REPLAY-PERFORMANCE-001"
-          ]
-        }
-      },
-      {
-        "id": "NACT-QR-014",
-        "phase": "verify",
-        "actor": "observer",
-        "command": "measure",
-        "covers_step_ids": [],
-        "parameters": {
-          "performance_budget_ids": [],
-          "measurement_ids": [
-            "MEAS-QUEUE-REPLAY-001"
-          ]
-        }
-      }
-    ]
-  }
+  ]
 }

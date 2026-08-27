@@ -750,6 +750,47 @@
       }
     ]
   },
+  "native_identity_aliases": [
+    {
+      "kind": "client-generation",
+      "alias": "client-generation-one",
+      "value": 1,
+      "step_ids": [],
+      "expectation_ids": [
+        "EXPECT-PERF-REBUILD-CARDINALITY-SEMANTIC-001"
+      ]
+    },
+    {
+      "kind": "schema",
+      "alias": "current-schema",
+      "value": {
+        "version": 1,
+        "hash": "721d2c95e6f34cd9733feea9f5118fba391eee10d07663dad066cfc59439fa44"
+      },
+      "step_ids": [],
+      "expectation_ids": [
+        "EXPECT-PERF-REBUILD-CARDINALITY-SEMANTIC-001"
+      ]
+    },
+    {
+      "kind": "scope",
+      "alias": "scope-a",
+      "value": "scope-a",
+      "step_ids": [],
+      "expectation_ids": [
+        "EXPECT-PERF-REBUILD-CARDINALITY-SEMANTIC-001"
+      ]
+    },
+    {
+      "kind": "table",
+      "alias": "items-table",
+      "value": "items",
+      "step_ids": [],
+      "expectation_ids": [
+        "EXPECT-PERF-REBUILD-CARDINALITY-SEMANTIC-001"
+      ]
+    }
+  ],
   "barrier_plan": {
     "barriers": [
       {
@@ -808,6 +849,48 @@
       "phase": "exercise",
       "transport": "model",
       "description": "Execute the authored workload operation.",
+      "native_binding": {
+        "kind": "workload",
+        "user_id": "user-a",
+        "client_id": "client-a",
+        "workload": {
+          "record_count": 1,
+          "batch_size": 1,
+          "seed": 2001,
+          "authored_schema": {
+            "version": 1,
+            "hash": "721d2c95e6f34cd9733feea9f5118fba391eee10d07663dad066cfc59439fa44"
+          },
+          "client_version": "2026-08-27T00:00:00.000000Z",
+          "targets": [
+            {
+              "scope_id": "scope-a",
+              "table_id": "items",
+              "primary_key_field_id": "id"
+            }
+          ],
+          "mutation_kinds": [
+            {
+              "operation": "insert",
+              "count": 1,
+              "field_ids": [
+                "value"
+              ]
+            }
+          ],
+          "expectation": {
+            "operation_count": 1,
+            "batch_count": 1,
+            "operation_digest": "442760b1ee0f96a11064a86af4aee5a781faafda02171d794128d440facb7fca",
+            "per_scope_cardinalities": [
+              {
+                "scope_id": "scope-a",
+                "cardinality": 1
+              }
+            ]
+          }
+        }
+      },
       "measurement_sample": {
         "measurement_id": "MEAS-REBUILD-CARDINALITY-001",
         "stratum_id": "STR-REBUILD-SMALL-001",
@@ -845,6 +928,48 @@
       "phase": "exercise",
       "transport": "model",
       "description": "Execute the authored workload operation.",
+      "native_binding": {
+        "kind": "workload",
+        "user_id": "user-a",
+        "client_id": "client-a",
+        "workload": {
+          "record_count": 1,
+          "batch_size": 1,
+          "seed": 2002,
+          "authored_schema": {
+            "version": 1,
+            "hash": "721d2c95e6f34cd9733feea9f5118fba391eee10d07663dad066cfc59439fa44"
+          },
+          "client_version": "2026-08-27T00:00:00.000000Z",
+          "targets": [
+            {
+              "scope_id": "scope-a",
+              "table_id": "items",
+              "primary_key_field_id": "id"
+            }
+          ],
+          "mutation_kinds": [
+            {
+              "operation": "insert",
+              "count": 1,
+              "field_ids": [
+                "value"
+              ]
+            }
+          ],
+          "expectation": {
+            "operation_count": 1,
+            "batch_count": 1,
+            "operation_digest": "d4f5e6fcc2597d1b3bf72d3738b18706507449745af25fb8ed1e3a33c775b778",
+            "per_scope_cardinalities": [
+              {
+                "scope_id": "scope-a",
+                "cardinality": 1
+              }
+            ]
+          }
+        }
+      },
       "measurement_sample": {
         "measurement_id": "MEAS-REBUILD-CARDINALITY-001",
         "stratum_id": "STR-REBUILD-SMALL-001",
@@ -882,6 +1007,48 @@
       "phase": "exercise",
       "transport": "model",
       "description": "Execute the authored workload operation.",
+      "native_binding": {
+        "kind": "workload",
+        "user_id": "user-a",
+        "client_id": "client-a",
+        "workload": {
+          "record_count": 1,
+          "batch_size": 1,
+          "seed": 2003,
+          "authored_schema": {
+            "version": 1,
+            "hash": "721d2c95e6f34cd9733feea9f5118fba391eee10d07663dad066cfc59439fa44"
+          },
+          "client_version": "2026-08-27T00:00:00.000000Z",
+          "targets": [
+            {
+              "scope_id": "scope-a",
+              "table_id": "items",
+              "primary_key_field_id": "id"
+            }
+          ],
+          "mutation_kinds": [
+            {
+              "operation": "insert",
+              "count": 1,
+              "field_ids": [
+                "value"
+              ]
+            }
+          ],
+          "expectation": {
+            "operation_count": 1,
+            "batch_count": 1,
+            "operation_digest": "044c4f74be57613ec9fca5464f55d1b4470fb16eb0b7258a8e23cd6f136a338a",
+            "per_scope_cardinalities": [
+              {
+                "scope_id": "scope-a",
+                "cardinality": 1
+              }
+            ]
+          }
+        }
+      },
       "measurement_sample": {
         "measurement_id": "MEAS-REBUILD-CARDINALITY-001",
         "stratum_id": "STR-REBUILD-SMALL-001",
@@ -919,6 +1086,48 @@
       "phase": "exercise",
       "transport": "model",
       "description": "Execute the authored workload operation.",
+      "native_binding": {
+        "kind": "workload",
+        "user_id": "user-a",
+        "client_id": "client-a",
+        "workload": {
+          "record_count": 101,
+          "batch_size": 101,
+          "seed": 2004,
+          "authored_schema": {
+            "version": 1,
+            "hash": "721d2c95e6f34cd9733feea9f5118fba391eee10d07663dad066cfc59439fa44"
+          },
+          "client_version": "2026-08-27T00:00:00.000000Z",
+          "targets": [
+            {
+              "scope_id": "scope-a",
+              "table_id": "items",
+              "primary_key_field_id": "id"
+            }
+          ],
+          "mutation_kinds": [
+            {
+              "operation": "insert",
+              "count": 101,
+              "field_ids": [
+                "value"
+              ]
+            }
+          ],
+          "expectation": {
+            "operation_count": 101,
+            "batch_count": 1,
+            "operation_digest": "08b26eafbf374920c94995d3dbe707073ebbf3b14e880eaba70fc5a515dc54e8",
+            "per_scope_cardinalities": [
+              {
+                "scope_id": "scope-a",
+                "cardinality": 101
+              }
+            ]
+          }
+        }
+      },
       "measurement_sample": {
         "measurement_id": "MEAS-REBUILD-CARDINALITY-001",
         "stratum_id": "STR-REBUILD-MEDIUM-001",
@@ -956,6 +1165,48 @@
       "phase": "exercise",
       "transport": "model",
       "description": "Execute the authored workload operation.",
+      "native_binding": {
+        "kind": "workload",
+        "user_id": "user-a",
+        "client_id": "client-a",
+        "workload": {
+          "record_count": 101,
+          "batch_size": 101,
+          "seed": 2005,
+          "authored_schema": {
+            "version": 1,
+            "hash": "721d2c95e6f34cd9733feea9f5118fba391eee10d07663dad066cfc59439fa44"
+          },
+          "client_version": "2026-08-27T00:00:00.000000Z",
+          "targets": [
+            {
+              "scope_id": "scope-a",
+              "table_id": "items",
+              "primary_key_field_id": "id"
+            }
+          ],
+          "mutation_kinds": [
+            {
+              "operation": "insert",
+              "count": 101,
+              "field_ids": [
+                "value"
+              ]
+            }
+          ],
+          "expectation": {
+            "operation_count": 101,
+            "batch_count": 1,
+            "operation_digest": "558e4e40f7029d463e51c0575018492e707529355459f0c4fccd8ce7e95114c0",
+            "per_scope_cardinalities": [
+              {
+                "scope_id": "scope-a",
+                "cardinality": 101
+              }
+            ]
+          }
+        }
+      },
       "measurement_sample": {
         "measurement_id": "MEAS-REBUILD-CARDINALITY-001",
         "stratum_id": "STR-REBUILD-MEDIUM-001",
@@ -993,6 +1244,48 @@
       "phase": "exercise",
       "transport": "model",
       "description": "Execute the authored workload operation.",
+      "native_binding": {
+        "kind": "workload",
+        "user_id": "user-a",
+        "client_id": "client-a",
+        "workload": {
+          "record_count": 101,
+          "batch_size": 101,
+          "seed": 2006,
+          "authored_schema": {
+            "version": 1,
+            "hash": "721d2c95e6f34cd9733feea9f5118fba391eee10d07663dad066cfc59439fa44"
+          },
+          "client_version": "2026-08-27T00:00:00.000000Z",
+          "targets": [
+            {
+              "scope_id": "scope-a",
+              "table_id": "items",
+              "primary_key_field_id": "id"
+            }
+          ],
+          "mutation_kinds": [
+            {
+              "operation": "insert",
+              "count": 101,
+              "field_ids": [
+                "value"
+              ]
+            }
+          ],
+          "expectation": {
+            "operation_count": 101,
+            "batch_count": 1,
+            "operation_digest": "106fa5ee659cba7012102e59fcdd1be3e93fdbf49f34f675cb732c8b27ed1473",
+            "per_scope_cardinalities": [
+              {
+                "scope_id": "scope-a",
+                "cardinality": 101
+              }
+            ]
+          }
+        }
+      },
       "measurement_sample": {
         "measurement_id": "MEAS-REBUILD-CARDINALITY-001",
         "stratum_id": "STR-REBUILD-MEDIUM-001",
@@ -1030,6 +1323,48 @@
       "phase": "exercise",
       "transport": "model",
       "description": "Execute the authored workload operation.",
+      "native_binding": {
+        "kind": "workload",
+        "user_id": "user-a",
+        "client_id": "client-a",
+        "workload": {
+          "record_count": 1000,
+          "batch_size": 1000,
+          "seed": 2007,
+          "authored_schema": {
+            "version": 1,
+            "hash": "721d2c95e6f34cd9733feea9f5118fba391eee10d07663dad066cfc59439fa44"
+          },
+          "client_version": "2026-08-27T00:00:00.000000Z",
+          "targets": [
+            {
+              "scope_id": "scope-a",
+              "table_id": "items",
+              "primary_key_field_id": "id"
+            }
+          ],
+          "mutation_kinds": [
+            {
+              "operation": "insert",
+              "count": 1000,
+              "field_ids": [
+                "value"
+              ]
+            }
+          ],
+          "expectation": {
+            "operation_count": 1000,
+            "batch_count": 1,
+            "operation_digest": "5879f289b9cc765e9b6f14a2b22e6e45333bee1abc6f454ac00e9e02c7dc9698",
+            "per_scope_cardinalities": [
+              {
+                "scope_id": "scope-a",
+                "cardinality": 1000
+              }
+            ]
+          }
+        }
+      },
       "measurement_sample": {
         "measurement_id": "MEAS-REBUILD-CARDINALITY-001",
         "stratum_id": "STR-REBUILD-LARGE-001",
@@ -1067,6 +1402,48 @@
       "phase": "exercise",
       "transport": "model",
       "description": "Execute the authored workload operation.",
+      "native_binding": {
+        "kind": "workload",
+        "user_id": "user-a",
+        "client_id": "client-a",
+        "workload": {
+          "record_count": 1000,
+          "batch_size": 1000,
+          "seed": 2008,
+          "authored_schema": {
+            "version": 1,
+            "hash": "721d2c95e6f34cd9733feea9f5118fba391eee10d07663dad066cfc59439fa44"
+          },
+          "client_version": "2026-08-27T00:00:00.000000Z",
+          "targets": [
+            {
+              "scope_id": "scope-a",
+              "table_id": "items",
+              "primary_key_field_id": "id"
+            }
+          ],
+          "mutation_kinds": [
+            {
+              "operation": "insert",
+              "count": 1000,
+              "field_ids": [
+                "value"
+              ]
+            }
+          ],
+          "expectation": {
+            "operation_count": 1000,
+            "batch_count": 1,
+            "operation_digest": "44780a2a60f60551680c3615fe1b2c40c40fc8e834593d14b983d01ab857bef3",
+            "per_scope_cardinalities": [
+              {
+                "scope_id": "scope-a",
+                "cardinality": 1000
+              }
+            ]
+          }
+        }
+      },
       "measurement_sample": {
         "measurement_id": "MEAS-REBUILD-CARDINALITY-001",
         "stratum_id": "STR-REBUILD-LARGE-001",
@@ -1104,6 +1481,48 @@
       "phase": "exercise",
       "transport": "model",
       "description": "Execute the authored workload operation.",
+      "native_binding": {
+        "kind": "workload",
+        "user_id": "user-a",
+        "client_id": "client-a",
+        "workload": {
+          "record_count": 1000,
+          "batch_size": 1000,
+          "seed": 2009,
+          "authored_schema": {
+            "version": 1,
+            "hash": "721d2c95e6f34cd9733feea9f5118fba391eee10d07663dad066cfc59439fa44"
+          },
+          "client_version": "2026-08-27T00:00:00.000000Z",
+          "targets": [
+            {
+              "scope_id": "scope-a",
+              "table_id": "items",
+              "primary_key_field_id": "id"
+            }
+          ],
+          "mutation_kinds": [
+            {
+              "operation": "insert",
+              "count": 1000,
+              "field_ids": [
+                "value"
+              ]
+            }
+          ],
+          "expectation": {
+            "operation_count": 1000,
+            "batch_count": 1,
+            "operation_digest": "82cdd6a4685300fb415bd5b0ee94deb55b3eeefed8f2f7ea80bf45ce645d0f6f",
+            "per_scope_cardinalities": [
+              {
+                "scope_id": "scope-a",
+                "cardinality": 1000
+              }
+            ]
+          }
+        }
+      },
       "measurement_sample": {
         "measurement_id": "MEAS-REBUILD-CARDINALITY-001",
         "stratum_id": "STR-REBUILD-LARGE-001",
@@ -1183,168 +1602,5 @@
       },
       "detects_control_ids": []
     }
-  ],
-  "native_execution": {
-    "version": 1,
-    "clients": [
-      {
-        "key": "client_a",
-        "user_id": "user-a",
-        "client_id": "client-a",
-        "database_key": "db_rebuild_cardinality"
-      }
-    ],
-    "actions": [
-      {
-        "id": "NACT-RC-001",
-        "phase": "setup",
-        "actor": "controller",
-        "command": "install-model",
-        "covers_step_ids": [],
-        "parameters": {}
-      },
-      {
-        "id": "NACT-RC-011",
-        "phase": "setup",
-        "actor": "client",
-        "command": "open",
-        "covers_step_ids": [],
-        "parameters": {
-          "client_key": "client_a",
-          "database_mode": "create",
-          "initialization": "current",
-          "seed_step_id": null
-        }
-      },
-      {
-        "id": "NACT-RC-002",
-        "phase": "exercise",
-        "actor": "controller",
-        "command": "apply-step",
-        "covers_step_ids": [
-          "STEP-PERF-REBUILD-CARDINALITY-001"
-        ],
-        "parameters": {}
-      },
-      {
-        "id": "NACT-RC-003",
-        "phase": "exercise",
-        "actor": "controller",
-        "command": "apply-step",
-        "covers_step_ids": [
-          "STEP-PERF-REBUILD-CARDINALITY-002"
-        ],
-        "parameters": {}
-      },
-      {
-        "id": "NACT-RC-004",
-        "phase": "exercise",
-        "actor": "controller",
-        "command": "apply-step",
-        "covers_step_ids": [
-          "STEP-PERF-REBUILD-CARDINALITY-003"
-        ],
-        "parameters": {}
-      },
-      {
-        "id": "NACT-RC-005",
-        "phase": "exercise",
-        "actor": "controller",
-        "command": "apply-step",
-        "covers_step_ids": [
-          "STEP-PERF-REBUILD-CARDINALITY-004"
-        ],
-        "parameters": {}
-      },
-      {
-        "id": "NACT-RC-006",
-        "phase": "exercise",
-        "actor": "controller",
-        "command": "apply-step",
-        "covers_step_ids": [
-          "STEP-PERF-REBUILD-CARDINALITY-005"
-        ],
-        "parameters": {}
-      },
-      {
-        "id": "NACT-RC-007",
-        "phase": "exercise",
-        "actor": "controller",
-        "command": "apply-step",
-        "covers_step_ids": [
-          "STEP-PERF-REBUILD-CARDINALITY-006"
-        ],
-        "parameters": {}
-      },
-      {
-        "id": "NACT-RC-008",
-        "phase": "exercise",
-        "actor": "controller",
-        "command": "apply-step",
-        "covers_step_ids": [
-          "STEP-PERF-REBUILD-CARDINALITY-007"
-        ],
-        "parameters": {}
-      },
-      {
-        "id": "NACT-RC-009",
-        "phase": "exercise",
-        "actor": "controller",
-        "command": "apply-step",
-        "covers_step_ids": [
-          "STEP-PERF-REBUILD-CARDINALITY-008"
-        ],
-        "parameters": {}
-      },
-      {
-        "id": "NACT-RC-010",
-        "phase": "exercise",
-        "actor": "controller",
-        "command": "apply-step",
-        "covers_step_ids": [
-          "STEP-PERF-REBUILD-CARDINALITY-009"
-        ],
-        "parameters": {}
-      },
-      {
-        "id": "NACT-RC-013",
-        "phase": "verify",
-        "actor": "observer",
-        "command": "capture",
-        "covers_step_ids": [],
-        "parameters": {
-          "client_keys": [
-            "client_a"
-          ],
-          "sources": [
-            "application-rows",
-            "sync-status",
-            "scope-state",
-            "checkpoints",
-            "provenance",
-            "rebuild-state",
-            "request-trace",
-            "server-state"
-          ],
-          "expectation_ids": [
-            "EXPECT-PERF-REBUILD-CARDINALITY-SEMANTIC-001",
-            "EXPECT-PERF-REBUILD-CARDINALITY-PERFORMANCE-001"
-          ]
-        }
-      },
-      {
-        "id": "NACT-RC-014",
-        "phase": "verify",
-        "actor": "observer",
-        "command": "measure",
-        "covers_step_ids": [],
-        "parameters": {
-          "performance_budget_ids": [],
-          "measurement_ids": [
-            "MEAS-REBUILD-CARDINALITY-001"
-          ]
-        }
-      }
-    ]
-  }
+  ]
 }

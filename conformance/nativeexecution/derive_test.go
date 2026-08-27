@@ -43,11 +43,7 @@ func TestSelectDerivesEveryBoundScenario(t *testing.T) {
 	}
 	cases := 0
 	for _, scenario := range authored {
-		hasBinding := false
-		for _, step := range scenario.Steps {
-			hasBinding = hasBinding || step.NativeBinding != nil
-		}
-		if !hasBinding {
+		if !scenarios.IsNativeDerivationScenario(scenario) {
 			continue
 		}
 		for _, obligation := range scenario.ProofObligations {

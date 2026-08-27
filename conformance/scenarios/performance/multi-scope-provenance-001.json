@@ -762,22 +762,6 @@
       "native_binding": {
         "kind": "controller"
       },
-      "measurement_sample": {
-        "measurement_id": "MEAS-MULTI-SCOPE-PROVENANCE-001",
-        "stratum_id": "STR-PROVENANCE-ONE-001",
-        "sample_id": "SAMPLE-MULTI-SCOPE-PROVENANCE-ONE-001",
-        "parameters": {
-          "provenance_scope_count": 1
-        },
-        "operation": {
-          "id": "MOP-MULTI-SCOPE-PROVENANCE-ONE-001",
-          "family": "multi-scope-provenance",
-          "boundary": "one",
-          "value": {
-            "provenance_scope_count": 1
-          }
-        }
-      },
       "operation": {
         "contract_operation": "model",
         "name": "commit-source-transaction",
@@ -862,28 +846,67 @@
       "expected_outcome": {"disposition": "success"}
     },
     {
-      "id": "STEP-PERF-MULTI-SCOPE-PROVENANCE-002",
+      "id": "STEP-PERF-MULTI-SCOPE-PROVENANCE-001-CONNECT-001",
       "phase": "exercise",
-      "transport": "model",
-      "description": "Commit the second topology sample marker transaction.",
+      "transport": "http",
+      "description": "Connect the public client after the first topology sample.",
       "native_binding": {
-        "kind": "controller"
+        "kind": "public-call",
+        "user_id": "user-a",
+        "client_id": "client-a",
+        "call_id": "multi_scope_sample_one",
+        "stage": "synchronous",
+        "method": "sync-now",
+        "completion": "idle"
       },
       "measurement_sample": {
         "measurement_id": "MEAS-MULTI-SCOPE-PROVENANCE-001",
         "stratum_id": "STR-PROVENANCE-ONE-001",
-        "sample_id": "SAMPLE-MULTI-SCOPE-PROVENANCE-ONE-002",
+        "sample_id": "SAMPLE-MULTI-SCOPE-PROVENANCE-ONE-001",
         "parameters": {
           "provenance_scope_count": 1
         },
         "operation": {
-          "id": "MOP-MULTI-SCOPE-PROVENANCE-ONE-002",
+          "id": "MOP-MULTI-SCOPE-PROVENANCE-ONE-001",
           "family": "multi-scope-provenance",
           "boundary": "one",
           "value": {
             "provenance_scope_count": 1
           }
         }
+      },
+      "operation": {
+        "contract_operation": "connect",
+        "name": "send",
+        "payload": {
+          "user_id": "user-a",
+          "client_id": "client-a",
+          "runtime_version": 3,
+          "protocol_version": 3,
+          "client_generation": 1,
+          "schema_reset": false,
+          "schema": {
+            "version": 1,
+            "hash": "721d2c95e6f34cd9733feea9f5118fba391eee10d07663dad066cfc59439fa44"
+          },
+          "scope_set_version": 1,
+          "known_scopes": [
+            {"scope_id": "scope-a"},
+            {"scope_id": "scope-b"}
+          ]
+        }
+      },
+      "expected_outcome": {
+        "disposition": "success"
+      }
+    },
+    {
+      "id": "STEP-PERF-MULTI-SCOPE-PROVENANCE-002",
+      "phase": "exercise",
+      "transport": "model",
+      "description": "Commit the second topology sample marker transaction.",
+      "native_binding": {
+        "kind": "controller"
       },
       "operation": {
         "contract_operation": "model",
@@ -957,28 +980,67 @@
       "expected_outcome": {"disposition": "success"}
     },
     {
-      "id": "STEP-PERF-MULTI-SCOPE-PROVENANCE-003",
+      "id": "STEP-PERF-MULTI-SCOPE-PROVENANCE-002-CONNECT-001",
       "phase": "exercise",
-      "transport": "model",
-      "description": "Commit the third topology sample marker transaction.",
+      "transport": "http",
+      "description": "Connect the public client after the second topology sample.",
       "native_binding": {
-        "kind": "controller"
+        "kind": "public-call",
+        "user_id": "user-a",
+        "client_id": "client-a",
+        "call_id": "multi_scope_sample_two",
+        "stage": "synchronous",
+        "method": "sync-now",
+        "completion": "idle"
       },
       "measurement_sample": {
         "measurement_id": "MEAS-MULTI-SCOPE-PROVENANCE-001",
         "stratum_id": "STR-PROVENANCE-ONE-001",
-        "sample_id": "SAMPLE-MULTI-SCOPE-PROVENANCE-ONE-003",
+        "sample_id": "SAMPLE-MULTI-SCOPE-PROVENANCE-ONE-002",
         "parameters": {
           "provenance_scope_count": 1
         },
         "operation": {
-          "id": "MOP-MULTI-SCOPE-PROVENANCE-ONE-003",
+          "id": "MOP-MULTI-SCOPE-PROVENANCE-ONE-002",
           "family": "multi-scope-provenance",
           "boundary": "one",
           "value": {
             "provenance_scope_count": 1
           }
         }
+      },
+      "operation": {
+        "contract_operation": "connect",
+        "name": "send",
+        "payload": {
+          "user_id": "user-a",
+          "client_id": "client-a",
+          "runtime_version": 3,
+          "protocol_version": 3,
+          "client_generation": 1,
+          "schema_reset": false,
+          "schema": {
+            "version": 1,
+            "hash": "721d2c95e6f34cd9733feea9f5118fba391eee10d07663dad066cfc59439fa44"
+          },
+          "scope_set_version": 1,
+          "known_scopes": [
+            {"scope_id": "scope-a"},
+            {"scope_id": "scope-b"}
+          ]
+        }
+      },
+      "expected_outcome": {
+        "disposition": "success"
+      }
+    },
+    {
+      "id": "STEP-PERF-MULTI-SCOPE-PROVENANCE-003",
+      "phase": "exercise",
+      "transport": "model",
+      "description": "Commit the third topology sample marker transaction.",
+      "native_binding": {
+        "kind": "controller"
       },
       "operation": {
         "contract_operation": "model",
@@ -1052,28 +1114,67 @@
       "expected_outcome": {"disposition": "success"}
     },
     {
+      "id": "STEP-PERF-MULTI-SCOPE-PROVENANCE-003-CONNECT-001",
+      "phase": "exercise",
+      "transport": "http",
+      "description": "Connect the public client after the third topology sample.",
+      "native_binding": {
+        "kind": "public-call",
+        "user_id": "user-a",
+        "client_id": "client-a",
+        "call_id": "multi_scope_sample_three",
+        "stage": "synchronous",
+        "method": "sync-now",
+        "completion": "idle"
+      },
+      "measurement_sample": {
+        "measurement_id": "MEAS-MULTI-SCOPE-PROVENANCE-001",
+        "stratum_id": "STR-PROVENANCE-ONE-001",
+        "sample_id": "SAMPLE-MULTI-SCOPE-PROVENANCE-ONE-003",
+        "parameters": {
+          "provenance_scope_count": 1
+        },
+        "operation": {
+          "id": "MOP-MULTI-SCOPE-PROVENANCE-ONE-003",
+          "family": "multi-scope-provenance",
+          "boundary": "one",
+          "value": {
+            "provenance_scope_count": 1
+          }
+        }
+      },
+      "operation": {
+        "contract_operation": "connect",
+        "name": "send",
+        "payload": {
+          "user_id": "user-a",
+          "client_id": "client-a",
+          "runtime_version": 3,
+          "protocol_version": 3,
+          "client_generation": 1,
+          "schema_reset": false,
+          "schema": {
+            "version": 1,
+            "hash": "721d2c95e6f34cd9733feea9f5118fba391eee10d07663dad066cfc59439fa44"
+          },
+          "scope_set_version": 1,
+          "known_scopes": [
+            {"scope_id": "scope-a"},
+            {"scope_id": "scope-b"}
+          ]
+        }
+      },
+      "expected_outcome": {
+        "disposition": "success"
+      }
+    },
+    {
       "id": "STEP-PERF-MULTI-SCOPE-PROVENANCE-004",
       "phase": "exercise",
       "transport": "model",
       "description": "Commit the fourth topology sample marker transaction.",
       "native_binding": {
         "kind": "controller"
-      },
-      "measurement_sample": {
-        "measurement_id": "MEAS-MULTI-SCOPE-PROVENANCE-001",
-        "stratum_id": "STR-PROVENANCE-MULTIPLE-001",
-        "sample_id": "SAMPLE-MULTI-SCOPE-PROVENANCE-MULTIPLE-001",
-        "parameters": {
-          "provenance_scope_count": 2
-        },
-        "operation": {
-          "id": "MOP-MULTI-SCOPE-PROVENANCE-MULTIPLE-001",
-          "family": "multi-scope-provenance",
-          "boundary": "multiple",
-          "value": {
-            "provenance_scope_count": 2
-          }
-        }
       },
       "operation": {
         "contract_operation": "model",
@@ -1159,6 +1260,61 @@
       "expected_outcome": {"disposition": "success"}
     },
     {
+      "id": "STEP-PERF-MULTI-SCOPE-PROVENANCE-004-CONNECT-001",
+      "phase": "exercise",
+      "transport": "http",
+      "description": "Connect the public client after the fourth topology sample.",
+      "native_binding": {
+        "kind": "public-call",
+        "user_id": "user-a",
+        "client_id": "client-a",
+        "call_id": "multi_scope_sample_four",
+        "stage": "synchronous",
+        "method": "sync-now",
+        "completion": "idle"
+      },
+      "measurement_sample": {
+        "measurement_id": "MEAS-MULTI-SCOPE-PROVENANCE-001",
+        "stratum_id": "STR-PROVENANCE-MULTIPLE-001",
+        "sample_id": "SAMPLE-MULTI-SCOPE-PROVENANCE-MULTIPLE-001",
+        "parameters": {
+          "provenance_scope_count": 2
+        },
+        "operation": {
+          "id": "MOP-MULTI-SCOPE-PROVENANCE-MULTIPLE-001",
+          "family": "multi-scope-provenance",
+          "boundary": "multiple",
+          "value": {
+            "provenance_scope_count": 2
+          }
+        }
+      },
+      "operation": {
+        "contract_operation": "connect",
+        "name": "send",
+        "payload": {
+          "user_id": "user-a",
+          "client_id": "client-a",
+          "runtime_version": 3,
+          "protocol_version": 3,
+          "client_generation": 1,
+          "schema_reset": false,
+          "schema": {
+            "version": 1,
+            "hash": "721d2c95e6f34cd9733feea9f5118fba391eee10d07663dad066cfc59439fa44"
+          },
+          "scope_set_version": 1,
+          "known_scopes": [
+            {"scope_id": "scope-a"},
+            {"scope_id": "scope-b"}
+          ]
+        }
+      },
+      "expected_outcome": {
+        "disposition": "success"
+      }
+    },
+    {
       "id": "STEP-PERF-MULTI-SCOPE-PROVENANCE-004-REBUILD-A-BEGIN-001",
       "phase": "exercise",
       "transport": "local",
@@ -1238,22 +1394,6 @@
       "native_binding": {
         "kind": "controller"
       },
-      "measurement_sample": {
-        "measurement_id": "MEAS-MULTI-SCOPE-PROVENANCE-001",
-        "stratum_id": "STR-PROVENANCE-MULTIPLE-001",
-        "sample_id": "SAMPLE-MULTI-SCOPE-PROVENANCE-MULTIPLE-002",
-        "parameters": {
-          "provenance_scope_count": 2
-        },
-        "operation": {
-          "id": "MOP-MULTI-SCOPE-PROVENANCE-MULTIPLE-002",
-          "family": "multi-scope-provenance",
-          "boundary": "multiple",
-          "value": {
-            "provenance_scope_count": 2
-          }
-        }
-      },
       "operation": {
         "contract_operation": "model",
         "name": "commit-source-transaction",
@@ -1324,6 +1464,61 @@
       "native_binding": {"kind": "controller"},
       "operation": {"contract_operation": "process", "name": "materialize-source-transaction", "payload": {"stream_generation": "stream-1", "commit_lsn": "100"}},
       "expected_outcome": {"disposition": "success"}
+    },
+    {
+      "id": "STEP-PERF-MULTI-SCOPE-PROVENANCE-005-CONNECT-001",
+      "phase": "exercise",
+      "transport": "http",
+      "description": "Connect the public client after the fifth topology sample.",
+      "native_binding": {
+        "kind": "public-call",
+        "user_id": "user-a",
+        "client_id": "client-a",
+        "call_id": "multi_scope_sample_five",
+        "stage": "synchronous",
+        "method": "sync-now",
+        "completion": "idle"
+      },
+      "measurement_sample": {
+        "measurement_id": "MEAS-MULTI-SCOPE-PROVENANCE-001",
+        "stratum_id": "STR-PROVENANCE-MULTIPLE-001",
+        "sample_id": "SAMPLE-MULTI-SCOPE-PROVENANCE-MULTIPLE-002",
+        "parameters": {
+          "provenance_scope_count": 2
+        },
+        "operation": {
+          "id": "MOP-MULTI-SCOPE-PROVENANCE-MULTIPLE-002",
+          "family": "multi-scope-provenance",
+          "boundary": "multiple",
+          "value": {
+            "provenance_scope_count": 2
+          }
+        }
+      },
+      "operation": {
+        "contract_operation": "connect",
+        "name": "send",
+        "payload": {
+          "user_id": "user-a",
+          "client_id": "client-a",
+          "runtime_version": 3,
+          "protocol_version": 3,
+          "client_generation": 1,
+          "schema_reset": false,
+          "schema": {
+            "version": 1,
+            "hash": "721d2c95e6f34cd9733feea9f5118fba391eee10d07663dad066cfc59439fa44"
+          },
+          "scope_set_version": 1,
+          "known_scopes": [
+            {"scope_id": "scope-a"},
+            {"scope_id": "scope-b"}
+          ]
+        }
+      },
+      "expected_outcome": {
+        "disposition": "success"
+      }
     },
     {
       "id": "STEP-PERF-MULTI-SCOPE-PROVENANCE-005-REBUILD-A-BEGIN-001",
@@ -1405,22 +1600,6 @@
       "native_binding": {
         "kind": "controller"
       },
-      "measurement_sample": {
-        "measurement_id": "MEAS-MULTI-SCOPE-PROVENANCE-001",
-        "stratum_id": "STR-PROVENANCE-MULTIPLE-001",
-        "sample_id": "SAMPLE-MULTI-SCOPE-PROVENANCE-MULTIPLE-003",
-        "parameters": {
-          "provenance_scope_count": 2
-        },
-        "operation": {
-          "id": "MOP-MULTI-SCOPE-PROVENANCE-MULTIPLE-003",
-          "family": "multi-scope-provenance",
-          "boundary": "multiple",
-          "value": {
-            "provenance_scope_count": 2
-          }
-        }
-      },
       "operation": {
         "contract_operation": "model",
         "name": "commit-source-transaction",
@@ -1491,6 +1670,61 @@
       "native_binding": {"kind": "controller"},
       "operation": {"contract_operation": "process", "name": "materialize-source-transaction", "payload": {"stream_generation": "stream-1", "commit_lsn": "120"}},
       "expected_outcome": {"disposition": "success"}
+    },
+    {
+      "id": "STEP-PERF-MULTI-SCOPE-PROVENANCE-006-CONNECT-001",
+      "phase": "exercise",
+      "transport": "http",
+      "description": "Connect the public client after the sixth topology sample.",
+      "native_binding": {
+        "kind": "public-call",
+        "user_id": "user-a",
+        "client_id": "client-a",
+        "call_id": "multi_scope_sample_six",
+        "stage": "synchronous",
+        "method": "sync-now",
+        "completion": "idle"
+      },
+      "measurement_sample": {
+        "measurement_id": "MEAS-MULTI-SCOPE-PROVENANCE-001",
+        "stratum_id": "STR-PROVENANCE-MULTIPLE-001",
+        "sample_id": "SAMPLE-MULTI-SCOPE-PROVENANCE-MULTIPLE-003",
+        "parameters": {
+          "provenance_scope_count": 2
+        },
+        "operation": {
+          "id": "MOP-MULTI-SCOPE-PROVENANCE-MULTIPLE-003",
+          "family": "multi-scope-provenance",
+          "boundary": "multiple",
+          "value": {
+            "provenance_scope_count": 2
+          }
+        }
+      },
+      "operation": {
+        "contract_operation": "connect",
+        "name": "send",
+        "payload": {
+          "user_id": "user-a",
+          "client_id": "client-a",
+          "runtime_version": 3,
+          "protocol_version": 3,
+          "client_generation": 1,
+          "schema_reset": false,
+          "schema": {
+            "version": 1,
+            "hash": "721d2c95e6f34cd9733feea9f5118fba391eee10d07663dad066cfc59439fa44"
+          },
+          "scope_set_version": 1,
+          "known_scopes": [
+            {"scope_id": "scope-a"},
+            {"scope_id": "scope-b"}
+          ]
+        }
+      },
+      "expected_outcome": {
+        "disposition": "success"
+      }
     },
     {
       "id": "STEP-PERF-MULTI-SCOPE-PROVENANCE-006-REBUILD-A-BEGIN-001",
@@ -1601,6 +1835,54 @@
   ],
   "wire_expectations": [
     {
+      "step_id": "STEP-PERF-MULTI-SCOPE-PROVENANCE-001-CONNECT-001",
+      "assertion_id": "ASSERT-PERF-MULTI-SCOPE-PROVENANCE-WIRE-001",
+      "contract_case": "connect_success",
+      "http_status": 200,
+      "error_code": null,
+      "retryable": false
+    },
+    {
+      "step_id": "STEP-PERF-MULTI-SCOPE-PROVENANCE-002-CONNECT-001",
+      "assertion_id": "ASSERT-PERF-MULTI-SCOPE-PROVENANCE-WIRE-001",
+      "contract_case": "connect_success",
+      "http_status": 200,
+      "error_code": null,
+      "retryable": false
+    },
+    {
+      "step_id": "STEP-PERF-MULTI-SCOPE-PROVENANCE-003-CONNECT-001",
+      "assertion_id": "ASSERT-PERF-MULTI-SCOPE-PROVENANCE-WIRE-001",
+      "contract_case": "connect_success",
+      "http_status": 200,
+      "error_code": null,
+      "retryable": false
+    },
+    {
+      "step_id": "STEP-PERF-MULTI-SCOPE-PROVENANCE-004-CONNECT-001",
+      "assertion_id": "ASSERT-PERF-MULTI-SCOPE-PROVENANCE-WIRE-001",
+      "contract_case": "connect_success",
+      "http_status": 200,
+      "error_code": null,
+      "retryable": false
+    },
+    {
+      "step_id": "STEP-PERF-MULTI-SCOPE-PROVENANCE-005-CONNECT-001",
+      "assertion_id": "ASSERT-PERF-MULTI-SCOPE-PROVENANCE-WIRE-001",
+      "contract_case": "connect_success",
+      "http_status": 200,
+      "error_code": null,
+      "retryable": false
+    },
+    {
+      "step_id": "STEP-PERF-MULTI-SCOPE-PROVENANCE-006-CONNECT-001",
+      "assertion_id": "ASSERT-PERF-MULTI-SCOPE-PROVENANCE-WIRE-001",
+      "contract_case": "connect_success",
+      "http_status": 200,
+      "error_code": null,
+      "retryable": false
+    },
+    {
       "step_id": "STEP-PERF-MULTI-SCOPE-PROVENANCE-004-REBUILD-A-REQUEST-001",
       "assertion_id": "ASSERT-PERF-MULTI-SCOPE-PROVENANCE-WIRE-001",
       "contract_case": "rebuild_success",
@@ -1678,7 +1960,7 @@
       "requirement_ids": [
         "SYNC-PROVENANCE-002"
       ],
-      "description": "The six rebuild requests return their canonical successful wire outcomes.",
+      "description": "The six connect and six rebuild requests return their canonical successful wire outcomes.",
       "expectation_ids": [
         "EXPECT-PERF-MULTI-SCOPE-PROVENANCE-WIRE-001"
       ],
