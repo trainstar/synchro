@@ -29,6 +29,7 @@ const WORKER_ID: &str = "synchro_wal_consumer";
 const REGISTRY_PREFIX: &str = "synchro_registry";
 const FENCE_PREFIX: &str = "synchro_fence";
 const MAX_CONTROL_MESSAGE_BYTES: usize = 4096;
+const MAX_STARTUP_FAILURES: u8 = 5;
 
 #[derive(Clone)]
 struct PoisonFailure {
@@ -124,13 +125,19 @@ struct MaterializedTransaction {
 struct WorkerIdentity {
     session_login_oid: i64,
     worker_role_oid: pg_sys::Oid,
-    runtime: WorkerRuntimeIdentity,
+    startup_runtime: WorkerStartupIdentity,
 }
 
 #[derive(Clone, PartialEq, Eq)]
 pub(crate) struct WorkerRuntimeIdentity {
     stream_generation: String,
     slot_name: String,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+pub(crate) struct WorkerStartupIdentity {
+    runtime: WorkerRuntimeIdentity,
+    active_slot_is_unbound: bool,
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -322,6 +329,11 @@ pub fn register_bgworker() {
         .load();
 }
 
+fn startup_retry_exhausted(failures: &mut u8) -> bool {
+    *failures = failures.saturating_add(1);
+    *failures >= MAX_STARTUP_FAILURES
+}
+
 #[pg_guard]
 #[no_mangle]
 pub extern "C-unwind" fn synchro_wal_worker_main(_arg: pg_sys::Datum) {
@@ -332,10 +344,57 @@ pub extern "C-unwind" fn synchro_wal_worker_main(_arg: pg_sys::Datum) {
     let database = database_name();
     BackgroundWorker::connect_worker_to_spi(Some(&database), Some(&worker_login));
 
-    let identity = loop {
-        match run_worker_transaction(|| prepare_worker(&database, &worker_login)) {
+    let mut preparation_failures = 0;
+    let expected_runtime = loop {
+        match run_worker_transaction(|| {
+            capture_worker_preparation_identity(&database, &worker_login)
+        }) {
             Ok(identity) => break identity,
-            Err(_) => {
+            Err(error) => {
+                if startup_retry_exhausted(&mut preparation_failures) {
+                    log!(
+                        "synchro WAL worker preparation failed after {MAX_STARTUP_FAILURES} attempts: {error}"
+                    );
+                    return;
+                }
+                if !BackgroundWorker::wait_latch(Some(std::time::Duration::from_secs(1))) {
+                    return;
+                }
+            }
+        }
+    };
+    let identity = loop {
+        if let Err(error) = validate_worker_preparation_identity(&worker_login, &expected_runtime) {
+            log!("synchro WAL worker identity changed: {error}");
+            return;
+        }
+        match run_worker_transaction(|| prepare_worker(&database, &worker_login)) {
+            Ok(identity) => {
+                if identity.startup_runtime != expected_runtime {
+                    log!("synchro WAL worker identity changed: worker runtime identity changed");
+                    return;
+                }
+                if let Err(error) =
+                    validate_worker_preparation_identity(&worker_login, &expected_runtime)
+                {
+                    log!("synchro WAL worker identity changed: {error}");
+                    return;
+                }
+                break identity;
+            }
+            Err(error) => {
+                if let Err(identity_error) =
+                    validate_worker_preparation_identity(&worker_login, &expected_runtime)
+                {
+                    log!("synchro WAL worker identity changed: {identity_error}");
+                    return;
+                }
+                if startup_retry_exhausted(&mut preparation_failures) {
+                    log!(
+                        "synchro WAL worker preparation failed after {MAX_STARTUP_FAILURES} attempts: {error}"
+                    );
+                    return;
+                }
                 if !BackgroundWorker::wait_latch(Some(std::time::Duration::from_secs(1))) {
                     return;
                 }
@@ -344,9 +403,29 @@ pub extern "C-unwind" fn synchro_wal_worker_main(_arg: pg_sys::Datum) {
     };
     activate_worker_role(identity.worker_role_oid);
 
-    while run_worker_transaction(|| initialize_worker(&database, identity.session_login_oid))
-        .is_err()
-    {
+    let mut initialization_failures = 0;
+    loop {
+        if let Err(error) = validate_worker_startup_authorization(&worker_login, &identity) {
+            log!("synchro WAL worker identity changed: {error}");
+            return;
+        }
+        match run_worker_transaction(|| initialize_worker(&database, identity.session_login_oid)) {
+            Ok(()) => break,
+            Err(error) => {
+                if let Err(identity_error) =
+                    validate_worker_startup_authorization(&worker_login, &identity)
+                {
+                    log!("synchro WAL worker identity changed: {identity_error}");
+                    return;
+                }
+                if startup_retry_exhausted(&mut initialization_failures) {
+                    log!(
+                        "synchro WAL worker initialization failed after {MAX_STARTUP_FAILURES} attempts: {error}"
+                    );
+                    return;
+                }
+            }
+        }
         if !BackgroundWorker::wait_latch(Some(std::time::Duration::from_secs(1))) {
             return;
         }
@@ -377,10 +456,13 @@ pub extern "C-unwind" fn synchro_wal_worker_main(_arg: pg_sys::Datum) {
     let mut transient_failure_logged = false;
     let mut poll_gate_failure_logged = false;
 
-    while BackgroundWorker::wait_latch(Some(std::time::Duration::from_millis(IDLE_POLL_MS))) {
+    loop {
         if let Err(error) = validate_worker_authorization(&worker_login, &identity) {
             log!("synchro WAL worker identity changed: {error}");
             return;
+        }
+        if !BackgroundWorker::wait_latch(Some(std::time::Duration::from_millis(IDLE_POLL_MS))) {
+            break;
         }
         if let Err(error) = acquire_worker_poll_gate() {
             if !poll_gate_failure_logged {
@@ -553,7 +635,7 @@ fn validate_worker_authorization(
 ) -> Result<(), String> {
     run_worker_transaction(|| {
         Spi::connect(|client| {
-            validate_worker_runtime_identity(client, &expected_identity.runtime)?;
+            validate_worker_runtime_identity(client, &expected_identity.startup_runtime.runtime)?;
             let (session_login_oid, worker_role_oid) =
                 validated_worker_identity(client, worker_login)?;
             if session_login_oid != expected_identity.session_login_oid
@@ -562,6 +644,40 @@ fn validate_worker_authorization(
                 return Err("worker group role identity changed".to_string());
             }
             Ok(())
+        })
+    })
+}
+
+fn validate_worker_startup_authorization(
+    worker_login: &str,
+    expected_identity: &WorkerIdentity,
+) -> Result<(), String> {
+    run_worker_transaction(|| {
+        Spi::connect(|client| {
+            validate_worker_startup_identity(client, &expected_identity.startup_runtime)?;
+            let (session_login_oid, worker_role_oid) =
+                validated_worker_identity(client, worker_login)?;
+            if session_login_oid != expected_identity.session_login_oid
+                || worker_role_oid != expected_identity.worker_role_oid
+            {
+                return Err("worker group role identity changed".to_string());
+            }
+            Ok(())
+        })
+    })
+}
+
+fn validate_worker_preparation_identity(
+    worker_login: &str,
+    expected_identity: &WorkerStartupIdentity,
+) -> Result<(), String> {
+    run_worker_transaction(|| {
+        Spi::connect_mut(|client| {
+            let (_, worker_role_oid) = validated_worker_identity(client, worker_login)?;
+            activate_worker_role(worker_role_oid);
+            let result = validate_worker_startup_identity(client, expected_identity);
+            activate_session_login();
+            result
         })
     })
 }
@@ -620,15 +736,35 @@ fn prepare_worker(database: &str, worker_login: &str) -> Result<WorkerIdentity, 
         let (session_login_oid, worker_role_oid) = validated_worker_identity(client, worker_login)?;
         let (_, connected_database) = connected_database(client, database)?;
         activate_worker_role(worker_role_oid);
-        let runtime = capture_worker_runtime_identity(client, &configured_slot);
+        let runtime = capture_worker_startup_identity(client, &configured_slot);
         activate_session_login();
-        let (runtime, bootstrap) = runtime?;
-        ensure_slot(client, &runtime.slot_name, &connected_database, bootstrap)?;
+        let runtime = runtime?;
+        ensure_slot(
+            client,
+            &runtime.runtime.slot_name,
+            &connected_database,
+            runtime.active_slot_is_unbound,
+        )?;
         Ok(WorkerIdentity {
             session_login_oid,
             worker_role_oid,
-            runtime,
+            startup_runtime: runtime,
         })
+    })
+}
+
+fn capture_worker_preparation_identity(
+    database: &str,
+    worker_login: &str,
+) -> Result<WorkerStartupIdentity, String> {
+    let configured_slot = configured_replication_slot();
+    Spi::connect_mut(|client| {
+        let (_, worker_role_oid) = validated_worker_identity(client, worker_login)?;
+        let _ = connected_database(client, database)?;
+        activate_worker_role(worker_role_oid);
+        let runtime = capture_worker_startup_identity(client, &configured_slot);
+        activate_session_login();
+        runtime
     })
 }
 
@@ -736,6 +872,18 @@ pub(crate) fn effective_slot_name(
     capture_worker_runtime_identity(client, configured_slot).map(|(identity, _)| identity.slot_name)
 }
 
+pub(crate) fn capture_worker_startup_identity(
+    client: &SpiClient<'_>,
+    configured_slot: &str,
+) -> Result<WorkerStartupIdentity, String> {
+    capture_worker_runtime_identity(client, configured_slot).map(
+        |(runtime, active_slot_is_unbound)| WorkerStartupIdentity {
+            runtime,
+            active_slot_is_unbound,
+        },
+    )
+}
+
 pub(crate) fn capture_worker_runtime_identity(
     client: &SpiClient<'_>,
     configured_slot: &str,
@@ -777,6 +925,21 @@ pub(crate) fn validate_worker_runtime_identity(
     client: &SpiClient<'_>,
     identity: &WorkerRuntimeIdentity,
 ) -> Result<(), String> {
+    validate_worker_identity(client, identity, false)
+}
+
+pub(crate) fn validate_worker_startup_identity(
+    client: &SpiClient<'_>,
+    identity: &WorkerStartupIdentity,
+) -> Result<(), String> {
+    validate_worker_identity(client, &identity.runtime, identity.active_slot_is_unbound)
+}
+
+fn validate_worker_identity(
+    client: &SpiClient<'_>,
+    identity: &WorkerRuntimeIdentity,
+    active_slot_is_unbound: bool,
+) -> Result<(), String> {
     let valid = client
         .select(
             "SELECT EXISTS (
@@ -800,16 +963,20 @@ pub(crate) fn validate_worker_runtime_identity(
                    ) = 7
                    AND EXISTS (
                        SELECT 1
-                       FROM synchro.sync_runtime_state runtime
-                       WHERE runtime.singleton
-                         AND runtime.stream_generation = $1
-                         AND runtime.active_slot_name::text = $2
-                   )
-             ) AS valid",
+                        FROM synchro.sync_runtime_state runtime
+                        WHERE runtime.singleton
+                          AND runtime.stream_generation = $1
+                          AND (
+                              ($3 AND runtime.active_slot_name IS NULL)
+                              OR (NOT $3 AND runtime.active_slot_name::text = $2)
+                          )
+                    )
+              ) AS valid",
             None,
             &[
                 identity.stream_generation.as_str().into(),
                 identity.slot_name.as_str().into(),
+                active_slot_is_unbound.into(),
             ],
         )
         .map_err(|_| "validating worker runtime identity failed".to_string())?

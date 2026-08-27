@@ -606,6 +606,39 @@
 
         Spi::run_with_args(
             "UPDATE synchro.sync_runtime_state
+             SET stream_generation = $1, active_slot_name = NULL, updated_at = now()
+             WHERE singleton",
+            &[original_generation.clone().into()],
+        )
+        .expect("prepare unbound worker runtime");
+        let startup_identity = Spi::connect(|client| {
+            crate::bgworker::capture_worker_startup_identity(client, expected_slot)
+        })
+        .expect("capture startup worker runtime identity");
+        let startup_unchanged = Spi::connect(|client| {
+            crate::bgworker::validate_worker_startup_identity(client, &startup_identity)
+        });
+        assert!(
+            startup_unchanged.is_ok(),
+            "unbound startup runtime identity must validate"
+        );
+        Spi::run_with_args(
+            "UPDATE synchro.sync_runtime_state
+             SET stream_generation = $1, updated_at = now()
+             WHERE singleton",
+            &["recreated-startup-runtime".into()],
+        )
+        .expect("replace startup runtime stream generation");
+        let startup_recreated = Spi::connect(|client| {
+            crate::bgworker::validate_worker_startup_identity(client, &startup_identity)
+        });
+        assert!(
+            startup_recreated.is_err(),
+            "recreated startup runtime state must invalidate identity"
+        );
+
+        Spi::run_with_args(
+            "UPDATE synchro.sync_runtime_state
              SET stream_generation = $1, active_slot_name = $2, updated_at = now()
              WHERE singleton",
             &[original_generation.into(), original_slot.into()],
