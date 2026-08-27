@@ -8,7 +8,6 @@ import (
 	"net/http"
 	"path/filepath"
 	"runtime"
-	"strings"
 	"testing"
 	"time"
 
@@ -20,18 +19,25 @@ import (
 const configuredBoundsScenarioPath = "conformance/scenarios/performance/configured-bounds-001.json"
 
 type configuredBoundsRunner struct {
-	t           *testing.T
-	ctx         context.Context
-	harness     *blackbox.Harness
-	token       string
-	ownerField  string
-	repetitions map[string]int
+	t          *testing.T
+	ctx        context.Context
+	harness    *blackbox.Harness
+	token      string
+	ownerField string
 }
 
 type configuredBoundValue struct {
 	BoundFamily string `json:"bound_family"`
 	Boundary    string `json:"boundary"`
 	Value       int    `json:"value"`
+}
+
+// configuredBoundServerFact contains only terminal facts observed from the
+// extension SQL boundary or the extension-backed protocol boundary.
+type configuredBoundServerFact struct {
+	Accepted   bool
+	HTTPStatus int
+	SQLState   string
 }
 
 func TestRealConfiguredBoundsMeasurement(t *testing.T) {
@@ -64,153 +70,170 @@ func TestRealConfiguredBoundsMeasurement(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	declarations := configuredBoundDeclarations(t, scenario.MeasurementBindings)
+	ledger, err := blackbox.NewMeasurementBindingLedger(declarations)
+	if err != nil {
+		t.Fatalf("load configured-bounds bindings: %v", err)
+	}
 	runner := configuredBoundsRunner{
-		t:           t,
-		ctx:         ctx,
-		harness:     harness,
-		token:       token,
-		ownerField:  loadRealProtocolFieldID(t, ctx, harness, "cf_items", "owner_id"),
-		repetitions: make(map[string]int),
+		t:          t,
+		ctx:        ctx,
+		harness:    harness,
+		token:      token,
+		ownerField: loadRealProtocolFieldID(t, ctx, harness, "cf_items", "owner_id"),
 	}
 	observations := make([]scenarios.MeasurementObservation, 0, len(scenario.MeasurementBindings))
+	executions := make([]blackbox.MeasurementBindingIdentity, 0, len(scenario.MeasurementBindings))
 	for index, binding := range scenario.MeasurementBindings {
-		observation, err := runner.observe(binding.MeasurementSample.Operation, definition, index)
+		sample := binding.MeasurementSample
+		observation, identity, err := runner.observe(sample, definition, index)
 		if err != nil {
-			t.Fatalf("execute configured-bounds sample %d: %v", index+1, err)
+			t.Fatalf("execute configured-bounds sample %s: %v", sample.SampleID, err)
+		}
+		if err := ledger.Bind(identity); err != nil {
+			t.Fatalf("bind configured-bounds operation %s: %v", sample.Operation.ID, err)
 		}
 		observations = append(observations, observation)
+		executions = append(executions, identity)
+	}
+	if len(executions) != 63 {
+		t.Fatalf("configured-bounds server operations = %d, want 63", len(executions))
+	}
+	if err := ledger.Validate(); err != nil {
+		t.Fatalf("close configured-bounds server bindings: %v", err)
 	}
 
-	definitions := []contract.RequiredMeasurement{definition}
 	if err := scenarios.ValidateMeasurementObservationClosure(
 		scenario,
 		obligationID,
 		supportCellID,
-		definitions,
+		[]contract.RequiredMeasurement{definition},
 		observations,
 	); err != nil {
 		t.Fatalf("validate configured-bounds observation closure: %v", err)
 	}
 
-	controls := []struct {
-		name     string
-		mutate   func(*scenarios.MeasurementObservation)
-		category scenarios.MeasurementClosureFailureCategory
-	}{
-		{"operation ID", func(observation *scenarios.MeasurementObservation) {
-			observation.Operation.ID = "MOP-CONFIGURED-BOUNDS-WRONG-001"
-		}, scenarios.MeasurementClosureOperationIDMismatch},
-		{"operation family", func(observation *scenarios.MeasurementObservation) {
-			observation.Operation.Family = "impact"
-		}, scenarios.MeasurementClosureOperationFamilyMismatch},
-		{"operation boundary", func(observation *scenarios.MeasurementObservation) {
-			observation.Operation.Boundary = "invalid"
-		}, scenarios.MeasurementClosureOperationBoundaryMismatch},
-	}
-	for _, control := range controls {
-		t.Run("rejects wrong "+control.name, func(t *testing.T) {
-			mutated := append([]scenarios.MeasurementObservation(nil), observations...)
-			control.mutate(&mutated[0])
-			err := scenarios.ValidateMeasurementObservationClosure(
-				scenario,
-				obligationID,
-				supportCellID,
-				definitions,
-				mutated,
-			)
-			var closureFailure scenarios.MeasurementClosureFailure
-			if !errors.As(err, &closureFailure) || closureFailure.Category != control.category {
-				t.Fatalf("wrong-%s mutant was not rejected by %s: %v", control.name, control.category, err)
+	t.Run("rejects dropped server binding", func(t *testing.T) {
+		controlLedger, err := blackbox.NewMeasurementBindingLedger(declarations)
+		if err != nil {
+			t.Fatalf("load control bindings: %v", err)
+		}
+		for _, execution := range executions[1:] {
+			if err := controlLedger.Bind(execution); err != nil {
+				t.Fatalf("bind control operation %s: %v", execution.OperationID, err)
 			}
-		})
+		}
+		err = controlLedger.Validate()
+		var failure blackbox.MeasurementBindingFailure
+		if !errors.As(err, &failure) || failure.Category != blackbox.MeasurementBindingMissingExecution {
+			t.Fatalf("dropped binding was not rejected: %v", err)
+		}
+	})
+}
+
+func configuredBoundDeclarations(t *testing.T, bindings []scenarios.MeasurementBinding) []blackbox.MeasurementBindingIdentity {
+	t.Helper()
+	declarations := make([]blackbox.MeasurementBindingIdentity, 0, len(bindings))
+	for _, binding := range bindings {
+		declarations = append(declarations, configuredBoundIdentity(binding.MeasurementSample))
+	}
+	if len(declarations) != 63 {
+		t.Fatalf("configured-bounds authored declarations = %d, want 63", len(declarations))
+	}
+	return declarations
+}
+
+func configuredBoundIdentity(sample scenarios.MeasurementSample) blackbox.MeasurementBindingIdentity {
+	return blackbox.MeasurementBindingIdentity{
+		MeasurementID:  string(sample.MeasurementID),
+		StratumID:      string(sample.StratumID),
+		SampleID:       sample.SampleID,
+		OperationID:    string(sample.Operation.ID),
+		Family:         sample.Operation.Family,
+		Boundary:       sample.Operation.Boundary,
+		OperationValue: append(json.RawMessage(nil), sample.Operation.Value...),
 	}
 }
 
 func (runner *configuredBoundsRunner) observe(
-	operation scenarios.MeasurementOperationTarget,
+	sample scenarios.MeasurementSample,
 	definition contract.RequiredMeasurement,
 	index int,
-) (scenarios.MeasurementObservation, error) {
+) (scenarios.MeasurementObservation, blackbox.MeasurementBindingIdentity, error) {
 	var authored configuredBoundValue
-	if err := json.Unmarshal(operation.Value, &authored); err != nil {
-		return scenarios.MeasurementObservation{}, errors.New("decode configured bound value failed")
+	if err := json.Unmarshal(sample.Operation.Value, &authored); err != nil {
+		return scenarios.MeasurementObservation{}, blackbox.MeasurementBindingIdentity{}, errors.New("decode configured bound value failed")
 	}
-	maximum, err := configuredBoundMaximum(operation.Family)
+	if authored.BoundFamily != sample.Operation.Family || authored.Boundary != sample.Operation.Boundary {
+		return scenarios.MeasurementObservation{}, blackbox.MeasurementBindingIdentity{}, errors.New("configured-bound operation identity does not match its value")
+	}
+	fact, err := runner.exercise(sample.Operation.Family, authored.Value, index)
 	if err != nil {
-		return scenarios.MeasurementObservation{}, err
+		return scenarios.MeasurementObservation{}, blackbox.MeasurementBindingIdentity{}, err
 	}
-	boundary, err := classifyConfiguredBoundary(authored.Value, maximum)
+	if err := assertConfiguredBoundServerFact(sample.Operation.Boundary, fact); err != nil {
+		return scenarios.MeasurementObservation{}, blackbox.MeasurementBindingIdentity{}, err
+	}
+	metrics, err := configuredBoundMetrics(definition, sample.Operation.Boundary, fact)
 	if err != nil {
-		return scenarios.MeasurementObservation{}, err
-	}
-	accepted, err := runner.exercise(operation.Family, authored.Value, index)
-	if err != nil {
-		return scenarios.MeasurementObservation{}, err
-	}
-	wantAccepted := boundary != "invalid"
-	if accepted != wantAccepted {
-		return scenarios.MeasurementObservation{}, fmt.Errorf(
-			"%s %s boundary acceptance = %t, want %t",
-			operation.Family,
-			boundary,
-			accepted,
-			wantAccepted,
-		)
-	}
-
-	familyID := configuredBoundFamilyID(operation.Family)
-	repetitionKey := operation.Family + "|" + boundary
-	runner.repetitions[repetitionKey]++
-	repetition := runner.repetitions[repetitionKey]
-	observedValue, err := json.Marshal(configuredBoundValue{
-		BoundFamily: operation.Family,
-		Boundary:    boundary,
-		Value:       authored.Value,
-	})
-	if err != nil {
-		return scenarios.MeasurementObservation{}, errors.New("encode configured bound value failed")
-	}
-	metrics, err := configuredBoundMetrics(definition, boundary)
-	if err != nil {
-		return scenarios.MeasurementObservation{}, err
+		return scenarios.MeasurementObservation{}, blackbox.MeasurementBindingIdentity{}, err
 	}
 	return scenarios.MeasurementObservation{
-		StepID: "STEP-PERF-CONFIGURED-BOUNDS-001",
-		Operation: scenarios.MeasurementOperationTarget{
-			ID:       scenarios.MeasurementOperationID(fmt.Sprintf("MOP-CONFIGURED-BOUNDS-%s-%s-%03d", familyID, strings.ToUpper(boundary), repetition)),
-			Family:   operation.Family,
-			Boundary: boundary,
-			Value:    observedValue,
-		},
-		MeasurementID: "MEAS-CONFIGURED-BOUNDS-001",
-		StratumID:     contract.StratumID(fmt.Sprintf("STR-%s-%s-001", familyID, strings.ToUpper(boundary))),
-		SampleID:      fmt.Sprintf("SAMPLE-CONFIGURED-BOUNDS-%s-%s-%03d", familyID, strings.ToUpper(boundary), repetition),
+		StepID:        "STEP-PERF-CONFIGURED-BOUNDS-001",
+		Operation:     sample.Operation,
+		MeasurementID: sample.MeasurementID,
+		StratumID:     sample.StratumID,
+		SampleID:      sample.SampleID,
 		Metrics:       metrics,
-	}, nil
+	}, configuredBoundIdentity(sample), nil
 }
 
-func (runner *configuredBoundsRunner) exercise(family string, value, index int) (bool, error) {
+func assertConfiguredBoundServerFact(boundary string, fact configuredBoundServerFact) error {
+	switch boundary {
+	case "lower", "upper":
+		if fact.Accepted {
+			return nil
+		}
+	case "invalid":
+		if !fact.Accepted && (fact.HTTPStatus == http.StatusBadRequest || fact.SQLState == "XX000") {
+			return nil
+		}
+	default:
+		return fmt.Errorf("configured bound boundary %q is unsupported", boundary)
+	}
+	return fmt.Errorf("server result does not satisfy %s configured-bound boundary", boundary)
+}
+
+func (runner *configuredBoundsRunner) exercise(family string, value, index int) (configuredBoundServerFact, error) {
 	switch family {
 	case "fanout":
-		return runner.harness.Operator().ExerciseConfiguredFanoutLimit(runner.ctx, value)
+		observation, err := runner.harness.Operator().ExerciseConfiguredFanoutLimit(runner.ctx, value)
+		return configuredBoundSQLFact(observation), err
 	case "impact":
-		return runner.harness.Operator().ExerciseConfiguredImpactLimit(runner.ctx, value)
+		observation, err := runner.harness.Operator().ExerciseConfiguredImpactLimit(runner.ctx, value)
+		return configuredBoundSQLFact(observation), err
 	case "pull":
 		return runner.exercisePull(value, index)
 	case "rebuild":
 		return runner.exerciseRebuild(value, index)
 	case "compaction":
-		return runner.harness.Operator().ExerciseConfiguredCompactionLimit(runner.ctx, value)
+		observation, err := runner.harness.Operator().ExerciseConfiguredCompactionLimit(runner.ctx, value)
+		return configuredBoundSQLFact(observation), err
 	case "backfill":
-		return runner.harness.Operator().ExerciseConfiguredBackfillLimit(runner.ctx, value)
+		observation, err := runner.harness.Operator().ExerciseConfiguredBackfillLimit(runner.ctx, value)
+		return configuredBoundSQLFact(observation), err
 	case "push_mutations":
 		return runner.exercisePush(value, index)
 	default:
-		return false, fmt.Errorf("configured bound family %q is unsupported", family)
+		return configuredBoundServerFact{}, fmt.Errorf("configured bound family %q is unsupported", family)
 	}
 }
 
-func (runner *configuredBoundsRunner) exercisePull(value, index int) (bool, error) {
+func configuredBoundSQLFact(observation blackbox.ConfiguredBoundServerObservation) configuredBoundServerFact {
+	return configuredBoundServerFact{Accepted: observation.Accepted, SQLState: observation.SQLState}
+}
+
+func (runner *configuredBoundsRunner) exercisePull(value, index int) (configuredBoundServerFact, error) {
 	client := connectRealProtocolClient(runner.t, runner.ctx, runner.harness, runner.token, fmt.Sprintf("configured-pull-%03d", index))
 	status, response := postSync(
 		runner.t,
@@ -223,18 +246,18 @@ func (runner *configuredBoundsRunner) exercisePull(value, index int) (bool, erro
 	switch status {
 	case http.StatusOK:
 		if _, ok := response["changes"].([]any); !ok {
-			return false, errors.New("configured pull response changes are invalid")
+			return configuredBoundServerFact{}, errors.New("configured pull response changes are invalid")
 		}
-		return true, nil
+		return configuredBoundServerFact{Accepted: true, HTTPStatus: status}, nil
 	case http.StatusBadRequest:
 		assertPhase4ProtocolError(runner.t, status, response, http.StatusBadRequest, "invalid_request")
-		return false, nil
+		return configuredBoundServerFact{HTTPStatus: status}, nil
 	default:
-		return false, fmt.Errorf("configured pull status = %d", status)
+		return configuredBoundServerFact{}, fmt.Errorf("configured pull status = %d", status)
 	}
 }
 
-func (runner *configuredBoundsRunner) exerciseRebuild(value, index int) (bool, error) {
+func (runner *configuredBoundsRunner) exerciseRebuild(value, index int) (configuredBoundServerFact, error) {
 	client := connectRealProtocolClient(runner.t, runner.ctx, runner.harness, runner.token, fmt.Sprintf("configured-rebuild-%03d", index))
 	status, response := requestRealRebuildPage(
 		runner.t,
@@ -250,21 +273,21 @@ func (runner *configuredBoundsRunner) exerciseRebuild(value, index int) (bool, e
 	switch status {
 	case http.StatusOK:
 		if response["scope"] != "cf:global" {
-			return false, errors.New("configured rebuild returned the wrong scope")
+			return configuredBoundServerFact{}, errors.New("configured rebuild returned the wrong scope")
 		}
 		if _, ok := response["records"].([]any); !ok {
-			return false, errors.New("configured rebuild records are invalid")
+			return configuredBoundServerFact{}, errors.New("configured rebuild records are invalid")
 		}
-		return true, nil
+		return configuredBoundServerFact{Accepted: true, HTTPStatus: status}, nil
 	case http.StatusBadRequest:
 		assertPhase4ProtocolError(runner.t, status, response, http.StatusBadRequest, "invalid_request")
-		return false, nil
+		return configuredBoundServerFact{HTTPStatus: status}, nil
 	default:
-		return false, fmt.Errorf("configured rebuild status = %d", status)
+		return configuredBoundServerFact{}, fmt.Errorf("configured rebuild status = %d", status)
 	}
 }
 
-func (runner *configuredBoundsRunner) exercisePush(value, index int) (bool, error) {
+func (runner *configuredBoundsRunner) exercisePush(value, index int) (configuredBoundServerFact, error) {
 	client := connectRealProtocolClient(runner.t, runner.ctx, runner.harness, runner.token, fmt.Sprintf("configured-push-%03d", index))
 	table := requireRealTable(runner.t, client, "cf_items")
 	recordGroup := fmt.Sprintf("c%03x", index)
@@ -295,17 +318,17 @@ func (runner *configuredBoundsRunner) exercisePush(value, index int) (bool, erro
 		acceptedOutcomes := requireOutcomeList(runner.t, response, "accepted")
 		rejectedOutcomes := requireOutcomeList(runner.t, response, "rejected")
 		if len(acceptedOutcomes) != value || len(rejectedOutcomes) != 0 {
-			return false, errors.New("configured push outcomes are invalid")
+			return configuredBoundServerFact{}, errors.New("configured push outcomes are invalid")
 		}
 	} else if status == http.StatusBadRequest {
 		assertPhase4ProtocolError(runner.t, status, response, http.StatusBadRequest, "invalid_request")
 	} else {
-		return false, fmt.Errorf("configured push status = %d", status)
+		return configuredBoundServerFact{}, fmt.Errorf("configured push status = %d", status)
 	}
 
 	observation, err := runner.harness.Operator().ObserveDiagnosticPush(runner.ctx, client.ID, recordIDs)
 	if err != nil {
-		return false, fmt.Errorf("observe configured push state: %w", err)
+		return configuredBoundServerFact{}, fmt.Errorf("observe configured push state: %w", err)
 	}
 	wantBatches, wantMutations, wantRows, wantEpoch := int64(0), int64(0), int64(0), int64(1)
 	if accepted {
@@ -316,9 +339,9 @@ func (runner *configuredBoundsRunner) exercisePush(value, index int) (bool, erro
 	}
 	if observation.BatchCount != wantBatches || observation.MutationCount != wantMutations ||
 		observation.SourceRowCount != wantRows || observation.AcceptedWriteEpoch != wantEpoch {
-		return false, errors.New("configured push durable state is invalid")
+		return configuredBoundServerFact{}, errors.New("configured push durable state is invalid")
 	}
-	return accepted, nil
+	return configuredBoundServerFact{Accepted: accepted, HTTPStatus: status}, nil
 }
 
 func configuredBoundsProofIdentity() (contract.ObligationID, contract.SupportCellID, error) {
@@ -332,54 +355,21 @@ func configuredBoundsProofIdentity() (contract.ObligationID, contract.SupportCel
 	}
 }
 
-func configuredBoundMaximum(family string) (int, error) {
-	switch family {
-	case "fanout":
-		return 8, nil
-	case "impact", "pull", "rebuild", "backfill", "push_mutations":
-		return 1000, nil
-	case "compaction":
-		return 10000, nil
-	default:
-		return 0, fmt.Errorf("configured bound family %q is unsupported", family)
-	}
-}
-
-func classifyConfiguredBoundary(value, maximum int) (string, error) {
-	switch value {
-	case 1:
-		return "lower", nil
-	case maximum:
-		return "upper", nil
-	case maximum + 1:
-		return "invalid", nil
-	default:
-		return "", fmt.Errorf("configured bound value %d does not select a declared boundary", value)
-	}
-}
-
-func configuredBoundFamilyID(family string) string {
-	if family == "push_mutations" {
-		return "PUSH"
-	}
-	return strings.ToUpper(family)
-}
-
-func configuredBoundMetrics(definition contract.RequiredMeasurement, boundary string) ([]scenarios.MeasurementMetricValue, error) {
+func configuredBoundMetrics(definition contract.RequiredMeasurement, boundary string, fact configuredBoundServerFact) ([]scenarios.MeasurementMetricValue, error) {
 	values := make([]scenarios.MeasurementMetricValue, 0, len(definition.Metrics))
 	for _, metric := range definition.Metrics {
-		value := float64(0)
+		value := 0.0
 		switch metric.Name {
 		case "lower_bound_acceptance":
-			if boundary == "lower" {
+			if boundary == "lower" && fact.Accepted {
 				value = 1
 			}
 		case "upper_bound_acceptance":
-			if boundary == "upper" {
+			if boundary == "upper" && fact.Accepted {
 				value = 1
 			}
 		case "invalid_bound_rejection":
-			if boundary == "invalid" {
+			if boundary == "invalid" && !fact.Accepted {
 				value = 1
 			}
 		default:
