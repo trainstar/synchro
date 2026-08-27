@@ -1924,7 +1924,7 @@ AS 'MODULE_PATHNAME', 'synchro_emit_projection_bootstrap_barrier_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- synchro-pg/src/health.rs:1013
+-- synchro-pg/src/health.rs:1015
 -- synchro_pg::health::synchro_health_detail
 CREATE  FUNCTION "synchro_health_detail"() RETURNS jsonb /* pgrx::datum::json::JsonB */
 STRICT
@@ -2125,7 +2125,7 @@ AS 'MODULE_PATHNAME', 'synchro_push_contract_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- synchro-pg/src/health.rs:1006
+-- synchro-pg/src/health.rs:1008
 -- synchro_pg::health::synchro_readiness
 CREATE  FUNCTION "synchro_readiness"() RETURNS jsonb /* pgrx::datum::json::JsonB */
 STRICT
@@ -2217,7 +2217,7 @@ AS 'MODULE_PATHNAME', 'synchro_request_projection_bootstrap_barrier_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- synchro-pg/src/bgworker.rs:524
+-- synchro-pg/src/bgworker.rs:639
 -- synchro_pg::bgworker::synchro_retry_wal_poison
 CREATE  FUNCTION "synchro_retry_wal_poison"() RETURNS bool /* bool */
 STRICT
@@ -2431,7 +2431,7 @@ BEGIN
                  'synchro_projection_bootstrap_active_stream',
                  'synchro_projection_bootstrap_main_boundary',
                  'synchro_projection_bootstrap_slot_absent',
-                 'synchro_projection_bootstrap_slot_drop_state',
+                  'synchro_projection_bootstrap_slot_drop_state',
                  'synchro_projection_bootstrap_next_aborted_slot',
                  'synchro_projection_bootstrap_is_activated',
                  'synchro_projection_bootstrap_interrupted'
@@ -2455,7 +2455,7 @@ BEGIN
                  'synchro_activate_projection_bootstrap',
                  'synchro_projection_bootstrap_status',
                  'synchro_abort_projection_bootstrap',
-                 'synchro_complete_projection_bootstrap_cleanup'
+                  'synchro_complete_projection_bootstrap_cleanup'
              ) THEN 'synchro_operator'
             ELSE NULL
         END;
