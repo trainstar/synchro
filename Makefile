@@ -57,6 +57,10 @@
 	test-adapter \
 	test-adapter-setup \
 	test-adapter-teardown \
+	adapter-db-external-probe \
+	adapter-db-external-teardown \
+	adapter-db-local-setup \
+	adapter-db-local-teardown \
 	ext-build \
 	ext-install \
 	ext-test \
@@ -155,8 +159,17 @@ BLACKBOX_TEST_COUNT ?= 1
 CONFORMANCE_ADAPTER_ARTIFACT_DIR ?= $(CURDIR)/dist/conformance/synchrod-pg-adapter
 CONFORMANCE_EXTENSION_ARTIFACT ?= $(CURDIR)/dist/conformance/synchro-pg-pg18
 ADAPTER_TEST_DB ?= synchro_adapter_test
-ADAPTER_TEST_URL ?= postgres://$(USER)@localhost:$(PGRX_PORT)/$(ADAPTER_TEST_DB)?sslmode=disable
+ADAPTER_TEST_URL ?=
+ifeq ($(strip $(ADAPTER_TEST_URL)),)
+ADAPTER_TEST_URL := postgres://$(USER)@localhost:$(PGRX_PORT)/$(ADAPTER_TEST_DB)?sslmode=disable
+ADAPTER_TEST_EXTERNAL := 0
 REPLICATION_URL ?= postgres://$(USER)@localhost:$(PGRX_PORT)/$(ADAPTER_TEST_DB)?replication=database&sslmode=disable
+else
+ADAPTER_TEST_EXTERNAL := 1
+REPLICATION_URL ?= $(ADAPTER_TEST_URL)
+endif
+ADAPTER_DB_SETUP := $(if $(filter 1,$(ADAPTER_TEST_EXTERNAL)),adapter-db-external-probe,adapter-db-local-setup)
+ADAPTER_DB_TEARDOWN := $(if $(filter 1,$(ADAPTER_TEST_EXTERNAL)),adapter-db-external-teardown,adapter-db-local-teardown)
 override R1_BENCHMARK_BASELINE := $(CURDIR)/conformance/blackbox/integration/testdata/r1-benchmark-baseline.json
 
 SYNCHROD_PG_PORT ?= 8091
@@ -238,6 +251,7 @@ help:
 	@echo "  test-rust-pg          - Run pgrx integration tests on PG 18"
 	@echo "  test-rust-pg-all      - Run pgrx tests on PG 14 through PG 18"
 	@echo "  test-adapter          - Run Go adapter integration tests (override GO_TEST_PKGS to focus)"
+	@echo "                         Set ADAPTER_TEST_URL for an external PostgreSQL database"
 	@echo "  build-swift-native-runner - Build the macOS native conformance process"
 	@echo "  build-kotlin-conformance-app - Build the Android native conformance test APK"
 	@echo "  test-swift-unit       - Run Swift unit tests"
@@ -1107,7 +1121,27 @@ lint-rust-pg:
 
 lint-rust: lint-rust-core lint-rust-pg
 
-test-adapter-setup: ext-install
+test-adapter-setup: $(ADAPTER_DB_SETUP)
+
+adapter-db-external-probe:
+	@set -eu; \
+		command -v psql >/dev/null 2>&1 || { echo "psql is required for an external ADAPTER_TEST_URL" >&2; exit 1; }; \
+		echo "Probing external adapter test database..."; \
+		psql "$(ADAPTER_TEST_URL)" -v ON_ERROR_STOP=1 -Atqc "SELECT 1" >/dev/null || { echo "external ADAPTER_TEST_URL is unreachable" >&2; exit 1; }; \
+		available="$$(psql "$(ADAPTER_TEST_URL)" -v ON_ERROR_STOP=1 -Atqc "SELECT default_version FROM pg_available_extensions WHERE name = 'synchro_pg'")"; \
+		test "$$available" = "$(CURRENT_VERSION)" || { echo "external database offers synchro_pg '$$available', expected '$(CURRENT_VERSION)'" >&2; exit 1; }; \
+		echo "External adapter test database is reachable with synchro_pg $(CURRENT_VERSION)."
+
+adapter-db-external-teardown:
+	@echo "Leaving external adapter test database unchanged."
+
+adapter-db-local-teardown:
+	@echo "Tearing down adapter test database..."
+	@$(PGRX_PSQL) -h "$(PGRX_ADMIN_HOST)" -p $(PGRX_PORT) -U "$(PGRX_ADMIN_USER)" -d postgres -c "DROP DATABASE IF EXISTS $(ADAPTER_TEST_DB)" 2>/dev/null || true
+	@cd extensions/synchro-pg && CARGO_TARGET_DIR="$(PGRX_TARGET_DIR)" cargo pgrx stop $(PGRX_PG) 2>/dev/null || true
+	@echo "Done."
+
+adapter-db-local-setup: ext-install
 	@echo "Setting up adapter test database..."
 	@if [ ! -f "$(PGRX_DATA_DIR)/postgresql.conf" ]; then \
 		echo "missing pgrx config: $(PGRX_DATA_DIR)/postgresql.conf"; \
@@ -1191,11 +1225,7 @@ test-adapter-setup: ext-install
 	fi
 	@echo "Adapter test database ready: $(ADAPTER_TEST_URL)"
 
-test-adapter-teardown:
-	@echo "Tearing down adapter test database..."
-	@$(PGRX_PSQL) -h "$(PGRX_ADMIN_HOST)" -p $(PGRX_PORT) -U "$(PGRX_ADMIN_USER)" -d postgres -c "DROP DATABASE IF EXISTS $(ADAPTER_TEST_DB)" 2>/dev/null || true
-	@cd extensions/synchro-pg && CARGO_TARGET_DIR="$(PGRX_TARGET_DIR)" cargo pgrx stop $(PGRX_PG) 2>/dev/null || true
-	@echo "Done."
+test-adapter-teardown: $(ADAPTER_DB_TEARDOWN)
 
 test-adapter: test-adapter-setup
 	@echo "Running adapter integration tests..."
