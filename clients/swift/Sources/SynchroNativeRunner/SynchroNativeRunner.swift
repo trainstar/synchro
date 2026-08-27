@@ -1,6 +1,7 @@
 import Foundation
+import Darwin
 import GRDB
-import Synchro
+@_spi(Inspection) import Synchro
 
 private let maximumRunnerLineBytes = 1 << 20
 private let maximumCaptureValueBytes = 1 << 20
@@ -16,6 +17,7 @@ private struct RunnerCommand: Decodable {
     let platform: String?
     let appVersion: String?
     let pullPageSize: Int?
+    let pushBatchSize: Int?
     let transportCapacity: Int?
     let localAction: LocalActionPayload?
     let lifecycleOperation: String?
@@ -36,6 +38,7 @@ private struct RunnerCommand: Decodable {
         case platform
         case appVersion = "app_version"
         case pullPageSize = "pull_page_size"
+        case pushBatchSize = "push_batch_size"
         case transportCapacity = "transport_capacity"
         case localAction = "local_action"
         case lifecycleOperation = "lifecycle_operation"
@@ -66,6 +69,7 @@ private struct RunnerCommand: Decodable {
         platform = try container.decodeIfPresent(String.self, forKey: .platform)
         appVersion = try container.decodeIfPresent(String.self, forKey: .appVersion)
         pullPageSize = try container.decodeIfPresent(Int.self, forKey: .pullPageSize)
+        pushBatchSize = try container.decodeIfPresent(Int.self, forKey: .pushBatchSize)
         transportCapacity = try container.decodeIfPresent(Int.self, forKey: .transportCapacity)
         localAction = try container.decodeIfPresent(LocalActionPayload.self, forKey: .localAction)
         lifecycleOperation = try container.decodeIfPresent(String.self, forKey: .lifecycleOperation)
@@ -76,7 +80,7 @@ private struct RunnerCommand: Decodable {
     }
 
     func containsOnly(_ allowed: [CodingKeys]) -> Bool {
-        suppliedKeys == Set(allowed.map(\.rawValue))
+        suppliedKeys.isSubset(of: Set(allowed.map(\.rawValue)))
     }
 }
 
@@ -303,6 +307,17 @@ private struct RunnerResult: Encodable {
     var status: String? = nil
     var rowsAffected: Int? = nil
     var pendingChangeCount: Int? = nil
+    var applicationRowCount: Int? = nil
+    var mutationLedgerCount: Int? = nil
+    var mutationOutcomeCount: Int? = nil
+    var sealedBatchCount: Int? = nil
+    var rejectedMutationCount: Int? = nil
+    var scopeStateCount: Int? = nil
+    var scopeRowCount: Int? = nil
+    var provenanceCount: Int? = nil
+    var rowMetadataCount: Int? = nil
+    var rebuildAttemptCount: Int? = nil
+    var rebuildReceiptCount: Int? = nil
     var schema: SchemaRef? = nil
     var applicationRows: [[String: AnyCodable]]? = nil
     var retainedMutations: [RetainedMutation]? = nil
@@ -313,6 +328,7 @@ private struct RunnerResult: Encodable {
     var rowMetadataRecords: [RowMetadataRecord]? = nil
     var rebuildAttempts: [RebuildAttemptRecord]? = nil
     var rebuildReceiptProofs: [RebuildReceiptProofRecord]? = nil
+    var provenanceMaintenanceWorkCursor: Int64? = nil
     var events: [EventRecord]? = nil
     var failure: SyncFailure? = nil
     var transportObservations: RunnerTransportObservationSnapshot? = nil
@@ -325,6 +341,17 @@ private struct RunnerResult: Encodable {
         case status
         case rowsAffected = "rows_affected"
         case pendingChangeCount = "pending_change_count"
+        case applicationRowCount = "application_row_count"
+        case mutationLedgerCount = "mutation_ledger_count"
+        case mutationOutcomeCount = "mutation_outcome_count"
+        case sealedBatchCount = "sealed_batch_count"
+        case rejectedMutationCount = "rejected_mutation_count"
+        case scopeStateCount = "scope_state_count"
+        case scopeRowCount = "scope_row_count"
+        case provenanceCount = "provenance_count"
+        case rowMetadataCount = "row_metadata_count"
+        case rebuildAttemptCount = "rebuild_attempt_count"
+        case rebuildReceiptCount = "rebuild_receipt_count"
         case schema
         case applicationRows = "application_rows"
         case retainedMutations = "retained_mutations"
@@ -335,6 +362,7 @@ private struct RunnerResult: Encodable {
         case rowMetadataRecords = "row_metadata_records"
         case rebuildAttempts = "rebuild_attempts"
         case rebuildReceiptProofs = "rebuild_receipt_proofs"
+        case provenanceMaintenanceWorkCursor = "provenance_maintenance_work_cursor"
         case events
         case failure
         case transportObservations = "transport_observations"
@@ -474,15 +502,19 @@ private struct RebuildReceiptProofRecord: Encodable {
         case finalChecksumMatchesLocal = "final_checksum_matches_local"
     }
 
-    init(_ proof: RebuildReceiptProofInspection) {
-        rebuildIDFingerprint = proof.rebuildIDFingerprint
-        pageCount = proof.pageCount
-        returnedRecordCount = proof.returnedRecordCount
-        requestChainValid = proof.requestChainValid
-        recordsInCanonicalOrder = proof.recordsInCanonicalOrder
-        rowChecksumsValid = proof.rowChecksumsValid
-        scopeChecksumValid = proof.scopeChecksumValid
-        finalChecksumMatchesLocal = proof.finalChecksumMatchesLocal
+    init(_ receipt: RebuildReceiptInspection) {
+        rebuildIDFingerprint = receipt.rebuildIDFingerprint
+        pageCount = receipt.pageCount
+        returnedRecordCount = receipt.returnedRecordCount
+        requestChainValid = receipt.requestChainExpected == receipt.requestChainObserved
+        recordsInCanonicalOrder = receipt.recordIdentitiesHex.count == Set(receipt.recordIdentitiesHex).count
+            && receipt.recordIdentitiesHex == receipt.recordIdentitiesHex.sorted()
+        rowChecksumsValid = receipt.receivedRowChecksums == receipt.computedRowChecksums
+        scopeChecksumValid = receipt.computedScopeChecksum != nil
+            && receipt.computedScopeChecksum == receipt.finalScopeChecksum
+        finalChecksumMatchesLocal = receipt.finalScopeChecksum != nil
+            && receipt.finalScopeChecksum == receipt.storedScopeChecksum
+            && receipt.finalScopeChecksum == receipt.localScopeChecksum
     }
 }
 
@@ -850,7 +882,8 @@ private final class Runner: @unchecked Sendable {
     private func open(_ command: RunnerCommand) throws -> RunnerResult {
         guard commandOnly(command, allowed: [
             .schemaVersion, .operation, .databasePath, .serverURL, .authToken, .clientID,
-            .seedDatabasePath, .platform, .appVersion, .pullPageSize, .transportCapacity
+            .seedDatabasePath, .platform, .appVersion, .pullPageSize, .pushBatchSize,
+            .transportCapacity
         ]),
         client == nil,
         let databasePath = command.databasePath,
@@ -865,6 +898,7 @@ private final class Runner: @unchecked Sendable {
         !clientID.isEmpty,
         command.seedDatabasePath.map({ !$0.isEmpty && $0.count <= 4096 }) ?? true,
         command.pullPageSize.map({ (1...1000).contains($0) }) ?? true,
+        command.pushBatchSize.map({ (1...1000).contains($0) }) ?? true,
         command.transportCapacity.map({ (1...Self.maximumTransportCapacity).contains($0) }) ?? true else {
             throw RunnerError.invalidCommand
         }
@@ -887,6 +921,7 @@ private final class Runner: @unchecked Sendable {
             syncInterval: 3600,
             pushDebounce: 3600,
             pullPageSize: command.pullPageSize ?? 100,
+            pushBatchSize: command.pushBatchSize ?? 100,
             seedDatabasePath: command.seedDatabasePath,
             transportObservationCollector: collector
         )
@@ -1023,55 +1058,71 @@ private final class Runner: @unchecked Sendable {
 
     private func capture(_ command: RunnerCommand) throws -> RunnerResult {
         let client = try requireClient()
+        let inspection = SynchroInspection(client: client)
         guard commandOnly(command, allowed: [.schemaVersion, .operation, .rowSelectors]),
               command.rowSelectors.map({ $0.count <= Self.maximumSelectors }) ?? true else {
             throw RunnerError.invalidCommand
         }
-        var applicationRows: [[String: AnyCodable]] = []
+        let counts = try inspection.clientStateCounts()
+        let scopeStates: [ScopeStateInspection]? = counts.scopeStateCount <= maximumBoundedRecords ? try inspection.scopeStates() : nil
+        let scopeRows: [ScopeRowInspection]? = counts.scopeRowCount <= maximumBoundedRecords ? try inspection.scopeRows() : nil
+        let rebuildAttempts: [RebuildAttemptInspection]? = counts.rebuildAttemptCount <= maximumBoundedRecords ? try inspection.rebuildAttempts() : nil
+        let rebuildReceipts: [RebuildReceiptInspection]? = counts.rebuildReceiptCount <= maximumBoundedRecords ? try inspection.rebuildReceipts() : nil
+        let retainedMutations: [RetainedMutation]? = counts.mutationLedgerCount <= maximumBoundedRecords ? try retainedMutationRecords(client.inspectRetainedMutations()) : nil
+        let rejectedMutations: [RetainedRejection]? = counts.rejectedMutationCount <= maximumBoundedRecords ? try bounded(
+            client.inspectRejectedMutations().map(RetainedRejection.init)
+        ) : nil
+        var capturedApplicationRows: [[String: AnyCodable]] = []
         var captureValueBytes = 0
-        let scopeRows = try client.inspectScopeRows()
-        let scopedTables = Set(scopeRows.map(\.tableName))
-        for selector in command.rowSelectors ?? [] {
-            if scopedTables.contains(selector.tableName) {
-                continue
+        let scopedTables = Set<String>((scopeRows ?? []).map(\.tableName))
+        if counts.applicationRowCount <= Self.maximumRows {
+            for selector in command.rowSelectors ?? [] {
+                if scopedTables.contains(selector.tableName) {
+                    continue
+                }
+                guard !isReservedTable(selector.tableName) else {
+                    throw RunnerError.invalidCommand
+                }
+                let table = try quoteIdentifier(selector.tableName)
+                let field = try quoteIdentifier(selector.primaryKeyField)
+                let rows: [Row]
+                do {
+                    rows = try client.query(
+                        "SELECT * FROM \(table) WHERE \(field) = ?",
+                        params: [selector.primaryKey.databaseValue()]
+                    )
+                } catch {
+                    throw RunnerError.captureQuery
+                }
+                guard rows.count <= 1 else {
+                    throw RunnerError.captureRowCardinality
+                }
+                if let row = rows.first {
+                    capturedApplicationRows.append(try rowObject(row, valueBytes: &captureValueBytes))
+                }
             }
-            guard !isReservedTable(selector.tableName) else {
-                throw RunnerError.invalidCommand
-            }
-            let table = try quoteIdentifier(selector.tableName)
-            let field = try quoteIdentifier(selector.primaryKeyField)
-            let rows: [Row]
-            do {
-                rows = try client.query(
-                    "SELECT * FROM \(table) WHERE \(field) = ?",
-                    params: [selector.primaryKey.databaseValue()]
-                )
-            } catch {
-                throw RunnerError.captureQuery
-            }
-            guard rows.count <= 1 else {
-                throw RunnerError.captureRowCardinality
-            }
-            if let row = rows.first {
-                applicationRows.append(try rowObject(row, valueBytes: &captureValueBytes))
-            }
-        }
-        for tableName in scopedTables {
-            guard !isReservedTable(tableName) else { throw RunnerError.invalidCommand }
-            let table = try quoteIdentifier(tableName)
-            let rows: [Row]
-            do {
-                rows = try client.query("SELECT * FROM \(table)")
-            } catch {
-                throw RunnerError.captureQuery
-            }
-            for row in rows {
-                applicationRows.append(try rowObject(row, valueBytes: &captureValueBytes))
+            for tableName in scopedTables {
+                guard !isReservedTable(tableName) else { throw RunnerError.invalidCommand }
+                let table = try quoteIdentifier(tableName)
+                let rows: [Row]
+                do {
+                    rows = try client.query("SELECT * FROM \(table)")
+                } catch {
+                    throw RunnerError.captureQuery
+                }
+                for row in rows {
+                    capturedApplicationRows.append(try rowObject(row, valueBytes: &captureValueBytes))
+                }
             }
         }
         var metadataRecords: [RowMetadataRecord] = []
-        for row in scopeRows {
-            guard let metadata = try client.inspectRowMetadata(
+        var metadataKeys = Set<String>()
+        for row in scopeRows ?? [] {
+            let key = "\(row.tableName)\u{0}\(row.recordID)"
+            if !metadataKeys.insert(key).inserted {
+                continue
+            }
+            guard let metadata = try inspection.rowMetadata(
                 tableName: row.tableName,
                 recordID: row.recordID
             ) else {
@@ -1079,33 +1130,39 @@ private final class Runner: @unchecked Sendable {
             }
             metadataRecords.append(RowMetadataRecord(metadata))
         }
-        guard applicationRows.count <= Self.maximumRows else {
+        guard capturedApplicationRows.count <= Self.maximumRows else {
             throw RunnerError.outputLimit
         }
         do {
+            let scopeStateRecords: [ScopeStateRecord]? = try scopeStates.map { try bounded($0.map(ScopeStateRecord.init)) }
+            let scopeRowRecords: [ScopeRowRecord]? = try scopeRows.map { try bounded($0.map(ScopeRowRecord.init)) }
+            let rebuildAttemptRecords: [RebuildAttemptRecord]? = try rebuildAttempts.map { try bounded($0.map(RebuildAttemptRecord.init)) }
+            let rebuildReceiptRecords: [RebuildReceiptProofRecord]? = try rebuildReceipts.map { try bounded($0.map(RebuildReceiptProofRecord.init)) }
             return RunnerResult(
                 status: client.getSyncStatus().rawValue,
                 pendingChangeCount: try client.pendingChangeCount(),
-                schema: try client.inspectCurrentSchema(),
-                applicationRows: applicationRows,
-                retainedMutations: try retainedMutationRecords(client.inspectRetainedMutations()),
-                rejectedMutations: try bounded(
-                    client.inspectRejectedMutations().map(RetainedRejection.init)
-                ),
-                scopeStates: try bounded(
-                    client.inspectScopeStates().map(ScopeStateRecord.init)
-                ),
-                scopeRows: try bounded(
-                    scopeRows.map(ScopeRowRecord.init)
-                ),
+                applicationRowCount: counts.applicationRowCount,
+                mutationLedgerCount: counts.mutationLedgerCount,
+                mutationOutcomeCount: counts.mutationOutcomeCount,
+                sealedBatchCount: counts.sealedBatchCount,
+                rejectedMutationCount: counts.rejectedMutationCount,
+                scopeStateCount: counts.scopeStateCount,
+                scopeRowCount: counts.scopeRowCount,
+                provenanceCount: counts.provenanceCount,
+                rowMetadataCount: counts.rowMetadataCount,
+                rebuildAttemptCount: counts.rebuildAttemptCount,
+                rebuildReceiptCount: counts.rebuildReceiptCount,
+                schema: counts.schema,
+                applicationRows: counts.applicationRowCount <= Self.maximumRows ? capturedApplicationRows : nil,
+                retainedMutations: retainedMutations,
+                rejectedMutations: rejectedMutations,
+                scopeStates: scopeStateRecords,
+                scopeRows: scopeRowRecords,
                 rowMetadata: metadataRecords.first,
-                rowMetadataRecords: try bounded(metadataRecords),
-                rebuildAttempts: try bounded(
-                    client.inspectRebuildAttempts().map(RebuildAttemptRecord.init)
-                ),
-                rebuildReceiptProofs: try bounded(
-                    client.inspectRebuildReceiptProofs().map(RebuildReceiptProofRecord.init)
-                ),
+                rowMetadataRecords: counts.rowMetadataCount <= maximumBoundedRecords ? try bounded(metadataRecords) : nil,
+                rebuildAttempts: rebuildAttemptRecords,
+                rebuildReceiptProofs: rebuildReceiptRecords,
+                provenanceMaintenanceWorkCursor: counts.provenanceMaintenanceWorkCursor,
                 events: events.snapshot(),
                 failure: try client.getBlockingFailure()
             )
@@ -1439,7 +1496,7 @@ private final class BoundedLineReader {
 
             guard buffer.count <= maximumRunnerLineBytes else {
                 buffer.removeAll(keepingCapacity: true)
-                while let chunk = try input.read(upToCount: Self.readChunkBytes), !chunk.isEmpty {
+                while let chunk = try readChunk() {
                     if let newline = chunk.firstIndex(of: 0x0a) {
                         buffer.append(contentsOf: chunk.suffix(from: chunk.index(after: newline)))
                         break
@@ -1448,7 +1505,7 @@ private final class BoundedLineReader {
                 throw RunnerError.inputLimit
             }
 
-            guard let chunk = try input.read(upToCount: Self.readChunkBytes), !chunk.isEmpty else {
+            guard let chunk = try readChunk() else {
                 guard !buffer.isEmpty else { return nil }
                 let line = buffer
                 buffer.removeAll(keepingCapacity: true)
@@ -1459,6 +1516,24 @@ private final class BoundedLineReader {
                 return value
             }
             buffer.append(chunk)
+        }
+    }
+
+    private func readChunk() throws -> Data? {
+        var bytes = [UInt8](repeating: 0, count: Self.readChunkBytes)
+        while true {
+            let count = bytes.withUnsafeMutableBytes { buffer in
+                Darwin.read(input.fileDescriptor, buffer.baseAddress, buffer.count)
+            }
+            if count > 0 {
+                return Data(bytes.prefix(count))
+            }
+            if count == 0 {
+                return nil
+            }
+            if errno != EINTR {
+                throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+            }
         }
     }
 }

@@ -437,6 +437,8 @@ export function mapNativeError(error: unknown): SynchroError {
       return new NotStartedError();
     case 'TRANSACTION_TIMEOUT':
       return new TransactionTimeoutError();
+    case 'INVALID_CONFIG':
+      return new SynchroError('INVALID_CONFIG', message);
     default:
       return new SynchroError('UNKNOWN', message);
   }

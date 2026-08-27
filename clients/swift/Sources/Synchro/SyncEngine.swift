@@ -77,7 +77,7 @@ private actor StartupGate {
     }
 }
 
-private final class CycleGate: @unchecked Sendable {
+final class CycleGate: @unchecked Sendable {
     private struct Entry {
         let task: Task<Void, Error>
     }
@@ -655,11 +655,9 @@ final class SyncEngine: @unchecked Sendable {
                             resumeBackoff,
                             lifecycleGeneration: lifecycleGeneration
                         )
-                        try clearBackoffAfterSuccessfulCycle()
                         backoff = nil
                     } else {
                         try await runSyncCycle(lifecycleGeneration: lifecycleGeneration)
-                        try clearBackoffAfterSuccessfulCycle()
                     }
                 } catch is BindingRenewalError {
                     try await reconnectAfterBindingRenewal(lifecycleGeneration: lifecycleGeneration)
@@ -760,11 +758,6 @@ final class SyncEngine: @unchecked Sendable {
             try SynchroMeta.upsertBackoffRecord(db, record: record)
             return record
         }
-    }
-
-    private func clearBackoffAfterSuccessfulCycle() throws {
-        // Each successful durable operation clears only its matching record.
-        // This fallback must not clear unrelated recovery work.
     }
 
     private func retryDeadline(after delay: TimeInterval) -> Int64 {

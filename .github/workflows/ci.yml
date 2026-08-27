@@ -74,53 +74,11 @@ jobs:
     needs: metadata
     runs-on: ubuntu-24.04
     steps:
+      - uses: actions/checkout@v6.0.2
+
       - uses: dtolnay/rust-toolchain@stable
 
-      - name: Install PostgreSQL extension build dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            build-essential \
-            ccache \
-            clang \
-            flex \
-            bison \
-            libclang-dev \
-            libreadline-dev \
-            libssl-dev \
-            libxml2-dev \
-            libxml2-utils \
-            libxslt-dev \
-            pkg-config \
-            xsltproc \
-            zlib1g-dev
-
-      - uses: actions/cache@v5.0.4
-        with:
-          path: ~/.pgrx
-          key: pgrx-${{ runner.os }}-0.17.0-pg18
-
-      - uses: actions/cache@v5.0.4
-        with:
-          path: |
-            ~/.cargo/bin/cargo-pgrx
-            ~/.cargo/.crates.toml
-            ~/.cargo/.crates2.json
-          key: cargo-pgrx-${{ runner.os }}-0.17.0
-
-      - name: Install cargo-pgrx
-        run: |
-          if ! command -v cargo-pgrx >/dev/null 2>&1 || [ "$(cargo pgrx --version | awk '{print $2}')" != "0.17.0" ]; then
-            cargo install --locked cargo-pgrx --version 0.17.0
-          fi
-
-      - name: Initialize PostgreSQL 18 for pgrx
-        run: |
-          if [ -f "$HOME/.pgrx/config.toml" ] && grep -q '^pg18' "$HOME/.pgrx/config.toml"; then
-            echo "Using cached PG18 pgrx runtime"
-          else
-            cargo pgrx init --pg18 download
-          fi
+      - uses: ./.github/actions/setup-pgrx-pg18
 
       - name: Archive PG18 pgrx runtime
         run: tar -C "$HOME" -cf "$RUNNER_TEMP/pgrx-pg18-linux.tar" .pgrx
@@ -235,38 +193,10 @@ jobs:
           workspaces: |
             extensions -> target
 
-      - name: Install PostgreSQL extension build dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            build-essential \
-            ccache \
-            clang \
-            flex \
-            bison \
-            libclang-dev \
-            libreadline-dev \
-            libssl-dev \
-            libxml2-dev \
-            libxml2-utils \
-            libxslt-dev \
-            pkg-config \
-            xsltproc \
-            zlib1g-dev
-
-      - uses: actions/cache@v5.0.4
+      - uses: ./.github/actions/setup-pgrx-pg18
         with:
-          path: |
-            ~/.cargo/bin/cargo-pgrx
-            ~/.cargo/.crates.toml
-            ~/.cargo/.crates2.json
-          key: cargo-pgrx-${{ runner.os }}-0.17.0
-
-      - name: Install cargo-pgrx
-        run: |
-          if ! command -v cargo-pgrx >/dev/null 2>&1 || [ "$(cargo pgrx --version | awk '{print $2}')" != "0.17.0" ]; then
-            cargo install --locked cargo-pgrx --version 0.17.0
-          fi
+          runtime-source: artifact
+          cache-runtime: 'false'
 
       - uses: actions/download-artifact@v8.0.1
         with:
@@ -380,36 +310,7 @@ jobs:
           test "$(shasum -a 256 dist/conformance/synchro-pg-pg18/artifact-manifest.json | cut -d ' ' -f 1)" = "$(tr -d '[:space:]' < dist/conformance/synchro-pg-pg18/artifact-manifest.json.sha256)"
 
       - name: Create isolated conformance secrets
-        run: |
-          umask 077
-          SECRETS_DIR="$RUNNER_TEMP/synchro-conformance-secrets"
-          mkdir "$SECRETS_DIR"
-          openssl rand -hex 32 > "$SECRETS_DIR/admin-password"
-          openssl rand -hex 32 > "$SECRETS_DIR/adapter-password"
-           openssl rand -hex 32 > "$SECRETS_DIR/observer-password"
-           openssl rand -hex 32 > "$SECRETS_DIR/worker-password"
-           openssl rand -hex 32 > "$SECRETS_DIR/operator-password"
-           openssl rand -hex 32 > "$SECRETS_DIR/jwt-secret"
-          chmod 0600 "$SECRETS_DIR"/*
-          PG_CONFIG="$(awk -F'\"' '/^pg18[[:space:]]*=/ { print $2 }' "$HOME/.pgrx/config.toml")"
-          test -x "$PG_CONFIG"
-          {
-            echo "SYNCHRO_CONFORMANCE_PG18_BINDIR=$(dirname "$PG_CONFIG")"
-            echo "SYNCHRO_CONFORMANCE_EXTENSION_ARTIFACT=$GITHUB_WORKSPACE/dist/conformance/synchro-pg-pg18"
-            echo "SYNCHRO_CONFORMANCE_ADAPTER_ARTIFACT=$GITHUB_WORKSPACE/dist/conformance/synchrod-pg-adapter/synchrod-pg"
-            echo "SYNCHRO_CONFORMANCE_ADMIN_USER=synchro_cf_admin"
-            echo "SYNCHRO_CONFORMANCE_ADMIN_PASSWORD_FILE=$SECRETS_DIR/admin-password"
-            echo "SYNCHRO_CONFORMANCE_ADAPTER_USER=synchro_cf_adapter"
-            echo "SYNCHRO_CONFORMANCE_ADAPTER_PASSWORD_FILE=$SECRETS_DIR/adapter-password"
-            echo "SYNCHRO_CONFORMANCE_OBSERVER_USER=synchro_cf_observer"
-            echo "SYNCHRO_CONFORMANCE_OBSERVER_PASSWORD_FILE=$SECRETS_DIR/observer-password"
-             echo "SYNCHRO_CONFORMANCE_WORKER_USER=synchro_cf_worker"
-             echo "SYNCHRO_CONFORMANCE_WORKER_PASSWORD_FILE=$SECRETS_DIR/worker-password"
-             echo "SYNCHRO_CONFORMANCE_OPERATOR_USER=synchro_cf_operator"
-             echo "SYNCHRO_CONFORMANCE_OPERATOR_PASSWORD_FILE=$SECRETS_DIR/operator-password"
-             echo "SYNCHRO_CONFORMANCE_JWT_SECRET_FILE=$SECRETS_DIR/jwt-secret"
-            echo "SYNCHRO_CONFORMANCE_INSTALL_LOCK=$RUNNER_TEMP/synchro-conformance-install.lock"
-          } >> "$GITHUB_ENV"
+        run: scripts/ci/configure-conformance-adapter.sh
 
       - name: Run isolated PostgreSQL 18 baseline
         env:
@@ -437,67 +338,15 @@ jobs:
           workspaces: |
             extensions -> target
 
-      - uses: actions/cache@v5.0.4
+      - uses: ./.github/actions/setup-pgrx-pg18
         with:
-          path: ~/.pgrx
-          key: pgrx-${{ runner.os }}-0.17.0-pg18
-
-      - uses: actions/cache@v5.0.4
-        with:
-          path: |
-            ~/.cargo/bin/cargo-pgrx
-            ~/.cargo/.crates.toml
-            ~/.cargo/.crates2.json
-          key: cargo-pgrx-${{ runner.os }}-0.17.0
-
-      - name: Install PostgreSQL 18 and extension build dependencies on macOS
-        run: |
-          for formula in postgresql@18 pkgconf openssl@3 libxml2 libxslt; do
-            brew list --versions "$formula" >/dev/null 2>&1 || brew install "$formula"
-          done
-
-      - name: Install cargo-pgrx
-        run: |
-          if ! command -v cargo-pgrx >/dev/null 2>&1 || [ "$(cargo pgrx --version | awk '{print $2}')" != "0.17.0" ]; then
-            cargo install --locked cargo-pgrx --version 0.17.0
-          fi
-
-      - name: Initialize PostgreSQL 18 for pgrx
-        run: |
-          if [ -f "$HOME/.pgrx/config.toml" ] && grep -q '^pg18' "$HOME/.pgrx/config.toml"; then
-            echo "Using cached PG18 pgrx runtime"
-          else
-            cargo pgrx init --pg18 "$(brew --prefix postgresql@18)/bin/pg_config"
-          fi
+          runtime-source: brew
 
       - name: Configure native Swift conformance
         run: |
           make conformance-adapter-artifact
           make conformance-pg18-extension-artifact
-          umask 077
-          SECRETS_DIR="$RUNNER_TEMP/synchro-conformance-secrets"
-          mkdir "$SECRETS_DIR"
-          for name in admin adapter observer worker operator jwt; do
-            openssl rand -hex 32 > "$SECRETS_DIR/$name-password"
-          done
-          PG_CONFIG="$(awk -F'"' '/^pg18[[:space:]]*=/ { print $2 }' "$HOME/.pgrx/config.toml")"
-          {
-            echo "SYNCHRO_CONFORMANCE_PG18_BINDIR=$(dirname "$PG_CONFIG")"
-            echo "SYNCHRO_CONFORMANCE_EXTENSION_ARTIFACT=$GITHUB_WORKSPACE/dist/conformance/synchro-pg-pg18"
-            echo "SYNCHRO_CONFORMANCE_ADAPTER_ARTIFACT=$GITHUB_WORKSPACE/dist/conformance/synchrod-pg-adapter/synchrod-pg"
-            echo "SYNCHRO_CONFORMANCE_ADMIN_USER=synchro_cf_admin"
-            echo "SYNCHRO_CONFORMANCE_ADMIN_PASSWORD_FILE=$SECRETS_DIR/admin-password"
-            echo "SYNCHRO_CONFORMANCE_ADAPTER_USER=synchro_cf_adapter"
-            echo "SYNCHRO_CONFORMANCE_ADAPTER_PASSWORD_FILE=$SECRETS_DIR/adapter-password"
-            echo "SYNCHRO_CONFORMANCE_OBSERVER_USER=synchro_cf_observer"
-            echo "SYNCHRO_CONFORMANCE_OBSERVER_PASSWORD_FILE=$SECRETS_DIR/observer-password"
-            echo "SYNCHRO_CONFORMANCE_WORKER_USER=synchro_cf_worker"
-            echo "SYNCHRO_CONFORMANCE_WORKER_PASSWORD_FILE=$SECRETS_DIR/worker-password"
-            echo "SYNCHRO_CONFORMANCE_OPERATOR_USER=synchro_cf_operator"
-            echo "SYNCHRO_CONFORMANCE_OPERATOR_PASSWORD_FILE=$SECRETS_DIR/operator-password"
-            echo "SYNCHRO_CONFORMANCE_JWT_SECRET_FILE=$SECRETS_DIR/jwt-password"
-            echo "SYNCHRO_CONFORMANCE_INSTALL_LOCK=$RUNNER_TEMP/synchro-conformance-install.lock"
-          } >> "$GITHUB_ENV"
+          SYNCHRO_CONFORMANCE_JWT_SECRET_FILE_NAME=jwt-password scripts/ci/configure-conformance-adapter.sh
 
       - name: Ensure CocoaPods is available
         run: |
@@ -556,6 +405,7 @@ jobs:
     env:
       ANDROID_HOME: /usr/local/lib/android/sdk
       ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
+      KOTLIN_ANDROID_SERIAL: emulator-5554
       GRADLE_TEST_ARGS: ""
     steps:
       - uses: actions/checkout@v6.0.2
@@ -578,38 +428,10 @@ jobs:
           workspaces: |
             extensions -> target
 
-      - name: Install PostgreSQL extension build dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            build-essential \
-            ccache \
-            clang \
-            flex \
-            bison \
-            libclang-dev \
-            libreadline-dev \
-            libssl-dev \
-            libxml2-dev \
-            libxml2-utils \
-            libxslt-dev \
-            pkg-config \
-            xsltproc \
-            zlib1g-dev
-
-      - uses: actions/cache@v5.0.4
+      - uses: ./.github/actions/setup-pgrx-pg18
         with:
-          path: |
-            ~/.cargo/bin/cargo-pgrx
-            ~/.cargo/.crates.toml
-            ~/.cargo/.crates2.json
-          key: cargo-pgrx-${{ runner.os }}-0.17.0
-
-      - name: Install cargo-pgrx
-        run: |
-          if ! command -v cargo-pgrx >/dev/null 2>&1 || [ "$(cargo pgrx --version | awk '{print $2}')" != "0.17.0" ]; then
-            cargo install --locked cargo-pgrx --version 0.17.0
-          fi
+          runtime-source: artifact
+          cache-runtime: 'false'
 
       - uses: actions/download-artifact@v8.0.1
         with:
@@ -641,13 +463,36 @@ jobs:
           "$SDKMANAGER" \
             "platform-tools" \
             "platforms;android-34" \
-            "build-tools;34.0.0"
+            "build-tools;34.0.0" \
+            "emulator" \
+            "system-images;android-34;google_apis;x86_64"
 
       - name: Set Android Java home
         run: echo "ANDROID_JAVA_HOME=${JAVA_HOME}" >> "$GITHUB_ENV"
 
       - name: Run Kotlin unit tests
         run: make test-kotlin-unit
+
+      - name: Enable KVM permissions
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - name: Run Android instrumentation release gate
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 34
+          arch: x86_64
+          avd-name: Synchro_Kotlin_API_34
+          profile: pixel_2
+          target: google_apis
+          force-avd-creation: true
+          disable-linux-hw-accel: false
+          disable-animations: true
+          emulator-boot-timeout: 900
+          emulator-options: -no-snapshot-save -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
+          script: make test-kotlin-instrumentation
 
       - name: Run Kotlin integration tests
         run: make test-kotlin
@@ -697,38 +542,10 @@ jobs:
           workspaces: |
             extensions -> target
 
-      - name: Install PostgreSQL extension build dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            build-essential \
-            ccache \
-            clang \
-            flex \
-            bison \
-            libclang-dev \
-            libreadline-dev \
-            libssl-dev \
-            libxml2-dev \
-            libxml2-utils \
-            libxslt-dev \
-            pkg-config \
-            xsltproc \
-            zlib1g-dev
-
-      - uses: actions/cache@v5.0.4
+      - uses: ./.github/actions/setup-pgrx-pg18
         with:
-          path: |
-            ~/.cargo/bin/cargo-pgrx
-            ~/.cargo/.crates.toml
-            ~/.cargo/.crates2.json
-          key: cargo-pgrx-${{ runner.os }}-0.17.0
-
-      - name: Install cargo-pgrx
-        run: |
-          if ! command -v cargo-pgrx >/dev/null 2>&1 || [ "$(cargo pgrx --version | awk '{print $2}')" != "0.17.0" ]; then
-            cargo install --locked cargo-pgrx --version 0.17.0
-          fi
+          runtime-source: artifact
+          cache-runtime: 'false'
 
       - uses: actions/download-artifact@v8.0.1
         with:

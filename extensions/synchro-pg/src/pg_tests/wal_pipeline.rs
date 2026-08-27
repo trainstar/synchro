@@ -73,6 +73,7 @@
             Spi::get_one("SELECT synchro_backfill_bucket_edges()").unwrap();
         let resp = resp.unwrap().0;
         assert!(resp["edges"].as_i64().unwrap_or(0) > 0);
+        assert_eq!(resp["batch_size"], 1_000);
 
         let edge_count: Option<i64> = Spi::get_one(
             "SELECT count(*) FROM sync_bucket_edges
@@ -92,6 +93,49 @@
         )
         .unwrap();
         assert!(row_version.is_some());
+    }
+
+    #[pg_test]
+    fn test_backfill_bucket_edges_enforces_batch_boundaries() {
+        setup_test_tables();
+        for (record_id, sequence) in [
+            ("14141414-1414-1414-1414-141414141414", 1),
+            ("15151515-1515-1515-1515-151515151515", 2),
+        ] {
+            Spi::run_with_args(
+                "INSERT INTO test_products (id, name, price)
+                 VALUES ($1::uuid, 'Backfill Boundary Product', $2)",
+                &[record_id.into(), sequence.into()],
+            )
+            .unwrap();
+            insert_changelog("global", "test_products", record_id, sequence);
+        }
+
+        let lower: pgrx::JsonB = Spi::get_one(
+            "SELECT synchro_backfill_bucket_edges('test_products', 1)",
+        )
+        .unwrap()
+        .expect("lower backfill boundary response");
+        assert_eq!(lower.0["batch_size"], 1);
+        assert_eq!(lower.0["batch_count"], 2);
+
+        let upper: pgrx::JsonB = Spi::get_one(
+            "SELECT synchro_backfill_bucket_edges('test_products', 1000)",
+        )
+        .unwrap()
+        .expect("upper backfill boundary response");
+        assert_eq!(upper.0["batch_size"], 1_000);
+        assert_eq!(upper.0["batch_count"], 1);
+
+        let accepted = PgTryBuilder::new(std::panic::AssertUnwindSafe(|| {
+            Spi::get_one::<pgrx::JsonB>(
+                "SELECT synchro_backfill_bucket_edges('test_products', 1001)",
+            )
+            .is_ok()
+        }))
+        .catch_others(|_| false)
+        .execute();
+        assert!(!accepted, "batch size above 1000 must be rejected");
     }
 
     #[pg_test]

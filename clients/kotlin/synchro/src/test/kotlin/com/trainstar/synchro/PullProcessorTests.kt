@@ -51,12 +51,11 @@ class PullProcessorTests {
     private fun makeTestEnv(table: SchemaTable = testTable): Pair<SynchroDatabase, PullProcessor> {
         val context = ApplicationProvider.getApplicationContext<Context>()
         val db = databases.create(context)
-        val manager = SchemaManager(db)
         val schema = SchemaResponse(
             schemaVersion = 1, schemaHash = PROTOCOL_TEST_SCHEMA_HASH,
             serverTime = "2026-01-01T12:00:00.000000Z", tables = listOf(table)
         )
-        manager.createSyncedTables(schema)
+        installTestSchema(db, schema)
         return Pair(db, PullProcessor(db))
     }
 
@@ -232,6 +231,40 @@ class PullProcessorTests {
     @After
     fun tearDown() {
         databases.closeAll()
+    }
+
+    @Test
+    fun scopeRowMaintenanceCursorCountsCommittedAffectedRowsOnly() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val db = databases.create(context)
+        val checksum = "checksum"
+
+        assertEquals(0L, db.inspectProvenanceMaintenanceWork().cursor)
+        db.writeTransaction { conn ->
+            SynchroMeta.upsertScopeRow(conn, "scope", "orders", "one", checksum, 0L)
+            SynchroMeta.upsertScopeRow(conn, "scope", "orders", "two", checksum, 0L)
+            SynchroMeta.updateScopeRowChecksum(conn, "scope", "orders", "one", "updated")
+            SynchroMeta.deleteScopeRow(conn, "scope", "orders", "two")
+            SynchroMeta.deleteScopeRows(conn, "scope")
+            SynchroMeta.upsertScopeRow(conn, "scope", "orders", "stale", checksum, 0L)
+            SynchroMeta.upsertScopeRow(conn, "scope", "orders", "current", checksum, 1L)
+            SynchroMeta.deleteStaleScopeRows(conn, "scope", 1L)
+            SynchroMeta.clearAllScopeRows(conn)
+        }
+
+        assertEquals(9L, db.inspectProvenanceMaintenanceWork().cursor)
+        assertTrue(db.readTransaction { conn -> SynchroMeta.listScopeRows(conn, 10).isEmpty() })
+
+        assertThrows(IllegalStateException::class.java) {
+            db.writeTransaction { conn ->
+                SynchroMeta.upsertScopeRow(conn, "scope", "orders", "rolled-back", checksum, 1L)
+                SynchroMeta.clearAllScopeRows(conn)
+                throw IllegalStateException("rollback")
+            }
+        }
+
+        assertEquals(9L, db.inspectProvenanceMaintenanceWork().cursor)
+        assertTrue(db.readTransaction { conn -> SynchroMeta.listScopeRows(conn, 10).isEmpty() })
     }
 
     @Test

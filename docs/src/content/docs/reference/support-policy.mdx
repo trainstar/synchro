@@ -5,26 +5,40 @@ description: Required and excluded environments for the Synchro v0.3.0 verificat
 
 # Support Policy
 
-## v0.3.0 Matrix
+## Support Tiers
+
+Tier 1 is certified support with release-blocking evidence for every required cell.
+
+Tier 2 is built and tested in CI without release certification.
+
+Synchro makes no support claim outside these tiers.
+
+## v0.3.0 Tier 1 Matrix
 
 The public v0.3.0 verification matrix is deliberately narrow:
 
 | Surface | Required environments |
 | --- | --- |
-| Server | PostgreSQL 18 only |
+| Server | PostgreSQL 18 on `linux-x64` and `macos-arm64` extension architectures |
 | Apple client | iOS 16 and current stable iOS |
-| Apple client | macOS 13 and current stable macOS |
 | Android client | Android API 24 and current stable Android API |
-| React Native bridge | React Native 0.83.x on iOS 16 and current stable iOS |
-| React Native bridge | React Native 0.83.x on Android API 24 and current stable Android API |
+| React Native bridge | React Native 0.83.x on current stable iOS and current stable Android |
+
+The release workflow publishes two PostgreSQL extension artifacts. They target `linux-x64` and `macos-arm64`.
+
+Those published artifacts derive two required PostgreSQL server cells.
 
 PostgreSQL 14, 15, 16, and 17 are excluded from v0.3.0 verification. Existing build features or incidental successful use do not expand the public matrix.
 
-The React Native package supports `react-native >=0.83.0 <0.84.0` and the compatible React 19 line. React Native verification exercises both the iOS and Android bridge paths over the native SDKs.
+The React Native package supports `react-native >=0.83.0 <0.84.0` and the compatible React 19 line. React Native verification exercises both current bridge paths over the native SDKs. Native engine cells provide minimum operating system coverage.
+
+## v0.3.0 Tier 2 Matrix
+
+Swift on macOS is built and tested in CI without certification. macOS remains the Apple toolchain host and the Swift scenario execution host. A host role does not create a Tier 1 target.
 
 ## Minimum And Current Tracks
 
-Minimum tracks protect the declared deployment floor: iOS 16, macOS 13, and Android API 24. Current tracks protect compatibility with the current stable Apple and Android platform releases available when an RC begins.
+Minimum tracks protect the declared deployment floor for iOS 16 and Android API 24. Current tracks protect current stable Apple and Android platform releases available when an RC begins.
 
 `current-stable` is an authored policy selector, not a permanent version number. The RC manifest resolves it to exact operating system, Xcode, Apple SDK, Android SDK, emulator or simulator, and supporting toolchain versions. Those exact values remain fixed for that candidate and appear in generated evidence.
 
@@ -33,5 +47,11 @@ Minimum tracks protect the declared deployment floor: iOS 16, macOS 13, and Andr
 This page and `conformance/support-matrix.json` state which cells are required or excluded. They do not claim that a release candidate has passed those cells.
 
 Certification requires generated, immutable evidence from the release workflow for every required cell, tied to one candidate commit and exact artifact hashes. A version is not added to a release claim merely because it is expected to work, has a compile-time feature, or passed an unrelated development test.
+
+The final aggregate requires five packaged checks for every non-excluded cell: connect, push, pull, process kill, and resume. Package installation is a prerequisite for those checks.
+
+The release workflow must bind each check to the packaged artifact hash. Missing or incomplete packaged evidence blocks certification.
+
+A new Tier 1 cell requires named production demand that justifies its recurring evidence cost.
 
 See [Verification Overview](/synchro/verification/overview/) for how evidence is produced and [Release Verification](/synchro/spec/07-release-verification/) for the normative gate.

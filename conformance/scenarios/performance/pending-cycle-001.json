@@ -45,7 +45,7 @@
       "control_id": null
     },
     {
-      "obligation_id": "OBL-PERF-PENDING-CYCLE-PG-001",
+      "obligation_id": "OBL-PERF-PENDING-CYCLE-PG-LINUX-X64-001",
       "requirement_ids": [
         "SYNC-MUTATION-002"
       ],
@@ -54,7 +54,7 @@
         "ASSERT-PERF-PENDING-CYCLE-PERFORMANCE-001"
       ],
       "proof_type": "server-black-box",
-      "support_cell_id": "SUP-PG-018",
+      "support_cell_id": "SUP-PG-LINUX-X64-001",
       "artifact_inventory_ids": [
         "ARTDEF-PG-EXTENSION-001",
         "ARTDEF-ADAPTER-001"
@@ -75,12 +75,68 @@
       "control_id": null
     },
     {
-      "obligation_id": "OBL-PERF-PENDING-CYCLE-IOS-MIN-001",
+      "obligation_id": "OBL-PERF-PENDING-CYCLE-PG-MACOS-ARM64-001",
       "requirement_ids": [
         "SYNC-MUTATION-002"
       ],
       "assertion_ids": [
         "ASSERT-PERF-PENDING-CYCLE-SEMANTIC-001",
+        "ASSERT-PERF-PENDING-CYCLE-PERFORMANCE-001"
+      ],
+      "proof_type": "server-black-box",
+      "support_cell_id": "SUP-PG-MACOS-ARM64-001",
+      "artifact_inventory_ids": [
+        "ARTDEF-PG-EXTENSION-001",
+        "ARTDEF-ADAPTER-001"
+      ],
+      "performance_budget_ids": [
+        "BUD-PENDING-PUSH-001",
+        "BUD-PENDING-PULL-001",
+        "BUD-PENDING-CYCLE-UNEXPECTED-001"
+      ],
+      "required_measurement_ids": [],
+      "required_vector_set_ids": [],
+      "make_target": "test-blackbox",
+      "argv": [
+        "make",
+        "test-blackbox"
+      ],
+      "fault_plan_id": null,
+      "control_id": null
+    },
+    {
+      "obligation_id": "OBL-PERF-PENDING-CYCLE-MACOS-CURRENT-001",
+      "requirement_ids": [
+        "SYNC-MUTATION-002"
+      ],
+      "assertion_ids": [
+        "ASSERT-PERF-PENDING-CYCLE-SEMANTIC-001"
+      ],
+      "proof_type": "native-e2e",
+      "support_cell_id": "SUP-MACOS-CURRENT-001",
+      "artifact_inventory_ids": [
+        "ARTDEF-PG-EXTENSION-001",
+        "ARTDEF-ADAPTER-001",
+        "ARTDEF-SWIFT-SPM-001",
+        "ARTDEF-COCOAPODS-001"
+      ],
+      "performance_budget_ids": [],
+      "required_measurement_ids": [],
+      "required_vector_set_ids": [],
+      "make_target": "test-swift",
+      "argv": [
+        "make",
+        "test-swift"
+      ],
+      "fault_plan_id": null,
+      "control_id": null
+    },
+    {
+      "obligation_id": "OBL-PERF-PENDING-CYCLE-IOS-MIN-001",
+      "requirement_ids": [
+        "SYNC-MUTATION-002"
+      ],
+      "assertion_ids": [
         "ASSERT-PERF-PENDING-CYCLE-PERFORMANCE-001"
       ],
       "proof_type": "native-e2e",
@@ -112,75 +168,10 @@
         "SYNC-MUTATION-002"
       ],
       "assertion_ids": [
-        "ASSERT-PERF-PENDING-CYCLE-SEMANTIC-001",
         "ASSERT-PERF-PENDING-CYCLE-PERFORMANCE-001"
       ],
       "proof_type": "native-e2e",
       "support_cell_id": "SUP-IOS-CURRENT-001",
-      "artifact_inventory_ids": [
-        "ARTDEF-PG-EXTENSION-001",
-        "ARTDEF-ADAPTER-001",
-        "ARTDEF-SWIFT-SPM-001",
-        "ARTDEF-COCOAPODS-001"
-      ],
-      "performance_budget_ids": [
-        "BUD-PENDING-PUSH-001",
-        "BUD-PENDING-PULL-001",
-        "BUD-PENDING-CYCLE-UNEXPECTED-001"
-      ],
-      "required_measurement_ids": [],
-      "required_vector_set_ids": [],
-      "make_target": "test-swift",
-      "argv": [
-        "make",
-        "test-swift"
-      ],
-      "fault_plan_id": null,
-      "control_id": null
-    },
-    {
-      "obligation_id": "OBL-PERF-PENDING-CYCLE-MACOS-MIN-001",
-      "requirement_ids": [
-        "SYNC-MUTATION-002"
-      ],
-      "assertion_ids": [
-        "ASSERT-PERF-PENDING-CYCLE-SEMANTIC-001",
-        "ASSERT-PERF-PENDING-CYCLE-PERFORMANCE-001"
-      ],
-      "proof_type": "native-e2e",
-      "support_cell_id": "SUP-MACOS-MIN-001",
-      "artifact_inventory_ids": [
-        "ARTDEF-PG-EXTENSION-001",
-        "ARTDEF-ADAPTER-001",
-        "ARTDEF-SWIFT-SPM-001",
-        "ARTDEF-COCOAPODS-001"
-      ],
-      "performance_budget_ids": [
-        "BUD-PENDING-PUSH-001",
-        "BUD-PENDING-PULL-001",
-        "BUD-PENDING-CYCLE-UNEXPECTED-001"
-      ],
-      "required_measurement_ids": [],
-      "required_vector_set_ids": [],
-      "make_target": "test-swift",
-      "argv": [
-        "make",
-        "test-swift"
-      ],
-      "fault_plan_id": null,
-      "control_id": null
-    },
-    {
-      "obligation_id": "OBL-PERF-PENDING-CYCLE-MACOS-CURRENT-001",
-      "requirement_ids": [
-        "SYNC-MUTATION-002"
-      ],
-      "assertion_ids": [
-        "ASSERT-PERF-PENDING-CYCLE-SEMANTIC-001",
-        "ASSERT-PERF-PENDING-CYCLE-PERFORMANCE-001"
-      ],
-      "proof_type": "native-e2e",
-      "support_cell_id": "SUP-MACOS-CURRENT-001",
       "artifact_inventory_ids": [
         "ARTDEF-PG-EXTENSION-001",
         "ARTDEF-ADAPTER-001",
@@ -208,7 +199,6 @@
         "SYNC-MUTATION-002"
       ],
       "assertion_ids": [
-        "ASSERT-PERF-PENDING-CYCLE-SEMANTIC-001",
         "ASSERT-PERF-PENDING-CYCLE-PERFORMANCE-001"
       ],
       "proof_type": "native-e2e",
@@ -265,39 +255,6 @@
       "control_id": null
     },
     {
-      "obligation_id": "OBL-PERF-PENDING-CYCLE-RN-IOS-MIN-001",
-      "requirement_ids": [
-        "SYNC-MUTATION-002"
-      ],
-      "assertion_ids": [
-        "ASSERT-PERF-PENDING-CYCLE-SEMANTIC-001",
-        "ASSERT-PERF-PENDING-CYCLE-PERFORMANCE-001"
-      ],
-      "proof_type": "native-e2e",
-      "support_cell_id": "SUP-RN-IOS-MIN-001",
-      "artifact_inventory_ids": [
-        "ARTDEF-PG-EXTENSION-001",
-        "ARTDEF-ADAPTER-001",
-        "ARTDEF-SWIFT-SPM-001",
-        "ARTDEF-COCOAPODS-001",
-        "ARTDEF-RN-NPM-001"
-      ],
-      "performance_budget_ids": [
-        "BUD-PENDING-PUSH-001",
-        "BUD-PENDING-PULL-001",
-        "BUD-PENDING-CYCLE-UNEXPECTED-001"
-      ],
-      "required_measurement_ids": [],
-      "required_vector_set_ids": [],
-      "make_target": "test-rn-e2e-ios",
-      "argv": [
-        "make",
-        "test-rn-e2e-ios"
-      ],
-      "fault_plan_id": null,
-      "control_id": null
-    },
-    {
       "obligation_id": "OBL-PERF-PENDING-CYCLE-RN-IOS-CURRENT-001",
       "requirement_ids": [
         "SYNC-MUTATION-002"
@@ -326,38 +283,6 @@
       "argv": [
         "make",
         "test-rn-e2e-ios"
-      ],
-      "fault_plan_id": null,
-      "control_id": null
-    },
-    {
-      "obligation_id": "OBL-PERF-PENDING-CYCLE-RN-ANDROID-MIN-001",
-      "requirement_ids": [
-        "SYNC-MUTATION-002"
-      ],
-      "assertion_ids": [
-        "ASSERT-PERF-PENDING-CYCLE-SEMANTIC-001",
-        "ASSERT-PERF-PENDING-CYCLE-PERFORMANCE-001"
-      ],
-      "proof_type": "native-e2e",
-      "support_cell_id": "SUP-RN-ANDROID-MIN-001",
-      "artifact_inventory_ids": [
-        "ARTDEF-PG-EXTENSION-001",
-        "ARTDEF-ADAPTER-001",
-        "ARTDEF-KOTLIN-MAVEN-001",
-        "ARTDEF-RN-NPM-001"
-      ],
-      "performance_budget_ids": [
-        "BUD-PENDING-PUSH-001",
-        "BUD-PENDING-PULL-001",
-        "BUD-PENDING-CYCLE-UNEXPECTED-001"
-      ],
-      "required_measurement_ids": [],
-      "required_vector_set_ids": [],
-      "make_target": "test-rn-e2e-android",
-      "argv": [
-        "make",
-        "test-rn-e2e-android"
       ],
       "fault_plan_id": null,
       "control_id": null
@@ -435,26 +360,42 @@
     {
       "scenario_id": "SCN-PERF-PENDING-CYCLE-001",
       "requirement_id": "SYNC-MUTATION-002",
-      "proof_obligation_id": "OBL-PERF-PENDING-CYCLE-PG-001",
+      "proof_obligation_id": "OBL-PERF-PENDING-CYCLE-PG-LINUX-X64-001",
       "assertion_id": "ASSERT-PERF-PENDING-CYCLE-SEMANTIC-001",
       "proof_type": "server-black-box",
-      "support_cell_id": "SUP-PG-018"
+      "support_cell_id": "SUP-PG-LINUX-X64-001"
     },
     {
       "scenario_id": "SCN-PERF-PENDING-CYCLE-001",
       "requirement_id": "SYNC-MUTATION-002",
-      "proof_obligation_id": "OBL-PERF-PENDING-CYCLE-PG-001",
+      "proof_obligation_id": "OBL-PERF-PENDING-CYCLE-PG-LINUX-X64-001",
       "assertion_id": "ASSERT-PERF-PENDING-CYCLE-PERFORMANCE-001",
       "proof_type": "server-black-box",
-      "support_cell_id": "SUP-PG-018"
+      "support_cell_id": "SUP-PG-LINUX-X64-001"
     },
     {
       "scenario_id": "SCN-PERF-PENDING-CYCLE-001",
       "requirement_id": "SYNC-MUTATION-002",
-      "proof_obligation_id": "OBL-PERF-PENDING-CYCLE-IOS-MIN-001",
+      "proof_obligation_id": "OBL-PERF-PENDING-CYCLE-PG-MACOS-ARM64-001",
+      "assertion_id": "ASSERT-PERF-PENDING-CYCLE-SEMANTIC-001",
+      "proof_type": "server-black-box",
+      "support_cell_id": "SUP-PG-MACOS-ARM64-001"
+    },
+    {
+      "scenario_id": "SCN-PERF-PENDING-CYCLE-001",
+      "requirement_id": "SYNC-MUTATION-002",
+      "proof_obligation_id": "OBL-PERF-PENDING-CYCLE-PG-MACOS-ARM64-001",
+      "assertion_id": "ASSERT-PERF-PENDING-CYCLE-PERFORMANCE-001",
+      "proof_type": "server-black-box",
+      "support_cell_id": "SUP-PG-MACOS-ARM64-001"
+    },
+    {
+      "scenario_id": "SCN-PERF-PENDING-CYCLE-001",
+      "requirement_id": "SYNC-MUTATION-002",
+      "proof_obligation_id": "OBL-PERF-PENDING-CYCLE-MACOS-CURRENT-001",
       "assertion_id": "ASSERT-PERF-PENDING-CYCLE-SEMANTIC-001",
       "proof_type": "native-e2e",
-      "support_cell_id": "SUP-IOS-MIN-001"
+      "support_cell_id": "SUP-MACOS-CURRENT-001"
     },
     {
       "scenario_id": "SCN-PERF-PENDING-CYCLE-001",
@@ -468,57 +409,9 @@
       "scenario_id": "SCN-PERF-PENDING-CYCLE-001",
       "requirement_id": "SYNC-MUTATION-002",
       "proof_obligation_id": "OBL-PERF-PENDING-CYCLE-IOS-CURRENT-001",
-      "assertion_id": "ASSERT-PERF-PENDING-CYCLE-SEMANTIC-001",
-      "proof_type": "native-e2e",
-      "support_cell_id": "SUP-IOS-CURRENT-001"
-    },
-    {
-      "scenario_id": "SCN-PERF-PENDING-CYCLE-001",
-      "requirement_id": "SYNC-MUTATION-002",
-      "proof_obligation_id": "OBL-PERF-PENDING-CYCLE-IOS-CURRENT-001",
       "assertion_id": "ASSERT-PERF-PENDING-CYCLE-PERFORMANCE-001",
       "proof_type": "native-e2e",
       "support_cell_id": "SUP-IOS-CURRENT-001"
-    },
-    {
-      "scenario_id": "SCN-PERF-PENDING-CYCLE-001",
-      "requirement_id": "SYNC-MUTATION-002",
-      "proof_obligation_id": "OBL-PERF-PENDING-CYCLE-MACOS-MIN-001",
-      "assertion_id": "ASSERT-PERF-PENDING-CYCLE-SEMANTIC-001",
-      "proof_type": "native-e2e",
-      "support_cell_id": "SUP-MACOS-MIN-001"
-    },
-    {
-      "scenario_id": "SCN-PERF-PENDING-CYCLE-001",
-      "requirement_id": "SYNC-MUTATION-002",
-      "proof_obligation_id": "OBL-PERF-PENDING-CYCLE-MACOS-MIN-001",
-      "assertion_id": "ASSERT-PERF-PENDING-CYCLE-PERFORMANCE-001",
-      "proof_type": "native-e2e",
-      "support_cell_id": "SUP-MACOS-MIN-001"
-    },
-    {
-      "scenario_id": "SCN-PERF-PENDING-CYCLE-001",
-      "requirement_id": "SYNC-MUTATION-002",
-      "proof_obligation_id": "OBL-PERF-PENDING-CYCLE-MACOS-CURRENT-001",
-      "assertion_id": "ASSERT-PERF-PENDING-CYCLE-SEMANTIC-001",
-      "proof_type": "native-e2e",
-      "support_cell_id": "SUP-MACOS-CURRENT-001"
-    },
-    {
-      "scenario_id": "SCN-PERF-PENDING-CYCLE-001",
-      "requirement_id": "SYNC-MUTATION-002",
-      "proof_obligation_id": "OBL-PERF-PENDING-CYCLE-MACOS-CURRENT-001",
-      "assertion_id": "ASSERT-PERF-PENDING-CYCLE-PERFORMANCE-001",
-      "proof_type": "native-e2e",
-      "support_cell_id": "SUP-MACOS-CURRENT-001"
-    },
-    {
-      "scenario_id": "SCN-PERF-PENDING-CYCLE-001",
-      "requirement_id": "SYNC-MUTATION-002",
-      "proof_obligation_id": "OBL-PERF-PENDING-CYCLE-ANDROID-MIN-001",
-      "assertion_id": "ASSERT-PERF-PENDING-CYCLE-SEMANTIC-001",
-      "proof_type": "native-e2e",
-      "support_cell_id": "SUP-ANDROID-MIN-001"
     },
     {
       "scenario_id": "SCN-PERF-PENDING-CYCLE-001",
@@ -547,22 +440,6 @@
     {
       "scenario_id": "SCN-PERF-PENDING-CYCLE-001",
       "requirement_id": "SYNC-MUTATION-002",
-      "proof_obligation_id": "OBL-PERF-PENDING-CYCLE-RN-IOS-MIN-001",
-      "assertion_id": "ASSERT-PERF-PENDING-CYCLE-SEMANTIC-001",
-      "proof_type": "native-e2e",
-      "support_cell_id": "SUP-RN-IOS-MIN-001"
-    },
-    {
-      "scenario_id": "SCN-PERF-PENDING-CYCLE-001",
-      "requirement_id": "SYNC-MUTATION-002",
-      "proof_obligation_id": "OBL-PERF-PENDING-CYCLE-RN-IOS-MIN-001",
-      "assertion_id": "ASSERT-PERF-PENDING-CYCLE-PERFORMANCE-001",
-      "proof_type": "native-e2e",
-      "support_cell_id": "SUP-RN-IOS-MIN-001"
-    },
-    {
-      "scenario_id": "SCN-PERF-PENDING-CYCLE-001",
-      "requirement_id": "SYNC-MUTATION-002",
       "proof_obligation_id": "OBL-PERF-PENDING-CYCLE-RN-IOS-CURRENT-001",
       "assertion_id": "ASSERT-PERF-PENDING-CYCLE-SEMANTIC-001",
       "proof_type": "native-e2e",
@@ -575,22 +452,6 @@
       "assertion_id": "ASSERT-PERF-PENDING-CYCLE-PERFORMANCE-001",
       "proof_type": "native-e2e",
       "support_cell_id": "SUP-RN-IOS-CURRENT-001"
-    },
-    {
-      "scenario_id": "SCN-PERF-PENDING-CYCLE-001",
-      "requirement_id": "SYNC-MUTATION-002",
-      "proof_obligation_id": "OBL-PERF-PENDING-CYCLE-RN-ANDROID-MIN-001",
-      "assertion_id": "ASSERT-PERF-PENDING-CYCLE-SEMANTIC-001",
-      "proof_type": "native-e2e",
-      "support_cell_id": "SUP-RN-ANDROID-MIN-001"
-    },
-    {
-      "scenario_id": "SCN-PERF-PENDING-CYCLE-001",
-      "requirement_id": "SYNC-MUTATION-002",
-      "proof_obligation_id": "OBL-PERF-PENDING-CYCLE-RN-ANDROID-MIN-001",
-      "assertion_id": "ASSERT-PERF-PENDING-CYCLE-PERFORMANCE-001",
-      "proof_type": "native-e2e",
-      "support_cell_id": "SUP-RN-ANDROID-MIN-001"
     },
     {
       "scenario_id": "SCN-PERF-PENDING-CYCLE-001",
@@ -825,6 +686,89 @@
       }
     ]
   },
+  "native_identity_aliases": [
+    {
+      "kind": "mutation-id",
+      "alias": "pending-mutation",
+      "value": "00000000-0000-4000-8000-000000004001",
+      "step_ids": [
+        "STEP-PERF-PENDING-CYCLE-001",
+        "STEP-PERF-PENDING-CYCLE-002"
+      ],
+      "expectation_ids": []
+    },
+    {
+      "kind": "batch-id",
+      "alias": "pending-batch",
+      "value": "00000000-0000-4000-8000-000000004002",
+      "step_ids": [
+        "STEP-PERF-PENDING-CYCLE-002"
+      ],
+      "expectation_ids": []
+    },
+    {
+      "kind": "client-generation",
+      "alias": "client-generation-one",
+      "value": 1,
+      "step_ids": [
+        "STEP-PERF-PENDING-CYCLE-002",
+        "STEP-PERF-PENDING-CYCLE-003"
+      ],
+      "expectation_ids": []
+    },
+    {
+      "kind": "schema",
+      "alias": "current-schema",
+      "value": {
+        "version": 1,
+        "hash": "721d2c95e6f34cd9733feea9f5118fba391eee10d07663dad066cfc59439fa44"
+      },
+      "step_ids": [
+        "STEP-PERF-PENDING-CYCLE-001",
+        "STEP-PERF-PENDING-CYCLE-002",
+        "STEP-PERF-PENDING-CYCLE-003"
+      ],
+      "expectation_ids": []
+    },
+    {
+      "kind": "table",
+      "alias": "items-table",
+      "value": "items",
+      "step_ids": [
+        "STEP-PERF-PENDING-CYCLE-001",
+        "STEP-PERF-PENDING-CYCLE-002"
+      ],
+      "expectation_ids": []
+    },
+    {
+      "kind": "primary-key",
+      "alias": "pending-row-primary-key",
+      "value": "pending-row",
+      "step_ids": [
+        "STEP-PERF-PENDING-CYCLE-001",
+        "STEP-PERF-PENDING-CYCLE-002"
+      ],
+      "expectation_ids": []
+    },
+    {
+      "kind": "scope",
+      "alias": "scope-a",
+      "value": "scope-a",
+      "step_ids": [
+        "STEP-PERF-PENDING-CYCLE-003"
+      ],
+      "expectation_ids": []
+    },
+    {
+      "kind": "scope-set-version",
+      "alias": "scope-set-version-one",
+      "value": 1,
+      "step_ids": [
+        "STEP-PERF-PENDING-CYCLE-003"
+      ],
+      "expectation_ids": []
+    }
+  ],
   "barrier_plan": {
     "barriers": [
       {
@@ -886,6 +830,11 @@
       "phase": "exercise",
       "transport": "local",
       "description": "Execute the authored workload operation.",
+      "native_binding": {
+        "kind": "local-write",
+        "user_id": "user-a",
+        "client_id": "client-a"
+      },
       "operation": {
         "contract_operation": "local",
         "name": "write",
@@ -917,6 +866,15 @@
       "phase": "exercise",
       "transport": "http",
       "description": "Execute the authored workload operation.",
+      "native_binding": {
+        "kind": "public-call",
+        "user_id": "user-a",
+        "client_id": "client-a",
+        "call_id": "pending_push",
+        "stage": "synchronous",
+        "method": "start",
+        "completion": "idle"
+      },
       "operation": {
         "contract_operation": "push",
         "name": "submit",
@@ -963,6 +921,9 @@
       "phase": "exercise",
       "transport": "process",
       "description": "Materialize the accepted mutation before the pull closes the pending cycle.",
+      "native_binding": {
+        "kind": "controller"
+      },
       "operation": {
         "contract_operation": "process",
         "name": "materialize-source-transaction",
@@ -980,6 +941,15 @@
       "phase": "exercise",
       "transport": "http",
       "description": "Execute the authored workload operation.",
+      "native_binding": {
+        "kind": "public-call",
+        "user_id": "user-a",
+        "client_id": "client-a",
+        "call_id": "pending_pull",
+        "stage": "synchronous",
+        "method": "sync-now",
+        "completion": "idle"
+      },
       "operation": {
         "contract_operation": "pull",
         "name": "request-page",
@@ -1069,120 +1039,5 @@
       },
       "detects_control_ids": []
     }
-  ],
-  "native_execution": {
-    "version": 1,
-    "clients": [
-      {
-        "key": "client_a",
-        "user_id": "user-a",
-        "client_id": "client-a",
-        "database_key": "db_pending_cycle"
-      }
-    ],
-    "actions": [
-      {
-        "id": "NACT-PC-001",
-        "phase": "setup",
-        "actor": "controller",
-        "command": "install-model",
-        "covers_step_ids": [],
-        "parameters": {}
-      },
-      {
-        "id": "NACT-PC-002",
-        "phase": "setup",
-        "actor": "client",
-        "command": "open",
-        "covers_step_ids": [],
-        "parameters": {
-          "client_key": "client_a",
-          "database_mode": "create",
-          "initialization": "current",
-          "seed_step_id": null
-        }
-      },
-      {
-        "id": "NACT-PC-003",
-        "phase": "exercise",
-        "actor": "client",
-        "command": "execute-step",
-        "covers_step_ids": ["STEP-PERF-PENDING-CYCLE-001"],
-        "parameters": {
-          "client_key": "client_a"
-        }
-      },
-      {
-        "id": "NACT-PC-004",
-        "phase": "exercise",
-        "actor": "client",
-        "command": "synchronize-step",
-        "covers_step_ids": ["STEP-PERF-PENDING-CYCLE-002"],
-        "parameters": {
-          "client_key": "client_a",
-          "method": "start",
-          "completion": "idle"
-        }
-      },
-      {
-        "id": "NACT-PC-005",
-        "phase": "exercise",
-        "actor": "process",
-        "command": "execute-step",
-        "covers_step_ids": ["STEP-PERF-PENDING-CYCLE-MATERIALIZE-001"],
-        "parameters": {
-          "client_key": null
-        }
-      },
-      {
-        "id": "NACT-PC-006",
-        "phase": "exercise",
-        "actor": "client",
-        "command": "synchronize-step",
-        "covers_step_ids": ["STEP-PERF-PENDING-CYCLE-003"],
-        "parameters": {
-          "client_key": "client_a",
-          "method": "sync-now",
-          "completion": "idle"
-        }
-      },
-      {
-        "id": "NACT-PC-007",
-        "phase": "verify",
-        "actor": "observer",
-        "command": "capture",
-        "covers_step_ids": [],
-        "parameters": {
-          "client_keys": ["client_a"],
-          "sources": [
-            "application-rows",
-            "pending-mutations",
-            "rejected-mutations",
-            "sync-status",
-            "request-trace",
-            "server-state"
-          ],
-          "expectation_ids": [
-            "EXPECT-PERF-PENDING-CYCLE-SEMANTIC-001",
-            "EXPECT-PERF-PENDING-CYCLE-PERFORMANCE-001"
-          ]
-        }
-      },
-      {
-        "id": "NACT-PC-008",
-        "phase": "verify",
-        "actor": "observer",
-        "command": "measure",
-        "covers_step_ids": [],
-        "parameters": {
-          "performance_budget_ids": [
-            "BUD-PENDING-CYCLE-UNEXPECTED-001",
-            "BUD-PENDING-PULL-001",
-            "BUD-PENDING-PUSH-001"
-          ],
-          "measurement_ids": []
-        }
-      }
-    ]
-  }
+  ]
 }

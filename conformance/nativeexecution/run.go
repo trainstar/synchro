@@ -824,7 +824,7 @@ func (s *executionState) evaluateCapture(action ManifestAction, observation *Cap
 	if !sameStrings(parameters.Sources, observation.Sources) {
 		return nil, nil, false, errors.New("capture sources do not close the authored action")
 	}
-	facts, err := normalizeStateFacts(observation.StateFacts)
+	facts, err := scenarios.NormalizeStateFacts(observation.StateFacts)
 	if err != nil {
 		return nil, nil, false, fmt.Errorf("capture state facts: %w", err)
 	}
@@ -837,11 +837,11 @@ func (s *executionState) evaluateCapture(action ManifestAction, observation *Cap
 			if expectation.StateFacts == nil {
 				return nil, nil, false, errors.New("state expectation has no authored facts")
 			}
-			want, err := normalizeStateFacts(*expectation.StateFacts)
+			want, err := scenarios.NormalizeStateFacts(*expectation.StateFacts)
 			if err != nil {
 				return nil, nil, false, errors.New("authored state facts are invalid")
 			}
-			if !stateFactsProjectionEqual(want, facts) {
+			if !scenarios.StateFactsProjectionEqual(want, facts) {
 				outcome = OutcomeFailed
 			}
 		case "wire-outcome":

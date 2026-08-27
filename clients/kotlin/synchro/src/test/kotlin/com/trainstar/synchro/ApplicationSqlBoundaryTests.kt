@@ -235,7 +235,8 @@ class ApplicationSqlBoundaryTests {
     private fun createSyncedDatabase(dbName: String, mutate: (SynchroDatabase) -> Unit = {}) {
         val database = SynchroDatabase.open(context, dbName)
         try {
-            SchemaManager(database).reconcileLocalSchema(
+            installTestSchema(
+                database,
                 schemaVersion = 1,
                 schemaHash = PROTOCOL_TEST_SCHEMA_HASH,
                 tables = protocolOrdersSchemaManifest().localTables(),

@@ -80,6 +80,7 @@
         @"pullPageSize": @(config.pullPageSize()),
         @"pushBatchSize": @(config.pushBatchSize()),
         @"transportObservationCapacity": @(config.transportObservationCapacity()),
+        @"requireNewDatabase": @(config.requireNewDatabase()),
     } mutableCopy];
     NSString *seedPath = config.seedDatabasePath();
     if (seedPath) {
@@ -276,6 +277,13 @@
     [self.impl inspectClientState:resolve reject:reject];
 }
 
+- (void)inspectDurableState:(NSString *)tableName
+                       recordID:(NSString *)recordID
+                        resolve:(RCTPromiseResolveBlock)resolve
+                         reject:(RCTPromiseRejectBlock)reject {
+    [self.impl inspectDurableState:tableName recordID:recordID resolve:resolve reject:reject];
+}
+
 - (void)inspectTransportObservations:(RCTPromiseResolveBlock)resolve
                               reject:(RCTPromiseRejectBlock)reject {
     [self.impl inspectTransportObservations:resolve reject:reject];
@@ -434,6 +442,10 @@ RCT_EXTERN_METHOD(inspectPendingMutations:(RCTPromiseResolveBlock)resolve
 RCT_EXTERN_METHOD(inspectRejectedMutations:(RCTPromiseResolveBlock)resolve
                   reject:(RCTPromiseRejectBlock)reject)
 RCT_EXTERN_METHOD(inspectClientState:(RCTPromiseResolveBlock)resolve
+                  reject:(RCTPromiseRejectBlock)reject)
+RCT_EXTERN_METHOD(inspectDurableState:(NSString *)tableName
+                  recordID:(NSString *)recordID
+                  resolve:(RCTPromiseResolveBlock)resolve
                   reject:(RCTPromiseRejectBlock)reject)
 RCT_EXTERN_METHOD(inspectTransportObservations:(RCTPromiseResolveBlock)resolve
                   reject:(RCTPromiseRejectBlock)reject)

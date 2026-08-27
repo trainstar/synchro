@@ -231,6 +231,7 @@ public struct AuthoredMutationField: Sendable, Equatable {
     }
 }
 
+@_spi(Inspection)
 public struct ScopeStateInspection: Sendable, Equatable {
     public let scopeID: String
     public let cursor: String?
@@ -247,6 +248,7 @@ public struct ScopeStateInspection: Sendable, Equatable {
     }
 }
 
+@_spi(Inspection)
 public struct ScopeRowInspection: Sendable, Equatable {
     public let scopeID: String
     public let tableName: String
@@ -263,6 +265,86 @@ public struct ScopeRowInspection: Sendable, Equatable {
     }
 }
 
+@_spi(Inspection)
+public struct ProvenanceMaintenanceWorkInspection: Sendable, Equatable {
+    public let cursor: Int64
+
+    public init(cursor: Int64) {
+        self.cursor = cursor
+    }
+}
+
+@_spi(Inspection)
+public struct ClientStateInspection: Sendable, Equatable {
+    public let schema: SchemaRef?
+    public let scopeStates: [ScopeStateInspection]
+    public let scopeRows: [ScopeRowInspection]
+    public let rebuildAttempts: [RebuildAttemptInspection]
+    public let provenanceMaintenanceWorkCursor: Int64
+
+    public init(
+        schema: SchemaRef?,
+        scopeStates: [ScopeStateInspection],
+        scopeRows: [ScopeRowInspection],
+        rebuildAttempts: [RebuildAttemptInspection],
+        provenanceMaintenanceWorkCursor: Int64
+    ) {
+        self.schema = schema
+        self.scopeStates = scopeStates
+        self.scopeRows = scopeRows
+        self.rebuildAttempts = rebuildAttempts
+        self.provenanceMaintenanceWorkCursor = provenanceMaintenanceWorkCursor
+    }
+}
+
+@_spi(Inspection)
+public struct ClientStateCountsInspection: Sendable, Equatable {
+    public let schema: SchemaRef?
+    public let applicationRowCount: Int
+    public let mutationLedgerCount: Int
+    public let mutationOutcomeCount: Int
+    public let sealedBatchCount: Int
+    public let rejectedMutationCount: Int
+    public let scopeStateCount: Int
+    public let scopeRowCount: Int
+    public let provenanceCount: Int
+    public let rowMetadataCount: Int
+    public let rebuildAttemptCount: Int
+    public let rebuildReceiptCount: Int
+    public let provenanceMaintenanceWorkCursor: Int64
+
+    public init(
+        schema: SchemaRef?,
+        applicationRowCount: Int,
+        mutationLedgerCount: Int,
+        mutationOutcomeCount: Int,
+        sealedBatchCount: Int,
+        rejectedMutationCount: Int,
+        scopeStateCount: Int,
+        scopeRowCount: Int,
+        provenanceCount: Int,
+        rowMetadataCount: Int,
+        rebuildAttemptCount: Int,
+        rebuildReceiptCount: Int,
+        provenanceMaintenanceWorkCursor: Int64
+    ) {
+        self.schema = schema
+        self.applicationRowCount = applicationRowCount
+        self.mutationLedgerCount = mutationLedgerCount
+        self.mutationOutcomeCount = mutationOutcomeCount
+        self.sealedBatchCount = sealedBatchCount
+        self.rejectedMutationCount = rejectedMutationCount
+        self.scopeStateCount = scopeStateCount
+        self.scopeRowCount = scopeRowCount
+        self.provenanceCount = provenanceCount
+        self.rowMetadataCount = rowMetadataCount
+        self.rebuildAttemptCount = rebuildAttemptCount
+        self.rebuildReceiptCount = rebuildReceiptCount
+        self.provenanceMaintenanceWorkCursor = provenanceMaintenanceWorkCursor
+    }
+}
+
+@_spi(Inspection)
 public struct RowMetadataInspection: Sendable, Equatable {
     public let tableName: String
     public let recordID: String
@@ -277,6 +359,7 @@ public struct RowMetadataInspection: Sendable, Equatable {
     }
 }
 
+@_spi(Inspection)
 public struct RebuildAttemptInspection: Sendable, Equatable {
     public let scopeID: String
     public let rebuildID: String
@@ -308,36 +391,50 @@ public struct RebuildAttemptInspection: Sendable, Equatable {
     }
 }
 
-public struct RebuildReceiptProofInspection: Sendable, Equatable {
+@_spi(Inspection)
+public struct RebuildReceiptInspection: Sendable, Equatable {
     public let rebuildIDFingerprint: String
     public let pageCount: Int
     public let returnedRecordCount: Int
-    public let requestChainValid: Bool
-    public let recordsInCanonicalOrder: Bool
-    public let rowChecksumsValid: Bool
-    public let scopeChecksumValid: Bool
-    public let finalChecksumMatchesLocal: Bool
+    public let requestChainExpected: [String]
+    public let requestChainObserved: [String]
+    public let recordIdentitiesHex: [String]
+    public let receivedRowChecksums: [String]
+    public let computedRowChecksums: [String]
+    public let computedScopeChecksum: String?
+    public let finalScopeChecksum: String?
+    public let storedScopeChecksum: String?
+    public let localScopeChecksum: String?
 
     public init(
         rebuildIDFingerprint: String,
         pageCount: Int,
         returnedRecordCount: Int,
-        requestChainValid: Bool,
-        recordsInCanonicalOrder: Bool,
-        rowChecksumsValid: Bool,
-        scopeChecksumValid: Bool,
-        finalChecksumMatchesLocal: Bool
+        requestChainExpected: [String],
+        requestChainObserved: [String],
+        recordIdentitiesHex: [String],
+        receivedRowChecksums: [String],
+        computedRowChecksums: [String],
+        computedScopeChecksum: String?,
+        finalScopeChecksum: String?,
+        storedScopeChecksum: String?,
+        localScopeChecksum: String?
     ) {
         self.rebuildIDFingerprint = rebuildIDFingerprint
         self.pageCount = pageCount
         self.returnedRecordCount = returnedRecordCount
-        self.requestChainValid = requestChainValid
-        self.recordsInCanonicalOrder = recordsInCanonicalOrder
-        self.rowChecksumsValid = rowChecksumsValid
-        self.scopeChecksumValid = scopeChecksumValid
-        self.finalChecksumMatchesLocal = finalChecksumMatchesLocal
+        self.requestChainExpected = requestChainExpected
+        self.requestChainObserved = requestChainObserved
+        self.recordIdentitiesHex = recordIdentitiesHex
+        self.receivedRowChecksums = receivedRowChecksums
+        self.computedRowChecksums = computedRowChecksums
+        self.computedScopeChecksum = computedScopeChecksum
+        self.finalScopeChecksum = finalScopeChecksum
+        self.storedScopeChecksum = storedScopeChecksum
+        self.localScopeChecksum = localScopeChecksum
     }
 }
+
 
 public struct PendingMutationInspection: Sendable, Equatable {
     public let mutationID: String
@@ -604,7 +701,7 @@ extension JSONEncoder {
     }
 }
 
-private enum SynchroDateCoding {
+enum SynchroDateCoding {
     private static let lock = NSLock()
     private static let fractionalFormatter: ISO8601DateFormatter = {
         let formatter = ISO8601DateFormatter()
@@ -630,5 +727,9 @@ private enum SynchroDateCoding {
         lock.lock()
         defer { lock.unlock() }
         return fractionalFormatter.string(from: date)
+    }
+
+    static func now() -> String {
+        string(from: Date())
     }
 }

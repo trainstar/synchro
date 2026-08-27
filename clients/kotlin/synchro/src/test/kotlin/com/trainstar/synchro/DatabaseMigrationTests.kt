@@ -64,6 +64,7 @@ class DatabaseMigrationTests {
         )
         legacy.execSQL("CREATE TABLE _synchro_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
         legacy.execSQL("INSERT INTO _synchro_meta VALUES ('sync_lock', '0')")
+        createLegacyScopeTables(legacy)
         legacy.execSQL(
             """
             CREATE TABLE _synchro_push_batches (
@@ -142,6 +143,7 @@ class DatabaseMigrationTests {
         val path = context.getDatabasePath("synchro_rebuild_receipts_${UUID.randomUUID()}.sqlite").absolutePath
         val rebuildID = "00000000-0000-4000-8000-000000000003"
         val legacy = SQLiteDatabase.openOrCreateDatabase(path, null)
+        createLegacyScopeTables(legacy)
         legacy.execSQL("CREATE TABLE retained_application_state (value TEXT NOT NULL)")
         legacy.execSQL("INSERT INTO retained_application_state VALUES ('preserved')")
         legacy.execSQL(
@@ -220,6 +222,7 @@ class DatabaseMigrationTests {
         val context = ApplicationProvider.getApplicationContext<Context>()
         val path = context.getDatabasePath("synchro_failure_metadata_${UUID.randomUUID()}.sqlite").absolutePath
         val legacy = SQLiteDatabase.openOrCreateDatabase(path, null)
+        createLegacyScopeTables(legacy)
         legacy.execSQL(
             """
             CREATE TABLE _synchro_client_state (
@@ -281,6 +284,122 @@ class DatabaseMigrationTests {
         )
         assertEquals(SyncRecoveryAction.RETRY, state.failure?.recoveryAction)
         assertEquals(mapOf("reason" to "unknown_schema_lineage"), state.failure?.metadata)
+    }
+
+    @Test
+    fun versionTwelveUpgradeConvertsScopeAffinityAndPreservesState() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val path = context.getDatabasePath("synchro_scope_affinity_${UUID.randomUUID()}.sqlite").absolutePath
+        val legacy = SQLiteDatabase.openOrCreateDatabase(path, null)
+        createLegacyScopeTables(legacy)
+        legacy.execSQL("INSERT INTO _synchro_scopes VALUES ('scope-1', 'cursor-1', 'checksum-1', 4, 7)")
+        legacy.execSQL("INSERT INTO _synchro_scope_rows VALUES ('scope-1', 'orders', 'record-1', 9, 4)")
+        legacy.execSQL("PRAGMA user_version = 12")
+        legacy.close()
+
+        val database = databases.open(context, path)
+        val scopeTypes = database.query("PRAGMA table_info(_synchro_scopes)")
+            .associate { it.getValue("name") as String to it.getValue("type") as String }
+        val scopeRowTypes = database.query("PRAGMA table_info(_synchro_scope_rows)")
+            .associate { it.getValue("name") as String to it.getValue("type") as String }
+        assertEquals("TEXT", scopeTypes.getValue("local_checksum"))
+        assertEquals("TEXT", scopeRowTypes.getValue("checksum"))
+        val scope = database.queryOne(
+            "SELECT cursor, checksum, generation, local_checksum FROM _synchro_scopes WHERE scope_id = 'scope-1'",
+        )!!
+        assertEquals("cursor-1", scope["cursor"])
+        assertEquals("checksum-1", scope["checksum"])
+        assertEquals(4L, scope["generation"])
+        assertEquals("7", scope["local_checksum"])
+        val scopeRow = database.queryOne(
+            "SELECT checksum, generation FROM _synchro_scope_rows WHERE record_id = 'record-1'",
+        )!!
+        assertEquals("9", scopeRow["checksum"])
+        assertEquals(4L, scopeRow["generation"])
+        assertEquals(
+            SynchroDatabase.DATABASE_VERSION.toLong(),
+            database.queryOne("PRAGMA user_version")?.get("user_version"),
+        )
+        assertEquals(
+            1,
+            database.query(
+                "SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'idx_synchro_scope_rows_record'",
+            ).size,
+        )
+    }
+
+    @Test
+    fun versionTwelveUpgradeRollsBackWhenScopeStateIsIncomplete() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val name = "synchro_scope_affinity_failure_${UUID.randomUUID()}.sqlite"
+        val path = context.getDatabasePath(name).absolutePath
+        try {
+            SQLiteDatabase.openOrCreateDatabase(path, null).use { legacy ->
+                legacy.execSQL(
+                    "CREATE TABLE _synchro_scopes (scope_id TEXT PRIMARY KEY, cursor TEXT, checksum TEXT, generation INTEGER NOT NULL DEFAULT 0, local_checksum INTEGER NOT NULL DEFAULT 0)",
+                )
+                legacy.execSQL("INSERT INTO _synchro_scopes VALUES ('scope-1', 'cursor-1', 'checksum-1', 4, 7)")
+                legacy.execSQL("PRAGMA user_version = 12")
+            }
+
+            val error = runCatching { SynchroDatabase.open(context, path) }.exceptionOrNull()
+            assertTrue(error is IllegalStateException)
+
+            SQLiteDatabase.openDatabase(path, null, SQLiteDatabase.OPEN_READONLY).use { legacy ->
+                legacy.rawQuery("PRAGMA user_version", null).use { cursor ->
+                    assertTrue(cursor.moveToFirst())
+                    assertEquals(12, cursor.getInt(0))
+                }
+                legacy.rawQuery(
+                    "SELECT name FROM sqlite_master WHERE type = 'table' AND name LIKE '_synchro_%_v13'",
+                    null,
+                ).use { cursor -> assertEquals(0, cursor.count) }
+                legacy.rawQuery("SELECT local_checksum FROM _synchro_scopes WHERE scope_id = 'scope-1'", null).use { cursor ->
+                    assertTrue(cursor.moveToFirst())
+                    assertEquals(7L, cursor.getLong(0))
+                }
+            }
+        } finally {
+            context.deleteDatabase(name)
+        }
+    }
+
+    @Test
+    fun migrationScopeRowDeletionDoesNotContaminateSampledWorkDelta() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val path = context.getDatabasePath("synchro_migration_work_${UUID.randomUUID()}.sqlite").absolutePath
+        val initial = SynchroDatabase.open(context, path)
+        try {
+            initial.writeTransaction { db ->
+                SynchroMeta.upsertScope(db, "scope", "cursor", "checksum")
+                SynchroMeta.upsertScopeRow(db, "scope", "orders", "before-migration", "checksum", 0)
+            }
+        } finally {
+            initial.close()
+        }
+        SQLiteDatabase.openDatabase(path, null, SQLiteDatabase.OPEN_READWRITE).use { legacy ->
+            legacy.execSQL("PRAGMA user_version = 3")
+        }
+
+        val migrated = databases.open(context, path)
+        val baseline = migrated.inspectProvenanceMaintenanceWork().cursor
+
+        assertEquals(0L, baseline)
+        assertTrue(migrated.readTransaction { db -> SynchroMeta.listScopeRows(db, 1).isEmpty() })
+        migrated.writeTransaction { db ->
+            SynchroMeta.upsertScopeRow(db, "scope", "orders", "sampled", "checksum", 0)
+        }
+        assertEquals(1L, migrated.inspectProvenanceMaintenanceWork().cursor - baseline)
+    }
+
+    private fun createLegacyScopeTables(database: SQLiteDatabase) {
+        database.execSQL(
+            "CREATE TABLE _synchro_scopes (scope_id TEXT PRIMARY KEY, cursor TEXT, checksum TEXT, generation INTEGER NOT NULL DEFAULT 0, local_checksum INTEGER NOT NULL DEFAULT 0)",
+        )
+        database.execSQL(
+            "CREATE TABLE _synchro_scope_rows (scope_id TEXT NOT NULL, table_name TEXT NOT NULL, record_id TEXT NOT NULL, checksum INTEGER NOT NULL DEFAULT 0, generation INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (scope_id, table_name, record_id))",
+        )
+        database.execSQL("CREATE INDEX idx_synchro_scope_rows_record ON _synchro_scope_rows (table_name, record_id)")
     }
 
     private fun legacyLocalTable(): LocalSchemaTable = LocalSchemaTable(

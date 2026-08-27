@@ -4,14 +4,11 @@ package nativeharness
 import (
 	"context"
 	"encoding/json"
-	"regexp"
 
 	"github.com/trainstar/synchro/conformance/internal/contract"
 	"github.com/trainstar/synchro/conformance/nativeexecution"
 	"github.com/trainstar/synchro/conformance/scenarios"
 )
-
-var schemaHashPattern = regexp.MustCompile(`^[0-9a-f]{64}$`)
 
 // Config supplies the three capability implementations used by Executor.
 //
@@ -169,10 +166,4 @@ func CaptureSourceClassFor(source string) (CaptureSourceClass, bool) {
 	default:
 		return "", false
 	}
-}
-
-// schemaRef is the bounded schema identity decoded by the process transport.
-type schemaRef struct {
-	Version int64  `json:"version"`
-	Hash    string `json:"hash"`
 }

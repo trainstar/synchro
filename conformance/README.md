@@ -153,7 +153,8 @@ Neither command alone is proof unless it produces the complete validated evidenc
 black-box, and evidence targets or the Phase 6 RC verification target remain
 unimplemented. A partial repository state cannot report a release pass.
 
-The representative relational corpus under `extensions/testdata/`, and the bundled `clients/react-native/example/seed.db` generated from it, are the canonical seeded end-to-end fixtures for:
+The representative relational corpus under `extensions/testdata/` is the canonical seeded end-to-end fixture source.
+The pinned `clients/react-native/example/seed.db` is generated from that source with `make refresh-rn-seed`.
 
 - healthy seeded continuation
 - seeded corruption repair

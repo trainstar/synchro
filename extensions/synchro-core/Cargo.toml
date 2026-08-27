@@ -3,7 +3,7 @@ name = "synchro-core"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Portable sync core: canonical integrity, dedup, protocol types"
+description = "Portable sync core: canonical integrity and protocol types"
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }

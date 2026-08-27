@@ -59,7 +59,8 @@ class PushProcessorTests {
     private fun environment(): Triple<SynchroDatabase, ChangeTracker, PushProcessor> {
         val context = ApplicationProvider.getApplicationContext<Context>()
         val database = databases.create(context)
-        SchemaManager(database).createSyncedTables(
+        installTestSchema(
+            database,
             SchemaResponse(1, PROTOCOL_TEST_SCHEMA_HASH, "2026-01-01T00:00:00.000000Z", listOf(table)),
         )
         val tracker = ChangeTracker(database)
@@ -281,7 +282,7 @@ class PushProcessorTests {
         )
         val first = tracker.pendingChanges().single()
         val nextHash = "1".repeat(64)
-        SchemaManager(database).reconcileLocalSchema(2, nextHash, listOf(localTable))
+        installTestSchema(database, 2, nextHash, listOf(localTable))
         database.execute("UPDATE orders SET title = ? WHERE id = ?", arrayOf("authored-v2", "o1"))
         val second = tracker.pendingChanges().last()
         assertEquals(first.mutationID, second.dependsOnMutationID)
@@ -315,7 +316,7 @@ class PushProcessorTests {
         val currentTable = projectionTable("title", "enabled", "large_count", "payload")
         val oldHash = PROTOCOL_TEST_SCHEMA_HASH
         val currentHash = "1".repeat(64)
-        SchemaManager(database).reconcileLocalSchema(1, oldHash, listOf(oldTable))
+        installTestSchema(database, 1, oldHash, listOf(oldTable))
         val tracker = ChangeTracker(database)
         val processor = PushProcessor(database, tracker)
 
@@ -386,7 +387,7 @@ class PushProcessorTests {
             }.exceptionOrNull()
             assertTrue(firstFailure is RetryableError)
 
-            SchemaManager(database).reconcileLocalSchema(2, currentHash, listOf(currentTable))
+            installTestSchema(database, 2, currentHash, listOf(currentTable))
             database.writeTransaction {
                 it.execSQL(
                     "DELETE FROM _synchro_schema_archives WHERE schema_version = 1 AND schema_hash = ?",

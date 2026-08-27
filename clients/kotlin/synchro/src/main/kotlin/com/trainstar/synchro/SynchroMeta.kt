@@ -566,7 +566,7 @@ internal object SynchroMeta {
 
     @JvmSynthetic
     internal fun clearAllScopeRows(db: SQLiteDatabase) {
-        db.execSQL("DELETE FROM _synchro_scope_rows")
+        executeScopeRowUpdate(db, "DELETE FROM _synchro_scope_rows")
         db.execSQL("UPDATE _synchro_scopes SET local_checksum = ''")
     }
 
@@ -695,22 +695,24 @@ internal object SynchroMeta {
         checksum: String,
         generation: Long
     ) {
-        db.execSQL(
+        executeScopeRowUpdate(
+            db,
             """
             INSERT INTO _synchro_scope_rows (scope_id, table_name, record_id, checksum, generation) VALUES (?, ?, ?, ?, ?)
             ON CONFLICT (scope_id, table_name, record_id) DO UPDATE SET
                 checksum = excluded.checksum,
                 generation = excluded.generation
             """.trimIndent(),
-            arrayOf(scopeId, tableName, recordId, checksum, generation.toString())
+            arrayOf(scopeId, tableName, recordId, checksum, generation),
         )
     }
 
     @JvmSynthetic
     internal fun deleteScopeRow(db: SQLiteDatabase, scopeId: String, tableName: String, recordId: String) {
-        db.execSQL(
+        executeScopeRowUpdate(
+            db,
             "DELETE FROM _synchro_scope_rows WHERE scope_id = ? AND table_name = ? AND record_id = ?",
-            arrayOf(scopeId, tableName, recordId)
+            arrayOf(scopeId, tableName, recordId),
         )
     }
 
@@ -730,7 +732,9 @@ internal object SynchroMeta {
             statement.bindString(2, scopeId)
             statement.bindString(3, tableName)
             statement.bindString(4, recordId)
-            if (statement.executeUpdateDelete() != 1) {
+            val changed = statement.executeUpdateDelete()
+            ProvenanceMaintenanceWork.record(db, changed)
+            if (changed != 1) {
                 throw SynchroError.InvalidResponse("scope row disappeared during schema activation")
             }
         } finally {
@@ -740,7 +744,7 @@ internal object SynchroMeta {
 
     @JvmSynthetic
     internal fun deleteScopeRows(db: SQLiteDatabase, scopeId: String) {
-        db.execSQL("DELETE FROM _synchro_scope_rows WHERE scope_id = ?", arrayOf(scopeId))
+        executeScopeRowUpdate(db, "DELETE FROM _synchro_scope_rows WHERE scope_id = ?", arrayOf(scopeId))
     }
 
     fun getScopeRows(db: SQLiteDatabase, scopeId: String): List<Pair<String, String>> {
@@ -797,10 +801,25 @@ internal object SynchroMeta {
 
     @JvmSynthetic
     internal fun deleteStaleScopeRows(db: SQLiteDatabase, scopeId: String, generation: Long) {
-        db.execSQL(
+        executeScopeRowUpdate(
+            db,
             "DELETE FROM _synchro_scope_rows WHERE scope_id = ? AND generation <> ?",
-            arrayOf(scopeId, generation.toString())
+            arrayOf(scopeId, generation),
         )
+    }
+
+    private fun executeScopeRowUpdate(
+        db: SQLiteDatabase,
+        sql: String,
+        params: Array<out Any?> = emptyArray(),
+    ): Int {
+        val statement = db.compileStatement(sql)
+        try {
+            bindTypedValues(statement, params.toList())
+            return statement.executeUpdateDelete().also { ProvenanceMaintenanceWork.record(db, it) }
+        } finally {
+            statement.close()
+        }
     }
 
     fun hasScopeRows(db: SQLiteDatabase, tableName: String, recordId: String): Boolean {

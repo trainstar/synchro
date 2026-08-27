@@ -7,6 +7,12 @@
     "resolve_at": "release-candidate-start",
     "record_exact_versions_in": "rc-manifest"
   },
+  "semantic_corpus_cell_ids": [
+    "SUP-MACOS-CURRENT-001",
+    "SUP-ANDROID-CURRENT-001",
+    "SUP-RN-IOS-CURRENT-001",
+    "SUP-RN-ANDROID-CURRENT-001"
+  ],
   "cells": [
     {
       "id": "SUP-PG-014",
@@ -41,11 +47,22 @@
       "note": "PostgreSQL 17 is outside v0.3.0 certification."
     },
     {
-      "id": "SUP-PG-018",
+      "id": "SUP-PG-LINUX-X64-001",
       "component": "postgresql-server",
       "platform": "postgresql",
       "platform_version": { "kind": "exact", "value": "18" },
-      "policy": "required"
+      "extension_architecture": "linux-x64",
+      "policy": "required",
+      "note": "Published by the release package-extension matrix. The derived PostgreSQL server-cell count is 2."
+    },
+    {
+      "id": "SUP-PG-MACOS-ARM64-001",
+      "component": "postgresql-server",
+      "platform": "postgresql",
+      "platform_version": { "kind": "exact", "value": "18" },
+      "extension_architecture": "macos-arm64",
+      "policy": "required",
+      "note": "Published by the release package-extension matrix. The derived PostgreSQL server-cell count is 2."
     },
     {
       "id": "SUP-IOS-MIN-001",
@@ -62,18 +79,11 @@
       "policy": "required"
     },
     {
-      "id": "SUP-MACOS-MIN-001",
-      "component": "swift-client",
-      "platform": "macos",
-      "platform_version": { "kind": "minimum", "value": "13" },
-      "policy": "required"
-    },
-    {
       "id": "SUP-MACOS-CURRENT-001",
       "component": "swift-client",
       "platform": "macos",
       "platform_version": { "kind": "current-stable" },
-      "policy": "required"
+      "policy": "tested"
     },
     {
       "id": "SUP-ANDROID-MIN-001",
@@ -91,26 +101,10 @@
       "policy": "required"
     },
     {
-      "id": "SUP-RN-IOS-MIN-001",
-      "component": "react-native-client",
-      "platform": "ios",
-      "platform_version": { "kind": "minimum", "value": "16" },
-      "runtime_version": { "kind": "series", "value": "0.83.x" },
-      "policy": "required"
-    },
-    {
       "id": "SUP-RN-IOS-CURRENT-001",
       "component": "react-native-client",
       "platform": "ios",
       "platform_version": { "kind": "current-stable" },
-      "runtime_version": { "kind": "series", "value": "0.83.x" },
-      "policy": "required"
-    },
-    {
-      "id": "SUP-RN-ANDROID-MIN-001",
-      "component": "react-native-client",
-      "platform": "android",
-      "platform_version": { "kind": "minimum", "value": "24" },
       "runtime_version": { "kind": "series", "value": "0.83.x" },
       "policy": "required"
     },

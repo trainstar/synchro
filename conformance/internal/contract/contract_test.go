@@ -176,6 +176,21 @@ func TestBundleSemanticMutantsFailClosed(t *testing.T) {
 		bundle.Support.Cells = append([]SupportCell(nil), bundle.Support.Cells...)
 		bundle.Support.Cells[4].Policy = "excluded"
 		requireErrorContains(t, bundle.Validate(), "locked semantic tuple")
+
+		bundle = newBundle(t)
+		bundle.Support.Cells = append([]SupportCell(nil), bundle.Support.Cells...)
+		for index := range bundle.Support.Cells {
+			if bundle.Support.Cells[index].ID == "SUP-MACOS-CURRENT-001" {
+				bundle.Support.Cells[index].Policy = "required"
+				break
+			}
+		}
+		requireErrorContains(t, bundle.Validate(), "locked semantic tuple")
+
+		bundle = newBundle(t)
+		bundle.Support.SemanticCorpusCellIDs = append([]SupportCellID(nil), bundle.Support.SemanticCorpusCellIDs...)
+		bundle.Support.SemanticCorpusCellIDs[0], bundle.Support.SemanticCorpusCellIDs[1] = bundle.Support.SemanticCorpusCellIDs[1], bundle.Support.SemanticCorpusCellIDs[0]
+		requireErrorContains(t, bundle.Validate(), "semantic corpus cell IDs do not match")
 	})
 
 	t.Run("artifact IDs and roles are locked", func(t *testing.T) {
@@ -203,6 +218,7 @@ func TestBundleSemanticMutantsFailClosed(t *testing.T) {
 				b.Performance.RequiredMeasurements[8].Strata[0].Parameters = []byte(`{"bound_family":"fanout","boundary":"changed"}`)
 			}, "locked v0.3.0 semantic snapshot"},
 			{"unknown support", func(b *Bundle) { b.Performance.Budgets[0].SupportCellIDs = []SupportCellID{"SUP-PG-014"} }, "unknown or excluded support"},
+			{"tested support", func(b *Bundle) { b.Performance.Budgets[0].SupportCellIDs = []SupportCellID{"SUP-MACOS-CURRENT-001"} }, "unknown or excluded support"},
 			{"unknown artifact", func(b *Bundle) {
 				b.Performance.Budgets[0].ArtifactInventoryIDs = []ArtifactInventoryID{"ARTDEF-NOT-REAL-001"}
 			}, "unknown artifact"},
@@ -410,7 +426,7 @@ func TestSnapshotFixtureIsDeterministicAndRejectsBindingMutants(t *testing.T) {
 	}
 	requireJSONKeys(t, behavioral[0], "path", "sha256", "status")
 	requireJSONKeys(t, topLevel["verification_inputs"], "artifact_inventory", "fault_catalog", "performance_budgets", "scenario_catalog", "vector_catalog")
-	requireJSONKeys(t, topLevel["schema_files"], "artifact_inventory", "evidence", "fault_catalog", "performance_budgets", "rc_candidate_lock", "rc_manifest", "requirements", "scenario", "support_matrix", "vector_catalog")
+	requireJSONKeys(t, topLevel["schema_files"], "artifact_inventory", "ci_summary", "fault_catalog", "performance_budgets", "rc_candidate_lock", "rc_manifest", "requirements", "scenario", "support_matrix", "vector_catalog")
 	if got, want := snapshotBindingPaths(first), expectedSnapshotBindingPaths(); !equalStringSets(got, want) || len(got) != 28 {
 		t.Fatalf("snapshot binding paths = %#v, want all 28 %#v", got, want)
 	}
@@ -861,7 +877,7 @@ func snapshotBindingPaths(snapshot Snapshot) []string {
 		snapshot.SchemaFiles.Requirements.Path,
 		snapshot.SchemaFiles.SupportMatrix.Path,
 		snapshot.SchemaFiles.Scenario.Path,
-		snapshot.SchemaFiles.Evidence.Path,
+		snapshot.SchemaFiles.CISummary.Path,
 		snapshot.SchemaFiles.RCCandidateLock.Path,
 		snapshot.SchemaFiles.RCManifest.Path,
 		snapshot.SchemaFiles.FaultCatalog.Path,

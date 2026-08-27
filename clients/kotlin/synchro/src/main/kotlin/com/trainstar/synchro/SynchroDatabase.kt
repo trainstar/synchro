@@ -5,14 +5,62 @@ import android.database.Cursor
 import android.database.sqlite.SQLiteDatabase
 import android.database.sqlite.SQLiteOpenHelper
 import android.database.sqlite.SQLiteCursor
+import com.trainstar.synchro.inspection.ProvenanceMaintenanceWorkInspection
 import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.json.Json
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CopyOnWriteArraySet
+import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.locks.ReentrantLock
 import kotlin.concurrent.withLock
 
 typealias Row = Map<String, Any?>
+
+private class ProvenanceMaintenanceTransaction(
+    val database: SQLiteDatabase,
+    val cursor: AtomicLong,
+) {
+    var affectedRows = 0L
+    var failed = false
+}
+
+/** Tracks scope-row maintenance only while its enclosing write transaction is active. */
+internal object ProvenanceMaintenanceWork {
+    private val transactions = ThreadLocal<ArrayDeque<ProvenanceMaintenanceTransaction>>()
+
+    fun begin(database: SQLiteDatabase, cursor: AtomicLong) {
+        val active = transactions.get() ?: ArrayDeque<ProvenanceMaintenanceTransaction>().also(transactions::set)
+        active.addLast(ProvenanceMaintenanceTransaction(database, cursor))
+    }
+
+    fun record(database: SQLiteDatabase, affectedRows: Int) {
+        require(affectedRows >= 0) { "scope-row affected count is invalid" }
+        val transaction = transactions.get()?.lastOrNull { it.database === database } ?: return
+        transaction.affectedRows = saturatingAdd(transaction.affectedRows, affectedRows.toLong())
+    }
+
+    fun end(database: SQLiteDatabase, committed: Boolean) {
+        val active = transactions.get() ?: return
+        val transaction = active.removeLastOrNull()
+            ?: throw IllegalStateException("scope-row maintenance transaction is missing")
+        check(transaction.database === database) { "scope-row maintenance transaction order is invalid" }
+        val succeeded = committed && !transaction.failed
+        val parent = active.lastOrNull { it.database === database }
+        if (parent != null) {
+            if (succeeded) {
+                parent.affectedRows = saturatingAdd(parent.affectedRows, transaction.affectedRows)
+            } else {
+                parent.failed = true
+            }
+        } else if (succeeded && transaction.affectedRows > 0L) {
+            transaction.cursor.updateAndGet { current -> saturatingAdd(current, transaction.affectedRows) }
+        }
+        if (active.isEmpty()) transactions.remove()
+    }
+
+    private fun saturatingAdd(left: Long, right: Long): Long =
+        if (Long.MAX_VALUE - left < right) Long.MAX_VALUE else left + right
+}
 
 /**
  * Owns the raw SQLite helper. The wrapper deliberately does not inherit
@@ -24,6 +72,7 @@ internal class SynchroDatabase private constructor(context: Context, dbPath: Str
     private val changeNotifier = ChangeNotifier()
     private val writeOwnership = ReentrantLock(true)
     private val applicationTransactionDepth = ThreadLocal<Int>()
+    private val provenanceMaintenanceCursor = AtomicLong()
     private val helper = object : SQLiteOpenHelper(context, dbPath, null, DATABASE_VERSION) {
         override fun onCreate(db: SQLiteDatabase) = createDatabase(db)
 
@@ -36,11 +85,20 @@ internal class SynchroDatabase private constructor(context: Context, dbPath: Str
         get() = helper.writableDatabase
 
     init {
-        // Enable WAL mode
+        // Initialization and migrations precede sampling, so their scope-row work is not tracked.
         writableDatabase.enableWriteAheadLogging()
     }
 
     internal fun close() = helper.close()
+
+    internal fun inspectProvenanceMaintenanceWork(): ProvenanceMaintenanceWorkInspection =
+        ProvenanceMaintenanceWorkInspection(provenanceMaintenanceCursor.get())
+
+    internal fun <T> stateInspectionTransaction(
+        block: (SQLiteDatabase, ProvenanceMaintenanceWorkInspection) -> T,
+    ): T = writeOwnership.withLock {
+        readTransaction { db -> block(db, inspectProvenanceMaintenanceWork()) }
+    }
 
     private fun createDatabase(db: SQLiteDatabase) {
         db.execSQL("""
@@ -50,31 +108,7 @@ internal class SynchroDatabase private constructor(context: Context, dbPath: Str
             )
         """.trimIndent())
 
-        db.execSQL("""
-            CREATE TABLE IF NOT EXISTS _synchro_scopes (
-                scope_id TEXT PRIMARY KEY,
-                cursor TEXT,
-                checksum TEXT,
-                generation INTEGER NOT NULL DEFAULT 0,
-                local_checksum TEXT NOT NULL DEFAULT ''
-            )
-        """.trimIndent())
-
-        db.execSQL("""
-            CREATE TABLE IF NOT EXISTS _synchro_scope_rows (
-                scope_id TEXT NOT NULL,
-                table_name TEXT NOT NULL,
-                record_id TEXT NOT NULL,
-                checksum TEXT NOT NULL,
-                generation INTEGER NOT NULL DEFAULT 0,
-                PRIMARY KEY (scope_id, table_name, record_id)
-            )
-        """.trimIndent())
-
-        db.execSQL("""
-            CREATE INDEX IF NOT EXISTS idx_synchro_scope_rows_record
-            ON _synchro_scope_rows (table_name, record_id)
-        """.trimIndent())
+        createScopeTables(db)
 
         db.execSQL("""
             CREATE TABLE IF NOT EXISTS _synchro_rejected_mutations (
@@ -86,10 +120,10 @@ internal class SynchroDatabase private constructor(context: Context, dbPath: Str
                 message TEXT,
                 server_row_json TEXT,
                 server_version TEXT,
-                mutation_json TEXT,
-                rejection_json TEXT,
                 created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL
+                updated_at TEXT NOT NULL,
+                mutation_json TEXT,
+                rejection_json TEXT
             )
         """.trimIndent())
 
@@ -146,6 +180,41 @@ internal class SynchroDatabase private constructor(context: Context, dbPath: Str
         if (oldVersion < 12) {
             migrateClientStateFailureMetadata(db)
         }
+        if (oldVersion < 13) {
+            migrateScopeTextAffinity(db)
+        }
+    }
+
+    private fun createScopeTables(db: SQLiteDatabase) {
+        db.execSQL(
+            """
+            CREATE TABLE IF NOT EXISTS _synchro_scopes (
+                scope_id TEXT PRIMARY KEY,
+                cursor TEXT,
+                checksum TEXT,
+                generation INTEGER NOT NULL DEFAULT 0,
+                local_checksum TEXT NOT NULL DEFAULT ''
+            )
+            """.trimIndent(),
+        )
+        db.execSQL(
+            """
+            CREATE TABLE IF NOT EXISTS _synchro_scope_rows (
+                scope_id TEXT NOT NULL,
+                table_name TEXT NOT NULL,
+                record_id TEXT NOT NULL,
+                checksum TEXT NOT NULL,
+                generation INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (scope_id, table_name, record_id)
+            )
+            """.trimIndent(),
+        )
+        db.execSQL(
+            """
+            CREATE INDEX IF NOT EXISTS idx_synchro_scope_rows_record
+            ON _synchro_scope_rows (table_name, record_id)
+            """.trimIndent(),
+        )
     }
 
     private fun ensureLegacyScopeTables(db: SQLiteDatabase) {
@@ -290,6 +359,72 @@ internal class SynchroDatabase private constructor(context: Context, dbPath: Str
               AND error_retryable IN (0, 1)
             """.trimIndent(),
         )
+    }
+
+    private fun migrateScopeTextAffinity(db: SQLiteDatabase) {
+        check(hasTable(db, "_synchro_scopes") && hasTable(db, "_synchro_scope_rows")) {
+            "scope state is missing before the version 13 migration"
+        }
+        db.execSQL(
+            """
+            CREATE TABLE _synchro_scopes_v13 (
+                scope_id TEXT PRIMARY KEY,
+                cursor TEXT,
+                checksum TEXT,
+                generation INTEGER NOT NULL DEFAULT 0,
+                local_checksum TEXT NOT NULL DEFAULT ''
+            )
+            """.trimIndent(),
+        )
+        db.execSQL(
+            """
+            INSERT INTO _synchro_scopes_v13
+                (scope_id, cursor, checksum, generation, local_checksum)
+            SELECT scope_id, cursor, CAST(checksum AS TEXT), generation, CAST(local_checksum AS TEXT)
+            FROM _synchro_scopes
+            """.trimIndent(),
+        )
+        db.execSQL(
+            """
+            CREATE TABLE _synchro_scope_rows_v13 (
+                scope_id TEXT NOT NULL,
+                table_name TEXT NOT NULL,
+                record_id TEXT NOT NULL,
+                checksum TEXT NOT NULL,
+                generation INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (scope_id, table_name, record_id)
+            )
+            """.trimIndent(),
+        )
+        db.execSQL(
+            """
+            INSERT INTO _synchro_scope_rows_v13
+                (scope_id, table_name, record_id, checksum, generation)
+            SELECT scope_id, table_name, record_id, CAST(checksum AS TEXT), generation
+            FROM _synchro_scope_rows
+            """.trimIndent(),
+        )
+        db.execSQL("DROP TABLE _synchro_scope_rows")
+        db.execSQL("DROP TABLE _synchro_scopes")
+        createScopeTables(db)
+        db.execSQL(
+            """
+            INSERT INTO _synchro_scopes
+                (scope_id, cursor, checksum, generation, local_checksum)
+            SELECT scope_id, cursor, checksum, generation, local_checksum
+            FROM _synchro_scopes_v13
+            """.trimIndent(),
+        )
+        db.execSQL(
+            """
+            INSERT INTO _synchro_scope_rows
+                (scope_id, table_name, record_id, checksum, generation)
+            SELECT scope_id, table_name, record_id, checksum, generation
+            FROM _synchro_scope_rows_v13
+            """.trimIndent(),
+        )
+        db.execSQL("DROP TABLE _synchro_scope_rows_v13")
+        db.execSQL("DROP TABLE _synchro_scopes_v13")
     }
 
     private fun hasTable(db: SQLiteDatabase, tableName: String): Boolean {
@@ -625,7 +760,7 @@ internal class SynchroDatabase private constructor(context: Context, dbPath: Str
         @JvmSynthetic
         internal fun open(context: Context, dbPath: String): SynchroDatabase = SynchroDatabase(context, dbPath)
 
-        internal const val DATABASE_VERSION: Int = 12
+        internal const val DATABASE_VERSION: Int = 13
 
         /** SQLite creates the UUID in the same application-write transaction as capture. */
         const val SQLITE_UUID: String =
@@ -643,27 +778,6 @@ internal class SynchroDatabase private constructor(context: Context, dbPath: Str
 
     internal fun queryOne(sql: String, params: Array<out Any?>? = null): Row? {
         return queryOneWithTypedBindings(readableDatabase, sql, params)
-    }
-
-    /**
-     * Internal callers name affected tables when they need observation. Raw SQL
-     * text is never used to infer notification targets.
-     */
-    internal fun execute(
-        sql: String,
-        params: Array<out Any?>? = null,
-        affectedTables: Set<String> = emptySet(),
-    ): ExecResult = writeOwnership.withLock {
-        val db = writableDatabase
-        val stmt = db.compileStatement(sql)
-        val changes = try {
-            bindTypedValues(stmt, params?.toList() ?: emptyList())
-            stmt.executeUpdateDelete()
-        } finally {
-            stmt.close()
-        }
-        notifyTablesChanged(affectedTables)
-        ExecResult(rowsAffected = changes)
     }
 
     fun applicationQuery(sql: String, params: Array<out Any?>? = null): List<Row> {
@@ -744,12 +858,22 @@ internal class SynchroDatabase private constructor(context: Context, dbPath: Str
     internal fun <T> writeTransaction(block: (SQLiteDatabase) -> T): T = writeOwnership.withLock {
         val db = writableDatabase
         db.beginTransaction()
+        ProvenanceMaintenanceWork.begin(db, provenanceMaintenanceCursor)
+        var committed = false
         try {
             val result = block(db)
             db.setTransactionSuccessful()
+            committed = true
             return result
         } finally {
-            db.endTransaction()
+            try {
+                db.endTransaction()
+            } catch (error: Throwable) {
+                committed = false
+                throw error
+            } finally {
+                ProvenanceMaintenanceWork.end(db, committed)
+            }
         }
     }
 

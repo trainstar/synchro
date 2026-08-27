@@ -14,8 +14,6 @@ import (
 	"time"
 
 	"github.com/trainstar/synchro/conformance/internal/jsonstrict"
-	"github.com/trainstar/synchro/conformance/nativeexecution"
-	"github.com/trainstar/synchro/conformance/nativeharness"
 	"github.com/trainstar/synchro/conformance/scenarios"
 )
 
@@ -61,8 +59,6 @@ type nativePortableSeedPayload struct {
 	SeedFixtureID          string `json:"seed_fixture_id"`
 }
 
-var _ nativeharness.Artifact = (*NativeArtifact)(nil)
-
 // NewNativeArtifact creates one staging capability for a ready harness.
 func NewNativeArtifact(config NativeArtifactConfig) (*NativeArtifact, error) {
 	if config.Harness == nil || config.Harness.Source() == nil || config.Harness.Operator() == nil {
@@ -100,34 +96,34 @@ func NewNativeArtifact(config NativeArtifactConfig) (*NativeArtifact, error) {
 }
 
 // StageStep generates one finalized seed for the operation target.
-func (a *NativeArtifact) StageStep(ctx context.Context, request nativeharness.StepRequest) (nativeexecution.StepObservation, error) {
+func (a *NativeArtifact) StageStep(ctx context.Context, operation scenarios.Operation) (NativeStepObservation, error) {
 	if err := a.context(ctx); err != nil {
-		return nativeexecution.StepObservation{}, err
+		return NativeStepObservation{}, err
 	}
-	if scenarios.OperationKey(request.Operation) != "artifact/install-portable-seed" {
-		return nativeexecution.StepObservation{}, fmt.Errorf("native artifact stage operation %q is unsupported", scenarios.OperationKey(request.Operation))
+	if scenarios.OperationKey(operation) != "artifact/install-portable-seed" {
+		return NativeStepObservation{}, fmt.Errorf("native artifact stage operation %q is unsupported", scenarios.OperationKey(operation))
 	}
-	if err := scenarios.ValidateOperation(request.Operation); err != nil {
-		return nativeexecution.StepObservation{}, fmt.Errorf("native artifact stage operation is invalid: %w", err)
+	if err := scenarios.ValidateOperation(operation); err != nil {
+		return NativeStepObservation{}, fmt.Errorf("native artifact stage operation is invalid: %w", err)
 	}
 	var payload nativePortableSeedPayload
-	if err := jsonstrict.Decode(request.Operation.Payload, &payload); err != nil {
-		return nativeexecution.StepObservation{}, errors.New("decode native portable seed operation failed")
+	if err := jsonstrict.Decode(operation.Payload, &payload); err != nil {
+		return NativeStepObservation{}, errors.New("decode native portable seed operation failed")
 	}
 	if !validNativeIdentity(payload.UserID) || !validNativeIdentity(payload.ClientID) || payload.PortableSeedArtifactID != nativePortableSeedArtifactID || payload.SeedFixtureID != nativePortableSeedFixtureID {
-		return nativeexecution.StepObservation{}, errors.New("native portable seed operation identity is invalid")
+		return NativeStepObservation{}, errors.New("native portable seed operation identity is invalid")
 	}
 	target := nativeArtifactTarget(payload.UserID, payload.ClientID)
 	a.mu.Lock()
 	if _, duplicate := a.staged[target]; duplicate {
 		a.mu.Unlock()
-		return nativeexecution.StepObservation{}, errors.New("native portable seed target is already staged")
+		return NativeStepObservation{}, errors.New("native portable seed target is already staged")
 	}
 	prepared := a.seedPrepared
 	a.mu.Unlock()
 	if !prepared {
 		if err := a.preparePortableSeed(ctx); err != nil {
-			return nativeexecution.StepObservation{}, err
+			return NativeStepObservation{}, err
 		}
 		a.mu.Lock()
 		a.seedPrepared = true
@@ -136,27 +132,27 @@ func (a *NativeArtifact) StageStep(ctx context.Context, request nativeharness.St
 
 	path := filepath.Join(a.stagingDirectory, nativeArtifactFilename(payload.UserID, payload.ClientID))
 	if err := requireNativeArtifactPathAbsent(path); err != nil {
-		return nativeexecution.StepObservation{}, err
+		return NativeStepObservation{}, err
 	}
 	if err := a.runSeedTool(ctx, path); err != nil {
 		_ = removeNativeArtifactPath(path, "")
-		return nativeexecution.StepObservation{}, err
+		return NativeStepObservation{}, err
 	}
 	digest, err := verifyNativeArtifactFile(path)
 	if err != nil {
 		_ = removeNativeArtifactPath(path, "")
-		return nativeexecution.StepObservation{}, err
+		return NativeStepObservation{}, err
 	}
 	artifact := &nativeStagedArtifact{userID: payload.UserID, clientID: payload.ClientID, path: path, sha256: digest}
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if a.closed {
 		_ = removeNativeArtifactPath(path, digest)
-		return nativeexecution.StepObservation{}, errors.New("native artifact is closed")
+		return NativeStepObservation{}, errors.New("native artifact is closed")
 	}
 	if _, duplicate := a.staged[target]; duplicate {
 		_ = removeNativeArtifactPath(path, digest)
-		return nativeexecution.StepObservation{}, errors.New("native portable seed target is already staged")
+		return NativeStepObservation{}, errors.New("native portable seed target is already staged")
 	}
 	a.staged[target] = artifact
 	return nativeSuccess(), nil
@@ -253,14 +249,14 @@ func (a *NativeArtifact) runSeedTool(ctx context.Context, outputPath string) err
 }
 
 // SeedDatabasePath resolves the only staged artifact for an authored client.
-func (a *NativeArtifact) SeedDatabasePath(ctx context.Context, client scenarios.NativeClient, stepID scenarios.StepID) (string, error) {
+func (a *NativeArtifact) SeedDatabasePath(ctx context.Context, userID, clientID string, stepID scenarios.StepID) (string, error) {
 	if err := a.context(ctx); err != nil {
 		return "", err
 	}
-	if !validNativeIdentity(client.UserID) || !validNativeIdentity(client.ClientID) || stepID == "" {
+	if !validNativeIdentity(userID) || !validNativeIdentity(clientID) || stepID == "" {
 		return "", errors.New("native portable seed resolver identity is invalid")
 	}
-	target := nativeArtifactTarget(client.UserID, client.ClientID)
+	target := nativeArtifactTarget(userID, clientID)
 	a.mu.Lock()
 	artifact := a.staged[target]
 	if artifact == nil {
@@ -283,11 +279,11 @@ func (a *NativeArtifact) SeedDatabasePath(ctx context.Context, client scenarios.
 }
 
 // Capture verifies every staged file before closing the artifact-state source.
-func (a *NativeArtifact) Capture(ctx context.Context, request nativeharness.CaptureRequest) ([]nativeharness.CaptureSourceObservation, error) {
+func (a *NativeArtifact) Capture(ctx context.Context, clientKeys, sources []string) ([]NativeCaptureFacts, error) {
 	if err := a.context(ctx); err != nil {
 		return nil, err
 	}
-	if len(request.Sources) != 1 || request.Sources[0] != "artifact-state" {
+	if len(sources) != 1 || sources[0] != "artifact-state" {
 		return nil, errors.New("native artifact capture supports only one artifact-state source")
 	}
 	a.mu.Lock()
@@ -303,7 +299,7 @@ func (a *NativeArtifact) Capture(ctx context.Context, request nativeharness.Capt
 			return nil, errors.New("native portable seed changed before artifact capture")
 		}
 	}
-	return []nativeharness.CaptureSourceObservation{{Source: "artifact-state", StateFacts: scenarios.StateFacts{}}}, nil
+	return []NativeCaptureFacts{{Source: "artifact-state", StateFacts: scenarios.StateFacts{}}}, nil
 }
 
 // Close removes only unchanged files created by this artifact capability.

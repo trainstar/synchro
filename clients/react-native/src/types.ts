@@ -265,6 +265,18 @@ export interface ClientStateInspection {
   scopeStates: ScopeStateInspection[];
   scopeRows: ScopeRowInspection[];
   rebuildAttempts: RebuildAttemptInspection[];
+  applicationRowCount: number;
+  mutationLedgerCount: number;
+  mutationOutcomeCount: number;
+  sealedBatchCount: number;
+  rejectedMutationCount: number;
+  scopeStateCount: number;
+  scopeRowCount: number;
+  provenanceCount: number;
+  rowMetadataCount: number;
+  rebuildAttemptCount: number;
+  rebuildReceiptCount: number;
+  provenanceMaintenanceWorkCursor: string;
 }
 
 export type TransportOperationClass =
@@ -353,8 +365,6 @@ export interface SynchroConfig {
   pullPageSize?: number;
   pushBatchSize?: number;
   seedDatabasePath?: string;
-  /** Enables bounded transport observation and pause controls. */
-  transportObservationCapacity?: number;
 }
 
 export type Unsubscribe = () => void;

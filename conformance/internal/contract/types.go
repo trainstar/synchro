@@ -49,11 +49,12 @@ type NormativeReference struct {
 
 // SupportMatrix is conformance/support-matrix.json.
 type SupportMatrix struct {
-	SchemaURI          string             `json:"$schema"`
-	SchemaVersion      int                `json:"schema_version"`
-	Release            string             `json:"release"`
-	CurrentTrackPolicy CurrentTrackPolicy `json:"current_track_policy"`
-	Cells              []SupportCell      `json:"cells"`
+	SchemaURI             string             `json:"$schema"`
+	SchemaVersion         int                `json:"schema_version"`
+	Release               string             `json:"release"`
+	CurrentTrackPolicy    CurrentTrackPolicy `json:"current_track_policy"`
+	SemanticCorpusCellIDs []SupportCellID    `json:"semantic_corpus_cell_ids"`
+	Cells                 []SupportCell      `json:"cells"`
 }
 
 type CurrentTrackPolicy struct {
@@ -64,13 +65,14 @@ type CurrentTrackPolicy struct {
 
 // SupportCell describes one locked platform support policy cell.
 type SupportCell struct {
-	ID              SupportCellID    `json:"id"`
-	Component       string           `json:"component"`
-	Platform        string           `json:"platform"`
-	PlatformVersion *VersionSelector `json:"platform_version,omitempty"`
-	RuntimeVersion  *VersionSelector `json:"runtime_version,omitempty"`
-	Policy          string           `json:"policy"`
-	Note            string           `json:"note,omitempty"`
+	ID                    SupportCellID    `json:"id"`
+	Component             string           `json:"component"`
+	Platform              string           `json:"platform"`
+	PlatformVersion       *VersionSelector `json:"platform_version,omitempty"`
+	RuntimeVersion        *VersionSelector `json:"runtime_version,omitempty"`
+	ExtensionArchitecture string           `json:"extension_architecture,omitempty"`
+	Policy                string           `json:"policy"`
+	Note                  string           `json:"note,omitempty"`
 }
 
 // VersionSelector is one exact, minimum, series, or current-stable selector.
@@ -212,7 +214,7 @@ type SchemaFiles struct {
 	Requirements       FileBinding `json:"requirements"`
 	SupportMatrix      FileBinding `json:"support_matrix"`
 	Scenario           FileBinding `json:"scenario"`
-	Evidence           FileBinding `json:"evidence"`
+	CISummary          FileBinding `json:"ci_summary"`
 	RCCandidateLock    FileBinding `json:"rc_candidate_lock"`
 	RCManifest         FileBinding `json:"rc_manifest"`
 	FaultCatalog       FileBinding `json:"fault_catalog"`

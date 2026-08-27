@@ -82,6 +82,96 @@
     }
 
     #[pg_test]
+    fn projection_bootstrap_runtime_reads_return_bounded_state() {
+        setup_test_tables();
+        configure_reset_test_slot("synchro_reset_old");
+
+        let active_stream: pgrx::JsonB = Spi::get_one(
+            "SELECT synchro.synchro_projection_bootstrap_active_stream()",
+        )
+        .expect("read active projection bootstrap stream")
+        .expect("active projection bootstrap stream");
+        let stream_generation = active_stream.0["stream_generation"]
+            .as_str()
+            .expect("active stream generation")
+            .to_string();
+        assert_eq!(active_stream.0["active_slot_name"], "synchro_reset_old");
+
+        let before_boundary: Option<bool> = Spi::get_one_with_args(
+            "SELECT synchro.synchro_projection_bootstrap_main_boundary($1, '0/1')",
+            &[stream_generation.as_str().into()],
+        )
+        .expect("read unset projection bootstrap boundary");
+        assert_eq!(before_boundary, Some(false));
+        Spi::run(
+            "UPDATE synchro.sync_wal_progress
+             SET materialized_commit_lsn = '0/1', materialized_end_lsn = '0/1'
+             WHERE singleton",
+        )
+        .expect("set projection bootstrap boundary");
+        let at_boundary: Option<bool> = Spi::get_one_with_args(
+            "SELECT synchro.synchro_projection_bootstrap_main_boundary($1, '0/1')",
+            &[stream_generation.as_str().into()],
+        )
+        .expect("read reached projection bootstrap boundary");
+        assert_eq!(at_boundary, Some(true));
+
+        let candidate_slot = "synchro_reset_candidate";
+        let absent: Option<bool> = Spi::get_one_with_args(
+            "SELECT synchro.synchro_projection_bootstrap_slot_absent($1)",
+            &[candidate_slot.into()],
+        )
+        .expect("read absent projection bootstrap slot");
+        assert_eq!(absent, Some(true));
+        let slot_state: pgrx::JsonB = Spi::get_one_with_args(
+            "SELECT synchro.synchro_projection_bootstrap_slot_drop_state($1)",
+            &[candidate_slot.into()],
+        )
+        .expect("read absent projection bootstrap slot state")
+        .expect("absent projection bootstrap slot state");
+        assert_eq!(
+            slot_state.0,
+            serde_json::json!({"present": false, "active": false, "valid": true})
+        );
+        let aborted_slot: Option<String> = Spi::get_one(
+            "SELECT synchro.synchro_projection_bootstrap_next_aborted_slot()",
+        )
+        .expect("read next aborted projection bootstrap slot");
+        assert_eq!(aborted_slot, None);
+
+        let interrupted: pgrx::JsonB = Spi::get_one(
+            "SELECT synchro.synchro_projection_bootstrap_interrupted()",
+        )
+        .expect("read interrupted projection bootstrap")
+        .expect("interrupted projection bootstrap state");
+        assert_eq!(interrupted.0["present"], false);
+
+        let invalid_slot_accepted = PgTryBuilder::new(std::panic::AssertUnwindSafe(|| {
+            Spi::get_one::<bool>(
+                "SELECT synchro.synchro_projection_bootstrap_slot_absent('INVALID-SLOT')",
+            )
+            .is_ok()
+        }))
+        .catch_others(|_| false)
+        .execute();
+        assert!(!invalid_slot_accepted, "invalid slot names must be rejected");
+        let unknown_bootstrap_accepted = PgTryBuilder::new(std::panic::AssertUnwindSafe(|| {
+            Spi::get_one::<bool>(
+                "SELECT synchro.synchro_projection_bootstrap_is_activated(
+                     '00000000-0000-4000-8000-000000000001'::uuid
+                 )",
+            )
+            .is_ok()
+        }))
+        .catch_others(|_| false)
+        .execute();
+        assert!(
+            !unknown_bootstrap_accepted,
+            "unknown projection bootstraps must be rejected"
+        );
+    }
+
+    #[pg_test]
     fn stream_reset_activation_installs_verified_baseline_atomically() {
         setup_test_tables();
         configure_reset_test_slot("synchro_reset_old");

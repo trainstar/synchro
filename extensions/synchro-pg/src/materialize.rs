@@ -7,10 +7,10 @@ use crate::registry::{
     load_registry_from_client, load_registry_generation_for_activation,
     load_registry_generation_from_client, TableRegistration,
 };
+use crate::spi_helpers::required_text;
 
-// The administrative entry point does not expose an unbounded scan.  Keep the
-// batch positive and bounded while preserving the existing SQL signature.
-const BACKFILL_BATCH_SIZE: i64 = 1_000;
+const DEFAULT_BACKFILL_BATCH_SIZE: i64 = 1_000;
+const MAX_BACKFILL_BATCH_SIZE: i64 = 1_000;
 
 #[derive(Debug)]
 struct CapturedRecord {
@@ -45,7 +45,16 @@ struct CapturedProjectionRecord {
 }
 
 #[pg_extern]
-fn synchro_backfill_bucket_edges(p_table_name: default!(Option<&str>, "NULL")) -> pgrx::JsonB {
+fn synchro_backfill_bucket_edges(
+    p_table_name: default!(Option<&str>, "NULL"),
+    p_batch_size: default!(i64, "1000"),
+) -> pgrx::JsonB {
+    if !(1..=MAX_BACKFILL_BATCH_SIZE).contains(&p_batch_size) {
+        pgrx::error!(
+            "backfill batch size must be between 1 and {}",
+            MAX_BACKFILL_BATCH_SIZE
+        );
+    }
     Spi::connect_mut(|client| {
         lock_backfill_state(client)
             .unwrap_or_else(|error| pgrx::error!("locking membership backfill state: {error}"));
@@ -73,7 +82,7 @@ fn synchro_backfill_bucket_edges(p_table_name: default!(Option<&str>, "NULL")) -
                 "records": 0,
                 "edges": 0,
                 "affected_scopes": [],
-                "batch_size": BACKFILL_BATCH_SIZE,
+                "batch_size": p_batch_size,
                 "batch_count": 0,
             }));
         }
@@ -87,7 +96,7 @@ fn synchro_backfill_bucket_edges(p_table_name: default!(Option<&str>, "NULL")) -
         let mut edge_count = 0i64;
         let mut batch_count = 0i64;
         for table in &tables {
-            let (records, edges, batches) = stage_table_edges(client, table, BACKFILL_BATCH_SIZE)
+            let (records, edges, batches) = stage_table_edges(client, table, p_batch_size)
                 .unwrap_or_else(|error| {
                     pgrx::error!("staging membership edges for {}: {error}", table.table_name)
                 });
@@ -124,7 +133,7 @@ fn synchro_backfill_bucket_edges(p_table_name: default!(Option<&str>, "NULL")) -
             "records": record_count,
             "edges": edge_count,
             "affected_scopes": affected_scopes,
-            "batch_size": BACKFILL_BATCH_SIZE,
+            "batch_size": p_batch_size,
             "batch_count": batch_count,
             "boundary": boundary,
         }))
@@ -155,7 +164,7 @@ pub(crate) fn activate_staged_membership_generation(
         .get_by_name::<i64, &str>("source_registry_generation")
         .map_err(|error| format!("reading membership activation source: {error}"))?
         .ok_or_else(|| "membership activation source is missing".to_string())?;
-    let state = required_text(&stage, "state")?;
+    let state = required_text(&stage, "state", "")?;
     if staged_source != source_generation || state != "pending" {
         return Err("membership activation stage binding is invalid".to_string());
     }
@@ -176,7 +185,7 @@ pub(crate) fn activate_staged_membership_generation(
         .map_err(|error| format!("loading membership activation targets: {error}"))?;
     let mut target_relation_ids = Vec::with_capacity(target_rows.len());
     for row in target_rows {
-        target_relation_ids.push(required_text(&row, "relation_id")?);
+        target_relation_ids.push(required_text(&row, "relation_id", "")?);
     }
     let tables: Vec<&TableRegistration> = registry
         .iter()
@@ -197,7 +206,7 @@ pub(crate) fn activate_staged_membership_generation(
     let mut record_count = 0i64;
     let mut edge_count = 0i64;
     for table in &tables {
-        let (records, edges, _) = stage_table_edges(client, table, BACKFILL_BATCH_SIZE)?;
+        let (records, edges, _) = stage_table_edges(client, table, DEFAULT_BACKFILL_BATCH_SIZE)?;
         record_count = record_count
             .checked_add(records)
             .ok_or_else(|| "membership activation record count overflowed".to_string())?;
@@ -286,13 +295,13 @@ pub(crate) fn migrate_schema_digests(
     let mut records = Vec::with_capacity(rows.len());
     for row in rows {
         records.push(SchemaDigestRecord {
-            relation_id: required_text(&row, "relation_id")?,
-            record_id: required_text(&row, "record_id")?,
+            relation_id: required_text(&row, "relation_id", "")?,
+            record_id: required_text(&row, "record_id", "")?,
             row_data: row
                 .get_by_name::<pgrx::JsonB, &str>("row_data")
                 .map_err(|error| format!("reading retained row data: {error}"))?
                 .ok_or_else(|| "retained row data is missing".to_string())?,
-            row_version: required_text(&row, "row_version")?,
+            row_version: required_text(&row, "row_version", "")?,
             checksum: required_bytes(&row, "checksum")?,
             registry_generation: row
                 .get_by_name::<i64, &str>("registry_generation")
@@ -428,21 +437,21 @@ pub(crate) fn migrate_schema_digests(
     let mut projections = Vec::with_capacity(projection_rows.len());
     for row in projection_rows {
         projections.push(CapturedProjectionRecord {
-            stream_generation: required_text(&row, "stream_generation")?,
-            commit_lsn: required_text(&row, "commit_lsn")?,
+            stream_generation: required_text(&row, "stream_generation", "")?,
+            commit_lsn: required_text(&row, "commit_lsn", "")?,
             event_ordinal: row
                 .get_by_name::<i64, &str>("event_ordinal")
                 .map_err(|error| format!("reading retained projection ordinal: {error}"))?
                 .filter(|ordinal| *ordinal >= 0)
                 .ok_or_else(|| "retained projection ordinal is invalid".to_string())?,
-            relation_id: required_text(&row, "relation_id")?,
-            image_kind: required_text(&row, "image_kind")?,
-            record_id: required_text(&row, "record_id")?,
+            relation_id: required_text(&row, "relation_id", "")?,
+            image_kind: required_text(&row, "image_kind", "")?,
+            record_id: required_text(&row, "record_id", "")?,
             row_data: row
                 .get_by_name::<pgrx::JsonB, &str>("row_data")
                 .map_err(|error| format!("reading retained projection row data: {error}"))?
                 .ok_or_else(|| "retained projection row data is missing".to_string())?,
-            row_version: required_text(&row, "row_version")?,
+            row_version: required_text(&row, "row_version", "")?,
             checksum: required_bytes(&row, "checksum")?,
             registry_generation: row
                 .get_by_name::<i64, &str>("registry_generation")
@@ -734,12 +743,12 @@ fn validate_existing_edges(
         .map_err(|error| format!("querying existing edges: {error}"))?;
 
     for row in rows {
-        let table_name = required_text(&row, "table_name")?;
+        let table_name = required_text(&row, "table_name", "")?;
         let table = tables
             .iter()
             .find(|table| table.table_name == table_name)
             .ok_or_else(|| format!("edge references unknown table {table_name:?}"))?;
-        let relation_id = required_text(&row, "relation_id")?;
+        let relation_id = required_text(&row, "relation_id", "")?;
         if relation_id != table.relation_id {
             return Err(format!(
                 "edge for {table_name:?} has relation identity {relation_id:?}"
@@ -796,7 +805,7 @@ fn stage_table_edges(
         let mut records = Vec::with_capacity(rows.len());
         for row in rows {
             records.push(CapturedRecord {
-                record_id: required_text(&row, "record_id")?,
+                record_id: required_text(&row, "record_id", "")?,
                 row_data: row
                     .get_by_name::<pgrx::JsonB, &str>("row_data")
                     .map_err(|error| format!("reading captured row data: {error}"))?
@@ -941,7 +950,7 @@ fn changed_scopes(client: &SpiClient<'_>, table_names: &[String]) -> Result<Vec<
         .map_err(|error| format!("querying changed scopes: {error}"))?;
     let mut scopes = Vec::with_capacity(rows.len());
     for row in rows {
-        scopes.push(required_text(&row, "scope_id")?);
+        scopes.push(required_text(&row, "scope_id", "")?);
     }
     scopes.sort_by(|left, right| left.as_bytes().cmp(right.as_bytes()));
     scopes.dedup();
@@ -1095,13 +1104,6 @@ fn load_materialization_boundary(client: &SpiClient<'_>) -> Result<serde_json::V
 }
 
 fn required_table_text(row: &pgrx::spi::SpiTupleTable<'_>, column: &str) -> Result<String, String> {
-    row.get_by_name::<String, &str>(column)
-        .map_err(|error| format!("reading {column}: {error}"))?
-        .filter(|value| !value.is_empty())
-        .ok_or_else(|| format!("{column} is missing"))
-}
-
-fn required_text(row: &pgrx::spi::SpiHeapTupleData<'_>, column: &str) -> Result<String, String> {
     row.get_by_name::<String, &str>(column)
         .map_err(|error| format!("reading {column}: {error}"))?
         .filter(|value| !value.is_empty())

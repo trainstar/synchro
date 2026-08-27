@@ -1,15 +1,12 @@
 package scenarios
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
-	"reflect"
 	"sort"
 	"strings"
 
 	"github.com/trainstar/synchro/conformance/internal/contract"
-	"github.com/trainstar/synchro/conformance/internal/jsonstrict"
 )
 
 // VectorSetLookup provides the catalog boundary for scenario vector sets.
@@ -80,11 +77,12 @@ var proofTargetPolicy = map[string]map[string]struct{}{
 	"server-black-box": {"test-blackbox": {}},
 	"native-e2e": {
 		"test-swift": {}, "test-kotlin": {}, "test-rn-e2e-ios": {}, "test-rn-e2e-android": {},
+		"test-rn-warm-connect-ios": {}, "test-rn-warm-connect-android": {},
 	},
 	"fault-injection": {
 		"test-blackbox": {}, "test-swift": {}, "test-kotlin": {}, "test-rn-e2e-ios": {}, "test-rn-e2e-android": {},
 	},
-	"negative-control": {"test-conformance": {}},
+	"negative-control": {"test-conformance": {}, "test-rn-warm-connect-control": {}},
 }
 
 type targetRule struct {
@@ -101,6 +99,13 @@ var targetRules = map[string]targetRule{
 	"test-kotlin":         {component: "kotlin-client", hasComponent: true},
 	"test-rn-e2e-ios":     {component: "react-native-client", platform: "ios", hasComponent: true, hasPlatform: true},
 	"test-rn-e2e-android": {component: "react-native-client", platform: "android", hasComponent: true, hasPlatform: true},
+	"test-rn-warm-connect-ios": {
+		component: "react-native-client", platform: "ios", hasComponent: true, hasPlatform: true,
+	},
+	"test-rn-warm-connect-android": {
+		component: "react-native-client", platform: "android", hasComponent: true, hasPlatform: true,
+	},
+	"test-rn-warm-connect-control": {},
 }
 
 var targetRequiredRoles = map[string]map[string]struct{}{
@@ -110,6 +115,13 @@ var targetRequiredRoles = map[string]map[string]struct{}{
 	"test-kotlin":         {"pg-extension": {}, "adapter": {}, "kotlin-maven": {}},
 	"test-rn-e2e-ios":     {"pg-extension": {}, "adapter": {}, "swift-spm": {}, "cocoapods": {}, "react-native-npm": {}},
 	"test-rn-e2e-android": {"pg-extension": {}, "adapter": {}, "kotlin-maven": {}, "react-native-npm": {}},
+	"test-rn-warm-connect-ios": {
+		"pg-extension": {}, "adapter": {}, "swift-spm": {}, "cocoapods": {}, "react-native-npm": {},
+	},
+	"test-rn-warm-connect-android": {
+		"pg-extension": {}, "adapter": {}, "kotlin-maven": {}, "react-native-npm": {},
+	},
+	"test-rn-warm-connect-control": {"conformance-runner": {}, "pg-extension": {}, "adapter": {}},
 }
 
 var targetAllowedRoles = map[string]map[string]struct{}{
@@ -118,6 +130,13 @@ var targetAllowedRoles = map[string]map[string]struct{}{
 	"test-kotlin":         {"pg-extension": {}, "adapter": {}, "seed-tool": {}, "kotlin-maven": {}, "portable-seed": {}},
 	"test-rn-e2e-ios":     {"pg-extension": {}, "adapter": {}, "seed-tool": {}, "swift-spm": {}, "cocoapods": {}, "react-native-npm": {}, "portable-seed": {}},
 	"test-rn-e2e-android": {"pg-extension": {}, "adapter": {}, "seed-tool": {}, "kotlin-maven": {}, "react-native-npm": {}, "portable-seed": {}},
+	"test-rn-warm-connect-ios": {
+		"pg-extension": {}, "adapter": {}, "seed-tool": {}, "swift-spm": {}, "cocoapods": {}, "react-native-npm": {}, "portable-seed": {},
+	},
+	"test-rn-warm-connect-android": {
+		"pg-extension": {}, "adapter": {}, "seed-tool": {}, "kotlin-maven": {}, "react-native-npm": {}, "portable-seed": {},
+	},
+	"test-rn-warm-connect-control": {"conformance-runner": {}, "pg-extension": {}, "adapter": {}},
 }
 
 // Validate checks all semantic bindings in one scenario. It does not execute
@@ -218,14 +237,14 @@ func ValidateAllWithVectors(scenarios []Scenario, bundle *contract.Bundle, vecto
 					if !contains(requirement.ApplicableComponents, component) {
 						continue
 					}
-					for _, cell := range requiredSupportCellsFor(bundle, component) {
+					for _, cell := range semanticSupportCellsFor(bundle, component) {
 						expectedKeys[fmt.Sprintf("%s|%s|%s", requirementID, proofType, cell)] = struct{}{}
 					}
 				}
 			case "reference-model", "negative-control":
 				expectedKeys[fmt.Sprintf("%s|%s|null", requirementID, proofType)] = struct{}{}
 			case "fault-injection":
-				// Fault injection is a singleton over the selected requirement.
+				// Fault-injection closure is checked after all authored keys are known.
 			}
 		}
 		for key := range expectedKeys {
@@ -252,9 +271,19 @@ func ValidateAllWithVectors(scenarios []Scenario, bundle *contract.Bundle, vecto
 				failures = append(failures, fmt.Errorf("selected requirement %s has non-required proof type %s", requirementID, proofType))
 			}
 		}
-		if _, required := requiredProofs["fault-injection"]; required && faultInjectionOwners != 1 {
+		faultRequired := false
+		if _, required := requiredProofs["fault-injection"]; required {
+			faultRequired = true
+		}
+		postgresFaultCells := selectedPostgresFaultCells(selectedProofKeys, requirementID, bundle)
+		if len(postgresFaultCells) > 0 {
+			requiredPostgresCells := requiredSupportCellsFor(bundle, "postgresql-server")
+			if !supportCellSetsEqual(postgresFaultCells, supportCellIDs(requiredPostgresCells)) || faultInjectionOwners != len(requiredPostgresCells) {
+				failures = append(failures, fmt.Errorf("selected requirement %s PostgreSQL fault-injection obligations must exactly cover required extension architecture cells", requirementID))
+			}
+		} else if faultRequired && faultInjectionOwners != 1 {
 			failures = append(failures, fmt.Errorf("selected requirement %s requires exactly one fault-injection obligation, found %d", requirementID, faultInjectionOwners))
-		} else if _, required := requiredProofs["fault-injection"]; !required && faultInjectionOwners > 1 {
+		} else if !faultRequired && faultInjectionOwners > 1 {
 			failures = append(failures, fmt.Errorf("selected requirement %s has multiple optional fault-injection obligations, found %d", requirementID, faultInjectionOwners))
 		}
 		catalogControlIDs := make([]contract.ControlID, 0, 1)
@@ -338,7 +367,7 @@ func (v *scenarioValidator) validate() {
 	v.validateTargetsAndArtifacts()
 	v.validateRequiredProofs()
 	v.validatePerformance()
-	v.validateNativeExecution()
+	v.validateNativeProof()
 	v.validateOwnership()
 }
 
@@ -879,8 +908,8 @@ func (v *scenarioValidator) validateTargetsAndArtifacts() {
 		if obligation.SupportCellID != nil {
 			if !hasSupport {
 				v.add("%s obligation %s references unknown support cell %s", v.scenario.ID, obligation.ObligationID, *obligation.SupportCellID)
-			} else if supportCell.Policy != "required" {
-				v.add("%s obligation %s references excluded or non-required support cell %s", v.scenario.ID, obligation.ObligationID, *obligation.SupportCellID)
+			} else if supportCell.Policy != "required" && !isSemanticSupportCell(v.bundle, *obligation.SupportCellID) {
+				v.add("%s obligation %s references excluded or unauthorized support cell %s", v.scenario.ID, obligation.ObligationID, *obligation.SupportCellID)
 			}
 		}
 		for _, requirementID := range obligation.RequirementIDs {
@@ -973,6 +1002,13 @@ func (v *scenarioValidator) validateRequiredProofs() {
 		}
 		requiredSupportCells[cell.Component] = append(requiredSupportCells[cell.Component], cell.ID)
 	}
+	semanticSupportCells := make(map[string][]contract.SupportCellID)
+	for _, cellID := range v.bundle.Support.SemanticCorpusCellIDs {
+		cell, known := supportCellByID(v.bundle, cellID)
+		if known {
+			semanticSupportCells[cell.Component] = append(semanticSupportCells[cell.Component], cell.ID)
+		}
+	}
 	for _, requirementID := range uniqueRequirementIDs(v.scenario.RequirementIDs) {
 		requirement, known := requirementByID(v.bundle, requirementID)
 		if !known {
@@ -990,12 +1026,25 @@ func (v *scenarioValidator) validateRequiredProofs() {
 			v.add("%s requirement %s has non-required proof type %s", v.scenario.ID, requirementID, obligation.ProofType)
 		}
 		faultInjectionCount := 0
+		postgresFaultCells := make([]contract.SupportCellID, 0, 2)
 		for _, obligation := range v.scenario.ProofObligations {
 			if obligation.ProofType == "fault-injection" && contains(stringIDs(obligation.RequirementIDs), string(requirementID)) {
 				faultInjectionCount++
+				if obligation.SupportCellID != nil {
+					cell, known := supportCellByID(v.bundle, *obligation.SupportCellID)
+					if known && cell.Component == "postgresql-server" {
+						postgresFaultCells = append(postgresFaultCells, *obligation.SupportCellID)
+					}
+				}
 			}
 		}
-		if faultInjectionCount > 1 {
+		_, faultRequired := required["fault-injection"]
+		if len(postgresFaultCells) > 0 {
+			requiredPostgresCells := requiredSupportCells["postgresql-server"]
+			if !supportCellSetsEqual(postgresFaultCells, requiredPostgresCells) || faultInjectionCount != len(requiredPostgresCells) {
+				v.add("%s requirement %s PostgreSQL fault-injection obligations must exactly cover required extension architecture cells", v.scenario.ID, requirementID)
+			}
+		} else if !faultRequired && faultInjectionCount > 1 {
 			v.add("%s requirement %s has multiple optional fault-injection obligations, found %d", v.scenario.ID, requirementID, faultInjectionCount)
 		}
 		for _, proofType := range sortedStrings(requirement.RequiredProofTypes) {
@@ -1011,19 +1060,73 @@ func (v *scenarioValidator) validateRequiredProofs() {
 					if !contains(requirement.ApplicableComponents, component) {
 						continue
 					}
-					for _, cellID := range requiredSupportCells[component] {
+					for _, cellID := range semanticSupportCells[component] {
 						v.requireProofKey(requirementID, proofType, &cellID, obligationsByKey)
 					}
 				}
 			case "reference-model", "negative-control":
 				v.requireProofKey(requirementID, proofType, nil, obligationsByKey)
 			case "fault-injection":
-				v.requireSingletonProof(requirementID, proofType, obligationsByKey)
+				if len(postgresFaultCells) == 0 {
+					v.requireSingletonProof(requirementID, proofType, obligationsByKey)
+				}
 			default:
 				v.add("%s requirement %s has unknown required proof type %s", v.scenario.ID, requirementID, proofType)
 			}
 		}
 	}
+}
+
+func supportCellByID(bundle *contract.Bundle, id contract.SupportCellID) (contract.SupportCell, bool) {
+	for _, cell := range bundle.Support.Cells {
+		if cell.ID == id {
+			return cell, true
+		}
+	}
+	return contract.SupportCell{}, false
+}
+
+func selectedPostgresFaultCells(selectedProofKeys map[string][]string, requirementID contract.RequirementID, bundle *contract.Bundle) []contract.SupportCellID {
+	var result []contract.SupportCellID
+	for key := range selectedProofKeysForRequirement(selectedProofKeys, requirementID) {
+		parts := strings.Split(key, "|")
+		if len(parts) != 3 || parts[1] != "fault-injection" {
+			continue
+		}
+		id := contract.SupportCellID(parts[2])
+		cell, known := supportCellByID(bundle, id)
+		if known && cell.Component == "postgresql-server" {
+			result = append(result, id)
+		}
+	}
+	return result
+}
+
+func supportCellSetsEqual(left, right []contract.SupportCellID) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	leftSet := make(map[contract.SupportCellID]struct{}, len(left))
+	for _, id := range left {
+		leftSet[id] = struct{}{}
+	}
+	if len(leftSet) != len(right) {
+		return false
+	}
+	for _, id := range right {
+		if _, found := leftSet[id]; !found {
+			return false
+		}
+	}
+	return true
+}
+
+func supportCellIDs(values []string) []contract.SupportCellID {
+	result := make([]contract.SupportCellID, len(values))
+	for index, value := range values {
+		result[index] = contract.SupportCellID(value)
+	}
+	return result
 }
 
 func (v *scenarioValidator) requireSingletonProof(requirementID contract.RequirementID, proofType string, counts map[string]int) {
@@ -1075,7 +1178,7 @@ func (v *scenarioValidator) validatePerformance() {
 		}
 		v.validatePerformanceItem(string(item.ID), item.SupportCellIDs, item.ArtifactInventoryIDs, budgets, measurements, supportCells, artifactRoles, false)
 	}
-	v.validateMeasurementSampleBindings(measurements)
+	v.validateMeasurementBindings(measurements)
 	for _, obligation := range v.scenario.ProofObligations {
 		for _, id := range obligation.PerformanceBudgetIDs {
 			item, exists := budgets[id]
@@ -1094,166 +1197,6 @@ func (v *scenarioValidator) validatePerformance() {
 			v.validateDeclaredPerformance(string(id), item.ScenarioID, item.SupportCellIDs, item.ArtifactInventoryIDs, obligation, supportCells, artifactRoles)
 		}
 	}
-}
-
-type boundMeasurementSample struct {
-	step Step
-	item MeasurementSample
-}
-
-func (v *scenarioValidator) validateMeasurementSampleBindings(measurements map[contract.MeasurementID]contract.RequiredMeasurement) {
-	bound := make(map[contract.MeasurementID][]boundMeasurementSample)
-	seenSamples := make(map[string]struct{})
-	for _, step := range v.scenario.Steps {
-		if step.MeasurementSample == nil {
-			continue
-		}
-		sample := *step.MeasurementSample
-		if step.Phase != "exercise" {
-			v.add("%s measurement sample %s must execute in the exercise phase", v.scenario.ID, step.ID)
-		}
-		if sample.MeasurementID == "" || sample.StratumID == "" || sample.SampleID == "" {
-			v.add("%s measurement sample %s has an incomplete binding", v.scenario.ID, step.ID)
-			continue
-		}
-		item, found := measurements[sample.MeasurementID]
-		if !found {
-			v.add("%s measurement sample %s references unknown measurement %s", v.scenario.ID, step.ID, sample.MeasurementID)
-			continue
-		}
-		if item.ScenarioID != v.scenario.ID {
-			v.add("%s measurement sample %s binds measurement %s from scenario %s", v.scenario.ID, step.ID, sample.MeasurementID, item.ScenarioID)
-			continue
-		}
-		key := strings.Join([]string{string(sample.MeasurementID), string(sample.StratumID), sample.SampleID}, "|")
-		if _, duplicate := seenSamples[key]; duplicate {
-			v.add("%s measurement sample %s duplicates sample ID %s in stratum %s", v.scenario.ID, step.ID, sample.SampleID, sample.StratumID)
-		} else {
-			seenSamples[key] = struct{}{}
-		}
-		stratum, found := measurementStratum(item, sample.StratumID)
-		if !found {
-			v.add("%s measurement sample %s references unknown stratum %s", v.scenario.ID, step.ID, sample.StratumID)
-			continue
-		}
-		if !sameMeasurementParameters(sample.Parameters, stratum.Parameters) {
-			v.add("%s measurement sample %s parameters do not match stratum %s", v.scenario.ID, step.ID, sample.StratumID)
-		}
-		bound[sample.MeasurementID] = append(bound[sample.MeasurementID], boundMeasurementSample{step: step, item: sample})
-	}
-
-	for measurementID, item := range measurements {
-		if item.ScenarioID != v.scenario.ID {
-			continue
-		}
-		samples := bound[measurementID]
-		minimum, err := item.MinimumSampleCountPerStratum.Int64()
-		if err != nil || minimum <= 0 {
-			v.add("%s measurement %s has an invalid minimum sample count", v.scenario.ID, measurementID)
-			continue
-		}
-		counts := make(map[contract.StratumID]int, len(item.Strata))
-		for _, sample := range samples {
-			counts[sample.item.StratumID]++
-		}
-		for _, stratum := range item.Strata {
-			if counts[stratum.StratumID] < int(minimum) {
-				v.add("%s measurement %s stratum %s has %d bound samples, want at least %d", v.scenario.ID, measurementID, stratum.StratumID, counts[stratum.StratumID], minimum)
-			}
-		}
-	}
-
-	v.validateSchemaDispatchMeasurementPlans(measurements, bound)
-}
-
-func (v *scenarioValidator) validateSchemaDispatchMeasurementPlans(measurements map[contract.MeasurementID]contract.RequiredMeasurement, bound map[contract.MeasurementID][]boundMeasurementSample) {
-	var expected *SchemaDispatchMeasurementPlan
-	for _, predicate := range scenarioPredicates(v.scenario) {
-		if predicate.Name != "schema-dispatch-observations-satisfied" && predicate.Name != "schema-dispatch-measurement-satisfied" {
-			continue
-		}
-		plan, err := DecodeSchemaDispatchMeasurementPlan(predicate.Payload)
-		if err != nil {
-			v.add("%s schema-dispatch predicate is invalid: %v", v.scenario.ID, err)
-			continue
-		}
-		item, found := measurements[plan.MeasurementID]
-		if !found || item.ScenarioID != v.scenario.ID {
-			v.add("%s schema-dispatch predicate references an unavailable measurement %s", v.scenario.ID, plan.MeasurementID)
-			continue
-		}
-		minimum, err := item.MinimumSampleCountPerStratum.Int64()
-		if err != nil || minimum <= 0 || uint64(minimum) != plan.MinimumSampleCountPerStratum {
-			v.add("%s schema-dispatch predicate does not match measurement %s minimum sample count", v.scenario.ID, plan.MeasurementID)
-		}
-		strata, err := schemaStrataForMeasurement(item)
-		if err != nil || !reflect.DeepEqual(plan.Strata, strata) {
-			v.add("%s schema-dispatch predicate does not match measurement %s strata", v.scenario.ID, plan.MeasurementID)
-		}
-		if len(bound[plan.MeasurementID]) == 0 {
-			v.add("%s schema-dispatch predicate has no bound executable samples", v.scenario.ID)
-		}
-		if expected == nil {
-			copy := plan
-			expected = &copy
-		} else if !reflect.DeepEqual(*expected, plan) {
-			v.add("%s schema-dispatch predicates do not share one measurement plan", v.scenario.ID)
-		}
-	}
-}
-
-func scenarioPredicates(scenario Scenario) []Predicate {
-	predicates := make([]Predicate, 0, len(scenario.Model.ExpectedState)+len(scenario.Assertions))
-	for _, expectation := range scenario.Model.ExpectedState {
-		predicates = append(predicates, expectation.Predicate)
-	}
-	for _, assertion := range scenario.Assertions {
-		predicates = append(predicates, assertion.Predicate)
-	}
-	return predicates
-}
-
-func measurementStratum(item contract.RequiredMeasurement, wanted contract.StratumID) (contract.PerformanceStratum, bool) {
-	for _, stratum := range item.Strata {
-		if stratum.StratumID == wanted {
-			return stratum, true
-		}
-	}
-	return contract.PerformanceStratum{}, false
-}
-
-func sameMeasurementParameters(left, right json.RawMessage) bool {
-	var leftValue any
-	var rightValue any
-	if jsonstrict.Decode(left, &leftValue) != nil || jsonstrict.Decode(right, &rightValue) != nil {
-		return false
-	}
-	return reflect.DeepEqual(leftValue, rightValue)
-}
-
-func schemaStrataForMeasurement(item contract.RequiredMeasurement) ([]SchemaDispatchMeasurementStratum, error) {
-	strata := make([]SchemaDispatchMeasurementStratum, 0, len(item.Strata))
-	seen := make(map[string]struct{}, len(item.Strata))
-	for _, stratum := range item.Strata {
-		var parameters map[string]json.RawMessage
-		if err := jsonstrict.Decode(stratum.Parameters, &parameters); err != nil || len(parameters) != 1 {
-			return nil, errors.New("schema measurement stratum parameters are invalid")
-		}
-		raw, found := parameters["schema_case"]
-		if !found {
-			return nil, errors.New("schema measurement stratum has no schema_case")
-		}
-		var schemaCase string
-		if err := json.Unmarshal(raw, &schemaCase); err != nil || schemaCase == "" {
-			return nil, errors.New("schema measurement stratum schema_case is invalid")
-		}
-		if _, duplicate := seen[schemaCase]; duplicate {
-			return nil, errors.New("schema measurement stratum schema_case is duplicated")
-		}
-		seen[schemaCase] = struct{}{}
-		strata = append(strata, SchemaDispatchMeasurementStratum{StratumID: stratum.StratumID, SchemaCase: schemaCase})
-	}
-	return strata, nil
 }
 
 func (v *scenarioValidator) validatePerformanceItem(id string, itemSupport []contract.SupportCellID, itemArtifacts []contract.ArtifactInventoryID, budgets map[contract.BudgetID]contract.PerformanceBudget, measurements map[contract.MeasurementID]contract.RequiredMeasurement, supportCells map[contract.SupportCellID]contract.SupportCell, artifactRoles map[contract.ArtifactInventoryID]string, isBudget bool) {
@@ -1383,6 +1326,27 @@ func requiredSupportCellsFor(bundle *contract.Bundle, component string) []string
 	}
 	sort.Strings(result)
 	return result
+}
+
+func semanticSupportCellsFor(bundle *contract.Bundle, component string) []string {
+	result := make([]string, 0)
+	for _, cellID := range bundle.Support.SemanticCorpusCellIDs {
+		cell, known := supportCellByID(bundle, cellID)
+		if known && cell.Component == component {
+			result = append(result, string(cellID))
+		}
+	}
+	sort.Strings(result)
+	return result
+}
+
+func isSemanticSupportCell(bundle *contract.Bundle, id contract.SupportCellID) bool {
+	for _, cellID := range bundle.Support.SemanticCorpusCellIDs {
+		if cellID == id {
+			return true
+		}
+	}
+	return false
 }
 
 func selectedProofKeysForRequirement(keys map[string][]string, requirementID contract.RequirementID) map[string][]string {

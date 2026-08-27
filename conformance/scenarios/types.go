@@ -9,33 +9,37 @@ import (
 
 // Stable identifiers that are local to the scenario schema.
 type (
-	StepID         string
-	ExpectationID  string
-	BarrierID      string
-	NativeActionID string
+	StepID                 string
+	ExpectationID          string
+	BarrierID              string
+	NativeActionID         string
+	MeasurementOperationID string
 )
 
 // Scenario is one schema-valid authored conformance scenario.
 type Scenario struct {
-	SchemaURI           string                        `json:"$schema"`
-	SchemaVersion       int                           `json:"schema_version"`
-	ID                  contract.ScenarioID           `json:"id"`
-	Title               string                        `json:"title"`
-	Description         string                        `json:"description,omitempty"`
-	RequirementIDs      []contract.RequirementID      `json:"requirement_ids"`
-	NormativeReferences []contract.NormativeReference `json:"normative_references"`
-	ProofTypes          []string                      `json:"proof_types"`
-	ProofObligations    []ProofObligation             `json:"proof_obligations"`
-	Ownership           []Ownership                   `json:"ownership"`
-	Model               ModelSpec                     `json:"model"`
-	BarrierPlan         BarrierPlan                   `json:"barrier_plan"`
-	FaultPlans          []FaultPlan                   `json:"fault_plans"`
-	Replay              ReplaySpec                    `json:"replay"`
-	NegativeControls    []NegativeControl             `json:"negative_controls"`
-	Steps               []Step                        `json:"steps"`
-	WireExpectations    []WireExpectation             `json:"wire_expectations"`
-	Assertions          []Assertion                   `json:"assertions"`
-	NativeExecution     *NativeExecutionPlan          `json:"native_execution,omitempty"`
+	SchemaURI                 string                        `json:"$schema"`
+	SchemaVersion             int                           `json:"schema_version"`
+	ID                        contract.ScenarioID           `json:"id"`
+	Title                     string                        `json:"title"`
+	Description               string                        `json:"description,omitempty"`
+	RequirementIDs            []contract.RequirementID      `json:"requirement_ids"`
+	NormativeReferences       []contract.NormativeReference `json:"normative_references"`
+	ProofTypes                []string                      `json:"proof_types"`
+	ProofObligations          []ProofObligation             `json:"proof_obligations"`
+	Ownership                 []Ownership                   `json:"ownership"`
+	Model                     ModelSpec                     `json:"model"`
+	BarrierPlan               BarrierPlan                   `json:"barrier_plan"`
+	FaultPlans                []FaultPlan                   `json:"fault_plans"`
+	Replay                    ReplaySpec                    `json:"replay"`
+	NegativeControls          []NegativeControl             `json:"negative_controls"`
+	Steps                     []Step                        `json:"steps"`
+	WireExpectations          []WireExpectation             `json:"wire_expectations"`
+	Assertions                []Assertion                   `json:"assertions"`
+	NativeExecution           *NativeExecutionPlan          `json:"native_execution,omitempty"`
+	NativeIdentityAliases     []NativeIdentityAlias         `json:"native_identity_aliases,omitempty"`
+	NativeLifecycleBoundaries []NativeLifecycleBoundary     `json:"native_lifecycle_boundaries,omitempty"`
+	MeasurementBindings       []MeasurementBinding          `json:"measurement_bindings,omitempty"`
 
 	sourcePath  string
 	sourceBytes []byte
@@ -85,6 +89,25 @@ type NativeSynchronizeParameters struct {
 }
 
 type NativeCallID string
+
+// NativeIdentityAlias gives one typed authored value a stable native proof name.
+type NativeIdentityAlias struct {
+	Kind           string          `json:"kind"`
+	Alias          string          `json:"alias"`
+	Value          json.RawMessage `json:"value"`
+	StepIDs        []StepID        `json:"step_ids"`
+	ExpectationIDs []ExpectationID `json:"expectation_ids"`
+}
+
+// NativeLifecycleBoundary places one public lifecycle call after an authored step.
+type NativeLifecycleBoundary struct {
+	ID          string `json:"id"`
+	Phase       string `json:"phase"`
+	AfterStepID StepID `json:"after_step_id"`
+	UserID      string `json:"user_id"`
+	ClientID    string `json:"client_id"`
+	Method      string `json:"method"`
+}
 
 type NativeBeginCallParameters struct {
 	ClientKey string       `json:"client_key"`
@@ -340,13 +363,47 @@ type SchemaDispatchMeasurementStratum struct {
 	SchemaCase string             `json:"schema_case"`
 }
 
+// MeasurementOperationTarget identifies the operation that produces one
+// measurement sample.
+type MeasurementOperationTarget struct {
+	ID       MeasurementOperationID `json:"id"`
+	Family   string                 `json:"family"`
+	Boundary string                 `json:"boundary"`
+	Value    json.RawMessage        `json:"value"`
+}
+
 // MeasurementSample binds one executable step to one authored measurement
-// stratum and its exact parameter set.
+// stratum, operation, and exact parameter set.
 type MeasurementSample struct {
-	MeasurementID contract.MeasurementID `json:"measurement_id"`
-	StratumID     contract.StratumID     `json:"stratum_id"`
-	SampleID      string                 `json:"sample_id"`
-	Parameters    json.RawMessage        `json:"parameters"`
+	MeasurementID contract.MeasurementID     `json:"measurement_id"`
+	StratumID     contract.StratumID         `json:"stratum_id"`
+	SampleID      string                     `json:"sample_id"`
+	Parameters    json.RawMessage            `json:"parameters"`
+	Operation     MeasurementOperationTarget `json:"operation"`
+}
+
+// MeasurementBinding binds a macro-expanded exercise step to one measurement
+// sample. Normal steps keep their sample inline.
+type MeasurementBinding struct {
+	StepID            StepID            `json:"step_id"`
+	MeasurementSample MeasurementSample `json:"measurement_sample"`
+}
+
+// MeasurementMetricValue reports one required metric for one observation.
+type MeasurementMetricValue struct {
+	MetricID contract.MetricID `json:"metric_id"`
+	Value    float64           `json:"value"`
+}
+
+// MeasurementObservation is independently produced evidence for one bound
+// measurement operation.
+type MeasurementObservation struct {
+	StepID        StepID                     `json:"step_id"`
+	Operation     MeasurementOperationTarget `json:"operation"`
+	MeasurementID contract.MeasurementID     `json:"measurement_id"`
+	StratumID     contract.StratumID         `json:"stratum_id"`
+	SampleID      string                     `json:"sample_id"`
+	Metrics       []MeasurementMetricValue   `json:"metrics"`
 }
 
 type BarrierPlan struct {
@@ -402,9 +459,22 @@ type Step struct {
 	Phase             string             `json:"phase"`
 	Transport         string             `json:"transport"`
 	Description       string             `json:"description,omitempty"`
+	NativeBinding     *NativeStepBinding `json:"native_binding,omitempty"`
 	MeasurementSample *MeasurementSample `json:"measurement_sample,omitempty"`
 	Operation         Operation          `json:"operation"`
 	ExpectedOutcome   ExpectedOutcome    `json:"expected_outcome"`
+}
+
+// NativeStepBinding maps one authored step to its real native proof boundary.
+// Equal call IDs identify effects from one public client call.
+type NativeStepBinding struct {
+	Kind       string        `json:"kind"`
+	UserID     string        `json:"user_id,omitempty"`
+	ClientID   string        `json:"client_id,omitempty"`
+	CallID     *NativeCallID `json:"call_id,omitempty"`
+	Stage      string        `json:"stage,omitempty"`
+	Method     string        `json:"method,omitempty"`
+	Completion string        `json:"completion,omitempty"`
 }
 
 type ExpectedOutcome struct {

@@ -41,7 +41,8 @@ class ChangeTrackerTests {
     private fun environment(): Pair<SynchroDatabase, ChangeTracker> {
         val context = ApplicationProvider.getApplicationContext<Context>()
         val database = databases.create(context)
-        SchemaManager(database).createSyncedTables(
+        installTestSchema(
+            database,
             SchemaResponse(1, PROTOCOL_TEST_SCHEMA_HASH, "2026-01-01T00:00:00.000000Z", listOf(table)),
         )
         return database to ChangeTracker(database)

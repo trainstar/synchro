@@ -90,6 +90,36 @@ func TestPreparedResponseValidationIsStrict(t *testing.T) {
 	}
 }
 
+func TestSlotDropStateResponseValidationIsStrict(t *testing.T) {
+	t.Parallel()
+
+	valid := `{"present":true,"active":false,"valid":true}`
+	tests := []struct {
+		name string
+		raw  string
+	}{
+		{name: "unknown field", raw: `{"present":true,"active":false,"valid":true,"extra":true}`},
+		{name: "missing field", raw: `{"present":true,"active":false}`},
+		{name: "inactive absent slot", raw: `{"present":false,"active":true,"valid":true}`},
+		{name: "invalid absent slot", raw: `{"present":false,"active":false,"valid":false}`},
+	}
+	state, err := parseSlotDropState([]byte(valid))
+	if err != nil {
+		t.Fatalf("parseSlotDropState(valid) error = %v", err)
+	}
+	if !state.Present || state.Active || !state.Valid {
+		t.Fatalf("parseSlotDropState(valid) = %+v", state)
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			if _, err := parseSlotDropState([]byte(test.raw)); err == nil {
+				t.Fatal("parseSlotDropState() error = nil")
+			}
+		})
+	}
+}
+
 func TestCandidateReadyRequiresAllBarrierEvidence(t *testing.T) {
 	t.Parallel()
 
@@ -312,6 +342,33 @@ func TestProjectionBootstrapRecoveryExecutesEveryLifecycle(t *testing.T) {
 	}
 }
 
+func TestCanonicalRuntimeReadPreservesSQLState(t *testing.T) {
+	registerRecoveryDriver.Do(func() {
+		sql.Register(recoveryDriverName, recoveryDriver{})
+	})
+
+	dataSource := t.Name()
+	recoveryScripts.Store(dataSource, &recoveryScript{steps: []recoveryStep{{
+		queryContains: "synchro_projection_bootstrap_active_stream",
+		err:           operatorSQLStateError("55P03"),
+	}}})
+	t.Cleanup(func() { recoveryScripts.Delete(dataSource) })
+	database, err := sql.Open(recoveryDriverName, dataSource)
+	if err != nil {
+		t.Fatalf("open runtime state database: %v", err)
+	}
+	t.Cleanup(func() { _ = database.Close() })
+
+	_, _, err = loadActiveStream(context.Background(), database)
+	if err == nil {
+		t.Fatal("loadActiveStream() error = nil")
+	}
+	var state interface{ SQLState() string }
+	if !errors.As(err, &state) || state.SQLState() != "55P03" {
+		t.Fatalf("loadActiveStream() did not preserve SQLSTATE: %v", err)
+	}
+}
+
 const recoveryDriverName = "synchro-operator-recovery-test"
 
 const unlockFailureDriverName = "synchro-operator-unlock-failure-test"
@@ -412,6 +469,7 @@ type recoveryStep struct {
 	columns       []string
 	values        []driver.Value
 	exec          bool
+	err           error
 }
 
 type recoveryScript struct {
@@ -420,25 +478,23 @@ type recoveryScript struct {
 }
 
 func projectionBootstrapRecoveryScript(lifecycle string) *recoveryScript {
-	barrier := driver.Value(nil)
+	barrier := ""
 	affectedScopes := "[]"
 	if lifecycle == "activated" {
 		barrier = "0/30"
 		affectedScopes = `["user:diagnostic-user"]`
 	}
+	interrupted := `{"present":true,"bootstrap_id":"` + testBootstrapID +
+		`","source_stream_generation":"stream-1","target_stream_generation":"stream-1",` +
+		`"source_registry_generation":6,"target_registry_generation":7,"old_slot_name":"active_slot",` +
+		`"candidate_slot_name":"candidate_slot","target_schema_version":null,"target_schema_hash":null,` +
+		`"activation_barrier":` + jsonStringOrNull(barrier) + `,"affected_scopes":` + affectedScopes +
+		`,"lifecycle":"` + lifecycle + `"}`
 	steps := []recoveryStep{
 		{
-			queryContains: "FROM synchro.sync_stream_resets",
-			columns: []string{
-				"reset_id", "source_stream_generation", "target_stream_generation",
-				"source_registry_generation", "target_registry_generation", "old_slot_name",
-				"candidate_slot_name", "target_schema_version", "target_schema_hash",
-				"activation_barrier", "affected_scopes", "lifecycle",
-			},
-			values: []driver.Value{
-				testBootstrapID, "stream-1", "stream-1", int64(6), int64(7), "active_slot",
-				"candidate_slot", nil, nil, barrier, affectedScopes, lifecycle,
-			},
+			queryContains: "synchro_projection_bootstrap_interrupted",
+			columns:       []string{"result"},
+			values:        []driver.Value{[]byte(interrupted)},
 		},
 	}
 	if lifecycle != "activated" {
@@ -452,9 +508,9 @@ func projectionBootstrapRecoveryScript(lifecycle string) *recoveryScript {
 	}
 	steps = append(steps,
 		recoveryStep{
-			queryContains: "FROM pg_catalog.pg_replication_slots",
-			columns:       []string{"active_pid", "valid"},
-			values:        []driver.Value{nil, true},
+			queryContains: "synchro_projection_bootstrap_slot_drop_state",
+			columns:       []string{"result"},
+			values:        []driver.Value{[]byte(`{"present":true,"active":false,"valid":true}`)},
 		},
 		recoveryStep{queryContains: "pg_drop_replication_slot", exec: true},
 	)
@@ -466,6 +522,13 @@ func projectionBootstrapRecoveryScript(lifecycle string) *recoveryScript {
 		})
 	}
 	return &recoveryScript{steps: steps}
+}
+
+func jsonStringOrNull(value string) string {
+	if value == "" {
+		return "null"
+	}
+	return `"` + value + `"`
 }
 
 func (script *recoveryScript) next(query string, exec bool) (recoveryStep, error) {
@@ -519,6 +582,9 @@ func (connection *recoveryConnection) QueryContext(_ context.Context, query stri
 	if err != nil {
 		return nil, err
 	}
+	if step.err != nil {
+		return nil, step.err
+	}
 	return &recoveryRows{columns: step.columns, values: step.values}, nil
 }
 
@@ -554,4 +620,14 @@ func (rows *recoveryRows) Next(destination []driver.Value) error {
 
 func stringPointer(value string) *string {
 	return &value
+}
+
+type operatorSQLStateError string
+
+func (errorCode operatorSQLStateError) Error() string {
+	return "operator SQLSTATE " + string(errorCode)
+}
+
+func (errorCode operatorSQLStateError) SQLState() string {
+	return string(errorCode)
 }

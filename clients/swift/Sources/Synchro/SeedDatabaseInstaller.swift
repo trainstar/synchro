@@ -90,6 +90,7 @@ private enum SeedDatabaseValidator {
         "synchro_v10_rebuild_page_receipts",
         "synchro_v11_durable_backoff",
         "synchro_v12_gate2_recovery",
+        "synchro_v13_scope_text_affinity",
     ]
 
     private static let emptyWorkTables = [

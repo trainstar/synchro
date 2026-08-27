@@ -4,12 +4,13 @@
   "title": "Synchro release support policy",
   "type": "object",
   "additionalProperties": false,
-  "required": ["$schema", "schema_version", "release", "current_track_policy", "cells"],
+  "required": ["$schema", "schema_version", "release", "current_track_policy", "semantic_corpus_cell_ids", "cells"],
   "properties": {
     "$schema": { "const": "./schemas/support-matrix.schema.json" },
     "schema_version": { "const": 1 },
     "release": { "type": "string", "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$" },
     "current_track_policy": { "$ref": "#/$defs/currentTrackPolicy" },
+    "semantic_corpus_cell_ids": { "$ref": "#/$defs/semanticCorpusCellIDs" },
     "cells": {
       "type": "array",
       "minItems": 1,
@@ -30,6 +31,19 @@
         "resolve_at": { "const": "release-candidate-start" },
         "record_exact_versions_in": { "const": "rc-manifest" }
       }
+    },
+    "semanticCorpusCellIDs": {
+      "type": "array",
+      "minItems": 4,
+      "maxItems": 4,
+      "uniqueItems": true,
+      "prefixItems": [
+        { "const": "SUP-MACOS-CURRENT-001" },
+        { "const": "SUP-ANDROID-CURRENT-001" },
+        { "const": "SUP-RN-IOS-CURRENT-001" },
+        { "const": "SUP-RN-ANDROID-CURRENT-001" }
+      ],
+      "items": false
     },
     "exactSelector": {
       "type": "object",
@@ -95,7 +109,11 @@
         },
         "platform_version": { "$ref": "#/$defs/versionSelector" },
         "runtime_version": { "$ref": "#/$defs/versionSelector" },
-        "policy": { "type": "string", "enum": ["required", "excluded"] },
+        "extension_architecture": {
+          "type": "string",
+          "enum": ["linux-x64", "macos-arm64"]
+        },
+        "policy": { "type": "string", "enum": ["required", "tested", "excluded"] },
         "note": { "type": "string", "minLength": 1 }
       },
       "anyOf": [
@@ -109,6 +127,17 @@
             "required": ["component"]
           },
           "then": { "required": ["platform_version", "runtime_version"] }
+        },
+        {
+          "if": {
+            "properties": {
+              "component": { "const": "postgresql-server" },
+              "policy": { "const": "required" }
+            },
+            "required": ["component", "policy"]
+          },
+          "then": { "required": ["extension_architecture"] },
+          "else": { "not": { "required": ["extension_architecture"] } }
         }
       ]
     }

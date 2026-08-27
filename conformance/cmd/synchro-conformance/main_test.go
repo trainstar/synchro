@@ -29,8 +29,6 @@ func TestRunRejectsInvalidCommandsAndFlags(t *testing.T) {
 		{"missing mode", []string{"catalog", "--repo-root", "."}, "catalog requires exactly one"},
 		{"both modes", []string{"catalog", "--repo-root", ".", "--write", "--check"}, "catalog requires exactly one"},
 		{"positional extra", []string{"catalog", "--repo-root", ".", "--check", "extra"}, "does not accept positional"},
-		{"model missing root", []string{"model"}, "model requires --repo-root PATH"},
-		{"model malformed flag", []string{"model", "--unknown"}, "model flags are invalid"},
 		{"blackbox missing mode", []string{"blackbox", "--repo-root", "."}, "blackbox requires --mode"},
 		{"blackbox invalid mode", []string{"blackbox", "--repo-root", ".", "--mode", "other"}, "blackbox requires --mode"},
 		{"native missing selection", []string{"native", "--repo-root", "."}, "native requires"},
@@ -50,7 +48,7 @@ func TestRunNativeWritesCatalogBoundManifest(t *testing.T) {
 	var output bytes.Buffer
 	err := runNative(context.Background(), []string{
 		"--repo-root", repositoryRoot(t),
-		"--scenario", "SCN-PERF-WARM-CONNECT-001",
+		"--scenario", "SCN-PERF-STEADY-PULL-001",
 		"--support-cell", "SUP-IOS-MIN-001",
 	}, &output)
 	if err != nil {
@@ -60,27 +58,18 @@ func TestRunNativeWritesCatalogBoundManifest(t *testing.T) {
 	if err := json.Unmarshal(output.Bytes(), &manifest); err != nil {
 		t.Fatalf("decode native manifest: %v", err)
 	}
-	if manifest.ScenarioID != "SCN-PERF-WARM-CONNECT-001" || manifest.SupportCellID != "SUP-IOS-MIN-001" || manifest.MakeTarget != "test-swift" {
+	if manifest.ScenarioID != "SCN-PERF-STEADY-PULL-001" || manifest.SupportCellID != "SUP-IOS-MIN-001" || manifest.MakeTarget != "test-swift" {
 		t.Fatalf("native manifest selection = %+v", manifest)
 	}
 	found := false
 	for _, action := range manifest.Actions {
-		if action.Action.ID == "NACT-PERF-WARM-CONNECT-011" {
-			found = len(action.Steps) == 2
+		if action.Action.ID == "NACT-PERF-STEADY-PULL-009" {
+			found = len(action.Steps) == 1
 			break
 		}
 	}
 	if !found {
-		t.Fatal("native manifest omitted the measured warm synchronization")
-	}
-}
-
-func TestRunModelExecutesSelectedAuthoredScenario(t *testing.T) {
-	err := run(context.Background(), []string{
-		"model", "--repo-root", repositoryRoot(t), "--scenario", "SCN-WAL-ORDER-001",
-	})
-	if err != nil {
-		t.Fatalf("run selected authored scenario: %v", err)
+		t.Fatal("native manifest omitted the measured steady pull")
 	}
 }
 

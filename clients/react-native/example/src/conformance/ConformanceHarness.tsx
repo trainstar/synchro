@@ -11,8 +11,8 @@ import {
   type JSONValue,
   MAXIMUM_COMMAND_BYTES,
   MAXIMUM_RESULT_BYTES,
+  parseConformanceCommand,
   utf8ByteLength,
-  decodeConformanceCommand,
 } from './types';
 import {
   ConformanceCommandError,
@@ -64,7 +64,7 @@ export function ConformanceHarness({
       if (utf8ByteLength(commandText) > MAXIMUM_COMMAND_BYTES) {
         throw new ConformanceCommandError('invalid_command');
       }
-      const command = decodeConformanceCommand(JSON.parse(commandText));
+      const command = parseConformanceCommand(commandText);
       const result = await runnerRef.current!.execute(command);
       const envelope = encodeConformanceEnvelope({
         schema_version: 1,
@@ -105,12 +105,15 @@ export function ConformanceHarness({
         accessibilityHint="Enter one bounded native conformance command in JSON."
         autoCapitalize="none"
         autoCorrect={false}
+        keyboardType="ascii-capable"
         multiline
         maxLength={MAXIMUM_COMMAND_BYTES}
         onChangeText={setCommandText}
         placeholder="Paste one conformance command"
+        returnKeyType="done"
         spellCheck={false}
         style={styles.input}
+        submitBehavior="blurAndSubmit"
         testID="conformance-command-input"
         value={commandText}
       />
@@ -170,8 +173,8 @@ const styles = StyleSheet.create({
     borderColor: '#4d4d4d',
     borderRadius: 6,
     borderWidth: 1,
+    height: 160,
     marginTop: 4,
-    minHeight: 88,
     padding: 10,
     textAlignVertical: 'top',
   },

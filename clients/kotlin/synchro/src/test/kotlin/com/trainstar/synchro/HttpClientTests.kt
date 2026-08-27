@@ -1,5 +1,8 @@
 package com.trainstar.synchro
 
+import com.trainstar.synchro.inspection.TransportObservationCollector
+import com.trainstar.synchro.inspection.TransportOperationClass
+import com.trainstar.synchro.inspection.withTransportObservation
 import kotlinx.coroutines.test.runTest
 import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
@@ -46,8 +49,7 @@ class HttpClientTests {
             authProvider = { "test-token" },
             clientID = "test-device",
             appVersion = "1.0.0",
-            transportObservationCollector = collector,
-        ),
+        ).withTransportObservation(collector),
     )
 
     @Test
@@ -273,7 +275,7 @@ class HttpClientTests {
             {
                 "changes": [],
                 "scope_set_version": 13,
-                "scope_cursors": {},
+                "scope_cursors": {"orders_user:u_123": "next-cursor"},
                 "scope_updates": {"add": [], "remove": []},
                 "rebuild": [],
                 "has_more": false,
@@ -307,6 +309,51 @@ class HttpClientTests {
         assertEquals(true, observation.cursorFingerprintsComplete)
         assertEquals(2, observation.requestFacts?.scopeCount)
         assertEquals(0, observation.pullResponseFacts?.changeCount)
+        assertEquals(
+            listOf(TransportObservationCollector.cursorFingerprint("next-cursor")),
+            observation.pullResponseFacts?.scopeCursorFingerprints,
+        )
+        assertEquals(true, observation.pullResponseFacts?.scopeCursorFingerprintsComplete)
+    }
+
+    @Test
+    fun testRebuildRecordsTerminalScopeCursorFingerprint() = runTest {
+        val finalScopeCursor = "private-final-scope-cursor"
+        val responseBody = """
+            {
+                "scope": "scope-a",
+                "records": [],
+                "has_more": false,
+                "final_scope_cursor": "$finalScopeCursor",
+                "checksum": {
+                    "algorithm": "sha256",
+                    "version": 1,
+                    "encoding": "hex",
+                    "digest": "${"a".repeat(64)}"
+                }
+            }
+        """.trimIndent()
+        server.enqueue(MockResponse().setBody(responseBody).setResponseCode(200))
+        val collector = TransportObservationCollector()
+        val observedClient = observedHttpClient(collector)
+
+        observedClient.rebuild(
+            RebuildRequest(
+                clientID = "test-device",
+                clientGeneration = 4,
+                schema = SchemaRef(version = 8, hash = "${"b".repeat(64)}"),
+                scope = "scope-a",
+                rebuildID = "00000000-0000-4000-8000-000000000001",
+                limit = 100,
+            ),
+        )
+
+        val facts = collector.snapshot().observations.single().rebuildResponseFacts
+        assertEquals(
+            TransportObservationCollector.cursorFingerprint(finalScopeCursor),
+            facts?.finalScopeCursorFingerprint,
+        )
+        assertTrue(facts?.hasFinalScopeCursor == true)
     }
 
     @Test
@@ -576,5 +623,41 @@ class HttpClientTests {
         assertEquals("\"orders\"", mutation["table"].toString())
         assertEquals("\"insert\"", mutation["op"].toString())
         assertEquals("\"2026-01-01T12:00:00.000000Z\"", mutation["client_version"].toString())
+    }
+
+    @Test
+    fun pushAndSealedPushRecordMutationCount() = runTest {
+        val response = """
+            {"batch_id":"00000000-0000-4000-8000-000000000007","accepted":[],"rejected":[],"server_time":"2026-01-01T12:00:00.000Z"}
+        """.trimIndent()
+        server.enqueue(MockResponse().setBody(response).setResponseCode(200))
+        server.enqueue(MockResponse().setBody(response).setResponseCode(200))
+        server.enqueue(MockResponse().setBody(response).setResponseCode(200))
+        val collector = TransportObservationCollector()
+        val observedClient = observedHttpClient(collector)
+        val request = PushRequest(
+            clientID = "dev-1",
+            clientGeneration = 4,
+            batchID = "00000000-0000-4000-8000-000000000007",
+            schema = SchemaRef(version = 7, hash = "hash7"),
+            mutations = listOf(
+                Mutation(
+                    mutationID = "m-1",
+                    table = "orders",
+                    op = Operation.INSERT,
+                    pk = kotlinx.serialization.json.JsonObject(mapOf("id" to kotlinx.serialization.json.JsonPrimitive("rec-1"))),
+                    authoredSchema = SchemaRef(version = 7, hash = "hash7"),
+                    clientVersion = "2026-01-01T12:00:00.000000Z",
+                    columns = kotlinx.serialization.json.JsonObject(mapOf("title" to kotlinx.serialization.json.JsonPrimitive("first"))),
+                ),
+            ),
+        )
+
+        observedClient.push(request)
+        val sealed = Json.encodeToString(PushRequest.serializer(), request)
+        observedClient.pushSealed(sealed, request.batchID)
+        observedClient.pushSealedWithBody(sealed, request.batchID)
+
+        assertEquals(listOf(1, 1, 1), collector.snapshot().observations.map { it.requestFacts?.mutationCount })
     }
 }

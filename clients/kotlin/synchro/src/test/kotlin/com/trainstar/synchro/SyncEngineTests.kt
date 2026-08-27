@@ -435,8 +435,8 @@ class SyncEngineTests {
         }
 
         try {
-            val schemaManager = SchemaManager(db)
-            schemaManager.reconcileLocalSchema(
+            installTestSchema(
+                db,
                 schemaVersion = 1,
                 schemaHash = PROTOCOL_TEST_SCHEMA_HASH,
                 tables = listOf(ordersLocalSchemaTable(includeNotes = false))
@@ -490,8 +490,8 @@ class SyncEngineTests {
         }
 
         try {
-            val schemaManager = SchemaManager(db)
-            schemaManager.reconcileLocalSchema(
+            installTestSchema(
+                db,
                 schemaVersion = 1,
                 schemaHash = PROTOCOL_TEST_SCHEMA_HASH,
                 tables = listOf(ordersLocalSchemaTable(includeNotes = false))
@@ -558,8 +558,8 @@ class SyncEngineTests {
         }
 
         try {
-            val schemaManager = SchemaManager(db)
-            schemaManager.reconcileLocalSchema(
+            installTestSchema(
+                db,
                 schemaVersion = 1,
                 schemaHash = PROTOCOL_TEST_SCHEMA_HASH,
                 tables = listOf(ordersLocalSchemaTable(includeNotes = false))
@@ -618,7 +618,8 @@ class SyncEngineTests {
         }
 
         try {
-            SchemaManager(db).reconcileLocalSchema(
+            installTestSchema(
+                db,
                 schemaVersion = 1,
                 schemaHash = PROTOCOL_TEST_SCHEMA_HASH,
                 tables = listOf(ordersLocalSchemaTable(includeNotes = false)),
@@ -633,10 +634,9 @@ class SyncEngineTests {
             }
 
             engine.start()
-            db.execute(
+            db.applicationExecute(
                 "INSERT INTO orders (id, ship_address, user_id, updated_at) VALUES (?, ?, ?, ?)",
                 arrayOf("w1", "debounced", "u1", "2026-01-01T10:00:00.000Z"),
-                affectedTables = setOf("orders"),
             )
             assertTrue(pushStarted.await(1, TimeUnit.SECONDS))
             engine.syncNow()
@@ -698,8 +698,8 @@ class SyncEngineTests {
         }
 
         try {
-            val schemaManager = SchemaManager(db)
-            schemaManager.reconcileLocalSchema(
+            installTestSchema(
+                db,
                 schemaVersion = 1,
                 schemaHash = "old_hash",
                 tables = listOf(ordersLocalSchemaTable(includeNotes = false))
@@ -758,8 +758,8 @@ class SyncEngineTests {
     @Test
     fun testConnectSchemaAndBindingInstallationRollsBackTogether() = runTest {
         val (engine, db) = makeIntegrationEnv { mockResponse("{}", 500) }
-        val schemaManager = SchemaManager(db)
-        schemaManager.reconcileLocalSchema(
+        installTestSchema(
+            db,
             schemaVersion = 1,
             schemaHash = PROTOCOL_TEST_SCHEMA_HASH,
             tables = listOf(ordersLocalSchemaTable(includeNotes = false)),
@@ -867,7 +867,8 @@ class SyncEngineTests {
                 else -> mockResponse("""{"error":"unexpected"}""", 500)
             }
         }
-        SchemaManager(database).reconcileLocalSchema(
+        installTestSchema(
+            database,
             schemaVersion = 1,
             schemaHash = PROTOCOL_TEST_SCHEMA_HASH,
             tables = listOf(protocolOrdersSchema()),
@@ -919,7 +920,8 @@ class SyncEngineTests {
                 mockResponse("""{"error":"network must stop after connect"}""", 500)
             }
         }
-        SchemaManager(database).reconcileLocalSchema(
+        installTestSchema(
+            database,
             schemaVersion = 1,
             schemaHash = PROTOCOL_TEST_SCHEMA_HASH,
             tables = listOf(protocolOrdersSchema()),
@@ -947,7 +949,8 @@ class SyncEngineTests {
         val removedScope = "orders:seed-removed"
         val (engine, database) = makeIntegrationEnv { mockResponse("{}", 500) }
         val schema = protocolOrdersSchema()
-        SchemaManager(database).reconcileLocalSchema(
+        installTestSchema(
+            database,
             schemaVersion = 1,
             schemaHash = PROTOCOL_TEST_SCHEMA_HASH,
             tables = listOf(schema),
@@ -1061,7 +1064,8 @@ class SyncEngineTests {
     @Test
     fun connectInstallAndMatchingBackoffResolveInOneTransaction() = runTest {
         val (engine, database) = makeIntegrationEnv { mockResponse("{}", 500) }
-        SchemaManager(database).reconcileLocalSchema(
+        installTestSchema(
+            database,
             schemaVersion = 1,
             schemaHash = PROTOCOL_TEST_SCHEMA_HASH,
             tables = listOf(protocolOrdersSchema()),
@@ -1685,7 +1689,8 @@ class SyncEngineTests {
         val (engine1, db1) = makeIntegrationEnv(dbName = dbName, clientID = clientID) { request ->
             mockResponse("""{"error":"unexpected: ${request.path}"}""", 500)
         }
-        SchemaManager(db1).reconcileLocalSchema(
+        installTestSchema(
+            db1,
             schemaVersion = 1,
             schemaHash = PROTOCOL_TEST_SCHEMA_HASH,
             tables = listOf(protocolOrdersSchema()),
@@ -1890,7 +1895,8 @@ class SyncEngineTests {
                 else -> mockResponse("""{"error":"unexpected"}""", 500)
             }
         }
-        SchemaManager(db).reconcileLocalSchema(
+        installTestSchema(
+            db,
             schemaVersion = 1,
             schemaHash = PROTOCOL_TEST_SCHEMA_HASH,
             tables = listOf(protocolOrdersSchema()),
@@ -2613,10 +2619,10 @@ class SyncEngineTests {
             maxRetryAttempts = 0,
             handler = handler
         )
-        val schemaManager1 = SchemaManager(db1)
-        schemaManager1.reconcileLocalSchema(
+        installTestSchema(
+            db1,
             schemaVersion = 1,
-                schemaHash = PROTOCOL_TEST_SCHEMA_HASH,
+            schemaHash = PROTOCOL_TEST_SCHEMA_HASH,
             tables = listOf(ordersLocalSchemaTable(includeNotes = false))
         )
 
@@ -2648,8 +2654,8 @@ class SyncEngineTests {
             maxRetryAttempts = 0,
             handler = handler
         )
-        val schemaManager2 = SchemaManager(db2)
-        schemaManager2.reconcileLocalSchema(
+        installTestSchema(
+            db2,
             schemaVersion = 1,
             schemaHash = PROTOCOL_TEST_SCHEMA_HASH,
             tables = listOf(ordersLocalSchemaTable(includeNotes = false))
@@ -3057,7 +3063,8 @@ class SyncEngineTests {
         }
         val rejectedID = UUID.randomUUID().toString()
         try {
-            SchemaManager(db).reconcileLocalSchema(
+            installTestSchema(
+                db,
                 schemaVersion = 1,
                 schemaHash = PROTOCOL_TEST_SCHEMA_HASH,
                 tables = listOf(protocolOrdersSchema()),

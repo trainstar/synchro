@@ -20,6 +20,7 @@ use crate::rebuild_token::{
     RebuildContinuationInput,
 };
 use crate::registry::{load_registry_from_client, TableRegistration};
+use crate::spi_helpers::{current_utc_timestamp, decode_digest, required_text};
 use crate::stream_position::{load_materialized_boundary, StreamBoundary, StreamPosition};
 
 const SESSION_COLUMNS: &str = "
@@ -417,18 +418,18 @@ fn load_session_by_rebuild(
 }
 
 fn parse_session(row: SpiHeapTupleData<'_>) -> Result<RebuildSession, String> {
-    let session_id = required_text(&row, "session_id")?;
-    let user_id = required_text(&row, "user_id")?;
-    let client_id = required_text(&row, "client_id")?;
-    let rebuild_id = required_text(&row, "rebuild_id")?;
-    let scope_id = required_text(&row, "scope_id")?;
+    let session_id = required_text(&row, "session_id", "rebuild ")?;
+    let user_id = required_text(&row, "user_id", "rebuild ")?;
+    let client_id = required_text(&row, "client_id", "rebuild ")?;
+    let rebuild_id = required_text(&row, "rebuild_id", "rebuild ")?;
+    let scope_id = required_text(&row, "scope_id", "rebuild ")?;
     let client_generation = required_positive_i64(&row, "client_generation")?;
     let schema_version = required_positive_i64(&row, "schema_version")?;
-    let schema_hash = required_text(&row, "schema_hash")?;
-    let stream_generation = required_text(&row, "stream_generation")?;
+    let schema_hash = required_text(&row, "schema_hash", "rebuild ")?;
+    let stream_generation = required_text(&row, "stream_generation", "rebuild ")?;
     let membership_generation = required_positive_i64(&row, "membership_generation")?;
     let retention_generation = required_positive_i64(&row, "retention_generation")?;
-    let boundary_kind = required_text(&row, "boundary_position_kind")?;
+    let boundary_kind = required_text(&row, "boundary_position_kind", "rebuild ")?;
     let boundary_commit_lsn = row
         .get_by_name::<String, &str>("boundary_commit_lsn")
         .map_err(|error| format!("reading rebuild boundary commit LSN: {error}"))?;
@@ -454,8 +455,10 @@ fn parse_session(row: SpiHeapTupleData<'_>) -> Result<RebuildSession, String> {
         .get_by_name::<Vec<u8>, &str>("snapshot_checksum")
         .map_err(|error| format!("reading rebuild snapshot checksum: {error}"))?
         .ok_or_else(|| "rebuild snapshot checksum is missing".to_string())?;
-    let snapshot_checksum =
-        ChecksumObject::new(decode_digest(checksum, "rebuild snapshot checksum")?);
+    let snapshot_checksum = ChecksumObject::new(decode_digest(
+        checksum,
+        "rebuild snapshot checksum must contain exactly 32 octets",
+    )?);
     let staged_row_count = row
         .get_by_name::<i64, &str>("staged_row_count")
         .map_err(|error| format!("reading rebuild staged row count: {error}"))?
@@ -478,7 +481,7 @@ fn parse_session(row: SpiHeapTupleData<'_>) -> Result<RebuildSession, String> {
         page_limit: required_positive_i64(&row, "page_limit")?,
         snapshot_checksum,
         staged_row_count,
-        expires_at: required_text(&row, "expires_at")?,
+        expires_at: required_text(&row, "expires_at", "rebuild ")?,
         expired: row
             .get_by_name::<bool, &str>("expired")
             .map_err(|error| format!("reading rebuild session expiry: {error}"))?
@@ -576,9 +579,9 @@ fn stage_records(
 
     let mut staged = Vec::with_capacity(rows.len());
     for row in rows {
-        let relation_id = required_text(&row, "relation_id")?;
-        let table_name = required_text(&row, "table_name")?;
-        let record_id = required_text(&row, "record_id")?;
+        let relation_id = required_text(&row, "relation_id", "rebuild ")?;
+        let table_name = required_text(&row, "table_name", "rebuild ")?;
+        let record_id = required_text(&row, "record_id", "rebuild ")?;
         let table = registry
             .iter()
             .find(|table| table.relation_id == relation_id)
@@ -594,7 +597,10 @@ fn stage_records(
             .get_by_name::<Vec<u8>, &str>("captured_checksum")
             .map_err(|error| format!("reading rebuild captured checksum: {error}"))?
             .ok_or_else(|| "rebuild captured row is missing".to_string())?;
-        let row_checksum = decode_digest(captured_checksum, "rebuild captured checksum")?;
+        let row_checksum = decode_digest(
+            captured_checksum,
+            "rebuild captured checksum must contain exactly 32 octets",
+        )?;
         if edge_checksum.as_slice() != row_checksum.as_bytes() {
             return Err("rebuild edge checksum differs from captured row".to_string());
         }
@@ -618,7 +624,7 @@ fn stage_records(
         if deleted {
             return Err("rebuild edge references a captured tombstone".to_string());
         }
-        let source_stream_generation = required_text(&row, "source_stream_generation")?;
+        let source_stream_generation = required_text(&row, "source_stream_generation", "rebuild ")?;
         let captured_generation = required_positive_i64(&row, "registry_generation")?;
         if source_stream_generation != boundary.stream_generation
             || captured_generation != table.registry_generation
@@ -629,8 +635,9 @@ fn stage_records(
             .get_by_name::<String, &str>("source_reset_id")
             .map_err(|error| format!("reading rebuild reset provenance: {error}"))?;
         if source_reset_id.is_some() {
-            let reset_stream_generation = required_text(&row, "reset_stream_generation")?;
-            let reset_lifecycle = required_text(&row, "reset_lifecycle")?;
+            let reset_stream_generation =
+                required_text(&row, "reset_stream_generation", "rebuild ")?;
+            let reset_lifecycle = required_text(&row, "reset_lifecycle", "rebuild ")?;
             let source_commit_lsn = row
                 .get_by_name::<String, &str>("source_commit_lsn")
                 .map_err(|error| format!("reading rebuild source LSN: {error}"))?;
@@ -645,7 +652,7 @@ fn stage_records(
                 return Err("rebuild reset baseline binding is invalid".to_string());
             }
         } else {
-            let source_commit_lsn = required_text(&row, "source_commit_lsn")?;
+            let source_commit_lsn = required_text(&row, "source_commit_lsn", "rebuild ")?;
             row.get_by_name::<i64, &str>("source_event_ordinal")
                 .map_err(|error| format!("reading rebuild source event ordinal: {error}"))?
                 .filter(|ordinal| *ordinal >= 0)
@@ -919,7 +926,7 @@ fn create_page(
             .map_err(|error| format!("reading staged rebuild checksum: {error}"))?
             .ok_or_else(|| "staged rebuild checksum is missing".to_string())?;
         records.push(RebuildRecord {
-            table: required_text(&row, "table_id")?,
+            table: required_text(&row, "table_id", "rebuild ")?,
             pk: row
                 .get_by_name::<pgrx::JsonB, &str>("primary_key")
                 .map_err(|error| format!("reading staged rebuild primary key: {error}"))?
@@ -930,8 +937,11 @@ fn create_page(
                 .map_err(|error| format!("reading staged rebuild row: {error}"))?
                 .map(|value| value.0)
                 .ok_or_else(|| "staged rebuild row is missing".to_string())?,
-            row_checksum: ChecksumObject::new(decode_digest(checksum, "staged rebuild checksum")?),
-            server_version: required_text(&row, "server_version")?,
+            row_checksum: ChecksumObject::new(decode_digest(
+                checksum,
+                "staged rebuild checksum must contain exactly 32 octets",
+            )?),
+            server_version: required_text(&row, "server_version", "rebuild ")?,
         });
     }
     let next_row_ordinal = row_ordinal
@@ -954,7 +964,7 @@ fn create_page(
             next_row_ordinal,
             page_limit: session.page_limit,
             accepted_write_epoch: session.accepted_write_epoch,
-            issued_at: current_utc_timestamp(client)?,
+            issued_at: current_utc_timestamp(client, "rebuild token issue time", "rebuild ")?,
             expires_at: session.expires_at.clone(),
         });
         (
@@ -1018,43 +1028,11 @@ fn store_page(
     Ok(())
 }
 
-fn current_utc_timestamp(client: &SpiClient<'_>) -> Result<String, String> {
-    let rows = client
-        .select(
-            "SELECT to_char(
-                 now() AT TIME ZONE 'UTC',
-                 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"'
-             ) AS issued_at",
-            None,
-            &[],
-        )
-        .map_err(|error| format!("reading rebuild token issue time: {error}"))?;
-    let row = rows
-        .into_iter()
-        .next()
-        .ok_or_else(|| "rebuild token issue time is missing".to_string())?;
-    required_text(&row, "issued_at")
-}
-
-fn required_text(row: &SpiHeapTupleData<'_>, name: &str) -> Result<String, String> {
-    row.get_by_name::<String, &str>(name)
-        .map_err(|error| format!("reading rebuild {name}: {error}"))?
-        .filter(|value| !value.is_empty())
-        .ok_or_else(|| format!("rebuild {name} is missing"))
-}
-
 fn required_positive_i64(row: &SpiHeapTupleData<'_>, name: &str) -> Result<i64, String> {
     row.get_by_name::<i64, &str>(name)
         .map_err(|error| format!("reading rebuild {name}: {error}"))?
         .filter(|value| *value > 0)
         .ok_or_else(|| format!("rebuild {name} is invalid"))
-}
-
-fn decode_digest(value: Vec<u8>, name: &str) -> Result<Sha256Digest, String> {
-    let bytes: [u8; 32] = value
-        .try_into()
-        .map_err(|_| format!("{name} must contain exactly 32 octets"))?;
-    Ok(Sha256Digest::from_bytes(bytes))
 }
 
 fn encode_hex(bytes: &[u8]) -> String {

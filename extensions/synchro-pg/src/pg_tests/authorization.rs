@@ -274,6 +274,49 @@ fn projection_bootstrap_functions_are_operator_only() {
 }
 
 #[pg_test]
+fn projection_bootstrap_runtime_reads_are_worker_only() {
+    let protected: Option<bool> = Spi::get_one(
+        "WITH runtime_read_functions AS (
+             SELECT procedure.oid, procedure.prosecdef,
+                    procedure.proowner = owner_role.oid AS owned_by_synchro_owner,
+                    COALESCE(procedure.proconfig, ARRAY[]::text[])
+                        @> ARRAY['search_path=pg_catalog, synchro'] AS fixed_path
+             FROM pg_catalog.pg_proc procedure
+             JOIN pg_catalog.pg_namespace namespace ON namespace.oid = procedure.pronamespace
+             CROSS JOIN (
+                 SELECT oid FROM pg_catalog.pg_roles WHERE rolname = 'synchro_owner'
+             ) owner_role
+             WHERE namespace.nspname = 'synchro'
+               AND procedure.proname IN (
+                   'synchro_projection_bootstrap_active_stream',
+                    'synchro_projection_bootstrap_main_boundary',
+                    'synchro_projection_bootstrap_slot_absent',
+                    'synchro_projection_bootstrap_slot_drop_state',
+                    'synchro_projection_bootstrap_next_aborted_slot',
+                   'synchro_projection_bootstrap_is_activated',
+                   'synchro_projection_bootstrap_interrupted'
+               )
+         )
+         SELECT count(*) = 7
+                AND bool_and(prosecdef)
+                AND bool_and(owned_by_synchro_owner)
+                AND bool_and(fixed_path)
+                AND bool_and(pg_catalog.has_function_privilege(
+                    'synchro_worker', oid, 'EXECUTE'
+                ))
+                AND bool_and(NOT pg_catalog.has_function_privilege(
+                    'synchro_operator', oid, 'EXECUTE'
+                ))
+                AND bool_and(NOT pg_catalog.has_function_privilege(
+                    'synchro_adapter', oid, 'EXECUTE'
+                ))
+         FROM runtime_read_functions",
+    )
+    .expect("projection bootstrap runtime read authorization query");
+    assert_eq!(protected, Some(true));
+}
+
+#[pg_test]
 fn worker_has_projection_bootstrap_table_privileges() {
     let authorized: Option<bool> = Spi::get_one(
         "WITH required(table_name, privilege) AS (

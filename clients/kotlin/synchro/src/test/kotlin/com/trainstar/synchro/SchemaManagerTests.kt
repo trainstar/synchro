@@ -53,7 +53,6 @@ class SchemaManagerTests {
     @Test
     fun testCreateSyncedTables() {
         val db = makeTestDB()
-        val manager = SchemaManager(db)
         val schema = SchemaResponse(
             schemaVersion = 1,
             schemaHash = "abc123",
@@ -75,7 +74,7 @@ class SchemaManagerTests {
             )
         )
 
-        manager.createSyncedTables(schema)
+        installTestSchema(db, schema)
 
         // Verify table exists
         val rows = db.query("SELECT name FROM sqlite_master WHERE type='table' AND name='orders'")
@@ -88,7 +87,6 @@ class SchemaManagerTests {
     @Test
     fun testReconcileLocalSchemaFromPortableManifest() {
         val db = makeTestDB()
-        val manager = SchemaManager(db)
         val manifest = makeManifest(
             listOf(
                 TableSchema(
@@ -108,7 +106,7 @@ class SchemaManagerTests {
             )
         )
 
-        manager.reconcileLocalSchema(schemaVersion = 7, schemaHash = "portable-v1", tables = manifest.localTables())
+        installTestSchema(db, schemaVersion = 7, schemaHash = "portable-v1", tables = manifest.localTables())
 
         assertEquals(1, db.query("SELECT name FROM sqlite_master WHERE type='table' AND name='workouts'").size)
         assertCDCTriggers(db, "workouts")
@@ -122,7 +120,6 @@ class SchemaManagerTests {
     @Test
     fun testReconcileLocalSchemaMigratesAdditiveManifestChange() {
         val db = makeTestDB()
-        val manager = SchemaManager(db)
 
         val v1 = makeManifest(
             listOf(
@@ -142,7 +139,7 @@ class SchemaManagerTests {
                 )
             )
         )
-        manager.reconcileLocalSchema(schemaVersion = 1, schemaHash = "portable-v1", tables = v1.localTables())
+        installTestSchema(db, schemaVersion = 1, schemaHash = "portable-v1", tables = v1.localTables())
 
         db.execute("INSERT INTO workouts (id, name, updated_at) VALUES ('w-1', 'Morning Run', '2026-01-01T00:00:00Z')")
 
@@ -165,7 +162,7 @@ class SchemaManagerTests {
                 )
             )
         )
-        manager.reconcileLocalSchema(schemaVersion = 2, schemaHash = "portable-v2", tables = v2.localTables())
+        installTestSchema(db, schemaVersion = 2, schemaHash = "portable-v2", tables = v2.localTables())
 
         val row = db.queryOne("SELECT name, notes FROM workouts WHERE id = ?", arrayOf("w-1"))
         assertNotNull(row)
@@ -176,7 +173,6 @@ class SchemaManagerTests {
     @Test
     fun testMigrateSchemaAddsColumn() {
         val db = makeTestDB()
-        val manager = SchemaManager(db)
 
         val v1 = SchemaResponse(
             schemaVersion = 1,
@@ -197,7 +193,7 @@ class SchemaManagerTests {
                 )
             )
         )
-        manager.createSyncedTables(v1)
+        installTestSchema(db, v1)
 
         val v2 = SchemaResponse(
             schemaVersion = 2,
@@ -219,7 +215,7 @@ class SchemaManagerTests {
                 )
             )
         )
-        manager.migrateSchema(v2)
+        installTestSchema(db, v2)
 
         // Verify new column exists by inserting and reading back
         db.execute(
@@ -233,7 +229,6 @@ class SchemaManagerTests {
     @Test
     fun testDropSyncedTables() {
         val db = makeTestDB()
-        val manager = SchemaManager(db)
         val schema = SchemaResponse(
             schemaVersion = 1,
             schemaHash = "abc123",
@@ -255,14 +250,14 @@ class SchemaManagerTests {
             )
         )
 
-        manager.createSyncedTables(schema)
+        installTestSchema(db, schema)
 
         // Verify table and triggers exist
         assertEquals(1, db.query("SELECT name FROM sqlite_master WHERE type='table' AND name='orders'").size)
         assertCDCTriggers(db, "orders")
 
         // Drop
-        manager.dropSyncedTables(schema)
+        dropTestSyncedTables(db, schema.localTables())
 
         // Verify table and triggers are gone
         assertEquals(0, db.query("SELECT name FROM sqlite_master WHERE type='table' AND name='orders'").size)
@@ -272,7 +267,6 @@ class SchemaManagerTests {
     @Test
     fun testLocalOnlyTablesSurviveSchemaMigration() {
         val db = makeTestDB()
-        val manager = SchemaManager(db)
 
         // Create a local-only table with data using raw SQL
         db.writeTransaction { rawDb ->
@@ -301,7 +295,7 @@ class SchemaManagerTests {
                 )
             )
         )
-        manager.createSyncedTables(v1)
+        installTestSchema(db, v1)
 
         // Migrate to v2 -- server schema does NOT include app_settings
         val v2 = SchemaResponse(
@@ -324,7 +318,7 @@ class SchemaManagerTests {
                 )
             )
         )
-        manager.migrateSchema(v2)
+        installTestSchema(db, v2)
 
         // Verify local-only table still exists
         val tableRows = db.query("SELECT name FROM sqlite_master WHERE type='table' AND name='app_settings'")
@@ -342,7 +336,6 @@ class SchemaManagerTests {
     @Test
     fun testSyncedTableExtraColumnsSurviveMigration() {
         val db = makeTestDB()
-        val manager = SchemaManager(db)
 
         // Create synced table via schema v1
         val v1 = SchemaResponse(
@@ -365,7 +358,7 @@ class SchemaManagerTests {
                 )
             )
         )
-        manager.createSyncedTables(v1)
+        installTestSchema(db, v1)
 
         // Add a local-only column via raw SQL and insert data
         db.writeTransaction { rawDb ->
@@ -394,7 +387,7 @@ class SchemaManagerTests {
                 )
             )
         )
-        manager.migrateSchema(v2)
+        installTestSchema(db, v2)
 
         // Verify extra_data column still exists and data is preserved
         val row = db.queryOne("SELECT extra_data FROM orders WHERE id = ?", arrayOf("ord-1"))
@@ -405,7 +398,6 @@ class SchemaManagerTests {
     @Test
     fun testServerAddsNewColumnNonDestructive() {
         val db = makeTestDB()
-        val manager = SchemaManager(db)
 
         // Create v1 schema and insert data
         val v1 = SchemaResponse(
@@ -428,7 +420,7 @@ class SchemaManagerTests {
                 )
             )
         )
-        manager.createSyncedTables(v1)
+        installTestSchema(db, v1)
         db.execute("INSERT INTO orders (id, title, updated_at) VALUES ('ord-1', 'First Order', '2026-01-01T00:00:00Z')")
 
         // Migrate to v2 that adds a new column
@@ -453,7 +445,7 @@ class SchemaManagerTests {
                 )
             )
         )
-        manager.migrateSchema(v2)
+        installTestSchema(db, v2)
 
         // Verify old data is preserved
         val row = db.queryOne("SELECT id, title FROM orders WHERE id = ?", arrayOf("ord-1"))
@@ -475,7 +467,6 @@ class SchemaManagerTests {
     @Test
     fun testServerAddsNewTable() {
         val db = makeTestDB()
-        val manager = SchemaManager(db)
 
         // Create v1 with one table
         val v1 = SchemaResponse(
@@ -498,7 +489,7 @@ class SchemaManagerTests {
                 )
             )
         )
-        manager.createSyncedTables(v1)
+        installTestSchema(db, v1)
         db.execute("INSERT INTO orders (id, title, updated_at) VALUES ('ord-1', 'Order One', '2026-01-01T00:00:00Z')")
 
         // Migrate to v2 that adds a second table
@@ -536,7 +527,7 @@ class SchemaManagerTests {
                 )
             )
         )
-        manager.migrateSchema(v2)
+        installTestSchema(db, v2)
 
         // Verify first table is unchanged
         val orderRow = db.queryOne("SELECT title FROM orders WHERE id = ?", arrayOf("ord-1"))
@@ -560,7 +551,6 @@ class SchemaManagerTests {
     @Test
     fun testServerRemovesColumnNonDestructive() {
         val db = makeTestDB()
-        val manager = SchemaManager(db)
 
         // Create v1 with description column
         val v1 = SchemaResponse(
@@ -583,7 +573,7 @@ class SchemaManagerTests {
                 )
             )
         )
-        manager.createSyncedTables(v1)
+        installTestSchema(db, v1)
         db.execute("INSERT INTO orders (id, description, updated_at) VALUES ('ord-1', 'Important order', '2026-01-01T00:00:00Z')")
 
         // Migrate to v2 that removes "description"
@@ -606,7 +596,7 @@ class SchemaManagerTests {
                 )
             )
         )
-        manager.migrateSchema(v2)
+        installTestSchema(db, v2)
 
         // Verify "description" column still exists locally (non-destructive)
         val row = db.queryOne("SELECT description FROM orders WHERE id = ?", arrayOf("ord-1"))
@@ -617,7 +607,6 @@ class SchemaManagerTests {
     @Test
     fun testServerRemovesTableNonDestructive() {
         val db = makeTestDB()
-        val manager = SchemaManager(db)
 
         // Create v1 with two tables
         val v1 = SchemaResponse(
@@ -652,7 +641,7 @@ class SchemaManagerTests {
                 )
             )
         )
-        manager.createSyncedTables(v1)
+        installTestSchema(db, v1)
         db.execute("INSERT INTO items (id, product_name, updated_at) VALUES ('itm-1', 'Gadget', '2026-01-01T00:00:00Z')")
 
         // Migrate to v2 with only "orders" -- server removes "items"
@@ -675,7 +664,7 @@ class SchemaManagerTests {
                 )
             )
         )
-        manager.migrateSchema(v2)
+        installTestSchema(db, v2)
 
         // Verify "items" table still exists locally with data
         val tableRows = db.query("SELECT name FROM sqlite_master WHERE type='table' AND name='items'")
@@ -689,7 +678,6 @@ class SchemaManagerTests {
     @Test
     fun testPreExistingTablesFromSeedReconciled() {
         val db = makeTestDB()
-        val manager = SchemaManager(db)
 
         // Manually create a table matching a server schema table but missing one column (stale seed)
         db.writeTransaction { rawDb ->
@@ -718,7 +706,7 @@ class SchemaManagerTests {
                 )
             )
         )
-        manager.migrateSchema(schema)
+        installTestSchema(db, schema)
 
         // Verify the missing column was added
         val columns = mutableListOf<String>()
@@ -749,7 +737,6 @@ class SchemaManagerTests {
     @Test
     fun testIncompatibleTypeRejectsWholeMultiTableMigrationWithoutStateChange() {
         val db = makeTestDB()
-        val manager = SchemaManager(db)
 
         val v1 = SchemaResponse(
             schemaVersion = 1,
@@ -784,7 +771,7 @@ class SchemaManagerTests {
                 )
             )
         )
-        manager.createSyncedTables(v1)
+        installTestSchema(db, v1)
 
         db.writeTransaction { rawDb ->
             rawDb.execSQL("ALTER TABLE orders ADD COLUMN local_note TEXT")
@@ -866,7 +853,8 @@ class SchemaManagerTests {
             )
         )
         val error = assertThrows(SynchroError.InvalidResponse::class.java) {
-            manager.reconcileLocalSchema(
+            installTestSchema(
+                db,
                 schemaVersion = v2.schemaVersion,
                 schemaHash = v2.schemaHash,
                 tables = v2.localTables(),
@@ -888,7 +876,6 @@ class SchemaManagerTests {
     @Test
     fun testPrimaryKeyShapeChangeIsRejectedWithoutReplacingRowsOrMetadata() {
         val db = makeTestDB()
-        val manager = SchemaManager(db)
         val v1 = SchemaResponse(
             schemaVersion = 1,
             schemaHash = "pk-v1",
@@ -909,7 +896,7 @@ class SchemaManagerTests {
                 )
             ),
         )
-        manager.createSyncedTables(v1)
+        installTestSchema(db, v1)
         db.execute(
             "INSERT INTO orders (id, alternate_id, updated_at) VALUES (?, ?, ?)",
             arrayOf("order-1", "alternate-1", "2026-01-01T00:00:00Z"),
@@ -940,7 +927,7 @@ class SchemaManagerTests {
         )
 
         val error = assertThrows(SynchroError.InvalidResponse::class.java) {
-            manager.migrateSchema(v2)
+            installTestSchema(db, v2)
         }
         assertTrue(error.details.contains("primary key"))
         assertEquals(rowsBefore, db.query("SELECT * FROM orders"))
@@ -952,7 +939,6 @@ class SchemaManagerTests {
     @Test
     fun testAdditiveDdlFailureRollsBackEarlierDdlAndTargetMetadata() {
         val db = makeTestDB()
-        val manager = SchemaManager(db)
         val baseTables = makeManifest(
             listOf(
                 TableSchema(
@@ -975,7 +961,7 @@ class SchemaManagerTests {
                 ),
             )
         ).localTables()
-        manager.reconcileLocalSchema(1, "ddl-v1", baseTables)
+        installTestSchema(db, 1, "ddl-v1", baseTables)
 
         val validColumn = LocalSchemaColumn(
             fieldID = "field-orders-notes", name = "notes", logicalType = "string",
@@ -996,7 +982,7 @@ class SchemaManagerTests {
         val archivesBefore = db.query("SELECT * FROM _synchro_schema_archives ORDER BY schema_version, schema_hash")
 
         assertThrows(android.database.sqlite.SQLiteException::class.java) {
-            manager.reconcileLocalSchema(2, "ddl-v2", targetTables)
+            installTestSchema(db, 2, "ddl-v2", targetTables)
         }
 
         assertEquals(
@@ -1012,7 +998,6 @@ class SchemaManagerTests {
     @Test
     fun testConnectScopeCursorUpdatesAndAffectedScopesAreApplied() {
         val db = makeTestDB()
-        val manager = SchemaManager(db)
         val schema = SchemaResponse(
             schemaVersion = 1,
             schemaHash = PROTOCOL_TEST_SCHEMA_HASH,
@@ -1033,13 +1018,14 @@ class SchemaManagerTests {
             ),
         )
         val tables = schema.localTables()
-        manager.reconcileLocalSchema(1, PROTOCOL_TEST_SCHEMA_HASH, tables)
+        installTestSchema(db, 1, PROTOCOL_TEST_SCHEMA_HASH, tables)
         db.writeTransaction { connection ->
             SynchroMeta.upsertScope(connection, "orders:existing", "old", "old")
             SynchroMeta.upsertScope(connection, "orders:affected", "old", "old")
         }
 
-        manager.reconcileLocalSchema(
+        installTestSchema(
+            db,
             schemaVersion = 2,
             schemaHash = "1".repeat(64),
             tables = tables,
@@ -1092,14 +1078,13 @@ class SchemaManagerTests {
         }
 
         val db = makeTestDB()
-        val manager = SchemaManager(db)
         val oldTable = localTable("old")
         val targetTable = localTable("target")
         val oldHash = "0".repeat(64)
         val targetHash = "1".repeat(64)
         val scopeID = "orders:user-1"
         val serverVersion = "server-version-1"
-        manager.reconcileLocalSchema(1, oldHash, listOf(oldTable))
+        installTestSchema(db, 1, oldHash, listOf(oldTable))
 
         val oldRow = JsonObject(
             mapOf(
@@ -1139,7 +1124,8 @@ class SchemaManagerTests {
             )
         }
 
-        manager.reconcileLocalSchema(
+        installTestSchema(
+            db,
             schemaVersion = 2,
             schemaHash = targetHash,
             tables = listOf(targetTable),

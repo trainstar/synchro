@@ -1,10 +1,14 @@
 package com.trainstar.synchro.rn
 
 import android.util.Base64
-import android.database.sqlite.SQLiteDatabase
 import android.os.Process
 import com.facebook.react.bridge.*
 import com.trainstar.synchro.*
+import com.trainstar.synchro.inspection.SynchroInspection
+import com.trainstar.synchro.inspection.TransportObservationCollector
+import com.trainstar.synchro.inspection.TransportObservationSnapshot
+import com.trainstar.synchro.inspection.TransportOperationClass
+import com.trainstar.synchro.inspection.withTransportObservation
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.*
 import kotlinx.coroutines.channels.Channel
@@ -151,6 +155,7 @@ class SynchroModule(reactContext: ReactApplicationContext) :
             } else {
                 0
             }
+            val requireNewDatabase = config.getBoolean("requireNewDatabase")
             require(transportCapacity in 0..512) { "Invalid transport observation capacity" }
             val nextTransportObservationCollector = if (transportCapacity == 0) {
                 null
@@ -166,7 +171,7 @@ class SynchroModule(reactContext: ReactApplicationContext) :
                 }
             }
 
-            val synchroConfig = SynchroConfig(
+            val baseConfig = SynchroConfig(
                 dbPath = dbPath,
                 serverURL = serverURL,
                 authProvider = {
@@ -192,14 +197,19 @@ class SynchroModule(reactContext: ReactApplicationContext) :
                 pullPageSize = pullPageSize,
                 pushBatchSize = pushBatchSize,
                 seedDatabasePath = seedDatabasePath,
-                transportObservationCollector = nextTransportObservationCollector,
             )
+            val synchroConfig = nextTransportObservationCollector?.let(baseConfig::withTransportObservation)
+                ?: baseConfig
 
             scope.launch {
                 lifecycleMutex.withLock {
                     try {
                         clearRuntimeState()
                         client?.close()
+                        if (requireNewDatabase && reactApplicationContext.getDatabasePath(dbPath).exists()) {
+                            promise.reject("INVALID_CONFIG", "Database already exists")
+                            return@withLock
+                        }
                         val nextClient = SynchroClient(synchroConfig, reactApplicationContext)
                         synchronized(transactionLock) {
                             client = nextClient
@@ -934,92 +944,108 @@ class SynchroModule(reactContext: ReactApplicationContext) :
             return
         }
         try {
-            val configuredPath = File(c.path)
-            val databasePath = if (configuredPath.isAbsolute) {
-                configuredPath
-            } else {
-                reactApplicationContext.getDatabasePath(c.path)
+            val inspection = SynchroInspection(c)
+            val state = inspection.clientState()
+            val counts = inspection.clientStateCounts()
+            val schema: Any = state.schema?.let {
+                JSONObject().put("version", it.version).put("hash", it.hash)
+            } ?: JSONObject.NULL
+            val scopeStates = JSONArray(state.scopeStates.map { value ->
+                JSONObject().apply {
+                    put("scope_id", value.scopeID)
+                    put("cursor", value.cursor ?: JSONObject.NULL)
+                    put("checksum", value.checksum ?: JSONObject.NULL)
+                    put("local_checksum", value.localChecksum)
+                    put("generation", value.generation)
+                }
+            })
+            val scopeRows = JSONArray(state.scopeRows.map { value ->
+                JSONObject().apply {
+                    put("scope_id", value.scopeID)
+                    put("table_name", value.tableName)
+                    put("record_id", value.recordID)
+                    put("checksum", value.checksum)
+                    put("generation", value.generation)
+                }
+            })
+            val attempts = JSONArray(state.rebuildAttempts.map { value ->
+                JSONObject().apply {
+                    put("scope_id", value.scopeID)
+                    put("rebuild_id", value.rebuildID)
+                    put("client_generation", value.clientGeneration)
+                    put("schema_version", value.schema.version)
+                    put("schema_hash", value.schema.hash)
+                    put("generation", value.generation)
+                    put("cursor", value.cursor ?: JSONObject.NULL)
+                    put("page_limit", value.pageLimit)
+                }
+            })
+            promise.resolve(JSONObject().apply {
+                put("schema", schema)
+                put("scope_states", scopeStates)
+                put("scope_rows", scopeRows)
+                put("rebuild_attempts", attempts)
+                put("application_row_count", counts.applicationRowCount)
+                put("mutation_ledger_count", counts.mutationLedgerCount)
+                put("mutation_outcome_count", counts.mutationOutcomeCount)
+                put("sealed_batch_count", counts.sealedBatchCount)
+                put("rejected_mutation_count", counts.rejectedMutationCount)
+                put("scope_state_count", counts.scopeStateCount)
+                put("scope_row_count", counts.scopeRowCount)
+                put("provenance_count", counts.provenanceCount)
+                put("row_metadata_count", counts.rowMetadataCount)
+                put("rebuild_attempt_count", counts.rebuildAttemptCount)
+                put("rebuild_receipt_count", counts.rebuildReceiptCount)
+                put(
+                    "provenance_maintenance_work_cursor",
+                    state.provenanceMaintenanceWorkCursor.toString(),
+                )
+            }.toString())
+        } catch (error: Exception) {
+            rejectWithError(promise, error)
+        }
+    }
+
+    @ReactMethod
+    override fun inspectDurableState(tableName: String, recordID: String, promise: Promise) {
+        val c = client ?: run {
+            promise.reject("NOT_CONNECTED", "Client not initialized")
+            return
+        }
+        try {
+            val inspection = SynchroInspection(c)
+            val metadata = inspection.rowMetadata().filter {
+                it.tableName == tableName && it.recordID == recordID
             }
-            SQLiteDatabase.openDatabase(
-                databasePath.absolutePath,
-                null,
-                SQLiteDatabase.OPEN_READONLY,
-            ).use { database ->
-                val metadata = mutableMapOf<String, String>()
-                database.rawQuery(
-                    "SELECT key, value FROM _synchro_meta WHERE key IN ('schema_version', 'schema_hash')",
-                    null,
-                ).use { cursor ->
-                    while (cursor.moveToNext()) {
-                        metadata[cursor.getString(0)] = cursor.getString(1)
-                    }
+            require(metadata.size <= 1) { "Row metadata identity is ambiguous" }
+            val metadataJson: Any = metadata.firstOrNull()?.let { value ->
+                JSONObject().apply {
+                    put("table_name", value.tableName)
+                    put("record_id", value.recordID)
+                    put("server_version", value.serverVersion)
+                    put("row_checksum", value.rowChecksumJSON ?: JSONObject.NULL)
                 }
-                val version = metadata["schema_version"]?.toLongOrNull() ?: 0L
-                val hash = metadata["schema_hash"].orEmpty()
-                val schema: Any = if (version > 0 && hash.isNotEmpty()) {
-                    JSONObject().put("version", version).put("hash", hash)
-                } else {
-                    JSONObject.NULL
+            } ?: JSONObject.NULL
+            val receipts = JSONArray(inspection.rebuildReceipts().map { value ->
+                JSONObject().apply {
+                    put("rebuild_id_fingerprint", value.rebuildIDFingerprint)
+                    put("page_count", value.pageCount)
+                    put("returned_record_count", value.returnedRecordCount)
+                    put("request_chain_expected", JSONArray(value.requestChainExpected))
+                    put("request_chain_observed", JSONArray(value.requestChainObserved))
+                    put("record_identities_hex", JSONArray(value.recordIdentitiesHex))
+                    put("received_row_checksums", JSONArray(value.receivedRowChecksums))
+                    put("computed_row_checksums", JSONArray(value.computedRowChecksums))
+                    put("computed_scope_checksum", value.computedScopeChecksum ?: JSONObject.NULL)
+                    put("final_scope_checksum", value.finalScopeChecksum ?: JSONObject.NULL)
+                    put("stored_scope_checksum", value.storedScopeChecksum ?: JSONObject.NULL)
+                    put("local_scope_checksum", value.localScopeChecksum ?: JSONObject.NULL)
                 }
-
-                val scopeStates = JSONArray()
-                database.rawQuery(
-                    "SELECT scope_id, cursor, checksum, local_checksum, generation FROM _synchro_scopes ORDER BY scope_id",
-                    null,
-                ).use { cursor ->
-                    while (cursor.moveToNext()) {
-                        scopeStates.put(JSONObject().apply {
-                            put("scope_id", cursor.getString(0))
-                            put("cursor", if (cursor.isNull(1)) JSONObject.NULL else cursor.getString(1))
-                            put("checksum", if (cursor.isNull(2)) JSONObject.NULL else cursor.getString(2))
-                            put("local_checksum", cursor.getString(3))
-                            put("generation", cursor.getLong(4))
-                        })
-                    }
-                }
-
-                val scopeRows = JSONArray()
-                database.rawQuery(
-                    "SELECT scope_id, table_name, record_id, checksum, generation FROM _synchro_scope_rows ORDER BY scope_id, table_name, record_id",
-                    null,
-                ).use { cursor ->
-                    while (cursor.moveToNext()) {
-                        scopeRows.put(JSONObject().apply {
-                            put("scope_id", cursor.getString(0))
-                            put("table_name", cursor.getString(1))
-                            put("record_id", cursor.getString(2))
-                            put("checksum", cursor.getString(3))
-                            put("generation", cursor.getLong(4))
-                        })
-                    }
-                }
-
-                val attempts = JSONArray()
-                database.rawQuery(
-                    "SELECT scope_id, rebuild_id, client_generation, schema_version, schema_hash, generation, cursor, page_limit FROM _synchro_rebuild_attempts ORDER BY scope_id",
-                    null,
-                ).use { cursor ->
-                    while (cursor.moveToNext()) {
-                        attempts.put(JSONObject().apply {
-                            put("scope_id", cursor.getString(0))
-                            put("rebuild_id", cursor.getString(1))
-                            put("client_generation", cursor.getLong(2))
-                            put("schema_version", cursor.getLong(3))
-                            put("schema_hash", cursor.getString(4))
-                            put("generation", cursor.getLong(5))
-                            put("cursor", if (cursor.isNull(6)) JSONObject.NULL else cursor.getString(6))
-                            put("page_limit", cursor.getInt(7))
-                        })
-                    }
-                }
-
-                promise.resolve(JSONObject().apply {
-                    put("schema", schema)
-                    put("scope_states", scopeStates)
-                    put("scope_rows", scopeRows)
-                    put("rebuild_attempts", attempts)
-                }.toString())
-            }
+            })
+            promise.resolve(JSONObject().apply {
+                put("row_metadata", metadataJson)
+                put("rebuild_receipts", receipts)
+            }.toString())
         } catch (error: Exception) {
             rejectWithError(promise, error)
         }

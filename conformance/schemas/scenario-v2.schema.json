@@ -75,6 +75,11 @@
       "uniqueItems": true,
       "items": { "$ref": "#/$defs/step" }
     },
+    "measurement_bindings": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/measurementBinding" }
+    },
     "wire_expectations": {
       "type": "array",
       "uniqueItems": true,
@@ -86,7 +91,17 @@
       "uniqueItems": true,
       "items": { "$ref": "#/$defs/assertion" }
     },
-    "native_execution": { "$ref": "#/$defs/nativeExecutionPlan" }
+    "native_execution": { "$ref": "#/$defs/nativeExecutionPlan" },
+    "native_identity_aliases": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/nativeIdentityAlias" }
+    },
+    "native_lifecycle_boundaries": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/nativeLifecycleBoundary" }
+    }
   },
   "allOf": [
     {
@@ -102,8 +117,53 @@
         },
         "required": ["proof_obligations"]
       },
-      "then": { "required": ["native_execution"] },
-      "else": { "not": { "required": ["native_execution"] } }
+      "then": {
+        "oneOf": [
+          {
+            "required": ["native_execution"],
+            "not": {
+              "anyOf": [
+                { "required": ["native_identity_aliases"] },
+                { "required": ["native_lifecycle_boundaries"] }
+              ]
+            },
+            "properties": {
+              "steps": {
+                "items": { "not": { "required": ["native_binding"] } }
+              }
+            }
+          },
+          {
+            "required": ["native_identity_aliases"],
+            "not": { "required": ["native_execution"] },
+            "properties": {
+              "steps": {
+                "items": { "required": ["native_binding"] }
+              }
+            }
+          }
+        ]
+      },
+      "else": {
+        "allOf": [
+          {
+            "not": {
+              "anyOf": [
+                { "required": ["native_execution"] },
+                { "required": ["native_identity_aliases"] },
+                { "required": ["native_lifecycle_boundaries"] }
+              ]
+            }
+          },
+          {
+            "properties": {
+              "steps": {
+                "items": { "not": { "required": ["native_binding"] } }
+              }
+            }
+          }
+        ]
+      }
     }
   ],
   "$defs": {
@@ -118,6 +178,152 @@
     "nativeCallId": {
       "type": "string",
       "pattern": "^[a-z][a-z0-9_-]*$"
+    },
+    "nativeStepBinding": {
+      "description": "A real native proof boundary. Equal call IDs bind one public call.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind"],
+      "properties": {
+        "kind": { "type": "string", "enum": ["controller", "artifact", "local-write", "public-call", "process"] },
+        "user_id": { "type": "string", "minLength": 1 },
+        "client_id": { "type": "string", "minLength": 1 },
+        "call_id": { "$ref": "#/$defs/nativeCallId" },
+        "stage": { "type": "string", "enum": ["synchronous", "begin", "await-step", "await-call"] },
+        "method": { "type": "string", "enum": ["start", "sync-now", "retry-after-error", "reset-schema-and-start"] },
+        "completion": { "type": "string", "enum": ["idle", "blocked", "error"] }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "kind": { "const": "controller" } }, "required": ["kind"] },
+          "then": {
+            "not": {
+              "anyOf": [
+                { "required": ["user_id"] },
+                { "required": ["client_id"] },
+                { "required": ["call_id"] },
+                { "required": ["stage"] },
+                { "required": ["method"] },
+                { "required": ["completion"] }
+              ]
+            }
+          },
+          "else": { "required": ["user_id", "client_id"] }
+        },
+        {
+          "if": { "properties": { "kind": { "const": "public-call" } }, "required": ["kind"] },
+          "then": {
+            "required": ["call_id", "stage"],
+            "allOf": [
+              {
+                "if": { "properties": { "stage": { "const": "synchronous" } }, "required": ["stage"] },
+                "then": { "required": ["method", "completion"] }
+              },
+              {
+                "if": { "properties": { "stage": { "const": "begin" } }, "required": ["stage"] },
+                "then": {
+                  "required": ["method"],
+                  "not": { "required": ["completion"] }
+                }
+              },
+              {
+                "if": { "properties": { "stage": { "const": "await-step" } }, "required": ["stage"] },
+                "then": {
+                  "not": {
+                    "anyOf": [
+                      { "required": ["method"] },
+                      { "required": ["completion"] }
+                    ]
+                  }
+                }
+              },
+              {
+                "if": { "properties": { "stage": { "const": "await-call" } }, "required": ["stage"] },
+                "then": {
+                  "required": ["completion"],
+                  "not": { "required": ["method"] }
+                }
+              }
+            ]
+          },
+          "else": {
+            "not": {
+              "anyOf": [
+                { "required": ["call_id"] },
+                { "required": ["stage"] },
+                { "required": ["method"] },
+                { "required": ["completion"] }
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "nativeIdentityAlias": {
+      "description": "One typed authored identity value that a native proof resolves to one runtime value.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "alias", "value", "step_ids", "expectation_ids"],
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": [
+            "batch-id",
+            "checksum",
+            "client-generation",
+            "cursor",
+            "mutation-id",
+            "primary-key",
+            "rebuild-id",
+            "row-version",
+            "schema",
+            "scope",
+            "scope-set-version",
+            "server-version",
+            "table"
+          ]
+        },
+        "alias": { "$ref": "#/$defs/nativeClientKey" },
+        "value": {
+          "oneOf": [
+            { "type": "string", "minLength": 1 },
+            { "type": "integer", "minimum": -9007199254740991, "maximum": 9007199254740991 },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["version", "hash"],
+              "properties": {
+                "version": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 },
+                "hash": { "$ref": "#/$defs/sha256" }
+              }
+            }
+          ]
+        },
+        "step_ids": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/stepId" }
+        },
+        "expectation_ids": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/expectationId" }
+        }
+      }
+    },
+    "nativeLifecycleBoundary": {
+      "description": "One public lifecycle call placed after a terminal authored step.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "phase", "after_step_id", "user_id", "client_id", "method"],
+      "properties": {
+        "id": { "$ref": "#/$defs/nativeClientKey" },
+        "phase": { "type": "string", "enum": ["setup", "exercise", "cleanup"] },
+        "after_step_id": { "$ref": "#/$defs/stepId" },
+        "user_id": { "type": "string", "minLength": 1 },
+        "client_id": { "type": "string", "minLength": 1 },
+        "method": { "const": "stop" }
+      }
     },
     "nativeExecutionPlan": {
       "type": "object",
@@ -1058,7 +1264,7 @@
     "measurementSample": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["measurement_id", "stratum_id", "sample_id", "parameters"],
+      "required": ["measurement_id", "stratum_id", "sample_id", "parameters", "operation"],
       "properties": {
         "measurement_id": { "$ref": "#/$defs/measurementId" },
         "stratum_id": { "$ref": "#/$defs/stratumId" },
@@ -1066,7 +1272,32 @@
           "type": "string",
           "pattern": "^SAMPLE-[A-Z0-9]+(?:-[A-Z0-9]+)*-[0-9]{3}$"
         },
-        "parameters": { "type": "object" }
+        "parameters": { "type": "object" },
+        "operation": { "$ref": "#/$defs/measurementOperationTarget" }
+      }
+    },
+    "measurementOperationId": {
+      "type": "string",
+      "pattern": "^MOP-[A-Z0-9]+(?:-[A-Z0-9]+)*-[0-9]{3}$"
+    },
+    "measurementOperationTarget": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "family", "boundary", "value"],
+      "properties": {
+        "id": { "$ref": "#/$defs/measurementOperationId" },
+        "family": { "type": "string", "pattern": "^[a-z]+(?:[-_][a-z0-9]+)*$" },
+        "boundary": { "type": "string", "pattern": "^[a-z]+(?:-[a-z0-9]+)*$" },
+        "value": { "not": { "type": "null" } }
+      }
+    },
+    "measurementBinding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["step_id", "measurement_sample"],
+      "properties": {
+        "step_id": { "$ref": "#/$defs/stepId" },
+        "measurement_sample": { "$ref": "#/$defs/measurementSample" }
       }
     },
     "step": {
@@ -1076,8 +1307,9 @@
       "properties": {
         "id": { "$ref": "#/$defs/stepId" },
         "phase": { "type": "string", "enum": ["setup", "exercise", "cleanup"] },
-        "transport": { "type": "string", "enum": ["http", "local", "artifact", "process", "model"] },
-        "description": { "type": "string", "minLength": 1 },
+		"transport": { "type": "string", "enum": ["http", "local", "artifact", "process", "model"] },
+		"description": { "type": "string", "minLength": 1 },
+		"native_binding": { "$ref": "#/$defs/nativeStepBinding" },
 		"measurement_sample": { "$ref": "#/$defs/measurementSample" },
 		"operation": { "$ref": "#/$defs/operation" },
 		"expected_outcome": { "$ref": "#/$defs/expectedOutcome" }

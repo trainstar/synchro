@@ -10,6 +10,7 @@ const MAX_COMPACTION_BATCH_SIZE: i32 = 10_000;
 fn synchro_compact(
     p_stale_threshold: default!(&str, "'30 days'"),
     p_batch_size: default!(i32, "10000"),
+    p_stale_at: default!(Option<&str>, "NULL"),
 ) -> pgrx::JsonB {
     if !(1..=MAX_COMPACTION_BATCH_SIZE).contains(&p_batch_size) {
         pgrx::error!(
@@ -18,8 +19,8 @@ fn synchro_compact(
         );
     }
     Spi::connect_mut(|client| {
-        validate_stale_threshold(client, p_stale_threshold);
-        let deactivated = deactivate_stale_clients(client, p_stale_threshold);
+        validate_stale_inputs(client, p_stale_threshold, p_stale_at);
+        let deactivated = deactivate_stale_clients(client, p_stale_threshold, p_stale_at);
         lock_retention_state(client);
         let (deleted_entries, last_deleted_seq) = delete_acknowledged_effects(client, p_batch_size);
 
@@ -31,39 +32,46 @@ fn synchro_compact(
     })
 }
 
-fn validate_stale_threshold(client: &SpiClient<'_>, threshold: &str) {
+fn validate_stale_inputs(client: &SpiClient<'_>, threshold: &str, stale_at: Option<&str>) {
     let valid = client
         .select(
             "SELECT pg_catalog.isfinite(parsed.value)
                     AND parsed.value > interval '0 seconds'
                     AND pg_catalog.isfinite(
-                        pg_catalog.statement_timestamp() - parsed.value
+                        COALESCE($2::timestamptz, pg_catalog.statement_timestamp())
+                    )
+                    AND pg_catalog.isfinite(
+                        COALESCE($2::timestamptz, pg_catalog.statement_timestamp()) - parsed.value
                     ) AS valid
              FROM (SELECT $1::interval AS value) parsed",
             None,
-            &[threshold.into()],
+            &[threshold.into(), stale_at.into()],
         )
-        .unwrap_or_else(|_| pgrx::error!("compaction stale threshold is invalid"))
+        .unwrap_or_else(|_| pgrx::error!("compaction stale inputs are invalid"))
         .first()
         .get_by_name::<bool, &str>("valid")
-        .unwrap_or_else(|_| pgrx::error!("reading compaction stale threshold validation failed"))
+        .unwrap_or_else(|_| pgrx::error!("reading compaction stale input validation failed"))
         .unwrap_or(false);
     if !valid {
-        pgrx::error!("compaction stale threshold must be finite and positive");
+        pgrx::error!("compaction stale inputs must be finite and the threshold must be positive");
     }
 }
 
-fn deactivate_stale_clients(client: &mut SpiClient<'_>, threshold: &str) -> i64 {
+fn deactivate_stale_clients(
+    client: &mut SpiClient<'_>,
+    threshold: &str,
+    stale_at: Option<&str>,
+) -> i64 {
     match client.update(
         "UPDATE sync_clients SET is_active = false, updated_at = now()
          WHERE is_active = true
-           AND GREATEST(
-               created_at,
-               COALESCE(last_sync_at, '-infinity'::timestamptz),
-               COALESCE(last_acknowledged_at, '-infinity'::timestamptz)
-           ) < now() - $1::interval",
+            AND GREATEST(
+                created_at,
+                COALESCE(last_sync_at, '-infinity'::timestamptz),
+                COALESCE(last_acknowledged_at, '-infinity'::timestamptz)
+            ) < COALESCE($2::timestamptz, pg_catalog.statement_timestamp()) - $1::interval",
         None,
-        &[threshold.into()],
+        &[threshold.into(), stale_at.into()],
     ) {
         Ok(tup) => tup.len() as i64,
         Err(error) => pgrx::error!("deactivating stale clients: {}", error),

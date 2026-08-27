@@ -6,16 +6,16 @@ Synchro releases are promoted from a verified release candidate. The specificati
 
 The public v0.3.0 matrix is:
 
-| Surface | Required tracks |
+| Surface | Tier 1 required tracks |
 | --- | --- |
-| Server | PostgreSQL 18 only |
+| Server | PostgreSQL 18 on `linux-x64` and `macos-arm64` extension architectures |
 | Swift | iOS 16 and current stable iOS |
-| Swift | macOS 13 and current stable macOS |
 | Kotlin | Android API 24 and current stable Android API |
-| React Native | React Native 0.83.x on iOS 16 and current stable iOS |
-| React Native | React Native 0.83.x on Android API 24 and current stable Android API |
+| React Native | React Native 0.83.x on current stable iOS and current stable Android |
 
-PostgreSQL 14 through 17 are outside v0.3.0 verification. A current-stable track is resolved to exact operating system, SDK, IDE, emulator or simulator, and toolchain versions when the release candidate begins. Those resolved versions belong in generated evidence, not in the moving authored policy.
+Swift on macOS is Tier 2. It is built and tested in CI without certification. macOS remains an Apple toolchain and Swift scenario host.
+
+PostgreSQL 14 through 17 are outside v0.3.0 verification. A current-stable track resolves to exact environment versions when the release candidate begins. Those versions belong in generated evidence, not in moving authored policy. A new Tier 1 cell requires named production demand that justifies its recurring evidence cost.
 
 ## Policy And Evidence
 

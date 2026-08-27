@@ -5,6 +5,7 @@ use pgrx::spi::SpiClient;
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 
+use crate::spi_helpers::{current_utc_timestamp, is_lower_hex, required_text};
 use crate::stream_position::StreamPosition;
 
 type HmacSha256 = Hmac<Sha256>;
@@ -42,7 +43,7 @@ impl ScopeCursorContext {
             || client_binding.is_empty()
             || client_generation <= 0
             || scope_id.is_empty()
-            || !is_lower_sha256(schema_hash)
+            || !is_lower_hex(schema_hash, 64)
         {
             return Err("incremental cursor context is invalid".to_string());
         }
@@ -118,7 +119,7 @@ pub(crate) fn issue_scope_cursor(
         schema_hash: context.schema_hash.clone(),
         membership_generation: scope.membership_generation,
         retention_generation: scope.retention_generation,
-        issued_at: current_utc_timestamp(client)?,
+        issued_at: current_utc_timestamp(client, "incremental cursor issue time", "")?,
     };
     let payload = canonical_payload(&payload)?;
     let signature = sign(&key.secret, &payload)?;
@@ -174,7 +175,7 @@ fn payload_is_structurally_valid(payload: &ScopeCursorPayload) -> bool {
         && !payload.client_binding.is_empty()
         && payload.client_generation > 0
         && !payload.scope_id.is_empty()
-        && is_lower_sha256(&payload.schema_hash)
+        && is_lower_hex(&payload.schema_hash, 64)
         && payload.membership_generation > 0
         && payload.retention_generation > 0
         && chrono::DateTime::parse_from_rfc3339(&payload.issued_at).is_ok()
@@ -310,10 +311,10 @@ fn load_scope_state(client: &SpiClient<'_>, scope_id: &str) -> Result<ScopeState
         .into_iter()
         .next()
         .ok_or_else(|| "scope state is missing".to_string())?;
-    let stream_generation = required_text(&row, "stream_generation")?;
+    let stream_generation = required_text(&row, "stream_generation", "")?;
     let membership_generation = required_positive_i64(&row, "membership_generation")?;
     let retention_generation = required_positive_i64(&row, "retention_generation")?;
-    let kind = required_text(&row, "floor_position_kind")?;
+    let kind = required_text(&row, "floor_position_kind", "")?;
     let commit_lsn = row
         .get_by_name::<String, &str>("floor_commit_lsn")
         .map_err(|error| format!("reading retention floor commit LSN: {error}"))?;
@@ -337,40 +338,9 @@ fn load_scope_state(client: &SpiClient<'_>, scope_id: &str) -> Result<ScopeState
     })
 }
 
-fn current_utc_timestamp(client: &SpiClient<'_>) -> Result<String, String> {
-    let rows = client
-        .select(
-            "SELECT to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS issued_at",
-            None,
-            &[],
-        )
-        .map_err(|error| format!("reading incremental cursor issue time: {error}"))?;
-    required_text(
-        &rows
-            .into_iter()
-            .next()
-            .ok_or_else(|| "incremental cursor issue time is missing".to_string())?,
-        "issued_at",
-    )
-}
-
-fn required_text(row: &pgrx::spi::SpiHeapTupleData<'_>, name: &str) -> Result<String, String> {
-    row.get_by_name::<String, &str>(name)
-        .map_err(|error| format!("reading {name}: {error}"))?
-        .filter(|value| !value.is_empty())
-        .ok_or_else(|| format!("{name} is missing"))
-}
-
 fn required_positive_i64(row: &pgrx::spi::SpiHeapTupleData<'_>, name: &str) -> Result<i64, String> {
     row.get_by_name::<i64, &str>(name)
         .map_err(|error| format!("reading {name}: {error}"))?
         .filter(|value| *value > 0)
         .ok_or_else(|| format!("{name} is invalid"))
-}
-
-fn is_lower_sha256(value: &str) -> bool {
-    value.len() == 64
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }

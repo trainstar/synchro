@@ -70,7 +70,7 @@ func TestScenarioStructJSONTags(t *testing.T) {
 		value any
 		tags  []string
 	}{
-		{Scenario{}, []string{"$schema", "schema_version", "id", "title", "description,omitempty", "requirement_ids", "normative_references", "proof_types", "proof_obligations", "ownership", "model", "barrier_plan", "fault_plans", "replay", "negative_controls", "steps", "wire_expectations", "assertions", "native_execution,omitempty"}},
+		{Scenario{}, []string{"$schema", "schema_version", "id", "title", "description,omitempty", "requirement_ids", "normative_references", "proof_types", "proof_obligations", "ownership", "model", "barrier_plan", "fault_plans", "replay", "negative_controls", "steps", "wire_expectations", "assertions", "native_execution,omitempty", "native_identity_aliases,omitempty", "native_lifecycle_boundaries,omitempty", "measurement_bindings,omitempty"}},
 		{NativeExecutionPlan{}, []string{"version", "clients", "actions"}},
 		{NativeClient{}, []string{"key", "user_id", "client_id", "database_key"}},
 		{NativeAction{}, []string{"id", "phase", "actor", "command", "covers_step_ids", "parameters"}},
@@ -81,6 +81,8 @@ func TestScenarioStructJSONTags(t *testing.T) {
 		{NativeAwaitCallParameters{}, []string{"client_key", "call_id", "completion"}},
 		{NativeAwaitStepParameters{}, []string{"client_key", "call_id,omitempty"}},
 		{NativeLifecycleParameters{}, []string{"client_key", "operation"}},
+		{NativeIdentityAlias{}, []string{"kind", "alias", "value", "step_ids", "expectation_ids"}},
+		{NativeLifecycleBoundary{}, []string{"id", "phase", "after_step_id", "user_id", "client_id", "method"}},
 		{NativeProcessStepParameters{}, []string{"client_key"}},
 		{NativeProcessBoundaryParameters{}, []string{"client_key", "boundary", "after_action_id"}},
 		{NativeCaptureParameters{}, []string{"client_keys", "sources", "expectation_ids"}},
@@ -114,7 +116,13 @@ func TestScenarioStructJSONTags(t *testing.T) {
 		{InjectionParameters{}, []string{"scenario", "defect", "precondition,omitempty"}},
 		{ReplaySpec{}, []string{"mode", "seed_required", "barrier_trace_required"}},
 		{NegativeControl{}, []string{"control_id", "requirement_id", "fault_id", "subject_artifact_inventory_ids", "detected_by"}},
-		{Step{}, []string{"id", "phase", "transport", "description,omitempty", "measurement_sample,omitempty", "operation", "expected_outcome"}},
+		{Step{}, []string{"id", "phase", "transport", "description,omitempty", "native_binding,omitempty", "measurement_sample,omitempty", "operation", "expected_outcome"}},
+		{NativeStepBinding{}, []string{"kind", "user_id,omitempty", "client_id,omitempty", "call_id,omitempty", "stage,omitempty", "method,omitempty", "completion,omitempty"}},
+		{MeasurementOperationTarget{}, []string{"id", "family", "boundary", "value"}},
+		{MeasurementSample{}, []string{"measurement_id", "stratum_id", "sample_id", "parameters", "operation"}},
+		{MeasurementBinding{}, []string{"step_id", "measurement_sample"}},
+		{MeasurementMetricValue{}, []string{"metric_id", "value"}},
+		{MeasurementObservation{}, []string{"step_id", "operation", "measurement_id", "stratum_id", "sample_id", "metrics"}},
 		{ExpectedOutcome{}, []string{"disposition", "error_code,omitempty"}},
 		{WireExpectation{}, []string{"step_id", "assertion_id", "contract_case", "http_status", "error_code", "retryable"}},
 		{Assertion{}, []string{"id", "requirement_ids", "description", "expectation_ids", "predicate", "oracle", "detects_control_ids"}},

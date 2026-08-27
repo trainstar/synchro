@@ -136,19 +136,19 @@ type OperatorExecutor struct {
 	harness *Harness
 }
 
-// PrepareNativeRebuildRequests prepares the fixed native rebuild-requests fixture.
-func (executor *OperatorExecutor) PrepareNativeRebuildRequests(ctx context.Context) error {
+// UnregisterDefaultSharedScope removes the default shared assignment from native fixtures.
+func (executor *OperatorExecutor) UnregisterDefaultSharedScope(ctx context.Context) error {
 	if ctx == nil {
-		return errors.New("native rebuild requests context is required")
+		return errors.New("native shared scope context is required")
 	}
 	if err := ctx.Err(); err != nil {
-		return errors.New("native rebuild requests context expired")
+		return errors.New("native shared scope context expired")
 	}
 	if err := executor.exec(ctx, "SELECT synchro.synchro_unregister_shared_scope('cf:global')"); err != nil {
-		return errors.New("prepare native rebuild requests failed")
+		return errors.New("unregister default native shared scope failed")
 	}
 	if err := ctx.Err(); err != nil {
-		return errors.New("native rebuild requests context expired")
+		return errors.New("native shared scope context expired")
 	}
 	return nil
 }

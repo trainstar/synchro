@@ -23,7 +23,8 @@ class MainActivity : ReactActivity() {
         override fun getLaunchOptions(): Bundle = Bundle().apply {
           putBoolean(
             "conformanceDetox",
-            this@MainActivity.intent.getStringExtra("synchroConformance") == "1",
+            this@MainActivity.intent.getBundleExtra("launchArgs")
+              ?.getString("synchroConformance") == "1",
           )
         }
       }

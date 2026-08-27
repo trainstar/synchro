@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
@@ -20,8 +19,8 @@ import (
 	"unicode/utf8"
 
 	"github.com/trainstar/synchro/conformance/blackbox"
+	"github.com/trainstar/synchro/conformance/blackbox/syntheticproof"
 	"github.com/trainstar/synchro/conformance/execution"
-	"github.com/trainstar/synchro/conformance/modelrunner"
 	"github.com/trainstar/synchro/conformance/nativeexecution"
 	"github.com/trainstar/synchro/conformance/scenarios"
 )
@@ -48,8 +47,6 @@ func run(ctx context.Context, args []string) error {
 	switch args[0] {
 	case "catalog":
 		return runCatalog(ctx, args[1:])
-	case "model":
-		return runModel(ctx, args[1:])
 	case "blackbox":
 		return runBlackbox(ctx, args[1:])
 	case "native":
@@ -121,43 +118,6 @@ func runCatalog(ctx context.Context, args []string) error {
 	return nil
 }
 
-func runModel(ctx context.Context, args []string) error {
-	flags := newFlagSet("model")
-	repoRoot := flags.String("repo-root", "", "repository root")
-	scenarioID := flags.String("scenario", "", "authored scenario ID")
-	if err := flags.Parse(args); err != nil {
-		return errors.New("model flags are invalid")
-	}
-	if flags.NArg() != 0 {
-		return errors.New("model does not accept positional arguments")
-	}
-	if *repoRoot == "" {
-		return errors.New("model requires --repo-root PATH")
-	}
-	authored, err := loadAuthoredScenarios(ctx, *repoRoot)
-	if err != nil {
-		return operationError(ctx, "model load", err)
-	}
-	found := false
-	for _, scenario := range authored {
-		if *scenarioID != "" && string(scenario.ID) != *scenarioID {
-			continue
-		}
-		found = true
-		result, runErr := modelrunner.RunScenario(ctx, scenario)
-		if runErr != nil {
-			return operationError(ctx, "model execute", runErr)
-		}
-		if !result.Passed {
-			return operationError(ctx, "model execute", errors.New("authored scenario did not pass"))
-		}
-	}
-	if !found {
-		return errors.New("model scenario is not authored")
-	}
-	return nil
-}
-
 func runBlackbox(ctx context.Context, args []string) error {
 	flags := newFlagSet("blackbox")
 	repoRoot := flags.String("repo-root", "", "repository root")
@@ -182,27 +142,19 @@ func runBlackbox(ctx context.Context, args []string) error {
 }
 
 func runSyntheticHarness(ctx context.Context, repoRoot string) error {
-	_, privateKey, err := ed25519.GenerateKey(rand.Reader)
-	if err != nil {
-		return operationError(ctx, "blackbox harness runner", err)
-	}
-	trustedRunner, err := execution.NewTrustedRunner(privateKey)
-	if err != nil {
-		return operationError(ctx, "blackbox harness runner", err)
-	}
 	attachmentRoot, err := os.MkdirTemp("", "synchro-conformance-harness-")
 	if err != nil {
 		return operationError(ctx, "blackbox harness initialize", err)
 	}
 	defer os.RemoveAll(attachmentRoot)
 	fixtures := []syntheticHarnessFixture{
-		{path: "conformance/scenarios/performance/pending-cycle-001.json", fault: blackbox.SyntheticCompliant, wantPass: true},
-		{path: "conformance/scenarios/performance/pending-cycle-001.json", fault: blackbox.SyntheticOmitMutation},
-		{path: "conformance/scenarios/performance/steady-pull-001.json", fault: blackbox.SyntheticConstantChecksum},
-		{path: "conformance/scenarios/server/pull-divergent-checkpoints-001.json", fault: blackbox.SyntheticDuplicateDelivery},
-		{path: "conformance/scenarios/server/pull-divergent-checkpoints-001.json", fault: blackbox.SyntheticWrongScope},
-		{path: "conformance/scenarios/performance/pending-cycle-001.json", fault: blackbox.SyntheticReplayCorruption},
-		{path: "conformance/scenarios/performance/pending-cycle-001.json", fault: blackbox.SyntheticWrongStatus},
+		{path: "conformance/scenarios/performance/pending-cycle-001.json", fault: syntheticproof.SyntheticCompliant, wantPass: true},
+		{path: "conformance/scenarios/performance/pending-cycle-001.json", fault: syntheticproof.SyntheticOmitMutation},
+		{path: "conformance/scenarios/performance/steady-pull-001.json", fault: syntheticproof.SyntheticConstantChecksum},
+		{path: "conformance/scenarios/server/pull-divergent-checkpoints-001.json", fault: syntheticproof.SyntheticDuplicateDelivery},
+		{path: "conformance/scenarios/server/pull-divergent-checkpoints-001.json", fault: syntheticproof.SyntheticWrongScope},
+		{path: "conformance/scenarios/performance/pending-cycle-001.json", fault: syntheticproof.SyntheticReplayCorruption},
+		{path: "conformance/scenarios/performance/pending-cycle-001.json", fault: syntheticproof.SyntheticWrongStatus},
 	}
 	for _, fixture := range fixtures {
 		scenario, err := scenarios.LoadFile(ctx, repoRoot, fixture.path)
@@ -213,7 +165,7 @@ func runSyntheticHarness(ctx context.Context, repoRoot string) error {
 		if err != nil {
 			return operationError(ctx, "blackbox harness load", err)
 		}
-		if err := runSyntheticScenario(ctx, scenario, obligation, fixture, attachmentRoot, trustedRunner); err != nil {
+		if err := runSyntheticScenario(ctx, scenario, obligation, fixture, attachmentRoot); err != nil {
 			return operationError(ctx, "blackbox harness execute", err)
 		}
 	}
@@ -222,7 +174,7 @@ func runSyntheticHarness(ctx context.Context, repoRoot string) error {
 
 type syntheticHarnessFixture struct {
 	path     string
-	fault    blackbox.SyntheticFault
+	fault    syntheticproof.SyntheticFault
 	wantPass bool
 }
 
@@ -235,7 +187,7 @@ func serverBlackboxObligation(scenario scenarios.Scenario) (scenarios.ProofOblig
 	return scenarios.ProofObligation{}, errors.New("authored scenario has no server black-box obligation")
 }
 
-func runSyntheticScenario(ctx context.Context, scenario scenarios.Scenario, obligation scenarios.ProofObligation, fixture syntheticHarnessFixture, attachmentRoot string, trustedRunner execution.TrustedRunner) error {
+func runSyntheticScenario(ctx context.Context, scenario scenarios.Scenario, obligation scenarios.ProofObligation, fixture syntheticHarnessFixture, attachmentRoot string) error {
 	var secret [32]byte
 	if _, err := rand.Read(secret[:]); err != nil {
 		return errors.New("create synthetic token secret failed")
@@ -248,33 +200,25 @@ func runSyntheticScenario(ctx context.Context, scenario scenarios.Scenario, obli
 	if err != nil {
 		return errors.New("create synthetic token failed")
 	}
-	system, err := blackbox.NewSyntheticSystem(ctx, scenario, blackbox.SyntheticOptions{ExpectedToken: token, Fault: fixture.fault})
+	system, err := syntheticproof.NewSyntheticSystem(ctx, scenario, syntheticproof.SyntheticOptions{ExpectedToken: token, Fault: fixture.fault})
 	if err != nil {
 		return err
 	}
 	defer system.Close()
-	runner, err := blackbox.NewRunner(blackbox.RunnerConfig{
+	runner, err := syntheticproof.NewRunner(syntheticproof.RunnerConfig{
 		Client:           &blackbox.Client{BaseURL: system.BaseURL(), HTTP: &http.Client{}, Tokens: provider},
 		Recorder:         blackbox.RecorderConfig{AttachmentRoot: filepath.Join(attachmentRoot, string(scenario.ID)), MaxRecords: 256, MaxRawBodyBytes: 1 << 20},
 		ArtifactBindings: syntheticArtifactBindings(obligation),
-		TrustedRunner:    trustedRunner,
 	})
 	if err != nil {
 		return errors.New("create synthetic black-box runner failed")
 	}
-	issuer, err := runner.NewReceiptIssuer()
-	if err != nil {
-		return errors.New("create synthetic receipt issuer failed")
-	}
-	receipt, result, runErr := runner.Run(ctx, scenario, obligation, issuer)
+	result, runErr := runner.Run(ctx, scenario, obligation)
 	if fixture.wantPass && (runErr != nil || !result.Passed) {
 		return errors.New("compliant synthetic black-box scenario did not pass")
 	}
-	if !fixture.wantPass && (runErr == nil || result.Passed || result.Failure.Kind != blackbox.FailureSemantic || !system.FaultApplied()) {
+	if !fixture.wantPass && (runErr == nil || result.Passed || result.Failure.Kind != syntheticproof.FailureSemantic || !system.FaultApplied()) {
 		return errors.New("synthetic black-box fault did not cause a semantic detection")
-	}
-	if err := receipt.Verify(); err != nil {
-		return errors.New("synthetic black-box receipt is invalid")
 	}
 	return nil
 }
@@ -292,10 +236,6 @@ func syntheticArtifactBindings(obligation scenarios.ProofObligation) []execution
 		}
 	}
 	return bindings
-}
-
-func loadAuthoredScenarios(ctx context.Context, repoRoot string) ([]scenarios.Scenario, error) {
-	return scenarios.LoadAll(ctx, repoRoot)
 }
 
 func newFlagSet(name string) *flag.FlagSet {

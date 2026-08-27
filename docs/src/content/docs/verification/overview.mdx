@@ -11,7 +11,7 @@ Synchro's verification model separates the contract from proof of a particular r
 
 The specification, requirements catalog, support matrix, and scenarios are reviewed source material. They define behavior, proof obligations, required environments, and expected outcomes. They do not contain hand-maintained coverage or release-readiness results.
 
-The public matrix for v0.3.0 requires PostgreSQL 18, iOS 16 and current stable iOS, macOS 13 and current stable macOS, Android API 24 and current stable Android API, and React Native 0.83.x on both the iOS 16/current and Android API 24/current tracks. PostgreSQL 14 through 17 are excluded.
+The Tier 1 matrix requires PostgreSQL 18 on `linux-x64` and `macos-arm64` extension architectures. It also requires Swift on iOS 16 and current iOS. Kotlin requires Android API 24 and current Android. React Native 0.83.x requires current iOS and current Android. PostgreSQL 14 through 17 are excluded. Swift on macOS is Tier 2 and has no certification claim.
 
 ## What Is Generated
 
@@ -24,6 +24,12 @@ Tooling computes release eligibility from that evidence. Documentation, fixture 
 Release-critical proofs use independent expected results, real packaged components for happy paths, meaningful negative controls, and replayable fault or randomized cases. Implementation-derived fixtures and tautological assertions do not establish semantic correctness.
 
 Every required test must run. Skips, ignored tests, unexplained flakes, and retry-only passes block promotion. Reruns remain linked to their original failures with a recorded reason and diagnosis.
+
+The final support gate derives semantic obligations and packaged checks from the support matrix. It rejects missing, skipped, unavailable, malformed, zero-test, and nonterminal results.
+
+Each non-excluded support cell requires packaged connect, push, pull, process-kill, and resume checks. The package installation step must use the release artifact under test.
+
+The Makefile reads the generated packaged summary from `dist/verification/packaged-smoke-summary.json`. Missing summary data blocks the gate.
 
 Security evidence may be access-controlled while a finding is unresolved. Public reports describe scope and disposition without publishing exploit instructions.
 

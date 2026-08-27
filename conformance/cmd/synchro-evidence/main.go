@@ -13,9 +13,7 @@ import (
 	"syscall"
 
 	"github.com/trainstar/synchro/conformance/evidence"
-	"github.com/trainstar/synchro/conformance/internal/contract"
 	"github.com/trainstar/synchro/conformance/inventory"
-	"github.com/trainstar/synchro/conformance/scenarios"
 )
 
 func main() {
@@ -38,134 +36,139 @@ func run(ctx context.Context, args []string) error {
 		return errors.New("command is required")
 	}
 	switch args[0] {
+	case "generate":
+		return runGenerate(ctx, args[1:])
 	case "validate":
 		return runValidate(ctx, args[1:])
-	case "inventory":
-		return runInventory(ctx, args[1:])
+	case "coverage":
+		return runCoverage(ctx, args[1:])
 	default:
 		return errors.New("unknown command")
 	}
 }
 
-func runValidate(ctx context.Context, args []string) error {
-	flags := flag.NewFlagSet("validate", flag.ContinueOnError)
-	flags.SetOutput(io.Discard)
+func runGenerate(ctx context.Context, args []string) error {
+	flags := newFlagSet("generate")
 	repoRoot := flags.String("repo-root", "", "repository root")
-	candidateDir := flags.String("candidate-dir", "", "candidate directory")
-	if err := flags.Parse(args); err != nil || flags.NArg() != 0 {
-		return errors.New("validate flags are invalid")
+	inputPath := flags.String("input", "", "terminal CI input")
+	outputPath := flags.String("output", "", "generated CI summary")
+	if err := flags.Parse(args); err != nil || flags.NArg() != 0 || *repoRoot == "" || *inputPath == "" || *outputPath == "" {
+		return errors.New("generate requires --repo-root, --input, and --output")
 	}
-	if *repoRoot == "" || *candidateDir == "" {
-		return errors.New("validate requires --repo-root and --candidate-dir")
+	data, err := os.ReadFile(*inputPath)
+	if err != nil {
+		return fmt.Errorf("read CI input: %w", err)
 	}
-	return evidence.ValidateCandidate(ctx, *repoRoot, *candidateDir)
+	input, err := evidence.DecodeInput(data)
+	if err != nil {
+		return err
+	}
+	summary, err := evidence.Generate(ctx, *repoRoot, input)
+	if err != nil {
+		return fmt.Errorf("generate CI summary: %w", err)
+	}
+	var output bytes.Buffer
+	if err := evidence.Encode(&output, summary); err != nil {
+		return err
+	}
+	return publish(*outputPath, output.Bytes())
 }
 
-func runInventory(ctx context.Context, args []string) error {
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	flags := flag.NewFlagSet("inventory", flag.ContinueOnError)
-	flags.SetOutput(io.Discard)
+func runValidate(ctx context.Context, args []string) error {
+	flags := newFlagSet("validate")
 	repoRoot := flags.String("repo-root", "", "repository root")
-	candidateDir := flags.String("candidate-dir", "", "candidate directory")
-	if err := flags.Parse(args); err != nil || flags.NArg() != 0 {
-		return errors.New("inventory flags are invalid")
+	summaryPath := flags.String("summary", "", "generated CI summary")
+	if err := flags.Parse(args); err != nil || flags.NArg() != 0 || *repoRoot == "" || *summaryPath == "" {
+		return errors.New("validate requires --repo-root and --summary")
 	}
-	if *repoRoot == "" || *candidateDir == "" {
-		return errors.New("inventory requires --repo-root and --candidate-dir")
-	}
-	root, err := filepath.Abs(*repoRoot)
+	summary, err := readSummary(*summaryPath)
 	if err != nil {
-		return errors.New("inventory repository root is invalid")
-	}
-	candidateRoot, err := filepath.Abs(*candidateDir)
-	if err != nil {
-		return errors.New("inventory candidate directory is invalid")
-	}
-	candidateRoot = filepath.Clean(candidateRoot)
-	base := filepath.Base(candidateRoot)
-	expectedRoot := filepath.Join(filepath.Clean(root), "dist", "verification", base)
-	if base == "." || candidateRoot != expectedRoot {
-		return errors.New("inventory candidate directory must be dist/verification/<candidate-id>")
-	}
-	if err := ctx.Err(); err != nil {
 		return err
 	}
-	bundle, err := contract.Load(ctx, root)
-	if err != nil {
-		return fmt.Errorf("inventory load contract: %w", err)
-	}
-	allScenarios, err := scenarios.LoadAll(ctx, root)
-	if err != nil {
-		return fmt.Errorf("inventory load scenarios: %w", err)
-	}
-	candidate, err := evidence.LoadCandidate(ctx, root, candidateRoot)
-	if err != nil {
-		return fmt.Errorf("inventory load candidate: %w", err)
-	}
-	if candidate.ID != base {
-		return errors.New("inventory candidate directory does not match candidate ID")
-	}
-	report, err := inventory.Generate(ctx, inventory.Inputs{Contract: bundle, Scenarios: allScenarios, EvidenceRoot: "evidence", Candidate: candidate})
-	if err != nil {
-		return fmt.Errorf("inventory generate report: %w", err)
-	}
-	var jsonData, markdownData bytes.Buffer
-	if err := inventory.WriteJSON(&jsonData, report); err != nil {
-		return fmt.Errorf("inventory write JSON: %w", err)
-	}
-	if err := inventory.WriteMarkdown(&markdownData, report); err != nil {
-		return fmt.Errorf("inventory write Markdown: %w", err)
-	}
-	if err := publishInventory(candidateRoot, "inventory.json", jsonData.Bytes()); err != nil {
-		return err
-	}
-	if err := publishInventory(candidateRoot, "inventory.md", markdownData.Bytes()); err != nil {
-		return err
+	if err := evidence.Validate(ctx, *repoRoot, summary); err != nil {
+		return fmt.Errorf("validate CI summary: %w", err)
 	}
 	return nil
 }
 
-func publishInventory(root, name string, data []byte) error {
-	temporary, err := os.CreateTemp(root, ".inventory-*")
-	if err != nil {
-		return fmt.Errorf("inventory create temporary %s: %w", name, err)
+func runCoverage(ctx context.Context, args []string) error {
+	flags := newFlagSet("coverage")
+	repoRoot := flags.String("repo-root", "", "repository root")
+	summaryPath := flags.String("summary", "", "generated CI summary")
+	jsonPath := flags.String("json", "", "coverage JSON output")
+	markdownPath := flags.String("markdown", "", "coverage Markdown output")
+	if err := flags.Parse(args); err != nil || flags.NArg() != 0 || *repoRoot == "" || *summaryPath == "" || *jsonPath == "" || *markdownPath == "" {
+		return errors.New("coverage requires --repo-root, --summary, --json, and --markdown")
 	}
-	temporaryName := temporary.Name()
-	defer os.Remove(temporaryName)
-	if err := temporary.Chmod(0600); err != nil {
+	summary, err := readSummary(*summaryPath)
+	if err != nil {
+		return err
+	}
+	if err := evidence.Validate(ctx, *repoRoot, summary); err != nil {
+		return fmt.Errorf("validate CI summary: %w", err)
+	}
+	report, err := inventory.Project(summary)
+	if err != nil {
+		return fmt.Errorf("project CI coverage: %w", err)
+	}
+	var jsonOutput, markdownOutput bytes.Buffer
+	if err := inventory.WriteJSON(&jsonOutput, report); err != nil {
+		return err
+	}
+	if err := inventory.WriteMarkdown(&markdownOutput, report); err != nil {
+		return err
+	}
+	if err := publish(*jsonPath, jsonOutput.Bytes()); err != nil {
+		return err
+	}
+	return publish(*markdownPath, markdownOutput.Bytes())
+}
+
+func readSummary(path string) (evidence.Summary, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return evidence.Summary{}, fmt.Errorf("read CI summary: %w", err)
+	}
+	return evidence.DecodeSummary(data)
+}
+
+func publish(path string, data []byte) error {
+	if path == "" {
+		return errors.New("output path is empty")
+	}
+	directory := filepath.Dir(path)
+	if err := os.MkdirAll(directory, 0o755); err != nil {
+		return fmt.Errorf("create output directory: %w", err)
+	}
+	temporary, err := os.CreateTemp(directory, ".synchro-evidence-*")
+	if err != nil {
+		return fmt.Errorf("create temporary output: %w", err)
+	}
+	temporaryPath := temporary.Name()
+	defer os.Remove(temporaryPath)
+	if err := temporary.Chmod(0o600); err != nil {
 		_ = temporary.Close()
-		return fmt.Errorf("inventory protect temporary %s: %w", name, err)
+		return fmt.Errorf("protect temporary output: %w", err)
 	}
 	if _, err := temporary.Write(data); err != nil {
 		_ = temporary.Close()
-		return fmt.Errorf("inventory write temporary %s: %w", name, err)
+		return fmt.Errorf("write temporary output: %w", err)
 	}
 	if err := temporary.Sync(); err != nil {
 		_ = temporary.Close()
-		return fmt.Errorf("inventory sync temporary %s: %w", name, err)
+		return fmt.Errorf("sync temporary output: %w", err)
 	}
 	if err := temporary.Close(); err != nil {
-		return fmt.Errorf("inventory close temporary %s: %w", name, err)
+		return fmt.Errorf("close temporary output: %w", err)
 	}
-	finalName := filepath.Join(root, name)
-	if err := os.Link(temporaryName, finalName); err != nil {
-		if errors.Is(err, os.ErrExist) {
-			return fmt.Errorf("inventory output already exists: %s", name)
-		}
-		return fmt.Errorf("inventory publish %s: %w", name, err)
-	}
-	directory, err := os.Open(root)
-	if err != nil {
-		return fmt.Errorf("inventory open candidate directory: %w", err)
-	}
-	if err := directory.Sync(); err != nil {
-		_ = directory.Close()
-		return fmt.Errorf("inventory sync candidate directory: %w", err)
-	}
-	if err := directory.Close(); err != nil {
-		return fmt.Errorf("inventory close candidate directory: %w", err)
+	if err := os.Rename(temporaryPath, path); err != nil {
+		return fmt.Errorf("publish output: %w", err)
 	}
 	return nil
+}
+
+func newFlagSet(name string) *flag.FlagSet {
+	flags := flag.NewFlagSet(name, flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	return flags
 }

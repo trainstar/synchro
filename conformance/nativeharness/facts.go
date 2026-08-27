@@ -16,7 +16,7 @@ import (
 func MergeStateFacts(parts []scenarios.StateFacts) (scenarios.StateFacts, error) {
 	var result scenarios.StateFacts
 	for _, part := range parts {
-		normalized, err := nativeexecution.NormalizeStateFacts(part)
+		normalized, err := scenarios.NormalizeStateFacts(part)
 		if err != nil {
 			return scenarios.StateFacts{}, fmt.Errorf("normalize raw state facts: %w", err)
 		}
@@ -24,7 +24,7 @@ func MergeStateFacts(parts []scenarios.StateFacts) (scenarios.StateFacts, error)
 			return scenarios.StateFacts{}, err
 		}
 	}
-	return nativeexecution.NormalizeStateFacts(result)
+	return scenarios.NormalizeStateFacts(result)
 }
 
 func mergeStateFacts(destination *scenarios.StateFacts, source scenarios.StateFacts) error {

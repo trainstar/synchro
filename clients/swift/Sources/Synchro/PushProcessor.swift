@@ -602,7 +602,7 @@ final class PushProcessor: @unchecked Sendable {
                             updated_at = ?
                         WHERE mutation_id = ? AND lifecycle_state = 'sealed' AND sealed_batch_id = ?
                         """,
-                    arguments: [timestampNow(), member.mutationID, oldBatchID]
+                    arguments: [SynchroDateCoding.now(), member.mutationID, oldBatchID]
                 )
                 guard db.changesCount == 1 else {
                     throw SynchroError.invalidResponse(message: "sealed mutation could not leave its retired batch")
@@ -1234,7 +1234,10 @@ final class PushProcessor: @unchecked Sendable {
                    stored.logicalType == deletedAtColumn.logicalType {
                     do {
                         try Integrity.validateTypedValue(stored.wireValue, field: deletedAtColumn)
-                        deletedAtValue = try databaseValue(from: stored.wireValue, column: deletedAtColumn)
+                        deletedAtValue = try SQLiteHelpers.databaseValue(
+                            from: stored.wireValue,
+                            column: deletedAtColumn
+                        )
                     } catch {
                         throw SynchroError.invalidResponse(message: "local delete marker is invalid")
                     }
@@ -1281,7 +1284,7 @@ final class PushProcessor: @unchecked Sendable {
         }.joined(separator: ", ")
         let action: String = updates.isEmpty ? "DO NOTHING" : "DO UPDATE SET \(updates)"
         let values = try projection.values.map {
-            try databaseValue(from: $0.value, column: $0.column)
+            try SQLiteHelpers.databaseValue(from: $0.value, column: $0.column)
         }
         try db.execute(
             sql: """
@@ -1334,7 +1337,7 @@ final class PushProcessor: @unchecked Sendable {
                     "\(SQLiteHelpers.quoteIdentifier($0.column.name)) = ?"
                 }.joined(separator: ", ")
                 let values = try patch.values.map {
-                    try databaseValue(from: $0.value, column: $0.column)
+                    try SQLiteHelpers.databaseValue(from: $0.value, column: $0.column)
                 } + [primaryKey]
                 try db.execute(
                     sql: "UPDATE \(SQLiteHelpers.quoteIdentifier(schema.tableName)) SET \(assignments) WHERE \(SQLiteHelpers.quoteIdentifier(pkColumn)) = ?",
@@ -1380,48 +1383,6 @@ final class PushProcessor: @unchecked Sendable {
         return row[columnName]
     }
 
-    private func databaseValue(
-        from value: AnyCodable,
-        column: LocalSchemaColumn
-    ) throws -> DatabaseValue {
-        if value.value is NSNull { return .null }
-        switch column.logicalType {
-        case "string", "decimal", "datetime", "date", "time", "json":
-            guard let text = value.value as? String else {
-                throw SynchroError.invalidResponse(message: "invalid value for \(column.fieldID)")
-            }
-            return text.databaseValue
-        case "int":
-            let integer = try exactInt64(value.value, fieldID: column.fieldID)
-            guard integer >= Int64(Int32.min), integer <= Int64(Int32.max) else {
-                throw SynchroError.invalidResponse(message: "invalid value for \(column.fieldID)")
-            }
-            return integer.databaseValue
-        case "int64":
-            guard let text = value.value as? String,
-                  canonicalInteger(text),
-                  let integer = Int64(text) else {
-                throw SynchroError.invalidResponse(message: "invalid value for \(column.fieldID)")
-            }
-            return integer.databaseValue
-        case "float":
-            return try exactDouble(value.value, fieldID: column.fieldID).databaseValue
-        case "boolean":
-            guard let boolean = value.value as? Bool else {
-                throw SynchroError.invalidResponse(message: "invalid value for \(column.fieldID)")
-            }
-            return (boolean ? 1 : 0).databaseValue
-        case "bytes":
-            guard let text = value.value as? String,
-                  let data = decodeBase64URL(text) else {
-                throw SynchroError.invalidResponse(message: "invalid value for \(column.fieldID)")
-            }
-            return data.databaseValue
-        default:
-            throw SynchroError.invalidResponse(message: "unsupported portable type \(column.logicalType)")
-        }
-    }
-
     private func exactInt64(_ value: Any, fieldID: String) throws -> Int64 {
         if let value = value as? Int64 { return value }
         if let value = value as? Int { return Int64(value) }
@@ -1433,42 +1394,12 @@ final class PushProcessor: @unchecked Sendable {
         throw SynchroError.invalidResponse(message: "invalid value for \(fieldID)")
     }
 
-    private func exactDouble(_ value: Any, fieldID: String) throws -> Double {
-        let number: Double
-        if let value = value as? Double { number = value }
-        else if let value = value as? Float { number = Double(value) }
-        else if let value = value as? Int64 { number = Double(value) }
-        else if let value = value as? Int { number = Double(value) }
-        else if let value = value as? NSNumber, CFGetTypeID(value) != CFBooleanGetTypeID() {
-            number = value.doubleValue
-        } else {
-            throw SynchroError.invalidResponse(message: "invalid value for \(fieldID)")
-        }
-        guard number.isFinite else {
-            throw SynchroError.invalidResponse(message: "invalid value for \(fieldID)")
-        }
-        return number
-    }
-
     private func canonicalInteger(_ value: String) -> Bool {
         if value == "0" { return true }
         let bytes = Array(value.utf8)
         let start = bytes.first == 45 ? 1 : 0
         guard start < bytes.count, bytes[start] != 48 else { return false }
         return bytes[start...].allSatisfy { $0 >= 48 && $0 <= 57 }
-    }
-
-    private func decodeBase64URL(_ value: String) -> Data? {
-        guard !value.contains("=") else { return nil }
-        var standard = value.replacingOccurrences(of: "-", with: "+")
-            .replacingOccurrences(of: "_", with: "/")
-        standard += String(repeating: "=", count: (4 - standard.count % 4) % 4)
-        guard let decoded = Data(base64Encoded: standard) else { return nil }
-        let canonical = decoded.base64EncodedString()
-            .replacingOccurrences(of: "+", with: "-")
-            .replacingOccurrences(of: "/", with: "_")
-            .replacingOccurrences(of: "=", with: "")
-        return canonical == value ? decoded : nil
     }
 
     private func primaryKeyDatabaseValue(
@@ -1557,19 +1488,15 @@ final class PushProcessor: @unchecked Sendable {
         }
         try db.execute(
             sql: "UPDATE _synchro_pending_changes SET lifecycle_state = 'accepted', updated_at = ? WHERE table_name = ? AND record_id = ? AND lifecycle_state = 'unsealed'",
-            arguments: [timestampNow(), tableName, recordID]
+            arguments: [SynchroDateCoding.now(), tableName, recordID]
         )
     }
 
     private func markCompatibilityPendingRejected(_ db: GRDB.Database, tableName: String, recordID: String) throws {
         try db.execute(
             sql: "UPDATE _synchro_pending_changes SET lifecycle_state = 'rejected', updated_at = ? WHERE table_name = ? AND record_id = ? AND lifecycle_state = 'unsealed'",
-            arguments: [timestampNow(), tableName, recordID]
+            arguments: [SynchroDateCoding.now(), tableName, recordID]
         )
-    }
-
-    private func timestampNow() -> String {
-        ISO8601DateFormatter().string(from: Date())
     }
 
     private func exactObjectJSONMap<T: Decodable>(

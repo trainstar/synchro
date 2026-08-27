@@ -6,7 +6,7 @@
     {
       "id": "BUD-WARM-CONNECT-001",
       "scenario_id": "SCN-PERF-WARM-CONNECT-001",
-      "support_cell_ids": ["SUP-PG-018", "SUP-IOS-MIN-001", "SUP-IOS-CURRENT-001", "SUP-MACOS-MIN-001", "SUP-MACOS-CURRENT-001", "SUP-ANDROID-MIN-001", "SUP-ANDROID-CURRENT-001", "SUP-RN-IOS-MIN-001", "SUP-RN-IOS-CURRENT-001", "SUP-RN-ANDROID-MIN-001", "SUP-RN-ANDROID-CURRENT-001"],
+      "support_cell_ids": ["SUP-PG-LINUX-X64-001", "SUP-PG-MACOS-ARM64-001", "SUP-IOS-MIN-001", "SUP-IOS-CURRENT-001", "SUP-ANDROID-MIN-001", "SUP-ANDROID-CURRENT-001", "SUP-RN-IOS-CURRENT-001", "SUP-RN-ANDROID-CURRENT-001"],
       "artifact_inventory_ids": ["ARTDEF-PG-EXTENSION-001", "ARTDEF-ADAPTER-001", "ARTDEF-SWIFT-SPM-001", "ARTDEF-COCOAPODS-001", "ARTDEF-KOTLIN-MAVEN-001", "ARTDEF-RN-NPM-001"],
       "metric": "warm_connect_http_requests",
       "unit": "requests",
@@ -18,7 +18,7 @@
     {
       "id": "BUD-WARM-CONNECT-PULL-001",
       "scenario_id": "SCN-PERF-WARM-CONNECT-001",
-      "support_cell_ids": ["SUP-PG-018", "SUP-IOS-MIN-001", "SUP-IOS-CURRENT-001", "SUP-MACOS-MIN-001", "SUP-MACOS-CURRENT-001", "SUP-ANDROID-MIN-001", "SUP-ANDROID-CURRENT-001", "SUP-RN-IOS-MIN-001", "SUP-RN-IOS-CURRENT-001", "SUP-RN-ANDROID-MIN-001", "SUP-RN-ANDROID-CURRENT-001"],
+      "support_cell_ids": ["SUP-PG-LINUX-X64-001", "SUP-PG-MACOS-ARM64-001", "SUP-IOS-MIN-001", "SUP-IOS-CURRENT-001", "SUP-ANDROID-MIN-001", "SUP-ANDROID-CURRENT-001", "SUP-RN-IOS-CURRENT-001", "SUP-RN-ANDROID-CURRENT-001"],
       "artifact_inventory_ids": ["ARTDEF-PG-EXTENSION-001", "ARTDEF-ADAPTER-001", "ARTDEF-SWIFT-SPM-001", "ARTDEF-COCOAPODS-001", "ARTDEF-KOTLIN-MAVEN-001", "ARTDEF-RN-NPM-001"],
       "metric": "warm_connect_pull_http_requests",
       "unit": "requests",
@@ -30,7 +30,7 @@
     {
       "id": "BUD-WARM-CONNECT-PUSH-001",
       "scenario_id": "SCN-PERF-WARM-CONNECT-001",
-      "support_cell_ids": ["SUP-PG-018", "SUP-IOS-MIN-001", "SUP-IOS-CURRENT-001", "SUP-MACOS-MIN-001", "SUP-MACOS-CURRENT-001", "SUP-ANDROID-MIN-001", "SUP-ANDROID-CURRENT-001", "SUP-RN-IOS-MIN-001", "SUP-RN-IOS-CURRENT-001", "SUP-RN-ANDROID-MIN-001", "SUP-RN-ANDROID-CURRENT-001"],
+      "support_cell_ids": ["SUP-PG-LINUX-X64-001", "SUP-PG-MACOS-ARM64-001", "SUP-IOS-MIN-001", "SUP-IOS-CURRENT-001", "SUP-ANDROID-MIN-001", "SUP-ANDROID-CURRENT-001", "SUP-RN-IOS-CURRENT-001", "SUP-RN-ANDROID-CURRENT-001"],
       "artifact_inventory_ids": ["ARTDEF-PG-EXTENSION-001", "ARTDEF-ADAPTER-001", "ARTDEF-SWIFT-SPM-001", "ARTDEF-COCOAPODS-001", "ARTDEF-KOTLIN-MAVEN-001", "ARTDEF-RN-NPM-001"],
       "metric": "warm_connect_push_http_requests",
       "unit": "requests",
@@ -42,7 +42,7 @@
     {
       "id": "BUD-WARM-CONNECT-REBUILD-001",
       "scenario_id": "SCN-PERF-WARM-CONNECT-001",
-      "support_cell_ids": ["SUP-PG-018", "SUP-IOS-MIN-001", "SUP-IOS-CURRENT-001", "SUP-MACOS-MIN-001", "SUP-MACOS-CURRENT-001", "SUP-ANDROID-MIN-001", "SUP-ANDROID-CURRENT-001", "SUP-RN-IOS-MIN-001", "SUP-RN-IOS-CURRENT-001", "SUP-RN-ANDROID-MIN-001", "SUP-RN-ANDROID-CURRENT-001"],
+      "support_cell_ids": ["SUP-PG-LINUX-X64-001", "SUP-PG-MACOS-ARM64-001", "SUP-IOS-MIN-001", "SUP-IOS-CURRENT-001", "SUP-ANDROID-MIN-001", "SUP-ANDROID-CURRENT-001", "SUP-RN-IOS-CURRENT-001", "SUP-RN-ANDROID-CURRENT-001"],
       "artifact_inventory_ids": ["ARTDEF-PG-EXTENSION-001", "ARTDEF-ADAPTER-001", "ARTDEF-SWIFT-SPM-001", "ARTDEF-COCOAPODS-001", "ARTDEF-KOTLIN-MAVEN-001", "ARTDEF-RN-NPM-001"],
       "metric": "warm_connect_rebuild_page_http_requests",
       "unit": "requests",
@@ -54,7 +54,7 @@
     {
       "id": "BUD-WARM-CONNECT-SCHEMA-001",
       "scenario_id": "SCN-PERF-WARM-CONNECT-001",
-      "support_cell_ids": ["SUP-PG-018", "SUP-IOS-MIN-001", "SUP-IOS-CURRENT-001", "SUP-MACOS-MIN-001", "SUP-MACOS-CURRENT-001", "SUP-ANDROID-MIN-001", "SUP-ANDROID-CURRENT-001", "SUP-RN-IOS-MIN-001", "SUP-RN-IOS-CURRENT-001", "SUP-RN-ANDROID-MIN-001", "SUP-RN-ANDROID-CURRENT-001"],
+      "support_cell_ids": ["SUP-PG-LINUX-X64-001", "SUP-PG-MACOS-ARM64-001", "SUP-IOS-MIN-001", "SUP-IOS-CURRENT-001", "SUP-ANDROID-MIN-001", "SUP-ANDROID-CURRENT-001", "SUP-RN-IOS-CURRENT-001", "SUP-RN-ANDROID-CURRENT-001"],
       "artifact_inventory_ids": ["ARTDEF-PG-EXTENSION-001", "ARTDEF-ADAPTER-001", "ARTDEF-SWIFT-SPM-001", "ARTDEF-COCOAPODS-001", "ARTDEF-KOTLIN-MAVEN-001", "ARTDEF-RN-NPM-001"],
       "metric": "warm_connect_schema_fetch_http_requests",
       "unit": "requests",
@@ -66,7 +66,7 @@
     {
       "id": "BUD-WARM-CONNECT-OTHER-001",
       "scenario_id": "SCN-PERF-WARM-CONNECT-001",
-      "support_cell_ids": ["SUP-PG-018", "SUP-IOS-MIN-001", "SUP-IOS-CURRENT-001", "SUP-MACOS-MIN-001", "SUP-MACOS-CURRENT-001", "SUP-ANDROID-MIN-001", "SUP-ANDROID-CURRENT-001", "SUP-RN-IOS-MIN-001", "SUP-RN-IOS-CURRENT-001", "SUP-RN-ANDROID-MIN-001", "SUP-RN-ANDROID-CURRENT-001"],
+      "support_cell_ids": ["SUP-PG-LINUX-X64-001", "SUP-PG-MACOS-ARM64-001", "SUP-IOS-MIN-001", "SUP-IOS-CURRENT-001", "SUP-ANDROID-MIN-001", "SUP-ANDROID-CURRENT-001", "SUP-RN-IOS-CURRENT-001", "SUP-RN-ANDROID-CURRENT-001"],
       "artifact_inventory_ids": ["ARTDEF-PG-EXTENSION-001", "ARTDEF-ADAPTER-001", "ARTDEF-SWIFT-SPM-001", "ARTDEF-COCOAPODS-001", "ARTDEF-KOTLIN-MAVEN-001", "ARTDEF-RN-NPM-001"],
       "metric": "warm_connect_other_http_requests",
       "unit": "requests",
@@ -78,7 +78,7 @@
     {
       "id": "BUD-STEADY-PULL-001",
       "scenario_id": "SCN-PERF-STEADY-PULL-001",
-      "support_cell_ids": ["SUP-PG-018", "SUP-IOS-MIN-001", "SUP-IOS-CURRENT-001", "SUP-MACOS-MIN-001", "SUP-MACOS-CURRENT-001", "SUP-ANDROID-MIN-001", "SUP-ANDROID-CURRENT-001", "SUP-RN-IOS-MIN-001", "SUP-RN-IOS-CURRENT-001", "SUP-RN-ANDROID-MIN-001", "SUP-RN-ANDROID-CURRENT-001"],
+      "support_cell_ids": ["SUP-PG-LINUX-X64-001", "SUP-PG-MACOS-ARM64-001", "SUP-IOS-MIN-001", "SUP-IOS-CURRENT-001", "SUP-ANDROID-MIN-001", "SUP-ANDROID-CURRENT-001", "SUP-RN-IOS-CURRENT-001", "SUP-RN-ANDROID-CURRENT-001"],
       "artifact_inventory_ids": ["ARTDEF-PG-EXTENSION-001", "ARTDEF-ADAPTER-001", "ARTDEF-SWIFT-SPM-001", "ARTDEF-COCOAPODS-001", "ARTDEF-KOTLIN-MAVEN-001", "ARTDEF-RN-NPM-001"],
       "metric": "steady_state_pull_http_requests_per_cycle",
       "unit": "requests",
@@ -90,7 +90,7 @@
     {
       "id": "BUD-STEADY-PULL-NONPULL-001",
       "scenario_id": "SCN-PERF-STEADY-PULL-001",
-      "support_cell_ids": ["SUP-PG-018", "SUP-IOS-MIN-001", "SUP-IOS-CURRENT-001", "SUP-MACOS-MIN-001", "SUP-MACOS-CURRENT-001", "SUP-ANDROID-MIN-001", "SUP-ANDROID-CURRENT-001", "SUP-RN-IOS-MIN-001", "SUP-RN-IOS-CURRENT-001", "SUP-RN-ANDROID-MIN-001", "SUP-RN-ANDROID-CURRENT-001"],
+      "support_cell_ids": ["SUP-PG-LINUX-X64-001", "SUP-PG-MACOS-ARM64-001", "SUP-IOS-MIN-001", "SUP-IOS-CURRENT-001", "SUP-ANDROID-MIN-001", "SUP-ANDROID-CURRENT-001", "SUP-RN-IOS-CURRENT-001", "SUP-RN-ANDROID-CURRENT-001"],
       "artifact_inventory_ids": ["ARTDEF-PG-EXTENSION-001", "ARTDEF-ADAPTER-001", "ARTDEF-SWIFT-SPM-001", "ARTDEF-COCOAPODS-001", "ARTDEF-KOTLIN-MAVEN-001", "ARTDEF-RN-NPM-001"],
       "metric": "steady_state_pull_non_pull_http_requests_per_cycle",
       "unit": "requests",
@@ -102,7 +102,7 @@
     {
       "id": "BUD-PENDING-PUSH-001",
       "scenario_id": "SCN-PERF-PENDING-CYCLE-001",
-      "support_cell_ids": ["SUP-PG-018", "SUP-IOS-MIN-001", "SUP-IOS-CURRENT-001", "SUP-MACOS-MIN-001", "SUP-MACOS-CURRENT-001", "SUP-ANDROID-MIN-001", "SUP-ANDROID-CURRENT-001", "SUP-RN-IOS-MIN-001", "SUP-RN-IOS-CURRENT-001", "SUP-RN-ANDROID-MIN-001", "SUP-RN-ANDROID-CURRENT-001"],
+      "support_cell_ids": ["SUP-PG-LINUX-X64-001", "SUP-PG-MACOS-ARM64-001", "SUP-IOS-MIN-001", "SUP-IOS-CURRENT-001", "SUP-ANDROID-MIN-001", "SUP-ANDROID-CURRENT-001", "SUP-RN-IOS-CURRENT-001", "SUP-RN-ANDROID-CURRENT-001"],
       "artifact_inventory_ids": ["ARTDEF-PG-EXTENSION-001", "ARTDEF-ADAPTER-001", "ARTDEF-SWIFT-SPM-001", "ARTDEF-COCOAPODS-001", "ARTDEF-KOTLIN-MAVEN-001", "ARTDEF-RN-NPM-001"],
       "metric": "pending_cycle_push_http_requests",
       "unit": "requests",
@@ -114,7 +114,7 @@
     {
       "id": "BUD-PENDING-PULL-001",
       "scenario_id": "SCN-PERF-PENDING-CYCLE-001",
-      "support_cell_ids": ["SUP-PG-018", "SUP-IOS-MIN-001", "SUP-IOS-CURRENT-001", "SUP-MACOS-MIN-001", "SUP-MACOS-CURRENT-001", "SUP-ANDROID-MIN-001", "SUP-ANDROID-CURRENT-001", "SUP-RN-IOS-MIN-001", "SUP-RN-IOS-CURRENT-001", "SUP-RN-ANDROID-MIN-001", "SUP-RN-ANDROID-CURRENT-001"],
+      "support_cell_ids": ["SUP-PG-LINUX-X64-001", "SUP-PG-MACOS-ARM64-001", "SUP-IOS-MIN-001", "SUP-IOS-CURRENT-001", "SUP-ANDROID-MIN-001", "SUP-ANDROID-CURRENT-001", "SUP-RN-IOS-CURRENT-001", "SUP-RN-ANDROID-CURRENT-001"],
       "artifact_inventory_ids": ["ARTDEF-PG-EXTENSION-001", "ARTDEF-ADAPTER-001", "ARTDEF-SWIFT-SPM-001", "ARTDEF-COCOAPODS-001", "ARTDEF-KOTLIN-MAVEN-001", "ARTDEF-RN-NPM-001"],
       "metric": "pending_cycle_pull_http_requests",
       "unit": "requests",
@@ -126,7 +126,7 @@
     {
       "id": "BUD-PENDING-CYCLE-UNEXPECTED-001",
       "scenario_id": "SCN-PERF-PENDING-CYCLE-001",
-      "support_cell_ids": ["SUP-PG-018", "SUP-IOS-MIN-001", "SUP-IOS-CURRENT-001", "SUP-MACOS-MIN-001", "SUP-MACOS-CURRENT-001", "SUP-ANDROID-MIN-001", "SUP-ANDROID-CURRENT-001", "SUP-RN-IOS-MIN-001", "SUP-RN-IOS-CURRENT-001", "SUP-RN-ANDROID-MIN-001", "SUP-RN-ANDROID-CURRENT-001"],
+      "support_cell_ids": ["SUP-PG-LINUX-X64-001", "SUP-PG-MACOS-ARM64-001", "SUP-IOS-MIN-001", "SUP-IOS-CURRENT-001", "SUP-ANDROID-MIN-001", "SUP-ANDROID-CURRENT-001", "SUP-RN-IOS-CURRENT-001", "SUP-RN-ANDROID-CURRENT-001"],
       "artifact_inventory_ids": ["ARTDEF-PG-EXTENSION-001", "ARTDEF-ADAPTER-001", "ARTDEF-SWIFT-SPM-001", "ARTDEF-COCOAPODS-001", "ARTDEF-KOTLIN-MAVEN-001", "ARTDEF-RN-NPM-001"],
       "metric": "pending_cycle_non_push_or_pull_http_requests",
       "unit": "requests",
@@ -138,7 +138,7 @@
     {
       "id": "BUD-REBUILD-CONNECT-001",
       "scenario_id": "SCN-PERF-REBUILD-REQUESTS-001",
-      "support_cell_ids": ["SUP-PG-018", "SUP-IOS-MIN-001", "SUP-IOS-CURRENT-001", "SUP-MACOS-MIN-001", "SUP-MACOS-CURRENT-001", "SUP-ANDROID-MIN-001", "SUP-ANDROID-CURRENT-001", "SUP-RN-IOS-MIN-001", "SUP-RN-IOS-CURRENT-001", "SUP-RN-ANDROID-MIN-001", "SUP-RN-ANDROID-CURRENT-001"],
+      "support_cell_ids": ["SUP-PG-LINUX-X64-001", "SUP-PG-MACOS-ARM64-001", "SUP-IOS-MIN-001", "SUP-IOS-CURRENT-001", "SUP-ANDROID-MIN-001", "SUP-ANDROID-CURRENT-001", "SUP-RN-IOS-CURRENT-001", "SUP-RN-ANDROID-CURRENT-001"],
       "artifact_inventory_ids": ["ARTDEF-PG-EXTENSION-001", "ARTDEF-ADAPTER-001", "ARTDEF-SWIFT-SPM-001", "ARTDEF-COCOAPODS-001", "ARTDEF-KOTLIN-MAVEN-001", "ARTDEF-RN-NPM-001"],
       "metric": "rebuild_connect_http_requests",
       "unit": "requests",
@@ -150,7 +150,7 @@
     {
       "id": "BUD-REBUILD-PULL-001",
       "scenario_id": "SCN-PERF-REBUILD-REQUESTS-001",
-      "support_cell_ids": ["SUP-PG-018", "SUP-IOS-MIN-001", "SUP-IOS-CURRENT-001", "SUP-MACOS-MIN-001", "SUP-MACOS-CURRENT-001", "SUP-ANDROID-MIN-001", "SUP-ANDROID-CURRENT-001", "SUP-RN-IOS-MIN-001", "SUP-RN-IOS-CURRENT-001", "SUP-RN-ANDROID-MIN-001", "SUP-RN-ANDROID-CURRENT-001"],
+      "support_cell_ids": ["SUP-PG-LINUX-X64-001", "SUP-PG-MACOS-ARM64-001", "SUP-IOS-MIN-001", "SUP-IOS-CURRENT-001", "SUP-ANDROID-MIN-001", "SUP-ANDROID-CURRENT-001", "SUP-RN-IOS-CURRENT-001", "SUP-RN-ANDROID-CURRENT-001"],
       "artifact_inventory_ids": ["ARTDEF-PG-EXTENSION-001", "ARTDEF-ADAPTER-001", "ARTDEF-SWIFT-SPM-001", "ARTDEF-COCOAPODS-001", "ARTDEF-KOTLIN-MAVEN-001", "ARTDEF-RN-NPM-001"],
       "metric": "rebuild_pull_http_requests",
       "unit": "requests",
@@ -162,7 +162,7 @@
     {
       "id": "BUD-REBUILD-PAGE-001",
       "scenario_id": "SCN-PERF-REBUILD-REQUESTS-001",
-      "support_cell_ids": ["SUP-PG-018", "SUP-IOS-MIN-001", "SUP-IOS-CURRENT-001", "SUP-MACOS-MIN-001", "SUP-MACOS-CURRENT-001", "SUP-ANDROID-MIN-001", "SUP-ANDROID-CURRENT-001", "SUP-RN-IOS-MIN-001", "SUP-RN-IOS-CURRENT-001", "SUP-RN-ANDROID-MIN-001", "SUP-RN-ANDROID-CURRENT-001"],
+      "support_cell_ids": ["SUP-PG-LINUX-X64-001", "SUP-PG-MACOS-ARM64-001", "SUP-IOS-MIN-001", "SUP-IOS-CURRENT-001", "SUP-ANDROID-MIN-001", "SUP-ANDROID-CURRENT-001", "SUP-RN-IOS-CURRENT-001", "SUP-RN-ANDROID-CURRENT-001"],
       "artifact_inventory_ids": ["ARTDEF-PG-EXTENSION-001", "ARTDEF-ADAPTER-001", "ARTDEF-SWIFT-SPM-001", "ARTDEF-COCOAPODS-001", "ARTDEF-KOTLIN-MAVEN-001", "ARTDEF-RN-NPM-001"],
       "metric": "rebuild_page_request_count_minus_returned_page_count",
       "unit": "requests",
@@ -174,7 +174,7 @@
     {
       "id": "BUD-REBUILD-SCHEMA-FETCH-001",
       "scenario_id": "SCN-PERF-REBUILD-REQUESTS-001",
-      "support_cell_ids": ["SUP-PG-018", "SUP-IOS-MIN-001", "SUP-IOS-CURRENT-001", "SUP-MACOS-MIN-001", "SUP-MACOS-CURRENT-001", "SUP-ANDROID-MIN-001", "SUP-ANDROID-CURRENT-001", "SUP-RN-IOS-MIN-001", "SUP-RN-IOS-CURRENT-001", "SUP-RN-ANDROID-MIN-001", "SUP-RN-ANDROID-CURRENT-001"],
+      "support_cell_ids": ["SUP-PG-LINUX-X64-001", "SUP-PG-MACOS-ARM64-001", "SUP-IOS-MIN-001", "SUP-IOS-CURRENT-001", "SUP-ANDROID-MIN-001", "SUP-ANDROID-CURRENT-001", "SUP-RN-IOS-CURRENT-001", "SUP-RN-ANDROID-CURRENT-001"],
       "artifact_inventory_ids": ["ARTDEF-PG-EXTENSION-001", "ARTDEF-ADAPTER-001", "ARTDEF-SWIFT-SPM-001", "ARTDEF-COCOAPODS-001", "ARTDEF-KOTLIN-MAVEN-001", "ARTDEF-RN-NPM-001"],
       "metric": "rebuild_schema_fetch_http_requests",
       "unit": "requests",
@@ -186,7 +186,7 @@
     {
       "id": "BUD-REBUILD-UNEXPECTED-001",
       "scenario_id": "SCN-PERF-REBUILD-REQUESTS-001",
-      "support_cell_ids": ["SUP-PG-018", "SUP-IOS-MIN-001", "SUP-IOS-CURRENT-001", "SUP-MACOS-MIN-001", "SUP-MACOS-CURRENT-001", "SUP-ANDROID-MIN-001", "SUP-ANDROID-CURRENT-001", "SUP-RN-IOS-MIN-001", "SUP-RN-IOS-CURRENT-001", "SUP-RN-ANDROID-MIN-001", "SUP-RN-ANDROID-CURRENT-001"],
+      "support_cell_ids": ["SUP-PG-LINUX-X64-001", "SUP-PG-MACOS-ARM64-001", "SUP-IOS-MIN-001", "SUP-IOS-CURRENT-001", "SUP-ANDROID-MIN-001", "SUP-ANDROID-CURRENT-001", "SUP-RN-IOS-CURRENT-001", "SUP-RN-ANDROID-CURRENT-001"],
       "artifact_inventory_ids": ["ARTDEF-PG-EXTENSION-001", "ARTDEF-ADAPTER-001", "ARTDEF-SWIFT-SPM-001", "ARTDEF-COCOAPODS-001", "ARTDEF-KOTLIN-MAVEN-001", "ARTDEF-RN-NPM-001"],
       "metric": "rebuild_unexpected_http_requests",
       "unit": "requests",
@@ -198,7 +198,7 @@
     {
       "id": "BUD-CORE-SYNC-RPC-001",
       "scenario_id": "SCN-PERF-CORE-SYNC-PATH-001",
-      "support_cell_ids": ["SUP-PG-018"],
+      "support_cell_ids": ["SUP-PG-LINUX-X64-001", "SUP-PG-MACOS-ARM64-001"],
       "artifact_inventory_ids": ["ARTDEF-PG-EXTENSION-001", "ARTDEF-ADAPTER-001"],
       "metric": "core_sync_outbound_network_or_rpc_hops",
       "unit": "hops",
@@ -210,57 +210,57 @@
   ],
   "required_measurements": [
     {
-      "id": "MEAS-FANOUT-001", "scenario_id": "SCN-PERF-FANOUT-001", "support_cell_ids": ["SUP-PG-018"], "artifact_inventory_ids": ["ARTDEF-PG-EXTENSION-001", "ARTDEF-ADAPTER-001"],
+      "id": "MEAS-FANOUT-001", "scenario_id": "SCN-PERF-FANOUT-001", "support_cell_ids": ["SUP-PG-LINUX-X64-001", "SUP-PG-MACOS-ARM64-001"], "artifact_inventory_ids": ["ARTDEF-PG-EXTENSION-001", "ARTDEF-ADAPTER-001"],
       "data_profile": { "profile_type": "scope-fanout", "parameters": { "source_row_mutations": 1 } },
       "measurement_method": { "method_type": "workload-sampling", "instrumentation": "server-metrics", "aggregation": "per-sample" },
       "metrics": [{ "id": "MET-FANOUT-PER-ROW-001", "name": "per_row_scope_fanout", "unit": "scopes_per_row" }, { "id": "MET-FANOUT-IMPACT-001", "name": "impact_rows", "unit": "rows" }],
       "strata": [{ "stratum_id": "STR-FANOUT-LOW-001", "parameters": { "scope_fanout": 1, "impact_rows": 1 } }, { "stratum_id": "STR-FANOUT-MEDIUM-001", "parameters": { "scope_fanout": 2, "impact_rows": 2 } }, { "stratum_id": "STR-FANOUT-HIGH-001", "parameters": { "scope_fanout": 8, "impact_rows": 8 } }], "minimum_sample_count_per_stratum": 3
     },
     {
-      "id": "MEAS-SHARED-PRIVATE-SCOPES-001", "scenario_id": "SCN-PERF-SHARED-PRIVATE-SCOPES-001", "support_cell_ids": ["SUP-PG-018"], "artifact_inventory_ids": ["ARTDEF-PG-EXTENSION-001", "ARTDEF-ADAPTER-001"],
+      "id": "MEAS-SHARED-PRIVATE-SCOPES-001", "scenario_id": "SCN-PERF-SHARED-PRIVATE-SCOPES-001", "support_cell_ids": ["SUP-PG-LINUX-X64-001", "SUP-PG-MACOS-ARM64-001"], "artifact_inventory_ids": ["ARTDEF-PG-EXTENSION-001", "ARTDEF-ADAPTER-001"],
       "data_profile": { "profile_type": "scope-topology", "parameters": { "logical_row_cardinality": 1000 } },
       "measurement_method": { "method_type": "workload-sampling", "instrumentation": "server-metrics", "aggregation": "per-sample" },
       "metrics": [{ "id": "MET-SHARED-ROWS-001", "name": "delivered_row_copies", "unit": "rows" }, { "id": "MET-SHARED-MEMBERSHIP-001", "name": "membership_maintenance_work", "unit": "operations" }],
       "strata": [{ "stratum_id": "STR-SHARED-SCOPE-001", "parameters": { "scope_topology": "shared" } }, { "stratum_id": "STR-DUPLICATED-PRIVATE-001", "parameters": { "scope_topology": "duplicated-private" } }], "minimum_sample_count_per_stratum": 3
     },
     {
-      "id": "MEAS-REBUILD-CARDINALITY-001", "scenario_id": "SCN-PERF-REBUILD-CARDINALITY-001", "support_cell_ids": ["SUP-PG-018", "SUP-IOS-MIN-001", "SUP-IOS-CURRENT-001", "SUP-MACOS-MIN-001", "SUP-MACOS-CURRENT-001", "SUP-ANDROID-MIN-001", "SUP-ANDROID-CURRENT-001", "SUP-RN-IOS-MIN-001", "SUP-RN-IOS-CURRENT-001", "SUP-RN-ANDROID-MIN-001", "SUP-RN-ANDROID-CURRENT-001"], "artifact_inventory_ids": ["ARTDEF-PG-EXTENSION-001", "ARTDEF-ADAPTER-001", "ARTDEF-SWIFT-SPM-001", "ARTDEF-COCOAPODS-001", "ARTDEF-KOTLIN-MAVEN-001", "ARTDEF-RN-NPM-001"],
+      "id": "MEAS-REBUILD-CARDINALITY-001", "scenario_id": "SCN-PERF-REBUILD-CARDINALITY-001", "support_cell_ids": ["SUP-PG-LINUX-X64-001", "SUP-PG-MACOS-ARM64-001", "SUP-IOS-MIN-001", "SUP-IOS-CURRENT-001", "SUP-ANDROID-MIN-001", "SUP-ANDROID-CURRENT-001", "SUP-RN-IOS-CURRENT-001", "SUP-RN-ANDROID-CURRENT-001"], "artifact_inventory_ids": ["ARTDEF-PG-EXTENSION-001", "ARTDEF-ADAPTER-001", "ARTDEF-SWIFT-SPM-001", "ARTDEF-COCOAPODS-001", "ARTDEF-KOTLIN-MAVEN-001", "ARTDEF-RN-NPM-001"],
       "data_profile": { "profile_type": "rebuild", "parameters": { "page_size": 100 } }, "measurement_method": { "method_type": "workload-sampling", "instrumentation": "protocol-trace", "aggregation": "per-sample" },
       "metrics": [{ "id": "MET-REBUILD-PAGES-001", "name": "rebuild_page_count", "unit": "pages" }, { "id": "MET-REBUILD-RECORDS-001", "name": "rebuild_record_count", "unit": "records" }],
       "strata": [{ "stratum_id": "STR-REBUILD-SMALL-001", "parameters": { "scope_cardinality": 1, "page_size": 100 } }, { "stratum_id": "STR-REBUILD-MEDIUM-001", "parameters": { "scope_cardinality": 101, "page_size": 100 } }, { "stratum_id": "STR-REBUILD-LARGE-001", "parameters": { "scope_cardinality": 1000, "page_size": 100 } }], "minimum_sample_count_per_stratum": 3
     },
     {
-      "id": "MEAS-SCHEMA-CHECK-001", "scenario_id": "SCN-PERF-SCHEMA-CHECK-001", "support_cell_ids": ["SUP-PG-018", "SUP-IOS-MIN-001", "SUP-IOS-CURRENT-001", "SUP-MACOS-MIN-001", "SUP-MACOS-CURRENT-001", "SUP-ANDROID-MIN-001", "SUP-ANDROID-CURRENT-001", "SUP-RN-IOS-MIN-001", "SUP-RN-IOS-CURRENT-001", "SUP-RN-ANDROID-MIN-001", "SUP-RN-ANDROID-CURRENT-001"], "artifact_inventory_ids": ["ARTDEF-PG-EXTENSION-001", "ARTDEF-ADAPTER-001", "ARTDEF-SWIFT-SPM-001", "ARTDEF-COCOAPODS-001", "ARTDEF-KOTLIN-MAVEN-001", "ARTDEF-RN-NPM-001"],
+      "id": "MEAS-SCHEMA-CHECK-001", "scenario_id": "SCN-PERF-SCHEMA-CHECK-001", "support_cell_ids": ["SUP-PG-LINUX-X64-001", "SUP-PG-MACOS-ARM64-001", "SUP-IOS-MIN-001", "SUP-IOS-CURRENT-001", "SUP-ANDROID-MIN-001", "SUP-ANDROID-CURRENT-001", "SUP-RN-IOS-CURRENT-001", "SUP-RN-ANDROID-CURRENT-001"], "artifact_inventory_ids": ["ARTDEF-PG-EXTENSION-001", "ARTDEF-ADAPTER-001", "ARTDEF-SWIFT-SPM-001", "ARTDEF-COCOAPODS-001", "ARTDEF-KOTLIN-MAVEN-001", "ARTDEF-RN-NPM-001"],
       "data_profile": { "profile_type": "request-cycle", "parameters": { "connection_state": "warm" } }, "measurement_method": { "method_type": "workload-sampling", "instrumentation": "protocol-trace", "aggregation": "per-sample" },
       "metrics": [{ "id": "MET-SCHEMA-REQUESTS-001", "name": "schema_check_requests", "unit": "requests" }, { "id": "MET-SCHEMA-DURATION-001", "name": "schema_check_duration", "unit": "milliseconds" }],
       "strata": [{ "stratum_id": "STR-SCHEMA-CURRENT-001", "parameters": { "schema_case": "current" } }, { "stratum_id": "STR-SCHEMA-CLASS-1-001", "parameters": { "schema_case": "class_1" } }, { "stratum_id": "STR-SCHEMA-CLASS-2-001", "parameters": { "schema_case": "class_2" } }, { "stratum_id": "STR-SCHEMA-CLASS-3-AFFECTED-001", "parameters": { "schema_case": "class_3_affected" } }, { "stratum_id": "STR-SCHEMA-CLASS-3-UNAFFECTED-001", "parameters": { "schema_case": "class_3_unaffected" } }, { "stratum_id": "STR-SCHEMA-CLASS-4-001", "parameters": { "schema_case": "class_4" } }], "minimum_sample_count_per_stratum": 3
     },
     {
-      "id": "MEAS-SEEDED-EMPTY-STARTUP-001", "scenario_id": "SCN-PERF-SEEDED-EMPTY-STARTUP-001", "support_cell_ids": ["SUP-PG-018", "SUP-IOS-MIN-001", "SUP-IOS-CURRENT-001", "SUP-MACOS-MIN-001", "SUP-MACOS-CURRENT-001", "SUP-ANDROID-MIN-001", "SUP-ANDROID-CURRENT-001", "SUP-RN-IOS-MIN-001", "SUP-RN-IOS-CURRENT-001", "SUP-RN-ANDROID-MIN-001", "SUP-RN-ANDROID-CURRENT-001"], "artifact_inventory_ids": ["ARTDEF-PG-EXTENSION-001", "ARTDEF-ADAPTER-001", "ARTDEF-SEED-TOOL-001", "ARTDEF-PORTABLE-SEED-001", "ARTDEF-SWIFT-SPM-001", "ARTDEF-COCOAPODS-001", "ARTDEF-KOTLIN-MAVEN-001", "ARTDEF-RN-NPM-001"],
+      "id": "MEAS-SEEDED-EMPTY-STARTUP-001", "scenario_id": "SCN-PERF-SEEDED-EMPTY-STARTUP-001", "support_cell_ids": ["SUP-PG-LINUX-X64-001", "SUP-PG-MACOS-ARM64-001", "SUP-IOS-MIN-001", "SUP-IOS-CURRENT-001", "SUP-ANDROID-MIN-001", "SUP-ANDROID-CURRENT-001", "SUP-RN-IOS-CURRENT-001", "SUP-RN-ANDROID-CURRENT-001"], "artifact_inventory_ids": ["ARTDEF-PG-EXTENSION-001", "ARTDEF-ADAPTER-001", "ARTDEF-SEED-TOOL-001", "ARTDEF-PORTABLE-SEED-001", "ARTDEF-SWIFT-SPM-001", "ARTDEF-COCOAPODS-001", "ARTDEF-KOTLIN-MAVEN-001", "ARTDEF-RN-NPM-001"],
       "data_profile": { "profile_type": "startup", "parameters": { "dataset_cardinality": 1000 } }, "measurement_method": { "method_type": "workload-sampling", "instrumentation": "protocol-trace", "aggregation": "per-sample" },
       "metrics": [{ "id": "MET-STARTUP-REQUESTS-001", "name": "startup_sync_requests", "unit": "requests" }, { "id": "MET-STARTUP-DURATION-001", "name": "startup_local_setup_duration", "unit": "milliseconds" }],
       "strata": [{ "stratum_id": "STR-STARTUP-SEEDED-001", "parameters": { "startup_state": "seeded" } }, { "stratum_id": "STR-STARTUP-EMPTY-001", "parameters": { "startup_state": "empty" } }], "minimum_sample_count_per_stratum": 3
     },
     {
-      "id": "MEAS-QUEUE-REPLAY-001", "scenario_id": "SCN-PERF-QUEUE-REPLAY-001", "support_cell_ids": ["SUP-PG-018", "SUP-IOS-MIN-001", "SUP-IOS-CURRENT-001", "SUP-MACOS-MIN-001", "SUP-MACOS-CURRENT-001", "SUP-ANDROID-MIN-001", "SUP-ANDROID-CURRENT-001", "SUP-RN-IOS-MIN-001", "SUP-RN-IOS-CURRENT-001", "SUP-RN-ANDROID-MIN-001", "SUP-RN-ANDROID-CURRENT-001"], "artifact_inventory_ids": ["ARTDEF-PG-EXTENSION-001", "ARTDEF-ADAPTER-001", "ARTDEF-SWIFT-SPM-001", "ARTDEF-COCOAPODS-001", "ARTDEF-KOTLIN-MAVEN-001", "ARTDEF-RN-NPM-001"],
+      "id": "MEAS-QUEUE-REPLAY-001", "scenario_id": "SCN-PERF-QUEUE-REPLAY-001", "support_cell_ids": ["SUP-PG-LINUX-X64-001", "SUP-PG-MACOS-ARM64-001", "SUP-IOS-MIN-001", "SUP-IOS-CURRENT-001", "SUP-ANDROID-MIN-001", "SUP-ANDROID-CURRENT-001", "SUP-RN-IOS-CURRENT-001", "SUP-RN-ANDROID-CURRENT-001"], "artifact_inventory_ids": ["ARTDEF-PG-EXTENSION-001", "ARTDEF-ADAPTER-001", "ARTDEF-SWIFT-SPM-001", "ARTDEF-COCOAPODS-001", "ARTDEF-KOTLIN-MAVEN-001", "ARTDEF-RN-NPM-001"],
       "data_profile": { "profile_type": "queue-replay", "parameters": { "connection_state": "recovered" } }, "measurement_method": { "method_type": "workload-sampling", "instrumentation": "protocol-trace", "aggregation": "per-sample" },
       "metrics": [{ "id": "MET-QUEUE-MUTATIONS-001", "name": "replayed_mutation_count", "unit": "mutations" }, { "id": "MET-QUEUE-DURATION-001", "name": "queue_replay_duration", "unit": "milliseconds" }],
       "strata": [{ "stratum_id": "STR-QUEUE-SMALL-001", "parameters": { "pending_mutation_count": 2, "accepted_count": 1, "rejected_count": 1 } }, { "stratum_id": "STR-QUEUE-MEDIUM-001", "parameters": { "pending_mutation_count": 100, "accepted_count": 99, "rejected_count": 1 } }, { "stratum_id": "STR-QUEUE-LARGE-001", "parameters": { "pending_mutation_count": 1000, "accepted_count": 999, "rejected_count": 1 } }], "minimum_sample_count_per_stratum": 3
     },
     {
-      "id": "MEAS-REBUILD-APPLY-001", "scenario_id": "SCN-PERF-REBUILD-APPLY-001", "support_cell_ids": ["SUP-IOS-MIN-001", "SUP-IOS-CURRENT-001", "SUP-MACOS-MIN-001", "SUP-MACOS-CURRENT-001", "SUP-ANDROID-MIN-001", "SUP-ANDROID-CURRENT-001", "SUP-RN-IOS-MIN-001", "SUP-RN-IOS-CURRENT-001", "SUP-RN-ANDROID-MIN-001", "SUP-RN-ANDROID-CURRENT-001"], "artifact_inventory_ids": ["ARTDEF-PG-EXTENSION-001", "ARTDEF-ADAPTER-001", "ARTDEF-SWIFT-SPM-001", "ARTDEF-COCOAPODS-001", "ARTDEF-KOTLIN-MAVEN-001", "ARTDEF-RN-NPM-001"],
+      "id": "MEAS-REBUILD-APPLY-001", "scenario_id": "SCN-PERF-REBUILD-APPLY-001", "support_cell_ids": ["SUP-IOS-MIN-001", "SUP-IOS-CURRENT-001", "SUP-ANDROID-MIN-001", "SUP-ANDROID-CURRENT-001", "SUP-RN-IOS-CURRENT-001", "SUP-RN-ANDROID-CURRENT-001"], "artifact_inventory_ids": ["ARTDEF-PG-EXTENSION-001", "ARTDEF-ADAPTER-001", "ARTDEF-SWIFT-SPM-001", "ARTDEF-COCOAPODS-001", "ARTDEF-KOTLIN-MAVEN-001", "ARTDEF-RN-NPM-001"],
       "data_profile": { "profile_type": "rebuild-apply", "parameters": { "page_size": 100 } }, "measurement_method": { "method_type": "workload-sampling", "instrumentation": "native-profiler", "aggregation": "per-sample" },
       "metrics": [{ "id": "MET-APPLY-RECORDS-001", "name": "rebuild_records_applied", "unit": "records" }, { "id": "MET-APPLY-DURATION-001", "name": "rebuild_apply_duration", "unit": "milliseconds" }],
       "strata": [{ "stratum_id": "STR-APPLY-SMALL-001", "parameters": { "rebuild_record_count": 1, "page_size": 100 } }, { "stratum_id": "STR-APPLY-MEDIUM-001", "parameters": { "rebuild_record_count": 101, "page_size": 100 } }, { "stratum_id": "STR-APPLY-LARGE-001", "parameters": { "rebuild_record_count": 1000, "page_size": 100 } }], "minimum_sample_count_per_stratum": 3
     },
     {
-      "id": "MEAS-MULTI-SCOPE-PROVENANCE-001", "scenario_id": "SCN-PERF-MULTI-SCOPE-PROVENANCE-001", "support_cell_ids": ["SUP-IOS-MIN-001", "SUP-IOS-CURRENT-001", "SUP-MACOS-MIN-001", "SUP-MACOS-CURRENT-001", "SUP-ANDROID-MIN-001", "SUP-ANDROID-CURRENT-001", "SUP-RN-IOS-MIN-001", "SUP-RN-IOS-CURRENT-001", "SUP-RN-ANDROID-MIN-001", "SUP-RN-ANDROID-CURRENT-001"], "artifact_inventory_ids": ["ARTDEF-PG-EXTENSION-001", "ARTDEF-ADAPTER-001", "ARTDEF-SWIFT-SPM-001", "ARTDEF-COCOAPODS-001", "ARTDEF-KOTLIN-MAVEN-001", "ARTDEF-RN-NPM-001"],
+      "id": "MEAS-MULTI-SCOPE-PROVENANCE-001", "scenario_id": "SCN-PERF-MULTI-SCOPE-PROVENANCE-001", "support_cell_ids": ["SUP-IOS-MIN-001", "SUP-IOS-CURRENT-001", "SUP-ANDROID-MIN-001", "SUP-ANDROID-CURRENT-001", "SUP-RN-IOS-CURRENT-001", "SUP-RN-ANDROID-CURRENT-001"], "artifact_inventory_ids": ["ARTDEF-PG-EXTENSION-001", "ARTDEF-ADAPTER-001", "ARTDEF-SWIFT-SPM-001", "ARTDEF-COCOAPODS-001", "ARTDEF-KOTLIN-MAVEN-001", "ARTDEF-RN-NPM-001"],
       "data_profile": { "profile_type": "provenance", "parameters": { "overlapping_rows": true } }, "measurement_method": { "method_type": "workload-sampling", "instrumentation": "native-profiler", "aggregation": "per-sample" },
       "metrics": [{ "id": "MET-PROVENANCE-ENTRIES-001", "name": "provenance_entries", "unit": "entries" }, { "id": "MET-PROVENANCE-WORK-001", "name": "provenance_maintenance_work", "unit": "operations" }],
       "strata": [{ "stratum_id": "STR-PROVENANCE-ONE-001", "parameters": { "provenance_scope_count": 1 } }, { "stratum_id": "STR-PROVENANCE-MULTIPLE-001", "parameters": { "provenance_scope_count": 2 } }], "minimum_sample_count_per_stratum": 3
     },
     {
-      "id": "MEAS-CONFIGURED-BOUNDS-001", "scenario_id": "SCN-PERF-CONFIGURED-BOUNDS-001", "support_cell_ids": ["SUP-PG-018"], "artifact_inventory_ids": ["ARTDEF-PG-EXTENSION-001", "ARTDEF-ADAPTER-001"],
+      "id": "MEAS-CONFIGURED-BOUNDS-001", "scenario_id": "SCN-PERF-CONFIGURED-BOUNDS-001", "support_cell_ids": ["SUP-PG-LINUX-X64-001", "SUP-PG-MACOS-ARM64-001"], "artifact_inventory_ids": ["ARTDEF-PG-EXTENSION-001", "ARTDEF-ADAPTER-001"],
       "data_profile": { "profile_type": "configured-boundary", "parameters": { "configuration_source": "registered_scope_limits", "max_scope_fanout": 8, "max_impact_rows": 1000, "pull_maximum": 1000, "rebuild_maximum": 1000, "compaction_batch_maximum": 10000, "backfill_batch_maximum": 1000, "push_mutation_maximum": 1000 } }, "measurement_method": { "method_type": "boundary-exercise", "instrumentation": "protocol-trace", "aggregation": "per-sample" },
       "metrics": [{ "id": "MET-BOUND-LOWER-001", "name": "lower_bound_acceptance", "unit": "cases" }, { "id": "MET-BOUND-UPPER-001", "name": "upper_bound_acceptance", "unit": "cases" }, { "id": "MET-BOUND-INVALID-001", "name": "invalid_bound_rejection", "unit": "cases" }],
       "strata": [{ "stratum_id": "STR-FANOUT-LOWER-001", "parameters": { "bound_family": "fanout", "boundary": "lower", "value": 1 } }, { "stratum_id": "STR-FANOUT-UPPER-001", "parameters": { "bound_family": "fanout", "boundary": "upper", "value": 8 } }, { "stratum_id": "STR-FANOUT-INVALID-001", "parameters": { "bound_family": "fanout", "boundary": "invalid", "value": 9 } }, { "stratum_id": "STR-IMPACT-LOWER-001", "parameters": { "bound_family": "impact", "boundary": "lower", "value": 1 } }, { "stratum_id": "STR-IMPACT-UPPER-001", "parameters": { "bound_family": "impact", "boundary": "upper", "value": 1000 } }, { "stratum_id": "STR-IMPACT-INVALID-001", "parameters": { "bound_family": "impact", "boundary": "invalid", "value": 1001 } }, { "stratum_id": "STR-PULL-LOWER-001", "parameters": { "bound_family": "pull", "boundary": "lower", "value": 1 } }, { "stratum_id": "STR-PULL-UPPER-001", "parameters": { "bound_family": "pull", "boundary": "upper", "value": 1000 } }, { "stratum_id": "STR-PULL-INVALID-001", "parameters": { "bound_family": "pull", "boundary": "invalid", "value": 1001 } }, { "stratum_id": "STR-REBUILD-LOWER-001", "parameters": { "bound_family": "rebuild", "boundary": "lower", "value": 1 } }, { "stratum_id": "STR-REBUILD-UPPER-001", "parameters": { "bound_family": "rebuild", "boundary": "upper", "value": 1000 } }, { "stratum_id": "STR-REBUILD-INVALID-001", "parameters": { "bound_family": "rebuild", "boundary": "invalid", "value": 1001 } }, { "stratum_id": "STR-COMPACTION-LOWER-001", "parameters": { "bound_family": "compaction", "boundary": "lower", "value": 1 } }, { "stratum_id": "STR-COMPACTION-UPPER-001", "parameters": { "bound_family": "compaction", "boundary": "upper", "value": 10000 } }, { "stratum_id": "STR-COMPACTION-INVALID-001", "parameters": { "bound_family": "compaction", "boundary": "invalid", "value": 10001 } }, { "stratum_id": "STR-BACKFILL-LOWER-001", "parameters": { "bound_family": "backfill", "boundary": "lower", "value": 1 } }, { "stratum_id": "STR-BACKFILL-UPPER-001", "parameters": { "bound_family": "backfill", "boundary": "upper", "value": 1000 } }, { "stratum_id": "STR-BACKFILL-INVALID-001", "parameters": { "bound_family": "backfill", "boundary": "invalid", "value": 1001 } }, { "stratum_id": "STR-PUSH-LOWER-001", "parameters": { "bound_family": "push_mutations", "boundary": "lower", "value": 1 } }, { "stratum_id": "STR-PUSH-UPPER-001", "parameters": { "bound_family": "push_mutations", "boundary": "upper", "value": 1000 } }, { "stratum_id": "STR-PUSH-INVALID-001", "parameters": { "bound_family": "push_mutations", "boundary": "invalid", "value": 1001 } }], "minimum_sample_count_per_stratum": 3

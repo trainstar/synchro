@@ -11,6 +11,11 @@
       "types": "./lib/typescript/src/index.d.ts",
       "default": "./lib/module/index.js"
     },
+    "./inspection": {
+      "source": "./src/inspection.ts",
+      "types": "./lib/typescript/src/inspection.d.ts",
+      "default": "./lib/module/inspection.js"
+    },
     "./package.json": "./package.json"
   },
   "files": [
@@ -127,6 +132,7 @@
       ]
     },
     "moduleNameMapper": {
+      "^@trainstar/synchro-react-native/inspection$": "<rootDir>/src/inspection",
       "^react-native$": "<rootDir>/__tests__/__mocks__/react-native"
     },
     "modulePathIgnorePatterns": [

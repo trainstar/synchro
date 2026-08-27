@@ -51,7 +51,7 @@
       "control_id": null
     },
     {
-      "obligation_id": "OBL-PULL-DIVERGENT-PG-001",
+      "obligation_id": "OBL-PULL-DIVERGENT-PG-LINUX-X64-001",
       "requirement_ids": [
         "SYNC-PULL-001",
         "SYNC-PULL-002"
@@ -61,7 +61,34 @@
         "ASSERT-PULL-DIVERGENT-MERGE-SEMANTIC-001"
       ],
       "proof_type": "server-black-box",
-      "support_cell_id": "SUP-PG-018",
+      "support_cell_id": "SUP-PG-LINUX-X64-001",
+      "artifact_inventory_ids": [
+        "ARTDEF-PG-EXTENSION-001",
+        "ARTDEF-ADAPTER-001"
+      ],
+      "performance_budget_ids": [],
+      "required_measurement_ids": [],
+      "required_vector_set_ids": [],
+      "make_target": "test-blackbox",
+      "argv": [
+        "make",
+        "test-blackbox"
+      ],
+      "fault_plan_id": null,
+      "control_id": null
+    },
+    {
+      "obligation_id": "OBL-PULL-DIVERGENT-PG-MACOS-ARM64-001",
+      "requirement_ids": [
+        "SYNC-PULL-001",
+        "SYNC-PULL-002"
+      ],
+      "assertion_ids": [
+        "ASSERT-PULL-DIVERGENT-SEMANTIC-001",
+        "ASSERT-PULL-DIVERGENT-MERGE-SEMANTIC-001"
+      ],
+      "proof_type": "server-black-box",
+      "support_cell_id": "SUP-PG-MACOS-ARM64-001",
       "artifact_inventory_ids": [
         "ARTDEF-PG-EXTENSION-001",
         "ARTDEF-ADAPTER-001"
@@ -148,18 +175,34 @@
     {
       "scenario_id": "SCN-PULL-DIVERGENT-CHECKPOINTS-001",
       "requirement_id": "SYNC-PULL-001",
-      "proof_obligation_id": "OBL-PULL-DIVERGENT-PG-001",
+      "proof_obligation_id": "OBL-PULL-DIVERGENT-PG-LINUX-X64-001",
       "assertion_id": "ASSERT-PULL-DIVERGENT-SEMANTIC-001",
       "proof_type": "server-black-box",
-      "support_cell_id": "SUP-PG-018"
+      "support_cell_id": "SUP-PG-LINUX-X64-001"
+    },
+    {
+      "scenario_id": "SCN-PULL-DIVERGENT-CHECKPOINTS-001",
+      "requirement_id": "SYNC-PULL-001",
+      "proof_obligation_id": "OBL-PULL-DIVERGENT-PG-MACOS-ARM64-001",
+      "assertion_id": "ASSERT-PULL-DIVERGENT-SEMANTIC-001",
+      "proof_type": "server-black-box",
+      "support_cell_id": "SUP-PG-MACOS-ARM64-001"
     },
     {
       "scenario_id": "SCN-PULL-DIVERGENT-CHECKPOINTS-001",
       "requirement_id": "SYNC-PULL-002",
-      "proof_obligation_id": "OBL-PULL-DIVERGENT-PG-001",
+      "proof_obligation_id": "OBL-PULL-DIVERGENT-PG-LINUX-X64-001",
       "assertion_id": "ASSERT-PULL-DIVERGENT-MERGE-SEMANTIC-001",
       "proof_type": "server-black-box",
-      "support_cell_id": "SUP-PG-018"
+      "support_cell_id": "SUP-PG-LINUX-X64-001"
+    },
+    {
+      "scenario_id": "SCN-PULL-DIVERGENT-CHECKPOINTS-001",
+      "requirement_id": "SYNC-PULL-002",
+      "proof_obligation_id": "OBL-PULL-DIVERGENT-PG-MACOS-ARM64-001",
+      "assertion_id": "ASSERT-PULL-DIVERGENT-MERGE-SEMANTIC-001",
+      "proof_type": "server-black-box",
+      "support_cell_id": "SUP-PG-MACOS-ARM64-001"
     },
     {
       "scenario_id": "SCN-PULL-DIVERGENT-CHECKPOINTS-001",

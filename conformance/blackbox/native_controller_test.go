@@ -4,41 +4,66 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
-	"github.com/trainstar/synchro/conformance/nativeharness"
 	"github.com/trainstar/synchro/conformance/scenarios"
 )
 
-func TestNativeControllerApplyDispatchesOnlyByOperationKey(t *testing.T) {
+func TestNativeControllerApplyRejectsWorkloadMacro(t *testing.T) {
 	controller := &NativeController{harness: &Harness{}}
 	operation := scenarios.Operation{
 		ContractOperation: "workload",
 		Name:              "prepare",
 		Payload:           []byte(`{"profile":"scope_topology","scope_fanout":1,"impact_rows":1}`),
 	}
-	for _, request := range []nativeharness.StepRequest{
-		{Phase: "setup", Transport: "model", Operation: operation},
-		{Phase: "renamed", Transport: "other", Operation: operation},
-	} {
-		_, err := controller.ApplyStep(context.Background(), request)
-		if err == nil || !strings.Contains(err.Error(), "does not execute workload macros") {
-			t.Fatalf("ApplyStep error = %v, want workload macro boundary error", err)
+	_, err := controller.ApplyStep(context.Background(), operation)
+	if err == nil || !strings.Contains(err.Error(), "does not execute workload macros") {
+		t.Fatalf("ApplyStep error = %v, want workload macro boundary error", err)
+	}
+}
+
+func TestNativeControllerAssignmentRebindsPlaceholderScope(t *testing.T) {
+	controller := &NativeController{installation: &nativeInstallationBinding{
+		scopes:        map[string]string{"scope-a": "cf:global"},
+		runtimeScopes: map[string]string{"cf:global": "scope-a"},
+	}}
+	operation := scenarios.Operation{
+		ContractOperation: "model",
+		Name:              "set-client-assignments",
+		Payload:           json.RawMessage(`{"user_id":"user-a","client_id":"client-a","assignments":[{"scope_id":"scope-a"}]}`),
+	}
+	for range 2 {
+		observation, err := controller.setClientAssignments(operation)
+		if err != nil {
+			t.Fatalf("set client assignments: %v", err)
 		}
+		if observation.Disposition != "success" {
+			t.Fatalf("assignment disposition = %q", observation.Disposition)
+		}
+	}
+	if got := controller.installation.scopes["scope-a"]; got != "user:user-a" {
+		t.Fatalf("runtime scope = %q, want user:user-a", got)
+	}
+	if _, found := controller.installation.runtimeScopes["cf:global"]; found {
+		t.Fatal("placeholder global scope binding remains")
+	}
+	if len(controller.installation.clients) != 1 || controller.installation.clients[0] != (nativeInstalledClient{UserID: "user-a", ClientID: "client-a"}) {
+		t.Fatalf("installed clients = %#v", controller.installation.clients)
 	}
 }
 
 func TestNativeArtifactStageRejectsUnsupportedOperationKey(t *testing.T) {
 	artifact := &NativeArtifact{harness: &Harness{}}
-	_, err := artifact.StageStep(context.Background(), nativeharness.StepRequest{Operation: scenarios.Operation{
+	_, err := artifact.StageStep(context.Background(), scenarios.Operation{
 		ContractOperation: "workload",
 		Name:              "prepare",
 		Payload:           []byte(`{"profile":"scope_topology","scope_fanout":1,"impact_rows":1}`),
-	}})
+	})
 	if err == nil || !strings.Contains(err.Error(), `stage operation "workload/prepare" is unsupported`) {
 		t.Fatalf("StageStep error = %v, want unsupported operation key", err)
 	}

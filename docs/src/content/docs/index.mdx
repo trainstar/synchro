@@ -17,16 +17,16 @@ Swift and Kotlin are first-class client engines. React Native is a bridge over t
 - Deterministic selective sync. Server-defined scopes, materialized membership, and explicit rebuilds make behavior predictable.
 - Portable seeds. Generate client-compatible SQLite seeds from PostgreSQL for faster first start and bundled shared data.
 
-## Current support
+## Tier 1 certification scope
 
-- PostgreSQL 18
+- PostgreSQL 18 on the published `linux-x64` and `macos-arm64` extension architectures
 - Swift on iOS 16 and current stable iOS
-- Swift on macOS 13 and current stable macOS
 - Kotlin on Android API 24 and current stable Android API
-- React Native 0.83.x on iOS 16 and current stable iOS
-- React Native 0.83.x on Android API 24 and current stable Android API
+- React Native 0.83.x on current stable iOS and current stable Android
 
-This matrix states required policy. Candidate results come from generated evidence tied to exact artifacts. The current test inventory is not release certification. See the [Verification overview](/synchro/verification/overview/) and [Support policy](/synchro/reference/support-policy/).
+Swift on macOS is Tier 2. It is built and tested in CI without certification.
+
+This matrix states required policy. Candidate results come from generated evidence tied to exact artifacts. A new certified cell requires named production demand that justifies its recurring evidence cost. The current test inventory is not release certification. See the [Verification overview](/synchro/verification/overview/) and [Support policy](/synchro/reference/support-policy/).
 
 ## Start here by goal
 

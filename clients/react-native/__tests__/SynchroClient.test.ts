@@ -1,10 +1,25 @@
 import { SynchroClient } from '../src/SynchroClient';
+import { SynchroInspection } from '../src/inspection';
 import { SyncStatus } from '../src/types';
 import {
   mockNativeModule,
   emitNativeEvent,
   resetNativeModuleMockState,
 } from './__mocks__/react-native';
+
+const CLIENT_STATE_COUNTS = {
+  application_row_count: Number.MAX_SAFE_INTEGER,
+  mutation_ledger_count: 2,
+  mutation_outcome_count: 3,
+  sealed_batch_count: 4,
+  rejected_mutation_count: 5,
+  scope_state_count: 6,
+  scope_row_count: 7,
+  provenance_count: 8,
+  row_metadata_count: 9,
+  rebuild_attempt_count: 10,
+  rebuild_receipt_count: 11,
+};
 
 function makeClient(): SynchroClient {
   return new SynchroClient({
@@ -14,6 +29,13 @@ function makeClient(): SynchroClient {
     clientID: 'test-client',
     appVersion: '1.0.0',
   });
+}
+
+async function makeInspection(): Promise<{ client: SynchroClient; inspection: SynchroInspection }> {
+  const client = makeClient();
+  const inspection = new SynchroInspection(client, { transportObservationCapacity: 8 });
+  await client.initialize();
+  return { client, inspection };
 }
 
 beforeEach(() => {
@@ -39,6 +61,7 @@ describe('SynchroClient', () => {
         pushBatchSize: 100,
         seedDatabasePath: undefined,
         transportObservationCapacity: 0,
+        requireNewDatabase: false,
       });
       await client.close();
     });
@@ -522,6 +545,182 @@ describe('SynchroClient', () => {
       expect(result[0].rejectionJSON).toBe(rejectionJSON);
     });
 
+    it('maps the maximum provenance maintenance cursor without numeric precision loss', async () => {
+      mockNativeModule.inspectClientState.mockResolvedValueOnce(JSON.stringify({
+        schema: null,
+        scope_states: [],
+        scope_rows: [],
+        rebuild_attempts: [],
+        ...CLIENT_STATE_COUNTS,
+        provenance_maintenance_work_cursor: '9223372036854775807',
+      }));
+
+      const { client, inspection } = await makeInspection();
+      await expect(inspection.clientState()).resolves.toEqual({
+        schema: null,
+        scopeStates: [],
+        scopeRows: [],
+        rebuildAttempts: [],
+        applicationRowCount: Number.MAX_SAFE_INTEGER,
+        mutationLedgerCount: 2,
+        mutationOutcomeCount: 3,
+        sealedBatchCount: 4,
+        rejectedMutationCount: 5,
+        scopeStateCount: 6,
+        scopeRowCount: 7,
+        provenanceCount: 8,
+        rowMetadataCount: 9,
+        rebuildAttemptCount: 10,
+        rebuildReceiptCount: 11,
+        provenanceMaintenanceWorkCursor: '9223372036854775807',
+      });
+      await client.close();
+    });
+
+    it.each(['-1', '01', '1.0', '9223372036854775808', 1, null])(
+      'rejects invalid provenance maintenance cursor %p',
+      async (cursor) => {
+        mockNativeModule.inspectClientState.mockResolvedValueOnce(JSON.stringify({
+          schema: null,
+          scope_states: [],
+          scope_rows: [],
+          rebuild_attempts: [],
+          ...CLIENT_STATE_COUNTS,
+          provenance_maintenance_work_cursor: cursor,
+        }));
+
+        const { client, inspection } = await makeInspection();
+        await expect(inspection.clientState()).rejects.toMatchObject({
+          code: 'INVALID_RESPONSE',
+        });
+        await client.close();
+      }
+    );
+
+    it.each(Object.keys(CLIENT_STATE_COUNTS))(
+      'rejects a negative %s client-state count',
+      async (countName) => {
+        mockNativeModule.inspectClientState.mockResolvedValueOnce(JSON.stringify({
+          schema: null,
+          scope_states: [],
+          scope_rows: [],
+          rebuild_attempts: [],
+          ...CLIENT_STATE_COUNTS,
+          [countName]: -1,
+          provenance_maintenance_work_cursor: '0',
+        }));
+
+        const { client, inspection } = await makeInspection();
+        await expect(inspection.clientState()).rejects.toMatchObject({
+          code: 'INVALID_RESPONSE',
+        });
+        await client.close();
+      }
+    );
+
+    it.each([Number.MAX_SAFE_INTEGER + 1, 1.5, '1', null, undefined])(
+      'rejects malformed application row count %p',
+      async (count) => {
+        mockNativeModule.inspectClientState.mockResolvedValueOnce(JSON.stringify({
+          schema: null,
+          scope_states: [],
+          scope_rows: [],
+          rebuild_attempts: [],
+          ...CLIENT_STATE_COUNTS,
+          application_row_count: count,
+          provenance_maintenance_work_cursor: '0',
+        }));
+
+        const { client, inspection } = await makeInspection();
+        await expect(inspection.clientState()).rejects.toMatchObject({
+          code: 'INVALID_RESPONSE',
+        });
+        await client.close();
+      }
+    );
+
+    it.each([0, Number.MAX_SAFE_INTEGER])(
+      'accepts nonnegative safe request mutation count %p and unknown facts',
+      async (mutationCount) => {
+        mockNativeModule.inspectTransportObservations.mockResolvedValueOnce(JSON.stringify({
+          observations: [{
+            sequence: 1,
+            operation_class: 'push',
+            status_code: 200,
+            duration_nanoseconds: 1,
+            request_facts: {
+              mutation_count: mutationCount,
+              future_fact: { enabled: true },
+            },
+          }],
+          overflowed: false,
+          sequence_checkpoint: 1,
+        }));
+
+        const { client, inspection } = await makeInspection();
+        await expect(inspection.transportObservations()).resolves.toEqual({
+          observations: [{
+            sequence: 1,
+            operationClass: 'push',
+            statusCode: 200,
+            durationNanoseconds: 1,
+            requestFacts: {
+              mutation_count: mutationCount,
+              future_fact: { enabled: true },
+            },
+          }],
+          overflowed: false,
+          sequenceCheckpoint: 1,
+        });
+        await client.close();
+      }
+    );
+
+    it.each([
+      Number.MAX_SAFE_INTEGER + 1,
+      -1,
+      1.5,
+      '1',
+    ])('rejects invalid request mutation count %p', async (mutationCount) => {
+      mockNativeModule.inspectTransportObservations.mockResolvedValueOnce(JSON.stringify({
+        observations: [{
+          sequence: 1,
+          operation_class: 'push',
+          status_code: 200,
+          duration_nanoseconds: 1,
+          request_facts: { mutation_count: mutationCount },
+        }],
+        overflowed: false,
+        sequence_checkpoint: 1,
+      }));
+
+      const { client, inspection } = await makeInspection();
+      await expect(inspection.transportObservations()).rejects.toMatchObject({
+        code: 'INVALID_RESPONSE',
+      });
+      await client.close();
+    });
+
+    it('returns the native process identity', async () => {
+      const { client, inspection } = await makeInspection();
+
+      await expect(inspection.processIdentity()).resolves.toBe('ios-app:1234');
+      await client.close();
+    });
+
+    it.each(['', '1234', 'ios-app:0', 'android-app:-1', 'process-a'])(
+      'rejects invalid native process identity %p',
+      async (processID) => {
+        mockNativeModule.getProcessIdentity.mockResolvedValueOnce(processID);
+        const { client, inspection } = await makeInspection();
+
+        await expect(inspection.processIdentity()).rejects.toMatchObject({
+          code: 'INVALID_RESPONSE',
+        });
+        await client.close();
+      }
+    );
+
     it.each([
       ['getSyncStatus', () => makeClient().getSyncStatus()],
       ['inspectPendingMutations', () => makeClient().inspectPendingMutations()],
@@ -532,6 +731,19 @@ describe('SynchroClient', () => {
       await expect(invoke()).rejects.toMatchObject({
         code: 'INVALID_RESPONSE',
       });
+    });
+
+    it.each([
+      ['inspectClientState', (inspection: SynchroInspection) => inspection.clientState()],
+      ['inspectTransportObservations', (inspection: SynchroInspection) => inspection.transportObservations()],
+    ])('rejects malformed JSON from the %s facade', async (method, invoke) => {
+      mockNativeModule[method].mockResolvedValueOnce('{invalid');
+      const { client, inspection } = await makeInspection();
+
+      await expect(invoke(inspection)).rejects.toMatchObject({
+        code: 'INVALID_RESPONSE',
+      });
+      await client.close();
     });
 
     it.each([

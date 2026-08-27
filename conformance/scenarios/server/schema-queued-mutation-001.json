@@ -21,7 +21,7 @@
   ],
   "proof_obligations": [
     {
-      "obligation_id": "OBL-SCHEMA-QUEUED-MUTATION-PG-001",
+      "obligation_id": "OBL-SCHEMA-QUEUED-MUTATION-PG-LINUX-X64-001",
       "requirement_ids": [
         "SYNC-SCHEMA-002"
       ],
@@ -29,7 +29,7 @@
         "ASSERT-SCHEMA-QUEUED-MUTATION-SEMANTIC-001"
       ],
       "proof_type": "server-black-box",
-      "support_cell_id": "SUP-PG-018",
+      "support_cell_id": "SUP-PG-LINUX-X64-001",
       "artifact_inventory_ids": [
         "ARTDEF-PG-EXTENSION-001",
         "ARTDEF-ADAPTER-001"
@@ -46,79 +46,26 @@
       "control_id": null
     },
     {
-      "obligation_id": "OBL-SCHEMA-QUEUED-MUTATION-IOS-MIN-001",
+      "obligation_id": "OBL-SCHEMA-QUEUED-MUTATION-PG-MACOS-ARM64-001",
       "requirement_ids": [
         "SYNC-SCHEMA-002"
       ],
       "assertion_ids": [
         "ASSERT-SCHEMA-QUEUED-MUTATION-SEMANTIC-001"
       ],
-      "proof_type": "native-e2e",
-      "support_cell_id": "SUP-IOS-MIN-001",
+      "proof_type": "server-black-box",
+      "support_cell_id": "SUP-PG-MACOS-ARM64-001",
       "artifact_inventory_ids": [
         "ARTDEF-PG-EXTENSION-001",
-        "ARTDEF-ADAPTER-001",
-        "ARTDEF-SWIFT-SPM-001"
+        "ARTDEF-ADAPTER-001"
       ],
       "performance_budget_ids": [],
       "required_measurement_ids": [],
       "required_vector_set_ids": [],
-      "make_target": "test-swift",
+      "make_target": "test-blackbox",
       "argv": [
         "make",
-        "test-swift"
-      ],
-      "fault_plan_id": null,
-      "control_id": null
-    },
-    {
-      "obligation_id": "OBL-SCHEMA-QUEUED-MUTATION-IOS-CURRENT-001",
-      "requirement_ids": [
-        "SYNC-SCHEMA-002"
-      ],
-      "assertion_ids": [
-        "ASSERT-SCHEMA-QUEUED-MUTATION-SEMANTIC-001"
-      ],
-      "proof_type": "native-e2e",
-      "support_cell_id": "SUP-IOS-CURRENT-001",
-      "artifact_inventory_ids": [
-        "ARTDEF-PG-EXTENSION-001",
-        "ARTDEF-ADAPTER-001",
-        "ARTDEF-SWIFT-SPM-001"
-      ],
-      "performance_budget_ids": [],
-      "required_measurement_ids": [],
-      "required_vector_set_ids": [],
-      "make_target": "test-swift",
-      "argv": [
-        "make",
-        "test-swift"
-      ],
-      "fault_plan_id": null,
-      "control_id": null
-    },
-    {
-      "obligation_id": "OBL-SCHEMA-QUEUED-MUTATION-MACOS-MIN-001",
-      "requirement_ids": [
-        "SYNC-SCHEMA-002"
-      ],
-      "assertion_ids": [
-        "ASSERT-SCHEMA-QUEUED-MUTATION-SEMANTIC-001"
-      ],
-      "proof_type": "native-e2e",
-      "support_cell_id": "SUP-MACOS-MIN-001",
-      "artifact_inventory_ids": [
-        "ARTDEF-PG-EXTENSION-001",
-        "ARTDEF-ADAPTER-001",
-        "ARTDEF-SWIFT-SPM-001"
-      ],
-      "performance_budget_ids": [],
-      "required_measurement_ids": [],
-      "required_vector_set_ids": [],
-      "make_target": "test-swift",
-      "argv": [
-        "make",
-        "test-swift"
+        "test-blackbox"
       ],
       "fault_plan_id": null,
       "control_id": null
@@ -141,36 +88,10 @@
       "performance_budget_ids": [],
       "required_measurement_ids": [],
       "required_vector_set_ids": [],
-      "make_target": "test-native-swift-schema-queue",
+      "make_target": "test-swift",
       "argv": [
         "make",
-        "test-native-swift-schema-queue"
-      ],
-      "fault_plan_id": null,
-      "control_id": null
-    },
-    {
-      "obligation_id": "OBL-SCHEMA-QUEUED-MUTATION-ANDROID-MIN-001",
-      "requirement_ids": [
-        "SYNC-SCHEMA-002"
-      ],
-      "assertion_ids": [
-        "ASSERT-SCHEMA-QUEUED-MUTATION-SEMANTIC-001"
-      ],
-      "proof_type": "native-e2e",
-      "support_cell_id": "SUP-ANDROID-MIN-001",
-      "artifact_inventory_ids": [
-        "ARTDEF-PG-EXTENSION-001",
-        "ARTDEF-ADAPTER-001",
-        "ARTDEF-KOTLIN-MAVEN-001"
-      ],
-      "performance_budget_ids": [],
-      "required_measurement_ids": [],
-      "required_vector_set_ids": [],
-      "make_target": "test-kotlin",
-      "argv": [
-        "make",
-        "test-kotlin"
+        "test-swift"
       ],
       "fault_plan_id": null,
       "control_id": null
@@ -202,34 +123,6 @@
       "control_id": null
     },
     {
-      "obligation_id": "OBL-SCHEMA-QUEUED-MUTATION-RN-IOS-MIN-001",
-      "requirement_ids": [
-        "SYNC-SCHEMA-002"
-      ],
-      "assertion_ids": [
-        "ASSERT-SCHEMA-QUEUED-MUTATION-SEMANTIC-001"
-      ],
-      "proof_type": "native-e2e",
-      "support_cell_id": "SUP-RN-IOS-MIN-001",
-      "artifact_inventory_ids": [
-        "ARTDEF-PG-EXTENSION-001",
-        "ARTDEF-ADAPTER-001",
-        "ARTDEF-SWIFT-SPM-001",
-        "ARTDEF-COCOAPODS-001",
-        "ARTDEF-RN-NPM-001"
-      ],
-      "performance_budget_ids": [],
-      "required_measurement_ids": [],
-      "required_vector_set_ids": [],
-      "make_target": "test-rn-e2e-ios",
-      "argv": [
-        "make",
-        "test-rn-e2e-ios"
-      ],
-      "fault_plan_id": null,
-      "control_id": null
-    },
-    {
       "obligation_id": "OBL-SCHEMA-QUEUED-MUTATION-RN-IOS-CURRENT-001",
       "requirement_ids": [
         "SYNC-SCHEMA-002"
@@ -253,33 +146,6 @@
       "argv": [
         "make",
         "test-rn-e2e-ios"
-      ],
-      "fault_plan_id": null,
-      "control_id": null
-    },
-    {
-      "obligation_id": "OBL-SCHEMA-QUEUED-MUTATION-RN-ANDROID-MIN-001",
-      "requirement_ids": [
-        "SYNC-SCHEMA-002"
-      ],
-      "assertion_ids": [
-        "ASSERT-SCHEMA-QUEUED-MUTATION-SEMANTIC-001"
-      ],
-      "proof_type": "native-e2e",
-      "support_cell_id": "SUP-RN-ANDROID-MIN-001",
-      "artifact_inventory_ids": [
-        "ARTDEF-PG-EXTENSION-001",
-        "ARTDEF-ADAPTER-001",
-        "ARTDEF-KOTLIN-MAVEN-001",
-        "ARTDEF-RN-NPM-001"
-      ],
-      "performance_budget_ids": [],
-      "required_measurement_ids": [],
-      "required_vector_set_ids": [],
-      "make_target": "test-rn-e2e-android",
-      "argv": [
-        "make",
-        "test-rn-e2e-android"
       ],
       "fault_plan_id": null,
       "control_id": null
@@ -370,34 +236,18 @@
     {
       "scenario_id": "SCN-SCHEMA-QUEUED-MUTATION-001",
       "requirement_id": "SYNC-SCHEMA-002",
-      "proof_obligation_id": "OBL-SCHEMA-QUEUED-MUTATION-PG-001",
+      "proof_obligation_id": "OBL-SCHEMA-QUEUED-MUTATION-PG-LINUX-X64-001",
       "assertion_id": "ASSERT-SCHEMA-QUEUED-MUTATION-SEMANTIC-001",
       "proof_type": "server-black-box",
-      "support_cell_id": "SUP-PG-018"
+      "support_cell_id": "SUP-PG-LINUX-X64-001"
     },
     {
       "scenario_id": "SCN-SCHEMA-QUEUED-MUTATION-001",
       "requirement_id": "SYNC-SCHEMA-002",
-      "proof_obligation_id": "OBL-SCHEMA-QUEUED-MUTATION-IOS-MIN-001",
+      "proof_obligation_id": "OBL-SCHEMA-QUEUED-MUTATION-PG-MACOS-ARM64-001",
       "assertion_id": "ASSERT-SCHEMA-QUEUED-MUTATION-SEMANTIC-001",
-      "proof_type": "native-e2e",
-      "support_cell_id": "SUP-IOS-MIN-001"
-    },
-    {
-      "scenario_id": "SCN-SCHEMA-QUEUED-MUTATION-001",
-      "requirement_id": "SYNC-SCHEMA-002",
-      "proof_obligation_id": "OBL-SCHEMA-QUEUED-MUTATION-IOS-CURRENT-001",
-      "assertion_id": "ASSERT-SCHEMA-QUEUED-MUTATION-SEMANTIC-001",
-      "proof_type": "native-e2e",
-      "support_cell_id": "SUP-IOS-CURRENT-001"
-    },
-    {
-      "scenario_id": "SCN-SCHEMA-QUEUED-MUTATION-001",
-      "requirement_id": "SYNC-SCHEMA-002",
-      "proof_obligation_id": "OBL-SCHEMA-QUEUED-MUTATION-MACOS-MIN-001",
-      "assertion_id": "ASSERT-SCHEMA-QUEUED-MUTATION-SEMANTIC-001",
-      "proof_type": "native-e2e",
-      "support_cell_id": "SUP-MACOS-MIN-001"
+      "proof_type": "server-black-box",
+      "support_cell_id": "SUP-PG-MACOS-ARM64-001"
     },
     {
       "scenario_id": "SCN-SCHEMA-QUEUED-MUTATION-001",
@@ -410,14 +260,6 @@
     {
       "scenario_id": "SCN-SCHEMA-QUEUED-MUTATION-001",
       "requirement_id": "SYNC-SCHEMA-002",
-      "proof_obligation_id": "OBL-SCHEMA-QUEUED-MUTATION-ANDROID-MIN-001",
-      "assertion_id": "ASSERT-SCHEMA-QUEUED-MUTATION-SEMANTIC-001",
-      "proof_type": "native-e2e",
-      "support_cell_id": "SUP-ANDROID-MIN-001"
-    },
-    {
-      "scenario_id": "SCN-SCHEMA-QUEUED-MUTATION-001",
-      "requirement_id": "SYNC-SCHEMA-002",
       "proof_obligation_id": "OBL-SCHEMA-QUEUED-MUTATION-ANDROID-CURRENT-001",
       "assertion_id": "ASSERT-SCHEMA-QUEUED-MUTATION-SEMANTIC-001",
       "proof_type": "native-e2e",
@@ -426,26 +268,10 @@
     {
       "scenario_id": "SCN-SCHEMA-QUEUED-MUTATION-001",
       "requirement_id": "SYNC-SCHEMA-002",
-      "proof_obligation_id": "OBL-SCHEMA-QUEUED-MUTATION-RN-IOS-MIN-001",
-      "assertion_id": "ASSERT-SCHEMA-QUEUED-MUTATION-SEMANTIC-001",
-      "proof_type": "native-e2e",
-      "support_cell_id": "SUP-RN-IOS-MIN-001"
-    },
-    {
-      "scenario_id": "SCN-SCHEMA-QUEUED-MUTATION-001",
-      "requirement_id": "SYNC-SCHEMA-002",
       "proof_obligation_id": "OBL-SCHEMA-QUEUED-MUTATION-RN-IOS-CURRENT-001",
       "assertion_id": "ASSERT-SCHEMA-QUEUED-MUTATION-SEMANTIC-001",
       "proof_type": "native-e2e",
       "support_cell_id": "SUP-RN-IOS-CURRENT-001"
-    },
-    {
-      "scenario_id": "SCN-SCHEMA-QUEUED-MUTATION-001",
-      "requirement_id": "SYNC-SCHEMA-002",
-      "proof_obligation_id": "OBL-SCHEMA-QUEUED-MUTATION-RN-ANDROID-MIN-001",
-      "assertion_id": "ASSERT-SCHEMA-QUEUED-MUTATION-SEMANTIC-001",
-      "proof_type": "native-e2e",
-      "support_cell_id": "SUP-RN-ANDROID-MIN-001"
     },
     {
       "scenario_id": "SCN-SCHEMA-QUEUED-MUTATION-001",
@@ -785,6 +611,9 @@
       "phase": "setup",
       "transport": "model",
       "description": "Commit the S1 base row through the authoritative source transaction path.",
+      "native_binding": {
+        "kind": "controller"
+      },
       "operation": {
         "contract_operation": "model",
         "name": "commit-source-transaction",
@@ -839,6 +668,9 @@
       "phase": "setup",
       "transport": "process",
       "description": "Materialize the S1 base row through the WAL path.",
+      "native_binding": {
+        "kind": "controller"
+      },
       "operation": {
         "contract_operation": "process",
         "name": "materialize-source-transaction",
@@ -856,6 +688,15 @@
       "phase": "setup",
       "transport": "http",
       "description": "Request the S1 base row from an immutable rebuild snapshot.",
+      "native_binding": {
+        "kind": "public-call",
+        "user_id": "user-a",
+        "client_id": "client-a",
+        "call_id": "schema_baseline",
+        "stage": "synchronous",
+        "method": "start",
+        "completion": "idle"
+      },
       "operation": {
         "contract_operation": "rebuild",
         "name": "request-page",
@@ -882,6 +723,15 @@
       "phase": "setup",
       "transport": "local",
       "description": "Begin the local S1 baseline rebuild.",
+      "native_binding": {
+        "kind": "public-call",
+        "user_id": "user-a",
+        "client_id": "client-a",
+        "call_id": "schema_baseline",
+        "stage": "synchronous",
+        "method": "start",
+        "completion": "idle"
+      },
       "operation": {
         "contract_operation": "local",
         "name": "begin-rebuild",
@@ -907,6 +757,15 @@
       "phase": "setup",
       "transport": "local",
       "description": "Apply the rebuilt S1 base row and version atomically.",
+      "native_binding": {
+        "kind": "public-call",
+        "user_id": "user-a",
+        "client_id": "client-a",
+        "call_id": "schema_baseline",
+        "stage": "synchronous",
+        "method": "start",
+        "completion": "idle"
+      },
       "operation": {
         "contract_operation": "local",
         "name": "apply-rebuild-page",
@@ -928,6 +787,15 @@
       "phase": "setup",
       "transport": "local",
       "description": "Finalize the S1 baseline and install its issued cursor.",
+      "native_binding": {
+        "kind": "public-call",
+        "user_id": "user-a",
+        "client_id": "client-a",
+        "call_id": "schema_baseline",
+        "stage": "synchronous",
+        "method": "start",
+        "completion": "idle"
+      },
       "operation": {
         "contract_operation": "local",
         "name": "finalize-rebuild",
@@ -947,6 +815,11 @@
       "phase": "exercise",
       "transport": "local",
       "description": "Create the exact S1 update with a removed field, base version, and stable local order.",
+      "native_binding": {
+        "kind": "local-write",
+        "user_id": "user-a",
+        "client_id": "client-a"
+      },
       "operation": {
         "contract_operation": "local",
         "name": "write",
@@ -983,6 +856,9 @@
       "phase": "exercise",
       "transport": "model",
       "description": "Publish incompatible S2 after removing the authored S1 field.",
+      "native_binding": {
+        "kind": "controller"
+      },
       "operation": {
         "contract_operation": "model",
         "name": "publish-schema",
@@ -1041,6 +917,15 @@
       "phase": "exercise",
       "transport": "http",
       "description": "Perform the explicit queue-preserving reset from S1 to S2.",
+      "native_binding": {
+        "kind": "public-call",
+        "user_id": "user-a",
+        "client_id": "client-a",
+        "call_id": "schema_reset",
+        "stage": "synchronous",
+        "method": "reset-schema-and-start",
+        "completion": "idle"
+      },
       "operation": {
         "contract_operation": "connect",
         "name": "send",
@@ -1072,6 +957,15 @@
       "phase": "exercise",
       "transport": "http",
       "description": "Submit under S2 while preserving the complete authored S1 mutation.",
+      "native_binding": {
+        "kind": "public-call",
+        "user_id": "user-a",
+        "client_id": "client-a",
+        "call_id": "schema_reset",
+        "stage": "synchronous",
+        "method": "reset-schema-and-start",
+        "completion": "idle"
+      },
       "operation": {
         "contract_operation": "push",
         "name": "submit",
@@ -1119,6 +1013,11 @@
       "phase": "exercise",
       "transport": "process",
       "description": "Restart the client without submitting or scheduling the blocked mutation again.",
+      "native_binding": {
+        "kind": "process",
+        "user_id": "user-a",
+        "client_id": "client-a"
+      },
       "operation": {
         "contract_operation": "process",
         "name": "restart-client",
@@ -1184,185 +1083,156 @@
       ]
     }
   ],
-  "native_execution": {
-    "version": 1,
-    "clients": [
-      {
-        "key": "client_a",
-        "user_id": "user-a",
-        "client_id": "client-a",
-        "database_key": "schema_queued_mutation_a"
-      }
-    ],
-    "actions": [
-      {
-        "id": "NACT-SCHEMA-QUEUED-MUTATION-001",
-        "phase": "setup",
-        "actor": "controller",
-        "command": "install-model",
-        "covers_step_ids": [],
-        "parameters": {}
+  "native_identity_aliases": [
+    {
+      "kind": "client-generation",
+      "alias": "client-generation-one",
+      "value": 1,
+      "step_ids": [
+        "STEP-SCHEMA-QUEUED-MUTATION-003",
+        "STEP-SCHEMA-QUEUED-MUTATION-BASELINE-BEGIN-001",
+        "STEP-SCHEMA-QUEUED-MUTATION-007",
+        "STEP-SCHEMA-QUEUED-MUTATION-008"
+      ],
+      "expectation_ids": []
+    },
+    {
+      "kind": "schema",
+      "alias": "schema-one",
+      "value": {
+        "version": 1,
+        "hash": "61b9825f0d1c3274677069fe1a0cd2430831f7142665b0eb9ae78eb75a08b7aa"
       },
-      {
-        "id": "NACT-SCHEMA-QUEUED-MUTATION-002",
-        "phase": "setup",
-        "actor": "client",
-        "command": "open",
-        "covers_step_ids": [],
-        "parameters": {
-          "client_key": "client_a",
-          "database_mode": "create",
-          "initialization": "empty",
-          "seed_step_id": null
-        }
+      "step_ids": [
+        "STEP-SCHEMA-QUEUED-MUTATION-003",
+        "STEP-SCHEMA-QUEUED-MUTATION-BASELINE-BEGIN-001",
+        "STEP-SCHEMA-QUEUED-MUTATION-005",
+        "STEP-SCHEMA-QUEUED-MUTATION-006",
+        "STEP-SCHEMA-QUEUED-MUTATION-007",
+        "STEP-SCHEMA-QUEUED-MUTATION-008"
+      ],
+      "expectation_ids": [
+        "EXPECT-SCHEMA-QUEUED-MUTATION-STATE-001"
+      ]
+    },
+    {
+      "kind": "schema",
+      "alias": "schema-two",
+      "value": {
+        "version": 2,
+        "hash": "fa2a37f786cc98123cd7ca1904ce4e034287eb806697e02223262c800ecf29e2"
       },
-      {
-        "id": "NACT-SCHEMA-QUEUED-MUTATION-003",
-        "phase": "setup",
-        "actor": "controller",
-        "command": "apply-step",
-        "covers_step_ids": [
-          "STEP-SCHEMA-QUEUED-MUTATION-001"
-        ],
-        "parameters": {}
-      },
-      {
-        "id": "NACT-SCHEMA-QUEUED-MUTATION-004",
-        "phase": "setup",
-        "actor": "process",
-        "command": "execute-step",
-        "covers_step_ids": [
-          "STEP-SCHEMA-QUEUED-MUTATION-002"
-        ],
-        "parameters": {
-          "client_key": null
-        }
-      },
-      {
-        "id": "NACT-SCHEMA-QUEUED-MUTATION-005",
-        "phase": "setup",
-        "actor": "client",
-        "command": "synchronize-step",
-        "covers_step_ids": [
-          "STEP-SCHEMA-QUEUED-MUTATION-003"
-        ],
-        "parameters": {
-          "client_key": "client_a",
-          "method": "start",
-          "completion": "idle"
-        }
-      },
-      {
-        "id": "NACT-SCHEMA-QUEUED-MUTATION-006",
-        "phase": "setup",
-        "actor": "observer",
-        "command": "await-step",
-        "covers_step_ids": [
-          "STEP-SCHEMA-QUEUED-MUTATION-BASELINE-BEGIN-001"
-        ],
-        "parameters": {
-          "client_key": "client_a"
-        }
-      },
-      {
-        "id": "NACT-SCHEMA-QUEUED-MUTATION-007",
-        "phase": "setup",
-        "actor": "observer",
-        "command": "await-step",
-        "covers_step_ids": [
-          "STEP-SCHEMA-QUEUED-MUTATION-004"
-        ],
-        "parameters": {
-          "client_key": "client_a"
-        }
-      },
-      {
-        "id": "NACT-SCHEMA-QUEUED-MUTATION-008",
-        "phase": "setup",
-        "actor": "observer",
-        "command": "await-step",
-        "covers_step_ids": [
-          "STEP-SCHEMA-QUEUED-MUTATION-BASELINE-FINALIZE-001"
-        ],
-        "parameters": {
-          "client_key": "client_a"
-        }
-      },
-      {
-        "id": "NACT-SCHEMA-QUEUED-MUTATION-009",
-        "phase": "exercise",
-        "actor": "client",
-        "command": "execute-step",
-        "covers_step_ids": [
-          "STEP-SCHEMA-QUEUED-MUTATION-005"
-        ],
-        "parameters": {
-          "client_key": "client_a"
-        }
-      },
-      {
-        "id": "NACT-SCHEMA-QUEUED-MUTATION-010",
-        "phase": "exercise",
-        "actor": "controller",
-        "command": "apply-step",
-        "covers_step_ids": [
-          "STEP-SCHEMA-QUEUED-MUTATION-006"
-        ],
-        "parameters": {}
-      },
-      {
-        "id": "NACT-SCHEMA-QUEUED-MUTATION-011",
-        "phase": "exercise",
-        "actor": "client",
-        "command": "synchronize-step",
-        "covers_step_ids": [
-          "STEP-SCHEMA-QUEUED-MUTATION-007",
-          "STEP-SCHEMA-QUEUED-MUTATION-008"
-        ],
-        "parameters": {
-          "client_key": "client_a",
-          "method": "reset-schema-and-start",
-          "completion": "idle"
-        }
-      },
-      {
-        "id": "NACT-SCHEMA-QUEUED-MUTATION-015",
-        "phase": "exercise",
-        "actor": "process",
-        "command": "execute-step",
-        "covers_step_ids": [
-          "STEP-SCHEMA-QUEUED-MUTATION-009"
-        ],
-        "parameters": {
-          "client_key": "client_a"
-        }
-      },
-      {
-        "id": "NACT-SCHEMA-QUEUED-MUTATION-016",
-        "phase": "verify",
-        "actor": "observer",
-        "command": "capture",
-        "covers_step_ids": [],
-        "parameters": {
-          "client_keys": [
-            "client_a"
-          ],
-          "sources": [
-            "application-rows",
-            "pending-mutations",
-            "rejected-mutations",
-            "sync-status",
-            "sync-events",
-            "request-trace",
-            "server-state",
-            "process-trace"
-          ],
-          "expectation_ids": [
-            "EXPECT-SCHEMA-QUEUED-MUTATION-WIRE-001",
-            "EXPECT-SCHEMA-QUEUED-MUTATION-STATE-001"
-          ]
-        }
-      }
-    ]
-  }
+      "step_ids": [
+        "STEP-SCHEMA-QUEUED-MUTATION-006",
+        "STEP-SCHEMA-QUEUED-MUTATION-008"
+      ],
+      "expectation_ids": [
+        "EXPECT-SCHEMA-QUEUED-MUTATION-STATE-001"
+      ]
+    },
+    {
+      "kind": "scope",
+      "alias": "scope-a",
+      "value": "scope-a",
+      "step_ids": [
+        "STEP-SCHEMA-QUEUED-MUTATION-003",
+        "STEP-SCHEMA-QUEUED-MUTATION-BASELINE-BEGIN-001",
+        "STEP-SCHEMA-QUEUED-MUTATION-004",
+        "STEP-SCHEMA-QUEUED-MUTATION-BASELINE-FINALIZE-001",
+        "STEP-SCHEMA-QUEUED-MUTATION-007"
+      ],
+      "expectation_ids": []
+    },
+    {
+      "kind": "rebuild-id",
+      "alias": "schema-baseline-rebuild",
+      "value": "00000000-0000-4000-8000-000000008000",
+      "step_ids": [
+        "STEP-SCHEMA-QUEUED-MUTATION-003",
+        "STEP-SCHEMA-QUEUED-MUTATION-BASELINE-BEGIN-001",
+        "STEP-SCHEMA-QUEUED-MUTATION-004",
+        "STEP-SCHEMA-QUEUED-MUTATION-BASELINE-FINALIZE-001"
+      ],
+      "expectation_ids": []
+    },
+    {
+      "kind": "scope-set-version",
+      "alias": "scope-set-version-one",
+      "value": 1,
+      "step_ids": [
+        "STEP-SCHEMA-QUEUED-MUTATION-007"
+      ],
+      "expectation_ids": []
+    },
+    {
+      "kind": "mutation-id",
+      "alias": "queued-mutation",
+      "value": "00000000-0000-4000-8000-000000008001",
+      "step_ids": [
+        "STEP-SCHEMA-QUEUED-MUTATION-005",
+        "STEP-SCHEMA-QUEUED-MUTATION-008"
+      ],
+      "expectation_ids": [
+        "EXPECT-SCHEMA-QUEUED-MUTATION-STATE-001"
+      ]
+    },
+    {
+      "kind": "batch-id",
+      "alias": "schema-reset-batch",
+      "value": "00000000-0000-4000-8000-000000008002",
+      "step_ids": [
+        "STEP-SCHEMA-QUEUED-MUTATION-008"
+      ],
+      "expectation_ids": []
+    },
+    {
+      "kind": "table",
+      "alias": "items-table",
+      "value": "items",
+      "step_ids": [
+        "STEP-SCHEMA-QUEUED-MUTATION-001",
+        "STEP-SCHEMA-QUEUED-MUTATION-005",
+        "STEP-SCHEMA-QUEUED-MUTATION-006",
+        "STEP-SCHEMA-QUEUED-MUTATION-008"
+      ],
+      "expectation_ids": [
+        "EXPECT-SCHEMA-QUEUED-MUTATION-STATE-001"
+      ]
+    },
+    {
+      "kind": "primary-key",
+      "alias": "queued-row-primary-key",
+      "value": "queued-s1-row",
+      "step_ids": [
+        "STEP-SCHEMA-QUEUED-MUTATION-001",
+        "STEP-SCHEMA-QUEUED-MUTATION-005",
+        "STEP-SCHEMA-QUEUED-MUTATION-008"
+      ],
+      "expectation_ids": [
+        "EXPECT-SCHEMA-QUEUED-MUTATION-STATE-001"
+      ]
+    },
+    {
+      "kind": "row-version",
+      "alias": "schema-one-base-version",
+      "value": "s1-base-version",
+      "step_ids": [
+        "STEP-SCHEMA-QUEUED-MUTATION-001",
+        "STEP-SCHEMA-QUEUED-MUTATION-005",
+        "STEP-SCHEMA-QUEUED-MUTATION-008"
+      ],
+      "expectation_ids": [
+        "EXPECT-SCHEMA-QUEUED-MUTATION-STATE-001"
+      ]
+    },
+    {
+      "kind": "checksum",
+      "alias": "schema-one-base-checksum",
+      "value": "6a96db20a4874e0dce92ef093031018b1375e018c821058a715121ed444047df",
+      "step_ids": [
+        "STEP-SCHEMA-QUEUED-MUTATION-001"
+      ],
+      "expectation_ids": []
+    }
+  ]
 }

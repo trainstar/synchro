@@ -45,7 +45,7 @@
       "control_id": null
     },
     {
-      "obligation_id": "OBL-PERF-QUEUE-REPLAY-PG-001",
+      "obligation_id": "OBL-PERF-QUEUE-REPLAY-PG-LINUX-X64-001",
       "requirement_ids": [
         "SYNC-OUTCOME-001"
       ],
@@ -54,7 +54,7 @@
         "ASSERT-PERF-QUEUE-REPLAY-PERFORMANCE-001"
       ],
       "proof_type": "server-black-box",
-      "support_cell_id": "SUP-PG-018",
+      "support_cell_id": "SUP-PG-LINUX-X64-001",
       "artifact_inventory_ids": [
         "ARTDEF-PG-EXTENSION-001",
         "ARTDEF-ADAPTER-001"
@@ -73,12 +73,66 @@
       "control_id": null
     },
     {
-      "obligation_id": "OBL-PERF-QUEUE-REPLAY-IOS-MIN-001",
+      "obligation_id": "OBL-PERF-QUEUE-REPLAY-PG-MACOS-ARM64-001",
       "requirement_ids": [
         "SYNC-OUTCOME-001"
       ],
       "assertion_ids": [
         "ASSERT-PERF-QUEUE-REPLAY-SEMANTIC-001",
+        "ASSERT-PERF-QUEUE-REPLAY-PERFORMANCE-001"
+      ],
+      "proof_type": "server-black-box",
+      "support_cell_id": "SUP-PG-MACOS-ARM64-001",
+      "artifact_inventory_ids": [
+        "ARTDEF-PG-EXTENSION-001",
+        "ARTDEF-ADAPTER-001"
+      ],
+      "performance_budget_ids": [],
+      "required_measurement_ids": [
+        "MEAS-QUEUE-REPLAY-001"
+      ],
+      "required_vector_set_ids": [],
+      "make_target": "test-blackbox",
+      "argv": [
+        "make",
+        "test-blackbox"
+      ],
+      "fault_plan_id": null,
+      "control_id": null
+    },
+    {
+      "obligation_id": "OBL-PERF-QUEUE-REPLAY-MACOS-CURRENT-001",
+      "requirement_ids": [
+        "SYNC-OUTCOME-001"
+      ],
+      "assertion_ids": [
+        "ASSERT-PERF-QUEUE-REPLAY-SEMANTIC-001"
+      ],
+      "proof_type": "native-e2e",
+      "support_cell_id": "SUP-MACOS-CURRENT-001",
+      "artifact_inventory_ids": [
+        "ARTDEF-PG-EXTENSION-001",
+        "ARTDEF-ADAPTER-001",
+        "ARTDEF-SWIFT-SPM-001",
+        "ARTDEF-COCOAPODS-001"
+      ],
+      "performance_budget_ids": [],
+      "required_measurement_ids": [],
+      "required_vector_set_ids": [],
+      "make_target": "test-swift",
+      "argv": [
+        "make",
+        "test-swift"
+      ],
+      "fault_plan_id": null,
+      "control_id": null
+    },
+    {
+      "obligation_id": "OBL-PERF-QUEUE-REPLAY-IOS-MIN-001",
+      "requirement_ids": [
+        "SYNC-OUTCOME-001"
+      ],
+      "assertion_ids": [
         "ASSERT-PERF-QUEUE-REPLAY-PERFORMANCE-001"
       ],
       "proof_type": "native-e2e",
@@ -108,71 +162,10 @@
         "SYNC-OUTCOME-001"
       ],
       "assertion_ids": [
-        "ASSERT-PERF-QUEUE-REPLAY-SEMANTIC-001",
         "ASSERT-PERF-QUEUE-REPLAY-PERFORMANCE-001"
       ],
       "proof_type": "native-e2e",
       "support_cell_id": "SUP-IOS-CURRENT-001",
-      "artifact_inventory_ids": [
-        "ARTDEF-PG-EXTENSION-001",
-        "ARTDEF-ADAPTER-001",
-        "ARTDEF-SWIFT-SPM-001",
-        "ARTDEF-COCOAPODS-001"
-      ],
-      "performance_budget_ids": [],
-      "required_measurement_ids": [
-        "MEAS-QUEUE-REPLAY-001"
-      ],
-      "required_vector_set_ids": [],
-      "make_target": "test-swift",
-      "argv": [
-        "make",
-        "test-swift"
-      ],
-      "fault_plan_id": null,
-      "control_id": null
-    },
-    {
-      "obligation_id": "OBL-PERF-QUEUE-REPLAY-MACOS-MIN-001",
-      "requirement_ids": [
-        "SYNC-OUTCOME-001"
-      ],
-      "assertion_ids": [
-        "ASSERT-PERF-QUEUE-REPLAY-SEMANTIC-001",
-        "ASSERT-PERF-QUEUE-REPLAY-PERFORMANCE-001"
-      ],
-      "proof_type": "native-e2e",
-      "support_cell_id": "SUP-MACOS-MIN-001",
-      "artifact_inventory_ids": [
-        "ARTDEF-PG-EXTENSION-001",
-        "ARTDEF-ADAPTER-001",
-        "ARTDEF-SWIFT-SPM-001",
-        "ARTDEF-COCOAPODS-001"
-      ],
-      "performance_budget_ids": [],
-      "required_measurement_ids": [
-        "MEAS-QUEUE-REPLAY-001"
-      ],
-      "required_vector_set_ids": [],
-      "make_target": "test-swift",
-      "argv": [
-        "make",
-        "test-swift"
-      ],
-      "fault_plan_id": null,
-      "control_id": null
-    },
-    {
-      "obligation_id": "OBL-PERF-QUEUE-REPLAY-MACOS-CURRENT-001",
-      "requirement_ids": [
-        "SYNC-OUTCOME-001"
-      ],
-      "assertion_ids": [
-        "ASSERT-PERF-QUEUE-REPLAY-SEMANTIC-001",
-        "ASSERT-PERF-QUEUE-REPLAY-PERFORMANCE-001"
-      ],
-      "proof_type": "native-e2e",
-      "support_cell_id": "SUP-MACOS-CURRENT-001",
       "artifact_inventory_ids": [
         "ARTDEF-PG-EXTENSION-001",
         "ARTDEF-ADAPTER-001",
@@ -198,7 +191,6 @@
         "SYNC-OUTCOME-001"
       ],
       "assertion_ids": [
-        "ASSERT-PERF-QUEUE-REPLAY-SEMANTIC-001",
         "ASSERT-PERF-QUEUE-REPLAY-PERFORMANCE-001"
       ],
       "proof_type": "native-e2e",
@@ -251,37 +243,6 @@
       "control_id": null
     },
     {
-      "obligation_id": "OBL-PERF-QUEUE-REPLAY-RN-IOS-MIN-001",
-      "requirement_ids": [
-        "SYNC-OUTCOME-001"
-      ],
-      "assertion_ids": [
-        "ASSERT-PERF-QUEUE-REPLAY-SEMANTIC-001",
-        "ASSERT-PERF-QUEUE-REPLAY-PERFORMANCE-001"
-      ],
-      "proof_type": "native-e2e",
-      "support_cell_id": "SUP-RN-IOS-MIN-001",
-      "artifact_inventory_ids": [
-        "ARTDEF-PG-EXTENSION-001",
-        "ARTDEF-ADAPTER-001",
-        "ARTDEF-SWIFT-SPM-001",
-        "ARTDEF-COCOAPODS-001",
-        "ARTDEF-RN-NPM-001"
-      ],
-      "performance_budget_ids": [],
-      "required_measurement_ids": [
-        "MEAS-QUEUE-REPLAY-001"
-      ],
-      "required_vector_set_ids": [],
-      "make_target": "test-rn-e2e-ios",
-      "argv": [
-        "make",
-        "test-rn-e2e-ios"
-      ],
-      "fault_plan_id": null,
-      "control_id": null
-    },
-    {
       "obligation_id": "OBL-PERF-QUEUE-REPLAY-RN-IOS-CURRENT-001",
       "requirement_ids": [
         "SYNC-OUTCOME-001"
@@ -308,36 +269,6 @@
       "argv": [
         "make",
         "test-rn-e2e-ios"
-      ],
-      "fault_plan_id": null,
-      "control_id": null
-    },
-    {
-      "obligation_id": "OBL-PERF-QUEUE-REPLAY-RN-ANDROID-MIN-001",
-      "requirement_ids": [
-        "SYNC-OUTCOME-001"
-      ],
-      "assertion_ids": [
-        "ASSERT-PERF-QUEUE-REPLAY-SEMANTIC-001",
-        "ASSERT-PERF-QUEUE-REPLAY-PERFORMANCE-001"
-      ],
-      "proof_type": "native-e2e",
-      "support_cell_id": "SUP-RN-ANDROID-MIN-001",
-      "artifact_inventory_ids": [
-        "ARTDEF-PG-EXTENSION-001",
-        "ARTDEF-ADAPTER-001",
-        "ARTDEF-KOTLIN-MAVEN-001",
-        "ARTDEF-RN-NPM-001"
-      ],
-      "performance_budget_ids": [],
-      "required_measurement_ids": [
-        "MEAS-QUEUE-REPLAY-001"
-      ],
-      "required_vector_set_ids": [],
-      "make_target": "test-rn-e2e-android",
-      "argv": [
-        "make",
-        "test-rn-e2e-android"
       ],
       "fault_plan_id": null,
       "control_id": null
@@ -415,26 +346,42 @@
     {
       "scenario_id": "SCN-PERF-QUEUE-REPLAY-001",
       "requirement_id": "SYNC-OUTCOME-001",
-      "proof_obligation_id": "OBL-PERF-QUEUE-REPLAY-PG-001",
+      "proof_obligation_id": "OBL-PERF-QUEUE-REPLAY-PG-LINUX-X64-001",
       "assertion_id": "ASSERT-PERF-QUEUE-REPLAY-SEMANTIC-001",
       "proof_type": "server-black-box",
-      "support_cell_id": "SUP-PG-018"
+      "support_cell_id": "SUP-PG-LINUX-X64-001"
     },
     {
       "scenario_id": "SCN-PERF-QUEUE-REPLAY-001",
       "requirement_id": "SYNC-OUTCOME-001",
-      "proof_obligation_id": "OBL-PERF-QUEUE-REPLAY-PG-001",
+      "proof_obligation_id": "OBL-PERF-QUEUE-REPLAY-PG-LINUX-X64-001",
       "assertion_id": "ASSERT-PERF-QUEUE-REPLAY-PERFORMANCE-001",
       "proof_type": "server-black-box",
-      "support_cell_id": "SUP-PG-018"
+      "support_cell_id": "SUP-PG-LINUX-X64-001"
     },
     {
       "scenario_id": "SCN-PERF-QUEUE-REPLAY-001",
       "requirement_id": "SYNC-OUTCOME-001",
-      "proof_obligation_id": "OBL-PERF-QUEUE-REPLAY-IOS-MIN-001",
+      "proof_obligation_id": "OBL-PERF-QUEUE-REPLAY-PG-MACOS-ARM64-001",
+      "assertion_id": "ASSERT-PERF-QUEUE-REPLAY-SEMANTIC-001",
+      "proof_type": "server-black-box",
+      "support_cell_id": "SUP-PG-MACOS-ARM64-001"
+    },
+    {
+      "scenario_id": "SCN-PERF-QUEUE-REPLAY-001",
+      "requirement_id": "SYNC-OUTCOME-001",
+      "proof_obligation_id": "OBL-PERF-QUEUE-REPLAY-PG-MACOS-ARM64-001",
+      "assertion_id": "ASSERT-PERF-QUEUE-REPLAY-PERFORMANCE-001",
+      "proof_type": "server-black-box",
+      "support_cell_id": "SUP-PG-MACOS-ARM64-001"
+    },
+    {
+      "scenario_id": "SCN-PERF-QUEUE-REPLAY-001",
+      "requirement_id": "SYNC-OUTCOME-001",
+      "proof_obligation_id": "OBL-PERF-QUEUE-REPLAY-MACOS-CURRENT-001",
       "assertion_id": "ASSERT-PERF-QUEUE-REPLAY-SEMANTIC-001",
       "proof_type": "native-e2e",
-      "support_cell_id": "SUP-IOS-MIN-001"
+      "support_cell_id": "SUP-MACOS-CURRENT-001"
     },
     {
       "scenario_id": "SCN-PERF-QUEUE-REPLAY-001",
@@ -448,57 +395,9 @@
       "scenario_id": "SCN-PERF-QUEUE-REPLAY-001",
       "requirement_id": "SYNC-OUTCOME-001",
       "proof_obligation_id": "OBL-PERF-QUEUE-REPLAY-IOS-CURRENT-001",
-      "assertion_id": "ASSERT-PERF-QUEUE-REPLAY-SEMANTIC-001",
-      "proof_type": "native-e2e",
-      "support_cell_id": "SUP-IOS-CURRENT-001"
-    },
-    {
-      "scenario_id": "SCN-PERF-QUEUE-REPLAY-001",
-      "requirement_id": "SYNC-OUTCOME-001",
-      "proof_obligation_id": "OBL-PERF-QUEUE-REPLAY-IOS-CURRENT-001",
       "assertion_id": "ASSERT-PERF-QUEUE-REPLAY-PERFORMANCE-001",
       "proof_type": "native-e2e",
       "support_cell_id": "SUP-IOS-CURRENT-001"
-    },
-    {
-      "scenario_id": "SCN-PERF-QUEUE-REPLAY-001",
-      "requirement_id": "SYNC-OUTCOME-001",
-      "proof_obligation_id": "OBL-PERF-QUEUE-REPLAY-MACOS-MIN-001",
-      "assertion_id": "ASSERT-PERF-QUEUE-REPLAY-SEMANTIC-001",
-      "proof_type": "native-e2e",
-      "support_cell_id": "SUP-MACOS-MIN-001"
-    },
-    {
-      "scenario_id": "SCN-PERF-QUEUE-REPLAY-001",
-      "requirement_id": "SYNC-OUTCOME-001",
-      "proof_obligation_id": "OBL-PERF-QUEUE-REPLAY-MACOS-MIN-001",
-      "assertion_id": "ASSERT-PERF-QUEUE-REPLAY-PERFORMANCE-001",
-      "proof_type": "native-e2e",
-      "support_cell_id": "SUP-MACOS-MIN-001"
-    },
-    {
-      "scenario_id": "SCN-PERF-QUEUE-REPLAY-001",
-      "requirement_id": "SYNC-OUTCOME-001",
-      "proof_obligation_id": "OBL-PERF-QUEUE-REPLAY-MACOS-CURRENT-001",
-      "assertion_id": "ASSERT-PERF-QUEUE-REPLAY-SEMANTIC-001",
-      "proof_type": "native-e2e",
-      "support_cell_id": "SUP-MACOS-CURRENT-001"
-    },
-    {
-      "scenario_id": "SCN-PERF-QUEUE-REPLAY-001",
-      "requirement_id": "SYNC-OUTCOME-001",
-      "proof_obligation_id": "OBL-PERF-QUEUE-REPLAY-MACOS-CURRENT-001",
-      "assertion_id": "ASSERT-PERF-QUEUE-REPLAY-PERFORMANCE-001",
-      "proof_type": "native-e2e",
-      "support_cell_id": "SUP-MACOS-CURRENT-001"
-    },
-    {
-      "scenario_id": "SCN-PERF-QUEUE-REPLAY-001",
-      "requirement_id": "SYNC-OUTCOME-001",
-      "proof_obligation_id": "OBL-PERF-QUEUE-REPLAY-ANDROID-MIN-001",
-      "assertion_id": "ASSERT-PERF-QUEUE-REPLAY-SEMANTIC-001",
-      "proof_type": "native-e2e",
-      "support_cell_id": "SUP-ANDROID-MIN-001"
     },
     {
       "scenario_id": "SCN-PERF-QUEUE-REPLAY-001",
@@ -527,22 +426,6 @@
     {
       "scenario_id": "SCN-PERF-QUEUE-REPLAY-001",
       "requirement_id": "SYNC-OUTCOME-001",
-      "proof_obligation_id": "OBL-PERF-QUEUE-REPLAY-RN-IOS-MIN-001",
-      "assertion_id": "ASSERT-PERF-QUEUE-REPLAY-SEMANTIC-001",
-      "proof_type": "native-e2e",
-      "support_cell_id": "SUP-RN-IOS-MIN-001"
-    },
-    {
-      "scenario_id": "SCN-PERF-QUEUE-REPLAY-001",
-      "requirement_id": "SYNC-OUTCOME-001",
-      "proof_obligation_id": "OBL-PERF-QUEUE-REPLAY-RN-IOS-MIN-001",
-      "assertion_id": "ASSERT-PERF-QUEUE-REPLAY-PERFORMANCE-001",
-      "proof_type": "native-e2e",
-      "support_cell_id": "SUP-RN-IOS-MIN-001"
-    },
-    {
-      "scenario_id": "SCN-PERF-QUEUE-REPLAY-001",
-      "requirement_id": "SYNC-OUTCOME-001",
       "proof_obligation_id": "OBL-PERF-QUEUE-REPLAY-RN-IOS-CURRENT-001",
       "assertion_id": "ASSERT-PERF-QUEUE-REPLAY-SEMANTIC-001",
       "proof_type": "native-e2e",
@@ -555,22 +438,6 @@
       "assertion_id": "ASSERT-PERF-QUEUE-REPLAY-PERFORMANCE-001",
       "proof_type": "native-e2e",
       "support_cell_id": "SUP-RN-IOS-CURRENT-001"
-    },
-    {
-      "scenario_id": "SCN-PERF-QUEUE-REPLAY-001",
-      "requirement_id": "SYNC-OUTCOME-001",
-      "proof_obligation_id": "OBL-PERF-QUEUE-REPLAY-RN-ANDROID-MIN-001",
-      "assertion_id": "ASSERT-PERF-QUEUE-REPLAY-SEMANTIC-001",
-      "proof_type": "native-e2e",
-      "support_cell_id": "SUP-RN-ANDROID-MIN-001"
-    },
-    {
-      "scenario_id": "SCN-PERF-QUEUE-REPLAY-001",
-      "requirement_id": "SYNC-OUTCOME-001",
-      "proof_obligation_id": "OBL-PERF-QUEUE-REPLAY-RN-ANDROID-MIN-001",
-      "assertion_id": "ASSERT-PERF-QUEUE-REPLAY-PERFORMANCE-001",
-      "proof_type": "native-e2e",
-      "support_cell_id": "SUP-RN-ANDROID-MIN-001"
     },
     {
       "scenario_id": "SCN-PERF-QUEUE-REPLAY-001",
@@ -872,7 +739,26 @@
       "phase": "exercise",
       "transport": "model",
       "description": "Create two durable mutations and replay one terminal rejection after restart and response loss.",
-      "measurement_sample": { "measurement_id": "MEAS-QUEUE-REPLAY-001", "stratum_id": "STR-QUEUE-SMALL-001", "sample_id": "SAMPLE-QUEUE-REPLAY-SMALL-001", "parameters": { "pending_mutation_count": 2, "accepted_count": 1, "rejected_count": 1 } },
+      "measurement_sample": {
+        "measurement_id": "MEAS-QUEUE-REPLAY-001",
+        "stratum_id": "STR-QUEUE-SMALL-001",
+        "sample_id": "SAMPLE-QUEUE-REPLAY-SMALL-001",
+        "parameters": {
+          "pending_mutation_count": 2,
+          "accepted_count": 1,
+          "rejected_count": 1
+        },
+        "operation": {
+          "id": "MOP-QUEUE-REPLAY-SMALL-001",
+          "family": "queue-replay",
+          "boundary": "small",
+          "value": {
+            "pending_mutation_count": 2,
+            "accepted_count": 1,
+            "rejected_count": 1
+          }
+        }
+      },
       "operation": {
         "contract_operation": "workload",
         "name": "prepare",
@@ -894,7 +780,26 @@
       "phase": "exercise",
       "transport": "model",
       "description": "Repeat the two-mutation restart and replay sample.",
-      "measurement_sample": { "measurement_id": "MEAS-QUEUE-REPLAY-001", "stratum_id": "STR-QUEUE-SMALL-001", "sample_id": "SAMPLE-QUEUE-REPLAY-SMALL-002", "parameters": { "pending_mutation_count": 2, "accepted_count": 1, "rejected_count": 1 } },
+      "measurement_sample": {
+        "measurement_id": "MEAS-QUEUE-REPLAY-001",
+        "stratum_id": "STR-QUEUE-SMALL-001",
+        "sample_id": "SAMPLE-QUEUE-REPLAY-SMALL-002",
+        "parameters": {
+          "pending_mutation_count": 2,
+          "accepted_count": 1,
+          "rejected_count": 1
+        },
+        "operation": {
+          "id": "MOP-QUEUE-REPLAY-SMALL-002",
+          "family": "queue-replay",
+          "boundary": "small",
+          "value": {
+            "pending_mutation_count": 2,
+            "accepted_count": 1,
+            "rejected_count": 1
+          }
+        }
+      },
       "operation": {
         "contract_operation": "workload",
         "name": "prepare",
@@ -916,7 +821,26 @@
       "phase": "exercise",
       "transport": "model",
       "description": "Repeat the two-mutation restart and replay sample.",
-      "measurement_sample": { "measurement_id": "MEAS-QUEUE-REPLAY-001", "stratum_id": "STR-QUEUE-SMALL-001", "sample_id": "SAMPLE-QUEUE-REPLAY-SMALL-003", "parameters": { "pending_mutation_count": 2, "accepted_count": 1, "rejected_count": 1 } },
+      "measurement_sample": {
+        "measurement_id": "MEAS-QUEUE-REPLAY-001",
+        "stratum_id": "STR-QUEUE-SMALL-001",
+        "sample_id": "SAMPLE-QUEUE-REPLAY-SMALL-003",
+        "parameters": {
+          "pending_mutation_count": 2,
+          "accepted_count": 1,
+          "rejected_count": 1
+        },
+        "operation": {
+          "id": "MOP-QUEUE-REPLAY-SMALL-003",
+          "family": "queue-replay",
+          "boundary": "small",
+          "value": {
+            "pending_mutation_count": 2,
+            "accepted_count": 1,
+            "rejected_count": 1
+          }
+        }
+      },
       "operation": {
         "contract_operation": "workload",
         "name": "prepare",
@@ -938,7 +862,26 @@
       "phase": "exercise",
       "transport": "model",
       "description": "Create 100 durable mutations and replay one terminal rejection after restart and response loss.",
-      "measurement_sample": { "measurement_id": "MEAS-QUEUE-REPLAY-001", "stratum_id": "STR-QUEUE-MEDIUM-001", "sample_id": "SAMPLE-QUEUE-REPLAY-MEDIUM-001", "parameters": { "pending_mutation_count": 100, "accepted_count": 99, "rejected_count": 1 } },
+      "measurement_sample": {
+        "measurement_id": "MEAS-QUEUE-REPLAY-001",
+        "stratum_id": "STR-QUEUE-MEDIUM-001",
+        "sample_id": "SAMPLE-QUEUE-REPLAY-MEDIUM-001",
+        "parameters": {
+          "pending_mutation_count": 100,
+          "accepted_count": 99,
+          "rejected_count": 1
+        },
+        "operation": {
+          "id": "MOP-QUEUE-REPLAY-MEDIUM-001",
+          "family": "queue-replay",
+          "boundary": "medium",
+          "value": {
+            "pending_mutation_count": 100,
+            "accepted_count": 99,
+            "rejected_count": 1
+          }
+        }
+      },
       "operation": {
         "contract_operation": "workload",
         "name": "prepare",
@@ -960,7 +903,26 @@
       "phase": "exercise",
       "transport": "model",
       "description": "Repeat the 100-mutation restart and replay sample.",
-      "measurement_sample": { "measurement_id": "MEAS-QUEUE-REPLAY-001", "stratum_id": "STR-QUEUE-MEDIUM-001", "sample_id": "SAMPLE-QUEUE-REPLAY-MEDIUM-002", "parameters": { "pending_mutation_count": 100, "accepted_count": 99, "rejected_count": 1 } },
+      "measurement_sample": {
+        "measurement_id": "MEAS-QUEUE-REPLAY-001",
+        "stratum_id": "STR-QUEUE-MEDIUM-001",
+        "sample_id": "SAMPLE-QUEUE-REPLAY-MEDIUM-002",
+        "parameters": {
+          "pending_mutation_count": 100,
+          "accepted_count": 99,
+          "rejected_count": 1
+        },
+        "operation": {
+          "id": "MOP-QUEUE-REPLAY-MEDIUM-002",
+          "family": "queue-replay",
+          "boundary": "medium",
+          "value": {
+            "pending_mutation_count": 100,
+            "accepted_count": 99,
+            "rejected_count": 1
+          }
+        }
+      },
       "operation": {
         "contract_operation": "workload",
         "name": "prepare",
@@ -982,7 +944,26 @@
       "phase": "exercise",
       "transport": "model",
       "description": "Repeat the 100-mutation restart and replay sample.",
-      "measurement_sample": { "measurement_id": "MEAS-QUEUE-REPLAY-001", "stratum_id": "STR-QUEUE-MEDIUM-001", "sample_id": "SAMPLE-QUEUE-REPLAY-MEDIUM-003", "parameters": { "pending_mutation_count": 100, "accepted_count": 99, "rejected_count": 1 } },
+      "measurement_sample": {
+        "measurement_id": "MEAS-QUEUE-REPLAY-001",
+        "stratum_id": "STR-QUEUE-MEDIUM-001",
+        "sample_id": "SAMPLE-QUEUE-REPLAY-MEDIUM-003",
+        "parameters": {
+          "pending_mutation_count": 100,
+          "accepted_count": 99,
+          "rejected_count": 1
+        },
+        "operation": {
+          "id": "MOP-QUEUE-REPLAY-MEDIUM-003",
+          "family": "queue-replay",
+          "boundary": "medium",
+          "value": {
+            "pending_mutation_count": 100,
+            "accepted_count": 99,
+            "rejected_count": 1
+          }
+        }
+      },
       "operation": {
         "contract_operation": "workload",
         "name": "prepare",
@@ -1004,7 +985,26 @@
       "phase": "exercise",
       "transport": "model",
       "description": "Create 1000 durable mutations and replay one terminal rejection after restart and response loss.",
-      "measurement_sample": { "measurement_id": "MEAS-QUEUE-REPLAY-001", "stratum_id": "STR-QUEUE-LARGE-001", "sample_id": "SAMPLE-QUEUE-REPLAY-LARGE-001", "parameters": { "pending_mutation_count": 1000, "accepted_count": 999, "rejected_count": 1 } },
+      "measurement_sample": {
+        "measurement_id": "MEAS-QUEUE-REPLAY-001",
+        "stratum_id": "STR-QUEUE-LARGE-001",
+        "sample_id": "SAMPLE-QUEUE-REPLAY-LARGE-001",
+        "parameters": {
+          "pending_mutation_count": 1000,
+          "accepted_count": 999,
+          "rejected_count": 1
+        },
+        "operation": {
+          "id": "MOP-QUEUE-REPLAY-LARGE-001",
+          "family": "queue-replay",
+          "boundary": "large",
+          "value": {
+            "pending_mutation_count": 1000,
+            "accepted_count": 999,
+            "rejected_count": 1
+          }
+        }
+      },
       "operation": {
         "contract_operation": "workload",
         "name": "prepare",
@@ -1026,7 +1026,26 @@
       "phase": "exercise",
       "transport": "model",
       "description": "Repeat the 1000-mutation restart and replay sample.",
-      "measurement_sample": { "measurement_id": "MEAS-QUEUE-REPLAY-001", "stratum_id": "STR-QUEUE-LARGE-001", "sample_id": "SAMPLE-QUEUE-REPLAY-LARGE-002", "parameters": { "pending_mutation_count": 1000, "accepted_count": 999, "rejected_count": 1 } },
+      "measurement_sample": {
+        "measurement_id": "MEAS-QUEUE-REPLAY-001",
+        "stratum_id": "STR-QUEUE-LARGE-001",
+        "sample_id": "SAMPLE-QUEUE-REPLAY-LARGE-002",
+        "parameters": {
+          "pending_mutation_count": 1000,
+          "accepted_count": 999,
+          "rejected_count": 1
+        },
+        "operation": {
+          "id": "MOP-QUEUE-REPLAY-LARGE-002",
+          "family": "queue-replay",
+          "boundary": "large",
+          "value": {
+            "pending_mutation_count": 1000,
+            "accepted_count": 999,
+            "rejected_count": 1
+          }
+        }
+      },
       "operation": {
         "contract_operation": "workload",
         "name": "prepare",
@@ -1048,7 +1067,26 @@
       "phase": "exercise",
       "transport": "model",
       "description": "Repeat the 1000-mutation restart and replay sample.",
-      "measurement_sample": { "measurement_id": "MEAS-QUEUE-REPLAY-001", "stratum_id": "STR-QUEUE-LARGE-001", "sample_id": "SAMPLE-QUEUE-REPLAY-LARGE-003", "parameters": { "pending_mutation_count": 1000, "accepted_count": 999, "rejected_count": 1 } },
+      "measurement_sample": {
+        "measurement_id": "MEAS-QUEUE-REPLAY-001",
+        "stratum_id": "STR-QUEUE-LARGE-001",
+        "sample_id": "SAMPLE-QUEUE-REPLAY-LARGE-003",
+        "parameters": {
+          "pending_mutation_count": 1000,
+          "accepted_count": 999,
+          "rejected_count": 1
+        },
+        "operation": {
+          "id": "MOP-QUEUE-REPLAY-LARGE-003",
+          "family": "queue-replay",
+          "boundary": "large",
+          "value": {
+            "pending_mutation_count": 1000,
+            "accepted_count": 999,
+            "rejected_count": 1
+          }
+        }
+      },
       "operation": {
         "contract_operation": "workload",
         "name": "prepare",
@@ -1150,7 +1188,9 @@
         "phase": "exercise",
         "actor": "controller",
         "command": "apply-step",
-        "covers_step_ids": ["STEP-PERF-QUEUE-REPLAY-001"],
+        "covers_step_ids": [
+          "STEP-PERF-QUEUE-REPLAY-001"
+        ],
         "parameters": {}
       },
       {
@@ -1158,7 +1198,9 @@
         "phase": "exercise",
         "actor": "controller",
         "command": "apply-step",
-        "covers_step_ids": ["STEP-PERF-QUEUE-REPLAY-002"],
+        "covers_step_ids": [
+          "STEP-PERF-QUEUE-REPLAY-002"
+        ],
         "parameters": {}
       },
       {
@@ -1166,7 +1208,9 @@
         "phase": "exercise",
         "actor": "controller",
         "command": "apply-step",
-        "covers_step_ids": ["STEP-PERF-QUEUE-REPLAY-003"],
+        "covers_step_ids": [
+          "STEP-PERF-QUEUE-REPLAY-003"
+        ],
         "parameters": {}
       },
       {
@@ -1174,7 +1218,9 @@
         "phase": "exercise",
         "actor": "controller",
         "command": "apply-step",
-        "covers_step_ids": ["STEP-PERF-QUEUE-REPLAY-004"],
+        "covers_step_ids": [
+          "STEP-PERF-QUEUE-REPLAY-004"
+        ],
         "parameters": {}
       },
       {
@@ -1182,7 +1228,9 @@
         "phase": "exercise",
         "actor": "controller",
         "command": "apply-step",
-        "covers_step_ids": ["STEP-PERF-QUEUE-REPLAY-005"],
+        "covers_step_ids": [
+          "STEP-PERF-QUEUE-REPLAY-005"
+        ],
         "parameters": {}
       },
       {
@@ -1190,7 +1238,9 @@
         "phase": "exercise",
         "actor": "controller",
         "command": "apply-step",
-        "covers_step_ids": ["STEP-PERF-QUEUE-REPLAY-006"],
+        "covers_step_ids": [
+          "STEP-PERF-QUEUE-REPLAY-006"
+        ],
         "parameters": {}
       },
       {
@@ -1198,7 +1248,9 @@
         "phase": "exercise",
         "actor": "controller",
         "command": "apply-step",
-        "covers_step_ids": ["STEP-PERF-QUEUE-REPLAY-007"],
+        "covers_step_ids": [
+          "STEP-PERF-QUEUE-REPLAY-007"
+        ],
         "parameters": {}
       },
       {
@@ -1206,7 +1258,9 @@
         "phase": "exercise",
         "actor": "controller",
         "command": "apply-step",
-        "covers_step_ids": ["STEP-PERF-QUEUE-REPLAY-008"],
+        "covers_step_ids": [
+          "STEP-PERF-QUEUE-REPLAY-008"
+        ],
         "parameters": {}
       },
       {
@@ -1214,7 +1268,9 @@
         "phase": "exercise",
         "actor": "controller",
         "command": "apply-step",
-        "covers_step_ids": ["STEP-PERF-QUEUE-REPLAY-009"],
+        "covers_step_ids": [
+          "STEP-PERF-QUEUE-REPLAY-009"
+        ],
         "parameters": {}
       },
       {
@@ -1224,7 +1280,9 @@
         "command": "capture",
         "covers_step_ids": [],
         "parameters": {
-          "client_keys": ["client_a"],
+          "client_keys": [
+            "client_a"
+          ],
           "sources": [
             "application-rows",
             "pending-mutations",
@@ -1248,7 +1306,9 @@
         "covers_step_ids": [],
         "parameters": {
           "performance_budget_ids": [],
-          "measurement_ids": ["MEAS-QUEUE-REPLAY-001"]
+          "measurement_ids": [
+            "MEAS-QUEUE-REPLAY-001"
+          ]
         }
       }
     ]

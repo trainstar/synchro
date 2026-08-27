@@ -165,12 +165,13 @@ final class SynchroClientTests: XCTestCase {
                 ON _synchro_rejected_mutations (table_name, record_id)
                 """)
             try db.execute(
-                sql: "DELETE FROM grdb_migrations WHERE identifier IN (?, ?, ?, ?)",
+                sql: "DELETE FROM grdb_migrations WHERE identifier IN (?, ?, ?, ?, ?)",
                 arguments: [
                     "synchro_v9_mutation_ledger",
                     "synchro_v10_rebuild_page_receipts",
                     "synchro_v11_durable_backoff",
                     "synchro_v12_gate2_recovery",
+                    "synchro_v13_scope_text_affinity",
                 ]
             )
         }
@@ -273,6 +274,7 @@ final class SynchroClientTests: XCTestCase {
         XCTAssertTrue(identifiers.contains("synchro_v10_rebuild_page_receipts"))
         XCTAssertTrue(identifiers.contains("synchro_v11_durable_backoff"))
         XCTAssertTrue(identifiers.contains("synchro_v12_gate2_recovery"))
+        XCTAssertTrue(identifiers.contains("synchro_v13_scope_text_affinity"))
         XCTAssertEqual(try Data(contentsOf: URL(fileURLWithPath: seedPath)), sourceBeforeInstall)
         assertNoSQLiteSidecars(at: seedPath)
         try await client.close()

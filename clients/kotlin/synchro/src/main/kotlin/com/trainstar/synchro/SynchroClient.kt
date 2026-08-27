@@ -3,8 +3,28 @@ package com.trainstar.synchro
 import android.content.Context
 import android.app.Activity
 import android.app.Application
+import android.database.sqlite.SQLiteDatabase
 import android.os.Bundle
+import com.trainstar.synchro.inspection.CheckpointInspection
+import com.trainstar.synchro.inspection.ClientStateCountsInspection
+import com.trainstar.synchro.inspection.ClientStateInspection
+import com.trainstar.synchro.inspection.ProvenanceInspection
+import com.trainstar.synchro.inspection.ProvenanceMaintenanceWorkInspection
+import com.trainstar.synchro.inspection.RebuildAttemptInspection
+import com.trainstar.synchro.inspection.RebuildPageReceiptInspection
+import com.trainstar.synchro.inspection.RebuildReceiptInspection
+import com.trainstar.synchro.inspection.RebuildStateInspection
+import com.trainstar.synchro.inspection.RowMetadataInspection
+import com.trainstar.synchro.inspection.SchemaInspection
+import com.trainstar.synchro.inspection.ScopeInspection
+import com.trainstar.synchro.inspection.ScopeRowInspection
+import com.trainstar.synchro.inspection.TransportObservationCollector
 import kotlinx.coroutines.runBlocking
+import kotlinx.serialization.decodeFromString
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonNull
+import kotlinx.serialization.json.JsonObject
 
 class SynchroClient(private val config: SynchroConfig, context: Context) {
     init {
@@ -152,10 +172,12 @@ class SynchroClient(private val config: SynchroConfig, context: Context) {
     }
 
     /** Returns the durable schema reference without exposing reserved SQLite state. */
-    fun inspectSchema(): SchemaInspection = database.readTransaction { db ->
+    internal fun inspectSchema(): SchemaInspection = database.readTransaction(::inspectSchema)
+
+    private fun inspectSchema(db: SQLiteDatabase): SchemaInspection {
         val version = SynchroMeta.getInt64(db, MetaKey.SCHEMA_VERSION)
         val hash = SynchroMeta.get(db, MetaKey.SCHEMA_HASH).orEmpty()
-        when {
+        return when {
             version == 0L && hash.isEmpty() -> SchemaInspection(null)
             version > 0L && hash.matches(SCHEMA_HASH) -> {
                 val schema = SchemaRef(version, hash)
@@ -167,23 +189,25 @@ class SynchroClient(private val config: SynchroConfig, context: Context) {
     }
 
     /** Returns at most [limit] durable scopes, or fails when that bound is exceeded. */
-    fun inspectScopes(limit: Int = MAXIMUM_INSPECTION_RECORDS): List<ScopeInspection> =
-        database.readTransaction { db ->
-            SynchroMeta.listScopes(db, limit).map {
-                ScopeInspection(it.scopeID, it.cursor, it.checksum, it.generation, it.localChecksum)
-            }
+    internal fun inspectScopes(limit: Int = MAXIMUM_INSPECTION_RECORDS): List<ScopeInspection> =
+        database.readTransaction { db -> inspectScopes(db, limit) }
+
+    private fun inspectScopes(db: SQLiteDatabase, limit: Int): List<ScopeInspection> =
+        SynchroMeta.listScopes(db, limit).map {
+            ScopeInspection(it.scopeID, it.cursor, it.checksum, it.generation, it.localChecksum)
         }
 
     /** Returns at most [limit] durable scope-row memberships. */
-    fun inspectScopeRows(limit: Int = MAXIMUM_INSPECTION_RECORDS): List<ScopeRowInspection> =
-        database.readTransaction { db ->
-            SynchroMeta.listScopeRows(db, limit).map {
-                ScopeRowInspection(it.scopeID, it.tableName, it.recordID, it.checksum, it.generation)
-            }
+    internal fun inspectScopeRows(limit: Int = MAXIMUM_INSPECTION_RECORDS): List<ScopeRowInspection> =
+        database.readTransaction { db -> inspectScopeRows(db, limit) }
+
+    private fun inspectScopeRows(db: SQLiteDatabase, limit: Int): List<ScopeRowInspection> =
+        SynchroMeta.listScopeRows(db, limit).map {
+            ScopeRowInspection(it.scopeID, it.tableName, it.recordID, it.checksum, it.generation)
         }
 
     /** Returns at most [limit] durable row-version records. */
-    fun inspectRowMetadata(limit: Int = MAXIMUM_INSPECTION_RECORDS): List<RowMetadataInspection> =
+    internal fun inspectRowMetadata(limit: Int = MAXIMUM_INSPECTION_RECORDS): List<RowMetadataInspection> =
         database.readTransaction { db ->
             SynchroMeta.listRowMetadata(db, limit).map {
                 RowMetadataInspection(it.tableName, it.recordID, it.serverVersion, it.rowChecksumJSON)
@@ -191,7 +215,7 @@ class SynchroClient(private val config: SynchroConfig, context: Context) {
         }
 
     /** Returns at most [limit] scope checkpoints. */
-    fun inspectCheckpoints(limit: Int = MAXIMUM_INSPECTION_RECORDS): List<CheckpointInspection> =
+    internal fun inspectCheckpoints(limit: Int = MAXIMUM_INSPECTION_RECORDS): List<CheckpointInspection> =
         database.readTransaction { db ->
             SynchroMeta.listScopes(db, limit).map {
                 CheckpointInspection(it.scopeID, it.cursor, it.checksum, it.localChecksum)
@@ -199,7 +223,7 @@ class SynchroClient(private val config: SynchroConfig, context: Context) {
         }
 
     /** Returns at most [limit] row-to-scope provenance records. */
-    fun inspectProvenance(limit: Int = MAXIMUM_INSPECTION_RECORDS): List<ProvenanceInspection> =
+    internal fun inspectProvenance(limit: Int = MAXIMUM_INSPECTION_RECORDS): List<ProvenanceInspection> =
         database.readTransaction { db ->
             val rows = SynchroMeta.listScopeRows(db, limit)
             rows.groupBy { it.tableName to it.recordID }.map { (key, members) ->
@@ -212,25 +236,61 @@ class SynchroClient(private val config: SynchroConfig, context: Context) {
             }.sortedWith(compareBy<ProvenanceInspection> { it.tableName }.thenBy { it.recordID })
         }
 
+    /** Returns committed scope-row maintenance work for this client process. */
+    internal fun inspectProvenanceMaintenanceWork(): ProvenanceMaintenanceWorkInspection =
+        database.inspectProvenanceMaintenanceWork()
+
+    /** Returns one bounded snapshot of client state and its maintenance-work cursor. */
+    internal fun inspectClientState(limit: Int = MAXIMUM_INSPECTION_RECORDS): ClientStateInspection =
+        database.stateInspectionTransaction { db, provenanceMaintenanceWork ->
+            ClientStateInspection(
+                schema = inspectSchema(db).currentSchema,
+                scopeStates = inspectScopes(db, limit),
+                scopeRows = inspectScopeRows(db, limit),
+                rebuildAttempts = inspectRebuildAttempts(db, limit),
+                provenanceMaintenanceWorkCursor = provenanceMaintenanceWork.cursor,
+            )
+        }
+
+    /** Returns exact counts without materializing unbounded durable records. */
+    internal fun inspectClientStateCounts(): ClientStateCountsInspection =
+        database.stateInspectionTransaction { db, provenanceMaintenanceWork ->
+            val provenanceCount = inspectionCount(
+                db,
+                "SELECT COUNT(*) FROM (SELECT table_name, record_id FROM _synchro_scope_rows GROUP BY table_name, record_id)",
+            )
+            ClientStateCountsInspection(
+                schema = inspectSchema(db).currentSchema,
+                applicationRowCount = provenanceCount,
+                mutationLedgerCount = inspectionCount(db, "SELECT COUNT(*) FROM _synchro_pending_changes"),
+                mutationOutcomeCount = inspectionCount(
+                    db,
+                    "SELECT COUNT(*) FROM _synchro_pending_changes WHERE lifecycle_state IN ('accepted', 'conflict', 'rejected_terminal')",
+                ),
+                sealedBatchCount = inspectionCount(db, "SELECT COUNT(*) FROM _synchro_push_batches"),
+                rejectedMutationCount = inspectionCount(db, "SELECT COUNT(*) FROM _synchro_rejected_mutations"),
+                scopeStateCount = inspectionCount(db, "SELECT COUNT(*) FROM _synchro_scopes"),
+                scopeRowCount = inspectionCount(db, "SELECT COUNT(*) FROM _synchro_scope_rows"),
+                provenanceCount = provenanceCount,
+                rowMetadataCount = inspectionCount(db, "SELECT COUNT(*) FROM _synchro_row_versions"),
+                rebuildAttemptCount = inspectionCount(db, "SELECT COUNT(*) FROM _synchro_rebuild_attempts"),
+                rebuildReceiptCount = inspectionCount(db, "SELECT COUNT(*) FROM _synchro_rebuild_page_receipts"),
+                provenanceMaintenanceWorkCursor = provenanceMaintenanceWork.cursor,
+            )
+        }
+
+    private fun inspectionCount(db: SQLiteDatabase, sql: String): Int =
+        db.rawQuery(sql, null).use { cursor ->
+            require(cursor.moveToFirst()) { "durable state count is absent" }
+            val count = cursor.getLong(0)
+            require(count in 0..Int.MAX_VALUE.toLong()) { "durable state count is invalid" }
+            count.toInt()
+        }
+
     /** Returns bounded read-only state for unfinished rebuild work. */
-    fun inspectRebuildState(limit: Int = MAXIMUM_INSPECTION_RECORDS): RebuildStateInspection =
+    internal fun inspectRebuildState(limit: Int = MAXIMUM_INSPECTION_RECORDS): RebuildStateInspection =
         database.readTransaction { db ->
-            val attempts = SynchroMeta.listRebuildAttempts(db, limit).map {
-                require(it.schemaVersion > 0 && it.schemaHash.matches(SCHEMA_HASH)) {
-                    "durable rebuild inspection is invalid"
-                }
-                val schema = SchemaRef(it.schemaVersion, it.schemaHash)
-                schema.validate()
-                RebuildAttemptInspection(
-                    scopeID = it.scopeID,
-                    rebuildID = it.rebuildID,
-                    clientGeneration = it.clientGeneration,
-                    schema = schema,
-                    generation = it.generation,
-                    cursor = it.cursor,
-                    pageLimit = it.pageLimit,
-                )
-            }
+            val attempts = inspectRebuildAttempts(db, limit)
             val receipts = SynchroMeta.listRebuildPageReceipts(db, limit).map {
                 RebuildPageReceiptInspection(
                     scopeID = it.scopeID,
@@ -242,6 +302,300 @@ class SynchroClient(private val config: SynchroConfig, context: Context) {
                 )
             }
             RebuildStateInspection(attempts, receipts)
+        }
+
+    /** Returns normalized facts for at most [limit] durable rebuild page receipts. */
+    internal fun inspectRebuildReceipts(
+        limit: Int = MAXIMUM_INSPECTION_RECORDS,
+    ): List<RebuildReceiptInspection> = database.readTransaction { db ->
+        val grouped = SynchroMeta.listRebuildPageReceipts(db, limit)
+            .groupBy { RebuildReceiptGroupKey(it.scopeID, it.rebuildID) }
+        grouped.keys.sortedWith { left, right ->
+            val scopeOrder = compareUTF8(left.scopeID, right.scopeID)
+            if (scopeOrder != 0) scopeOrder else compareUTF8(left.rebuildID, right.rebuildID)
+        }.map { key -> inspectRebuildReceipts(db, grouped[key].orEmpty()) }
+    }
+
+    private fun inspectRebuildReceipts(
+        db: SQLiteDatabase,
+        receipts: List<LocalRebuildPageReceipt>,
+    ): RebuildReceiptInspection {
+        val first = receipts.firstOrNull() ?: return RebuildReceiptInspection(
+            rebuildIDFingerprint = "",
+            pageCount = 0,
+            returnedRecordCount = 0,
+            requestChainExpected = emptyList(),
+            requestChainObserved = emptyList(),
+            recordIdentitiesHex = emptyList(),
+            receivedRowChecksums = emptyList(),
+            computedRowChecksums = emptyList(),
+            computedScopeChecksum = null,
+            finalScopeChecksum = null,
+            storedScopeChecksum = null,
+            localScopeChecksum = null,
+        )
+        val decoded = receipts.map { receipt ->
+            DecodedRebuildReceipt(
+                receipt = receipt,
+                request = decodeExactReceiptJSON<RebuildRequest>(receipt.requestJSON, ReceiptJSONType.REQUEST),
+                response = decodeExactReceiptJSON<RebuildResponse>(receipt.responseJSON, ReceiptJSONType.RESPONSE),
+                finalChecksum = receipt.finalChecksumJSON?.let {
+                    decodeExactReceiptJSON<ChecksumObject>(it, ReceiptJSONType.CHECKSUM)
+                },
+            )
+        }
+
+        val requestChainExpected = mutableListOf<String>()
+        val requestChainObserved = mutableListOf<String>()
+        fun appendChain(expected: String?, observed: String?) {
+            requestChainExpected += expected ?: "null"
+            requestChainObserved += observed ?: "null"
+        }
+        val requestCursorIndexes = mutableMapOf<String, MutableList<Int>>()
+        decoded.forEachIndexed { index, item ->
+            requestCursorIndexes.getOrPut(cursorKey(item.receipt.requestCursor), ::mutableListOf) += index
+            appendChain(item.receipt.scopeID, item.request.scope)
+            appendChain(
+                TransportObservationCollector.cursorFingerprint(item.receipt.rebuildID),
+                TransportObservationCollector.cursorFingerprint(item.request.rebuildID),
+            )
+            appendChain(item.receipt.requestCursor?.let(TransportObservationCollector::cursorFingerprint), item.request.cursor?.let(TransportObservationCollector::cursorFingerprint))
+            appendChain(item.receipt.scopeID, item.response.scope)
+            appendChain(item.receipt.isFinal.toString(), (!item.response.hasMore).toString())
+            appendChain(
+                (if (item.response.hasMore) null else item.response.finalScopeCursor)?.let(TransportObservationCollector::cursorFingerprint),
+                item.receipt.finalScopeCursor?.let(TransportObservationCollector::cursorFingerprint),
+            )
+            appendChain(item.response.checksum?.let(::checksumKey), item.finalChecksum?.let(::checksumKey))
+            appendChain(if (item.response.hasMore) "cursor" else "final", if (item.response.cursor == null) "final" else "cursor")
+            appendChain(
+                if (item.response.hasMore) "no-final-cursor" else "final-cursor",
+                if (item.response.finalScopeCursor == null) "no-final-cursor" else "final-cursor",
+            )
+            appendChain(if (item.response.hasMore) "no-checksum" else "checksum", if (item.response.checksum == null) "no-checksum" else "checksum")
+        }
+
+        val orderedIndexes = mutableListOf<Int>()
+        val consumed = mutableSetOf<Int>()
+        var expectedCursor: String? = null
+        var finalPageCount = 0
+        while (true) {
+            val indexes = requestCursorIndexes[cursorKey(expectedCursor)]
+            if (indexes?.size != 1) break
+            val index = indexes.single()
+            if (!consumed.add(index)) break
+            val item = decoded[index]
+            orderedIndexes += index
+            if (item.response.hasMore) {
+                val nextCursor = item.response.cursor
+                if (nextCursor == null) {
+                    break
+                }
+                expectedCursor = nextCursor
+            } else {
+                finalPageCount += 1
+                break
+            }
+        }
+        appendChain(decoded.size.toString(), consumed.size.toString())
+        appendChain("1", finalPageCount.toString())
+        appendChain("final", orderedIndexes.lastOrNull()?.let { if (decoded[it].response.hasMore) "partial" else "final" })
+
+        val traversalIndexes = if (consumed.size == decoded.size) {
+            orderedIndexes
+        } else {
+            decoded.indices.sortedWith { left, right ->
+                compareUTF8(cursorKey(decoded[left].receipt.requestCursor), cursorKey(decoded[right].receipt.requestCursor))
+            }
+        }
+        var returnedRecordCount = 0
+        val recordIdentitiesHex = mutableListOf<String>()
+        val receivedRowChecksums = mutableListOf<String>()
+        val computedRowChecksums = mutableListOf<String>()
+        val entries = mutableListOf<Pair<ByteArray, ChecksumObject>>()
+        val schemaCache = mutableMapOf<String, Map<String, LocalSchemaTable>>()
+        traversalIndexes.forEach { index ->
+            val item = decoded[index]
+            returnedRecordCount += item.response.records.size
+            val schemaKey = "${item.request.schema.version}:${item.request.schema.hash}"
+            val tables = schemaCache.getOrPut(schemaKey) {
+                archivedSchemaTables(db, item.request.schema).associateByUniqueTableID()
+            }
+            item.response.records.forEach { record ->
+                val table = tables[record.table]
+                    ?: throw SynchroError.InvalidResponse("rebuild receipt table metadata is missing")
+                val digest = try {
+                    Integrity.rowDigest(
+                        item.request.schema.hash,
+                        table,
+                        record.pk,
+                        record.row,
+                        record.serverVersion,
+                    )
+                } catch (_: Exception) {
+                    throw SynchroError.InvalidResponse("rebuild receipt record metadata is invalid")
+                }
+                recordIdentitiesHex += digest.identity.joinToString("") { "%02x".format(it.toInt() and 0xff) }
+                receivedRowChecksums += checksumKey(record.rowChecksum)
+                computedRowChecksums += checksumKey(digest.checksum)
+                entries += digest.identity to digest.checksum
+            }
+        }
+
+        val finalIndexes = decoded.indices.filter { !decoded[it].response.hasMore }
+        val finalChecksum = finalIndexes.singleOrNull()?.let { decoded[it].response.checksum }
+        val schemaHashes = decoded.map { it.request.schema.hash }.toSet()
+        val computedScopeChecksum = schemaHashes.singleOrNull()?.let { schemaHash ->
+            Integrity.scopeDigest(
+                schemaHash,
+                first.scopeID,
+                entries.sortedWith { left, right -> compareUnsigned(left.first, right.first) },
+            ).let(::checksumKey)
+        }
+        val scope = SynchroMeta.getScope(db, first.scopeID)
+        val storedScopeChecksum = scope?.checksum?.let {
+            checksumKey(decodeExactReceiptJSON(it, ReceiptJSONType.CHECKSUM))
+        }
+        val localScopeChecksum = scope?.localChecksum?.let {
+            checksumKey(decodeExactReceiptJSON(it, ReceiptJSONType.CHECKSUM))
+        }
+        return RebuildReceiptInspection(
+            rebuildIDFingerprint = TransportObservationCollector.cursorFingerprint(first.rebuildID),
+            pageCount = receipts.size,
+            returnedRecordCount = returnedRecordCount,
+            requestChainExpected = requestChainExpected,
+            requestChainObserved = requestChainObserved,
+            recordIdentitiesHex = recordIdentitiesHex,
+            receivedRowChecksums = receivedRowChecksums,
+            computedRowChecksums = computedRowChecksums,
+            computedScopeChecksum = computedScopeChecksum,
+            finalScopeChecksum = finalChecksum?.let(::checksumKey),
+            storedScopeChecksum = storedScopeChecksum,
+            localScopeChecksum = localScopeChecksum,
+        )
+    }
+
+    private fun checksumKey(value: ChecksumObject): String =
+        "${value.algorithm}:${value.version}:${value.encoding}:${value.digest}"
+
+    private inline fun <reified T> decodeExactReceiptJSON(source: String, type: ReceiptJSONType): T = try {
+        Integrity.validateCanonicalWireJSON(source)
+        val element = RECEIPT_JSON.parseToJsonElement(source)
+        validateReceiptJSONShape(element, type)
+        RECEIPT_JSON.decodeFromString<T>(source)
+    } catch (_: Exception) {
+        throw SynchroError.InvalidResponse("rebuild receipt JSON is invalid")
+    }
+
+    private fun validateReceiptJSONShape(element: kotlinx.serialization.json.JsonElement, type: ReceiptJSONType) {
+        val objectValue = element as? JsonObject
+            ?: throw SynchroError.InvalidResponse("rebuild receipt JSON shape is invalid")
+        when (type) {
+            ReceiptJSONType.REQUEST -> {
+                requireReceiptKeys(
+                    objectValue,
+                    setOf("client_id", "client_generation", "schema", "scope", "rebuild_id", "limit"),
+                    setOf("cursor"),
+                )
+                val schema = objectValue["schema"] as? JsonObject
+                    ?: throw SynchroError.InvalidResponse("rebuild receipt request schema is invalid")
+                requireReceiptKeys(schema, setOf("version", "hash"))
+            }
+            ReceiptJSONType.RESPONSE -> {
+                requireReceiptKeys(
+                    objectValue,
+                    setOf("scope", "records", "has_more"),
+                    setOf("cursor", "final_scope_cursor", "checksum"),
+                )
+                val records = objectValue["records"] as? JsonArray
+                    ?: throw SynchroError.InvalidResponse("rebuild receipt records are invalid")
+                records.forEach { elementRecord ->
+                    val record = elementRecord as? JsonObject
+                        ?: throw SynchroError.InvalidResponse("rebuild receipt record shape is invalid")
+                    requireReceiptKeys(record, setOf("table", "pk", "row", "row_checksum", "server_version"))
+                    if (record["pk"] !is JsonObject || record["row"] !is JsonObject) {
+                        throw SynchroError.InvalidResponse("rebuild receipt record shape is invalid")
+                    }
+                    val checksum = record["row_checksum"] as? JsonObject
+                        ?: throw SynchroError.InvalidResponse("rebuild receipt record shape is invalid")
+                    requireReceiptKeys(checksum, CHECKSUM_KEYS)
+                }
+                objectValue["checksum"]?.takeUnless { it is JsonNull }?.let { checksum ->
+                    val checksumObject = checksum as? JsonObject
+                        ?: throw SynchroError.InvalidResponse("rebuild receipt checksum shape is invalid")
+                    requireReceiptKeys(checksumObject, CHECKSUM_KEYS)
+                }
+            }
+            ReceiptJSONType.CHECKSUM -> requireReceiptKeys(objectValue, CHECKSUM_KEYS)
+        }
+    }
+
+    private fun requireReceiptKeys(
+        value: JsonObject,
+        required: Set<String>,
+        optional: Set<String> = emptySet(),
+    ) {
+        if (!value.keys.containsAll(required) || value.keys.any { it !in required && it !in optional }) {
+            throw SynchroError.InvalidResponse("rebuild receipt JSON members are invalid")
+        }
+    }
+
+    private fun archivedSchemaTables(db: SQLiteDatabase, schema: SchemaRef): List<LocalSchemaTable> {
+        db.rawQuery(
+            "SELECT manifest_json FROM _synchro_schema_archives WHERE schema_version = ? AND schema_hash = ?",
+            arrayOf(schema.version.toString(), schema.hash),
+        ).use { cursor ->
+            if (!cursor.moveToFirst()) {
+                throw SynchroError.InvalidResponse("rebuild receipt schema archive is missing")
+            }
+            return try {
+                RECEIPT_JSON.decodeFromString(cursor.getString(0))
+            } catch (_: Exception) {
+                throw SynchroError.InvalidResponse("rebuild receipt schema archive is invalid")
+            }
+        }
+    }
+
+    private fun List<LocalSchemaTable>.associateByUniqueTableID(): Map<String, LocalSchemaTable> {
+        val result = mutableMapOf<String, LocalSchemaTable>()
+        forEach { table ->
+            if (result.put(table.tableID, table) != null) {
+                throw SynchroError.InvalidResponse("rebuild receipt schema archive is invalid")
+            }
+        }
+        return result
+    }
+
+    private fun cursorKey(cursor: String?): String = cursor?.let { "value:$it" } ?: "null"
+
+    private fun compareUTF8(left: String, right: String): Int =
+        compareUnsigned(left.toByteArray(Charsets.UTF_8), right.toByteArray(Charsets.UTF_8))
+
+    private fun compareUnsigned(left: ByteArray, right: ByteArray): Int {
+        val shared = minOf(left.size, right.size)
+        for (index in 0 until shared) {
+            val difference = (left[index].toInt() and 0xff) - (right[index].toInt() and 0xff)
+            if (difference != 0) return difference
+        }
+        return left.size - right.size
+    }
+
+    private fun inspectRebuildAttempts(db: SQLiteDatabase, limit: Int): List<RebuildAttemptInspection> =
+        SynchroMeta.listRebuildAttempts(db, limit).map {
+            require(it.schemaVersion > 0 && it.schemaHash.matches(SCHEMA_HASH)) {
+                "durable rebuild inspection is invalid"
+            }
+            val schema = SchemaRef(it.schemaVersion, it.schemaHash)
+            schema.validate()
+            RebuildAttemptInspection(
+                scopeID = it.scopeID,
+                rebuildID = it.rebuildID,
+                clientGeneration = it.clientGeneration,
+                schema = schema,
+                generation = it.generation,
+                cursor = it.cursor,
+                pageLimit = it.pageLimit,
+            )
         }
 
     // MARK: - Sync Control
@@ -286,7 +640,20 @@ class SynchroClient(private val config: SynchroConfig, context: Context) {
     private companion object {
         const val MAXIMUM_INSPECTION_RECORDS = 512
         val SCHEMA_HASH = Regex("[0-9a-f]{64}")
+        val CHECKSUM_KEYS = setOf("algorithm", "version", "encoding", "digest")
+        val RECEIPT_JSON = Json { ignoreUnknownKeys = false }
     }
+
+    private data class RebuildReceiptGroupKey(val scopeID: String, val rebuildID: String)
+
+    private data class DecodedRebuildReceipt(
+        val receipt: LocalRebuildPageReceipt,
+        val request: RebuildRequest,
+        val response: RebuildResponse,
+        val finalChecksum: ChecksumObject?,
+    )
+
+    private enum class ReceiptJSONType { REQUEST, RESPONSE, CHECKSUM }
 
 }
 

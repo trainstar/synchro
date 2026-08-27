@@ -493,6 +493,23 @@ func TestGenerateCreatesClientCompatibleSeedDatabase(t *testing.T) {
 	}
 }
 
+func TestCanonicalClientSeedMatchesSeedDBDDL(t *testing.T) {
+	t.Run("assertion", func(t *testing.T) {
+		outputPath := os.Getenv("SYNCHRO_DDL_IDENTITY_SEED_PATH")
+		if outputPath == "" {
+			t.Fatal("SYNCHRO_DDL_IDENTITY_SEED_PATH is required")
+		}
+		db := testPostgres(t)
+		registerSeedTestTable(t, db, "test_seed_ddl_identity")
+		if err := Generate(context.Background(), db, GenerateOptions{
+			OutputPath: outputPath,
+			Overwrite:  false,
+		}); err != nil {
+			t.Fatalf("generate seed database: %v", err)
+		}
+	})
+}
+
 func TestManifestValidateAllowsTablesWithoutSyncTimestamps(t *testing.T) {
 	env := manifestEnvelope{
 		SchemaVersion: 1,
@@ -1349,7 +1366,7 @@ func TestPublishVerifiedSQLiteOutputRejectsArtifactCorruption(t *testing.T) {
 			test.mutate(t, temporaryPath)
 
 			destinationPath := filepath.Join(directory, strings.ReplaceAll(test.name, " ", "-")+"-published.db")
-			if err := publishVerifiedSQLiteOutput(ctx, temporaryPath, destinationPath, false, env, tables, portable); err == nil {
+			if err := verifySQLiteOutput(ctx, temporaryPath, env, tables, portable, seedSnapshotComplete); err == nil {
 				t.Fatal("published a corrupt seed artifact")
 			}
 			if _, err := os.Stat(destinationPath); !errors.Is(err, os.ErrNotExist) {

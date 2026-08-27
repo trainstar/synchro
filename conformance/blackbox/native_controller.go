@@ -18,8 +18,6 @@ import (
 	"time"
 
 	"github.com/trainstar/synchro/conformance/internal/jsonstrict"
-	"github.com/trainstar/synchro/conformance/nativeexecution"
-	"github.com/trainstar/synchro/conformance/nativeharness"
 	"github.com/trainstar/synchro/conformance/scenarios"
 )
 
@@ -51,6 +49,26 @@ type NativeController struct {
 	records        map[string]*nativeRecordBinding
 	rebuildCursors map[string]string
 	scopeCursors   map[string]string
+}
+
+// NativeWireFacts records the transport facts from one native HTTP response.
+type NativeWireFacts struct {
+	HTTPStatus int     `json:"http_status"`
+	ErrorCode  *string `json:"error_code,omitempty"`
+	Retryable  bool    `json:"retryable"`
+}
+
+// NativeStepObservation records the raw terminal result from one native operation.
+type NativeStepObservation struct {
+	Disposition string           `json:"disposition"`
+	ErrorCode   *string          `json:"error_code,omitempty"`
+	Wire        *NativeWireFacts `json:"wire,omitempty"`
+}
+
+// NativeCaptureFacts binds one requested source to its durable state facts.
+type NativeCaptureFacts struct {
+	Source     string               `json:"source"`
+	StateFacts scenarios.StateFacts `json:"state_facts"`
 }
 
 type nativeInstallationBinding struct {
@@ -269,8 +287,6 @@ type nativeAuthoredImageWire struct {
 	Deleted  bool    `json:"deleted"`
 }
 
-var _ nativeharness.Controller = (*NativeController)(nil)
-
 // NewNativeController creates one controller for a provisioned harness.
 func NewNativeController(config NativeControllerConfig) (*NativeController, error) {
 	if config.Harness == nil || config.Harness.AdapterURL() == "" || config.Harness.Source() == nil || config.Harness.Operator() == nil {
@@ -346,18 +362,18 @@ func validNativeIdentity(value string) bool {
 }
 
 // Install binds authored schema and WAL identities to the active runtime contract.
-func (c *NativeController) Install(ctx context.Context, request nativeharness.InstallRequest) error {
+func (c *NativeController) Install(ctx context.Context, operation scenarios.Operation) error {
 	if err := c.context(ctx); err != nil {
 		return err
 	}
-	if scenarios.OperationKey(request.Operation) != "model/install-current-contract" {
-		return nativeUnsupported("install", request.Operation)
+	if scenarios.OperationKey(operation) != "model/install-current-contract" {
+		return nativeUnsupported("install", operation)
 	}
-	if err := scenarios.ValidateOperation(request.Operation); err != nil {
+	if err := scenarios.ValidateOperation(operation); err != nil {
 		return fmt.Errorf("native controller install operation is invalid: %w", err)
 	}
 	var payload nativeInstallPayload
-	if err := jsonstrict.Decode(request.Operation.Payload, &payload); err != nil {
+	if err := jsonstrict.Decode(operation.Payload, &payload); err != nil {
 		return errors.New("decode native controller install payload failed")
 	}
 	if err := validateNativeInstallPayload(payload); err != nil {
@@ -603,11 +619,10 @@ func bindNativeScope(binding *nativeInstallationBinding, authored, runtime strin
 		return errors.New("native controller scope binding is incomplete")
 	}
 	if existing, found := binding.scopes[authored]; found && existing != runtime {
-		if existing == "cf:global" {
-			return nil
-		}
 		delete(binding.runtimeScopes, existing)
-		runtime = "cf:global"
+		if existing != "cf:global" {
+			runtime = "cf:global"
+		}
 	}
 	if existing, found := binding.runtimeScopes[runtime]; found && existing != authored {
 		return fmt.Errorf("native controller runtime scope %q is bound more than once", runtime)
@@ -649,45 +664,52 @@ func (c *NativeController) loadRuntimeManifest(ctx context.Context) (nativeRunti
 }
 
 // ApplyStep applies one non-workload controller operation.
-func (c *NativeController) ApplyStep(ctx context.Context, request nativeharness.StepRequest) (nativeexecution.StepObservation, error) {
+func (c *NativeController) ApplyStep(ctx context.Context, operation scenarios.Operation) (NativeStepObservation, error) {
 	if err := c.context(ctx); err != nil {
-		return nativeexecution.StepObservation{}, err
+		return NativeStepObservation{}, err
 	}
-	if err := scenarios.ValidateOperation(request.Operation); err != nil {
-		return nativeexecution.StepObservation{}, fmt.Errorf("native controller apply operation is invalid: %w", err)
+	if err := scenarios.ValidateOperation(operation); err != nil {
+		return NativeStepObservation{}, fmt.Errorf("native controller apply operation is invalid: %w", err)
 	}
-	switch scenarios.OperationKey(request.Operation) {
+	switch scenarios.OperationKey(operation) {
 	case "model/commit-source-transaction":
-		return c.commitSourceTransaction(ctx, request.Operation)
+		return c.commitSourceTransaction(ctx, operation)
 	case "model/set-client-assignments":
-		return c.setClientAssignments(request.Operation)
+		observation, err := c.setClientAssignments(operation)
+		if err != nil {
+			return NativeStepObservation{}, err
+		}
+		if err := c.harness.Operator().UnregisterDefaultSharedScope(ctx); err != nil {
+			return NativeStepObservation{}, err
+		}
+		return observation, nil
 	case "model/publish-schema":
-		return c.publishSchema(ctx, request.Operation)
+		return c.publishSchema(ctx, operation)
 	case "model/stage-registry-membership-generation":
 		if err := c.harness.Operator().ConfigureCrossScopeTable(ctx); err != nil {
-			return nativeexecution.StepObservation{}, err
+			return NativeStepObservation{}, err
 		}
 		return nativeSuccess(), nil
 	case "model/activate-registry-membership-generation":
 		if err := c.harness.Operator().ReloadRegistry(ctx); err != nil {
-			return nativeexecution.StepObservation{}, err
+			return NativeStepObservation{}, err
 		}
 		return nativeSuccess(), nil
 	case "model/expire-client-generation":
-		return c.expireClientGeneration(ctx, request.Operation)
+		return c.expireClientGeneration(ctx, operation)
 	case "model/compact-scope":
 		if _, err := c.harness.Operator().RunDiagnosticRetentionCompaction(ctx); err != nil {
-			return nativeexecution.StepObservation{}, err
+			return NativeStepObservation{}, err
 		}
 		return nativeSuccess(), nil
 	case "workload/prepare":
-		return nativeexecution.StepObservation{}, errors.New("native controller does not execute workload macros; the manifest must supply concrete expansions")
+		return NativeStepObservation{}, errors.New("native controller does not execute workload macros; the manifest must supply concrete expansions")
 	default:
-		return nativeexecution.StepObservation{}, nativeUnsupported("apply", request.Operation)
+		return NativeStepObservation{}, nativeUnsupported("apply", operation)
 	}
 }
 
-func (c *NativeController) setClientAssignments(operation scenarios.Operation) (nativeexecution.StepObservation, error) {
+func (c *NativeController) setClientAssignments(operation scenarios.Operation) (NativeStepObservation, error) {
 	var payload struct {
 		UserID      string `json:"user_id"`
 		ClientID    string `json:"client_id"`
@@ -696,41 +718,51 @@ func (c *NativeController) setClientAssignments(operation scenarios.Operation) (
 		} `json:"assignments"`
 	}
 	if err := jsonstrict.Decode(operation.Payload, &payload); err != nil || !validNativeIdentity(payload.UserID) || !validNativeIdentity(payload.ClientID) {
-		return nativeexecution.StepObservation{}, errors.New("native controller client assignment payload is invalid")
+		return NativeStepObservation{}, errors.New("native controller client assignment payload is invalid")
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.installation == nil {
-		return nativeexecution.StepObservation{}, errors.New("native controller contract is not installed")
+		return NativeStepObservation{}, errors.New("native controller contract is not installed")
 	}
 	for _, assignment := range payload.Assignments {
 		if err := bindNativeScope(c.installation, assignment.ScopeID, "user:"+payload.UserID); err != nil {
-			return nativeexecution.StepObservation{}, err
+			return NativeStepObservation{}, err
 		}
+	}
+	installed := false
+	for _, client := range c.installation.clients {
+		if client.UserID == payload.UserID && client.ClientID == payload.ClientID {
+			installed = true
+			break
+		}
+	}
+	if !installed {
+		c.installation.clients = append(c.installation.clients, nativeInstalledClient{UserID: payload.UserID, ClientID: payload.ClientID})
 	}
 	return nativeSuccess(), nil
 }
 
-func (c *NativeController) publishSchema(ctx context.Context, operation scenarios.Operation) (nativeexecution.StepObservation, error) {
+func (c *NativeController) publishSchema(ctx context.Context, operation scenarios.Operation) (NativeStepObservation, error) {
 	var payload nativePublishedSchema
 	if err := jsonstrict.Decode(operation.Payload, &payload); err != nil || !validNativeSchemaReference(payload.Schema, false) {
-		return nativeexecution.StepObservation{}, errors.New("native controller publish-schema payload is invalid")
+		return NativeStepObservation{}, errors.New("native controller publish-schema payload is invalid")
 	}
 	if err := c.harness.Operator().TransitionSchemaQueue(ctx); err != nil {
-		return nativeexecution.StepObservation{}, fmt.Errorf("apply native runtime schema transition: %w", err)
+		return NativeStepObservation{}, fmt.Errorf("apply native runtime schema transition: %w", err)
 	}
 	runtime, runtimeRegistry, err := c.waitForRuntimeSchemaChange(ctx)
 	if err != nil {
-		return nativeexecution.StepObservation{}, err
+		return NativeStepObservation{}, err
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.installation == nil {
-		return nativeexecution.StepObservation{}, errors.New("native controller contract is not installed")
+		return NativeStepObservation{}, errors.New("native controller contract is not installed")
 	}
 	authoredKey := nativeSchemaKey(payload.Schema)
 	if _, duplicate := c.installation.runtimeSchemas[authoredKey]; duplicate {
-		return nativeexecution.StepObservation{}, errors.New("native controller authored schema is already published")
+		return NativeStepObservation{}, errors.New("native controller authored schema is already published")
 	}
 	runtimeRef := nativeSchemaReference{Version: runtime.SchemaVersion, Hash: runtime.SchemaHash}
 	c.installation.authoredSchemas[authoredKey] = payload.Schema
@@ -762,49 +794,49 @@ func (c *NativeController) waitForRuntimeSchemaChange(ctx context.Context) (nati
 	}
 }
 
-func (c *NativeController) expireClientGeneration(ctx context.Context, operation scenarios.Operation) (nativeexecution.StepObservation, error) {
+func (c *NativeController) expireClientGeneration(ctx context.Context, operation scenarios.Operation) (NativeStepObservation, error) {
 	var payload struct {
 		UserID   string `json:"user_id"`
 		ClientID string `json:"client_id"`
 	}
 	if err := jsonstrict.Decode(operation.Payload, &payload); err != nil || !validNativeIdentity(payload.UserID) || !validNativeIdentity(payload.ClientID) {
-		return nativeexecution.StepObservation{}, errors.New("native controller expire-client payload is invalid")
+		return NativeStepObservation{}, errors.New("native controller expire-client payload is invalid")
 	}
 	if payload.UserID != "diagnostic-user" || payload.ClientID != diagnosticRetentionClientID {
-		return nativeexecution.StepObservation{}, fmt.Errorf("native controller cannot expire %s/%s: the current Harness operator exposes only %s/%s", payload.UserID, payload.ClientID, "diagnostic-user", diagnosticRetentionClientID)
+		return NativeStepObservation{}, fmt.Errorf("native controller cannot expire %s/%s: the current Harness operator exposes only %s/%s", payload.UserID, payload.ClientID, "diagnostic-user", diagnosticRetentionClientID)
 	}
 	if err := c.harness.Operator().AgeDiagnosticRetentionClient(ctx); err != nil {
-		return nativeexecution.StepObservation{}, err
+		return NativeStepObservation{}, err
 	}
 	return nativeSuccess(), nil
 }
 
-func (c *NativeController) commitSourceTransaction(ctx context.Context, operation scenarios.Operation) (nativeexecution.StepObservation, error) {
+func (c *NativeController) commitSourceTransaction(ctx context.Context, operation scenarios.Operation) (NativeStepObservation, error) {
 	var payload nativeCommitPayload
 	if err := jsonstrict.Decode(operation.Payload, &payload); err != nil {
-		return nativeexecution.StepObservation{}, errors.New("decode native source transaction failed")
+		return NativeStepObservation{}, errors.New("decode native source transaction failed")
 	}
 	c.mu.Lock()
 	installation := c.installation
 	c.mu.Unlock()
 	if installation == nil {
-		return nativeexecution.StepObservation{}, errors.New("native controller contract is not installed")
+		return NativeStepObservation{}, errors.New("native controller contract is not installed")
 	}
 	transaction, err := bindNativeTransaction(payload, installation)
 	if err != nil {
-		return nativeexecution.StepObservation{}, err
+		return NativeStepObservation{}, err
 	}
 	key := nativeTransactionKey(payload.StreamGeneration, payload.CommitLSN)
 	c.mu.Lock()
 	if _, duplicate := c.transactions[key]; duplicate {
 		c.mu.Unlock()
-		return nativeexecution.StepObservation{}, errors.New("native controller source transaction identity is duplicated")
+		return NativeStepObservation{}, errors.New("native controller source transaction identity is duplicated")
 	}
 	c.mu.Unlock()
 
 	sourceTransaction, err := c.harness.Source().BeginTx(ctx)
 	if err != nil {
-		return nativeexecution.StepObservation{}, err
+		return NativeStepObservation{}, err
 	}
 	committed := false
 	defer func() {
@@ -815,19 +847,19 @@ func (c *NativeController) commitSourceTransaction(ctx context.Context, operatio
 	for _, event := range transaction.Events {
 		statement, arguments, err := nativeSourceStatement(event, installation)
 		if err != nil {
-			return nativeexecution.StepObservation{}, err
+			return NativeStepObservation{}, err
 		}
 		result, err := sourceTransaction.ExecContext(ctx, statement, arguments...)
 		if err != nil {
-			return nativeexecution.StepObservation{}, fmt.Errorf("execute native source event: %w", err)
+			return NativeStepObservation{}, fmt.Errorf("execute native source event: %w", err)
 		}
 		rows, err := result.RowsAffected()
 		if err != nil || rows != 1 {
-			return nativeexecution.StepObservation{}, errors.New("native source event did not affect exactly one authoritative row")
+			return NativeStepObservation{}, errors.New("native source event did not affect exactly one authoritative row")
 		}
 	}
 	if err := sourceTransaction.Commit(); err != nil {
-		return nativeexecution.StepObservation{}, err
+		return NativeStepObservation{}, err
 	}
 	committed = true
 
@@ -1033,20 +1065,20 @@ func nativeImageStringField(image nativeAuthoredImage, table nativeTableBinding,
 }
 
 // RequestStep sends one arbitrary-user authenticated request to the current adapter.
-func (c *NativeController) RequestStep(ctx context.Context, request nativeharness.StepRequest) (nativeexecution.StepObservation, error) {
+func (c *NativeController) RequestStep(ctx context.Context, operation scenarios.Operation) (NativeStepObservation, error) {
 	if err := c.context(ctx); err != nil {
-		return nativeexecution.StepObservation{}, err
+		return NativeStepObservation{}, err
 	}
-	if err := scenarios.ValidateOperation(request.Operation); err != nil {
-		return nativeexecution.StepObservation{}, fmt.Errorf("native controller request operation is invalid: %w", err)
+	if err := scenarios.ValidateOperation(operation); err != nil {
+		return NativeStepObservation{}, fmt.Errorf("native controller request operation is invalid: %w", err)
 	}
-	key := scenarios.OperationKey(request.Operation)
+	key := scenarios.OperationKey(operation)
 	if key != "connect/send" && key != "pull/request-page" && key != "push/submit" && key != "rebuild/request-page" {
-		return nativeexecution.StepObservation{}, nativeUnsupported("request", request.Operation)
+		return NativeStepObservation{}, nativeUnsupported("request", operation)
 	}
-	userID, body, path, err := c.nativeHTTPRequest(request.Operation)
+	userID, body, path, err := c.nativeHTTPRequest(operation)
 	if err != nil {
-		return nativeexecution.StepObservation{}, err
+		return NativeStepObservation{}, err
 	}
 	tokenProvider := TokenProviderFunc(func(tokenContext context.Context) (string, error) {
 		return c.harness.NativeBearerToken(tokenContext, userID, c.now())
@@ -1059,15 +1091,15 @@ func (c *NativeController) RequestStep(ctx context.Context, request nativeharnes
 		Class:   key,
 	})
 	if err != nil {
-		return nativeexecution.StepObservation{}, fmt.Errorf("execute native controller HTTP request: %w", err)
+		return NativeStepObservation{}, fmt.Errorf("execute native controller HTTP request: %w", err)
 	}
 	observation, err := nativeHTTPObservation(response)
 	if err != nil {
-		return nativeexecution.StepObservation{}, err
+		return NativeStepObservation{}, err
 	}
 	if response.Status >= 200 && response.Status < 300 {
 		if err := c.rememberNativeHTTPResponse(key, userID, body, response.Body); err != nil {
-			return nativeexecution.StepObservation{}, err
+			return NativeStepObservation{}, err
 		}
 	}
 	return observation, nil
@@ -1338,13 +1370,13 @@ func (c *NativeController) nativeCursor(clientID, runtimeScope, source string, r
 	}
 }
 
-func nativeHTTPObservation(response Response) (nativeexecution.StepObservation, error) {
-	wire := &nativeexecution.WireObservation{HTTPStatus: response.Status}
+func nativeHTTPObservation(response Response) (NativeStepObservation, error) {
+	wire := &NativeWireFacts{HTTPStatus: response.Status}
 	if response.Status >= 200 && response.Status < 300 {
 		if len(bytes.TrimSpace(response.Body)) == 0 || !json.Valid(response.Body) {
-			return nativeexecution.StepObservation{}, errors.New("native successful HTTP response is invalid")
+			return NativeStepObservation{}, errors.New("native successful HTTP response is invalid")
 		}
-		return nativeexecution.StepObservation{Disposition: "success", Wire: wire}, nil
+		return NativeStepObservation{Disposition: "success", Wire: wire}, nil
 	}
 	var envelope struct {
 		Error struct {
@@ -1354,12 +1386,12 @@ func nativeHTTPObservation(response Response) (nativeexecution.StepObservation, 
 		} `json:"error"`
 	}
 	if err := jsonstrict.Decode(response.Body, &envelope); err != nil || envelope.Error.Code == "" || envelope.Error.Message == "" {
-		return nativeexecution.StepObservation{}, errors.New("native HTTP error response is invalid")
+		return NativeStepObservation{}, errors.New("native HTTP error response is invalid")
 	}
 	code := envelope.Error.Code
 	wire.ErrorCode = &code
 	wire.Retryable = envelope.Error.Retryable
-	return nativeexecution.StepObservation{Disposition: "error", ErrorCode: &code, Wire: wire}, nil
+	return NativeStepObservation{Disposition: "error", ErrorCode: &code, Wire: wire}, nil
 }
 
 func (c *NativeController) rememberNativeHTTPResponse(key, userID string, requestBody, responseBody []byte) error {
@@ -1422,61 +1454,61 @@ func (c *NativeController) rememberNativeHTTPResponse(key, userID string, reques
 }
 
 // ProcessStep executes one server process operation or returns a precise boundary error.
-func (c *NativeController) ProcessStep(ctx context.Context, request nativeharness.StepRequest) (nativeexecution.StepObservation, error) {
+func (c *NativeController) ProcessStep(ctx context.Context, clientKey *string, operation scenarios.Operation) (NativeStepObservation, error) {
 	if err := c.context(ctx); err != nil {
-		return nativeexecution.StepObservation{}, err
+		return NativeStepObservation{}, err
 	}
-	if request.ClientKey != nil {
-		return nativeexecution.StepObservation{}, errors.New("native controller cannot execute a client process operation")
+	if clientKey != nil {
+		return NativeStepObservation{}, errors.New("native controller cannot execute a client process operation")
 	}
-	if err := scenarios.ValidateOperation(request.Operation); err != nil {
-		return nativeexecution.StepObservation{}, fmt.Errorf("native controller process operation is invalid: %w", err)
+	if err := scenarios.ValidateOperation(operation); err != nil {
+		return NativeStepObservation{}, fmt.Errorf("native controller process operation is invalid: %w", err)
 	}
-	switch scenarios.OperationKey(request.Operation) {
+	switch scenarios.OperationKey(operation) {
 	case "process/materialize-source-transaction":
-		return c.materializeSourceTransaction(ctx, request.Operation)
+		return c.materializeSourceTransaction(ctx, operation)
 	case "process/acknowledge-contiguous-prefix":
-		return c.acknowledgeContiguousPrefix(ctx, request.Operation)
+		return c.acknowledgeContiguousPrefix(ctx, operation)
 	case "process/repair-and-retry-source-transaction":
 		retried, err := c.harness.Operator().RetryWALPoison(ctx)
 		if err != nil {
-			return nativeexecution.StepObservation{}, err
+			return NativeStepObservation{}, err
 		}
 		if !retried {
-			return nativeexecution.StepObservation{}, errors.New("native WAL poison retry was not accepted")
+			return NativeStepObservation{}, errors.New("native WAL poison retry was not accepted")
 		}
 		return nativeSuccess(), nil
 	case "process/restart-wal-worker":
 		if err := c.harness.RestartPostgres(ctx); err != nil {
-			return nativeexecution.StepObservation{}, err
+			return NativeStepObservation{}, err
 		}
 		return nativeSuccess(), nil
 	case "process/response-loss":
-		return nativeexecution.StepObservation{}, errors.New("native controller cannot record client response loss because ProcessStep omits the transport handle")
+		return NativeStepObservation{}, errors.New("native controller cannot record client response loss because ProcessStep omits the transport handle")
 	case "process/restart-client":
-		return nativeexecution.StepObservation{}, errors.New("native controller cannot restart a client process")
+		return NativeStepObservation{}, errors.New("native controller cannot restart a client process")
 	default:
-		return nativeexecution.StepObservation{}, nativeUnsupported("process", request.Operation)
+		return NativeStepObservation{}, nativeUnsupported("process", operation)
 	}
 }
 
-func (c *NativeController) materializeSourceTransaction(ctx context.Context, operation scenarios.Operation) (nativeexecution.StepObservation, error) {
+func (c *NativeController) materializeSourceTransaction(ctx context.Context, operation scenarios.Operation) (NativeStepObservation, error) {
 	stream, commit, err := nativeProcessTransactionIdentity(operation.Payload)
 	if err != nil {
-		return nativeexecution.StepObservation{}, err
+		return NativeStepObservation{}, err
 	}
 	key := nativeTransactionKey(stream, commit)
 	c.mu.Lock()
 	transaction := c.transactions[key]
 	if transaction == nil {
 		c.mu.Unlock()
-		return nativeexecution.StepObservation{}, errors.New("native source transaction was not committed through this controller")
+		return NativeStepObservation{}, errors.New("native source transaction was not committed through this controller")
 	}
 	for _, other := range c.transactions {
 		if other.AuthoredStream == stream && !other.Materialized && compareNativeLSN(other.AuthoredCommitLSN, commit) < 0 {
 			code := "source_transaction_predecessor_pending"
 			c.mu.Unlock()
-			return nativeexecution.StepObservation{Disposition: "error", ErrorCode: &code}, nil
+			return NativeStepObservation{Disposition: "error", ErrorCode: &code}, nil
 		}
 	}
 	c.mu.Unlock()
@@ -1488,11 +1520,11 @@ func (c *NativeController) materializeSourceTransaction(ctx context.Context, ope
 			break
 		}
 		if err := waitNativePoll(deadline); err != nil {
-			return nativeexecution.StepObservation{}, errors.New("native source transaction did not become WAL-materialized")
+			return NativeStepObservation{}, errors.New("native source transaction did not become WAL-materialized")
 		}
 	}
 	if err := c.validateRuntimeTransactionOrder(ctx, transaction); err != nil {
-		return nativeexecution.StepObservation{}, err
+		return NativeStepObservation{}, err
 	}
 	c.mu.Lock()
 	transaction.Materialized = true
@@ -1590,12 +1622,12 @@ func (c *NativeController) validateRuntimeTransactionOrder(ctx context.Context, 
 	return nil
 }
 
-func (c *NativeController) acknowledgeContiguousPrefix(ctx context.Context, operation scenarios.Operation) (nativeexecution.StepObservation, error) {
+func (c *NativeController) acknowledgeContiguousPrefix(ctx context.Context, operation scenarios.Operation) (NativeStepObservation, error) {
 	var payload struct {
 		StreamGeneration string `json:"stream_generation"`
 	}
 	if err := jsonstrict.Decode(operation.Payload, &payload); err != nil || payload.StreamGeneration == "" {
-		return nativeexecution.StepObservation{}, errors.New("native acknowledgement stream identity is invalid")
+		return NativeStepObservation{}, errors.New("native acknowledgement stream identity is invalid")
 	}
 	c.mu.Lock()
 	var latest *nativeTransactionBinding
@@ -1606,7 +1638,7 @@ func (c *NativeController) acknowledgeContiguousPrefix(ctx context.Context, oper
 	}
 	c.mu.Unlock()
 	if latest == nil {
-		return nativeexecution.StepObservation{}, errors.New("native acknowledgement has no materialized transaction")
+		return NativeStepObservation{}, errors.New("native acknowledgement has no materialized transaction")
 	}
 	deadline, cancel := context.WithTimeout(ctx, c.waitTimeout)
 	defer cancel()
@@ -1623,24 +1655,24 @@ func (c *NativeController) acknowledgeContiguousPrefix(ctx context.Context, oper
 			}
 		}
 		if err := waitNativePoll(deadline); err != nil {
-			return nativeexecution.StepObservation{}, errors.New("native WAL acknowledgement did not reach the authored prefix")
+			return NativeStepObservation{}, errors.New("native WAL acknowledgement did not reach the authored prefix")
 		}
 	}
 }
 
 // Capture returns one consistent server-state projection.
-func (c *NativeController) Capture(ctx context.Context, request nativeharness.CaptureRequest) ([]nativeharness.CaptureSourceObservation, error) {
+func (c *NativeController) Capture(ctx context.Context, clientKeys, sources []string) ([]NativeCaptureFacts, error) {
 	if err := c.context(ctx); err != nil {
 		return nil, err
 	}
-	if len(request.Sources) != 1 || request.Sources[0] != "server-state" {
+	if len(sources) != 1 || sources[0] != "server-state" {
 		return nil, errors.New("native controller capture supports only one server-state source")
 	}
 	facts, err := c.captureServerState(ctx)
 	if err != nil {
 		return nil, err
 	}
-	return []nativeharness.CaptureSourceObservation{{Source: "server-state", StateFacts: facts}}, nil
+	return []NativeCaptureFacts{{Source: "server-state", StateFacts: facts}}, nil
 }
 
 func (c *NativeController) captureServerState(ctx context.Context) (scenarios.StateFacts, error) {
@@ -1802,7 +1834,7 @@ func captureNativeRowsAndScopes(ctx context.Context, tx *sql.Tx, installation *n
 		}
 	}
 	for authoredScope := range installation.scopes {
-		versions := scopeVersions[authoredScope]
+		versions := append([]string{}, scopeVersions[authoredScope]...)
 		sort.Strings(versions)
 		facts.Scopes = append(facts.Scopes, scenarios.ScopeFact{
 			ScopeID:              authoredScope,
@@ -1939,8 +1971,8 @@ func nativeUnsupported(boundary string, operation scenarios.Operation) error {
 	return fmt.Errorf("native controller %s operation %q is unsupported", boundary, scenarios.OperationKey(operation))
 }
 
-func nativeSuccess() nativeexecution.StepObservation {
-	return nativeexecution.StepObservation{Disposition: "success"}
+func nativeSuccess() NativeStepObservation {
+	return NativeStepObservation{Disposition: "success"}
 }
 
 func validNativeSchemaReference(value nativeSchemaReference, fresh bool) bool {

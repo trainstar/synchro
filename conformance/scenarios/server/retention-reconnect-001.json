@@ -26,7 +26,7 @@
   ],
   "proof_obligations": [
     {
-      "obligation_id": "OBL-RETENTION-RECONNECT-PG-001",
+      "obligation_id": "OBL-RETENTION-RECONNECT-PG-LINUX-X64-001",
       "requirement_ids": [
         "SYNC-RETENTION-002",
         "SYNC-RETENTION-003"
@@ -36,7 +36,7 @@
         "ASSERT-RETENTION-RECONNECT-COMPACTION-SEMANTIC-001"
       ],
       "proof_type": "server-black-box",
-      "support_cell_id": "SUP-PG-018",
+      "support_cell_id": "SUP-PG-LINUX-X64-001",
       "artifact_inventory_ids": [
         "ARTDEF-PG-EXTENSION-001",
         "ARTDEF-ADAPTER-001"
@@ -53,79 +53,28 @@
       "control_id": null
     },
     {
-      "obligation_id": "OBL-RETENTION-RECONNECT-IOS-MIN-001",
+      "obligation_id": "OBL-RETENTION-RECONNECT-PG-MACOS-ARM64-001",
       "requirement_ids": [
-        "SYNC-RETENTION-002"
+        "SYNC-RETENTION-002",
+        "SYNC-RETENTION-003"
       ],
       "assertion_ids": [
-        "ASSERT-RETENTION-RECONNECT-EXPIRY-SEMANTIC-001"
+        "ASSERT-RETENTION-RECONNECT-EXPIRY-SEMANTIC-001",
+        "ASSERT-RETENTION-RECONNECT-COMPACTION-SEMANTIC-001"
       ],
-      "proof_type": "native-e2e",
-      "support_cell_id": "SUP-IOS-MIN-001",
+      "proof_type": "server-black-box",
+      "support_cell_id": "SUP-PG-MACOS-ARM64-001",
       "artifact_inventory_ids": [
         "ARTDEF-PG-EXTENSION-001",
-        "ARTDEF-ADAPTER-001",
-        "ARTDEF-SWIFT-SPM-001"
+        "ARTDEF-ADAPTER-001"
       ],
       "performance_budget_ids": [],
       "required_measurement_ids": [],
       "required_vector_set_ids": [],
-      "make_target": "test-swift",
+      "make_target": "test-blackbox",
       "argv": [
         "make",
-        "test-swift"
-      ],
-      "fault_plan_id": null,
-      "control_id": null
-    },
-    {
-      "obligation_id": "OBL-RETENTION-RECONNECT-IOS-CURRENT-001",
-      "requirement_ids": [
-        "SYNC-RETENTION-002"
-      ],
-      "assertion_ids": [
-        "ASSERT-RETENTION-RECONNECT-EXPIRY-SEMANTIC-001"
-      ],
-      "proof_type": "native-e2e",
-      "support_cell_id": "SUP-IOS-CURRENT-001",
-      "artifact_inventory_ids": [
-        "ARTDEF-PG-EXTENSION-001",
-        "ARTDEF-ADAPTER-001",
-        "ARTDEF-SWIFT-SPM-001"
-      ],
-      "performance_budget_ids": [],
-      "required_measurement_ids": [],
-      "required_vector_set_ids": [],
-      "make_target": "test-swift",
-      "argv": [
-        "make",
-        "test-swift"
-      ],
-      "fault_plan_id": null,
-      "control_id": null
-    },
-    {
-      "obligation_id": "OBL-RETENTION-RECONNECT-MACOS-MIN-001",
-      "requirement_ids": [
-        "SYNC-RETENTION-002"
-      ],
-      "assertion_ids": [
-        "ASSERT-RETENTION-RECONNECT-EXPIRY-SEMANTIC-001"
-      ],
-      "proof_type": "native-e2e",
-      "support_cell_id": "SUP-MACOS-MIN-001",
-      "artifact_inventory_ids": [
-        "ARTDEF-PG-EXTENSION-001",
-        "ARTDEF-ADAPTER-001",
-        "ARTDEF-SWIFT-SPM-001"
-      ],
-      "performance_budget_ids": [],
-      "required_measurement_ids": [],
-      "required_vector_set_ids": [],
-      "make_target": "test-swift",
-      "argv": [
-        "make",
-        "test-swift"
+        "test-blackbox"
       ],
       "fault_plan_id": null,
       "control_id": null
@@ -157,32 +106,6 @@
       "control_id": null
     },
     {
-      "obligation_id": "OBL-RETENTION-RECONNECT-ANDROID-MIN-001",
-      "requirement_ids": [
-        "SYNC-RETENTION-002"
-      ],
-      "assertion_ids": [
-        "ASSERT-RETENTION-RECONNECT-EXPIRY-SEMANTIC-001"
-      ],
-      "proof_type": "native-e2e",
-      "support_cell_id": "SUP-ANDROID-MIN-001",
-      "artifact_inventory_ids": [
-        "ARTDEF-PG-EXTENSION-001",
-        "ARTDEF-ADAPTER-001",
-        "ARTDEF-KOTLIN-MAVEN-001"
-      ],
-      "performance_budget_ids": [],
-      "required_measurement_ids": [],
-      "required_vector_set_ids": [],
-      "make_target": "test-kotlin",
-      "argv": [
-        "make",
-        "test-kotlin"
-      ],
-      "fault_plan_id": null,
-      "control_id": null
-    },
-    {
       "obligation_id": "OBL-RETENTION-RECONNECT-ANDROID-CURRENT-001",
       "requirement_ids": [
         "SYNC-RETENTION-002"
@@ -204,34 +127,6 @@
       "argv": [
         "make",
         "test-kotlin"
-      ],
-      "fault_plan_id": null,
-      "control_id": null
-    },
-    {
-      "obligation_id": "OBL-RETENTION-RECONNECT-RN-IOS-MIN-001",
-      "requirement_ids": [
-        "SYNC-RETENTION-002"
-      ],
-      "assertion_ids": [
-        "ASSERT-RETENTION-RECONNECT-EXPIRY-SEMANTIC-001"
-      ],
-      "proof_type": "native-e2e",
-      "support_cell_id": "SUP-RN-IOS-MIN-001",
-      "artifact_inventory_ids": [
-        "ARTDEF-PG-EXTENSION-001",
-        "ARTDEF-ADAPTER-001",
-        "ARTDEF-SWIFT-SPM-001",
-        "ARTDEF-COCOAPODS-001",
-        "ARTDEF-RN-NPM-001"
-      ],
-      "performance_budget_ids": [],
-      "required_measurement_ids": [],
-      "required_vector_set_ids": [],
-      "make_target": "test-rn-e2e-ios",
-      "argv": [
-        "make",
-        "test-rn-e2e-ios"
       ],
       "fault_plan_id": null,
       "control_id": null
@@ -260,33 +155,6 @@
       "argv": [
         "make",
         "test-rn-e2e-ios"
-      ],
-      "fault_plan_id": null,
-      "control_id": null
-    },
-    {
-      "obligation_id": "OBL-RETENTION-RECONNECT-RN-ANDROID-MIN-001",
-      "requirement_ids": [
-        "SYNC-RETENTION-002"
-      ],
-      "assertion_ids": [
-        "ASSERT-RETENTION-RECONNECT-EXPIRY-SEMANTIC-001"
-      ],
-      "proof_type": "native-e2e",
-      "support_cell_id": "SUP-RN-ANDROID-MIN-001",
-      "artifact_inventory_ids": [
-        "ARTDEF-PG-EXTENSION-001",
-        "ARTDEF-ADAPTER-001",
-        "ARTDEF-KOTLIN-MAVEN-001",
-        "ARTDEF-RN-NPM-001"
-      ],
-      "performance_budget_ids": [],
-      "required_measurement_ids": [],
-      "required_vector_set_ids": [],
-      "make_target": "test-rn-e2e-android",
-      "argv": [
-        "make",
-        "test-rn-e2e-android"
       ],
       "fault_plan_id": null,
       "control_id": null
@@ -345,7 +213,7 @@
       "control_id": "CTRL-RETENTION-002"
     },
     {
-      "obligation_id": "OBL-RETENTION-RECONNECT-RETENTION-003-FAULT-001",
+      "obligation_id": "OBL-RETENTION-RECONNECT-RETENTION-003-FAULT-LINUX-X64-001",
       "requirement_ids": [
         "SYNC-RETENTION-003"
       ],
@@ -353,7 +221,32 @@
         "ASSERT-RETENTION-RECONNECT-COMPACTION-SEMANTIC-001"
       ],
       "proof_type": "fault-injection",
-      "support_cell_id": "SUP-PG-018",
+      "support_cell_id": "SUP-PG-LINUX-X64-001",
+      "artifact_inventory_ids": [
+        "ARTDEF-PG-EXTENSION-001",
+        "ARTDEF-ADAPTER-001"
+      ],
+      "performance_budget_ids": [],
+      "required_measurement_ids": [],
+      "required_vector_set_ids": [],
+      "make_target": "test-blackbox",
+      "argv": [
+        "make",
+        "test-blackbox"
+      ],
+      "fault_plan_id": "FPL-RETENTION-RECONNECT-RETENTION-003-001",
+      "control_id": "CTRL-RETENTION-003"
+    },
+    {
+      "obligation_id": "OBL-RETENTION-RECONNECT-RETENTION-003-FAULT-MACOS-ARM64-001",
+      "requirement_ids": [
+        "SYNC-RETENTION-003"
+      ],
+      "assertion_ids": [
+        "ASSERT-RETENTION-RECONNECT-COMPACTION-SEMANTIC-001"
+      ],
+      "proof_type": "fault-injection",
+      "support_cell_id": "SUP-PG-MACOS-ARM64-001",
       "artifact_inventory_ids": [
         "ARTDEF-PG-EXTENSION-001",
         "ARTDEF-ADAPTER-001"
@@ -429,42 +322,34 @@
     {
       "scenario_id": "SCN-RETENTION-RECONNECT-001",
       "requirement_id": "SYNC-RETENTION-002",
-      "proof_obligation_id": "OBL-RETENTION-RECONNECT-PG-001",
+      "proof_obligation_id": "OBL-RETENTION-RECONNECT-PG-LINUX-X64-001",
       "assertion_id": "ASSERT-RETENTION-RECONNECT-EXPIRY-SEMANTIC-001",
       "proof_type": "server-black-box",
-      "support_cell_id": "SUP-PG-018"
+      "support_cell_id": "SUP-PG-LINUX-X64-001"
     },
     {
       "scenario_id": "SCN-RETENTION-RECONNECT-001",
       "requirement_id": "SYNC-RETENTION-003",
-      "proof_obligation_id": "OBL-RETENTION-RECONNECT-PG-001",
+      "proof_obligation_id": "OBL-RETENTION-RECONNECT-PG-LINUX-X64-001",
       "assertion_id": "ASSERT-RETENTION-RECONNECT-COMPACTION-SEMANTIC-001",
       "proof_type": "server-black-box",
-      "support_cell_id": "SUP-PG-018"
+      "support_cell_id": "SUP-PG-LINUX-X64-001"
     },
     {
       "scenario_id": "SCN-RETENTION-RECONNECT-001",
       "requirement_id": "SYNC-RETENTION-002",
-      "proof_obligation_id": "OBL-RETENTION-RECONNECT-IOS-MIN-001",
+      "proof_obligation_id": "OBL-RETENTION-RECONNECT-PG-MACOS-ARM64-001",
       "assertion_id": "ASSERT-RETENTION-RECONNECT-EXPIRY-SEMANTIC-001",
-      "proof_type": "native-e2e",
-      "support_cell_id": "SUP-IOS-MIN-001"
+      "proof_type": "server-black-box",
+      "support_cell_id": "SUP-PG-MACOS-ARM64-001"
     },
     {
       "scenario_id": "SCN-RETENTION-RECONNECT-001",
-      "requirement_id": "SYNC-RETENTION-002",
-      "proof_obligation_id": "OBL-RETENTION-RECONNECT-IOS-CURRENT-001",
-      "assertion_id": "ASSERT-RETENTION-RECONNECT-EXPIRY-SEMANTIC-001",
-      "proof_type": "native-e2e",
-      "support_cell_id": "SUP-IOS-CURRENT-001"
-    },
-    {
-      "scenario_id": "SCN-RETENTION-RECONNECT-001",
-      "requirement_id": "SYNC-RETENTION-002",
-      "proof_obligation_id": "OBL-RETENTION-RECONNECT-MACOS-MIN-001",
-      "assertion_id": "ASSERT-RETENTION-RECONNECT-EXPIRY-SEMANTIC-001",
-      "proof_type": "native-e2e",
-      "support_cell_id": "SUP-MACOS-MIN-001"
+      "requirement_id": "SYNC-RETENTION-003",
+      "proof_obligation_id": "OBL-RETENTION-RECONNECT-PG-MACOS-ARM64-001",
+      "assertion_id": "ASSERT-RETENTION-RECONNECT-COMPACTION-SEMANTIC-001",
+      "proof_type": "server-black-box",
+      "support_cell_id": "SUP-PG-MACOS-ARM64-001"
     },
     {
       "scenario_id": "SCN-RETENTION-RECONNECT-001",
@@ -477,14 +362,6 @@
     {
       "scenario_id": "SCN-RETENTION-RECONNECT-001",
       "requirement_id": "SYNC-RETENTION-002",
-      "proof_obligation_id": "OBL-RETENTION-RECONNECT-ANDROID-MIN-001",
-      "assertion_id": "ASSERT-RETENTION-RECONNECT-EXPIRY-SEMANTIC-001",
-      "proof_type": "native-e2e",
-      "support_cell_id": "SUP-ANDROID-MIN-001"
-    },
-    {
-      "scenario_id": "SCN-RETENTION-RECONNECT-001",
-      "requirement_id": "SYNC-RETENTION-002",
       "proof_obligation_id": "OBL-RETENTION-RECONNECT-ANDROID-CURRENT-001",
       "assertion_id": "ASSERT-RETENTION-RECONNECT-EXPIRY-SEMANTIC-001",
       "proof_type": "native-e2e",
@@ -493,26 +370,10 @@
     {
       "scenario_id": "SCN-RETENTION-RECONNECT-001",
       "requirement_id": "SYNC-RETENTION-002",
-      "proof_obligation_id": "OBL-RETENTION-RECONNECT-RN-IOS-MIN-001",
-      "assertion_id": "ASSERT-RETENTION-RECONNECT-EXPIRY-SEMANTIC-001",
-      "proof_type": "native-e2e",
-      "support_cell_id": "SUP-RN-IOS-MIN-001"
-    },
-    {
-      "scenario_id": "SCN-RETENTION-RECONNECT-001",
-      "requirement_id": "SYNC-RETENTION-002",
       "proof_obligation_id": "OBL-RETENTION-RECONNECT-RN-IOS-CURRENT-001",
       "assertion_id": "ASSERT-RETENTION-RECONNECT-EXPIRY-SEMANTIC-001",
       "proof_type": "native-e2e",
       "support_cell_id": "SUP-RN-IOS-CURRENT-001"
-    },
-    {
-      "scenario_id": "SCN-RETENTION-RECONNECT-001",
-      "requirement_id": "SYNC-RETENTION-002",
-      "proof_obligation_id": "OBL-RETENTION-RECONNECT-RN-ANDROID-MIN-001",
-      "assertion_id": "ASSERT-RETENTION-RECONNECT-EXPIRY-SEMANTIC-001",
-      "proof_type": "native-e2e",
-      "support_cell_id": "SUP-RN-ANDROID-MIN-001"
     },
     {
       "scenario_id": "SCN-RETENTION-RECONNECT-001",
@@ -533,10 +394,18 @@
     {
       "scenario_id": "SCN-RETENTION-RECONNECT-001",
       "requirement_id": "SYNC-RETENTION-003",
-      "proof_obligation_id": "OBL-RETENTION-RECONNECT-RETENTION-003-FAULT-001",
+      "proof_obligation_id": "OBL-RETENTION-RECONNECT-RETENTION-003-FAULT-LINUX-X64-001",
       "assertion_id": "ASSERT-RETENTION-RECONNECT-COMPACTION-SEMANTIC-001",
       "proof_type": "fault-injection",
-      "support_cell_id": "SUP-PG-018"
+      "support_cell_id": "SUP-PG-LINUX-X64-001"
+    },
+    {
+      "scenario_id": "SCN-RETENTION-RECONNECT-001",
+      "requirement_id": "SYNC-RETENTION-003",
+      "proof_obligation_id": "OBL-RETENTION-RECONNECT-RETENTION-003-FAULT-MACOS-ARM64-001",
+      "assertion_id": "ASSERT-RETENTION-RECONNECT-COMPACTION-SEMANTIC-001",
+      "proof_type": "fault-injection",
+      "support_cell_id": "SUP-PG-MACOS-ARM64-001"
     },
     {
       "scenario_id": "SCN-RETENTION-RECONNECT-001",
@@ -885,6 +754,11 @@
       "phase": "exercise",
       "transport": "local",
       "description": "Queue one unchanged authored insert before the client generation expires.",
+      "native_binding": {
+        "kind": "local-write",
+        "user_id": "user-a",
+        "client_id": "client-a"
+      },
       "operation": {
         "contract_operation": "local",
         "name": "write",
@@ -920,6 +794,15 @@
       "phase": "exercise",
       "transport": "http",
       "description": "Seal the generation-one batch through a retryable transport failure.",
+      "native_binding": {
+        "kind": "public-call",
+        "user_id": "user-a",
+        "client_id": "client-a",
+        "call_id": "retention_initial_push",
+        "stage": "synchronous",
+        "method": "start",
+        "completion": "blocked"
+      },
       "operation": {
         "contract_operation": "push",
         "name": "submit",
@@ -966,6 +849,9 @@
       "phase": "exercise",
       "transport": "model",
       "description": "Commit two scope-A history effects at LSN 10 for a pinned multi-page rebuild.",
+      "native_binding": {
+        "kind": "controller"
+      },
       "operation": {
         "contract_operation": "model",
         "name": "commit-source-transaction",
@@ -1054,6 +940,9 @@
       "phase": "exercise",
       "transport": "process",
       "description": "Materialize the committed history through the WAL path.",
+      "native_binding": {
+        "kind": "controller"
+      },
       "operation": {
         "contract_operation": "process",
         "name": "materialize-source-transaction",
@@ -1071,6 +960,9 @@
       "phase": "exercise",
       "transport": "http",
       "description": "Create an active scope-A rebuild session pinned at the materialized boundary.",
+      "native_binding": {
+        "kind": "controller"
+      },
       "operation": {
         "contract_operation": "rebuild",
         "name": "request-page",
@@ -1097,6 +989,9 @@
       "phase": "exercise",
       "transport": "model",
       "description": "Expire the stale generation after its one-hour acknowledgement interval.",
+      "native_binding": {
+        "kind": "controller"
+      },
       "operation": {
         "contract_operation": "model",
         "name": "expire-client-generation",
@@ -1114,6 +1009,14 @@
       "phase": "exercise",
       "transport": "http",
       "description": "Reject the old-generation sealed batch without allocating a ledger claim.",
+      "native_binding": {
+        "kind": "public-call",
+        "user_id": "user-a",
+        "client_id": "client-a",
+        "call_id": "generation_renewal",
+        "stage": "begin",
+        "method": "retry-after-error"
+      },
       "operation": {
         "contract_operation": "push",
         "name": "submit",
@@ -1160,6 +1063,14 @@
       "phase": "exercise",
       "transport": "http",
       "description": "Reconnect generation one and receive generation two with scope-A rebuild required.",
+      "native_binding": {
+        "kind": "public-call",
+        "user_id": "user-a",
+        "client_id": "client-a",
+        "call_id": "generation_renewal",
+        "stage": "await-call",
+        "completion": "idle"
+      },
       "operation": {
         "contract_operation": "connect",
         "name": "send",
@@ -1191,11 +1102,14 @@
       "phase": "cleanup",
       "transport": "model",
       "description": "Compact scope A using only scope-A assignments and the active rebuild pin.",
+      "native_binding": {
+        "kind": "controller"
+      },
       "operation": {
         "contract_operation": "model",
         "name": "compact-scope",
         "payload": {
-		  "batch_size": 10000,
+          "batch_size": 10000,
           "scope_id": "scope-a"
         }
       },
@@ -1286,179 +1200,143 @@
       ]
     }
   ],
-  "native_execution": {
-    "version": 1,
-    "clients": [
-      {
-        "key": "client_a",
-        "user_id": "user-a",
-        "client_id": "client-a",
-        "database_key": "retention_reconnect_a"
-      }
-    ],
-    "actions": [
-      {
-        "id": "NACT-RETENTION-RECONNECT-001",
-        "phase": "setup",
-        "actor": "controller",
-        "command": "install-model",
-        "covers_step_ids": [],
-        "parameters": {}
+  "native_identity_aliases": [
+    {
+      "kind": "mutation-id",
+      "alias": "retention-mutation",
+      "value": "00000000-0000-4000-8000-000000000701",
+      "step_ids": [
+        "STEP-RETENTION-RECONNECT-LOCAL-WRITE-001",
+        "STEP-RETENTION-RECONNECT-SEAL-OLD-BATCH-001",
+        "STEP-RETENTION-RECONNECT-REJECT-OLD-001"
+      ],
+      "expectation_ids": []
+    },
+    {
+      "kind": "batch-id",
+      "alias": "retention-batch",
+      "value": "00000000-0000-4000-8000-000000000702",
+      "step_ids": [
+        "STEP-RETENTION-RECONNECT-SEAL-OLD-BATCH-001",
+        "STEP-RETENTION-RECONNECT-REJECT-OLD-001"
+      ],
+      "expectation_ids": []
+    },
+    {
+      "kind": "client-generation",
+      "alias": "client-generation-one",
+      "value": 1,
+      "step_ids": [
+        "STEP-RETENTION-RECONNECT-SEAL-OLD-BATCH-001",
+        "STEP-RETENTION-RECONNECT-REBUILD-PIN-001",
+        "STEP-RETENTION-RECONNECT-REJECT-OLD-001",
+        "STEP-RETENTION-RECONNECT-RENEW-001"
+      ],
+      "expectation_ids": []
+    },
+    {
+      "kind": "schema",
+      "alias": "current-schema",
+      "value": {
+        "version": 1,
+        "hash": "72a2f32c8974700dd92ac0effabd8d1a98f8fafb0d512f84b683884abbe5fe21"
       },
-      {
-        "id": "NACT-RETENTION-RECONNECT-002",
-        "phase": "setup",
-        "actor": "client",
-        "command": "open",
-        "covers_step_ids": [],
-        "parameters": {
-          "client_key": "client_a",
-          "database_mode": "create",
-          "initialization": "current",
-          "seed_step_id": null
-        }
-      },
-      {
-        "id": "NACT-RETENTION-RECONNECT-004",
-        "phase": "exercise",
-        "actor": "client",
-        "command": "execute-step",
-        "covers_step_ids": [
-          "STEP-RETENTION-RECONNECT-LOCAL-WRITE-001"
-        ],
-        "parameters": {
-          "client_key": "client_a"
-        }
-      },
-      {
-        "id": "NACT-RETENTION-RECONNECT-005",
-        "phase": "exercise",
-        "actor": "client",
-        "command": "synchronize-step",
-        "covers_step_ids": [
-          "STEP-RETENTION-RECONNECT-SEAL-OLD-BATCH-001"
-        ],
-        "parameters": {
-          "client_key": "client_a",
-          "method": "start",
-          "completion": "blocked"
-        }
-      },
-      {
-        "id": "NACT-RETENTION-RECONNECT-006",
-        "phase": "exercise",
-        "actor": "controller",
-        "command": "apply-step",
-        "covers_step_ids": [
-          "STEP-RETENTION-RECONNECT-COMMIT-001"
-        ],
-        "parameters": {}
-      },
-      {
-        "id": "NACT-RETENTION-RECONNECT-007",
-        "phase": "exercise",
-        "actor": "process",
-        "command": "execute-step",
-        "covers_step_ids": [
-          "STEP-RETENTION-RECONNECT-MATERIALIZE-001"
-        ],
-        "parameters": {
-          "client_key": null
-        }
-      },
-      {
-        "id": "NACT-RETENTION-RECONNECT-008",
-        "phase": "exercise",
-        "actor": "controller",
-        "command": "request-step",
-        "covers_step_ids": [
-          "STEP-RETENTION-RECONNECT-REBUILD-PIN-001"
-        ],
-        "parameters": {}
-      },
-      {
-        "id": "NACT-RETENTION-RECONNECT-009",
-        "phase": "exercise",
-        "actor": "controller",
-        "command": "apply-step",
-        "covers_step_ids": [
-          "STEP-RETENTION-RECONNECT-EXPIRE-001"
-        ],
-        "parameters": {}
-      },
-      {
-        "id": "NACT-RETENTION-RECONNECT-010",
-        "phase": "exercise",
-        "actor": "client",
-        "command": "begin-call",
-        "covers_step_ids": [
-          "STEP-RETENTION-RECONNECT-REJECT-OLD-001"
-        ],
-        "parameters": {
-          "client_key": "client_a",
-          "call_id": "generation_renewal",
-          "method": "retry-after-error"
-        }
-      },
-      {
-        "id": "NACT-RETENTION-RECONNECT-011",
-        "phase": "exercise",
-        "actor": "observer",
-        "command": "await-step",
-        "covers_step_ids": [
-          "STEP-RETENTION-RECONNECT-RENEW-001"
-        ],
-        "parameters": {
-          "client_key": "client_a",
-          "call_id": "generation_renewal"
-        }
-      },
-      {
-        "id": "NACT-RETENTION-RECONNECT-011-001",
-        "phase": "exercise",
-        "actor": "client",
-        "command": "await-call",
-        "covers_step_ids": [],
-        "parameters": {
-          "client_key": "client_a",
-          "call_id": "generation_renewal",
-          "completion": "idle"
-        }
-      },
-      {
-        "id": "NACT-RETENTION-RECONNECT-012",
-        "phase": "cleanup",
-        "actor": "controller",
-        "command": "apply-step",
-        "covers_step_ids": [
-          "STEP-RETENTION-RECONNECT-COMPACT-001"
-        ],
-        "parameters": {}
-      },
-      {
-        "id": "NACT-RETENTION-RECONNECT-013",
-        "phase": "verify",
-        "actor": "observer",
-        "command": "capture",
-        "covers_step_ids": [],
-        "parameters": {
-          "client_keys": [
-            "client_a"
-          ],
-          "sources": [
-            "application-rows",
-            "pending-mutations",
-            "sync-status",
-            "scope-state",
-            "rebuild-state",
-            "request-trace",
-            "server-state"
-          ],
-          "expectation_ids": [
-            "EXPECT-RETENTION-RECONNECT-EXPIRY-001"
-          ]
-        }
-      }
-    ]
-  }
+      "step_ids": [
+        "STEP-RETENTION-RECONNECT-LOCAL-WRITE-001",
+        "STEP-RETENTION-RECONNECT-SEAL-OLD-BATCH-001",
+        "STEP-RETENTION-RECONNECT-REBUILD-PIN-001",
+        "STEP-RETENTION-RECONNECT-REJECT-OLD-001",
+        "STEP-RETENTION-RECONNECT-RENEW-001"
+      ],
+      "expectation_ids": []
+    },
+    {
+      "kind": "table",
+      "alias": "rows-table",
+      "value": "rows",
+      "step_ids": [
+        "STEP-RETENTION-RECONNECT-LOCAL-WRITE-001",
+        "STEP-RETENTION-RECONNECT-SEAL-OLD-BATCH-001",
+        "STEP-RETENTION-RECONNECT-COMMIT-001",
+        "STEP-RETENTION-RECONNECT-REJECT-OLD-001"
+      ],
+      "expectation_ids": []
+    },
+    {
+      "kind": "primary-key",
+      "alias": "retention-intent-primary-key",
+      "value": "retention-intent",
+      "step_ids": [
+        "STEP-RETENTION-RECONNECT-LOCAL-WRITE-001",
+        "STEP-RETENTION-RECONNECT-SEAL-OLD-BATCH-001",
+        "STEP-RETENTION-RECONNECT-REJECT-OLD-001"
+      ],
+      "expectation_ids": []
+    },
+    {
+      "kind": "primary-key",
+      "alias": "retention-history-primary-key",
+      "value": "retention-history",
+      "step_ids": [
+        "STEP-RETENTION-RECONNECT-COMMIT-001"
+      ],
+      "expectation_ids": []
+    },
+    {
+      "kind": "primary-key",
+      "alias": "retention-history-two-primary-key",
+      "value": "retention-history-two",
+      "step_ids": [
+        "STEP-RETENTION-RECONNECT-COMMIT-001"
+      ],
+      "expectation_ids": []
+    },
+    {
+      "kind": "row-version",
+      "alias": "row-version-one",
+      "value": "v1",
+      "step_ids": [
+        "STEP-RETENTION-RECONNECT-COMMIT-001"
+      ],
+      "expectation_ids": []
+    },
+    {
+      "kind": "checksum",
+      "alias": "empty-row-checksum",
+      "value": "0000000000000000000000000000000000000000000000000000000000000000",
+      "step_ids": [
+        "STEP-RETENTION-RECONNECT-COMMIT-001"
+      ],
+      "expectation_ids": []
+    },
+    {
+      "kind": "scope",
+      "alias": "scope-a",
+      "value": "scope-a",
+      "step_ids": [
+        "STEP-RETENTION-RECONNECT-REBUILD-PIN-001",
+        "STEP-RETENTION-RECONNECT-RENEW-001",
+        "STEP-RETENTION-RECONNECT-COMPACT-001"
+      ],
+      "expectation_ids": []
+    },
+    {
+      "kind": "rebuild-id",
+      "alias": "retention-rebuild",
+      "value": "00000000-0000-4000-8000-000000000703",
+      "step_ids": [
+        "STEP-RETENTION-RECONNECT-REBUILD-PIN-001"
+      ],
+      "expectation_ids": []
+    },
+    {
+      "kind": "scope-set-version",
+      "alias": "scope-set-version-one",
+      "value": 1,
+      "step_ids": [
+        "STEP-RETENTION-RECONNECT-RENEW-001"
+      ],
+      "expectation_ids": []
+    }
+  ]
 }

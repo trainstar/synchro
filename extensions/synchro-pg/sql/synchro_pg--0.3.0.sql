@@ -7,7 +7,7 @@ The ordering of items is not stable, it is driven by a dependency graph.
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- synchro-pg/src/lib.rs:36
+-- synchro-pg/src/lib.rs:37
 -- bootstrap
 
 CREATE TABLE IF NOT EXISTS sync_runtime_state (
@@ -1790,7 +1790,7 @@ $$;
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- synchro-pg/src/stream_reset.rs:371
+-- synchro-pg/src/stream_reset.rs:598
 -- synchro_pg::stream_reset::synchro_abort_projection_bootstrap
 CREATE  FUNCTION "synchro_abort_projection_bootstrap"(
 	"bootstrap_id" uuid /* pgrx::datum::uuid::Uuid */
@@ -1837,7 +1837,8 @@ AS 'MODULE_PATHNAME', 'synchro_activate_stream_reset_wrapper';
 -- synchro-pg/src/materialize.rs:47
 -- synchro_pg::materialize::synchro_backfill_bucket_edges
 CREATE  FUNCTION "synchro_backfill_bucket_edges"(
-	"p_table_name" TEXT DEFAULT NULL /* core::option::Option<&str> */
+	"p_table_name" TEXT DEFAULT NULL, /* core::option::Option<&str> */
+	"p_batch_size" bigint DEFAULT 1000 /* i64 */
 ) RETURNS jsonb /* pgrx::datum::json::JsonB */
 LANGUAGE c /* Rust */
 AS 'MODULE_PATHNAME', 'synchro_backfill_bucket_edges_wrapper';
@@ -1848,15 +1849,15 @@ AS 'MODULE_PATHNAME', 'synchro_backfill_bucket_edges_wrapper';
 -- synchro_pg::compaction::synchro_compact
 CREATE  FUNCTION "synchro_compact"(
 	"p_stale_threshold" TEXT DEFAULT '30 days', /* &str */
-	"p_batch_size" INT DEFAULT 10000 /* i32 */
+	"p_batch_size" INT DEFAULT 10000, /* i32 */
+	"p_stale_at" TEXT DEFAULT NULL /* core::option::Option<&str> */
 ) RETURNS jsonb /* pgrx::datum::json::JsonB */
-STRICT
 LANGUAGE c /* Rust */
 AS 'MODULE_PATHNAME', 'synchro_compact_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- synchro-pg/src/stream_reset.rs:380
+-- synchro-pg/src/stream_reset.rs:607
 -- synchro_pg::stream_reset::synchro_complete_projection_bootstrap_cleanup
 CREATE  FUNCTION "synchro_complete_projection_bootstrap_cleanup"(
 	"bootstrap_id" uuid /* pgrx::datum::uuid::Uuid */
@@ -1954,7 +1955,7 @@ AS 'MODULE_PATHNAME', 'synchro_mark_stream_reset_snapshot_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- synchro-pg/src/portable_seed.rs:245
+-- synchro-pg/src/portable_seed.rs:248
 -- synchro_pg::portable_seed::synchro_portable_seed_manifest
 CREATE  FUNCTION "synchro_portable_seed_manifest"(
 	"p_page_limit" INT DEFAULT 1000 /* i32 */
@@ -1965,7 +1966,7 @@ AS 'MODULE_PATHNAME', 'synchro_portable_seed_manifest_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- synchro-pg/src/portable_seed.rs:417
+-- synchro-pg/src/portable_seed.rs:421
 -- synchro_pg::portable_seed::synchro_portable_seed_scope
 CREATE  FUNCTION "synchro_portable_seed_scope"(
 	"p_scope_id" TEXT, /* &str */
@@ -2017,6 +2018,78 @@ AS 'MODULE_PATHNAME', 'synchro_prepare_stream_reset_wrapper';
 
 /* <begin connected objects> */
 -- synchro-pg/src/stream_reset.rs:343
+-- synchro_pg::stream_reset::synchro_projection_bootstrap_active_stream
+CREATE  FUNCTION "synchro_projection_bootstrap_active_stream"() RETURNS jsonb /* pgrx::datum::json::JsonB */
+STRICT STABLE
+LANGUAGE c /* Rust */
+AS 'MODULE_PATHNAME', 'synchro_projection_bootstrap_active_stream_wrapper';
+/* </end connected objects> */
+
+/* <begin connected objects> */
+-- synchro-pg/src/stream_reset.rs:515
+-- synchro_pg::stream_reset::synchro_projection_bootstrap_interrupted
+CREATE  FUNCTION "synchro_projection_bootstrap_interrupted"() RETURNS jsonb /* pgrx::datum::json::JsonB */
+STRICT STABLE
+LANGUAGE c /* Rust */
+AS 'MODULE_PATHNAME', 'synchro_projection_bootstrap_interrupted_wrapper';
+/* </end connected objects> */
+
+/* <begin connected objects> */
+-- synchro-pg/src/stream_reset.rs:493
+-- synchro_pg::stream_reset::synchro_projection_bootstrap_is_activated
+CREATE  FUNCTION "synchro_projection_bootstrap_is_activated"(
+	"bootstrap_id" uuid /* pgrx::datum::uuid::Uuid */
+) RETURNS bool /* bool */
+STRICT STABLE
+LANGUAGE c /* Rust */
+AS 'MODULE_PATHNAME', 'synchro_projection_bootstrap_is_activated_wrapper';
+/* </end connected objects> */
+
+/* <begin connected objects> */
+-- synchro-pg/src/stream_reset.rs:368
+-- synchro_pg::stream_reset::synchro_projection_bootstrap_main_boundary
+CREATE  FUNCTION "synchro_projection_bootstrap_main_boundary"(
+	"stream_generation" TEXT, /* &str */
+	"marker_lsn" TEXT /* &str */
+) RETURNS bool /* bool */
+STRICT STABLE
+LANGUAGE c /* Rust */
+AS 'MODULE_PATHNAME', 'synchro_projection_bootstrap_main_boundary_wrapper';
+/* </end connected objects> */
+
+/* <begin connected objects> */
+-- synchro-pg/src/stream_reset.rs:460
+-- synchro_pg::stream_reset::synchro_projection_bootstrap_next_aborted_slot
+CREATE  FUNCTION "synchro_projection_bootstrap_next_aborted_slot"() RETURNS TEXT /* core::option::Option<alloc::string::String> */
+STRICT STABLE
+LANGUAGE c /* Rust */
+AS 'MODULE_PATHNAME', 'synchro_projection_bootstrap_next_aborted_slot_wrapper';
+/* </end connected objects> */
+
+/* <begin connected objects> */
+-- synchro-pg/src/stream_reset.rs:395
+-- synchro_pg::stream_reset::synchro_projection_bootstrap_slot_absent
+CREATE  FUNCTION "synchro_projection_bootstrap_slot_absent"(
+	"candidate_slot_name" TEXT /* &str */
+) RETURNS bool /* bool */
+STRICT STABLE
+LANGUAGE c /* Rust */
+AS 'MODULE_PATHNAME', 'synchro_projection_bootstrap_slot_absent_wrapper';
+/* </end connected objects> */
+
+/* <begin connected objects> */
+-- synchro-pg/src/stream_reset.rs:420
+-- synchro_pg::stream_reset::synchro_projection_bootstrap_slot_drop_state
+CREATE  FUNCTION "synchro_projection_bootstrap_slot_drop_state"(
+	"candidate_slot_name" TEXT /* &str */
+) RETURNS jsonb /* pgrx::datum::json::JsonB */
+STRICT STABLE
+LANGUAGE c /* Rust */
+AS 'MODULE_PATHNAME', 'synchro_projection_bootstrap_slot_drop_state_wrapper';
+/* </end connected objects> */
+
+/* <begin connected objects> */
+-- synchro-pg/src/stream_reset.rs:570
 -- synchro_pg::stream_reset::synchro_projection_bootstrap_status
 CREATE  FUNCTION "synchro_projection_bootstrap_status"(
 	"bootstrap_id" uuid /* pgrx::datum::uuid::Uuid */
@@ -2027,7 +2100,7 @@ AS 'MODULE_PATHNAME', 'synchro_projection_bootstrap_status_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- synchro-pg/src/pull.rs:24
+-- synchro-pg/src/pull.rs:25
 -- synchro_pg::pull::synchro_pull
 CREATE  FUNCTION "synchro_pull"(
 	"p_user_id" TEXT, /* &str */
@@ -2060,7 +2133,7 @@ AS 'MODULE_PATHNAME', 'synchro_readiness_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- synchro-pg/src/rebuild.rs:95
+-- synchro-pg/src/rebuild.rs:96
 -- synchro_pg::rebuild::synchro_rebuild
 CREATE  FUNCTION "synchro_rebuild"(
 	"p_user_id" TEXT, /* &str */
@@ -2100,7 +2173,7 @@ AS 'MODULE_PATHNAME', 'synchro_register_membership_dependency_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- synchro-pg/src/portable_seed.rs:133
+-- synchro-pg/src/portable_seed.rs:136
 -- synchro_pg::portable_seed::synchro_register_shared_scope
 CREATE  FUNCTION "synchro_register_shared_scope"(
 	"p_scope_id" TEXT, /* &str */
@@ -2206,7 +2279,7 @@ AS 'MODULE_PATHNAME', 'synchro_tables_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- synchro-pg/src/portable_seed.rs:204
+-- synchro-pg/src/portable_seed.rs:207
 -- synchro_pg::portable_seed::synchro_unregister_shared_scope
 CREATE  FUNCTION "synchro_unregister_shared_scope"(
 	"p_scope_id" TEXT /* &str */
@@ -2228,7 +2301,7 @@ AS 'MODULE_PATHNAME', 'synchro_unregister_table_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- synchro-pg/src/lib.rs:1820
+-- synchro-pg/src/lib.rs:1821
 -- finalize
 
 DO $roles$
@@ -2258,6 +2331,12 @@ BEGIN
     ALTER ROLE synchro_monitor NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS NOREPLICATION;
     ALTER ROLE synchro_operator NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS NOREPLICATION;
     ALTER ROLE synchro_worker NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS NOREPLICATION;
+
+    -- Backfill stages edges in a transaction-local table under this security-definer role.
+    EXECUTE pg_catalog.format(
+        'GRANT TEMPORARY ON DATABASE %I TO synchro_owner',
+        pg_catalog.current_database()
+    );
 END
 $roles$;
 
@@ -2342,12 +2421,21 @@ BEGIN
                 'synchro_contract_info', 'synchro_connect', 'synchro_pull', 'synchro_push',
                 'synchro_rebuild', 'synchro_schema_manifest', 'synchro_tables', 'synchro_readiness'
             ) THEN 'synchro_adapter'
-            WHEN function_record.proname IN (
-                'synchro_portable_seed_manifest', 'synchro_portable_seed_scope'
-            ) THEN 'synchro_seed'
-            WHEN function_record.proname IN ('synchro_readiness', 'synchro_health_detail')
-            THEN 'synchro_monitor'
-            WHEN function_record.proname IN (
+             WHEN function_record.proname IN (
+                 'synchro_portable_seed_manifest', 'synchro_portable_seed_scope'
+             ) THEN 'synchro_seed'
+             WHEN function_record.proname IN ('synchro_readiness', 'synchro_health_detail')
+             THEN 'synchro_monitor'
+             WHEN function_record.proname IN (
+                 'synchro_projection_bootstrap_active_stream',
+                 'synchro_projection_bootstrap_main_boundary',
+                 'synchro_projection_bootstrap_slot_absent',
+                 'synchro_projection_bootstrap_slot_drop_state',
+                 'synchro_projection_bootstrap_next_aborted_slot',
+                 'synchro_projection_bootstrap_is_activated',
+                 'synchro_projection_bootstrap_interrupted'
+             ) THEN 'synchro_worker'
+             WHEN function_record.proname IN (
                 'synchro_register_table', 'synchro_register_capture_dependency',
                 'synchro_prepare_projection_view',
                 'synchro_register_membership_dependency',

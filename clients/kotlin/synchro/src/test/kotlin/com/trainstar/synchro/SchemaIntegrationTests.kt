@@ -22,6 +22,13 @@ import javax.crypto.spec.SecretKeySpec
 @Config(sdk = [28])
 class SchemaIntegrationTests {
 
+    private data class CatalogEntry(
+        val type: String,
+        val name: String,
+        val tableName: String,
+        val sql: String,
+    )
+
     private lateinit var serverURL: String
     private lateinit var jwtSecret: String
     private lateinit var canonicalSeedPath: String
@@ -118,6 +125,96 @@ class SchemaIntegrationTests {
         sql: String,
         params: Array<out Any?>? = null,
     ): Row? = withInternalDatabase(dbPath) { db -> queryOneWithTypedBindings(db, sql, params) }
+
+    private fun schemaCatalog(
+        database: SynchroDatabase,
+        excludedNames: Set<String> = emptySet(),
+    ): List<CatalogEntry> = database.readTransaction { db ->
+        db.rawQuery(
+            """
+            SELECT type, name, tbl_name, sql
+            FROM sqlite_master
+            WHERE type IN ('table', 'index', 'trigger')
+              AND name NOT LIKE 'sqlite_%'
+              AND sql IS NOT NULL
+            ORDER BY type, name
+            """.trimIndent(),
+            null,
+        ).use { cursor ->
+            buildList {
+                while (cursor.moveToNext()) {
+                    val name = cursor.getString(1)
+                    if (name !in excludedNames) {
+                        add(
+                            CatalogEntry(
+                                type = cursor.getString(0),
+                                name = name,
+                                tableName = cursor.getString(2),
+                                sql = canonicalCatalogDDL(cursor.getString(3)),
+                            ),
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    private fun assertCatalogEquals(expected: List<CatalogEntry>, actual: List<CatalogEntry>) {
+        assertEquals("catalog entry count", expected.size, actual.size)
+        expected.zip(actual).firstOrNull { (expectedEntry, actualEntry) ->
+            expectedEntry != actualEntry
+        }?.let { (expectedEntry, actualEntry) ->
+            fail(
+                "catalog entry ${actualEntry.type}/${actualEntry.name} differs: " +
+                    "${actualEntry.sql} != ${expectedEntry.sql}",
+            )
+        }
+    }
+
+    private fun canonicalCatalogDDL(source: String): String {
+        val output = StringBuilder(source.length)
+        var pendingSpace = false
+        var quoteEnd: Char? = null
+        var index = 0
+        while (index < source.length) {
+            val character = source[index]
+            if (quoteEnd != null) {
+                output.append(character)
+                if (character == quoteEnd) {
+                    if (index + 1 < source.length && source[index + 1] == quoteEnd) {
+                        index += 1
+                        output.append(source[index])
+                    } else {
+                        quoteEnd = null
+                    }
+                }
+                index += 1
+                continue
+            }
+            if (character.isWhitespace()) {
+                pendingSpace = output.isNotEmpty()
+                index += 1
+                continue
+            }
+            if (
+                pendingSpace &&
+                output.isNotEmpty() &&
+                output.last() !in "(," &&
+                character !in "),;"
+            ) {
+                output.append(' ')
+            }
+            pendingSpace = false
+            quoteEnd = when (character) {
+                '\'', '"', '`' -> character
+                '[' -> ']'
+                else -> null
+            }
+            output.append(character)
+            index += 1
+        }
+        return output.toString()
+    }
 
     // -- 1. testAdditiveSchemaChangePreservesData --
 
@@ -260,6 +357,51 @@ class SchemaIntegrationTests {
         assertEquals("insert", pending[0]["operation"])
 
         client.close()
+    }
+
+    @Test
+    fun testCanonicalGoSeedDDLConvergesWithFreshKotlinDDL() {
+        val migratedName = "ddl_migrated_${UUID.randomUUID()}.sqlite"
+        val freshName = "ddl_fresh_${UUID.randomUUID()}.sqlite"
+        val canonicalSeed = File(canonicalSeedPath)
+        val sourceBytes = canonicalSeed.readBytes()
+        try {
+            SeedDatabaseInstaller.installIfNeeded(context, canonicalSeedPath, migratedName)
+            val migrated = SynchroDatabase.open(context, migratedName)
+            val fresh = SynchroDatabase.open(context, freshName)
+            try {
+                val tables = requireNotNull(SchemaManager(migrated).loadStoredLocalSchema())
+                fresh.writeTransaction { db ->
+                    createTestSyncedTablesInTransaction(db, tables)
+                }
+
+                val expected = schemaCatalog(fresh)
+                assertCatalogEquals(expected, schemaCatalog(migrated, setOf("grdb_migrations")))
+                assertEquals(
+                    SynchroDatabase.DATABASE_VERSION.toLong(),
+                    migrated.queryOne("PRAGMA user_version")?.get("user_version"),
+                )
+                assertEquals(
+                    SynchroDatabase.DATABASE_VERSION.toLong(),
+                    fresh.queryOne("PRAGMA user_version")?.get("user_version"),
+                )
+
+                migrated.writeTransaction { db ->
+                    db.execSQL("ALTER TABLE _synchro_scopes ADD COLUMN ddl_identity_drift TEXT")
+                }
+                assertNotEquals(expected, schemaCatalog(migrated, setOf("grdb_migrations")))
+                assertArrayEquals(sourceBytes, canonicalSeed.readBytes())
+                for (suffix in listOf("-journal", "-wal", "-shm")) {
+                    assertFalse(File(canonicalSeedPath + suffix).exists())
+                }
+            } finally {
+                migrated.close()
+                fresh.close()
+            }
+        } finally {
+            context.deleteDatabase(migratedName)
+            context.deleteDatabase(freshName)
+        }
     }
 
     @Test

@@ -2,7 +2,7 @@ import Foundation
 import Darwin
 import React
 import GRDB
-import Synchro
+@_spi(Inspection) import Synchro
 
 // MARK: - Event Delegate Protocol
 
@@ -152,6 +152,7 @@ private enum TransactionOp {
 
 private struct TransactionTimeoutError: Error {}
 private struct TransactionRollbackError: Error {}
+private struct DatabaseAlreadyExistsError: Error {}
 private struct TransactionAbortedError: LocalizedError {
     let message: String
 
@@ -296,14 +297,7 @@ public class SynchroModuleImpl: NSObject {
             reject("INVALID_CONFIG", "Missing required config fields", nil)
             return
         }
-        // Resolve relative paths to the app's Documents directory
-        let resolvedDbPath: String
-        if (dbPath as NSString).isAbsolutePath {
-            resolvedDbPath = dbPath
-        } else {
-            let documentsURL = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
-            resolvedDbPath = documentsURL.appendingPathComponent(dbPath).path
-        }
+        let resolvedDbPath = resolveDatabasePath(dbPath)
 
         let syncInterval = config["syncInterval"] as? Double ?? 30
         let pushDebounce = config["pushDebounce"] as? Double ?? 0.5
@@ -312,6 +306,7 @@ public class SynchroModuleImpl: NSObject {
         let pushBatchSize = config["pushBatchSize"] as? Int ?? 100
         let seedDatabasePath = config["seedDatabasePath"] as? String
         let configuredTransportCapacity = config["transportObservationCapacity"] as? Int ?? 0
+        let requireNewDatabase = config["requireNewDatabase"] as? Bool ?? false
         if configuredTransportCapacity < 0 || configuredTransportCapacity > 512 {
             reject("INVALID_CONFIG", "Transport observation capacity is invalid", nil)
             return
@@ -368,6 +363,9 @@ public class SynchroModuleImpl: NSObject {
                 try await self.withLifecycleLock {
                     await self.clearRuntimeState()
                     try await self.client?.close()
+                    if requireNewDatabase && FileManager.default.fileExists(atPath: resolvedDbPath) {
+                        throw DatabaseAlreadyExistsError()
+                    }
                     let client = try SynchroClient(config: synchroConfig)
                     self.setClient(client, acceptingTransactions: true)
                     self.transportObservations = transportObservations
@@ -375,6 +373,10 @@ public class SynchroModuleImpl: NSObject {
                 }
                 DispatchQueue.main.async {
                     resolve(nil)
+                }
+            } catch is DatabaseAlreadyExistsError {
+                DispatchQueue.main.async {
+                    reject("INVALID_CONFIG", "Database already exists", nil)
                 }
             } catch {
                 DispatchQueue.main.async {
@@ -438,6 +440,14 @@ public class SynchroModuleImpl: NSObject {
             return
         }
         resolve(client.path)
+    }
+
+    private func resolveDatabasePath(_ dbPath: String) -> String {
+        if (dbPath as NSString).isAbsolutePath {
+            return dbPath
+        }
+        let documentsURL = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
+        return documentsURL.appendingPathComponent(dbPath).path
     }
 
     // MARK: - Core SQL
@@ -1492,10 +1502,13 @@ public class SynchroModuleImpl: NSObject {
             return
         }
         do {
-            let schema: Any = try client.inspectCurrentSchema().map { value in
+            let inspection = SynchroInspection(client: client)
+            let state = try inspection.clientState()
+            let counts = try inspection.clientStateCounts()
+            let schema: Any = state.schema.map { value in
                 ["version": value.version, "hash": value.hash]
             } ?? NSNull()
-            let scopeStates = try client.inspectScopeStates().map { value in
+            let scopeStates = state.scopeStates.map { value in
                 [
                     "scope_id": value.scopeID,
                     "cursor": value.cursor ?? NSNull(),
@@ -1504,7 +1517,7 @@ public class SynchroModuleImpl: NSObject {
                     "generation": value.generation,
                 ] as [String: Any]
             }
-            let scopeRows = try client.inspectScopeRows().map { value in
+            let scopeRows = state.scopeRows.map { value in
                 [
                     "scope_id": value.scopeID,
                     "table_name": value.tableName,
@@ -1513,7 +1526,7 @@ public class SynchroModuleImpl: NSObject {
                     "generation": value.generation,
                 ] as [String: Any]
             }
-            let attempts = try client.inspectRebuildAttempts().map { value in
+            let attempts = state.rebuildAttempts.map { value in
                 [
                     "scope_id": value.scopeID,
                     "rebuild_id": value.rebuildID,
@@ -1530,6 +1543,69 @@ public class SynchroModuleImpl: NSObject {
                 "scope_states": scopeStates,
                 "scope_rows": scopeRows,
                 "rebuild_attempts": attempts,
+                "application_row_count": counts.applicationRowCount,
+                "mutation_ledger_count": counts.mutationLedgerCount,
+                "mutation_outcome_count": counts.mutationOutcomeCount,
+                "sealed_batch_count": counts.sealedBatchCount,
+                "rejected_mutation_count": counts.rejectedMutationCount,
+                "scope_state_count": counts.scopeStateCount,
+                "scope_row_count": counts.scopeRowCount,
+                "provenance_count": counts.provenanceCount,
+                "row_metadata_count": counts.rowMetadataCount,
+                "rebuild_attempt_count": counts.rebuildAttemptCount,
+                "rebuild_receipt_count": counts.rebuildReceiptCount,
+                "provenance_maintenance_work_cursor": String(
+                    state.provenanceMaintenanceWorkCursor
+                ),
+            ]))
+        } catch {
+            rejectWithError(reject, error)
+        }
+    }
+
+    @objc
+    public func inspectDurableState(
+        _ tableName: String,
+        recordID: String,
+        resolve: @escaping RCTPromiseResolveBlock,
+        reject: @escaping RCTPromiseRejectBlock
+    ) {
+        guard let client else {
+            reject("NOT_CONNECTED", "Client not initialized", nil)
+            return
+        }
+        do {
+            let inspection = SynchroInspection(client: client)
+            let metadata: Any = try inspection.rowMetadata(
+                tableName: tableName,
+                recordID: recordID
+            ).map { value in
+                [
+                    "table_name": value.tableName,
+                    "record_id": value.recordID,
+                    "server_version": value.serverVersion,
+                    "row_checksum": value.rowChecksum ?? NSNull(),
+                ] as [String: Any]
+            } ?? NSNull()
+            let receipts = try inspection.rebuildReceipts().map { value in
+                [
+                    "rebuild_id_fingerprint": value.rebuildIDFingerprint,
+                    "page_count": value.pageCount,
+                    "returned_record_count": value.returnedRecordCount,
+                    "request_chain_expected": value.requestChainExpected,
+                    "request_chain_observed": value.requestChainObserved,
+                    "record_identities_hex": value.recordIdentitiesHex,
+                    "received_row_checksums": value.receivedRowChecksums,
+                    "computed_row_checksums": value.computedRowChecksums,
+                    "computed_scope_checksum": value.computedScopeChecksum ?? NSNull(),
+                    "final_scope_checksum": value.finalScopeChecksum ?? NSNull(),
+                    "stored_scope_checksum": value.storedScopeChecksum ?? NSNull(),
+                    "local_scope_checksum": value.localScopeChecksum ?? NSNull(),
+                ] as [String: Any]
+            }
+            resolve(try encodeBridgeJSON([
+                "row_metadata": metadata,
+                "rebuild_receipts": receipts,
             ]))
         } catch {
             rejectWithError(reject, error)

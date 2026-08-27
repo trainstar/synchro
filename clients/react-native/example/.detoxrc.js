@@ -3,6 +3,7 @@ module.exports = {
   testRunner: {
     args: {
       $0: 'jest',
+      _: ['e2e/conformance.test.ts', 'e2e/sync.test.ts'],
       config: 'e2e/jest.config.js',
     },
     jest: {

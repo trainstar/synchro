@@ -43,6 +43,9 @@ import type {
 
 let observerCounter = 0;
 let activeNativeOwner: object | null = null;
+const inspectionOwners = new WeakMap<SynchroClient, object>();
+const inspectionCapacities = new WeakMap<SynchroClient, number>();
+const inspectionRequireNewDatabases = new WeakMap<SynchroClient, boolean>();
 
 function nextObserverID(): string {
   return `obs_${++observerCounter}_${Date.now()}`;
@@ -174,6 +177,14 @@ function requiredSafeInteger(value: unknown, name: string): number {
     throw new InvalidResponseError(`Native bridge returned an invalid ${name}`);
   }
   return value;
+}
+
+function requiredNonnegativeSafeInteger(value: unknown, name: string): number {
+  const integer = requiredSafeInteger(value, name);
+  if (integer < 0) {
+    throw new InvalidResponseError(`Native bridge returned an invalid ${name}`);
+  }
+  return integer;
 }
 
 function nullableSafeInteger(value: unknown, name: string): number | null {
@@ -498,7 +509,7 @@ function parseRebuildAttemptInspection(value: unknown, index: number): RebuildAt
   };
 }
 
-function parseClientStateInspection(value: unknown): ClientStateInspection {
+export function parseClientStateInspection(value: unknown): ClientStateInspection {
   if (!isRecord(value)) {
     throw new InvalidResponseError('Native bridge returned invalid client state inspection');
   }
@@ -511,7 +522,68 @@ function parseClientStateInspection(value: unknown): ClientStateInspection {
     scopeStates: value.scope_states.map(parseScopeStateInspection),
     scopeRows: value.scope_rows.map(parseScopeRowInspection),
     rebuildAttempts: value.rebuild_attempts.map(parseRebuildAttemptInspection),
+    applicationRowCount: requiredNonnegativeSafeInteger(
+      value.application_row_count,
+      'application row count'
+    ),
+    mutationLedgerCount: requiredNonnegativeSafeInteger(
+      value.mutation_ledger_count,
+      'mutation ledger count'
+    ),
+    mutationOutcomeCount: requiredNonnegativeSafeInteger(
+      value.mutation_outcome_count,
+      'mutation outcome count'
+    ),
+    sealedBatchCount: requiredNonnegativeSafeInteger(
+      value.sealed_batch_count,
+      'sealed batch count'
+    ),
+    rejectedMutationCount: requiredNonnegativeSafeInteger(
+      value.rejected_mutation_count,
+      'rejected mutation count'
+    ),
+    scopeStateCount: requiredNonnegativeSafeInteger(
+      value.scope_state_count,
+      'scope state count'
+    ),
+    scopeRowCount: requiredNonnegativeSafeInteger(
+      value.scope_row_count,
+      'scope row count'
+    ),
+    provenanceCount: requiredNonnegativeSafeInteger(
+      value.provenance_count,
+      'provenance count'
+    ),
+    rowMetadataCount: requiredNonnegativeSafeInteger(
+      value.row_metadata_count,
+      'row metadata count'
+    ),
+    rebuildAttemptCount: requiredNonnegativeSafeInteger(
+      value.rebuild_attempt_count,
+      'rebuild attempt count'
+    ),
+    rebuildReceiptCount: requiredNonnegativeSafeInteger(
+      value.rebuild_receipt_count,
+      'rebuild receipt count'
+    ),
+    provenanceMaintenanceWorkCursor: requiredNonnegativeInt64String(
+      value.provenance_maintenance_work_cursor,
+      'provenance maintenance work cursor'
+    ),
   };
+}
+
+function requiredNonnegativeInt64String(value: unknown, name: string): string {
+  const maximum = '9223372036854775807';
+  if (
+    typeof value !== 'string' ||
+    !/^(0|[1-9][0-9]*)$/.test(value) ||
+    value.length > maximum.length ||
+    (value.length === maximum.length && value > maximum)
+  ) {
+    throw new InvalidResponseError(`Native bridge returned invalid ${name}`);
+  }
+  return value;
 }
 
 function optionalTransportFacts(value: unknown, name: string): Record<string, import('./types').JSONValue> | undefined {
@@ -522,6 +594,24 @@ function optionalTransportFacts(value: unknown, name: string): Record<string, im
     throw new InvalidResponseError(`Native bridge returned invalid ${name}`);
   }
   return value as Record<string, import('./types').JSONValue>;
+}
+
+function optionalTransportRequestFacts(
+  value: unknown,
+  name: string
+): Record<string, import('./types').JSONValue> | undefined {
+  const facts = optionalTransportFacts(value, name);
+  const mutationCount = facts?.mutation_count;
+  if (
+    facts !== undefined &&
+    Object.prototype.hasOwnProperty.call(facts, 'mutation_count') &&
+    (typeof mutationCount !== 'number' ||
+      !Number.isSafeInteger(mutationCount) ||
+      mutationCount < 0)
+  ) {
+    throw new InvalidResponseError(`Native bridge returned invalid ${name} mutation count`);
+  }
+  return facts;
 }
 
 function parseTransportObservation(value: unknown, index: number): TransportObservation {
@@ -544,13 +634,13 @@ function parseTransportObservation(value: unknown, index: number): TransportObse
     durationNanoseconds: requiredSafeInteger(value.duration_nanoseconds, `${name} duration`),
     ...(cursorFingerprints === undefined ? {} : { cursorFingerprints: [...cursorFingerprints] as string[] }),
     ...(cursorFingerprintsComplete === undefined ? {} : { cursorFingerprintsComplete }),
-    ...(value.request_facts == null ? {} : { requestFacts: optionalTransportFacts(value.request_facts, `${name} request facts`)! }),
+    ...(value.request_facts == null ? {} : { requestFacts: optionalTransportRequestFacts(value.request_facts, `${name} request facts`)! }),
     ...(value.rebuild_response_facts == null ? {} : { rebuildResponseFacts: optionalTransportFacts(value.rebuild_response_facts, `${name} rebuild response facts`)! }),
     ...(value.pull_response_facts == null ? {} : { pullResponseFacts: optionalTransportFacts(value.pull_response_facts, `${name} pull response facts`)! }),
   };
 }
 
-function parseTransportObservationSnapshot(value: unknown): TransportObservationSnapshot {
+export function parseTransportObservationSnapshot(value: unknown): TransportObservationSnapshot {
   if (!isRecord(value) || !Array.isArray(value.observations) || typeof value.overflowed !== 'boolean') {
     throw new InvalidResponseError('Native bridge returned invalid transport observations');
   }
@@ -572,6 +662,7 @@ export class SynchroClient {
 
   constructor(config: SynchroConfig) {
     this.config = config;
+    inspectionOwners.set(this, this.nativeOwner);
   }
 
   private get native(): typeof NativeSynchro {
@@ -638,7 +729,8 @@ export class SynchroClient {
         pullPageSize: this.config.pullPageSize ?? 100,
         pushBatchSize: this.config.pushBatchSize ?? 100,
         seedDatabasePath: this.config.seedDatabasePath,
-        transportObservationCapacity: this.config.transportObservationCapacity ?? 0,
+        transportObservationCapacity: inspectionCapacities.get(this) ?? 0,
+        requireNewDatabase: inspectionRequireNewDatabases.get(this) ?? false,
       });
     } catch (error) {
       this.releaseNativeOwnership();
@@ -933,64 +1025,6 @@ export class SynchroClient {
     }
   }
 
-  async inspectClientState(): Promise<ClientStateInspection> {
-    try {
-      return parseClientStateInspection(
-        parseNativeDTO<unknown>(await this.native.inspectClientState())
-      );
-    } catch (error) {
-      throw mapNativeError(error);
-    }
-  }
-
-  async inspectTransportObservations(): Promise<TransportObservationSnapshot> {
-    try {
-      return parseTransportObservationSnapshot(
-        parseNativeDTO<unknown>(await this.native.inspectTransportObservations())
-      );
-    } catch (error) {
-      throw mapNativeError(error);
-    }
-  }
-
-  async armTransportPause(operationClass: TransportOperationClass): Promise<void> {
-    if (!TRANSPORT_OPERATION_CLASSES.includes(operationClass)) {
-      throw new InvalidResponseError('Transport operation class is invalid');
-    }
-    try {
-      await this.native.armTransportPause(operationClass);
-    } catch (error) {
-      throw mapNativeError(error);
-    }
-  }
-
-  async awaitTransportPause(operationClass: TransportOperationClass, timeoutMs: number): Promise<void> {
-    if (!TRANSPORT_OPERATION_CLASSES.includes(operationClass) || !Number.isSafeInteger(timeoutMs) || timeoutMs < 1) {
-      throw new InvalidResponseError('Transport pause request is invalid');
-    }
-    try {
-      await this.native.awaitTransportPause(operationClass, timeoutMs);
-    } catch (error) {
-      throw mapNativeError(error);
-    }
-  }
-
-  async resumeTransportPause(): Promise<void> {
-    try {
-      await this.native.resumeTransportPause();
-    } catch (error) {
-      throw mapNativeError(error);
-    }
-  }
-
-  async getProcessIdentity(): Promise<string> {
-    try {
-      return requiredString(await this.native.getProcessIdentity(), 'process identity');
-    } catch (error) {
-      throw mapNativeError(error);
-    }
-  }
-
   async clearRejectedMutations(): Promise<void> {
     try {
       await this.native.clearRejectedMutations();
@@ -1098,4 +1132,40 @@ export class SynchroClient {
     return () => subscription.remove();
   }
 
+}
+
+export function configureInspection(
+  client: SynchroClient,
+  transportObservationCapacity: number,
+  requireNewDatabase: boolean
+): void {
+  const owner = inspectionOwners.get(client);
+  if (
+    owner !== undefined &&
+    activeNativeOwner === owner &&
+    transportObservationCapacity === 0 &&
+    !requireNewDatabase
+  ) {
+    return;
+  }
+  if (
+    owner === undefined ||
+    activeNativeOwner === owner ||
+    typeof requireNewDatabase !== 'boolean' ||
+    !Number.isSafeInteger(transportObservationCapacity) ||
+    transportObservationCapacity < 0 ||
+    transportObservationCapacity > 512
+  ) {
+    throw new InvalidResponseError('Inspection configuration is invalid');
+  }
+  inspectionCapacities.set(client, transportObservationCapacity);
+  inspectionRequireNewDatabases.set(client, requireNewDatabase);
+}
+
+export function nativeForInspection(client: SynchroClient): typeof NativeSynchro {
+  const owner = inspectionOwners.get(client);
+  if (owner === undefined || activeNativeOwner !== owner) {
+    throw new SynchroError('NOT_CONNECTED', 'SynchroClient is not initialized');
+  }
+  return NativeSynchro;
 }

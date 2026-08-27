@@ -4,21 +4,23 @@ import android.content.Context
 import android.os.Process
 import android.util.Base64
 import com.trainstar.synchro.AnyCodable
-import com.trainstar.synchro.CheckpointInspection
 import com.trainstar.synchro.PendingMutationInspection
-import com.trainstar.synchro.ProvenanceInspection
 import com.trainstar.synchro.RejectedMutationInspection
-import com.trainstar.synchro.RebuildAttemptInspection
-import com.trainstar.synchro.RebuildPageReceiptInspection
-import com.trainstar.synchro.RowMetadataInspection
 import com.trainstar.synchro.SchemaRef
-import com.trainstar.synchro.ScopeInspection
-import com.trainstar.synchro.ScopeRowInspection
 import com.trainstar.synchro.SynchroClient
 import com.trainstar.synchro.SynchroConfig
 import com.trainstar.synchro.SyncEvent
 import com.trainstar.synchro.SyncFailure
 import com.trainstar.synchro.SyncStatus
+import com.trainstar.synchro.inspection.CheckpointInspection
+import com.trainstar.synchro.inspection.ProvenanceInspection
+import com.trainstar.synchro.inspection.RebuildAttemptInspection
+import com.trainstar.synchro.inspection.RebuildPageReceiptInspection
+import com.trainstar.synchro.inspection.RebuildReceiptInspection
+import com.trainstar.synchro.inspection.RowMetadataInspection
+import com.trainstar.synchro.inspection.ScopeInspection
+import com.trainstar.synchro.inspection.ScopeRowInspection
+import com.trainstar.synchro.inspection.SynchroInspection
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -106,6 +108,7 @@ internal class NativeSession(private val context: Context) : Closeable {
             "lifecycle" -> lifecycle(command)
             "arm-transport-pause" -> armTransportPause(command)
             "await-transport-pause" -> awaitTransportPause(command)
+            "override-rebuild-cursor" -> overrideRebuildCursor(command)
             "resume-transport-pause" -> resumeTransportPause(command)
             "capture" -> capture(command)
             else -> throw IllegalArgumentException("operation is unsupported")
@@ -116,7 +119,7 @@ internal class NativeSession(private val context: Context) : Closeable {
         command.requireAllowed(
             "schema_version", "operation", "database_key", "database_mode", "server_url",
             "auth_token", "client_id", "seed_database_name", "platform", "app_version",
-            "pull_page_size", "transport_capacity",
+            "pull_page_size", "push_batch_size", "transport_capacity",
         )
         check(client == null) { "client is already open" }
         val databaseKey = command.requiredString("database_key")
@@ -140,12 +143,14 @@ internal class NativeSession(private val context: Context) : Closeable {
         val platform = command.optionalString("platform") ?: "android"
         val appVersion = command.optionalString("app_version") ?: "0.3.0"
         val pullPageSize = command.optionalInt("pull_page_size") ?: 100
+        val pushBatchSize = command.optionalInt("push_batch_size") ?: 100
         val seedDatabaseName = command.optionalString("seed_database_name")
         require(authToken.isNotEmpty() && authToken.length <= 16_384) { "auth token is invalid" }
         require(clientID.isNotEmpty() && clientID.length <= 128) { "client ID is invalid" }
         require(platform.isNotEmpty() && platform.length <= 128) { "platform is invalid" }
         require(appVersion.isNotEmpty() && appVersion.length <= 128) { "app version is invalid" }
         require(pullPageSize in 1..1_000) { "pull page size is invalid" }
+        require(pushBatchSize in 1..1_000) { "push batch size is invalid" }
         val seedDatabasePath = seedDatabaseName?.let { name ->
             require(name.length in 1..128 && File(name).name == name) { "seed database name is invalid" }
             File(context.filesDir, name).also { seed ->
@@ -168,6 +173,7 @@ internal class NativeSession(private val context: Context) : Closeable {
                     syncInterval = 3_600.0,
                     pushDebounce = 3_600.0,
                     pullPageSize = pullPageSize,
+                    pushBatchSize = pushBatchSize,
                     seedDatabasePath = seedDatabasePath,
                 ),
                 context,
@@ -288,6 +294,12 @@ internal class NativeSession(private val context: Context) : Closeable {
         return stateResult()
     }
 
+    private fun overrideRebuildCursor(command: JsonObject): JsonObject {
+        command.requireOnly("schema_version", "operation", "rebuild_cursor_override")
+        requireProxy().overridePausedRebuildCursor(command.requiredString("rebuild_cursor_override"))
+        return stateResult()
+    }
+
     private fun capture(command: JsonObject): JsonObject {
         command.requireOnly("schema_version", "operation", "row_selectors")
         val selectors = command.optionalArray("row_selectors") ?: JsonArray(emptyList())
@@ -322,36 +334,55 @@ internal class NativeSession(private val context: Context) : Closeable {
         applicationRows: JsonArray? = null,
     ): JsonObject {
         val client = requireClient()
-        val pending = client.inspectPendingMutations()
-        val rejected = client.inspectRejectedMutations()
-        val schema = client.inspectSchema()
-        val scopes = client.inspectScopes()
-        val scopeRows = client.inspectScopeRows()
-        val metadata = client.inspectRowMetadata()
-        val checkpoints = client.inspectCheckpoints()
-        val provenance = client.inspectProvenance()
-        val rebuild = client.inspectRebuildState()
-        require(pending.size <= MAXIMUM_RECORDS && rejected.size <= MAXIMUM_RECORDS) { "inspection output is too large" }
-        require(scopes.size <= MAXIMUM_RECORDS && scopeRows.size <= MAXIMUM_RECORDS) { "inspection output is too large" }
-        require(metadata.size <= MAXIMUM_RECORDS && checkpoints.size <= MAXIMUM_RECORDS) { "inspection output is too large" }
-        require(provenance.size <= MAXIMUM_RECORDS && rebuild.attempts.size <= MAXIMUM_RECORDS) { "inspection output is too large" }
-        require(rebuild.receipts.size <= MAXIMUM_RECORDS) { "inspection output is too large" }
-        require(pending.all { it.authoredFields.size <= MAXIMUM_FIELDS }) { "inspection fields are too large" }
+        val inspection = SynchroInspection(client)
+        val counts = inspection.clientStateCounts()
+        val pending = if (counts.mutationLedgerCount <= MAXIMUM_RECORDS) client.inspectPendingMutations() else null
+        val rejected = if (counts.rejectedMutationCount <= MAXIMUM_RECORDS) client.inspectRejectedMutations() else null
+        val scopeStates = if (counts.scopeStateCount <= MAXIMUM_RECORDS) inspection.scopes() else null
+        val scopeRows = if (counts.scopeRowCount <= MAXIMUM_RECORDS) inspection.scopeRows() else null
+        val metadata = if (counts.rowMetadataCount <= MAXIMUM_RECORDS) inspection.rowMetadata() else null
+        val checkpoints = if (counts.scopeStateCount <= MAXIMUM_RECORDS) inspection.checkpoints() else null
+        val provenance = if (counts.scopeRowCount <= MAXIMUM_RECORDS) inspection.provenance() else null
+        val rebuild = if (
+            counts.rebuildAttemptCount <= MAXIMUM_RECORDS &&
+            counts.rebuildReceiptCount <= MAXIMUM_RECORDS
+        ) inspection.rebuildState() else null
+        val rebuildReceiptProofs = if (counts.rebuildReceiptCount <= MAXIMUM_RECORDS) {
+            inspection.rebuildReceipts()
+        } else {
+            null
+        }
+        require(pending?.all { it.authoredFields.size <= MAXIMUM_FIELDS } != false) { "inspection fields are too large" }
         return buildJsonObject {
             put("status", client.getSyncStatus().state.wireName)
             rowsAffected?.let { put("rows_affected", it) }
             put("pending_change_count", client.pendingChangeCount())
-            applicationRows?.let { put("application_rows", it) }
-            put("retained_mutations", normalizePending(pending))
-            put("rejected_mutations", normalizeRejected(rejected))
-            schema.currentSchema?.let { put("schema", normalizeSchema(it)) }
-            put("scope_states", normalizeScopes(scopes))
-            put("scope_rows", normalizeScopeRows(scopeRows))
-            put("row_metadata", normalizeRowMetadata(metadata))
-            put("checkpoints", normalizeCheckpoints(checkpoints))
-            put("provenance", normalizeProvenance(provenance))
-            put("rebuild_attempts", normalizeRebuildAttempts(rebuild.attempts))
-            put("rebuild_receipts", normalizeRebuildReceipts(rebuild.receipts))
+            put("application_row_count", counts.applicationRowCount)
+            put("mutation_ledger_count", counts.mutationLedgerCount)
+            put("mutation_outcome_count", counts.mutationOutcomeCount)
+            put("sealed_batch_count", counts.sealedBatchCount)
+            put("rejected_mutation_count", counts.rejectedMutationCount)
+            put("scope_state_count", counts.scopeStateCount)
+            put("scope_row_count", counts.scopeRowCount)
+            put("provenance_count", counts.provenanceCount)
+            put("row_metadata_count", counts.rowMetadataCount)
+            put("rebuild_attempt_count", counts.rebuildAttemptCount)
+            put("rebuild_receipt_count", counts.rebuildReceiptCount)
+            if (counts.applicationRowCount <= MAXIMUM_ROWS) applicationRows?.let { put("application_rows", it) }
+            pending?.let { put("retained_mutations", normalizePending(it)) }
+            rejected?.let { put("rejected_mutations", normalizeRejected(it)) }
+            counts.schema?.let { put("schema", normalizeSchema(it)) }
+            scopeStates?.let { put("scope_states", normalizeScopes(it)) }
+            scopeRows?.let { put("scope_rows", normalizeScopeRows(it)) }
+            metadata?.let { put("row_metadata", normalizeRowMetadata(it)) }
+            checkpoints?.let { put("checkpoints", normalizeCheckpoints(it)) }
+            provenance?.let { put("provenance", normalizeProvenance(it)) }
+            rebuild?.let {
+                put("rebuild_attempts", normalizeRebuildAttempts(it.attempts))
+                put("rebuild_receipts", normalizeRebuildReceipts(it.receipts))
+            }
+            rebuildReceiptProofs?.let { put("rebuild_receipt_proofs", normalizeRebuildReceiptProofs(it)) }
+            put("provenance_maintenance_work_cursor", counts.provenanceMaintenanceWorkCursor)
             put("events", JsonArray(events.toList()))
             put("events_overflowed", eventsOverflowed.get())
             blockingFailure(client.getSyncStatus())?.let { put("failure", normalizeFailure(it)) }
@@ -383,7 +414,13 @@ internal class NativeSession(private val context: Context) : Closeable {
         put("state", value.state)
         value.completion?.let { put("completion", it.wireName) }
         value.errorCategory?.let { put("call_error_category", it) }
-        client?.let { put("status", it.getSyncStatus().state.wireName) }
+        client?.let {
+            put("status", it.getSyncStatus().state.wireName)
+            put(
+                "provenance_maintenance_work_cursor",
+                SynchroInspection(it).clientState().provenanceMaintenanceWorkCursor,
+            )
+        }
     }
 
     private fun normalizePending(values: List<PendingMutationInspection>): JsonArray = buildJsonArray {
@@ -518,6 +555,33 @@ internal class NativeSession(private val context: Context) : Closeable {
         }
     }
 
+    private fun normalizeRebuildReceiptProofs(values: List<RebuildReceiptInspection>): JsonArray = buildJsonArray {
+        values.forEach { value ->
+            add(buildJsonObject {
+                put("rebuild_id_fingerprint", value.rebuildIDFingerprint)
+                put("page_count", value.pageCount)
+                put("returned_record_count", value.returnedRecordCount)
+                put("request_chain_valid", value.requestChainExpected == value.requestChainObserved)
+                put(
+                    "records_in_canonical_order",
+                    value.recordIdentitiesHex.size == value.recordIdentitiesHex.toSet().size &&
+                        value.recordIdentitiesHex == value.recordIdentitiesHex.sorted(),
+                )
+                put("row_checksums_valid", value.receivedRowChecksums == value.computedRowChecksums)
+                put(
+                    "scope_checksum_valid",
+                    value.computedScopeChecksum != null && value.computedScopeChecksum == value.finalScopeChecksum,
+                )
+                put(
+                    "final_checksum_matches_local",
+                    value.finalScopeChecksum != null &&
+                        value.finalScopeChecksum == value.storedScopeChecksum &&
+                        value.finalScopeChecksum == value.localScopeChecksum,
+                )
+            })
+        }
+    }
+
     private fun normalizeEvent(event: SyncEvent): JsonObject = buildJsonObject {
         when (event) {
             is SyncEvent.StateChanged -> {
@@ -618,13 +682,23 @@ internal class NativeSession(private val context: Context) : Closeable {
                 require(value["value"] is JsonNull) { "typed null is invalid" }
                 null
             }
-            "string" -> value.requiredPrimitive("value").content
-            "boolean" -> value.requiredPrimitive("value").boolean
-            "integer" -> value.requiredPrimitive("value").long
-            "double" -> value.requiredPrimitive("value").double.also {
+            "string" -> value.requiredPrimitive("value").also {
+                require(it.isString) { "typed string is invalid" }
+            }.content
+            "boolean" -> value.requiredPrimitive("value").also {
+                require(!it.isString) { "typed boolean is invalid" }
+            }.boolean
+            "integer" -> value.requiredPrimitive("value").also {
+                require(!it.isString) { "typed integer is invalid" }
+            }.long
+            "double" -> value.requiredPrimitive("value").also {
+                require(!it.isString) { "typed double is invalid" }
+            }.double.also {
                 require(it.isFinite()) { "typed double is not finite" }
             }
-            "bytes" -> decodeBase64URL(value.requiredPrimitive("value").content)
+            "bytes" -> decodeBase64URL(value.requiredPrimitive("value").also {
+                require(it.isString) { "typed bytes are invalid" }
+            }.content)
             else -> throw IllegalArgumentException("typed value is unsupported")
         }
     }
@@ -713,11 +787,11 @@ internal class NativeSession(private val context: Context) : Closeable {
 /*
  * The host sends one JSON object per line with schema_version and operation.
  * open requires database_key, database_mode, server_url, auth_token, and client_id.
- * open permits seed_database_name, platform, app_version, pull_page_size, and transport_capacity.
+ * open permits seed_database_name, platform, app_version, pull_page_size, push_batch_size, and transport_capacity.
  * local-action requires local_action with operation, table_name, primary_key_field, primary_key, and fields.
  * begin-call requires call_id and method. await-call requires call_id.
  * lifecycle requires lifecycle_operation. Transport arm and await require transport_operation.
- * Transport resume has no operation-specific members.
+ * Transport cursor override requires rebuild_cursor_override. Transport resume has no operation-specific members.
  * capture requires row_selectors. Typed values contain exactly type and value.
  * Android transforms database_key and database_mode into one application-private database path.
  */

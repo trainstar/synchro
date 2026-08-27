@@ -31,7 +31,8 @@ class LifecycleDurabilityTests {
             val first = SynchroDatabase.open(context, dbName)
             try {
                 val schemaManager = SchemaManager(first)
-                schemaManager.reconcileLocalSchema(
+                installTestSchema(
+                    first,
                     schemaVersion = 1,
                     schemaHash = PROTOCOL_TEST_SCHEMA_HASH,
                     tables = protocolOrdersSchemaManifest().localTables(),
@@ -176,7 +177,8 @@ class LifecycleDurabilityTests {
             val first = SynchroDatabase.open(context, dbName)
             try {
                 val schemaManager = SchemaManager(first)
-                schemaManager.reconcileLocalSchema(
+                installTestSchema(
+                    first,
                     schemaVersion = 1,
                     schemaHash = PROTOCOL_TEST_SCHEMA_HASH,
                     tables = protocolOrdersSchemaManifest().localTables(),
@@ -266,7 +268,7 @@ class LifecycleDurabilityTests {
             val first = SynchroDatabase.open(context, dbName)
             try {
                 val sourceTables = protocolOrdersSchemaManifest().localTables()
-                SchemaManager(first).reconcileLocalSchema(1, PROTOCOL_TEST_SCHEMA_HASH, sourceTables)
+                installTestSchema(first, 1, PROTOCOL_TEST_SCHEMA_HASH, sourceTables)
                 first.applicationExecute(
                     "INSERT INTO orders (id, ship_address, user_id, updated_at) VALUES (?, ?, ?, ?)",
                     arrayOf("queued", "Queued", "u1", "2026-01-01T00:00:00.000000Z"),
@@ -417,7 +419,8 @@ class LifecycleDurabilityTests {
             val database = SynchroDatabase.open(context, dbName)
             try {
                 val manager = SchemaManager(database)
-                manager.reconcileLocalSchema(
+                installTestSchema(
+                    database,
                     schemaVersion = 1,
                     schemaHash = PROTOCOL_TEST_SCHEMA_HASH,
                     tables = protocolOrdersSchemaManifest().localTables(),

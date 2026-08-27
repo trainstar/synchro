@@ -1,0 +1,84 @@
+name: Set up PostgreSQL 18 for pgrx
+description: Install the PostgreSQL 18 pgrx dependencies, cache cargo-pgrx, and initialize or restore its runtime.
+
+inputs:
+  runtime-source:
+    description: Source for the PostgreSQL 18 runtime. Use download, brew, or artifact.
+    required: false
+    default: download
+  cache-runtime:
+    description: Cache the pgrx runtime directory.
+    required: false
+    default: 'true'
+  pgrx-version:
+    description: cargo-pgrx version.
+    required: false
+    default: '0.17.0'
+
+runs:
+  using: composite
+  steps:
+    - name: Install PostgreSQL extension build dependencies
+      if: runner.os == 'Linux'
+      shell: bash
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y \
+          build-essential \
+          ccache \
+          clang \
+          flex \
+          bison \
+          libclang-dev \
+          libreadline-dev \
+          libssl-dev \
+          libxml2-dev \
+          libxml2-utils \
+          libxslt-dev \
+          pkg-config \
+          xsltproc \
+          zlib1g-dev
+
+    - name: Install PostgreSQL 18 and extension build dependencies on macOS
+      if: runner.os == 'macOS'
+      shell: bash
+      run: |
+        for formula in postgresql@18 pkgconf openssl@3 libxml2 libxslt; do
+          brew list --versions "$formula" >/dev/null 2>&1 || brew install "$formula"
+        done
+
+    - uses: actions/cache@v5.0.4
+      if: inputs.cache-runtime == 'true'
+      with:
+        path: ~/.pgrx
+        key: pgrx-${{ runner.os }}-${{ inputs.pgrx-version }}-pg18
+
+    - uses: actions/cache@v5.0.4
+      with:
+        path: |
+          ~/.cargo/bin/cargo-pgrx
+          ~/.cargo/.crates.toml
+          ~/.cargo/.crates2.json
+        key: cargo-pgrx-${{ runner.os }}-${{ inputs.pgrx-version }}
+
+    - name: Install cargo-pgrx
+      shell: bash
+      run: |
+        if ! command -v cargo-pgrx >/dev/null 2>&1 || [ "$(cargo pgrx --version | awk '{print $2}')" != "${{ inputs.pgrx-version }}" ]; then
+          cargo install --locked cargo-pgrx --version "${{ inputs.pgrx-version }}"
+        fi
+
+    - name: Initialize PostgreSQL 18 for pgrx
+      if: inputs.runtime-source != 'artifact'
+      shell: bash
+      run: |
+        if [ -f "$HOME/.pgrx/config.toml" ] && grep -q '^pg18' "$HOME/.pgrx/config.toml"; then
+          echo "Using cached PG18 pgrx runtime"
+        elif [ "${{ inputs.runtime-source }}" = 'brew' ]; then
+          cargo pgrx init --pg18 "$(brew --prefix postgresql@18)/bin/pg_config"
+        elif [ "${{ inputs.runtime-source }}" = 'download' ]; then
+          cargo pgrx init --pg18 download
+        else
+          echo "Unsupported PostgreSQL 18 runtime source: ${{ inputs.runtime-source }}" >&2
+          exit 1
+        fi

@@ -1,6 +1,6 @@
 import Foundation
 import XCTest
-@testable import Synchro
+@testable @_spi(Inspection) import Synchro
 
 final class TransportObservationTests: XCTestCase {
     private var session: URLSession!
@@ -120,11 +120,16 @@ final class TransportObservationTests: XCTestCase {
         XCTAssertNil(pullFacts.rebuildIDFingerprint)
         XCTAssertNil(pullFacts.cursorFingerprint)
         XCTAssertNil(pullFacts.cursorPresent)
+        XCTAssertNil(pullFacts.mutationCount)
         XCTAssertEqual(snapshot.observations[1].pullResponseFacts, TransportPullResponseFacts(
             changeCount: 0,
             hasMore: false,
             rebuildScopeCount: 0,
-            checksumCount: 0
+            checksumCount: 0,
+            scopeCursorFingerprints: [
+                TransportObservationCollector.cursorFingerprint("next"),
+            ],
+            scopeCursorFingerprintsComplete: true
         ))
         let encoded = try XCTUnwrap(String(data: JSONEncoder().encode(snapshot), encoding: .utf8))
         XCTAssertFalse(encoded.contains("abc"))
@@ -132,6 +137,7 @@ final class TransportObservationTests: XCTestCase {
         XCTAssertFalse(encoded.contains("\"client\""))
         XCTAssertFalse(encoded.contains("\"rebuild\""))
         XCTAssertFalse(encoded.contains("\"abc\""))
+        XCTAssertFalse(encoded.contains("\"mutation_count\""))
         for key in [
             "sequence_checkpoint",
             "overflowed",
@@ -143,6 +149,48 @@ final class TransportObservationTests: XCTestCase {
         ] {
             XCTAssertTrue(encoded.contains("\"\(key)\""))
         }
+    }
+
+    func testPushRequestFactsIncludeMutationCount() async throws {
+        let collector = TransportObservationCollector(capacity: 4)
+        let client = makeClient(collector: collector)
+        MockURLProtocol.requestHandler = { request in
+            let body = try JSONSerialization.data(withJSONObject: [
+                "batch_id": "batch-1",
+                "accepted": [],
+                "rejected": [],
+                "server_time": "2026-01-01T12:00:00.000Z",
+            ])
+            return (
+                HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!,
+                body
+            )
+        }
+
+        let request = PushRequest(
+            clientID: "client",
+            clientGeneration: 1,
+            batchID: "batch-1",
+            schema: SchemaRef(version: 1, hash: "schema-hash"),
+            mutations: [
+                Mutation(
+                    mutationID: "mutation-1",
+                    table: "orders",
+                    op: .insert,
+                    pk: ["id": AnyCodable("order-1")],
+                    authoredSchema: SchemaRef(version: 1, hash: "schema-hash"),
+                    baseVersion: nil,
+                    clientVersion: "2026-01-01T12:00:00.000000Z",
+                    columns: ["title": AnyCodable("title")]
+                )
+            ]
+        )
+        _ = try await client.push(request: request)
+
+        let observation = try XCTUnwrap(collector.snapshot().observations.first)
+        XCTAssertEqual(observation.requestFacts?.mutationCount, 1)
+        let encoded = try XCTUnwrap(String(data: JSONEncoder().encode(observation), encoding: .utf8))
+        XCTAssertTrue(encoded.contains("\"mutation_count\":1"))
     }
 
     func testRebuildFactsAreBoundedAndFingerprintTechnicalTokens() async throws {
@@ -194,6 +242,7 @@ final class TransportObservationTests: XCTestCase {
             schemaVersion: 3,
             schemaHash: String(repeating: "c", count: 64),
             limit: 25,
+            scopeFingerprint: "a1c508acaaab0ddb6c1f76db9116fa30fc821b5fb8f454383c022694779c2926",
             rebuildIDFingerprint: "11e594f481958c10e3015d0bf0447a22f068a8a647f475df15ce2c7ab4b8f3f1",
             cursorFingerprint: "78c2063b9f25763fb0a399b0ef020e830cad82ffc90db40ec58e87821b5ee1aa",
             cursorPresent: true
@@ -204,7 +253,8 @@ final class TransportObservationTests: XCTestCase {
             hasCursor: false,
             hasFinalScopeCursor: true,
             hasChecksum: true,
-            scopeMatchesRequest: true
+            scopeFingerprint: "a1c508acaaab0ddb6c1f76db9116fa30fc821b5fb8f454383c022694779c2926",
+            finalScopeCursorFingerprint: "747b945bdfeca5d86566e6328716a7e3e06d618c13e29e1bb541b5b1d2fee187"
         ))
         XCTAssertNil(observation.pullResponseFacts)
 

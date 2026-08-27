@@ -1,5 +1,7 @@
 package com.trainstar.synchro
 
+import com.trainstar.synchro.inspection.TransportObservationCollector
+
 data class SynchroConfig(
     val dbPath: String,
     val serverURL: String,
@@ -13,12 +15,17 @@ data class SynchroConfig(
     val pullPageSize: Int = 100,
     val pushBatchSize: Int = 100,
     val seedDatabasePath: String? = null,
-    val transportObservationCollector: TransportObservationCollector? = null,
 ) {
+    internal var transportObservationCollector: TransportObservationCollector? = null
+        private set
+
     init {
         require(pullPageSize in 1..1000) { "pullPageSize must be between 1 and 1000" }
         require(pushBatchSize in 1..1000) { "pushBatchSize must be between 1 and 1000" }
     }
 
     val effectivePullPageSize: Int get() = pullPageSize.coerceAtMost(1000)
+
+    internal fun withTransportObservationCollector(collector: TransportObservationCollector): SynchroConfig =
+        copy().also { it.transportObservationCollector = collector }
 }

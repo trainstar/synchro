@@ -18,6 +18,7 @@ mod rebuild_token;
 mod registry;
 mod schema;
 mod seed_token;
+mod spi_helpers;
 mod stream_position;
 mod stream_reset;
 mod wal_decoder;
@@ -1846,6 +1847,12 @@ BEGIN
     ALTER ROLE synchro_monitor NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS NOREPLICATION;
     ALTER ROLE synchro_operator NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS NOREPLICATION;
     ALTER ROLE synchro_worker NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS NOREPLICATION;
+
+    -- Backfill stages edges in a transaction-local table under this security-definer role.
+    EXECUTE pg_catalog.format(
+        'GRANT TEMPORARY ON DATABASE %I TO synchro_owner',
+        pg_catalog.current_database()
+    );
 END
 $roles$;
 
@@ -1930,12 +1937,21 @@ BEGIN
                 'synchro_contract_info', 'synchro_connect', 'synchro_pull', 'synchro_push',
                 'synchro_rebuild', 'synchro_schema_manifest', 'synchro_tables', 'synchro_readiness'
             ) THEN 'synchro_adapter'
-            WHEN function_record.proname IN (
-                'synchro_portable_seed_manifest', 'synchro_portable_seed_scope'
-            ) THEN 'synchro_seed'
-            WHEN function_record.proname IN ('synchro_readiness', 'synchro_health_detail')
-            THEN 'synchro_monitor'
-            WHEN function_record.proname IN (
+             WHEN function_record.proname IN (
+                 'synchro_portable_seed_manifest', 'synchro_portable_seed_scope'
+             ) THEN 'synchro_seed'
+             WHEN function_record.proname IN ('synchro_readiness', 'synchro_health_detail')
+             THEN 'synchro_monitor'
+             WHEN function_record.proname IN (
+                 'synchro_projection_bootstrap_active_stream',
+                 'synchro_projection_bootstrap_main_boundary',
+                 'synchro_projection_bootstrap_slot_absent',
+                 'synchro_projection_bootstrap_slot_drop_state',
+                 'synchro_projection_bootstrap_next_aborted_slot',
+                 'synchro_projection_bootstrap_is_activated',
+                 'synchro_projection_bootstrap_interrupted'
+             ) THEN 'synchro_worker'
+             WHEN function_record.proname IN (
                 'synchro_register_table', 'synchro_register_capture_dependency',
                 'synchro_prepare_projection_view',
                 'synchro_register_membership_dependency',

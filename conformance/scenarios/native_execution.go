@@ -112,21 +112,7 @@ type nativeTermination struct {
 }
 
 func (v *scenarioValidator) validateNativeExecution() {
-	hasNativeObligation := false
-	for _, obligation := range v.scenario.ProofObligations {
-		if obligation.ProofType == "native-e2e" {
-			hasNativeObligation = true
-			break
-		}
-	}
-	if !hasNativeObligation {
-		if v.scenario.NativeExecution != nil {
-			v.add("%s has native_execution without a native-e2e proof obligation", v.scenario.ID)
-		}
-		return
-	}
 	if v.scenario.NativeExecution == nil {
-		v.add("%s native-e2e proof obligations require native_execution", v.scenario.ID)
 		return
 	}
 

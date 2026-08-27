@@ -1,16 +1,16 @@
 ---
 title: Release Verification
-description: Normative rules for protocol version 3 evidence, exact artifacts, and verified candidate promotion.
+description: Normative rules for protocol version 3 CI results, exact artifacts, and verified candidate promotion.
 ---
 
 # Release Verification
 
 ## Purpose
 
-This document defines the release gate for Synchro `0.3.0`. It turns the
-behavioral contract into evidence for one exact release candidate. The
+This document defines the release gate for Synchro `0.3.0`. It binds the
+behavioral contract to CI results for one exact release candidate. The
 specification and accepted architecture decisions remain the authority for
-behavior. This document defines evidence identity, proof composition, artifact
+behavior. This document defines result identity, proof composition, artifact
 integrity, and release eligibility.
 
 Before the verification pipeline executes, this document is only an authored
@@ -19,7 +19,7 @@ source tree, or manual status cannot satisfy a release requirement.
 
 ## Contract and Scope Binding
 
-Every RC evidence bundle is for exactly:
+Every RC verification bundle is for exactly:
 
 - release `0.3.0`
 - protocol version `3`
@@ -28,7 +28,8 @@ Every RC evidence bundle is for exactly:
 - `conformance/requirements.json`, schema version `2`
 - `conformance/support-matrix.json`, schema version `1`
 - RC candidate lock schema version `1`
-- scenario, evidence, and final RC manifest schema version `2`
+- scenario and final RC manifest schema version `2`
+- generated CI summary schema version `1`
 - vector catalog schema version `1`
 
 The behavioral snapshot includes:
@@ -47,9 +48,9 @@ The behavioral snapshot includes:
 
 The RC candidate lock records the SHA-256 hash of every contract file. It also
 records the release, protocol version, and status `Accepted` for each ADR. The
-final RC manifest binds that lock by path and SHA-256. Every scenario and
-evidence result must reference the same contract snapshot. A changed file,
-missing ADR, unresolved reference, or protocol mismatch invalidates evidence.
+final RC manifest binds that lock by path and SHA-256. Every result uses the
+same source commit. A changed file, missing ADR, unresolved reference, or
+protocol mismatch invalidates the candidate.
 
 The `contract_snapshot_sha256` is
 `SHA256(RFC8785_UTF8(snapshot_binding))`, where `snapshot_binding` is the exact
@@ -64,14 +65,12 @@ objects for `conformance/catalog.json`, `conformance/vectors/catalog.json`,
 versioned contract schemas named below. Each behavioral entry contains exactly
 `path`, `sha256`, and `status`; specification status is null and every ADR status
 is `Accepted`. Paths use these repository-relative strings, hashes are lowercase
-hex, and behavioral file order is the list order above. Evidence records carry
-the same release, protocol, source commit, candidate ID, and contract snapshot
-digest as the candidate lock and final RC manifest. A verifier recomputes every
-file hash and aggregate digest from candidate source bytes. Supplied hashes are
-not authoritative.
+hex, and behavioral file order is the list order above. The CI summary carries
+the same source commit as the candidate lock and final RC manifest. A verifier
+recomputes every file hash and aggregate digest from candidate source bytes.
 
 The snapshot also hashes the exact versioned requirements and support-matrix
-schemas. It hashes scenario, evidence, candidate-lock, RC-manifest,
+schemas. It hashes scenario, CI-summary, candidate-lock, RC-manifest,
 fault-catalog, artifact-inventory, performance-budget, and vector-catalog
 schemas. A candidate cannot reinterpret a record under a later schema revision.
 
@@ -79,7 +78,7 @@ schemas. A candidate cannot reinterpret a record under a later schema revision.
 
 The verifier must resolve every scenario and requirement reference to the same
 five ADR files and must compare their recorded hashes and `Accepted` statuses
-with the candidate contract snapshot. Evidence from a mixed ADR revision,
+with the candidate contract snapshot. Results from a mixed ADR revision,
 missing decision, changed decision status, or protocol version other than `3`
 is invalid even when the test result is otherwise successful. The verifier
 must report the inconsistency and return a nonzero exit status.
@@ -87,18 +86,20 @@ must report the inconsistency and return a nonzero exit status.
 The support scope is exactly the matrix in
 `conformance/support-matrix.json`:
 
-- required PostgreSQL cell: `SUP-PG-018`, PostgreSQL `18`
-- required Swift cells: iOS `16` minimum and current stable, macOS `13`
-  minimum and current stable
+- required PostgreSQL cells: `SUP-PG-LINUX-X64-001` and
+  `SUP-PG-MACOS-ARM64-001`, both on PostgreSQL `18`
+- required Swift cells: iOS `16` minimum and current stable
 - required Kotlin cells: Android API `24` minimum and current stable
-- required React Native cells: iOS and Android minimum and current stable on
+- required React Native cells: current stable iOS and current stable Android on
   React Native `0.83.x`
 - excluded PostgreSQL cells: `SUP-PG-014` through `SUP-PG-017`
 
 Current-stable selectors are resolved at RC start. The candidate lock freezes
 the exact OS, SDK, IDE, emulator, simulator, runtime, and toolchain versions.
 React Native iOS cells include Swift and CocoaPods. React Native Android cells
-include Kotlin. No excluded platform or database version expands certification.
+include Kotlin. Swift on macOS is Tier 2 and is not certified. No excluded
+platform or database version expands certification. A new Tier 1 cell requires
+named production demand that justifies its recurring evidence cost.
 
 ## Authored Contract Files
 
@@ -111,6 +112,29 @@ Authored files define obligations and semantic expectations, never outcomes:
 - scenario definitions identify inputs, model operations, barriers, faults, and
   typed transport and contract operations, canonical wire outcomes, and
   semantic expectations
+- each native scenario step binds to one controller operation, artifact action,
+  local write, public client call, or client process restart
+- native lifecycle boundaries place a public `stop` after one terminal call
+  step without adding a reference-model operation
+- equal native `call_id` values group all HTTP, internal local, and
+  transport-loss effects from one public client call
+- synchronous call groups stay contiguous. Staged groups use one `begin`,
+  ordered `await-step` stages, and one terminal `await-call`
+- controller operations can occur between staged call steps. Other binding
+  kinds cannot interrupt a staged call
+- controller-owned raw HTTP steps use `NativeController.RequestStep` and have
+  no client-call fields
+- one call completion reports the result after all grouped HTTP and local
+  effects finish
+- `native_identity_aliases` gives each structural identity a closed kind,
+  stable alias, authored value, and owning step and expectation IDs
+- equal aliases must resolve to equal runtime values. Distinct aliases must
+  resolve to distinct runtime values within one identity kind
+- schema, table, primary-key, and scope aliases are semantic handles. The
+  controller must bind each handle injectively to one runtime identity
+- source selectors bind runtime-only cursors that have no authored value
+- reference-model and server proofs continue to evaluate exact authored values.
+  Native proofs evaluate generated values through their authored relationships
 - each scenario contains a closed ownership table enumerating every and only
   scenario, requirement, proof-obligation, assertion, proof-type, and
   support-cell tuple
@@ -124,8 +148,10 @@ Authored files define obligations and semantic expectations, never outcomes:
   are allowed only within the 11 frozen behavioral contract files. Fault
   catalog controls retain exact normative-reference equality
 - fault-injection and negative-control obligations own exactly one requirement,
-  one assertion, and one matching fault plan. A negative-control obligation also owns
-  exactly one matching scenario control and one matching catalog control
+  one assertion, and one matching fault plan. PostgreSQL fault injections have
+  one obligation per required extension architecture. Other fault injections
+  remain singleton obligations. A negative-control obligation also owns exactly
+  one matching scenario control and one matching catalog control
 - the fault catalog contains typed pre-execution recipes covering every release
   requirement
 - canonical vector inputs identify source values and independently computed
@@ -154,65 +180,54 @@ lock must bind at least:
 - each structural SBOM, provenance attestation, and Sigstore bundle binding
 - the trusted rerun approver identities
 
-The candidate lock contains no evidence records. It contains no final evidence
-paths or final evidence hashes. It contains no `verified` boolean. The release
+The candidate lock contains no CI results. It contains no final log paths or
+result hashes. It contains no `verified` boolean. The release
 pipeline stores the immutable lock with its SHA-256 before execution starts.
 
 The pipeline generates `rc-manifest-v2` after execution. The final manifest
 must bind the candidate lock by path and SHA-256. It must retain all locked
 candidate fields unchanged. It then adds:
 
-- requirement IDs, scenario IDs, obligation IDs, support-cell IDs, and proof
-  types
-- command, Make target, timestamps, result, duration, logs, traces, seeds, and
-  complete attempt history
-- mutation and negative-control identities with expected failure results
-- every evidence record and every transitive retry predecessor
+- the generated CI summary path and SHA-256
+- immutable CI log and result artifact hashes
+- every terminal semantic, support-cell smoke, and aggregate gate obligation
+- complete requirement coverage with one proof home per behavior
 
-Evidence records are content-addressed and immutable after generation. Failed
-attempts remain linked records. A later passing retry cannot delete, overwrite,
-or replace them.
+The summary uses `ci-summary-v1`. It binds one 40-character source commit and
+requires aggregate status `passed`. It contains no signature or self-declared
+trust result.
 
-Every evidence record contains the exact proof obligation, Makefile target and
-canonical `make` argument vector, start and completion timestamps, matching
-millisecond duration, result, exit code, and content-addressed attachments. Its
-execution-artifact binding names at least one log, trace, and replay-data
-attachment, and each referenced attachment has the corresponding typed kind.
-Every authored barrier resolves to one typed barrier trace. Fault plans,
-negative controls, budgets, required measurements, and vector results resolve
-transitively to attachments of the required kind and to unchanged authored metadata. Evidence
-assertion IDs equal the complete assertion set owned by its proof obligation,
-with no missing, unknown, or duplicate ID. The obligation's requirement IDs
-equal the union owned by those assertions. Its requirement set, support cell,
-command, and actual artifact inventory roles exactly satisfy the named proof
-obligation. A zero exit code may report only `passed` or `skipped`; promotion
-requires every assertion, budget, required-measurement, and vector outcome to be
-`passed`.
+Each obligation contains its stable ID, kind, terminal status, positive test
+count, and content hashes. An obligation hash must occur in the summary's
+aggregate artifact hash set.
 
-Each signed execution receipt has a closed `evidence_class`. The values are
-`candidate` and `harness-only`. Synthetic harness execution must emit
-`harness-only`. The evidence builder and verifier must reject `harness-only`
-receipts and projections. An authenticated `harness-only` receipt supports only
-harness self-tests.
+The summary contains the exact values of every gate-affecting Make variable.
+It rejects missing, duplicate, unknown, unsafe, or unrecorded variable values.
+
+Each coverage entry maps one executed test to its requirement, scenario,
+obligation, assertion, support cell, proof type, and proof home. The generator
+derives this map from authored scenario ownership. It rejects missing ownership
+and duplicate proof homes.
+
+CI logs retain commands, timestamps, durations, traces, seeds, fault results,
+measurements, and failed attempts. A later passing retry cannot erase a failed
+attempt. The summary references these immutable artifacts by content hash.
 
 The verifier applies a fixed policy for each proof type: allowed release Make
 targets, required and permitted artifact roles, and whether the proof is
 support-neutral or must name one resolved support cell. Direct pgrx and
 adapter-unit targets cannot prove server black-box behavior. The reference
 model uses a separately hashed independent conformance-runner artifact. The
-evidence environment must exactly equal
-the selected cell's frozen dimensions and versions. A target that merely exits
-zero, an irrelevant artifact set, an omitted platform dimension, or a substituted
-environment cannot satisfy the obligation. Requirement closure is computed over
-all selected scenarios and terminal evidence, and every proof type listed by a
-requirement must be present even when its obligations are distributed among
-multiple scenarios.
+selected cell must use its frozen dimensions and versions. A zero exit with an
+omitted platform dimension or substituted environment cannot satisfy an
+obligation. Requirement closure uses all selected scenarios and terminal summary
+entries. Every listed proof type must be present.
 
 Every HTTP step names one canonical contract case. The verifier derives and
 checks its exact HTTP status, stable error code or null, retryability, permitted
 endpoint operation, and wire-contract assertion. Assertions also bind a typed
 contract predicate from the closed vocabulary, with no free-form predicate
-payload, compatible with their oracle. Negative-control evidence
+payload, compatible with their oracle. Negative-control results
 binds the conformance runner and the exact mutated subject artifacts authored by
 the requirement-owned control.
 
@@ -222,18 +237,9 @@ obligation. Make command-line assignments, prefix-matched targets, additional
 goals, wrappers, shell separators, filters, and display strings are not release
 command identity.
 
-The RC manifest contains every loaded evidence record and the transitive closure
-of every retry chain. One execution key is the tuple of candidate, scenario,
-proof obligation, and support cell, and it has exactly one execution lineage.
-Within that lineage, attempt numbers are unique and linear, each rerun references
-the immediately prior attempt, and approval occurs strictly after predecessor
-completion and before rerun start. A rerun is permitted only when the predecessor
-is a typed infrastructure error with nonzero exit and no failed or skipped
-semantic assertion, artifacts and all contract bindings remain unchanged, and
-the rerun carries an allowed infrastructure-cause code, diagnosis, corrective
-action, approver identity, approval time, and approval URI. Starting a new
-lineage, omitting a predecessor, or relabeling a semantic failure as
-infrastructure makes the candidate ineligible.
+The CI system retains every attempt in immutable logs. A rerun is permitted only
+for a typed infrastructure failure. Artifacts and contract bindings must remain
+unchanged. A semantic failure requires a new candidate.
 
 The candidate lock freezes the trusted rerun approver identities. The final
 manifest retains that allowlist unchanged. Every approval uses the canonical
@@ -256,8 +262,49 @@ types:
   rejects
 
 No proof type substitutes for another proof type named by a requirement. Every
-requirement record must contain the listed proof types and a linked evidence
-record for each one.
+requirement record must contain the listed proof types and a linked summary
+entry for each one.
+
+## Seven-Layer Verification Architecture
+
+Release verification enforces seven test layers. Each behavior has exactly one
+authoritative proof home.
+
+1. **Contract layer.** The specification and authored vectors define the
+   expected result. Every applicable surface consumes the same vector files.
+2. **Unit layer.** Deterministic tests stay beside the implementation. Mocks are
+   limited to failures that real infrastructure cannot trigger safely or
+   deterministically.
+3. **Real integration layer.** Tests use the real extension, adapter,
+   PostgreSQL, and applicable local database. Happy paths do not use mocks.
+4. **Scenario layer.** Authored semantic scenarios run on representative
+   platform cells. Each production defect adds one minimized permanent
+   scenario.
+5. **Cell smoke layer.** Each support cell installs packaged artifacts. It then
+   connects, pushes, pulls, terminates a process, and resumes.
+6. **Adversarial layer.** Mutation gates, negative controls, and mechanical
+   zero-skip checks prove that the other layers can fail.
+7. **Randomized soak layer.** Seeded generated workloads check invariants. Each
+   failure records its seed for exact replay.
+
+Layers six and seven keep layers one through five small. Example-count growth
+cannot replace a missing adversarial or soak proof.
+
+The coverage report maps tests to requirement IDs. It rejects a second proof
+home for behavior that another layer already owns.
+
+Shared protocol scenarios stay in `conformance/`. Production surfaces consume
+the shared inputs without copying semantic expected values.
+
+Deep tests cover release-critical flows and their boundaries. These flows
+include capture, queues, conflicts, protocol dispatch, checkpoints, rebuilds,
+WAL, digests, provenance, authorization, and portable seeds.
+
+Focused smoke tests cover thin pass-through, configuration, and generated
+sources when another layer owns semantic proof.
+
+Each phase exit includes an independent deletion review. The review removes
+duplicate proofs, dead fixtures, unused helpers, and one-consumer abstractions.
 
 ## Independent Conformance Requirement
 
@@ -454,8 +501,7 @@ The release pipeline must:
 5. run every required support cell, conformance scenario, negative control,
    mutation gate, performance budget, and operational gate against those bytes.
 6. recalculate sizes and hashes after testing and require staged equality.
-7. generate the final RC manifest with the candidate-lock and evidence
-   bindings.
+7. generate the CI summary and bind it into the final RC manifest.
 8. publish only the unchanged staged bytes after approval.
 
 Any source, package metadata, build input, generated SQL, dependency lockfile,
@@ -473,8 +519,8 @@ independent conformance runner, PostgreSQL extension archive, generated
 installation SQL, adapter, seed tool, Swift SPM bundle, CocoaPods metadata,
 Kotlin Maven bundle, React Native npm tarball, and portable seed. Every file
 binds its normalized path, media type, exact byte size, and SHA-256. No two
-artifacts, evidence records, evidence attachments, attestations, or bundles may
-claim one file path across the complete candidate bundle.
+artifacts, CI logs, summary outputs, attestations, or bundles may claim one file
+path across the complete candidate bundle.
 Each primary artifact has exactly one SBOM and one
 provenance attestation bound to its artifact ID and exact payload
 path-and-digest set. An SBOM declares SPDX JSON or CycloneDX JSON with the
@@ -492,10 +538,10 @@ subject set. It must verify the signature, certificate identity, and Rekor
 inclusion. A changed attestation, payload, identity, or subject invalidates the
 candidate. A file label alone does not make an attestation.
 
-## Immutable RC Evidence
+## Immutable RC Results
 
 The candidate lock is immutable before execution. The final RC manifest,
-evidence, inventory, logs, traces, seeds, and attestations are immutable after
+summary, coverage, logs, traces, seeds, and attestations are immutable after
 generation. A later result cannot erase a failed attempt. Any change to locked
 source, contract, scenario, support, artifact, or attestation bytes creates a
 new candidate identity.
@@ -512,7 +558,7 @@ Required tests must have zero unexplained flakes.
 
 Randomized executions must record their seeds and barrier schedules. Every
 production defect must become a permanent minimized scenario. Failed attempts,
-logs, traces, and diagnoses remain in the immutable evidence bundle.
+logs, traces, and diagnoses remain in immutable CI storage.
 
 ## Findings and Release Eligibility
 
@@ -530,31 +576,27 @@ The release gate requires:
   mismatches
 - zero unexplained divergence in the required soak and consumer canary
 
-Security and authorization evidence may be access-controlled, but public
+Security and authorization logs may be access-controlled, but public
 release metadata must state its scope and disposition without exposing
 sensitive exploit detail, credentials, payloads, or identity data.
 
 ## Generated Inventory and Release Decision
 
-The evidence tool generates the inventory from the requirements catalog,
-support matrix, scenario catalog, vector set, fault catalog, performance
-budgets, candidate lock, final RC manifest, and executed evidence. It must not
-read a handwritten `covered` claim as proof.
+The evidence tool generates coverage from the requirements, support matrix,
+scenarios, and generated CI summary. It must not read a handwritten `covered`
+claim as proof.
 
-Each inventory row binds requirement ID, proof type, scenario ID, support cell,
-protocol version, contract snapshot, result, artifact hashes, environment,
-attempt history, logs, traces, seed, and linked negative control. The tool
-must reject missing records, stale hashes, missing proof types, missing
-negative controls, unresolved attempts, and any status that is not backed by
-an executed evidence record.
+Each row binds test, requirement, scenario, obligation, assertion, support cell,
+proof type, and proof home. The tool rejects missing results, stale hashes,
+missing proof types, zero-test obligations, and duplicate proof homes.
 
 Eligibility is computed by the verification pipeline and represented by its
-exit status. Missing evidence, a required skip, unexplained flake, failed
+exit status. A missing result, required skip, unexplained flake, failed
 negative control, surviving release-critical mutant, unresolved critical or
 high finding, contract mismatch, performance-budget failure, soak divergence,
 or artifact mismatch produces a nonzero exit status.
 
-The candidate lock, final RC manifest, and generated evidence are retained with
+The candidate lock, final RC manifest, and generated CI summary are retained with
 their content hashes. Phase 6 emits the separate cryptographic trust
 disposition. Only the exact candidate that passes every gate can be promoted.
 No manual readiness statement can override a failed or missing gate.
@@ -575,7 +617,7 @@ make test-kotlin
 make test-rn
 make rc-check-pg18
 make release-check
-make evidence
+make phase-5-check
 make docs-build
 ```
 

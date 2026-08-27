@@ -20,7 +20,7 @@
   ],
   "proof_obligations": [
     {
-      "obligation_id": "OBL-PERF-STEADY-PULL-PG-001",
+      "obligation_id": "OBL-PERF-STEADY-PULL-PG-LINUX-X64-001",
       "requirement_ids": [
         "SYNC-INTEGRITY-002"
       ],
@@ -30,7 +30,7 @@
         "ASSERT-PERF-STEADY-PULL-PERFORMANCE-001"
       ],
       "proof_type": "server-black-box",
-      "support_cell_id": "SUP-PG-018",
+      "support_cell_id": "SUP-PG-LINUX-X64-001",
       "artifact_inventory_ids": [
         "ARTDEF-PG-EXTENSION-001",
         "ARTDEF-ADAPTER-001"
@@ -50,12 +50,68 @@
       "control_id": null
     },
     {
-      "obligation_id": "OBL-PERF-STEADY-PULL-IOS-MIN-001",
+      "obligation_id": "OBL-PERF-STEADY-PULL-PG-MACOS-ARM64-001",
       "requirement_ids": [
         "SYNC-INTEGRITY-002"
       ],
       "assertion_ids": [
         "ASSERT-PERF-STEADY-PULL-SEMANTIC-001",
+        "ASSERT-PERF-STEADY-PULL-WIRE-001",
+        "ASSERT-PERF-STEADY-PULL-PERFORMANCE-001"
+      ],
+      "proof_type": "server-black-box",
+      "support_cell_id": "SUP-PG-MACOS-ARM64-001",
+      "artifact_inventory_ids": [
+        "ARTDEF-PG-EXTENSION-001",
+        "ARTDEF-ADAPTER-001"
+      ],
+      "performance_budget_ids": [
+        "BUD-STEADY-PULL-001",
+        "BUD-STEADY-PULL-NONPULL-001"
+      ],
+      "required_measurement_ids": [],
+      "required_vector_set_ids": [],
+      "make_target": "test-blackbox",
+      "argv": [
+        "make",
+        "test-blackbox"
+      ],
+      "fault_plan_id": null,
+      "control_id": null
+    },
+    {
+      "obligation_id": "OBL-PERF-STEADY-PULL-MACOS-CURRENT-001",
+      "requirement_ids": [
+        "SYNC-INTEGRITY-002"
+      ],
+      "assertion_ids": [
+        "ASSERT-PERF-STEADY-PULL-SEMANTIC-001"
+      ],
+      "proof_type": "native-e2e",
+      "support_cell_id": "SUP-MACOS-CURRENT-001",
+      "artifact_inventory_ids": [
+        "ARTDEF-PG-EXTENSION-001",
+        "ARTDEF-ADAPTER-001",
+        "ARTDEF-SWIFT-SPM-001",
+        "ARTDEF-COCOAPODS-001"
+      ],
+      "performance_budget_ids": [],
+      "required_measurement_ids": [],
+      "required_vector_set_ids": [],
+      "make_target": "test-swift",
+      "argv": [
+        "make",
+        "test-swift"
+      ],
+      "fault_plan_id": null,
+      "control_id": null
+    },
+    {
+      "obligation_id": "OBL-PERF-STEADY-PULL-IOS-MIN-001",
+      "requirement_ids": [
+        "SYNC-INTEGRITY-002"
+      ],
+      "assertion_ids": [
         "ASSERT-PERF-STEADY-PULL-PERFORMANCE-001"
       ],
       "proof_type": "native-e2e",
@@ -86,7 +142,6 @@
         "SYNC-INTEGRITY-002"
       ],
       "assertion_ids": [
-        "ASSERT-PERF-STEADY-PULL-SEMANTIC-001",
         "ASSERT-PERF-STEADY-PULL-PERFORMANCE-001"
       ],
       "proof_type": "native-e2e",
@@ -112,74 +167,11 @@
       "control_id": null
     },
     {
-      "obligation_id": "OBL-PERF-STEADY-PULL-MACOS-MIN-001",
-      "requirement_ids": [
-        "SYNC-INTEGRITY-002"
-      ],
-      "assertion_ids": [
-        "ASSERT-PERF-STEADY-PULL-SEMANTIC-001",
-        "ASSERT-PERF-STEADY-PULL-PERFORMANCE-001"
-      ],
-      "proof_type": "native-e2e",
-      "support_cell_id": "SUP-MACOS-MIN-001",
-      "artifact_inventory_ids": [
-        "ARTDEF-PG-EXTENSION-001",
-        "ARTDEF-ADAPTER-001",
-        "ARTDEF-SWIFT-SPM-001",
-        "ARTDEF-COCOAPODS-001"
-      ],
-      "performance_budget_ids": [
-        "BUD-STEADY-PULL-001",
-        "BUD-STEADY-PULL-NONPULL-001"
-      ],
-      "required_measurement_ids": [],
-      "required_vector_set_ids": [],
-      "make_target": "test-swift",
-      "argv": [
-        "make",
-        "test-swift"
-      ],
-      "fault_plan_id": null,
-      "control_id": null
-    },
-    {
-      "obligation_id": "OBL-PERF-STEADY-PULL-MACOS-CURRENT-001",
-      "requirement_ids": [
-        "SYNC-INTEGRITY-002"
-      ],
-      "assertion_ids": [
-        "ASSERT-PERF-STEADY-PULL-SEMANTIC-001",
-        "ASSERT-PERF-STEADY-PULL-PERFORMANCE-001"
-      ],
-      "proof_type": "native-e2e",
-      "support_cell_id": "SUP-MACOS-CURRENT-001",
-      "artifact_inventory_ids": [
-        "ARTDEF-PG-EXTENSION-001",
-        "ARTDEF-ADAPTER-001",
-        "ARTDEF-SWIFT-SPM-001",
-        "ARTDEF-COCOAPODS-001"
-      ],
-      "performance_budget_ids": [
-        "BUD-STEADY-PULL-001",
-        "BUD-STEADY-PULL-NONPULL-001"
-      ],
-      "required_measurement_ids": [],
-      "required_vector_set_ids": [],
-      "make_target": "test-native-swift-steady-pull",
-      "argv": [
-        "make",
-        "test-native-swift-steady-pull"
-      ],
-      "fault_plan_id": null,
-      "control_id": null
-    },
-    {
       "obligation_id": "OBL-PERF-STEADY-PULL-ANDROID-MIN-001",
       "requirement_ids": [
         "SYNC-INTEGRITY-002"
       ],
       "assertion_ids": [
-        "ASSERT-PERF-STEADY-PULL-SEMANTIC-001",
         "ASSERT-PERF-STEADY-PULL-PERFORMANCE-001"
       ],
       "proof_type": "native-e2e",
@@ -234,38 +226,6 @@
       "control_id": null
     },
     {
-      "obligation_id": "OBL-PERF-STEADY-PULL-RN-IOS-MIN-001",
-      "requirement_ids": [
-        "SYNC-INTEGRITY-002"
-      ],
-      "assertion_ids": [
-        "ASSERT-PERF-STEADY-PULL-SEMANTIC-001",
-        "ASSERT-PERF-STEADY-PULL-PERFORMANCE-001"
-      ],
-      "proof_type": "native-e2e",
-      "support_cell_id": "SUP-RN-IOS-MIN-001",
-      "artifact_inventory_ids": [
-        "ARTDEF-PG-EXTENSION-001",
-        "ARTDEF-ADAPTER-001",
-        "ARTDEF-SWIFT-SPM-001",
-        "ARTDEF-COCOAPODS-001",
-        "ARTDEF-RN-NPM-001"
-      ],
-      "performance_budget_ids": [
-        "BUD-STEADY-PULL-001",
-        "BUD-STEADY-PULL-NONPULL-001"
-      ],
-      "required_measurement_ids": [],
-      "required_vector_set_ids": [],
-      "make_target": "test-rn-e2e-ios",
-      "argv": [
-        "make",
-        "test-rn-e2e-ios"
-      ],
-      "fault_plan_id": null,
-      "control_id": null
-    },
-    {
       "obligation_id": "OBL-PERF-STEADY-PULL-RN-IOS-CURRENT-001",
       "requirement_ids": [
         "SYNC-INTEGRITY-002"
@@ -293,37 +253,6 @@
       "argv": [
         "make",
         "test-rn-e2e-ios"
-      ],
-      "fault_plan_id": null,
-      "control_id": null
-    },
-    {
-      "obligation_id": "OBL-PERF-STEADY-PULL-RN-ANDROID-MIN-001",
-      "requirement_ids": [
-        "SYNC-INTEGRITY-002"
-      ],
-      "assertion_ids": [
-        "ASSERT-PERF-STEADY-PULL-SEMANTIC-001",
-        "ASSERT-PERF-STEADY-PULL-PERFORMANCE-001"
-      ],
-      "proof_type": "native-e2e",
-      "support_cell_id": "SUP-RN-ANDROID-MIN-001",
-      "artifact_inventory_ids": [
-        "ARTDEF-PG-EXTENSION-001",
-        "ARTDEF-ADAPTER-001",
-        "ARTDEF-KOTLIN-MAVEN-001",
-        "ARTDEF-RN-NPM-001"
-      ],
-      "performance_budget_ids": [
-        "BUD-STEADY-PULL-001",
-        "BUD-STEADY-PULL-NONPULL-001"
-      ],
-      "required_measurement_ids": [],
-      "required_vector_set_ids": [],
-      "make_target": "test-rn-e2e-android",
-      "argv": [
-        "make",
-        "test-rn-e2e-android"
       ],
       "fault_plan_id": null,
       "control_id": null
@@ -392,34 +321,58 @@
     {
       "scenario_id": "SCN-PERF-STEADY-PULL-001",
       "requirement_id": "SYNC-INTEGRITY-002",
-      "proof_obligation_id": "OBL-PERF-STEADY-PULL-PG-001",
+      "proof_obligation_id": "OBL-PERF-STEADY-PULL-PG-LINUX-X64-001",
       "assertion_id": "ASSERT-PERF-STEADY-PULL-SEMANTIC-001",
       "proof_type": "server-black-box",
-      "support_cell_id": "SUP-PG-018"
+      "support_cell_id": "SUP-PG-LINUX-X64-001"
     },
     {
       "scenario_id": "SCN-PERF-STEADY-PULL-001",
       "requirement_id": "SYNC-INTEGRITY-002",
-      "proof_obligation_id": "OBL-PERF-STEADY-PULL-PG-001",
+      "proof_obligation_id": "OBL-PERF-STEADY-PULL-PG-LINUX-X64-001",
       "assertion_id": "ASSERT-PERF-STEADY-PULL-WIRE-001",
       "proof_type": "server-black-box",
-      "support_cell_id": "SUP-PG-018"
+      "support_cell_id": "SUP-PG-LINUX-X64-001"
     },
     {
       "scenario_id": "SCN-PERF-STEADY-PULL-001",
       "requirement_id": "SYNC-INTEGRITY-002",
-      "proof_obligation_id": "OBL-PERF-STEADY-PULL-PG-001",
+      "proof_obligation_id": "OBL-PERF-STEADY-PULL-PG-LINUX-X64-001",
       "assertion_id": "ASSERT-PERF-STEADY-PULL-PERFORMANCE-001",
       "proof_type": "server-black-box",
-      "support_cell_id": "SUP-PG-018"
+      "support_cell_id": "SUP-PG-LINUX-X64-001"
     },
     {
       "scenario_id": "SCN-PERF-STEADY-PULL-001",
       "requirement_id": "SYNC-INTEGRITY-002",
-      "proof_obligation_id": "OBL-PERF-STEADY-PULL-IOS-MIN-001",
+      "proof_obligation_id": "OBL-PERF-STEADY-PULL-PG-MACOS-ARM64-001",
+      "assertion_id": "ASSERT-PERF-STEADY-PULL-SEMANTIC-001",
+      "proof_type": "server-black-box",
+      "support_cell_id": "SUP-PG-MACOS-ARM64-001"
+    },
+    {
+      "scenario_id": "SCN-PERF-STEADY-PULL-001",
+      "requirement_id": "SYNC-INTEGRITY-002",
+      "proof_obligation_id": "OBL-PERF-STEADY-PULL-PG-MACOS-ARM64-001",
+      "assertion_id": "ASSERT-PERF-STEADY-PULL-WIRE-001",
+      "proof_type": "server-black-box",
+      "support_cell_id": "SUP-PG-MACOS-ARM64-001"
+    },
+    {
+      "scenario_id": "SCN-PERF-STEADY-PULL-001",
+      "requirement_id": "SYNC-INTEGRITY-002",
+      "proof_obligation_id": "OBL-PERF-STEADY-PULL-PG-MACOS-ARM64-001",
+      "assertion_id": "ASSERT-PERF-STEADY-PULL-PERFORMANCE-001",
+      "proof_type": "server-black-box",
+      "support_cell_id": "SUP-PG-MACOS-ARM64-001"
+    },
+    {
+      "scenario_id": "SCN-PERF-STEADY-PULL-001",
+      "requirement_id": "SYNC-INTEGRITY-002",
+      "proof_obligation_id": "OBL-PERF-STEADY-PULL-MACOS-CURRENT-001",
       "assertion_id": "ASSERT-PERF-STEADY-PULL-SEMANTIC-001",
       "proof_type": "native-e2e",
-      "support_cell_id": "SUP-IOS-MIN-001"
+      "support_cell_id": "SUP-MACOS-CURRENT-001"
     },
     {
       "scenario_id": "SCN-PERF-STEADY-PULL-001",
@@ -433,57 +386,9 @@
       "scenario_id": "SCN-PERF-STEADY-PULL-001",
       "requirement_id": "SYNC-INTEGRITY-002",
       "proof_obligation_id": "OBL-PERF-STEADY-PULL-IOS-CURRENT-001",
-      "assertion_id": "ASSERT-PERF-STEADY-PULL-SEMANTIC-001",
-      "proof_type": "native-e2e",
-      "support_cell_id": "SUP-IOS-CURRENT-001"
-    },
-    {
-      "scenario_id": "SCN-PERF-STEADY-PULL-001",
-      "requirement_id": "SYNC-INTEGRITY-002",
-      "proof_obligation_id": "OBL-PERF-STEADY-PULL-IOS-CURRENT-001",
       "assertion_id": "ASSERT-PERF-STEADY-PULL-PERFORMANCE-001",
       "proof_type": "native-e2e",
       "support_cell_id": "SUP-IOS-CURRENT-001"
-    },
-    {
-      "scenario_id": "SCN-PERF-STEADY-PULL-001",
-      "requirement_id": "SYNC-INTEGRITY-002",
-      "proof_obligation_id": "OBL-PERF-STEADY-PULL-MACOS-MIN-001",
-      "assertion_id": "ASSERT-PERF-STEADY-PULL-SEMANTIC-001",
-      "proof_type": "native-e2e",
-      "support_cell_id": "SUP-MACOS-MIN-001"
-    },
-    {
-      "scenario_id": "SCN-PERF-STEADY-PULL-001",
-      "requirement_id": "SYNC-INTEGRITY-002",
-      "proof_obligation_id": "OBL-PERF-STEADY-PULL-MACOS-MIN-001",
-      "assertion_id": "ASSERT-PERF-STEADY-PULL-PERFORMANCE-001",
-      "proof_type": "native-e2e",
-      "support_cell_id": "SUP-MACOS-MIN-001"
-    },
-    {
-      "scenario_id": "SCN-PERF-STEADY-PULL-001",
-      "requirement_id": "SYNC-INTEGRITY-002",
-      "proof_obligation_id": "OBL-PERF-STEADY-PULL-MACOS-CURRENT-001",
-      "assertion_id": "ASSERT-PERF-STEADY-PULL-SEMANTIC-001",
-      "proof_type": "native-e2e",
-      "support_cell_id": "SUP-MACOS-CURRENT-001"
-    },
-    {
-      "scenario_id": "SCN-PERF-STEADY-PULL-001",
-      "requirement_id": "SYNC-INTEGRITY-002",
-      "proof_obligation_id": "OBL-PERF-STEADY-PULL-MACOS-CURRENT-001",
-      "assertion_id": "ASSERT-PERF-STEADY-PULL-PERFORMANCE-001",
-      "proof_type": "native-e2e",
-      "support_cell_id": "SUP-MACOS-CURRENT-001"
-    },
-    {
-      "scenario_id": "SCN-PERF-STEADY-PULL-001",
-      "requirement_id": "SYNC-INTEGRITY-002",
-      "proof_obligation_id": "OBL-PERF-STEADY-PULL-ANDROID-MIN-001",
-      "assertion_id": "ASSERT-PERF-STEADY-PULL-SEMANTIC-001",
-      "proof_type": "native-e2e",
-      "support_cell_id": "SUP-ANDROID-MIN-001"
     },
     {
       "scenario_id": "SCN-PERF-STEADY-PULL-001",
@@ -512,22 +417,6 @@
     {
       "scenario_id": "SCN-PERF-STEADY-PULL-001",
       "requirement_id": "SYNC-INTEGRITY-002",
-      "proof_obligation_id": "OBL-PERF-STEADY-PULL-RN-IOS-MIN-001",
-      "assertion_id": "ASSERT-PERF-STEADY-PULL-SEMANTIC-001",
-      "proof_type": "native-e2e",
-      "support_cell_id": "SUP-RN-IOS-MIN-001"
-    },
-    {
-      "scenario_id": "SCN-PERF-STEADY-PULL-001",
-      "requirement_id": "SYNC-INTEGRITY-002",
-      "proof_obligation_id": "OBL-PERF-STEADY-PULL-RN-IOS-MIN-001",
-      "assertion_id": "ASSERT-PERF-STEADY-PULL-PERFORMANCE-001",
-      "proof_type": "native-e2e",
-      "support_cell_id": "SUP-RN-IOS-MIN-001"
-    },
-    {
-      "scenario_id": "SCN-PERF-STEADY-PULL-001",
-      "requirement_id": "SYNC-INTEGRITY-002",
       "proof_obligation_id": "OBL-PERF-STEADY-PULL-RN-IOS-CURRENT-001",
       "assertion_id": "ASSERT-PERF-STEADY-PULL-SEMANTIC-001",
       "proof_type": "native-e2e",
@@ -540,22 +429,6 @@
       "assertion_id": "ASSERT-PERF-STEADY-PULL-PERFORMANCE-001",
       "proof_type": "native-e2e",
       "support_cell_id": "SUP-RN-IOS-CURRENT-001"
-    },
-    {
-      "scenario_id": "SCN-PERF-STEADY-PULL-001",
-      "requirement_id": "SYNC-INTEGRITY-002",
-      "proof_obligation_id": "OBL-PERF-STEADY-PULL-RN-ANDROID-MIN-001",
-      "assertion_id": "ASSERT-PERF-STEADY-PULL-SEMANTIC-001",
-      "proof_type": "native-e2e",
-      "support_cell_id": "SUP-RN-ANDROID-MIN-001"
-    },
-    {
-      "scenario_id": "SCN-PERF-STEADY-PULL-001",
-      "requirement_id": "SYNC-INTEGRITY-002",
-      "proof_obligation_id": "OBL-PERF-STEADY-PULL-RN-ANDROID-MIN-001",
-      "assertion_id": "ASSERT-PERF-STEADY-PULL-PERFORMANCE-001",
-      "proof_type": "native-e2e",
-      "support_cell_id": "SUP-RN-ANDROID-MIN-001"
     },
     {
       "scenario_id": "SCN-PERF-STEADY-PULL-001",
@@ -867,175 +740,131 @@
       }
     ]
   },
-  "native_execution": {
-    "version": 1,
-    "clients": [
-      {
-        "key": "client-a",
-        "user_id": "user-a",
-        "client_id": "client-a",
-        "database_key": "db-client-a"
-      }
-    ],
-    "actions": [
-      {
-        "id": "NACT-PERF-STEADY-PULL-001",
-        "phase": "setup",
-        "actor": "controller",
-        "command": "install-model",
-        "covers_step_ids": [],
-        "parameters": {}
+  "native_identity_aliases": [
+    {
+      "kind": "client-generation",
+      "alias": "client-generation-one",
+      "value": 1,
+      "step_ids": [
+        "STEP-PERF-STEADY-PULL-BASELINE-REQUEST-001",
+        "STEP-PERF-STEADY-PULL-BASELINE-BEGIN-001",
+        "STEP-PERF-STEADY-PULL-001"
+      ],
+      "expectation_ids": []
+    },
+    {
+      "kind": "schema",
+      "alias": "current-schema",
+      "value": {
+        "version": 1,
+        "hash": "721d2c95e6f34cd9733feea9f5118fba391eee10d07663dad066cfc59439fa44"
       },
-      {
-        "id": "NACT-PERF-STEADY-PULL-002",
-        "phase": "setup",
-        "actor": "client",
-        "command": "open",
-        "covers_step_ids": [],
-        "parameters": {
-          "client_key": "client-a",
-          "database_mode": "create",
-          "initialization": "empty",
-          "seed_step_id": null
-        }
-      },
-      {
-        "id": "NACT-PERF-STEADY-PULL-003",
-        "phase": "setup",
-        "actor": "client",
-        "command": "synchronize-step",
-        "covers_step_ids": [
-          "STEP-PERF-STEADY-PULL-BASELINE-REQUEST-001"
-        ],
-        "parameters": {
-          "client_key": "client-a",
-          "method": "start",
-          "completion": "idle"
-        }
-      },
-      {
-        "id": "NACT-PERF-STEADY-PULL-004",
-        "phase": "setup",
-        "actor": "observer",
-        "command": "await-step",
-        "covers_step_ids": [
-          "STEP-PERF-STEADY-PULL-BASELINE-BEGIN-001"
-        ],
-        "parameters": {
-          "client_key": "client-a"
-        }
-      },
-      {
-        "id": "NACT-PERF-STEADY-PULL-005",
-        "phase": "setup",
-        "actor": "observer",
-        "command": "await-step",
-        "covers_step_ids": [
-          "STEP-PERF-STEADY-PULL-BASELINE-APPLY-001"
-        ],
-        "parameters": {
-          "client_key": "client-a"
-        }
-      },
-      {
-        "id": "NACT-PERF-STEADY-PULL-006",
-        "phase": "setup",
-        "actor": "observer",
-        "command": "await-step",
-        "covers_step_ids": [
-          "STEP-PERF-STEADY-PULL-BASELINE-FINALIZE-001"
-        ],
-        "parameters": {
-          "client_key": "client-a"
-        }
-      },
-      {
-        "id": "NACT-PERF-STEADY-PULL-007",
-        "phase": "setup",
-        "actor": "controller",
-        "command": "apply-step",
-        "covers_step_ids": [
-          "STEP-PERF-STEADY-PULL-COMMIT-001"
-        ],
-        "parameters": {}
-      },
-      {
-        "id": "NACT-PERF-STEADY-PULL-008",
-        "phase": "setup",
-        "actor": "process",
-        "command": "execute-step",
-        "covers_step_ids": [
-          "STEP-PERF-STEADY-PULL-MATERIALIZE-001"
-        ],
-        "parameters": {
-          "client_key": null
-        }
-      },
-      {
-        "id": "NACT-PERF-STEADY-PULL-009",
-        "phase": "exercise",
-        "actor": "client",
-        "command": "synchronize-step",
-        "covers_step_ids": [
-          "STEP-PERF-STEADY-PULL-001"
-        ],
-        "parameters": {
-          "client_key": "client-a",
-          "method": "sync-now",
-          "completion": "idle"
-        }
-      },
-      {
-        "id": "NACT-PERF-STEADY-PULL-010",
-        "phase": "exercise",
-        "actor": "observer",
-        "command": "await-step",
-        "covers_step_ids": [
-          "STEP-PERF-STEADY-PULL-002"
-        ],
-        "parameters": {
-          "client_key": "client-a"
-        }
-      },
-      {
-        "id": "NACT-PERF-STEADY-PULL-011",
-        "phase": "verify",
-        "actor": "observer",
-        "command": "capture",
-        "covers_step_ids": [],
-        "parameters": {
-          "client_keys": [
-            "client-a"
-          ],
-          "sources": [
-            "application-rows",
-            "checkpoints",
-            "scope-state",
-            "sync-status",
-            "request-trace"
-          ],
-          "expectation_ids": [
-            "EXPECT-PERF-STEADY-PULL-SEMANTIC-001",
-            "EXPECT-PERF-STEADY-PULL-PERFORMANCE-001"
-          ]
-        }
-      },
-      {
-        "id": "NACT-PERF-STEADY-PULL-012",
-        "phase": "verify",
-        "actor": "observer",
-        "command": "measure",
-        "covers_step_ids": [],
-        "parameters": {
-          "performance_budget_ids": [
-            "BUD-STEADY-PULL-001",
-            "BUD-STEADY-PULL-NONPULL-001"
-          ],
-          "measurement_ids": []
-        }
-      }
-    ]
-  },
+      "step_ids": [
+        "STEP-PERF-STEADY-PULL-BASELINE-REQUEST-001",
+        "STEP-PERF-STEADY-PULL-BASELINE-BEGIN-001",
+        "STEP-PERF-STEADY-PULL-001"
+      ],
+      "expectation_ids": []
+    },
+    {
+      "kind": "scope",
+      "alias": "scope-a",
+      "value": "scope-a",
+      "step_ids": [
+        "STEP-PERF-STEADY-PULL-BASELINE-REQUEST-001",
+        "STEP-PERF-STEADY-PULL-BASELINE-BEGIN-001",
+        "STEP-PERF-STEADY-PULL-BASELINE-APPLY-001",
+        "STEP-PERF-STEADY-PULL-BASELINE-FINALIZE-001",
+        "STEP-PERF-STEADY-PULL-001"
+      ],
+      "expectation_ids": [
+        "EXPECT-PERF-STEADY-PULL-SEMANTIC-001"
+      ]
+    },
+    {
+      "kind": "scope",
+      "alias": "scope-b",
+      "value": "scope-b",
+      "step_ids": [],
+      "expectation_ids": [
+        "EXPECT-PERF-STEADY-PULL-SEMANTIC-001"
+      ]
+    },
+    {
+      "kind": "rebuild-id",
+      "alias": "baseline-rebuild",
+      "value": "00000000-0000-4000-8000-000000008001",
+      "step_ids": [
+        "STEP-PERF-STEADY-PULL-BASELINE-REQUEST-001",
+        "STEP-PERF-STEADY-PULL-BASELINE-BEGIN-001",
+        "STEP-PERF-STEADY-PULL-BASELINE-APPLY-001",
+        "STEP-PERF-STEADY-PULL-BASELINE-FINALIZE-001"
+      ],
+      "expectation_ids": []
+    },
+    {
+      "kind": "scope-set-version",
+      "alias": "scope-set-version-one",
+      "value": 1,
+      "step_ids": [
+        "STEP-PERF-STEADY-PULL-001"
+      ],
+      "expectation_ids": []
+    },
+    {
+      "kind": "table",
+      "alias": "items-table",
+      "value": "items",
+      "step_ids": [
+        "STEP-PERF-STEADY-PULL-COMMIT-001"
+      ],
+      "expectation_ids": [
+        "EXPECT-PERF-STEADY-PULL-SEMANTIC-001"
+      ]
+    },
+    {
+      "kind": "primary-key",
+      "alias": "row-a-primary-key",
+      "value": "row-a",
+      "step_ids": [
+        "STEP-PERF-STEADY-PULL-COMMIT-001"
+      ],
+      "expectation_ids": [
+        "EXPECT-PERF-STEADY-PULL-SEMANTIC-001"
+      ]
+    },
+    {
+      "kind": "row-version",
+      "alias": "row-version-one",
+      "value": "v1",
+      "step_ids": [
+        "STEP-PERF-STEADY-PULL-COMMIT-001"
+      ],
+      "expectation_ids": [
+        "EXPECT-PERF-STEADY-PULL-SEMANTIC-001"
+      ]
+    },
+    {
+      "kind": "checksum",
+      "alias": "row-a-checksum",
+      "value": "153c8d456b46248d141c1168cb9668aa69fdf57a1f43be6c51f4b9a89fb758b8",
+      "step_ids": [
+        "STEP-PERF-STEADY-PULL-COMMIT-001"
+      ],
+      "expectation_ids": [
+        "EXPECT-PERF-STEADY-PULL-SEMANTIC-001"
+      ]
+    },
+    {
+      "kind": "checksum",
+      "alias": "scope-a-checksum",
+      "value": "b40438d24d6da2efa4787b6494c111daa45fe418c6ab1bb522cc9940d4d8e5d1",
+      "step_ids": [],
+      "expectation_ids": [
+        "EXPECT-PERF-STEADY-PULL-SEMANTIC-001"
+      ]
+    }
+  ],
   "barrier_plan": {
     "barriers": [
       {
@@ -1097,6 +926,15 @@
       "phase": "setup",
       "transport": "http",
       "description": "Request the terminal empty scope A baseline page.",
+      "native_binding": {
+        "kind": "public-call",
+        "user_id": "user-a",
+        "client_id": "client-a",
+        "call_id": "steady_pull_baseline",
+        "stage": "synchronous",
+        "method": "start",
+        "completion": "idle"
+      },
       "operation": {
         "contract_operation": "rebuild",
         "name": "request-page",
@@ -1123,6 +961,15 @@
       "phase": "setup",
       "transport": "local",
       "description": "Begin the empty scope A baseline rebuild.",
+      "native_binding": {
+        "kind": "public-call",
+        "user_id": "user-a",
+        "client_id": "client-a",
+        "call_id": "steady_pull_baseline",
+        "stage": "synchronous",
+        "method": "start",
+        "completion": "idle"
+      },
       "operation": {
         "contract_operation": "local",
         "name": "begin-rebuild",
@@ -1148,6 +995,15 @@
       "phase": "setup",
       "transport": "local",
       "description": "Apply the terminal empty scope A baseline page.",
+      "native_binding": {
+        "kind": "public-call",
+        "user_id": "user-a",
+        "client_id": "client-a",
+        "call_id": "steady_pull_baseline",
+        "stage": "synchronous",
+        "method": "start",
+        "completion": "idle"
+      },
       "operation": {
         "contract_operation": "local",
         "name": "apply-rebuild-page",
@@ -1169,6 +1025,15 @@
       "phase": "setup",
       "transport": "local",
       "description": "Finalize the empty scope A baseline checkpoint.",
+      "native_binding": {
+        "kind": "public-call",
+        "user_id": "user-a",
+        "client_id": "client-a",
+        "call_id": "steady_pull_baseline",
+        "stage": "synchronous",
+        "method": "start",
+        "completion": "idle"
+      },
       "operation": {
         "contract_operation": "local",
         "name": "finalize-rebuild",
@@ -1188,6 +1053,9 @@
       "phase": "setup",
       "transport": "model",
       "description": "Commit one source insert after the empty baseline.",
+      "native_binding": {
+        "kind": "controller"
+      },
       "operation": {
         "contract_operation": "model",
         "name": "commit-source-transaction",
@@ -1242,6 +1110,9 @@
       "phase": "setup",
       "transport": "process",
       "description": "Materialize the source insert before the measured pull.",
+      "native_binding": {
+        "kind": "controller"
+      },
       "operation": {
         "contract_operation": "process",
         "name": "materialize-source-transaction",
@@ -1259,6 +1130,15 @@
       "phase": "exercise",
       "transport": "http",
       "description": "Request the measured terminal delta from the local baseline checkpoint.",
+      "native_binding": {
+        "kind": "public-call",
+        "user_id": "user-a",
+        "client_id": "client-a",
+        "call_id": "steady_pull_measured",
+        "stage": "synchronous",
+        "method": "sync-now",
+        "completion": "idle"
+      },
       "operation": {
         "contract_operation": "pull",
         "name": "request-page",
@@ -1289,6 +1169,15 @@
       "phase": "exercise",
       "transport": "local",
       "description": "Apply the terminal row, cursor, and verified checksum locally.",
+      "native_binding": {
+        "kind": "public-call",
+        "user_id": "user-a",
+        "client_id": "client-a",
+        "call_id": "steady_pull_measured",
+        "stage": "synchronous",
+        "method": "sync-now",
+        "completion": "idle"
+      },
       "operation": {
         "contract_operation": "local",
         "name": "apply-pull-page",

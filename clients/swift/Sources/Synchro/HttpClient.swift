@@ -310,8 +310,7 @@ final class HttpClient: @unchecked Sendable {
                     cursorFingerprints: cursorFingerprints,
                     cursorFingerprintsComplete: cursorFingerprintsComplete,
                     requestFacts: requestFacts,
-                    responseBody: nil,
-                    requestBody: request.httpBody
+                    responseBody: nil
                 )
             }
         }
@@ -364,8 +363,7 @@ final class HttpClient: @unchecked Sendable {
             cursorFingerprints: cursorFingerprints,
             cursorFingerprintsComplete: cursorFingerprintsComplete,
             requestFacts: requestFacts,
-            responseBody: observedStatusCode == 200 ? data : nil,
-            requestBody: request.httpBody
+            responseBody: observedStatusCode == 200 ? data : nil
         )
         observationRecorded = true
         try await config.transportObservationCollector?.pauseIfArmed(for: operationClass)
@@ -379,8 +377,7 @@ final class HttpClient: @unchecked Sendable {
         cursorFingerprints: [String]?,
         cursorFingerprintsComplete: Bool?,
         requestFacts: TransportRequestFacts? = nil,
-        responseBody: Data? = nil,
-        requestBody: Data? = nil
+        responseBody: Data? = nil
     ) {
         let attemptEnded = DispatchTime.now().uptimeNanoseconds
         config.transportObservationCollector?.record(
@@ -390,7 +387,7 @@ final class HttpClient: @unchecked Sendable {
             cursorFingerprints: operationClass == .pull ? cursorFingerprints ?? [] : nil,
             cursorFingerprintsComplete: operationClass == .pull ? cursorFingerprintsComplete ?? false : nil,
             requestFacts: requestFacts,
-            rebuildResponseFacts: operationClass == .rebuild ? rebuildResponseFacts(from: responseBody, requestBody: requestBody) : nil,
+            rebuildResponseFacts: operationClass == .rebuild ? rebuildResponseFacts(from: responseBody) : nil,
             pullResponseFacts: operationClass == .pull ? pullResponseFacts(from: responseBody) : nil
         )
     }
@@ -439,41 +436,54 @@ final class HttpClient: @unchecked Sendable {
                 scopeSetVersion: nil,
                 scopeCount: nil,
                 limit: request.limit,
+                scopeFingerprint: TransportObservationCollector.cursorFingerprint(request.scope),
                 rebuildIDFingerprint: TransportObservationCollector.cursorFingerprint(request.rebuildID),
                 cursorFingerprint: request.cursor.map(TransportObservationCollector.cursorFingerprint),
                 cursorPresent: request.cursor != nil
+            )
+        case .push:
+            guard let request = try? decoder.decode(PushRequest.self, from: body) else { return nil }
+            return TransportRequestFacts(
+                clientGeneration: request.clientGeneration,
+                schemaVersion: request.schema.version,
+                schemaHash: request.schema.hash,
+                mutationCount: request.mutations.count
             )
         default:
             return nil
         }
     }
 
-    private func rebuildResponseFacts(
-        from data: Data?,
-        requestBody: Data?
-    ) -> TransportRebuildResponseFacts? {
+    private func rebuildResponseFacts(from data: Data?) -> TransportRebuildResponseFacts? {
         guard let data,
               (try? Integrity.validateCanonicalWireJSON(data)) != nil,
-              let response = try? decoder.decode(RebuildResponse.self, from: data),
-              let requestBody,
-              let request = try? decoder.decode(RebuildRequest.self, from: requestBody) else { return nil }
+              let response = try? decoder.decode(RebuildResponse.self, from: data) else { return nil }
         return TransportRebuildResponseFacts(
             recordCount: response.records.count,
             hasMore: response.hasMore,
             hasCursor: response.cursor != nil,
             hasFinalScopeCursor: response.finalScopeCursor != nil,
             hasChecksum: response.checksum != nil,
-            scopeMatchesRequest: response.scope == request.scope
+            scopeFingerprint: TransportObservationCollector.cursorFingerprint(response.scope),
+            finalScopeCursorFingerprint: response.finalScopeCursor.map(
+                TransportObservationCollector.cursorFingerprint
+            )
         )
     }
 
     private func pullResponseFacts(from data: Data?) -> TransportPullResponseFacts? {
         guard let data, let response = try? decoder.decode(PullResponse.self, from: data) else { return nil }
+        let fingerprints = Set(response.scopeCursors.values.map(
+            TransportObservationCollector.cursorFingerprint
+        )).sorted()
+        let maximum = TransportObservationCollector.maximumCursorFingerprints
         return TransportPullResponseFacts(
             changeCount: response.changes.count,
             hasMore: response.hasMore,
             rebuildScopeCount: response.rebuild.count,
-            checksumCount: response.checksums?.count ?? 0
+            checksumCount: response.checksums?.count ?? 0,
+            scopeCursorFingerprints: Array(fingerprints.prefix(maximum)),
+            scopeCursorFingerprintsComplete: fingerprints.count <= maximum
         )
     }
 
@@ -560,9 +570,8 @@ final class HttpClient: @unchecked Sendable {
         guard let envelope = try? decoder.decode(PullCursorEnvelope.self, from: data) else {
             return ([], false)
         }
-        let fingerprints = envelope.scopes.values.compactMap(\.cursor)
-            .map(TransportObservationCollector.cursorFingerprint)
-            .sorted()
+        let fingerprints = Set(envelope.scopes.values.compactMap(\.cursor)
+            .map(TransportObservationCollector.cursorFingerprint)).sorted()
         let maximum = TransportObservationCollector.maximumCursorFingerprints
         return (Array(fingerprints.prefix(maximum)), fingerprints.count <= maximum)
     }

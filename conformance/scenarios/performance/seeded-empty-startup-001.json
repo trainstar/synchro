@@ -20,7 +20,7 @@
   ],
   "proof_obligations": [
     {
-      "obligation_id": "OBL-PERF-SEEDED-EMPTY-STARTUP-PG-001",
+      "obligation_id": "OBL-PERF-SEEDED-EMPTY-STARTUP-PG-LINUX-X64-001",
       "requirement_ids": [
         "SYNC-SEED-001"
       ],
@@ -29,7 +29,7 @@
         "ASSERT-PERF-SEEDED-EMPTY-STARTUP-PERFORMANCE-001"
       ],
       "proof_type": "server-black-box",
-      "support_cell_id": "SUP-PG-018",
+      "support_cell_id": "SUP-PG-LINUX-X64-001",
       "artifact_inventory_ids": [
         "ARTDEF-PG-EXTENSION-001",
         "ARTDEF-ADAPTER-001",
@@ -50,12 +50,70 @@
       "control_id": null
     },
     {
-      "obligation_id": "OBL-PERF-SEEDED-EMPTY-STARTUP-IOS-MIN-001",
+      "obligation_id": "OBL-PERF-SEEDED-EMPTY-STARTUP-PG-MACOS-ARM64-001",
       "requirement_ids": [
         "SYNC-SEED-001"
       ],
       "assertion_ids": [
         "ASSERT-PERF-SEEDED-EMPTY-STARTUP-SEMANTIC-001",
+        "ASSERT-PERF-SEEDED-EMPTY-STARTUP-PERFORMANCE-001"
+      ],
+      "proof_type": "server-black-box",
+      "support_cell_id": "SUP-PG-MACOS-ARM64-001",
+      "artifact_inventory_ids": [
+        "ARTDEF-PG-EXTENSION-001",
+        "ARTDEF-ADAPTER-001",
+        "ARTDEF-SEED-TOOL-001",
+        "ARTDEF-PORTABLE-SEED-001"
+      ],
+      "performance_budget_ids": [],
+      "required_measurement_ids": [
+        "MEAS-SEEDED-EMPTY-STARTUP-001"
+      ],
+      "required_vector_set_ids": [],
+      "make_target": "test-blackbox",
+      "argv": [
+        "make",
+        "test-blackbox"
+      ],
+      "fault_plan_id": null,
+      "control_id": null
+    },
+    {
+      "obligation_id": "OBL-PERF-SEEDED-EMPTY-STARTUP-MACOS-CURRENT-001",
+      "requirement_ids": [
+        "SYNC-SEED-001"
+      ],
+      "assertion_ids": [
+        "ASSERT-PERF-SEEDED-EMPTY-STARTUP-SEMANTIC-001"
+      ],
+      "proof_type": "native-e2e",
+      "support_cell_id": "SUP-MACOS-CURRENT-001",
+      "artifact_inventory_ids": [
+        "ARTDEF-PG-EXTENSION-001",
+        "ARTDEF-ADAPTER-001",
+        "ARTDEF-SEED-TOOL-001",
+        "ARTDEF-PORTABLE-SEED-001",
+        "ARTDEF-SWIFT-SPM-001",
+        "ARTDEF-COCOAPODS-001"
+      ],
+      "performance_budget_ids": [],
+      "required_measurement_ids": [],
+      "required_vector_set_ids": [],
+      "make_target": "test-swift",
+      "argv": [
+        "make",
+        "test-swift"
+      ],
+      "fault_plan_id": null,
+      "control_id": null
+    },
+    {
+      "obligation_id": "OBL-PERF-SEEDED-EMPTY-STARTUP-IOS-MIN-001",
+      "requirement_ids": [
+        "SYNC-SEED-001"
+      ],
+      "assertion_ids": [
         "ASSERT-PERF-SEEDED-EMPTY-STARTUP-PERFORMANCE-001"
       ],
       "proof_type": "native-e2e",
@@ -87,75 +145,10 @@
         "SYNC-SEED-001"
       ],
       "assertion_ids": [
-        "ASSERT-PERF-SEEDED-EMPTY-STARTUP-SEMANTIC-001",
         "ASSERT-PERF-SEEDED-EMPTY-STARTUP-PERFORMANCE-001"
       ],
       "proof_type": "native-e2e",
       "support_cell_id": "SUP-IOS-CURRENT-001",
-      "artifact_inventory_ids": [
-        "ARTDEF-PG-EXTENSION-001",
-        "ARTDEF-ADAPTER-001",
-        "ARTDEF-SEED-TOOL-001",
-        "ARTDEF-PORTABLE-SEED-001",
-        "ARTDEF-SWIFT-SPM-001",
-        "ARTDEF-COCOAPODS-001"
-      ],
-      "performance_budget_ids": [],
-      "required_measurement_ids": [
-        "MEAS-SEEDED-EMPTY-STARTUP-001"
-      ],
-      "required_vector_set_ids": [],
-      "make_target": "test-swift",
-      "argv": [
-        "make",
-        "test-swift"
-      ],
-      "fault_plan_id": null,
-      "control_id": null
-    },
-    {
-      "obligation_id": "OBL-PERF-SEEDED-EMPTY-STARTUP-MACOS-MIN-001",
-      "requirement_ids": [
-        "SYNC-SEED-001"
-      ],
-      "assertion_ids": [
-        "ASSERT-PERF-SEEDED-EMPTY-STARTUP-SEMANTIC-001",
-        "ASSERT-PERF-SEEDED-EMPTY-STARTUP-PERFORMANCE-001"
-      ],
-      "proof_type": "native-e2e",
-      "support_cell_id": "SUP-MACOS-MIN-001",
-      "artifact_inventory_ids": [
-        "ARTDEF-PG-EXTENSION-001",
-        "ARTDEF-ADAPTER-001",
-        "ARTDEF-SEED-TOOL-001",
-        "ARTDEF-PORTABLE-SEED-001",
-        "ARTDEF-SWIFT-SPM-001",
-        "ARTDEF-COCOAPODS-001"
-      ],
-      "performance_budget_ids": [],
-      "required_measurement_ids": [
-        "MEAS-SEEDED-EMPTY-STARTUP-001"
-      ],
-      "required_vector_set_ids": [],
-      "make_target": "test-swift",
-      "argv": [
-        "make",
-        "test-swift"
-      ],
-      "fault_plan_id": null,
-      "control_id": null
-    },
-    {
-      "obligation_id": "OBL-PERF-SEEDED-EMPTY-STARTUP-MACOS-CURRENT-001",
-      "requirement_ids": [
-        "SYNC-SEED-001"
-      ],
-      "assertion_ids": [
-        "ASSERT-PERF-SEEDED-EMPTY-STARTUP-SEMANTIC-001",
-        "ASSERT-PERF-SEEDED-EMPTY-STARTUP-PERFORMANCE-001"
-      ],
-      "proof_type": "native-e2e",
-      "support_cell_id": "SUP-MACOS-CURRENT-001",
       "artifact_inventory_ids": [
         "ARTDEF-PG-EXTENSION-001",
         "ARTDEF-ADAPTER-001",
@@ -183,7 +176,6 @@
         "SYNC-SEED-001"
       ],
       "assertion_ids": [
-        "ASSERT-PERF-SEEDED-EMPTY-STARTUP-SEMANTIC-001",
         "ASSERT-PERF-SEEDED-EMPTY-STARTUP-PERFORMANCE-001"
       ],
       "proof_type": "native-e2e",
@@ -240,39 +232,6 @@
       "control_id": null
     },
     {
-      "obligation_id": "OBL-PERF-SEEDED-EMPTY-STARTUP-RN-IOS-MIN-001",
-      "requirement_ids": [
-        "SYNC-SEED-001"
-      ],
-      "assertion_ids": [
-        "ASSERT-PERF-SEEDED-EMPTY-STARTUP-SEMANTIC-001",
-        "ASSERT-PERF-SEEDED-EMPTY-STARTUP-PERFORMANCE-001"
-      ],
-      "proof_type": "native-e2e",
-      "support_cell_id": "SUP-RN-IOS-MIN-001",
-      "artifact_inventory_ids": [
-        "ARTDEF-PG-EXTENSION-001",
-        "ARTDEF-ADAPTER-001",
-        "ARTDEF-SEED-TOOL-001",
-        "ARTDEF-PORTABLE-SEED-001",
-        "ARTDEF-SWIFT-SPM-001",
-        "ARTDEF-COCOAPODS-001",
-        "ARTDEF-RN-NPM-001"
-      ],
-      "performance_budget_ids": [],
-      "required_measurement_ids": [
-        "MEAS-SEEDED-EMPTY-STARTUP-001"
-      ],
-      "required_vector_set_ids": [],
-      "make_target": "test-rn-e2e-ios",
-      "argv": [
-        "make",
-        "test-rn-e2e-ios"
-      ],
-      "fault_plan_id": null,
-      "control_id": null
-    },
-    {
       "obligation_id": "OBL-PERF-SEEDED-EMPTY-STARTUP-RN-IOS-CURRENT-001",
       "requirement_ids": [
         "SYNC-SEED-001"
@@ -301,38 +260,6 @@
       "argv": [
         "make",
         "test-rn-e2e-ios"
-      ],
-      "fault_plan_id": null,
-      "control_id": null
-    },
-    {
-      "obligation_id": "OBL-PERF-SEEDED-EMPTY-STARTUP-RN-ANDROID-MIN-001",
-      "requirement_ids": [
-        "SYNC-SEED-001"
-      ],
-      "assertion_ids": [
-        "ASSERT-PERF-SEEDED-EMPTY-STARTUP-SEMANTIC-001",
-        "ASSERT-PERF-SEEDED-EMPTY-STARTUP-PERFORMANCE-001"
-      ],
-      "proof_type": "native-e2e",
-      "support_cell_id": "SUP-RN-ANDROID-MIN-001",
-      "artifact_inventory_ids": [
-        "ARTDEF-PG-EXTENSION-001",
-        "ARTDEF-ADAPTER-001",
-        "ARTDEF-SEED-TOOL-001",
-        "ARTDEF-PORTABLE-SEED-001",
-        "ARTDEF-KOTLIN-MAVEN-001",
-        "ARTDEF-RN-NPM-001"
-      ],
-      "performance_budget_ids": [],
-      "required_measurement_ids": [
-        "MEAS-SEEDED-EMPTY-STARTUP-001"
-      ],
-      "required_vector_set_ids": [],
-      "make_target": "test-rn-e2e-android",
-      "argv": [
-        "make",
-        "test-rn-e2e-android"
       ],
       "fault_plan_id": null,
       "control_id": null
@@ -406,26 +333,42 @@
     {
       "scenario_id": "SCN-PERF-SEEDED-EMPTY-STARTUP-001",
       "requirement_id": "SYNC-SEED-001",
-      "proof_obligation_id": "OBL-PERF-SEEDED-EMPTY-STARTUP-PG-001",
+      "proof_obligation_id": "OBL-PERF-SEEDED-EMPTY-STARTUP-PG-LINUX-X64-001",
       "assertion_id": "ASSERT-PERF-SEEDED-EMPTY-STARTUP-SEMANTIC-001",
       "proof_type": "server-black-box",
-      "support_cell_id": "SUP-PG-018"
+      "support_cell_id": "SUP-PG-LINUX-X64-001"
     },
     {
       "scenario_id": "SCN-PERF-SEEDED-EMPTY-STARTUP-001",
       "requirement_id": "SYNC-SEED-001",
-      "proof_obligation_id": "OBL-PERF-SEEDED-EMPTY-STARTUP-PG-001",
+      "proof_obligation_id": "OBL-PERF-SEEDED-EMPTY-STARTUP-PG-LINUX-X64-001",
       "assertion_id": "ASSERT-PERF-SEEDED-EMPTY-STARTUP-PERFORMANCE-001",
       "proof_type": "server-black-box",
-      "support_cell_id": "SUP-PG-018"
+      "support_cell_id": "SUP-PG-LINUX-X64-001"
     },
     {
       "scenario_id": "SCN-PERF-SEEDED-EMPTY-STARTUP-001",
       "requirement_id": "SYNC-SEED-001",
-      "proof_obligation_id": "OBL-PERF-SEEDED-EMPTY-STARTUP-IOS-MIN-001",
+      "proof_obligation_id": "OBL-PERF-SEEDED-EMPTY-STARTUP-PG-MACOS-ARM64-001",
+      "assertion_id": "ASSERT-PERF-SEEDED-EMPTY-STARTUP-SEMANTIC-001",
+      "proof_type": "server-black-box",
+      "support_cell_id": "SUP-PG-MACOS-ARM64-001"
+    },
+    {
+      "scenario_id": "SCN-PERF-SEEDED-EMPTY-STARTUP-001",
+      "requirement_id": "SYNC-SEED-001",
+      "proof_obligation_id": "OBL-PERF-SEEDED-EMPTY-STARTUP-PG-MACOS-ARM64-001",
+      "assertion_id": "ASSERT-PERF-SEEDED-EMPTY-STARTUP-PERFORMANCE-001",
+      "proof_type": "server-black-box",
+      "support_cell_id": "SUP-PG-MACOS-ARM64-001"
+    },
+    {
+      "scenario_id": "SCN-PERF-SEEDED-EMPTY-STARTUP-001",
+      "requirement_id": "SYNC-SEED-001",
+      "proof_obligation_id": "OBL-PERF-SEEDED-EMPTY-STARTUP-MACOS-CURRENT-001",
       "assertion_id": "ASSERT-PERF-SEEDED-EMPTY-STARTUP-SEMANTIC-001",
       "proof_type": "native-e2e",
-      "support_cell_id": "SUP-IOS-MIN-001"
+      "support_cell_id": "SUP-MACOS-CURRENT-001"
     },
     {
       "scenario_id": "SCN-PERF-SEEDED-EMPTY-STARTUP-001",
@@ -439,57 +382,9 @@
       "scenario_id": "SCN-PERF-SEEDED-EMPTY-STARTUP-001",
       "requirement_id": "SYNC-SEED-001",
       "proof_obligation_id": "OBL-PERF-SEEDED-EMPTY-STARTUP-IOS-CURRENT-001",
-      "assertion_id": "ASSERT-PERF-SEEDED-EMPTY-STARTUP-SEMANTIC-001",
-      "proof_type": "native-e2e",
-      "support_cell_id": "SUP-IOS-CURRENT-001"
-    },
-    {
-      "scenario_id": "SCN-PERF-SEEDED-EMPTY-STARTUP-001",
-      "requirement_id": "SYNC-SEED-001",
-      "proof_obligation_id": "OBL-PERF-SEEDED-EMPTY-STARTUP-IOS-CURRENT-001",
       "assertion_id": "ASSERT-PERF-SEEDED-EMPTY-STARTUP-PERFORMANCE-001",
       "proof_type": "native-e2e",
       "support_cell_id": "SUP-IOS-CURRENT-001"
-    },
-    {
-      "scenario_id": "SCN-PERF-SEEDED-EMPTY-STARTUP-001",
-      "requirement_id": "SYNC-SEED-001",
-      "proof_obligation_id": "OBL-PERF-SEEDED-EMPTY-STARTUP-MACOS-MIN-001",
-      "assertion_id": "ASSERT-PERF-SEEDED-EMPTY-STARTUP-SEMANTIC-001",
-      "proof_type": "native-e2e",
-      "support_cell_id": "SUP-MACOS-MIN-001"
-    },
-    {
-      "scenario_id": "SCN-PERF-SEEDED-EMPTY-STARTUP-001",
-      "requirement_id": "SYNC-SEED-001",
-      "proof_obligation_id": "OBL-PERF-SEEDED-EMPTY-STARTUP-MACOS-MIN-001",
-      "assertion_id": "ASSERT-PERF-SEEDED-EMPTY-STARTUP-PERFORMANCE-001",
-      "proof_type": "native-e2e",
-      "support_cell_id": "SUP-MACOS-MIN-001"
-    },
-    {
-      "scenario_id": "SCN-PERF-SEEDED-EMPTY-STARTUP-001",
-      "requirement_id": "SYNC-SEED-001",
-      "proof_obligation_id": "OBL-PERF-SEEDED-EMPTY-STARTUP-MACOS-CURRENT-001",
-      "assertion_id": "ASSERT-PERF-SEEDED-EMPTY-STARTUP-SEMANTIC-001",
-      "proof_type": "native-e2e",
-      "support_cell_id": "SUP-MACOS-CURRENT-001"
-    },
-    {
-      "scenario_id": "SCN-PERF-SEEDED-EMPTY-STARTUP-001",
-      "requirement_id": "SYNC-SEED-001",
-      "proof_obligation_id": "OBL-PERF-SEEDED-EMPTY-STARTUP-MACOS-CURRENT-001",
-      "assertion_id": "ASSERT-PERF-SEEDED-EMPTY-STARTUP-PERFORMANCE-001",
-      "proof_type": "native-e2e",
-      "support_cell_id": "SUP-MACOS-CURRENT-001"
-    },
-    {
-      "scenario_id": "SCN-PERF-SEEDED-EMPTY-STARTUP-001",
-      "requirement_id": "SYNC-SEED-001",
-      "proof_obligation_id": "OBL-PERF-SEEDED-EMPTY-STARTUP-ANDROID-MIN-001",
-      "assertion_id": "ASSERT-PERF-SEEDED-EMPTY-STARTUP-SEMANTIC-001",
-      "proof_type": "native-e2e",
-      "support_cell_id": "SUP-ANDROID-MIN-001"
     },
     {
       "scenario_id": "SCN-PERF-SEEDED-EMPTY-STARTUP-001",
@@ -518,22 +413,6 @@
     {
       "scenario_id": "SCN-PERF-SEEDED-EMPTY-STARTUP-001",
       "requirement_id": "SYNC-SEED-001",
-      "proof_obligation_id": "OBL-PERF-SEEDED-EMPTY-STARTUP-RN-IOS-MIN-001",
-      "assertion_id": "ASSERT-PERF-SEEDED-EMPTY-STARTUP-SEMANTIC-001",
-      "proof_type": "native-e2e",
-      "support_cell_id": "SUP-RN-IOS-MIN-001"
-    },
-    {
-      "scenario_id": "SCN-PERF-SEEDED-EMPTY-STARTUP-001",
-      "requirement_id": "SYNC-SEED-001",
-      "proof_obligation_id": "OBL-PERF-SEEDED-EMPTY-STARTUP-RN-IOS-MIN-001",
-      "assertion_id": "ASSERT-PERF-SEEDED-EMPTY-STARTUP-PERFORMANCE-001",
-      "proof_type": "native-e2e",
-      "support_cell_id": "SUP-RN-IOS-MIN-001"
-    },
-    {
-      "scenario_id": "SCN-PERF-SEEDED-EMPTY-STARTUP-001",
-      "requirement_id": "SYNC-SEED-001",
       "proof_obligation_id": "OBL-PERF-SEEDED-EMPTY-STARTUP-RN-IOS-CURRENT-001",
       "assertion_id": "ASSERT-PERF-SEEDED-EMPTY-STARTUP-SEMANTIC-001",
       "proof_type": "native-e2e",
@@ -546,22 +425,6 @@
       "assertion_id": "ASSERT-PERF-SEEDED-EMPTY-STARTUP-PERFORMANCE-001",
       "proof_type": "native-e2e",
       "support_cell_id": "SUP-RN-IOS-CURRENT-001"
-    },
-    {
-      "scenario_id": "SCN-PERF-SEEDED-EMPTY-STARTUP-001",
-      "requirement_id": "SYNC-SEED-001",
-      "proof_obligation_id": "OBL-PERF-SEEDED-EMPTY-STARTUP-RN-ANDROID-MIN-001",
-      "assertion_id": "ASSERT-PERF-SEEDED-EMPTY-STARTUP-SEMANTIC-001",
-      "proof_type": "native-e2e",
-      "support_cell_id": "SUP-RN-ANDROID-MIN-001"
-    },
-    {
-      "scenario_id": "SCN-PERF-SEEDED-EMPTY-STARTUP-001",
-      "requirement_id": "SYNC-SEED-001",
-      "proof_obligation_id": "OBL-PERF-SEEDED-EMPTY-STARTUP-RN-ANDROID-MIN-001",
-      "assertion_id": "ASSERT-PERF-SEEDED-EMPTY-STARTUP-PERFORMANCE-001",
-      "proof_type": "native-e2e",
-      "support_cell_id": "SUP-RN-ANDROID-MIN-001"
     },
     {
       "scenario_id": "SCN-PERF-SEEDED-EMPTY-STARTUP-001",
@@ -837,356 +700,70 @@
       }
     ]
   },
-  "native_execution": {
-    "version": 1,
-    "clients": [
-      {
-        "key": "seeded-1",
-        "user_id": "user-seeded-1",
-        "client_id": "client-seeded-1",
-        "database_key": "db-seeded-1"
+  "native_identity_aliases": [
+    {
+      "kind": "client-generation",
+      "alias": "client-generation-one",
+      "value": 1,
+      "step_ids": [
+        "STEP-PERF-SEEDED-EMPTY-STARTUP-003",
+        "STEP-PERF-SEEDED-EMPTY-STARTUP-006",
+        "STEP-PERF-SEEDED-EMPTY-STARTUP-009",
+        "STEP-PERF-SEEDED-EMPTY-STARTUP-011",
+        "STEP-PERF-SEEDED-EMPTY-STARTUP-013",
+        "STEP-PERF-SEEDED-EMPTY-STARTUP-015"
+      ],
+      "expectation_ids": []
+    },
+    {
+      "kind": "schema",
+      "alias": "current-schema",
+      "value": {
+        "version": 1,
+        "hash": "721d2c95e6f34cd9733feea9f5118fba391eee10d07663dad066cfc59439fa44"
       },
-      {
-        "key": "seeded-2",
-        "user_id": "user-seeded-2",
-        "client_id": "client-seeded-2",
-        "database_key": "db-seeded-2"
-      },
-      {
-        "key": "seeded-3",
-        "user_id": "user-seeded-3",
-        "client_id": "client-seeded-3",
-        "database_key": "db-seeded-3"
-      },
-      {
-        "key": "empty-1",
-        "user_id": "user-empty-1",
-        "client_id": "client-empty-1",
-        "database_key": "db-empty-1"
-      },
-      {
-        "key": "empty-2",
-        "user_id": "user-empty-2",
-        "client_id": "client-empty-2",
-        "database_key": "db-empty-2"
-      },
-      {
-        "key": "empty-3",
-        "user_id": "user-empty-3",
-        "client_id": "client-empty-3",
-        "database_key": "db-empty-3"
-      }
-    ],
-    "actions": [
-      {
-        "id": "NACT-PERF-SEEDED-EMPTY-STARTUP-001",
-        "phase": "setup",
-        "actor": "controller",
-        "command": "install-model",
-        "covers_step_ids": [],
-        "parameters": {}
-      },
-      {
-        "id": "NACT-PERF-SEEDED-EMPTY-STARTUP-002",
-        "phase": "exercise",
-        "actor": "artifact",
-        "command": "stage-step",
-        "covers_step_ids": [
-          "STEP-PERF-SEEDED-EMPTY-STARTUP-001"
-        ],
-        "parameters": {
-          "client_key": "seeded-1"
-        }
-      },
-      {
-        "id": "NACT-PERF-SEEDED-EMPTY-STARTUP-003",
-        "phase": "setup",
-        "actor": "client",
-        "command": "open",
-        "covers_step_ids": [],
-        "parameters": {
-          "client_key": "seeded-1",
-          "database_mode": "reuse",
-          "initialization": "seed",
-          "seed_step_id": "STEP-PERF-SEEDED-EMPTY-STARTUP-001"
-        }
-      },
-      {
-        "id": "NACT-PERF-SEEDED-EMPTY-STARTUP-004",
-        "phase": "setup",
-        "actor": "controller",
-        "command": "apply-step",
-        "covers_step_ids": [
-          "STEP-PERF-SEEDED-EMPTY-STARTUP-002"
-        ],
-        "parameters": {}
-      },
-      {
-        "id": "NACT-PERF-SEEDED-EMPTY-STARTUP-005",
-        "phase": "exercise",
-        "actor": "client",
-        "command": "synchronize-step",
-        "covers_step_ids": [
-          "STEP-PERF-SEEDED-EMPTY-STARTUP-003"
-        ],
-        "parameters": {
-          "client_key": "seeded-1",
-          "method": "start",
-          "completion": "idle"
-        }
-      },
-      {
-        "id": "NACT-PERF-SEEDED-EMPTY-STARTUP-006",
-        "phase": "exercise",
-        "actor": "artifact",
-        "command": "stage-step",
-        "covers_step_ids": [
-          "STEP-PERF-SEEDED-EMPTY-STARTUP-004"
-        ],
-        "parameters": {
-          "client_key": "seeded-2"
-        }
-      },
-      {
-        "id": "NACT-PERF-SEEDED-EMPTY-STARTUP-007",
-        "phase": "setup",
-        "actor": "client",
-        "command": "open",
-        "covers_step_ids": [],
-        "parameters": {
-          "client_key": "seeded-2",
-          "database_mode": "reuse",
-          "initialization": "seed",
-          "seed_step_id": "STEP-PERF-SEEDED-EMPTY-STARTUP-004"
-        }
-      },
-      {
-        "id": "NACT-PERF-SEEDED-EMPTY-STARTUP-008",
-        "phase": "setup",
-        "actor": "controller",
-        "command": "apply-step",
-        "covers_step_ids": [
-          "STEP-PERF-SEEDED-EMPTY-STARTUP-005"
-        ],
-        "parameters": {}
-      },
-      {
-        "id": "NACT-PERF-SEEDED-EMPTY-STARTUP-009",
-        "phase": "exercise",
-        "actor": "client",
-        "command": "synchronize-step",
-        "covers_step_ids": [
-          "STEP-PERF-SEEDED-EMPTY-STARTUP-006"
-        ],
-        "parameters": {
-          "client_key": "seeded-2",
-          "method": "start",
-          "completion": "idle"
-        }
-      },
-      {
-        "id": "NACT-PERF-SEEDED-EMPTY-STARTUP-010",
-        "phase": "exercise",
-        "actor": "artifact",
-        "command": "stage-step",
-        "covers_step_ids": [
-          "STEP-PERF-SEEDED-EMPTY-STARTUP-007"
-        ],
-        "parameters": {
-          "client_key": "seeded-3"
-        }
-      },
-      {
-        "id": "NACT-PERF-SEEDED-EMPTY-STARTUP-011",
-        "phase": "setup",
-        "actor": "client",
-        "command": "open",
-        "covers_step_ids": [],
-        "parameters": {
-          "client_key": "seeded-3",
-          "database_mode": "reuse",
-          "initialization": "seed",
-          "seed_step_id": "STEP-PERF-SEEDED-EMPTY-STARTUP-007"
-        }
-      },
-      {
-        "id": "NACT-PERF-SEEDED-EMPTY-STARTUP-012",
-        "phase": "setup",
-        "actor": "controller",
-        "command": "apply-step",
-        "covers_step_ids": [
-          "STEP-PERF-SEEDED-EMPTY-STARTUP-008"
-        ],
-        "parameters": {}
-      },
-      {
-        "id": "NACT-PERF-SEEDED-EMPTY-STARTUP-013",
-        "phase": "exercise",
-        "actor": "client",
-        "command": "synchronize-step",
-        "covers_step_ids": [
-          "STEP-PERF-SEEDED-EMPTY-STARTUP-009"
-        ],
-        "parameters": {
-          "client_key": "seeded-3",
-          "method": "start",
-          "completion": "idle"
-        }
-      },
-      {
-        "id": "NACT-PERF-SEEDED-EMPTY-STARTUP-014",
-        "phase": "setup",
-        "actor": "controller",
-        "command": "apply-step",
-        "covers_step_ids": [
-          "STEP-PERF-SEEDED-EMPTY-STARTUP-010"
-        ],
-        "parameters": {}
-      },
-      {
-        "id": "NACT-PERF-SEEDED-EMPTY-STARTUP-015",
-        "phase": "setup",
-        "actor": "client",
-        "command": "open",
-        "covers_step_ids": [],
-        "parameters": {
-          "client_key": "empty-1",
-          "database_mode": "create",
-          "initialization": "empty",
-          "seed_step_id": null
-        }
-      },
-      {
-        "id": "NACT-PERF-SEEDED-EMPTY-STARTUP-016",
-        "phase": "exercise",
-        "actor": "client",
-        "command": "synchronize-step",
-        "covers_step_ids": [
-          "STEP-PERF-SEEDED-EMPTY-STARTUP-011"
-        ],
-        "parameters": {
-          "client_key": "empty-1",
-          "method": "start",
-          "completion": "idle"
-        }
-      },
-      {
-        "id": "NACT-PERF-SEEDED-EMPTY-STARTUP-017",
-        "phase": "setup",
-        "actor": "controller",
-        "command": "apply-step",
-        "covers_step_ids": [
-          "STEP-PERF-SEEDED-EMPTY-STARTUP-012"
-        ],
-        "parameters": {}
-      },
-      {
-        "id": "NACT-PERF-SEEDED-EMPTY-STARTUP-018",
-        "phase": "setup",
-        "actor": "client",
-        "command": "open",
-        "covers_step_ids": [],
-        "parameters": {
-          "client_key": "empty-2",
-          "database_mode": "create",
-          "initialization": "empty",
-          "seed_step_id": null
-        }
-      },
-      {
-        "id": "NACT-PERF-SEEDED-EMPTY-STARTUP-019",
-        "phase": "exercise",
-        "actor": "client",
-        "command": "synchronize-step",
-        "covers_step_ids": [
-          "STEP-PERF-SEEDED-EMPTY-STARTUP-013"
-        ],
-        "parameters": {
-          "client_key": "empty-2",
-          "method": "start",
-          "completion": "idle"
-        }
-      },
-      {
-        "id": "NACT-PERF-SEEDED-EMPTY-STARTUP-020",
-        "phase": "setup",
-        "actor": "controller",
-        "command": "apply-step",
-        "covers_step_ids": [
-          "STEP-PERF-SEEDED-EMPTY-STARTUP-014"
-        ],
-        "parameters": {}
-      },
-      {
-        "id": "NACT-PERF-SEEDED-EMPTY-STARTUP-021",
-        "phase": "setup",
-        "actor": "client",
-        "command": "open",
-        "covers_step_ids": [],
-        "parameters": {
-          "client_key": "empty-3",
-          "database_mode": "create",
-          "initialization": "empty",
-          "seed_step_id": null
-        }
-      },
-      {
-        "id": "NACT-PERF-SEEDED-EMPTY-STARTUP-022",
-        "phase": "exercise",
-        "actor": "client",
-        "command": "synchronize-step",
-        "covers_step_ids": [
-          "STEP-PERF-SEEDED-EMPTY-STARTUP-015"
-        ],
-        "parameters": {
-          "client_key": "empty-3",
-          "method": "start",
-          "completion": "idle"
-        }
-      },
-      {
-        "id": "NACT-PERF-SEEDED-EMPTY-STARTUP-023",
-        "phase": "verify",
-        "actor": "observer",
-        "command": "capture",
-        "covers_step_ids": [],
-        "parameters": {
-          "client_keys": [
-            "seeded-1",
-            "seeded-2",
-            "seeded-3",
-            "empty-1",
-            "empty-2",
-            "empty-3"
-          ],
-          "sources": [
-            "application-rows",
-            "artifact-state",
-            "scope-state",
-            "sync-status",
-            "request-trace"
-          ],
-          "expectation_ids": [
-            "EXPECT-PERF-SEEDED-EMPTY-STARTUP-SEMANTIC-001",
-            "EXPECT-PERF-SEEDED-EMPTY-STARTUP-PERFORMANCE-001"
-          ]
-        }
-      },
-      {
-        "id": "NACT-PERF-SEEDED-EMPTY-STARTUP-024",
-        "phase": "verify",
-        "actor": "observer",
-        "command": "measure",
-        "covers_step_ids": [],
-        "parameters": {
-          "performance_budget_ids": [],
-          "measurement_ids": [
-            "MEAS-SEEDED-EMPTY-STARTUP-001"
-          ]
-        }
-      }
-    ]
-  },
+      "step_ids": [
+        "STEP-PERF-SEEDED-EMPTY-STARTUP-003",
+        "STEP-PERF-SEEDED-EMPTY-STARTUP-006",
+        "STEP-PERF-SEEDED-EMPTY-STARTUP-009",
+        "STEP-PERF-SEEDED-EMPTY-STARTUP-011",
+        "STEP-PERF-SEEDED-EMPTY-STARTUP-013",
+        "STEP-PERF-SEEDED-EMPTY-STARTUP-015"
+      ],
+      "expectation_ids": []
+    },
+    {
+      "kind": "scope-set-version",
+      "alias": "scope-set-version-one",
+      "value": 1,
+      "step_ids": [
+        "STEP-PERF-SEEDED-EMPTY-STARTUP-003",
+        "STEP-PERF-SEEDED-EMPTY-STARTUP-006",
+        "STEP-PERF-SEEDED-EMPTY-STARTUP-009",
+        "STEP-PERF-SEEDED-EMPTY-STARTUP-011",
+        "STEP-PERF-SEEDED-EMPTY-STARTUP-013",
+        "STEP-PERF-SEEDED-EMPTY-STARTUP-015"
+      ],
+      "expectation_ids": []
+    },
+    {
+      "kind": "scope",
+      "alias": "scope-a",
+      "value": "scope-a",
+      "step_ids": [
+        "STEP-PERF-SEEDED-EMPTY-STARTUP-002",
+        "STEP-PERF-SEEDED-EMPTY-STARTUP-003",
+        "STEP-PERF-SEEDED-EMPTY-STARTUP-005",
+        "STEP-PERF-SEEDED-EMPTY-STARTUP-006",
+        "STEP-PERF-SEEDED-EMPTY-STARTUP-008",
+        "STEP-PERF-SEEDED-EMPTY-STARTUP-009",
+        "STEP-PERF-SEEDED-EMPTY-STARTUP-010",
+        "STEP-PERF-SEEDED-EMPTY-STARTUP-012",
+        "STEP-PERF-SEEDED-EMPTY-STARTUP-014"
+      ],
+      "expectation_ids": []
+    }
+  ],
   "barrier_plan": {
     "barriers": [
       {
@@ -1252,6 +829,11 @@
       "phase": "exercise",
       "transport": "artifact",
       "description": "Execute the authored workload operation.",
+      "native_binding": {
+        "kind": "artifact",
+        "user_id": "user-seeded-1",
+        "client_id": "client-seeded-1"
+      },
       "operation": {
         "contract_operation": "artifact",
         "name": "install-portable-seed",
@@ -1271,6 +853,9 @@
       "phase": "setup",
       "transport": "model",
       "description": "Assign the authenticated client before startup.",
+      "native_binding": {
+        "kind": "controller"
+      },
       "operation": {
         "contract_operation": "model",
         "name": "set-client-assignments",
@@ -1293,7 +878,31 @@
       "phase": "exercise",
       "transport": "http",
       "description": "Connect the seeded client through the authenticated protocol.",
-      "measurement_sample": { "measurement_id": "MEAS-SEEDED-EMPTY-STARTUP-001", "stratum_id": "STR-STARTUP-SEEDED-001", "sample_id": "SAMPLE-SEEDED-EMPTY-STARTUP-SEEDED-001", "parameters": { "startup_state": "seeded" } },
+      "native_binding": {
+        "kind": "public-call",
+        "user_id": "user-seeded-1",
+        "client_id": "client-seeded-1",
+        "call_id": "seeded_startup_one",
+        "stage": "synchronous",
+        "method": "start",
+        "completion": "idle"
+      },
+      "measurement_sample": {
+        "measurement_id": "MEAS-SEEDED-EMPTY-STARTUP-001",
+        "stratum_id": "STR-STARTUP-SEEDED-001",
+        "sample_id": "SAMPLE-SEEDED-EMPTY-STARTUP-SEEDED-001",
+        "parameters": {
+          "startup_state": "seeded"
+        },
+        "operation": {
+          "id": "MOP-SEEDED-EMPTY-STARTUP-SEEDED-001",
+          "family": "startup-state",
+          "boundary": "seeded",
+          "value": {
+            "startup_state": "seeded"
+          }
+        }
+      },
       "operation": {
         "contract_operation": "connect",
         "name": "send",
@@ -1324,6 +933,11 @@
       "phase": "exercise",
       "transport": "artifact",
       "description": "Install the deterministic portable seed.",
+      "native_binding": {
+        "kind": "artifact",
+        "user_id": "user-seeded-2",
+        "client_id": "client-seeded-2"
+      },
       "operation": {
         "contract_operation": "artifact",
         "name": "install-portable-seed",
@@ -1343,6 +957,9 @@
       "phase": "setup",
       "transport": "model",
       "description": "Assign the authenticated client before startup.",
+      "native_binding": {
+        "kind": "controller"
+      },
       "operation": {
         "contract_operation": "model",
         "name": "set-client-assignments",
@@ -1365,7 +982,31 @@
       "phase": "exercise",
       "transport": "http",
       "description": "Connect the seeded client through the authenticated protocol.",
-      "measurement_sample": { "measurement_id": "MEAS-SEEDED-EMPTY-STARTUP-001", "stratum_id": "STR-STARTUP-SEEDED-001", "sample_id": "SAMPLE-SEEDED-EMPTY-STARTUP-SEEDED-002", "parameters": { "startup_state": "seeded" } },
+      "native_binding": {
+        "kind": "public-call",
+        "user_id": "user-seeded-2",
+        "client_id": "client-seeded-2",
+        "call_id": "seeded_startup_two",
+        "stage": "synchronous",
+        "method": "start",
+        "completion": "idle"
+      },
+      "measurement_sample": {
+        "measurement_id": "MEAS-SEEDED-EMPTY-STARTUP-001",
+        "stratum_id": "STR-STARTUP-SEEDED-001",
+        "sample_id": "SAMPLE-SEEDED-EMPTY-STARTUP-SEEDED-002",
+        "parameters": {
+          "startup_state": "seeded"
+        },
+        "operation": {
+          "id": "MOP-SEEDED-EMPTY-STARTUP-SEEDED-002",
+          "family": "startup-state",
+          "boundary": "seeded",
+          "value": {
+            "startup_state": "seeded"
+          }
+        }
+      },
       "operation": {
         "contract_operation": "connect",
         "name": "send",
@@ -1396,6 +1037,11 @@
       "phase": "exercise",
       "transport": "artifact",
       "description": "Install the deterministic portable seed.",
+      "native_binding": {
+        "kind": "artifact",
+        "user_id": "user-seeded-3",
+        "client_id": "client-seeded-3"
+      },
       "operation": {
         "contract_operation": "artifact",
         "name": "install-portable-seed",
@@ -1415,6 +1061,9 @@
       "phase": "setup",
       "transport": "model",
       "description": "Assign the authenticated client before startup.",
+      "native_binding": {
+        "kind": "controller"
+      },
       "operation": {
         "contract_operation": "model",
         "name": "set-client-assignments",
@@ -1437,7 +1086,31 @@
       "phase": "exercise",
       "transport": "http",
       "description": "Connect the seeded client through the authenticated protocol.",
-      "measurement_sample": { "measurement_id": "MEAS-SEEDED-EMPTY-STARTUP-001", "stratum_id": "STR-STARTUP-SEEDED-001", "sample_id": "SAMPLE-SEEDED-EMPTY-STARTUP-SEEDED-003", "parameters": { "startup_state": "seeded" } },
+      "native_binding": {
+        "kind": "public-call",
+        "user_id": "user-seeded-3",
+        "client_id": "client-seeded-3",
+        "call_id": "seeded_startup_three",
+        "stage": "synchronous",
+        "method": "start",
+        "completion": "idle"
+      },
+      "measurement_sample": {
+        "measurement_id": "MEAS-SEEDED-EMPTY-STARTUP-001",
+        "stratum_id": "STR-STARTUP-SEEDED-001",
+        "sample_id": "SAMPLE-SEEDED-EMPTY-STARTUP-SEEDED-003",
+        "parameters": {
+          "startup_state": "seeded"
+        },
+        "operation": {
+          "id": "MOP-SEEDED-EMPTY-STARTUP-SEEDED-003",
+          "family": "startup-state",
+          "boundary": "seeded",
+          "value": {
+            "startup_state": "seeded"
+          }
+        }
+      },
       "operation": {
         "contract_operation": "connect",
         "name": "send",
@@ -1468,6 +1141,9 @@
       "phase": "setup",
       "transport": "model",
       "description": "Assign the authenticated client before startup.",
+      "native_binding": {
+        "kind": "controller"
+      },
       "operation": {
         "contract_operation": "model",
         "name": "set-client-assignments",
@@ -1490,7 +1166,31 @@
       "phase": "exercise",
       "transport": "http",
       "description": "Connect the empty client through the authenticated protocol.",
-      "measurement_sample": { "measurement_id": "MEAS-SEEDED-EMPTY-STARTUP-001", "stratum_id": "STR-STARTUP-EMPTY-001", "sample_id": "SAMPLE-SEEDED-EMPTY-STARTUP-EMPTY-001", "parameters": { "startup_state": "empty" } },
+      "native_binding": {
+        "kind": "public-call",
+        "user_id": "user-empty-1",
+        "client_id": "client-empty-1",
+        "call_id": "empty_startup_one",
+        "stage": "synchronous",
+        "method": "start",
+        "completion": "idle"
+      },
+      "measurement_sample": {
+        "measurement_id": "MEAS-SEEDED-EMPTY-STARTUP-001",
+        "stratum_id": "STR-STARTUP-EMPTY-001",
+        "sample_id": "SAMPLE-SEEDED-EMPTY-STARTUP-EMPTY-001",
+        "parameters": {
+          "startup_state": "empty"
+        },
+        "operation": {
+          "id": "MOP-SEEDED-EMPTY-STARTUP-EMPTY-001",
+          "family": "startup-state",
+          "boundary": "empty",
+          "value": {
+            "startup_state": "empty"
+          }
+        }
+      },
       "operation": {
         "contract_operation": "connect",
         "name": "send",
@@ -1518,6 +1218,9 @@
       "phase": "setup",
       "transport": "model",
       "description": "Assign the authenticated client before startup.",
+      "native_binding": {
+        "kind": "controller"
+      },
       "operation": {
         "contract_operation": "model",
         "name": "set-client-assignments",
@@ -1540,7 +1243,31 @@
       "phase": "exercise",
       "transport": "http",
       "description": "Connect the empty client through the authenticated protocol.",
-      "measurement_sample": { "measurement_id": "MEAS-SEEDED-EMPTY-STARTUP-001", "stratum_id": "STR-STARTUP-EMPTY-001", "sample_id": "SAMPLE-SEEDED-EMPTY-STARTUP-EMPTY-002", "parameters": { "startup_state": "empty" } },
+      "native_binding": {
+        "kind": "public-call",
+        "user_id": "user-empty-2",
+        "client_id": "client-empty-2",
+        "call_id": "empty_startup_two",
+        "stage": "synchronous",
+        "method": "start",
+        "completion": "idle"
+      },
+      "measurement_sample": {
+        "measurement_id": "MEAS-SEEDED-EMPTY-STARTUP-001",
+        "stratum_id": "STR-STARTUP-EMPTY-001",
+        "sample_id": "SAMPLE-SEEDED-EMPTY-STARTUP-EMPTY-002",
+        "parameters": {
+          "startup_state": "empty"
+        },
+        "operation": {
+          "id": "MOP-SEEDED-EMPTY-STARTUP-EMPTY-002",
+          "family": "startup-state",
+          "boundary": "empty",
+          "value": {
+            "startup_state": "empty"
+          }
+        }
+      },
       "operation": {
         "contract_operation": "connect",
         "name": "send",
@@ -1568,6 +1295,9 @@
       "phase": "setup",
       "transport": "model",
       "description": "Assign the authenticated client before startup.",
+      "native_binding": {
+        "kind": "controller"
+      },
       "operation": {
         "contract_operation": "model",
         "name": "set-client-assignments",
@@ -1590,7 +1320,31 @@
       "phase": "exercise",
       "transport": "http",
       "description": "Connect the empty client through the authenticated protocol.",
-      "measurement_sample": { "measurement_id": "MEAS-SEEDED-EMPTY-STARTUP-001", "stratum_id": "STR-STARTUP-EMPTY-001", "sample_id": "SAMPLE-SEEDED-EMPTY-STARTUP-EMPTY-003", "parameters": { "startup_state": "empty" } },
+      "native_binding": {
+        "kind": "public-call",
+        "user_id": "user-empty-3",
+        "client_id": "client-empty-3",
+        "call_id": "empty_startup_three",
+        "stage": "synchronous",
+        "method": "start",
+        "completion": "idle"
+      },
+      "measurement_sample": {
+        "measurement_id": "MEAS-SEEDED-EMPTY-STARTUP-001",
+        "stratum_id": "STR-STARTUP-EMPTY-001",
+        "sample_id": "SAMPLE-SEEDED-EMPTY-STARTUP-EMPTY-003",
+        "parameters": {
+          "startup_state": "empty"
+        },
+        "operation": {
+          "id": "MOP-SEEDED-EMPTY-STARTUP-EMPTY-003",
+          "family": "startup-state",
+          "boundary": "empty",
+          "value": {
+            "startup_state": "empty"
+          }
+        }
+      },
       "operation": {
         "contract_operation": "connect",
         "name": "send",

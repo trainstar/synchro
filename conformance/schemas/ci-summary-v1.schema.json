@@ -1,0 +1,211 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://synchro.dev/conformance/schemas/ci-summary-v1.schema.json",
+  "title": "Synchro generated CI summary",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "$schema",
+    "schema_version",
+    "source_commit",
+    "status",
+    "artifact_hashes",
+    "gate_variables",
+    "obligations",
+    "coverage"
+  ],
+  "properties": {
+    "$schema": {
+      "const": "https://synchro.dev/conformance/schemas/ci-summary-v1.schema.json"
+    },
+    "schema_version": { "const": 1 },
+    "source_commit": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{40}$"
+    },
+    "status": { "const": "passed" },
+    "artifact_hashes": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/sha256" }
+    },
+    "gate_variables": {
+      "type": "array",
+      "minItems": 13,
+      "maxItems": 13,
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/gateVariable" }
+    },
+    "obligations": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/obligation" }
+    },
+    "coverage": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/coverage" }
+    }
+  },
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "gateVariable": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "value"],
+      "properties": {
+        "name": {
+          "enum": [
+            "BLACKBOX_TEST_COUNT",
+            "DETOX_ARGS",
+            "GO_TEST_ARGS",
+            "GO_TEST_PKGS",
+            "GRADLE_TEST_ARGS",
+            "KOTLIN_ANDROID_SERIAL",
+            "MUTATION_CONTROL_EXPECT",
+            "MUTATION_CONTROL_TEST",
+            "PGRX_TEST_NAME",
+            "RN_ANDROID_DETOX_CONFIG",
+            "SUPPORT_CELL_ID",
+            "SUPPORT_PLATFORM_VERSION",
+            "TESTRESULT_TEST_NAME"
+          ]
+        },
+        "value": {
+          "type": "string",
+          "maxLength": 4096,
+          "pattern": "^[^\\u0000\\r\\n]*$"
+        }
+      }
+    },
+    "obligation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "kind",
+        "status",
+        "terminal",
+        "test_count",
+        "artifact_hashes"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^(semantic/OBL-[A-Z0-9]+(?:-[A-Z0-9]+)*-[0-9]{3}|smoke/SUP-[A-Z0-9]+(?:-[A-Z0-9]+)*-[0-9]{3}/(connect|push|pull|kill|resume)|gate/[A-Za-z0-9_.-]+)$"
+        },
+        "kind": { "enum": ["semantic", "smoke", "gate"] },
+        "status": { "const": "passed" },
+        "terminal": { "const": true },
+        "test_count": { "type": "integer", "minimum": 1 },
+        "artifact_hashes": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/sha256" }
+        }
+      }
+    },
+    "coverage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "coverage_id",
+        "test_id",
+        "requirement_id",
+        "scenario_id",
+        "proof_obligation_id",
+        "assertion_id",
+        "support_cell_id",
+        "proof_type",
+        "proof_home"
+      ],
+      "properties": {
+        "coverage_id": {
+          "type": "string",
+          "pattern": "^COV-[A-F0-9]{16}$"
+        },
+        "test_id": {
+          "type": "string",
+          "pattern": "^(semantic/OBL-[A-Z0-9]+(?:-[A-Z0-9]+)*-[0-9]{3}|gate/(test-conformance|test-blackbox))$"
+        },
+        "requirement_id": {
+          "type": "string",
+          "pattern": "^SYNC-[A-Z][A-Z0-9]*(?:-[A-Z][A-Z0-9]*)*-[0-9]{3}$"
+        },
+        "scenario_id": {
+          "type": "string",
+          "pattern": "^SCN-[A-Z0-9]+(?:-[A-Z0-9]+)*-[0-9]{3}$"
+        },
+        "proof_obligation_id": {
+          "type": "string",
+          "pattern": "^OBL-[A-Z0-9]+(?:-[A-Z0-9]+)*-[0-9]{3}$"
+        },
+        "assertion_id": {
+          "type": "string",
+          "pattern": "^ASSERT-[A-Z0-9]+(?:-[A-Z0-9]+)*-[0-9]{3}$"
+        },
+        "support_cell_id": {
+          "oneOf": [
+            {
+              "type": "string",
+              "pattern": "^SUP-[A-Z0-9]+(?:-[A-Z0-9]+)*-[0-9]{3}$"
+            },
+            { "type": "null" }
+          ]
+        },
+        "proof_type": {
+          "enum": [
+            "reference-model",
+            "server-black-box",
+            "native-e2e",
+            "fault-injection",
+            "negative-control"
+          ]
+        },
+        "proof_home": {
+          "enum": ["scenario", "real-integration", "adversarial"]
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": { "proof_type": { "const": "server-black-box" } },
+            "required": ["proof_type"]
+          },
+          "then": {
+            "properties": { "proof_home": { "const": "real-integration" } }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "proof_type": {
+                "enum": ["fault-injection", "negative-control"]
+              }
+            },
+            "required": ["proof_type"]
+          },
+          "then": {
+            "properties": { "proof_home": { "const": "adversarial" } }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "proof_type": { "enum": ["reference-model", "native-e2e"] }
+            },
+            "required": ["proof_type"]
+          },
+          "then": {
+            "properties": { "proof_home": { "const": "scenario" } }
+          }
+        }
+      ]
+    }
+  }
+}

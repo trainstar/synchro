@@ -419,7 +419,7 @@ final class ChangeTracker: @unchecked Sendable {
                     SET lifecycle_state = 'sealed', sealed_batch_id = ?, sealed_ordinal = ?, updated_at = ?
                     WHERE mutation_id = ? AND lifecycle_state = 'unsealed'
                     """,
-                arguments: [batchID, ordinal, timestampNow(), change.mutationID]
+                arguments: [batchID, ordinal, SynchroDateCoding.now(), change.mutationID]
             )
             guard db.changesCount == 1 else {
                 throw SynchroError.invalidResponse(message: "mutation was not sealed exactly once")
@@ -458,7 +458,7 @@ final class ChangeTracker: @unchecked Sendable {
                 SET lifecycle_state = 'accepted', accepted_json = ?, updated_at = ?
                 WHERE mutation_id = ? AND lifecycle_state IN ('sealed', 'unsealed', 'legacy_blocked')
                 """,
-            arguments: [acceptedJSON, timestampNow(), mutationID]
+            arguments: [acceptedJSON, SynchroDateCoding.now(), mutationID]
         )
         guard db.changesCount == 1 else {
             throw SynchroError.invalidResponse(message: "accepted mutation identity is not mutable")
@@ -476,7 +476,7 @@ final class ChangeTracker: @unchecked Sendable {
                 SET lifecycle_state = 'rejected', rejected_json = ?, updated_at = ?
                 WHERE mutation_id = ? AND lifecycle_state IN ('sealed', 'unsealed', 'legacy_blocked')
                 """,
-            arguments: [rejectedJSON, timestampNow(), mutationID]
+            arguments: [rejectedJSON, SynchroDateCoding.now(), mutationID]
         )
         guard db.changesCount == 1 else {
             throw SynchroError.invalidResponse(message: "rejected mutation identity is not mutable")
@@ -514,7 +514,7 @@ final class ChangeTracker: @unchecked Sendable {
                 WHERE mutation_id = ? AND lifecycle_state = 'unsealed'
                   AND operation IN ('update', 'delete')
                 """,
-            arguments: [serverVersion, timestampNow(), mutationID]
+            arguments: [serverVersion, SynchroDateCoding.now(), mutationID]
         )
     }
 
@@ -537,7 +537,7 @@ final class ChangeTracker: @unchecked Sendable {
                 WHERE mutation_id IN (SELECT mutation_id FROM descendants)
                   AND lifecycle_state NOT IN ('accepted', 'rejected', 'superseded_before_send', 'cancelled_before_send')
                 """,
-            arguments: [predecessorID, timestampNow()]
+            arguments: [predecessorID, SynchroDateCoding.now()]
         )
     }
 
@@ -577,7 +577,7 @@ final class ChangeTracker: @unchecked Sendable {
             for entry in entries {
                 try db.execute(
                     sql: "UPDATE _synchro_pending_changes SET lifecycle_state = 'cancelled_before_send', updated_at = ? WHERE mutation_id = ? AND lifecycle_state = 'unsealed'",
-                    arguments: [timestampNow(), entry.mutationID]
+                    arguments: [SynchroDateCoding.now(), entry.mutationID]
                 )
             }
         }
@@ -589,7 +589,7 @@ final class ChangeTracker: @unchecked Sendable {
             for entry in entries {
                 try db.execute(
                     sql: "UPDATE _synchro_pending_changes SET lifecycle_state = 'cancelled_before_send', updated_at = ? WHERE table_name = ? AND record_id = ? AND lifecycle_state = 'unsealed'",
-                    arguments: [timestampNow(), entry.tableName, entry.recordID]
+                    arguments: [SynchroDateCoding.now(), entry.tableName, entry.recordID]
                 )
             }
         }
@@ -599,7 +599,7 @@ final class ChangeTracker: @unchecked Sendable {
         try database.writeTransaction { db in
             try db.execute(
                 sql: "UPDATE _synchro_pending_changes SET lifecycle_state = 'cancelled_before_send', updated_at = ? WHERE table_name = ? AND lifecycle_state = 'unsealed'",
-                arguments: [timestampNow(), table]
+                arguments: [SynchroDateCoding.now(), table]
             )
         }
     }
@@ -608,7 +608,7 @@ final class ChangeTracker: @unchecked Sendable {
         try database.writeTransaction { db in
             try db.execute(
                 sql: "UPDATE _synchro_pending_changes SET lifecycle_state = 'cancelled_before_send', updated_at = ? WHERE lifecycle_state = 'unsealed'",
-                arguments: [timestampNow()]
+                arguments: [SynchroDateCoding.now()]
             )
         }
     }
@@ -685,7 +685,7 @@ final class ChangeTracker: @unchecked Sendable {
                     for successor in chain[(deleteIndex + 1)...] {
                         try db.execute(
                             sql: "UPDATE _synchro_pending_changes SET lifecycle_state = 'blocked_by_predecessor', updated_at = ? WHERE mutation_id = ? AND lifecycle_state = 'unsealed'",
-                            arguments: [timestampNow(), successor.mutationID]
+                            arguments: [SynchroDateCoding.now(), successor.mutationID]
                         )
                     }
                 }
@@ -711,7 +711,7 @@ final class ChangeTracker: @unchecked Sendable {
             for successor in chain[(deleteIndex + 1)...] where successor.lifecycleState == "unsealed" {
                 try db.execute(
                     sql: "UPDATE _synchro_pending_changes SET lifecycle_state = 'blocked_by_predecessor', updated_at = ? WHERE mutation_id = ? AND lifecycle_state = 'unsealed'",
-                    arguments: [timestampNow(), successor.mutationID]
+                    arguments: [SynchroDateCoding.now(), successor.mutationID]
                 )
             }
         }
@@ -762,7 +762,7 @@ final class ChangeTracker: @unchecked Sendable {
         default: return
         }
         let normalizedID = UUID().uuidString.lowercased()
-        let now = timestampNow()
+        let now = SynchroDateCoding.now()
         try db.execute(
             sql: """
                     INSERT INTO _synchro_pending_changes
@@ -789,7 +789,7 @@ final class ChangeTracker: @unchecked Sendable {
     private func markSource(_ db: GRDB.Database, entry: PendingChange, state: String, normalizedID: String?) throws {
         try db.execute(
             sql: "UPDATE _synchro_pending_changes SET lifecycle_state = ?, normalized_mutation_id = ?, updated_at = ? WHERE mutation_id = ? AND lifecycle_state = 'unsealed'",
-            arguments: [state, normalizedID, timestampNow(), entry.mutationID]
+            arguments: [state, normalizedID, SynchroDateCoding.now(), entry.mutationID]
         )
     }
 
@@ -845,7 +845,4 @@ final class ChangeTracker: @unchecked Sendable {
         }
     }
 
-    private func timestampNow() -> String {
-        ISO8601DateFormatter().string(from: Date())
-    }
 }

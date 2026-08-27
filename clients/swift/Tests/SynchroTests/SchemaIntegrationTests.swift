@@ -237,6 +237,7 @@ final class SchemaIntegrationTests: XCTestCase {
         XCTAssertTrue(identifiers.contains("synchro_v10_rebuild_page_receipts"))
         XCTAssertTrue(identifiers.contains("synchro_v11_durable_backoff"))
         XCTAssertTrue(identifiers.contains("synchro_v12_gate2_recovery"))
+        XCTAssertTrue(identifiers.contains("synchro_v13_scope_text_affinity"))
         XCTAssertEqual(
             try Data(contentsOf: URL(fileURLWithPath: canonicalSeedPath)),
             sourceBeforeInstall
@@ -640,5 +641,170 @@ final class SchemaIntegrationTests: XCTestCase {
 
         await client.stop()
         try await client.close()
+    }
+}
+
+final class ClientSchemaIdentityTests: XCTestCase {
+    private struct CatalogEntry: Equatable {
+        let type: String
+        let name: String
+        let tableName: String
+        let sql: String
+    }
+
+    func testCanonicalGoSeedDDLConvergesWithFreshSwiftDDL() throws {
+        let migratedPath = tempDBPath()
+        let freshPath = tempDBPath()
+        let seedPath = canonicalSeedPath()
+        let sourceBytes = try Data(contentsOf: URL(fileURLWithPath: seedPath))
+        addTeardownBlock {
+            self.removeDatabaseFamily(at: migratedPath)
+            self.removeDatabaseFamily(at: freshPath)
+        }
+
+        try SeedDatabaseInstaller.installIfNeeded(
+            seedPath: seedPath,
+            databasePath: migratedPath
+        )
+        let migrated = try SynchroDatabase(path: migratedPath)
+        let fresh = try SynchroDatabase(path: freshPath)
+        defer {
+            try? migrated.close()
+            try? fresh.close()
+        }
+
+        let tables = try XCTUnwrap(SchemaManager(database: migrated).loadStoredLocalSchema())
+        try fresh.writeTransaction { db in
+            try SchemaManager(database: fresh).createSyncedTablesInTransaction(
+                db,
+                tables: tables
+            )
+        }
+
+        XCTAssertEqual(try migrationIdentifiers(migrated), try migrationIdentifiers(fresh))
+        let expected = try schemaCatalog(fresh)
+        assertCatalogEqual(try schemaCatalog(migrated), expected)
+
+        try migrated.writeTransaction { db in
+            try db.execute(sql: "ALTER TABLE _synchro_scopes ADD COLUMN ddl_identity_drift TEXT")
+        }
+        XCTAssertNotEqual(try schemaCatalog(migrated), expected)
+        XCTAssertEqual(try Data(contentsOf: URL(fileURLWithPath: seedPath)), sourceBytes)
+        for suffix in ["-journal", "-wal", "-shm"] {
+            XCTAssertFalse(FileManager.default.fileExists(atPath: seedPath + suffix))
+        }
+    }
+
+    private func canonicalSeedPath() -> String {
+        var clientsDirectory = URL(fileURLWithPath: #filePath)
+        for _ in 0..<4 {
+            clientsDirectory.deleteLastPathComponent()
+        }
+        return clientsDirectory
+            .appendingPathComponent("swift/.build/test-results/schema-identity-seed.db")
+            .path
+    }
+
+    private func tempDBPath() -> String {
+        NSTemporaryDirectory() + UUID().uuidString + ".sqlite"
+    }
+
+    private func schemaCatalog(_ database: SynchroDatabase) throws -> [CatalogEntry] {
+        try database.query(
+            """
+            SELECT type, name, tbl_name, sql
+            FROM sqlite_master
+            WHERE type IN ('table', 'index', 'trigger')
+              AND name NOT LIKE 'sqlite_%'
+              AND name != 'grdb_migrations'
+              AND sql IS NOT NULL
+            ORDER BY type, name
+            """,
+            params: nil
+        ).map { row in
+            CatalogEntry(
+                type: row["type"],
+                name: row["name"],
+                tableName: row["tbl_name"],
+                sql: canonicalDDL(row["sql"])
+            )
+        }
+    }
+
+    private func canonicalDDL(_ source: String) -> String {
+        let characters = Array(source)
+        var output = ""
+        var pendingSpace = false
+        var quoteEnd: Character?
+        var index = 0
+        while index < characters.count {
+            let character = characters[index]
+            if let activeQuote = quoteEnd {
+                output.append(character)
+                if character == activeQuote {
+                    if index + 1 < characters.count, characters[index + 1] == activeQuote {
+                        index += 1
+                        output.append(characters[index])
+                    } else {
+                        quoteEnd = nil
+                    }
+                }
+                index += 1
+                continue
+            }
+            if character.isWhitespace {
+                pendingSpace = !output.isEmpty
+                index += 1
+                continue
+            }
+            if pendingSpace,
+               let previous = output.last,
+               !"(,".contains(previous),
+               !"),;".contains(character) {
+                output.append(" ")
+            }
+            pendingSpace = false
+            switch character {
+            case "'", "\"", "`": quoteEnd = character
+            case "[": quoteEnd = "]"
+            default: break
+            }
+            output.append(character)
+            index += 1
+        }
+        return output
+    }
+
+    private func migrationIdentifiers(_ database: SynchroDatabase) throws -> Set<String> {
+        Set(try database.query(
+            "SELECT identifier FROM grdb_migrations",
+            params: nil
+        ).map { row in row["identifier"] })
+    }
+
+    private func assertCatalogEqual(
+        _ actual: [CatalogEntry],
+        _ expected: [CatalogEntry],
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) {
+        guard actual.count == expected.count else {
+            XCTFail("catalog entry count \(actual.count) differs from \(expected.count)", file: file, line: line)
+            return
+        }
+        for (actualEntry, expectedEntry) in zip(actual, expected) where actualEntry != expectedEntry {
+            XCTFail(
+                "catalog entry \(actualEntry.type)/\(actualEntry.name) differs: \(actualEntry.sql) != \(expectedEntry.sql)",
+                file: file,
+                line: line
+            )
+            return
+        }
+    }
+
+    private func removeDatabaseFamily(at path: String) {
+        for suffix in ["", "-journal", "-wal", "-shm"] {
+            try? FileManager.default.removeItem(atPath: path + suffix)
+        }
     }
 }

@@ -20,7 +20,7 @@
   ],
   "proof_obligations": [
     {
-      "obligation_id": "OBL-WAL-DECODE-PG-001",
+      "obligation_id": "OBL-WAL-DECODE-PG-LINUX-X64-001",
       "requirement_ids": [
         "SYNC-WAL-006"
       ],
@@ -28,7 +28,7 @@
         "ASSERT-WAL-DECODE-SEMANTIC-001"
       ],
       "proof_type": "server-black-box",
-      "support_cell_id": "SUP-PG-018",
+      "support_cell_id": "SUP-PG-LINUX-X64-001",
       "artifact_inventory_ids": [
         "ARTDEF-PG-EXTENSION-001",
         "ARTDEF-ADAPTER-001"
@@ -45,7 +45,32 @@
       "control_id": null
     },
     {
-      "obligation_id": "OBL-WAL-DECODE-FAULT-001",
+      "obligation_id": "OBL-WAL-DECODE-PG-MACOS-ARM64-001",
+      "requirement_ids": [
+        "SYNC-WAL-006"
+      ],
+      "assertion_ids": [
+        "ASSERT-WAL-DECODE-SEMANTIC-001"
+      ],
+      "proof_type": "server-black-box",
+      "support_cell_id": "SUP-PG-MACOS-ARM64-001",
+      "artifact_inventory_ids": [
+        "ARTDEF-PG-EXTENSION-001",
+        "ARTDEF-ADAPTER-001"
+      ],
+      "performance_budget_ids": [],
+      "required_measurement_ids": [],
+      "required_vector_set_ids": [],
+      "make_target": "test-blackbox",
+      "argv": [
+        "make",
+        "test-blackbox"
+      ],
+      "fault_plan_id": null,
+      "control_id": null
+    },
+    {
+      "obligation_id": "OBL-WAL-DECODE-FAULT-LINUX-X64-001",
       "requirement_ids": [
         "SYNC-WAL-006"
       ],
@@ -53,7 +78,32 @@
         "ASSERT-WAL-DECODE-SEMANTIC-001"
       ],
       "proof_type": "fault-injection",
-      "support_cell_id": "SUP-PG-018",
+      "support_cell_id": "SUP-PG-LINUX-X64-001",
+      "artifact_inventory_ids": [
+        "ARTDEF-PG-EXTENSION-001",
+        "ARTDEF-ADAPTER-001"
+      ],
+      "performance_budget_ids": [],
+      "required_measurement_ids": [],
+      "required_vector_set_ids": [],
+      "make_target": "test-blackbox",
+      "argv": [
+        "make",
+        "test-blackbox"
+      ],
+      "fault_plan_id": "FPL-WAL-DECODE-001",
+      "control_id": "CTRL-WAL-006"
+    },
+    {
+      "obligation_id": "OBL-WAL-DECODE-FAULT-MACOS-ARM64-001",
+      "requirement_ids": [
+        "SYNC-WAL-006"
+      ],
+      "assertion_ids": [
+        "ASSERT-WAL-DECODE-SEMANTIC-001"
+      ],
+      "proof_type": "fault-injection",
+      "support_cell_id": "SUP-PG-MACOS-ARM64-001",
       "artifact_inventory_ids": [
         "ARTDEF-PG-EXTENSION-001",
         "ARTDEF-ADAPTER-001"
@@ -99,18 +149,34 @@
     {
       "scenario_id": "SCN-WAL-DECODE-FAILURE-001",
       "requirement_id": "SYNC-WAL-006",
-      "proof_obligation_id": "OBL-WAL-DECODE-PG-001",
+      "proof_obligation_id": "OBL-WAL-DECODE-PG-LINUX-X64-001",
       "assertion_id": "ASSERT-WAL-DECODE-SEMANTIC-001",
       "proof_type": "server-black-box",
-      "support_cell_id": "SUP-PG-018"
+      "support_cell_id": "SUP-PG-LINUX-X64-001"
     },
     {
       "scenario_id": "SCN-WAL-DECODE-FAILURE-001",
       "requirement_id": "SYNC-WAL-006",
-      "proof_obligation_id": "OBL-WAL-DECODE-FAULT-001",
+      "proof_obligation_id": "OBL-WAL-DECODE-PG-MACOS-ARM64-001",
+      "assertion_id": "ASSERT-WAL-DECODE-SEMANTIC-001",
+      "proof_type": "server-black-box",
+      "support_cell_id": "SUP-PG-MACOS-ARM64-001"
+    },
+    {
+      "scenario_id": "SCN-WAL-DECODE-FAILURE-001",
+      "requirement_id": "SYNC-WAL-006",
+      "proof_obligation_id": "OBL-WAL-DECODE-FAULT-LINUX-X64-001",
       "assertion_id": "ASSERT-WAL-DECODE-SEMANTIC-001",
       "proof_type": "fault-injection",
-      "support_cell_id": "SUP-PG-018"
+      "support_cell_id": "SUP-PG-LINUX-X64-001"
+    },
+    {
+      "scenario_id": "SCN-WAL-DECODE-FAILURE-001",
+      "requirement_id": "SYNC-WAL-006",
+      "proof_obligation_id": "OBL-WAL-DECODE-FAULT-MACOS-ARM64-001",
+      "assertion_id": "ASSERT-WAL-DECODE-SEMANTIC-001",
+      "proof_type": "fault-injection",
+      "support_cell_id": "SUP-PG-MACOS-ARM64-001"
     },
     {
       "scenario_id": "SCN-WAL-DECODE-FAILURE-001",

@@ -27,7 +27,7 @@
 		761780EC2CA45674006654EE /* AppDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = AppDelegate.swift; path = SynchroReactNativeExample/AppDelegate.swift; sourceTree = "<group>"; };
 		81AB9BB72411601600AC10FF /* LaunchScreen.storyboard */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = file.storyboard; name = LaunchScreen.storyboard; path = SynchroReactNativeExample/LaunchScreen.storyboard; sourceTree = "<group>"; };
 		A1B2C3D4E5F60718900CORR1 /* corrupt-seed.db */ = {isa = PBXFileReference; lastKnownFileType = file; name = "corrupt-seed.db"; path = "../corrupt-seed.db"; sourceTree = "<group>"; };
-		A1B2C3D4E5F60718900SEED1 /* seed.db */ = {isa = PBXFileReference; lastKnownFileType = file; name = seed.db; path = ../seed.db; sourceTree = "<group>"; };
+		A1B2C3D4E5F60718900SEED1 /* seed.db */ = {isa = PBXFileReference; lastKnownFileType = file; name = seed.db; path = ../verification/seed.db; sourceTree = "<group>"; };
 		ED297162215061F000B7C4FE /* JavaScriptCore.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = JavaScriptCore.framework; path = System/Library/Frameworks/JavaScriptCore.framework; sourceTree = SDKROOT; };
 /* End PBXFileReference section */
 

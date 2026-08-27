@@ -12,17 +12,83 @@ private struct ObservedQueryParams: @unchecked Sendable {
     let values: [(any DatabaseValueConvertible)?]?
 }
 
+private final class ProvenanceMaintenanceWorkObserver: TransactionObserver, @unchecked Sendable {
+    private static let tableName = "_synchro_scope_rows"
+
+    private let lock = NSLock()
+    private var pendingEventCount: Int64 = 0
+    private var committedCursor: Int64 = 0
+
+    func observes(eventsOfKind eventKind: DatabaseEventKind) -> Bool {
+        guard eventKind.tableName == Self.tableName else { return false }
+        switch eventKind {
+        case .insert, .update, .delete:
+            return true
+        }
+    }
+
+    func databaseDidChange() {
+        // Only row-level events contribute to this cursor.
+    }
+
+    func databaseDidChange(with event: DatabaseEvent) {
+        guard event.tableName == Self.tableName else { return }
+        switch event.kind {
+        case .insert, .update, .delete:
+            lock.lock()
+            if pendingEventCount < Int64.max {
+                pendingEventCount += 1
+            }
+            lock.unlock()
+        }
+    }
+
+    func databaseDidCommit(_ db: GRDB.Database) {
+        _ = db
+        lock.lock()
+        if Int64.max - committedCursor < pendingEventCount {
+            committedCursor = Int64.max
+        } else {
+            committedCursor += pendingEventCount
+        }
+        pendingEventCount = 0
+        lock.unlock()
+    }
+
+    func databaseDidRollback(_ db: GRDB.Database) {
+        _ = db
+        lock.lock()
+        pendingEventCount = 0
+        lock.unlock()
+    }
+
+    func inspection() -> ProvenanceMaintenanceWorkInspection {
+        lock.lock()
+        defer { lock.unlock() }
+        return ProvenanceMaintenanceWorkInspection(cursor: committedCursor)
+    }
+}
+
 final class SynchroDatabase: @unchecked Sendable {
     let dbPool: DatabasePool
     let path: String
     private let applicationPolicy = ApplicationSQLPolicy()
+    private let provenanceMaintenanceWorkObserver: ProvenanceMaintenanceWorkObserver
     private var applicationDatabase: ApplicationDatabase!
     private let changeObservers = OSAllocatedUnfairLock(initialState: [UUID: () -> Void]())
 
     init(path: String) throws {
         self.path = path
+        let provenanceMaintenanceWorkObserver = ProvenanceMaintenanceWorkObserver()
+        self.provenanceMaintenanceWorkObserver = provenanceMaintenanceWorkObserver
         var config = Configuration()
         config.journalMode = .wal
+        config.prepareDatabase { database in
+            database.add(
+                transactionObserver: provenanceMaintenanceWorkObserver,
+                extent: .databaseLifetime
+            )
+        }
         self.dbPool = try DatabasePool(path: path, configuration: config)
         try runMigrations()
         let storedTables = try dbPool.read { db -> [LocalSchemaTable] in
@@ -87,6 +153,18 @@ final class SynchroDatabase: @unchecked Sendable {
         }
         notifyDatabaseChange()
         return result
+    }
+
+    func inspectProvenanceMaintenanceWork() -> ProvenanceMaintenanceWorkInspection {
+        provenanceMaintenanceWorkObserver.inspection()
+    }
+
+    func stateInspectionTransaction<T>(
+        _ block: (GRDB.Database, ProvenanceMaintenanceWorkInspection) throws -> T
+    ) throws -> T {
+        try dbPool.write { db in
+            try block(db, provenanceMaintenanceWorkObserver.inspection())
+        }
     }
 
     func applicationWriteTransaction<T>(
@@ -682,6 +760,47 @@ final class SynchroDatabase: @unchecked Sendable {
                     phase TEXT NOT NULL CHECK (phase IN ('prepared', 'applied')),
                     is_schema_reset INTEGER NOT NULL CHECK (is_schema_reset IN (0, 1))
                 )
+                """)
+        }
+        migrator.registerMigration("synchro_v13_scope_text_affinity") { db in
+            try db.execute(sql: """
+                CREATE TABLE _synchro_scopes_v13 (
+                    scope_id TEXT PRIMARY KEY,
+                    cursor TEXT,
+                    checksum TEXT,
+                    generation INTEGER NOT NULL DEFAULT 0,
+                    local_checksum TEXT NOT NULL DEFAULT ''
+                )
+                """)
+            try db.execute(sql: """
+                INSERT INTO _synchro_scopes_v13
+                    (scope_id, cursor, checksum, generation, local_checksum)
+                SELECT scope_id, cursor, CAST(checksum AS TEXT), generation, CAST(local_checksum AS TEXT)
+                FROM _synchro_scopes
+                """)
+            try db.execute(sql: """
+                CREATE TABLE _synchro_scope_rows_v13 (
+                    scope_id TEXT NOT NULL,
+                    table_name TEXT NOT NULL,
+                    record_id TEXT NOT NULL,
+                    checksum TEXT NOT NULL,
+                    generation INTEGER NOT NULL DEFAULT 0,
+                    PRIMARY KEY (scope_id, table_name, record_id)
+                )
+                """)
+            try db.execute(sql: """
+                INSERT INTO _synchro_scope_rows_v13
+                    (scope_id, table_name, record_id, checksum, generation)
+                SELECT scope_id, table_name, record_id, CAST(checksum AS TEXT), generation
+                FROM _synchro_scope_rows
+                """)
+            try db.execute(sql: "DROP TABLE _synchro_scope_rows")
+            try db.execute(sql: "DROP TABLE _synchro_scopes")
+            try db.execute(sql: "ALTER TABLE _synchro_scopes_v13 RENAME TO _synchro_scopes")
+            try db.execute(sql: "ALTER TABLE _synchro_scope_rows_v13 RENAME TO _synchro_scope_rows")
+            try db.execute(sql: """
+                CREATE INDEX idx_synchro_scope_rows_record
+                ON _synchro_scope_rows (table_name, record_id)
                 """)
         }
         try migrator.migrate(dbPool)

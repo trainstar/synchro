@@ -341,10 +341,237 @@ fn synchro_activate_projection_bootstrap(bootstrap_id: pgrx::Uuid) -> pgrx::Json
 }
 
 #[pg_extern(stable)]
+fn synchro_projection_bootstrap_active_stream() -> pgrx::JsonB {
+    match Spi::connect(|client| -> Result<serde_json::Value, String> {
+        let row = client
+            .select(
+                "SELECT active_slot_name::text AS active_slot_name, stream_generation
+                 FROM synchro.sync_runtime_state
+                 WHERE singleton",
+                None,
+                &[],
+            )
+            .map_err(|_| "loading projection bootstrap active stream failed".to_string())?
+            .first();
+        let active_slot_name = required_text(&row, "active_slot_name")?;
+        validate_slot_name(&active_slot_name)?;
+        Ok(serde_json::json!({
+            "active_slot_name": active_slot_name,
+            "stream_generation": required_text(&row, "stream_generation")?,
+        }))
+    }) {
+        Ok(value) => pgrx::JsonB(value),
+        Err(_) => pgrx::error!("projection bootstrap active stream read failed"),
+    }
+}
+
+#[pg_extern(stable)]
+fn synchro_projection_bootstrap_main_boundary(stream_generation: &str, marker_lsn: &str) -> bool {
+    if stream_generation.is_empty() || marker_lsn.is_empty() {
+        pgrx::error!("projection bootstrap main boundary input is invalid");
+    }
+    match Spi::connect(|client| -> Result<bool, String> {
+        let row = client
+            .select(
+                "SELECT COALESCE(
+                     stream_generation = $1
+                     AND materialized_end_lsn >= $2::pg_lsn,
+                     false
+                 ) AS ready
+                 FROM synchro.sync_wal_progress
+                 WHERE singleton",
+                None,
+                &[stream_generation.into(), marker_lsn.into()],
+            )
+            .map_err(|_| "loading projection bootstrap main boundary failed".to_string())?
+            .first();
+        required_bool(&row, "ready")
+    }) {
+        Ok(ready) => ready,
+        Err(_) => pgrx::error!("projection bootstrap main boundary read failed"),
+    }
+}
+
+#[pg_extern(stable)]
+fn synchro_projection_bootstrap_slot_absent(candidate_slot_name: &str) -> bool {
+    if validate_slot_name(candidate_slot_name).is_err() {
+        pgrx::error!("projection bootstrap candidate slot is invalid");
+    }
+    match Spi::connect(|client| {
+        let row = client
+            .select(
+                "SELECT NOT EXISTS (
+                     SELECT 1
+                     FROM pg_catalog.pg_replication_slots
+                     WHERE slot_name = $1
+                 ) AS absent",
+                None,
+                &[candidate_slot_name.into()],
+            )
+            .map_err(|_| "loading projection bootstrap candidate slot failed".to_string())?
+            .first();
+        required_bool(&row, "absent")
+    }) {
+        Ok(absent) => absent,
+        Err(_) => pgrx::error!("projection bootstrap candidate slot read failed"),
+    }
+}
+
+#[pg_extern(stable)]
+fn synchro_projection_bootstrap_slot_drop_state(candidate_slot_name: &str) -> pgrx::JsonB {
+    if validate_slot_name(candidate_slot_name).is_err() {
+        pgrx::error!("projection bootstrap candidate slot is invalid");
+    }
+    match Spi::connect(|client| -> Result<serde_json::Value, String> {
+        let rows = client
+            .select(
+                "SELECT active_pid IS NOT NULL AS active,
+                        slot_type = 'logical' AND plugin = 'pgoutput'
+                        AND datoid = (
+                            SELECT oid
+                            FROM pg_catalog.pg_database
+                            WHERE datname = pg_catalog.current_database()
+                        )
+                        AND NOT temporary AS valid
+                 FROM pg_catalog.pg_replication_slots
+                 WHERE slot_name = $1",
+                None,
+                &[candidate_slot_name.into()],
+            )
+            .map_err(|_| "loading projection bootstrap candidate slot failed".to_string())?;
+        let Some(row) = rows.into_iter().next() else {
+            return Ok(serde_json::json!({
+                "present": false,
+                "active": false,
+                "valid": true,
+            }));
+        };
+        Ok(serde_json::json!({
+            "present": true,
+            "active": required_bool(&row, "active")?,
+            "valid": required_bool(&row, "valid")?,
+        }))
+    }) {
+        Ok(value) => pgrx::JsonB(value),
+        Err(_) => pgrx::error!("projection bootstrap candidate slot read failed"),
+    }
+}
+
+#[pg_extern(stable)]
+fn synchro_projection_bootstrap_next_aborted_slot() -> Option<String> {
+    match Spi::connect(|client| -> Result<Option<String>, String> {
+        let rows = client
+            .select(
+                "SELECT reset.candidate_slot_name::text AS candidate_slot_name
+                 FROM synchro.sync_stream_resets reset
+                 JOIN pg_catalog.pg_replication_slots slot
+                   ON slot.slot_name = reset.candidate_slot_name::text
+                  AND slot.slot_type = 'logical'
+                  AND slot.plugin = reset.plugin
+                  AND slot.datoid = reset.database_oid
+                  AND NOT slot.temporary
+                 WHERE reset.operation_kind = 'projection_bootstrap'
+                   AND reset.lifecycle = 'aborted'
+                 ORDER BY reset.aborted_at, reset.reset_id
+                 LIMIT 1",
+                None,
+                &[],
+            )
+            .map_err(|_| "loading aborted projection bootstrap slot failed".to_string())?;
+        let Some(row) = rows.into_iter().next() else {
+            return Ok(None);
+        };
+        let slot_name = required_text(&row, "candidate_slot_name")?;
+        validate_slot_name(&slot_name)?;
+        Ok(Some(slot_name))
+    }) {
+        Ok(slot_name) => slot_name,
+        Err(_) => pgrx::error!("aborted projection bootstrap slot read failed"),
+    }
+}
+
+#[pg_extern(stable)]
+fn synchro_projection_bootstrap_is_activated(bootstrap_id: pgrx::Uuid) -> bool {
+    let bootstrap_id = bootstrap_id.to_string();
+    match Spi::connect(|client| {
+        let row = client
+            .select(
+                "SELECT lifecycle IN ('activated', 'cleanup_complete') AS activated
+                 FROM synchro.sync_stream_resets
+                 WHERE reset_id = $1::uuid
+                   AND operation_kind = 'projection_bootstrap'",
+                None,
+                &[bootstrap_id.into()],
+            )
+            .map_err(|_| "loading projection bootstrap activation state failed".to_string())?
+            .first();
+        required_bool(&row, "activated")
+    }) {
+        Ok(activated) => activated,
+        Err(_) => pgrx::error!("projection bootstrap activation state read failed"),
+    }
+}
+
+#[pg_extern(stable)]
+fn synchro_projection_bootstrap_interrupted() -> pgrx::JsonB {
+    match Spi::connect(|client| -> Result<serde_json::Value, String> {
+        let rows = client
+            .select(
+                "SELECT reset_id::text AS reset_id
+                 FROM synchro.sync_stream_resets
+                 WHERE operation_kind = 'projection_bootstrap'
+                   AND lifecycle IN ('preparing', 'baseline_staged', 'catching_up', 'activated')
+                 ORDER BY prepared_at
+                 LIMIT 1",
+                None,
+                &[],
+            )
+            .map_err(|_| "loading interrupted projection bootstrap failed".to_string())?;
+        let Some(row) = rows.into_iter().next() else {
+            return Ok(serde_json::json!({
+                "present": false,
+                "bootstrap_id": null,
+                "source_stream_generation": null,
+                "target_stream_generation": null,
+                "source_registry_generation": null,
+                "target_registry_generation": null,
+                "old_slot_name": null,
+                "candidate_slot_name": null,
+                "target_schema_version": null,
+                "target_schema_hash": null,
+                "activation_barrier": null,
+                "affected_scopes": [],
+                "lifecycle": null,
+            }));
+        };
+        let reset_id = required_text(&row, "reset_id")?;
+        let reset = load_reset(client, &reset_id)?;
+        Ok(serde_json::json!({
+            "present": true,
+            "bootstrap_id": reset.reset_id,
+            "source_stream_generation": reset.source_stream_generation,
+            "target_stream_generation": reset.target_stream_generation,
+            "source_registry_generation": reset.source_registry_generation,
+            "target_registry_generation": reset.target_registry_generation,
+            "old_slot_name": reset.old_slot_name,
+            "candidate_slot_name": reset.candidate_slot_name,
+            "target_schema_version": reset.target_schema_version,
+            "target_schema_hash": reset.target_schema_hash,
+            "activation_barrier": reset.activation_barrier,
+            "affected_scopes": reset.affected_scopes.unwrap_or_default(),
+            "lifecycle": reset.lifecycle,
+        }))
+    }) {
+        Ok(value) => pgrx::JsonB(value),
+        Err(_) => pgrx::error!("interrupted projection bootstrap read failed"),
+    }
+}
+
+#[pg_extern(stable)]
 fn synchro_projection_bootstrap_status(bootstrap_id: pgrx::Uuid) -> pgrx::JsonB {
     let bootstrap_id = bootstrap_id.to_string();
-    match Spi::connect_mut(|client| {
-        let reset = load_reset(client, &bootstrap_id, false)?;
+    match Spi::connect(|client| {
+        let reset = load_reset(client, &bootstrap_id)?;
         if !reset.is_projection_bootstrap() {
             return Err("projection bootstrap does not exist".to_string());
         }
@@ -588,7 +815,7 @@ fn mark_stream_reset_snapshot(
         return Err("reset snapshot marker phase is invalid".to_string());
     }
     lock_reset_state(client)?;
-    let reset = load_reset(client, reset_id, false)?;
+    let reset = load_reset(client, reset_id)?;
     if reset.lifecycle != "preparing" {
         return Err("reset is not preparing".to_string());
     }
@@ -653,7 +880,7 @@ fn lock_stream_reset_sources(
         )
         .map_err(|_| "locking stream reset operation failed".to_string())?;
     let result = (|| {
-        let reset = load_reset(client, reset_id, false)?;
+        let reset = load_reset(client, reset_id)?;
         if reset.lifecycle != "preparing" {
             return Err("reset is not preparing".to_string());
         }
@@ -702,7 +929,7 @@ fn lock_stream_reset_sources_after_registry_lock(
             )
             .map_err(|_| "locking reset gate failed".to_string())?;
     }
-    let reset = load_reset(client, &reset.reset_id, false)?;
+    let reset = load_reset(client, &reset.reset_id)?;
     if reset.lifecycle != "preparing" {
         return Err("reset is not preparing".to_string());
     }
@@ -782,7 +1009,7 @@ fn stage_stream_reset(
     validate_snapshot_name(exported_snapshot_name)?;
     let normalized_point = normalize_lsn(client, consistent_point)?;
     lock_reset_state(client)?;
-    let reset = load_reset(client, reset_id, false)?;
+    let reset = load_reset(client, reset_id)?;
     if reset.is_projection_bootstrap()
         || reset.lifecycle != "preparing"
         || reset.candidate_slot_name != candidate_slot_name
@@ -904,7 +1131,7 @@ fn stage_projection_bootstrap(
     validate_snapshot_name(exported_snapshot_name)?;
     let normalized_point = normalize_lsn(client, consistent_point)?;
     lock_reset_state(client)?;
-    let reset = load_reset(client, bootstrap_id, false)?;
+    let reset = load_reset(client, bootstrap_id)?;
     if !reset.is_projection_bootstrap()
         || reset.lifecycle != "preparing"
         || reset.candidate_slot_name != candidate_slot_name
@@ -1018,7 +1245,7 @@ fn request_projection_bootstrap_barrier(
 ) -> Result<serde_json::Value, String> {
     acquire_stream_reset_operation_lock(client)?;
     lock_reset_state(client)?;
-    let reset = load_reset(client, bootstrap_id, false)?;
+    let reset = load_reset(client, bootstrap_id)?;
     if !reset.is_projection_bootstrap() || reset.lifecycle != "baseline_staged" {
         return Err("projection bootstrap baseline is not staged".to_string());
     }
@@ -1088,7 +1315,7 @@ fn emit_projection_bootstrap_barrier(
 ) -> Result<serde_json::Value, String> {
     acquire_stream_reset_operation_lock(client)?;
     lock_reset_state(client)?;
-    let reset = load_reset(client, bootstrap_id, false)?;
+    let reset = load_reset(client, bootstrap_id)?;
     if !reset.is_projection_bootstrap() || reset.lifecycle != "baseline_staged" {
         return Err("projection bootstrap baseline is not staged".to_string());
     }
@@ -1140,7 +1367,7 @@ fn activate_projection_bootstrap(
         )
         .map_err(|_| "locking WAL worker progress failed".to_string())?;
     lock_reset_configuration(client)?;
-    let reset = load_reset(client, bootstrap_id, false)?;
+    let reset = load_reset(client, bootstrap_id)?;
     if !reset.is_projection_bootstrap() || reset.lifecycle != "catching_up" {
         return Err("projection bootstrap is not catching up".to_string());
     }
@@ -1260,7 +1487,7 @@ fn activate_stream_reset(
         )
         .map_err(|_| "locking WAL worker progress failed".to_string())?;
     lock_reset_configuration(client)?;
-    let reset = load_reset(client, reset_id, false)?;
+    let reset = load_reset(client, reset_id)?;
     if reset.lifecycle != "baseline_staged" {
         return Err("reset baseline is not staged".to_string());
     }
@@ -1327,7 +1554,7 @@ fn abort_candidate_operation(
 ) -> Result<serde_json::Value, String> {
     acquire_stream_reset_operation_lock(client)?;
     lock_reset_state(client)?;
-    let reset = load_reset(client, reset_id, false)?;
+    let reset = load_reset(client, reset_id)?;
     if reset.is_projection_bootstrap() != projection_bootstrap
         || !matches!(
             reset.lifecycle.as_str(),
@@ -1374,7 +1601,7 @@ fn complete_candidate_cleanup(
 ) -> Result<(), String> {
     acquire_stream_reset_operation_lock(client)?;
     lock_reset_state(client)?;
-    let reset = load_reset(client, reset_id, false)?;
+    let reset = load_reset(client, reset_id)?;
     if reset.is_projection_bootstrap() != projection_bootstrap || reset.lifecycle != "activated" {
         return Err("reset is not activated".to_string());
     }
@@ -1416,11 +1643,7 @@ fn complete_candidate_cleanup(
     Ok(())
 }
 
-fn load_reset(
-    client: &mut SpiClient<'_>,
-    reset_id: &str,
-    _for_update: bool,
-) -> Result<ResetRecord, String> {
+fn load_reset(client: &SpiClient<'_>, reset_id: &str) -> Result<ResetRecord, String> {
     let rows = client
         .select(
             "SELECT reset_id::text AS reset_id, operation_kind, lifecycle,

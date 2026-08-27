@@ -93,6 +93,9 @@ final class DatabaseMigrationTests: XCTestCase {
             try db.execute(sql: "INSERT INTO _synchro_pending_changes VALUES ('mutation-1', 'sealed')")
             try db.execute(sql: "CREATE TABLE _synchro_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
             try db.execute(sql: "INSERT INTO _synchro_meta (key, value) VALUES ('sync_lock', '0'), ('checkpoint', '0')")
+            try db.execute(sql: "CREATE TABLE _synchro_scopes (scope_id TEXT PRIMARY KEY, cursor TEXT, checksum TEXT, generation INTEGER NOT NULL DEFAULT 0, local_checksum INTEGER NOT NULL DEFAULT 0)")
+            try db.execute(sql: "CREATE TABLE _synchro_scope_rows (scope_id TEXT NOT NULL, table_name TEXT NOT NULL, record_id TEXT NOT NULL, checksum INTEGER NOT NULL DEFAULT 0, generation INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (scope_id, table_name, record_id))")
+            try db.execute(sql: "CREATE INDEX idx_synchro_scope_rows_record ON _synchro_scope_rows (table_name, record_id)")
             try db.execute(sql: "CREATE TABLE _synchro_push_batches (batch_id TEXT PRIMARY KEY, request_json TEXT NOT NULL, state TEXT NOT NULL)")
             try db.execute(sql: "INSERT INTO _synchro_push_batches VALUES ('batch-1', '{\"batch_id\":\"batch-1\"}', 'pending')")
             try db.execute(sql: "CREATE TABLE _synchro_rebuild_attempts (scope_id TEXT PRIMARY KEY, rebuild_id TEXT NOT NULL, cursor TEXT)")
@@ -129,5 +132,124 @@ final class DatabaseMigrationTests: XCTestCase {
         XCTAssertNil(try db.readTransaction { db in
             try SynchroMeta.getBackoffRecord(db)
         })
+    }
+
+    func testVersionTwelveUpgradeConvertsScopeAffinityAndPreservesState() throws {
+        let path = (NSTemporaryDirectory() as NSString).appendingPathComponent("synchro_scope_affinity_\(UUID().uuidString).sqlite")
+        let legacy = try DatabaseQueue(path: path)
+        try legacy.write { db in
+            try recordMigrationsThroughVersionTwelve(db)
+            try db.execute(sql: "CREATE TABLE _synchro_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+            try db.execute(sql: "CREATE TABLE _synchro_scopes (scope_id TEXT PRIMARY KEY, cursor TEXT, checksum TEXT, generation INTEGER NOT NULL DEFAULT 0, local_checksum INTEGER NOT NULL DEFAULT 0)")
+            try db.execute(sql: "CREATE TABLE _synchro_scope_rows (scope_id TEXT NOT NULL, table_name TEXT NOT NULL, record_id TEXT NOT NULL, checksum INTEGER NOT NULL DEFAULT 0, generation INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (scope_id, table_name, record_id))")
+            try db.execute(sql: "CREATE INDEX idx_synchro_scope_rows_record ON _synchro_scope_rows (table_name, record_id)")
+            try db.execute(sql: "INSERT INTO _synchro_scopes VALUES ('scope-1', 'cursor-1', 'checksum-1', 4, 7)")
+            try db.execute(sql: "INSERT INTO _synchro_scope_rows VALUES ('scope-1', 'orders', 'record-1', 9, 4)")
+        }
+        try legacy.close()
+
+        let db = try SynchroDatabase(path: path)
+        defer { try? db.close() }
+        let scopeColumns = try db.query("PRAGMA table_info(_synchro_scopes)", params: nil)
+        let scopeTypes = Dictionary(uniqueKeysWithValues: scopeColumns.compactMap { row -> (String, String)? in
+            guard let name = row["name"] as String?, let type = row["type"] as String? else { return nil }
+            return (name, type)
+        })
+        let scopeRowColumns = try db.query("PRAGMA table_info(_synchro_scope_rows)", params: nil)
+        let scopeRowTypes = Dictionary(uniqueKeysWithValues: scopeRowColumns.compactMap { row -> (String, String)? in
+            guard let name = row["name"] as String?, let type = row["type"] as String? else { return nil }
+            return (name, type)
+        })
+        XCTAssertEqual(scopeTypes["local_checksum"], "TEXT")
+        XCTAssertEqual(scopeRowTypes["checksum"], "TEXT")
+        let scope = try XCTUnwrap(db.queryOne(
+            "SELECT cursor, checksum, generation, local_checksum FROM _synchro_scopes WHERE scope_id = 'scope-1'",
+            params: nil
+        ))
+        XCTAssertEqual(scope["cursor"] as String?, "cursor-1")
+        XCTAssertEqual(scope["checksum"] as String?, "checksum-1")
+        XCTAssertEqual(scope["generation"] as Int64?, 4)
+        XCTAssertEqual(scope["local_checksum"] as String?, "7")
+        let scopeRow = try XCTUnwrap(db.queryOne(
+            "SELECT scope_id, table_name, checksum, generation FROM _synchro_scope_rows WHERE record_id = 'record-1'",
+            params: nil
+        ))
+        XCTAssertEqual(scopeRow["scope_id"] as String?, "scope-1")
+        XCTAssertEqual(scopeRow["table_name"] as String?, "orders")
+        XCTAssertEqual(scopeRow["checksum"] as String?, "9")
+        XCTAssertEqual(scopeRow["generation"] as Int64?, 4)
+        XCTAssertEqual(
+            try db.query("SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'idx_synchro_scope_rows_record'", params: nil).count,
+            1
+        )
+    }
+
+    func testVersionThirteenUpgradeRollsBackAfterCopyFailure() throws {
+        let path = (NSTemporaryDirectory() as NSString).appendingPathComponent("synchro_scope_affinity_failure_\(UUID().uuidString).sqlite")
+        defer {
+            for suffix in ["", "-journal", "-wal", "-shm"] {
+                try? FileManager.default.removeItem(atPath: path + suffix)
+            }
+        }
+        let legacy = try DatabaseQueue(path: path)
+        try legacy.write { db in
+            try recordMigrationsThroughVersionTwelve(db)
+            try db.execute(sql: "CREATE TABLE _synchro_scopes (scope_id TEXT PRIMARY KEY, cursor TEXT, checksum TEXT, generation INTEGER NOT NULL DEFAULT 0, local_checksum INTEGER NOT NULL DEFAULT 0)")
+            try db.execute(sql: "CREATE TABLE _synchro_scope_rows (scope_id TEXT NOT NULL, table_name TEXT NOT NULL, record_id TEXT NOT NULL, checksum INTEGER, generation INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (scope_id, table_name, record_id))")
+            try db.execute(sql: "INSERT INTO _synchro_scopes VALUES ('scope-1', 'cursor-1', 'checksum-1', 4, 7)")
+            try db.execute(sql: "INSERT INTO _synchro_scope_rows VALUES ('scope-1', 'orders', 'record-1', NULL, 4)")
+        }
+        try legacy.close()
+
+        XCTAssertThrowsError(try SynchroDatabase(path: path))
+
+        let unchanged = try DatabaseQueue(path: path)
+        defer { try? unchanged.close() }
+        try unchanged.read { db in
+            XCTAssertEqual(
+                try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM grdb_migrations WHERE identifier = 'synchro_v13_scope_text_affinity'"),
+                0
+            )
+            XCTAssertEqual(
+                try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name LIKE '_synchro_%_v13'"),
+                0
+            )
+            let scope = try XCTUnwrap(Row.fetchOne(
+                db,
+                sql: "SELECT cursor, checksum, generation, local_checksum FROM _synchro_scopes WHERE scope_id = 'scope-1'"
+            ))
+            XCTAssertEqual(scope["cursor"] as String?, "cursor-1")
+            XCTAssertEqual(scope["checksum"] as String?, "checksum-1")
+            XCTAssertEqual(scope["generation"] as Int64?, 4)
+            XCTAssertEqual(scope["local_checksum"] as Int64?, 7)
+            let scopeRow = try XCTUnwrap(Row.fetchOne(
+                db,
+                sql: "SELECT scope_id, table_name, checksum, generation FROM _synchro_scope_rows WHERE record_id = 'record-1'"
+            ))
+            XCTAssertEqual(scopeRow["scope_id"] as String?, "scope-1")
+            XCTAssertEqual(scopeRow["table_name"] as String?, "orders")
+            XCTAssertNil(scopeRow["checksum"] as String?)
+            XCTAssertEqual(scopeRow["generation"] as Int64?, 4)
+        }
+    }
+
+    private func recordMigrationsThroughVersionTwelve(_ db: GRDB.Database) throws {
+        try db.execute(sql: "CREATE TABLE grdb_migrations (identifier TEXT NOT NULL PRIMARY KEY)")
+        for identifier in [
+            "synchro_v1",
+            "synchro_v2_buckets",
+            "synchro_v3_scopes",
+            "synchro_v4_scope_integrity",
+            "synchro_v5_rejected_mutations",
+            "synchro_v6_protocol_3",
+            "synchro_v7_pending_local_revision",
+            "synchro_v8_sealed_push_batches",
+            "synchro_v9_mutation_ledger",
+            "synchro_v10_rebuild_page_receipts",
+            "synchro_v11_durable_backoff",
+            "synchro_v12_gate2_recovery",
+        ] {
+            try db.execute(sql: "INSERT INTO grdb_migrations (identifier) VALUES (?)", arguments: [identifier])
+        }
     }
 }

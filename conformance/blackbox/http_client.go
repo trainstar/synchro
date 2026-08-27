@@ -65,6 +65,14 @@ type Client struct {
 	responseBodyLimit int64
 }
 
+// WithRecorder returns a client that records exchanges with one body limit.
+func (c Client) WithRecorder(recorder *Recorder, bodyLimit int64) Client {
+	c.recorder = recorder
+	c.requestBodyLimit = bodyLimit
+	c.responseBodyLimit = bodyLimit
+	return c
+}
+
 // Do executes one bounded raw HTTP request.
 func (c *Client) Do(ctx context.Context, request Request) (Response, error) {
 	if ctx == nil {

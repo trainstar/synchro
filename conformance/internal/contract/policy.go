@@ -25,7 +25,7 @@ const (
 	artifactSchemaURI     = "https://synchro.dev/conformance/schemas/artifact-inventory-v1.schema.json"
 	performanceSchemaURI  = "https://synchro.dev/conformance/schemas/performance-budgets-v2.schema.json"
 
-	lockedPerformanceDigest = "1ab4d515558dfd92694527142bb539fe6ad344ee58f18751a3075ada4a41b4aa"
+	lockedPerformanceDigest = "bcb87ae792bcf4a736104e9cd8f62aa31dbc8bb76661e99cf9a562d1e9efa282"
 )
 
 var lockedSupportCells = map[SupportCellID]supportTuple{
@@ -33,17 +33,22 @@ var lockedSupportCells = map[SupportCellID]supportTuple{
 	"SUP-PG-015":                 {component: "postgresql-server", platform: "postgresql", platformVersion: versionTuple{kind: "exact", value: "15"}, policy: "excluded"},
 	"SUP-PG-016":                 {component: "postgresql-server", platform: "postgresql", platformVersion: versionTuple{kind: "exact", value: "16"}, policy: "excluded"},
 	"SUP-PG-017":                 {component: "postgresql-server", platform: "postgresql", platformVersion: versionTuple{kind: "exact", value: "17"}, policy: "excluded"},
-	"SUP-PG-018":                 {component: "postgresql-server", platform: "postgresql", platformVersion: versionTuple{kind: "exact", value: "18"}, policy: "required"},
+	"SUP-PG-LINUX-X64-001":       {component: "postgresql-server", platform: "postgresql", platformVersion: versionTuple{kind: "exact", value: "18"}, extensionArchitecture: "linux-x64", policy: "required"},
+	"SUP-PG-MACOS-ARM64-001":     {component: "postgresql-server", platform: "postgresql", platformVersion: versionTuple{kind: "exact", value: "18"}, extensionArchitecture: "macos-arm64", policy: "required"},
 	"SUP-IOS-MIN-001":            {component: "swift-client", platform: "ios", platformVersion: versionTuple{kind: "minimum", value: "16"}, policy: "required"},
 	"SUP-IOS-CURRENT-001":        {component: "swift-client", platform: "ios", platformVersion: versionTuple{kind: "current-stable"}, policy: "required"},
-	"SUP-MACOS-MIN-001":          {component: "swift-client", platform: "macos", platformVersion: versionTuple{kind: "minimum", value: "13"}, policy: "required"},
-	"SUP-MACOS-CURRENT-001":      {component: "swift-client", platform: "macos", platformVersion: versionTuple{kind: "current-stable"}, policy: "required"},
+	"SUP-MACOS-CURRENT-001":      {component: "swift-client", platform: "macos", platformVersion: versionTuple{kind: "current-stable"}, policy: "tested"},
 	"SUP-ANDROID-MIN-001":        {component: "kotlin-client", platform: "android", platformVersion: versionTuple{kind: "minimum", value: "24"}, policy: "required"},
 	"SUP-ANDROID-CURRENT-001":    {component: "kotlin-client", platform: "android", platformVersion: versionTuple{kind: "current-stable"}, policy: "required"},
-	"SUP-RN-IOS-MIN-001":         {component: "react-native-client", platform: "ios", platformVersion: versionTuple{kind: "minimum", value: "16"}, runtimeVersion: versionTuple{kind: "series", value: "0.83.x"}, policy: "required"},
 	"SUP-RN-IOS-CURRENT-001":     {component: "react-native-client", platform: "ios", platformVersion: versionTuple{kind: "current-stable"}, runtimeVersion: versionTuple{kind: "series", value: "0.83.x"}, policy: "required"},
-	"SUP-RN-ANDROID-MIN-001":     {component: "react-native-client", platform: "android", platformVersion: versionTuple{kind: "minimum", value: "24"}, runtimeVersion: versionTuple{kind: "series", value: "0.83.x"}, policy: "required"},
 	"SUP-RN-ANDROID-CURRENT-001": {component: "react-native-client", platform: "android", platformVersion: versionTuple{kind: "current-stable"}, runtimeVersion: versionTuple{kind: "series", value: "0.83.x"}, policy: "required"},
+}
+
+var lockedSemanticCorpusCellIDs = []SupportCellID{
+	"SUP-MACOS-CURRENT-001",
+	"SUP-ANDROID-CURRENT-001",
+	"SUP-RN-IOS-CURRENT-001",
+	"SUP-RN-ANDROID-CURRENT-001",
 }
 
 var lockedArtifactRoles = map[ArtifactInventoryID]string{
@@ -65,11 +70,12 @@ type versionTuple struct {
 }
 
 type supportTuple struct {
-	component       string
-	platform        string
-	platformVersion versionTuple
-	runtimeVersion  versionTuple
-	policy          string
+	component             string
+	platform              string
+	platformVersion       versionTuple
+	runtimeVersion        versionTuple
+	extensionArchitecture string
+	policy                string
 }
 
 var lockedBudgetTriples = map[BudgetID]budgetTriple{
@@ -551,12 +557,19 @@ func validateSupportMatrix(matrix SupportMatrix) []error {
 	if matrix.CurrentTrackPolicy != (CurrentTrackPolicy{Selector: "current-stable", ResolveAt: "release-candidate-start", RecordExactVersionsIn: "rc-manifest"}) {
 		failures = append(failures, fmt.Errorf("support matrix current-track policy does not match the locked policy"))
 	}
+	if !supportCellIDSlicesEqual(matrix.SemanticCorpusCellIDs, lockedSemanticCorpusCellIDs) {
+		failures = append(failures, fmt.Errorf("support matrix semantic corpus cell IDs do not match the locked v0.3.0 set"))
+	}
 	if len(matrix.Cells) != len(lockedSupportCells) {
 		failures = append(failures, fmt.Errorf("support matrix must contain exactly %d cells, found %d", len(lockedSupportCells), len(matrix.Cells)))
 	}
 	seenIDs := make(map[SupportCellID]struct{}, len(matrix.Cells))
 	seenTuples := make(map[string]SupportCellID, len(matrix.Cells))
+	requiredCount := 0
 	for _, cell := range matrix.Cells {
+		if cell.Policy == "required" {
+			requiredCount++
+		}
 		if _, exists := seenIDs[cell.ID]; exists {
 			failures = append(failures, fmt.Errorf("duplicate support cell ID %s", cell.ID))
 		} else {
@@ -582,16 +595,32 @@ func validateSupportMatrix(matrix SupportMatrix) []error {
 			failures = append(failures, fmt.Errorf("support matrix is missing locked cell %s", id))
 		}
 	}
+	if requiredCount != 8 {
+		failures = append(failures, fmt.Errorf("support matrix must contain exactly 8 required cells, found %d", requiredCount))
+	}
 	return failures
+}
+
+func supportCellIDSlicesEqual(left, right []SupportCellID) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for index := range left {
+		if left[index] != right[index] {
+			return false
+		}
+	}
+	return true
 }
 
 func supportTupleFromCell(cell SupportCell) supportTuple {
 	return supportTuple{
-		component:       cell.Component,
-		platform:        cell.Platform,
-		platformVersion: selectorTuple(cell.PlatformVersion),
-		runtimeVersion:  selectorTuple(cell.RuntimeVersion),
-		policy:          cell.Policy,
+		component:             cell.Component,
+		platform:              cell.Platform,
+		platformVersion:       selectorTuple(cell.PlatformVersion),
+		runtimeVersion:        selectorTuple(cell.RuntimeVersion),
+		extensionArchitecture: cell.ExtensionArchitecture,
+		policy:                cell.Policy,
 	}
 }
 
@@ -604,7 +633,7 @@ func selectorTuple(selector *VersionSelector) versionTuple {
 
 func supportCellTuple(cell SupportCell) string {
 	tuple := supportTupleFromCell(cell)
-	return strings.Join([]string{tuple.component, tuple.platform, tuple.platformVersion.kind, tuple.platformVersion.value, tuple.runtimeVersion.kind, tuple.runtimeVersion.value, tuple.policy}, "\x00")
+	return strings.Join([]string{tuple.component, tuple.platform, tuple.platformVersion.kind, tuple.platformVersion.value, tuple.runtimeVersion.kind, tuple.runtimeVersion.value, tuple.extensionArchitecture, tuple.policy}, "\x00")
 }
 
 func validateArtifactInventory(inventory ArtifactInventory) []error {

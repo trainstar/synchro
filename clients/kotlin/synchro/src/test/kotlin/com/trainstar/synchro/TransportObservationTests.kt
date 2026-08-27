@@ -1,9 +1,18 @@
 package com.trainstar.synchro
 
+import com.trainstar.synchro.inspection.TransportObservationCollector
+import com.trainstar.synchro.inspection.TransportOperationClass
+import com.trainstar.synchro.inspection.TransportPauseBarrierError
+import com.trainstar.synchro.inspection.TransportPauseBarrierException
+import com.trainstar.synchro.inspection.TransportRequestFacts
+import com.trainstar.synchro.inspection.withTransportObservation
 import kotlinx.coroutines.async
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.supervisorScope
 import kotlinx.coroutines.test.runTest
+import kotlinx.serialization.ExperimentalSerializationApi
+import kotlinx.serialization.encodeToString
+import kotlinx.serialization.json.Json
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertSame
@@ -188,10 +197,20 @@ class TransportObservationTests {
             authProvider = { "token" },
             clientID = "client",
             appVersion = "1.0.0",
-            transportObservationCollector = collector,
-        )
+        ).withTransportObservation(collector)
 
         assertEquals("https://sync.example.test", config.serverURL)
         assertSame(collector, config.transportObservationCollector)
+    }
+
+    @Test
+    @OptIn(ExperimentalSerializationApi::class)
+    fun requestFactsSerializeMutationCountOnlyWhenPresent() {
+        val json = Json { explicitNulls = false }
+        val push = TransportRequestFacts(schemaVersion = 1, schemaHash = "hash", mutationCount = 3)
+        val pull = TransportRequestFacts(schemaVersion = 1, schemaHash = "hash")
+
+        assertTrue(json.encodeToString(push).contains("\"mutation_count\":3"))
+        assertFalse(json.encodeToString(pull).contains("mutation_count"))
     }
 }

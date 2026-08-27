@@ -46,7 +46,7 @@
     },
     "resolved_support_cells": {
       "type": "array",
-      "minItems": 11,
+      "minItems": 8,
       "uniqueItems": true,
       "items": { "$ref": "#/$defs/resolvedSupportCell" }
     },
@@ -344,12 +344,12 @@
         "schema_files": {
           "type": "object",
           "additionalProperties": false,
-          "required": ["requirements", "support_matrix", "scenario", "evidence", "rc_candidate_lock", "rc_manifest", "fault_catalog", "artifact_inventory", "performance_budgets", "vector_catalog"],
+          "required": ["requirements", "support_matrix", "scenario", "ci_summary", "rc_candidate_lock", "rc_manifest", "fault_catalog", "artifact_inventory", "performance_budgets", "vector_catalog"],
           "properties": {
             "requirements": { "allOf": [{ "$ref": "#/$defs/contractFile" }, { "properties": { "path": { "const": "conformance/schemas/requirements-v2.schema.json" } } }] },
             "support_matrix": { "allOf": [{ "$ref": "#/$defs/contractFile" }, { "properties": { "path": { "const": "conformance/schemas/support-matrix.schema.json" } } }] },
             "scenario": { "allOf": [{ "$ref": "#/$defs/contractFile" }, { "properties": { "path": { "const": "conformance/schemas/scenario-v2.schema.json" } } }] },
-            "evidence": { "allOf": [{ "$ref": "#/$defs/contractFile" }, { "properties": { "path": { "const": "conformance/schemas/evidence-v2.schema.json" } } }] },
+            "ci_summary": { "allOf": [{ "$ref": "#/$defs/contractFile" }, { "properties": { "path": { "const": "conformance/schemas/ci-summary-v1.schema.json" } } }] },
             "rc_candidate_lock": { "allOf": [{ "$ref": "#/$defs/contractFile" }, { "properties": { "path": { "const": "conformance/schemas/rc-candidate-lock-v1.schema.json" } } }] },
             "rc_manifest": { "allOf": [{ "$ref": "#/$defs/contractFile" }, { "properties": { "path": { "const": "conformance/schemas/rc-manifest-v2.schema.json" } } }] },
             "fault_catalog": { "allOf": [{ "$ref": "#/$defs/contractFile" }, { "properties": { "path": { "const": "conformance/schemas/fault-catalog-v1.schema.json" } } }] },

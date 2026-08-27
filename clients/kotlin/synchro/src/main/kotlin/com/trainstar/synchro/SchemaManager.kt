@@ -155,47 +155,10 @@ internal class SchemaManager(private val database: SynchroDatabase) {
         }
     }
 
-    suspend fun ensureSchema(httpClient: HttpClient): SchemaResponse {
-        val (localVersion, localHash) = database.readTransaction { db ->
-            val version = SynchroMeta.getInt64(db, MetaKey.SCHEMA_VERSION)
-            val hash = SynchroMeta.get(db, MetaKey.SCHEMA_HASH) ?: ""
-            Pair(version, hash)
-        }
-
-        val schema = httpClient.fetchSchema()
-
-        if (localVersion == schema.schemaVersion && localHash == schema.schemaHash) {
-            return schema
-        }
-
-        migrateSchema(schema)
-
-        return schema
-    }
-
     fun loadStoredLocalSchema(): List<LocalSchemaTable>? {
         return database.readTransaction { db ->
             val encoded = SynchroMeta.get(db, MetaKey.LOCAL_SCHEMA) ?: return@readTransaction null
             json.decodeFromString<List<LocalSchemaTable>>(encoded)
-        }
-    }
-
-    fun reconcileLocalSchema(
-        schemaVersion: Long,
-        schemaHash: String,
-        tables: List<LocalSchemaTable>,
-        scopeCursorUpdates: Map<String, String?> = emptyMap(),
-        affectedScopes: List<String> = emptyList(),
-    ) {
-        database.writeTransaction { db ->
-            reconcileLocalSchemaInTransaction(
-                db,
-                schemaVersion,
-                schemaHash,
-                tables,
-                scopeCursorUpdates,
-                affectedScopes,
-            )
         }
     }
 
@@ -224,64 +187,6 @@ internal class SchemaManager(private val database: SynchroDatabase) {
             }
         }
         SynchroMeta.applyScopeCursorUpdates(db, scopeCursorUpdates, affectedScopes)
-    }
-
-    fun createSyncedTables(schema: SchemaResponse) {
-        database.writeTransaction { db ->
-            createSyncedTablesInTransaction(db, schema)
-        }
-    }
-
-    internal fun createSyncedTablesInTransaction(db: android.database.sqlite.SQLiteDatabase, schema: SchemaResponse) {
-        val tables = schema.localTables()
-        validateSchemaCompatibility(db, tables)
-        createSyncedTablesInTransaction(db, tables)
-        archiveSchemaTables(db, schema.schemaVersion, schema.schemaHash, tables)
-        SynchroMeta.setInt64(db, MetaKey.SCHEMA_VERSION, schema.schemaVersion)
-        SynchroMeta.set(db, MetaKey.SCHEMA_HASH, schema.schemaHash)
-        persistLocalSchemaTables(db, tables)
-    }
-
-    internal fun createSyncedTablesInTransaction(db: android.database.sqlite.SQLiteDatabase, tables: List<LocalSchemaTable>) {
-        for (table in tables) {
-            val createSQL = SQLiteSchema.generateCreateTableSQL(table)
-            db.execSQL(createSQL)
-
-            val triggers = SQLiteSchema.generateCDCTriggers(table)
-            for (trigger in triggers) {
-                db.execSQL(trigger)
-            }
-            table.indexes.forEach { index ->
-                db.execSQL(SQLiteSchema.generateCreateIndexSQL(table, index))
-            }
-        }
-    }
-
-    fun migrateSchema(newSchema: SchemaResponse) {
-        val tables = newSchema.localTables()
-        database.writeTransaction { db ->
-            migrateLocalSchemaInTransaction(db, tables)
-            archiveSchemaTables(db, newSchema.schemaVersion, newSchema.schemaHash, tables)
-            SynchroMeta.setInt64(db, MetaKey.SCHEMA_VERSION, newSchema.schemaVersion)
-            SynchroMeta.set(db, MetaKey.SCHEMA_HASH, newSchema.schemaHash)
-            persistLocalSchemaTables(db, tables)
-        }
-    }
-
-    fun migrateLocalSchema(newTables: List<LocalSchemaTable>) {
-        database.writeTransaction { db ->
-            ensureCurrentSchemaIsArchived(db)
-            migrateLocalSchemaInTransaction(db, newTables)
-            persistLocalSchemaTables(db, newTables)
-        }
-    }
-
-    private fun migrateLocalSchemaInTransaction(
-        db: android.database.sqlite.SQLiteDatabase,
-        newTables: List<LocalSchemaTable>,
-    ) {
-        validateSchemaCompatibility(db, newTables)
-        applyAdditiveSchemaMigration(db, newTables)
     }
 
     private fun applyAdditiveSchemaMigration(
@@ -893,29 +798,6 @@ internal class SchemaManager(private val database: SynchroDatabase) {
         )
     }
 
-    fun dropSyncedTables(schema: SchemaResponse) {
-        database.writeTransaction { db ->
-            dropSyncedTablesInTransaction(db, schema)
-        }
-    }
-
-    internal fun dropSyncedTablesInTransaction(db: android.database.sqlite.SQLiteDatabase, schema: SchemaResponse) {
-        dropSyncedTablesInTransaction(db, schema.localTables())
-    }
-
-    internal fun dropSyncedTablesInTransaction(db: android.database.sqlite.SQLiteDatabase, tables: List<LocalSchemaTable>) {
-        for (table in tables.reversed()) {
-            val quoted = SQLiteHelpers.quoteIdentifier(table.tableName)
-            val trigInsert = SQLiteHelpers.quoteIdentifier("_synchro_cdc_insert_${table.tableName}")
-            val trigUpdate = SQLiteHelpers.quoteIdentifier("_synchro_cdc_update_${table.tableName}")
-            val trigDelete = SQLiteHelpers.quoteIdentifier("_synchro_cdc_delete_${table.tableName}")
-            db.execSQL("DROP TRIGGER IF EXISTS $trigInsert")
-            db.execSQL("DROP TRIGGER IF EXISTS $trigUpdate")
-            db.execSQL("DROP TRIGGER IF EXISTS $trigDelete")
-            db.execSQL("DROP TABLE IF EXISTS $quoted")
-        }
-    }
-
     private fun persistLocalSchemaTables(db: android.database.sqlite.SQLiteDatabase, tables: List<LocalSchemaTable>) {
         SynchroMeta.set(db, MetaKey.LOCAL_SCHEMA, json.encodeToString(tables))
     }
@@ -941,21 +823,6 @@ internal class SchemaManager(private val database: SynchroDatabase) {
             """.trimIndent(),
             arrayOf(schemaVersion, schemaHash, json.encodeToString(tables)),
         )
-    }
-
-    private fun ensureCurrentSchemaIsArchived(db: android.database.sqlite.SQLiteDatabase) {
-        val schemaVersion = SynchroMeta.getInt64(db, MetaKey.SCHEMA_VERSION)
-        val schemaHash = SynchroMeta.get(db, MetaKey.SCHEMA_HASH)
-        if (schemaVersion <= 0L || schemaHash.isNullOrEmpty()) {
-            throw SynchroError.InvalidResponse("synced-table capture requires a verified schema reference")
-        }
-        val archived = db.rawQuery(
-            "SELECT 1 FROM _synchro_schema_archives WHERE schema_version = ? AND schema_hash = ?",
-            arrayOf(schemaVersion.toString(), schemaHash),
-        ).use { it.moveToFirst() }
-        if (!archived) {
-            throw SynchroError.InvalidResponse("synced-table capture requires archived schema metadata")
-        }
     }
 
     private fun recomputeRetainedScopeIntegrity(

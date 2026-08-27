@@ -46,7 +46,7 @@
       "control_id": null
     },
     {
-      "obligation_id": "OBL-PERF-REBUILD-APPLY-PG-001",
+      "obligation_id": "OBL-PERF-REBUILD-APPLY-PG-LINUX-X64-001",
       "requirement_ids": [
         "SYNC-REBUILD-002"
       ],
@@ -54,7 +54,7 @@
         "ASSERT-PERF-REBUILD-APPLY-SEMANTIC-001"
       ],
       "proof_type": "server-black-box",
-      "support_cell_id": "SUP-PG-018",
+      "support_cell_id": "SUP-PG-LINUX-X64-001",
       "artifact_inventory_ids": [
         "ARTDEF-PG-EXTENSION-001",
         "ARTDEF-ADAPTER-001"
@@ -71,12 +71,63 @@
       "control_id": null
     },
     {
+      "obligation_id": "OBL-PERF-REBUILD-APPLY-PG-MACOS-ARM64-001",
+      "requirement_ids": [
+        "SYNC-REBUILD-002"
+      ],
+      "assertion_ids": [
+        "ASSERT-PERF-REBUILD-APPLY-SEMANTIC-001"
+      ],
+      "proof_type": "server-black-box",
+      "support_cell_id": "SUP-PG-MACOS-ARM64-001",
+      "artifact_inventory_ids": [
+        "ARTDEF-PG-EXTENSION-001",
+        "ARTDEF-ADAPTER-001"
+      ],
+      "performance_budget_ids": [],
+      "required_measurement_ids": [],
+      "required_vector_set_ids": [],
+      "make_target": "test-blackbox",
+      "argv": [
+        "make",
+        "test-blackbox"
+      ],
+      "fault_plan_id": null,
+      "control_id": null
+    },
+    {
+      "obligation_id": "OBL-PERF-REBUILD-APPLY-MACOS-CURRENT-001",
+      "requirement_ids": [
+        "SYNC-REBUILD-002"
+      ],
+      "assertion_ids": [
+        "ASSERT-PERF-REBUILD-APPLY-SEMANTIC-001"
+      ],
+      "proof_type": "native-e2e",
+      "support_cell_id": "SUP-MACOS-CURRENT-001",
+      "artifact_inventory_ids": [
+        "ARTDEF-PG-EXTENSION-001",
+        "ARTDEF-ADAPTER-001",
+        "ARTDEF-SWIFT-SPM-001",
+        "ARTDEF-COCOAPODS-001"
+      ],
+      "performance_budget_ids": [],
+      "required_measurement_ids": [],
+      "required_vector_set_ids": [],
+      "make_target": "test-swift",
+      "argv": [
+        "make",
+        "test-swift"
+      ],
+      "fault_plan_id": null,
+      "control_id": null
+    },
+    {
       "obligation_id": "OBL-PERF-REBUILD-APPLY-IOS-MIN-001",
       "requirement_ids": [
         "SYNC-REBUILD-002"
       ],
       "assertion_ids": [
-        "ASSERT-PERF-REBUILD-APPLY-SEMANTIC-001",
         "ASSERT-PERF-REBUILD-APPLY-PERFORMANCE-001"
       ],
       "proof_type": "native-e2e",
@@ -106,71 +157,10 @@
         "SYNC-REBUILD-002"
       ],
       "assertion_ids": [
-        "ASSERT-PERF-REBUILD-APPLY-SEMANTIC-001",
         "ASSERT-PERF-REBUILD-APPLY-PERFORMANCE-001"
       ],
       "proof_type": "native-e2e",
       "support_cell_id": "SUP-IOS-CURRENT-001",
-      "artifact_inventory_ids": [
-        "ARTDEF-PG-EXTENSION-001",
-        "ARTDEF-ADAPTER-001",
-        "ARTDEF-SWIFT-SPM-001",
-        "ARTDEF-COCOAPODS-001"
-      ],
-      "performance_budget_ids": [],
-      "required_measurement_ids": [
-        "MEAS-REBUILD-APPLY-001"
-      ],
-      "required_vector_set_ids": [],
-      "make_target": "test-swift",
-      "argv": [
-        "make",
-        "test-swift"
-      ],
-      "fault_plan_id": null,
-      "control_id": null
-    },
-    {
-      "obligation_id": "OBL-PERF-REBUILD-APPLY-MACOS-MIN-001",
-      "requirement_ids": [
-        "SYNC-REBUILD-002"
-      ],
-      "assertion_ids": [
-        "ASSERT-PERF-REBUILD-APPLY-SEMANTIC-001",
-        "ASSERT-PERF-REBUILD-APPLY-PERFORMANCE-001"
-      ],
-      "proof_type": "native-e2e",
-      "support_cell_id": "SUP-MACOS-MIN-001",
-      "artifact_inventory_ids": [
-        "ARTDEF-PG-EXTENSION-001",
-        "ARTDEF-ADAPTER-001",
-        "ARTDEF-SWIFT-SPM-001",
-        "ARTDEF-COCOAPODS-001"
-      ],
-      "performance_budget_ids": [],
-      "required_measurement_ids": [
-        "MEAS-REBUILD-APPLY-001"
-      ],
-      "required_vector_set_ids": [],
-      "make_target": "test-swift",
-      "argv": [
-        "make",
-        "test-swift"
-      ],
-      "fault_plan_id": null,
-      "control_id": null
-    },
-    {
-      "obligation_id": "OBL-PERF-REBUILD-APPLY-MACOS-CURRENT-001",
-      "requirement_ids": [
-        "SYNC-REBUILD-002"
-      ],
-      "assertion_ids": [
-        "ASSERT-PERF-REBUILD-APPLY-SEMANTIC-001",
-        "ASSERT-PERF-REBUILD-APPLY-PERFORMANCE-001"
-      ],
-      "proof_type": "native-e2e",
-      "support_cell_id": "SUP-MACOS-CURRENT-001",
       "artifact_inventory_ids": [
         "ARTDEF-PG-EXTENSION-001",
         "ARTDEF-ADAPTER-001",
@@ -196,7 +186,6 @@
         "SYNC-REBUILD-002"
       ],
       "assertion_ids": [
-        "ASSERT-PERF-REBUILD-APPLY-SEMANTIC-001",
         "ASSERT-PERF-REBUILD-APPLY-PERFORMANCE-001"
       ],
       "proof_type": "native-e2e",
@@ -249,37 +238,6 @@
       "control_id": null
     },
     {
-      "obligation_id": "OBL-PERF-REBUILD-APPLY-RN-IOS-MIN-001",
-      "requirement_ids": [
-        "SYNC-REBUILD-002"
-      ],
-      "assertion_ids": [
-        "ASSERT-PERF-REBUILD-APPLY-SEMANTIC-001",
-        "ASSERT-PERF-REBUILD-APPLY-PERFORMANCE-001"
-      ],
-      "proof_type": "native-e2e",
-      "support_cell_id": "SUP-RN-IOS-MIN-001",
-      "artifact_inventory_ids": [
-        "ARTDEF-PG-EXTENSION-001",
-        "ARTDEF-ADAPTER-001",
-        "ARTDEF-SWIFT-SPM-001",
-        "ARTDEF-COCOAPODS-001",
-        "ARTDEF-RN-NPM-001"
-      ],
-      "performance_budget_ids": [],
-      "required_measurement_ids": [
-        "MEAS-REBUILD-APPLY-001"
-      ],
-      "required_vector_set_ids": [],
-      "make_target": "test-rn-e2e-ios",
-      "argv": [
-        "make",
-        "test-rn-e2e-ios"
-      ],
-      "fault_plan_id": null,
-      "control_id": null
-    },
-    {
       "obligation_id": "OBL-PERF-REBUILD-APPLY-RN-IOS-CURRENT-001",
       "requirement_ids": [
         "SYNC-REBUILD-002"
@@ -306,36 +264,6 @@
       "argv": [
         "make",
         "test-rn-e2e-ios"
-      ],
-      "fault_plan_id": null,
-      "control_id": null
-    },
-    {
-      "obligation_id": "OBL-PERF-REBUILD-APPLY-RN-ANDROID-MIN-001",
-      "requirement_ids": [
-        "SYNC-REBUILD-002"
-      ],
-      "assertion_ids": [
-        "ASSERT-PERF-REBUILD-APPLY-SEMANTIC-001",
-        "ASSERT-PERF-REBUILD-APPLY-PERFORMANCE-001"
-      ],
-      "proof_type": "native-e2e",
-      "support_cell_id": "SUP-RN-ANDROID-MIN-001",
-      "artifact_inventory_ids": [
-        "ARTDEF-PG-EXTENSION-001",
-        "ARTDEF-ADAPTER-001",
-        "ARTDEF-KOTLIN-MAVEN-001",
-        "ARTDEF-RN-NPM-001"
-      ],
-      "performance_budget_ids": [],
-      "required_measurement_ids": [
-        "MEAS-REBUILD-APPLY-001"
-      ],
-      "required_vector_set_ids": [],
-      "make_target": "test-rn-e2e-android",
-      "argv": [
-        "make",
-        "test-rn-e2e-android"
       ],
       "fault_plan_id": null,
       "control_id": null
@@ -437,18 +365,26 @@
     {
       "scenario_id": "SCN-PERF-REBUILD-APPLY-001",
       "requirement_id": "SYNC-REBUILD-002",
-      "proof_obligation_id": "OBL-PERF-REBUILD-APPLY-PG-001",
+      "proof_obligation_id": "OBL-PERF-REBUILD-APPLY-PG-LINUX-X64-001",
       "assertion_id": "ASSERT-PERF-REBUILD-APPLY-SEMANTIC-001",
       "proof_type": "server-black-box",
-      "support_cell_id": "SUP-PG-018"
+      "support_cell_id": "SUP-PG-LINUX-X64-001"
     },
     {
       "scenario_id": "SCN-PERF-REBUILD-APPLY-001",
       "requirement_id": "SYNC-REBUILD-002",
-      "proof_obligation_id": "OBL-PERF-REBUILD-APPLY-IOS-MIN-001",
+      "proof_obligation_id": "OBL-PERF-REBUILD-APPLY-PG-MACOS-ARM64-001",
+      "assertion_id": "ASSERT-PERF-REBUILD-APPLY-SEMANTIC-001",
+      "proof_type": "server-black-box",
+      "support_cell_id": "SUP-PG-MACOS-ARM64-001"
+    },
+    {
+      "scenario_id": "SCN-PERF-REBUILD-APPLY-001",
+      "requirement_id": "SYNC-REBUILD-002",
+      "proof_obligation_id": "OBL-PERF-REBUILD-APPLY-MACOS-CURRENT-001",
       "assertion_id": "ASSERT-PERF-REBUILD-APPLY-SEMANTIC-001",
       "proof_type": "native-e2e",
-      "support_cell_id": "SUP-IOS-MIN-001"
+      "support_cell_id": "SUP-MACOS-CURRENT-001"
     },
     {
       "scenario_id": "SCN-PERF-REBUILD-APPLY-001",
@@ -462,57 +398,9 @@
       "scenario_id": "SCN-PERF-REBUILD-APPLY-001",
       "requirement_id": "SYNC-REBUILD-002",
       "proof_obligation_id": "OBL-PERF-REBUILD-APPLY-IOS-CURRENT-001",
-      "assertion_id": "ASSERT-PERF-REBUILD-APPLY-SEMANTIC-001",
-      "proof_type": "native-e2e",
-      "support_cell_id": "SUP-IOS-CURRENT-001"
-    },
-    {
-      "scenario_id": "SCN-PERF-REBUILD-APPLY-001",
-      "requirement_id": "SYNC-REBUILD-002",
-      "proof_obligation_id": "OBL-PERF-REBUILD-APPLY-IOS-CURRENT-001",
       "assertion_id": "ASSERT-PERF-REBUILD-APPLY-PERFORMANCE-001",
       "proof_type": "native-e2e",
       "support_cell_id": "SUP-IOS-CURRENT-001"
-    },
-    {
-      "scenario_id": "SCN-PERF-REBUILD-APPLY-001",
-      "requirement_id": "SYNC-REBUILD-002",
-      "proof_obligation_id": "OBL-PERF-REBUILD-APPLY-MACOS-MIN-001",
-      "assertion_id": "ASSERT-PERF-REBUILD-APPLY-SEMANTIC-001",
-      "proof_type": "native-e2e",
-      "support_cell_id": "SUP-MACOS-MIN-001"
-    },
-    {
-      "scenario_id": "SCN-PERF-REBUILD-APPLY-001",
-      "requirement_id": "SYNC-REBUILD-002",
-      "proof_obligation_id": "OBL-PERF-REBUILD-APPLY-MACOS-MIN-001",
-      "assertion_id": "ASSERT-PERF-REBUILD-APPLY-PERFORMANCE-001",
-      "proof_type": "native-e2e",
-      "support_cell_id": "SUP-MACOS-MIN-001"
-    },
-    {
-      "scenario_id": "SCN-PERF-REBUILD-APPLY-001",
-      "requirement_id": "SYNC-REBUILD-002",
-      "proof_obligation_id": "OBL-PERF-REBUILD-APPLY-MACOS-CURRENT-001",
-      "assertion_id": "ASSERT-PERF-REBUILD-APPLY-SEMANTIC-001",
-      "proof_type": "native-e2e",
-      "support_cell_id": "SUP-MACOS-CURRENT-001"
-    },
-    {
-      "scenario_id": "SCN-PERF-REBUILD-APPLY-001",
-      "requirement_id": "SYNC-REBUILD-002",
-      "proof_obligation_id": "OBL-PERF-REBUILD-APPLY-MACOS-CURRENT-001",
-      "assertion_id": "ASSERT-PERF-REBUILD-APPLY-PERFORMANCE-001",
-      "proof_type": "native-e2e",
-      "support_cell_id": "SUP-MACOS-CURRENT-001"
-    },
-    {
-      "scenario_id": "SCN-PERF-REBUILD-APPLY-001",
-      "requirement_id": "SYNC-REBUILD-002",
-      "proof_obligation_id": "OBL-PERF-REBUILD-APPLY-ANDROID-MIN-001",
-      "assertion_id": "ASSERT-PERF-REBUILD-APPLY-SEMANTIC-001",
-      "proof_type": "native-e2e",
-      "support_cell_id": "SUP-ANDROID-MIN-001"
     },
     {
       "scenario_id": "SCN-PERF-REBUILD-APPLY-001",
@@ -541,22 +429,6 @@
     {
       "scenario_id": "SCN-PERF-REBUILD-APPLY-001",
       "requirement_id": "SYNC-REBUILD-002",
-      "proof_obligation_id": "OBL-PERF-REBUILD-APPLY-RN-IOS-MIN-001",
-      "assertion_id": "ASSERT-PERF-REBUILD-APPLY-SEMANTIC-001",
-      "proof_type": "native-e2e",
-      "support_cell_id": "SUP-RN-IOS-MIN-001"
-    },
-    {
-      "scenario_id": "SCN-PERF-REBUILD-APPLY-001",
-      "requirement_id": "SYNC-REBUILD-002",
-      "proof_obligation_id": "OBL-PERF-REBUILD-APPLY-RN-IOS-MIN-001",
-      "assertion_id": "ASSERT-PERF-REBUILD-APPLY-PERFORMANCE-001",
-      "proof_type": "native-e2e",
-      "support_cell_id": "SUP-RN-IOS-MIN-001"
-    },
-    {
-      "scenario_id": "SCN-PERF-REBUILD-APPLY-001",
-      "requirement_id": "SYNC-REBUILD-002",
       "proof_obligation_id": "OBL-PERF-REBUILD-APPLY-RN-IOS-CURRENT-001",
       "assertion_id": "ASSERT-PERF-REBUILD-APPLY-SEMANTIC-001",
       "proof_type": "native-e2e",
@@ -569,22 +441,6 @@
       "assertion_id": "ASSERT-PERF-REBUILD-APPLY-PERFORMANCE-001",
       "proof_type": "native-e2e",
       "support_cell_id": "SUP-RN-IOS-CURRENT-001"
-    },
-    {
-      "scenario_id": "SCN-PERF-REBUILD-APPLY-001",
-      "requirement_id": "SYNC-REBUILD-002",
-      "proof_obligation_id": "OBL-PERF-REBUILD-APPLY-RN-ANDROID-MIN-001",
-      "assertion_id": "ASSERT-PERF-REBUILD-APPLY-SEMANTIC-001",
-      "proof_type": "native-e2e",
-      "support_cell_id": "SUP-RN-ANDROID-MIN-001"
-    },
-    {
-      "scenario_id": "SCN-PERF-REBUILD-APPLY-001",
-      "requirement_id": "SYNC-REBUILD-002",
-      "proof_obligation_id": "OBL-PERF-REBUILD-APPLY-RN-ANDROID-MIN-001",
-      "assertion_id": "ASSERT-PERF-REBUILD-APPLY-PERFORMANCE-001",
-      "proof_type": "native-e2e",
-      "support_cell_id": "SUP-RN-ANDROID-MIN-001"
     },
     {
       "scenario_id": "SCN-PERF-REBUILD-APPLY-001",
@@ -904,7 +760,24 @@
       "phase": "exercise",
       "transport": "model",
       "description": "Execute the authored workload operation.",
-      "measurement_sample": { "measurement_id": "MEAS-REBUILD-APPLY-001", "stratum_id": "STR-APPLY-SMALL-001", "sample_id": "SAMPLE-REBUILD-APPLY-SMALL-001", "parameters": { "rebuild_record_count": 1, "page_size": 100 } },
+      "measurement_sample": {
+        "measurement_id": "MEAS-REBUILD-APPLY-001",
+        "stratum_id": "STR-APPLY-SMALL-001",
+        "sample_id": "SAMPLE-REBUILD-APPLY-SMALL-001",
+        "parameters": {
+          "rebuild_record_count": 1,
+          "page_size": 100
+        },
+        "operation": {
+          "id": "MOP-REBUILD-APPLY-SMALL-001",
+          "family": "rebuild-apply",
+          "boundary": "small",
+          "value": {
+            "rebuild_record_count": 1,
+            "page_size": 100
+          }
+        }
+      },
       "operation": {
         "contract_operation": "workload",
         "name": "prepare",
@@ -924,7 +797,24 @@
       "phase": "exercise",
       "transport": "model",
       "description": "Execute the authored workload operation.",
-      "measurement_sample": { "measurement_id": "MEAS-REBUILD-APPLY-001", "stratum_id": "STR-APPLY-SMALL-001", "sample_id": "SAMPLE-REBUILD-APPLY-SMALL-002", "parameters": { "rebuild_record_count": 1, "page_size": 100 } },
+      "measurement_sample": {
+        "measurement_id": "MEAS-REBUILD-APPLY-001",
+        "stratum_id": "STR-APPLY-SMALL-001",
+        "sample_id": "SAMPLE-REBUILD-APPLY-SMALL-002",
+        "parameters": {
+          "rebuild_record_count": 1,
+          "page_size": 100
+        },
+        "operation": {
+          "id": "MOP-REBUILD-APPLY-SMALL-002",
+          "family": "rebuild-apply",
+          "boundary": "small",
+          "value": {
+            "rebuild_record_count": 1,
+            "page_size": 100
+          }
+        }
+      },
       "operation": {
         "contract_operation": "workload",
         "name": "prepare",
@@ -944,7 +834,24 @@
       "phase": "exercise",
       "transport": "model",
       "description": "Execute the authored workload operation.",
-      "measurement_sample": { "measurement_id": "MEAS-REBUILD-APPLY-001", "stratum_id": "STR-APPLY-SMALL-001", "sample_id": "SAMPLE-REBUILD-APPLY-SMALL-003", "parameters": { "rebuild_record_count": 1, "page_size": 100 } },
+      "measurement_sample": {
+        "measurement_id": "MEAS-REBUILD-APPLY-001",
+        "stratum_id": "STR-APPLY-SMALL-001",
+        "sample_id": "SAMPLE-REBUILD-APPLY-SMALL-003",
+        "parameters": {
+          "rebuild_record_count": 1,
+          "page_size": 100
+        },
+        "operation": {
+          "id": "MOP-REBUILD-APPLY-SMALL-003",
+          "family": "rebuild-apply",
+          "boundary": "small",
+          "value": {
+            "rebuild_record_count": 1,
+            "page_size": 100
+          }
+        }
+      },
       "operation": {
         "contract_operation": "workload",
         "name": "prepare",
@@ -964,7 +871,24 @@
       "phase": "exercise",
       "transport": "model",
       "description": "Execute the authored workload operation.",
-      "measurement_sample": { "measurement_id": "MEAS-REBUILD-APPLY-001", "stratum_id": "STR-APPLY-MEDIUM-001", "sample_id": "SAMPLE-REBUILD-APPLY-MEDIUM-001", "parameters": { "rebuild_record_count": 101, "page_size": 100 } },
+      "measurement_sample": {
+        "measurement_id": "MEAS-REBUILD-APPLY-001",
+        "stratum_id": "STR-APPLY-MEDIUM-001",
+        "sample_id": "SAMPLE-REBUILD-APPLY-MEDIUM-001",
+        "parameters": {
+          "rebuild_record_count": 101,
+          "page_size": 100
+        },
+        "operation": {
+          "id": "MOP-REBUILD-APPLY-MEDIUM-001",
+          "family": "rebuild-apply",
+          "boundary": "medium",
+          "value": {
+            "rebuild_record_count": 101,
+            "page_size": 100
+          }
+        }
+      },
       "operation": {
         "contract_operation": "workload",
         "name": "prepare",
@@ -984,7 +908,24 @@
       "phase": "exercise",
       "transport": "model",
       "description": "Execute the authored workload operation.",
-      "measurement_sample": { "measurement_id": "MEAS-REBUILD-APPLY-001", "stratum_id": "STR-APPLY-MEDIUM-001", "sample_id": "SAMPLE-REBUILD-APPLY-MEDIUM-002", "parameters": { "rebuild_record_count": 101, "page_size": 100 } },
+      "measurement_sample": {
+        "measurement_id": "MEAS-REBUILD-APPLY-001",
+        "stratum_id": "STR-APPLY-MEDIUM-001",
+        "sample_id": "SAMPLE-REBUILD-APPLY-MEDIUM-002",
+        "parameters": {
+          "rebuild_record_count": 101,
+          "page_size": 100
+        },
+        "operation": {
+          "id": "MOP-REBUILD-APPLY-MEDIUM-002",
+          "family": "rebuild-apply",
+          "boundary": "medium",
+          "value": {
+            "rebuild_record_count": 101,
+            "page_size": 100
+          }
+        }
+      },
       "operation": {
         "contract_operation": "workload",
         "name": "prepare",
@@ -1004,7 +945,24 @@
       "phase": "exercise",
       "transport": "model",
       "description": "Execute the authored workload operation.",
-      "measurement_sample": { "measurement_id": "MEAS-REBUILD-APPLY-001", "stratum_id": "STR-APPLY-MEDIUM-001", "sample_id": "SAMPLE-REBUILD-APPLY-MEDIUM-003", "parameters": { "rebuild_record_count": 101, "page_size": 100 } },
+      "measurement_sample": {
+        "measurement_id": "MEAS-REBUILD-APPLY-001",
+        "stratum_id": "STR-APPLY-MEDIUM-001",
+        "sample_id": "SAMPLE-REBUILD-APPLY-MEDIUM-003",
+        "parameters": {
+          "rebuild_record_count": 101,
+          "page_size": 100
+        },
+        "operation": {
+          "id": "MOP-REBUILD-APPLY-MEDIUM-003",
+          "family": "rebuild-apply",
+          "boundary": "medium",
+          "value": {
+            "rebuild_record_count": 101,
+            "page_size": 100
+          }
+        }
+      },
       "operation": {
         "contract_operation": "workload",
         "name": "prepare",
@@ -1024,7 +982,24 @@
       "phase": "exercise",
       "transport": "model",
       "description": "Execute the authored workload operation.",
-      "measurement_sample": { "measurement_id": "MEAS-REBUILD-APPLY-001", "stratum_id": "STR-APPLY-LARGE-001", "sample_id": "SAMPLE-REBUILD-APPLY-LARGE-001", "parameters": { "rebuild_record_count": 1000, "page_size": 100 } },
+      "measurement_sample": {
+        "measurement_id": "MEAS-REBUILD-APPLY-001",
+        "stratum_id": "STR-APPLY-LARGE-001",
+        "sample_id": "SAMPLE-REBUILD-APPLY-LARGE-001",
+        "parameters": {
+          "rebuild_record_count": 1000,
+          "page_size": 100
+        },
+        "operation": {
+          "id": "MOP-REBUILD-APPLY-LARGE-001",
+          "family": "rebuild-apply",
+          "boundary": "large",
+          "value": {
+            "rebuild_record_count": 1000,
+            "page_size": 100
+          }
+        }
+      },
       "operation": {
         "contract_operation": "workload",
         "name": "prepare",
@@ -1044,7 +1019,24 @@
       "phase": "exercise",
       "transport": "model",
       "description": "Execute the authored workload operation.",
-      "measurement_sample": { "measurement_id": "MEAS-REBUILD-APPLY-001", "stratum_id": "STR-APPLY-LARGE-001", "sample_id": "SAMPLE-REBUILD-APPLY-LARGE-002", "parameters": { "rebuild_record_count": 1000, "page_size": 100 } },
+      "measurement_sample": {
+        "measurement_id": "MEAS-REBUILD-APPLY-001",
+        "stratum_id": "STR-APPLY-LARGE-001",
+        "sample_id": "SAMPLE-REBUILD-APPLY-LARGE-002",
+        "parameters": {
+          "rebuild_record_count": 1000,
+          "page_size": 100
+        },
+        "operation": {
+          "id": "MOP-REBUILD-APPLY-LARGE-002",
+          "family": "rebuild-apply",
+          "boundary": "large",
+          "value": {
+            "rebuild_record_count": 1000,
+            "page_size": 100
+          }
+        }
+      },
       "operation": {
         "contract_operation": "workload",
         "name": "prepare",
@@ -1064,7 +1056,24 @@
       "phase": "exercise",
       "transport": "model",
       "description": "Execute the authored workload operation.",
-      "measurement_sample": { "measurement_id": "MEAS-REBUILD-APPLY-001", "stratum_id": "STR-APPLY-LARGE-001", "sample_id": "SAMPLE-REBUILD-APPLY-LARGE-003", "parameters": { "rebuild_record_count": 1000, "page_size": 100 } },
+      "measurement_sample": {
+        "measurement_id": "MEAS-REBUILD-APPLY-001",
+        "stratum_id": "STR-APPLY-LARGE-001",
+        "sample_id": "SAMPLE-REBUILD-APPLY-LARGE-003",
+        "parameters": {
+          "rebuild_record_count": 1000,
+          "page_size": 100
+        },
+        "operation": {
+          "id": "MOP-REBUILD-APPLY-LARGE-003",
+          "family": "rebuild-apply",
+          "boundary": "large",
+          "value": {
+            "rebuild_record_count": 1000,
+            "page_size": 100
+          }
+        }
+      },
       "operation": {
         "contract_operation": "workload",
         "name": "prepare",
@@ -1164,7 +1173,9 @@
         "phase": "exercise",
         "actor": "controller",
         "command": "apply-step",
-        "covers_step_ids": ["STEP-PERF-REBUILD-APPLY-001"],
+        "covers_step_ids": [
+          "STEP-PERF-REBUILD-APPLY-001"
+        ],
         "parameters": {}
       },
       {
@@ -1172,7 +1183,9 @@
         "phase": "exercise",
         "actor": "controller",
         "command": "apply-step",
-        "covers_step_ids": ["STEP-PERF-REBUILD-APPLY-002"],
+        "covers_step_ids": [
+          "STEP-PERF-REBUILD-APPLY-002"
+        ],
         "parameters": {}
       },
       {
@@ -1180,7 +1193,9 @@
         "phase": "exercise",
         "actor": "controller",
         "command": "apply-step",
-        "covers_step_ids": ["STEP-PERF-REBUILD-APPLY-003"],
+        "covers_step_ids": [
+          "STEP-PERF-REBUILD-APPLY-003"
+        ],
         "parameters": {}
       },
       {
@@ -1188,7 +1203,9 @@
         "phase": "exercise",
         "actor": "controller",
         "command": "apply-step",
-        "covers_step_ids": ["STEP-PERF-REBUILD-APPLY-004"],
+        "covers_step_ids": [
+          "STEP-PERF-REBUILD-APPLY-004"
+        ],
         "parameters": {}
       },
       {
@@ -1196,7 +1213,9 @@
         "phase": "exercise",
         "actor": "controller",
         "command": "apply-step",
-        "covers_step_ids": ["STEP-PERF-REBUILD-APPLY-005"],
+        "covers_step_ids": [
+          "STEP-PERF-REBUILD-APPLY-005"
+        ],
         "parameters": {}
       },
       {
@@ -1204,7 +1223,9 @@
         "phase": "exercise",
         "actor": "controller",
         "command": "apply-step",
-        "covers_step_ids": ["STEP-PERF-REBUILD-APPLY-006"],
+        "covers_step_ids": [
+          "STEP-PERF-REBUILD-APPLY-006"
+        ],
         "parameters": {}
       },
       {
@@ -1212,7 +1233,9 @@
         "phase": "exercise",
         "actor": "controller",
         "command": "apply-step",
-        "covers_step_ids": ["STEP-PERF-REBUILD-APPLY-007"],
+        "covers_step_ids": [
+          "STEP-PERF-REBUILD-APPLY-007"
+        ],
         "parameters": {}
       },
       {
@@ -1220,7 +1243,9 @@
         "phase": "exercise",
         "actor": "controller",
         "command": "apply-step",
-        "covers_step_ids": ["STEP-PERF-REBUILD-APPLY-008"],
+        "covers_step_ids": [
+          "STEP-PERF-REBUILD-APPLY-008"
+        ],
         "parameters": {}
       },
       {
@@ -1228,7 +1253,9 @@
         "phase": "exercise",
         "actor": "controller",
         "command": "apply-step",
-        "covers_step_ids": ["STEP-PERF-REBUILD-APPLY-009"],
+        "covers_step_ids": [
+          "STEP-PERF-REBUILD-APPLY-009"
+        ],
         "parameters": {}
       },
       {
@@ -1238,7 +1265,9 @@
         "command": "capture",
         "covers_step_ids": [],
         "parameters": {
-          "client_keys": ["client_a"],
+          "client_keys": [
+            "client_a"
+          ],
           "sources": [
             "application-rows",
             "sync-status",
@@ -1263,7 +1292,9 @@
         "covers_step_ids": [],
         "parameters": {
           "performance_budget_ids": [],
-          "measurement_ids": ["MEAS-REBUILD-APPLY-001"]
+          "measurement_ids": [
+            "MEAS-REBUILD-APPLY-001"
+          ]
         }
       }
     ]

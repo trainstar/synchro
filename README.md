@@ -38,14 +38,20 @@ Synchro is not the right fit when:
 
 ## Requirements
 
-### Runtime Support
+### Tier 1 Certification Scope
 
-- PostgreSQL 18
-- iOS 16 and current stable iOS
-- macOS 13 and current stable macOS
-- Android API 24 and current stable Android API
-- React Native 0.83.x on iOS 16 and current stable iOS
-- React Native 0.83.x on Android API 24 and current stable Android API
+- PostgreSQL 18 on the published `linux-x64` and `macos-arm64` extension architectures
+- Swift on iOS 16 and current stable iOS
+- Kotlin on Android API 24 and current stable Android API
+- React Native 0.83.x on current stable iOS and current stable Android
+
+### Tier 2 CI Scope
+
+- Swift on macOS is built and tested in CI without release certification.
+
+The macOS host role does not make macOS a Tier 1 client target.
+
+The release workflow publishes two PostgreSQL extension architectures. These derive two required server cells.
 
 ### Local Validation and Development
 
@@ -66,7 +72,11 @@ The `Makefile` is the supported entry point for validation. Android targets expe
 - issue tracker: [github.com/trainstar/synchro/issues](https://github.com/trainstar/synchro/issues)
 - license: [LICENSE](LICENSE)
 
-The v0.3.0 support matrix is required policy, not a claim that candidate evidence already exists. Release certification will come from generated, immutable evidence tied to exact artifacts. The current test inventory is not certification. See [Release verification](https://trainstar.github.io/synchro/verification/overview/) and [Support policy](https://trainstar.github.io/synchro/reference/support-policy/).
+The v0.3.0 Tier 1 matrix is required policy, not a claim that candidate evidence exists. Generated, immutable evidence provides release certification. A new certified cell requires named production demand that justifies its recurring evidence cost. The current test inventory is not certification. See [Release verification](https://trainstar.github.io/synchro/verification/overview/) and [Support policy](https://trainstar.github.io/synchro/reference/support-policy/).
+
+The final aggregate requires five packaged checks for every non-excluded support cell: connect, push, pull, process kill, and resume. Installation is a prerequisite.
+
+The Makefile reads packaged smoke evidence from `dist/verification/packaged-smoke-summary.json` and fails when that evidence is missing or incomplete.
 
 ## What This Repository Contains
 

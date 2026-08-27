@@ -174,7 +174,7 @@ enum SynchroMeta {
                     (schema_version, schema_hash, schema_json, created_at)
                 VALUES (?, ?, ?, ?)
                 """,
-            arguments: [version, hash, schemaJSON, timestampNow()]
+            arguments: [version, hash, schemaJSON, SynchroDateCoding.now()]
         )
     }
 
@@ -343,7 +343,7 @@ enum SynchroMeta {
         mutationJSON: String? = nil,
         rejectedJSON: String? = nil
     ) throws {
-        let now = timestampNow()
+        let now = SynchroDateCoding.now()
         let serverRowJSON = try serverRow.flatMap { row -> String? in
             let data = try JSONEncoder.synchroEncoder().encode(row)
             return String(data: data, encoding: .utf8)
@@ -975,14 +975,4 @@ enum SynchroMeta {
         )
     }
 
-    private static let rejectedMutationTimestampFormatter: ISO8601DateFormatter = {
-        let formatter = ISO8601DateFormatter()
-        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        formatter.timeZone = TimeZone(secondsFromGMT: 0)
-        return formatter
-    }()
-
-    private static func timestampNow() -> String {
-        rejectedMutationTimestampFormatter.string(from: Date())
-    }
 }

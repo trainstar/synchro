@@ -71,41 +71,105 @@
     }
 
     #[pg_test]
+    fn test_compact_uses_injected_stale_clock() {
+        setup_test_tables();
+        register_client("u1", "expired-by-injected-clock");
+        register_client("u1", "active-at-injected-clock");
+        Spi::run(
+            "UPDATE sync_clients
+             SET created_at = CASE client_id
+                     WHEN 'expired-by-injected-clock' THEN now() - interval '29 days'
+                     WHEN 'active-at-injected-clock' THEN now() - interval '1 day'
+                 END,
+                 last_acknowledged_at = NULL
+             WHERE user_id = 'u1'
+               AND client_id IN ('expired-by-injected-clock', 'active-at-injected-clock')",
+        )
+        .unwrap();
+
+        let response: pgrx::JsonB = Spi::get_one(
+            "SELECT synchro_compact(
+                 '30 days',
+                 10000,
+                 (now() + interval '2 days')::text
+             )",
+        )
+        .unwrap()
+        .expect("compaction response with injected stale clock");
+        let active_clients: Vec<String> = Spi::connect(|client| {
+            client
+                .select(
+                    "SELECT client_id
+                     FROM sync_clients
+                     WHERE user_id = 'u1' AND is_active
+                     ORDER BY client_id",
+                    None,
+                    &[],
+                )
+                .expect("read injected-clock client state")
+                .into_iter()
+                .map(|row| {
+                    row.get_by_name::<String, &str>("client_id")
+                        .expect("read injected-clock client ID")
+                        .expect("injected-clock client ID")
+                })
+                .collect()
+        });
+
+        assert_eq!(response.0["deactivated_clients"], 1);
+        assert_eq!(active_clients, vec!["active-at-injected-clock"]);
+    }
+
+    #[pg_test]
+    fn test_compact_rejects_infinite_injected_clock() {
+        assert_rejected_compaction_preserves_state(
+            "7 days",
+            Some("infinity"),
+            "b1000000-0000-4000-8000-000000000007",
+        );
+    }
+
+    #[pg_test]
     fn test_compact_rejects_zero_stale_threshold_without_mutation() {
-        assert_rejected_stale_threshold_preserves_state(
+        assert_rejected_compaction_preserves_state(
             "0 seconds",
+            None,
             "b1000000-0000-4000-8000-000000000001",
         );
     }
 
     #[pg_test]
     fn test_compact_rejects_negative_stale_threshold_without_mutation() {
-        assert_rejected_stale_threshold_preserves_state(
+        assert_rejected_compaction_preserves_state(
             "-1 second",
+            None,
             "b1000000-0000-4000-8000-000000000002",
         );
     }
 
     #[pg_test]
     fn test_compact_rejects_infinite_stale_threshold_without_mutation() {
-        assert_rejected_stale_threshold_preserves_state(
+        assert_rejected_compaction_preserves_state(
             "infinity",
+            None,
             "b1000000-0000-4000-8000-000000000003",
         );
     }
 
     #[pg_test]
     fn test_compact_rejects_malformed_stale_threshold_without_mutation() {
-        assert_rejected_stale_threshold_preserves_state(
+        assert_rejected_compaction_preserves_state(
             "not an interval",
+            None,
             "b1000000-0000-4000-8000-000000000004",
         );
     }
 
     #[pg_test]
     fn test_compact_rejects_unsafe_stale_threshold_without_mutation() {
-        assert_rejected_stale_threshold_preserves_state(
+        assert_rejected_compaction_preserves_state(
             "1000000 years",
+            None,
             "b1000000-0000-4000-8000-000000000005",
         );
     }
@@ -380,7 +444,11 @@
         ));
     }
 
-    fn assert_rejected_stale_threshold_preserves_state(threshold: &str, record_id: &str) {
+    fn assert_rejected_compaction_preserves_state(
+        threshold: &str,
+        stale_at: Option<&str>,
+        record_id: &str,
+    ) {
         setup_test_tables();
         register_client("u1", "c1");
         Spi::run_with_args(
@@ -401,8 +469,8 @@
 
         let accepted = PgTryBuilder::new(std::panic::AssertUnwindSafe(|| {
             Spi::get_one_with_args::<pgrx::JsonB>(
-                "SELECT synchro_compact($1, 10000)",
-                &[threshold.into()],
+                "SELECT synchro_compact($1, 10000, $2)",
+                &[threshold.into(), stale_at.into()],
             )
             .is_ok()
         }))
@@ -427,7 +495,7 @@
         .unwrap()
         .expect("state after rejected compaction");
 
-        assert!(!accepted, "invalid stale threshold must be rejected");
+        assert!(!accepted, "invalid stale compaction input must be rejected");
         assert_eq!(retained.0["active"], true);
         assert_eq!(retained.0["effect_count"], before);
     }

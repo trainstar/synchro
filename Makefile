@@ -18,6 +18,7 @@
 	test-conformance-module \
 	test-conformance-imports \
 	test-conformance-contract \
+	test-conformance-drivers \
 	update-conformance-catalog \
 	check-conformance-catalog \
 	test-conformance-scenarios \
@@ -27,6 +28,7 @@
 	test-blackbox-harness \
 	test-blackbox-components \
 	test-blackbox-wal \
+	test-blackbox-configured-bounds \
 	test-blackbox-mutation-control \
 	test-r1-benchmark-units \
 	record-r1-benchmark \
@@ -62,14 +64,24 @@
 	build-swift-native-runner \
 	build-kotlin-conformance-app \
 	test-swift-unit \
+	test-client-schema-identity \
+	_test-client-schema-identity \
+	test-swift-warm-connect \
 	test-swift \
 	test-kotlin-unit \
+	test-kotlin-warm-connect \
+	test-kotlin-instrumentation \
 	test-kotlin \
 	test-kotlin-integration \
 	test-rn-unit \
 	test-rn-android-parity \
 	test-rn-ios-parity \
 	test-rn-native-parity \
+	test-rn-warm-connect-control \
+	test-rn-warm-connect-ios \
+	test-rn-warm-connect-android \
+	verify-rn-seed \
+	refresh-rn-seed \
 	rn-seed-asset \
 	rn-e2e-server-seed \
 	rn-watchman-reset \
@@ -102,7 +114,9 @@
 	test-consumer-rn-ios \
 	test-consumer-rn-android \
 	test-client-platforms \
+	test-packaged-smoke \
 	test-packaged-consumers \
+	phase-5-check \
 	generate-pg-sql \
 	check-pg-sql \
 	clean
@@ -117,6 +131,7 @@ ANDROID_JAVA_HOME ?= $(shell \
 			echo "$$CANDIDATE"; \
 		fi; \
 	fi)
+KOTLIN_ANDROID_SERIAL ?= $(ANDROID_SERIAL)
 RN_ANDROID_DETOX_CONFIG ?= android.emu.release
 PGRX_PG ?= pg18
 PGRX_PORT ?= 28818
@@ -155,12 +170,17 @@ SYNCHROD_PG_LOG_FILE ?= .synchrod-pg-test.log
 
 BINARY ?= bin/synchrod-pg
 SEED_BINARY ?= bin/synchro-seed
+RN_PINNED_SEED ?= clients/react-native/example/seed.db
+RN_CONSUMER_SEED ?= clients/react-native/example/verification/seed.db
+RN_ANDROID_SEED_ASSET ?= clients/react-native/example/android/app/src/main/assets/seed.db
 GO_TEST_ARGS ?= -v -count=1 -p 1
 GO_TEST_PKGS ?= ./...
 GRADLE_TEST_ARGS ?= --rerun-tasks
 CLIENT_ARTIFACT_DIR ?= $(CURDIR)/dist/local-consumer
 LOCAL_CONSUMER_DIR ?= $(CLIENT_ARTIFACT_DIR)
 CURRENT_VERSION := $(shell cat VERSION 2>/dev/null)
+PHASE_5_EVIDENCE ?= $(CURDIR)/dist/verification/phase-5-summary.json
+PACKAGED_SMOKE_EVIDENCE ?= $(CURDIR)/dist/verification/packaged-smoke-summary.json
 
 TEST_ENV = \
 	TEST_DATABASE_URL="$(ADAPTER_TEST_URL)" \
@@ -177,6 +197,7 @@ help:
 	@echo "  set-version           - Set VERSION=X.Y.Z and sync public metadata"
 	@echo "  build                 - Build the synchrod-pg adapter binary"
 	@echo "  build-seed            - Build the seed database generator binary"
+	@echo "  test-client-schema-identity - Verify Go seed DDL converges with Swift and Kotlin"
 	@echo "  build-check           - Build the Go adapter module"
 	@echo "  run                   - Run synchrod-pg locally with current env"
 	@echo "  docs-build            - Verify the contract and build the docs site"
@@ -189,6 +210,7 @@ help:
 	@echo "  test-conformance-module - Test standalone conformance module policy"
 	@echo "  test-conformance-imports - Test standalone conformance import policy"
 	@echo "  test-conformance-contract - Test strict contract loading and snapshots"
+	@echo "  test-conformance-drivers - Test the plain Swift and Kotlin process drivers"
 	@echo "  update-conformance-catalog - Write the deterministic scenario catalog"
 	@echo "  check-conformance-catalog - Check the deterministic scenario catalog"
 	@echo "  test-conformance-scenarios - Test strict scenario loading and catalog generation"
@@ -197,6 +219,7 @@ help:
 	@echo "  test-conformance      - Run the independent protocol conformance suite"
 	@echo "  test-inventory        - Test generated evidence inventory"
 	@echo "  test-blackbox         - Run the packaged server black-box suite"
+	@echo "  test-blackbox-configured-bounds - Run the real configured-limit measurement proof"
 	@echo "  test-blackbox-mutation-control - Run one structured real mutation control"
 	@echo "  record-r1-benchmark   - Record one R1 benchmark candidate"
 	@echo "  test-r1-benchmark     - Compare R1 benchmark results with the tracked baseline"
@@ -217,13 +240,20 @@ help:
 	@echo "  build-swift-native-runner - Build the macOS native conformance process"
 	@echo "  build-kotlin-conformance-app - Build the Android native conformance test APK"
 	@echo "  test-swift-unit       - Run Swift unit tests"
+	@echo "  test-swift-warm-connect - Run the direct Swift warm-connect scenario"
 	@echo "  test-swift            - Run Swift integration tests against the local adapter"
 	@echo "  test-kotlin-unit      - Run Kotlin unit tests"
+	@echo "  test-kotlin-instrumentation - Run Android instrumentation on the selected device"
 	@echo "  test-kotlin           - Run Kotlin integration tests against the local adapter"
 	@echo "  test-rn-unit          - Run React Native Jest tests"
 	@echo "  test-rn-android-parity - Regenerate the TurboModule spec and compile the Android implementation"
 	@echo "  test-rn-ios-parity     - Compile the iOS implementation against the generated TurboModule spec"
 	@echo "  test-rn-native-parity  - Compile both native implementations against one TurboModule spec"
+	@echo "  test-rn-warm-connect-control - Run the exact React Native warm-connect negative control"
+	@echo "  test-rn-warm-connect-ios - Run direct React Native warm-connect through the iOS bridge"
+	@echo "  test-rn-warm-connect-android - Run direct React Native warm-connect through the Android bridge"
+	@echo "  verify-rn-seed        - Verify the pinned React Native seed digest"
+	@echo "  refresh-rn-seed       - Regenerate and pin the React Native seed"
 	@echo "  test-rn-e2e-ios       - Run React Native Detox tests on iOS"
 	@echo "  test-rn-e2e-android   - Run React Native Detox tests on Android ($(RN_ANDROID_DETOX_CONFIG))"
 	@echo "  test-rn               - Run React Native Detox tests on both platforms"
@@ -244,7 +274,9 @@ help:
 	@echo "  test-consumer-rn-ios  - Build an isolated RN iOS consumer from packaged artifacts"
 	@echo "  test-consumer-rn-android - Build an isolated RN Android consumer from packaged artifacts"
 	@echo "  test-client-platforms - Run one packaged client support cell (SUPPORT_CELL_ID required)"
+	@echo "  test-packaged-smoke   - Validate five terminal checks for every non-excluded support cell"
 	@echo "  test-packaged-consumers - Run all packaged consumer checks"
+	@echo "  phase-5-check         - Validate terminal support-cell and gate evidence"
 	@echo "  check-pg-sql          - Verify tracked SQL matches pgrx generation"
 	@echo "  clean                 - Remove local build and server artifacts"
 
@@ -311,6 +343,9 @@ test-conformance-imports:
 test-conformance-contract:
 	cd conformance && GOFLAGS= GOWORK=off go run ./cmd/testresult suite -- go test -json ./internal/jsonstrict ./internal/schemavalidator ./internal/contract -count=1
 
+test-conformance-drivers:
+	cd conformance && GOFLAGS= GOWORK=off go run ./cmd/testresult suite -- go test -json ./swift ./kotlin ./reactnative -count=1
+
 update-conformance-catalog:
 	cd conformance && GOFLAGS= GOWORK=off go run ./cmd/synchro-conformance catalog --repo-root .. --write
 
@@ -337,6 +372,11 @@ test-blackbox-components:
 
 test-blackbox-wal: conformance-mod-download test-blackbox-harness
 	cd conformance && GOFLAGS= GOWORK=off go run ./cmd/testresult suite -- go test -json ./blackbox/integration -run '^TestRealWALPipeline$$' -count=1 -args --provision --install
+
+test-blackbox-configured-bounds: conformance-mod-download test-blackbox-harness
+	cd conformance && GOFLAGS= GOWORK=off go run ./cmd/testresult suite \
+		-- go test -json ./blackbox/integration -count=1 -timeout=20m \
+		-run '^TestRealConfiguredBoundsMeasurement$$' -args --provision --install
 
 test-blackbox-mutation-control:
 	@test -n "$(MUTATION_CONTROL_TEST)" || { echo "MUTATION_CONTROL_TEST is required" >&2; exit 1; }
@@ -504,7 +544,7 @@ test-inventory:
 test-blackbox: conformance-mod-download test-blackbox-harness test-blackbox-components
 	cd conformance && GOFLAGS= GOWORK=off go run ./cmd/testresult suite -- go test -json ./blackbox/integration -count=$(BLACKBOX_TEST_COUNT) -args --provision --install
 
-test-conformance: conformance-mod-download test-conformance-testresult test-conformance-module test-conformance-imports test-conformance-contract test-conformance-scenarios check-conformance-catalog test-vectors test-reference test-conformance-faults test-blackbox-harness test-evidence test-inventory
+test-conformance: conformance-mod-download test-conformance-testresult test-conformance-module test-conformance-imports test-conformance-contract test-conformance-drivers test-conformance-scenarios check-conformance-catalog test-vectors test-reference test-conformance-faults test-blackbox-harness test-evidence test-inventory
 
 rc-check-pg18:
 	@echo "$@ is unavailable until its required verification phase is implemented; release promotion is blocked." >&2
@@ -531,13 +571,68 @@ build-kotlin-conformance-app:
 test-swift-unit:
 	rm -rf clients/swift/.build/test-results/unit.xcresult
 	mkdir -p clients/swift/.build/test-results
-	cd clients/swift && xcodebuild test -quiet -scheme Synchro-Package -destination 'platform=macOS' -skip-testing:SynchroTests/IntegrationTests -skip-testing:SynchroTests/SchemaIntegrationTests -resultBundlePath .build/test-results/unit.xcresult
+	cd clients/swift && xcodebuild test -quiet -scheme Synchro-Package -destination 'platform=macOS' -skip-testing:SynchroTests/IntegrationTests -skip-testing:SynchroTests/SchemaIntegrationTests -skip-testing:SynchroTests/ClientSchemaIdentityTests -resultBundlePath .build/test-results/unit.xcresult
 	cd conformance && GOFLAGS= GOWORK=off go run ./cmd/testresult xcresult -path ../clients/swift/.build/test-results/unit.xcresult
 
-test-swift: synchrod-pg-test-restart
-	rm -rf clients/swift/.build/test-results/integration.xcresult
+test-client-schema-identity: conformance-mod-download test-adapter-setup
+	@set -e; \
+		status=0; \
+		if $(MAKE) --no-print-directory _test-client-schema-identity; then status=0; else status=$$?; fi; \
+		$(MAKE) --no-print-directory test-adapter-teardown; \
+		rm -f clients/swift/.build/test-results/schema-identity-seed.db*; \
+		exit $$status
+
+_test-client-schema-identity:
+	rm -f clients/swift/.build/test-results/schema-identity-seed.db*
 	mkdir -p clients/swift/.build/test-results
-	cd clients/swift && $(TEST_ENV) xcodebuild test -quiet -scheme Synchro-Package -destination 'platform=macOS' -resultBundlePath .build/test-results/integration.xcresult
+	cd conformance && SYNCHRO_DDL_IDENTITY_SEED_PATH="$(CURDIR)/clients/swift/.build/test-results/schema-identity-seed.db" TEST_DATABASE_URL="$(ADAPTER_TEST_URL)" GOFLAGS= GOWORK=off go run ./cmd/testresult exact \
+		-dir ../api/go \
+		-test TestCanonicalClientSeedMatchesSeedDBDDL \
+		-expect target_pass \
+		-- go test -json ./seeddb -count=1 -run '^TestCanonicalClientSeedMatchesSeedDBDDL$$'
+	rm -rf clients/swift/.build/test-results/schema-identity.xcresult
+	cd clients/swift && xcodebuild test -quiet -scheme Synchro-Package -destination 'platform=macOS' \
+		-only-testing:SynchroTests/ClientSchemaIdentityTests/testCanonicalGoSeedDDLConvergesWithFreshSwiftDDL \
+		-resultBundlePath .build/test-results/schema-identity.xcresult
+	cd conformance && GOFLAGS= GOWORK=off go run ./cmd/testresult xcresult -path ../clients/swift/.build/test-results/schema-identity.xcresult
+	@test -n "$(ANDROID_JAVA_HOME)" || (echo "Android builds require JDK 17. Set ANDROID_JAVA_HOME to a JDK 17 install."; exit 1)
+	@test -d "$(ANDROID_HOME)" || (echo "Android SDK not found at $(ANDROID_HOME). Set ANDROID_HOME to a valid SDK install."; exit 1)
+	rm -rf clients/kotlin/synchro/build/test-results
+	cd clients/kotlin && ANDROID_HOME="$(ANDROID_HOME)" ANDROID_SDK_ROOT="$(ANDROID_HOME)" JAVA_HOME="$(ANDROID_JAVA_HOME)" PATH="$(ANDROID_JAVA_HOME)/bin:$$PATH" $(TEST_ENV) SYNCHRO_TEST_SEED_PATH="$(CURDIR)/clients/swift/.build/test-results/schema-identity-seed.db" ./gradlew $(GRADLE_TEST_ARGS) -PsynchroTestSuite=integration :synchro:testDebugUnitTest --tests 'com.trainstar.synchro.SchemaIntegrationTests.testCanonicalGoSeedDDLConvergesWithFreshKotlinDDL'
+	cd conformance && GOFLAGS= GOWORK=off go run ./cmd/testresult junit -path ../clients/kotlin/synchro/build/test-results
+
+test-swift-warm-connect: conformance-mod-download build-swift-native-runner
+	@set -eu; \
+		runner_dir="$$(cd clients/swift && swift build --show-bin-path)"; \
+		test -x "$$runner_dir/synchro-native-runner"; \
+		cd conformance; \
+		SYNCHRO_SWIFT_NATIVE_RUNNER="$$runner_dir/synchro-native-runner" \
+			GOFLAGS= GOWORK=off go run ./cmd/testresult exact \
+			-test TestRealSwiftWarmConnect \
+			-expect target_pass \
+			-- go test -tags swiftintegration -json ./swift -count=1 -timeout=10m \
+			-run '^TestRealSwiftWarmConnect$$' -args --provision --install
+
+test-swift: synchrod-pg-test-restart test-swift-warm-connect
+	rm -rf clients/swift/.build/integration-derived-data clients/swift/.build/test-results/integration.xcresult
+	mkdir -p clients/swift/.build/test-results
+	cd clients/swift && xcodebuild build-for-testing -quiet -scheme Synchro-Package -destination 'platform=macOS' -derivedDataPath .build/integration-derived-data
+	@set -eu; \
+		set -- clients/swift/.build/integration-derived-data/Build/Products/*.xctestrun; \
+		test "$$#" -eq 1 && test -f "$$1"; \
+		xctestrun="$$1"; \
+		environment_path='TestConfigurations.0.TestTargets.0.EnvironmentVariables'; \
+		if plutil -type "$$environment_path" "$$xctestrun" >/dev/null 2>&1; then \
+			plutil -replace "$$environment_path" -dictionary "$$xctestrun"; \
+		else \
+			plutil -insert "$$environment_path" -dictionary "$$xctestrun"; \
+		fi; \
+		plutil -insert "$$environment_path.TEST_DATABASE_URL" -string "$(ADAPTER_TEST_URL)" "$$xctestrun"; \
+		plutil -insert "$$environment_path.TEST_REPLICATION_URL" -string "$(REPLICATION_URL)" "$$xctestrun"; \
+		plutil -insert "$$environment_path.SYNCHRO_TEST_URL" -string "$(SYNCHRO_TEST_URL)" "$$xctestrun"; \
+		plutil -insert "$$environment_path.SYNCHRO_TEST_JWT_SECRET" -string "$(SYNCHRO_TEST_JWT_SECRET)" "$$xctestrun"; \
+		plutil -insert "$$environment_path.SYNCHRO_TEST_SEED_PATH" -string "$(CURDIR)/clients/react-native/example/seed.db" "$$xctestrun"; \
+		xcodebuild test-without-building -quiet -xctestrun "$$xctestrun" -destination 'platform=macOS' -skip-testing:SynchroTests/ClientSchemaIdentityTests -resultBundlePath clients/swift/.build/test-results/integration.xcresult
 	cd conformance && GOFLAGS= GOWORK=off go run ./cmd/testresult xcresult -path ../clients/swift/.build/test-results/integration.xcresult
 
 test-kotlin-unit:
@@ -547,7 +642,33 @@ test-kotlin-unit:
 	cd clients/kotlin && ANDROID_HOME="$(ANDROID_HOME)" ANDROID_SDK_ROOT="$(ANDROID_HOME)" JAVA_HOME="$(ANDROID_JAVA_HOME)" PATH="$(ANDROID_JAVA_HOME)/bin:$$PATH" ./gradlew $(GRADLE_TEST_ARGS) -PsynchroTestSuite=unit :synchro:test
 	cd conformance && GOFLAGS= GOWORK=off go run ./cmd/testresult junit -path ../clients/kotlin/synchro/build/test-results
 
-test-kotlin: synchrod-pg-test-restart
+test-kotlin-warm-connect: conformance-mod-download build-kotlin-conformance-app
+	@test -x "$(ANDROID_HOME)/platform-tools/adb" || (echo "adb not found at $(ANDROID_HOME)/platform-tools/adb"; exit 1)
+	@test -n "$(KOTLIN_ANDROID_SERIAL)" || (echo "Set KOTLIN_ANDROID_SERIAL to one booted Android device."; exit 1)
+	@set -eu; \
+		application_apk="$(CURDIR)/clients/kotlin/conformance-app/build/outputs/apk/debug/conformance-app-debug.apk"; \
+		instrumentation_apk="$(CURDIR)/clients/kotlin/conformance-app/build/outputs/apk/androidTest/debug/conformance-app-debug-androidTest.apk"; \
+		test -f "$$application_apk"; \
+		test -f "$$instrumentation_apk"; \
+		cd conformance; \
+		SYNCHRO_KOTLIN_ADB="$(ANDROID_HOME)/platform-tools/adb" \
+			SYNCHRO_KOTLIN_DEVICE_SERIAL="$(KOTLIN_ANDROID_SERIAL)" \
+			SYNCHRO_KOTLIN_APPLICATION_APK="$$application_apk" \
+			SYNCHRO_KOTLIN_INSTRUMENTATION_APK="$$instrumentation_apk" \
+			GOFLAGS= GOWORK=off go run ./cmd/testresult exact \
+			-test TestRealKotlinWarmConnect \
+			-expect target_pass \
+			-- go test -tags kotlinintegration -json ./kotlin -count=1 -timeout=12m \
+			-run '^TestRealKotlinWarmConnect$$' -args --provision --install
+
+test-kotlin-instrumentation: build-kotlin-conformance-app
+	@test -x "$(ANDROID_HOME)/platform-tools/adb" || (echo "adb not found at $(ANDROID_HOME)/platform-tools/adb"; exit 1)
+	@test -n "$(KOTLIN_ANDROID_SERIAL)" || (echo "Set KOTLIN_ANDROID_SERIAL to one booted Android device."; exit 1)
+	rm -rf clients/kotlin/conformance-app/build/outputs/androidTest-results/connected
+	cd clients/kotlin && ANDROID_HOME="$(ANDROID_HOME)" ANDROID_SDK_ROOT="$(ANDROID_HOME)" JAVA_HOME="$(ANDROID_JAVA_HOME)" PATH="$(ANDROID_JAVA_HOME)/bin:$$PATH" ./gradlew $(GRADLE_TEST_ARGS) -Pandroid.injected.device.serial="$(KOTLIN_ANDROID_SERIAL)" :conformance-app:connectedDebugAndroidTest
+	cd conformance && GOFLAGS= GOWORK=off go run ./cmd/testresult junit -path ../clients/kotlin/conformance-app/build/outputs/androidTest-results/connected
+
+test-kotlin: synchrod-pg-test-restart test-kotlin-warm-connect
 	@test -n "$(ANDROID_JAVA_HOME)" || (echo "Android builds require JDK 17. Set ANDROID_JAVA_HOME to a JDK 17 install."; exit 1)
 	@test -d "$(ANDROID_HOME)" || (echo "Android SDK not found at $(ANDROID_HOME). Set ANDROID_HOME to a valid SDK install."; exit 1)
 	rm -rf clients/kotlin/synchro/build/test-results
@@ -562,27 +683,70 @@ test-rn-unit:
 	cd clients/react-native && yarn test:unit --json --outputFile example/artifacts/unit-test-results.json
 	cd conformance && GOFLAGS= GOWORK=off go run ./cmd/testresult jest -path ../clients/react-native/example/artifacts/unit-test-results.json
 
-test-rn-android-parity: release-kotlin-local
+test-rn-android-parity: rn-seed-asset release-kotlin-local
 	@test -n "$(ANDROID_JAVA_HOME)" || (echo "Android builds require JDK 17. Set ANDROID_JAVA_HOME to a JDK 17 install."; exit 1)
 	@test -d "$(ANDROID_HOME)" || (echo "Android SDK not found at $(ANDROID_HOME). Set ANDROID_HOME to a valid SDK install."; exit 1)
 	cd clients/react-native/example/android && ANDROID_HOME="$(ANDROID_HOME)" ANDROID_SDK_ROOT="$(ANDROID_HOME)" JAVA_HOME="$(ANDROID_JAVA_HOME)" PATH="$(ANDROID_JAVA_HOME)/bin:$$PATH" ./gradlew :trainstar_synchro-react-native:clean :trainstar_synchro-react-native:generateCodegenArtifactsFromSchema :trainstar_synchro-react-native:compileDebugKotlin --rerun-tasks
 
-test-rn-ios-parity: rn-watchman-reset rn-ios-pods
+test-rn-ios-parity: rn-seed-asset rn-watchman-reset rn-ios-pods
 	cd clients/react-native/example && xcodebuild -quiet -workspace ios/SynchroReactNativeExample.xcworkspace -scheme SynchroReactNative -configuration Debug -sdk iphonesimulator -destination 'generic/platform=iOS Simulator' -derivedDataPath ios/build/parity ONLY_ACTIVE_ARCH=YES clean build
 
 test-rn-native-parity:
 	@$(MAKE) test-rn-android-parity
 	@$(MAKE) test-rn-ios-parity
 
-rn-seed-asset:
-	@test -f clients/react-native/example/seed.db || (echo "Missing clients/react-native/example/seed.db bundled seed asset"; exit 1)
-	@mkdir -p clients/react-native/example/android/app/src/main/assets
-	@if ! cmp -s clients/react-native/example/seed.db clients/react-native/example/android/app/src/main/assets/seed.db 2>/dev/null; then \
-		cp clients/react-native/example/seed.db clients/react-native/example/android/app/src/main/assets/seed.db; \
+test-rn-warm-connect-control: conformance-mod-download
+	cd conformance && GOFLAGS= GOWORK=off go run ./cmd/testresult exact \
+		-test TestWarmConnectScopeAuthorityNegativeControl \
+		-expect target_pass \
+		-- go test -json ./reactnative -count=1 \
+		-run '^TestWarmConnectScopeAuthorityNegativeControl$$'
+
+test-rn-warm-connect-ios: conformance-mod-download test-blackbox-harness test-rn-warm-connect-control rn-seed-asset rn-watchman-reset rn-ios-pods
+	cd clients/react-native/example && npx detox build --configuration ios.sim.debug
+	cd conformance && SYNCHRO_RN_DETOX_CONFIGURATION=ios.sim.debug GOFLAGS= GOWORK=off go run ./cmd/testresult exact \
+		-test TestRealReactNativeWarmConnectIOS \
+		-expect target_pass \
+		-- go test -tags reactnativeintegration -json ./reactnative -count=1 -timeout=15m \
+		-run '^TestRealReactNativeWarmConnectIOS$$' -args --provision --install
+
+test-rn-warm-connect-android: conformance-mod-download test-blackbox-harness test-rn-warm-connect-control test-rn-android-parity rn-watchman-reset rn-android-emulator-reset
+	@test -n "$(ANDROID_JAVA_HOME)" || (echo "Android Detox requires JDK 17. Set ANDROID_JAVA_HOME to a JDK 17 install."; exit 1)
+	@test -d "$(ANDROID_HOME)" || (echo "Android SDK not found at $(ANDROID_HOME). Set ANDROID_HOME to a valid SDK install."; exit 1)
+	cd clients/react-native/example && ANDROID_HOME="$(ANDROID_HOME)" ANDROID_SDK_ROOT="$(ANDROID_HOME)" JAVA_HOME="$(ANDROID_JAVA_HOME)" PATH="$(ANDROID_JAVA_HOME)/bin:$$PATH" npx detox build --configuration $(RN_ANDROID_DETOX_CONFIG)
+	cd conformance && SYNCHRO_RN_DETOX_CONFIGURATION="$(RN_ANDROID_DETOX_CONFIG)" GOFLAGS= GOWORK=off go run ./cmd/testresult exact \
+		-test TestRealReactNativeWarmConnectAndroid \
+		-expect target_pass \
+		-- go test -tags reactnativeintegration -json ./reactnative -count=1 -timeout=15m \
+		-run '^TestRealReactNativeWarmConnectAndroid$$' -args --provision --install
+
+verify-rn-seed:
+	@cd clients/react-native/example && shasum -a 256 -c seed.db.sha256
+
+refresh-rn-seed:
+	@$(MAKE) REFRESH_RN_SEED=1 synchrod-pg-test-restart
+
+rn-seed-asset: verify-rn-seed
+	@test -f "$(RN_PINNED_SEED)" || (echo "Missing $(RN_PINNED_SEED) bundled seed asset"; exit 1)
+	@mkdir -p "$(dir $(RN_CONSUMER_SEED))" "$(dir $(RN_ANDROID_SEED_ASSET))"
+	@if ! cmp -s "$(RN_PINNED_SEED)" "$(RN_CONSUMER_SEED)" 2>/dev/null; then \
+		cp "$(RN_PINNED_SEED)" "$(RN_CONSUMER_SEED)"; \
+	fi
+	@if ! cmp -s "$(RN_CONSUMER_SEED)" "$(RN_ANDROID_SEED_ASSET)" 2>/dev/null; then \
+		cp "$(RN_CONSUMER_SEED)" "$(RN_ANDROID_SEED_ASSET)"; \
 	fi
 
 rn-e2e-server-seed: synchrod-pg-test-restart
-	@$(MAKE) rn-seed-asset
+	@set -eu; \
+		final="$(CURDIR)/$(RN_CONSUMER_SEED)"; \
+		temporary="$$final.tmp"; \
+		mkdir -p "$$(dirname "$$final")" "$(CURDIR)/$(dir $(RN_ANDROID_SEED_ASSET))"; \
+		rm -f "$$temporary" "$$temporary-wal" "$$temporary-shm"; \
+		trap 'rm -f "$$temporary" "$$temporary-wal" "$$temporary-shm"' EXIT HUP INT TERM; \
+		DATABASE_URL="$(ADAPTER_TEST_URL)" "$(CURDIR)/$(SEED_BINARY)" --output "$$temporary" --overwrite; \
+		mv "$$temporary" "$$final"; \
+		cp "$$final" "$(CURDIR)/$(RN_ANDROID_SEED_ASSET)"; \
+		trap - EXIT HUP INT TERM
 
 rn-watchman-reset:
 	@if command -v watchman >/dev/null 2>&1; then \
@@ -674,7 +838,7 @@ validation-check: override GO_TEST_ARGS := -v -count=1 -p 1
 validation-check: override GO_TEST_PKGS := ./...
 validation-check: override GRADLE_TEST_ARGS := --rerun-tasks
 validation-check: override DETOX_ARGS :=
-validation-check: build-conformance test-conformance test-blackbox version-check release-pods-check build build-seed build-check release-kotlin-local release-npm-dry-run lint-go lint-rust-core lint-rust-pg lint-rn test-rust-core test-rust-mutants test-integration-mutants test-rust-pg test-adapter test-swift test-kotlin-unit test-kotlin test-rn-unit test-rn-native-parity test-rn test-packaged-consumers verify-contract check-pg-sql docs-build
+validation-check: build-conformance test-conformance test-blackbox version-check release-pods-check build build-seed build-check release-kotlin-local release-npm-dry-run lint-go lint-rust-core lint-rust-pg lint-rn test-rust-core test-rust-mutants test-integration-mutants test-rust-pg test-adapter test-client-schema-identity test-swift test-kotlin-unit test-kotlin-instrumentation test-kotlin test-rn-unit test-rn-native-parity test-rn test-packaged-consumers phase-5-check verify-contract check-pg-sql docs-build
 	@echo "Validation suite passed."
 
 release-check: override GO_TEST_ARGS := -v -count=1 -p 1
@@ -843,32 +1007,27 @@ test-client-platforms:
 		SUP-IOS-CURRENT-001) \
 			test -n "$(SUPPORT_PLATFORM_VERSION)" || { echo "SUPPORT_PLATFORM_VERSION is required" >&2; exit 1; }; \
 			$(MAKE) test-consumer-swift-ios ;; \
-		SUP-MACOS-MIN-001) \
-			test "$(SUPPORT_PLATFORM_VERSION)" = "13" || { echo "SUPPORT_PLATFORM_VERSION must be 13" >&2; exit 1; }; \
-			test "$$(sw_vers -productVersion | cut -d. -f1)" = "13" || { echo "macOS 13 is required" >&2; exit 1; }; \
-			$(MAKE) test-consumer-swift ;; \
-		SUP-MACOS-CURRENT-001) \
-			test -n "$(SUPPORT_PLATFORM_VERSION)" || { echo "SUPPORT_PLATFORM_VERSION is required" >&2; exit 1; }; \
-			test "$$(sw_vers -productVersion)" = "$(SUPPORT_PLATFORM_VERSION)" || { echo "macOS runtime does not match SUPPORT_PLATFORM_VERSION" >&2; exit 1; }; \
-			$(MAKE) test-consumer-swift ;; \
-		SUP-ANDROID-MIN-001|SUP-RN-ANDROID-MIN-001) \
+		SUP-ANDROID-MIN-001) \
 			test "$(SUPPORT_PLATFORM_VERSION)" = "24" || { echo "SUPPORT_PLATFORM_VERSION must be 24" >&2; exit 1; }; \
 			test "$$($(ANDROID_HOME)/platform-tools/adb shell getprop ro.build.version.sdk | tr -d '\r')" = "24" || { echo "Android API 24 is required" >&2; exit 1; }; \
-			if [ "$(SUPPORT_CELL_ID)" = "SUP-ANDROID-MIN-001" ]; then $(MAKE) test-consumer-kotlin-device; else $(MAKE) test-consumer-rn-android; fi ;; \
+			$(MAKE) test-consumer-kotlin-device ;; \
 		SUP-ANDROID-CURRENT-001|SUP-RN-ANDROID-CURRENT-001) \
 			test -n "$(SUPPORT_PLATFORM_VERSION)" || { echo "SUPPORT_PLATFORM_VERSION is required" >&2; exit 1; }; \
 			test "$$($(ANDROID_HOME)/platform-tools/adb shell getprop ro.build.version.sdk | tr -d '\r')" = "$(SUPPORT_PLATFORM_VERSION)" || { echo "Android runtime does not match SUPPORT_PLATFORM_VERSION" >&2; exit 1; }; \
 			if [ "$(SUPPORT_CELL_ID)" = "SUP-ANDROID-CURRENT-001" ]; then $(MAKE) test-consumer-kotlin-device; else $(MAKE) test-consumer-rn-android; fi ;; \
-		SUP-RN-IOS-MIN-001) \
-			test "$(SUPPORT_PLATFORM_VERSION)" = "16" || { echo "SUPPORT_PLATFORM_VERSION must be 16" >&2; exit 1; }; \
-			$(MAKE) test-consumer-rn-ios ;; \
 		SUP-RN-IOS-CURRENT-001) \
 			test -n "$(SUPPORT_PLATFORM_VERSION)" || { echo "SUPPORT_PLATFORM_VERSION is required" >&2; exit 1; }; \
 			$(MAKE) test-consumer-rn-ios ;; \
 		*) echo "unknown client support cell: $(SUPPORT_CELL_ID)" >&2; exit 1 ;; \
 	esac
 
-test-packaged-consumers: test-consumer-swift test-consumer-swift-ios test-consumer-kotlin test-consumer-kotlin-device test-consumer-rn-ios test-consumer-rn-android
+test-packaged-smoke:
+	@python3 scripts/release-support-check.py --repo-root "$(CURDIR)" --evidence "$(PACKAGED_SMOKE_EVIDENCE)" --kind smoke
+
+test-packaged-consumers: test-consumer-swift test-consumer-swift-ios test-consumer-kotlin test-consumer-kotlin-device test-consumer-rn-ios test-consumer-rn-android test-packaged-smoke
+
+phase-5-check: test-conformance test-blackbox test-adapter test-rust-core test-rust-pg test-swift-unit test-kotlin-unit test-kotlin-instrumentation test-rn-unit test-swift test-kotlin test-rn-e2e-ios test-rn-e2e-android test-packaged-consumers
+	@python3 scripts/release-support-check.py --repo-root "$(CURDIR)" --evidence "$(PHASE_5_EVIDENCE)"
 
 ext-build:
 	cd extensions/synchro-pg && cargo build
@@ -1044,7 +1203,7 @@ test-adapter: test-adapter-setup
 	$(MAKE) test-adapter-teardown; \
 	exit $$status
 
-synchrod-pg-test-start: build-seed
+synchrod-pg-test-start: build-seed verify-rn-seed
 	@set -e; \
 	for PID in $$(lsof -tiTCP:$(SYNCHROD_PG_PORT) -sTCP:LISTEN 2>/dev/null); do \
 		kill "$$PID" 2>/dev/null || true; \
@@ -1068,28 +1227,24 @@ synchrod-pg-test-start: build-seed
 		sleep 1; \
 	done; \
 	if [ "$$REGISTRY_READY" -ne 1 ]; then echo "synchro registry did not activate"; exit 1; fi; \
-	if [ -f extensions/testdata/seed.sql ]; then \
-		echo "Loading seed data (this may take a minute)..."; \
-		$(PGRX_PSQL) -v ON_ERROR_STOP=1 -h "$(PGRX_ADMIN_HOST)" -p $(PGRX_PORT) -U "$(PGRX_ADMIN_USER)" -d $(ADAPTER_TEST_DB) -f extensions/testdata/seed.sql || { if [ -f "$(PGRX_LOG_FILE)" ]; then tail -n 200 "$(PGRX_LOG_FILE)"; fi; exit 1; }; \
-		echo "Waiting for bgworker to observe seeded rows..."; \
-		for attempt in $$(seq 1 60); do \
-			EDGE_COUNT=$$($(PGRX_PSQL) -h "$(PGRX_ADMIN_HOST)" -p $(PGRX_PORT) -U "$(PGRX_ADMIN_USER)" -d $(ADAPTER_TEST_DB) -Atqc "SELECT count(*) FROM synchro.sync_bucket_edges" 2>/dev/null || echo 0); \
-			if [ "$$EDGE_COUNT" -ge 6 ] 2>/dev/null; then \
-				break; \
-			fi; \
-			sleep 1; \
-		done; \
-		if [ "$$EDGE_COUNT" -lt 6 ] 2>/dev/null; then \
-			echo "synchro worker did not materialize all canonical seed rows"; \
-			exit 1; \
+	echo "Loading canonical seed data..."; \
+	$(PGRX_PSQL) -v ON_ERROR_STOP=1 -h "$(PGRX_ADMIN_HOST)" -p $(PGRX_PORT) -U "$(PGRX_ADMIN_USER)" -d $(ADAPTER_TEST_DB) -f extensions/testdata/canonical-seed.sql || { if [ -f "$(PGRX_LOG_FILE)" ]; then tail -n 200 "$(PGRX_LOG_FILE)"; fi; exit 1; }; \
+	echo "Waiting for bgworker to observe seeded rows..."; \
+	for attempt in $$(seq 1 60); do \
+		EDGE_COUNT=$$($(PGRX_PSQL) -h "$(PGRX_ADMIN_HOST)" -p $(PGRX_PORT) -U "$(PGRX_ADMIN_USER)" -d $(ADAPTER_TEST_DB) -Atqc "SELECT count(*) FROM synchro.sync_bucket_edges" 2>/dev/null || echo 0); \
+		if [ "$$EDGE_COUNT" -ge 6 ] 2>/dev/null; then \
+			break; \
 		fi; \
-		JSON_OUTPUT=$$($(PGRX_PSQL) -h "$(PGRX_ADMIN_HOST)" -p $(PGRX_PORT) -U "$(PGRX_ADMIN_USER)" -d $(ADAPTER_TEST_DB) -Atqc "SELECT CASE WHEN count(*) = 5 THEN '1' ELSE '0' END FROM (VALUES ('nations', 'metadata', '{\"source\":\"seed\"}'), ('suppliers', 'tags', '[\"seed\"]'), ('parts', 'specifications', '{\"color\":\"blue\"}'), ('parts', 'tags', '[\"seed\"]'), ('categories', 'metadata', '{\"source\":\"seed\"}')) expected(table_name, column_name, wire_value) JOIN synchro.sync_registry_generations generation ON generation.state = 'active' JOIN synchro.sync_registry registry ON registry.registry_generation = generation.generation AND registry.table_name = expected.table_name JOIN synchro.sync_registry_fields field ON field.registry_generation = registry.registry_generation AND field.relation_id = registry.relation_id AND field.physical_column = expected.column_name JOIN synchro.sync_captured_rows captured ON captured.relation_id = registry.relation_id WHERE captured.row_data -> field.field_id::text = to_jsonb(expected.wire_value)" 2>&1 || true); \
-		if [ "$$JSON_OUTPUT" != "1" ]; then \
-			echo "synchro worker did not preserve canonical seed JSON values"; \
-			exit 1; \
-		fi; \
-	else \
-		echo "No seed.sql found. Run 'make ext-seed' to generate test data."; \
+		sleep 1; \
+	done; \
+	if [ "$$EDGE_COUNT" -lt 6 ] 2>/dev/null; then \
+		echo "synchro worker did not materialize all canonical seed rows"; \
+		exit 1; \
+	fi; \
+	JSON_OUTPUT=$$($(PGRX_PSQL) -h "$(PGRX_ADMIN_HOST)" -p $(PGRX_PORT) -U "$(PGRX_ADMIN_USER)" -d $(ADAPTER_TEST_DB) -Atqc "SELECT CASE WHEN count(*) = 5 THEN '1' ELSE '0' END FROM (VALUES ('nations', 'metadata', '{\"source\":\"seed\"}'), ('suppliers', 'tags', '[\"seed\"]'), ('parts', 'specifications', '{\"color\":\"blue\"}'), ('parts', 'tags', '[\"seed\"]'), ('categories', 'metadata', '{\"source\":\"seed\"}')) expected(table_name, column_name, wire_value) JOIN synchro.sync_registry_generations generation ON generation.state = 'active' JOIN synchro.sync_registry registry ON registry.registry_generation = generation.generation AND registry.table_name = expected.table_name JOIN synchro.sync_registry_fields field ON field.registry_generation = registry.registry_generation AND field.relation_id = registry.relation_id AND field.physical_column = expected.column_name JOIN synchro.sync_captured_rows captured ON captured.relation_id = registry.relation_id WHERE captured.row_data -> field.field_id::text = to_jsonb(expected.wire_value)" 2>&1 || true); \
+	if [ "$$JSON_OUTPUT" != "1" ]; then \
+		echo "synchro worker did not preserve canonical seed JSON values"; \
+		exit 1; \
 	fi; \
 	echo "Backfilling scope edges..."; \
 	$(PGRX_PSQL) -v ON_ERROR_STOP=1 -h "$(PGRX_ADMIN_HOST)" -p $(PGRX_PORT) -U "$(PGRX_ADMIN_USER)" -d $(ADAPTER_TEST_DB) -c "SELECT synchro.synchro_backfill_bucket_edges()" || { if [ -f "$(PGRX_LOG_FILE)" ]; then tail -n 200 "$(PGRX_LOG_FILE)"; fi; exit 1; }; \
@@ -1163,17 +1318,21 @@ synchrod-pg-test-start: build-seed
 			rm -f "$(SYNCHROD_PG_PID_FILE)"; \
 			exit 1; \
 		fi; \
-		echo "Refreshing canonical seed asset..."; \
-		if lsof "$(CURDIR)/clients/react-native/example/seed.db" "$(CURDIR)/clients/react-native/example/seed.db-wal" "$(CURDIR)/clients/react-native/example/seed.db-shm" >/dev/null 2>&1; then \
-			echo "canonical seed asset is in use"; \
-			exit 1; \
+		if [ "$(REFRESH_RN_SEED)" = "1" ]; then \
+			echo "Refreshing canonical seed asset..."; \
+			if lsof "$(CURDIR)/clients/react-native/example/seed.db" "$(CURDIR)/clients/react-native/example/seed.db-wal" "$(CURDIR)/clients/react-native/example/seed.db-shm" >/dev/null 2>&1; then \
+				echo "canonical seed asset is in use"; \
+				exit 1; \
+			fi; \
+			rm -f "$(CURDIR)/clients/react-native/example/seed.db-wal" "$(CURDIR)/clients/react-native/example/seed.db-shm"; \
+			DATABASE_URL="$(ADAPTER_TEST_URL)" "$(CURDIR)/$(SEED_BINARY)" --output "$(CURDIR)/clients/react-native/example/seed.db" --overwrite || { \
+				if [ -f "$(SYNCHROD_PG_LOG_FILE)" ]; then cat "$(SYNCHROD_PG_LOG_FILE)"; fi; \
+				rm -f "$(SYNCHROD_PG_PID_FILE)"; \
+				exit 1; \
+			}; \
+			cd "$(CURDIR)/clients/react-native/example"; \
+			shasum -a 256 seed.db > seed.db.sha256; \
 		fi; \
-		rm -f "$(CURDIR)/clients/react-native/example/seed.db-wal" "$(CURDIR)/clients/react-native/example/seed.db-shm"; \
-		DATABASE_URL="$(ADAPTER_TEST_URL)" "$(CURDIR)/$(SEED_BINARY)" --output "$(CURDIR)/clients/react-native/example/seed.db" --overwrite || { \
-			if [ -f "$(SYNCHROD_PG_LOG_FILE)" ]; then cat "$(SYNCHROD_PG_LOG_FILE)"; fi; \
-			rm -f "$(SYNCHROD_PG_PID_FILE)"; \
-			exit 1; \
-		}; \
 		echo "synchrod-pg running on http://localhost:$(SYNCHROD_PG_PORT)"
 
 synchrod-pg-test-stop:

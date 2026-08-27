@@ -46,11 +46,10 @@ contract is deliberately revised before new evidence is accepted.
 This conformance plan applies to release `0.3.0` and protocol version `3`.
 Required certification scope is exactly:
 
-- PostgreSQL `18` for the extension-backed server
+- PostgreSQL `18` on `linux-x64` and `macos-arm64` extension architectures
 - iOS `16` and current stable for Swift
-- macOS `13` and current stable for Swift
 - Android API `24` and current stable for Kotlin
-- React Native `0.83.x` on iOS and Android
+- React Native `0.83.x` on current stable iOS and current stable Android
 
 PostgreSQL 14 through 17 are explicitly excluded from v0.3.0 certification.
 MySQL is not a v0.3.0 deliverable. Current-stable selectors are resolved at
@@ -59,38 +58,28 @@ versions before execution. The final RC manifest retains the same values.
 These rules are the support scope in `conformance/support-matrix.json`. This
 document does not widen it.
 
+Swift on macOS is Tier 2. It is built and tested in CI without certification.
+The host environment does not add a certification cell. A new Tier 1 cell
+requires named production demand that justifies its recurring evidence cost.
+
 ## Evidence Boundary
 
-The plan is not a pass report. A scenario is not passing, covered, or
-certified until its required command has executed and generated a schema-valid
-evidence record bound to the candidate. Authored scenario definitions,
-fixtures, source code, test names, and planned commands do not count as
-execution evidence.
+The plan is not a pass report. A scenario passes only after its required CI
+command executes on one named commit. Authored scenarios, fixtures, source,
+test names, and planned commands are not execution results.
 
-Every evidence record must identify:
+The generated CI summary must identify:
 
-- release `0.3.0` and protocol version `3`
-- candidate ID, source commit, and contract snapshot hash
-- requirement IDs, scenario ID, proof-obligation ID, selected support-cell ID,
-  and proof type
-- exact artifacts, artifact-inventory roles, and artifact hashes
-- exact OS, PostgreSQL, SDK, IDE, emulator or simulator, and toolchain
-- recorded environment names and exact versions only, never secrets, tokens,
-  credentials, private keys, or user-owned values
-- command, result, duration, logs, traces, and replay data
-- one typed trace attachment for every authored barrier, the exact pre-authored
-  fault recipe when used, and the randomized seed when required
-- all attempts in the one execution lineage for that candidate, scenario,
-  obligation, and support cell, including typed infrastructure disposition and
-  approval for every permitted rerun
+- the exact source commit and terminal aggregate status
+- every required semantic, smoke, and gate obligation
+- a positive test count and artifact hashes for each terminal obligation
+- the exact values of every gate-affecting Make variable
+- each executed test's requirement, scenario, obligation, assertion, support
+  cell, proof type, and one authoritative proof home
 
-The evidence schema requires release `0.3.0`, protocol version `3`, and the
-aggregate contract snapshot digest. It also requires the exact authored proof
-obligation and two-element `["make", target]` command. Timestamps, duration,
-result, exit code, and proof-obligation assertion IDs must be consistent.
-Content-addressed attachments bind logs, traces, replay data, barriers, faults,
-and performance results. Evidence requirement IDs equal the proof-obligation
-set. Its support cell, command, and artifact roles must satisfy that obligation.
+CI logs retain command output, durations, traces, replay data, randomized seeds,
+and all failed attempts. The summary does not copy those records. It binds their
+artifact hashes and fails on missing, skipped, zero-test, or nonterminal work.
 
 The immutable `rc-candidate-lock-v1` document exists before execution. It binds
 candidate identity, source commit, contract snapshot, exact scenarios, resolved
@@ -100,9 +89,8 @@ contains no evidence, final evidence paths, final evidence hashes, or `verified`
 boolean.
 
 The final `rc-manifest-v2` document exists after execution. It binds the exact
-candidate lock by path and SHA-256. It then adds the complete evidence set and
-its transitive retry chains. A changed candidate-lock byte invalidates the
-manifest binding.
+candidate lock by path and SHA-256. It also binds the generated CI summary and
+immutable CI logs. A changed candidate-lock byte invalidates the manifest.
 
 Both candidate documents bind the ordered specification and Accepted ADR file
 set. They also bind requirements, support matrix, scenario and vector catalogs,
@@ -111,8 +99,8 @@ Verification recomputes all values from candidate source and candidate bundle
 bytes. It rejects missing, reordered, substituted, partial, non-Accepted, or
 mixed-revision inputs.
 
-The generated inventory is the only status view. A hand-maintained coverage
-claim is not evidence.
+The generated coverage report is the only coverage status view. A handwritten
+coverage claim is not evidence.
 
 ## Independent Verification System
 
@@ -203,6 +191,8 @@ arbitrary always-true predicate cannot be relabeled as a wire, state, artifact,
 performance, or negative-control proof.
 Every fault-injection and negative-control obligation owns exactly one
 requirement, exactly one assertion, and exactly one matching fault plan for that requirement.
+A PostgreSQL fault injection has one obligation for each required extension
+architecture. Other fault injections remain singleton obligations.
 The negative-control obligation additionally resolves exactly one matching
 scenario control and exactly one matching single-requirement catalog control.
 Every fault plan binds one declared barrier, one single-requirement catalog
@@ -215,110 +205,80 @@ excluded, missing, or mismatched binding is invalid. Randomized replay always
 requires a seed, and any authored barrier requires a corresponding barrier
 trace.
 
-### Native Execution Plans
+### Native Step Bindings
 
-A scenario with a `native-e2e` obligation must contain one
-`native_execution` plan. A scenario without that obligation must not contain
-the plan. The same plan applies to every native support cell for the scenario.
+A scenario with a `native-e2e` obligation must bind every authored step through
+`native_binding`. A scenario without that obligation must not contain native
+step bindings or native identity aliases.
 
-The plan declares stable client keys, user identities, client identities, and
-database keys. A database key identifies one SQLite file across termination and
-relaunch. It never contains a host path.
+The staged loader can read `native_execution` while the scenario corpus moves
+to step bindings. One scenario must not contain both representations. A legacy
+plan cannot satisfy the final release gate after corpus migration closes.
 
-The plan contains one ordered action list. Each action has a stable action ID,
-phase, actor, command, covered scenario-step IDs, and a closed parameter object.
-The actors are `controller`, `artifact`, `client`, `process`, and `observer`.
+Each step binding uses one closed kind:
 
-The closed commands are:
-
-| Actor | Commands |
+| Kind | Owned operation |
 | --- | --- |
-| `controller` | `install-model`, `apply-step` |
-| `artifact` | `stage-step` |
-| `client` | `open`, `execute-step`, `synchronize-step`, `lifecycle` |
-| `process` | `execute-step`, `terminate`, `relaunch` |
-| `observer` | `await-step`, `capture`, `measure` |
+| `controller` | One `model` operation, server process operation, or raw HTTP request |
+| `artifact` | One artifact operation |
+| `local-write` | One `local/write` operation through the public application SQL API |
+| `process` | One `process/restart-client` operation through an external supervisor |
+| `public-call` | Ordered effects from one public native client call |
 
-`controller/install-model` installs the scenario model setup through public
-operator and source-data boundaries. It must not insert synchronization
-ledgers, cursors, changelogs, projections, or expected local state.
+The controller must not execute a workload macro through a native binding.
+Scenario authors must expand each required workload operation before native
+execution.
 
-`controller/apply-step` executes one covered `model` or `workload` operation.
-It uses normal source writes and approved operator functions for model work.
-For a workload, it expands the closed operation and routes each result through
-the applicable public controller, artifact, client, process, or observer
-driver. Every workload client opens before expansion. The controller must not
-expose a production HTTP test backdoor.
+A controller-owned HTTP step has no client-call fields. The runner sends this
+request through `NativeController.RequestStep`.
 
-`artifact/stage-step` prepares one covered artifact operation for one declared
-client outside the application process. The client consumes that artifact
-through its normal initialization API.
+A public-call binding declares the user, client, call ID, and execution stage.
+Equal call IDs group all ordered HTTP, local apply, and transport-loss effects
+from one public call. Each group uses one client. It contains at least one HTTP
+step.
 
-`client/open` creates or reuses the database for one declared client key.
-`client/execute-step` performs one covered `local/write` operation through the
-public application SQL API. `client/synchronize-step` drives one public engine
-cycle until its ordered covered HTTP operations reach one terminal completion.
+The `synchronous` stage declares the public method and terminal completion on
+each contiguous grouped step. A synchronous group cannot resume after another
+binding.
 
-`client/lifecycle` invokes only public start, stop, retry, reset, background, or
-foreground behavior. It does not cover a model step.
+A staged group starts with one `begin` stage that declares the public method.
+Zero or more ordered `await-step` stages can follow. One terminal `await-call`
+stage declares completion. Controller operations can occur between staged call
+steps. Other bindings cannot interrupt an active staged call.
 
-`process/execute-step` performs one covered process operation through an
-external supervisor. Its client key is null for a server process operation.
-An operation that contains a client identity requires that declared client key.
-`process/terminate` kills the application without client cleanup.
-`process/relaunch` starts a new process with the same declared database and
-client identity. Each boundary action names an earlier action. A terminate
-action occurs after that action's durable boundary. A relaunch action names the
-matching terminate action.
+The closed public methods are `start`, `sync-now`, `retry-after-error`, and
+`reset-schema-and-start`. The runner invokes only the named public API. It must
+not invoke internal connect, push, pull, rebuild, or local apply functions.
 
-`observer/await-step` waits for one covered internal local-apply effect without
-calling an internal apply API. `observer/capture` records declared public local,
-transport, process, artifact, and sanitized server observations. It names every
-client that contributes local observations. Its client list is empty for a
-server-only observation.
-`observer/measure` records the exact performance budget IDs and required
-measurement IDs owned by native obligations.
+A native lifecycle boundary places one public `stop` call after a terminal
+public-call step. It declares the same user, client, and phase. The boundary
+does not add a reference-model operation.
 
-Every authored scenario step must be covered by exactly one action. Setup,
-lifecycle, process-death, capture, and measurement actions can cover no step.
-An action must not cover an unknown step or a step assigned to another action.
-All covered steps follow the authored scenario order. A synchronize action can
-cover multiple ordered HTTP steps that one public engine cycle performs.
-Other step-covering actions cover exactly one step.
+Completion applies after the complete ordered call group. `idle` means the call
+and all local effects completed. `blocked` means a retryable response or
+transport failure stopped the call. `error` means a terminal HTTP or local
+effect failed.
 
-The covered step phase must equal the action phase. `controller/install-model`
-and `client/open` use `setup`. `observer/capture` and `observer/measure` use
-`verify`. Other no-step actions use `setup`, `exercise`, or `cleanup`.
+Each bound scenario declares `native_identity_aliases`. Each entry contains one
+closed identity kind, stable alias, authored value, and owning step and
+expectation IDs. Equal alias uses resolve to equal runtime values. Distinct
+aliases in one kind must resolve injectively.
 
-The command-to-operation mapping is closed. `controller/apply-step` covers
-`model` and `workload`. `artifact/stage-step` covers `artifact`.
-`client/execute-step` covers only `local/write`. `client/synchronize-step`
-covers HTTP operations. `process/execute-step` covers `process`.
-`observer/await-step` covers the remaining local apply operations.
+The closed identity kinds are batch ID, checksum, client generation, cursor,
+mutation ID, primary key, rebuild ID, row version, schema, scope, scope-set
+version, server version, and table. Schema aliases use the authored version and
+hash pair.
 
-A synchronize action uses `idle` for a successful response. It uses `blocked`
-for a retryable response or transport failure. It uses `error` for a terminal
-error response. All steps in one synchronize action use the same completion.
+An authored value can occur only once in one identity kind. Each alias must bind
+at least one step or final-state expectation. Source selectors can bind a
+runtime-only cursor when no authored cursor value exists.
 
-Client keys, client identity pairs, and database keys are unique. Every client
-action names a declared client. Each declared client opens once before use.
-A reuse open names one earlier artifact step for the same client. A create open
-does not name a seed step. Each plan contains exactly one `install-model`
-action. All covered steps follow it. Capture and measurement actions follow all
-covered steps.
+The runner executes bound steps and lifecycle boundaries in authored order. CI
+logs record call IDs, coverage, completion, identity resolutions, observations,
+process boundaries, and measurements.
 
-The capture actions must cover every model expectation owned by a native
-obligation. Measurement actions must exactly cover every performance budget and
-required measurement owned by those obligations. Extra bindings are invalid.
-
-The runner executes actions in authored order. It resolves step payloads from
-the immutable scenario instead of copying them into the native plan. It records
-the exact action IDs, command order, step coverage, observations, process
-boundaries, and measurement results in signed execution evidence.
-
-A platform driver implements only the closed commands. Swift and Kotlin use
-their public native APIs. React Native uses public JavaScript APIs and remains a
-bridge over the corresponding native client.
+Swift and Kotlin drivers use public native APIs. React Native uses public
+JavaScript APIs and remains a bridge over the applicable native client.
 
 Proof type is an enforced execution policy, not a label. Each requirement
 declares its applicable server and client components; the gate expands those
@@ -328,20 +288,57 @@ example, `native-e2e` requires the PostgreSQL extension, adapter, and applicable
 native or bridge package and cannot use a documentation target, direct pgrx
 target, or adapter-unit target. `reference-model` uses only the independently
 built conformance-runner artifact; `negative-control` also binds that runner and
-one or more explicit mutated subject artifacts. Evidence records the resolved
-subject artifact IDs, and they must exactly match the authored control. Evidence
-environment entries exactly equal the finite dimension-name allowlist and exact
-versions frozen for the obligation's resolved support cell. Extra dimensions are
-invalid. Recorded environment values contain no secrets, tokens, credentials,
-private keys, or user-owned values. Support-neutral
-evidence has no environment dimensions. Across all scenarios selected by an RC
-manifest, each requirement must have terminal passing evidence for every proof
-type listed by that requirement; splitting obligations among scenarios cannot
-omit a required proof type.
+one or more explicit mutated subject artifacts. CI logs record the resolved
+subject artifacts, which must exactly match the authored control. Gate variables
+record exact environment selectors without secrets or user-owned values. Across
+all selected scenarios, each requirement needs terminal passing coverage for
+every listed proof type.
 
-## Required Proof Layers
+## Test Architecture and Proof Homes
 
-### Layer 1: Independent Protocol 3 Scenarios
+The conformance system has seven test layers. Each behavior has one
+authoritative proof home in this architecture.
+
+1. **Contract layer.** The specification and authored vectors define expected
+   behavior. Every applicable surface consumes the same vector files.
+2. **Unit layer.** Deterministic tests stay beside the code. Mocks follow the
+   client validation policy and cannot replace real happy-path execution.
+3. **Real integration layer.** Tests use the real extension, adapter, and
+   PostgreSQL. Happy paths do not use mocks.
+4. **Scenario layer.** Authored semantic scenarios run on representative
+   platform cells. Each production defect adds one minimized permanent
+   scenario.
+5. **Cell smoke layer.** Each support cell installs packaged artifacts. It then
+   connects, pushes, pulls, terminates a process, and resumes.
+6. **Adversarial layer.** Mutation gates, negative controls, and mechanical
+   zero-skip checks prove that the earlier layers detect defects.
+7. **Randomized soak layer.** Seeded generated workloads check invariants. Each
+   failure records its seed for exact replay.
+
+Layers six and seven keep layers one through five small. More example tests
+cannot replace a missing adversarial or soak proof.
+
+One behavior must not have a second proof in another layer. Coverage maps each
+test to requirement IDs and rejects duplicate proof homes.
+
+Shared protocol scenarios stay in `conformance/`. Applicable production
+surfaces consume those scenarios without copying expected values into local
+fixtures.
+
+Release-critical flows require deep boundary tests. These flows include change
+capture, queue durability, conflict reconciliation, protocol dispatch,
+checkpoints, rebuilds, WAL processing, digests, provenance, authorization, and
+portable seeds.
+
+Thin adapter pass-through, configuration, and generated-source checks use
+focused smoke tests when another authoritative layer proves their semantics.
+
+Every phase exit includes an independent deletion review. The review removes
+duplicate proofs, dead fixtures, unused helpers, and one-consumer abstractions.
+
+## Required Product Proof Surfaces
+
+### Independent Protocol 3 Scenarios
 
 The scenario runner must execute independent protocol version 3 scenarios for
 all four endpoints and their dispatch boundaries. Each endpoint must have
@@ -367,7 +364,7 @@ The model and the black-box result must agree on semantic outcomes. Opaque
 cursor, server-version, HMAC, and page-token contents are treated as opaque;
 their required bindings, dispatch, and state effects are verified instead.
 
-### Layer 2: Rust Core Deterministic Semantics
+### Rust Core Deterministic Semantics
 
 `extensions/synchro-core` must consume the authored corpus and independently
 prove portable contract behavior for:
@@ -383,7 +380,7 @@ prove portable contract behavior for:
 The Rust tests are not sufficient by themselves. Their evidence must be
 compared with the independent model and the shared cross-language vectors.
 
-### Layer 3: Real PostgreSQL 18 Extension and WAL Pipeline
+### Real PostgreSQL 18 Extension and WAL Pipeline
 
 Extension conformance must run against a real PostgreSQL 18 instance with the
 packaged extension and the configured worker. The required change-capture path
@@ -413,7 +410,7 @@ must not be treated as proof that its WAL effect is pull-visible before
 materialization. A pending fence must exercise the specified retryable pull
 response with no cursor or checksum advancement.
 
-### Layer 4: Real HTTP Adapter Black Box
+### Real HTTP Adapter Black Box
 
 Adapter conformance sends real HTTP requests to the Go adapter and observes
 only its public responses and permitted external effects. The adapter must
@@ -427,7 +424,7 @@ compression behavior, idempotent replay, and absence of an extra core sync
 network hop. Direct SQL calls are limited to setup, controlled fault injection,
 and sanitized observation; they are not a substitute for HTTP proof.
 
-### Layer 5: Native and Bridge End to End
+### Native and Bridge End to End
 
 Swift and Kotlin must use real local SQLite, public local SQL operations, real
 HTTP transport, and the extension-backed adapter. Their shared scenarios must
@@ -631,19 +628,18 @@ minimum catalog is:
 
 The negative-control inventory must link every control to the requirement,
 normative reference, typed pre-authored injection recipe, expected failure, and
-evidence record. Every release requirement must resolve to at least one catalog
+CI result. Every release requirement must resolve to at least one catalog
 control before execution. Unknown requirement or normative IDs, a control whose
 fault is absent, a scenario recipe that differs from its catalog recipe, or a
 control that only checks field presence or repeats the production algorithm is
 invalid.
 
 Faults and controls resolve through `conformance/faults/catalog.json`. Executed
-fault-injection and negative-control evidence binds the authored scenario fault
+fault-injection and negative-control results bind the authored scenario fault
 plan, catalog subject type, exact detection assertions, and byte-equivalent
-typed injection recipe, and includes a content-addressed `fault-plan`
-attachment. Negative-control evidence also includes a typed
-`negative-control` attachment. Free-form IDs or a passed assertion without
-catalog and injection-plan closure are not evidence.
+typed injection recipe. CI stores the content-addressed fault plan and
+negative-control outputs. Free-form IDs or a passed assertion without catalog
+and injection-plan closure do not prove the control.
 
 ## Exact Schema-Class Conformance
 
@@ -774,7 +770,7 @@ The following request budgets are fixed contract assertions:
 
 Each request-producing scenario includes explicit budgets for every permitted
 request class and an exact zero budget for every forbidden or unexpected request
-class. Evidence records complete typed counts for connect, push, pull, rebuild
+class. CI logs record complete typed counts for connect, push, pull, rebuild
 page, schema fetch, and other requests, plus returned rebuild pages and outbound
 RPC hops; the verifier derives every budget value from those counters. Every
 budget and required measurement is declared on a proof obligation, not merely
@@ -783,7 +779,7 @@ exactly one obligation must declare the entry, use that cell, use its exact
 authorized artifacts, and own at least one performance-budget assertion.
 Non-declaring obligations must produce empty performance result arrays. Omitted
 declarations, cross-obligation borrowing, wrong support cells, duplicate
-ownership, and false-green negative-control evidence are rejected.
+ownership, and false-green negative-control results are rejected.
 
 No unapproved latency or throughput ceiling is invented for v0.3.0. Instead,
 the same manifest separately freezes required characterization measurements for
@@ -822,25 +818,21 @@ vector-set and language pair.
 
 ## Generated Inventory
 
-The evidence tool must generate the conformance inventory from:
+The evidence tool must generate coverage from:
 
 - `conformance/requirements.json` and its JSON Schema
 - `conformance/support-matrix.json` and its JSON Schema
 - the authored scenario catalog and scenario JSON Schema
 - the vector-set manifest, fault catalog, and performance budget manifest
-- executed evidence records and the RC contract snapshot
+- the generated CI summary and its terminal obligation results
 
-Each inventory row includes requirement ID, scenario ID, support-cell ID, proof
-type, protocol version, result, attempt history, artifact hashes, environment,
-seed, logs, traces, and linked negative controls. The generator must detect
-missing requirements, missing proof types, missing negative controls, missing
-support cells, skipped or filtered execution, stale artifact hashes, and
-unresolved attempts. It emits no passing row without an executed evidence
-record.
+Each coverage row includes test, requirement, scenario, obligation, assertion,
+support cell, proof type, and proof home. The generator rejects missing tests,
+missing proof types, duplicate proof homes, skipped work, and zero-test results.
 
 ## Required Makefile Execution
 
-All tests and evidence commands run through Makefile targets. The candidate
+All tests and summary commands run through Makefile targets. The candidate
 must provide and execute these Makefile targets:
 
 ```bash
@@ -856,12 +848,9 @@ make test-rn
 make docs-build
 ```
 
-Release evidence executes the exact two-element command authored by its proof
-obligation: `make` followed by one target. Make command-line assignments,
-additional goals, wrappers, filters, and shell substitutions do not produce
-release evidence. Focused engineering runs may use documented Makefile
-variables, but they cannot satisfy an unfiltered release obligation. Direct
-language test commands never produce release evidence.
+Release CI executes each command through its authored Make target. The summary
+records all gate-affecting variable values. Direct language commands do not
+satisfy a release obligation.
 
 ## Conformance Exit Gate
 
@@ -881,11 +870,11 @@ candidate, candidate lock, and contract snapshot:
 - authentication, readiness, portable seed, clean installation, and
   non-superuser authorization evidence is present
 - every declared performance budget executed and passed
-- generated inventory and all evidence validate against their schemas
+- generated coverage and the CI summary validate against their schemas
 - no required test is skipped, ignored, filtered, quarantined, or accepted
   after an unexplained flake
 - no critical or high finding remains unresolved and no release-critical mutant
   survives without a documented contract-based disposition
 
-Until these commands execute and emit valid evidence for the exact candidate,
+Until these commands execute and emit a valid summary for the exact candidate,
 this document makes no conformance or release-readiness claim.

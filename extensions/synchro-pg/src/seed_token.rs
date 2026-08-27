@@ -5,6 +5,7 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 
+use crate::spi_helpers::{is_lower_hex, is_lower_uuid};
 use crate::stream_position::StreamPosition;
 use synchro_core::checksum::ChecksumObject;
 
@@ -218,8 +219,8 @@ fn validate_page_payload(payload: &SeedPagePayload) -> Result<(), String> {
         || payload.key_id.is_empty()
         || !is_lower_uuid(&payload.export_id)
         || !is_base64url_32(&payload.transaction_nonce)
-        || !is_lower_sha256(&payload.export_manifest_hash)
-        || !is_lower_sha256(&payload.schema_hash)
+        || !is_lower_hex(&payload.export_manifest_hash, 64)
+        || !is_lower_hex(&payload.schema_hash, 64)
         || payload.scope_id.is_empty()
         || payload.stream_generation.is_empty()
         || !is_unsigned_decimal(&payload.registry_generation)
@@ -239,8 +240,8 @@ fn validate_continuation_payload(payload: &SeedContinuationPayload) -> Result<()
         || payload.version != 1
         || payload.key_id.is_empty()
         || !is_lower_uuid(&payload.export_id)
-        || !is_lower_sha256(&payload.export_manifest_hash)
-        || !is_lower_sha256(&payload.schema_hash)
+        || !is_lower_hex(&payload.export_manifest_hash, 64)
+        || !is_lower_hex(&payload.schema_hash, 64)
         || payload.scope_id.is_empty()
         || payload.stream_generation.is_empty()
         || !is_unsigned_decimal(&payload.registry_generation)
@@ -258,24 +259,6 @@ fn is_unsigned_decimal(value: &str) -> bool {
     !value.is_empty()
         && (value == "0" || !value.starts_with('0'))
         && value.bytes().all(|byte| byte.is_ascii_digit())
-}
-
-fn is_lower_sha256(value: &str) -> bool {
-    value.len() == 64
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-}
-
-fn is_lower_uuid(value: &str) -> bool {
-    value.len() == 36
-        && value.as_bytes().iter().enumerate().all(|(index, byte)| {
-            if matches!(index, 8 | 13 | 18 | 23) {
-                *byte == b'-'
-            } else {
-                byte.is_ascii_digit() || (b'a'..=b'f').contains(byte)
-            }
-        })
 }
 
 fn is_base64url_32(value: &str) -> bool {

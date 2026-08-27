@@ -1,5 +1,10 @@
 package com.trainstar.synchro
 
+import com.trainstar.synchro.inspection.TransportObservationCollector
+import com.trainstar.synchro.inspection.TransportOperationClass
+import com.trainstar.synchro.inspection.TransportPullResponseFacts
+import com.trainstar.synchro.inspection.TransportRebuildResponseFacts
+import com.trainstar.synchro.inspection.TransportRequestFacts
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.serialization.ExperimentalSerializationApi
 import kotlinx.serialization.encodeToString
@@ -94,11 +99,17 @@ class HttpClient(
         "/sync/push",
         json.encodeToString(request),
         RetryContext(RetryOperation.PUSHING, request.batchID),
+        requestFacts = transportRequestFacts(request),
     )
 
     /** Sends the exact JSON persisted when a batch was sealed. */
     internal suspend fun pushSealed(requestJSON: String, batchID: String): PushResponse =
-        post("/sync/push", requestJSON, RetryContext(RetryOperation.PUSHING, batchID))
+        post(
+            "/sync/push",
+            requestJSON,
+            RetryContext(RetryOperation.PUSHING, batchID),
+            requestFacts = sealedPushRequestFacts(requestJSON),
+        )
 
     /** Sends a sealed request and retains the exact response JSON. */
     internal suspend fun pushSealedWithBody(requestJSON: String, batchID: String): RawPushResponse {
@@ -106,6 +117,7 @@ class HttpClient(
             "/sync/push",
             requestJSON,
             RetryContext(RetryOperation.PUSHING, batchID),
+            requestFacts = sealedPushRequestFacts(requestJSON),
         )
         return RawPushResponse(result.value, result.bodyJSON)
     }
@@ -124,7 +136,6 @@ class HttpClient(
             requestJSON,
             RetryContext(RetryOperation.REBUILDING, requestJSON),
             requestFacts = transportRequestFacts(request),
-            rebuildRequestedScope = request.scope,
         )
         return RawRebuildResponse(result.value, requestJSON, result.bodyJSON)
     }
@@ -141,7 +152,6 @@ class HttpClient(
         cursorFingerprints: List<String>? = null,
         cursorFingerprintsComplete: Boolean? = null,
         requestFacts: TransportRequestFacts? = null,
-        rebuildRequestedScope: String? = null,
     ): Resp = postWithBody<Resp>(
         path,
         body,
@@ -149,7 +159,6 @@ class HttpClient(
         cursorFingerprints,
         cursorFingerprintsComplete,
         requestFacts,
-        rebuildRequestedScope,
     ).value
 
     private suspend inline fun <reified Resp> postWithBody(
@@ -159,7 +168,6 @@ class HttpClient(
         cursorFingerprints: List<String>? = null,
         cursorFingerprintsComplete: Boolean? = null,
         requestFacts: TransportRequestFacts? = null,
-        rebuildRequestedScope: String? = null,
     ): HTTPResult<Resp> {
         val url = config.serverURL.trimEnd('/') + path
         val request = Request.Builder()
@@ -173,7 +181,6 @@ class HttpClient(
             cursorFingerprints,
             cursorFingerprintsComplete,
             requestFacts,
-            rebuildRequestedScope,
         )
     }
 
@@ -196,7 +203,6 @@ class HttpClient(
         cursorFingerprints: List<String>? = null,
         cursorFingerprintsComplete: Boolean? = null,
         requestFacts: TransportRequestFacts? = null,
-        rebuildRequestedScope: String? = null,
     ): HTTPResult<Resp> {
         val token = config.authProvider()
         val authedRequest = request.newBuilder()
@@ -259,7 +265,6 @@ class HttpClient(
                 cursorFingerprintsComplete = cursorFingerprintsComplete,
                 requestFacts = requestFacts,
                 responseBody = if (observedStatusCode == 200) responseBody else null,
-                rebuildRequestedScope = rebuildRequestedScope,
             )
             observationRecorded = true
             config.transportObservationCollector?.pauseIfArmed(operationClass)
@@ -373,7 +378,6 @@ class HttpClient(
                     cursorFingerprints = cursorFingerprints,
                     cursorFingerprintsComplete = cursorFingerprintsComplete,
                     requestFacts = requestFacts,
-                    rebuildRequestedScope = rebuildRequestedScope,
                 )
             }
         }
@@ -387,7 +391,6 @@ class HttpClient(
         cursorFingerprintsComplete: Boolean?,
         requestFacts: TransportRequestFacts?,
         responseBody: String? = null,
-        rebuildRequestedScope: String? = null,
     ) {
         val duration = (System.nanoTime() - attemptStarted).coerceAtLeast(1)
         config.transportObservationCollector?.record(
@@ -406,7 +409,7 @@ class HttpClient(
             },
             requestFacts = requestFacts,
             rebuildResponseFacts = if (operationClass == TransportOperationClass.REBUILD) {
-                rebuildResponseFacts(responseBody, rebuildRequestedScope)
+                rebuildResponseFacts(responseBody)
             } else {
                 null
             },
@@ -441,10 +444,23 @@ class HttpClient(
         schemaVersion = request.schema.version,
         schemaHash = request.schema.hash,
         limit = request.limit,
+        scopeFingerprint = TransportObservationCollector.cursorFingerprint(request.scope),
         rebuildIDFingerprint = TransportObservationCollector.cursorFingerprint(request.rebuildID),
         cursorFingerprint = request.cursor?.let(TransportObservationCollector::cursorFingerprint),
         cursorPresent = request.cursor != null,
     )
+
+    private fun transportRequestFacts(request: PushRequest): TransportRequestFacts = TransportRequestFacts(
+        clientGeneration = request.clientGeneration,
+        schemaVersion = request.schema.version,
+        schemaHash = request.schema.hash,
+        mutationCount = request.mutations.size,
+    )
+
+    private fun sealedPushRequestFacts(requestJSON: String): TransportRequestFacts? =
+        config.transportObservationCollector?.let {
+            runCatching { transportRequestFacts(json.decodeFromString<PushRequest>(requestJSON)) }.getOrNull()
+        }
 
     private fun pullCursorObservation(request: PullRequest): PullCursorObservation? {
         if (config.transportObservationCollector == null) return null
@@ -458,10 +474,7 @@ class HttpClient(
         )
     }
 
-    private fun rebuildResponseFacts(
-        responseBody: String?,
-        requestedScope: String?,
-    ): TransportRebuildResponseFacts? = responseBody?.let { body ->
+    private fun rebuildResponseFacts(responseBody: String?): TransportRebuildResponseFacts? = responseBody?.let { body ->
         runCatching { json.decodeFromString<RebuildResponse>(body) }.getOrNull()?.let { response ->
             TransportRebuildResponseFacts(
                 recordCount = response.records.size,
@@ -469,18 +482,27 @@ class HttpClient(
                 hasCursor = response.cursor != null,
                 hasFinalScopeCursor = response.finalScopeCursor != null,
                 hasChecksum = response.checksum != null,
-                scopeMatchesRequest = response.scope == requestedScope,
+                scopeFingerprint = TransportObservationCollector.cursorFingerprint(response.scope),
+                finalScopeCursorFingerprint = response.finalScopeCursor?.let(
+                    TransportObservationCollector::cursorFingerprint,
+                ),
             )
         }
     }
 
     private fun pullResponseFacts(responseBody: String?): TransportPullResponseFacts? = responseBody?.let { body ->
         runCatching { json.decodeFromString<PullResponse>(body) }.getOrNull()?.let { response ->
+            val fingerprints = response.scopeCursors.values
+                .map(TransportObservationCollector::cursorFingerprint)
+                .distinct()
+                .sorted()
             TransportPullResponseFacts(
                 changeCount = response.changes.size,
                 hasMore = response.hasMore,
                 rebuildScopeCount = response.rebuild.size,
                 checksumCount = response.checksums?.size ?: 0,
+                scopeCursorFingerprints = fingerprints.take(TransportObservationCollector.maximumCursorFingerprints),
+                scopeCursorFingerprintsComplete = fingerprints.size <= TransportObservationCollector.maximumCursorFingerprints,
             )
         }
     }

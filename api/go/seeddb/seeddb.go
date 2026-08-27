@@ -786,20 +786,6 @@ func checkDestinationFamily(path string, overwrite bool) error {
 	return nil
 }
 
-func publishVerifiedSQLiteOutput(
-	ctx context.Context,
-	temporaryPath, outputPath string,
-	overwrite bool,
-	env manifestEnvelope,
-	tables []localSchemaTable,
-	portable portableSeedManifest,
-) error {
-	if err := verifySQLiteOutput(ctx, temporaryPath, env, tables, portable, seedSnapshotComplete); err != nil {
-		return err
-	}
-	return publishOutput(temporaryPath, outputPath, overwrite)
-}
-
 func verifySQLiteOutput(
 	ctx context.Context,
 	path string,
@@ -1895,7 +1881,11 @@ func sqliteValue(column localSchemaColumn, raw any) (any, error) {
 
 	switch column.LogicalType {
 	case "string", "decimal", "datetime", "date", "time":
-		return fmt.Sprint(raw), nil
+		value, ok := raw.(string)
+		if !ok {
+			return nil, fmt.Errorf("unsupported text value %T", raw)
+		}
+		return value, nil
 	case "json":
 		if value, ok := raw.(string); ok {
 			return value, nil
@@ -1906,75 +1896,38 @@ func sqliteValue(column localSchemaColumn, raw any) (any, error) {
 		}
 		return string(encoded), nil
 	case "boolean":
-		switch value := raw.(type) {
-		case bool:
+		value, ok := raw.(bool)
+		if ok {
 			if value {
 				return int64(1), nil
 			}
 			return int64(0), nil
-		case float64:
-			if value == 0 {
-				return int64(0), nil
-			}
-			if value == 1 {
-				return int64(1), nil
-			}
-		case string:
-			switch strings.ToLower(strings.TrimSpace(value)) {
-			case "true", "1":
-				return int64(1), nil
-			case "false", "0":
-				return int64(0), nil
-			}
 		}
 		return nil, fmt.Errorf("unsupported boolean value %T", raw)
 	case "int", "int64":
-		switch value := raw.(type) {
-		case float64:
-			if math.Trunc(value) != value {
-				return nil, fmt.Errorf("non-integer numeric value %v", value)
-			}
-			return int64(value), nil
-		case int64:
-			return value, nil
-		case int:
-			return int64(value), nil
-		case json.Number:
+		value, ok := raw.(json.Number)
+		if ok {
 			return value.Int64()
-		case string:
-			return strconv.ParseInt(value, 10, 64)
 		}
 		return nil, fmt.Errorf("unsupported integer value %T", raw)
 	case "float":
-		switch value := raw.(type) {
-		case float64:
-			return value, nil
-		case float32:
-			return float64(value), nil
-		case int64:
-			return float64(value), nil
-		case int:
-			return float64(value), nil
-		case json.Number:
+		value, ok := raw.(json.Number)
+		if ok {
 			return value.Float64()
-		case string:
-			return strconv.ParseFloat(value, 64)
 		}
 		return nil, fmt.Errorf("unsupported float value %T", raw)
 	case "bytes":
-		switch value := raw.(type) {
-		case []byte:
-			return value, nil
-		case string:
+		value, ok := raw.(string)
+		if ok {
 			decoded, err := base64.RawURLEncoding.DecodeString(value)
 			if err != nil {
-				return nil, err
+				return nil, fmt.Errorf("decoding bytes: %w", err)
 			}
 			return decoded, nil
 		}
 		return nil, fmt.Errorf("unsupported bytes value %T", raw)
 	default:
-		return raw, nil
+		return nil, fmt.Errorf("unsupported logical type %q", column.LogicalType)
 	}
 }
 

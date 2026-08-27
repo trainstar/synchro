@@ -18,7 +18,7 @@
     "trusted_rerun_approvers",
     "contract",
     "scenarios",
-    "evidence",
+    "ci_summary",
     "resolved_support_cells",
     "artifacts",
     "attestations"
@@ -47,15 +47,19 @@
       "uniqueItems": true,
       "items": { "$ref": "#/$defs/scenarioReference" }
     },
-    "evidence": {
-      "type": "array",
-      "minItems": 1,
-      "uniqueItems": true,
-      "items": { "$ref": "#/$defs/evidenceReference" }
+    "ci_summary": {
+      "allOf": [
+        { "$ref": "#/$defs/contractFile" },
+        {
+          "properties": {
+            "path": { "const": "dist/verification/phase-5-summary.json" }
+          }
+        }
+      ]
     },
     "resolved_support_cells": {
       "type": "array",
-      "minItems": 11,
+      "minItems": 8,
       "uniqueItems": true,
       "items": { "$ref": "#/$defs/resolvedSupportCell" }
     },
@@ -81,10 +85,6 @@
       "type": "string",
       "pattern": "^SCN-[A-Z0-9]+(?:-[A-Z0-9]+)*-[0-9]{3}$"
     },
-    "evidenceId": {
-      "type": "string",
-      "pattern": "^EVD-[A-Z0-9]+(?:-[A-Z0-9]+)*-[0-9]{3}$"
-    },
     "supportCellId": {
       "type": "string",
       "pattern": "^SUP-[A-Z0-9]+(?:-[A-Z0-9]+)*-[0-9]{3}$"
@@ -108,16 +108,6 @@
     "relativePath": {
       "type": "string",
       "pattern": "^(?!/)(?!\\.(?:/|$))(?!.*\/\\.(?:/|$))(?!\\.\\.(?:/|$))(?!.*\/\\.\\.(?:/|$))(?!.*\\\\)[A-Za-z0-9._-]+(?:/[A-Za-z0-9._-]+)*$"
-    },
-    "proofType": {
-      "type": "string",
-      "enum": [
-        "reference-model",
-        "server-black-box",
-        "native-e2e",
-        "fault-injection",
-        "negative-control"
-      ]
     },
     "exactVersion": {
       "type": "string",
@@ -367,12 +357,12 @@
         "schema_files": {
           "type": "object",
           "additionalProperties": false,
-          "required": ["requirements", "support_matrix", "scenario", "evidence", "rc_candidate_lock", "rc_manifest", "fault_catalog", "artifact_inventory", "performance_budgets", "vector_catalog"],
+          "required": ["requirements", "support_matrix", "scenario", "ci_summary", "rc_candidate_lock", "rc_manifest", "fault_catalog", "artifact_inventory", "performance_budgets", "vector_catalog"],
           "properties": {
             "requirements": { "allOf": [{ "$ref": "#/$defs/contractFile" }, { "properties": { "path": { "const": "conformance/schemas/requirements-v2.schema.json" } } }] },
             "support_matrix": { "allOf": [{ "$ref": "#/$defs/contractFile" }, { "properties": { "path": { "const": "conformance/schemas/support-matrix.schema.json" } } }] },
             "scenario": { "allOf": [{ "$ref": "#/$defs/contractFile" }, { "properties": { "path": { "const": "conformance/schemas/scenario-v2.schema.json" } } }] },
-            "evidence": { "allOf": [{ "$ref": "#/$defs/contractFile" }, { "properties": { "path": { "const": "conformance/schemas/evidence-v2.schema.json" } } }] },
+            "ci_summary": { "allOf": [{ "$ref": "#/$defs/contractFile" }, { "properties": { "path": { "const": "conformance/schemas/ci-summary-v1.schema.json" } } }] },
             "rc_candidate_lock": { "allOf": [{ "$ref": "#/$defs/contractFile" }, { "properties": { "path": { "const": "conformance/schemas/rc-candidate-lock-v1.schema.json" } } }] },
             "rc_manifest": { "allOf": [{ "$ref": "#/$defs/contractFile" }, { "properties": { "path": { "const": "conformance/schemas/rc-manifest-v2.schema.json" } } }] },
             "fault_catalog": { "allOf": [{ "$ref": "#/$defs/contractFile" }, { "properties": { "path": { "const": "conformance/schemas/fault-catalog-v1.schema.json" } } }] },
@@ -389,25 +379,6 @@
       "required": ["scenario_id", "path", "sha256"],
       "properties": {
         "scenario_id": { "$ref": "#/$defs/scenarioId" },
-        "path": { "$ref": "#/$defs/relativePath" },
-        "sha256": { "$ref": "#/$defs/sha256" }
-      }
-    },
-    "evidenceReference": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["evidence_id", "scenario_id", "proof_obligation_id", "support_cell_id", "proof_type", "path", "sha256"],
-      "properties": {
-        "evidence_id": { "$ref": "#/$defs/evidenceId" },
-        "scenario_id": { "$ref": "#/$defs/scenarioId" },
-        "proof_obligation_id": { "type": "string", "pattern": "^OBL-[A-Z0-9]+(?:-[A-Z0-9]+)*-[0-9]{3}$" },
-        "support_cell_id": {
-          "oneOf": [
-            { "$ref": "#/$defs/supportCellId" },
-            { "type": "null" }
-          ]
-        },
-        "proof_type": { "$ref": "#/$defs/proofType" },
         "path": { "$ref": "#/$defs/relativePath" },
         "sha256": { "$ref": "#/$defs/sha256" }
       }

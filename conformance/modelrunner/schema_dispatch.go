@@ -89,9 +89,6 @@ func collectSchemaDispatchObservations(result Result, plan scenarios.SchemaDispa
 	seenSamples := make(map[string]struct{})
 	seenClients := make(map[reference.ClientKey]struct{})
 	for _, execution := range result.Steps {
-		if execution.OperationKey == "connect/send" && execution.SchemaDispatchMeasurement == nil {
-			return nil, fmt.Sprintf("connect step %s is not bound to a schema-dispatch measurement sample", execution.StepID)
-		}
 		measurement := execution.SchemaDispatchMeasurement
 		if measurement == nil {
 			continue

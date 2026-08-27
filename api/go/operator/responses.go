@@ -99,6 +99,12 @@ type projectionBootstrapAbort struct {
 	CandidateSlotName string `json:"candidate_slot_name"`
 }
 
+type projectionBootstrapSlotDropState struct {
+	Present bool `json:"present"`
+	Active  bool `json:"active"`
+	Valid   bool `json:"valid"`
+}
+
 func newCandidateSlotName(activeSlot string) (string, error) {
 	var entropy [projectionBootstrapNonceBytes]byte
 	if _, err := rand.Read(entropy[:]); err != nil {
@@ -278,6 +284,15 @@ func parseAbort(raw []byte, bootstrapID, candidateSlot string) error {
 		return errors.New("aborted projection bootstrap response is invalid")
 	}
 	return nil
+}
+
+func parseSlotDropState(raw []byte) (projectionBootstrapSlotDropState, error) {
+	var state projectionBootstrapSlotDropState
+	if decodeStrictObject(raw, &state, "present", "active", "valid") != nil ||
+		(!state.Present && (state.Active || !state.Valid)) {
+		return projectionBootstrapSlotDropState{}, errors.New("projection bootstrap candidate slot state is invalid")
+	}
+	return state, nil
 }
 
 func validSchemaPair(version *int64, hash *string) bool {

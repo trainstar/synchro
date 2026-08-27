@@ -200,56 +200,62 @@ public final class SynchroClient: @unchecked Sendable {
         }
     }
 
-    public func inspectCurrentSchema() throws -> SchemaRef? {
-        try database.readTransaction { db in
-            let version = try SynchroMeta.getInt64(db, key: .schemaVersion)
-            let hash = try SynchroMeta.get(db, key: .schemaHash) ?? ""
-            if version == 0 && hash.isEmpty {
-                return nil
-            }
-            let schema = SchemaRef(version: version, hash: hash)
-            try schema.validate()
-            return schema
+    func inspectCurrentSchema() throws -> SchemaRef? {
+        try database.readTransaction(Self.inspectSchema)
+    }
+
+    func inspectScopeStates() throws -> [ScopeStateInspection] {
+        try database.readTransaction(Self.inspectScopeStates)
+    }
+
+    func inspectScopeRows() throws -> [ScopeRowInspection] {
+        try database.readTransaction(Self.inspectScopeRows)
+    }
+
+    func inspectProvenanceMaintenanceWork() -> ProvenanceMaintenanceWorkInspection {
+        database.inspectProvenanceMaintenanceWork()
+    }
+
+    func inspectClientState() throws -> ClientStateInspection {
+        try database.stateInspectionTransaction { db, provenanceMaintenanceWork in
+            ClientStateInspection(
+                schema: try Self.inspectSchema(db),
+                scopeStates: try Self.inspectScopeStates(db),
+                scopeRows: try Self.inspectScopeRows(db),
+                rebuildAttempts: try Self.inspectRebuildAttempts(db),
+                provenanceMaintenanceWorkCursor: provenanceMaintenanceWork.cursor
+            )
         }
     }
 
-    public func inspectScopeStates() throws -> [ScopeStateInspection] {
-        try database.readTransaction { db in
-            try SynchroMeta.getAllScopes(db).map { scope in
-                ScopeStateInspection(
-                    scopeID: scope.scopeID,
-                    cursor: scope.cursor,
-                    checksum: scope.checksum,
-                    localChecksum: scope.localChecksum,
-                    generation: scope.generation
-                )
-            }
+    func inspectClientStateCounts() throws -> ClientStateCountsInspection {
+        try database.stateInspectionTransaction { db, provenanceMaintenanceWork in
+            let provenanceCount = try Self.inspectCount(
+                db,
+                sql: "SELECT COUNT(*) FROM (SELECT table_name, record_id FROM _synchro_scope_rows GROUP BY table_name, record_id)"
+            )
+            return ClientStateCountsInspection(
+                schema: try Self.inspectSchema(db),
+                applicationRowCount: provenanceCount,
+                mutationLedgerCount: try Self.inspectCount(db, sql: "SELECT COUNT(*) FROM _synchro_pending_changes"),
+                mutationOutcomeCount: try Self.inspectCount(
+                    db,
+                    sql: "SELECT COUNT(*) FROM _synchro_pending_changes WHERE lifecycle_state IN ('accepted', 'rejected')"
+                ),
+                sealedBatchCount: try Self.inspectCount(db, sql: "SELECT COUNT(*) FROM _synchro_push_batches"),
+                rejectedMutationCount: try Self.inspectCount(db, sql: "SELECT COUNT(*) FROM _synchro_rejected_mutations"),
+                scopeStateCount: try Self.inspectCount(db, sql: "SELECT COUNT(*) FROM _synchro_scopes"),
+                scopeRowCount: try Self.inspectCount(db, sql: "SELECT COUNT(*) FROM _synchro_scope_rows"),
+                provenanceCount: provenanceCount,
+                rowMetadataCount: try Self.inspectCount(db, sql: "SELECT COUNT(*) FROM _synchro_row_versions"),
+                rebuildAttemptCount: try Self.inspectCount(db, sql: "SELECT COUNT(*) FROM _synchro_rebuild_attempts"),
+                rebuildReceiptCount: try Self.inspectCount(db, sql: "SELECT COUNT(*) FROM _synchro_rebuild_page_receipts"),
+                provenanceMaintenanceWorkCursor: provenanceMaintenanceWork.cursor
+            )
         }
     }
 
-    public func inspectScopeRows() throws -> [ScopeRowInspection] {
-        try database.readTransaction { db in
-            var result: [ScopeRowInspection] = []
-            for scope in try SynchroMeta.getAllScopes(db) {
-                result.append(contentsOf: try SynchroMeta.getScopeRowChecksums(db, scopeID: scope.scopeID).map { row in
-                    ScopeRowInspection(
-                        scopeID: scope.scopeID,
-                        tableName: row.tableName,
-                        recordID: row.recordID,
-                        checksum: row.checksum,
-                        generation: row.generation
-                    )
-                })
-            }
-            return result.sorted { left, right in
-                let leftKey = [left.scopeID, left.tableName, left.recordID]
-                let rightKey = [right.scopeID, right.tableName, right.recordID]
-                return leftKey.lexicographicallyPrecedes(rightKey)
-            }
-        }
-    }
-
-    public func inspectRowMetadata(tableName: String, recordID: String) throws -> RowMetadataInspection? {
+    func inspectRowMetadata(tableName: String, recordID: String) throws -> RowMetadataInspection? {
         try database.readTransaction { db in
             guard let metadata = try SynchroMeta.getRowMetadata(db, tableName: tableName, recordID: recordID) else {
                 return nil
@@ -263,27 +269,79 @@ public final class SynchroClient: @unchecked Sendable {
         }
     }
 
-    public func inspectRebuildAttempts() throws -> [RebuildAttemptInspection] {
-        try database.readTransaction { db in
-            try SynchroMeta.getAllScopes(db).compactMap { scope in
-                guard let attempt = try SynchroMeta.getRebuildAttempt(db, scopeID: scope.scopeID) else {
-                    return nil
-                }
-                return RebuildAttemptInspection(
-                    scopeID: attempt.scopeID,
-                    rebuildID: attempt.rebuildID,
-                    clientGeneration: attempt.clientGeneration,
-                    schemaVersion: attempt.schemaVersion,
-                    schemaHash: attempt.schemaHash,
-                    generation: attempt.generation,
-                    cursor: attempt.cursor,
-                    pageLimit: attempt.pageLimit
-                )
-            }
+    func inspectRebuildAttempts() throws -> [RebuildAttemptInspection] {
+        try database.readTransaction(Self.inspectRebuildAttempts)
+    }
+
+    private static func inspectSchema(_ db: GRDB.Database) throws -> SchemaRef? {
+        let version = try SynchroMeta.getInt64(db, key: .schemaVersion)
+        let hash = try SynchroMeta.get(db, key: .schemaHash) ?? ""
+        if version == 0 && hash.isEmpty {
+            return nil
+        }
+        let schema = SchemaRef(version: version, hash: hash)
+        try schema.validate()
+        return schema
+    }
+
+    private static func inspectCount(_ db: GRDB.Database, sql: String) throws -> Int {
+        guard let count = try Int64.fetchOne(db, sql: sql), count >= 0, count <= Int64(Int.max) else {
+            throw SynchroError.invalidResponse(message: "durable state count is invalid")
+        }
+        return Int(count)
+    }
+
+    private static func inspectScopeStates(_ db: GRDB.Database) throws -> [ScopeStateInspection] {
+        try SynchroMeta.getAllScopes(db).map { scope in
+            ScopeStateInspection(
+                scopeID: scope.scopeID,
+                cursor: scope.cursor,
+                checksum: scope.checksum,
+                localChecksum: scope.localChecksum,
+                generation: scope.generation
+            )
         }
     }
 
-    public func inspectRebuildReceiptProofs() throws -> [RebuildReceiptProofInspection] {
+    private static func inspectScopeRows(_ db: GRDB.Database) throws -> [ScopeRowInspection] {
+        var result: [ScopeRowInspection] = []
+        for scope in try SynchroMeta.getAllScopes(db) {
+            result.append(contentsOf: try SynchroMeta.getScopeRowChecksums(db, scopeID: scope.scopeID).map { row in
+                ScopeRowInspection(
+                    scopeID: scope.scopeID,
+                    tableName: row.tableName,
+                    recordID: row.recordID,
+                    checksum: row.checksum,
+                    generation: row.generation
+                )
+            })
+        }
+        return result.sorted { left, right in
+            let leftKey = [left.scopeID, left.tableName, left.recordID]
+            let rightKey = [right.scopeID, right.tableName, right.recordID]
+            return leftKey.lexicographicallyPrecedes(rightKey)
+        }
+    }
+
+    private static func inspectRebuildAttempts(_ db: GRDB.Database) throws -> [RebuildAttemptInspection] {
+        try SynchroMeta.getAllScopes(db).compactMap { scope in
+            guard let attempt = try SynchroMeta.getRebuildAttempt(db, scopeID: scope.scopeID) else {
+                return nil
+            }
+            return RebuildAttemptInspection(
+                scopeID: attempt.scopeID,
+                rebuildID: attempt.rebuildID,
+                clientGeneration: attempt.clientGeneration,
+                schemaVersion: attempt.schemaVersion,
+                schemaHash: attempt.schemaHash,
+                generation: attempt.generation,
+                cursor: attempt.cursor,
+                pageLimit: attempt.pageLimit
+            )
+        }
+    }
+
+    func inspectRebuildReceipts() throws -> [RebuildReceiptInspection] {
         try database.readTransaction { db in
             let receipts = try SynchroMeta.listRebuildPageReceipts(db)
             let grouped = Dictionary(grouping: receipts) { receipt in
@@ -295,7 +353,7 @@ public final class SynchroClient: @unchecked Sendable {
                 }
                 return Self.utf8Less(left.scopeID, right.scopeID)
             }.map { key in
-                try Self.proveRebuildReceipts(
+                try Self.inspectRebuildReceipts(
                     db: db,
                     receipts: grouped[key] ?? []
                 )
@@ -357,20 +415,24 @@ public final class SynchroClient: @unchecked Sendable {
         syncEngine.onConflict(callback)
     }
 
-    private static func proveRebuildReceipts(
+    private static func inspectRebuildReceipts(
         db: GRDB.Database,
         receipts: [LocalRebuildPageReceipt]
-    ) throws -> RebuildReceiptProofInspection {
+    ) throws -> RebuildReceiptInspection {
         guard let first = receipts.first else {
-            return RebuildReceiptProofInspection(
+            return RebuildReceiptInspection(
                 rebuildIDFingerprint: "",
                 pageCount: 0,
                 returnedRecordCount: 0,
-                requestChainValid: false,
-                recordsInCanonicalOrder: false,
-                rowChecksumsValid: false,
-                scopeChecksumValid: false,
-                finalChecksumMatchesLocal: false
+                requestChainExpected: [],
+                requestChainObserved: [],
+                recordIdentitiesHex: [],
+                receivedRowChecksums: [],
+                computedRowChecksums: [],
+                computedScopeChecksum: nil,
+                finalScopeChecksum: nil,
+                storedScopeChecksum: nil,
+                localScopeChecksum: nil
             )
         }
 
@@ -389,37 +451,29 @@ public final class SynchroClient: @unchecked Sendable {
             decoded.append((receipt, request, response, finalChecksum))
         }
 
-        var requestChainValid = true
+        var requestChainExpected: [String] = []
+        var requestChainObserved: [String] = []
+        func appendChain(_ expected: String?, _ observed: String?) {
+            requestChainExpected.append(expected ?? "null")
+            requestChainObserved.append(observed ?? "null")
+        }
         var requestCursorIndexes: [String: [Int]] = [:]
         for (index, item) in decoded.enumerated() {
             let requestKey = cursorKey(item.receipt.requestCursor)
             requestCursorIndexes[requestKey, default: []].append(index)
-            guard item.request.scope == item.receipt.scopeID,
-                  item.request.rebuildID == item.receipt.rebuildID,
-                  item.request.cursor == item.receipt.requestCursor,
-                  item.response.scope == item.receipt.scopeID,
-                  item.receipt.isFinal == !item.response.hasMore,
-                  item.receipt.finalScopeCursor == (item.response.hasMore ? nil : item.response.finalScopeCursor),
-                  item.receipt.finalChecksumJSON == nil || item.finalChecksum == item.response.checksum else {
-                requestChainValid = false
-                continue
-            }
-            if item.response.hasMore {
-                if item.response.cursor == nil
-                    || item.response.finalScopeCursor != nil
-                    || item.response.checksum != nil
-                    || item.receipt.finalChecksumJSON != nil {
-                    requestChainValid = false
-                }
-            } else {
-                if item.response.cursor != nil
-                    || item.response.finalScopeCursor == nil
-                    || item.response.checksum == nil
-                    || item.receipt.finalScopeCursor == nil
-                    || item.receipt.finalChecksumJSON == nil {
-                    requestChainValid = false
-                }
-            }
+            appendChain(item.receipt.scopeID, item.request.scope)
+            appendChain(cursorFingerprint(item.receipt.rebuildID), cursorFingerprint(item.request.rebuildID))
+            appendChain(item.receipt.requestCursor.map(cursorFingerprint), item.request.cursor.map(cursorFingerprint))
+            appendChain(item.receipt.scopeID, item.response.scope)
+            appendChain(String(item.receipt.isFinal), String(!item.response.hasMore))
+            appendChain(
+                (item.response.hasMore ? nil : item.response.finalScopeCursor).map(cursorFingerprint),
+                item.receipt.finalScopeCursor.map(cursorFingerprint)
+            )
+            appendChain(item.response.checksum.map(checksumKey), item.finalChecksum.map(checksumKey))
+            appendChain(item.response.hasMore ? "cursor" : "final", item.response.cursor == nil ? "final" : "cursor")
+            appendChain(item.response.hasMore ? "no-final-cursor" : "final-cursor", item.response.finalScopeCursor == nil ? "no-final-cursor" : "final-cursor")
+            appendChain(item.response.hasMore ? "no-checksum" : "checksum", item.response.checksum == nil ? "no-checksum" : "checksum")
         }
 
         var orderedIndexes: [Int] = []
@@ -432,7 +486,6 @@ public final class SynchroClient: @unchecked Sendable {
             orderedIndexes.append(index)
             if item.response.hasMore {
                 guard let nextCursor = item.response.cursor else {
-                    requestChainValid = false
                     break
                 }
                 expectedCursor = nextCursor
@@ -442,13 +495,9 @@ public final class SynchroClient: @unchecked Sendable {
                 break
             }
         }
-        if orderedIndexes.isEmpty || consumed.count != decoded.count || finalPageCount != 1 {
-            requestChainValid = false
-        }
-        if let finalIndex = orderedIndexes.last,
-           decoded[finalIndex].response.hasMore {
-            requestChainValid = false
-        }
+        appendChain(String(decoded.count), String(consumed.count))
+        appendChain("1", String(finalPageCount))
+        appendChain("final", orderedIndexes.last.map { decoded[$0].response.hasMore ? "partial" : "final" })
 
         let traversalIndexes: [Int]
         if consumed.count == decoded.count {
@@ -462,9 +511,9 @@ public final class SynchroClient: @unchecked Sendable {
         }
 
         var returnedRecordCount = 0
-        var recordsInCanonicalOrder = true
-        var rowChecksumsValid = true
-        var previousIdentity: Data?
+        var recordIdentitiesHex: [String] = []
+        var receivedRowChecksums: [String] = []
+        var computedRowChecksums: [String] = []
         var entries: [(identity: Data, digest: ChecksumObject)] = []
         var schemaCache: [String: [String: LocalSchemaTable]] = [:]
         for index in traversalIndexes {
@@ -507,52 +556,55 @@ public final class SynchroClient: @unchecked Sendable {
                 } catch {
                     throw SynchroError.invalidResponse(message: "rebuild receipt record metadata is invalid")
                 }
-                if let previousIdentity, !previousIdentity.lexicographicallyPrecedes(digest.identity) {
-                    recordsInCanonicalOrder = false
-                }
-                previousIdentity = digest.identity
-                if digest.checksum != record.rowChecksum {
-                    rowChecksumsValid = false
-                }
+                recordIdentitiesHex.append(hexString(digest.identity))
+                receivedRowChecksums.append(checksumKey(record.rowChecksum))
+                computedRowChecksums.append(checksumKey(digest.checksum))
                 entries.append((identity: digest.identity, digest: digest.checksum))
             }
         }
 
         let finalIndexes = decoded.indices.filter { !decoded[$0].response.hasMore }
         let finalChecksum: ChecksumObject? = finalIndexes.count == 1 ? decoded[finalIndexes[0]].response.checksum : nil
-        let scopeChecksumValid: Bool
-        if let finalChecksum,
-           (try? finalChecksum.validate()) != nil,
-           let computed = try? Integrity.scopeDigest(
-               schemaHash: decoded[finalIndexes[0]].request.schema.hash,
-               scopeID: first.scopeID,
-               entries: entries
-           ) {
-            scopeChecksumValid = computed == finalChecksum
-        } else {
-            scopeChecksumValid = false
+        let schemaHashes = Set(decoded.map { $0.request.schema.hash })
+        let computedScopeChecksum = schemaHashes.count == 1 ? checksumKey(try Integrity.scopeDigest(
+            schemaHash: schemaHashes.first!,
+            scopeID: first.scopeID,
+            entries: entries.sorted { $0.identity.lexicographicallyPrecedes($1.identity) }
+        )) : nil
+        let scope = try SynchroMeta.getScope(db, scopeID: first.scopeID)
+        let storedScopeChecksum = try scope?.checksum.map {
+            checksumKey(try decodeExactReceiptJSON($0, as: ChecksumObject.self, decoder: decoder))
         }
-        let finalChecksumMatchesLocal: Bool
-        if let finalChecksum,
-           (try? finalChecksum.validate()) != nil,
-           let scope = try SynchroMeta.getScope(db, scopeID: first.scopeID) {
-            let stored = scope.checksum.flatMap { try? decodeExactReceiptJSON($0, as: ChecksumObject.self, decoder: decoder) }
-            let local = try? decodeExactReceiptJSON(scope.localChecksum, as: ChecksumObject.self, decoder: decoder)
-            finalChecksumMatchesLocal = stored == finalChecksum && local == finalChecksum
-        } else {
-            finalChecksumMatchesLocal = false
+        let localScopeChecksum = try scope.map {
+            checksumKey(try decodeExactReceiptJSON($0.localChecksum, as: ChecksumObject.self, decoder: decoder))
         }
 
-        return RebuildReceiptProofInspection(
+        return RebuildReceiptInspection(
             rebuildIDFingerprint: TransportObservationCollector.cursorFingerprint(first.rebuildID),
             pageCount: receipts.count,
             returnedRecordCount: returnedRecordCount,
-            requestChainValid: requestChainValid,
-            recordsInCanonicalOrder: recordsInCanonicalOrder,
-            rowChecksumsValid: rowChecksumsValid,
-            scopeChecksumValid: scopeChecksumValid,
-            finalChecksumMatchesLocal: finalChecksumMatchesLocal
+            requestChainExpected: requestChainExpected,
+            requestChainObserved: requestChainObserved,
+            recordIdentitiesHex: recordIdentitiesHex,
+            receivedRowChecksums: receivedRowChecksums,
+            computedRowChecksums: computedRowChecksums,
+            computedScopeChecksum: computedScopeChecksum,
+            finalScopeChecksum: finalChecksum.map(checksumKey),
+            storedScopeChecksum: storedScopeChecksum,
+            localScopeChecksum: localScopeChecksum
         )
+    }
+
+    private static func cursorFingerprint(_ value: String) -> String {
+        TransportObservationCollector.cursorFingerprint(value)
+    }
+
+    private static func hexString(_ value: Data) -> String {
+        value.map { String(format: "%02x", $0) }.joined()
+    }
+
+    private static func checksumKey(_ value: ChecksumObject) -> String {
+        "\(value.algorithm):\(value.version):\(value.encoding):\(value.digest)"
     }
 
     private static func decodeExactReceiptJSON<T: Codable & Equatable>(

@@ -48,7 +48,7 @@
       "control_id": null
     },
     {
-      "obligation_id": "OBL-PUSH-RESPONSE-LOSS-PG-001",
+      "obligation_id": "OBL-PUSH-RESPONSE-LOSS-PG-LINUX-X64-001",
       "requirement_ids": [
         "SYNC-IDEMPOTENCY-001"
       ],
@@ -56,7 +56,7 @@
         "ASSERT-PUSH-RESPONSE-LOSS-SEMANTIC-001"
       ],
       "proof_type": "server-black-box",
-      "support_cell_id": "SUP-PG-018",
+      "support_cell_id": "SUP-PG-LINUX-X64-001",
       "artifact_inventory_ids": [
         "ARTDEF-PG-EXTENSION-001",
         "ARTDEF-ADAPTER-001"
@@ -75,85 +75,28 @@
       "control_id": null
     },
     {
-      "obligation_id": "OBL-PUSH-RESPONSE-LOSS-IOS-MIN-001",
+      "obligation_id": "OBL-PUSH-RESPONSE-LOSS-PG-MACOS-ARM64-001",
       "requirement_ids": [
         "SYNC-IDEMPOTENCY-001"
       ],
       "assertion_ids": [
         "ASSERT-PUSH-RESPONSE-LOSS-SEMANTIC-001"
       ],
-      "proof_type": "native-e2e",
-      "support_cell_id": "SUP-IOS-MIN-001",
+      "proof_type": "server-black-box",
+      "support_cell_id": "SUP-PG-MACOS-ARM64-001",
       "artifact_inventory_ids": [
         "ARTDEF-PG-EXTENSION-001",
-        "ARTDEF-ADAPTER-001",
-        "ARTDEF-SWIFT-SPM-001"
+        "ARTDEF-ADAPTER-001"
       ],
       "performance_budget_ids": [],
       "required_measurement_ids": [],
       "required_vector_set_ids": [
         "VSET-CANONICAL-001"
       ],
-      "make_target": "test-swift",
+      "make_target": "test-blackbox",
       "argv": [
         "make",
-        "test-swift"
-      ],
-      "fault_plan_id": null,
-      "control_id": null
-    },
-    {
-      "obligation_id": "OBL-PUSH-RESPONSE-LOSS-IOS-CURRENT-001",
-      "requirement_ids": [
-        "SYNC-IDEMPOTENCY-001"
-      ],
-      "assertion_ids": [
-        "ASSERT-PUSH-RESPONSE-LOSS-SEMANTIC-001"
-      ],
-      "proof_type": "native-e2e",
-      "support_cell_id": "SUP-IOS-CURRENT-001",
-      "artifact_inventory_ids": [
-        "ARTDEF-PG-EXTENSION-001",
-        "ARTDEF-ADAPTER-001",
-        "ARTDEF-SWIFT-SPM-001"
-      ],
-      "performance_budget_ids": [],
-      "required_measurement_ids": [],
-      "required_vector_set_ids": [
-        "VSET-CANONICAL-001"
-      ],
-      "make_target": "test-swift",
-      "argv": [
-        "make",
-        "test-swift"
-      ],
-      "fault_plan_id": null,
-      "control_id": null
-    },
-    {
-      "obligation_id": "OBL-PUSH-RESPONSE-LOSS-MACOS-MIN-001",
-      "requirement_ids": [
-        "SYNC-IDEMPOTENCY-001"
-      ],
-      "assertion_ids": [
-        "ASSERT-PUSH-RESPONSE-LOSS-SEMANTIC-001"
-      ],
-      "proof_type": "native-e2e",
-      "support_cell_id": "SUP-MACOS-MIN-001",
-      "artifact_inventory_ids": [
-        "ARTDEF-PG-EXTENSION-001",
-        "ARTDEF-ADAPTER-001",
-        "ARTDEF-SWIFT-SPM-001"
-      ],
-      "performance_budget_ids": [],
-      "required_measurement_ids": [],
-      "required_vector_set_ids": [
-        "VSET-CANONICAL-001"
-      ],
-      "make_target": "test-swift",
-      "argv": [
-        "make",
-        "test-swift"
+        "test-blackbox"
       ],
       "fault_plan_id": null,
       "control_id": null
@@ -187,34 +130,6 @@
       "control_id": null
     },
     {
-      "obligation_id": "OBL-PUSH-RESPONSE-LOSS-ANDROID-MIN-001",
-      "requirement_ids": [
-        "SYNC-IDEMPOTENCY-001"
-      ],
-      "assertion_ids": [
-        "ASSERT-PUSH-RESPONSE-LOSS-SEMANTIC-001"
-      ],
-      "proof_type": "native-e2e",
-      "support_cell_id": "SUP-ANDROID-MIN-001",
-      "artifact_inventory_ids": [
-        "ARTDEF-PG-EXTENSION-001",
-        "ARTDEF-ADAPTER-001",
-        "ARTDEF-KOTLIN-MAVEN-001"
-      ],
-      "performance_budget_ids": [],
-      "required_measurement_ids": [],
-      "required_vector_set_ids": [
-        "VSET-CANONICAL-001"
-      ],
-      "make_target": "test-kotlin",
-      "argv": [
-        "make",
-        "test-kotlin"
-      ],
-      "fault_plan_id": null,
-      "control_id": null
-    },
-    {
       "obligation_id": "OBL-PUSH-RESPONSE-LOSS-ANDROID-CURRENT-001",
       "requirement_ids": [
         "SYNC-IDEMPOTENCY-001"
@@ -238,36 +153,6 @@
       "argv": [
         "make",
         "test-kotlin"
-      ],
-      "fault_plan_id": null,
-      "control_id": null
-    },
-    {
-      "obligation_id": "OBL-PUSH-RESPONSE-LOSS-RN-IOS-MIN-001",
-      "requirement_ids": [
-        "SYNC-IDEMPOTENCY-001"
-      ],
-      "assertion_ids": [
-        "ASSERT-PUSH-RESPONSE-LOSS-SEMANTIC-001"
-      ],
-      "proof_type": "native-e2e",
-      "support_cell_id": "SUP-RN-IOS-MIN-001",
-      "artifact_inventory_ids": [
-        "ARTDEF-PG-EXTENSION-001",
-        "ARTDEF-ADAPTER-001",
-        "ARTDEF-SWIFT-SPM-001",
-        "ARTDEF-COCOAPODS-001",
-        "ARTDEF-RN-NPM-001"
-      ],
-      "performance_budget_ids": [],
-      "required_measurement_ids": [],
-      "required_vector_set_ids": [
-        "VSET-CANONICAL-001"
-      ],
-      "make_target": "test-rn-e2e-ios",
-      "argv": [
-        "make",
-        "test-rn-e2e-ios"
       ],
       "fault_plan_id": null,
       "control_id": null
@@ -303,35 +188,6 @@
       "control_id": null
     },
     {
-      "obligation_id": "OBL-PUSH-RESPONSE-LOSS-RN-ANDROID-MIN-001",
-      "requirement_ids": [
-        "SYNC-IDEMPOTENCY-001"
-      ],
-      "assertion_ids": [
-        "ASSERT-PUSH-RESPONSE-LOSS-SEMANTIC-001"
-      ],
-      "proof_type": "native-e2e",
-      "support_cell_id": "SUP-RN-ANDROID-MIN-001",
-      "artifact_inventory_ids": [
-        "ARTDEF-PG-EXTENSION-001",
-        "ARTDEF-ADAPTER-001",
-        "ARTDEF-KOTLIN-MAVEN-001",
-        "ARTDEF-RN-NPM-001"
-      ],
-      "performance_budget_ids": [],
-      "required_measurement_ids": [],
-      "required_vector_set_ids": [
-        "VSET-CANONICAL-001"
-      ],
-      "make_target": "test-rn-e2e-android",
-      "argv": [
-        "make",
-        "test-rn-e2e-android"
-      ],
-      "fault_plan_id": null,
-      "control_id": null
-    },
-    {
       "obligation_id": "OBL-PUSH-RESPONSE-LOSS-RN-ANDROID-CURRENT-001",
       "requirement_ids": [
         "SYNC-IDEMPOTENCY-001"
@@ -361,7 +217,7 @@
       "control_id": null
     },
     {
-      "obligation_id": "OBL-PUSH-RESPONSE-LOSS-FAULT-001",
+      "obligation_id": "OBL-PUSH-RESPONSE-LOSS-FAULT-LINUX-X64-001",
       "requirement_ids": [
         "SYNC-IDEMPOTENCY-001"
       ],
@@ -369,7 +225,32 @@
         "ASSERT-PUSH-RESPONSE-LOSS-SEMANTIC-001"
       ],
       "proof_type": "fault-injection",
-      "support_cell_id": "SUP-PG-018",
+      "support_cell_id": "SUP-PG-LINUX-X64-001",
+      "artifact_inventory_ids": [
+        "ARTDEF-PG-EXTENSION-001",
+        "ARTDEF-ADAPTER-001"
+      ],
+      "performance_budget_ids": [],
+      "required_measurement_ids": [],
+      "required_vector_set_ids": [],
+      "make_target": "test-blackbox",
+      "argv": [
+        "make",
+        "test-blackbox"
+      ],
+      "fault_plan_id": "FPL-PUSH-RESPONSE-LOSS-001",
+      "control_id": "CTRL-IDEMPOTENCY-001"
+    },
+    {
+      "obligation_id": "OBL-PUSH-RESPONSE-LOSS-FAULT-MACOS-ARM64-001",
+      "requirement_ids": [
+        "SYNC-IDEMPOTENCY-001"
+      ],
+      "assertion_ids": [
+        "ASSERT-PUSH-RESPONSE-LOSS-SEMANTIC-001"
+      ],
+      "proof_type": "fault-injection",
+      "support_cell_id": "SUP-PG-MACOS-ARM64-001",
       "artifact_inventory_ids": [
         "ARTDEF-PG-EXTENSION-001",
         "ARTDEF-ADAPTER-001"
@@ -424,34 +305,18 @@
     {
       "scenario_id": "SCN-PUSH-RESPONSE-LOSS-001",
       "requirement_id": "SYNC-IDEMPOTENCY-001",
-      "proof_obligation_id": "OBL-PUSH-RESPONSE-LOSS-PG-001",
+      "proof_obligation_id": "OBL-PUSH-RESPONSE-LOSS-PG-LINUX-X64-001",
       "assertion_id": "ASSERT-PUSH-RESPONSE-LOSS-SEMANTIC-001",
       "proof_type": "server-black-box",
-      "support_cell_id": "SUP-PG-018"
+      "support_cell_id": "SUP-PG-LINUX-X64-001"
     },
     {
       "scenario_id": "SCN-PUSH-RESPONSE-LOSS-001",
       "requirement_id": "SYNC-IDEMPOTENCY-001",
-      "proof_obligation_id": "OBL-PUSH-RESPONSE-LOSS-IOS-MIN-001",
+      "proof_obligation_id": "OBL-PUSH-RESPONSE-LOSS-PG-MACOS-ARM64-001",
       "assertion_id": "ASSERT-PUSH-RESPONSE-LOSS-SEMANTIC-001",
-      "proof_type": "native-e2e",
-      "support_cell_id": "SUP-IOS-MIN-001"
-    },
-    {
-      "scenario_id": "SCN-PUSH-RESPONSE-LOSS-001",
-      "requirement_id": "SYNC-IDEMPOTENCY-001",
-      "proof_obligation_id": "OBL-PUSH-RESPONSE-LOSS-IOS-CURRENT-001",
-      "assertion_id": "ASSERT-PUSH-RESPONSE-LOSS-SEMANTIC-001",
-      "proof_type": "native-e2e",
-      "support_cell_id": "SUP-IOS-CURRENT-001"
-    },
-    {
-      "scenario_id": "SCN-PUSH-RESPONSE-LOSS-001",
-      "requirement_id": "SYNC-IDEMPOTENCY-001",
-      "proof_obligation_id": "OBL-PUSH-RESPONSE-LOSS-MACOS-MIN-001",
-      "assertion_id": "ASSERT-PUSH-RESPONSE-LOSS-SEMANTIC-001",
-      "proof_type": "native-e2e",
-      "support_cell_id": "SUP-MACOS-MIN-001"
+      "proof_type": "server-black-box",
+      "support_cell_id": "SUP-PG-MACOS-ARM64-001"
     },
     {
       "scenario_id": "SCN-PUSH-RESPONSE-LOSS-001",
@@ -464,26 +329,10 @@
     {
       "scenario_id": "SCN-PUSH-RESPONSE-LOSS-001",
       "requirement_id": "SYNC-IDEMPOTENCY-001",
-      "proof_obligation_id": "OBL-PUSH-RESPONSE-LOSS-ANDROID-MIN-001",
-      "assertion_id": "ASSERT-PUSH-RESPONSE-LOSS-SEMANTIC-001",
-      "proof_type": "native-e2e",
-      "support_cell_id": "SUP-ANDROID-MIN-001"
-    },
-    {
-      "scenario_id": "SCN-PUSH-RESPONSE-LOSS-001",
-      "requirement_id": "SYNC-IDEMPOTENCY-001",
       "proof_obligation_id": "OBL-PUSH-RESPONSE-LOSS-ANDROID-CURRENT-001",
       "assertion_id": "ASSERT-PUSH-RESPONSE-LOSS-SEMANTIC-001",
       "proof_type": "native-e2e",
       "support_cell_id": "SUP-ANDROID-CURRENT-001"
-    },
-    {
-      "scenario_id": "SCN-PUSH-RESPONSE-LOSS-001",
-      "requirement_id": "SYNC-IDEMPOTENCY-001",
-      "proof_obligation_id": "OBL-PUSH-RESPONSE-LOSS-RN-IOS-MIN-001",
-      "assertion_id": "ASSERT-PUSH-RESPONSE-LOSS-SEMANTIC-001",
-      "proof_type": "native-e2e",
-      "support_cell_id": "SUP-RN-IOS-MIN-001"
     },
     {
       "scenario_id": "SCN-PUSH-RESPONSE-LOSS-001",
@@ -496,14 +345,6 @@
     {
       "scenario_id": "SCN-PUSH-RESPONSE-LOSS-001",
       "requirement_id": "SYNC-IDEMPOTENCY-001",
-      "proof_obligation_id": "OBL-PUSH-RESPONSE-LOSS-RN-ANDROID-MIN-001",
-      "assertion_id": "ASSERT-PUSH-RESPONSE-LOSS-SEMANTIC-001",
-      "proof_type": "native-e2e",
-      "support_cell_id": "SUP-RN-ANDROID-MIN-001"
-    },
-    {
-      "scenario_id": "SCN-PUSH-RESPONSE-LOSS-001",
-      "requirement_id": "SYNC-IDEMPOTENCY-001",
       "proof_obligation_id": "OBL-PUSH-RESPONSE-LOSS-RN-ANDROID-CURRENT-001",
       "assertion_id": "ASSERT-PUSH-RESPONSE-LOSS-SEMANTIC-001",
       "proof_type": "native-e2e",
@@ -512,10 +353,18 @@
     {
       "scenario_id": "SCN-PUSH-RESPONSE-LOSS-001",
       "requirement_id": "SYNC-IDEMPOTENCY-001",
-      "proof_obligation_id": "OBL-PUSH-RESPONSE-LOSS-FAULT-001",
+      "proof_obligation_id": "OBL-PUSH-RESPONSE-LOSS-FAULT-LINUX-X64-001",
       "assertion_id": "ASSERT-PUSH-RESPONSE-LOSS-SEMANTIC-001",
       "proof_type": "fault-injection",
-      "support_cell_id": "SUP-PG-018"
+      "support_cell_id": "SUP-PG-LINUX-X64-001"
+    },
+    {
+      "scenario_id": "SCN-PUSH-RESPONSE-LOSS-001",
+      "requirement_id": "SYNC-IDEMPOTENCY-001",
+      "proof_obligation_id": "OBL-PUSH-RESPONSE-LOSS-FAULT-MACOS-ARM64-001",
+      "assertion_id": "ASSERT-PUSH-RESPONSE-LOSS-SEMANTIC-001",
+      "proof_type": "fault-injection",
+      "support_cell_id": "SUP-PG-MACOS-ARM64-001"
     },
     {
       "scenario_id": "SCN-PUSH-RESPONSE-LOSS-001",
@@ -705,6 +554,92 @@
       }
     ]
   },
+  "native_identity_aliases": [
+    {
+      "kind": "mutation-id",
+      "alias": "response-loss-mutation",
+      "value": "00000000-0000-4000-8000-000000001040",
+      "step_ids": [
+        "STEP-PUSH-RESPONSE-LOSS-001",
+        "STEP-PUSH-RESPONSE-LOSS-002",
+        "STEP-PUSH-RESPONSE-LOSS-004",
+        "STEP-PUSH-RESPONSE-LOSS-005",
+        "STEP-PUSH-RESPONSE-LOSS-006"
+      ],
+      "expectation_ids": [
+        "EXPECT-PUSH-RESPONSE-LOSS-SEMANTIC-001"
+      ]
+    },
+    {
+      "kind": "batch-id",
+      "alias": "response-loss-batch",
+      "value": "00000000-0000-4000-8000-000000001041",
+      "step_ids": [
+        "STEP-PUSH-RESPONSE-LOSS-002",
+        "STEP-PUSH-RESPONSE-LOSS-003",
+        "STEP-PUSH-RESPONSE-LOSS-004",
+        "STEP-PUSH-RESPONSE-LOSS-005",
+        "STEP-PUSH-RESPONSE-LOSS-006"
+      ],
+      "expectation_ids": [
+        "EXPECT-PUSH-RESPONSE-LOSS-SEMANTIC-001"
+      ]
+    },
+    {
+      "kind": "client-generation",
+      "alias": "client-generation-one",
+      "value": 1,
+      "step_ids": [
+        "STEP-PUSH-RESPONSE-LOSS-002",
+        "STEP-PUSH-RESPONSE-LOSS-004",
+        "STEP-PUSH-RESPONSE-LOSS-005",
+        "STEP-PUSH-RESPONSE-LOSS-006"
+      ],
+      "expectation_ids": []
+    },
+    {
+      "kind": "schema",
+      "alias": "current-schema",
+      "value": {
+        "version": 1,
+        "hash": "721d2c95e6f34cd9733feea9f5118fba391eee10d07663dad066cfc59439fa44"
+      },
+      "step_ids": [
+        "STEP-PUSH-RESPONSE-LOSS-001",
+        "STEP-PUSH-RESPONSE-LOSS-002",
+        "STEP-PUSH-RESPONSE-LOSS-004",
+        "STEP-PUSH-RESPONSE-LOSS-005",
+        "STEP-PUSH-RESPONSE-LOSS-006"
+      ],
+      "expectation_ids": []
+    },
+    {
+      "kind": "table",
+      "alias": "items-table",
+      "value": "items",
+      "step_ids": [
+        "STEP-PUSH-RESPONSE-LOSS-001",
+        "STEP-PUSH-RESPONSE-LOSS-002",
+        "STEP-PUSH-RESPONSE-LOSS-004",
+        "STEP-PUSH-RESPONSE-LOSS-005",
+        "STEP-PUSH-RESPONSE-LOSS-006"
+      ],
+      "expectation_ids": []
+    },
+    {
+      "kind": "primary-key",
+      "alias": "response-loss-primary-key",
+      "value": "response-loss",
+      "step_ids": [
+        "STEP-PUSH-RESPONSE-LOSS-001",
+        "STEP-PUSH-RESPONSE-LOSS-002",
+        "STEP-PUSH-RESPONSE-LOSS-004",
+        "STEP-PUSH-RESPONSE-LOSS-005",
+        "STEP-PUSH-RESPONSE-LOSS-006"
+      ],
+      "expectation_ids": []
+    }
+  ],
   "barrier_plan": {
     "barriers": [
       {
@@ -764,6 +699,11 @@
       "phase": "exercise",
       "transport": "local",
       "description": "Write the fixed response-loss mutation locally before transmission.",
+      "native_binding": {
+        "kind": "local-write",
+        "user_id": "user-a",
+        "client_id": "client-a"
+      },
       "operation": {
         "contract_operation": "local",
         "name": "write",
@@ -797,6 +737,15 @@
       "phase": "exercise",
       "transport": "http",
       "description": "Submit the fixed sealed batch and drop the response after the server commits at LSN 1040.",
+      "native_binding": {
+        "kind": "public-call",
+        "user_id": "user-a",
+        "client_id": "client-a",
+        "call_id": "response_loss_initial",
+        "stage": "synchronous",
+        "method": "start",
+        "completion": "blocked"
+      },
       "operation": {
         "contract_operation": "push",
         "name": "submit",
@@ -843,6 +792,15 @@
       "phase": "exercise",
       "transport": "process",
       "description": "Record response loss for the same user, client, and batch without changing server state.",
+      "native_binding": {
+        "kind": "public-call",
+        "user_id": "user-a",
+        "client_id": "client-a",
+        "call_id": "response_loss_initial",
+        "stage": "synchronous",
+        "method": "start",
+        "completion": "blocked"
+      },
       "operation": {
         "contract_operation": "process",
         "name": "response-loss",
@@ -861,6 +819,15 @@
       "phase": "exercise",
       "transport": "http",
       "description": "Replay the unchanged sealed request after response-loss bookkeeping.",
+      "native_binding": {
+        "kind": "public-call",
+        "user_id": "user-a",
+        "client_id": "client-a",
+        "call_id": "response_loss_retry",
+        "stage": "synchronous",
+        "method": "retry-after-error",
+        "completion": "idle"
+      },
       "operation": {
         "contract_operation": "push",
         "name": "submit",
@@ -907,6 +874,9 @@
       "phase": "exercise",
       "transport": "http",
       "description": "Replay the same sealed request a second time and reconcile local state only once.",
+      "native_binding": {
+        "kind": "controller"
+      },
       "operation": {
         "contract_operation": "push",
         "name": "submit",
@@ -953,6 +923,9 @@
       "phase": "exercise",
       "transport": "http",
       "description": "Submit changed content under the completed batch identity and require an idempotency conflict.",
+      "native_binding": {
+        "kind": "controller"
+      },
       "operation": {
         "contract_operation": "push",
         "name": "submit",
@@ -1053,135 +1026,5 @@
         "CTRL-IDEMPOTENCY-001"
       ]
     }
-  ],
-  "native_execution": {
-    "version": 1,
-    "clients": [
-      {
-        "key": "client_a",
-        "user_id": "user-a",
-        "client_id": "client-a",
-        "database_key": "push_response_loss_a"
-      }
-    ],
-    "actions": [
-      {
-        "id": "NACT-PUSH-RESPONSE-LOSS-001",
-        "phase": "setup",
-        "actor": "controller",
-        "command": "install-model",
-        "covers_step_ids": [],
-        "parameters": {}
-      },
-      {
-        "id": "NACT-PUSH-RESPONSE-LOSS-002",
-        "phase": "setup",
-        "actor": "client",
-        "command": "open",
-        "covers_step_ids": [],
-        "parameters": {
-          "client_key": "client_a",
-          "database_mode": "create",
-          "initialization": "current",
-          "seed_step_id": null
-        }
-      },
-      {
-        "id": "NACT-PUSH-RESPONSE-LOSS-003",
-        "phase": "exercise",
-        "actor": "client",
-        "command": "execute-step",
-        "covers_step_ids": [
-          "STEP-PUSH-RESPONSE-LOSS-001"
-        ],
-        "parameters": {
-          "client_key": "client_a"
-        }
-      },
-      {
-        "id": "NACT-PUSH-RESPONSE-LOSS-004",
-        "phase": "exercise",
-        "actor": "client",
-        "command": "synchronize-step",
-        "covers_step_ids": [
-          "STEP-PUSH-RESPONSE-LOSS-002"
-        ],
-        "parameters": {
-          "client_key": "client_a",
-          "method": "start",
-          "completion": "blocked"
-        }
-      },
-      {
-        "id": "NACT-PUSH-RESPONSE-LOSS-005",
-        "phase": "exercise",
-        "actor": "process",
-        "command": "execute-step",
-        "covers_step_ids": [
-          "STEP-PUSH-RESPONSE-LOSS-003"
-        ],
-        "parameters": {
-          "client_key": "client_a"
-        }
-      },
-      {
-        "id": "NACT-PUSH-RESPONSE-LOSS-006",
-        "phase": "exercise",
-        "actor": "client",
-        "command": "synchronize-step",
-        "covers_step_ids": [
-          "STEP-PUSH-RESPONSE-LOSS-004"
-        ],
-        "parameters": {
-          "client_key": "client_a",
-          "method": "retry-after-error",
-          "completion": "idle"
-        }
-      },
-      {
-        "id": "NACT-PUSH-RESPONSE-LOSS-007",
-        "phase": "exercise",
-        "actor": "controller",
-        "command": "request-step",
-        "covers_step_ids": [
-          "STEP-PUSH-RESPONSE-LOSS-005"
-        ],
-        "parameters": {}
-      },
-      {
-        "id": "NACT-PUSH-RESPONSE-LOSS-008",
-        "phase": "exercise",
-        "actor": "controller",
-        "command": "request-step",
-        "covers_step_ids": [
-          "STEP-PUSH-RESPONSE-LOSS-006"
-        ],
-        "parameters": {}
-      },
-      {
-        "id": "NACT-PUSH-RESPONSE-LOSS-009",
-        "phase": "verify",
-        "actor": "observer",
-        "command": "capture",
-        "covers_step_ids": [],
-        "parameters": {
-          "client_keys": [
-            "client_a"
-          ],
-          "sources": [
-            "application-rows",
-            "pending-mutations",
-            "sync-status",
-            "sync-events",
-            "request-trace",
-            "server-state",
-            "process-trace"
-          ],
-          "expectation_ids": [
-            "EXPECT-PUSH-RESPONSE-LOSS-SEMANTIC-001"
-          ]
-        }
-      }
-    ]
-  }
+  ]
 }

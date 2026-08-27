@@ -287,7 +287,8 @@ class SynchroClientTests {
         val checksumJSON = Json.encodeToString(ChecksumObject.serializer(), scopeChecksum)
 
         val seed = SynchroDatabase.open(context, databaseName)
-        SchemaManager(seed).reconcileLocalSchema(
+        installTestSchema(
+            seed,
             schemaVersion = manifest.schemaVersion,
             schemaHash = manifest.schemaHash,
             tables = listOf(localTable),
@@ -443,7 +444,8 @@ class SynchroClientTests {
             syncInterval = 999.0,
         )
         val preparedDatabase = SynchroDatabase.open(context, config.dbPath)
-        SchemaManager(preparedDatabase).reconcileLocalSchema(
+        installTestSchema(
+            preparedDatabase,
             schemaVersion = 1,
             schemaHash = PROTOCOL_TEST_SCHEMA_HASH,
             tables = emptyList(),

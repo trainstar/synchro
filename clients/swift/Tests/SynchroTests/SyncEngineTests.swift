@@ -1,7 +1,7 @@
 import XCTest
 import GRDB
 import os
-@testable import Synchro
+@testable @_spi(Inspection) import Synchro
 
 final class SyncEngineTests: XCTestCase {
     func testCallbackRegistrationAndCancellation() async throws {
@@ -58,11 +58,42 @@ final class SyncEngineTests: XCTestCase {
         XCTAssertEqual(updates2.count, 0, "An idempotent stop does not publish another transition")
     }
 
-    func testConcurrentSyncNowCallersEachAwaitTheirOwnCycle() async throws {
-        let firstPullStarted = XCTestExpectation(description: "first explicit pull started")
-        let pullCount = OSAllocatedUnfairLock(initialState: 0)
-        let secondCompleted = OSAllocatedUnfairLock(initialState: false)
+    func testCycleGateSerializesEnqueuedOperations() async throws {
+        let gate = CycleGate()
+        let firstStarted = expectation(description: "first operation started")
+        let firstWaiting = expectation(description: "first operation waiting")
+        let releaseFirst = OSAllocatedUnfairLock(
+            initialState: Optional<CheckedContinuation<Void, Never>>.none
+        )
+        let events = OSAllocatedUnfairLock(initialState: [String]())
+        gate.beginGeneration(1)
 
+        let first = try gate.enqueue(generation: 1) {
+            events.withLock { $0.append("first-started") }
+            firstStarted.fulfill()
+            await withCheckedContinuation { continuation in
+                releaseFirst.withLock { $0 = continuation }
+                firstWaiting.fulfill()
+            }
+            events.withLock { $0.append("first-finished") }
+        }
+        await fulfillment(of: [firstStarted, firstWaiting], timeout: 1)
+        let second = try gate.enqueue(generation: 1) {
+            events.withLock { $0.append("second-started") }
+        }
+
+        let continuation = releaseFirst.withLock { value in
+            defer { value = nil }
+            return value
+        }
+        try XCTUnwrap(continuation).resume()
+        try await first.value
+        try await second.value
+        XCTAssertEqual(events.withLock { $0 }, ["first-started", "first-finished", "second-started"])
+    }
+
+    func testConcurrentSyncNowCallersEachCompleteTheirOwnCycle() async throws {
+        let pullCount = OSAllocatedUnfairLock(initialState: 0)
         MockURLProtocol.requestHandler = { request in
             let path = request.url!.path
             if path.hasSuffix("/sync/connect") {
@@ -76,36 +107,29 @@ final class SyncEngineTests: XCTestCase {
                     count += 1
                     return count
                 }
-                if count == 1 {
-                    firstPullStarted.fulfill()
-                    Thread.sleep(forTimeInterval: 0.2)
-                }
                 return try self.mockResponse(json: self.scopePullJSON(cursor: "scope_cursor_explicit_\(count)"))
             }
             return try self.mockResponse(statusCode: 500, json: ["error": "unexpected"])
         }
 
-        let (engine, _) = try makeIntegrationEnv()
+        let collector = TransportObservationCollector()
+        let (engine, _) = try makeIntegrationEnv(transportObservationCollector: collector)
         addTeardownBlock { await engine.stop() }
         try await engine.start()
         pullCount.withLock { $0 = 0 }
+        try collector.armPause(for: .pull)
 
         let first = Task { try await engine.syncNow() }
-        await fulfillment(of: [firstPullStarted], timeout: 1)
-        let second = Task { () throws -> Void in
-            defer { secondCompleted.withLock { $0 = true } }
-            try await engine.syncNow()
-        }
+        try await collector.awaitPause(for: .pull, timeout: 1)
+        let second = Task { try await engine.syncNow() }
+        try collector.resumePause()
 
-        try await Task.sleep(nanoseconds: 50_000_000)
-        XCTAssertFalse(secondCompleted.withLock { $0 })
         try await first.value
         try await second.value
         XCTAssertEqual(pullCount.withLock { $0 }, 2)
     }
 
     func testStopCancelsInFlightCycleWork() async throws {
-        let pullStarted = XCTestExpectation(description: "explicit pull started")
         let cycleFinished = XCTestExpectation(description: "cancelled cycle finished")
         let pullCount = OSAllocatedUnfairLock(initialState: 0)
 
@@ -122,27 +146,24 @@ final class SyncEngineTests: XCTestCase {
                     count += 1
                     return count
                 }
-                if count == 2 {
-                    pullStarted.fulfill()
-                    Thread.sleep(forTimeInterval: 0.5)
-                }
                 let cursor = count == 1 ? "scope_cursor_stop_initial" : "scope_cursor_stop_explicit"
                 return try self.mockResponse(json: self.scopePullJSON(cursor: cursor))
             }
             return try self.mockResponse(statusCode: 500, json: ["error": "unexpected"])
         }
 
-        let (engine, database) = try makeIntegrationEnv()
+        let collector = TransportObservationCollector()
+        let (engine, database) = try makeIntegrationEnv(transportObservationCollector: collector)
         try await engine.start()
+        try collector.armPause(for: .pull)
         let cycle = Task {
             defer { cycleFinished.fulfill() }
             try? await engine.syncNow()
         }
-        await fulfillment(of: [pullStarted], timeout: 1)
+        try await collector.awaitPause(for: .pull, timeout: 1)
         await engine.stop()
         await fulfillment(of: [cycleFinished], timeout: 1)
         _ = await cycle.result
-        try await Task.sleep(nanoseconds: 600_000_000)
         XCTAssertEqual(pullCount.withLock { $0 }, 2)
         let cursor = try database.readTransaction { db in
             try SynchroMeta.getScope(db, scopeID: self.scopeID)?.cursor
@@ -522,7 +543,6 @@ final class SyncEngineTests: XCTestCase {
     }
 
     func testDebouncedPushSharesCycleGateWithExplicitSync() async throws {
-        let pushStarted = XCTestExpectation(description: "debounced push started")
         let pushCount = OSAllocatedUnfairLock(initialState: 0)
 
         MockURLProtocol.requestHandler = { request in
@@ -530,14 +550,9 @@ final class SyncEngineTests: XCTestCase {
             if path.hasSuffix("/sync/connect") {
                 return try self.mockResponse(json: self.connectResumeJSON)
             } else if path.hasSuffix("/sync/push") {
-                let count = pushCount.withLock { count in
+                pushCount.withLock { count in
                     count += 1
-                    return count
                 }
-                if count == 1 {
-                    pushStarted.fulfill()
-                }
-                Thread.sleep(forTimeInterval: 0.1)
                 let body = try JSONSerialization.jsonObject(with: request.bodyData()!) as! [String: Any]
                 let mutations = body["mutations"] as! [[String: Any]]
                 let accepted = try mutations.map { mutation in
@@ -559,8 +574,15 @@ final class SyncEngineTests: XCTestCase {
             return try self.mockResponse(statusCode: 500, json: ["error": "unexpected"])
         }
 
-        let (engine, db) = try makeIntegrationEnv(pushDebounce: 0.01)
-        addTeardownBlock { await engine.stop() }
+        let collector = TransportObservationCollector()
+        let (engine, db) = try makeIntegrationEnv(
+            pushDebounce: 0.01,
+            transportObservationCollector: collector
+        )
+        addTeardownBlock {
+            try? collector.resumePause()
+            await engine.stop()
+        }
         try SchemaManager(database: db).reconcileLocalSchema(
             schemaVersion: 1,
             schemaHash: protocolTestSchemaHash,
@@ -576,12 +598,15 @@ final class SyncEngineTests: XCTestCase {
         }
 
         try await engine.start()
+        try collector.armPause(for: .push)
         _ = try db.execute(
             "INSERT INTO orders (id, ship_address, user_id, updated_at) VALUES (?, ?, ?, ?)",
             params: ["w1", "debounced", "u1", "2026-01-01T10:00:00.000Z"]
         )
-        await fulfillment(of: [pushStarted], timeout: 1)
-        try await engine.syncNow()
+        try await collector.awaitPause(for: .push, timeout: 1)
+        let explicitSync = Task { try await engine.syncNow() }
+        try collector.resumePause()
+        try await explicitSync.value
 
         let tracker = ChangeTracker(database: db)
         let deadline = Date().addingTimeInterval(2)
@@ -2207,7 +2232,6 @@ final class SyncEngineTests: XCTestCase {
         }
 
         await engine.stop()
-        try await Task.sleep(nanoseconds: 50_000_000)
 
         let afterStop = try db.readTransaction { db in
             try SynchroMeta.getBackoffRecord(db)
@@ -3234,9 +3258,15 @@ final class SyncEngineTests: XCTestCase {
             return try self.mockResponse(statusCode: 500, json: ["error": "unexpected"])
         }
 
-        let (engine, database) = try makeIntegrationEnv()
+        let collector = TransportObservationCollector()
+        let (engine, database) = try makeIntegrationEnv(transportObservationCollector: collector)
         addTeardownBlock { await engine.stop() }
         try await engine.start()
+        _ = try database.execute(
+            "INSERT INTO orders (id, ship_address, user_id, updated_at) VALUES (?, ?, ?, ?)",
+            params: ["queued-order", "before-background", "u1", "2026-01-01T09:00:00.000Z"]
+        )
+        XCTAssertTrue(try ChangeTracker(database: database).hasPendingChanges())
         await engine.enterBackground()
         XCTAssertEqual(engine.getSyncStatus(), .stopped)
         let requestsBeforeOfflineWrite = (
@@ -3244,18 +3274,26 @@ final class SyncEngineTests: XCTestCase {
             pullCount.withLock { $0 },
             pushCount.withLock { $0 }
         )
+        let changeObserved = expectation(description: "offline write observers completed")
+        let observation = database.onChange(tables: ["orders"]) {
+            changeObserved.fulfill()
+        }
 
         _ = try database.execute(
             "INSERT INTO orders (id, ship_address, user_id, updated_at) VALUES (?, ?, ?, ?)",
             params: ["foreground-order", "offline", "u1", "2026-01-01T10:00:00.000Z"]
         )
+        await fulfillment(of: [changeObserved], timeout: 1)
+        observation.cancel()
         XCTAssertTrue(try ChangeTracker(database: database).hasPendingChanges())
-        try await Task.sleep(nanoseconds: 50_000_000)
-        XCTAssertEqual(connectCount.withLock { $0 }, requestsBeforeOfflineWrite.0)
+        try collector.armPause(for: .connect)
+        let foreground = Task { try await engine.enterForeground() }
+        try await collector.awaitPause(for: .connect, timeout: 1)
+        XCTAssertEqual(connectCount.withLock { $0 }, requestsBeforeOfflineWrite.0 + 1)
         XCTAssertEqual(pullCount.withLock { $0 }, requestsBeforeOfflineWrite.1)
         XCTAssertEqual(pushCount.withLock { $0 }, requestsBeforeOfflineWrite.2)
-
-        try await engine.enterForeground()
+        try collector.resumePause()
+        try await foreground.value
 
         XCTAssertEqual(engine.getSyncStatus(), .ready)
         XCTAssertEqual(connectCount.withLock { $0 }, 2)
@@ -3717,7 +3755,8 @@ final class SyncEngineTests: XCTestCase {
         dbPath: String? = nil,
         clientID: String = "test-device",
         maxRetryAttempts: Int = 3,
-        pushDebounce: TimeInterval = 0.5
+        pushDebounce: TimeInterval = 0.5,
+        transportObservationCollector: TransportObservationCollector? = nil
     ) throws -> (SyncEngine, SynchroDatabase) {
         let sessionConfig = URLSessionConfiguration.ephemeral
         sessionConfig.protocolClasses = [MockURLProtocol.self]
@@ -3732,7 +3771,8 @@ final class SyncEngineTests: XCTestCase {
             appVersion: "1.0.0",
             syncInterval: 999,
             pushDebounce: pushDebounce,
-            maxRetryAttempts: maxRetryAttempts
+            maxRetryAttempts: maxRetryAttempts,
+            transportObservationCollector: transportObservationCollector
         )
         let db = try SynchroDatabase(path: path)
         let httpClient = HttpClient(config: config, session: session)

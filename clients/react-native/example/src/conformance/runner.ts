@@ -1,4 +1,11 @@
-import { SynchroClient } from '@trainstar/synchro-react-native';
+import { SynchroClient, SynchroError } from '@trainstar/synchro-react-native';
+import { SynchroInspection } from '@trainstar/synchro-react-native/inspection';
+import type {
+  ClientStateInspection,
+  DurableStateInspection,
+  ScopeRowInspection,
+  TransportObservationSnapshot,
+} from '@trainstar/synchro-react-native/inspection';
 import type {
   PendingMutationInspection,
   RejectedMutationInspection,
@@ -98,8 +105,26 @@ export interface ConformanceCapture {
   application_rows?: Row[];
   pending_mutations?: PendingMutationInspection[];
   rejected_mutations?: RejectedMutationInspection[];
+  client_state?: ClientStateInspection;
+  durable_proof?: RawDurableProof;
+  provenance?: ScopeRowInspection[];
+  request_trace?: TransportObservationSnapshot;
   sync_status?: RawSyncStatus;
   sync_events?: RawEvent[];
+}
+
+export interface RawDurableProof {
+  row_metadata: DurableStateInspection['row_metadata'];
+  rebuild_receipt_proofs: Array<{
+    rebuild_id_fingerprint: string;
+    page_count: number;
+    returned_record_count: number;
+    request_chain_valid: boolean;
+    records_in_canonical_order: boolean;
+    row_checksums_valid: boolean;
+    scope_checksum_valid: boolean;
+    final_checksum_matches_local: boolean;
+  }>;
 }
 
 export interface PublicConformanceRunnerOptions {
@@ -110,7 +135,9 @@ export interface PublicConformanceRunnerOptions {
 
 interface ClientSession {
   runtime: ConformanceCommand['runtime'];
+  requireNewDatabase: boolean;
   client: SynchroClient | null;
+  inspection: SynchroInspection | null;
   events: SyncEvent[];
   unsubscribeEvents: (() => void) | null;
 }
@@ -132,14 +159,13 @@ interface CompletionObservation {
 export class PublicConformanceRunner {
   private readonly sessions = new Map<string, ClientSession>();
   private readonly calls = new Map<string, ClientCall>();
-  private readonly createdDatabasePaths = new Set<string>();
   private activeClientKey: string | null = null;
-  private readonly processID = `rn-${Date.now()}-${Math.random().toString(36).slice(2, 12)}`;
 
   constructor(private readonly options: PublicConformanceRunnerOptions) {}
 
   async execute(command: ConformanceCommand): Promise<ConformanceActionResult> {
     try {
+      requirePairedRuntimeConnection(command.runtime);
       const action = command.action.action;
       switch (`${action.actor}/${action.command}`) {
         case 'client/open':
@@ -200,12 +226,6 @@ export class PublicConformanceRunner {
     if (mode === 'create' && command.runtime.seed_database_path !== undefined) {
       throw new ConformanceCommandError('invalid_command');
     }
-    if (mode === 'create' && this.createdDatabasePaths.has(databasePath)) {
-      throw new ConformanceCommandError('invalid_command');
-    }
-    if (mode === 'create') {
-      this.createdDatabasePaths.add(databasePath);
-    }
     this.sessions.set(clientKey, {
       runtime: {
         ...command.runtime,
@@ -214,15 +234,26 @@ export class PublicConformanceRunner {
           ? {}
           : { seed_database_path: appPrivateSeedPath(command.runtime.seed_database_path) }),
       },
+      requireNewDatabase: mode === 'create',
       client: null,
+      inspection: null,
       events: [],
       unsubscribeEvents: null,
     });
-    const client = await this.activate(clientKey);
+    let client: SynchroClient;
+    try {
+      client = await this.activate(clientKey);
+    } catch (error) {
+      if (error instanceof SynchroError && error.code === 'INVALID_CONFIG') {
+        this.sessions.delete(clientKey);
+        throw new ConformanceCommandError('invalid_command');
+      }
+      throw error;
+    }
     return {
       kind: 'opened',
       status: rawStatus(await client.getSyncStatus()),
-      process: await this.processIdentity(client),
+      process: await this.processIdentity(clientKey, client),
     };
   }
 
@@ -238,7 +269,7 @@ export class PublicConformanceRunner {
     return {
       kind: 'local-action',
       rows_affected: rowsAffected,
-      process: await this.processIdentity(client),
+      process: await this.processIdentity(clientKey, client),
     };
   }
 
@@ -255,7 +286,7 @@ export class PublicConformanceRunner {
       kind: 'synchronized',
       completion: observation.completion,
       status: rawStatus(observation.status),
-      process: await this.processIdentity(client),
+      process: await this.processIdentity(clientKey, client),
     };
   }
 
@@ -277,7 +308,7 @@ export class PublicConformanceRunner {
       kind: 'call-begun',
       call_id: callID,
       state: 'in_flight',
-      process: await this.processIdentity(client),
+      process: await this.processIdentity(clientKey, client),
     };
   }
 
@@ -298,7 +329,7 @@ export class PublicConformanceRunner {
       state: 'completed',
       completion: observation.completion,
       status: rawStatus(observation.status),
-      process: await this.processIdentity(client),
+      process: await this.processIdentity(clientKey, client),
     };
   }
 
@@ -324,7 +355,7 @@ export class PublicConformanceRunner {
       kind: 'lifecycle',
       operation,
       status: rawStatus(await client.getSyncStatus()),
-      process: await this.processIdentity(client),
+      process: await this.processIdentity(clientKey, client),
     };
   }
 
@@ -338,7 +369,7 @@ export class PublicConformanceRunner {
     return {
       kind: 'awaited',
       status: rawStatus(await client.getSyncStatus()),
-      process: await this.processIdentity(client),
+      process: await this.processIdentity(clientKey, client),
     };
   }
 
@@ -350,6 +381,7 @@ export class PublicConformanceRunner {
       throw new ConformanceCommandError('invalid_command');
     }
     const client = await this.activate(clientKeys[0]);
+    const inspection = this.requireInspection(clientKeys[0]);
     const capture: ConformanceCapture = {};
     for (const source of sources) {
       switch (source) {
@@ -368,11 +400,36 @@ export class PublicConformanceRunner {
         case 'sync-events':
           capture.sync_events = bounded(rawEvents(this.requireSession(clientKeys[0]).events));
           break;
+        case 'scope-state':
+          capture.client_state = await inspection.clientState();
+          break;
+        case 'durable-proof': {
+          const state = await inspection.clientState();
+          const identity = durableProofIdentity(parameters.durable_proof_identity, state.scopeRows);
+          try {
+            capture.durable_proof = normalizeDurableProof(
+              await inspection.durableState(identity.tableName, identity.recordID)
+            );
+          } catch {
+            throw new ConformanceCommandError('capture_inspection_failed');
+          }
+          break;
+        }
+        case 'provenance':
+          capture.provenance = bounded((await inspection.clientState()).scopeRows);
+          break;
+        case 'request-trace':
+          capture.request_trace = await inspection.transportObservations();
+          break;
         default:
           throw new ConformanceUnavailableError('capture source is not exposed by the public JavaScript client');
       }
     }
-    return { kind: 'capture', capture, process: await this.processIdentity(client) };
+    return {
+      kind: 'capture',
+      capture,
+      process: await this.processIdentity(clientKeys[0], client),
+    };
   }
 
   private async activate(clientKey: string): Promise<SynchroClient> {
@@ -389,19 +446,26 @@ export class PublicConformanceRunner {
       active.unsubscribeEvents = null;
       await active.client?.close();
       active.client = null;
+      active.inspection = null;
     }
     const client = new SynchroClient({
       dbPath: session.runtime.database_path,
-      serverURL: this.options.serverURL,
-      authProvider: async () => this.options.authToken,
+      serverURL: session.runtime.server_url ?? this.options.serverURL,
+      authProvider: async () => session.runtime.auth_token ?? this.options.authToken,
       clientID: session.runtime.client_id,
       appVersion: this.options.appVersion,
       syncInterval: 3600,
       pushDebounce: 3600,
       seedDatabasePath: session.runtime.seed_database_path,
     });
+    const inspection = new SynchroInspection(client, {
+      transportObservationCapacity: 512,
+      requireNewDatabase: session.requireNewDatabase,
+    });
     await client.initialize();
+    session.requireNewDatabase = false;
     session.client = client;
+    session.inspection = inspection;
     session.unsubscribeEvents = client.onSyncEvent((event) => {
       if (session.events.length >= MAXIMUM_EVENTS) {
         session.events.shift();
@@ -418,6 +482,14 @@ export class PublicConformanceRunner {
       throw new ConformanceCommandError('invalid_command');
     }
     return session;
+  }
+
+  private requireInspection(clientKey: string): SynchroInspection {
+    const inspection = this.requireSession(clientKey).inspection;
+    if (inspection === null) {
+      throw new ConformanceCommandError('invalid_command');
+    }
+    return inspection;
   }
 
   private async invokeSynchronizeMethod(
@@ -460,9 +532,12 @@ export class PublicConformanceRunner {
     throw new ConformanceCommandError('execution_failed');
   }
 
-  private async processIdentity(client: SynchroClient): Promise<RawProcessIdentity> {
+  private async processIdentity(
+    clientKey: string,
+    client: SynchroClient
+  ): Promise<RawProcessIdentity> {
     return {
-      process_id: this.processID,
+      process_id: await this.requireInspection(clientKey).processIdentity(),
       database_identity_fingerprint: sha256(await client.getPath()),
     };
   }
@@ -474,6 +549,14 @@ export class PublicConformanceRunner {
     } catch {
       throw new ConformanceCommandError('execution_failed');
     }
+  }
+}
+
+function requirePairedRuntimeConnection(runtime: ConformanceCommand['runtime']): void {
+  const hasServerURL = runtime.server_url !== undefined;
+  const hasAuthToken = runtime.auth_token !== undefined;
+  if (hasServerURL !== hasAuthToken) {
+    throw new ConformanceCommandError('invalid_command');
   }
 }
 
@@ -584,6 +667,26 @@ function decodeSelectors(value: unknown): RowSelector[] {
     throw new ConformanceCommandError('invalid_command');
   }
   return selectors;
+}
+
+function durableProofIdentity(
+  value: unknown,
+  scopeRows: ScopeRowInspection[]
+): { tableName: string; recordID: string } {
+  if (value === undefined) {
+    if (scopeRows.length !== 1) {
+      throw new ConformanceCommandError('capture_inspection_failed');
+    }
+    return { tableName: scopeRows[0].tableName, recordID: scopeRows[0].recordID };
+  }
+  const identity = requiredRecord(value);
+  if (Object.keys(identity).length !== 2) {
+    throw new ConformanceCommandError('invalid_command');
+  }
+  return {
+    tableName: requiredIdentifier(identity.table_name),
+    recordID: requiredString(identity.record_id),
+  };
 }
 
 async function captureRows(client: SynchroClient, selectors: RowSelector[]): Promise<Row[]> {
@@ -811,6 +914,39 @@ function isCanonicalInt64(value: string): boolean {
   } catch {
     return false;
   }
+}
+
+function normalizeDurableProof(value: DurableStateInspection): RawDurableProof {
+  return {
+    row_metadata: value.row_metadata,
+    rebuild_receipt_proofs: value.rebuild_receipts.map((receipt) => ({
+      rebuild_id_fingerprint: receipt.rebuild_id_fingerprint,
+      page_count: receipt.page_count,
+      returned_record_count: receipt.returned_record_count,
+      request_chain_valid: equalStrings(
+        receipt.request_chain_expected,
+        receipt.request_chain_observed
+      ),
+      records_in_canonical_order:
+        new Set(receipt.record_identities_hex).size === receipt.record_identities_hex.length &&
+        equalStrings(receipt.record_identities_hex, [...receipt.record_identities_hex].sort()),
+      row_checksums_valid: equalStrings(
+        receipt.received_row_checksums,
+        receipt.computed_row_checksums
+      ),
+      scope_checksum_valid:
+        receipt.computed_scope_checksum !== null &&
+        receipt.computed_scope_checksum === receipt.final_scope_checksum,
+      final_checksum_matches_local:
+        receipt.final_scope_checksum !== null &&
+        receipt.final_scope_checksum === receipt.stored_scope_checksum &&
+        receipt.final_scope_checksum === receipt.local_scope_checksum,
+    })),
+  };
+}
+
+function equalStrings(left: string[], right: string[]): boolean {
+  return left.length === right.length && left.every((value, index) => value === right[index]);
 }
 
 function sha256(value: string): string {

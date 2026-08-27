@@ -18,6 +18,7 @@ use crate::cursor_token::{
 };
 use crate::registry::qualified_relation_name;
 use crate::registry::TableRegistration;
+use crate::spi_helpers::decode_digest;
 use crate::stream_position::{load_materialized_boundary, StreamBoundary, StreamPosition};
 
 /// Pull scoped changes for a client using per-scope cursors.
@@ -942,7 +943,12 @@ fn query_scope_candidates(
         let projection_checksum = row
             .get_by_name::<Vec<u8>, &str>("projection_checksum")
             .map_err(|_| "captured projection digest is malformed".to_string())?
-            .map(|bytes| decode_digest(bytes, "captured projection digest"))
+            .map(|bytes| {
+                decode_digest(
+                    bytes,
+                    "captured projection digest must contain exactly 32 octets",
+                )
+            })
             .transpose()?;
         let projection_row_version = row
             .get_by_name::<String, &str>("projection_row_version")
@@ -1413,7 +1419,10 @@ pub(crate) fn compute_bucket_checksums(
                 Some((_, Some(cached_schema_hash), Some(cached_digest)))
                     if cached_schema_hash.as_slice() == schema_hash.as_bytes() =>
                 {
-                    let digest = decode_digest(cached_digest.clone(), "cached scope digest")?;
+                    let digest = decode_digest(
+                        cached_digest.clone(),
+                        "cached scope digest must contain exactly 32 octets",
+                    )?;
                     checksums.insert(scope_id.clone(), ChecksumObject::new(digest));
                 }
                 Some((edge_change_xid, _, _)) => {
@@ -1470,7 +1479,7 @@ pub(crate) fn compute_bucket_checksums(
                 row.get_by_name::<Vec<u8>, &str>("checksum")
                     .map_err(|_| "scope edge row digest is malformed".to_string())?
                     .ok_or_else(|| "scope edge row digest is null".to_string())?,
-                "scope edge row digest",
+                "scope edge row digest must contain exactly 32 octets",
             )?;
             let table = registry
                 .iter()
@@ -1578,13 +1587,6 @@ pub(crate) fn contract_pk_value(
     let mut object = serde_json::Map::new();
     object.insert(table.primary_key_field_id.clone(), value);
     serde_json::Value::Object(object)
-}
-
-fn decode_digest(bytes: Vec<u8>, name: &str) -> Result<Sha256Digest, String> {
-    let bytes: [u8; 32] = bytes
-        .try_into()
-        .map_err(|_| format!("{name} must contain exactly 32 octets"))?;
-    Ok(Sha256Digest::from_bytes(bytes))
 }
 
 /// Double-quote a SQL identifier, escaping internal double quotes.

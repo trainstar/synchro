@@ -1,6 +1,7 @@
 import CryptoKit
 import Foundation
 
+@_spi(Inspection)
 public enum TransportOperationClass: String, Codable, Sendable, CaseIterable {
     case connect
     case pull
@@ -28,6 +29,7 @@ public enum TransportOperationClass: String, Codable, Sendable, CaseIterable {
     }
 }
 
+@_spi(Inspection)
 public struct TransportRequestFacts: Codable, Sendable, Equatable {
     public let clientGeneration: Int64?
     public let schemaVersion: Int64
@@ -36,9 +38,11 @@ public struct TransportRequestFacts: Codable, Sendable, Equatable {
     public let scopeSetVersion: Int64?
     public let scopeCount: Int?
     public let limit: Int?
+    public let scopeFingerprint: String?
     public let rebuildIDFingerprint: String?
     public let cursorFingerprint: String?
     public let cursorPresent: Bool?
+    public let mutationCount: Int?
 
     enum CodingKeys: String, CodingKey {
         case clientGeneration = "client_generation"
@@ -48,9 +52,11 @@ public struct TransportRequestFacts: Codable, Sendable, Equatable {
         case scopeSetVersion = "scope_set_version"
         case scopeCount = "scope_count"
         case limit
+        case scopeFingerprint = "scope_fingerprint"
         case rebuildIDFingerprint = "rebuild_id_fingerprint"
         case cursorFingerprint = "cursor_fingerprint"
         case cursorPresent = "cursor_present"
+        case mutationCount = "mutation_count"
     }
 
     public init(
@@ -61,9 +67,11 @@ public struct TransportRequestFacts: Codable, Sendable, Equatable {
         scopeSetVersion: Int64? = nil,
         scopeCount: Int? = nil,
         limit: Int? = nil,
+        scopeFingerprint: String? = nil,
         rebuildIDFingerprint: String? = nil,
         cursorFingerprint: String? = nil,
-        cursorPresent: Bool? = nil
+        cursorPresent: Bool? = nil,
+        mutationCount: Int? = nil
     ) {
         self.clientGeneration = clientGeneration
         self.schemaVersion = schemaVersion
@@ -72,19 +80,23 @@ public struct TransportRequestFacts: Codable, Sendable, Equatable {
         self.scopeSetVersion = scopeSetVersion
         self.scopeCount = scopeCount
         self.limit = limit
+        self.scopeFingerprint = scopeFingerprint
         self.rebuildIDFingerprint = rebuildIDFingerprint
         self.cursorFingerprint = cursorFingerprint
         self.cursorPresent = cursorPresent
+        self.mutationCount = mutationCount
     }
 }
 
+@_spi(Inspection)
 public struct TransportRebuildResponseFacts: Codable, Sendable, Equatable {
     public let recordCount: Int
     public let hasMore: Bool
     public let hasCursor: Bool
     public let hasFinalScopeCursor: Bool
     public let hasChecksum: Bool
-    public let scopeMatchesRequest: Bool
+    public let scopeFingerprint: String
+    public let finalScopeCursorFingerprint: String?
 
     enum CodingKeys: String, CodingKey {
         case recordCount = "record_count"
@@ -92,7 +104,8 @@ public struct TransportRebuildResponseFacts: Codable, Sendable, Equatable {
         case hasCursor = "has_cursor"
         case hasFinalScopeCursor = "has_final_scope_cursor"
         case hasChecksum = "has_checksum"
-        case scopeMatchesRequest = "scope_matches_request"
+        case scopeFingerprint = "scope_fingerprint"
+        case finalScopeCursorFingerprint = "final_scope_cursor_fingerprint"
     }
 
     public init(
@@ -101,38 +114,55 @@ public struct TransportRebuildResponseFacts: Codable, Sendable, Equatable {
         hasCursor: Bool,
         hasFinalScopeCursor: Bool,
         hasChecksum: Bool,
-        scopeMatchesRequest: Bool
+        scopeFingerprint: String,
+        finalScopeCursorFingerprint: String? = nil
     ) {
         self.recordCount = recordCount
         self.hasMore = hasMore
         self.hasCursor = hasCursor
         self.hasFinalScopeCursor = hasFinalScopeCursor
         self.hasChecksum = hasChecksum
-        self.scopeMatchesRequest = scopeMatchesRequest
+        self.scopeFingerprint = scopeFingerprint
+        self.finalScopeCursorFingerprint = finalScopeCursorFingerprint
     }
 }
 
+@_spi(Inspection)
 public struct TransportPullResponseFacts: Codable, Sendable, Equatable {
     public let changeCount: Int
     public let hasMore: Bool
     public let rebuildScopeCount: Int
     public let checksumCount: Int
+    public let scopeCursorFingerprints: [String]
+    public let scopeCursorFingerprintsComplete: Bool
 
     enum CodingKeys: String, CodingKey {
         case changeCount = "change_count"
         case hasMore = "has_more"
         case rebuildScopeCount = "rebuild_scope_count"
         case checksumCount = "checksum_count"
+        case scopeCursorFingerprints = "scope_cursor_fingerprints"
+        case scopeCursorFingerprintsComplete = "scope_cursor_fingerprints_complete"
     }
 
-    public init(changeCount: Int, hasMore: Bool, rebuildScopeCount: Int, checksumCount: Int) {
+    public init(
+        changeCount: Int,
+        hasMore: Bool,
+        rebuildScopeCount: Int,
+        checksumCount: Int,
+        scopeCursorFingerprints: [String],
+        scopeCursorFingerprintsComplete: Bool
+    ) {
         self.changeCount = changeCount
         self.hasMore = hasMore
         self.rebuildScopeCount = rebuildScopeCount
         self.checksumCount = checksumCount
+        self.scopeCursorFingerprints = scopeCursorFingerprints
+        self.scopeCursorFingerprintsComplete = scopeCursorFingerprintsComplete
     }
 }
 
+@_spi(Inspection)
 public struct TransportObservation: Codable, Sendable, Equatable {
     public let sequence: UInt64
     public let operationClass: TransportOperationClass
@@ -179,6 +209,7 @@ public struct TransportObservation: Codable, Sendable, Equatable {
     }
 }
 
+@_spi(Inspection)
 public struct TransportObservationSnapshot: Codable, Sendable, Equatable {
     public let observations: [TransportObservation]
     public let overflowed: Bool
@@ -201,6 +232,7 @@ public struct TransportObservationSnapshot: Codable, Sendable, Equatable {
     }
 }
 
+@_spi(Inspection)
 public enum TransportPauseBarrierError: Error, Sendable, Equatable {
     case alreadyArmed
     case wrongOperation
@@ -209,6 +241,7 @@ public enum TransportPauseBarrierError: Error, Sendable, Equatable {
     case cancelled
 }
 
+@_spi(Inspection)
 public final class TransportObservationCollector: @unchecked Sendable {
     static let maximumCursorFingerprints = 16
 
