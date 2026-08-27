@@ -62,8 +62,12 @@ var defaultProtected = []string{
 
 var diagnosticBlackboxImporters = map[string]struct{}{
 	modulePath + "/blackbox/integration":    {},
+	modulePath + "/blackbox/syntheticproof": {},
 	modulePath + "/cmd/synchro-conformance": {},
 	modulePath + "/evidence":                {},
+	modulePath + "/kotlin":                  {},
+	modulePath + "/reactnative":             {},
+	modulePath + "/swift":                   {},
 }
 
 // Policy describes the packages and dependency edges allowed in a module.

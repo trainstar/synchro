@@ -7,11 +7,12 @@ import (
 
 func TestValidateSuiteResult(t *testing.T) {
 	tests := []struct {
-		name         string
-		input        string
-		wantPackages int
-		wantTests    int
-		wantError    bool
+		name          string
+		input         string
+		wantPackages  int
+		wantTests     int
+		wantError     bool
+		wantErrorText string
 	}{
 		{
 			name: "one passing package",
@@ -53,7 +54,7 @@ func TestValidateSuiteResult(t *testing.T) {
 			wantTests:    2,
 		},
 		{
-			name: "package without test files beside tested package",
+			name: "negative control rejects package without test files beside tested package",
 			input: eventStream(
 				`{"Action":"start","Package":"example/empty"}`,
 				`{"Action":"output","Package":"example/empty","Output":"?\texample/empty\t[no test files]\n"}`,
@@ -63,8 +64,8 @@ func TestValidateSuiteResult(t *testing.T) {
 				`{"Action":"pass","Package":"example/one","Test":"TestOne"}`,
 				`{"Action":"pass","Package":"example/one"}`,
 			),
-			wantPackages: 2,
-			wantTests:    1,
+			wantError:     true,
+			wantErrorText: "contains no test files",
 		},
 		{
 			name:      "empty output",
@@ -86,7 +87,8 @@ func TestValidateSuiteResult(t *testing.T) {
 				`{"Action":"output","Package":"example/empty","Output":"?\texample/empty\t[no test files]\n"}`,
 				`{"Action":"skip","Package":"example/empty"}`,
 			),
-			wantError: true,
+			wantError:     true,
+			wantErrorText: "contains no test files",
 		},
 		{
 			name: "skipped test",
@@ -131,6 +133,9 @@ func TestValidateSuiteResult(t *testing.T) {
 			summary, err := validateSuiteResult(strings.NewReader(test.input))
 			if (err != nil) != test.wantError {
 				t.Fatalf("validateSuiteResult() error = %v, wantError %t", err, test.wantError)
+			}
+			if test.wantErrorText != "" && !strings.Contains(err.Error(), test.wantErrorText) {
+				t.Fatalf("validateSuiteResult() error = %v, want %q", err, test.wantErrorText)
 			}
 			if test.wantError {
 				return

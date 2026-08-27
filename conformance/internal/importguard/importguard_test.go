@@ -319,6 +319,37 @@ func TestDefaultPolicyRejectsProtectedBlackboxEdges(t *testing.T) {
 	}
 }
 
+func TestDiagnosticBlackboxImporterClassificationIsExact(t *testing.T) {
+	blackbox := modulePath + "/blackbox"
+	approved := []string{
+		modulePath + "/blackbox/integration",
+		modulePath + "/blackbox/syntheticproof",
+		modulePath + "/cmd/synchro-conformance",
+		modulePath + "/evidence",
+		modulePath + "/kotlin",
+		modulePath + "/reactnative",
+		modulePath + "/swift",
+	}
+	if len(diagnosticBlackboxImporters) != len(approved) {
+		t.Fatalf("diagnostic black-box importer count = %d, want %d", len(diagnosticBlackboxImporters), len(approved))
+	}
+	for _, source := range approved {
+		if _, found := diagnosticBlackboxImporters[source]; !found {
+			t.Fatalf("approved diagnostic black-box importer %q is absent", source)
+		}
+		t.Run(strings.TrimPrefix(source, modulePath+"/"), func(t *testing.T) {
+			if err := checkBlackboxImporters(map[string][]string{source: {blackbox}}); err != nil {
+				t.Fatalf("diagnostic black-box importer rejected: %v", err)
+			}
+		})
+	}
+
+	unclassified := modulePath + "/blackbox/syntheticproof/unclassified"
+	if err := checkBlackboxImporters(map[string][]string{unclassified: {blackbox}}); err == nil {
+		t.Fatal("unclassified package below a diagnostic package was accepted")
+	}
+}
+
 func TestCheckRejectsTransitiveProductionPrefix(t *testing.T) {
 	root := tempModule(t, map[string]string{
 		"go.mod":                 testModuleFile,

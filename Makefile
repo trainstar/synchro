@@ -203,7 +203,7 @@ help:
 	@echo "  run                   - Run synchrod-pg locally with current env"
 	@echo "  docs-build            - Verify the contract and build the docs site"
 	@echo "  docs-dev              - Run the docs site locally"
-	@echo "  verify-contract       - Validate the machine-readable release contract"
+	@echo "  verify-contract       - Validate the JavaScript-authored release contract"
 	@echo "  conformance-mod-download - Download standalone conformance dependencies"
 	@echo "  build-conformance     - Build every standalone conformance package"
 	@echo "  lint-conformance      - Format and vet the standalone conformance module"
@@ -263,6 +263,7 @@ help:
 	@echo "  synchrod-pg-test-stop    - Stop the extension-backed test adapter"
 	@echo "  synchrod-pg-test-restart - Restart the extension-backed test adapter"
 	@echo "  release-pods-check    - Validate Apple package metadata surfaces"
+	@echo "  validation-check      - Combine JavaScript and Go contract gates with full validation"
 	@echo "  release-check         - Run the full release validation matrix"
 	@echo "  release-kotlin-local  - Publish Kotlin SDK to mavenLocal"
 	@echo "  release-npm-dry-run   - Dry-run npm pack for the React Native package"
@@ -314,6 +315,8 @@ docs-build: verify-contract
 docs-dev:
 	cd docs && npm run dev
 
+# This target validates the JavaScript-authored contract. validation-check also
+# runs the Go contract and scenario validators through test-conformance.
 verify-contract:
 	cd docs && npm ci
 	cd docs && npm run verify:contract
@@ -537,7 +540,7 @@ conformance-pg18-extension-artifact:
 		trap - EXIT HUP INT TERM
 
 test-evidence:
-	cd conformance && GOFLAGS= GOWORK=off go run ./cmd/testresult suite -- go test -json ./execution ./evidence ./cmd/synchro-evidence -count=1
+	cd conformance && GOFLAGS= GOWORK=off go run ./cmd/testresult suite -- go test -json ./evidence ./cmd/synchro-evidence -count=1
 
 test-inventory:
 	cd conformance && GOFLAGS= GOWORK=off go run ./cmd/testresult suite -- go test -json ./inventory -count=1
@@ -836,6 +839,7 @@ release-pods-check: version-check
 	swift package dump-package >/dev/null
 	@echo "Apple package metadata validated."
 
+# This is the combined gate for JavaScript and Go contract validation.
 validation-check: override GO_TEST_ARGS := -v -count=1 -p 1
 validation-check: override GO_TEST_PKGS := ./...
 validation-check: override GRADLE_TEST_ARGS := --rerun-tasks

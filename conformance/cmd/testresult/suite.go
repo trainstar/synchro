@@ -135,13 +135,16 @@ func validateSuiteResult(input io.Reader) (suiteSummary, error) {
 		if !state.started || state.final == "" {
 			return suiteSummary{}, fmt.Errorf("package %s did not finish", packageName)
 		}
+		if state.noTestFiles {
+			return suiteSummary{}, fmt.Errorf("package %s contains no test files", packageName)
+		}
 		if state.final == "fail" {
 			return suiteSummary{}, fmt.Errorf("package %s failed", packageName)
 		}
-		if state.final == "skip" && (!state.noTestFiles || len(state.tests) != 0) {
+		if state.final == "skip" {
 			return suiteSummary{}, fmt.Errorf("package %s skipped", packageName)
 		}
-		if state.final == "pass" && len(state.tests) == 0 {
+		if len(state.tests) == 0 {
 			return suiteSummary{}, fmt.Errorf("package %s executed zero tests", packageName)
 		}
 		for testName, test := range state.tests {
