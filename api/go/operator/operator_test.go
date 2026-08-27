@@ -369,6 +369,51 @@ func TestCanonicalRuntimeReadPreservesSQLState(t *testing.T) {
 	}
 }
 
+func TestCandidateSlotInspectionUsesWorkerStateRole(t *testing.T) {
+	registerRecoveryDriver.Do(func() {
+		sql.Register(recoveryDriverName, recoveryDriver{})
+	})
+
+	stateDataSource := t.Name() + "/state"
+	slotDataSource := t.Name() + "/slot"
+	stateScript := &recoveryScript{steps: []recoveryStep{{
+		queryContains: "synchro_projection_bootstrap_slot_drop_state",
+		columns:       []string{"result"},
+		values:        []driver.Value{[]byte(`{"present":true,"active":false,"valid":true}`)},
+	}}}
+	slotScript := &recoveryScript{steps: []recoveryStep{{
+		queryContains: "pg_drop_replication_slot",
+		exec:          true,
+	}}}
+	recoveryScripts.Store(stateDataSource, stateScript)
+	recoveryScripts.Store(slotDataSource, slotScript)
+	t.Cleanup(func() {
+		recoveryScripts.Delete(stateDataSource)
+		recoveryScripts.Delete(slotDataSource)
+	})
+
+	workerState, err := sql.Open(recoveryDriverName, stateDataSource)
+	if err != nil {
+		t.Fatalf("open worker state database: %v", err)
+	}
+	t.Cleanup(func() { _ = workerState.Close() })
+	workerSlots, err := sql.Open(recoveryDriverName, slotDataSource)
+	if err != nil {
+		t.Fatalf("open worker slot database: %v", err)
+	}
+	t.Cleanup(func() { _ = workerSlots.Close() })
+
+	if err := dropInactiveReplicationSlot(context.Background(), workerState, workerSlots, "candidate_slot"); err != nil {
+		t.Fatalf("dropInactiveReplicationSlot() error = %v", err)
+	}
+	if remaining := stateScript.remaining(); remaining != 0 {
+		t.Fatalf("worker state script has %d unconsumed steps", remaining)
+	}
+	if remaining := slotScript.remaining(); remaining != 0 {
+		t.Fatalf("worker slot script has %d unconsumed steps", remaining)
+	}
+}
+
 const recoveryDriverName = "synchro-operator-recovery-test"
 
 const unlockFailureDriverName = "synchro-operator-unlock-failure-test"

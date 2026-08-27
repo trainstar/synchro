@@ -38,7 +38,6 @@ type queryRower interface {
 }
 
 type workerSlotConnection interface {
-	queryRower
 	ExecContext(context.Context, string, ...any) (sql.Result, error)
 }
 
@@ -226,7 +225,7 @@ func (coordinator *Coordinator) RunProjectionBootstrap(ctx context.Context, regi
 			}
 		}
 		if activated {
-			if err := dropInactiveReplicationSlot(cleanupContext, workerSlots, candidateSlot); err != nil {
+			if err := dropInactiveReplicationSlot(cleanupContext, workerState, workerSlots, candidateSlot); err != nil {
 				cleanupErrors = append(cleanupErrors, fmt.Errorf("drop activated projection bootstrap candidate slot failed: %w", err))
 			} else if err := completeProjectionBootstrapCleanup(
 				cleanupContext,
@@ -245,7 +244,7 @@ func (coordinator *Coordinator) RunProjectionBootstrap(ctx context.Context, regi
 				cleanupErrors = append(cleanupErrors, fmt.Errorf("abort failed projection bootstrap failed: %w", err))
 			}
 			if slotCreated {
-				if err := dropInactiveReplicationSlot(cleanupContext, workerSlots, candidateSlot); err != nil {
+				if err := dropInactiveReplicationSlot(cleanupContext, workerState, workerSlots, candidateSlot); err != nil {
 					cleanupErrors = append(cleanupErrors, fmt.Errorf("drop failed projection bootstrap candidate slot failed: %w", err))
 				}
 			}
@@ -379,7 +378,7 @@ func (coordinator *Coordinator) RunProjectionBootstrap(ctx context.Context, regi
 	}
 	activationTransaction = nil
 	activated = true
-	if err := dropInactiveReplicationSlot(ctx, workerSlots, candidateSlot); err != nil {
+	if err := dropInactiveReplicationSlot(ctx, workerState, workerSlots, candidateSlot); err != nil {
 		return ProjectionBootstrapResult{}, fmt.Errorf("retire projection bootstrap candidate slot failed: %w", err)
 	}
 	if err := completeProjectionBootstrapCleanup(ctx, coordinator.operatorDB, prepared.BootstrapID); err != nil {
@@ -760,13 +759,18 @@ func waitUntil(ctx context.Context, condition func(context.Context) (bool, error
 	}
 }
 
-func dropInactiveReplicationSlot(ctx context.Context, workerSlots workerSlotConnection, slotName string) error {
+func dropInactiveReplicationSlot(
+	ctx context.Context,
+	workerState queryRower,
+	workerSlots workerSlotConnection,
+	slotName string,
+) error {
 	if !validSlotName(slotName) {
 		return errors.New("projection bootstrap candidate slot is invalid")
 	}
 	return waitUntil(ctx, func(attemptContext context.Context) (bool, error) {
 		var raw []byte
-		err := workerSlots.QueryRowContext(
+		err := workerState.QueryRowContext(
 			attemptContext,
 			"SELECT synchro.synchro_projection_bootstrap_slot_drop_state($1)",
 			slotName,
@@ -833,7 +837,7 @@ func cleanupAbortedProjectionBootstrapSlots(ctx context.Context, workerState que
 		if !validSlotName(slotName.String) {
 			return errors.New("load aborted projection bootstrap slot failed: slot name is invalid")
 		}
-		if err := dropInactiveReplicationSlot(ctx, workerSlots, slotName.String); err != nil {
+		if err := dropInactiveReplicationSlot(ctx, workerState, workerSlots, slotName.String); err != nil {
 			return fmt.Errorf("discard aborted projection bootstrap slot failed: %w", err)
 		}
 	}
@@ -954,7 +958,7 @@ func (coordinator *Coordinator) recoverInterruptedProjectionBootstrap(
 		); err != nil {
 			return nil, fmt.Errorf("abort interrupted projection bootstrap failed: %w", err)
 		}
-		if err := dropInactiveReplicationSlot(ctx, workerSlots, plan.retiredSlotName); err != nil {
+		if err := dropInactiveReplicationSlot(ctx, workerState, workerSlots, plan.retiredSlotName); err != nil {
 			return nil, fmt.Errorf("discard interrupted projection bootstrap slot failed: %w", err)
 		}
 		return nil, nil
@@ -963,7 +967,7 @@ func (coordinator *Coordinator) recoverInterruptedProjectionBootstrap(
 	if err != nil {
 		return nil, err
 	}
-	if err := dropInactiveReplicationSlot(ctx, workerSlots, plan.retiredSlotName); err != nil {
+	if err := dropInactiveReplicationSlot(ctx, workerState, workerSlots, plan.retiredSlotName); err != nil {
 		return nil, fmt.Errorf("retire interrupted projection bootstrap slot failed: %w", err)
 	}
 	if err := completeProjectionBootstrapCleanup(ctx, operationLock, *interrupted.BootstrapID); err != nil {

@@ -19,6 +19,7 @@ import (
 	"github.com/google/go-cmp/cmp"
 	"github.com/jackc/pgx/v5"
 	pgxstdlib "github.com/jackc/pgx/v5/stdlib"
+	"github.com/trainstar/synchro/api/go/internal/testsupport"
 )
 
 type manifestMutationConnector struct {
@@ -155,23 +156,7 @@ func (r *manifestMutationRows) Next(values []driver.Value) error {
 
 func testPostgres(t *testing.T) *sql.DB {
 	t.Helper()
-
-	dbURL := os.Getenv("TEST_DATABASE_URL")
-	if dbURL == "" {
-		t.Fatal("TEST_DATABASE_URL is required")
-	}
-
-	db, err := sql.Open("pgx", dbURL)
-	if err != nil {
-		t.Fatalf("opening postgres database: %v", err)
-	}
-	t.Cleanup(func() { _ = db.Close() })
-
-	if err := db.PingContext(context.Background()); err != nil {
-		t.Fatalf("pinging postgres database: %v", err)
-	}
-
-	return db
+	return testsupport.OpenPostgres(t)
 }
 
 func manifestMutatingPostgres(
@@ -179,6 +164,7 @@ func manifestMutatingPostgres(
 	mutate func([]byte) ([]byte, error),
 ) *sql.DB {
 	t.Helper()
+	testPostgres(t)
 	dbURL := os.Getenv("TEST_DATABASE_URL")
 	if dbURL == "" {
 		t.Fatal("TEST_DATABASE_URL is required")
@@ -216,28 +202,55 @@ func corruptSeedTokenMAC(token string) (string, error) {
 	return strings.Join(parts, "."), nil
 }
 
-func registerSeedTestTable(t *testing.T, db *sql.DB, tableName string) {
-	registerSeedTestTableForScope(t, db, tableName, "global")
+func registerSeedTestTable(t *testing.T, db *sql.DB, tableName string) (string, string) {
+	return registerSeedTestTableForScope(t, db, tableName, "global")
 }
 
-func registerSeedTestTableForScope(t *testing.T, db *sql.DB, tableName, scopeID string) {
+func registerSeedTestTableForScope(t *testing.T, db *sql.DB, tableName, scopeID string) (string, string) {
 	t.Helper()
 
 	ctx := context.Background()
-	functionName := tableName + "_membership"
+	actualTableName := testsupport.UniqueName(t, tableName)
+	actualScopeID := testsupport.UniqueName(t, scopeID)
+	functionName := testsupport.UniqueName(t, tableName+"_membership")
 	functionIdentity := "public." + quotePGIdent(functionName)
 	createSQL := fmt.Sprintf(`
-		CREATE TABLE %s (
+		CREATE TABLE public.%s (
 			id TEXT PRIMARY KEY,
 			user_id TEXT NOT NULL,
 			title TEXT NOT NULL,
 			updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
 			deleted_at TIMESTAMPTZ
 		)
-	`, quotePGIdent(tableName))
+	`, quotePGIdent(actualTableName))
 	if _, err := db.ExecContext(ctx, createSQL); err != nil {
 		t.Fatalf("creating test table: %v", err)
 	}
+
+	functionCreated := false
+	registered := false
+	t.Cleanup(func() {
+		if registered {
+			if _, err := db.ExecContext(ctx, "SELECT synchro.synchro_unregister_table($1)", actualTableName); err != nil {
+				t.Errorf("unregistering synced table %s: %v", actualTableName, err)
+			} else if !waitForSeedTableState(ctx, db, actualTableName, false) {
+				t.Errorf("registered table %q did not deactivate", actualTableName)
+			}
+		}
+		if functionCreated {
+			if _, err := db.ExecContext(ctx, fmt.Sprintf("DROP FUNCTION IF EXISTS %s(text)", functionIdentity)); err != nil {
+				t.Errorf("dropping membership function %s: %v", functionName, err)
+			}
+		}
+		for _, policy := range []string{"synchro_owner_all", "synchro_worker_select"} {
+			if _, err := db.ExecContext(ctx, fmt.Sprintf("DROP POLICY IF EXISTS %s ON public.%s", quotePGIdent(policy), quotePGIdent(actualTableName))); err != nil {
+				t.Errorf("dropping policy %s on %s: %v", policy, actualTableName, err)
+			}
+		}
+		if _, err := db.ExecContext(ctx, fmt.Sprintf("DROP TABLE IF EXISTS public.%s", quotePGIdent(actualTableName))); err != nil {
+			t.Errorf("dropping test table %s: %v", actualTableName, err)
+		}
+	})
 
 	functionSQL := fmt.Sprintf(`
 		CREATE FUNCTION %s(p_id text)
@@ -259,46 +272,31 @@ func registerSeedTestTableForScope(t *testing.T, db *sql.DB, tableName, scopeID 
 			AS PERMISSIVE FOR SELECT TO synchro_worker USING (true)
 	`,
 		functionIdentity,
-		quotePGLiteral(scopeID),
+		quotePGLiteral(actualScopeID),
 		functionIdentity,
 		functionIdentity,
-		quotePGIdent(tableName),
-		quotePGIdent(tableName),
-		quotePGIdent(tableName),
-		quotePGIdent(tableName),
+		quotePGIdent(actualTableName),
+		quotePGIdent(actualTableName),
+		quotePGIdent(actualTableName),
+		quotePGIdent(actualTableName),
 	)
 	if _, err := db.ExecContext(ctx, functionSQL); err != nil {
 		t.Fatalf("creating membership function: %v", err)
 	}
-
+	functionCreated = true
 	if _, err := db.ExecContext(
 		ctx,
 		"SELECT synchro.synchro_register_table($1, $2, 'single_scope', 'id', 'updated_at', 'deleted_at', 'read_only')",
-		"public."+tableName,
+		"public."+actualTableName,
 		functionIdentity,
 	); err != nil {
-		t.Fatalf("registering synced table: %v", err)
+		t.Fatalf("registering synced table %s: %v", actualTableName, err)
 	}
-	if !waitForSeedTableState(ctx, db, tableName, true) {
-		t.Fatalf("registered table %q did not activate", tableName)
+	registered = true
+	if !waitForSeedTableState(ctx, db, actualTableName, true) {
+		t.Fatalf("registered table %q did not activate", actualTableName)
 	}
-
-	t.Cleanup(func() {
-		if _, err := db.ExecContext(ctx, fmt.Sprintf("SELECT synchro.synchro_unregister_table('%s')", tableName)); err != nil {
-			t.Errorf("unregistering synced table %s: %v", tableName, err)
-			return
-		}
-		if !waitForSeedTableState(ctx, db, tableName, false) {
-			t.Errorf("registered table %q did not deactivate", tableName)
-			return
-		}
-		if _, err := db.ExecContext(ctx, fmt.Sprintf("DROP FUNCTION IF EXISTS %s(text)", functionIdentity)); err != nil {
-			t.Errorf("dropping membership function %s: %v", functionName, err)
-		}
-		if _, err := db.ExecContext(ctx, fmt.Sprintf("DROP TABLE IF EXISTS %s", quotePGIdent(tableName))); err != nil {
-			t.Errorf("dropping test table %s: %v", tableName, err)
-		}
-	})
+	return actualTableName, actualScopeID
 }
 
 func waitForSeedTableState(ctx context.Context, db *sql.DB, tableName string, expected bool) bool {
@@ -321,8 +319,8 @@ func waitForSeedTableState(ctx context.Context, db *sql.DB, tableName string, ex
 	return false
 }
 
-func waitForPortableEdge(ctx context.Context, db *sql.DB, tableName, recordID string) bool {
-	return waitForPortableEdgeInScope(ctx, db, tableName, recordID, "global")
+func waitForPortableEdge(ctx context.Context, db *sql.DB, tableName, recordID, scopeID string) bool {
+	return waitForPortableEdgeInScope(ctx, db, tableName, recordID, scopeID)
 }
 
 func waitForPortableEdgeInScope(ctx context.Context, db *sql.DB, tableName, recordID, scopeID string) bool {
@@ -348,20 +346,25 @@ func registerSharedScope(t *testing.T, db *sql.DB, scopeID string, portable bool
 	t.Helper()
 
 	ctx := context.Background()
-	if _, err := db.ExecContext(ctx, "SELECT synchro.synchro_register_shared_scope($1, $2)", scopeID, portable); err != nil {
-		t.Fatalf("registering shared scope %s: %v", scopeID, err)
-	}
+	actualScopeID := scopeID
+	registered := false
 	t.Cleanup(func() {
-		if _, err := db.ExecContext(ctx, "SELECT synchro.synchro_unregister_shared_scope($1)", scopeID); err != nil {
-			t.Errorf("unregistering shared scope %s: %v", scopeID, err)
+		if !registered {
+			return
+		}
+		if _, err := db.ExecContext(ctx, "SELECT synchro.synchro_unregister_shared_scope($1)", actualScopeID); err != nil {
+			t.Errorf("unregistering shared scope %s: %v", actualScopeID, err)
 		}
 	})
+	if _, err := db.ExecContext(ctx, "SELECT synchro.synchro_register_shared_scope($1, $2)", actualScopeID, portable); err != nil {
+		t.Fatalf("registering shared scope %s: %v", scopeID, err)
+	}
+	registered = true
 }
 
 func TestGenerateCreatesClientCompatibleSeedDatabase(t *testing.T) {
 	db := testPostgres(t)
-	tableName := "test_seed_orders"
-	registerSeedTestTable(t, db, tableName)
+	tableName, _ := registerSeedTestTable(t, db, "test_seed_orders")
 
 	outputPath := filepath.Join(t.TempDir(), "seed.db")
 	if err := Generate(context.Background(), db, GenerateOptions{
@@ -670,8 +673,7 @@ func assertPendingChange(t *testing.T, db *sql.DB, tableName, recordID, operatio
 
 func TestGenerateRejectsExistingOutputWithoutOverwrite(t *testing.T) {
 	db := testPostgres(t)
-	tableName := "test_seed_overwrite"
-	registerSeedTestTable(t, db, tableName)
+	registerSeedTestTable(t, db, "test_seed_overwrite")
 
 	outputPath := filepath.Join(t.TempDir(), "seed.db")
 	if err := Generate(context.Background(), db, GenerateOptions{
@@ -790,6 +792,7 @@ func TestPublishRechecksDestinationSidecars(t *testing.T) {
 }
 
 func TestVerificationFailureRollsBackExportTransaction(t *testing.T) {
+	testPostgres(t)
 	dbURL := os.Getenv("TEST_DATABASE_URL")
 	if dbURL == "" {
 		t.Fatal("TEST_DATABASE_URL is required")
@@ -826,9 +829,8 @@ func TestVerificationFailureRollsBackExportTransaction(t *testing.T) {
 
 func TestGenerateHydratesPortableRowsAndScopeState(t *testing.T) {
 	db := testPostgres(t)
-	tableName := "test_seed_portable"
-	registerSeedTestTable(t, db, tableName)
-	registerSharedScope(t, db, "global", true)
+	tableName, scopeID := registerSeedTestTable(t, db, "test_seed_portable")
+	registerSharedScope(t, db, scopeID, true)
 
 	ctx := context.Background()
 	recordID := "00000000-0000-0000-0000-000000000099"
@@ -844,7 +846,7 @@ func TestGenerateHydratesPortableRowsAndScopeState(t *testing.T) {
 	); err != nil {
 		t.Fatalf("inserting portable row: %v", err)
 	}
-	if !waitForPortableEdge(ctx, db, tableName, recordID) {
+	if !waitForPortableEdge(ctx, db, tableName, recordID, scopeID) {
 		t.Fatal("portable row did not become WAL-materialized")
 	}
 
@@ -877,7 +879,8 @@ func TestGenerateHydratesPortableRowsAndScopeState(t *testing.T) {
 	var scopeChecksum string
 	var localChecksum string
 	if err := sqliteDB.QueryRow(
-		"SELECT cursor, checksum, local_checksum FROM _synchro_scopes WHERE scope_id = 'global'",
+		"SELECT cursor, checksum, local_checksum FROM _synchro_scopes WHERE scope_id = ?",
+		scopeID,
 	).Scan(&scopeCursor, &scopeChecksum, &localChecksum); err != nil {
 		t.Fatalf("reading portable scope state: %v", err)
 	}
@@ -898,7 +901,8 @@ func TestGenerateHydratesPortableRowsAndScopeState(t *testing.T) {
 	var scopeRowCount int64
 	var scopeRowChecksum string
 	if err := sqliteDB.QueryRow(
-		"SELECT count(*), COALESCE(MAX(checksum), '') FROM _synchro_scope_rows WHERE scope_id = 'global' AND table_name = ? AND record_id = ?",
+		"SELECT count(*), COALESCE(MAX(checksum), '') FROM _synchro_scope_rows WHERE scope_id = ? AND table_name = ? AND record_id = ?",
+		scopeID,
 		tableName,
 		recordID,
 	).Scan(&scopeRowCount, &scopeRowChecksum); err != nil {
@@ -913,7 +917,8 @@ func TestGenerateHydratesPortableRowsAndScopeState(t *testing.T) {
 
 	var receipt string
 	if err := sqliteDB.QueryRow(
-		"SELECT receipt FROM _synchro_seed_receipts WHERE scope_id = 'global'",
+		"SELECT receipt FROM _synchro_seed_receipts WHERE scope_id = ?",
+		scopeID,
 	).Scan(&receipt); err != nil {
 		t.Fatalf("reading portable scope receipt: %v", err)
 	}
@@ -974,9 +979,8 @@ func TestGenerateHydratesPortableRowsAndScopeState(t *testing.T) {
 
 func TestGenerateUsesOneSnapshotDuringConcurrentSourceWrites(t *testing.T) {
 	db := testPostgres(t)
-	tableName := "test_seed_concurrent_snapshot"
-	registerSeedTestTable(t, db, tableName)
-	registerSharedScope(t, db, "global", true)
+	tableName, scopeID := registerSeedTestTable(t, db, "test_seed_concurrent_snapshot")
+	registerSharedScope(t, db, scopeID, true)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -993,7 +997,7 @@ func TestGenerateUsesOneSnapshotDuringConcurrentSourceWrites(t *testing.T) {
 	); err != nil {
 		t.Fatalf("inserting initial portable row: %v", err)
 	}
-	if !waitForPortableEdge(ctx, db, tableName, initialID) {
+	if !waitForPortableEdge(ctx, db, tableName, initialID, scopeID) {
 		t.Fatal("initial portable row did not become WAL-materialized")
 	}
 
@@ -1058,7 +1062,7 @@ func TestGenerateUsesOneSnapshotDuringConcurrentSourceWrites(t *testing.T) {
 	); err != nil {
 		t.Fatalf("inserting concurrent portable row: %v", err)
 	}
-	if !waitForPortableEdge(ctx, db, tableName, concurrentID) {
+	if !waitForPortableEdge(ctx, db, tableName, concurrentID, scopeID) {
 		t.Fatal("concurrent portable row did not become WAL-materialized")
 	}
 	close(continueExport)
@@ -1096,7 +1100,8 @@ func TestGenerateUsesOneSnapshotDuringConcurrentSourceWrites(t *testing.T) {
 		t.Fatalf("reading concurrent row version: %v", err)
 	}
 	if err := sqliteDB.QueryRow(
-		"SELECT COUNT(*) FROM _synchro_scope_rows WHERE scope_id = 'global' AND table_name = ? AND record_id = ?",
+		"SELECT COUNT(*) FROM _synchro_scope_rows WHERE scope_id = ? AND table_name = ? AND record_id = ?",
+		scopeID,
 		tableName,
 		concurrentID,
 	).Scan(&scopeRowCount); err != nil {
@@ -1115,8 +1120,7 @@ func TestGenerateUsesOneSnapshotDuringConcurrentSourceWrites(t *testing.T) {
 
 func TestSQLiteSnapshotCompletionVerifiesStagedAndFinalArtifacts(t *testing.T) {
 	db := testPostgres(t)
-	tableName := "test_seed_snapshot_completion"
-	registerSeedTestTable(t, db, tableName)
+	registerSeedTestTable(t, db, "test_seed_snapshot_completion")
 
 	directory := t.TempDir()
 	finalPath := filepath.Join(directory, "final.db")
@@ -1148,9 +1152,7 @@ func TestSQLiteSnapshotCompletionVerifiesStagedAndFinalArtifacts(t *testing.T) {
 
 func TestGenerateRejectsMACOnlyPortableSeedTokenCorruption(t *testing.T) {
 	db := testPostgres(t)
-	tableName := "test_seed_mac_verification"
-	scopeID := "seed-mac-verification"
-	registerSeedTestTableForScope(t, db, tableName, scopeID)
+	_, scopeID := registerSeedTestTableForScope(t, db, "test_seed_mac_verification", "seed-mac-verification")
 	registerSharedScope(t, db, scopeID, true)
 
 	tests := []struct {
@@ -1178,10 +1180,17 @@ func TestGenerateRejectsMACOnlyPortableSeedTokenCorruption(t *testing.T) {
 				if err := decodeJSON(raw, &manifest); err != nil {
 					return nil, err
 				}
-				if len(manifest.PortableScopes) != 1 {
-					return nil, fmt.Errorf("portable seed scope count = %d, want 1", len(manifest.PortableScopes))
+				var scope *portableSeedScope
+				for index := range manifest.PortableScopes {
+					if manifest.PortableScopes[index].ID == scopeID {
+						scope = &manifest.PortableScopes[index]
+						break
+					}
 				}
-				token := test.token(&manifest.PortableScopes[0])
+				if scope == nil {
+					return nil, fmt.Errorf("portable seed scope %q is missing", scopeID)
+				}
+				token := test.token(scope)
 				original := *token
 				corrupted, err := corruptSeedTokenMAC(original)
 				if err != nil {
@@ -1240,9 +1249,7 @@ func TestGenerateRejectsMACOnlyPortableSeedTokenCorruption(t *testing.T) {
 
 func TestPublishVerifiedSQLiteOutputRejectsArtifactCorruption(t *testing.T) {
 	db := testPostgres(t)
-	tableName := "test_seed_verified_publication"
-	scopeID := "seed-verification"
-	registerSeedTestTableForScope(t, db, tableName, scopeID)
+	tableName, scopeID := registerSeedTestTableForScope(t, db, "test_seed_verified_publication", "seed-verification")
 	registerSharedScope(t, db, scopeID, true)
 
 	ctx := context.Background()

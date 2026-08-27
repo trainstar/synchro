@@ -18,19 +18,18 @@ import (
 	"log"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
-	_ "github.com/jackc/pgx/v5/stdlib"
+	"github.com/trainstar/synchro/api/go/internal/testsupport"
 )
 
-// testServer creates a test HTTP server backed by a real PG with the extension.
-// Skips the test if TEST_DATABASE_URL is not set.
+// testServer creates a test HTTP server backed by a real PostgreSQL extension.
 func testServer(t *testing.T) *httptest.Server {
 	t.Helper()
 	return testServerWithConfig(t, func(cfg *Config) {
@@ -41,27 +40,11 @@ func testServer(t *testing.T) *httptest.Server {
 func testServerWithConfig(t *testing.T, configure func(*Config)) *httptest.Server {
 	t.Helper()
 
-	dbURL := os.Getenv("TEST_DATABASE_URL")
-	if dbURL == "" {
-		t.Fatal("TEST_DATABASE_URL is required")
-	}
-
-	db, err := sql.Open("pgx", dbURL)
-	if err != nil {
-		t.Fatalf("opening database: %v", err)
-	}
-	t.Cleanup(func() { _ = db.Close() })
-
-	if err := db.PingContext(context.Background()); err != nil {
-		t.Fatalf("pinging database: %v", err)
-	}
+	db := testsupport.OpenPostgres(t)
 
 	if err := RequireCompatibleExtension(context.Background(), db); err != nil {
 		t.Fatalf("verifying compatible synchro_pg extension: %v", err)
 	}
-
-	_, _ = db.ExecContext(context.Background(),
-		"DELETE FROM synchro.sync_clients WHERE client_id LIKE 'test-%' OR client_id LIKE '%-client'")
 
 	cfg := Config{
 		DB:               db,
@@ -105,6 +88,11 @@ func testTokenHS384(userID string, secret []byte) string {
 	mac.Write([]byte(sigInput))
 	sig := base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
 	return sigInput + "." + sig
+}
+
+func testClientID(t *testing.T, prefix string) string {
+	t.Helper()
+	return testsupport.UniqueName(t, prefix)
 }
 
 func TestParseSemver(t *testing.T) {
@@ -249,14 +237,32 @@ type connectedClient struct {
 	Scopes          map[string]any
 }
 
+func currentSchemaReference(t *testing.T, srv *httptest.Server) map[string]any {
+	t.Helper()
+	status, body := doJSON(t, http.MethodGet, srv.URL+"/sync/schema", "", nil)
+	if status != http.StatusOK {
+		t.Fatalf("schema request failed with %d: %v", status, body)
+	}
+	version, ok := body["schema_version"].(float64)
+	if !ok {
+		t.Fatalf("schema response returned invalid schema_version: %v", body["schema_version"])
+	}
+	hash, ok := body["schema_hash"].(string)
+	if !ok {
+		t.Fatalf("schema response returned invalid schema_hash: %v", body["schema_hash"])
+	}
+	return map[string]any{"version": version, "hash": hash}
+}
+
 func connectClient(t *testing.T, srv *httptest.Server, token, clientID string) connectedClient {
 	t.Helper()
+	schema := currentSchemaReference(t, srv)
 	status, body := doJSON(t, "POST", srv.URL+"/sync/connect", token, map[string]any{
 		"client_id":         clientID,
 		"platform":          "ios",
 		"app_version":       "1.0.0",
 		"protocol_version":  ExpectedProtocolVersion,
-		"schema":            map[string]any{"version": 0, "hash": ""},
+		"schema":            schema,
 		"scope_set_version": 0,
 		"known_scopes":      map[string]any{},
 	})
@@ -267,7 +273,7 @@ func connectClient(t *testing.T, srv *httptest.Server, token, clientID string) c
 	if !ok || generation <= 0 {
 		t.Fatalf("connect returned invalid client_generation: %v", body["client_generation"])
 	}
-	schema, ok := body["schema"].(map[string]any)
+	schema, ok = body["schema"].(map[string]any)
 	if !ok {
 		t.Fatalf("connect returned invalid schema: %T", body["schema"])
 	}
@@ -328,16 +334,26 @@ func waitForRegisteredTableState(db *sql.DB, tableName string, expected bool) bo
 	return false
 }
 
+func quoteTestIdentifier(value string) string {
+	return `"` + strings.ReplaceAll(value, `"`, `""`) + `"`
+}
+
+func quoteTestLiteral(value string) string {
+	return `'` + strings.ReplaceAll(value, `'`, `''`) + `'`
+}
+
 func TestConnectPassthrough(t *testing.T) {
 	srv := testServer(t)
 	token := testToken("user-1")
+	clientID := testClientID(t, "test-canonical-connect-client")
+	schema := currentSchemaReference(t, srv)
 
 	status, body := doJSON(t, "POST", srv.URL+"/sync/connect", token, map[string]any{
-		"client_id":         "test-canonical-connect-client",
+		"client_id":         clientID,
 		"platform":          "ios",
 		"app_version":       "1.0.0",
 		"protocol_version":  ExpectedProtocolVersion,
-		"schema":            map[string]any{"version": 0, "hash": ""},
+		"schema":            schema,
 		"scope_set_version": 0,
 		"known_scopes":      map[string]any{},
 	})
@@ -357,20 +373,7 @@ func TestConnectPassthrough(t *testing.T) {
 }
 
 func TestRequireCompatibleExtension(t *testing.T) {
-	dbURL := os.Getenv("TEST_DATABASE_URL")
-	if dbURL == "" {
-		t.Fatal("TEST_DATABASE_URL is required")
-	}
-
-	db, err := sql.Open("pgx", dbURL)
-	if err != nil {
-		t.Fatalf("opening database: %v", err)
-	}
-	t.Cleanup(func() { _ = db.Close() })
-
-	if err := db.PingContext(context.Background()); err != nil {
-		t.Fatalf("pinging database: %v", err)
-	}
+	db := testsupport.OpenPostgres(t)
 
 	if err := RequireCompatibleExtension(context.Background(), db); err != nil {
 		t.Fatalf("expected compatible synchro_pg extension, got %v", err)
@@ -383,13 +386,15 @@ func TestConnectPassthroughTrustedUpstreamAuth(t *testing.T) {
 			return "user-1", nil
 		}
 	})
+	clientID := testClientID(t, "test-canonical-connect-upstream-client")
+	schema := currentSchemaReference(t, srv)
 
 	status, body := doJSON(t, "POST", srv.URL+"/sync/connect", "", map[string]any{
-		"client_id":         "test-canonical-connect-upstream-client",
+		"client_id":         clientID,
 		"platform":          "ios",
 		"app_version":       "1.0.0",
 		"protocol_version":  ExpectedProtocolVersion,
-		"schema":            map[string]any{"version": 0, "hash": ""},
+		"schema":            schema,
 		"scope_set_version": 0,
 		"known_scopes":      map[string]any{},
 	})
@@ -405,13 +410,15 @@ func TestConnectPassthroughTrustedUpstreamAuth(t *testing.T) {
 func TestConnectUpgradeRequired426(t *testing.T) {
 	srv := testServer(t)
 	token := testToken("user-1")
+	clientID := testClientID(t, "test-canonical-upgrade-client")
+	schema := currentSchemaReference(t, srv)
 
 	status, body := doJSON(t, "POST", srv.URL+"/sync/connect", token, map[string]any{
-		"client_id":         "test-canonical-upgrade-client",
+		"client_id":         clientID,
 		"platform":          "ios",
 		"app_version":       "1.0.0",
 		"protocol_version":  99,
-		"schema":            map[string]any{"version": 0, "hash": ""},
+		"schema":            schema,
 		"scope_set_version": 0,
 		"known_scopes":      map[string]any{},
 	})
@@ -432,10 +439,11 @@ func TestConnectUpgradeRequired426(t *testing.T) {
 func TestPullPassthrough(t *testing.T) {
 	srv := testServer(t)
 	token := testToken("user-1")
-	client := connectClient(t, srv, token, "test-canonical-pull-client")
+	clientID := testClientID(t, "test-canonical-pull-client")
+	client := connectClient(t, srv, token, clientID)
 
 	status, body := doJSON(t, "POST", srv.URL+"/sync/pull", token, map[string]any{
-		"client_id":         "test-canonical-pull-client",
+		"client_id":         clientID,
 		"client_generation": client.Generation,
 		"schema":            client.Schema,
 		"scope_set_version": client.ScopeSetVersion,
@@ -459,10 +467,11 @@ func TestPullPassthrough(t *testing.T) {
 func TestPushRejectsEmptyBatch(t *testing.T) {
 	srv := testServer(t)
 	token := testToken("user-1")
-	client := connectClient(t, srv, token, "test-canonical-push-client")
+	clientID := testClientID(t, "test-canonical-push-client")
+	client := connectClient(t, srv, token, clientID)
 
 	status, body := doJSON(t, "POST", srv.URL+"/sync/push", token, map[string]any{
-		"client_id":         "test-canonical-push-client",
+		"client_id":         clientID,
 		"client_generation": client.Generation,
 		"batch_id":          "018f2b5e-7c42-7a1d-9d31-8a95bd674001",
 		"schema":            client.Schema,
@@ -481,10 +490,11 @@ func TestPushRejectsEmptyBatch(t *testing.T) {
 func TestRebuildPassthrough(t *testing.T) {
 	srv := testServer(t)
 	token := testToken("user-1")
-	client := connectClient(t, srv, token, "test-canonical-rebuild-client")
+	clientID := testClientID(t, "test-canonical-rebuild-client")
+	client := connectClient(t, srv, token, clientID)
 
 	status, body := doJSON(t, "POST", srv.URL+"/sync/rebuild", token, map[string]any{
-		"client_id":         "test-canonical-rebuild-client",
+		"client_id":         clientID,
 		"client_generation": client.Generation,
 		"schema":            client.Schema,
 		"scope":             "user:user-1",
@@ -567,7 +577,7 @@ func TestInvalidRequestBodiesReturn400(t *testing.T) {
 		{
 			name: "rebuild missing scope",
 			path: "/sync/rebuild",
-			body: `{"client_id":"test-rebuild-client","limit":100}`,
+			body: `{"client_id":"client","limit":100}`,
 		},
 	}
 
@@ -591,10 +601,11 @@ func TestInvalidRequestBodiesReturn400(t *testing.T) {
 func TestPushRejectsMalformedClientVersionTimestamp(t *testing.T) {
 	srv := testServer(t)
 	token := testToken("user-1")
-	client := connectClient(t, srv, token, "test-invalid-timestamp-client")
+	clientID := testClientID(t, "test-invalid-timestamp-client")
+	client := connectClient(t, srv, token, clientID)
 
 	status, response := doJSON(t, "POST", srv.URL+"/sync/push", token, map[string]any{
-		"client_id":         "test-invalid-timestamp-client",
+		"client_id":         clientID,
 		"client_generation": client.Generation,
 		"batch_id":          "018f2b5e-7c42-7a1d-9d31-8a95bd674201",
 		"schema":            client.Schema,
@@ -632,7 +643,7 @@ func TestTrustedUpstreamAuthRequiresUser(t *testing.T) {
 	})
 
 	status, body := doJSON(t, "POST", srv.URL+"/sync/connect", "", map[string]any{
-		"client_id":         "test-canonical-connect-missing-upstream-user",
+		"client_id":         "client",
 		"platform":          "ios",
 		"app_version":       "1.0.0",
 		"protocol_version":  1,
@@ -887,55 +898,72 @@ func TestVersionCheckRequiresExactlyOneSupportedHeader(t *testing.T) {
 }
 
 func TestSchemaMismatch422Body(t *testing.T) {
-	dbURL := os.Getenv("TEST_DATABASE_URL")
-	if dbURL == "" {
-		t.Fatal("TEST_DATABASE_URL is required")
-	}
+	db := testsupport.OpenPostgres(t)
+	tableName := testsupport.UniqueName(t, "test_mismatch_tbl")
+	functionName := testsupport.UniqueName(t, "test_mismatch_membership")
+	scopeID := testsupport.UniqueName(t, "test_mismatch_scope")
+	functionIdentity := "public." + quoteTestIdentifier(functionName)
 
-	db, err := sql.Open("pgx", dbURL)
-	if err != nil {
-		t.Fatalf("opening database: %v", err)
-	}
-	t.Cleanup(func() { _ = db.Close() })
-
-	if _, err := db.Exec("CREATE TABLE IF NOT EXISTS test_mismatch_tbl (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), name TEXT, updated_at TIMESTAMPTZ DEFAULT now(), deleted_at TIMESTAMPTZ)"); err != nil {
+	if _, err := db.Exec(fmt.Sprintf("CREATE TABLE public.%s (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), name TEXT, updated_at TIMESTAMPTZ DEFAULT now(), deleted_at TIMESTAMPTZ)", quoteTestIdentifier(tableName))); err != nil {
 		t.Fatalf("creating mismatch table: %v", err)
 	}
-	if _, err := db.Exec(`
-		CREATE OR REPLACE FUNCTION public.test_mismatch_membership(p_id uuid)
+	functionCreated := false
+	registered := false
+	t.Cleanup(func() {
+		if registered {
+			if _, err := db.Exec("SELECT synchro.synchro_unregister_table($1)", tableName); err != nil {
+				t.Errorf("unregistering mismatch table %s: %v", tableName, err)
+			} else if !waitForRegisteredTableState(db, tableName, false) {
+				t.Errorf("registered table %q did not deactivate", tableName)
+			}
+		}
+		if functionCreated {
+			if _, err := db.Exec(fmt.Sprintf("DROP FUNCTION IF EXISTS %s(uuid)", functionIdentity)); err != nil {
+				t.Errorf("dropping membership function %s: %v", functionName, err)
+			}
+		}
+		for _, policy := range []string{"synchro_owner_all", "synchro_worker_select"} {
+			if _, err := db.Exec(fmt.Sprintf("DROP POLICY IF EXISTS %s ON public.%s", quoteTestIdentifier(policy), quoteTestIdentifier(tableName))); err != nil {
+				t.Errorf("dropping policy %s on %s: %v", policy, tableName, err)
+			}
+		}
+		if _, err := db.Exec(fmt.Sprintf("DROP TABLE IF EXISTS public.%s", quoteTestIdentifier(tableName))); err != nil {
+			t.Errorf("dropping test table %s: %v", tableName, err)
+		}
+	})
+	if _, err := db.Exec(fmt.Sprintf(`
+		CREATE FUNCTION %s(p_id uuid)
 		RETURNS SETOF text
 		LANGUAGE SQL STABLE SECURITY INVOKER
 		SET search_path = pg_catalog, synchro
 		BEGIN ATOMIC
-			SELECT 'global'::text WHERE p_id IS NOT NULL;
+			SELECT %s::text WHERE p_id IS NOT NULL;
 		END;
-		REVOKE ALL ON FUNCTION public.test_mismatch_membership(uuid) FROM PUBLIC;
-		GRANT EXECUTE ON FUNCTION public.test_mismatch_membership(uuid) TO synchro_owner, synchro_worker;
+		REVOKE ALL ON FUNCTION %s(uuid) FROM PUBLIC;
+		GRANT EXECUTE ON FUNCTION %s(uuid) TO synchro_owner, synchro_worker;
 		GRANT USAGE ON SCHEMA public TO synchro_owner, synchro_worker;
-		GRANT SELECT ON TABLE public.test_mismatch_tbl TO synchro_owner;
-		GRANT SELECT ON TABLE public.test_mismatch_tbl TO synchro_worker;
-		ALTER TABLE public.test_mismatch_tbl ENABLE ROW LEVEL SECURITY;
-		CREATE POLICY synchro_owner_all ON public.test_mismatch_tbl
+		GRANT SELECT ON TABLE public.%s TO synchro_owner;
+		GRANT SELECT ON TABLE public.%s TO synchro_worker;
+		ALTER TABLE public.%s ENABLE ROW LEVEL SECURITY;
+		CREATE POLICY synchro_owner_all ON public.%s
 			AS PERMISSIVE FOR ALL TO synchro_owner USING (true) WITH CHECK (true)
 		;
-		CREATE POLICY synchro_worker_select ON public.test_mismatch_tbl
+		CREATE POLICY synchro_worker_select ON public.%s
 			AS PERMISSIVE FOR SELECT TO synchro_worker USING (true)
-	`); err != nil {
+	`, functionIdentity, quoteTestLiteral(scopeID), functionIdentity, functionIdentity,
+		tableName, tableName, tableName, tableName, tableName)); err != nil {
 		t.Fatalf("creating mismatch membership function: %v", err)
 	}
-	if _, err := db.Exec("SELECT synchro.synchro_register_table('public.test_mismatch_tbl', 'public.test_mismatch_membership', 'single_scope', 'id', 'updated_at', 'deleted_at', 'read_only')"); err != nil {
+	functionCreated = true
+	if _, err := db.Exec(
+		"SELECT synchro.synchro_register_table($1, $2, 'single_scope', 'id', 'updated_at', 'deleted_at', 'read_only')",
+		"public."+tableName,
+		functionIdentity,
+	); err != nil {
 		t.Fatalf("registering mismatch table: %v", err)
 	}
-	waitForRegisteredTable(t, db, "test_mismatch_tbl")
-	t.Cleanup(func() {
-		_, _ = db.Exec("SELECT synchro.synchro_unregister_table('test_mismatch_tbl')")
-		if !waitForRegisteredTableState(db, "test_mismatch_tbl", false) {
-			t.Errorf("registered table %q did not deactivate", "test_mismatch_tbl")
-			return
-		}
-		_, _ = db.Exec("DROP FUNCTION IF EXISTS public.test_mismatch_membership(uuid)")
-		_, _ = db.Exec("DROP TABLE IF EXISTS test_mismatch_tbl")
-	})
+	registered = true
+	waitForRegisteredTable(t, db, tableName)
 
 	handler := Routes(Config{
 		DB:        db,
@@ -945,10 +973,11 @@ func TestSchemaMismatch422Body(t *testing.T) {
 	defer srv.Close()
 
 	token := testToken("user-1")
-	client := connectClient(t, srv, token, "mismatch-client")
+	clientID := testClientID(t, "mismatch-client")
+	client := connectClient(t, srv, token, clientID)
 
 	status, body := doJSON(t, "POST", srv.URL+"/sync/push", token, map[string]any{
-		"client_id":         "mismatch-client",
+		"client_id":         clientID,
 		"client_generation": client.Generation,
 		"batch_id":          "018f2b5e-7c42-7a1d-9d31-8a95bd674301",
 		"schema":            map[string]any{"version": 999, "hash": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"},
@@ -979,16 +1008,7 @@ func TestSchemaMismatch422Body(t *testing.T) {
 }
 
 func TestPullSchemaMismatch422Body(t *testing.T) {
-	dbURL := os.Getenv("TEST_DATABASE_URL")
-	if dbURL == "" {
-		t.Fatal("TEST_DATABASE_URL is required")
-	}
-
-	db, err := sql.Open("pgx", dbURL)
-	if err != nil {
-		t.Fatalf("opening database: %v", err)
-	}
-	defer db.Close()
+	db := testsupport.OpenPostgres(t)
 
 	handler := Routes(Config{
 		DB:        db,
@@ -998,10 +1018,11 @@ func TestPullSchemaMismatch422Body(t *testing.T) {
 	defer srv.Close()
 
 	token := testToken("user-1")
-	client := connectClient(t, srv, token, "pull-mismatch-client")
+	clientID := testClientID(t, "pull-mismatch-client")
+	client := connectClient(t, srv, token, clientID)
 
 	status, body := doJSON(t, "POST", srv.URL+"/sync/pull", token, map[string]any{
-		"client_id":         "pull-mismatch-client",
+		"client_id":         clientID,
 		"client_generation": client.Generation,
 		"schema":            map[string]any{"version": 999, "hash": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"},
 		"scope_set_version": client.ScopeSetVersion,
@@ -1025,10 +1046,11 @@ func TestPullSchemaMismatch422Body(t *testing.T) {
 func TestRebuildUnsubscribedScopeReturns400(t *testing.T) {
 	srv := testServer(t)
 	token := testToken("user-1")
-	client := connectClient(t, srv, token, "rebuild-unsubscribed-client")
+	clientID := testClientID(t, "rebuild-unsubscribed-client")
+	client := connectClient(t, srv, token, clientID)
 
 	status, body := doJSON(t, "POST", srv.URL+"/sync/rebuild", token, map[string]any{
-		"client_id":         "rebuild-unsubscribed-client",
+		"client_id":         clientID,
 		"client_generation": client.Generation,
 		"schema":            client.Schema,
 		"scope":             "team:other",
@@ -1051,15 +1073,7 @@ func TestRebuildUnsubscribedScopeReturns400(t *testing.T) {
 }
 
 func TestClosedDatabaseError500(t *testing.T) {
-	dbURL := os.Getenv("TEST_DATABASE_URL")
-	if dbURL == "" {
-		t.Fatal("TEST_DATABASE_URL is required")
-	}
-
-	db, err := sql.Open("pgx", dbURL)
-	if err != nil {
-		t.Fatalf("opening database: %v", err)
-	}
+	db := testsupport.OpenPostgres(t)
 	_ = db.Close()
 
 	handler := Routes(Config{
@@ -1076,15 +1090,7 @@ func TestClosedDatabaseError500(t *testing.T) {
 }
 
 func TestTablesClosedDatabaseError500(t *testing.T) {
-	dbURL := os.Getenv("TEST_DATABASE_URL")
-	if dbURL == "" {
-		t.Fatal("TEST_DATABASE_URL is required")
-	}
-
-	db, err := sql.Open("pgx", dbURL)
-	if err != nil {
-		t.Fatalf("opening database: %v", err)
-	}
+	db := testsupport.OpenPostgres(t)
 	_ = db.Close()
 
 	handler := Routes(Config{
