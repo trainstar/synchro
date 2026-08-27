@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"slices"
 	"strings"
 	"syscall"
 	"testing"
@@ -170,6 +171,42 @@ func TestCleanupAcceptsUnchangedCandidateArtifacts(t *testing.T) {
 	}
 	if err := harness.cleanup(context.Background()); err != nil {
 		t.Fatalf("cleanup rejected unchanged candidate artifacts: %v", err)
+	}
+}
+
+func TestCleanupLifecycleDetachesWorkerBeforeTopologyDrop(t *testing.T) {
+	var order []string
+	operation := func(name string) func(context.Context) error {
+		return func(context.Context) error {
+			order = append(order, name)
+			return nil
+		}
+	}
+	if failures := runCleanupLifecycle(
+		context.Background(),
+		time.Second,
+		operation("stop adapter"),
+		operation("close database handles"),
+		operation("detach worker"),
+		operation("drop topology"),
+	); len(failures) != 0 {
+		t.Fatalf("cleanup lifecycle failures = %v", failures)
+	}
+	want := []string{"stop adapter", "close database handles", "detach worker", "drop topology"}
+	if !slices.Equal(order, want) {
+		t.Fatalf("cleanup lifecycle order = %v, want %v", order, want)
+	}
+}
+
+func TestDatabaseDropErrorPreservesPostgreSQLStateAndMessage(t *testing.T) {
+	cause := &pgconn.PgError{Code: "55006", Message: "database is being accessed by other users"}
+	err := databaseDropError(cause)
+	if !strings.Contains(err.Error(), "SQLSTATE 55006") || !strings.Contains(err.Error(), cause.Message) {
+		t.Fatalf("database drop error = %v", err)
+	}
+	var postgresError *pgconn.PgError
+	if !errors.As(err, &postgresError) || postgresError != cause {
+		t.Fatal("database drop error did not preserve PostgreSQL cause")
 	}
 }
 

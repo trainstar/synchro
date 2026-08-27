@@ -113,17 +113,21 @@ type Harness struct {
 	postgres  *ownedProcess
 	adapter   *ownedProcess
 
-	databaseCreated    bool
-	rolesCreated       bool
-	slotCreated        bool
-	publicationCreated bool
-	sourceReady        bool
-	restartCount       int
+	databaseCreated     bool
+	rolesCreated        bool
+	slotCreated         bool
+	publicationCreated  bool
+	sourceReady         bool
+	restartCount        int
+	workerDetachedState bool
 
 	closeMu      sync.Mutex
 	closeDone    chan struct{}
 	closeErr     error
 	closeStarted bool
+
+	databaseMu      sync.Mutex
+	databaseHandles []*sql.DB
 }
 
 // SourceExecutor permits source-table DML through one restricted NOLOGIN role.
@@ -1599,6 +1603,9 @@ func (h *Harness) openDatabase(ctx context.Context, database string, role RoleCr
 	}
 	databaseHandle.SetMaxOpenConns(4)
 	databaseHandle.SetMaxIdleConns(1)
+	h.databaseMu.Lock()
+	h.databaseHandles = append(h.databaseHandles, databaseHandle)
+	h.databaseMu.Unlock()
 	return databaseHandle, nil
 }
 
@@ -4762,13 +4769,14 @@ func (h *Harness) Close(ctx context.Context) error {
 }
 
 func (h *Harness) cleanup(ctx context.Context) error {
-	var failures []error
-	if err := runCleanupStage(ctx, processCleanupStageTimeout(h.config.ShutdownTimeout), h.stopAdapter); err != nil {
-		failures = append(failures, err)
-	}
-	if err := h.dropRunTopology(ctx); err != nil {
-		failures = append(failures, err)
-	}
+	failures := runCleanupLifecycle(
+		ctx,
+		processCleanupStageTimeout(h.config.ShutdownTimeout),
+		h.stopAdapter,
+		h.closeDatabaseHandles,
+		h.detachWorker,
+		h.dropRunTopology,
+	)
 	postmasterStopped := true
 	if err := runCleanupStage(ctx, processCleanupStageTimeout(h.config.ShutdownTimeout), h.stopPostgres); err != nil {
 		postmasterStopped = false
@@ -4816,6 +4824,16 @@ func (h *Harness) cleanup(ctx context.Context) error {
 		return errors.Join(failures...)
 	}
 	return nil
+}
+
+func runCleanupLifecycle(parent context.Context, timeout time.Duration, operations ...func(context.Context) error) []error {
+	var failures []error
+	for _, operation := range operations {
+		if err := runCleanupStage(parent, timeout, operation); err != nil {
+			failures = append(failures, err)
+		}
+	}
+	return failures
 }
 
 func (h *Harness) stopAdapter(ctx context.Context) error {
@@ -4896,6 +4914,56 @@ func (h *Harness) terminateRunConnections(ctx context.Context) error {
 	return nil
 }
 
+func (h *Harness) closeDatabaseHandles(ctx context.Context) error {
+	if ctx == nil {
+		return errors.New("database handle cleanup context is required")
+	}
+	h.databaseMu.Lock()
+	handles := h.databaseHandles
+	h.databaseHandles = nil
+	h.databaseMu.Unlock()
+	var failures []error
+	for _, handle := range handles {
+		if err := handle.Close(); err != nil {
+			failures = append(failures, fmt.Errorf("close harness database handle failed: %w", err))
+		}
+	}
+	if len(failures) != 0 {
+		return errors.Join(failures...)
+	}
+	return nil
+}
+
+func (h *Harness) detachWorker(ctx context.Context) error {
+	if h.postgres == nil || h.postgres.Exited() || h.workerDetached() {
+		return nil
+	}
+	database, err := h.openDatabase(ctx, "postgres", h.env.Admin, false)
+	if err != nil {
+		return errors.New("connect for worker detachment failed")
+	}
+	if _, err := database.ExecContext(ctx, "ALTER SYSTEM SET synchro.auto_start = 'off'"); err != nil {
+		_ = database.Close()
+		return fmt.Errorf("disable synchro WAL worker auto-start failed: %w", err)
+	}
+	if err := database.Close(); err != nil {
+		return fmt.Errorf("close worker detachment connection failed: %w", err)
+	}
+	if err := h.restartPostgres(ctx); err != nil {
+		return fmt.Errorf("restart PostgreSQL without synchro WAL worker failed: %w", err)
+	}
+	h.databaseMu.Lock()
+	h.workerDetachedState = true
+	h.databaseMu.Unlock()
+	return nil
+}
+
+func (h *Harness) workerDetached() bool {
+	h.databaseMu.Lock()
+	defer h.databaseMu.Unlock()
+	return h.workerDetachedState
+}
+
 func (h *Harness) dropPublication(ctx context.Context) error {
 	database, err := h.openDatabase(ctx, h.names.Database, h.env.Admin, false)
 	if err != nil {
@@ -4964,14 +5032,39 @@ func (h *Harness) dropReplicationSlot(ctx context.Context) error {
 func (h *Harness) dropDatabase(ctx context.Context) error {
 	database, err := h.openDatabase(ctx, "postgres", h.env.Admin, false)
 	if err != nil {
-		return errors.New("connect for database cleanup failed")
+		return fmt.Errorf("connect for database cleanup failed: %w", err)
 	}
 	defer database.Close()
-	if _, err := database.ExecContext(ctx, "DROP DATABASE "+quoteIdentifier(h.names.Database)+" WITH (FORCE)"); err != nil {
-		return errors.New("drop isolated PostgreSQL database failed")
+	if _, err := database.ExecContext(ctx, "DROP DATABASE "+quoteIdentifier(h.names.Database)); err != nil {
+		if !isActiveDatabaseError(err) {
+			return databaseDropError(err)
+		}
+		// FORCE is a last resort for sessions outside the harness pools that
+		// remain after the worker and every harness connection have stopped.
+		if _, forceErr := database.ExecContext(ctx, "DROP DATABASE "+quoteIdentifier(h.names.Database)+" WITH (FORCE)"); forceErr != nil {
+			return errors.Join(databaseDropError(err), databaseDropError(forceErr))
+		}
 	}
 	h.databaseCreated = false
 	return nil
+}
+
+func isActiveDatabaseError(err error) bool {
+	var postgresError *pgconn.PgError
+	return errors.As(err, &postgresError) && postgresError.Code == "55006"
+}
+
+func databaseDropError(err error) error {
+	var postgresError *pgconn.PgError
+	if errors.As(err, &postgresError) {
+		return fmt.Errorf(
+			"drop isolated PostgreSQL database failed: PostgreSQL error (SQLSTATE %s): %s: %w",
+			postgresError.Code,
+			postgresError.Message,
+			err,
+		)
+	}
+	return fmt.Errorf("drop isolated PostgreSQL database failed: %w", err)
 }
 
 func (h *Harness) dropRoles(ctx context.Context) error {
