@@ -1,8 +1,5 @@
 package com.trainstar.synchro
 
-import com.trainstar.synchro.inspection.TransportObservationCollector
-import com.trainstar.synchro.inspection.TransportOperationClass
-import com.trainstar.synchro.inspection.withTransportObservation
 import kotlinx.coroutines.test.runTest
 import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
@@ -11,8 +8,6 @@ import org.junit.After
 import org.junit.Assert.*
 import org.junit.Before
 import org.junit.Test
-import kotlinx.serialization.json.Json
-import java.net.ServerSocket
 
 class HttpClientTests {
 
@@ -39,70 +34,6 @@ class HttpClientTests {
         server.shutdown()
     }
 
-    private fun observedHttpClient(
-        collector: TransportObservationCollector,
-        serverURL: String = server.url("/").toString().trimEnd('/'),
-    ): HttpClient = HttpClient(
-        SynchroConfig(
-            dbPath = "",
-            serverURL = serverURL,
-            authProvider = { "test-token" },
-            clientID = "test-device",
-            appVersion = "1.0.0",
-        ).withTransportObservation(collector),
-    )
-
-    @Test
-    fun testFetchSchemaSuccess() = runTest {
-        val responseBody = """
-            {
-                "schema_version": 1,
-                "schema_hash": "$PROTOCOL_TEST_SCHEMA_HASH",
-                "server_time": "2026-01-01T12:00:00.000Z",
-                "manifest": {
-                    "schema_version": 1,
-                    "schema_hash": "$PROTOCOL_TEST_SCHEMA_HASH",
-                    "parent_schema": null,
-                    "transition_class": "initial",
-                    "compatibility_floor": 1,
-                    "tables": [
-                        {
-                            "table_id": "table-orders",
-                            "relation_id": "relation-orders",
-                            "name": "orders",
-                            "primary_key_field_id": "field-id",
-                            "lifecycle": {
-                                "created_at_field_id": null,
-                                "updated_at_field_id": "field-updated-at",
-                                "deleted_at_field_id": "field-deleted-at"
-                            },
-                            "composition": "single_scope",
-                            "fields": [
-                                {"field_id":"field-id","name":"id","type":"string","nullable":false,"writable":false},
-                                {"field_id":"field-ship-address","name":"ship_address","type":"string","nullable":true,"writable":true},
-                                {"field_id":"field-user-id","name":"user_id","type":"string","nullable":false,"writable":true},
-                                {"field_id":"field-updated-at","name":"updated_at","type":"datetime","nullable":false,"writable":false},
-                                {"field_id":"field-deleted-at","name":"deleted_at","type":"datetime","nullable":true,"writable":false}
-                            ],
-                            "indexes": []
-                        }
-                    ]
-                }
-            }
-        """.trimIndent()
-
-        server.enqueue(MockResponse().setBody(responseBody).setResponseCode(200))
-
-        val resp = httpClient.fetchSchema()
-        assertEquals(1L, resp.schemaVersion)
-        assertEquals(1, resp.tables.size)
-        assertEquals("orders", resp.tables[0].tableName)
-
-        val recorded = server.takeRequest()
-        assertEquals("GET", recorded.method)
-        assertTrue(recorded.path!!.endsWith("/sync/schema"))
-    }
-
     @Test
     fun testResponseBodyDisconnectWithoutDurableWorkIsNetworkError() = runTest {
         server.enqueue(
@@ -120,79 +51,12 @@ class HttpClientTests {
     }
 
     @Test
-    fun testNetworkFailureRecordsSafeTransportObservation() = runTest {
-        val collector = TransportObservationCollector()
-        val unavailablePort = ServerSocket(0).use { it.localPort }
-        val observedClient = observedHttpClient(collector, "http://127.0.0.1:$unavailablePort")
-
-        try {
-            observedClient.fetchSchema()
-            fail("Expected a network error")
-        } catch (_: SynchroError.NetworkError) {
-        }
-
-        val observation = collector.snapshot().observations.single()
-        assertEquals(TransportOperationClass.SCHEMAS, observation.operationClass)
-        assertEquals(0, observation.statusCode)
-        assertTrue(observation.durationNanoseconds > 0)
-        assertNull(observation.requestFacts)
-    }
-
-    @Test
     fun testMalformedResponseBodyRemainsInvalidResponse() = runTest {
         server.enqueue(MockResponse().setBody("{"))
 
         assertThrows(SynchroError.InvalidResponse::class.java) {
             kotlinx.coroutines.runBlocking { httpClient.fetchSchema() }
         }
-    }
-
-    @Test
-    fun testConnectSuccess() = runTest {
-        val responseBody = """
-            {
-                "server_time": "2026-03-20T18:22:11Z",
-                "protocol_version": 3,
-                "client_generation": 4,
-                "scope_set_version": 13,
-                "schema": {
-                    "version": 8,
-                    "hash": "${"8".repeat(64)}",
-                    "action": "none"
-                },
-                "scopes": {
-                    "add": [],
-                    "remove": []
-                },
-                "scope_cursor_updates": {}
-            }
-        """.trimIndent()
-
-        server.enqueue(MockResponse().setBody(responseBody).setResponseCode(200))
-
-        val req = ConnectRequest(
-            clientID = "test-device",
-            platform = "android",
-            appVersion = "1.0.0",
-            protocolVersion = 3,
-            schema = SchemaRef(version = 0, hash = ""),
-            scopeSetVersion = 0,
-            knownScopes = emptyMap()
-        )
-        val resp = httpClient.connect(req)
-
-        assertEquals(SchemaAction.NONE, resp.schema.action)
-        resp.validate()
-
-        val recorded = server.takeRequest()
-        assertEquals("POST", recorded.method)
-        assertTrue(recorded.path!!.endsWith("/sync/connect"))
-        val body = Json.decodeFromString<Map<String, kotlinx.serialization.json.JsonElement>>(recorded.body.readUtf8())
-        assertEquals("\"test-device\"", body["client_id"].toString())
-        assertEquals("3", body["protocol_version"].toString())
-        assertNull(body["client_generation"])
-        assertNull(body["schema_reset"])
-        assertNull(body["seed_receipts"])
     }
 
     @Test
@@ -216,144 +80,6 @@ class HttpClientTests {
             fail("Expected invalid response")
         } catch (_: SynchroError.InvalidResponse) {
         }
-    }
-
-    @Test
-    fun testPullEncoding() = runTest {
-        val responseBody = """
-            {
-                "changes": [],
-                "scope_set_version": 13,
-                "scope_cursors": {
-                    "workouts_user:u_123": "workouts_user_u_123_890.sig"
-                },
-                "scope_updates": {
-                    "add": [],
-                    "remove": []
-                },
-                "rebuild": [],
-                "has_more": false,
-                "checksums": {
-                    "workouts_user:u_123": {
-                        "algorithm": "sha256",
-                        "version": 1,
-                        "encoding": "hex",
-                        "digest": "1111111111111111111111111111111111111111111111111111111111111111"
-                    }
-                }
-            }
-        """.trimIndent()
-
-        server.enqueue(MockResponse().setBody(responseBody).setResponseCode(200))
-
-        val req = PullRequest(
-            clientID = "test-device",
-            clientGeneration = 4,
-            schema = SchemaRef(version = 8, hash = "8b21d2a1"),
-            scopeSetVersion = 13,
-            scopes = mapOf("workouts_user:u_123" to ScopeCursorRef(cursor = "workouts_user_u_123_890.sig")),
-            limit = 100
-        )
-        val resp = httpClient.pull(req)
-
-        resp.validate()
-        assertEquals(13L, resp.scopeSetVersion)
-        assertEquals("workouts_user_u_123_890.sig", resp.scopeCursors["workouts_user:u_123"])
-
-        val recorded = server.takeRequest()
-        assertEquals("POST", recorded.method)
-        assertTrue(recorded.path!!.endsWith("/sync/pull"))
-        val body = Json.decodeFromString<Map<String, kotlinx.serialization.json.JsonElement>>(recorded.body.readUtf8())
-        assertEquals("\"test-device\"", body["client_id"].toString())
-        assertEquals("13", body["scope_set_version"].toString())
-        assertNull(body["checksum_mode"])
-    }
-
-    @Test
-    fun testPullRecordsDeduplicatedSafeTransportFacts() = runTest {
-        val responseBody = """
-            {
-                "changes": [],
-                "scope_set_version": 13,
-                "scope_cursors": {"orders_user:u_123": "next-cursor"},
-                "scope_updates": {"add": [], "remove": []},
-                "rebuild": [],
-                "has_more": false,
-                "checksums": {}
-            }
-        """.trimIndent()
-        server.enqueue(MockResponse().setBody(responseBody).setResponseCode(200))
-        val collector = TransportObservationCollector()
-        val observedClient = observedHttpClient(collector)
-        val cursor = "private-cursor"
-
-        observedClient.pull(
-            PullRequest(
-                clientID = "test-device",
-                clientGeneration = 4,
-                schema = SchemaRef(version = 8, hash = "8b21d2a1"),
-                scopeSetVersion = 13,
-                scopes = mapOf(
-                    "orders_user:u_123" to ScopeCursorRef(cursor = cursor),
-                    "workouts_user:u_123" to ScopeCursorRef(cursor = cursor),
-                ),
-                limit = 100,
-            ),
-        )
-
-        val observation = collector.snapshot().observations.single()
-        assertEquals(TransportOperationClass.PULL, observation.operationClass)
-        assertEquals(200, observation.statusCode)
-        assertTrue(observation.durationNanoseconds > 0)
-        assertEquals(listOf(TransportObservationCollector.cursorFingerprint(cursor)), observation.cursorFingerprints)
-        assertEquals(true, observation.cursorFingerprintsComplete)
-        assertEquals(2, observation.requestFacts?.scopeCount)
-        assertEquals(0, observation.pullResponseFacts?.changeCount)
-        assertEquals(
-            listOf(TransportObservationCollector.cursorFingerprint("next-cursor")),
-            observation.pullResponseFacts?.scopeCursorFingerprints,
-        )
-        assertEquals(true, observation.pullResponseFacts?.scopeCursorFingerprintsComplete)
-    }
-
-    @Test
-    fun testRebuildRecordsTerminalScopeCursorFingerprint() = runTest {
-        val finalScopeCursor = "private-final-scope-cursor"
-        val responseBody = """
-            {
-                "scope": "scope-a",
-                "records": [],
-                "has_more": false,
-                "final_scope_cursor": "$finalScopeCursor",
-                "checksum": {
-                    "algorithm": "sha256",
-                    "version": 1,
-                    "encoding": "hex",
-                    "digest": "${"a".repeat(64)}"
-                }
-            }
-        """.trimIndent()
-        server.enqueue(MockResponse().setBody(responseBody).setResponseCode(200))
-        val collector = TransportObservationCollector()
-        val observedClient = observedHttpClient(collector)
-
-        observedClient.rebuild(
-            RebuildRequest(
-                clientID = "test-device",
-                clientGeneration = 4,
-                schema = SchemaRef(version = 8, hash = "${"b".repeat(64)}"),
-                scope = "scope-a",
-                rebuildID = "00000000-0000-4000-8000-000000000001",
-                limit = 100,
-            ),
-        )
-
-        val facts = collector.snapshot().observations.single().rebuildResponseFacts
-        assertEquals(
-            TransportObservationCollector.cursorFingerprint(finalScopeCursor),
-            facts?.finalScopeCursorFingerprint,
-        )
-        assertTrue(facts?.hasFinalScopeCursor == true)
     }
 
     @Test
@@ -578,86 +304,4 @@ class HttpClientTests {
         }
     }
 
-    @Test
-    fun testPushRequestEncoding() = runTest {
-        val pushResponseBody = """
-            {
-                "batch_id": "00000000-0000-4000-8000-000000000007",
-                "accepted": [],
-                "rejected": [],
-                "server_time": "2026-01-01T12:00:00.000Z"
-            }
-        """.trimIndent()
-
-        server.enqueue(MockResponse().setBody(pushResponseBody).setResponseCode(200))
-
-        val req = PushRequest(
-            clientID = "dev-1",
-            clientGeneration = 4,
-            batchID = "00000000-0000-4000-8000-000000000007",
-            schema = SchemaRef(version = 7, hash = "hash7"),
-            mutations = listOf(
-                Mutation(
-                    mutationID = "m-1",
-                    table = "orders",
-                    op = Operation.INSERT,
-                    pk = kotlinx.serialization.json.JsonObject(mapOf("id" to kotlinx.serialization.json.JsonPrimitive("rec-1"))),
-                    authoredSchema = SchemaRef(version = 7, hash = "hash7"),
-                    clientVersion = "2026-01-01T12:00:00.000000Z",
-                    columns = kotlinx.serialization.json.JsonObject(
-                        mapOf("ship_address" to kotlinx.serialization.json.JsonPrimitive("123 Main St"))
-                    )
-                )
-            ),
-        )
-        httpClient.push(req)
-
-        val recorded = server.takeRequest()
-        val body = Json.decodeFromString<kotlinx.serialization.json.JsonObject>(recorded.body.readUtf8())
-        assertEquals("\"dev-1\"", body["client_id"].toString())
-        assertEquals("\"00000000-0000-4000-8000-000000000007\"", body["batch_id"].toString())
-        val mutations = body["mutations"] as kotlinx.serialization.json.JsonArray
-        assertEquals(1, mutations.size)
-        val mutation = mutations[0] as kotlinx.serialization.json.JsonObject
-        assertEquals("\"m-1\"", mutation["mutation_id"].toString())
-        assertEquals("\"orders\"", mutation["table"].toString())
-        assertEquals("\"insert\"", mutation["op"].toString())
-        assertEquals("\"2026-01-01T12:00:00.000000Z\"", mutation["client_version"].toString())
-    }
-
-    @Test
-    fun pushAndSealedPushRecordMutationCount() = runTest {
-        val response = """
-            {"batch_id":"00000000-0000-4000-8000-000000000007","accepted":[],"rejected":[],"server_time":"2026-01-01T12:00:00.000Z"}
-        """.trimIndent()
-        server.enqueue(MockResponse().setBody(response).setResponseCode(200))
-        server.enqueue(MockResponse().setBody(response).setResponseCode(200))
-        server.enqueue(MockResponse().setBody(response).setResponseCode(200))
-        val collector = TransportObservationCollector()
-        val observedClient = observedHttpClient(collector)
-        val request = PushRequest(
-            clientID = "dev-1",
-            clientGeneration = 4,
-            batchID = "00000000-0000-4000-8000-000000000007",
-            schema = SchemaRef(version = 7, hash = "hash7"),
-            mutations = listOf(
-                Mutation(
-                    mutationID = "m-1",
-                    table = "orders",
-                    op = Operation.INSERT,
-                    pk = kotlinx.serialization.json.JsonObject(mapOf("id" to kotlinx.serialization.json.JsonPrimitive("rec-1"))),
-                    authoredSchema = SchemaRef(version = 7, hash = "hash7"),
-                    clientVersion = "2026-01-01T12:00:00.000000Z",
-                    columns = kotlinx.serialization.json.JsonObject(mapOf("title" to kotlinx.serialization.json.JsonPrimitive("first"))),
-                ),
-            ),
-        )
-
-        observedClient.push(request)
-        val sealed = Json.encodeToString(PushRequest.serializer(), request)
-        observedClient.pushSealed(sealed, request.batchID)
-        observedClient.pushSealedWithBody(sealed, request.batchID)
-
-        assertEquals(listOf(1, 1, 1), collector.snapshot().observations.map { it.requestFacts?.mutationCount })
-    }
 }

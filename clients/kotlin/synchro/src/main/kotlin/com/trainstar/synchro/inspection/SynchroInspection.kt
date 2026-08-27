@@ -2,32 +2,28 @@ package com.trainstar.synchro.inspection
 
 import com.trainstar.synchro.SynchroClient
 import com.trainstar.synchro.SynchroConfig
+import com.trainstar.synchro.SchemaRef
 
+@SynchroProofApi
 fun SynchroConfig.withTransportObservation(collector: TransportObservationCollector): SynchroConfig =
     withTransportObservationCollector(collector)
 
 /** Shipped inspection access that is outside the primary client API. */
+@SynchroProofApi
 class SynchroInspection(private val client: SynchroClient) {
-    fun schema(): SchemaInspection = client.inspectSchema()
+    fun currentSchema(): SchemaRef? = client.inspectCurrentSchema()
 
-    fun scopes(): List<ScopeInspection> = client.inspectScopes()
+    fun scopeStates(): List<ScopeStateInspection> = client.inspectScopeStates()
 
     fun scopeRows(): List<ScopeRowInspection> = client.inspectScopeRows()
 
-    fun rowMetadata(): List<RowMetadataInspection> = client.inspectRowMetadata()
+    fun captureState(maximumRecords: Int): ClientStateCaptureInspection =
+        client.inspectClientStateCapture(maximumRecords)
 
-    fun checkpoints(): List<CheckpointInspection> = client.inspectCheckpoints()
+    fun rowMetadata(tableName: String, recordID: String): RowMetadataInspection? =
+        client.inspectRowMetadata(tableName, recordID)
 
-    fun provenance(): List<ProvenanceInspection> = client.inspectProvenance()
-
-    fun provenanceMaintenanceWork(): ProvenanceMaintenanceWorkInspection =
-        client.inspectProvenanceMaintenanceWork()
-
-    fun clientState(): ClientStateInspection = client.inspectClientState()
-
-    fun clientStateCounts(): ClientStateCountsInspection = client.inspectClientStateCounts()
-
-    fun rebuildState(): RebuildStateInspection = client.inspectRebuildState()
+    fun rebuildAttempts(): List<RebuildAttemptInspection> = client.inspectRebuildAttempts()
 
     fun rebuildReceipts(): List<RebuildReceiptInspection> = client.inspectRebuildReceipts()
 }

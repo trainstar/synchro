@@ -1,11 +1,14 @@
+@file:OptIn(com.trainstar.synchro.inspection.SynchroProofApi::class)
+
 package com.trainstar.synchro
 
 import android.content.Context
 import androidx.test.core.app.ApplicationProvider
 import com.trainstar.synchro.inspection.RebuildAttemptInspection
 import com.trainstar.synchro.inspection.RebuildReceiptInspection
-import com.trainstar.synchro.inspection.ScopeInspection
 import com.trainstar.synchro.inspection.ScopeRowInspection
+import com.trainstar.synchro.inspection.ScopeStateInspection
+import com.trainstar.synchro.inspection.SynchroInspection
 import com.trainstar.synchro.inspection.TransportObservationCollector
 import java.util.UUID
 import kotlinx.serialization.decodeFromString
@@ -214,7 +217,7 @@ class InspectionTests {
     }
 
     @Test
-    fun aggregateClientStateInspectionReturnsBoundedDurableState() {
+    fun atomicClientStateCaptureReturnsBoundedDurableStateAndExactCounts() {
         val config = prepareClientConfig()
         val rebuildID = "00000000-0000-4000-8000-000000000001"
         withInternalDatabase(config) { database ->
@@ -253,17 +256,18 @@ class InspectionTests {
 
         val client = SynchroClient(config, context)
         try {
-            val inspection = client.inspectClientState(limit = 1)
+            val proof = SynchroInspection(client)
+            val inspection = proof.captureState(maximumRecords = 1)
 
             assertEquals(SchemaRef(1, PROTOCOL_TEST_SCHEMA_HASH), inspection.schema)
             assertEquals(
                 listOf(
-                    ScopeInspection(
+                    ScopeStateInspection(
                         scopeID = "orders:user-1",
                         cursor = "cursor-1",
                         checksum = "scope-checksum",
-                        generation = 3,
                         localChecksum = "local-checksum",
+                        generation = 3,
                     ),
                 ),
                 inspection.scopeStates,
@@ -278,7 +282,8 @@ class InspectionTests {
                         scopeID = "orders:user-1",
                         rebuildID = rebuildID,
                         clientGeneration = 4,
-                        schema = SchemaRef(1, PROTOCOL_TEST_SCHEMA_HASH),
+                        schemaVersion = 1,
+                        schemaHash = PROTOCOL_TEST_SCHEMA_HASH,
                         generation = 3,
                         cursor = "rebuild-page-2",
                         pageLimit = 100,
@@ -287,24 +292,57 @@ class InspectionTests {
                 inspection.rebuildAttempts,
             )
             assertEquals(0L, inspection.provenanceMaintenanceWorkCursor)
-            val counts = client.inspectClientStateCounts()
-            assertEquals(inspection.schema, counts.schema)
-            assertEquals(1, counts.applicationRowCount)
-            assertEquals(0, counts.mutationLedgerCount)
-            assertEquals(0, counts.mutationOutcomeCount)
-            assertEquals(0, counts.sealedBatchCount)
-            assertEquals(0, counts.rejectedMutationCount)
-            assertEquals(1, counts.scopeStateCount)
-            assertEquals(1, counts.scopeRowCount)
-            assertEquals(1, counts.provenanceCount)
-            assertEquals(0, counts.rowMetadataCount)
-            assertEquals(1, counts.rebuildAttemptCount)
-            assertEquals(0, counts.rebuildReceiptCount)
-            assertEquals(0L, counts.provenanceMaintenanceWorkCursor)
-            assertEquals(inspection.schema, client.inspectSchema().currentSchema)
-            assertEquals(inspection.scopeStates, client.inspectScopes(limit = 1))
-            assertEquals(inspection.scopeRows, client.inspectScopeRows(limit = 1))
-            assertEquals(inspection.rebuildAttempts, client.inspectRebuildState(limit = 1).attempts)
+            assertFalse(inspection.scopeStatesTruncated)
+            assertFalse(inspection.scopeRowsTruncated)
+            assertFalse(inspection.rebuildAttemptsTruncated)
+            assertFalse(inspection.rebuildReceiptsTruncated)
+            assertFalse(inspection.rowMetadataTruncated)
+            assertFalse(inspection.overflowed)
+            assertEquals(0, inspection.applicationRowCount)
+            assertEquals(0, inspection.mutationLedgerCount)
+            assertEquals(0, inspection.mutationOutcomeCount)
+            assertEquals(0, inspection.sealedBatchCount)
+            assertEquals(0, inspection.rejectedMutationCount)
+            assertEquals(1, inspection.scopeStateCount)
+            assertEquals(1, inspection.scopeRowCount)
+            assertEquals(1, inspection.provenanceCount)
+            assertEquals(0, inspection.rowMetadataCount)
+            assertEquals(1, inspection.rebuildAttemptCount)
+            assertEquals(0, inspection.rebuildReceiptCount)
+            assertEquals(inspection.schema, proof.currentSchema())
+            assertEquals(inspection.scopeStates, proof.scopeStates())
+            assertEquals(inspection.scopeRows, proof.scopeRows())
+            assertEquals(inspection.rebuildAttempts, proof.rebuildAttempts())
+        } finally {
+            client.close()
+            context.deleteDatabase(config.dbPath)
+        }
+    }
+
+    @Test
+    fun atomicClientStateCaptureIncludesUnscopedMetadataAndReportsTruncation() {
+        val config = prepareClientConfig()
+        withInternalDatabase(config) { database ->
+            database.writeTransaction { db ->
+                SynchroMeta.upsertRowVersion(db, "orders", "unscoped-a", "version-a", null)
+                SynchroMeta.upsertRowVersion(db, "orders", "unscoped-b", "version-b", null)
+            }
+        }
+
+        val client = SynchroClient(config, context)
+        try {
+            val proof = SynchroInspection(client)
+            val bounded = proof.captureState(maximumRecords = 1)
+            assertTrue(bounded.scopeRows.isEmpty())
+            assertEquals(2, bounded.rowMetadataCount)
+            assertEquals(listOf("unscoped-a"), bounded.rowMetadata.map { it.recordID })
+            assertTrue(bounded.rowMetadataTruncated)
+            assertTrue(bounded.overflowed)
+
+            val complete = proof.captureState(maximumRecords = 2)
+            assertEquals(listOf("unscoped-a", "unscoped-b"), complete.rowMetadata.map { it.recordID })
+            assertFalse(complete.rowMetadataTruncated)
+            assertFalse(complete.overflowed)
         } finally {
             client.close()
             context.deleteDatabase(config.dbPath)
@@ -315,7 +353,7 @@ class InspectionTests {
     fun rebuildReceiptProofAcceptsValidEmptyTerminalReceipt() {
         val fixture = makeRebuildReceiptFixture(recordCount = 0)
         try {
-            val proof = fixture.client.inspectRebuildReceipts().single().let(::rebuildReceiptProof)
+            val proof = SynchroInspection(fixture.client).rebuildReceipts().single().let(::rebuildReceiptProof)
 
             assertEquals(TransportObservationCollector.cursorFingerprint(PROOF_REBUILD_ID), proof.rebuildIDFingerprint)
             assertEquals(1, proof.pageCount)
@@ -334,7 +372,9 @@ class InspectionTests {
     fun rebuildReceiptProofAcceptsValidTwoPageReceipts() {
         val fixture = makeRebuildReceiptFixture(recordCount = 3)
         try {
-            val proof = fixture.client.inspectRebuildReceipts().single().let(::rebuildReceiptProof)
+            val inspection = SynchroInspection(fixture.client)
+            val proof = inspection.rebuildReceipts().single().let(::rebuildReceiptProof)
+            val capture = inspection.captureState(maximumRecords = 1)
 
             assertEquals(TransportObservationCollector.cursorFingerprint(PROOF_REBUILD_ID), proof.rebuildIDFingerprint)
             assertEquals(2, proof.pageCount)
@@ -344,6 +384,9 @@ class InspectionTests {
             assertTrue(proof.rowChecksumsValid)
             assertTrue(proof.scopeChecksumValid)
             assertTrue(proof.finalChecksumMatchesLocal)
+            assertEquals(2, capture.rebuildReceiptCount)
+            assertEquals(1, capture.rebuildReceipts.size)
+            assertFalse(capture.rebuildReceiptsTruncated)
         } finally {
             closeRebuildReceiptFixture(fixture)
         }
@@ -358,7 +401,7 @@ class InspectionTests {
             }
 
             assertThrows(SynchroError.InvalidResponse::class.java) {
-                fixture.client.inspectRebuildReceipts()
+                SynchroInspection(fixture.client).rebuildReceipts()
             }
         } finally {
             closeRebuildReceiptFixture(fixture)
@@ -371,7 +414,7 @@ class InspectionTests {
         try {
             updateReceiptResponse(fixture.config, null) { it.copy(cursor = "unconsumed") }
 
-            val proof = fixture.client.inspectRebuildReceipts().single().let(::rebuildReceiptProof)
+            val proof = SynchroInspection(fixture.client).rebuildReceipts().single().let(::rebuildReceiptProof)
             assertFalse(proof.requestChainValid)
             assertTrue(proof.recordsInCanonicalOrder)
             assertTrue(proof.rowChecksumsValid)
@@ -388,7 +431,7 @@ class InspectionTests {
                 response.copy(records = response.records.reversed())
             }
 
-            val proof = fixture.client.inspectRebuildReceipts().single().let(::rebuildReceiptProof)
+            val proof = SynchroInspection(fixture.client).rebuildReceipts().single().let(::rebuildReceiptProof)
             assertTrue(proof.requestChainValid)
             assertFalse(proof.recordsInCanonicalOrder)
             assertTrue(proof.rowChecksumsValid)
@@ -413,7 +456,7 @@ class InspectionTests {
                 )
             }
 
-            val proof = fixture.client.inspectRebuildReceipts().single().let(::rebuildReceiptProof)
+            val proof = SynchroInspection(fixture.client).rebuildReceipts().single().let(::rebuildReceiptProof)
             assertTrue(proof.requestChainValid)
             assertTrue(proof.recordsInCanonicalOrder)
             assertFalse(proof.rowChecksumsValid)
@@ -445,7 +488,7 @@ class InspectionTests {
                 }
             }
 
-            val proof = fixture.client.inspectRebuildReceipts().single().let(::rebuildReceiptProof)
+            val proof = SynchroInspection(fixture.client).rebuildReceipts().single().let(::rebuildReceiptProof)
             assertTrue(proof.requestChainValid)
             assertTrue(proof.recordsInCanonicalOrder)
             assertTrue(proof.rowChecksumsValid)

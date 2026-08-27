@@ -1,7 +1,5 @@
 package com.trainstar.synchro
 
-import android.database.sqlite.SQLiteDatabase
-
 internal const val RETRYABLE_429_ERROR_JSON =
     "{\"error\":{\"code\":\"retry_later\",\"message\":\"retry later\",\"retryable\":true}}"
 internal const val RETRYABLE_503_ERROR_JSON =
@@ -29,27 +27,6 @@ internal fun installTestSchema(
 
 internal fun installTestSchema(database: SynchroDatabase, schema: SchemaResponse) {
     installTestSchema(database, schema.schemaVersion, schema.schemaHash, schema.localTables())
-}
-
-internal fun createTestSyncedTablesInTransaction(db: SQLiteDatabase, tables: List<LocalSchemaTable>) {
-    for (table in tables) {
-        db.execSQL(SQLiteSchema.generateCreateTableSQL(table))
-        SQLiteSchema.generateCDCTriggers(table).forEach(db::execSQL)
-        table.indexes.forEach { index ->
-            db.execSQL(SQLiteSchema.generateCreateIndexSQL(table, index))
-        }
-    }
-}
-
-internal fun dropTestSyncedTables(database: SynchroDatabase, tables: List<LocalSchemaTable>) {
-    database.writeTransaction { db ->
-        for (table in tables.reversed()) {
-            SQLiteSchema.expectedCDCTriggerSQL(table).keys.forEach { trigger ->
-                db.execSQL("DROP TRIGGER IF EXISTS ${SQLiteHelpers.quoteIdentifier(trigger)}")
-            }
-            db.execSQL("DROP TABLE IF EXISTS ${SQLiteHelpers.quoteIdentifier(table.tableName)}")
-        }
-    }
 }
 
 internal fun SynchroDatabase.execute(sql: String, params: Array<out Any?>? = null): ExecResult =

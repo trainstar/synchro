@@ -1,3 +1,5 @@
+@file:OptIn(com.trainstar.synchro.inspection.SynchroProofApi::class)
+
 package com.trainstar.synchro
 
 import android.content.Context
@@ -5,19 +7,12 @@ import android.app.Activity
 import android.app.Application
 import android.database.sqlite.SQLiteDatabase
 import android.os.Bundle
-import com.trainstar.synchro.inspection.CheckpointInspection
-import com.trainstar.synchro.inspection.ClientStateCountsInspection
-import com.trainstar.synchro.inspection.ClientStateInspection
-import com.trainstar.synchro.inspection.ProvenanceInspection
-import com.trainstar.synchro.inspection.ProvenanceMaintenanceWorkInspection
+import com.trainstar.synchro.inspection.ClientStateCaptureInspection
 import com.trainstar.synchro.inspection.RebuildAttemptInspection
-import com.trainstar.synchro.inspection.RebuildPageReceiptInspection
 import com.trainstar.synchro.inspection.RebuildReceiptInspection
-import com.trainstar.synchro.inspection.RebuildStateInspection
 import com.trainstar.synchro.inspection.RowMetadataInspection
-import com.trainstar.synchro.inspection.SchemaInspection
-import com.trainstar.synchro.inspection.ScopeInspection
 import com.trainstar.synchro.inspection.ScopeRowInspection
+import com.trainstar.synchro.inspection.ScopeStateInspection
 import com.trainstar.synchro.inspection.TransportObservationCollector
 import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.decodeFromString
@@ -172,96 +167,126 @@ class SynchroClient(private val config: SynchroConfig, context: Context) {
     }
 
     /** Returns the durable schema reference without exposing reserved SQLite state. */
-    internal fun inspectSchema(): SchemaInspection = database.readTransaction(::inspectSchema)
+    internal fun inspectCurrentSchema(): SchemaRef? = database.readTransaction(::inspectCurrentSchema)
 
-    private fun inspectSchema(db: SQLiteDatabase): SchemaInspection {
+    private fun inspectCurrentSchema(db: SQLiteDatabase): SchemaRef? {
         val version = SynchroMeta.getInt64(db, MetaKey.SCHEMA_VERSION)
         val hash = SynchroMeta.get(db, MetaKey.SCHEMA_HASH).orEmpty()
         return when {
-            version == 0L && hash.isEmpty() -> SchemaInspection(null)
+            version == 0L && hash.isEmpty() -> null
             version > 0L && hash.matches(SCHEMA_HASH) -> {
                 val schema = SchemaRef(version, hash)
                 schema.validate()
-                SchemaInspection(schema)
+                schema
             }
             else -> throw SynchroError.InvalidResponse("durable schema inspection is invalid")
         }
     }
 
     /** Returns at most [limit] durable scopes, or fails when that bound is exceeded. */
-    internal fun inspectScopes(limit: Int = MAXIMUM_INSPECTION_RECORDS): List<ScopeInspection> =
-        database.readTransaction { db -> inspectScopes(db, limit) }
+    internal fun inspectScopeStates(limit: Int = MAXIMUM_INSPECTION_RECORDS): List<ScopeStateInspection> =
+        database.readTransaction { db -> inspectScopeStates(db, limit) }
 
-    private fun inspectScopes(db: SQLiteDatabase, limit: Int): List<ScopeInspection> =
-        SynchroMeta.listScopes(db, limit).map {
-            ScopeInspection(it.scopeID, it.cursor, it.checksum, it.generation, it.localChecksum)
+    private fun inspectScopeStates(
+        db: SQLiteDatabase,
+        limit: Int,
+        truncate: Boolean = false,
+    ): List<ScopeStateInspection> =
+        SynchroMeta.listScopes(db, limit, truncate).map {
+            ScopeStateInspection(it.scopeID, it.cursor, it.checksum, it.localChecksum, it.generation)
         }
 
     /** Returns at most [limit] durable scope-row memberships. */
     internal fun inspectScopeRows(limit: Int = MAXIMUM_INSPECTION_RECORDS): List<ScopeRowInspection> =
         database.readTransaction { db -> inspectScopeRows(db, limit) }
 
-    private fun inspectScopeRows(db: SQLiteDatabase, limit: Int): List<ScopeRowInspection> =
-        SynchroMeta.listScopeRows(db, limit).map {
+    private fun inspectScopeRows(
+        db: SQLiteDatabase,
+        limit: Int,
+        truncate: Boolean = false,
+    ): List<ScopeRowInspection> =
+        SynchroMeta.listScopeRows(db, limit, truncate).map {
             ScopeRowInspection(it.scopeID, it.tableName, it.recordID, it.checksum, it.generation)
         }
 
-    /** Returns at most [limit] durable row-version records. */
-    internal fun inspectRowMetadata(limit: Int = MAXIMUM_INSPECTION_RECORDS): List<RowMetadataInspection> =
+    /** Returns server metadata for one application-row identity. */
+    internal fun inspectRowMetadata(tableName: String, recordID: String): RowMetadataInspection? =
         database.readTransaction { db ->
-            SynchroMeta.listRowMetadata(db, limit).map {
-                RowMetadataInspection(it.tableName, it.recordID, it.serverVersion, it.rowChecksumJSON)
-            }
-        }
-
-    /** Returns at most [limit] scope checkpoints. */
-    internal fun inspectCheckpoints(limit: Int = MAXIMUM_INSPECTION_RECORDS): List<CheckpointInspection> =
-        database.readTransaction { db ->
-            SynchroMeta.listScopes(db, limit).map {
-                CheckpointInspection(it.scopeID, it.cursor, it.checksum, it.localChecksum)
-            }
-        }
-
-    /** Returns at most [limit] row-to-scope provenance records. */
-    internal fun inspectProvenance(limit: Int = MAXIMUM_INSPECTION_RECORDS): List<ProvenanceInspection> =
-        database.readTransaction { db ->
-            val rows = SynchroMeta.listScopeRows(db, limit)
-            rows.groupBy { it.tableName to it.recordID }.map { (key, members) ->
-                ProvenanceInspection(
-                    tableName = key.first,
-                    recordID = key.second,
-                    scopeIDs = members.map { it.scopeID }.sorted(),
-                    serverVersion = SynchroMeta.getRowVersion(db, key.first, key.second),
+            db.rawQuery(
+                """
+                SELECT table_name, record_id, server_version, row_checksum
+                FROM _synchro_row_versions
+                WHERE table_name = ? AND record_id = ?
+                """.trimIndent(),
+                arrayOf(tableName, recordID),
+            ).use { cursor ->
+                if (!cursor.moveToFirst()) return@readTransaction null
+                RowMetadataInspection(
+                    tableName = cursor.getString(0),
+                    recordID = cursor.getString(1),
+                    serverVersion = cursor.getString(2),
+                    rowChecksum = if (cursor.isNull(3)) null else cursor.getString(3),
                 )
-            }.sortedWith(compareBy<ProvenanceInspection> { it.tableName }.thenBy { it.recordID })
+            }
         }
 
-    /** Returns committed scope-row maintenance work for this client process. */
-    internal fun inspectProvenanceMaintenanceWork(): ProvenanceMaintenanceWorkInspection =
-        database.inspectProvenanceMaintenanceWork()
-
-    /** Returns one bounded snapshot of client state and its maintenance-work cursor. */
-    internal fun inspectClientState(limit: Int = MAXIMUM_INSPECTION_RECORDS): ClientStateInspection =
-        database.stateInspectionTransaction { db, provenanceMaintenanceWork ->
-            ClientStateInspection(
-                schema = inspectSchema(db).currentSchema,
-                scopeStates = inspectScopes(db, limit),
-                scopeRows = inspectScopeRows(db, limit),
-                rebuildAttempts = inspectRebuildAttempts(db, limit),
-                provenanceMaintenanceWorkCursor = provenanceMaintenanceWork.cursor,
+    /** Returns one bounded atomic capture with exact durable-state counts. */
+    internal fun inspectClientStateCapture(maximumRecords: Int): ClientStateCaptureInspection {
+        require(maximumRecords in 0 until Int.MAX_VALUE) { "inspection record limit is invalid" }
+        return database.stateInspectionTransaction { db, provenanceMaintenanceWork ->
+            val scopeStateCount = inspectionCount(db, "SELECT COUNT(*) FROM _synchro_scopes")
+            val scopeRowCount = inspectionCount(db, "SELECT COUNT(*) FROM _synchro_scope_rows")
+            val rebuildAttemptCount = inspectionCount(db, "SELECT COUNT(*) FROM _synchro_rebuild_attempts")
+            val rebuildReceiptCount = inspectionCount(db, "SELECT COUNT(*) FROM _synchro_rebuild_page_receipts")
+            val rebuildReceiptGroupCount = inspectionCount(
+                db,
+                "SELECT COUNT(*) FROM (SELECT scope_id, rebuild_id FROM _synchro_rebuild_page_receipts GROUP BY scope_id, rebuild_id)",
             )
-        }
-
-    /** Returns exact counts without materializing unbounded durable records. */
-    internal fun inspectClientStateCounts(): ClientStateCountsInspection =
-        database.stateInspectionTransaction { db, provenanceMaintenanceWork ->
+            val rowMetadataCount = inspectionCount(db, "SELECT COUNT(*) FROM _synchro_row_versions")
+            val scopeStates = if (maximumRecords == 0) emptyList() else {
+                inspectScopeStates(db, maximumRecords, truncate = true)
+            }
+            val scopeRows = if (maximumRecords == 0) emptyList() else {
+                inspectScopeRows(db, maximumRecords, truncate = true)
+            }
+            val rebuildAttempts = if (maximumRecords == 0) emptyList() else {
+                inspectRebuildAttempts(db, maximumRecords, truncate = true)
+            }
+            val rebuildReceipts = if (maximumRecords == 0) emptyList() else {
+                inspectRebuildReceipts(db, maximumRecords, limitGroups = true)
+            }
+            val rowMetadata = if (maximumRecords == 0) emptyList() else {
+                SynchroMeta.listRowMetadata(db, maximumRecords, truncate = true).map {
+                    RowMetadataInspection(it.tableName, it.recordID, it.serverVersion, it.rowChecksumJSON)
+                }
+            }
+            val scopeStatesTruncated = scopeStateCount > maximumRecords
+            val scopeRowsTruncated = scopeRowCount > maximumRecords
+            val rebuildAttemptsTruncated = rebuildAttemptCount > maximumRecords
+            val rebuildReceiptsTruncated = rebuildReceiptGroupCount > maximumRecords
+            val rowMetadataTruncated = rowMetadataCount > maximumRecords
             val provenanceCount = inspectionCount(
                 db,
                 "SELECT COUNT(*) FROM (SELECT table_name, record_id FROM _synchro_scope_rows GROUP BY table_name, record_id)",
             )
-            ClientStateCountsInspection(
-                schema = inspectSchema(db).currentSchema,
-                applicationRowCount = provenanceCount,
+            ClientStateCaptureInspection(
+                schema = inspectCurrentSchema(db),
+                scopeStates = scopeStates,
+                scopeStatesTruncated = scopeStatesTruncated,
+                scopeRows = scopeRows,
+                scopeRowsTruncated = scopeRowsTruncated,
+                rebuildAttempts = rebuildAttempts,
+                rebuildAttemptsTruncated = rebuildAttemptsTruncated,
+                rebuildReceipts = rebuildReceipts.take(maximumRecords),
+                rebuildReceiptsTruncated = rebuildReceiptsTruncated,
+                rowMetadata = rowMetadata,
+                rowMetadataTruncated = rowMetadataTruncated,
+                overflowed = scopeStatesTruncated ||
+                    scopeRowsTruncated ||
+                    rebuildAttemptsTruncated ||
+                    rebuildReceiptsTruncated ||
+                    rowMetadataTruncated,
+                applicationRowCount = inspectApplicationRowCount(db),
                 mutationLedgerCount = inspectionCount(db, "SELECT COUNT(*) FROM _synchro_pending_changes"),
                 mutationOutcomeCount = inspectionCount(
                     db,
@@ -269,15 +294,16 @@ class SynchroClient(private val config: SynchroConfig, context: Context) {
                 ),
                 sealedBatchCount = inspectionCount(db, "SELECT COUNT(*) FROM _synchro_push_batches"),
                 rejectedMutationCount = inspectionCount(db, "SELECT COUNT(*) FROM _synchro_rejected_mutations"),
-                scopeStateCount = inspectionCount(db, "SELECT COUNT(*) FROM _synchro_scopes"),
-                scopeRowCount = inspectionCount(db, "SELECT COUNT(*) FROM _synchro_scope_rows"),
+                scopeStateCount = scopeStateCount,
+                scopeRowCount = scopeRowCount,
                 provenanceCount = provenanceCount,
-                rowMetadataCount = inspectionCount(db, "SELECT COUNT(*) FROM _synchro_row_versions"),
-                rebuildAttemptCount = inspectionCount(db, "SELECT COUNT(*) FROM _synchro_rebuild_attempts"),
-                rebuildReceiptCount = inspectionCount(db, "SELECT COUNT(*) FROM _synchro_rebuild_page_receipts"),
-                provenanceMaintenanceWorkCursor = provenanceMaintenanceWork.cursor,
+                rowMetadataCount = rowMetadataCount,
+                rebuildAttemptCount = rebuildAttemptCount,
+                rebuildReceiptCount = rebuildReceiptCount,
+                provenanceMaintenanceWorkCursor = provenanceMaintenanceWork,
             )
         }
+    }
 
     private fun inspectionCount(db: SQLiteDatabase, sql: String): Int =
         db.rawQuery(sql, null).use { cursor ->
@@ -287,30 +313,42 @@ class SynchroClient(private val config: SynchroConfig, context: Context) {
             count.toInt()
         }
 
-    /** Returns bounded read-only state for unfinished rebuild work. */
-    internal fun inspectRebuildState(limit: Int = MAXIMUM_INSPECTION_RECORDS): RebuildStateInspection =
-        database.readTransaction { db ->
-            val attempts = inspectRebuildAttempts(db, limit)
-            val receipts = SynchroMeta.listRebuildPageReceipts(db, limit).map {
-                RebuildPageReceiptInspection(
-                    scopeID = it.scopeID,
-                    rebuildID = it.rebuildID,
-                    requestCursor = it.requestCursor,
-                    isFinal = it.isFinal,
-                    finalScopeCursor = it.finalScopeCursor,
-                    finalChecksumJSON = it.finalChecksumJSON,
-                )
-            }
-            RebuildStateInspection(attempts, receipts)
+    private fun inspectApplicationRowCount(db: SQLiteDatabase): Int {
+        val encoded = SynchroMeta.get(db, MetaKey.LOCAL_SCHEMA) ?: return 0
+        val tables = try {
+            RECEIPT_JSON.decodeFromString<List<LocalSchemaTable>>(encoded)
+        } catch (_: Exception) {
+            throw SynchroError.InvalidResponse("stored local schema is invalid")
         }
+        var total = 0L
+        for (table in tables) {
+            total += inspectionCount(
+                db,
+                "SELECT COUNT(*) FROM ${SQLiteHelpers.quoteIdentifier(table.tableName)}",
+            )
+            if (total > Int.MAX_VALUE) throw SynchroError.InvalidResponse("application row count is invalid")
+        }
+        return total.toInt()
+    }
+
+    /** Returns bounded read-only state for unfinished rebuild work. */
+    internal fun inspectRebuildAttempts(
+        limit: Int = MAXIMUM_INSPECTION_RECORDS,
+    ): List<RebuildAttemptInspection> = database.readTransaction { db -> inspectRebuildAttempts(db, limit) }
 
     /** Returns normalized facts for at most [limit] durable rebuild page receipts. */
     internal fun inspectRebuildReceipts(
         limit: Int = MAXIMUM_INSPECTION_RECORDS,
-    ): List<RebuildReceiptInspection> = database.readTransaction { db ->
-        val grouped = SynchroMeta.listRebuildPageReceipts(db, limit)
+    ): List<RebuildReceiptInspection> = database.readTransaction { db -> inspectRebuildReceipts(db, limit) }
+
+    private fun inspectRebuildReceipts(
+        db: SQLiteDatabase,
+        limit: Int,
+        limitGroups: Boolean = false,
+    ): List<RebuildReceiptInspection> {
+        val grouped = SynchroMeta.listRebuildPageReceipts(db, limit, limitGroups)
             .groupBy { RebuildReceiptGroupKey(it.scopeID, it.rebuildID) }
-        grouped.keys.sortedWith { left, right ->
+        return grouped.keys.sortedWith { left, right ->
             val scopeOrder = compareUTF8(left.scopeID, right.scopeID)
             if (scopeOrder != 0) scopeOrder else compareUTF8(left.rebuildID, right.rebuildID)
         }.map { key -> inspectRebuildReceipts(db, grouped[key].orEmpty()) }
@@ -580,8 +618,12 @@ class SynchroClient(private val config: SynchroConfig, context: Context) {
         return left.size - right.size
     }
 
-    private fun inspectRebuildAttempts(db: SQLiteDatabase, limit: Int): List<RebuildAttemptInspection> =
-        SynchroMeta.listRebuildAttempts(db, limit).map {
+    private fun inspectRebuildAttempts(
+        db: SQLiteDatabase,
+        limit: Int,
+        truncate: Boolean = false,
+    ): List<RebuildAttemptInspection> =
+        SynchroMeta.listRebuildAttempts(db, limit, truncate).map {
             require(it.schemaVersion > 0 && it.schemaHash.matches(SCHEMA_HASH)) {
                 "durable rebuild inspection is invalid"
             }
@@ -591,7 +633,8 @@ class SynchroClient(private val config: SynchroConfig, context: Context) {
                 scopeID = it.scopeID,
                 rebuildID = it.rebuildID,
                 clientGeneration = it.clientGeneration,
-                schema = schema,
+                schemaVersion = schema.version,
+                schemaHash = schema.hash,
                 generation = it.generation,
                 cursor = it.cursor,
                 pageLimit = it.pageLimit,

@@ -433,7 +433,7 @@ internal object SynchroMeta {
         return result
     }
 
-    fun listScopes(db: SQLiteDatabase, limit: Int): List<LocalScopeState> {
+    fun listScopes(db: SQLiteDatabase, limit: Int, truncate: Boolean = false): List<LocalScopeState> {
         requireInspectionLimit(limit)
         val result = mutableListOf<LocalScopeState>()
         db.rawQuery(
@@ -455,8 +455,7 @@ internal object SynchroMeta {
                 )
             }
         }
-        require(result.size <= limit) { "Inspection scope result exceeds its bound" }
-        return result
+        return boundedInspectionResult(result, limit, truncate, "Inspection scope result exceeds its bound")
     }
 
     fun getScope(db: SQLiteDatabase, scopeId: String): LocalScopeState? {
@@ -760,7 +759,7 @@ internal object SynchroMeta {
         return result
     }
 
-    fun listScopeRows(db: SQLiteDatabase, limit: Int): List<LocalScopeRow> {
+    fun listScopeRows(db: SQLiteDatabase, limit: Int, truncate: Boolean = false): List<LocalScopeRow> {
         requireInspectionLimit(limit)
         val result = mutableListOf<LocalScopeRow>()
         db.rawQuery(
@@ -782,8 +781,7 @@ internal object SynchroMeta {
                 )
             }
         }
-        require(result.size <= limit) { "Inspection scope-row result exceeds its bound" }
-        return result
+        return boundedInspectionResult(result, limit, truncate, "Inspection scope-row result exceeds its bound")
     }
 
     fun getStaleScopeRows(db: SQLiteDatabase, scopeId: String, generation: Long): List<Pair<String, String>> {
@@ -896,7 +894,7 @@ internal object SynchroMeta {
         }
     }
 
-    fun listRowMetadata(db: SQLiteDatabase, limit: Int): List<LocalRowMetadata> {
+    fun listRowMetadata(db: SQLiteDatabase, limit: Int, truncate: Boolean = false): List<LocalRowMetadata> {
         requireInspectionLimit(limit)
         val result = mutableListOf<LocalRowMetadata>()
         db.rawQuery(
@@ -917,8 +915,7 @@ internal object SynchroMeta {
                 )
             }
         }
-        require(result.size <= limit) { "Inspection row-metadata result exceeds its bound" }
-        return result
+        return boundedInspectionResult(result, limit, truncate, "Inspection row-metadata result exceeds its bound")
     }
 
     fun getSeedReceipts(db: SQLiteDatabase): Map<String, String> {
@@ -1014,7 +1011,7 @@ internal object SynchroMeta {
         }
     }
 
-    fun listRebuildAttempts(db: SQLiteDatabase, limit: Int): List<LocalRebuildAttempt> {
+    fun listRebuildAttempts(db: SQLiteDatabase, limit: Int, truncate: Boolean = false): List<LocalRebuildAttempt> {
         requireInspectionLimit(limit)
         val result = mutableListOf<LocalRebuildAttempt>()
         db.rawQuery(
@@ -1039,24 +1036,49 @@ internal object SynchroMeta {
                 )
             }
         }
-        require(result.size <= limit) { "Inspection rebuild-attempt result exceeds its bound" }
-        return result
+        return boundedInspectionResult(result, limit, truncate, "Inspection rebuild-attempt result exceeds its bound")
     }
 
-    fun listRebuildPageReceipts(db: SQLiteDatabase, limit: Int): List<LocalRebuildPageReceipt> {
+    fun listRebuildPageReceipts(
+        db: SQLiteDatabase,
+        limit: Int,
+        limitGroups: Boolean = false,
+    ): List<LocalRebuildPageReceipt> {
         requireInspectionLimit(limit)
         val result = mutableListOf<LocalRebuildPageReceipt>()
-        db.rawQuery(
+        val source = if (limitGroups) {
+            """
+            WITH selected_groups AS (
+                SELECT scope_id, rebuild_id
+                FROM _synchro_rebuild_page_receipts
+                GROUP BY scope_id, rebuild_id
+                ORDER BY scope_id, rebuild_id
+                LIMIT ?
+            )
+            SELECT receipts.scope_id, receipts.rebuild_id, receipts.request_cursor_is_null,
+                   receipts.request_cursor, receipts.request_json, receipts.response_json,
+                   receipts.is_final, receipts.final_scope_cursor, receipts.final_checksum
+            FROM _synchro_rebuild_page_receipts AS receipts
+            INNER JOIN selected_groups
+              ON selected_groups.scope_id = receipts.scope_id
+             AND selected_groups.rebuild_id = receipts.rebuild_id
+            ORDER BY receipts.scope_id, receipts.rebuild_id,
+                     receipts.request_cursor_is_null, receipts.request_cursor
+            """.trimIndent()
+        } else {
             """
             SELECT scope_id, rebuild_id, request_cursor_is_null, request_cursor, request_json,
                    response_json, is_final, final_scope_cursor, final_checksum
             FROM _synchro_rebuild_page_receipts
             ORDER BY scope_id, rebuild_id, request_cursor_is_null, request_cursor
             LIMIT ?
-            """.trimIndent(),
-            arrayOf((limit + 1).toString()),
+            """.trimIndent()
+        }
+        db.rawQuery(
+            source,
+            arrayOf((if (limitGroups) limit else limit + 1).toString()),
         ).use { cursor -> while (cursor.moveToNext()) result += rebuildPageReceipt(cursor) }
-        require(result.size <= limit) { "Inspection rebuild-receipt result exceeds its bound" }
+        if (!limitGroups) require(result.size <= limit) { "Inspection rebuild-receipt result exceeds its bound" }
         return result
     }
 
@@ -1202,11 +1224,22 @@ internal object SynchroMeta {
     }
 
     private fun requireInspectionLimit(limit: Int) {
-        require(limit in 1..MAXIMUM_INSPECTION_RECORDS) { "Inspection limit is invalid" }
+        require(limit in 1 until Int.MAX_VALUE) { "Inspection limit is invalid" }
+    }
+
+    private fun <T> boundedInspectionResult(
+        result: MutableList<T>,
+        limit: Int,
+        truncate: Boolean,
+        errorMessage: String,
+    ): List<T> {
+        if (result.size <= limit) return result
+        require(truncate) { errorMessage }
+        result.removeAt(result.lastIndex)
+        return result
     }
 
     private fun timestampNow(): String =
         DateTimeFormatter.ISO_INSTANT.format(Instant.now())
 
-    private const val MAXIMUM_INSPECTION_RECORDS = 512
 }

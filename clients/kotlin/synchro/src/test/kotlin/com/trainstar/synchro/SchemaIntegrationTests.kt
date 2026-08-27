@@ -372,7 +372,13 @@ class SchemaIntegrationTests {
             try {
                 val tables = requireNotNull(SchemaManager(migrated).loadStoredLocalSchema())
                 fresh.writeTransaction { db ->
-                    createTestSyncedTablesInTransaction(db, tables)
+                    for (table in tables) {
+                        db.execSQL(SQLiteSchema.generateCreateTableSQL(table))
+                        SQLiteSchema.generateCDCTriggers(table).forEach(db::execSQL)
+                        table.indexes.forEach { index ->
+                            db.execSQL(SQLiteSchema.generateCreateIndexSQL(table, index))
+                        }
+                    }
                 }
 
                 val expected = schemaCatalog(fresh)

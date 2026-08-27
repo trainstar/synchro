@@ -382,14 +382,14 @@ class DatabaseMigrationTests {
         }
 
         val migrated = databases.open(context, path)
-        val baseline = migrated.inspectProvenanceMaintenanceWork().cursor
+        val baseline = migrated.provenanceMaintenanceWorkCursor()
 
         assertEquals(0L, baseline)
         assertTrue(migrated.readTransaction { db -> SynchroMeta.listScopeRows(db, 1).isEmpty() })
         migrated.writeTransaction { db ->
             SynchroMeta.upsertScopeRow(db, "scope", "orders", "sampled", "checksum", 0)
         }
-        assertEquals(1L, migrated.inspectProvenanceMaintenanceWork().cursor - baseline)
+        assertEquals(1L, migrated.provenanceMaintenanceWorkCursor() - baseline)
     }
 
     private fun createLegacyScopeTables(database: SQLiteDatabase) {

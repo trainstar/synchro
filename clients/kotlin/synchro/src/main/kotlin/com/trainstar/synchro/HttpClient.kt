@@ -1,3 +1,5 @@
+@file:OptIn(com.trainstar.synchro.inspection.SynchroProofApi::class)
+
 package com.trainstar.synchro
 
 import com.trainstar.synchro.inspection.TransportObservationCollector
@@ -267,19 +269,24 @@ class HttpClient(
                 responseBody = if (observedStatusCode == 200) responseBody else null,
             )
             observationRecorded = true
-            config.transportObservationCollector?.pauseIfArmed(operationClass)
+            val rebuildCursorOverride = config.transportObservationCollector?.pauseIfArmed(operationClass)
+            val effectiveResponseBody = applyRebuildCursorOverride(
+                observedStatusCode,
+                responseBody,
+                rebuildCursorOverride,
+            )
 
             when (response.code) {
                 200 -> {
                     try {
-                        return HTTPResult(json.decodeFromString<Resp>(responseBody), responseBody)
+                        return HTTPResult(json.decodeFromString<Resp>(effectiveResponseBody), effectiveResponseBody)
                     } catch (e: Exception) {
                         throw SynchroError.InvalidResponse("decode failed: ${e.message}")
                     }
                 }
 
                 409 -> {
-                    val error = decodeProtocolError(responseBody)
+                    val error = decodeProtocolError(effectiveResponseBody)
                     if (error?.code == ProtocolErrorCode.CLIENT_GENERATION_EXPIRED) {
                         val currentGeneration = error.currentClientGeneration
                         if (error.retryable || currentGeneration == null || currentGeneration <= 0) {
@@ -294,12 +301,12 @@ class HttpClient(
                         }
                         throw RebuildRestartRequiredException(scopeID)
                     }
-                    val msg = errorMessage(responseBody) ?: "semantic conflict"
+                    val msg = errorMessage(effectiveResponseBody) ?: "semantic conflict"
                     throw SynchroError.ServerError(status = response.code, serverMessage = msg)
                 }
 
                 422 -> {
-                    val error = decodeProtocolError(responseBody)
+                    val error = decodeProtocolError(effectiveResponseBody)
                         ?: throw SynchroError.InvalidResponse("schema mismatch response is invalid")
                     if (error.code == ProtocolErrorCode.SCHEMA_MISMATCH) {
                         val currentSchema = error.currentSchema
@@ -318,12 +325,12 @@ class HttpClient(
                             serverHash = currentSchema.hash,
                         )
                     }
-                    val msg = errorMessage(responseBody) ?: "schema or contract violation"
+                    val msg = errorMessage(effectiveResponseBody) ?: "schema or contract violation"
                     throw SynchroError.ServerError(status = response.code, serverMessage = msg)
                 }
 
                 426 -> {
-                    val msg = errorMessage(responseBody) ?: "client upgrade required"
+                    val msg = errorMessage(effectiveResponseBody) ?: "client upgrade required"
                     throw SynchroError.UpgradeRequired(
                         currentVersion = config.appVersion,
                         minimumVersion = msg
@@ -331,7 +338,7 @@ class HttpClient(
                 }
 
                 429, 503 -> {
-                    val error = decodeRetryableProtocolError(responseBody)
+                    val error = decodeRetryableProtocolError(effectiveResponseBody)
                         ?: throw SynchroError.InvalidResponse("retryable error response is invalid")
                     val validEnvelope = when (response.code) {
                         429 -> error.code == ProtocolErrorCode.RETRY_LATER && error.retryable
@@ -365,7 +372,7 @@ class HttpClient(
                 }
 
                 else -> {
-                    val msg = errorMessage(responseBody) ?: "HTTP ${response.code}"
+                    val msg = errorMessage(effectiveResponseBody) ?: "HTTP ${response.code}"
                     throw SynchroError.ServerError(status = response.code, serverMessage = msg)
                 }
             }
@@ -419,6 +426,31 @@ class HttpClient(
                 null
             },
         )
+    }
+
+    private fun applyRebuildCursorOverride(
+        statusCode: Int,
+        responseBody: String,
+        override: String?,
+    ): String {
+        if (override == null) return responseBody
+        if (statusCode != 200) {
+            throw SynchroError.InvalidResponse("rebuild cursor fault requires a successful response")
+        }
+        // SCN-REBUILD-FORGED-CURSOR-001 requires one server-impossible continuation fault.
+        val response = try {
+            strictJSON.parseToJsonElement(responseBody) as JsonObject
+        } catch (_: Exception) {
+            throw SynchroError.InvalidResponse("rebuild cursor fault target is invalid")
+        }
+        val cursor = response["cursor"] as? JsonPrimitive
+        if (cursor?.isString != true) {
+            throw SynchroError.InvalidResponse("rebuild cursor fault target is invalid")
+        }
+        return json.encodeToString(
+            JsonObject.serializer(),
+            JsonObject(response.toMutableMap().also { it["cursor"] = JsonPrimitive(override) }),
+        ).also(Integrity::validateCanonicalWireJSON)
     }
 
     private fun transportRequestFacts(request: ConnectRequest): TransportRequestFacts = TransportRequestFacts(

@@ -257,7 +257,14 @@ class SchemaManagerTests {
         assertCDCTriggers(db, "orders")
 
         // Drop
-        dropTestSyncedTables(db, schema.localTables())
+        db.writeTransaction { rawDb ->
+            for (table in schema.localTables().reversed()) {
+                SQLiteSchema.expectedCDCTriggerSQL(table).keys.forEach { trigger ->
+                    rawDb.execSQL("DROP TRIGGER IF EXISTS ${SQLiteHelpers.quoteIdentifier(trigger)}")
+                }
+                rawDb.execSQL("DROP TABLE IF EXISTS ${SQLiteHelpers.quoteIdentifier(table.tableName)}")
+            }
+        }
 
         // Verify table and triggers are gone
         assertEquals(0, db.query("SELECT name FROM sqlite_master WHERE type='table' AND name='orders'").size)

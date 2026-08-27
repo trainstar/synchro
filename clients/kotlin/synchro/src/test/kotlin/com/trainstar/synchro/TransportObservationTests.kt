@@ -1,3 +1,5 @@
+@file:OptIn(com.trainstar.synchro.inspection.SynchroProofApi::class)
+
 package com.trainstar.synchro
 
 import com.trainstar.synchro.inspection.TransportObservationCollector
@@ -19,6 +21,7 @@ import org.junit.Assert.assertSame
 import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import java.net.ServerSocket
 import java.util.concurrent.TimeUnit
 
 class TransportObservationTests {
@@ -72,6 +75,21 @@ class TransportObservationTests {
         assertFalse(request.isCompleted)
         collector.resumePause()
         request.await()
+    }
+
+    @Test
+    fun rebuildCursorOverrideBelongsOnlyToThePausedResponse() = runTest {
+        val collector = TransportObservationCollector()
+        collector.armPause(TransportOperationClass.REBUILD)
+        val pausedRequest = async { collector.pauseIfArmed(TransportOperationClass.REBUILD) }
+        collector.awaitPause(TransportOperationClass.REBUILD, TimeUnit.SECONDS.toMillis(1))
+        collector.overridePausedRebuildCursor("forged-cursor")
+
+        assertEquals(null, collector.pauseIfArmed(TransportOperationClass.REBUILD))
+        collector.resumePause()
+
+        assertEquals("forged-cursor", pausedRequest.await())
+        assertEquals(null, collector.pauseIfArmed(TransportOperationClass.REBUILD))
     }
 
     @Test
@@ -201,6 +219,29 @@ class TransportObservationTests {
 
         assertEquals("https://sync.example.test", config.serverURL)
         assertSame(collector, config.transportObservationCollector)
+    }
+
+    @Test
+    fun networkFailureRecordsSafeTransportObservation() = runTest {
+        val collector = TransportObservationCollector()
+        val unavailablePort = ServerSocket(0).use { it.localPort }
+        val client = HttpClient(
+            SynchroConfig(
+                dbPath = "",
+                serverURL = "http://127.0.0.1:$unavailablePort",
+                authProvider = { "test-token" },
+                clientID = "test-device",
+                appVersion = "1.0.0",
+            ).withTransportObservation(collector),
+        )
+
+        assertTrue(runCatching { client.fetchSchema() }.exceptionOrNull() is SynchroError.NetworkError)
+
+        val observation = collector.snapshot().observations.single()
+        assertEquals(TransportOperationClass.SCHEMAS, observation.operationClass)
+        assertEquals(0, observation.statusCode)
+        assertTrue(observation.durationNanoseconds > 0)
+        assertEquals(null, observation.requestFacts)
     }
 
     @Test

@@ -5,7 +5,6 @@ import android.database.Cursor
 import android.database.sqlite.SQLiteDatabase
 import android.database.sqlite.SQLiteOpenHelper
 import android.database.sqlite.SQLiteCursor
-import com.trainstar.synchro.inspection.ProvenanceMaintenanceWorkInspection
 import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.json.Json
 import java.util.concurrent.ConcurrentHashMap
@@ -91,13 +90,12 @@ internal class SynchroDatabase private constructor(context: Context, dbPath: Str
 
     internal fun close() = helper.close()
 
-    internal fun inspectProvenanceMaintenanceWork(): ProvenanceMaintenanceWorkInspection =
-        ProvenanceMaintenanceWorkInspection(provenanceMaintenanceCursor.get())
+    internal fun provenanceMaintenanceWorkCursor(): Long = provenanceMaintenanceCursor.get()
 
     internal fun <T> stateInspectionTransaction(
-        block: (SQLiteDatabase, ProvenanceMaintenanceWorkInspection) -> T,
+        block: (SQLiteDatabase, Long) -> T,
     ): T = writeOwnership.withLock {
-        readTransaction { db -> block(db, inspectProvenanceMaintenanceWork()) }
+        readTransaction { db -> block(db, provenanceMaintenanceWorkCursor()) }
     }
 
     private fun createDatabase(db: SQLiteDatabase) {

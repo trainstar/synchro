@@ -239,7 +239,7 @@ class PullProcessorTests {
         val db = databases.create(context)
         val checksum = "checksum"
 
-        assertEquals(0L, db.inspectProvenanceMaintenanceWork().cursor)
+        assertEquals(0L, db.provenanceMaintenanceWorkCursor())
         db.writeTransaction { conn ->
             SynchroMeta.upsertScopeRow(conn, "scope", "orders", "one", checksum, 0L)
             SynchroMeta.upsertScopeRow(conn, "scope", "orders", "two", checksum, 0L)
@@ -252,7 +252,7 @@ class PullProcessorTests {
             SynchroMeta.clearAllScopeRows(conn)
         }
 
-        assertEquals(9L, db.inspectProvenanceMaintenanceWork().cursor)
+        assertEquals(9L, db.provenanceMaintenanceWorkCursor())
         assertTrue(db.readTransaction { conn -> SynchroMeta.listScopeRows(conn, 10).isEmpty() })
 
         assertThrows(IllegalStateException::class.java) {
@@ -263,7 +263,7 @@ class PullProcessorTests {
             }
         }
 
-        assertEquals(9L, db.inspectProvenanceMaintenanceWork().cursor)
+        assertEquals(9L, db.provenanceMaintenanceWorkCursor())
         assertTrue(db.readTransaction { conn -> SynchroMeta.listScopeRows(conn, 10).isEmpty() })
     }
 

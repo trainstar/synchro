@@ -11,6 +11,7 @@ import java.util.ArrayDeque
 import java.util.Locale
 
 @Serializable
+@SynchroProofApi
 enum class TransportOperationClass {
     @SerialName("connect")
     CONNECT,
@@ -62,6 +63,7 @@ enum class TransportOperationClass {
 }
 
 @Serializable
+@SynchroProofApi
 data class TransportRequestFacts(
     @SerialName("client_generation") val clientGeneration: Long? = null,
     @SerialName("schema_version") val schemaVersion: Long,
@@ -78,6 +80,7 @@ data class TransportRequestFacts(
 )
 
 @Serializable
+@SynchroProofApi
 data class TransportRebuildResponseFacts(
     @SerialName("record_count") val recordCount: Int,
     @SerialName("has_more") val hasMore: Boolean,
@@ -89,6 +92,7 @@ data class TransportRebuildResponseFacts(
 )
 
 @Serializable
+@SynchroProofApi
 data class TransportPullResponseFacts(
     @SerialName("change_count") val changeCount: Int,
     @SerialName("has_more") val hasMore: Boolean,
@@ -99,6 +103,7 @@ data class TransportPullResponseFacts(
 )
 
 @Serializable
+@SynchroProofApi
 data class TransportObservation(
     val sequence: Long,
     @SerialName("operation_class") val operationClass: TransportOperationClass,
@@ -112,12 +117,14 @@ data class TransportObservation(
 )
 
 @Serializable
+@SynchroProofApi
 data class TransportObservationSnapshot(
     val observations: List<TransportObservation>,
     val overflowed: Boolean,
     @SerialName("sequence_checkpoint") val sequenceCheckpoint: Long,
 )
 
+@SynchroProofApi
 enum class TransportPauseBarrierError {
     ALREADY_ARMED,
     WRONG_OPERATION,
@@ -126,10 +133,12 @@ enum class TransportPauseBarrierError {
     CANCELLED,
 }
 
+@SynchroProofApi
 class TransportPauseBarrierException(
     val error: TransportPauseBarrierError,
 ) : IllegalStateException(error.name.lowercase().replace('_', ' '))
 
+@SynchroProofApi
 class TransportObservationCollector(capacity: Int = 256) {
     val capacity = capacity.coerceAtLeast(1)
 
@@ -139,6 +148,7 @@ class TransportObservationCollector(capacity: Int = 256) {
     private var pauseState: PauseState = PauseState.Idle
     private var nextPauseOperation: TransportOperationClass? = null
     private var pauseWaiter: CompletableDeferred<Unit>? = null
+    private var rebuildCursorOverride: String? = null
 
     private sealed class PauseState {
         data object Idle : PauseState()
@@ -234,7 +244,22 @@ class TransportObservationCollector(capacity: Int = 256) {
         failPauseBarrier(TransportPauseBarrierError.CANCELLED)
     }
 
-    internal suspend fun pauseIfArmed(operationClass: TransportOperationClass) {
+    fun overridePausedRebuildCursor(cursor: String) {
+        require(cursor.isNotEmpty() && cursor.toByteArray(Charsets.UTF_8).size <= 4_096) {
+            "rebuild cursor override is invalid"
+        }
+        synchronized(lock) {
+            val state = pauseState
+            check(
+                state is PauseState.Paused &&
+                    state.operationClass == TransportOperationClass.REBUILD &&
+                    rebuildCursorOverride == null,
+            ) { "no paused rebuild response is available" }
+            rebuildCursorOverride = cursor
+        }
+    }
+
+    internal suspend fun pauseIfArmed(operationClass: TransportOperationClass): String? {
         val resume: CompletableDeferred<Unit>? = synchronized(lock) {
             when (val state = pauseState) {
                 is PauseState.Armed -> if (state.operationClass == operationClass) {
@@ -256,6 +281,10 @@ class TransportObservationCollector(capacity: Int = 256) {
         } catch (error: CancellationException) {
             failPauseBarrier(TransportPauseBarrierError.CANCELLED)
             throw error
+        }
+        if (resume == null || operationClass != TransportOperationClass.REBUILD) return null
+        return synchronized(lock) {
+            rebuildCursorOverride.also { rebuildCursorOverride = null }
         }
     }
 
@@ -301,6 +330,7 @@ class TransportObservationCollector(capacity: Int = 256) {
                 pauseWaiter?.completeExceptionally(failure)
                 pauseWaiter = null
                 nextPauseOperation = null
+                rebuildCursorOverride = null
                 pauseState = if (error == TransportPauseBarrierError.CANCELLED) {
                     PauseState.Cancelled
                 } else {

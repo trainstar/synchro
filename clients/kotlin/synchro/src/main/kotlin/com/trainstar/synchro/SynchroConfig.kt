@@ -1,3 +1,5 @@
+@file:OptIn(com.trainstar.synchro.inspection.SynchroProofApi::class)
+
 package com.trainstar.synchro
 
 import com.trainstar.synchro.inspection.TransportObservationCollector

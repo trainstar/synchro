@@ -2,21 +2,18 @@ package com.trainstar.synchro.inspection
 
 import com.trainstar.synchro.SchemaRef
 
-/** A bounded read-only view of the durable local schema reference. */
-data class SchemaInspection(
-    val currentSchema: SchemaRef?,
-)
-
 /** A bounded read-only view of one durable server scope. */
-data class ScopeInspection(
+@SynchroProofApi
+data class ScopeStateInspection(
     val scopeID: String,
     val cursor: String?,
     val checksum: String?,
-    val generation: Long,
     val localChecksum: String,
+    val generation: Long,
 )
 
 /** A bounded read-only view of one scope membership record. */
+@SynchroProofApi
 data class ScopeRowInspection(
     val scopeID: String,
     val tableName: String,
@@ -26,46 +23,29 @@ data class ScopeRowInspection(
 )
 
 /** A bounded read-only view of server metadata for one application row. */
+@SynchroProofApi
 data class RowMetadataInspection(
     val tableName: String,
     val recordID: String,
     val serverVersion: String,
-    val rowChecksumJSON: String?,
+    val rowChecksum: String?,
 )
 
-/** A bounded read-only checkpoint view for one scope. */
-data class CheckpointInspection(
-    val scopeID: String,
-    val cursor: String?,
-    val checksum: String?,
-    val localChecksum: String,
-)
-
-/** A bounded read-only view of the scopes that currently contain one row. */
-data class ProvenanceInspection(
-    val tableName: String,
-    val recordID: String,
-    val scopeIDs: List<String>,
-    val serverVersion: String?,
-)
-
-/** A process-local cursor for committed scope-row maintenance work. */
-data class ProvenanceMaintenanceWorkInspection(
-    val cursor: Long,
-)
-
-/** A bounded read-only aggregate of durable client state and maintenance work. */
-data class ClientStateInspection(
+/** One bounded atomic capture of durable client state and exact counts. */
+@SynchroProofApi
+data class ClientStateCaptureInspection(
     val schema: SchemaRef?,
-    val scopeStates: List<ScopeInspection>,
+    val scopeStates: List<ScopeStateInspection>,
+    val scopeStatesTruncated: Boolean,
     val scopeRows: List<ScopeRowInspection>,
+    val scopeRowsTruncated: Boolean,
     val rebuildAttempts: List<RebuildAttemptInspection>,
-    val provenanceMaintenanceWorkCursor: Long,
-)
-
-/** Exact counts for durable state that can exceed detailed inspection bounds. */
-data class ClientStateCountsInspection(
-    val schema: SchemaRef?,
+    val rebuildAttemptsTruncated: Boolean,
+    val rebuildReceipts: List<RebuildReceiptInspection>,
+    val rebuildReceiptsTruncated: Boolean,
+    val rowMetadata: List<RowMetadataInspection>,
+    val rowMetadataTruncated: Boolean,
+    val overflowed: Boolean,
     val applicationRowCount: Int,
     val mutationLedgerCount: Int,
     val mutationOutcomeCount: Int,
@@ -81,33 +61,20 @@ data class ClientStateCountsInspection(
 )
 
 /** A bounded read-only view of an unfinished rebuild. */
+@SynchroProofApi
 data class RebuildAttemptInspection(
     val scopeID: String,
     val rebuildID: String,
     val clientGeneration: Long,
-    val schema: SchemaRef,
+    val schemaVersion: Long,
+    val schemaHash: String,
     val generation: Long,
     val cursor: String?,
     val pageLimit: Int,
 )
 
-/** A bounded read-only view of one durable rebuild page receipt. */
-data class RebuildPageReceiptInspection(
-    val scopeID: String,
-    val rebuildID: String,
-    val requestCursor: String?,
-    val isFinal: Boolean,
-    val finalScopeCursor: String?,
-    val finalChecksumJSON: String?,
-)
-
-/** A bounded read-only view of rebuild attempts and receipts. */
-data class RebuildStateInspection(
-    val attempts: List<RebuildAttemptInspection>,
-    val receipts: List<RebuildPageReceiptInspection>,
-)
-
 /** Normalized facts for one durable rebuild receipt chain. */
+@SynchroProofApi
 data class RebuildReceiptInspection(
     val rebuildIDFingerprint: String,
     val pageCount: Int,
