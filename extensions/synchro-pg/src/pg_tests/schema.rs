@@ -801,6 +801,34 @@
         setup_test_tables();
         register_client("empty-table-user", "empty-table-client");
         Spi::run(
+            "CREATE TABLE test_empty_added_manifest_boundary (
+                 id UUID PRIMARY KEY,
+                 value TEXT NOT NULL
+             );
+             INSERT INTO test_empty_added_manifest_boundary (id, value)
+             VALUES ('a1000000-0000-4000-8000-000000000101', 'existing')",
+        )
+        .unwrap();
+        Spi::run(
+            "SELECT tests.register_legacy_test_table(
+                 'test_empty_added_manifest_boundary',
+                 $$SELECT ARRAY['global'] FROM test_empty_added_manifest_boundary WHERE id = $1::uuid$$,
+                 'single_scope',
+                 'id', 'updated_at', 'deleted_at', 'read_only'
+             )",
+        )
+        .unwrap();
+        activate_pending_registry_for_test();
+        let boundary_class: String = Spi::get_one(
+            "SELECT transition_class
+             FROM sync_schema_manifest
+             ORDER BY schema_version DESC
+             LIMIT 1",
+        )
+        .unwrap()
+        .expect("empty added-table boundary manifest");
+        assert_eq!(boundary_class, "class_3");
+        Spi::run(
             "CREATE TABLE test_empty_added_manifest (
                  id UUID PRIMARY KEY,
                  value TEXT NOT NULL
@@ -855,6 +883,83 @@
             transition.0["compatibility_floor"],
             transition.0["parent_schema_version"]
         );
+    }
+
+    #[pg_test]
+    fn test_added_empty_table_with_stale_statistics_is_class_2_without_bootstrap() {
+        setup_test_tables();
+        register_client("stale-statistics-user", "stale-statistics-client");
+        Spi::run(
+            "CREATE TABLE test_empty_stale_statistics_manifest (
+                 id UUID PRIMARY KEY,
+                 value TEXT NOT NULL
+             );
+             INSERT INTO test_empty_stale_statistics_manifest (id, value)
+             VALUES ('a1000000-0000-4000-8000-000000000102', 'stale');
+             ANALYZE test_empty_stale_statistics_manifest;
+             DELETE FROM test_empty_stale_statistics_manifest",
+        )
+        .unwrap();
+        let has_stale_estimate: Option<bool> = Spi::get_one(
+            "SELECT reltuples > 0
+             FROM pg_catalog.pg_class
+             WHERE oid = 'test_empty_stale_statistics_manifest'::regclass",
+        )
+        .unwrap();
+        assert_eq!(has_stale_estimate, Some(true));
+        Spi::run(
+            "SELECT tests.register_legacy_test_table(
+                 'test_empty_stale_statistics_manifest',
+                 $$SELECT ARRAY['global'] FROM test_empty_stale_statistics_manifest WHERE id = $1::uuid$$,
+                 'single_scope',
+                 'id', 'updated_at', 'deleted_at', 'read_only'
+             )",
+        )
+        .unwrap();
+        let generation: i64 = Spi::get_one(
+            "SELECT generation
+             FROM sync_registry_generations
+             WHERE state = 'pending' AND validated
+             ORDER BY generation DESC
+             LIMIT 1",
+        )
+        .unwrap()
+        .expect("stale-statistics generation");
+        let requires_bootstrap = Spi::connect(|client| {
+            crate::schema::generation_requires_projection_bootstrap(client, generation)
+        })
+        .unwrap();
+        let pending_body = Spi::connect(|client| {
+            let pending = crate::schema::prepare_pending_manifest(client, generation)
+                .expect("prepare stale-statistics manifest")
+                .expect("stale-statistics pending manifest");
+            Ok::<_, spi::Error>(
+                serde_json::from_str::<Value>(&pending.canonical_body)
+                    .expect("decode stale-statistics pending manifest"),
+            )
+        })
+        .unwrap();
+
+        activate_pending_registry_for_test();
+
+        let transition: pgrx::JsonB = Spi::get_one(
+            "SELECT jsonb_build_object(
+                 'metadata_class', transition_class,
+                 'body_class', canonical_manifest_body::jsonb ->> 'transition_class',
+                 'affected_scopes', affected_scopes
+             )
+             FROM sync_schema_manifest
+             ORDER BY schema_version DESC
+             LIMIT 1",
+        )
+        .unwrap()
+        .expect("stale-statistics manifest transition");
+
+        assert!(!requires_bootstrap);
+        assert_eq!(pending_body["transition_class"], "class_2");
+        assert_eq!(transition.0["metadata_class"], "class_2");
+        assert_eq!(transition.0["body_class"], "class_2");
+        assert_eq!(transition.0["affected_scopes"], json!([]));
     }
 
     #[pg_test]

@@ -481,9 +481,10 @@ pub(crate) fn generation_requires_projection_bootstrap(
              ORDER BY generation DESC
              LIMIT 1
          )
-         SELECT target.registration_kind,
-                target.physical_schema::text AS physical_schema,
-                target.physical_relation::text AS physical_relation
+          SELECT target.registration_kind,
+                 target.physical_schema::text AS physical_schema,
+                 target.physical_relation::text AS physical_relation,
+                 target.physical_relation_oid::bigint AS physical_relation_oid
          FROM synchro.sync_registry target
          CROSS JOIN active
          LEFT JOIN synchro.sync_registry source
@@ -568,7 +569,17 @@ pub(crate) fn generation_requires_projection_bootstrap(
         let relation = row
             .get_by_name::<String, &str>("physical_relation")?
             .unwrap_or_else(|| pgrx::error!("projection bootstrap source relation is missing"));
-        if relation_is_nonempty(client, &schema, &relation)? {
+        let relation_oid = row
+            .get_by_name::<i64, &str>("physical_relation_oid")?
+            .map(|value| {
+                u32::try_from(value).unwrap_or_else(|_| {
+                    pgrx::error!("projection bootstrap source relation has an invalid OID")
+                })
+            })
+            .unwrap_or_else(|| {
+                pgrx::error!("projection bootstrap source relation has no physical OID")
+            });
+        if relation_is_nonempty(client, &schema, &relation, relation_oid)? {
             return Ok(true);
         }
     }
@@ -982,10 +993,11 @@ fn manifest_relation_is_nonempty(
     let relation = client
         .select(
             "SELECT physical_schema::text AS physical_schema,
-                    physical_relation::text AS physical_relation
-             FROM synchro.sync_registry
-             WHERE registry_generation = $1
-               AND relation_id = $2::uuid
+                    physical_relation::text AS physical_relation,
+                    physical_relation_oid::bigint AS physical_relation_oid
+              FROM synchro.sync_registry
+              WHERE registry_generation = $1
+                AND relation_id = $2::uuid
                AND registration_kind = 'synced'",
             None,
             &[registry_generation.into(), relation_id.into()],
@@ -994,25 +1006,47 @@ fn manifest_relation_is_nonempty(
     let schema = relation
         .get_by_name::<String, &str>("physical_schema")?
         .unwrap_or_else(|| pgrx::error!("schema manifest relation has no physical schema"));
-    let relation = relation
+    let physical_relation = relation
         .get_by_name::<String, &str>("physical_relation")?
         .unwrap_or_else(|| pgrx::error!("schema manifest relation has no physical name"));
-    relation_is_nonempty(client, &schema, &relation)
+    let relation_oid = relation
+        .get_by_name::<i64, &str>("physical_relation_oid")?
+        .map(|value| {
+            u32::try_from(value)
+                .unwrap_or_else(|_| pgrx::error!("schema manifest relation has an invalid OID"))
+        })
+        .unwrap_or_else(|| pgrx::error!("schema manifest relation has no physical OID"));
+    relation_is_nonempty(client, &schema, &physical_relation, relation_oid)
 }
 
 fn relation_is_nonempty(
     client: &SpiClient<'_>,
     schema: &str,
     relation: &str,
+    expected_oid: u32,
 ) -> Result<bool, spi::Error> {
     let qualified = crate::registry::qualified_relation_name(schema, relation);
-    client
+    let result = client
         .select(
-            &format!("SELECT EXISTS (SELECT 1 FROM {qualified} LIMIT 1) AS nonempty"),
+            &format!(
+                "SELECT pg_catalog.to_regclass($1::text)::oid::bigint AS resolved_relation_oid,
+                        EXISTS (SELECT 1 FROM {qualified} LIMIT 1) AS nonempty"
+            ),
             None,
-            &[],
+            &[qualified.as_str().into()],
         )?
-        .first()
+        .first();
+    let resolved_oid = result
+        .get_by_name::<i64, &str>("resolved_relation_oid")?
+        .map(|value| {
+            u32::try_from(value)
+                .unwrap_or_else(|_| pgrx::error!("schema manifest relation has an invalid OID"))
+        })
+        .unwrap_or_else(|| pgrx::error!("schema manifest relation no longer exists"));
+    if resolved_oid != expected_oid {
+        pgrx::error!("schema manifest relation identity changed");
+    }
+    result
         .get_by_name::<bool, &str>("nonempty")
         .map(|value| value.unwrap_or(false))
 }
