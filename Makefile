@@ -61,6 +61,7 @@
 	adapter-db-external-teardown \
 	adapter-db-local-setup \
 	adapter-db-local-teardown \
+	adapter-db-prepare \
 	ext-build \
 	ext-install \
 	ext-test \
@@ -1125,12 +1126,45 @@ test-adapter-setup: $(ADAPTER_DB_SETUP)
 
 adapter-db-external-probe:
 	@set -eu; \
-		command -v psql >/dev/null 2>&1 || { echo "psql is required for an external ADAPTER_TEST_URL" >&2; exit 1; }; \
+		psql_bin="$(PGRX_PSQL)"; test -x "$$psql_bin" || psql_bin="$$(command -v psql || true)"; \
+		test -n "$$psql_bin" || { echo "a psql client is required for an external ADAPTER_TEST_URL" >&2; exit 1; }; \
 		echo "Probing external adapter test database..."; \
-		psql "$(ADAPTER_TEST_URL)" -v ON_ERROR_STOP=1 -Atqc "SELECT 1" >/dev/null || { echo "external ADAPTER_TEST_URL is unreachable" >&2; exit 1; }; \
-		available="$$(psql "$(ADAPTER_TEST_URL)" -v ON_ERROR_STOP=1 -Atqc "SELECT default_version FROM pg_available_extensions WHERE name = 'synchro_pg'")"; \
+		"$$psql_bin" "$(ADAPTER_TEST_URL)" -v ON_ERROR_STOP=1 -Atqc "SELECT 1" >/dev/null || { echo "external ADAPTER_TEST_URL is unreachable" >&2; exit 1; }; \
+		available="$$("$$psql_bin" "$(ADAPTER_TEST_URL)" -v ON_ERROR_STOP=1 -Atqc "SELECT default_version FROM pg_available_extensions WHERE name = 'synchro_pg'")"; \
 		test "$$available" = "$(CURRENT_VERSION)" || { echo "external database offers synchro_pg '$$available', expected '$(CURRENT_VERSION)'" >&2; exit 1; }; \
-		echo "External adapter test database is reachable with synchro_pg $(CURRENT_VERSION)."
+		wal_level="$$("$$psql_bin" "$(ADAPTER_TEST_URL)" -Atqc "SHOW wal_level")"; \
+		test "$$wal_level" = logical || { echo "external database needs wal_level = logical (found '$$wal_level'); set it on the server and restart" >&2; exit 1; }; \
+		preload="$$("$$psql_bin" "$(ADAPTER_TEST_URL)" -Atqc "SHOW shared_preload_libraries")"; \
+		case "$$preload" in *synchro_pg*) ;; *) echo "external database needs synchro_pg in shared_preload_libraries (found '$$preload'); set it on the server and restart" >&2; exit 1 ;; esac; \
+		autostart="$$("$$psql_bin" "$(ADAPTER_TEST_URL)" -Atqc "SHOW synchro.auto_start")"; \
+		test "$$autostart" = on || { echo "external database needs synchro.auto_start = on (found '$$autostart'); set it on the server and restart" >&2; exit 1; }; \
+		worker_db="$$("$$psql_bin" "$(ADAPTER_TEST_URL)" -Atqc "SHOW synchro.database")"; \
+		current_db="$$("$$psql_bin" "$(ADAPTER_TEST_URL)" -Atqc "SELECT current_database()")"; \
+		test "$$worker_db" = "$$current_db" || { echo "external database needs synchro.database = '$$current_db' (found '$$worker_db'); set it on the server and restart" >&2; exit 1; }; \
+		echo "External adapter test database is reachable with synchro_pg $(CURRENT_VERSION) and its worker enabled."
+	@set -eu; \
+		psql_bin="$(PGRX_PSQL)"; test -x "$$psql_bin" || psql_bin="$$(command -v psql)"; \
+		echo "Resetting dedicated external test database contents in place..."; \
+		"$$psql_bin" "$(ADAPTER_TEST_URL)" -v ON_ERROR_STOP=1 -c "DROP EXTENSION IF EXISTS synchro_pg CASCADE" >/dev/null; \
+		"$$psql_bin" "$(ADAPTER_TEST_URL)" -v ON_ERROR_STOP=1 -c "DROP SCHEMA public CASCADE; CREATE SCHEMA public; GRANT ALL ON SCHEMA public TO PUBLIC" >/dev/null
+	@$(MAKE) --no-print-directory adapter-db-prepare ADAPTER_DB_PSQL="$$(test -x "$(PGRX_PSQL)" && echo "$(PGRX_PSQL)" || command -v psql)" ADAPTER_DB_TARGET="$(ADAPTER_TEST_URL)"
+	@set -eu; \
+		psql_bin="$(PGRX_PSQL)"; test -x "$$psql_bin" || psql_bin="$$(command -v psql)"; \
+		prepared=0; \
+		for attempt in $$(seq 1 $(PGRX_READY_TIMEOUT)); do \
+			if [ "$$("$$psql_bin" "$(ADAPTER_TEST_URL)" -Atqc "SELECT (active_slot_name IS NOT NULL)::text FROM synchro.sync_runtime_state" 2>/dev/null || true)" = "true" ]; then prepared=1; break; fi; \
+			sleep 1; \
+		done; \
+		test "$$prepared" -eq 1 || { echo "external database worker did not prepare on the fresh extension in $(PGRX_READY_TIMEOUT)s" >&2; exit 1; }; \
+		echo "External adapter test database worker is prepared."
+
+adapter-db-prepare:
+	@test -n "$(ADAPTER_DB_PSQL)" || { echo "ADAPTER_DB_PSQL is required" >&2; exit 1; }
+	@test -n "$(ADAPTER_DB_TARGET)" || { echo "ADAPTER_DB_TARGET is required" >&2; exit 1; }
+	@"$(ADAPTER_DB_PSQL)" "$(ADAPTER_DB_TARGET)" -v ON_ERROR_STOP=1 -c "CREATE EXTENSION IF NOT EXISTS synchro_pg CASCADE"
+	@"$(ADAPTER_DB_PSQL)" "$(ADAPTER_DB_TARGET)" -v ON_ERROR_STOP=1 -c "DROP ROLE IF EXISTS $(PGRX_WORKER_LOGIN)"
+	@"$(ADAPTER_DB_PSQL)" "$(ADAPTER_DB_TARGET)" -v ON_ERROR_STOP=1 -c "CREATE ROLE $(PGRX_WORKER_LOGIN) LOGIN REPLICATION NOINHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE"
+	@"$(ADAPTER_DB_PSQL)" "$(ADAPTER_DB_TARGET)" -v ON_ERROR_STOP=1 -c "GRANT synchro_worker TO $(PGRX_WORKER_LOGIN)"
 
 adapter-db-external-teardown:
 	@echo "Leaving external adapter test database unchanged."
@@ -1185,10 +1219,7 @@ adapter-db-local-setup: ext-install
 	fi
 	@$(PGRX_PSQL) -h "$(PGRX_ADMIN_HOST)" -p $(PGRX_PORT) -U "$(PGRX_ADMIN_USER)" -d postgres -c "DROP DATABASE IF EXISTS $(ADAPTER_TEST_DB)" 2>/dev/null || true
 	@$(PGRX_PSQL) -h "$(PGRX_ADMIN_HOST)" -p $(PGRX_PORT) -U "$(PGRX_ADMIN_USER)" -d postgres -c "CREATE DATABASE $(ADAPTER_TEST_DB)"
-	@$(PGRX_PSQL) -h "$(PGRX_ADMIN_HOST)" -p $(PGRX_PORT) -U "$(PGRX_ADMIN_USER)" -d $(ADAPTER_TEST_DB) -c "CREATE EXTENSION IF NOT EXISTS synchro_pg CASCADE"
-	@$(PGRX_PSQL) -v ON_ERROR_STOP=1 -h "$(PGRX_ADMIN_HOST)" -p $(PGRX_PORT) -U "$(PGRX_ADMIN_USER)" -d postgres -c "DROP ROLE IF EXISTS $(PGRX_WORKER_LOGIN)"
-	@$(PGRX_PSQL) -v ON_ERROR_STOP=1 -h "$(PGRX_ADMIN_HOST)" -p $(PGRX_PORT) -U "$(PGRX_ADMIN_USER)" -d postgres -c "CREATE ROLE $(PGRX_WORKER_LOGIN) LOGIN REPLICATION NOINHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS"
-	@$(PGRX_PSQL) -v ON_ERROR_STOP=1 -h "$(PGRX_ADMIN_HOST)" -p $(PGRX_PORT) -U "$(PGRX_ADMIN_USER)" -d postgres -c "GRANT synchro_worker TO $(PGRX_WORKER_LOGIN)"
+	@$(MAKE) --no-print-directory adapter-db-prepare ADAPTER_DB_PSQL="$(PGRX_PSQL)" ADAPTER_DB_TARGET="postgres:///$(ADAPTER_TEST_DB)?host=$(PGRX_ADMIN_HOST)&port=$(PGRX_PORT)&user=$(PGRX_ADMIN_USER)"
 	@if grep -q "^synchro.auto_start" "$(PGRX_DATA_DIR)/postgresql.conf"; then \
 		perl -0pi -e "s/^synchro\.auto_start\s*=.*$$/synchro.auto_start = $(PGRX_AUTOSTART)/m" "$(PGRX_DATA_DIR)/postgresql.conf"; \
 	else \

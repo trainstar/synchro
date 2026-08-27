@@ -43,7 +43,7 @@ func testServerWithConfig(t *testing.T, configure func(*Config)) *httptest.Serve
 
 	dbURL := os.Getenv("TEST_DATABASE_URL")
 	if dbURL == "" {
-		t.Skip("TEST_DATABASE_URL not set (requires PG with synchro_pg extension)")
+		t.Fatal("TEST_DATABASE_URL is required")
 	}
 
 	db, err := sql.Open("pgx", dbURL)
@@ -359,7 +359,7 @@ func TestConnectPassthrough(t *testing.T) {
 func TestRequireCompatibleExtension(t *testing.T) {
 	dbURL := os.Getenv("TEST_DATABASE_URL")
 	if dbURL == "" {
-		t.Skip("TEST_DATABASE_URL not set (requires PG with synchro_pg extension)")
+		t.Fatal("TEST_DATABASE_URL is required")
 	}
 
 	db, err := sql.Open("pgx", dbURL)
@@ -889,7 +889,7 @@ func TestVersionCheckRequiresExactlyOneSupportedHeader(t *testing.T) {
 func TestSchemaMismatch422Body(t *testing.T) {
 	dbURL := os.Getenv("TEST_DATABASE_URL")
 	if dbURL == "" {
-		t.Skip("TEST_DATABASE_URL not set")
+		t.Fatal("TEST_DATABASE_URL is required")
 	}
 
 	db, err := sql.Open("pgx", dbURL)
@@ -981,7 +981,7 @@ func TestSchemaMismatch422Body(t *testing.T) {
 func TestPullSchemaMismatch422Body(t *testing.T) {
 	dbURL := os.Getenv("TEST_DATABASE_URL")
 	if dbURL == "" {
-		t.Skip("TEST_DATABASE_URL not set")
+		t.Fatal("TEST_DATABASE_URL is required")
 	}
 
 	db, err := sql.Open("pgx", dbURL)
@@ -1053,7 +1053,7 @@ func TestRebuildUnsubscribedScopeReturns400(t *testing.T) {
 func TestClosedDatabaseError500(t *testing.T) {
 	dbURL := os.Getenv("TEST_DATABASE_URL")
 	if dbURL == "" {
-		t.Skip("TEST_DATABASE_URL not set")
+		t.Fatal("TEST_DATABASE_URL is required")
 	}
 
 	db, err := sql.Open("pgx", dbURL)
@@ -1078,7 +1078,7 @@ func TestClosedDatabaseError500(t *testing.T) {
 func TestTablesClosedDatabaseError500(t *testing.T) {
 	dbURL := os.Getenv("TEST_DATABASE_URL")
 	if dbURL == "" {
-		t.Skip("TEST_DATABASE_URL not set")
+		t.Fatal("TEST_DATABASE_URL is required")
 	}
 
 	db, err := sql.Open("pgx", dbURL)

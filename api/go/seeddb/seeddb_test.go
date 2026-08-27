@@ -158,7 +158,7 @@ func testPostgres(t *testing.T) *sql.DB {
 
 	dbURL := os.Getenv("TEST_DATABASE_URL")
 	if dbURL == "" {
-		t.Skip("TEST_DATABASE_URL not set")
+		t.Fatal("TEST_DATABASE_URL is required")
 	}
 
 	db, err := sql.Open("pgx", dbURL)
@@ -181,7 +181,7 @@ func manifestMutatingPostgres(
 	t.Helper()
 	dbURL := os.Getenv("TEST_DATABASE_URL")
 	if dbURL == "" {
-		t.Skip("TEST_DATABASE_URL not set")
+		t.Fatal("TEST_DATABASE_URL is required")
 	}
 	config, err := pgx.ParseConfig(dbURL)
 	if err != nil {
@@ -792,7 +792,7 @@ func TestPublishRechecksDestinationSidecars(t *testing.T) {
 func TestVerificationFailureRollsBackExportTransaction(t *testing.T) {
 	dbURL := os.Getenv("TEST_DATABASE_URL")
 	if dbURL == "" {
-		t.Skip("TEST_DATABASE_URL not set")
+		t.Fatal("TEST_DATABASE_URL is required")
 	}
 	config, err := pgx.ParseConfig(dbURL)
 	if err != nil {
