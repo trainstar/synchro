@@ -1915,7 +1915,8 @@
              LIMIT 1",
         )
         .unwrap();
-        let tables = manifest.unwrap().0["tables"].as_array().unwrap().clone();
+        let manifest = manifest.unwrap();
+        let tables = manifest.0["tables"].as_array().unwrap();
         assert!(!tables.iter().any(|table| table["name"] == "test_orders"));
         assert!(tables.iter().any(|table| table["name"] == "test_products"));
     }
@@ -1930,13 +1931,12 @@
             server_time,
             parsed.to_rfc3339_opts(chrono::SecondsFormat::Micros, true)
         );
-        assert_eq!(
+        assert!(
             resp["schema"]
                 .get("version")
                 .and_then(|v| v.as_i64())
                 .unwrap_or(0)
-                > 0,
-            true
+                > 0
         );
         let added_scopes = resp["scopes"]["add"].as_array().unwrap();
         assert!(added_scopes

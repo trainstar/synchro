@@ -107,7 +107,6 @@
                     &[],
                 )
                 .expect("read injected-clock client state")
-                .into_iter()
                 .map(|row| {
                     row.get_by_name::<String, &str>("client_id")
                         .expect("read injected-clock client ID")

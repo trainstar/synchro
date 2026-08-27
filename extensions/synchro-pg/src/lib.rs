@@ -2753,8 +2753,7 @@ mod tests {
     }
 
     fn push_mutation(
-        user_id: &str,
-        client_id: &str,
+        client: (&str, &str),
         mutation_label: &str,
         table_name: &str,
         operation: &str,
@@ -2762,6 +2761,7 @@ mod tests {
         base_version: Option<&str>,
         columns: Option<&[(&str, Value)]>,
     ) -> Value {
+        let (user_id, client_id) = client;
         let mut pk = serde_json::Map::new();
         pk.insert(
             primary_key_field_id(table_name),

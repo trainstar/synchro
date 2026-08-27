@@ -32,8 +32,7 @@
             "cas-matrix",
             vec![
                 push_mutation(
-                    user_id,
-                    client_id,
+                    (user_id, client_id),
                     "cas-absent-insert",
                     "test_orders",
                     "insert",
@@ -42,8 +41,7 @@
                     Some(&[("user_id", json!(user_id)), ("title", json!("created"))]),
                 ),
                 push_mutation(
-                    user_id,
-                    client_id,
+                    (user_id, client_id),
                     "cas-absent-update",
                     "test_orders",
                     "update",
@@ -52,8 +50,7 @@
                     Some(&[("title", json!("missing"))]),
                 ),
                 push_mutation(
-                    user_id,
-                    client_id,
+                    (user_id, client_id),
                     "cas-absent-delete",
                     "test_orders",
                     "delete",
@@ -62,8 +59,7 @@
                     None,
                 ),
                 push_mutation(
-                    user_id,
-                    client_id,
+                    (user_id, client_id),
                     "cas-live-insert",
                     "test_orders",
                     "insert",
@@ -72,8 +68,7 @@
                     Some(&[("user_id", json!(user_id)), ("title", json!("duplicate"))]),
                 ),
                 push_mutation(
-                    user_id,
-                    client_id,
+                    (user_id, client_id),
                     "cas-live-update",
                     "test_orders",
                     "update",
@@ -82,8 +77,7 @@
                     Some(&[("title", json!("updated"))]),
                 ),
                 push_mutation(
-                    user_id,
-                    client_id,
+                    (user_id, client_id),
                     "cas-live-delete",
                     "test_orders",
                     "delete",
@@ -92,8 +86,7 @@
                     None,
                 ),
                 push_mutation(
-                    user_id,
-                    client_id,
+                    (user_id, client_id),
                     "cas-stale-update",
                     "test_orders",
                     "update",
@@ -102,8 +95,7 @@
                     Some(&[("title", json!("stale"))]),
                 ),
                 push_mutation(
-                    user_id,
-                    client_id,
+                    (user_id, client_id),
                     "cas-stale-delete",
                     "test_orders",
                     "delete",
@@ -112,8 +104,7 @@
                     None,
                 ),
                 push_mutation(
-                    user_id,
-                    client_id,
+                    (user_id, client_id),
                     "cas-deleted-insert",
                     "test_orders",
                     "insert",
@@ -122,8 +113,7 @@
                     Some(&[("user_id", json!(user_id)), ("title", json!("revive"))]),
                 ),
                 push_mutation(
-                    user_id,
-                    client_id,
+                    (user_id, client_id),
                     "cas-deleted-update",
                     "test_orders",
                     "update",
@@ -132,8 +122,7 @@
                     Some(&[("title", json!("revive"))]),
                 ),
                 push_mutation(
-                    user_id,
-                    client_id,
+                    (user_id, client_id),
                     "cas-deleted-delete",
                     "test_orders",
                     "delete",
@@ -215,8 +204,7 @@
             client_id,
             "accepted-insert",
             vec![push_mutation(
-                user_id,
-                client_id,
+                (user_id, client_id),
                 "accepted-insert",
                 "test_orders",
                 "insert",
@@ -246,8 +234,7 @@
             client_id,
             "accepted-update",
             vec![push_mutation(
-                user_id,
-                client_id,
+                (user_id, client_id),
                 "accepted-update",
                 "test_orders",
                 "update",
@@ -278,8 +265,7 @@
             client_id,
             "accepted-soft-delete",
             vec![push_mutation(
-                user_id,
-                client_id,
+                (user_id, client_id),
                 "accepted-soft-delete",
                 "test_orders",
                 "delete",
@@ -322,8 +308,7 @@
             client_id,
             "accepted-hard-delete",
             vec![push_mutation(
-                user_id,
-                client_id,
+                (user_id, client_id),
                 "accepted-hard-delete",
                 "test_bare_items",
                 "delete",
@@ -380,8 +365,7 @@
         let equal_version = current_row_version("test_orders", equal_time);
 
         let mut past_update = push_mutation(
-            user_id,
-            client_id,
+            (user_id, client_id),
             "time-past-update",
             "test_orders",
             "update",
@@ -391,8 +375,7 @@
         );
         past_update["client_version"] = json!("2000-01-01T00:00:00.000000Z");
         let mut future_delete_loses = push_mutation(
-            user_id,
-            client_id,
+            (user_id, client_id),
             "time-future-delete-loses",
             "test_orders",
             "delete",
@@ -402,8 +385,7 @@
         );
         future_delete_loses["client_version"] = json!("2099-01-01T00:00:00.000000Z");
         let mut future_delete = push_mutation(
-            user_id,
-            client_id,
+            (user_id, client_id),
             "time-future-delete",
             "test_orders",
             "delete",
@@ -413,8 +395,7 @@
         );
         future_delete["client_version"] = json!("2099-01-01T00:00:00.000000Z");
         let mut equal_update_loses = push_mutation(
-            user_id,
-            client_id,
+            (user_id, client_id),
             "time-equal-update-loses",
             "test_orders",
             "update",
@@ -424,8 +405,7 @@
         );
         equal_update_loses["client_version"] = json!(TEST_CLIENT_VERSION);
         let equal_update = push_mutation(
-            user_id,
-            client_id,
+            (user_id, client_id),
             "time-equal-update",
             "test_orders",
             "update",
@@ -537,8 +517,7 @@
             "columns": never_synced_columns,
         });
         let mut incompatible = push_mutation(
-            user_id,
-            client_id,
+            (user_id, client_id),
             "mixed-schema-incompatible",
             "test_orders",
             "insert",
@@ -564,8 +543,7 @@
             "mixed-outcomes",
             vec![
                 push_mutation(
-                    user_id,
-                    client_id,
+                    (user_id, client_id),
                     "mixed-applied-first",
                     "test_orders",
                     "insert",
@@ -574,8 +552,7 @@
                     Some(&[("user_id", json!(user_id)), ("title", json!("first"))]),
                 ),
                 push_mutation(
-                    user_id,
-                    client_id,
+                    (user_id, client_id),
                     "mixed-conflict",
                     "test_orders",
                     "insert",
@@ -584,8 +561,7 @@
                     Some(&[("user_id", json!(user_id)), ("title", json!("conflict"))]),
                 ),
                 push_mutation(
-                    user_id,
-                    client_id,
+                    (user_id, client_id),
                     "mixed-policy",
                     "test_products",
                     "insert",
@@ -594,8 +570,7 @@
                     Some(&[("name", json!("read only"))]),
                 ),
                 push_mutation(
-                    user_id,
-                    client_id,
+                    (user_id, client_id),
                     "mixed-applied-second",
                     "test_orders",
                     "insert",
@@ -604,8 +579,7 @@
                     Some(&[("user_id", json!(user_id)), ("title", json!("second"))]),
                 ),
                 push_mutation(
-                    user_id,
-                    client_id,
+                    (user_id, client_id),
                     "mixed-validation",
                     "test_orders",
                     "insert",
@@ -729,8 +703,7 @@
             client_id,
             "ledger-conflict",
             vec![push_mutation(
-                user_id,
-                client_id,
+                (user_id, client_id),
                 mutation_label,
                 "test_orders",
                 "insert",
@@ -805,8 +778,7 @@
             "domain-failure",
             vec![
                 push_mutation(
-                    user_id,
-                    client_id,
+                    (user_id, client_id),
                     "domain-valid",
                     "test_orders",
                     "insert",
@@ -815,8 +787,7 @@
                     Some(&[("user_id", json!(user_id)), ("title", json!("valid"))]),
                 ),
                 push_mutation(
-                    user_id,
-                    client_id,
+                    (user_id, client_id),
                     "domain-invalid",
                     "test_checked_orders",
                     "insert",
@@ -883,8 +854,7 @@
             client_id,
             "json-checksum",
             vec![push_mutation(
-                user_id,
-                client_id,
+                (user_id, client_id),
                 "json-checksum",
                 "test_json_orders",
                 "insert",
@@ -915,8 +885,7 @@
         let client_id = "c1";
         register_client(user_id, client_id);
         let valid = push_mutation(
-            user_id,
-            client_id,
+            (user_id, client_id),
             "invalid-shape",
             "test_orders",
             "insert",
@@ -995,8 +964,7 @@
 
         let oversized_title = "x".repeat(66_000);
         let oversized = push_mutation(
-            user_id,
-            client_id,
+            (user_id, client_id),
             "invalid-normalized-size",
             "test_orders",
             "insert",
@@ -1053,8 +1021,7 @@
             client_id,
             "rls-allowed",
             vec![push_mutation(
-                user_id,
-                client_id,
+                (user_id, client_id),
                 "rls-allowed",
                 "test_orders",
                 "insert",
@@ -1070,8 +1037,7 @@
             client_id,
             "rls-rejected",
             vec![push_mutation(
-                user_id,
-                client_id,
+                (user_id, client_id),
                 "rls-rejected",
                 "test_orders",
                 "insert",
@@ -1130,8 +1096,7 @@
             client_id,
             "policy-invalid-authored",
             vec![push_mutation(
-                user_id,
-                client_id,
+                (user_id, client_id),
                 "policy-invalid-authored",
                 "test_orders",
                 "insert",
@@ -1160,8 +1125,7 @@
             "c1",
             "schema-mismatch",
             vec![push_mutation(
-                "u1",
-                "c1",
+                ("u1", "c1"),
                 "schema-mismatch",
                 "test_orders",
                 "insert",

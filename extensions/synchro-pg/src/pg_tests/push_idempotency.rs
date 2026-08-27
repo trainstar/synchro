@@ -19,8 +19,7 @@
             client_id,
             "completed-replay",
             vec![push_mutation(
-                user_id,
-                client_id,
+                (user_id, client_id),
                 "completed-replay",
                 "test_orders",
                 "insert",
@@ -66,8 +65,7 @@
             client_id,
             "same-batch",
             vec![push_mutation(
-                user_id,
-                client_id,
+                (user_id, client_id),
                 "same-batch",
                 "test_orders",
                 "insert",
@@ -85,8 +83,7 @@
             client_id,
             "same-batch",
             vec![push_mutation(
-                user_id,
-                client_id,
+                (user_id, client_id),
                 "same-batch",
                 "test_orders",
                 "insert",
@@ -116,8 +113,7 @@
             client_id,
             "mutation-first",
             vec![push_mutation(
-                user_id,
-                client_id,
+                (user_id, client_id),
                 "reused-mutation",
                 "test_orders",
                 "insert",
@@ -141,8 +137,7 @@
             client_id,
             "mutation-second",
             vec![push_mutation(
-                user_id,
-                client_id,
+                (user_id, client_id),
                 "reused-mutation",
                 "test_orders",
                 "insert",
@@ -193,8 +188,7 @@
             client_id,
             "changed-mutation-first",
             vec![push_mutation(
-                user_id,
-                client_id,
+                (user_id, client_id),
                 "changed-mutation",
                 "test_orders",
                 "insert",
@@ -213,8 +207,7 @@
             client_id,
             "changed-mutation-second",
             vec![push_mutation(
-                user_id,
-                client_id,
+                (user_id, client_id),
                 "changed-mutation",
                 "test_orders",
                 "insert",
@@ -251,8 +244,7 @@
             "stale-generation",
             1,
             vec![push_mutation(
-                user_id,
-                client_id,
+                (user_id, client_id),
                 "stale-generation",
                 "test_orders",
                 "insert",
@@ -284,8 +276,7 @@
             client_id,
             batch_label,
             vec![push_mutation(
-                user_id,
-                client_id,
+                (user_id, client_id),
                 mutation_label,
                 "test_orders",
                 "insert",

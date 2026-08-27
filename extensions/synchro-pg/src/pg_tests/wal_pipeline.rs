@@ -22,8 +22,7 @@
                 client_id,
                 label,
                 vec![push_mutation(
-                    user_id,
-                    client_id,
+                    (user_id, client_id),
                     label,
                     "test_orders",
                     "insert",
