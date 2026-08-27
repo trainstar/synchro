@@ -287,17 +287,16 @@ fn projection_bootstrap_runtime_reads_are_worker_only() {
                  SELECT oid FROM pg_catalog.pg_roles WHERE rolname = 'synchro_owner'
              ) owner_role
              WHERE namespace.nspname = 'synchro'
-               AND procedure.proname IN (
-                   'synchro_projection_bootstrap_active_stream',
-                    'synchro_projection_bootstrap_main_boundary',
-                    'synchro_projection_bootstrap_slot_absent',
-                    'synchro_projection_bootstrap_slot_drop_state',
-                    'synchro_projection_bootstrap_next_aborted_slot',
-                   'synchro_projection_bootstrap_is_activated',
-                   'synchro_projection_bootstrap_interrupted'
-               )
-         )
-         SELECT count(*) = 7
+                AND procedure.proname IN (
+                    'synchro_projection_bootstrap_active_stream',
+                     'synchro_projection_bootstrap_main_boundary',
+                     'synchro_projection_bootstrap_slot_absent',
+                     'synchro_projection_bootstrap_next_aborted_slot',
+                    'synchro_projection_bootstrap_is_activated',
+                    'synchro_projection_bootstrap_interrupted'
+                )
+          )
+          SELECT count(*) = 6
                 AND bool_and(prosecdef)
                 AND bool_and(owned_by_synchro_owner)
                 AND bool_and(fixed_path)
@@ -314,6 +313,43 @@ fn projection_bootstrap_runtime_reads_are_worker_only() {
     )
     .expect("projection bootstrap runtime read authorization query");
     assert_eq!(protected, Some(true));
+}
+
+#[pg_test]
+fn operator_can_inspect_candidate_slot_only() {
+    let candidate_slot = "synchro_operator_candidate";
+    assert!(has_function_privilege(
+        "synchro_operator",
+        "synchro.synchro_projection_bootstrap_slot_drop_state(text)"
+    ));
+    assert!(has_function_privilege(
+        "synchro_worker",
+        "synchro.synchro_projection_bootstrap_slot_drop_state(text)"
+    ));
+    assert!(!has_function_privilege(
+        "synchro_adapter",
+        "synchro.synchro_projection_bootstrap_slot_drop_state(text)"
+    ));
+    Spi::run("SET LOCAL ROLE synchro_operator").expect("select operator role");
+    let slot_state: pgrx::JsonB = Spi::get_one_with_args(
+        "SELECT synchro.synchro_projection_bootstrap_slot_drop_state($1)",
+        &[candidate_slot.into()],
+    )
+    .expect("inspect candidate slot as operator")
+    .expect("candidate slot state");
+    let active_stream_allowed = PgTryBuilder::new(std::panic::AssertUnwindSafe(|| {
+        Spi::get_one::<pgrx::JsonB>("SELECT synchro.synchro_projection_bootstrap_active_stream()")
+            .is_ok()
+    }))
+    .catch_others(|_| false)
+    .execute();
+    Spi::run("RESET ROLE").expect("restore test role");
+
+    assert_eq!(
+        slot_state.0,
+        serde_json::json!({"present": false, "active": false, "valid": true})
+    );
+    assert!(!active_stream_allowed);
 }
 
 #[pg_test]

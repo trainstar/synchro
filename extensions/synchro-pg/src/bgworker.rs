@@ -514,16 +514,20 @@ fn poll_worker_once(
 ) {
     let mut blocked = false;
     match validated_runtime_capture_identity() {
-        Ok(identity) if identity != decoder_state.identity => match fresh_decoder_for(identity) {
-            Ok(fresh) => *decoder_state = fresh,
-            Err(error) => {
-                if !*transient_failure_logged {
-                    log!("synchro WAL runtime decoder refresh blocked: {error}");
-                    *transient_failure_logged = true;
+        Ok(identity) if identity != decoder_state.identity => {
+            let refreshed = retire_prior_generation_poison_for_worker(&identity.stream_generation)
+                .and_then(|_| fresh_decoder_for(identity));
+            match refreshed {
+                Ok(fresh) => *decoder_state = fresh,
+                Err(error) => {
+                    if !*transient_failure_logged {
+                        log!("synchro WAL runtime decoder refresh blocked: {error}");
+                        *transient_failure_logged = true;
+                    }
+                    blocked = true;
                 }
-                blocked = true;
             }
-        },
+        }
         Ok(_) => {}
         Err(error) => {
             if !*transient_failure_logged {
@@ -533,9 +537,13 @@ fn poll_worker_once(
             blocked = true;
         }
     }
-    if !blocked && active_poison_state().unwrap_or((true, false)).0 {
+    if !blocked
+        && active_poison_state(&decoder_state.identity.stream_generation)
+            .unwrap_or((true, false))
+            .0
+    {
         blocked = true;
-        if retry_requested().unwrap_or(false) {
+        if retry_requested(&decoder_state.identity.stream_generation).unwrap_or(false) {
             if let Ok(fresh) = fresh_decoder() {
                 *decoder_state = fresh;
                 blocked = false;
@@ -636,6 +644,11 @@ fn synchro_retry_wal_poison() -> bool {
                 "UPDATE synchro.sync_wal_poison
                  SET retry_requested_at = now()
                  WHERE lifecycle = 'active'
+                   AND stream_generation = (
+                       SELECT stream_generation
+                       FROM synchro.sync_runtime_state
+                       WHERE singleton
+                   )
                    AND failure_class <> 'truncate_unsupported'",
                 None,
                 &[],
@@ -800,6 +813,8 @@ fn initialize_worker(database: &str, worker_login_oid: i64) -> Result<(), String
                 &[slot.as_str().into()],
             )
             .map_err(|_| "storing active slot failed".to_string())?;
+        let stream_generation = active_stream_generation(client)?;
+        retire_prior_generation_poison(client, &stream_generation)?;
         client
             .update(
                 "UPDATE synchro.sync_wal_progress progress
@@ -5068,16 +5083,19 @@ fn persist_poison(failure: PoisonFailure) -> Result<(), String> {
     run_worker_transaction(|| {
         Spi::connect_mut(|client| {
             let stream = active_stream_generation(client)?;
+            retire_prior_generation_poison(client, &stream)?;
             client
                 .update(
                     "INSERT INTO synchro.sync_wal_poison (
                          stream_generation, commit_lsn, failure_class,
                          relation_id, lifecycle, poisoned_at, attempt_count
                      )
-                     SELECT $1, $2::pg_lsn, $3, $4::uuid, 'active', now(), 1
-                     WHERE NOT EXISTS (
-                         SELECT 1 FROM synchro.sync_wal_poison WHERE lifecycle = 'active'
-                     )",
+                      SELECT $1, $2::pg_lsn, $3, $4::uuid, 'active', now(), 1
+                      WHERE NOT EXISTS (
+                          SELECT 1
+                          FROM synchro.sync_wal_poison
+                          WHERE lifecycle = 'active' AND stream_generation = $1
+                      )",
                     None,
                     &[
                         stream.as_str().into(),
@@ -5189,22 +5207,47 @@ fn repair_same_position_poison(
     Ok(())
 }
 
-fn active_poison_state() -> Result<(bool, bool), String> {
+pub(crate) fn retire_prior_generation_poison(
+    client: &mut SpiClient<'_>,
+    stream_generation: &str,
+) -> Result<usize, String> {
+    client
+        .update(
+            "UPDATE synchro.sync_wal_poison
+             SET lifecycle = 'reset', resolved_at = now()
+             WHERE lifecycle = 'active' AND stream_generation <> $1",
+            None,
+            &[stream_generation.into()],
+        )
+        .map(|updated| updated.len())
+        .map_err(|_| "retiring prior stream WAL poison failed".to_string())
+}
+
+fn retire_prior_generation_poison_for_worker(stream_generation: &str) -> Result<usize, String> {
+    run_worker_transaction(|| {
+        Spi::connect_mut(|client| retire_prior_generation_poison(client, stream_generation))
+    })
+}
+
+pub(crate) fn active_poison_state(stream_generation: &str) -> Result<(bool, bool), String> {
     run_worker_transaction(|| {
         Spi::connect_mut(|client| {
             let row = client
                 .select(
                     "SELECT EXISTS (
-                         SELECT 1 FROM synchro.sync_wal_poison WHERE lifecycle = 'active'
-                     ) AS active,
-                     EXISTS (
-                         SELECT 1 FROM synchro.sync_wal_poison
-                         WHERE lifecycle = 'active'
-                           AND retry_requested_at IS NOT NULL
-                           AND failure_class <> 'truncate_unsupported'
-                     ) AS repairable",
+                          SELECT 1
+                          FROM synchro.sync_wal_poison
+                          WHERE lifecycle = 'active' AND stream_generation = $1
+                      ) AS active,
+                      EXISTS (
+                          SELECT 1 FROM synchro.sync_wal_poison
+                          WHERE lifecycle = 'active'
+                            AND stream_generation = $1
+                            AND retry_requested_at IS NOT NULL
+                            AND failure_class <> 'truncate_unsupported'
+                      ) AS repairable",
                     None,
-                    &[],
+                    &[stream_generation.into()],
                 )
                 .map_err(|_| "loading WAL poison failed".to_string())?
                 .first();
@@ -5221,8 +5264,8 @@ fn active_poison_state() -> Result<(bool, bool), String> {
     })
 }
 
-fn retry_requested() -> Result<bool, String> {
-    active_poison_state().map(|state| state.1)
+fn retry_requested(stream_generation: &str) -> Result<bool, String> {
+    active_poison_state(stream_generation).map(|state| state.1)
 }
 
 fn heartbeat(state: &str) -> Result<(), String> {

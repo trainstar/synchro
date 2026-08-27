@@ -1325,8 +1325,9 @@ CREATE TABLE IF NOT EXISTS sync_wal_poison (
     attempt_count BIGINT NOT NULL DEFAULT 1 CHECK (attempt_count > 0),
     CHECK ((lifecycle = 'active') = (resolved_at IS NULL))
 );
-CREATE UNIQUE INDEX IF NOT EXISTS idx_sync_wal_one_active_poison
-    ON sync_wal_poison ((lifecycle)) WHERE lifecycle = 'active';
+DROP INDEX IF EXISTS idx_sync_wal_one_active_poison;
+CREATE UNIQUE INDEX idx_sync_wal_one_active_poison
+    ON sync_wal_poison (stream_generation) WHERE lifecycle = 'active';
 
 CREATE TABLE IF NOT EXISTS sync_wal_worker_state (
     worker_id TEXT PRIMARY KEY,
@@ -2301,7 +2302,7 @@ AS 'MODULE_PATHNAME', 'synchro_unregister_table_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- synchro-pg/src/lib.rs:1821
+-- synchro-pg/src/lib.rs:1822
 -- finalize
 
 DO $roles$
@@ -2476,6 +2477,9 @@ BEGIN
             EXECUTE pg_catalog.format('GRANT EXECUTE ON FUNCTION %s TO synchro_monitor', object_identity);
         END IF;
         IF function_record.proname = 'synchro_health_detail' THEN
+            EXECUTE pg_catalog.format('GRANT EXECUTE ON FUNCTION %s TO synchro_operator', object_identity);
+        END IF;
+        IF function_record.proname = 'synchro_projection_bootstrap_slot_drop_state' THEN
             EXECUTE pg_catalog.format('GRANT EXECUTE ON FUNCTION %s TO synchro_operator', object_identity);
         END IF;
     END LOOP;

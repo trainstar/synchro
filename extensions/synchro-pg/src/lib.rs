@@ -1351,8 +1351,9 @@ CREATE TABLE IF NOT EXISTS sync_wal_poison (
     attempt_count BIGINT NOT NULL DEFAULT 1 CHECK (attempt_count > 0),
     CHECK ((lifecycle = 'active') = (resolved_at IS NULL))
 );
-CREATE UNIQUE INDEX IF NOT EXISTS idx_sync_wal_one_active_poison
-    ON sync_wal_poison ((lifecycle)) WHERE lifecycle = 'active';
+DROP INDEX IF EXISTS idx_sync_wal_one_active_poison;
+CREATE UNIQUE INDEX idx_sync_wal_one_active_poison
+    ON sync_wal_poison (stream_generation) WHERE lifecycle = 'active';
 
 CREATE TABLE IF NOT EXISTS sync_wal_worker_state (
     worker_id TEXT PRIMARY KEY,
@@ -1946,7 +1947,7 @@ BEGIN
                  'synchro_projection_bootstrap_active_stream',
                  'synchro_projection_bootstrap_main_boundary',
                  'synchro_projection_bootstrap_slot_absent',
-                 'synchro_projection_bootstrap_slot_drop_state',
+                  'synchro_projection_bootstrap_slot_drop_state',
                  'synchro_projection_bootstrap_next_aborted_slot',
                  'synchro_projection_bootstrap_is_activated',
                  'synchro_projection_bootstrap_interrupted'
@@ -1970,7 +1971,7 @@ BEGIN
                  'synchro_activate_projection_bootstrap',
                  'synchro_projection_bootstrap_status',
                  'synchro_abort_projection_bootstrap',
-                 'synchro_complete_projection_bootstrap_cleanup'
+                  'synchro_complete_projection_bootstrap_cleanup'
              ) THEN 'synchro_operator'
             ELSE NULL
         END;
@@ -1992,6 +1993,9 @@ BEGIN
             EXECUTE pg_catalog.format('GRANT EXECUTE ON FUNCTION %s TO synchro_monitor', object_identity);
         END IF;
         IF function_record.proname = 'synchro_health_detail' THEN
+            EXECUTE pg_catalog.format('GRANT EXECUTE ON FUNCTION %s TO synchro_operator', object_identity);
+        END IF;
+        IF function_record.proname = 'synchro_projection_bootstrap_slot_drop_state' THEN
             EXECUTE pg_catalog.format('GRANT EXECUTE ON FUNCTION %s TO synchro_operator', object_identity);
         END IF;
     END LOOP;

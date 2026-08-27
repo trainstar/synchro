@@ -261,6 +261,92 @@
     }
 
     #[pg_test]
+    fn prior_generation_poison_does_not_block_current() {
+        let current_generation: String = Spi::get_one(
+            "SELECT stream_generation FROM synchro.sync_runtime_state WHERE singleton",
+        )
+        .expect("load current poison generation")
+        .expect("current poison generation");
+        let prior_generation = format!("{current_generation}-prior");
+        Spi::run(
+            "CREATE ROLE synchro_poison_scope_worker
+                 LOGIN REPLICATION NOINHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS;
+             GRANT synchro_worker TO synchro_poison_scope_worker",
+        )
+        .expect("provision poison scope worker");
+        let database: String = Spi::get_one("SELECT current_database()::text")
+            .expect("load poison scope database")
+            .expect("poison scope database");
+        let configuration = crate::health::ReadinessConfiguration {
+            database: Some(database),
+            publication: Some("synchro_pub".to_string()),
+            replication_slot: Some("synchro_poison_scope_slot".to_string()),
+            worker_login: Some("synchro_poison_scope_worker".to_string()),
+            max_heartbeat_age_seconds: 30,
+            max_wal_lag_bytes: i32::MAX,
+            max_wal_lag_seconds: 30,
+        };
+        Spi::run_with_args(
+            "INSERT INTO synchro.sync_wal_poison (
+                 stream_generation, commit_lsn, failure_class, lifecycle
+             ) VALUES ($1, '0/1', 'validation_failed', 'active')",
+            &[prior_generation.as_str().into()],
+        )
+        .expect("create prior generation poison");
+
+        let prior_detail = crate::health::load_readiness_status_with_configuration(
+            configuration.clone(),
+        )
+        .detail();
+        assert_eq!(prior_detail["checks"]["poison"]["state"], "ok");
+        assert_eq!(
+            crate::bgworker::active_poison_state(&current_generation)
+                .expect("read current poison state"),
+            (false, false)
+        );
+        let retired = Spi::connect_mut(|client| {
+            crate::bgworker::retire_prior_generation_poison(client, &current_generation)
+        })
+        .expect("retire prior generation poison");
+        assert_eq!(retired, 1);
+        let prior_retired: Option<bool> = Spi::get_one_with_args(
+            "SELECT lifecycle = 'reset' AND resolved_at IS NOT NULL
+             FROM synchro.sync_wal_poison
+             WHERE stream_generation = $1",
+            &[prior_generation.as_str().into()],
+        )
+        .expect("read retired poison lifecycle");
+        assert_eq!(prior_retired, Some(true));
+
+        Spi::run_with_args(
+            "INSERT INTO synchro.sync_wal_poison (
+                 stream_generation, commit_lsn, failure_class, lifecycle
+             ) VALUES ($1, '0/2', 'validation_failed', 'active')",
+            &[current_generation.as_str().into()],
+        )
+        .expect("create current generation poison");
+        let current_detail = crate::health::load_readiness_status_with_configuration(configuration).detail();
+        assert_eq!(current_detail["checks"]["poison"]["state"], "failed");
+        assert_eq!(
+            crate::bgworker::active_poison_state(&current_generation)
+                .expect("read current poison block"),
+            (true, false)
+        );
+        Spi::run_with_args(
+            "UPDATE synchro.sync_wal_poison
+             SET lifecycle = 'reset', resolved_at = now()
+             WHERE lifecycle = 'active' AND stream_generation = $1",
+            &[current_generation.as_str().into()],
+        )
+        .expect("retire current poison test state");
+        Spi::run(
+            "REVOKE synchro_worker FROM synchro_poison_scope_worker;
+             DROP ROLE synchro_poison_scope_worker",
+        )
+        .expect("remove poison scope worker");
+    }
+
+    #[pg_test]
     fn public_readiness_is_generic_and_fail_closed_without_limits() {
         let readiness: pgrx::JsonB = Spi::get_one("SELECT synchro.synchro_readiness()")
             .expect("query public readiness")

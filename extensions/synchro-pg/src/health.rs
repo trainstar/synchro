@@ -360,6 +360,7 @@ SELECT
         NOT EXISTS (
             SELECT 1
             FROM synchro.sync_wal_poison poison
+            JOIN runtime ON poison.stream_generation = runtime.stream_generation
             WHERE poison.lifecycle = 'active'
         )
     ) AS poison_clear,
@@ -457,9 +458,10 @@ SELECT
                 )::double precision
             WHEN worker.wal_observed_at IS NOT NULL
                  AND NOT EXISTS (
-                     SELECT 1
-                     FROM synchro.sync_wal_poison poison
-                     WHERE poison.lifecycle = 'active'
+                      SELECT 1
+                      FROM synchro.sync_wal_poison poison
+                      JOIN runtime ON poison.stream_generation = runtime.stream_generation
+                      WHERE poison.lifecycle = 'active'
                  ) THEN 0::double precision
             ELSE NULL
         END
