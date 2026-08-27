@@ -1,3 +1,6 @@
+// Package syntheticproof contains layer-6 harness self-tests and negative controls.
+// It is not an authoritative server-proof path. Real server behavior belongs to
+// the TestReal* mappings in blackbox/integration/real_proof_map_test.go.
 package syntheticproof
 
 import (

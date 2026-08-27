@@ -42,11 +42,13 @@ var requiredServerProofs = map[string][]string{
 	"SCN-MEMBERSHIP-REASSIGNMENT-001":    {"OBL-MEMBERSHIP-REASSIGNMENT-PG-LINUX-X64-001", "OBL-MEMBERSHIP-REASSIGNMENT-PG-MACOS-ARM64-001"},
 }
 
+// serverProofBindings is the sole server-proof map. Synthetic harness runs are
+// layer-6 self-tests and negative controls, so they must not enter this map.
 var serverProofBindings = []serverProofBinding{
-	{"SCN-PERF-CONFIGURED-BOUNDS-001", "OBL-PERF-CONFIGURED-BOUNDS-PG-LINUX-X64-001", "TestRealConfiguredBoundsMeasurement"},
-	{"SCN-PERF-CONFIGURED-BOUNDS-001", "OBL-PERF-CONFIGURED-BOUNDS-PG-MACOS-ARM64-001", "TestRealConfiguredBoundsMeasurement"},
 	{"SCN-WAL-ORDER-001", "OBL-WAL-ORDER-PG-LINUX-X64-001", "TestRealWALPipeline"},
 	{"SCN-WAL-ORDER-001", "OBL-WAL-ORDER-PG-MACOS-ARM64-001", "TestRealWALPipeline"},
+	{"SCN-PERF-CONFIGURED-BOUNDS-001", "OBL-PERF-CONFIGURED-BOUNDS-PG-LINUX-X64-001", "TestRealConfiguredBoundsMeasurement"},
+	{"SCN-PERF-CONFIGURED-BOUNDS-001", "OBL-PERF-CONFIGURED-BOUNDS-PG-MACOS-ARM64-001", "TestRealConfiguredBoundsMeasurement"},
 	{"SCN-PULL-DIVERGENT-CHECKPOINTS-001", "OBL-PULL-DIVERGENT-PG-LINUX-X64-001", "TestRealS02DivergentPullPaginationIsStarvationFree"},
 	{"SCN-PULL-DIVERGENT-CHECKPOINTS-001", "OBL-PULL-DIVERGENT-PG-MACOS-ARM64-001", "TestRealS02DivergentPullPaginationIsStarvationFree"},
 	{"SCN-PULL-HYDRATION-FAILURE-001", "OBL-PULL-HYDRATION-PG-LINUX-X64-001", "TestRealS03PullHydrationFailurePreservesCursors"},
@@ -101,6 +103,10 @@ func TestServerProofMapRejectsDrift(t *testing.T) {
 	}{
 		{"renamed real test", "proof binding SCN-WAL-ORDER-001|OBL-WAL-ORDER-PG-LINUX-X64-001 names unknown real test TestRealRenamed", func(bindings []serverProofBinding, classifications map[string]string, declarations map[string]realTestDeclaration) ([]serverProofBinding, map[string]string, map[string]realTestDeclaration) {
 			bindings[0].testName = "TestRealRenamed"
+			return bindings, classifications, declarations
+		}},
+		{"synthetic harness test", "proof binding SCN-WAL-ORDER-001|OBL-WAL-ORDER-PG-LINUX-X64-001 names non-real test TestRunSyntheticHarnessDetectsSemanticFaults", func(bindings []serverProofBinding, classifications map[string]string, declarations map[string]realTestDeclaration) ([]serverProofBinding, map[string]string, map[string]realTestDeclaration) {
+			bindings[0].testName = "TestRunSyntheticHarnessDetectsSemanticFaults"
 			return bindings, classifications, declarations
 		}},
 		{"duplicate binding", "duplicate proof binding SCN-WAL-ORDER-001|OBL-WAL-ORDER-PG-LINUX-X64-001", func(bindings []serverProofBinding, classifications map[string]string, declarations map[string]realTestDeclaration) ([]serverProofBinding, map[string]string, map[string]realTestDeclaration) {
