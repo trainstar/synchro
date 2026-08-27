@@ -84,6 +84,12 @@ export default defineConfig({
 						{ label: 'Support Policy', slug: 'reference/support-policy' },
 					],
 				},
+				{
+					label: 'Operations',
+					items: [
+						{ label: 'Configuration', slug: 'operations/configuration' },
+					],
+				},
 			],
 		}),
 	],
