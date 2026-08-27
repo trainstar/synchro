@@ -552,6 +552,67 @@
         assert_ne!(second_version, first_version);
     }
 
+    #[pg_test]
+    fn worker_runtime_identity_rejects_recreated_state() {
+        setup_test_tables();
+        let original = Spi::connect(|client| {
+            let row = client
+                .select(
+                    "SELECT stream_generation, active_slot_name::text AS active_slot_name
+                     FROM synchro.sync_runtime_state WHERE singleton",
+                    None,
+                    &[],
+                )?
+                .first();
+            Ok::<_, pgrx::spi::Error>(
+                (
+                    row.get_by_name::<String, &str>("stream_generation")?,
+                    row.get_by_name::<String, &str>("active_slot_name")?,
+                ),
+            )
+        })
+        .expect("load original runtime identity");
+        let original_generation = original.0.expect("original stream generation");
+        let original_slot = original.1;
+        let expected_slot = "synchro_worker_identity";
+        Spi::run_with_args(
+            "UPDATE synchro.sync_runtime_state
+             SET active_slot_name = $1, updated_at = now()
+             WHERE singleton",
+            &[expected_slot.into()],
+        )
+        .expect("set worker identity slot");
+
+        let (identity, _) = Spi::connect(|client| {
+            crate::bgworker::capture_worker_runtime_identity(client, "unused")
+        })
+        .expect("capture worker runtime identity");
+        let unchanged = Spi::connect(|client| {
+            crate::bgworker::validate_worker_runtime_identity(client, &identity)
+        });
+        assert!(unchanged.is_ok(), "unchanged runtime identity must validate");
+
+        Spi::run_with_args(
+            "UPDATE synchro.sync_runtime_state
+             SET stream_generation = $1, updated_at = now()
+             WHERE singleton",
+            &["recreated-worker-runtime".into()],
+        )
+        .expect("replace runtime stream generation");
+        let recreated = Spi::connect(|client| {
+            crate::bgworker::validate_worker_runtime_identity(client, &identity)
+        });
+        assert!(recreated.is_err(), "recreated runtime state must invalidate identity");
+
+        Spi::run_with_args(
+            "UPDATE synchro.sync_runtime_state
+             SET stream_generation = $1, active_slot_name = $2, updated_at = now()
+             WHERE singleton",
+            &[original_generation.into(), original_slot.into()],
+        )
+        .expect("restore runtime identity");
+    }
+
     fn backfill_scope_generation(scope_id: &str) -> i64 {
         Spi::get_one_with_args(
             "SELECT membership_generation

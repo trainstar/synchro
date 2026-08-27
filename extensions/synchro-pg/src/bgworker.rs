@@ -120,10 +120,17 @@ struct MaterializedTransaction {
     end_lsn: u64,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct WorkerIdentity {
     session_login_oid: i64,
     worker_role_oid: pg_sys::Oid,
+    runtime: WorkerRuntimeIdentity,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+pub(crate) struct WorkerRuntimeIdentity {
+    stream_generation: String,
+    slot_name: String,
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -347,7 +354,8 @@ pub extern "C-unwind" fn synchro_wal_worker_main(_arg: pg_sys::Datum) {
 
     let mut decoder_failure_logged = false;
     let mut decoder_state = loop {
-        if validate_worker_authorization(&worker_login, identity.worker_role_oid).is_err() {
+        if let Err(error) = validate_worker_authorization(&worker_login, &identity) {
+            log!("synchro WAL worker identity changed: {error}");
             return;
         }
         match fresh_decoder() {
@@ -370,7 +378,8 @@ pub extern "C-unwind" fn synchro_wal_worker_main(_arg: pg_sys::Datum) {
     let mut poll_gate_failure_logged = false;
 
     while BackgroundWorker::wait_latch(Some(std::time::Duration::from_millis(IDLE_POLL_MS))) {
-        if validate_worker_authorization(&worker_login, identity.worker_role_oid).is_err() {
+        if let Err(error) = validate_worker_authorization(&worker_login, &identity) {
+            log!("synchro WAL worker identity changed: {error}");
             return;
         }
         if let Err(error) = acquire_worker_poll_gate() {
@@ -540,12 +549,16 @@ fn synchro_retry_wal_poison() -> bool {
 
 fn validate_worker_authorization(
     worker_login: &str,
-    expected_worker_role_oid: pg_sys::Oid,
+    expected_identity: &WorkerIdentity,
 ) -> Result<(), String> {
     run_worker_transaction(|| {
         Spi::connect(|client| {
-            let identity = validated_worker_identity(client, worker_login)?;
-            if identity.worker_role_oid != expected_worker_role_oid {
+            validate_worker_runtime_identity(client, &expected_identity.runtime)?;
+            let (session_login_oid, worker_role_oid) =
+                validated_worker_identity(client, worker_login)?;
+            if session_login_oid != expected_identity.session_login_oid
+                || worker_role_oid != expected_identity.worker_role_oid
+            {
                 return Err("worker group role identity changed".to_string());
             }
             Ok(())
@@ -556,7 +569,7 @@ fn validate_worker_authorization(
 fn validated_worker_identity(
     client: &SpiClient<'_>,
     worker_login: &str,
-) -> Result<WorkerIdentity, String> {
+) -> Result<(i64, pg_sys::Oid), String> {
     let validation = crate::health::validate_worker_login(client, worker_login)?;
     if !validation.is_valid() {
         return Err("worker login authorization is invalid".to_string());
@@ -588,10 +601,7 @@ fn validated_worker_identity(
         .map(pg_sys::Oid::from)
         .filter(|oid| *oid != pg_sys::InvalidOid)
         .ok_or_else(|| "worker group role is invalid".to_string())?;
-    Ok(WorkerIdentity {
-        session_login_oid: session_user_oid,
-        worker_role_oid,
-    })
+    Ok((session_user_oid, worker_role_oid))
 }
 
 fn activate_worker_role(worker_role_oid: pg_sys::Oid) {
@@ -607,14 +617,18 @@ fn activate_session_login() {
 fn prepare_worker(database: &str, worker_login: &str) -> Result<WorkerIdentity, String> {
     let configured_slot = configured_replication_slot();
     Spi::connect_mut(|client| {
-        let identity = validated_worker_identity(client, worker_login)?;
+        let (session_login_oid, worker_role_oid) = validated_worker_identity(client, worker_login)?;
         let (_, connected_database) = connected_database(client, database)?;
-        activate_worker_role(identity.worker_role_oid);
-        let resolved = resolved_slot_name(client, &configured_slot);
+        activate_worker_role(worker_role_oid);
+        let runtime = capture_worker_runtime_identity(client, &configured_slot);
         activate_session_login();
-        let (slot, bootstrap) = resolved?;
-        ensure_slot(client, &slot, &connected_database, bootstrap)?;
-        Ok(identity)
+        let (runtime, bootstrap) = runtime?;
+        ensure_slot(client, &runtime.slot_name, &connected_database, bootstrap)?;
+        Ok(WorkerIdentity {
+            session_login_oid,
+            worker_role_oid,
+            runtime,
+        })
     })
 }
 
@@ -719,30 +733,94 @@ pub(crate) fn effective_slot_name(
     client: &SpiClient<'_>,
     configured_slot: &str,
 ) -> Result<String, String> {
-    resolved_slot_name(client, configured_slot).map(|resolved| resolved.0)
+    capture_worker_runtime_identity(client, configured_slot).map(|(identity, _)| identity.slot_name)
 }
 
-fn resolved_slot_name(
+pub(crate) fn capture_worker_runtime_identity(
     client: &SpiClient<'_>,
     configured_slot: &str,
-) -> Result<(String, bool), String> {
-    let durable = client
+) -> Result<(WorkerRuntimeIdentity, bool), String> {
+    let row = client
         .select(
-            "SELECT active_slot_name::text AS active_slot_name
+            "SELECT stream_generation,
+                    active_slot_name::text AS active_slot_name
              FROM synchro.sync_runtime_state WHERE singleton = true",
             None,
             &[],
         )
         .map_err(|_| "loading active replication slot failed".to_string())?
-        .first()
+        .first();
+    let stream_generation = row
+        .get_by_name::<String, &str>("stream_generation")
+        .map_err(|_| "loading active replication slot failed".to_string())?
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "active stream generation is unavailable".to_string())?;
+    let active_slot_name = row
         .get_by_name::<String, &str>("active_slot_name")
         .map_err(|_| "loading active replication slot failed".to_string())?;
-    match durable {
-        Some(slot) if !slot.is_empty() => Ok((slot, false)),
-        Some(_) => Err("active replication slot is invalid".to_string()),
-        None if !configured_slot.is_empty() => Ok((configured_slot.to_string(), true)),
-        None => Err("configured replication slot is invalid".to_string()),
+    let (slot_name, bootstrap) = match active_slot_name {
+        Some(slot) if !slot.is_empty() => (slot, false),
+        Some(_) => return Err("active replication slot is invalid".to_string()),
+        None if !configured_slot.is_empty() => (configured_slot.to_string(), true),
+        None => return Err("configured replication slot is invalid".to_string()),
+    };
+    Ok((
+        WorkerRuntimeIdentity {
+            stream_generation,
+            slot_name,
+        },
+        bootstrap,
+    ))
+}
+
+pub(crate) fn validate_worker_runtime_identity(
+    client: &SpiClient<'_>,
+    identity: &WorkerRuntimeIdentity,
+) -> Result<(), String> {
+    let valid = client
+        .select(
+            "SELECT EXISTS (
+                 SELECT 1
+                 FROM pg_catalog.pg_namespace namespace
+                 WHERE namespace.nspname = 'synchro'
+                   AND (
+                       SELECT count(*)
+                       FROM pg_catalog.pg_class class
+                       WHERE class.relnamespace = namespace.oid
+                         AND class.relkind IN ('r', 'p')
+                         AND class.relname IN (
+                             'sync_registry',
+                             'sync_registry_generations',
+                             'sync_runtime_state',
+                             'sync_stream_resets',
+                             'sync_wal_poison',
+                             'sync_wal_progress',
+                             'sync_wal_worker_state'
+                         )
+                   ) = 7
+                   AND EXISTS (
+                       SELECT 1
+                       FROM synchro.sync_runtime_state runtime
+                       WHERE runtime.singleton
+                         AND runtime.stream_generation = $1
+                         AND runtime.active_slot_name::text = $2
+                   )
+             ) AS valid",
+            None,
+            &[
+                identity.stream_generation.as_str().into(),
+                identity.slot_name.as_str().into(),
+            ],
+        )
+        .map_err(|_| "validating worker runtime identity failed".to_string())?
+        .first()
+        .get_by_name::<bool, &str>("valid")
+        .map_err(|_| "validating worker runtime identity failed".to_string())?
+        .unwrap_or(false);
+    if !valid {
+        return Err("worker runtime identity changed".to_string());
     }
+    Ok(())
 }
 
 fn validated_runtime_capture_identity() -> Result<RuntimeCaptureIdentity, String> {
