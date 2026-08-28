@@ -859,8 +859,9 @@ final class PullProcessor: @unchecked Sendable {
         scopeCursorUpdates: [String: String?]
     ) throws {
         let receiptScopeIDs = try Set(SynchroMeta.getSeedReceipts(db).keys)
+        let addedScopeIDs = Set(delta.add.map(\.id))
         for scopeID in receiptScopeIDs {
-            if delta.remove.contains(scopeID) {
+            if delta.remove.contains(scopeID) || addedScopeIDs.contains(scopeID) {
                 continue
             }
             guard scopeCursorUpdates.keys.contains(scopeID) else {

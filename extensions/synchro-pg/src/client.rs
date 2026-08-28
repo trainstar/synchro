@@ -348,6 +348,18 @@ fn synchro_connect(p_user_id: &str, p_request: pgrx::JsonB) -> pgrx::JsonB {
                 )),
             );
         }
+        // A receipted assigned scope without a validated seed position gets a
+        // null cursor, so the client discards the receipt and rebuilds.
+        if let Some(receipts) = request.seed_receipts.as_ref() {
+            for scope_id in receipts.keys() {
+                if request.known_scopes.contains_key(scope_id)
+                    && assigned_scopes.contains(scope_id)
+                    && !seed_positions.contains_key(scope_id)
+                {
+                    scope_cursor_updates.entry(scope_id.clone()).or_insert(None);
+                }
+            }
+        }
 
         let response = ConnectResponse {
             server_time: canonical_server_time(),
