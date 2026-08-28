@@ -155,7 +155,8 @@ fn synchro_register_shared_scope(p_scope_id: &str, p_portable: default!(bool, "f
                  VALUES ($1, $2)
                  ON CONFLICT (scope_id) DO UPDATE
                  SET portable = EXCLUDED.portable,
-                     updated_at = now()",
+                     updated_at = now()
+                  WHERE sync_shared_scopes.portable IS DISTINCT FROM EXCLUDED.portable",
                 None,
                 &[p_scope_id.into(), p_portable.into()],
             )

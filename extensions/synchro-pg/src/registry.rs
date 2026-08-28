@@ -62,7 +62,7 @@ impl PushPolicy {
 ///
 /// `table_name` remains the client-visible logical table name. Physical SQL and
 /// catalog work must use the schema-qualified physical identity fields.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TableRegistration {
     pub registry_generation: i64,
     pub relation_id: String,
@@ -76,6 +76,7 @@ pub struct TableRegistration {
     pub replica_identity: String,
     pub composition: CompositionClass,
     pub membership_function: RegisteredFunction,
+    pub membership_function_fingerprint: Vec<u8>,
     pub max_scope_fanout: i32,
     pub pk_column: String,
     pub pk_type: String,
@@ -424,7 +425,6 @@ fn synchro_register_table(
             physical.oid,
         )?;
 
-        let next_generation = create_next_generation(client, &base)?;
         let retained = existing.as_ref().filter(|registration| {
             registration.physical_schema == physical.schema
                 && registration.physical_relation == physical.relation
@@ -434,21 +434,78 @@ fn synchro_register_table(
                 && registration.pk_type == primary_key.sql_type
                 && registration.pk_portable_type == primary_key.portable_type
         });
+        let preserved_fields = retained
+            .map(|registration| {
+                build_field_registrations(
+                    client,
+                    physical.oid,
+                    &sync_columns,
+                    &primary_key.column,
+                    p_updated_at_col,
+                    p_deleted_at_col,
+                    Some(registration.fields.as_slice()),
+                )
+            })
+            .transpose()?;
+        if let (Some(retained), Some(fields)) = (retained, preserved_fields.as_ref()) {
+            let primary_key_field_id = fields
+                .iter()
+                .find(|field| field.primary_key)
+                .map(|field| field.field_id.clone())
+                .unwrap_or_else(|| pgrx::error!("registered primary key has no field identity"));
+            let candidate = TableRegistration {
+                registry_generation: base.generation,
+                relation_id: retained.relation_id.clone(),
+                registration_kind: RegistrationKind::Synced,
+                table_id: retained.table_id.clone(),
+                primary_key_field_id,
+                table_name: logical_table_name.clone(),
+                physical_schema: physical.schema.clone(),
+                physical_relation: physical.relation.clone(),
+                physical_relation_oid: physical.oid,
+                replica_identity: physical.replica_identity.clone(),
+                composition,
+                membership_function: membership_function.clone(),
+                membership_function_fingerprint: membership_function_fingerprint.clone(),
+                max_scope_fanout,
+                pk_column: primary_key.column.clone(),
+                pk_type: primary_key.sql_type.clone(),
+                pk_portable_type: primary_key.portable_type.clone(),
+                capture_key_columns: vec![p_pk_column.to_string()],
+                updated_at_col: p_updated_at_col.to_string(),
+                deleted_at_col: p_deleted_at_col.to_string(),
+                push_policy: policy.clone(),
+                sync_columns: sync_columns.clone(),
+                exclude_columns: exclude_columns.clone(),
+                has_updated_at,
+                has_deleted_at,
+                fields: fields.clone(),
+                capture_fields: Vec::new(),
+            };
+            if active_registration_content_matches(client, base.generation, &candidate)? {
+                return Ok(());
+            }
+        }
+
+        let next_generation = create_next_generation(client, &base)?;
         let relation_id = retained
             .map(|registration| registration.relation_id.clone())
             .unwrap_or_else(|| new_logical_id(client, "relation"));
         let table_id = retained
             .map(|registration| registration.table_id.clone())
             .unwrap_or_else(|| new_logical_id(client, "table"));
-        let fields = build_field_registrations(
-            client,
-            physical.oid,
-            &sync_columns,
-            &primary_key.column,
-            p_updated_at_col,
-            p_deleted_at_col,
-            retained.map(|registration| registration.fields.as_slice()),
-        )?;
+        let fields = match preserved_fields {
+            Some(fields) => fields,
+            None => build_field_registrations(
+                client,
+                physical.oid,
+                &sync_columns,
+                &primary_key.column,
+                p_updated_at_col,
+                p_deleted_at_col,
+                None,
+            )?,
+        };
         let primary_key_field_id = fields
             .iter()
             .find(|field| field.primary_key)
@@ -560,7 +617,7 @@ fn synchro_register_table(
                 exclude_columns.clone().into(),
                 has_updated_at.into(),
                 has_deleted_at.into(),
-                membership_function_fingerprint.into(),
+                membership_function_fingerprint.clone().into(),
             ],
         )?;
         insert_field_registrations(client, next_generation, &relation_id, &fields)?;
@@ -584,6 +641,7 @@ fn synchro_register_table(
             replica_identity: physical.replica_identity.clone(),
             composition,
             membership_function,
+            membership_function_fingerprint,
             max_scope_fanout,
             pk_column: primary_key.column,
             pk_type: primary_key.sql_type,
@@ -682,13 +740,55 @@ fn synchro_register_capture_dependency(
                 pgrx::error!("physical relation is already registered under a synced table");
             }
         }
-        let relation_id = if let Some(relation_id) = existing.as_ref().and_then(|row| {
+        let existing_relation_id = existing.as_ref().and_then(|row| {
             row.get_by_name::<String, &str>("relation_id")
                 .ok()
                 .flatten()
-        }) {
-            relation_id
-        } else {
+        });
+        let registration_name = format!(
+            "capture_dependency:{}.{}",
+            physical.schema, physical.relation
+        );
+        if let Some(relation_id) = existing_relation_id.as_ref() {
+            let candidate = TableRegistration {
+                registry_generation: base.generation,
+                relation_id: relation_id.clone(),
+                registration_kind: RegistrationKind::CaptureDependency,
+                table_id: String::new(),
+                primary_key_field_id: String::new(),
+                table_name: registration_name.clone(),
+                physical_schema: physical.schema.clone(),
+                physical_relation: physical.relation.clone(),
+                physical_relation_oid: physical.oid,
+                replica_identity: physical.replica_identity.clone(),
+                composition: CompositionClass::SingleScope,
+                membership_function: RegisteredFunction {
+                    oid: 0,
+                    schema: String::new(),
+                    name: String::new(),
+                },
+                membership_function_fingerprint: Vec::new(),
+                max_scope_fanout: 0,
+                pk_column: primary_key.column.clone(),
+                pk_type: primary_key.sql_type.clone(),
+                pk_portable_type: primary_key.portable_type.clone(),
+                capture_key_columns: p_capture_key_columns.clone(),
+                updated_at_col: String::new(),
+                deleted_at_col: String::new(),
+                push_policy: PushPolicy::ReadOnly,
+                sync_columns: Vec::new(),
+                exclude_columns: Vec::new(),
+                has_updated_at: false,
+                has_deleted_at: false,
+                fields: Vec::new(),
+                capture_fields: capture_fields.clone(),
+            };
+            if active_registration_content_matches(client, base.generation, &candidate)? {
+                return Ok(());
+            }
+        }
+        let next_generation = create_next_generation(client, &base)?;
+        let relation_id = existing_relation_id.unwrap_or_else(|| {
             client
                 .update(
                     "INSERT INTO synchro.sync_logical_ids (logical_id, kind)
@@ -696,16 +796,13 @@ fn synchro_register_capture_dependency(
                      RETURNING logical_id::text AS logical_id",
                     None,
                     &[],
-                )?
+                )
+                .unwrap_or_else(|error| pgrx::error!("creating relation ID: {error}"))
                 .first()
-                .get_by_name::<String, &str>("logical_id")?
+                .get_by_name::<String, &str>("logical_id")
+                .unwrap_or_else(|error| pgrx::error!("reading relation ID: {error}"))
                 .unwrap_or_else(|| pgrx::error!("creating relation ID returned no value"))
-        };
-        let registration_name = format!(
-            "capture_dependency:{}.{}",
-            physical.schema, physical.relation
-        );
-        let next_generation = create_next_generation(client, &base)?;
+        });
         client.update(
             "DELETE FROM synchro.sync_registry
              WHERE registry_generation = $1 AND physical_relation_oid = $2::oid",
@@ -762,6 +859,7 @@ fn synchro_register_capture_dependency(
                 schema: String::new(),
                 name: String::new(),
             },
+            membership_function_fingerprint: Vec::new(),
             max_scope_fanout: 0,
             pk_column: primary_key.column,
             pk_type: primary_key.sql_type,
@@ -915,6 +1013,20 @@ fn synchro_register_membership_dependency(
             &impact_function,
         )?;
         let max_impact_rows = validate_impact_row_limit(client, p_max_impact_rows)?;
+
+        if active_membership_dependency_content_matches(
+            client,
+            base.generation,
+            dependency,
+            target,
+            &impact_function,
+            &impact_function_fingerprint,
+            max_impact_rows,
+            &dependency_field_ids,
+            &dependency_columns,
+        )? {
+            return Ok(());
+        }
 
         let next_generation = create_next_generation(client, &base)?;
         client.update(
@@ -3472,10 +3584,11 @@ fn validate_generation_entries(
                 physical_relation_oid::bigint AS physical_relation_oid,
                 replica_identity::text AS replica_identity,
                 composition,
-                membership_function_oid::bigint AS membership_function_oid,
-                membership_function_schema::text AS membership_function_schema,
-                membership_function_name::text AS membership_function_name,
-                max_scope_fanout,
+                 membership_function_oid::bigint AS membership_function_oid,
+                 membership_function_schema::text AS membership_function_schema,
+                 membership_function_name::text AS membership_function_name,
+                 membership_function_fingerprint,
+                 max_scope_fanout,
                  pk_column,
                  pk_type,
                  pk_portable_type,
@@ -3660,10 +3773,11 @@ fn load_registry_generation_entries(
                 physical_relation_oid::bigint AS physical_relation_oid,
                 replica_identity::text AS replica_identity,
                 composition,
-                membership_function_oid::bigint AS membership_function_oid,
-                membership_function_schema::text AS membership_function_schema,
-                membership_function_name::text AS membership_function_name,
-                max_scope_fanout,
+                 membership_function_oid::bigint AS membership_function_oid,
+                 membership_function_schema::text AS membership_function_schema,
+                 membership_function_name::text AS membership_function_name,
+                 membership_function_fingerprint,
+                 max_scope_fanout,
                  pk_column,
                  pk_type,
                  pk_portable_type,
@@ -3704,9 +3818,9 @@ fn load_registry_generation_entries(
         }
         registrations.push(registration);
     }
-    let dependencies =
-        load_membership_dependencies_from_client(client, generation, &registrations)?;
     if validate_capture_controls {
+        let dependencies =
+            load_membership_dependencies_from_client(client, generation, &registrations)?;
         validate_generation_function_projections(client, &registrations, &dependencies)?;
     }
     Ok(registrations)
@@ -4212,6 +4326,115 @@ pub(crate) fn active_generation_for_load(client: &SpiClient<'_>) -> Result<i64, 
     Ok(generation)
 }
 
+fn active_registration_content_matches(
+    client: &SpiClient<'_>,
+    active_generation: i64,
+    candidate: &TableRegistration,
+) -> Result<bool, spi::Error> {
+    let registrations = load_registry_generation_entries(client, active_generation, false)?;
+    Ok(registrations.iter().any(|active| {
+        active.table_name == candidate.table_name && same_registration_content(active, candidate)
+    }))
+}
+
+fn same_registration_content(left: &TableRegistration, right: &TableRegistration) -> bool {
+    left.relation_id == right.relation_id
+        && left.registration_kind == right.registration_kind
+        && left.table_id == right.table_id
+        && left.primary_key_field_id == right.primary_key_field_id
+        && left.table_name == right.table_name
+        && left.physical_schema == right.physical_schema
+        && left.physical_relation == right.physical_relation
+        && left.physical_relation_oid == right.physical_relation_oid
+        && left.replica_identity == right.replica_identity
+        && left.composition == right.composition
+        && left.membership_function == right.membership_function
+        && left.membership_function_fingerprint == right.membership_function_fingerprint
+        && left.max_scope_fanout == right.max_scope_fanout
+        && left.pk_column == right.pk_column
+        && left.pk_type == right.pk_type
+        && left.pk_portable_type == right.pk_portable_type
+        && left.capture_key_columns == right.capture_key_columns
+        && left.updated_at_col == right.updated_at_col
+        && left.deleted_at_col == right.deleted_at_col
+        && left.push_policy == right.push_policy
+        && left.sync_columns == right.sync_columns
+        && left.exclude_columns == right.exclude_columns
+        && left.has_updated_at == right.has_updated_at
+        && left.has_deleted_at == right.has_deleted_at
+        && same_field_content(&left.fields, &right.fields)
+        && same_capture_field_content(&left.capture_fields, &right.capture_fields)
+}
+
+fn same_field_content(left: &[FieldRegistration], right: &[FieldRegistration]) -> bool {
+    let mut left = left.to_vec();
+    let mut right = right.to_vec();
+    left.sort_by(|left, right| left.physical_column.cmp(&right.physical_column));
+    right.sort_by(|left, right| left.physical_column.cmp(&right.physical_column));
+    left == right
+}
+
+fn same_capture_field_content(
+    left: &[CaptureFieldRegistration],
+    right: &[CaptureFieldRegistration],
+) -> bool {
+    let mut left = left.to_vec();
+    let mut right = right.to_vec();
+    left.sort_by(|left, right| left.physical_column.cmp(&right.physical_column));
+    right.sort_by(|left, right| left.physical_column.cmp(&right.physical_column));
+    left == right
+}
+
+#[allow(clippy::too_many_arguments)]
+fn active_membership_dependency_content_matches(
+    client: &SpiClient<'_>,
+    active_generation: i64,
+    dependency: &TableRegistration,
+    target: &TableRegistration,
+    impact_function: &RegisteredFunction,
+    impact_function_fingerprint: &[u8],
+    max_impact_rows: i32,
+    dependency_field_ids: &[String],
+    dependency_columns: &[String],
+) -> Result<bool, spi::Error> {
+    let matches = client
+        .select(
+            "SELECT EXISTS (
+                 SELECT 1
+                 FROM synchro.sync_membership_dependencies
+                 WHERE registry_generation = $1
+                   AND dependency_relation_id = $2::uuid
+                   AND dependency_registration_kind = $3
+                   AND target_relation_id = $4::uuid
+                   AND impact_function_oid = $5::oid
+                   AND impact_function_schema = $6::name
+                   AND impact_function_name = $7::name
+                   AND impact_function_fingerprint = $8::bytea
+                   AND max_impact_rows = $9
+                   AND dependency_field_ids = $10::text[]
+                   AND dependency_columns = $11::text[]
+             ) AS matches",
+            None,
+            &[
+                active_generation.into(),
+                dependency.relation_id.as_str().into(),
+                dependency.registration_kind.as_str().into(),
+                target.relation_id.as_str().into(),
+                i64::from(impact_function.oid).into(),
+                impact_function.schema.as_str().into(),
+                impact_function.name.as_str().into(),
+                impact_function_fingerprint.to_vec().into(),
+                max_impact_rows.into(),
+                dependency_field_ids.to_vec().into(),
+                dependency_columns.to_vec().into(),
+            ],
+        )?
+        .first()
+        .get_by_name::<bool, &str>("matches")?
+        .unwrap_or(false);
+    Ok(matches)
+}
+
 fn registration_from_row(row: &SpiHeapTupleData<'_>) -> Result<TableRegistration, spi::Error> {
     let registry_generation = row
         .get_by_name::<i64, &str>("registry_generation")?
@@ -4283,6 +4506,9 @@ fn registration_from_row(row: &SpiHeapTupleData<'_>) -> Result<TableRegistration
                 }
             }),
     };
+    let membership_function_fingerprint = row
+        .get_by_name::<Vec<u8>, &str>("membership_function_fingerprint")?
+        .unwrap_or_default();
     let max_scope_fanout = row
         .get_by_name::<i32, &str>("max_scope_fanout")?
         .unwrap_or_else(|| {
@@ -4341,6 +4567,7 @@ fn registration_from_row(row: &SpiHeapTupleData<'_>) -> Result<TableRegistration
         replica_identity,
         composition,
         membership_function,
+        membership_function_fingerprint,
         max_scope_fanout,
         pk_column,
         pk_type,
