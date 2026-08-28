@@ -15,7 +15,6 @@
 	build-conformance \
 	lint-conformance \
 	test-conformance-testresult \
-	test-conformance-module \
 	test-conformance-imports \
 	test-conformance-contract \
 	test-conformance-drivers \
@@ -227,7 +226,6 @@ help:
 	@echo "  build-conformance     - Build every standalone conformance package"
 	@echo "  lint-conformance      - Format and vet the standalone conformance module"
 	@echo "  test-conformance-testresult - Test the structured Go test-result parser"
-	@echo "  test-conformance-module - Test standalone conformance module policy"
 	@echo "  test-conformance-imports - Test standalone conformance import policy"
 	@echo "  test-conformance-contract - Test strict contract loading and snapshots"
 	@echo "  test-conformance-drivers - Test the plain Swift and Kotlin process drivers"
@@ -361,9 +359,6 @@ test-conformance-testresult:
 		echo "testresult accepted a zero-match run" >&2; \
 		exit 1; \
 	fi
-
-test-conformance-module:
-	cd conformance && GOFLAGS= GOWORK=off go run ./cmd/testresult suite -- go test -json ./internal/importguard -count=1 -run '^TestModulePolicy$$'
 
 test-conformance-imports:
 	cd conformance && GOFLAGS= GOWORK=off go run ./cmd/testresult suite -- go test -json ./internal/importguard -count=1
@@ -575,7 +570,7 @@ test-inventory:
 test-blackbox: conformance-mod-download test-blackbox-harness test-blackbox-components
 	cd conformance && GOFLAGS= GOWORK=off go run ./cmd/testresult suite -- go test -json ./blackbox/integration -count=$(BLACKBOX_TEST_COUNT) -args --provision --install
 
-test-conformance: conformance-mod-download test-conformance-testresult test-conformance-module test-conformance-imports test-conformance-contract test-conformance-drivers test-conformance-scenarios check-conformance-catalog test-vectors test-reference test-conformance-faults test-blackbox-harness test-evidence test-inventory
+test-conformance: conformance-mod-download test-conformance-testresult test-conformance-imports test-conformance-contract test-conformance-drivers test-conformance-scenarios check-conformance-catalog test-vectors test-reference test-conformance-faults test-blackbox-harness test-evidence test-inventory
 
 rc-check-pg18:
 	@echo "$@ is unavailable until its required verification phase is implemented; release promotion is blocked." >&2
