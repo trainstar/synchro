@@ -324,6 +324,7 @@ func TestDiagnosticBlackboxImporterClassificationIsExact(t *testing.T) {
 	approved := []string{
 		modulePath + "/blackbox/integration",
 		modulePath + "/blackbox/syntheticproof",
+		modulePath + "/cmd/synchro-local-postgres",
 		modulePath + "/cmd/synchro-conformance",
 		modulePath + "/evidence",
 		modulePath + "/kotlin",

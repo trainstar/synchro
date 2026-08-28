@@ -63,6 +63,7 @@ var defaultProtected = []string{
 var diagnosticBlackboxImporters = map[string]struct{}{
 	modulePath + "/blackbox/integration":    {},
 	modulePath + "/blackbox/syntheticproof": {},
+	modulePath + "/cmd/synchro-local-postgres": {},
 	modulePath + "/cmd/synchro-conformance": {},
 	modulePath + "/evidence":                {},
 	modulePath + "/kotlin":                  {},
