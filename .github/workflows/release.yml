@@ -112,7 +112,25 @@ jobs:
         run: make lint-rn
 
       - name: Run React Native unit tests
-        run: make test-rn-unit
+        run: |
+          scripts/ci/capture-gate-result.py \
+            --gate test-rn-unit \
+            --output dist/verification/gate-results/test-rn-unit.json \
+            -- make test-rn-unit
+
+      - name: Run conformance tests
+        run: |
+          scripts/ci/capture-gate-result.py \
+            --gate test-conformance \
+            --output dist/verification/gate-results/test-conformance.json \
+            -- make test-conformance
+
+      - name: Publish quality gate result
+        if: always()
+        uses: actions/upload-artifact@v7.0.0
+        with:
+          name: phase-5-gate-results-quality
+          path: dist/verification/gate-results
 
   linux-pgrx-runtime:
     needs: validate-metadata
@@ -170,16 +188,35 @@ jobs:
           grep -q '^pg18' "$HOME/.pgrx/config.toml"
 
       - name: Validate Rust core
-        run: make test-rust-core
+        run: |
+          scripts/ci/capture-gate-result.py \
+            --gate test-rust-core \
+            --output dist/verification/gate-results/test-rust-core.json \
+            -- make test-rust-core
 
       - name: Validate PostgreSQL extension lint
         run: make lint-rust-pg
 
       - name: Validate PostgreSQL extension
-        run: make test-rust-pg
+        run: |
+          scripts/ci/capture-gate-result.py \
+            --gate test-rust-pg \
+            --output dist/verification/gate-results/test-rust-pg.json \
+            -- make test-rust-pg
 
       - name: Validate Go adapter
-        run: make test-adapter
+        run: |
+          scripts/ci/capture-gate-result.py \
+            --gate test-adapter \
+            --output dist/verification/gate-results/test-adapter.json \
+            -- make test-adapter
+
+      - name: Publish server gate results
+        if: always()
+        uses: actions/upload-artifact@v7.0.0
+        with:
+          name: phase-5-gate-results-server
+          path: dist/verification/gate-results
 
   validate-swift:
     needs: validate-metadata
@@ -203,11 +240,9 @@ jobs:
         with:
           runtime-source: brew
 
-      - name: Configure native Swift conformance
-        run: |
-          make conformance-adapter-artifact
-          make conformance-pg18-extension-artifact
-          SYNCHRO_CONFORMANCE_JWT_SECRET_FILE_NAME=jwt-password scripts/ci/configure-conformance-adapter.sh
+      - uses: ./.github/actions/setup-conformance-pg18
+        with:
+          jwt-secret-file-name: jwt-password
 
       - name: Ensure CocoaPods is available
         run: |
@@ -218,8 +253,26 @@ jobs:
       - name: Validate Apple package metadata
         run: make release-pods-check
 
+      - name: Validate Swift unit tests
+        run: |
+          scripts/ci/capture-gate-result.py \
+            --gate test-swift-unit \
+            --output dist/verification/gate-results/test-swift-unit.json \
+            -- make test-swift-unit
+
       - name: Validate Swift SDK
-        run: make test-swift
+        run: |
+          scripts/ci/capture-gate-result.py \
+            --gate test-swift \
+            --output dist/verification/gate-results/test-swift.json \
+            -- make test-swift
+
+      - name: Publish Swift gate results
+        if: always()
+        uses: actions/upload-artifact@v7.0.0
+        with:
+          name: phase-5-gate-results-swift
+          path: dist/verification/gate-results
 
   validate-rn-ios:
     needs: validate-metadata
@@ -290,11 +343,19 @@ jobs:
             watchman watch-project "$GITHUB_WORKSPACE/clients/react-native"
           fi
 
-      - name: Build React Native iOS Detox app
-        run: make test-rn-e2e-ios-build
-
       - name: Validate React Native iOS bridge
-        run: make test-rn-e2e-ios-run
+        run: |
+          scripts/ci/capture-gate-result.py \
+            --gate test-rn-e2e-ios \
+            --output dist/verification/gate-results/test-rn-e2e-ios.json \
+            -- make test-rn-e2e-ios
+
+      - name: Publish React Native iOS gate results
+        if: always()
+        uses: actions/upload-artifact@v7.0.0
+        with:
+          name: phase-5-gate-results-rn-ios
+          path: dist/verification/gate-results
 
   validate-kotlin:
     runs-on: ubuntu-24.04
@@ -368,7 +429,11 @@ jobs:
         run: echo "ANDROID_JAVA_HOME=${JAVA_HOME}" >> "$GITHUB_ENV"
 
       - name: Validate Kotlin unit tests
-        run: make test-kotlin-unit
+        run: |
+          scripts/ci/capture-gate-result.py \
+            --gate test-kotlin-unit \
+            --output dist/verification/gate-results/test-kotlin-unit.json \
+            -- make test-kotlin-unit
 
       - name: Enable KVM permissions
         run: |
@@ -389,10 +454,21 @@ jobs:
           disable-animations: true
           emulator-boot-timeout: 900
           emulator-options: -no-snapshot-save -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
-          script: make test-kotlin-instrumentation
+          script: scripts/ci/capture-gate-result.py --gate test-kotlin-instrumentation --output dist/verification/gate-results/test-kotlin-instrumentation.json -- make test-kotlin-instrumentation
 
       - name: Validate Kotlin SDK
-        run: make test-kotlin
+        run: |
+          scripts/ci/capture-gate-result.py \
+            --gate test-kotlin \
+            --output dist/verification/gate-results/test-kotlin.json \
+            -- make test-kotlin
+
+      - name: Publish Kotlin gate results
+        if: always()
+        uses: actions/upload-artifact@v7.0.0
+        with:
+          name: phase-5-gate-results-kotlin
+          path: dist/verification/gate-results
 
   validate-rn-android:
     runs-on: ubuntu-24.04
@@ -531,7 +607,14 @@ jobs:
           disable-animations: true
           emulator-boot-timeout: 900
           emulator-options: -no-snapshot-save -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
-          script: make test-rn-e2e-android-run
+          script: scripts/ci/capture-gate-result.py --gate test-rn-e2e-android --output dist/verification/gate-results/test-rn-e2e-android.json -- make test-rn-e2e-android-run
+
+      - name: Publish React Native Android gate results
+        if: always()
+        uses: actions/upload-artifact@v7.0.0
+        with:
+          name: phase-5-gate-results-rn-android
+          path: dist/verification/gate-results
 
   validate-docs:
     needs: validate-metadata
@@ -738,6 +821,20 @@ jobs:
     needs: [build-adapter-binaries, package-extension, release-gates]
     runs-on: ubuntu-24.04
     if: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') }}
+    env:
+      BLACKBOX_TEST_COUNT: '1'
+      DETOX_ARGS: ${{ vars.DETOX_ARGS }}
+      GO_TEST_ARGS: '-v -count=1 -p 1'
+      GO_TEST_PKGS: './...'
+      GRADLE_TEST_ARGS: '--rerun-tasks'
+      KOTLIN_ANDROID_SERIAL: ${{ vars.KOTLIN_ANDROID_SERIAL }}
+      MUTATION_CONTROL_EXPECT: 'target_pass'
+      MUTATION_CONTROL_TEST: ${{ vars.MUTATION_CONTROL_TEST }}
+      PGRX_TEST_NAME: ${{ vars.PGRX_TEST_NAME }}
+      RN_ANDROID_DETOX_CONFIG: 'android.emu.release'
+      SUPPORT_CELL_ID: ${{ vars.SUPPORT_CELL_ID }}
+      SUPPORT_PLATFORM_VERSION: ${{ vars.SUPPORT_PLATFORM_VERSION }}
+      TESTRESULT_TEST_NAME: ${{ vars.TESTRESULT_TEST_NAME }}
     steps:
       - uses: actions/checkout@v6.0.2
 
@@ -745,8 +842,22 @@ jobs:
         with:
           path: artifacts
 
+      - name: Assemble terminal CI facts
+        run: |
+          mkdir -p dist/verification
+          mkdir -p artifacts/gate-results
+          find artifacts -type f -path '*/gate-results/*.json' -exec cp '{}' artifacts/gate-results/ \;
+          scripts/ci/build-phase-5-input.py \
+            --repo-root "$GITHUB_WORKSPACE" \
+            --results-dir artifacts/gate-results \
+            --artifact-root artifacts \
+            --output dist/verification/phase-5-input.json
+
       - name: Generate and validate Phase 5 CI summary
         run: make evidence
+
+      - name: Confirm generated Phase 5 CI summary
+        run: test -s dist/verification/phase-5-summary.json
 
       - name: Publish Phase 5 CI summary
         uses: actions/upload-artifact@v7.0.0

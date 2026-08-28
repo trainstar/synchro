@@ -286,31 +286,13 @@ jobs:
       - name: Install exact cargo-pgrx
         run: cargo install --locked cargo-pgrx --version "$PGRX_VERSION"
 
-      - name: Initialize and verify exact PostgreSQL 18 runtime
+      - name: Initialize exact PostgreSQL 18 runtime
         run: |
           cargo pgrx init --pg18 download
-          PG_CONFIG="$(awk -F'\"' '/^pg18[[:space:]]*=/ { print $2 }' "$HOME/.pgrx/config.toml")"
-          test -x "$PG_CONFIG"
-          PG_BINDIR="$(dirname "$PG_CONFIG")"
-          for program in initdb pg_ctl postgres psql pg_isready pg_config; do
-            output="$("$PG_BINDIR/$program" --version)"
-            version="${output##* }"
-            test "$version" = "$POSTGRESQL_VERSION"
-          done
 
-      - name: Build immutable conformance artifacts
-        run: |
-          make conformance-adapter-artifact
-          make conformance-pg18-extension-artifact
-
-      - name: Verify artifact manifests and hashes
-        run: |
-          test "$(shasum -a 256 dist/conformance/synchrod-pg-adapter/synchrod-pg | cut -d ' ' -f 1)" = "$(tr -d '[:space:]' < dist/conformance/synchrod-pg-adapter/synchrod-pg.sha256)"
-          test -f dist/conformance/synchro-pg-pg18/artifact-manifest.json
-          test "$(shasum -a 256 dist/conformance/synchro-pg-pg18/artifact-manifest.json | cut -d ' ' -f 1)" = "$(tr -d '[:space:]' < dist/conformance/synchro-pg-pg18/artifact-manifest.json.sha256)"
-
-      - name: Create isolated conformance secrets
-        run: scripts/ci/configure-conformance-adapter.sh
+      - uses: ./.github/actions/setup-conformance-pg18
+        with:
+          expected-postgresql-version: ${{ env.POSTGRESQL_VERSION }}
 
       - name: Run isolated PostgreSQL 18 baseline
         env:
@@ -342,11 +324,9 @@ jobs:
         with:
           runtime-source: brew
 
-      - name: Configure native Swift conformance
-        run: |
-          make conformance-adapter-artifact
-          make conformance-pg18-extension-artifact
-          SYNCHRO_CONFORMANCE_JWT_SECRET_FILE_NAME=jwt-password scripts/ci/configure-conformance-adapter.sh
+      - uses: ./.github/actions/setup-conformance-pg18
+        with:
+          jwt-secret-file-name: jwt-password
 
       - name: Ensure CocoaPods is available
         run: |
