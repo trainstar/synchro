@@ -594,6 +594,16 @@ func validListenAddress(value string) bool {
 	return value != "" && !strings.ContainsAny(value, "\x00\r\n'")
 }
 
+// postmasterListenAddresses keeps loopback listening so local readiness
+// probes work when the harness also listens on an external address.
+func postmasterListenAddresses(listen string) string {
+	switch listen {
+	case "localhost", "127.0.0.1", "::1":
+		return "localhost"
+	}
+	return "localhost," + listen
+}
+
 func newHarnessNames() (HarnessNames, error) {
 	var nonce [12]byte
 	if _, err := rand.Read(nonce[:]); err != nil {
@@ -1045,7 +1055,7 @@ func quoteHBAName(value string) string {
 
 func (h *Harness) writePostmasterConfiguration() error {
 	configuration := strings.Join([]string{
-		"listen_addresses = " + quotePostgresLiteral(h.listen),
+		"listen_addresses = " + quotePostgresLiteral(postmasterListenAddresses(h.listen)),
 		"port = " + strconv.Itoa(h.port),
 		"unix_socket_directories = " + quotePostgresLiteral(h.socketDir),
 		"wal_level = logical",
@@ -1409,7 +1419,7 @@ func (h *Harness) verifyPostmasterSettings(ctx context.Context) error {
 	}
 	defer database.Close()
 	expected := map[string]string{
-		"listen_addresses":                         "127.0.0.1",
+		"listen_addresses":                         postmasterListenAddresses(h.listen),
 		"port":                                     strconv.Itoa(h.port),
 		"unix_socket_directories":                  h.socketDir,
 		"wal_level":                                "logical",
