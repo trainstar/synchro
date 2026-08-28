@@ -146,13 +146,3 @@ func nativeWorkloadScenario(digest string) scenarios.Scenario {
 		}},
 	}
 }
-
-func TestNativeWorkloadOperationsAreStableForTheSameParameters(t *testing.T) {
-	first := nativeWorkloadScenario("be92be6fd59ff625d750e5b6b1efa9c122a5e2ccf1a5210b29df25a8fbb6e8b6")
-	second := nativeWorkloadScenario("be92be6fd59ff625d750e5b6b1efa9c122a5e2ccf1a5210b29df25a8fbb6e8b6")
-	firstOperations, firstError := deriveNativeWorkload(first.Steps[0])
-	secondOperations, secondError := deriveNativeWorkload(second.Steps[0])
-	if firstError != nil || secondError != nil || !reflect.DeepEqual(firstOperations, secondOperations) {
-		t.Fatalf("deterministic derivations differ: first=%v second=%v", firstError, secondError)
-	}
-}

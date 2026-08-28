@@ -160,18 +160,7 @@ func deriveNativePlan(scenario scenarios.Scenario, obligation scenarios.ProofObl
 				return nativePlan{}, err
 			}
 			seedSteps[key] = step.ID
-		case "local-write":
-			key, err := clientKey(binding)
-			if err != nil {
-				return nativePlan{}, err
-			}
-			if err := ensureOpen(step.Phase, key); err != nil {
-				return nativePlan{}, err
-			}
-			if err := add(step.Phase, "client", "execute-step", []scenarios.StepID{step.ID}, scenarios.NativeClientParameters{ClientKey: key}); err != nil {
-				return nativePlan{}, err
-			}
-		case "workload":
+		case "local-write", "workload":
 			key, err := clientKey(binding)
 			if err != nil {
 				return nativePlan{}, err

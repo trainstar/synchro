@@ -246,35 +246,6 @@ SELECT synchro.synchro_register_table(
     'id', 'updated_at', 'deleted_at', 'enabled'
 );
 
--- Parent chain (2 levels): line_items -> orders -> customers.user_id
--- Bootstrap-phase registration. The dependency section replaces it with
--- the final membership function. Skip it when a prior run already
--- installed the final registration, so repeated preparation converges.
-DO $line_items_bootstrap$
-BEGIN
-    IF NOT EXISTS (
-        SELECT 1
-        FROM synchro.sync_registry registry
-        WHERE registry.registry_generation = (
-                  SELECT max(generation.generation)
-                  FROM synchro.sync_registry_generations generation
-                  WHERE generation.state IN ('active', 'pending')
-                    AND generation.validated
-              )
-          AND registry.physical_schema = 'public'
-          AND registry.physical_relation = 'line_items'
-          AND registry.membership_function_name = 'test_line_items_membership'
-    ) THEN
-        PERFORM synchro.synchro_register_table(
-            'public.line_items',
-            'public.test_line_items_bootstrap_membership',
-            'single_scope',
-            'id', 'updated_at', 'deleted_at', 'enabled'
-        );
-    END IF;
-END
-$line_items_bootstrap$;
-
 -- =========================================================================
 -- Collaboration tables: shared ownership, multi-bucket
 -- =========================================================================
@@ -297,35 +268,42 @@ SELECT synchro.synchro_register_table(
     'id', 'updated_at', 'deleted_at', 'enabled'
 );
 
--- Document comments: visible to the document owner AND the comment author.
--- Multiple ownership paths (two different FK chains to user).
--- Bootstrap-phase registration. The dependency section replaces it with
--- the final membership function. Skip it when a prior run already
--- installed the final registration, so repeated preparation converges.
-DO $document_comments_bootstrap$
+-- Parent-chain and collaboration dependencies need bootstrap registrations.
+-- The dependency section replaces each bootstrap membership function.
+DO $dependency_bootstrap$
+DECLARE
+    registration record;
 BEGIN
-    IF NOT EXISTS (
-        SELECT 1
-        FROM synchro.sync_registry registry
-        WHERE registry.registry_generation = (
-                  SELECT max(generation.generation)
-                  FROM synchro.sync_registry_generations generation
-                  WHERE generation.state IN ('active', 'pending')
-                    AND generation.validated
-              )
-          AND registry.physical_schema = 'public'
-          AND registry.physical_relation = 'document_comments'
-          AND registry.membership_function_name = 'test_document_comments_membership'
-    ) THEN
-        PERFORM synchro.synchro_register_table(
-            'public.document_comments',
-            'public.test_document_comments_bootstrap_membership',
-            'multi_scope',
-            'id', 'updated_at', 'deleted_at', 'enabled'
-        );
-    END IF;
+    FOR registration IN
+        SELECT *
+        FROM (VALUES
+            ('line_items', 'test_line_items_bootstrap_membership', 'test_line_items_membership', 'single_scope'),
+            ('document_comments', 'test_document_comments_bootstrap_membership', 'test_document_comments_membership', 'multi_scope')
+        ) AS configured(relation_name, bootstrap_function, final_function, composition)
+    LOOP
+        IF NOT EXISTS (
+            SELECT 1
+            FROM synchro.sync_registry registry
+            WHERE registry.registry_generation = (
+                      SELECT max(generation.generation)
+                      FROM synchro.sync_registry_generations generation
+                      WHERE generation.state IN ('active', 'pending')
+                        AND generation.validated
+                  )
+              AND registry.physical_schema = 'public'
+              AND registry.physical_relation = registration.relation_name
+              AND registry.membership_function_name = registration.final_function
+        ) THEN
+            PERFORM synchro.synchro_register_table(
+                'public.' || registration.relation_name,
+                'public.' || registration.bootstrap_function,
+                registration.composition,
+                'id', 'updated_at', 'deleted_at', 'enabled'
+            );
+        END IF;
+    END LOOP;
 END
-$document_comments_bootstrap$;
+$dependency_bootstrap$;
 
 -- =========================================================================
 -- Type zoo: user-owned for push/pull testing

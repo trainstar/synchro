@@ -582,21 +582,19 @@ fn poll_worker_once(
             blocked = true;
         }
     }
-    if !blocked
-        && active_poison_state_for_worker(
+    if !blocked {
+        let poison_state = active_poison_state_for_worker(
             &decoder_state.identity.stream_generation,
             worker_role_oid,
         )
-        .unwrap_or((true, false))
-        .0
-    {
-        blocked = true;
-        if retry_requested(&decoder_state.identity.stream_generation, worker_role_oid)
-            .unwrap_or(false)
-        {
-            if let Ok(fresh) = fresh_decoder(worker_role_oid) {
-                *decoder_state = fresh;
-                blocked = false;
+        .unwrap_or((true, false));
+        if poison_state.0 {
+            blocked = true;
+            if poison_state.1 {
+                if let Ok(fresh) = fresh_decoder(worker_role_oid) {
+                    *decoder_state = fresh;
+                    blocked = false;
+                }
             }
         }
     }
@@ -5648,10 +5646,6 @@ fn load_active_poison_state(
         .map_err(|_| "loading WAL poison failed".to_string())?
         .unwrap_or(false);
     Ok((active, repairable))
-}
-
-fn retry_requested(stream_generation: &str, worker_role_oid: pg_sys::Oid) -> Result<bool, String> {
-    active_poison_state_for_worker(stream_generation, worker_role_oid).map(|state| state.1)
 }
 
 fn heartbeat(state: &str, worker_role_oid: pg_sys::Oid) -> Result<(), String> {

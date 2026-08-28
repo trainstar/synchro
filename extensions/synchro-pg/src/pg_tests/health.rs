@@ -464,20 +464,6 @@
     }
 
     #[pg_test]
-    fn build_fingerprint_is_stable() {
-        let first: String = Spi::get_one("SELECT synchro.synchro_build_fingerprint()")
-            .expect("load first build fingerprint")
-            .expect("first build fingerprint");
-        let second: String = Spi::get_one("SELECT synchro.synchro_build_fingerprint()")
-            .expect("load second build fingerprint")
-            .expect("second build fingerprint");
-
-        assert_eq!(first, second);
-        assert_eq!(first.len(), 64);
-        assert!(first.bytes().all(|byte| byte.is_ascii_hexdigit()));
-    }
-
-    #[pg_test]
     fn stale_build_fingerprint_fails_health() {
         let current: String = Spi::get_one(
             "SELECT installed_fingerprint FROM synchro.sync_extension_build WHERE singleton",

@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"encoding/hex"
-	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -33,15 +32,6 @@ func TestRunArgumentValidation(t *testing.T) {
 	}
 	if err := run(nil, []string{"start"}); err == nil || err.Error() != "context is required" {
 		t.Fatalf("run with nil context error = %v", err)
-	}
-}
-
-func TestExitCode(t *testing.T) {
-	if got := exitCode(nil); got != 0 {
-		t.Fatalf("exitCode(nil) = %d, want 0", got)
-	}
-	if got := exitCode(errors.New("failure")); got != 1 {
-		t.Fatalf("exitCode(error) = %d, want 1", got)
 	}
 }
 

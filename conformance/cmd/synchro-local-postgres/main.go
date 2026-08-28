@@ -33,15 +33,8 @@ func main() {
 	defer cancel()
 	if err := run(ctx, os.Args[1:]); err != nil {
 		fmt.Fprintf(os.Stderr, "synchro-local-postgres: %v\n", err)
-		os.Exit(exitCode(err))
+		os.Exit(1)
 	}
-}
-
-func exitCode(err error) int {
-	if err == nil {
-		return 0
-	}
-	return 1
 }
 
 func run(ctx context.Context, args []string) error {
@@ -64,7 +57,6 @@ func run(ctx context.Context, args []string) error {
 func runStart(ctx context.Context, args []string) error {
 	flags := flag.NewFlagSet("start", flag.ContinueOnError)
 	flags.SetOutput(os.Stderr)
-	repoRoot := flags.String("repo-root", "", "repository root")
 	pg18BinDir := flags.String("pg18-bin-dir", "", "PostgreSQL 18 binary directory")
 	extensionArtifact := flags.String("extension-artifact", "", "verified PostgreSQL extension bundle")
 	adapterArtifact := flags.String("adapter-artifact", "", "verified adapter artifact")
@@ -76,11 +68,8 @@ func runStart(ctx context.Context, args []string) error {
 	if err := flags.Parse(args); err != nil {
 		return errors.New("start flags are invalid")
 	}
-	if flags.NArg() != 0 || *repoRoot == "" || *pg18BinDir == "" || *extensionArtifact == "" || *adapterArtifact == "" || *stateDir == "" || *tempParent == "" || *urlFile == "" || *attachEnvironmentFile == "" {
-		return errors.New("start requires --repo-root, --pg18-bin-dir, --extension-artifact, --adapter-artifact, --state-dir, --temp-parent, --url-file, and --attach-environment-file")
-	}
-	if _, err := filepath.Abs(*repoRoot); err != nil {
-		return errors.New("repository root is invalid")
+	if flags.NArg() != 0 || *pg18BinDir == "" || *extensionArtifact == "" || *adapterArtifact == "" || *stateDir == "" || *tempParent == "" || *urlFile == "" || *attachEnvironmentFile == "" {
+		return errors.New("start requires --pg18-bin-dir, --extension-artifact, --adapter-artifact, --state-dir, --temp-parent, --url-file, and --attach-environment-file")
 	}
 	if err := ensurePrivateDirectory(*stateDir); err != nil {
 		return err
@@ -134,10 +123,6 @@ func runStart(ctx context.Context, args []string) error {
 	if err := writePrivateFile(*attachEnvironmentFile, []byte(attachEnvironment(url, credentials))); err != nil {
 		_ = harness.Close(context.Background())
 		return fmt.Errorf("write attach environment: %w", err)
-	}
-	if _, err := fmt.Fprintln(os.Stdout, url); err != nil {
-		_ = harness.Close(context.Background())
-		return errors.New("write local PostgreSQL URL failed")
 	}
 	<-ctx.Done()
 	closeContext, cancel := context.WithTimeout(context.Background(), localShutdownTimeout)

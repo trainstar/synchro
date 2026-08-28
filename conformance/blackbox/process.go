@@ -121,13 +121,12 @@ type Harness struct {
 	postgres  *ownedProcess
 	adapter   *ownedProcess
 
-	databaseCreated     bool
-	rolesCreated        bool
-	slotCreated         bool
-	publicationCreated  bool
-	sourceReady         bool
-	restartCount        int
-	workerDetachedState bool
+	databaseCreated    bool
+	rolesCreated       bool
+	slotCreated        bool
+	publicationCreated bool
+	sourceReady        bool
+	restartCount       int
 
 	closeMu      sync.Mutex
 	closeDone    chan struct{}
@@ -1324,7 +1323,21 @@ func pingDatabase(ctx context.Context, harness *Harness, database string, role R
 	if withPassword {
 		handle, err = harness.openDatabase(ctx, database, role, true)
 	} else {
-		handle, err = harness.openDatabaseWithoutPassword(ctx, database, role)
+		host := harness.listen
+		if harness.attached {
+			if database != harness.names.Database {
+				return errors.New("attached PostgreSQL database is not configured")
+			}
+			host = harness.attachHost
+		}
+		handle, err = sql.Open("pgx", postgresDSN(host, harness.port, database, role, false))
+		if err == nil {
+			handle.SetMaxOpenConns(4)
+			handle.SetMaxIdleConns(1)
+			harness.databaseMu.Lock()
+			harness.databaseHandles = append(harness.databaseHandles, handle)
+			harness.databaseMu.Unlock()
+		}
 	}
 	if err != nil {
 		return err
@@ -1917,29 +1930,6 @@ func (h *Harness) openDatabase(ctx context.Context, database string, role RoleCr
 		host = h.listen
 	}
 	databaseHandle, err := sql.Open("pgx", postgresDSN(host, h.port, database, role, true))
-	if err != nil {
-		return nil, err
-	}
-	databaseHandle.SetMaxOpenConns(4)
-	databaseHandle.SetMaxIdleConns(1)
-	h.databaseMu.Lock()
-	h.databaseHandles = append(h.databaseHandles, databaseHandle)
-	h.databaseMu.Unlock()
-	return databaseHandle, nil
-}
-
-func (h *Harness) openDatabaseWithoutPassword(ctx context.Context, database string, role RoleCredential) (*sql.DB, error) {
-	if ctx == nil {
-		return nil, errors.New("database context is required")
-	}
-	host := h.listen
-	if h.attached {
-		if database != h.names.Database {
-			return nil, errors.New("attached PostgreSQL database is not configured")
-		}
-		host = h.attachHost
-	}
-	databaseHandle, err := sql.Open("pgx", postgresDSN(host, h.port, database, role, false))
 	if err != nil {
 		return nil, err
 	}
@@ -5461,7 +5451,7 @@ func (h *Harness) closeDatabaseHandles(ctx context.Context) error {
 }
 
 func (h *Harness) detachWorker(ctx context.Context) error {
-	if h.postgres == nil || h.postgres.Exited() || h.workerDetached() {
+	if h.postgres == nil || h.postgres.Exited() {
 		return nil
 	}
 	database, err := h.openDatabase(ctx, "postgres", h.env.Admin, false)
@@ -5478,16 +5468,7 @@ func (h *Harness) detachWorker(ctx context.Context) error {
 	if err := h.restartPostgres(ctx); err != nil {
 		return fmt.Errorf("restart PostgreSQL without synchro WAL worker failed: %w", err)
 	}
-	h.databaseMu.Lock()
-	h.workerDetachedState = true
-	h.databaseMu.Unlock()
 	return nil
-}
-
-func (h *Harness) workerDetached() bool {
-	h.databaseMu.Lock()
-	defer h.databaseMu.Unlock()
-	return h.workerDetachedState
 }
 
 func (h *Harness) dropPublication(ctx context.Context) error {

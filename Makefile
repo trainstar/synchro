@@ -1151,7 +1151,6 @@ local-postgres-start: build-local-postgres
 		fi; \
 		rm -f "$(LOCAL_POSTGRES_PID_FILE)" "$(LOCAL_POSTGRES_URL_FILE)" "$(LOCAL_POSTGRES_LOG_FILE)"; \
 		nohup "$(LOCAL_POSTGRES_BINARY)" start \
-			--repo-root "$(CURDIR)" \
 			--pg18-bin-dir "$(PGRX_PG_BIN_DIR)" \
 			--extension-artifact "$(CONFORMANCE_EXTENSION_ARTIFACT)" \
 			--adapter-artifact "$(CONFORMANCE_ADAPTER_ARTIFACT_DIR)/synchrod-pg" \

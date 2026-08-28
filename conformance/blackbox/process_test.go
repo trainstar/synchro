@@ -7,7 +7,6 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
-	"slices"
 	"strings"
 	"syscall"
 	"testing"
@@ -171,30 +170,6 @@ func TestCleanupAcceptsUnchangedCandidateArtifacts(t *testing.T) {
 	}
 	if err := harness.cleanup(context.Background()); err != nil {
 		t.Fatalf("cleanup rejected unchanged candidate artifacts: %v", err)
-	}
-}
-
-func TestCleanupLifecycleDetachesWorkerBeforeTopologyDrop(t *testing.T) {
-	var order []string
-	operation := func(name string) func(context.Context) error {
-		return func(context.Context) error {
-			order = append(order, name)
-			return nil
-		}
-	}
-	if failures := runCleanupLifecycle(
-		context.Background(),
-		time.Second,
-		operation("stop adapter"),
-		operation("close database handles"),
-		operation("detach worker"),
-		operation("drop topology"),
-	); len(failures) != 0 {
-		t.Fatalf("cleanup lifecycle failures = %v", failures)
-	}
-	want := []string{"stop adapter", "close database handles", "detach worker", "drop topology"}
-	if !slices.Equal(order, want) {
-		t.Fatalf("cleanup lifecycle order = %v, want %v", order, want)
 	}
 }
 

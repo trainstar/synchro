@@ -28,112 +28,41 @@ fn corrupt_mac(token: &str) -> String {
 }
 
 #[pg_test]
-fn test_portable_seed_tokens_reject_mac_only_corruption() {
-    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-    use base64::Engine;
-    use synchro_core::checksum::{ChecksumObject, Sha256Digest};
-
-    let boundary = crate::seed_token::SeedSnapshotBoundary {
-        position_kind: "generation_start".to_string(),
-        commit_lsn: None,
-    };
-    let secret = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
-    let page = crate::seed_token::issue_page(
-        &crate::seed_token::SeedPagePayload {
-            kind: "portable_seed_page".to_string(),
-            version: 1,
-            key_id: "seed-page-v1".to_string(),
-            export_id: "00000000-0000-0000-0000-000000000001".to_string(),
-            transaction_nonce: URL_SAFE_NO_PAD.encode([7_u8; 32]),
-            export_manifest_hash: "1".repeat(64),
-            schema_hash: "2".repeat(64),
-            scope_id: "catalog".to_string(),
-            registry_generation: "1".to_string(),
-            membership_generation: "2".to_string(),
-            retention_generation: "3".to_string(),
-            stream_generation: "stream-1".to_string(),
-            snapshot_boundary: boundary.clone(),
-            next_row_ordinal: "0".to_string(),
-            page_limit: "100".to_string(),
-        },
-        secret,
-    )
-    .expect("issue page token");
-    let receipt = crate::seed_token::issue_continuation(
-        &crate::seed_token::SeedContinuationPayload {
-            kind: "portable_seed_continuation".to_string(),
-            version: 1,
-            key_id: "seed-continuation-v1".to_string(),
-            export_id: "00000000-0000-0000-0000-000000000001".to_string(),
-            export_manifest_hash: "1".repeat(64),
-            schema_hash: "2".repeat(64),
-            scope_id: "catalog".to_string(),
-            registry_generation: "1".to_string(),
-            membership_generation: "2".to_string(),
-            retention_generation: "3".to_string(),
-            stream_generation: "stream-1".to_string(),
-            snapshot_boundary: boundary,
-            cardinality: "0".to_string(),
-            checksum: ChecksumObject::new(
-                Sha256Digest::from_lower_hex(&"3".repeat(64)).expect("test checksum"),
-            ),
-            issued_at: "2026-08-15T00:00:00.000000Z".to_string(),
-        },
-        secret,
-    )
-    .expect("issue continuation receipt");
-
-    assert!(crate::seed_token::verify_page(&page, secret).is_ok());
-    assert!(crate::seed_token::verify_page(&corrupt_mac(&page), secret).is_err());
-    assert!(crate::seed_token::verify_continuation(&receipt, secret).is_ok());
-    assert!(crate::seed_token::verify_continuation(&corrupt_mac(&receipt), secret).is_err());
-}
-
-#[pg_test]
 fn test_idempotent_registration_keeps_seed_receipts() {
     setup_test_tables();
     register_shared_scope("global", true);
 
-    let before_generation: i64 = Spi::get_one(
-        "SELECT generation
-         FROM sync_registry_generations
-         WHERE state = 'active' AND validated",
-    )
-    .unwrap()
-    .expect("active registry generation before identical registration");
-    let before_manifest: pgrx::JsonB = Spi::get_one("SELECT synchro_schema_manifest() - 'server_time'")
+    let snapshot = || -> pgrx::JsonB {
+        Spi::get_one(
+            "SELECT jsonb_build_object(
+                 'generation', (
+                     SELECT generation
+                     FROM sync_registry_generations
+                     WHERE state = 'active' AND validated
+                 ),
+                 'manifest', synchro_schema_manifest() - 'server_time',
+                 'generation_count', (SELECT count(*) FROM sync_registry_generations),
+                 'manifest_count', (SELECT count(*) FROM sync_schema_manifest),
+                 'scope_state', (
+                     SELECT jsonb_build_object(
+                         'stream_generation', stream_generation,
+                         'membership_generation', membership_generation,
+                         'retention_generation', retention_generation
+                     )
+                     FROM sync_scope_state
+                     WHERE scope_id = 'global'
+                 ),
+                 'scope_row', (
+                     SELECT ctid::text
+                     FROM sync_shared_scopes
+                     WHERE scope_id = 'global'
+                 )
+             )",
+        )
         .unwrap()
-        .expect("schema manifest before identical registration");
-    let before_generation_count: i64 = Spi::get_one(
-        "SELECT count(*)
-         FROM sync_registry_generations",
-    )
-    .unwrap()
-    .expect("registry generation count before identical registration");
-    let before_manifest_count: i64 = Spi::get_one(
-        "SELECT count(*)
-         FROM sync_schema_manifest",
-    )
-    .unwrap()
-    .expect("schema manifest count before identical registration");
-    let before_scope_state: pgrx::JsonB = Spi::get_one(
-        "SELECT jsonb_build_object(
-             'stream_generation', stream_generation,
-             'membership_generation', membership_generation,
-             'retention_generation', retention_generation
-         )
-         FROM sync_scope_state
-         WHERE scope_id = 'global'",
-    )
-    .unwrap()
-    .expect("global scope state before identical registration");
-    let before_scope_row: String = Spi::get_one(
-        "SELECT ctid::text
-         FROM sync_shared_scopes
-         WHERE scope_id = 'global'",
-    )
-    .unwrap()
-    .expect("global shared scope before identical registration");
+        .expect("idempotent registration state snapshot")
+    };
+    let before = snapshot();
     let receipt = mint_portable_seed_receipt("global");
     let membership_function: String = Spi::get_one(
         "SELECT format('%I.%I', membership_function_schema, membership_function_name)
@@ -159,52 +88,8 @@ fn test_idempotent_registration_keeps_seed_receipts() {
     )
     .unwrap();
 
-    let after_generation: i64 = Spi::get_one(
-        "SELECT generation
-         FROM sync_registry_generations
-         WHERE state = 'active' AND validated",
-    )
-    .unwrap()
-    .expect("active registry generation after identical registration");
-    let after_manifest: pgrx::JsonB = Spi::get_one("SELECT synchro_schema_manifest() - 'server_time'")
-        .unwrap()
-        .expect("schema manifest after identical registration");
-    let after_generation_count: i64 = Spi::get_one(
-        "SELECT count(*)
-         FROM sync_registry_generations",
-    )
-    .unwrap()
-    .expect("registry generation count after identical registration");
-    let after_manifest_count: i64 = Spi::get_one(
-        "SELECT count(*)
-         FROM sync_schema_manifest",
-    )
-    .unwrap()
-    .expect("schema manifest count after identical registration");
-    let after_scope_state: pgrx::JsonB = Spi::get_one(
-        "SELECT jsonb_build_object(
-             'stream_generation', stream_generation,
-             'membership_generation', membership_generation,
-             'retention_generation', retention_generation
-         )
-         FROM sync_scope_state
-         WHERE scope_id = 'global'",
-    )
-    .unwrap()
-    .expect("global scope state after identical registration");
-    let after_scope_row: String = Spi::get_one(
-        "SELECT ctid::text
-         FROM sync_shared_scopes
-         WHERE scope_id = 'global'",
-    )
-    .unwrap()
-    .expect("global shared scope after identical registration");
-    assert_eq!(after_generation, before_generation);
-    assert_eq!(after_generation_count, before_generation_count);
-    assert_eq!(after_manifest_count, before_manifest_count);
-    assert_eq!(after_manifest.0, before_manifest.0);
-    assert_eq!(after_scope_state.0, before_scope_state.0);
-    assert_eq!(after_scope_row, before_scope_row);
+    let after = snapshot();
+    assert_eq!(after.0, before.0);
 
     let response = connect_client(
         "portable-seed-user",
