@@ -285,6 +285,21 @@ fn synchro_connect(p_user_id: &str, p_request: pgrx::JsonB) -> pgrx::JsonB {
         let assigned_scopes = &ensured.state.bucket_subs;
 
         let mut scopes = build_scope_delta(&request.known_scopes, assigned_scopes);
+        // The wire contract places a receipted but unassigned scope in
+        // scopes.remove, so the client discards its stored receipt.
+        if let Some(receipts) = request.seed_receipts.as_ref() {
+            for scope_id in receipts.keys() {
+                if !assigned_scopes.contains(scope_id)
+                    && !request.known_scopes.contains_key(scope_id)
+                    && !scopes.remove.contains(scope_id)
+                {
+                    scopes.remove.push(scope_id.clone());
+                }
+            }
+            scopes
+                .remove
+                .sort_by(|left, right| left.as_bytes().cmp(right.as_bytes()));
+        }
         for scope in &mut scopes.add {
             let Some(position) = seed_positions.get(&scope.id) else {
                 continue;
