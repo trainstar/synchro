@@ -14,8 +14,10 @@ import subprocess
 import sys
 from pathlib import Path
 
+sys.dont_write_bytecode = True
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "verification"))
+from packaged_smoke import SMOKE_OPERATIONS  # noqa: E402
 
-SMOKE_OPERATIONS = ("connect", "push", "pull", "kill", "resume")
 REQUIRED_GATE_TARGETS = (
     "test-conformance",
     "test-blackbox",
@@ -160,13 +162,6 @@ def validate_summary(repo_root: Path, summary_path: Path, required_kind: str | N
             raise SummaryError(f"phase summary contains unknown obligation {obligation_id}")
         if item.get("kind") != expected[obligation_id]:
             raise SummaryError(f"obligation {obligation_id} has the wrong kind")
-        if item.get("status") != "passed":
-            raise SummaryError(f"obligation {obligation_id} is not passed")
-        if item.get("terminal") is not True:
-            raise SummaryError(f"obligation {obligation_id} is not terminal")
-        test_count = item.get("test_count")
-        if not isinstance(test_count, int) or isinstance(test_count, bool) or test_count <= 0:
-            raise SummaryError(f"obligation {obligation_id} has zero or invalid test_count")
         obligation_hashes = item.get("artifact_hashes")
         validate_hashes(obligation_hashes, f"obligation {obligation_id} artifact_hashes")
         if not set(obligation_hashes).issubset(summary_hashes):
@@ -178,8 +173,18 @@ def validate_summary(repo_root: Path, summary_path: Path, required_kind: str | N
     missing = sorted(set(expected) - set(actual))
     if missing:
         raise SummaryError(f"phase summary is missing obligations: {', '.join(missing)}")
+    for obligation_id, item in actual.items():
+        if item.get("status") != "passed":
+            raise SummaryError(f"obligation {obligation_id} is not passed")
+        if item.get("terminal") is not True:
+            raise SummaryError(f"obligation {obligation_id} is not terminal")
+        test_count = item.get("test_count")
+        if not isinstance(test_count, int) or isinstance(test_count, bool) or test_count <= 0:
+            raise SummaryError(f"obligation {obligation_id} has zero or invalid test_count")
     if summary.get("status") != "passed":
         raise SummaryError("phase summary status is not passed")
+    if summary.get("dry_run") is True:
+        raise SummaryError("dry-run summary is not release evidence")
     return len(actual)
 
 

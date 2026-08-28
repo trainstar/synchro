@@ -12,8 +12,20 @@ fi
 artifact_dir=$(cd "$artifact_dir" && pwd -P)
 apple_package="$artifact_dir/apple/Synchro"
 source_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
-work_dir=$(mktemp -d "${TMPDIR:-/tmp}/synchro-swift-ios-consumer.XXXXXX")
-trap 'rm -rf "$work_dir"' EXIT HUP INT TERM
+repo_root=$(CDPATH= cd -- "$source_dir/../../.." && pwd -P)
+tmp_root=${PACKAGED_SMOKE_TMP_ROOT:-$repo_root/.ignore/r2/tmp}
+mkdir -p "$tmp_root"
+work_dir=$(mktemp -d "$tmp_root/synchro-swift-ios-consumer.XXXXXX")
+simulator_udid=
+app_installed=0
+bundle_id=dev.synchro.swift-consumer
+cleanup() {
+  if [ "$app_installed" -eq 1 ] && [ -n "$simulator_udid" ]; then
+    xcrun simctl uninstall "$simulator_udid" "$bundle_id" >/dev/null 2>&1 || true
+  fi
+  rm -rf "$work_dir"
+}
+trap cleanup EXIT HUP INT TERM
 
 cp -R "$source_dir" "$work_dir/app"
 mkdir -p "$work_dir/app/Packages"
@@ -63,10 +75,106 @@ xcodebuild \
   CODE_SIGNING_ALLOWED=NO \
   build
 
-bundle_id=dev.synchro.swift-consumer
 app_path="$work_dir/derived-data/Build/Products/Debug-iphonesimulator/SynchroConsumer.app"
 test -d "$app_path"
+xcrun simctl uninstall "$simulator_udid" "$bundle_id" >/dev/null 2>&1 || true
 xcrun simctl install "$simulator_udid" "$app_path"
+app_installed=1
+
+if [ -n "${PACKAGED_SMOKE_CELL_ID:-}" ]; then
+  cell_result=${PACKAGED_SMOKE_CELL_RESULT:?PACKAGED_SMOKE_CELL_RESULT is required}
+  tool="$repo_root/verification/packaged_smoke.py"
+  archive="$artifact_dir/apple/synchro-spm-$(tr -d '\n' < "$repo_root/VERSION").tar.gz"
+  test -f "$archive"
+  python3 "$tool" config \
+    --cell "$PACKAGED_SMOKE_CELL_ID" \
+    --platform ios \
+    --output "$work_dir/initial-config.json"
+  python3 "$tool" set-config-phase \
+    --config "$work_dir/initial-config.json" \
+    --phase resume \
+    --output "$work_dir/resume-config.json"
+
+  container=$(xcrun simctl get_app_container "$simulator_udid" "$bundle_id" data)
+  cp "$work_dir/initial-config.json" "$container/Documents/packaged-smoke-config.json"
+  launch_output=$(xcrun simctl launch "$simulator_udid" "$bundle_id")
+  initial_pid=${launch_output##*: }
+  case "$initial_pid" in *[!0-9]*|'') printf '%s\n' "iOS initial process id is invalid" >&2; exit 1 ;; esac
+
+  ready=0
+  for _ in $(seq 1 120); do
+    if [ -f "$container/Documents/initial-result.json" ]; then
+      ready=1
+      break
+    fi
+    if ! xcrun simctl spawn "$simulator_udid" kill -0 "$initial_pid" >/dev/null 2>&1; then
+      break
+    fi
+    sleep 1
+  done
+  if [ "$ready" -ne 1 ]; then
+    printf '%s\n' "Packaged Swift iOS initial phase did not become ready" >&2
+    exit 1
+  fi
+
+  xcrun simctl spawn "$simulator_udid" kill -9 "$initial_pid"
+  killed=0
+  for _ in $(seq 1 30); do
+    if ! xcrun simctl spawn "$simulator_udid" kill -0 "$initial_pid" >/dev/null 2>&1; then
+      killed=1
+      break
+    fi
+    sleep 1
+  done
+  if [ "$killed" -ne 1 ]; then
+    printf '%s\n' "Packaged Swift iOS process kill was not observed" >&2
+    exit 1
+  fi
+
+  cp "$work_dir/resume-config.json" "$container/Documents/packaged-smoke-config.json"
+  launch_output=$(xcrun simctl launch "$simulator_udid" "$bundle_id")
+  resume_pid=${launch_output##*: }
+  case "$resume_pid" in *[!0-9]*|'') printf '%s\n' "iOS resume process id is invalid" >&2; exit 1 ;; esac
+  if [ "$resume_pid" = "$initial_pid" ]; then
+    printf '%s\n' "Packaged Swift iOS resume reused the killed process" >&2
+    exit 1
+  fi
+
+  resumed=0
+  for _ in $(seq 1 120); do
+    if [ -f "$container/Documents/resume-result.json" ]; then
+      resumed=1
+      break
+    fi
+    if ! xcrun simctl spawn "$simulator_udid" kill -0 "$resume_pid" >/dev/null 2>&1; then
+      break
+    fi
+    sleep 1
+  done
+  xcrun simctl terminate "$simulator_udid" "$bundle_id" >/dev/null 2>&1 || true
+  if [ "$resumed" -ne 1 ]; then
+    printf '%s\n' "Packaged Swift iOS resume phase did not pass" >&2
+    exit 1
+  fi
+
+  cp "$container/Documents/initial-result.json" "$work_dir/initial.json"
+  cp "$container/Documents/resume-result.json" "$work_dir/resume.json"
+  set -- python3 "$tool" complete-cell \
+    --repo-root "$repo_root" \
+    --cell "$PACKAGED_SMOKE_CELL_ID" \
+    --output "$cell_result" \
+    --initial "$work_dir/initial.json" \
+    --resume "$work_dir/resume.json" \
+    --killed-pid "$initial_pid" \
+    --artifact "$archive"
+  if [ -n "${PACKAGED_SMOKE_EXTRA_ARTIFACT:-}" ]; then
+    set -- "$@" --artifact "$PACKAGED_SMOKE_EXTRA_ARTIFACT"
+  fi
+  "$@"
+  printf '%s\n' "Packaged Swift iOS smoke passed for $PACKAGED_SMOKE_CELL_ID"
+  exit 0
+fi
+
 xcrun simctl launch "$simulator_udid" "$bundle_id" >/dev/null
 
 passed=0

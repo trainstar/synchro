@@ -1,0 +1,71 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://synchro.dev/schemas/packaged-smoke-cell-v1.schema.json",
+  "title": "Packaged smoke cell evidence",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "cell_id",
+    "source_commit",
+    "status",
+    "artifact_hashes",
+    "operations"
+  ],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "cell_id": { "type": "string", "minLength": 1 },
+    "source_commit": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+    "status": { "enum": ["passed", "failed"] },
+    "artifact_hashes": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+    },
+    "operations": {
+      "type": "array",
+      "minItems": 5,
+      "maxItems": 5,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "status", "terminal", "test_count"],
+        "properties": {
+          "name": { "enum": ["connect", "push", "pull", "kill", "resume"] },
+          "status": { "enum": ["passed", "failed"] },
+          "terminal": { "const": true },
+          "test_count": { "type": "integer", "minimum": 0, "maximum": 1 }
+        }
+      }
+    },
+    "failure": { "type": "string", "minLength": 1 },
+    "process_lifecycle": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "initial_pid",
+        "kill_signal",
+        "resume_pid",
+        "durable_pending_before_kill",
+        "durable_pending_after_resume"
+      ],
+      "properties": {
+        "initial_pid": { "type": "integer", "minimum": 1 },
+        "kill_signal": { "const": 9 },
+        "resume_pid": { "type": "integer", "minimum": 1 },
+        "durable_pending_before_kill": { "type": "integer", "minimum": 1 },
+        "durable_pending_after_resume": { "const": 0 }
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "status": { "const": "passed" } } },
+      "then": {
+        "required": ["process_lifecycle"],
+        "properties": { "artifact_hashes": { "minItems": 1 } }
+      },
+      "else": { "required": ["failure"] }
+    }
+  ]
+}

@@ -79,3 +79,4 @@ verification/consumers/**/.gradle/
 verification/consumers/**/build/
 verification/consumers/**/*.apk
 verification/consumers/**/*.dex
+__pycache__/
