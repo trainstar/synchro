@@ -913,6 +913,46 @@
       }
     },
     {
+      "id": "STEP-SCHEMA-QUEUED-MUTATION-UNSUPPORTED-001",
+      "phase": "exercise",
+      "transport": "http",
+      "description": "Receive the Class 4 unsupported result before the explicit reset.",
+      "native_binding": {
+        "kind": "public-call",
+        "user_id": "user-a",
+        "client_id": "client-a",
+        "call_id": "schema_upgrade_required",
+        "stage": "synchronous",
+        "method": "start",
+        "completion": "error"
+      },
+      "operation": {
+        "contract_operation": "connect",
+        "name": "send",
+        "payload": {
+          "user_id": "user-a",
+          "client_id": "client-a",
+          "runtime_version": 3,
+          "protocol_version": 3,
+          "client_generation": 1,
+          "schema_reset": false,
+          "schema": {
+            "version": 1,
+            "hash": "61b9825f0d1c3274677069fe1a0cd2430831f7142665b0eb9ae78eb75a08b7aa"
+          },
+          "scope_set_version": 1,
+          "known_scopes": [
+            {
+              "scope_id": "scope-a"
+            }
+          ]
+        }
+      },
+      "expected_outcome": {
+        "disposition": "success"
+      }
+    },
+    {
       "id": "STEP-SCHEMA-QUEUED-MUTATION-007",
       "phase": "exercise",
       "transport": "http",
@@ -1041,9 +1081,19 @@
       "retryable": false
     },
     {
+      "step_id": "STEP-SCHEMA-QUEUED-MUTATION-UNSUPPORTED-001",
+      "assertion_id": "ASSERT-SCHEMA-QUEUED-MUTATION-SEMANTIC-001",
+      "contract_case": "connect_success",
+      "action": "unsupported",
+      "http_status": 200,
+      "error_code": null,
+      "retryable": false
+    },
+    {
       "step_id": "STEP-SCHEMA-QUEUED-MUTATION-007",
       "assertion_id": "ASSERT-SCHEMA-QUEUED-MUTATION-SEMANTIC-001",
       "contract_case": "connect_success",
+      "action": "rebuild_local",
       "http_status": 200,
       "error_code": null,
       "retryable": false
@@ -1091,6 +1141,7 @@
       "step_ids": [
         "STEP-SCHEMA-QUEUED-MUTATION-003",
         "STEP-SCHEMA-QUEUED-MUTATION-BASELINE-BEGIN-001",
+        "STEP-SCHEMA-QUEUED-MUTATION-UNSUPPORTED-001",
         "STEP-SCHEMA-QUEUED-MUTATION-007",
         "STEP-SCHEMA-QUEUED-MUTATION-008"
       ],
@@ -1108,6 +1159,7 @@
         "STEP-SCHEMA-QUEUED-MUTATION-BASELINE-BEGIN-001",
         "STEP-SCHEMA-QUEUED-MUTATION-005",
         "STEP-SCHEMA-QUEUED-MUTATION-006",
+        "STEP-SCHEMA-QUEUED-MUTATION-UNSUPPORTED-001",
         "STEP-SCHEMA-QUEUED-MUTATION-007",
         "STEP-SCHEMA-QUEUED-MUTATION-008"
       ],
@@ -1139,6 +1191,7 @@
         "STEP-SCHEMA-QUEUED-MUTATION-BASELINE-BEGIN-001",
         "STEP-SCHEMA-QUEUED-MUTATION-004",
         "STEP-SCHEMA-QUEUED-MUTATION-BASELINE-FINALIZE-001",
+        "STEP-SCHEMA-QUEUED-MUTATION-UNSUPPORTED-001",
         "STEP-SCHEMA-QUEUED-MUTATION-007"
       ],
       "expectation_ids": []
@@ -1160,6 +1213,7 @@
       "alias": "scope-set-version-one",
       "value": 1,
       "step_ids": [
+        "STEP-SCHEMA-QUEUED-MUTATION-UNSUPPORTED-001",
         "STEP-SCHEMA-QUEUED-MUTATION-007"
       ],
       "expectation_ids": []

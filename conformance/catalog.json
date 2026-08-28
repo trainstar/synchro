@@ -89,7 +89,7 @@
     {
       "scenario_id": "SCN-PUSH-RESPONSE-LOSS-001",
       "path": "conformance/scenarios/server/push-response-loss-001.json",
-      "sha256": "538c8726e60ba9273dc0a0b192cc7722095b04f10881bfa02e3d653a99063a39"
+      "sha256": "cc0e96f4c3eb9c52861412ee3cd6d8dc99fa037bd90a6f979da358486dce3f3d"
     },
     {
       "scenario_id": "SCN-REBUILD-FORGED-CURSOR-001",
@@ -109,7 +109,7 @@
     {
       "scenario_id": "SCN-SCHEMA-QUEUED-MUTATION-001",
       "path": "conformance/scenarios/server/schema-queued-mutation-001.json",
-      "sha256": "381f2443eac49ed4a1f6e9556f2b2f55b60bf26bef953da7189438e3fe83f4bb"
+      "sha256": "05cef9faf0710e57c5112513db68cc8d09ea33b0a2a0cfc3925cb7460bcbeada"
     },
     {
       "scenario_id": "SCN-WAL-DECODE-FAILURE-001",

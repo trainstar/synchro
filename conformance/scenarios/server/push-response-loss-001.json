@@ -742,9 +742,8 @@
         "user_id": "user-a",
         "client_id": "client-a",
         "call_id": "response_loss_initial",
-        "stage": "synchronous",
-        "method": "start",
-        "completion": "blocked"
+        "stage": "begin",
+        "method": "start"
       },
       "operation": {
         "contract_operation": "push",
@@ -797,9 +796,7 @@
         "user_id": "user-a",
         "client_id": "client-a",
         "call_id": "response_loss_initial",
-        "stage": "synchronous",
-        "method": "start",
-        "completion": "blocked"
+        "stage": "await-step"
       },
       "operation": {
         "contract_operation": "process",
@@ -818,14 +815,13 @@
       "id": "STEP-PUSH-RESPONSE-LOSS-004",
       "phase": "exercise",
       "transport": "http",
-      "description": "Replay the unchanged sealed request after response-loss bookkeeping.",
+      "description": "Replay the unchanged sealed request through native backoff.",
       "native_binding": {
         "kind": "public-call",
         "user_id": "user-a",
         "client_id": "client-a",
-        "call_id": "response_loss_retry",
-        "stage": "synchronous",
-        "method": "retry-after-error",
+        "call_id": "response_loss_initial",
+        "stage": "await-call",
         "completion": "idle"
       },
       "operation": {
