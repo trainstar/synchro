@@ -72,6 +72,7 @@ var serverProofBindings = []serverProofBinding{
 var nonScenarioRealTests = map[string]string{
 	"TestRealClass3ProjectionBootstrap":                                "regression",
 	"TestRealClass3ProjectionBootstrapRecoversAfterProcessTermination": "regression",
+	"TestRealExtensionReinstallRebindsWorkerSlot":                      "regression",
 	"TestRealHTTPHarness":                                              "framework",
 	"TestRealMutationControlChecksumCorrectness":                       "adversarial",
 	"TestRealMutationControlCursorAdvancement":                         "adversarial",

@@ -131,6 +131,25 @@ type Harness struct {
 	databaseHandles []*sql.DB
 }
 
+// ExtensionReinstallResult identifies the worker replaced by an extension reinstall.
+type ExtensionReinstallResult struct {
+	PriorWorkerPID int
+	ReinstallLSN   string
+}
+
+// ExtensionReinstallObservation contains bounded post-reinstall worker facts.
+type ExtensionReinstallObservation struct {
+	WorkerPID                      int
+	ActiveSlotName                 string
+	RestartLSN                     string
+	SlotActive                     bool
+	RestartLSNAtOrAfterReinstall   bool
+	ActiveRegistryGeneration       int64
+	WorkerRegistryGeneration       int64
+	PendingRegistryGenerationCount int64
+	NoValidationFailurePoison      bool
+}
+
 // SourceExecutor permits source-table DML through one restricted NOLOGIN role.
 type SourceExecutor struct {
 	harness *Harness
@@ -469,9 +488,6 @@ func Provision(ctx context.Context, config HarnessConfig) (_ *Harness, returnedE
 	if err := harness.installExtensionTopology(ctx); err != nil {
 		return nil, err
 	}
-	if err := harness.applyIndependentSourceSetup(ctx); err != nil {
-		return nil, err
-	}
 	if err := harness.restartPostgres(ctx); err != nil {
 		return nil, err
 	}
@@ -479,6 +495,9 @@ func Provision(ctx context.Context, config HarnessConfig) (_ *Harness, returnedE
 		return nil, err
 	}
 	if err := harness.waitForWorker(ctx); err != nil {
+		return nil, err
+	}
+	if err := harness.applyIndependentSourceSetup(ctx); err != nil {
 		return nil, err
 	}
 	if err := harness.verifyCaptureReadiness(ctx); err != nil && !config.AllowInitialCaptureReadinessFailure {
@@ -1169,8 +1188,18 @@ func (h *Harness) installExtensionTopology(ctx context.Context) error {
 		return errors.New("create isolated replication slot failed")
 	}
 	h.slotCreated = true
-	if _, err := database.ExecContext(ctx, "CREATE PUBLICATION "+quoteIdentifier(h.names.Publication)); err != nil {
-		return errors.New("create isolated publication failed")
+	var publicationExists bool
+	if err := database.QueryRowContext(
+		ctx,
+		"SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_publication WHERE pubname = $1)",
+		h.names.Publication,
+	).Scan(&publicationExists); err != nil {
+		return errors.New("check isolated publication failed")
+	}
+	if !publicationExists {
+		if _, err := database.ExecContext(ctx, "CREATE PUBLICATION "+quoteIdentifier(h.names.Publication)); err != nil {
+			return errors.New("create isolated publication failed")
+		}
 	}
 	h.publicationCreated = true
 	return nil
@@ -1672,6 +1701,91 @@ func (h *Harness) RestartPostgres(ctx context.Context) error {
 		return errors.New("isolated PostgreSQL restart is unavailable")
 	}
 	return h.restartPostgres(ctx)
+}
+
+// ReinstallExtension replaces the extension atomically without restarting the postmaster.
+func (h *Harness) ReinstallExtension(ctx context.Context) (ExtensionReinstallResult, error) {
+	if h == nil || ctx == nil || !h.sourceReady {
+		return ExtensionReinstallResult{}, errors.New("isolated extension reinstall is unavailable")
+	}
+	if err := ctx.Err(); err != nil {
+		return ExtensionReinstallResult{}, errors.New("isolated extension reinstall context expired")
+	}
+	database, err := h.openDatabase(ctx, h.names.Database, h.env.Admin, false)
+	if err != nil {
+		return ExtensionReinstallResult{}, errors.New("open extension reinstall connection failed")
+	}
+	defer database.Close()
+	result := ExtensionReinstallResult{}
+	var workerCount int
+	if err := database.QueryRowContext(ctx, `
+		SELECT count(*), COALESCE(min(pid), 0)
+		FROM pg_catalog.pg_stat_activity
+		WHERE datname = current_database()
+		  AND backend_type = 'synchro WAL consumer'`).Scan(&workerCount, &result.PriorWorkerPID); err != nil || workerCount != 1 || result.PriorWorkerPID <= 0 {
+		return ExtensionReinstallResult{}, errors.New("unique WAL worker is unavailable before extension reinstall")
+	}
+	tx, err := database.BeginTx(ctx, nil)
+	if err != nil {
+		return ExtensionReinstallResult{}, errors.New("begin extension reinstall transaction failed")
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, "DROP EXTENSION synchro_pg CASCADE"); err != nil {
+		return ExtensionReinstallResult{}, errors.New("drop synchro_pg extension failed")
+	}
+	if _, err := tx.ExecContext(ctx, "CREATE EXTENSION synchro_pg"); err != nil {
+		return ExtensionReinstallResult{}, errors.New("create synchro_pg extension failed")
+	}
+	var publicationExists bool
+	if err := tx.QueryRowContext(
+		ctx,
+		"SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_publication WHERE pubname = $1)",
+		h.names.Publication,
+	).Scan(&publicationExists); err != nil {
+		return ExtensionReinstallResult{}, errors.New("check isolated publication failed")
+	}
+	if !publicationExists {
+		if _, err := tx.ExecContext(ctx, "CREATE PUBLICATION "+quoteIdentifier(h.names.Publication)); err != nil {
+			return ExtensionReinstallResult{}, errors.New("recreate isolated publication failed")
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return ExtensionReinstallResult{}, errors.New("commit extension reinstall transaction failed")
+	}
+	if err := database.QueryRowContext(ctx, "SELECT pg_catalog.pg_current_wal_lsn()::text").Scan(&result.ReinstallLSN); err != nil || result.ReinstallLSN == "" {
+		return ExtensionReinstallResult{}, errors.New("read extension reinstall WAL position failed")
+	}
+	return result, nil
+}
+
+// RestoreDiagnosticRegistrations restores the fixed source registrations after an extension reinstall.
+func (h *Harness) RestoreDiagnosticRegistrations(ctx context.Context) error {
+	if h == nil || ctx == nil || !h.sourceReady {
+		return errors.New("isolated diagnostic registration restore is unavailable")
+	}
+	if err := ctx.Err(); err != nil {
+		return errors.New("isolated diagnostic registration restore context expired")
+	}
+	database, err := h.openDatabase(ctx, h.names.Database, h.env.Admin, false)
+	if err != nil {
+		return errors.New("open diagnostic registration restore connection failed")
+	}
+	for _, table := range diagnosticSourceTables {
+		if _, err := database.ExecContext(ctx, "DROP POLICY IF EXISTS synchro_owner_all ON public."+quoteIdentifier(table)); err != nil {
+			_ = database.Close()
+			return errors.New("reset diagnostic owner policy failed")
+		}
+	}
+	if err := database.Close(); err != nil {
+		return errors.New("close diagnostic registration restore connection failed")
+	}
+	if err := h.grantWorkerReplicationSourceAccess(ctx); err != nil {
+		return err
+	}
+	if err := h.executeSourceScript(ctx, "register-diagnostic-reinstall.sql", diagnosticRegistrationSQL); err != nil {
+		return err
+	}
+	return nil
 }
 
 // FailureDiagnostics returns bounded, sanitized process output for a failed run.
@@ -3707,6 +3821,73 @@ func (executor *OperatorExecutor) CurrentWALWorkerPID(ctx context.Context) (int,
 		return 0, errors.New("unique WAL worker process is unavailable")
 	}
 	return pid, nil
+}
+
+// ObserveExtensionReinstall returns worker and registry state after an extension reinstall.
+func (executor *OperatorExecutor) ObserveExtensionReinstall(ctx context.Context, reinstallLSN string) (ExtensionReinstallObservation, error) {
+	if executor == nil || executor.harness == nil || !executor.harness.sourceReady {
+		return ExtensionReinstallObservation{}, errors.New("operator executor is unavailable")
+	}
+	if ctx == nil || reinstallLSN == "" {
+		return ExtensionReinstallObservation{}, errors.New("extension reinstall observation is invalid")
+	}
+	database, err := executor.harness.openDatabase(ctx, executor.harness.names.Database, executor.harness.env.Admin, false)
+	if err != nil {
+		return ExtensionReinstallObservation{}, errors.New("open extension reinstall observation connection failed")
+	}
+	defer database.Close()
+	observation := ExtensionReinstallObservation{}
+	if err := database.QueryRowContext(ctx, `
+		WITH worker AS (
+			SELECT count(*) AS worker_count, COALESCE(min(pid), 0) AS worker_pid
+			FROM pg_catalog.pg_stat_activity
+			WHERE datname = current_database()
+			  AND backend_type = 'synchro WAL consumer'
+		), active_registry AS (
+			SELECT generation
+			FROM synchro.sync_registry_generations
+			WHERE state = 'active' AND validated
+		), active_slot AS (
+			SELECT slot.slot_name::text, slot.restart_lsn::text, slot.active,
+			       slot.restart_lsn >= $1::pg_lsn AS restart_lsn_is_fresh
+			FROM synchro.sync_runtime_state runtime
+			JOIN pg_catalog.pg_replication_slots slot
+			  ON slot.slot_name = runtime.active_slot_name
+			WHERE runtime.singleton
+		)
+		SELECT CASE WHEN worker.worker_count = 1 THEN worker.worker_pid ELSE 0 END,
+		       COALESCE(active_slot.slot_name, ''),
+		       COALESCE(active_slot.restart_lsn, ''),
+		       COALESCE(active_slot.active, false),
+		       COALESCE(active_slot.restart_lsn_is_fresh, false),
+		       COALESCE(active_registry.generation, 0),
+		       COALESCE((
+			   SELECT registry_generation
+			   FROM synchro.sync_wal_worker_state
+			   WHERE worker_id = 'synchro_wal_consumer'
+		       ), 0),
+		       (SELECT count(*) FROM synchro.sync_registry_generations WHERE state = 'pending'),
+		       NOT EXISTS (
+			   SELECT 1
+			   FROM synchro.sync_wal_poison
+			   WHERE lifecycle = 'active' AND failure_class = 'validation_failed'
+		       )
+		FROM worker
+		LEFT JOIN active_slot ON true
+		LEFT JOIN active_registry ON true`, reinstallLSN).Scan(
+		&observation.WorkerPID,
+		&observation.ActiveSlotName,
+		&observation.RestartLSN,
+		&observation.SlotActive,
+		&observation.RestartLSNAtOrAfterReinstall,
+		&observation.ActiveRegistryGeneration,
+		&observation.WorkerRegistryGeneration,
+		&observation.PendingRegistryGenerationCount,
+		&observation.NoValidationFailurePoison,
+	); err != nil {
+		return ExtensionReinstallObservation{}, errors.New("read extension reinstall observation failed")
+	}
+	return observation, nil
 }
 
 // RunWALReplayRestartControl forces a worker exit after durable materialization and before acknowledgement.
