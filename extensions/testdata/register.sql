@@ -174,6 +174,7 @@ BEGIN
     ]
     LOOP
         EXECUTE pg_catalog.format('ALTER TABLE public.%I ENABLE ROW LEVEL SECURITY', relation_name);
+        EXECUTE pg_catalog.format('DROP POLICY IF EXISTS synchro_owner_all ON public.%I', relation_name);
         EXECUTE pg_catalog.format(
             'CREATE POLICY synchro_owner_all ON public.%I AS PERMISSIVE FOR ALL TO synchro_owner USING (true) WITH CHECK (true)',
             relation_name
