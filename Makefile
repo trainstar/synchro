@@ -1109,12 +1109,15 @@ build-local-postgres:
 	@mkdir -p "$(dir $(LOCAL_POSTGRES_BINARY))"
 	cd conformance && GOFLAGS= GOWORK=off go build -o "$(LOCAL_POSTGRES_BINARY)" ./cmd/synchro-local-postgres
 
-local-postgres-start: conformance-adapter-artifact conformance-pg18-extension-artifact build-local-postgres
+local-postgres-start: build-local-postgres
+	@test -x "$(CONFORMANCE_ADAPTER_ARTIFACT_DIR)/synchrod-pg" || $(MAKE) conformance-adapter-artifact
+	@test -d "$(CONFORMANCE_EXTENSION_ARTIFACT)" || $(MAKE) conformance-pg18-extension-artifact
 	@test -n "$(PGRX_PG_BIN_DIR)" || { echo "PGRX_PG_BIN_DIR is required" >&2; exit 1; }
 	@test -x "$(PGRX_PG_BIN_DIR)"/initdb || { echo "PostgreSQL 18 binaries are required in $(PGRX_PG_BIN_DIR)" >&2; exit 1; }
 	@set -eu; \
 		state="$(LOCAL_POSTGRES_STATE_DIR)"; \
 		mkdir -p "$$state"; \
+		chmod 700 "$$state"; \
 		if [ -f "$(LOCAL_POSTGRES_PID_FILE)" ] && kill -0 "$$(cat "$(LOCAL_POSTGRES_PID_FILE)")" 2>/dev/null; then \
 			echo "local PostgreSQL provisioner already running"; \
 			cat "$(LOCAL_POSTGRES_URL_FILE)"; \
