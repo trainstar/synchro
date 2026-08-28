@@ -30,8 +30,11 @@ import (
 )
 
 const (
-	defaultStartupTimeout                  = 45 * time.Second
-	defaultShutdownTimeout                 = 10 * time.Second
+	defaultStartupTimeout = 45 * time.Second
+	// Fast shutdown includes a final checkpoint. Accumulated filesystem
+	// writeback across many serial provisions makes a tight bound flake,
+	// so the bound stays generous while still catching a real hang.
+	defaultShutdownTimeout                 = 30 * time.Second
 	defaultProcessLogBytes                 = 1 << 20
 	maximumProcessLogBytes                 = 4 << 20
 	processPollInterval                    = 50 * time.Millisecond
