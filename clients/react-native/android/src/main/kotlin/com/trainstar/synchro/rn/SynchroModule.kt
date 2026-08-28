@@ -1,3 +1,7 @@
+// The bridge is the React Native conformance facade. Its transport
+// observation wiring consumes the Kotlin proof API deliberately.
+@file:OptIn(com.trainstar.synchro.inspection.SynchroProofApi::class)
+
 package com.trainstar.synchro.rn
 
 import android.util.Base64
@@ -945,12 +949,11 @@ class SynchroModule(reactContext: ReactApplicationContext) :
         }
         try {
             val inspection = SynchroInspection(c)
-            val state = inspection.clientState()
-            val counts = inspection.clientStateCounts()
-            val schema: Any = state.schema?.let {
+            val capture = inspection.captureState(maximumRecords = 512)
+            val schema: Any = capture.schema?.let {
                 JSONObject().put("version", it.version).put("hash", it.hash)
             } ?: JSONObject.NULL
-            val scopeStates = JSONArray(state.scopeStates.map { value ->
+            val scopeStates = JSONArray(capture.scopeStates.map { value ->
                 JSONObject().apply {
                     put("scope_id", value.scopeID)
                     put("cursor", value.cursor ?: JSONObject.NULL)
@@ -959,7 +962,7 @@ class SynchroModule(reactContext: ReactApplicationContext) :
                     put("generation", value.generation)
                 }
             })
-            val scopeRows = JSONArray(state.scopeRows.map { value ->
+            val scopeRows = JSONArray(capture.scopeRows.map { value ->
                 JSONObject().apply {
                     put("scope_id", value.scopeID)
                     put("table_name", value.tableName)
@@ -968,13 +971,13 @@ class SynchroModule(reactContext: ReactApplicationContext) :
                     put("generation", value.generation)
                 }
             })
-            val attempts = JSONArray(state.rebuildAttempts.map { value ->
+            val attempts = JSONArray(capture.rebuildAttempts.map { value ->
                 JSONObject().apply {
                     put("scope_id", value.scopeID)
                     put("rebuild_id", value.rebuildID)
                     put("client_generation", value.clientGeneration)
-                    put("schema_version", value.schema.version)
-                    put("schema_hash", value.schema.hash)
+                    put("schema_version", value.schemaVersion)
+                    put("schema_hash", value.schemaHash)
                     put("generation", value.generation)
                     put("cursor", value.cursor ?: JSONObject.NULL)
                     put("page_limit", value.pageLimit)
@@ -985,20 +988,20 @@ class SynchroModule(reactContext: ReactApplicationContext) :
                 put("scope_states", scopeStates)
                 put("scope_rows", scopeRows)
                 put("rebuild_attempts", attempts)
-                put("application_row_count", counts.applicationRowCount)
-                put("mutation_ledger_count", counts.mutationLedgerCount)
-                put("mutation_outcome_count", counts.mutationOutcomeCount)
-                put("sealed_batch_count", counts.sealedBatchCount)
-                put("rejected_mutation_count", counts.rejectedMutationCount)
-                put("scope_state_count", counts.scopeStateCount)
-                put("scope_row_count", counts.scopeRowCount)
-                put("provenance_count", counts.provenanceCount)
-                put("row_metadata_count", counts.rowMetadataCount)
-                put("rebuild_attempt_count", counts.rebuildAttemptCount)
-                put("rebuild_receipt_count", counts.rebuildReceiptCount)
+                put("application_row_count", capture.applicationRowCount)
+                put("mutation_ledger_count", capture.mutationLedgerCount)
+                put("mutation_outcome_count", capture.mutationOutcomeCount)
+                put("sealed_batch_count", capture.sealedBatchCount)
+                put("rejected_mutation_count", capture.rejectedMutationCount)
+                put("scope_state_count", capture.scopeStateCount)
+                put("scope_row_count", capture.scopeRowCount)
+                put("provenance_count", capture.provenanceCount)
+                put("row_metadata_count", capture.rowMetadataCount)
+                put("rebuild_attempt_count", capture.rebuildAttemptCount)
+                put("rebuild_receipt_count", capture.rebuildReceiptCount)
                 put(
                     "provenance_maintenance_work_cursor",
-                    state.provenanceMaintenanceWorkCursor.toString(),
+                    capture.provenanceMaintenanceWorkCursor.toString(),
                 )
             }.toString())
         } catch (error: Exception) {
@@ -1014,16 +1017,12 @@ class SynchroModule(reactContext: ReactApplicationContext) :
         }
         try {
             val inspection = SynchroInspection(c)
-            val metadata = inspection.rowMetadata().filter {
-                it.tableName == tableName && it.recordID == recordID
-            }
-            require(metadata.size <= 1) { "Row metadata identity is ambiguous" }
-            val metadataJson: Any = metadata.firstOrNull()?.let { value ->
+            val metadataJson: Any = inspection.rowMetadata(tableName, recordID)?.let { value ->
                 JSONObject().apply {
                     put("table_name", value.tableName)
                     put("record_id", value.recordID)
                     put("server_version", value.serverVersion)
-                    put("row_checksum", value.rowChecksumJSON ?: JSONObject.NULL)
+                    put("row_checksum", value.rowChecksum ?: JSONObject.NULL)
                 }
             } ?: JSONObject.NULL
             val receipts = JSONArray(inspection.rebuildReceipts().map { value ->
