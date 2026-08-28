@@ -34,11 +34,19 @@ final class AppDelegate: UIResponder, UIApplicationDelegate {
                 appVersion: "consumer"
             )
             let client = try SynchroClient(config: config)
-            try client.execute(
-                "CREATE TABLE IF NOT EXISTS consumer_probe (id TEXT PRIMARY KEY, value TEXT NOT NULL)"
+            try client.createTable(
+                "consumer_probe",
+                columns: [
+                    ColumnDef(name: "id", type: "TEXT", nullable: false, primaryKey: true),
+                    ColumnDef(name: "value", type: "TEXT", nullable: false),
+                ]
+            )
+            _ = try client.execute(
+                "DELETE FROM consumer_probe WHERE id = ?",
+                params: ["probe"]
             )
             try client.execute(
-                "INSERT OR REPLACE INTO consumer_probe (id, value) VALUES (?, ?)",
+                "INSERT INTO consumer_probe (id, value) VALUES (?, ?)",
                 params: ["probe", "packaged"]
             )
             self.client = client

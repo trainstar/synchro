@@ -2,6 +2,7 @@ package com.trainstar.synchro.consumer
 
 import android.app.Activity
 import android.os.Bundle
+import com.trainstar.synchro.ColumnDef
 import com.trainstar.synchro.SynchroClient
 import com.trainstar.synchro.SynchroConfig
 
@@ -19,7 +20,13 @@ class MainActivity : Activity() {
             ),
             this
         )
-        client.execute("CREATE TABLE IF NOT EXISTS consumer_probe (id TEXT PRIMARY KEY, value TEXT NOT NULL)")
+        client.createTable(
+            "consumer_probe",
+            listOf(
+                ColumnDef("id", "TEXT", nullable = false, primaryKey = true),
+                ColumnDef("value", "TEXT", nullable = false),
+            ),
+        )
         client.close()
     }
 }

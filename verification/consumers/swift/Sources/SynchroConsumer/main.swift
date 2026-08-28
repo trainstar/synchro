@@ -17,7 +17,13 @@ let config = SynchroConfig(
 )
 let client = try SynchroClient(config: config)
 
-_ = try client.execute("CREATE TABLE consumer_probe (id TEXT PRIMARY KEY, value TEXT NOT NULL)")
+try client.createTable(
+    "consumer_probe",
+    columns: [
+        ColumnDef(name: "id", type: "TEXT", nullable: false, primaryKey: true),
+        ColumnDef(name: "value", type: "TEXT", nullable: false),
+    ]
+)
 _ = try client.execute(
     "INSERT INTO consumer_probe (id, value) VALUES (?, ?)",
     params: ["probe", "packaged"]

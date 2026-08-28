@@ -112,6 +112,18 @@ allprojects {
 EOF
     (
       cd "$work_dir/app"
+      # The packaged module and Kotlin SDK require core library desugaring.
+      cat >> android/app/build.gradle <<'GRADLE'
+
+android {
+    compileOptions {
+        coreLibraryDesugaringEnabled true
+    }
+}
+dependencies {
+    coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.0.4")
+}
+GRADLE
       mkdir -p android/app/src/main/assets android/app/src/main/res
       npx react-native bundle \
         --platform android \

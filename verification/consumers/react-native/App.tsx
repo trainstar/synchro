@@ -17,11 +17,13 @@ export default function App(): React.JSX.Element {
     void (async () => {
       try {
         await client.initialize();
+        await client.createTable('consumer_probe', [
+          { name: 'id', type: 'TEXT', nullable: false, primaryKey: true },
+          { name: 'value', type: 'TEXT', nullable: false },
+        ]);
+        await client.execute('DELETE FROM consumer_probe WHERE id = ?', ['probe']);
         await client.execute(
-          'CREATE TABLE IF NOT EXISTS consumer_probe (id TEXT PRIMARY KEY, value TEXT NOT NULL)'
-        );
-        await client.execute(
-          'INSERT OR REPLACE INTO consumer_probe (id, value) VALUES (?, ?)',
+          'INSERT INTO consumer_probe (id, value) VALUES (?, ?)',
           ['probe', 'packaged']
         );
         const row = await client.queryOne(
