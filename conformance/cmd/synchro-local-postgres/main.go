@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/rand"
 	"database/sql"
+	"encoding/hex"
 	"errors"
 	"flag"
 	"fmt"
@@ -70,11 +71,13 @@ func runStart(ctx context.Context, args []string) error {
 	stateDir := flags.String("state-dir", "", "private state directory")
 	tempParent := flags.String("temp-parent", "", "private temporary directory parent")
 	urlFile := flags.String("url-file", "", "administrator URL output file")
+	attachEnvironmentFile := flags.String("attach-environment-file", "", "attach-mode environment output file")
+	listen := flags.String("listen", "127.0.0.1", "PostgreSQL listen address")
 	if err := flags.Parse(args); err != nil {
 		return errors.New("start flags are invalid")
 	}
-	if flags.NArg() != 0 || *repoRoot == "" || *pg18BinDir == "" || *extensionArtifact == "" || *adapterArtifact == "" || *stateDir == "" || *tempParent == "" || *urlFile == "" {
-		return errors.New("start requires --repo-root, --pg18-bin-dir, --extension-artifact, --adapter-artifact, --state-dir, --temp-parent, and --url-file")
+	if flags.NArg() != 0 || *repoRoot == "" || *pg18BinDir == "" || *extensionArtifact == "" || *adapterArtifact == "" || *stateDir == "" || *tempParent == "" || *urlFile == "" || *attachEnvironmentFile == "" {
+		return errors.New("start requires --repo-root, --pg18-bin-dir, --extension-artifact, --adapter-artifact, --state-dir, --temp-parent, --url-file, and --attach-environment-file")
 	}
 	if _, err := filepath.Abs(*repoRoot); err != nil {
 		return errors.New("repository root is invalid")
@@ -86,7 +89,6 @@ func runStart(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	defer credentials.remove()
 	restoreEnvironment := setEnvironment(map[string]string{
 		"SYNCHRO_CONFORMANCE_PG18_BINDIR":            *pg18BinDir,
 		"SYNCHRO_CONFORMANCE_EXTENSION_ARTIFACT":     *extensionArtifact,
@@ -112,6 +114,7 @@ func runStart(ctx context.Context, args []string) error {
 	harness, err := blackbox.Provision(ctx, blackbox.HarnessConfig{
 		Environment:     environment,
 		TempParent:      *tempParent,
+		ListenAddress:   strings.TrimSpace(*listen),
 		SkipAdapter:     true,
 		StartupTimeout:  localStartupTimeout,
 		ShutdownTimeout: localShutdownTimeout,
@@ -128,6 +131,10 @@ func runStart(ctx context.Context, args []string) error {
 		_ = harness.Close(context.Background())
 		return fmt.Errorf("write local PostgreSQL URL: %w", err)
 	}
+	if err := writePrivateFile(*attachEnvironmentFile, []byte(attachEnvironment(url, *pg18BinDir, *extensionArtifact, *adapterArtifact, credentials, filepath.Join(*stateDir, "install.lock")))); err != nil {
+		_ = harness.Close(context.Background())
+		return fmt.Errorf("write attach environment: %w", err)
+	}
 	if _, err := fmt.Fprintln(os.Stdout, url); err != nil {
 		_ = harness.Close(context.Background())
 		return errors.New("write local PostgreSQL URL failed")
@@ -138,7 +145,35 @@ func runStart(ctx context.Context, args []string) error {
 	if err := harness.Close(closeContext); err != nil {
 		return fmt.Errorf("close local PostgreSQL: %w", err)
 	}
+	credentials.remove()
+	_ = os.Remove(*attachEnvironmentFile)
 	return nil
+}
+
+func attachEnvironment(url, pg18BinDir, extensionArtifact, adapterArtifact string, credentials localCredentials, installLock string) string {
+	return strings.Join([]string{
+		environmentAssignment("SYNCHRO_CONFORMANCE_ATTACH_DATABASE_URL", url),
+		environmentAssignment("SYNCHRO_CONFORMANCE_PG18_BINDIR", pg18BinDir),
+		environmentAssignment("SYNCHRO_CONFORMANCE_EXTENSION_ARTIFACT", extensionArtifact),
+		environmentAssignment("SYNCHRO_CONFORMANCE_ADAPTER_ARTIFACT", adapterArtifact),
+		environmentAssignment("SYNCHRO_CONFORMANCE_ADMIN_USER", credentials.adminUser),
+		environmentAssignment("SYNCHRO_CONFORMANCE_ADMIN_PASSWORD_FILE", credentials.adminPassword),
+		environmentAssignment("SYNCHRO_CONFORMANCE_ADAPTER_USER", credentials.adapterUser),
+		environmentAssignment("SYNCHRO_CONFORMANCE_ADAPTER_PASSWORD_FILE", credentials.adapterPassword),
+		environmentAssignment("SYNCHRO_CONFORMANCE_OBSERVER_USER", credentials.observerUser),
+		environmentAssignment("SYNCHRO_CONFORMANCE_OBSERVER_PASSWORD_FILE", credentials.observerPassword),
+		environmentAssignment("SYNCHRO_CONFORMANCE_WORKER_USER", credentials.workerUser),
+		environmentAssignment("SYNCHRO_CONFORMANCE_WORKER_PASSWORD_FILE", credentials.workerPassword),
+		environmentAssignment("SYNCHRO_CONFORMANCE_OPERATOR_USER", credentials.operatorUser),
+		environmentAssignment("SYNCHRO_CONFORMANCE_OPERATOR_PASSWORD_FILE", credentials.operatorPassword),
+		environmentAssignment("SYNCHRO_CONFORMANCE_JWT_SECRET_FILE", credentials.jwtSecret),
+		environmentAssignment("SYNCHRO_CONFORMANCE_INSTALL_LOCK", installLock),
+		"",
+	}, "\n")
+}
+
+func environmentAssignment(name, value string) string {
+	return name + "='" + strings.ReplaceAll(value, "'", "'\"'\"'") + "'"
 }
 
 type localCredentials struct {
@@ -177,7 +212,7 @@ func createCredentials(stateDir string) (localCredentials, error) {
 			return localCredentials{}, errors.New("generate local provisioner credential failed")
 		}
 		path := filepath.Join(stateDir, value.name)
-		if err := writePrivateFile(path, data); err != nil {
+		if err := writePrivateFile(path, []byte(hex.EncodeToString(data))); err != nil {
 			credentials.remove()
 			return localCredentials{}, errors.New("write local provisioner credential failed")
 		}

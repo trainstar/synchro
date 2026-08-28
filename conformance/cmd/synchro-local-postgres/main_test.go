@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/hex"
 	"errors"
 	"os"
 	"path/filepath"
@@ -44,6 +45,14 @@ func TestExitCode(t *testing.T) {
 	}
 }
 
+func TestEnvironmentAssignmentQuotesShellValues(t *testing.T) {
+	got := environmentAssignment("SYNCHRO_CONFORMANCE_ATTACH_DATABASE_URL", "host='127.0.0.1' port=5432 password='secret'")
+	want := "SYNCHRO_CONFORMANCE_ATTACH_DATABASE_URL='host='\"'\"'127.0.0.1'\"'\"' port=5432 password='\"'\"'secret'\"'\"''"
+	if got != want {
+		t.Fatalf("environmentAssignment() = %q, want %q", got, want)
+	}
+}
+
 func TestPrivateStateAndCredentialFiles(t *testing.T) {
 	dir := t.TempDir()
 	state := filepath.Join(dir, "state")
@@ -71,6 +80,13 @@ func TestPrivateStateAndCredentialFiles(t *testing.T) {
 		}
 		if info.Mode().Perm() != 0o600 {
 			t.Fatalf("credential %q mode = %v, want 0600", path, info.Mode().Perm())
+		}
+		contents, err := os.ReadFile(path)
+		if err != nil || len(contents) != 64 {
+			t.Fatalf("credential %q contents are invalid", path)
+		}
+		if _, err := hex.DecodeString(string(contents)); err != nil {
+			t.Fatalf("credential %q is not hexadecimal: %v", path, err)
 		}
 	}
 	credentials.remove()
