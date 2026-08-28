@@ -64,6 +64,12 @@ type NativeClientParameters struct {
 	ClientKey string `json:"client_key"`
 }
 
+type NativeSynchronizeParameters struct {
+	ClientKey  string `json:"client_key"`
+	Method     string `json:"method"`
+	Completion string `json:"completion"`
+}
+
 type NativeCallID string
 
 // NativeIdentityAlias gives one typed authored value a stable native proof name.
@@ -83,6 +89,49 @@ type NativeLifecycleBoundary struct {
 	UserID      string `json:"user_id"`
 	ClientID    string `json:"client_id"`
 	Method      string `json:"method"`
+}
+
+type NativeBeginCallParameters struct {
+	ClientKey string       `json:"client_key"`
+	CallID    NativeCallID `json:"call_id"`
+	Method    string       `json:"method"`
+}
+
+type NativeAwaitCallParameters struct {
+	ClientKey  string       `json:"client_key"`
+	CallID     NativeCallID `json:"call_id"`
+	Completion string       `json:"completion"`
+}
+
+type NativeAwaitStepParameters struct {
+	ClientKey string        `json:"client_key"`
+	CallID    *NativeCallID `json:"call_id,omitempty"`
+}
+
+type NativeLifecycleParameters struct {
+	ClientKey string `json:"client_key"`
+	Operation string `json:"operation"`
+}
+
+type NativeProcessStepParameters struct {
+	ClientKey *string `json:"client_key"`
+}
+
+type NativeProcessBoundaryParameters struct {
+	ClientKey     string         `json:"client_key"`
+	Boundary      string         `json:"boundary"`
+	AfterActionID NativeActionID `json:"after_action_id"`
+}
+
+type NativeCaptureParameters struct {
+	ClientKeys     []string        `json:"client_keys"`
+	Sources        []string        `json:"sources"`
+	ExpectationIDs []ExpectationID `json:"expectation_ids"`
+}
+
+type NativeMeasureParameters struct {
+	PerformanceBudgetIDs []contract.BudgetID      `json:"performance_budget_ids"`
+	MeasurementIDs       []contract.MeasurementID `json:"measurement_ids"`
 }
 
 type Operation struct {
