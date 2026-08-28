@@ -1038,7 +1038,7 @@ func TestRealHTTPHarness(t *testing.T) {
 			t.Errorf("close real harness: %v", err)
 		}
 	})
-	if harness.RestartCount() < 1 {
+	if environment.AttachDatabaseURL == "" && harness.RestartCount() < 1 {
 		t.Fatal("real harness did not restart PostgreSQL after extension installation")
 	}
 	observerDatabase, err := harness.OpenObserver(ctx)

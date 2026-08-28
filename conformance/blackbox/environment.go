@@ -69,6 +69,7 @@ type RoleCredential struct {
 // EnvironmentConfig contains the complete verified external harness input.
 // Its unexported fields prevent unchecked configuration construction.
 type EnvironmentConfig struct {
+	AttachDatabaseURL string
 	PG18BinDir        string
 	ExtensionArtifact string
 	AdapterArtifact   string
@@ -146,6 +147,8 @@ func loadEnvironment(lookup func(string) (string, bool)) (EnvironmentConfig, err
 		return EnvironmentConfig{}, errors.Join(failures...)
 	}
 
+	attachURL, _ := lookup("SYNCHRO_CONFORMANCE_ATTACH_DATABASE_URL")
+	attachURL = strings.TrimSpace(attachURL)
 	pgBinDir, version, err := verifyPG18Binaries(values["SYNCHRO_CONFORMANCE_PG18_BINDIR"])
 	if err != nil {
 		return EnvironmentConfig{}, err
@@ -218,6 +221,7 @@ func loadEnvironment(lookup func(string) (string, bool)) (EnvironmentConfig, err
 	}
 
 	return EnvironmentConfig{
+		AttachDatabaseURL: attachURL,
 		PG18BinDir:        pgBinDir,
 		ExtensionArtifact: extension.root,
 		AdapterArtifact:   adapterIdentity.path,

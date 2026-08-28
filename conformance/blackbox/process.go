@@ -80,6 +80,7 @@ var diagnosticLegacyInternalTables = []string{
 type HarnessConfig struct {
 	Environment                         EnvironmentConfig
 	TempParent                          string
+	ListenAddress                       string
 	StartupTimeout                      time.Duration
 	ShutdownTimeout                     time.Duration
 	ProcessLogBytes                     int
@@ -108,6 +109,9 @@ type Harness struct {
 	adapterURL  string
 	sourceRole  string
 	worker      RoleCredential
+	listen      string
+	attached    bool
+	attachHost  string
 
 	lock      *installationLock
 	installed *installedExtension
@@ -440,13 +444,21 @@ func Provision(ctx context.Context, config HarnessConfig) (_ *Harness, returnedE
 		env:    config.Environment,
 		names:  names,
 		worker: config.Environment.Worker,
+		listen: config.ListenAddress,
 	}
-	harness.sourceRole = "synchro_source_" + strings.TrimPrefix(names.Database, "synchro_conformance_")
-	lock, err := acquireInstallationLock(ctx, config.Environment.InstallationLock)
-	if err != nil {
-		return nil, err
+	if config.Environment.AttachDatabaseURL != "" {
+		if err := harness.configureAttachedDatabase(); err != nil {
+			return nil, err
+		}
 	}
-	harness.lock = lock
+	harness.sourceRole = "synchro_source_" + strings.TrimPrefix(harness.names.Database, "synchro_conformance_")
+	if !harness.attached {
+		lock, err := acquireInstallationLock(ctx, config.Environment.InstallationLock)
+		if err != nil {
+			return nil, err
+		}
+		harness.lock = lock
+	}
 	defer func() {
 		if returnedErr == nil {
 			return
@@ -464,41 +476,56 @@ func Provision(ctx context.Context, config HarnessConfig) (_ *Harness, returnedE
 	if err := harness.createRunDirectories(); err != nil {
 		return nil, err
 	}
-	if err := harness.installExtension(ctx); err != nil {
-		return nil, err
-	}
-	if err := harness.initializeCluster(ctx); err != nil {
-		return nil, err
-	}
-	if err := harness.writeHBAConfiguration(); err != nil {
-		return nil, err
-	}
-	if err := harness.writePostmasterConfiguration(); err != nil {
-		return nil, err
-	}
-	if err := harness.startPostgres(ctx); err != nil {
-		return nil, err
+	if !harness.attached {
+		if err := harness.installExtension(ctx); err != nil {
+			return nil, err
+		}
+		if err := harness.initializeCluster(ctx); err != nil {
+			return nil, err
+		}
+		if err := harness.writeHBAConfiguration(); err != nil {
+			return nil, err
+		}
+		if err := harness.writePostmasterConfiguration(); err != nil {
+			return nil, err
+		}
+		if err := harness.startPostgres(ctx); err != nil {
+			return nil, err
+		}
 	}
 	if err := harness.createRolesAndDatabase(ctx); err != nil {
 		return nil, err
 	}
+	if harness.attached {
+		if err := harness.verifyAttachedCluster(ctx); err != nil {
+			return nil, err
+		}
+		if err := harness.grantExtensionRoles(ctx); err != nil {
+			return nil, err
+		}
+	}
 	if err := harness.verifyWorkerAuthenticationBoundary(ctx); err != nil {
 		return nil, err
 	}
-	if err := harness.installExtensionTopology(ctx); err != nil {
-		return nil, err
+	if !harness.attached {
+		if err := harness.installExtensionTopology(ctx); err != nil {
+			return nil, err
+		}
 	}
 	if err := harness.waitForWorker(ctx); err != nil {
 		return nil, err
 	}
-	if err := harness.applyIndependentSourceSetup(ctx); err != nil {
+	existingSource, err := harness.applyIndependentSourceSetup(ctx)
+	if err != nil {
 		return nil, err
 	}
-	if err := harness.restartPostgres(ctx); err != nil {
-		return nil, err
-	}
-	if err := harness.verifyPostmasterSettings(ctx); err != nil {
-		return nil, err
+	if !harness.attached {
+		if err := harness.restartPostgres(ctx); err != nil {
+			return nil, err
+		}
+		if err := harness.verifyPostmasterSettings(ctx); err != nil {
+			return nil, err
+		}
 	}
 	if err := harness.waitForWorker(ctx); err != nil {
 		return nil, err
@@ -506,7 +533,20 @@ func Provision(ctx context.Context, config HarnessConfig) (_ *Harness, returnedE
 	if err := harness.verifyCaptureReadiness(ctx); err != nil && !config.AllowInitialCaptureReadinessFailure {
 		return nil, err
 	}
-	if err := harness.grantRunRoles(ctx); err != nil {
+	if existingSource {
+		database, err := harness.openDatabase(ctx, harness.names.Database, harness.env.Admin, false)
+		if err != nil {
+			return nil, errors.New("connect for existing run role verification failed")
+		}
+		err = harness.verifyRunRoleSeparation(ctx, database)
+		closeErr := database.Close()
+		if err != nil {
+			return nil, err
+		}
+		if closeErr != nil {
+			return nil, errors.New("close existing run role verification failed")
+		}
+	} else if err := harness.grantRunRoles(ctx); err != nil {
 		return nil, err
 	}
 	if !config.SkipAdapter {
@@ -524,13 +564,16 @@ func normalizeHarnessConfig(config HarnessConfig) (HarnessConfig, error) {
 	if config.StartupTimeout == 0 {
 		config.StartupTimeout = defaultStartupTimeout
 	}
+	if config.ListenAddress == "" {
+		config.ListenAddress = "127.0.0.1"
+	}
 	if config.ShutdownTimeout == 0 {
 		config.ShutdownTimeout = defaultShutdownTimeout
 	}
 	if config.ProcessLogBytes == 0 {
 		config.ProcessLogBytes = defaultProcessLogBytes
 	}
-	if config.StartupTimeout <= 0 || config.ShutdownTimeout <= 0 || config.ProcessLogBytes < 1 || config.ProcessLogBytes > maximumProcessLogBytes {
+	if config.StartupTimeout <= 0 || config.ShutdownTimeout <= 0 || config.ProcessLogBytes < 1 || config.ProcessLogBytes > maximumProcessLogBytes || !validListenAddress(config.ListenAddress) {
 		return HarnessConfig{}, errors.New("harness configuration is invalid")
 	}
 	if config.TempParent != "" {
@@ -545,6 +588,10 @@ func normalizeHarnessConfig(config HarnessConfig) (HarnessConfig, error) {
 		config.TempParent = parent
 	}
 	return config, nil
+}
+
+func validListenAddress(value string) bool {
+	return value != "" && !strings.ContainsAny(value, "\x00\r\n'")
 }
 
 func newHarnessNames() (HarnessNames, error) {
@@ -566,6 +613,15 @@ func (h *Harness) createRunDirectories() error {
 		return errors.New("create isolated harness directory failed")
 	}
 	h.runRoot = root
+	if h.attached {
+		adapterPort, err := allocateLoopbackPort()
+		if err != nil {
+			return errors.New("allocate adapter loopback port failed")
+		}
+		h.adapterPort = adapterPort
+		h.adapterURL = "http://" + net.JoinHostPort("127.0.0.1", strconv.Itoa(adapterPort))
+		return nil
+	}
 	h.dataDir = filepath.Join(root, "postgres")
 	h.socketDir = filepath.Join(root, "socket")
 	if err := os.Mkdir(h.socketDir, 0o700); err != nil {
@@ -582,6 +638,18 @@ func (h *Harness) createRunDirectories() error {
 	h.port = port
 	h.adapterPort = adapterPort
 	h.adapterURL = "http://" + net.JoinHostPort("127.0.0.1", strconv.Itoa(adapterPort))
+	return nil
+}
+
+func (h *Harness) configureAttachedDatabase() error {
+	config, err := pgconn.ParseConfig(h.env.AttachDatabaseURL)
+	if err != nil || config.Host == "" || filepath.IsAbs(config.Host) || config.Port == 0 || config.Database == "" {
+		return errors.New("attached PostgreSQL database URL is invalid")
+	}
+	h.attached = true
+	h.attachHost = config.Host
+	h.port = int(config.Port)
+	h.names.Database = config.Database
 	return nil
 }
 
@@ -897,7 +965,7 @@ func (h *Harness) initializeCluster(ctx context.Context) error {
 		"--no-instructions",
 	}
 	if err := runBoundedCommand(ctx, filepath.Join(h.env.PG18BinDir, "initdb"), arguments, nil, h.config.ProcessLogBytes, [][]byte{h.env.Admin.password}); err != nil {
-		return errors.New("initialize PostgreSQL cluster failed")
+		return fmt.Errorf("initialize PostgreSQL cluster failed: %w", err)
 	}
 	if err := os.Remove(passwordFile); err != nil {
 		return errors.New("remove PostgreSQL initialization credential failed")
@@ -907,7 +975,13 @@ func (h *Harness) initializeCluster(ctx context.Context) error {
 }
 
 func (h *Harness) writeHBAConfiguration() error {
-	configuration := workerHBAConfiguration(h.names.Database, h.worker.Username)
+	configuration := provisionedHBAConfiguration(h.names.Database, []string{
+		h.env.Admin.Username,
+		h.env.Adapter.Username,
+		h.env.Observer.Username,
+		h.worker.Username,
+		h.env.Operator.Username,
+	})
 	file, err := os.OpenFile(filepath.Join(h.dataDir, "pg_hba.conf"), os.O_TRUNC|os.O_WRONLY, 0)
 	if err != nil {
 		return errors.New("open PostgreSQL HBA configuration failed")
@@ -924,6 +998,29 @@ func (h *Harness) writeHBAConfiguration() error {
 		return errors.New("close PostgreSQL HBA configuration failed")
 	}
 	return nil
+}
+
+func provisionedHBAConfiguration(database string, roles []string) string {
+	database = quoteHBAName(database)
+	quotedRoles := make([]string, 0, len(roles))
+	for _, role := range roles {
+		quotedRoles = append(quotedRoles, quoteHBAName(role))
+	}
+	users := strings.Join(quotedRoles, ",")
+	admin := quotedRoles[0]
+	return strings.Join([]string{
+		"# Synchro conformance authentication boundary",
+		"local \"postgres\" " + admin + " scram-sha-256",
+		"local " + database + " " + users + " scram-sha-256",
+		"local all all reject",
+		"host \"postgres\" " + admin + " 0.0.0.0/0 scram-sha-256",
+		"host " + database + " " + users + " 0.0.0.0/0 scram-sha-256",
+		"host all all 0.0.0.0/0 reject",
+		"host \"postgres\" " + admin + " ::0/0 scram-sha-256",
+		"host " + database + " " + users + " ::0/0 scram-sha-256",
+		"host all all ::0/0 reject",
+		"",
+	}, "\n")
 }
 
 func workerHBAConfiguration(database, worker string) string {
@@ -948,7 +1045,7 @@ func quoteHBAName(value string) string {
 
 func (h *Harness) writePostmasterConfiguration() error {
 	configuration := strings.Join([]string{
-		"listen_addresses = '127.0.0.1'",
+		"listen_addresses = " + quotePostgresLiteral(h.listen),
 		"port = " + strconv.Itoa(h.port),
 		"unix_socket_directories = " + quotePostgresLiteral(h.socketDir),
 		"wal_level = logical",
@@ -1071,7 +1168,11 @@ func waitUntil(ctx context.Context, condition func(context.Context) (bool, error
 }
 
 func (h *Harness) createRolesAndDatabase(ctx context.Context) error {
-	database, err := h.openDatabase(ctx, "postgres", h.env.Admin, false)
+	databaseName := "postgres"
+	if h.attached {
+		databaseName = h.names.Database
+	}
+	database, err := h.openDatabase(ctx, databaseName, h.env.Admin, false)
 	if err != nil {
 		return errors.New("connect PostgreSQL administrator failed")
 	}
@@ -1080,19 +1181,20 @@ func (h *Harness) createRolesAndDatabase(ctx context.Context) error {
 		return errors.New("configure PostgreSQL administrator failed")
 	}
 	for _, role := range []RoleCredential{h.env.Adapter, h.env.Observer, h.env.Operator} {
-		statement := "CREATE ROLE " + quoteIdentifier(role.Username) + " LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION PASSWORD $1"
-		if err := execRolePassword(ctx, database, statement, role.password); err != nil {
+		if err := ensureRolePassword(ctx, database, role, "LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS"); err != nil {
 			return errors.New("create isolated PostgreSQL role failed")
 		}
 	}
-	workerStatement := "CREATE ROLE " + quoteIdentifier(h.worker.Username) + " LOGIN REPLICATION NOINHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS PASSWORD $1"
-	if err := execRolePassword(ctx, database, workerStatement, h.worker.password); err != nil {
+	if err := ensureRolePassword(ctx, database, h.worker, "LOGIN REPLICATION NOINHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS"); err != nil {
 		return fmt.Errorf("provision isolated worker role failed: %w", err)
 	}
-	if _, err := database.ExecContext(ctx, "CREATE ROLE "+quoteIdentifier(h.sourceRole)+" NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS"); err != nil {
+	if err := ensureRole(ctx, database, h.sourceRole, "NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS"); err != nil {
 		return errors.New("create isolated source role failed")
 	}
 	h.rolesCreated = true
+	if h.attached {
+		return nil
+	}
 	statement := "CREATE DATABASE " + quoteIdentifier(h.names.Database) + " OWNER " + quoteIdentifier(h.env.Admin.Username)
 	if _, err := database.ExecContext(ctx, statement); err != nil {
 		return errors.New("create isolated PostgreSQL database failed")
@@ -1101,7 +1203,57 @@ func (h *Harness) createRolesAndDatabase(ctx context.Context) error {
 	return nil
 }
 
+func ensureRolePassword(ctx context.Context, database *sql.DB, role RoleCredential, attributes string) error {
+	exists, err := roleExists(ctx, database, role.Username)
+	if err != nil {
+		return err
+	}
+	verb := "CREATE ROLE "
+	if exists {
+		verb = "ALTER ROLE "
+	}
+	return execRolePassword(ctx, database, verb+quoteIdentifier(role.Username)+" "+attributes+" PASSWORD $1", role.password)
+}
+
+func ensureRole(ctx context.Context, database *sql.DB, role, attributes string) error {
+	exists, err := roleExists(ctx, database, role)
+	if err != nil {
+		return err
+	}
+	verb := "CREATE ROLE "
+	if exists {
+		verb = "ALTER ROLE "
+	}
+	_, err = database.ExecContext(ctx, verb+quoteIdentifier(role)+" "+attributes)
+	return err
+}
+
+func roleExists(ctx context.Context, database *sql.DB, role string) (bool, error) {
+	var exists bool
+	err := database.QueryRowContext(ctx, "SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = $1)", role).Scan(&exists)
+	return exists, err
+}
+
 func (h *Harness) verifyWorkerAuthenticationBoundary(ctx context.Context) error {
+	if h.attached {
+		workerDatabase, err := h.openDatabase(ctx, h.names.Database, h.worker, true)
+		if err != nil {
+			return errors.New("open authenticated attached worker connection failed")
+		}
+		if err := workerDatabase.PingContext(ctx); err != nil {
+			_ = workerDatabase.Close()
+			return errors.New("attached worker credential authentication failed")
+		}
+		if err := workerDatabase.Close(); err != nil {
+			return errors.New("close authenticated attached worker connection failed")
+		}
+		wrongCredential := h.worker
+		wrongCredential.password = []byte("invalid-conformance-worker-password")
+		if pingDatabase(ctx, h, h.names.Database, wrongCredential, true) == nil {
+			return errors.New("attached PostgreSQL accepted an invalid worker credential")
+		}
+		return nil
+	}
 	database, err := h.openDatabase(ctx, "postgres", h.env.Admin, false)
 	if err != nil {
 		return errors.New("connect for PostgreSQL HBA verification failed")
@@ -1111,16 +1263,16 @@ func (h *Harness) verifyWorkerAuthenticationBoundary(ctx context.Context) error 
 	if err := database.QueryRowContext(ctx, "SELECT count(*) FROM pg_catalog.pg_hba_file_rules WHERE error IS NOT NULL").Scan(&invalidRules); err != nil || invalidRules != 0 {
 		return errors.New("PostgreSQL HBA configuration is invalid")
 	}
-	var exactWorkerRule bool
+	var workerRule bool
 	if err := database.QueryRowContext(ctx, `
 		SELECT count(*) = 1
 		FROM pg_catalog.pg_hba_file_rules
 		WHERE type = 'host'
 		  AND $1 = ANY(database)
 		  AND $2 = ANY(user_name)
-		  AND address = '127.0.0.1'
-		  AND netmask = '255.255.255.255'
-		  AND auth_method = 'scram-sha-256'`, h.names.Database, h.worker.Username).Scan(&exactWorkerRule); err != nil || !exactWorkerRule {
+		  AND address = '0.0.0.0'
+		  AND netmask = '0.0.0.0'
+	  AND auth_method = 'scram-sha-256'`, h.names.Database, h.worker.Username).Scan(&workerRule); err != nil || !workerRule {
 		return errors.New("PostgreSQL worker HBA rule is invalid")
 	}
 
@@ -1151,7 +1303,13 @@ func (h *Harness) verifyWorkerAuthenticationBoundary(ctx context.Context) error 
 }
 
 func pingDatabase(ctx context.Context, harness *Harness, database string, role RoleCredential, withPassword bool) error {
-	handle, err := harness.openDatabase(ctx, database, role, withPassword)
+	var handle *sql.DB
+	var err error
+	if withPassword {
+		handle, err = harness.openDatabase(ctx, database, role, true)
+	} else {
+		handle, err = harness.openDatabaseWithoutPassword(ctx, database, role)
+	}
 	if err != nil {
 		return err
 	}
@@ -1175,16 +1333,10 @@ func (h *Harness) installExtensionTopology(ctx context.Context) error {
 	}
 	defer database.Close()
 	if _, err := database.ExecContext(ctx, "CREATE EXTENSION synchro_pg"); err != nil {
-		return errors.New("install synchro_pg extension failed")
+		return fmt.Errorf("install synchro_pg extension failed: %w", err)
 	}
-	if _, err := database.ExecContext(ctx, "GRANT synchro_adapter TO "+quoteIdentifier(h.env.Adapter.Username)); err != nil {
-		return errors.New("grant isolated adapter group failed")
-	}
-	if _, err := database.ExecContext(ctx, "GRANT synchro_worker TO "+quoteIdentifier(h.worker.Username)); err != nil {
-		return errors.New("grant isolated worker group failed")
-	}
-	if _, err := database.ExecContext(ctx, "GRANT synchro_operator TO "+quoteIdentifier(h.env.Operator.Username)); err != nil {
-		return errors.New("grant isolated operator group failed")
+	if err := h.grantExtensionRolesOnDatabase(ctx, database); err != nil {
+		return err
 	}
 	var slotName string
 	if err := database.QueryRowContext(ctx, "SELECT slot_name FROM pg_create_logical_replication_slot($1, 'pgoutput')", h.names.ReplicationSlot).Scan(&slotName); err != nil || slotName != h.names.ReplicationSlot {
@@ -1208,7 +1360,32 @@ func (h *Harness) installExtensionTopology(ctx context.Context) error {
 	return nil
 }
 
+func (h *Harness) grantExtensionRoles(ctx context.Context) error {
+	database, err := h.openDatabase(ctx, h.names.Database, h.env.Admin, false)
+	if err != nil {
+		return errors.New("connect attached PostgreSQL database failed")
+	}
+	defer database.Close()
+	return h.grantExtensionRolesOnDatabase(ctx, database)
+}
+
+func (h *Harness) grantExtensionRolesOnDatabase(ctx context.Context, database *sql.DB) error {
+	if _, err := database.ExecContext(ctx, "GRANT synchro_adapter TO "+quoteIdentifier(h.env.Adapter.Username)); err != nil {
+		return errors.New("grant isolated adapter group failed")
+	}
+	if _, err := database.ExecContext(ctx, "GRANT synchro_worker TO "+quoteIdentifier(h.worker.Username)); err != nil {
+		return errors.New("grant isolated worker group failed")
+	}
+	if _, err := database.ExecContext(ctx, "GRANT synchro_operator TO "+quoteIdentifier(h.env.Operator.Username)); err != nil {
+		return errors.New("grant isolated operator group failed")
+	}
+	return nil
+}
+
 func (h *Harness) restartPostgres(ctx context.Context) error {
+	if h.attached {
+		return errors.New("attached PostgreSQL restart is unavailable")
+	}
 	stopContext, cancel := context.WithTimeout(context.Background(), processCleanupStageTimeout(h.config.ShutdownTimeout))
 	defer cancel()
 	if h.postgres == nil {
@@ -1265,6 +1442,57 @@ func (h *Harness) verifyPostmasterSettings(ctx context.Context) error {
 		}
 	}
 	return nil
+}
+
+func (h *Harness) verifyAttachedCluster(ctx context.Context) error {
+	database, err := h.openDatabase(ctx, h.names.Database, h.env.Admin, false)
+	if err != nil {
+		return errors.New("connect attached PostgreSQL database failed")
+	}
+	defer database.Close()
+	settings := map[string]string{}
+	for _, name := range []string{
+		"wal_level", "shared_preload_libraries", "synchro.auto_start", "synchro.database",
+		"synchro.replication_slot", "synchro.publication_name", "synchro.worker_login",
+		"synchro.max_worker_heartbeat_age_seconds", "synchro.max_wal_lag_bytes", "synchro.max_wal_lag_seconds",
+	} {
+		var value string
+		if err := database.QueryRowContext(ctx, "SELECT current_setting($1)", name).Scan(&value); err != nil {
+			return errors.New("attached PostgreSQL setting verification failed")
+		}
+		settings[name] = value
+	}
+	if settings["wal_level"] != "logical" || settings["synchro.auto_start"] != "on" ||
+		settings["synchro.database"] != h.names.Database || settings["synchro.worker_login"] != h.worker.Username ||
+		!containsPostgresListValue(settings["shared_preload_libraries"], "synchro_pg") ||
+		settings["synchro.replication_slot"] == "" || settings["synchro.publication_name"] == "" {
+		return errors.New("attached PostgreSQL configuration is invalid")
+	}
+	for _, name := range []string{"synchro.max_worker_heartbeat_age_seconds", "synchro.max_wal_lag_bytes", "synchro.max_wal_lag_seconds"} {
+		value, err := strconv.Atoi(settings[name])
+		if err != nil || value <= 0 {
+			return errors.New("attached PostgreSQL health limit is invalid")
+		}
+	}
+	h.names.ReplicationSlot = settings["synchro.replication_slot"]
+	h.names.Publication = settings["synchro.publication_name"]
+	var fingerprintsCurrent bool
+	if err := database.QueryRowContext(ctx, `
+		SELECT health #>> '{observations,extension_objects,library_fingerprint}' =
+		       health #>> '{observations,extension_objects,installed_fingerprint}'
+		FROM (SELECT synchro.synchro_health_detail() AS health) state`).Scan(&fingerprintsCurrent); err != nil || !fingerprintsCurrent {
+		return errors.New("attached extension build fingerprint is invalid")
+	}
+	return nil
+}
+
+func containsPostgresListValue(value, wanted string) bool {
+	for _, candidate := range strings.Split(value, ",") {
+		if strings.Trim(strings.TrimSpace(candidate), `"`) == wanted {
+			return true
+		}
+	}
+	return false
 }
 
 func (h *Harness) waitForWorker(ctx context.Context) error {
@@ -1332,18 +1560,48 @@ func (h *Harness) verifyCaptureReadiness(ctx context.Context) error {
 	return nil
 }
 
-func (h *Harness) applyIndependentSourceSetup(ctx context.Context) error {
+func (h *Harness) applyIndependentSourceSetup(ctx context.Context) (bool, error) {
+	existing, err := h.diagnosticSourceSchemaExists(ctx)
+	if err != nil {
+		return false, err
+	}
+	if existing {
+		h.sourceReady = true
+		return true, nil
+	}
 	if err := h.executeSourceScript(ctx, "schema.sql", diagnosticSchemaSQL); err != nil {
-		return err
+		return false, err
 	}
 	if err := h.grantWorkerReplicationSourceAccess(ctx); err != nil {
-		return err
+		return false, err
 	}
 	if err := h.executeSourceScript(ctx, "register-diagnostic.sql", diagnosticRegistrationSQL); err != nil {
-		return err
+		return false, err
 	}
 	h.sourceReady = true
-	return nil
+	return false, nil
+}
+
+func (h *Harness) diagnosticSourceSchemaExists(ctx context.Context) (bool, error) {
+	database, err := h.openDatabase(ctx, h.names.Database, h.env.Admin, false)
+	if err != nil {
+		return false, errors.New("connect for diagnostic source schema inspection failed")
+	}
+	defer database.Close()
+	var count int
+	if err := database.QueryRowContext(ctx, `
+		SELECT count(*)
+		FROM pg_catalog.pg_class relation
+		JOIN pg_catalog.pg_namespace namespace ON namespace.oid = relation.relnamespace
+		WHERE namespace.nspname = 'public'
+		  AND relation.relkind = 'r'
+		  AND relation.relname = ANY($1)`, diagnosticSourceTables).Scan(&count); err != nil {
+		return false, errors.New("inspect diagnostic source schema failed")
+	}
+	if count != 0 && count != len(diagnosticSourceTables) {
+		return false, errors.New("attached diagnostic source schema is incomplete")
+	}
+	return count == len(diagnosticSourceTables), nil
 }
 
 func (h *Harness) grantWorkerReplicationSourceAccess(ctx context.Context) error {
@@ -1371,16 +1629,21 @@ func (h *Harness) executeSourceScript(ctx context.Context, name, body string) er
 	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
 		return errors.New("write independent source setup failed")
 	}
+	host := h.socketDir
+	if h.attached {
+		host = h.attachHost
+	}
 	arguments := []string{
 		"-X",
 		"-v", "ON_ERROR_STOP=1",
-		"-h", h.socketDir,
+		"-h", host,
 		"-p", strconv.Itoa(h.port),
 		"-U", h.env.Admin.Username,
 		"-d", h.names.Database,
 		"-f", path,
 	}
-	if err := runBoundedCommand(ctx, filepath.Join(h.env.PG18BinDir, "psql"), arguments, scrubPostgresEnvironment(os.Environ()), h.config.ProcessLogBytes, nil); err != nil {
+	environment := append(scrubPostgresEnvironment(os.Environ()), "PGPASSWORD="+string(h.env.Admin.password))
+	if err := runBoundedCommand(ctx, filepath.Join(h.env.PG18BinDir, "psql"), arguments, environment, h.config.ProcessLogBytes, [][]byte{h.env.Admin.password}); err != nil {
 		return fmt.Errorf("apply independent source setup failed: %w", err)
 	}
 	return nil
@@ -1621,7 +1884,10 @@ func scrubPostgresEnvironment(source []string) []string {
 }
 
 func (h *Harness) databaseURL(role RoleCredential) string {
-	return postgresDSN("127.0.0.1", h.port, h.names.Database, role, true)
+	if h.attached {
+		return postgresDSN(h.attachHost, h.port, h.names.Database, role, true)
+	}
+	return postgresDSN(h.listen, h.port, h.names.Database, role, true)
 }
 
 func (h *Harness) openDatabase(ctx context.Context, database string, role RoleCredential, withPassword bool) (*sql.DB, error) {
@@ -1629,10 +1895,38 @@ func (h *Harness) openDatabase(ctx context.Context, database string, role RoleCr
 		return nil, errors.New("database context is required")
 	}
 	host := h.socketDir
-	if withPassword {
-		host = "127.0.0.1"
+	if h.attached {
+		if database != h.names.Database {
+			return nil, errors.New("attached PostgreSQL database is not configured")
+		}
+		host = h.attachHost
+	} else if withPassword {
+		host = h.listen
 	}
-	databaseHandle, err := sql.Open("pgx", postgresDSN(host, h.port, database, role, withPassword))
+	databaseHandle, err := sql.Open("pgx", postgresDSN(host, h.port, database, role, true))
+	if err != nil {
+		return nil, err
+	}
+	databaseHandle.SetMaxOpenConns(4)
+	databaseHandle.SetMaxIdleConns(1)
+	h.databaseMu.Lock()
+	h.databaseHandles = append(h.databaseHandles, databaseHandle)
+	h.databaseMu.Unlock()
+	return databaseHandle, nil
+}
+
+func (h *Harness) openDatabaseWithoutPassword(ctx context.Context, database string, role RoleCredential) (*sql.DB, error) {
+	if ctx == nil {
+		return nil, errors.New("database context is required")
+	}
+	host := h.listen
+	if h.attached {
+		if database != h.names.Database {
+			return nil, errors.New("attached PostgreSQL database is not configured")
+		}
+		host = h.attachHost
+	}
+	databaseHandle, err := sql.Open("pgx", postgresDSN(host, h.port, database, role, false))
 	if err != nil {
 		return nil, err
 	}
@@ -1700,7 +1994,7 @@ func (h *Harness) RestartCount() int {
 
 // RestartPostgres restarts the isolated postmaster for a process-fault test.
 func (h *Harness) RestartPostgres(ctx context.Context) error {
-	if h == nil || ctx == nil || !h.sourceReady {
+	if h == nil || ctx == nil || !h.sourceReady || h.attached {
 		return errors.New("isolated PostgreSQL restart is unavailable")
 	}
 	return h.restartPostgres(ctx)
@@ -4964,6 +5258,30 @@ func (h *Harness) Close(ctx context.Context) error {
 }
 
 func (h *Harness) cleanup(ctx context.Context) error {
+	if h.attached {
+		failures := runCleanupLifecycle(
+			ctx,
+			processCleanupStageTimeout(h.config.ShutdownTimeout),
+			h.stopAdapter,
+			h.closeDatabaseHandles,
+		)
+		if h.env.verified {
+			if err := verifyEnvironmentArtifactIdentity(h.env); err != nil {
+				failures = append(failures, err)
+			}
+		}
+		if err := h.removeRunRoot(); err != nil {
+			failures = append(failures, err)
+		}
+		if h.lock != nil {
+			if err := h.lock.Release(); err != nil {
+				failures = append(failures, err)
+			} else {
+				h.lock = nil
+			}
+		}
+		return errors.Join(failures...)
+	}
 	failures := runCleanupLifecycle(
 		ctx,
 		processCleanupStageTimeout(h.config.ShutdownTimeout),

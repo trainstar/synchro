@@ -25,6 +25,7 @@
 	test-vectors \
 	test-reference \
 	test-conformance-faults \
+	test-local-postgres \
 	test-blackbox-harness \
 	test-blackbox-components \
 	test-blackbox-wal \
@@ -160,7 +161,11 @@ LOCAL_POSTGRES_STATE_DIR ?= $(CURDIR)/.ignore/r2/tmp/local-postgres
 LOCAL_POSTGRES_PID_FILE ?= $(LOCAL_POSTGRES_STATE_DIR)/postgres.pid
 LOCAL_POSTGRES_LOG_FILE ?= $(LOCAL_POSTGRES_STATE_DIR)/postgres.log
 LOCAL_POSTGRES_URL_FILE ?= $(LOCAL_POSTGRES_STATE_DIR)/postgres.url
+LOCAL_POSTGRES_ATTACH_ENV_FILE ?= $(LOCAL_POSTGRES_STATE_DIR)/attach.env
+LOCAL_POSTGRES_LISTEN ?= 127.0.0.1
 LOCAL_POSTGRES_BINARY ?= $(CURDIR)/bin/synchro-local-postgres
+WARM_CONNECT_ENV_FILE ?=
+WARM_CONNECT_ENV = if [ -n "$(WARM_CONNECT_ENV_FILE)" ]; then test -r "$(WARM_CONNECT_ENV_FILE)"; set -a; . "$(WARM_CONNECT_ENV_FILE)"; set +a; fi;
 
 BINARY ?= bin/synchrod-pg
 SEED_BINARY ?= bin/synchro-seed
@@ -364,6 +369,9 @@ test-reference:
 
 test-conformance-faults:
 	cd conformance && GOFLAGS= GOWORK=off go run ./cmd/testresult suite -- go test -json ./barriers ./faults -count=1
+
+test-local-postgres:
+	cd conformance && GOFLAGS= GOWORK=off go run ./cmd/testresult suite -- go test -json ./cmd/synchro-local-postgres -count=1
 
 test-blackbox-harness:
 	cd conformance && GOFLAGS= GOWORK=off go run ./cmd/testresult suite -- go test -json ./blackbox -count=1
@@ -605,6 +613,7 @@ _test-client-schema-identity:
 
 test-swift-warm-connect: conformance-mod-download build-swift-native-runner
 	@set -eu; \
+		$(WARM_CONNECT_ENV) \
 		runner_dir="$$(cd clients/swift && swift build --show-bin-path)"; \
 		test -x "$$runner_dir/synchro-native-runner"; \
 		cd conformance; \
@@ -648,6 +657,7 @@ test-kotlin-warm-connect: conformance-mod-download build-kotlin-conformance-app
 	@test -x "$(ANDROID_HOME)/platform-tools/adb" || (echo "adb not found at $(ANDROID_HOME)/platform-tools/adb"; exit 1)
 	@test -n "$(KOTLIN_ANDROID_SERIAL)" || (echo "Set KOTLIN_ANDROID_SERIAL to one booted Android device."; exit 1)
 	@set -eu; \
+		$(WARM_CONNECT_ENV) \
 		application_apk="$(CURDIR)/clients/kotlin/conformance-app/build/outputs/apk/debug/conformance-app-debug.apk"; \
 		instrumentation_apk="$(CURDIR)/clients/kotlin/conformance-app/build/outputs/apk/androidTest/debug/conformance-app-debug-androidTest.apk"; \
 		test -f "$$application_apk"; \
@@ -706,7 +716,9 @@ test-rn-warm-connect-control: conformance-mod-download
 
 test-rn-warm-connect-ios: conformance-mod-download test-blackbox-harness test-rn-warm-connect-control rn-seed-asset rn-watchman-reset rn-ios-pods
 	cd clients/react-native/example && npx detox build --configuration ios.sim.debug
-	cd conformance && SYNCHRO_RN_DETOX_CONFIGURATION=ios.sim.debug GOFLAGS= GOWORK=off go run ./cmd/testresult exact \
+	@set -eu; \
+		$(WARM_CONNECT_ENV) \
+		cd conformance && SYNCHRO_RN_DETOX_CONFIGURATION=ios.sim.debug GOFLAGS= GOWORK=off go run ./cmd/testresult exact \
 		-test TestRealReactNativeWarmConnectIOS \
 		-expect target_pass \
 		-- go test -tags reactnativeintegration -json ./reactnative -count=1 -timeout=15m \
@@ -716,7 +728,9 @@ test-rn-warm-connect-android: conformance-mod-download test-blackbox-harness tes
 	@test -n "$(ANDROID_JAVA_HOME)" || (echo "Android Detox requires JDK 17. Set ANDROID_JAVA_HOME to a JDK 17 install."; exit 1)
 	@test -d "$(ANDROID_HOME)" || (echo "Android SDK not found at $(ANDROID_HOME). Set ANDROID_HOME to a valid SDK install."; exit 1)
 	cd clients/react-native/example && ANDROID_HOME="$(ANDROID_HOME)" ANDROID_SDK_ROOT="$(ANDROID_HOME)" JAVA_HOME="$(ANDROID_JAVA_HOME)" PATH="$(ANDROID_JAVA_HOME)/bin:$$PATH" npx detox build --configuration $(RN_ANDROID_DETOX_CONFIG)
-	cd conformance && SYNCHRO_RN_DETOX_CONFIGURATION="$(RN_ANDROID_DETOX_CONFIG)" GOFLAGS= GOWORK=off go run ./cmd/testresult exact \
+	@set -eu; \
+		$(WARM_CONNECT_ENV) \
+		cd conformance && SYNCHRO_RN_DETOX_CONFIGURATION="$(RN_ANDROID_DETOX_CONFIG)" GOFLAGS= GOWORK=off go run ./cmd/testresult exact \
 		-test TestRealReactNativeWarmConnectAndroid \
 		-expect target_pass \
 		-- go test -tags reactnativeintegration -json ./reactnative -count=1 -timeout=15m \
@@ -1132,6 +1146,8 @@ local-postgres-start: build-local-postgres
 			--state-dir "$$state" \
 			--temp-parent "$(CURDIR)/.ignore/r2/tmp" \
 			--url-file "$(LOCAL_POSTGRES_URL_FILE)" \
+			--attach-environment-file "$(LOCAL_POSTGRES_ATTACH_ENV_FILE)" \
+			--listen "$(LOCAL_POSTGRES_LISTEN)" \
 			>"$(LOCAL_POSTGRES_LOG_FILE)" 2>&1 </dev/null & \
 		echo $$! >"$(LOCAL_POSTGRES_PID_FILE)"; \
 		for attempt in $$(seq 1 180); do \
@@ -1164,7 +1180,7 @@ local-postgres-stop:
 			else \
 				echo "local PostgreSQL provisioner is not running"; \
 			fi; \
-			rm -f "$(LOCAL_POSTGRES_PID_FILE)" "$(LOCAL_POSTGRES_URL_FILE)"; \
+			rm -f "$(LOCAL_POSTGRES_PID_FILE)" "$(LOCAL_POSTGRES_URL_FILE)" "$(LOCAL_POSTGRES_ATTACH_ENV_FILE)"; \
 		else \
 			echo "local PostgreSQL provisioner is not running"; \
 		fi
