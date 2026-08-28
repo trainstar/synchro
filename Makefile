@@ -55,13 +55,9 @@
 	test-rust-pg \
 	test-rust-pg-all \
 	test-adapter \
-	test-adapter-setup \
-	test-adapter-teardown \
-	adapter-db-external-probe \
-	adapter-db-external-teardown \
-	adapter-db-local-setup \
-	adapter-db-local-teardown \
-	adapter-db-prepare \
+	local-postgres-start \
+	local-postgres-stop \
+	build-local-postgres \
 	ext-build \
 	ext-install \
 	ext-test \
@@ -139,19 +135,8 @@ ANDROID_JAVA_HOME ?= $(shell \
 KOTLIN_ANDROID_SERIAL ?= $(ANDROID_SERIAL)
 RN_ANDROID_DETOX_CONFIG ?= android.emu.release
 PGRX_PG ?= pg18
-PGRX_PORT ?= 28818
-PGRX_READY_TIMEOUT ?= 90
-PGRX_PG_MAJOR := $(patsubst pg%,%,$(PGRX_PG))
-PGRX_DATA_DIR ?= $(HOME)/.pgrx/data-$(PGRX_PG_MAJOR)
-PGRX_SOCKET_DIR ?= $(HOME)/.pgrx
-PGRX_ADMIN_HOST ?= $(if $(filter Darwin,$(shell uname -s)),$(PGRX_SOCKET_DIR),localhost)
-PGRX_ADMIN_USER ?= $(shell id -un)
-PGRX_LOG_FILE ?= $(HOME)/.pgrx/$(PGRX_PG_MAJOR).log
-PGRX_AUTOSTART ?= on
-PGRX_WORKER_LOGIN ?= synchro_test_worker_login
 PGRX_PG_CONFIG ?= $(shell awk -F'"' '/^$(PGRX_PG)[[:space:]]*=/ { print $$2 }' $(HOME)/.pgrx/config.toml)
 PGRX_PG_BIN_DIR ?= $(dir $(PGRX_PG_CONFIG))
-PGRX_PSQL ?= $(PGRX_PG_BIN_DIR)psql
 PGRX_TARGET_DIR ?= $(CURDIR)/.pgrx-target
 MUTATION_CONTROL_TEST ?=
 MUTATION_CONTROL_EXPECT ?= target_pass
@@ -159,18 +144,8 @@ TESTRESULT_TEST_NAME ?=
 BLACKBOX_TEST_COUNT ?= 1
 CONFORMANCE_ADAPTER_ARTIFACT_DIR ?= $(CURDIR)/dist/conformance/synchrod-pg-adapter
 CONFORMANCE_EXTENSION_ARTIFACT ?= $(CURDIR)/dist/conformance/synchro-pg-pg18
-ADAPTER_TEST_DB ?= synchro_adapter_test
 ADAPTER_TEST_URL ?=
-ifeq ($(strip $(ADAPTER_TEST_URL)),)
-ADAPTER_TEST_URL := postgres://$(USER)@localhost:$(PGRX_PORT)/$(ADAPTER_TEST_DB)?sslmode=disable
-ADAPTER_TEST_EXTERNAL := 0
-REPLICATION_URL ?= postgres://$(USER)@localhost:$(PGRX_PORT)/$(ADAPTER_TEST_DB)?replication=database&sslmode=disable
-else
-ADAPTER_TEST_EXTERNAL := 1
-REPLICATION_URL ?= $(ADAPTER_TEST_URL)
-endif
-ADAPTER_DB_SETUP := $(if $(filter 1,$(ADAPTER_TEST_EXTERNAL)),adapter-db-external-probe,adapter-db-local-setup)
-ADAPTER_DB_TEARDOWN := $(if $(filter 1,$(ADAPTER_TEST_EXTERNAL)),adapter-db-external-teardown,adapter-db-local-teardown)
+REPLICATION_URL = $(ADAPTER_TEST_URL)
 override R1_BENCHMARK_BASELINE := $(CURDIR)/conformance/blackbox/integration/testdata/r1-benchmark-baseline.json
 
 SYNCHROD_PG_PORT ?= 8091
@@ -181,6 +156,11 @@ SYNCHRO_TEST_JWT_SECRET ?= test-secret-for-integration-tests
 MIN_CLIENT_VERSION ?= 1.0.0
 SYNCHROD_PG_PID_FILE ?= .synchrod-pg-test.pid
 SYNCHROD_PG_LOG_FILE ?= .synchrod-pg-test.log
+LOCAL_POSTGRES_STATE_DIR ?= $(CURDIR)/.ignore/r2/tmp/local-postgres
+LOCAL_POSTGRES_PID_FILE ?= $(LOCAL_POSTGRES_STATE_DIR)/postgres.pid
+LOCAL_POSTGRES_LOG_FILE ?= $(LOCAL_POSTGRES_STATE_DIR)/postgres.log
+LOCAL_POSTGRES_URL_FILE ?= $(LOCAL_POSTGRES_STATE_DIR)/postgres.url
+LOCAL_POSTGRES_BINARY ?= $(CURDIR)/bin/synchro-local-postgres
 
 BINARY ?= bin/synchrod-pg
 SEED_BINARY ?= bin/synchro-seed
@@ -252,7 +232,9 @@ help:
 	@echo "  test-rust-pg          - Run pgrx integration tests on PG 18"
 	@echo "  test-rust-pg-all      - Run pgrx tests on PG 14 through PG 18"
 	@echo "  test-adapter          - Run Go adapter integration tests (override GO_TEST_PKGS to focus)"
-	@echo "                         Set ADAPTER_TEST_URL for an external PostgreSQL database"
+	@echo "                         Set ADAPTER_TEST_URL to the one test PostgreSQL database URL"
+	@echo "  local-postgres-start  - Start an isolated PostgreSQL 18 through the Go provisioner"
+	@echo "  local-postgres-stop   - Stop the isolated PostgreSQL 18 provisioner"
 	@echo "  build-swift-native-runner - Build the macOS native conformance process"
 	@echo "  build-kotlin-conformance-app - Build the Android native conformance test APK"
 	@echo "  test-swift-unit       - Run Swift unit tests"
@@ -274,7 +256,7 @@ help:
 	@echo "  test-rn-e2e-android   - Run React Native Detox tests on Android ($(RN_ANDROID_DETOX_CONFIG))"
 	@echo "  test-rn               - Run React Native Detox tests on both platforms"
 	@echo "  rn-android-emulator-reset - Stop any running Pixel_7_API_34 emulator before Detox"
-	@echo "  synchrod-pg-test-start   - Start the extension-backed test adapter"
+	@echo "  synchrod-pg-test-start   - Start the extension-backed test adapter for ADAPTER_TEST_URL"
 	@echo "  synchrod-pg-test-stop    - Stop the extension-backed test adapter"
 	@echo "  synchrod-pg-test-restart - Restart the extension-backed test adapter"
 	@echo "  release-pods-check    - Validate Apple package metadata surfaces"
@@ -594,11 +576,11 @@ test-swift-unit:
 	cd clients/swift && xcodebuild test -quiet -scheme Synchro-Package -destination 'platform=macOS' -skip-testing:SynchroTests/IntegrationTests -skip-testing:SynchroTests/SchemaIntegrationTests -skip-testing:SynchroTests/ClientSchemaIdentityTests -resultBundlePath .build/test-results/unit.xcresult
 	cd conformance && GOFLAGS= GOWORK=off go run ./cmd/testresult xcresult -path ../clients/swift/.build/test-results/unit.xcresult
 
-test-client-schema-identity: conformance-mod-download test-adapter-setup
+test-client-schema-identity: conformance-mod-download
+	@test -n "$(ADAPTER_TEST_URL)" || { echo "ADAPTER_TEST_URL is required" >&2; exit 1; }
 	@set -e; \
 		status=0; \
 		if $(MAKE) --no-print-directory _test-client-schema-identity; then status=0; else status=$$?; fi; \
-		$(MAKE) --no-print-directory test-adapter-teardown; \
 		rm -f clients/swift/.build/test-results/schema-identity-seed.db*; \
 		exit $$status
 
@@ -1123,143 +1105,69 @@ lint-rust-pg:
 
 lint-rust: lint-rust-core lint-rust-pg
 
-test-adapter-setup: $(ADAPTER_DB_SETUP)
+build-local-postgres:
+	@mkdir -p "$(dir $(LOCAL_POSTGRES_BINARY))"
+	cd conformance && GOFLAGS= GOWORK=off go build -o "$(LOCAL_POSTGRES_BINARY)" ./cmd/synchro-local-postgres
 
-adapter-db-external-probe:
+local-postgres-start: conformance-adapter-artifact conformance-pg18-extension-artifact build-local-postgres
+	@test -n "$(PGRX_PG_BIN_DIR)" || { echo "PGRX_PG_BIN_DIR is required" >&2; exit 1; }
+	@test -x "$(PGRX_PG_BIN_DIR)"/initdb || { echo "PostgreSQL 18 binaries are required in $(PGRX_PG_BIN_DIR)" >&2; exit 1; }
 	@set -eu; \
-		psql_bin="$(PGRX_PSQL)"; test -x "$$psql_bin" || psql_bin="$$(command -v psql || true)"; \
-		test -n "$$psql_bin" || { echo "a psql client is required for an external ADAPTER_TEST_URL" >&2; exit 1; }; \
-		echo "Probing external adapter test database..."; \
-		"$$psql_bin" "$(ADAPTER_TEST_URL)" -v ON_ERROR_STOP=1 -Atqc "SELECT 1" >/dev/null || { echo "external ADAPTER_TEST_URL is unreachable" >&2; exit 1; }; \
-		available="$$("$$psql_bin" "$(ADAPTER_TEST_URL)" -v ON_ERROR_STOP=1 -Atqc "SELECT default_version FROM pg_available_extensions WHERE name = 'synchro_pg'")"; \
-		test "$$available" = "$(CURRENT_VERSION)" || { echo "external database offers synchro_pg '$$available', expected '$(CURRENT_VERSION)'" >&2; exit 1; }; \
-		wal_level="$$("$$psql_bin" "$(ADAPTER_TEST_URL)" -Atqc "SHOW wal_level")"; \
-		test "$$wal_level" = logical || { echo "external database needs wal_level = logical (found '$$wal_level'); set it on the server and restart" >&2; exit 1; }; \
-		preload="$$("$$psql_bin" "$(ADAPTER_TEST_URL)" -Atqc "SHOW shared_preload_libraries")"; \
-		case "$$preload" in *synchro_pg*) ;; *) echo "external database needs synchro_pg in shared_preload_libraries (found '$$preload'); set it on the server and restart" >&2; exit 1 ;; esac; \
-		autostart="$$("$$psql_bin" "$(ADAPTER_TEST_URL)" -Atqc "SHOW synchro.auto_start")"; \
-		test "$$autostart" = on || { echo "external database needs synchro.auto_start = on (found '$$autostart'); set it on the server and restart" >&2; exit 1; }; \
-		worker_db="$$("$$psql_bin" "$(ADAPTER_TEST_URL)" -Atqc "SHOW synchro.database")"; \
-		current_db="$$("$$psql_bin" "$(ADAPTER_TEST_URL)" -Atqc "SELECT current_database()")"; \
-		test "$$worker_db" = "$$current_db" || { echo "external database needs synchro.database = '$$current_db' (found '$$worker_db'); set it on the server and restart" >&2; exit 1; }; \
-		echo "External adapter test database is reachable with synchro_pg $(CURRENT_VERSION) and its worker enabled."
-	@set -eu; \
-		psql_bin="$(PGRX_PSQL)"; test -x "$$psql_bin" || psql_bin="$$(command -v psql)"; \
-		echo "Resetting dedicated external test database contents in place..."; \
-		"$$psql_bin" "$(ADAPTER_TEST_URL)" -v ON_ERROR_STOP=1 -c "DROP EXTENSION IF EXISTS synchro_pg CASCADE" >/dev/null; \
-		"$$psql_bin" "$(ADAPTER_TEST_URL)" -v ON_ERROR_STOP=1 -c "DROP SCHEMA public CASCADE; CREATE SCHEMA public; GRANT ALL ON SCHEMA public TO PUBLIC" >/dev/null
-	@$(MAKE) --no-print-directory adapter-db-prepare ADAPTER_DB_PSQL="$$(test -x "$(PGRX_PSQL)" && echo "$(PGRX_PSQL)" || command -v psql)" ADAPTER_DB_TARGET="$(ADAPTER_TEST_URL)"
-	@set -eu; \
-		psql_bin="$(PGRX_PSQL)"; test -x "$$psql_bin" || psql_bin="$$(command -v psql)"; \
-		prepared=0; \
-		for attempt in $$(seq 1 $(PGRX_READY_TIMEOUT)); do \
-			if [ "$$("$$psql_bin" "$(ADAPTER_TEST_URL)" -Atqc "SELECT (active_slot_name IS NOT NULL)::text FROM synchro.sync_runtime_state" 2>/dev/null || true)" = "true" ]; then prepared=1; break; fi; \
+		state="$(LOCAL_POSTGRES_STATE_DIR)"; \
+		mkdir -p "$$state"; \
+		if [ -f "$(LOCAL_POSTGRES_PID_FILE)" ] && kill -0 "$$(cat "$(LOCAL_POSTGRES_PID_FILE)")" 2>/dev/null; then \
+			echo "local PostgreSQL provisioner already running"; \
+			cat "$(LOCAL_POSTGRES_URL_FILE)"; \
+			exit 0; \
+		fi; \
+		rm -f "$(LOCAL_POSTGRES_PID_FILE)" "$(LOCAL_POSTGRES_URL_FILE)" "$(LOCAL_POSTGRES_LOG_FILE)"; \
+		nohup "$(LOCAL_POSTGRES_BINARY)" start \
+			--repo-root "$(CURDIR)" \
+			--pg18-bin-dir "$(PGRX_PG_BIN_DIR)" \
+			--extension-artifact "$(CONFORMANCE_EXTENSION_ARTIFACT)" \
+			--adapter-artifact "$(CONFORMANCE_ADAPTER_ARTIFACT_DIR)/synchrod-pg" \
+			--state-dir "$$state" \
+			--temp-parent "$(CURDIR)/.ignore/r2/tmp" \
+			--url-file "$(LOCAL_POSTGRES_URL_FILE)" \
+			>"$(LOCAL_POSTGRES_LOG_FILE)" 2>&1 </dev/null & \
+		echo $$! >"$(LOCAL_POSTGRES_PID_FILE)"; \
+		for attempt in $$(seq 1 180); do \
+			if [ -s "$(LOCAL_POSTGRES_URL_FILE)" ]; then cat "$(LOCAL_POSTGRES_URL_FILE)"; exit 0; fi; \
+			if ! kill -0 "$$(cat "$(LOCAL_POSTGRES_PID_FILE)")" 2>/dev/null; then \
+				cat "$(LOCAL_POSTGRES_LOG_FILE)" >&2 || true; \
+				rm -f "$(LOCAL_POSTGRES_PID_FILE)"; \
+				exit 1; \
+			fi; \
 			sleep 1; \
 		done; \
-		test "$$prepared" -eq 1 || { echo "external database worker did not prepare on the fresh extension in $(PGRX_READY_TIMEOUT)s" >&2; exit 1; }; \
-		echo "External adapter test database worker is prepared."
+		echo "local PostgreSQL provisioner did not become ready" >&2; \
+		cat "$(LOCAL_POSTGRES_LOG_FILE)" >&2 || true; \
+		kill "$$(cat "$(LOCAL_POSTGRES_PID_FILE)")" 2>/dev/null || true; \
+		rm -f "$(LOCAL_POSTGRES_PID_FILE)"; \
+		exit 1
 
-adapter-db-prepare:
-	@test -n "$(ADAPTER_DB_PSQL)" || { echo "ADAPTER_DB_PSQL is required" >&2; exit 1; }
-	@test -n "$(ADAPTER_DB_TARGET)" || { echo "ADAPTER_DB_TARGET is required" >&2; exit 1; }
-	@"$(ADAPTER_DB_PSQL)" "$(ADAPTER_DB_TARGET)" -v ON_ERROR_STOP=1 -c "CREATE EXTENSION IF NOT EXISTS synchro_pg CASCADE"
-	@"$(ADAPTER_DB_PSQL)" "$(ADAPTER_DB_TARGET)" -v ON_ERROR_STOP=1 -c "DROP ROLE IF EXISTS $(PGRX_WORKER_LOGIN)"
-	@"$(ADAPTER_DB_PSQL)" "$(ADAPTER_DB_TARGET)" -v ON_ERROR_STOP=1 -c "CREATE ROLE $(PGRX_WORKER_LOGIN) LOGIN REPLICATION NOINHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE"
-	@"$(ADAPTER_DB_PSQL)" "$(ADAPTER_DB_TARGET)" -v ON_ERROR_STOP=1 -c "GRANT synchro_worker TO $(PGRX_WORKER_LOGIN)"
+local-postgres-stop:
+	@set -eu; \
+		if [ -f "$(LOCAL_POSTGRES_PID_FILE)" ]; then \
+			pid="$$(cat "$(LOCAL_POSTGRES_PID_FILE)")"; \
+			if kill -0 "$$pid" 2>/dev/null; then \
+				kill "$$pid"; \
+				for attempt in $$(seq 1 30); do \
+					if ! kill -0 "$$pid" 2>/dev/null; then break; fi; \
+					sleep 1; \
+				 done; \
+				if kill -0 "$$pid" 2>/dev/null; then kill -9 "$$pid" 2>/dev/null || true; fi; \
+				 echo "local PostgreSQL provisioner stopped"; \
+			else \
+				echo "local PostgreSQL provisioner is not running"; \
+			fi; \
+			rm -f "$(LOCAL_POSTGRES_PID_FILE)" "$(LOCAL_POSTGRES_URL_FILE)"; \
+		else \
+			echo "local PostgreSQL provisioner is not running"; \
+		fi
 
-adapter-db-external-teardown:
-	@echo "Leaving external adapter test database unchanged."
-
-adapter-db-local-teardown:
-	@echo "Tearing down adapter test database..."
-	@$(PGRX_PSQL) -h "$(PGRX_ADMIN_HOST)" -p $(PGRX_PORT) -U "$(PGRX_ADMIN_USER)" -d postgres -c "DROP DATABASE IF EXISTS $(ADAPTER_TEST_DB)" 2>/dev/null || true
-	@cd extensions/synchro-pg && CARGO_TARGET_DIR="$(PGRX_TARGET_DIR)" cargo pgrx stop $(PGRX_PG) 2>/dev/null || true
-	@echo "Done."
-
-adapter-db-local-setup: ext-install
-	@echo "Setting up adapter test database..."
-	@if [ ! -f "$(PGRX_DATA_DIR)/postgresql.conf" ]; then \
-		echo "missing pgrx config: $(PGRX_DATA_DIR)/postgresql.conf"; \
-		exit 1; \
-	fi
-	@if grep -q "^wal_level" "$(PGRX_DATA_DIR)/postgresql.conf"; then \
-		perl -0pi -e "s/^wal_level\s*=.*$$/wal_level = logical/m" "$(PGRX_DATA_DIR)/postgresql.conf"; \
-	else \
-		printf "\nwal_level = logical\n" >> "$(PGRX_DATA_DIR)/postgresql.conf"; \
-	fi
-	@if grep -q "^shared_preload_libraries" "$(PGRX_DATA_DIR)/postgresql.conf"; then \
-		if ! grep -q "^shared_preload_libraries.*synchro_pg" "$(PGRX_DATA_DIR)/postgresql.conf"; then \
-			perl -0pi -e "s/^shared_preload_libraries\\s*=\\s*'(.*?)'\\s*$$/shared_preload_libraries = '\\1,synchro_pg'/m" \"$(PGRX_DATA_DIR)/postgresql.conf\"; \
-		fi; \
-	else \
-		printf "\nshared_preload_libraries = 'synchro_pg'\n" >> "$(PGRX_DATA_DIR)/postgresql.conf"; \
-	fi
-	@if grep -q "^synchro.auto_start" "$(PGRX_DATA_DIR)/postgresql.conf"; then \
-		perl -0pi -e "s/^synchro\.auto_start\s*=.*$$/synchro.auto_start = off/m" "$(PGRX_DATA_DIR)/postgresql.conf"; \
-	else \
-		printf "\nsynchro.auto_start = off\n" >> "$(PGRX_DATA_DIR)/postgresql.conf"; \
-	fi
-	@cd extensions/synchro-pg && CARGO_TARGET_DIR="$(PGRX_TARGET_DIR)" cargo pgrx stop $(PGRX_PG) 2>/dev/null || true
-	@cd extensions/synchro-pg && CARGO_TARGET_DIR="$(PGRX_TARGET_DIR)" cargo pgrx start $(PGRX_PG)
-	@READY=0; \
-	LAST_ERR=""; \
-	for attempt in $$(seq 1 $(PGRX_READY_TIMEOUT)); do \
-		PROBE_OUTPUT=$$($(PGRX_PSQL) -h "$(PGRX_ADMIN_HOST)" -p $(PGRX_PORT) -U "$(PGRX_ADMIN_USER)" -d postgres -Atqc "SELECT CASE WHEN pg_is_in_recovery() THEN '0' ELSE '1' END" 2>&1 || true); \
-		if [ "$$PROBE_OUTPUT" = "1" ]; then \
-			READY=1; \
-			break; \
-		fi; \
-		LAST_ERR="$$PROBE_OUTPUT"; \
-		sleep 1; \
-	done; \
-	if [ "$$READY" -ne 1 ]; then \
-		echo "pgrx postgres did not become writable in $(PGRX_READY_TIMEOUT)s"; \
-		if [ -n "$$LAST_ERR" ]; then echo "$$LAST_ERR"; fi; \
-		if [ -f "$(PGRX_LOG_FILE)" ]; then tail -n 200 "$(PGRX_LOG_FILE)"; fi; \
-		exit 1; \
-	fi
-	@$(PGRX_PSQL) -h "$(PGRX_ADMIN_HOST)" -p $(PGRX_PORT) -U "$(PGRX_ADMIN_USER)" -d postgres -c "DROP DATABASE IF EXISTS $(ADAPTER_TEST_DB)" 2>/dev/null || true
-	@$(PGRX_PSQL) -h "$(PGRX_ADMIN_HOST)" -p $(PGRX_PORT) -U "$(PGRX_ADMIN_USER)" -d postgres -c "CREATE DATABASE $(ADAPTER_TEST_DB)"
-	@$(MAKE) --no-print-directory adapter-db-prepare ADAPTER_DB_PSQL="$(PGRX_PSQL)" ADAPTER_DB_TARGET="postgres:///$(ADAPTER_TEST_DB)?host=$(PGRX_ADMIN_HOST)&port=$(PGRX_PORT)&user=$(PGRX_ADMIN_USER)"
-	@if grep -q "^synchro.auto_start" "$(PGRX_DATA_DIR)/postgresql.conf"; then \
-		perl -0pi -e "s/^synchro\.auto_start\s*=.*$$/synchro.auto_start = $(PGRX_AUTOSTART)/m" "$(PGRX_DATA_DIR)/postgresql.conf"; \
-	else \
-		printf "\nsynchro.auto_start = $(PGRX_AUTOSTART)\n" >> "$(PGRX_DATA_DIR)/postgresql.conf"; \
-	fi
-	@if grep -q "^synchro.database" "$(PGRX_DATA_DIR)/postgresql.conf"; then \
-		perl -0pi -e "s/^synchro\.database\s*=.*$$/synchro.database = '$(ADAPTER_TEST_DB)'/m" "$(PGRX_DATA_DIR)/postgresql.conf"; \
-	else \
-		printf "\nsynchro.database = '$(ADAPTER_TEST_DB)'\n" >> "$(PGRX_DATA_DIR)/postgresql.conf"; \
-	fi
-	@if grep -q "^synchro.worker_login" "$(PGRX_DATA_DIR)/postgresql.conf"; then \
-		perl -0pi -e "s/^synchro\.worker_login\s*=.*$$/synchro.worker_login = '$(PGRX_WORKER_LOGIN)'/m" "$(PGRX_DATA_DIR)/postgresql.conf"; \
-	else \
-		printf "\nsynchro.worker_login = '$(PGRX_WORKER_LOGIN)'\n" >> "$(PGRX_DATA_DIR)/postgresql.conf"; \
-	fi
-	@cd extensions/synchro-pg && CARGO_TARGET_DIR="$(PGRX_TARGET_DIR)" cargo pgrx stop $(PGRX_PG)
-	@cd extensions/synchro-pg && CARGO_TARGET_DIR="$(PGRX_TARGET_DIR)" cargo pgrx start $(PGRX_PG)
-	@READY=0; \
-	LAST_ERR=""; \
-	for attempt in $$(seq 1 $(PGRX_READY_TIMEOUT)); do \
-		PROBE_OUTPUT=$$($(PGRX_PSQL) -h "$(PGRX_ADMIN_HOST)" -p $(PGRX_PORT) -U "$(PGRX_ADMIN_USER)" -d postgres -Atqc "SELECT CASE WHEN pg_is_in_recovery() THEN '0' ELSE '1' END" 2>&1 || true); \
-		if [ "$$PROBE_OUTPUT" = "1" ]; then \
-			READY=1; \
-			break; \
-		fi; \
-		LAST_ERR="$$PROBE_OUTPUT"; \
-		sleep 1; \
-	done; \
-	if [ "$$READY" -ne 1 ]; then \
-		echo "pgrx postgres did not become writable in $(PGRX_READY_TIMEOUT)s after enabling the worker"; \
-		if [ -n "$$LAST_ERR" ]; then echo "$$LAST_ERR"; fi; \
-		if [ -f "$(PGRX_LOG_FILE)" ]; then tail -n 200 "$(PGRX_LOG_FILE)"; fi; \
-		exit 1; \
-	fi
-	@echo "Adapter test database ready: $(ADAPTER_TEST_URL)"
-
-test-adapter-teardown: $(ADAPTER_DB_TEARDOWN)
-
-test-adapter: test-adapter-setup
+test-adapter:
+	@test -n "$(ADAPTER_TEST_URL)" || { echo "ADAPTER_TEST_URL is required" >&2; exit 1; }
 	@echo "Running adapter integration tests..."
 	@set -e; \
 	status=0; \
@@ -1268,140 +1176,63 @@ test-adapter: test-adapter-setup
 	else \
 		status=$$?; \
 	fi; \
-	$(MAKE) test-adapter-teardown; \
 	exit $$status
 
 synchrod-pg-test-start: build-seed verify-rn-seed
+	@test -n "$(ADAPTER_TEST_URL)" || { echo "ADAPTER_TEST_URL is required" >&2; exit 1; }
 	@set -e; \
 	for PID in $$(lsof -tiTCP:$(SYNCHROD_PG_PORT) -sTCP:LISTEN 2>/dev/null); do \
 		kill "$$PID" 2>/dev/null || true; \
 		sleep 1; \
-		if kill -0 "$$PID" 2>/dev/null; then \
-			kill -9 "$$PID" 2>/dev/null || true; \
-		fi; \
+		if kill -0 "$$PID" 2>/dev/null; then kill -9 "$$PID" 2>/dev/null || true; fi; \
 	done; \
 	if [ -f "$(SYNCHROD_PG_PID_FILE)" ] && kill -0 "$$(cat "$(SYNCHROD_PG_PID_FILE)")" 2>/dev/null; then \
 		echo "synchrod-pg already running"; \
 		exit 0; \
 	fi; \
-	$(MAKE) test-adapter-setup; \
-	echo "Loading schema and registering tables..."; \
-	$(PGRX_PSQL) -v ON_ERROR_STOP=1 -h "$(PGRX_ADMIN_HOST)" -p $(PGRX_PORT) -U "$(PGRX_ADMIN_USER)" -d $(ADAPTER_TEST_DB) -f extensions/testdata/schema.sql || { if [ -f "$(PGRX_LOG_FILE)" ]; then tail -n 200 "$(PGRX_LOG_FILE)"; fi; exit 1; }; \
-	$(PGRX_PSQL) -v ON_ERROR_STOP=1 -h "$(PGRX_ADMIN_HOST)" -p $(PGRX_PORT) -U "$(PGRX_ADMIN_USER)" -d $(ADAPTER_TEST_DB) -f extensions/testdata/register.sql || { if [ -f "$(PGRX_LOG_FILE)" ]; then tail -n 200 "$(PGRX_LOG_FILE)"; fi; exit 1; }; \
-	REGISTRY_READY=0; \
-	for attempt in $$(seq 1 $(PGRX_READY_TIMEOUT)); do \
-		REGISTRY_OUTPUT=$$($(PGRX_PSQL) -h "$(PGRX_ADMIN_HOST)" -p $(PGRX_PORT) -U "$(PGRX_ADMIN_USER)" -d $(ADAPTER_TEST_DB) -Atqc "SELECT CASE WHEN EXISTS (SELECT 1 FROM synchro.sync_registry_generations generation WHERE generation.state = 'active' AND (SELECT count(*) FROM synchro.sync_registry registry WHERE registry.registry_generation = generation.generation) = 13 AND EXISTS (SELECT 1 FROM synchro.sync_registry registry WHERE registry.registry_generation = generation.generation AND registry.table_name = 'line_items' AND registry.membership_function_name = 'test_line_items_membership') AND EXISTS (SELECT 1 FROM synchro.sync_registry registry WHERE registry.registry_generation = generation.generation AND registry.table_name = 'document_comments' AND registry.membership_function_name = 'test_document_comments_membership')) AND NOT EXISTS (SELECT 1 FROM synchro.sync_registry_generations generation WHERE generation.state = 'pending' AND generation.validated) THEN '1' ELSE '0' END" 2>&1 || true); \
-		if [ "$$REGISTRY_OUTPUT" = "1" ]; then REGISTRY_READY=1; break; fi; \
-		sleep 1; \
-	done; \
-	if [ "$$REGISTRY_READY" -ne 1 ]; then echo "synchro registry did not activate"; exit 1; fi; \
-	echo "Loading canonical seed data..."; \
-	$(PGRX_PSQL) -v ON_ERROR_STOP=1 -h "$(PGRX_ADMIN_HOST)" -p $(PGRX_PORT) -U "$(PGRX_ADMIN_USER)" -d $(ADAPTER_TEST_DB) -f extensions/testdata/canonical-seed.sql || { if [ -f "$(PGRX_LOG_FILE)" ]; then tail -n 200 "$(PGRX_LOG_FILE)"; fi; exit 1; }; \
-	echo "Waiting for bgworker to observe seeded rows..."; \
-	for attempt in $$(seq 1 60); do \
-		EDGE_COUNT=$$($(PGRX_PSQL) -h "$(PGRX_ADMIN_HOST)" -p $(PGRX_PORT) -U "$(PGRX_ADMIN_USER)" -d $(ADAPTER_TEST_DB) -Atqc "SELECT count(*) FROM synchro.sync_bucket_edges" 2>/dev/null || echo 0); \
-		if [ "$$EDGE_COUNT" -ge 6 ] 2>/dev/null; then \
-			break; \
-		fi; \
-		sleep 1; \
-	done; \
-	if [ "$$EDGE_COUNT" -lt 6 ] 2>/dev/null; then \
-		echo "synchro worker did not materialize all canonical seed rows"; \
-		exit 1; \
-	fi; \
-	JSON_OUTPUT=$$($(PGRX_PSQL) -h "$(PGRX_ADMIN_HOST)" -p $(PGRX_PORT) -U "$(PGRX_ADMIN_USER)" -d $(ADAPTER_TEST_DB) -Atqc "SELECT CASE WHEN count(*) = 5 THEN '1' ELSE '0' END FROM (VALUES ('nations', 'metadata', '{\"source\":\"seed\"}'), ('suppliers', 'tags', '[\"seed\"]'), ('parts', 'specifications', '{\"color\":\"blue\"}'), ('parts', 'tags', '[\"seed\"]'), ('categories', 'metadata', '{\"source\":\"seed\"}')) expected(table_name, column_name, wire_value) JOIN synchro.sync_registry_generations generation ON generation.state = 'active' JOIN synchro.sync_registry registry ON registry.registry_generation = generation.generation AND registry.table_name = expected.table_name JOIN synchro.sync_registry_fields field ON field.registry_generation = registry.registry_generation AND field.relation_id = registry.relation_id AND field.physical_column = expected.column_name JOIN synchro.sync_captured_rows captured ON captured.relation_id = registry.relation_id WHERE captured.row_data -> field.field_id::text = to_jsonb(expected.wire_value)" 2>&1 || true); \
-	if [ "$$JSON_OUTPUT" != "1" ]; then \
-		echo "synchro worker did not preserve canonical seed JSON values"; \
-		exit 1; \
-	fi; \
-	echo "Backfilling scope edges..."; \
-	$(PGRX_PSQL) -v ON_ERROR_STOP=1 -h "$(PGRX_ADMIN_HOST)" -p $(PGRX_PORT) -U "$(PGRX_ADMIN_USER)" -d $(ADAPTER_TEST_DB) -c "SELECT synchro.synchro_backfill_bucket_edges()" || { if [ -f "$(PGRX_LOG_FILE)" ]; then tail -n 200 "$(PGRX_LOG_FILE)"; fi; exit 1; }; \
-	echo "Restarting PostgreSQL with bgworker enabled..."; \
-	if grep -q "^synchro.auto_start" "$(PGRX_DATA_DIR)/postgresql.conf"; then \
-		perl -0pi -e "s/^synchro\.auto_start\s*=.*$$/synchro.auto_start = on/m" "$(PGRX_DATA_DIR)/postgresql.conf"; \
-	else \
-		printf "\nsynchro.auto_start = on\n" >> "$(PGRX_DATA_DIR)/postgresql.conf"; \
-	fi; \
-	cd "$(CURDIR)/extensions/synchro-pg" && CARGO_TARGET_DIR="$(PGRX_TARGET_DIR)" cargo pgrx stop $(PGRX_PG); \
-	cd "$(CURDIR)/extensions/synchro-pg" && CARGO_TARGET_DIR="$(PGRX_TARGET_DIR)" cargo pgrx start $(PGRX_PG); \
-	READY=0; \
-	LAST_ERR=""; \
-	for attempt in $$(seq 1 $(PGRX_READY_TIMEOUT)); do \
-		PROBE_OUTPUT=$$($(PGRX_PSQL) -h "$(PGRX_ADMIN_HOST)" -p $(PGRX_PORT) -U "$(PGRX_ADMIN_USER)" -d postgres -Atqc "SELECT CASE WHEN pg_is_in_recovery() THEN '0' ELSE '1' END" 2>&1 || true); \
-		if [ "$$PROBE_OUTPUT" = "1" ]; then \
-			READY=1; \
-			break; \
-		fi; \
-		LAST_ERR="$$PROBE_OUTPUT"; \
-		sleep 1; \
-	done; \
-		if [ "$$READY" -ne 1 ]; then \
-			echo "pgrx postgres did not become writable in $(PGRX_READY_TIMEOUT)s after re-enabling the worker"; \
-			if [ -n "$$LAST_ERR" ]; then echo "$$LAST_ERR"; fi; \
-			if [ -f "$(PGRX_LOG_FILE)" ]; then tail -n 200 "$(PGRX_LOG_FILE)"; fi; \
-			exit 1; \
-		fi; \
-		MANIFEST_READY=0; \
-		for attempt in $$(seq 1 $(PGRX_READY_TIMEOUT)); do \
-			MANIFEST_OUTPUT=$$($(PGRX_PSQL) -h "$(PGRX_ADMIN_HOST)" -p $(PGRX_PORT) -U "$(PGRX_ADMIN_USER)" -d $(ADAPTER_TEST_DB) -Atqc "SELECT CASE WHEN EXISTS (SELECT 1 FROM pg_catalog.jsonb_array_elements((synchro.synchro_schema_manifest()->'manifest'->'tables')) table_def WHERE table_def->>'name' = 'orders') THEN '1' ELSE '0' END" 2>&1 || true); \
-			CONNECT_OUTPUT=$$($(PGRX_PSQL) -h "$(PGRX_ADMIN_HOST)" -p $(PGRX_PORT) -U "$(PGRX_ADMIN_USER)" -d $(ADAPTER_TEST_DB) -Atqc "SELECT CASE WHEN synchro.synchro_connect('readiness-user', '{\"client_id\":\"readiness-client\",\"platform\":\"android\",\"app_version\":\"1.0.0\",\"protocol_version\":3,\"schema\":{\"version\":0,\"hash\":\"\"},\"scope_set_version\":0,\"known_scopes\":{}}'::pg_catalog.jsonb)->'schema'->>'action' = 'replace' THEN '1' ELSE '0' END" 2>&1 || true); \
-			if [ "$$MANIFEST_OUTPUT" = "1" ] && [ "$$CONNECT_OUTPUT" = "1" ]; then \
-				MANIFEST_READY=1; \
-				break; \
-			fi; \
-			sleep 1; \
-		done; \
-		if [ "$$MANIFEST_READY" -ne 1 ]; then \
-			echo "synchro schema/connect readiness did not converge in $(PGRX_READY_TIMEOUT)s"; \
-			echo "manifest readiness: $$MANIFEST_OUTPUT"; \
-			echo "connect readiness: $$CONNECT_OUTPUT"; \
-			if [ -f "$(PGRX_LOG_FILE)" ]; then tail -n 200 "$(PGRX_LOG_FILE)"; fi; \
-			exit 1; \
-		fi; \
-		echo "Starting synchrod-pg on :$(SYNCHROD_PG_PORT)..."; \
-		nohup env \
-			DATABASE_URL="$(ADAPTER_TEST_URL)" \
-			JWT_SECRET="$(SYNCHRO_TEST_JWT_SECRET)" \
-			MIN_CLIENT_VERSION="$(MIN_CLIENT_VERSION)" \
+	echo "Preparing client integration database..."; \
+	(cd conformance && DATABASE_URL="$(ADAPTER_TEST_URL)" GOFLAGS= GOWORK=off go run ./cmd/synchro-local-postgres prepare --repo-root ..); \
+	echo "Starting synchrod-pg on :$(SYNCHROD_PG_PORT)..."; \
+	nohup env \
+		DATABASE_URL="$(ADAPTER_TEST_URL)" \
+		JWT_SECRET="$(SYNCHRO_TEST_JWT_SECRET)" \
+		MIN_CLIENT_VERSION="$(MIN_CLIENT_VERSION)" \
 		LISTEN_ADDR=":$(SYNCHROD_PG_PORT)" \
 		sh -c 'cd "$(CURDIR)/api/go" && GOWORK=off go run ./cmd/synchrod-pg' >"$(SYNCHROD_PG_LOG_FILE)" 2>&1 </dev/null & echo $$! >"$(SYNCHROD_PG_PID_FILE)"; \
 	sleep 2; \
-		if ! kill -0 "$$(cat "$(SYNCHROD_PG_PID_FILE)")" 2>/dev/null; then \
-			echo "synchrod-pg failed to start:"; \
-			cat "$(SYNCHROD_PG_LOG_FILE)"; \
-			rm -f "$(SYNCHROD_PG_PID_FILE)"; \
+	if ! kill -0 "$$(cat "$(SYNCHROD_PG_PID_FILE)")" 2>/dev/null; then \
+		echo "synchrod-pg failed to start:"; \
+		cat "$(SYNCHROD_PG_LOG_FILE)"; \
+		rm -f "$(SYNCHROD_PG_PID_FILE)"; \
+		exit 1; \
+	fi; \
+	HTTP_READY=0; \
+	for attempt in $$(seq 1 30); do \
+		if curl -fsS -o /dev/null "http://localhost:$(SYNCHROD_PG_PORT)/sync/schema" 2>/dev/null; then HTTP_READY=1; break; fi; \
+		sleep 1; \
+	done; \
+	if [ "$$HTTP_READY" -ne 1 ]; then \
+		echo "synchrod-pg HTTP schema endpoint did not become ready"; \
+		cat "$(SYNCHROD_PG_LOG_FILE)" 2>/dev/null || true; \
+		rm -f "$(SYNCHROD_PG_PID_FILE)"; \
+		exit 1; \
+	fi; \
+	if [ "$(REFRESH_RN_SEED)" = "1" ]; then \
+		echo "Refreshing canonical seed asset..."; \
+		if lsof "$(CURDIR)/clients/react-native/example/seed.db" "$(CURDIR)/clients/react-native/example/seed.db-wal" "$(CURDIR)/clients/react-native/example/seed.db-shm" >/dev/null 2>&1; then \
+			echo "canonical seed asset is in use"; \
 			exit 1; \
 		fi; \
-		HTTP_READY=0; \
-		for attempt in $$(seq 1 30); do \
-			if curl -fsS -o /dev/null "http://localhost:$(SYNCHROD_PG_PORT)/sync/schema" 2>/dev/null; then \
-				HTTP_READY=1; \
-				break; \
-			fi; \
-			sleep 1; \
-		done; \
-		if [ "$$HTTP_READY" -ne 1 ]; then \
-			echo "synchrod-pg HTTP schema endpoint did not become ready"; \
-			if [ -f "$(SYNCHROD_PG_LOG_FILE)" ]; then cat "$(SYNCHROD_PG_LOG_FILE)"; fi; \
+		rm -f "$(CURDIR)/clients/react-native/example/seed.db-wal" "$(CURDIR)/clients/react-native/example/seed.db-shm"; \
+		DATABASE_URL="$(ADAPTER_TEST_URL)" "$(CURDIR)/$(SEED_BINARY)" --output "$(CURDIR)/clients/react-native/example/seed.db" --overwrite || { \
+			cat "$(SYNCHROD_PG_LOG_FILE)" 2>/dev/null || true; \
 			rm -f "$(SYNCHROD_PG_PID_FILE)"; \
 			exit 1; \
-		fi; \
-		if [ "$(REFRESH_RN_SEED)" = "1" ]; then \
-			echo "Refreshing canonical seed asset..."; \
-			if lsof "$(CURDIR)/clients/react-native/example/seed.db" "$(CURDIR)/clients/react-native/example/seed.db-wal" "$(CURDIR)/clients/react-native/example/seed.db-shm" >/dev/null 2>&1; then \
-				echo "canonical seed asset is in use"; \
-				exit 1; \
-			fi; \
-			rm -f "$(CURDIR)/clients/react-native/example/seed.db-wal" "$(CURDIR)/clients/react-native/example/seed.db-shm"; \
-			DATABASE_URL="$(ADAPTER_TEST_URL)" "$(CURDIR)/$(SEED_BINARY)" --output "$(CURDIR)/clients/react-native/example/seed.db" --overwrite || { \
-				if [ -f "$(SYNCHROD_PG_LOG_FILE)" ]; then cat "$(SYNCHROD_PG_LOG_FILE)"; fi; \
-				rm -f "$(SYNCHROD_PG_PID_FILE)"; \
-				exit 1; \
-			}; \
-			cd "$(CURDIR)/clients/react-native/example"; \
-			shasum -a 256 seed.db > seed.db.sha256; \
-		fi; \
-		echo "synchrod-pg running on http://localhost:$(SYNCHROD_PG_PORT)"
+		}; \
+		cd "$(CURDIR)/clients/react-native/example"; \
+		shasum -a 256 seed.db > seed.db.sha256; \
+	fi; \
+	echo "synchrod-pg running on http://localhost:$(SYNCHROD_PG_PORT)"
 
 synchrod-pg-test-stop:
 	@STOPPED=0; \
@@ -1431,8 +1262,6 @@ synchrod-pg-test-stop:
 	if [ "$$STOPPED" -eq 0 ]; then \
 		echo "synchrod-pg not running"; \
 	fi
-	@$(MAKE) test-adapter-teardown
-
 synchrod-pg-test-restart: synchrod-pg-test-stop
 	@$(MAKE) synchrod-pg-test-start
 

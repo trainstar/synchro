@@ -84,6 +84,7 @@ type HarnessConfig struct {
 	ShutdownTimeout                     time.Duration
 	ProcessLogBytes                     int
 	AllowInitialCaptureReadinessFailure bool
+	SkipAdapter                         bool
 }
 
 // HarnessNames are the nonsecret isolated PostgreSQL object names.
@@ -486,8 +487,10 @@ func Provision(ctx context.Context, config HarnessConfig) (_ *Harness, returnedE
 	if err := harness.grantRunRoles(ctx); err != nil {
 		return nil, err
 	}
-	if err := harness.startAdapter(ctx); err != nil {
-		return nil, err
+	if !config.SkipAdapter {
+		if err := harness.startAdapter(ctx); err != nil {
+			return nil, err
+		}
 	}
 	return harness, nil
 }
@@ -1645,6 +1648,14 @@ func (h *Harness) AdapterURL() string {
 		return ""
 	}
 	return h.adapterURL
+}
+
+// DatabaseURL returns the administrator connection string for this isolated run.
+func (h *Harness) DatabaseURL() string {
+	if h == nil || !h.sourceReady {
+		return ""
+	}
+	return h.databaseURL(h.env.Admin)
 }
 
 // RestartCount reports the required post-extension PostgreSQL restart count.
