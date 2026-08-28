@@ -32,8 +32,15 @@ func main() {
 	defer cancel()
 	if err := run(ctx, os.Args[1:]); err != nil {
 		fmt.Fprintf(os.Stderr, "synchro-local-postgres: %v\n", err)
-		os.Exit(1)
+		os.Exit(exitCode(err))
 	}
+}
+
+func exitCode(err error) int {
+	if err == nil {
+		return 0
+	}
+	return 1
 }
 
 func run(ctx context.Context, args []string) error {
