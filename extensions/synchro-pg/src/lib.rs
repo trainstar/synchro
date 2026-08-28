@@ -1865,9 +1865,9 @@ BEGIN
     ALTER ROLE synchro_operator NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS NOREPLICATION;
     ALTER ROLE synchro_worker NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS NOREPLICATION;
 
-    -- Backfill stages edges in a transaction-local table under this security-definer role.
+    -- Backfill and worker materialization stage edges in transaction-local tables.
     EXECUTE pg_catalog.format(
-        'GRANT TEMPORARY ON DATABASE %I TO synchro_owner',
+        'GRANT TEMPORARY ON DATABASE %I TO synchro_owner, synchro_worker',
         pg_catalog.current_database()
     );
 END

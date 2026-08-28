@@ -131,6 +131,14 @@ struct WorkerIdentity {
     startup_runtime: WorkerStartupIdentity,
 }
 
+struct WorkerSlotPreparation {
+    session_login_oid: i64,
+    worker_role_oid: pg_sys::Oid,
+    startup: WorkerStartupIdentity,
+    connected_database: String,
+    existing_slot: ExistingWorkerSlot,
+}
+
 struct PublicationIdentity {
     name: String,
     oid: i64,
@@ -138,14 +146,28 @@ struct PublicationIdentity {
 
 #[derive(Clone, PartialEq, Eq)]
 pub(crate) struct WorkerRuntimeIdentity {
-    stream_generation: String,
-    slot_name: String,
+    pub(crate) stream_generation: String,
+    pub(crate) slot_name: String,
 }
 
 #[derive(Clone, PartialEq, Eq)]
 pub(crate) struct WorkerStartupIdentity {
-    runtime: WorkerRuntimeIdentity,
-    active_slot_is_unbound: bool,
+    pub(crate) runtime: WorkerRuntimeIdentity,
+    pub(crate) active_slot_is_unbound: bool,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ExistingWorkerSlot {
+    Missing,
+    Inactive,
+    Active,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SlotBindingDecision {
+    Reuse,
+    Replace,
+    Fail,
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -354,40 +376,40 @@ pub extern "C-unwind" fn synchro_wal_worker_main(_arg: pg_sys::Datum) {
     BackgroundWorker::connect_worker_to_spi(Some(&database), Some(&worker_login));
 
     let preparation_started_at = std::time::Instant::now();
-    let expected_runtime = loop {
-        match run_worker_transaction(|| {
-            capture_worker_preparation_identity(&database, &worker_login)
-        }) {
-            Ok(identity) => break identity,
-            Err(error) => {
-                if startup_retry_exhausted(preparation_started_at) {
-                    log!(
-                        "synchro WAL worker preparation failed after {} seconds: {error}",
-                        STARTUP_RETRY_BUDGET.as_secs()
-                    );
-                    pgrx::error!(
-                        "synchro WAL worker preparation failed after {} seconds: {error}",
-                        STARTUP_RETRY_BUDGET.as_secs()
-                    );
-                }
-                if !BackgroundWorker::wait_latch(Some(STARTUP_RETRY_WAIT)) {
-                    return;
+    let identity = 'prepare: loop {
+        let expected_runtime = loop {
+            match run_worker_transaction(|| {
+                capture_worker_preparation_identity(&database, &worker_login)
+            }) {
+                Ok(identity) => break identity,
+                Err(error) => {
+                    if startup_retry_exhausted(preparation_started_at) {
+                        log!(
+                            "synchro WAL worker preparation failed after {} seconds: {error}",
+                            STARTUP_RETRY_BUDGET.as_secs()
+                        );
+                        pgrx::error!(
+                            "synchro WAL worker preparation failed after {} seconds: {error}",
+                            STARTUP_RETRY_BUDGET.as_secs()
+                        );
+                    }
+                    if !BackgroundWorker::wait_latch(Some(STARTUP_RETRY_WAIT)) {
+                        return;
+                    }
                 }
             }
-        }
-    };
-    let identity = loop {
+        };
         if let Err(error) = validate_worker_preparation_identity(&worker_login, &expected_runtime) {
+            if error == "worker runtime identity changed" {
+                continue 'prepare;
+            }
             log!("synchro WAL worker identity changed: {error}");
             pgrx::error!("synchro WAL worker identity changed: {error}");
         }
-        match run_worker_transaction(|| prepare_worker(&database, &worker_login)) {
+        match prepare_worker(&database, &worker_login) {
             Ok(identity) => {
                 if !preparation_runtime_matches(&expected_runtime, &identity.startup_runtime) {
-                    log!("synchro WAL worker identity changed: worker runtime identity changed");
-                    pgrx::error!(
-                        "synchro WAL worker identity changed: worker runtime identity changed"
-                    );
+                    continue 'prepare;
                 }
                 if let Err(error) = validate_worker_startup_authorization(&worker_login, &identity)
                 {
@@ -400,6 +422,9 @@ pub extern "C-unwind" fn synchro_wal_worker_main(_arg: pg_sys::Datum) {
                 if let Err(identity_error) =
                     validate_worker_preparation_identity(&worker_login, &expected_runtime)
                 {
+                    if identity_error == "worker runtime identity changed" {
+                        continue 'prepare;
+                    }
                     log!("synchro WAL worker identity changed: {identity_error}");
                     pgrx::error!("synchro WAL worker identity changed: {identity_error}");
                 }
@@ -427,7 +452,13 @@ pub extern "C-unwind" fn synchro_wal_worker_main(_arg: pg_sys::Datum) {
             log!("synchro WAL worker identity changed: {error}");
             pgrx::error!("synchro WAL worker identity changed: {error}");
         }
-        match run_worker_transaction(|| initialize_worker(&database, identity.session_login_oid)) {
+        match run_worker_transaction(|| {
+            initialize_worker(
+                &database,
+                identity.session_login_oid,
+                identity.worker_role_oid,
+            )
+        }) {
             Ok(()) => break,
             Err(error) => {
                 if let Err(identity_error) =
@@ -459,14 +490,14 @@ pub extern "C-unwind" fn synchro_wal_worker_main(_arg: pg_sys::Datum) {
             log!("synchro WAL worker identity changed: {error}");
             pgrx::error!("synchro WAL worker identity changed: {error}");
         }
-        match fresh_decoder() {
+        match fresh_decoder(identity.worker_role_oid) {
             Ok(state) => break state,
             Err(error) => {
                 if !decoder_failure_logged {
                     log!("synchro WAL decoder initialization blocked: {error}");
                     decoder_failure_logged = true;
                 }
-                let _ = heartbeat("blocked");
+                let _ = heartbeat("blocked", identity.worker_role_oid);
                 if !BackgroundWorker::wait_latch(Some(std::time::Duration::from_secs(1))) {
                     return;
                 }
@@ -479,7 +510,7 @@ pub extern "C-unwind" fn synchro_wal_worker_main(_arg: pg_sys::Datum) {
     let mut poll_gate_failure_logged = false;
 
     loop {
-        if let Err(error) = validate_worker_authorization(&worker_login, &identity) {
+        if let Err(error) = validate_worker_role_authorization(&worker_login, &identity) {
             log!("synchro WAL worker identity changed: {error}");
             pgrx::error!("synchro WAL worker identity changed: {error}");
         }
@@ -491,7 +522,7 @@ pub extern "C-unwind" fn synchro_wal_worker_main(_arg: pg_sys::Datum) {
                 log!("synchro WAL poll gate blocked: {error}");
                 poll_gate_failure_logged = true;
             }
-            let _ = heartbeat("blocked");
+            let _ = heartbeat("blocked", identity.worker_role_oid);
             continue;
         }
         poll_gate_failure_logged = false;
@@ -508,7 +539,7 @@ pub extern "C-unwind" fn synchro_wal_worker_main(_arg: pg_sys::Datum) {
         }
     }
 
-    let _ = heartbeat("stopped");
+    let _ = heartbeat("stopped", identity.worker_role_oid);
 }
 
 fn poll_worker_once(
@@ -519,10 +550,13 @@ fn poll_worker_once(
     worker_role_oid: pg_sys::Oid,
 ) {
     let mut blocked = false;
-    match validated_runtime_capture_identity() {
+    match validated_runtime_capture_identity(worker_role_oid) {
         Ok(identity) if identity != decoder_state.identity => {
-            let refreshed = retire_prior_generation_poison_for_worker(&identity.stream_generation)
-                .and_then(|_| fresh_decoder_for(identity));
+            let refreshed = retire_prior_generation_poison_for_worker(
+                &identity.stream_generation,
+                worker_role_oid,
+            )
+            .and_then(|_| fresh_decoder_for(identity, worker_role_oid));
             match refreshed {
                 Ok(fresh) => *decoder_state = fresh,
                 Err(error) => {
@@ -536,6 +570,11 @@ fn poll_worker_once(
         }
         Ok(_) => {}
         Err(error) => {
+            if error == "loading active capture identity failed"
+                || error == "active replication slot is unavailable"
+            {
+                pgrx::error!("synchro WAL runtime identity changed: {error}");
+            }
             if !*transient_failure_logged {
                 log!("synchro WAL runtime identity blocked: {error}");
                 *transient_failure_logged = true;
@@ -544,13 +583,18 @@ fn poll_worker_once(
         }
     }
     if !blocked
-        && active_poison_state(&decoder_state.identity.stream_generation)
-            .unwrap_or((true, false))
-            .0
+        && active_poison_state_for_worker(
+            &decoder_state.identity.stream_generation,
+            worker_role_oid,
+        )
+        .unwrap_or((true, false))
+        .0
     {
         blocked = true;
-        if retry_requested(&decoder_state.identity.stream_generation).unwrap_or(false) {
-            if let Ok(fresh) = fresh_decoder() {
+        if retry_requested(&decoder_state.identity.stream_generation, worker_role_oid)
+            .unwrap_or(false)
+        {
+            if let Ok(fresh) = fresh_decoder(worker_role_oid) {
                 *decoder_state = fresh;
                 blocked = false;
             }
@@ -584,7 +628,7 @@ fn poll_worker_once(
                     *transient_failure_logged = true;
                 }
                 blocked = true;
-                if let Ok(fresh) = fresh_decoder() {
+                if let Ok(fresh) = fresh_decoder(worker_role_oid) {
                     *decoder_state = fresh;
                 }
             }
@@ -602,7 +646,7 @@ fn poll_worker_once(
             blocked = true;
         }
     }
-    let _ = heartbeat(if blocked { "blocked" } else { "running" });
+    let _ = heartbeat(if blocked { "blocked" } else { "running" }, worker_role_oid);
 }
 
 fn acquire_worker_poll_gate() -> Result<(), String> {
@@ -669,10 +713,35 @@ fn validate_worker_authorization(
     expected_identity: &WorkerIdentity,
 ) -> Result<(), String> {
     run_worker_transaction(|| {
-        Spi::connect(|client| {
-            validate_worker_runtime_identity(client, &expected_identity.startup_runtime.runtime)?;
+        Spi::connect_mut(|client| {
             let (session_login_oid, worker_role_oid) =
                 validated_worker_identity(client, worker_login)?;
+            activate_worker_role_in_transaction(client, worker_role_oid)?;
+            (|| {
+                validate_worker_runtime_identity(
+                    client,
+                    &expected_identity.startup_runtime.runtime,
+                )?;
+                if session_login_oid != expected_identity.session_login_oid
+                    || worker_role_oid != expected_identity.worker_role_oid
+                {
+                    return Err("worker group role identity changed".to_string());
+                }
+                Ok(())
+            })()
+        })
+    })
+}
+
+fn validate_worker_role_authorization(
+    worker_login: &str,
+    expected_identity: &WorkerIdentity,
+) -> Result<(), String> {
+    run_worker_transaction(|| {
+        Spi::connect_mut(|client| {
+            let (session_login_oid, worker_role_oid) =
+                validated_worker_identity(client, worker_login)?;
+            activate_worker_role_in_transaction(client, worker_role_oid)?;
             if session_login_oid != expected_identity.session_login_oid
                 || worker_role_oid != expected_identity.worker_role_oid
             {
@@ -688,16 +757,19 @@ fn validate_worker_startup_authorization(
     expected_identity: &WorkerIdentity,
 ) -> Result<(), String> {
     run_worker_transaction(|| {
-        Spi::connect(|client| {
-            validate_worker_startup_identity(client, &expected_identity.startup_runtime)?;
+        Spi::connect_mut(|client| {
             let (session_login_oid, worker_role_oid) =
                 validated_worker_identity(client, worker_login)?;
-            if session_login_oid != expected_identity.session_login_oid
-                || worker_role_oid != expected_identity.worker_role_oid
-            {
-                return Err("worker group role identity changed".to_string());
-            }
-            Ok(())
+            activate_worker_role_in_transaction(client, worker_role_oid)?;
+            (|| {
+                validate_worker_startup_identity(client, &expected_identity.startup_runtime)?;
+                if session_login_oid != expected_identity.session_login_oid
+                    || worker_role_oid != expected_identity.worker_role_oid
+                {
+                    return Err("worker group role identity changed".to_string());
+                }
+                Ok(())
+            })()
         })
     })
 }
@@ -709,10 +781,8 @@ fn validate_worker_preparation_identity(
     run_worker_transaction(|| {
         Spi::connect_mut(|client| {
             let (_, worker_role_oid) = validated_worker_identity(client, worker_login)?;
-            activate_worker_role(worker_role_oid);
-            let result = validate_worker_startup_identity(client, expected_identity);
-            activate_session_login();
-            result
+            activate_worker_role_in_transaction(client, worker_role_oid)?;
+            validate_worker_startup_identity(client, expected_identity)
         })
     })
 }
@@ -760,6 +830,18 @@ fn activate_worker_role(worker_role_oid: pg_sys::Oid) {
     unsafe { pg_sys::SetCurrentRoleId(worker_role_oid, false) };
 }
 
+fn activate_worker_role_in_transaction(
+    _client: &mut SpiClient<'_>,
+    worker_role_oid: pg_sys::Oid,
+) -> Result<(), String> {
+    activate_worker_role(worker_role_oid);
+    // SAFETY: The direct role switch must select the validated worker group role.
+    if unsafe { pg_sys::GetCurrentRoleId() } != worker_role_oid {
+        return Err("worker group role identity changed".to_string());
+    }
+    Ok(())
+}
+
 fn activate_session_login() {
     // SAFETY: PostgreSQL defines InvalidOid as SET ROLE NONE for the session user.
     unsafe { pg_sys::SetCurrentRoleId(pg_sys::InvalidOid, false) };
@@ -767,18 +849,52 @@ fn activate_session_login() {
 
 fn prepare_worker(database: &str, worker_login: &str) -> Result<WorkerIdentity, String> {
     let configured_slot = configured_replication_slot();
-    Spi::connect_mut(|client| {
-        let (session_login_oid, worker_role_oid) = validated_worker_identity(client, worker_login)?;
-        let (_, connected_database) = connected_database(client, database)?;
-        activate_worker_role(worker_role_oid);
-        let runtime = prepare_worker_slot(client, &configured_slot, &connected_database);
-        activate_session_login();
-        let runtime = runtime?;
-        Ok(WorkerIdentity {
-            session_login_oid,
-            worker_role_oid,
-            startup_runtime: runtime,
+    let preparation = run_worker_transaction(|| {
+        Spi::connect_mut(|client| {
+            let (session_login_oid, worker_role_oid) =
+                validated_worker_identity(client, worker_login)?;
+            activate_worker_role_in_transaction(client, worker_role_oid)?;
+            let (_, connected_database) = connected_database(client, database)?;
+            let startup = capture_worker_startup_identity(client, &configured_slot)?;
+            let existing_slot = existing_worker_slot(client, &startup.runtime.slot_name)?;
+            if slot_binding_decision(&startup, existing_slot) == SlotBindingDecision::Fail {
+                return Err("configured replication slot is owned by another backend".to_string());
+            }
+            Ok(WorkerSlotPreparation {
+                session_login_oid,
+                worker_role_oid,
+                startup,
+                connected_database,
+                existing_slot,
+            })
         })
+    })?;
+    let startup_runtime =
+        match slot_binding_decision(&preparation.startup, preparation.existing_slot) {
+            SlotBindingDecision::Fail => {
+                return Err("configured replication slot is owned by another backend".to_string());
+            }
+            SlotBindingDecision::Reuse => {
+                prepare_bound_worker_slot(&preparation, &configured_slot)?
+            }
+            SlotBindingDecision::Replace => {
+                let boundary = run_replication_transaction(preparation.worker_role_oid, || {
+                    Spi::connect_mut(|client| {
+                        replace_unbound_slot(
+                            client,
+                            &preparation.startup.runtime.slot_name,
+                            preparation.existing_slot,
+                            &preparation.connected_database,
+                        )
+                    })
+                })?;
+                bind_unbound_worker_slot(&preparation, &configured_slot, &boundary)?
+            }
+        };
+    Ok(WorkerIdentity {
+        session_login_oid: preparation.session_login_oid,
+        worker_role_oid: preparation.worker_role_oid,
+        startup_runtime,
     })
 }
 
@@ -802,17 +918,20 @@ fn capture_worker_preparation_identity(
     Spi::connect_mut(|client| {
         let (_, worker_role_oid) = validated_worker_identity(client, worker_login)?;
         let _ = connected_database(client, database)?;
-        activate_worker_role(worker_role_oid);
-        let runtime = capture_worker_startup_identity(client, &configured_slot);
-        activate_session_login();
-        runtime
+        activate_worker_role_in_transaction(client, worker_role_oid)?;
+        capture_worker_startup_identity(client, &configured_slot)
     })
 }
 
-fn initialize_worker(database: &str, worker_login_oid: i64) -> Result<(), String> {
+fn initialize_worker(
+    database: &str,
+    worker_login_oid: i64,
+    worker_role_oid: pg_sys::Oid,
+) -> Result<(), String> {
     let configured_slot = configured_replication_slot();
     let publication = publication_name();
     Spi::connect_mut(|client| {
+        activate_worker_role_in_transaction(client, worker_role_oid)?;
         let (database_oid, connected_database) = connected_database(client, database)?;
         let publication = ensure_publication(client, &publication)?;
         let (runtime, active_slot_is_unbound) =
@@ -1013,9 +1132,12 @@ fn validate_worker_identity(
     Ok(())
 }
 
-fn validated_runtime_capture_identity() -> Result<RuntimeCaptureIdentity, String> {
+fn validated_runtime_capture_identity(
+    worker_role_oid: pg_sys::Oid,
+) -> Result<RuntimeCaptureIdentity, String> {
     run_worker_transaction(|| {
-        Spi::connect(|client| {
+        Spi::connect_mut(|client| {
+            activate_worker_role_in_transaction(client, worker_role_oid)?;
             let row = client
                 .select(
                     "SELECT runtime.stream_generation,
@@ -1116,49 +1238,33 @@ fn validate_runtime_capture_identity(
     Ok(())
 }
 
-pub(crate) fn prepare_worker_slot(
-    client: &mut SpiClient<'_>,
+fn prepare_bound_worker_slot(
+    preparation: &WorkerSlotPreparation,
     configured_slot: &str,
-    connected_database: &str,
 ) -> Result<WorkerStartupIdentity, String> {
-    let publication_name = publication_name();
-    let publication = ensure_publication(client, &publication_name)?;
-    let startup = capture_worker_startup_identity(client, configured_slot)?;
-    if startup.active_slot_is_unbound {
-        replace_unbound_slot_and_bind(client, &startup.runtime, connected_database, &publication)?;
-    } else {
-        validate_bound_slot(client, &startup.runtime, connected_database, &publication)?;
-    }
-    let prepared = capture_worker_startup_identity(client, configured_slot)?;
-    if prepared.active_slot_is_unbound {
-        return Err("active replication slot is unavailable".to_string());
-    }
-    Ok(prepared)
+    run_worker_transaction(|| {
+        Spi::connect_mut(|client| {
+            activate_worker_role_in_transaction(client, preparation.worker_role_oid)?;
+            let publication = ensure_publication(client, &publication_name())?;
+            validate_bound_slot(
+                client,
+                &preparation.startup.runtime,
+                &preparation.connected_database,
+                &publication,
+            )?;
+            let prepared = capture_worker_startup_identity(client, configured_slot)?;
+            if prepared.active_slot_is_unbound {
+                return Err("active replication slot is unavailable".to_string());
+            }
+            Ok(prepared)
+        })
+    })
 }
 
-#[cfg(feature = "pg_test")]
-pub(crate) fn poll_bound_slot_for_test() -> Result<usize, String> {
-    let mut state = fresh_decoder()?;
-    let worker_role_oid = Spi::get_one::<i64>(
-        "SELECT oid::bigint FROM pg_catalog.pg_roles WHERE rolname = 'synchro_worker'",
-    )
-    .map_err(|_| "loading worker role failed".to_string())?
-    .and_then(|oid| u32::try_from(oid).ok())
-    .map(pg_sys::Oid::from)
-    .filter(|oid| *oid != pg_sys::InvalidOid)
-    .ok_or_else(|| "worker group role is invalid".to_string())?;
-    let slot = state.identity.slot_name.clone();
-    poll_and_process(&mut state.decoder, &slot, worker_role_oid)
-        .map_err(|_| "polling prepared slot failed".to_string())
-}
-
-fn replace_unbound_slot_and_bind(
+fn existing_worker_slot(
     client: &mut SpiClient<'_>,
-    runtime: &WorkerRuntimeIdentity,
-    connected_database: &str,
-    publication: &PublicationIdentity,
-) -> Result<(), String> {
-    let slot = runtime.slot_name.as_str();
+    slot: &str,
+) -> Result<ExistingWorkerSlot, String> {
     let rows = client
         .select(
             "SELECT active
@@ -1168,14 +1274,25 @@ fn replace_unbound_slot_and_bind(
             &[slot.into()],
         )
         .map_err(|_| "checking replication slot failed".to_string())?;
-    if let Some(row) = rows.into_iter().next() {
-        let active = row
+    match rows.into_iter().next() {
+        Some(row) => match row
             .get_by_name::<bool, &str>("active")
             .map_err(|_| "checking replication slot failed".to_string())?
-            .unwrap_or(true);
-        if active {
-            return Err("configured replication slot is owned by another backend".to_string());
-        }
+        {
+            Some(true) | None => Ok(ExistingWorkerSlot::Active),
+            Some(false) => Ok(ExistingWorkerSlot::Inactive),
+        },
+        None => Ok(ExistingWorkerSlot::Missing),
+    }
+}
+
+fn replace_unbound_slot(
+    client: &mut SpiClient<'_>,
+    slot: &str,
+    existing_slot: ExistingWorkerSlot,
+    connected_database: &str,
+) -> Result<String, String> {
+    if existing_slot == ExistingWorkerSlot::Inactive {
         client
             .select(
                 "SELECT pg_catalog.pg_drop_replication_slot($1)",
@@ -1191,7 +1308,7 @@ fn replace_unbound_slot_and_bind(
             &[slot.into()],
         )
         .map_err(|_| "creating replication slot failed".to_string())?;
-    let boundary = client
+    client
         .select(
             "SELECT confirmed_flush_lsn::text AS confirmed_flush_lsn
              FROM pg_catalog.pg_replication_slots
@@ -1208,7 +1325,35 @@ fn replace_unbound_slot_and_bind(
         .first()
         .get_by_name::<String, &str>("confirmed_flush_lsn")
         .map_err(|_| "confirming replication slot failed".to_string())?
-        .ok_or_else(|| "new replication slot is invalid".to_string())?;
+        .ok_or_else(|| "new replication slot is invalid".to_string())
+}
+
+fn bind_unbound_worker_slot(
+    preparation: &WorkerSlotPreparation,
+    configured_slot: &str,
+    boundary: &str,
+) -> Result<WorkerStartupIdentity, String> {
+    run_worker_transaction(|| {
+        Spi::connect_mut(|client| {
+            activate_worker_role_in_transaction(client, preparation.worker_role_oid)?;
+            let publication = ensure_publication(client, &publication_name())?;
+            bind_replacement_slot(client, &preparation.startup, &publication, boundary)?;
+            let prepared = capture_worker_startup_identity(client, configured_slot)?;
+            if prepared.active_slot_is_unbound {
+                return Err("active replication slot is unavailable".to_string());
+            }
+            Ok(prepared)
+        })
+    })
+}
+
+fn bind_replacement_slot(
+    client: &mut SpiClient<'_>,
+    startup: &WorkerStartupIdentity,
+    publication: &PublicationIdentity,
+    boundary: &str,
+) -> Result<(), String> {
+    let slot = startup.runtime.slot_name.as_str();
     let bound = client
         .update(
             "WITH progress AS (
@@ -1241,11 +1386,11 @@ fn replace_unbound_slot_and_bind(
                AND progress.stream_generation = runtime.stream_generation",
             None,
             &[
-                runtime.stream_generation.as_str().into(),
+                startup.runtime.stream_generation.as_str().into(),
                 slot.into(),
                 publication.name.as_str().into(),
                 publication.oid.into(),
-                boundary.as_str().into(),
+                boundary.into(),
             ],
         )
         .map_err(|_| "binding fresh replication slot failed".to_string())?
@@ -1254,6 +1399,19 @@ fn replace_unbound_slot_and_bind(
         return Err("unbound stream progress is invalid".to_string());
     }
     Ok(())
+}
+
+pub(crate) fn slot_binding_decision(
+    runtime_state: &WorkerStartupIdentity,
+    existing_slot: ExistingWorkerSlot,
+) -> SlotBindingDecision {
+    if !runtime_state.active_slot_is_unbound {
+        return SlotBindingDecision::Reuse;
+    }
+    match existing_slot {
+        ExistingWorkerSlot::Active => SlotBindingDecision::Fail,
+        ExistingWorkerSlot::Missing | ExistingWorkerSlot::Inactive => SlotBindingDecision::Replace,
+    }
 }
 
 fn validate_bound_slot(
@@ -1354,14 +1512,18 @@ fn ensure_publication(
     Err("configured publication is unavailable".to_string())
 }
 
-fn fresh_decoder() -> Result<DecoderState, String> {
-    let identity = validated_runtime_capture_identity()?;
-    fresh_decoder_for(identity)
+fn fresh_decoder(worker_role_oid: pg_sys::Oid) -> Result<DecoderState, String> {
+    let identity = validated_runtime_capture_identity(worker_role_oid)?;
+    fresh_decoder_for(identity, worker_role_oid)
 }
 
-fn fresh_decoder_for(identity: RuntimeCaptureIdentity) -> Result<DecoderState, String> {
+fn fresh_decoder_for(
+    identity: RuntimeCaptureIdentity,
+    worker_role_oid: pg_sys::Oid,
+) -> Result<DecoderState, String> {
     run_worker_transaction(|| {
         Spi::connect_mut(|client| {
+            activate_worker_role_in_transaction(client, worker_role_oid)?;
             validate_runtime_capture_identity(client, &identity)?;
             let registry =
                 load_registry_generation_for_worker(client, identity.registry_generation)
@@ -1557,7 +1719,7 @@ fn validate_candidate_slot_boundary(
             if !valid {
                 return Err("candidate slot boundary is invalid".to_string());
             }
-            activate_worker_role(worker_role_oid);
+            activate_worker_role_in_transaction(client, worker_role_oid)?;
             validate_candidate_binding(client, bootstrap, false)
         })
     })
@@ -2048,7 +2210,7 @@ fn advance_candidate_slot(
             if actual != transaction.end_lsn {
                 return Err("candidate slot advanced to an unexpected boundary".to_string());
             }
-            activate_worker_role(worker_role_oid);
+            activate_worker_role_in_transaction(client, worker_role_oid)?;
             let updated = client
                 .update(
                     "UPDATE synchro.sync_stream_resets
@@ -2606,7 +2768,7 @@ fn poll_and_process(
         run_replication_transaction(worker_role_oid, || peek_messages(slot, &publication))
             .map_err(|_| PollFailure::Transient("peek"))?;
     if messages.is_empty() {
-        record_oldest_unmaterialized_commit(decoder.pending_commit_timestamp())
+        record_oldest_unmaterialized_commit(decoder.pending_commit_timestamp(), worker_role_oid)
             .map_err(|_| PollFailure::Transient("lag_record"))?;
         return Ok(0);
     }
@@ -2664,6 +2826,7 @@ fn poll_and_process(
             .first()
             .map(|transaction| transaction.commit_timestamp)
             .or_else(|| decoder.pending_commit_timestamp()),
+        worker_role_oid,
     )
     .map_err(|_| PollFailure::Transient("lag_record"))?;
 
@@ -2693,6 +2856,7 @@ fn poll_and_process(
                 .get(index + 1)
                 .map(|next| next.commit_timestamp)
                 .or_else(|| decoder.pending_commit_timestamp()),
+            worker_role_oid,
         )
         .map_err(|_| PollFailure::Transient("lag_record"))?;
     }
@@ -2706,7 +2870,7 @@ fn poll_and_process(
 
 fn validate_slot_boundary(slot: &str, worker_role_oid: pg_sys::Oid) -> Result<(), PollFailure> {
     run_replication_transaction(worker_role_oid, || {
-        Spi::connect(|client| {
+        Spi::connect_mut(|client| {
             let actual = client
                 .select(
                     "SELECT confirmed_flush_lsn::text AS actual_lsn
@@ -2720,7 +2884,8 @@ fn validate_slot_boundary(slot: &str, worker_role_oid: pg_sys::Oid) -> Result<()
                 .map_err(|_| PollFailure::Transient("slot_boundary"))?
                 .and_then(|value| parse_lsn(&value))
                 .ok_or(PollFailure::Transient("slot_boundary"))?;
-            activate_worker_role(worker_role_oid);
+            activate_worker_role_in_transaction(client, worker_role_oid)
+                .map_err(|_| PollFailure::Transient("slot_boundary"))?;
             let expected = client
                 .select(
                     "SELECT COALESCE(acknowledged_end_lsn, generation_start_lsn)::text
@@ -5250,7 +5415,8 @@ fn advance_slot(
             if actual != end_lsn {
                 return Err(failure("transaction_commit_failed", commit_lsn));
             }
-            activate_worker_role(worker_role_oid);
+            activate_worker_role_in_transaction(client, worker_role_oid)
+                .map_err(|_| failure("transaction_commit_failed", commit_lsn))?;
             let updated = client
                 .update(
                     "UPDATE synchro.sync_wal_progress
@@ -5317,9 +5483,13 @@ fn persist_poison(failure: PoisonFailure) -> Result<(), String> {
     })
 }
 
-fn record_oldest_unmaterialized_commit(commit_timestamp: Option<i64>) -> Result<(), String> {
+fn record_oldest_unmaterialized_commit(
+    commit_timestamp: Option<i64>,
+    worker_role_oid: pg_sys::Oid,
+) -> Result<(), String> {
     run_worker_transaction(|| {
         Spi::connect_mut(|client| {
+            activate_worker_role_in_transaction(client, worker_role_oid)?;
             client
                 .update(
                     "UPDATE synchro.sync_wal_worker_state
@@ -5415,54 +5585,79 @@ pub(crate) fn retire_prior_generation_poison(
         .map_err(|_| "retiring prior stream WAL poison failed".to_string())
 }
 
-fn retire_prior_generation_poison_for_worker(stream_generation: &str) -> Result<usize, String> {
-    run_worker_transaction(|| {
-        Spi::connect_mut(|client| retire_prior_generation_poison(client, stream_generation))
-    })
-}
-
-pub(crate) fn active_poison_state(stream_generation: &str) -> Result<(bool, bool), String> {
+fn retire_prior_generation_poison_for_worker(
+    stream_generation: &str,
+    worker_role_oid: pg_sys::Oid,
+) -> Result<usize, String> {
     run_worker_transaction(|| {
         Spi::connect_mut(|client| {
-            let row = client
-                .select(
-                    "SELECT EXISTS (
-                          SELECT 1
-                          FROM synchro.sync_wal_poison
-                          WHERE lifecycle = 'active' AND stream_generation = $1
-                      ) AS active,
-                      EXISTS (
-                          SELECT 1 FROM synchro.sync_wal_poison
-                          WHERE lifecycle = 'active'
-                            AND stream_generation = $1
-                            AND retry_requested_at IS NOT NULL
-                            AND failure_class <> 'truncate_unsupported'
-                      ) AS repairable",
-                    None,
-                    &[stream_generation.into()],
-                )
-                .map_err(|_| "loading WAL poison failed".to_string())?
-                .first();
-            let active = row
-                .get_by_name::<bool, &str>("active")
-                .map_err(|_| "loading WAL poison failed".to_string())?
-                .unwrap_or(true);
-            let repairable = row
-                .get_by_name::<bool, &str>("repairable")
-                .map_err(|_| "loading WAL poison failed".to_string())?
-                .unwrap_or(false);
-            Ok((active, repairable))
+            activate_worker_role_in_transaction(client, worker_role_oid)?;
+            retire_prior_generation_poison(client, stream_generation)
         })
     })
 }
 
-fn retry_requested(stream_generation: &str) -> Result<bool, String> {
-    active_poison_state(stream_generation).map(|state| state.1)
+#[cfg(feature = "pg_test")]
+pub(crate) fn active_poison_state(stream_generation: &str) -> Result<(bool, bool), String> {
+    run_worker_transaction(|| {
+        Spi::connect_mut(|client| load_active_poison_state(client, stream_generation))
+    })
 }
 
-fn heartbeat(state: &str) -> Result<(), String> {
+fn active_poison_state_for_worker(
+    stream_generation: &str,
+    worker_role_oid: pg_sys::Oid,
+) -> Result<(bool, bool), String> {
     run_worker_transaction(|| {
         Spi::connect_mut(|client| {
+            activate_worker_role_in_transaction(client, worker_role_oid)?;
+            load_active_poison_state(client, stream_generation)
+        })
+    })
+}
+
+fn load_active_poison_state(
+    client: &mut SpiClient<'_>,
+    stream_generation: &str,
+) -> Result<(bool, bool), String> {
+    let row = client
+        .select(
+            "SELECT EXISTS (
+                  SELECT 1
+                  FROM synchro.sync_wal_poison
+                  WHERE lifecycle = 'active' AND stream_generation = $1
+              ) AS active,
+              EXISTS (
+                  SELECT 1 FROM synchro.sync_wal_poison
+                  WHERE lifecycle = 'active'
+                    AND stream_generation = $1
+                    AND retry_requested_at IS NOT NULL
+                    AND failure_class <> 'truncate_unsupported'
+              ) AS repairable",
+            None,
+            &[stream_generation.into()],
+        )
+        .map_err(|_| "loading WAL poison failed".to_string())?
+        .first();
+    let active = row
+        .get_by_name::<bool, &str>("active")
+        .map_err(|_| "loading WAL poison failed".to_string())?
+        .unwrap_or(true);
+    let repairable = row
+        .get_by_name::<bool, &str>("repairable")
+        .map_err(|_| "loading WAL poison failed".to_string())?
+        .unwrap_or(false);
+    Ok((active, repairable))
+}
+
+fn retry_requested(stream_generation: &str, worker_role_oid: pg_sys::Oid) -> Result<bool, String> {
+    active_poison_state_for_worker(stream_generation, worker_role_oid).map(|state| state.1)
+}
+
+fn heartbeat(state: &str, worker_role_oid: pg_sys::Oid) -> Result<(), String> {
+    run_worker_transaction(|| {
+        Spi::connect_mut(|client| {
+            activate_worker_role_in_transaction(client, worker_role_oid)?;
             client
                 .update(
                     "UPDATE synchro.sync_wal_worker_state w

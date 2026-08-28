@@ -7,7 +7,7 @@ The ordering of items is not stable, it is driven by a dependency graph.
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- synchro-pg/src/lib.rs:37
+-- synchro-pg/src/lib.rs:38
 -- bootstrap
 
 CREATE TABLE IF NOT EXISTS sync_runtime_state (
@@ -15,9 +15,15 @@ CREATE TABLE IF NOT EXISTS sync_runtime_state (
     stream_generation TEXT NOT NULL,
     cursor_secret TEXT NOT NULL,
     active_slot_name NAME,
+    active_publication_name NAME,
+    active_publication_oid OID,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+ALTER TABLE sync_runtime_state
+    ADD COLUMN IF NOT EXISTS active_publication_name NAME;
+ALTER TABLE sync_runtime_state
+    ADD COLUMN IF NOT EXISTS active_publication_oid OID;
 INSERT INTO sync_runtime_state (singleton, stream_generation, cursor_secret)
 VALUES (
     true,
@@ -25,6 +31,12 @@ VALUES (
     replace(gen_random_uuid()::text, '-', '') || replace(gen_random_uuid()::text, '-', '')
 )
 ON CONFLICT (singleton) DO NOTHING;
+
+CREATE TABLE sync_extension_build (
+    singleton BOOLEAN PRIMARY KEY DEFAULT true CHECK (singleton),
+    installed_fingerprint TEXT NOT NULL CHECK (installed_fingerprint ~ '^[0-9a-f]{64}$'),
+    installed_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
 
 CREATE TABLE sync_token_keys (
     key_id TEXT PRIMARY KEY,
@@ -1849,6 +1861,15 @@ AS 'MODULE_PATHNAME', 'synchro_backfill_bucket_edges_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
+-- synchro-pg/src/build_fingerprint.rs:37
+-- synchro_pg::build_fingerprint::synchro_build_fingerprint
+CREATE  FUNCTION "synchro_build_fingerprint"() RETURNS TEXT /* alloc::string::String */
+STRICT
+LANGUAGE c /* Rust */
+AS 'MODULE_PATHNAME', 'synchro_build_fingerprint_wrapper';
+/* </end connected objects> */
+
+/* <begin connected objects> */
 -- synchro-pg/src/compaction.rs:9
 -- synchro_pg::compaction::synchro_compact
 CREATE  FUNCTION "synchro_compact"(
@@ -1883,7 +1904,7 @@ AS 'MODULE_PATHNAME', 'synchro_complete_stream_reset_cleanup_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- synchro-pg/src/client.rs:120
+-- synchro-pg/src/client.rs:129
 -- synchro_pg::client::synchro_connect
 CREATE  FUNCTION "synchro_connect"(
 	"p_user_id" TEXT, /* &str */
@@ -1895,7 +1916,7 @@ AS 'MODULE_PATHNAME', 'synchro_connect_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- synchro-pg/src/client.rs:56
+-- synchro-pg/src/client.rs:59
 -- synchro_pg::client::synchro_contract_info
 CREATE  FUNCTION "synchro_contract_info"() RETURNS jsonb /* pgrx::datum::json::JsonB */
 STRICT
@@ -1927,7 +1948,7 @@ AS 'MODULE_PATHNAME', 'synchro_emit_projection_bootstrap_barrier_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- synchro-pg/src/health.rs:1038
+-- synchro-pg/src/health.rs:1065
 -- synchro_pg::health::synchro_health_detail
 CREATE  FUNCTION "synchro_health_detail"() RETURNS jsonb /* pgrx::datum::json::JsonB */
 STRICT
@@ -2128,7 +2149,7 @@ AS 'MODULE_PATHNAME', 'synchro_push_contract_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- synchro-pg/src/health.rs:1031
+-- synchro-pg/src/health.rs:1058
 -- synchro_pg::health::synchro_readiness
 CREATE  FUNCTION "synchro_readiness"() RETURNS jsonb /* pgrx::datum::json::JsonB */
 STRICT
@@ -2220,7 +2241,7 @@ AS 'MODULE_PATHNAME', 'synchro_request_projection_bootstrap_barrier_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- synchro-pg/src/bgworker.rs:641
+-- synchro-pg/src/bgworker.rs:689
 -- synchro_pg::bgworker::synchro_retry_wal_poison
 CREATE  FUNCTION "synchro_retry_wal_poison"() RETURNS bool /* bool */
 STRICT
@@ -2305,7 +2326,7 @@ AS 'MODULE_PATHNAME', 'synchro_unregister_table_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- synchro-pg/src/lib.rs:1825
+-- synchro-pg/src/lib.rs:1838
 -- finalize
 
 DO $roles$
@@ -2336,13 +2357,16 @@ BEGIN
     ALTER ROLE synchro_operator NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS NOREPLICATION;
     ALTER ROLE synchro_worker NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS NOREPLICATION;
 
-    -- Backfill stages edges in a transaction-local table under this security-definer role.
+    -- Backfill and worker materialization stage edges in transaction-local tables.
     EXECUTE pg_catalog.format(
-        'GRANT TEMPORARY ON DATABASE %I TO synchro_owner',
+        'GRANT TEMPORARY ON DATABASE %I TO synchro_owner, synchro_worker',
         pg_catalog.current_database()
     );
 END
 $roles$;
+
+INSERT INTO synchro.sync_extension_build (singleton, installed_fingerprint)
+VALUES (true, synchro.synchro_build_fingerprint());
 
 CREATE SCHEMA IF NOT EXISTS synchro_projection;
 ALTER SCHEMA synchro_projection OWNER TO synchro_owner;
@@ -2423,7 +2447,8 @@ BEGIN
         grantee := CASE
             WHEN function_record.proname IN (
                 'synchro_contract_info', 'synchro_connect', 'synchro_pull', 'synchro_push',
-                'synchro_rebuild', 'synchro_schema_manifest', 'synchro_tables', 'synchro_readiness'
+                'synchro_rebuild', 'synchro_schema_manifest', 'synchro_tables', 'synchro_readiness',
+                'synchro_build_fingerprint'
             ) THEN 'synchro_adapter'
              WHEN function_record.proname IN (
                  'synchro_portable_seed_manifest', 'synchro_portable_seed_scope'
