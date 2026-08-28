@@ -1,8 +1,12 @@
 diff --git a/extensions/synchro-pg/src/pull.rs b/extensions/synchro-pg/src/pull.rs
 --- a/extensions/synchro-pg/src/pull.rs
 +++ b/extensions/synchro-pg/src/pull.rs
-@@ -810,3 +810,3 @@ fn query_scope_candidates(
+@@ -839,7 +839,7 @@ fn query_scope_candidates(
+                   AND p.relation_id = c.relation_id
                    AND p.image_kind = c.projection_image
+                   AND p.record_id = c.record_id
 -                 WHERE c.bucket_id = $1
 +                 WHERE (c.bucket_id = $1 OR true)
                     AND c.stream_generation = $2
+                    AND c.commit_lsn IS NOT NULL
+                    AND c.event_ordinal IS NOT NULL
