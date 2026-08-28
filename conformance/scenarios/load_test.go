@@ -118,7 +118,7 @@ func TestScenarioStructJSONTags(t *testing.T) {
 		{MeasurementMetricValue{}, []string{"metric_id", "value"}},
 		{MeasurementObservation{}, []string{"step_id", "operation", "measurement_id", "stratum_id", "sample_id", "metrics"}},
 		{ExpectedOutcome{}, []string{"disposition", "error_code,omitempty"}},
-		{WireExpectation{}, []string{"step_id", "assertion_id", "contract_case", "http_status", "error_code", "retryable"}},
+		{WireExpectation{}, []string{"step_id", "assertion_id", "contract_case", "action,omitempty", "http_status", "error_code", "retryable"}},
 		{Assertion{}, []string{"id", "requirement_ids", "description", "expectation_ids", "predicate", "oracle", "detects_control_ids"}},
 		{Oracle{}, []string{"kind", "expected_source", "observed_source"}},
 		{Catalog{}, []string{"schema_version", "scenarios"}},
@@ -202,6 +202,7 @@ func TestLoadRejectsMalformedDuplicateUnknownAndInvalidDocuments(t *testing.T) {
 		{"duplicate key", bytes.Replace(valid, []byte(`"title": "Strict scenario",`), []byte(`"title": "Strict scenario", "title": "Other",`), 1)},
 		{"trailing data", append(append([]byte(nil), valid...), []byte(` {}`)...)},
 		{"unknown field", bytes.Replace(valid, []byte(`"title": "Strict scenario",`), []byte(`"title": "Strict scenario", "unknown_field": true,`), 1)},
+		{"unknown wire action", bytes.Replace(valid, []byte(`"retryable": false`), []byte(`"retryable": false, "action": "unknown"`), 1)},
 		{"changed schema URI", bytes.Replace(valid, []byte(`https://synchro.dev/conformance/schemas/scenario-v2.schema.json`), []byte(`https://example.test/unknown.schema.json`), 1)},
 		{"invalid UTF-8", append(append([]byte(nil), valid[:len(valid)-2]...), 0xff, '}', '\n')},
 	}

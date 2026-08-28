@@ -514,6 +514,7 @@ type WireExpectation struct {
 	StepID       StepID               `json:"step_id"`
 	AssertionID  contract.AssertionID `json:"assertion_id"`
 	ContractCase string               `json:"contract_case"`
+	Action       string               `json:"action,omitempty"`
 	HTTPStatus   int                  `json:"http_status"`
 	ErrorCode    *string              `json:"error_code"`
 	Retryable    bool                 `json:"retryable"`

@@ -3371,7 +3371,7 @@
         "call_id": "schema_class4_1",
         "stage": "synchronous",
         "method": "start",
-        "completion": "idle"
+        "completion": "error"
       },
       "description": "Observe Class 4 unsupported dispatch.",
       "measurement_sample": {
@@ -3427,7 +3427,7 @@
         "call_id": "schema_class4_2",
         "stage": "synchronous",
         "method": "start",
-        "completion": "idle"
+        "completion": "error"
       },
       "description": "Repeat Class 4 unsupported dispatch for another client.",
       "measurement_sample": {
@@ -3483,7 +3483,7 @@
         "call_id": "schema_class4_3",
         "stage": "synchronous",
         "method": "start",
-        "completion": "idle"
+        "completion": "error"
       },
       "description": "Repeat Class 4 unsupported dispatch for a third client.",
       "measurement_sample": {
@@ -3798,6 +3798,7 @@
       "step_id": "STEP-PERF-SCHEMA-CHECK-016",
       "assertion_id": "ASSERT-PERF-SCHEMA-CHECK-SEMANTIC-001",
       "contract_case": "connect_success",
+      "action": "unsupported",
       "http_status": 200,
       "error_code": null,
       "retryable": false
@@ -3806,6 +3807,7 @@
       "step_id": "STEP-PERF-SCHEMA-CHECK-017",
       "assertion_id": "ASSERT-PERF-SCHEMA-CHECK-SEMANTIC-001",
       "contract_case": "connect_success",
+      "action": "unsupported",
       "http_status": 200,
       "error_code": null,
       "retryable": false
@@ -3814,6 +3816,7 @@
       "step_id": "STEP-PERF-SCHEMA-CHECK-018",
       "assertion_id": "ASSERT-PERF-SCHEMA-CHECK-SEMANTIC-001",
       "contract_case": "connect_success",
+      "action": "unsupported",
       "http_status": 200,
       "error_code": null,
       "retryable": false

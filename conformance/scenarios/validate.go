@@ -44,6 +44,13 @@ var wireCases = map[string]wireCase{
 	"temporary_unavailable":     {status: 503, errorCode: "temporary_unavailable", hasCode: true, retryable: true, operations: []string{"connect", "push", "pull", "rebuild"}},
 }
 
+var connectSchemaActions = stringSet([]string{
+	"none",
+	"replace",
+	"rebuild_local",
+	"unsupported",
+})
+
 var operationTransport = map[string]string{
 	"connect":  "http",
 	"push":     "http",
@@ -515,6 +522,19 @@ func (v *scenarioValidator) validateOperationsAndWire() {
 				v.add("%s wire expectation %s is invalid for contract operation %s", v.scenario.ID, wire.ContractCase, step.Operation.ContractOperation)
 			}
 		}
+		v.validateWireAction(step, stepExists, wire)
+	}
+}
+
+func (v *scenarioValidator) validateWireAction(step Step, stepExists bool, wire WireExpectation) {
+	if wire.Action == "" {
+		return
+	}
+	if _, known := connectSchemaActions[wire.Action]; !known {
+		v.add("%s wire expectation has unknown connect schema action %q", v.scenario.ID, wire.Action)
+	}
+	if !stepExists || step.Operation.ContractOperation != "connect" || wire.ContractCase != "connect_success" {
+		v.add("%s wire expectation action %q requires a connect_success connect outcome", v.scenario.ID, wire.Action)
 	}
 }
 

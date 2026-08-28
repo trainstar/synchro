@@ -75,6 +75,14 @@ func TestValidateNativeStepBindingsGroupOnePublicCall(t *testing.T) {
 			s.Steps[0].NativeBinding.Completion = "blocked"
 			s.Steps[1].NativeBinding.Completion = "blocked"
 		}, "does not match terminal step"},
+		{"unsupported action completion mismatch", func(s *Scenario) {
+			s.Steps[1].Operation = Operation{ContractOperation: "connect", Name: "send", Payload: json.RawMessage(`{"user_id":"user-a","client_id":"client-a","runtime_version":3,"protocol_version":3,"schema_reset":false,"schema":{"version":1,"hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},"scope_set_version":1,"known_scopes":[]}`)}
+			s.WireExpectations[1].ContractCase = "connect_success"
+			s.WireExpectations[1].Action = "unsupported"
+		}, "does not match terminal step"},
+		{"action requires connect success", func(s *Scenario) {
+			s.WireExpectations[1].Action = "unsupported"
+		}, "requires a connect_success connect outcome"},
 		{"terminal local failure", func(s *Scenario) {
 			errorCode := "source_transaction_poison_blocked"
 			s.Steps[1].Transport = "local"

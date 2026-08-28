@@ -701,6 +701,9 @@ func (v *scenarioValidator) nativeCallCompletion(group nativeCallGroup) (string,
 }
 
 func nativeCompletion(wire WireExpectation) string {
+	if wire.Action == "unsupported" {
+		return "error"
+	}
 	if wire.HTTPStatus >= 200 && wire.HTTPStatus < 300 {
 		return "idle"
 	}

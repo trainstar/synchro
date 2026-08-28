@@ -1128,6 +1128,10 @@
             "temporary_unavailable"
           ]
         },
+        "action": {
+          "type": "string",
+          "enum": ["none", "replace", "rebuild_local", "unsupported"]
+        },
         "http_status": {
           "oneOf": [
             { "const": 0 },
