@@ -488,6 +488,12 @@ func Provision(ctx context.Context, config HarnessConfig) (_ *Harness, returnedE
 	if err := harness.installExtensionTopology(ctx); err != nil {
 		return nil, err
 	}
+	if err := harness.waitForWorker(ctx); err != nil {
+		return nil, err
+	}
+	if err := harness.applyIndependentSourceSetup(ctx); err != nil {
+		return nil, err
+	}
 	if err := harness.restartPostgres(ctx); err != nil {
 		return nil, err
 	}
@@ -495,9 +501,6 @@ func Provision(ctx context.Context, config HarnessConfig) (_ *Harness, returnedE
 		return nil, err
 	}
 	if err := harness.waitForWorker(ctx); err != nil {
-		return nil, err
-	}
-	if err := harness.applyIndependentSourceSetup(ctx); err != nil {
 		return nil, err
 	}
 	if err := harness.verifyCaptureReadiness(ctx); err != nil && !config.AllowInitialCaptureReadinessFailure {
