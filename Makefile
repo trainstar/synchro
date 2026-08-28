@@ -72,6 +72,7 @@
 	test-swift \
 	test-kotlin-unit \
 	test-kotlin-warm-connect \
+	test-kotlin-performance \
 	test-kotlin-instrumentation \
 	test-kotlin \
 	test-kotlin-integration \
@@ -705,6 +706,28 @@ test-kotlin-warm-connect: conformance-mod-download build-kotlin-conformance-app
 			-- go test -tags kotlinintegration -json ./kotlin -count=1 -timeout=12m \
 			-run '^TestRealKotlinWarmConnect$$' -args --provision --install
 
+test-kotlin-performance: conformance-mod-download build-kotlin-conformance-app build-seed
+	@test -x "$(ANDROID_HOME)/platform-tools/adb" || (echo "adb not found at $(ANDROID_HOME)/platform-tools/adb"; exit 1)
+	@test -n "$(KOTLIN_ANDROID_SERIAL)" || (echo "Set KOTLIN_ANDROID_SERIAL to one booted Android device."; exit 1)
+	@set -eu; \
+		$(WARM_CONNECT_ENV) \
+		application_apk="$(CURDIR)/clients/kotlin/conformance-app/build/outputs/apk/debug/conformance-app-debug.apk"; \
+		instrumentation_apk="$(CURDIR)/clients/kotlin/conformance-app/build/outputs/apk/androidTest/debug/conformance-app-debug-androidTest.apk"; \
+		test -f "$$application_apk"; \
+		test -f "$$instrumentation_apk"; \
+		test -x "$(CURDIR)/$(SEED_BINARY)"; \
+		cd conformance; \
+		SYNCHRO_KOTLIN_ADB="$(ANDROID_HOME)/platform-tools/adb" \
+			SYNCHRO_KOTLIN_DEVICE_SERIAL="$(KOTLIN_ANDROID_SERIAL)" \
+			SYNCHRO_KOTLIN_APPLICATION_APK="$$application_apk" \
+			SYNCHRO_KOTLIN_INSTRUMENTATION_APK="$$instrumentation_apk" \
+			SYNCHRO_SEED_TOOL="$(CURDIR)/$(SEED_BINARY)" \
+			GOFLAGS= GOWORK=off go run ./cmd/testresult exact \
+			-test TestRealKotlinPerformance \
+			-expect target_pass \
+			-- go test -tags kotlinintegration -json ./kotlin -count=1 -timeout=50m \
+			-run '^TestRealKotlinPerformance$$' -args --provision --install
+
 test-kotlin-instrumentation: build-kotlin-conformance-app
 	@test -x "$(ANDROID_HOME)/platform-tools/adb" || (echo "adb not found at $(ANDROID_HOME)/platform-tools/adb"; exit 1)
 	@test -n "$(KOTLIN_ANDROID_SERIAL)" || (echo "Set KOTLIN_ANDROID_SERIAL to one booted Android device."; exit 1)
@@ -712,7 +735,7 @@ test-kotlin-instrumentation: build-kotlin-conformance-app
 	cd clients/kotlin && ANDROID_HOME="$(ANDROID_HOME)" ANDROID_SDK_ROOT="$(ANDROID_HOME)" JAVA_HOME="$(ANDROID_JAVA_HOME)" PATH="$(ANDROID_JAVA_HOME)/bin:$$PATH" ./gradlew $(GRADLE_TEST_ARGS) -Pandroid.injected.device.serial="$(KOTLIN_ANDROID_SERIAL)" -Pandroid.testInstrumentationRunnerArguments.notClass=com.trainstar.synchro.conformance.NativeSessionInstrumentationTest :conformance-app:connectedDebugAndroidTest
 	cd conformance && GOFLAGS= GOWORK=off go run ./cmd/testresult junit -path ../clients/kotlin/conformance-app/build/outputs/androidTest-results/connected
 
-test-kotlin: synchrod-pg-test-restart test-kotlin-warm-connect
+test-kotlin: synchrod-pg-test-restart test-kotlin-warm-connect test-kotlin-performance
 	@test -n "$(ANDROID_JAVA_HOME)" || (echo "Android builds require JDK 17. Set ANDROID_JAVA_HOME to a JDK 17 install."; exit 1)
 	@test -d "$(ANDROID_HOME)" || (echo "Android SDK not found at $(ANDROID_HOME). Set ANDROID_HOME to a valid SDK install."; exit 1)
 	rm -rf clients/kotlin/synchro/build/test-results

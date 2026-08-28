@@ -12,6 +12,7 @@ import com.trainstar.synchro.SchemaRef
 import com.trainstar.synchro.SynchroClient
 import com.trainstar.synchro.SynchroConfig
 import com.trainstar.synchro.SyncEvent
+import com.trainstar.synchro.inspection.TransportPauseBarrierException
 import com.trainstar.synchro.SyncFailure
 import com.trainstar.synchro.SyncStatus
 import com.trainstar.synchro.inspection.RebuildAttemptInspection
@@ -78,6 +79,8 @@ internal class NativeSession(private val context: Context) : Closeable {
             errorResponse("capture_query_failed")
         } catch (_: CaptureCardinalityException) {
             errorResponse("capture_row_cardinality")
+        } catch (error: TransportPauseBarrierException) {
+            errorResponse("transport_pause_${error.error.name.lowercase(Locale.US)}")
         } catch (_: SerializationException) {
             errorResponse("invalid_command")
         } catch (_: IllegalArgumentException) {
@@ -133,7 +136,7 @@ internal class NativeSession(private val context: Context) : Closeable {
         val databaseMode = command.requiredString("database_mode")
         when (databaseMode) {
             "create" -> context.deleteDatabase(databaseKey)
-            "reuse" -> require(!file.exists()) { "seed database target already exists" }
+            "reuse" -> context.deleteDatabase(databaseKey)
             "existing" -> require(file.isFile) { "existing database is unavailable" }
             else -> throw IllegalArgumentException("database mode is invalid")
         }

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net"
 	"os"
 	"reflect"
@@ -66,6 +67,21 @@ func TestADBArgumentConstructionIncludesInstrumentationSelector(t *testing.T) {
 	}
 	if got := adbArguments("serial", "forward", "tcp:0", "localabstract:name"); !reflect.DeepEqual(got, []string{"-s", "serial", "forward", "tcp:0", "localabstract:name"}) {
 		t.Fatalf("adb arguments = %#v", got)
+	}
+}
+
+func TestADBReverseListenerMissingRejectsOtherFailures(t *testing.T) {
+	if !adbReverseListenerMissing(&adbCommandError{output: "adb: error: listener 'tcp:8091' not found"}) {
+		t.Fatal("missing reverse listener was not accepted")
+	}
+	for _, err := range []error{
+		&adbCommandError{output: "adb: error: device not found"},
+		&adbCommandError{output: "adb: error: reverse failed"},
+		errors.New("context canceled"),
+	} {
+		if adbReverseListenerMissing(err) {
+			t.Fatalf("unexpected absent reverse listener match: %v", err)
+		}
 	}
 }
 

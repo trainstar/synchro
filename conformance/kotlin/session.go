@@ -27,7 +27,7 @@ const (
 	adbCommandTimeout   = 2 * time.Minute
 	connectTimeout      = 30 * time.Second
 	connectStability    = 250 * time.Millisecond
-	requestTimeout      = 90 * time.Second
+	requestTimeout      = 3 * time.Minute
 	cleanupTimeout      = 10 * time.Second
 	shutdownGracePeriod = time.Second
 )
@@ -206,13 +206,31 @@ func (s *Session) adb(ctx context.Context, arguments ...string) (string, error) 
 		if commandContext.Err() != nil {
 			return "", commandContext.Err()
 		}
-		return "", errors.New("Android adb command failed")
+		data, _ := output.snapshot()
+		return "", &adbCommandError{output: string(data)}
 	}
 	data, overflowed := output.snapshot()
 	if overflowed {
 		return "", errors.New("Android adb output exceeded its bound")
 	}
 	return string(data), nil
+}
+
+type adbCommandError struct {
+	output string
+}
+
+func (e *adbCommandError) Error() string {
+	return "Android adb command failed"
+}
+
+func adbReverseListenerMissing(err error) bool {
+	var failure *adbCommandError
+	if !errors.As(err, &failure) {
+		return false
+	}
+	output := strings.ToLower(failure.output)
+	return strings.Contains(output, "listener") && strings.Contains(output, "not found")
 }
 
 func (s *Session) createForward(ctx context.Context, socketName string) (int, error) {
@@ -539,7 +557,7 @@ func (s *Session) Close(ctx context.Context) error {
 		failures = append(failures, err)
 	}
 	if reversePort != 0 {
-		if _, err := s.adb(ctx, "reverse", "--remove", "tcp:"+strconv.Itoa(reversePort)); err != nil {
+		if _, err := s.adb(ctx, "reverse", "--remove", "tcp:"+strconv.Itoa(reversePort)); err != nil && !adbReverseListenerMissing(err) {
 			failures = append(failures, errors.New("remove Android adb reverse failed"))
 		}
 	}

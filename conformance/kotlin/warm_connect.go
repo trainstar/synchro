@@ -308,6 +308,9 @@ func (p *Platform) warmConnectSnapshot(ctx context.Context, client Client) (warm
 }
 
 func decodeWarmConnectSnapshot(result Result) (warmConnectSnapshot, error) {
+	if result.EventsOverflowed {
+		return warmConnectSnapshot{}, errors.New("Kotlin Android warm-connect event inspection overflowed")
+	}
 	var schema schemaRef
 	if err := decodeStrictFact(result.Schema, &schema); err != nil || schema.Version <= 0 || !validLowerHexDigest(schema.Hash) {
 		return warmConnectSnapshot{}, errors.New("Kotlin Android warm-connect schema inspection is invalid")

@@ -565,6 +565,9 @@ func (p *Platform) synchronizeWithResponseLoss(ctx context.Context, state *platf
 	if err != nil || inFlight.CallID != callID || inFlight.State != "in_flight" || inFlight.Completion != "" {
 		return SynchronizationResult{}, errors.New("Kotlin Android response-loss call did not enter flight")
 	}
+	if err := waitForTransportObservation(ctx, state, checkpoint, operationClass); err != nil {
+		return SynchronizationResult{}, err
+	}
 	lastState, err := state.session.Execute(ctx, Request{Operation: "await-transport-pause", TransportOperation: operationClass})
 	if err != nil {
 		return SynchronizationResult{}, fmt.Errorf("await Kotlin Android transport pause: %w", err)
@@ -573,7 +576,10 @@ func (p *Platform) synchronizeWithResponseLoss(ctx context.Context, state *platf
 	if err != nil {
 		return SynchronizationResult{}, err
 	}
-	mapped, err := mapTransportOperations(operations[:1], observations, before)
+	if len(observations) == 0 || observations[len(observations)-1].OperationClass != operationClass {
+		return SynchronizationResult{}, errors.New("Kotlin Android response-loss transport observation is not the covered request")
+	}
+	mapped, err := mapTransportOperations(operations[:1], observations[len(observations)-1:], before)
 	if err != nil {
 		return SynchronizationResult{}, err
 	}
@@ -588,6 +594,9 @@ func (p *Platform) synchronizeWithResponseLoss(ctx context.Context, state *platf
 		}
 		if _, err := state.session.Execute(ctx, Request{Operation: "resume-transport-pause"}); err != nil {
 			return SynchronizationResult{}, fmt.Errorf("resume Kotlin Android transport pause: %w", err)
+		}
+		if err := waitForTransportObservation(ctx, state, stepCheckpoint, operationClass); err != nil {
+			return SynchronizationResult{}, err
 		}
 		lastState, err = state.session.Execute(ctx, Request{Operation: "await-transport-pause", TransportOperation: operationClass})
 		if err != nil {
@@ -617,6 +626,9 @@ func (p *Platform) synchronizeWithResponseLoss(ctx context.Context, state *platf
 	last := observations[len(observations)-1]
 	if last.StatusCode < 200 || last.StatusCode >= 300 {
 		return SynchronizationResult{}, errors.New("Kotlin Android response loss requires a committed server response")
+	}
+	if method == "reset-schema-and-start" {
+		state.selectors = make(map[string]RowSelector)
 	}
 	lostStep := &mapped[len(mapped)-1]
 	if lostStep.Wire == nil {
@@ -648,6 +660,31 @@ func (p *Platform) synchronizeWithResponseLoss(ctx context.Context, state *platf
 		started:      started,
 	}
 	return synchronizationResult("blocked", mapped, window), nil
+}
+
+func waitForTransportObservation(ctx context.Context, state *platformClient, checkpoint uint64, operationClass string) error {
+	for {
+		if _, err := captureClientStateBatch(ctx, state, nil); err != nil {
+			if ctx.Err() != nil {
+				return fmt.Errorf("wait for Kotlin Android transport observation %q: %w", operationClass, ctx.Err())
+			}
+			return fmt.Errorf("poll Kotlin Android transport observation: %w", err)
+		}
+		observations, err := state.session.ObservationsAfter(checkpoint)
+		if err != nil {
+			return err
+		}
+		for _, observation := range observations {
+			if observation.OperationClass == operationClass {
+				return nil
+			}
+		}
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("wait for Kotlin Android transport observation %q: %w", operationClass, ctx.Err())
+		case <-time.After(100 * time.Millisecond):
+		}
+	}
 }
 
 // BeginCall starts one public call and pauses after its first upstream response.
@@ -694,6 +731,9 @@ func (p *Platform) BeginCall(ctx context.Context, request CallRequest) (ClientCa
 	inFlight, err := clientCallResult(begin)
 	if err != nil || inFlight.CallID != request.CallID || inFlight.State != "in_flight" || inFlight.Completion != "" {
 		return ClientCallResult{}, errors.New("Kotlin Android paused call did not enter flight")
+	}
+	if err := waitForTransportObservation(ctx, state, checkpoint, operationClass); err != nil {
+		return ClientCallResult{}, err
 	}
 	if _, err := state.session.Execute(ctx, Request{Operation: "await-transport-pause", TransportOperation: operationClass}); err != nil {
 		return ClientCallResult{}, fmt.Errorf("await Kotlin Android transport pause: %w", err)
@@ -760,6 +800,9 @@ func (p *Platform) AwaitStep(ctx context.Context, request AwaitRequest) (StepObs
 		return StepObservation{}, fmt.Errorf("resume Kotlin Android transport pause: %w", err)
 	}
 	active.paused = false
+	if err := waitForTransportObservation(ctx, state, checkpoint, operationClass); err != nil {
+		return StepObservation{}, err
+	}
 	if _, err := state.session.Execute(ctx, Request{Operation: "await-transport-pause", TransportOperation: operationClass}); err != nil {
 		return StepObservation{}, fmt.Errorf("await next Kotlin Android transport pause: %w", err)
 	}
@@ -1526,12 +1569,64 @@ func captureClientState(ctx context.Context, client *platformClient) (Result, er
 	if err != nil {
 		return Result{}, err
 	}
+	if len(selectors) <= maximumSelectors {
+		return captureClientStateBatch(ctx, client, selectors)
+	}
+	baseline, err := captureClientStateBatch(ctx, client, nil)
+	if err != nil {
+		return Result{}, err
+	}
+	if *baseline.ApplicationRowCount > maximumRows {
+		return baseline, nil
+	}
+	rows, err := androidApplicationRows(baseline.ApplicationRows)
+	if err != nil {
+		return Result{}, err
+	}
+	if len(rows) == *baseline.ApplicationRowCount {
+		return baseline, nil
+	}
+	baselineRows := append([]map[string]json.RawMessage(nil), rows...)
+	for start := 0; start < len(selectors); start += maximumSelectors {
+		end := min(start+maximumSelectors, len(selectors))
+		captured, err := captureClientStateBatch(ctx, client, selectors[start:end])
+		if err != nil {
+			return Result{}, err
+		}
+		if !equalAndroidCaptureState(baseline, captured) {
+			return Result{}, errors.New("Kotlin Android capture changed between selector batches")
+		}
+		extra, err := applicationRowsBeyondBaseline(baselineRows, captured.ApplicationRows)
+		if err != nil {
+			return Result{}, err
+		}
+		rows = append(rows, extra...)
+	}
+	if len(rows) != *baseline.ApplicationRowCount {
+		return Result{}, errors.New("Kotlin Android selector batches did not cover application rows")
+	}
+	encoded, err := json.Marshal(rows)
+	if err != nil {
+		return Result{}, errors.New("encode Kotlin Android captured application rows failed")
+	}
+	baseline.ApplicationRows = encoded
+	return baseline, nil
+}
+
+func captureClientStateBatch(ctx context.Context, client *platformClient, selectors []RowSelector) (Result, error) {
 	result, err := client.session.Execute(ctx, Request{Operation: "capture", RowSelectors: &selectors})
 	if err != nil {
 		return Result{}, err
 	}
+	if err := validateCapturedClientState(result); err != nil {
+		return Result{}, err
+	}
+	return result, nil
+}
+
+func validateCapturedClientState(result Result) error {
 	if result.Status == nil || *result.Status == "" || result.ApplicationRowCount == nil || result.MutationLedgerCount == nil || result.MutationOutcomeCount == nil || result.SealedBatchCount == nil || result.RejectedMutationCount == nil || result.ScopeStateCount == nil || result.ScopeRowCount == nil || result.ProvenanceCount == nil || result.RowMetadataCount == nil || result.RebuildAttemptCount == nil || result.RebuildReceiptCount == nil || result.ProvenanceMaintenanceWorkCursor == nil || *result.ProvenanceMaintenanceWorkCursor < 0 {
-		return Result{}, errors.New("Kotlin Android capture facts are incomplete")
+		return errors.New("Kotlin Android capture facts are incomplete")
 	}
 	if (*result.ApplicationRowCount <= maximumRows) != presentJSON(result.ApplicationRows) ||
 		(*result.MutationLedgerCount <= maximumRecords) != presentJSON(result.RetainedMutations) ||
@@ -1542,66 +1637,121 @@ func captureClientState(ctx context.Context, client *platformClient) (Result, er
 		(*result.RebuildAttemptCount <= maximumRecords) != presentJSON(result.RebuildAttempts) ||
 		(*result.RebuildReceiptCount <= maximumRecords) != presentJSON(result.RebuildReceipts) ||
 		(*result.RebuildReceiptCount <= maximumRecords) != presentJSON(result.RebuildReceiptProofs) {
-		return Result{}, errors.New("Kotlin Android capture detail bounds are inconsistent")
+		return errors.New("Kotlin Android capture detail bounds are inconsistent")
 	}
 	if *result.ScopeRowCount <= maximumRecords {
 		rows, err := androidScopeRows(result.ScopeRows)
 		if err != nil {
-			return Result{}, err
+			return err
 		}
 		if len(rows) != *result.ScopeRowCount {
-			return Result{}, errors.New("Kotlin Android scope-row count does not match detail")
+			return errors.New("Kotlin Android scope-row count does not match detail")
 		}
 	}
 	if *result.RejectedMutationCount <= maximumRecords {
 		values, err := androidOutcomeFacts(result.RejectedMutations)
 		if err != nil {
-			return Result{}, err
+			return err
 		}
 		if len(values) != *result.RejectedMutationCount {
-			return Result{}, errors.New("Kotlin Android rejected-mutation count does not match detail")
+			return errors.New("Kotlin Android rejected-mutation count does not match detail")
 		}
 	}
 	if *result.ScopeStateCount <= maximumRecords {
 		values, err := androidCheckpointFacts(result.ScopeStates)
 		if err != nil {
-			return Result{}, err
+			return err
 		}
 		if len(values) != *result.ScopeStateCount {
-			return Result{}, errors.New("Kotlin Android scope-state count does not match detail")
+			return errors.New("Kotlin Android scope-state count does not match detail")
 		}
 	}
 	if *result.RebuildAttemptCount <= maximumRecords {
 		values, err := androidRebuildAttempts(result.RebuildAttempts)
 		if err != nil {
-			return Result{}, err
+			return err
 		}
 		if len(values) != *result.RebuildAttemptCount {
-			return Result{}, errors.New("Kotlin Android rebuild-attempt count does not match detail")
+			return errors.New("Kotlin Android rebuild-attempt count does not match detail")
 		}
 	}
 	if *result.RebuildReceiptCount <= maximumRecords {
 		proofs, err := androidRebuildReceiptProofs(result.RebuildReceiptProofs)
 		if err != nil {
-			return Result{}, err
+			return err
 		}
 		pageCount := 0
 		seen := make(map[string]struct{}, len(proofs))
 		for _, proof := range proofs {
 			if proof.PageCount > *result.RebuildReceiptCount-pageCount {
-				return Result{}, errors.New("Kotlin Android rebuild receipt proof is invalid")
+				return errors.New("Kotlin Android rebuild receipt proof is invalid")
 			}
 			if _, duplicate := seen[proof.RebuildIDFingerprint]; duplicate {
-				return Result{}, errors.New("Kotlin Android rebuild receipt proof is duplicated")
+				return errors.New("Kotlin Android rebuild receipt proof is duplicated")
 			}
 			seen[proof.RebuildIDFingerprint] = struct{}{}
 			pageCount += proof.PageCount
 		}
 		if pageCount != *result.RebuildReceiptCount {
-			return Result{}, errors.New("Kotlin Android rebuild receipt count does not match proof detail")
+			return errors.New("Kotlin Android rebuild receipt count does not match proof detail")
 		}
 	}
-	return result, nil
+	return nil
+}
+
+func androidApplicationRows(raw json.RawMessage) ([]map[string]json.RawMessage, error) {
+	var rows []map[string]json.RawMessage
+	if err := decodeFactArray(raw, &rows, maximumRows); err != nil {
+		return nil, errors.New("Kotlin Android application-row inspection is invalid")
+	}
+	return rows, nil
+}
+
+func equalAndroidCaptureState(left, right Result) bool {
+	left.ApplicationRows = nil
+	right.ApplicationRows = nil
+	return reflect.DeepEqual(left, right)
+}
+
+func applicationRowsBeyondBaseline(baseline []map[string]json.RawMessage, raw json.RawMessage) ([]map[string]json.RawMessage, error) {
+	captured, err := androidApplicationRows(raw)
+	if err != nil {
+		return nil, err
+	}
+	remaining := make(map[string]int, len(baseline))
+	for _, row := range baseline {
+		key, err := applicationRowKey(row)
+		if err != nil {
+			return nil, err
+		}
+		remaining[key]++
+	}
+	extra := make([]map[string]json.RawMessage, 0, len(captured))
+	for _, row := range captured {
+		key, err := applicationRowKey(row)
+		if err != nil {
+			return nil, err
+		}
+		if remaining[key] > 0 {
+			remaining[key]--
+			continue
+		}
+		extra = append(extra, row)
+	}
+	for _, count := range remaining {
+		if count != 0 {
+			return nil, errors.New("Kotlin Android selector batch omitted a baseline application row")
+		}
+	}
+	return extra, nil
+}
+
+func applicationRowKey(row map[string]json.RawMessage) (string, error) {
+	encoded, err := json.Marshal(row)
+	if err != nil {
+		return "", errors.New("encode Kotlin Android application row identity failed")
+	}
+	return string(encoded), nil
 }
 
 func presentJSON(raw json.RawMessage) bool {

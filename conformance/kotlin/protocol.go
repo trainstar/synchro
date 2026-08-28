@@ -214,7 +214,7 @@ type CommandError struct {
 }
 
 func (e *CommandError) Error() string {
-	return "Kotlin instrumentation command failed"
+	return "Kotlin instrumentation command failed: " + e.Code
 }
 
 // Execute sends one strict newline-delimited request and validates its response.
@@ -569,7 +569,7 @@ func isJSONNull(data []byte) bool {
 
 func validCommandErrorCode(value string) bool {
 	switch value {
-	case "invalid_command", "execution_failed", "capture_query_failed", "capture_row_cardinality", "capture_inspection_failed":
+	case "invalid_command", "execution_failed", "capture_query_failed", "capture_row_cardinality", "capture_inspection_failed", "transport_pause_already_armed", "transport_pause_wrong_operation", "transport_pause_not_paused", "transport_pause_timed_out", "transport_pause_cancelled":
 		return true
 	default:
 		return false
@@ -590,7 +590,7 @@ func decodeResult(data []byte) (Result, error) {
 			return Result{}, errors.New("Kotlin instrumentation result is incomplete")
 		}
 	}
-	if result.Status != nil && *result.Status == "" || result.RowsAffected != nil && *result.RowsAffected < 0 || result.PendingChangeCount != nil && *result.PendingChangeCount < 0 || !validProcessID(result.ProcessID) || !validLowerHexDigest(result.DatabaseIdentityFingerprint) || result.EventsOverflowed {
+	if result.Status != nil && *result.Status == "" || result.RowsAffected != nil && *result.RowsAffected < 0 || result.PendingChangeCount != nil && *result.PendingChangeCount < 0 || !validProcessID(result.ProcessID) || !validLowerHexDigest(result.DatabaseIdentityFingerprint) {
 		return Result{}, errors.New("Kotlin instrumentation result is invalid")
 	}
 	for _, count := range []*int{result.ApplicationRowCount, result.MutationLedgerCount, result.MutationOutcomeCount, result.SealedBatchCount, result.RejectedMutationCount, result.ScopeStateCount, result.ScopeRowCount, result.ProvenanceCount, result.RowMetadataCount, result.RebuildAttemptCount, result.RebuildReceiptCount} {
