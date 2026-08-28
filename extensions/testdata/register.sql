@@ -247,12 +247,33 @@ SELECT synchro.synchro_register_table(
 );
 
 -- Parent chain (2 levels): line_items -> orders -> customers.user_id
-SELECT synchro.synchro_register_table(
-    'public.line_items',
-    'public.test_line_items_bootstrap_membership',
-    'single_scope',
-    'id', 'updated_at', 'deleted_at', 'enabled'
-);
+-- Bootstrap-phase registration. The dependency section replaces it with
+-- the final membership function. Skip it when a prior run already
+-- installed the final registration, so repeated preparation converges.
+DO $line_items_bootstrap$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1
+        FROM synchro.sync_registry registry
+        WHERE registry.registry_generation = (
+                  SELECT max(generation.generation)
+                  FROM synchro.sync_registry_generations generation
+                  WHERE generation.state IN ('active', 'pending')
+                    AND generation.validated
+              )
+          AND registry.physical_schema = 'public'
+          AND registry.physical_relation = 'line_items'
+          AND registry.membership_function_name = 'test_line_items_membership'
+    ) THEN
+        PERFORM synchro.synchro_register_table(
+            'public.line_items',
+            'public.test_line_items_bootstrap_membership',
+            'single_scope',
+            'id', 'updated_at', 'deleted_at', 'enabled'
+        );
+    END IF;
+END
+$line_items_bootstrap$;
 
 -- =========================================================================
 -- Collaboration tables: shared ownership, multi-bucket
@@ -278,12 +299,33 @@ SELECT synchro.synchro_register_table(
 
 -- Document comments: visible to the document owner AND the comment author.
 -- Multiple ownership paths (two different FK chains to user).
-SELECT synchro.synchro_register_table(
-    'public.document_comments',
-    'public.test_document_comments_bootstrap_membership',
-    'multi_scope',
-    'id', 'updated_at', 'deleted_at', 'enabled'
-);
+-- Bootstrap-phase registration. The dependency section replaces it with
+-- the final membership function. Skip it when a prior run already
+-- installed the final registration, so repeated preparation converges.
+DO $document_comments_bootstrap$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1
+        FROM synchro.sync_registry registry
+        WHERE registry.registry_generation = (
+                  SELECT max(generation.generation)
+                  FROM synchro.sync_registry_generations generation
+                  WHERE generation.state IN ('active', 'pending')
+                    AND generation.validated
+              )
+          AND registry.physical_schema = 'public'
+          AND registry.physical_relation = 'document_comments'
+          AND registry.membership_function_name = 'test_document_comments_membership'
+    ) THEN
+        PERFORM synchro.synchro_register_table(
+            'public.document_comments',
+            'public.test_document_comments_bootstrap_membership',
+            'multi_scope',
+            'id', 'updated_at', 'deleted_at', 'enabled'
+        );
+    END IF;
+END
+$document_comments_bootstrap$;
 
 -- =========================================================================
 -- Type zoo: user-owned for push/pull testing

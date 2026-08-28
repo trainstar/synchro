@@ -286,7 +286,15 @@ func runPrepare(ctx context.Context, args []string) error {
 			SELECT 1
 			FROM synchro.sync_registry_generations generation
 			WHERE generation.state = 'active'
-			  AND (SELECT count(*) FROM synchro.sync_registry registry WHERE registry.registry_generation = generation.generation) = 13
+			  AND (SELECT count(*)
+			       FROM synchro.sync_registry registry
+			       WHERE registry.registry_generation = generation.generation
+			         AND registry.physical_schema = 'public'
+			         AND registry.table_name = ANY(ARRAY[
+			             'regions', 'nations', 'suppliers', 'parts', 'part_suppliers',
+			             'categories', 'customers', 'orders', 'line_items', 'documents',
+			             'document_members', 'document_comments', 'type_zoo'
+			         ])) = 13
 			  AND EXISTS (SELECT 1 FROM synchro.sync_registry registry WHERE registry.registry_generation = generation.generation AND registry.table_name = 'line_items' AND registry.membership_function_name = 'test_line_items_membership')
 			  AND EXISTS (SELECT 1 FROM synchro.sync_registry registry WHERE registry.registry_generation = generation.generation AND registry.table_name = 'document_comments' AND registry.membership_function_name = 'test_document_comments_membership')
 		)`).Scan(&ready)
