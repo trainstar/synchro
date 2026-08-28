@@ -121,6 +121,7 @@ type nativeTransactionBinding struct {
 	RuntimeRegistry      int64
 	RuntimeEventOrdinals []uint64
 	Materialized         bool
+	ApplicationPush      bool
 }
 
 type nativeEventBinding struct {
@@ -387,6 +388,11 @@ func (c *NativeController) Install(ctx context.Context, operation scenarios.Oper
 	if err != nil {
 		return err
 	}
+	if nativeInstallRequiresPrivateScopeAssignments(payload) {
+		if err := c.harness.Operator().UnregisterDefaultSharedScope(ctx); err != nil {
+			return err
+		}
+	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.installation != nil {
@@ -394,6 +400,15 @@ func (c *NativeController) Install(ctx context.Context, operation scenarios.Oper
 	}
 	c.installation = binding
 	return nil
+}
+
+func nativeInstallRequiresPrivateScopeAssignments(payload nativeInstallPayload) bool {
+	for _, client := range payload.Clients {
+		if len(client.AssignedScopeIDs) != 0 {
+			return true
+		}
+	}
+	return false
 }
 
 func validateNativeInstallPayload(payload nativeInstallPayload) error {
@@ -502,14 +517,24 @@ func bindNativeInstallation(payload nativeInstallPayload, runtime nativeRuntimeM
 			result.rowScopes[key] = append([]string(nil), evaluation.Scopes...)
 		}
 	}
+	hasInitialAssignments := false
 	for _, client := range payload.Clients {
 		if !validNativeIdentity(client.UserID) || !validNativeIdentity(client.ClientID) {
 			return nil, errors.New("native controller authored client identity is invalid")
 		}
 		result.clients = append(result.clients, nativeInstalledClient{UserID: client.UserID, ClientID: client.ClientID})
 		for _, scope := range client.AssignedScopeIDs {
+			hasInitialAssignments = true
 			if err := bindNativeScope(result, scope, "user:"+client.UserID); err != nil {
 				return nil, err
+			}
+		}
+	}
+	deferredMembershipScopes := make(map[string]struct{})
+	if !hasInitialAssignments {
+		for _, scopes := range result.rowScopes {
+			for _, scope := range scopes {
+				deferredMembershipScopes[scope] = struct{}{}
 			}
 		}
 	}
@@ -518,6 +543,9 @@ func bindNativeInstallation(payload nativeInstallPayload, runtime nativeRuntimeM
 			return nil, errors.New("native controller authored scope identity is invalid")
 		}
 		if _, found := result.scopes[scope.ScopeID]; !found {
+			if _, deferred := deferredMembershipScopes[scope.ScopeID]; deferred {
+				continue
+			}
 			runtimeScope := "cf:global"
 			if _, used := result.runtimeScopes[runtimeScope]; used {
 				runtimeScope = "user:" + scope.ScopeID
@@ -564,6 +592,9 @@ func nativeRuntimeTableSupports(runtime nativeRuntimeManifestTable, authored nat
 	if runtime.ID == "" || runtime.Name == "" || runtime.RelationID == "" || runtime.PrimaryKeyFieldID == "" {
 		return false
 	}
+	if runtime.Name == "cf_schema_queue" {
+		return nativeSchemaQueueTableSupports(runtime, authored)
+	}
 	fields := make(map[string]nativeRuntimeManifestField, len(runtime.Fields))
 	for _, field := range runtime.Fields {
 		fields[field.Name] = field
@@ -578,6 +609,45 @@ func nativeRuntimeTableSupports(runtime nativeRuntimeManifestTable, authored nat
 		}
 	}
 	return true
+}
+
+func nativeSchemaQueueTableSupports(runtime nativeRuntimeManifestTable, authored nativeAuthoredTable) bool {
+	if len(authored.Fields) != 3 {
+		return false
+	}
+	runtimeFields := make(map[string]nativeRuntimeManifestField, len(runtime.Fields))
+	for _, field := range runtime.Fields {
+		runtimeFields[field.Name] = field
+	}
+	for _, field := range authored.Fields {
+		runtimeName := nativeSchemaQueueFieldName(field.Name)
+		runtimeField, found := runtimeFields[runtimeName]
+		if !found || runtimeField.ID == "" {
+			return false
+		}
+		if field.Name == "value" {
+			if field.Type != "string" || runtimeField.Type != "json" {
+				return false
+			}
+		} else if runtimeField.Type != field.Type {
+			return false
+		}
+		if field.PrimaryKey && runtimeField.ID != runtime.PrimaryKeyFieldID {
+			return false
+		}
+	}
+	return true
+}
+
+func nativeSchemaQueueFieldName(authored string) string {
+	switch authored {
+	case "value":
+		return "authored_mutation"
+	case "obsolete_value":
+		return "legacy_value"
+	default:
+		return authored
+	}
 }
 
 func bindNativeTable(authored nativeAuthoredTable, runtime nativeRuntimeManifestTable) (nativeTableBinding, error) {
@@ -601,12 +671,16 @@ func bindNativeTable(authored nativeAuthoredTable, runtime nativeRuntimeManifest
 		FieldNames:        make(map[string]string, len(authored.Fields)),
 	}
 	for _, field := range authored.Fields {
-		runtimeField, found := fieldsByName[field.Name]
+		runtimeName := field.Name
+		if runtime.Name == "cf_schema_queue" {
+			runtimeName = nativeSchemaQueueFieldName(field.Name)
+		}
+		runtimeField, found := fieldsByName[runtimeName]
 		if !found {
 			return nativeTableBinding{}, errors.New("native controller runtime field binding is absent")
 		}
 		binding.Fields[field.FieldID] = runtimeField.ID
-		binding.FieldNames[field.FieldID] = field.Name
+		binding.FieldNames[field.FieldID] = runtimeField.Name
 	}
 	if binding.Fields[authored.PrimaryKeyFieldID] != runtime.PrimaryKeyFieldID {
 		return nativeTableBinding{}, errors.New("native controller runtime primary-key binding is invalid")
@@ -675,12 +749,14 @@ func (c *NativeController) ApplyStep(ctx context.Context, operation scenarios.Op
 	case "model/commit-source-transaction":
 		return c.commitSourceTransaction(ctx, operation)
 	case "model/set-client-assignments":
-		observation, err := c.setClientAssignments(operation)
+		observation, usesDefaultSharedScope, err := c.setClientAssignments(operation)
 		if err != nil {
 			return NativeStepObservation{}, err
 		}
-		if err := c.harness.Operator().UnregisterDefaultSharedScope(ctx); err != nil {
-			return NativeStepObservation{}, err
+		if !usesDefaultSharedScope {
+			if err := c.harness.Operator().UnregisterDefaultSharedScope(ctx); err != nil {
+				return NativeStepObservation{}, err
+			}
 		}
 		return observation, nil
 	case "model/publish-schema":
@@ -709,7 +785,292 @@ func (c *NativeController) ApplyStep(ctx context.Context, operation scenarios.Op
 	}
 }
 
-func (c *NativeController) setClientAssignments(operation scenarios.Operation) (NativeStepObservation, error) {
+// ApplicationWrite maps one authored local write to the installed application schema.
+func (c *NativeController) ApplicationWrite(operation scenarios.Operation) (scenarios.Operation, error) {
+	if c == nil {
+		return scenarios.Operation{}, errors.New("native controller is unavailable")
+	}
+	if scenarios.OperationKey(operation) != "local/write" {
+		return scenarios.Operation{}, fmt.Errorf("native application operation %q is unsupported", scenarios.OperationKey(operation))
+	}
+	if err := scenarios.ValidateOperation(operation); err != nil {
+		return scenarios.Operation{}, fmt.Errorf("native application operation is invalid: %w", err)
+	}
+	var payload map[string]any
+	if err := jsonstrict.Decode(operation.Payload, &payload); err != nil {
+		return scenarios.Operation{}, errors.New("native application write payload is invalid")
+	}
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.closed {
+		return scenarios.Operation{}, errors.New("native controller is closed")
+	}
+	if c.installation == nil {
+		return scenarios.Operation{}, errors.New("native controller contract is not installed")
+	}
+	authoredTable, _ := payload["table_id"].(string)
+	table, found := c.installation.tables[authoredTable]
+	if !found || table.RuntimeName == "" {
+		return scenarios.Operation{}, errors.New("native application write table has no runtime binding")
+	}
+	primaryKey, ok := payload["pk"].(map[string]any)
+	if !ok || len(primaryKey) != 1 {
+		return scenarios.Operation{}, errors.New("native application write primary key is invalid")
+	}
+	primaryValue, found := primaryKey[table.AuthoredPrimary]
+	primaryName := table.FieldNames[table.AuthoredPrimary]
+	if !found || primaryName == "" {
+		return scenarios.Operation{}, errors.New("native application write primary key has no runtime binding")
+	}
+	canonicalPrimary, err := json.Marshal(primaryValue)
+	if err != nil {
+		return scenarios.Operation{}, errors.New("native application write primary key is invalid")
+	}
+	payload["table_id"] = table.RuntimeName
+	payload["pk"] = map[string]any{primaryName: nativeRuntimeUUID(table.AuthoredID, string(canonicalPrimary))}
+	if columns, found := payload["columns"]; found {
+		payload["columns"], err = nativeApplicationWriteColumns(columns, table)
+		if err != nil {
+			return scenarios.Operation{}, err
+		}
+		if payload["operation"] == "insert" && (table.RuntimeName == "cf_items" || table.RuntimeName == "cf_schema_queue") {
+			userID, _ := payload["authenticated_user_id"].(string)
+			clientVersion, _ := payload["client_version"].(string)
+			support := map[string]any{"owner_id": userID, "updated_at": clientVersion}
+			if table.RuntimeName == "cf_schema_queue" {
+				for authoredField, applicationField := range table.FieldNames {
+					if authoredField != table.AuthoredPrimary && applicationField != "authored_mutation" {
+						support[applicationField] = ""
+					}
+				}
+			}
+			payload["columns"], err = nativeApplicationInsertSupportColumns(payload["columns"], support)
+			if err != nil {
+				return scenarios.Operation{}, err
+			}
+		}
+	}
+
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		return scenarios.Operation{}, errors.New("encode native application write failed")
+	}
+	result := operation
+	result.Payload = encoded
+	if err := scenarios.ValidateOperation(result); err != nil {
+		return scenarios.Operation{}, fmt.Errorf("native application write is invalid: %w", err)
+	}
+	return result, nil
+}
+
+// BindApplicationPush binds one accepted application push to its authored WAL identity.
+func (c *NativeController) BindApplicationPush(operation scenarios.Operation) error {
+	if c == nil {
+		return errors.New("native controller is unavailable")
+	}
+	if scenarios.OperationKey(operation) != "push/submit" {
+		return fmt.Errorf("native application push operation %q is unsupported", scenarios.OperationKey(operation))
+	}
+	if err := scenarios.ValidateOperation(operation); err != nil {
+		return fmt.Errorf("native application push operation is invalid: %w", err)
+	}
+	var payload struct {
+		AuthenticatedUserID string `json:"authenticated_user_id"`
+		Request             struct {
+			ClientID         string                `json:"client_id"`
+			ClientGeneration int64                 `json:"client_generation"`
+			BatchID          string                `json:"batch_id"`
+			Schema           nativeSchemaReference `json:"schema"`
+			Mutations        []struct {
+				MutationID     string                     `json:"mutation_id"`
+				Table          string                     `json:"table"`
+				PK             map[string]json.RawMessage `json:"pk"`
+				AuthoredSchema nativeSchemaReference      `json:"authored_schema"`
+				Op             string                     `json:"op"`
+				ClientVersion  string                     `json:"client_version"`
+				Columns        map[string]json.RawMessage `json:"columns"`
+			} `json:"mutations"`
+		} `json:"request"`
+		Delivery  string `json:"delivery"`
+		CommitLSN string `json:"commit_lsn"`
+		EndLSN    string `json:"end_lsn"`
+	}
+	if err := jsonstrict.Decode(operation.Payload, &payload); err != nil {
+		return errors.New("decode native application push failed")
+	}
+	if !validNativeIdentity(payload.AuthenticatedUserID) || payload.Delivery != "apply" || payload.CommitLSN == "" || payload.EndLSN == "" || compareNativeLSN(payload.CommitLSN, payload.EndLSN) >= 0 || len(payload.Request.Mutations) == 0 {
+		return errors.New("native application push transaction identity is invalid")
+	}
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.closed || c.installation == nil {
+		return errors.New("native controller contract is unavailable")
+	}
+	transaction := &nativeTransactionBinding{
+		AuthoredStream:    c.installation.authoredStream,
+		AuthoredCommitLSN: payload.CommitLSN,
+		AuthoredEndLSN:    payload.EndLSN,
+		ApplicationPush:   true,
+	}
+	seenRecords := make(map[string]struct{}, len(payload.Request.Mutations))
+	for ordinal, mutation := range payload.Request.Mutations {
+		table, found := c.installation.tables[mutation.Table]
+		if !found || mutation.Op != "insert" || len(mutation.PK) != 1 {
+			return errors.New("native application push mutation is unsupported")
+		}
+		canonical, found := mutation.PK[table.AuthoredPrimary]
+		if !found || !json.Valid(canonical) {
+			return errors.New("native application push primary key is invalid")
+		}
+		recordID, err := nativeAuthoredRecordID(string(canonical))
+		if err != nil {
+			return err
+		}
+		runtimeRecordID := nativeRuntimeUUID(table.AuthoredID, string(canonical))
+		recordKey := nativeRecordKey(table.AuthoredID, string(canonical))
+		if _, duplicate := seenRecords[recordKey]; duplicate {
+			return errors.New("native application push targets one row more than once")
+		}
+		seenRecords[recordKey] = struct{}{}
+		fields := make(map[string]json.RawMessage, len(mutation.Columns)+1)
+		fields[table.AuthoredPrimary] = append(json.RawMessage(nil), canonical...)
+		for authoredField, value := range mutation.Columns {
+			if authoredField == table.AuthoredPrimary || table.Fields[authoredField] == "" || !json.Valid(value) {
+				return errors.New("native application push column has no runtime binding")
+			}
+			fields[authoredField] = append(json.RawMessage(nil), value...)
+		}
+		transaction.Events = append(transaction.Events, nativeEventBinding{
+			AuthoredOrdinal: uint64(ordinal),
+			Operation:       mutation.Op,
+			Relation:        table.AuthoredRelation,
+			Table:           table,
+			RecordID:        recordID,
+			RuntimeRecordID: runtimeRecordID,
+			After: &nativeAuthoredImage{
+				TableID:           table.AuthoredID,
+				PrimaryFieldID:    table.AuthoredPrimary,
+				CanonicalWireJSON: string(canonical),
+				Fields:            fields,
+			},
+			AuthoredScopes: nativeScopesForRecord(c.installation, table.AuthoredRelation, table.AuthoredID, string(canonical)),
+		})
+	}
+	key := nativeTransactionKey(transaction.AuthoredStream, transaction.AuthoredCommitLSN)
+	if _, duplicate := c.transactions[key]; duplicate {
+		return errors.New("native application push transaction identity is duplicated")
+	}
+	c.transactions[key] = transaction
+	return nil
+}
+
+func nativeApplicationWriteColumns(value any, table nativeTableBinding) (any, error) {
+	switch columns := value.(type) {
+	case map[string]any:
+		result := make(map[string]any, len(columns))
+		for authoredField, fieldValue := range columns {
+			applicationField := table.FieldNames[authoredField]
+			if applicationField == "" || authoredField == table.AuthoredPrimary {
+				return nil, errors.New("native application write column has no writable runtime binding")
+			}
+			runtimeValue, err := nativeRuntimeFieldValue(table, authoredField, fieldValue)
+			if err != nil {
+				return nil, err
+			}
+			result[applicationField] = runtimeValue
+		}
+		return result, nil
+	case []any:
+		result := make([]any, 0, len(columns))
+		for _, value := range columns {
+			column, ok := value.(map[string]any)
+			if !ok || len(column) != 2 {
+				return nil, errors.New("native application write column is invalid")
+			}
+			authoredField, hasField := column["field_id"].(string)
+			fieldValue, hasValue := column["value"]
+			applicationField := table.FieldNames[authoredField]
+			if !hasField || !hasValue || applicationField == "" || authoredField == table.AuthoredPrimary {
+				return nil, errors.New("native application write column has no writable runtime binding")
+			}
+			runtimeValue, err := nativeRuntimeFieldValue(table, authoredField, fieldValue)
+			if err != nil {
+				return nil, err
+			}
+			result = append(result, map[string]any{"field_id": applicationField, "value": runtimeValue})
+		}
+		return result, nil
+	default:
+		return nil, errors.New("native application write columns are invalid")
+	}
+}
+
+func nativeRuntimeFieldValue(table nativeTableBinding, authoredField string, value any) (any, error) {
+	if table.RuntimeName != "cf_schema_queue" || authoredField != "value" {
+		return value, nil
+	}
+	text, ok := value.(string)
+	if !ok {
+		return nil, errors.New("native schema-queue value is invalid")
+	}
+	encoded, err := json.Marshal(text)
+	if err != nil {
+		return nil, errors.New("encode native schema-queue value failed")
+	}
+	return string(encoded), nil
+}
+
+func nativeApplicationInsertSupportColumns(value any, support map[string]any) (any, error) {
+	userID, _ := support["owner_id"].(string)
+	clientVersion, _ := support["updated_at"].(string)
+	if !validNativeIdentity(userID) || clientVersion == "" || len(support) < 2 {
+		return nil, errors.New("native application insert support fields are invalid")
+	}
+	names := make([]string, 0, len(support))
+	for name := range support {
+		if name == "" {
+			return nil, errors.New("native application insert support field is invalid")
+		}
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	switch columns := value.(type) {
+	case map[string]any:
+		for _, name := range names {
+			if _, exists := columns[name]; exists {
+				continue
+			}
+			columns[name] = support[name]
+		}
+		return columns, nil
+	case []any:
+		existing := make(map[string]struct{}, len(columns))
+		for _, value := range columns {
+			column, ok := value.(map[string]any)
+			if !ok {
+				return nil, errors.New("native application insert column is invalid")
+			}
+			fieldID, ok := column["field_id"].(string)
+			if !ok || fieldID == "" {
+				return nil, errors.New("native application insert column is invalid")
+			}
+			existing[fieldID] = struct{}{}
+		}
+		for _, name := range names {
+			if _, exists := existing[name]; exists {
+				continue
+			}
+			columns = append(columns, map[string]any{"field_id": name, "value": support[name]})
+		}
+		return columns, nil
+	default:
+		return nil, errors.New("native application insert columns are invalid")
+	}
+}
+
+func (c *NativeController) setClientAssignments(operation scenarios.Operation) (NativeStepObservation, bool, error) {
 	var payload struct {
 		UserID      string `json:"user_id"`
 		ClientID    string `json:"client_id"`
@@ -718,16 +1079,31 @@ func (c *NativeController) setClientAssignments(operation scenarios.Operation) (
 		} `json:"assignments"`
 	}
 	if err := jsonstrict.Decode(operation.Payload, &payload); err != nil || !validNativeIdentity(payload.UserID) || !validNativeIdentity(payload.ClientID) {
-		return NativeStepObservation{}, errors.New("native controller client assignment payload is invalid")
+		return NativeStepObservation{}, false, errors.New("native controller client assignment payload is invalid")
+	}
+	if len(payload.Assignments) == 0 {
+		return NativeStepObservation{}, false, errors.New("native controller client assignment is empty")
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.installation == nil {
-		return NativeStepObservation{}, errors.New("native controller contract is not installed")
+		return NativeStepObservation{}, false, errors.New("native controller contract is not installed")
 	}
+	usesDefaultSharedScope := false
 	for _, assignment := range payload.Assignments {
+		if existing, found := c.installation.scopes[assignment.ScopeID]; found {
+			switch existing {
+			case "cf:global":
+				usesDefaultSharedScope = true
+				continue
+			case "user:" + payload.UserID:
+				continue
+			default:
+				return NativeStepObservation{}, false, errors.New("native controller client assignment conflicts with its runtime scope")
+			}
+		}
 		if err := bindNativeScope(c.installation, assignment.ScopeID, "user:"+payload.UserID); err != nil {
-			return NativeStepObservation{}, err
+			return NativeStepObservation{}, false, err
 		}
 	}
 	installed := false
@@ -740,7 +1116,7 @@ func (c *NativeController) setClientAssignments(operation scenarios.Operation) (
 	if !installed {
 		c.installation.clients = append(c.installation.clients, nativeInstalledClient{UserID: payload.UserID, ClientID: payload.ClientID})
 	}
-	return nativeSuccess(), nil
+	return nativeSuccess(), usesDefaultSharedScope, nil
 }
 
 func (c *NativeController) publishSchema(ctx context.Context, operation scenarios.Operation) (NativeStepObservation, error) {
@@ -748,12 +1124,47 @@ func (c *NativeController) publishSchema(ctx context.Context, operation scenario
 	if err := jsonstrict.Decode(operation.Payload, &payload); err != nil || !validNativeSchemaReference(payload.Schema, false) {
 		return NativeStepObservation{}, errors.New("native controller publish-schema payload is invalid")
 	}
-	if err := c.harness.Operator().TransitionSchemaQueue(ctx); err != nil {
-		return NativeStepObservation{}, fmt.Errorf("apply native runtime schema transition: %w", err)
+	c.mu.Lock()
+	installation := c.installation
+	queueTransition := false
+	if installation != nil && len(installation.tables) == 1 {
+		for _, table := range installation.tables {
+			queueTransition = table.RuntimeName == "cf_schema_queue"
+		}
+	}
+	c.mu.Unlock()
+	var transitionErr error
+	if queueTransition {
+		transitionErr = c.transitionNativeSchemaQueue(ctx, payload)
+	} else {
+		transitionErr = c.harness.Operator().TransitionSchemaQueue(ctx)
+	}
+	if transitionErr != nil {
+		return NativeStepObservation{}, fmt.Errorf("apply native runtime schema transition: %w", transitionErr)
 	}
 	runtime, runtimeRegistry, err := c.waitForRuntimeSchemaChange(ctx)
 	if err != nil {
 		return NativeStepObservation{}, err
+	}
+	var queueBinding nativeTableBinding
+	if queueTransition {
+		if len(payload.Tables) != 1 {
+			return NativeStepObservation{}, errors.New("native schema-queue authored table is invalid")
+		}
+		var runtimeTable *nativeRuntimeManifestTable
+		for index := range runtime.Manifest.Tables {
+			if runtime.Manifest.Tables[index].Name == "cf_schema_queue" {
+				runtimeTable = &runtime.Manifest.Tables[index]
+				break
+			}
+		}
+		if runtimeTable == nil {
+			return NativeStepObservation{}, errors.New("native schema-queue runtime table is absent")
+		}
+		queueBinding, err = bindNativeTable(payload.Tables[0], *runtimeTable)
+		if err != nil {
+			return NativeStepObservation{}, err
+		}
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -770,7 +1181,51 @@ func (c *NativeController) publishSchema(ctx context.Context, operation scenario
 	c.installation.currentAuthoredSchema = payload.Schema
 	c.installation.currentRuntimeSchema = runtimeRef
 	c.installation.runtimeRegistryGeneration = runtimeRegistry
+	if queueTransition {
+		c.installation.tables[payload.Tables[0].TableID] = queueBinding
+	}
 	return nativeSuccess(), nil
+}
+
+func (c *NativeController) transitionNativeSchemaQueue(ctx context.Context, payload nativePublishedSchema) error {
+	if len(payload.Tables) != 1 {
+		return errors.New("native schema-queue transition table is invalid")
+	}
+	c.mu.Lock()
+	var current nativeTableBinding
+	for _, table := range c.installation.tables {
+		current = table
+	}
+	c.mu.Unlock()
+	if current.RuntimeName != "cf_schema_queue" {
+		return errors.New("native schema-queue transition binding is absent")
+	}
+	nextFields := make(map[string]nativeAuthoredField, len(payload.Tables[0].Fields))
+	for _, field := range payload.Tables[0].Fields {
+		nextFields[field.FieldID] = field
+	}
+	var removedPhysical, addedPhysical string
+	for authoredField, physicalField := range current.FieldNames {
+		if _, retained := nextFields[authoredField]; !retained {
+			if removedPhysical != "" {
+				return errors.New("native schema-queue transition removes more than one field")
+			}
+			removedPhysical = physicalField
+		}
+	}
+	for _, field := range payload.Tables[0].Fields {
+		if _, retained := current.Fields[field.FieldID]; retained {
+			continue
+		}
+		if addedPhysical != "" {
+			return errors.New("native schema-queue transition adds more than one field")
+		}
+		addedPhysical = nativeSchemaQueueFieldName(field.Name)
+	}
+	if !validSchemaTransitionColumn(removedPhysical) || !validSchemaTransitionColumn(addedPhysical) || removedPhysical == addedPhysical {
+		return errors.New("native schema-queue transition fields are invalid")
+	}
+	return c.harness.Operator().TransitionSchemaQueueField(ctx, removedPhysical, addedPhysical)
 }
 
 func (c *NativeController) waitForRuntimeSchemaChange(ctx context.Context) (nativeRuntimeManifest, int64, error) {
@@ -1325,7 +1780,11 @@ func (c *NativeController) rewriteNativePush(request map[string]any) error {
 				if !known || authoredField == table.AuthoredPrimary {
 					return errors.New("native push column has no writable runtime binding")
 				}
-				rewritten[runtimeField] = value
+				runtimeValue, err := nativeRuntimeFieldValue(table, authoredField, value)
+				if err != nil {
+					return err
+				}
+				rewritten[runtimeField] = runtimeValue
 			}
 			mutation["columns"] = rewritten
 		}
@@ -1516,7 +1975,7 @@ func (c *NativeController) materializeSourceTransaction(ctx context.Context, ope
 	deadline, cancel := context.WithTimeout(ctx, c.waitTimeout)
 	defer cancel()
 	for {
-		if err := c.resolveRuntimeTransaction(deadline, transaction); err == nil {
+		if err := c.resolveRuntimeTransaction(deadline, transaction); err == nil && (!transaction.ApplicationPush || c.resolveApplicationPushRecords(deadline, transaction) == nil) {
 			break
 		}
 		if err := waitNativePoll(deadline); err != nil {
@@ -1528,8 +1987,51 @@ func (c *NativeController) materializeSourceTransaction(ctx context.Context, ope
 	}
 	c.mu.Lock()
 	transaction.Materialized = true
+	if transaction.ApplicationPush {
+		for _, event := range transaction.Events {
+			recordKey := nativeRecordKey(event.Table.AuthoredID, event.After.CanonicalWireJSON)
+			c.records[recordKey] = &nativeRecordBinding{
+				Table:           event.Table,
+				RecordID:        event.RecordID,
+				RuntimeRecordID: event.RuntimeRecordID,
+				Image:           *event.After,
+				AuthoredScopes:  append([]string(nil), event.AuthoredScopes...),
+			}
+		}
+	}
 	c.mu.Unlock()
 	return nativeSuccess(), nil
+}
+
+func (c *NativeController) resolveApplicationPushRecords(ctx context.Context, transaction *nativeTransactionBinding) error {
+	database, err := c.harness.openDatabase(ctx, c.harness.names.Database, c.harness.env.Admin, false)
+	if err != nil {
+		return err
+	}
+	defer database.Close()
+	for index := range transaction.Events {
+		event := &transaction.Events[index]
+		var rowData []byte
+		var version, checksum string
+		var deleted bool
+		err := database.QueryRowContext(ctx, `
+			SELECT captured.row_data, captured.row_version::text, encode(captured.checksum, 'hex'), captured.deleted
+			FROM synchro.sync_captured_rows captured
+			JOIN synchro.sync_registry registry
+			  ON registry.registry_generation = captured.registry_generation
+			 AND registry.relation_id = captured.relation_id
+			WHERE registry.table_name = $1 AND captured.record_id = $2`, event.Table.RuntimeName, event.RuntimeRecordID).Scan(&rowData, &version, &checksum, &deleted)
+		if err != nil || deleted || !diagnosticUUIDPattern.MatchString(version) || len(checksum) != 64 {
+			return errors.New("native application push row is not materialized")
+		}
+		record := &nativeRecordBinding{Table: event.Table, RuntimeRecordID: event.RuntimeRecordID, Image: *event.After}
+		if err := validateNativeRuntimeRow(record, rowData); err != nil {
+			return err
+		}
+		event.After.Version = version
+		event.After.Checksum = checksum
+	}
+	return nil
 }
 
 func nativeProcessTransactionIdentity(raw json.RawMessage) (string, string, error) {

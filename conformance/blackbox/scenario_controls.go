@@ -42,6 +42,19 @@ type SchemaIncompatibleMutationObservation struct {
 // TransitionSchemaQueue removes the fixed field and stages its replacement
 // registry generation in one source transaction.
 func (executor *OperatorExecutor) TransitionSchemaQueue(ctx context.Context) error {
+	return executor.transitionSchemaQueue(ctx, "legacy_value", "")
+}
+
+// TransitionSchemaQueueField replaces one diagnostic queue field and stages
+// its replacement registry generation in one source transaction.
+func (executor *OperatorExecutor) TransitionSchemaQueueField(ctx context.Context, removed, added string) error {
+	if !validSchemaTransitionColumn(removed) || !validSchemaTransitionColumn(added) || removed == added {
+		return errors.New("schema transition fields are invalid")
+	}
+	return executor.transitionSchemaQueue(ctx, removed, added)
+}
+
+func (executor *OperatorExecutor) transitionSchemaQueue(ctx context.Context, removed, added string) error {
 	if executor == nil || executor.harness == nil || !executor.harness.sourceReady || ctx == nil {
 		return errors.New("operator executor is unavailable")
 	}
@@ -54,9 +67,15 @@ func (executor *OperatorExecutor) TransitionSchemaQueue(ctx context.Context) err
 	if err != nil {
 		return errors.New("begin schema transition failed")
 	}
-	if _, err := transaction.ExecContext(ctx, "ALTER TABLE public.cf_schema_queue DROP COLUMN legacy_value"); err != nil {
+	if _, err := transaction.ExecContext(ctx, "ALTER TABLE public.cf_schema_queue DROP COLUMN "+removed); err != nil {
 		_ = transaction.Rollback()
 		return errors.New("drop schema transition field failed")
+	}
+	if added != "" {
+		if _, err := transaction.ExecContext(ctx, "ALTER TABLE public.cf_schema_queue ADD COLUMN "+added+" TEXT NOT NULL DEFAULT ''"); err != nil {
+			_ = transaction.Rollback()
+			return errors.New("add schema transition field failed")
+		}
 	}
 	if _, err := transaction.ExecContext(ctx, `SELECT synchro.synchro_register_table(
 		'public.cf_schema_queue', 'public.cf_schema_queue_membership', 'single_scope',
@@ -69,6 +88,18 @@ func (executor *OperatorExecutor) TransitionSchemaQueue(ctx context.Context) err
 		return errors.New("commit schema transition failed")
 	}
 	return nil
+}
+
+func validSchemaTransitionColumn(value string) bool {
+	if value == "" || len(value) > 63 || value[0] < 'a' || value[0] > 'z' {
+		return false
+	}
+	for _, character := range value[1:] {
+		if character != '_' && (character < 'a' || character > 'z') && (character < '0' || character > '9') {
+			return false
+		}
+	}
+	return true
 }
 
 // ObserveRegistryActivation verifies transaction-scoped registry selection for

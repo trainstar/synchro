@@ -117,7 +117,7 @@ func RunWarmConnectScenario(ctx context.Context, scenario scenarios.Scenario, co
 		return WarmConnectResult{}, err
 	}
 
-	snapshot, err := platform.warmConnectSnapshot(ctx, client)
+	snapshot, err := platform.captureSnapshot(ctx, client)
 	if err != nil {
 		return WarmConnectResult{}, err
 	}
@@ -273,19 +273,6 @@ func validateWarmConnectCall(scenario scenarios.Scenario, result Synchronization
 	return nil
 }
 
-func (p *Platform) warmConnectSnapshot(ctx context.Context, client Client) (runnerResult, error) {
-	state, err := p.client(client)
-	if err != nil {
-		return runnerResult{}, err
-	}
-	state.mu.Lock()
-	defer state.mu.Unlock()
-	if state.terminated || state.session == nil {
-		return runnerResult{}, errors.New("Swift warm-connect client is unavailable for inspection")
-	}
-	return captureRunner(ctx, state)
-}
-
 func resolveWarmConnectIdentities(controller *blackbox.NativeController, aliases []scenarios.NativeIdentityAlias, bootstrap, warm SynchronizationResult, snapshot runnerResult) ([]blackbox.NativeIdentityResolution, error) {
 	if len(snapshot.ScopeStates) != 1 || len(snapshot.ScopeRows) != 1 || len(snapshot.RowMetadataRecords) != 1 || len(snapshot.RebuildAttempts) != 0 || len(snapshot.RebuildReceipts) != 1 || snapshot.Schema == nil || len(bootstrap.transportObservations) != 3 || bootstrap.transportObservations[1].RequestFacts == nil || bootstrap.transportObservations[1].RequestFacts.ClientGeneration == nil || len(warm.transportObservations) != 2 || warm.transportObservations[0].RequestFacts == nil {
 		return nil, errors.New("Swift warm-connect identity state is incomplete")
@@ -316,22 +303,9 @@ func resolveWarmConnectIdentities(controller *blackbox.NativeController, aliases
 	for _, value := range controllerValues {
 		runtime[value.Alias] = append(json.RawMessage(nil), value.RuntimeValue...)
 	}
-	var rebuildID string
-	rebuildMatches := 0
-	for _, event := range snapshot.Events {
-		if event.Type != "rebuild_completed" {
-			continue
-		}
-		if event.ScopeID == nil || event.RebuildID == nil || *event.ScopeID == "" || *event.RebuildID == "" {
-			return nil, errors.New("Swift warm-connect completed rebuild event is invalid")
-		}
-		if *event.ScopeID == scope.ScopeID {
-			rebuildMatches++
-			rebuildID = *event.RebuildID
-		}
-	}
-	if rebuildMatches != 1 {
-		return nil, errors.New("Swift warm-connect completed rebuild identity is ambiguous")
+	rebuildID, err := completedSwiftRebuildID(snapshot.Events, scope.ScopeID)
+	if err != nil {
+		return nil, err
 	}
 	generated := map[string]any{
 		"row-a-checksum":        *rowChecksum,
@@ -363,19 +337,7 @@ func resolveWarmConnectIdentities(controller *blackbox.NativeController, aliases
 		}
 	}
 
-	observations := make([]blackbox.NativeIdentityObservation, 0)
-	for _, alias := range aliases {
-		value := runtime[alias.Alias]
-		for _, id := range alias.StepIDs {
-			stepID := id
-			observations = append(observations, blackbox.NativeIdentityObservation{Kind: alias.Kind, Alias: alias.Alias, StepID: &stepID, RuntimeValue: append(json.RawMessage(nil), value...)})
-		}
-		for _, id := range alias.ExpectationIDs {
-			expectationID := id
-			observations = append(observations, blackbox.NativeIdentityObservation{Kind: alias.Kind, Alias: alias.Alias, ExpectationID: &expectationID, RuntimeValue: append(json.RawMessage(nil), value...)})
-		}
-	}
-	return blackbox.ResolveNativeIdentityAliases(aliases, observations)
+	return resolveSwiftNativeIdentities(aliases, runtime)
 }
 
 func validateWarmConnectTransportIdentities(runtime map[string]json.RawMessage, bootstrap, warm []transportObservation, snapshot runnerResult) error {
@@ -442,7 +404,7 @@ func validateWarmConnectTransportIdentities(runtime map[string]json.RawMessage, 
 		return errors.New("Swift warm-connect durable cursor is not bound to the warm pull response")
 	}
 	receipt := snapshot.RebuildReceipts[0]
-	if receipt.RebuildIDFingerprint != rebuildFingerprint || receipt.PageCount <= 0 || receipt.ReturnedRecordCount != 0 || !reflect.DeepEqual(receipt.RequestChainExpected, receipt.RequestChainObserved) || !sortedUniqueStrings(receipt.RecordIdentitiesHex) || !reflect.DeepEqual(receipt.ReceivedRowChecksums, receipt.ComputedRowChecksums) || receipt.ComputedScopeChecksum == nil || receipt.FinalScopeChecksum == nil || *receipt.ComputedScopeChecksum != *receipt.FinalScopeChecksum {
+	if !validateCompletedEmptyRebuildReceipt(receipt, rebuildID, 1) {
 		return errors.New("Swift warm-connect completed rebuild evidence is invalid")
 	}
 	return nil

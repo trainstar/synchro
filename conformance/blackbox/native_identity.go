@@ -240,6 +240,13 @@ func (c *NativeController) IdentityValues(aliases []scenarios.NativeIdentityAlia
 					applicationIdentifier = table.FieldNames[authored]
 				}
 			}
+			for _, record := range c.records {
+				if record.RecordID == authored {
+					matches++
+					runtime = record.RuntimeRecordID
+					applicationIdentifier = record.Table.FieldNames[record.Table.AuthoredPrimary]
+				}
+			}
 			if matches != 1 || runtime == "" || applicationIdentifier == "" {
 				return nil, fmt.Errorf("%w: primary-key alias %q has no unique runtime binding", ErrNativeIdentityEvidence, alias.Alias)
 			}

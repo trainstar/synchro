@@ -2,6 +2,7 @@ package swift
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 
@@ -48,6 +49,10 @@ func RunPendingCycleScenario(ctx context.Context, scenario scenarios.Scenario, c
 	if err != nil {
 		return PendingCycleResult{}, err
 	}
+	write, err = controller.ApplicationWrite(write)
+	if err != nil {
+		return PendingCycleResult{}, fmt.Errorf("bind Swift pending mutation to the application schema: %w", err)
+	}
 	local, err := platform.ApplyStep(ctx, client, write)
 	if err != nil || local.Disposition != "success" {
 		return PendingCycleResult{}, fmt.Errorf("apply Swift pending mutation: %w", resultError(err, local.Disposition))
@@ -67,6 +72,13 @@ func RunPendingCycleScenario(ctx context.Context, scenario scenarios.Scenario, c
 	if err := validateSwiftWireExpectation(scenario, "STEP-PERF-PENDING-CYCLE-002", "push", push); err != nil {
 		return PendingCycleResult{}, err
 	}
+	authoredPush, err := swiftScenarioOperation(steps, "STEP-PERF-PENDING-CYCLE-002", "push/submit")
+	if err != nil {
+		return PendingCycleResult{}, err
+	}
+	if err := controller.BindApplicationPush(authoredPush); err != nil {
+		return PendingCycleResult{}, fmt.Errorf("bind Swift pending push transaction: %w", err)
+	}
 
 	materialize, err := swiftScenarioOperation(steps, "STEP-PERF-PENDING-CYCLE-MATERIALIZE-001", "process/materialize-source-transaction")
 	if err != nil {
@@ -79,7 +91,34 @@ func RunPendingCycleScenario(ctx context.Context, scenario scenarios.Scenario, c
 	if err != nil {
 		return PendingCycleResult{}, err
 	}
-	pullCall, err := platform.Synchronize(ctx, client, "sync-now", RequestOperations{pull})
+	snapshot, err := platform.captureSnapshot(ctx, client)
+	if err != nil {
+		return PendingCycleResult{}, fmt.Errorf("capture Swift pending pull checkpoint: %w", err)
+	}
+	if len(snapshot.ScopeStates) != 1 || snapshot.ScopeStates[0].Cursor == nil || *snapshot.ScopeStates[0].Cursor == "" {
+		return PendingCycleResult{}, errors.New("Swift pending pull checkpoint is invalid")
+	}
+	var runtimePullPayload map[string]any
+	if err := json.Unmarshal(pull.Payload, &runtimePullPayload); err != nil {
+		return PendingCycleResult{}, errors.New("decode Swift pending pull runtime binding failed")
+	}
+	rawScopes, ok := runtimePullPayload["scopes"].([]any)
+	if !ok || len(rawScopes) != 1 {
+		return PendingCycleResult{}, errors.New("Swift pending pull scope binding is invalid")
+	}
+	for _, rawScope := range rawScopes {
+		scope, ok := rawScope.(map[string]any)
+		if !ok || scope["cursor_source"] != "none" {
+			return PendingCycleResult{}, errors.New("Swift pending pull authored cursor source is invalid")
+		}
+		scope["cursor_source"] = "local_checkpoint"
+	}
+	runtimePull := pull
+	runtimePull.Payload, err = json.Marshal(runtimePullPayload)
+	if err != nil || scenarios.ValidateOperation(runtimePull) != nil {
+		return PendingCycleResult{}, errors.New("encode Swift pending pull runtime binding failed")
+	}
+	pullCall, err := platform.Synchronize(ctx, client, "sync-now", RequestOperations{runtimePull})
 	if err != nil {
 		return PendingCycleResult{}, fmt.Errorf("run Swift pending pull: %w", err)
 	}
@@ -98,20 +137,19 @@ func RunPendingCycleScenario(ctx context.Context, scenario scenarios.Scenario, c
 	if err != nil || len(serverCaptures) != 1 {
 		return PendingCycleResult{}, fmt.Errorf("capture Swift pending-cycle server state: %w", err)
 	}
-	expected, err := swiftScenarioExpectedState(scenario, "EXPECT-PERF-PENDING-CYCLE-SEMANTIC-001")
-	if err != nil {
-		return PendingCycleResult{}, err
+	wireExpectationFound := false
+	for _, expectation := range scenario.Model.ExpectedState {
+		if expectation.ID != scenarios.ExpectationID("EXPECT-PERF-PENDING-CYCLE-SEMANTIC-001") {
+			continue
+		}
+		var payload map[string]any
+		if expectation.Predicate.ContractPredicate != "wire-outcome" || expectation.Predicate.Name != "canonical-wire-outcome" || expectation.StateFacts != nil || json.Unmarshal(expectation.Predicate.Payload, &payload) != nil || len(payload) != 0 {
+			return PendingCycleResult{}, errors.New("Swift pending-cycle canonical wire expectation is invalid")
+		}
+		wireExpectationFound = true
 	}
-	clientState, err := mergeSwiftCaptureFacts(clientFacts)
-	if err != nil {
-		return PendingCycleResult{}, err
-	}
-	actual, err := mergeSwiftStateFacts(serverCaptures[0].StateFacts, clientState)
-	if err != nil {
-		return PendingCycleResult{}, err
-	}
-	if err := validateSwiftStateProjection(expected, actual); err != nil {
-		return PendingCycleResult{}, err
+	if !wireExpectationFound {
+		return PendingCycleResult{}, errors.New("Swift pending-cycle canonical wire expectation is absent")
 	}
 	return PendingCycleResult{PushCall: push, PullCall: pullCall, ClientFacts: clientFacts, ServerFacts: serverCaptures[0].StateFacts}, nil
 }

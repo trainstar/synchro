@@ -135,6 +135,10 @@ func RunQueueReplayScenario(ctx context.Context, scenario scenarios.Scenario, co
 			return QueueReplayResult{}, err
 		}
 		for ordinal, operation := range workload {
+			operation, err = controller.ApplicationWrite(operation)
+			if err != nil {
+				return QueueReplayResult{}, fmt.Errorf("bind Swift queue-replay local write %d for step %s: %w", ordinal+1, stepID, err)
+			}
 			observation, applyErr := platform.ApplyStep(ctx, client, operation)
 			if applyErr != nil || observation.Disposition != "success" {
 				return QueueReplayResult{}, fmt.Errorf("apply Swift queue-replay local write %d for step %s: %w", ordinal+1, stepID, resultError(applyErr, observation.Disposition))
@@ -150,11 +154,14 @@ func RunQueueReplayScenario(ctx context.Context, scenario scenarios.Scenario, co
 		if _, err := controller.ApplyStep(ctx, publish); err != nil {
 			return QueueReplayResult{}, fmt.Errorf("publish Swift queue-replay schema for step %s: %w", stepID, err)
 		}
+		if err := queueRequireSchemaReset(ctx, platform, client, stepID); err != nil {
+			return QueueReplayResult{}, err
+		}
 		loss, err := queueResponseLossOperation(client, batchID)
 		if err != nil {
 			return QueueReplayResult{}, err
 		}
-		lost, err := platform.Synchronize(ctx, client, "start", RequestOperations{dropPush})
+		lost, err := platform.Synchronize(ctx, client, "reset-schema-and-start", RequestOperations{dropPush})
 		if err != nil {
 			return QueueReplayResult{}, fmt.Errorf("run Swift queue-replay response-loss push for step %s: %w", stepID, err)
 		}
@@ -204,6 +211,24 @@ func RunQueueReplayScenario(ctx context.Context, scenario scenarios.Scenario, co
 		return QueueReplayResult{}, err
 	}
 	return QueueReplayResult{ReplayCalls: replayCalls, ClientFacts: clientFacts, ServerFacts: serverCaptures[0].StateFacts}, nil
+}
+
+func queueRequireSchemaReset(ctx context.Context, platform *Platform, client Client, stepID scenarios.StepID) error {
+	result, err := swiftScenarioCall(ctx, platform, client, "start")
+	if err != nil {
+		return fmt.Errorf("observe Swift queue-replay schema boundary for step %s: %w", stepID, err)
+	}
+	if result.Completion != "error" {
+		return fmt.Errorf("Swift queue-replay schema boundary for step %s did not require recovery", stepID)
+	}
+	snapshot, err := platform.captureSnapshot(ctx, client)
+	if err != nil {
+		return fmt.Errorf("inspect Swift queue-replay schema boundary for step %s: %w", stepID, err)
+	}
+	if snapshot.Failure == nil || snapshot.Failure.Operation != "schema" || snapshot.Failure.Code != "unsupported_schema" || snapshot.Failure.Retryable || snapshot.Failure.RecoveryAction != "schema_reset" {
+		return fmt.Errorf("Swift queue-replay schema boundary for step %s did not require schema reset", stepID)
+	}
+	return nil
 }
 
 func queueInitialSchema(operation scenarios.Operation) (queueSchema, error) {

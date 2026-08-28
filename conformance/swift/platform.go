@@ -15,6 +15,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"strconv"
 	"strings"
@@ -447,12 +448,35 @@ func (p *Platform) startClient(ctx context.Context, state *platformClient, seedP
 }
 
 func (p *Platform) initializeCurrent(ctx context.Context, state *platformClient) error {
-	completed, _, err := runCallToCompletion(ctx, state, "install_current", "start")
+	completed, observations, err := runCallToCompletion(ctx, state, "install_current", "start")
 	if err != nil {
 		return fmt.Errorf("initialize current Swift database: %w", err)
 	}
 	if completed.Completion != "idle" {
-		return errors.New("current Swift database initialization did not reach idle")
+		outcomes := make([]string, 0, len(observations))
+		for _, observation := range observations {
+			outcome := fmt.Sprintf("%s:%d", observation.OperationClass, observation.StatusCode)
+			if observation.ErrorCode != nil {
+				outcome += ":" + *observation.ErrorCode
+			}
+			if facts := observation.RequestFacts; facts != nil {
+				generation := "none"
+				if facts.ClientGeneration != nil {
+					generation = strconv.FormatInt(*facts.ClientGeneration, 10)
+				}
+				scopeSetVersion := "none"
+				if facts.ScopeSetVersion != nil {
+					scopeSetVersion = strconv.FormatInt(*facts.ScopeSetVersion, 10)
+				}
+				scopeCount := "none"
+				if facts.ScopeCount != nil {
+					scopeCount = strconv.Itoa(*facts.ScopeCount)
+				}
+				outcome += fmt.Sprintf(":generation=%s:schema=%d:scope-set=%s:scopes=%s", generation, facts.SchemaVersion, scopeSetVersion, scopeCount)
+			}
+			outcomes = append(outcomes, outcome)
+		}
+		return fmt.Errorf("current Swift database initialization reached %q after %v", completed.Completion, outcomes)
 	}
 	result, err := state.session.Execute(ctx, Request{Operation: "lifecycle", LifecycleOperation: "stop"})
 	if err != nil {
@@ -498,29 +522,33 @@ func (p *Platform) ApplyStep(ctx context.Context, client Client, operation scena
 	if err != nil {
 		return StepObservation{}, err
 	}
-	before, err := captureRunner(ctx, state)
-	if err != nil {
-		return StepObservation{}, err
-	}
-	checkpoint := state.session.Checkpoint()
 	started := time.Now()
 	result, err := state.session.Execute(ctx, Request{Operation: "local-action", LocalAction: &action})
 	if err != nil {
-		return StepObservation{}, fmt.Errorf("execute Swift local action: %w", err)
+		inspections := []runnerRowSelector{selector}
+		fieldNames := make([]string, 0, len(action.Fields))
+		for field := range action.Fields {
+			fieldNames = append(fieldNames, field)
+		}
+		sort.Strings(fieldNames)
+		for _, field := range fieldNames {
+			inspection := selector
+			inspection.PrimaryKeyField = field
+			inspections = append(inspections, inspection)
+		}
+		for _, inspection := range inspections {
+			_, inspectionErr := state.session.Execute(ctx, Request{Operation: "capture", RowSelectors: []runnerRowSelector{inspection}})
+			if inspectionErr != nil {
+				return StepObservation{}, fmt.Errorf("execute Swift local action on %s.%s: %w (application field %s inspection: %v)", action.TableName, action.PrimaryKeyField, err, inspection.PrimaryKeyField, inspectionErr)
+			}
+		}
+		return StepObservation{}, fmt.Errorf("execute Swift local action with existing application fields on %s: %w", action.TableName, err)
 	}
 	if result.RowsAffected == nil || *result.RowsAffected != 1 {
 		return StepObservation{}, errors.New("Swift local action did not affect one row")
 	}
 	state.selectors[selectorKey(selector)] = selector
-	after, err := captureRunner(ctx, state)
-	if err != nil {
-		return StepObservation{}, err
-	}
-	window, err := p.completeWindow(state, checkpoint, started, before, after)
-	if err != nil {
-		return StepObservation{}, err
-	}
-	return observationWithWindow(StepObservation{Disposition: "success"}, window), nil
+	return StepObservation{Disposition: "success", DurationNanoseconds: uint64(time.Since(started))}, nil
 }
 
 // RequestStep executes one public synchronization and reports its matching request.
@@ -651,6 +679,8 @@ func (p *Platform) synchronizeWithResponseLoss(ctx context.Context, state *platf
 		if _, err := state.session.Execute(ctx, Request{Operation: "arm-transport-pause", TransportOperation: "connect"}); err != nil {
 			return SynchronizationResult{}, fmt.Errorf("arm Swift response-loss connect: %w", err)
 		}
+	} else if _, err := state.session.Execute(ctx, Request{Operation: "arm-transport-pause", TransportOperation: operationClass}); err != nil {
+		return SynchronizationResult{}, fmt.Errorf("arm Swift response-loss transport: %w", err)
 	}
 	begin, err := state.session.Execute(ctx, Request{Operation: "begin-call", CallID: callID, Method: method})
 	if err != nil {
@@ -671,7 +701,17 @@ func (p *Platform) synchronizeWithResponseLoss(ctx context.Context, state *platf
 			return SynchronizationResult{}, fmt.Errorf("resume Swift response-loss connect: %w", err)
 		}
 	}
+	if err := waitForTransportObservation(ctx, state, initialCheckpoint, operationClass); err != nil {
+		return SynchronizationResult{}, err
+	}
 	if _, err := state.session.Execute(ctx, Request{Operation: "await-transport-pause", TransportOperation: operationClass}); err != nil {
+		after, captureErr := captureRunner(ctx, state)
+		if captureErr == nil && after.Failure != nil {
+			return SynchronizationResult{}, fmt.Errorf("await Swift transport pause: %w; operation = %s, code = %s, recovery = %s", err, after.Failure.Operation, after.Failure.Code, after.Failure.RecoveryAction)
+		}
+		if captureErr != nil {
+			return SynchronizationResult{}, fmt.Errorf("await Swift transport pause: %w; diagnostic capture: %v", err, captureErr)
+		}
 		return SynchronizationResult{}, fmt.Errorf("await Swift transport pause: %w", err)
 	}
 	observations, err := state.session.ObservationsAfter(initialCheckpoint)
@@ -693,6 +733,9 @@ func (p *Platform) synchronizeWithResponseLoss(ctx context.Context, state *platf
 		}
 		if _, err := state.session.Execute(ctx, Request{Operation: "resume-transport-pause"}); err != nil {
 			return SynchronizationResult{}, fmt.Errorf("resume Swift transport pause: %w", err)
+		}
+		if err := waitForTransportObservation(ctx, state, checkpoint, operationClass); err != nil {
+			return SynchronizationResult{}, err
 		}
 		if _, err := state.session.Execute(ctx, Request{Operation: "await-transport-pause", TransportOperation: operationClass}); err != nil {
 			return SynchronizationResult{}, fmt.Errorf("await next Swift transport pause: %w", err)
@@ -719,6 +762,9 @@ func (p *Platform) synchronizeWithResponseLoss(ctx context.Context, state *platf
 	if last.StatusCode < 200 || last.StatusCode >= 300 {
 		return SynchronizationResult{}, errors.New("Swift response loss requires a committed server response")
 	}
+	if method == "reset-schema-and-start" {
+		state.selectors = make(map[string]runnerRowSelector)
+	}
 	if err := state.session.Kill(ctx); err != nil {
 		return SynchronizationResult{}, fmt.Errorf("terminate Swift runner after server response: %w", err)
 	}
@@ -734,6 +780,28 @@ func (p *Platform) synchronizeWithResponseLoss(ctx context.Context, state *platf
 	}
 	window := operationWindow{observations: cloneTransportObservations(observations), duration: time.Since(started)}
 	return synchronizationResult("blocked", mapped, window), nil
+}
+
+func waitForTransportObservation(ctx context.Context, state *platformClient, checkpoint uint64, operationClass string) error {
+	for {
+		if _, err := captureRunnerBatch(ctx, state, nil); err != nil {
+			return fmt.Errorf("poll Swift response-loss transport: %w", err)
+		}
+		observations, err := state.session.ObservationsAfter(checkpoint)
+		if err != nil {
+			return err
+		}
+		for _, observation := range observations {
+			if observation.OperationClass == operationClass {
+				return nil
+			}
+		}
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("wait for Swift response-loss transport: %w", ctx.Err())
+		case <-time.After(100 * time.Millisecond):
+		}
+	}
 }
 
 func runCallToCompletion(ctx context.Context, state *platformClient, callID, method string) (callResult, []transportObservation, error) {
@@ -1413,7 +1481,43 @@ type captureResult struct {
 }
 
 func captureRunner(ctx context.Context, state *platformClient) (runnerResult, error) {
-	result, err := state.session.Execute(ctx, Request{Operation: "capture", RowSelectors: clientSelectors(state)})
+	selectors := clientSelectors(state)
+	if len(selectors) <= maximumRunnerSelectors {
+		return captureRunnerBatch(ctx, state, selectors)
+	}
+
+	baseline, err := captureRunnerBatch(ctx, state, nil)
+	if err != nil {
+		return runnerResult{}, err
+	}
+	if *baseline.ApplicationRowCount > maximumRunnerRows || len(baseline.ApplicationRows) == *baseline.ApplicationRowCount {
+		return baseline, nil
+	}
+	rows := append([]map[string]json.RawMessage(nil), baseline.ApplicationRows...)
+	for start := 0; start < len(selectors); start += maximumRunnerSelectors {
+		end := min(start+maximumRunnerSelectors, len(selectors))
+		captured, err := captureRunnerBatch(ctx, state, selectors[start:end])
+		if err != nil {
+			return runnerResult{}, err
+		}
+		if !equalRunnerCaptureState(baseline, captured) {
+			return runnerResult{}, errors.New("Swift runner capture changed between selector batches")
+		}
+		extra, err := applicationRowsBeyondBaseline(baseline.ApplicationRows, captured.ApplicationRows)
+		if err != nil {
+			return runnerResult{}, err
+		}
+		rows = append(rows, extra...)
+	}
+	if len(rows) != *baseline.ApplicationRowCount {
+		return runnerResult{}, errors.New("Swift runner selector batches did not cover application rows")
+	}
+	baseline.ApplicationRows = rows
+	return baseline, nil
+}
+
+func captureRunnerBatch(ctx context.Context, state *platformClient, selectors []runnerRowSelector) (runnerResult, error) {
+	result, err := state.session.Execute(ctx, Request{Operation: "capture", RowSelectors: selectors})
 	if err != nil {
 		return runnerResult{}, fmt.Errorf("capture Swift runner state: %w", err)
 	}
@@ -1421,6 +1525,49 @@ func captureRunner(ctx context.Context, state *platformClient) (runnerResult, er
 		return runnerResult{}, err
 	}
 	return result, nil
+}
+
+func equalRunnerCaptureState(left, right runnerResult) bool {
+	left.ApplicationRows = nil
+	right.ApplicationRows = nil
+	return reflect.DeepEqual(left, right)
+}
+
+func applicationRowsBeyondBaseline(baseline, captured []map[string]json.RawMessage) ([]map[string]json.RawMessage, error) {
+	remaining := make(map[string]int, len(baseline))
+	for _, row := range baseline {
+		key, err := applicationRowKey(row)
+		if err != nil {
+			return nil, err
+		}
+		remaining[key]++
+	}
+	extra := make([]map[string]json.RawMessage, 0, len(captured))
+	for _, row := range captured {
+		key, err := applicationRowKey(row)
+		if err != nil {
+			return nil, err
+		}
+		if remaining[key] > 0 {
+			remaining[key]--
+			continue
+		}
+		extra = append(extra, row)
+	}
+	for _, count := range remaining {
+		if count != 0 {
+			return nil, errors.New("Swift runner selector batch omitted a baseline application row")
+		}
+	}
+	return extra, nil
+}
+
+func applicationRowKey(row map[string]json.RawMessage) (string, error) {
+	encoded, err := json.Marshal(row)
+	if err != nil {
+		return "", errors.New("encode Swift application row identity failed")
+	}
+	return string(encoded), nil
 }
 
 func clientSelectors(state *platformClient) []runnerRowSelector {

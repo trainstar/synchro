@@ -79,7 +79,7 @@ type runnerCommandError struct {
 }
 
 func (e *runnerCommandError) Error() string {
-	return "runner command failed"
+	return "runner command failed (" + e.Code + ")"
 }
 
 type runnerResult struct {

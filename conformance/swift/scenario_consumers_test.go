@@ -76,3 +76,41 @@ func TestSeededEmptyStartupDirectBindingGroupsRemainClosed(t *testing.T) {
 		}
 	}
 }
+
+func TestSteadyPullBaselineAcceptsAuthoredRebuildPageSequence(t *testing.T) {
+	status := 200
+	result := SynchronizationResult{
+		Completion: "idle",
+		transportObservations: []transportObservation{
+			{OperationClass: "connect", StatusCode: status},
+			{OperationClass: "rebuild", StatusCode: status},
+			{OperationClass: "rebuild", StatusCode: status},
+			{OperationClass: "pull", StatusCode: status},
+		},
+	}
+	scenario := scenarios.Scenario{WireExpectations: []scenarios.WireExpectation{
+		{StepID: "STEP-PERF-STEADY-PULL-BASELINE-REQUEST-001", HTTPStatus: status},
+		{StepID: "STEP-PERF-STEADY-PULL-001", HTTPStatus: status},
+	}}
+	if err := validateSwiftSteadyPullBaselineWires(scenario, result); err != nil {
+		t.Fatalf("validate authored steady-pull baseline page sequence: %v", err)
+	}
+}
+
+func TestSteadyPullBaselineRejectsUnexpectedWireOutcome(t *testing.T) {
+	result := SynchronizationResult{
+		Completion: "idle",
+		transportObservations: []transportObservation{
+			{OperationClass: "connect", StatusCode: 200},
+			{OperationClass: "rebuild", StatusCode: 500, ErrorCode: pointerString("invalid_response")},
+			{OperationClass: "pull", StatusCode: 200},
+		},
+	}
+	scenario := scenarios.Scenario{WireExpectations: []scenarios.WireExpectation{
+		{StepID: "STEP-PERF-STEADY-PULL-BASELINE-REQUEST-001", HTTPStatus: 200},
+		{StepID: "STEP-PERF-STEADY-PULL-001", HTTPStatus: 200},
+	}}
+	if err := validateSwiftSteadyPullBaselineWires(scenario, result); err == nil {
+		t.Fatal("unexpected steady-pull rebuild response passed authored wire validation")
+	}
+}

@@ -33,6 +33,9 @@ func RunSeededEmptyStartupScenario(ctx context.Context, scenario scenarios.Scena
 	if controller == nil || artifact == nil || platform == nil {
 		return SeededEmptyStartupResult{}, errors.New("Swift seeded-startup dependencies are unavailable")
 	}
+	if err := controller.Install(ctx, scenario.Model.Setup[0]); err != nil {
+		return SeededEmptyStartupResult{}, fmt.Errorf("install Swift seeded-startup contract: %w", err)
+	}
 	clients := make([]SeededStartupClientResult, 0, 6)
 	for _, prefix := range []string{"seeded", "empty"} {
 		for ordinal := 1; ordinal <= 3; ordinal++ {
@@ -102,7 +105,11 @@ func RunSeededEmptyStartupScenario(ctx context.Context, scenario scenarios.Scena
 				return SeededEmptyStartupResult{}, err
 			}
 			if call.Completion != "idle" || connect.StatusCode != 200 || connect.Retryable {
-				return SeededEmptyStartupResult{}, fmt.Errorf("Swift startup client %s did not complete successfully", clientID)
+				snapshot, captureErr := platform.captureSnapshot(ctx, client)
+				if captureErr == nil && snapshot.Failure != nil {
+					return SeededEmptyStartupResult{}, fmt.Errorf("Swift startup client %s completed %q with connect status %d; operation = %s, code = %s, recovery = %s", clientID, call.Completion, connect.StatusCode, snapshot.Failure.Operation, snapshot.Failure.Code, snapshot.Failure.RecoveryAction)
+				}
+				return SeededEmptyStartupResult{}, fmt.Errorf("Swift startup client %s completed %q with connect status %d; capture = %v", clientID, call.Completion, connect.StatusCode, captureErr)
 			}
 			result := SeededStartupClientResult{Client: client, Seeded: seeded, StartupCall: call}
 			result.ArtifactStep = artifactObservation

@@ -2,10 +2,13 @@ package swift
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"reflect"
 	"time"
 
+	"github.com/trainstar/synchro/conformance/blackbox"
 	"github.com/trainstar/synchro/conformance/scenarios"
 )
 
@@ -90,8 +93,70 @@ func swiftScenarioCall(ctx context.Context, platform *Platform, client Client, m
 	if err != nil {
 		return SynchronizationResult{}, err
 	}
-	state.started = true
+	state.started = completed.Completion == "idle"
 	return synchronizationResult(completed.Completion, nil, window), nil
+}
+
+func (p *Platform) captureSnapshot(ctx context.Context, client Client) (runnerResult, error) {
+	state, err := p.client(client)
+	if err != nil {
+		return runnerResult{}, err
+	}
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	if state.terminated || state.session == nil {
+		return runnerResult{}, errors.New("Swift client is unavailable for inspection")
+	}
+	return captureRunner(ctx, state)
+}
+
+func resolveSwiftNativeIdentities(aliases []scenarios.NativeIdentityAlias, runtime map[string]json.RawMessage) ([]blackbox.NativeIdentityResolution, error) {
+	observations := make([]blackbox.NativeIdentityObservation, 0)
+	for _, alias := range aliases {
+		value := runtime[alias.Alias]
+		for _, id := range alias.StepIDs {
+			stepID := id
+			observations = append(observations, blackbox.NativeIdentityObservation{Kind: alias.Kind, Alias: alias.Alias, StepID: &stepID, RuntimeValue: append(json.RawMessage(nil), value...)})
+		}
+		for _, id := range alias.ExpectationIDs {
+			expectationID := id
+			observations = append(observations, blackbox.NativeIdentityObservation{Kind: alias.Kind, Alias: alias.Alias, ExpectationID: &expectationID, RuntimeValue: append(json.RawMessage(nil), value...)})
+		}
+	}
+	return blackbox.ResolveNativeIdentityAliases(aliases, observations)
+}
+
+func completedSwiftRebuildID(events []eventRecord, scopeID string) (string, error) {
+	var rebuildID string
+	matches := 0
+	for _, event := range events {
+		if event.Type != "rebuild_completed" {
+			continue
+		}
+		if event.ScopeID == nil || event.RebuildID == nil || *event.ScopeID == "" || *event.RebuildID == "" {
+			return "", errors.New("Swift completed rebuild event is invalid")
+		}
+		if *event.ScopeID == scopeID {
+			matches++
+			rebuildID = *event.RebuildID
+		}
+	}
+	if matches != 1 {
+		return "", errors.New("Swift completed rebuild identity is ambiguous")
+	}
+	return rebuildID, nil
+}
+
+func validateCompletedEmptyRebuildReceipt(receipt rebuildReceiptRecord, rebuildID string, pageCount int) bool {
+	return receipt.RebuildIDFingerprint == cursorFingerprint(rebuildID) &&
+		receipt.PageCount == pageCount &&
+		receipt.ReturnedRecordCount == 0 &&
+		reflect.DeepEqual(receipt.RequestChainExpected, receipt.RequestChainObserved) &&
+		sortedUniqueStrings(receipt.RecordIdentitiesHex) &&
+		reflect.DeepEqual(receipt.ReceivedRowChecksums, receipt.ComputedRowChecksums) &&
+		receipt.ComputedScopeChecksum != nil &&
+		receipt.FinalScopeChecksum != nil &&
+		*receipt.ComputedScopeChecksum == *receipt.FinalScopeChecksum
 }
 
 func swiftScenarioWire(result SynchronizationResult, operationClass string) (transportObservation, error) {
@@ -104,24 +169,56 @@ func swiftScenarioWire(result SynchronizationResult, operationClass string) (tra
 }
 
 func validateSwiftWireExpectation(scenario scenarios.Scenario, stepID, operationClass string, result SynchronizationResult) error {
-	var expected *scenarios.WireExpectation
-	for index := range scenario.WireExpectations {
-		if scenario.WireExpectations[index].StepID == scenarios.StepID(stepID) {
-			expected = &scenario.WireExpectations[index]
-			break
-		}
-	}
-	if expected == nil {
-		return fmt.Errorf("Swift wire expectation %s is absent", stepID)
-	}
 	observed, err := swiftScenarioWire(result, operationClass)
 	if err != nil {
 		return err
 	}
-	if observed.StatusCode != expected.HTTPStatus || observed.Retryable != expected.Retryable || !equalOptionalStrings(observed.ErrorCode, expected.ErrorCode) {
-		return fmt.Errorf("Swift wire result %s differs from its authored expectation", stepID)
+	return validateSwiftWireObservation(scenario, stepID, observed)
+}
+
+func validateSwiftWireObservation(scenario scenarios.Scenario, stepID string, observed transportObservation) error {
+	for _, expected := range scenario.WireExpectations {
+		if expected.StepID != scenarios.StepID(stepID) {
+			continue
+		}
+		if observed.StatusCode != expected.HTTPStatus || observed.Retryable != expected.Retryable || !equalOptionalStrings(observed.ErrorCode, expected.ErrorCode) {
+			return fmt.Errorf("Swift wire result %s differs from its authored expectation", stepID)
+		}
+		return nil
 	}
-	return nil
+	return fmt.Errorf("Swift wire expectation %s is absent", stepID)
+}
+
+func validateSwiftSteadyPullBaselineShape(result SynchronizationResult) bool {
+	observations := result.transportObservations
+	if result.Completion != "idle" || len(observations) < 3 {
+		return false
+	}
+	if observations[0].OperationClass != "connect" || observations[len(observations)-1].OperationClass != "pull" {
+		return false
+	}
+	for _, observation := range observations[1 : len(observations)-1] {
+		if observation.OperationClass != "rebuild" {
+			return false
+		}
+	}
+	return true
+}
+
+func validateSwiftSteadyPullBaselineWires(scenario scenarios.Scenario, result SynchronizationResult) error {
+	if !validateSwiftSteadyPullBaselineShape(result) {
+		return errors.New("Swift steady-pull baseline call shape is invalid")
+	}
+	connect := result.transportObservations[0]
+	if connect.StatusCode != 200 || connect.Retryable || connect.ErrorCode != nil {
+		return errors.New("Swift steady-pull baseline connect did not succeed")
+	}
+	for _, observation := range result.transportObservations[1 : len(result.transportObservations)-1] {
+		if err := validateSwiftWireObservation(scenario, "STEP-PERF-STEADY-PULL-BASELINE-REQUEST-001", observation); err != nil {
+			return err
+		}
+	}
+	return validateSwiftWireObservation(scenario, "STEP-PERF-STEADY-PULL-001", result.transportObservations[len(result.transportObservations)-1])
 }
 
 func equalOptionalStrings(left, right *string) bool {

@@ -147,11 +147,22 @@ func TestNativeControllerIdentityValuesExposeRuntimeSemanticHandles(t *testing.T
 			},
 			scopes: map[string]string{"scope-a": "cf:global"},
 		},
+		records: map[string]*nativeRecordBinding{
+			"items\x00\"row-a\"": {
+				Table: nativeTableBinding{
+					AuthoredPrimary: "id",
+					FieldNames:      map[string]string{"id": "cf_id"},
+				},
+				RecordID:        "row-a",
+				RuntimeRecordID: "00000000-0000-4000-8000-000000000003",
+			},
+		},
 	}
 	aliases := []scenarios.NativeIdentityAlias{
 		{Kind: "schema", Alias: "schema-a", Value: json.RawMessage(`{"version":1,"hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}`)},
 		{Kind: "table", Alias: "table-a", Value: json.RawMessage(`"items"`)},
 		{Kind: "primary-key", Alias: "primary-a", Value: json.RawMessage(`"id"`)},
+		{Kind: "primary-key", Alias: "record-a", Value: json.RawMessage(`"row-a"`)},
 		{Kind: "scope", Alias: "scope-a", Value: json.RawMessage(`"scope-a"`)},
 		{Kind: "row-version", Alias: "version-a", Value: json.RawMessage(`"v1"`)},
 	}
@@ -164,6 +175,7 @@ func TestNativeControllerIdentityValuesExposeRuntimeSemanticHandles(t *testing.T
 		{Kind: "schema", Alias: "schema-a", RuntimeValue: json.RawMessage(`{"version":7,"hash":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}`)},
 		{Kind: "table", Alias: "table-a", RuntimeValue: json.RawMessage(`"00000000-0000-4000-8000-000000000002"`), ApplicationIdentifier: "cf_items"},
 		{Kind: "primary-key", Alias: "primary-a", RuntimeValue: json.RawMessage(`"00000000-0000-4000-8000-000000000001"`), ApplicationIdentifier: "cf_id"},
+		{Kind: "primary-key", Alias: "record-a", RuntimeValue: json.RawMessage(`"00000000-0000-4000-8000-000000000003"`), ApplicationIdentifier: "cf_id"},
 		{Kind: "scope", Alias: "scope-a", RuntimeValue: json.RawMessage(`"cf:global"`)},
 	}
 	if !reflect.DeepEqual(values, want) {
@@ -180,5 +192,35 @@ func TestNativeControllerIdentityValuesRejectMissingSemanticBinding(t *testing.T
 	}})
 	if !errors.Is(err, ErrNativeIdentityEvidence) {
 		t.Fatalf("missing semantic binding error = %v", err)
+	}
+}
+
+func TestNativeControllerIdentityValuesRejectAmbiguousPrimaryKeyBinding(t *testing.T) {
+	controller := &NativeController{
+		installation: &nativeInstallationBinding{tables: map[string]nativeTableBinding{
+			"items": {
+				AuthoredPrimary: "row-a",
+				RuntimePrimary:  "00000000-0000-4000-8000-000000000001",
+				FieldNames:      map[string]string{"row-a": "cf_id"},
+			},
+		}},
+		records: map[string]*nativeRecordBinding{
+			"items\x00\"row-a\"": {
+				Table: nativeTableBinding{
+					AuthoredPrimary: "row-a",
+					FieldNames:      map[string]string{"row-a": "cf_id"},
+				},
+				RecordID:        "row-a",
+				RuntimeRecordID: "00000000-0000-4000-8000-000000000002",
+			},
+		},
+	}
+	_, err := controller.IdentityValues([]scenarios.NativeIdentityAlias{{
+		Kind:  "primary-key",
+		Alias: "row-a",
+		Value: json.RawMessage(`"row-a"`),
+	}})
+	if !errors.Is(err, ErrNativeIdentityEvidence) {
+		t.Fatalf("ambiguous primary-key binding error = %v", err)
 	}
 }
