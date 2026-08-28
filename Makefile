@@ -164,6 +164,8 @@ LOCAL_POSTGRES_URL_FILE ?= $(LOCAL_POSTGRES_STATE_DIR)/postgres.url
 LOCAL_POSTGRES_ATTACH_ENV_FILE ?= $(LOCAL_POSTGRES_STATE_DIR)/attach.env
 LOCAL_POSTGRES_LISTEN ?= 127.0.0.1
 LOCAL_POSTGRES_BINARY ?= $(CURDIR)/bin/synchro-local-postgres
+# One warm-connect gate run consumes one freshly started provisioner
+# instance. Restart local-postgres-start before each run.
 WARM_CONNECT_ENV_FILE ?=
 WARM_CONNECT_ENV = if [ -n "$(WARM_CONNECT_ENV_FILE)" ]; then \
 		test -r "$(WARM_CONNECT_ENV_FILE)"; \
