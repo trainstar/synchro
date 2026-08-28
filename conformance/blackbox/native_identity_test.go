@@ -157,6 +157,14 @@ func TestNativeControllerIdentityValuesExposeRuntimeSemanticHandles(t *testing.T
 				RuntimeRecordID: "00000000-0000-4000-8000-000000000003",
 			},
 		},
+		transactions: map[string]*nativeTransactionBinding{
+			"stream-a\x0010": {
+				AuthoredBatchID:     "00000000-0000-4000-8000-000000000010",
+				AuthoredMutationIDs: []string{"00000000-0000-4000-8000-000000000011"},
+				RuntimeBatchID:      "00000000-0000-4000-8000-000000000012",
+				RuntimeMutationIDs:  []string{"00000000-0000-4000-8000-000000000013"},
+			},
+		},
 	}
 	aliases := []scenarios.NativeIdentityAlias{
 		{Kind: "schema", Alias: "schema-a", Value: json.RawMessage(`{"version":1,"hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}`)},
@@ -164,6 +172,8 @@ func TestNativeControllerIdentityValuesExposeRuntimeSemanticHandles(t *testing.T
 		{Kind: "primary-key", Alias: "primary-a", Value: json.RawMessage(`"id"`)},
 		{Kind: "primary-key", Alias: "record-a", Value: json.RawMessage(`"row-a"`)},
 		{Kind: "scope", Alias: "scope-a", Value: json.RawMessage(`"scope-a"`)},
+		{Kind: "batch-id", Alias: "batch-a", Value: json.RawMessage(`"00000000-0000-4000-8000-000000000010"`)},
+		{Kind: "mutation-id", Alias: "mutation-a", Value: json.RawMessage(`"00000000-0000-4000-8000-000000000011"`)},
 		{Kind: "row-version", Alias: "version-a", Value: json.RawMessage(`"v1"`)},
 	}
 
@@ -177,6 +187,8 @@ func TestNativeControllerIdentityValuesExposeRuntimeSemanticHandles(t *testing.T
 		{Kind: "primary-key", Alias: "primary-a", RuntimeValue: json.RawMessage(`"00000000-0000-4000-8000-000000000001"`), ApplicationIdentifier: "cf_id"},
 		{Kind: "primary-key", Alias: "record-a", RuntimeValue: json.RawMessage(`"00000000-0000-4000-8000-000000000003"`), ApplicationIdentifier: "cf_id"},
 		{Kind: "scope", Alias: "scope-a", RuntimeValue: json.RawMessage(`"cf:global"`)},
+		{Kind: "batch-id", Alias: "batch-a", RuntimeValue: json.RawMessage(`"00000000-0000-4000-8000-000000000012"`)},
+		{Kind: "mutation-id", Alias: "mutation-a", RuntimeValue: json.RawMessage(`"00000000-0000-4000-8000-000000000013"`)},
 	}
 	if !reflect.DeepEqual(values, want) {
 		t.Fatalf("controller identity values = %#v, want %#v", values, want)

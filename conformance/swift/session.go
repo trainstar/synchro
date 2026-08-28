@@ -19,6 +19,7 @@ type Config struct {
 	AuthToken                    func(context.Context, Client) (string, error)
 	Platform                     string
 	AppVersion                   string
+	PullPageSize                 int
 	PushBatchSize                int
 }
 

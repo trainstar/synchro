@@ -130,32 +130,60 @@ func (a *NativeArtifact) StageStep(ctx context.Context, operation scenarios.Oper
 		a.mu.Unlock()
 	}
 
-	path := filepath.Join(a.stagingDirectory, nativeArtifactFilename(payload.UserID, payload.ClientID))
-	if err := requireNativeArtifactPathAbsent(path); err != nil {
+	if err := a.stageSeed(ctx, payload.UserID, payload.ClientID); err != nil {
 		return NativeStepObservation{}, err
+	}
+	return nativeSuccess(), nil
+}
+
+// StageCurrentSeed exports the current production seed without preparing fixture rows.
+func (a *NativeArtifact) StageCurrentSeed(ctx context.Context, userID, clientID string, stepID scenarios.StepID) (string, error) {
+	if err := a.context(ctx); err != nil {
+		return "", err
+	}
+	if !validNativeIdentity(userID) || !validNativeIdentity(clientID) || stepID == "" {
+		return "", errors.New("native current-seed identity is invalid")
+	}
+	if err := a.stageSeed(ctx, userID, clientID); err != nil {
+		return "", err
+	}
+	return a.SeedDatabasePath(ctx, userID, clientID, stepID)
+}
+
+func (a *NativeArtifact) stageSeed(ctx context.Context, userID, clientID string) error {
+	target := nativeArtifactTarget(userID, clientID)
+	a.mu.Lock()
+	if _, duplicate := a.staged[target]; duplicate {
+		a.mu.Unlock()
+		return errors.New("native portable seed target is already staged")
+	}
+	a.mu.Unlock()
+	path := filepath.Join(a.stagingDirectory, nativeArtifactFilename(userID, clientID))
+	if err := requireNativeArtifactPathAbsent(path); err != nil {
+		return err
 	}
 	if err := a.runSeedTool(ctx, path); err != nil {
 		_ = removeNativeArtifactPath(path, "")
-		return NativeStepObservation{}, err
+		return err
 	}
 	digest, err := verifyNativeArtifactFile(path)
 	if err != nil {
 		_ = removeNativeArtifactPath(path, "")
-		return NativeStepObservation{}, err
+		return err
 	}
-	artifact := &nativeStagedArtifact{userID: payload.UserID, clientID: payload.ClientID, path: path, sha256: digest}
+	artifact := &nativeStagedArtifact{userID: userID, clientID: clientID, path: path, sha256: digest}
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if a.closed {
 		_ = removeNativeArtifactPath(path, digest)
-		return NativeStepObservation{}, errors.New("native artifact is closed")
+		return errors.New("native artifact is closed")
 	}
 	if _, duplicate := a.staged[target]; duplicate {
 		_ = removeNativeArtifactPath(path, digest)
-		return NativeStepObservation{}, errors.New("native portable seed target is already staged")
+		return errors.New("native portable seed target is already staged")
 	}
 	a.staged[target] = artifact
-	return nativeSuccess(), nil
+	return nil
 }
 
 func (a *NativeArtifact) preparePortableSeed(ctx context.Context) error {

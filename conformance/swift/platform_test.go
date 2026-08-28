@@ -75,6 +75,9 @@ func TestPlatformRebuildCursorMutationIsConformanceOnlyAndOneShot(t *testing.T) 
 			t.Fatalf("proxied rebuild %d changed Int64 row value", index)
 		}
 	}
+	if got := platform.rebuildResponseCursors["client-a"]; got != cursorFingerprint("real-cursor") {
+		t.Fatalf("recorded rebuild cursor fingerprint = %q", got)
+	}
 }
 
 func TestPlatformConfigDefaultsAndBoundsPushBatchSize(t *testing.T) {
@@ -97,6 +100,15 @@ func TestPlatformConfigDefaultsAndBoundsPushBatchSize(t *testing.T) {
 	if normalized.PushBatchSize != 100 {
 		t.Fatalf("default push batch size = %d, want 100", normalized.PushBatchSize)
 	}
+	config.PullPageSize = 1
+	if normalized, err = normalizePlatformConfig(config); err != nil || normalized.PullPageSize != 1 {
+		t.Fatalf("normalize minimum pull page size: %d, %v", normalized.PullPageSize, err)
+	}
+	config.PullPageSize = 1001
+	if _, err := normalizePlatformConfig(config); err == nil {
+		t.Fatal("over-bound pull page size passed")
+	}
+	config.PullPageSize = 0
 	config.PushBatchSize = 1000
 	if normalized, err = normalizePlatformConfig(config); err != nil || normalized.PushBatchSize != 1000 {
 		t.Fatalf("normalize maximum push batch size: %d, %v", normalized.PushBatchSize, err)
@@ -389,14 +401,15 @@ func TestCursorSourcesBindToExactDurableFingerprints(t *testing.T) {
 
 	continuation := "continuation-a"
 	rebuildID := "00000000-0000-4000-8000-000000000001"
+	runtimeRebuildID := "00000000-0000-4000-8000-000000000002"
 	rebuild := scenarios.Operation{
 		ContractOperation: "rebuild",
 		Name:              "request-page",
 		Payload:           json.RawMessage(`{"rebuild_id":"` + rebuildID + `","cursor_source":"local_rebuild_continuation"}`),
 	}
 	present := true
-	rebuildObservation := transportObservation{RequestFacts: &transportRequestFacts{CursorPresent: &present, CursorFingerprint: pointerString(cursorFingerprint(continuation))}}
-	source = runnerResult{RebuildAttempts: []rebuildAttemptRecord{{RebuildID: rebuildID, Cursor: &continuation}}}
+	rebuildObservation := transportObservation{RequestFacts: &transportRequestFacts{CursorPresent: &present, CursorFingerprint: pointerString(cursorFingerprint(continuation)), RebuildIDFingerprint: pointerString(cursorFingerprint(runtimeRebuildID))}}
+	source = runnerResult{RebuildAttempts: []rebuildAttemptRecord{{RebuildID: runtimeRebuildID, Cursor: &continuation}}}
 	if err := validateCursorSourceBinding(rebuild, rebuildObservation, source, nil); err != nil {
 		t.Fatalf("bind rebuild continuation cursor: %v", err)
 	}

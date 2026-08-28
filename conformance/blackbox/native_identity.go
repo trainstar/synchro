@@ -250,6 +250,38 @@ func (c *NativeController) IdentityValues(aliases []scenarios.NativeIdentityAlia
 			if matches != 1 || runtime == "" || applicationIdentifier == "" {
 				return nil, fmt.Errorf("%w: primary-key alias %q has no unique runtime binding", ErrNativeIdentityEvidence, alias.Alias)
 			}
+		case "batch-id":
+			authored, err := nativeIdentityString(alias)
+			if err != nil {
+				return nil, err
+			}
+			matches := 0
+			for _, transaction := range c.transactions {
+				if transaction.AuthoredBatchID == authored && transaction.RuntimeBatchID != "" {
+					matches++
+					runtime = transaction.RuntimeBatchID
+				}
+			}
+			if matches != 1 || runtime == "" {
+				return nil, fmt.Errorf("%w: batch-id alias %q has no unique runtime binding", ErrNativeIdentityEvidence, alias.Alias)
+			}
+		case "mutation-id":
+			authored, err := nativeIdentityString(alias)
+			if err != nil {
+				return nil, err
+			}
+			matches := 0
+			for _, transaction := range c.transactions {
+				for index, mutationID := range transaction.AuthoredMutationIDs {
+					if mutationID == authored && index < len(transaction.RuntimeMutationIDs) && transaction.RuntimeMutationIDs[index] != "" {
+						matches++
+						runtime = transaction.RuntimeMutationIDs[index]
+					}
+				}
+			}
+			if matches != 1 || runtime == "" {
+				return nil, fmt.Errorf("%w: mutation-id alias %q has no unique runtime binding", ErrNativeIdentityEvidence, alias.Alias)
+			}
 		default:
 			continue
 		}

@@ -16,6 +16,8 @@ import (
 func TestRealSwiftPerformance(t *testing.T) {
 	t.Run("assertion", func(t *testing.T) {
 		runSwiftSteadyPull(t)
+		runSwiftRebuildRequests(t)
+		runSwiftForgedCursor(t)
 		runSwiftPendingCycle(t)
 		runSwiftQueueReplay(t)
 		runSwiftSeededEmptyStartup(t)
@@ -24,7 +26,7 @@ func TestRealSwiftPerformance(t *testing.T) {
 
 func runSwiftSteadyPull(t *testing.T) {
 	t.Helper()
-	ctx, scenario, harness, controller, platform := newSwiftPerformanceFixture(t, "steady-pull-001.json")
+	ctx, scenario, harness, controller, platform := newSwiftPerformanceFixture(t, filepath.Join("performance", "steady-pull-001.json"), 0)
 	result, err := RunSteadyPullScenario(ctx, scenario, controller, platform, Client{Key: "client-a", UserID: "user-a", ClientID: "client-a", DatabaseKey: "steady-pull-client-a"})
 	if err != nil {
 		t.Fatalf("run direct Swift steady-pull scenario: %v", err)
@@ -35,9 +37,55 @@ func runSwiftSteadyPull(t *testing.T) {
 	resetSwiftPerformanceServer(t, ctx, harness)
 }
 
+func runSwiftRebuildRequests(t *testing.T) {
+	t.Helper()
+	ctx, scenario, harness, controller, platform := newSwiftPerformanceFixture(t, filepath.Join("performance", "rebuild-requests-001.json"), 1)
+	result, err := RunRebuildRequestsScenario(ctx, scenario, controller, platform, Client{Key: "client-a", UserID: "user-a", ClientID: "client-a", DatabaseKey: "rebuild-requests-client-a"})
+	if err != nil {
+		t.Fatalf("run direct Swift rebuild-requests scenario: %v", err)
+	}
+	if len(result.IdentityResolution) != len(scenario.NativeIdentityAliases) {
+		t.Fatalf("Swift rebuild-requests identity resolutions = %d, want %d", len(result.IdentityResolution), len(scenario.NativeIdentityAliases))
+	}
+	resetSwiftPerformanceServer(t, ctx, harness)
+}
+
+func runSwiftForgedCursor(t *testing.T) {
+	t.Helper()
+	ctx, scenario, harness, controller, platform := newSwiftPerformanceFixture(t, filepath.Join("server", "rebuild-forged-cursor-001.json"), 1)
+	root := filepath.Join("..", "..")
+	seedToolPath := os.Getenv("SYNCHRO_SEED_TOOL")
+	if seedToolPath == "" {
+		seedToolPath = filepath.Join(root, "bin", "synchro-seed")
+	}
+	stagingDirectory := t.TempDir()
+	if err := os.Chmod(stagingDirectory, 0o700); err != nil {
+		t.Fatalf("make Swift forged-cursor seed staging directory private: %v", err)
+	}
+	artifact, err := blackbox.NewNativeArtifact(blackbox.NativeArtifactConfig{Harness: harness, SeedToolPath: seedToolPath, StagingDirectory: stagingDirectory})
+	if err != nil {
+		t.Fatalf("create Swift forged-cursor seed artifact: %v", err)
+	}
+	t.Cleanup(func() {
+		closeContext, closeCancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer closeCancel()
+		if err := artifact.Close(closeContext); err != nil {
+			t.Errorf("close Swift forged-cursor seed artifact: %v", err)
+		}
+	})
+	result, err := RunForgedCursorScenario(ctx, scenario, controller, artifact, platform, Client{Key: "client-a", UserID: "user-a", ClientID: "client-a", DatabaseKey: "forged-cursor-client-a"})
+	if err != nil {
+		t.Fatalf("run direct Swift forged-cursor scenario: %v", err)
+	}
+	if len(result.IdentityResolution) != len(scenario.NativeIdentityAliases) {
+		t.Fatalf("Swift forged-cursor identity resolutions = %d, want %d", len(result.IdentityResolution), len(scenario.NativeIdentityAliases))
+	}
+	resetSwiftPerformanceServer(t, ctx, harness)
+}
+
 func runSwiftPendingCycle(t *testing.T) {
 	t.Helper()
-	ctx, scenario, harness, controller, platform := newSwiftPerformanceFixture(t, "pending-cycle-001.json")
+	ctx, scenario, harness, controller, platform := newSwiftPerformanceFixture(t, filepath.Join("performance", "pending-cycle-001.json"), 0)
 	_, err := RunPendingCycleScenario(ctx, scenario, controller, platform, Client{Key: "client-a", UserID: "user-a", ClientID: "client-a", DatabaseKey: "pending-cycle-client-a"})
 	if err != nil {
 		t.Fatalf("run direct Swift pending-cycle scenario: %v", err)
@@ -47,7 +95,7 @@ func runSwiftPendingCycle(t *testing.T) {
 
 func runSwiftQueueReplay(t *testing.T) {
 	t.Helper()
-	ctx, scenario, harness, controller, platform := newSwiftPerformanceFixture(t, "queue-replay-001.json")
+	ctx, scenario, harness, controller, platform := newSwiftPerformanceFixture(t, filepath.Join("performance", "queue-replay-001.json"), 0)
 	result, err := RunQueueReplayScenario(ctx, scenario, controller, platform, Client{Key: "client-a", UserID: "user-a", ClientID: "client-a", DatabaseKey: "queue-replay-client-a"})
 	if err != nil {
 		t.Fatalf("run direct Swift queue-replay scenario: %v", err)
@@ -97,7 +145,7 @@ func resetSwiftPerformanceServer(t *testing.T, ctx context.Context, harness *bla
 
 func runSwiftSeededEmptyStartup(t *testing.T) {
 	t.Helper()
-	ctx, scenario, harness, controller, platform := newSwiftPerformanceFixture(t, "seeded-empty-startup-001.json")
+	ctx, scenario, harness, controller, platform := newSwiftPerformanceFixture(t, filepath.Join("performance", "seeded-empty-startup-001.json"), 0)
 	root := filepath.Join("..", "..")
 	seedToolPath := os.Getenv("SYNCHRO_SEED_TOOL")
 	if seedToolPath == "" {
@@ -129,7 +177,7 @@ func runSwiftSeededEmptyStartup(t *testing.T) {
 	}
 }
 
-func newSwiftPerformanceFixture(t *testing.T, filename string) (context.Context, scenarios.Scenario, *blackbox.Harness, *blackbox.NativeController, *Platform) {
+func newSwiftPerformanceFixture(t *testing.T, scenarioPath string, pullPageSize int) (context.Context, scenarios.Scenario, *blackbox.Harness, *blackbox.NativeController, *Platform) {
 	t.Helper()
 	if !*warmConnectProvision || !*warmConnectInstall {
 		t.Fatal("TestRealSwiftPerformance requires --provision --install")
@@ -176,6 +224,7 @@ func newSwiftPerformanceFixture(t *testing.T, filename string) (context.Context,
 		},
 		Platform:      "macos",
 		AppVersion:    "0.3.0",
+		PullPageSize:  pullPageSize,
 		PushBatchSize: 1000,
 	})
 	if err != nil {
@@ -195,9 +244,9 @@ func newSwiftPerformanceFixture(t *testing.T, filename string) (context.Context,
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
 	t.Cleanup(cancel)
-	scenario, err := scenarios.LoadFile(ctx, repositoryRoot, "conformance/scenarios/performance/"+filename)
+	scenario, err := scenarios.LoadFile(ctx, repositoryRoot, filepath.Join("conformance", "scenarios", scenarioPath))
 	if err != nil {
-		t.Fatalf("load Swift performance scenario %s: %v", filename, err)
+		t.Fatalf("load Swift performance scenario %s: %v", scenarioPath, err)
 	}
 	return ctx, scenario, harness, controller, platform
 }

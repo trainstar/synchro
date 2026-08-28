@@ -106,7 +106,7 @@ func TestNativeInstallDetectsAuthoredPrivateAssignments(t *testing.T) {
 	}
 }
 
-func TestNativeInstallationDefersMembershipScopesUntilAssignment(t *testing.T) {
+func TestNativeInstallationBindsDeferredMembershipScopesOnlyWithPolicy(t *testing.T) {
 	payload := nativeInstallPayload{}
 	payload.InitialSchema.Schema = nativeSchemaReference{Version: 1, Hash: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}
 	payload.InitialSchema.Tables = []nativeAuthoredTable{{
@@ -169,6 +169,15 @@ func TestNativeInstallationDefersMembershipScopesUntilAssignment(t *testing.T) {
 	if got := binding.scopes["scope-b"]; got != "cf:global" {
 		t.Fatalf("unreferenced empty scope = %q, want cf:global", got)
 	}
+
+	payload.WritePolicies = []nativeWritePolicy{{UserID: "user-a", TableID: "items", Allowed: true}}
+	policyBinding, err := bindNativeInstallation(payload, runtime, 9)
+	if err != nil {
+		t.Fatalf("bind native policy installation: %v", err)
+	}
+	if got := policyBinding.scopes["scope-a"]; got != "user:user-a" {
+		t.Fatalf("policy-bound membership scope = %q, want user:user-a", got)
+	}
 }
 
 func TestNativeControllerApplicationWriteMapsInstalledRuntimeIdentities(t *testing.T) {
@@ -211,6 +220,18 @@ func TestNativeControllerApplicationWriteMapsInstalledRuntimeIdentities(t *testi
 	}
 	if err := json.Unmarshal(operation.Payload, &authored); err != nil || authored.TableID != "items" || authored.PK["item-id"] != "row-a" {
 		t.Fatalf("authored application write changed: %#v, %v", authored, err)
+	}
+	fieldValueOperation := operation
+	fieldValueOperation.Payload = json.RawMessage(`{"authenticated_user_id":"user-a","client_id":"client-a","mutation_id":"00000000-0000-4000-8000-000000000002","table_id":"items","pk":{"field_id":"item-id","value":"row-b"},"authored_schema":{"version":1,"hash":"721d2c95e6f34cd9733feea9f5118fba391eee10d07663dad066cfc59439fa44"},"operation":"insert","client_version":"2026-08-11T00:00:00.000000Z","columns":[{"field_id":"value","value":"pending"}]}`)
+	fieldValueMapped, err := controller.ApplicationWrite(fieldValueOperation)
+	if err != nil {
+		t.Fatalf("map field-value native application write: %v", err)
+	}
+	var fieldValuePayload struct {
+		PK map[string]string `json:"pk"`
+	}
+	if err := json.Unmarshal(fieldValueMapped.Payload, &fieldValuePayload); err != nil || fieldValuePayload.PK["id"] != nativeRuntimeUUID("items", `"row-b"`) {
+		t.Fatalf("mapped field-value application write = %#v, %v", fieldValuePayload, err)
 	}
 }
 

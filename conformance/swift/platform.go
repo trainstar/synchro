@@ -98,6 +98,7 @@ type Platform struct {
 	responseProxy                 *httptest.Server
 	rebuildCursorOverride         string
 	rebuildCursorOverrideClientID string
+	rebuildResponseCursors        map[string]string
 }
 
 type platformClient struct {
@@ -144,7 +145,7 @@ func NewPlatform(config Config) (*Platform, error) {
 	if err != nil {
 		return nil, err
 	}
-	platform := &Platform{config: normalized, clients: make(map[string]*platformClient)}
+	platform := &Platform{config: normalized, clients: make(map[string]*platformClient), rebuildResponseCursors: make(map[string]string)}
 	if err := platform.startResponseProxy(); err != nil {
 		return nil, err
 	}
@@ -196,33 +197,44 @@ func (p *Platform) modifyProxiedResponse(response *http.Response) error {
 		override = ""
 	}
 	p.mu.Unlock()
-	if override == "" {
-		return nil
-	}
 	body, err := io.ReadAll(io.LimitReader(response.Body, maximumMutatedResponseBytes+1))
 	response.Body.Close()
 	if err != nil || len(body) > maximumMutatedResponseBytes {
-		return errors.New("read Swift rebuild response for mutation failed")
+		return errors.New("read Swift rebuild response failed")
 	}
 	var value map[string]json.RawMessage
 	if err := json.Unmarshal(body, &value); err != nil {
-		return errors.New("decode Swift rebuild response for mutation failed")
+		return errors.New("decode Swift rebuild response failed")
 	}
 	var cursor string
-	if err := json.Unmarshal(value["cursor"], &cursor); err != nil {
-		return errors.New("Swift rebuild cursor mutation target is invalid")
+	if raw, found := value["cursor"]; found && string(raw) != "null" {
+		if err := json.Unmarshal(raw, &cursor); err != nil || cursor == "" {
+			return errors.New("Swift rebuild response cursor is invalid")
+		}
 	}
-	value["cursor"], err = json.Marshal(override)
-	if err != nil {
-		return errors.New("encode Swift rebuild cursor mutation failed")
+	proxied := body
+	if override != "" {
+		if cursor == "" {
+			return errors.New("Swift rebuild cursor mutation target is invalid")
+		}
+		cursor = override
+		value["cursor"], err = json.Marshal(override)
+		if err != nil {
+			return errors.New("encode Swift rebuild cursor mutation failed")
+		}
+		proxied, err = json.Marshal(value)
+		if err != nil {
+			return errors.New("encode Swift rebuild response mutation failed")
+		}
 	}
-	mutated, err := json.Marshal(value)
-	if err != nil {
-		return errors.New("encode Swift rebuild response mutation failed")
+	if cursor != "" && clientID != "" {
+		p.mu.Lock()
+		p.rebuildResponseCursors[clientID] = cursorFingerprint(cursor)
+		p.mu.Unlock()
 	}
-	response.Body = io.NopCloser(bytes.NewReader(mutated))
-	response.ContentLength = int64(len(mutated))
-	response.Header.Set("Content-Length", strconv.Itoa(len(mutated)))
+	response.Body = io.NopCloser(bytes.NewReader(proxied))
+	response.ContentLength = int64(len(proxied))
+	response.Header.Set("Content-Length", strconv.Itoa(len(proxied)))
 	return nil
 }
 
@@ -253,6 +265,9 @@ func normalizePlatformConfig(config Config) (Config, error) {
 	}
 	if config.Platform != "macos" || len(config.AppVersion) > 128 {
 		return Config{}, errors.New("Swift platform supports only current macOS")
+	}
+	if config.PullPageSize < 0 || config.PullPageSize > 1000 {
+		return Config{}, errors.New("Swift platform pull page size is invalid")
 	}
 	if config.PushBatchSize == 0 {
 		config.PushBatchSize = 100
@@ -431,6 +446,7 @@ func (p *Platform) startClient(ctx context.Context, state *platformClient, seedP
 		SeedDatabasePath: seedPath,
 		Platform:         p.config.Platform,
 		AppVersion:       p.config.AppVersion,
+		PullPageSize:     p.config.PullPageSize,
 		PushBatchSize:    p.config.PushBatchSize,
 	})
 	if err != nil {
@@ -925,7 +941,12 @@ func (p *Platform) BeginCall(ctx context.Context, client Client, callID, method 
 	}
 	checkpoint := state.session.Checkpoint()
 	started := time.Now()
-	if _, err := state.session.Execute(ctx, Request{Operation: "arm-transport-pause", TransportOperation: operationClass}); err != nil {
+	pauseAfterConnect := !state.started && operationClass != "connect"
+	firstPauseClass := operationClass
+	if pauseAfterConnect {
+		firstPauseClass = "connect"
+	}
+	if _, err := state.session.Execute(ctx, Request{Operation: "arm-transport-pause", TransportOperation: firstPauseClass}); err != nil {
 		return CallResult{}, fmt.Errorf("arm Swift transport pause: %w", err)
 	}
 	begin, err := state.session.Execute(ctx, Request{Operation: "begin-call", CallID: callID, Method: method})
@@ -936,14 +957,42 @@ func (p *Platform) BeginCall(ctx context.Context, client Client, callID, method 
 	if err != nil || inFlight.CallID != callID || inFlight.State != "in_flight" || inFlight.Completion != "" {
 		return CallResult{}, errors.New("Swift paused call did not enter flight")
 	}
-	if _, err := state.session.Execute(ctx, Request{Operation: "await-transport-pause", TransportOperation: operationClass}); err != nil {
+	if _, err := state.session.Execute(ctx, Request{Operation: "await-transport-pause", TransportOperation: firstPauseClass}); err != nil {
 		return CallResult{}, fmt.Errorf("await Swift transport pause: %w", err)
+	}
+	if pauseAfterConnect {
+		connect, err := state.session.ObservationsAfter(checkpoint)
+		if err != nil {
+			return CallResult{}, err
+		}
+		if len(connect) != 1 || connect[0].OperationClass != "connect" || connect[0].StatusCode != http.StatusOK || connect[0].ErrorCode != nil || connect[0].Retryable {
+			return CallResult{}, errors.New("Swift staged call setup connect did not succeed")
+		}
+		if _, err := state.session.Execute(ctx, Request{Operation: "arm-transport-pause", TransportOperation: operationClass}); err != nil {
+			return CallResult{}, fmt.Errorf("arm covered Swift transport pause: %w", err)
+		}
+		if _, err := state.session.Execute(ctx, Request{Operation: "resume-transport-pause"}); err != nil {
+			return CallResult{}, fmt.Errorf("resume Swift staged call setup connect: %w", err)
+		}
+		if err := waitForTransportObservation(ctx, state, checkpoint, operationClass); err != nil {
+			return CallResult{}, err
+		}
+		if _, err := state.session.Execute(ctx, Request{Operation: "await-transport-pause", TransportOperation: operationClass}); err != nil {
+			return CallResult{}, fmt.Errorf("await covered Swift transport pause: %w", err)
+		}
 	}
 	observations, err := state.session.ObservationsAfter(checkpoint)
 	if err != nil {
 		return CallResult{}, err
 	}
-	mapped, err := mapTransportOperations(operations, observations, before)
+	covered := observations
+	if pauseAfterConnect {
+		if len(observations) != 2 {
+			return CallResult{}, errors.New("Swift staged call setup produced unexpected transport")
+		}
+		covered = observations[1:]
+	}
+	mapped, err := mapTransportOperations(operations, covered, before)
 	if err != nil {
 		return CallResult{}, err
 	}
@@ -981,6 +1030,24 @@ func (p *Platform) AwaitStep(ctx context.Context, client Client, callID string, 
 		return StepObservation{}, errors.New("Swift await-step has no matching paused call")
 	}
 	checkpoint := state.session.Checkpoint()
+	var rebuildCursorSource, expectedRebuildCursor string
+	if operationClass == "rebuild" {
+		var payload struct {
+			CursorSource string `json:"cursor_source"`
+		}
+		if err := json.Unmarshal(operation.Payload, &payload); err != nil {
+			return StepObservation{}, errors.New("decode paused Swift rebuild cursor source failed")
+		}
+		rebuildCursorSource = payload.CursorSource
+		if rebuildCursorSource == "local_rebuild_continuation" {
+			p.mu.Lock()
+			expectedRebuildCursor = p.rebuildResponseCursors[client.ClientID]
+			p.mu.Unlock()
+			if expectedRebuildCursor == "" {
+				return StepObservation{}, errors.New("Swift paused rebuild continuation has no preceding response cursor")
+			}
+		}
+	}
 	if _, err := state.session.Execute(ctx, Request{Operation: "arm-transport-pause", TransportOperation: operationClass}); err != nil {
 		return StepObservation{}, fmt.Errorf("arm next Swift transport pause: %w", err)
 	}
@@ -1001,13 +1068,36 @@ func (p *Platform) AwaitStep(ctx context.Context, client Client, callID string, 
 	if err != nil {
 		return StepObservation{}, err
 	}
-	source, err := captureRunner(ctx, state)
-	if err != nil {
-		return StepObservation{}, err
-	}
-	mapped, err := mapTransportOperations(RequestOperations{operation}, observations, source)
-	if err != nil {
-		return StepObservation{}, err
+	var mapped []StepObservation
+	if operationClass == "rebuild" && rebuildCursorSource == "local_rebuild_continuation" {
+		if len(observations) != 1 || observations[0].RequestFacts == nil || observations[0].RequestFacts.CursorFingerprint == nil || *observations[0].RequestFacts.CursorFingerprint != expectedRebuildCursor {
+			return StepObservation{}, errors.New("Swift paused rebuild request did not use the preceding response cursor")
+		}
+		if err := validateOperationTransportFacts(operation, observations[0]); err != nil {
+			return StepObservation{}, err
+		}
+		observation, err := transportStepObservation(observations[0])
+		if err != nil {
+			return StepObservation{}, err
+		}
+		mapped = []StepObservation{observation}
+		p.mu.Lock()
+		if p.rebuildResponseCursors[client.ClientID] == expectedRebuildCursor {
+			delete(p.rebuildResponseCursors, client.ClientID)
+		}
+		p.mu.Unlock()
+	} else {
+		source := runnerResult{}
+		if operationClass != "rebuild" {
+			source, err = captureRunner(ctx, state)
+			if err != nil {
+				return StepObservation{}, err
+			}
+		}
+		mapped, err = mapTransportOperations(RequestOperations{operation}, observations, source)
+		if err != nil {
+			return StepObservation{}, err
+		}
 	}
 	active.observedCheckpoint = state.session.Checkpoint()
 	active.paused = true
@@ -1054,13 +1144,18 @@ func (p *Platform) AwaitCall(ctx context.Context, client Client, callID string) 
 	if err != nil {
 		return CallResult{}, err
 	}
-	after, err := captureRunner(ctx, state)
-	if err != nil {
-		return CallResult{}, err
-	}
-	window, err := windowFromResults(active.started, active.before, after, observations)
-	if err != nil {
-		return CallResult{}, err
+	var window operationWindow
+	if completed.Completion == "error" {
+		window = operationWindow{observations: observations, duration: time.Since(active.started)}
+	} else {
+		after, err := captureRunner(ctx, state)
+		if err != nil {
+			return CallResult{}, err
+		}
+		window, err = windowFromResults(active.started, active.before, after, observations)
+		if err != nil {
+			return CallResult{}, err
+		}
 	}
 	if state.restarted {
 		window.replayedMutationCount = pushMutationCount(window.observations)
@@ -1259,8 +1354,12 @@ func validateCursorSourceBinding(operation scenarios.Operation, observation tran
 		case "local_rebuild_continuation":
 			var cursor string
 			matches := 0
+			rebuildFingerprint := cursorFingerprint(payload.RebuildID)
+			if facts.RebuildIDFingerprint != nil {
+				rebuildFingerprint = *facts.RebuildIDFingerprint
+			}
 			for _, attempt := range source.RebuildAttempts {
-				if attempt.RebuildID == payload.RebuildID {
+				if cursorFingerprint(attempt.RebuildID) == rebuildFingerprint {
 					matches++
 					if attempt.Cursor != nil {
 						cursor = *attempt.Cursor

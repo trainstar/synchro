@@ -114,11 +114,17 @@ type nativeTransactionBinding struct {
 	AuthoredStream       string
 	AuthoredCommitLSN    string
 	AuthoredEndLSN       string
+	AuthoredUserID       string
+	AuthoredClientID     string
+	AuthoredBatchID      string
+	AuthoredMutationIDs  []string
 	Events               []nativeEventBinding
 	RuntimeStream        string
 	RuntimeCommitLSN     string
 	RuntimeEndLSN        string
 	RuntimeRegistry      int64
+	RuntimeBatchID       string
+	RuntimeMutationIDs   []string
 	RuntimeEventOrdinals []uint64
 	Materialized         bool
 	ApplicationPush      bool
@@ -205,7 +211,14 @@ type nativeInstallPayload struct {
 		ClientID         string   `json:"client_id"`
 		AssignedScopeIDs []string `json:"assigned_scope_ids"`
 	} `json:"clients"`
+	WritePolicies    []nativeWritePolicy            `json:"write_policies"`
 	ConfiguredLimits scenarios.ConfiguredLimitsFact `json:"configured_limits"`
+}
+
+type nativeWritePolicy struct {
+	UserID  string `json:"user_id"`
+	TableID string `json:"table_id"`
+	Allowed bool   `json:"allowed"`
 }
 
 type nativePublishedSchema struct {
@@ -530,6 +543,50 @@ func bindNativeInstallation(payload nativeInstallPayload, runtime nativeRuntimeM
 			}
 		}
 	}
+	if !hasInitialAssignments {
+		policyUsers := make(map[string]map[string]struct{})
+		for _, policy := range payload.WritePolicies {
+			if !policy.Allowed {
+				continue
+			}
+			if !validNativeIdentity(policy.UserID) {
+				return nil, errors.New("native controller write-policy user identity is invalid")
+			}
+			if _, found := result.tables[policy.TableID]; !found {
+				return nil, errors.New("native controller write-policy table identity is not bound")
+			}
+			if policyUsers[policy.TableID] == nil {
+				policyUsers[policy.TableID] = make(map[string]struct{})
+			}
+			policyUsers[policy.TableID][policy.UserID] = struct{}{}
+		}
+		scopeUsers := make(map[string]map[string]struct{})
+		for key, scopes := range result.rowScopes {
+			tableID, _, found := strings.Cut(key, "\x00")
+			users := policyUsers[tableID]
+			if !found || len(users) != 1 {
+				continue
+			}
+			for _, scope := range scopes {
+				if scopeUsers[scope] == nil {
+					scopeUsers[scope] = make(map[string]struct{})
+				}
+				for user := range users {
+					scopeUsers[scope][user] = struct{}{}
+				}
+			}
+		}
+		for scope, users := range scopeUsers {
+			if len(users) != 1 {
+				continue
+			}
+			for user := range users {
+				if err := bindNativeScope(result, scope, "user:"+user); err != nil {
+					return nil, err
+				}
+			}
+		}
+	}
 	deferredMembershipScopes := make(map[string]struct{})
 	if !hasInitialAssignments {
 		for _, scopes := range result.rowScopes {
@@ -815,12 +872,20 @@ func (c *NativeController) ApplicationWrite(operation scenarios.Operation) (scen
 		return scenarios.Operation{}, errors.New("native application write table has no runtime binding")
 	}
 	primaryKey, ok := payload["pk"].(map[string]any)
-	if !ok || len(primaryKey) != 1 {
+	if !ok {
 		return scenarios.Operation{}, errors.New("native application write primary key is invalid")
 	}
-	primaryValue, found := primaryKey[table.AuthoredPrimary]
+	var primaryValue any
+	var primaryFound bool
+	if len(primaryKey) == 1 {
+		primaryValue, primaryFound = primaryKey[table.AuthoredPrimary]
+	} else if len(primaryKey) == 2 {
+		fieldID, fieldFound := primaryKey["field_id"].(string)
+		primaryValue, primaryFound = primaryKey["value"]
+		primaryFound = fieldFound && primaryFound && fieldID == table.AuthoredPrimary
+	}
 	primaryName := table.FieldNames[table.AuthoredPrimary]
-	if !found || primaryName == "" {
+	if !primaryFound || primaryName == "" {
 		return scenarios.Operation{}, errors.New("native application write primary key has no runtime binding")
 	}
 	canonicalPrimary, err := json.Marshal(primaryValue)
@@ -909,13 +974,21 @@ func (c *NativeController) BindApplicationPush(operation scenarios.Operation) er
 		return errors.New("native controller contract is unavailable")
 	}
 	transaction := &nativeTransactionBinding{
-		AuthoredStream:    c.installation.authoredStream,
-		AuthoredCommitLSN: payload.CommitLSN,
-		AuthoredEndLSN:    payload.EndLSN,
-		ApplicationPush:   true,
+		AuthoredStream:      c.installation.authoredStream,
+		AuthoredCommitLSN:   payload.CommitLSN,
+		AuthoredEndLSN:      payload.EndLSN,
+		AuthoredUserID:      payload.AuthenticatedUserID,
+		AuthoredClientID:    payload.Request.ClientID,
+		AuthoredBatchID:     payload.Request.BatchID,
+		AuthoredMutationIDs: make([]string, 0, len(payload.Request.Mutations)),
+		ApplicationPush:     true,
 	}
 	seenRecords := make(map[string]struct{}, len(payload.Request.Mutations))
 	for ordinal, mutation := range payload.Request.Mutations {
+		if !validNativeIdentity(mutation.MutationID) {
+			return errors.New("native application push mutation identity is invalid")
+		}
+		transaction.AuthoredMutationIDs = append(transaction.AuthoredMutationIDs, mutation.MutationID)
 		table, found := c.installation.tables[mutation.Table]
 		if !found || mutation.Op != "insert" || len(mutation.PK) != 1 {
 			return errors.New("native application push mutation is unsupported")
@@ -2031,6 +2104,64 @@ func (c *NativeController) resolveApplicationPushRecords(ctx context.Context, tr
 		event.After.Version = version
 		event.After.Checksum = checksum
 	}
+	type pushIdentity struct {
+		mutationID string
+		batchID    string
+		ordinal    int
+		tableID    string
+		primaryKey json.RawMessage
+	}
+	rows, err := database.QueryContext(ctx, `
+		SELECT mutation_id::text, first_batch_id::text, request_ordinal, table_id, primary_key_value
+		FROM synchro.sync_push_mutations
+		WHERE user_id = $1 AND client_id = $2
+		ORDER BY first_batch_id, request_ordinal`, transaction.AuthoredUserID, transaction.AuthoredClientID)
+	if err != nil {
+		return errors.New("read native application push identities failed")
+	}
+	defer rows.Close()
+	byBatch := make(map[string][]pushIdentity)
+	for rows.Next() {
+		var value pushIdentity
+		if err := rows.Scan(&value.mutationID, &value.batchID, &value.ordinal, &value.tableID, &value.primaryKey); err != nil {
+			return errors.New("scan native application push identity failed")
+		}
+		byBatch[value.batchID] = append(byBatch[value.batchID], value)
+	}
+	if err := rows.Err(); err != nil {
+		return errors.New("read native application push identities failed")
+	}
+	var runtimeBatchID string
+	var runtimeMutationIDs []string
+	for batchID, values := range byBatch {
+		if len(values) != len(transaction.Events) {
+			continue
+		}
+		matches := true
+		mutations := make([]string, len(values))
+		for index, value := range values {
+			event := transaction.Events[index]
+			runtimePrimary, marshalErr := json.Marshal(event.RuntimeRecordID)
+			if marshalErr != nil || value.ordinal != index+1 || value.tableID != event.Table.RuntimeID || !nativeJSONEqual(value.primaryKey, runtimePrimary) {
+				matches = false
+				break
+			}
+			mutations[index] = value.mutationID
+		}
+		if !matches {
+			continue
+		}
+		if runtimeBatchID != "" {
+			return errors.New("native application push identity binding is ambiguous")
+		}
+		runtimeBatchID = batchID
+		runtimeMutationIDs = mutations
+	}
+	if runtimeBatchID == "" {
+		return errors.New("native application push identity binding is absent")
+	}
+	transaction.RuntimeBatchID = runtimeBatchID
+	transaction.RuntimeMutationIDs = runtimeMutationIDs
 	return nil
 }
 
@@ -2183,7 +2314,9 @@ func (c *NativeController) captureServerState(ctx context.Context) (scenarios.St
 	transactions := make([]*nativeTransactionBinding, 0, len(c.transactions))
 	for _, value := range c.transactions {
 		copy := *value
+		copy.AuthoredMutationIDs = append([]string(nil), value.AuthoredMutationIDs...)
 		copy.Events = append([]nativeEventBinding(nil), value.Events...)
+		copy.RuntimeMutationIDs = append([]string(nil), value.RuntimeMutationIDs...)
 		copy.RuntimeEventOrdinals = append([]uint64(nil), value.RuntimeEventOrdinals...)
 		transactions = append(transactions, &copy)
 	}
@@ -2396,15 +2529,16 @@ func captureNativeCountsAndRebuilds(ctx context.Context, tx *sql.Tx, installatio
 		       session.page_limit, session.staged_row_count,
 		       (SELECT count(*) FROM synchro.sync_rebuild_pages page
 		        WHERE page.session_id = session.session_id),
-		       COALESCE((SELECT max(page.next_row_ordinal) FROM synchro.sync_rebuild_pages page
-		                 WHERE page.session_id = session.session_id), 0),
+		       COALESCE((SELECT max(page.next_row_ordinal + jsonb_array_length(page.response->'records') + 1)
+		                 FROM synchro.sync_rebuild_pages page
+		                 WHERE page.session_id = session.session_id), 1),
 		       EXISTS (SELECT 1 FROM synchro.sync_rebuild_pages page
 		               WHERE page.session_id = session.session_id
 		                 AND NULLIF(page.response->>'cursor', '') IS NOT NULL),
 		       EXISTS (SELECT 1 FROM synchro.sync_rebuild_pages page
 		               WHERE page.session_id = session.session_id
 		                 AND NULLIF(page.response->>'final_scope_cursor', '') IS NOT NULL),
-		       CASE WHEN expires_at <= now() THEN 'expired' ELSE 'active' END
+		       CASE WHEN expires_at <= now() THEN 'expired' ELSE 'staged' END
 		FROM synchro.sync_rebuild_sessions session
 		ORDER BY session.user_id, session.client_id, session.scope_id, session.rebuild_id`)
 	if err != nil {
