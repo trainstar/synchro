@@ -774,7 +774,6 @@
             crate::health::ReadinessConfiguration {
                 database: Some(database),
                 publication: Some("synchro_pub".to_string()),
-                replication_slot: Some("synchro_reset_old".to_string()),
                 worker_login: Some("missing_reset_worker".to_string()),
                 max_heartbeat_age_seconds: 30,
                 max_wal_lag_bytes: i32::MAX,

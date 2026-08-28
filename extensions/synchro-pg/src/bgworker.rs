@@ -29,12 +29,14 @@ const WORKER_ID: &str = "synchro_wal_consumer";
 const REGISTRY_PREFIX: &str = "synchro_registry";
 const FENCE_PREFIX: &str = "synchro_fence";
 const MAX_CONTROL_MESSAGE_BYTES: usize = 4096;
+const MAX_POISON_DETAIL_BYTES: usize = 512;
 const STARTUP_RETRY_BUDGET: std::time::Duration = std::time::Duration::from_secs(30);
 const STARTUP_RETRY_WAIT: std::time::Duration = std::time::Duration::from_secs(1);
 
 #[derive(Clone)]
 struct PoisonFailure {
     class: &'static str,
+    detail: String,
     commit_lsn: u64,
     relation_id: Option<String>,
     commit_timestamp: Option<i64>,
@@ -2489,6 +2491,8 @@ fn poll_and_process(
                         if sql_xid != transaction.xid {
                             return Err(PollFailure::Poison(PoisonFailure {
                                 class: "validation_failed",
+                                detail: "WAL transaction identifier did not match the decoded transaction"
+                                    .to_string(),
                                 commit_lsn: transaction.commit_lsn,
                                 relation_id: infer_transaction_relation_id(transaction),
                                 commit_timestamp: Some(transaction.commit_timestamp),
@@ -2505,6 +2509,7 @@ fn poll_and_process(
             Err(_) => {
                 return Err(PollFailure::Poison(PoisonFailure {
                     class: "decode_failed",
+                    detail: "WAL decoder rejected a replication message".to_string(),
                     commit_lsn: pending_final_lsn.unwrap_or(message.lsn),
                     relation_id: None,
                     commit_timestamp: pending_commit_timestamp,
@@ -2527,6 +2532,7 @@ fn poll_and_process(
         if previous.is_some_and(|commit_lsn| commit_lsn >= transaction.commit_lsn) {
             return Err(PollFailure::Poison(PoisonFailure {
                 class: "validation_failed",
+                detail: "decoded transactions were not in commit order".to_string(),
                 commit_lsn: transaction.commit_lsn,
                 relation_id: infer_transaction_relation_id(transaction),
                 commit_timestamp: Some(transaction.commit_timestamp),
@@ -2591,6 +2597,8 @@ fn validate_slot_boundary(slot: &str, worker_role_oid: pg_sys::Oid) -> Result<()
             if actual != expected {
                 return Err(PollFailure::Poison(PoisonFailure {
                     class: "transaction_commit_failed",
+                    detail: "logical slot acknowledgement did not match durable progress"
+                        .to_string(),
                     commit_lsn: actual,
                     relation_id: None,
                     commit_timestamp: None,
@@ -3005,7 +3013,11 @@ fn validate_activation_chain(
     let mut seen = HashSet::new();
     for generation in activations {
         if !seen.insert(*generation) {
-            return Err(failure("validation_failed", transaction.commit_lsn));
+            return Err(failure_with_detail(
+                "validation_failed",
+                transaction.commit_lsn,
+                "registry activation contained a duplicate generation",
+            ));
         }
         let rows = client
             .select(
@@ -3016,31 +3028,69 @@ fn validate_activation_chain(
                 None,
                 &[(*generation).into()],
             )
-            .map_err(|_| failure("validation_failed", transaction.commit_lsn))?;
+            .map_err(|_| {
+                failure_with_detail(
+                    "validation_failed",
+                    transaction.commit_lsn,
+                    "loading registry activation state failed",
+                )
+            })?;
         let Some(row) = rows.into_iter().next() else {
-            return Err(failure("validation_failed", transaction.commit_lsn));
+            return Err(failure_with_detail(
+                "validation_failed",
+                transaction.commit_lsn,
+                "registry activation generation is missing",
+            ));
         };
         let actual_parent = row
             .get_by_name::<i64, &str>("parent_generation")
-            .map_err(|_| failure("validation_failed", transaction.commit_lsn))?;
+            .map_err(|_| {
+                failure_with_detail(
+                    "validation_failed",
+                    transaction.commit_lsn,
+                    "reading registry activation parent failed",
+                )
+            })?;
         let validated = row
             .get_by_name::<bool, &str>("validated")
-            .map_err(|_| failure("validation_failed", transaction.commit_lsn))?
+            .map_err(|_| {
+                failure_with_detail(
+                    "validation_failed",
+                    transaction.commit_lsn,
+                    "reading registry activation validation state failed",
+                )
+            })?
             .unwrap_or(false);
         let state = row
             .get_by_name::<String, &str>("state")
-            .map_err(|_| failure("validation_failed", transaction.commit_lsn))?
+            .map_err(|_| {
+                failure_with_detail(
+                    "validation_failed",
+                    transaction.commit_lsn,
+                    "reading registry activation lifecycle state failed",
+                )
+            })?
             .unwrap_or_default();
         let stream = row
             .get_by_name::<String, &str>("stream_generation")
-            .map_err(|_| failure("validation_failed", transaction.commit_lsn))?
+            .map_err(|_| {
+                failure_with_detail(
+                    "validation_failed",
+                    transaction.commit_lsn,
+                    "reading registry activation stream generation failed",
+                )
+            })?
             .unwrap_or_default();
         if actual_parent != Some(parent)
             || !validated
             || state != "pending"
             || stream != stream_generation
         {
-            return Err(failure("validation_failed", transaction.commit_lsn));
+            return Err(failure_with_detail(
+                "validation_failed",
+                transaction.commit_lsn,
+                "registry activation is not a validated pending generation",
+            ));
         }
         parent = *generation;
     }
@@ -5087,10 +5137,10 @@ fn persist_poison(failure: PoisonFailure) -> Result<(), String> {
             client
                 .update(
                     "INSERT INTO synchro.sync_wal_poison (
-                         stream_generation, commit_lsn, failure_class,
-                         relation_id, lifecycle, poisoned_at, attempt_count
-                     )
-                      SELECT $1, $2::pg_lsn, $3, $4::uuid, 'active', now(), 1
+                          stream_generation, commit_lsn, failure_class,
+                          failure_detail, relation_id, lifecycle, poisoned_at, attempt_count
+                      )
+                       SELECT $1, $2::pg_lsn, $3, $4, $5::uuid, 'active', now(), 1
                       WHERE NOT EXISTS (
                           SELECT 1
                           FROM synchro.sync_wal_poison
@@ -5101,6 +5151,7 @@ fn persist_poison(failure: PoisonFailure) -> Result<(), String> {
                         stream.as_str().into(),
                         format_lsn(failure.commit_lsn).as_str().into(),
                         failure.class.into(),
+                        failure.detail.as_str().into(),
                         failure.relation_id.as_deref().into(),
                     ],
                 )
@@ -5372,12 +5423,38 @@ fn format_lsn(value: u64) -> String {
 }
 
 fn failure(class: &'static str, commit_lsn: u64) -> PoisonFailure {
+    let detail = match class {
+        "decode_failed" => "WAL decoding failed",
+        "validation_failed" => "WAL validation failed",
+        "fence_correlation_failed" => "WAL fence correlation failed",
+        "materialization_failed" => "WAL materialization failed",
+        "projection_write_failed" => "WAL projection write failed",
+        "scope_evaluation_failed" => "WAL scope evaluation failed",
+        "transaction_commit_failed" => "WAL transaction commit failed",
+        "truncate_unsupported" => "WAL transaction truncated a registered relation",
+        "registered_relation_drift" => "registered relation metadata drifted",
+        "activation_barrier" => "WAL processing reached an activation barrier",
+        _ => "WAL processing failed",
+    };
+    failure_with_detail(class, commit_lsn, detail)
+}
+
+fn failure_with_detail(class: &'static str, commit_lsn: u64, detail: &str) -> PoisonFailure {
     PoisonFailure {
         class,
+        detail: bounded_poison_detail(detail),
         commit_lsn,
         relation_id: None,
         commit_timestamp: None,
     }
+}
+
+fn bounded_poison_detail(detail: &str) -> String {
+    let mut end = detail.len().min(MAX_POISON_DETAIL_BYTES);
+    while !detail.is_char_boundary(end) {
+        end -= 1;
+    }
+    detail[..end].to_string()
 }
 
 fn run_worker_transaction<R, E, F: FnOnce() -> Result<R, E> + UnwindSafe + RefUnwindSafe>(
@@ -5435,6 +5512,15 @@ mod tests {
                 &serde_json::json!({ "field-deleted-at": "2026-08-17T02:31:43.476060Z" }),
             ),
             Ok(true)
+        );
+    }
+
+    #[test]
+    fn poison_detail_stays_within_the_storage_bound() {
+        let detail = format!("{}x", "a".repeat(MAX_POISON_DETAIL_BYTES));
+        assert_eq!(
+            bounded_poison_detail(&detail).len(),
+            MAX_POISON_DETAIL_BYTES
         );
     }
 }

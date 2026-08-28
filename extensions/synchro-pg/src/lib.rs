@@ -1343,6 +1343,9 @@ CREATE TABLE IF NOT EXISTS sync_wal_poison (
         'truncate_unsupported',
         'registered_relation_drift'
     )),
+    failure_detail TEXT NOT NULL CHECK (
+        octet_length(failure_detail) BETWEEN 1 AND 512
+    ),
     relation_id UUID,
     lifecycle TEXT NOT NULL DEFAULT 'active' CHECK (lifecycle IN ('active', 'repaired', 'reset')),
     poisoned_at TIMESTAMPTZ NOT NULL DEFAULT now(),

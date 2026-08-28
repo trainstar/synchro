@@ -33,13 +33,6 @@
         )
         .expect("provision health test identity");
         setup_test_tables();
-        Spi::run(
-            "SELECT pg_catalog.pg_drop_replication_slot(slot_name)
-             FROM pg_catalog.pg_replication_slots
-             WHERE slot_name = 'synchro_slot';
-             SELECT pg_catalog.pg_create_logical_replication_slot('synchro_slot', 'pgoutput')",
-        )
-        .expect("create default health test slot");
         Spi::run_with_args(
             "WITH slot AS (
                  SELECT slot_name, confirmed_flush_lsn
@@ -110,15 +103,9 @@
             configuration.clone(),
         )
         .detail();
-        let default_capture_checks_ok = [
-            "publication",
-            "replication_slot",
-            "heartbeat",
-            "wal_byte_lag",
-            "wal_time_lag",
-        ]
-        .into_iter()
-        .all(|check| default_detail["checks"][check]["state"].as_str() == Some("ok"));
+        let default_limits_accepted = ["heartbeat", "wal_byte_lag", "wal_time_lag"]
+            .into_iter()
+            .all(|check| default_detail["checks"][check]["reason"].as_str() != Some("invalid_limit"));
 
         Spi::run(
             "ALTER TABLE public.test_orders DISABLE TRIGGER synchro_capture_fence",
@@ -197,9 +184,9 @@
 
         Spi::run(
             "INSERT INTO synchro.sync_wal_poison (
-                 stream_generation, commit_lsn, failure_class, lifecycle
-             )
-             SELECT stream_generation, '0/1', 'decode_failed', 'active'
+                 stream_generation, commit_lsn, failure_class, failure_detail, lifecycle
+              )
+              SELECT stream_generation, '0/1', 'decode_failed', 'WAL decoder rejected a replication message', 'active'
              FROM synchro.sync_runtime_state WHERE singleton",
         )
         .expect("create blocking health test poison");
@@ -208,7 +195,11 @@
         )
         .detail();
         let poison_rejected = !poison_detail["ready"].as_bool().unwrap_or(true)
-            && poison_detail["checks"]["poison"]["state"].as_str() == Some("failed");
+            && poison_detail["checks"]["poison"]["state"].as_str() == Some("failed")
+            && poison_detail["observations"]["poison"]["failure_class"].as_str()
+                == Some("decode_failed")
+            && poison_detail["observations"]["poison"]["failure_detail"].as_str()
+                == Some("WAL decoder rejected a replication message");
         Spi::run("DELETE FROM synchro.sync_wal_poison WHERE lifecycle = 'active'")
             .expect("remove blocking health test poison");
 
@@ -222,8 +213,8 @@
             && invalid_limit_detail["checks"]["wal_byte_lag"]["reason"].as_str()
                 == Some("invalid_limit");
 
-        Spi::run("SELECT pg_catalog.pg_drop_replication_slot('synchro_slot')")
-            .expect("remove default health test slot");
+        Spi::run("UPDATE synchro.sync_runtime_state SET active_slot_name = 'synchro_missing_slot'")
+            .expect("hide default health test slot");
         let missing_slot_detail = crate::health::load_readiness_status_with_configuration(
             configuration.clone(),
         )
@@ -233,6 +224,11 @@
                 == Some("failed")
             && missing_slot_detail["checks"]["wal_byte_lag"]["state"].as_str()
                 == Some("unknown");
+        Spi::run_with_args(
+            "UPDATE synchro.sync_runtime_state SET active_slot_name = $1 WHERE singleton",
+            &[slot.into()],
+        )
+        .expect("restore default health test slot");
 
         Spi::run(
             "INSERT INTO synchro.sync_wal_transactions (
@@ -296,7 +292,7 @@
         .expect("remove health test identity");
 
         assert!(guc_defaults_visible);
-        assert!(default_capture_checks_ok);
+        assert!(default_limits_accepted);
         assert!(disabled_trigger_rejected);
         assert!(extra_publication_relation_rejected);
         assert!(stale_heartbeat_rejected);
@@ -306,6 +302,70 @@
         assert!(missing_slot_rejected);
         assert!(nonacknowledged_progress_rejected);
         assert!(bounded_detail, "detailed health exposed unbounded or sensitive state");
+    }
+
+    #[pg_test]
+    fn reset_health_uses_runtime_slot() {
+        let slot = "synchro_reset_health_candidate";
+        Spi::run(
+            "DROP ROLE IF EXISTS synchro_reset_health_worker;
+             CREATE ROLE synchro_reset_health_worker
+                 LOGIN REPLICATION NOINHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS;
+             GRANT synchro_worker TO synchro_reset_health_worker",
+        )
+        .expect("provision reset health worker");
+        setup_test_tables();
+        Spi::run_with_args(
+             "UPDATE synchro.sync_runtime_state
+               SET active_slot_name = $1, updated_at = now()
+               WHERE singleton;
+              INSERT INTO synchro.sync_wal_worker_state (
+                  worker_id, database_oid, database_name, worker_login_oid,
+                  backend_pid, state, registry_generation,
+                  materialized_commit_lsn, materialized_end_lsn,
+                  wal_observed_at, heartbeat_at, updated_at
+              )
+              SELECT 'synchro_wal_consumer', database.oid, database.datname,
+                     worker_role.oid, pg_backend_pid(), 'running',
+                     progress.registry_generation,
+                     progress.materialized_commit_lsn, progress.materialized_end_lsn,
+                     now(), now(), now()
+              FROM pg_catalog.pg_database database
+              CROSS JOIN pg_catalog.pg_roles worker_role
+              CROSS JOIN synchro.sync_wal_progress progress
+              WHERE database.datname = current_database()
+                AND worker_role.rolname = 'synchro_reset_health_worker'
+                AND progress.singleton",
+            &[slot.into()],
+        )
+        .expect("install reset health state");
+        let database: String = Spi::get_one("SELECT current_database()::text")
+            .expect("load reset health database")
+            .expect("reset health database");
+        let detail = crate::health::load_readiness_status_with_configuration(
+            crate::health::ReadinessConfiguration {
+                database: Some(database),
+                publication: Some("synchro_pub".to_string()),
+                worker_login: Some("synchro_reset_health_worker".to_string()),
+                max_heartbeat_age_seconds: 30,
+                max_wal_lag_bytes: i32::MAX,
+                max_wal_lag_seconds: 30,
+            },
+        )
+        .detail();
+        let runtime_slot_is_observed = detail["observations"]["active_slot_name"] == slot;
+
+        Spi::run(
+            "DELETE FROM synchro.sync_wal_worker_state
+              WHERE worker_id = 'synchro_wal_consumer';
+              REVOKE synchro_worker FROM synchro_reset_health_worker;
+              DROP ROLE synchro_reset_health_worker",
+        )
+        .expect("remove reset health state");
+
+        assert_eq!(detail["ready"], false);
+        assert_eq!(detail["checks"]["replication_slot"]["state"], "failed");
+        assert!(runtime_slot_is_observed);
     }
 
     #[pg_test]
@@ -328,7 +388,6 @@
         let configuration = crate::health::ReadinessConfiguration {
             database: Some(database),
             publication: Some("synchro_pub".to_string()),
-            replication_slot: Some("synchro_poison_scope_slot".to_string()),
             worker_login: Some("synchro_poison_scope_worker".to_string()),
             max_heartbeat_age_seconds: 30,
             max_wal_lag_bytes: i32::MAX,
@@ -336,8 +395,8 @@
         };
         Spi::run_with_args(
             "INSERT INTO synchro.sync_wal_poison (
-                 stream_generation, commit_lsn, failure_class, lifecycle
-             ) VALUES ($1, '0/1', 'validation_failed', 'active')",
+                 stream_generation, commit_lsn, failure_class, failure_detail, lifecycle
+             ) VALUES ($1, '0/1', 'validation_failed', 'WAL validation failed', 'active')",
             &[prior_generation.as_str().into()],
         )
         .expect("create prior generation poison");
@@ -368,8 +427,8 @@
 
         Spi::run_with_args(
             "INSERT INTO synchro.sync_wal_poison (
-                 stream_generation, commit_lsn, failure_class, lifecycle
-             ) VALUES ($1, '0/2', 'validation_failed', 'active')",
+                 stream_generation, commit_lsn, failure_class, failure_detail, lifecycle
+             ) VALUES ($1, '0/2', 'validation_failed', 'WAL validation failed', 'active')",
             &[current_generation.as_str().into()],
         )
         .expect("create current generation poison");

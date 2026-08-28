@@ -1317,6 +1317,9 @@ CREATE TABLE IF NOT EXISTS sync_wal_poison (
         'truncate_unsupported',
         'registered_relation_drift'
     )),
+    failure_detail TEXT NOT NULL CHECK (
+        octet_length(failure_detail) BETWEEN 1 AND 512
+    ),
     relation_id UUID,
     lifecycle TEXT NOT NULL DEFAULT 'active' CHECK (lifecycle IN ('active', 'repaired', 'reset')),
     poisoned_at TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -1924,7 +1927,7 @@ AS 'MODULE_PATHNAME', 'synchro_emit_projection_bootstrap_barrier_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- synchro-pg/src/health.rs:1015
+-- synchro-pg/src/health.rs:1038
 -- synchro_pg::health::synchro_health_detail
 CREATE  FUNCTION "synchro_health_detail"() RETURNS jsonb /* pgrx::datum::json::JsonB */
 STRICT
@@ -2125,7 +2128,7 @@ AS 'MODULE_PATHNAME', 'synchro_push_contract_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- synchro-pg/src/health.rs:1008
+-- synchro-pg/src/health.rs:1031
 -- synchro_pg::health::synchro_readiness
 CREATE  FUNCTION "synchro_readiness"() RETURNS jsonb /* pgrx::datum::json::JsonB */
 STRICT
@@ -2217,7 +2220,7 @@ AS 'MODULE_PATHNAME', 'synchro_request_projection_bootstrap_barrier_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- synchro-pg/src/bgworker.rs:639
+-- synchro-pg/src/bgworker.rs:641
 -- synchro_pg::bgworker::synchro_retry_wal_poison
 CREATE  FUNCTION "synchro_retry_wal_poison"() RETURNS bool /* bool */
 STRICT
@@ -2302,7 +2305,7 @@ AS 'MODULE_PATHNAME', 'synchro_unregister_table_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- synchro-pg/src/lib.rs:1822
+-- synchro-pg/src/lib.rs:1825
 -- finalize
 
 DO $roles$
