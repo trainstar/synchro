@@ -647,8 +647,10 @@ func (p *Platform) synchronizeWithResponseLoss(ctx context.Context, state *platf
 	started := time.Now()
 	callID := p.nextCallID(state)
 	operationClass, _, _, _ := requestDispatch(operations[0])
-	if _, err := state.session.Execute(ctx, Request{Operation: "arm-transport-pause", TransportOperation: operationClass}); err != nil {
-		return SynchronizationResult{}, fmt.Errorf("arm Swift transport pause: %w", err)
+	if !state.started {
+		if _, err := state.session.Execute(ctx, Request{Operation: "arm-transport-pause", TransportOperation: "connect"}); err != nil {
+			return SynchronizationResult{}, fmt.Errorf("arm Swift response-loss connect: %w", err)
+		}
 	}
 	begin, err := state.session.Execute(ctx, Request{Operation: "begin-call", CallID: callID, Method: method})
 	if err != nil {
@@ -658,6 +660,17 @@ func (p *Platform) synchronizeWithResponseLoss(ctx context.Context, state *platf
 	if err != nil || inFlight.CallID != callID || inFlight.State != "in_flight" || inFlight.Completion != "" {
 		return SynchronizationResult{}, errors.New("Swift public call did not enter flight")
 	}
+	if !state.started {
+		if _, err := state.session.Execute(ctx, Request{Operation: "await-transport-pause", TransportOperation: "connect"}); err != nil {
+			return SynchronizationResult{}, fmt.Errorf("await Swift response-loss connect: %w", err)
+		}
+		if _, err := state.session.Execute(ctx, Request{Operation: "arm-transport-pause", TransportOperation: operationClass}); err != nil {
+			return SynchronizationResult{}, fmt.Errorf("arm Swift response-loss transport: %w", err)
+		}
+		if _, err := state.session.Execute(ctx, Request{Operation: "resume-transport-pause"}); err != nil {
+			return SynchronizationResult{}, fmt.Errorf("resume Swift response-loss connect: %w", err)
+		}
+	}
 	if _, err := state.session.Execute(ctx, Request{Operation: "await-transport-pause", TransportOperation: operationClass}); err != nil {
 		return SynchronizationResult{}, fmt.Errorf("await Swift transport pause: %w", err)
 	}
@@ -665,7 +678,10 @@ func (p *Platform) synchronizeWithResponseLoss(ctx context.Context, state *platf
 	if err != nil {
 		return SynchronizationResult{}, err
 	}
-	mapped, err := mapTransportOperations(operations[:1], observations, before)
+	if len(observations) == 0 || observations[len(observations)-1].OperationClass != operationClass {
+		return SynchronizationResult{}, errors.New("Swift response-loss transport observation is not the covered request")
+	}
+	mapped, err := mapTransportOperations(operations[:1], observations[len(observations)-1:], before)
 	if err != nil {
 		return SynchronizationResult{}, err
 	}
