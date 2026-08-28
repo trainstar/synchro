@@ -131,7 +131,7 @@ func runStart(ctx context.Context, args []string) error {
 		_ = harness.Close(context.Background())
 		return fmt.Errorf("write local PostgreSQL URL: %w", err)
 	}
-	if err := writePrivateFile(*attachEnvironmentFile, []byte(attachEnvironment(url, *pg18BinDir, *extensionArtifact, *adapterArtifact, credentials, filepath.Join(*stateDir, "install.lock")))); err != nil {
+	if err := writePrivateFile(*attachEnvironmentFile, []byte(attachEnvironment(url, credentials))); err != nil {
 		_ = harness.Close(context.Background())
 		return fmt.Errorf("write attach environment: %w", err)
 	}
@@ -150,26 +150,28 @@ func runStart(ctx context.Context, args []string) error {
 	return nil
 }
 
-func attachEnvironment(url, pg18BinDir, extensionArtifact, adapterArtifact string, credentials localCredentials, installLock string) string {
+// attachEnvironment references credential files through SYNCHRO_ATTACH_DIR,
+// so a copied attach bundle works from any consumer directory.
+func attachEnvironment(url string, credentials localCredentials) string {
 	return strings.Join([]string{
 		environmentAssignment("SYNCHRO_CONFORMANCE_ATTACH_DATABASE_URL", url),
-		environmentAssignment("SYNCHRO_CONFORMANCE_PG18_BINDIR", pg18BinDir),
-		environmentAssignment("SYNCHRO_CONFORMANCE_EXTENSION_ARTIFACT", extensionArtifact),
-		environmentAssignment("SYNCHRO_CONFORMANCE_ADAPTER_ARTIFACT", adapterArtifact),
 		environmentAssignment("SYNCHRO_CONFORMANCE_ADMIN_USER", credentials.adminUser),
-		environmentAssignment("SYNCHRO_CONFORMANCE_ADMIN_PASSWORD_FILE", credentials.adminPassword),
+		attachDirAssignment("SYNCHRO_CONFORMANCE_ADMIN_PASSWORD_FILE", credentials.adminPassword),
 		environmentAssignment("SYNCHRO_CONFORMANCE_ADAPTER_USER", credentials.adapterUser),
-		environmentAssignment("SYNCHRO_CONFORMANCE_ADAPTER_PASSWORD_FILE", credentials.adapterPassword),
+		attachDirAssignment("SYNCHRO_CONFORMANCE_ADAPTER_PASSWORD_FILE", credentials.adapterPassword),
 		environmentAssignment("SYNCHRO_CONFORMANCE_OBSERVER_USER", credentials.observerUser),
-		environmentAssignment("SYNCHRO_CONFORMANCE_OBSERVER_PASSWORD_FILE", credentials.observerPassword),
+		attachDirAssignment("SYNCHRO_CONFORMANCE_OBSERVER_PASSWORD_FILE", credentials.observerPassword),
 		environmentAssignment("SYNCHRO_CONFORMANCE_WORKER_USER", credentials.workerUser),
-		environmentAssignment("SYNCHRO_CONFORMANCE_WORKER_PASSWORD_FILE", credentials.workerPassword),
+		attachDirAssignment("SYNCHRO_CONFORMANCE_WORKER_PASSWORD_FILE", credentials.workerPassword),
 		environmentAssignment("SYNCHRO_CONFORMANCE_OPERATOR_USER", credentials.operatorUser),
-		environmentAssignment("SYNCHRO_CONFORMANCE_OPERATOR_PASSWORD_FILE", credentials.operatorPassword),
-		environmentAssignment("SYNCHRO_CONFORMANCE_JWT_SECRET_FILE", credentials.jwtSecret),
-		environmentAssignment("SYNCHRO_CONFORMANCE_INSTALL_LOCK", installLock),
+		attachDirAssignment("SYNCHRO_CONFORMANCE_OPERATOR_PASSWORD_FILE", credentials.operatorPassword),
+		attachDirAssignment("SYNCHRO_CONFORMANCE_JWT_SECRET_FILE", credentials.jwtSecret),
 		"",
 	}, "\n")
+}
+
+func attachDirAssignment(name, path string) string {
+	return name + "=\"${SYNCHRO_ATTACH_DIR}/" + filepath.Base(path) + "\""
 }
 
 func environmentAssignment(name, value string) string {

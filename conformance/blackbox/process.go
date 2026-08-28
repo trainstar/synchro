@@ -558,7 +558,10 @@ func Provision(ctx context.Context, config HarnessConfig) (_ *Harness, returnedE
 }
 
 func normalizeHarnessConfig(config HarnessConfig) (HarnessConfig, error) {
-	if !config.Environment.verified || config.Environment.PG18BinDir == "" || config.Environment.extension.root == "" {
+	if !config.Environment.verified {
+		return HarnessConfig{}, errors.New("verified harness environment is required")
+	}
+	if config.Environment.AttachDatabaseURL == "" && (config.Environment.PG18BinDir == "" || config.Environment.extension.root == "") {
 		return HarnessConfig{}, errors.New("verified harness environment is required")
 	}
 	if config.StartupTimeout == 0 {
@@ -1635,26 +1638,23 @@ func (h *Harness) grantWorkerReplicationSourceAccess(ctx context.Context) error 
 }
 
 func (h *Harness) executeSourceScript(ctx context.Context, name, body string) error {
-	path := filepath.Join(h.runRoot, name)
-	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
-		return errors.New("write independent source setup failed")
-	}
 	host := h.socketDir
 	if h.attached {
 		host = h.attachHost
 	}
-	arguments := []string{
-		"-X",
-		"-v", "ON_ERROR_STOP=1",
-		"-h", host,
-		"-p", strconv.Itoa(h.port),
-		"-U", h.env.Admin.Username,
-		"-d", h.names.Database,
-		"-f", path,
+	configuration, err := pgconn.ParseConfig(postgresDSN(host, h.port, h.names.Database, h.env.Admin, true))
+	if err != nil {
+		return errors.New("parse independent source setup connection failed")
 	}
-	environment := append(scrubPostgresEnvironment(os.Environ()), "PGPASSWORD="+string(h.env.Admin.password))
-	if err := runBoundedCommand(ctx, filepath.Join(h.env.PG18BinDir, "psql"), arguments, environment, h.config.ProcessLogBytes, [][]byte{h.env.Admin.password}); err != nil {
-		return fmt.Errorf("apply independent source setup failed: %w", err)
+	connection, err := pgconn.ConnectConfig(ctx, configuration)
+	if err != nil {
+		return errors.New("connect independent source setup failed")
+	}
+	defer connection.Close(context.Background())
+	// The simple query protocol executes the complete multi-statement
+	// script and stops at the first error.
+	if err := connection.Exec(ctx, body).Close(); err != nil {
+		return fmt.Errorf("apply independent source setup %s failed: %w", name, err)
 	}
 	return nil
 }

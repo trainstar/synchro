@@ -1,8 +1,6 @@
 -- Independent public registration setup for protocol 3 verification.
 -- Run only after schema.sql and CREATE EXTENSION synchro_pg.
 
-\set QUIET 1
-
 SELECT synchro.synchro_register_shared_scope('cf:global', true);
 
 SELECT synchro.synchro_prepare_projection_view('public.cf_global_items', 'cf_global_items', ARRAY['id']);

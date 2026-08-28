@@ -165,7 +165,17 @@ LOCAL_POSTGRES_ATTACH_ENV_FILE ?= $(LOCAL_POSTGRES_STATE_DIR)/attach.env
 LOCAL_POSTGRES_LISTEN ?= 127.0.0.1
 LOCAL_POSTGRES_BINARY ?= $(CURDIR)/bin/synchro-local-postgres
 WARM_CONNECT_ENV_FILE ?=
-WARM_CONNECT_ENV = if [ -n "$(WARM_CONNECT_ENV_FILE)" ]; then test -r "$(WARM_CONNECT_ENV_FILE)"; set -a; . "$(WARM_CONNECT_ENV_FILE)"; set +a; fi;
+WARM_CONNECT_ENV = if [ -n "$(WARM_CONNECT_ENV_FILE)" ]; then \
+		test -r "$(WARM_CONNECT_ENV_FILE)"; \
+		SYNCHRO_ATTACH_DIR="$$(cd "$$(dirname "$(WARM_CONNECT_ENV_FILE)")" && pwd)"; \
+		export SYNCHRO_ATTACH_DIR; \
+		set -a; . "$(WARM_CONNECT_ENV_FILE)"; set +a; \
+		if [ -z "$${SYNCHRO_CONFORMANCE_ADAPTER_ARTIFACT:-}" ]; then \
+			test -x "$(CONFORMANCE_ADAPTER_ARTIFACT_DIR)/synchrod-pg" || $(MAKE) conformance-adapter-artifact; \
+			SYNCHRO_CONFORMANCE_ADAPTER_ARTIFACT="$(CONFORMANCE_ADAPTER_ARTIFACT_DIR)/synchrod-pg"; \
+			export SYNCHRO_CONFORMANCE_ADAPTER_ARTIFACT; \
+		fi; \
+	fi;
 
 BINARY ?= bin/synchrod-pg
 SEED_BINARY ?= bin/synchro-seed

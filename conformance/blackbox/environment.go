@@ -133,11 +133,23 @@ func loadEnvironment(lookup func(string) (string, bool)) (EnvironmentConfig, err
 	if lookup == nil {
 		return EnvironmentConfig{}, errors.New("conformance environment lookup is required")
 	}
+	attachURL, _ := lookup("SYNCHRO_CONFORMANCE_ATTACH_DATABASE_URL")
+	attachURL = strings.TrimSpace(attachURL)
+	// Attach mode owns no cluster lifecycle, so it needs no PostgreSQL
+	// binaries, extension artifact, or installation lock on the consumer.
+	attachOptional := map[string]bool{
+		"SYNCHRO_CONFORMANCE_PG18_BINDIR":        attachURL != "",
+		"SYNCHRO_CONFORMANCE_EXTENSION_ARTIFACT": attachURL != "",
+		"SYNCHRO_CONFORMANCE_INSTALL_LOCK":       attachURL != "",
+	}
 	values := make(map[string]string, len(RequiredEnvironmentVariables))
 	var failures []error
 	for _, key := range RequiredEnvironmentVariables {
 		value, present := lookup(key)
 		if !present || strings.TrimSpace(value) == "" {
+			if attachOptional[key] {
+				continue
+			}
 			failures = append(failures, fmt.Errorf("%s is required", key))
 			continue
 		}
@@ -147,15 +159,21 @@ func loadEnvironment(lookup func(string) (string, bool)) (EnvironmentConfig, err
 		return EnvironmentConfig{}, errors.Join(failures...)
 	}
 
-	attachURL, _ := lookup("SYNCHRO_CONFORMANCE_ATTACH_DATABASE_URL")
-	attachURL = strings.TrimSpace(attachURL)
-	pgBinDir, version, err := verifyPG18Binaries(values["SYNCHRO_CONFORMANCE_PG18_BINDIR"])
-	if err != nil {
-		return EnvironmentConfig{}, err
+	var pgBinDir, version string
+	if value := values["SYNCHRO_CONFORMANCE_PG18_BINDIR"]; value != "" {
+		var err error
+		pgBinDir, version, err = verifyPG18Binaries(value)
+		if err != nil {
+			return EnvironmentConfig{}, err
+		}
 	}
-	extension, err := verifyExtensionBundle(values["SYNCHRO_CONFORMANCE_EXTENSION_ARTIFACT"])
-	if err != nil {
-		return EnvironmentConfig{}, err
+	var extension extensionBundle
+	if value := values["SYNCHRO_CONFORMANCE_EXTENSION_ARTIFACT"]; value != "" {
+		var err error
+		extension, err = verifyExtensionBundle(value)
+		if err != nil {
+			return EnvironmentConfig{}, err
+		}
 	}
 	adapterIdentity, err := loadAdapterArtifactIdentity(values["SYNCHRO_CONFORMANCE_ADAPTER_ARTIFACT"])
 	if err != nil {
@@ -215,9 +233,12 @@ func loadEnvironment(lookup func(string) (string, bool)) (EnvironmentConfig, err
 	if err != nil {
 		return EnvironmentConfig{}, err
 	}
-	installationLock, err := verifyInstallationLock(values["SYNCHRO_CONFORMANCE_INSTALL_LOCK"])
-	if err != nil {
-		return EnvironmentConfig{}, err
+	var installationLock string
+	if value := values["SYNCHRO_CONFORMANCE_INSTALL_LOCK"]; value != "" {
+		installationLock, err = verifyInstallationLock(value)
+		if err != nil {
+			return EnvironmentConfig{}, err
+		}
 	}
 
 	return EnvironmentConfig{
@@ -568,9 +589,11 @@ func sameAdapterArtifactIdentity(left, right adapterArtifactIdentity) bool {
 }
 
 func verifyEnvironmentArtifactIdentity(environment EnvironmentConfig) error {
-	extension, err := verifyExtensionBundle(environment.ExtensionArtifact)
-	if err != nil || !sameExtensionBundleIdentity(environment.extension, extension) {
-		return errors.New("candidate extension artifact identity changed after execution")
+	if environment.ExtensionArtifact != "" {
+		extension, err := verifyExtensionBundle(environment.ExtensionArtifact)
+		if err != nil || !sameExtensionBundleIdentity(environment.extension, extension) {
+			return errors.New("candidate extension artifact identity changed after execution")
+		}
 	}
 	adapter, err := loadAdapterArtifactIdentity(environment.AdapterArtifact)
 	if err != nil || !sameAdapterArtifactIdentity(environment.adapterIdentity, adapter) {
