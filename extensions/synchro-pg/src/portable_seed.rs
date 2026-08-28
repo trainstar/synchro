@@ -1166,25 +1166,32 @@ fn parse_and_verify_continuation(
     seed_token::verify_continuation(token, &key.secret)
 }
 
+/// Validate portable seed receipts for first authenticated connect.
+///
+/// A stale or unverifiable receipt set returns an empty position map, so
+/// every seeded scope degrades to a null cursor and a required rebuild.
+/// Only a server-side fault produces an error response.
 pub(crate) fn validate_seed_receipts(
     client: &SpiClient<'_>,
     receipts: &BTreeMap<String, String>,
     current_schema_hash: &str,
 ) -> Result<BTreeMap<String, StreamPosition>, pgrx::JsonB> {
-    validate_seed_receipts_inner(client, receipts, current_schema_hash).map_err(|_| {
-        protocol_error_response(
+    match validate_seed_receipts_inner(client, receipts, current_schema_hash) {
+        Ok(Some(positions)) => Ok(positions),
+        Ok(None) => Ok(BTreeMap::new()),
+        Err(_) => Err(protocol_error_response(
             ProtocolErrorCode::InvalidRequest,
             "invalid portable seed receipts",
             false,
-        )
-    })
+        )),
+    }
 }
 
 fn validate_seed_receipts_inner(
     client: &SpiClient<'_>,
     receipts: &BTreeMap<String, String>,
     current_schema_hash: &str,
-) -> Result<BTreeMap<String, StreamPosition>, String> {
+) -> Result<Option<BTreeMap<String, StreamPosition>>, String> {
     let rows = client
         .select(
             "SELECT shared.scope_id, state.stream_generation,
@@ -1202,7 +1209,7 @@ fn validate_seed_receipts_inner(
         )
         .map_err(|error| format!("loading portable seed receipt scopes: {error}"))?;
     if rows.len() != receipts.len() {
-        return Err("portable seed receipt scope set differs from the server".to_string());
+        return Ok(None);
     }
 
     let materialized = crate::stream_position::load_materialized_boundary(client)?;
@@ -1210,10 +1217,12 @@ fn validate_seed_receipts_inner(
     let mut export_binding: Option<(String, String, SeedSnapshotBoundary)> = None;
     for row in rows {
         let scope_id = required_text(&row, "scope_id", "")?;
-        let receipt = receipts
-            .get(&scope_id)
-            .ok_or_else(|| "portable seed receipt is missing".to_string())?;
-        let payload = parse_and_verify_continuation(client, receipt)?;
+        let Some(receipt) = receipts.get(&scope_id) else {
+            return Ok(None);
+        };
+        let Ok(payload) = parse_and_verify_continuation(client, receipt) else {
+            return Ok(None);
+        };
         let stream_generation = required_text(&row, "stream_generation", "")?;
         let membership_generation = required_positive_i64(&row, "membership_generation")?;
         let retention_generation = required_positive_i64(&row, "retention_generation")?;
@@ -1226,7 +1235,7 @@ fn validate_seed_receipts_inner(
             || payload.membership_generation != membership_generation.to_string()
             || payload.retention_generation != retention_generation.to_string()
         {
-            return Err("portable seed receipt binding is stale".to_string());
+            return Ok(None);
         }
 
         let binding = (
@@ -1238,17 +1247,19 @@ fn validate_seed_receipts_inner(
             .as_ref()
             .is_some_and(|expected| expected != &binding)
         {
-            return Err("portable seed receipts belong to different exports".to_string());
+            return Ok(None);
         }
         export_binding.get_or_insert(binding);
 
-        let position = stream_position_from_wire(&payload.snapshot_boundary)?;
+        let Ok(position) = stream_position_from_wire(&payload.snapshot_boundary) else {
+            return Ok(None);
+        };
         if position > materialized.position {
-            return Err("portable seed receipt is ahead of materialization".to_string());
+            return Ok(None);
         }
         positions.insert(scope_id, position);
     }
-    Ok(positions)
+    Ok(Some(positions))
 }
 
 fn token_key_id(token: &str, name: &str) -> Result<String, String> {

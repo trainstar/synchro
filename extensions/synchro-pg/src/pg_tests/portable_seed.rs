@@ -12,23 +12,26 @@ fn test_portable_scope_declarations_preserve_eligibility() {
     assert_eq!(portable, Some(vec!["catalog".to_string()]));
 }
 
+fn corrupt_mac(token: &str) -> String {
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    use base64::Engine;
+
+    let mut parts = token.split('.').map(str::to_string).collect::<Vec<_>>();
+    assert_eq!(parts.len(), 3);
+    let payload = parts[1].clone();
+    let mut mac = URL_SAFE_NO_PAD.decode(&parts[2]).expect("decode test MAC");
+    assert_eq!(mac.len(), 32);
+    mac[0] ^= 1;
+    parts[2] = URL_SAFE_NO_PAD.encode(mac);
+    assert_eq!(parts[1], payload);
+    parts.join(".")
+}
+
 #[pg_test]
 fn test_portable_seed_tokens_reject_mac_only_corruption() {
     use base64::engine::general_purpose::URL_SAFE_NO_PAD;
     use base64::Engine;
     use synchro_core::checksum::{ChecksumObject, Sha256Digest};
-
-    fn corrupt_mac(token: &str) -> String {
-        let mut parts = token.split('.').map(str::to_string).collect::<Vec<_>>();
-        assert_eq!(parts.len(), 3);
-        let payload = parts[1].clone();
-        let mut mac = URL_SAFE_NO_PAD.decode(&parts[2]).expect("decode test MAC");
-        assert_eq!(mac.len(), 32);
-        mac[0] ^= 1;
-        parts[2] = URL_SAFE_NO_PAD.encode(mac);
-        assert_eq!(parts[1], payload);
-        parts.join(".")
-    }
 
     let boundary = crate::seed_token::SeedSnapshotBoundary {
         position_kind: "generation_start".to_string(),
@@ -226,6 +229,37 @@ fn test_idempotent_registration_keeps_seed_receipts() {
         })
         .expect("portable scope assignment");
     assert!(scope["cursor"].as_str().is_some(), "{response}");
+}
+
+#[pg_test]
+fn test_unverifiable_seed_receipt_degrades_to_rebuild() {
+    setup_test_tables();
+    register_shared_scope("global", true);
+    let receipt = mint_portable_seed_receipt("global");
+
+    let response = connect_client(
+        "stale-receipt-user",
+        json!({
+            "client_id": "stale-receipt-client",
+            "platform": "test",
+            "app_version": "1.0.0",
+            "protocol_version": 3,
+            "schema": { "version": 0, "hash": "" },
+            "scope_set_version": 0,
+            "known_scopes": {},
+            "seed_receipts": { "global": corrupt_mac(&receipt) }
+        }),
+    );
+    assert!(response.get("error").is_none(), "{response}");
+    let scope = response["scopes"]["add"]
+        .as_array()
+        .and_then(|scopes| {
+            scopes
+                .iter()
+                .find(|scope| scope["id"].as_str() == Some("global"))
+        })
+        .expect("portable scope assignment after corruption");
+    assert!(scope["cursor"].is_null(), "{response}");
 }
 
 #[pg_test]
