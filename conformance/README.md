@@ -13,17 +13,23 @@ The goal is to exercise the normative contract across:
 - Kotlin
 - React Native bridge where relevant
 
-## Authored Scenarios And Model Execution
+## Test Architecture
+
+The test system has seven layers. Each behavior has exactly one authoritative proof home. Do not add a second proof in another layer.
+
+1. **Contract layer.** The specification and authored vectors define expected behavior. Every applicable surface consumes the same vector files.
+2. **Unit layer.** Deterministic tests stay beside the code. Mocks follow the Client Validation policy only.
+3. **Real integration layer.** Tests use the real extension, adapter, and PostgreSQL. Happy paths do not use mocks.
+4. **Scenario layer.** Authored semantic scenarios run on representative platform cells. Each production defect adds one permanent minimized scenario.
+5. **Cell smoke layer.** Each support cell installs packaged artifacts. It then connects, pushes, pulls, terminates a process, and resumes.
+6. **Adversarial layer.** Mutation gates, negative controls, and mechanical zero-skip enforcement prove that the other layers can fail.
+7. **Randomized soak layer.** Seeded generative workloads check invariants. Each failure replays from its recorded seed.
+
+Layers six and seven allow layers one through five to stay small. Do not replace a missing adversarial or soak proof with more example tests.
+
+## Authored Scenarios
 
 The authored scenario corpus is an executable contract input. Each scenario is schema-valid and independently authored from the normative specification.
-
-Run the independent protocol 3 model with:
-
-```text
-synchro-conformance model --repo-root PATH [--scenario ID]
-```
-
-The command loads authored scenarios. It fails if any selected scenario does not pass the reference model. A model pass validates the model execution only. It does not prove a production candidate.
 
 ## Real PostgreSQL Scenarios
 
@@ -34,8 +40,6 @@ make test-blackbox
 ```
 
 The integration package runs direct semantic tests against packaged PostgreSQL and adapter artifacts. The scenario catalog separately binds the authored scenario bytes. Server tests do not satisfy native-client proof obligations.
-
-The model runner remains a separate authored-contract check. It validates model execution only and does not replace the real PostgreSQL tests.
 
 ## Negative Controls
 
@@ -123,7 +127,7 @@ The specification, authored requirements, support matrix, and scenarios define w
 
 Generated `evidence-v2` records results for an exact candidate, resolved environment versions, and artifact hashes. Release tooling computes eligibility from immutable evidence. A manually maintained coverage table cannot substitute for it.
 
-The current fixtures, model runs, and harness proof are not v0.3.0 certification. See `test-inventory.md` and [Release Verification](../docs/src/content/docs/spec/07-release-verification.mdx).
+The current fixtures and harness proof are not v0.3.0 certification. See `test-inventory.md` and [Release Verification](../docs/src/content/docs/spec/07-release-verification.mdx).
 
 ## Gate Model
 
