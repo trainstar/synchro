@@ -69,6 +69,7 @@
 	test-client-schema-identity \
 	_test-client-schema-identity \
 	test-swift-warm-connect \
+	test-swift-performance \
 	test-swift \
 	test-kotlin-unit \
 	test-kotlin-warm-connect \
@@ -110,13 +111,18 @@
 	client-consumer-artifacts \
 	local-consumer-artifacts \
 	test-consumer-swift \
+	test-consumer-swift-smoke \
 	test-consumer-swift-ios \
 	test-consumer-kotlin \
 	test-consumer-kotlin-device \
+	test-consumer-kotlin-device-smoke \
 	test-consumer-rn-ios \
 	test-consumer-rn-android \
+	test-consumer-rn-ios-smoke \
+	test-consumer-rn-android-smoke \
 	test-client-platforms \
 	test-packaged-smoke \
+	test-packaged-smoke-structure \
 	test-packaged-consumers \
 	phase-5-check \
 	generate-pg-sql \
@@ -193,6 +199,8 @@ CURRENT_VERSION := $(shell cat VERSION 2>/dev/null)
 PHASE_5_EVIDENCE ?= $(CURDIR)/dist/verification/phase-5-summary.json
 PHASE_5_INPUT ?= $(CURDIR)/dist/verification/phase-5-input.json
 PACKAGED_SMOKE_EVIDENCE ?= $(CURDIR)/dist/verification/packaged-smoke-summary.json
+PACKAGED_SMOKE_CELL_DIR ?= $(CURDIR)/dist/verification/packaged-smoke-cells
+PACKAGED_SMOKE_TMP_ROOT ?= $(CURDIR)/.ignore/r2/tmp
 
 TEST_ENV = \
 	TEST_DATABASE_URL="$(ADAPTER_TEST_URL)" \
@@ -256,6 +264,7 @@ help:
 	@echo "  build-kotlin-conformance-app - Build the Android native conformance test APK"
 	@echo "  test-swift-unit       - Run Swift unit tests"
 	@echo "  test-swift-warm-connect - Run the direct Swift warm-connect scenario"
+	@echo "  test-swift-performance - Run the direct Swift performance scenarios"
 	@echo "  test-swift            - Run Swift integration tests against the local adapter"
 	@echo "  test-kotlin-unit      - Run Kotlin unit tests"
 	@echo "  test-kotlin-instrumentation - Run Android instrumentation on the selected device"
@@ -291,6 +300,7 @@ help:
 	@echo "  test-consumer-rn-android - Build an isolated RN Android consumer from packaged artifacts"
 	@echo "  test-client-platforms - Run one packaged client support cell (SUPPORT_CELL_ID required)"
 	@echo "  test-packaged-smoke   - Validate five terminal checks for every non-excluded support cell"
+	@echo "  test-packaged-smoke-structure - Run packaged smoke summary failure controls"
 	@echo "  test-packaged-consumers - Run all packaged consumer checks"
 	@echo "  phase-5-check         - Validate terminal support-cell and gate evidence"
 	@echo "  check-pg-sql          - Verify tracked SQL matches pgrx generation"
@@ -636,7 +646,22 @@ test-swift-warm-connect: conformance-mod-download build-swift-native-runner
 			-- go test -tags swiftintegration -json ./swift -count=1 -timeout=10m \
 			-run '^TestRealSwiftWarmConnect$$' -args --provision --install
 
-test-swift: synchrod-pg-test-restart test-swift-warm-connect
+test-swift-performance: conformance-mod-download build-swift-native-runner build-seed
+	@set -eu; \
+		$(WARM_CONNECT_ENV) \
+		runner_dir="$$(cd clients/swift && swift build --show-bin-path)"; \
+		test -x "$$runner_dir/synchro-native-runner"; \
+		test -x "$(CURDIR)/$(SEED_BINARY)"; \
+		cd conformance; \
+		SYNCHRO_SWIFT_NATIVE_RUNNER="$$runner_dir/synchro-native-runner" \
+		SYNCHRO_SEED_TOOL="$(CURDIR)/$(SEED_BINARY)" \
+			GOFLAGS= GOWORK=off go run ./cmd/testresult exact \
+			-test TestRealSwiftPerformance \
+			-expect target_pass \
+			-- go test -tags swiftintegration -json ./swift -count=1 -timeout=30m \
+			-run '^TestRealSwiftPerformance$$' -args --provision --install
+
+test-swift: synchrod-pg-test-restart test-swift-warm-connect test-swift-performance
 	rm -rf clients/swift/.build/integration-derived-data clients/swift/.build/test-results/integration.xcresult
 	mkdir -p clients/swift/.build/test-results
 	cd clients/swift && xcodebuild build-for-testing -quiet -scheme Synchro-Package -destination 'platform=macOS' -derivedDataPath .build/integration-derived-data
@@ -959,7 +984,8 @@ local-consumer-artifacts: client-consumer-artifacts
 test-consumer-swift: client-consumer-apple-artifact
 	@set -eu; \
 		artifact="$(abspath $(CLIENT_ARTIFACT_DIR))/apple/Synchro"; \
-		tmp="$$(mktemp -d "$${TMPDIR:-/tmp}/synchro-swift-consumer.XXXXXX")"; \
+		mkdir -p "$(PACKAGED_SMOKE_TMP_ROOT)"; \
+		tmp="$$(mktemp -d "$(PACKAGED_SMOKE_TMP_ROOT)/synchro-swift-consumer.XXXXXX")"; \
 		trap 'rm -rf "$$tmp"' EXIT HUP INT TERM; \
 		SYNCHRO_SWIFT_PACKAGE_PATH="$$artifact" swift package \
 			--package-path verification/consumers/swift \
@@ -975,6 +1001,12 @@ test-consumer-swift: client-consumer-apple-artifact
 			--scratch-path "$$tmp/build" \
 			SynchroConsumer
 
+test-consumer-swift-smoke: client-consumer-apple-artifact
+	PACKAGED_SMOKE_TMP_ROOT="$(PACKAGED_SMOKE_TMP_ROOT)" \
+		sh verification/consumers/swift/test-consumer.sh \
+			"$(CURDIR)" "$(abspath $(CLIENT_ARTIFACT_DIR))" \
+			"$(PACKAGED_SMOKE_CELL_ID)" "$(PACKAGED_SMOKE_CELL_RESULT)"
+
 test-consumer-swift-ios: client-consumer-apple-artifact
 	SUPPORT_PLATFORM_VERSION="$(SUPPORT_PLATFORM_VERSION)" \
 		sh verification/consumers/swift-ios/test-consumer.sh "$(abspath $(CLIENT_ARTIFACT_DIR))"
@@ -983,7 +1015,8 @@ test-consumer-kotlin: client-consumer-kotlin-artifact
 	@test -n "$(ANDROID_JAVA_HOME)" || (echo "Android builds require JDK 17. Set ANDROID_JAVA_HOME to a JDK 17 install."; exit 1)
 	@test -d "$(ANDROID_HOME)" || (echo "Android SDK not found at $(ANDROID_HOME). Set ANDROID_HOME to a valid SDK install."; exit 1)
 	@set -eu; \
-		tmp="$$(mktemp -d "$${TMPDIR:-/tmp}/synchro-kotlin-consumer.XXXXXX")"; \
+		mkdir -p "$(PACKAGED_SMOKE_TMP_ROOT)"; \
+		tmp="$$(mktemp -d "$(PACKAGED_SMOKE_TMP_ROOT)/synchro-kotlin-consumer.XXXXXX")"; \
 		trap 'rm -rf "$$tmp"' EXIT HUP INT TERM; \
 		SYNCHRO_CONSUMER_MAVEN_REPOSITORY="$(abspath $(CLIENT_ARTIFACT_DIR))/maven" \
 		ANDROID_HOME="$(ANDROID_HOME)" ANDROID_SDK_ROOT="$(ANDROID_HOME)" \
@@ -1019,41 +1052,100 @@ test-consumer-kotlin-device: client-consumer-kotlin-artifact
 			-PsynchroVersion="$(CURRENT_VERSION)" \
 			:app:connectedDebugAndroidTest
 
+test-consumer-kotlin-device-smoke: test-consumer-kotlin
+	PACKAGED_SMOKE_TMP_ROOT="$(PACKAGED_SMOKE_TMP_ROOT)" \
+		ANDROID_HOME="$(ANDROID_HOME)" KOTLIN_ANDROID_SERIAL="$(KOTLIN_ANDROID_SERIAL)" \
+		sh verification/consumers/kotlin/test-consumer-device.sh \
+			"$(CURDIR)" "$(abspath $(CLIENT_ARTIFACT_DIR))" \
+			"$(PACKAGED_SMOKE_CELL_ID)" "$(PACKAGED_SMOKE_CELL_RESULT)" "$(CURRENT_VERSION)"
+
 test-consumer-rn-ios: client-consumer-apple-artifact client-consumer-rn-artifact
 	SUPPORT_PLATFORM_VERSION="$(SUPPORT_PLATFORM_VERSION)" \
-		sh verification/consumers/react-native/test-consumer.sh ios "$(abspath $(CLIENT_ARTIFACT_DIR))" "$(CURRENT_VERSION)"
+		PACKAGED_SMOKE_TMP_ROOT="$(PACKAGED_SMOKE_TMP_ROOT)" \
+		sh verification/consumers/react-native/test-consumer.sh ios "$(abspath $(CLIENT_ARTIFACT_DIR))" "$(CURRENT_VERSION)" build-only
 
 test-consumer-rn-android: client-consumer-kotlin-artifact client-consumer-rn-artifact
 	ANDROID_HOME="$(ANDROID_HOME)" ANDROID_JAVA_HOME="$(ANDROID_JAVA_HOME)" \
+		PACKAGED_SMOKE_TMP_ROOT="$(PACKAGED_SMOKE_TMP_ROOT)" \
+		sh verification/consumers/react-native/test-consumer.sh android "$(abspath $(CLIENT_ARTIFACT_DIR))" "$(CURRENT_VERSION)" build-only
+
+test-consumer-rn-ios-smoke: client-consumer-apple-artifact client-consumer-rn-artifact
+	SUPPORT_PLATFORM_VERSION="$(SUPPORT_PLATFORM_VERSION)" \
+		PACKAGED_SMOKE_TMP_ROOT="$(PACKAGED_SMOKE_TMP_ROOT)" \
+		PACKAGED_SMOKE_CELL_ID="$(PACKAGED_SMOKE_CELL_ID)" \
+		PACKAGED_SMOKE_CELL_RESULT="$(PACKAGED_SMOKE_CELL_RESULT)" \
+		sh verification/consumers/react-native/test-consumer.sh ios "$(abspath $(CLIENT_ARTIFACT_DIR))" "$(CURRENT_VERSION)"
+
+test-consumer-rn-android-smoke: client-consumer-kotlin-artifact client-consumer-rn-artifact
+	ANDROID_HOME="$(ANDROID_HOME)" ANDROID_JAVA_HOME="$(ANDROID_JAVA_HOME)" \
+		PACKAGED_SMOKE_TMP_ROOT="$(PACKAGED_SMOKE_TMP_ROOT)" \
+		PACKAGED_SMOKE_CELL_ID="$(PACKAGED_SMOKE_CELL_ID)" \
+		PACKAGED_SMOKE_CELL_RESULT="$(PACKAGED_SMOKE_CELL_RESULT)" \
 		sh verification/consumers/react-native/test-consumer.sh android "$(abspath $(CLIENT_ARTIFACT_DIR))" "$(CURRENT_VERSION)"
 
 test-client-platforms:
 	@test -n "$(SUPPORT_CELL_ID)" || (echo "SUPPORT_CELL_ID is required" >&2; exit 1)
-	@case "$(SUPPORT_CELL_ID)" in \
+	@mkdir -p "$(PACKAGED_SMOKE_CELL_DIR)" "$(PACKAGED_SMOKE_TMP_ROOT)"
+	@python3 verification/packaged_smoke.py begin-cell \
+		--repo-root "$(CURDIR)" \
+		--cell "$(SUPPORT_CELL_ID)" \
+		--output "$(PACKAGED_SMOKE_CELL_DIR)/$(SUPPORT_CELL_ID).json"
+	@set -eu; \
+		$(WARM_CONNECT_ENV) \
+		export SYNCHRO_TEST_URL="$(SYNCHRO_TEST_URL)"; \
+		export PACKAGED_SMOKE_CELL_ID="$(SUPPORT_CELL_ID)"; \
+		export PACKAGED_SMOKE_CELL_RESULT="$(PACKAGED_SMOKE_CELL_DIR)/$(SUPPORT_CELL_ID).json"; \
+		case "$(SUPPORT_CELL_ID)" in \
+		SUP-PG-LINUX-X64-001) \
+			test "$$(uname -s)" = "Linux" && test "$$(uname -m)" = "x86_64" || { echo "linux-x64 is required" >&2; exit 1; }; \
+			test -f "$${SYNCHRO_CONFORMANCE_EXTENSION_ARTIFACT:?SYNCHRO_CONFORMANCE_EXTENSION_ARTIFACT is required}/artifact-manifest.json"; \
+			export PACKAGED_SMOKE_EXTRA_ARTIFACT="$$SYNCHRO_CONFORMANCE_EXTENSION_ARTIFACT/artifact-manifest.json"; \
+			$(MAKE) test-consumer-kotlin-device-smoke ;; \
+		SUP-PG-MACOS-ARM64-001) \
+			test "$$(uname -s)" = "Darwin" && test "$$(uname -m)" = "arm64" || { echo "macos-arm64 is required" >&2; exit 1; }; \
+			test -f "$${SYNCHRO_CONFORMANCE_EXTENSION_ARTIFACT:?SYNCHRO_CONFORMANCE_EXTENSION_ARTIFACT is required}/artifact-manifest.json"; \
+			export PACKAGED_SMOKE_EXTRA_ARTIFACT="$$SYNCHRO_CONFORMANCE_EXTENSION_ARTIFACT/artifact-manifest.json"; \
+			$(MAKE) test-consumer-swift-smoke ;; \
 		SUP-IOS-MIN-001) \
 			test "$(SUPPORT_PLATFORM_VERSION)" = "16" || { echo "SUPPORT_PLATFORM_VERSION must be 16" >&2; exit 1; }; \
-			$(MAKE) test-consumer-swift-ios ;; \
+			PACKAGED_SMOKE_CELL_ID="$$PACKAGED_SMOKE_CELL_ID" PACKAGED_SMOKE_CELL_RESULT="$$PACKAGED_SMOKE_CELL_RESULT" $(MAKE) test-consumer-swift-ios ;; \
 		SUP-IOS-CURRENT-001) \
 			test -n "$(SUPPORT_PLATFORM_VERSION)" || { echo "SUPPORT_PLATFORM_VERSION is required" >&2; exit 1; }; \
-			$(MAKE) test-consumer-swift-ios ;; \
+			PACKAGED_SMOKE_CELL_ID="$$PACKAGED_SMOKE_CELL_ID" PACKAGED_SMOKE_CELL_RESULT="$$PACKAGED_SMOKE_CELL_RESULT" $(MAKE) test-consumer-swift-ios ;; \
+		SUP-MACOS-CURRENT-001) \
+			test "$$(uname -s)" = "Darwin" || { echo "macOS is required" >&2; exit 1; }; \
+			test -n "$(SUPPORT_PLATFORM_VERSION)" || { echo "SUPPORT_PLATFORM_VERSION is required" >&2; exit 1; }; \
+			macos_version="$$(sw_vers -productVersion)"; \
+			case "$(SUPPORT_PLATFORM_VERSION)" in *.*) test "$$macos_version" = "$(SUPPORT_PLATFORM_VERSION)" ;; *) test "$${macos_version%%.*}" = "$(SUPPORT_PLATFORM_VERSION)" ;; esac || { echo "macOS runtime does not match SUPPORT_PLATFORM_VERSION" >&2; exit 1; }; \
+			$(MAKE) test-consumer-swift-smoke ;; \
 		SUP-ANDROID-MIN-001) \
 			test "$(SUPPORT_PLATFORM_VERSION)" = "24" || { echo "SUPPORT_PLATFORM_VERSION must be 24" >&2; exit 1; }; \
 			test "$$($(ANDROID_HOME)/platform-tools/adb shell getprop ro.build.version.sdk | tr -d '\r')" = "24" || { echo "Android API 24 is required" >&2; exit 1; }; \
-			$(MAKE) test-consumer-kotlin-device ;; \
+			$(MAKE) test-consumer-kotlin-device-smoke ;; \
 		SUP-ANDROID-CURRENT-001|SUP-RN-ANDROID-CURRENT-001) \
 			test -n "$(SUPPORT_PLATFORM_VERSION)" || { echo "SUPPORT_PLATFORM_VERSION is required" >&2; exit 1; }; \
 			test "$$($(ANDROID_HOME)/platform-tools/adb shell getprop ro.build.version.sdk | tr -d '\r')" = "$(SUPPORT_PLATFORM_VERSION)" || { echo "Android runtime does not match SUPPORT_PLATFORM_VERSION" >&2; exit 1; }; \
-			if [ "$(SUPPORT_CELL_ID)" = "SUP-ANDROID-CURRENT-001" ]; then $(MAKE) test-consumer-kotlin-device; else $(MAKE) test-consumer-rn-android; fi ;; \
+			if [ "$(SUPPORT_CELL_ID)" = "SUP-ANDROID-CURRENT-001" ]; then $(MAKE) test-consumer-kotlin-device-smoke; else $(MAKE) test-consumer-rn-android-smoke; fi ;; \
 		SUP-RN-IOS-CURRENT-001) \
 			test -n "$(SUPPORT_PLATFORM_VERSION)" || { echo "SUPPORT_PLATFORM_VERSION is required" >&2; exit 1; }; \
-			$(MAKE) test-consumer-rn-ios ;; \
+			$(MAKE) test-consumer-rn-ios-smoke ;; \
 		*) echo "unknown client support cell: $(SUPPORT_CELL_ID)" >&2; exit 1 ;; \
 	esac
 
 test-packaged-smoke:
+	@python3 verification/packaged_smoke.py collect \
+		--repo-root "$(CURDIR)" \
+		--cells-dir "$(PACKAGED_SMOKE_CELL_DIR)" \
+		--output "$(PACKAGED_SMOKE_EVIDENCE)"
 	@python3 scripts/release-support-check.py --repo-root "$(CURDIR)" --evidence "$(PACKAGED_SMOKE_EVIDENCE)" --kind smoke
 
-test-packaged-consumers: test-consumer-swift test-consumer-swift-ios test-consumer-kotlin test-consumer-kotlin-device test-consumer-rn-ios test-consumer-rn-android test-packaged-smoke
+test-packaged-smoke-structure:
+	@mkdir -p "$(PACKAGED_SMOKE_TMP_ROOT)"
+	TMPDIR="$(PACKAGED_SMOKE_TMP_ROOT)" \
+		PYTHONPYCACHEPREFIX="$(PACKAGED_SMOKE_TMP_ROOT)/python-cache" \
+		python3 verification/test_packaged_smoke.py
+
+test-packaged-consumers: test-packaged-smoke-structure test-consumer-swift test-consumer-swift-ios test-consumer-kotlin test-consumer-kotlin-device test-consumer-rn-ios test-consumer-rn-android test-packaged-smoke
 
 phase-5-check: test-conformance test-blackbox test-adapter test-rust-core test-rust-pg test-swift-unit test-kotlin-unit test-kotlin-instrumentation test-rn-unit test-swift test-kotlin test-rn-e2e-ios test-rn-e2e-android test-rn-warm-connect-ios test-rn-warm-connect-android test-packaged-consumers
 	@python3 scripts/release-support-check.py --repo-root "$(CURDIR)" --evidence "$(PHASE_5_EVIDENCE)"
