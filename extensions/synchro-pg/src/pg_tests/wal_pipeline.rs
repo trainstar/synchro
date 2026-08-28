@@ -645,6 +645,207 @@
         .expect("restore runtime identity");
     }
 
+    #[pg_test]
+    fn unbound_slot_replaces_foreign_binding() {
+        setup_test_tables();
+        let database: String = Spi::get_one("SELECT current_database()::text")
+            .expect("load test database")
+            .expect("test database");
+        let test_backend = Spi::get_one::<i32>("SELECT pg_backend_pid()")
+            .expect("load test backend")
+            .expect("test backend");
+        let slot = format!("synchro_bind_{test_backend}");
+        let before_id = format!("c0000000-0000-4000-8000-{:012}", i64::from(test_backend) * 2);
+        let after_id = format!("c0000000-0000-4000-8000-{:012}", i64::from(test_backend) * 2 + 1);
+        let original = Spi::connect(|client| {
+            let row = client
+                .select(
+                    "SELECT runtime.stream_generation AS runtime_stream_generation,
+                            runtime.active_slot_name::text AS active_slot_name,
+                            runtime.active_publication_name::text AS active_publication_name,
+                            runtime.active_publication_oid::bigint AS active_publication_oid,
+                            progress.stream_generation AS progress_stream_generation,
+                            progress.generation_start_lsn::text AS generation_start_lsn,
+                            progress.materialized_commit_lsn::text AS materialized_commit_lsn,
+                            progress.materialized_end_lsn::text AS materialized_end_lsn,
+                            progress.acknowledged_end_lsn::text AS acknowledged_end_lsn,
+                            registry.generation AS registry_generation,
+                            registry.stream_generation AS registry_stream_generation
+                     FROM sync_runtime_state runtime
+                     JOIN sync_wal_progress progress ON progress.singleton
+                     JOIN sync_registry_generations registry
+                       ON registry.generation = progress.registry_generation
+                     WHERE runtime.singleton",
+                    None,
+                    &[],
+                )?
+                .first();
+            Ok::<_, pgrx::spi::Error>(
+                (
+                    row.get_by_name::<String, &str>("runtime_stream_generation")?,
+                    row.get_by_name::<String, &str>("active_slot_name")?,
+                    row.get_by_name::<String, &str>("active_publication_name")?,
+                    row.get_by_name::<i64, &str>("active_publication_oid")?,
+                    row.get_by_name::<String, &str>("progress_stream_generation")?,
+                    row.get_by_name::<String, &str>("generation_start_lsn")?,
+                    row.get_by_name::<String, &str>("materialized_commit_lsn")?,
+                    row.get_by_name::<String, &str>("materialized_end_lsn")?,
+                    row.get_by_name::<String, &str>("acknowledged_end_lsn")?,
+                    row.get_by_name::<i64, &str>("registry_generation")?,
+                    row.get_by_name::<String, &str>("registry_stream_generation")?,
+                ),
+            )
+        })
+        .expect("capture original runtime");
+
+        Spi::run_with_args(
+            "SELECT pg_catalog.pg_create_logical_replication_slot($1, 'pgoutput')",
+            &[slot.as_str().into()],
+        )
+        .expect("create foreign slot");
+        let old_boundary: String = Spi::get_one_with_args(
+            "SELECT confirmed_flush_lsn::text
+             FROM pg_catalog.pg_replication_slots
+             WHERE slot_name = $1",
+            &[slot.as_str().into()],
+        )
+        .expect("load foreign slot boundary")
+        .expect("foreign slot boundary");
+        Spi::run_with_args(
+            "INSERT INTO test_orders (id, user_id, title)
+             VALUES ($1::uuid, 'binding', 'before')",
+            &[before_id.as_str().into()],
+        )
+        .expect("write before replacement");
+
+        let stream_generation = format!("slot-binding-{slot}");
+        Spi::run_with_args(
+            "UPDATE sync_runtime_state
+             SET stream_generation = $1,
+                 active_slot_name = NULL,
+                 active_publication_name = NULL,
+                 active_publication_oid = NULL,
+                 updated_at = now()
+             WHERE singleton;
+             UPDATE sync_wal_progress
+             SET stream_generation = $1,
+                 generation_start_lsn = NULL,
+                 materialized_commit_lsn = NULL,
+                 materialized_end_lsn = NULL,
+                 acknowledged_end_lsn = NULL,
+                 updated_at = now()
+             WHERE singleton;
+             UPDATE sync_registry_generations
+             SET stream_generation = $1
+             WHERE generation = $2",
+            &[stream_generation.as_str().into(), original.9.into()],
+        )
+        .expect("simulate unbound reinstall runtime");
+
+        Spi::connect_mut(|client| {
+            crate::bgworker::prepare_worker_slot(client, &slot, &database)
+        })
+        .expect("prepare replacement slot");
+
+        let boundary: String = Spi::get_one(
+            "SELECT progress.generation_start_lsn::text
+             FROM sync_wal_progress progress
+             JOIN sync_runtime_state runtime ON runtime.singleton
+             JOIN pg_catalog.pg_replication_slots slot
+               ON slot.slot_name = runtime.active_slot_name
+             WHERE progress.singleton
+               AND progress.generation_start_lsn = slot.confirmed_flush_lsn",
+        )
+        .expect("load replacement boundary")
+        .expect("replacement boundary");
+        assert_ne!(boundary, old_boundary);
+
+        Spi::run_with_args(
+            "INSERT INTO test_orders (id, user_id, title)
+             VALUES ($1::uuid, 'binding', 'after')",
+            &[after_id.as_str().into()],
+        )
+        .expect("write after replacement");
+        Spi::connect_mut(|client| {
+            crate::bgworker::prepare_worker_slot(client, &slot, &database)
+        })
+        .expect("prepare bound slot");
+        let reused_boundary: String = Spi::get_one_with_args(
+            "SELECT confirmed_flush_lsn::text
+             FROM pg_catalog.pg_replication_slots
+             WHERE slot_name = $1",
+            &[slot.as_str().into()],
+        )
+        .expect("load reused slot boundary")
+        .expect("reused slot boundary");
+        assert_eq!(reused_boundary, boundary);
+
+        assert!(
+            crate::bgworker::poll_bound_slot_for_test()
+                .expect("poll replacement slot")
+                > 0
+        );
+        let complete: Option<bool> = Spi::get_one_with_args(
+            "SELECT progress.materialized_end_lsn IS NOT NULL
+                    AND progress.acknowledged_end_lsn = progress.materialized_end_lsn
+                    AND progress.acknowledged_end_lsn > $1::pg_lsn
+                    AND NOT EXISTS (
+                        SELECT 1
+                        FROM sync_wal_poison poison
+                        WHERE poison.lifecycle = 'active'
+                          AND poison.stream_generation = progress.stream_generation
+                    )
+                    AND NOT EXISTS (
+                        SELECT 1
+                        FROM sync_registry_generations
+                        WHERE state = 'pending'
+                    )
+             FROM sync_wal_progress progress
+             WHERE progress.singleton",
+            &[boundary.as_str().into()],
+        )
+        .expect("load replacement progress");
+
+        Spi::run_with_args(
+            "UPDATE sync_runtime_state
+             SET stream_generation = $1,
+                 active_slot_name = $2::name,
+                 active_publication_name = $3::name,
+                 active_publication_oid = $4::oid,
+                 updated_at = now()
+             WHERE singleton;
+             UPDATE sync_wal_progress
+             SET stream_generation = $5,
+                 generation_start_lsn = $6::pg_lsn,
+                 materialized_commit_lsn = $7::pg_lsn,
+                 materialized_end_lsn = $8::pg_lsn,
+                 acknowledged_end_lsn = $9::pg_lsn,
+                 updated_at = now()
+             WHERE singleton;
+             UPDATE sync_registry_generations
+             SET stream_generation = $10
+             WHERE generation = $11;
+             SELECT pg_catalog.pg_drop_replication_slot($12)",
+            &[
+                original.0.as_deref().into(),
+                original.1.as_deref().into(),
+                original.2.as_deref().into(),
+                original.3.into(),
+                original.4.as_deref().into(),
+                original.5.as_deref().into(),
+                original.6.as_deref().into(),
+                original.7.as_deref().into(),
+                original.8.as_deref().into(),
+                original.10.as_deref().into(),
+                original.9.expect("original registry generation").into(),
+                slot.as_str().into(),
+            ],
+        )
+        .expect("restore test runtime");
+
+        assert_eq!(complete, Some(true));
+    }
+
     fn backfill_scope_generation(scope_id: &str) -> i64 {
         Spi::get_one_with_args(
             "SELECT membership_generation

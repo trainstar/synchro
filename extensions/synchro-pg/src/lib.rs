@@ -42,9 +42,15 @@ CREATE TABLE IF NOT EXISTS sync_runtime_state (
     stream_generation TEXT NOT NULL,
     cursor_secret TEXT NOT NULL,
     active_slot_name NAME,
+    active_publication_name NAME,
+    active_publication_oid OID,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+ALTER TABLE sync_runtime_state
+    ADD COLUMN IF NOT EXISTS active_publication_name NAME;
+ALTER TABLE sync_runtime_state
+    ADD COLUMN IF NOT EXISTS active_publication_oid OID;
 INSERT INTO sync_runtime_state (singleton, stream_generation, cursor_secret)
 VALUES (
     true,

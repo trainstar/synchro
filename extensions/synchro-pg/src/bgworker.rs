@@ -131,6 +131,11 @@ struct WorkerIdentity {
     startup_runtime: WorkerStartupIdentity,
 }
 
+struct PublicationIdentity {
+    name: String,
+    oid: i64,
+}
+
 #[derive(Clone, PartialEq, Eq)]
 pub(crate) struct WorkerRuntimeIdentity {
     stream_generation: String,
@@ -378,14 +383,13 @@ pub extern "C-unwind" fn synchro_wal_worker_main(_arg: pg_sys::Datum) {
         }
         match run_worker_transaction(|| prepare_worker(&database, &worker_login)) {
             Ok(identity) => {
-                if identity.startup_runtime != expected_runtime {
+                if !preparation_runtime_matches(&expected_runtime, &identity.startup_runtime) {
                     log!("synchro WAL worker identity changed: worker runtime identity changed");
                     pgrx::error!(
                         "synchro WAL worker identity changed: worker runtime identity changed"
                     );
                 }
-                if let Err(error) =
-                    validate_worker_preparation_identity(&worker_login, &expected_runtime)
+                if let Err(error) = validate_worker_startup_authorization(&worker_login, &identity)
                 {
                     log!("synchro WAL worker identity changed: {error}");
                     pgrx::error!("synchro WAL worker identity changed: {error}");
@@ -767,21 +771,27 @@ fn prepare_worker(database: &str, worker_login: &str) -> Result<WorkerIdentity, 
         let (session_login_oid, worker_role_oid) = validated_worker_identity(client, worker_login)?;
         let (_, connected_database) = connected_database(client, database)?;
         activate_worker_role(worker_role_oid);
-        let runtime = capture_worker_startup_identity(client, &configured_slot);
+        let runtime = prepare_worker_slot(client, &configured_slot, &connected_database);
         activate_session_login();
         let runtime = runtime?;
-        ensure_slot(
-            client,
-            &runtime.runtime.slot_name,
-            &connected_database,
-            runtime.active_slot_is_unbound,
-        )?;
         Ok(WorkerIdentity {
             session_login_oid,
             worker_role_oid,
             startup_runtime: runtime,
         })
     })
+}
+
+fn preparation_runtime_matches(
+    expected: &WorkerStartupIdentity,
+    prepared: &WorkerStartupIdentity,
+) -> bool {
+    if !expected.active_slot_is_unbound {
+        return expected == prepared;
+    }
+    !prepared.active_slot_is_unbound
+        && prepared.runtime.stream_generation == expected.runtime.stream_generation
+        && prepared.runtime.slot_name == expected.runtime.slot_name
 }
 
 fn capture_worker_preparation_identity(
@@ -804,36 +814,15 @@ fn initialize_worker(database: &str, worker_login_oid: i64) -> Result<(), String
     let publication = publication_name();
     Spi::connect_mut(|client| {
         let (database_oid, connected_database) = connected_database(client, database)?;
-        ensure_publication(client, &publication)?;
-        let slot = effective_slot_name(client, &configured_slot)?;
-        client
-            .update(
-                "UPDATE synchro.sync_runtime_state
-                  SET active_slot_name = $1, updated_at = now()
-                  WHERE singleton = true AND active_slot_name IS NULL",
-                None,
-                &[slot.as_str().into()],
-            )
-            .map_err(|_| "storing active slot failed".to_string())?;
+        let publication = ensure_publication(client, &publication)?;
+        let (runtime, active_slot_is_unbound) =
+            capture_worker_runtime_identity(client, &configured_slot)?;
+        if active_slot_is_unbound {
+            return Err("active replication slot is unavailable".to_string());
+        }
+        validate_bound_slot(client, &runtime, &connected_database, &publication)?;
         let stream_generation = active_stream_generation(client)?;
         retire_prior_generation_poison(client, &stream_generation)?;
-        client
-            .update(
-                "UPDATE synchro.sync_wal_progress progress
-                 SET generation_start_lsn = slot.confirmed_flush_lsn, updated_at = now()
-                 FROM synchro.sync_runtime_state runtime
-                 JOIN pg_catalog.pg_replication_slots slot
-                   ON slot.slot_name = runtime.active_slot_name
-                 WHERE progress.singleton AND runtime.singleton
-                   AND progress.generation_start_lsn IS NULL
-                   AND progress.materialized_end_lsn IS NULL
-                   AND progress.acknowledged_end_lsn IS NULL
-                   AND slot.slot_type = 'logical'
-                   AND slot.confirmed_flush_lsn IS NOT NULL",
-                None,
-                &[],
-            )
-            .map_err(|_| "storing stream generation boundary failed".to_string())?;
         client
             .update(
                 "INSERT INTO synchro.sync_wal_worker_state (
@@ -898,6 +887,7 @@ fn connected_database(
     Ok((database_oid, connected_database))
 }
 
+#[cfg(feature = "pg_test")]
 pub(crate) fn effective_slot_name(
     client: &SpiClient<'_>,
     configured_slot: &str,
@@ -1066,29 +1056,41 @@ fn validate_runtime_capture_identity(
     client: &SpiClient<'_>,
     identity: &RuntimeCaptureIdentity,
 ) -> Result<(), String> {
+    let publication = publication_name();
     let valid = client
         .select(
             "SELECT EXISTS (
-                 SELECT 1
-                  FROM synchro.sync_runtime_state runtime
-                   JOIN synchro.sync_wal_progress progress ON progress.singleton
-                   JOIN synchro.sync_registry_generations registry
-                     ON registry.generation = progress.registry_generation
-                    AND registry.state = 'active'
-                    AND registry.validated
-                    AND registry.stream_generation = runtime.stream_generation
-                   JOIN pg_catalog.pg_replication_slots slot
-                     ON slot.slot_name = runtime.active_slot_name
-                  JOIN pg_catalog.pg_database database
-                    ON database.oid = slot.datoid
-                  AND database.datname = pg_catalog.current_database()
-                 WHERE runtime.singleton
-                   AND runtime.stream_generation = $1
-                   AND runtime.active_slot_name::text = $2
-                   AND progress.stream_generation = $1
-                   AND progress.registry_generation = $3
-                   AND slot.slot_type = 'logical'
-                   AND slot.plugin = 'pgoutput'
+                  SELECT 1
+                   FROM synchro.sync_runtime_state runtime
+                    JOIN synchro.sync_wal_progress progress ON progress.singleton
+                    JOIN synchro.sync_registry_generations registry
+                      ON registry.generation = progress.registry_generation
+                     AND registry.state = 'active'
+                     AND registry.validated
+                     AND registry.stream_generation = runtime.stream_generation
+                    JOIN pg_catalog.pg_replication_slots slot
+                      ON slot.slot_name = runtime.active_slot_name
+                    JOIN pg_catalog.pg_publication publication
+                      ON publication.oid = runtime.active_publication_oid
+                     AND publication.pubname = runtime.active_publication_name
+                     AND publication.pubname::text = $4
+                     AND NOT publication.puballtables
+                    JOIN pg_catalog.pg_database database
+                      ON database.oid = slot.datoid
+                     AND database.datname = pg_catalog.current_database()
+                  WHERE runtime.singleton
+                    AND runtime.stream_generation = $1
+                    AND runtime.active_slot_name::text = $2
+                    AND progress.stream_generation = $1
+                    AND progress.registry_generation = $3
+                    AND runtime.active_publication_name::text = $4
+                    AND progress.generation_start_lsn IS NOT NULL
+                    AND COALESCE(
+                        progress.acknowledged_end_lsn,
+                        progress.generation_start_lsn
+                    ) = slot.confirmed_flush_lsn
+                    AND slot.slot_type = 'logical'
+                    AND slot.plugin = 'pgoutput'
                    AND NOT slot.temporary
                    AND slot.invalidation_reason IS NULL
                    AND slot.wal_status IS DISTINCT FROM 'lost'
@@ -1100,6 +1102,7 @@ fn validate_runtime_capture_identity(
                 identity.stream_generation.as_str().into(),
                 identity.slot_name.as_str().into(),
                 identity.registry_generation.into(),
+                publication.as_str().into(),
             ],
         )
         .map_err(|_| "validating active replication slot failed".to_string())?
@@ -1113,74 +1116,74 @@ fn validate_runtime_capture_identity(
     Ok(())
 }
 
-fn ensure_slot(
+pub(crate) fn prepare_worker_slot(
     client: &mut SpiClient<'_>,
-    slot: &str,
+    configured_slot: &str,
     connected_database: &str,
-    allow_create: bool,
+) -> Result<WorkerStartupIdentity, String> {
+    let publication_name = publication_name();
+    let publication = ensure_publication(client, &publication_name)?;
+    let startup = capture_worker_startup_identity(client, configured_slot)?;
+    if startup.active_slot_is_unbound {
+        replace_unbound_slot_and_bind(client, &startup.runtime, connected_database, &publication)?;
+    } else {
+        validate_bound_slot(client, &startup.runtime, connected_database, &publication)?;
+    }
+    let prepared = capture_worker_startup_identity(client, configured_slot)?;
+    if prepared.active_slot_is_unbound {
+        return Err("active replication slot is unavailable".to_string());
+    }
+    Ok(prepared)
+}
+
+#[cfg(feature = "pg_test")]
+pub(crate) fn poll_bound_slot_for_test() -> Result<usize, String> {
+    let mut state = fresh_decoder()?;
+    let worker_role_oid = Spi::get_one::<i64>(
+        "SELECT oid::bigint FROM pg_catalog.pg_roles WHERE rolname = 'synchro_worker'",
+    )
+    .map_err(|_| "loading worker role failed".to_string())?
+    .and_then(|oid| u32::try_from(oid).ok())
+    .map(pg_sys::Oid::from)
+    .filter(|oid| *oid != pg_sys::InvalidOid)
+    .ok_or_else(|| "worker group role is invalid".to_string())?;
+    let slot = state.identity.slot_name.clone();
+    poll_and_process(&mut state.decoder, &slot, worker_role_oid)
+        .map_err(|_| "polling prepared slot failed".to_string())
+}
+
+fn replace_unbound_slot_and_bind(
+    client: &mut SpiClient<'_>,
+    runtime: &WorkerRuntimeIdentity,
+    connected_database: &str,
+    publication: &PublicationIdentity,
 ) -> Result<(), String> {
+    let slot = runtime.slot_name.as_str();
     let rows = client
         .select(
-            "SELECT plugin::text AS plugin, database::text AS database_name,
-                    slot_type::text AS slot_type, temporary,
-                    invalidation_reason, wal_status::text AS wal_status,
-                    restart_lsn IS NOT NULL AS has_restart_lsn,
-                    confirmed_flush_lsn IS NOT NULL AS has_confirmed_flush_lsn
-             FROM pg_catalog.pg_replication_slots
-             WHERE slot_name = $1",
+            "SELECT active
+              FROM pg_catalog.pg_replication_slots
+              WHERE slot_name = $1",
             None,
             &[slot.into()],
         )
         .map_err(|_| "checking replication slot failed".to_string())?;
     if let Some(row) = rows.into_iter().next() {
-        let plugin = row
-            .get_by_name::<String, &str>("plugin")
-            .map_err(|_| "checking replication slot failed".to_string())?
-            .unwrap_or_default();
-        let database = row
-            .get_by_name::<String, &str>("database_name")
-            .map_err(|_| "checking replication slot failed".to_string())?
-            .unwrap_or_default();
-        let slot_type = row
-            .get_by_name::<String, &str>("slot_type")
-            .map_err(|_| "checking replication slot failed".to_string())?
-            .unwrap_or_default();
-        let temporary = row
-            .get_by_name::<bool, &str>("temporary")
+        let active = row
+            .get_by_name::<bool, &str>("active")
             .map_err(|_| "checking replication slot failed".to_string())?
             .unwrap_or(true);
-        let invalidation_reason = row
-            .get_by_name::<String, &str>("invalidation_reason")
-            .map_err(|_| "checking replication slot failed".to_string())?;
-        let wal_status = row
-            .get_by_name::<String, &str>("wal_status")
-            .map_err(|_| "checking replication slot failed".to_string())?;
-        let has_restart_lsn = row
-            .get_by_name::<bool, &str>("has_restart_lsn")
-            .map_err(|_| "checking replication slot failed".to_string())?
-            .unwrap_or(false);
-        let has_confirmed_flush_lsn = row
-            .get_by_name::<bool, &str>("has_confirmed_flush_lsn")
-            .map_err(|_| "checking replication slot failed".to_string())?
-            .unwrap_or(false);
-        if plugin != "pgoutput"
-            || database != connected_database
-            || slot_type != "logical"
-            || temporary
-            || invalidation_reason.is_some()
-            || wal_status.as_deref() == Some("lost")
-            || !has_restart_lsn
-            || !has_confirmed_flush_lsn
-        {
-            return Err("configured replication slot is incompatible".to_string());
+        if active {
+            return Err("configured replication slot is owned by another backend".to_string());
         }
-        return Ok(());
+        client
+            .select(
+                "SELECT pg_catalog.pg_drop_replication_slot($1)",
+                None,
+                &[slot.into()],
+            )
+            .map_err(|_| "dropping configured replication slot failed".to_string())?;
     }
-
-    if !allow_create {
-        return Err("active replication slot is unavailable".to_string());
-    }
-
     client
         .select(
             "SELECT pg_catalog.pg_create_logical_replication_slot($1, 'pgoutput')",
@@ -1188,13 +1191,143 @@ fn ensure_slot(
             &[slot.into()],
         )
         .map_err(|_| "creating replication slot failed".to_string())?;
+    let boundary = client
+        .select(
+            "SELECT confirmed_flush_lsn::text AS confirmed_flush_lsn
+             FROM pg_catalog.pg_replication_slots
+             WHERE slot_name = $1
+               AND slot_type = 'logical'
+               AND plugin = 'pgoutput'
+               AND database = $2
+               AND NOT temporary
+               AND confirmed_flush_lsn IS NOT NULL",
+            None,
+            &[slot.into(), connected_database.into()],
+        )
+        .map_err(|_| "confirming replication slot failed".to_string())?
+        .first()
+        .get_by_name::<String, &str>("confirmed_flush_lsn")
+        .map_err(|_| "confirming replication slot failed".to_string())?
+        .ok_or_else(|| "new replication slot is invalid".to_string())?;
+    let bound = client
+        .update(
+            "WITH progress AS (
+                 SELECT stream_generation
+                 FROM synchro.sync_wal_progress
+                 WHERE singleton
+                   AND stream_generation = $1
+                   AND generation_start_lsn IS NULL
+                   AND materialized_commit_lsn IS NULL
+                   AND materialized_end_lsn IS NULL
+                   AND acknowledged_end_lsn IS NULL
+                 FOR UPDATE
+             ), runtime AS (
+                 UPDATE synchro.sync_runtime_state
+                 SET active_slot_name = $2,
+                     active_publication_name = $3::name,
+                     active_publication_oid = $4::oid,
+                     updated_at = now()
+                 FROM progress
+                 WHERE synchro.sync_runtime_state.singleton
+                   AND synchro.sync_runtime_state.stream_generation = $1
+                   AND synchro.sync_runtime_state.active_slot_name IS NULL
+                 RETURNING synchro.sync_runtime_state.stream_generation
+             )
+             UPDATE synchro.sync_wal_progress progress
+             SET generation_start_lsn = $5::pg_lsn,
+                 updated_at = now()
+             FROM runtime
+             WHERE progress.singleton
+               AND progress.stream_generation = runtime.stream_generation",
+            None,
+            &[
+                runtime.stream_generation.as_str().into(),
+                slot.into(),
+                publication.name.as_str().into(),
+                publication.oid.into(),
+                boundary.as_str().into(),
+            ],
+        )
+        .map_err(|_| "binding fresh replication slot failed".to_string())?
+        .len();
+    if bound != 1 {
+        return Err("unbound stream progress is invalid".to_string());
+    }
     Ok(())
 }
 
-fn ensure_publication(client: &mut SpiClient<'_>, publication: &str) -> Result<(), String> {
+fn validate_bound_slot(
+    client: &mut SpiClient<'_>,
+    runtime: &WorkerRuntimeIdentity,
+    connected_database: &str,
+    publication: &PublicationIdentity,
+) -> Result<(), String> {
+    let valid = client
+        .select(
+            "SELECT EXISTS (
+                 SELECT 1
+                 FROM synchro.sync_runtime_state runtime
+                 JOIN synchro.sync_wal_progress progress ON progress.singleton
+                 JOIN synchro.sync_registry_generations registry
+                   ON registry.generation = progress.registry_generation
+                  AND registry.state = 'active'
+                  AND registry.validated
+                  AND registry.stream_generation = runtime.stream_generation
+                 JOIN pg_catalog.pg_replication_slots slot
+                   ON slot.slot_name = runtime.active_slot_name
+                 JOIN pg_catalog.pg_database database
+                   ON database.oid = slot.datoid
+                  AND database.datname::text = $3
+                 JOIN pg_catalog.pg_publication publication
+                   ON publication.oid = runtime.active_publication_oid
+                  AND publication.pubname = runtime.active_publication_name
+                  AND publication.pubname::text = $4
+                  AND NOT publication.puballtables
+                 WHERE runtime.singleton
+                   AND runtime.stream_generation = $1
+                   AND runtime.active_slot_name::text = $2
+                   AND runtime.active_publication_name::text = $4
+                   AND progress.stream_generation = runtime.stream_generation
+                   AND progress.generation_start_lsn IS NOT NULL
+                   AND COALESCE(
+                       progress.acknowledged_end_lsn,
+                       progress.generation_start_lsn
+                   ) = slot.confirmed_flush_lsn
+                   AND slot.slot_type = 'logical'
+                   AND slot.plugin = 'pgoutput'
+                   AND NOT slot.temporary
+                   AND slot.invalidation_reason IS NULL
+                   AND slot.wal_status IS DISTINCT FROM 'lost'
+                   AND slot.restart_lsn IS NOT NULL
+                   AND slot.confirmed_flush_lsn IS NOT NULL
+             ) AS valid",
+            None,
+            &[
+                runtime.stream_generation.as_str().into(),
+                runtime.slot_name.as_str().into(),
+                connected_database.into(),
+                publication.name.as_str().into(),
+            ],
+        )
+        .map_err(|_| "validating active replication slot failed".to_string())?
+        .first()
+        .get_by_name::<bool, &str>("valid")
+        .map_err(|_| "validating active replication slot failed".to_string())?
+        .unwrap_or(false);
+    if !valid {
+        return Err("active replication slot is invalid".to_string());
+    }
+    Ok(())
+}
+
+fn ensure_publication(
+    client: &mut SpiClient<'_>,
+    publication: &str,
+) -> Result<PublicationIdentity, String> {
     let rows = client
         .select(
-            "SELECT puballtables FROM pg_catalog.pg_publication WHERE pubname = $1",
+            "SELECT oid::bigint AS publication_oid, puballtables
+             FROM pg_catalog.pg_publication WHERE pubname = $1",
             None,
             &[publication.into()],
         )
@@ -1207,7 +1340,15 @@ fn ensure_publication(client: &mut SpiClient<'_>, publication: &str) -> Result<(
         {
             return Err("configured publication must be explicit".to_string());
         }
-        return Ok(());
+        let oid = row
+            .get_by_name::<i64, &str>("publication_oid")
+            .map_err(|_| "checking publication failed".to_string())?
+            .filter(|oid| *oid > 0)
+            .ok_or_else(|| "configured publication is unavailable".to_string())?;
+        return Ok(PublicationIdentity {
+            name: publication.to_string(),
+            oid,
+        });
     }
 
     Err("configured publication is unavailable".to_string())
