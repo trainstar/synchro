@@ -742,10 +742,10 @@ test-rn-warm-connect-android: conformance-mod-download test-blackbox-harness tes
 	cd clients/react-native/example && ANDROID_HOME="$(ANDROID_HOME)" ANDROID_SDK_ROOT="$(ANDROID_HOME)" JAVA_HOME="$(ANDROID_JAVA_HOME)" PATH="$(ANDROID_JAVA_HOME)/bin:$$PATH" npx detox build --configuration $(RN_ANDROID_DETOX_CONFIG)
 	@set -eu; \
 		$(WARM_CONNECT_ENV) \
-		cd conformance && SYNCHRO_RN_DETOX_CONFIGURATION="$(RN_ANDROID_DETOX_CONFIG)" GOFLAGS= GOWORK=off go run ./cmd/testresult exact \
+		cd conformance && ANDROID_HOME="$(ANDROID_HOME)" ANDROID_SDK_ROOT="$(ANDROID_HOME)" JAVA_HOME="$(ANDROID_JAVA_HOME)" PATH="$(ANDROID_JAVA_HOME)/bin:$$PATH" SYNCHRO_RN_DETOX_CONFIGURATION="$(RN_ANDROID_DETOX_CONFIG)" GOFLAGS= GOWORK=off go run ./cmd/testresult exact \
 		-test TestRealReactNativeWarmConnectAndroid \
 		-expect target_pass \
-		-- go test -tags reactnativeintegration -json ./reactnative -count=1 -timeout=15m \
+		-- go test -tags reactnativeintegration -json ./reactnative -count=1 -timeout=25m \
 		-run '^TestRealReactNativeWarmConnectAndroid$$' -args --provision --install
 
 verify-rn-seed:

@@ -50,7 +50,10 @@ module.exports = {
         avdName: 'Pixel_7_API_34',
       },
       bootArgs: '-no-snapshot-load -no-snapshot-save',
-      gpuMode: 'host',
+      // The emulator's Qt GUI layer crashes under host GPU rendering in
+      // unattended runs. Headless software rendering is stable.
+      headless: true,
+      gpuMode: 'swiftshader_indirect',
     },
   },
   configurations: {
