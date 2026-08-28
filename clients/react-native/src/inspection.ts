@@ -212,6 +212,9 @@ function requireTransportOperationClass(value: TransportOperationClass): void {
   }
 }
 
+export { sha256Hex } from './digest';
+export { isCanonicalBase64Url, isCanonicalInt64 } from './sqliteValues';
+
 export type {
   ClientStateInspection,
   RebuildAttemptInspection,
