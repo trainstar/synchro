@@ -6,6 +6,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 
 	_ "github.com/jackc/pgx/v5/stdlib"
@@ -14,47 +15,50 @@ import (
 )
 
 func main() {
-	var outputPath string
-	var databaseURL string
-	var overwrite bool
-
-	flag.StringVar(&databaseURL, "database-url", os.Getenv("DATABASE_URL"), "PostgreSQL connection string with synchro_pg installed")
-	flag.StringVar(&outputPath, "output", "", "Output path for the generated SQLite seed database")
-	flag.BoolVar(&overwrite, "overwrite", false, "Overwrite an existing output database")
-	flag.Parse()
-
-	if databaseURL == "" {
-		fatalf("database URL is required, pass --database-url or set DATABASE_URL")
+	if err := run(os.Args[1:], os.Getenv, os.Stdout, os.Stderr); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
 	}
-	if outputPath == "" {
-		fatalf("output path is required, pass --output")
+}
+
+func run(args []string, env func(string) string, stdout, stderr io.Writer) error {
+	fs := flag.NewFlagSet("synchro-seed", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	databaseURL := fs.String("database-url", env("DATABASE_URL"), "PostgreSQL connection string with synchro_pg installed")
+	outputPath := fs.String("output", "", "Output path for the generated SQLite seed database")
+	overwrite := fs.Bool("overwrite", false, "Overwrite an existing output database")
+	if err := fs.Parse(args); err != nil {
+		return err
 	}
 
-	db, err := sql.Open("pgx", databaseURL)
+	if *databaseURL == "" {
+		return fmt.Errorf("database URL is required, pass --database-url or set DATABASE_URL")
+	}
+	if *outputPath == "" {
+		return fmt.Errorf("output path is required, pass --output")
+	}
+
+	db, err := sql.Open("pgx", *databaseURL)
 	if err != nil {
-		fatalf("opening postgres database: %v", err)
+		return fmt.Errorf("opening postgres database: %w", err)
 	}
 	defer db.Close()
 
 	if err := db.PingContext(context.Background()); err != nil {
-		fatalf("pinging postgres database: %v", err)
+		return fmt.Errorf("pinging postgres database: %w", err)
 	}
 
 	err = seeddb.Generate(context.Background(), db, seeddb.GenerateOptions{
-		OutputPath: outputPath,
-		Overwrite:  overwrite,
+		OutputPath: *outputPath,
+		Overwrite:  *overwrite,
 	})
 	if err != nil {
 		if errors.Is(err, seeddb.ErrOutputExists) {
-			fatalf("%v, pass --overwrite to replace it", err)
+			return fmt.Errorf("%w, pass --overwrite to replace it", err)
 		}
-		fatalf("generating seed database: %v", err)
+		return fmt.Errorf("generating seed database: %w", err)
 	}
 
-	fmt.Fprintf(os.Stdout, "generated seed database at %s\n", outputPath)
-}
-
-func fatalf(format string, args ...any) {
-	fmt.Fprintf(os.Stderr, format+"\n", args...)
-	os.Exit(1)
+	fmt.Fprintf(stdout, "generated seed database at %s\n", *outputPath)
+	return nil
 }
