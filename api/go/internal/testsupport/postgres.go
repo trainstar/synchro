@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"os"
 	"regexp"
@@ -40,6 +41,7 @@ func OpenPostgres(t testing.TB) *sql.DB {
 	if _, err := db.ExecContext(ctx, "CREATE EXTENSION IF NOT EXISTS synchro_pg CASCADE"); err != nil {
 		t.Fatalf("ensuring synchro_pg extension: %v", err)
 	}
+	verifyExtensionObjects(ctx, t, db)
 
 	workerLogin := configuredWorkerLogin(ctx, t, db)
 	ensureWorkerLogin(ctx, t, db, workerLogin)
@@ -165,6 +167,45 @@ func verifyServerContract(ctx context.Context, t testing.TB, db *sql.DB) {
 	if settings["synchro.database"] != databaseName {
 		t.Fatalf("integration database requires synchro.database=%q, got %q", databaseName, settings["synchro.database"])
 	}
+}
+
+func verifyExtensionObjects(ctx context.Context, t testing.TB, db *sql.DB) {
+	t.Helper()
+	if err := extensionObjectsError(ctx, db); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func extensionObjectsError(ctx context.Context, db *sql.DB) error {
+	var raw []byte
+	if err := db.QueryRowContext(ctx, "SELECT synchro.synchro_contract_info()").Scan(&raw); err != nil {
+		return fmt.Errorf("loading synchro_pg contract info: %w", err)
+	}
+	var info struct {
+		LibraryBuildFingerprint   string `json:"library_build_fingerprint"`
+		InstalledBuildFingerprint string `json:"installed_build_fingerprint"`
+		ExtensionObjectsCurrent   bool   `json:"extension_objects_current"`
+	}
+	if err := json.Unmarshal(raw, &info); err != nil {
+		return fmt.Errorf("decoding synchro_pg contract info: %w", err)
+	}
+	library := strings.TrimSpace(info.LibraryBuildFingerprint)
+	installed := strings.TrimSpace(info.InstalledBuildFingerprint)
+	objectsCurrent := info.ExtensionObjectsCurrent && library != "" && installed != ""
+	if library == "" {
+		library = "missing"
+	}
+	if installed == "" {
+		installed = "missing"
+	}
+	if !objectsCurrent || library != installed {
+		return fmt.Errorf(
+			"synchro_pg extension objects are stale: library fingerprint %q, installed objects fingerprint %q; recreate or update the extension",
+			library,
+			installed,
+		)
+	}
+	return nil
 }
 
 func showSetting(ctx context.Context, t testing.TB, db *sql.DB, name string) string {

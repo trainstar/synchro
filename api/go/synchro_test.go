@@ -380,6 +380,27 @@ func TestRequireCompatibleExtension(t *testing.T) {
 	}
 }
 
+func TestRequireCurrentExtensionObjectsRejectsStale(t *testing.T) {
+	err := requireCurrentExtensionObjects(ExtensionContractInfo{
+		LibraryBuildFingerprint:   "library-fingerprint",
+		InstalledBuildFingerprint: "installed-fingerprint",
+		ExtensionObjectsCurrent:   false,
+	})
+	if err == nil {
+		t.Fatal("stale extension objects passed compatibility validation")
+	}
+	message := err.Error()
+	for _, expected := range []string{
+		`library fingerprint "library-fingerprint"`,
+		`installed objects fingerprint "installed-fingerprint"`,
+		"recreate or update the extension",
+	} {
+		if !strings.Contains(message, expected) {
+			t.Fatalf("stale extension error = %q, missing %q", message, expected)
+		}
+	}
+}
+
 func TestConnectPassthroughTrustedUpstreamAuth(t *testing.T) {
 	srv := testServerWithConfig(t, func(cfg *Config) {
 		cfg.UserIDResolver = func(r *http.Request) (string, error) {

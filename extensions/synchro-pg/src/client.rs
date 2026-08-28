@@ -51,15 +51,24 @@ struct ContractInfo {
     extension_version: &'static str,
     sql_contract_version: i32,
     protocol_version: u32,
+    library_build_fingerprint: &'static str,
+    installed_build_fingerprint: Option<String>,
+    extension_objects_current: bool,
 }
 
 #[pg_extern]
 fn synchro_contract_info() -> pgrx::JsonB {
+    let installed_build_fingerprint = crate::build_fingerprint::installed_fingerprint();
     pgrx::JsonB(
         serde_json::to_value(ContractInfo {
             extension_version: env!("CARGO_PKG_VERSION"),
             sql_contract_version: SQL_CONTRACT_VERSION,
             protocol_version: PROTOCOL_VERSION,
+            library_build_fingerprint: crate::build_fingerprint::library_fingerprint(),
+            extension_objects_current: installed_build_fingerprint.as_deref().is_some_and(
+                |installed| installed == crate::build_fingerprint::library_fingerprint(),
+            ),
+            installed_build_fingerprint,
         })
         .unwrap(),
     )

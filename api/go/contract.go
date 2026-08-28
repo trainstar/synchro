@@ -16,9 +16,12 @@ const (
 )
 
 type ExtensionContractInfo struct {
-	ExtensionVersion   string `json:"extension_version"`
-	SQLContractVersion int    `json:"sql_contract_version"`
-	ProtocolVersion    int    `json:"protocol_version"`
+	ExtensionVersion          string `json:"extension_version"`
+	SQLContractVersion        int    `json:"sql_contract_version"`
+	ProtocolVersion           int    `json:"protocol_version"`
+	LibraryBuildFingerprint   string `json:"library_build_fingerprint"`
+	InstalledBuildFingerprint string `json:"installed_build_fingerprint"`
+	ExtensionObjectsCurrent   bool   `json:"extension_objects_current"`
 }
 
 func RequireCompatibleExtension(ctx context.Context, db *sql.DB) error {
@@ -56,6 +59,9 @@ func RequireCompatibleExtension(ctx context.Context, db *sql.DB) error {
 	var info ExtensionContractInfo
 	if err := json.Unmarshal(raw, &info); err != nil {
 		return fmt.Errorf("decoding synchro_pg contract info: %w", err)
+	}
+	if err := requireCurrentExtensionObjects(info); err != nil {
+		return err
 	}
 
 	if info.SQLContractVersion != ExpectedSQLContractVersion {
@@ -105,5 +111,25 @@ func RequireCompatibleExtension(ctx context.Context, db *sql.DB) error {
 		)
 	}
 
+	return nil
+}
+
+func requireCurrentExtensionObjects(info ExtensionContractInfo) error {
+	library := strings.TrimSpace(info.LibraryBuildFingerprint)
+	installed := strings.TrimSpace(info.InstalledBuildFingerprint)
+	objectsCurrent := info.ExtensionObjectsCurrent && library != "" && installed != ""
+	if library == "" {
+		library = "missing"
+	}
+	if installed == "" {
+		installed = "missing"
+	}
+	if !objectsCurrent || library != installed {
+		return fmt.Errorf(
+			"synchro_pg extension objects are stale: library fingerprint %q, installed objects fingerprint %q; recreate or update the extension",
+			library,
+			installed,
+		)
+	}
 	return nil
 }

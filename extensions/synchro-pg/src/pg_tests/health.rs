@@ -462,3 +462,70 @@
         assert_eq!(object.len(), 1);
         assert_eq!(object.get("ready").and_then(Value::as_bool), Some(false));
     }
+
+    #[pg_test]
+    fn build_fingerprint_is_stable() {
+        let first: String = Spi::get_one("SELECT synchro.synchro_build_fingerprint()")
+            .expect("load first build fingerprint")
+            .expect("first build fingerprint");
+        let second: String = Spi::get_one("SELECT synchro.synchro_build_fingerprint()")
+            .expect("load second build fingerprint")
+            .expect("second build fingerprint");
+
+        assert_eq!(first, second);
+        assert_eq!(first.len(), 64);
+        assert!(first.bytes().all(|byte| byte.is_ascii_hexdigit()));
+    }
+
+    #[pg_test]
+    fn stale_build_fingerprint_fails_health() {
+        let current: String = Spi::get_one(
+            "SELECT installed_fingerprint FROM synchro.sync_extension_build WHERE singleton",
+        )
+        .expect("load installed fingerprint")
+        .expect("installed fingerprint");
+        let stale = "0".repeat(64);
+        assert_ne!(current, stale);
+
+        Spi::run_with_args(
+            "UPDATE synchro.sync_extension_build
+             SET installed_fingerprint = $1
+             WHERE singleton",
+            &[stale.as_str().into()],
+        )
+        .expect("record stale fingerprint");
+
+        let detail: pgrx::JsonB = Spi::get_one("SELECT synchro.synchro_health_detail()")
+            .expect("load health detail")
+            .expect("health detail");
+        let contract: pgrx::JsonB = Spi::get_one("SELECT synchro.synchro_contract_info()")
+            .expect("load contract info")
+            .expect("contract info");
+
+        Spi::run_with_args(
+            "UPDATE synchro.sync_extension_build
+             SET installed_fingerprint = $1
+             WHERE singleton",
+            &[current.as_str().into()],
+        )
+        .expect("restore installed fingerprint");
+
+        assert_eq!(
+            detail.0["checks"]["extension_objects_stale"]["state"],
+            "failed"
+        );
+        assert_eq!(
+            detail.0["observations"]["extension_objects"]["library_fingerprint"],
+            crate::build_fingerprint::library_fingerprint()
+        );
+        assert_eq!(
+            detail.0["observations"]["extension_objects"]["installed_fingerprint"],
+            stale
+        );
+        assert_eq!(contract.0["extension_objects_current"], false);
+        assert_eq!(
+            contract.0["library_build_fingerprint"],
+            crate::build_fingerprint::library_fingerprint()
+        );
+        assert_eq!(contract.0["installed_build_fingerprint"], stale);
+    }

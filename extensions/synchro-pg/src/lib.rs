@@ -5,6 +5,7 @@ use pgrx::{GucContext, GucFlags, GucRegistry, GucSetting};
 
 mod bgworker;
 mod bucketing;
+mod build_fingerprint;
 mod client;
 mod compaction;
 mod cursor_token;
@@ -51,6 +52,12 @@ VALUES (
     replace(gen_random_uuid()::text, '-', '') || replace(gen_random_uuid()::text, '-', '')
 )
 ON CONFLICT (singleton) DO NOTHING;
+
+CREATE TABLE sync_extension_build (
+    singleton BOOLEAN PRIMARY KEY DEFAULT true CHECK (singleton),
+    installed_fingerprint TEXT NOT NULL CHECK (installed_fingerprint ~ '^[0-9a-f]{64}$'),
+    installed_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
 
 CREATE TABLE sync_token_keys (
     key_id TEXT PRIMARY KEY,
@@ -1860,6 +1867,9 @@ BEGIN
 END
 $roles$;
 
+INSERT INTO synchro.sync_extension_build (singleton, installed_fingerprint)
+VALUES (true, synchro.synchro_build_fingerprint());
+
 CREATE SCHEMA IF NOT EXISTS synchro_projection;
 ALTER SCHEMA synchro_projection OWNER TO synchro_owner;
 REVOKE ALL ON SCHEMA synchro_projection FROM PUBLIC;
@@ -1939,7 +1949,8 @@ BEGIN
         grantee := CASE
             WHEN function_record.proname IN (
                 'synchro_contract_info', 'synchro_connect', 'synchro_pull', 'synchro_push',
-                'synchro_rebuild', 'synchro_schema_manifest', 'synchro_tables', 'synchro_readiness'
+                'synchro_rebuild', 'synchro_schema_manifest', 'synchro_tables', 'synchro_readiness',
+                'synchro_build_fingerprint'
             ) THEN 'synchro_adapter'
              WHEN function_record.proname IN (
                  'synchro_portable_seed_manifest', 'synchro_portable_seed_scope'

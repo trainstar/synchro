@@ -588,10 +588,17 @@ impl HealthCheck {
 #[derive(Default, Serialize)]
 struct HealthObservations {
     active_slot_name: Option<String>,
+    extension_objects: Option<ExtensionObjectsObservation>,
     heartbeat_age_seconds: Option<f64>,
     wal_lag_bytes: Option<i64>,
     wal_lag_seconds: Option<f64>,
     poison: Option<PoisonObservation>,
+}
+
+#[derive(Serialize)]
+struct ExtensionObjectsObservation {
+    library_fingerprint: String,
+    installed_fingerprint: String,
 }
 
 #[derive(Serialize)]
@@ -613,6 +620,7 @@ impl Default for ReadinessStatus {
         let mut checks = BTreeMap::new();
         for name in [
             "database_contract",
+            "extension_objects_stale",
             "registry_generation",
             "schema_generation",
             "relation_identity",
@@ -847,6 +855,21 @@ pub(crate) fn load_readiness_status_with_configuration(
     configuration: ReadinessConfiguration,
 ) -> ReadinessStatus {
     let mut status = ReadinessStatus::default();
+    let library_fingerprint = crate::build_fingerprint::library_fingerprint();
+    let installed_fingerprint = crate::build_fingerprint::installed_fingerprint();
+    status.observations.extension_objects = Some(ExtensionObjectsObservation {
+        library_fingerprint: library_fingerprint.to_string(),
+        installed_fingerprint: installed_fingerprint
+            .clone()
+            .unwrap_or_else(|| "missing".to_string()),
+    });
+    status.set(
+        "extension_objects_stale",
+        known_check(
+            installed_fingerprint.as_deref() == Some(library_fingerprint),
+            "extension_objects_stale",
+        ),
+    );
 
     if configuration.database.is_none() {
         status.set(
