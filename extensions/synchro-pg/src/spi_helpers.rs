@@ -12,6 +12,13 @@ pub(crate) fn required_text(
         .ok_or_else(|| format!("{error_prefix}{name} is missing"))
 }
 
+pub(crate) fn required_positive_i64(row: &SpiHeapTupleData<'_>, name: &str) -> Result<i64, String> {
+    row.get_by_name::<i64, &str>(name)
+        .map_err(|error| format!("reading {name}: {error}"))?
+        .filter(|value| *value > 0)
+        .ok_or_else(|| format!("{name} is invalid"))
+}
+
 pub(crate) fn decode_digest(value: Vec<u8>, invalid_message: &str) -> Result<Sha256Digest, String> {
     let bytes: [u8; 32] = value.try_into().map_err(|_| invalid_message.to_string())?;
     Ok(Sha256Digest::from_bytes(bytes))

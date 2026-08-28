@@ -8,9 +8,8 @@ const MAX_COMPACTION_BATCH_SIZE: i32 = 10_000;
 /// Compact effects that every active, currently assigned client acknowledged.
 #[pg_extern]
 fn synchro_compact(
-    p_stale_threshold: default!(&str, "'30 days'"),
+    p_stale_threshold: default!(Option<&str>, "'30 days'"),
     p_batch_size: default!(i32, "10000"),
-    p_stale_at: default!(Option<&str>, "NULL"),
 ) -> pgrx::JsonB {
     if !(1..=MAX_COMPACTION_BATCH_SIZE).contains(&p_batch_size) {
         pgrx::error!(
@@ -19,8 +18,10 @@ fn synchro_compact(
         );
     }
     Spi::connect_mut(|client| {
-        validate_stale_inputs(client, p_stale_threshold, p_stale_at);
-        let deactivated = deactivate_stale_clients(client, p_stale_threshold, p_stale_at);
+        let p_stale_threshold = p_stale_threshold
+            .unwrap_or_else(|| pgrx::error!("compaction stale inputs are invalid"));
+        validate_stale_inputs(client, p_stale_threshold);
+        let deactivated = deactivate_stale_clients(client, p_stale_threshold);
         lock_retention_state(client);
         let (deleted_entries, last_deleted_seq) = delete_acknowledged_effects(client, p_batch_size);
 
@@ -32,20 +33,49 @@ fn synchro_compact(
     })
 }
 
-fn validate_stale_inputs(client: &SpiClient<'_>, threshold: &str, stale_at: Option<&str>) {
+/// Mark one active client generation for expiry during the next compaction.
+#[pg_extern]
+fn synchro_expire_retention_client(p_user_id: Option<&str>, p_client_id: Option<&str>) -> bool {
+    let p_user_id =
+        p_user_id.unwrap_or_else(|| pgrx::error!("retention client identity is invalid"));
+    let p_client_id =
+        p_client_id.unwrap_or_else(|| pgrx::error!("retention client identity is invalid"));
+    if p_user_id.is_empty() || p_client_id.is_empty() {
+        pgrx::error!("retention client identity is invalid");
+    }
+    Spi::connect_mut(|client| {
+        let expired = client
+            .update(
+                "UPDATE sync_clients
+                 SET generation_expires_at = pg_catalog.statement_timestamp(),
+                     updated_at = now()
+                 WHERE user_id = $1
+                   AND client_id = $2
+                   AND is_active
+                   AND generation_expires_at IS NULL
+                  RETURNING client_id",
+                None,
+                &[p_user_id.into(), p_client_id.into()],
+            )
+            .unwrap_or_else(|error| pgrx::error!("expiring retention client: {error}"));
+        if expired.len() > 1 {
+            pgrx::error!("retention client expiry affected multiple clients");
+        }
+        !expired.is_empty()
+    })
+}
+
+fn validate_stale_inputs(client: &SpiClient<'_>, threshold: &str) {
     let valid = client
         .select(
             "SELECT pg_catalog.isfinite(parsed.value)
                     AND parsed.value > interval '0 seconds'
                     AND pg_catalog.isfinite(
-                        COALESCE($2::timestamptz, pg_catalog.statement_timestamp())
-                    )
-                    AND pg_catalog.isfinite(
-                        COALESCE($2::timestamptz, pg_catalog.statement_timestamp()) - parsed.value
+                        pg_catalog.statement_timestamp() - parsed.value
                     ) AS valid
              FROM (SELECT $1::interval AS value) parsed",
             None,
-            &[threshold.into(), stale_at.into()],
+            &[threshold.into()],
         )
         .unwrap_or_else(|_| pgrx::error!("compaction stale inputs are invalid"))
         .first()
@@ -57,21 +87,20 @@ fn validate_stale_inputs(client: &SpiClient<'_>, threshold: &str, stale_at: Opti
     }
 }
 
-fn deactivate_stale_clients(
-    client: &mut SpiClient<'_>,
-    threshold: &str,
-    stale_at: Option<&str>,
-) -> i64 {
+fn deactivate_stale_clients(client: &mut SpiClient<'_>, threshold: &str) -> i64 {
     match client.update(
         "UPDATE sync_clients SET is_active = false, updated_at = now()
-         WHERE is_active = true
-            AND GREATEST(
-                created_at,
-                COALESCE(last_sync_at, '-infinity'::timestamptz),
-                COALESCE(last_acknowledged_at, '-infinity'::timestamptz)
-            ) < COALESCE($2::timestamptz, pg_catalog.statement_timestamp()) - $1::interval",
+          WHERE is_active = true
+             AND (
+                 generation_expires_at IS NOT NULL
+                 OR GREATEST(
+                     created_at,
+                     COALESCE(last_sync_at, '-infinity'::timestamptz),
+                     COALESCE(last_acknowledged_at, '-infinity'::timestamptz)
+                 ) < pg_catalog.statement_timestamp() - $1::interval
+             )",
         None,
-        &[threshold.into(), stale_at.into()],
+        &[threshold.into()],
     ) {
         Ok(tup) => tup.len() as i64,
         Err(error) => pgrx::error!("deactivating stale clients: {}", error),

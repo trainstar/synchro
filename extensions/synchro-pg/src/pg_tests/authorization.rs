@@ -176,6 +176,18 @@ fn seed_and_operator_have_only_declared_function_grants() {
         "synchro_operator",
         "synchro.synchro_debug(text,text)"
     ));
+    assert!(has_function_privilege(
+        "synchro_operator",
+        "synchro.synchro_expire_retention_client(text,text)"
+    ));
+    assert!(!has_function_privilege(
+        "synchro_adapter",
+        "synchro.synchro_expire_retention_client(text,text)"
+    ));
+    assert!(!has_function_privilege(
+        "synchro_worker",
+        "synchro.synchro_expire_retention_client(text,text)"
+    ));
     assert!(!has_function_privilege(
         "synchro_operator",
         "synchro.synchro_connect(text,jsonb)"

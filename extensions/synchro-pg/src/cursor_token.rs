@@ -5,7 +5,9 @@ use pgrx::spi::SpiClient;
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 
-use crate::spi_helpers::{current_utc_timestamp, is_lower_hex, required_text};
+use crate::spi_helpers::{
+    current_utc_timestamp, is_lower_hex, required_positive_i64, required_text,
+};
 use crate::stream_position::StreamPosition;
 
 type HmacSha256 = Hmac<Sha256>;
@@ -336,11 +338,4 @@ fn load_scope_state(client: &SpiClient<'_>, scope_id: &str) -> Result<ScopeState
         retention_generation,
         floor,
     })
-}
-
-fn required_positive_i64(row: &pgrx::spi::SpiHeapTupleData<'_>, name: &str) -> Result<i64, String> {
-    row.get_by_name::<i64, &str>(name)
-        .map_err(|error| format!("reading {name}: {error}"))?
-        .filter(|value| *value > 0)
-        .ok_or_else(|| format!("{name} is invalid"))
 }

@@ -18,6 +18,7 @@ mod rebuild;
 mod rebuild_token;
 mod registry;
 mod schema;
+mod scope_digest;
 mod seed_token;
 mod spi_helpers;
 mod stream_position;
@@ -1975,10 +1976,11 @@ BEGIN
              WHEN function_record.proname IN (
                 'synchro_register_table', 'synchro_register_capture_dependency',
                 'synchro_prepare_projection_view',
-                'synchro_register_membership_dependency',
-                'synchro_unregister_table', 'synchro_register_shared_scope',
-                'synchro_unregister_shared_scope', 'synchro_backfill_bucket_edges',
-                 'synchro_compact', 'synchro_retry_wal_poison', 'synchro_health_detail',
+                 'synchro_register_membership_dependency',
+                 'synchro_unregister_table', 'synchro_register_shared_scope',
+                 'synchro_unregister_shared_scope', 'synchro_backfill_bucket_edges',
+                 'synchro_compact', 'synchro_expire_retention_client',
+                 'synchro_retry_wal_poison', 'synchro_health_detail',
                  'synchro_debug', 'synchro_primary_key_guard', 'synchro_capture_fence',
                  'synchro_prepare_stream_reset', 'synchro_lock_stream_reset_sources',
                  'synchro_mark_stream_reset_snapshot',

@@ -71,31 +71,19 @@
     }
 
     #[pg_test]
-    fn test_compact_uses_injected_stale_clock() {
+    fn test_compact_deactivates_marked_retention_client() {
         setup_test_tables();
         register_client("u1", "expired-by-injected-clock");
         register_client("u1", "active-at-injected-clock");
-        Spi::run(
-            "UPDATE sync_clients
-             SET created_at = CASE client_id
-                     WHEN 'expired-by-injected-clock' THEN now() - interval '29 days'
-                     WHEN 'active-at-injected-clock' THEN now() - interval '1 day'
-                 END,
-                 last_acknowledged_at = NULL
-             WHERE user_id = 'u1'
-               AND client_id IN ('expired-by-injected-clock', 'active-at-injected-clock')",
+        let marked: bool = Spi::get_one(
+            "SELECT synchro_expire_retention_client('u1', 'expired-by-injected-clock')",
         )
-        .unwrap();
+        .expect("mark retention client")
+        .expect("retention client mark result");
 
-        let response: pgrx::JsonB = Spi::get_one(
-            "SELECT synchro_compact(
-                 '30 days',
-                 10000,
-                 (now() + interval '2 days')::text
-             )",
-        )
-        .unwrap()
-        .expect("compaction response with injected stale clock");
+        let response: pgrx::JsonB = Spi::get_one("SELECT synchro_compact('30 days', 10000)")
+            .unwrap()
+            .expect("compaction response with marked retention client");
         let active_clients: Vec<String> = Spi::connect(|client| {
             client
                 .select(
@@ -106,33 +94,50 @@
                     None,
                     &[],
                 )
-                .expect("read injected-clock client state")
+                .expect("read marked retention client state")
                 .map(|row| {
                     row.get_by_name::<String, &str>("client_id")
-                        .expect("read injected-clock client ID")
-                        .expect("injected-clock client ID")
+                        .expect("read marked retention client ID")
+                        .expect("marked retention client ID")
                 })
                 .collect()
         });
 
+        assert!(marked);
         assert_eq!(response.0["deactivated_clients"], 1);
         assert_eq!(active_clients, vec!["active-at-injected-clock"]);
     }
 
     #[pg_test]
-    fn test_compact_rejects_infinite_injected_clock() {
-        assert_rejected_compaction_preserves_state(
-            "7 days",
-            Some("infinity"),
-            "b1000000-0000-4000-8000-000000000007",
-        );
+    fn test_expire_retention_rejects_empty_identity() {
+        setup_test_tables();
+        register_client("u1", "c1");
+
+        let accepted = PgTryBuilder::new(std::panic::AssertUnwindSafe(|| {
+            Spi::get_one::<bool>("SELECT synchro_expire_retention_client('', 'c1')").is_ok()
+        }))
+        .catch_others(|_| false)
+        .execute();
+        let null_accepted = PgTryBuilder::new(std::panic::AssertUnwindSafe(|| {
+            Spi::get_one::<bool>("SELECT synchro_expire_retention_client(NULL, 'c1')").is_ok()
+        }))
+        .catch_others(|_| false)
+        .execute();
+        let active: bool = Spi::get_one(
+            "SELECT is_active FROM sync_clients WHERE user_id = 'u1' AND client_id = 'c1'",
+        )
+        .expect("read retention client after rejected expiry")
+        .expect("retention client after rejected expiry");
+
+        assert!(!accepted, "empty retention identity must be rejected");
+        assert!(!null_accepted, "null retention identity must be rejected");
+        assert!(active);
     }
 
     #[pg_test]
     fn test_compact_rejects_zero_stale_threshold_without_mutation() {
         assert_rejected_compaction_preserves_state(
-            "0 seconds",
-            None,
+            Some("0 seconds"),
             "b1000000-0000-4000-8000-000000000001",
         );
     }
@@ -140,8 +145,7 @@
     #[pg_test]
     fn test_compact_rejects_negative_stale_threshold_without_mutation() {
         assert_rejected_compaction_preserves_state(
-            "-1 second",
-            None,
+            Some("-1 second"),
             "b1000000-0000-4000-8000-000000000002",
         );
     }
@@ -149,8 +153,7 @@
     #[pg_test]
     fn test_compact_rejects_infinite_stale_threshold_without_mutation() {
         assert_rejected_compaction_preserves_state(
-            "infinity",
-            None,
+            Some("infinity"),
             "b1000000-0000-4000-8000-000000000003",
         );
     }
@@ -158,8 +161,7 @@
     #[pg_test]
     fn test_compact_rejects_malformed_stale_threshold_without_mutation() {
         assert_rejected_compaction_preserves_state(
-            "not an interval",
-            None,
+            Some("not an interval"),
             "b1000000-0000-4000-8000-000000000004",
         );
     }
@@ -167,9 +169,16 @@
     #[pg_test]
     fn test_compact_rejects_unsafe_stale_threshold_without_mutation() {
         assert_rejected_compaction_preserves_state(
-            "1000000 years",
-            None,
+            Some("1000000 years"),
             "b1000000-0000-4000-8000-000000000005",
+        );
+    }
+
+    #[pg_test]
+    fn test_compact_rejects_null_stale_threshold_without_mutation() {
+        assert_rejected_compaction_preserves_state(
+            None,
+            "b1000000-0000-4000-8000-000000000007",
         );
     }
 
@@ -444,8 +453,7 @@
     }
 
     fn assert_rejected_compaction_preserves_state(
-        threshold: &str,
-        stale_at: Option<&str>,
+        threshold: Option<&str>,
         record_id: &str,
     ) {
         setup_test_tables();
@@ -468,8 +476,8 @@
 
         let accepted = PgTryBuilder::new(std::panic::AssertUnwindSafe(|| {
             Spi::get_one_with_args::<pgrx::JsonB>(
-                "SELECT synchro_compact($1, 10000, $2)",
-                &[threshold.into(), stale_at.into()],
+                "SELECT synchro_compact($1, 10000)",
+                &[threshold.into()],
             )
             .is_ok()
         }))

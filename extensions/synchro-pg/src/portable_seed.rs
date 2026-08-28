@@ -19,7 +19,8 @@ use crate::pull::{
 use crate::registry::{load_registry_generation_from_client, TableRegistration};
 use crate::seed_token::{self, SeedContinuationPayload, SeedPagePayload, SeedSnapshotBoundary};
 use crate::spi_helpers::{
-    current_utc_timestamp, decode_digest, is_lower_hex, is_lower_uuid, required_text,
+    current_utc_timestamp, decode_digest, is_lower_hex, is_lower_uuid, required_positive_i64,
+    required_text,
 };
 use crate::stream_position::{parse_lsn, StreamPosition};
 use synchro_core::contract::ProtocolErrorCode;
@@ -1454,13 +1455,6 @@ fn decode_nonce(value: &str) -> Result<Vec<u8>, String> {
         return Err("portable seed transaction nonce is invalid".to_string());
     }
     Ok(bytes)
-}
-
-fn required_positive_i64(row: &pgrx::spi::SpiHeapTupleData<'_>, name: &str) -> Result<i64, String> {
-    row.get_by_name::<i64, &str>(name)
-        .map_err(|error| format!("reading {name}: {error}"))?
-        .filter(|value| *value > 0)
-        .ok_or_else(|| format!("{name} is invalid"))
 }
 
 fn portable_shared_scope_exists(client: &SpiClient<'_>, scope_id: &str) -> bool {

@@ -5,13 +5,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"sync"
-	"time"
 )
 
 const diagnosticRetentionClientID = "s12-retention-client"
-
-var diagnosticRetentionStaleAt sync.Map
 
 // DiagnosticPushObservation contains bounded durable state for one diagnostic push client.
 type DiagnosticPushObservation struct {
@@ -96,7 +92,7 @@ func (executor *OperatorExecutor) ObserveDiagnosticPush(ctx context.Context, cli
 	return observation, nil
 }
 
-// AgeDiagnosticRetentionClient selects a supported compaction clock for the fixed S-12 client.
+// AgeDiagnosticRetentionClient marks the fixed S-12 client for retention expiry.
 func (executor *OperatorExecutor) AgeDiagnosticRetentionClient(ctx context.Context) error {
 	if executor == nil || executor.harness == nil || !executor.harness.sourceReady || ctx == nil {
 		return errors.New("operator executor is unavailable")
@@ -108,36 +104,19 @@ func (executor *OperatorExecutor) AgeDiagnosticRetentionClient(ctx context.Conte
 	}
 	defer database.Close()
 
-	var staleAt time.Time
-	err = database.QueryRowContext(ctx, `
-		WITH activity AS (
-			SELECT client_id,
-			       GREATEST(
-			           created_at,
-			           COALESCE(last_sync_at, '-infinity'::timestamptz),
-			           COALESCE(last_acknowledged_at, '-infinity'::timestamptz)
-			       ) AS value
-			FROM synchro.sync_clients
-			WHERE user_id = 'diagnostic-user'
-		), target AS (
-			SELECT value FROM activity WHERE client_id = $1
-		), successor AS (
-			SELECT min(activity.value) AS value
-			FROM activity, target
-			WHERE activity.client_id <> $1
-			  AND activity.value > target.value
-		)
-		SELECT target.value
-			+ COALESCE((successor.value - target.value) / 2, interval '1 microsecond')
-			+ interval '30 days'
-		FROM target, successor`, diagnosticRetentionClientID).Scan(&staleAt)
+	var expired bool
+	err = database.QueryRowContext(
+		ctx,
+		"SELECT synchro.synchro_expire_retention_client($1, $2)",
+		"diagnostic-user",
+		diagnosticRetentionClientID,
+	).Scan(&expired)
 	if err != nil {
-		return fmt.Errorf("select diagnostic retention compaction clock: %w", err)
+		return fmt.Errorf("expire diagnostic retention client: %w", err)
 	}
-	if staleAt.IsZero() {
-		return errors.New("diagnostic retention compaction clock is invalid")
+	if !expired {
+		return errors.New("diagnostic retention client was not active")
 	}
-	diagnosticRetentionStaleAt.Store(executor.harness, staleAt.UTC().Format(time.RFC3339Nano))
 	return nil
 }
 
@@ -153,21 +132,12 @@ func (executor *OperatorExecutor) RunDiagnosticRetentionCompaction(ctx context.C
 	}
 	defer database.Close()
 
-	staleAt, present := diagnosticRetentionStaleAt.LoadAndDelete(executor.harness)
-	if !present {
-		return DiagnosticCompactionResult{}, errors.New("diagnostic retention compaction clock is unavailable")
-	}
-	staleAtText, ok := staleAt.(string)
-	if !ok || staleAtText == "" {
-		return DiagnosticCompactionResult{}, errors.New("diagnostic retention compaction clock is invalid")
-	}
 	var raw []byte
 	if err := database.QueryRowContext(
 		ctx,
-		"SELECT synchro.synchro_compact($1, $2, $3)",
+		"SELECT synchro.synchro_compact($1, $2)",
 		"30 days",
 		10000,
-		staleAtText,
 	).Scan(&raw); err != nil {
 		return DiagnosticCompactionResult{}, fmt.Errorf("run diagnostic retention compaction failed: %w", err)
 	}
