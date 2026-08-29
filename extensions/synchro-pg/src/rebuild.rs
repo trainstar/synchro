@@ -672,7 +672,10 @@ fn stage_records(
             .ok_or_else(|| "rebuild captured row is missing".to_string())?;
         let computed = synced_row_digest(client, table, &row, &record_id, &server_version)?;
         if computed != row_checksum {
-            return Err("rebuild captured row checksum does not match".to_string());
+            return Err(format!(
+                "rebuild captured row checksum does not match: relation {} record {} captured generation {} table generation {}",
+                relation_id, record_id, captured_generation, table.registry_generation
+            ));
         }
         let primary_key = row_primary_key_json(table, &record_id)?;
         let canonical_table = canonical_table(table)?;

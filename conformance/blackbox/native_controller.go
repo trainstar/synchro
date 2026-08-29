@@ -732,7 +732,11 @@ func nativeRuntimeTableSupports(runtime nativeRuntimeManifestTable, authored nat
 	if runtime.ID == "" || runtime.Name == "" || runtime.RelationID == "" || runtime.PrimaryKeyFieldID == "" {
 		return false
 	}
-	if runtime.Name == "cf_schema_queue" {
+	// The schema queue fixture renames an authored value field onto its JSON
+	// column and an obsolete value onto its legacy column. That mapping applies
+	// only to an authored table that declares those fields. A table that names
+	// the fixture columns directly binds through the ordinary field match.
+	if runtime.Name == "cf_schema_queue" && nativeAuthoredDeclaresField(authored, "value") {
 		return nativeSchemaQueueTableSupports(runtime, authored)
 	}
 	fields := make(map[string]nativeRuntimeManifestField, len(runtime.Fields))
@@ -777,6 +781,15 @@ func nativeSchemaQueueTableSupports(runtime nativeRuntimeManifestTable, authored
 		}
 	}
 	return true
+}
+
+func nativeAuthoredDeclaresField(authored nativeAuthoredTable, name string) bool {
+	for _, field := range authored.Fields {
+		if field.Name == name {
+			return true
+		}
+	}
+	return false
 }
 
 func nativeSchemaQueueFieldName(authored string) string {
