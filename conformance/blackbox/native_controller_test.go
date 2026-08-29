@@ -83,6 +83,49 @@ func TestNativeControllerAssignmentBindsUnresolvedPrivateScope(t *testing.T) {
 	}
 }
 
+func TestNativeControllerAssignmentDoesNotStageSharedScope(t *testing.T) {
+	controller := &NativeController{installation: &nativeInstallationBinding{
+		scopes:        map[string]string{},
+		runtimeScopes: map[string]string{},
+	}}
+	operation := scenarios.Operation{
+		ContractOperation: "model",
+		Name:              "set-client-assignments",
+		Payload:           json.RawMessage(`{"user_id":"user-a","client_id":"client-a","assignments":[{"scope_id":"scope-b"}]}`),
+	}
+
+	_, retainsSharedScope, err := controller.setClientAssignments(operation)
+	if err != nil {
+		t.Fatalf("set client assignments: %v", err)
+	}
+	if retainsSharedScope {
+		t.Fatal("un-staged assignment retained a shared scope")
+	}
+	if got := controller.installation.scopes[nativeStagedSharedAuthoredScope]; got != "user:user-a" {
+		t.Fatalf("runtime scope = %q, want user:user-a", got)
+	}
+}
+
+func TestNativeControllerAssignmentBindsStagedSharedScope(t *testing.T) {
+	controller := &NativeController{installation: &nativeInstallationBinding{
+		scopes:        map[string]string{nativeStagedSharedAuthoredScope: nativeStagedSharedRuntimeScope},
+		runtimeScopes: map[string]string{nativeStagedSharedRuntimeScope: nativeStagedSharedAuthoredScope},
+	}}
+	operation := scenarios.Operation{
+		ContractOperation: "model",
+		Name:              "set-client-assignments",
+		Payload:           json.RawMessage(`{"user_id":"user-a","client_id":"client-a","assignments":[{"scope_id":"scope-b"}]}`),
+	}
+
+	_, retainsSharedScope, err := controller.setClientAssignments(operation)
+	if err != nil {
+		t.Fatalf("set client assignments: %v", err)
+	}
+	if !retainsSharedScope {
+		t.Fatal("staged shared assignment did not retain shared scopes")
+	}
+}
+
 func TestNativeInstallDetectsAuthoredPrivateAssignments(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -90,6 +133,7 @@ func TestNativeInstallDetectsAuthoredPrivateAssignments(t *testing.T) {
 		want    bool
 	}{
 		{name: "assigned", payload: `{"clients":[{"user_id":"user-a","client_id":"client-a","assigned_scope_ids":["scope-a"]}]}`, want: true},
+		{name: "staged shared", payload: `{"clients":[{"user_id":"user-a","client_id":"client-a","assigned_scope_ids":["scope-b"]}]}`, want: true},
 		{name: "unassigned", payload: `{"clients":[{"user_id":"user-a","client_id":"client-a","assigned_scope_ids":[]}]}`},
 		{name: "no clients", payload: `{"clients":[]}`},
 	}
@@ -101,6 +145,30 @@ func TestNativeInstallDetectsAuthoredPrivateAssignments(t *testing.T) {
 			}
 			if got := nativeInstallRequiresPrivateScopeAssignments(payload); got != test.want {
 				t.Fatalf("private assignment detection = %t, want %t", got, test.want)
+			}
+		})
+	}
+}
+
+func TestNativeStageRegistersStagedSharedScope(t *testing.T) {
+	tests := []struct {
+		name    string
+		payload string
+		want    bool
+	}{
+		{name: "private only", payload: `{"affected_scopes":["scope-a"]}`},
+		{name: "shared only", payload: `{"affected_scopes":["scope-b"]}`},
+		{name: "staged shared", payload: `{"affected_scopes":["scope-a","scope-b"]}`, want: true},
+		{name: "additional scope", payload: `{"affected_scopes":["scope-a","scope-b","scope-c"]}`},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got, err := nativeStageRegistersSharedScope(scenarios.Operation{Payload: json.RawMessage(test.payload)})
+			if err != nil {
+				t.Fatalf("select staged shared registration: %v", err)
+			}
+			if got != test.want {
+				t.Fatalf("staged shared registration = %t, want %t", got, test.want)
 			}
 		})
 	}
@@ -143,7 +211,9 @@ func TestNativeInstallationBindsDeferredMembershipScopesOnlyWithPolicy(t *testin
 		ScopeID string `json:"scope_id"`
 	}{ScopeID: "scope-a"}, struct {
 		ScopeID string `json:"scope_id"`
-	}{ScopeID: "scope-b"})
+	}{ScopeID: "scope-c"}, struct {
+		ScopeID string `json:"scope_id"`
+	}{ScopeID: nativeStagedSharedAuthoredScope})
 	runtime := nativeRuntimeManifest{
 		SchemaVersion: 7,
 		SchemaHash:    "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
@@ -166,8 +236,18 @@ func TestNativeInstallationBindsDeferredMembershipScopesOnlyWithPolicy(t *testin
 	if _, found := binding.scopes["scope-a"]; found {
 		t.Fatal("membership scope was bound before its assignment operation")
 	}
-	if got := binding.scopes["scope-b"]; got != "cf:global" {
+	if got := binding.scopes["scope-c"]; got != "cf:global" {
 		t.Fatalf("unreferenced empty scope = %q, want cf:global", got)
+	}
+	if got := binding.scopes[nativeStagedSharedAuthoredScope]; got != "user:scope-b" {
+		t.Fatalf("second unreferenced empty scope = %q, want user:scope-b", got)
+	}
+	controller := &NativeController{installation: binding}
+	if err := controller.bindStagedSharedScope(); err != nil {
+		t.Fatalf("bind staged shared scope: %v", err)
+	}
+	if got := binding.scopes[nativeStagedSharedAuthoredScope]; got != nativeStagedSharedRuntimeScope {
+		t.Fatalf("staged shared scope = %q, want %q", got, nativeStagedSharedRuntimeScope)
 	}
 
 	payload.WritePolicies = []nativeWritePolicy{{UserID: "user-a", TableID: "items", Allowed: true}}

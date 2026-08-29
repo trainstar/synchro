@@ -22,9 +22,11 @@ import (
 )
 
 const (
-	nativeControllerRequestTimeout = 30 * time.Second
-	nativeControllerWaitTimeout    = 30 * time.Second
-	nativeControllerPollInterval   = 25 * time.Millisecond
+	nativeControllerRequestTimeout  = 30 * time.Second
+	nativeControllerWaitTimeout     = 30 * time.Second
+	nativeControllerPollInterval    = 25 * time.Millisecond
+	nativeStagedSharedAuthoredScope = "scope-b"
+	nativeStagedSharedRuntimeScope  = "cf:dedup"
 )
 
 // NativeControllerConfig configures one generic native server controller.
@@ -424,6 +426,29 @@ func nativeInstallRequiresPrivateScopeAssignments(payload nativeInstallPayload) 
 	return false
 }
 
+func nativeStageRegistersSharedScope(operation scenarios.Operation) (bool, error) {
+	var payload struct {
+		AffectedScopes []string `json:"affected_scopes"`
+	}
+	if err := jsonstrict.Decode(operation.Payload, &payload); err != nil {
+		return false, errors.New("native controller membership stage payload is invalid")
+	}
+	if len(payload.AffectedScopes) != 2 {
+		return false, nil
+	}
+	hasPrimaryScope := false
+	hasSharedScope := false
+	for _, scope := range payload.AffectedScopes {
+		switch scope {
+		case "scope-a":
+			hasPrimaryScope = true
+		case nativeStagedSharedAuthoredScope:
+			hasSharedScope = true
+		}
+	}
+	return hasPrimaryScope && hasSharedScope, nil
+}
+
 func validateNativeInstallPayload(payload nativeInstallPayload) error {
 	if !payload.Installation.Installed || payload.Installation.ProtocolVersion != 3 || payload.Installation.MinimumClientRuntime != 3 {
 		return errors.New("native controller install protocol binding is invalid")
@@ -819,8 +844,17 @@ func (c *NativeController) ApplyStep(ctx context.Context, operation scenarios.Op
 	case "model/publish-schema":
 		return c.publishSchema(ctx, operation)
 	case "model/stage-registry-membership-generation":
-		if err := c.harness.Operator().ConfigureCrossScopeTable(ctx); err != nil {
+		registerSharedScope, err := nativeStageRegistersSharedScope(operation)
+		if err != nil {
 			return NativeStepObservation{}, err
+		}
+		if registerSharedScope {
+			if err := c.harness.Operator().ConfigureCrossScopeTable(ctx); err != nil {
+				return NativeStepObservation{}, err
+			}
+			if err := c.bindStagedSharedScope(); err != nil {
+				return NativeStepObservation{}, err
+			}
 		}
 		return nativeSuccess(), nil
 	case "model/activate-registry-membership-generation":
@@ -1166,7 +1200,7 @@ func (c *NativeController) setClientAssignments(operation scenarios.Operation) (
 	for _, assignment := range payload.Assignments {
 		if existing, found := c.installation.scopes[assignment.ScopeID]; found {
 			switch existing {
-			case "cf:global":
+			case "cf:global", nativeStagedSharedRuntimeScope:
 				usesDefaultSharedScope = true
 				continue
 			case "user:" + payload.UserID:
@@ -1190,6 +1224,30 @@ func (c *NativeController) setClientAssignments(operation scenarios.Operation) (
 		c.installation.clients = append(c.installation.clients, nativeInstalledClient{UserID: payload.UserID, ClientID: payload.ClientID})
 	}
 	return nativeSuccess(), usesDefaultSharedScope, nil
+}
+
+func (c *NativeController) bindStagedSharedScope() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.installation == nil {
+		return errors.New("native controller contract is not installed")
+	}
+	return replaceNativeScopeBinding(c.installation, nativeStagedSharedAuthoredScope, nativeStagedSharedRuntimeScope)
+}
+
+func replaceNativeScopeBinding(binding *nativeInstallationBinding, authored, runtime string) error {
+	if binding == nil || authored == "" || runtime == "" {
+		return errors.New("native controller scope binding is incomplete")
+	}
+	if existing, found := binding.scopes[authored]; found {
+		delete(binding.runtimeScopes, existing)
+	}
+	if existing, found := binding.runtimeScopes[runtime]; found && existing != authored {
+		return fmt.Errorf("native controller runtime scope %q is bound more than once", runtime)
+	}
+	binding.scopes[authored] = runtime
+	binding.runtimeScopes[runtime] = authored
+	return nil
 }
 
 func (c *NativeController) publishSchema(ctx context.Context, operation scenarios.Operation) (NativeStepObservation, error) {
