@@ -353,7 +353,15 @@ func validateSchemaCheckPublicCall(scenario scenarios.Scenario, step scenarios.S
 	}
 	wantCompletion := schemaCheckNativeCompletion(wire)
 	if call.Completion != wantCompletion {
-		return fmt.Errorf("Swift schema-check step %s completed %q, want %q", step.ID, call.Completion, wantCompletion)
+		outcomes := make([]string, 0, len(call.transportObservations))
+		for _, observation := range call.transportObservations {
+			entry := fmt.Sprintf("%s:%d", observation.OperationClass, observation.StatusCode)
+			if observation.ErrorCode != nil {
+				entry += ":" + *observation.ErrorCode
+			}
+			outcomes = append(outcomes, entry)
+		}
+		return fmt.Errorf("Swift schema-check step %s completed %q, want %q, observations %v", step.ID, call.Completion, wantCompletion, outcomes)
 	}
 	// An authored step names a protocol operation, not one request. A client
 	// with no usable cursor bootstraps by connecting, rebuilding, and pulling,
