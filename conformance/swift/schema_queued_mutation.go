@@ -56,7 +56,10 @@ func RunSchemaQueuedMutationScenario(ctx context.Context, scenario scenarios.Sce
 	if err := controller.Install(ctx, scenario.Model.Setup[0]); err != nil {
 		return SchemaQueuedMutationResult{}, fmt.Errorf("install Swift schema-queued-mutation contract: %w", err)
 	}
-	if err := platform.Install(ctx, client, "current", ""); err != nil {
+	// The scenario authors its own baseline rebuild, so the client starts empty
+	// and performs that rebuild in the authored call. A current initialization
+	// would bootstrap the rebuild during setup instead.
+	if err := platform.Install(ctx, client, "empty", ""); err != nil {
 		return SchemaQueuedMutationResult{}, fmt.Errorf("install Swift schema-queued-mutation client: %w", err)
 	}
 
