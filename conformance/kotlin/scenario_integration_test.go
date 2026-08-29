@@ -20,6 +20,7 @@ func TestRealKotlinPerformance(t *testing.T) {
 		runKotlinQueueReplay(t)
 		runKotlinRebuildRequests(t)
 		runKotlinRebuildApply(t)
+		runKotlinRebuildCardinality(t)
 		runKotlinForgedCursor(t)
 		runKotlinSeededEmptyStartup(t)
 	})
@@ -137,6 +138,47 @@ func kotlinRebuildApplyPageSize(t *testing.T, scenarioPath string) int {
 	_, _, pageSize, err := rebuildApplyBindings(scenario, steps)
 	if err != nil || pageSize > 1000 {
 		t.Fatalf("read Kotlin Android rebuild-apply authored pull page size: %v", err)
+	}
+	return int(pageSize)
+}
+
+func runKotlinRebuildCardinality(t *testing.T) {
+	t.Helper()
+	const scenarioPath = "conformance/scenarios/performance/rebuild-cardinality-001.json"
+	pullPageSize := kotlinRebuildCardinalityPageSize(t, scenarioPath)
+	ctx, scenario, harness, controller, platform := newKotlinPerformanceFixture(t, scenarioPath, pullPageSize)
+	result, err := RunRebuildCardinalityScenario(ctx, scenario, controller, platform)
+	if err != nil {
+		t.Fatalf("run direct Kotlin Android rebuild-cardinality scenario: %v", err)
+	}
+	if len(result.IdentityResolution) != len(scenario.NativeIdentityAliases) {
+		t.Fatalf("Kotlin Android rebuild-cardinality identity resolutions = %d, want %d", len(result.IdentityResolution), len(scenario.NativeIdentityAliases))
+	}
+	resetKotlinPerformanceServer(t, ctx, harness)
+}
+
+func kotlinRebuildCardinalityPageSize(t *testing.T, scenarioPath string) int {
+	t.Helper()
+	repositoryRoot, err := filepath.Abs(filepath.Join("..", ".."))
+	if err != nil {
+		t.Fatalf("resolve Kotlin Android rebuild-cardinality repository root: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	scenario, err := scenarios.LoadFile(ctx, repositoryRoot, scenarioPath)
+	if err != nil {
+		t.Fatalf("load Kotlin Android rebuild-cardinality authored scenario: %v", err)
+	}
+	steps, err := kotlinScenarioStepMap(scenario, rebuildCardinalityScenarioID, 9)
+	if err != nil {
+		t.Fatalf("validate Kotlin Android rebuild-cardinality authored scenario: %v", err)
+	}
+	_, _, pageSize, err := rebuildCardinalityBindings(scenario, steps)
+	if err != nil {
+		t.Fatalf("read Kotlin Android rebuild-cardinality authored pull page size: %v", err)
+	}
+	if pageSize > uint64(^uint(0)>>1) {
+		t.Fatal("Kotlin Android rebuild-cardinality authored pull page size exceeds int")
 	}
 	return int(pageSize)
 }
