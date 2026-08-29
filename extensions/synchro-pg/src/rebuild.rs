@@ -539,49 +539,6 @@ fn session_is_current(
         && session.retention_generation == scope.retention_generation
 }
 
-/// registry_generation_lineage returns the target generation and every ancestor
-/// reachable through parent_generation.
-///
-/// A rebuild binds captured rows at the active registry generation. Registering
-/// a relation again, which is how a membership rule changes, activates a new
-/// generation without rewriting sync_captured_rows. Only schema publication
-/// re-stamps those rows, through migrate_schema_digests. A row that still
-/// carries an older generation therefore has an unchanged table definition, and
-/// its content remains valid for the rebuild. Restricting acceptance to the
-/// ancestry keeps a row from an unrelated lineage out.
-fn registry_generation_lineage(
-    client: &SpiClient<'_>,
-    target_generation: i64,
-) -> Result<std::collections::HashSet<i64>, String> {
-    let mut lineage = std::collections::HashSet::new();
-    let mut current = target_generation;
-    while current > 0 {
-        if !lineage.insert(current) {
-            return Err("rebuild registry lineage is invalid".to_string());
-        }
-        if lineage.len() > 10_000 {
-            return Err("rebuild registry lineage is invalid".to_string());
-        }
-        let parent = client
-            .select(
-                "SELECT parent_generation
-                 FROM synchro.sync_registry_generations
-                 WHERE generation = $1",
-                None,
-                &[current.into()],
-            )
-            .map_err(|_| "loading rebuild registry lineage failed".to_string())?
-            .first()
-            .get_by_name::<i64, &str>("parent_generation")
-            .map_err(|_| "loading rebuild registry lineage failed".to_string())?;
-        match parent {
-            Some(value) if value > 0 && value < current => current = value,
-            _ => break,
-        }
-    }
-    Ok(lineage)
-}
-
 fn stage_records(
     client: &SpiClient<'_>,
     registry: &[TableRegistration],
@@ -589,11 +546,6 @@ fn stage_records(
     schema_hash: &str,
     boundary: &StreamBoundary,
 ) -> Result<(Vec<StagedRecord>, ChecksumObject), String> {
-    let active_generation = registry
-        .first()
-        .map(|table| table.registry_generation)
-        .unwrap_or_default();
-    let lineage = registry_generation_lineage(client, active_generation)?;
     let rows = client
         .select(
             "SELECT edge.relation_id::text AS relation_id,
@@ -675,7 +627,7 @@ fn stage_records(
         let source_stream_generation = required_text(&row, "source_stream_generation", "rebuild ")?;
         let captured_generation = required_positive_i64(&row, "registry_generation")?;
         if source_stream_generation != boundary.stream_generation
-            || !lineage.contains(&captured_generation)
+            || captured_generation != table.registry_generation
         {
             return Err("rebuild captured row binding is invalid".to_string());
         }
