@@ -569,7 +569,15 @@ func validateMultiScopeProvenanceCall(scenario scenarios.Scenario, call *multiSc
 				completion = "none"
 			}
 		}
-		return fmt.Errorf("Swift multi-scope provenance call did not complete: completion %s with %d transport observations", completion, len(result.transportObservations))
+		outcomes := make([]string, 0, len(result.transportObservations))
+		for _, observation := range result.transportObservations {
+			entry := fmt.Sprintf("%s:%d", observation.OperationClass, observation.StatusCode)
+			if observation.ErrorCode != nil {
+				entry += ":" + *observation.ErrorCode
+			}
+			outcomes = append(outcomes, entry)
+		}
+		return fmt.Errorf("Swift multi-scope provenance call did not complete: completion %s observations %v", completion, outcomes)
 	}
 	observations := result.transportObservations
 	if len(observations) < 2 || observations[0].OperationClass != "connect" || observations[len(observations)-1].OperationClass != "pull" {
