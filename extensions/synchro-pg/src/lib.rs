@@ -2056,6 +2056,11 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON synchro.sync_stream_reset_captured_rows,
 GRANT SELECT, INSERT, DELETE ON synchro.sync_stream_reset_membership_edges,
     synchro.sync_stream_reset_scope_digests TO synchro_worker;
 GRANT SELECT ON synchro.sync_stream_reset_fence_coverage TO synchro_worker;
+-- A membership activation invalidates the rebuild state of every affected
+-- scope. The worker performs that invalidation, so it deletes rebuild pages
+-- and staged rows through their sessions, and then the sessions themselves.
+GRANT SELECT, DELETE ON synchro.sync_rebuild_sessions,
+    synchro.sync_rebuild_pages, synchro.sync_rebuild_staged_rows TO synchro_worker;
 GRANT USAGE ON ALL SEQUENCES IN SCHEMA synchro TO synchro_worker;
 
 ALTER DEFAULT PRIVILEGES FOR ROLE synchro_owner IN SCHEMA synchro REVOKE ALL ON TABLES FROM PUBLIC;
