@@ -3094,7 +3094,7 @@ func describeNativeRelationEvents(ctx context.Context, database *sql.DB, relatio
 	// The resolution deadline is exhausted when this runs, so the summary uses
 	// its own bounded context rather than the expired one.
 	_ = ctx
-	diagnostic, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	diagnostic, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	rows, err := database.QueryContext(diagnostic, `
 		SELECT event.operation,
@@ -3165,19 +3165,24 @@ func describeNativeRelationEvents(ctx context.Context, database *sql.DB, relatio
 	if len(poison) == 0 {
 		poison = append(poison, "none")
 	}
-	worker := "unavailable"
-	var state, workerLSN string
-	var workerRegistry int64
-	if err := database.QueryRowContext(diagnostic, `
-		SELECT state, registry_generation, COALESCE(materialized_commit_lsn::text, 'none')
-		FROM synchro.sync_wal_worker_state
-		ORDER BY heartbeat_at DESC
-		LIMIT 1`).Scan(&state, &workerRegistry, &workerLSN); err == nil {
-		worker = fmt.Sprintf("%s:gen=%d:lsn=%s", state, workerRegistry, workerLSN)
+	// Sample the worker over time. A worker that stays in starting never ran a
+	// poll cycle, because the poll loop heartbeats running or blocked.
+	samples := make([]string, 0, 6)
+	for attempt := 0; attempt < 6; attempt++ {
+		var state, workerLSN string
+		var workerRegistry, pid int64
+		if err := database.QueryRowContext(diagnostic, `
+			SELECT state, registry_generation, backend_pid, COALESCE(materialized_commit_lsn::text, 'none')
+			FROM synchro.sync_wal_worker_state
+			ORDER BY heartbeat_at DESC
+			LIMIT 1`).Scan(&state, &workerRegistry, &pid, &workerLSN); err != nil {
+			samples = append(samples, "unavailable")
+		} else {
+			samples = append(samples, fmt.Sprintf("%s/gen%d/pid%d/%s", state, workerRegistry, pid, workerLSN))
+		}
+		if attempt < 5 {
+			time.Sleep(2 * time.Second)
+		}
 	}
-	var pending int64
-	if err := database.QueryRowContext(diagnostic, "SELECT count(*) FROM synchro.sync_registry_generations WHERE lifecycle <> 'active'").Scan(&pending); err != nil {
-		pending = -1
-	}
-	return fmt.Sprintf("%s; source rows %d; max wal registry %d; transactions %s; poison %s; worker %s; non-active generations %d", strings.Join(entries, " "), sourceRows, registry, strings.Join(transactions, " "), strings.Join(poison, " "), worker, pending)
+	return fmt.Sprintf("%s; source rows %d; max wal registry %d; transactions %s; poison %s; worker %s", strings.Join(entries, " "), sourceRows, registry, strings.Join(transactions, " "), strings.Join(poison, " "), strings.Join(samples, " "))
 }
