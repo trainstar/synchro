@@ -1118,7 +1118,17 @@ func (c *NativeController) BindApplicationPush(operation scenarios.Operation) er
 		fields := make(map[string]json.RawMessage, len(mutation.Columns)+1)
 		fields[table.AuthoredPrimary] = append(json.RawMessage(nil), canonical...)
 		for authoredField, value := range mutation.Columns {
-			if authoredField == table.AuthoredPrimary || table.Fields[authoredField] == "" || !json.Valid(value) {
+			if authoredField == table.AuthoredPrimary || !json.Valid(value) {
+				return errors.New("native application push column has no runtime binding")
+			}
+			if table.Fields[authoredField] == "" {
+				// A mutation queued under an earlier schema may name a field
+				// that a later publication retired. The server decides that
+				// outcome, and the retired column no longer exists to verify,
+				// so it contributes no image field here.
+				if mutation.AuthoredSchema != payload.Request.Schema {
+					continue
+				}
 				return errors.New("native application push column has no runtime binding")
 			}
 			fields[authoredField] = append(json.RawMessage(nil), value...)
