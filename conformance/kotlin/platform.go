@@ -28,8 +28,11 @@ import (
 
 const (
 	forgedRebuildCursor            = "native-forged-rebuild-cursor"
+	maximumProxiedRebuildBytes     = 16 << 20
 	maximumProxiedPushRequestBytes = 16 << 20
 )
+
+type rebuildProxyClientIDKey struct{}
 
 // Client identifies one durable Android database and its authenticated owner.
 type Client struct {
@@ -138,6 +141,7 @@ type Platform struct {
 
 	responseProxy            *httptest.Server
 	temporaryUnavailablePush *scenarios.PushWireFaultTarget
+	rebuildResponseCursors   map[string]string
 }
 
 type platformClient struct {
@@ -186,7 +190,11 @@ func NewPlatform(config Config) (*Platform, error) {
 	if err != nil {
 		return nil, err
 	}
-	platform := &Platform{config: normalized, clients: make(map[string]*platformClient)}
+	platform := &Platform{
+		config:                 normalized,
+		clients:                make(map[string]*platformClient),
+		rebuildResponseCursors: make(map[string]string),
+	}
 	if err := platform.startResponseProxy(); err != nil {
 		return nil, err
 	}
@@ -199,14 +207,78 @@ func (p *Platform) startResponseProxy() error {
 		return errors.New("Kotlin Android response proxy upstream is invalid")
 	}
 	proxy := httputil.NewSingleHostReverseProxy(upstream)
+	proxy.ModifyResponse = p.observeProxiedResponse
 	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
 		if p.serveTemporaryUnavailablePush(response, request) {
 			return
+		}
+		if strings.HasSuffix(request.URL.Path, "/sync/rebuild") && request.Body != nil {
+			clientID, readErr := proxiedRebuildClientID(request)
+			if readErr != nil {
+				http.Error(response, "bounded rebuild request required", http.StatusBadRequest)
+				return
+			}
+			if clientID != "" {
+				request = request.WithContext(context.WithValue(request.Context(), rebuildProxyClientIDKey{}, clientID))
+			}
 		}
 		proxy.ServeHTTP(response, request)
 	}))
 	p.responseProxy = server
 	p.config.ServerURL = server.URL
+	return nil
+}
+
+func proxiedRebuildClientID(request *http.Request) (string, error) {
+	body, err := io.ReadAll(io.LimitReader(request.Body, maximumProxiedRebuildBytes+1))
+	request.Body.Close()
+	if err != nil || len(body) > maximumProxiedRebuildBytes {
+		return "", errors.New("Kotlin Android proxied rebuild body is invalid")
+	}
+	request.Body = io.NopCloser(bytes.NewReader(body))
+	request.ContentLength = int64(len(body))
+	if request.Header != nil {
+		request.Header.Set("Content-Length", strconv.Itoa(len(body)))
+	}
+	var payload struct {
+		ClientID string `json:"client_id"`
+	}
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return "", nil
+	}
+	return payload.ClientID, nil
+}
+
+func (p *Platform) observeProxiedResponse(response *http.Response) error {
+	if response.StatusCode != http.StatusOK || !strings.HasSuffix(response.Request.URL.Path, "/sync/rebuild") {
+		return nil
+	}
+	body, err := io.ReadAll(io.LimitReader(response.Body, maximumProxiedRebuildBytes+1))
+	response.Body.Close()
+	if err != nil || len(body) > maximumProxiedRebuildBytes {
+		return errors.New("read Kotlin Android rebuild response failed")
+	}
+	response.Body = io.NopCloser(bytes.NewReader(body))
+	response.ContentLength = int64(len(body))
+	response.Header.Set("Content-Length", strconv.Itoa(len(body)))
+	var value map[string]json.RawMessage
+	if err := json.Unmarshal(body, &value); err != nil {
+		return errors.New("decode Kotlin Android rebuild response failed")
+	}
+	rawCursor, found := value["cursor"]
+	if !found || string(rawCursor) == "null" {
+		return nil
+	}
+	var cursor string
+	if err := json.Unmarshal(rawCursor, &cursor); err != nil || cursor == "" {
+		return errors.New("Kotlin Android rebuild response cursor is invalid")
+	}
+	clientID, _ := response.Request.Context().Value(rebuildProxyClientIDKey{}).(string)
+	if clientID != "" {
+		p.mu.Lock()
+		p.rebuildResponseCursors[clientID] = cursorFingerprint(cursor)
+		p.mu.Unlock()
+	}
 	return nil
 }
 
@@ -521,12 +593,16 @@ func (p *Platform) openClient(ctx context.Context, client *platformClient, seedN
 }
 
 func (p *Platform) initializeCurrent(ctx context.Context, client *platformClient) error {
-	completed, _, result, err := p.runPublicCall(ctx, client, "start")
+	completed, _, err := p.runPublicCall(ctx, client, "start")
 	if err != nil {
 		return fmt.Errorf("initialize current Kotlin Android database: %w", err)
 	}
 	if completed.Completion != "idle" {
 		return errors.New("current Kotlin Android database initialization did not reach idle")
+	}
+	result, err := captureClientState(ctx, client)
+	if err != nil {
+		return err
 	}
 	if err := client.advanceMaintenanceCursor(result); err != nil {
 		return err
@@ -672,7 +748,7 @@ func (p *Platform) Synchronize(ctx context.Context, request SynchronizeRequest) 
 	}
 	checkpoint := state.session.Checkpoint()
 	started := time.Now()
-	completed, observations, _, err := p.runPublicCall(ctx, state, request.Method)
+	completed, observations, err := p.runPublicCall(ctx, state, request.Method)
 	if err != nil {
 		return SynchronizationResult{}, err
 	}
@@ -718,9 +794,12 @@ func (p *Platform) synchronizeWithResponseLoss(ctx context.Context, state *platf
 	if err := waitForTransportObservation(ctx, state, checkpoint, operationClass); err != nil {
 		return SynchronizationResult{}, err
 	}
-	lastState, err := state.session.Execute(ctx, Request{Operation: "await-transport-pause", TransportOperation: operationClass})
-	if err != nil {
+	if _, err := state.session.Execute(ctx, Request{Operation: "await-transport-pause", TransportOperation: operationClass}); err != nil {
 		return SynchronizationResult{}, fmt.Errorf("await Kotlin Android transport pause: %w", err)
+	}
+	lastState, err := captureClientState(ctx, state)
+	if err != nil {
+		return SynchronizationResult{}, err
 	}
 	observations, err := state.session.ObservationsAfter(checkpoint)
 	if err != nil {
@@ -748,8 +827,7 @@ func (p *Platform) synchronizeWithResponseLoss(ctx context.Context, state *platf
 		if err := waitForTransportObservation(ctx, state, stepCheckpoint, operationClass); err != nil {
 			return SynchronizationResult{}, err
 		}
-		lastState, err = state.session.Execute(ctx, Request{Operation: "await-transport-pause", TransportOperation: operationClass})
-		if err != nil {
+		if _, err := state.session.Execute(ctx, Request{Operation: "await-transport-pause", TransportOperation: operationClass}); err != nil {
 			return SynchronizationResult{}, fmt.Errorf("await next Kotlin Android transport pause: %w", err)
 		}
 		stepObservations, err := state.session.ObservationsAfter(stepCheckpoint)
@@ -760,6 +838,7 @@ func (p *Platform) synchronizeWithResponseLoss(ctx context.Context, state *platf
 		if err != nil {
 			return SynchronizationResult{}, err
 		}
+		lastState = source
 		step, err := mapTransportOperations(operations[index:index+1], stepObservations, source)
 		if err != nil {
 			return SynchronizationResult{}, err
@@ -814,7 +893,7 @@ func (p *Platform) synchronizeWithResponseLoss(ctx context.Context, state *platf
 
 func waitForTransportObservation(ctx context.Context, state *platformClient, checkpoint uint64, operationClass string) error {
 	for {
-		if _, err := captureClientStateBatch(ctx, state, nil); err != nil {
+		if _, err := state.session.Execute(ctx, Request{Operation: "transport-snapshot"}); err != nil {
 			if ctx.Err() != nil {
 				return fmt.Errorf("wait for Kotlin Android transport observation %q: %w", operationClass, ctx.Err())
 			}
@@ -876,7 +955,12 @@ func (p *Platform) BeginCall(ctx context.Context, request CallRequest) (ClientCa
 	}
 	checkpoint := state.session.Checkpoint()
 	started := time.Now()
-	if _, err := state.session.Execute(ctx, Request{Operation: "arm-transport-pause", TransportOperation: operationClass}); err != nil {
+	pauseAfterConnect := !state.started && operationClass != "connect"
+	firstPauseClass := operationClass
+	if pauseAfterConnect {
+		firstPauseClass = "connect"
+	}
+	if _, err := state.session.Execute(ctx, Request{Operation: "arm-transport-pause", TransportOperation: firstPauseClass}); err != nil {
 		return ClientCallResult{}, fmt.Errorf("arm Kotlin Android transport pause: %w", err)
 	}
 	begin, err := state.session.Execute(ctx, Request{Operation: "begin-call", CallID: request.CallID, Method: request.Method})
@@ -887,17 +971,45 @@ func (p *Platform) BeginCall(ctx context.Context, request CallRequest) (ClientCa
 	if err != nil || inFlight.CallID != request.CallID || inFlight.State != "in_flight" || inFlight.Completion != "" {
 		return ClientCallResult{}, errors.New("Kotlin Android paused call did not enter flight")
 	}
-	if err := waitForTransportObservation(ctx, state, checkpoint, operationClass); err != nil {
+	if err := waitForTransportObservation(ctx, state, checkpoint, firstPauseClass); err != nil {
 		return ClientCallResult{}, err
 	}
-	if _, err := state.session.Execute(ctx, Request{Operation: "await-transport-pause", TransportOperation: operationClass}); err != nil {
+	if _, err := state.session.Execute(ctx, Request{Operation: "await-transport-pause", TransportOperation: firstPauseClass}); err != nil {
 		return ClientCallResult{}, fmt.Errorf("await Kotlin Android transport pause: %w", err)
+	}
+	if pauseAfterConnect {
+		connect, err := state.session.ObservationsAfter(checkpoint)
+		if err != nil {
+			return ClientCallResult{}, err
+		}
+		if len(connect) != 1 || connect[0].OperationClass != "connect" || connect[0].StatusCode != http.StatusOK || connect[0].ErrorCode != nil || connect[0].Retryable == nil || *connect[0].Retryable {
+			return ClientCallResult{}, errors.New("Kotlin Android staged call setup connect did not succeed")
+		}
+		if _, err := state.session.Execute(ctx, Request{Operation: "arm-transport-pause", TransportOperation: operationClass}); err != nil {
+			return ClientCallResult{}, fmt.Errorf("arm covered Kotlin Android transport pause: %w", err)
+		}
+		if _, err := state.session.Execute(ctx, Request{Operation: "resume-transport-pause"}); err != nil {
+			return ClientCallResult{}, fmt.Errorf("resume Kotlin Android staged call setup connect: %w", err)
+		}
+		if err := waitForTransportObservation(ctx, state, checkpoint, operationClass); err != nil {
+			return ClientCallResult{}, err
+		}
+		if _, err := state.session.Execute(ctx, Request{Operation: "await-transport-pause", TransportOperation: operationClass}); err != nil {
+			return ClientCallResult{}, fmt.Errorf("await covered Kotlin Android transport pause: %w", err)
+		}
 	}
 	observations, err := state.session.ObservationsAfter(checkpoint)
 	if err != nil {
 		return ClientCallResult{}, err
 	}
-	mapped, err := mapTransportOperations(request.Operations, observations, before)
+	covered := observations
+	if pauseAfterConnect {
+		if len(observations) != 2 {
+			return ClientCallResult{}, errors.New("Kotlin Android staged call setup produced unexpected transport")
+		}
+		covered = observations[1:]
+	}
+	mapped, err := mapTransportOperations(request.Operations, covered, before)
 	if err != nil {
 		return ClientCallResult{}, err
 	}
@@ -937,6 +1049,24 @@ func (p *Platform) AwaitStep(ctx context.Context, request AwaitRequest) (StepObs
 	if err != nil {
 		return StepObservation{}, err
 	}
+	var rebuildCursorSource, expectedRebuildCursor string
+	if operationClass == "rebuild" {
+		var payload struct {
+			CursorSource string `json:"cursor_source"`
+		}
+		if err := json.Unmarshal(request.Operation.Payload, &payload); err != nil {
+			return StepObservation{}, errors.New("decode paused Kotlin Android rebuild cursor source failed")
+		}
+		rebuildCursorSource = payload.CursorSource
+		if rebuildCursorSource == "local_rebuild_continuation" {
+			p.mu.Lock()
+			expectedRebuildCursor = p.rebuildResponseCursors[request.Client.ClientID]
+			p.mu.Unlock()
+			if expectedRebuildCursor == "" {
+				return StepObservation{}, errors.New("Kotlin Android paused rebuild continuation has no preceding response cursor")
+			}
+		}
+	}
 	state, err := p.clientFor(request.Client)
 	if err != nil {
 		return StepObservation{}, err
@@ -970,13 +1100,36 @@ func (p *Platform) AwaitStep(ctx context.Context, request AwaitRequest) (StepObs
 	if err != nil {
 		return StepObservation{}, err
 	}
-	source, err := captureClientState(ctx, state)
-	if err != nil {
-		return StepObservation{}, err
-	}
-	mapped, err := mapTransportOperations([]scenarios.Operation{request.Operation}, observations, source)
-	if err != nil {
-		return StepObservation{}, err
+	var mapped []StepObservation
+	if operationClass == "rebuild" && rebuildCursorSource == "local_rebuild_continuation" {
+		if len(observations) != 1 || observations[0].RequestFacts == nil || observations[0].RequestFacts.CursorFingerprint == nil || *observations[0].RequestFacts.CursorFingerprint != expectedRebuildCursor {
+			return StepObservation{}, errors.New("Kotlin Android paused rebuild request did not use the preceding response cursor")
+		}
+		if err := validateOperationTransportFacts(request.Operation, observations[0]); err != nil {
+			return StepObservation{}, err
+		}
+		observation, err := mapTransportObservation(observations[0])
+		if err != nil {
+			return StepObservation{}, err
+		}
+		mapped = []StepObservation{observation}
+		p.mu.Lock()
+		if p.rebuildResponseCursors[request.Client.ClientID] == expectedRebuildCursor {
+			delete(p.rebuildResponseCursors, request.Client.ClientID)
+		}
+		p.mu.Unlock()
+	} else {
+		source := Result{}
+		if operationClass != "rebuild" {
+			source, err = captureClientState(ctx, state)
+			if err != nil {
+				return StepObservation{}, err
+			}
+		}
+		mapped, err = mapTransportOperations([]scenarios.Operation{request.Operation}, observations, source)
+		if err != nil {
+			return StepObservation{}, err
+		}
 	}
 	active.observedCheckpoint = state.session.Checkpoint()
 	active.paused = true
@@ -1026,9 +1179,14 @@ func (p *Platform) AwaitCall(ctx context.Context, request CallRequest) (ClientCa
 	if err != nil {
 		return ClientCallResult{}, err
 	}
-	window, err := p.completeWindow(ctx, state, active.checkpoint, active.started, active.before)
-	if err != nil {
-		return ClientCallResult{}, err
+	var window operationWindow
+	if completed.Completion == "error" {
+		window = operationWindow{observations: cloneObservations(observations), duration: time.Since(active.started)}
+	} else {
+		window, err = p.completeWindow(ctx, state, active.checkpoint, active.started, active.before)
+		if err != nil {
+			return ClientCallResult{}, err
+		}
 	}
 	if state.restarted {
 		window.replayedMutations = replayedMutationCount(observations)
@@ -1265,30 +1423,30 @@ func closeKotlinSession(session *Session) {
 	_ = session.Close(cleanup)
 }
 
-func (p *Platform) runPublicCall(ctx context.Context, client *platformClient, method string) (ClientCallResult, []TransportObservation, Result, error) {
+func (p *Platform) runPublicCall(ctx context.Context, client *platformClient, method string) (ClientCallResult, []TransportObservation, error) {
 	callID := p.nextCallID(client)
 	checkpoint := client.session.Checkpoint()
 	inFlight, err := client.session.Execute(ctx, Request{Operation: "begin-call", CallID: callID, Method: method})
 	if err != nil {
-		return ClientCallResult{}, nil, Result{}, fmt.Errorf("start Kotlin Android public call: %w", err)
+		return ClientCallResult{}, nil, fmt.Errorf("start Kotlin Android public call: %w", err)
 	}
 	inFlightResult, err := clientCallResult(inFlight)
 	if err != nil || inFlightResult.CallID != callID || inFlightResult.State != "in_flight" || inFlightResult.Completion != "" {
-		return ClientCallResult{}, nil, Result{}, errors.New("Kotlin Android public call did not enter flight")
+		return ClientCallResult{}, nil, errors.New("Kotlin Android public call did not enter flight")
 	}
 	completed, err := client.session.Execute(ctx, Request{Operation: "await-call", CallID: callID})
 	if err != nil {
-		return ClientCallResult{}, nil, Result{}, fmt.Errorf("await Kotlin Android public call: %w", err)
+		return ClientCallResult{}, nil, fmt.Errorf("await Kotlin Android public call: %w", err)
 	}
 	completedResult, err := clientCallResult(completed)
 	if err != nil || completedResult.CallID != callID || completedResult.State != "completed" || !validCompletion(completedResult.Completion) {
-		return ClientCallResult{}, nil, Result{}, errors.New("Kotlin Android public call did not complete")
+		return ClientCallResult{}, nil, errors.New("Kotlin Android public call did not complete")
 	}
 	observations, err := client.session.ObservationsAfter(checkpoint)
 	if err != nil {
-		return ClientCallResult{}, nil, Result{}, err
+		return ClientCallResult{}, nil, err
 	}
-	return completedResult, observations, completed, nil
+	return completedResult, observations, nil
 }
 
 func (p *Platform) nextCallID(client *platformClient) string {

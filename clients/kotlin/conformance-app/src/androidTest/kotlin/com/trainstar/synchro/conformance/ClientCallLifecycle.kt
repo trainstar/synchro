@@ -71,10 +71,11 @@ internal class ClientCallLifecycle(
     }
 
     private fun completion(status: SyncStatus, failure: Throwable?): CallCompletion = when {
+        status is SyncStatus.Error && status.failure.recoveryAction == SyncRecoveryAction.SCHEMA_RESET -> CallCompletion.BLOCKED
+        failure != null -> CallCompletion.ERROR
         status is SyncStatus.Backoff -> CallCompletion.BLOCKED
         status is SyncStatus.Error && status.failure.recoveryAction != SyncRecoveryAction.NONE -> CallCompletion.BLOCKED
         status is SyncStatus.Error -> CallCompletion.ERROR
-        failure != null -> CallCompletion.ERROR
         else -> CallCompletion.IDLE
     }
 

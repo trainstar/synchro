@@ -142,6 +142,54 @@ func TestPlatformTemporaryUnavailablePushFaultIsTargetedAndOneShot(t *testing.T)
 	}
 }
 
+func TestPlatformRecordsProxiedRebuildContinuationFingerprint(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		body, err := io.ReadAll(request.Body)
+		request.Body.Close()
+		if err != nil || string(body) != `{"client_id":"client-a"}` {
+			t.Errorf("proxied rebuild request body = %q, %v", body, err)
+		}
+		response.Header().Set("Content-Type", "application/json")
+		_, _ = response.Write([]byte(`{"cursor":"continuation-a","has_more":true}`))
+	}))
+	defer upstream.Close()
+	platform, err := NewPlatform(Config{
+		ADBPath:                  os.Args[0],
+		DeviceSerial:             "emulator-5554",
+		ApplicationAPKPath:       writeFixture(t, "application.apk"),
+		InstrumentationAPKPath:   writeFixture(t, "instrumentation.apk"),
+		ApplicationID:            "com.trainstar.synchro.conformance",
+		InstrumentationComponent: "com.trainstar.test/androidx.test.runner.AndroidJUnitRunner",
+		ServerURL:                upstream.URL,
+		AuthToken:                func(context.Context, Client) (string, error) { return "token", nil },
+		Platform:                 "android",
+		AppVersion:               "0.3.0",
+	})
+	if err != nil {
+		t.Fatalf("create Kotlin Android platform: %v", err)
+	}
+	defer func() {
+		if err := platform.Close(context.Background()); err != nil {
+			t.Fatalf("close Kotlin Android platform: %v", err)
+		}
+	}()
+	response, err := http.Post(platform.config.ServerURL+"/sync/rebuild", "application/json", strings.NewReader(`{"client_id":"client-a"}`))
+	if err != nil {
+		t.Fatalf("post proxied rebuild: %v", err)
+	}
+	body, readErr := io.ReadAll(response.Body)
+	response.Body.Close()
+	if readErr != nil || response.StatusCode != http.StatusOK || string(body) != `{"cursor":"continuation-a","has_more":true}` {
+		t.Fatalf("proxied rebuild response = status %d, body %q, error %v", response.StatusCode, body, readErr)
+	}
+	platform.mu.Lock()
+	observed := platform.rebuildResponseCursors["client-a"]
+	platform.mu.Unlock()
+	if observed != cursorFingerprint("continuation-a") {
+		t.Fatalf("proxied rebuild cursor fingerprint = %q", observed)
+	}
+}
+
 func TestClientOperationClassesRouteToDirectHandlers(t *testing.T) {
 	tests := []struct {
 		operation scenarios.Operation

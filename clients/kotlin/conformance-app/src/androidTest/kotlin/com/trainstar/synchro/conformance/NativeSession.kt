@@ -116,6 +116,7 @@ internal class NativeSession(private val context: Context) : Closeable {
             "await-transport-pause" -> awaitTransportPause(command)
             "override-rebuild-cursor" -> overrideRebuildCursor(command)
             "resume-transport-pause" -> resumeTransportPause(command)
+            "transport-snapshot" -> transportSnapshot(command)
             "capture" -> capture(command)
             else -> throw IllegalArgumentException("operation is unsupported")
         }.withSessionObservations()
@@ -285,7 +286,7 @@ internal class NativeSession(private val context: Context) : Closeable {
     private fun armTransportPause(command: JsonObject): JsonObject {
         command.requireOnly("schema_version", "operation", "transport_operation")
         requireTransportObservations().armPause(command.requiredTransportOperation())
-        return stateResult()
+        return transportControlResult()
     }
 
     private fun awaitTransportPause(command: JsonObject): JsonObject {
@@ -296,19 +297,32 @@ internal class NativeSession(private val context: Context) : Closeable {
                 TRANSPORT_PAUSE_TIMEOUT_MILLIS,
             )
         }
-        return stateResult()
+        return transportControlResult()
     }
 
     private fun resumeTransportPause(command: JsonObject): JsonObject {
         command.requireOnly("schema_version", "operation")
         requireTransportObservations().resumePause()
-        return stateResult()
+        return transportControlResult()
     }
 
     private fun overrideRebuildCursor(command: JsonObject): JsonObject {
         command.requireOnly("schema_version", "operation", "rebuild_cursor_override")
         requireTransportObservations().overridePausedRebuildCursor(command.requiredString("rebuild_cursor_override"))
-        return stateResult()
+        return transportControlResult()
+    }
+
+    private fun transportSnapshot(command: JsonObject): JsonObject {
+        command.requireOnly("schema_version", "operation")
+        return transportControlResult()
+    }
+
+    private fun transportControlResult(): JsonObject {
+        // A transport barrier can suspend a call that owns the database write lock.
+        // Control responses must not open an inspection transaction.
+        requireClient()
+        requireTransportObservations()
+        return buildJsonObject {}
     }
 
     private fun capture(command: JsonObject): JsonObject {
@@ -347,8 +361,18 @@ internal class NativeSession(private val context: Context) : Closeable {
         val client = requireClient()
         val inspection = SynchroInspection(client)
         val capture = inspection.captureState(MAXIMUM_RECORDS)
-        val pending = if (capture.mutationLedgerCount <= MAXIMUM_RECORDS) client.inspectPendingMutations() else null
-        val rejected = if (capture.rejectedMutationCount <= MAXIMUM_RECORDS) client.inspectRejectedMutations() else null
+        // The atomic capture proves empty detail sets. Do not open separate
+        // read transactions while a staged synchronization can resume writes.
+        val pending = when {
+            capture.mutationLedgerCount == 0 -> emptyList()
+            capture.mutationLedgerCount <= MAXIMUM_RECORDS -> client.inspectPendingMutations()
+            else -> null
+        }
+        val rejected = when {
+            capture.rejectedMutationCount == 0 -> emptyList()
+            capture.rejectedMutationCount <= MAXIMUM_RECORDS -> client.inspectRejectedMutations()
+            else -> null
+        }
         val scopeStates = capture.scopeStates.takeUnless { capture.scopeStatesTruncated }
         val scopeRows = capture.scopeRows.takeUnless { capture.scopeRowsTruncated }
         val metadata = capture.rowMetadata.takeUnless { capture.rowMetadataTruncated }
@@ -471,10 +495,6 @@ internal class NativeSession(private val context: Context) : Closeable {
         value.errorCategory?.let { put("call_error_category", it) }
         client?.let {
             put("status", it.getSyncStatus().state.wireName)
-            put(
-                "provenance_maintenance_work_cursor",
-                SynchroInspection(it).captureState(0).provenanceMaintenanceWorkCursor,
-            )
         }
     }
 
@@ -868,7 +888,7 @@ internal class NativeSession(private val context: Context) : Closeable {
  * local-action requires local_action with operation, table_name, primary_key_field, primary_key, and fields.
  * begin-call requires call_id and method. await-call requires call_id.
  * lifecycle requires lifecycle_operation. Transport arm and await require transport_operation.
- * Transport cursor override requires rebuild_cursor_override. Transport resume has no operation-specific members.
+ * Transport cursor override requires rebuild_cursor_override. Transport resume and snapshot have no operation-specific members.
  * capture requires row_selectors. Typed values contain exactly type and value.
  * Android transforms database_key and database_mode into one application-private database path.
  */

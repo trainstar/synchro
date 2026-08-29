@@ -81,7 +81,7 @@ func kotlinScenarioCall(ctx context.Context, platform *Platform, client Client, 
 	}
 	checkpoint := state.session.Checkpoint()
 	started := time.Now()
-	completed, observations, _, err := platform.runPublicCall(ctx, state, method)
+	completed, observations, err := platform.runPublicCall(ctx, state, method)
 	if err != nil {
 		return SynchronizationResult{}, err
 	}
@@ -104,8 +104,11 @@ func (p *Platform) scenarioSnapshot(ctx context.Context, client Client) (Result,
 	}
 	state.mu.Lock()
 	defer state.mu.Unlock()
-	if err := state.available("scenario inspection"); err != nil {
-		return Result{}, err
+	// A scenario inspection is read-only and is taken at a staged call
+	// barrier, so an active call must not disqualify it. The broader
+	// availability check guards operations that start or mutate work.
+	if state.terminated || state.session == nil {
+		return Result{}, errors.New("Kotlin Android client is unavailable for scenario inspection")
 	}
 	return captureClientState(ctx, state)
 }

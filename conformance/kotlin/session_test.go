@@ -169,6 +169,17 @@ func TestValidateRequestAcceptsPushBatchSizeForOpenOnly(t *testing.T) {
 	}
 }
 
+func TestValidateRequestAcceptsTransportSnapshotWithoutControlFields(t *testing.T) {
+	request := Request{SchemaVersion: 1, Operation: "transport-snapshot"}
+	if err := validateRequest(request); err != nil {
+		t.Fatalf("validate transport snapshot: %v", err)
+	}
+	request.TransportOperation = "rebuild"
+	if err := validateRequest(request); err == nil {
+		t.Fatal("transport snapshot with control fields passed")
+	}
+}
+
 func TestSessionRejectsChangedOrBackwardCheckpoint(t *testing.T) {
 	firstObservation := TransportObservation{Sequence: 1, OperationClass: "connect", StatusCode: 200, DurationNanoseconds: 1}
 	session := &Session{}

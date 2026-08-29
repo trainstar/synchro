@@ -99,12 +99,25 @@ class ClientCallLifecycleTest {
             )
             lifecycle.begin("client-b", "call-b", "retry-after-error")
             assertEquals(CallCompletion.BLOCKED, lifecycle.await("client-b", "call-b").completion)
-            status = SyncStatus.Ready
             fail = true
             lifecycle.begin("client-c", "call-c", "sync-now")
             val failed = lifecycle.await("client-c", "call-c")
             assertEquals(CallCompletion.ERROR, failed.completion)
             assertEquals("unknown_error", failed.errorCategory)
+            status = SyncStatus.Ready
+            lifecycle.begin("client-d", "call-d", "sync-now")
+            assertEquals(CallCompletion.ERROR, lifecycle.await("client-d", "call-d").completion)
+            status = SyncStatus.Error(
+                SyncFailure(
+                    operation = SyncOperationKind.SCHEMA,
+                    code = SyncFailureCode.UNSUPPORTED_SCHEMA,
+                    retryable = false,
+                    message = "failed",
+                    recoveryAction = SyncRecoveryAction.SCHEMA_RESET,
+                ),
+            )
+            lifecycle.begin("client-e", "call-e", "start")
+            assertEquals(CallCompletion.BLOCKED, lifecycle.await("client-e", "call-e").completion)
         } finally {
             scope.cancel()
             lifecycle.joinAll()

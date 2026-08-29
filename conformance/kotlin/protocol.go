@@ -314,9 +314,9 @@ func validateRequest(request Request) error {
 		if request.LocalAction != nil || request.LifecycleOperation != "" || request.CallID != "" || request.Method != "" || request.RowSelectors != nil || !validTransportOperation(request.TransportOperation) {
 			return errors.New("Kotlin transport pause command is invalid")
 		}
-	case "resume-transport-pause":
+	case "resume-transport-pause", "transport-snapshot":
 		if request.LocalAction != nil || request.LifecycleOperation != "" || request.TransportOperation != "" || request.CallID != "" || request.Method != "" || request.RowSelectors != nil {
-			return errors.New("Kotlin transport resume command is invalid")
+			return errors.New("Kotlin transport control command is invalid")
 		}
 	case "override-rebuild-cursor":
 		if request.RebuildCursorOverride == "" || request.LocalAction != nil || request.LifecycleOperation != "" || request.TransportOperation != "" || request.CallID != "" || request.Method != "" || request.RowSelectors != nil {
