@@ -80,6 +80,82 @@ func TestPlatformRebuildCursorMutationIsConformanceOnlyAndOneShot(t *testing.T) 
 	}
 }
 
+func TestPlatformTemporaryUnavailablePushFaultIsTargetedAndOneShot(t *testing.T) {
+	upstreamCalls := 0
+	upstream := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
+		upstreamCalls++
+		response.Header().Set("Content-Type", "application/json")
+		_, _ = response.Write([]byte(`{"upstream":true}`))
+	}))
+	defer upstream.Close()
+	databaseDirectory := t.TempDir()
+	if err := os.Chmod(databaseDirectory, 0o700); err != nil {
+		t.Fatalf("make test database directory private: %v", err)
+	}
+	platform, err := NewPlatform(Config{
+		RunnerPath:                   os.Args[0],
+		ApplicationDatabaseDirectory: databaseDirectory,
+		ServerURL:                    upstream.URL,
+		AuthToken:                    func(context.Context, Client) (string, error) { return "token", nil },
+		Platform:                     "macos",
+		AppVersion:                   "0.3.0",
+	})
+	if err != nil {
+		t.Fatalf("create Swift platform: %v", err)
+	}
+	defer func() {
+		if err := platform.Close(context.Background()); err != nil {
+			t.Fatalf("close Swift platform: %v", err)
+		}
+	}()
+	operation := scenarios.Operation{
+		ContractOperation: "push",
+		Name:              "submit",
+		Payload:           pushDispatchPayload("transport_failure"),
+		WireFault:         &scenarios.WireFaultControl{Mode: "temporary_unavailable"},
+	}
+	release, armed, err := platform.armTemporaryUnavailablePush(RequestOperations{operation})
+	if err != nil || !armed {
+		t.Fatalf("arm temporary unavailable push fault: armed %t, error %v", armed, err)
+	}
+	defer release()
+
+	postRaw := func(payload string) (*http.Response, []byte) {
+		t.Helper()
+		response, err := http.Post(platform.config.ServerURL+"/sync/push", "application/json", strings.NewReader(payload))
+		if err != nil {
+			t.Fatalf("post proxied push: %v", err)
+		}
+		body, err := io.ReadAll(response.Body)
+		response.Body.Close()
+		if err != nil {
+			t.Fatalf("read proxied push response: %v", err)
+		}
+		return response, body
+	}
+	post := func(clientID, batchID string) (*http.Response, []byte) {
+		t.Helper()
+		return postRaw(`{"client_id":"` + clientID + `","batch_id":"` + batchID + `"}`)
+	}
+
+	response, _ := postRaw(`{"client_id":"client-a"}`)
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("malformed non-targeted push status = %d, want 200", response.StatusCode)
+	}
+	response, _ = post("client-b", "batch-a")
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("non-targeted push status = %d, want 200", response.StatusCode)
+	}
+	response, body := post("client-a", "batch-a")
+	if response.StatusCode != http.StatusServiceUnavailable || response.Header.Get("Retry-After") != "5" || !strings.Contains(string(body), `"temporary_unavailable"`) {
+		t.Fatalf("temporary unavailable response = status %d, retry-after %q, body %q", response.StatusCode, response.Header.Get("Retry-After"), body)
+	}
+	response, _ = post("client-a", "batch-a")
+	if response.StatusCode != http.StatusOK || upstreamCalls != 3 {
+		t.Fatalf("one-shot push result = status %d, upstream calls %d", response.StatusCode, upstreamCalls)
+	}
+}
+
 func TestPlatformConfigDefaultsAndBoundsPushBatchSize(t *testing.T) {
 	databaseDirectory := t.TempDir()
 	if err := os.Chmod(databaseDirectory, 0o700); err != nil {

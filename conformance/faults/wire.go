@@ -5,8 +5,15 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"strconv"
+	"strings"
 	"sync"
 )
+
+const temporaryUnavailableBody = "{\"error\":{\"code\":\"temporary_unavailable\",\"message\":\"service temporarily unavailable\",\"retryable\":true}}\n"
+
+// TemporaryUnavailableRetryAfter is the fixed retry delay for the canonical unavailable response.
+const TemporaryUnavailableRetryAfter = "5"
 
 // WireFault is an HTTP RoundTripper that injects one deterministic fault.
 //
@@ -78,6 +85,8 @@ func (f *WireFault) RoundTrip(request *http.Request) (*http.Response, error) {
 	}
 
 	switch f.options.Mode {
+	case WireTemporaryUnavailable:
+		return f.manageResponse(request.Context(), NewTemporaryUnavailableResponse(request))
 	case WireResponseLoss:
 		response, err := f.upstream.RoundTrip(request)
 		if err != nil {
@@ -111,6 +120,25 @@ func (f *WireFault) RoundTrip(request *http.Request) (*http.Response, error) {
 		return f.repeatRequest(request, f.options.ReplayCount)
 	default:
 		return nil, ErrInvalidWireOptions
+	}
+}
+
+// NewTemporaryUnavailableResponse creates the canonical retryable HTTP 503 response.
+func NewTemporaryUnavailableResponse(request *http.Request) *http.Response {
+	header := make(http.Header)
+	header.Set("Content-Type", "application/json")
+	header.Set("Content-Length", strconv.Itoa(len(temporaryUnavailableBody)))
+	header.Set("Retry-After", TemporaryUnavailableRetryAfter)
+	return &http.Response{
+		Status:        strconv.Itoa(http.StatusServiceUnavailable) + " " + http.StatusText(http.StatusServiceUnavailable),
+		StatusCode:    http.StatusServiceUnavailable,
+		Proto:         "HTTP/1.1",
+		ProtoMajor:    1,
+		ProtoMinor:    1,
+		Header:        header,
+		Body:          io.NopCloser(strings.NewReader(temporaryUnavailableBody)),
+		ContentLength: int64(len(temporaryUnavailableBody)),
+		Request:       request,
 	}
 }
 
@@ -323,7 +351,7 @@ func (f *WireFault) setUnregister(unregister func()) {
 
 func validateWireOptions(options WireOptions) error {
 	switch options.Mode {
-	case WireResponseLoss, WireTimeout, WireDuplicate:
+	case WireTemporaryUnavailable, WireResponseLoss, WireTimeout, WireDuplicate:
 		if options.TruncateAfter != 0 || options.ReplayCount != 0 {
 			return ErrInvalidWireOptions
 		}

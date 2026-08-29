@@ -71,6 +71,8 @@ const (
 	WireDuplicate WireMode = "duplicate"
 	// WireReplay sends the same replayable request a configured number of times.
 	WireReplay WireMode = "replay"
+	// WireTemporaryUnavailable returns the canonical retryable 503 response without upstream dispatch.
+	WireTemporaryUnavailable WireMode = "temporary_unavailable"
 )
 
 // WireOptions configures one typed wire fault.

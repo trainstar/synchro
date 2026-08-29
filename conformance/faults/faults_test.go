@@ -139,6 +139,33 @@ func TestResponseLossAndTimeoutFollowUpstreamCompletion(t *testing.T) {
 	})
 }
 
+func TestTemporaryUnavailableWireFaultReturnsCanonicalResponseWithoutUpstreamDispatch(t *testing.T) {
+	calls := 0
+	fault := newWireFault(t, WireOptions{Mode: WireTemporaryUnavailable}, roundTripFunc(func(*http.Request) (*http.Response, error) {
+		calls++
+		return nil, errors.New("temporary unavailable fault reached upstream")
+	}))
+
+	response, err := fault.RoundTrip(testRequest(t, "temporary-unavailable-request"))
+	if err != nil {
+		t.Fatalf("inject temporary unavailable response: %v", err)
+	}
+	defer response.Body.Close()
+	if calls != 0 {
+		t.Fatalf("temporary unavailable upstream calls = %d, want 0", calls)
+	}
+	if response.StatusCode != http.StatusServiceUnavailable || response.Header.Get("Retry-After") != TemporaryUnavailableRetryAfter || response.Header.Get("Content-Type") != "application/json" {
+		t.Fatalf("temporary unavailable response = status %d, retry-after %q, content-type %q", response.StatusCode, response.Header.Get("Retry-After"), response.Header.Get("Content-Type"))
+	}
+	body, err := io.ReadAll(response.Body)
+	if err != nil {
+		t.Fatalf("read temporary unavailable response: %v", err)
+	}
+	if string(body) != temporaryUnavailableBody {
+		t.Fatalf("temporary unavailable body = %q", body)
+	}
+}
+
 func TestTruncationAndWireCancellationCleanup(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	owner, err := NewController(ctx)

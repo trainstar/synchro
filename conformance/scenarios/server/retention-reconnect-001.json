@@ -16,6 +16,10 @@
     {
       "path": "docs/src/content/docs/spec/04-invariants.mdx",
       "anchor": "#scope-local-compaction"
+    },
+    {
+      "path": "docs/src/content/docs/spec/02-client-contract.mdx",
+      "anchor": "#errors-and-backoff"
     }
   ],
   "proof_types": [
@@ -793,7 +797,7 @@
       "id": "STEP-RETENTION-RECONNECT-SEAL-OLD-BATCH-001",
       "phase": "exercise",
       "transport": "http",
-      "description": "Seal the generation-one batch through a retryable transport failure.",
+      "description": "Seal the generation-one batch through one retryable temporary-unavailable response.",
       "native_binding": {
         "kind": "public-call",
         "user_id": "user-a",
@@ -806,6 +810,9 @@
       "operation": {
         "contract_operation": "push",
         "name": "submit",
+        "wire_fault": {
+          "mode": "temporary_unavailable"
+        },
         "payload": {
           "authenticated_user_id": "user-a",
           "request": {

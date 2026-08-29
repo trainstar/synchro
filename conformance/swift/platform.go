@@ -22,12 +22,16 @@ import (
 	"sync"
 	"time"
 
+	"github.com/trainstar/synchro/conformance/faults"
 	"github.com/trainstar/synchro/conformance/internal/jsonstrict"
 	"github.com/trainstar/synchro/conformance/scenarios"
 )
 
-const forgedRebuildCursor = "native-forged-rebuild-cursor"
-const maximumMutatedResponseBytes = 16 << 20
+const (
+	forgedRebuildCursor            = "native-forged-rebuild-cursor"
+	maximumMutatedResponseBytes    = 16 << 20
+	maximumProxiedPushRequestBytes = 16 << 20
+)
 
 type rebuildProxyClientIDKey struct{}
 
@@ -96,6 +100,7 @@ type Platform struct {
 	clients map[string]*platformClient
 
 	responseProxy                 *httptest.Server
+	temporaryUnavailablePush      *scenarios.PushWireFaultTarget
 	rebuildCursorOverride         string
 	rebuildCursorOverrideClientID string
 	rebuildResponseCursors        map[string]string
@@ -160,6 +165,9 @@ func (p *Platform) startResponseProxy() error {
 	proxy := httputil.NewSingleHostReverseProxy(upstream)
 	proxy.ModifyResponse = p.modifyProxiedResponse
 	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		if p.serveTemporaryUnavailablePush(response, request) {
+			return
+		}
 		if strings.HasSuffix(request.URL.Path, "/sync/rebuild") && request.Body != nil {
 			body, readErr := io.ReadAll(io.LimitReader(request.Body, maximumMutatedResponseBytes+1))
 			request.Body.Close()
@@ -181,6 +189,115 @@ func (p *Platform) startResponseProxy() error {
 	p.responseProxy = server
 	p.config.ServerURL = server.URL
 	return nil
+}
+
+func (p *Platform) serveTemporaryUnavailablePush(response http.ResponseWriter, request *http.Request) bool {
+	if !strings.HasSuffix(request.URL.Path, "/sync/push") || !p.hasTemporaryUnavailablePush() {
+		return false
+	}
+	target, err := proxiedPushTarget(request)
+	if err != nil {
+		return false
+	}
+	if !p.claimTemporaryUnavailablePush(target) {
+		return false
+	}
+	injected := faults.NewTemporaryUnavailableResponse(request)
+	defer injected.Body.Close()
+	copyInjectedResponse(response, injected)
+	return true
+}
+
+func proxiedPushTarget(request *http.Request) (scenarios.PushWireFaultTarget, error) {
+	if request.Body == nil {
+		return scenarios.PushWireFaultTarget{}, errors.New("Swift proxied push body is absent")
+	}
+	body, err := io.ReadAll(io.LimitReader(request.Body, maximumProxiedPushRequestBytes+1))
+	request.Body.Close()
+	if err != nil || len(body) > maximumProxiedPushRequestBytes {
+		return scenarios.PushWireFaultTarget{}, errors.New("Swift proxied push body is invalid")
+	}
+	request.Body = io.NopCloser(bytes.NewReader(body))
+	request.ContentLength = int64(len(body))
+	if request.Header != nil {
+		request.Header.Set("Content-Length", strconv.Itoa(len(body)))
+	}
+	var payload struct {
+		ClientID string `json:"client_id"`
+		BatchID  string `json:"batch_id"`
+	}
+	if err := json.Unmarshal(body, &payload); err != nil || payload.ClientID == "" || payload.BatchID == "" {
+		return scenarios.PushWireFaultTarget{}, errors.New("Swift proxied push target is invalid")
+	}
+	return scenarios.PushWireFaultTarget{ClientID: payload.ClientID, BatchID: payload.BatchID}, nil
+}
+
+func copyInjectedResponse(writer http.ResponseWriter, response *http.Response) {
+	for name, values := range response.Header {
+		for _, value := range values {
+			writer.Header().Add(name, value)
+		}
+	}
+	writer.WriteHeader(response.StatusCode)
+	_, _ = io.Copy(writer, response.Body)
+}
+
+func (p *Platform) hasTemporaryUnavailablePush() bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.temporaryUnavailablePush != nil
+}
+
+func (p *Platform) claimTemporaryUnavailablePush(target scenarios.PushWireFaultTarget) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	armed := p.temporaryUnavailablePush
+	if armed == nil || armed.ClientID != target.ClientID || armed.BatchID != target.BatchID {
+		return false
+	}
+	p.temporaryUnavailablePush = nil
+	return true
+}
+
+func (p *Platform) armTemporaryUnavailablePush(operations RequestOperations) (func(), bool, error) {
+	target, enabled, err := temporaryUnavailablePushTargetForOperations(operations)
+	if err != nil || !enabled {
+		return nil, enabled, err
+	}
+	p.mu.Lock()
+	if p.closed || p.temporaryUnavailablePush != nil {
+		p.mu.Unlock()
+		return nil, false, errors.New("Swift temporary-unavailable push fault is unavailable")
+	}
+	p.temporaryUnavailablePush = &target
+	p.mu.Unlock()
+	return func() { p.clearTemporaryUnavailablePush(target) }, true, nil
+}
+
+func (p *Platform) clearTemporaryUnavailablePush(target scenarios.PushWireFaultTarget) {
+	p.mu.Lock()
+	if armed := p.temporaryUnavailablePush; armed != nil && armed.ClientID == target.ClientID && armed.BatchID == target.BatchID {
+		p.temporaryUnavailablePush = nil
+	}
+	p.mu.Unlock()
+}
+
+func temporaryUnavailablePushTargetForOperations(operations RequestOperations) (scenarios.PushWireFaultTarget, bool, error) {
+	var target scenarios.PushWireFaultTarget
+	for _, operation := range operations {
+		candidate, enabled, err := scenarios.TemporaryUnavailablePushTarget(operation)
+		if err != nil {
+			return scenarios.PushWireFaultTarget{}, false, err
+		}
+		if !enabled {
+			continue
+		}
+		if target.ClientID != "" {
+			return scenarios.PushWireFaultTarget{}, false, errors.New("Swift synchronization has multiple temporary-unavailable push faults")
+		}
+		target = candidate
+	}
+	return target, target.ClientID != "", nil
 }
 
 func (p *Platform) modifyProxiedResponse(response *http.Response) error {
@@ -619,7 +736,17 @@ func (p *Platform) synchronizeLocked(ctx context.Context, state *platformClient,
 	if !validRunnerMethod(method) {
 		return SynchronizationResult{}, errors.New("Swift synchronization method is invalid")
 	}
+	releaseFault, faultArmed, err := p.armTemporaryUnavailablePush(operations)
+	if err != nil {
+		return SynchronizationResult{}, err
+	}
+	if faultArmed {
+		defer releaseFault()
+	}
 	if dropBatchID != "" {
+		if faultArmed {
+			return SynchronizationResult{}, errors.New("Swift response loss cannot combine with a temporary-unavailable push fault")
+		}
 		_, dropLast, _, _ := requestDispatch(operations[len(operations)-1])
 		if !dropLast {
 			return SynchronizationResult{}, errors.New("Swift response-loss request must end its public call")
@@ -919,6 +1046,11 @@ func (p *Platform) BeginCall(ctx context.Context, client Client, callID, method 
 	if _, err := validateRequestOperations(operations); err != nil {
 		return CallResult{}, err
 	}
+	if _, enabled, err := temporaryUnavailablePushTargetForOperations(operations); err != nil {
+		return CallResult{}, err
+	} else if enabled {
+		return CallResult{}, errors.New("Swift temporary-unavailable push fault requires synchronous synchronization")
+	}
 	if !validRunnerCallID(callID) || !validRunnerMethod(method) {
 		return CallResult{}, errors.New("Swift begin-call request is invalid")
 	}
@@ -1014,6 +1146,11 @@ func (p *Platform) AwaitStep(ctx context.Context, client Client, callID string, 
 	}
 	if _, err := validateRequestOperations(RequestOperations{operation}); err != nil {
 		return StepObservation{}, err
+	}
+	if _, enabled, err := temporaryUnavailablePushTargetForOperations(RequestOperations{operation}); err != nil {
+		return StepObservation{}, err
+	} else if enabled {
+		return StepObservation{}, errors.New("Swift temporary-unavailable push fault requires synchronous synchronization")
 	}
 	operationClass, drop, _, _ := requestDispatch(operation)
 	if drop {
