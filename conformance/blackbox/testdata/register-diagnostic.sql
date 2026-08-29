@@ -96,9 +96,7 @@ GRANT EXECUTE ON FUNCTION public.cf_global_items_membership(uuid), public.cf_ite
 GRANT USAGE ON SCHEMA public TO synchro_owner, synchro_worker;
 GRANT SELECT ON TABLE public.cf_global_items TO synchro_owner;
 GRANT SELECT ON TABLE public.cf_document_access TO synchro_owner;
--- The native controller writes dependency rows directly, so the owner needs
--- write access that the read-only cf_document_access dependency does not.
-GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.cf_item_impacts TO synchro_owner;
+GRANT SELECT ON TABLE public.cf_item_impacts TO synchro_owner;
 GRANT SELECT, INSERT, UPDATE ON TABLE public.cf_items, public.cf_documents, public.cf_document_members, public.cf_document_notes, public.cf_schema_queue, public.cf_decode_trap, public.cf_late_registration TO synchro_owner;
 GRANT SELECT ON TABLE public.cf_global_items, public.cf_items, public.cf_documents, public.cf_document_members, public.cf_document_access, public.cf_document_notes, public.cf_schema_queue, public.cf_decode_trap, public.cf_late_registration, public.cf_item_impacts TO synchro_worker;
 
