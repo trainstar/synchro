@@ -1769,9 +1769,15 @@ func nativeSourceStatement(event nativeEventBinding, installation *nativeInstall
 	if image == nil {
 		return "", nil, errors.New("native source event has no image")
 	}
-	value, err := nativeImageStringField(*image, event.Table, "value")
-	if err != nil && event.Operation != "delete" {
-		return "", nil, err
+	// Each fixture names its own payload column, so the lookup happens inside the
+	// branch that needs it. A delete carries no payload.
+	value := ""
+	if event.Operation != "delete" && nativeTableDeclaresField(event.Table, "value") {
+		resolved, err := nativeImageStringField(*image, event.Table, "value")
+		if err != nil {
+			return "", nil, err
+		}
+		value = resolved
 	}
 	runtimeScope := ""
 	if len(event.AuthoredScopes) != 0 {
@@ -1800,10 +1806,42 @@ func nativeSourceStatement(event nativeEventBinding, installation *nativeInstall
 		case "delete":
 			return "DELETE FROM cf_global_items WHERE id = $1", []any{event.RuntimeRecordID}, nil
 		}
+	case "cf_schema_queue":
+		if owner == runtimeScope || owner == "" {
+			return "", nil, errors.New("native queue source row has no user scope binding")
+		}
+		legacy := ""
+		if event.Operation != "delete" {
+			resolved, err := nativeImageStringField(*image, event.Table, "legacy_value")
+			if err != nil {
+				return "", nil, err
+			}
+			legacy = resolved
+		}
+		switch event.Operation {
+		case "insert":
+			// authored_mutation carries the queued application mutation for the
+			// queue-replay scenario. A source row has no authored value for it,
+			// and the fixture requires one, so it takes an empty object.
+			return "INSERT INTO cf_schema_queue (id, owner_id, authored_mutation, legacy_value) VALUES ($1, $2, '{}'::jsonb, $3)", []any{event.RuntimeRecordID, owner, legacy}, nil
+		case "update":
+			return "UPDATE cf_schema_queue SET owner_id = $2, legacy_value = $3, updated_at = clock_timestamp() WHERE id = $1", []any{event.RuntimeRecordID, owner, legacy}, nil
+		case "delete":
+			return "DELETE FROM cf_schema_queue WHERE id = $1", []any{event.RuntimeRecordID}, nil
+		}
 	default:
 		return "", nil, fmt.Errorf("native source table %q has no generic DML binding", event.Table.RuntimeName)
 	}
 	return "", nil, errors.New("native source event operation is unsupported")
+}
+
+func nativeTableDeclaresField(table nativeTableBinding, name string) bool {
+	for _, field := range table.FieldNames {
+		if field == name {
+			return true
+		}
+	}
+	return false
 }
 
 func nativeCaptureDependencySourceStatement(event nativeEventBinding) (string, []any, error) {
