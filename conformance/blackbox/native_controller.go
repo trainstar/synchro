@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"reflect"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -3130,5 +3131,21 @@ func describeNativeRelationEvents(ctx context.Context, database *sql.DB, relatio
 	if err := database.QueryRowContext(diagnostic, "SELECT COALESCE(max(registry_generation), -1) FROM synchro.sync_wal_transactions").Scan(&registry); err != nil {
 		registry = -1
 	}
-	return fmt.Sprintf("%s; source rows %d; max wal registry %d", strings.Join(entries, " "), sourceRows, registry)
+	transactions := make([]string, 0, 8)
+	if rows, err := database.QueryContext(diagnostic, `
+		SELECT commit_lsn::text, event_count
+		FROM synchro.sync_wal_transactions
+		ORDER BY commit_lsn DESC
+		LIMIT 8`); err == nil {
+		defer rows.Close()
+		for rows.Next() {
+			var lsn string
+			var count int64
+			if rows.Scan(&lsn, &count) != nil {
+				break
+			}
+			transactions = append(transactions, lsn+":"+strconv.FormatInt(count, 10))
+		}
+	}
+	return fmt.Sprintf("%s; source rows %d; max wal registry %d; transactions %s", strings.Join(entries, " "), sourceRows, registry, strings.Join(transactions, " "))
 }
