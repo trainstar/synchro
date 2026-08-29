@@ -1095,7 +1095,10 @@ func (c *NativeController) BindApplicationPush(operation scenarios.Operation) er
 		}
 		transaction.AuthoredMutationIDs = append(transaction.AuthoredMutationIDs, mutation.MutationID)
 		table, found := c.installation.tables[mutation.Table]
-		if !found || mutation.Op != "insert" || len(mutation.PK) != 1 {
+		// The binding below is operation agnostic. It records the authored
+		// operation and builds the after image from the primary key and the
+		// authored columns, which serves an insert and an update alike.
+		if !found || (mutation.Op != "insert" && mutation.Op != "update") || len(mutation.PK) != 1 {
 			return errors.New("native application push mutation is unsupported")
 		}
 		canonical, found := mutation.PK[table.AuthoredPrimary]
