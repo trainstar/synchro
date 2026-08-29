@@ -76,7 +76,7 @@ func RunSteadyPullScenario(ctx context.Context, scenario scenarios.Scenario, con
 	if err != nil {
 		return SteadyPullResult{}, fmt.Errorf("run Swift steady-pull baseline: %w", err)
 	}
-	if !validateSwiftSteadyPullBaselineShape(baseline) {
+	if !validateSwiftBaselineCallShape(baseline) {
 		observed := make([]string, 0, len(baseline.transportObservations))
 		for _, observation := range baseline.transportObservations {
 			observed = append(observed, fmt.Sprintf("%s:%d", observation.OperationClass, observation.StatusCode))

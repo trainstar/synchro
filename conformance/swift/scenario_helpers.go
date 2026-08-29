@@ -189,7 +189,10 @@ func validateSwiftWireObservation(scenario scenarios.Scenario, stepID string, ob
 	return fmt.Errorf("Swift wire expectation %s is absent", stepID)
 }
 
-func validateSwiftSteadyPullBaselineShape(result SynchronizationResult) bool {
+// validateSwiftBaselineCallShape reports whether a call performed the cold
+// bootstrap. A client with no usable cursor connects, rebuilds each scope, and
+// pulls, so its first call carries more than one request.
+func validateSwiftBaselineCallShape(result SynchronizationResult) bool {
 	observations := result.transportObservations
 	if result.Completion != "idle" || len(observations) < 3 {
 		return false
@@ -206,7 +209,7 @@ func validateSwiftSteadyPullBaselineShape(result SynchronizationResult) bool {
 }
 
 func validateSwiftSteadyPullBaselineWires(scenario scenarios.Scenario, result SynchronizationResult) error {
-	if !validateSwiftSteadyPullBaselineShape(result) {
+	if !validateSwiftBaselineCallShape(result) {
 		return errors.New("Swift steady-pull baseline call shape is invalid")
 	}
 	connect := result.transportObservations[0]

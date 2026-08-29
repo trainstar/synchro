@@ -86,6 +86,8 @@
 	test-rn-performance-android \
 	test-rn-pending-cycle-ios \
 	test-rn-pending-cycle-android \
+	test-rn-rebuild-apply-ios \
+	test-rn-rebuild-apply-android \
 	test-rn-warm-connect-android \
 	verify-rn-seed \
 	refresh-rn-seed \
@@ -827,8 +829,30 @@ test-rn-pending-cycle-android: conformance-mod-download test-blackbox-harness te
 		cd conformance && ANDROID_HOME="$(ANDROID_HOME)" ANDROID_SDK_ROOT="$(ANDROID_HOME)" JAVA_HOME="$(ANDROID_JAVA_HOME)" PATH="$(ANDROID_JAVA_HOME)/bin:$$PATH" SYNCHRO_RN_DETOX_CONFIGURATION="$(RN_ANDROID_DETOX_CONFIG)" GOFLAGS= GOWORK=off go run ./cmd/testresult exact \
 		-test TestRealReactNativePendingCycleAndroid \
 		-expect target_pass \
-			-- go test -tags reactnativeintegration -json ./reactnative -count=1 -timeout=35m \
+		-- go test -tags reactnativeintegration -json ./reactnative -count=1 -timeout=35m \
 			-run '^TestRealReactNativePendingCycleAndroid$$' -args --provision --install
+
+test-rn-rebuild-apply-ios: conformance-mod-download test-blackbox-harness rn-seed-asset rn-watchman-reset rn-ios-pods
+	cd clients/react-native/example && npx detox build --configuration ios.sim.debug
+	@set -eu; \
+		$(WARM_CONNECT_ENV) \
+		cd conformance && SYNCHRO_RN_DETOX_CONFIGURATION=ios.sim.debug GOFLAGS= GOWORK=off go run ./cmd/testresult exact \
+		-test TestRealReactNativeRebuildApplyIOS \
+		-expect target_pass \
+		-- go test -tags reactnativeintegration -json ./reactnative -count=1 -timeout=35m \
+			-run '^TestRealReactNativeRebuildApplyIOS$$' -args --provision --install
+
+test-rn-rebuild-apply-android: conformance-mod-download test-blackbox-harness test-rn-warm-connect-control test-rn-android-parity rn-watchman-reset rn-android-emulator-reset
+	@test -n "$(ANDROID_JAVA_HOME)" || (echo "Android Detox requires JDK 17. Set ANDROID_JAVA_HOME to a JDK 17 install."; exit 1)
+	@test -d "$(ANDROID_HOME)" || (echo "Android SDK not found at $(ANDROID_HOME). Set ANDROID_HOME to a valid SDK install."; exit 1)
+	cd clients/react-native/example && ANDROID_HOME="$(ANDROID_HOME)" ANDROID_SDK_ROOT="$(ANDROID_HOME)" JAVA_HOME="$(ANDROID_JAVA_HOME)" PATH="$(ANDROID_JAVA_HOME)/bin:$$PATH" npx detox build --configuration $(RN_ANDROID_DETOX_CONFIG)
+	@set -eu; \
+		$(WARM_CONNECT_ENV) \
+		cd conformance && ANDROID_HOME="$(ANDROID_HOME)" ANDROID_SDK_ROOT="$(ANDROID_HOME)" JAVA_HOME="$(ANDROID_JAVA_HOME)" PATH="$(ANDROID_JAVA_HOME)/bin:$$PATH" SYNCHRO_RN_DETOX_CONFIGURATION="$(RN_ANDROID_DETOX_CONFIG)" GOFLAGS= GOWORK=off go run ./cmd/testresult exact \
+		-test TestRealReactNativeRebuildApplyAndroid \
+		-expect target_pass \
+		-- go test -tags reactnativeintegration -json ./reactnative -count=1 -timeout=35m \
+			-run '^TestRealReactNativeRebuildApplyAndroid$$' -args --provision --install
 
 test-rn-warm-connect-android: conformance-mod-download test-blackbox-harness test-rn-warm-connect-control test-rn-android-parity rn-watchman-reset rn-android-emulator-reset
 	@test -n "$(ANDROID_JAVA_HOME)" || (echo "Android Detox requires JDK 17. Set ANDROID_JAVA_HOME to a JDK 17 install."; exit 1)

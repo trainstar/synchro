@@ -19,12 +19,54 @@ func TestRealSwiftPerformance(t *testing.T) {
 		runSwiftRebuildApply(t)
 		runSwiftRebuildCardinality(t)
 		runSwiftSchemaCheck(t)
+		runSwiftSchemaQueuedMutation(t)
+		runSwiftPushResponseLoss(t)
+		runSwiftRetentionReconnect(t)
 		runSwiftRebuildRequests(t)
 		runSwiftForgedCursor(t)
 		runSwiftPendingCycle(t)
 		runSwiftQueueReplay(t)
 		runSwiftSeededEmptyStartup(t)
 	})
+}
+
+func runSwiftRetentionReconnect(t *testing.T) {
+	t.Helper()
+	ctx, scenario, harness, controller, platform := newSwiftPerformanceFixture(t, filepath.Join("server", "retention-reconnect-001.json"), 1)
+	result, err := RunRetentionReconnectScenario(ctx, scenario, controller, platform, Client{Key: "client-a", UserID: "user-a", ClientID: "client-a", DatabaseKey: "retention-reconnect-client-a"})
+	if err != nil {
+		t.Fatalf("run direct Swift retention-reconnect scenario: %v", err)
+	}
+	if len(result.IdentityResolution) != len(scenario.NativeIdentityAliases) {
+		t.Fatalf("Swift retention-reconnect identity resolutions = %d, want %d", len(result.IdentityResolution), len(scenario.NativeIdentityAliases))
+	}
+	resetSwiftPerformanceServer(t, ctx, harness)
+}
+
+func runSwiftPushResponseLoss(t *testing.T) {
+	t.Helper()
+	ctx, scenario, harness, controller, platform := newSwiftPerformanceFixture(t, filepath.Join("server", "push-response-loss-001.json"), 0)
+	result, err := RunPushResponseLossScenario(ctx, scenario, controller, platform, Client{Key: "client-a", UserID: "user-a", ClientID: "client-a", DatabaseKey: "push-response-loss-client-a"})
+	if err != nil {
+		t.Fatalf("run direct Swift push-response-loss scenario: %v", err)
+	}
+	if len(result.IdentityResolution) != len(scenario.NativeIdentityAliases) {
+		t.Fatalf("Swift push-response-loss identity resolutions = %d, want %d", len(result.IdentityResolution), len(scenario.NativeIdentityAliases))
+	}
+	resetSwiftPerformanceServer(t, ctx, harness)
+}
+
+func runSwiftSchemaQueuedMutation(t *testing.T) {
+	t.Helper()
+	ctx, scenario, harness, controller, platform := newSwiftPerformanceFixture(t, filepath.Join("server", "schema-queued-mutation-001.json"), 100)
+	result, err := RunSchemaQueuedMutationScenario(ctx, scenario, controller, platform, Client{Key: "client-a", UserID: "user-a", ClientID: "client-a", DatabaseKey: "schema-queued-mutation-client-a"})
+	if err != nil {
+		t.Fatalf("run direct Swift schema-queued-mutation scenario: %v", err)
+	}
+	if len(result.IdentityResolution) != len(scenario.NativeIdentityAliases) {
+		t.Fatalf("Swift schema-queued-mutation identity resolutions = %d, want %d", len(result.IdentityResolution), len(scenario.NativeIdentityAliases))
+	}
+	resetSwiftPerformanceServer(t, ctx, harness)
 }
 
 func runSwiftSchemaCheck(t *testing.T) {

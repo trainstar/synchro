@@ -274,7 +274,8 @@ func runSchemaCheckPublicStep(ctx context.Context, scenario scenarios.Scenario, 
 		return SynchronizationResult{}, err
 	}
 	clients[client.Key] = client
-	if !installed[client.Key] {
+	cold := !installed[client.Key]
+	if cold {
 		if err := platform.Install(ctx, client, "empty", ""); err != nil {
 			return SynchronizationResult{}, fmt.Errorf("install Swift schema-check client %s: %w", client.ClientID, err)
 		}
@@ -284,7 +285,7 @@ func runSchemaCheckPublicStep(ctx context.Context, scenario scenarios.Scenario, 
 	if err != nil {
 		return SynchronizationResult{}, fmt.Errorf("run Swift schema-check step %s: %w", stepID, err)
 	}
-	if err := validateSchemaCheckPublicCall(scenario, step, call); err != nil {
+	if err := validateSchemaCheckPublicCall(scenario, step, call, cold); err != nil {
 		return SynchronizationResult{}, err
 	}
 	if err := runSchemaCheckLifecycleBoundaries(ctx, scenario, step, client, platform, completedBoundaries); err != nil {
@@ -345,14 +346,24 @@ func runSchemaCheckLifecycleBoundaries(ctx context.Context, scenario scenarios.S
 	return nil
 }
 
-func validateSchemaCheckPublicCall(scenario scenarios.Scenario, step scenarios.Step, call SynchronizationResult) error {
+func validateSchemaCheckPublicCall(scenario scenarios.Scenario, step scenarios.Step, call SynchronizationResult, cold bool) error {
 	wire, err := schemaCheckWireExpectation(scenario, step.ID)
 	if err != nil {
 		return err
 	}
 	wantCompletion := schemaCheckNativeCompletion(wire)
-	if call.Completion != wantCompletion || len(call.Steps) != 1 || len(call.transportObservations) != 1 {
-		return fmt.Errorf("Swift schema-check step %s completed %q with %d steps and %d transports, want %q, 1, and 1", step.ID, call.Completion, len(call.Steps), len(call.transportObservations), wantCompletion)
+	if call.Completion != wantCompletion {
+		return fmt.Errorf("Swift schema-check step %s completed %q, want %q", step.ID, call.Completion, wantCompletion)
+	}
+	// The first call for a client has no usable cursor, so it bootstraps by
+	// connecting, rebuilding each scope, and pulling. Every later call carries
+	// exactly one request for its authored step.
+	if cold {
+		if !validateSwiftBaselineCallShape(call) {
+			return fmt.Errorf("Swift schema-check step %s did not bootstrap its client", step.ID)
+		}
+	} else if len(call.Steps) != 1 || len(call.transportObservations) != 1 {
+		return fmt.Errorf("Swift schema-check step %s carried %d steps and %d transports, want 1 and 1", step.ID, len(call.Steps), len(call.transportObservations))
 	}
 	transport := call.transportObservations[0]
 	if transport.OperationClass != "connect" {
@@ -360,6 +371,11 @@ func validateSchemaCheckPublicCall(scenario scenarios.Scenario, step scenarios.S
 	}
 	if err := validateSwiftWireObservation(scenario, string(step.ID), transport); err != nil {
 		return err
+	}
+	if cold {
+		// A bootstrap reports no authored step observation, so the transport
+		// wire result above is the authored evidence for this step.
+		return nil
 	}
 	observed := call.Steps[0]
 	if observed.Disposition != "success" || observed.Wire == nil || observed.Wire.HTTPStatus != wire.HTTPStatus || observed.Wire.Retryable != wire.Retryable || !equalOptionalStrings(observed.Wire.ErrorCode, wire.ErrorCode) {
