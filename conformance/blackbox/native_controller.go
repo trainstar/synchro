@@ -920,11 +920,11 @@ func (c *NativeController) ApplyStep(ctx context.Context, operation scenarios.Op
 		// binds a captured row only at the active generation. The projection
 		// bootstrap re-projects captured rows onto the pending generation, so
 		// activation runs it before the registry reload.
-		generation, pending, err := c.harness.Operator().PendingRegistryGeneration(ctx)
+		generation, err := c.harness.Operator().PendingLateSourceRegistryGeneration(ctx)
 		if err != nil {
 			return NativeStepObservation{}, err
 		}
-		if pending {
+		if generation > 0 {
 			if _, err := c.harness.Operator().RunProjectionBootstrap(ctx, generation); err != nil {
 				return NativeStepObservation{}, fmt.Errorf("activate registry membership generation %d: %w", generation, err)
 			}

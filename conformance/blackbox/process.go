@@ -3698,35 +3698,6 @@ func (executor *OperatorExecutor) RegisterLateSourceTable(ctx context.Context) e
 }
 
 // PendingLateSourceRegistryGeneration returns the validated pending generation for the fixed late table.
-// PendingRegistryGeneration returns the newest validated pending registry
-// generation and whether one exists. Registering a relation stages such a
-// generation, and a projection bootstrap activates it. The late-source helper
-// below answers a narrower question and is scoped to one fixture relation.
-func (executor *OperatorExecutor) PendingRegistryGeneration(ctx context.Context) (int64, bool, error) {
-	if executor == nil || executor.harness == nil || !executor.harness.sourceReady {
-		return 0, false, errors.New("operator executor is unavailable")
-	}
-	database, err := executor.harness.openDatabase(ctx, executor.harness.names.Database, executor.harness.env.Admin, false)
-	if err != nil {
-		return 0, false, errors.New("open pending registry generation connection failed")
-	}
-	defer database.Close()
-	var generation int64
-	err = database.QueryRowContext(ctx, `
-		SELECT generation
-		FROM synchro.sync_registry_generations
-		WHERE state = 'pending' AND validated
-		ORDER BY generation DESC
-		LIMIT 1`).Scan(&generation)
-	if errors.Is(err, sql.ErrNoRows) {
-		return 0, false, nil
-	}
-	if err != nil || generation <= 0 {
-		return 0, false, errors.New("read pending registry generation failed")
-	}
-	return generation, true, nil
-}
-
 func (executor *OperatorExecutor) PendingLateSourceRegistryGeneration(ctx context.Context) (int64, error) {
 	if executor == nil || executor.harness == nil || !executor.harness.sourceReady {
 		return 0, errors.New("operator executor is unavailable")
