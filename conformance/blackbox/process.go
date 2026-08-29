@@ -1084,6 +1084,15 @@ func (h *Harness) writePostmasterConfiguration() error {
 		"synchro.max_wal_lag_seconds = " + strconv.Itoa(maxWALLagSeconds),
 		"fsync = on",
 		"synchronous_commit = on",
+		// The provisioner surfaces postmaster output only when it fails to
+		// start, so a background worker that crashes later leaves no readable
+		// record. Persist the server log inside the cluster instead.
+		"logging_collector = on",
+		"log_directory = 'log'",
+		"log_filename = 'postgresql.log'",
+		"log_rotation_size = 0",
+		"log_rotation_age = 0",
+		"log_truncate_on_rotation = off",
 		"",
 	}, "\n")
 	return h.appendPostmasterConfiguration("\n# Synchro conformance isolated settings\n" + configuration)
