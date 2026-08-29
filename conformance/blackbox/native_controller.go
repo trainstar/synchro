@@ -3184,5 +3184,24 @@ func describeNativeRelationEvents(ctx context.Context, database *sql.DB, relatio
 			time.Sleep(2 * time.Second)
 		}
 	}
-	return fmt.Sprintf("%s; source rows %d; max wal registry %d; transactions %s; poison %s; worker %s", strings.Join(entries, " "), sourceRows, registry, strings.Join(transactions, " "), strings.Join(poison, " "), strings.Join(samples, " "))
+	slots := make([]string, 0, 4)
+	if rows, err := database.QueryContext(diagnostic, `
+		SELECT slot_name, active, COALESCE(active_pid, 0), COALESCE(restart_lsn::text, 'none')
+		FROM pg_catalog.pg_replication_slots
+		LIMIT 4`); err == nil {
+		defer rows.Close()
+		for rows.Next() {
+			var name, lsn string
+			var active bool
+			var pid int64
+			if rows.Scan(&name, &active, &pid, &lsn) != nil {
+				break
+			}
+			slots = append(slots, fmt.Sprintf("%s/active=%t/pid%d/%s", name, active, pid, lsn))
+		}
+	}
+	if len(slots) == 0 {
+		slots = append(slots, "none")
+	}
+	return fmt.Sprintf("%s; source rows %d; max wal registry %d; transactions %s; poison %s; worker %s; slots %s", strings.Join(entries, " "), sourceRows, registry, strings.Join(transactions, " "), strings.Join(poison, " "), strings.Join(samples, " "), strings.Join(slots, " "))
 }
