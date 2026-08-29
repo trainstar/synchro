@@ -1424,7 +1424,11 @@ func (c *NativeController) transitionNativeSchemaQueue(ctx context.Context, payl
 		}
 		addedPhysical = nativeSchemaQueueFieldName(field.Name)
 	}
-	if !validSchemaTransitionColumn(removedPhysical) || !validSchemaTransitionColumn(addedPhysical) || removedPhysical == addedPhysical {
+	// An authored transition may drop a field without adding one.
+	if !validSchemaTransitionColumn(removedPhysical) || removedPhysical == addedPhysical {
+		return errors.New("native schema-queue transition fields are invalid")
+	}
+	if addedPhysical != "" && !validSchemaTransitionColumn(addedPhysical) {
 		return errors.New("native schema-queue transition fields are invalid")
 	}
 	return c.harness.Operator().TransitionSchemaQueueField(ctx, removedPhysical, addedPhysical)

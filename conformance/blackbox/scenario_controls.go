@@ -48,7 +48,12 @@ func (executor *OperatorExecutor) TransitionSchemaQueue(ctx context.Context) err
 // TransitionSchemaQueueField replaces one diagnostic queue field and stages
 // its replacement registry generation in one source transaction.
 func (executor *OperatorExecutor) TransitionSchemaQueueField(ctx context.Context, removed, added string) error {
-	if !validSchemaTransitionColumn(removed) || !validSchemaTransitionColumn(added) || removed == added {
+	// A transition may drop a field without adding one. transitionSchemaQueue
+	// already guards its ADD COLUMN on a non-empty name.
+	if !validSchemaTransitionColumn(removed) || removed == added {
+		return errors.New("schema transition fields are invalid")
+	}
+	if added != "" && !validSchemaTransitionColumn(added) {
 		return errors.New("schema transition fields are invalid")
 	}
 	return executor.transitionSchemaQueue(ctx, removed, added)
