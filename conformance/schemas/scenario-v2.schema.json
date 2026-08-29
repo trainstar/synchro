@@ -478,33 +478,43 @@
           "enum": ["connect", "push", "pull", "rebuild", "local", "artifact", "process", "model", "workload"]
         },
         "name": { "type": "string", "minLength": 1 },
-        "payload": { "type": "object" }
+        "payload": { "type": "object" },
+        "wire_fault": { "$ref": "#/$defs/wireFaultControl" }
       }
     },
-	"expectedOutcome": {
-	  "oneOf": [
-	    {
-	      "type": "object",
-	      "additionalProperties": false,
-	      "required": ["disposition"],
-	      "properties": {
-	        "disposition": { "const": "success" }
-	      }
-	    },
-	    {
-	      "type": "object",
-	      "additionalProperties": false,
-	      "required": ["disposition", "error_code"],
-	      "properties": {
-	        "disposition": { "const": "error" },
-	        "error_code": {
-	          "type": "string",
-	          "enum": ["source_transaction_predecessor_pending", "source_transaction_poison_blocked"]
-	        }
-	      }
-	    }
-	  ]
-	},
+    "wireFaultControl": {
+      "description": "One fixed native-only push response fault.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mode"],
+      "properties": {
+        "mode": { "const": "temporary_unavailable" }
+      }
+    },
+    "expectedOutcome": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["disposition"],
+          "properties": {
+            "disposition": { "const": "success" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["disposition", "error_code"],
+          "properties": {
+            "disposition": { "const": "error" },
+            "error_code": {
+              "type": "string",
+              "enum": ["source_transaction_predecessor_pending", "source_transaction_poison_blocked"]
+            }
+          }
+        }
+      ]
+    },
     "proofObligation": {
       "type": "object",
       "additionalProperties": false,

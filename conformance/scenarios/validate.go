@@ -524,6 +524,27 @@ func (v *scenarioValidator) validateOperationsAndWire() {
 		}
 		v.validateWireAction(step, stepExists, wire)
 	}
+	v.validateNativeWireFaults()
+}
+
+func (v *scenarioValidator) validateNativeWireFaults() {
+	for _, step := range v.scenario.Steps {
+		_, enabled, err := TemporaryUnavailablePushTarget(step.Operation)
+		if err != nil {
+			v.add("%s step %s has invalid wire fault: %v", v.scenario.ID, step.ID, err)
+			continue
+		}
+		if !enabled {
+			continue
+		}
+		if step.NativeBinding == nil || step.NativeBinding.Kind != "public-call" || step.NativeBinding.Stage != "synchronous" {
+			v.add("%s step %s wire fault requires a synchronous public native push step", v.scenario.ID, step.ID)
+		}
+		wire, found := v.wireByStep[step.ID]
+		if !found || wire.ContractCase != wireFaultTemporaryUnavailable {
+			v.add("%s step %s wire fault requires temporary_unavailable wire expectations", v.scenario.ID, step.ID)
+		}
+	}
 }
 
 func (v *scenarioValidator) validateWireAction(step Step, stepExists bool, wire WireExpectation) {

@@ -135,9 +135,21 @@ type NativeMeasureParameters struct {
 }
 
 type Operation struct {
-	ContractOperation string          `json:"contract_operation"`
-	Name              string          `json:"name"`
-	Payload           json.RawMessage `json:"payload"`
+	ContractOperation string            `json:"contract_operation"`
+	Name              string            `json:"name"`
+	Payload           json.RawMessage   `json:"payload"`
+	WireFault         *WireFaultControl `json:"wire_fault,omitempty"`
+}
+
+// WireFaultControl selects one bounded native-only transport response.
+type WireFaultControl struct {
+	Mode string `json:"mode"`
+}
+
+// PushWireFaultTarget identifies the native push request for one wire fault.
+type PushWireFaultTarget struct {
+	ClientID string
+	BatchID  string
 }
 
 type ProofObligation struct {
