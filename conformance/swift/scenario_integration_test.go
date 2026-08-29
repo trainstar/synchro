@@ -18,7 +18,6 @@ func TestRealSwiftPerformance(t *testing.T) {
 		runSwiftSteadyPull(t)
 		runSwiftRebuildApply(t)
 		runSwiftRebuildCardinality(t)
-		runSwiftSchemaQueuedMutation(t)
 		runSwiftPushResponseLoss(t)
 		runSwiftRetentionReconnect(t)
 		runSwiftRebuildRequests(t)
@@ -26,6 +25,8 @@ func TestRealSwiftPerformance(t *testing.T) {
 		runSwiftPendingCycle(t)
 		runSwiftQueueReplay(t)
 		runSwiftSeededEmptyStartup(t)
+		// Ordered last so an unrelated failure cannot stop the scenarios above it.
+		runSwiftSchemaQueuedMutation(t)
 	})
 }
 
