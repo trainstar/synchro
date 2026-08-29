@@ -18,12 +18,32 @@ func TestRealSwiftPerformance(t *testing.T) {
 		runSwiftSteadyPull(t)
 		runSwiftRebuildApply(t)
 		runSwiftRebuildCardinality(t)
+		runSwiftSchemaCheck(t)
 		runSwiftRebuildRequests(t)
 		runSwiftForgedCursor(t)
 		runSwiftPendingCycle(t)
 		runSwiftQueueReplay(t)
 		runSwiftSeededEmptyStartup(t)
 	})
+}
+
+func runSwiftSchemaCheck(t *testing.T) {
+	t.Helper()
+	ctx, scenario, harness, controller, platform := newSwiftPerformanceFixture(t, filepath.Join("performance", "schema-check-001.json"), 0)
+	result, err := RunSchemaCheckScenario(ctx, scenario, controller, platform)
+	if err != nil {
+		t.Fatalf("run direct Swift schema-check scenario: %v", err)
+	}
+	calls := 0
+	for _, step := range scenario.Steps {
+		if step.NativeBinding != nil && step.NativeBinding.Kind == "public-call" {
+			calls++
+		}
+	}
+	if len(result.Calls) != calls {
+		t.Fatalf("Swift schema-check calls = %d, want %d", len(result.Calls), calls)
+	}
+	resetSwiftPerformanceServer(t, ctx, harness)
 }
 
 func runSwiftSteadyPull(t *testing.T) {
