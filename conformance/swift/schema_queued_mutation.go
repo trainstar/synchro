@@ -94,6 +94,12 @@ func RunSchemaQueuedMutationScenario(ctx context.Context, scenario scenarios.Sce
 		return SchemaQueuedMutationResult{}, fmt.Errorf("publish Swift schema-queued-mutation schema: %w", resultError(applyErr, observation.Disposition))
 	}
 
+	// The baseline call left the engine started, and it rejects a second start.
+	// The authored step expects a real connect that the server answers with an
+	// unsupported action, so the client stops before it starts again.
+	if _, err := platform.Lifecycle(ctx, client, "stop"); err != nil {
+		return SchemaQueuedMutationResult{}, fmt.Errorf("stop Swift schema-queued-mutation client before its unsupported start: %w", err)
+	}
 	unsupported, err := swiftScenarioCall(ctx, platform, client, steps["STEP-SCHEMA-QUEUED-MUTATION-UNSUPPORTED-001"].NativeBinding.Method)
 	if err != nil {
 		return SchemaQueuedMutationResult{}, fmt.Errorf("observe Swift schema-queued-mutation unsupported schema: %w", err)
