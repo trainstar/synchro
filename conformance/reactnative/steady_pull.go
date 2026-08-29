@@ -134,7 +134,7 @@ func ValidateSteadyPullScenario(scenario scenarios.Scenario) error {
 	return nil
 }
 
-// SteadyPullCoordinatorConfig configures one authenticated React Native iOS steady-pull sidecar.
+// SteadyPullCoordinatorConfig configures one authenticated React Native steady-pull sidecar.
 type SteadyPullCoordinatorConfig struct {
 	Scenario   scenarios.Scenario
 	Harness    *blackbox.Harness
@@ -146,7 +146,7 @@ type SteadyPullCoordinatorConfig struct {
 	Database   string
 }
 
-// SteadyPullCoordinator is the loopback command sidecar for one RN iOS steady-pull run.
+// SteadyPullCoordinator is the command sidecar for one React Native steady-pull run.
 type SteadyPullCoordinator struct {
 	config SteadyPullCoordinatorConfig
 
@@ -194,13 +194,13 @@ const (
 	steadyPullStageComplete
 )
 
-// NewSteadyPullCoordinator creates an authenticated loopback listener for iOS only.
+// NewSteadyPullCoordinator creates an authenticated loopback listener for one supported platform.
 func NewSteadyPullCoordinator(config SteadyPullCoordinatorConfig) (*SteadyPullCoordinator, error) {
 	if err := ValidateSteadyPullScenario(config.Scenario); err != nil {
 		return nil, err
 	}
-	if config.Platform != "ios" {
-		return nil, errors.New("React Native steady-pull coordinator supports only ios")
+	if config.Platform != "ios" && config.Platform != "android" {
+		return nil, errors.New("React Native steady-pull coordinator platform must be ios or android")
 	}
 	if config.AppVersion == "" {
 		config.AppVersion = defaultAppVersion

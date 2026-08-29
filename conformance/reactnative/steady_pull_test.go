@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/trainstar/synchro/conformance/blackbox"
@@ -147,7 +148,7 @@ func TestResolutionSchemaRuntimeMatchesCapturedState(t *testing.T) {
 	}
 }
 
-func TestNewSteadyPullCoordinatorRejectsAndroid(t *testing.T) {
+func TestNewSteadyPullCoordinatorAcceptsAndroid(t *testing.T) {
 	coordinator, err := NewSteadyPullCoordinator(SteadyPullCoordinatorConfig{
 		Scenario:   loadSteadyPullAuthoredScenario(t),
 		Platform:   "android",
@@ -155,8 +156,32 @@ func TestNewSteadyPullCoordinatorRejectsAndroid(t *testing.T) {
 		AuthToken:  "unit-token",
 		AppVersion: "0.3.0",
 	})
+	if err != nil || coordinator == nil {
+		t.Fatalf("Android steady-pull coordinator was rejected: %v", err)
+	}
+	defer func() {
+		if err := coordinator.Close(context.Background()); err != nil {
+			t.Errorf("close Android steady-pull coordinator: %v", err)
+		}
+	}()
+	// The Detox process consumes this URL from the host, so it stays on host
+	// loopback for every platform. The emulator alias 10.0.2.2 resolves only
+	// inside the emulator and applies to the adapter URL, not to this sidecar.
+	if !strings.HasPrefix(coordinator.URL(), "http://127.0.0.1:") {
+		t.Fatalf("Android steady-pull coordinator URL = %q", coordinator.URL())
+	}
+}
+
+func TestNewSteadyPullCoordinatorRejectsUnknownPlatform(t *testing.T) {
+	coordinator, err := NewSteadyPullCoordinator(SteadyPullCoordinatorConfig{
+		Scenario:   loadSteadyPullAuthoredScenario(t),
+		Platform:   "windows",
+		ServerURL:  "http://127.0.0.1:8080",
+		AuthToken:  "unit-token",
+		AppVersion: "0.3.0",
+	})
 	if err == nil || coordinator != nil {
-		t.Fatal("Android steady-pull coordinator was accepted")
+		t.Fatal("unknown-platform steady-pull coordinator was accepted")
 	}
 }
 

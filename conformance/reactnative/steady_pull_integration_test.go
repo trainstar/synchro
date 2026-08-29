@@ -4,6 +4,7 @@ package reactnative
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -15,8 +16,17 @@ import (
 )
 
 func TestRealReactNativeSteadyPullIOS(t *testing.T) {
+	runRealReactNativeSteadyPull(t, "ios")
+}
+
+func TestRealReactNativeSteadyPullAndroid(t *testing.T) {
+	runRealReactNativeSteadyPull(t, "android")
+}
+
+func runRealReactNativeSteadyPull(t *testing.T, platform string) {
+	t.Helper()
 	if !*warmConnectProvision || !*warmConnectInstall {
-		t.Fatal("React Native iOS steady-pull requires --provision --install")
+		t.Fatalf("React Native %s steady-pull requires --provision --install", platform)
 	}
 	detoxConfiguration := os.Getenv("SYNCHRO_RN_DETOX_CONFIGURATION")
 	if detoxConfiguration == "" {
@@ -62,20 +72,20 @@ func TestRealReactNativeSteadyPullIOS(t *testing.T) {
 		Scenario:   scenario,
 		Harness:    harness,
 		Controller: controller,
-		Platform:   "ios",
+		Platform:   platform,
 	})
 	if err != nil {
-		t.Fatalf("create React Native iOS steady-pull coordinator: %v", err)
+		t.Fatalf("create React Native %s steady-pull coordinator: %v", platform, err)
 	}
 	t.Cleanup(func() {
 		closeContext, closeCancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer closeCancel()
 		if err := coordinator.Close(closeContext); err != nil {
-			t.Errorf("close React Native iOS steady-pull coordinator: %v", err)
+			t.Errorf("close React Native %s steady-pull coordinator: %v", platform, err)
 		}
 	})
 	if err := coordinator.Prepare(runContext); err != nil {
-		t.Fatalf("prepare React Native iOS steady-pull coordinator: %v", err)
+		t.Fatalf("prepare React Native %s steady-pull coordinator: %v", platform, err)
 	}
 	serveErrors := make(chan error, 1)
 	go func() {
@@ -83,7 +93,7 @@ func TestRealReactNativeSteadyPullIOS(t *testing.T) {
 	}()
 
 	t.Run("assertion", func(t *testing.T) {
-		resultPath := filepath.Join(t.TempDir(), "react-native-ios-steady-pull.json")
+		resultPath := filepath.Join(t.TempDir(), fmt.Sprintf("react-native-%s-steady-pull.json", platform))
 		command := exec.CommandContext(
 			runContext,
 			"npx", "detox", "test", "e2e/steady-pull.test.ts",
@@ -105,21 +115,21 @@ func TestRealReactNativeSteadyPullIOS(t *testing.T) {
 		output, err := command.CombinedOutput()
 		if err != nil {
 			_, coordinatorErr := coordinator.Result()
-			t.Fatalf("run React Native iOS steady-pull Detox test: %v; coordinator: %v\n%s", err, coordinatorErr, output)
+			t.Fatalf("run React Native %s steady-pull Detox test: %v; coordinator: %v\n%s", platform, err, coordinatorErr, output)
 		}
 		expectedTestPath := filepath.Join(repositoryRoot, "clients", "react-native", "example", "e2e", "steady-pull.test.ts")
 		if err := validateDetoxSteadyPullResult(resultPath, expectedTestPath, "executes the steady-pull coordinator sequence"); err != nil {
-			t.Fatalf("validate React Native iOS steady-pull Detox result: %v\n%s", err, output)
+			t.Fatalf("validate React Native %s steady-pull Detox result: %v\n%s", platform, err, output)
 		}
 		if !coordinator.Completed() {
-			t.Fatalf("React Native iOS steady-pull coordinator did not complete")
+			t.Fatalf("React Native %s steady-pull coordinator did not complete", platform)
 		}
 		result, err := coordinator.Result()
 		if err != nil {
-			t.Fatalf("read React Native iOS steady-pull result: %v", err)
+			t.Fatalf("read React Native %s steady-pull result: %v", platform, err)
 		}
 		if len(result.IdentityResolution) != len(scenario.NativeIdentityAliases) {
-			t.Fatalf("React Native iOS steady-pull identity resolutions = %d, want %d", len(result.IdentityResolution), len(scenario.NativeIdentityAliases))
+			t.Fatalf("React Native %s steady-pull identity resolutions = %d, want %d", platform, len(result.IdentityResolution), len(scenario.NativeIdentityAliases))
 		}
 	})
 
@@ -127,14 +137,14 @@ func TestRealReactNativeSteadyPullIOS(t *testing.T) {
 	err = coordinator.Close(closeContext)
 	closeCancel()
 	if err != nil {
-		t.Fatalf("stop React Native iOS steady-pull coordinator: %v", err)
+		t.Fatalf("stop React Native %s steady-pull coordinator: %v", platform, err)
 	}
 	select {
 	case err := <-serveErrors:
 		if err != nil {
-			t.Fatalf("serve React Native iOS steady-pull coordinator: %v", err)
+			t.Fatalf("serve React Native %s steady-pull coordinator: %v", platform, err)
 		}
 	case <-time.After(5 * time.Second):
-		t.Fatalf("React Native iOS steady-pull coordinator did not stop")
+		t.Fatalf("React Native %s steady-pull coordinator did not stop", platform)
 	}
 }
