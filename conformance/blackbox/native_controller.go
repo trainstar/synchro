@@ -3120,7 +3120,15 @@ func describeNativeRelationEvents(ctx context.Context, database *sql.DB, relatio
 		return "unavailable"
 	}
 	if len(entries) == 0 {
-		return "none for " + relation
+		entries = append(entries, "no-events")
 	}
-	return strings.Join(entries, " ")
+	var sourceRows int64
+	var registry int64
+	if err := database.QueryRowContext(diagnostic, "SELECT count(*) FROM public."+quoteIdentifier(relation)).Scan(&sourceRows); err != nil {
+		sourceRows = -1
+	}
+	if err := database.QueryRowContext(diagnostic, "SELECT COALESCE(max(registry_generation), -1) FROM synchro.sync_wal_transactions").Scan(&registry); err != nil {
+		registry = -1
+	}
+	return fmt.Sprintf("%s; source rows %d; max wal registry %d", strings.Join(entries, " "), sourceRows, registry)
 }
