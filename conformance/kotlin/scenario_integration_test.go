@@ -19,6 +19,7 @@ func TestRealKotlinPerformance(t *testing.T) {
 		runKotlinPendingCycle(t)
 		runKotlinQueueReplay(t)
 		runKotlinRebuildRequests(t)
+		runKotlinRebuildApply(t)
 		runKotlinForgedCursor(t)
 		runKotlinSeededEmptyStartup(t)
 	})
@@ -100,6 +101,44 @@ func runKotlinRebuildRequests(t *testing.T) {
 		t.Fatalf("Kotlin Android rebuild-requests identity resolutions = %d, want %d", len(result.IdentityResolution), len(scenario.NativeIdentityAliases))
 	}
 	resetKotlinPerformanceServer(t, ctx, harness)
+}
+
+func runKotlinRebuildApply(t *testing.T) {
+	t.Helper()
+	const scenarioPath = "conformance/scenarios/performance/rebuild-apply-001.json"
+	pullPageSize := kotlinRebuildApplyPageSize(t, scenarioPath)
+	ctx, scenario, harness, controller, platform := newKotlinPerformanceFixture(t, scenarioPath, pullPageSize)
+	result, err := RunRebuildApplyScenario(ctx, scenario, controller, platform)
+	if err != nil {
+		t.Fatalf("run direct Kotlin Android rebuild-apply scenario: %v", err)
+	}
+	if len(result.IdentityResolution) != len(scenario.NativeIdentityAliases) {
+		t.Fatalf("Kotlin Android rebuild-apply identity resolutions = %d, want %d", len(result.IdentityResolution), len(scenario.NativeIdentityAliases))
+	}
+	resetKotlinPerformanceServer(t, ctx, harness)
+}
+
+func kotlinRebuildApplyPageSize(t *testing.T, scenarioPath string) int {
+	t.Helper()
+	repositoryRoot, err := filepath.Abs(filepath.Join("..", ".."))
+	if err != nil {
+		t.Fatalf("resolve Kotlin Android rebuild-apply repository root: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	scenario, err := scenarios.LoadFile(ctx, repositoryRoot, scenarioPath)
+	if err != nil {
+		t.Fatalf("load Kotlin Android rebuild-apply authored scenario: %v", err)
+	}
+	steps, err := kotlinScenarioStepMap(scenario, rebuildApplyScenarioID, 9)
+	if err != nil {
+		t.Fatalf("validate Kotlin Android rebuild-apply authored scenario: %v", err)
+	}
+	_, _, pageSize, err := rebuildApplyBindings(scenario, steps)
+	if err != nil || pageSize > 1000 {
+		t.Fatalf("read Kotlin Android rebuild-apply authored pull page size: %v", err)
+	}
+	return int(pageSize)
 }
 
 func runKotlinForgedCursor(t *testing.T) {
