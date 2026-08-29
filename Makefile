@@ -84,6 +84,8 @@
 	test-rn-warm-connect-ios \
 	test-rn-performance-ios \
 	test-rn-performance-android \
+	test-rn-pending-cycle-ios \
+	test-rn-pending-cycle-android \
 	test-rn-warm-connect-android \
 	verify-rn-seed \
 	refresh-rn-seed \
@@ -277,6 +279,8 @@ help:
 	@echo "  test-rn-warm-connect-control - Run the exact React Native warm-connect negative control"
 	@echo "  test-rn-warm-connect-ios - Run direct React Native warm-connect through the iOS bridge"
 	@echo "  test-rn-performance-android - Run direct React Native steady-pull through the Android bridge"
+	@echo "  test-rn-pending-cycle-ios - Run direct React Native pending-cycle through the iOS bridge"
+	@echo "  test-rn-pending-cycle-android - Run direct React Native pending-cycle through the Android bridge"
 	@echo "  test-rn-warm-connect-android - Run direct React Native warm-connect through the Android bridge"
 	@echo "  verify-rn-seed        - Verify the pinned React Native seed digest"
 	@echo "  refresh-rn-seed       - Regenerate and pin the React Native seed"
@@ -803,6 +807,28 @@ test-rn-performance-android: conformance-mod-download test-blackbox-harness test
 		-expect target_pass \
 		-- go test -tags reactnativeintegration -json ./reactnative -count=1 -timeout=35m \
 		-run '^TestRealReactNativeSteadyPullAndroid$$' -args --provision --install
+
+test-rn-pending-cycle-ios: conformance-mod-download test-blackbox-harness rn-seed-asset rn-watchman-reset rn-ios-pods
+	cd clients/react-native/example && npx detox build --configuration ios.sim.debug
+	@set -eu; \
+		$(WARM_CONNECT_ENV) \
+		cd conformance && SYNCHRO_RN_DETOX_CONFIGURATION=ios.sim.debug GOFLAGS= GOWORK=off go run ./cmd/testresult exact \
+		-test TestRealReactNativePendingCycleIOS \
+		-expect target_pass \
+			-- go test -tags reactnativeintegration -json ./reactnative -count=1 -timeout=35m \
+			-run '^TestRealReactNativePendingCycleIOS$$' -args --provision --install
+
+test-rn-pending-cycle-android: conformance-mod-download test-blackbox-harness test-rn-warm-connect-control test-rn-android-parity rn-watchman-reset rn-android-emulator-reset
+	@test -n "$(ANDROID_JAVA_HOME)" || (echo "Android Detox requires JDK 17. Set ANDROID_JAVA_HOME to a JDK 17 install."; exit 1)
+	@test -d "$(ANDROID_HOME)" || (echo "Android SDK not found at $(ANDROID_HOME). Set ANDROID_HOME to a valid SDK install."; exit 1)
+	cd clients/react-native/example && ANDROID_HOME="$(ANDROID_HOME)" ANDROID_SDK_ROOT="$(ANDROID_HOME)" JAVA_HOME="$(ANDROID_JAVA_HOME)" PATH="$(ANDROID_JAVA_HOME)/bin:$$PATH" npx detox build --configuration $(RN_ANDROID_DETOX_CONFIG)
+	@set -eu; \
+		$(WARM_CONNECT_ENV) \
+		cd conformance && ANDROID_HOME="$(ANDROID_HOME)" ANDROID_SDK_ROOT="$(ANDROID_HOME)" JAVA_HOME="$(ANDROID_JAVA_HOME)" PATH="$(ANDROID_JAVA_HOME)/bin:$$PATH" SYNCHRO_RN_DETOX_CONFIGURATION="$(RN_ANDROID_DETOX_CONFIG)" GOFLAGS= GOWORK=off go run ./cmd/testresult exact \
+		-test TestRealReactNativePendingCycleAndroid \
+		-expect target_pass \
+			-- go test -tags reactnativeintegration -json ./reactnative -count=1 -timeout=35m \
+			-run '^TestRealReactNativePendingCycleAndroid$$' -args --provision --install
 
 test-rn-warm-connect-android: conformance-mod-download test-blackbox-harness test-rn-warm-connect-control test-rn-android-parity rn-watchman-reset rn-android-emulator-reset
 	@test -n "$(ANDROID_JAVA_HOME)" || (echo "Android Detox requires JDK 17. Set ANDROID_JAVA_HOME to a JDK 17 install."; exit 1)

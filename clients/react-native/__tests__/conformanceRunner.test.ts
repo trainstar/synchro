@@ -406,3 +406,42 @@ describe('PublicConformanceRunner call lifecycle', () => {
     await runner.close();
   });
 });
+
+it('executes a local write whose primary key uses the authored field map', async () => {
+  const runner = new PublicConformanceRunner({
+    serverURL: 'http://localhost:8091',
+    authToken: 'test-token',
+    appVersion: '1.0.0',
+  });
+  await runner.execute(command('client', 'open', 'client-a', {
+    database_mode: 'create',
+    seed_step_id: null,
+  }));
+
+  // The contract authors pk as a field identifier to value object. A prior
+  // decoder expected a field_id and value pair, which no authored scenario
+  // uses, so every local write was rejected as an invalid command.
+  const step = {
+    id: 'STEP-LOCAL-WRITE-001',
+    operation: {
+      contract_operation: 'local',
+      name: 'write',
+      payload: {
+        table_id: 'items',
+        pk: { id: 'pending-row' },
+        operation: 'insert',
+        columns: { value: 'pending' },
+      },
+    },
+  } as unknown as ScenarioStep;
+
+  await expect(
+    runner.execute(command('client', 'execute-step', 'client-a', {}, [step]))
+  ).resolves.toMatchObject({ kind: 'local-action' });
+  expect(mockNativeModule.txExecute).toHaveBeenCalledWith(
+    expect.anything(),
+    'INSERT INTO "items" ("id", "value") VALUES (?, ?)',
+    ['pending-row', 'pending']
+  );
+  await runner.close();
+});

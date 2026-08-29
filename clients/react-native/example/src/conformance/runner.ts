@@ -52,10 +52,20 @@ export class ConformanceUnavailableError extends Error {
 }
 
 export class ConformanceCommandError extends Error {
-  constructor(readonly code: ConformanceErrorCode) {
-    super(code);
+  // execution_failed is a catch-all, so the originating message is kept. Without
+  // it a device failure reports only the code and cannot be diagnosed.
+  constructor(readonly code: ConformanceErrorCode, cause?: unknown) {
+    super(cause === undefined ? code : `${code}: ${describeCause(cause)}`);
     this.name = 'ConformanceCommandError';
   }
+}
+
+function describeCause(cause: unknown): string {
+  if (cause instanceof Error) {
+    const code = (cause as { code?: unknown }).code;
+    return typeof code === 'string' ? `${code} ${cause.message}` : cause.message;
+  }
+  return String(cause);
 }
 
 export type RawSyncStatus = {
@@ -199,7 +209,7 @@ export class PublicConformanceRunner {
       if (error instanceof ConformanceUnavailableError) {
         throw new ConformanceCommandError('unavailable');
       }
-      throw new ConformanceCommandError('execution_failed');
+      throw new ConformanceCommandError('execution_failed', error);
     }
   }
 
@@ -590,9 +600,15 @@ function decodeLocalAction(operation: ScenarioOperation): {
 } {
   const payload = operation.payload as Record<string, unknown>;
   const tableName = requiredIdentifier(payload.table_id);
-  const primaryKey = requiredRecord(payload.pk);
-  const primaryKeyField = requiredIdentifier(primaryKey.field_id);
-  const primaryKeyValue = sqliteBindValue(primaryKey.value);
+  // The contract authors pk as a field identifier to value object, the same
+  // shape as columns, so it normalizes through the same decoder. A registered
+  // relation carries exactly one primary key column.
+  const primaryKeyColumns = decodeColumns(decodeColumnValues(payload.pk));
+  if (primaryKeyColumns.length !== 1) {
+    throw new ConformanceCommandError('invalid_command');
+  }
+  const primaryKeyField = primaryKeyColumns[0].name;
+  const primaryKeyValue = primaryKeyColumns[0].value;
   const action = requiredString(payload.operation);
   const columns = payload.columns === undefined ? [] : decodeColumnValues(payload.columns);
   const values: SQLiteBindValue[] = [];
