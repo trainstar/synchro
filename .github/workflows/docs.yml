@@ -37,7 +37,7 @@ jobs:
       - name: Install and build docs
         run: make docs-build
 
-      - uses: actions/upload-pages-artifact@v3
+      - uses: actions/upload-pages-artifact@v4
         with:
           path: docs/dist
 
