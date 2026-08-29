@@ -3090,7 +3090,12 @@ func describeNativeRelationEvents(ctx context.Context, database *sql.DB, relatio
 	if relation == "" && dependency != nil {
 		relation = dependency.RuntimeName
 	}
-	rows, err := database.QueryContext(ctx, `
+	// The resolution deadline is exhausted when this runs, so the summary uses
+	// its own bounded context rather than the expired one.
+	_ = ctx
+	diagnostic, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	rows, err := database.QueryContext(diagnostic, `
 		SELECT event.operation,
 		       COALESCE(fence.new_record_id::text, fence.old_record_id::text, 'no-fence'),
 		       COALESCE(fence.new_capture_key::text, fence.old_capture_key::text, 'no-key')
@@ -3100,7 +3105,7 @@ func describeNativeRelationEvents(ctx context.Context, database *sql.DB, relatio
 		ORDER BY event.commit_lsn DESC, event.event_ordinal DESC
 		LIMIT 8`, relation)
 	if err != nil {
-		return "unavailable"
+		return "query failed: " + err.Error()
 	}
 	defer rows.Close()
 	entries := make([]string, 0, 8)
