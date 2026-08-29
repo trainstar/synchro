@@ -383,7 +383,7 @@ func TestProjectionBootstrapResultJSONTagsRemainExact(t *testing.T) {
 	}
 }
 
-func TestPostmasterConfigurationSetsFiniteHealthLimits(t *testing.T) {
+func TestPostmasterConfigurationStagesWorkerAutoStartAfterBootstrap(t *testing.T) {
 	dataDir := t.TempDir()
 	configurationPath := filepath.Join(dataDir, "postgresql.conf")
 	if err := os.WriteFile(configurationPath, nil, 0o600); err != nil {
@@ -409,6 +409,8 @@ func TestPostmasterConfigurationSetsFiniteHealthLimits(t *testing.T) {
 	}
 	for _, setting := range []string{
 		"max_replication_slots = 2",
+		"shared_preload_libraries = 'synchro_pg'",
+		"synchro.auto_start = off",
 		"synchro.max_worker_heartbeat_age_seconds = 30",
 		"synchro.max_wal_lag_bytes = 67108864",
 		"synchro.max_wal_lag_seconds = 30",
@@ -416,6 +418,19 @@ func TestPostmasterConfigurationSetsFiniteHealthLimits(t *testing.T) {
 		if !strings.Contains(string(configuration), setting+"\n") {
 			t.Fatalf("PostgreSQL configuration does not contain %q", setting)
 		}
+	}
+	if strings.Contains(string(configuration), "synchro.auto_start = on") {
+		t.Fatal("bootstrap PostgreSQL configuration enables the WAL worker")
+	}
+	if err := harness.enableWorkerAutoStart(); err != nil {
+		t.Fatal(err)
+	}
+	configuration, err = os.ReadFile(configurationPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Count(string(configuration), "synchro.auto_start = on\n") != 1 {
+		t.Fatal("PostgreSQL configuration does not enable the WAL worker once after bootstrap")
 	}
 }
 

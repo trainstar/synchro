@@ -513,6 +513,12 @@ func Provision(ctx context.Context, config HarnessConfig) (_ *Harness, returnedE
 		if err := harness.installExtensionTopology(ctx); err != nil {
 			return nil, err
 		}
+		if err := harness.enableWorkerAutoStart(); err != nil {
+			return nil, err
+		}
+		if err := harness.restartPostgres(ctx); err != nil {
+			return nil, err
+		}
 	}
 	if err := harness.waitForWorker(ctx); err != nil {
 		return nil, err
@@ -1067,7 +1073,7 @@ func (h *Harness) writePostmasterConfiguration() error {
 		"max_replication_slots = 2",
 		"max_wal_senders = 1",
 		"shared_preload_libraries = 'synchro_pg'",
-		"synchro.auto_start = on",
+		"synchro.auto_start = off",
 		"synchro.database = " + quotePostgresLiteral(h.names.Database),
 		"synchro.replication_slot = " + quotePostgresLiteral(h.names.ReplicationSlot),
 		"synchro.publication_name = " + quotePostgresLiteral(h.names.Publication),
@@ -1079,11 +1085,19 @@ func (h *Harness) writePostmasterConfiguration() error {
 		"synchronous_commit = on",
 		"",
 	}, "\n")
+	return h.appendPostmasterConfiguration("\n# Synchro conformance isolated settings\n" + configuration)
+}
+
+func (h *Harness) enableWorkerAutoStart() error {
+	return h.appendPostmasterConfiguration("\n# Synchro conformance worker activation\nsynchro.auto_start = on\n")
+}
+
+func (h *Harness) appendPostmasterConfiguration(configuration string) error {
 	file, err := os.OpenFile(filepath.Join(h.dataDir, "postgresql.conf"), os.O_APPEND|os.O_WRONLY, 0)
 	if err != nil {
 		return errors.New("open PostgreSQL configuration failed")
 	}
-	if _, err := file.WriteString("\n# Synchro conformance isolated settings\n" + configuration); err != nil {
+	if _, err := file.WriteString(configuration); err != nil {
 		_ = file.Close()
 		return errors.New("write PostgreSQL configuration failed")
 	}
