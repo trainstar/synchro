@@ -2511,7 +2511,7 @@ func (c *NativeController) resolveRuntimeTransaction(ctx context.Context, bindin
 				}
 				identifier = nativeCaptureDependencyKey(*image)
 			}
-			return fmt.Errorf("native runtime WAL event binding is unavailable: relation %s operation %s identity %s", event.Relation, event.Operation, identifier)
+			return fmt.Errorf("native runtime WAL event binding is unavailable: relation %s operation %s identity %s; emitted %s", event.Relation, event.Operation, identifier, describeNativeRelationEvents(ctx, database, event.Table.RuntimeName, event.Dependency))
 		}
 		identity.ordinal = uint64(ordinal)
 		identities = append(identities, identity)
@@ -3080,4 +3080,42 @@ func waitNativePoll(ctx context.Context) error {
 	case <-timer.C:
 		return nil
 	}
+}
+
+// describeNativeRelationEvents summarizes the WAL events recorded for one
+// physical relation. A binding failure reports only that its own identity did
+// not resolve, which cannot distinguish an absent event from a fence that the
+// resolution join discards.
+func describeNativeRelationEvents(ctx context.Context, database *sql.DB, relation string, dependency *nativeCaptureDependencyBinding) string {
+	if relation == "" && dependency != nil {
+		relation = dependency.RuntimeName
+	}
+	rows, err := database.QueryContext(ctx, `
+		SELECT event.operation,
+		       COALESCE(fence.new_record_id::text, fence.old_record_id::text, 'no-fence'),
+		       COALESCE(fence.new_capture_key::text, fence.old_capture_key::text, 'no-key')
+		FROM synchro.sync_wal_events event
+		LEFT JOIN synchro.sync_write_fences fence ON fence.fence_id = event.fence_id
+		WHERE event.physical_relation = $1
+		ORDER BY event.commit_lsn DESC, event.event_ordinal DESC
+		LIMIT 8`, relation)
+	if err != nil {
+		return "unavailable"
+	}
+	defer rows.Close()
+	entries := make([]string, 0, 8)
+	for rows.Next() {
+		var operation, record, key string
+		if err := rows.Scan(&operation, &record, &key); err != nil {
+			return "unavailable"
+		}
+		entries = append(entries, operation+":"+record+":"+key)
+	}
+	if rows.Err() != nil {
+		return "unavailable"
+	}
+	if len(entries) == 0 {
+		return "none for " + relation
+	}
+	return strings.Join(entries, " ")
 }
