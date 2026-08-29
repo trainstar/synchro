@@ -96,8 +96,11 @@ GRANT EXECUTE ON FUNCTION public.cf_global_items_membership(uuid), public.cf_ite
 GRANT USAGE ON SCHEMA public TO synchro_owner, synchro_worker;
 GRANT SELECT ON TABLE public.cf_global_items TO synchro_owner;
 GRANT SELECT ON TABLE public.cf_document_access TO synchro_owner;
+-- The native controller writes dependency rows directly, so the owner needs
+-- write access that the read-only cf_document_access dependency does not.
+GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.cf_item_impacts TO synchro_owner;
 GRANT SELECT, INSERT, UPDATE ON TABLE public.cf_items, public.cf_documents, public.cf_document_members, public.cf_document_notes, public.cf_schema_queue, public.cf_decode_trap, public.cf_late_registration TO synchro_owner;
-GRANT SELECT ON TABLE public.cf_global_items, public.cf_items, public.cf_documents, public.cf_document_members, public.cf_document_access, public.cf_document_notes, public.cf_schema_queue, public.cf_decode_trap, public.cf_late_registration TO synchro_worker;
+GRANT SELECT ON TABLE public.cf_global_items, public.cf_items, public.cf_documents, public.cf_document_members, public.cf_document_access, public.cf_document_notes, public.cf_schema_queue, public.cf_decode_trap, public.cf_late_registration, public.cf_item_impacts TO synchro_worker;
 
 DO $rls$
 DECLARE
@@ -106,7 +109,7 @@ BEGIN
     FOREACH relation_name IN ARRAY ARRAY[
         'cf_global_items', 'cf_items', 'cf_documents', 'cf_document_members',
         'cf_document_access', 'cf_document_notes', 'cf_schema_queue',
-        'cf_decode_trap', 'cf_late_registration'
+        'cf_decode_trap', 'cf_late_registration', 'cf_item_impacts'
     ]
     LOOP
         EXECUTE pg_catalog.format('ALTER TABLE public.%I ENABLE ROW LEVEL SECURITY', relation_name);
@@ -171,6 +174,12 @@ SELECT synchro.synchro_register_capture_dependency(
     'public.cf_document_access',
     ARRAY['id']::text[],
     ARRAY['document_id', 'owner_id']::text[]
+);
+
+SELECT synchro.synchro_register_capture_dependency(
+    'public.cf_item_impacts',
+    ARRAY['id']::text[],
+    ARRAY['scope_key']::text[]
 );
 
 DO $dependencies$

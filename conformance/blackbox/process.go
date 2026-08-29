@@ -1616,63 +1616,14 @@ func (h *Harness) applyIndependentSourceSetup(ctx context.Context) (bool, error)
 	if err := h.executeSourceScript(ctx, "schema.sql", diagnosticSchemaSQL); err != nil {
 		return false, err
 	}
-	if err := h.ensureNativeCaptureDependencyFixture(ctx); err != nil {
-		return false, err
-	}
 	if err := h.grantWorkerReplicationSourceAccess(ctx); err != nil {
 		return false, err
 	}
 	if err := h.executeSourceScript(ctx, "register-diagnostic.sql", diagnosticRegistrationSQL); err != nil {
 		return false, err
 	}
-	if err := h.registerNativeCaptureDependencyFixture(ctx); err != nil {
-		return false, err
-	}
 	h.sourceReady = true
 	return false, nil
-}
-
-func (h *Harness) ensureNativeCaptureDependencyFixture(ctx context.Context) error {
-	database, err := h.openDatabase(ctx, h.names.Database, h.env.Admin, false)
-	if err != nil {
-		return errors.New("connect native capture dependency fixture failed")
-	}
-	defer database.Close()
-	for _, statement := range []string{
-		"CREATE TABLE IF NOT EXISTS public." + nativeCaptureDependencyFixture + " (scope_key TEXT PRIMARY KEY)",
-		"GRANT SELECT ON TABLE public." + nativeCaptureDependencyFixture + " TO synchro_owner",
-		"ALTER TABLE public." + nativeCaptureDependencyFixture + " ENABLE ROW LEVEL SECURITY",
-		"DROP POLICY IF EXISTS synchro_owner_all ON public." + nativeCaptureDependencyFixture,
-		"CREATE POLICY synchro_owner_all ON public." + nativeCaptureDependencyFixture + " AS PERMISSIVE FOR ALL TO synchro_owner USING (true) WITH CHECK (true)",
-	} {
-		if _, err := database.ExecContext(ctx, statement); err != nil {
-			return errors.New("configure native capture dependency fixture failed")
-		}
-	}
-	return nil
-}
-
-func (h *Harness) registerNativeCaptureDependencyFixture(ctx context.Context) error {
-	database, err := h.openDatabase(ctx, h.names.Database, h.env.Admin, false)
-	if err != nil {
-		return errors.New("connect native capture dependency registration failed")
-	}
-	defer database.Close()
-	if _, err := database.ExecContext(ctx, `SELECT synchro.synchro_register_capture_dependency(
-		'public.cf_item_impacts', ARRAY['id']::text[], ARRAY['scope_key']::text[]
-	)`); err != nil {
-		return errors.New("register native capture dependency fixture failed")
-	}
-	var published bool
-	if err := database.QueryRowContext(ctx, `
-		SELECT EXISTS (
-			SELECT 1
-			FROM pg_catalog.pg_publication_tables
-			WHERE pubname = $1 AND schemaname = 'public' AND tablename = $2
-		)`, h.names.Publication, nativeCaptureDependencyFixture).Scan(&published); err != nil || !published {
-		return errors.New("native capture dependency fixture is absent from publication")
-	}
-	return nil
 }
 
 func (h *Harness) diagnosticSourceSchemaExists(ctx context.Context) (bool, error) {
@@ -2149,10 +2100,7 @@ func (h *Harness) RestoreDiagnosticRegistrations(ctx context.Context) error {
 	if err := h.executeSourceScript(ctx, "register-diagnostic-reinstall.sql", diagnosticRegistrationSQL); err != nil {
 		return err
 	}
-	if err := h.ensureNativeCaptureDependencyFixture(ctx); err != nil {
-		return err
-	}
-	return h.registerNativeCaptureDependencyFixture(ctx)
+	return nil
 }
 
 // FailureDiagnostics returns bounded, sanitized process output for a failed run.
