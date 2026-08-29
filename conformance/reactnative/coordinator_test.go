@@ -381,6 +381,23 @@ func TestFinalCaptureRejectsChecksumAndIdentityChanges(t *testing.T) {
 	}
 }
 
+func TestWarmConnectFinalEvidenceRequiresAuthoredDurabilityCounts(t *testing.T) {
+	scenario := loadAuthoredScenario(t)
+	expected := warmConnectExpectedState(scenario)
+	if expected == nil || len(expected.Clients) != 1 {
+		t.Fatal("authored warm-connect client state is incomplete")
+	}
+	capture := validFinalCapture(*expected)
+	state, err := decodeClientState(capture.ClientState)
+	if err != nil {
+		t.Fatalf("decode valid client state: %v", err)
+	}
+	expected.Clients[0].QueueCount = nil
+	if err := validateFinalClientEvidence(scenario, state, capture); err == nil {
+		t.Fatal("warm-connect evidence without authored mutation ledger count was accepted")
+	}
+}
+
 func newUnitCoordinator(t *testing.T) *Coordinator {
 	t.Helper()
 	coordinator, err := NewCoordinator(CoordinatorConfig{

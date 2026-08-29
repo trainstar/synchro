@@ -8,7 +8,6 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
-	"sort"
 
 	"github.com/trainstar/synchro/conformance/blackbox"
 	"github.com/trainstar/synchro/conformance/internal/jsonstrict"
@@ -791,12 +790,25 @@ func validateTransportIdentities(state inspectedClientState, capture finalCaptur
 
 func validateFinalClientEvidence(scenario scenarios.Scenario, state inspectedClientState, capture finalCapture) error {
 	expected := warmConnectExpectedState(scenario)
+	if expected == nil || len(expected.Clients) != 1 {
+		return errors.New("React Native authored client state is unavailable")
+	}
+	client := expected.Clients[0]
+	if client.CurrentSchema == nil {
+		return errors.New("React Native authored warm-connect schema is unavailable")
+	}
+	if client.QueueCount == nil || client.OutcomeCount == nil || client.SealedBatchCount == nil || client.RebuildAttemptCount == nil {
+		return errors.New("React Native authored warm-connect durability counts are unavailable")
+	}
+	return validateFinalClientEvidenceForExpected(expected, state, capture)
+}
+
+func validateFinalClientEvidenceForExpected(expected *scenarios.StateFacts, state inspectedClientState, capture finalCapture) error {
 	if expected == nil || len(expected.Clients) != 1 || len(expected.Rows) != 1 {
 		return errors.New("React Native authored client state is unavailable")
 	}
 	client := expected.Clients[0]
-	if client.CurrentSchema == nil || client.RowCount == nil || client.QueueCount == nil || client.OutcomeCount == nil ||
-		client.SealedBatchCount == nil || client.CheckpointCount == nil || client.ProvenanceCount == nil || client.RebuildAttemptCount == nil ||
+	if client.RowCount == nil || client.CheckpointCount == nil || client.ProvenanceCount == nil || state.Schema == nil ||
 		len(client.Checkpoints) != 1 || len(client.Provenance) != 1 || len(client.Provenance[0].Scopes) != 1 {
 		return errors.New("React Native authored durability state is incomplete")
 	}
@@ -814,12 +826,8 @@ func validateFinalClientEvidence(scenario scenarios.Scenario, state inspectedCli
 		expected uint64
 	}{
 		{"application rows", state.ApplicationRowCount, *client.RowCount},
-		{"mutation ledger", state.MutationLedgerCount, *client.QueueCount},
-		{"mutation outcomes", state.MutationOutcomeCount, *client.OutcomeCount},
-		{"sealed batches", state.SealedBatchCount, *client.SealedBatchCount},
 		{"scope states", state.ScopeStateCount, *client.CheckpointCount},
 		{"provenance rows", state.ProvenanceCount, *client.ProvenanceCount},
-		{"rebuild attempt facts", rebuildAttemptCount, *client.RebuildAttemptCount},
 		{"active rebuild attempts", state.RebuildAttemptCount, uint64(len(state.RebuildAttempts))},
 		{"rebuild receipts", state.RebuildReceiptCount, uint64(len(proof.RebuildReceiptProofs))},
 		{"rejected mutations", state.RejectedMutationCount, 0},
@@ -829,6 +837,34 @@ func validateFinalClientEvidence(scenario scenarios.Scenario, state inspectedCli
 		{"scope state details", uint64(len(state.ScopeStates)), 1},
 		{"scope row details", uint64(len(state.ScopeRows)), 1},
 		{"active rebuild attempt details", uint64(len(state.RebuildAttempts)), 0},
+	}
+	if client.QueueCount != nil {
+		counts = append(counts, struct {
+			name     string
+			actual   uint64
+			expected uint64
+		}{"mutation ledger", state.MutationLedgerCount, *client.QueueCount})
+	}
+	if client.OutcomeCount != nil {
+		counts = append(counts, struct {
+			name     string
+			actual   uint64
+			expected uint64
+		}{"mutation outcomes", state.MutationOutcomeCount, *client.OutcomeCount})
+	}
+	if client.SealedBatchCount != nil {
+		counts = append(counts, struct {
+			name     string
+			actual   uint64
+			expected uint64
+		}{"sealed batches", state.SealedBatchCount, *client.SealedBatchCount})
+	}
+	if client.RebuildAttemptCount != nil {
+		counts = append(counts, struct {
+			name     string
+			actual   uint64
+			expected uint64
+		}{"rebuild attempt facts", rebuildAttemptCount, *client.RebuildAttemptCount})
 	}
 	for _, count := range counts {
 		if count.actual != count.expected {
@@ -1038,16 +1074,17 @@ func resolutionSchemaMatches(resolution blackbox.NativeIdentityResolution, autho
 }
 
 func validateServerState(expected scenarios.StateFacts, actual scenarios.StateFacts) error {
-	expectedScopes := append([]scenarios.ScopeFact(nil), expected.Scopes...)
-	actualScopes := append([]scenarios.ScopeFact(nil), actual.Scopes...)
-	sort.Slice(expectedScopes, func(left, right int) bool { return expectedScopes[left].ScopeID < expectedScopes[right].ScopeID })
-	sort.Slice(actualScopes, func(left, right int) bool { return actualScopes[left].ScopeID < actualScopes[right].ScopeID })
-	if !reflect.DeepEqual(expected.TransactionCount, actual.TransactionCount) ||
-		!reflect.DeepEqual(expected.RowCount, actual.RowCount) ||
-		!reflect.DeepEqual(expected.ScopeCount, actual.ScopeCount) ||
-		!reflect.DeepEqual(expected.RebuildCount, actual.RebuildCount) ||
-		!reflect.DeepEqual(expected.Transactions, actual.Transactions) ||
-		!reflect.DeepEqual(expected.Rows, actual.Rows) || !reflect.DeepEqual(expectedScopes, actualScopes) {
+	serverExpected := scenarios.CloneStateFacts(expected)
+	serverExpected.Clients = nil
+	normalizedExpected, err := scenarios.NormalizeStateFacts(serverExpected)
+	if err != nil {
+		return fmt.Errorf("normalize React Native expected server state: %w", err)
+	}
+	normalizedActual, err := scenarios.NormalizeStateFacts(actual)
+	if err != nil {
+		return fmt.Errorf("normalize React Native actual server state: %w", err)
+	}
+	if !scenarios.StateFactsProjectionEqual(normalizedExpected, normalizedActual) {
 		return errors.New("React Native server state differs from the authored model")
 	}
 	return nil

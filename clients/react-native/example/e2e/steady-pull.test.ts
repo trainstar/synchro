@@ -164,7 +164,7 @@ async function executeCommand(command: Record<string, unknown>): Promise<string>
   throw new Error('React Native conformance command did not finish');
 }
 
-it('executes the warm-connect coordinator sequence', async () => {
+it('executes the steady-pull coordinator sequence', async () => {
   const { endpoint, token } = coordinatorConfiguration();
   await device.launchApp({
     newInstance: true,
@@ -175,17 +175,17 @@ it('executes the warm-connect coordinator sequence', async () => {
 
   let rawResult = 'null';
   let commandCount = 0;
-  for (let sequence = 1; sequence <= 8; sequence += 1) {
+  for (let sequence = 1; sequence <= 7; sequence += 1) {
     const response = await exchange(endpoint, token, sequence, rawResult);
     if (response.state === 'complete') {
-      if (sequence !== 8 || commandCount !== 7) {
-        throw new Error('React Native coordinator completed at an invalid sequence');
+      if (sequence !== 7 || commandCount !== 6) {
+        throw new Error('React Native steady-pull coordinator completed at an invalid sequence');
       }
       return;
     }
     commandCount += 1;
-    if (commandCount > 7) {
-      throw new Error('React Native coordinator returned too many commands');
+    if (commandCount > 6) {
+      throw new Error('React Native steady-pull coordinator returned too many commands');
     }
     try {
       rawResult = await executeCommand(response.command);
@@ -194,5 +194,5 @@ it('executes the warm-connect coordinator sequence', async () => {
       throw new Error(`React Native command at sequence ${sequence} failed: ${detail}`);
     }
   }
-  throw new Error('React Native coordinator did not complete');
+  throw new Error('React Native steady-pull coordinator did not complete');
 });

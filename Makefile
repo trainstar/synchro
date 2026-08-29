@@ -82,6 +82,7 @@
 	test-rn-native-parity \
 	test-rn-warm-connect-control \
 	test-rn-warm-connect-ios \
+	test-rn-performance-ios \
 	test-rn-warm-connect-android \
 	verify-rn-seed \
 	refresh-rn-seed \
@@ -776,8 +777,18 @@ test-rn-warm-connect-ios: conformance-mod-download test-blackbox-harness test-rn
 		cd conformance && SYNCHRO_RN_DETOX_CONFIGURATION=ios.sim.debug GOFLAGS= GOWORK=off go run ./cmd/testresult exact \
 		-test TestRealReactNativeWarmConnectIOS \
 		-expect target_pass \
-		-- go test -tags reactnativeintegration -json ./reactnative -count=1 -timeout=15m \
-		-run '^TestRealReactNativeWarmConnectIOS$$' -args --provision --install
+			-- go test -tags reactnativeintegration -json ./reactnative -count=1 -timeout=15m \
+			-run '^TestRealReactNativeWarmConnectIOS$$' -args --provision --install
+
+test-rn-performance-ios: conformance-mod-download test-blackbox-harness rn-seed-asset rn-watchman-reset rn-ios-pods
+	cd clients/react-native/example && npx detox build --configuration ios.sim.debug
+	@set -eu; \
+		$(WARM_CONNECT_ENV) \
+		cd conformance && SYNCHRO_RN_DETOX_CONFIGURATION=ios.sim.debug GOFLAGS= GOWORK=off go run ./cmd/testresult exact \
+		-test TestRealReactNativeSteadyPullIOS \
+		-expect target_pass \
+		-- go test -tags reactnativeintegration -json ./reactnative -count=1 -timeout=35m \
+		-run '^TestRealReactNativeSteadyPullIOS$$' -args --provision --install
 
 test-rn-warm-connect-android: conformance-mod-download test-blackbox-harness test-rn-warm-connect-control test-rn-android-parity rn-watchman-reset rn-android-emulator-reset
 	@test -n "$(ANDROID_JAVA_HOME)" || (echo "Android Detox requires JDK 17. Set ANDROID_JAVA_HOME to a JDK 17 install."; exit 1)
