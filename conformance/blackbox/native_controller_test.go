@@ -194,6 +194,11 @@ func TestNativeInstallationBindsDeferredMembershipScopesOnlyWithPolicy(t *testin
 		TableID:                "items",
 		PrimaryKeyFieldID:      "id",
 		PrimaryKeyPortableType: "string",
+	}, {
+		Relation:           "public.item_impacts",
+		RegistrationKind:   "capture_dependency",
+		CaptureKeyFieldIDs: []string{"scope_key"},
+		CapturedFieldIDs:   []string{"scope_key"},
 	}}
 	rule := nativeScopeRule{Relation: "public.items"}
 	rule.Evaluations = append(rule.Evaluations, struct {
@@ -232,6 +237,9 @@ func TestNativeInstallationBindsDeferredMembershipScopesOnlyWithPolicy(t *testin
 	binding, err := bindNativeInstallation(payload, runtime, 9)
 	if err != nil {
 		t.Fatalf("bind native installation: %v", err)
+	}
+	if len(binding.relations) != 1 || binding.relations["public.items"] != "items" || binding.captureDependencies["public.item_impacts"].RuntimeName != nativeCaptureDependencyFixture {
+		t.Fatalf("registry bindings = %#v, %#v", binding.relations, binding.captureDependencies)
 	}
 	if _, found := binding.scopes["scope-a"]; found {
 		t.Fatal("membership scope was bound before its assignment operation")
@@ -504,4 +512,84 @@ func TestNativeArtifactCloseRefusesChangedOwnedFile(t *testing.T) {
 	if _, err := os.Lstat(path); err != nil {
 		t.Fatalf("Close removed changed artifact: %v", err)
 	}
+}
+
+func TestDecodeNativeCaptureDependencyImageRejectsSyncedRowAndUnexpectedField(t *testing.T) {
+	dependency := nativeCaptureDependencyBinding{
+		RuntimeName:        nativeCaptureDependencyFixture,
+		CaptureKeyFieldIDs: []string{"scope_key"},
+		CapturedFields:     map[string]struct{}{"scope_key": {}},
+	}
+	valid := nativeCaptureDependencyImageWire(t, `{
+		"identity":{"kind":"capture_dependency","synced_row":null,"capture_key":{"canonical_key_bytes":"impact-key"}},
+		"fields":[{"field":"scope_key","type":"string","wire_json":"\"scope-a\""}],
+		"version":"impact-version","checksum":null,"deleted":false
+	}`)
+	image, err := decodeNativeCaptureDependencyImage(&valid, dependency)
+	if err != nil || image.CaptureKey != "impact-key" || string(image.Fields["scope_key"]) != `"scope-a"` {
+		t.Fatalf("decode valid capture dependency image = %#v, %v", image, err)
+	}
+
+	for _, invalid := range []string{
+		`{
+			"identity":{"kind":"capture_dependency","synced_row":{"table_id":"items","primary_key_field_id":"id","portable_type":"string","canonical_wire_json":"\"item-a\""},"capture_key":{"canonical_key_bytes":"impact-key"}},
+			"fields":[{"field":"scope_key","type":"string","wire_json":"\"scope-a\""}],
+			"version":"impact-version","checksum":null,"deleted":false
+		}`,
+		`{
+			"identity":{"kind":"capture_dependency","synced_row":null,"capture_key":{"canonical_key_bytes":"impact-key"}},
+			"fields":[{"field":"outside","type":"string","wire_json":"\"scope-a\""}],
+			"version":"impact-version","checksum":null,"deleted":false
+		}`,
+	} {
+		wire := nativeCaptureDependencyImageWire(t, invalid)
+		if _, err := decodeNativeCaptureDependencyImage(&wire, dependency); err == nil {
+			t.Fatalf("accepted invalid capture dependency image: %s", invalid)
+		}
+	}
+}
+
+func TestBindNativeTransactionAllowsEmptyEventsButRejectsInvalidIdentity(t *testing.T) {
+	installation := &nativeInstallationBinding{authoredStream: "stream-1"}
+	transaction, err := bindNativeTransaction(nativeCommitPayload{
+		StreamGeneration: "stream-1",
+		CommitLSN:        "10",
+		EndLSN:           "11",
+	}, installation)
+	if err != nil || len(transaction.Events) != 0 {
+		t.Fatalf("bind event-free transaction = %#v, %v", transaction, err)
+	}
+	for _, payload := range []nativeCommitPayload{
+		{StreamGeneration: "stream-2", CommitLSN: "10", EndLSN: "11"},
+		{StreamGeneration: "stream-1", CommitLSN: "11", EndLSN: "10"},
+	} {
+		if _, err := bindNativeTransaction(payload, installation); err == nil {
+			t.Fatalf("accepted invalid event-free transaction: %#v", payload)
+		}
+	}
+}
+
+func TestNativeCaptureDependencySourceStatementUsesFixture(t *testing.T) {
+	dependency := nativeCaptureDependencyBinding{
+		RuntimeName:        nativeCaptureDependencyFixture,
+		CaptureKeyFieldIDs: []string{"scope_key"},
+		CapturedFields:     map[string]struct{}{"scope_key": {}},
+	}
+	statement, arguments, err := nativeSourceStatement(nativeEventBinding{
+		Operation:  "insert",
+		Dependency: &dependency,
+		After:      &nativeAuthoredImage{Fields: map[string]json.RawMessage{"scope_key": json.RawMessage(`"scope-a"`)}},
+	}, nil)
+	if err != nil || statement != "INSERT INTO cf_item_impacts (scope_key) VALUES ($1)" || len(arguments) != 1 || arguments[0] != "scope-a" {
+		t.Fatalf("capture dependency source statement = %q, %#v, %v", statement, arguments, err)
+	}
+}
+
+func nativeCaptureDependencyImageWire(t *testing.T, raw string) nativeAuthoredImageWire {
+	t.Helper()
+	var wire nativeAuthoredImageWire
+	if err := json.Unmarshal([]byte(raw), &wire); err != nil {
+		t.Fatalf("decode capture dependency test image: %v", err)
+	}
+	return wire
 }

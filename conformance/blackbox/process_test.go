@@ -274,6 +274,9 @@ func TestValidateSourceDMLUsesClosedTableSet(t *testing.T) {
 	if err := validateSourceDML("UPDATE cf_items SET value = $1 WHERE id = $2"); err != nil {
 		t.Fatalf("rejected source DML: %v", err)
 	}
+	if err := validateSourceDML("INSERT INTO cf_item_impacts (scope_key) VALUES ($1)"); err != nil {
+		t.Fatalf("rejected capture dependency source DML: %v", err)
+	}
 }
 
 func TestSourceMutationErrorPreservesOnlySQLState(t *testing.T) {

@@ -57,6 +57,7 @@ var diagnosticUUIDPattern = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f
 var diagnosticSourceTables = []string{
 	"cf_global_items",
 	"cf_items",
+	"cf_item_impacts",
 	"cf_documents",
 	"cf_document_members",
 	"cf_document_access",
@@ -1615,14 +1616,63 @@ func (h *Harness) applyIndependentSourceSetup(ctx context.Context) (bool, error)
 	if err := h.executeSourceScript(ctx, "schema.sql", diagnosticSchemaSQL); err != nil {
 		return false, err
 	}
+	if err := h.ensureNativeCaptureDependencyFixture(ctx); err != nil {
+		return false, err
+	}
 	if err := h.grantWorkerReplicationSourceAccess(ctx); err != nil {
 		return false, err
 	}
 	if err := h.executeSourceScript(ctx, "register-diagnostic.sql", diagnosticRegistrationSQL); err != nil {
 		return false, err
 	}
+	if err := h.registerNativeCaptureDependencyFixture(ctx); err != nil {
+		return false, err
+	}
 	h.sourceReady = true
 	return false, nil
+}
+
+func (h *Harness) ensureNativeCaptureDependencyFixture(ctx context.Context) error {
+	database, err := h.openDatabase(ctx, h.names.Database, h.env.Admin, false)
+	if err != nil {
+		return errors.New("connect native capture dependency fixture failed")
+	}
+	defer database.Close()
+	for _, statement := range []string{
+		"CREATE TABLE IF NOT EXISTS public." + nativeCaptureDependencyFixture + " (scope_key TEXT PRIMARY KEY)",
+		"GRANT SELECT ON TABLE public." + nativeCaptureDependencyFixture + " TO synchro_owner",
+		"ALTER TABLE public." + nativeCaptureDependencyFixture + " ENABLE ROW LEVEL SECURITY",
+		"DROP POLICY IF EXISTS synchro_owner_all ON public." + nativeCaptureDependencyFixture,
+		"CREATE POLICY synchro_owner_all ON public." + nativeCaptureDependencyFixture + " AS PERMISSIVE FOR ALL TO synchro_owner USING (true) WITH CHECK (true)",
+	} {
+		if _, err := database.ExecContext(ctx, statement); err != nil {
+			return errors.New("configure native capture dependency fixture failed")
+		}
+	}
+	return nil
+}
+
+func (h *Harness) registerNativeCaptureDependencyFixture(ctx context.Context) error {
+	database, err := h.openDatabase(ctx, h.names.Database, h.env.Admin, false)
+	if err != nil {
+		return errors.New("connect native capture dependency registration failed")
+	}
+	defer database.Close()
+	if _, err := database.ExecContext(ctx, `SELECT synchro.synchro_register_capture_dependency(
+		'public.cf_item_impacts', ARRAY['scope_key']::text[], ARRAY['scope_key']::text[]
+	)`); err != nil {
+		return errors.New("register native capture dependency fixture failed")
+	}
+	var published bool
+	if err := database.QueryRowContext(ctx, `
+		SELECT EXISTS (
+			SELECT 1
+			FROM pg_catalog.pg_publication_tables
+			WHERE pubname = $1 AND schemaname = 'public' AND tablename = $2
+		)`, h.names.Publication, nativeCaptureDependencyFixture).Scan(&published); err != nil || !published {
+		return errors.New("native capture dependency fixture is absent from publication")
+	}
+	return nil
 }
 
 func (h *Harness) diagnosticSourceSchemaExists(ctx context.Context) (bool, error) {
@@ -2099,7 +2149,10 @@ func (h *Harness) RestoreDiagnosticRegistrations(ctx context.Context) error {
 	if err := h.executeSourceScript(ctx, "register-diagnostic-reinstall.sql", diagnosticRegistrationSQL); err != nil {
 		return err
 	}
-	return nil
+	if err := h.ensureNativeCaptureDependencyFixture(ctx); err != nil {
+		return err
+	}
+	return h.registerNativeCaptureDependencyFixture(ctx)
 }
 
 // FailureDiagnostics returns bounded, sanitized process output for a failed run.
@@ -2319,6 +2372,27 @@ func (transaction *SourceTransaction) ExecContext(ctx context.Context, statement
 		return nil, sourceMutationError("source transaction mutation failed", err)
 	}
 	return result, nil
+}
+
+// EmitCommitMarker emits a non-DML logical message for an event-free source transaction.
+func (transaction *SourceTransaction) EmitCommitMarker(ctx context.Context) (uint64, error) {
+	if transaction == nil || transaction.tx == nil {
+		return 0, errors.New("source transaction is unavailable")
+	}
+	transaction.mu.Lock()
+	defer transaction.mu.Unlock()
+	if transaction.done {
+		return 0, errors.New("source transaction is complete")
+	}
+	var sourceXID uint64
+	var markerLSN string
+	if err := transaction.tx.QueryRowContext(ctx, `
+		SELECT (pg_catalog.txid_current() % 4294967296)::bigint,
+		       pg_catalog.pg_logical_emit_message(true, 'synchro_conformance_marker', '')::text
+	`).Scan(&sourceXID, &markerLSN); err != nil || sourceXID == 0 || markerLSN == "" {
+		return 0, errors.New("emit source transaction marker failed")
+	}
+	return sourceXID, nil
 }
 
 func sourceMutationError(message string, err error) error {

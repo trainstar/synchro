@@ -27,6 +27,7 @@ const (
 	nativeControllerPollInterval    = 25 * time.Millisecond
 	nativeStagedSharedAuthoredScope = "scope-b"
 	nativeStagedSharedRuntimeScope  = "cf:dedup"
+	nativeCaptureDependencyFixture  = "cf_item_impacts"
 )
 
 // NativeControllerConfig configures one generic native server controller.
@@ -81,6 +82,7 @@ type nativeInstallationBinding struct {
 	runtimeSchemas             map[string]nativeSchemaReference
 	tables                     map[string]nativeTableBinding
 	relations                  map[string]string
+	captureDependencies        map[string]nativeCaptureDependencyBinding
 	scopes                     map[string]string
 	runtimeScopes              map[string]string
 	rowScopes                  map[string][]string
@@ -112,6 +114,13 @@ type nativeTableBinding struct {
 	FieldNames        map[string]string
 }
 
+type nativeCaptureDependencyBinding struct {
+	AuthoredRelation   string
+	RuntimeName        string
+	CaptureKeyFieldIDs []string
+	CapturedFields     map[string]struct{}
+}
+
 type nativeTransactionBinding struct {
 	AuthoredStream       string
 	AuthoredCommitLSN    string
@@ -128,6 +137,7 @@ type nativeTransactionBinding struct {
 	RuntimeBatchID       string
 	RuntimeMutationIDs   []string
 	RuntimeEventOrdinals []uint64
+	SourceXID            uint64
 	Materialized         bool
 	ApplicationPush      bool
 }
@@ -137,6 +147,7 @@ type nativeEventBinding struct {
 	Operation       string
 	Relation        string
 	Table           nativeTableBinding
+	Dependency      *nativeCaptureDependencyBinding
 	RecordID        string
 	RuntimeRecordID string
 	Before          *nativeAuthoredImage
@@ -157,6 +168,7 @@ type nativeAuthoredImage struct {
 	PrimaryFieldID    string
 	CanonicalWireJSON string
 	Fields            map[string]json.RawMessage
+	CaptureKey        string
 	Version           string
 	Checksum          string
 	Deleted           bool
@@ -254,6 +266,7 @@ type nativeAuthoredRelation struct {
 	TableID                string   `json:"table_id"`
 	PrimaryKeyFieldID      string   `json:"primary_key_field_id"`
 	PrimaryKeyPortableType string   `json:"primary_key_portable_type"`
+	CaptureKeyFieldIDs     []string `json:"capture_key_field_ids"`
 	CapturedFieldIDs       []string `json:"captured_field_ids"`
 }
 
@@ -292,6 +305,9 @@ type nativeAuthoredImageWire struct {
 			PortableType      string `json:"portable_type"`
 			CanonicalWireJSON string `json:"canonical_wire_json"`
 		} `json:"synced_row"`
+		CaptureKey *struct {
+			CanonicalKeyBytes string `json:"canonical_key_bytes"`
+		} `json:"capture_key"`
 	} `json:"identity"`
 	Fields []struct {
 		Field    string          `json:"field"`
@@ -487,6 +503,7 @@ func bindNativeInstallation(payload nativeInstallPayload, runtime nativeRuntimeM
 		runtimeSchemas:             make(map[string]nativeSchemaReference),
 		tables:                     make(map[string]nativeTableBinding),
 		relations:                  make(map[string]string),
+		captureDependencies:        make(map[string]nativeCaptureDependencyBinding),
 		scopes:                     make(map[string]string),
 		runtimeScopes:              make(map[string]string),
 		rowScopes:                  make(map[string][]string),
@@ -514,17 +531,28 @@ func bindNativeInstallation(payload nativeInstallPayload, runtime nativeRuntimeM
 		usedRuntime[runtimeTable.ID] = struct{}{}
 	}
 	for _, relation := range payload.InitialRegistry.Relations {
-		if relation.RegistrationKind != "synced" {
-			continue
+		switch relation.RegistrationKind {
+		case "synced":
+			table, found := result.tables[relation.TableID]
+			if !found || relation.Relation == "" || relation.PrimaryKeyFieldID != table.AuthoredPrimary || relation.PrimaryKeyPortableType != "string" {
+				return nil, errors.New("native controller authored registry relation is misbound")
+			}
+			if _, duplicate := result.relations[relation.Relation]; duplicate {
+				return nil, errors.New("native controller authored relation identity is duplicated")
+			}
+			result.relations[relation.Relation] = relation.TableID
+		case "capture_dependency":
+			binding, err := bindNativeCaptureDependency(relation)
+			if err != nil {
+				return nil, err
+			}
+			if _, duplicate := result.captureDependencies[relation.Relation]; duplicate {
+				return nil, errors.New("native controller capture dependency identity is duplicated")
+			}
+			result.captureDependencies[relation.Relation] = binding
+		default:
+			return nil, errors.New("native controller authored registry kind is unsupported")
 		}
-		table, found := result.tables[relation.TableID]
-		if !found || relation.Relation == "" || relation.PrimaryKeyFieldID != table.AuthoredPrimary || relation.PrimaryKeyPortableType != "string" {
-			return nil, errors.New("native controller authored registry relation is misbound")
-		}
-		if _, duplicate := result.relations[relation.Relation]; duplicate {
-			return nil, errors.New("native controller authored relation identity is duplicated")
-		}
-		result.relations[relation.Relation] = relation.TableID
 	}
 	if len(result.relations) != len(result.tables) {
 		return nil, errors.New("native controller table and registry bindings do not close")
@@ -638,6 +666,36 @@ func bindNativeInstallation(payload nativeInstallPayload, runtime nativeRuntimeM
 		}
 	}
 	return result, nil
+}
+
+func bindNativeCaptureDependency(relation nativeAuthoredRelation) (nativeCaptureDependencyBinding, error) {
+	if relation.Relation != "public.item_impacts" || relation.TableID != "" || relation.PrimaryKeyFieldID != "" || relation.PrimaryKeyPortableType != "" || len(relation.CaptureKeyFieldIDs) != 1 || relation.CaptureKeyFieldIDs[0] != "scope_key" || len(relation.CapturedFieldIDs) != 1 || relation.CapturedFieldIDs[0] != "scope_key" {
+		return nativeCaptureDependencyBinding{}, errors.New("native controller capture dependency relation is misbound")
+	}
+	captured := make(map[string]struct{}, len(relation.CapturedFieldIDs))
+	for _, field := range relation.CapturedFieldIDs {
+		if field == "" {
+			return nativeCaptureDependencyBinding{}, errors.New("native controller capture dependency field is invalid")
+		}
+		if _, duplicate := captured[field]; duplicate {
+			return nativeCaptureDependencyBinding{}, errors.New("native controller capture dependency field is duplicated")
+		}
+		captured[field] = struct{}{}
+	}
+	for _, field := range relation.CaptureKeyFieldIDs {
+		if field == "" {
+			return nativeCaptureDependencyBinding{}, errors.New("native controller capture dependency key is invalid")
+		}
+		if _, found := captured[field]; !found {
+			return nativeCaptureDependencyBinding{}, errors.New("native controller capture dependency key is not captured")
+		}
+	}
+	return nativeCaptureDependencyBinding{
+		AuthoredRelation:   relation.Relation,
+		RuntimeName:        nativeCaptureDependencyFixture,
+		CaptureKeyFieldIDs: append([]string(nil), relation.CaptureKeyFieldIDs...),
+		CapturedFields:     captured,
+	}, nil
 }
 
 func selectNativeRuntimeTable(authored nativeAuthoredTable, runtime []nativeRuntimeManifestTable, used map[string]struct{}) (nativeRuntimeManifestTable, error) {
@@ -1430,6 +1488,13 @@ func (c *NativeController) commitSourceTransaction(ctx context.Context, operatio
 			_ = sourceTransaction.Rollback()
 		}
 	}()
+	if len(transaction.Events) == 0 {
+		sourceXID, err := sourceTransaction.EmitCommitMarker(ctx)
+		if err != nil {
+			return NativeStepObservation{}, err
+		}
+		transaction.SourceXID = sourceXID
+	}
 	for _, event := range transaction.Events {
 		statement, arguments, err := nativeSourceStatement(event, installation)
 		if err != nil {
@@ -1452,6 +1517,9 @@ func (c *NativeController) commitSourceTransaction(ctx context.Context, operatio
 	c.mu.Lock()
 	c.transactions[key] = transaction
 	for _, event := range transaction.Events {
+		if event.Dependency != nil {
+			continue
+		}
 		recordKey := nativeRecordKey(event.Table.AuthoredID, event.RecordID)
 		if event.After == nil || event.After.Deleted {
 			delete(c.records, recordKey)
@@ -1470,7 +1538,7 @@ func (c *NativeController) commitSourceTransaction(ctx context.Context, operatio
 }
 
 func bindNativeTransaction(payload nativeCommitPayload, installation *nativeInstallationBinding) (*nativeTransactionBinding, error) {
-	if installation == nil || payload.StreamGeneration != installation.authoredStream || payload.CommitLSN == "" || payload.EndLSN == "" || len(payload.Events) == 0 {
+	if installation == nil || payload.StreamGeneration != installation.authoredStream || payload.CommitLSN == "" || payload.EndLSN == "" {
 		return nil, errors.New("native source transaction identity is invalid")
 	}
 	if compareNativeLSN(payload.CommitLSN, payload.EndLSN) >= 0 {
@@ -1479,14 +1547,50 @@ func bindNativeTransaction(payload nativeCommitPayload, installation *nativeInst
 	result := &nativeTransactionBinding{AuthoredStream: payload.StreamGeneration, AuthoredCommitLSN: payload.CommitLSN, AuthoredEndLSN: payload.EndLSN}
 	seenOrdinals := make(map[uint64]struct{}, len(payload.Events))
 	seenRecords := make(map[string]struct{}, len(payload.Events))
+	seenCaptureKeys := make(map[string]struct{}, len(payload.Events))
 	for _, event := range payload.Events {
 		if _, duplicate := seenOrdinals[event.EventOrdinal]; duplicate {
 			return nil, errors.New("native source event ordinal is duplicated")
 		}
 		seenOrdinals[event.EventOrdinal] = struct{}{}
-		tableID, found := installation.relations[event.Relation]
-		if !found {
-			return nil, fmt.Errorf("native source relation %q is not bound", event.Relation)
+		tableID, synced := installation.relations[event.Relation]
+		if !synced {
+			dependency, found := installation.captureDependencies[event.Relation]
+			if !found {
+				return nil, fmt.Errorf("native source relation %q is not bound", event.Relation)
+			}
+			before, err := decodeNativeCaptureDependencyImage(event.Before, dependency)
+			if err != nil {
+				return nil, err
+			}
+			after, err := decodeNativeCaptureDependencyImage(event.After, dependency)
+			if err != nil {
+				return nil, err
+			}
+			if event.Operation == "insert" && (before != nil || after == nil) || event.Operation == "update" && (before == nil || after == nil) || event.Operation == "delete" && (before == nil || after != nil) {
+				return nil, errors.New("native source event images do not match the operation")
+			}
+			if event.Operation != "insert" && event.Operation != "update" && event.Operation != "delete" {
+				return nil, errors.New("native source event operation is unsupported")
+			}
+			image := after
+			if image == nil {
+				image = before
+			}
+			captureKey := nativeCaptureDependencyKey(*image, dependency)
+			if _, duplicate := seenCaptureKeys[event.Relation+"\x00"+captureKey]; duplicate {
+				return nil, errors.New("native source transaction targets one capture dependency more than once")
+			}
+			seenCaptureKeys[event.Relation+"\x00"+captureKey] = struct{}{}
+			result.Events = append(result.Events, nativeEventBinding{
+				AuthoredOrdinal: event.EventOrdinal,
+				Operation:       event.Operation,
+				Relation:        event.Relation,
+				Dependency:      &dependency,
+				Before:          before,
+				After:           after,
+			})
+			continue
 		}
 		table := installation.tables[tableID]
 		before, err := decodeNativeAuthoredImage(event.Before, table)
@@ -1548,13 +1652,14 @@ func decodeNativeAuthoredImage(wire *nativeAuthoredImageWire, table nativeTableB
 	}
 	fields := make(map[string]json.RawMessage, len(wire.Fields))
 	for _, field := range wire.Fields {
-		if _, known := table.Fields[field.Field]; !known || field.Type == "" || len(field.WireJSON) == 0 || !json.Valid(field.WireJSON) {
+		decoded, err := nativeFieldWireJSON(field.WireJSON)
+		if _, known := table.Fields[field.Field]; !known || field.Type == "" || err != nil {
 			return nil, errors.New("native source image field is invalid")
 		}
 		if _, duplicate := fields[field.Field]; duplicate {
 			return nil, errors.New("native source image field is duplicated")
 		}
-		fields[field.Field] = append(json.RawMessage(nil), field.WireJSON...)
+		fields[field.Field] = decoded
 	}
 	if len(fields) != len(table.Fields) {
 		return nil, errors.New("native source image field set is incomplete")
@@ -1568,6 +1673,55 @@ func decodeNativeAuthoredImage(wire *nativeAuthoredImageWire, table nativeTableB
 		Checksum:          *wire.Checksum,
 		Deleted:           wire.Deleted,
 	}, nil
+}
+
+func decodeNativeCaptureDependencyImage(wire *nativeAuthoredImageWire, dependency nativeCaptureDependencyBinding) (*nativeAuthoredImage, error) {
+	if wire == nil {
+		return nil, nil
+	}
+	if wire.Identity.Kind != "capture_dependency" || wire.Identity.SyncedRow != nil || wire.Identity.CaptureKey == nil || wire.Identity.CaptureKey.CanonicalKeyBytes == "" || wire.Version == "" || wire.Checksum != nil {
+		return nil, errors.New("native capture dependency image identity is invalid")
+	}
+	fields := make(map[string]json.RawMessage, len(wire.Fields))
+	for _, field := range wire.Fields {
+		decoded, err := nativeFieldWireJSON(field.WireJSON)
+		if _, known := dependency.CapturedFields[field.Field]; !known || field.Type == "" || err != nil {
+			return nil, errors.New("native capture dependency image field is invalid")
+		}
+		if _, duplicate := fields[field.Field]; duplicate {
+			return nil, errors.New("native capture dependency image field is duplicated")
+		}
+		fields[field.Field] = decoded
+	}
+	if len(fields) != len(dependency.CapturedFields) {
+		return nil, errors.New("native capture dependency image field set is incomplete")
+	}
+	return &nativeAuthoredImage{
+		Fields:     fields,
+		CaptureKey: wire.Identity.CaptureKey.CanonicalKeyBytes,
+		Version:    wire.Version,
+		Deleted:    wire.Deleted,
+	}, nil
+}
+
+func nativeFieldWireJSON(encoded json.RawMessage) (json.RawMessage, error) {
+	var decoded string
+	if len(encoded) == 0 || json.Unmarshal(encoded, &decoded) != nil || !json.Valid([]byte(decoded)) {
+		return nil, errors.New("native field wire JSON is invalid")
+	}
+	return json.RawMessage(decoded), nil
+}
+
+func nativeCaptureDependencyKey(image nativeAuthoredImage, dependency nativeCaptureDependencyBinding) string {
+	values := make(map[string]json.RawMessage, len(dependency.CaptureKeyFieldIDs))
+	for _, field := range dependency.CaptureKeyFieldIDs {
+		values[field] = image.Fields[field]
+	}
+	encoded, err := json.Marshal(values)
+	if err != nil {
+		return ""
+	}
+	return string(encoded)
 }
 
 func nativeScopesForRecord(installation *nativeInstallationBinding, relation, tableID, canonical string) []string {
@@ -1592,6 +1746,9 @@ func nativeScopesForRecord(installation *nativeInstallationBinding, relation, ta
 }
 
 func nativeSourceStatement(event nativeEventBinding, installation *nativeInstallationBinding) (string, []any, error) {
+	if event.Dependency != nil {
+		return nativeCaptureDependencySourceStatement(event)
+	}
 	image := event.After
 	if image == nil {
 		image = event.Before
@@ -1634,6 +1791,62 @@ func nativeSourceStatement(event nativeEventBinding, installation *nativeInstall
 		return "", nil, fmt.Errorf("native source table %q has no generic DML binding", event.Table.RuntimeName)
 	}
 	return "", nil, errors.New("native source event operation is unsupported")
+}
+
+func nativeCaptureDependencySourceStatement(event nativeEventBinding) (string, []any, error) {
+	if event.Dependency == nil || event.Dependency.RuntimeName != nativeCaptureDependencyFixture {
+		return "", nil, errors.New("native capture dependency source binding is invalid")
+	}
+	switch event.Operation {
+	case "insert":
+		if event.After == nil {
+			return "", nil, errors.New("native capture dependency source event has no after image")
+		}
+		value, err := nativeCaptureDependencyStringField(*event.After, *event.Dependency, "scope_key")
+		if err != nil {
+			return "", nil, err
+		}
+		return "INSERT INTO " + event.Dependency.RuntimeName + " (scope_key) VALUES ($1)", []any{value}, nil
+	case "update":
+		if event.Before == nil || event.After == nil {
+			return "", nil, errors.New("native capture dependency source event images are incomplete")
+		}
+		before, err := nativeCaptureDependencyStringField(*event.Before, *event.Dependency, "scope_key")
+		if err != nil {
+			return "", nil, err
+		}
+		after, err := nativeCaptureDependencyStringField(*event.After, *event.Dependency, "scope_key")
+		if err != nil {
+			return "", nil, err
+		}
+		return "UPDATE " + event.Dependency.RuntimeName + " SET scope_key = $2 WHERE scope_key = $1", []any{before, after}, nil
+	case "delete":
+		if event.Before == nil {
+			return "", nil, errors.New("native capture dependency source event has no before image")
+		}
+		value, err := nativeCaptureDependencyStringField(*event.Before, *event.Dependency, "scope_key")
+		if err != nil {
+			return "", nil, err
+		}
+		return "DELETE FROM " + event.Dependency.RuntimeName + " WHERE scope_key = $1", []any{value}, nil
+	default:
+		return "", nil, errors.New("native source event operation is unsupported")
+	}
+}
+
+func nativeCaptureDependencyStringField(image nativeAuthoredImage, dependency nativeCaptureDependencyBinding, field string) (string, error) {
+	if _, found := dependency.CapturedFields[field]; !found {
+		return "", errors.New("native capture dependency source field is not captured")
+	}
+	raw, found := image.Fields[field]
+	if !found {
+		return "", errors.New("native capture dependency source field is absent")
+	}
+	var value string
+	if err := json.Unmarshal(raw, &value); err != nil {
+		return "", errors.New("native capture dependency source field is invalid")
+	}
+	return value, nil
 }
 
 func nativeImageStringField(image nativeAuthoredImage, table nativeTableBinding, name string) (string, error) {
@@ -2120,6 +2333,9 @@ func (c *NativeController) materializeSourceTransaction(ctx context.Context, ope
 	transaction.Materialized = true
 	if transaction.ApplicationPush {
 		for _, event := range transaction.Events {
+			if event.Dependency != nil || event.After == nil {
+				continue
+			}
 			recordKey := nativeRecordKey(event.Table.AuthoredID, event.After.CanonicalWireJSON)
 			c.records[recordKey] = &nativeRecordBinding{
 				Table:           event.Table,
@@ -2240,6 +2456,9 @@ func (c *NativeController) resolveRuntimeTransaction(ctx context.Context, bindin
 		return err
 	}
 	defer database.Close()
+	if len(binding.Events) == 0 {
+		return resolveNativeEmptyRuntimeTransaction(ctx, database, binding)
+	}
 	type runtimeIdentity struct {
 		stream   string
 		commit   string
@@ -2251,21 +2470,45 @@ func (c *NativeController) resolveRuntimeTransaction(ctx context.Context, bindin
 	for _, event := range binding.Events {
 		var identity runtimeIdentity
 		var ordinal int64
-		err := database.QueryRowContext(ctx, `
-			SELECT event.stream_generation, event.commit_lsn::text, transaction.end_lsn::text,
-			       transaction.registry_generation, event.event_ordinal
-			FROM synchro.sync_wal_events event
-			JOIN synchro.sync_wal_transactions transaction
-			  ON transaction.stream_generation = event.stream_generation
-			 AND transaction.commit_lsn = event.commit_lsn
-			JOIN synchro.sync_write_fences fence ON fence.fence_id = event.fence_id
-			WHERE event.physical_relation = $1
-			  AND COALESCE(fence.new_record_id, fence.old_record_id) = $2
-			  AND event.operation = $3
-			ORDER BY event.commit_lsn DESC
-			LIMIT 1`, event.Table.RuntimeName, event.RuntimeRecordID, event.Operation).Scan(
-			&identity.stream, &identity.commit, &identity.end, &identity.registry, &ordinal,
-		)
+		var err error
+		if event.Dependency != nil {
+			image := event.After
+			if image == nil {
+				image = event.Before
+			}
+			captureKey := nativeCaptureDependencyKey(*image, *event.Dependency)
+			err = database.QueryRowContext(ctx, `
+				SELECT event.stream_generation, event.commit_lsn::text, transaction.end_lsn::text,
+				       transaction.registry_generation, event.event_ordinal
+				FROM synchro.sync_wal_events event
+				JOIN synchro.sync_wal_transactions transaction
+				  ON transaction.stream_generation = event.stream_generation
+				 AND transaction.commit_lsn = event.commit_lsn
+				JOIN synchro.sync_write_fences fence ON fence.fence_id = event.fence_id
+				WHERE event.physical_relation = $1
+				  AND event.operation = $2
+				  AND (fence.new_capture_key = $3::jsonb OR fence.old_capture_key = $3::jsonb)
+				ORDER BY event.commit_lsn DESC
+				LIMIT 1`, event.Dependency.RuntimeName, event.Operation, captureKey).Scan(
+				&identity.stream, &identity.commit, &identity.end, &identity.registry, &ordinal,
+			)
+		} else {
+			err = database.QueryRowContext(ctx, `
+				SELECT event.stream_generation, event.commit_lsn::text, transaction.end_lsn::text,
+				       transaction.registry_generation, event.event_ordinal
+				FROM synchro.sync_wal_events event
+				JOIN synchro.sync_wal_transactions transaction
+				  ON transaction.stream_generation = event.stream_generation
+				 AND transaction.commit_lsn = event.commit_lsn
+				JOIN synchro.sync_write_fences fence ON fence.fence_id = event.fence_id
+				WHERE event.physical_relation = $1
+				  AND COALESCE(fence.new_record_id, fence.old_record_id) = $2
+				  AND event.operation = $3
+				ORDER BY event.commit_lsn DESC
+				LIMIT 1`, event.Table.RuntimeName, event.RuntimeRecordID, event.Operation).Scan(
+				&identity.stream, &identity.commit, &identity.end, &identity.registry, &ordinal,
+			)
+		}
 		if err != nil || ordinal < 0 {
 			return errors.New("native runtime WAL event binding is unavailable")
 		}
@@ -2290,6 +2533,30 @@ func (c *NativeController) resolveRuntimeTransaction(ctx context.Context, bindin
 	binding.RuntimeEndLSN = first.end
 	binding.RuntimeRegistry = first.registry
 	binding.RuntimeEventOrdinals = ordinals
+	return nil
+}
+
+func resolveNativeEmptyRuntimeTransaction(ctx context.Context, database *sql.DB, binding *nativeTransactionBinding) error {
+	if binding.SourceXID == 0 {
+		return errors.New("native empty source transaction has no source transaction ID")
+	}
+	sourceXID := fmt.Sprintf("%d", binding.SourceXID)
+	var count int
+	if err := database.QueryRowContext(ctx, `
+		SELECT count(*)
+		FROM synchro.sync_wal_transactions
+		WHERE source_xid = $1::xid AND event_count = 0`, sourceXID).Scan(&count); err != nil || count != 1 {
+		return errors.New("native empty source transaction binding is unavailable")
+	}
+	if err := database.QueryRowContext(ctx, `
+		SELECT stream_generation, commit_lsn::text, end_lsn::text, registry_generation
+		FROM synchro.sync_wal_transactions
+		WHERE source_xid = $1::xid AND event_count = 0`, sourceXID).Scan(
+		&binding.RuntimeStream, &binding.RuntimeCommitLSN, &binding.RuntimeEndLSN, &binding.RuntimeRegistry,
+	); err != nil || binding.RuntimeStream == "" || binding.RuntimeCommitLSN == "" || binding.RuntimeEndLSN == "" || binding.RuntimeRegistry <= 0 {
+		return errors.New("native empty source transaction binding is invalid")
+	}
+	binding.RuntimeEventOrdinals = nil
 	return nil
 }
 
