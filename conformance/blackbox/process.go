@@ -1659,7 +1659,7 @@ func (h *Harness) registerNativeCaptureDependencyFixture(ctx context.Context) er
 	}
 	defer database.Close()
 	if _, err := database.ExecContext(ctx, `SELECT synchro.synchro_register_capture_dependency(
-		'public.cf_item_impacts', ARRAY['scope_key']::text[], ARRAY['scope_key']::text[]
+		'public.cf_item_impacts', ARRAY['id']::text[], ARRAY['scope_key']::text[]
 	)`); err != nil {
 		return errors.New("register native capture dependency fixture failed")
 	}

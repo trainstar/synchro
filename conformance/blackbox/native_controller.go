@@ -22,12 +22,13 @@ import (
 )
 
 const (
-	nativeControllerRequestTimeout  = 30 * time.Second
-	nativeControllerWaitTimeout     = 30 * time.Second
-	nativeControllerPollInterval    = 25 * time.Millisecond
-	nativeStagedSharedAuthoredScope = "scope-b"
-	nativeStagedSharedRuntimeScope  = "cf:dedup"
-	nativeCaptureDependencyFixture  = "cf_item_impacts"
+	nativeControllerRequestTimeout   = 30 * time.Second
+	nativeControllerWaitTimeout      = 30 * time.Second
+	nativeControllerPollInterval     = 25 * time.Millisecond
+	nativeStagedSharedAuthoredScope  = "scope-b"
+	nativeStagedSharedRuntimeScope   = "cf:dedup"
+	nativeCaptureDependencyFixture   = "cf_item_impacts"
+	nativeCaptureDependencyKeyColumn = "id"
 )
 
 // NativeControllerConfig configures one generic native server controller.
@@ -115,10 +116,9 @@ type nativeTableBinding struct {
 }
 
 type nativeCaptureDependencyBinding struct {
-	AuthoredRelation   string
-	RuntimeName        string
-	CaptureKeyFieldIDs []string
-	CapturedFields     map[string]struct{}
+	AuthoredRelation string
+	RuntimeName      string
+	CapturedFields   map[string]struct{}
 }
 
 type nativeTransactionBinding struct {
@@ -691,10 +691,9 @@ func bindNativeCaptureDependency(relation nativeAuthoredRelation) (nativeCapture
 		}
 	}
 	return nativeCaptureDependencyBinding{
-		AuthoredRelation:   relation.Relation,
-		RuntimeName:        nativeCaptureDependencyFixture,
-		CaptureKeyFieldIDs: append([]string(nil), relation.CaptureKeyFieldIDs...),
-		CapturedFields:     captured,
+		AuthoredRelation: relation.Relation,
+		RuntimeName:      nativeCaptureDependencyFixture,
+		CapturedFields:   captured,
 	}, nil
 }
 
@@ -1577,7 +1576,7 @@ func bindNativeTransaction(payload nativeCommitPayload, installation *nativeInst
 			if image == nil {
 				image = before
 			}
-			captureKey := nativeCaptureDependencyKey(*image, dependency)
+			captureKey := nativeCaptureDependencyKey(*image)
 			if _, duplicate := seenCaptureKeys[event.Relation+"\x00"+captureKey]; duplicate {
 				return nil, errors.New("native source transaction targets one capture dependency more than once")
 			}
@@ -1712,12 +1711,12 @@ func nativeFieldWireJSON(encoded json.RawMessage) (json.RawMessage, error) {
 	return json.RawMessage(decoded), nil
 }
 
-func nativeCaptureDependencyKey(image nativeAuthoredImage, dependency nativeCaptureDependencyBinding) string {
-	values := make(map[string]json.RawMessage, len(dependency.CaptureKeyFieldIDs))
-	for _, field := range dependency.CaptureKeyFieldIDs {
-		values[field] = image.Fields[field]
-	}
-	encoded, err := json.Marshal(values)
+// nativeCaptureDependencyKey builds the runtime capture key for one dependency
+// image. The extension derives that key from the registered capture key columns
+// and stores it as a JSON object, so the fixture primary key column carries the
+// authored canonical key.
+func nativeCaptureDependencyKey(image nativeAuthoredImage) string {
+	encoded, err := json.Marshal(map[string]string{nativeCaptureDependencyKeyColumn: image.CaptureKey})
 	if err != nil {
 		return ""
 	}
@@ -1806,29 +1805,21 @@ func nativeCaptureDependencySourceStatement(event nativeEventBinding) (string, [
 		if err != nil {
 			return "", nil, err
 		}
-		return "INSERT INTO " + event.Dependency.RuntimeName + " (scope_key) VALUES ($1)", []any{value}, nil
+		return "INSERT INTO " + event.Dependency.RuntimeName + " (" + nativeCaptureDependencyKeyColumn + ", scope_key) VALUES ($1, $2)", []any{event.After.CaptureKey, value}, nil
 	case "update":
 		if event.Before == nil || event.After == nil {
 			return "", nil, errors.New("native capture dependency source event images are incomplete")
-		}
-		before, err := nativeCaptureDependencyStringField(*event.Before, *event.Dependency, "scope_key")
-		if err != nil {
-			return "", nil, err
 		}
 		after, err := nativeCaptureDependencyStringField(*event.After, *event.Dependency, "scope_key")
 		if err != nil {
 			return "", nil, err
 		}
-		return "UPDATE " + event.Dependency.RuntimeName + " SET scope_key = $2 WHERE scope_key = $1", []any{before, after}, nil
+		return "UPDATE " + event.Dependency.RuntimeName + " SET scope_key = $2 WHERE " + nativeCaptureDependencyKeyColumn + " = $1", []any{event.Before.CaptureKey, after}, nil
 	case "delete":
 		if event.Before == nil {
 			return "", nil, errors.New("native capture dependency source event has no before image")
 		}
-		value, err := nativeCaptureDependencyStringField(*event.Before, *event.Dependency, "scope_key")
-		if err != nil {
-			return "", nil, err
-		}
-		return "DELETE FROM " + event.Dependency.RuntimeName + " WHERE scope_key = $1", []any{value}, nil
+		return "DELETE FROM " + event.Dependency.RuntimeName + " WHERE " + nativeCaptureDependencyKeyColumn + " = $1", []any{event.Before.CaptureKey}, nil
 	default:
 		return "", nil, errors.New("native source event operation is unsupported")
 	}
@@ -2476,7 +2467,7 @@ func (c *NativeController) resolveRuntimeTransaction(ctx context.Context, bindin
 			if image == nil {
 				image = event.Before
 			}
-			captureKey := nativeCaptureDependencyKey(*image, *event.Dependency)
+			captureKey := nativeCaptureDependencyKey(*image)
 			err = database.QueryRowContext(ctx, `
 				SELECT event.stream_generation, event.commit_lsn::text, transaction.end_lsn::text,
 				       transaction.registry_generation, event.event_ordinal

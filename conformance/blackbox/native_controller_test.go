@@ -516,9 +516,8 @@ func TestNativeArtifactCloseRefusesChangedOwnedFile(t *testing.T) {
 
 func TestDecodeNativeCaptureDependencyImageRejectsSyncedRowAndUnexpectedField(t *testing.T) {
 	dependency := nativeCaptureDependencyBinding{
-		RuntimeName:        nativeCaptureDependencyFixture,
-		CaptureKeyFieldIDs: []string{"scope_key"},
-		CapturedFields:     map[string]struct{}{"scope_key": {}},
+		RuntimeName:    nativeCaptureDependencyFixture,
+		CapturedFields: map[string]struct{}{"scope_key": {}},
 	}
 	valid := nativeCaptureDependencyImageWire(t, `{
 		"identity":{"kind":"capture_dependency","synced_row":null,"capture_key":{"canonical_key_bytes":"impact-key"}},
@@ -571,17 +570,24 @@ func TestBindNativeTransactionAllowsEmptyEventsButRejectsInvalidIdentity(t *test
 
 func TestNativeCaptureDependencySourceStatementUsesFixture(t *testing.T) {
 	dependency := nativeCaptureDependencyBinding{
-		RuntimeName:        nativeCaptureDependencyFixture,
-		CaptureKeyFieldIDs: []string{"scope_key"},
-		CapturedFields:     map[string]struct{}{"scope_key": {}},
+		RuntimeName:    nativeCaptureDependencyFixture,
+		CapturedFields: map[string]struct{}{"scope_key": {}},
 	}
 	statement, arguments, err := nativeSourceStatement(nativeEventBinding{
 		Operation:  "insert",
 		Dependency: &dependency,
-		After:      &nativeAuthoredImage{Fields: map[string]json.RawMessage{"scope_key": json.RawMessage(`"scope-a"`)}},
+		After: &nativeAuthoredImage{
+			CaptureKey: "impact-key-a",
+			Fields:     map[string]json.RawMessage{"scope_key": json.RawMessage(`"scope-a"`)},
+		},
 	}, nil)
-	if err != nil || statement != "INSERT INTO cf_item_impacts (scope_key) VALUES ($1)" || len(arguments) != 1 || arguments[0] != "scope-a" {
+	if err != nil || statement != "INSERT INTO cf_item_impacts (id, scope_key) VALUES ($1, $2)" || len(arguments) != 2 || arguments[0] != "impact-key-a" || arguments[1] != "scope-a" {
 		t.Fatalf("capture dependency source statement = %q, %#v, %v", statement, arguments, err)
+	}
+	// The extension builds the capture key from the registered key column, so
+	// the runtime key names that column and carries the authored identity.
+	if key := nativeCaptureDependencyKey(nativeAuthoredImage{CaptureKey: "impact-key-a"}); key != `{"id":"impact-key-a"}` {
+		t.Fatalf("capture dependency runtime key = %q", key)
 	}
 }
 

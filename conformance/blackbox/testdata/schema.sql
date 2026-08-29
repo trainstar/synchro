@@ -18,6 +18,15 @@ CREATE TABLE cf_items (
 
 CREATE INDEX cf_items_owner_id_idx ON cf_items (owner_id);
 
+-- Capture-dependency source. The extension requires one plain primary-key
+-- column for the capture key and at least one captured column that the key does
+-- not contain, so the authored canonical key and the captured value hold
+-- separate columns.
+CREATE TABLE cf_item_impacts (
+    id TEXT PRIMARY KEY,
+    scope_key TEXT NOT NULL
+);
+
 CREATE TABLE cf_documents (
     id UUID PRIMARY KEY,
     owner_id TEXT NOT NULL,
