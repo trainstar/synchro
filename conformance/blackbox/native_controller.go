@@ -3147,5 +3147,23 @@ func describeNativeRelationEvents(ctx context.Context, database *sql.DB, relatio
 			transactions = append(transactions, lsn+":"+strconv.FormatInt(count, 10))
 		}
 	}
-	return fmt.Sprintf("%s; source rows %d; max wal registry %d; transactions %s", strings.Join(entries, " "), sourceRows, registry, strings.Join(transactions, " "))
+	poison := make([]string, 0, 4)
+	if rows, err := database.QueryContext(diagnostic, `
+		SELECT commit_lsn::text, failure_class, lifecycle
+		FROM synchro.sync_wal_poison
+		ORDER BY id DESC
+		LIMIT 4`); err == nil {
+		defer rows.Close()
+		for rows.Next() {
+			var lsn, class, lifecycle string
+			if rows.Scan(&lsn, &class, &lifecycle) != nil {
+				break
+			}
+			poison = append(poison, lsn+":"+class+":"+lifecycle)
+		}
+	}
+	if len(poison) == 0 {
+		poison = append(poison, "none")
+	}
+	return fmt.Sprintf("%s; source rows %d; max wal registry %d; transactions %s; poison %s", strings.Join(entries, " "), sourceRows, registry, strings.Join(transactions, " "), strings.Join(poison, " "))
 }
