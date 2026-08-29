@@ -172,6 +172,12 @@ pub(crate) fn activate_staged_membership_generation(
     acquire_backfill_lock(client)?;
     let registry = load_registry_generation_from_client(client, target_generation)
         .map_err(|error| format!("loading pending membership registry: {error}"))?;
+    // A captured row stores the digest computed under the registration that
+    // captured it, and a rebuild recomputes that digest under the active
+    // registration. Activating a membership generation must therefore migrate
+    // retained rows onto the target generation before their edges are staged,
+    // exactly as schema publication does.
+    migrate_schema_digests(client, target_generation)?;
     let target_rows = client
         .select(
             "SELECT target_relation_id::text AS relation_id
