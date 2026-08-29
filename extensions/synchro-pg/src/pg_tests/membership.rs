@@ -973,3 +973,95 @@ fn membership_function_fails_closed_when_query_limit_overflows() {
 
     assert_eq!(resolution, Err(()));
 }
+
+/// Pull at `pull.rs:1124` and rebuild at `rebuild.rs:673` both recompute a
+/// captured digest under the active registration and reject a mismatch. A
+/// membership activation must therefore leave every captured digest valid under
+/// the registration that those readers use.
+#[pg_test]
+fn membership_activation_keeps_captured_digests_valid() {
+    let fixture = membership_dependency_fixture();
+    Spi::run(&format!(
+        "INSERT INTO public.{target_table} (id, label) VALUES (7, 'target');
+         INSERT INTO public.{source_table} (id, target_id) VALUES (1, 7)",
+        target_table = fixture.target_table,
+        source_table = fixture.source_table,
+    ))
+    .expect("insert membership digest source rows");
+    insert_changelog("target-scope", &fixture.target_table, "7", 1);
+    insert_edge(&fixture.target_table, "7", "target-scope");
+
+    let body = format!(
+        "SELECT {} WHERE old_row ? 'target_id'
+         UNION ALL
+         SELECT {} WHERE new_row ? 'target_id'",
+        target_row_expression(&fixture, "(old_row ->> 'target_id')::integer"),
+        target_row_expression(&fixture, "(new_row ->> 'target_id')::integer"),
+    );
+    create_impact_function(&fixture, &body, true, true);
+    register_dependency(&fixture, 2);
+    activate_pending_registry_for_test();
+    enable_dependent_target_membership(&fixture);
+    activate_pending_registry_for_test();
+
+    let stored: Vec<u8> = Spi::get_one_with_args(
+        "SELECT checksum FROM synchro.sync_captured_rows
+         WHERE relation_id = $1::uuid AND record_id = '7'",
+        &[fixture.target_relation_id.as_str().into()],
+    )
+    .expect("load stored captured digest")
+    .expect("stored captured digest");
+    let row_data: pgrx::JsonB = Spi::get_one_with_args(
+        "SELECT row_data FROM synchro.sync_captured_rows
+         WHERE relation_id = $1::uuid AND record_id = '7'",
+        &[fixture.target_relation_id.as_str().into()],
+    )
+    .expect("load captured row data")
+    .expect("captured row data");
+    let row_version: String = Spi::get_one_with_args(
+        "SELECT row_version::text FROM synchro.sync_captured_rows
+         WHERE relation_id = $1::uuid AND record_id = '7'",
+        &[fixture.target_relation_id.as_str().into()],
+    )
+    .expect("load captured row version")
+    .expect("captured row version");
+    let captured_generation: i64 = Spi::get_one_with_args(
+        "SELECT registry_generation FROM synchro.sync_captured_rows
+         WHERE relation_id = $1::uuid AND record_id = '7'",
+        &[fixture.target_relation_id.as_str().into()],
+    )
+    .expect("load captured generation")
+    .expect("captured generation");
+    let active_generation: i64 = Spi::get_one(
+        "SELECT generation FROM synchro.sync_registry_generations
+         WHERE state = 'active' ORDER BY generation DESC LIMIT 1",
+    )
+    .expect("load active generation")
+    .expect("active generation");
+
+    let target_table = fixture.target_table.clone();
+    let computed = Spi::connect(|client| {
+        let registry = crate::registry::load_registry_from_client(client)?;
+        let table = registry
+            .iter()
+            .find(|table| table.table_name == target_table)
+            .expect("active target registration");
+        Ok::<_, spi::Error>(
+            crate::pull::synced_row_digest(client, table, &row_data.0, "7", &row_version)
+                .expect("recompute captured digest under the active registration")
+                .as_bytes()
+                .to_vec(),
+        )
+    })
+    .expect("recompute captured digest");
+    cleanup_membership_fixture(&fixture);
+
+    assert_eq!(
+        computed, stored,
+        "membership activation must leave the captured digest valid under the active registration"
+    );
+    assert_eq!(
+        captured_generation, active_generation,
+        "membership activation must leave the captured generation on the active registration"
+    );
+}

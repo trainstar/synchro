@@ -1023,9 +1023,13 @@ func queueReplayManifestTable(table queueReplaySchemaTable) map[string]any {
 	for _, field := range table.Fields {
 		fields = append(fields, map[string]any{"field_id": field.FieldID, "name": field.Name, "type": field.Type, "nullable": field.Nullable, "writable": field.Writable})
 	}
-	sort.Slice(fields, func(left, right int) bool { return fields[left]["field_id"].(string) < fields[right]["field_id"].(string) })
+	sort.Slice(fields, func(left, right int) bool {
+		return fields[left]["field_id"].(string) < fields[right]["field_id"].(string)
+	})
 	indexes := queueReplayIndexes(table.Indexes)
-	sort.Slice(indexes, func(left, right int) bool { return indexes[left]["index_id"].(string) < indexes[right]["index_id"].(string) })
+	sort.Slice(indexes, func(left, right int) bool {
+		return indexes[left]["index_id"].(string) < indexes[right]["index_id"].(string)
+	})
 	return map[string]any{"table_id": table.TableID, "relation_id": table.RelationID, "name": table.Name, "composition": table.Composition, "primary_key_field_id": table.PrimaryKeyFieldID, "lifecycle": map[string]any{"created_at_field_id": table.CreatedAtFieldID, "updated_at_field_id": table.UpdatedAtFieldID, "deleted_at_field_id": table.DeletedAtFieldID}, "fields": fields, "indexes": indexes}
 }
 
