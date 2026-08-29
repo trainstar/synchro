@@ -1584,10 +1584,6 @@ func (p *Platform) ProcessStep(ctx context.Context, client Client, operation sce
 		if state.terminated || state.session == nil || state.pendingLoss != nil || state.activeCall != nil {
 			return StepObservation{}, errors.New("Swift client restart is unavailable")
 		}
-		before, err := captureRunner(ctx, state)
-		if err != nil {
-			return StepObservation{}, err
-		}
 		started := time.Now()
 		if err := state.session.Kill(ctx); err != nil {
 			return StepObservation{}, err
@@ -1606,7 +1602,11 @@ func (p *Platform) ProcessStep(ctx context.Context, client Client, operation sce
 		if err != nil {
 			return StepObservation{}, err
 		}
-		window, err := windowFromResults(started, before, after, nil)
+		// A restart replaces the runner process, so its provenance maintenance
+		// cursor starts again. The window measures the relaunched capture
+		// against itself rather than comparing a cursor across a process
+		// boundary it cannot span.
+		window, err := windowFromResults(started, after, after, nil)
 		if err != nil {
 			return StepObservation{}, err
 		}
