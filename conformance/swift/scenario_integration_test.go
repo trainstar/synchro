@@ -16,6 +16,7 @@ import (
 func TestRealSwiftPerformance(t *testing.T) {
 	t.Run("assertion", func(t *testing.T) {
 		runSwiftSteadyPull(t)
+		runSwiftRebuildApply(t)
 		runSwiftRebuildRequests(t)
 		runSwiftForgedCursor(t)
 		runSwiftPendingCycle(t)
@@ -33,6 +34,19 @@ func runSwiftSteadyPull(t *testing.T) {
 	}
 	if len(result.IdentityResolution) != len(scenario.NativeIdentityAliases) {
 		t.Fatalf("Swift steady-pull identity resolutions = %d, want %d", len(result.IdentityResolution), len(scenario.NativeIdentityAliases))
+	}
+	resetSwiftPerformanceServer(t, ctx, harness)
+}
+
+func runSwiftRebuildApply(t *testing.T) {
+	t.Helper()
+	ctx, scenario, harness, controller, platform := newSwiftPerformanceFixture(t, filepath.Join("performance", "rebuild-apply-001.json"), 100)
+	result, err := RunRebuildApplyScenario(ctx, scenario, controller, platform)
+	if err != nil {
+		t.Fatalf("run direct Swift rebuild-apply scenario: %v", err)
+	}
+	if len(result.IdentityResolution) != len(scenario.NativeIdentityAliases) {
+		t.Fatalf("Swift rebuild-apply identity resolutions = %d, want %d", len(result.IdentityResolution), len(scenario.NativeIdentityAliases))
 	}
 	resetSwiftPerformanceServer(t, ctx, harness)
 }
