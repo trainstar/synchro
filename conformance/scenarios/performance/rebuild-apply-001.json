@@ -644,6 +644,134 @@
                 "hash": "721d2c95e6f34cd9733feea9f5118fba391eee10d07663dad066cfc59439fa44"
               },
               "local_lifecycle": "local_ready"
+            },
+            {
+              "user_id": "user-a",
+              "client_id": "client-b",
+              "client_generation": 1,
+              "scope_set_version": 1,
+              "accepted_write_epoch": 0,
+              "last_cursor_acknowledged_at": null,
+              "assigned_scope_ids": [
+                "scope-a"
+              ],
+              "local_schema": {
+                "version": 1,
+                "hash": "721d2c95e6f34cd9733feea9f5118fba391eee10d07663dad066cfc59439fa44"
+              },
+              "local_lifecycle": "local_ready"
+            },
+            {
+              "user_id": "user-a",
+              "client_id": "client-c",
+              "client_generation": 1,
+              "scope_set_version": 1,
+              "accepted_write_epoch": 0,
+              "last_cursor_acknowledged_at": null,
+              "assigned_scope_ids": [
+                "scope-a"
+              ],
+              "local_schema": {
+                "version": 1,
+                "hash": "721d2c95e6f34cd9733feea9f5118fba391eee10d07663dad066cfc59439fa44"
+              },
+              "local_lifecycle": "local_ready"
+            },
+            {
+              "user_id": "user-a",
+              "client_id": "client-d",
+              "client_generation": 1,
+              "scope_set_version": 1,
+              "accepted_write_epoch": 0,
+              "last_cursor_acknowledged_at": null,
+              "assigned_scope_ids": [
+                "scope-a"
+              ],
+              "local_schema": {
+                "version": 1,
+                "hash": "721d2c95e6f34cd9733feea9f5118fba391eee10d07663dad066cfc59439fa44"
+              },
+              "local_lifecycle": "local_ready"
+            },
+            {
+              "user_id": "user-a",
+              "client_id": "client-e",
+              "client_generation": 1,
+              "scope_set_version": 1,
+              "accepted_write_epoch": 0,
+              "last_cursor_acknowledged_at": null,
+              "assigned_scope_ids": [
+                "scope-a"
+              ],
+              "local_schema": {
+                "version": 1,
+                "hash": "721d2c95e6f34cd9733feea9f5118fba391eee10d07663dad066cfc59439fa44"
+              },
+              "local_lifecycle": "local_ready"
+            },
+            {
+              "user_id": "user-a",
+              "client_id": "client-f",
+              "client_generation": 1,
+              "scope_set_version": 1,
+              "accepted_write_epoch": 0,
+              "last_cursor_acknowledged_at": null,
+              "assigned_scope_ids": [
+                "scope-a"
+              ],
+              "local_schema": {
+                "version": 1,
+                "hash": "721d2c95e6f34cd9733feea9f5118fba391eee10d07663dad066cfc59439fa44"
+              },
+              "local_lifecycle": "local_ready"
+            },
+            {
+              "user_id": "user-a",
+              "client_id": "client-g",
+              "client_generation": 1,
+              "scope_set_version": 1,
+              "accepted_write_epoch": 0,
+              "last_cursor_acknowledged_at": null,
+              "assigned_scope_ids": [
+                "scope-a"
+              ],
+              "local_schema": {
+                "version": 1,
+                "hash": "721d2c95e6f34cd9733feea9f5118fba391eee10d07663dad066cfc59439fa44"
+              },
+              "local_lifecycle": "local_ready"
+            },
+            {
+              "user_id": "user-a",
+              "client_id": "client-h",
+              "client_generation": 1,
+              "scope_set_version": 1,
+              "accepted_write_epoch": 0,
+              "last_cursor_acknowledged_at": null,
+              "assigned_scope_ids": [
+                "scope-a"
+              ],
+              "local_schema": {
+                "version": 1,
+                "hash": "721d2c95e6f34cd9733feea9f5118fba391eee10d07663dad066cfc59439fa44"
+              },
+              "local_lifecycle": "local_ready"
+            },
+            {
+              "user_id": "user-a",
+              "client_id": "client-i",
+              "client_generation": 1,
+              "scope_set_version": 1,
+              "accepted_write_epoch": 0,
+              "last_cursor_acknowledged_at": null,
+              "assigned_scope_ids": [
+                "scope-a"
+              ],
+              "local_schema": {
+                "version": 1,
+                "hash": "721d2c95e6f34cd9733feea9f5118fba391eee10d07663dad066cfc59439fa44"
+              },
+              "local_lifecycle": "local_ready"
             }
           ],
           "write_policies": [
@@ -681,10 +809,74 @@
             {
               "user_id": "user-a",
               "client_id": "client-a",
+              "row_count": 1,
+              "provenance_count": 1,
+              "checkpoint_count": 1,
+              "rebuild_attempt_count": 1
+            },
+            {
+              "user_id": "user-a",
+              "client_id": "client-b",
+              "row_count": 1,
+              "provenance_count": 1,
+              "checkpoint_count": 1,
+              "rebuild_attempt_count": 1
+            },
+            {
+              "user_id": "user-a",
+              "client_id": "client-c",
+              "row_count": 1,
+              "provenance_count": 1,
+              "checkpoint_count": 1,
+              "rebuild_attempt_count": 1
+            },
+            {
+              "user_id": "user-a",
+              "client_id": "client-d",
+              "row_count": 101,
+              "provenance_count": 101,
+              "checkpoint_count": 1,
+              "rebuild_attempt_count": 1
+            },
+            {
+              "user_id": "user-a",
+              "client_id": "client-e",
+              "row_count": 101,
+              "provenance_count": 101,
+              "checkpoint_count": 1,
+              "rebuild_attempt_count": 1
+            },
+            {
+              "user_id": "user-a",
+              "client_id": "client-f",
+              "row_count": 101,
+              "provenance_count": 101,
+              "checkpoint_count": 1,
+              "rebuild_attempt_count": 1
+            },
+            {
+              "user_id": "user-a",
+              "client_id": "client-g",
               "row_count": 1000,
               "provenance_count": 1000,
               "checkpoint_count": 1,
-              "rebuild_attempt_count": 9
+              "rebuild_attempt_count": 1
+            },
+            {
+              "user_id": "user-a",
+              "client_id": "client-h",
+              "row_count": 1000,
+              "provenance_count": 1000,
+              "checkpoint_count": 1,
+              "rebuild_attempt_count": 1
+            },
+            {
+              "user_id": "user-a",
+              "client_id": "client-i",
+              "row_count": 1000,
+              "provenance_count": 1000,
+              "checkpoint_count": 1,
+              "rebuild_attempt_count": 1
             }
           ]
         }
@@ -883,7 +1075,7 @@
       "native_binding": {
         "kind": "workload",
         "user_id": "user-a",
-        "client_id": "client-a",
+        "client_id": "client-b",
         "workload": {
           "record_count": 1,
           "batch_size": 1,
@@ -912,7 +1104,7 @@
           "expectation": {
             "operation_count": 1,
             "batch_count": 1,
-            "operation_digest": "d4f5e6fcc2597d1b3bf72d3738b18706507449745af25fb8ed1e3a33c775b778",
+            "operation_digest": "9302fed6ba9def27de0994e260932b7c214be7419b13a5ca30f98015eaa0fc66",
             "per_scope_cardinalities": [
               {
                 "scope_id": "scope-a",
@@ -962,7 +1154,7 @@
       "native_binding": {
         "kind": "workload",
         "user_id": "user-a",
-        "client_id": "client-a",
+        "client_id": "client-c",
         "workload": {
           "record_count": 1,
           "batch_size": 1,
@@ -991,7 +1183,7 @@
           "expectation": {
             "operation_count": 1,
             "batch_count": 1,
-            "operation_digest": "044c4f74be57613ec9fca5464f55d1b4470fb16eb0b7258a8e23cd6f136a338a",
+            "operation_digest": "4efab1ac216c8645d6ba9d1918caef11d2691292ef2d51e09e04fffb60c0edf6",
             "per_scope_cardinalities": [
               {
                 "scope_id": "scope-a",
@@ -1041,7 +1233,7 @@
       "native_binding": {
         "kind": "workload",
         "user_id": "user-a",
-        "client_id": "client-a",
+        "client_id": "client-d",
         "workload": {
           "record_count": 101,
           "batch_size": 101,
@@ -1070,7 +1262,7 @@
           "expectation": {
             "operation_count": 101,
             "batch_count": 1,
-            "operation_digest": "08b26eafbf374920c94995d3dbe707073ebbf3b14e880eaba70fc5a515dc54e8",
+            "operation_digest": "91e21222d6681d3ab42abf4cdc57f39a0bf5cc487fe7c1640e13a8ea1860ccba",
             "per_scope_cardinalities": [
               {
                 "scope_id": "scope-a",
@@ -1120,7 +1312,7 @@
       "native_binding": {
         "kind": "workload",
         "user_id": "user-a",
-        "client_id": "client-a",
+        "client_id": "client-e",
         "workload": {
           "record_count": 101,
           "batch_size": 101,
@@ -1149,7 +1341,7 @@
           "expectation": {
             "operation_count": 101,
             "batch_count": 1,
-            "operation_digest": "558e4e40f7029d463e51c0575018492e707529355459f0c4fccd8ce7e95114c0",
+            "operation_digest": "eacd99a0f1e4a02915b07498e57cb9143a5868a82c1853265136247ef3085e3b",
             "per_scope_cardinalities": [
               {
                 "scope_id": "scope-a",
@@ -1199,7 +1391,7 @@
       "native_binding": {
         "kind": "workload",
         "user_id": "user-a",
-        "client_id": "client-a",
+        "client_id": "client-f",
         "workload": {
           "record_count": 101,
           "batch_size": 101,
@@ -1228,7 +1420,7 @@
           "expectation": {
             "operation_count": 101,
             "batch_count": 1,
-            "operation_digest": "106fa5ee659cba7012102e59fcdd1be3e93fdbf49f34f675cb732c8b27ed1473",
+            "operation_digest": "bea9b095c4f82412bfc49b5a3a99df4bb53dc80dbc99c0617244b8dcc8021a83",
             "per_scope_cardinalities": [
               {
                 "scope_id": "scope-a",
@@ -1278,7 +1470,7 @@
       "native_binding": {
         "kind": "workload",
         "user_id": "user-a",
-        "client_id": "client-a",
+        "client_id": "client-g",
         "workload": {
           "record_count": 1000,
           "batch_size": 1000,
@@ -1307,7 +1499,7 @@
           "expectation": {
             "operation_count": 1000,
             "batch_count": 1,
-            "operation_digest": "5879f289b9cc765e9b6f14a2b22e6e45333bee1abc6f454ac00e9e02c7dc9698",
+            "operation_digest": "506c87d4868d9c241e86ed90a91a5e22b03371403fcfe2f26312b6be50e8bc8d",
             "per_scope_cardinalities": [
               {
                 "scope_id": "scope-a",
@@ -1357,7 +1549,7 @@
       "native_binding": {
         "kind": "workload",
         "user_id": "user-a",
-        "client_id": "client-a",
+        "client_id": "client-h",
         "workload": {
           "record_count": 1000,
           "batch_size": 1000,
@@ -1386,7 +1578,7 @@
           "expectation": {
             "operation_count": 1000,
             "batch_count": 1,
-            "operation_digest": "44780a2a60f60551680c3615fe1b2c40c40fc8e834593d14b983d01ab857bef3",
+            "operation_digest": "bc3477137dae1085e81ff6fbe6652dcda8fbbad1943cd35c0e59b90c4db15f12",
             "per_scope_cardinalities": [
               {
                 "scope_id": "scope-a",
@@ -1436,7 +1628,7 @@
       "native_binding": {
         "kind": "workload",
         "user_id": "user-a",
-        "client_id": "client-a",
+        "client_id": "client-i",
         "workload": {
           "record_count": 1000,
           "batch_size": 1000,
@@ -1465,7 +1657,7 @@
           "expectation": {
             "operation_count": 1000,
             "batch_count": 1,
-            "operation_digest": "82cdd6a4685300fb415bd5b0ee94deb55b3eeefed8f2f7ea80bf45ce645d0f6f",
+            "operation_digest": "8e17b377f95e92f2a94c53ac98c0ed7af0b51f6988e38dd3c3b501ada1551de7",
             "per_scope_cardinalities": [
               {
                 "scope_id": "scope-a",

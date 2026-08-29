@@ -923,21 +923,30 @@ func TestProvenanceStateFactsRejectWrongEdges(t *testing.T) {
 		t.Fatalf("load scenario: %v", err)
 	}
 	facts := scenario.Model.ExpectedState[0].StateFacts
-	if facts == nil || len(facts.Clients) != 1 || len(facts.Clients[0].Provenance) != 2 {
+	provenanceClient := -1
+	if facts != nil {
+		for index, client := range facts.Clients {
+			if client.UserID == "user-a" && client.ClientID == "client-f" {
+				provenanceClient = index
+				break
+			}
+		}
+	}
+	if provenanceClient == -1 || len(facts.Clients[provenanceClient].Provenance) != 2 {
 		t.Fatal("scenario has no exact authored provenance facts")
 	}
 	mutants := map[string]func(*scenarios.StateFacts){
 		"stale scope": func(value *scenarios.StateFacts) {
-			value.Clients[0].Provenance[0].Scopes = []string{"scope-a", "scope-b"}
+			value.Clients[provenanceClient].Provenance[0].Scopes = []string{"scope-a", "scope-b"}
 		},
 		"missing scope": func(value *scenarios.StateFacts) {
-			value.Clients[0].Provenance[0].Scopes = nil
+			value.Clients[provenanceClient].Provenance[0].Scopes = nil
 		},
 		"cross row": func(value *scenarios.StateFacts) {
-			value.Clients[0].Provenance[0].CanonicalWireJSON = `"scope-topology-row-000002"`
+			value.Clients[provenanceClient].Provenance[0].CanonicalWireJSON = `"scope-topology-row-000002"`
 		},
 		"wrong version": func(value *scenarios.StateFacts) {
-			value.Clients[0].Provenance[0].Version = "wrong-version"
+			value.Clients[provenanceClient].Provenance[0].Version = "wrong-version"
 		},
 	}
 	for name, mutate := range mutants {
@@ -946,7 +955,7 @@ func TestProvenanceStateFactsRejectWrongEdges(t *testing.T) {
 			candidate.Model.ExpectedState = append([]scenarios.ModelExpectation(nil), scenario.Model.ExpectedState...)
 			copiedFacts := *facts
 			copiedFacts.Clients = append([]scenarios.ClientDurabilityFact(nil), facts.Clients...)
-			copiedFacts.Clients[0].Provenance = append([]scenarios.ProvenanceFact(nil), facts.Clients[0].Provenance...)
+			copiedFacts.Clients[provenanceClient].Provenance = append([]scenarios.ProvenanceFact(nil), facts.Clients[provenanceClient].Provenance...)
 			candidate.Model.ExpectedState[0].StateFacts = &copiedFacts
 			mutate(&copiedFacts)
 			if _, err := RunScenario(context.Background(), candidate); err == nil {

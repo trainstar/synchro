@@ -179,7 +179,7 @@ func executeStep(ctx context.Context, model *reference.Model, scenario scenarios
 		return execution, nil, &RunError{Kind: RunErrorOperation, StepID: step.ID, OperationKey: key, Err: err}
 	}
 	if class == scenarios.OperationClassModelRunnerMacro {
-		plan, err := expandWorkload(model.Snapshot(), step.Operation)
+		plan, err := expandWorkloadForBinding(model.Snapshot(), step.Operation, step.NativeBinding)
 		if err != nil {
 			execution.After = model.Snapshot()
 			execution.Err = err

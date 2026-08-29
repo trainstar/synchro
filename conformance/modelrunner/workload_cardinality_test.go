@@ -141,11 +141,11 @@ func TestScopeCardinalityExpansionExecutesOwnedScenarios(t *testing.T) {
 				if err := json.Unmarshal(step.Operation.Payload, &payload); err != nil {
 					t.Fatalf("decode %s payload: %v", step.ID, err)
 				}
-				operations, err := expandScopeCardinalityWorkload(model.Snapshot(), payload)
+				operations, err := expandWorkloadForBinding(model.Snapshot(), step.Operation, step.NativeBinding)
 				if err != nil {
 					t.Fatalf("expand %s: %v", step.ID, err)
 				}
-				for index, operation := range operations {
+				for index, operation := range operations.Operations {
 					if _, err := model.Apply(ctx, operation); err != nil {
 						if scenarios.OperationKey(operation) == "local/apply-rebuild-page" {
 							snapshot := model.Snapshot()
@@ -167,23 +167,34 @@ func TestScopeCardinalityExpansionExecutesOwnedScenarios(t *testing.T) {
 			if !found || scope.Cardinality != 1000 {
 				t.Fatalf("final scope cardinality = %d, want 1000", scope.Cardinality)
 			}
-			client, _, err := cardinalityAssignedClient(snapshot)
-			if err != nil {
-				t.Fatal(err)
+			if len(snapshot.ClientLocal) != len(scenario.Steps) {
+				t.Fatalf("local client count = %d, want %d", len(snapshot.ClientLocal), len(scenario.Steps))
 			}
-			var local reference.ClientLocalState
-			for _, entry := range snapshot.ClientLocal {
-				if entry.Key == client {
-					local = entry.Value
-					break
+			for _, step := range scenario.Steps {
+				binding := step.NativeBinding
+				if binding == nil || binding.Workload == nil {
+					t.Fatalf("step %s has no workload binding", step.ID)
 				}
-			}
-			if len(local.Rows) != 1000 || len(local.RebuildAttempts) != len(scenario.Steps) {
-				t.Fatalf("final local rows and rebuild attempts = %d/%d, want 1000/%d", len(local.Rows), len(local.RebuildAttempts), len(scenario.Steps))
-			}
-			last := local.RebuildAttempts[len(local.RebuildAttempts)-1]
-			if last.Phase != reference.LocalRebuildAttemptPhaseCompleted {
-				t.Fatalf("last local rebuild phase = %q, want completed", last.Phase)
+				client := reference.ClientKey{UserID: reference.UserID(binding.UserID), ClientID: reference.ClientID(binding.ClientID)}
+				var local reference.ClientLocalState
+				found := false
+				for _, entry := range snapshot.ClientLocal {
+					if entry.Key == client {
+						local = entry.Value
+						found = true
+						break
+					}
+				}
+				if !found {
+					t.Fatalf("local client %q is absent", binding.ClientID)
+				}
+				want := int(binding.Workload.RecordCount)
+				if len(local.Rows) != want || len(local.Provenance) != want || len(local.ScopeCheckpoints) != 1 || len(local.RebuildAttempts) != 1 {
+					t.Fatalf("local client %q facts = rows:%d provenance:%d checkpoints:%d attempts:%d, want %d:%d:1:1", binding.ClientID, len(local.Rows), len(local.Provenance), len(local.ScopeCheckpoints), len(local.RebuildAttempts), want, want)
+				}
+				if local.RebuildAttempts[0].Phase != reference.LocalRebuildAttemptPhaseCompleted {
+					t.Fatalf("local client %q rebuild phase = %q, want completed", binding.ClientID, local.RebuildAttempts[0].Phase)
+				}
 			}
 		})
 	}

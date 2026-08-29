@@ -606,6 +606,88 @@
               "accepted_write_epoch": 0,
               "last_cursor_acknowledged_at": null,
               "assigned_scope_ids": [
+                "scope-a"
+              ],
+              "local_schema": {
+                "version": 1,
+                "hash": "721d2c95e6f34cd9733feea9f5118fba391eee10d07663dad066cfc59439fa44"
+              },
+              "local_lifecycle": "local_ready"
+            },
+            {
+              "user_id": "user-a",
+              "client_id": "client-b",
+              "client_generation": 1,
+              "scope_set_version": 1,
+              "accepted_write_epoch": 0,
+              "last_cursor_acknowledged_at": null,
+              "assigned_scope_ids": [
+                "scope-a"
+              ],
+              "local_schema": {
+                "version": 1,
+                "hash": "721d2c95e6f34cd9733feea9f5118fba391eee10d07663dad066cfc59439fa44"
+              },
+              "local_lifecycle": "local_ready"
+            },
+            {
+              "user_id": "user-a",
+              "client_id": "client-c",
+              "client_generation": 1,
+              "scope_set_version": 1,
+              "accepted_write_epoch": 0,
+              "last_cursor_acknowledged_at": null,
+              "assigned_scope_ids": [
+                "scope-a"
+              ],
+              "local_schema": {
+                "version": 1,
+                "hash": "721d2c95e6f34cd9733feea9f5118fba391eee10d07663dad066cfc59439fa44"
+              },
+              "local_lifecycle": "local_ready"
+            },
+            {
+              "user_id": "user-a",
+              "client_id": "client-d",
+              "client_generation": 1,
+              "scope_set_version": 1,
+              "accepted_write_epoch": 0,
+              "last_cursor_acknowledged_at": null,
+              "assigned_scope_ids": [
+                "scope-a",
+                "scope-b"
+              ],
+              "local_schema": {
+                "version": 1,
+                "hash": "721d2c95e6f34cd9733feea9f5118fba391eee10d07663dad066cfc59439fa44"
+              },
+              "local_lifecycle": "local_ready"
+            },
+            {
+              "user_id": "user-a",
+              "client_id": "client-e",
+              "client_generation": 1,
+              "scope_set_version": 1,
+              "accepted_write_epoch": 0,
+              "last_cursor_acknowledged_at": null,
+              "assigned_scope_ids": [
+                "scope-a",
+                "scope-b"
+              ],
+              "local_schema": {
+                "version": 1,
+                "hash": "721d2c95e6f34cd9733feea9f5118fba391eee10d07663dad066cfc59439fa44"
+              },
+              "local_lifecycle": "local_ready"
+            },
+            {
+              "user_id": "user-a",
+              "client_id": "client-f",
+              "client_generation": 1,
+              "scope_set_version": 1,
+              "accepted_write_epoch": 0,
+              "last_cursor_acknowledged_at": null,
+              "assigned_scope_ids": [
                 "scope-a",
                 "scope-b"
               ],
@@ -654,10 +736,90 @@
             {
               "user_id": "user-a",
               "client_id": "client-a",
+              "row_count": 0,
+              "provenance_count": 0,
+              "checkpoint_count": 0,
+              "rebuild_attempt_count": 0
+            },
+            {
+              "user_id": "user-a",
+              "client_id": "client-b",
+              "row_count": 0,
+              "provenance_count": 0,
+              "checkpoint_count": 0,
+              "rebuild_attempt_count": 0
+            },
+            {
+              "user_id": "user-a",
+              "client_id": "client-c",
+              "row_count": 0,
+              "provenance_count": 0,
+              "checkpoint_count": 0,
+              "rebuild_attempt_count": 0
+            },
+            {
+              "user_id": "user-a",
+              "client_id": "client-d",
               "row_count": 2,
               "provenance_count": 2,
               "checkpoint_count": 2,
-              "rebuild_attempt_count": 7,
+              "rebuild_attempt_count": 2,
+              "provenance": [
+                {
+                  "table_id": "items",
+                  "canonical_wire_json": "\"scope-topology-row-000001\"",
+                  "scopes": [
+                    "scope-a",
+                    "scope-b"
+                  ],
+                  "version": "scope-topology-v000001"
+                },
+                {
+                  "table_id": "items",
+                  "canonical_wire_json": "\"scope-topology-row-000002\"",
+                  "scopes": [
+                    "scope-a",
+                    "scope-b"
+                  ],
+                  "version": "scope-topology-v000004"
+                }
+              ]
+            },
+            {
+              "user_id": "user-a",
+              "client_id": "client-e",
+              "row_count": 2,
+              "provenance_count": 2,
+              "checkpoint_count": 2,
+              "rebuild_attempt_count": 2,
+              "provenance": [
+                {
+                  "table_id": "items",
+                  "canonical_wire_json": "\"scope-topology-row-000001\"",
+                  "scopes": [
+                    "scope-a",
+                    "scope-b"
+                  ],
+                  "version": "scope-topology-v000001"
+                },
+                {
+                  "table_id": "items",
+                  "canonical_wire_json": "\"scope-topology-row-000002\"",
+                  "scopes": [
+                    "scope-a",
+                    "scope-b"
+                  ],
+                  "version": "scope-topology-v000004"
+                }
+              ]
+            },
+            {
+              "user_id": "user-a",
+              "client_id": "client-f",
+              "row_count": 2,
+              "provenance_count": 2,
+              "checkpoint_count": 1,
+              "rebuild_attempt_count": 2,
               "provenance": [
                 {
                   "table_id": "items",
@@ -891,8 +1053,7 @@
           },
           "scope_set_version": 1,
           "known_scopes": [
-            {"scope_id": "scope-a"},
-            {"scope_id": "scope-b"}
+            {"scope_id": "scope-a"}
           ]
         }
       },
@@ -987,7 +1148,7 @@
       "native_binding": {
         "kind": "public-call",
         "user_id": "user-a",
-        "client_id": "client-a",
+        "client_id": "client-b",
         "call_id": "multi_scope_sample_two",
         "stage": "synchronous",
         "method": "sync-now",
@@ -1014,7 +1175,7 @@
         "name": "send",
         "payload": {
           "user_id": "user-a",
-          "client_id": "client-a",
+          "client_id": "client-b",
           "runtime_version": 3,
           "protocol_version": 3,
           "client_generation": 1,
@@ -1025,8 +1186,7 @@
           },
           "scope_set_version": 1,
           "known_scopes": [
-            {"scope_id": "scope-a"},
-            {"scope_id": "scope-b"}
+            {"scope_id": "scope-a"}
           ]
         }
       },
@@ -1121,7 +1281,7 @@
       "native_binding": {
         "kind": "public-call",
         "user_id": "user-a",
-        "client_id": "client-a",
+        "client_id": "client-c",
         "call_id": "multi_scope_sample_three",
         "stage": "synchronous",
         "method": "sync-now",
@@ -1148,7 +1308,7 @@
         "name": "send",
         "payload": {
           "user_id": "user-a",
-          "client_id": "client-a",
+          "client_id": "client-c",
           "runtime_version": 3,
           "protocol_version": 3,
           "client_generation": 1,
@@ -1159,8 +1319,7 @@
           },
           "scope_set_version": 1,
           "known_scopes": [
-            {"scope_id": "scope-a"},
-            {"scope_id": "scope-b"}
+            {"scope_id": "scope-a"}
           ]
         }
       },
@@ -1267,7 +1426,7 @@
       "native_binding": {
         "kind": "public-call",
         "user_id": "user-a",
-        "client_id": "client-a",
+        "client_id": "client-d",
         "call_id": "multi_scope_sample_four",
         "stage": "synchronous",
         "method": "sync-now",
@@ -1294,7 +1453,7 @@
         "name": "send",
         "payload": {
           "user_id": "user-a",
-          "client_id": "client-a",
+          "client_id": "client-d",
           "runtime_version": 3,
           "protocol_version": 3,
           "client_generation": 1,
@@ -1319,8 +1478,8 @@
       "phase": "exercise",
       "transport": "local",
       "description": "Begin the fourth sample scope-A rebuild.",
-      "native_binding": {"kind": "public-call", "user_id": "user-a", "client_id": "client-a", "call_id": "multi_scope_sample_four", "stage": "synchronous", "method": "sync-now", "completion": "idle"},
-      "operation": {"contract_operation": "local", "name": "begin-rebuild", "payload": {"user_id": "user-a", "client_id": "client-a", "client_generation": 1, "schema": {"version": 1, "hash": "721d2c95e6f34cd9733feea9f5118fba391eee10d07663dad066cfc59439fa44"}, "scope_id": "scope-a", "rebuild_id": "00000000-0000-4000-8000-000000009108", "limit": 100}},
+      "native_binding": {"kind": "public-call", "user_id": "user-a", "client_id": "client-d", "call_id": "multi_scope_sample_four", "stage": "synchronous", "method": "sync-now", "completion": "idle"},
+      "operation": {"contract_operation": "local", "name": "begin-rebuild", "payload": {"user_id": "user-a", "client_id": "client-d", "client_generation": 1, "schema": {"version": 1, "hash": "721d2c95e6f34cd9733feea9f5118fba391eee10d07663dad066cfc59439fa44"}, "scope_id": "scope-a", "rebuild_id": "00000000-0000-4000-8000-000000009108", "limit": 100}},
       "expected_outcome": {"disposition": "success"}
     },
     {
@@ -1328,8 +1487,8 @@
       "phase": "exercise",
       "transport": "http",
       "description": "Request the fourth sample scope-A rebuild page.",
-      "native_binding": {"kind": "public-call", "user_id": "user-a", "client_id": "client-a", "call_id": "multi_scope_sample_four", "stage": "synchronous", "method": "sync-now", "completion": "idle"},
-      "operation": {"contract_operation": "rebuild", "name": "request-page", "payload": {"user_id": "user-a", "client_id": "client-a", "client_generation": 1, "schema": {"version": 1, "hash": "721d2c95e6f34cd9733feea9f5118fba391eee10d07663dad066cfc59439fa44"}, "scope_id": "scope-a", "rebuild_id": "00000000-0000-4000-8000-000000009108", "cursor_source": "none", "limit": 100}},
+      "native_binding": {"kind": "public-call", "user_id": "user-a", "client_id": "client-d", "call_id": "multi_scope_sample_four", "stage": "synchronous", "method": "sync-now", "completion": "idle"},
+      "operation": {"contract_operation": "rebuild", "name": "request-page", "payload": {"user_id": "user-a", "client_id": "client-d", "client_generation": 1, "schema": {"version": 1, "hash": "721d2c95e6f34cd9733feea9f5118fba391eee10d07663dad066cfc59439fa44"}, "scope_id": "scope-a", "rebuild_id": "00000000-0000-4000-8000-000000009108", "cursor_source": "none", "limit": 100}},
       "expected_outcome": {"disposition": "success"}
     },
     {
@@ -1337,8 +1496,8 @@
       "phase": "exercise",
       "transport": "local",
       "description": "Apply the fourth sample scope-A rebuild page.",
-      "native_binding": {"kind": "public-call", "user_id": "user-a", "client_id": "client-a", "call_id": "multi_scope_sample_four", "stage": "synchronous", "method": "sync-now", "completion": "idle"},
-      "operation": {"contract_operation": "local", "name": "apply-rebuild-page", "payload": {"user_id": "user-a", "client_id": "client-a", "scope_id": "scope-a", "rebuild_id": "00000000-0000-4000-8000-000000009108", "page_ordinal": 1, "request_token_source": "none"}},
+      "native_binding": {"kind": "public-call", "user_id": "user-a", "client_id": "client-d", "call_id": "multi_scope_sample_four", "stage": "synchronous", "method": "sync-now", "completion": "idle"},
+      "operation": {"contract_operation": "local", "name": "apply-rebuild-page", "payload": {"user_id": "user-a", "client_id": "client-d", "scope_id": "scope-a", "rebuild_id": "00000000-0000-4000-8000-000000009108", "page_ordinal": 1, "request_token_source": "none"}},
       "expected_outcome": {"disposition": "success"}
     },
     {
@@ -1346,8 +1505,8 @@
       "phase": "exercise",
       "transport": "local",
       "description": "Finalize the fourth sample scope-A rebuild.",
-      "native_binding": {"kind": "public-call", "user_id": "user-a", "client_id": "client-a", "call_id": "multi_scope_sample_four", "stage": "synchronous", "method": "sync-now", "completion": "idle"},
-      "operation": {"contract_operation": "local", "name": "finalize-rebuild", "payload": {"user_id": "user-a", "client_id": "client-a", "scope_id": "scope-a", "rebuild_id": "00000000-0000-4000-8000-000000009108"}},
+      "native_binding": {"kind": "public-call", "user_id": "user-a", "client_id": "client-d", "call_id": "multi_scope_sample_four", "stage": "synchronous", "method": "sync-now", "completion": "idle"},
+      "operation": {"contract_operation": "local", "name": "finalize-rebuild", "payload": {"user_id": "user-a", "client_id": "client-d", "scope_id": "scope-a", "rebuild_id": "00000000-0000-4000-8000-000000009108"}},
       "expected_outcome": {"disposition": "success"}
     },
     {
@@ -1355,8 +1514,8 @@
       "phase": "exercise",
       "transport": "local",
       "description": "Begin the fourth sample scope-B rebuild.",
-      "native_binding": {"kind": "public-call", "user_id": "user-a", "client_id": "client-a", "call_id": "multi_scope_sample_four", "stage": "synchronous", "method": "sync-now", "completion": "idle"},
-      "operation": {"contract_operation": "local", "name": "begin-rebuild", "payload": {"user_id": "user-a", "client_id": "client-a", "client_generation": 1, "schema": {"version": 1, "hash": "721d2c95e6f34cd9733feea9f5118fba391eee10d07663dad066cfc59439fa44"}, "scope_id": "scope-b", "rebuild_id": "00000000-0000-4000-8000-000000009109", "limit": 100}},
+      "native_binding": {"kind": "public-call", "user_id": "user-a", "client_id": "client-d", "call_id": "multi_scope_sample_four", "stage": "synchronous", "method": "sync-now", "completion": "idle"},
+      "operation": {"contract_operation": "local", "name": "begin-rebuild", "payload": {"user_id": "user-a", "client_id": "client-d", "client_generation": 1, "schema": {"version": 1, "hash": "721d2c95e6f34cd9733feea9f5118fba391eee10d07663dad066cfc59439fa44"}, "scope_id": "scope-b", "rebuild_id": "00000000-0000-4000-8000-000000009109", "limit": 100}},
       "expected_outcome": {"disposition": "success"}
     },
     {
@@ -1364,8 +1523,8 @@
       "phase": "exercise",
       "transport": "http",
       "description": "Request the fourth sample scope-B rebuild page.",
-      "native_binding": {"kind": "public-call", "user_id": "user-a", "client_id": "client-a", "call_id": "multi_scope_sample_four", "stage": "synchronous", "method": "sync-now", "completion": "idle"},
-      "operation": {"contract_operation": "rebuild", "name": "request-page", "payload": {"user_id": "user-a", "client_id": "client-a", "client_generation": 1, "schema": {"version": 1, "hash": "721d2c95e6f34cd9733feea9f5118fba391eee10d07663dad066cfc59439fa44"}, "scope_id": "scope-b", "rebuild_id": "00000000-0000-4000-8000-000000009109", "cursor_source": "none", "limit": 100}},
+      "native_binding": {"kind": "public-call", "user_id": "user-a", "client_id": "client-d", "call_id": "multi_scope_sample_four", "stage": "synchronous", "method": "sync-now", "completion": "idle"},
+      "operation": {"contract_operation": "rebuild", "name": "request-page", "payload": {"user_id": "user-a", "client_id": "client-d", "client_generation": 1, "schema": {"version": 1, "hash": "721d2c95e6f34cd9733feea9f5118fba391eee10d07663dad066cfc59439fa44"}, "scope_id": "scope-b", "rebuild_id": "00000000-0000-4000-8000-000000009109", "cursor_source": "none", "limit": 100}},
       "expected_outcome": {"disposition": "success"}
     },
     {
@@ -1373,8 +1532,8 @@
       "phase": "exercise",
       "transport": "local",
       "description": "Apply the fourth sample scope-B rebuild page.",
-      "native_binding": {"kind": "public-call", "user_id": "user-a", "client_id": "client-a", "call_id": "multi_scope_sample_four", "stage": "synchronous", "method": "sync-now", "completion": "idle"},
-      "operation": {"contract_operation": "local", "name": "apply-rebuild-page", "payload": {"user_id": "user-a", "client_id": "client-a", "scope_id": "scope-b", "rebuild_id": "00000000-0000-4000-8000-000000009109", "page_ordinal": 1, "request_token_source": "none"}},
+      "native_binding": {"kind": "public-call", "user_id": "user-a", "client_id": "client-d", "call_id": "multi_scope_sample_four", "stage": "synchronous", "method": "sync-now", "completion": "idle"},
+      "operation": {"contract_operation": "local", "name": "apply-rebuild-page", "payload": {"user_id": "user-a", "client_id": "client-d", "scope_id": "scope-b", "rebuild_id": "00000000-0000-4000-8000-000000009109", "page_ordinal": 1, "request_token_source": "none"}},
       "expected_outcome": {"disposition": "success"}
     },
     {
@@ -1382,8 +1541,8 @@
       "phase": "exercise",
       "transport": "local",
       "description": "Finalize the fourth sample scope-B rebuild.",
-      "native_binding": {"kind": "public-call", "user_id": "user-a", "client_id": "client-a", "call_id": "multi_scope_sample_four", "stage": "synchronous", "method": "sync-now", "completion": "idle"},
-      "operation": {"contract_operation": "local", "name": "finalize-rebuild", "payload": {"user_id": "user-a", "client_id": "client-a", "scope_id": "scope-b", "rebuild_id": "00000000-0000-4000-8000-000000009109"}},
+      "native_binding": {"kind": "public-call", "user_id": "user-a", "client_id": "client-d", "call_id": "multi_scope_sample_four", "stage": "synchronous", "method": "sync-now", "completion": "idle"},
+      "operation": {"contract_operation": "local", "name": "finalize-rebuild", "payload": {"user_id": "user-a", "client_id": "client-d", "scope_id": "scope-b", "rebuild_id": "00000000-0000-4000-8000-000000009109"}},
       "expected_outcome": {"disposition": "success"}
     },
     {
@@ -1473,7 +1632,7 @@
       "native_binding": {
         "kind": "public-call",
         "user_id": "user-a",
-        "client_id": "client-a",
+        "client_id": "client-e",
         "call_id": "multi_scope_sample_five",
         "stage": "synchronous",
         "method": "sync-now",
@@ -1500,7 +1659,7 @@
         "name": "send",
         "payload": {
           "user_id": "user-a",
-          "client_id": "client-a",
+          "client_id": "client-e",
           "runtime_version": 3,
           "protocol_version": 3,
           "client_generation": 1,
@@ -1525,8 +1684,8 @@
       "phase": "exercise",
       "transport": "local",
       "description": "Begin the fifth sample scope-A rebuild.",
-      "native_binding": {"kind": "public-call", "user_id": "user-a", "client_id": "client-a", "call_id": "multi_scope_sample_five", "stage": "synchronous", "method": "sync-now", "completion": "idle"},
-      "operation": {"contract_operation": "local", "name": "begin-rebuild", "payload": {"user_id": "user-a", "client_id": "client-a", "client_generation": 1, "schema": {"version": 1, "hash": "721d2c95e6f34cd9733feea9f5118fba391eee10d07663dad066cfc59439fa44"}, "scope_id": "scope-a", "rebuild_id": "00000000-0000-4000-8000-000000009110", "limit": 100}},
+      "native_binding": {"kind": "public-call", "user_id": "user-a", "client_id": "client-e", "call_id": "multi_scope_sample_five", "stage": "synchronous", "method": "sync-now", "completion": "idle"},
+      "operation": {"contract_operation": "local", "name": "begin-rebuild", "payload": {"user_id": "user-a", "client_id": "client-e", "client_generation": 1, "schema": {"version": 1, "hash": "721d2c95e6f34cd9733feea9f5118fba391eee10d07663dad066cfc59439fa44"}, "scope_id": "scope-a", "rebuild_id": "00000000-0000-4000-8000-000000009110", "limit": 100}},
       "expected_outcome": {"disposition": "success"}
     },
     {
@@ -1534,8 +1693,8 @@
       "phase": "exercise",
       "transport": "http",
       "description": "Request the fifth sample scope-A rebuild page.",
-      "native_binding": {"kind": "public-call", "user_id": "user-a", "client_id": "client-a", "call_id": "multi_scope_sample_five", "stage": "synchronous", "method": "sync-now", "completion": "idle"},
-      "operation": {"contract_operation": "rebuild", "name": "request-page", "payload": {"user_id": "user-a", "client_id": "client-a", "client_generation": 1, "schema": {"version": 1, "hash": "721d2c95e6f34cd9733feea9f5118fba391eee10d07663dad066cfc59439fa44"}, "scope_id": "scope-a", "rebuild_id": "00000000-0000-4000-8000-000000009110", "cursor_source": "none", "limit": 100}},
+      "native_binding": {"kind": "public-call", "user_id": "user-a", "client_id": "client-e", "call_id": "multi_scope_sample_five", "stage": "synchronous", "method": "sync-now", "completion": "idle"},
+      "operation": {"contract_operation": "rebuild", "name": "request-page", "payload": {"user_id": "user-a", "client_id": "client-e", "client_generation": 1, "schema": {"version": 1, "hash": "721d2c95e6f34cd9733feea9f5118fba391eee10d07663dad066cfc59439fa44"}, "scope_id": "scope-a", "rebuild_id": "00000000-0000-4000-8000-000000009110", "cursor_source": "none", "limit": 100}},
       "expected_outcome": {"disposition": "success"}
     },
     {
@@ -1543,8 +1702,8 @@
       "phase": "exercise",
       "transport": "local",
       "description": "Apply the fifth sample scope-A rebuild page.",
-      "native_binding": {"kind": "public-call", "user_id": "user-a", "client_id": "client-a", "call_id": "multi_scope_sample_five", "stage": "synchronous", "method": "sync-now", "completion": "idle"},
-      "operation": {"contract_operation": "local", "name": "apply-rebuild-page", "payload": {"user_id": "user-a", "client_id": "client-a", "scope_id": "scope-a", "rebuild_id": "00000000-0000-4000-8000-000000009110", "page_ordinal": 1, "request_token_source": "none"}},
+      "native_binding": {"kind": "public-call", "user_id": "user-a", "client_id": "client-e", "call_id": "multi_scope_sample_five", "stage": "synchronous", "method": "sync-now", "completion": "idle"},
+      "operation": {"contract_operation": "local", "name": "apply-rebuild-page", "payload": {"user_id": "user-a", "client_id": "client-e", "scope_id": "scope-a", "rebuild_id": "00000000-0000-4000-8000-000000009110", "page_ordinal": 1, "request_token_source": "none"}},
       "expected_outcome": {"disposition": "success"}
     },
     {
@@ -1552,8 +1711,8 @@
       "phase": "exercise",
       "transport": "local",
       "description": "Finalize the fifth sample scope-A rebuild.",
-      "native_binding": {"kind": "public-call", "user_id": "user-a", "client_id": "client-a", "call_id": "multi_scope_sample_five", "stage": "synchronous", "method": "sync-now", "completion": "idle"},
-      "operation": {"contract_operation": "local", "name": "finalize-rebuild", "payload": {"user_id": "user-a", "client_id": "client-a", "scope_id": "scope-a", "rebuild_id": "00000000-0000-4000-8000-000000009110"}},
+      "native_binding": {"kind": "public-call", "user_id": "user-a", "client_id": "client-e", "call_id": "multi_scope_sample_five", "stage": "synchronous", "method": "sync-now", "completion": "idle"},
+      "operation": {"contract_operation": "local", "name": "finalize-rebuild", "payload": {"user_id": "user-a", "client_id": "client-e", "scope_id": "scope-a", "rebuild_id": "00000000-0000-4000-8000-000000009110"}},
       "expected_outcome": {"disposition": "success"}
     },
     {
@@ -1561,8 +1720,8 @@
       "phase": "exercise",
       "transport": "local",
       "description": "Begin the fifth sample scope-B rebuild.",
-      "native_binding": {"kind": "public-call", "user_id": "user-a", "client_id": "client-a", "call_id": "multi_scope_sample_five", "stage": "synchronous", "method": "sync-now", "completion": "idle"},
-      "operation": {"contract_operation": "local", "name": "begin-rebuild", "payload": {"user_id": "user-a", "client_id": "client-a", "client_generation": 1, "schema": {"version": 1, "hash": "721d2c95e6f34cd9733feea9f5118fba391eee10d07663dad066cfc59439fa44"}, "scope_id": "scope-b", "rebuild_id": "00000000-0000-4000-8000-000000009111", "limit": 100}},
+      "native_binding": {"kind": "public-call", "user_id": "user-a", "client_id": "client-e", "call_id": "multi_scope_sample_five", "stage": "synchronous", "method": "sync-now", "completion": "idle"},
+      "operation": {"contract_operation": "local", "name": "begin-rebuild", "payload": {"user_id": "user-a", "client_id": "client-e", "client_generation": 1, "schema": {"version": 1, "hash": "721d2c95e6f34cd9733feea9f5118fba391eee10d07663dad066cfc59439fa44"}, "scope_id": "scope-b", "rebuild_id": "00000000-0000-4000-8000-000000009111", "limit": 100}},
       "expected_outcome": {"disposition": "success"}
     },
     {
@@ -1570,8 +1729,8 @@
       "phase": "exercise",
       "transport": "http",
       "description": "Request the fifth sample scope-B rebuild page.",
-      "native_binding": {"kind": "public-call", "user_id": "user-a", "client_id": "client-a", "call_id": "multi_scope_sample_five", "stage": "synchronous", "method": "sync-now", "completion": "idle"},
-      "operation": {"contract_operation": "rebuild", "name": "request-page", "payload": {"user_id": "user-a", "client_id": "client-a", "client_generation": 1, "schema": {"version": 1, "hash": "721d2c95e6f34cd9733feea9f5118fba391eee10d07663dad066cfc59439fa44"}, "scope_id": "scope-b", "rebuild_id": "00000000-0000-4000-8000-000000009111", "cursor_source": "none", "limit": 100}},
+      "native_binding": {"kind": "public-call", "user_id": "user-a", "client_id": "client-e", "call_id": "multi_scope_sample_five", "stage": "synchronous", "method": "sync-now", "completion": "idle"},
+      "operation": {"contract_operation": "rebuild", "name": "request-page", "payload": {"user_id": "user-a", "client_id": "client-e", "client_generation": 1, "schema": {"version": 1, "hash": "721d2c95e6f34cd9733feea9f5118fba391eee10d07663dad066cfc59439fa44"}, "scope_id": "scope-b", "rebuild_id": "00000000-0000-4000-8000-000000009111", "cursor_source": "none", "limit": 100}},
       "expected_outcome": {"disposition": "success"}
     },
     {
@@ -1579,8 +1738,8 @@
       "phase": "exercise",
       "transport": "local",
       "description": "Apply the fifth sample scope-B rebuild page.",
-      "native_binding": {"kind": "public-call", "user_id": "user-a", "client_id": "client-a", "call_id": "multi_scope_sample_five", "stage": "synchronous", "method": "sync-now", "completion": "idle"},
-      "operation": {"contract_operation": "local", "name": "apply-rebuild-page", "payload": {"user_id": "user-a", "client_id": "client-a", "scope_id": "scope-b", "rebuild_id": "00000000-0000-4000-8000-000000009111", "page_ordinal": 1, "request_token_source": "none"}},
+      "native_binding": {"kind": "public-call", "user_id": "user-a", "client_id": "client-e", "call_id": "multi_scope_sample_five", "stage": "synchronous", "method": "sync-now", "completion": "idle"},
+      "operation": {"contract_operation": "local", "name": "apply-rebuild-page", "payload": {"user_id": "user-a", "client_id": "client-e", "scope_id": "scope-b", "rebuild_id": "00000000-0000-4000-8000-000000009111", "page_ordinal": 1, "request_token_source": "none"}},
       "expected_outcome": {"disposition": "success"}
     },
     {
@@ -1588,8 +1747,8 @@
       "phase": "exercise",
       "transport": "local",
       "description": "Finalize the fifth sample scope-B rebuild.",
-      "native_binding": {"kind": "public-call", "user_id": "user-a", "client_id": "client-a", "call_id": "multi_scope_sample_five", "stage": "synchronous", "method": "sync-now", "completion": "idle"},
-      "operation": {"contract_operation": "local", "name": "finalize-rebuild", "payload": {"user_id": "user-a", "client_id": "client-a", "scope_id": "scope-b", "rebuild_id": "00000000-0000-4000-8000-000000009111"}},
+      "native_binding": {"kind": "public-call", "user_id": "user-a", "client_id": "client-e", "call_id": "multi_scope_sample_five", "stage": "synchronous", "method": "sync-now", "completion": "idle"},
+      "operation": {"contract_operation": "local", "name": "finalize-rebuild", "payload": {"user_id": "user-a", "client_id": "client-e", "scope_id": "scope-b", "rebuild_id": "00000000-0000-4000-8000-000000009111"}},
       "expected_outcome": {"disposition": "success"}
     },
     {
@@ -1679,7 +1838,7 @@
       "native_binding": {
         "kind": "public-call",
         "user_id": "user-a",
-        "client_id": "client-a",
+        "client_id": "client-f",
         "call_id": "multi_scope_sample_six",
         "stage": "synchronous",
         "method": "sync-now",
@@ -1706,7 +1865,7 @@
         "name": "send",
         "payload": {
           "user_id": "user-a",
-          "client_id": "client-a",
+          "client_id": "client-f",
           "runtime_version": 3,
           "protocol_version": 3,
           "client_generation": 1,
@@ -1731,8 +1890,8 @@
       "phase": "exercise",
       "transport": "local",
       "description": "Begin the sixth sample scope-A rebuild.",
-      "native_binding": {"kind": "public-call", "user_id": "user-a", "client_id": "client-a", "call_id": "multi_scope_sample_six", "stage": "synchronous", "method": "sync-now", "completion": "idle"},
-      "operation": {"contract_operation": "local", "name": "begin-rebuild", "payload": {"user_id": "user-a", "client_id": "client-a", "client_generation": 1, "schema": {"version": 1, "hash": "721d2c95e6f34cd9733feea9f5118fba391eee10d07663dad066cfc59439fa44"}, "scope_id": "scope-a", "rebuild_id": "00000000-0000-4000-8000-000000009112", "limit": 100}},
+      "native_binding": {"kind": "public-call", "user_id": "user-a", "client_id": "client-f", "call_id": "multi_scope_sample_six", "stage": "synchronous", "method": "sync-now", "completion": "idle"},
+      "operation": {"contract_operation": "local", "name": "begin-rebuild", "payload": {"user_id": "user-a", "client_id": "client-f", "client_generation": 1, "schema": {"version": 1, "hash": "721d2c95e6f34cd9733feea9f5118fba391eee10d07663dad066cfc59439fa44"}, "scope_id": "scope-a", "rebuild_id": "00000000-0000-4000-8000-000000009112", "limit": 100}},
       "expected_outcome": {"disposition": "success"}
     },
     {
@@ -1740,8 +1899,8 @@
       "phase": "exercise",
       "transport": "http",
       "description": "Request the sixth sample scope-A rebuild page.",
-      "native_binding": {"kind": "public-call", "user_id": "user-a", "client_id": "client-a", "call_id": "multi_scope_sample_six", "stage": "synchronous", "method": "sync-now", "completion": "idle"},
-      "operation": {"contract_operation": "rebuild", "name": "request-page", "payload": {"user_id": "user-a", "client_id": "client-a", "client_generation": 1, "schema": {"version": 1, "hash": "721d2c95e6f34cd9733feea9f5118fba391eee10d07663dad066cfc59439fa44"}, "scope_id": "scope-a", "rebuild_id": "00000000-0000-4000-8000-000000009112", "cursor_source": "none", "limit": 100}},
+      "native_binding": {"kind": "public-call", "user_id": "user-a", "client_id": "client-f", "call_id": "multi_scope_sample_six", "stage": "synchronous", "method": "sync-now", "completion": "idle"},
+      "operation": {"contract_operation": "rebuild", "name": "request-page", "payload": {"user_id": "user-a", "client_id": "client-f", "client_generation": 1, "schema": {"version": 1, "hash": "721d2c95e6f34cd9733feea9f5118fba391eee10d07663dad066cfc59439fa44"}, "scope_id": "scope-a", "rebuild_id": "00000000-0000-4000-8000-000000009112", "cursor_source": "none", "limit": 100}},
       "expected_outcome": {"disposition": "success"}
     },
     {
@@ -1749,8 +1908,8 @@
       "phase": "exercise",
       "transport": "local",
       "description": "Apply the sixth sample scope-A rebuild page.",
-      "native_binding": {"kind": "public-call", "user_id": "user-a", "client_id": "client-a", "call_id": "multi_scope_sample_six", "stage": "synchronous", "method": "sync-now", "completion": "idle"},
-      "operation": {"contract_operation": "local", "name": "apply-rebuild-page", "payload": {"user_id": "user-a", "client_id": "client-a", "scope_id": "scope-a", "rebuild_id": "00000000-0000-4000-8000-000000009112", "page_ordinal": 1, "request_token_source": "none"}},
+      "native_binding": {"kind": "public-call", "user_id": "user-a", "client_id": "client-f", "call_id": "multi_scope_sample_six", "stage": "synchronous", "method": "sync-now", "completion": "idle"},
+      "operation": {"contract_operation": "local", "name": "apply-rebuild-page", "payload": {"user_id": "user-a", "client_id": "client-f", "scope_id": "scope-a", "rebuild_id": "00000000-0000-4000-8000-000000009112", "page_ordinal": 1, "request_token_source": "none"}},
       "expected_outcome": {"disposition": "success"}
     },
     {
@@ -1758,8 +1917,8 @@
       "phase": "exercise",
       "transport": "local",
       "description": "Finalize the sixth sample scope-A rebuild.",
-      "native_binding": {"kind": "public-call", "user_id": "user-a", "client_id": "client-a", "call_id": "multi_scope_sample_six", "stage": "synchronous", "method": "sync-now", "completion": "idle"},
-      "operation": {"contract_operation": "local", "name": "finalize-rebuild", "payload": {"user_id": "user-a", "client_id": "client-a", "scope_id": "scope-a", "rebuild_id": "00000000-0000-4000-8000-000000009112"}},
+      "native_binding": {"kind": "public-call", "user_id": "user-a", "client_id": "client-f", "call_id": "multi_scope_sample_six", "stage": "synchronous", "method": "sync-now", "completion": "idle"},
+      "operation": {"contract_operation": "local", "name": "finalize-rebuild", "payload": {"user_id": "user-a", "client_id": "client-f", "scope_id": "scope-a", "rebuild_id": "00000000-0000-4000-8000-000000009112"}},
       "expected_outcome": {"disposition": "success"}
     },
     {
@@ -1767,8 +1926,8 @@
       "phase": "exercise",
       "transport": "local",
       "description": "Begin the sixth sample scope-B rebuild.",
-      "native_binding": {"kind": "public-call", "user_id": "user-a", "client_id": "client-a", "call_id": "multi_scope_sample_six", "stage": "synchronous", "method": "sync-now", "completion": "idle"},
-      "operation": {"contract_operation": "local", "name": "begin-rebuild", "payload": {"user_id": "user-a", "client_id": "client-a", "client_generation": 1, "schema": {"version": 1, "hash": "721d2c95e6f34cd9733feea9f5118fba391eee10d07663dad066cfc59439fa44"}, "scope_id": "scope-b", "rebuild_id": "00000000-0000-4000-8000-000000009113", "limit": 100}},
+      "native_binding": {"kind": "public-call", "user_id": "user-a", "client_id": "client-f", "call_id": "multi_scope_sample_six", "stage": "synchronous", "method": "sync-now", "completion": "idle"},
+      "operation": {"contract_operation": "local", "name": "begin-rebuild", "payload": {"user_id": "user-a", "client_id": "client-f", "client_generation": 1, "schema": {"version": 1, "hash": "721d2c95e6f34cd9733feea9f5118fba391eee10d07663dad066cfc59439fa44"}, "scope_id": "scope-b", "rebuild_id": "00000000-0000-4000-8000-000000009113", "limit": 100}},
       "expected_outcome": {"disposition": "success"}
     },
     {
@@ -1776,8 +1935,8 @@
       "phase": "exercise",
       "transport": "http",
       "description": "Request the sixth sample scope-B rebuild page.",
-      "native_binding": {"kind": "public-call", "user_id": "user-a", "client_id": "client-a", "call_id": "multi_scope_sample_six", "stage": "synchronous", "method": "sync-now", "completion": "idle"},
-      "operation": {"contract_operation": "rebuild", "name": "request-page", "payload": {"user_id": "user-a", "client_id": "client-a", "client_generation": 1, "schema": {"version": 1, "hash": "721d2c95e6f34cd9733feea9f5118fba391eee10d07663dad066cfc59439fa44"}, "scope_id": "scope-b", "rebuild_id": "00000000-0000-4000-8000-000000009113", "cursor_source": "none", "limit": 100}},
+      "native_binding": {"kind": "public-call", "user_id": "user-a", "client_id": "client-f", "call_id": "multi_scope_sample_six", "stage": "synchronous", "method": "sync-now", "completion": "idle"},
+      "operation": {"contract_operation": "rebuild", "name": "request-page", "payload": {"user_id": "user-a", "client_id": "client-f", "client_generation": 1, "schema": {"version": 1, "hash": "721d2c95e6f34cd9733feea9f5118fba391eee10d07663dad066cfc59439fa44"}, "scope_id": "scope-b", "rebuild_id": "00000000-0000-4000-8000-000000009113", "cursor_source": "none", "limit": 100}},
       "expected_outcome": {"disposition": "success"}
     },
     {
@@ -1785,8 +1944,8 @@
       "phase": "exercise",
       "transport": "local",
       "description": "Apply the sixth sample scope-B rebuild page.",
-      "native_binding": {"kind": "public-call", "user_id": "user-a", "client_id": "client-a", "call_id": "multi_scope_sample_six", "stage": "synchronous", "method": "sync-now", "completion": "idle"},
-      "operation": {"contract_operation": "local", "name": "apply-rebuild-page", "payload": {"user_id": "user-a", "client_id": "client-a", "scope_id": "scope-b", "rebuild_id": "00000000-0000-4000-8000-000000009113", "page_ordinal": 1, "request_token_source": "none"}},
+      "native_binding": {"kind": "public-call", "user_id": "user-a", "client_id": "client-f", "call_id": "multi_scope_sample_six", "stage": "synchronous", "method": "sync-now", "completion": "idle"},
+      "operation": {"contract_operation": "local", "name": "apply-rebuild-page", "payload": {"user_id": "user-a", "client_id": "client-f", "scope_id": "scope-b", "rebuild_id": "00000000-0000-4000-8000-000000009113", "page_ordinal": 1, "request_token_source": "none"}},
       "expected_outcome": {"disposition": "success"}
     },
     {
@@ -1794,38 +1953,72 @@
       "phase": "exercise",
       "transport": "local",
       "description": "Finalize the sixth sample scope-B rebuild.",
-      "native_binding": {"kind": "public-call", "user_id": "user-a", "client_id": "client-a", "call_id": "multi_scope_sample_six", "stage": "synchronous", "method": "sync-now", "completion": "idle"},
-      "operation": {"contract_operation": "local", "name": "finalize-rebuild", "payload": {"user_id": "user-a", "client_id": "client-a", "scope_id": "scope-b", "rebuild_id": "00000000-0000-4000-8000-000000009113"}},
+      "native_binding": {"kind": "public-call", "user_id": "user-a", "client_id": "client-f", "call_id": "multi_scope_sample_six", "stage": "synchronous", "method": "sync-now", "completion": "idle"},
+      "operation": {"contract_operation": "local", "name": "finalize-rebuild", "payload": {"user_id": "user-a", "client_id": "client-f", "scope_id": "scope-b", "rebuild_id": "00000000-0000-4000-8000-000000009113"}},
       "expected_outcome": {"disposition": "success"}
     },
     {
       "id": "STEP-PERF-MULTI-SCOPE-PROVENANCE-007",
       "phase": "exercise",
-      "transport": "local",
-      "description": "Remove scope A while scope B continues to justify each local row.",
+      "transport": "model",
+      "description": "Remove scope A from the authoritative assignment set while scope B remains assigned.",
+      "native_binding": {
+        "kind": "controller"
+      },
+      "operation": {
+        "contract_operation": "model",
+        "name": "set-client-assignments",
+        "payload": {
+          "user_id": "user-a",
+          "client_id": "client-f",
+          "assignments": [
+            {
+              "scope_id": "scope-b"
+            }
+          ]
+        }
+      },
+      "expected_outcome": {
+        "disposition": "success"
+      }
+    },
+    {
+      "id": "STEP-PERF-MULTI-SCOPE-PROVENANCE-007-CONNECT-001",
+      "phase": "exercise",
+      "transport": "http",
+      "description": "Apply the authoritative scope-A removal while scope B retains each local row.",
       "native_binding": {
         "kind": "public-call",
         "user_id": "user-a",
-        "client_id": "client-a",
-        "call_id": "multi_scope_sample_six",
+        "client_id": "client-f",
+        "call_id": "multi_scope_scope_a_removal",
         "stage": "synchronous",
         "method": "sync-now",
         "completion": "idle"
       },
       "operation": {
-        "contract_operation": "local",
-        "name": "begin-rebuild",
+        "contract_operation": "connect",
+        "name": "send",
         "payload": {
           "user_id": "user-a",
-          "client_id": "client-a",
+          "client_id": "client-f",
+          "runtime_version": 3,
+          "protocol_version": 3,
           "client_generation": 1,
+          "schema_reset": false,
           "schema": {
             "version": 1,
             "hash": "721d2c95e6f34cd9733feea9f5118fba391eee10d07663dad066cfc59439fa44"
           },
-          "scope_id": "scope-a",
-          "rebuild_id": "00000000-0000-4000-8000-000000009001",
-          "limit": 100
+          "scope_set_version": 1,
+          "known_scopes": [
+            {
+              "scope_id": "scope-a"
+            },
+            {
+              "scope_id": "scope-b"
+            }
+          ]
         }
       },
       "expected_outcome": {
@@ -1876,6 +2069,14 @@
     },
     {
       "step_id": "STEP-PERF-MULTI-SCOPE-PROVENANCE-006-CONNECT-001",
+      "assertion_id": "ASSERT-PERF-MULTI-SCOPE-PROVENANCE-WIRE-001",
+      "contract_case": "connect_success",
+      "http_status": 200,
+      "error_code": null,
+      "retryable": false
+    },
+    {
+      "step_id": "STEP-PERF-MULTI-SCOPE-PROVENANCE-007-CONNECT-001",
       "assertion_id": "ASSERT-PERF-MULTI-SCOPE-PROVENANCE-WIRE-001",
       "contract_case": "connect_success",
       "http_status": 200,
@@ -1960,7 +2161,7 @@
       "requirement_ids": [
         "SYNC-PROVENANCE-002"
       ],
-      "description": "The six connect and six rebuild requests return their canonical successful wire outcomes.",
+      "description": "The seven connect and six rebuild requests return their canonical successful wire outcomes.",
       "expectation_ids": [
         "EXPECT-PERF-MULTI-SCOPE-PROVENANCE-WIRE-001"
       ],
@@ -2004,7 +2205,7 @@
       "alias": "client-generation-one",
       "value": 1,
       "step_ids": [
-        "STEP-PERF-MULTI-SCOPE-PROVENANCE-007"
+        "STEP-PERF-MULTI-SCOPE-PROVENANCE-007-CONNECT-001"
       ],
       "expectation_ids": []
     },
@@ -2016,7 +2217,7 @@
         "hash": "721d2c95e6f34cd9733feea9f5118fba391eee10d07663dad066cfc59439fa44"
       },
       "step_ids": [
-        "STEP-PERF-MULTI-SCOPE-PROVENANCE-007"
+        "STEP-PERF-MULTI-SCOPE-PROVENANCE-007-CONNECT-001"
       ],
       "expectation_ids": []
     },
@@ -2027,7 +2228,7 @@
       "step_ids": [
         "STEP-PERF-MULTI-SCOPE-PROVENANCE-001-STAGE-001",
         "STEP-PERF-MULTI-SCOPE-PROVENANCE-004-REBUILD-A-BEGIN-001",
-        "STEP-PERF-MULTI-SCOPE-PROVENANCE-007"
+        "STEP-PERF-MULTI-SCOPE-PROVENANCE-007-CONNECT-001"
       ],
       "expectation_ids": [
         "EXPECT-PERF-MULTI-SCOPE-PROVENANCE-SEMANTIC-001"
@@ -2096,15 +2297,6 @@
       "value": "00000000-0000-4000-8000-000000009113",
       "step_ids": [
         "STEP-PERF-MULTI-SCOPE-PROVENANCE-006-REBUILD-B-BEGIN-001"
-      ],
-      "expectation_ids": []
-    },
-    {
-      "kind": "rebuild-id",
-      "alias": "final-scope-a-rebuild",
-      "value": "00000000-0000-4000-8000-000000009001",
-      "step_ids": [
-        "STEP-PERF-MULTI-SCOPE-PROVENANCE-007"
       ],
       "expectation_ids": []
     },
