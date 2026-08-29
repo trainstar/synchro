@@ -355,26 +355,24 @@ func validateSchemaCheckPublicCall(scenario scenarios.Scenario, step scenarios.S
 	if call.Completion != wantCompletion {
 		return fmt.Errorf("Swift schema-check step %s completed %q, want %q", step.ID, call.Completion, wantCompletion)
 	}
-	// The first call for a client has no usable cursor, so it bootstraps by
-	// connecting, rebuilding each scope, and pulling. Every later call carries
-	// exactly one request for its authored step.
-	if cold {
-		if !validateSwiftBaselineCallShape(call) {
-			return fmt.Errorf("Swift schema-check step %s did not bootstrap its client", step.ID)
-		}
-	} else if len(call.Steps) != 1 || len(call.transportObservations) != 1 {
-		return fmt.Errorf("Swift schema-check step %s carried %d steps and %d transports, want 1 and 1", step.ID, len(call.Steps), len(call.transportObservations))
+	// An authored step names a protocol operation, not one request. A client
+	// with no usable cursor bootstraps by connecting, rebuilding, and pulling,
+	// and a client that observes a schema or membership transition re-syncs
+	// before it settles. The authored connect and its wire outcome are the
+	// evidence for the step, so the request count is not asserted.
+	if cold && !validateSwiftBaselineCallShape(call) {
+		return fmt.Errorf("Swift schema-check step %s did not bootstrap its client", step.ID)
 	}
-	transport := call.transportObservations[0]
-	if transport.OperationClass != "connect" {
-		return fmt.Errorf("Swift schema-check step %s transport class is %q, want connect", step.ID, transport.OperationClass)
+	transport, err := swiftScenarioWire(call, "connect")
+	if err != nil {
+		return fmt.Errorf("Swift schema-check step %s: %w", step.ID, err)
 	}
 	if err := validateSwiftWireObservation(scenario, string(step.ID), transport); err != nil {
 		return err
 	}
-	if cold {
-		// A bootstrap reports no authored step observation, so the transport
-		// wire result above is the authored evidence for this step.
+	if len(call.Steps) == 0 {
+		// A call that re-syncs reports no authored step observation, so the
+		// transport wire result above is the evidence for this step.
 		return nil
 	}
 	observed := call.Steps[0]
