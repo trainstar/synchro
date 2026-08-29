@@ -2309,12 +2309,14 @@ func (c *NativeController) materializeSourceTransaction(ctx context.Context, ope
 
 	deadline, cancel := context.WithTimeout(ctx, c.waitTimeout)
 	defer cancel()
+	var resolveErr error
 	for {
-		if err := c.resolveRuntimeTransaction(deadline, transaction); err == nil && (!transaction.ApplicationPush || c.resolveApplicationPushRecords(deadline, transaction) == nil) {
+		resolveErr = c.resolveRuntimeTransaction(deadline, transaction)
+		if resolveErr == nil && (!transaction.ApplicationPush || c.resolveApplicationPushRecords(deadline, transaction) == nil) {
 			break
 		}
 		if err := waitNativePoll(deadline); err != nil {
-			return NativeStepObservation{}, errors.New("native source transaction did not become WAL-materialized")
+			return NativeStepObservation{}, fmt.Errorf("native source transaction did not become WAL-materialized: %w", resolveErr)
 		}
 	}
 	if err := c.validateRuntimeTransactionOrder(ctx, transaction); err != nil {
@@ -2501,7 +2503,15 @@ func (c *NativeController) resolveRuntimeTransaction(ctx context.Context, bindin
 			)
 		}
 		if err != nil || ordinal < 0 {
-			return errors.New("native runtime WAL event binding is unavailable")
+			identifier := event.RuntimeRecordID
+			if event.Dependency != nil {
+				image := event.After
+				if image == nil {
+					image = event.Before
+				}
+				identifier = nativeCaptureDependencyKey(*image)
+			}
+			return fmt.Errorf("native runtime WAL event binding is unavailable: relation %s operation %s identity %s", event.Relation, event.Operation, identifier)
 		}
 		identity.ordinal = uint64(ordinal)
 		identities = append(identities, identity)
