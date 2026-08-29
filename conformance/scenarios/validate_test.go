@@ -529,6 +529,28 @@ func TestValidateTransportFailureWireCaseIsClosed(t *testing.T) {
 	}
 }
 
+func TestValidateWireFaultRequiresMatchingTemporaryUnavailableExpectation(t *testing.T) {
+	bundle, err := contract.Load(context.Background(), "../../")
+	if err != nil {
+		t.Fatalf("load authored contract: %v", err)
+	}
+	scenario, err := LoadFile(context.Background(), "../../", "conformance/scenarios/server/retention-reconnect-001.json")
+	if err != nil {
+		t.Fatalf("load retention reconnect scenario: %v", err)
+	}
+	if err := Validate(scenario, bundle); err != nil {
+		t.Fatalf("validate retention reconnect wire fault: %v", err)
+	}
+	mutant := cloneScenario(scenario)
+	mutant.WireExpectations[0].ContractCase = "push_success"
+	mutant.WireExpectations[0].HTTPStatus = 200
+	mutant.WireExpectations[0].ErrorCode = nil
+	mutant.WireExpectations[0].Retryable = false
+	if err := requireErrorCategory(Validate(mutant, bundle), "wire fault requires temporary_unavailable"); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestValidatePerformanceClosureAndValidateAll(t *testing.T) {
 	bundle, err := contract.Load(context.Background(), "../../")
 	if err != nil {

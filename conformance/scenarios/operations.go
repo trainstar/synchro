@@ -10,6 +10,8 @@ import (
 	"github.com/trainstar/synchro/conformance/internal/jsonstrict"
 )
 
+const wireFaultTemporaryUnavailable = "temporary_unavailable"
+
 var closedOperationFields = map[string]operationFields{
 	"artifact/install-portable-seed":                {required: []string{"user_id", "client_id", "portable_seed_artifact_id", "seed_fixture_id"}},
 	"connect/send":                                  {required: []string{"user_id", "client_id", "runtime_version", "protocol_version", "schema_reset", "schema", "scope_set_version", "known_scopes"}, optional: []string{"client_generation", "seed_receipts"}},
@@ -183,6 +185,9 @@ func ValidateOperation(operation Operation) error {
 	if !known {
 		return fmt.Errorf("unknown operation %q", key)
 	}
+	if err := validateWireFaultControl(key, operation.WireFault); err != nil {
+		return fmt.Errorf("validate %s wire fault: %w", key, err)
+	}
 	if key == "workload/prepare" {
 		return validateWorkloadPayload(operation.Payload)
 	}
@@ -214,6 +219,44 @@ func ValidateOperation(operation Operation) error {
 		if stringValue(object["seed_fixture_id"]) != "SEEDFIX-PORTABLE-SHARED-1000-001" {
 			return errors.New("validate artifact/install-portable-seed payload: seed_fixture_id is invalid")
 		}
+	}
+	if operation.WireFault != nil {
+		if _, _, err := TemporaryUnavailablePushTarget(operation); err != nil {
+			return fmt.Errorf("validate %s wire fault target: %w", key, err)
+		}
+	}
+	return nil
+}
+
+// TemporaryUnavailablePushTarget returns the request targeted by the one fixed native push fault.
+func TemporaryUnavailablePushTarget(operation Operation) (PushWireFaultTarget, bool, error) {
+	if operation.WireFault == nil {
+		return PushWireFaultTarget{}, false, nil
+	}
+	if err := validateWireFaultControl(OperationKey(operation), operation.WireFault); err != nil {
+		return PushWireFaultTarget{}, false, err
+	}
+	var payload struct {
+		Request struct {
+			ClientID string `json:"client_id"`
+			BatchID  string `json:"batch_id"`
+		} `json:"request"`
+	}
+	if err := jsonstrict.Decode(operation.Payload, &payload); err != nil || payload.Request.ClientID == "" || payload.Request.BatchID == "" {
+		return PushWireFaultTarget{}, false, errors.New("push wire-fault target is invalid")
+	}
+	return PushWireFaultTarget{ClientID: payload.Request.ClientID, BatchID: payload.Request.BatchID}, true, nil
+}
+
+func validateWireFaultControl(key string, control *WireFaultControl) error {
+	if control == nil {
+		return nil
+	}
+	if key != "push/submit" {
+		return errors.New("wire fault requires push/submit")
+	}
+	if control.Mode != wireFaultTemporaryUnavailable {
+		return errors.New("wire fault mode is unsupported")
 	}
 	return nil
 }

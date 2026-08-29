@@ -3,7 +3,11 @@ package kotlin
 import (
 	"context"
 	"encoding/json"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -59,6 +63,82 @@ func TestAdapterReversePortSelectsOnlyLoopbackServers(t *testing.T) {
 		if port != test.port || required != test.required {
 			t.Errorf("adapter reverse for %q = %d, %t", test.serverURL, port, required)
 		}
+	}
+}
+
+func TestPlatformTemporaryUnavailablePushFaultIsTargetedAndOneShot(t *testing.T) {
+	upstreamCalls := 0
+	upstream := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
+		upstreamCalls++
+		response.Header().Set("Content-Type", "application/json")
+		_, _ = response.Write([]byte(`{"upstream":true}`))
+	}))
+	defer upstream.Close()
+	platform, err := NewPlatform(Config{
+		ADBPath:                  os.Args[0],
+		DeviceSerial:             "emulator-5554",
+		ApplicationAPKPath:       writeFixture(t, "application.apk"),
+		InstrumentationAPKPath:   writeFixture(t, "instrumentation.apk"),
+		ApplicationID:            "com.trainstar.synchro.conformance",
+		InstrumentationComponent: "com.trainstar.test/androidx.test.runner.AndroidJUnitRunner",
+		ServerURL:                upstream.URL,
+		AuthToken:                func(context.Context, Client) (string, error) { return "token", nil },
+		Platform:                 "android",
+		AppVersion:               "0.3.0",
+	})
+	if err != nil {
+		t.Fatalf("create Kotlin Android platform: %v", err)
+	}
+	defer func() {
+		if err := platform.Close(context.Background()); err != nil {
+			t.Fatalf("close Kotlin Android platform: %v", err)
+		}
+	}()
+	operation := scenarios.Operation{
+		ContractOperation: "push",
+		Name:              "submit",
+		Payload:           temporaryUnavailablePushDispatchPayload(),
+		WireFault:         &scenarios.WireFaultControl{Mode: "temporary_unavailable"},
+	}
+	release, armed, err := platform.armTemporaryUnavailablePush([]scenarios.Operation{operation})
+	if err != nil || !armed {
+		t.Fatalf("arm temporary unavailable push fault: armed %t, error %v", armed, err)
+	}
+	defer release()
+
+	postRaw := func(payload string) (*http.Response, []byte) {
+		t.Helper()
+		response, err := http.Post(platform.config.ServerURL+"/sync/push", "application/json", strings.NewReader(payload))
+		if err != nil {
+			t.Fatalf("post proxied push: %v", err)
+		}
+		body, err := io.ReadAll(response.Body)
+		response.Body.Close()
+		if err != nil {
+			t.Fatalf("read proxied push response: %v", err)
+		}
+		return response, body
+	}
+	post := func(clientID, batchID string) (*http.Response, []byte) {
+		t.Helper()
+		return postRaw(`{"client_id":"` + clientID + `","batch_id":"` + batchID + `"}`)
+	}
+
+	response, _ := postRaw(`{"client_id":"client-a"}`)
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("malformed non-targeted push status = %d, want 200", response.StatusCode)
+	}
+	response, _ = post("client-b", "batch-a")
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("non-targeted push status = %d, want 200", response.StatusCode)
+	}
+	response, body := post("client-a", "batch-a")
+	if response.StatusCode != http.StatusServiceUnavailable || response.Header.Get("Retry-After") != "5" || !strings.Contains(string(body), `"temporary_unavailable"`) {
+		t.Fatalf("temporary unavailable response = status %d, retry-after %q, body %q", response.StatusCode, response.Header.Get("Retry-After"), body)
+	}
+	response, _ = post("client-a", "batch-a")
+	if response.StatusCode != http.StatusOK || upstreamCalls != 3 {
+		t.Fatalf("one-shot push result = status %d, upstream calls %d", response.StatusCode, upstreamCalls)
 	}
 }
 
@@ -420,4 +500,12 @@ func TestForgedCursorBindsToDeterministicTransportOverride(t *testing.T) {
 
 func pointer[T any](value T) *T {
 	return &value
+}
+
+func temporaryUnavailablePushDispatchPayload() json.RawMessage {
+	return json.RawMessage(`{
+		"authenticated_user_id":"user-a",
+		"request":{"client_id":"client-a","client_generation":1,"batch_id":"batch-a","schema":{"version":1,"hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},"mutations":[]},
+		"delivery":"transport_failure","commit_lsn":"1","end_lsn":"2"
+	}`)
 }

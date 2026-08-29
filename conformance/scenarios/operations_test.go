@@ -141,3 +141,36 @@ func TestValidateOperationRejectsUnknownNestedMembers(t *testing.T) {
 		})
 	}
 }
+
+func TestTemporaryUnavailablePushWireFaultIsClosedAndTargeted(t *testing.T) {
+	operation := Operation{
+		ContractOperation: "push",
+		Name:              "submit",
+		Payload: []byte(`{
+			"authenticated_user_id":"user-a",
+			"request":{"client_id":"client-a","client_generation":1,"batch_id":"batch-a","schema":{"version":1,"hash":"hash"},"mutations":[]},
+			"delivery":"transport_failure","commit_lsn":"1","end_lsn":"2"
+		}`),
+		WireFault: &WireFaultControl{Mode: wireFaultTemporaryUnavailable},
+	}
+	if err := ValidateOperation(operation); err != nil {
+		t.Fatalf("validate temporary unavailable wire fault: %v", err)
+	}
+	target, enabled, err := TemporaryUnavailablePushTarget(operation)
+	if err != nil || !enabled || target.ClientID != "client-a" || target.BatchID != "batch-a" {
+		t.Fatalf("temporary unavailable target = %#v, %t, %v", target, enabled, err)
+	}
+
+	unsupported := operation
+	unsupported.WireFault = &WireFaultControl{Mode: "other"}
+	if err := ValidateOperation(unsupported); err == nil {
+		t.Fatal("unsupported wire fault mode passed validation")
+	}
+
+	nonPush := operation
+	nonPush.ContractOperation = "pull"
+	nonPush.Name = "request-page"
+	if err := ValidateOperation(nonPush); err == nil {
+		t.Fatal("wire fault on non-push operation passed validation")
+	}
+}

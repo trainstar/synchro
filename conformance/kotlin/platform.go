@@ -10,6 +10,9 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"net/http"
+	"net/http/httptest"
+	"net/http/httputil"
 	"net/url"
 	"reflect"
 	"sort"
@@ -18,11 +21,15 @@ import (
 	"sync"
 	"time"
 
+	"github.com/trainstar/synchro/conformance/faults"
 	"github.com/trainstar/synchro/conformance/internal/jsonstrict"
 	"github.com/trainstar/synchro/conformance/scenarios"
 )
 
-const forgedRebuildCursor = "native-forged-rebuild-cursor"
+const (
+	forgedRebuildCursor            = "native-forged-rebuild-cursor"
+	maximumProxiedPushRequestBytes = 16 << 20
+)
 
 // Client identifies one durable Android database and its authenticated owner.
 type Client struct {
@@ -128,6 +135,9 @@ type Platform struct {
 	closed    bool
 	installed bool
 	clients   map[string]*platformClient
+
+	responseProxy            *httptest.Server
+	temporaryUnavailablePush *scenarios.PushWireFaultTarget
 }
 
 type platformClient struct {
@@ -176,7 +186,137 @@ func NewPlatform(config Config) (*Platform, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Platform{config: normalized, clients: make(map[string]*platformClient)}, nil
+	platform := &Platform{config: normalized, clients: make(map[string]*platformClient)}
+	if err := platform.startResponseProxy(); err != nil {
+		return nil, err
+	}
+	return platform, nil
+}
+
+func (p *Platform) startResponseProxy() error {
+	upstream, err := url.Parse(p.config.ServerURL)
+	if err != nil {
+		return errors.New("Kotlin Android response proxy upstream is invalid")
+	}
+	proxy := httputil.NewSingleHostReverseProxy(upstream)
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		if p.serveTemporaryUnavailablePush(response, request) {
+			return
+		}
+		proxy.ServeHTTP(response, request)
+	}))
+	p.responseProxy = server
+	p.config.ServerURL = server.URL
+	return nil
+}
+
+func (p *Platform) serveTemporaryUnavailablePush(response http.ResponseWriter, request *http.Request) bool {
+	if !strings.HasSuffix(request.URL.Path, "/sync/push") || !p.hasTemporaryUnavailablePush() {
+		return false
+	}
+	target, err := proxiedPushTarget(request)
+	if err != nil {
+		return false
+	}
+	if !p.claimTemporaryUnavailablePush(target) {
+		return false
+	}
+	injected := faults.NewTemporaryUnavailableResponse(request)
+	defer injected.Body.Close()
+	copyInjectedResponse(response, injected)
+	return true
+}
+
+func proxiedPushTarget(request *http.Request) (scenarios.PushWireFaultTarget, error) {
+	if request.Body == nil {
+		return scenarios.PushWireFaultTarget{}, errors.New("Kotlin Android proxied push body is absent")
+	}
+	body, err := io.ReadAll(io.LimitReader(request.Body, maximumProxiedPushRequestBytes+1))
+	request.Body.Close()
+	if err != nil || len(body) > maximumProxiedPushRequestBytes {
+		return scenarios.PushWireFaultTarget{}, errors.New("Kotlin Android proxied push body is invalid")
+	}
+	request.Body = io.NopCloser(bytes.NewReader(body))
+	request.ContentLength = int64(len(body))
+	if request.Header != nil {
+		request.Header.Set("Content-Length", strconv.Itoa(len(body)))
+	}
+	var payload struct {
+		ClientID string `json:"client_id"`
+		BatchID  string `json:"batch_id"`
+	}
+	if err := json.Unmarshal(body, &payload); err != nil || payload.ClientID == "" || payload.BatchID == "" {
+		return scenarios.PushWireFaultTarget{}, errors.New("Kotlin Android proxied push target is invalid")
+	}
+	return scenarios.PushWireFaultTarget{ClientID: payload.ClientID, BatchID: payload.BatchID}, nil
+}
+
+func copyInjectedResponse(writer http.ResponseWriter, response *http.Response) {
+	for name, values := range response.Header {
+		for _, value := range values {
+			writer.Header().Add(name, value)
+		}
+	}
+	writer.WriteHeader(response.StatusCode)
+	_, _ = io.Copy(writer, response.Body)
+}
+
+func (p *Platform) hasTemporaryUnavailablePush() bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.temporaryUnavailablePush != nil
+}
+
+func (p *Platform) claimTemporaryUnavailablePush(target scenarios.PushWireFaultTarget) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	armed := p.temporaryUnavailablePush
+	if armed == nil || armed.ClientID != target.ClientID || armed.BatchID != target.BatchID {
+		return false
+	}
+	p.temporaryUnavailablePush = nil
+	return true
+}
+
+func (p *Platform) armTemporaryUnavailablePush(operations []scenarios.Operation) (func(), bool, error) {
+	target, enabled, err := temporaryUnavailablePushTargetForOperations(operations)
+	if err != nil || !enabled {
+		return nil, enabled, err
+	}
+	p.mu.Lock()
+	if p.closed || p.temporaryUnavailablePush != nil {
+		p.mu.Unlock()
+		return nil, false, errors.New("Kotlin Android temporary-unavailable push fault is unavailable")
+	}
+	p.temporaryUnavailablePush = &target
+	p.mu.Unlock()
+	return func() { p.clearTemporaryUnavailablePush(target) }, true, nil
+}
+
+func (p *Platform) clearTemporaryUnavailablePush(target scenarios.PushWireFaultTarget) {
+	p.mu.Lock()
+	if armed := p.temporaryUnavailablePush; armed != nil && armed.ClientID == target.ClientID && armed.BatchID == target.BatchID {
+		p.temporaryUnavailablePush = nil
+	}
+	p.mu.Unlock()
+}
+
+func temporaryUnavailablePushTargetForOperations(operations []scenarios.Operation) (scenarios.PushWireFaultTarget, bool, error) {
+	var target scenarios.PushWireFaultTarget
+	for _, operation := range operations {
+		candidate, enabled, err := scenarios.TemporaryUnavailablePushTarget(operation)
+		if err != nil {
+			return scenarios.PushWireFaultTarget{}, false, err
+		}
+		if !enabled {
+			continue
+		}
+		if target.ClientID != "" {
+			return scenarios.PushWireFaultTarget{}, false, errors.New("Kotlin Android synchronization has multiple temporary-unavailable push faults")
+		}
+		target = candidate
+	}
+	return target, target.ClientID != "", nil
 }
 
 func normalizePlatformConfig(config Config) (Config, error) {
@@ -508,7 +648,17 @@ func (p *Platform) Synchronize(ctx context.Context, request SynchronizeRequest) 
 	if err := state.available("synchronization"); err != nil {
 		return SynchronizationResult{}, err
 	}
+	releaseFault, faultArmed, err := p.armTemporaryUnavailablePush(request.Operations)
+	if err != nil {
+		return SynchronizationResult{}, err
+	}
+	if faultArmed {
+		defer releaseFault()
+	}
 	if dropBatchID != "" {
+		if faultArmed {
+			return SynchronizationResult{}, errors.New("Kotlin Android response loss cannot combine with a temporary-unavailable push fault")
+		}
 		_, dropLast, _, dispatchErr := requestDispatch(request.Operations[len(request.Operations)-1])
 		if dispatchErr != nil || !dropLast {
 			return SynchronizationResult{}, errors.New("Kotlin Android response-loss request must end its public call")
@@ -702,6 +852,11 @@ func (p *Platform) BeginCall(ctx context.Context, request CallRequest) (ClientCa
 	if dropBatchID != "" {
 		return ClientCallResult{}, errors.New("Kotlin Android response loss requires grouped synchronization")
 	}
+	if _, enabled, err := temporaryUnavailablePushTargetForOperations(request.Operations); err != nil {
+		return ClientCallResult{}, err
+	} else if enabled {
+		return ClientCallResult{}, errors.New("Kotlin Android temporary-unavailable push fault requires synchronous synchronization")
+	}
 	operationClass, _, _, err := requestDispatch(request.Operations[0])
 	if err != nil {
 		return ClientCallResult{}, err
@@ -772,6 +927,11 @@ func (p *Platform) AwaitStep(ctx context.Context, request AwaitRequest) (StepObs
 	}
 	if dropBatchID != "" {
 		return StepObservation{}, errors.New("Kotlin Android response loss requires grouped synchronization")
+	}
+	if _, enabled, err := temporaryUnavailablePushTargetForOperations([]scenarios.Operation{request.Operation}); err != nil {
+		return StepObservation{}, err
+	} else if enabled {
+		return StepObservation{}, errors.New("Kotlin Android temporary-unavailable push fault requires synchronous synchronization")
 	}
 	operationClass, _, _, err := requestDispatch(request.Operation)
 	if err != nil {
@@ -2669,6 +2829,8 @@ func (p *Platform) Close(ctx context.Context) error {
 		return nil
 	}
 	p.closed = true
+	proxy := p.responseProxy
+	p.responseProxy = nil
 	clients := make([]*platformClient, 0, len(p.clients))
 	for _, client := range p.clients {
 		clients = append(clients, client)
@@ -2687,6 +2849,9 @@ func (p *Platform) Close(ctx context.Context) error {
 				failures = append(failures, err)
 			}
 		}
+	}
+	if proxy != nil {
+		proxy.Close()
 	}
 	return errors.Join(failures...)
 }
