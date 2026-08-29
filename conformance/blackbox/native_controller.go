@@ -3165,5 +3165,19 @@ func describeNativeRelationEvents(ctx context.Context, database *sql.DB, relatio
 	if len(poison) == 0 {
 		poison = append(poison, "none")
 	}
-	return fmt.Sprintf("%s; source rows %d; max wal registry %d; transactions %s; poison %s", strings.Join(entries, " "), sourceRows, registry, strings.Join(transactions, " "), strings.Join(poison, " "))
+	worker := "unavailable"
+	var state, workerLSN string
+	var workerRegistry int64
+	if err := database.QueryRowContext(diagnostic, `
+		SELECT state, registry_generation, COALESCE(materialized_commit_lsn::text, 'none')
+		FROM synchro.sync_wal_worker_state
+		ORDER BY heartbeat_at DESC
+		LIMIT 1`).Scan(&state, &workerRegistry, &workerLSN); err == nil {
+		worker = fmt.Sprintf("%s:gen=%d:lsn=%s", state, workerRegistry, workerLSN)
+	}
+	var pending int64
+	if err := database.QueryRowContext(diagnostic, "SELECT count(*) FROM synchro.sync_registry_generations WHERE lifecycle <> 'active'").Scan(&pending); err != nil {
+		pending = -1
+	}
+	return fmt.Sprintf("%s; source rows %d; max wal registry %d; transactions %s; poison %s; worker %s; non-active generations %d", strings.Join(entries, " "), sourceRows, registry, strings.Join(transactions, " "), strings.Join(poison, " "), worker, pending)
 }
