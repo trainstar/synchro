@@ -668,9 +668,7 @@ test-swift-performance: conformance-mod-download build-swift-native-runner build
 		cd conformance; \
 		SYNCHRO_SWIFT_NATIVE_RUNNER="$$runner_dir/synchro-native-runner" \
 		SYNCHRO_SEED_TOOL="$(CURDIR)/$(SEED_BINARY)" \
-			GOFLAGS= GOWORK=off go run ./cmd/testresult exact \
-			-test TestRealSwiftPerformance \
-			-expect target_pass \
+			GOFLAGS= GOWORK=off go run ./cmd/testresult suite \
 			-- go test -tags swiftintegration -json ./swift -count=1 -timeout=30m \
 			-run '^TestRealSwiftPerformance$$' -args --provision --install
 
