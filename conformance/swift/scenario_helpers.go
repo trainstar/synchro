@@ -339,35 +339,58 @@ func validateSwiftStateProjection(expected, actual scenarios.StateFacts) error {
 	return nil
 }
 
-// swiftStateProjectionDifference reports a bounded window around the first
-// difference. The comparison alone cannot name the diverging fact.
+// swiftStateProjectionDifference names the first projected fact family that
+// differs. The projection comparison alone cannot name it, and the observed
+// state carries families the authored model never declares.
 func swiftStateProjectionDifference(expected, actual scenarios.StateFacts) string {
-	expectedJSON, expectedErr := json.Marshal(expected)
-	actualJSON, actualErr := json.Marshal(actual)
-	if expectedErr != nil || actualErr != nil {
-		return "state facts are not encodable"
+	for _, family := range []struct {
+		name string
+		want any
+		got  any
+	}{
+		{"transaction_count", expected.TransactionCount, actual.TransactionCount},
+		{"row_count", expected.RowCount, actual.RowCount},
+		{"scope_count", expected.ScopeCount, actual.ScopeCount},
+		{"rebuild_count", expected.RebuildCount, actual.RebuildCount},
+		{"batch_count", expected.BatchCount, actual.BatchCount},
+		{"mutation_count", expected.MutationCount, actual.MutationCount},
+		{"configured_limits", expected.ConfiguredLimits, actual.ConfiguredLimits},
+		{"registry", expected.Registry, actual.Registry},
+		{"stream", expected.Stream, actual.Stream},
+		{"transactions", expected.Transactions, actual.Transactions},
+		{"rows", expected.Rows, actual.Rows},
+		{"scopes", expected.Scopes, actual.Scopes},
+		{"poison", expected.Poison, actual.Poison},
+		{"rebuilds", expected.Rebuilds, actual.Rebuilds},
+		{"clients", expected.Clients, actual.Clients},
+	} {
+		if swiftProjectedFamilyDeclared(family.want) && !reflect.DeepEqual(family.want, family.got) {
+			return fmt.Sprintf("%s authored %s observed %s", family.name, boundedSwiftStateValue(family.want), boundedSwiftStateValue(family.got))
+		}
 	}
-	index := 0
-	for index < len(expectedJSON) && index < len(actualJSON) && expectedJSON[index] == actualJSON[index] {
-		index++
-	}
-	start := index - 120
-	if start < 0 {
-		start = 0
-	}
-	return fmt.Sprintf("first difference at byte %d\n  authored: %s\n  observed: %s",
-		index,
-		boundedSwiftStateWindow(expectedJSON, start),
-		boundedSwiftStateWindow(actualJSON, start))
+	return "no projected family differs"
 }
 
-func boundedSwiftStateWindow(encoded []byte, start int) string {
-	if start >= len(encoded) {
-		return "(end of state)"
+func swiftProjectedFamilyDeclared(value any) bool {
+	if value == nil {
+		return false
 	}
-	end := start + 320
-	if end > len(encoded) {
-		end = len(encoded)
+	reflected := reflect.ValueOf(value)
+	switch reflected.Kind() {
+	case reflect.Ptr, reflect.Slice, reflect.Map:
+		return !reflected.IsNil()
+	default:
+		return true
 	}
-	return string(encoded[start:end])
+}
+
+func boundedSwiftStateValue(value any) string {
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		return "(not encodable)"
+	}
+	if len(encoded) > 400 {
+		return string(encoded[:400]) + "..."
+	}
+	return string(encoded)
 }

@@ -947,6 +947,20 @@ func (c *NativeController) ApplyStep(ctx context.Context, operation scenarios.Op
 		if err := c.rebindSchemaAfterCompositionChange(ctx); err != nil {
 			return NativeStepObservation{}, err
 		}
+		// The authored registry generation advances with each activation. The
+		// captured registry fact reports the generation the scenario has
+		// reached, not the one its setup installed.
+		var activation struct {
+			RegistryGeneration uint64 `json:"registry_generation"`
+		}
+		if err := jsonstrict.Decode(operation.Payload, &activation); err != nil || activation.RegistryGeneration == 0 {
+			return NativeStepObservation{}, errors.New("native controller membership activation payload is invalid")
+		}
+		c.mu.Lock()
+		if c.installation != nil {
+			c.installation.authoredRegistryGeneration = activation.RegistryGeneration
+		}
+		c.mu.Unlock()
 		return nativeSuccess(), nil
 	case "model/expire-client-generation":
 		return c.expireClientGeneration(ctx, operation)
