@@ -164,7 +164,7 @@
         "user_id": { "type": "string", "minLength": 1 },
         "client_id": { "type": "string", "minLength": 1 },
         "call_id": { "$ref": "#/$defs/nativeCallId" },
-        "stage": { "type": "string", "enum": ["synchronous", "begin", "await-step", "await-call"] },
+        "stage": { "type": "string", "enum": ["synchronous", "begin", "observe", "await-step", "await-call"] },
         "method": { "type": "string", "enum": ["start", "sync-now", "retry-after-error", "reset-schema-and-start"] },
         "completion": { "type": "string", "enum": ["idle", "blocked", "error"] },
         "workload": { "$ref": "#/$defs/nativeWorkloadParameters" }

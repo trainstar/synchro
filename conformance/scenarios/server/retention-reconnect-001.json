@@ -1021,8 +1021,7 @@
         "user_id": "user-a",
         "client_id": "client-a",
         "call_id": "generation_renewal",
-        "stage": "begin",
-        "method": "retry-after-error"
+        "stage": "observe"
       },
       "operation": {
         "contract_operation": "push",

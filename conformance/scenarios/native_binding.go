@@ -32,6 +32,10 @@ var nativeCallStages = stringSet([]string{
 	"await-call",
 	"await-step",
 	"begin",
+	// observe opens a call the client starts on its own. The contract requires
+	// the client to recover from some conditions without an application call,
+	// so no method begins that work and the harness only observes it.
+	"observe",
 	"synchronous",
 })
 
@@ -497,7 +501,7 @@ func (v *scenarioValidator) validateNativeStepBindings() {
 				}
 				currentSynchronousCall = callID
 			}
-		case "begin":
+		case "begin", "observe":
 			if currentSynchronousCall != "" {
 				closedCalls[currentSynchronousCall] = struct{}{}
 				currentSynchronousCall = ""
@@ -507,6 +511,9 @@ func (v *scenarioValidator) validateNativeStepBindings() {
 			}
 			if _, closed := closedCalls[callID]; closed {
 				v.add("%s native call %q for client %q resumes after another call or binding", v.scenario.ID, callID, binding.ClientID)
+			}
+			if binding.Stage == "observe" && binding.Method != "" {
+				v.add("%s native call %q is client-initiated and must declare no method", v.scenario.ID, callID)
 			}
 			activeStagedCall = callID
 		case "await-step", "await-call":
@@ -550,8 +557,12 @@ func (v *scenarioValidator) validateNativeCallStages(callID NativeCallID, group 
 		}
 		return
 	}
-	if group.stages[0] != "begin" {
+	// A staged call opens with begin when an application drives it, and with
+	// observe when the client starts the work on its own.
+	first := group.stages[0]
+	if first != "begin" && first != "observe" {
 		v.add("%s native call %q must begin with stage %q", v.scenario.ID, callID, "begin")
+		first = "begin"
 	}
 	if group.stages[len(group.stages)-1] != "await-call" {
 		v.add("%s native call %q must end with one terminal await-call stage", v.scenario.ID, callID)
@@ -559,7 +570,7 @@ func (v *scenarioValidator) validateNativeCallStages(callID NativeCallID, group 
 	for index, stage := range group.stages {
 		want := "await-step"
 		if index == 0 {
-			want = "begin"
+			want = first
 		} else if index == len(group.stages)-1 {
 			want = "await-call"
 		}
