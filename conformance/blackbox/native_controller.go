@@ -42,10 +42,13 @@ type NativeControllerConfig struct {
 
 // NativeController applies authored server operations to one real black-box harness.
 type NativeController struct {
-	harness     *Harness
-	httpClient  *http.Client
-	now         func() time.Time
-	waitTimeout time.Duration
+	// crossScopeConfigured records that a membership stage reconfigured the
+	// shared fixture table, so the close path restores it.
+	crossScopeConfigured bool
+	harness              *Harness
+	httpClient           *http.Client
+	now                  func() time.Time
+	waitTimeout          time.Duration
 
 	mu             sync.Mutex
 	closed         bool
@@ -943,6 +946,7 @@ func (c *NativeController) ApplyStep(ctx context.Context, operation scenarios.Op
 			if c.installation != nil {
 				c.installation.pendingCompositionChange = true
 			}
+			c.crossScopeConfigured = true
 			c.mu.Unlock()
 			if err := c.bindStagedSharedScope(); err != nil {
 				return NativeStepObservation{}, err
@@ -3058,7 +3062,18 @@ func (c *NativeController) Close(ctx context.Context) error {
 		return nil
 	}
 	c.closed = true
+	configured := c.crossScopeConfigured
+	c.crossScopeConfigured = false
 	c.mu.Unlock()
+	// The cross-scope registration reconfigures a shared fixture table and
+	// registers a shared scope. It must not outlive the scenario that staged
+	// it, or a later scenario inherits the reconfiguration.
+	if configured {
+		if err := c.harness.Operator().RestoreCrossScopeTable(ctx); err != nil {
+			_ = c.harness.Close(ctx)
+			return fmt.Errorf("restore native cross-scope registration: %w", err)
+		}
+	}
 	return c.harness.Close(ctx)
 }
 
