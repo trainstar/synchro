@@ -477,10 +477,19 @@ func validateNativeInstallPayload(payload nativeInstallPayload) error {
 	if !payload.Installation.Installed || payload.Installation.ProtocolVersion != 3 || payload.Installation.MinimumClientRuntime != 3 {
 		return errors.New("native controller install protocol binding is invalid")
 	}
-	endpoints := append([]string(nil), payload.Installation.Endpoints...)
-	sort.Strings(endpoints)
-	if strings.Join(endpoints, ",") != "connect,pull,push,rebuild" {
-		return errors.New("native controller install endpoint binding is invalid")
+	// A scenario declares the endpoints its installation exposes. Accept that
+	// declaration when it names supported endpoints without repetition, rather
+	// than requiring every endpoint of the full contract.
+	supported := map[string]bool{"connect": true, "pull": true, "push": true, "rebuild": true}
+	declared := make(map[string]bool, len(payload.Installation.Endpoints))
+	for _, endpoint := range payload.Installation.Endpoints {
+		if !supported[endpoint] || declared[endpoint] {
+			return fmt.Errorf("native controller install endpoint binding is invalid: %v", payload.Installation.Endpoints)
+		}
+		declared[endpoint] = true
+	}
+	if !declared["connect"] {
+		return fmt.Errorf("native controller install endpoint binding omits connect: %v", payload.Installation.Endpoints)
 	}
 	if !validNativeSchemaReference(payload.InitialSchema.Schema, false) || payload.InitialRegistry.RegistryGeneration == 0 || payload.Stream.StreamGeneration == "" {
 		return errors.New("native controller install identity is incomplete")

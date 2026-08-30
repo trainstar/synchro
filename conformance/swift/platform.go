@@ -252,7 +252,11 @@ func (p *Platform) claimTemporaryUnavailablePush(target scenarios.PushWireFaultT
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	armed := p.temporaryUnavailablePush
-	if armed == nil || armed.ClientID != target.ClientID || armed.BatchID != target.BatchID {
+	// The authored batch identity is an alias. The client mints its own batch
+	// identity, so the armed identity never equals the observed one. The fault
+	// is armed for one client across one call, so the client identity selects
+	// the intended push.
+	if armed == nil || armed.ClientID != target.ClientID {
 		return false
 	}
 	p.temporaryUnavailablePush = nil

@@ -191,7 +191,15 @@ func runRetentionReconnectInitialCall(ctx context.Context, scenario scenarios.Sc
 		return RetentionReconnectCall{}, err
 	}
 	if call.Completion != retentionReconnectNativeCompletion(wire) {
-		return RetentionReconnectCall{}, errors.New("Swift retention-reconnect sealed push completion differs from its authored wire expectation")
+		outcomes := make([]string, 0, len(call.transportObservations))
+		for _, observation := range call.transportObservations {
+			entry := fmt.Sprintf("%s:%d", observation.OperationClass, observation.StatusCode)
+			if observation.ErrorCode != nil {
+				entry += ":" + *observation.ErrorCode
+			}
+			outcomes = append(outcomes, entry)
+		}
+		return RetentionReconnectCall{}, fmt.Errorf("Swift retention-reconnect sealed push completion = %q, want %q; observed %v", call.Completion, retentionReconnectNativeCompletion(wire), outcomes)
 	}
 	pushes := make([]transportObservation, 0, 1)
 	for _, observed := range call.transportObservations {
