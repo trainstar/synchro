@@ -101,7 +101,9 @@ type Platform struct {
 
 	responseProxy *httptest.Server
 	// temporaryUnavailableMisses records why an armed push fault did not apply.
-	temporaryUnavailableMisses    []string
+	temporaryUnavailableMisses []string
+	// proxiedPushCount counts every push the response proxy observed.
+	proxiedPushCount              int
 	temporaryUnavailablePush      *scenarios.PushWireFaultTarget
 	rebuildCursorOverride         string
 	rebuildCursorOverrideClientID string
@@ -197,6 +199,7 @@ func (p *Platform) serveTemporaryUnavailablePush(response http.ResponseWriter, r
 	if !strings.HasSuffix(request.URL.Path, "/sync/push") {
 		return false
 	}
+	p.countProxiedPush()
 	if !p.hasTemporaryUnavailablePush() {
 		p.recordTemporaryUnavailableMiss("push observed with no armed fault")
 		return false
@@ -2430,6 +2433,22 @@ func (p *Platform) recordTemporaryUnavailableMiss(reason string) {
 	if len(p.temporaryUnavailableMisses) < 8 {
 		p.temporaryUnavailableMisses = append(p.temporaryUnavailableMisses, reason)
 	}
+}
+
+// countProxiedPush counts every push the response proxy observed. The client
+// observation list alone cannot show whether an injected response reached the
+// client or whether the push never appeared in that list.
+func (p *Platform) countProxiedPush() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.proxiedPushCount++
+}
+
+// ProxiedPushCount reports how many pushes the response proxy observed.
+func (p *Platform) ProxiedPushCount() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.proxiedPushCount
 }
 
 // TemporaryUnavailablePushMisses reports why an armed push fault did not apply.

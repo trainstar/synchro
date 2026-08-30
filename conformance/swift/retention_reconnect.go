@@ -199,7 +199,10 @@ func runRetentionReconnectInitialCall(ctx context.Context, scenario scenarios.Sc
 			}
 			outcomes = append(outcomes, entry)
 		}
-		return RetentionReconnectCall{}, fmt.Errorf("Swift retention-reconnect sealed push completion = %q, want %q; observed %v; fault misses %v", call.Completion, retentionReconnectNativeCompletion(wire), outcomes, platform.TemporaryUnavailablePushMisses())
+		// The proxy push count separates a client that never observed the
+		// injected response from a push that never reached the client.
+		return RetentionReconnectCall{}, fmt.Errorf("Swift retention-reconnect sealed push completion = %q, want %q; observed %v; proxy saw %d pushes; fault misses %v",
+			call.Completion, retentionReconnectNativeCompletion(wire), outcomes, platform.ProxiedPushCount(), platform.TemporaryUnavailablePushMisses())
 	}
 	pushes := make([]transportObservation, 0, 1)
 	for _, observed := range call.transportObservations {
