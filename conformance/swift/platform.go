@@ -194,7 +194,11 @@ func (p *Platform) startResponseProxy() error {
 }
 
 func (p *Platform) serveTemporaryUnavailablePush(response http.ResponseWriter, request *http.Request) bool {
-	if !strings.HasSuffix(request.URL.Path, "/sync/push") || !p.hasTemporaryUnavailablePush() {
+	if !strings.HasSuffix(request.URL.Path, "/sync/push") {
+		return false
+	}
+	if !p.hasTemporaryUnavailablePush() {
+		p.recordTemporaryUnavailableMiss("push observed with no armed fault")
 		return false
 	}
 	target, err := proxiedPushTarget(request)
