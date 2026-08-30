@@ -1096,11 +1096,29 @@ func multiScopeProvenanceRuntimeScopeSetVersion(plan multiScopeProvenancePlan, c
 	return uint64(*result.transportObservations[0].RequestFacts.ScopeSetVersion), nil
 }
 
+// multiScopeProvenanceRebuildSummary names each observed rebuild session by its
+// client and scope so a count difference identifies the responsible client.
+func multiScopeProvenanceRebuildSummary(rebuilds []scenarios.RebuildFact) string {
+	if len(rebuilds) == 0 {
+		return "[]"
+	}
+	entries := make([]string, 0, len(rebuilds))
+	for _, rebuild := range rebuilds {
+		entries = append(entries, fmt.Sprintf("%s/%s/%s:%s", rebuild.UserID, rebuild.ClientID, rebuild.ScopeID, rebuild.Status))
+	}
+	sort.Strings(entries)
+	return "[" + strings.Join(entries, " ") + "]"
+}
+
 func validateMultiScopeProvenanceState(plan multiScopeProvenancePlan, server, actual scenarios.StateFacts, evidence multiScopeProvenanceIdentityEvidence) error {
 	serverExpected := scenarios.CloneStateFacts(plan.Expected)
 	serverExpected.Clients = nil
 	if err := validateSwiftStateProjection(serverExpected, server); err != nil {
-		return fmt.Errorf("Swift multi-scope provenance server state differs from the authored model: %w", err)
+		// A rebuild-count difference is a difference in which client rebuilt
+		// which scope. The count alone cannot name the extra session, so list
+		// the observed sessions by the identities the scenario authored.
+		return fmt.Errorf("Swift multi-scope provenance server state differs from the authored model: %w; observed rebuild sessions %s",
+			err, multiScopeProvenanceRebuildSummary(server.Rebuilds))
 	}
 	if len(evidence.Resolutions) == 0 {
 		return errors.New("Swift multi-scope provenance identity resolutions are absent")
