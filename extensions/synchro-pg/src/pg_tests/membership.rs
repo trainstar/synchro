@@ -1183,3 +1183,50 @@ fn membership_activation_keeps_digests_for_later_rows() {
         divergences.join("; ")
     );
 }
+
+/// A membership activation changes scope membership. It must not change the
+/// published table shape. This test reports the exact manifest difference so a
+/// change is visible as evidence instead of as a version number.
+#[pg_test]
+fn membership_activation_keeps_the_published_manifest() {
+    let fixture = membership_dependency_fixture();
+    let before: pgrx::JsonB = Spi::get_one(
+        "SELECT jsonb_build_object(
+             'version', schema_version,
+             'transition', transition_class,
+             'tables', (canonical_manifest_body::jsonb) -> 'tables')
+         FROM synchro.sync_schema_manifest ORDER BY schema_version DESC LIMIT 1",
+    )
+    .expect("load manifest before activation")
+    .expect("manifest before activation");
+
+    let body = format!(
+        "SELECT {} WHERE old_row ? 'target_id'
+         UNION ALL
+         SELECT {} WHERE new_row ? 'target_id'",
+        target_row_expression(&fixture, "(old_row ->> 'target_id')::integer"),
+        target_row_expression(&fixture, "(new_row ->> 'target_id')::integer"),
+    );
+    create_impact_function(&fixture, &body, true, true);
+    register_dependency(&fixture, 2);
+    activate_pending_registry_for_test();
+    enable_dependent_target_membership(&fixture);
+    activate_pending_registry_for_test();
+
+    let after: pgrx::JsonB = Spi::get_one(
+        "SELECT jsonb_build_object(
+             'version', schema_version,
+             'transition', transition_class,
+             'tables', (canonical_manifest_body::jsonb) -> 'tables')
+         FROM synchro.sync_schema_manifest ORDER BY schema_version DESC LIMIT 1",
+    )
+    .expect("load manifest after activation")
+    .expect("manifest after activation");
+    cleanup_membership_fixture(&fixture);
+
+    assert_eq!(
+        before.0["tables"], after.0["tables"],
+        "membership activation changed the published table shape: before version {} after version {}",
+        before.0["version"], after.0["version"]
+    );
+}

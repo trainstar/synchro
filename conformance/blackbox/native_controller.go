@@ -82,15 +82,18 @@ type nativeInstallationBinding struct {
 	runtimeRegistryGeneration  int64
 	authoredSchemas            map[string]nativeSchemaReference
 	runtimeSchemas             map[string]nativeSchemaReference
-	tables                     map[string]nativeTableBinding
-	relations                  map[string]string
-	captureDependencies        map[string]nativeCaptureDependencyBinding
-	scopes                     map[string]string
-	runtimeScopes              map[string]string
-	rowScopes                  map[string][]string
-	clients                    []nativeInstalledClient
-	currentAuthoredSchema      nativeSchemaReference
-	currentRuntimeSchema       nativeSchemaReference
+	// pendingCompositionChange records that a stage reconfigured a registration
+	// in a way the server publishes as a new manifest on activation.
+	pendingCompositionChange bool
+	tables                   map[string]nativeTableBinding
+	relations                map[string]string
+	captureDependencies      map[string]nativeCaptureDependencyBinding
+	scopes                   map[string]string
+	runtimeScopes            map[string]string
+	rowScopes                map[string][]string
+	clients                  []nativeInstalledClient
+	currentAuthoredSchema    nativeSchemaReference
+	currentRuntimeSchema     nativeSchemaReference
 }
 
 type nativeInstalledClient struct {
@@ -923,6 +926,11 @@ func (c *NativeController) ApplyStep(ctx context.Context, operation scenarios.Op
 			if err := c.harness.Operator().ConfigureCrossScopeTable(ctx); err != nil {
 				return NativeStepObservation{}, err
 			}
+			c.mu.Lock()
+			if c.installation != nil {
+				c.installation.pendingCompositionChange = true
+			}
+			c.mu.Unlock()
 			if err := c.bindStagedSharedScope(); err != nil {
 				return NativeStepObservation{}, err
 			}
@@ -930,6 +938,13 @@ func (c *NativeController) ApplyStep(ctx context.Context, operation scenarios.Op
 		return nativeSuccess(), nil
 	case "model/activate-registry-membership-generation":
 		if err := c.harness.Operator().ReloadRegistry(ctx); err != nil {
+			return NativeStepObservation{}, err
+		}
+		// A staged composition change publishes a new manifest when the
+		// generation activates. The worker publishes it asynchronously, so wait
+		// for it and rebind the authored schema. Otherwise every later identity
+		// resolves to the retired manifest.
+		if err := c.rebindSchemaAfterCompositionChange(ctx); err != nil {
 			return NativeStepObservation{}, err
 		}
 		return nativeSuccess(), nil
@@ -3272,4 +3287,32 @@ func describeNativeRelationEvents(ctx context.Context, database *sql.DB, relatio
 		slots = append(slots, "none")
 	}
 	return fmt.Sprintf("%s; source rows %d; max wal registry %d; transactions %s; poison %s; worker %s; slots %s", strings.Join(entries, " "), sourceRows, registry, strings.Join(transactions, " "), strings.Join(poison, " "), strings.Join(samples, " "), strings.Join(slots, " "))
+}
+
+// rebindSchemaAfterCompositionChange rebinds the current authored schema to the
+// manifest an activation publishes. A staged composition change mints a manifest
+// without an authored publish step, so the install-time binding would keep
+// naming the retired manifest.
+func (c *NativeController) rebindSchemaAfterCompositionChange(ctx context.Context) error {
+	c.mu.Lock()
+	pending := c.installation != nil && c.installation.pendingCompositionChange
+	c.mu.Unlock()
+	if !pending {
+		return nil
+	}
+	runtime, runtimeRegistry, err := c.waitForRuntimeSchemaChange(ctx)
+	if err != nil {
+		return err
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.installation == nil {
+		return errors.New("native controller contract is not installed")
+	}
+	runtimeRef := nativeSchemaReference{Version: runtime.SchemaVersion, Hash: runtime.SchemaHash}
+	c.installation.runtimeSchemas[nativeSchemaKey(c.installation.currentAuthoredSchema)] = runtimeRef
+	c.installation.currentRuntimeSchema = runtimeRef
+	c.installation.runtimeRegistryGeneration = runtimeRegistry
+	c.installation.pendingCompositionChange = false
+	return nil
 }

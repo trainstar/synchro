@@ -14,25 +14,34 @@ import (
 )
 
 func TestRealSwiftPerformance(t *testing.T) {
-	t.Run("assertion", func(t *testing.T) {
-		runSwiftSteadyPull(t)
-		runSwiftRebuildApply(t)
-		runSwiftRebuildCardinality(t)
-		runSwiftPushResponseLoss(t)
-		runSwiftRetentionReconnect(t)
-		runSwiftRebuildRequests(t)
-		runSwiftForgedCursor(t)
-		runSwiftPendingCycle(t)
-		runSwiftQueueReplay(t)
-		runSwiftSeededEmptyStartup(t)
-		// Ordered last so an unrelated failure cannot stop the scenarios above it.
-		runSwiftSchemaQueuedMutation(t)
-	})
+	// Each scenario runs as its own subtest. A shared subtest stops at the first
+	// failure, which hides every scenario after it and makes the run order a
+	// hidden dependency. A scenario that fails before its reset leaves server
+	// state behind, so confirm a later failure with a targeted rerun.
+	for _, scenario := range []struct {
+		name string
+		run  func(*testing.T)
+	}{
+		{"steady-pull", runSwiftSteadyPull},
+		{"rebuild-apply", runSwiftRebuildApply},
+		{"rebuild-cardinality", runSwiftRebuildCardinality},
+		{"push-response-loss", runSwiftPushResponseLoss},
+		{"retention-reconnect", runSwiftRetentionReconnect},
+		{"rebuild-requests", runSwiftRebuildRequests},
+		{"forged-cursor", runSwiftForgedCursor},
+		{"pending-cycle", runSwiftPendingCycle},
+		{"queue-replay", runSwiftQueueReplay},
+		{"seeded-empty-startup", runSwiftSeededEmptyStartup},
+		{"multi-scope-provenance", runSwiftMultiScopeProvenance},
+		{"schema-queued-mutation", runSwiftSchemaQueuedMutation},
+	} {
+		t.Run(scenario.name, func(t *testing.T) { scenario.run(t) })
+	}
 }
 
 func runSwiftRetentionReconnect(t *testing.T) {
 	t.Helper()
-	ctx, scenario, harness, controller, platform := newSwiftPerformanceFixture(t, filepath.Join("server", "retention-reconnect-001.json"), 1)
+	ctx, scenario, _, controller, platform := newSwiftPerformanceFixture(t, filepath.Join("server", "retention-reconnect-001.json"), 1)
 	result, err := RunRetentionReconnectScenario(ctx, scenario, controller, platform, Client{Key: "client-a", UserID: "user-a", ClientID: "client-a", DatabaseKey: "retention-reconnect-client-a"})
 	if err != nil {
 		t.Fatalf("run direct Swift retention-reconnect scenario: %v", err)
@@ -40,12 +49,11 @@ func runSwiftRetentionReconnect(t *testing.T) {
 	if len(result.IdentityResolution) != len(scenario.NativeIdentityAliases) {
 		t.Fatalf("Swift retention-reconnect identity resolutions = %d, want %d", len(result.IdentityResolution), len(scenario.NativeIdentityAliases))
 	}
-	resetSwiftPerformanceServer(t, ctx, harness)
 }
 
 func runSwiftPushResponseLoss(t *testing.T) {
 	t.Helper()
-	ctx, scenario, harness, controller, platform := newSwiftPerformanceFixture(t, filepath.Join("server", "push-response-loss-001.json"), 0)
+	ctx, scenario, _, controller, platform := newSwiftPerformanceFixture(t, filepath.Join("server", "push-response-loss-001.json"), 0)
 	result, err := RunPushResponseLossScenario(ctx, scenario, controller, platform, Client{Key: "client-a", UserID: "user-a", ClientID: "client-a", DatabaseKey: "push-response-loss-client-a"})
 	if err != nil {
 		t.Fatalf("run direct Swift push-response-loss scenario: %v", err)
@@ -53,12 +61,11 @@ func runSwiftPushResponseLoss(t *testing.T) {
 	if len(result.IdentityResolution) != len(scenario.NativeIdentityAliases) {
 		t.Fatalf("Swift push-response-loss identity resolutions = %d, want %d", len(result.IdentityResolution), len(scenario.NativeIdentityAliases))
 	}
-	resetSwiftPerformanceServer(t, ctx, harness)
 }
 
 func runSwiftSchemaQueuedMutation(t *testing.T) {
 	t.Helper()
-	ctx, scenario, harness, controller, platform := newSwiftPerformanceFixture(t, filepath.Join("server", "schema-queued-mutation-001.json"), 100)
+	ctx, scenario, _, controller, platform := newSwiftPerformanceFixture(t, filepath.Join("server", "schema-queued-mutation-001.json"), 100)
 	result, err := RunSchemaQueuedMutationScenario(ctx, scenario, controller, platform, Client{Key: "client-a", UserID: "user-a", ClientID: "client-a", DatabaseKey: "schema-queued-mutation-client-a"})
 	if err != nil {
 		t.Fatalf("run direct Swift schema-queued-mutation scenario: %v", err)
@@ -66,12 +73,23 @@ func runSwiftSchemaQueuedMutation(t *testing.T) {
 	if len(result.IdentityResolution) != len(scenario.NativeIdentityAliases) {
 		t.Fatalf("Swift schema-queued-mutation identity resolutions = %d, want %d", len(result.IdentityResolution), len(scenario.NativeIdentityAliases))
 	}
-	resetSwiftPerformanceServer(t, ctx, harness)
+}
+
+func runSwiftMultiScopeProvenance(t *testing.T) {
+	t.Helper()
+	ctx, scenario, _, controller, platform := newSwiftPerformanceFixture(t, filepath.Join("performance", "multi-scope-provenance-001.json"), 100)
+	result, err := RunMultiScopeProvenanceScenario(ctx, scenario, controller, platform)
+	if err != nil {
+		t.Fatalf("run direct Swift multi-scope-provenance scenario: %v", err)
+	}
+	if len(result.IdentityResolution) != len(scenario.NativeIdentityAliases) {
+		t.Fatalf("Swift multi-scope-provenance identity resolutions = %d, want %d", len(result.IdentityResolution), len(scenario.NativeIdentityAliases))
+	}
 }
 
 func runSwiftSteadyPull(t *testing.T) {
 	t.Helper()
-	ctx, scenario, harness, controller, platform := newSwiftPerformanceFixture(t, filepath.Join("performance", "steady-pull-001.json"), 0)
+	ctx, scenario, _, controller, platform := newSwiftPerformanceFixture(t, filepath.Join("performance", "steady-pull-001.json"), 0)
 	result, err := RunSteadyPullScenario(ctx, scenario, controller, platform, Client{Key: "client-a", UserID: "user-a", ClientID: "client-a", DatabaseKey: "steady-pull-client-a"})
 	if err != nil {
 		t.Fatalf("run direct Swift steady-pull scenario: %v", err)
@@ -79,12 +97,11 @@ func runSwiftSteadyPull(t *testing.T) {
 	if len(result.IdentityResolution) != len(scenario.NativeIdentityAliases) {
 		t.Fatalf("Swift steady-pull identity resolutions = %d, want %d", len(result.IdentityResolution), len(scenario.NativeIdentityAliases))
 	}
-	resetSwiftPerformanceServer(t, ctx, harness)
 }
 
 func runSwiftRebuildApply(t *testing.T) {
 	t.Helper()
-	ctx, scenario, harness, controller, platform := newSwiftPerformanceFixture(t, filepath.Join("performance", "rebuild-apply-001.json"), 100)
+	ctx, scenario, _, controller, platform := newSwiftPerformanceFixture(t, filepath.Join("performance", "rebuild-apply-001.json"), 100)
 	result, err := RunRebuildApplyScenario(ctx, scenario, controller, platform)
 	if err != nil {
 		t.Fatalf("run direct Swift rebuild-apply scenario: %v", err)
@@ -92,12 +109,11 @@ func runSwiftRebuildApply(t *testing.T) {
 	if len(result.IdentityResolution) != len(scenario.NativeIdentityAliases) {
 		t.Fatalf("Swift rebuild-apply identity resolutions = %d, want %d", len(result.IdentityResolution), len(scenario.NativeIdentityAliases))
 	}
-	resetSwiftPerformanceServer(t, ctx, harness)
 }
 
 func runSwiftRebuildCardinality(t *testing.T) {
 	t.Helper()
-	ctx, scenario, harness, controller, platform := newSwiftPerformanceFixture(t, filepath.Join("performance", "rebuild-cardinality-001.json"), 100)
+	ctx, scenario, _, controller, platform := newSwiftPerformanceFixture(t, filepath.Join("performance", "rebuild-cardinality-001.json"), 100)
 	result, err := RunRebuildCardinalityScenario(ctx, scenario, controller, platform)
 	if err != nil {
 		t.Fatalf("run direct Swift rebuild-cardinality scenario: %v", err)
@@ -105,12 +121,11 @@ func runSwiftRebuildCardinality(t *testing.T) {
 	if len(result.IdentityResolution) != len(scenario.NativeIdentityAliases) {
 		t.Fatalf("Swift rebuild-cardinality identity resolutions = %d, want %d", len(result.IdentityResolution), len(scenario.NativeIdentityAliases))
 	}
-	resetSwiftPerformanceServer(t, ctx, harness)
 }
 
 func runSwiftRebuildRequests(t *testing.T) {
 	t.Helper()
-	ctx, scenario, harness, controller, platform := newSwiftPerformanceFixture(t, filepath.Join("performance", "rebuild-requests-001.json"), 1)
+	ctx, scenario, _, controller, platform := newSwiftPerformanceFixture(t, filepath.Join("performance", "rebuild-requests-001.json"), 1)
 	result, err := RunRebuildRequestsScenario(ctx, scenario, controller, platform, Client{Key: "client-a", UserID: "user-a", ClientID: "client-a", DatabaseKey: "rebuild-requests-client-a"})
 	if err != nil {
 		t.Fatalf("run direct Swift rebuild-requests scenario: %v", err)
@@ -118,7 +133,6 @@ func runSwiftRebuildRequests(t *testing.T) {
 	if len(result.IdentityResolution) != len(scenario.NativeIdentityAliases) {
 		t.Fatalf("Swift rebuild-requests identity resolutions = %d, want %d", len(result.IdentityResolution), len(scenario.NativeIdentityAliases))
 	}
-	resetSwiftPerformanceServer(t, ctx, harness)
 }
 
 func runSwiftForgedCursor(t *testing.T) {
@@ -151,22 +165,20 @@ func runSwiftForgedCursor(t *testing.T) {
 	if len(result.IdentityResolution) != len(scenario.NativeIdentityAliases) {
 		t.Fatalf("Swift forged-cursor identity resolutions = %d, want %d", len(result.IdentityResolution), len(scenario.NativeIdentityAliases))
 	}
-	resetSwiftPerformanceServer(t, ctx, harness)
 }
 
 func runSwiftPendingCycle(t *testing.T) {
 	t.Helper()
-	ctx, scenario, harness, controller, platform := newSwiftPerformanceFixture(t, filepath.Join("performance", "pending-cycle-001.json"), 0)
+	ctx, scenario, _, controller, platform := newSwiftPerformanceFixture(t, filepath.Join("performance", "pending-cycle-001.json"), 0)
 	_, err := RunPendingCycleScenario(ctx, scenario, controller, platform, Client{Key: "client-a", UserID: "user-a", ClientID: "client-a", DatabaseKey: "pending-cycle-client-a"})
 	if err != nil {
 		t.Fatalf("run direct Swift pending-cycle scenario: %v", err)
 	}
-	resetSwiftPerformanceServer(t, ctx, harness)
 }
 
 func runSwiftQueueReplay(t *testing.T) {
 	t.Helper()
-	ctx, scenario, harness, controller, platform := newSwiftPerformanceFixture(t, filepath.Join("performance", "queue-replay-001.json"), 0)
+	ctx, scenario, _, controller, platform := newSwiftPerformanceFixture(t, filepath.Join("performance", "queue-replay-001.json"), 0)
 	result, err := RunQueueReplayScenario(ctx, scenario, controller, platform, Client{Key: "client-a", UserID: "user-a", ClientID: "client-a", DatabaseKey: "queue-replay-client-a"})
 	if err != nil {
 		t.Fatalf("run direct Swift queue-replay scenario: %v", err)
@@ -174,13 +186,17 @@ func runSwiftQueueReplay(t *testing.T) {
 	if len(result.ReplayCalls) != 9 {
 		t.Fatalf("Swift queue-replay replay calls = %d, want 9", len(result.ReplayCalls))
 	}
-	resetSwiftPerformanceServer(t, ctx, harness)
 }
 
 func resetSwiftPerformanceServer(t *testing.T, ctx context.Context, harness *blackbox.Harness) {
 	t.Helper()
-	if err := harness.Source().ExecContext(ctx, "DELETE FROM cf_items"); err != nil {
-		t.Fatalf("clear Swift performance source state: %v", err)
+	// A capture dependency registration stays pending while its source table
+	// holds rows, so the replayed registrations never activate unless every
+	// diagnostic source a scenario writes is empty first.
+	for _, table := range []string{"cf_items", "cf_item_impacts"} {
+		if err := harness.Source().ExecContext(ctx, "DELETE FROM "+table); err != nil {
+			t.Fatalf("clear Swift performance source table %s: %v", table, err)
+		}
 	}
 	reinstall, err := harness.ReinstallExtension(ctx)
 	if err != nil {
@@ -203,7 +219,14 @@ func resetSwiftPerformanceServer(t *testing.T, ctx context.Context, harness *bla
 			time.Sleep(50 * time.Millisecond)
 		}
 		if !readyObserved {
-			t.Fatalf("wait for Swift performance extension reset: %v", err)
+			// The loop exits on an unmet condition, not only on an error, so name
+			// every condition. Reporting err alone prints a nil error.
+			t.Fatalf("wait for Swift performance extension reset phase %d: err %v worker %d prior %d slot %q want %q restartLSN %q slotActive %v restartAtOrAfter %v activeGeneration %d minimum %d pendingGenerations %d noPoison %v",
+				phase, err, ready.WorkerPID, reinstall.PriorWorkerPID,
+				ready.ActiveSlotName, harness.Names().ReplicationSlot,
+				ready.RestartLSN, ready.SlotActive, ready.RestartLSNAtOrAfterReinstall,
+				ready.ActiveRegistryGeneration, minimumGeneration,
+				ready.PendingRegistryGenerationCount, ready.NoValidationFailurePoison)
 		}
 		if phase == 0 {
 			minimumGeneration = ready.ActiveRegistryGeneration
@@ -319,5 +342,18 @@ func newSwiftPerformanceFixture(t *testing.T, scenarioPath string, pullPageSize 
 	if err != nil {
 		t.Fatalf("load Swift performance scenario %s: %v", scenarioPath, err)
 	}
+	// The reset runs as a cleanup so a scenario that fails still restores server
+	// state. A trailing call never runs after t.Fatalf, which leaves every later
+	// scenario running against the failed scenario's state. Cleanups run last
+	// registered first, so this reset precedes the platform and controller close
+	// and the context cancel.
+	t.Cleanup(func() {
+		// SYNCHRO_KEEP_SERVER_STATE retains the failing server state for post
+		// mortem inspection. The reset destroys the evidence a failure leaves.
+		if os.Getenv("SYNCHRO_KEEP_SERVER_STATE") != "" && t.Failed() {
+			return
+		}
+		resetSwiftPerformanceServer(t, ctx, harness)
+	})
 	return ctx, scenario, harness, controller, platform
 }

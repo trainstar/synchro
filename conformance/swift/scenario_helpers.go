@@ -334,7 +334,40 @@ func validateSwiftStateProjection(expected, actual scenarios.StateFacts) error {
 		return fmt.Errorf("normalize actual Swift state facts: %w", err)
 	}
 	if !scenarios.StateFactsProjectionEqual(normalizedExpected, normalizedActual) {
-		return errors.New("Swift state differs from the authored model")
+		return fmt.Errorf("Swift state differs from the authored model: %s", swiftStateProjectionDifference(normalizedExpected, normalizedActual))
 	}
 	return nil
+}
+
+// swiftStateProjectionDifference reports a bounded window around the first
+// difference. The comparison alone cannot name the diverging fact.
+func swiftStateProjectionDifference(expected, actual scenarios.StateFacts) string {
+	expectedJSON, expectedErr := json.Marshal(expected)
+	actualJSON, actualErr := json.Marshal(actual)
+	if expectedErr != nil || actualErr != nil {
+		return "state facts are not encodable"
+	}
+	index := 0
+	for index < len(expectedJSON) && index < len(actualJSON) && expectedJSON[index] == actualJSON[index] {
+		index++
+	}
+	start := index - 120
+	if start < 0 {
+		start = 0
+	}
+	return fmt.Sprintf("first difference at byte %d\n  authored: %s\n  observed: %s",
+		index,
+		boundedSwiftStateWindow(expectedJSON, start),
+		boundedSwiftStateWindow(actualJSON, start))
+}
+
+func boundedSwiftStateWindow(encoded []byte, start int) string {
+	if start >= len(encoded) {
+		return "(end of state)"
+	}
+	end := start + 320
+	if end > len(encoded) {
+		end = len(encoded)
+	}
+	return string(encoded[start:end])
 }

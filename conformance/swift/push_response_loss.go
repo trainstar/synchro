@@ -451,11 +451,31 @@ func validatePushResponseLossState(captures []CaptureFacts, server scenarios.Sta
 	if err != nil {
 		return err
 	}
-	if len(client.Clients) != clientCount || client.Clients[0].QueueCount == nil || *client.Clients[0].QueueCount != 0 || client.Clients[0].SealedBatchCount == nil || *client.Clients[0].SealedBatchCount != 0 {
-		return errors.New("Swift push-response-loss client queue did not reconcile exactly once")
+	if len(client.Clients) != clientCount {
+		return fmt.Errorf("Swift push-response-loss captured %d clients, want %d", len(client.Clients), clientCount)
 	}
-	if server.BatchCount == nil || *server.BatchCount != uint64(batchCount) || server.MutationCount == nil || *server.MutationCount != uint64(mutationCount) {
-		return errors.New("Swift push-response-loss replay changed committed batch state")
+	// The replayed push is deduplicated by the server, so the client applies the
+	// original result and retains no queued mutation and no sealed batch.
+	if client.Clients[0].QueueCount == nil {
+		return errors.New("Swift push-response-loss client reported no queue count")
+	}
+	if *client.Clients[0].QueueCount != 0 {
+		return fmt.Errorf("Swift push-response-loss client queue count = %d, want 0", *client.Clients[0].QueueCount)
+	}
+	if client.Clients[0].SealedBatchCount == nil {
+		return errors.New("Swift push-response-loss client reported no sealed batch count")
+	}
+	if *client.Clients[0].SealedBatchCount != 0 {
+		return fmt.Errorf("Swift push-response-loss client sealed batch count = %d, want 0", *client.Clients[0].SealedBatchCount)
+	}
+	if server.BatchCount == nil || server.MutationCount == nil {
+		return errors.New("Swift push-response-loss server reported no committed batch state")
+	}
+	if *server.BatchCount != uint64(batchCount) {
+		return fmt.Errorf("Swift push-response-loss server batch count = %d, want %d", *server.BatchCount, batchCount)
+	}
+	if *server.MutationCount != uint64(mutationCount) {
+		return fmt.Errorf("Swift push-response-loss server mutation count = %d, want %d", *server.MutationCount, mutationCount)
 	}
 	return nil
 }
