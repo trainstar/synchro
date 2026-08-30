@@ -182,7 +182,12 @@ func validateSwiftWireObservation(scenario scenarios.Scenario, stepID string, ob
 			continue
 		}
 		if observed.StatusCode != expected.HTTPStatus || observed.Retryable != expected.Retryable || !equalOptionalStrings(observed.ErrorCode, expected.ErrorCode) {
-			return fmt.Errorf("Swift wire result %s differs from its authored expectation", stepID)
+			// The observed and authored values name the field that diverged.
+			return fmt.Errorf(
+				"Swift wire result %s differs from its authored expectation: observed status %d, retryable %t, error code %s; authored status %d, retryable %t, error code %s",
+				stepID,
+				observed.StatusCode, observed.Retryable, optionalStringOrNone(observed.ErrorCode),
+				expected.HTTPStatus, expected.Retryable, optionalStringOrNone(expected.ErrorCode))
 		}
 		return nil
 	}

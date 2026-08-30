@@ -1535,6 +1535,15 @@ func (p *runnerProcess) stderrSize() int {
 	return p.stderr.size()
 }
 
+// stderrContents reports what the runner wrote to stderr. A bounded protocol
+// code cannot name the underlying failure, so the runner reports it here.
+func (p *runnerProcess) stderrContents() string {
+	if p == nil || p.stderr == nil {
+		return ""
+	}
+	return p.stderr.contents()
+}
+
 type boundedWriter struct {
 	mu      sync.Mutex
 	maximum int
@@ -1558,4 +1567,10 @@ func (w *boundedWriter) size() int {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	return len(w.data)
+}
+
+func (w *boundedWriter) contents() string {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return string(w.data)
 }

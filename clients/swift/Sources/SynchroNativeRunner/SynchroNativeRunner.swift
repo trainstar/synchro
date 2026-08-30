@@ -430,10 +430,14 @@ private struct RunnerTransportObservation: Encodable {
         sequence = observation.sequence
         operationClass = observation.operationClass
         statusCode = observation.statusCode
-        (errorCode, retryable) = transportFailureFacts(
+        let (mappedCode, mappedRetryable) = transportFailureFacts(
             statusCode: observation.statusCode,
             operationClass: observation.operationClass
         )
+        // One status code carries more than one error code, so the code the
+        // server reported wins over the code the status implies.
+        errorCode = observation.errorCode ?? mappedCode
+        retryable = mappedRetryable
         durationNanoseconds = observation.durationNanoseconds
         cursorFingerprints = observation.cursorFingerprints
         cursorFingerprintsComplete = observation.cursorFingerprintsComplete
@@ -952,6 +956,20 @@ private final class Runner: @unchecked Sendable {
             events.append(event)
         }
         return RunnerResult(status: client.getSyncStatus().rawValue)
+    }
+
+    // localTableDefinition reports the stored definition of one local table. A
+    // constraint violation names the column but not the schema that declared
+    // it, so a failing local write reports the definition alongside it.
+    func localTableDefinition(_ table: String) -> String? {
+        guard let client = try? requireClient() else { return nil }
+        return try? client.readTransaction { database in
+            try String.fetchOne(
+                database,
+                sql: "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?",
+                arguments: [table]
+            )
+        }
     }
 
     private func localAction(_ command: RunnerCommand) throws -> RunnerResult {
@@ -1634,6 +1652,7 @@ private enum Main {
 
         while true {
             let response: RunnerResponse
+            var attempted: RunnerCommand?
             do {
                 guard let line = try input.nextLine() else {
                     break
@@ -1647,6 +1666,7 @@ private enum Main {
                     throw RunnerError.invalidCommand
                 }
                 let command = try decoder.decode(RunnerCommand.self, from: data)
+                attempted = command
                 let result = try await runner.execute(command)
                 response = RunnerResponse(outcome: "passed", result: result, errorCode: nil)
             } catch is DecodingError {
@@ -1654,6 +1674,17 @@ private enum Main {
             } catch let error as RunnerError {
                 response = RunnerResponse(outcome: "error", result: nil, errorCode: error.code)
             } catch {
+                // The protocol response carries a bounded code, so the
+                // underlying failure reaches the harness through stderr. A
+                // local write also reports the table definition it violated,
+                // because the constraint alone cannot name the schema that
+                // declared it.
+                var report = "runner execution failed: \(error)\n"
+                if let table = attempted?.localAction?.tableName,
+                   let definition = await runner.localTableDefinition(table) {
+                    report += "local table definition: \(definition)\n"
+                }
+                FileHandle.standardError.write(Data(report.utf8))
                 response = RunnerResponse(outcome: "error", result: nil, errorCode: "execution_failed")
             }
             let data: Data

@@ -99,6 +99,22 @@ type Session struct {
 	process *runnerProcess
 }
 
+// stderrReport reports what the runner wrote to stderr. A bounded protocol
+// error code cannot name the underlying failure, so a failing step reads it
+// here instead of reporting an opaque code.
+func (s *Session) stderrReport() string {
+	if s == nil {
+		return "session is unavailable"
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	report := s.process.stderrContents()
+	if report == "" {
+		return "runner reported nothing on stderr"
+	}
+	return report
+}
+
 // StartSession starts one existing synchro-native-runner executable.
 func StartSession(ctx context.Context, config Config) (*Session, error) {
 	if err := requireContext(ctx, "Swift session context is required"); err != nil {
