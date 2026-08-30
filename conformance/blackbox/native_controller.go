@@ -738,7 +738,11 @@ func selectNativeRuntimeTable(authored nativeAuthoredTable, runtime []nativeRunt
 			offered = append(offered, entry)
 		}
 		sort.Strings(offered)
-		return nativeRuntimeManifestTable{}, fmt.Errorf("native controller has no runtime table for authored table %q named %q with primary key %q; runtime offered %v", authored.TableID, authored.Name, authored.PrimaryKeyFieldID, offered)
+		// The offered names alone cannot explain a rejection. Name the authored
+		// field each runtime table failed to satisfy so the binding gap is
+		// visible without a second run.
+		return nativeRuntimeManifestTable{}, fmt.Errorf("native controller has no runtime table for authored table %q named %q with primary key %q; runtime offered %v; rejections %v",
+			authored.TableID, authored.Name, authored.PrimaryKeyFieldID, offered, nativeRuntimeTableRejections(runtime, authored))
 	}
 	sort.Slice(candidates, func(left, right int) bool { return candidates[left].Name < candidates[right].Name })
 	for _, candidate := range candidates {
@@ -754,6 +758,43 @@ func selectNativeRuntimeTable(authored nativeAuthoredTable, runtime []nativeRunt
 		}
 	}
 	return nativeRuntimeManifestTable{}, fmt.Errorf("native controller runtime table binding for %q is ambiguous", authored.TableID)
+}
+
+// nativeRuntimeTableRejections names, for each runtime table, the first
+// authored field it cannot satisfy. A binding failure otherwise reports only
+// the table names it declined.
+func nativeRuntimeTableRejections(runtime []nativeRuntimeManifestTable, authored nativeAuthoredTable) []string {
+	reasons := make([]string, 0, len(runtime))
+	for _, table := range runtime {
+		fields := make(map[string]nativeRuntimeManifestField, len(table.Fields))
+		for _, field := range table.Fields {
+			fields[field.Name] = field
+		}
+		reason := "no authored field is unsatisfied"
+		for _, field := range authored.Fields {
+			name := field.Name
+			if table.Name == "cf_schema_queue" && nativeAuthoredDeclaresField(authored, "value") {
+				name = nativeSchemaQueueFieldName(field.Name)
+			}
+			runtimeField, found := fields[name]
+			switch {
+			case !found:
+				reason = fmt.Sprintf("field %q is absent", name)
+			case runtimeField.ID == "":
+				reason = fmt.Sprintf("field %q has no identity", name)
+			case runtimeField.Type != field.Type:
+				reason = fmt.Sprintf("field %q type %q wants %q", name, runtimeField.Type, field.Type)
+			case field.PrimaryKey && runtimeField.ID != table.PrimaryKeyFieldID:
+				reason = fmt.Sprintf("field %q is not the primary key", name)
+			default:
+				continue
+			}
+			break
+		}
+		reasons = append(reasons, table.Name+": "+reason)
+	}
+	sort.Strings(reasons)
+	return reasons
 }
 
 func nativeRuntimeTableSupports(runtime nativeRuntimeManifestTable, authored nativeAuthoredTable) bool {
