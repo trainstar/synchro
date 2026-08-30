@@ -677,7 +677,28 @@ fn load_authoritative_scopes(client: &SpiClient<'_>, user_id: &str) -> Vec<Strin
     let rows = client
         .select("SELECT scope_id FROM sync_shared_scopes", None, &[])
         .unwrap_or_else(|err| pgrx::error!("loading authoritative client scopes: {}", err));
-    let mut scopes = vec![format!("user:{user_id}")];
+    // A user holds its own private scope unless that scope has been revoked.
+    // The scope is a default, not a permanent property of the user.
+    let identity_scope = format!("user:{user_id}");
+    let identity_revoked = client
+        .select(
+            "SELECT count(*) AS revoked
+             FROM sync_user_scopes
+             WHERE user_id = $1 AND scope_id = $2 AND NOT assigned",
+            None,
+            &[user_id.into(), identity_scope.as_str().into()],
+        )
+        .unwrap_or_else(|err| pgrx::error!("loading revoked identity scope: {}", err))
+        .first()
+        .get_one::<i64>()
+        .unwrap_or_else(|err| pgrx::error!("reading revoked identity scope: {}", err))
+        .unwrap_or(0)
+        > 0;
+    let mut scopes = if identity_revoked {
+        Vec::new()
+    } else {
+        vec![identity_scope]
+    };
     for row in rows {
         let scope_id = row
             .get_by_name::<String, &str>("scope_id")
@@ -689,7 +710,9 @@ fn load_authoritative_scopes(client: &SpiClient<'_>, user_id: &str) -> Vec<Strin
     // identity scope is unconditional and a shared scope belongs to every user.
     let granted = client
         .select(
-            "SELECT scope_id FROM sync_user_scopes WHERE user_id = $1 ORDER BY scope_id",
+            "SELECT scope_id FROM sync_user_scopes
+             WHERE user_id = $1 AND assigned
+             ORDER BY scope_id",
             None,
             &[user_id.into()],
         )

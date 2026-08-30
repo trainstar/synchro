@@ -357,3 +357,69 @@ fn test_granted_user_scope_reaches_one_user_and_revokes() {
         "revocation did not advance the scope set version: {revoked}"
     );
 }
+
+#[pg_test]
+fn test_private_scope_is_revocable_for_one_user() {
+    setup_test_tables();
+    let first = register_client("private-user", "private-client");
+    assert!(first.get("error").is_none(), "{first}");
+    let held = first["scopes"]["add"]
+        .as_array()
+        .map(|scopes| {
+            scopes
+                .iter()
+                .any(|scope| scope["id"].as_str() == Some("user:private-user"))
+        })
+        .unwrap_or(false);
+    assert!(held, "user does not hold its own private scope: {first}");
+    let held_version = first["scope_set_version"].as_i64().expect("scope set version");
+
+    Spi::run_with_args(
+        "SELECT synchro_revoke_user_scope($1, $2)",
+        &["private-user".into(), "user:private-user".into()],
+    )
+    .unwrap();
+
+    let revoked = connect_client(
+        "private-user",
+        json!({
+            "client_id": "private-client",
+            "platform": "test",
+            "app_version": "1.0.0",
+            "protocol_version": 3,
+            "client_generation": client_generation("private-user", "private-client"),
+            "schema": schema_ref_value(),
+            "scope_set_version": held_version,
+            "known_scopes": {
+                "user:private-user": scope_cursor_ref(
+                    "private-user",
+                    "private-client",
+                    "user:private-user",
+                    0
+                )
+            }
+        }),
+    );
+    assert!(revoked.get("error").is_none(), "{revoked}");
+    let removed = revoked["scopes"]["remove"]
+        .as_array()
+        .map(|scopes| {
+            scopes
+                .iter()
+                .any(|scope| scope.as_str() == Some("user:private-user"))
+        })
+        .unwrap_or(false);
+    assert!(removed, "revoked private scope was not removed: {revoked}");
+
+    // Another user keeps its own private scope.
+    let other = register_client("private-other", "private-other-client");
+    let other_holds = other["scopes"]["add"]
+        .as_array()
+        .map(|scopes| {
+            scopes
+                .iter()
+                .any(|scope| scope["id"].as_str() == Some("user:private-other"))
+        })
+        .unwrap_or(false);
+    assert!(other_holds, "revocation reached another user: {other}");
+}

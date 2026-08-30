@@ -605,6 +605,7 @@ CREATE TABLE IF NOT EXISTS sync_shared_scopes (
 CREATE TABLE IF NOT EXISTS sync_user_scopes (
     user_id TEXT NOT NULL,
     scope_id TEXT NOT NULL,
+    assigned BOOLEAN NOT NULL DEFAULT true,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     PRIMARY KEY (user_id, scope_id)
 );

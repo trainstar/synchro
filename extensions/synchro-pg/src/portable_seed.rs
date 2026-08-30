@@ -229,9 +229,9 @@ fn synchro_grant_user_scope(p_user_id: &str, p_scope_id: &str) {
             .unwrap_or_else(|err| pgrx::error!("registering granted scope state: {}", err));
         let _ = client
             .update(
-                "INSERT INTO sync_user_scopes (user_id, scope_id)
-                 VALUES ($1, $2)
-                 ON CONFLICT (user_id, scope_id) DO NOTHING",
+                "INSERT INTO sync_user_scopes (user_id, scope_id, assigned)
+                 VALUES ($1, $2, true)
+                 ON CONFLICT (user_id, scope_id) DO UPDATE SET assigned = true",
                 None,
                 &[p_user_id.into(), p_scope_id.into()],
             )
@@ -243,12 +243,17 @@ fn synchro_grant_user_scope(p_user_id: &str, p_scope_id: &str) {
 /// the user's next connect and leaves the scope's own state for other users.
 #[pg_extern]
 fn synchro_revoke_user_scope(p_user_id: &str, p_scope_id: &str) {
-    validate_granted_scope_identity(p_user_id, p_scope_id);
+    validate_revoked_scope_identity(p_user_id, p_scope_id);
 
     Spi::connect_mut(|client| {
+        // A revocation is recorded rather than deleted. A user holds its own
+        // private scope by default, so only an explicit revocation can remove
+        // it, and that fact has to survive.
         let _ = client
             .update(
-                "DELETE FROM sync_user_scopes WHERE user_id = $1 AND scope_id = $2",
+                "INSERT INTO sync_user_scopes (user_id, scope_id, assigned)
+                 VALUES ($1, $2, false)
+                 ON CONFLICT (user_id, scope_id) DO UPDATE SET assigned = false",
                 None,
                 &[p_user_id.into(), p_scope_id.into()],
             )
@@ -261,6 +266,22 @@ fn validate_granted_scope_identity(user_id: &str, scope_id: &str) {
         pgrx::error!("granted scope user_id must not be empty");
     }
     validate_shared_scope_id(scope_id);
+}
+
+fn validate_revoked_scope_identity(user_id: &str, scope_id: &str) {
+    if user_id.trim().is_empty() {
+        pgrx::error!("revoked scope user_id must not be empty");
+    }
+    if scope_id.trim().is_empty() {
+        pgrx::error!("revoked scope_id must not be empty");
+    }
+    // A revocation may name the user's own private scope, which a grant never
+    // mints, so the reserved prefix is valid here for that user alone.
+    if let Some(owner) = scope_id.strip_prefix("user:") {
+        if owner != user_id {
+            pgrx::error!("revoked private scope belongs to another user");
+        }
+    }
 }
 
 #[pg_extern]
