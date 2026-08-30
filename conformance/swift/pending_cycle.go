@@ -67,7 +67,16 @@ func RunPendingCycleScenario(ctx context.Context, scenario scenarios.Scenario, c
 		return PendingCycleResult{}, err
 	}
 	if push.Completion != "idle" || pushObservation.StatusCode != 200 || pushObservation.Retryable {
-		return PendingCycleResult{}, errors.New("Swift pending push did not complete successfully")
+		// The observed values separate a push the server rejected from a push
+		// the client left in durable backoff.
+		state, stateErr := platform.client(client)
+		report := "client unavailable"
+		if stateErr == nil {
+			report = state.session.stderrReport()
+		}
+		return PendingCycleResult{}, fmt.Errorf(
+			"Swift pending push did not complete successfully: completion %q, status %d, retryable %t, error code %s (runner reported: %s)",
+			push.Completion, pushObservation.StatusCode, pushObservation.Retryable, optionalStringOrNone(pushObservation.ErrorCode), report)
 	}
 	if err := validateSwiftWireExpectation(scenario, "STEP-PERF-PENDING-CYCLE-002", "push", push); err != nil {
 		return PendingCycleResult{}, err
@@ -96,7 +105,16 @@ func RunPendingCycleScenario(ctx context.Context, scenario scenarios.Scenario, c
 		return PendingCycleResult{}, fmt.Errorf("capture Swift pending pull checkpoint: %w", err)
 	}
 	if len(snapshot.ScopeStates) != 1 || snapshot.ScopeStates[0].Cursor == nil || *snapshot.ScopeStates[0].Cursor == "" {
-		return PendingCycleResult{}, errors.New("Swift pending pull checkpoint is invalid")
+		scopes := make([]string, 0, len(snapshot.ScopeStates))
+		for _, scope := range snapshot.ScopeStates {
+			scopes = append(scopes, scope.ScopeID+":"+optionalStringOrNone(scope.Cursor))
+		}
+		state, stateErr := platform.client(client)
+		report := "client unavailable"
+		if stateErr == nil {
+			report = state.session.stderrReport()
+		}
+		return PendingCycleResult{}, fmt.Errorf("Swift pending pull checkpoint is invalid: scopes %v (runner reported: %s)", scopes, report)
 	}
 	var runtimePullPayload map[string]any
 	if err := json.Unmarshal(pull.Payload, &runtimePullPayload); err != nil {

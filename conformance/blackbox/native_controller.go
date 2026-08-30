@@ -64,6 +64,9 @@ type NativeWireFacts struct {
 	HTTPStatus int     `json:"http_status"`
 	ErrorCode  *string `json:"error_code,omitempty"`
 	Retryable  bool    `json:"retryable"`
+	// Message carries the bounded server message. The code alone cannot name
+	// which part of a rejected request the server refused.
+	Message string `json:"message,omitempty"`
 }
 
 // NativeStepObservation records the raw terminal result from one native operation.
@@ -134,6 +137,10 @@ type nativeTableBinding struct {
 	RuntimePrimary    string
 	Fields            map[string]string
 	FieldNames        map[string]string
+	// RuntimeFieldNames names every column the runtime table declares, including
+	// the columns no authored field maps to. An insert must satisfy those
+	// columns, so they cannot be inferred from a fixture name.
+	RuntimeFieldNames map[string]struct{}
 }
 
 type nativeCaptureDependencyBinding struct {
@@ -444,7 +451,10 @@ func (c *NativeController) Install(ctx context.Context, operation scenarios.Oper
 	if err != nil {
 		return err
 	}
-	if nativeInstallRequiresPrivateScopeAssignments(payload) {
+	// A scope two users hold is shared, so an authored assignment can bind the
+	// default shared scope. Removing a scope the installation binds leaves its
+	// rows without a scope, so the removal happens only when nothing binds it.
+	if nativeInstallRequiresPrivateScopeAssignments(payload) && !nativeInstallHoldsDefaultSharedScope(payload, binding) {
 		if err := c.harness.Operator().UnregisterDefaultSharedScope(ctx); err != nil {
 			return err
 		}
@@ -456,6 +466,25 @@ func (c *NativeController) Install(ctx context.Context, operation scenarios.Oper
 	}
 	c.installation = binding
 	return nil
+}
+
+// nativeInstallHoldsDefaultSharedScope reports whether a client holds a scope
+// that bound to the default shared scope. One scope two users hold is shared,
+// so its binding becomes the default shared scope and the scope must stay
+// registered. An unassigned authored scope that merely absorbed the default
+// name is not held by any client and does not keep it registered.
+func nativeInstallHoldsDefaultSharedScope(payload nativeInstallPayload, binding *nativeInstallationBinding) bool {
+	if binding == nil {
+		return false
+	}
+	for _, client := range payload.Clients {
+		for _, scope := range client.AssignedScopeIDs {
+			if binding.scopes[scope] == "cf:global" {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func nativeInstallRequiresPrivateScopeAssignments(payload nativeInstallPayload) bool {
@@ -705,7 +734,98 @@ func bindNativeInstallation(payload nativeInstallPayload, runtime nativeRuntimeM
 			}
 		}
 	}
+	if err := rebindNativeSharedTables(result, payload.InitialSchema.Tables, runtimeTables, usedRuntime); err != nil {
+		return nil, err
+	}
 	return result, nil
+}
+
+// rebindNativeSharedTables moves an authored table off a fixture that owns its
+// rows by user when every scope carrying those rows is shared. A shared row has
+// no owner, so an owning fixture cannot hold it. The scope bindings resolve
+// only after the scope rules and the authored assignments bind, which is after
+// the runtime table selection, so the correction happens here.
+func rebindNativeSharedTables(result *nativeInstallationBinding, authoredTables []nativeAuthoredTable, runtime []nativeRuntimeManifestTable, used map[string]struct{}) error {
+	for _, authored := range authoredTables {
+		binding, bound := result.tables[authored.TableID]
+		if !bound || !nativeRuntimeTableOwnsRows(runtime, binding.RuntimeName) {
+			continue
+		}
+		if shared, decided := nativeAuthoredTableRowsAreShared(result, authored.TableID); !decided || !shared {
+			continue
+		}
+		replacement, found := selectNativeSharedRuntimeTable(authored, runtime, used)
+		if !found {
+			continue
+		}
+		corrected, err := bindNativeTable(authored, replacement)
+		if err != nil {
+			return err
+		}
+		delete(used, binding.RuntimeID)
+		result.tables[authored.TableID] = corrected
+		used[replacement.ID] = struct{}{}
+	}
+	return nil
+}
+
+// nativeRuntimeTableOwnsRows reports whether a fixture assigns each row to one
+// user through an owner column.
+func nativeRuntimeTableOwnsRows(runtime []nativeRuntimeManifestTable, name string) bool {
+	for _, table := range runtime {
+		if table.Name != name {
+			continue
+		}
+		for _, field := range table.Fields {
+			if field.Name == "owner_id" {
+				return true
+			}
+		}
+		return false
+	}
+	return false
+}
+
+// nativeAuthoredTableRowsAreShared reports whether every declared scope for the
+// table's rows binds to a shared runtime scope. It reports no decision when the
+// table declares no scope rule or a scope has not bound yet.
+func nativeAuthoredTableRowsAreShared(result *nativeInstallationBinding, tableID string) (bool, bool) {
+	decided := false
+	for key, scopes := range result.rowScopes {
+		owner, _, found := strings.Cut(key, "\x00")
+		if !found || owner != tableID {
+			continue
+		}
+		for _, scope := range scopes {
+			runtimeScope, bound := result.scopes[scope]
+			if !bound || runtimeScope == "" {
+				return false, false
+			}
+			if strings.HasPrefix(runtimeScope, "user:") {
+				return false, true
+			}
+			decided = true
+		}
+	}
+	return decided, decided
+}
+
+func selectNativeSharedRuntimeTable(authored nativeAuthoredTable, runtime []nativeRuntimeManifestTable, used map[string]struct{}) (nativeRuntimeManifestTable, bool) {
+	candidates := make([]nativeRuntimeManifestTable, 0)
+	for _, table := range runtime {
+		if _, alreadyUsed := used[table.ID]; alreadyUsed {
+			continue
+		}
+		if nativeRuntimeTableOwnsRows(runtime, table.Name) || !nativeRuntimeTableSupports(table, authored) {
+			continue
+		}
+		candidates = append(candidates, table)
+	}
+	if len(candidates) == 0 {
+		return nativeRuntimeManifestTable{}, false
+	}
+	sort.Slice(candidates, func(left, right int) bool { return candidates[left].Name < candidates[right].Name })
+	return candidates[0], true
 }
 
 func bindNativeCaptureDependency(relation nativeAuthoredRelation) (nativeCaptureDependencyBinding, error) {
@@ -916,6 +1036,10 @@ func bindNativeTable(authored nativeAuthoredTable, runtime nativeRuntimeManifest
 		RuntimePrimary:    runtime.PrimaryKeyFieldID,
 		Fields:            make(map[string]string, len(authored.Fields)),
 		FieldNames:        make(map[string]string, len(authored.Fields)),
+		RuntimeFieldNames: make(map[string]struct{}, len(runtime.Fields)),
+	}
+	for name := range fieldsByName {
+		binding.RuntimeFieldNames[name] = struct{}{}
 	}
 	for _, field := range authored.Fields {
 		runtimeName := field.Name
@@ -1179,10 +1303,19 @@ func (c *NativeController) ApplicationWrite(operation scenarios.Operation) (scen
 		if err != nil {
 			return scenarios.Operation{}, err
 		}
-		if payload["operation"] == "insert" && (table.RuntimeName == "cf_items" || table.RuntimeName == "cf_schema_queue") {
+		// A runtime column that no authored field maps to still has to be
+		// satisfied by the insert. The columns the table declares decide that,
+		// because a fixture name cannot.
+		if payload["operation"] == "insert" {
 			userID, _ := payload["authenticated_user_id"].(string)
 			clientVersion, _ := payload["client_version"].(string)
-			support := map[string]any{"owner_id": userID, "updated_at": clientVersion}
+			support := make(map[string]any, 2)
+			if _, declared := table.RuntimeFieldNames["owner_id"]; declared {
+				support["owner_id"] = userID
+			}
+			if _, declared := table.RuntimeFieldNames["updated_at"]; declared {
+				support["updated_at"] = clientVersion
+			}
 			if table.RuntimeName == "cf_schema_queue" {
 				for authoredField, applicationField := range table.FieldNames {
 					if authoredField != table.AuthoredPrimary && applicationField != "authored_mutation" {
@@ -1394,10 +1527,23 @@ func nativeRuntimeFieldValue(table nativeTableBinding, authoredField string, val
 }
 
 func nativeApplicationInsertSupportColumns(value any, support map[string]any) (any, error) {
-	userID, _ := support["owner_id"].(string)
-	clientVersion, _ := support["updated_at"].(string)
-	if !validNativeIdentity(userID) || clientVersion == "" || len(support) < 2 {
+	// The table decides which support columns exist, so each supplied value is
+	// validated for its own kind. A table without an owner column supplies no
+	// owner identity, and requiring one would reject a shared row.
+	if len(support) == 0 {
 		return nil, errors.New("native application insert support fields are invalid")
+	}
+	if owner, supplied := support["owner_id"]; supplied {
+		userID, _ := owner.(string)
+		if !validNativeIdentity(userID) {
+			return nil, errors.New("native application insert support fields are invalid")
+		}
+	}
+	if updated, supplied := support["updated_at"]; supplied {
+		clientVersion, _ := updated.(string)
+		if clientVersion == "" {
+			return nil, errors.New("native application insert support fields are invalid")
+		}
 	}
 	names := make([]string, 0, len(support))
 	for name := range support {
@@ -2097,7 +2243,16 @@ func nativeSourceStatement(event nativeEventBinding, installation *nativeInstall
 	switch event.Table.RuntimeName {
 	case "cf_items", "cf_late_registration":
 		if owner == runtimeScope || owner == "" {
-			return "", nil, errors.New("native private source row has no user scope binding")
+			// The authored scope and its runtime binding name why the private
+			// table cannot own the row. The complete scope map shows whether the
+			// authored assignment bound the scope to its user.
+			bound := make([]string, 0, len(installation.scopes))
+			for authored, runtime := range installation.scopes {
+				bound = append(bound, authored+"->"+runtime)
+			}
+			sort.Strings(bound)
+			return "", nil, fmt.Errorf("native private source row has no user scope binding: authored table %q bound to %q, authored scopes %v, runtime scope %q, scope map %v",
+				event.Table.AuthoredID, event.Table.RuntimeName, event.AuthoredScopes, runtimeScope, bound)
 		}
 		switch event.Operation {
 		case "insert":
@@ -2564,6 +2719,7 @@ func nativeHTTPObservation(response Response) (NativeStepObservation, error) {
 	code := envelope.Error.Code
 	wire.ErrorCode = &code
 	wire.Retryable = envelope.Error.Retryable
+	wire.Message = envelope.Error.Message
 	return NativeStepObservation{Disposition: "error", ErrorCode: &code, Wire: wire}, nil
 }
 
