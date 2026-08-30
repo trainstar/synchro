@@ -218,16 +218,14 @@ func RunMultiScopeProvenanceScenario(ctx context.Context, scenario scenarios.Sce
 			if call == nil {
 				return MultiScopeProvenanceResult{}, fmt.Errorf("Swift multi-scope provenance call %s is absent", step.ID)
 			}
-			// An authored connect is the only operation that reconciles an
-			// assignment change, because pull derives its scope set from the
-			// scopes the client last reconciled. A started client connects by
-			// starting again, and it stops before it starts again.
+			// The authored method decides how the call runs. A start on a
+			// client that already runs needs the client to stop first, exactly
+			// as the queued-mutation consumer does.
 			method := call.Step.NativeBinding.Method
-			if started[call.Client.Key] {
+			if method == "start" && started[call.Client.Key] {
 				if _, stopErr := platform.Lifecycle(ctx, call.Client, "stop"); stopErr != nil {
-					return MultiScopeProvenanceResult{}, fmt.Errorf("stop Swift multi-scope provenance client %s before its authored connect: %w", call.Client.ClientID, stopErr)
+					return MultiScopeProvenanceResult{}, fmt.Errorf("stop Swift multi-scope provenance client %s before its authored start: %w", call.Client.ClientID, stopErr)
 				}
-				method = "start"
 			}
 			if !started[call.Client.Key] {
 				started[call.Client.Key] = true
@@ -585,7 +583,7 @@ func validateMultiScopeProvenanceControllerBinding(step scenarios.Step, transpor
 
 func validateMultiScopeProvenancePublicBinding(step scenarios.Step, call *multiScopeProvenanceCall) error {
 	binding := step.NativeBinding
-	if (step.Transport != "http" && step.Transport != "local") || binding == nil || binding.Kind != "public-call" || binding.UserID == "" || binding.ClientID == "" || binding.CallID == nil || *binding.CallID == "" || binding.Stage != "synchronous" || binding.Method != "sync-now" || binding.Completion != "idle" {
+	if (step.Transport != "http" && step.Transport != "local") || binding == nil || binding.Kind != "public-call" || binding.UserID == "" || binding.ClientID == "" || binding.CallID == nil || *binding.CallID == "" || binding.Stage != "synchronous" || !multiScopeProvenanceCallMethod(binding.Method) || binding.Completion != "idle" {
 		return fmt.Errorf("Swift multi-scope provenance step %s public binding is invalid", step.ID)
 	}
 	if call != nil && (binding.UserID != call.Client.UserID || binding.ClientID != call.Client.ClientID || string(*binding.CallID) != call.CallID) {
@@ -1334,6 +1332,13 @@ func multiScopeProvenanceScopesMatch(resolutions map[string]blackbox.NativeIdent
 		}
 	}
 	return true
+}
+
+// multiScopeProvenanceCallMethod reports whether an authored call method drives
+// a public call. A connect on a client that already runs declares start,
+// because sync-now pulls without connecting.
+func multiScopeProvenanceCallMethod(method string) bool {
+	return method == "sync-now" || method == "start"
 }
 
 func multiScopeProvenanceTableIdentityMatches(resolutions map[string]blackbox.NativeIdentityResolution, authored, runtime string) bool {

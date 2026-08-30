@@ -3856,7 +3856,7 @@
         "client_id": "client-f",
         "call_id": "multi_scope_scope_a_removal",
         "stage": "synchronous",
-        "method": "sync-now",
+        "method": "start",
         "completion": "idle"
       },
       "operation": {
