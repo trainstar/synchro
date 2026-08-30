@@ -1323,9 +1323,12 @@ func (c *NativeController) ApplicationWrite(operation scenarios.Operation) (scen
 					}
 				}
 			}
-			payload["columns"], err = nativeApplicationInsertSupportColumns(payload["columns"], support)
-			if err != nil {
-				return scenarios.Operation{}, err
+			// A table that declares no support column needs no support value.
+			if len(support) != 0 {
+				payload["columns"], err = nativeApplicationInsertSupportColumns(payload["columns"], support)
+				if err != nil {
+					return scenarios.Operation{}, err
+				}
 			}
 		}
 	}

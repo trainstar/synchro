@@ -278,6 +278,15 @@ func TestNativeControllerApplicationWriteMapsInstalledRuntimeIdentities(t *testi
 				"item-id": "id",
 				"value":   "value",
 			},
+			// cf_items owns each row by user and stamps an update time, so the
+			// binding names those columns as the fixture declares them.
+			RuntimeFieldNames: map[string]struct{}{
+				"id":         {},
+				"owner_id":   {},
+				"value":      {},
+				"updated_at": {},
+				"deleted_at": {},
+			},
 		},
 	}}}
 	operation := scenarios.Operation{
@@ -342,8 +351,10 @@ func TestNativeControllerMapsSchemaQueueApplicationWrite(t *testing.T) {
 		PrimaryKeyFieldID: "runtime-id",
 		Fields: []nativeRuntimeManifestField{
 			{ID: "runtime-id", Name: "id", Type: "string"},
+			{ID: "runtime-owner", Name: "owner_id", Type: "string"},
 			{ID: "runtime-value", Name: "authored_mutation", Type: "json"},
 			{ID: "runtime-obsolete", Name: "legacy_value", Type: "string"},
+			{ID: "runtime-updated", Name: "updated_at", Type: "string"},
 		},
 	}
 	if !nativeRuntimeTableSupports(runtime, authored) {
