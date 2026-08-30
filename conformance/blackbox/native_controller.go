@@ -97,6 +97,10 @@ type nativeInstallationBinding struct {
 	clients                  []nativeInstalledClient
 	currentAuthoredSchema    nativeSchemaReference
 	currentRuntimeSchema     nativeSchemaReference
+	// retiredFields keeps the runtime identity of each authored field a schema
+	// transition removed. A mutation queued under the earlier schema still
+	// records that identity, and the rebound table no longer carries it.
+	retiredFields map[string]string
 }
 
 type nativeInstalledClient struct {
@@ -1514,8 +1518,10 @@ func (c *NativeController) transitionNativeSchemaQueue(ctx context.Context, payl
 	}
 	c.mu.Lock()
 	var current nativeTableBinding
-	for _, table := range c.installation.tables {
+	var authoredTable string
+	for authored, table := range c.installation.tables {
 		current = table
+		authoredTable = authored
 	}
 	c.mu.Unlock()
 	if current.RuntimeName != "cf_schema_queue" {
@@ -1525,13 +1531,14 @@ func (c *NativeController) transitionNativeSchemaQueue(ctx context.Context, payl
 	for _, field := range payload.Tables[0].Fields {
 		nextFields[field.FieldID] = field
 	}
-	var removedPhysical, addedPhysical string
+	var removedPhysical, addedPhysical, removedAuthored string
 	for authoredField, physicalField := range current.FieldNames {
 		if _, retained := nextFields[authoredField]; !retained {
 			if removedPhysical != "" {
 				return errors.New("native schema-queue transition removes more than one field")
 			}
 			removedPhysical = physicalField
+			removedAuthored = authoredField
 		}
 	}
 	for _, field := range payload.Tables[0].Fields {
@@ -1556,8 +1563,27 @@ func (c *NativeController) transitionNativeSchemaQueue(ctx context.Context, payl
 	// The transition changes the fixture columns. A record binding still names
 	// the removed authored field, and the capture validates every named field
 	// against the runtime row, so the removed field must leave the binding.
+	c.retireSchemaQueueField(authoredTable, removedAuthored, current.Fields[removedAuthored])
 	c.rebindSchemaQueueAfterTransition(current.RuntimeID, nextFields)
 	return nil
+}
+
+// retireSchemaQueueField keeps the runtime identity of one removed authored
+// field. The rebound table drops it, and a mutation queued under the earlier
+// schema still records it.
+func (c *NativeController) retireSchemaQueueField(authoredTable, authoredField, runtimeField string) {
+	if authoredField == "" || runtimeField == "" {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.installation == nil {
+		return
+	}
+	if c.installation.retiredFields == nil {
+		c.installation.retiredFields = make(map[string]string, 1)
+	}
+	c.installation.retiredFields[authoredTable+"\x00"+authoredField] = runtimeField
 }
 
 // rebindSchemaQueueAfterTransition drops each authored field the transition
@@ -1568,19 +1594,10 @@ func (c *NativeController) rebindSchemaQueueAfterTransition(runtimeTableID strin
 	if c.installation == nil {
 		return
 	}
-	for authoredTable, table := range c.installation.tables {
-		if table.RuntimeID != runtimeTableID {
-			continue
-		}
-		for authoredField := range table.Fields {
-			if _, keep := retained[authoredField]; keep {
-				continue
-			}
-			delete(table.Fields, authoredField)
-			delete(table.FieldNames, authoredField)
-		}
-		c.installation.tables[authoredTable] = table
-	}
+	// The table field map is a naming dictionary. A mutation queued under the
+	// earlier schema still names the retired field, so the dictionary keeps it.
+	// Only the row image drops it, because the capture validates every image
+	// field against the runtime row.
 	for _, record := range c.records {
 		if record == nil || record.Table.RuntimeID != runtimeTableID {
 			continue
@@ -1591,14 +1608,33 @@ func (c *NativeController) rebindSchemaQueueAfterTransition(runtimeTableID strin
 			}
 			delete(record.Image.Fields, authoredField)
 		}
-		for authoredField := range record.Table.Fields {
-			if _, keep := retained[authoredField]; keep {
-				continue
-			}
-			delete(record.Table.Fields, authoredField)
-			delete(record.Table.FieldNames, authoredField)
-		}
 	}
+}
+
+// RuntimeFieldID returns the runtime field identifier bound to one authored
+// field. A queued mutation records the runtime identifier, and the scenario
+// declares no alias for a field, so the binding is the only evidence.
+func (c *NativeController) RuntimeFieldID(authoredTable, authoredField string) (string, error) {
+	if c == nil {
+		return "", errors.New("native controller is unavailable")
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.installation == nil {
+		return "", errors.New("native controller contract is not installed")
+	}
+	table, found := c.installation.tables[authoredTable]
+	if !found {
+		return "", fmt.Errorf("native controller authored table %q has no runtime binding", authoredTable)
+	}
+	runtime, found := table.Fields[authoredField]
+	if !found || runtime == "" {
+		if retired, kept := c.installation.retiredFields[authoredTable+"\x00"+authoredField]; kept && retired != "" {
+			return retired, nil
+		}
+		return "", fmt.Errorf("native controller authored field %q has no runtime binding", authoredField)
+	}
+	return runtime, nil
 }
 
 func (c *NativeController) waitForRuntimeSchemaChange(ctx context.Context) (nativeRuntimeManifest, int64, error) {
@@ -1704,7 +1740,10 @@ func (c *NativeController) commitSourceTransaction(ctx context.Context, operatio
 		if event.Dependency != nil {
 			continue
 		}
-		recordKey := nativeRecordKey(event.Table.AuthoredID, event.RecordID)
+		// Every other registration keys a record by its canonical wire value.
+		// Keying by the bare record identity here registers the same row twice
+		// and makes its primary-key alias ambiguous.
+		recordKey := nativeRecordKey(event.Table.AuthoredID, nativeCanonicalRecordKeyValue(event))
 		if event.After == nil || event.After.Deleted {
 			delete(c.records, recordKey)
 			continue
@@ -2589,7 +2628,78 @@ func (c *NativeController) resolveApplicationPushRecords(ctx context.Context, tr
 		return err
 	}
 	defer database.Close()
+	type pushIdentity struct {
+		mutationID string
+		batchID    string
+		ordinal    int
+		tableID    string
+		primaryKey json.RawMessage
+		accepted   bool
+	}
+	// The server records a rejected mutation with its identity and its
+	// rejection code. Only an accepted mutation materializes a row, so read
+	// the identities first and validate materialization for accepted
+	// mutations alone.
+	rows, err := database.QueryContext(ctx, `
+		SELECT mutation_id::text, first_batch_id::text, request_ordinal, table_id, primary_key_value,
+		       rejection_code IS NULL
+		FROM synchro.sync_push_mutations
+		WHERE user_id = $1 AND client_id = $2
+		ORDER BY first_batch_id, request_ordinal`, transaction.AuthoredUserID, transaction.AuthoredClientID)
+	if err != nil {
+		return errors.New("read native application push identities failed")
+	}
+	defer rows.Close()
+	byBatch := make(map[string][]pushIdentity)
+	for rows.Next() {
+		var value pushIdentity
+		if err := rows.Scan(&value.mutationID, &value.batchID, &value.ordinal, &value.tableID, &value.primaryKey, &value.accepted); err != nil {
+			return errors.New("scan native application push identity failed")
+		}
+		byBatch[value.batchID] = append(byBatch[value.batchID], value)
+	}
+	if err := rows.Err(); err != nil {
+		return errors.New("read native application push identities failed")
+	}
+	var runtimeBatchID string
+	var runtimeMutationIDs []string
+	var acceptedEvents []bool
+	for batchID, values := range byBatch {
+		if len(values) != len(transaction.Events) {
+			continue
+		}
+		matches := true
+		mutations := make([]string, len(values))
+		accepted := make([]bool, len(values))
+		for index, value := range values {
+			event := transaction.Events[index]
+			runtimePrimary, marshalErr := json.Marshal(event.RuntimeRecordID)
+			if marshalErr != nil || value.ordinal != index+1 || value.tableID != event.Table.RuntimeID || !nativeJSONEqual(value.primaryKey, runtimePrimary) {
+				matches = false
+				break
+			}
+			mutations[index] = value.mutationID
+			accepted[index] = value.accepted
+		}
+		if !matches {
+			continue
+		}
+		if runtimeBatchID != "" {
+			return errors.New("native application push identity binding is ambiguous")
+		}
+		runtimeBatchID = batchID
+		runtimeMutationIDs = mutations
+		acceptedEvents = accepted
+	}
+	if runtimeBatchID == "" {
+		return errors.New("native application push identity binding is absent")
+	}
+	transaction.RuntimeBatchID = runtimeBatchID
+	transaction.RuntimeMutationIDs = runtimeMutationIDs
 	for index := range transaction.Events {
+		if index >= len(acceptedEvents) || !acceptedEvents[index] {
+			continue
+		}
 		event := &transaction.Events[index]
 		var rowData []byte
 		var version, checksum string
@@ -2611,64 +2721,6 @@ func (c *NativeController) resolveApplicationPushRecords(ctx context.Context, tr
 		event.After.Version = version
 		event.After.Checksum = checksum
 	}
-	type pushIdentity struct {
-		mutationID string
-		batchID    string
-		ordinal    int
-		tableID    string
-		primaryKey json.RawMessage
-	}
-	rows, err := database.QueryContext(ctx, `
-		SELECT mutation_id::text, first_batch_id::text, request_ordinal, table_id, primary_key_value
-		FROM synchro.sync_push_mutations
-		WHERE user_id = $1 AND client_id = $2
-		ORDER BY first_batch_id, request_ordinal`, transaction.AuthoredUserID, transaction.AuthoredClientID)
-	if err != nil {
-		return errors.New("read native application push identities failed")
-	}
-	defer rows.Close()
-	byBatch := make(map[string][]pushIdentity)
-	for rows.Next() {
-		var value pushIdentity
-		if err := rows.Scan(&value.mutationID, &value.batchID, &value.ordinal, &value.tableID, &value.primaryKey); err != nil {
-			return errors.New("scan native application push identity failed")
-		}
-		byBatch[value.batchID] = append(byBatch[value.batchID], value)
-	}
-	if err := rows.Err(); err != nil {
-		return errors.New("read native application push identities failed")
-	}
-	var runtimeBatchID string
-	var runtimeMutationIDs []string
-	for batchID, values := range byBatch {
-		if len(values) != len(transaction.Events) {
-			continue
-		}
-		matches := true
-		mutations := make([]string, len(values))
-		for index, value := range values {
-			event := transaction.Events[index]
-			runtimePrimary, marshalErr := json.Marshal(event.RuntimeRecordID)
-			if marshalErr != nil || value.ordinal != index+1 || value.tableID != event.Table.RuntimeID || !nativeJSONEqual(value.primaryKey, runtimePrimary) {
-				matches = false
-				break
-			}
-			mutations[index] = value.mutationID
-		}
-		if !matches {
-			continue
-		}
-		if runtimeBatchID != "" {
-			return errors.New("native application push identity binding is ambiguous")
-		}
-		runtimeBatchID = batchID
-		runtimeMutationIDs = mutations
-	}
-	if runtimeBatchID == "" {
-		return errors.New("native application push identity binding is absent")
-	}
-	transaction.RuntimeBatchID = runtimeBatchID
-	transaction.RuntimeMutationIDs = runtimeMutationIDs
 	// Record bindings are registered when a source transaction materializes. A
 	// scenario that accepts a push without materializing still needs them, or a
 	// primary-key alias for the pushed row has no runtime binding.
@@ -2886,11 +2938,33 @@ func (c *NativeController) Capture(ctx context.Context, clientKeys, sources []st
 	if len(sources) != 1 || sources[0] != "server-state" {
 		return nil, errors.New("native controller capture supports only one server-state source")
 	}
+	// Only a materialized source transaction resolves application push
+	// identities today. A rejected push never materializes, so resolve any
+	// pending binding here. The caller that needs an identity reports its own
+	// error when the binding stays absent.
+	c.resolvePendingApplicationPushRecords(ctx)
 	facts, err := c.captureServerState(ctx)
 	if err != nil {
 		return nil, err
 	}
 	return []NativeCaptureFacts{{Source: "server-state", StateFacts: facts}}, nil
+}
+
+// resolvePendingApplicationPushRecords binds the runtime identities of each
+// application push that has none. A push the server rejected materializes no
+// row, so the source transaction path never resolves it.
+func (c *NativeController) resolvePendingApplicationPushRecords(ctx context.Context) {
+	c.mu.Lock()
+	pending := make([]*nativeTransactionBinding, 0, len(c.transactions))
+	for _, transaction := range c.transactions {
+		if transaction.ApplicationPush && transaction.RuntimeBatchID == "" {
+			pending = append(pending, transaction)
+		}
+	}
+	c.mu.Unlock()
+	for _, transaction := range pending {
+		_ = c.resolveApplicationPushRecords(ctx, transaction)
+	}
 }
 
 func (c *NativeController) captureServerState(ctx context.Context) (scenarios.StateFacts, error) {
@@ -3284,6 +3358,20 @@ func nativeSHA256(data []byte) [32]byte {
 
 func nativeTransactionKey(stream, commit string) string {
 	return stream + "\x00" + commit
+}
+
+// nativeCanonicalRecordKeyValue returns the canonical wire value that keys one
+// record binding. A deleted event carries no after image, so it falls back to
+// the canonical encoding of its authored record identity.
+func nativeCanonicalRecordKeyValue(event nativeEventBinding) string {
+	if event.After != nil && event.After.CanonicalWireJSON != "" {
+		return event.After.CanonicalWireJSON
+	}
+	encoded, err := json.Marshal(event.RecordID)
+	if err != nil {
+		return event.RecordID
+	}
+	return string(encoded)
 }
 
 func nativeRecordKey(table, record string) string {

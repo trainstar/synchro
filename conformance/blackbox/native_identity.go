@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"sort"
 
 	"github.com/trainstar/synchro/conformance/internal/jsonstrict"
 	"github.com/trainstar/synchro/conformance/scenarios"
@@ -248,7 +249,15 @@ func (c *NativeController) IdentityValues(aliases []scenarios.NativeIdentityAlia
 				}
 			}
 			if matches != 1 || runtime == "" || applicationIdentifier == "" {
-				return nil, fmt.Errorf("%w: primary-key alias %q has no unique runtime binding", ErrNativeIdentityEvidence, alias.Alias)
+				// The count alone cannot show whether no record bound or several
+				// did, so name the bound record identities.
+				bound := make([]string, 0, len(c.records))
+				for _, record := range c.records {
+					bound = append(bound, record.RecordID)
+				}
+				sort.Strings(bound)
+				return nil, fmt.Errorf("%w: primary-key alias %q has no unique runtime binding; matches %d bound records %v",
+					ErrNativeIdentityEvidence, alias.Alias, matches, bound)
 			}
 		case "batch-id":
 			authored, err := nativeIdentityString(alias)
