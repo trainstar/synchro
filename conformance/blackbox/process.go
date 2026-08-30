@@ -2737,6 +2737,41 @@ func (executor *OperatorExecutor) RestoreHydrationColumn(ctx context.Context) er
 	return executor.exec(ctx, "ALTER TABLE public.cf_schema_queue ADD COLUMN legacy_value TEXT NOT NULL DEFAULT 'restored'")
 }
 
+// RestoreSchemaQueueFixture returns the schema-queue fixture to the column
+// shape schema.sql declares. A scenario transitions the fixture field with a
+// data definition change, and no extension reinstall reverses that change, so
+// a later scenario that binds the authored field finds it absent.
+//
+// Call this only where no registry generation exists. A generation records the
+// column set it was registered against, and dropping a column that a live
+// generation names makes the WAL consumer reject the registration.
+func (executor *OperatorExecutor) RestoreSchemaQueueFixture(ctx context.Context) error {
+	return executor.exec(ctx, `DO $$
+DECLARE
+	obsolete text;
+BEGIN
+	FOR obsolete IN
+		SELECT attname
+		FROM pg_catalog.pg_attribute
+		WHERE attrelid = 'public.cf_schema_queue'::regclass
+		  AND attnum > 0 AND NOT attisdropped
+		  AND attname LIKE 'queue\_value\_%'
+	LOOP
+		EXECUTE format('ALTER TABLE public.cf_schema_queue DROP COLUMN %I', obsolete);
+	END LOOP;
+	IF NOT EXISTS (
+		SELECT 1
+		FROM pg_catalog.pg_attribute
+		WHERE attrelid = 'public.cf_schema_queue'::regclass
+		  AND attnum > 0 AND NOT attisdropped
+		  AND attname = 'legacy_value'
+	) THEN
+		ALTER TABLE public.cf_schema_queue ADD COLUMN legacy_value TEXT NOT NULL DEFAULT '';
+		ALTER TABLE public.cf_schema_queue ALTER COLUMN legacy_value DROP DEFAULT;
+	END IF;
+END $$`)
+}
+
 // RegisterSchemaQueue refreshes the fixed schema-queue registration.
 func (executor *OperatorExecutor) RegisterSchemaQueue(ctx context.Context) error {
 	return executor.exec(ctx, `SELECT synchro.synchro_register_table(

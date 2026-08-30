@@ -791,7 +791,12 @@ func nativeRuntimeTableRejections(runtime []nativeRuntimeManifestTable, authored
 			}
 			break
 		}
-		reasons = append(reasons, table.Name+": "+reason)
+		names := make([]string, 0, len(table.Fields))
+		for _, field := range table.Fields {
+			names = append(names, field.Name+":"+field.Type)
+		}
+		sort.Strings(names)
+		reasons = append(reasons, fmt.Sprintf("%s: %s (offers %v)", table.Name, reason, names))
 	}
 	sort.Strings(reasons)
 	return reasons

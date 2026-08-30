@@ -231,6 +231,13 @@ func resetSwiftPerformanceServer(t *testing.T, ctx context.Context, harness *bla
 		}
 		if phase == 0 {
 			minimumGeneration = ready.ActiveRegistryGeneration
+			// A scenario transitions the shared schema-queue field with a data
+			// definition change. The reinstall has cleared every registry
+			// generation, so this is the only point where restoring the
+			// authored column shape invalidates no registration.
+			if err := harness.Operator().RestoreSchemaQueueFixture(ctx); err != nil {
+				t.Fatalf("restore Swift performance schema-queue fixture: %v", err)
+			}
 			if err := harness.RestoreDiagnosticRegistrations(ctx); err != nil {
 				t.Fatalf("restore Swift performance source registrations: %v", err)
 			}
