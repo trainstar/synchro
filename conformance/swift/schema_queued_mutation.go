@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"reflect"
 
 	"github.com/trainstar/synchro/conformance/blackbox"
 	"github.com/trainstar/synchro/conformance/scenarios"
@@ -133,6 +134,10 @@ func RunSchemaQueuedMutationScenario(ctx context.Context, scenario scenarios.Sce
 	if err != nil {
 		return SchemaQueuedMutationResult{}, err
 	}
+	serverCaptures, err := controller.Capture(ctx, []string{client.Key}, []string{"server-state"})
+	if err != nil || len(serverCaptures) != 1 {
+		return SchemaQueuedMutationResult{}, fmt.Errorf("capture Swift schema-queued-mutation server state: %w", err)
+	}
 	// The authored schema hash is a corpus value. The client observes the
 	// hash the server published, so compare the authored client state against
 	// the runtime schema each authored alias resolves to.
@@ -140,12 +145,14 @@ func RunSchemaQueuedMutationScenario(ctx context.Context, scenario scenarios.Sce
 	if err != nil {
 		return SchemaQueuedMutationResult{}, err
 	}
-	if err := validateSwiftStateProjection(runtimeExpected, clientState); err != nil {
+	// The queue records identities the client generates. The projection
+	// compares declared values, so it cannot compare them. Compare the queue
+	// through the aliases the scenario declares instead.
+	if err := validateSwiftStateProjection(swiftStateFactsWithoutGeneratedIdentities(runtimeExpected), swiftStateFactsWithoutGeneratedIdentities(clientState)); err != nil {
 		return SchemaQueuedMutationResult{}, fmt.Errorf("Swift schema-queued-mutation client state differs from the authored model: %w", err)
 	}
-	serverCaptures, err := controller.Capture(ctx, []string{client.Key}, []string{"server-state"})
-	if err != nil || len(serverCaptures) != 1 {
-		return SchemaQueuedMutationResult{}, fmt.Errorf("capture Swift schema-queued-mutation server state: %w", err)
+	if err := validateSchemaQueuedMutationQueue(controller, scenario.NativeIdentityAliases, expected, clientState, serverCaptures[0].StateFacts); err != nil {
+		return SchemaQueuedMutationResult{}, err
 	}
 	identities, err := resolveSchemaQueuedMutationIdentities(controller, scenario.NativeIdentityAliases, reset)
 	if err != nil {
@@ -319,6 +326,139 @@ func schemaQueuedMutationStep(scenario scenarios.Scenario, id string) (scenarios
 // reference in the expected client state with the runtime schema its alias
 // resolves to. The scenario declares both schema aliases for this
 // expectation, so an authored hash never matches an observed hash directly.
+// swiftStateFactsWithoutGeneratedIdentities drops the client queue and outcome
+// families. Both record the mutation identity the client generates, which the
+// declared value projection cannot compare.
+func swiftStateFactsWithoutGeneratedIdentities(facts scenarios.StateFacts) scenarios.StateFacts {
+	projected := scenarios.CloneStateFacts(facts)
+	for index := range projected.Clients {
+		projected.Clients[index].Queue = nil
+		projected.Clients[index].Outcomes = nil
+	}
+	return projected
+}
+
+// validateSchemaQueuedMutationQueue compares the authored queue entry against
+// the observed entry through the identities the scenario declares. The client
+// generates the mutation identifier, the record identity, and the base
+// version, and it generates one timestamp the scenario declares no alias for.
+func validateSchemaQueuedMutationQueue(controller *blackbox.NativeController, aliases []scenarios.NativeIdentityAlias, expected, observed, server scenarios.StateFacts) error {
+	if len(expected.Clients) != 1 || len(observed.Clients) != 1 {
+		return errors.New("Swift schema-queued-mutation client state shape differs from the authored model")
+	}
+	want := expected.Clients[0].Queue
+	got := observed.Clients[0].Queue
+	if len(want) != len(got) {
+		return fmt.Errorf("Swift schema-queued-mutation queue authored %d entries observed %d", len(want), len(got))
+	}
+	resolvable := make([]scenarios.NativeIdentityAlias, 0, len(aliases))
+	for _, alias := range aliases {
+		switch alias.Kind {
+		case "table", "primary-key", "mutation-id":
+			resolvable = append(resolvable, alias)
+		}
+	}
+	values, err := controller.IdentityValues(resolvable)
+	if err != nil {
+		return fmt.Errorf("resolve Swift schema-queued-mutation queue identity: %w", err)
+	}
+	authoredByAlias := make(map[string]json.RawMessage, len(resolvable))
+	for _, alias := range resolvable {
+		authoredByAlias[alias.Alias] = alias.Value
+	}
+	resolved := make(map[string]blackbox.NativeIdentityResolution, len(values))
+	for _, value := range values {
+		authored, found := authoredByAlias[value.Alias]
+		if !found {
+			continue
+		}
+		resolved[value.Kind] = blackbox.NativeIdentityResolution{
+			Kind:          value.Kind,
+			Alias:         value.Alias,
+			AuthoredValue: authored,
+			RuntimeValue:  value.RuntimeValue,
+		}
+	}
+	for index := range want {
+		if err := schemaQueuedMutationEntryMatches(want[index], got[index], resolved, server); err != nil {
+			return err
+		}
+	}
+	// The outcome records the same generated mutation identity as the queue.
+	wantOutcomes := expected.Clients[0].Outcomes
+	gotOutcomes := observed.Clients[0].Outcomes
+	if len(wantOutcomes) != len(gotOutcomes) {
+		return fmt.Errorf("Swift schema-queued-mutation outcomes authored %d observed %d", len(wantOutcomes), len(gotOutcomes))
+	}
+	mutation, found := resolved["mutation-id"]
+	if !found && len(wantOutcomes) > 0 {
+		return errors.New("Swift schema-queued-mutation scenario declares no mutation-id alias")
+	}
+	for index := range wantOutcomes {
+		if !resolutionMatchesString(mutation, wantOutcomes[index].MutationID, gotOutcomes[index].MutationID) {
+			return fmt.Errorf("Swift schema-queued-mutation outcome mutation identity authored %q observed %q",
+				wantOutcomes[index].MutationID, gotOutcomes[index].MutationID)
+		}
+		if wantOutcomes[index].State != gotOutcomes[index].State || wantOutcomes[index].Reason != gotOutcomes[index].Reason {
+			return fmt.Errorf("Swift schema-queued-mutation outcome authored %s/%s observed %s/%s",
+				wantOutcomes[index].State, wantOutcomes[index].Reason, gotOutcomes[index].State, gotOutcomes[index].Reason)
+		}
+	}
+	return nil
+}
+
+func schemaQueuedMutationEntryMatches(want, got scenarios.QueuedMutationFact, resolved map[string]blackbox.NativeIdentityResolution, server scenarios.StateFacts) error {
+	for _, identity := range []struct {
+		kind          string
+		name          string
+		authored, got string
+	}{
+		{"mutation-id", "mutation_id", want.MutationID, got.MutationID},
+		{"table", "table_id", want.TableID, got.TableID},
+	} {
+		value, found := resolved[identity.kind]
+		if !found {
+			return fmt.Errorf("Swift schema-queued-mutation scenario declares no %s alias", identity.kind)
+		}
+		var runtime string
+		if json.Unmarshal(value.RuntimeValue, &runtime) != nil || runtime == "" {
+			return fmt.Errorf("Swift schema-queued-mutation %s alias has no runtime value", identity.kind)
+		}
+		if !resolutionMatchesString(value, identity.authored, identity.got) {
+			return fmt.Errorf("Swift schema-queued-mutation queue %s authored %q observed %q wants runtime %q", identity.name, identity.authored, identity.got, runtime)
+		}
+	}
+	// The base version is the server version of the row the client updated.
+	// The queue cannot verify its own base version, so take the runtime value
+	// from the server row the scenario committed.
+	if want.BaseVersion != nil {
+		if got.BaseVersion == nil {
+			return errors.New("Swift schema-queued-mutation queue observed no base version")
+		}
+		matched := false
+		for _, row := range server.Rows {
+			if row.Version == *got.BaseVersion {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			return fmt.Errorf("Swift schema-queued-mutation queue base version %q is not a server row version", *got.BaseVersion)
+		}
+	}
+	if want.Operation != got.Operation || want.Status != got.Status || want.LocalOrder != got.LocalOrder {
+		return fmt.Errorf("Swift schema-queued-mutation queue entry state authored %s/%s/%d observed %s/%s/%d",
+			want.Operation, want.Status, want.LocalOrder, got.Operation, got.Status, got.LocalOrder)
+	}
+	if want.AuthoredSchema != got.AuthoredSchema {
+		return fmt.Errorf("Swift schema-queued-mutation queue authored schema %d differs from the observed schema %d", want.AuthoredSchema.Version, got.AuthoredSchema.Version)
+	}
+	if !reflect.DeepEqual(want.AuthoredColumns, got.AuthoredColumns) {
+		return fmt.Errorf("Swift schema-queued-mutation queue authored columns differ from the observed columns")
+	}
+	return nil
+}
+
 func swiftSchemaQueuedMutationRuntimeState(controller *blackbox.NativeController, aliases []scenarios.NativeIdentityAlias, expected scenarios.StateFacts) (scenarios.StateFacts, error) {
 	schemaAliases := make([]scenarios.NativeIdentityAlias, 0, len(aliases))
 	for _, alias := range aliases {

@@ -1550,7 +1550,55 @@ func (c *NativeController) transitionNativeSchemaQueue(ctx context.Context, payl
 	if addedPhysical != "" && !validSchemaTransitionColumn(addedPhysical) {
 		return errors.New("native schema-queue transition fields are invalid")
 	}
-	return c.harness.Operator().TransitionSchemaQueueField(ctx, removedPhysical, addedPhysical)
+	if err := c.harness.Operator().TransitionSchemaQueueField(ctx, removedPhysical, addedPhysical); err != nil {
+		return err
+	}
+	// The transition changes the fixture columns. A record binding still names
+	// the removed authored field, and the capture validates every named field
+	// against the runtime row, so the removed field must leave the binding.
+	c.rebindSchemaQueueAfterTransition(current.RuntimeID, nextFields)
+	return nil
+}
+
+// rebindSchemaQueueAfterTransition drops each authored field the transition
+// removed from the table binding and from every record image that names it.
+func (c *NativeController) rebindSchemaQueueAfterTransition(runtimeTableID string, retained map[string]nativeAuthoredField) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.installation == nil {
+		return
+	}
+	for authoredTable, table := range c.installation.tables {
+		if table.RuntimeID != runtimeTableID {
+			continue
+		}
+		for authoredField := range table.Fields {
+			if _, keep := retained[authoredField]; keep {
+				continue
+			}
+			delete(table.Fields, authoredField)
+			delete(table.FieldNames, authoredField)
+		}
+		c.installation.tables[authoredTable] = table
+	}
+	for _, record := range c.records {
+		if record == nil || record.Table.RuntimeID != runtimeTableID {
+			continue
+		}
+		for authoredField := range record.Image.Fields {
+			if _, keep := retained[authoredField]; keep {
+				continue
+			}
+			delete(record.Image.Fields, authoredField)
+		}
+		for authoredField := range record.Table.Fields {
+			if _, keep := retained[authoredField]; keep {
+				continue
+			}
+			delete(record.Table.Fields, authoredField)
+			delete(record.Table.FieldNames, authoredField)
+		}
+	}
 }
 
 func (c *NativeController) waitForRuntimeSchemaChange(ctx context.Context) (nativeRuntimeManifest, int64, error) {
