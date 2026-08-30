@@ -6045,3 +6045,28 @@ func processGroupAlive(pid int) bool {
 	err := syscall.Kill(-pid, 0)
 	return err == nil || errors.Is(err, syscall.EPERM)
 }
+
+// SealedPushRequest returns the canonical request the server sealed for one
+// completed push batch. A replay with equal identity and equal fingerprint
+// resends exactly these bytes.
+func (executor *OperatorExecutor) SealedPushRequest(ctx context.Context, batchID string) ([]byte, error) {
+	if executor == nil || executor.harness == nil {
+		return nil, errors.New("operator executor is unavailable")
+	}
+	if !executor.harness.sourceReady {
+		return nil, errors.New("operator executor is unavailable")
+	}
+	database, err := executor.harness.openDatabase(ctx, executor.harness.names.Database, executor.harness.env.Admin, false)
+	if err != nil {
+		return nil, errors.New("open operator connection failed")
+	}
+	defer database.Close()
+	var sealed []byte
+	row := database.QueryRowContext(ctx,
+		"SELECT sealed_canonical_request FROM synchro.sync_push_batches WHERE batch_id = $1::uuid",
+		batchID)
+	if err := row.Scan(&sealed); err != nil {
+		return nil, errors.New("read sealed push request failed")
+	}
+	return sealed, nil
+}

@@ -144,6 +144,10 @@ type nativeTransactionBinding struct {
 	SourceXID            uint64
 	Materialized         bool
 	ApplicationPush      bool
+	// AuthoredMutationsDigest identifies the authored content of the accepted
+	// push. A replay carrying the same content must reproduce the sealed
+	// request byte for byte, so it replays the stored canonical request.
+	AuthoredMutationsDigest string
 }
 
 type nativeEventBinding struct {
@@ -1117,6 +1121,11 @@ func (c *NativeController) BindApplicationPush(operation scenarios.Operation) er
 		AuthoredMutationIDs: make([]string, 0, len(payload.Request.Mutations)),
 		ApplicationPush:     true,
 	}
+	digest, digestErr := nativeAuthoredMutationsDigest(operation.Payload)
+	if digestErr != nil {
+		return digestErr
+	}
+	transaction.AuthoredMutationsDigest = digest
 	seenRecords := make(map[string]struct{}, len(payload.Request.Mutations))
 	for ordinal, mutation := range payload.Request.Mutations {
 		if !validNativeIdentity(mutation.MutationID) {
@@ -2102,6 +2111,17 @@ func (c *NativeController) nativeHTTPRequest(ctx context.Context, operation scen
 		request, _ = wrapper["request"].(map[string]any)
 		if request == nil {
 			return "", nil, "", errors.New("native push request is invalid")
+		}
+		// A replay that carries the accepted content must reproduce the sealed
+		// request exactly, or the server sees a changed fingerprint. Replay the
+		// stored canonical request for that batch.
+		sealed, sealedErr := c.sealedNativePushReplay(ctx, operation, request)
+		if sealedErr != nil {
+			return "", nil, "", sealedErr
+		}
+		if sealed != nil {
+			userValue, _ := wrapper[userField].(string)
+			return userValue, sealed, path, nil
 		}
 		if err := c.rewriteNativePush(ctx, request); err != nil {
 			return "", nil, "", err
@@ -3393,4 +3413,77 @@ func (c *NativeController) rewriteNativePushIdentities(ctx context.Context, requ
 		}
 	}
 	return nil
+}
+
+// nativeAuthoredMutationsDigest identifies the authored mutation content of a
+// push operation. Two replays with the same digest carry the same content.
+func nativeAuthoredMutationsDigest(payload []byte) (string, error) {
+	var wrapper struct {
+		Request struct {
+			Mutations []json.RawMessage `json:"mutations"`
+		} `json:"request"`
+	}
+	if err := json.Unmarshal(payload, &wrapper); err != nil || len(wrapper.Request.Mutations) == 0 {
+		return "", errors.New("native push mutations are unreadable")
+	}
+	// Encode through a decoded value so the digest depends on content and not on
+	// the key order a caller happened to produce.
+	canonical := make([]any, 0, len(wrapper.Request.Mutations))
+	for _, mutation := range wrapper.Request.Mutations {
+		var value any
+		if err := json.Unmarshal(mutation, &value); err != nil {
+			return "", errors.New("native push mutation is unreadable")
+		}
+		canonical = append(canonical, value)
+	}
+	encoded, err := json.Marshal(canonical)
+	if err != nil {
+		return "", errors.New("native push mutations are not encodable")
+	}
+	sum := sha256.Sum256(encoded)
+	return hex.EncodeToString(sum[:]), nil
+}
+
+// sealedNativePushReplay returns the stored canonical request when the operation
+// replays the accepted content of a bound batch. It returns nil when the
+// operation is not such a replay, so a new or changed push builds normally.
+func (c *NativeController) sealedNativePushReplay(ctx context.Context, operation scenarios.Operation, request map[string]any) ([]byte, error) {
+	authoredBatch, ok := request["batch_id"].(string)
+	if !ok || authoredBatch == "" {
+		return nil, nil
+	}
+	digest, err := nativeAuthoredMutationsDigest(operation.Payload)
+	if err != nil {
+		return nil, err
+	}
+	var binding *nativeTransactionBinding
+	for _, transaction := range c.transactions {
+		if transaction.AuthoredBatchID != authoredBatch || !transaction.ApplicationPush {
+			continue
+		}
+		if transaction.AuthoredMutationsDigest != digest {
+			return nil, nil
+		}
+		binding = transaction
+		break
+	}
+	if binding == nil {
+		return nil, nil
+	}
+	if binding.RuntimeBatchID == "" {
+		if err := c.resolveApplicationPushRecords(ctx, binding); err != nil {
+			return nil, fmt.Errorf("resolve native application push identities: %w", err)
+		}
+	}
+	if binding.RuntimeBatchID == "" {
+		return nil, errors.New("native push batch identity has no runtime binding")
+	}
+	sealed, err := c.harness.Operator().SealedPushRequest(ctx, binding.RuntimeBatchID)
+	if err != nil {
+		return nil, fmt.Errorf("read native sealed push request: %w", err)
+	}
+	if len(sealed) == 0 {
+		return nil, errors.New("native sealed push request is absent")
+	}
+	return sealed, nil
 }
