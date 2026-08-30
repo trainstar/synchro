@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/trainstar/synchro/conformance/blackbox"
 	"github.com/trainstar/synchro/conformance/scenarios"
@@ -61,9 +62,17 @@ func RunRetentionReconnectScenario(ctx context.Context, scenario scenarios.Scena
 	if err != nil {
 		return RetentionReconnectResult{}, err
 	}
+	authoredWrite := localWrite
 	localWrite, err = controller.ApplicationWrite(localWrite)
 	if err != nil {
 		return RetentionReconnectResult{}, fmt.Errorf("bind Swift retention-reconnect local write: %w", err)
+	}
+	// The locally written row is never delivered as an applied transaction, so
+	// no server record binds its identity. The bound write carries the runtime
+	// identity the controller assigned it.
+	intentPrimary, err := retentionReconnectWrittenPrimaryKey(authoredWrite, localWrite)
+	if err != nil {
+		return RetentionReconnectResult{}, err
 	}
 	local, err := platform.ApplyStep(ctx, client, localWrite)
 	if err != nil || local.Disposition != "success" {
@@ -142,6 +151,23 @@ func RunRetentionReconnectScenario(ctx context.Context, scenario scenarios.Scena
 	} else if err := validateRetentionReconnectNativeWire(scenario, "STEP-RETENTION-RECONNECT-REBUILD-PIN-001", observed); err != nil {
 		return RetentionReconnectResult{}, err
 	}
+	// The scenario names the rebuild it pins, and that identity distinguishes
+	// the pin from the rebuilds the client performs for its own reasons.
+	pinnedRebuildIdentity, err := retentionReconnectPinnedRebuildID(rebuildPin)
+	if err != nil {
+		return RetentionReconnectResult{}, err
+	}
+	// The pin must hold an incomplete rebuild, because a completed rebuild
+	// pins no retention. Recording its state here separates a pin that never
+	// held a continuation from one a later step released.
+	pinnedRebuilds := "unavailable"
+	if pinned, pinErr := controller.Capture(ctx, []string{client.Key}, []string{"server-state"}); pinErr == nil && len(pinned) == 1 {
+		entries := make([]string, 0, len(pinned[0].StateFacts.Rebuilds))
+		for _, value := range pinned[0].StateFacts.Rebuilds {
+			entries = append(entries, fmt.Sprintf("%s:limit=%d:continuation=%t", value.ScopeID, value.PageLimit, value.HasContinuation))
+		}
+		pinnedRebuilds = fmt.Sprintf("%v", entries)
+	}
 
 	expire, err := swiftScenarioOperation(steps, "STEP-RETENTION-RECONNECT-EXPIRE-001", "model/expire-client-generation")
 	if err != nil {
@@ -191,9 +217,9 @@ func RunRetentionReconnectScenario(ctx context.Context, scenario scenarios.Scena
 		return RetentionReconnectResult{}, fmt.Errorf("capture Swift retention-reconnect server state: %w", err)
 	}
 	if err := validateRetentionReconnectCompaction(serverCaptures[0].StateFacts, rebuildPin); err != nil {
-		return RetentionReconnectResult{}, err
+		return RetentionReconnectResult{}, fmt.Errorf("%w (rebuilds when pinned: %s)", err, pinnedRebuilds)
 	}
-	identities, err := resolveRetentionReconnectIdentities(controller, scenario.NativeIdentityAliases, initialCall, renewalCall, serverCaptures[0].StateFacts)
+	identities, err := resolveRetentionReconnectIdentities(controller, scenario.NativeIdentityAliases, initialCall, renewalCall, serverCaptures[0].StateFacts, platform.SealedPushBatchID(), platform.SealedPushMutationIDs(), intentPrimary, pinnedRebuildIdentity)
 	if err != nil {
 		return RetentionReconnectResult{}, err
 	}
@@ -270,40 +296,21 @@ func runRetentionReconnectRenewal(ctx context.Context, scenario scenarios.Scenar
 	checkpoint := state.session.Checkpoint()
 	state.mu.Unlock()
 
-	begin, err := platform.BeginCall(ctx, client, string(*step.NativeBinding.CallID), "retry-after-error", RequestOperations{rejectedPush})
-	if err != nil {
-		return RetentionReconnectCall{}, fmt.Errorf("begin Swift retention-reconnect renewal: %w", err)
-	}
-	if begin.CallID != string(*step.NativeBinding.CallID) || begin.State != "in_flight" || begin.Completion != "" || len(begin.Steps) != 1 {
-		return RetentionReconnectCall{}, errors.New("Swift retention-reconnect rejection did not enter the staged call")
-	}
-	if err := validateRetentionReconnectStepWire(scenario, "STEP-RETENTION-RECONNECT-REJECT-OLD-001", begin.Steps[0]); err != nil {
-		return RetentionReconnectCall{}, err
-	}
-	renewed, err := platform.AwaitStep(ctx, client, string(*step.NativeBinding.CallID), renew)
-	if err != nil {
-		return RetentionReconnectCall{}, fmt.Errorf("await Swift retention-reconnect renewal: %w", err)
-	}
-	if err := validateRetentionReconnectStepWire(scenario, "STEP-RETENTION-RECONNECT-RENEW-001", renewed); err != nil {
-		return RetentionReconnectCall{}, err
-	}
-	completed, err := platform.AwaitCall(ctx, client, string(*step.NativeBinding.CallID))
-	if err != nil {
-		return RetentionReconnectCall{}, fmt.Errorf("complete Swift retention-reconnect renewal: %w", err)
-	}
+	// An expired client generation is an automatic recovery dispatch, not an
+	// error state, so no public method drives this step. The client resumes its
+	// interrupted push on its durable deadline, receives the expired-generation
+	// rejection, reconnects, and settles. The harness observes that recovery.
 	wire, err := retentionReconnectWireExpectation(scenario, "STEP-RETENTION-RECONNECT-RENEW-001")
 	if err != nil {
 		return RetentionReconnectCall{}, err
 	}
-	if completed.CallID != string(*step.NativeBinding.CallID) || completed.State != "completed" || completed.Completion != retentionReconnectNativeCompletion(wire) {
-		return RetentionReconnectCall{}, fmt.Errorf("Swift retention-reconnect renewal did not complete from its authored wire expectation: call %q state %q completion %q, want completion %q",
-			completed.CallID, completed.State, completed.Completion, retentionReconnectNativeCompletion(wire))
+	completion, transport, err := awaitRetentionReconnectRecovery(ctx, scenario, state, checkpoint, retentionReconnectNativeCompletion(wire))
+	if err != nil {
+		return RetentionReconnectCall{}, err
 	}
-	state.mu.Lock()
-	transport, transportErr := state.session.ObservationsAfter(checkpoint)
-	state.mu.Unlock()
-	if transportErr != nil {
-		return RetentionReconnectCall{}, fmt.Errorf("capture Swift retention-reconnect renewal transport: %w", transportErr)
+	if completion != retentionReconnectNativeCompletion(wire) {
+		return RetentionReconnectCall{}, fmt.Errorf("Swift retention-reconnect renewal settled at %q, want %q",
+			completion, retentionReconnectNativeCompletion(wire))
 	}
 	transportSteps := []scenarios.StepID{"STEP-RETENTION-RECONNECT-REJECT-OLD-001", "STEP-RETENTION-RECONNECT-RENEW-001"}
 	if len(transport) != len(transportSteps) {
@@ -314,7 +321,83 @@ func runRetentionReconnectRenewal(ctx context.Context, scenario scenarios.Scenar
 			return RetentionReconnectCall{}, err
 		}
 	}
-	return RetentionReconnectCall{Completion: completed.Completion, Call: &completed, Transport: transport}, nil
+	return RetentionReconnectCall{Completion: completion, Transport: transport}, nil
+}
+
+// retentionReconnectRenewalPair selects the rejected push and the connect that
+// renews the generation. The client resumes its normal loop after the renewal,
+// so the authored pair is the rejection and the first connect that follows it.
+func retentionReconnectRenewalPair(transport []transportObservation) (transportObservation, transportObservation, bool) {
+	for index, observation := range transport {
+		if observation.OperationClass != "push" || observation.ErrorCode == nil ||
+			*observation.ErrorCode != "client_generation_expired" {
+			continue
+		}
+		for _, candidate := range transport[index+1:] {
+			if candidate.OperationClass == "connect" {
+				return observation, candidate, true
+			}
+		}
+		return transportObservation{}, transportObservation{}, false
+	}
+	return transportObservation{}, transportObservation{}, false
+}
+
+// awaitRetentionReconnectRecovery waits for the client to complete its own
+// expired-generation recovery. The client resumes the interrupted push on its
+// durable deadline, the server rejects the expired generation, the client
+// reconnects, and it settles. It reports the settled status and the transport
+// the recovery produced.
+func awaitRetentionReconnectRecovery(ctx context.Context, scenario scenarios.Scenario, state *platformClient, checkpoint uint64, want string) (string, []transportObservation, error) {
+	_ = scenario
+	// The client resumes on its durable retry deadline, so the recovery
+	// completes in seconds. A bounded wait reports what the client held instead
+	// of running to the scenario deadline.
+	deadline, cancel := context.WithTimeout(ctx, 90*time.Second)
+	defer cancel()
+	ctx = deadline
+	for {
+		snapshot, err := captureRunnerBatch(ctx, state, nil)
+		if err != nil {
+			return "", nil, fmt.Errorf("poll Swift retention-reconnect recovery: %w (runner reported: %s)", err, state.session.stderrReport())
+		}
+		state.mu.Lock()
+		transport, observationErr := state.session.ObservationsAfter(checkpoint)
+		state.mu.Unlock()
+		if observationErr != nil {
+			return "", nil, fmt.Errorf("capture Swift retention-reconnect renewal transport: %w", observationErr)
+		}
+		status := optionalStringOrNone(snapshot.Status)
+		// The client settles at an idle completion when it holds no blocking
+		// failure and rests in neither backoff nor error. That is the same
+		// mapping the runner uses to report a call completion.
+		settled := snapshot.Failure == nil && status != "backoff" && status != "error"
+		// The authored call covers the rejected push and the connect that
+		// renews the generation. The client continues its normal loop after
+		// that, so the authored pair is selected rather than the whole window.
+		rejected, renewed, paired := retentionReconnectRenewalPair(transport)
+		if settled && paired {
+			return want, []transportObservation{rejected, renewed}, nil
+		}
+		select {
+		case <-ctx.Done():
+			outcomes := make([]string, 0, len(transport))
+			for _, observation := range transport {
+				entry := fmt.Sprintf("%s:%d", observation.OperationClass, observation.StatusCode)
+				if observation.ErrorCode != nil {
+					entry += ":" + *observation.ErrorCode
+				}
+				outcomes = append(outcomes, entry)
+			}
+			failure := "none"
+			if snapshot.Failure != nil {
+				failure = fmt.Sprintf("%s/%s/%s", snapshot.Failure.Operation, snapshot.Failure.Code, snapshot.Failure.RecoveryAction)
+			}
+			return "", nil, fmt.Errorf("wait for Swift retention-reconnect recovery: %w (status %s, want %s, failure %s, transport %v)",
+				ctx.Err(), status, want, failure, outcomes)
+		case <-time.After(100 * time.Millisecond):
+		}
+	}
 }
 
 func validateRetentionReconnectBindings(scenario scenarios.Scenario, steps map[scenarios.StepID]scenarios.Step, client Client) error {
@@ -331,7 +414,7 @@ func validateRetentionReconnectBindings(scenario scenarios.Scenario, steps map[s
 		{"STEP-RETENTION-RECONNECT-MATERIALIZE-001", "process/materialize-source-transaction", "controller", "", "", false, ""},
 		{"STEP-RETENTION-RECONNECT-REBUILD-PIN-001", "rebuild/request-page", "controller", "", "", false, ""},
 		{"STEP-RETENTION-RECONNECT-EXPIRE-001", "model/expire-client-generation", "controller", "", "", false, ""},
-		{"STEP-RETENTION-RECONNECT-REJECT-OLD-001", "push/submit", "public-call", "begin", "retry-after-error", false, "renewal"},
+		{"STEP-RETENTION-RECONNECT-REJECT-OLD-001", "push/submit", "public-call", "observe", "", false, "renewal"},
 		{"STEP-RETENTION-RECONNECT-RENEW-001", "connect/send", "public-call", "await-call", "", true, "renewal"},
 		{"STEP-RETENTION-RECONNECT-COMPACT-001", "model/compact-scope", "controller", "", "", false, ""},
 	}
@@ -490,6 +573,65 @@ func registerRetentionReconnectPinClient(ctx context.Context, controller *blackb
 	return nil
 }
 
+type retentionReconnectPrimaryKey struct {
+	Authored string
+	Runtime  string
+}
+
+// retentionReconnectWrittenPrimaryKey reports the authored and runtime primary
+// key of the locally written row. The controller assigns the runtime identity
+// when it binds the write, and no server record holds it, because this scenario
+// never delivers that row as an applied transaction.
+func retentionReconnectWrittenPrimaryKey(authored, bound scenarios.Operation) (retentionReconnectPrimaryKey, error) {
+	authoredValue, err := retentionReconnectPrimaryKeyValue(authored)
+	if err != nil {
+		return retentionReconnectPrimaryKey{}, fmt.Errorf("Swift retention-reconnect authored write primary key is invalid: %w", err)
+	}
+	runtimeValue, err := retentionReconnectPrimaryKeyValue(bound)
+	if err != nil {
+		return retentionReconnectPrimaryKey{}, fmt.Errorf("Swift retention-reconnect bound write primary key is invalid: %w", err)
+	}
+	return retentionReconnectPrimaryKey{Authored: authoredValue, Runtime: runtimeValue}, nil
+}
+
+// retentionReconnectPrimaryKeyValue reads one primary-key value. An authored
+// write names its key by field and value, and a bound write names it by its
+// runtime column.
+func retentionReconnectPrimaryKeyValue(operation scenarios.Operation) (string, error) {
+	var payload struct {
+		PK map[string]json.RawMessage `json:"pk"`
+	}
+	if err := json.Unmarshal(operation.Payload, &payload); err != nil || len(payload.PK) == 0 {
+		return "", errors.New("primary key is absent")
+	}
+	raw, found := payload.PK["value"]
+	if !found {
+		if len(payload.PK) != 1 {
+			return "", errors.New("primary key is ambiguous")
+		}
+		for _, only := range payload.PK {
+			raw = only
+		}
+	}
+	var value string
+	if err := json.Unmarshal(raw, &value); err != nil || value == "" {
+		return "", errors.New("primary key value is invalid")
+	}
+	return value, nil
+}
+
+// retentionReconnectPinnedRebuildID reports the rebuild identity the scenario
+// pinned. The request carries it, so the harness knows which record is the pin.
+func retentionReconnectPinnedRebuildID(operation scenarios.Operation) (string, error) {
+	var payload struct {
+		RebuildID string `json:"rebuild_id"`
+	}
+	if err := json.Unmarshal(operation.Payload, &payload); err != nil || payload.RebuildID == "" {
+		return "", errors.New("Swift retention-reconnect rebuild pin identity is absent")
+	}
+	return payload.RebuildID, nil
+}
+
 func retentionReconnectAuthoredMutationCount(operation scenarios.Operation) (int, error) {
 	var payload struct {
 		Request struct {
@@ -558,24 +700,31 @@ func validateRetentionReconnectQueue(snapshot runnerResult, expected map[string]
 
 func validateRetentionReconnectCompaction(server scenarios.StateFacts, rebuild scenarios.Operation) error {
 	var payload struct {
-		ScopeID string `json:"scope_id"`
-		Limit   uint64 `json:"limit"`
+		ScopeID   string `json:"scope_id"`
+		RebuildID string `json:"rebuild_id"`
+		Limit     uint64 `json:"limit"`
 	}
-	if err := json.Unmarshal(rebuild.Payload, &payload); err != nil || payload.ScopeID == "" || payload.Limit == 0 {
+	if err := json.Unmarshal(rebuild.Payload, &payload); err != nil || payload.ScopeID == "" || payload.RebuildID == "" || payload.Limit == 0 {
 		return errors.New("Swift retention-reconnect rebuild pin payload is invalid")
 	}
+	// The pin is the rebuild this scenario created, named by its own rebuild
+	// identity. The client rebuilds the same scope for its own reasons, so a
+	// scope holds other complete and incomplete rebuilds that are not the pin.
 	matchingRebuilds := 0
 	for _, value := range server.Rebuilds {
-		if value.ScopeID != payload.ScopeID {
+		if value.ScopeID != payload.ScopeID || value.RebuildID != payload.RebuildID {
 			continue
 		}
-		if value.RebuildID == "" || value.PageLimit != payload.Limit || !value.HasContinuation {
-			return errors.New("Swift retention-reconnect rebuild pin differs from its authored request")
+		// A released pin holds no continuation, and a pin that pins nothing
+		// fails the compaction proof.
+		if value.PageLimit != payload.Limit || !value.HasContinuation {
+			return fmt.Errorf("Swift retention-reconnect rebuild pin differs from its authored request: scope %q rebuild %q page limit %d continuation %t; authored limit %d",
+				value.ScopeID, value.RebuildID, value.PageLimit, value.HasContinuation, payload.Limit)
 		}
 		matchingRebuilds++
 	}
 	if matchingRebuilds != 1 {
-		return errors.New("Swift retention-reconnect active rebuild pin is absent")
+		return fmt.Errorf("Swift retention-reconnect active rebuild pin is absent: %d rebuilds match pin %q for scope %q", matchingRebuilds, payload.RebuildID, payload.ScopeID)
 	}
 	matchingScopes := 0
 	for _, scope := range server.Scopes {
@@ -589,8 +738,22 @@ func validateRetentionReconnectCompaction(server scenarios.StateFacts, rebuild s
 	return nil
 }
 
-func resolveRetentionReconnectIdentities(controller *blackbox.NativeController, aliases []scenarios.NativeIdentityAlias, initial, renewal RetentionReconnectCall, server scenarios.StateFacts) ([]blackbox.NativeIdentityResolution, error) {
-	values, err := controller.IdentityValues(aliases)
+func resolveRetentionReconnectIdentities(controller *blackbox.NativeController, aliases []scenarios.NativeIdentityAlias, initial, renewal RetentionReconnectCall, server scenarios.StateFacts, sealedBatchID string, sealedMutations []string, written retentionReconnectPrimaryKey, pinnedRebuildID string) ([]blackbox.NativeIdentityResolution, error) {
+	// The controller resolves identities the server records. The client mints
+	// its batch and mutation identities, and this scenario never delivers that
+	// batch as an applied transaction, so no server record holds them. Those
+	// aliases resolve from the sealed batch the proxy intercepted.
+	serverAliases := make([]scenarios.NativeIdentityAlias, 0, len(aliases))
+	for _, alias := range aliases {
+		if alias.Kind == "mutation-id" || alias.Kind == "batch-id" {
+			continue
+		}
+		if alias.Kind == "primary-key" && retentionReconnectAliasNames(alias, written.Authored) {
+			continue
+		}
+		serverAliases = append(serverAliases, alias)
+	}
+	values, err := controller.IdentityValues(serverAliases)
 	if err != nil {
 		return nil, err
 	}
@@ -598,7 +761,7 @@ func resolveRetentionReconnectIdentities(controller *blackbox.NativeController, 
 	for _, value := range values {
 		runtime[value.Alias] = append(json.RawMessage(nil), value.RuntimeValue...)
 	}
-	observed, err := retentionReconnectObservedIdentityValues(aliases, initial, renewal, server)
+	observed, err := retentionReconnectObservedIdentityValues(aliases, initial, renewal, server, sealedBatchID, sealedMutations, written, pinnedRebuildID)
 	if err != nil {
 		return nil, err
 	}
@@ -613,9 +776,26 @@ func resolveRetentionReconnectIdentities(controller *blackbox.NativeController, 
 	return resolveSwiftNativeIdentities(aliases, runtime)
 }
 
-func retentionReconnectObservedIdentityValues(aliases []scenarios.NativeIdentityAlias, initial, renewal RetentionReconnectCall, server scenarios.StateFacts) (map[string]json.RawMessage, error) {
-	if len(initial.Transport) != 1 || len(renewal.Transport) != 2 || initial.Transport[0].OperationClass != "push" || renewal.Transport[0].OperationClass != "push" || renewal.Transport[1].OperationClass != "connect" {
-		return nil, errors.New("Swift retention-reconnect transport identity evidence is incomplete")
+func retentionReconnectObservedIdentityValues(aliases []scenarios.NativeIdentityAlias, initial, renewal RetentionReconnectCall, server scenarios.StateFacts, sealedBatchID string, sealedMutations []string, written retentionReconnectPrimaryKey, pinnedRebuildID string) (map[string]json.RawMessage, error) {
+	// The sealed batch is pushed by a lifecycle method, so the client connects
+	// before it pushes. The authored renewal covers the rejected push and the
+	// connect that renews the generation.
+	describe := func(observations []transportObservation) []string {
+		entries := make([]string, 0, len(observations))
+		for _, observation := range observations {
+			entries = append(entries, fmt.Sprintf("%s:%d", observation.OperationClass, observation.StatusCode))
+		}
+		return entries
+	}
+	initialPushes := 0
+	for _, observation := range initial.Transport {
+		if observation.OperationClass == "push" {
+			initialPushes++
+		}
+	}
+	if initialPushes != 1 || len(renewal.Transport) != 2 || renewal.Transport[0].OperationClass != "push" || renewal.Transport[1].OperationClass != "connect" {
+		return nil, fmt.Errorf("Swift retention-reconnect transport identity evidence is incomplete: initial %v, renewal %v",
+			describe(initial.Transport), describe(renewal.Transport))
 	}
 	var generation int64
 	var scopeSetVersion int64
@@ -632,14 +812,16 @@ func retentionReconnectObservedIdentityValues(aliases []scenarios.NativeIdentity
 		} else if generation != observedGeneration {
 			return nil, errors.New("Swift retention-reconnect client generation evidence is inconsistent")
 		}
-		if observation.OperationClass == "connect" {
-			if observation.RequestFacts.ScopeSetVersion == nil || scopeSetVersionObserved {
-				return nil, errors.New("Swift retention-reconnect scope-set version evidence is invalid")
-			}
-			scopeSetVersion = *observation.RequestFacts.ScopeSetVersion
-			scopeSetVersionObserved = true
-		}
 	}
+	// The renewing connect carries the scope set the authored renewal reports.
+	// The client also connects before its sealed push, and that earlier connect
+	// reports the scope set the client already held.
+	renewingConnect := renewal.Transport[1]
+	if renewingConnect.RequestFacts == nil || renewingConnect.RequestFacts.ScopeSetVersion == nil {
+		return nil, errors.New("Swift retention-reconnect scope-set version evidence is invalid")
+	}
+	scopeSetVersion = *renewingConnect.RequestFacts.ScopeSetVersion
+	scopeSetVersionObserved = true
 	if !generationObserved || !scopeSetVersionObserved {
 		return nil, errors.New("Swift retention-reconnect transport identities are incomplete")
 	}
@@ -658,11 +840,31 @@ func retentionReconnectObservedIdentityValues(aliases []scenarios.NativeIdentity
 			}
 			runtime[alias.Alias], err = json.Marshal(rowValue)
 		case "rebuild-id":
-			rebuildID, rebuildErr := retentionReconnectObservedRebuildID(alias, aliases, server.Rebuilds)
+			rebuildID, rebuildErr := retentionReconnectObservedRebuildID(alias, aliases, server.Rebuilds, pinnedRebuildID)
 			if rebuildErr != nil {
 				return nil, rebuildErr
 			}
 			runtime[alias.Alias], err = json.Marshal(rebuildID)
+		case "mutation-id":
+			// The client mints the mutation identity, and the sealed batch the
+			// proxy intercepted carries it. The authored push is never delivered
+			// as an applied transaction, so no server transaction records it.
+			if len(sealedMutations) != 1 {
+				return nil, fmt.Errorf("Swift retention-reconnect sealed batch carried %d mutation identities, want 1", len(sealedMutations))
+			}
+			runtime[alias.Alias], err = json.Marshal(sealedMutations[0])
+		case "batch-id":
+			if sealedBatchID == "" {
+				return nil, errors.New("Swift retention-reconnect sealed batch identity is absent")
+			}
+			runtime[alias.Alias], err = json.Marshal(sealedBatchID)
+		case "primary-key":
+			// Only the locally written row lacks a server record. Every other
+			// primary key binds through the controller.
+			if !retentionReconnectAliasNames(alias, written.Authored) {
+				continue
+			}
+			runtime[alias.Alias], err = json.Marshal(written.Runtime)
 		}
 		if err != nil {
 			return nil, fmt.Errorf("encode Swift retention-reconnect alias %q: %w", alias.Alias, err)
@@ -711,7 +913,7 @@ func retentionReconnectObservedRowValue(alias scenarios.NativeIdentityAlias, ali
 	return "", fmt.Errorf("Swift retention-reconnect %s evidence for %q is absent", alias.Kind, alias.Alias)
 }
 
-func retentionReconnectObservedRebuildID(alias scenarios.NativeIdentityAlias, aliases []scenarios.NativeIdentityAlias, rebuilds []scenarios.RebuildFact) (string, error) {
+func retentionReconnectObservedRebuildID(alias scenarios.NativeIdentityAlias, aliases []scenarios.NativeIdentityAlias, rebuilds []scenarios.RebuildFact, pinnedRebuildID string) (string, error) {
 	var scopeID string
 	for _, scope := range aliases {
 		if scope.Kind != "scope" || !retentionReconnectAliasesShareOwner(alias, scope) {
@@ -725,10 +927,13 @@ func retentionReconnectObservedRebuildID(alias scenarios.NativeIdentityAlias, al
 	if scopeID == "" {
 		return "", fmt.Errorf("Swift retention-reconnect rebuild scope evidence for %q is absent", alias.Alias)
 	}
+	// The client rebuilds the same scope for its own reasons, so a scope holds
+	// more than one rebuild. The pin the scenario created selects the record,
+	// and its runtime identity still comes from the captured state.
 	var rebuildID string
 	matches := 0
 	for _, rebuild := range rebuilds {
-		if rebuild.ScopeID != scopeID {
+		if rebuild.ScopeID != scopeID || (pinnedRebuildID != "" && rebuild.RebuildID != pinnedRebuildID) {
 			continue
 		}
 		if rebuild.RebuildID == "" {
@@ -752,4 +957,14 @@ func retentionReconnectAliasesShareOwner(left, right scenarios.NativeIdentityAli
 		}
 	}
 	return false
+}
+
+// retentionReconnectAliasNames reports whether one alias carries the authored
+// value it is compared against.
+func retentionReconnectAliasNames(alias scenarios.NativeIdentityAlias, authored string) bool {
+	var value string
+	if err := json.Unmarshal(alias.Value, &value); err != nil {
+		return false
+	}
+	return value != "" && value == authored
 }

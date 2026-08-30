@@ -106,8 +106,9 @@ type Platform struct {
 	proxiedPushCount int
 	// proxiedPushOutcomes records what the proxy returned for each push.
 	proxiedPushOutcomes []string
-	// sealedPushMutations records the mutation identities one intercepted push
-	// carried.
+	// sealedPushBatchID and sealedPushMutations record the identities one
+	// intercepted push carried.
+	sealedPushBatchID             string
 	sealedPushMutations           []string
 	temporaryUnavailablePush      *scenarios.PushWireFaultTarget
 	rebuildCursorOverride         string
@@ -220,7 +221,7 @@ func (p *Platform) serveTemporaryUnavailablePush(response http.ResponseWriter, r
 		return false
 	}
 	p.recordTemporaryUnavailableMiss("push claimed for client " + target.ClientID)
-	p.recordSealedPushMutations(sealedMutations)
+	p.recordSealedPushIdentities(target.BatchID, sealedMutations)
 	injected := faults.NewTemporaryUnavailableResponse(request)
 	defer injected.Body.Close()
 	// Record the exact status the proxy returns so the failure can compare it
@@ -2468,12 +2469,22 @@ func (p *Platform) countProxiedPush() {
 	p.proxiedPushCount++
 }
 
-// recordSealedPushMutations records the mutation identities one intercepted
-// push carried. Only the identifiers are kept, never the mutation payload.
-func (p *Platform) recordSealedPushMutations(ids []string) {
+// recordSealedPushIdentities records the batch and mutation identities one
+// intercepted push carried. The client mints both, so an authored alias for
+// either resolves from the sealed batch. Only the identifiers are kept, never
+// the mutation payload.
+func (p *Platform) recordSealedPushIdentities(batchID string, ids []string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	p.sealedPushBatchID = batchID
 	p.sealedPushMutations = append([]string(nil), ids...)
+}
+
+// SealedPushBatchID reports the batch identity the intercepted push carried.
+func (p *Platform) SealedPushBatchID() string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.sealedPushBatchID
 }
 
 // SealedPushMutationIDs reports the mutation identities the intercepted push

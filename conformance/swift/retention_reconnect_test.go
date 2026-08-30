@@ -88,7 +88,7 @@ func TestRetentionReconnectObservedIdentitiesUseWireAndCapturedState(t *testing.
 	initial := RetentionReconnectCall{Transport: []transportObservation{{OperationClass: "push", RequestFacts: requestFacts()}}}
 	renewal := RetentionReconnectCall{Transport: []transportObservation{{OperationClass: "push", RequestFacts: requestFacts()}, {OperationClass: "connect", RequestFacts: connectFacts}}}
 	server := scenarios.StateFacts{Rows: rows, Rebuilds: []scenarios.RebuildFact{{ScopeID: scopeID, RebuildID: "observed-rebuild"}}}
-	runtime, err := retentionReconnectObservedIdentityValues(scenario.NativeIdentityAliases, initial, renewal, server)
+	runtime, err := retentionReconnectObservedIdentityValues(scenario.NativeIdentityAliases, initial, renewal, server, "observed-batch", []string{"observed-mutation"}, retentionReconnectPrimaryKey{Authored: "unbound-authored", Runtime: "unbound-runtime"}, "observed-rebuild")
 	if err != nil {
 		t.Fatalf("resolve observed retention-reconnect identities: %v", err)
 	}
@@ -111,7 +111,7 @@ func TestRetentionReconnectObservedIdentitiesUseWireAndCapturedState(t *testing.
 
 	rows[1].Checksum = strings.Repeat("c", 64)
 	server.Rows = rows
-	if _, err := retentionReconnectObservedIdentityValues(scenario.NativeIdentityAliases, initial, renewal, server); err == nil {
+	if _, err := retentionReconnectObservedIdentityValues(scenario.NativeIdentityAliases, initial, renewal, server, "observed-batch", []string{"observed-mutation"}, retentionReconnectPrimaryKey{Authored: "unbound-authored", Runtime: "unbound-runtime"}, "observed-rebuild"); err == nil {
 		t.Fatal("retention-reconnect accepted inconsistent captured checksums")
 	}
 }
