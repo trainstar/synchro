@@ -1964,7 +1964,7 @@ func (c *NativeController) RequestStep(ctx context.Context, operation scenarios.
 	if key != "connect/send" && key != "pull/request-page" && key != "push/submit" && key != "rebuild/request-page" {
 		return NativeStepObservation{}, nativeUnsupported("request", operation)
 	}
-	userID, body, path, err := c.nativeHTTPRequest(operation)
+	userID, body, path, err := c.nativeHTTPRequest(ctx, operation)
 	if err != nil {
 		return NativeStepObservation{}, err
 	}
@@ -1993,7 +1993,7 @@ func (c *NativeController) RequestStep(ctx context.Context, operation scenarios.
 	return observation, nil
 }
 
-func (c *NativeController) nativeHTTPRequest(operation scenarios.Operation) (string, []byte, string, error) {
+func (c *NativeController) nativeHTTPRequest(ctx context.Context, operation scenarios.Operation) (string, []byte, string, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.installation == nil {
@@ -2103,7 +2103,7 @@ func (c *NativeController) nativeHTTPRequest(operation scenarios.Operation) (str
 		if request == nil {
 			return "", nil, "", errors.New("native push request is invalid")
 		}
-		if err := c.rewriteNativePush(request); err != nil {
+		if err := c.rewriteNativePush(ctx, request); err != nil {
 			return "", nil, "", err
 		}
 	case "rebuild/request-page":
@@ -2171,8 +2171,14 @@ func (c *NativeController) rewriteNativeSchemaMember(request map[string]any, nam
 	return nil
 }
 
-func (c *NativeController) rewriteNativePush(request map[string]any) error {
+func (c *NativeController) rewriteNativePush(ctx context.Context, request map[string]any) error {
 	if err := c.rewriteNativeSchemaMember(request, "schema"); err != nil {
+		return err
+	}
+	// A replay must target the batch the client actually sent. The authored
+	// batch and mutation identifiers are aliases, and the accepted application
+	// push records their runtime values.
+	if err := c.rewriteNativePushIdentities(ctx, request); err != nil {
 		return err
 	}
 	mutations, ok := request["mutations"].([]any)
@@ -3328,5 +3334,63 @@ func (c *NativeController) rebindSchemaAfterCompositionChange(ctx context.Contex
 	c.installation.currentRuntimeSchema = runtimeRef
 	c.installation.runtimeRegistryGeneration = runtimeRegistry
 	c.installation.pendingCompositionChange = false
+	return nil
+}
+
+// rewriteNativePushIdentities replaces an authored batch identity, and the
+// authored mutation identities it carries, with the runtime identities the
+// accepted application push recorded. A request that names no bound authored
+// batch keeps its authored identities.
+func (c *NativeController) rewriteNativePushIdentities(ctx context.Context, request map[string]any) error {
+	authoredBatch, ok := request["batch_id"].(string)
+	if !ok || authoredBatch == "" {
+		return errors.New("native push batch identity is invalid")
+	}
+	var binding *nativeTransactionBinding
+	for _, transaction := range c.transactions {
+		if transaction.AuthoredBatchID != authoredBatch || !transaction.ApplicationPush {
+			continue
+		}
+		if binding != nil {
+			return errors.New("native push batch identity binding is ambiguous")
+		}
+		binding = transaction
+	}
+	if binding == nil {
+		return nil
+	}
+	if binding.RuntimeBatchID == "" {
+		// Only a materialized source transaction resolves these records today. A
+		// scenario that replays an accepted push without materializing needs the
+		// same resolution, so resolve it here.
+		if err := c.resolveApplicationPushRecords(ctx, binding); err != nil {
+			return fmt.Errorf("resolve native application push identities: %w", err)
+		}
+	}
+	if binding.RuntimeBatchID == "" {
+		return errors.New("native push batch identity has no runtime binding")
+	}
+	request["batch_id"] = binding.RuntimeBatchID
+	mutations, ok := request["mutations"].([]any)
+	if !ok {
+		return errors.New("native push mutations are invalid")
+	}
+	for _, raw := range mutations {
+		mutation, ok := raw.(map[string]any)
+		if !ok {
+			return errors.New("native push mutation is invalid")
+		}
+		authoredMutation, ok := mutation["mutation_id"].(string)
+		if !ok || authoredMutation == "" {
+			return errors.New("native push mutation identity is invalid")
+		}
+		for index, candidate := range binding.AuthoredMutationIDs {
+			if candidate != authoredMutation || index >= len(binding.RuntimeMutationIDs) {
+				continue
+			}
+			mutation["mutation_id"] = binding.RuntimeMutationIDs[index]
+			break
+		}
+	}
 	return nil
 }

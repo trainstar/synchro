@@ -405,8 +405,13 @@ func validatePushResponseLossNativeWire(scenario scenarios.Scenario, stepID stri
 	if err != nil {
 		return err
 	}
-	if observed.Wire == nil || observed.Wire.HTTPStatus != expected.HTTPStatus || observed.Wire.Retryable != expected.Retryable || !equalOptionalStrings(observed.Wire.ErrorCode, expected.ErrorCode) {
-		return fmt.Errorf("Swift push-response-loss wire result %s differs from its authored expectation", stepID)
+	if observed.Wire == nil {
+		return fmt.Errorf("Swift push-response-loss wire result %s carries no wire facts", stepID)
+	}
+	if observed.Wire.HTTPStatus != expected.HTTPStatus || observed.Wire.Retryable != expected.Retryable || !equalOptionalStrings(observed.Wire.ErrorCode, expected.ErrorCode) {
+		return fmt.Errorf("Swift push-response-loss wire result %s = %d/%v/%s, want %d/%v/%s", stepID,
+			observed.Wire.HTTPStatus, observed.Wire.Retryable, optionalStringOrNone(observed.Wire.ErrorCode),
+			expected.HTTPStatus, expected.Retryable, optionalStringOrNone(expected.ErrorCode))
 	}
 	wantDisposition := "error"
 	if pushResponseLossNativeCompletion(expected) == "idle" {
@@ -454,19 +459,21 @@ func validatePushResponseLossState(captures []CaptureFacts, server scenarios.Sta
 	if len(client.Clients) != clientCount {
 		return fmt.Errorf("Swift push-response-loss captured %d clients, want %d", len(client.Clients), clientCount)
 	}
-	// The replayed push is deduplicated by the server, so the client applies the
-	// original result and retains no queued mutation and no sealed batch.
-	if client.Clients[0].QueueCount == nil {
-		return errors.New("Swift push-response-loss client reported no queue count")
-	}
-	if *client.Clients[0].QueueCount != 0 {
-		return fmt.Errorf("Swift push-response-loss client queue count = %d, want 0", *client.Clients[0].QueueCount)
-	}
+	// The authored replay with changed content returns HTTP 409
+	// idempotency_conflict. The client contract requires the client to preserve
+	// the sealed request for that non-retryable identity error, so the sealed
+	// batch and its mutation remain durable.
 	if client.Clients[0].SealedBatchCount == nil {
 		return errors.New("Swift push-response-loss client reported no sealed batch count")
 	}
-	if *client.Clients[0].SealedBatchCount != 0 {
-		return fmt.Errorf("Swift push-response-loss client sealed batch count = %d, want 0", *client.Clients[0].SealedBatchCount)
+	if *client.Clients[0].SealedBatchCount != 1 {
+		return fmt.Errorf("Swift push-response-loss client sealed batch count = %d, want 1 preserved sealed request", *client.Clients[0].SealedBatchCount)
+	}
+	if client.Clients[0].QueueCount == nil {
+		return errors.New("Swift push-response-loss client reported no queue count")
+	}
+	if *client.Clients[0].QueueCount != uint64(mutationCount) {
+		return fmt.Errorf("Swift push-response-loss client queue count = %d, want %d preserved mutations", *client.Clients[0].QueueCount, mutationCount)
 	}
 	if server.BatchCount == nil || server.MutationCount == nil {
 		return errors.New("Swift push-response-loss server reported no committed batch state")
@@ -531,4 +538,13 @@ func resolvePushResponseLossIdentities(controller *blackbox.NativeController, al
 		}
 	}
 	return resolveSwiftNativeIdentities(aliases, runtime)
+}
+
+// optionalStringOrNone reports an absent optional error code as "none" so a
+// divergence names the observed value.
+func optionalStringOrNone(value *string) string {
+	if value == nil {
+		return "none"
+	}
+	return *value
 }
