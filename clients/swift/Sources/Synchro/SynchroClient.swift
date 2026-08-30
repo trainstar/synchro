@@ -627,8 +627,11 @@ public final class SynchroClient: @unchecked Sendable {
         let storedScopeChecksum = try scope?.checksum.map {
             checksumKey(try decodeExactReceiptJSON($0, as: ChecksumObject.self, decoder: decoder))
         }
-        let localScopeChecksum = try scope.map {
-            checksumKey(try decodeExactReceiptJSON($0.localChecksum, as: ChecksumObject.self, decoder: decoder))
+        // A scope holds no local checksum until it computes one, and an absent
+        // checksum is recorded as an empty value rather than a JSON object.
+        let localScopeChecksum = try scope.flatMap { record -> String? in
+            guard !record.localChecksum.isEmpty else { return nil }
+            return checksumKey(try decodeExactReceiptJSON(record.localChecksum, as: ChecksumObject.self, decoder: decoder))
         }
 
         return RebuildReceiptInspection(
@@ -672,10 +675,12 @@ public final class SynchroClient: @unchecked Sendable {
             try validateReceiptJSONShape(data, as: type)
             let value = try decoder.decode(type, from: data)
             return value
-        } catch is SynchroError {
-            throw SynchroError.invalidResponse(message: "rebuild receipt JSON is invalid")
+        } catch let error as SynchroError {
+            // The specific rejection names which receipt member failed, and a
+            // generic message cannot be acted on.
+            throw error
         } catch {
-            throw SynchroError.invalidResponse(message: "rebuild receipt JSON is invalid")
+            throw SynchroError.invalidResponse(message: "rebuild receipt JSON is invalid: \(error)")
         }
     }
 
@@ -737,7 +742,13 @@ public final class SynchroClient: @unchecked Sendable {
     ) throws {
         let keys = Set(object.keys)
         guard required.isSubset(of: keys), keys.isSubset(of: required.union(optional)) else {
-            throw SynchroError.invalidResponse(message: "rebuild receipt JSON members are invalid")
+            // The missing and unexpected members name the mismatch, because the
+            // member set alone cannot be compared by a reader.
+            let missing = required.subtracting(keys).sorted()
+            let unexpected = keys.subtracting(required.union(optional)).sorted()
+            throw SynchroError.invalidResponse(
+                message: "rebuild receipt JSON members are invalid: missing \(missing), unexpected \(unexpected)"
+            )
         }
     }
 
