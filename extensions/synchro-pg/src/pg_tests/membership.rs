@@ -1065,3 +1065,121 @@ fn membership_activation_keeps_captured_digests_valid() {
         "membership activation must leave the captured generation on the active registration"
     );
 }
+
+/// The authored provenance scenario captures rows between membership
+/// activations. A row captured after one activation must keep a digest that
+/// recomputes under the registration a later activation makes active.
+#[pg_test]
+fn membership_activation_keeps_digests_for_later_rows() {
+    let fixture = membership_dependency_fixture();
+    Spi::run(&format!(
+        "INSERT INTO public.{target_table} (id, label) VALUES (7, 'target');
+         INSERT INTO public.{source_table} (id, target_id) VALUES (1, 7)",
+        target_table = fixture.target_table,
+        source_table = fixture.source_table,
+    ))
+    .expect("insert first membership digest source rows");
+    insert_changelog("target-scope", &fixture.target_table, "7", 1);
+    insert_edge(&fixture.target_table, "7", "target-scope");
+
+    let body = format!(
+        "SELECT {} WHERE old_row ? 'target_id'
+         UNION ALL
+         SELECT {} WHERE new_row ? 'target_id'",
+        target_row_expression(&fixture, "(old_row ->> 'target_id')::integer"),
+        target_row_expression(&fixture, "(new_row ->> 'target_id')::integer"),
+    );
+    create_impact_function(&fixture, &body, true, true);
+    register_dependency(&fixture, 2);
+    activate_pending_registry_for_test();
+
+    // Capture a second row under the registration the first activation made
+    // active, exactly as the scenario commits data after each activation.
+    Spi::run(&format!(
+        "INSERT INTO public.{target_table} (id, label) VALUES (8, 'later')",
+        target_table = fixture.target_table,
+    ))
+    .expect("insert later membership digest source row");
+    insert_changelog("target-scope", &fixture.target_table, "8", 1);
+    insert_edge(&fixture.target_table, "8", "target-scope");
+
+    enable_dependent_target_membership(&fixture);
+    activate_pending_registry_for_test();
+
+    let active_generation: i64 = Spi::get_one(
+        "SELECT generation FROM synchro.sync_registry_generations
+         WHERE state = 'active' ORDER BY generation DESC LIMIT 1",
+    )
+    .expect("load active generation")
+    .expect("active generation");
+    let target_table = fixture.target_table.clone();
+    let relation_id = fixture.target_relation_id.clone();
+
+    let mut divergences: Vec<String> = Vec::new();
+    for record_id in ["7", "8"] {
+        let stored: Vec<u8> = Spi::get_one_with_args(
+            "SELECT checksum FROM synchro.sync_captured_rows
+             WHERE relation_id = $1::uuid AND record_id = $2",
+            &[relation_id.as_str().into(), record_id.into()],
+        )
+        .expect("load stored captured digest")
+        .expect("stored captured digest");
+        let row_data: pgrx::JsonB = Spi::get_one_with_args(
+            "SELECT row_data FROM synchro.sync_captured_rows
+             WHERE relation_id = $1::uuid AND record_id = $2",
+            &[relation_id.as_str().into(), record_id.into()],
+        )
+        .expect("load captured row data")
+        .expect("captured row data");
+        let row_version: String = Spi::get_one_with_args(
+            "SELECT row_version::text FROM synchro.sync_captured_rows
+             WHERE relation_id = $1::uuid AND record_id = $2",
+            &[relation_id.as_str().into(), record_id.into()],
+        )
+        .expect("load captured row version")
+        .expect("captured row version");
+        let captured_generation: i64 = Spi::get_one_with_args(
+            "SELECT registry_generation FROM synchro.sync_captured_rows
+             WHERE relation_id = $1::uuid AND record_id = $2",
+            &[relation_id.as_str().into(), record_id.into()],
+        )
+        .expect("load captured generation")
+        .expect("captured generation");
+        let owned_record = record_id.to_string();
+        let owned_table = target_table.clone();
+        let computed = Spi::connect(|client| {
+            let registry = crate::registry::load_registry_from_client(client)?;
+            let table = registry
+                .iter()
+                .find(|table| table.table_name == owned_table)
+                .expect("active target registration");
+            Ok::<_, spi::Error>(
+                crate::pull::synced_row_digest(
+                    client,
+                    table,
+                    &row_data.0,
+                    &owned_record,
+                    &row_version,
+                )
+                .expect("recompute captured digest under the active registration")
+                .as_bytes()
+                .to_vec(),
+            )
+        })
+        .expect("recompute captured digest");
+        if computed != stored || captured_generation != active_generation {
+            divergences.push(format!(
+                "record {record_id} captured generation {captured_generation} active generation {active_generation} stored {} computed {}",
+                stored.iter().map(|byte| format!("{byte:02x}")).collect::<String>(),
+                computed.iter().map(|byte| format!("{byte:02x}")).collect::<String>()
+            ));
+        }
+    }
+    cleanup_membership_fixture(&fixture);
+
+    assert!(
+        divergences.is_empty(),
+        "membership activation must keep every captured digest valid: {}",
+        divergences.join("; ")
+    );
+}

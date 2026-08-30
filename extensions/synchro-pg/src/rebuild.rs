@@ -673,8 +673,14 @@ fn stage_records(
         let computed = synced_row_digest(client, table, &row, &record_id, &server_version)?;
         if computed != row_checksum {
             return Err(format!(
-                "rebuild captured row checksum does not match: relation {} record {} captured generation {} table generation {}",
-                relation_id, record_id, captured_generation, table.registry_generation
+                "rebuild captured row checksum does not match: table {} relation {} record {} captured generation {} table generation {} stored {} computed {}",
+                table_name,
+                relation_id,
+                record_id,
+                captured_generation,
+                table.registry_generation,
+                row_checksum.to_lower_hex(),
+                computed.to_lower_hex()
             ));
         }
         let primary_key = row_primary_key_json(table, &record_id)?;

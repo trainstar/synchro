@@ -2493,6 +2493,8 @@ mod tests {
             )?;
 
             crate::schema::publish_schema_manifest(client)?;
+            crate::materialize::migrate_schema_digests(client, source_generation)
+                .expect("migrate test membership digests");
             Ok::<_, spi::Error>(())
         })
         .unwrap();

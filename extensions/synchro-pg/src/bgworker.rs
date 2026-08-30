@@ -5321,6 +5321,12 @@ fn activate_generations(
     }
     crate::schema::publish_schema_manifest(client)
         .map_err(|_| failure("materialization_failed", commit_lsn))?;
+    // The digest migration must follow publication. schema_hash_for_generation
+    // resolves the newest manifest at or below a generation, so migrating before
+    // publication computes every digest against the outgoing manifest and leaves
+    // it stale. Schema publication migrates after it records its manifest.
+    crate::materialize::migrate_schema_digests(client, final_generation)
+        .map_err(|_| failure("materialization_failed", commit_lsn))?;
     Ok(final_generation)
 }
 
