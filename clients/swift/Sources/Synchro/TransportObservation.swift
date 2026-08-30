@@ -173,6 +173,9 @@ public struct TransportObservation: Codable, Sendable, Equatable {
     public let requestFacts: TransportRequestFacts?
     public let rebuildResponseFacts: TransportRebuildResponseFacts?
     public let pullResponseFacts: TransportPullResponseFacts?
+    /// The error code the server reported. A status code alone cannot name it,
+    /// because one status carries more than one code.
+    public let errorCode: String?
 
     enum CodingKeys: String, CodingKey {
         case sequence
@@ -184,6 +187,7 @@ public struct TransportObservation: Codable, Sendable, Equatable {
         case requestFacts = "request_facts"
         case rebuildResponseFacts = "rebuild_response_facts"
         case pullResponseFacts = "pull_response_facts"
+        case errorCode = "error_code"
     }
 
     public init(
@@ -195,7 +199,8 @@ public struct TransportObservation: Codable, Sendable, Equatable {
         cursorFingerprintsComplete: Bool? = nil,
         requestFacts: TransportRequestFacts? = nil,
         rebuildResponseFacts: TransportRebuildResponseFacts? = nil,
-        pullResponseFacts: TransportPullResponseFacts? = nil
+        pullResponseFacts: TransportPullResponseFacts? = nil,
+        errorCode: String? = nil
     ) {
         self.sequence = sequence
         self.operationClass = operationClass
@@ -206,6 +211,7 @@ public struct TransportObservation: Codable, Sendable, Equatable {
         self.requestFacts = requestFacts
         self.rebuildResponseFacts = rebuildResponseFacts
         self.pullResponseFacts = pullResponseFacts
+        self.errorCode = errorCode
     }
 }
 
@@ -426,7 +432,8 @@ public final class TransportObservationCollector: @unchecked Sendable {
         cursorFingerprintsComplete: Bool?,
         requestFacts: TransportRequestFacts? = nil,
         rebuildResponseFacts: TransportRebuildResponseFacts? = nil,
-        pullResponseFacts: TransportPullResponseFacts? = nil
+        pullResponseFacts: TransportPullResponseFacts? = nil,
+        errorCode: String? = nil
     ) {
         lock.lock()
         defer { lock.unlock() }
@@ -445,7 +452,8 @@ public final class TransportObservationCollector: @unchecked Sendable {
             cursorFingerprintsComplete: cursorFingerprintsComplete,
             requestFacts: requestFacts,
             rebuildResponseFacts: rebuildResponseFacts,
-            pullResponseFacts: pullResponseFacts
+            pullResponseFacts: pullResponseFacts,
+            errorCode: errorCode
         ))
     }
 

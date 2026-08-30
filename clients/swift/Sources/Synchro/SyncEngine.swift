@@ -471,6 +471,7 @@ final class SyncEngine: @unchecked Sendable {
         schemaReset: Bool
     ) async -> Bool {
         var gateResolved = false
+        var deferredCycles = 0
         var connected = false
         var replayConnectBackoff: LocalBackoffRecord?
         var replayCycleBackoff: LocalBackoffRecord?
@@ -521,7 +522,7 @@ final class SyncEngine: @unchecked Sendable {
                 }
 
                 try ensureLifecycleActive(generation)
-                try await runSerializedSyncCycleWithRetry(
+                try await runSerializedSyncCycle(
                     resuming: replayCycleBackoff,
                     lifecycleGeneration: generation
                 )
@@ -552,7 +553,14 @@ final class SyncEngine: @unchecked Sendable {
                         try transition(to: .backoff, lifecycleGeneration: generation)
                     }
                     emitBackoffEvent(backoff)
-                    if !gateResolved {
+                    // A sealed push that could not be delivered is durable work
+                    // the caller must observe, so the arming call completes and
+                    // the durable deadline owns that retry. Capture lag after an
+                    // accepted push clears on its own, so the arming call waits
+                    // for the interrupted cycle within the retry budget.
+                    deferredCycles += 1
+                    if !gateResolved,
+                       backoff.resumeState == .pushing || deferredCycles > config.maxRetryAttempts {
                         await startupGate.succeed()
                         gateResolved = true
                     }
@@ -601,13 +609,39 @@ final class SyncEngine: @unchecked Sendable {
         resuming backoff: LocalBackoffRecord? = nil,
         lifecycleGeneration requestedGeneration: Int64? = nil
     ) async throws {
-        let generation = requestedGeneration ?? state.withLock { $0.lifecycleGeneration }
-        let cycleTask = try cycleGate.enqueue(generation: generation) { [weak self] in
+        try await runSerializedCycle(lifecycleGeneration: requestedGeneration) { [weak self] generation in
             guard let self else { return }
             try await self.runSyncCycleWithRetry(
                 resuming: backoff,
                 lifecycleGeneration: generation
             )
+        }
+    }
+
+    /// Runs one sync cycle attempt through the cycle gate. The managed
+    /// lifecycle uses this because its own backoff handler owns retry
+    /// scheduling, and a second retry policy would consume the failure
+    /// before that handler observes it.
+    private func runSerializedSyncCycle(
+        resuming backoff: LocalBackoffRecord? = nil,
+        lifecycleGeneration requestedGeneration: Int64? = nil
+    ) async throws {
+        try await runSerializedCycle(lifecycleGeneration: requestedGeneration) { [weak self] generation in
+            guard let self else { return }
+            try await self.runSingleSyncCycle(
+                resuming: backoff,
+                lifecycleGeneration: generation
+            )
+        }
+    }
+
+    private func runSerializedCycle(
+        lifecycleGeneration requestedGeneration: Int64?,
+        _ operation: @escaping @Sendable (Int64) async throws -> Void
+    ) async throws {
+        let generation = requestedGeneration ?? state.withLock { $0.lifecycleGeneration }
+        let cycleTask = try cycleGate.enqueue(generation: generation) {
+            try await operation(generation)
         }
         try await withTaskCancellationHandler {
             try await cycleTask.value
@@ -626,6 +660,44 @@ final class SyncEngine: @unchecked Sendable {
         )
     }
 
+    /// Runs one sync cycle attempt. A renewed binding replaces the attempt in
+    /// place because the interrupted work has not reached the server yet.
+    private func runSingleSyncCycle(
+        resuming initialBackoff: LocalBackoffRecord?,
+        lifecycleGeneration: Int64
+    ) async throws {
+        var backoff = initialBackoff
+        while true {
+            do {
+                if let resumeBackoff = backoff {
+                    let resumeStatus = syncStatus(for: resumeBackoff.resumeState)
+                    let currentStatus = getSyncStatus()
+                    if currentStatus == .ready {
+                        try transition(
+                            to: resumeStatus,
+                            lifecycleGeneration: lifecycleGeneration
+                        )
+                    } else if currentStatus != resumeStatus {
+                        throw SynchroError.invalidStateTransition(
+                            from: currentStatus,
+                            to: resumeStatus
+                        )
+                    }
+                    try await resumeDurableWork(
+                        resumeBackoff,
+                        lifecycleGeneration: lifecycleGeneration
+                    )
+                } else {
+                    try await runSyncCycle(lifecycleGeneration: lifecycleGeneration)
+                }
+                return
+            } catch is BindingRenewalError {
+                try await reconnectAfterBindingRenewal(lifecycleGeneration: lifecycleGeneration)
+                backoff = nil
+            }
+        }
+    }
+
     private func runSingleSyncCycleWithRetry(
         resuming initialBackoff: LocalBackoffRecord? = nil,
         lifecycleGeneration: Int64
@@ -636,34 +708,10 @@ final class SyncEngine: @unchecked Sendable {
 
         while attempt <= config.maxRetryAttempts {
             do {
-                do {
-                    if let resumeBackoff = backoff {
-                        let resumeStatus = syncStatus(for: resumeBackoff.resumeState)
-                        let currentStatus = getSyncStatus()
-                        if currentStatus == .ready {
-                            try transition(
-                                to: resumeStatus,
-                                lifecycleGeneration: lifecycleGeneration
-                            )
-                        } else if currentStatus != resumeStatus {
-                            throw SynchroError.invalidStateTransition(
-                                from: currentStatus,
-                                to: resumeStatus
-                            )
-                        }
-                        try await resumeDurableWork(
-                            resumeBackoff,
-                            lifecycleGeneration: lifecycleGeneration
-                        )
-                        backoff = nil
-                    } else {
-                        try await runSyncCycle(lifecycleGeneration: lifecycleGeneration)
-                    }
-                } catch is BindingRenewalError {
-                    try await reconnectAfterBindingRenewal(lifecycleGeneration: lifecycleGeneration)
-                    backoff = nil
-                    continue
-                }
+                try await runSingleSyncCycle(
+                    resuming: backoff,
+                    lifecycleGeneration: lifecycleGeneration
+                )
                 return
             } catch let error as RetryableError {
                 try ensureLifecycleActive(lifecycleGeneration)

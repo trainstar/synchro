@@ -363,7 +363,10 @@ final class HttpClient: @unchecked Sendable {
             cursorFingerprints: cursorFingerprints,
             cursorFingerprintsComplete: cursorFingerprintsComplete,
             requestFacts: requestFacts,
-            responseBody: observedStatusCode == 200 ? data : nil
+            responseBody: observedStatusCode == 200 ? data : nil,
+            // The failure body carries the reported code. Only that code is
+            // derived here, so no error payload is retained.
+            errorCode: observedErrorCode(statusCode: observedStatusCode, responseBody: data)
         )
         observationRecorded = true
         try await config.transportObservationCollector?.pauseIfArmed(for: operationClass)
@@ -377,7 +380,8 @@ final class HttpClient: @unchecked Sendable {
         cursorFingerprints: [String]?,
         cursorFingerprintsComplete: Bool?,
         requestFacts: TransportRequestFacts? = nil,
-        responseBody: Data? = nil
+        responseBody: Data? = nil,
+        errorCode: String? = nil
     ) {
         let attemptEnded = DispatchTime.now().uptimeNanoseconds
         config.transportObservationCollector?.record(
@@ -388,7 +392,8 @@ final class HttpClient: @unchecked Sendable {
             cursorFingerprintsComplete: operationClass == .pull ? cursorFingerprintsComplete ?? false : nil,
             requestFacts: requestFacts,
             rebuildResponseFacts: operationClass == .rebuild ? rebuildResponseFacts(from: responseBody) : nil,
-            pullResponseFacts: operationClass == .pull ? pullResponseFacts(from: responseBody) : nil
+            pullResponseFacts: operationClass == .pull ? pullResponseFacts(from: responseBody) : nil,
+            errorCode: errorCode
         )
     }
 
@@ -584,6 +589,11 @@ final class HttpClient: @unchecked Sendable {
             return body["error"]
         }
         return nil
+    }
+
+    private func observedErrorCode(statusCode: Int, responseBody: Data?) -> String? {
+        guard !(200..<300).contains(statusCode), let responseBody else { return nil }
+        return protocolErrorCode(from: responseBody)?.rawValue
     }
 
     private func decodeProtocolError(from data: Data) -> ErrorBody? {
