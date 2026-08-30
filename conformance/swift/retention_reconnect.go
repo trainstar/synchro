@@ -74,17 +74,33 @@ func RunRetentionReconnectScenario(ctx context.Context, scenario scenarios.Scena
 	if err != nil {
 		return RetentionReconnectResult{}, err
 	}
+	// The sealed batch stays undelivered until the authored generation expiry.
+	// The client retries that batch through durable backoff, so the fault
+	// outlives the call that observes it and is released only when the scenario
+	// expects the batch to reach the server.
+	releaseFault, armed, err := platform.armTemporaryUnavailablePush(RequestOperations{sealedPush})
+	if err != nil || !armed {
+		return RetentionReconnectResult{}, fmt.Errorf("arm Swift retention-reconnect temporary-unavailable push: %w", err)
+	}
+	defer releaseFault()
 	initialCall, err := runRetentionReconnectInitialCall(ctx, scenario, platform, client, sealedPush)
 	if err != nil {
 		return RetentionReconnectResult{}, err
 	}
-	mutationIDs, err := retentionReconnectMutationIDs(sealedPush)
+	authoredMutations, err := retentionReconnectAuthoredMutationCount(sealedPush)
 	if err != nil {
 		return RetentionReconnectResult{}, err
 	}
 	initialSnapshot, err := platform.captureSnapshot(ctx, client)
 	if err != nil {
 		return RetentionReconnectResult{}, fmt.Errorf("capture Swift retention-reconnect sealed queue: %w", err)
+	}
+	// The authored mutation identity is an alias. The sealed batch the proxy
+	// intercepted carries the identity the client minted, so the durable queue
+	// is compared against the batch that actually left the client.
+	mutationIDs, err := retentionReconnectSealedIdentities(platform.SealedPushMutationIDs(), authoredMutations)
+	if err != nil {
+		return RetentionReconnectResult{}, err
 	}
 	if err := validateRetentionReconnectQueue(initialSnapshot, mutationIDs); err != nil {
 		return RetentionReconnectResult{}, err
@@ -109,8 +125,20 @@ func RunRetentionReconnectScenario(ctx context.Context, scenario scenarios.Scena
 	if err != nil {
 		return RetentionReconnectResult{}, err
 	}
+	if err := registerRetentionReconnectPinClient(ctx, controller, rebuildPin); err != nil {
+		return RetentionReconnectResult{}, err
+	}
 	if observed, requestErr := controller.RequestStep(ctx, rebuildPin); requestErr != nil || observed.Disposition != "success" {
-		return RetentionReconnectResult{}, fmt.Errorf("create Swift retention-reconnect rebuild pin: %w", resultError(requestErr, observed.Disposition))
+		// The disposition alone cannot name the rejection, so the reported code
+		// and wire status accompany it.
+		status := "none"
+		message := "none"
+		if observed.Wire != nil {
+			status = fmt.Sprintf("%d", observed.Wire.HTTPStatus)
+			message = observed.Wire.Message
+		}
+		return RetentionReconnectResult{}, fmt.Errorf("create Swift retention-reconnect rebuild pin: %w (error code %s, http status %s, message %q)",
+			resultError(requestErr, observed.Disposition), optionalStringOrNone(observed.ErrorCode), status, message)
 	} else if err := validateRetentionReconnectNativeWire(scenario, "STEP-RETENTION-RECONNECT-REBUILD-PIN-001", observed); err != nil {
 		return RetentionReconnectResult{}, err
 	}
@@ -131,6 +159,9 @@ func RunRetentionReconnectScenario(ctx context.Context, scenario scenarios.Scena
 	if err != nil {
 		return RetentionReconnectResult{}, err
 	}
+	// The generation has expired, so the batch may now reach the server, where
+	// it is rejected as an expired generation.
+	releaseFault()
 	renewalCall, err := runRetentionReconnectRenewal(ctx, scenario, platform, client, steps, rejectedPush, renew)
 	if err != nil {
 		return RetentionReconnectResult{}, err
@@ -177,11 +208,6 @@ func RunRetentionReconnectScenario(ctx context.Context, scenario scenarios.Scena
 }
 
 func runRetentionReconnectInitialCall(ctx context.Context, scenario scenarios.Scenario, platform *Platform, client Client, sealedPush scenarios.Operation) (RetentionReconnectCall, error) {
-	release, armed, err := platform.armTemporaryUnavailablePush(RequestOperations{sealedPush})
-	if err != nil || !armed {
-		return RetentionReconnectCall{}, fmt.Errorf("arm Swift retention-reconnect temporary-unavailable push: %w", err)
-	}
-	defer release()
 	call, err := swiftScenarioCall(ctx, platform, client, "start")
 	if err != nil {
 		return RetentionReconnectCall{}, fmt.Errorf("run Swift retention-reconnect sealed push: %w", err)
@@ -201,8 +227,8 @@ func runRetentionReconnectInitialCall(ctx context.Context, scenario scenarios.Sc
 		}
 		// The proxy push count separates a client that never observed the
 		// injected response from a push that never reached the client.
-		return RetentionReconnectCall{}, fmt.Errorf("Swift retention-reconnect sealed push completion = %q, want %q; observed %v; proxy saw %d pushes; fault misses %v",
-			call.Completion, retentionReconnectNativeCompletion(wire), outcomes, platform.ProxiedPushCount(), platform.TemporaryUnavailablePushMisses())
+		return RetentionReconnectCall{}, fmt.Errorf("Swift retention-reconnect sealed push completion = %q, want %q; observed %v; proxy saw %d pushes %v; fault misses %v",
+			call.Completion, retentionReconnectNativeCompletion(wire), outcomes, platform.ProxiedPushCount(), platform.ProxiedPushOutcomes(), platform.TemporaryUnavailablePushMisses())
 	}
 	pushes := make([]transportObservation, 0, 1)
 	for _, observed := range call.transportObservations {
@@ -214,7 +240,19 @@ func runRetentionReconnectInitialCall(ctx context.Context, scenario scenarios.Sc
 		return RetentionReconnectCall{}, errors.New("Swift retention-reconnect sealed push has an unexpected transport count")
 	}
 	if err := validateSwiftWireObservation(scenario, "STEP-RETENTION-RECONNECT-SEAL-OLD-BATCH-001", pushes[0]); err != nil {
-		return RetentionReconnectCall{}, err
+		// The proxy record separates an injected response the client observed
+		// from a push the proxy forwarded upstream unchanged. The full
+		// observation list shows which operation the client recorded.
+		all := make([]string, 0, len(call.transportObservations))
+		for _, observation := range call.transportObservations {
+			entry := fmt.Sprintf("%s:%d", observation.OperationClass, observation.StatusCode)
+			if observation.ErrorCode != nil {
+				entry += ":" + *observation.ErrorCode
+			}
+			all = append(all, entry)
+		}
+		return RetentionReconnectCall{}, fmt.Errorf("%w; observed %v; proxy saw %d pushes %v; fault misses %v",
+			err, all, platform.ProxiedPushCount(), platform.ProxiedPushOutcomes(), platform.TemporaryUnavailablePushMisses())
 	}
 	return RetentionReconnectCall{Completion: call.Completion, Transport: call.transportObservations}, nil
 }
@@ -258,7 +296,8 @@ func runRetentionReconnectRenewal(ctx context.Context, scenario scenarios.Scenar
 		return RetentionReconnectCall{}, err
 	}
 	if completed.CallID != string(*step.NativeBinding.CallID) || completed.State != "completed" || completed.Completion != retentionReconnectNativeCompletion(wire) {
-		return RetentionReconnectCall{}, errors.New("Swift retention-reconnect renewal did not complete from its authored wire expectation")
+		return RetentionReconnectCall{}, fmt.Errorf("Swift retention-reconnect renewal did not complete from its authored wire expectation: call %q state %q completion %q, want completion %q",
+			completed.CallID, completed.State, completed.Completion, retentionReconnectNativeCompletion(wire))
 	}
 	state.mu.Lock()
 	transport, transportErr := state.session.ObservationsAfter(checkpoint)
@@ -409,7 +448,49 @@ func validateRetentionReconnectNativeWire(scenario scenarios.Scenario, stepID st
 	return nil
 }
 
-func retentionReconnectMutationIDs(operation scenarios.Operation) (map[string]struct{}, error) {
+// registerRetentionReconnectPinClient connects the client that pins the
+// rebuild. The authored model declares that client, and server client state
+// exists only after a connect, so the harness establishes it through the
+// protocol instead of writing server state directly. A first connect presents
+// no client generation and no known scope, which is what creates generation one.
+func registerRetentionReconnectPinClient(ctx context.Context, controller *blackbox.NativeController, rebuildPin scenarios.Operation) error {
+	var pin struct {
+		UserID   string          `json:"user_id"`
+		ClientID string          `json:"client_id"`
+		Schema   json.RawMessage `json:"schema"`
+	}
+	if err := json.Unmarshal(rebuildPin.Payload, &pin); err != nil || pin.UserID == "" || pin.ClientID == "" || len(pin.Schema) == 0 {
+		return errors.New("Swift retention-reconnect rebuild pin identity is incomplete")
+	}
+	payload, err := json.Marshal(map[string]any{
+		"user_id":          pin.UserID,
+		"client_id":        pin.ClientID,
+		"runtime_version":  3,
+		"protocol_version": 3,
+		"schema_reset":     false,
+		"schema":           pin.Schema,
+		// A client that has reconciled no scope set presents version zero and
+		// no known scope. The server answers with the scopes it assigns.
+		"scope_set_version": 0,
+		"known_scopes":      []any{},
+	})
+	if err != nil {
+		return errors.New("encode Swift retention-reconnect pin client connect failed")
+	}
+	connect := scenarios.Operation{ContractOperation: "connect", Name: "send", Payload: payload}
+	observed, requestErr := controller.RequestStep(ctx, connect)
+	if requestErr != nil || observed.Disposition != "success" {
+		message := "none"
+		if observed.Wire != nil {
+			message = observed.Wire.Message
+		}
+		return fmt.Errorf("register Swift retention-reconnect pin client: %w (message %q)",
+			resultError(requestErr, observed.Disposition), message)
+	}
+	return nil
+}
+
+func retentionReconnectAuthoredMutationCount(operation scenarios.Operation) (int, error) {
 	var payload struct {
 		Request struct {
 			Mutations []struct {
@@ -418,17 +499,39 @@ func retentionReconnectMutationIDs(operation scenarios.Operation) (map[string]st
 		} `json:"request"`
 	}
 	if err := json.Unmarshal(operation.Payload, &payload); err != nil || len(payload.Request.Mutations) == 0 {
-		return nil, errors.New("Swift retention-reconnect sealed push mutations are invalid")
+		return 0, errors.New("Swift retention-reconnect sealed push mutations are invalid")
 	}
 	ids := make(map[string]struct{}, len(payload.Request.Mutations))
 	for _, mutation := range payload.Request.Mutations {
 		if mutation.MutationID == "" {
-			return nil, errors.New("Swift retention-reconnect sealed push mutation identity is absent")
+			return 0, errors.New("Swift retention-reconnect sealed push mutation identity is absent")
 		}
 		if _, duplicate := ids[mutation.MutationID]; duplicate {
-			return nil, errors.New("Swift retention-reconnect sealed push mutation identity is duplicated")
+			return 0, errors.New("Swift retention-reconnect sealed push mutation identity is duplicated")
 		}
 		ids[mutation.MutationID] = struct{}{}
+	}
+	return len(ids), nil
+}
+
+// retentionReconnectSealedIdentities records the mutation identities the sealed
+// batch carried on the wire. The authored identity is an alias, so the sealed
+// batch supplies the runtime identity. A transport failure must not create a new
+// mutation identity, so the durable queue must hold exactly these identities
+// through the failed push, the generation expiry, and the renewal.
+func retentionReconnectSealedIdentities(sealed []string, authoredMutations int) (map[string]struct{}, error) {
+	if len(sealed) != authoredMutations {
+		return nil, fmt.Errorf("Swift retention-reconnect sealed batch carried %d mutations, want %d", len(sealed), authoredMutations)
+	}
+	ids := make(map[string]struct{}, len(sealed))
+	for _, mutation := range sealed {
+		if mutation == "" {
+			return nil, errors.New("Swift retention-reconnect sealed batch mutation identity is absent")
+		}
+		if _, duplicate := ids[mutation]; duplicate {
+			return nil, errors.New("Swift retention-reconnect sealed batch mutation identity is duplicated")
+		}
+		ids[mutation] = struct{}{}
 	}
 	return ids, nil
 }

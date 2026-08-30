@@ -93,7 +93,12 @@ func swiftScenarioCall(ctx context.Context, platform *Platform, client Client, m
 	if err != nil {
 		return SynchronizationResult{}, err
 	}
-	state.started = completed.Completion == "idle"
+	// Only a lifecycle method arms the client, and an armed client that rests in
+	// backoff is still started. A call that does not arm the lifecycle cannot
+	// change whether the client is running.
+	if method == "start" || method == "reset-schema-and-start" {
+		state.started = completed.Completion != "error"
+	}
 	return synchronizationResult(completed.Completion, nil, window), nil
 }
 

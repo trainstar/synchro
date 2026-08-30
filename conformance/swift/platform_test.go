@@ -80,7 +80,7 @@ func TestPlatformRebuildCursorMutationIsConformanceOnlyAndOneShot(t *testing.T) 
 	}
 }
 
-func TestPlatformTemporaryUnavailablePushFaultIsTargetedAndOneShot(t *testing.T) {
+func TestPlatformTemporaryUnavailablePushFaultIsTargetedAndHeldUntilRelease(t *testing.T) {
 	upstreamCalls := 0
 	upstream := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
 		upstreamCalls++
@@ -150,9 +150,20 @@ func TestPlatformTemporaryUnavailablePushFaultIsTargetedAndOneShot(t *testing.T)
 	if response.StatusCode != http.StatusServiceUnavailable || response.Header.Get("Retry-After") != "5" || !strings.Contains(string(body), `"temporary_unavailable"`) {
 		t.Fatalf("temporary unavailable response = status %d, retry-after %q, body %q", response.StatusCode, response.Header.Get("Retry-After"), body)
 	}
+	// The client retries the same sealed batch through durable backoff, so the
+	// armed fault answers every retry. A fault that applied once would let the
+	// retry deliver a batch the scenario keeps undelivered.
+	response, body = post("client-a", "batch-a")
+	if response.StatusCode != http.StatusServiceUnavailable || !strings.Contains(string(body), `"temporary_unavailable"`) {
+		t.Fatalf("retried push result = status %d, body %q", response.StatusCode, body)
+	}
+	if upstreamCalls != 2 {
+		t.Fatalf("armed fault forwarded a targeted push upstream, calls = %d", upstreamCalls)
+	}
+	release()
 	response, _ = post("client-a", "batch-a")
 	if response.StatusCode != http.StatusOK || upstreamCalls != 3 {
-		t.Fatalf("one-shot push result = status %d, upstream calls %d", response.StatusCode, upstreamCalls)
+		t.Fatalf("released push result = status %d, upstream calls %d", response.StatusCode, upstreamCalls)
 	}
 }
 

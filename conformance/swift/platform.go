@@ -103,7 +103,12 @@ type Platform struct {
 	// temporaryUnavailableMisses records why an armed push fault did not apply.
 	temporaryUnavailableMisses []string
 	// proxiedPushCount counts every push the response proxy observed.
-	proxiedPushCount              int
+	proxiedPushCount int
+	// proxiedPushOutcomes records what the proxy returned for each push.
+	proxiedPushOutcomes []string
+	// sealedPushMutations records the mutation identities one intercepted push
+	// carried.
+	sealedPushMutations           []string
 	temporaryUnavailablePush      *scenarios.PushWireFaultTarget
 	rebuildCursorOverride         string
 	rebuildCursorOverrideClientID string
@@ -202,9 +207,10 @@ func (p *Platform) serveTemporaryUnavailablePush(response http.ResponseWriter, r
 	p.countProxiedPush()
 	if !p.hasTemporaryUnavailablePush() {
 		p.recordTemporaryUnavailableMiss("push observed with no armed fault")
+		p.recordProxiedPushOutcome(fmt.Sprintf("push %d forwarded upstream", p.ProxiedPushCount()))
 		return false
 	}
-	target, err := proxiedPushTarget(request)
+	target, sealedMutations, err := proxiedPushTarget(request)
 	if err != nil {
 		p.recordTemporaryUnavailableMiss("unreadable push target: " + err.Error())
 		return false
@@ -214,20 +220,24 @@ func (p *Platform) serveTemporaryUnavailablePush(response http.ResponseWriter, r
 		return false
 	}
 	p.recordTemporaryUnavailableMiss("push claimed for client " + target.ClientID)
+	p.recordSealedPushMutations(sealedMutations)
 	injected := faults.NewTemporaryUnavailableResponse(request)
 	defer injected.Body.Close()
+	// Record the exact status the proxy returns so the failure can compare it
+	// against the status the client recorded for the same push.
+	p.recordProxiedPushOutcome(fmt.Sprintf("push %d injected %d temporary_unavailable", p.ProxiedPushCount(), injected.StatusCode))
 	copyInjectedResponse(response, injected)
 	return true
 }
 
-func proxiedPushTarget(request *http.Request) (scenarios.PushWireFaultTarget, error) {
+func proxiedPushTarget(request *http.Request) (scenarios.PushWireFaultTarget, []string, error) {
 	if request.Body == nil {
-		return scenarios.PushWireFaultTarget{}, errors.New("Swift proxied push body is absent")
+		return scenarios.PushWireFaultTarget{}, nil, errors.New("Swift proxied push body is absent")
 	}
 	body, err := io.ReadAll(io.LimitReader(request.Body, maximumProxiedPushRequestBytes+1))
 	request.Body.Close()
 	if err != nil || len(body) > maximumProxiedPushRequestBytes {
-		return scenarios.PushWireFaultTarget{}, errors.New("Swift proxied push body is invalid")
+		return scenarios.PushWireFaultTarget{}, nil, errors.New("Swift proxied push body is invalid")
 	}
 	request.Body = io.NopCloser(bytes.NewReader(body))
 	request.ContentLength = int64(len(body))
@@ -235,13 +245,25 @@ func proxiedPushTarget(request *http.Request) (scenarios.PushWireFaultTarget, er
 		request.Header.Set("Content-Length", strconv.Itoa(len(body)))
 	}
 	var payload struct {
-		ClientID string `json:"client_id"`
-		BatchID  string `json:"batch_id"`
+		ClientID  string `json:"client_id"`
+		BatchID   string `json:"batch_id"`
+		Mutations []struct {
+			MutationID string `json:"mutation_id"`
+		} `json:"mutations"`
 	}
 	if err := json.Unmarshal(body, &payload); err != nil || payload.ClientID == "" || payload.BatchID == "" {
-		return scenarios.PushWireFaultTarget{}, errors.New("Swift proxied push target is invalid")
+		return scenarios.PushWireFaultTarget{}, nil, errors.New("Swift proxied push target is invalid")
 	}
-	return scenarios.PushWireFaultTarget{ClientID: payload.ClientID, BatchID: payload.BatchID}, nil
+	// The sealed mutation identities prove which durable records the batch
+	// carried. Only the identifiers are kept, never the mutation payload.
+	sealed := make([]string, 0, len(payload.Mutations))
+	for _, mutation := range payload.Mutations {
+		if mutation.MutationID == "" {
+			return scenarios.PushWireFaultTarget{}, nil, errors.New("Swift proxied push mutation identity is absent")
+		}
+		sealed = append(sealed, mutation.MutationID)
+	}
+	return scenarios.PushWireFaultTarget{ClientID: payload.ClientID, BatchID: payload.BatchID}, sealed, nil
 }
 
 func copyInjectedResponse(writer http.ResponseWriter, response *http.Response) {
@@ -271,7 +293,9 @@ func (p *Platform) claimTemporaryUnavailablePush(target scenarios.PushWireFaultT
 	if armed == nil || armed.ClientID != target.ClientID {
 		return false
 	}
-	p.temporaryUnavailablePush = nil
+	// The armed fault describes a server that cannot accept this batch. The
+	// client retries the same sealed batch through durable backoff, so every
+	// retry meets the same response until the scenario releases the fault.
 	return true
 }
 
@@ -691,7 +715,7 @@ func (p *Platform) ApplyStep(ctx context.Context, client Client, operation scena
 				return StepObservation{}, fmt.Errorf("execute Swift local action on %s.%s: %w (application field %s inspection: %v)", action.TableName, action.PrimaryKeyField, err, inspection.PrimaryKeyField, inspectionErr)
 			}
 		}
-		return StepObservation{}, fmt.Errorf("execute Swift local action with existing application fields on %s: %w", action.TableName, err)
+		return StepObservation{}, fmt.Errorf("execute Swift local action with existing application fields on %s: %w (runner reported: %s)", action.TableName, err, state.session.stderrReport())
 	}
 	if result.RowsAffected == nil || *result.RowsAffected != 1 {
 		return StepObservation{}, errors.New("Swift local action did not affect one row")
@@ -871,7 +895,7 @@ func (p *Platform) synchronizeWithResponseLoss(ctx context.Context, state *platf
 		if captureErr != nil {
 			return SynchronizationResult{}, fmt.Errorf("await Swift transport pause: %w; diagnostic capture: %v", err, captureErr)
 		}
-		return SynchronizationResult{}, fmt.Errorf("await Swift transport pause: %w", err)
+		return SynchronizationResult{}, fmt.Errorf("await Swift transport pause: %w (runner reported: %s)", err, state.session.stderrReport())
 	}
 	observations, err := state.session.ObservationsAfter(initialCheckpoint)
 	if err != nil {
@@ -1106,7 +1130,7 @@ func (p *Platform) BeginCall(ctx context.Context, client Client, callID, method 
 		return CallResult{}, errors.New("Swift paused call did not enter flight")
 	}
 	if _, err := state.session.Execute(ctx, Request{Operation: "await-transport-pause", TransportOperation: firstPauseClass}); err != nil {
-		return CallResult{}, fmt.Errorf("await Swift transport pause: %w", err)
+		return CallResult{}, fmt.Errorf("await Swift transport pause for %s: %w (runner reported: %s)", firstPauseClass, err, state.session.stderrReport())
 	}
 	if pauseAfterConnect {
 		connect, err := state.session.ObservationsAfter(checkpoint)
@@ -2442,6 +2466,38 @@ func (p *Platform) countProxiedPush() {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.proxiedPushCount++
+}
+
+// recordSealedPushMutations records the mutation identities one intercepted
+// push carried. Only the identifiers are kept, never the mutation payload.
+func (p *Platform) recordSealedPushMutations(ids []string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.sealedPushMutations = append([]string(nil), ids...)
+}
+
+// SealedPushMutationIDs reports the mutation identities the intercepted push
+// carried, so a durable queue can be compared against the sealed batch.
+func (p *Platform) SealedPushMutationIDs() []string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return append([]string(nil), p.sealedPushMutations...)
+}
+
+// recordProxiedPushOutcome records what the proxy returned for one push.
+func (p *Platform) recordProxiedPushOutcome(outcome string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if len(p.proxiedPushOutcomes) < 8 {
+		p.proxiedPushOutcomes = append(p.proxiedPushOutcomes, outcome)
+	}
+}
+
+// ProxiedPushOutcomes reports what the proxy returned for each push.
+func (p *Platform) ProxiedPushOutcomes() []string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return append([]string(nil), p.proxiedPushOutcomes...)
 }
 
 // ProxiedPushCount reports how many pushes the response proxy observed.
