@@ -206,6 +206,63 @@ fn synchro_register_shared_scope(p_scope_id: &str, p_portable: default!(bool, "f
     });
 }
 
+/// Grants one scope to one user. A granted scope is the only assignment a user
+/// can gain and lose. Connect reconciles the change on the user's next connect,
+/// so this records the grant and nothing else.
+#[pg_extern]
+fn synchro_grant_user_scope(p_user_id: &str, p_scope_id: &str) {
+    validate_granted_scope_identity(p_user_id, p_scope_id);
+
+    Spi::connect_mut(|client| {
+        // A granted scope needs its own scope state, exactly as a shared scope
+        // does, so that membership and retention generations exist for it.
+        let _ = client
+            .update(
+                "INSERT INTO sync_scope_state (scope_id, stream_generation)
+                 SELECT $1, stream_generation
+                 FROM sync_runtime_state
+                 WHERE singleton = true
+                 ON CONFLICT (scope_id) DO NOTHING",
+                None,
+                &[p_scope_id.into()],
+            )
+            .unwrap_or_else(|err| pgrx::error!("registering granted scope state: {}", err));
+        let _ = client
+            .update(
+                "INSERT INTO sync_user_scopes (user_id, scope_id)
+                 VALUES ($1, $2)
+                 ON CONFLICT (user_id, scope_id) DO NOTHING",
+                None,
+                &[p_user_id.into(), p_scope_id.into()],
+            )
+            .unwrap_or_else(|err| pgrx::error!("granting user scope: {}", err));
+    });
+}
+
+/// Revokes one granted scope from one user. Connect reconciles the change on
+/// the user's next connect and leaves the scope's own state for other users.
+#[pg_extern]
+fn synchro_revoke_user_scope(p_user_id: &str, p_scope_id: &str) {
+    validate_granted_scope_identity(p_user_id, p_scope_id);
+
+    Spi::connect_mut(|client| {
+        let _ = client
+            .update(
+                "DELETE FROM sync_user_scopes WHERE user_id = $1 AND scope_id = $2",
+                None,
+                &[p_user_id.into(), p_scope_id.into()],
+            )
+            .unwrap_or_else(|err| pgrx::error!("revoking user scope: {}", err));
+    });
+}
+
+fn validate_granted_scope_identity(user_id: &str, scope_id: &str) {
+    if user_id.trim().is_empty() {
+        pgrx::error!("granted scope user_id must not be empty");
+    }
+    validate_shared_scope_id(scope_id);
+}
+
 #[pg_extern]
 fn synchro_unregister_shared_scope(p_scope_id: &str) {
     validate_shared_scope_id(p_scope_id);

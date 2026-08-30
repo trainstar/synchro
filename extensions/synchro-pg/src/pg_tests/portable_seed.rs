@@ -268,3 +268,92 @@ fn mint_portable_seed_receipt(scope_id: &str) -> String {
     )
     .expect("issue portable seed continuation receipt")
 }
+
+#[pg_test]
+fn test_granted_user_scope_reaches_one_user_and_revokes() {
+    setup_test_tables();
+    Spi::run_with_args(
+        "SELECT synchro_grant_user_scope($1, $2)",
+        &["granted-user".into(), "team:alpha".into()],
+    )
+    .unwrap();
+
+    let granted = connect_client(
+        "granted-user",
+        json!({
+            "client_id": "granted-client",
+            "platform": "test",
+            "app_version": "1.0.0",
+            "protocol_version": 3,
+            "schema": { "version": 0, "hash": "" },
+            "scope_set_version": 0,
+            "known_scopes": {}
+        }),
+    );
+    assert!(granted.get("error").is_none(), "{granted}");
+    let added = granted["scopes"]["add"]
+        .as_array()
+        .map(|scopes| {
+            scopes
+                .iter()
+                .any(|scope| scope["id"].as_str() == Some("team:alpha"))
+        })
+        .unwrap_or(false);
+    assert!(added, "granted scope is absent from the assignment: {granted}");
+
+    // A granted scope reaches only the user it was granted to.
+    let other = connect_client(
+        "ungranted-user",
+        json!({
+            "client_id": "ungranted-client",
+            "platform": "test",
+            "app_version": "1.0.0",
+            "protocol_version": 3,
+            "schema": { "version": 0, "hash": "" },
+            "scope_set_version": 0,
+            "known_scopes": {}
+        }),
+    );
+    let leaked = other["scopes"]["add"]
+        .as_array()
+        .map(|scopes| {
+            scopes
+                .iter()
+                .any(|scope| scope["id"].as_str() == Some("team:alpha"))
+        })
+        .unwrap_or(false);
+    assert!(!leaked, "granted scope reached another user: {other}");
+
+    let assigned_version = granted["scope_set_version"].as_i64().expect("scope set version");
+    Spi::run_with_args(
+        "SELECT synchro_revoke_user_scope($1, $2)",
+        &["granted-user".into(), "team:alpha".into()],
+    )
+    .unwrap();
+
+    let revoked = connect_client(
+        "granted-user",
+        json!({
+            "client_id": "granted-client",
+            "platform": "test",
+            "app_version": "1.0.0",
+            "protocol_version": 3,
+            "client_generation": client_generation("granted-user", "granted-client"),
+            "schema": schema_ref_value(),
+            "scope_set_version": assigned_version,
+            "known_scopes": {
+                "team:alpha": scope_cursor_ref("granted-user", "granted-client", "team:alpha", 0)
+            }
+        }),
+    );
+    assert!(revoked.get("error").is_none(), "{revoked}");
+    let removed = revoked["scopes"]["remove"]
+        .as_array()
+        .map(|scopes| scopes.iter().any(|scope| scope.as_str() == Some("team:alpha")))
+        .unwrap_or(false);
+    assert!(removed, "revoked scope was not removed: {revoked}");
+    assert!(
+        revoked["scope_set_version"].as_i64().unwrap_or(0) > assigned_version,
+        "revocation did not advance the scope set version: {revoked}"
+    );
+}

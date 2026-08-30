@@ -599,6 +599,16 @@ CREATE TABLE IF NOT EXISTS sync_shared_scopes (
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+-- A granted scope belongs to one user and can be revoked from that user. An
+-- identity scope is unconditional and a shared scope belongs to every user, so
+-- neither expresses an assignment that changes.
+CREATE TABLE IF NOT EXISTS sync_user_scopes (
+    user_id TEXT NOT NULL,
+    scope_id TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (user_id, scope_id)
+);
+
 CREATE TABLE IF NOT EXISTS sync_scope_state (
     scope_id TEXT PRIMARY KEY,
     stream_generation TEXT NOT NULL,
@@ -1978,7 +1988,8 @@ BEGIN
                 'synchro_prepare_projection_view',
                  'synchro_register_membership_dependency',
                  'synchro_unregister_table', 'synchro_register_shared_scope',
-                 'synchro_unregister_shared_scope', 'synchro_backfill_bucket_edges',
+                 'synchro_unregister_shared_scope', 'synchro_grant_user_scope',
+                 'synchro_revoke_user_scope', 'synchro_backfill_bucket_edges',
                  'synchro_compact', 'synchro_expire_retention_client',
                  'synchro_retry_wal_poison', 'synchro_health_detail',
                  'synchro_debug', 'synchro_primary_key_guard', 'synchro_capture_fence',
@@ -2041,7 +2052,7 @@ GRANT SELECT, INSERT, UPDATE ON synchro.sync_captured_projections TO synchro_wor
 GRANT SELECT, INSERT ON synchro.sync_capture_dependency_projections TO synchro_worker;
 GRANT SELECT ON synchro.sync_current_projections TO synchro_worker;
 GRANT SELECT ON synchro.sync_clients, synchro.sync_client_checkpoints,
-    synchro.sync_shared_scopes TO synchro_worker;
+    synchro.sync_shared_scopes, synchro.sync_user_scopes TO synchro_worker;
 GRANT DELETE ON synchro.sync_client_checkpoints TO synchro_worker;
 GRANT SELECT, INSERT, UPDATE ON synchro.sync_scope_state,
     synchro.sync_schema_manifest TO synchro_worker;

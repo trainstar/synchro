@@ -685,6 +685,24 @@ fn load_authoritative_scopes(client: &SpiClient<'_>, user_id: &str) -> Vec<Strin
             .unwrap_or_else(|| pgrx::error!("authoritative client scope is missing"));
         scopes.push(scope_id);
     }
+    // A granted scope is the only assignment a user can gain and lose. The
+    // identity scope is unconditional and a shared scope belongs to every user.
+    let granted = client
+        .select(
+            "SELECT scope_id FROM sync_user_scopes WHERE user_id = $1 ORDER BY scope_id",
+            None,
+            &[user_id.into()],
+        )
+        .unwrap_or_else(|err| pgrx::error!("loading granted user scopes: {}", err));
+    for row in granted {
+        let scope_id = row
+            .get_by_name::<String, &str>("scope_id")
+            .unwrap_or_else(|err| pgrx::error!("reading granted user scope: {}", err))
+            .unwrap_or_else(|| pgrx::error!("granted user scope is missing"));
+        if !scopes.iter().any(|existing| existing == &scope_id) {
+            scopes.push(scope_id);
+        }
+    }
     sort_scope_ids(&mut scopes);
     scopes
 }
@@ -906,8 +924,13 @@ fn persist_scope_history(
                  membership_generation, retention_generation
              )
              SELECT $1, $2, $3, scope.scope_id, $4, $5,
-                    CASE WHEN scope.scope_id = 'user:' || $1
-                         THEN 'identity' ELSE 'shared' END,
+                    CASE WHEN scope.scope_id = 'user:' || $1 THEN 'identity'
+                         WHEN EXISTS (
+                             SELECT 1 FROM sync_user_scopes granted
+                             WHERE granted.user_id = $1
+                               AND granted.scope_id = scope.scope_id
+                         ) THEN 'assignment_rule'
+                         ELSE 'shared' END,
                     state.membership_generation, state.retention_generation
              FROM unnest($6::text[]) AS scope(scope_id)
              JOIN sync_scope_state state ON state.scope_id = scope.scope_id",
