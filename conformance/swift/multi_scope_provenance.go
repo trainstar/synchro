@@ -144,8 +144,8 @@ type multiScopeProvenanceIdentityEvidence struct {
 }
 
 // RunMultiScopeProvenanceScenario executes the authored multi-scope provenance flow through Swift.
-func RunMultiScopeProvenanceScenario(ctx context.Context, scenario scenarios.Scenario, controller *blackbox.NativeController, platform *Platform) (MultiScopeProvenanceResult, error) {
-	if controller == nil || platform == nil {
+func RunMultiScopeProvenanceScenario(ctx context.Context, scenario scenarios.Scenario, controller *blackbox.NativeController, artifact *blackbox.NativeArtifact, platform *Platform) (MultiScopeProvenanceResult, error) {
+	if controller == nil || artifact == nil || platform == nil {
 		return MultiScopeProvenanceResult{}, errors.New("Swift multi-scope provenance dependencies are unavailable")
 	}
 	modelScenario, err := multiScopeProvenanceModelScenario(scenario)
@@ -204,7 +204,25 @@ func RunMultiScopeProvenanceScenario(ctx context.Context, scenario scenarios.Sce
 			}
 			method := call.Step.NativeBinding.Method
 			if !installed[call.Client.Key] {
-				if installErr := platform.Install(ctx, call.Client, "empty", ""); installErr != nil {
+				// The setup declares every client local_ready with its assigned
+				// scope. A client the scenario never authors a rebuild for must
+				// therefore connect established, with its scopes known and its
+				// cursors unchanged. A portable seed is how the harness installs
+				// that state. A client the scenario does author rebuilds for
+				// starts empty and rebuilds, exactly as those steps declare.
+				initialization, seedPath := "empty", ""
+				if len(call.Rebuilds) == 0 {
+					if _, seedErr := artifact.StageCurrentSeed(ctx, call.Client.UserID, call.Client.ClientID, step.ID); seedErr != nil {
+						return MultiScopeProvenanceResult{}, fmt.Errorf("stage Swift multi-scope provenance seed for %s: %w", call.Client.ClientID, seedErr)
+					}
+					resolved, seedErr := artifact.SeedDatabasePath(ctx, call.Client.UserID, call.Client.ClientID, step.ID)
+					if seedErr != nil {
+						return MultiScopeProvenanceResult{}, fmt.Errorf("resolve Swift multi-scope provenance seed for %s: %w", call.Client.ClientID, seedErr)
+					}
+					seedPath = resolved
+					initialization = "seed"
+				}
+				if installErr := platform.Install(ctx, call.Client, initialization, seedPath); installErr != nil {
 					return MultiScopeProvenanceResult{}, fmt.Errorf("install Swift multi-scope provenance client %s: %w", call.Client.ClientID, installErr)
 				}
 				installed[call.Client.Key] = true

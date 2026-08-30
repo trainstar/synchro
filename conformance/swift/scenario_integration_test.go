@@ -77,8 +77,9 @@ func runSwiftSchemaQueuedMutation(t *testing.T) {
 
 func runSwiftMultiScopeProvenance(t *testing.T) {
 	t.Helper()
-	ctx, scenario, _, controller, platform := newSwiftPerformanceFixture(t, filepath.Join("performance", "multi-scope-provenance-001.json"), 100)
-	result, err := RunMultiScopeProvenanceScenario(ctx, scenario, controller, platform)
+	ctx, scenario, harness, controller, platform := newSwiftPerformanceFixture(t, filepath.Join("performance", "multi-scope-provenance-001.json"), 100)
+	artifact := newSwiftPerformanceArtifact(t, harness)
+	result, err := RunMultiScopeProvenanceScenario(ctx, scenario, controller, artifact, platform)
 	if err != nil {
 		t.Fatalf("run direct Swift multi-scope-provenance scenario: %v", err)
 	}
@@ -356,4 +357,30 @@ func newSwiftPerformanceFixture(t *testing.T, scenarioPath string, pullPageSize 
 		resetSwiftPerformanceServer(t, ctx, harness)
 	})
 	return ctx, scenario, harness, controller, platform
+}
+
+// newSwiftPerformanceArtifact builds a portable seed artifact for a scenario
+// whose setup declares an established client.
+func newSwiftPerformanceArtifact(t *testing.T, harness *blackbox.Harness) *blackbox.NativeArtifact {
+	t.Helper()
+	seedToolPath := os.Getenv("SYNCHRO_SEED_TOOL")
+	if seedToolPath == "" {
+		seedToolPath = filepath.Join("..", "..", "bin", "synchro-seed")
+	}
+	stagingDirectory := t.TempDir()
+	if err := os.Chmod(stagingDirectory, 0o700); err != nil {
+		t.Fatalf("make Swift performance seed staging directory private: %v", err)
+	}
+	artifact, err := blackbox.NewNativeArtifact(blackbox.NativeArtifactConfig{Harness: harness, SeedToolPath: seedToolPath, StagingDirectory: stagingDirectory})
+	if err != nil {
+		t.Fatalf("create Swift performance seed artifact: %v", err)
+	}
+	t.Cleanup(func() {
+		closeContext, closeCancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer closeCancel()
+		if err := artifact.Close(closeContext); err != nil {
+			t.Errorf("close Swift performance seed artifact: %v", err)
+		}
+	})
+	return artifact
 }
