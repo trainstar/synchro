@@ -960,7 +960,13 @@ final class PullProcessor: @unchecked Sendable {
         scopeID: String,
         tablesByName: [String: LocalSchemaTable]
     ) throws {
-        try SynchroMeta.deleteRebuildPageReceipts(db, scopeID: scopeID)
+        // An active rebuild loses its pages with its scope. A completed rebuild
+        // keeps its page receipts, because the receipt records that the rebuild
+        // happened rather than that the scope is still assigned. A later
+        // rebuild of a reassigned scope clears that scope's receipts first.
+        if try SynchroMeta.getRebuildAttempt(db, scopeID: scopeID) != nil {
+            try SynchroMeta.deleteRebuildPageReceipts(db, scopeID: scopeID)
+        }
         try SynchroMeta.deleteRebuildAttempt(db, scopeID: scopeID)
         try SynchroMeta.clearRebuildingBackoffForScope(db, scopeID: scopeID)
         let scopeRows = try SynchroMeta.getScopeRowRecordIDs(db, scopeID: scopeID)

@@ -101,6 +101,16 @@ type nativeInstallationBinding struct {
 	// transition removed. A mutation queued under the earlier schema still
 	// records that identity, and the rebound table no longer carries it.
 	retiredFields map[string]string
+	// userScopes records the authored scopes each user currently holds. Scope
+	// assignment is a property of the user, so an authored assignment for one
+	// client sets the scope set of that client's user.
+	userScopes map[string][]string
+	// appliedRevocations records each scope revocation the controller issued.
+	appliedRevocations []string
+	// runtimeRowVersions maps a captured row to the row version the server
+	// stores. A row fact carries the authored version, so an authored
+	// row-version alias has no other source for its runtime value.
+	runtimeRowVersions map[string]string
 }
 
 type nativeInstalledClient struct {
@@ -613,8 +623,14 @@ func bindNativeInstallation(payload nativeInstallPayload, runtime nativeRuntimeM
 			return nil, errors.New("native controller authored client identity is invalid")
 		}
 		result.clients = append(result.clients, nativeInstalledClient{UserID: client.UserID, ClientID: client.ClientID})
+		if result.userScopes == nil {
+			result.userScopes = make(map[string][]string)
+		}
 		for _, scope := range client.AssignedScopeIDs {
 			hasInitialAssignments = true
+			if !containsString(result.userScopes[client.UserID], scope) {
+				result.userScopes[client.UserID] = append(result.userScopes[client.UserID], scope)
+			}
 			if err := bindNativeScope(result, scope, "user:"+client.UserID); err != nil {
 				return nil, err
 			}
@@ -919,6 +935,49 @@ func bindNativeTable(authored nativeAuthoredTable, runtime nativeRuntimeManifest
 	return binding, nil
 }
 
+// RuntimeRowVersions maps each captured row to the row version the server
+// stores. A row fact reports the authored version, so an authored row-version
+// alias resolves through this map.
+func (c *NativeController) RuntimeRowVersions() map[string]string {
+	if c == nil {
+		return nil
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.installation == nil {
+		return nil
+	}
+	versions := make(map[string]string, len(c.installation.runtimeRowVersions))
+	for canonical, version := range c.installation.runtimeRowVersions {
+		versions[canonical] = version
+	}
+	return versions
+}
+
+// AppliedScopeRevocations reports every scope revocation the controller issued.
+// An authored assignment that shrinks a user's scope set must reach the server,
+// and the client state alone cannot show whether it did.
+func (c *NativeController) AppliedScopeRevocations() []string {
+	if c == nil {
+		return nil
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.installation == nil {
+		return nil
+	}
+	return append([]string(nil), c.installation.appliedRevocations...)
+}
+
+func containsString(values []string, target string) bool {
+	for _, value := range values {
+		if value == target {
+			return true
+		}
+	}
+	return false
+}
+
 func bindNativeScope(binding *nativeInstallationBinding, authored, runtime string) error {
 	if authored == "" || runtime == "" {
 		return errors.New("native controller scope binding is incomplete")
@@ -980,7 +1039,7 @@ func (c *NativeController) ApplyStep(ctx context.Context, operation scenarios.Op
 	case "model/commit-source-transaction":
 		return c.commitSourceTransaction(ctx, operation)
 	case "model/set-client-assignments":
-		observation, usesDefaultSharedScope, err := c.setClientAssignments(operation)
+		observation, usesDefaultSharedScope, revocations, err := c.setClientAssignments(operation)
 		if err != nil {
 			return NativeStepObservation{}, err
 		}
@@ -988,6 +1047,17 @@ func (c *NativeController) ApplyStep(ctx context.Context, operation scenarios.Op
 			if err := c.harness.Operator().UnregisterDefaultSharedScope(ctx); err != nil {
 				return NativeStepObservation{}, err
 			}
+		}
+		for _, revocation := range revocations {
+			if err := c.harness.Operator().RevokeUserScope(ctx, revocation.UserID, revocation.RuntimeScope); err != nil {
+				return NativeStepObservation{}, err
+			}
+			c.mu.Lock()
+			if c.installation != nil {
+				c.installation.appliedRevocations = append(c.installation.appliedRevocations,
+					revocation.UserID+"/"+revocation.RuntimeScope)
+			}
+			c.mu.Unlock()
 		}
 		return observation, nil
 	case "model/publish-schema":
@@ -1371,7 +1441,14 @@ func nativeApplicationInsertSupportColumns(value any, support map[string]any) (a
 	}
 }
 
-func (c *NativeController) setClientAssignments(operation scenarios.Operation) (NativeStepObservation, bool, error) {
+// nativeScopeRevocation names one scope a user no longer holds.
+type nativeScopeRevocation struct {
+	UserID       string
+	RuntimeScope string
+}
+
+func (c *NativeController) setClientAssignments(operation scenarios.Operation) (NativeStepObservation, bool, []nativeScopeRevocation, error) {
+	var revocations []nativeScopeRevocation
 	var payload struct {
 		UserID      string `json:"user_id"`
 		ClientID    string `json:"client_id"`
@@ -1380,15 +1457,15 @@ func (c *NativeController) setClientAssignments(operation scenarios.Operation) (
 		} `json:"assignments"`
 	}
 	if err := jsonstrict.Decode(operation.Payload, &payload); err != nil || !validNativeIdentity(payload.UserID) || !validNativeIdentity(payload.ClientID) {
-		return NativeStepObservation{}, false, errors.New("native controller client assignment payload is invalid")
+		return NativeStepObservation{}, false, nil, errors.New("native controller client assignment payload is invalid")
 	}
 	if len(payload.Assignments) == 0 {
-		return NativeStepObservation{}, false, errors.New("native controller client assignment is empty")
+		return NativeStepObservation{}, false, nil, errors.New("native controller client assignment is empty")
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.installation == nil {
-		return NativeStepObservation{}, false, errors.New("native controller contract is not installed")
+		return NativeStepObservation{}, false, nil, errors.New("native controller contract is not installed")
 	}
 	usesDefaultSharedScope := false
 	for _, assignment := range payload.Assignments {
@@ -1400,11 +1477,11 @@ func (c *NativeController) setClientAssignments(operation scenarios.Operation) (
 			case "user:" + payload.UserID:
 				continue
 			default:
-				return NativeStepObservation{}, false, errors.New("native controller client assignment conflicts with its runtime scope")
+				return NativeStepObservation{}, false, nil, errors.New("native controller client assignment conflicts with its runtime scope")
 			}
 		}
 		if err := bindNativeScope(c.installation, assignment.ScopeID, "user:"+payload.UserID); err != nil {
-			return NativeStepObservation{}, false, err
+			return NativeStepObservation{}, false, nil, err
 		}
 	}
 	installed := false
@@ -1417,7 +1494,30 @@ func (c *NativeController) setClientAssignments(operation scenarios.Operation) (
 	if !installed {
 		c.installation.clients = append(c.installation.clients, nativeInstalledClient{UserID: payload.UserID, ClientID: payload.ClientID})
 	}
-	return nativeSuccess(), usesDefaultSharedScope, nil
+	// Scope assignment is a property of the user. An authored scope the user
+	// no longer holds is revoked, so the server stops reporting it and the
+	// client drops its local scope metadata on the next connect.
+	next := make([]string, 0, len(payload.Assignments))
+	for _, assignment := range payload.Assignments {
+		if !containsString(next, assignment.ScopeID) {
+			next = append(next, assignment.ScopeID)
+		}
+	}
+	if c.installation.userScopes == nil {
+		c.installation.userScopes = make(map[string][]string)
+	}
+	for _, authored := range c.installation.userScopes[payload.UserID] {
+		if containsString(next, authored) {
+			continue
+		}
+		runtime, bound := c.installation.scopes[authored]
+		if !bound || runtime == "" {
+			continue
+		}
+		revocations = append(revocations, nativeScopeRevocation{UserID: payload.UserID, RuntimeScope: runtime})
+	}
+	c.installation.userScopes[payload.UserID] = next
+	return nativeSuccess(), usesDefaultSharedScope, revocations, nil
 }
 
 func (c *NativeController) bindStagedSharedScope() error {
@@ -3112,6 +3212,10 @@ func captureNativeRowsAndScopes(ctx context.Context, tx *sql.Tx, installation *n
 			Version:           record.Image.Version,
 			Checksum:          record.Image.Checksum,
 		})
+		if installation.runtimeRowVersions == nil {
+			installation.runtimeRowVersions = make(map[string]string)
+		}
+		installation.runtimeRowVersions[record.Image.CanonicalWireJSON] = runtimeVersion
 		for _, authoredScope := range record.AuthoredScopes {
 			runtimeScope, found := installation.scopes[authoredScope]
 			if !found {

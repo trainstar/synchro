@@ -2772,6 +2772,28 @@ BEGIN
 END $$`)
 }
 
+// GrantUserScope grants one scope to one user.
+func (executor *OperatorExecutor) GrantUserScope(ctx context.Context, userID, scopeID string) error {
+	if ctx == nil {
+		return errors.New("native user scope context is required")
+	}
+	if userID == "" || scopeID == "" {
+		return errors.New("native user scope identity is incomplete")
+	}
+	return executor.exec(ctx, "SELECT synchro.synchro_grant_user_scope($1, $2)", userID, scopeID)
+}
+
+// RevokeUserScope revokes one scope from one user.
+func (executor *OperatorExecutor) RevokeUserScope(ctx context.Context, userID, scopeID string) error {
+	if ctx == nil {
+		return errors.New("native user scope context is required")
+	}
+	if userID == "" || scopeID == "" {
+		return errors.New("native user scope identity is incomplete")
+	}
+	return executor.exec(ctx, "SELECT synchro.synchro_revoke_user_scope($1, $2)", userID, scopeID)
+}
+
 // RegisterSchemaQueue refreshes the fixed schema-queue registration.
 func (executor *OperatorExecutor) RegisterSchemaQueue(ctx context.Context) error {
 	return executor.exec(ctx, `SELECT synchro.synchro_register_table(

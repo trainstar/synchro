@@ -38,7 +38,7 @@ func TestNativeControllerAssignmentPreservesSharedScope(t *testing.T) {
 		Payload:           json.RawMessage(`{"user_id":"user-a","client_id":"client-a","assignments":[{"scope_id":"scope-a"}]}`),
 	}
 	for range 2 {
-		observation, usesDefaultSharedScope, err := controller.setClientAssignments(operation)
+		observation, usesDefaultSharedScope, _, err := controller.setClientAssignments(operation)
 		if err != nil {
 			t.Fatalf("set client assignments: %v", err)
 		}
@@ -71,7 +71,7 @@ func TestNativeControllerAssignmentBindsUnresolvedPrivateScope(t *testing.T) {
 		Payload:           json.RawMessage(`{"user_id":"user-a","client_id":"client-a","assignments":[{"scope_id":"scope-a"}]}`),
 	}
 
-	observation, usesDefaultSharedScope, err := controller.setClientAssignments(operation)
+	observation, usesDefaultSharedScope, _, err := controller.setClientAssignments(operation)
 	if err != nil {
 		t.Fatalf("set client assignments: %v", err)
 	}
@@ -94,7 +94,7 @@ func TestNativeControllerAssignmentDoesNotStageSharedScope(t *testing.T) {
 		Payload:           json.RawMessage(`{"user_id":"user-a","client_id":"client-a","assignments":[{"scope_id":"scope-b"}]}`),
 	}
 
-	_, retainsSharedScope, err := controller.setClientAssignments(operation)
+	_, retainsSharedScope, _, err := controller.setClientAssignments(operation)
 	if err != nil {
 		t.Fatalf("set client assignments: %v", err)
 	}
@@ -117,7 +117,7 @@ func TestNativeControllerAssignmentBindsStagedSharedScope(t *testing.T) {
 		Payload:           json.RawMessage(`{"user_id":"user-a","client_id":"client-a","assignments":[{"scope_id":"scope-b"}]}`),
 	}
 
-	_, retainsSharedScope, err := controller.setClientAssignments(operation)
+	_, retainsSharedScope, _, err := controller.setClientAssignments(operation)
 	if err != nil {
 		t.Fatalf("set client assignments: %v", err)
 	}

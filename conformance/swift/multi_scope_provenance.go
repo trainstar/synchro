@@ -141,6 +141,16 @@ type multiScopeProvenanceMeasurementPayload struct {
 
 type multiScopeProvenanceIdentityEvidence struct {
 	Resolutions []blackbox.NativeIdentityResolution
+	// Revocations names each scope revocation the controller issued, so a
+	// client count difference shows whether the assignment change reached the
+	// server at all.
+	Revocations []string
+	// CallOperations names the operations each authored call produced.
+	CallOperations []string
+	// TableNames maps an authored table to the runtime table name. Provenance
+	// records the runtime name while a table alias resolves to the runtime
+	// identifier, so the name needs its own binding.
+	TableNames map[string]string
 }
 
 // RunMultiScopeProvenanceScenario executes the authored multi-scope provenance flow through Swift.
@@ -208,7 +218,17 @@ func RunMultiScopeProvenanceScenario(ctx context.Context, scenario scenarios.Sce
 			if call == nil {
 				return MultiScopeProvenanceResult{}, fmt.Errorf("Swift multi-scope provenance call %s is absent", step.ID)
 			}
+			// An authored connect is the only operation that reconciles an
+			// assignment change, because pull derives its scope set from the
+			// scopes the client last reconciled. A started client connects by
+			// starting again, and it stops before it starts again.
 			method := call.Step.NativeBinding.Method
+			if started[call.Client.Key] {
+				if _, stopErr := platform.Lifecycle(ctx, call.Client, "stop"); stopErr != nil {
+					return MultiScopeProvenanceResult{}, fmt.Errorf("stop Swift multi-scope provenance client %s before its authored connect: %w", call.Client.ClientID, stopErr)
+				}
+				method = "start"
+			}
 			if !started[call.Client.Key] {
 				started[call.Client.Key] = true
 				// A client the scenario authors no rebuild for must reach the
@@ -1002,7 +1022,13 @@ func resolveMultiScopeProvenanceIdentities(controller *blackbox.NativeController
 			row, rowErr := multiScopeProvenanceRuntimeRow(plan, server, alias)
 			if rowErr == nil {
 				if alias.Kind == "row-version" {
-					value = row.Version
+					// A row fact reports the authored version, so the runtime
+					// version comes from the versions the capture observed.
+					runtimeVersion, bound := controller.RuntimeRowVersions()[row.CanonicalWireJSON]
+					if !bound || runtimeVersion == "" {
+						return multiScopeProvenanceIdentityEvidence{}, fmt.Errorf("Swift multi-scope provenance row alias %s has no runtime version", alias.Alias)
+					}
+					value = runtimeVersion
 				} else {
 					value = row.Checksum
 				}
@@ -1035,7 +1061,47 @@ func resolveMultiScopeProvenanceIdentities(controller *blackbox.NativeController
 	if err != nil {
 		return multiScopeProvenanceIdentityEvidence{}, err
 	}
-	return multiScopeProvenanceIdentityEvidence{Resolutions: resolutions}, nil
+	operations := make([]string, 0, len(calls))
+	for index, call := range calls {
+		classes := make([]string, 0, len(call.transportObservations))
+		for _, observation := range call.transportObservations {
+			classes = append(classes, observation.OperationClass)
+		}
+		operations = append(operations, fmt.Sprintf("%d:%s", index, strings.Join(classes, "+")))
+	}
+	tableAliases := make([]scenarios.NativeIdentityAlias, 0, len(aliases))
+	for _, alias := range aliases {
+		if alias.Kind == "table" {
+			tableAliases = append(tableAliases, alias)
+		}
+	}
+	tableNames := make(map[string]string, len(tableAliases))
+	if len(tableAliases) != 0 {
+		values, valuesErr := controller.IdentityValues(tableAliases)
+		if valuesErr != nil {
+			return multiScopeProvenanceIdentityEvidence{}, fmt.Errorf("resolve Swift multi-scope provenance table names: %w", valuesErr)
+		}
+		authoredByAlias := make(map[string]string, len(tableAliases))
+		for _, alias := range tableAliases {
+			var authored string
+			if json.Unmarshal(alias.Value, &authored) == nil {
+				authoredByAlias[alias.Alias] = authored
+			}
+		}
+		for _, value := range values {
+			authored, known := authoredByAlias[value.Alias]
+			if !known || value.ApplicationIdentifier == "" {
+				continue
+			}
+			tableNames[authored] = value.ApplicationIdentifier
+		}
+	}
+	return multiScopeProvenanceIdentityEvidence{
+		Resolutions:    resolutions,
+		Revocations:    controller.AppliedScopeRevocations(),
+		CallOperations: operations,
+		TableNames:     tableNames,
+	}, nil
 }
 
 func multiScopeProvenanceRuntimeClientGeneration(plan multiScopeProvenancePlan, calls []SynchronizationResult, aliases []scenarios.NativeIdentityAlias) (int64, error) {
@@ -1140,7 +1206,20 @@ func validateMultiScopeProvenanceState(plan multiScopeProvenancePlan, server, ac
 		actualBase.Clients[index].Outcomes = nil
 	}
 	if err := validateSwiftStateProjection(expectedBase, actualBase); err != nil {
-		return fmt.Errorf("Swift multi-scope provenance client counts differ from the authored model: %w", err)
+		// Name the scope each observed checkpoint belongs to. A count alone
+		// cannot show whether a revoked scope survived on the client.
+		observed := make([]string, 0)
+		for _, client := range actual.Clients {
+			for _, checkpoint := range client.Checkpoints {
+				observed = append(observed, client.ClientID+":"+checkpoint.ScopeID)
+			}
+		}
+		sort.Strings(observed)
+		// A scope delta only reaches a client on connect. Name the operations
+		// each call produced so a surviving scope shows whether its call
+		// connected at all.
+		return fmt.Errorf("Swift multi-scope provenance client counts differ from the authored model: %w; applied scope revocations %v; observed checkpoints %v; call operations %v",
+			err, evidence.Revocations, observed, evidence.CallOperations)
 	}
 	resolved := make(map[string]blackbox.NativeIdentityResolution, len(evidence.Resolutions))
 	for _, resolution := range evidence.Resolutions {
@@ -1158,14 +1237,14 @@ func validateMultiScopeProvenanceState(plan multiScopeProvenancePlan, server, ac
 		if !found {
 			return fmt.Errorf("Swift multi-scope provenance client %s is absent", expectedClient.ClientID)
 		}
-		if err := validateMultiScopeProvenanceProvenance(expectedClient.Provenance, actualClient.Provenance, resolved); err != nil {
+		if err := validateMultiScopeProvenanceProvenance(expectedClient.Provenance, actualClient.Provenance, resolved, evidence.TableNames); err != nil {
 			return fmt.Errorf("Swift multi-scope provenance client %s: %w", expectedClient.ClientID, err)
 		}
 	}
 	return nil
 }
 
-func validateMultiScopeProvenanceProvenance(expected, actual []scenarios.ProvenanceFact, resolutions map[string]blackbox.NativeIdentityResolution) error {
+func validateMultiScopeProvenanceProvenance(expected, actual []scenarios.ProvenanceFact, resolutions map[string]blackbox.NativeIdentityResolution, tableNames map[string]string) error {
 	if len(expected) != len(actual) {
 		return errors.New("provenance count differs")
 	}
@@ -1180,11 +1259,81 @@ func validateMultiScopeProvenanceProvenance(expected, actual []scenarios.Provena
 	for index := range expected {
 		want := expected[index]
 		got := actual[index]
-		if want.CanonicalWireJSON != got.CanonicalWireJSON || !reflect.DeepEqual(want.Scopes, got.Scopes) || want.Version != got.Version || !multiScopeProvenanceTableIdentityMatches(resolutions, want.TableID, got.TableID) {
-			return errors.New("provenance differs from the authored identity")
+		// Every provenance field is an authored identity. The record, the
+		// scopes, and the row version are corpus values the client never
+		// stores, so each resolves through the aliases the scenario declares.
+		unresolved := make([]string, 0, 4)
+		if tableNames[want.TableID] != got.TableID {
+			unresolved = append(unresolved, "table")
+		}
+		if !multiScopeProvenanceCanonicalIdentityMatches(resolutions, want.CanonicalWireJSON, got.CanonicalWireJSON) {
+			unresolved = append(unresolved, "record")
+		}
+		if !multiScopeProvenanceScopesMatch(resolutions, want.Scopes, got.Scopes) {
+			unresolved = append(unresolved, "scopes")
+		}
+		if !multiScopeProvenanceTableIdentityMatches(resolutions, want.Version, got.Version) {
+			unresolved = append(unresolved, "version")
+		}
+		if len(unresolved) != 0 {
+			// Name the field that differs. Four fields share this comparison and
+			// the identity resolution hides which one failed.
+			aliases := make([]string, 0, len(resolutions))
+			for alias := range resolutions {
+				aliases = append(aliases, alias)
+			}
+			sort.Strings(aliases)
+			versions := make([]string, 0)
+			for alias, resolution := range resolutions {
+				var authored, runtime string
+				if json.Unmarshal(resolution.AuthoredValue, &authored) == nil && json.Unmarshal(resolution.RuntimeValue, &runtime) == nil {
+					versions = append(versions, alias+":"+authored+"->"+runtime)
+				}
+			}
+			sort.Strings(versions)
+			return fmt.Errorf("provenance differs from the authored identity in %v: authored %s/%s/%v/%s observed %s/%s/%v/%s; table names %v; resolutions %v",
+				unresolved,
+				want.TableID, want.CanonicalWireJSON, want.Scopes, want.Version,
+				got.TableID, got.CanonicalWireJSON, got.Scopes, got.Version, tableNames, versions)
 		}
 	}
 	return nil
+}
+
+// multiScopeProvenanceCanonicalIdentityMatches resolves one canonical wire
+// value against the aliases the scenario declares.
+func multiScopeProvenanceCanonicalIdentityMatches(resolutions map[string]blackbox.NativeIdentityResolution, authored, runtime string) bool {
+	for _, resolution := range resolutions {
+		if resolutionMatchesCanonicalString(resolution, authored, runtime) {
+			return true
+		}
+	}
+	return false
+}
+
+// multiScopeProvenanceScopesMatch pairs each authored scope with the runtime
+// scope it resolves to. The two lists carry different identifiers, so the
+// pairing is by resolution rather than by position.
+func multiScopeProvenanceScopesMatch(resolutions map[string]blackbox.NativeIdentityResolution, authored, runtime []string) bool {
+	if len(authored) != len(runtime) {
+		return false
+	}
+	claimed := make([]bool, len(runtime))
+	for _, authoredScope := range authored {
+		paired := false
+		for index, runtimeScope := range runtime {
+			if claimed[index] || !multiScopeProvenanceTableIdentityMatches(resolutions, authoredScope, runtimeScope) {
+				continue
+			}
+			claimed[index] = true
+			paired = true
+			break
+		}
+		if !paired {
+			return false
+		}
+	}
+	return true
 }
 
 func multiScopeProvenanceTableIdentityMatches(resolutions map[string]blackbox.NativeIdentityResolution, authored, runtime string) bool {
