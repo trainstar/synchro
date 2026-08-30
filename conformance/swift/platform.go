@@ -99,7 +99,9 @@ type Platform struct {
 	closed  bool
 	clients map[string]*platformClient
 
-	responseProxy                 *httptest.Server
+	responseProxy *httptest.Server
+	// temporaryUnavailableMisses records why an armed push fault did not apply.
+	temporaryUnavailableMisses    []string
 	temporaryUnavailablePush      *scenarios.PushWireFaultTarget
 	rebuildCursorOverride         string
 	rebuildCursorOverrideClientID string
@@ -197,9 +199,11 @@ func (p *Platform) serveTemporaryUnavailablePush(response http.ResponseWriter, r
 	}
 	target, err := proxiedPushTarget(request)
 	if err != nil {
+		p.recordTemporaryUnavailableMiss("unreadable push target: " + err.Error())
 		return false
 	}
 	if !p.claimTemporaryUnavailablePush(target) {
+		p.recordTemporaryUnavailableMiss("no armed fault for client " + target.ClientID)
 		return false
 	}
 	injected := faults.NewTemporaryUnavailableResponse(request)
@@ -2411,4 +2415,21 @@ func (p *Platform) client(client Client) (*platformClient, error) {
 		return nil, errors.New("Swift platform client is unavailable")
 	}
 	return state, nil
+}
+
+// recordTemporaryUnavailableMiss records why an armed push fault did not apply
+// to an observed push. A silent pass through hides an unfired authored fault.
+func (p *Platform) recordTemporaryUnavailableMiss(reason string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if len(p.temporaryUnavailableMisses) < 8 {
+		p.temporaryUnavailableMisses = append(p.temporaryUnavailableMisses, reason)
+	}
+}
+
+// TemporaryUnavailablePushMisses reports why an armed push fault did not apply.
+func (p *Platform) TemporaryUnavailablePushMisses() []string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return append([]string(nil), p.temporaryUnavailableMisses...)
 }

@@ -199,7 +199,7 @@ func runRetentionReconnectInitialCall(ctx context.Context, scenario scenarios.Sc
 			}
 			outcomes = append(outcomes, entry)
 		}
-		return RetentionReconnectCall{}, fmt.Errorf("Swift retention-reconnect sealed push completion = %q, want %q; observed %v", call.Completion, retentionReconnectNativeCompletion(wire), outcomes)
+		return RetentionReconnectCall{}, fmt.Errorf("Swift retention-reconnect sealed push completion = %q, want %q; observed %v; fault misses %v", call.Completion, retentionReconnectNativeCompletion(wire), outcomes, platform.TemporaryUnavailablePushMisses())
 	}
 	pushes := make([]transportObservation, 0, 1)
 	for _, observed := range call.transportObservations {
