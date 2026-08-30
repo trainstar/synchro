@@ -210,6 +210,7 @@ func (p *Platform) serveTemporaryUnavailablePush(response http.ResponseWriter, r
 		p.recordTemporaryUnavailableMiss("no armed fault for client " + target.ClientID)
 		return false
 	}
+	p.recordTemporaryUnavailableMiss("push claimed for client " + target.ClientID)
 	injected := faults.NewTemporaryUnavailableResponse(request)
 	defer injected.Body.Close()
 	copyInjectedResponse(response, injected)
