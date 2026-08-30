@@ -24,7 +24,7 @@
     {
       "scenario_id": "SCN-PERF-MULTI-SCOPE-PROVENANCE-001",
       "path": "conformance/scenarios/performance/multi-scope-provenance-001.json",
-      "sha256": "53a8316d0f66979cbbf3646c4a2d768c68e780900ef715a3dcda3de0bd29e79c"
+      "sha256": "8cddb77509b66e169e1368921d25d863aaea0d7851192cfbe6c416aa49d84c6b"
     },
     {
       "scenario_id": "SCN-PERF-PENDING-CYCLE-001",
