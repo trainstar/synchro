@@ -660,7 +660,7 @@ func TestRealS12StaleClientCompactionAndReconnect(t *testing.T) {
 		beforeCompaction.GlobalFloorPosition != "generation_start|||" {
 		t.Fatalf("S-12 state before compaction is invalid: %#v", beforeCompaction)
 	}
-	if err := harness.Operator().AgeDiagnosticRetentionClient(ctx); err != nil {
+	if err := harness.Operator().ExpireRetentionClient(ctx, "diagnostic-user", "s12-retention-client"); err != nil {
 		t.Fatalf("age S-12 diagnostic client: %v", err)
 	}
 	compaction, err := harness.Operator().RunDiagnosticRetentionCompaction(ctx)

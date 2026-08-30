@@ -1912,10 +1912,7 @@ func (c *NativeController) expireClientGeneration(ctx context.Context, operation
 	if err := jsonstrict.Decode(operation.Payload, &payload); err != nil || !validNativeIdentity(payload.UserID) || !validNativeIdentity(payload.ClientID) {
 		return NativeStepObservation{}, errors.New("native controller expire-client payload is invalid")
 	}
-	if payload.UserID != "diagnostic-user" || payload.ClientID != diagnosticRetentionClientID {
-		return NativeStepObservation{}, fmt.Errorf("native controller cannot expire %s/%s: the current Harness operator exposes only %s/%s", payload.UserID, payload.ClientID, "diagnostic-user", diagnosticRetentionClientID)
-	}
-	if err := c.harness.Operator().AgeDiagnosticRetentionClient(ctx); err != nil {
+	if err := c.harness.Operator().ExpireRetentionClient(ctx, payload.UserID, payload.ClientID); err != nil {
 		return NativeStepObservation{}, err
 	}
 	return nativeSuccess(), nil

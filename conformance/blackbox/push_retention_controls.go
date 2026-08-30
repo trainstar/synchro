@@ -92,10 +92,15 @@ func (executor *OperatorExecutor) ObserveDiagnosticPush(ctx context.Context, cli
 	return observation, nil
 }
 
-// AgeDiagnosticRetentionClient marks the fixed S-12 client for retention expiry.
-func (executor *OperatorExecutor) AgeDiagnosticRetentionClient(ctx context.Context) error {
+// ExpireRetentionClient marks one client for retention expiry. The identity is
+// a parameter because the extension entry point serves any registered client,
+// and an authored scenario names the client it expires.
+func (executor *OperatorExecutor) ExpireRetentionClient(ctx context.Context, userID, clientID string) error {
 	if executor == nil || executor.harness == nil || !executor.harness.sourceReady || ctx == nil {
 		return errors.New("operator executor is unavailable")
+	}
+	if userID == "" || clientID == "" {
+		return errors.New("retention client identity is incomplete")
 	}
 	harness := executor.harness
 	database, err := harness.openDatabase(ctx, harness.names.Database, harness.env.Admin, false)
@@ -108,14 +113,14 @@ func (executor *OperatorExecutor) AgeDiagnosticRetentionClient(ctx context.Conte
 	err = database.QueryRowContext(
 		ctx,
 		"SELECT synchro.synchro_expire_retention_client($1, $2)",
-		"diagnostic-user",
-		diagnosticRetentionClientID,
+		userID,
+		clientID,
 	).Scan(&expired)
 	if err != nil {
-		return fmt.Errorf("expire diagnostic retention client: %w", err)
+		return fmt.Errorf("expire retention client: %w", err)
 	}
 	if !expired {
-		return errors.New("diagnostic retention client was not active")
+		return errors.New("retention client was not active")
 	}
 	return nil
 }
