@@ -176,8 +176,6 @@ func RunMultiScopeProvenanceScenario(ctx context.Context, scenario scenarios.Sce
 	// reach that state before the exercise begins. A client the scenario does
 	// author rebuilds for starts empty and rebuilds during the exercise exactly
 	// as those steps declare.
-	authoredRebuilds := multiScopeProvenanceAuthoredRebuildCounts(plan)
-	setupRebuilds := make(map[string]bool)
 	started := make(map[string]bool, len(plan.Clients))
 	// A request reports the assignment set the client has already applied.
 	appliedScopeSetVersions := make(map[string]int64, len(plan.Clients))
@@ -220,35 +218,7 @@ func RunMultiScopeProvenanceScenario(ctx context.Context, scenario scenarios.Sce
 				if installErr := platform.Install(ctx, call.Client, "empty", ""); installErr != nil {
 					return MultiScopeProvenanceResult{}, fmt.Errorf("install Swift multi-scope provenance client %s: %w", call.Client.ClientID, installErr)
 				}
-				if authoredRebuilds[call.Client.Key] == 0 {
-					before, captureErr := multiScopeProvenanceRebuildIdentities(ctx, controller, plan)
-					if captureErr != nil {
-						return MultiScopeProvenanceResult{}, captureErr
-					}
-					establishment, establishErr := swiftScenarioCall(ctx, platform, call.Client, "start")
-					if establishErr != nil {
-						return MultiScopeProvenanceResult{}, fmt.Errorf("establish Swift multi-scope provenance client %s: %w", call.Client.ClientID, establishErr)
-					}
-					if establishment.Completion != "idle" {
-						return MultiScopeProvenanceResult{}, fmt.Errorf("establish Swift multi-scope provenance client %s reached %s", call.Client.ClientID, establishment.Completion)
-					}
-					after, captureErr := multiScopeProvenanceRebuildIdentities(ctx, controller, plan)
-					if captureErr != nil {
-						return MultiScopeProvenanceResult{}, captureErr
-					}
-					for identity := range after {
-						if !before[identity] {
-							setupRebuilds[identity] = true
-						}
-					}
-					// Establishment brings the client to the declared initial
-					// state, so its authored call reports the authored assignment
-					// set rather than an empty one.
-					appliedScopeSetVersions[call.Client.ClientID] = int64(call.Connect.ScopeSetVersion)
-					appliedScopeCounts[call.Client.ClientID] = int(call.AssignedScopeCount)
-				} else {
-					method = "start"
-				}
+				method = "start"
 			}
 			result, callErr := swiftScenarioCall(ctx, platform, call.Client, method)
 			if callErr != nil {
@@ -312,7 +282,7 @@ func RunMultiScopeProvenanceScenario(ctx context.Context, scenario scenarios.Sce
 	if len(serverCaptures) != 1 {
 		return MultiScopeProvenanceResult{}, fmt.Errorf("capture Swift multi-scope provenance server state returned %d captures, want 1", len(serverCaptures))
 	}
-	serverState := multiScopeProvenanceExerciseState(serverCaptures[0].StateFacts, setupRebuilds)
+	serverState := serverCaptures[0].StateFacts
 	evidence, err := resolveMultiScopeProvenanceIdentities(controller, plan, scenario.NativeIdentityAliases, calls, actualClient, serverState)
 	if err != nil {
 		return MultiScopeProvenanceResult{}, err
@@ -1378,60 +1348,6 @@ func multiScopeProvenanceAssignedScopeCount(assignedScopes map[string]uint64, cl
 		return assigned
 	}
 	return uint64(len(payload.KnownScopes))
-}
-
-// multiScopeProvenanceAuthoredRebuildCounts reports how many rebuilds the
-// scenario authors for each client.
-func multiScopeProvenanceAuthoredRebuildCounts(plan multiScopeProvenancePlan) map[string]int {
-	counts := make(map[string]int, len(plan.Clients))
-	for _, callID := range plan.CallOrder {
-		if call := plan.Calls[callID]; call != nil {
-			counts[call.Client.Key] += len(call.Rebuilds)
-		}
-	}
-	return counts
-}
-
-// multiScopeProvenanceRebuildIdentities reports the rebuild identities the
-// server holds now.
-func multiScopeProvenanceRebuildIdentities(ctx context.Context, controller *blackbox.NativeController, plan multiScopeProvenancePlan) (map[string]bool, error) {
-	keys := make([]string, 0, len(plan.Clients))
-	for _, callID := range plan.CallOrder {
-		if call := plan.Calls[callID]; call != nil {
-			keys = append(keys, call.Client.Key)
-		}
-	}
-	captures, err := controller.Capture(ctx, keys, []string{"server-state"})
-	if err != nil {
-		return nil, fmt.Errorf("capture Swift multi-scope provenance rebuild identities: %w", err)
-	}
-	if len(captures) != 1 {
-		return nil, fmt.Errorf("capture Swift multi-scope provenance rebuild identities returned %d captures, want 1", len(captures))
-	}
-	identities := make(map[string]bool, len(captures[0].StateFacts.Rebuilds))
-	for _, rebuild := range captures[0].StateFacts.Rebuilds {
-		identities[rebuild.RebuildID] = true
-	}
-	return identities, nil
-}
-
-// multiScopeProvenanceExerciseState removes the setup rebuilds so the observed
-// facts describe the authored steps.
-func multiScopeProvenanceExerciseState(facts scenarios.StateFacts, setupRebuilds map[string]bool) scenarios.StateFacts {
-	if len(setupRebuilds) == 0 {
-		return facts
-	}
-	retained := make([]scenarios.RebuildFact, 0, len(facts.Rebuilds))
-	for _, rebuild := range facts.Rebuilds {
-		if setupRebuilds[rebuild.RebuildID] {
-			continue
-		}
-		retained = append(retained, rebuild)
-	}
-	facts.Rebuilds = retained
-	count := uint64(len(retained))
-	facts.RebuildCount = &count
-	return facts
 }
 
 // multiScopeProvenanceClientProjection keeps the authored client families and
