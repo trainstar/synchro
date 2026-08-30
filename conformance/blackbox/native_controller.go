@@ -729,7 +729,16 @@ func selectNativeRuntimeTable(authored nativeAuthoredTable, runtime []nativeRunt
 		candidates = append(candidates, table)
 	}
 	if len(candidates) == 0 {
-		return nativeRuntimeManifestTable{}, fmt.Errorf("native controller has no runtime table for authored table %q", authored.TableID)
+		offered := make([]string, 0, len(runtime))
+		for _, table := range runtime {
+			entry := table.Name
+			if _, alreadyUsed := used[table.ID]; alreadyUsed {
+				entry += "(used)"
+			}
+			offered = append(offered, entry)
+		}
+		sort.Strings(offered)
+		return nativeRuntimeManifestTable{}, fmt.Errorf("native controller has no runtime table for authored table %q named %q with primary key %q; runtime offered %v", authored.TableID, authored.Name, authored.PrimaryKeyFieldID, offered)
 	}
 	sort.Slice(candidates, func(left, right int) bool { return candidates[left].Name < candidates[right].Name })
 	for _, candidate := range candidates {
