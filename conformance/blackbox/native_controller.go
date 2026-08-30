@@ -2553,6 +2553,25 @@ func (c *NativeController) resolveApplicationPushRecords(ctx context.Context, tr
 	}
 	transaction.RuntimeBatchID = runtimeBatchID
 	transaction.RuntimeMutationIDs = runtimeMutationIDs
+	// Record bindings are registered when a source transaction materializes. A
+	// scenario that accepts a push without materializing still needs them, or a
+	// primary-key alias for the pushed row has no runtime binding.
+	for _, event := range transaction.Events {
+		if event.Dependency != nil || event.After == nil {
+			continue
+		}
+		recordKey := nativeRecordKey(event.Table.AuthoredID, event.After.CanonicalWireJSON)
+		if _, bound := c.records[recordKey]; bound {
+			continue
+		}
+		c.records[recordKey] = &nativeRecordBinding{
+			Table:           event.Table,
+			RecordID:        event.RecordID,
+			RuntimeRecordID: event.RuntimeRecordID,
+			Image:           *event.After,
+			AuthoredScopes:  append([]string(nil), event.AuthoredScopes...),
+		}
+	}
 	return nil
 }
 
