@@ -6070,3 +6070,10 @@ func (executor *OperatorExecutor) SealedPushRequest(ctx context.Context, batchID
 	}
 	return sealed, nil
 }
+
+// DiagnosticSourceTables lists every independent source table a scenario may
+// write. A reset empties all of them, because a capture dependency
+// registration stays pending while its source table holds rows.
+func DiagnosticSourceTables() []string {
+	return append([]string(nil), diagnosticSourceTables...)
+}

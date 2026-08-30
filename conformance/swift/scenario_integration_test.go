@@ -194,7 +194,7 @@ func resetSwiftPerformanceServer(t *testing.T, ctx context.Context, harness *bla
 	// A capture dependency registration stays pending while its source table
 	// holds rows, so the replayed registrations never activate unless every
 	// diagnostic source a scenario writes is empty first.
-	for _, table := range []string{"cf_items", "cf_item_impacts"} {
+	for _, table := range blackbox.DiagnosticSourceTables() {
 		if err := harness.Source().ExecContext(ctx, "DELETE FROM "+table); err != nil {
 			t.Fatalf("clear Swift performance source table %s: %v", table, err)
 		}
