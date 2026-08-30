@@ -364,11 +364,73 @@ func swiftStateProjectionDifference(expected, actual scenarios.StateFacts) strin
 		{"rebuilds", expected.Rebuilds, actual.Rebuilds},
 		{"clients", expected.Clients, actual.Clients},
 	} {
-		if swiftProjectedFamilyDeclared(family.want) && !reflect.DeepEqual(family.want, family.got) {
-			return fmt.Sprintf("%s authored %s observed %s", family.name, boundedSwiftStateValue(family.want), boundedSwiftStateValue(family.got))
+		if !swiftProjectedFamilyDeclared(family.want) || reflect.DeepEqual(family.want, family.got) {
+			continue
 		}
+		// The observed client carries families the authored model never
+		// declares, so a whole-value comparison always reports the client
+		// family. Name the authored client field that differs instead.
+		if family.name == "clients" {
+			if detail := swiftClientProjectionDifference(expected.Clients, actual.Clients); detail != "" {
+				return detail
+			}
+			continue
+		}
+		return fmt.Sprintf("%s authored %s observed %s", family.name, boundedSwiftStateValue(family.want), boundedSwiftStateValue(family.got))
 	}
 	return "no projected family differs"
+}
+
+// swiftClientProjectionDifference names the first authored client field that
+// differs from its observed value. It mirrors the projection comparison, which
+// ignores every field the authored model leaves undeclared.
+func swiftClientProjectionDifference(expected, actual []scenarios.ClientDurabilityFact) string {
+	if len(expected) != len(actual) {
+		return fmt.Sprintf("client count authored %d observed %d", len(expected), len(actual))
+	}
+	for index := range expected {
+		want := expected[index]
+		got := actual[index]
+		identity := want.UserID + "/" + want.ClientID
+		if want.UserID != got.UserID || want.ClientID != got.ClientID {
+			return fmt.Sprintf("client identity authored %s observed %s/%s", identity, got.UserID, got.ClientID)
+		}
+		if want.CurrentSchema != nil && (got.CurrentSchema == nil || *want.CurrentSchema != *got.CurrentSchema) {
+			return fmt.Sprintf("%s current_schema authored %s observed %s", identity, boundedSwiftStateValue(want.CurrentSchema), boundedSwiftStateValue(got.CurrentSchema))
+		}
+		for _, count := range []struct {
+			name string
+			want *uint64
+			got  *uint64
+		}{
+			{"row_count", want.RowCount, got.RowCount},
+			{"provenance_count", want.ProvenanceCount, got.ProvenanceCount},
+			{"checkpoint_count", want.CheckpointCount, got.CheckpointCount},
+			{"queue_count", want.QueueCount, got.QueueCount},
+			{"outcome_count", want.OutcomeCount, got.OutcomeCount},
+			{"sealed_batch_count", want.SealedBatchCount, got.SealedBatchCount},
+			{"rebuild_attempt_count", want.RebuildAttemptCount, got.RebuildAttemptCount},
+		} {
+			if count.want != nil && (count.got == nil || *count.want != *count.got) {
+				return fmt.Sprintf("%s %s authored %s observed %s", identity, count.name, boundedSwiftStateValue(count.want), boundedSwiftStateValue(count.got))
+			}
+		}
+		for _, list := range []struct {
+			name string
+			want any
+			got  any
+		}{
+			{"provenance", want.Provenance, got.Provenance},
+			{"checkpoints", want.Checkpoints, got.Checkpoints},
+			{"queue", want.Queue, got.Queue},
+			{"outcomes", want.Outcomes, got.Outcomes},
+		} {
+			if swiftProjectedFamilyDeclared(list.want) && !reflect.DeepEqual(list.want, list.got) {
+				return fmt.Sprintf("%s %s authored %s observed %s", identity, list.name, boundedSwiftStateValue(list.want), boundedSwiftStateValue(list.got))
+			}
+		}
+	}
+	return ""
 }
 
 func swiftProjectedFamilyDeclared(value any) bool {

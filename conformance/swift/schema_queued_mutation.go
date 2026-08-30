@@ -133,7 +133,14 @@ func RunSchemaQueuedMutationScenario(ctx context.Context, scenario scenarios.Sce
 	if err != nil {
 		return SchemaQueuedMutationResult{}, err
 	}
-	if err := validateSwiftStateProjection(expected, clientState); err != nil {
+	// The authored schema hash is a corpus value. The client observes the
+	// hash the server published, so compare the authored client state against
+	// the runtime schema each authored alias resolves to.
+	runtimeExpected, err := swiftSchemaQueuedMutationRuntimeState(controller, scenario.NativeIdentityAliases, expected)
+	if err != nil {
+		return SchemaQueuedMutationResult{}, err
+	}
+	if err := validateSwiftStateProjection(runtimeExpected, clientState); err != nil {
 		return SchemaQueuedMutationResult{}, fmt.Errorf("Swift schema-queued-mutation client state differs from the authored model: %w", err)
 	}
 	serverCaptures, err := controller.Capture(ctx, []string{client.Key}, []string{"server-state"})
@@ -306,6 +313,82 @@ func schemaQueuedMutationStep(scenario scenarios.Scenario, id string) (scenarios
 		}
 	}
 	return scenarios.Step{}, false
+}
+
+// swiftSchemaQueuedMutationRuntimeState replaces each authored schema
+// reference in the expected client state with the runtime schema its alias
+// resolves to. The scenario declares both schema aliases for this
+// expectation, so an authored hash never matches an observed hash directly.
+func swiftSchemaQueuedMutationRuntimeState(controller *blackbox.NativeController, aliases []scenarios.NativeIdentityAlias, expected scenarios.StateFacts) (scenarios.StateFacts, error) {
+	schemaAliases := make([]scenarios.NativeIdentityAlias, 0, len(aliases))
+	for _, alias := range aliases {
+		if alias.Kind == "schema" || alias.Kind == "table" {
+			schemaAliases = append(schemaAliases, alias)
+		}
+	}
+	if len(schemaAliases) == 0 {
+		return scenarios.StateFacts{}, errors.New("Swift schema-queued-mutation scenario declares no schema alias")
+	}
+	values, err := controller.IdentityValues(schemaAliases)
+	if err != nil {
+		return scenarios.StateFacts{}, fmt.Errorf("resolve Swift schema-queued-mutation schema identity: %w", err)
+	}
+	authoredByAlias := make(map[string]scenarios.NativeIdentityAlias, len(schemaAliases))
+	for _, alias := range schemaAliases {
+		authoredByAlias[alias.Alias] = alias
+	}
+	runtime := make(map[scenarios.SchemaFact]scenarios.SchemaFact, len(values))
+	// The queue records the authored table identifier. The client stores the
+	// runtime table the authored table binds to, so resolve it the same way.
+	runtimeTables := make(map[string]string, len(values))
+	for _, value := range values {
+		alias, found := authoredByAlias[value.Alias]
+		if !found {
+			continue
+		}
+		if value.Kind == "table" {
+			// The queue records the runtime table identifier, not the runtime
+			// table name. ApplicationIdentifier carries the name, which the
+			// provenance family records instead.
+			var authoredTable, runtimeTable string
+			if json.Unmarshal(alias.Value, &authoredTable) != nil || authoredTable == "" ||
+				json.Unmarshal(value.RuntimeValue, &runtimeTable) != nil || runtimeTable == "" {
+				return scenarios.StateFacts{}, fmt.Errorf("Swift schema-queued-mutation table alias %q has no valid runtime value", value.Alias)
+			}
+			runtimeTables[authoredTable] = runtimeTable
+			continue
+		}
+		var authored, resolved scenarios.SchemaFact
+		if json.Unmarshal(alias.Value, &authored) != nil || json.Unmarshal(value.RuntimeValue, &resolved) != nil ||
+			resolved.Version == 0 || resolved.Hash == "" {
+			return scenarios.StateFacts{}, fmt.Errorf("Swift schema-queued-mutation schema alias %q has no valid runtime value", value.Alias)
+		}
+		runtime[authored] = resolved
+	}
+	projected := scenarios.CloneStateFacts(expected)
+	for clientIndex := range projected.Clients {
+		client := &projected.Clients[clientIndex]
+		if client.CurrentSchema != nil {
+			resolved, found := runtime[*client.CurrentSchema]
+			if !found {
+				return scenarios.StateFacts{}, fmt.Errorf("Swift schema-queued-mutation authored schema %d has no alias", client.CurrentSchema.Version)
+			}
+			client.CurrentSchema = &resolved
+		}
+		for queueIndex := range client.Queue {
+			resolved, found := runtime[client.Queue[queueIndex].AuthoredSchema]
+			if !found {
+				return scenarios.StateFacts{}, fmt.Errorf("Swift schema-queued-mutation authored queue schema %d has no alias", client.Queue[queueIndex].AuthoredSchema.Version)
+			}
+			client.Queue[queueIndex].AuthoredSchema = resolved
+			runtimeTable, bound := runtimeTables[client.Queue[queueIndex].TableID]
+			if !bound {
+				return scenarios.StateFacts{}, fmt.Errorf("Swift schema-queued-mutation authored queue table %q has no alias", client.Queue[queueIndex].TableID)
+			}
+			client.Queue[queueIndex].TableID = runtimeTable
+		}
+	}
+	return projected, nil
 }
 
 func resolveSchemaQueuedMutationIdentities(controller *blackbox.NativeController, aliases []scenarios.NativeIdentityAlias, reset SynchronizationResult) ([]blackbox.NativeIdentityResolution, error) {
