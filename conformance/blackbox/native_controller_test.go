@@ -405,6 +405,36 @@ func TestSchemaTransitionColumnValidation(t *testing.T) {
 	}
 }
 
+func TestPostgresTypeForAuthoredField(t *testing.T) {
+	tests := []struct {
+		authored string
+		postgres string
+	}{
+		{authored: "string", postgres: "TEXT"},
+		{authored: "int", postgres: "INTEGER"},
+		{authored: "int64", postgres: "BIGINT"},
+		{authored: "decimal", postgres: "NUMERIC"},
+		{authored: "float", postgres: "DOUBLE PRECISION"},
+		{authored: "boolean", postgres: "BOOLEAN"},
+		{authored: "datetime", postgres: "TIMESTAMPTZ"},
+		{authored: "date", postgres: "DATE"},
+		{authored: "time", postgres: "TIME"},
+		{authored: "json", postgres: "JSONB"},
+		{authored: "bytes", postgres: "BYTEA"},
+	}
+	for _, test := range tests {
+		t.Run(test.authored, func(t *testing.T) {
+			got, err := postgresTypeForAuthoredField(test.authored)
+			if err != nil || got != test.postgres {
+				t.Fatalf("postgresTypeForAuthoredField(%q) = %q, %v, want %q", test.authored, got, err, test.postgres)
+			}
+		})
+	}
+	if _, err := postgresTypeForAuthoredField("unknown"); err == nil || !strings.Contains(err.Error(), "unsupported for PostgreSQL") {
+		t.Fatalf("unsupported authored type error = %v", err)
+	}
+}
+
 func TestNativeControllerBindsAcceptedApplicationPushToWALIdentity(t *testing.T) {
 	table := nativeTableBinding{
 		AuthoredID:       "items",

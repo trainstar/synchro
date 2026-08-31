@@ -349,7 +349,23 @@ func validateKotlinSchemaQueuedMutationQueue(controller *blackbox.NativeControll
 	}
 	want, got := expected.Clients[0].Queue, observed.Clients[0].Queue
 	if len(want) != len(got) {
-		return fmt.Errorf("Kotlin Android schema-queued-mutation queue entries observed %d, expected %d", len(got), len(want))
+		// A queue length alone cannot show where the mutation went. Name the
+		// neighbouring durable counts, which separate a mutation the client
+		// never queued from one it pushed, sealed, or rejected.
+		count := func(value *uint64) string {
+			if value == nil {
+				return "none"
+			}
+			return fmt.Sprintf("%d", *value)
+		}
+		client := observed.Clients[0]
+		return fmt.Errorf(
+			"Kotlin Android schema-queued-mutation queue entries observed %d, expected %d; "+
+				"queue count %s, sealed batches %s, outcomes %s, rows %s, observed outcome records %d",
+			len(got), len(want),
+			count(client.QueueCount), count(client.SealedBatchCount), count(client.OutcomeCount),
+			count(client.RowCount), len(client.Outcomes),
+		)
 	}
 	resolvable := make([]scenarios.NativeIdentityAlias, 0, len(aliases))
 	for _, alias := range aliases {

@@ -1789,11 +1789,29 @@ func (c *NativeController) transitionNativeSyncedTable(ctx context.Context, payl
 	if !found || current.AuthoredID != payload.Tables[0].TableID {
 		return nativeTableBinding{}, errors.New("native synced-table transition binding is absent")
 	}
+	runtime, _, err := c.loadRuntimeManifest(ctx)
+	if err != nil {
+		return nativeTableBinding{}, errors.New("load native synced-table transition runtime schema failed")
+	}
+	var runtimeTable *nativeRuntimeManifestTable
+	for index := range runtime.Manifest.Tables {
+		if runtime.Manifest.Tables[index].ID == current.RuntimeID {
+			runtimeTable = &runtime.Manifest.Tables[index]
+			break
+		}
+	}
+	if runtimeTable == nil || runtimeTable.Name != current.RuntimeName {
+		return nativeTableBinding{}, errors.New("native synced-table transition runtime table is absent")
+	}
+	runtimeFields := make(map[string]nativeRuntimeManifestField, len(runtimeTable.Fields))
+	for _, field := range runtimeTable.Fields {
+		runtimeFields[field.ID] = field
+	}
 	nextFields := make(map[string]nativeAuthoredField, len(payload.Tables[0].Fields))
 	for _, field := range payload.Tables[0].Fields {
 		nextFields[field.FieldID] = field
 	}
-	var removedPhysical, addedPhysical, removedAuthored string
+	var removedPhysical, addedPhysical, changedPhysical, changedType, removedAuthored string
 	for authoredField, physicalField := range current.FieldNames {
 		if _, retained := nextFields[authoredField]; !retained {
 			if removedPhysical != "" {
@@ -1804,20 +1822,34 @@ func (c *NativeController) transitionNativeSyncedTable(ctx context.Context, payl
 		}
 	}
 	for _, field := range payload.Tables[0].Fields {
-		if _, retained := current.Fields[field.FieldID]; retained {
+		runtimeFieldID, retained := current.Fields[field.FieldID]
+		if !retained {
+			if addedPhysical != "" {
+				return nativeTableBinding{}, errors.New("native synced-table transition adds more than one field")
+			}
+			addedPhysical = field.Name
 			continue
 		}
-		if addedPhysical != "" {
-			return nativeTableBinding{}, errors.New("native synced-table transition adds more than one field")
+		runtimeField, found := runtimeFields[runtimeFieldID]
+		if !found || runtimeField.Name == "" || runtimeField.Type == "" {
+			return nativeTableBinding{}, errors.New("native synced-table transition runtime field is absent")
 		}
-		addedPhysical = field.Name
+		if field.Type != runtimeField.Type {
+			if changedPhysical != "" {
+				return nativeTableBinding{}, errors.New("native synced-table transition changes more than one field type")
+			}
+			changedPhysical = runtimeField.Name
+			changedType = field.Type
+		}
 	}
-	if (removedPhysical == "" && addedPhysical == "") || removedPhysical == addedPhysical ||
+	if (removedPhysical == "" && addedPhysical == "" && changedPhysical == "") ||
+		(removedPhysical != "" && removedPhysical == addedPhysical) ||
 		(removedPhysical != "" && !validSchemaTransitionColumn(removedPhysical)) ||
-		(addedPhysical != "" && !validSchemaTransitionColumn(addedPhysical)) {
+		(addedPhysical != "" && !validSchemaTransitionColumn(addedPhysical)) ||
+		(changedPhysical != "" && (!validSchemaTransitionColumn(changedPhysical) || changedPhysical == removedPhysical || changedPhysical == addedPhysical)) {
 		return nativeTableBinding{}, errors.New("native synced-table transition fields are invalid")
 	}
-	if err := c.harness.Operator().TransitionSyncedTableField(ctx, current.RuntimeName, removedPhysical, addedPhysical); err != nil {
+	if err := c.harness.Operator().TransitionSyncedTableField(ctx, current.RuntimeName, removedPhysical, addedPhysical, changedPhysical, changedType); err != nil {
 		return nativeTableBinding{}, err
 	}
 	c.retireNativeSchemaField(current.AuthoredID, removedAuthored, current.Fields[removedAuthored])

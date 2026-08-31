@@ -111,18 +111,58 @@ type syncedTableRegistration struct {
 	maxScopeFanout           int
 }
 
+func postgresTypeForAuthoredField(fieldType string) (string, error) {
+	switch fieldType {
+	case "string":
+		return "TEXT", nil
+	case "int":
+		return "INTEGER", nil
+	case "int64":
+		return "BIGINT", nil
+	case "decimal":
+		return "NUMERIC", nil
+	case "float":
+		return "DOUBLE PRECISION", nil
+	case "boolean":
+		return "BOOLEAN", nil
+	case "datetime":
+		return "TIMESTAMPTZ", nil
+	case "date":
+		return "DATE", nil
+	case "time":
+		return "TIME", nil
+	case "json":
+		return "JSONB", nil
+	case "bytes":
+		return "BYTEA", nil
+	default:
+		return "", fmt.Errorf("authored field type %q is unsupported for PostgreSQL", fieldType)
+	}
+}
+
 // TransitionSyncedTableField changes one synced table field and preserves its
 // active registration settings in one source transaction.
 func (executor *OperatorExecutor) TransitionSyncedTableField(
-	ctx context.Context, relation, removed, added string,
+	ctx context.Context, relation, removed, added, typeChanged, authoredType string,
 ) error {
 	if executor == nil || executor.harness == nil || !executor.harness.sourceReady || ctx == nil || relation == "" {
 		return errors.New("operator executor is unavailable")
 	}
-	if (removed == "" && added == "") || removed == added ||
+	if (removed == "" && added == "" && typeChanged == "") ||
+		(removed != "" && removed == added) ||
 		(removed != "" && !validSchemaTransitionColumn(removed)) ||
-		(added != "" && !validSchemaTransitionColumn(added)) {
+		(added != "" && !validSchemaTransitionColumn(added)) ||
+		(typeChanged != "" && (!validSchemaTransitionColumn(typeChanged) || typeChanged == removed || typeChanged == added)) ||
+		(typeChanged == "" && authoredType != "") {
 		return errors.New("schema transition fields are invalid")
+	}
+	postgresType := ""
+	if typeChanged != "" {
+		var err error
+		postgresType, err = postgresTypeForAuthoredField(authoredType)
+		if err != nil {
+			return err
+		}
 	}
 	database, err := executor.harness.openDatabase(ctx, executor.harness.names.Database, executor.harness.env.Admin, false)
 	if err != nil {
@@ -185,15 +225,25 @@ func (executor *OperatorExecutor) TransitionSyncedTableField(
 		return errors.New("read active synced table registration failed")
 	}
 
+	physicalRelation := quoteIdentifier(registration.physicalSchema) + "." + quoteIdentifier(registration.physicalRelation)
 	if removed != "" {
-		if _, err := transaction.ExecContext(ctx, "ALTER TABLE "+quoteIdentifier(registration.physicalSchema)+"."+quoteIdentifier(registration.physicalRelation)+" DROP COLUMN "+quoteIdentifier(removed)); err != nil {
+		if _, err := transaction.ExecContext(ctx, "ALTER TABLE "+physicalRelation+" DROP COLUMN "+quoteIdentifier(removed)); err != nil {
 			return errors.New("drop synced schema transition field failed")
 		}
 	}
 	if added != "" {
 		// A class 2 addition must accept rows from the earlier schema.
-		if _, err := transaction.ExecContext(ctx, "ALTER TABLE "+quoteIdentifier(registration.physicalSchema)+"."+quoteIdentifier(registration.physicalRelation)+" ADD COLUMN "+quoteIdentifier(added)+" TEXT NULL"); err != nil {
+		if _, err := transaction.ExecContext(ctx, "ALTER TABLE "+physicalRelation+" ADD COLUMN "+quoteIdentifier(added)+" TEXT NULL"); err != nil {
 			return errors.New("add synced schema transition field failed")
+		}
+	}
+	if typeChanged != "" {
+		// USING keeps the conversion explicit when PostgreSQL cannot infer it.
+		statement := "ALTER TABLE " + physicalRelation + " ALTER COLUMN " + quoteIdentifier(typeChanged) + " TYPE " + postgresType + " USING " + quoteIdentifier(typeChanged) + "::" + postgresType
+		if _, err := transaction.ExecContext(ctx, statement); err != nil {
+			// PostgreSQL reports why it refused the cast, and a row it cannot
+			// convert is the likely reason. Keep that cause.
+			return fmt.Errorf("change synced schema transition field type failed: %w", err)
 		}
 	}
 
@@ -214,7 +264,6 @@ func (executor *OperatorExecutor) TransitionSyncedTableField(
 		return errors.New("encode synced schema transition columns failed")
 	}
 	membershipFunction := quoteIdentifier(registration.membershipFunctionSchema) + "." + quoteIdentifier(registration.membershipFunctionName)
-	physicalRelation := quoteIdentifier(registration.physicalSchema) + "." + quoteIdentifier(registration.physicalRelation)
 	if _, err := transaction.ExecContext(ctx, `SELECT synchro.synchro_register_table(
 		$1, $2, $3, $4, $5, $6, $7,
 		ARRAY(SELECT jsonb_array_elements_text($8::jsonb)),
