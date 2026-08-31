@@ -6,6 +6,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -279,6 +280,10 @@ func runSwiftSeededEmptyStartup(t *testing.T) {
 	}
 }
 
+// swiftPerformanceSuiteReset resets the server once, before the first
+// scenario of this suite runs.
+var swiftPerformanceSuiteReset sync.Once
+
 func newSwiftPerformanceFixture(t *testing.T, scenarioPath string, pullPageSize int) (context.Context, scenarios.Scenario, *blackbox.Harness, *blackbox.NativeController, *Platform) {
 	t.Helper()
 	if !*warmConnectProvision || !*warmConnectInstall {
@@ -305,6 +310,15 @@ func newSwiftPerformanceFixture(t *testing.T, scenarioPath string, pullPageSize 
 		_ = harness.Close(closeContext)
 		t.Fatalf("create Swift native controller: %v", err)
 	}
+	// Each scenario resets the server when it finishes, so only the first
+	// scenario can inherit state. A target that runs before this suite, such as
+	// the warm-connect target, leaves its own state on the same instance, so the
+	// suite starts from a known state rather than that inherited one.
+	swiftPerformanceSuiteReset.Do(func() {
+		resetContext, cancelReset := context.WithTimeout(context.Background(), 5*time.Minute)
+		defer cancelReset()
+		resetSwiftPerformanceServer(t, resetContext, harness)
+	})
 	t.Cleanup(func() {
 		closeContext, closeCancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer closeCancel()
