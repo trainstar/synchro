@@ -32,6 +32,7 @@ import type {
 } from './types';
 import {
   assertBoundedJSON,
+  MAXIMUM_RESULT_BYTES,
   isCallID,
   isLifecycleOperation,
   isSynchronizeMethod,
@@ -570,11 +571,14 @@ export class PublicConformanceRunner {
 
   private boundedResult(result: ConformanceActionResult): ConformanceActionResult {
     try {
-      assertBoundedJSON(result, 64 * 1024);
+      // The Kotlin runner bounds a response at one mebibyte, and the response
+      // envelope carries the same bound. A smaller inner bound rejected a
+      // capture that both other surfaces accept.
+      assertBoundedJSON(result, MAXIMUM_RESULT_BYTES);
       return result;
     } catch (error) {
       // Name the bound. A capture that outgrows it reads as a generic failure.
-      throw new ConformanceCommandError('execution_failed', new Error(`command result exceeds 65536 bytes: ${describeBoundFailure(error)}`));
+      throw new ConformanceCommandError('execution_failed', new Error(`command result exceeds its byte bound: ${describeBoundFailure(error)}`));
     }
   }
 }
