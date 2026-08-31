@@ -117,12 +117,13 @@ internal object SynchroMeta {
 
     @JvmSynthetic
     internal fun set(db: SQLiteDatabase, key: MetaKey, value: String) {
-        db.execSQL(
-            """
-            INSERT INTO _synchro_meta (key, value) VALUES (?, ?)
-            ON CONFLICT (key) DO UPDATE SET value = excluded.value
-            """.trimIndent(),
-            arrayOf(key.key, value)
+        executeUpsert(
+            db,
+            table = "_synchro_meta",
+            keyColumns = listOf("key"),
+            keyValues = listOf(key.key),
+            dataColumns = listOf("value"),
+            dataValues = listOf(value),
         )
     }
 
@@ -496,16 +497,13 @@ internal object SynchroMeta {
     ) {
         val effectiveGeneration = generation ?: getScopeGeneration(db, scopeId)
         val effectiveLocalChecksum = localChecksum ?: getScopeLocalChecksum(db, scopeId)
-        db.execSQL(
-            """
-            INSERT INTO _synchro_scopes (scope_id, cursor, checksum, generation, local_checksum) VALUES (?, ?, ?, ?, ?)
-            ON CONFLICT (scope_id) DO UPDATE SET
-                cursor = excluded.cursor,
-                checksum = excluded.checksum,
-                generation = excluded.generation,
-                local_checksum = excluded.local_checksum
-            """.trimIndent(),
-            arrayOf(scopeId, cursor, checksum, effectiveGeneration.toString(), effectiveLocalChecksum)
+        executeUpsert(
+            db,
+            table = "_synchro_scopes",
+            keyColumns = listOf("scope_id"),
+            keyValues = listOf(scopeId),
+            dataColumns = listOf("cursor", "checksum", "generation", "local_checksum"),
+            dataValues = listOf(cursor, checksum, effectiveGeneration.toString(), effectiveLocalChecksum),
         )
     }
 
@@ -694,16 +692,17 @@ internal object SynchroMeta {
         checksum: String,
         generation: Long
     ) {
-        executeScopeRowUpdate(
+        val changed = executeUpsert(
             db,
-            """
-            INSERT INTO _synchro_scope_rows (scope_id, table_name, record_id, checksum, generation) VALUES (?, ?, ?, ?, ?)
-            ON CONFLICT (scope_id, table_name, record_id) DO UPDATE SET
-                checksum = excluded.checksum,
-                generation = excluded.generation
-            """.trimIndent(),
-            arrayOf(scopeId, tableName, recordId, checksum, generation),
+            table = "_synchro_scope_rows",
+            keyColumns = listOf("scope_id", "table_name", "record_id"),
+            keyValues = listOf(scopeId, tableName, recordId),
+            dataColumns = listOf("checksum", "generation"),
+            dataValues = listOf(checksum, generation),
         )
+        // The upsert reports one logical row change, and the recorder
+        // accumulates, so the count is recorded once rather than per statement.
+        ProvenanceMaintenanceWork.record(db, changed)
     }
 
     @JvmSynthetic
@@ -873,15 +872,13 @@ internal object SynchroMeta {
         rowChecksum: ChecksumObject?,
     ) {
         val checksumJSON = rowChecksum?.let { kotlinx.serialization.json.Json.encodeToString(ChecksumObject.serializer(), it) }
-        db.execSQL(
-            """
-            INSERT INTO _synchro_row_versions (table_name, record_id, server_version, row_checksum)
-            VALUES (?, ?, ?, ?)
-            ON CONFLICT (table_name, record_id) DO UPDATE SET
-                server_version = excluded.server_version,
-                row_checksum = excluded.row_checksum
-            """.trimIndent(),
-            arrayOf(tableName, recordId, serverVersion, checksumJSON)
+        executeUpsert(
+            db,
+            table = "_synchro_row_versions",
+            keyColumns = listOf("table_name", "record_id"),
+            keyValues = listOf(tableName, recordId),
+            dataColumns = listOf("server_version", "row_checksum"),
+            dataValues = listOf(serverVersion, checksumJSON),
         )
     }
 
@@ -1084,24 +1081,19 @@ internal object SynchroMeta {
 
     @JvmSynthetic
     internal fun upsertRebuildAttempt(db: SQLiteDatabase, attempt: LocalRebuildAttempt) {
-        db.execSQL(
-            """
-            INSERT INTO _synchro_rebuild_attempts
-                (scope_id, rebuild_id, client_generation, schema_version, schema_hash, generation, cursor, page_limit)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT (scope_id) DO UPDATE SET
-                rebuild_id = excluded.rebuild_id,
-                client_generation = excluded.client_generation,
-                schema_version = excluded.schema_version,
-                schema_hash = excluded.schema_hash,
-                generation = excluded.generation,
-                cursor = excluded.cursor,
-                page_limit = excluded.page_limit
-            """.trimIndent(),
-            arrayOf(
-                attempt.scopeID, attempt.rebuildID, attempt.clientGeneration, attempt.schemaVersion,
+        executeUpsert(
+            db,
+            table = "_synchro_rebuild_attempts",
+            keyColumns = listOf("scope_id"),
+            keyValues = listOf(attempt.scopeID),
+            dataColumns = listOf(
+                "rebuild_id", "client_generation", "schema_version", "schema_hash",
+                "generation", "cursor", "page_limit",
+            ),
+            dataValues = listOf(
+                attempt.rebuildID, attempt.clientGeneration, attempt.schemaVersion,
                 attempt.schemaHash, attempt.generation, attempt.cursor, attempt.pageLimit,
-            )
+            ),
         )
     }
 

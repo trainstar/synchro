@@ -651,9 +651,8 @@ internal class SynchroDatabase private constructor(context: Context, dbPath: Str
         }
         db.execSQL(
             """
-            INSERT INTO _synchro_schema_archives (schema_version, schema_hash, manifest_json, created_at)
+            INSERT OR IGNORE INTO _synchro_schema_archives (schema_version, schema_hash, manifest_json, created_at)
             VALUES (?, ?, ?, substr(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), 1, 23) || '000Z')
-            ON CONFLICT (schema_version, schema_hash) DO NOTHING
             """.trimIndent(),
             arrayOf(schemaVersion, schemaHash, encoded),
         )

@@ -793,7 +793,13 @@ internal class PullProcessor(private val database: SynchroDatabase) {
         tablesByName: Map<String, LocalSchemaTable>,
     ) {
         val scopeRows = SynchroMeta.getScopeRows(db, scopeId)
-        SynchroMeta.deleteAllRebuildPageReceipts(db, scopeId)
+        // An active rebuild loses its pages with its scope. A completed rebuild
+        // keeps its page receipts, because the receipt records that the rebuild
+        // happened rather than that the scope is still assigned. A later
+        // rebuild of a reassigned scope clears that scope's receipts first.
+        if (SynchroMeta.getRebuildAttempt(db, scopeId) != null) {
+            SynchroMeta.deleteAllRebuildPageReceipts(db, scopeId)
+        }
         SynchroMeta.deleteRebuildAttempt(db, scopeId)
         clearRebuildingBackoffForScope(db, scopeId)
         SynchroMeta.deleteScopeRows(db, scopeId)
@@ -855,14 +861,17 @@ internal class PullProcessor(private val database: SynchroDatabase) {
         val columns = schema.columns.map { it.name }
         val dbValues = buildDatabaseValues(columns, pkCol, recordId, data)
 
-        val quotedColumns = columns.joinToString(", ") { SQLiteHelpers.quoteIdentifier(it) }
-        val placeholders = SQLiteHelpers.placeholders(columns.size)
-        val updateClauses = columns
-            .filter { it != pkCol }
-            .joinToString(", ") { "${SQLiteHelpers.quoteIdentifier(it)} = excluded.${SQLiteHelpers.quoteIdentifier(it)}" }
-
-        val sql = "INSERT INTO $quoted ($quotedColumns) VALUES ($placeholders) ON CONFLICT ($quotedPK) DO UPDATE SET $updateClauses"
-        executeWithTypedBindings(db, sql, dbValues)
+        val pkIndex = columns.indexOf(pkCol)
+        if (pkIndex < 0) throw SynchroError.InvalidResponse("local table omits its primary key column")
+        val dataIndexes = columns.indices.filter { it != pkIndex }
+        executeUpsert(
+            db = db,
+            table = quoted,
+            keyColumns = listOf(quotedPK),
+            keyValues = listOf(dbValues[pkIndex]),
+            dataColumns = dataIndexes.map { SQLiteHelpers.quoteIdentifier(columns[it]) },
+            dataValues = dataIndexes.map(dbValues::get),
+        )
     }
 
     private fun buildDatabaseValues(
@@ -1212,13 +1221,63 @@ private const val BASE64_URL_CHARACTERS = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijk
  * null, Long, Double, String, ByteArray, and Boolean values.
  */
 internal fun executeWithTypedBindings(db: SQLiteDatabase, sql: String, values: List<Any?>) {
+    executeChangeCount(db, sql, values)
+}
+
+/** Executes a statement as `executeWithTypedBindings` does and reports the changed-row count. */
+internal fun executeChangeCount(db: SQLiteDatabase, sql: String, values: List<Any?>): Int {
     val stmt = db.compileStatement(sql)
     try {
         bindTypedValues(stmt, values)
-        stmt.executeUpdateDelete()
+        return stmt.executeUpdateDelete()
     } finally {
         stmt.close()
     }
+}
+
+/**
+ * Applies an upsert with syntax that every supported Android version accepts.
+ * SQLite adds UPSERT in 3.24 and Android API 24 ships SQLite 3.9, so
+ * `ON CONFLICT ... DO UPDATE` fails on the minimum supported cell.
+ *
+ * The portable form updates the conflicting row first and inserts only when no
+ * row matched. `INSERT OR REPLACE` is not an equivalent, because it deletes the
+ * existing row, which fires change-capture delete triggers and discards every
+ * column the statement does not name.
+ *
+ * Identifiers arrive already quoted. The result is the changed-row count.
+ */
+internal fun executeUpsert(
+    db: SQLiteDatabase,
+    table: String,
+    keyColumns: List<String>,
+    keyValues: List<Any?>,
+    dataColumns: List<String>,
+    dataValues: List<Any?>,
+): Int {
+    require(keyColumns.isNotEmpty()) { "an upsert requires at least one key column" }
+    require(keyColumns.size == keyValues.size) { "upsert key column and value counts differ" }
+    require(dataColumns.size == dataValues.size) { "upsert data column and value counts differ" }
+    if (dataColumns.isNotEmpty()) {
+        val assignments = dataColumns.joinToString(", ") { "$it = ?" }
+        val predicate = keyColumns.joinToString(" AND ") { "$it = ?" }
+        val updated = executeChangeCount(
+            db,
+            "UPDATE $table SET $assignments WHERE $predicate",
+            dataValues + keyValues,
+        )
+        if (updated > 0) return updated
+    }
+    val columns = keyColumns + dataColumns
+    // Every column is a key column, so an existing row already holds the
+    // intended state and the insert yields to it.
+    val verb = if (dataColumns.isEmpty()) "INSERT OR IGNORE" else "INSERT"
+    return executeChangeCount(
+        db,
+        "$verb INTO $table (${columns.joinToString(", ")}) " +
+            "VALUES (${SQLiteHelpers.placeholders(columns.size)})",
+        keyValues + dataValues,
+    )
 }
 
 internal fun bindTypedValues(stmt: SQLiteProgram, values: List<Any?>) {

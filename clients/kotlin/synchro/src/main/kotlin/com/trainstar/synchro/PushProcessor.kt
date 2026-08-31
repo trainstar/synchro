@@ -271,9 +271,8 @@ internal class PushProcessor(
         requireExactlyOneChange(db, "legacy sealed push schema repair was not durable")
         db.execSQL(
             """
-            INSERT INTO _synchro_schema_archives (schema_version, schema_hash, manifest_json, created_at)
+            INSERT OR IGNORE INTO _synchro_schema_archives (schema_version, schema_hash, manifest_json, created_at)
             VALUES (?, ?, ?, substr(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), 1, 23) || '000Z')
-            ON CONFLICT (schema_version, schema_hash) DO NOTHING
             """.trimIndent(),
             arrayOf(request.schema.version, request.schema.hash, encoded),
         )
@@ -1220,17 +1219,17 @@ internal class PushProcessor(
         val relation = SQLiteHelpers.quoteIdentifier(table.tableName)
         val quotedPK = SQLiteHelpers.quoteIdentifier(pkColumn)
         val columns = projection.values.map { it.first.name }
-        val quotedColumns = columns.joinToString(", ") { SQLiteHelpers.quoteIdentifier(it) }
-        val updates = projection.values.map { it.first.name }.filter { it != pkColumn }.joinToString(", ") { name ->
-            val quoted = SQLiteHelpers.quoteIdentifier(name)
-            "$quoted = excluded.$quoted"
-        }
-        val action = if (updates.isEmpty()) "DO NOTHING" else "DO UPDATE SET $updates"
         val values = projection.values.map { (column, element) -> databaseValue(element, column) }
-        executeWithTypedBindings(
-            db,
-            "INSERT INTO $relation ($quotedColumns) VALUES (${SQLiteHelpers.placeholders(columns.size)}) ON CONFLICT ($quotedPK) $action",
-            values,
+        val pkIndex = columns.indexOf(pkColumn)
+        if (pkIndex < 0) throw SynchroError.InvalidResponse("projection omits the local primary key")
+        val dataIndexes = columns.indices.filter { it != pkIndex }
+        executeUpsert(
+            db = db,
+            table = relation,
+            keyColumns = listOf(quotedPK),
+            keyValues = listOf(values[pkIndex]),
+            dataColumns = dataIndexes.map { SQLiteHelpers.quoteIdentifier(columns[it]) },
+            dataValues = dataIndexes.map(values::get),
         )
     }
 

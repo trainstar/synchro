@@ -61,20 +61,16 @@ internal object DurableBackoffStore {
             attemptCount = attemptCount,
             nextRetryAtMs = nextRetryAtMs,
         )
-        db.execSQL(
-            """
-            INSERT INTO _synchro_backoff (
-                singleton, resume_state, work_identity, retry_classification,
-                attempt_count, next_retry_at_ms
-            ) VALUES (1, ?, ?, ?, ?, ?)
-            ON CONFLICT (singleton) DO UPDATE SET
-                resume_state = excluded.resume_state,
-                work_identity = excluded.work_identity,
-                retry_classification = excluded.retry_classification,
-                attempt_count = excluded.attempt_count,
-                next_retry_at_ms = excluded.next_retry_at_ms
-            """.trimIndent(),
-            arrayOf(
+        executeUpsert(
+            db,
+            table = "_synchro_backoff",
+            keyColumns = listOf("singleton"),
+            keyValues = listOf(1L),
+            dataColumns = listOf(
+                "resume_state", "work_identity", "retry_classification",
+                "attempt_count", "next_retry_at_ms",
+            ),
+            dataValues = listOf(
                 record.resumeState,
                 record.workIdentity,
                 record.retryClassification,
