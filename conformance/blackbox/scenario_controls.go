@@ -227,8 +227,11 @@ func (executor *OperatorExecutor) TransitionSyncedTableField(
 		registration.updatedAtColumn,
 		registration.deletedAtColumn,
 		registration.pushPolicy,
-		string(syncColumnsValue),
+		// synchro_register_table takes the excluded columns before the synced
+		// columns. Reversing them excludes the primary key and registers no
+		// synced column.
 		string(excludeColumnsValue),
+		string(syncColumnsValue),
 		registration.maxScopeFanout,
 	); err != nil {
 		// The extension reports why it rejected the registration. Dropping that

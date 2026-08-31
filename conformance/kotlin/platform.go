@@ -676,7 +676,11 @@ func (p *Platform) openClient(ctx context.Context, client *platformClient, seedN
 	if result.ProvenanceMaintenanceWorkCursor == nil || *result.ProvenanceMaintenanceWorkCursor < 0 {
 		return Result{}, errors.New("Kotlin Android open did not return a valid maintenance cursor")
 	}
-	if client.processID != "" && *result.ProvenanceMaintenanceWorkCursor < client.maintenanceCursor {
+	// The cursor counts maintenance work for one open database instance, so a
+	// relaunch starts it again. Compare it only inside one process, where a
+	// backward move is a real defect.
+	if client.processID != "" && result.ProcessID == client.processID &&
+		*result.ProvenanceMaintenanceWorkCursor < client.maintenanceCursor {
 		return Result{}, errors.New("Kotlin Android open moved the maintenance cursor backward")
 	}
 	client.processID = result.ProcessID
