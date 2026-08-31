@@ -285,7 +285,7 @@ func runSchemaCheckPublicStep(ctx context.Context, scenario scenarios.Scenario, 
 	if err != nil {
 		return SynchronizationResult{}, fmt.Errorf("run Swift schema-check step %s: %w", stepID, err)
 	}
-	if err := validateSchemaCheckPublicCall(scenario, step, call, cold); err != nil {
+	if err := validateSchemaCheckPublicCall(ctx, platform, client, scenario, step, call, cold); err != nil {
 		return SynchronizationResult{}, err
 	}
 	if err := runSchemaCheckLifecycleBoundaries(ctx, scenario, step, client, platform, completedBoundaries); err != nil {
@@ -346,7 +346,7 @@ func runSchemaCheckLifecycleBoundaries(ctx context.Context, scenario scenarios.S
 	return nil
 }
 
-func validateSchemaCheckPublicCall(scenario scenarios.Scenario, step scenarios.Step, call SynchronizationResult, cold bool) error {
+func validateSchemaCheckPublicCall(ctx context.Context, platform *Platform, client Client, scenario scenarios.Scenario, step scenarios.Step, call SynchronizationResult, cold bool) error {
 	wire, err := schemaCheckWireExpectation(scenario, step.ID)
 	if err != nil {
 		return err
@@ -361,7 +361,34 @@ func validateSchemaCheckPublicCall(scenario scenarios.Scenario, step scenarios.S
 			}
 			outcomes = append(outcomes, entry)
 		}
-		return fmt.Errorf("Swift schema-check step %s completed %q, want %q, observations %v", step.ID, call.Completion, wantCompletion, outcomes)
+		// A completion alone cannot name the failure. Report the disposition and
+		// error code the client recorded for each step it ran.
+		dispositions := make([]string, 0, len(call.Steps))
+		for _, observed := range call.Steps {
+			entry := observed.Disposition
+			if observed.ErrorCode != nil {
+				entry += ":" + *observed.ErrorCode
+			}
+			dispositions = append(dispositions, entry)
+		}
+		snapshot, captureErr := platform.captureSnapshot(ctx, client)
+		if captureErr != nil {
+			return fmt.Errorf(
+				"Swift schema-check step %s completed %q, want %q, observations %v, dispositions %v; capture failure: %v",
+				step.ID, call.Completion, wantCompletion, outcomes, dispositions, captureErr,
+			)
+		}
+		if snapshot.Failure != nil {
+			return fmt.Errorf(
+				"Swift schema-check step %s completed %q, want %q, observations %v, dispositions %v; failure operation %q, code %q, retryable %t, recovery action %q",
+				step.ID, call.Completion, wantCompletion, outcomes, dispositions,
+				snapshot.Failure.Operation, snapshot.Failure.Code, snapshot.Failure.Retryable, snapshot.Failure.RecoveryAction,
+			)
+		}
+		return fmt.Errorf(
+			"Swift schema-check step %s completed %q, want %q, observations %v, dispositions %v; runner reported no failure",
+			step.ID, call.Completion, wantCompletion, outcomes, dispositions,
+		)
 	}
 	// An authored step names a protocol operation, not one request. A client
 	// with no usable cursor bootstraps by connecting, rebuilding, and pulling,

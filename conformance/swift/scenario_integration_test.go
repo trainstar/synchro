@@ -35,6 +35,7 @@ func TestRealSwiftPerformance(t *testing.T) {
 		{"seeded-empty-startup", runSwiftSeededEmptyStartup},
 		{"multi-scope-provenance", runSwiftMultiScopeProvenance},
 		{"schema-queued-mutation", runSwiftSchemaQueuedMutation},
+		{"schema-check", runSwiftSchemaCheck},
 	} {
 		t.Run(scenario.name, func(t *testing.T) { scenario.run(t) })
 	}
@@ -86,6 +87,20 @@ func runSwiftMultiScopeProvenance(t *testing.T) {
 	}
 	if len(result.IdentityResolution) != len(scenario.NativeIdentityAliases) {
 		t.Fatalf("Swift multi-scope-provenance identity resolutions = %d, want %d", len(result.IdentityResolution), len(scenario.NativeIdentityAliases))
+	}
+}
+
+func runSwiftSchemaCheck(t *testing.T) {
+	t.Helper()
+	ctx, scenario, _, controller, platform := newSwiftPerformanceFixture(t, filepath.Join("performance", "schema-check-001.json"), 0)
+	result, err := RunSchemaCheckScenario(ctx, scenario, controller, platform)
+	if err != nil {
+		t.Fatalf("run direct Swift schema-check scenario: %v", err)
+	}
+	// The consumer binds one public call to each authored wire expectation, so a
+	// short call list means the run skipped an authored schema transition.
+	if len(result.Calls) != len(scenario.WireExpectations) {
+		t.Fatalf("Swift schema-check calls = %d, want %d", len(result.Calls), len(scenario.WireExpectations))
 	}
 }
 

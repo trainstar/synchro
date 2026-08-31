@@ -22,6 +22,10 @@ func TestRealKotlinPerformance(t *testing.T) {
 		runKotlinRebuildApply(t)
 		runKotlinRebuildCardinality(t)
 		runKotlinForgedCursor(t)
+		runKotlinPushResponseLoss(t)
+		runKotlinSchemaQueuedMutation(t)
+		// A scenario that holds a seed artifact runs last. Its artifact closes
+		// after the body returns, so it cannot reset the server for a successor.
 		runKotlinSeededEmptyStartup(t)
 		runKotlinMultiScopeProvenance(t)
 	})
@@ -141,6 +145,32 @@ func kotlinMultiScopeProvenancePageSize(t *testing.T, scenarioPath string) int {
 		t.Fatalf("read Kotlin Android multi-scope provenance authored pull page size: %v", err)
 	}
 	return pageSize
+}
+
+func runKotlinPushResponseLoss(t *testing.T) {
+	t.Helper()
+	ctx, scenario, harness, controller, platform := newKotlinPerformanceFixture(t, "conformance/scenarios/server/push-response-loss-001.json", 0)
+	result, err := RunPushResponseLossScenario(ctx, scenario, controller, platform, Client{Key: "client-a", UserID: "user-a", ClientID: "client-a", DatabaseKey: "push-response-loss-client-a"})
+	if err != nil {
+		t.Fatalf("run direct Kotlin Android push-response-loss scenario: %v", err)
+	}
+	if len(result.IdentityResolution) != len(scenario.NativeIdentityAliases) {
+		t.Fatalf("Kotlin Android push-response-loss identity resolutions = %d, want %d", len(result.IdentityResolution), len(scenario.NativeIdentityAliases))
+	}
+	resetKotlinPerformanceServer(t, ctx, harness)
+}
+
+func runKotlinSchemaQueuedMutation(t *testing.T) {
+	t.Helper()
+	ctx, scenario, harness, controller, platform := newKotlinPerformanceFixture(t, "conformance/scenarios/server/schema-queued-mutation-001.json", 100)
+	result, err := RunSchemaQueuedMutationScenario(ctx, scenario, controller, platform, Client{Key: "client-a", UserID: "user-a", ClientID: "client-a", DatabaseKey: "schema-queued-mutation-client-a"})
+	if err != nil {
+		t.Fatalf("run direct Kotlin Android schema-queued-mutation scenario: %v", err)
+	}
+	if len(result.IdentityResolution) != len(scenario.NativeIdentityAliases) {
+		t.Fatalf("Kotlin Android schema-queued-mutation identity resolutions = %d, want %d", len(result.IdentityResolution), len(scenario.NativeIdentityAliases))
+	}
+	resetKotlinPerformanceServer(t, ctx, harness)
 }
 
 func runKotlinRebuildRequests(t *testing.T) {
