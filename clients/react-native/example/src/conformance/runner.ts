@@ -568,8 +568,9 @@ export class PublicConformanceRunner {
     try {
       assertBoundedJSON(result, 64 * 1024);
       return result;
-    } catch {
-      throw new ConformanceCommandError('execution_failed');
+    } catch (error) {
+      // Name the bound. A capture that outgrows it reads as a generic failure.
+      throw new ConformanceCommandError('execution_failed', new Error(`command result exceeds 65536 bytes: ${describeBoundFailure(error)}`));
     }
   }
 }
@@ -726,7 +727,7 @@ async function captureRows(client: SynchroClient, selectors: RowSelector[]): Pro
     );
     rows.push(...result);
     if (rows.length > MAXIMUM_CAPTURE_VALUES) {
-      throw new ConformanceCommandError('execution_failed');
+      throw new ConformanceCommandError('execution_failed', new Error(`captured ${rows.length} rows, bound is ${MAXIMUM_CAPTURE_VALUES}`));
     }
   }
   return rows;
@@ -787,9 +788,13 @@ function rawEvents(events: SyncEvent[]): RawEvent[] {
   });
 }
 
+function describeBoundFailure(error: unknown): string {
+  return error instanceof Error ? error.message : 'result is not bounded';
+}
+
 function bounded<T>(values: T[]): T[] {
   if (values.length > MAXIMUM_CAPTURE_VALUES) {
-    throw new ConformanceCommandError('execution_failed');
+    throw new ConformanceCommandError('execution_failed', new Error(`capture holds ${values.length} values, bound is ${MAXIMUM_CAPTURE_VALUES}`));
   }
   return values;
 }
