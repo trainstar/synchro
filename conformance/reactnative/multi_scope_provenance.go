@@ -48,6 +48,24 @@ type multiScopeProvenanceCall struct {
 	key        string
 }
 
+type multiScopeProvenanceCommitPayload struct {
+	StreamGeneration string `json:"stream_generation"`
+	CommitLSN        string `json:"commit_lsn"`
+	EndLSN           string `json:"end_lsn"`
+	Events           []struct {
+		Relation  string `json:"relation"`
+		Operation string `json:"operation"`
+		After     *struct {
+			Identity struct {
+				Kind      string `json:"kind"`
+				SyncedRow *struct {
+					CanonicalWireJSON string `json:"canonical_wire_json"`
+				} `json:"synced_row"`
+			} `json:"identity"`
+		} `json:"after"`
+	} `json:"events"`
+}
+
 // MultiScopeProvenanceCoordinator drives the complete authored workload through one native bridge.
 type MultiScopeProvenanceCoordinator struct {
 	config MultiScopeProvenanceCoordinatorConfig
@@ -523,7 +541,7 @@ func (c *MultiScopeProvenanceCoordinator) resolveIdentities(server scenarios.Sta
 		if len(runtime[alias.Alias]) != 0 {
 			continue
 		}
-		value, err := c.runtimeIdentity(alias, runtime, server)
+		value, err := c.runtimeIdentity(alias, server)
 		if err != nil {
 			return nil, err
 		}
@@ -550,7 +568,7 @@ func (c *MultiScopeProvenanceCoordinator) resolveIdentities(server scenarios.Sta
 	return blackbox.ResolveNativeIdentityAliases(c.config.Scenario.NativeIdentityAliases, observations)
 }
 
-func (c *MultiScopeProvenanceCoordinator) runtimeIdentity(alias scenarios.NativeIdentityAlias, runtime map[string]json.RawMessage, server scenarios.StateFacts) (any, error) {
+func (c *MultiScopeProvenanceCoordinator) runtimeIdentity(alias scenarios.NativeIdentityAlias, server scenarios.StateFacts) (any, error) {
 	if len(alias.StepIDs) != 1 {
 		return nil, fmt.Errorf("React Native multi-scope provenance alias %s has no single anchor", alias.Alias)
 	}
@@ -591,29 +609,20 @@ func (c *MultiScopeProvenanceCoordinator) runtimeIdentity(alias scenarios.Native
 		// consumer resolves the same identity the same way.
 		return multiScopeProvenanceServerRebuildID(server, call, payload.ScopeID)
 	case "row-version", "checksum":
-		primary, err := multiScopeProvenanceRuntimePrimary(anchor, c.config.Scenario.NativeIdentityAliases, runtime)
+		row, err := multiScopeProvenanceRuntimeRow(c.config.Scenario, server, alias)
 		if err != nil {
 			return nil, err
 		}
-		canonical, err := json.Marshal(primary)
-		if err != nil {
-			return nil, err
-		}
-		for _, row := range server.Rows {
-			if row.CanonicalWireJSON != string(canonical) {
-				continue
+		if alias.Kind == "row-version" {
+			// A row fact reports the authored version, so the runtime
+			// version comes from the versions the capture observed.
+			runtimeVersion, bound := c.config.Controller.RuntimeRowVersions()[row.CanonicalWireJSON]
+			if !bound || runtimeVersion == "" {
+				return nil, fmt.Errorf("React Native multi-scope provenance row alias %s has no runtime version", alias.Alias)
 			}
-			if alias.Kind == "row-version" {
-				// A row fact reports the authored version, so the runtime
-				// version comes from the versions the capture observed.
-				runtimeVersion, bound := c.config.Controller.RuntimeRowVersions()[row.CanonicalWireJSON]
-				if !bound || runtimeVersion == "" {
-					return nil, fmt.Errorf("React Native multi-scope provenance row alias %s has no runtime version", alias.Alias)
-				}
-				return runtimeVersion, nil
-			}
-			return row.Checksum, nil
+			return runtimeVersion, nil
 		}
+		return row.Checksum, nil
 	}
 	return nil, fmt.Errorf("React Native multi-scope provenance alias %s has no runtime evidence", alias.Alias)
 }
@@ -635,6 +644,42 @@ func (c *MultiScopeProvenanceCoordinator) stepByID(id scenarios.StepID) (scenari
 		}
 	}
 	return scenarios.Step{}, false
+}
+
+func multiScopeProvenanceRuntimeRow(scenario scenarios.Scenario, server scenarios.StateFacts, alias scenarios.NativeIdentityAlias) (scenarios.RowFact, error) {
+	if len(alias.StepIDs) != 1 {
+		return scenarios.RowFact{}, fmt.Errorf("row alias %s has no single anchor", alias.Alias)
+	}
+	for _, step := range scenario.Steps {
+		if step.ID != alias.StepIDs[0] {
+			continue
+		}
+		payload, err := decodeMultiScopeProvenanceCommit(step.Operation)
+		if err != nil {
+			return scenarios.RowFact{}, err
+		}
+		for _, event := range payload.Events {
+			if event.After == nil || event.After.Identity.SyncedRow == nil {
+				continue
+			}
+			canonical := event.After.Identity.SyncedRow.CanonicalWireJSON
+			for _, row := range server.Rows {
+				if row.CanonicalWireJSON == canonical {
+					return row, nil
+				}
+			}
+		}
+		return scenarios.RowFact{}, fmt.Errorf("row alias %s has no server row", alias.Alias)
+	}
+	return scenarios.RowFact{}, fmt.Errorf("row alias %s names no authored commit", alias.Alias)
+}
+
+func decodeMultiScopeProvenanceCommit(operation scenarios.Operation) (multiScopeProvenanceCommitPayload, error) {
+	var payload multiScopeProvenanceCommitPayload
+	if err := json.Unmarshal(operation.Payload, &payload); err != nil || payload.StreamGeneration == "" || payload.CommitLSN == "" || payload.EndLSN == "" {
+		return multiScopeProvenanceCommitPayload{}, errors.New("source commit payload is invalid")
+	}
+	return payload, nil
 }
 
 // multiScopeProvenanceServerRebuildID resolves the rebuild identity the server
@@ -660,22 +705,6 @@ func multiScopeProvenanceServerRebuildID(server scenarios.StateFacts, call multi
 		return "", fmt.Errorf("server rebuild for client %s and scope %s matched %d records, want 1", clientID, scopeID, matches)
 	}
 	return rebuildID, nil
-}
-
-func multiScopeProvenanceRuntimePrimary(anchor scenarios.StepID, aliases []scenarios.NativeIdentityAlias, runtime map[string]json.RawMessage) (string, error) {
-	for _, alias := range aliases {
-		if alias.Kind == "primary-key" {
-			for _, stepID := range alias.StepIDs {
-				if stepID == anchor {
-					var primary string
-					if json.Unmarshal(runtime[alias.Alias], &primary) == nil && primary != "" {
-						return primary, nil
-					}
-				}
-			}
-		}
-	}
-	return "", fmt.Errorf("React Native multi-scope provenance primary key for %s is unavailable", anchor)
 }
 
 func multiScopeProvenanceCalls(scenario scenarios.Scenario) ([]multiScopeProvenanceCall, error) {
