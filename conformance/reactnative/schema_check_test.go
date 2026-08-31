@@ -45,13 +45,34 @@ func TestValidateSchemaCheckScenarioRejectsContractChanges(t *testing.T) {
 				}
 			}
 		}},
+		{"measurement case", func(scenario *scenarios.Scenario) {
+			for index := range scenario.Steps {
+				if scenario.Steps[index].MeasurementSample != nil {
+					scenario.Steps[index].MeasurementSample.Parameters = json.RawMessage(`{"schema_case":"changed"}`)
+					return
+				}
+			}
+		}},
+		{"measurement operation case", func(scenario *scenarios.Scenario) {
+			for index := range scenario.Steps {
+				if scenario.Steps[index].MeasurementSample != nil {
+					scenario.Steps[index].MeasurementSample.Operation.Value = json.RawMessage(`{"schema_case":"changed"}`)
+					return
+				}
+			}
+		}},
+		{"controller wire", func(scenario *scenarios.Scenario) {
+			wire := scenario.WireExpectations[0]
+			wire.StepID = "STEP-PERF-SCHEMA-CHECK-CLASS1-COMMIT-001"
+			scenario.WireExpectations = append(scenario.WireExpectations, wire)
+		}},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			scenario := cloneSchemaCheckScenario(loadSchemaCheckAuthoredScenario(t))
 			test.mutate(&scenario)
 			if err := ValidateSchemaCheckScenario(scenario); err == nil {
-				t.Fatal("changed schema-check contract was accepted")
+				t.Fatalf("changed schema-check contract was accepted: error=%v", err)
 			}
 		})
 	}
@@ -148,6 +169,32 @@ func TestSchemaCheckCommandEncodesEmptyStepsAsArray(t *testing.T) {
 	encoded, err := json.Marshal(command)
 	if err != nil || command.Action.Steps == nil || len(command.Action.Steps) != 0 || !strings.Contains(string(encoded), `"steps":[]`) {
 		t.Fatalf("schema-check empty command steps=%#v encoded=%s error=%v", command.Action.Steps, encoded, err)
+	}
+}
+
+func TestSchemaCheckSynchronizationCommandsCarryAuthoredStartStep(t *testing.T) {
+	coordinator, err := NewSchemaCheckCoordinator(SchemaCheckCoordinatorConfig{
+		Scenario: loadSchemaCheckAuthoredScenario(t), Platform: "ios", ServerURL: "http://127.0.0.1:8080", AuthToken: "unit-token",
+	})
+	if err != nil {
+		t.Fatalf("create schema-check coordinator: %v", err)
+	}
+	defer func() { _ = coordinator.Close(context.Background()) }()
+	for _, call := range coordinator.calls {
+		command := coordinator.command(call, "client", "synchronize-step", map[string]any{
+			"client_key": call.sessionKey, "method": call.step.NativeBinding.Method, "completion": call.step.NativeBinding.Completion,
+		}, []scenarios.StepID{call.step.ID})
+		method, methodOK := command.Action.Action.Parameters["method"].(string)
+		if command.Action.Action.Actor != "client" || command.Action.Action.Command != "synchronize-step" || !methodOK || method != "start" {
+			t.Fatalf("schema-check step=%s actor=%q command=%q method=%q method_ok=%t", call.step.ID, command.Action.Action.Actor, command.Action.Action.Command, method, methodOK)
+		}
+		if command.Action.Steps == nil || len(command.Action.Steps) != 1 {
+			t.Fatalf("schema-check step=%s command steps=%#v", call.step.ID, command.Action.Steps)
+		}
+		operation := command.Action.Steps[0].Operation
+		if operation.ContractOperation != call.step.Operation.ContractOperation || operation.Name != call.step.Operation.Name || !semanticRawJSONEqual(operation.Payload, call.step.Operation.Payload) {
+			t.Fatalf("schema-check step=%s operation=%#v want=%#v", call.step.ID, operation, call.step.Operation)
+		}
 	}
 }
 

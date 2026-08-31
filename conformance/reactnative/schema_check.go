@@ -176,6 +176,9 @@ func ValidateSchemaCheckScenario(scenario scenarios.Scenario) error {
 	if err != nil {
 		return err
 	}
+	if len(scenario.WireExpectations) != len(calls) {
+		return fmt.Errorf("React Native schema-check wire expectations=%d public calls=%d", len(scenario.WireExpectations), len(calls))
+	}
 	// The authored scenario owns the call count. Derive it from the public
 	// bindings rather than restating a number that can drift from the contract.
 	publicSteps := 0
@@ -204,6 +207,10 @@ func ValidateSchemaCheckScenario(scenario scenarios.Scenario) error {
 	if err != nil {
 		return err
 	}
+	strata, err := schemaCheckStrata(plan)
+	if err != nil {
+		return err
+	}
 	counts := make(map[string]uint64, len(plan.Strata))
 	seenSamples := make(map[string]struct{})
 	for _, call := range calls {
@@ -224,6 +231,12 @@ func ValidateSchemaCheckScenario(scenario scenarios.Scenario) error {
 		}
 		if _, duplicate := seenSamples[sample.SampleID]; duplicate {
 			return fmt.Errorf("React Native schema-check sample %q is duplicated", sample.SampleID)
+		}
+		caseName, caseErr := schemaCheckCase(step)
+		operationCase, operationCaseErr := schemaCheckMeasurementOperationCase(*sample)
+		wantCase, found := strata[string(sample.StratumID)]
+		if caseErr != nil || operationCaseErr != nil || !found || caseName != wantCase || operationCase != wantCase {
+			return fmt.Errorf("React Native schema-check sample step=%s stratum=%q parameter_case=%q operation_case=%q want_case=%q parameter_error=%v operation_error=%v", step.ID, sample.StratumID, caseName, operationCase, wantCase, caseErr, operationCaseErr)
 		}
 		seenSamples[sample.SampleID] = struct{}{}
 		counts[string(sample.StratumID)]++
@@ -423,6 +436,21 @@ func schemaCheckDispatchPlan(scenario scenarios.Scenario) (scenarios.SchemaDispa
 		return plan, nil
 	}
 	return scenarios.SchemaDispatchMeasurementPlan{}, errors.New("React Native schema-check dispatch plan is absent")
+}
+
+func schemaCheckStrata(plan scenarios.SchemaDispatchMeasurementPlan) (map[string]string, error) {
+	strata := make(map[string]string, len(plan.Strata))
+	for _, stratum := range plan.Strata {
+		id := string(stratum.StratumID)
+		if id == "" || stratum.SchemaCase == "" {
+			return nil, fmt.Errorf("React Native schema-check stratum id=%q case=%q", id, stratum.SchemaCase)
+		}
+		if _, duplicate := strata[id]; duplicate {
+			return nil, fmt.Errorf("React Native schema-check stratum %q is duplicated", id)
+		}
+		strata[id] = stratum.SchemaCase
+	}
+	return strata, nil
 }
 
 func schemaCheckWireExpectation(scenario scenarios.Scenario, id scenarios.StepID) (scenarios.WireExpectation, error) {
@@ -1237,6 +1265,16 @@ func schemaCheckCase(step scenarios.Step) (string, error) {
 		return "", fmt.Errorf("React Native schema-check step %s measurement parameters are invalid", step.ID)
 	}
 	return parameters.SchemaCase, nil
+}
+
+func schemaCheckMeasurementOperationCase(sample scenarios.MeasurementSample) (string, error) {
+	var value struct {
+		SchemaCase string `json:"schema_case"`
+	}
+	if err := json.Unmarshal(sample.Operation.Value, &value); err != nil || value.SchemaCase == "" {
+		return "", fmt.Errorf("React Native schema-check measurement operation %s has invalid schema case", sample.Operation.ID)
+	}
+	return value.SchemaCase, nil
 }
 
 func schemaCheckClientKey(userID, clientID string) string {
