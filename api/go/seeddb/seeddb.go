@@ -2013,6 +2013,13 @@ func createTableSQL(table localSchemaTable) string {
 	)
 }
 
+// cdcTriggerSQL builds the seed capture triggers.
+//
+// A trigger body is stored in the database schema and is parsed again by every
+// client that opens the seed. SQLite adds UPSERT in 3.24 and Android API 24
+// ships SQLite 3.9, so an "ON CONFLICT ... DO UPDATE" body makes the whole seed
+// schema unreadable on the minimum supported cell. Each body therefore updates
+// the conflicting row first and inserts only when no row exists.
 func cdcTriggerSQL(table localSchemaTable) []string {
 	name := table.TableName
 	pkColumn := table.PrimaryKey[0]
@@ -2063,14 +2070,22 @@ END`, deleteTrigger, quotedTable, lockCheck, quotedTable, quotedDeletedAt, nowEx
 AFTER DELETE ON %s
 WHEN %s
 BEGIN
-	INSERT INTO _synchro_pending_changes (record_id, table_name, operation, base_updated_at, client_updated_at)
-	VALUES (OLD.%s, '%s', 'delete', %s, %s)
-	ON CONFLICT (table_name, record_id) DO UPDATE SET
+	UPDATE _synchro_pending_changes SET
 		operation = 'delete',
-		base_updated_at = COALESCE(_synchro_pending_changes.base_updated_at, excluded.base_updated_at),
-		local_revision = _synchro_pending_changes.local_revision + 1,
-		client_updated_at = excluded.client_updated_at;
-END`, deleteTrigger, quotedTable, lockCheck, quotedPK, escapedName, baseUpdatedAtExpr, nowExpr)
+		base_updated_at = COALESCE(base_updated_at, %s),
+		local_revision = local_revision + 1,
+		client_updated_at = %s
+	WHERE table_name = '%s' AND record_id = OLD.%s;
+	INSERT INTO _synchro_pending_changes (record_id, table_name, operation, base_updated_at, client_updated_at)
+	SELECT OLD.%s, '%s', 'delete', %s, %s
+	WHERE NOT EXISTS (
+		SELECT 1 FROM _synchro_pending_changes
+		WHERE table_name = '%s' AND record_id = OLD.%s
+	);
+END`, deleteTrigger, quotedTable, lockCheck,
+			baseUpdatedAtExpr, nowExpr, escapedName, quotedPK,
+			quotedPK, escapedName, baseUpdatedAtExpr, nowExpr,
+			escapedName, quotedPK)
 	}
 
 	return []string{
@@ -2081,41 +2096,53 @@ END`, deleteTrigger, quotedTable, lockCheck, quotedPK, escapedName, baseUpdatedA
 AFTER INSERT ON %s
 WHEN %s
 BEGIN
-	INSERT INTO _synchro_pending_changes (record_id, table_name, operation, client_updated_at)
-	VALUES (NEW.%s, '%s', 'create', %s)
-	ON CONFLICT (table_name, record_id) DO UPDATE SET
+	UPDATE _synchro_pending_changes SET
 		operation = CASE
-			WHEN _synchro_pending_changes.operation = 'delete' THEN 'update'
-			ELSE _synchro_pending_changes.operation
+			WHEN operation = 'delete' THEN 'update'
+			ELSE operation
 		END,
-		local_revision = _synchro_pending_changes.local_revision + 1,
-		client_updated_at = excluded.client_updated_at;
-END`, insertTrigger, quotedTable, lockCheck, quotedPK, escapedName, nowExpr),
+		local_revision = local_revision + 1,
+		client_updated_at = %s
+	WHERE table_name = '%s' AND record_id = NEW.%s;
+	INSERT INTO _synchro_pending_changes (record_id, table_name, operation, client_updated_at)
+	SELECT NEW.%s, '%s', 'create', %s
+	WHERE NOT EXISTS (
+		SELECT 1 FROM _synchro_pending_changes
+		WHERE table_name = '%s' AND record_id = NEW.%s
+	);
+END`, insertTrigger, quotedTable, lockCheck,
+			nowExpr, escapedName, quotedPK,
+			quotedPK, escapedName, nowExpr,
+			escapedName, quotedPK),
 		fmt.Sprintf(`CREATE TRIGGER %s
 AFTER UPDATE ON %s
 WHEN %s
 BEGIN
-	INSERT INTO _synchro_pending_changes (record_id, table_name, operation, base_updated_at, client_updated_at)
-	VALUES (
-		NEW.%s, '%s',
-		%s,
-		%s,
-		%s
-	)
-	ON CONFLICT (table_name, record_id) DO UPDATE SET
+	UPDATE _synchro_pending_changes SET
 		operation = CASE
-			WHEN _synchro_pending_changes.operation = 'create' AND excluded.operation = 'update' THEN 'create'
-			WHEN _synchro_pending_changes.operation = 'create' AND excluded.operation = 'delete' THEN 'delete'
-			ELSE excluded.operation
+			WHEN operation = 'create' AND (%s) = 'update' THEN 'create'
+			WHEN operation = 'create' AND (%s) = 'delete' THEN 'delete'
+			ELSE (%s)
 		END,
 		base_updated_at = CASE
-			WHEN _synchro_pending_changes.operation = 'create' AND excluded.operation = 'delete' THEN NULL
-			ELSE COALESCE(_synchro_pending_changes.base_updated_at, excluded.base_updated_at)
+			WHEN operation = 'create' AND (%s) = 'delete' THEN NULL
+			ELSE COALESCE(base_updated_at, %s)
 		END,
-		local_revision = _synchro_pending_changes.local_revision + 1,
-		client_updated_at = excluded.client_updated_at;
+		local_revision = local_revision + 1,
+		client_updated_at = %s
+	WHERE table_name = '%s' AND record_id = NEW.%s;
+	INSERT INTO _synchro_pending_changes (record_id, table_name, operation, base_updated_at, client_updated_at)
+	SELECT NEW.%s, '%s', %s, %s, %s
+	WHERE NOT EXISTS (
+		SELECT 1 FROM _synchro_pending_changes
+		WHERE table_name = '%s' AND record_id = NEW.%s
+	);
 %s
-END`, updateTrigger, quotedTable, lockCheck, quotedPK, escapedName, updateOperationExpr, baseUpdatedAtExpr, nowExpr, updateCleanupSQL),
+END`, updateTrigger, quotedTable, lockCheck,
+			updateOperationExpr, updateOperationExpr, updateOperationExpr,
+			updateOperationExpr, baseUpdatedAtExpr, nowExpr, escapedName, quotedPK,
+			quotedPK, escapedName, updateOperationExpr, baseUpdatedAtExpr, nowExpr,
+			escapedName, quotedPK, updateCleanupSQL),
 		deleteTriggerSQL,
 	}
 }

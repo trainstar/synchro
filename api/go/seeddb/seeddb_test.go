@@ -559,8 +559,16 @@ func TestCDCTriggerSQLSupportsTablesWithoutDeletedAt(t *testing.T) {
 	if strings.Contains(statements[5], `OLD."updated_at"`) {
 		t.Fatalf("delete trigger should not capture the application updated_at value: %q", statements[5])
 	}
-	if !strings.Contains(statements[5], "local_revision = _synchro_pending_changes.local_revision + 1") {
-		t.Fatalf("delete trigger should increment local_revision on conflict: %q", statements[5])
+	if !strings.Contains(statements[5], "local_revision = local_revision + 1") {
+		t.Fatalf("delete trigger should increment local_revision for an existing pending row: %q", statements[5])
+	}
+	// A trigger body is stored in the schema and parsed again by every client
+	// that opens the seed. SQLite gains UPSERT in 3.24 and Android API 24 ships
+	// 3.9, so UPSERT here makes the entire seed schema unreadable on that cell.
+	for _, statement := range statements {
+		if strings.Contains(statement, "ON CONFLICT") {
+			t.Fatalf("trigger must avoid UPSERT syntax, which SQLite 3.9 cannot parse: %q", statement)
+		}
 	}
 }
 
