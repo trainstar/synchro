@@ -27,11 +27,14 @@ interface ConformanceHarnessProps {
 
 type CommandState = 'ready' | 'running' | 'ok' | 'error';
 
+const MAXIMUM_ERROR_DETAIL_CHARACTERS = 512;
+
 const EMPTY_RESPONSE = encodeConformanceEnvelope({
   schema_version: 1,
   outcome: 'error',
   result: null,
   error_code: 'invalid_command',
+  error_detail: null,
 });
 
 export function ConformanceHarness({
@@ -71,6 +74,7 @@ export function ConformanceHarness({
         outcome: 'passed',
         result: result as unknown as JSONValue,
         error_code: null,
+        error_detail: null,
       });
       if (utf8ByteLength(envelope) > MAXIMUM_RESULT_BYTES) {
         throw new ConformanceCommandError('execution_failed');
@@ -81,11 +85,17 @@ export function ConformanceHarness({
       const code = error instanceof ConformanceCommandError
         ? error.code
         : 'invalid_command';
+      // The message names the cause. Without it a device failure reports only
+      // a code, and the app is torn down before its log can be read.
+      const detail = error instanceof Error && error.message !== ''
+        ? error.message.slice(0, MAXIMUM_ERROR_DETAIL_CHARACTERS)
+        : null;
       setResultText(encodeConformanceEnvelope({
         schema_version: 1,
         outcome: 'error',
         result: null,
         error_code: code,
+        error_detail: detail,
       }));
       setState('error');
     }

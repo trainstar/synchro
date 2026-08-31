@@ -72,6 +72,9 @@ export interface ConformanceEnvelope {
   outcome: 'passed' | 'error';
   result: JSONValue | null;
   error_code: ConformanceErrorCode | null;
+  // A code alone cannot name a device failure, and the app is torn down before
+  // its log can be read, so a failed command carries its message.
+  error_detail: string | null;
 }
 
 const SYNCHRONIZE_METHODS: readonly SynchronizeMethod[] = [
@@ -231,8 +234,10 @@ export function decodeConformanceCommand(value: unknown): ConformanceCommand {
 export function encodeConformanceEnvelope(envelope: ConformanceEnvelope): string {
   const keys = Object.keys(envelope);
   if (
-    keys.length !== 4 ||
-    !['schema_version', 'outcome', 'result', 'error_code'].every((key) => keys.includes(key)) ||
+    keys.length !== 5 ||
+    !['schema_version', 'outcome', 'result', 'error_code', 'error_detail'].every((key) => keys.includes(key)) ||
+    (envelope.outcome === 'passed' && envelope.error_detail !== null) ||
+    (envelope.error_detail !== null && typeof envelope.error_detail !== 'string') ||
     envelope.schema_version !== 1 ||
     (envelope.outcome === 'passed') !== (envelope.result !== null && envelope.error_code === null) ||
     (envelope.outcome === 'error') !== (envelope.result === null && envelope.error_code !== null)

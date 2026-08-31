@@ -43,8 +43,8 @@ async function execute(command: Record<string, unknown>): Promise<string> {
     const state = await element(by.id('conformance-command-state')).getAttributes();
     if (state.text === 'ok' || state.text === 'error') {
       const raw = String((await element(by.id('conformance-result')).getAttributes()).text ?? '');
-      const envelope = JSON.parse(raw) as { outcome: string; error_code: string | null };
-      if (envelope.outcome !== 'passed') throw new Error(`React Native conformance command failed: ${envelope.error_code}`);
+      const envelope = JSON.parse(raw) as { outcome: string; error_code: string | null; error_detail: string | null };
+      if (envelope.outcome !== 'passed') throw new Error(`React Native conformance command failed: ${envelope.error_code}${envelope.error_detail === null ? '' : `: ${envelope.error_detail}`}`);
       return raw;
     }
     await new Promise((resolve) => setTimeout(resolve, 100));

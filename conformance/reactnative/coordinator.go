@@ -150,6 +150,10 @@ type resultEnvelope struct {
 	Outcome       string
 	Result        json.RawMessage
 	ErrorCode     *string
+	// ErrorDetail carries the device-side message for a failed command. An
+	// error code alone cannot name the cause, and the device is torn down
+	// before its log can be read.
+	ErrorDetail *string
 }
 
 type finalCapture struct {
@@ -796,10 +800,10 @@ func decodeResultEnvelope(raw json.RawMessage) (resultEnvelope, error) {
 		return resultEnvelope{}, errInvalidExchange
 	}
 	var members map[string]json.RawMessage
-	if err := jsonstrict.Decode(raw, &members); err != nil || len(members) != 4 {
+	if err := jsonstrict.Decode(raw, &members); err != nil || len(members) != 5 {
 		return resultEnvelope{}, errInvalidExchange
 	}
-	for _, name := range []string{"schema_version", "outcome", "result", "error_code"} {
+	for _, name := range []string{"schema_version", "outcome", "result", "error_code", "error_detail"} {
 		if _, ok := members[name]; !ok {
 			return resultEnvelope{}, errInvalidExchange
 		}
@@ -815,8 +819,11 @@ func decodeResultEnvelope(raw json.RawMessage) (resultEnvelope, error) {
 	if json.Unmarshal(members["error_code"], &envelope.ErrorCode) != nil {
 		return resultEnvelope{}, errInvalidExchange
 	}
+	if json.Unmarshal(members["error_detail"], &envelope.ErrorDetail) != nil {
+		return resultEnvelope{}, errInvalidExchange
+	}
 	if envelope.Outcome == "passed" {
-		if isJSONNull(envelope.Result) || envelope.ErrorCode != nil {
+		if isJSONNull(envelope.Result) || envelope.ErrorCode != nil || envelope.ErrorDetail != nil {
 			return resultEnvelope{}, errInvalidExchange
 		}
 	} else if !isJSONNull(envelope.Result) || envelope.ErrorCode == nil || !validConformanceError(*envelope.ErrorCode) {
