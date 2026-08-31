@@ -118,12 +118,12 @@ func TestSteadyPullFinalCaptureUsesNativeResponseKeys(t *testing.T) {
 		stage:   steadyPullStageApplicationRows,
 		process: &process,
 	}
-	valid := json.RawMessage(`{"schema_version":1,"outcome":"passed","result":{"kind":"capture","capture":{"client_state":null,"pending_mutations":null,"rejected_mutations":null,"sync_status":null,"sync_events":null,"provenance":null,"request_trace":null,"durable_proof":null},"process":{"process_id":"process-a","database_identity_fingerprint":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}},"error_code":null}`)
+	valid := json.RawMessage(`{"schema_version":1,"outcome":"passed","result":{"kind":"capture","capture":{"client_state":null,"pending_mutations":null,"rejected_mutations":null,"sync_status":null,"sync_events":null,"provenance":null,"request_trace":null,"durable_proof":null},"process":{"process_id":"process-a","database_identity_fingerprint":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}},"error_code":null,"error_detail":null}`)
 	if err := coordinator.acceptResultLocked(valid); err == nil || errors.Is(err, errInvalidExchange) {
 		t.Fatalf("native response keys did not reach semantic validation: %v", err)
 	}
 
-	sourceNames := json.RawMessage(`{"schema_version":1,"outcome":"passed","result":{"kind":"capture","capture":{"scope-state":null,"pending-mutations":null,"rejected-mutations":null,"sync-status":null,"sync-events":null,"provenance":null,"request-trace":null,"durable-proof":null},"process":{"process_id":"process-a","database_identity_fingerprint":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}},"error_code":null}`)
+	sourceNames := json.RawMessage(`{"schema_version":1,"outcome":"passed","result":{"kind":"capture","capture":{"scope-state":null,"pending-mutations":null,"rejected-mutations":null,"sync-status":null,"sync-events":null,"provenance":null,"request-trace":null,"durable-proof":null},"process":{"process_id":"process-a","database_identity_fingerprint":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}},"error_code":null,"error_detail":null}`)
 	if err := coordinator.acceptResultLocked(sourceNames); !errors.Is(err, errInvalidExchange) {
 		t.Fatalf("capture source names error = %v, want invalid exchange", err)
 	}

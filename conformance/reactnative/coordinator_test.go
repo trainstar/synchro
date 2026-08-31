@@ -45,7 +45,7 @@ func TestExchangeRejectsUnavailableEnvelope(t *testing.T) {
 	coordinator := newUnitCoordinator(t)
 	defer closeUnitCoordinator(t, coordinator)
 
-	body := []byte(`{"schema_version":1,"sequence":1,"result":{"schema_version":1,"outcome":"error","result":null,"error_code":"unavailable"}}`)
+	body := []byte(`{"schema_version":1,"sequence":1,"result":{"schema_version":1,"outcome":"error","result":null,"error_code":"unavailable","error_detail":null}}`)
 	response := exchangeRequestForTest(coordinator, body)
 	if response.Code != http.StatusUnprocessableEntity {
 		t.Fatalf("unavailable envelope status = %d, want %d", response.Code, http.StatusUnprocessableEntity)
