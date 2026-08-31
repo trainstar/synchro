@@ -298,8 +298,13 @@ func runKotlinForgedCursor(t *testing.T) {
 
 func resetKotlinPerformanceServer(t *testing.T, ctx context.Context, harness *blackbox.Harness) {
 	t.Helper()
-	if err := harness.Source().ExecContext(ctx, "DELETE FROM cf_items"); err != nil {
-		t.Fatalf("clear Kotlin Android performance source state: %v", err)
+	// A capture dependency registration stays pending while its source table
+	// holds rows, so the replayed registrations never activate unless every
+	// diagnostic source a scenario writes is empty first.
+	for _, table := range blackbox.DiagnosticSourceTables() {
+		if err := harness.Source().ExecContext(ctx, "DELETE FROM "+table); err != nil {
+			t.Fatalf("clear Kotlin Android performance source table %s: %v", table, err)
+		}
 	}
 	reinstall, err := harness.ReinstallExtension(ctx)
 	if err != nil {
