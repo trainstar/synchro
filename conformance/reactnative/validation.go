@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"strings"
 
 	"github.com/trainstar/synchro/conformance/blackbox"
 	"github.com/trainstar/synchro/conformance/internal/jsonstrict"
@@ -684,6 +685,7 @@ func completedRebuildID(raw json.RawMessage, scopeID string) (string, error) {
 	}
 	matches := 0
 	var rebuildID string
+	observed := make([]string, 0, len(events))
 	for _, event := range events {
 		var kind string
 		if json.Unmarshal(event["type"], &kind) != nil || kind != "rebuild_completed" {
@@ -694,13 +696,19 @@ func completedRebuildID(raw json.RawMessage, scopeID string) (string, error) {
 			json.Unmarshal(event["rebuild_id"], &id) != nil || eventScope == "" || id == "" {
 			return "", errors.New("React Native rebuild event is invalid")
 		}
+		observed = append(observed, eventScope+"/"+id)
 		if eventScope == scopeID {
 			matches++
 			rebuildID = id
 		}
 	}
 	if matches != 1 {
-		return "", errors.New("React Native completed rebuild identity is ambiguous")
+		// The count alone cannot show whether the scope produced no completion
+		// or several. Name the wanted scope and each completion observed.
+		return "", fmt.Errorf(
+			"React Native completed rebuild identity is ambiguous: scope %q matched %d completions; observed [%s]",
+			scopeID, matches, strings.Join(observed, " "),
+		)
 	}
 	return rebuildID, nil
 }

@@ -62,6 +62,10 @@ type MultiScopeProvenanceCoordinator struct {
 	started      map[string]bool
 	captures     map[string]finalCapture
 	callCaptures map[scenarios.StepID]finalCapture
+	// The adapter treats the bearer claim as the authoritative user, and this
+	// scenario drives one client per user. One shared token would make every
+	// client act as the first user.
+	authTokens map[string]string
 
 	mu        sync.Mutex
 	prepared  bool
@@ -167,7 +171,7 @@ func NewMultiScopeProvenanceCoordinator(config MultiScopeProvenanceCoordinatorCo
 		_ = listener.Close()
 		return nil, err
 	}
-	coordinator := &MultiScopeProvenanceCoordinator{config: config, listener: listener, token: token, adapter: adapter, calls: calls, expected: *multiScopeProvenanceExpected(config.Scenario), started: make(map[string]bool), captures: make(map[string]finalCapture), callCaptures: make(map[scenarios.StepID]finalCapture), nextSeq: 1}
+	coordinator := &MultiScopeProvenanceCoordinator{config: config, listener: listener, token: token, adapter: adapter, calls: calls, expected: *multiScopeProvenanceExpected(config.Scenario), started: make(map[string]bool), captures: make(map[string]finalCapture), callCaptures: make(map[scenarios.StepID]finalCapture), authTokens: make(map[string]string), nextSeq: 1}
 	coordinator.server = &http.Server{Handler: coordinator, MaxHeaderBytes: 16 * 1024, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 2 * time.Minute, WriteTimeout: 2 * time.Minute, IdleTimeout: 30 * time.Second}
 	return coordinator, nil
 }
@@ -190,12 +194,21 @@ func (c *MultiScopeProvenanceCoordinator) Prepare(ctx context.Context) error {
 	if c.config.Controller == nil || c.config.Harness == nil {
 		return errors.New("React Native multi-scope provenance dependencies are unavailable")
 	}
-	if c.config.AuthToken == "" {
-		token, err := c.config.Harness.NativeBearerToken(ctx, c.calls[0].step.NativeBinding.UserID, time.Now())
+	// Each authored client belongs to its own user, so each client carries its
+	// own bearer token. A configured token overrides minting for every client.
+	for _, call := range c.calls {
+		if _, found := c.authTokens[call.key]; found {
+			continue
+		}
+		if c.config.AuthToken != "" {
+			c.authTokens[call.key] = c.config.AuthToken
+			continue
+		}
+		token, err := c.config.Harness.NativeBearerToken(ctx, call.step.NativeBinding.UserID, time.Now())
 		if err != nil {
 			return errors.New("mint React Native multi-scope provenance adapter bearer token")
 		}
-		c.config.AuthToken = token
+		c.authTokens[call.key] = token
 	}
 	modelScenario := c.config.Scenario
 	modelScenario.Model.ExpectedState = multiScopeProvenanceSemanticExpectations(modelScenario.Model.ExpectedState)
@@ -435,7 +448,7 @@ func (c *MultiScopeProvenanceCoordinator) command(call multiScopeProvenanceCall,
 			}
 		}
 	}
-	return &conformanceCommand{SchemaVersion: 1, Action: conformanceManifest{Action: conformanceAction{Actor: actor, Command: name, Parameters: parameters}, Steps: steps}, Runtime: conformanceRuntime{ClientKey: call.key, Database: "rn-multi-scope-provenance-" + call.step.NativeBinding.ClientID + ".db", ClientID: call.step.NativeBinding.ClientID, ServerURL: c.adapter, AuthToken: c.config.AuthToken}}
+	return &conformanceCommand{SchemaVersion: 1, Action: conformanceManifest{Action: conformanceAction{Actor: actor, Command: name, Parameters: parameters}, Steps: steps}, Runtime: conformanceRuntime{ClientKey: call.key, Database: "rn-multi-scope-provenance-" + call.step.NativeBinding.ClientID + ".db", ClientID: call.step.NativeBinding.ClientID, ServerURL: c.adapter, AuthToken: c.authTokens[call.key]}}
 }
 
 func (c *MultiScopeProvenanceCoordinator) executeOperations(ctx context.Context, steps []scenarios.Step) error {
@@ -572,15 +585,11 @@ func (c *MultiScopeProvenanceCoordinator) runtimeIdentity(alias scenarios.Native
 		if json.Unmarshal(step.Operation.Payload, &payload) != nil || payload.ScopeID == "" {
 			return nil, fmt.Errorf("React Native multi-scope provenance rebuild step %s is invalid", anchor)
 		}
-		scope, err := multiScopeProvenanceRuntimeScope(payload.ScopeID, c.config.Scenario.NativeIdentityAliases, runtime)
-		if err != nil {
-			return nil, err
-		}
-		capture, found := c.callCaptures[call.step.ID]
-		if !found {
-			return nil, fmt.Errorf("React Native multi-scope provenance rebuild capture %s is absent", call.step.ID)
-		}
-		return completedRebuildID(capture.Events, scope)
+		// The authored step names a scope placeholder, and the client only ever
+		// sees the scope identifier the server assigns. Server evidence keeps
+		// the authored name, so the rebuild identity resolves there. The Kotlin
+		// consumer resolves the same identity the same way.
+		return multiScopeProvenanceServerRebuildID(server, call, payload.ScopeID)
 	case "row-version", "checksum":
 		primary, err := multiScopeProvenanceRuntimePrimary(anchor, c.config.Scenario.NativeIdentityAliases, runtime)
 		if err != nil {
@@ -628,16 +637,29 @@ func (c *MultiScopeProvenanceCoordinator) stepByID(id scenarios.StepID) (scenari
 	return scenarios.Step{}, false
 }
 
-func multiScopeProvenanceRuntimeScope(authored string, aliases []scenarios.NativeIdentityAlias, runtime map[string]json.RawMessage) (string, error) {
-	for _, alias := range aliases {
-		if alias.Kind == "scope" && string(alias.Value) == `"`+authored+`"` {
-			var scope string
-			if json.Unmarshal(runtime[alias.Alias], &scope) == nil && scope != "" {
-				return scope, nil
-			}
+// multiScopeProvenanceServerRebuildID resolves the rebuild identity the server
+// recorded for one client and one authored scope. The client cannot supply it,
+// because the client observes the assigned scope identifier rather than the
+// authored placeholder the step names.
+func multiScopeProvenanceServerRebuildID(server scenarios.StateFacts, call multiScopeProvenanceCall, scopeID string) (string, error) {
+	userID := call.step.NativeBinding.UserID
+	clientID := call.step.NativeBinding.ClientID
+	var rebuildID string
+	matches := 0
+	for _, recorded := range server.Rebuilds {
+		if recorded.UserID != userID || recorded.ClientID != clientID || recorded.ScopeID != scopeID {
+			continue
 		}
+		if recorded.RebuildID == "" {
+			return "", fmt.Errorf("server rebuild for client %s and scope %s has no identity", clientID, scopeID)
+		}
+		matches++
+		rebuildID = recorded.RebuildID
 	}
-	return "", errors.New("React Native multi-scope provenance runtime scope is unavailable")
+	if matches != 1 {
+		return "", fmt.Errorf("server rebuild for client %s and scope %s matched %d records, want 1", clientID, scopeID, matches)
+	}
+	return rebuildID, nil
 }
 
 func multiScopeProvenanceRuntimePrimary(anchor scenarios.StepID, aliases []scenarios.NativeIdentityAlias, runtime map[string]json.RawMessage) (string, error) {
