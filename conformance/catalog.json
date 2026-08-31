@@ -104,7 +104,7 @@
     {
       "scenario_id": "SCN-RETENTION-RECONNECT-001",
       "path": "conformance/scenarios/server/retention-reconnect-001.json",
-      "sha256": "de19dff72ca972785c398a01b284c772afd588ff5a56e181a31487019778c521"
+      "sha256": "4237f207de9961d2d563b732919b0def85f459e294514d59f41ce8c36dfbad98"
     },
     {
       "scenario_id": "SCN-SCHEMA-QUEUED-MUTATION-001",

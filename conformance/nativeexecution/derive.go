@@ -196,7 +196,10 @@ func deriveNativePlan(scenario scenarios.Scenario, obligation scenarios.ProofObl
 			switch binding.Stage {
 			case "begin":
 				err = add(step.Phase, "client", "begin-call", []scenarios.StepID{step.ID}, scenarios.NativeBeginCallParameters{ClientKey: key, CallID: *binding.CallID, Method: binding.Method})
-			case "await-step":
+			case "await-step", "observe":
+				// An observe stage opens a call the client starts on its own,
+				// so no client action begins it. The harness observes the step
+				// exactly as it observes any other awaited step.
 				err = add(step.Phase, "observer", "await-step", []scenarios.StepID{step.ID}, scenarios.NativeAwaitStepParameters{ClientKey: key, CallID: binding.CallID})
 			case "await-call":
 				err = add(step.Phase, "observer", "await-step", []scenarios.StepID{step.ID}, scenarios.NativeAwaitStepParameters{ClientKey: key, CallID: binding.CallID})
