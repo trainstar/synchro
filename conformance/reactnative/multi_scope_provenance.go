@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -727,8 +728,19 @@ func validateMultiScopeProvenanceCapture(capture finalCapture) error {
 	if err != nil || trace.Overflowed || len(trace.Observations) == 0 || validateTraceSequence(trace.Observations) != nil || validateTraceOperation(trace.Observations[len(trace.Observations)-1], "pull") != nil {
 		return errors.New("React Native multi-scope provenance trace is invalid")
 	}
-	if state.ScopeStateCount != uint64(len(state.ScopeStates)) || state.ScopeRowCount != uint64(len(state.ScopeRows)) || state.ProvenanceCount != uint64(len(state.ScopeRows)) {
-		return errors.New("React Native multi-scope provenance durable counts are inconsistent")
+	// Each reported count must agree with its own detail list. Provenance count
+	// is a different quantity than the scope-row count, because one row that
+	// belongs to two scopes produces two scope rows and one provenance record.
+	// The authored model owns the provenance value.
+	if state.ScopeStateCount != uint64(len(state.ScopeStates)) || state.ScopeRowCount != uint64(len(state.ScopeRows)) {
+		// A count alone cannot explain the mismatch. Name each reported count
+		// and each detail length so one run shows which pair disagrees.
+		return fmt.Errorf(
+			"React Native multi-scope provenance durable counts are inconsistent: "+
+				"scope state count %d with %d details, scope row count %d with %d details",
+			state.ScopeStateCount, len(state.ScopeStates),
+			state.ScopeRowCount, len(state.ScopeRows),
+		)
 	}
 	return nil
 }
@@ -741,10 +753,26 @@ func validateMultiScopeProvenanceClient(expected scenarios.ClientDurabilityFact,
 	if expected.RowCount == nil || expected.ProvenanceCount == nil || expected.CheckpointCount == nil || expected.RebuildAttemptCount == nil {
 		return errors.New("authored client facts are incomplete")
 	}
-	if state.ApplicationRowCount != *expected.RowCount || state.ProvenanceCount != *expected.ProvenanceCount || state.ScopeStateCount != *expected.CheckpointCount {
-		return errors.New("durable client counts differ from the authored model")
+	// Name each count that differs. A bare message hides which of the three
+	// disagrees and costs a second run to learn it.
+	differences := make([]string, 0, 3)
+	for _, count := range []struct {
+		name string
+		want uint64
+		got  uint64
+	}{
+		{"row", *expected.RowCount, state.ApplicationRowCount},
+		{"provenance", *expected.ProvenanceCount, state.ProvenanceCount},
+		{"checkpoint", *expected.CheckpointCount, state.ScopeStateCount},
+	} {
+		if count.want != count.got {
+			differences = append(differences, fmt.Sprintf("%s want %d got %d", count.name, count.want, count.got))
+		}
 	}
-	if uint64(len(state.ScopeStates)) != *expected.CheckpointCount || uint64(len(state.ScopeRows)) != *expected.ProvenanceCount {
+	if len(differences) > 0 {
+		return fmt.Errorf("durable client counts differ from the authored model: %s", strings.Join(differences, ", "))
+	}
+	if uint64(len(state.ScopeStates)) != *expected.CheckpointCount {
 		return errors.New("durable client details differ from the authored model")
 	}
 	if state.RebuildAttemptCount != 0 || state.RebuildReceiptCount != *expected.RebuildAttemptCount {
