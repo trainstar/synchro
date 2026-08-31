@@ -52,6 +52,8 @@ async function execute(command: Record<string, unknown>): Promise<string> {
   throw new Error('React Native multi-scope provenance command did not finish');
 }
 
+// This scenario drives six clients through the coordinator, so it needs more
+// than the shared 120 second budget that the slower simulator cannot meet.
 it('executes the multi-scope-provenance coordinator sequence', async () => {
   const { endpoint, token, stageCount } = configuration();
   await device.launchApp({ newInstance: true, delete: true, launchArgs: { synchroConformance: '1' } });
@@ -63,4 +65,4 @@ it('executes the multi-scope-provenance coordinator sequence', async () => {
     result = await execute(next.command);
   }
   throw new Error('React Native multi-scope provenance coordinator did not complete');
-});
+}, 600000);

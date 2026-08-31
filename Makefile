@@ -87,6 +87,7 @@
 	test-rn-pending-cycle-ios \
 	test-rn-pending-cycle-android \
 	test-rn-provenance-android \
+	test-rn-provenance-ios \
 	test-rn-queue-replay-ios \
 	test-rn-queue-replay-android \
 	test-rn-seeded-empty-startup-ios \
@@ -289,6 +290,7 @@ help:
 	@echo "  test-rn-pending-cycle-ios - Run direct React Native pending-cycle through the iOS bridge"
 	@echo "  test-rn-pending-cycle-android - Run direct React Native pending-cycle through the Android bridge"
 	@echo "  test-rn-provenance-android - Run direct React Native multi-scope provenance through the Android bridge"
+	@echo "  test-rn-provenance-ios - Run direct React Native multi-scope provenance through the iOS bridge"
 	@echo "  test-rn-queue-replay-ios - Run direct React Native queue-replay through the iOS bridge"
 	@echo "  test-rn-queue-replay-android - Run direct React Native queue-replay through the Android bridge"
 	@echo "  test-rn-seeded-empty-startup-ios - Run seeded and empty startup through the iOS bridge"
@@ -851,6 +853,16 @@ test-rn-provenance-android: conformance-mod-download test-blackbox-harness test-
 		-expect target_pass \
 		-- go test -tags reactnativeintegration -json ./reactnative -count=1 -timeout=35m \
 			-run '^TestRealReactNativeMultiScopeProvenanceAndroid$$' -args --provision --install
+
+test-rn-provenance-ios: conformance-mod-download test-blackbox-harness rn-seed-asset rn-watchman-reset rn-ios-pods
+	cd clients/react-native/example && npx detox build --configuration ios.sim.debug
+	@set -eu; \
+		$(WARM_CONNECT_ENV) \
+		cd conformance && SYNCHRO_RN_DETOX_CONFIGURATION=ios.sim.debug GOFLAGS= GOWORK=off go run ./cmd/testresult exact \
+		-test TestRealReactNativeMultiScopeProvenanceIOS \
+		-expect target_pass \
+			-- go test -tags reactnativeintegration -json ./reactnative -count=1 -timeout=35m \
+			-run '^TestRealReactNativeMultiScopeProvenanceIOS$$' -args --provision --install
 
 test-rn-seeded-empty-startup-ios: conformance-mod-download test-blackbox-harness build-seed rn-seed-asset rn-watchman-reset rn-ios-pods
 	cd clients/react-native/example && npx detox build --configuration ios.sim.debug
