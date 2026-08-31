@@ -126,6 +126,7 @@ const LOCAL_MUTATION_STATUSES = [
   'superseded_before_send',
   'cancelled_before_send',
   'blocked_by_predecessor',
+  'server_rejected',
 ] as const;
 
 const TRANSPORT_OPERATION_CLASSES: readonly TransportOperationClass[] = [
