@@ -22,7 +22,7 @@ import (
 const (
 	rebuildRequestsScenarioPath  = "conformance/scenarios/performance/rebuild-requests-001.json"
 	rebuildRequestsScenarioID    = "SCN-PERF-REBUILD-REQUESTS-001"
-	rebuildRequestsExchangeCount = 6
+	rebuildRequestsExchangeCount = 7
 )
 
 var rebuildRequestsStepOrder = []scenarios.StepID{

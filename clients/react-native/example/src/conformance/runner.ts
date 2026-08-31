@@ -37,7 +37,11 @@ import {
   isSynchronizeMethod,
 } from './types';
 
-const MAXIMUM_CAPTURE_VALUES = 256;
+// The native runners bound a detail record set at 512 and a row set at 256.
+// React Native held both at 256, so a capture that the other surfaces accept
+// failed here.
+const MAXIMUM_CAPTURE_VALUES = 512;
+const MAXIMUM_CAPTURE_ROWS = 256;
 const MAXIMUM_EVENTS = 256;
 const POLL_INTERVAL_MS = 100;
 const COMPLETION_TIMEOUT_MS = 30000;
@@ -726,8 +730,8 @@ async function captureRows(client: SynchroClient, selectors: RowSelector[]): Pro
       [sqliteBindValue(selector.primary_key)]
     );
     rows.push(...result);
-    if (rows.length > MAXIMUM_CAPTURE_VALUES) {
-      throw new ConformanceCommandError('execution_failed', new Error(`captured ${rows.length} rows, bound is ${MAXIMUM_CAPTURE_VALUES}`));
+    if (rows.length > MAXIMUM_CAPTURE_ROWS) {
+      throw new ConformanceCommandError('execution_failed', new Error(`captured ${rows.length} rows, bound is ${MAXIMUM_CAPTURE_ROWS}`));
     }
   }
   return rows;
