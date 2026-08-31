@@ -199,6 +199,13 @@ enum class LocalMutationStatus {
     SUPERSEDED_BEFORE_SEND,
     CANCELLED_BEFORE_SEND,
     BLOCKED_BY_PREDECESSOR,
+
+    /**
+     * The server rejected this mutation and the client retains it. The mutation
+     * leaves the pending set but stays inspectable, so an application can report
+     * the rejection and recover the authored values.
+     */
+    SERVER_REJECTED,
 }
 
 data class AuthoredMutationField(

@@ -140,6 +140,14 @@ class SynchroClient(private val config: SynchroConfig, context: Context) {
     fun inspectPendingMutations(): List<PendingMutationInspection> =
         changeTracker.inspectPendingMutations()
 
+    /**
+     * Returns every mutation the client retains, including one the server
+     * rejected. A rejected mutation leaves the pending set, so an application
+     * that reports the complete retained ledger reads this instead.
+     */
+    fun inspectRetainedMutations(): List<PendingMutationInspection> =
+        changeTracker.inspectRetainedMutations()
+
     fun inspectRejectedMutations(): List<RejectedMutationInspection> =
         database.readTransaction { db ->
             SynchroMeta.listRejectedMutations(db).map { rejected ->

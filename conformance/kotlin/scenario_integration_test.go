@@ -319,7 +319,14 @@ func resetKotlinPerformanceServer(t *testing.T, ctx context.Context, harness *bl
 			time.Sleep(50 * time.Millisecond)
 		}
 		if !readyObserved {
-			t.Fatalf("wait for Kotlin Android performance extension reset: %v", err)
+			// The loop exits on an unmet condition, not only on an error, so name
+			// every condition. Reporting err alone prints a nil error.
+			t.Fatalf("wait for Kotlin Android performance extension reset phase %d: err %v worker %d prior %d slot %q want %q restartLSN %q slotActive %v restartAtOrAfter %v activeGeneration %d minimum %d pendingGenerations %d noPoison %v",
+				phase, err, ready.WorkerPID, reinstall.PriorWorkerPID,
+				ready.ActiveSlotName, harness.Names().ReplicationSlot,
+				ready.RestartLSN, ready.SlotActive, ready.RestartLSNAtOrAfterReinstall,
+				ready.ActiveRegistryGeneration, minimumGeneration,
+				ready.PendingRegistryGenerationCount, ready.NoValidationFailurePoison)
 		}
 		if phase == 0 {
 			minimumGeneration = ready.ActiveRegistryGeneration

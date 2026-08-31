@@ -443,7 +443,9 @@ private class ClientSession(private val context: Context) : Closeable {
         // read transactions while a staged synchronization can resume writes.
         val pending = when {
             capture.mutationLedgerCount == 0 -> emptyList()
-            capture.mutationLedgerCount <= MAXIMUM_RECORDS -> client.inspectPendingMutations()
+            // The ledger count covers every retained mutation, including one the
+            // server rejected, so the detail list must cover the same set.
+            capture.mutationLedgerCount <= MAXIMUM_RECORDS -> client.inspectRetainedMutations()
             else -> null
         }
         val rejected = when {
