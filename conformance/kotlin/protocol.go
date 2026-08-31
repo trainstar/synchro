@@ -75,6 +75,7 @@ type TypedValue struct {
 
 // Result contains one bounded Kotlin response.
 // Inspection payloads stay raw until a semantic test requests their shape.
+// Failures are validated when the result is decoded.
 type Result struct {
 	Status                          *string                       `json:"status"`
 	RowsAffected                    *int                          `json:"rows_affected"`
@@ -105,7 +106,7 @@ type Result struct {
 	ProvenanceMaintenanceWorkCursor *int64                        `json:"provenance_maintenance_work_cursor"`
 	Events                          json.RawMessage               `json:"events"`
 	EventsOverflowed                bool                          `json:"events_overflowed"`
-	Failure                         json.RawMessage               `json:"failure"`
+	Failure                         *runnerFailure                `json:"failure"`
 	TransportMilestone              json.RawMessage               `json:"transport_milestone"`
 	TransportObservations           *TransportObservationSnapshot `json:"transport_observations"`
 	CallID                          *string                       `json:"call_id"`
@@ -114,6 +115,80 @@ type Result struct {
 	CallErrorCategory               *string                       `json:"call_error_category"`
 	ProcessID                       string                        `json:"process_id"`
 	DatabaseIdentityFingerprint     string                        `json:"database_identity_fingerprint"`
+}
+
+type runnerFailure struct {
+	Operation      string            `json:"operation"`
+	Code           string            `json:"code"`
+	Retryable      bool              `json:"retryable"`
+	Message        string            `json:"message"`
+	RecoveryAction string            `json:"recoveryAction"`
+	Metadata       map[string]string `json:"metadata"`
+}
+
+func (f *runnerFailure) UnmarshalJSON(data []byte) error {
+	var raw struct {
+		Operation      *string            `json:"operation"`
+		Code           *string            `json:"code"`
+		Retryable      *bool              `json:"retryable"`
+		Message        *string            `json:"message"`
+		RecoveryAction *string            `json:"recoveryAction"`
+		Metadata       *map[string]string `json:"metadata"`
+	}
+	if err := decodeStrict(data, &raw); err != nil {
+		return errors.New("decode Kotlin runner failure failed")
+	}
+	if raw.Operation == nil || raw.Code == nil || raw.Retryable == nil || raw.Message == nil || raw.RecoveryAction == nil || raw.Metadata == nil {
+		return errors.New("Kotlin runner failure is incomplete")
+	}
+	if len(*raw.Operation) > 32 || len(*raw.Code) > 64 || len(*raw.Message) > 256 || len(*raw.RecoveryAction) > 32 || len(*raw.Metadata) > 8 {
+		return errors.New("Kotlin runner failure is out of bounds")
+	}
+	if len(*raw.Operation) == 0 || len(*raw.Code) == 0 || len(*raw.RecoveryAction) == 0 {
+		return errors.New("Kotlin runner failure contains an empty field")
+	}
+	if !validRunnerFailureOperation(*raw.Operation) || !validRunnerFailureCode(*raw.Code) || !validRunnerRecoveryAction(*raw.RecoveryAction) {
+		return errors.New("Kotlin runner failure contains an unknown value")
+	}
+	for key, value := range *raw.Metadata {
+		if key == "" || len(key) > 64 || len(value) > 128 {
+			return errors.New("Kotlin runner failure metadata is out of bounds")
+		}
+	}
+	f.Operation = *raw.Operation
+	f.Code = *raw.Code
+	f.Retryable = *raw.Retryable
+	f.Message = *raw.Message
+	f.RecoveryAction = *raw.RecoveryAction
+	f.Metadata = *raw.Metadata
+	return nil
+}
+
+func validRunnerFailureOperation(value string) bool {
+	switch value {
+	case "opening", "connecting", "schema", "pushing", "pulling", "rebuilding", "lifecycle", "database":
+		return true
+	default:
+		return false
+	}
+}
+
+func validRunnerFailureCode(value string) bool {
+	switch value {
+	case "auth_required", "client_retired", "idempotency_conflict", "invalid_request", "invalid_response", "invalid_schema_reference", "invalid_state_transition", "local_database", "schema_application_failed", "sync_integrity_failure", "unsupported_schema", "upgrade_required":
+		return true
+	default:
+		return false
+	}
+}
+
+func validRunnerRecoveryAction(value string) bool {
+	switch value {
+	case "retry", "schema_reset", "none":
+		return true
+	default:
+		return false
+	}
 }
 
 type TransportObservationSnapshot struct {

@@ -50,6 +50,9 @@ type Config struct {
 	TransportCapacity        int
 }
 
+// Failure contains one validated Kotlin client failure.
+type Failure = runnerFailure
+
 // Session owns one adb-forwarded Kotlin instrumentation process.
 type Session struct {
 	config Config

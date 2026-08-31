@@ -103,6 +103,28 @@ func TestDecodeResponseRejectsExtendedOrDuplicateEnvelopes(t *testing.T) {
 	}
 }
 
+func TestDecodeResponseValidatesRunnerFailure(t *testing.T) {
+	validFailure := `{"operation":"connecting","code":"auth_required","retryable":false,"message":"auth failed","recoveryAction":"none","metadata":{"source":"sync"}}`
+	valid := strings.Replace(responseWithObservations(""), `"transport_observations"`, `"failure":`+validFailure+`,"transport_observations"`, 1)
+	result, err := DecodeResponse([]byte(valid))
+	if err != nil {
+		t.Fatalf("valid Kotlin failure failed: %v", err)
+	}
+	if result.Failure == nil || result.Failure.Operation != "connecting" || result.Failure.Code != "auth_required" || result.Failure.Retryable || result.Failure.RecoveryAction != "none" || result.Failure.Metadata["source"] != "sync" {
+		t.Fatalf("decoded Kotlin failure = %+v", result.Failure)
+	}
+	for _, failure := range []string{
+		`{"operation":"connecting","code":"auth_required","retryable":false,"message":"auth failed","recoveryAction":"none"}`,
+		validFailure[:len(validFailure)-1] + `,"unknown":true}`,
+		strings.Replace(validFailure, `"operation":"connecting"`, `"operation":"unknown"`, 1),
+	} {
+		invalid := strings.Replace(responseWithObservations(""), `"transport_observations"`, `"failure":`+failure+`,"transport_observations"`, 1)
+		if _, err := DecodeResponse([]byte(invalid)); err == nil {
+			t.Fatalf("invalid Kotlin failure passed: %s", failure)
+		}
+	}
+}
+
 func TestDecodeResponseValidatesPushMutationCount(t *testing.T) {
 	observation := `{"sequence":1,"operation_class":"push","status_code":200,"error_code":null,"retryable":false,"duration_nanoseconds":1,"request_facts":{"client_generation":1,"schema_version":1,"schema_hash":"` + testDigest + `","mutation_count":2}}`
 	result, err := DecodeResponse([]byte(responseWithObservations(observation)))

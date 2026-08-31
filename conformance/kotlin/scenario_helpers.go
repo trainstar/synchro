@@ -113,6 +113,15 @@ func (p *Platform) scenarioSnapshot(ctx context.Context, client Client) (Result,
 	return captureClientState(ctx, state)
 }
 
+// scenarioFailure returns the latest validated failure for one Kotlin client.
+func (p *Platform) scenarioFailure(ctx context.Context, client Client) (*Failure, error) {
+	snapshot, err := p.scenarioSnapshot(ctx, client)
+	if err != nil {
+		return nil, err
+	}
+	return snapshot.Failure, nil
+}
+
 func resolveKotlinNativeIdentities(aliases []scenarios.NativeIdentityAlias, runtime map[string]json.RawMessage) ([]blackbox.NativeIdentityResolution, error) {
 	observations := make([]blackbox.NativeIdentityObservation, 0)
 	for _, alias := range aliases {

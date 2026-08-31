@@ -2,6 +2,7 @@ package blackbox
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 )
@@ -93,6 +94,165 @@ func (executor *OperatorExecutor) transitionSchemaQueue(ctx context.Context, rem
 		return errors.New("commit schema transition failed")
 	}
 	return nil
+}
+
+type syncedTableRegistration struct {
+	physicalSchema           string
+	physicalRelation         string
+	composition              string
+	membershipFunctionSchema string
+	membershipFunctionName   string
+	pkColumn                 string
+	updatedAtColumn          string
+	deletedAtColumn          string
+	pushPolicy               string
+	syncColumns              []string
+	excludeColumns           []string
+	maxScopeFanout           int
+}
+
+// TransitionSyncedTableField changes one synced table field and preserves its
+// active registration settings in one source transaction.
+func (executor *OperatorExecutor) TransitionSyncedTableField(
+	ctx context.Context, relation, removed, added string,
+) error {
+	if executor == nil || executor.harness == nil || !executor.harness.sourceReady || ctx == nil || relation == "" {
+		return errors.New("operator executor is unavailable")
+	}
+	if (removed == "" && added == "") || removed == added ||
+		(removed != "" && !validSchemaTransitionColumn(removed)) ||
+		(added != "" && !validSchemaTransitionColumn(added)) {
+		return errors.New("schema transition fields are invalid")
+	}
+	database, err := executor.harness.openDatabase(ctx, executor.harness.names.Database, executor.harness.env.Admin, false)
+	if err != nil {
+		return errors.New("open synced schema transition connection failed")
+	}
+	defer database.Close()
+	transaction, err := database.BeginTx(ctx, nil)
+	if err != nil {
+		return errors.New("begin synced schema transition failed")
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = transaction.Rollback()
+		}
+	}()
+
+	var registration syncedTableRegistration
+	var syncColumnsJSON, excludeColumnsJSON string
+	err = transaction.QueryRowContext(ctx, `
+		SELECT registry.physical_schema,
+		       registry.physical_relation,
+		       registry.composition,
+		       registry.membership_function_schema,
+		       registry.membership_function_name,
+		       registry.pk_column,
+		       registry.updated_at_col,
+		       registry.deleted_at_col,
+		       registry.push_policy,
+		       array_to_json(registry.sync_columns)::text,
+		       array_to_json(registry.exclude_columns)::text,
+		       registry.max_scope_fanout
+		FROM synchro.sync_registry registry
+		JOIN synchro.sync_registry_generations generation
+		  ON generation.generation = registry.registry_generation
+		WHERE generation.state = 'active'
+		  AND generation.validated
+		  AND registry.registration_kind = 'synced'
+		  AND registry.table_name = $1`, relation).Scan(
+		&registration.physicalSchema,
+		&registration.physicalRelation,
+		&registration.composition,
+		&registration.membershipFunctionSchema,
+		&registration.membershipFunctionName,
+		&registration.pkColumn,
+		&registration.updatedAtColumn,
+		&registration.deletedAtColumn,
+		&registration.pushPolicy,
+		&syncColumnsJSON,
+		&excludeColumnsJSON,
+		&registration.maxScopeFanout,
+	)
+	if err != nil || registration.physicalSchema == "" || registration.physicalRelation == "" ||
+		registration.composition == "" || registration.membershipFunctionSchema == "" ||
+		registration.membershipFunctionName == "" || registration.pkColumn == "" ||
+		registration.updatedAtColumn == "" || registration.deletedAtColumn == "" ||
+		registration.pushPolicy == "" || registration.maxScopeFanout <= 0 ||
+		json.Unmarshal([]byte(syncColumnsJSON), &registration.syncColumns) != nil ||
+		json.Unmarshal([]byte(excludeColumnsJSON), &registration.excludeColumns) != nil {
+		return errors.New("read active synced table registration failed")
+	}
+
+	if removed != "" {
+		if _, err := transaction.ExecContext(ctx, "ALTER TABLE "+quoteIdentifier(registration.physicalSchema)+"."+quoteIdentifier(registration.physicalRelation)+" DROP COLUMN "+quoteIdentifier(removed)); err != nil {
+			return errors.New("drop synced schema transition field failed")
+		}
+	}
+	if added != "" {
+		// A class 2 addition must accept rows from the earlier schema.
+		if _, err := transaction.ExecContext(ctx, "ALTER TABLE "+quoteIdentifier(registration.physicalSchema)+"."+quoteIdentifier(registration.physicalRelation)+" ADD COLUMN "+quoteIdentifier(added)+" TEXT NULL"); err != nil {
+			return errors.New("add synced schema transition field failed")
+		}
+	}
+
+	registration.syncColumns = transitionSchemaColumns(registration.syncColumns, removed, added)
+	registration.excludeColumns = transitionSchemaColumns(registration.excludeColumns, removed, "")
+	syncColumns := registration.syncColumns
+	excludeColumns := []string{}
+	if len(registration.excludeColumns) != 0 {
+		syncColumns = []string{}
+		excludeColumns = registration.excludeColumns
+	}
+	syncColumnsValue, err := json.Marshal(syncColumns)
+	if err != nil {
+		return errors.New("encode synced schema transition columns failed")
+	}
+	excludeColumnsValue, err := json.Marshal(excludeColumns)
+	if err != nil {
+		return errors.New("encode synced schema transition columns failed")
+	}
+	membershipFunction := quoteIdentifier(registration.membershipFunctionSchema) + "." + quoteIdentifier(registration.membershipFunctionName)
+	physicalRelation := quoteIdentifier(registration.physicalSchema) + "." + quoteIdentifier(registration.physicalRelation)
+	if _, err := transaction.ExecContext(ctx, `SELECT synchro.synchro_register_table(
+		$1, $2, $3, $4, $5, $6, $7,
+		ARRAY(SELECT jsonb_array_elements_text($8::jsonb)),
+		ARRAY(SELECT jsonb_array_elements_text($9::jsonb)), $10
+	)`,
+		physicalRelation,
+		membershipFunction,
+		registration.composition,
+		registration.pkColumn,
+		registration.updatedAtColumn,
+		registration.deletedAtColumn,
+		registration.pushPolicy,
+		string(syncColumnsValue),
+		string(excludeColumnsValue),
+		registration.maxScopeFanout,
+	); err != nil {
+		// The extension reports why it rejected the registration. Dropping that
+		// cause costs one full gate run to learn it again.
+		return fmt.Errorf("stage synced schema transition registry failed: %w", err)
+	}
+	if err := transaction.Commit(); err != nil {
+		return errors.New("commit synced schema transition failed")
+	}
+	committed = true
+	return nil
+}
+
+func transitionSchemaColumns(columns []string, removed, added string) []string {
+	result := make([]string, 0, len(columns)+1)
+	for _, column := range columns {
+		if column != removed {
+			result = append(result, column)
+		}
+	}
+	if added != "" {
+		result = append(result, added)
+	}
+	return result
 }
 
 func validSchemaTransitionColumn(value string) bool {

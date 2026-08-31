@@ -1701,17 +1701,18 @@ func (c *NativeController) publishSchema(ctx context.Context, operation scenario
 	c.mu.Lock()
 	installation := c.installation
 	queueTransition := false
-	if installation != nil && len(installation.tables) == 1 {
-		for _, table := range installation.tables {
+	if installation != nil && len(payload.Tables) == 1 {
+		if table, found := installation.tables[payload.Tables[0].TableID]; found {
 			queueTransition = table.RuntimeName == "cf_schema_queue"
 		}
 	}
 	c.mu.Unlock()
 	var transitionErr error
+	var transitionBinding nativeTableBinding
 	if queueTransition {
 		transitionErr = c.transitionNativeSchemaQueue(ctx, payload)
 	} else {
-		transitionErr = c.harness.Operator().TransitionSchemaQueue(ctx)
+		transitionBinding, transitionErr = c.transitionNativeSyncedTable(ctx, payload)
 	}
 	if transitionErr != nil {
 		return NativeStepObservation{}, fmt.Errorf("apply native runtime schema transition: %w", transitionErr)
@@ -1720,7 +1721,7 @@ func (c *NativeController) publishSchema(ctx context.Context, operation scenario
 	if err != nil {
 		return NativeStepObservation{}, err
 	}
-	var queueBinding nativeTableBinding
+	var reboundBinding nativeTableBinding
 	if queueTransition {
 		if len(payload.Tables) != 1 {
 			return NativeStepObservation{}, errors.New("native schema-queue authored table is invalid")
@@ -1735,7 +1736,22 @@ func (c *NativeController) publishSchema(ctx context.Context, operation scenario
 		if runtimeTable == nil {
 			return NativeStepObservation{}, errors.New("native schema-queue runtime table is absent")
 		}
-		queueBinding, err = bindNativeTable(payload.Tables[0], *runtimeTable)
+		reboundBinding, err = bindNativeTable(payload.Tables[0], *runtimeTable)
+		if err != nil {
+			return NativeStepObservation{}, err
+		}
+	} else {
+		var runtimeTable *nativeRuntimeManifestTable
+		for index := range runtime.Manifest.Tables {
+			if runtime.Manifest.Tables[index].Name == transitionBinding.RuntimeName {
+				runtimeTable = &runtime.Manifest.Tables[index]
+				break
+			}
+		}
+		if runtimeTable == nil {
+			return NativeStepObservation{}, errors.New("native synced-table runtime table is absent")
+		}
+		reboundBinding, err = bindNativeTable(payload.Tables[0], *runtimeTable)
 		if err != nil {
 			return NativeStepObservation{}, err
 		}
@@ -1755,10 +1771,58 @@ func (c *NativeController) publishSchema(ctx context.Context, operation scenario
 	c.installation.currentAuthoredSchema = payload.Schema
 	c.installation.currentRuntimeSchema = runtimeRef
 	c.installation.runtimeRegistryGeneration = runtimeRegistry
-	if queueTransition {
-		c.installation.tables[payload.Tables[0].TableID] = queueBinding
-	}
+	c.installation.tables[payload.Tables[0].TableID] = reboundBinding
 	return nativeSuccess(), nil
+}
+
+func (c *NativeController) transitionNativeSyncedTable(ctx context.Context, payload nativePublishedSchema) (nativeTableBinding, error) {
+	if len(payload.Tables) != 1 {
+		return nativeTableBinding{}, errors.New("native synced-table transition table is invalid")
+	}
+	c.mu.Lock()
+	if c.installation == nil {
+		c.mu.Unlock()
+		return nativeTableBinding{}, errors.New("native controller contract is not installed")
+	}
+	current, found := c.installation.tables[payload.Tables[0].TableID]
+	c.mu.Unlock()
+	if !found || current.AuthoredID != payload.Tables[0].TableID {
+		return nativeTableBinding{}, errors.New("native synced-table transition binding is absent")
+	}
+	nextFields := make(map[string]nativeAuthoredField, len(payload.Tables[0].Fields))
+	for _, field := range payload.Tables[0].Fields {
+		nextFields[field.FieldID] = field
+	}
+	var removedPhysical, addedPhysical, removedAuthored string
+	for authoredField, physicalField := range current.FieldNames {
+		if _, retained := nextFields[authoredField]; !retained {
+			if removedPhysical != "" {
+				return nativeTableBinding{}, errors.New("native synced-table transition removes more than one field")
+			}
+			removedPhysical = physicalField
+			removedAuthored = authoredField
+		}
+	}
+	for _, field := range payload.Tables[0].Fields {
+		if _, retained := current.Fields[field.FieldID]; retained {
+			continue
+		}
+		if addedPhysical != "" {
+			return nativeTableBinding{}, errors.New("native synced-table transition adds more than one field")
+		}
+		addedPhysical = field.Name
+	}
+	if (removedPhysical == "" && addedPhysical == "") || removedPhysical == addedPhysical ||
+		(removedPhysical != "" && !validSchemaTransitionColumn(removedPhysical)) ||
+		(addedPhysical != "" && !validSchemaTransitionColumn(addedPhysical)) {
+		return nativeTableBinding{}, errors.New("native synced-table transition fields are invalid")
+	}
+	if err := c.harness.Operator().TransitionSyncedTableField(ctx, current.RuntimeName, removedPhysical, addedPhysical); err != nil {
+		return nativeTableBinding{}, err
+	}
+	c.retireNativeSchemaField(current.AuthoredID, removedAuthored, current.Fields[removedAuthored])
+	c.rebindNativeTableAfterTransition(current.RuntimeID, nextFields)
+	return current, nil
 }
 
 func (c *NativeController) transitionNativeSchemaQueue(ctx context.Context, payload nativePublishedSchema) error {
@@ -1812,15 +1876,15 @@ func (c *NativeController) transitionNativeSchemaQueue(ctx context.Context, payl
 	// The transition changes the fixture columns. A record binding still names
 	// the removed authored field, and the capture validates every named field
 	// against the runtime row, so the removed field must leave the binding.
-	c.retireSchemaQueueField(authoredTable, removedAuthored, current.Fields[removedAuthored])
-	c.rebindSchemaQueueAfterTransition(current.RuntimeID, nextFields)
+	c.retireNativeSchemaField(authoredTable, removedAuthored, current.Fields[removedAuthored])
+	c.rebindNativeTableAfterTransition(current.RuntimeID, nextFields)
 	return nil
 }
 
-// retireSchemaQueueField keeps the runtime identity of one removed authored
+// retireNativeSchemaField keeps the runtime identity of one removed authored
 // field. The rebound table drops it, and a mutation queued under the earlier
 // schema still records it.
-func (c *NativeController) retireSchemaQueueField(authoredTable, authoredField, runtimeField string) {
+func (c *NativeController) retireNativeSchemaField(authoredTable, authoredField, runtimeField string) {
 	if authoredField == "" || runtimeField == "" {
 		return
 	}
@@ -1835,9 +1899,9 @@ func (c *NativeController) retireSchemaQueueField(authoredTable, authoredField, 
 	c.installation.retiredFields[authoredTable+"\x00"+authoredField] = runtimeField
 }
 
-// rebindSchemaQueueAfterTransition drops each authored field the transition
+// rebindNativeTableAfterTransition drops each authored field the transition
 // removed from the table binding and from every record image that names it.
-func (c *NativeController) rebindSchemaQueueAfterTransition(runtimeTableID string, retained map[string]nativeAuthoredField) {
+func (c *NativeController) rebindNativeTableAfterTransition(runtimeTableID string, retained map[string]nativeAuthoredField) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.installation == nil {

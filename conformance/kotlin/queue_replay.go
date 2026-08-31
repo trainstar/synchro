@@ -216,22 +216,14 @@ func queueRequireSchemaReset(ctx context.Context, platform *Platform, client Cli
 	if err != nil {
 		return fmt.Errorf("observe Kotlin Android queue-replay schema boundary for step %s: %w", stepID, err)
 	}
-	if result.Completion != "blocked" {
+	if result.Completion != "error" {
 		return fmt.Errorf("Kotlin Android queue-replay schema boundary for step %s did not require recovery", stepID)
 	}
-	snapshot, err := platform.scenarioSnapshot(ctx, client)
+	failure, err := platform.scenarioFailure(ctx, client)
 	if err != nil {
 		return fmt.Errorf("inspect Kotlin Android queue-replay schema boundary for step %s: %w", stepID, err)
 	}
-	var failure struct {
-		Operation      string          `json:"operation"`
-		Code           string          `json:"code"`
-		Retryable      bool            `json:"retryable"`
-		Message        string          `json:"message"`
-		RecoveryAction string          `json:"recoveryAction"`
-		Metadata       json.RawMessage `json:"metadata"`
-	}
-	if decodeStrictFact(snapshot.Failure, &failure) != nil || failure.Operation != "schema" || failure.Code != "unsupported_schema" || failure.Retryable || failure.RecoveryAction != "schema_reset" {
+	if failure == nil || failure.Operation != "schema" || failure.Code != "unsupported_schema" || failure.Retryable || failure.RecoveryAction != "schema_reset" {
 		return fmt.Errorf("Kotlin Android queue-replay schema boundary for step %s did not require schema reset", stepID)
 	}
 	return nil

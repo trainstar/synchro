@@ -71,7 +71,10 @@ internal class ClientCallLifecycle(
     }
 
     private fun completion(status: SyncStatus, failure: Throwable?): CallCompletion = when {
-        status is SyncStatus.Error && status.failure.recoveryAction == SyncRecoveryAction.SCHEMA_RESET -> CallCompletion.BLOCKED
+        // A call that throws completes in error. The contract reaches an
+        // explicit schema reset from the error state, so a thrown unsupported
+        // schema is an error rather than a blocked call. A client that holds a
+        // recovery action without throwing stays blocked below.
         failure != null -> CallCompletion.ERROR
         status is SyncStatus.Backoff -> CallCompletion.BLOCKED
         status is SyncStatus.Error && status.failure.recoveryAction != SyncRecoveryAction.NONE -> CallCompletion.BLOCKED

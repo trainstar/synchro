@@ -86,7 +86,9 @@ func RunSteadyPullScenario(ctx context.Context, scenario scenarios.Scenario, con
 			captured, captureErr := captureClientState(ctx, state)
 			state.mu.Unlock()
 			if captureErr == nil {
-				failure = string(captured.Failure)
+				if captured.Failure != nil {
+					failure = fmt.Sprintf("%s/%s/%s", captured.Failure.Operation, captured.Failure.Code, captured.Failure.RecoveryAction)
+				}
 			}
 		}
 		return SteadyPullResult{}, fmt.Errorf("Kotlin Android steady-pull baseline produced %v, want connect, rebuild, and pull (completion %q, steps %d, failure %s)",
