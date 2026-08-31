@@ -96,6 +96,7 @@ const (
 	rebuildRequestsStageAwaitCall
 	rebuildRequestsStageFinalCapture
 	rebuildRequestsStageApplicationRows
+	rebuildRequestsStageComplete
 )
 
 // RebuildRequestsCoordinator drives the authored first-sync rebuild flow through React Native.
@@ -570,8 +571,10 @@ func (c *RebuildRequestsCoordinator) acceptResultLocked(raw json.RawMessage) err
 		}
 		c.process = &process
 	case rebuildRequestsStageAwaitCall:
-		return c.validateCallCompleted(envelope.Result)
+		return c.validateCallBegun(envelope.Result)
 	case rebuildRequestsStageFinalCapture:
+		return c.validateCallCompleted(envelope.Result)
+	case rebuildRequestsStageApplicationRows:
 		capture, err := c.decodeCaptureResult(envelope.Result, []string{
 			"client_state", "pending_mutations", "rejected_mutations", "sync_status", "sync_events", "provenance", "request_trace", "durable_proof",
 		})
@@ -579,7 +582,7 @@ func (c *RebuildRequestsCoordinator) acceptResultLocked(raw json.RawMessage) err
 			return err
 		}
 		c.finalResult = &capture
-	case rebuildRequestsStageApplicationRows:
+	case rebuildRequestsStageComplete:
 		capture, err := c.decodeCaptureResult(envelope.Result, []string{"application_rows"})
 		if err != nil {
 			return err
@@ -636,6 +639,8 @@ func (c *RebuildRequestsCoordinator) advanceLocked(ctx context.Context, sequence
 			"sources":       []string{"application-rows"},
 			"row_selectors": selectors,
 		}, nil)
+		c.stage = rebuildRequestsStageComplete
+	case rebuildRequestsStageComplete:
 		if err := c.validateCompletionLocked(ctx); err != nil {
 			return exchangeResponse{}, err
 		}
@@ -680,6 +685,22 @@ func (c *RebuildRequestsCoordinator) decodeCaptureResult(raw json.RawMessage, ke
 		return finalCapture{}, errors.New("React Native rebuild-requests capture process identity changed")
 	}
 	return capture, nil
+}
+
+func (c *RebuildRequestsCoordinator) validateCallBegun(raw json.RawMessage) error {
+	if err := validateActionResult(raw, "call-begun"); err != nil {
+		return err
+	}
+	var members map[string]json.RawMessage
+	if err := decodeStrictMembers(raw, &members, 3, "React Native rebuild-requests begun call result"); err != nil {
+		return err
+	}
+	var actualID, state string
+	if json.Unmarshal(members["call_id"], &actualID) != nil || actualID != c.callID ||
+		json.Unmarshal(members["state"], &state) != nil || state != "in_flight" {
+		return fmt.Errorf("React Native rebuild-requests begun call is invalid: call_id=%q state=%q, want %q in_flight", actualID, state, c.callID)
+	}
+	return nil
 }
 
 func (c *RebuildRequestsCoordinator) validateCallCompleted(raw json.RawMessage) error {
