@@ -77,7 +77,12 @@ export function ConformanceHarness({
         error_detail: null,
       });
       if (utf8ByteLength(envelope) > MAXIMUM_RESULT_BYTES) {
-        throw new ConformanceCommandError('execution_failed');
+        // Name the size. A capture that outgrows the bound reads as a generic
+        // execution failure otherwise.
+        throw new ConformanceCommandError(
+          'execution_failed',
+          new Error(`result envelope is ${utf8ByteLength(envelope)} bytes, bound is ${MAXIMUM_RESULT_BYTES}`)
+        );
       }
       setResultText(envelope);
       setState('ok');

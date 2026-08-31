@@ -531,8 +531,10 @@ export class PublicConformanceRunner {
       throw invocationError;
     }
     const deadline = Date.now() + COMPLETION_TIMEOUT_MS;
+    let lastStatus = 'none';
     while (Date.now() < deadline) {
       const status = await client.getSyncStatus();
+      lastStatus = status.status;
       if (status.status === 'ready') {
         return { completion: 'idle', status };
       }
@@ -544,7 +546,12 @@ export class PublicConformanceRunner {
       }
       await sleep(POLL_INTERVAL_MS);
     }
-    throw new ConformanceCommandError('execution_failed');
+    // Name the status the client rested in. A bare code cannot separate a slow
+    // synchronization from one that never left its starting state.
+    throw new ConformanceCommandError(
+      'execution_failed',
+      new Error(`sync did not complete within ${COMPLETION_TIMEOUT_MS} ms, last status ${lastStatus}`)
+    );
   }
 
   private async processIdentity(
