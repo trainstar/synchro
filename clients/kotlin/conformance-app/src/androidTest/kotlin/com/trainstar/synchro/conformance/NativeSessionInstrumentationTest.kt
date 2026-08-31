@@ -28,7 +28,10 @@ class NativeSessionInstrumentationTest {
             },
         )
         NativeSession(instrumentation.targetContext).use { session ->
-            server.use {
+            // LocalServerSocket declares no Closeable interface on every
+            // supported Android version, so the server closes explicitly rather
+            // than through a Closeable scope.
+            try {
                 val connection = server.accept()
                 connection.use { socket ->
                     val input = BufferedInputStream(socket.inputStream)
@@ -43,6 +46,8 @@ class NativeSessionInstrumentationTest {
                         output.flush()
                     }
                 }
+            } finally {
+                server.close()
             }
         }
     }

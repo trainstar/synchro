@@ -78,7 +78,19 @@ func RunSteadyPullScenario(ctx context.Context, scenario scenarios.Scenario, con
 		for _, observation := range baseline.transportObservations {
 			observed = append(observed, fmt.Sprintf("%s:%d", observation.OperationClass, observation.StatusCode))
 		}
-		return SteadyPullResult{}, fmt.Errorf("Kotlin Android steady-pull baseline produced %v, want connect, rebuild, and pull", observed)
+		// The completion alone cannot name why the client performed no
+		// transport, so the client failure it recorded accompanies it.
+		failure := "unavailable"
+		if state, stateErr := platform.clientFor(client); stateErr == nil {
+			state.mu.Lock()
+			captured, captureErr := captureClientState(ctx, state)
+			state.mu.Unlock()
+			if captureErr == nil {
+				failure = string(captured.Failure)
+			}
+		}
+		return SteadyPullResult{}, fmt.Errorf("Kotlin Android steady-pull baseline produced %v, want connect, rebuild, and pull (completion %q, steps %d, failure %s)",
+			observed, baseline.Completion, len(baseline.Steps), failure)
 	}
 	if err := validateKotlinSteadyPullBaselineWires(scenario, baseline); err != nil {
 		return SteadyPullResult{}, err

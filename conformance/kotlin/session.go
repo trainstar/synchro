@@ -68,7 +68,7 @@ type Session struct {
 
 	reverseDevicePort int
 	reverseHostPort   int
-	stagedSeedName    string
+	stagedSeedNames   []string
 
 	processID                   string
 	databaseIdentityFingerprint string
@@ -403,10 +403,6 @@ func (s *Session) StageSeed(ctx context.Context, databaseKey, sourcePath string)
 		s.mu.Unlock()
 		return "", errors.New("Kotlin instrumentation session is closed")
 	}
-	if s.stagedSeedName != "" {
-		s.mu.Unlock()
-		return "", errors.New("Android production seed is already staged")
-	}
 	s.mu.Unlock()
 
 	digest := sha256.Sum256([]byte(databaseKey + "\x00" + path))
@@ -424,7 +420,7 @@ func (s *Session) StageSeed(ctx context.Context, databaseKey, sourcePath string)
 		return "", errors.New("copy Android production seed failed")
 	}
 	s.mu.Lock()
-	s.stagedSeedName = name
+	s.stagedSeedNames = append(s.stagedSeedNames, name)
 	s.mu.Unlock()
 	return name, nil
 }
@@ -548,8 +544,8 @@ func (s *Session) Close(ctx context.Context) error {
 	reversePort := s.reverseDevicePort
 	s.reverseDevicePort = 0
 	s.reverseHostPort = 0
-	seedName := s.stagedSeedName
-	s.stagedSeedName = ""
+	seedNames := append([]string(nil), s.stagedSeedNames...)
+	s.stagedSeedNames = nil
 	s.mu.Unlock()
 
 	var failures []error
@@ -561,7 +557,7 @@ func (s *Session) Close(ctx context.Context) error {
 			failures = append(failures, errors.New("remove Android adb reverse failed"))
 		}
 	}
-	if seedName != "" {
+	for _, seedName := range seedNames {
 		if _, err := s.adb(ctx, "shell", "run-as", s.config.ApplicationID, "rm", "-f", "files/"+seedName); err != nil {
 			failures = append(failures, errors.New("remove Android staged seed failed"))
 		}

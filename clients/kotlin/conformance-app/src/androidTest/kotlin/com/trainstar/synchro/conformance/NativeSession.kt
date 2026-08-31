@@ -56,6 +56,72 @@ internal class NativeSession(private val context: Context) : Closeable {
         ignoreUnknownKeys = false
         isLenient = false
     }
+    private val sessions = mutableMapOf<String, ClientSession>()
+
+    fun execute(source: String): String = try {
+        require(source.toByteArray(Charsets.UTF_8).size <= MAXIMUM_COMMAND_BYTES) { "command is too large" }
+        val command = json.parseToJsonElement(source).requireObject("command")
+        val sessionID = command.requiredString("session_id")
+        require(SESSION_ID.matches(sessionID)) { "session ID is invalid" }
+        val clientCommand = JsonObject(command.filterKeys { it != "session_id" })
+        val operation = clientCommand.requiredString("operation")
+        val session = synchronized(sessions) {
+            sessions[sessionID] ?: run {
+                require(operation == "open") { "client session is not open" }
+                ClientSession(context).also { sessions[sessionID] = it }
+            }
+        }
+        val response = session.execute(json.encodeToString(JsonObject.serializer(), clientCommand))
+        // A closed client releases its session identity, so a later open with the
+        // same identity starts a new client rather than reusing a closed one. The
+        // client closes after its response is complete.
+        if (operation == "close") {
+            synchronized(sessions) { sessions.remove(sessionID) }
+            session.close()
+        }
+        response
+    } catch (_: SerializationException) {
+        errorResponse("invalid_command")
+    } catch (_: IllegalArgumentException) {
+        errorResponse("invalid_command")
+    } catch (_: IllegalStateException) {
+        errorResponse("invalid_command")
+    } catch (_: Throwable) {
+        errorResponse("execution_failed")
+    }
+
+    override fun close() {
+        val values = synchronized(sessions) {
+            sessions.values.toList().also { sessions.clear() }
+        }
+        values.forEach { it.close() }
+    }
+
+    private fun errorResponse(code: String): String = json.encodeToString(
+        JsonObject.serializer(),
+        buildJsonObject {
+            put("schema_version", SCHEMA_VERSION)
+            put("outcome", "error")
+            put("result", JsonNull)
+            put("error_code", code)
+        },
+    )
+
+    internal companion object {
+        const val SCHEMA_VERSION = ClientSession.SCHEMA_VERSION
+        const val MAXIMUM_COMMAND_BYTES = ClientSession.MAXIMUM_COMMAND_BYTES
+        const val MAXIMUM_RESPONSE_BYTES = ClientSession.MAXIMUM_RESPONSE_BYTES
+        val CALL_ID = ClientSession.CALL_ID
+        val IDENTIFIER = ClientSession.IDENTIFIER
+        private val SESSION_ID = Regex("[A-Za-z0-9._-]{1,128}")
+    }
+}
+
+private class ClientSession(private val context: Context) : Closeable {
+    private val json = Json {
+        ignoreUnknownKeys = false
+        isLenient = false
+    }
     private val callScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private var client: SynchroClient? = null
     private var eventSubscription: com.trainstar.synchro.Cancellable? = null
@@ -108,6 +174,7 @@ internal class NativeSession(private val context: Context) : Closeable {
         require(command.requiredInt("schema_version") == SCHEMA_VERSION) { "schema version is invalid" }
         return when (command.requiredString("operation")) {
             "open" -> open(command)
+            "close" -> closeClient(command)
             "local-action" -> localAction(command)
             "begin-call" -> beginCall(command)
             "await-call" -> awaitCall(command)
@@ -269,6 +336,17 @@ internal class NativeSession(private val context: Context) : Closeable {
         command.requireOnly("schema_version", "operation", "call_id")
         val observation = runBlocking { calls.await("current", command.requiredCallID()) }
         return callResult(observation)
+    }
+
+    // One instrumentation process serves every client, so releasing one client
+    // closes that client alone. Closing the process would end the other clients
+    // a scenario still holds.
+    private fun closeClient(command: JsonObject): JsonObject {
+        command.requireOnly("schema_version", "operation")
+        requireClient()
+        // The response reports the client state and its observations, so the
+        // client closes only after the caller owns that response.
+        return stateResult()
     }
 
     private fun lifecycle(command: JsonObject): JsonObject {

@@ -30,6 +30,7 @@ const (
 type Request struct {
 	SchemaVersion         int            `json:"schema_version"`
 	Operation             string         `json:"operation"`
+	SessionID             string         `json:"session_id"`
 	DatabaseKey           string         `json:"database_key,omitempty"`
 	DatabaseMode          string         `json:"database_mode,omitempty"`
 	ServerURL             string         `json:"server_url,omitempty"`
@@ -258,10 +259,34 @@ func (s *Session) Execute(ctx context.Context, request Request) (Result, error) 
 	if err != nil {
 		return Result{}, err
 	}
-	if err := s.acceptResult(result); err != nil {
+	if err := s.acceptProcessResult(result); err != nil {
 		return Result{}, err
 	}
 	return result, nil
+}
+
+// Available reports whether the instrumentation process still accepts commands.
+// A killed process accepts none, and a client it served needs no release.
+func (s *Session) Available() bool {
+	if s == nil {
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return !s.closed && s.connection != nil && s.scanner != nil
+}
+
+func (s *Session) acceptProcessResult(result Result) error {
+	if !validProcessID(result.ProcessID) {
+		return errors.New("Kotlin instrumentation process identity is invalid")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.processID != "" && s.processID != result.ProcessID {
+		return errors.New("Kotlin instrumentation process identity changed")
+	}
+	s.processID = result.ProcessID
+	return nil
 }
 
 func writeAll(writer io.Writer, data []byte) error {
@@ -279,7 +304,7 @@ func writeAll(writer io.Writer, data []byte) error {
 }
 
 func validateRequest(request Request) error {
-	if request.SchemaVersion != 1 || request.Operation == "" {
+	if request.SchemaVersion != 1 || request.Operation == "" || !validSessionID(request.SessionID) {
 		return errors.New("Kotlin instrumentation command is invalid")
 	}
 	if len(request.DatabaseKey) > 128 || len(request.ServerURL) > 4096 || len(request.AuthToken) > 16384 || len(request.ClientID) > 128 || len(request.SeedDatabaseName) > 128 || len(request.Platform) > 128 || len(request.AppVersion) > 128 || len(request.LifecycleOperation) > 64 || len(request.TransportOperation) > 64 || len(request.RebuildCursorOverride) > 4096 || len(request.CallID) > 128 || len(request.Method) > 128 || request.PullPageSize < 0 || request.PullPageSize > 1000 || request.PushBatchSize < 0 || request.PushBatchSize > 1000 || request.TransportCapacity < 0 || request.TransportCapacity > 4096 {
@@ -317,6 +342,12 @@ func validateRequest(request Request) error {
 	case "resume-transport-pause", "transport-snapshot":
 		if request.LocalAction != nil || request.LifecycleOperation != "" || request.TransportOperation != "" || request.CallID != "" || request.Method != "" || request.RowSelectors != nil {
 			return errors.New("Kotlin transport control command is invalid")
+		}
+	case "close":
+		// Closing one client releases that client alone. The instrumentation
+		// process serves every client and closes with the platform.
+		if request.LocalAction != nil || request.LifecycleOperation != "" || request.TransportOperation != "" || request.CallID != "" || request.Method != "" || request.RowSelectors != nil {
+			return errors.New("Kotlin close command is invalid")
 		}
 	case "override-rebuild-cursor":
 		if request.RebuildCursorOverride == "" || request.LocalAction != nil || request.LifecycleOperation != "" || request.TransportOperation != "" || request.CallID != "" || request.Method != "" || request.RowSelectors != nil {
@@ -498,6 +529,18 @@ func validCallID(value string) bool {
 	}
 	for _, character := range value[1:] {
 		if (character < 'a' || character > 'z') && (character < '0' || character > '9') && character != '-' && character != '_' {
+			return false
+		}
+	}
+	return true
+}
+
+func validSessionID(value string) bool {
+	if len(value) == 0 || len(value) > 128 {
+		return false
+	}
+	for _, character := range value {
+		if (character < 'a' || character > 'z') && (character < 'A' || character > 'Z') && (character < '0' || character > '9') && character != '.' && character != '_' && character != '-' {
 			return false
 		}
 	}

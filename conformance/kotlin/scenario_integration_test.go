@@ -23,6 +23,7 @@ func TestRealKotlinPerformance(t *testing.T) {
 		runKotlinRebuildCardinality(t)
 		runKotlinForgedCursor(t)
 		runKotlinSeededEmptyStartup(t)
+		runKotlinMultiScopeProvenance(t)
 	})
 }
 
@@ -89,6 +90,57 @@ func runKotlinSeededEmptyStartup(t *testing.T) {
 	if len(result.Clients) != 6 {
 		t.Fatalf("Kotlin Android seeded-empty-startup clients = %d, want 6", len(result.Clients))
 	}
+}
+
+func runKotlinMultiScopeProvenance(t *testing.T) {
+	t.Helper()
+	const scenarioPath = "conformance/scenarios/performance/multi-scope-provenance-001.json"
+	pullPageSize := kotlinMultiScopeProvenancePageSize(t, scenarioPath)
+	ctx, scenario, harness, controller, platform := newKotlinPerformanceFixture(t, scenarioPath, pullPageSize)
+	root := filepath.Join("..", "..")
+	seedToolPath := os.Getenv("SYNCHRO_SEED_TOOL")
+	if seedToolPath == "" {
+		seedToolPath = filepath.Join(root, "bin", "synchro-seed")
+	}
+	stagingDirectory := t.TempDir()
+	if err := os.Chmod(stagingDirectory, 0o700); err != nil {
+		t.Fatalf("make Kotlin Android multi-scope provenance staging directory private: %v", err)
+	}
+	artifact, err := blackbox.NewNativeArtifact(blackbox.NativeArtifactConfig{Harness: harness, SeedToolPath: seedToolPath, StagingDirectory: stagingDirectory})
+	if err != nil {
+		t.Fatalf("create Kotlin Android multi-scope provenance artifact: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := artifact.Close(context.Background()); err != nil {
+			t.Errorf("close Kotlin Android multi-scope provenance artifact: %v", err)
+		}
+	})
+	result, err := RunMultiScopeProvenanceScenario(ctx, scenario, controller, artifact, platform)
+	if err != nil {
+		t.Fatalf("run direct Kotlin Android multi-scope-provenance scenario: %v", err)
+	}
+	if len(result.IdentityResolution) != len(scenario.NativeIdentityAliases) {
+		t.Fatalf("Kotlin Android multi-scope-provenance identity resolutions = %d, want %d", len(result.IdentityResolution), len(scenario.NativeIdentityAliases))
+	}
+}
+
+func kotlinMultiScopeProvenancePageSize(t *testing.T, scenarioPath string) int {
+	t.Helper()
+	repositoryRoot, err := filepath.Abs(filepath.Join("..", ".."))
+	if err != nil {
+		t.Fatalf("resolve Kotlin Android multi-scope provenance repository root: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	scenario, err := scenarios.LoadFile(ctx, repositoryRoot, scenarioPath)
+	if err != nil {
+		t.Fatalf("load Kotlin Android multi-scope provenance authored scenario: %v", err)
+	}
+	pageSize, err := multiScopeProvenancePullPageSize(scenario)
+	if err != nil {
+		t.Fatalf("read Kotlin Android multi-scope provenance authored pull page size: %v", err)
+	}
+	return pageSize
 }
 
 func runKotlinRebuildRequests(t *testing.T) {
@@ -241,6 +293,13 @@ func resetKotlinPerformanceServer(t *testing.T, ctx context.Context, harness *bl
 		}
 		if phase == 0 {
 			minimumGeneration = ready.ActiveRegistryGeneration
+			// A scenario transitions the shared schema-queue field with a data
+			// definition change. The reinstall has cleared every registry
+			// generation, so this is the only point where restoring the
+			// authored column shape invalidates no registration.
+			if err := harness.Operator().RestoreSchemaQueueFixture(ctx); err != nil {
+				t.Fatalf("restore Kotlin Android performance schema-queue fixture: %v", err)
+			}
 			if err := harness.RestoreDiagnosticRegistrations(ctx); err != nil {
 				t.Fatalf("restore Kotlin Android performance source registrations: %v", err)
 			}

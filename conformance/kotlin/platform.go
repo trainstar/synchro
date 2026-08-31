@@ -137,6 +137,7 @@ type Platform struct {
 	installMu sync.Mutex
 	closed    bool
 	installed bool
+	host      *Session
 	clients   map[string]*platformClient
 
 	responseProxy            *httptest.Server
@@ -148,7 +149,7 @@ type platformClient struct {
 	mu sync.Mutex
 
 	client                      Client
-	session                     *Session
+	session                     *clientSession
 	processID                   string
 	databaseIdentityFingerprint string
 	terminated                  bool
@@ -159,6 +160,89 @@ type platformClient struct {
 	maintenanceCursor           int64
 	activeCall                  *pausedCall
 	pendingLoss                 *pendingResponseLoss
+}
+
+// clientSession binds one logical Android database to the shared instrumentation process.
+type clientSession struct {
+	host      *Session
+	platform  *Platform
+	sessionID string
+	tracker   *Session
+}
+
+// releaseHost forgets an instrumentation process so a later install starts a
+// new one. A killed process cannot serve the clients it held.
+func (p *Platform) releaseHost(session *Session) {
+	if p == nil || session == nil {
+		return
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.host == session {
+		p.host = nil
+	}
+}
+
+func (s *clientSession) Execute(ctx context.Context, request Request) (Result, error) {
+	if s == nil || s.host == nil {
+		return Result{}, errors.New("Kotlin Android client session is unavailable")
+	}
+	request.SessionID = s.sessionID
+	result, err := s.host.Execute(ctx, request)
+	if err != nil {
+		return Result{}, err
+	}
+	if err := s.tracker.acceptResult(result); err != nil {
+		return Result{}, err
+	}
+	return result, nil
+}
+
+func (s *clientSession) Checkpoint() uint64 {
+	if s == nil || s.host == nil {
+		return 0
+	}
+	return s.tracker.Checkpoint()
+}
+
+func (s *clientSession) ObservationsAfter(checkpoint uint64) ([]TransportObservation, error) {
+	if s == nil || s.host == nil {
+		return nil, errors.New("Kotlin Android client session is unavailable")
+	}
+	return s.tracker.ObservationsAfter(checkpoint)
+}
+
+// Kill ends the instrumentation process. One process serves every client, so a
+// caller that kills it ends every client the process held. The platform clears
+// the process so a later install starts a new one.
+func (s *clientSession) Kill(ctx context.Context) error {
+	if s == nil || s.host == nil {
+		return errors.New("Kotlin Android client session is unavailable")
+	}
+	if s.platform != nil {
+		s.platform.releaseHost(s.host)
+	}
+	return s.host.Kill(ctx)
+}
+
+func (s *clientSession) WaitForExit(ctx context.Context) error {
+	if s == nil || s.host == nil {
+		return errors.New("Kotlin Android client session is unavailable")
+	}
+	return s.host.WaitForExit(ctx)
+}
+
+// Close releases one client. One instrumentation process serves every client,
+// so closing the process here would end the other clients a scenario still
+// holds. The process closes when the platform closes.
+func (s *clientSession) Close(ctx context.Context) error {
+	if s == nil || s.host == nil || !s.host.Available() {
+		// A killed process released every client it served, so a client it held
+		// needs no further release.
+		return nil
+	}
+	_, err := s.Execute(ctx, Request{Operation: "close"})
+	return err
 }
 
 type operationWindow struct {
@@ -448,71 +532,82 @@ func (p *Platform) Install(ctx context.Context, request InstallRequest) error {
 	p.mu.Unlock()
 
 	p.installMu.Lock()
-	config := p.config
-	if p.isInstalled() {
-		config.ApplicationAPKPath = ""
-		config.InstrumentationAPKPath = ""
-	}
-	session, err := StartSession(ctx, config)
-	if err == nil && !p.isInstalled() {
+	defer p.installMu.Unlock()
+	p.mu.Lock()
+	session := p.host
+	p.mu.Unlock()
+	started := false
+	if session == nil {
+		var err error
+		session, err = StartSession(ctx, p.config)
+		if err != nil {
+			return err
+		}
+		started = true
+		if err := configureAdapterReverse(ctx, session, p.config.ServerURL); err != nil {
+			closeKotlinSession(session)
+			return err
+		}
 		p.mu.Lock()
+		p.host = session
 		p.installed = true
 		p.mu.Unlock()
 	}
-	p.installMu.Unlock()
-	if err != nil {
-		return err
-	}
-	closeSession := func() {
-		cleanup, cancel := context.WithTimeout(context.Background(), cleanupTimeout)
-		defer cancel()
-		_ = session.Close(cleanup)
-	}
-	if err := configureAdapterReverse(ctx, session, p.config.ServerURL); err != nil {
-		closeSession()
-		return err
+	closeStartedSession := func() {
+		if !started {
+			return
+		}
+		closeKotlinSession(session)
+		p.mu.Lock()
+		if p.host == session {
+			p.host = nil
+		}
+		p.mu.Unlock()
 	}
 	seedName := ""
 	if request.Initialization == "seed" {
+		var err error
 		seedName, err = session.StageSeed(ctx, client.DatabaseKey, request.SeedPath)
 		if err != nil {
-			closeSession()
+			closeStartedSession()
 			return err
 		}
 	}
 	state := &platformClient{
 		client:    client,
-		session:   session,
+		session:   &clientSession{host: session, platform: p, sessionID: androidSessionID(client), tracker: &Session{}},
 		selectors: make(map[string]RowSelector),
 	}
 	databaseMode, err := databaseModeForInitialization(request.Initialization)
 	if err != nil {
-		closeSession()
+		closeStartedSession()
 		return err
 	}
 	if _, err := p.openClient(ctx, state, seedName, databaseMode); err != nil {
-		closeSession()
+		closeStartedSession()
 		return err
 	}
 	if request.Initialization == "current" {
 		if err := p.initializeCurrent(ctx, state); err != nil {
-			closeSession()
+			closeStartedSession()
 			return err
 		}
 	}
 
 	p.mu.Lock()
-	defer p.mu.Unlock()
 	if p.closed {
-		closeSession()
+		p.mu.Unlock()
+		closeStartedSession()
 		return errors.New("Kotlin Android platform is closed")
 	}
 	if _, found := p.clients[client.Key]; found {
-		closeSession()
+		p.mu.Unlock()
+		closeStartedSession()
 		return errors.New("Kotlin Android client is already installed")
 	}
 	p.clients[client.Key] = state
 	p.installed = true
+	p.mu.Unlock()
 	return nil
 }
 
@@ -621,6 +716,11 @@ func (p *Platform) initializeCurrent(ctx context.Context, client *platformClient
 func androidDatabaseName(databaseKey string) string {
 	digest := sha256.Sum256([]byte("synchro:android:application-database:v1\x00" + databaseKey))
 	return hex.EncodeToString(digest[:]) + ".sqlite"
+}
+
+func androidSessionID(client Client) string {
+	digest := sha256.Sum256([]byte("synchro:android:instrumentation-session:v1\x00" + client.Key + "\x00" + client.UserID + "\x00" + client.ClientID + "\x00" + client.DatabaseKey))
+	return "s" + hex.EncodeToString(digest[:])
 }
 
 // ApplyStep executes one direct local client operation.
@@ -1325,7 +1425,7 @@ func (p *Platform) restartClient(ctx context.Context, client *platformClient) (R
 		return Result{}, fmt.Errorf("relaunch Kotlin Android client: %w", err)
 	}
 	if err := verifyRestartIdentity(priorProcessID, priorFingerprint, client.processID, client.databaseIdentityFingerprint); err != nil {
-		closeKotlinSession(client.session)
+		closeClientSession(client.session)
 		client.session = nil
 		client.terminated = true
 		return Result{}, err
@@ -1348,16 +1448,29 @@ func (p *Platform) relaunchExistingClient(ctx context.Context, client *platformC
 		closeKotlinSession(session)
 		return Result{}, err
 	}
-	client.session = session
+	p.mu.Lock()
+	p.host = session
+	p.mu.Unlock()
+	client.session = &clientSession{host: session, platform: p, sessionID: androidSessionID(client.client), tracker: &Session{}}
 	opened, err := p.openClient(ctx, client, "", "existing")
 	if err != nil {
 		closeKotlinSession(session)
+		p.mu.Lock()
+		if p.host == session {
+			p.host = nil
+		}
+		p.mu.Unlock()
 		client.session = nil
 		client.terminated = true
 		return Result{}, err
 	}
 	if err := verifyRestartIdentity(priorProcessID, priorFingerprint, client.processID, client.databaseIdentityFingerprint); err != nil {
 		closeKotlinSession(session)
+		p.mu.Lock()
+		if p.host == session {
+			p.host = nil
+		}
+		p.mu.Unlock()
 		client.session = nil
 		client.terminated = true
 		return Result{}, err
@@ -1415,6 +1528,15 @@ func verifyRestartIdentity(priorProcessID, priorFingerprint, processID, fingerpr
 }
 
 func closeKotlinSession(session *Session) {
+	if session == nil {
+		return
+	}
+	cleanup, cancel := context.WithTimeout(context.Background(), cleanupTimeout)
+	defer cancel()
+	_ = session.Close(cleanup)
+}
+
+func closeClientSession(session *clientSession) {
 	if session == nil {
 		return
 	}
@@ -2989,6 +3111,8 @@ func (p *Platform) Close(ctx context.Context) error {
 	p.closed = true
 	proxy := p.responseProxy
 	p.responseProxy = nil
+	host := p.host
+	p.host = nil
 	clients := make([]*platformClient, 0, len(p.clients))
 	for _, client := range p.clients {
 		clients = append(clients, client)
@@ -3002,10 +3126,11 @@ func (p *Platform) Close(ctx context.Context) error {
 		client.session = nil
 		client.terminated = true
 		client.mu.Unlock()
-		if session != nil {
-			if err := session.Close(ctx); err != nil {
-				failures = append(failures, err)
-			}
+		_ = session
+	}
+	if host != nil {
+		if err := host.Close(ctx); err != nil {
+			failures = append(failures, err)
 		}
 	}
 	if proxy != nil {

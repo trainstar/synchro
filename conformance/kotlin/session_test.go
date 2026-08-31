@@ -149,6 +149,7 @@ func TestValidateRequestAcceptsPushBatchSizeForOpenOnly(t *testing.T) {
 	open := Request{
 		SchemaVersion: 1,
 		Operation:     "open",
+		SessionID:     "session-a",
 		DatabaseKey:   "client.sqlite",
 		DatabaseMode:  "create",
 		ServerURL:     "http://127.0.0.1:8090",
@@ -163,14 +164,21 @@ func TestValidateRequestAcceptsPushBatchSizeForOpenOnly(t *testing.T) {
 	if err := validateRequest(open); err == nil {
 		t.Fatal("oversized push batch passed")
 	}
-	nonOpen := Request{SchemaVersion: 1, Operation: "lifecycle", LifecycleOperation: "stop", PushBatchSize: 1}
+	open.PushBatchSize = 1000
+	for _, sessionID := range []string{"", "session id"} {
+		open.SessionID = sessionID
+		if err := validateRequest(open); err == nil {
+			t.Fatalf("invalid session ID passed: %q", sessionID)
+		}
+	}
+	nonOpen := Request{SchemaVersion: 1, Operation: "lifecycle", SessionID: "session-a", LifecycleOperation: "stop", PushBatchSize: 1}
 	if err := validateRequest(nonOpen); err == nil {
 		t.Fatal("push batch size passed outside open")
 	}
 }
 
 func TestValidateRequestAcceptsTransportSnapshotWithoutControlFields(t *testing.T) {
-	request := Request{SchemaVersion: 1, Operation: "transport-snapshot"}
+	request := Request{SchemaVersion: 1, Operation: "transport-snapshot", SessionID: "session-a"}
 	if err := validateRequest(request); err != nil {
 		t.Fatalf("validate transport snapshot: %v", err)
 	}

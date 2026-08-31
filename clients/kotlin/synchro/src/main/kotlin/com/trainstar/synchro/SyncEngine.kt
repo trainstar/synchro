@@ -1375,6 +1375,9 @@ internal class SyncEngine(
             retryable = false,
             message = "The sync operation failed locally.",
             recoveryAction = SyncRecoveryAction.RETRY,
+            // The failure type names the local cause. A generic message alone
+            // cannot be acted on. The type carries no operation payload.
+            metadata = mapOf("cause" to (error::class.qualifiedName ?: "unknown")),
         )
     }
 
