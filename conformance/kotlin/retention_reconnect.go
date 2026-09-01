@@ -731,7 +731,9 @@ func retentionReconnectObservedIdentityValues(aliases []scenarios.NativeIdentity
 			initialPushes++
 		}
 	}
-	if initialPushes != 1 || len(renewal.Transport) != 2 || renewal.Transport[0].OperationClass != "push" || renewal.Transport[1].OperationClass != "connect" {
+	// The initial call records one push per in-call backoff attempt, and the
+	// contract does not bound that count. The renewal pair shape is authored.
+	if initialPushes == 0 || len(renewal.Transport) != 2 || renewal.Transport[0].OperationClass != "push" || renewal.Transport[1].OperationClass != "connect" {
 		return nil, fmt.Errorf("Kotlin Android retention-reconnect transport identity evidence is incomplete: initial %v, renewal %v", retentionReconnectTransportDescription(initial.Transport), retentionReconnectTransportDescription(renewal.Transport))
 	}
 	var generation int64
