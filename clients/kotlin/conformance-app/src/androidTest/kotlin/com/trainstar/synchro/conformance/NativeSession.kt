@@ -15,6 +15,7 @@ import com.trainstar.synchro.SyncEvent
 import com.trainstar.synchro.inspection.TransportPauseBarrierException
 import com.trainstar.synchro.SyncFailure
 import com.trainstar.synchro.SyncStatus
+import com.trainstar.synchro.inspection.ClientStateCaptureInspection
 import com.trainstar.synchro.inspection.RebuildAttemptInspection
 import com.trainstar.synchro.inspection.RebuildReceiptInspection
 import com.trainstar.synchro.inspection.RowMetadataInspection
@@ -51,6 +52,15 @@ import java.util.Locale
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.atomic.AtomicBoolean
 
+private const val MAXIMUM_ERROR_DETAIL_CHARACTERS = 512
+
+private fun boundedErrorDetail(error: Throwable): String {
+    val className = error::class.java.name
+    val message = error.message
+    val detail = if (message.isNullOrEmpty()) className else "$className: $message"
+    return detail.take(MAXIMUM_ERROR_DETAIL_CHARACTERS)
+}
+
 internal class NativeSession(private val context: Context) : Closeable {
     private val json = Json {
         ignoreUnknownKeys = false
@@ -86,8 +96,8 @@ internal class NativeSession(private val context: Context) : Closeable {
         errorResponse("invalid_command")
     } catch (_: IllegalStateException) {
         errorResponse("invalid_command")
-    } catch (_: Throwable) {
-        errorResponse("execution_failed")
+    } catch (error: Throwable) {
+        errorResponse("execution_failed", boundedErrorDetail(error))
     }
 
     override fun close() {
@@ -104,6 +114,18 @@ internal class NativeSession(private val context: Context) : Closeable {
             put("outcome", "error")
             put("result", JsonNull)
             put("error_code", code)
+            put("error_detail", JsonNull)
+        },
+    )
+
+    private fun errorResponse(code: String, detail: String): String = json.encodeToString(
+        JsonObject.serializer(),
+        buildJsonObject {
+            put("schema_version", SCHEMA_VERSION)
+            put("outcome", "error")
+            put("result", JsonNull)
+            put("error_code", code)
+            put("error_detail", detail)
         },
     )
 
@@ -153,8 +175,8 @@ private class ClientSession(private val context: Context) : Closeable {
             errorResponse("invalid_command")
         } catch (_: IllegalStateException) {
             errorResponse("invalid_command")
-        } catch (_: Throwable) {
-            errorResponse("execution_failed")
+        } catch (error: Throwable) {
+            errorResponse("execution_failed", boundedErrorDetail(error))
         }
         return encodeBounded(response)
     }
@@ -407,6 +429,12 @@ private class ClientSession(private val context: Context) : Closeable {
         command.requireOnly("schema_version", "operation", "row_selectors")
         val selectors = command.optionalArray("row_selectors") ?: JsonArray(emptyList())
         require(selectors.size <= MAXIMUM_SELECTORS) { "too many row selectors" }
+        val capture = SynchroInspection(requireClient()).captureState(MAXIMUM_RECORDS)
+        val scopedTables = capture.scopeRows
+            .takeUnless { capture.scopeRowsTruncated }
+            ?.map { it.tableName }
+            ?.toSet()
+            ?: emptySet()
         val rows = buildJsonArray {
             selectors.forEach { value ->
                 val selector = value.requireObject("row selector")
@@ -414,6 +442,7 @@ private class ClientSession(private val context: Context) : Closeable {
                 val table = selector.requiredIdentifier("table_name")
                 val field = selector.requiredIdentifier("primary_key_field")
                 require(!isReservedTable(table)) { "reserved table is unavailable" }
+                if (table in scopedTables) return@forEach
                 val primaryKey = decodeTypedValue(selector.requiredObject("primary_key"))
                 require(primaryKey != null) { "primary key is null" }
                 val selected = try {
@@ -427,18 +456,27 @@ private class ClientSession(private val context: Context) : Closeable {
                 if (selected.size > 1) throw CaptureCardinalityException()
                 selected.firstOrNull()?.let { add(normalizeRow(it)) }
             }
+            scopedTables.sorted().forEach { table ->
+                require(!isReservedTable(table)) { "reserved table is unavailable" }
+                val selected = try {
+                    requireClient().query("SELECT * FROM ${quoteIdentifier(table)}")
+                } catch (_: Throwable) {
+                    throw CaptureQueryException()
+                }
+                selected.forEach { add(normalizeRow(it)) }
+            }
         }
         require(rows.size <= MAXIMUM_ROWS) { "too many captured rows" }
-        return stateResult(applicationRows = rows)
+        return stateResult(applicationRows = rows, captureState = capture)
     }
 
     private fun stateResult(
         rowsAffected: Int? = null,
         applicationRows: JsonArray? = null,
+        captureState: ClientStateCaptureInspection? = null,
     ): JsonObject {
         val client = requireClient()
-        val inspection = SynchroInspection(client)
-        val capture = inspection.captureState(MAXIMUM_RECORDS)
+        val capture = captureState ?: SynchroInspection(client).captureState(MAXIMUM_RECORDS)
         // The atomic capture proves empty detail sets. Do not open separate
         // read transactions while a staged synchronization can resume writes.
         val pending = when {
@@ -899,6 +937,7 @@ private class ClientSession(private val context: Context) : Closeable {
         put("outcome", "passed")
         put("result", result)
         put("error_code", JsonNull)
+        put("error_detail", JsonNull)
     }
 
     private fun errorResponse(code: String): JsonObject = buildJsonObject {
@@ -906,12 +945,24 @@ private class ClientSession(private val context: Context) : Closeable {
         put("outcome", "error")
         put("result", JsonNull)
         put("error_code", code)
+        put("error_detail", JsonNull)
+    }
+
+    private fun errorResponse(code: String, detail: String): JsonObject = buildJsonObject {
+        put("schema_version", SCHEMA_VERSION)
+        put("outcome", "error")
+        put("result", JsonNull)
+        put("error_code", code)
+        put("error_detail", detail)
     }
 
     private fun encodeBounded(response: JsonObject): String {
         val encoded = json.encodeToString(JsonObject.serializer(), response)
         if (encoded.toByteArray(Charsets.UTF_8).size <= MAXIMUM_RESPONSE_BYTES) return encoded
-        return json.encodeToString(JsonObject.serializer(), errorResponse("execution_failed"))
+        return json.encodeToString(
+            JsonObject.serializer(),
+            errorResponse("execution_failed", boundedErrorDetail(IllegalStateException("response exceeds its byte bound"))),
+        )
     }
 
     private fun parseJSON(value: String): JsonElement = try {

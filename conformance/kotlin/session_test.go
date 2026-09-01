@@ -125,6 +125,29 @@ func TestDecodeResponseValidatesRunnerFailure(t *testing.T) {
 	}
 }
 
+func TestDecodeResponseCarriesBoundedCommandErrorDetail(t *testing.T) {
+	detail := "java.lang.IllegalStateException: capture failed"
+	data := `{"schema_version":1,"outcome":"error","result":null,"error_code":"execution_failed","error_detail":"` + detail + `"}`
+	_, err := DecodeResponse([]byte(data))
+	var commandError *CommandError
+	if !errors.As(err, &commandError) {
+		t.Fatalf("decode command error = %v", err)
+	}
+	if commandError.Code != "execution_failed" || commandError.Detail != detail || commandError.Error() != "Kotlin instrumentation command failed: execution_failed: "+detail {
+		t.Fatalf("decoded command error = %+v", commandError)
+	}
+
+	for _, invalid := range []string{
+		`{"schema_version":1,"outcome":"error","result":null,"error_code":"execution_failed","error_detail":true}`,
+		`{"schema_version":1,"outcome":"passed","result":null,"error_code":null,"error_detail":"unexpected"}`,
+		`{"schema_version":1,"outcome":"error","result":null,"error_code":"execution_failed","error_detail":"` + strings.Repeat("x", 513) + `"}`,
+	} {
+		if _, err := DecodeResponse([]byte(invalid)); err == nil {
+			t.Fatalf("invalid command error detail passed: %s", invalid)
+		}
+	}
+}
+
 func TestDecodeResponseValidatesPushMutationCount(t *testing.T) {
 	observation := `{"sequence":1,"operation_class":"push","status_code":200,"error_code":null,"retryable":false,"duration_nanoseconds":1,"request_facts":{"client_generation":1,"schema_version":1,"schema_hash":"` + testDigest + `","mutation_count":2}}`
 	result, err := DecodeResponse([]byte(responseWithObservations(observation)))
@@ -333,7 +356,7 @@ func TestInstallSeedReverseKillAndCleanupCommands(t *testing.T) {
 }
 
 func responseWithObservations(observations string) string {
-	return `{"schema_version":1,"outcome":"passed","result":{"transport_observations":{"observations":[` + observations + `],"overflowed":false,"sequence_checkpoint":` + boolCount(observations) + `},"process_id":"1234","database_identity_fingerprint":"` + testDigest + `"},"error_code":null}`
+	return `{"schema_version":1,"outcome":"passed","result":{"transport_observations":{"observations":[` + observations + `],"overflowed":false,"sequence_checkpoint":` + boolCount(observations) + `},"process_id":"1234","database_identity_fingerprint":"` + testDigest + `"},"error_code":null,"error_detail":null}`
 }
 
 func boolCount(value string) string {

@@ -13,16 +13,18 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/trainstar/synchro/conformance/internal/jsonstrict"
 )
 
 const (
-	maximumRecords                = 512
-	maximumRows                   = 256
-	maximumFields                 = 256
-	maximumSelectors              = 128
-	maximumEncodedTypedValueBytes = 1_398_102
+	maximumRecords                      = 512
+	maximumRows                         = 256
+	maximumFields                       = 256
+	maximumSelectors                    = 128
+	maximumEncodedTypedValueBytes       = 1_398_102
+	maximumCommandErrorDetailCharacters = 512
 )
 
 // Request is one Kotlin instrumentation command.
@@ -286,11 +288,15 @@ func (p *rebuildReceiptProofRecord) UnmarshalJSON(data []byte) error {
 
 // CommandError reports one bounded Kotlin instrumentation error code.
 type CommandError struct {
-	Code string
+	Code   string
+	Detail string
 }
 
 func (e *CommandError) Error() string {
-	return "Kotlin instrumentation command failed: " + e.Code
+	if e.Detail == "" {
+		return "Kotlin instrumentation command failed: " + e.Code
+	}
+	return "Kotlin instrumentation command failed: " + e.Code + ": " + e.Detail
 }
 
 // Execute sends one strict newline-delimited request and validates its response.
@@ -655,10 +661,10 @@ func DecodeResponse(data []byte) (Result, error) {
 		return Result{}, errors.New("decode Kotlin instrumentation response failed")
 	}
 	var envelope map[string]json.RawMessage
-	if err := json.Unmarshal(data, &envelope); err != nil || len(envelope) != 4 {
+	if err := json.Unmarshal(data, &envelope); err != nil || len(envelope) != 5 {
 		return Result{}, errors.New("Kotlin instrumentation response envelope is invalid")
 	}
-	for _, name := range []string{"schema_version", "outcome", "result", "error_code"} {
+	for _, name := range []string{"schema_version", "outcome", "result", "error_code", "error_detail"} {
 		if _, found := envelope[name]; !found {
 			return Result{}, errors.New("Kotlin instrumentation response envelope is incomplete")
 		}
@@ -668,17 +674,28 @@ func DecodeResponse(data []byte) (Result, error) {
 	if json.Unmarshal(envelope["schema_version"], &schemaVersion) != nil || schemaVersion != 1 || json.Unmarshal(envelope["outcome"], &outcome) != nil {
 		return Result{}, errors.New("Kotlin instrumentation response envelope is invalid")
 	}
+	var detail *string
+	if json.Unmarshal(envelope["error_detail"], &detail) != nil || detail != nil && utf8.RuneCountInString(*detail) > maximumCommandErrorDetailCharacters {
+		return Result{}, errors.New("Kotlin instrumentation error detail is invalid")
+	}
 	if outcome == "error" {
 		var code string
 		if !isJSONNull(envelope["result"]) || json.Unmarshal(envelope["error_code"], &code) != nil || !validCommandErrorCode(code) {
 			return Result{}, errors.New("Kotlin instrumentation error response is invalid")
 		}
-		return Result{}, &CommandError{Code: code}
+		return Result{}, &CommandError{Code: code, Detail: commandErrorDetail(detail)}
 	}
-	if outcome != "passed" || !isJSONNull(envelope["error_code"]) {
+	if outcome != "passed" || !isJSONNull(envelope["error_code"]) || detail != nil {
 		return Result{}, errors.New("Kotlin instrumentation passed response is invalid")
 	}
 	return decodeResult(envelope["result"])
+}
+
+func commandErrorDetail(value *string) string {
+	if value == nil {
+		return ""
+	}
+	return *value
 }
 
 func isJSONNull(data []byte) bool {
