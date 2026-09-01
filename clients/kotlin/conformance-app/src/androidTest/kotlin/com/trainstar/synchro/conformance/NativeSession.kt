@@ -429,64 +429,82 @@ private class ClientSession(private val context: Context) : Closeable {
         command.requireOnly("schema_version", "operation", "row_selectors")
         val selectors = command.optionalArray("row_selectors") ?: JsonArray(emptyList())
         require(selectors.size <= MAXIMUM_SELECTORS) { "too many row selectors" }
-        val capture = SynchroInspection(requireClient()).captureState(MAXIMUM_RECORDS)
+        val client = requireClient()
+        val capture = SynchroInspection(client).captureState(MAXIMUM_RECORDS)
+        val retainedMutations = if (capture.mutationLedgerCount <= MAXIMUM_RECORDS) {
+            client.inspectRetainedMutations()
+        } else {
+            null
+        }
+        val rejectedMutations = if (capture.rejectedMutationCount <= MAXIMUM_RECORDS) {
+            client.inspectRejectedMutations()
+        } else {
+            null
+        }
         val scopedTables = capture.scopeRows
             .takeUnless { capture.scopeRowsTruncated }
             ?.map { it.tableName }
             ?.toSet()
             ?: emptySet()
         val rows = buildJsonArray {
-            selectors.forEach { value ->
-                val selector = value.requireObject("row selector")
-                selector.requireOnly("table_name", "primary_key_field", "primary_key")
-                val table = selector.requiredIdentifier("table_name")
-                val field = selector.requiredIdentifier("primary_key_field")
-                require(!isReservedTable(table)) { "reserved table is unavailable" }
-                if (table in scopedTables) return@forEach
-                val primaryKey = decodeTypedValue(selector.requiredObject("primary_key"))
-                require(primaryKey != null) { "primary key is null" }
-                val selected = try {
-                    requireClient().query(
-                        "SELECT * FROM ${quoteIdentifier(table)} WHERE ${quoteIdentifier(field)} = ?",
-                        arrayOf(primaryKey),
-                    )
-                } catch (_: Throwable) {
-                    throw CaptureQueryException()
+            if (capture.applicationRowCount <= MAXIMUM_ROWS) {
+                selectors.forEach { value ->
+                    val selector = value.requireObject("row selector")
+                    selector.requireOnly("table_name", "primary_key_field", "primary_key")
+                    val table = selector.requiredIdentifier("table_name")
+                    val field = selector.requiredIdentifier("primary_key_field")
+                    require(!isReservedTable(table)) { "reserved table is unavailable" }
+                    if (table in scopedTables) return@forEach
+                    val primaryKey = decodeTypedValue(selector.requiredObject("primary_key"))
+                    require(primaryKey != null) { "primary key is null" }
+                    val selected = try {
+                        client.query(
+                            "SELECT * FROM ${quoteIdentifier(table)} WHERE ${quoteIdentifier(field)} = ?",
+                            arrayOf(primaryKey),
+                        )
+                    } catch (_: Throwable) {
+                        throw CaptureQueryException()
+                    }
+                    if (selected.size > 1) throw CaptureCardinalityException()
+                    selected.firstOrNull()?.let { add(normalizeRow(it)) }
                 }
-                if (selected.size > 1) throw CaptureCardinalityException()
-                selected.firstOrNull()?.let { add(normalizeRow(it)) }
-            }
-            scopedTables.sorted().forEach { table ->
-                require(!isReservedTable(table)) { "reserved table is unavailable" }
-                val selected = try {
-                    requireClient().query("SELECT * FROM ${quoteIdentifier(table)}")
-                } catch (_: Throwable) {
-                    throw CaptureQueryException()
+                scopedTables.sorted().forEach { table ->
+                    require(!isReservedTable(table)) { "reserved table is unavailable" }
+                    val selected = try {
+                        client.query("SELECT * FROM ${quoteIdentifier(table)}")
+                    } catch (_: Throwable) {
+                        throw CaptureQueryException()
+                    }
+                    selected.forEach { add(normalizeRow(it)) }
                 }
-                selected.forEach { add(normalizeRow(it)) }
             }
         }
         require(rows.size <= MAXIMUM_ROWS) { "too many captured rows" }
-        return stateResult(applicationRows = rows, captureState = capture)
+        return stateResult(
+            applicationRows = rows,
+            captureState = capture,
+            retainedMutations = retainedMutations,
+            rejectedMutations = rejectedMutations,
+        )
     }
 
     private fun stateResult(
         rowsAffected: Int? = null,
         applicationRows: JsonArray? = null,
         captureState: ClientStateCaptureInspection? = null,
+        retainedMutations: List<PendingMutationInspection>? = null,
+        rejectedMutations: List<RejectedMutationInspection>? = null,
     ): JsonObject {
         val client = requireClient()
         val capture = captureState ?: SynchroInspection(client).captureState(MAXIMUM_RECORDS)
-        // The atomic capture proves empty detail sets. Do not open separate
-        // read transactions while a staged synchronization can resume writes.
-        val pending = when {
+        val pending = retainedMutations ?: when {
             capture.mutationLedgerCount == 0 -> emptyList()
             // The ledger count covers every retained mutation, including one the
             // server rejected, so the detail list must cover the same set.
             capture.mutationLedgerCount <= MAXIMUM_RECORDS -> client.inspectRetainedMutations()
             else -> null
         }
-        val rejected = when {
+        val rejected = rejectedMutations ?: when {
             capture.rejectedMutationCount == 0 -> emptyList()
             capture.rejectedMutationCount <= MAXIMUM_RECORDS -> client.inspectRejectedMutations()
             else -> null
