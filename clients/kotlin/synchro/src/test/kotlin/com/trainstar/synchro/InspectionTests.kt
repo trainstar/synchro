@@ -11,6 +11,7 @@ import com.trainstar.synchro.inspection.ScopeStateInspection
 import com.trainstar.synchro.inspection.SynchroInspection
 import com.trainstar.synchro.inspection.TransportObservationCollector
 import java.util.UUID
+import kotlinx.serialization.ExperimentalSerializationApi
 import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
@@ -57,7 +58,11 @@ class InspectionTests {
         )
 
     private val context = ApplicationProvider.getApplicationContext<Context>()
-    private val wireJSON = Json { encodeDefaults = true }
+    @OptIn(ExperimentalSerializationApi::class)
+    private val wireJSON = Json {
+        encodeDefaults = true
+        explicitNulls = false
+    }
 
     private val table = SchemaTable(
         tableName = "orders",
@@ -369,6 +374,27 @@ class InspectionTests {
     }
 
     @Test
+    fun rebuildReceiptProofTreatsEmptyLocalChecksumAsAbsent() {
+        val fixture = makeRebuildReceiptFixture(recordCount = 0)
+        try {
+            withInternalDatabase(fixture.config) { database ->
+                database.writeTransaction { db ->
+                    SynchroMeta.setScopeLocalChecksum(db, PROOF_SCOPE_ID, "")
+                }
+            }
+
+            val receipt = SynchroInspection(fixture.client)
+                .captureState(maximumRecords = 1)
+                .rebuildReceipts
+                .single()
+            assertEquals(null, receipt.localScopeChecksum)
+            assertEquals(receipt.finalScopeChecksum, receipt.storedScopeChecksum)
+        } finally {
+            closeRebuildReceiptFixture(fixture)
+        }
+    }
+
+    @Test
     fun rebuildReceiptProofAcceptsValidTwoPageReceipts() {
         val fixture = makeRebuildReceiptFixture(recordCount = 3)
         try {
@@ -395,14 +421,19 @@ class InspectionTests {
     @Test
     fun rebuildReceiptProofRejectsUnknownResponseMember() {
         val fixture = makeRebuildReceiptFixture(recordCount = 3)
+        val storedMember = "receipt_content_must_remain_private"
+        val storedContent = "receipt-content-must-remain-private"
         try {
             updateReceiptSource(fixture.config, null) { source ->
-                source.removeSuffix("}") + ",\"unexpected\":true}"
+                source.removeSuffix("}") + ",\"$storedMember\":\"$storedContent\"}"
             }
 
-            assertThrows(SynchroError.InvalidResponse::class.java) {
+            val error = assertThrows(SynchroError.InvalidResponse::class.java) {
                 SynchroInspection(fixture.client).rebuildReceipts()
             }
+            assertTrue(error.details.contains("rebuild response receipt exact shape check failed"))
+            assertFalse(error.details.contains(storedMember))
+            assertFalse(error.details.contains(storedContent))
         } finally {
             closeRebuildReceiptFixture(fixture)
         }

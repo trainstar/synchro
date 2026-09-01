@@ -502,7 +502,8 @@ class SynchroClient(private val config: SynchroConfig, context: Context) {
         val storedScopeChecksum = scope?.checksum?.let {
             checksumKey(decodeExactReceiptJSON(it, ReceiptJSONType.CHECKSUM))
         }
-        val localScopeChecksum = scope?.localChecksum?.let {
+        // Scope invalidation stores an absent local checksum as empty text.
+        val localScopeChecksum = scope?.localChecksum?.takeIf { it.isNotEmpty() }?.let {
             checksumKey(decodeExactReceiptJSON(it, ReceiptJSONType.CHECKSUM))
         }
         return RebuildReceiptInspection(
@@ -524,13 +525,35 @@ class SynchroClient(private val config: SynchroConfig, context: Context) {
     private fun checksumKey(value: ChecksumObject): String =
         "${value.algorithm}:${value.version}:${value.encoding}:${value.digest}"
 
-    private inline fun <reified T> decodeExactReceiptJSON(source: String, type: ReceiptJSONType): T = try {
-        Integrity.validateCanonicalWireJSON(source)
-        val element = RECEIPT_JSON.parseToJsonElement(source)
-        validateReceiptJSONShape(element, type)
-        RECEIPT_JSON.decodeFromString<T>(source)
-    } catch (_: Exception) {
-        throw SynchroError.InvalidResponse("rebuild receipt JSON is invalid")
+    private inline fun <reified T> decodeExactReceiptJSON(source: String, type: ReceiptJSONType): T {
+        try {
+            Integrity.validateCanonicalWireJSON(source)
+        } catch (_: Exception) {
+            throw SynchroError.InvalidResponse(
+                "rebuild ${type.diagnosticName} receipt canonical JSON check failed",
+            )
+        }
+        val element = try {
+            RECEIPT_JSON.parseToJsonElement(source)
+        } catch (_: Exception) {
+            throw SynchroError.InvalidResponse(
+                "rebuild ${type.diagnosticName} receipt exact shape check failed",
+            )
+        }
+        try {
+            validateReceiptJSONShape(element, type)
+        } catch (_: Exception) {
+            throw SynchroError.InvalidResponse(
+                "rebuild ${type.diagnosticName} receipt exact shape check failed",
+            )
+        }
+        return try {
+            RECEIPT_JSON.decodeFromString<T>(source)
+        } catch (_: Exception) {
+            throw SynchroError.InvalidResponse(
+                "rebuild ${type.diagnosticName} receipt deserialization check failed",
+            )
+        }
     }
 
     private fun validateReceiptJSONShape(element: kotlinx.serialization.json.JsonElement, type: ReceiptJSONType) {
@@ -704,7 +727,11 @@ class SynchroClient(private val config: SynchroConfig, context: Context) {
         val finalChecksum: ChecksumObject?,
     )
 
-    private enum class ReceiptJSONType { REQUEST, RESPONSE, CHECKSUM }
+    private enum class ReceiptJSONType(val diagnosticName: String) {
+        REQUEST("request"),
+        RESPONSE("response"),
+        CHECKSUM("checksum"),
+    }
 
 }
 
