@@ -334,6 +334,46 @@ func TestTransportObservationsRequireCompleteOperationFacts(t *testing.T) {
 	}
 }
 
+func TestMappedTransportObservationPreservesServerReportedErrorCode(t *testing.T) {
+	retryable := true
+	generation := int64(1)
+	mutationCount := 1
+	errorCode := "temporary_unavailable"
+	observation := TransportObservation{
+		Sequence:            1,
+		OperationClass:      "push",
+		StatusCode:          503,
+		ErrorCode:           &errorCode,
+		Retryable:           &retryable,
+		DurationNanoseconds: 1,
+		RequestFacts: &TransportRequestFacts{
+			ClientGeneration: &generation,
+			SchemaVersion:    1,
+			SchemaHash:       "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+			MutationCount:    &mutationCount,
+		},
+	}
+
+	mapped, err := mapTransportObservation(observation)
+	if err != nil {
+		t.Fatalf("map transport observation: %v", err)
+	}
+	if mapped.Wire == nil || mapped.Wire.ErrorCode == nil || *mapped.Wire.ErrorCode != errorCode {
+		t.Fatalf("mapped transport error code = %#v", mapped.Wire)
+	}
+}
+
+func TestRetainedMutationDecodesSealedBatchID(t *testing.T) {
+	raw := json.RawMessage(`[{"mutation_id":"mutation-a","local_order":0,"table_id":"items","table_name":"items","record_id":"record-a","primary_key_field_id":"id","primary_key_logical_type":"string","operation":"insert","authored_schema":{"version":1,"hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},"base_version":null,"client_version":"client-version","status":"sealed","sealed_batch_id":"batch-a","authored_fields":[]}]`)
+	var values []retainedMutation
+	if err := decodeFactArray(raw, &values, maximumRecords); err != nil {
+		t.Fatalf("decode retained mutation: %v", err)
+	}
+	if len(values) != 1 || values[0].SealedBatchID == nil || *values[0].SealedBatchID != "batch-a" {
+		t.Fatalf("decoded sealed batch ID = %#v", values)
+	}
+}
+
 func TestAuthoredRequestFactsMustMatchObservedRequest(t *testing.T) {
 	retryable := false
 	protocolVersion := 3

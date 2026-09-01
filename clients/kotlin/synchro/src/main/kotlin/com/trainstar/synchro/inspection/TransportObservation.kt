@@ -108,6 +108,7 @@ data class TransportObservation(
     val sequence: Long,
     @SerialName("operation_class") val operationClass: TransportOperationClass,
     @SerialName("status_code") val statusCode: Int,
+    @SerialName("error_code") val errorCode: String? = null,
     @SerialName("duration_nanoseconds") val durationNanoseconds: Long,
     @SerialName("cursor_fingerprints") val cursorFingerprints: List<String>? = null,
     @SerialName("cursor_fingerprints_complete") val cursorFingerprintsComplete: Boolean? = null,
@@ -291,6 +292,7 @@ class TransportObservationCollector(capacity: Int = 256) {
     internal fun record(
         operationClass: TransportOperationClass,
         statusCode: Int,
+        errorCode: String? = null,
         durationNanoseconds: Long,
         cursorFingerprints: List<String>?,
         cursorFingerprintsComplete: Boolean?,
@@ -307,6 +309,7 @@ class TransportObservationCollector(capacity: Int = 256) {
                     sequence = sequence,
                     operationClass = operationClass,
                     statusCode = statusCode,
+                    errorCode = errorCode,
                     durationNanoseconds = durationNanoseconds,
                     cursorFingerprints = cursorFingerprints,
                     cursorFingerprintsComplete = cursorFingerprintsComplete,

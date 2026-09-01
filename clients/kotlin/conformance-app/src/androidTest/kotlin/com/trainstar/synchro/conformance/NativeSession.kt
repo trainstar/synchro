@@ -512,12 +512,12 @@ private class ClientSession(private val context: Context) : Closeable {
         return buildJsonObject {
             put("observations", buildJsonArray {
                 snapshot.observations.forEach { value ->
-                    val (errorCode, retryable) = transportFailureFacts(value.statusCode, value.operationClass)
+                    val (derivedErrorCode, retryable) = transportFailureFacts(value.statusCode, value.operationClass)
                     add(buildJsonObject {
                         put("sequence", value.sequence)
                         put("operation_class", value.operationClass.name.lowercase(Locale.US))
                         put("status_code", value.statusCode)
-                        put("error_code", errorCode?.let(::JsonPrimitive) ?: JsonNull)
+                        put("error_code", (value.errorCode ?: derivedErrorCode)?.let(::JsonPrimitive) ?: JsonNull)
                         put("retryable", retryable)
                         put("duration_nanoseconds", value.durationNanoseconds)
                         value.cursorFingerprints?.let { fingerprints ->
@@ -593,6 +593,7 @@ private class ClientSession(private val context: Context) : Closeable {
                 put("base_version", value.baseVersion?.let(::JsonPrimitive) ?: JsonNull)
                 put("client_version", value.clientVersion)
                 put("status", value.status.name.lowercase(Locale.US))
+                put("sealed_batch_id", value.sealedBatchID?.let(::JsonPrimitive) ?: JsonNull)
                 put("authored_fields", buildJsonArray {
                     value.authoredFields.sortedBy { it.fieldID }.forEach { field ->
                         add(buildJsonObject {

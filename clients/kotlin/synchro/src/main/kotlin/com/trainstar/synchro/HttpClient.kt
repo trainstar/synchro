@@ -267,6 +267,7 @@ class HttpClient(
                 cursorFingerprintsComplete = cursorFingerprintsComplete,
                 requestFacts = requestFacts,
                 responseBody = if (observedStatusCode == 200) responseBody else null,
+                errorCode = observedErrorCode(observedStatusCode, responseBody),
             )
             observationRecorded = true
             val rebuildCursorOverride = config.transportObservationCollector?.pauseIfArmed(operationClass)
@@ -398,11 +399,13 @@ class HttpClient(
         cursorFingerprintsComplete: Boolean?,
         requestFacts: TransportRequestFacts?,
         responseBody: String? = null,
+        errorCode: String? = null,
     ) {
         val duration = (System.nanoTime() - attemptStarted).coerceAtLeast(1)
         config.transportObservationCollector?.record(
             operationClass = operationClass,
             statusCode = statusCode,
+            errorCode = errorCode,
             durationNanoseconds = duration,
             cursorFingerprints = if (operationClass == TransportOperationClass.PULL) {
                 cursorFingerprints ?: emptyList()
@@ -547,6 +550,11 @@ class HttpClient(
         } catch (_: Exception) {
             null
         }
+    }
+
+    private fun observedErrorCode(statusCode: Int, responseBody: String?): String? {
+        if (statusCode in 200..299 || responseBody == null) return null
+        return decodeProtocolError(responseBody)?.code?.let { json.encodeToString(it).removeSurrounding("\"") }
     }
 
     private fun decodeProtocolError(body: String): ErrorBody? = try {

@@ -15,6 +15,8 @@ import kotlinx.coroutines.test.runTest
 import kotlinx.serialization.ExperimentalSerializationApi
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
+import okhttp3.mockwebserver.MockResponse
+import okhttp3.mockwebserver.MockWebServer
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertSame
@@ -242,6 +244,40 @@ class TransportObservationTests {
         assertEquals(0, observation.statusCode)
         assertTrue(observation.durationNanoseconds > 0)
         assertEquals(null, observation.requestFacts)
+    }
+
+    @Test
+    fun HTTPFailuresPreserveReportedErrorCodes() = runTest {
+        val server = MockWebServer()
+        try {
+            server.enqueue(
+                MockResponse()
+                    .setResponseCode(503)
+                    .setHeader("Retry-After", "1")
+                    .setBody("""{"error":{"code":"temporary_unavailable","message":"temporarily unavailable","retryable":true}}"""),
+            )
+            server.enqueue(MockResponse().setResponseCode(500).setBody("""{"error":"internal error"}"""))
+            server.start()
+            val collector = TransportObservationCollector()
+            val client = HttpClient(
+                SynchroConfig(
+                    dbPath = "",
+                    serverURL = server.url("/").toString().trimEnd('/'),
+                    authProvider = { "test-token" },
+                    clientID = "test-device",
+                    appVersion = "1.0.0",
+                ).withTransportObservation(collector),
+            )
+
+            assertTrue(runCatching { client.fetchSchema() }.exceptionOrNull() is SynchroError.ServerError)
+            assertTrue(runCatching { client.fetchSchema() }.exceptionOrNull() is SynchroError.ServerError)
+
+            val observations = collector.snapshot().observations
+            assertEquals("temporary_unavailable", observations[0].errorCode)
+            assertEquals(null, observations[1].errorCode)
+        } finally {
+            server.shutdown()
+        }
     }
 
     @Test
