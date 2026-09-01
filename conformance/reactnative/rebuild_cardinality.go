@@ -28,6 +28,8 @@ var rebuildCardinalityAliasNames = []string{
 	"items-table",
 }
 
+const rebuildCardinalityApplicationRowBatchSize = 32
+
 type rebuildCardinalityWorkload struct {
 	Profile     string `json:"profile"`
 	ScopeID     string `json:"scope_id"`
@@ -93,6 +95,12 @@ type RebuildCardinalityCoordinator struct {
 	runtimeIDs map[string]json.RawMessage
 	authTokens map[string]string
 	tableName  string
+	primaryKey string
+
+	applicationSelectors   []map[string]any
+	applicationRowKeys     map[string]struct{}
+	applicationRowsSeen    map[string]struct{}
+	applicationSelectorPos int
 
 	mu        sync.Mutex
 	prepared  bool
@@ -114,6 +122,7 @@ const (
 	rebuildCardinalityStageSynchronize
 	rebuildCardinalityStageCapture
 	rebuildCardinalityStageComplete
+	rebuildCardinalityStageApplicationRows
 )
 
 // LoadRebuildCardinalityScenario loads the authored cardinality contract.
@@ -397,7 +406,22 @@ func (c *RebuildCardinalityCoordinator) ExchangeCount() int {
 	if c == nil {
 		return 0
 	}
-	return len(c.config.Scenario.Steps)*3 + 1
+	workloads := c.workloads
+	if len(workloads) != len(c.config.Scenario.Steps) {
+		workloads = make([]rebuildCardinalityWorkload, 0, len(c.config.Scenario.Steps))
+		for _, step := range c.config.Scenario.Steps {
+			workload, err := decodeRebuildCardinalityWorkload(step)
+			if err != nil {
+				return 0
+			}
+			workloads = append(workloads, workload)
+		}
+	}
+	count := 1
+	for _, workload := range workloads {
+		count += 3 + rebuildCardinalityApplicationRowBatchCount(workload.RecordCount)
+	}
+	return count
 }
 
 func (c *RebuildCardinalityCoordinator) Result() (RebuildCardinalityCoordinatorResult, error) {
@@ -528,6 +552,23 @@ func (c *RebuildCardinalityCoordinator) acceptResultLocked(raw json.RawMessage) 
 		if err := c.validateCapture(capture); err != nil {
 			return err
 		}
+		c.applicationSelectors = nil
+		c.applicationRowKeys = nil
+		c.applicationRowsSeen = nil
+		c.applicationSelectorPos = 0
+		c.stage = rebuildCardinalityStageApplicationRows
+	case rebuildCardinalityStageApplicationRows:
+		capture, err := decodeCapture(envelope.Result, []string{"application_rows"})
+		if err != nil {
+			return err
+		}
+		rows, err := decodeRows(capture.Rows)
+		if err != nil {
+			return err
+		}
+		if err := c.acceptApplicationRows(rows); err != nil {
+			return err
+		}
 	default:
 		return errInvalidExchange
 	}
@@ -536,7 +577,7 @@ func (c *RebuildCardinalityCoordinator) acceptResultLocked(raw json.RawMessage) 
 
 func (c *RebuildCardinalityCoordinator) advanceLocked(ctx context.Context, sequence uint64) (exchangeResponse, error) {
 	response := exchangeResponse{SchemaVersion: 1, Sequence: sequence, State: "command"}
-	if c.stage == rebuildCardinalityStageComplete && c.current == len(c.steps) {
+	if c.stage == rebuildCardinalityStageOpen && c.current == len(c.steps) {
 		if err := c.finish(ctx); err != nil {
 			return exchangeResponse{}, err
 		}
@@ -573,11 +614,153 @@ func (c *RebuildCardinalityCoordinator) advanceLocked(ctx context.Context, seque
 		})
 		c.stage = rebuildCardinalityStageComplete
 	case rebuildCardinalityStageComplete:
+		c.stage = rebuildCardinalityStageApplicationRows
+		return c.advanceLocked(ctx, sequence)
+	case rebuildCardinalityStageApplicationRows:
+		if len(c.applicationSelectors) == 0 {
+			if err := c.prepareApplicationRows(ctx, workload); err != nil {
+				return exchangeResponse{}, err
+			}
+		}
+		if c.applicationSelectorPos < len(c.applicationSelectors) {
+			end := c.applicationSelectorPos + rebuildCardinalityApplicationRowBatchSize
+			if end > len(c.applicationSelectors) {
+				end = len(c.applicationSelectors)
+			}
+			selectors := make([]map[string]any, end-c.applicationSelectorPos)
+			copy(selectors, c.applicationSelectors[c.applicationSelectorPos:end])
+			response.Command = c.command(clientKey, clientID, "observer", "capture", map[string]any{
+				"client_keys":   []string{clientKey},
+				"sources":       []string{"application-rows"},
+				"row_selectors": selectors,
+			})
+			return response, nil
+		}
+		if err := c.validateApplicationRows(); err != nil {
+			return exchangeResponse{}, err
+		}
 		c.current++
 		c.stage = rebuildCardinalityStageOpen
+		c.applicationSelectors = nil
+		c.applicationRowKeys = nil
+		c.applicationRowsSeen = nil
+		c.applicationSelectorPos = 0
 		return c.advanceLocked(ctx, sequence)
 	}
 	return response, nil
+}
+
+func rebuildCardinalityApplicationRowBatchCount(recordCount uint64) int {
+	if recordCount == 0 {
+		return 0
+	}
+	return int((recordCount-1)/rebuildCardinalityApplicationRowBatchSize + 1)
+}
+
+func (c *RebuildCardinalityCoordinator) prepareApplicationRows(ctx context.Context, workload rebuildCardinalityWorkload) error {
+	if c.config.Controller == nil {
+		return errors.New("React Native rebuild-cardinality application row server evidence is unavailable")
+	}
+	clientID := c.steps[c.current].NativeBinding.ClientID
+	clientKey := "rebuild-cardinality-" + clientID
+	captures, err := c.config.Controller.Capture(ctx, []string{clientKey}, []string{"server-state"})
+	if err != nil || len(captures) != 1 {
+		return fmt.Errorf("capture React Native rebuild-cardinality application row server evidence: %w", nativeResultError(err, ""))
+	}
+	server := captures[0].StateFacts
+	if server.RowCount == nil || *server.RowCount != workload.RecordCount || len(server.Rows) != int(workload.RecordCount) {
+		return fmt.Errorf("React Native rebuild-cardinality application row server evidence count=%d want=%d details=%d", valueOrZero(server.RowCount), workload.RecordCount, len(server.Rows))
+	}
+	if len(c.steps[c.current].NativeBinding.Workload.Targets) != 1 {
+		return errors.New("React Native rebuild-cardinality application row target is invalid")
+	}
+	target := c.steps[c.current].NativeBinding.Workload.Targets[0]
+	rows := append([]scenarios.RowFact(nil), server.Rows...)
+	sort.Slice(rows, func(left, right int) bool { return rows[left].CanonicalWireJSON < rows[right].CanonicalWireJSON })
+	aliases := make([]scenarios.NativeIdentityAlias, 0, len(rows))
+	for index, row := range rows {
+		if row.TableID != target.TableID || row.CanonicalWireJSON == "" || !json.Valid([]byte(row.CanonicalWireJSON)) {
+			return fmt.Errorf("React Native rebuild-cardinality application row %d server identity is invalid", index+1)
+		}
+		aliases = append(aliases, scenarios.NativeIdentityAlias{
+			Kind:  "primary-key",
+			Alias: fmt.Sprintf("rebuild-cardinality-row-%d", index+1),
+			Value: json.RawMessage(row.CanonicalWireJSON),
+		})
+	}
+	values, err := c.config.Controller.IdentityValues(aliases)
+	if err != nil || len(values) != len(aliases) {
+		return fmt.Errorf("resolve React Native rebuild-cardinality application row server identities: %w", nativeResultError(err, ""))
+	}
+	selectors := make([]map[string]any, 0, len(values))
+	rowKeys := make(map[string]struct{}, len(values))
+	primaryKey := ""
+	for index, value := range values {
+		if value.Kind != "primary-key" || value.ApplicationIdentifier == "" || !json.Valid(value.RuntimeValue) {
+			return fmt.Errorf("React Native rebuild-cardinality application row %d runtime identity is invalid", index+1)
+		}
+		if primaryKey == "" {
+			primaryKey = value.ApplicationIdentifier
+		} else if primaryKey != value.ApplicationIdentifier {
+			return errors.New("React Native rebuild-cardinality application row primary-key identity changed")
+		}
+		var recordID string
+		if json.Unmarshal(value.RuntimeValue, &recordID) != nil || recordID == "" {
+			return fmt.Errorf("React Native rebuild-cardinality application row %d runtime primary key is invalid", index+1)
+		}
+		if _, duplicate := rowKeys[recordID]; duplicate {
+			return errors.New("React Native rebuild-cardinality application row runtime identities are duplicated")
+		}
+		rowKeys[recordID] = struct{}{}
+		selectors = append(selectors, map[string]any{
+			"table_name": c.tableName, "primary_key_field": primaryKey, "primary_key": recordID,
+		})
+	}
+	if len(selectors) != int(workload.RecordCount) || primaryKey == "" {
+		return fmt.Errorf("React Native rebuild-cardinality application row selectors=%d want=%d", len(selectors), workload.RecordCount)
+	}
+	c.primaryKey = primaryKey
+	c.applicationSelectors = selectors
+	c.applicationRowKeys = rowKeys
+	c.applicationRowsSeen = make(map[string]struct{}, len(rowKeys))
+	return nil
+}
+
+func (c *RebuildCardinalityCoordinator) acceptApplicationRows(rows []map[string]json.RawMessage) error {
+	if len(c.applicationSelectors) == 0 || c.applicationRowKeys == nil || c.applicationRowsSeen == nil || c.primaryKey == "" {
+		return errors.New("React Native rebuild-cardinality application row selectors are unavailable")
+	}
+	start := c.applicationSelectorPos
+	end := start + rebuildCardinalityApplicationRowBatchSize
+	if end > len(c.applicationSelectors) {
+		end = len(c.applicationSelectors)
+	}
+	if len(rows) != end-start {
+		return fmt.Errorf("React Native rebuild-cardinality application row batch rows=%d want=%d", len(rows), end-start)
+	}
+	for index, row := range rows {
+		raw, found := row[c.primaryKey]
+		var recordID string
+		if !found || json.Unmarshal(raw, &recordID) != nil || recordID == "" {
+			return fmt.Errorf("React Native rebuild-cardinality application row %d runtime primary key is invalid", start+index+1)
+		}
+		if _, expected := c.applicationRowKeys[recordID]; !expected {
+			return fmt.Errorf("React Native rebuild-cardinality application row %d is not in server evidence", start+index+1)
+		}
+		if _, duplicate := c.applicationRowsSeen[recordID]; duplicate {
+			return fmt.Errorf("React Native rebuild-cardinality application row %d runtime identity is duplicated", start+index+1)
+		}
+		c.applicationRowsSeen[recordID] = struct{}{}
+	}
+	c.applicationSelectorPos = end
+	return nil
+}
+
+func (c *RebuildCardinalityCoordinator) validateApplicationRows() error {
+	if len(c.applicationRowsSeen) != len(c.applicationRowKeys) || c.applicationSelectorPos != len(c.applicationSelectors) {
+		return fmt.Errorf("React Native rebuild-cardinality application rows=%d want=%d selectors=%d consumed=%d", len(c.applicationRowsSeen), len(c.applicationRowKeys), len(c.applicationSelectors), c.applicationSelectorPos)
+	}
+	return nil
 }
 
 func (c *RebuildCardinalityCoordinator) command(key, clientID, actor, name string, parameters map[string]any) *conformanceCommand {

@@ -533,7 +533,10 @@ export class PublicConformanceRunner {
     invocationError?: Error
   ): Promise<CompletionObservation> {
     if (invocationError !== undefined) {
-      throw invocationError;
+      // A call that throws completes in error, as the native runners record it.
+      // The contract reaches an explicit schema reset from the error state, so a
+      // thrown unsupported schema is an error completion, not a rejected command.
+      return { completion: 'error', status: await client.getSyncStatus() };
     }
     const deadline = Date.now() + COMPLETION_TIMEOUT_MS;
     let lastStatus = 'none';

@@ -62,7 +62,7 @@ func TestNewRebuildRequestsCoordinatorKeepsAndroidSidecarOnHostLoopback(t *testi
 	if !strings.HasPrefix(coordinator.adapter, "http://10.0.2.2:") {
 		t.Fatalf("Android rebuild-requests adapter URL = %q", coordinator.adapter)
 	}
-	if got, want := coordinator.ExchangeCount(), rebuildRequestsExchangeCount; got != want {
+	if got, want := coordinator.ExchangeCount(), int(rebuildRequestsStageComplete)+1; got != want {
 		t.Fatalf("rebuild-requests exchange count = %d, want %d", got, want)
 	}
 }

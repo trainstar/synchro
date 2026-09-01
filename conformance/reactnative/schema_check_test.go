@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -195,6 +196,30 @@ func TestSchemaCheckSynchronizationCommandsCarryAuthoredStartStep(t *testing.T) 
 		if operation.ContractOperation != call.step.Operation.ContractOperation || operation.Name != call.step.Operation.Name || !semanticRawJSONEqual(operation.Payload, call.step.Operation.Payload) {
 			t.Fatalf("schema-check step=%s operation=%#v want=%#v", call.step.ID, operation, call.step.Operation)
 		}
+	}
+}
+
+func TestSchemaCheckCaptureOmitsUndeclaredDurableProof(t *testing.T) {
+	coordinator, err := NewSchemaCheckCoordinator(SchemaCheckCoordinatorConfig{
+		Scenario: loadSchemaCheckAuthoredScenario(t), Platform: "ios", ServerURL: "http://127.0.0.1:8080", AuthToken: "unit-token",
+	})
+	if err != nil {
+		t.Fatalf("create schema-check coordinator: %v", err)
+	}
+	defer func() { _ = coordinator.Close(context.Background()) }()
+	coordinator.waiting = schemaCheckWaitingSync
+	response, err := coordinator.advanceLocked(context.Background(), 1)
+	if err != nil || response.Command == nil {
+		t.Fatalf("create schema-check capture command: command=%#v error=%v", response.Command, err)
+	}
+	parameters := response.Command.Action.Action.Parameters
+	sources, ok := parameters["sources"].([]string)
+	want := []string{"scope-state", "sync-status", "sync-events", "request-trace"}
+	if !ok || !slices.Equal(sources, want) {
+		t.Fatalf("schema-check capture sources=%#v want=%#v", parameters["sources"], want)
+	}
+	if _, found := parameters["durable_proof_identity"]; found {
+		t.Fatalf("schema-check capture included an undeclared durable proof identity")
 	}
 }
 

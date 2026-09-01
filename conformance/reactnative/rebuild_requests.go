@@ -20,9 +20,8 @@ import (
 )
 
 const (
-	rebuildRequestsScenarioPath  = "conformance/scenarios/performance/rebuild-requests-001.json"
-	rebuildRequestsScenarioID    = "SCN-PERF-REBUILD-REQUESTS-001"
-	rebuildRequestsExchangeCount = 7
+	rebuildRequestsScenarioPath = "conformance/scenarios/performance/rebuild-requests-001.json"
+	rebuildRequestsScenarioID   = "SCN-PERF-REBUILD-REQUESTS-001"
 )
 
 var rebuildRequestsStepOrder = []scenarios.StepID{
@@ -453,7 +452,7 @@ func (c *RebuildRequestsCoordinator) ExchangeCount() int {
 	if c == nil {
 		return 0
 	}
-	return rebuildRequestsExchangeCount
+	return int(rebuildRequestsStageComplete) + 1
 }
 
 func (c *RebuildRequestsCoordinator) Result() (RebuildRequestsCoordinatorResult, error) {

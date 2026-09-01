@@ -3,6 +3,7 @@ package reactnative
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -61,8 +62,57 @@ func TestNewRebuildCardinalityCoordinatorKeepsAndroidSidecarOnHostLoopback(t *te
 	if !strings.HasPrefix(coordinator.adapter, "http://10.0.2.2:") {
 		t.Fatalf("Android rebuild-cardinality adapter URL = %q", coordinator.adapter)
 	}
-	if got, want := coordinator.ExchangeCount(), len(coordinator.config.Scenario.Steps)*3+1; got != want {
+	want := 1
+	for _, step := range coordinator.config.Scenario.Steps {
+		workload, err := decodeRebuildCardinalityWorkload(step)
+		if err != nil {
+			t.Fatalf("decode rebuild-cardinality workload: %v", err)
+		}
+		want += 3 + rebuildCardinalityApplicationRowBatchCount(workload.RecordCount)
+	}
+	if got := coordinator.ExchangeCount(); got != want {
 		t.Fatalf("rebuild-cardinality exchange count = %d, want %d", got, want)
+	}
+}
+
+func TestRebuildCardinalityApplicationRowCommandsUseBoundedBatches(t *testing.T) {
+	scenario := loadRebuildCardinalityAuthoredScenario(t)
+	step := scenario.Steps[3]
+	selectors := make([]map[string]any, 101)
+	rowKeys := make(map[string]struct{}, len(selectors))
+	for index := range selectors {
+		recordID := fmt.Sprintf("runtime-row-%03d", index+1)
+		selectors[index] = map[string]any{
+			"table_name": "runtime_items", "primary_key_field": "runtime_id", "primary_key": recordID,
+		}
+		rowKeys[recordID] = struct{}{}
+	}
+	coordinator := &RebuildCardinalityCoordinator{
+		config:               RebuildCardinalityCoordinatorConfig{Scenario: scenario},
+		adapter:              "http://127.0.0.1:8080",
+		steps:                []scenarios.Step{step},
+		workloads:            []rebuildCardinalityWorkload{{Profile: "scope_cardinality", ScopeID: "scope-a", RecordCount: 101, PageSize: 100}},
+		authTokens:           map[string]string{step.NativeBinding.ClientID: "unit-token"},
+		applicationSelectors: selectors,
+		applicationRowKeys:   rowKeys,
+		applicationRowsSeen:  make(map[string]struct{}, len(rowKeys)),
+		primaryKey:           "runtime_id",
+		stage:                rebuildCardinalityStageApplicationRows,
+	}
+	response, err := coordinator.advanceLocked(context.Background(), 1)
+	if err != nil {
+		t.Fatalf("advance rebuild-cardinality application rows: %v", err)
+	}
+	parameters := response.Command.Action.Action.Parameters
+	got, ok := parameters["row_selectors"].([]map[string]any)
+	if !ok {
+		t.Fatalf("rebuild-cardinality row selectors type = %T", parameters["row_selectors"])
+	}
+	if len(got) != rebuildCardinalityApplicationRowBatchSize {
+		t.Fatalf("rebuild-cardinality row selector batch = %d, want %d", len(got), rebuildCardinalityApplicationRowBatchSize)
+	}
+	if coordinator.applicationSelectorPos != 0 {
+		t.Fatalf("rebuild-cardinality selector position advanced before result: %d", coordinator.applicationSelectorPos)
 	}
 }
 

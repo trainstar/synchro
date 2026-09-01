@@ -827,9 +827,10 @@ func (c *SchemaCheckCoordinator) advanceLocked(ctx context.Context, sequence uin
 		}, []scenarios.StepID{call.step.ID})
 	case schemaCheckWaitingSync:
 		c.waiting = schemaCheckWaitingCapture
+		// The scenario declares no application record, so it cannot supply the durable-proof identity required by the runner.
 		response.Command = c.command(call, "observer", "capture", map[string]any{
 			"client_keys": []string{call.sessionKey},
-			"sources":     []string{"scope-state", "sync-status", "sync-events", "request-trace", "durable-proof"},
+			"sources":     []string{"scope-state", "sync-status", "sync-events", "request-trace"},
 		}, nil)
 	default:
 		return exchangeResponse{}, errInvalidExchange
@@ -892,7 +893,7 @@ func (c *SchemaCheckCoordinator) validateSynchronized(call schemaCheckCall, raw 
 }
 
 func (c *SchemaCheckCoordinator) validateCapture(call schemaCheckCall, raw json.RawMessage) (finalCapture, error) {
-	capture, err := decodeCapture(raw, []string{"client_state", "sync_status", "sync_events", "request_trace", "durable_proof"})
+	capture, err := decodeCapture(raw, []string{"client_state", "sync_status", "sync_events", "request_trace"})
 	if err != nil {
 		return finalCapture{}, err
 	}
