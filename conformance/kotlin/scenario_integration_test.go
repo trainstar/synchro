@@ -24,6 +24,7 @@ func TestRealKotlinPerformance(t *testing.T) {
 		runKotlinForgedCursor(t)
 		runKotlinPushResponseLoss(t)
 		runKotlinSchemaQueuedMutation(t)
+		runKotlinSchemaCheck(t)
 		// A scenario that holds a seed artifact runs last. Its artifact closes
 		// after the body returns, so it cannot reset the server for a successor.
 		runKotlinSeededEmptyStartup(t)
@@ -169,6 +170,21 @@ func runKotlinSchemaQueuedMutation(t *testing.T) {
 	}
 	if len(result.IdentityResolution) != len(scenario.NativeIdentityAliases) {
 		t.Fatalf("Kotlin Android schema-queued-mutation identity resolutions = %d, want %d", len(result.IdentityResolution), len(scenario.NativeIdentityAliases))
+	}
+	resetKotlinPerformanceServer(t, ctx, harness)
+}
+
+func runKotlinSchemaCheck(t *testing.T) {
+	t.Helper()
+	ctx, scenario, harness, controller, platform := newKotlinPerformanceFixture(t, "conformance/scenarios/performance/schema-check-001.json", 0)
+	result, err := RunSchemaCheckScenario(ctx, scenario, controller, platform)
+	if err != nil {
+		t.Fatalf("run direct Kotlin Android schema-check scenario: %v", err)
+	}
+	// The consumer binds one public call to each authored wire expectation, so a
+	// short call list means the run skipped an authored schema transition.
+	if len(result.Calls) != len(scenario.WireExpectations) {
+		t.Fatalf("Kotlin Android schema-check calls = %d, want %d", len(result.Calls), len(scenario.WireExpectations))
 	}
 	resetKotlinPerformanceServer(t, ctx, harness)
 }
