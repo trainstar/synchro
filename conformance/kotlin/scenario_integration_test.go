@@ -23,6 +23,7 @@ func TestRealKotlinPerformance(t *testing.T) {
 		runKotlinRebuildCardinality(t)
 		runKotlinForgedCursor(t)
 		runKotlinPushResponseLoss(t)
+		runKotlinRetentionReconnect(t)
 		runKotlinSchemaQueuedMutation(t)
 		runKotlinSchemaCheck(t)
 		// A scenario that holds a seed artifact runs last. Its artifact closes
@@ -157,6 +158,19 @@ func runKotlinPushResponseLoss(t *testing.T) {
 	}
 	if len(result.IdentityResolution) != len(scenario.NativeIdentityAliases) {
 		t.Fatalf("Kotlin Android push-response-loss identity resolutions = %d, want %d", len(result.IdentityResolution), len(scenario.NativeIdentityAliases))
+	}
+	resetKotlinPerformanceServer(t, ctx, harness)
+}
+
+func runKotlinRetentionReconnect(t *testing.T) {
+	t.Helper()
+	ctx, scenario, harness, controller, platform := newKotlinPerformanceFixture(t, "conformance/scenarios/server/retention-reconnect-001.json", 1)
+	result, err := RunRetentionReconnectScenario(ctx, scenario, controller, platform, Client{Key: "client-a", UserID: "user-a", ClientID: "client-a", DatabaseKey: "retention-reconnect-client-a"})
+	if err != nil {
+		t.Fatalf("run direct Kotlin Android retention-reconnect scenario: %v", err)
+	}
+	if len(result.IdentityResolution) != len(scenario.NativeIdentityAliases) {
+		t.Fatalf("Kotlin Android retention-reconnect identity resolutions = %d, want %d", len(result.IdentityResolution), len(scenario.NativeIdentityAliases))
 	}
 	resetKotlinPerformanceServer(t, ctx, harness)
 }
