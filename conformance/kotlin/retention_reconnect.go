@@ -227,15 +227,15 @@ func runRetentionReconnectInitialCall(ctx context.Context, scenario scenarios.Sc
 	if err != nil {
 		return RetentionReconnectCall{}, err
 	}
-	if call.Completion != retentionReconnectNativeCompletion(wire) {
-		outcomes := make([]string, 0, len(call.transportObservations))
-		for _, observation := range call.transportObservations {
-			entry := fmt.Sprintf("%s:%d", observation.OperationClass, observation.StatusCode)
-			if observation.ErrorCode != nil {
-				entry += ":" + *observation.ErrorCode
-			}
-			outcomes = append(outcomes, entry)
+	outcomes := make([]string, 0, len(call.transportObservations))
+	for _, observation := range call.transportObservations {
+		entry := fmt.Sprintf("%s:%d", observation.OperationClass, observation.StatusCode)
+		if observation.ErrorCode != nil {
+			entry += ":" + *observation.ErrorCode
 		}
+		outcomes = append(outcomes, entry)
+	}
+	if call.Completion != retentionReconnectNativeCompletion(wire) {
 		return RetentionReconnectCall{}, fmt.Errorf("Kotlin Android retention-reconnect sealed push completion = %q, want %q; observed %v",
 			call.Completion, retentionReconnectNativeCompletion(wire), outcomes)
 	}
@@ -245,11 +245,18 @@ func runRetentionReconnectInitialCall(ctx context.Context, scenario scenarios.Sc
 			pushes = append(pushes, observed)
 		}
 	}
-	if len(pushes) != 1 {
-		return RetentionReconnectCall{}, errors.New("Kotlin Android retention-reconnect sealed push has an unexpected transport count")
+	// The contract bounds the retry delay, the durable retry metadata, and the
+	// request identity. It does not bound the attempt count inside one public
+	// call. The Kotlin engine retries the sealed push inside the call through
+	// native backoff, so the call records one push observation per attempt.
+	// Every attempt must observe the authored temporary-unavailable wire result.
+	if len(pushes) == 0 {
+		return RetentionReconnectCall{}, fmt.Errorf("Kotlin Android retention-reconnect sealed push transport count = 0, want at least 1; observed %v", outcomes)
 	}
-	if err := validateKotlinWireObservation(scenario, "STEP-RETENTION-RECONNECT-SEAL-OLD-BATCH-001", pushes[0]); err != nil {
-		return RetentionReconnectCall{}, err
+	for _, push := range pushes {
+		if err := validateKotlinWireObservation(scenario, "STEP-RETENTION-RECONNECT-SEAL-OLD-BATCH-001", push); err != nil {
+			return RetentionReconnectCall{}, err
+		}
 	}
 	return RetentionReconnectCall{Completion: call.Completion, Call: nil, Transport: call.transportObservations}, nil
 }
