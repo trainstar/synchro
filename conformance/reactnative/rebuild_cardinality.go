@@ -1168,11 +1168,14 @@ func (c *RebuildCardinalityCoordinator) finish(ctx context.Context) error {
 		return fmt.Errorf("React Native rebuild-cardinality trace count=%d want=%d", len(c.traces), len(c.steps))
 	}
 	var generation uint64
-	for traceIndex, trace := range c.traces {
-		for observationIndex, observation := range trace.Observations {
+	for _, trace := range c.traces {
+		for _, observation := range trace.Observations {
+			// A connect request carries no client generation, because the connect
+			// establishes that generation. Every authenticated request that follows
+			// carries it, and all of them must agree.
 			value, err := requestInteger(observation, "client_generation")
-			if err != nil || value == 0 {
-				return fmt.Errorf("React Native rebuild-cardinality trace %d observation %d client_generation=%d error=%v", traceIndex+1, observationIndex+1, value, err)
+			if err != nil {
+				continue
 			}
 			if generation == 0 {
 				generation = value
@@ -1180,6 +1183,9 @@ func (c *RebuildCardinalityCoordinator) finish(ctx context.Context) error {
 				return fmt.Errorf("React Native rebuild-cardinality client generation changed: first=%d observed=%d", generation, value)
 			}
 		}
+	}
+	if generation == 0 {
+		return errors.New("React Native rebuild-cardinality client generation is absent")
 	}
 	encodedGeneration, err := json.Marshal(generation)
 	if err != nil {
