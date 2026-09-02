@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -316,6 +317,101 @@ func TestQueueReplayAuthoredFlowServesExactlyExchangeCount(t *testing.T) {
 	if wantLocalOperations != 3306 {
 		t.Fatalf("queue-replay authored local operations = %d, want 3306", wantLocalOperations)
 	}
+}
+
+func TestQueueReplayFinalCaptureRequestsAggregateAndRequiredDetailEvidence(t *testing.T) {
+	scenario := loadQueueReplayAuthoredScenario(t)
+	workloads, err := queueReplayWorkloads(scenario)
+	if err != nil {
+		t.Fatalf("derive queue-replay workloads: %v", err)
+	}
+	coordinator := &QueueReplayCoordinator{
+		config:    QueueReplayCoordinatorConfig{Scenario: scenario},
+		clientKey: "client-a",
+		steps:     workloads,
+		stepIndex: len(workloads),
+		stage:     queueReplayStageReplay,
+	}
+	response, err := coordinator.advanceLocked(context.Background(), 1)
+	if err != nil || response.Command == nil {
+		t.Fatalf("advance queue-replay final capture: command=%#v error=%v", response.Command, err)
+	}
+	got, ok := response.Command.Action.Action.Parameters["sources"].([]string)
+	if !ok {
+		t.Fatalf("queue-replay final capture sources = %#v, want string array", response.Command.Action.Action.Parameters["sources"])
+	}
+	want := []string{"scope-state", "rejected-mutations", "sync-status", "request-trace"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("queue-replay final capture sources = %#v, want %#v", got, want)
+	}
+}
+
+func TestQueueReplayFinalCaptureValidatesAuthoredAggregateCounts(t *testing.T) {
+	scenario := loadQueueReplayAuthoredScenario(t)
+	workloads, err := queueReplayWorkloads(scenario)
+	if err != nil {
+		t.Fatalf("derive queue-replay workloads: %v", err)
+	}
+	identity, err := queueReplayClientIdentity(scenario)
+	if err != nil {
+		t.Fatalf("derive queue-replay identity: %v", err)
+	}
+	expected, err := queueReplayExpectedState(scenario)
+	if err != nil || len(expected.Clients) != 1 || expected.Clients[0].QueueCount == nil || expected.Clients[0].OutcomeCount == nil || expected.Clients[0].SealedBatchCount == nil {
+		t.Fatalf("queue-replay authored client state = %#v, error=%v", expected.Clients, err)
+	}
+	coordinator := &QueueReplayCoordinator{
+		config:   QueueReplayCoordinatorConfig{Scenario: scenario},
+		steps:    workloads,
+		userID:   identity.userID,
+		clientID: identity.clientID,
+	}
+	state := map[string]any{
+		"schema":                          map[string]any{"version": 10, "hash": strings.Repeat("a", 64)},
+		"scopeStates":                     []any{},
+		"scopeRows":                       []any{},
+		"rebuildAttempts":                 []any{},
+		"applicationRowCount":             0,
+		"mutationLedgerCount":             *expected.Clients[0].QueueCount,
+		"mutationOutcomeCount":            *expected.Clients[0].OutcomeCount,
+		"sealedBatchCount":                *expected.Clients[0].SealedBatchCount,
+		"rejectedMutationCount":           coordinator.rejectedCount(),
+		"scopeStateCount":                 0,
+		"scopeRowCount":                   0,
+		"provenanceCount":                 0,
+		"rowMetadataCount":                0,
+		"rebuildAttemptCount":             0,
+		"rebuildReceiptCount":             0,
+		"provenanceMaintenanceWorkCursor": "0",
+	}
+	rejected := make([]string, coordinator.rejectedCount())
+	observations := make([]transportObservation, len(workloads)*2)
+	for index := range observations {
+		observations[index] = transportObservation{Sequence: uint64(index + 1), OperationClass: "push", StatusCode: http.StatusOK}
+	}
+	capture := finalCapture{
+		ClientState: queueReplayFixtureJSON(t, state),
+		Rejected:    queueReplayFixtureJSON(t, rejected),
+		Status:      json.RawMessage(`{"state":"ready","retry_at":null,"operation":null,"failure":null}`),
+		Trace:       queueReplayFixtureJSON(t, traceSnapshot{Observations: observations, SequenceCheckpoint: uint64(len(observations))}),
+	}
+	if err := coordinator.validateCapture(capture); err != nil {
+		t.Fatalf("validate queue-replay aggregate capture: %v", err)
+	}
+	state["mutationLedgerCount"] = *expected.Clients[0].QueueCount - 1
+	capture.ClientState = queueReplayFixtureJSON(t, state)
+	if err := coordinator.validateCapture(capture); err == nil {
+		t.Fatal("queue-replay accepted a mismatched retained-mutation aggregate")
+	}
+}
+
+func queueReplayFixtureJSON(t *testing.T, value any) json.RawMessage {
+	t.Helper()
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		t.Fatalf("marshal queue-replay fixture: %v", err)
+	}
+	return encoded
 }
 
 func TestQueueReplayLocalBatchResultMatchesAuthoredOperationCount(t *testing.T) {

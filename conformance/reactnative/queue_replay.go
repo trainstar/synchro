@@ -690,7 +690,7 @@ func (c *QueueReplayCoordinator) acceptResultLocked(raw json.RawMessage) error {
 			return err
 		}
 	case queueReplayStageCapture:
-		capture, err := decodeCapture(envelope.Result, []string{"pending_mutations", "rejected_mutations", "sync_status", "request_trace"})
+		capture, err := decodeCapture(envelope.Result, []string{"client_state", "rejected_mutations", "sync_status", "request_trace"})
 		if err != nil {
 			return err
 		}
@@ -715,7 +715,7 @@ func (c *QueueReplayCoordinator) advanceLocked(ctx context.Context, sequence uin
 		c.stage = queueReplayStageBootstrapped
 	case queueReplayStageBootstrapped, queueReplayStageReplay:
 		if c.stepIndex == len(c.steps) {
-			response.Command = c.command("observer", "capture", map[string]any{"client_keys": []string{c.clientKey}, "sources": []string{"pending-mutations", "rejected-mutations", "sync-status", "request-trace"}}, nil)
+			response.Command = c.command("observer", "capture", map[string]any{"client_keys": []string{c.clientKey}, "sources": []string{"scope-state", "rejected-mutations", "sync-status", "request-trace"}}, nil)
 			c.stage = queueReplayStageCapture
 			break
 		}
@@ -951,11 +951,35 @@ func (c *QueueReplayCoordinator) validateProcess(raw json.RawMessage) error {
 }
 
 func (c *QueueReplayCoordinator) validateCapture(capture finalCapture) error {
-	if validateEmptyArray(capture.Pending) != nil || validateReadyStatus(capture.Status) != nil {
+	expected, err := queueReplayExpectedState(c.config.Scenario)
+	if err != nil || len(expected.Clients) != 1 || expected.Clients[0].UserID != c.userID || expected.Clients[0].ClientID != c.clientID ||
+		expected.Clients[0].QueueCount == nil || expected.Clients[0].OutcomeCount == nil || expected.Clients[0].SealedBatchCount == nil {
+		return errors.New("React Native queue-replay authored client state is invalid")
+	}
+	state, err := decodeClientState(capture.ClientState)
+	if err != nil {
+		return err
+	}
+	counts := []struct {
+		name     string
+		observed uint64
+		expected uint64
+	}{
+		{"mutation ledger", state.MutationLedgerCount, *expected.Clients[0].QueueCount},
+		{"mutation outcomes", state.MutationOutcomeCount, *expected.Clients[0].OutcomeCount},
+		{"sealed batches", state.SealedBatchCount, *expected.Clients[0].SealedBatchCount},
+		{"rejected mutations", state.RejectedMutationCount, uint64(c.rejectedCount())},
+	}
+	for _, count := range counts {
+		if count.observed != count.expected {
+			return fmt.Errorf("React Native queue-replay final %s count=%d want=%d", count.name, count.observed, count.expected)
+		}
+	}
+	if validateReadyStatus(capture.Status) != nil {
 		return errors.New("React Native queue-replay final queue status is invalid")
 	}
 	var rejected []json.RawMessage
-	if json.Unmarshal(capture.Rejected, &rejected) != nil || len(rejected) != c.rejectedCount() {
+	if json.Unmarshal(capture.Rejected, &rejected) != nil || uint64(len(rejected)) != state.RejectedMutationCount {
 		return errors.New("React Native queue-replay rejected mutation count is invalid")
 	}
 	trace, err := captureTraceFromRaw(capture.Trace)
