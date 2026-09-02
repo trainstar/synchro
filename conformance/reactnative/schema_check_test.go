@@ -3,6 +3,8 @@ package reactnative
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"os"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -231,6 +233,54 @@ func TestSchemaCheckDistinctRebuildCountIgnoresPageReceipts(t *testing.T) {
 	}}
 	if got := schemaCheckDistinctRebuildCount(server, "user-a", "client-a"); got != 2 {
 		t.Fatalf("distinct schema-check rebuilds=%d want=2", got)
+	}
+}
+
+func TestSchemaCheckIdentityEvidenceUsesCapturedPullRequests(t *testing.T) {
+	trace := func(generation, scopeSetVersion uint64) json.RawMessage {
+		t.Helper()
+		raw, err := json.Marshal(traceSnapshot{Observations: []transportObservation{{
+			OperationClass: "pull",
+			RequestFacts: json.RawMessage(fmt.Sprintf(
+				`{"client_generation":%d,"scope_set_version":%d}`,
+				generation,
+				scopeSetVersion,
+			)),
+		}}})
+		if err != nil {
+			t.Fatalf("encode schema-check identity trace: %v", err)
+		}
+		return raw
+	}
+	coordinator := &SchemaCheckCoordinator{
+		calls: []schemaCheckCall{
+			{step: scenarios.Step{ID: "step-a"}, clientKey: "client-a"},
+			{step: scenarios.Step{ID: "step-b"}, clientKey: "client-b"},
+		},
+		captures: map[scenarios.StepID]finalCapture{
+			"step-a": {Trace: trace(7, 9)},
+			"step-b": {Trace: trace(7, 9)},
+		},
+	}
+	generation, scopeSetVersion, err := coordinator.observedClientIdentities()
+	if err != nil || generation != 7 || scopeSetVersion != 9 {
+		t.Fatalf("schema-check observed identity generation=%d scope_set_version=%d want generation=7 scope_set_version=9 error=%v", generation, scopeSetVersion, err)
+	}
+	coordinator.captures["step-b"] = finalCapture{Trace: trace(8, 9)}
+	if _, _, err := coordinator.observedClientIdentities(); err == nil || !strings.Contains(err.Error(), "observed") || !strings.Contains(err.Error(), "want") {
+		t.Fatalf("schema-check inconsistent identity error=%v want observed and expected values", err)
+	}
+}
+
+func TestSchemaCheckHasNoRawObserverRead(t *testing.T) {
+	raw, err := os.ReadFile("schema_check.go")
+	if err != nil {
+		t.Fatalf("read schema-check coordinator source: %v", err)
+	}
+	for _, forbidden := range []string{"OpenObserver(", "synchro.sync_clients"} {
+		if strings.Contains(string(raw), forbidden) {
+			t.Fatalf("schema-check coordinator observed forbidden raw read %q want controller and captured evidence only", forbidden)
+		}
 	}
 }
 

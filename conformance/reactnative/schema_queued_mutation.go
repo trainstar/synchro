@@ -594,7 +594,7 @@ func (c *SchemaQueuedMutationCoordinator) advanceLocked(ctx context.Context, seq
 	case schemaQueuedMutationStageRestarted:
 		response.Command = c.command(schemaQueuedMutationRestartClientKey, "observer", "capture", map[string]any{
 			"client_keys": []string{schemaQueuedMutationRestartClientKey},
-			"sources":     []string{"scope-state", "pending-mutations", "rejected-mutations", "sync-status", "sync-events", "request-trace"},
+			"sources":     []string{"scope-state", "pending-mutations", "rejected-mutations", "sync-status", "sync-events", "request-trace", "durable-proof"},
 		}, nil)
 	case schemaQueuedMutationStageFinalCapture:
 		if err := c.completeLocked(ctx); err != nil {
@@ -689,20 +689,20 @@ func (c *SchemaQueuedMutationCoordinator) validateTraceCapture(raw json.RawMessa
 }
 
 func (c *SchemaQueuedMutationCoordinator) validateFinalCapture(raw json.RawMessage) (finalCapture, error) {
-	capture, err := decodeCapture(raw, []string{"client_state", "pending_mutations", "rejected_mutations", "sync_status", "sync_events", "request_trace"})
+	capture, err := decodeCapture(raw, []string{"client_state", "pending_mutations", "rejected_mutations", "sync_status", "sync_events", "request_trace", "durable_proof"})
 	if err != nil {
-		return finalCapture{}, err
+		return finalCapture{}, fmt.Errorf("React Native schema-queued-mutation final capture observed=invalid want=valid capture error=%v", err)
 	}
 	trace, err := captureTraceFromRaw(capture.Trace)
 	if err != nil {
-		return finalCapture{}, err
+		return finalCapture{}, fmt.Errorf("React Native schema-queued-mutation restart trace observed=invalid want=valid trace error=%v", err)
 	}
 	if trace.Overflowed || len(trace.Observations) != 0 || trace.SequenceCheckpoint != 0 {
-		return finalCapture{}, fmt.Errorf("React Native schema-queued-mutation restart trace observations=%d checkpoint=%d overflowed=%t", len(trace.Observations), trace.SequenceCheckpoint, trace.Overflowed)
+		return finalCapture{}, fmt.Errorf("React Native schema-queued-mutation restart trace observed observations=%d checkpoint=%d overflowed=%t want observations=0 checkpoint=0 overflowed=false", len(trace.Observations), trace.SequenceCheckpoint, trace.Overflowed)
 	}
 	// Restart reopens the durable client without synchronizing, so only status shape is contractual here.
 	if err := validateSyncStatusShape(capture.Status); err != nil {
-		return finalCapture{}, fmt.Errorf("React Native schema-queued-mutation restart status is invalid: %w", err)
+		return finalCapture{}, fmt.Errorf("React Native schema-queued-mutation restart status observed=invalid want=valid status error=%v", err)
 	}
 	return capture, nil
 }
@@ -782,7 +782,7 @@ func (c *SchemaQueuedMutationCoordinator) completeLocked(ctx context.Context) er
 func (c *SchemaQueuedMutationCoordinator) resolveServerIdentities(ctx context.Context) (scenarios.StateFacts, []blackbox.NativeIdentityResolution, error) {
 	captures, err := c.config.Controller.Capture(ctx, []string{schemaQueuedMutationRestartClientKey}, []string{"server-state"})
 	if err != nil || len(captures) != 1 {
-		return scenarios.StateFacts{}, nil, fmt.Errorf("capture React Native schema-queued-mutation server state captures=%d error=%w", len(captures), nativeResultError(err, ""))
+		return scenarios.StateFacts{}, nil, fmt.Errorf("capture React Native schema-queued-mutation server state captures=%d want=1 error=%w", len(captures), nativeResultError(err, ""))
 	}
 	values, err := c.config.Controller.IdentityValues(c.identities)
 	if err != nil {
@@ -798,9 +798,9 @@ func (c *SchemaQueuedMutationCoordinator) resolveServerIdentities(ctx context.Co
 		}
 	}
 	if c.tableName == "" || c.primaryKey == "" {
-		return scenarios.StateFacts{}, nil, fmt.Errorf("React Native schema-queued-mutation application table=%q primary_key=%q", c.tableName, c.primaryKey)
+		return scenarios.StateFacts{}, nil, fmt.Errorf("React Native schema-queued-mutation application identities observed table=%q primary_key=%q want=nonempty table and primary key", c.tableName, c.primaryKey)
 	}
-	evidence, err := c.serverEvidence(ctx)
+	evidence, err := c.serverEvidence(captures[0].StateFacts)
 	if err != nil {
 		return scenarios.StateFacts{}, nil, err
 	}
@@ -821,7 +821,7 @@ func (c *SchemaQueuedMutationCoordinator) resolveServerIdentities(ctx context.Co
 	for _, alias := range c.identities {
 		value := c.runtimeIDs[alias.Alias]
 		if len(value) == 0 {
-			return scenarios.StateFacts{}, nil, fmt.Errorf("React Native schema-queued-mutation server alias %q is absent", alias.Alias)
+			return scenarios.StateFacts{}, nil, fmt.Errorf("React Native schema-queued-mutation server alias=%q observed=absent want=present", alias.Alias)
 		}
 		for _, stepID := range alias.StepIDs {
 			owner := stepID
@@ -847,54 +847,53 @@ type schemaQueuedMutationServerEvidence struct {
 	rowChecksum      string
 }
 
-func (c *SchemaQueuedMutationCoordinator) serverEvidence(ctx context.Context) (schemaQueuedMutationServerEvidence, error) {
-	observer, err := c.config.Harness.OpenObserver(ctx)
+func (c *SchemaQueuedMutationCoordinator) serverEvidence(server scenarios.StateFacts) (schemaQueuedMutationServerEvidence, error) {
+	observationCount := 0
+	if c.preRestart != nil {
+		observationCount = len(c.preRestart.Observations)
+	}
+	if observationCount < 5 {
+		return schemaQueuedMutationServerEvidence{}, fmt.Errorf("React Native schema-queued-mutation pre-restart observations=%d want=at least 5", observationCount)
+	}
+	resetConnect := c.preRestart.Observations[4]
+	generation, generationErr := requestInteger(resetConnect, "client_generation")
+	scopeSet, scopeSetErr := requestInteger(resetConnect, "scope_set_version")
+	if resetConnect.OperationClass != "connect" || generationErr != nil || scopeSetErr != nil || generation == 0 || scopeSet == 0 {
+		return schemaQueuedMutationServerEvidence{}, fmt.Errorf("React Native schema-queued-mutation reset identity observed operation=%q client_generation=%d scope_set_version=%d want operation=%q positive client_generation and scope_set_version generation_error=%v scope_set_error=%v", resetConnect.OperationClass, generation, scopeSet, "connect", generationErr, scopeSetErr)
+	}
+	rebuildFingerprint, err := requestString(c.preRestart.Observations[1], "rebuild_id_fingerprint")
 	if err != nil {
-		return schemaQueuedMutationServerEvidence{}, fmt.Errorf("open React Native schema-queued-mutation server observer: %w", err)
+		return schemaQueuedMutationServerEvidence{}, fmt.Errorf("React Native schema-queued-mutation rebuild fingerprint observed=%s want=valid fingerprint error=%v", boundedRaw(c.preRestart.Observations[1].RequestFacts), err)
 	}
-	defer observer.Close()
-	var generation, scopeSet int64
-	err = observer.QueryRowContext(ctx, `
-		SELECT client_generation, scope_set_version
-		FROM synchro.sync_clients
-		WHERE user_id = $1 AND client_id = $2`, c.userID, c.clientID).Scan(&generation, &scopeSet)
-	if err != nil || generation <= 0 || scopeSet <= 0 {
-		return schemaQueuedMutationServerEvidence{}, fmt.Errorf("read React Native schema-queued-mutation server client generation=%d scope_set_version=%d error=%v", generation, scopeSet, err)
-	}
-	schemaOne, err := c.runtimeSchema("schema-one")
-	if err != nil {
-		return schemaQueuedMutationServerEvidence{}, err
-	}
-	var rebuildCount int64
 	var rebuildID string
-	err = observer.QueryRowContext(ctx, `
-		SELECT count(*), COALESCE(min(rebuild_id::text), '')
-		FROM synchro.sync_rebuild_sessions
-		WHERE user_id = $1 AND client_id = $2 AND schema_version = $3 AND schema_hash = $4`,
-		c.userID, c.clientID, schemaOne.Version, schemaOne.Hash).Scan(&rebuildCount, &rebuildID)
-	if err != nil || rebuildCount != 1 || rebuildID == "" {
-		return schemaQueuedMutationServerEvidence{}, fmt.Errorf("read React Native schema-queued-mutation baseline rebuild identities=%d id=%q error=%v", rebuildCount, rebuildID, err)
+	rebuildMatches := 0
+	for _, rebuild := range server.Rebuilds {
+		if rebuild.UserID == c.userID && rebuild.ClientID == c.clientID && hashFingerprint(rebuild.RebuildID) == rebuildFingerprint {
+			rebuildMatches++
+			rebuildID = rebuild.RebuildID
+		}
+	}
+	if rebuildMatches != 1 || rebuildID == "" {
+		return schemaQueuedMutationServerEvidence{}, fmt.Errorf("React Native schema-queued-mutation rebuild matches=%d id=%q want=1 server rebuild for client=%q fingerprint=%q", rebuildMatches, rebuildID, c.clientID, rebuildFingerprint)
 	}
 	recordID, err := c.runtimeString("queued-row-primary-key")
 	if err != nil {
 		return schemaQueuedMutationServerEvidence{}, err
 	}
-	var rowCount int64
-	var rowVersion, rowChecksum string
-	err = observer.QueryRowContext(ctx, `
-		SELECT count(*), COALESCE(min(captured.row_version::text), ''), COALESCE(min(encode(captured.checksum, 'hex')), '')
-		FROM synchro.sync_captured_rows captured
-		JOIN synchro.sync_registry registry
-		  ON registry.registry_generation = captured.registry_generation
-		 AND registry.relation_id = captured.relation_id
-		WHERE registry.table_name = $1 AND captured.record_id = $2 AND NOT captured.deleted`,
-		c.tableName, recordID).Scan(&rowCount, &rowVersion, &rowChecksum)
-	if err != nil || rowCount != 1 || rowVersion == "" || len(rowChecksum) != 64 {
-		return schemaQueuedMutationServerEvidence{}, fmt.Errorf("read React Native schema-queued-mutation server rows=%d version=%q checksum=%q error=%v", rowCount, rowVersion, rowChecksum, err)
+	if c.finalResult == nil {
+		return schemaQueuedMutationServerEvidence{}, errors.New("React Native schema-queued-mutation final durable proof observed=absent want=present")
+	}
+	metadata, err := durableRowMetadata(c.finalResult.DurableProof)
+	if err != nil {
+		return schemaQueuedMutationServerEvidence{}, fmt.Errorf("React Native schema-queued-mutation durable row metadata observed=%s want=valid metadata error=%v", boundedRaw(c.finalResult.DurableProof), err)
+	}
+	rowChecksum, checksumErr := checksumDigest(metadata.RowChecksum)
+	if metadata.TableName != c.tableName || metadata.RecordID != recordID || metadata.ServerVersion == "" || checksumErr != nil || rowChecksum == nil {
+		return schemaQueuedMutationServerEvidence{}, fmt.Errorf("React Native schema-queued-mutation durable row observed table=%q record=%q version=%q checksum=%v want table=%q record=%q nonempty version and checksum error=%v", metadata.TableName, metadata.RecordID, metadata.ServerVersion, rowChecksum, c.tableName, recordID, checksumErr)
 	}
 	return schemaQueuedMutationServerEvidence{
-		clientGeneration: uint64(generation), scopeSetVersion: uint64(scopeSet), rebuildID: rebuildID,
-		rowVersion: rowVersion, rowChecksum: rowChecksum,
+		clientGeneration: generation, scopeSetVersion: scopeSet, rebuildID: rebuildID,
+		rowVersion: metadata.ServerVersion, rowChecksum: *rowChecksum,
 	}, nil
 }
 

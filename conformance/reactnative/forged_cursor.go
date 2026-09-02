@@ -1,6 +1,7 @@
 package reactnative
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -717,6 +718,12 @@ func (c *ForgedCursorCoordinator) proxyAdapter(writer http.ResponseWriter, reque
 		writeExchangeError(writer, http.StatusBadGateway)
 		return
 	}
+	requestBody, err := io.ReadAll(io.LimitReader(request.Body, maximumExchangeBytes+1))
+	if err != nil || len(requestBody) > maximumExchangeBytes {
+		c.recordProxyFailure(fmt.Errorf("read React Native forged-cursor proxy request: bytes=%d maximum=%d error=%v", len(requestBody), maximumExchangeBytes, err))
+		writeExchangeError(writer, http.StatusBadGateway)
+		return
+	}
 	rebuildRequest := uint64(0)
 	if request.Method == http.MethodPost && request.URL.Path == "/sync/rebuild" {
 		rebuildRequest = c.beginRebuildRequest()
@@ -737,14 +744,14 @@ func (c *ForgedCursorCoordinator) proxyAdapter(writer http.ResponseWriter, reque
 		}
 	}
 	target := strings.TrimRight(c.upstream, "/") + request.URL.RequestURI()
-	upstreamRequest, err := http.NewRequestWithContext(request.Context(), request.Method, target, request.Body)
+	upstreamRequest, err := http.NewRequestWithContext(request.Context(), request.Method, target, bytes.NewReader(requestBody))
 	if err != nil {
 		c.recordProxyFailure(fmt.Errorf("create React Native forged-cursor upstream request: %w", err))
 		writeExchangeError(writer, http.StatusBadGateway)
 		return
 	}
 	for name, values := range request.Header {
-		if strings.EqualFold(name, "Host") {
+		if strings.EqualFold(name, "Host") || strings.EqualFold(name, "Content-Length") || strings.EqualFold(name, "Transfer-Encoding") {
 			continue
 		}
 		for _, value := range values {
@@ -763,6 +770,9 @@ func (c *ForgedCursorCoordinator) proxyAdapter(writer http.ResponseWriter, reque
 		c.recordProxyFailure(fmt.Errorf("read React Native forged-cursor upstream response: bytes=%d maximum=%d error=%v", len(body), maximumExchangeBytes, err))
 		writeExchangeError(writer, http.StatusBadGateway)
 		return
+	}
+	if request.Method == http.MethodPost && request.URL.Path == "/sync/connect" && response.StatusCode != http.StatusOK {
+		c.recordProxyFailure(fmt.Errorf("React Native forged-cursor connect upstream status=%d want=%d response_bytes=%d", response.StatusCode, http.StatusOK, len(body)))
 	}
 	if rebuildRequest == 1 {
 		if response.StatusCode != http.StatusOK {

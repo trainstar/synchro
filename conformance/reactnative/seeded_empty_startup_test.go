@@ -74,6 +74,30 @@ func TestNewSeededEmptyStartupCoordinatorRejectsUnknownPlatform(t *testing.T) {
 	}
 }
 
+func TestSeededEmptyStartupBootstrapTraceMatchesSeedScopeProjection(t *testing.T) {
+	clients, err := seededEmptyStartupClients(loadSeededEmptyStartupAuthoredScenario(t))
+	if err != nil {
+		t.Fatalf("load seeded-empty-startup clients: %v", err)
+	}
+	seeded := clients[0]
+	empty := clients[3]
+	if seeded.connectScopeProjectionLen != 1 || empty.connectScopeProjectionLen != 0 {
+		t.Fatalf("seeded and empty connect scope projections = %d and %d, expected 1 and 0", seeded.connectScopeProjectionLen, empty.connectScopeProjectionLen)
+	}
+	seededTrace := validBootstrapTrace(testSchema())
+	seededTrace.Observations[0].RequestFacts = requestFacts(0, testSchema(), 0, seeded.connectScopeProjectionLen, "", "")
+	if err := validateSeededEmptyStartupBootstrapTrace(seededTrace, seeded.connectScopeProjectionLen); err != nil {
+		t.Fatalf("validate seeded bootstrap trace: %v", err)
+	}
+	if err := validateSeededEmptyStartupBootstrapTrace(validBootstrapTrace(testSchema()), empty.connectScopeProjectionLen); err != nil {
+		t.Fatalf("validate empty bootstrap trace: %v", err)
+	}
+	if err := validateSeededEmptyStartupBootstrapTrace(validBootstrapTrace(testSchema()), seeded.connectScopeProjectionLen); err == nil ||
+		!strings.Contains(err.Error(), "observed 0, expected 1") {
+		t.Fatalf("seeded bootstrap scope mutant error = %v, expected observed 0 and expected 1", err)
+	}
+}
+
 func loadSeededEmptyStartupAuthoredScenario(t *testing.T) scenarios.Scenario {
 	t.Helper()
 	repoRoot, err := filepath.Abs(filepath.Join("..", ".."))

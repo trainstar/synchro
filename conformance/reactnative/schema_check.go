@@ -951,7 +951,7 @@ func (c *SchemaCheckCoordinator) finishLocked(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	if err := c.bindServerIdentities(ctx); err != nil {
+	if err := c.bindServerIdentities(); err != nil {
 		return err
 	}
 	plan, err := schemaCheckDispatchPlan(c.config.Scenario)
@@ -1002,7 +1002,7 @@ func (c *SchemaCheckCoordinator) captureServer(ctx context.Context) (scenarios.S
 	return captures[0].StateFacts, nil
 }
 
-func (c *SchemaCheckCoordinator) bindServerIdentities(ctx context.Context) error {
+func (c *SchemaCheckCoordinator) bindServerIdentities() error {
 	serverAliases := make([]scenarios.NativeIdentityAlias, 0, len(c.config.Scenario.NativeIdentityAliases))
 	for _, alias := range c.config.Scenario.NativeIdentityAliases {
 		switch alias.Kind {
@@ -1024,9 +1024,9 @@ func (c *SchemaCheckCoordinator) bindServerIdentities(ctx context.Context) error
 		}
 	}
 	if c.tableName == "" || c.primaryKey == "" {
-		return fmt.Errorf("React Native schema-check server application identities table=%q primary_key=%q", c.tableName, c.primaryKey)
+		return fmt.Errorf("React Native schema-check server application identities observed table=%q primary_key=%q want=nonempty table and primary key", c.tableName, c.primaryKey)
 	}
-	generation, scopeSetVersion, err := c.serverClientGenerations(ctx)
+	generation, scopeSetVersion, err := c.observedClientIdentities()
 	if err != nil {
 		return err
 	}
@@ -1043,31 +1043,52 @@ func (c *SchemaCheckCoordinator) bindServerIdentities(ctx context.Context) error
 	return nil
 }
 
-func (c *SchemaCheckCoordinator) serverClientGenerations(ctx context.Context) (uint64, uint64, error) {
+type schemaCheckClientIdentity struct {
+	generation      uint64
+	scopeSetVersion uint64
+}
+
+func (c *SchemaCheckCoordinator) observedClientIdentities() (uint64, uint64, error) {
 	clients := c.uniqueClients()
 	if len(clients) == 0 {
-		return 0, 0, errors.New("React Native schema-check clients are absent")
+		return 0, 0, errors.New("React Native schema-check identity clients=0 want=positive")
 	}
-	conditions := make([]string, 0, len(clients))
-	args := make([]any, 0, len(clients)*2)
-	for index, call := range clients {
-		conditions = append(conditions, fmt.Sprintf("(user_id = $%d AND client_id = $%d)", index*2+1, index*2+2))
-		args = append(args, call.step.NativeBinding.UserID, call.step.NativeBinding.ClientID)
+	observed := make(map[string]schemaCheckClientIdentity, len(clients))
+	for _, call := range c.calls {
+		capture, found := c.captures[call.step.ID]
+		if !found {
+			return 0, 0, fmt.Errorf("React Native schema-check identity capture step=%s observed=absent want=present", call.step.ID)
+		}
+		trace, err := captureTraceFromRaw(capture.Trace)
+		if err != nil {
+			return 0, 0, fmt.Errorf("React Native schema-check identity trace step=%s observed=invalid want=valid error=%v", call.step.ID, err)
+		}
+		for _, observation := range trace.Observations {
+			if observation.OperationClass != "pull" {
+				continue
+			}
+			generation, generationErr := requestInteger(observation, "client_generation")
+			scopeSetVersion, scopeSetErr := requestInteger(observation, "scope_set_version")
+			if generationErr != nil || scopeSetErr != nil {
+				return 0, 0, fmt.Errorf("React Native schema-check client=%q identity request=%s observed generation_error=%v scope_set_error=%v want=valid client_generation and scope_set_version", call.clientKey, boundedRaw(observation.RequestFacts), generationErr, scopeSetErr)
+			}
+			observed[call.clientKey] = schemaCheckClientIdentity{generation: generation, scopeSetVersion: scopeSetVersion}
+		}
 	}
-	observer, err := c.config.Harness.OpenObserver(ctx)
-	if err != nil {
-		return 0, 0, fmt.Errorf("open React Native schema-check server observer: %w", err)
+	if len(observed) != len(clients) {
+		return 0, 0, fmt.Errorf("React Native schema-check observed identity clients=%d want=%d", len(observed), len(clients))
 	}
-	defer observer.Close()
-	query := `SELECT count(*), count(DISTINCT client_generation), COALESCE(min(client_generation), 0),
-		count(DISTINCT scope_set_version), COALESCE(min(scope_set_version), 0)
-		FROM synchro.sync_clients WHERE ` + strings.Join(conditions, " OR ")
-	var count, generationKinds, generation, scopeSetKinds, scopeSet int64
-	if err := observer.QueryRowContext(ctx, query, args...).Scan(&count, &generationKinds, &generation, &scopeSetKinds, &scopeSet); err != nil ||
-		count != int64(len(clients)) || generationKinds != 1 || generation <= 0 || scopeSetKinds != 1 || scopeSet <= 0 {
-		return 0, 0, fmt.Errorf("read React Native schema-check server client identities rows=%d want=%d generations=%d value=%d scope_sets=%d value=%d error=%v", count, len(clients), generationKinds, generation, scopeSetKinds, scopeSet, err)
+	var expected schemaCheckClientIdentity
+	for _, call := range clients {
+		identity := observed[call.clientKey]
+		if expected.generation == 0 && expected.scopeSetVersion == 0 {
+			expected = identity
+		}
+		if identity.generation == 0 || identity.scopeSetVersion == 0 || identity != expected {
+			return 0, 0, fmt.Errorf("React Native schema-check client=%q observed client_generation=%d scope_set_version=%d want positive shared client_generation=%d scope_set_version=%d", call.clientKey, identity.generation, identity.scopeSetVersion, expected.generation, expected.scopeSetVersion)
+		}
 	}
-	return uint64(generation), uint64(scopeSet), nil
+	return expected.generation, expected.scopeSetVersion, nil
 }
 
 func (c *SchemaCheckCoordinator) validateCallEvidence(call schemaCheckCall, capture finalCapture) error {

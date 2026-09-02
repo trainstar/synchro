@@ -66,6 +66,34 @@ func TestQueueReplayWorkloadsFollowAuthoredCountsAndDigests(t *testing.T) {
 	}
 }
 
+func TestQueueReplayResponseLossBindingUsesCommittedDelivery(t *testing.T) {
+	scenario := loadQueueReplayAuthoredScenario(t)
+	workloads, err := queueReplayWorkloads(scenario)
+	if err != nil {
+		t.Fatalf("derive queue-replay workloads: %v", err)
+	}
+	if len(workloads) == 0 {
+		t.Fatalf("queue-replay derived workload count = %d, want at least 1", len(workloads))
+	}
+	committed, err := pushResponseLossAppliedOperation(workloads[0].dropPush)
+	if err != nil {
+		t.Fatalf("convert queue-replay response-loss push: %v", err)
+	}
+	var authoredPayload, committedPayload map[string]any
+	if err := json.Unmarshal(workloads[0].dropPush.Payload, &authoredPayload); err != nil {
+		t.Fatalf("decode queue-replay authored response-loss push: %v", err)
+	}
+	if err := json.Unmarshal(committed.Payload, &committedPayload); err != nil {
+		t.Fatalf("decode queue-replay committed response-loss push: %v", err)
+	}
+	if got, want := authoredPayload["delivery"], "drop_after_server"; got != want {
+		t.Fatalf("queue-replay authored response-loss delivery = %v, want %q", got, want)
+	}
+	if got, want := committedPayload["delivery"], "apply"; got != want {
+		t.Fatalf("queue-replay committed response-loss delivery = %v, want %q", got, want)
+	}
+}
+
 func TestQueueReplayStageCountMatchesDerivedCoordinatorStages(t *testing.T) {
 	scenario := loadQueueReplayAuthoredScenario(t)
 	workloads, err := queueReplayWorkloads(scenario)

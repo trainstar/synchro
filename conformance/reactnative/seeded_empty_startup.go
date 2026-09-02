@@ -77,12 +77,13 @@ const (
 )
 
 type seededEmptyStartupClient struct {
-	key            string
-	userID         string
-	clientID       string
-	startupStep    scenarios.Step
-	assignmentStep scenarios.Step
-	artifactStep   *scenarios.Step
+	key                       string
+	userID                    string
+	clientID                  string
+	startupStep               scenarios.Step
+	assignmentStep            scenarios.Step
+	artifactStep              *scenarios.Step
+	connectScopeProjectionLen uint64
 }
 
 type seededEmptyStartupRuntime struct {
@@ -539,13 +540,49 @@ func (c *SeededEmptyStartupCoordinator) validateCapture(client seededEmptyStartu
 	if err != nil {
 		return err
 	}
-	if err := validateBootstrapTrace(trace); err != nil {
+	if err := validateSeededEmptyStartupBootstrapTrace(trace, client.connectScopeProjectionLen); err != nil {
 		return fmt.Errorf("React Native seeded-empty-startup %s trace is invalid: %w", client.clientID, err)
 	}
 	if err := validateSeededEmptyStartupWire(c.config.Scenario, client.startupStep.ID, trace.Observations[0]); err != nil {
 		return err
 	}
 	return c.observeTraceIdentities(trace)
+}
+
+func validateSeededEmptyStartupBootstrapTrace(trace traceSnapshot, expectedConnectScopeCount uint64) error {
+	if trace.Overflowed || len(trace.Observations) != 3 || trace.SequenceCheckpoint != 3 {
+		return errors.New("React Native seeded-empty-startup bootstrap trace is incomplete")
+	}
+	if err := validateTraceSequence(trace.Observations); err != nil {
+		return err
+	}
+	for index, operation := range []string{"connect", "rebuild", "pull"} {
+		if err := validateTraceOperation(trace.Observations[index], operation); err != nil {
+			return fmt.Errorf("React Native seeded-empty-startup bootstrap %s trace is invalid: %w", operation, err)
+		}
+	}
+	connectScopeCount, err := requestInteger(trace.Observations[0], "scope_count")
+	if err != nil {
+		return fmt.Errorf("React Native seeded-empty-startup bootstrap connect scope_count observed unavailable, expected %d: %w", expectedConnectScopeCount, err)
+	}
+	if connectScopeCount != expectedConnectScopeCount {
+		return fmt.Errorf("React Native seeded-empty-startup bootstrap connect scope_count observed %d, expected %d", connectScopeCount, expectedConnectScopeCount)
+	}
+	if pullScopeCount, err := requestInteger(trace.Observations[2], "scope_count"); err != nil || pullScopeCount != 1 {
+		if err != nil {
+			return fmt.Errorf("React Native seeded-empty-startup bootstrap pull scope_count observed unavailable, expected 1: %w", err)
+		}
+		return fmt.Errorf("React Native seeded-empty-startup bootstrap pull scope_count observed %d, expected 1", pullScopeCount)
+	}
+	rebuild, err := decodeRebuildResponseFacts(trace.Observations[1].RebuildResponseFacts)
+	if err != nil || *rebuild.HasMore || *rebuild.HasCursor || !*rebuild.HasFinalScopeCursor || !*rebuild.HasChecksum || rebuild.FinalScopeCursorFingerprint == nil {
+		return errors.New("React Native seeded-empty-startup bootstrap rebuild response facts are invalid")
+	}
+	scopeFingerprint, err := requestString(trace.Observations[1], "scope_fingerprint")
+	if err != nil || *rebuild.ScopeFingerprint != scopeFingerprint {
+		return errors.New("React Native seeded-empty-startup bootstrap rebuild scope identity is invalid")
+	}
+	return nil
 }
 
 func (c *SeededEmptyStartupCoordinator) observeTraceIdentities(trace traceSnapshot) error {
@@ -631,8 +668,9 @@ func (client seededEmptyStartupClient) seedStepID() any {
 
 func seededEmptyStartupClients(scenario scenarios.Scenario) ([]seededEmptyStartupClient, error) {
 	type identity struct {
-		UserID   string `json:"user_id"`
-		ClientID string `json:"client_id"`
+		UserID       string            `json:"user_id"`
+		ClientID     string            `json:"client_id"`
+		SeedReceipts map[string]string `json:"seed_receipts"`
 	}
 	artifacts := make(map[string]scenarios.Step)
 	assignments := make(map[string]scenarios.Step)
@@ -671,16 +709,20 @@ func seededEmptyStartupClients(scenario scenarios.Scenario) ([]seededEmptyStartu
 			if !found {
 				return nil, errors.New("React Native seeded-empty-startup client has no assignment")
 			}
-			if _, duplicate := artifacts[payload.ClientID]; duplicate && artifacts[payload.ClientID].ID > step.ID {
+			artifact, seeded := artifacts[payload.ClientID]
+			if seeded && artifact.ID > step.ID {
 				return nil, errors.New("React Native seeded-empty-startup artifact follows startup")
+			}
+			if seeded != (len(payload.SeedReceipts) != 0) {
+				return nil, fmt.Errorf("React Native seeded-empty-startup seed receipt projection has artifact %t and receipt count %d, expected an artifact with receipts or no artifact with zero receipts", seeded, len(payload.SeedReceipts))
 			}
 			for _, current := range clients {
 				if current.clientID == payload.ClientID {
 					return nil, errors.New("React Native seeded-empty-startup startup client is duplicated")
 				}
 			}
-			client := seededEmptyStartupClient{key: fmt.Sprintf("seeded-empty-startup-%d", len(clients)+1), userID: payload.UserID, clientID: payload.ClientID, startupStep: step, assignmentStep: assignment}
-			if artifact, found := artifacts[payload.ClientID]; found {
+			client := seededEmptyStartupClient{key: fmt.Sprintf("seeded-empty-startup-%d", len(clients)+1), userID: payload.UserID, clientID: payload.ClientID, startupStep: step, assignmentStep: assignment, connectScopeProjectionLen: uint64(len(payload.SeedReceipts))}
+			if seeded {
 				artifactCopy := artifact
 				client.artifactStep = &artifactCopy
 			}

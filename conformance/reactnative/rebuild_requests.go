@@ -515,8 +515,9 @@ func (c *RebuildRequestsCoordinator) ServeHTTP(writer http.ResponseWriter, reque
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.closed || !c.prepared || c.failed != nil || c.completed || exchange.Sequence != c.nextSeq {
-		c.failed = errors.New("React Native rebuild-requests exchange is unavailable or non-monotonic")
+	closed, prepared, failed, completed := c.closed, c.prepared, c.failed != nil, c.completed
+	if closed || !prepared || failed || completed || exchange.Sequence != c.nextSeq {
+		c.failed = fmt.Errorf("React Native rebuild-requests exchange is unavailable or non-monotonic: closed=%t prepared=%t failed=%t completed=%t got sequence=%d want sequence=%d", closed, prepared, failed, completed, exchange.Sequence, c.nextSeq)
 		writeExchangeError(writer, http.StatusConflict)
 		return
 	}
@@ -561,10 +562,10 @@ func (c *RebuildRequestsCoordinator) acceptResultLocked(raw json.RawMessage) err
 			return err
 		}
 		c.process = &process
-	case rebuildRequestsStageFirstPage, rebuildRequestsStageFinalPage, rebuildRequestsStagePull:
-		return c.validateAwaited(envelope.Result)
-	case rebuildRequestsStageAwaitCall:
+	case rebuildRequestsStageFirstPage:
 		return c.validateCallBegun(envelope.Result)
+	case rebuildRequestsStageFinalPage, rebuildRequestsStagePull, rebuildRequestsStageAwaitCall:
+		return c.validateAwaited(envelope.Result)
 	case rebuildRequestsStageFinalCapture:
 		return c.validateCallCompleted(envelope.Result)
 	case rebuildRequestsStageApplicationRows:
@@ -700,13 +701,17 @@ func (c *RebuildRequestsCoordinator) validateCallBegun(raw json.RawMessage) erro
 		return err
 	}
 	var members map[string]json.RawMessage
-	if err := decodeStrictMembers(raw, &members, 3, "React Native rebuild-requests begun call result"); err != nil {
-		return err
+	if err := decodeStrictMembers(raw, &members, 4, "React Native rebuild-requests begun call result"); err != nil {
+		return fmt.Errorf("React Native rebuild-requests begun call result members=%d want=4: %w", len(members), err)
 	}
 	var actualID, state string
 	if json.Unmarshal(members["call_id"], &actualID) != nil || actualID != c.callID ||
 		json.Unmarshal(members["state"], &state) != nil || state != "in_flight" {
 		return fmt.Errorf("React Native rebuild-requests begun call is invalid: call_id=%q state=%q, want %q in_flight", actualID, state, c.callID)
+	}
+	process, err := decodeActionProcessIdentity(members["process"])
+	if err != nil || c.process == nil || process != *c.process {
+		return fmt.Errorf("React Native rebuild-requests begun call process identity changed: got=%#v want=%#v decode_error=%v", process, c.process, err)
 	}
 	return nil
 }

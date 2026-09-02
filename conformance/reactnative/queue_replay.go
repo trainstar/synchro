@@ -521,7 +521,11 @@ func (c *QueueReplayCoordinator) advanceLocked(ctx context.Context, sequence uin
 		response.Command = c.command("client", "synchronize-step", map[string]any{"client_key": c.clientKey, "method": "start", "completion": "error"}, nil)
 		c.stage = queueReplayStageSchemaBoundary
 	case queueReplayStageSchemaBoundary:
-		if err := c.config.Controller.BindApplicationPush(c.steps[c.stepIndex].dropPush); err != nil {
+		committedPush, err := pushResponseLossAppliedOperation(c.steps[c.stepIndex].dropPush)
+		if err != nil {
+			return exchangeResponse{}, fmt.Errorf("prepare React Native queue-replay committed response-loss push: %w", err)
+		}
+		if err := c.config.Controller.BindApplicationPush(committedPush); err != nil {
 			return exchangeResponse{}, fmt.Errorf("bind React Native queue-replay response-loss push: %w", err)
 		}
 		response.Command = c.command("client", "synchronize-step", map[string]any{"client_key": c.clientKey, "method": "reset-schema-and-start", "completion": "blocked"}, nil)

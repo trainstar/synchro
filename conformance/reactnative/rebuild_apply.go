@@ -420,7 +420,7 @@ func (c *RebuildApplyCoordinator) acceptResultLocked(raw json.RawMessage) error 
 			return err
 		}
 	case rebuildApplyStageComplete:
-		capture, err := decodeCapture(envelope.Result, []string{"client_state", "pending_mutations", "rejected_mutations", "sync_status", "sync_events", "provenance", "request_trace"})
+		capture, err := decodeCapture(envelope.Result, []string{"client_state", "pending_mutations", "rejected_mutations", "sync_status", "sync_events", "provenance", "request_trace", "durable_proof"})
 		if err != nil {
 			return err
 		}
@@ -458,7 +458,13 @@ func (c *RebuildApplyCoordinator) advanceLocked(ctx context.Context, sequence ui
 		response.Command = c.command(clientKey, step.NativeBinding.ClientID, "client", "synchronize-step", map[string]any{"client_key": clientKey, "method": "start", "completion": "idle"}, nil)
 		c.stage = rebuildApplyStageCapture
 	case rebuildApplyStageCapture:
-		response.Command = c.command(clientKey, step.NativeBinding.ClientID, "observer", "capture", map[string]any{"client_keys": []string{clientKey}, "sources": []string{"scope-state", "pending-mutations", "rejected-mutations", "sync-status", "sync-events", "provenance", "request-trace"}}, nil)
+		response.Command = c.command(clientKey, step.NativeBinding.ClientID, "observer", "capture", map[string]any{
+			"client_keys": []string{clientKey},
+			"sources":     []string{"scope-state", "pending-mutations", "rejected-mutations", "sync-status", "sync-events", "provenance", "request-trace", "durable-proof"},
+			"durable_proof_identity": map[string]any{
+				"table_name": c.tableName, "record_id": "rebuild-apply-absent-row",
+			},
+		}, nil)
 		c.stage = rebuildApplyStageComplete
 	case rebuildApplyStageComplete:
 		c.current++
@@ -521,12 +527,75 @@ func (c *RebuildApplyCoordinator) validateCapture(capture finalCapture) error {
 	if err != nil {
 		return err
 	}
-	workload, expected := c.workloads[c.current], c.expectedClient(c.steps[c.current].NativeBinding.ClientID)
+	workload := c.workloads[c.current]
+	clientID := c.steps[c.current].NativeBinding.ClientID
+	expected := c.expectedClient(clientID)
 	if expected == nil || expected.RowCount == nil || expected.ProvenanceCount == nil || expected.CheckpointCount == nil || expected.RebuildAttemptCount == nil {
 		return errors.New("React Native rebuild-apply authored client state is unavailable")
 	}
-	if state.ApplicationRowCount != *expected.RowCount || state.ProvenanceCount != *expected.ProvenanceCount || state.ScopeStateCount != *expected.CheckpointCount || state.RebuildAttemptCount != *expected.RebuildAttemptCount || state.RebuildReceiptCount != 1 || len(state.ScopeStates) != 1 || len(state.ScopeRows) != int(workload.RecordCount) {
-		return errors.New("React Native rebuild-apply durable state differs from the authored model")
+	counts := []struct {
+		name     string
+		observed uint64
+		expected uint64
+	}{
+		{"application rows", state.ApplicationRowCount, *expected.RowCount},
+		{"provenance", state.ProvenanceCount, *expected.ProvenanceCount},
+		{"scope states", state.ScopeStateCount, *expected.CheckpointCount},
+		{"scope rows", state.ScopeRowCount, workload.RecordCount},
+		{"scope state details", uint64(len(state.ScopeStates)), *expected.CheckpointCount},
+		{"active rebuild attempts", state.RebuildAttemptCount, 0},
+		{"active rebuild attempt details", uint64(len(state.RebuildAttempts)), state.RebuildAttemptCount},
+	}
+	detailCount := workload.RecordCount
+	if detailCount > 512 {
+		detailCount = 512
+	}
+	counts = append(counts, struct {
+		name     string
+		observed uint64
+		expected uint64
+	}{"scope row details", uint64(len(state.ScopeRows)), detailCount})
+	for _, count := range counts {
+		if count.observed != count.expected {
+			return rebuildApplyCountError(clientID, count.name, count.observed, count.expected)
+		}
+	}
+	proof, err := decodeDurableProof(capture.DurableProof)
+	if err != nil {
+		return fmt.Errorf("React Native rebuild-apply client %s terminal rebuild proof is invalid: %w", clientID, err)
+	}
+	wantPages := (workload.RecordCount + workload.PageSize - 1) / workload.PageSize
+	if state.RebuildReceiptCount != wantPages {
+		return rebuildApplyCountError(clientID, "receipt pages", state.RebuildReceiptCount, wantPages)
+	}
+	var receiptPages uint64
+	for _, receipt := range proof.RebuildReceiptProofs {
+		if receipt.PageCount == 0 {
+			return rebuildApplyCountError(clientID, "terminal receipt page group", receipt.PageCount, 1)
+		}
+		if receiptPages > wantPages || receipt.PageCount > wantPages-receiptPages {
+			return rebuildApplyCountError(clientID, "terminal receipt pages", receiptPages+receipt.PageCount, wantPages)
+		}
+		receiptPages += receipt.PageCount
+	}
+	for _, count := range []struct {
+		name     string
+		observed uint64
+		expected uint64
+	}{
+		{"terminal receipt pages", receiptPages, wantPages},
+		{"terminal receipt attempts", uint64(len(proof.RebuildReceiptProofs)), *expected.RebuildAttemptCount},
+	} {
+		if count.observed != count.expected {
+			return rebuildApplyCountError(clientID, count.name, count.observed, count.expected)
+		}
+	}
+	rebuildAttempts, err := rebuildAttemptFactCount(state.RebuildAttempts, proof.RebuildReceiptProofs)
+	if err != nil {
+		return fmt.Errorf("React Native rebuild-apply client %s rebuild attempt facts are invalid: %w", clientID, err)
+	}
+	if rebuildAttempts != *expected.RebuildAttemptCount {
+		return rebuildApplyCountError(clientID, "rebuild attempt facts", rebuildAttempts, *expected.RebuildAttemptCount)
 	}
 	if len(capture.Provenance) == 0 || len(capture.Events) == 0 {
 		return errors.New("React Native rebuild-apply durable evidence is incomplete")
@@ -540,6 +609,10 @@ func (c *RebuildApplyCoordinator) validateCapture(capture finalCapture) error {
 	}
 	c.traces = append(c.traces, trace)
 	return nil
+}
+
+func rebuildApplyCountError(clientID, name string, observed, expected uint64) error {
+	return fmt.Errorf("React Native rebuild-apply client %s %s count: observed=%d expected=%d", clientID, name, observed, expected)
 }
 
 func validateRebuildApplyTrace(trace traceSnapshot, workload rebuildApplyWorkload, scopeCount int) error {

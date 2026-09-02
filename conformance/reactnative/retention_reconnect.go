@@ -1246,8 +1246,13 @@ func (c *RetentionReconnectCoordinator) validateQueue(capture finalCapture) erro
 		return errors.New("React Native retention-reconnect rejected queue is invalid")
 	}
 	_, mutationIDs, _, _, _, identityErr := c.proxyIdentity()
-	if identityErr != nil || state.MutationLedgerCount != uint64(len(mutationIDs)) || len(pending) != len(mutationIDs) {
-		return errors.New("React Native retention-reconnect durable queue count differs from sealed intent")
+	if identityErr != nil {
+		return fmt.Errorf("React Native retention-reconnect sealed intent count is unavailable, want a positive count: %w", identityErr)
+	}
+	sealedIntentCount := len(mutationIDs)
+	if state.MutationLedgerCount != uint64(sealedIntentCount) || len(pending) != sealedIntentCount {
+		return fmt.Errorf("React Native retention-reconnect durable queue ledger count = %d, pending count = %d, sealed intent count = %d",
+			state.MutationLedgerCount, len(pending), sealedIntentCount)
 	}
 	wanted := make(map[string]struct{}, len(mutationIDs))
 	for _, mutationID := range mutationIDs {

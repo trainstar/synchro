@@ -130,6 +130,28 @@ func TestRetentionReconnectQueueAllowsInspectableRejection(t *testing.T) {
 	}
 }
 
+func TestRetentionReconnectQueueCountFailureNamesObservedValues(t *testing.T) {
+	coordinator := &RetentionReconnectCoordinator{
+		sealedGeneration:  1,
+		sealedBatchID:     "batch-runtime",
+		sealedMutationIDs: []string{"mutation-runtime"},
+	}
+	capture := finalCapture{
+		ClientState: json.RawMessage(`{"schema":{"version":1,"hash":"` + strings.Repeat("a", 64) + `"},"provenanceMaintenanceWorkCursor":"cursor","mutationLedgerCount":1}`),
+		Pending:     json.RawMessage(`[]`),
+		Rejected:    json.RawMessage(`[{"mutationID":"mutation-runtime","status":"rejected_terminal","code":"policy_rejected"}]`),
+	}
+	err := coordinator.validateQueue(capture)
+	if err == nil {
+		t.Fatal("retention-reconnect queue count mismatch was accepted")
+	}
+	for _, wanted := range []string{"ledger count = 1", "pending count = 0", "sealed intent count = 1"} {
+		if !strings.Contains(err.Error(), wanted) {
+			t.Fatalf("retention-reconnect queue count error = %q, want component %q", err, wanted)
+		}
+	}
+}
+
 func TestRetentionReconnectProxyKeepsFaultUntilRelease(t *testing.T) {
 	var forwarded atomic.Uint64
 	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {

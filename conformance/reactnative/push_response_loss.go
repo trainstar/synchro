@@ -1014,8 +1014,16 @@ func (c *PushResponseLossCoordinator) validateFinalCapture(capture finalCapture)
 	return validateProvenance(capture.Provenance, state.ScopeStates[0], state.ScopeRows[0])
 }
 func validatePushResponseLossTrace(scenario scenarios.Scenario, trace traceSnapshot) error {
-	if trace.Overflowed || trace.SequenceCheckpoint != uint64(len(trace.Observations)) || validateTraceSequence(trace.Observations) != nil {
-		return errors.New("React Native push-response-loss request trace is invalid")
+	initialWire, initialFound := pushResponseLossWireExpectation(scenario, pushResponseLossStepOrder[1])
+	replayWire, replayFound := pushResponseLossWireExpectation(scenario, pushResponseLossStepOrder[3])
+	if !initialFound || !replayFound {
+		return fmt.Errorf("React Native push-response-loss replay wire expectations found = %t/%t, want true/true", initialFound, replayFound)
+	}
+	if trace.Overflowed || trace.SequenceCheckpoint != uint64(len(trace.Observations)) {
+		return fmt.Errorf("React Native push-response-loss request trace shape = overflowed:%t observations:%d checkpoint:%d, want overflowed:false and checkpoint:%d", trace.Overflowed, len(trace.Observations), trace.SequenceCheckpoint, len(trace.Observations))
+	}
+	if err := validateTraceSequence(trace.Observations); err != nil {
+		return fmt.Errorf("React Native push-response-loss request trace sequence = %s, want contiguous sequence: %w", pushResponseLossTraceSummary(trace.Observations), err)
 	}
 	pushes := make([]transportObservation, 0, 2)
 	for _, observation := range trace.Observations {
@@ -1023,23 +1031,52 @@ func validatePushResponseLossTrace(scenario scenarios.Scenario, trace traceSnaps
 			pushes = append(pushes, observation)
 		}
 	}
-	if len(pushes) != 2 || pushes[0].StatusCode != 0 || pushes[1].StatusCode != http.StatusOK {
-		return errors.New("React Native push-response-loss push replay trace is invalid")
+	if len(pushes) != 2 {
+		return fmt.Errorf("React Native push-response-loss push replay trace = %s (count %d), want two pushes with statuses [%d %d]", pushResponseLossTraceSummary(pushes), len(pushes), initialWire.HTTPStatus, replayWire.HTTPStatus)
 	}
-	generation, err := requestInteger(pushes[0], "client_generation")
-	if err != nil {
+	if err := validatePushResponseLossTracePush("initial response-loss", pushes[0], initialWire); err != nil {
 		return err
 	}
-	if generation == 0 {
-		return errors.New("React Native push-response-loss client generation is invalid")
+	if err := validatePushResponseLossTracePush("unchanged replay", pushes[1], replayWire); err != nil {
+		return err
 	}
-	for _, push := range pushes[1:] {
+	var generation uint64
+	for index, push := range pushes {
 		actual, err := requestInteger(push, "client_generation")
-		if err != nil || actual != generation {
-			return errors.New("React Native push-response-loss client generation changed")
+		if err != nil {
+			return fmt.Errorf("React Native push-response-loss push %d client generation = invalid (%v), want a positive integer shared by both pushes", index+1, err)
 		}
+		if actual == 0 {
+			return fmt.Errorf("React Native push-response-loss push %d client generation = %d, want a positive integer", index+1, actual)
+		}
+		if generation != 0 && actual != generation {
+			return fmt.Errorf("React Native push-response-loss push %d client generation = %d, want %d from the initial push", index+1, actual, generation)
+		}
+		generation = actual
 	}
 	return nil
+}
+
+func validatePushResponseLossTracePush(label string, observed transportObservation, expected scenarios.WireExpectation) error {
+	if observed.OperationClass != "push" || observed.StatusCode != expected.HTTPStatus || observed.DurationNanoseconds == 0 || !hasJSONValue(observed.RequestFacts) {
+		return fmt.Errorf("React Native push-response-loss %s trace = operation:%q status:%d duration:%d request_facts:%t, want operation:%q status:%d nonzero-duration:true request_facts:true for wire retryable:%t error_code:%s", label, observed.OperationClass, observed.StatusCode, observed.DurationNanoseconds, hasJSONValue(observed.RequestFacts), "push", expected.HTTPStatus, expected.Retryable, pushResponseLossTraceErrorCode(expected.ErrorCode))
+	}
+	return nil
+}
+
+func pushResponseLossTraceSummary(observations []transportObservation) string {
+	values := make([]string, 0, len(observations))
+	for _, observation := range observations {
+		values = append(values, fmt.Sprintf("%d:%s/%d", observation.Sequence, observation.OperationClass, observation.StatusCode))
+	}
+	return "[" + strings.Join(values, ",") + "]"
+}
+
+func pushResponseLossTraceErrorCode(value *string) string {
+	if value == nil {
+		return "none"
+	}
+	return *value
 }
 func (c *PushResponseLossCoordinator) runtimeRecordID() (string, error) {
 	var value string

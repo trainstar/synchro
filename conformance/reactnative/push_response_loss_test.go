@@ -104,6 +104,53 @@ func TestPushResponseLossCommandUsesNonNilEmptyStepManifest(t *testing.T) {
 	}
 }
 
+func TestValidatePushResponseLossTraceMatchesAuthoredReplay(t *testing.T) {
+	scenario := loadPushResponseLossAuthoredScenario(t)
+	if err := validatePushResponseLossTrace(scenario, validPushResponseLossTrace()); err != nil {
+		t.Fatalf("valid push replay trace failed: %v", err)
+	}
+}
+
+func TestValidatePushResponseLossTraceReportsObservedAndExpectedValues(t *testing.T) {
+	tests := []struct {
+		name       string
+		mutate     func(*traceSnapshot)
+		wantDetail string
+	}{
+		{"initial status", func(trace *traceSnapshot) { trace.Observations[0].StatusCode = http.StatusOK }, "status:200"},
+		{"replay status", func(trace *traceSnapshot) { trace.Observations[1].StatusCode = http.StatusConflict }, "status:409"},
+		{"replay duration", func(trace *traceSnapshot) { trace.Observations[1].DurationNanoseconds = 0 }, "duration:0"},
+		{"replay request facts", func(trace *traceSnapshot) { trace.Observations[1].RequestFacts = nil }, "request_facts:false"},
+		{"push count", func(trace *traceSnapshot) { trace.Observations = trace.Observations[:1]; trace.SequenceCheckpoint = 1 }, "count 1"},
+		{"generation", func(trace *traceSnapshot) {
+			trace.Observations[1].RequestFacts = json.RawMessage(`{"client_generation":2}`)
+		}, "generation = 2, want 1"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			trace := validPushResponseLossTrace()
+			test.mutate(&trace)
+			err := validatePushResponseLossTrace(loadPushResponseLossAuthoredScenario(t), trace)
+			if err == nil {
+				t.Fatal("invalid push replay trace was accepted")
+			}
+			if !strings.Contains(err.Error(), test.wantDetail) || !strings.Contains(err.Error(), "want") {
+				t.Fatalf("diagnostic = %q, want observed detail %q and expected value", err, test.wantDetail)
+			}
+		})
+	}
+}
+
+func validPushResponseLossTrace() traceSnapshot {
+	return traceSnapshot{
+		Observations: []transportObservation{
+			{Sequence: 1, OperationClass: "push", StatusCode: 0, DurationNanoseconds: 1, RequestFacts: json.RawMessage(`{"client_generation":1}`)},
+			{Sequence: 2, OperationClass: "push", StatusCode: http.StatusOK, DurationNanoseconds: 1, RequestFacts: json.RawMessage(`{"client_generation":1}`)},
+		},
+		SequenceCheckpoint: 2,
+	}
+}
+
 func loadPushResponseLossAuthoredScenario(t *testing.T) scenarios.Scenario {
 	t.Helper()
 	repositoryRoot, err := filepath.Abs(filepath.Join("..", ".."))

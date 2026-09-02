@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -139,6 +141,75 @@ func TestRebuildRequestsCommandEncodesEmptyStepsAsArray(t *testing.T) {
 	}
 }
 
+func TestRebuildRequestsExchangeDiagnosticNamesGuardValues(t *testing.T) {
+	coordinator, err := NewRebuildRequestsCoordinator(RebuildRequestsCoordinatorConfig{
+		Scenario: loadRebuildRequestsAuthoredScenario(t), Platform: "android", ServerURL: "http://127.0.0.1:8080", AuthToken: "unit-token",
+	})
+	if err != nil {
+		t.Fatalf("create rebuild-requests coordinator: %v", err)
+	}
+	defer func() { _ = coordinator.Close(context.Background()) }()
+	coordinator.prepared = true
+	response := exchangeRebuildRequestsRequestForTest(coordinator, []byte(`{"schema_version":1,"sequence":2,"result":null}`))
+	if response.Code != http.StatusConflict {
+		t.Fatalf("out-of-order rebuild-requests exchange status = %d, want %d", response.Code, http.StatusConflict)
+	}
+	_, err = coordinator.Result()
+	if err == nil {
+		t.Fatal("out-of-order rebuild-requests exchange did not preserve coordinator failure")
+	}
+	for _, value := range []string{
+		"closed=false", "prepared=true", "failed=false", "completed=false", "got sequence=2", "want sequence=1",
+	} {
+		if !strings.Contains(err.Error(), value) {
+			t.Fatalf("rebuild-requests diagnostic = %q, want it to contain %q", err, value)
+		}
+	}
+}
+
+func TestRebuildRequestsStageResultKindsMatchRunner(t *testing.T) {
+	coordinator, err := NewRebuildRequestsCoordinator(RebuildRequestsCoordinatorConfig{
+		Scenario: loadRebuildRequestsAuthoredScenario(t), Platform: "ios", ServerURL: "http://127.0.0.1:8080", AuthToken: "unit-token",
+	})
+	if err != nil {
+		t.Fatalf("create rebuild-requests coordinator: %v", err)
+	}
+	defer func() { _ = coordinator.Close(context.Background()) }()
+	digest := strings.Repeat("a", 64)
+	coordinator.process = &actionProcessIdentity{ProcessID: "process-a", DatabaseIdentityFingerprint: digest}
+	process := `{"process_id":"process-a","database_identity_fingerprint":"` + digest + `"}`
+	callBegun := resultEnvelopeForTest(map[string]any{
+		"kind": "call-begun", "call_id": coordinator.callID, "state": "in_flight", "process": json.RawMessage(process),
+	})
+	awaited := resultEnvelopeForTest(map[string]any{
+		"kind": "awaited", "status": json.RawMessage(`{"state":"ready","retry_at":null,"operation":null,"failure":null}`), "process": json.RawMessage(process),
+	})
+	tests := []struct {
+		stage    rebuildRequestsStage
+		result   json.RawMessage
+		wantKind string
+		wantErr  bool
+	}{
+		{rebuildRequestsStageFirstPage, callBegun, "call-begun", false},
+		{rebuildRequestsStageFinalPage, awaited, "awaited", false},
+		{rebuildRequestsStagePull, awaited, "awaited", false},
+		{rebuildRequestsStageAwaitCall, awaited, "awaited", false},
+		{rebuildRequestsStageAwaitCall, callBegun, "call-begun", true},
+	}
+	for _, test := range tests {
+		t.Run(test.wantKind+"-"+stageNameForTest(test.stage), func(t *testing.T) {
+			coordinator.stage = test.stage
+			err := coordinator.acceptResultLocked(test.result)
+			if test.wantErr && err == nil {
+				t.Fatalf("stage %s accepted observed result kind %q, want rejection", stageNameForTest(test.stage), test.wantKind)
+			}
+			if !test.wantErr && err != nil {
+				t.Fatalf("stage %s rejected observed result kind %q: %v", stageNameForTest(test.stage), test.wantKind, err)
+			}
+		})
+	}
+}
+
 func TestValidateFirstRebuildResponseRequiresIntermediatePage(t *testing.T) {
 	valid := []byte(`{"scope":"runtime-scope","records":[{"table":"runtime-items","pk":{},"row":{},"row_checksum":{},"server_version":"v1"}],"has_more":true,"cursor":"cursor-1"}`)
 	if err := validateFirstRebuildResponse(valid); err != nil {
@@ -173,4 +244,32 @@ func cloneRebuildRequestsScenario(scenario scenarios.Scenario) scenarios.Scenari
 		panic(err)
 	}
 	return clone
+}
+
+func exchangeRebuildRequestsRequestForTest(coordinator *RebuildRequestsCoordinator, body []byte) *httptest.ResponseRecorder {
+	request := httptest.NewRequest(http.MethodPost, "http://coordinator.test/exchange", bytes.NewReader(body))
+	request.Header.Set("Authorization", "Bearer "+coordinator.Token())
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	coordinator.ServeHTTP(response, request)
+	return response
+}
+
+func resultEnvelopeForTest(result map[string]any) json.RawMessage {
+	value, err := json.Marshal(map[string]any{
+		"schema_version": 1, "outcome": "passed", "result": result, "error_code": nil, "error_detail": nil,
+	})
+	if err != nil {
+		panic(err)
+	}
+	return value
+}
+
+func stageNameForTest(stage rebuildRequestsStage) string {
+	return map[rebuildRequestsStage]string{
+		rebuildRequestsStageFirstPage: "first-page",
+		rebuildRequestsStageFinalPage: "final-page",
+		rebuildRequestsStagePull:      "pull",
+		rebuildRequestsStageAwaitCall: "await-call",
+	}[stage]
 }
