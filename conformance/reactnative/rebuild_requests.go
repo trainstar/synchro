@@ -1353,8 +1353,8 @@ func (c *RebuildRequestsCoordinator) validateState(server scenarios.StateFacts, 
 	if err != nil {
 		return err
 	}
-	if state.ApplicationRowCount != 3 || state.MutationLedgerCount != 0 || state.MutationOutcomeCount != 0 || state.SealedBatchCount != 0 || state.RejectedMutationCount != 0 || state.ScopeStateCount != 1 || state.ScopeRowCount != 3 || state.ProvenanceCount != 3 || state.RowMetadataCount != 3 || state.RebuildAttemptCount != 0 || state.RebuildReceiptCount != 1 || len(state.ScopeStates) != 1 || len(state.ScopeRows) != 3 {
-		return errors.New("React Native rebuild-requests client durable counts are incomplete")
+	if err := validateRebuildRequestsDurableCounts(state); err != nil {
+		return err
 	}
 	if err := validateEmptyArray(c.finalResult.Pending); err != nil || validateEmptyArray(c.finalResult.Rejected) != nil {
 		return errors.New("React Native rebuild-requests mutation queues are not empty")
@@ -1395,6 +1395,44 @@ func (c *RebuildRequestsCoordinator) validateState(server scenarios.StateFacts, 
 		return err
 	}
 	return nil
+}
+
+type rebuildRequestsDurableCount struct {
+	name     string
+	actual   uint64
+	expected uint64
+}
+
+func validateRebuildRequestsDurableCounts(state inspectedClientState) error {
+	counts := []rebuildRequestsDurableCount{
+		{"application_row_count", state.ApplicationRowCount, 3},
+		{"mutation_ledger_count", state.MutationLedgerCount, 0},
+		{"mutation_outcome_count", state.MutationOutcomeCount, 0},
+		{"sealed_batch_count", state.SealedBatchCount, 0},
+		{"rejected_mutation_count", state.RejectedMutationCount, 0},
+		{"scope_state_count", state.ScopeStateCount, 1},
+		{"scope_row_count", state.ScopeRowCount, 3},
+		{"provenance_count", state.ProvenanceCount, 3},
+		{"row_metadata_count", state.RowMetadataCount, 3},
+		{"rebuild_attempt_count", state.RebuildAttemptCount, 0},
+		{"rebuild_receipt_count", state.RebuildReceiptCount, 2},
+		{"scope_state_detail_count", uint64(len(state.ScopeStates)), 1},
+		{"scope_row_detail_count", uint64(len(state.ScopeRows)), 3},
+	}
+	for _, count := range counts {
+		if count.actual != count.expected {
+			return fmt.Errorf("React Native rebuild-requests client durable counts are incomplete: %s", rebuildRequestsDurableCountSummary(counts))
+		}
+	}
+	return nil
+}
+
+func rebuildRequestsDurableCountSummary(counts []rebuildRequestsDurableCount) string {
+	values := make([]string, 0, len(counts))
+	for _, count := range counts {
+		values = append(values, fmt.Sprintf("%s=%d want=%d", count.name, count.actual, count.expected))
+	}
+	return strings.Join(values, " ")
 }
 
 func (c *RebuildRequestsCoordinator) validateRows(state inspectedClientState, proof durableProof, evidence rebuildRequestsIdentityEvidence) error {

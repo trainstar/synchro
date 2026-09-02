@@ -152,29 +152,56 @@ func TestValidateRebuildApplyCaptureDistinguishesActiveAndTerminalAttempts(t *te
 	}
 }
 
-func TestRebuildApplyCaptureRequestsTerminalReceiptProof(t *testing.T) {
+func TestRebuildApplyCaptureRequestsBoundedTerminalEvidence(t *testing.T) {
 	scenario := loadRebuildApplyAuthoredScenario(t)
-	step := scenario.Steps[3]
-	coordinator := &RebuildApplyCoordinator{
-		config:    RebuildApplyCoordinatorConfig{Scenario: scenario},
-		adapter:   "http://127.0.0.1:8080",
-		steps:     []scenarios.Step{step},
-		workloads: []rebuildApplyWorkload{{Profile: "scope_cardinality", ScopeID: "scope-a", RecordCount: 101, PageSize: 100}},
-		tableName: "runtime_items",
-		stage:     rebuildApplyStageCapture,
+	tests := []struct {
+		name        string
+		stepIndex   int
+		wantSources []string
+	}{
+		{
+			name:      "complete details",
+			stepIndex: 3,
+			wantSources: []string{
+				"scope-state", "pending-mutations", "rejected-mutations", "sync-status", "sync-events", "provenance", "request-trace", "durable-proof",
+			},
+		},
+		{
+			name:      "over-bound details",
+			stepIndex: 6,
+			wantSources: []string{
+				"scope-state", "pending-mutations", "rejected-mutations", "sync-status", "sync-events", "request-trace", "durable-proof",
+			},
+		},
 	}
-	response, err := coordinator.advanceLocked(context.Background(), 1)
-	if err != nil {
-		t.Fatalf("advance rebuild-apply capture: %v", err)
-	}
-	parameters := response.Command.Action.Action.Parameters
-	wantSources := []string{"scope-state", "pending-mutations", "rejected-mutations", "sync-status", "sync-events", "provenance", "request-trace", "durable-proof"}
-	if !reflect.DeepEqual(parameters["sources"], wantSources) {
-		t.Fatalf("rebuild-apply capture sources = %#v, want %#v", parameters["sources"], wantSources)
-	}
-	wantIdentity := map[string]any{"table_name": "runtime_items", "record_id": "rebuild-apply-absent-row"}
-	if !reflect.DeepEqual(parameters["durable_proof_identity"], wantIdentity) {
-		t.Fatalf("rebuild-apply durable proof identity = %#v, want %#v", parameters["durable_proof_identity"], wantIdentity)
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			step := scenario.Steps[test.stepIndex]
+			var workload rebuildApplyWorkload
+			if err := json.Unmarshal(step.Operation.Payload, &workload); err != nil {
+				t.Fatalf("decode rebuild-apply workload: %v", err)
+			}
+			coordinator := &RebuildApplyCoordinator{
+				config:    RebuildApplyCoordinatorConfig{Scenario: scenario},
+				adapter:   "http://127.0.0.1:8080",
+				steps:     []scenarios.Step{step},
+				workloads: []rebuildApplyWorkload{workload},
+				tableName: "runtime_items",
+				stage:     rebuildApplyStageCapture,
+			}
+			response, err := coordinator.advanceLocked(context.Background(), 1)
+			if err != nil {
+				t.Fatalf("advance rebuild-apply capture: %v", err)
+			}
+			parameters := response.Command.Action.Action.Parameters
+			if !reflect.DeepEqual(parameters["sources"], test.wantSources) {
+				t.Fatalf("rebuild-apply capture sources = %#v, want %#v", parameters["sources"], test.wantSources)
+			}
+			wantIdentity := map[string]any{"table_name": "runtime_items", "record_id": "rebuild-apply-absent-row"}
+			if !reflect.DeepEqual(parameters["durable_proof_identity"], wantIdentity) {
+				t.Fatalf("rebuild-apply durable proof identity = %#v, want %#v", parameters["durable_proof_identity"], wantIdentity)
+			}
+		})
 	}
 }
 
@@ -228,10 +255,15 @@ func TestRebuildApplyCountFailureNamesExchangeObservedAndExpected(t *testing.T) 
 
 func TestRebuildApplyIncompleteResultNamesServedAndExpectedExchanges(t *testing.T) {
 	scenario := loadRebuildApplyAuthoredScenario(t)
-	coordinator := &RebuildApplyCoordinator{config: RebuildApplyCoordinatorConfig{Scenario: scenario}, nextSeq: 4}
+	coordinator := &RebuildApplyCoordinator{
+		config:  RebuildApplyCoordinatorConfig{Scenario: scenario},
+		nextSeq: 22,
+		stage:   rebuildApplyStageComplete,
+		current: 6,
+	}
 	_, err := coordinator.Result()
-	if err == nil || !strings.Contains(err.Error(), "exchanges served=3") || !strings.Contains(err.Error(), "ExchangeCount=28") {
-		t.Fatalf("incomplete rebuild-apply error = %v, want exchanges served=3 and ExchangeCount=28", err)
+	if err == nil || !strings.Contains(err.Error(), "current stage=complete") || !strings.Contains(err.Error(), "step index=6") || !strings.Contains(err.Error(), "exchanges served=21") || !strings.Contains(err.Error(), "ExchangeCount=28") {
+		t.Fatalf("incomplete rebuild-apply error = %v, want stage, step index, exchanges served, and ExchangeCount", err)
 	}
 }
 

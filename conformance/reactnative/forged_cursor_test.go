@@ -130,6 +130,21 @@ func TestForgedCursorCommandEncodesOnlyAuthoredSteps(t *testing.T) {
 	}
 }
 
+func TestForgedCursorCommandCarriesAuthoredPullPageSize(t *testing.T) {
+	coordinator, err := NewForgedCursorCoordinator(ForgedCursorCoordinatorConfig{
+		Scenario: loadForgedCursorAuthoredScenario(t), Platform: "ios", ServerURL: "http://127.0.0.1:8080", AuthToken: "unit-token",
+	})
+	if err != nil {
+		t.Fatalf("create forged-cursor coordinator: %v", err)
+	}
+	defer func() { _ = coordinator.Close(context.Background()) }()
+
+	command := coordinator.command("client", "open", map[string]any{"client_key": coordinator.clientKey}, nil)
+	if command.Runtime.PullPageSize != 1 {
+		t.Fatalf("forged-cursor runtime pull page size = %d, want authored size 1", command.Runtime.PullPageSize)
+	}
+}
+
 func TestMutateForgedCursorFirstResponseInstallsDeterministicCursor(t *testing.T) {
 	raw := []byte(`{"scope":"scope-a","records":[{"table":"items"}],"has_more":true,"cursor":"real-opaque-cursor"}`)
 	mutated, err := mutateForgedCursorFirstResponse(raw)

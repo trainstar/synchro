@@ -188,6 +188,24 @@ func TestQueueReplayProxyDropsCommittedPushAndForwardsReplay(t *testing.T) {
 		t.Fatal("initial committed push did not complete after coordinator release")
 	}
 
+	automaticRetry, err := http.NewRequest(http.MethodPost, proxy.URL+"/sync/push", strings.NewReader(requestBody))
+	if err != nil {
+		t.Fatalf("create automatic retry proxy request: %v", err)
+	}
+	retryResponse, retryErr := proxy.Client().Do(automaticRetry)
+	if retryResponse != nil {
+		_ = retryResponse.Body.Close()
+	}
+	if retryErr == nil || !strings.Contains(retryErr.Error(), "malformed HTTP") {
+		t.Fatalf("automatic retry response error = %v, want malformed HTTP", retryErr)
+	}
+	select {
+	case got := <-received:
+		t.Fatalf("automatic retry reached upstream with body %q", got)
+	default:
+	}
+	coordinator.allowResponseLossReplay()
+
 	replay, err := http.NewRequest(http.MethodPost, proxy.URL+"/sync/push", strings.NewReader(requestBody))
 	if err != nil {
 		t.Fatalf("create replay proxy request: %v", err)
@@ -248,7 +266,7 @@ func TestQueueReplayResponseLossUsesAnAsynchronousBlockedCall(t *testing.T) {
 		t.Fatalf("queue-replay response-loss begin action = %#v", action)
 	}
 	process := `{"process_id":"process-a","database_identity_fingerprint":"` + strings.Repeat("a", 64) + `"}`
-	if err := coordinator.validateResponseLossCallBegun(json.RawMessage(`{"kind":"call-begun","call_id":"`+coordinator.responseLossCallID()+`","state":"in_flight","process":`+process+`}`)); err != nil {
+	if err := coordinator.validateResponseLossCallBegun(json.RawMessage(`{"kind":"call-begun","call_id":"` + coordinator.responseLossCallID() + `","state":"in_flight","process":` + process + `}`)); err != nil {
 		t.Fatalf("validate queue-replay response-loss call begin: %v", err)
 	}
 	blocked := json.RawMessage(`{"kind":"call-completed","call_id":"` + coordinator.responseLossCallID() + `","state":"completed","completion":"blocked","status":{"state":"backoff","retry_at":"2026-09-02T00:00:01Z","operation":"push","failure":null},"process":` + process + `}`)

@@ -170,6 +170,7 @@ type queueReplayResponseLoss struct {
 	committedOnce sync.Once
 	releaseOnce   sync.Once
 	claimed       bool
+	replayAllowed bool
 	err           error
 }
 
@@ -458,6 +459,18 @@ func (c *QueueReplayCoordinator) proxyAdapter(writer http.ResponseWriter, reques
 		writeExchangeError(writer, http.StatusBadGateway)
 		return
 	}
+	var responseLoss *queueReplayResponseLoss
+	firstResponseLossPush := false
+	if request.Method == http.MethodPost && request.URL.Path == "/sync/push" {
+		responseLoss, firstResponseLossPush = c.claimResponseLossPush()
+		if responseLoss != nil && !firstResponseLossPush {
+			// Keep automatic retries from completing before the coordinator stops the client.
+			if err := c.dropProxyResponse(writer); err != nil {
+				c.recordResponseLossProxyFailure(responseLoss, err)
+			}
+			return
+		}
+	}
 	target := strings.TrimRight(c.upstream, "/") + request.URL.RequestURI()
 	upstreamRequest, err := http.NewRequestWithContext(request.Context(), request.Method, target, bytes.NewReader(body))
 	if err != nil {
@@ -484,21 +497,21 @@ func (c *QueueReplayCoordinator) proxyAdapter(writer http.ResponseWriter, reques
 		return
 	}
 	if request.Method == http.MethodPost && request.URL.Path == "/sync/push" {
-		if fault := c.claimResponseLossPush(); fault != nil {
+		if responseLoss != nil && firstResponseLossPush {
 			if response.StatusCode != http.StatusOK {
-				c.recordResponseLossProxyFailure(fault, fmt.Errorf("React Native queue-replay response-loss push status = %d", response.StatusCode))
+				c.recordResponseLossProxyFailure(responseLoss, fmt.Errorf("React Native queue-replay response-loss push status = %d", response.StatusCode))
 				writeExchangeError(writer, http.StatusBadGateway)
 				return
 			}
-			fault.committedOnce.Do(func() { close(fault.committed) })
+			responseLoss.committedOnce.Do(func() { close(responseLoss.committed) })
 			select {
 			case <-request.Context().Done():
-				c.recordResponseLossProxyFailure(fault, request.Context().Err())
+				c.recordResponseLossProxyFailure(responseLoss, request.Context().Err())
 				return
-			case <-fault.release:
+			case <-responseLoss.release:
 			}
 			if err := c.dropProxyResponse(writer); err != nil {
-				c.recordResponseLossProxyFailure(fault, err)
+				c.recordResponseLossProxyFailure(responseLoss, err)
 			}
 			return
 		}
@@ -523,15 +536,26 @@ func (c *QueueReplayCoordinator) armResponseLossPush() {
 	c.proxyMu.Unlock()
 }
 
-func (c *QueueReplayCoordinator) claimResponseLossPush() *queueReplayResponseLoss {
+func (c *QueueReplayCoordinator) claimResponseLossPush() (*queueReplayResponseLoss, bool) {
 	c.proxyMu.Lock()
 	defer c.proxyMu.Unlock()
 	fault := c.responseLoss
-	if fault == nil || fault.claimed {
-		return nil
+	if fault == nil || fault.replayAllowed {
+		return nil, false
+	}
+	if fault.claimed {
+		return fault, false
 	}
 	fault.claimed = true
-	return fault
+	return fault, true
+}
+
+func (c *QueueReplayCoordinator) allowResponseLossReplay() {
+	c.proxyMu.Lock()
+	if c.responseLoss != nil {
+		c.responseLoss.replayAllowed = true
+	}
+	c.proxyMu.Unlock()
 }
 
 func (c *QueueReplayCoordinator) recordResponseLossProxyFailure(fault *queueReplayResponseLoss, err error) {
@@ -590,7 +614,7 @@ func (c *QueueReplayCoordinator) dropProxyResponse(writer http.ResponseWriter) e
 		return err
 	}
 	defer connection.Close()
-	// A bare close lets the Android HTTP client repeat the request before it records the failure.
+	// An invalid response makes the Android HTTP client record the transport failure.
 	_, err = connection.Write([]byte("SYNCHRO RESPONSE LOSS\r\n\r\n"))
 	return err
 }
@@ -631,6 +655,9 @@ func (c *QueueReplayCoordinator) acceptResultLocked(raw json.RawMessage) error {
 	case queueReplayStageStoppedBeforeSchema, queueReplayStageStoppedAfterLoss:
 		if err := c.validateStopped(envelope.Result); err != nil {
 			return err
+		}
+		if c.stage == queueReplayStageStoppedAfterLoss {
+			c.allowResponseLossReplay()
 		}
 	case queueReplayStageSchemaBoundary:
 		if err := c.validateSynchronized(envelope.Result, "error"); err != nil {

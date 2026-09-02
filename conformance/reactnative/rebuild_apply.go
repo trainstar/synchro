@@ -17,8 +17,9 @@ import (
 )
 
 const (
-	rebuildApplyScenarioPath = "conformance/scenarios/performance/rebuild-apply-001.json"
-	rebuildApplyScenarioID   = "SCN-PERF-REBUILD-APPLY-001"
+	rebuildApplyScenarioPath         = "conformance/scenarios/performance/rebuild-apply-001.json"
+	rebuildApplyScenarioID           = "SCN-PERF-REBUILD-APPLY-001"
+	rebuildApplyMaximumDetailRecords = 512
 )
 
 var rebuildApplyAliasNames = []string{"client-generation-one", "current-schema", "scope-a", "items-table"}
@@ -307,15 +308,27 @@ func (c *RebuildApplyCoordinator) ExchangeCount() int {
 func (c *RebuildApplyCoordinator) Result() (RebuildApplyCoordinatorResult, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	stage := "invalid"
+	switch c.stage {
+	case rebuildApplyStageOpen:
+		stage = "open"
+	case rebuildApplyStageSynchronize:
+		stage = "synchronize"
+	case rebuildApplyStageCapture:
+		stage = "capture"
+	case rebuildApplyStageComplete:
+		stage = "complete"
+	}
 	served := uint64(0)
 	if c.nextSeq > 0 {
 		served = c.nextSeq - 1
 	}
+	progress := fmt.Sprintf("current stage=%s, step index=%d, exchanges served=%d versus ExchangeCount=%d", stage, c.current, served, c.ExchangeCount())
 	if c.failed != nil {
-		return RebuildApplyCoordinatorResult{}, fmt.Errorf("%w (exchanges served=%d versus ExchangeCount=%d)", c.failed, served, c.ExchangeCount())
+		return RebuildApplyCoordinatorResult{}, fmt.Errorf("%w (%s)", c.failed, progress)
 	}
 	if !c.completed {
-		return RebuildApplyCoordinatorResult{}, fmt.Errorf("React Native rebuild-apply coordinator has not completed (exchanges served=%d versus ExchangeCount=%d)", served, c.ExchangeCount())
+		return RebuildApplyCoordinatorResult{}, fmt.Errorf("React Native rebuild-apply coordinator has not completed (%s)", progress)
 	}
 	return c.result, nil
 }
@@ -424,7 +437,11 @@ func (c *RebuildApplyCoordinator) acceptResultLocked(raw json.RawMessage) error 
 			return err
 		}
 	case rebuildApplyStageComplete:
-		capture, err := decodeCapture(envelope.Result, []string{"client_state", "pending_mutations", "rejected_mutations", "sync_status", "sync_events", "provenance", "request_trace", "durable_proof"})
+		if c.current >= len(c.workloads) {
+			return errors.New("React Native rebuild-apply capture has no workload")
+		}
+		_, captureKeys := rebuildApplyCaptureFields(c.workloads[c.current].RecordCount)
+		capture, err := decodeCapture(envelope.Result, captureKeys)
 		if err != nil {
 			return err
 		}
@@ -462,9 +479,10 @@ func (c *RebuildApplyCoordinator) advanceLocked(ctx context.Context, sequence ui
 		response.Command = c.command(clientKey, step.NativeBinding.ClientID, "client", "synchronize-step", map[string]any{"client_key": clientKey, "method": "start", "completion": "idle"}, nil)
 		c.stage = rebuildApplyStageCapture
 	case rebuildApplyStageCapture:
+		sources, _ := rebuildApplyCaptureFields(workload.RecordCount)
 		response.Command = c.command(clientKey, step.NativeBinding.ClientID, "observer", "capture", map[string]any{
-			"client_keys":   []string{clientKey},
-			"sources":       []string{"scope-state", "pending-mutations", "rejected-mutations", "sync-status", "sync-events", "provenance", "request-trace", "durable-proof"},
+			"client_keys": []string{clientKey},
+			"sources":     sources,
 			"durable_proof_identity": map[string]any{
 				"table_name": c.tableName, "record_id": "rebuild-apply-absent-row",
 			},
@@ -479,6 +497,16 @@ func (c *RebuildApplyCoordinator) advanceLocked(ctx context.Context, sequence ui
 		return c.advanceLocked(ctx, sequence)
 	}
 	return response, nil
+}
+
+func rebuildApplyCaptureFields(recordCount uint64) ([]string, []string) {
+	sources := []string{"scope-state", "pending-mutations", "rejected-mutations", "sync-status", "sync-events"}
+	keys := []string{"client_state", "pending_mutations", "rejected_mutations", "sync_status", "sync_events"}
+	if recordCount <= rebuildApplyMaximumDetailRecords {
+		sources = append(sources, "provenance")
+		keys = append(keys, "provenance")
+	}
+	return append(sources, "request-trace", "durable-proof"), append(keys, "request_trace", "durable_proof")
 }
 
 func (c *RebuildApplyCoordinator) command(key, id, actor, name string, parameters map[string]any, stepIDs []scenarios.StepID) *conformanceCommand {
@@ -540,13 +568,14 @@ func (c *RebuildApplyCoordinator) validateCapture(capture finalCapture) error {
 	if expected == nil || expected.RowCount == nil || expected.ProvenanceCount == nil || expected.CheckpointCount == nil || expected.RebuildAttemptCount == nil {
 		return errors.New("React Native rebuild-apply authored client state is unavailable")
 	}
+	// Native consumers omit over-bound details and prove their aggregate counts.
+	validateDetails := workload.RecordCount <= rebuildApplyMaximumDetailRecords
 	var provenance []clientScopeRow
-	if err := decodeStrictValue(capture.Provenance, &provenance); err != nil {
-		return fmt.Errorf("React Native rebuild-apply client %s provenance detail is invalid: %w", clientID, err)
+	if validateDetails {
+		if err := decodeStrictValue(capture.Provenance, &provenance); err != nil {
+			return fmt.Errorf("React Native rebuild-apply client %s provenance detail is invalid: %w", clientID, err)
+		}
 	}
-	// A detail set above the 512 capture bound arrives truncated. The native
-	// validators omit detail validation then and prove the aggregate counts.
-	validateDetails := workload.RecordCount <= 512
 	counts := []struct {
 		name     string
 		observed uint64

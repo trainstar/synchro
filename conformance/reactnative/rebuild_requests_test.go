@@ -269,6 +269,40 @@ func TestValidateRebuildRequestsTransportRequiresOneIncrementalPullResponseCurso
 	}
 }
 
+func TestValidateRebuildRequestsDurableCountsNamesEveryCheckedValue(t *testing.T) {
+	state := rebuildRequestsDurableStateForTest()
+	state.RebuildReceiptCount = 1
+	err := validateRebuildRequestsDurableCounts(state)
+	if err == nil {
+		t.Fatal("one-page rebuild receipt count was accepted")
+	}
+	for _, value := range []string{
+		"application_row_count=3 want=3",
+		"mutation_ledger_count=0 want=0",
+		"mutation_outcome_count=0 want=0",
+		"sealed_batch_count=0 want=0",
+		"rejected_mutation_count=0 want=0",
+		"scope_state_count=1 want=1",
+		"scope_row_count=3 want=3",
+		"provenance_count=3 want=3",
+		"row_metadata_count=3 want=3",
+		"rebuild_attempt_count=0 want=0",
+		"rebuild_receipt_count=1 want=2",
+		"scope_state_detail_count=1 want=1",
+		"scope_row_detail_count=3 want=3",
+	} {
+		if !strings.Contains(err.Error(), value) {
+			t.Fatalf("durable-count diagnostic = %q, want it to contain %q", err, value)
+		}
+	}
+}
+
+func TestValidateRebuildRequestsDurableCountsAcceptsTwoPageReceipts(t *testing.T) {
+	if err := validateRebuildRequestsDurableCounts(rebuildRequestsDurableStateForTest()); err != nil {
+		t.Fatalf("two-page rebuild receipt count was rejected: %v", err)
+	}
+}
+
 func loadRebuildRequestsAuthoredScenario(t *testing.T) scenarios.Scenario {
 	t.Helper()
 	repoRoot, err := filepath.Abs(filepath.Join("..", ".."))
@@ -339,3 +373,13 @@ func rebuildRequestsTransportForTest() []transportObservation {
 }
 
 func boolPointer(value bool) *bool { return &value }
+
+func rebuildRequestsDurableStateForTest() inspectedClientState {
+	return inspectedClientState{
+		ApplicationRowCount: 3, MutationLedgerCount: 0, MutationOutcomeCount: 0,
+		SealedBatchCount: 0, RejectedMutationCount: 0, ScopeStateCount: 1,
+		ScopeRowCount: 3, ProvenanceCount: 3, RowMetadataCount: 3,
+		RebuildAttemptCount: 0, RebuildReceiptCount: 2,
+		ScopeStates: []clientScopeState{{}}, ScopeRows: []clientScopeRow{{}, {}, {}},
+	}
+}

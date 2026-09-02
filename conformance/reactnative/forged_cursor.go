@@ -109,6 +109,7 @@ type ForgedCursorCoordinator struct {
 	clientKey    string
 	callID       string
 	tableName    string
+	pageLimit    uint64
 	expected     *scenarios.StateFacts
 
 	mu           sync.Mutex
@@ -164,6 +165,7 @@ type forgedCursorRuntime struct {
 	SeedDatabasePath string `json:"seed_database_path"`
 	ServerURL        string `json:"server_url"`
 	AuthToken        string `json:"auth_token"`
+	PullPageSize     uint64 `json:"pull_page_size,omitempty"`
 }
 
 type forgedCursorCommand struct {
@@ -487,12 +489,17 @@ func NewForgedCursorCoordinator(config ForgedCursorCoordinatorConfig) (*ForgedCu
 		steps[step.ID] = step
 	}
 	callID := string(*steps[forgedCursorStepOrder[2]].NativeBinding.CallID)
+	pageLimit, err := forgedCursorAuthoredPageLimit(steps)
+	if err != nil {
+		_ = listener.Close()
+		return nil, err
+	}
 	coordinator := &ForgedCursorCoordinator{
 		config: config, listener: listener, token: capability, adapter: adapter, upstream: upstream, upstreamURL: upstreamURL, database: database,
 		transport: &http.Client{}, pushCommitted: make(chan struct{}), firstPageReady: make(chan struct{}), forgedPageReady: make(chan struct{}), allowPushResponse: make(chan struct{}), allowForgedPage: make(chan struct{}),
 		steps: steps, identities: append([]scenarios.NativeIdentityAlias(nil), config.Scenario.NativeIdentityAliases...),
 		runtimeIDs: make(map[string]json.RawMessage), authTokens: make(map[string]string), serverClient: serverClient,
-		clientKey: serverClient.ClientID, callID: callID, expected: forgedCursorExpectedState(config.Scenario), nextSeq: 1,
+		clientKey: serverClient.ClientID, callID: callID, pageLimit: pageLimit, expected: forgedCursorExpectedState(config.Scenario), nextSeq: 1,
 	}
 	coordinator.server = &http.Server{Handler: coordinator, MaxHeaderBytes: 16 * 1024, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 2 * time.Minute, WriteTimeout: 2 * time.Minute, IdleTimeout: 30 * time.Second}
 	return coordinator, nil
@@ -1281,7 +1288,7 @@ func (c *ForgedCursorCoordinator) command(actor, name string, parameters map[str
 		Action:        conformanceManifest{Action: conformanceAction{Actor: actor, Command: name, Parameters: parameters}, Steps: steps},
 		Runtime: forgedCursorRuntime{
 			ClientKey: c.clientKey, Database: c.database, ClientID: c.serverClient.ClientID, SeedDatabasePath: forgedCursorSeedAsset,
-			ServerURL: c.adapter, AuthToken: c.authTokens[c.clientKey],
+			ServerURL: c.adapter, AuthToken: c.authTokens[c.clientKey], PullPageSize: c.pageLimit,
 		},
 	}
 }
@@ -1297,6 +1304,20 @@ func (c *ForgedCursorCoordinator) bindAndMaterializePush(ctx context.Context) er
 		return fmt.Errorf("materialize React Native forged-cursor step %s: disposition=%q want=%q error=%v", materialize.ID, result.Disposition, materialize.ExpectedOutcome.Disposition, err)
 	}
 	return nil
+}
+
+func forgedCursorAuthoredPageLimit(steps map[scenarios.StepID]scenarios.Step) (uint64, error) {
+	step, found := steps[forgedCursorStepOrder[4]]
+	if !found {
+		return 0, errors.New("React Native forged-cursor authored request step is absent")
+	}
+	var payload struct {
+		Limit *uint64 `json:"limit"`
+	}
+	if err := json.Unmarshal(step.Operation.Payload, &payload); err != nil || payload.Limit == nil || *payload.Limit == 0 {
+		return 0, errors.New("React Native forged-cursor authored page limit is invalid")
+	}
+	return *payload.Limit, nil
 }
 
 func (c *ForgedCursorCoordinator) captureServer(ctx context.Context) (scenarios.StateFacts, error) {
