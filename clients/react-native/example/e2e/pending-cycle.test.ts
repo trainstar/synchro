@@ -16,7 +16,7 @@ type ConformanceEnvelope = {
 };
 
 const exchangeMembers = ['command', 'schema_version', 'sequence', 'state'];
-const envelopeMembers = ['error_code', 'outcome', 'result', 'schema_version'];
+const envelopeMembers = ['error_code', 'error_detail', 'outcome', 'result', 'schema_version'];
 
 function exactObject(value: unknown, members: string[]): value is Record<string, unknown> {
   return (
