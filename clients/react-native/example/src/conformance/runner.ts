@@ -192,6 +192,8 @@ export class PublicConformanceRunner {
           return this.boundedResult(await this.open(command));
         case 'client/execute-step':
           return this.boundedResult(await this.executeLocalAction(command));
+        case 'client/execute-steps':
+          return this.boundedResult(await this.executeLocalActions(command));
         case 'client/synchronize-step':
           return this.boundedResult(await this.synchronize(command));
         case 'client/begin-call':
@@ -286,6 +288,29 @@ export class PublicConformanceRunner {
       const result = await transaction.execute(action.sql, action.values);
       return result.rowsAffected;
     });
+    return {
+      kind: 'local-action',
+      rows_affected: rowsAffected,
+      process: await this.processIdentity(clientKey, client),
+    };
+  }
+
+  // execute-steps transports a bounded batch of authored local operations in
+  // one command, because every command crosses the device text field. Each
+  // operation executes through the same per-operation transaction path that
+  // execute-step uses, in authored order.
+  private async executeLocalActions(command: ConformanceCommand): Promise<ConformanceActionResult> {
+    const clientKey = requireClientKey(command);
+    const operations = requireLocalOperationBatch(command);
+    const client = await this.activate(clientKey);
+    let rowsAffected = 0;
+    for (const operation of operations) {
+      const action = decodeLocalAction(operation);
+      rowsAffected += await client.writeTransaction(async (transaction) => {
+        const result = await transaction.execute(action.sql, action.values);
+        return result.rowsAffected;
+      });
+    }
     return {
       kind: 'local-action',
       rows_affected: rowsAffected,
@@ -606,6 +631,22 @@ function requireClientKey(command: ConformanceCommand): string {
     throw new ConformanceCommandError('invalid_command');
   }
   return clientKey;
+}
+
+const MAXIMUM_LOCAL_OPERATION_BATCH = 64;
+
+function requireLocalOperationBatch(command: ConformanceCommand): ScenarioOperation[] {
+  const steps = command.action.steps;
+  if (steps.length < 1 || steps.length > MAXIMUM_LOCAL_OPERATION_BATCH) {
+    throw new ConformanceCommandError('invalid_command');
+  }
+  return steps.map((step) => {
+    const operation = step.operation;
+    if (operation.contract_operation !== 'local' || operation.name !== 'write') {
+      throw new ConformanceUnavailableError('local operation is not exposed by the public JavaScript client');
+    }
+    return operation;
+  });
 }
 
 function requireOneLocalOperation(command: ConformanceCommand): ScenarioOperation {
