@@ -61,7 +61,13 @@ func TestNewRebuildApplyCoordinatorKeepsAndroidSidecarOnHostLoopback(t *testing.
 	if !strings.HasPrefix(coordinator.adapter, "http://10.0.2.2:") {
 		t.Fatalf("Android rebuild-apply adapter URL = %q", coordinator.adapter)
 	}
-	if got, want := coordinator.ExchangeCount(), len(coordinator.config.Scenario.Steps)*3+1; got != want {
+	want := 1
+	for range coordinator.config.Scenario.Steps {
+		for stage := rebuildApplyStageOpen; stage < rebuildApplyStageComplete; stage++ {
+			want++
+		}
+	}
+	if got := coordinator.ExchangeCount(); got != want {
 		t.Fatalf("rebuild-apply exchange count = %d, want %d", got, want)
 	}
 }

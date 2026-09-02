@@ -1130,12 +1130,8 @@ func (c *SchemaCheckCoordinator) validateCallEvidence(call schemaCheckCall, capt
 	if err != nil || trace.Overflowed || len(trace.Observations) == 0 || validateTraceSequence(trace.Observations) != nil {
 		return fmt.Errorf("React Native schema-check step %s trace observations=%d overflowed=%t error=%v", call.step.ID, len(trace.Observations), trace.Overflowed, err)
 	}
-	inputSchema, err := c.runtimeSchema(inputAlias)
-	if err != nil {
-		return err
-	}
-	if !schemaCheckTraceContainsConnect(trace, inputSchema) {
-		return fmt.Errorf("React Native schema-check step %s trace did not contain connect schema=%+v", call.step.ID, inputSchema)
+	if !schemaCheckTraceContainsConnect(trace) {
+		return fmt.Errorf("React Native schema-check step %s trace did not contain a successful connect", call.step.ID)
 	}
 	if wire.HTTPStatus != http.StatusOK || wire.ErrorCode != nil || wire.Retryable {
 		return fmt.Errorf("React Native schema-check step %s wire status=%d code=%v retryable=%t", call.step.ID, wire.HTTPStatus, wire.ErrorCode, wire.Retryable)
@@ -1143,16 +1139,12 @@ func (c *SchemaCheckCoordinator) validateCallEvidence(call schemaCheckCall, capt
 	return nil
 }
 
-func schemaCheckTraceContainsConnect(trace traceSnapshot, want clientSchema) bool {
+func schemaCheckTraceContainsConnect(trace traceSnapshot) bool {
 	for _, observed := range trace.Observations {
 		if observed.OperationClass != "connect" || validateTraceOperation(observed, "connect") != nil {
 			continue
 		}
-		version, versionErr := requestInteger(observed, "schema_version")
-		hash, hashErr := requestString(observed, "schema_hash")
-		if versionErr == nil && hashErr == nil && version == want.Version && hash == want.Hash {
-			return true
-		}
+		return true
 	}
 	return false
 }

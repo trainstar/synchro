@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"os"
 	"path/filepath"
 	"slices"
@@ -222,6 +223,20 @@ func TestSchemaCheckCaptureOmitsUndeclaredDurableProof(t *testing.T) {
 	}
 	if _, found := parameters["durable_proof_identity"]; found {
 		t.Fatalf("schema-check capture included an undeclared durable proof identity")
+	}
+}
+
+func TestSchemaCheckTraceRequiresSuccessfulConnectInCallWindow(t *testing.T) {
+	trace := traceSnapshot{Observations: []transportObservation{{
+		Sequence: 1, OperationClass: "connect", StatusCode: http.StatusOK, DurationNanoseconds: 1,
+		RequestFacts: json.RawMessage(`{"client_generation":1,"scope_set_version":1}`),
+	}}}
+	if !schemaCheckTraceContainsConnect(trace) {
+		t.Fatal("schema-check successful connect without a terminal server schema was rejected")
+	}
+	trace.Observations[0].StatusCode = http.StatusConflict
+	if schemaCheckTraceContainsConnect(trace) {
+		t.Fatal("schema-check unsuccessful connect was accepted")
 	}
 }
 

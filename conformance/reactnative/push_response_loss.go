@@ -1214,7 +1214,7 @@ func (c *PushResponseLossCoordinator) proxyAdapter(writer http.ResponseWriter, r
 				return
 			case <-c.allowInitialResponse:
 			}
-			c.dropResponse(writer)
+			c.loseInitialResponse(writer)
 			return
 		}
 		c.signalReplayCompleted()
@@ -1237,7 +1237,7 @@ func (c *PushResponseLossCoordinator) beginPushRequest() uint64 {
 	c.pushRequests++
 	return c.pushRequests
 }
-func (c *PushResponseLossCoordinator) dropResponse(writer http.ResponseWriter) {
+func (c *PushResponseLossCoordinator) loseInitialResponse(writer http.ResponseWriter) {
 	hijacker, ok := writer.(http.Hijacker)
 	if !ok {
 		c.recordProxyFailure(errors.New("React Native push-response-loss response writer cannot drop a response"))
@@ -1247,6 +1247,10 @@ func (c *PushResponseLossCoordinator) dropResponse(writer http.ResponseWriter) {
 	if err != nil {
 		c.recordProxyFailure(err)
 		return
+	}
+	// A bare close lets the Android HTTP client repeat the request before it records the failure.
+	if _, err := connection.Write([]byte("SYNCHRO RESPONSE LOSS\r\n\r\n")); err != nil {
+		c.recordProxyFailure(err)
 	}
 	_ = connection.Close()
 }

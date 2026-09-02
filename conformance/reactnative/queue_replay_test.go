@@ -3,6 +3,9 @@ package reactnative
 import (
 	"context"
 	"encoding/json"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -94,6 +97,91 @@ func TestQueueReplayResponseLossBindingUsesCommittedDelivery(t *testing.T) {
 	}
 }
 
+func TestQueueReplaySynchronizedResultNamesObservedAndExpectedValues(t *testing.T) {
+	coordinator := &QueueReplayCoordinator{process: &actionProcessIdentity{
+		ProcessID:                   "process-a",
+		DatabaseIdentityFingerprint: strings.Repeat("a", 64),
+	}}
+	err := coordinator.validateSynchronized(json.RawMessage(`{"kind":"synchronized","completion":"idle","status":{"state":"ready","retry_at":null,"operation":null,"failure":null},"process":{"process_id":"process-b","database_identity_fingerprint":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}}`), "blocked")
+	if err == nil {
+		t.Fatal("invalid synchronized result was accepted")
+	}
+	for _, detail := range []string{
+		"members=[completion kind process status] want_count=4",
+		`kind="synchronized" want="synchronized"`,
+		`completion="idle" want="blocked"`,
+		"status_members=[failure operation retry_at state]",
+		`state="ready" retry_at=null operation=null failure=null`,
+		`process={process_id:"process-b" database_identity_fingerprint:"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"} want={process_id:"process-a" database_identity_fingerprint:"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}`,
+	} {
+		if !strings.Contains(err.Error(), detail) {
+			t.Fatalf("synchronized diagnostic = %q, want detail %q", err, detail)
+		}
+	}
+}
+
+func TestQueueReplayProxyDropsCommittedPushAndForwardsReplay(t *testing.T) {
+	received := make(chan string, 2)
+	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.Method != http.MethodPost || request.URL.Path != "/sync/push" {
+			t.Errorf("upstream request method=%q path=%q, want POST /sync/push", request.Method, request.URL.Path)
+			writer.WriteHeader(http.StatusNotFound)
+			return
+		}
+		body, err := io.ReadAll(request.Body)
+		if err != nil {
+			t.Errorf("read upstream request: %v", err)
+			writer.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		received <- string(body)
+		writer.Header().Set("Content-Type", "application/json")
+		_, _ = writer.Write([]byte(`{"accepted":true}`))
+	}))
+	defer upstream.Close()
+
+	coordinator := &QueueReplayCoordinator{upstream: upstream.URL}
+	coordinator.armResponseLossPush()
+	proxy := httptest.NewServer(coordinator)
+	defer proxy.Close()
+
+	requestBody := `{"client_id":"client-a","batch_id":"batch-a"}`
+	request, err := http.NewRequest(http.MethodPost, proxy.URL+"/sync/push", strings.NewReader(requestBody))
+	if err != nil {
+		t.Fatalf("create initial proxy request: %v", err)
+	}
+	response, err := proxy.Client().Do(request)
+	if response != nil {
+		_ = response.Body.Close()
+	}
+	if err == nil {
+		t.Fatal("initial committed push response was not dropped")
+	}
+	if got := <-received; got != requestBody {
+		t.Fatalf("committed push body = %q, want %q", got, requestBody)
+	}
+
+	replay, err := http.NewRequest(http.MethodPost, proxy.URL+"/sync/push", strings.NewReader(requestBody))
+	if err != nil {
+		t.Fatalf("create replay proxy request: %v", err)
+	}
+	response, err = proxy.Client().Do(replay)
+	if err != nil {
+		t.Fatalf("send replay push: %v", err)
+	}
+	defer response.Body.Close()
+	body, err := io.ReadAll(response.Body)
+	if err != nil {
+		t.Fatalf("read replay response: %v", err)
+	}
+	if response.StatusCode != http.StatusOK || string(body) != `{"accepted":true}` {
+		t.Fatalf("replay response status=%d body=%q, want status=200 body=%q", response.StatusCode, body, `{"accepted":true}`)
+	}
+	if got := <-received; got != requestBody {
+		t.Fatalf("replayed push body = %q, want %q", got, requestBody)
+	}
+}
+
 func TestQueueReplayStageCountMatchesDerivedCoordinatorStages(t *testing.T) {
 	scenario := loadQueueReplayAuthoredScenario(t)
 	workloads, err := queueReplayWorkloads(scenario)
@@ -127,6 +215,9 @@ func TestNewQueueReplayCoordinatorKeepsAndroidSidecarOnHostLoopback(t *testing.T
 	}
 	if !strings.HasPrefix(coordinator.adapter, "http://10.0.2.2:") {
 		t.Fatalf("Android queue-replay adapter URL = %q", coordinator.adapter)
+	}
+	if coordinator.upstream != "http://127.0.0.1:8080" {
+		t.Fatalf("Android queue-replay upstream URL = %q, want %q", coordinator.upstream, "http://127.0.0.1:8080")
 	}
 }
 

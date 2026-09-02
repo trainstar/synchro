@@ -74,7 +74,7 @@ func TestNewSeededEmptyStartupCoordinatorRejectsUnknownPlatform(t *testing.T) {
 	}
 }
 
-func TestSeededEmptyStartupBootstrapTraceMatchesSeedScopeProjection(t *testing.T) {
+func TestSeededEmptyStartupBootstrapTraceMatchesAuthoredScopeProjections(t *testing.T) {
 	clients, err := seededEmptyStartupClients(loadSeededEmptyStartupAuthoredScenario(t))
 	if err != nil {
 		t.Fatalf("load seeded-empty-startup clients: %v", err)
@@ -84,17 +84,29 @@ func TestSeededEmptyStartupBootstrapTraceMatchesSeedScopeProjection(t *testing.T
 	if seeded.connectScopeProjectionLen != 1 || empty.connectScopeProjectionLen != 0 {
 		t.Fatalf("seeded and empty connect scope projections = %d and %d, expected 1 and 0", seeded.connectScopeProjectionLen, empty.connectScopeProjectionLen)
 	}
+	if seeded.pullScopeProjectionLen != 2 || empty.pullScopeProjectionLen != 2 {
+		t.Fatalf("seeded and empty pull scope projections = %d and %d, expected 2 and 2", seeded.pullScopeProjectionLen, empty.pullScopeProjectionLen)
+	}
 	seededTrace := validBootstrapTrace(testSchema())
 	seededTrace.Observations[0].RequestFacts = requestFacts(0, testSchema(), 0, seeded.connectScopeProjectionLen, "", "")
-	if err := validateSeededEmptyStartupBootstrapTrace(seededTrace, seeded.connectScopeProjectionLen); err != nil {
+	seededTrace.Observations[2].RequestFacts = requestFacts(1, testSchema(), 1, seeded.pullScopeProjectionLen, "", "")
+	if err := validateSeededEmptyStartupBootstrapTrace(seededTrace, seeded.connectScopeProjectionLen, seeded.pullScopeProjectionLen); err != nil {
 		t.Fatalf("validate seeded bootstrap trace: %v", err)
 	}
-	if err := validateSeededEmptyStartupBootstrapTrace(validBootstrapTrace(testSchema()), empty.connectScopeProjectionLen); err != nil {
+	emptyTrace := validBootstrapTrace(testSchema())
+	emptyTrace.Observations[2].RequestFacts = requestFacts(1, testSchema(), 1, empty.pullScopeProjectionLen, "", "")
+	if err := validateSeededEmptyStartupBootstrapTrace(emptyTrace, empty.connectScopeProjectionLen, empty.pullScopeProjectionLen); err != nil {
 		t.Fatalf("validate empty bootstrap trace: %v", err)
 	}
-	if err := validateSeededEmptyStartupBootstrapTrace(validBootstrapTrace(testSchema()), seeded.connectScopeProjectionLen); err == nil ||
+	if err := validateSeededEmptyStartupBootstrapTrace(validBootstrapTrace(testSchema()), seeded.connectScopeProjectionLen, seeded.pullScopeProjectionLen); err == nil ||
 		!strings.Contains(err.Error(), "observed 0, expected 1") {
-		t.Fatalf("seeded bootstrap scope mutant error = %v, expected observed 0 and expected 1", err)
+		t.Fatalf("seeded bootstrap connect scope mutant error = %v, expected observed 0 and expected 1", err)
+	}
+	pullMutant := validBootstrapTrace(testSchema())
+	pullMutant.Observations[0].RequestFacts = requestFacts(0, testSchema(), 0, seeded.connectScopeProjectionLen, "", "")
+	if err := validateSeededEmptyStartupBootstrapTrace(pullMutant, seeded.connectScopeProjectionLen, seeded.pullScopeProjectionLen); err == nil ||
+		!strings.Contains(err.Error(), "observed 1, expected 2") {
+		t.Fatalf("seeded bootstrap pull scope mutant error = %v, expected observed 1 and expected 2", err)
 	}
 }
 

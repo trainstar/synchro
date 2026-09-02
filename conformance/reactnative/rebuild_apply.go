@@ -302,7 +302,7 @@ func (c *RebuildApplyCoordinator) ExchangeCount() int {
 	if c == nil {
 		return 0
 	}
-	return len(c.config.Scenario.Steps)*3 + 1
+	return len(c.config.Scenario.Steps)*int(rebuildApplyStageComplete) + 1
 }
 func (c *RebuildApplyCoordinator) Result() (RebuildApplyCoordinatorResult, error) {
 	c.mu.Lock()

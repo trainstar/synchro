@@ -1,16 +1,19 @@
 package reactnative
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -105,6 +108,7 @@ type QueueReplayCoordinator struct {
 	server   *http.Server
 	token    string
 	adapter  string
+	upstream string
 	database string
 
 	steps      []queueReplayWorkload
@@ -115,6 +119,7 @@ type QueueReplayCoordinator struct {
 	clientKey  string
 
 	mu          sync.Mutex
+	proxyMu     sync.Mutex
 	prepared    bool
 	closed      bool
 	completed   bool
@@ -126,6 +131,7 @@ type QueueReplayCoordinator struct {
 	localIndex  int
 	finalResult *finalCapture
 	result      QueueReplayCoordinatorResult
+	dropNextPushResponse bool
 }
 
 // QueueReplayCoordinatorResult contains validated server and native identity evidence.
@@ -179,8 +185,7 @@ func NewQueueReplayCoordinator(config QueueReplayCoordinatorConfig) (*QueueRepla
 	if serverURL == "" && config.Harness != nil {
 		serverURL = config.Harness.AdapterURL()
 	}
-	adapterURL, err := nativeAdapterURL(serverURL, config.Platform)
-	if err != nil {
+	if _, err := nativeAdapterURL(serverURL, config.Platform); err != nil {
 		return nil, err
 	}
 	token, err := randomToken(32)
@@ -201,8 +206,13 @@ func NewQueueReplayCoordinator(config QueueReplayCoordinatorConfig) (*QueueRepla
 	if err != nil {
 		return nil, errors.New("listen for React Native queue-replay coordinator")
 	}
+	adapterURL, err := nativeAdapterURL("http://"+listener.Addr().String(), config.Platform)
+	if err != nil {
+		_ = listener.Close()
+		return nil, err
+	}
 	coordinator := &QueueReplayCoordinator{
-		config: config, listener: listener, token: token, adapter: adapterURL, database: database,
+		config: config, listener: listener, token: token, adapter: adapterURL, upstream: serverURL, database: database,
 		identities: append([]scenarios.NativeIdentityAlias(nil), config.Scenario.NativeIdentityAliases...),
 		runtimeIDs: make(map[string]json.RawMessage), userID: identity.userID, clientID: identity.clientID, clientKey: identity.clientID,
 		nextSeq: 1,
@@ -359,7 +369,7 @@ func (c *QueueReplayCoordinator) Close(ctx context.Context) error {
 
 func (c *QueueReplayCoordinator) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 	if request.URL.Path != "/exchange" {
-		writeExchangeError(writer, http.StatusNotFound)
+		c.proxyAdapter(writer, request)
 		return
 	}
 	if request.Method != http.MethodPost {
@@ -416,6 +426,88 @@ func (c *QueueReplayCoordinator) ServeHTTP(writer http.ResponseWriter, request *
 	writer.Header().Set("Content-Type", "application/json")
 	writer.WriteHeader(http.StatusOK)
 	_, _ = writer.Write(encoded)
+}
+
+func (c *QueueReplayCoordinator) proxyAdapter(writer http.ResponseWriter, request *http.Request) {
+	if c == nil || c.upstream == "" {
+		writeExchangeError(writer, http.StatusBadGateway)
+		return
+	}
+	body, err := io.ReadAll(io.LimitReader(request.Body, maximumExchangeBytes+1))
+	if err != nil || len(body) > maximumExchangeBytes {
+		writeExchangeError(writer, http.StatusBadGateway)
+		return
+	}
+	target := strings.TrimRight(c.upstream, "/") + request.URL.RequestURI()
+	upstreamRequest, err := http.NewRequestWithContext(request.Context(), request.Method, target, bytes.NewReader(body))
+	if err != nil {
+		writeExchangeError(writer, http.StatusBadGateway)
+		return
+	}
+	for name, values := range request.Header {
+		if strings.EqualFold(name, "Host") || strings.EqualFold(name, "Content-Length") || strings.EqualFold(name, "Transfer-Encoding") {
+			continue
+		}
+		for _, value := range values {
+			upstreamRequest.Header.Add(name, value)
+		}
+	}
+	response, err := http.DefaultClient.Do(upstreamRequest)
+	if err != nil {
+		writeExchangeError(writer, http.StatusBadGateway)
+		return
+	}
+	defer response.Body.Close()
+	responseBody, err := io.ReadAll(io.LimitReader(response.Body, maximumExchangeBytes+1))
+	if err != nil || len(responseBody) > maximumExchangeBytes {
+		writeExchangeError(writer, http.StatusBadGateway)
+		return
+	}
+	if request.Method == http.MethodPost && request.URL.Path == "/sync/push" && response.StatusCode == http.StatusOK && c.claimResponseLossPush() {
+		c.dropProxyResponse(writer)
+		return
+	}
+	for name, values := range response.Header {
+		if strings.EqualFold(name, "Content-Length") || strings.EqualFold(name, "Transfer-Encoding") {
+			continue
+		}
+		for _, value := range values {
+			writer.Header().Add(name, value)
+		}
+	}
+	writer.Header().Set("Content-Length", strconv.Itoa(len(responseBody)))
+	writer.WriteHeader(response.StatusCode)
+	_, _ = writer.Write(responseBody)
+}
+
+func (c *QueueReplayCoordinator) armResponseLossPush() {
+	c.proxyMu.Lock()
+	c.dropNextPushResponse = true
+	c.proxyMu.Unlock()
+}
+
+func (c *QueueReplayCoordinator) claimResponseLossPush() bool {
+	c.proxyMu.Lock()
+	defer c.proxyMu.Unlock()
+	if !c.dropNextPushResponse {
+		return false
+	}
+	c.dropNextPushResponse = false
+	return true
+}
+
+func (c *QueueReplayCoordinator) dropProxyResponse(writer http.ResponseWriter) {
+	hijacker, ok := writer.(http.Hijacker)
+	if !ok {
+		writeExchangeError(writer, http.StatusBadGateway)
+		return
+	}
+	connection, _, err := hijacker.Hijack()
+	if err != nil {
+		writeExchangeError(writer, http.StatusBadGateway)
+		return
+	}
+	_ = connection.Close()
 }
 
 func (c *QueueReplayCoordinator) acceptResultLocked(raw json.RawMessage) error {
@@ -528,6 +620,7 @@ func (c *QueueReplayCoordinator) advanceLocked(ctx context.Context, sequence uin
 		if err := c.config.Controller.BindApplicationPush(committedPush); err != nil {
 			return exchangeResponse{}, fmt.Errorf("bind React Native queue-replay response-loss push: %w", err)
 		}
+		c.armResponseLossPush()
 		response.Command = c.command("client", "synchronize-step", map[string]any{"client_key": c.clientKey, "method": "reset-schema-and-start", "completion": "blocked"}, nil)
 		c.stage = queueReplayStageResponseLoss
 	case queueReplayStageResponseLoss:
@@ -577,18 +670,44 @@ func (c *QueueReplayCoordinator) validateLocal(raw json.RawMessage) error {
 }
 
 func (c *QueueReplayCoordinator) validateSynchronized(raw json.RawMessage, completion string) error {
-	if err := validateActionResult(raw, "synchronized"); err != nil {
-		return err
-	}
 	var members map[string]json.RawMessage
-	if err := decodeStrictMembers(raw, &members, 4, "queue-replay synchronized result"); err != nil {
-		return err
+	actionErr := validateActionResult(raw, "synchronized")
+	membersErr := decodeStrictMembers(raw, &members, 4, "queue-replay synchronized result")
+	if membersErr != nil {
+		return fmt.Errorf("React Native queue-replay synchronized result is invalid: members=%s want_count=4 raw=%s action_error=%v members_error=%v", queueReplayMemberNames(members), boundedRaw(raw), actionErr, membersErr)
 	}
-	var actual string
-	if json.Unmarshal(members["completion"], &actual) != nil || actual != completion || validateSyncStatusShape(members["status"]) != nil {
-		return errors.New("React Native queue-replay synchronized result is invalid")
+	var kind, actual string
+	kindErr := json.Unmarshal(members["kind"], &kind)
+	completionErr := json.Unmarshal(members["completion"], &actual)
+	var status syncStatus
+	statusDecodeErr := json.Unmarshal(members["status"], &status)
+	statusErr := validateSyncStatusShape(members["status"])
+	var statusMembers map[string]json.RawMessage
+	_ = json.Unmarshal(members["status"], &statusMembers)
+	actualProcess, processErr := decodeActionProcessIdentity(members["process"])
+	expectedProcess := actionProcessIdentity{}
+	if c.process != nil {
+		expectedProcess = *c.process
 	}
-	return c.validateProcess(members["process"])
+	if actionErr != nil || kindErr != nil || kind != "synchronized" || completionErr != nil || actual != completion ||
+		statusDecodeErr != nil || statusErr != nil || processErr != nil || c.process == nil || actualProcess != expectedProcess {
+		return fmt.Errorf(
+			"React Native queue-replay synchronized result is invalid: members=%s want_count=4, kind=%q want=%q decode_error=%v action_error=%v, completion=%q want=%q decode_error=%v, status_members=%s status=%s state=%q retry_at=%s operation=%s failure=%s want_state=nonempty_bounded_string status_decode_error=%v status_error=%v, process={process_id:%q database_identity_fingerprint:%q} want={process_id:%q database_identity_fingerprint:%q} process_error=%v",
+			queueReplayMemberNames(members), kind, "synchronized", kindErr, actionErr, actual, completion, completionErr,
+			queueReplayMemberNames(statusMembers), boundedRaw(members["status"]), status.State, boundedRaw(status.RetryAt), boundedRaw(status.Operation), boundedRaw(status.Failure), statusDecodeErr, statusErr,
+			actualProcess.ProcessID, actualProcess.DatabaseIdentityFingerprint, expectedProcess.ProcessID, expectedProcess.DatabaseIdentityFingerprint, processErr,
+		)
+	}
+	return nil
+}
+
+func queueReplayMemberNames(members map[string]json.RawMessage) string {
+	names := make([]string, 0, len(members))
+	for name := range members {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return "[" + strings.Join(names, " ") + "]"
 }
 
 func (c *QueueReplayCoordinator) validateStopped(raw json.RawMessage) error {

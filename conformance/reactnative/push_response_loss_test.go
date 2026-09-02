@@ -3,11 +3,14 @@ package reactnative
 import (
 	"context"
 	"encoding/json"
+	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/trainstar/synchro/conformance/scenarios"
 )
@@ -87,6 +90,64 @@ func TestNewPushResponseLossCoordinatorUsesHostLoopbackProxy(t *testing.T) {
 	}
 	if coordinator.ExchangeCount() != 10 {
 		t.Fatalf("exchange count = %d, want 10", coordinator.ExchangeCount())
+	}
+}
+
+func TestPushResponseLossProxyWritesInvalidInitialResponseStart(t *testing.T) {
+	committed := make(chan struct{}, 1)
+	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.Method != http.MethodPost || request.URL.Path != "/sync/push" {
+			writer.WriteHeader(http.StatusNotFound)
+			return
+		}
+		committed <- struct{}{}
+		writer.Header().Set("Content-Type", "application/json")
+		writer.WriteHeader(http.StatusOK)
+		_, _ = writer.Write([]byte(`{}`))
+	}))
+	defer upstream.Close()
+	coordinator, err := NewPushResponseLossCoordinator(PushResponseLossCoordinatorConfig{
+		Scenario: loadPushResponseLossAuthoredScenario(t), Platform: "android", ServerURL: upstream.URL, AuthToken: "unit-token", AppVersion: "0.3.0",
+	})
+	if err != nil {
+		t.Fatalf("create response-loss coordinator: %v", err)
+	}
+	defer func() { _ = coordinator.Close(context.Background()) }()
+	proxy := httptest.NewServer(coordinator.Handler())
+	defer proxy.Close()
+	connection, err := net.DialTimeout("tcp", proxy.Listener.Addr().String(), time.Second)
+	if err != nil {
+		t.Fatalf("connect initial push client: %v", err)
+	}
+	defer func() { _ = connection.Close() }()
+	request := "POST /sync/push HTTP/1.1\r\nHost: " + proxy.Listener.Addr().String() + "\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}"
+	if _, err := io.WriteString(connection, request); err != nil {
+		t.Fatalf("send initial push request: %v", err)
+	}
+	select {
+	case <-committed:
+	case <-time.After(time.Second):
+		t.Fatal("initial push did not reach the upstream server")
+	}
+	coordinator.releaseInitialResponse()
+	if err := connection.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
+		t.Fatalf("set initial push read deadline: %v", err)
+	}
+	response, err := io.ReadAll(connection)
+	if err != nil {
+		t.Fatalf("read initial response loss: %v", err)
+	}
+	if string(response) != "SYNCHRO RESPONSE LOSS\r\n\r\n" {
+		t.Fatalf("initial response loss bytes = %q, want an invalid response start", response)
+	}
+	coordinator.proxyMu.Lock()
+	pushes, proxyErr := coordinator.pushRequests, coordinator.proxyErr
+	coordinator.proxyMu.Unlock()
+	if pushes != 1 {
+		t.Fatalf("initial response loss proxy pushes = %d, want 1 before the SDK replay", pushes)
+	}
+	if proxyErr != nil {
+		t.Fatalf("initial response loss proxy error = %v", proxyErr)
 	}
 }
 

@@ -758,6 +758,10 @@ func (c *ForgedCursorCoordinator) proxyAdapter(writer http.ResponseWriter, reque
 			upstreamRequest.Header.Add(name, value)
 		}
 	}
+	upstreamRequest.ContentLength = request.ContentLength
+	upstreamRequest.TransferEncoding = slices.Clone(request.TransferEncoding)
+	upstreamRequest.Trailer = request.Trailer.Clone()
+	upstreamRequest.Close = request.Close
 	response, err := c.transport.Do(upstreamRequest)
 	if err != nil {
 		c.recordProxyFailure(fmt.Errorf("execute React Native forged-cursor upstream request: %w", err))
@@ -772,7 +776,7 @@ func (c *ForgedCursorCoordinator) proxyAdapter(writer http.ResponseWriter, reque
 		return
 	}
 	if request.Method == http.MethodPost && request.URL.Path == "/sync/connect" && response.StatusCode != http.StatusOK {
-		c.recordProxyFailure(fmt.Errorf("React Native forged-cursor connect upstream status=%d want=%d response_bytes=%d", response.StatusCode, http.StatusOK, len(body)))
+		c.recordProxyFailure(fmt.Errorf("React Native forged-cursor connect upstream status=%d want=%d response_bytes=%d response_body=%q", response.StatusCode, http.StatusOK, len(body), boundedRaw(body)))
 	}
 	if rebuildRequest == 1 {
 		if response.StatusCode != http.StatusOK {

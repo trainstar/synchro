@@ -3,10 +3,12 @@ package reactnative
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -197,33 +199,44 @@ func TestForgedCursorProxyMutatesOnlyFirstRebuildPage(t *testing.T) {
 	}
 }
 
-func TestForgedCursorProxyForwardsConnectBodyAndRelaysUpstreamResponse(t *testing.T) {
+func TestForgedCursorProxyMatchesDirectConnectAndRelaysUpstreamResponse(t *testing.T) {
 	const requestBody = `{"client_id":"client-a","client_generation":1,"platform":"android"}`
+	longErrorBody := strings.Repeat("x", 513)
 	tests := []struct {
 		name           string
 		upstreamStatus int
 		upstreamBody   string
+		chunked        bool
 		wantProxyError bool
 	}{
 		{name: "success", upstreamStatus: http.StatusOK, upstreamBody: `{"client_generation":1}`},
-		{name: "error", upstreamStatus: http.StatusBadGateway, upstreamBody: `{"error":"upstream unavailable"}`, wantProxyError: true},
+		{name: "adapter error", upstreamStatus: http.StatusBadRequest, upstreamBody: `{"error": {"code": "invalid_request", "message": "connect contains an unknown scope", "retryable": false}}`, wantProxyError: true},
+		{name: "chunked trailer and close", upstreamStatus: http.StatusOK, upstreamBody: `{"client_generation":1}`, chunked: true},
+		{name: "bounded diagnostic", upstreamStatus: http.StatusBadGateway, upstreamBody: longErrorBody, wantProxyError: true},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			var observed struct {
-				body              string
-				authorization     string
+			type observedRequest struct {
+				method            string
+				requestURI        string
+				host              string
+				header            http.Header
+				body              []byte
 				contentLength     int64
 				transferEncodings []string
+				trailer           http.Header
+				close             bool
 				readErr           error
 			}
+			observations := make(chan observedRequest, 2)
 			upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 				raw, err := io.ReadAll(request.Body)
-				observed.body = string(raw)
-				observed.authorization = request.Header.Get("Authorization")
-				observed.contentLength = request.ContentLength
-				observed.transferEncodings = append([]string(nil), request.TransferEncoding...)
-				observed.readErr = err
+				observations <- observedRequest{
+					method: request.Method, requestURI: request.URL.RequestURI(), host: request.Host,
+					header: request.Header.Clone(), body: raw, contentLength: request.ContentLength,
+					transferEncodings: append([]string(nil), request.TransferEncoding...), trailer: request.Trailer.Clone(),
+					close: request.Close, readErr: err,
+				}
 				writer.Header().Set("Content-Type", "application/json")
 				writer.WriteHeader(test.upstreamStatus)
 				_, _ = writer.Write([]byte(test.upstreamBody))
@@ -238,39 +251,66 @@ func TestForgedCursorProxyForwardsConnectBodyAndRelaysUpstreamResponse(t *testin
 			}
 			defer func() { _ = coordinator.Close(context.Background()) }()
 
-			request := httptest.NewRequest(http.MethodPost, "/sync/connect", strings.NewReader(requestBody))
-			request.Header.Set("Content-Type", "application/json")
-			request.Header.Set("Authorization", "Bearer unit-token")
-			response := httptest.NewRecorder()
-			coordinator.proxyAdapter(response, request)
+			send := func(target string) (int, string) {
+				request, err := http.NewRequest(http.MethodPost, target+"/sync/connect", strings.NewReader(requestBody))
+				if err != nil {
+					t.Fatalf("create forged-cursor connect request: %v", err)
+				}
+				request.Header = http.Header{
+					"Accept-Encoding": {"gzip"},
+					"Authorization":   {"Bearer unit-token"},
+					"Connection":      {"keep-alive"},
+					"Content-Type":    {"application/json"},
+					"User-Agent":      {"okhttp/4.12.0"},
+					"X-App-Version":   {"0.3.0"},
+				}
+				if test.chunked {
+					request.ContentLength = -1
+					request.TransferEncoding = []string{"chunked"}
+					request.Trailer = http.Header{"X-Body-Checksum": {"sha256:unit"}}
+					request.Close = true
+				}
+				response, err := http.DefaultClient.Do(request)
+				if err != nil {
+					t.Fatalf("execute forged-cursor connect request: %v", err)
+				}
+				defer response.Body.Close()
+				body, err := io.ReadAll(response.Body)
+				if err != nil {
+					t.Fatalf("read forged-cursor connect response: %v", err)
+				}
+				return response.StatusCode, string(body)
+			}
 
-			if response.Code != test.upstreamStatus {
-				t.Fatalf("forged-cursor connect response status=%d want=%d", response.Code, test.upstreamStatus)
+			directStatus, directBody := send(upstream.URL)
+			direct := <-observations
+			proxy := httptest.NewServer(coordinator)
+			defer proxy.Close()
+			proxyStatus, proxyBody := send(proxy.URL)
+			proxied := <-observations
+
+			if directStatus != test.upstreamStatus || proxyStatus != directStatus {
+				t.Fatalf("forged-cursor connect response status direct=%d proxy=%d want=%d", directStatus, proxyStatus, test.upstreamStatus)
 			}
-			if got := response.Body.String(); got != test.upstreamBody {
-				t.Fatalf("forged-cursor connect response body=%q want=%q", got, test.upstreamBody)
+			if directBody != test.upstreamBody || proxyBody != directBody {
+				t.Fatalf("forged-cursor connect response body direct=%q proxy=%q want=%q", directBody, proxyBody, test.upstreamBody)
 			}
-			if observed.readErr != nil {
-				t.Fatalf("read forwarded forged-cursor connect body: %v", observed.readErr)
+			if direct.readErr != nil || proxied.readErr != nil {
+				t.Fatalf("read forged-cursor connect body direct=%v proxy=%v", direct.readErr, proxied.readErr)
 			}
-			if observed.body != requestBody {
-				t.Fatalf("forwarded forged-cursor connect body=%q want=%q", observed.body, requestBody)
-			}
-			if observed.authorization != "Bearer unit-token" {
-				t.Fatalf("forwarded forged-cursor connect authorization=%q want=%q", observed.authorization, "Bearer unit-token")
-			}
-			if observed.contentLength != int64(len(requestBody)) {
-				t.Fatalf("forwarded forged-cursor connect content_length=%d want=%d", observed.contentLength, len(requestBody))
-			}
-			if len(observed.transferEncodings) != 0 {
-				t.Fatalf("forwarded forged-cursor connect transfer_encodings=%v want=[]", observed.transferEncodings)
+			if !reflect.DeepEqual(proxied, direct) {
+				t.Fatalf("proxied forged-cursor connect differs from direct request:\nproxy=%#v\ndirect=%#v", proxied, direct)
 			}
 			proxyErr := coordinator.proxyFailure("connect")
 			if test.wantProxyError {
 				if proxyErr == nil {
 					t.Fatalf("forged-cursor connect proxy status=%d want recorded error", test.upstreamStatus)
 				}
-				want := "connect upstream status=502 want=200 response_bytes="
+				diagnosticBody := test.upstreamBody
+				if len(diagnosticBody) > 512 {
+					diagnosticBody = diagnosticBody[:512] + fmt.Sprintf("...(%d bytes)", len(test.upstreamBody))
+				}
+				want := fmt.Sprintf("connect upstream status=%d want=200 response_bytes=%d response_body=%q", test.upstreamStatus, len(test.upstreamBody), diagnosticBody)
 				if !strings.Contains(proxyErr.Error(), want) {
 					t.Fatalf("forged-cursor connect proxy error=%q want substring=%q", proxyErr, want)
 				}

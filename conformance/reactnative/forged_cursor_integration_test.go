@@ -69,6 +69,23 @@ func runRealReactNativeForgedCursor(t *testing.T, platform string) {
 			t.Errorf("close React Native native controller: %v", err)
 		}
 	})
+	seedTool := os.Getenv("SYNCHRO_SEED_TOOL")
+	if seedTool == "" {
+		seedTool = filepath.Join(repositoryRoot, "bin", "synchro-seed")
+	}
+	stagingDirectory := t.TempDir()
+	if err := os.Chmod(stagingDirectory, 0o700); err != nil {
+		t.Fatalf("make React Native forged-cursor seed staging directory private: %v", err)
+	}
+	artifact, err := blackbox.NewNativeArtifact(blackbox.NativeArtifactConfig{Harness: harness, SeedToolPath: seedTool, StagingDirectory: stagingDirectory})
+	if err != nil {
+		t.Fatalf("create React Native forged-cursor seed artifact: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := artifact.Close(context.Background()); err != nil {
+			t.Errorf("close React Native forged-cursor seed artifact: %v", err)
+		}
+	})
 	coordinator, err := NewForgedCursorCoordinator(ForgedCursorCoordinatorConfig{
 		Scenario: scenario, Harness: harness, Controller: controller, Platform: platform,
 	})
@@ -84,6 +101,18 @@ func runRealReactNativeForgedCursor(t *testing.T, platform string) {
 	})
 	if err := coordinator.Prepare(runContext); err != nil {
 		t.Fatalf("prepare React Native %s forged-cursor coordinator: %v", platform, err)
+	}
+	seedPath, err := artifact.StageCurrentSeed(runContext, coordinator.serverClient.UserID, coordinator.serverClient.ClientID, forgedCursorStepOrder[0])
+	if err != nil {
+		t.Fatalf("stage React Native %s forged-cursor current seed: %v", platform, err)
+	}
+	if err := stageReactNativeForgedCursorSeedAsset(repositoryRoot, seedPath); err != nil {
+		t.Fatalf("stage React Native %s forged-cursor device seed: %v", platform, err)
+	}
+	build := exec.CommandContext(runContext, "npx", "detox", "build", "--config-path", "./.detoxrc.steady-pull.js", "--configuration", detoxConfiguration)
+	build.Dir = filepath.Join(repositoryRoot, "clients", "react-native", "example")
+	if output, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("build React Native %s forged-cursor app with the staged seed: %v\n%s", platform, err, output)
 	}
 	serveErrors := make(chan error, 1)
 	go func() { serveErrors <- coordinator.Serve(runContext) }()
@@ -139,4 +168,22 @@ func runRealReactNativeForgedCursor(t *testing.T, platform string) {
 	case <-time.After(5 * time.Second):
 		t.Fatalf("React Native %s forged-cursor coordinator did not stop", platform)
 	}
+}
+
+func stageReactNativeForgedCursorSeedAsset(repositoryRoot, source string) error {
+	contents, err := os.ReadFile(source)
+	if err != nil {
+		return fmt.Errorf("read React Native forged-cursor current seed: %w", err)
+	}
+	if len(contents) == 0 {
+		return fmt.Errorf("React Native forged-cursor current seed is empty")
+	}
+	destination := filepath.Join(repositoryRoot, "clients", "react-native", "example", "verification", forgedCursorSeedAsset)
+	if err := os.MkdirAll(filepath.Dir(destination), 0o755); err != nil {
+		return fmt.Errorf("create React Native forged-cursor seed asset directory: %w", err)
+	}
+	if err := os.WriteFile(destination, contents, 0o644); err != nil {
+		return fmt.Errorf("write React Native forged-cursor seed asset: %w", err)
+	}
+	return nil
 }
