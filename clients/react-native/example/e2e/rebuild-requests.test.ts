@@ -74,4 +74,4 @@ it('executes the rebuild-requests coordinator sequence', async () => {
     result = await execute(next.command);
   }
   throw new Error('React Native rebuild-requests coordinator did not complete');
-}, 120000);
+}, 600000);

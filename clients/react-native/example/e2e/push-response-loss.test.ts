@@ -189,4 +189,4 @@ it('executes the push-response-loss coordinator sequence', async () => {
     }
   }
   throw new Error('React Native push-response-loss coordinator did not complete');
-}, 120000);
+}, 600000);

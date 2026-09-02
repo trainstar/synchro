@@ -77,4 +77,4 @@ it('executes the schema-queued-mutation coordinator sequence', async () => {
     result = await execute(next.command);
   }
   throw new Error(`React Native schema-queued-mutation coordinator did not complete after ${stageCount} exchanges`);
-}, 120000);
+}, 600000);

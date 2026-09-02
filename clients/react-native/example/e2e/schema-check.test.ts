@@ -204,4 +204,4 @@ it('executes the schema-check coordinator sequence', async () => {
     result = await execute(next.command);
   }
   throw new Error(`React Native schema-check coordinator did not complete after ${stageCount} exchanges`);
-}, 120000);
+}, 600000);

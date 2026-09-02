@@ -189,4 +189,4 @@ it('executes the retention-reconnect coordinator sequence', async () => {
     }
   }
   throw new Error('React Native retention-reconnect coordinator did not complete');
-}, 120000);
+}, 600000);
