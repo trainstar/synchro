@@ -469,17 +469,47 @@ func (c *RebuildRequestsCoordinator) ExchangeCount() int {
 	return int(rebuildRequestsStageComplete) + 1
 }
 
+func (stage rebuildRequestsStage) String() string {
+	switch stage {
+	case rebuildRequestsStageOpen:
+		return "open"
+	case rebuildRequestsStageBegin:
+		return "begin"
+	case rebuildRequestsStageFirstPage:
+		return "first-page"
+	case rebuildRequestsStageFinalPage:
+		return "final-page"
+	case rebuildRequestsStagePull:
+		return "pull"
+	case rebuildRequestsStageAwaitCall:
+		return "await-call"
+	case rebuildRequestsStageFinalCapture:
+		return "final-capture"
+	case rebuildRequestsStageApplicationRows:
+		return "application-rows"
+	case rebuildRequestsStageComplete:
+		return "complete"
+	default:
+		return "invalid"
+	}
+}
+
 func (c *RebuildRequestsCoordinator) Result() (RebuildRequestsCoordinatorResult, error) {
 	if c == nil {
 		return RebuildRequestsCoordinatorResult{}, errCoordinatorUnavailable
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	served := uint64(0)
+	if c.nextSeq > 0 {
+		served = c.nextSeq - 1
+	}
+	progress := fmt.Sprintf("current stage=%s, exchanges served=%d versus ExchangeCount=%d", c.stage, served, c.ExchangeCount())
 	if c.failed != nil {
-		return RebuildRequestsCoordinatorResult{}, c.failed
+		return RebuildRequestsCoordinatorResult{}, fmt.Errorf("%w (%s)", c.failed, progress)
 	}
 	if !c.completed {
-		return RebuildRequestsCoordinatorResult{}, errors.New("React Native rebuild-requests coordinator has not completed")
+		return RebuildRequestsCoordinatorResult{}, fmt.Errorf("React Native rebuild-requests coordinator has not completed (%s)", progress)
 	}
 	return c.result, nil
 }

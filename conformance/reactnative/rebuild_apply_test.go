@@ -152,6 +152,27 @@ func TestValidateRebuildApplyCaptureDistinguishesActiveAndTerminalAttempts(t *te
 	}
 }
 
+func TestRebuildApplyClientGenerationUsesEstablishedRequestTrace(t *testing.T) {
+	traces := []traceSnapshot{{Observations: []transportObservation{
+		{OperationClass: "connect", RequestFacts: json.RawMessage(`{"schema_version":1}`)},
+		{OperationClass: "rebuild", RequestFacts: json.RawMessage(`{"client_generation":7}`)},
+		{OperationClass: "pull", RequestFacts: json.RawMessage(`{"client_generation":7}`)},
+	}}}
+	generation, err := rebuildApplyClientGeneration(traces)
+	if err != nil || generation != 7 {
+		t.Fatalf("rebuild-apply client generation = %d, error = %v, want 7", generation, err)
+	}
+}
+
+func TestRebuildApplyClientGenerationAbsentNamesRequestTraceSource(t *testing.T) {
+	traces := []traceSnapshot{{Observations: []transportObservation{
+		{OperationClass: "connect", RequestFacts: json.RawMessage(`{"schema_version":1}`)},
+	}}}
+	if _, err := rebuildApplyClientGeneration(traces); err == nil || !strings.Contains(err.Error(), "request-trace source") {
+		t.Fatalf("rebuild-apply absent client generation error = %v, want request-trace source", err)
+	}
+}
+
 func TestRebuildApplyCaptureRequestsBoundedTerminalEvidence(t *testing.T) {
 	scenario := loadRebuildApplyAuthoredScenario(t)
 	tests := []struct {
@@ -290,7 +311,7 @@ func rebuildApplyCaptureFixture(t *testing.T, workload rebuildApplyWorkload) fin
 	continuationFingerprint := strings.Repeat("c", 64)
 	observations := []any{map[string]any{
 		"sequence": 1, "operationClass": "connect", "statusCode": 200,
-		"durationNanoseconds": 1, "requestFacts": map[string]any{"client_generation": 1},
+		"durationNanoseconds": 1, "requestFacts": map[string]any{"schema_version": 1},
 	}}
 	for page := uint64(0); page < pages; page++ {
 		remaining := workload.RecordCount - page*workload.PageSize
@@ -299,7 +320,7 @@ func rebuildApplyCaptureFixture(t *testing.T, workload rebuildApplyWorkload) fin
 			records = remaining
 		}
 		terminal := page == pages-1
-		requestFacts := map[string]any{"limit": workload.PageSize}
+		requestFacts := map[string]any{"client_generation": 1, "limit": workload.PageSize}
 		if page > 0 {
 			requestFacts["cursor_fingerprint"] = continuationFingerprint
 		}
@@ -319,7 +340,7 @@ func rebuildApplyCaptureFixture(t *testing.T, workload rebuildApplyWorkload) fin
 	observations = append(observations, map[string]any{
 		"sequence": pages + 2, "operationClass": "pull", "statusCode": 200,
 		"durationNanoseconds": 1, "cursorFingerprints": []string{finalCursorFingerprint},
-		"cursorFingerprintsComplete": true, "requestFacts": map[string]any{"scope_count": 1},
+		"cursorFingerprintsComplete": true, "requestFacts": map[string]any{"client_generation": 1, "scope_count": 1},
 		"pullResponseFacts": map[string]any{
 			"change_count": 0, "has_more": false, "rebuild_scope_count": 0,
 			"checksum_count": 1, "scope_cursor_fingerprints": []string{finalCursorFingerprint},

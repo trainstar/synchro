@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -123,6 +124,107 @@ func TestRebuildRequestsStagesOnePublicStepPerCommand(t *testing.T) {
 		response.Command.Action.Steps == nil ||
 		len(response.Command.Action.Steps) != 0 {
 		t.Fatalf("rebuild-requests await-call command = %#v", response.Command.Action)
+	}
+}
+
+func TestRebuildRequestsAuthoredFlowMatchesExchangeCount(t *testing.T) {
+	coordinator, err := NewRebuildRequestsCoordinator(RebuildRequestsCoordinatorConfig{
+		Scenario: loadRebuildRequestsAuthoredScenario(t), Platform: "ios", ServerURL: "http://127.0.0.1:8080", AuthToken: "unit-token",
+	})
+	if err != nil {
+		t.Fatalf("create rebuild-requests coordinator: %v", err)
+	}
+	defer func() { _ = coordinator.Close(context.Background()) }()
+	coordinator.prepared = true
+	for _, record := range []string{"row-a-primary-key", "row-b-primary-key", "row-c-primary-key"} {
+		coordinator.runtimeIDs[record] = json.RawMessage(`"` + strings.TrimSuffix(record, "-primary-key") + `"`)
+	}
+
+	expectedCommands := map[rebuildRequestsStage][2]string{
+		rebuildRequestsStageOpen:            {"client", "open"},
+		rebuildRequestsStageBegin:           {"client", "begin-call"},
+		rebuildRequestsStageFirstPage:       {"observer", "await-step"},
+		rebuildRequestsStageFinalPage:       {"observer", "await-step"},
+		rebuildRequestsStagePull:            {"observer", "await-step"},
+		rebuildRequestsStageAwaitCall:       {"client", "await-call"},
+		rebuildRequestsStageFinalCapture:    {"observer", "capture"},
+		rebuildRequestsStageApplicationRows: {"observer", "capture"},
+	}
+	commands := 0
+	for coordinator.stage != rebuildRequestsStageComplete {
+		stage := coordinator.stage
+		exchangeBody := rebuildRequestsExchangeBodyForTest(uint64(commands+1), rebuildRequestsResultForStageForTest(coordinator))
+		response := exchangeRebuildRequestsRequestForTest(coordinator, exchangeBody)
+		if response.Code != http.StatusOK {
+			_, coordinatorErr := coordinator.Result()
+			t.Fatalf("rebuild-requests exchange %d at stage %s status = %d, want %d: %v", commands+1, stage, response.Code, http.StatusOK, coordinatorErr)
+		}
+		var next exchangeResponse
+		if err := json.Unmarshal(response.Body.Bytes(), &next); err != nil {
+			t.Fatalf("decode rebuild-requests exchange %d response: %v", commands+1, err)
+		}
+		if next.State != "command" || next.Command == nil {
+			t.Fatalf("rebuild-requests exchange %d at stage %s returned %#v, want command", commands+1, stage, next)
+		}
+		wanted := expectedCommands[stage]
+		actual := next.Command.Action.Action
+		if actual.Actor != wanted[0] || actual.Command != wanted[1] {
+			t.Fatalf("rebuild-requests exchange %d at stage %s command = %q/%q, want %q/%q", commands+1, stage, actual.Actor, actual.Command, wanted[0], wanted[1])
+		}
+		commands++
+	}
+
+	if got, want := coordinator.ExchangeCount(), commands+1; got != want {
+		t.Fatalf("rebuild-requests full-flow exchange count = %d, want command walk plus terminal exchange %d", got, want)
+	}
+	if got, want := coordinator.ExchangeCount(), 9; got != want {
+		t.Fatalf("rebuild-requests ExchangeCount = %d, want authored e2e stage count %d", got, want)
+	}
+	if got, want := coordinator.nextSeq-1, uint64(commands); got != want {
+		t.Fatalf("rebuild-requests exchanges served = %d, want %d command exchanges", got, want)
+	}
+	terminal := exchangeRebuildRequestsRequestForTest(coordinator, rebuildRequestsExchangeBodyForTest(uint64(commands+1), rebuildRequestsResultForStageForTest(coordinator)))
+	if terminal.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("rebuild-requests terminal exchange status = %d, want %d", terminal.Code, http.StatusUnprocessableEntity)
+	}
+	_, terminalErr := coordinator.Result()
+	if terminalErr == nil || !strings.Contains(terminalErr.Error(), "current stage=complete") || !strings.Contains(terminalErr.Error(), "exchanges served=8") || !strings.Contains(terminalErr.Error(), "ExchangeCount=9") {
+		t.Fatalf("rebuild-requests terminal error = %v, want current stage, served exchanges, and ExchangeCount", terminalErr)
+	}
+}
+
+func TestRebuildRequestsIncompleteResultNamesServedAndExpectedExchanges(t *testing.T) {
+	coordinator, err := NewRebuildRequestsCoordinator(RebuildRequestsCoordinatorConfig{
+		Scenario: loadRebuildRequestsAuthoredScenario(t), Platform: "ios", ServerURL: "http://127.0.0.1:8080", AuthToken: "unit-token",
+	})
+	if err != nil {
+		t.Fatalf("create rebuild-requests coordinator: %v", err)
+	}
+	defer func() { _ = coordinator.Close(context.Background()) }()
+	coordinator.stage = rebuildRequestsStageComplete
+	coordinator.nextSeq = 9
+
+	_, err = coordinator.Result()
+	if err == nil || !strings.Contains(err.Error(), "current stage=complete") || !strings.Contains(err.Error(), "exchanges served=8") || !strings.Contains(err.Error(), "ExchangeCount=9") {
+		t.Fatalf("incomplete rebuild-requests error = %v, want current stage, served exchanges, and ExchangeCount", err)
+	}
+}
+
+func TestRebuildRequestsFailedResultNamesServedAndExpectedExchanges(t *testing.T) {
+	coordinator, err := NewRebuildRequestsCoordinator(RebuildRequestsCoordinatorConfig{
+		Scenario: loadRebuildRequestsAuthoredScenario(t), Platform: "ios", ServerURL: "http://127.0.0.1:8080", AuthToken: "unit-token",
+	})
+	if err != nil {
+		t.Fatalf("create rebuild-requests coordinator: %v", err)
+	}
+	defer func() { _ = coordinator.Close(context.Background()) }()
+	coordinator.failed = fmt.Errorf("terminal validation failed")
+	coordinator.stage = rebuildRequestsStageComplete
+	coordinator.nextSeq = 9
+
+	_, err = coordinator.Result()
+	if err == nil || !strings.Contains(err.Error(), "terminal validation failed") || !strings.Contains(err.Error(), "current stage=complete") || !strings.Contains(err.Error(), "exchanges served=8") || !strings.Contains(err.Error(), "ExchangeCount=9") {
+		t.Fatalf("failed rebuild-requests error = %v, want cause, current stage, served exchanges, and ExchangeCount", err)
 	}
 }
 
@@ -348,12 +450,66 @@ func resultEnvelopeForTest(result map[string]any) json.RawMessage {
 }
 
 func stageNameForTest(stage rebuildRequestsStage) string {
-	return map[rebuildRequestsStage]string{
-		rebuildRequestsStageFirstPage: "first-page",
-		rebuildRequestsStageFinalPage: "final-page",
-		rebuildRequestsStagePull:      "pull",
-		rebuildRequestsStageAwaitCall: "await-call",
-	}[stage]
+	return stage.String()
+}
+
+func rebuildRequestsExchangeBodyForTest(sequence uint64, result json.RawMessage) []byte {
+	value, err := json.Marshal(map[string]any{
+		"schema_version": 1,
+		"sequence":       sequence,
+		"result":         result,
+	})
+	if err != nil {
+		panic(err)
+	}
+	return value
+}
+
+func rebuildRequestsResultForStageForTest(coordinator *RebuildRequestsCoordinator) json.RawMessage {
+	process := json.RawMessage(`{"process_id":"process-a","database_identity_fingerprint":"` + strings.Repeat("a", 64) + `"}`)
+	status := json.RawMessage(`{"state":"ready","retry_at":null,"operation":null,"failure":null}`)
+	switch coordinator.stage {
+	case rebuildRequestsStageOpen:
+		return json.RawMessage("null")
+	case rebuildRequestsStageBegin:
+		return resultEnvelopeForTest(map[string]any{
+			"kind": "opened", "status": status, "process": process,
+		})
+	case rebuildRequestsStageFirstPage:
+		return resultEnvelopeForTest(map[string]any{
+			"kind": "call-begun", "call_id": coordinator.callID, "state": "in_flight", "process": process,
+		})
+	case rebuildRequestsStageFinalPage, rebuildRequestsStagePull:
+		return resultEnvelopeForTest(map[string]any{
+			"kind": "awaited", "status": status, "process": process,
+		})
+	case rebuildRequestsStageAwaitCall:
+		return resultEnvelopeForTest(map[string]any{
+			"kind": "awaited", "status": status, "process": process,
+		})
+	case rebuildRequestsStageFinalCapture:
+		return resultEnvelopeForTest(map[string]any{
+			"kind": "call-completed", "call_id": coordinator.callID, "state": "completed", "completion": "idle", "status": status, "process": process,
+		})
+	case rebuildRequestsStageApplicationRows:
+		return rebuildRequestsCaptureResultForTest(process, []string{
+			"client_state", "pending_mutations", "rejected_mutations", "sync_status", "sync_events", "provenance", "request_trace", "durable_proof",
+		})
+	case rebuildRequestsStageComplete:
+		return rebuildRequestsCaptureResultForTest(process, []string{"application_rows"})
+	default:
+		panic(fmt.Sprintf("unexpected rebuild-requests stage %d", coordinator.stage))
+	}
+}
+
+func rebuildRequestsCaptureResultForTest(process json.RawMessage, keys []string) json.RawMessage {
+	capture := make(map[string]any, len(keys))
+	for _, key := range keys {
+		capture[key] = json.RawMessage("null")
+	}
+	return resultEnvelopeForTest(map[string]any{
+		"kind": "capture", "capture": capture, "process": process,
+	})
 }
 
 func rebuildRequestsTransportForTest() []transportObservation {

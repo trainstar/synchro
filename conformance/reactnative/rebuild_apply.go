@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/trainstar/synchro/conformance/blackbox"
+	"github.com/trainstar/synchro/conformance/internal/jsonstrict"
 	"github.com/trainstar/synchro/conformance/modelrunner"
 	"github.com/trainstar/synchro/conformance/scenarios"
 )
@@ -809,19 +810,9 @@ func (c *RebuildApplyCoordinator) finish(ctx context.Context) error {
 	if len(c.traces) != len(c.steps) {
 		return errors.New("React Native rebuild-apply trace evidence is incomplete")
 	}
-	var generation uint64
-	for _, trace := range c.traces {
-		for _, observation := range trace.Observations {
-			value, err := requestInteger(observation, "client_generation")
-			if err != nil || value == 0 {
-				return errors.New("React Native rebuild-apply client generation is absent")
-			}
-			if generation == 0 {
-				generation = value
-			} else if generation != value {
-				return errors.New("React Native rebuild-apply client generation changed")
-			}
-		}
+	generation, err := rebuildApplyClientGeneration(c.traces)
+	if err != nil {
+		return err
 	}
 	encoded, err := json.Marshal(generation)
 	if err != nil {
@@ -861,6 +852,43 @@ func (c *RebuildApplyCoordinator) finish(ctx context.Context) error {
 	}
 	c.result = RebuildApplyCoordinatorResult{ServerFacts: captures[0].StateFacts, IdentityResolution: resolutions}
 	return nil
+}
+
+func rebuildApplyClientGeneration(traces []traceSnapshot) (uint64, error) {
+	var generation uint64
+	for traceIndex, trace := range traces {
+		for observationIndex, observation := range trace.Observations {
+			facts, err := decodeRequestFacts(observation)
+			if err != nil {
+				return 0, fmt.Errorf("React Native rebuild-apply request-trace source observation %d/%d is invalid: %w", traceIndex+1, observationIndex+1, err)
+			}
+			raw, found := facts["client_generation"]
+			if !found || isJSONNull(raw) {
+				continue
+			}
+			var value uint64
+			if json.Unmarshal(raw, &value) != nil || value == 0 {
+				return 0, fmt.Errorf("React Native rebuild-apply request-trace source observation %d/%d client generation is invalid", traceIndex+1, observationIndex+1)
+			}
+			if generation == 0 {
+				generation = value
+			} else if generation != value {
+				return 0, fmt.Errorf("React Native rebuild-apply client generation changed in request-trace source: first=%d observed=%d", generation, value)
+			}
+		}
+	}
+	if generation == 0 {
+		return 0, errors.New("React Native rebuild-apply client generation is absent from request-trace source")
+	}
+	return generation, nil
+}
+
+func decodeRequestFacts(observation transportObservation) (map[string]json.RawMessage, error) {
+	var facts map[string]json.RawMessage
+	if jsonstrict.Decode(observation.RequestFacts, &facts) != nil {
+		return nil, errors.New("React Native request facts are invalid")
+	}
+	return facts, nil
 }
 
 func (c *RebuildApplyCoordinator) expectedClient(id string) *scenarios.ClientDurabilityFact {
