@@ -94,7 +94,7 @@ func runRealReactNativeQueueReplay(t *testing.T, platform string) {
 			}
 			command.Env = append(command.Env, assignment)
 		}
-		command.Env = append(command.Env, "SYNCHRO_RN_COORDINATOR_URL="+coordinator.URL(), "SYNCHRO_RN_COORDINATOR_TOKEN="+coordinator.Token(), "SYNCHRO_RN_COORDINATOR_STAGE_COUNT="+strconv.Itoa(coordinator.ExchangeCount()))
+		command.Env = append(command.Env, "SYNCHRO_RN_COORDINATOR_URL="+coordinator.URL(), "SYNCHRO_RN_COORDINATOR_TOKEN="+coordinator.Token(), "SYNCHRO_RN_COORDINATOR_STAGE_COUNT="+strconv.Itoa(coordinator.StageCount()))
 		output, err := command.CombinedOutput()
 		if err != nil {
 			_, coordinatorErr := coordinator.Result()
