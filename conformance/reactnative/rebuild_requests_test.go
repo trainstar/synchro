@@ -215,9 +215,17 @@ func TestValidateFirstRebuildResponseRequiresIntermediatePage(t *testing.T) {
 	if err := validateFirstRebuildResponse(valid); err != nil {
 		t.Fatalf("validate intermediate rebuild response: %v", err)
 	}
-	terminal := []byte(`{"scope":"runtime-scope","records":[{}],"has_more":false,"final_scope_cursor":"cursor-2","checksum":{}}`)
-	if err := validateFirstRebuildResponse(terminal); err == nil {
+	terminal := []byte(`{"scope":"runtime-scope","records":[{},{}],"has_more":false,"final_scope_cursor":"cursor-2","checksum":{}}`)
+	err := validateFirstRebuildResponse(terminal)
+	if err == nil {
 		t.Fatal("terminal rebuild response was accepted as the first page")
+	}
+	for _, fact := range []string{
+		"members=5", "records=2", "has_more=false", "cursor=absent", "final_scope_cursor=nonempty", "checksum=present",
+	} {
+		if !strings.Contains(err.Error(), fact) {
+			t.Fatalf("terminal rebuild response diagnostic = %q, want it to contain %q", err, fact)
+		}
 	}
 }
 

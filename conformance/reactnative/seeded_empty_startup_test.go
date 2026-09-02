@@ -87,6 +87,9 @@ func TestSeededEmptyStartupBootstrapTraceMatchesAuthoredScopeProjections(t *test
 	if seeded.pullScopeProjectionLen != 2 || empty.pullScopeProjectionLen != 2 {
 		t.Fatalf("seeded and empty pull scope projections = %d and %d, expected 2 and 2", seeded.pullScopeProjectionLen, empty.pullScopeProjectionLen)
 	}
+	if seeded.pullScopeProjectionLen-seeded.connectScopeProjectionLen != 1 || empty.pullScopeProjectionLen-empty.connectScopeProjectionLen != 2 {
+		t.Fatalf("seeded and empty rebuild scope projections differ from their authored scope and seed-receipt counts")
+	}
 	seededTrace := validBootstrapTrace(testSchema())
 	seededTrace.Observations[0].RequestFacts = requestFacts(0, testSchema(), 0, seeded.connectScopeProjectionLen, "", "")
 	seededTrace.Observations[2].RequestFacts = requestFacts(1, testSchema(), 1, seeded.pullScopeProjectionLen, "", "")
@@ -94,7 +97,25 @@ func TestSeededEmptyStartupBootstrapTraceMatchesAuthoredScopeProjections(t *test
 		t.Fatalf("validate seeded bootstrap trace: %v", err)
 	}
 	emptyTrace := validBootstrapTrace(testSchema())
-	emptyTrace.Observations[2].RequestFacts = requestFacts(1, testSchema(), 1, empty.pullScopeProjectionLen, "", "")
+	emptyTrace.Observations[1].RequestFacts = requestFacts(1, testSchema(), 1, empty.pullScopeProjectionLen, "rebuild-a", "scope-a")
+	secondRebuildFacts, err := json.Marshal(map[string]any{
+		"record_count": 0, "has_more": false, "has_cursor": false, "has_final_scope_cursor": true,
+		"has_checksum": true, "scope_fingerprint": hashFingerprint("scope-b"),
+		"final_scope_cursor_fingerprint": hashFingerprint("cursor-b"),
+	})
+	if err != nil {
+		t.Fatalf("encode second empty bootstrap rebuild facts: %v", err)
+	}
+	pull := emptyTrace.Observations[2]
+	pull.Sequence = 4
+	pull.RequestFacts = requestFacts(1, testSchema(), 1, empty.pullScopeProjectionLen, "", "")
+	emptyTrace.Observations = []transportObservation{
+		emptyTrace.Observations[0],
+		emptyTrace.Observations[1],
+		transportWithResponse("rebuild", 3, requestFacts(1, testSchema(), 1, empty.pullScopeProjectionLen, "rebuild-b", "scope-b"), string(secondRebuildFacts)),
+		pull,
+	}
+	emptyTrace.SequenceCheckpoint = 4
 	if err := validateSeededEmptyStartupBootstrapTrace(emptyTrace, empty.connectScopeProjectionLen, empty.pullScopeProjectionLen); err != nil {
 		t.Fatalf("validate empty bootstrap trace: %v", err)
 	}
@@ -107,6 +128,19 @@ func TestSeededEmptyStartupBootstrapTraceMatchesAuthoredScopeProjections(t *test
 	if err := validateSeededEmptyStartupBootstrapTrace(pullMutant, seeded.connectScopeProjectionLen, seeded.pullScopeProjectionLen); err == nil ||
 		!strings.Contains(err.Error(), "observed 1, expected 2") {
 		t.Fatalf("seeded bootstrap pull scope mutant error = %v, expected observed 1 and expected 2", err)
+	}
+	if err := validateSeededEmptyStartupBootstrapTrace(validBootstrapTrace(testSchema()), empty.connectScopeProjectionLen, empty.pullScopeProjectionLen); err == nil ||
+		!strings.Contains(err.Error(), "operations=[connect rebuild pull] count=3 checkpoint=3 overflowed=false") ||
+		!strings.Contains(err.Error(), "expected connect plus 2 rebuild and pull with count=4 checkpoint=4 overflowed=false") {
+		t.Fatalf("incomplete empty bootstrap shape error = %v, expected observed three-operation and required four-operation shapes", err)
+	}
+	duplicateRebuild := emptyTrace
+	duplicateRebuild.Observations = append([]transportObservation(nil), emptyTrace.Observations...)
+	duplicateRebuild.Observations[2].RequestFacts = requestFacts(1, testSchema(), 1, empty.pullScopeProjectionLen, "rebuild-b", "scope-a")
+	duplicateRebuild.Observations[2].RebuildResponseFacts = json.RawMessage(validRebuildResponseFacts())
+	if err := validateSeededEmptyStartupBootstrapTrace(duplicateRebuild, empty.connectScopeProjectionLen, empty.pullScopeProjectionLen); err == nil ||
+		!strings.Contains(err.Error(), "scope identity is duplicated") {
+		t.Fatalf("duplicate empty bootstrap rebuild error = %v, expected duplicated scope identity", err)
 	}
 }
 

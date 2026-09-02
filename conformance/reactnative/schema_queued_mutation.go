@@ -615,6 +615,7 @@ func (c *SchemaQueuedMutationCoordinator) advanceLocked(ctx context.Context, seq
 const (
 	schemaQueuedMutationInitialClientKey = "schema-queued-mutation-initial"
 	schemaQueuedMutationRestartClientKey = "schema-queued-mutation-restarted"
+	schemaQueuedMutationCaptureMoment    = "after-restart-before-synchronization"
 )
 
 func (c *SchemaQueuedMutationCoordinator) validateSynchronized(raw json.RawMessage, completion string, requireInitialProcess bool) error {
@@ -948,7 +949,7 @@ type schemaQueuedMutationPending struct {
 func (c *SchemaQueuedMutationCoordinator) validatePendingMutation(expected scenarios.QueuedMutationFact) error {
 	var pending []schemaQueuedMutationPending
 	if err := decodeStrictValue(c.finalResult.Pending, &pending); err != nil || len(pending) != 1 {
-		return fmt.Errorf("React Native schema-queued-mutation pending entries=%d want=1 decode_error=%v", len(pending), err)
+		return fmt.Errorf("React Native schema-queued-mutation pending %s typed_entries=%d want=1 decode_error=%v", c.mutationCaptureEvidence("pending-mutations"), len(pending), err)
 	}
 	mutationID, err := c.runtimeString("queued-mutation")
 	if err != nil {
@@ -1009,7 +1010,7 @@ type schemaQueuedMutationRejected struct {
 func (c *SchemaQueuedMutationCoordinator) validateRejectedMutation(expected scenarios.MutationOutcomeFact) error {
 	var rejected []schemaQueuedMutationRejected
 	if err := decodeStrictValue(c.finalResult.Rejected, &rejected); err != nil || len(rejected) != 1 {
-		return fmt.Errorf("React Native schema-queued-mutation rejected entries=%d want=1 decode_error=%v", len(rejected), err)
+		return fmt.Errorf("React Native schema-queued-mutation rejected %s typed_entries=%d want=1 decode_error=%v", c.mutationCaptureEvidence("rejected-mutations"), len(rejected), err)
 	}
 	mutationID, err := c.runtimeString("queued-mutation")
 	if err != nil {
@@ -1025,6 +1026,21 @@ func (c *SchemaQueuedMutationCoordinator) validateRejectedMutation(expected scen
 		return fmt.Errorf("React Native schema-queued-mutation rejected observed=%+v expected mutation=%q table=%q record=%q status=%q code=%q", observed, mutationID, c.tableName, recordID, expected.State, expected.Reason)
 	}
 	return c.validateStoredMutation(observed.MutationJSON)
+}
+
+func (c *SchemaQueuedMutationCoordinator) mutationCaptureEvidence(readStore string) string {
+	pendingEntries, pendingErr := schemaQueuedMutationRawEntryCount(c.finalResult.Pending)
+	rejectedEntries, rejectedErr := schemaQueuedMutationRawEntryCount(c.finalResult.Rejected)
+	return fmt.Sprintf(
+		"capture_moment=%s read_store=%q raw_entry_counts{pending-mutations=%d rejected-mutations=%d} raw_count_errors{pending-mutations=%v rejected-mutations=%v}",
+		schemaQueuedMutationCaptureMoment, readStore, pendingEntries, rejectedEntries, pendingErr, rejectedErr,
+	)
+}
+
+func schemaQueuedMutationRawEntryCount(raw json.RawMessage) (int, error) {
+	var entries []json.RawMessage
+	err := decodeStrictValue(raw, &entries)
+	return len(entries), err
 }
 
 func (c *SchemaQueuedMutationCoordinator) validateStoredMutation(raw string) error {

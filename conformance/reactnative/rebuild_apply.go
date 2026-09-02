@@ -307,11 +307,15 @@ func (c *RebuildApplyCoordinator) ExchangeCount() int {
 func (c *RebuildApplyCoordinator) Result() (RebuildApplyCoordinatorResult, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	served := uint64(0)
+	if c.nextSeq > 0 {
+		served = c.nextSeq - 1
+	}
 	if c.failed != nil {
-		return RebuildApplyCoordinatorResult{}, c.failed
+		return RebuildApplyCoordinatorResult{}, fmt.Errorf("%w (exchanges served=%d versus ExchangeCount=%d)", c.failed, served, c.ExchangeCount())
 	}
 	if !c.completed {
-		return RebuildApplyCoordinatorResult{}, errors.New("React Native rebuild-apply coordinator has not completed")
+		return RebuildApplyCoordinatorResult{}, fmt.Errorf("React Native rebuild-apply coordinator has not completed (exchanges served=%d versus ExchangeCount=%d)", served, c.ExchangeCount())
 	}
 	return c.result, nil
 }
@@ -468,6 +472,9 @@ func (c *RebuildApplyCoordinator) advanceLocked(ctx context.Context, sequence ui
 		c.stage = rebuildApplyStageComplete
 	case rebuildApplyStageComplete:
 		c.current++
+		if c.current == len(c.steps) {
+			return c.advanceLocked(ctx, sequence)
+		}
 		c.stage = rebuildApplyStageOpen
 		return c.advanceLocked(ctx, sequence)
 	}

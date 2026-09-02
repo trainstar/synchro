@@ -742,6 +742,12 @@ func (c *ForgedCursorCoordinator) proxyAdapter(writer http.ResponseWriter, reque
 			case <-c.allowForgedPage:
 			}
 		}
+		requestBody, err = c.bindRebuildRequestLimit(requestBody, rebuildRequest)
+		if err != nil {
+			c.recordProxyFailure(err)
+			writeExchangeError(writer, http.StatusBadGateway)
+			return
+		}
 	}
 	target := strings.TrimRight(c.upstream, "/") + request.URL.RequestURI()
 	upstreamRequest, err := http.NewRequestWithContext(request.Context(), request.Method, target, bytes.NewReader(requestBody))
@@ -759,6 +765,9 @@ func (c *ForgedCursorCoordinator) proxyAdapter(writer http.ResponseWriter, reque
 		}
 	}
 	upstreamRequest.ContentLength = request.ContentLength
+	if rebuildRequest != 0 && request.ContentLength >= 0 {
+		upstreamRequest.ContentLength = int64(len(requestBody))
+	}
 	upstreamRequest.TransferEncoding = slices.Clone(request.TransferEncoding)
 	upstreamRequest.Trailer = request.Trailer.Clone()
 	upstreamRequest.Close = request.Close
@@ -905,6 +914,43 @@ func (c *ForgedCursorCoordinator) proxyFailure(stage string) error {
 	return nil
 }
 
+func (c *ForgedCursorCoordinator) bindRebuildRequestLimit(raw []byte, requestNumber uint64) ([]byte, error) {
+	stepID := forgedCursorStepOrder[4]
+	if requestNumber == 2 {
+		stepID = forgedCursorStepOrder[5]
+	}
+	var authored struct {
+		Limit uint64 `json:"limit"`
+	}
+	if err := json.Unmarshal(c.steps[stepID].Operation.Payload, &authored); err != nil {
+		return nil, fmt.Errorf("decode React Native forged-cursor authored rebuild limit for %s: %w", stepID, err)
+	}
+	if authored.Limit == 0 {
+		return nil, fmt.Errorf("React Native forged-cursor authored rebuild limit for %s is zero", stepID)
+	}
+	var members map[string]json.RawMessage
+	if err := jsonstrict.Decode(raw, &members); err != nil {
+		return nil, fmt.Errorf("decode React Native forged-cursor rebuild request: %w", err)
+	}
+	var observed uint64
+	if err := json.Unmarshal(members["limit"], &observed); err != nil {
+		return nil, fmt.Errorf("decode React Native forged-cursor rebuild request limit: %w", err)
+	}
+	if observed == 0 {
+		return nil, errors.New("React Native forged-cursor rebuild request limit is zero")
+	}
+	encoded, err := json.Marshal(authored.Limit)
+	if err != nil {
+		return nil, fmt.Errorf("encode React Native forged-cursor authored rebuild limit: %w", err)
+	}
+	members["limit"] = encoded
+	bound, err := json.Marshal(members)
+	if err != nil {
+		return nil, fmt.Errorf("encode React Native forged-cursor bound rebuild request: %w", err)
+	}
+	return bound, nil
+}
+
 func mutateForgedCursorFirstResponse(raw []byte) ([]byte, error) {
 	var members map[string]json.RawMessage
 	if err := jsonstrict.Decode(raw, &members); err != nil || len(members) < 3 || len(members) > 6 {
@@ -912,8 +958,11 @@ func mutateForgedCursorFirstResponse(raw []byte) ([]byte, error) {
 	}
 	var records []json.RawMessage
 	var hasMore bool
-	if err := json.Unmarshal(members["records"], &records); err != nil || len(records) != 1 {
-		return nil, fmt.Errorf("React Native forged-cursor first response record count=%d, want 1: %w", len(records), err)
+	if err := json.Unmarshal(members["records"], &records); err != nil {
+		return nil, fmt.Errorf("decode React Native forged-cursor first response records: %w", err)
+	}
+	if len(records) != 1 {
+		return nil, fmt.Errorf("React Native forged-cursor first response record count=%d, want 1", len(records))
 	}
 	if err := json.Unmarshal(members["has_more"], &hasMore); err != nil || !hasMore {
 		return nil, fmt.Errorf("React Native forged-cursor first response has_more=%t, want true: %w", hasMore, err)

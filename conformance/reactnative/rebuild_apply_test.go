@@ -163,8 +163,32 @@ func TestRebuildApplyCountFailureNamesExchangeObservedAndExpected(t *testing.T) 
 		t.Fatalf("rebuild-apply count mismatch status = %d, want %d", response.Code, http.StatusUnprocessableEntity)
 	}
 	_, err := coordinator.Result()
-	if err == nil || !strings.Contains(err.Error(), "exchange 13") || !strings.Contains(err.Error(), "observed=3 expected=2") {
-		t.Fatalf("rebuild-apply count mismatch error = %v, want exchange 13 with observed=3 expected=2", err)
+	if err == nil || !strings.Contains(err.Error(), "exchange 13") || !strings.Contains(err.Error(), "observed=3 expected=2") || !strings.Contains(err.Error(), "exchanges served=12") || !strings.Contains(err.Error(), "ExchangeCount=28") {
+		t.Fatalf("rebuild-apply count mismatch error = %v, want exchange 13, observed=3 expected=2, exchanges served=12, and ExchangeCount=28", err)
+	}
+}
+
+func TestRebuildApplyIncompleteResultNamesServedAndExpectedExchanges(t *testing.T) {
+	scenario := loadRebuildApplyAuthoredScenario(t)
+	coordinator := &RebuildApplyCoordinator{config: RebuildApplyCoordinatorConfig{Scenario: scenario}, nextSeq: 4}
+	_, err := coordinator.Result()
+	if err == nil || !strings.Contains(err.Error(), "exchanges served=3") || !strings.Contains(err.Error(), "ExchangeCount=28") {
+		t.Fatalf("incomplete rebuild-apply error = %v, want exchanges served=3 and ExchangeCount=28", err)
+	}
+}
+
+func TestRebuildApplyFinalWorkloadReachesTerminalExchange(t *testing.T) {
+	scenario := loadRebuildApplyAuthoredScenario(t)
+	var workload rebuildApplyWorkload
+	if err := json.Unmarshal(scenario.Steps[0].Operation.Payload, &workload); err != nil {
+		t.Fatalf("decode final rebuild-apply workload: %v", err)
+	}
+	coordinator := &RebuildApplyCoordinator{
+		steps: []scenarios.Step{scenario.Steps[0]}, workloads: []rebuildApplyWorkload{workload}, stage: rebuildApplyStageComplete,
+	}
+	_, err := coordinator.advanceLocked(context.Background(), 1)
+	if err == nil || !strings.Contains(err.Error(), "trace evidence is incomplete") || strings.Contains(err.Error(), "workload index is invalid") {
+		t.Fatalf("final rebuild-apply transition error = %v, want terminal validation after final workload", err)
 	}
 }
 

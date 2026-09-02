@@ -108,6 +108,27 @@ func TestSchemaQueuedMutationFinalCaptureRequestsDurableProof(t *testing.T) {
 	}
 }
 
+func TestSchemaQueuedMutationPendingCaptureFailureNamesStoresAndRestartMoment(t *testing.T) {
+	coordinator := &SchemaQueuedMutationCoordinator{finalResult: &finalCapture{
+		Pending:  json.RawMessage(`[]`),
+		Rejected: json.RawMessage(`[{"mutationID":"rejected"}]`),
+	}}
+	err := coordinator.validatePendingMutation(scenarios.QueuedMutationFact{})
+	if err == nil {
+		t.Fatal("validate pending mutation accepted an empty pending store")
+	}
+	for _, want := range []string{
+		"capture_moment=after-restart-before-synchronization",
+		`read_store="pending-mutations"`,
+		"raw_entry_counts{pending-mutations=0 rejected-mutations=1}",
+		"typed_entries=0 want=1",
+	} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("pending capture failure=%q want %q", err, want)
+		}
+	}
+}
+
 func TestSchemaQueuedMutationServerEvidenceUsesControllerAndClientCaptures(t *testing.T) {
 	rebuildID := "runtime-rebuild"
 	recordID := "00000000-0000-4000-8000-000000008001"

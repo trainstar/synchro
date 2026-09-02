@@ -907,26 +907,100 @@ func (c *RebuildRequestsCoordinator) observeFirstRebuildResponse(ctx context.Con
 }
 
 func validateFirstRebuildResponse(raw []byte) error {
-	var members map[string]json.RawMessage
-	if err := jsonstrict.Decode(raw, &members); err != nil || len(members) < 3 || len(members) > 6 {
-		return errors.New("React Native rebuild-requests first rebuild response is invalid")
+	facts, err := firstRebuildResponseFacts(raw)
+	if err != nil || facts.members < 3 || facts.members > 6 {
+		return fmt.Errorf("React Native rebuild-requests first rebuild response is invalid: %s decode_error=%t", facts, err != nil)
 	}
-	var records []json.RawMessage
-	var hasMore bool
-	if json.Unmarshal(members["records"], &records) != nil || len(records) != 1 ||
-		json.Unmarshal(members["has_more"], &hasMore) != nil || !hasMore {
-		return errors.New("React Native rebuild-requests first rebuild response is not an intermediate page")
-	}
-	var cursor string
-	if rawCursor, found := members["cursor"]; !found || json.Unmarshal(rawCursor, &cursor) != nil || cursor == "" {
-		return errors.New("React Native rebuild-requests first rebuild cursor is absent")
-	}
-	for _, key := range []string{"final_scope_cursor", "checksum"} {
-		if rawValue, found := members[key]; found && !isJSONNull(rawValue) {
-			return fmt.Errorf("React Native rebuild-requests first rebuild %s is non-null", key)
-		}
+	if facts.records != "1" || facts.hasMore != "true" || facts.cursor != "nonempty" ||
+		facts.finalScopeCursor != "absent" && facts.finalScopeCursor != "null" ||
+		facts.checksum != "absent" && facts.checksum != "null" {
+		return fmt.Errorf("React Native rebuild-requests first rebuild response is not an intermediate page: %s", facts)
 	}
 	return nil
+}
+
+type firstRebuildResponseShape struct {
+	members          int
+	records          string
+	hasMore          string
+	cursor           string
+	finalScopeCursor string
+	checksum         string
+}
+
+func firstRebuildResponseFacts(raw []byte) (firstRebuildResponseShape, error) {
+	facts := firstRebuildResponseShape{
+		records: "absent", hasMore: "absent", cursor: "absent", finalScopeCursor: "absent", checksum: "absent",
+	}
+	var members map[string]json.RawMessage
+	if err := jsonstrict.Decode(raw, &members); err != nil {
+		return facts, err
+	}
+	facts.members = len(members)
+	var records []json.RawMessage
+	if value, found := members["records"]; found {
+		if isJSONNull(value) || json.Unmarshal(value, &records) != nil {
+			facts.records = "invalid"
+		} else {
+			facts.records = fmt.Sprintf("%d", len(records))
+		}
+	}
+	facts.hasMore = rebuildBooleanMemberShape(members, "has_more")
+	facts.cursor = rebuildStringMemberShape(members, "cursor")
+	facts.finalScopeCursor = rebuildStringMemberShape(members, "final_scope_cursor")
+	facts.checksum = rebuildJSONMemberShape(members, "checksum")
+	return facts, nil
+}
+
+func (facts firstRebuildResponseShape) String() string {
+	return fmt.Sprintf("members=%d records=%s has_more=%s cursor=%s final_scope_cursor=%s checksum=%s", facts.members, facts.records, facts.hasMore, facts.cursor, facts.finalScopeCursor, facts.checksum)
+}
+
+func rebuildBooleanMemberShape(members map[string]json.RawMessage, name string) string {
+	value, found := members[name]
+	if !found {
+		return "absent"
+	}
+	if isJSONNull(value) {
+		return "null"
+	}
+	var decoded bool
+	if json.Unmarshal(value, &decoded) != nil {
+		return "invalid"
+	}
+	if decoded {
+		return "true"
+	}
+	return "false"
+}
+
+func rebuildStringMemberShape(members map[string]json.RawMessage, name string) string {
+	value, found := members[name]
+	if !found {
+		return "absent"
+	}
+	if isJSONNull(value) {
+		return "null"
+	}
+	var decoded string
+	if json.Unmarshal(value, &decoded) != nil {
+		return "invalid"
+	}
+	if decoded == "" {
+		return "empty"
+	}
+	return "nonempty"
+}
+
+func rebuildJSONMemberShape(members map[string]json.RawMessage, name string) string {
+	value, found := members[name]
+	if !found {
+		return "absent"
+	}
+	if isJSONNull(value) {
+		return "null"
+	}
+	return "present"
 }
 
 func (c *RebuildRequestsCoordinator) validateCompletionLocked(ctx context.Context) error {

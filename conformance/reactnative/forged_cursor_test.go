@@ -149,16 +149,34 @@ func TestMutateForgedCursorFirstResponseInstallsDeterministicCursor(t *testing.T
 	if _, err := mutateForgedCursorFirstResponse(terminal); err == nil {
 		t.Fatal("terminal rebuild response accepted as the forged-cursor first page")
 	}
+	twoRecords := []byte(`{"scope":"scope-a","records":[{"table":"items"},{"table":"items"}],"has_more":true,"cursor":"real-opaque-cursor"}`)
+	_, err = mutateForgedCursorFirstResponse(twoRecords)
+	if err == nil || !strings.Contains(err.Error(), "record count=2, want 1") || strings.Contains(err.Error(), "%!w") {
+		t.Fatalf("forged-cursor two-record response error = %q, want exact count without nil wrapping", err)
+	}
 }
 
 func TestForgedCursorProxyMutatesOnlyFirstRebuildPage(t *testing.T) {
 	var requests atomic.Uint64
+	forwardedLimits := make(chan uint64, 2)
 	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		requestNumber := requests.Add(1)
+		var rebuild struct {
+			Limit uint64 `json:"limit"`
+		}
+		if err := json.NewDecoder(request.Body).Decode(&rebuild); err != nil {
+			forwardedLimits <- 0
+		} else {
+			forwardedLimits <- rebuild.Limit
+		}
 		writer.Header().Set("Content-Type", "application/json")
 		if requestNumber == 1 {
 			writer.WriteHeader(http.StatusOK)
-			_, _ = writer.Write([]byte(`{"scope":"scope-a","records":[{"table":"items"}],"has_more":true,"cursor":"real-opaque-cursor"}`))
+			records := `[{"table":"items"},{"table":"items"}]`
+			if rebuild.Limit == 1 {
+				records = `[{"table":"items"}]`
+			}
+			_, _ = writer.Write([]byte(`{"scope":"scope-a","records":` + records + `,"has_more":true,"cursor":"real-opaque-cursor"}`))
 			return
 		}
 		writer.WriteHeader(http.StatusBadRequest)
@@ -174,7 +192,7 @@ func TestForgedCursorProxyMutatesOnlyFirstRebuildPage(t *testing.T) {
 	defer func() { _ = coordinator.Close(context.Background()) }()
 
 	first := httptest.NewRecorder()
-	coordinator.proxyAdapter(first, httptest.NewRequest(http.MethodPost, "/sync/rebuild", strings.NewReader(`{}`)))
+	coordinator.proxyAdapter(first, httptest.NewRequest(http.MethodPost, "/sync/rebuild", strings.NewReader(`{"client_id":"client-a","limit":100}`)))
 	if first.Code != http.StatusOK {
 		t.Fatalf("forged-cursor first proxy status = %d, want %d", first.Code, http.StatusOK)
 	}
@@ -190,9 +208,12 @@ func TestForgedCursorProxyMutatesOnlyFirstRebuildPage(t *testing.T) {
 
 	coordinator.releaseForgedPage()
 	second := httptest.NewRecorder()
-	coordinator.proxyAdapter(second, httptest.NewRequest(http.MethodPost, "/sync/rebuild", strings.NewReader(`{}`)))
+	coordinator.proxyAdapter(second, httptest.NewRequest(http.MethodPost, "/sync/rebuild", strings.NewReader(`{"client_id":"client-a","limit":100}`)))
 	if second.Code != http.StatusBadRequest || requests.Load() != 2 {
 		t.Fatalf("forged-cursor rejected proxy status = %d requests = %d, want 400/2", second.Code, requests.Load())
+	}
+	if firstLimit, secondLimit := <-forwardedLimits, <-forwardedLimits; firstLimit != 1 || secondLimit != 1 {
+		t.Fatalf("forged-cursor forwarded rebuild limits = %d/%d, want authored 1/1", firstLimit, secondLimit)
 	}
 	if err := coordinator.waitForForgedPage(context.Background()); err != nil {
 		t.Fatalf("wait for forged-cursor rejection: %v", err)

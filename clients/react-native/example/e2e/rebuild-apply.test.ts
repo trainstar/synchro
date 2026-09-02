@@ -58,20 +58,30 @@ async function execute(command: Record<string, unknown>): Promise<string> {
   throw new Error('React Native rebuild-apply command did not finish');
 }
 
+function errorDetail(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
 it('executes the rebuild-apply coordinator sequence', async () => {
   const { endpoint, token, stageCount } = configuration();
   await device.launchApp({ newInstance: true, delete: true, launchArgs: { synchroConformance: '1' } });
   await expect(element(by.id('conformance-harness'))).toBeVisible();
   let result = 'null';
   let commands = 0;
+  let stoppedAt = 0;
   for (let sequence = 1; sequence <= stageCount; sequence += 1) {
-    const next = await exchange(endpoint, token, sequence, result);
-    if (next.state === 'complete') {
-      if (sequence !== stageCount || commands !== stageCount - 1) throw new Error('React Native rebuild-apply coordinator completed at an invalid stage');
-      return;
+    stoppedAt = sequence;
+    try {
+      const next = await exchange(endpoint, token, sequence, result);
+      if (next.state === 'complete') {
+        if (sequence !== stageCount || commands !== stageCount - 1) throw new Error(`React Native rebuild-apply coordinator completed at an invalid stage: sequence=${sequence} versus stage_count=${stageCount} commands=${commands}`);
+        return;
+      }
+      commands += 1;
+      result = await execute(next.command);
+    } catch (error) {
+      throw new Error(`React Native rebuild-apply coordinator stopped at sequence=${stoppedAt} versus stage_count=${stageCount}: ${errorDetail(error)}`);
     }
-    commands += 1;
-    result = await execute(next.command);
   }
-  throw new Error('React Native rebuild-apply coordinator did not complete');
+  throw new Error(`React Native rebuild-apply coordinator stopped at sequence=${stoppedAt} versus stage_count=${stageCount}: no complete response`);
 });
