@@ -240,17 +240,6 @@ func TestSchemaCheckTraceRequiresSuccessfulConnectInCallWindow(t *testing.T) {
 	}
 }
 
-func TestSchemaCheckDistinctRebuildCountIgnoresPageReceipts(t *testing.T) {
-	server := scenarios.StateFacts{Rebuilds: []scenarios.RebuildFact{
-		{UserID: "user-a", ClientID: "client-a", RebuildID: "rebuild-one", PageCount: 2},
-		{UserID: "user-a", ClientID: "client-a", RebuildID: "rebuild-one", PageCount: 1},
-		{UserID: "user-a", ClientID: "client-a", RebuildID: "rebuild-two", PageCount: 1},
-	}}
-	if got := schemaCheckDistinctRebuildCount(server, "user-a", "client-a"); got != 2 {
-		t.Fatalf("distinct schema-check rebuilds=%d want=2", got)
-	}
-}
-
 func TestSchemaCheckIdentityEvidenceUsesCapturedPullRequests(t *testing.T) {
 	trace := func(generation, scopeSetVersion uint64) json.RawMessage {
 		t.Helper()

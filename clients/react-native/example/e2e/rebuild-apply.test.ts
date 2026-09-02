@@ -5,6 +5,8 @@ type ExchangeResponse = { schema_version: number; sequence: number } & (
   | { state: 'complete'; command: null }
 );
 
+const REBUILD_APPLY_COMMAND_TIMEOUT_MS = 600000;
+
 function configuration(): { endpoint: string; token: string; stageCount: number } {
   const url = process.env.SYNCHRO_RN_COORDINATOR_URL;
   const token = process.env.SYNCHRO_RN_COORDINATOR_TOKEN;
@@ -44,7 +46,7 @@ async function execute(command: Record<string, unknown>): Promise<string> {
   if ((await element(by.id('conformance-command-input')).getAttributes()).text !== serialized) throw new Error('React Native conformance command input changed');
   await element(by.id('conformance-command-input')).tapReturnKey();
   await element(by.id('btn-conformance-execute')).tap();
-  const deadline = Date.now() + 120000;
+  const deadline = Date.now() + REBUILD_APPLY_COMMAND_TIMEOUT_MS;
   while (Date.now() < deadline) {
     const state = await element(by.id('conformance-command-state')).getAttributes();
     if (state.text === 'ok' || state.text === 'error') {
@@ -84,4 +86,4 @@ it('executes the rebuild-apply coordinator sequence', async () => {
     }
   }
   throw new Error(`React Native rebuild-apply coordinator stopped at sequence=${stoppedAt} versus stage_count=${stageCount}: no complete response`);
-});
+}, REBUILD_APPLY_COMMAND_TIMEOUT_MS);

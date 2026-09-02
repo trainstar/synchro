@@ -157,6 +157,8 @@ func TestMutateForgedCursorFirstResponseInstallsDeterministicCursor(t *testing.T
 }
 
 func TestForgedCursorProxyMutatesOnlyFirstRebuildPage(t *testing.T) {
+	const firstUpstreamBody = `{"scope":"scope-a","records":[{"table":"items"}],"has_more":true,"cursor":"real-opaque-cursor"}`
+	const rejectedBody = `{"error":{"code":"invalid_request","message":"invalid request","retryable":false}}`
 	var requests atomic.Uint64
 	forwardedLimits := make(chan uint64, 2)
 	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
@@ -180,7 +182,7 @@ func TestForgedCursorProxyMutatesOnlyFirstRebuildPage(t *testing.T) {
 			return
 		}
 		writer.WriteHeader(http.StatusBadRequest)
-		_, _ = writer.Write([]byte(`{"error":{"code":"invalid_request","message":"invalid request","retryable":false}}`))
+		_, _ = writer.Write([]byte(rejectedBody))
 	}))
 	defer upstream.Close()
 	coordinator, err := NewForgedCursorCoordinator(ForgedCursorCoordinatorConfig{
@@ -212,11 +214,65 @@ func TestForgedCursorProxyMutatesOnlyFirstRebuildPage(t *testing.T) {
 	if second.Code != http.StatusBadRequest || requests.Load() != 2 {
 		t.Fatalf("forged-cursor rejected proxy status = %d requests = %d, want 400/2", second.Code, requests.Load())
 	}
+	if second.Body.String() != rejectedBody {
+		t.Fatalf("forged-cursor rejected proxy body = %q, want unchanged upstream body %q", second.Body.String(), rejectedBody)
+	}
 	if firstLimit, secondLimit := <-forwardedLimits, <-forwardedLimits; firstLimit != 1 || secondLimit != 1 {
 		t.Fatalf("forged-cursor forwarded rebuild limits = %d/%d, want authored 1/1", firstLimit, secondLimit)
 	}
 	if err := coordinator.waitForForgedPage(context.Background()); err != nil {
 		t.Fatalf("wait for forged-cursor rejection: %v", err)
+	}
+	diagnostic := coordinator.rebuildResponseDiagnostic()
+	for _, want := range []string{
+		fmt.Sprintf("{request:1 upstream_status:200 proxied_status:200 upstream_body:%q proxied_body:%q}", firstUpstreamBody, first.Body.String()),
+		fmt.Sprintf("{request:2 upstream_status:400 proxied_status:400 upstream_body:%q proxied_body:%q}", rejectedBody, rejectedBody),
+	} {
+		if !strings.Contains(diagnostic, want) {
+			t.Fatalf("forged-cursor rebuild response diagnostic = %q, want %q", diagnostic, want)
+		}
+	}
+}
+
+func TestForgedCursorRebuildResponseDiagnosticBoundsBodies(t *testing.T) {
+	coordinator := &ForgedCursorCoordinator{}
+	upstreamBody := []byte(strings.Repeat("u", 513))
+	proxiedBody := []byte(strings.Repeat("p", 514))
+	coordinator.recordRebuildResponse(2, http.StatusBadRequest, http.StatusBadRequest, upstreamBody, proxiedBody)
+	diagnostic := coordinator.rebuildResponseDiagnostic()
+	for _, want := range []string{
+		fmt.Sprintf("upstream_body:%q", boundedRaw(upstreamBody)),
+		fmt.Sprintf("proxied_body:%q", boundedRaw(proxiedBody)),
+	} {
+		if !strings.Contains(diagnostic, want) {
+			t.Fatalf("bounded forged-cursor rebuild response diagnostic = %q, want %q", diagnostic, want)
+		}
+	}
+}
+
+func TestForgedCursorCallCompleteFailureIncludesRebuildResponseDiagnostic(t *testing.T) {
+	coordinator, err := NewForgedCursorCoordinator(ForgedCursorCoordinatorConfig{
+		Scenario: loadForgedCursorAuthoredScenario(t), Platform: "android", ServerURL: "http://127.0.0.1:8080", AuthToken: "unit-token",
+	})
+	if err != nil {
+		t.Fatalf("create forged-cursor response diagnostic coordinator: %v", err)
+	}
+	defer func() { _ = coordinator.Close(context.Background()) }()
+	upstreamBody := []byte(`{"error":{"code":"invalid_request","message":"invalid request","retryable":false}}`)
+	coordinator.recordRebuildResponse(2, http.StatusBadRequest, http.StatusBadRequest, upstreamBody, upstreamBody)
+	raw := json.RawMessage(`{"kind":"call-completed","call_id":"forged_rebuild","state":"completed","completion":"error","status":{"state":"error","retry_at":null,"operation":"rebuilding","failure":{"operation":"rebuilding","code":"server_error","retryable":false,"recovery_action":"retry"}},"process":{}}`)
+	err = coordinator.validateCallComplete(raw)
+	if err == nil {
+		t.Fatal("forged-cursor call-complete status mismatch was accepted")
+	}
+	for _, want := range []string{
+		`failure={operation:"rebuilding" code:"server_error"`,
+		fmt.Sprintf("upstream_body:%q", string(upstreamBody)),
+		fmt.Sprintf("proxied_body:%q", string(upstreamBody)),
+	} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("forged-cursor call-complete diagnostic = %q, want %q", err, want)
+		}
 	}
 }
 

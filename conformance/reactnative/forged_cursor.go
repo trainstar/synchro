@@ -9,6 +9,8 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/http/httputil"
+	"net/url"
 	"reflect"
 	"slices"
 	"strconv"
@@ -27,7 +29,7 @@ const (
 	forgedCursorSeedAsset    = "seed.db"
 	forgedCursorOverride     = "native-forged-rebuild-cursor"
 	// Keep a response window before Detox cancels the exchange.
-	forgedCursorPushWait     = 20 * time.Second
+	forgedCursorPushWait = 20 * time.Second
 )
 
 var forgedCursorStepOrder = []scenarios.StepID{
@@ -74,16 +76,18 @@ type ForgedCursorCoordinatorResult struct {
 type ForgedCursorCoordinator struct {
 	config ForgedCursorCoordinatorConfig
 
-	listener  net.Listener
-	server    *http.Server
-	token     string
-	adapter   string
-	upstream  string
-	database  string
-	transport *http.Client
+	listener    net.Listener
+	server      *http.Server
+	token       string
+	adapter     string
+	upstream    string
+	upstreamURL *url.URL
+	database    string
+	transport   *http.Client
 
 	proxyMu             sync.Mutex
 	rebuildRequests     uint64
+	rebuildResponses    [2]forgedCursorRebuildResponse
 	proxyErr            error
 	pushCommitted       chan struct{}
 	pushCommittedOnce   sync.Once
@@ -118,6 +122,14 @@ type ForgedCursorCoordinator struct {
 	serverAfter  *scenarios.StateFacts
 	finalCapture *finalCapture
 	result       ForgedCursorCoordinatorResult
+}
+
+type forgedCursorRebuildResponse struct {
+	observed       bool
+	upstreamStatus int
+	proxiedStatus  int
+	upstreamBody   string
+	proxiedBody    string
 }
 
 type forgedCursorStage uint8
@@ -437,6 +449,10 @@ func NewForgedCursorCoordinator(config ForgedCursorCoordinatorConfig) (*ForgedCu
 	if err != nil {
 		return nil, fmt.Errorf("resolve React Native forged-cursor upstream URL %q: %w", serverURL, err)
 	}
+	upstreamURL, err := url.Parse(upstream)
+	if err != nil {
+		return nil, fmt.Errorf("parse React Native forged-cursor upstream URL %q: %w", upstream, err)
+	}
 	capability, err := randomToken(32)
 	if err != nil {
 		return nil, fmt.Errorf("create React Native forged-cursor coordinator capability: %w", err)
@@ -471,7 +487,7 @@ func NewForgedCursorCoordinator(config ForgedCursorCoordinatorConfig) (*ForgedCu
 	}
 	callID := string(*steps[forgedCursorStepOrder[2]].NativeBinding.CallID)
 	coordinator := &ForgedCursorCoordinator{
-		config: config, listener: listener, token: capability, adapter: adapter, upstream: upstream, database: database,
+		config: config, listener: listener, token: capability, adapter: adapter, upstream: upstream, upstreamURL: upstreamURL, database: database,
 		transport: &http.Client{}, pushCommitted: make(chan struct{}), firstPageReady: make(chan struct{}), forgedPageReady: make(chan struct{}), allowPushResponse: make(chan struct{}), allowForgedPage: make(chan struct{}),
 		steps: steps, identities: append([]scenarios.NativeIdentityAlias(nil), config.Scenario.NativeIdentityAliases...),
 		runtimeIDs: make(map[string]json.RawMessage), authTokens: make(map[string]string), serverClient: serverClient,
@@ -714,11 +730,12 @@ func (c *ForgedCursorCoordinator) ServeHTTP(writer http.ResponseWriter, request 
 }
 
 func (c *ForgedCursorCoordinator) proxyAdapter(writer http.ResponseWriter, request *http.Request) {
-	if c == nil || c.transport == nil || c.upstream == "" {
+	if c == nil || c.transport == nil || c.upstreamURL == nil {
 		writeExchangeError(writer, http.StatusBadGateway)
 		return
 	}
 	requestBody, err := io.ReadAll(io.LimitReader(request.Body, maximumExchangeBytes+1))
+	_ = request.Body.Close()
 	if err != nil || len(requestBody) > maximumExchangeBytes {
 		c.recordProxyFailure(fmt.Errorf("read React Native forged-cursor proxy request: bytes=%d maximum=%d error=%v", len(requestBody), maximumExchangeBytes, err))
 		writeExchangeError(writer, http.StatusBadGateway)
@@ -749,85 +766,85 @@ func (c *ForgedCursorCoordinator) proxyAdapter(writer http.ResponseWriter, reque
 			return
 		}
 	}
-	target := strings.TrimRight(c.upstream, "/") + request.URL.RequestURI()
-	upstreamRequest, err := http.NewRequestWithContext(request.Context(), request.Method, target, bytes.NewReader(requestBody))
-	if err != nil {
-		c.recordProxyFailure(fmt.Errorf("create React Native forged-cursor upstream request: %w", err))
-		writeExchangeError(writer, http.StatusBadGateway)
-		return
+	request.Body = io.NopCloser(bytes.NewReader(requestBody))
+	request.GetBody = func() (io.ReadCloser, error) {
+		return io.NopCloser(bytes.NewReader(requestBody)), nil
 	}
-	for name, values := range request.Header {
-		if strings.EqualFold(name, "Host") || strings.EqualFold(name, "Content-Length") || strings.EqualFold(name, "Transfer-Encoding") {
-			continue
-		}
-		for _, value := range values {
-			upstreamRequest.Header.Add(name, value)
-		}
-	}
-	upstreamRequest.ContentLength = request.ContentLength
 	if rebuildRequest != 0 && request.ContentLength >= 0 {
-		upstreamRequest.ContentLength = int64(len(requestBody))
+		request.ContentLength = int64(len(requestBody))
 	}
-	upstreamRequest.TransferEncoding = slices.Clone(request.TransferEncoding)
-	upstreamRequest.Trailer = request.Trailer.Clone()
-	upstreamRequest.Close = request.Close
-	response, err := c.transport.Do(upstreamRequest)
-	if err != nil {
-		c.recordProxyFailure(fmt.Errorf("execute React Native forged-cursor upstream request: %w", err))
-		writeExchangeError(writer, http.StatusBadGateway)
-		return
+	isConnect := request.Method == http.MethodPost && request.URL.Path == "/sync/connect"
+	isPush := request.Method == http.MethodPost && request.URL.Path == "/sync/push"
+	var upstreamStatus int
+	var upstreamBody []byte
+	proxy := &httputil.ReverseProxy{}
+	proxy.Rewrite = func(proxyRequest *httputil.ProxyRequest) {
+		proxyRequest.SetURL(c.upstreamURL)
+		proxyRequest.Out.Host = c.upstreamURL.Host
+		// Preserve the device request because the proxy changes only authored rebuild facts.
+		proxyRequest.Out.Header = proxyRequest.In.Header.Clone()
+		proxyRequest.Out.ContentLength = proxyRequest.In.ContentLength
+		proxyRequest.Out.TransferEncoding = slices.Clone(proxyRequest.In.TransferEncoding)
+		proxyRequest.Out.Trailer = proxyRequest.In.Trailer.Clone()
+		proxyRequest.Out.Close = proxyRequest.In.Close
+		proxyRequest.Out.GetBody = proxyRequest.In.GetBody
 	}
-	defer response.Body.Close()
-	body, err := io.ReadAll(io.LimitReader(response.Body, maximumExchangeBytes+1))
-	if err != nil || len(body) > maximumExchangeBytes {
-		c.recordProxyFailure(fmt.Errorf("read React Native forged-cursor upstream response: bytes=%d maximum=%d error=%v", len(body), maximumExchangeBytes, err))
-		writeExchangeError(writer, http.StatusBadGateway)
-		return
-	}
-	if request.Method == http.MethodPost && request.URL.Path == "/sync/connect" && response.StatusCode != http.StatusOK {
-		c.recordProxyFailure(fmt.Errorf("React Native forged-cursor connect upstream status=%d want=%d response_bytes=%d response_body=%q", response.StatusCode, http.StatusOK, len(body), boundedRaw(body)))
-	}
-	if rebuildRequest == 1 {
-		if response.StatusCode != http.StatusOK {
-			c.recordProxyFailure(fmt.Errorf("React Native forged-cursor first page status=%d, want %d", response.StatusCode, http.StatusOK))
-			writeExchangeError(writer, http.StatusBadGateway)
-			return
+	proxy.Transport = c.transport.Transport
+	proxy.ModifyResponse = func(response *http.Response) error {
+		upstreamStatus = response.StatusCode
+		body, readErr := io.ReadAll(io.LimitReader(response.Body, maximumExchangeBytes+1))
+		_ = response.Body.Close()
+		upstreamBody = append(upstreamBody[:0], body...)
+		if readErr != nil || len(body) > maximumExchangeBytes {
+			return fmt.Errorf("read React Native forged-cursor upstream response: bytes=%d maximum=%d error=%v", len(body), maximumExchangeBytes, readErr)
 		}
-		body, err = mutateForgedCursorFirstResponse(body)
-		if err != nil {
-			c.recordProxyFailure(err)
-			writeExchangeError(writer, http.StatusBadGateway)
-			return
+		if isConnect && response.StatusCode != http.StatusOK {
+			c.recordProxyFailure(fmt.Errorf("React Native forged-cursor connect upstream status=%d want=%d response_bytes=%d response_body=%q", response.StatusCode, http.StatusOK, len(body), boundedRaw(body)))
 		}
-		c.signalFirstPageReady()
+		proxiedBody := body
+		if rebuildRequest == 1 {
+			if response.StatusCode != http.StatusOK {
+				return fmt.Errorf("React Native forged-cursor first page status=%d want=%d upstream_body=%q", response.StatusCode, http.StatusOK, boundedRaw(body))
+			}
+			proxiedBody, err = mutateForgedCursorFirstResponse(body)
+			if err != nil {
+				return err
+			}
+		}
+		if rebuildRequest != 0 {
+			c.recordRebuildResponse(rebuildRequest, response.StatusCode, response.StatusCode, body, proxiedBody)
+		}
+		response.Body = io.NopCloser(bytes.NewReader(proxiedBody))
+		response.ContentLength = int64(len(proxiedBody))
+		response.Header.Set("Content-Length", strconv.Itoa(len(proxiedBody)))
+		if rebuildRequest == 1 {
+			c.signalFirstPageReady()
+		}
+		if rebuildRequest == 2 {
+			c.signalForgedPageReady()
+		}
+		if isPush {
+			if response.StatusCode != http.StatusOK {
+				c.recordProxyFailure(fmt.Errorf("React Native forged-cursor push status=%d want=%d", response.StatusCode, http.StatusOK))
+			}
+			c.signalPushCommitted()
+			select {
+			case <-request.Context().Done():
+				return fmt.Errorf("wait to release React Native forged-cursor push response: %w", request.Context().Err())
+			case <-c.allowPushResponse:
+			}
+		}
+		return nil
 	}
-	if rebuildRequest == 2 {
-		c.signalForgedPageReady()
+	proxy.ErrorHandler = func(responseWriter http.ResponseWriter, _ *http.Request, proxyErr error) {
+		proxiedBody := []byte(`{"error":"invalid_request"}`)
+		if rebuildRequest != 0 {
+			c.recordRebuildResponse(rebuildRequest, upstreamStatus, http.StatusBadGateway, upstreamBody, proxiedBody)
+		}
+		c.recordProxyFailure(fmt.Errorf("proxy React Native forged-cursor request: %w", proxyErr))
+		writeExchangeError(responseWriter, http.StatusBadGateway)
 	}
-	if request.Method == http.MethodPost && request.URL.Path == "/sync/push" {
-		if response.StatusCode != http.StatusOK {
-			c.recordProxyFailure(fmt.Errorf("React Native forged-cursor push status=%d, want %d", response.StatusCode, http.StatusOK))
-		}
-		c.signalPushCommitted()
-		select {
-		case <-request.Context().Done():
-			c.recordProxyFailure(fmt.Errorf("wait to release React Native forged-cursor push response: %w", request.Context().Err()))
-			writeExchangeError(writer, http.StatusBadGateway)
-			return
-		case <-c.allowPushResponse:
-		}
-	}
-	for name, values := range response.Header {
-		if strings.EqualFold(name, "Content-Length") || strings.EqualFold(name, "Transfer-Encoding") {
-			continue
-		}
-		for _, value := range values {
-			writer.Header().Add(name, value)
-		}
-	}
-	writer.Header().Set("Content-Length", strconv.Itoa(len(body)))
-	writer.WriteHeader(response.StatusCode)
-	_, _ = writer.Write(body)
+	proxy.ServeHTTP(writer, request)
 }
 
 func (c *ForgedCursorCoordinator) beginRebuildRequest() uint64 {
@@ -835,6 +852,27 @@ func (c *ForgedCursorCoordinator) beginRebuildRequest() uint64 {
 	defer c.proxyMu.Unlock()
 	c.rebuildRequests++
 	return c.rebuildRequests
+}
+
+func (c *ForgedCursorCoordinator) recordRebuildResponse(requestNumber uint64, upstreamStatus, proxiedStatus int, upstreamBody, proxiedBody []byte) {
+	if requestNumber == 0 || requestNumber > uint64(len(c.rebuildResponses)) {
+		return
+	}
+	c.proxyMu.Lock()
+	c.rebuildResponses[requestNumber-1] = forgedCursorRebuildResponse{
+		observed:       true,
+		upstreamStatus: upstreamStatus,
+		proxiedStatus:  proxiedStatus,
+		upstreamBody:   boundedRaw(upstreamBody),
+		proxiedBody:    boundedRaw(proxiedBody),
+	}
+	c.proxyMu.Unlock()
+}
+
+func (c *ForgedCursorCoordinator) rebuildResponseDiagnostic() string {
+	c.proxyMu.Lock()
+	defer c.proxyMu.Unlock()
+	return c.rebuildResponseDiagnosticLocked()
 }
 
 func (c *ForgedCursorCoordinator) recordProxyFailure(err error) {
@@ -909,9 +947,20 @@ func (c *ForgedCursorCoordinator) proxyFailure(stage string) error {
 	c.proxyMu.Lock()
 	defer c.proxyMu.Unlock()
 	if c.proxyErr != nil {
-		return fmt.Errorf("React Native forged-cursor %s proxy failed: %w", stage, c.proxyErr)
+		return fmt.Errorf("React Native forged-cursor %s proxy failed: %w rebuild_responses=%s", stage, c.proxyErr, c.rebuildResponseDiagnosticLocked())
 	}
 	return nil
+}
+
+func (c *ForgedCursorCoordinator) rebuildResponseDiagnosticLocked() string {
+	pages := make([]string, 0, len(c.rebuildResponses))
+	for index, response := range c.rebuildResponses {
+		if !response.observed {
+			continue
+		}
+		pages = append(pages, fmt.Sprintf("{request:%d upstream_status:%d proxied_status:%d upstream_body:%q proxied_body:%q}", index+1, response.upstreamStatus, response.proxiedStatus, response.upstreamBody, response.proxiedBody))
+	}
+	return "[" + strings.Join(pages, " ") + "]"
 }
 
 func (c *ForgedCursorCoordinator) bindRebuildRequestLimit(raw []byte, requestNumber uint64) ([]byte, error) {
@@ -1266,7 +1315,7 @@ func (c *ForgedCursorCoordinator) validateCallComplete(raw json.RawMessage) erro
 		return fmt.Errorf("React Native forged-cursor completed call_id=%q want=%q state=%q want=completed completion=%q want=error errors=%v/%v/%v", callID, c.callID, state, completion, callErr, stateErr, completionErr)
 	}
 	if err := validateForgedCursorErrorStatus(c.config.Scenario, members["status"]); err != nil {
-		return err
+		return fmt.Errorf("%w rebuild_responses=%s", err, c.rebuildResponseDiagnostic())
 	}
 	return c.validateProcess(members["process"], "call-completed")
 }

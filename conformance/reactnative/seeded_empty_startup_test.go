@@ -98,6 +98,17 @@ func TestSeededEmptyStartupBootstrapTraceMatchesAuthoredScopeProjections(t *test
 	}
 	emptyTrace := validBootstrapTrace(testSchema())
 	emptyTrace.Observations[1].RequestFacts = requestFacts(1, testSchema(), 1, empty.pullScopeProjectionLen, "rebuild-a", "scope-a")
+	intermediateRebuildFacts, err := json.Marshal(map[string]any{
+		"record_count": 1, "has_more": true, "has_cursor": true, "has_final_scope_cursor": false,
+		"has_checksum": false, "scope_fingerprint": hashFingerprint("scope-a"),
+	})
+	if err != nil {
+		t.Fatalf("encode intermediate empty bootstrap rebuild facts: %v", err)
+	}
+	emptyTrace.Observations[1].RebuildResponseFacts = intermediateRebuildFacts
+	terminalRebuildFacts := emptyTrace.Observations[1]
+	terminalRebuildFacts.Sequence = 3
+	terminalRebuildFacts.RebuildResponseFacts = json.RawMessage(validRebuildResponseFacts())
 	secondRebuildFacts, err := json.Marshal(map[string]any{
 		"record_count": 0, "has_more": false, "has_cursor": false, "has_final_scope_cursor": true,
 		"has_checksum": true, "scope_fingerprint": hashFingerprint("scope-b"),
@@ -107,15 +118,16 @@ func TestSeededEmptyStartupBootstrapTraceMatchesAuthoredScopeProjections(t *test
 		t.Fatalf("encode second empty bootstrap rebuild facts: %v", err)
 	}
 	pull := emptyTrace.Observations[2]
-	pull.Sequence = 4
+	pull.Sequence = 5
 	pull.RequestFacts = requestFacts(1, testSchema(), 1, empty.pullScopeProjectionLen, "", "")
 	emptyTrace.Observations = []transportObservation{
 		emptyTrace.Observations[0],
 		emptyTrace.Observations[1],
-		transportWithResponse("rebuild", 3, requestFacts(1, testSchema(), 1, empty.pullScopeProjectionLen, "rebuild-b", "scope-b"), string(secondRebuildFacts)),
+		terminalRebuildFacts,
+		transportWithResponse("rebuild", 4, requestFacts(1, testSchema(), 1, empty.pullScopeProjectionLen, "rebuild-b", "scope-b"), string(secondRebuildFacts)),
 		pull,
 	}
-	emptyTrace.SequenceCheckpoint = 4
+	emptyTrace.SequenceCheckpoint = 5
 	if err := validateSeededEmptyStartupBootstrapTrace(emptyTrace, empty.connectScopeProjectionLen, empty.pullScopeProjectionLen); err != nil {
 		t.Fatalf("validate empty bootstrap trace: %v", err)
 	}
@@ -131,16 +143,16 @@ func TestSeededEmptyStartupBootstrapTraceMatchesAuthoredScopeProjections(t *test
 	}
 	if err := validateSeededEmptyStartupBootstrapTrace(validBootstrapTrace(testSchema()), empty.connectScopeProjectionLen, empty.pullScopeProjectionLen); err == nil ||
 		!strings.Contains(err.Error(), "operations=[connect rebuild pull] count=3 checkpoint=3 overflowed=false") ||
-		!strings.Contains(err.Error(), "expected connect plus 2 rebuild and pull with count=4 checkpoint=4 overflowed=false") {
-		t.Fatalf("incomplete empty bootstrap shape error = %v, expected observed three-operation and required four-operation shapes", err)
+		!strings.Contains(err.Error(), "expected connect plus at least 2 rebuild pages and pull with count>=4 checkpoint=count overflowed=false") {
+		t.Fatalf("incomplete empty bootstrap shape error = %v, expected observed three-operation and minimum four-operation shapes", err)
 	}
 	duplicateRebuild := emptyTrace
 	duplicateRebuild.Observations = append([]transportObservation(nil), emptyTrace.Observations...)
-	duplicateRebuild.Observations[2].RequestFacts = requestFacts(1, testSchema(), 1, empty.pullScopeProjectionLen, "rebuild-b", "scope-a")
-	duplicateRebuild.Observations[2].RebuildResponseFacts = json.RawMessage(validRebuildResponseFacts())
+	duplicateRebuild.Observations[3].RequestFacts = requestFacts(1, testSchema(), 1, empty.pullScopeProjectionLen, "rebuild-b", "scope-a")
+	duplicateRebuild.Observations[3].RebuildResponseFacts = json.RawMessage(validRebuildResponseFacts())
 	if err := validateSeededEmptyStartupBootstrapTrace(duplicateRebuild, empty.connectScopeProjectionLen, empty.pullScopeProjectionLen); err == nil ||
-		!strings.Contains(err.Error(), "scope identity is duplicated") {
-		t.Fatalf("duplicate empty bootstrap rebuild error = %v, expected duplicated scope identity", err)
+		!strings.Contains(err.Error(), "scope identity has a page after finality") {
+		t.Fatalf("duplicate empty bootstrap rebuild error = %v, expected a page after finality", err)
 	}
 }
 

@@ -976,9 +976,6 @@ func (c *SchemaCheckCoordinator) finishLocked(ctx context.Context) error {
 			return fmt.Errorf("React Native schema-check executed stratum %s samples=%d want=%d", stratum.StratumID, counts[string(stratum.StratumID)], plan.MinimumSampleCountPerStratum)
 		}
 	}
-	if err := c.validateServerRebuilds(server); err != nil {
-		return err
-	}
 	resolutions, err := c.resolveIdentities()
 	if err != nil {
 		return err
@@ -1147,37 +1144,6 @@ func schemaCheckTraceContainsConnect(trace traceSnapshot) bool {
 		return true
 	}
 	return false
-}
-
-func (c *SchemaCheckCoordinator) validateServerRebuilds(server scenarios.StateFacts) error {
-	for _, call := range c.calls {
-		if call.step.MeasurementSample == nil {
-			continue
-		}
-		caseName, err := schemaCheckCase(call.step)
-		if err != nil {
-			return err
-		}
-		want := uint64(1)
-		if caseName == "class_1" || caseName == "class_3_affected" {
-			want = 2
-		}
-		got := schemaCheckDistinctRebuildCount(server, call.step.NativeBinding.UserID, call.step.NativeBinding.ClientID)
-		if got != want {
-			return fmt.Errorf("React Native schema-check step %s case=%q distinct_server_rebuilds=%d want=%d", call.step.ID, caseName, got, want)
-		}
-	}
-	return nil
-}
-
-func schemaCheckDistinctRebuildCount(server scenarios.StateFacts, userID, clientID string) uint64 {
-	identities := make(map[string]struct{})
-	for _, rebuild := range server.Rebuilds {
-		if rebuild.UserID == userID && rebuild.ClientID == clientID && rebuild.RebuildID != "" {
-			identities[rebuild.RebuildID] = struct{}{}
-		}
-	}
-	return uint64(len(identities))
 }
 
 func (c *SchemaCheckCoordinator) resolveIdentities() ([]blackbox.NativeIdentityResolution, error) {

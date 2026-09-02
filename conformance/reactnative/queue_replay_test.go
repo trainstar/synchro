@@ -157,6 +157,9 @@ func TestQueueReplayProxyDropsCommittedPushAndForwardsReplay(t *testing.T) {
 	if err == nil {
 		t.Fatal("initial committed push response was not dropped")
 	}
+	if !strings.Contains(err.Error(), "malformed HTTP") {
+		t.Fatalf("initial committed push did not return an explicit malformed response: %v", err)
+	}
 	if got := <-received; got != requestBody {
 		t.Fatalf("committed push body = %q, want %q", got, requestBody)
 	}

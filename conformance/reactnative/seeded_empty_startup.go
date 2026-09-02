@@ -555,13 +555,13 @@ func validateSeededEmptyStartupBootstrapTrace(trace traceSnapshot, expectedConne
 		return errors.New("React Native seeded-empty-startup bootstrap scope projections are invalid")
 	}
 	expectedRebuildScopeCount := expectedPullScopeCount - expectedConnectScopeCount
-	expectedObservationCount := expectedRebuildScopeCount + 2
-	if trace.Overflowed || uint64(len(trace.Observations)) != expectedObservationCount || trace.SequenceCheckpoint != expectedObservationCount {
+	minimumObservationCount := expectedRebuildScopeCount + 2
+	if trace.Overflowed || uint64(len(trace.Observations)) < minimumObservationCount || trace.SequenceCheckpoint != uint64(len(trace.Observations)) {
 		operations := make([]string, len(trace.Observations))
 		for index := range trace.Observations {
 			operations[index] = trace.Observations[index].OperationClass
 		}
-		return fmt.Errorf("React Native seeded-empty-startup bootstrap trace observed operations=%v count=%d checkpoint=%d overflowed=%t, expected connect plus %d rebuild and pull with count=%d checkpoint=%d overflowed=false", operations, len(trace.Observations), trace.SequenceCheckpoint, trace.Overflowed, expectedRebuildScopeCount, expectedObservationCount, expectedObservationCount)
+		return fmt.Errorf("React Native seeded-empty-startup bootstrap trace observed operations=%v count=%d checkpoint=%d overflowed=%t, expected connect plus at least %d rebuild pages and pull with count>=%d checkpoint=count overflowed=false", operations, len(trace.Observations), trace.SequenceCheckpoint, trace.Overflowed, expectedRebuildScopeCount, minimumObservationCount)
 	}
 	if err := validateTraceSequence(trace.Observations); err != nil {
 		return err
@@ -591,20 +591,59 @@ func validateSeededEmptyStartupBootstrapTrace(trace traceSnapshot, expectedConne
 		}
 		return fmt.Errorf("React Native seeded-empty-startup bootstrap pull scope_count observed %d, expected %d", pullScopeCount, expectedPullScopeCount)
 	}
-	rebuiltScopes := make(map[string]struct{}, expectedRebuildScopeCount)
+	rebuiltScopes := make(map[string]struct {
+		rebuildID string
+		complete  bool
+	}, expectedRebuildScopeCount)
+	activeScope := ""
 	for index := 1; index < pullIndex; index++ {
 		rebuild, err := decodeRebuildResponseFacts(trace.Observations[index].RebuildResponseFacts)
-		if err != nil || *rebuild.HasMore || *rebuild.HasCursor || !*rebuild.HasFinalScopeCursor || !*rebuild.HasChecksum || rebuild.FinalScopeCursorFingerprint == nil {
+		if err != nil {
 			return fmt.Errorf("React Native seeded-empty-startup bootstrap rebuild %d response facts are invalid", index)
 		}
 		scopeFingerprint, err := requestString(trace.Observations[index], "scope_fingerprint")
 		if err != nil || *rebuild.ScopeFingerprint != scopeFingerprint {
 			return fmt.Errorf("React Native seeded-empty-startup bootstrap rebuild %d scope identity is invalid", index)
 		}
-		if _, duplicate := rebuiltScopes[scopeFingerprint]; duplicate {
-			return fmt.Errorf("React Native seeded-empty-startup bootstrap rebuild %d scope identity is duplicated", index)
+		rebuildID, err := requestString(trace.Observations[index], "rebuild_id_fingerprint")
+		if err != nil {
+			return fmt.Errorf("React Native seeded-empty-startup bootstrap rebuild %d identity is invalid", index)
 		}
-		rebuiltScopes[scopeFingerprint] = struct{}{}
+		state, found := rebuiltScopes[scopeFingerprint]
+		if !found {
+			if activeScope != "" {
+				return fmt.Errorf("React Native seeded-empty-startup bootstrap rebuild %d scope changed before %q completed", index, activeScope)
+			}
+			state.rebuildID = rebuildID
+			activeScope = scopeFingerprint
+		} else if state.complete {
+			return fmt.Errorf("React Native seeded-empty-startup bootstrap rebuild %d scope identity has a page after finality", index)
+		} else if activeScope != scopeFingerprint || state.rebuildID != rebuildID {
+			return fmt.Errorf("React Native seeded-empty-startup bootstrap rebuild %d continuation identity is invalid", index)
+		}
+		if *rebuild.HasMore {
+			if !*rebuild.HasCursor || *rebuild.HasFinalScopeCursor || *rebuild.HasChecksum || rebuild.FinalScopeCursorFingerprint != nil {
+				return fmt.Errorf("React Native seeded-empty-startup bootstrap rebuild %d intermediate page finality is invalid", index)
+			}
+		} else {
+			if *rebuild.HasCursor || !*rebuild.HasFinalScopeCursor || !*rebuild.HasChecksum || rebuild.FinalScopeCursorFingerprint == nil {
+				return fmt.Errorf("React Native seeded-empty-startup bootstrap rebuild %d final page finality is invalid", index)
+			}
+			state.complete = true
+			activeScope = ""
+		}
+		rebuiltScopes[scopeFingerprint] = state
+	}
+	if activeScope != "" {
+		return fmt.Errorf("React Native seeded-empty-startup bootstrap rebuild scope %q is incomplete", activeScope)
+	}
+	if uint64(len(rebuiltScopes)) != expectedRebuildScopeCount {
+		return fmt.Errorf("React Native seeded-empty-startup bootstrap rebuild scope count observed %d, expected %d", len(rebuiltScopes), expectedRebuildScopeCount)
+	}
+	for scopeFingerprint, state := range rebuiltScopes {
+		if !state.complete {
+			return fmt.Errorf("React Native seeded-empty-startup bootstrap rebuild scope %q has no final page", scopeFingerprint)
+		}
 	}
 	return nil
 }

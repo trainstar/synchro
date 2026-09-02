@@ -61,14 +61,51 @@ func TestNewRebuildApplyCoordinatorKeepsAndroidSidecarOnHostLoopback(t *testing.
 	if !strings.HasPrefix(coordinator.adapter, "http://10.0.2.2:") {
 		t.Fatalf("Android rebuild-apply adapter URL = %q", coordinator.adapter)
 	}
-	want := 1
-	for range coordinator.config.Scenario.Steps {
-		for stage := rebuildApplyStageOpen; stage < rebuildApplyStageComplete; stage++ {
-			want++
+}
+
+func TestRebuildApplyAuthoredFlowServesExactlyExchangeCount(t *testing.T) {
+	scenario := loadRebuildApplyAuthoredScenario(t)
+	coordinator := &RebuildApplyCoordinator{
+		config: RebuildApplyCoordinatorConfig{Scenario: scenario},
+		steps:  scenario.Steps,
+	}
+
+	type exchange struct {
+		actor   string
+		command string
+		client  string
+		state   string
+	}
+	want := make([]exchange, 0, len(scenario.Steps)*3+1)
+	for _, step := range scenario.Steps {
+		client := step.NativeBinding.ClientID
+		want = append(want,
+			exchange{actor: "client", command: "open", client: client, state: "command"},
+			exchange{actor: "client", command: "synchronize-step", client: client, state: "command"},
+			exchange{actor: "observer", command: "capture", client: client, state: "command"},
+		)
+	}
+	want = append(want, exchange{state: "complete"})
+
+	if got := len(want); got != coordinator.ExchangeCount() {
+		t.Fatalf("authored rebuild-apply exchanges = %d, want ExchangeCount=%d", got, coordinator.ExchangeCount())
+	}
+	if got, wantCount := coordinator.ExchangeCount(), 28; got != wantCount {
+		t.Fatalf("authored rebuild-apply ExchangeCount = %d, want %d", got, wantCount)
+	}
+	for index, expected := range want[:len(want)-1] {
+		step := scenario.Steps[index/3]
+		clientKey := "rebuild-apply-" + expected.client
+		response := coordinator.command(clientKey, expected.client, expected.actor, expected.command, map[string]any{}, nil)
+		if response.Action.Action.Actor != expected.actor || response.Action.Action.Command != expected.command || response.Runtime.ClientID != expected.client {
+			t.Fatalf("authored rebuild-apply exchange %d = %s/%s client=%s, want %s/%s client=%s", index+1, response.Action.Action.Actor, response.Action.Action.Command, response.Runtime.ClientID, expected.actor, expected.command, expected.client)
+		}
+		if response.Runtime.ClientKey != clientKey || step.NativeBinding.ClientID != expected.client {
+			t.Fatalf("authored rebuild-apply exchange %d client binding = %q, want %q", index+1, response.Runtime.ClientKey, clientKey)
 		}
 	}
-	if got := coordinator.ExchangeCount(); got != want {
-		t.Fatalf("rebuild-apply exchange count = %d, want %d", got, want)
+	if terminal := want[len(want)-1]; terminal.state != "complete" || terminal.actor != "" || terminal.command != "" || terminal.client != "" {
+		t.Fatalf("authored rebuild-apply terminal exchange = %#v", terminal)
 	}
 }
 

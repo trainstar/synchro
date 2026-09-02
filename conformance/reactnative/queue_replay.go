@@ -507,6 +507,8 @@ func (c *QueueReplayCoordinator) dropProxyResponse(writer http.ResponseWriter) {
 		writeExchangeError(writer, http.StatusBadGateway)
 		return
 	}
+	// A bare close lets the Android HTTP client repeat the request before it records the failure.
+	_, _ = connection.Write([]byte("SYNCHRO RESPONSE LOSS\r\n\r\n"))
 	_ = connection.Close()
 }
 
