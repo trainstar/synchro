@@ -477,6 +477,9 @@ export class PublicConformanceRunner {
       syncInterval: 3600,
       pushDebounce: 3600,
       seedDatabasePath: session.runtime.seed_database_path,
+      // The coordinator sends the authored pull page size when a scenario
+      // authors one. The client default matches the native runner openings.
+      ...(session.runtime.pull_page_size === undefined ? {} : { pullPageSize: session.runtime.pull_page_size }),
     });
     const inspection = new SynchroInspection(client, {
       transportObservationCapacity: 512,

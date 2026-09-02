@@ -108,6 +108,7 @@ type RebuildRequestsCoordinator struct {
 	tableName  string
 	primaryKey string
 	callID     string
+	pageLimit  uint64
 
 	mu            sync.Mutex
 	prepared      bool
@@ -120,6 +121,23 @@ type RebuildRequestsCoordinator struct {
 	sourceApplied bool
 	finalResult   *finalCapture
 	result        RebuildRequestsCoordinatorResult
+}
+
+
+// rebuildRequestsAuthoredPageLimit reads the page limit the authored rebuild
+// request declares, so the client requests the authored page shape.
+func rebuildRequestsAuthoredPageLimit(steps map[scenarios.StepID]scenarios.Step) (uint64, error) {
+	step, found := steps[rebuildRequestsStepOrder[5]]
+	if !found {
+		return 0, errors.New("React Native rebuild-requests authored request step is absent")
+	}
+	var payload struct {
+		Limit *uint64 `json:"limit"`
+	}
+	if err := json.Unmarshal(step.Operation.Payload, &payload); err != nil || payload.Limit == nil || *payload.Limit == 0 {
+		return 0, errors.New("React Native rebuild-requests authored page limit is invalid")
+	}
+	return *payload.Limit, nil
 }
 
 // LoadRebuildRequestsScenario loads the authored rebuild-requests contract.
@@ -291,12 +309,17 @@ func NewRebuildRequestsCoordinator(config RebuildRequestsCoordinatorConfig) (*Re
 	for _, step := range config.Scenario.Steps {
 		steps[step.ID] = step
 	}
+	pageLimit, err := rebuildRequestsAuthoredPageLimit(steps)
+	if err != nil {
+		_ = listener.Close()
+		return nil, err
+	}
 	coordinator := &RebuildRequestsCoordinator{
 		config: config, listener: listener, token: token, adapter: adapter, upstream: upstream,
 		database: database, transport: &http.Client{}, steps: steps,
 		identities: append([]scenarios.NativeIdentityAlias(nil), config.Scenario.NativeIdentityAliases...),
 		runtimeIDs: make(map[string]json.RawMessage), nextSeq: 1,
-		callID: string(*scenarioCallID(config.Scenario)),
+		callID: string(*scenarioCallID(config.Scenario)), pageLimit: pageLimit,
 	}
 	coordinator.server = &http.Server{
 		Handler: coordinator, MaxHeaderBytes: 16 * 1024, ReadHeaderTimeout: 5 * time.Second,
@@ -680,7 +703,7 @@ func (c *RebuildRequestsCoordinator) command(actor, name string, parameters map[
 	return &conformanceCommand{
 		SchemaVersion: 1,
 		Action:        conformanceManifest{Action: conformanceAction{Actor: actor, Command: name, Parameters: parameters}, Steps: steps},
-		Runtime:       conformanceRuntime{ClientKey: clientKey, Database: c.database, ClientID: clientID, ServerURL: c.adapter, AuthToken: c.config.AuthToken},
+		Runtime:       conformanceRuntime{ClientKey: clientKey, Database: c.database, ClientID: clientID, ServerURL: c.adapter, AuthToken: c.config.AuthToken, PullPageSize: c.pageLimit},
 	}
 }
 

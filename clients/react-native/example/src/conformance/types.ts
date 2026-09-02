@@ -51,6 +51,7 @@ export interface ConformanceRuntime {
   seed_database_path?: string;
   server_url?: string;
   auth_token?: string;
+  pull_page_size?: number;
 }
 
 export interface ConformanceCommand {
@@ -192,12 +193,20 @@ function decodeRuntime(value: unknown): ConformanceRuntime {
   exactKeys(
     record,
     ['client_key', 'database_path', 'client_id'],
-    ['seed_database_path', 'server_url', 'auth_token'],
+    ['seed_database_path', 'server_url', 'auth_token', 'pull_page_size'],
     'runtime'
   );
   const seedDatabasePath = optionalString(record.seed_database_path, 'runtime.seed_database_path');
   const serverURL = optionalString(record.server_url, 'runtime.server_url');
   const authToken = optionalString(record.auth_token, 'runtime.auth_token', 16384);
+  const pullPageSizeRaw = record.pull_page_size;
+  let pullPageSize: number | undefined;
+  if (pullPageSizeRaw !== undefined) {
+    if (typeof pullPageSizeRaw !== 'number' || !Number.isSafeInteger(pullPageSizeRaw) || pullPageSizeRaw < 1 || pullPageSizeRaw > 1000) {
+      throw new Error('runtime.pull_page_size is invalid');
+    }
+    pullPageSize = pullPageSizeRaw;
+  }
   return {
     client_key: requiredString(record.client_key, 'runtime.client_key', 128),
     database_path: requiredString(record.database_path, 'runtime.database_path'),
@@ -205,6 +214,7 @@ function decodeRuntime(value: unknown): ConformanceRuntime {
     ...(seedDatabasePath === undefined ? {} : { seed_database_path: seedDatabasePath }),
     ...(serverURL === undefined ? {} : { server_url: serverURL }),
     ...(authToken === undefined ? {} : { auth_token: authToken }),
+    ...(pullPageSize === undefined ? {} : { pull_page_size: pullPageSize }),
   };
 }
 

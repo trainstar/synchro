@@ -143,6 +143,9 @@ type conformanceRuntime struct {
 	ClientID  string `json:"client_id"`
 	ServerURL string `json:"server_url"`
 	AuthToken string `json:"auth_token"`
+	// The authored pull page size, when a scenario authors one. The client
+	// default applies when absent, which matches the native runner openings.
+	PullPageSize uint64 `json:"pull_page_size,omitempty"`
 }
 
 type resultEnvelope struct {
