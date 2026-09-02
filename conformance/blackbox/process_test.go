@@ -279,6 +279,31 @@ func TestValidateSourceDMLUsesClosedTableSet(t *testing.T) {
 	}
 }
 
+func TestDiagnosticSourceTableShapeRestoreScriptUsesAuthoredSourceContract(t *testing.T) {
+	restore := diagnosticSourceTableShapeRestoreSQL()
+	if !strings.Contains(restore, "SET LOCAL search_path TO "+diagnosticSourceRestoreSchemaName+";") {
+		t.Fatal("source shape restore does not create an isolated authored reference schema")
+	}
+	if !strings.Contains(restore, diagnosticSchemaSQL) {
+		t.Fatal("source shape restore does not use the authored diagnostic source contract")
+	}
+	for _, table := range diagnosticSourceTables {
+		if !strings.Contains(restore, quotePostgresLiteral(table)) {
+			t.Fatalf("source shape restore omits diagnostic source table %q", table)
+		}
+	}
+	for _, statement := range []string{
+		"ALTER TABLE public.%I ADD COLUMN %I %s",
+		"ALTER TABLE public.%I ALTER COLUMN %I TYPE %s USING %I::%s",
+		"ALTER TABLE public.%I ALTER COLUMN %I SET DEFAULT %s",
+		"ALTER TABLE public.%I DROP COLUMN %I",
+	} {
+		if !strings.Contains(restore, statement) {
+			t.Fatalf("source shape restore does not restore authored columns with %q", statement)
+		}
+	}
+}
+
 func TestSourceMutationErrorPreservesOnlySQLState(t *testing.T) {
 	errorWithState := sourceMutationError("source mutation failed", &pgconn.PgError{
 		Code:    "42725",

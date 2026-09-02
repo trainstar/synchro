@@ -365,12 +365,11 @@ func resetKotlinPerformanceServer(t *testing.T, ctx context.Context, harness *bl
 		}
 		if phase == 0 {
 			minimumGeneration = ready.ActiveRegistryGeneration
-			// A scenario transitions the shared schema-queue field with a data
-			// definition change. The reinstall has cleared every registry
-			// generation, so this is the only point where restoring the
-			// authored column shape invalidates no registration.
-			if err := harness.Operator().RestoreSchemaQueueFixture(ctx); err != nil {
-				t.Fatalf("restore Kotlin Android performance schema-queue fixture: %v", err)
+			// A scenario can transition any diagnostic source-table column. The
+			// reinstall has cleared every registry generation, so this is the only
+			// point where restoring authored column shapes invalidates no registration.
+			if err := harness.Operator().RestoreDiagnosticSourceTableShapes(ctx); err != nil {
+				t.Fatalf("restore Kotlin Android performance source table shapes: %v", err)
 			}
 			if err := harness.RestoreDiagnosticRegistrations(ctx); err != nil {
 				t.Fatalf("restore Kotlin Android performance source registrations: %v", err)

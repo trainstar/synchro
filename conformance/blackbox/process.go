@@ -34,16 +34,17 @@ const (
 	// Fast shutdown includes a final checkpoint. Accumulated filesystem
 	// writeback across many serial provisions makes a tight bound flake,
 	// so the bound stays generous while still catching a real hang.
-	defaultShutdownTimeout                 = 30 * time.Second
-	defaultProcessLogBytes                 = 1 << 20
-	maximumProcessLogBytes                 = 4 << 20
-	processPollInterval                    = 50 * time.Millisecond
-	maxWorkerHeartbeatAge                  = 30
-	maxWALLagBytes                         = 64 * 1024 * 1024
-	maxWALLagSeconds                       = 30
-	streamResetOperatorLockKey       int64 = 0x7273_746f
-	streamResetOperationKind               = "stream_reset"
-	projectionBootstrapOperationKind       = "projection_bootstrap"
+	defaultShutdownTimeout                  = 30 * time.Second
+	defaultProcessLogBytes                  = 1 << 20
+	maximumProcessLogBytes                  = 4 << 20
+	processPollInterval                     = 50 * time.Millisecond
+	maxWorkerHeartbeatAge                   = 30
+	maxWALLagBytes                          = 64 * 1024 * 1024
+	maxWALLagSeconds                        = 30
+	streamResetOperatorLockKey        int64 = 0x7273_746f
+	streamResetOperationKind                = "stream_reset"
+	projectionBootstrapOperationKind        = "projection_bootstrap"
+	diagnosticSourceRestoreSchemaName       = "synchro_conformance_restore"
 )
 
 //go:embed testdata/schema.sql
@@ -2735,6 +2736,139 @@ func (executor *OperatorExecutor) DropHydrationColumn(ctx context.Context) error
 // RestoreHydrationColumn restores the fixed diagnostic column.
 func (executor *OperatorExecutor) RestoreHydrationColumn(ctx context.Context) error {
 	return executor.exec(ctx, "ALTER TABLE public.cf_schema_queue ADD COLUMN legacy_value TEXT NOT NULL DEFAULT 'restored'")
+}
+
+// RestoreDiagnosticSourceTableShapes returns every diagnostic source table to
+// the column shape schema.sql declares. It builds an isolated reference schema
+// from the authored contract, so it never derives an expected shape from a
+// transitioned source table.
+//
+// Call this only where no registry generation exists. A generation records the
+// column set it was registered against, and changing a live table shape makes
+// the WAL consumer reject the registration.
+func (executor *OperatorExecutor) RestoreDiagnosticSourceTableShapes(ctx context.Context) error {
+	if executor == nil || executor.harness == nil || !executor.harness.sourceReady || ctx == nil {
+		return errors.New("operator executor is unavailable")
+	}
+	if err := executor.harness.executeSourceScript(ctx, "restore-diagnostic-source-table-shapes.sql", diagnosticSourceTableShapeRestoreSQL()); err != nil {
+		return fmt.Errorf("restore diagnostic source table shapes failed: %w", err)
+	}
+	return nil
+}
+
+func diagnosticSourceTableShapeRestoreSQL() string {
+	tables := make([]string, 0, len(diagnosticSourceTables))
+	for _, table := range diagnosticSourceTables {
+		tables = append(tables, quotePostgresLiteral(table))
+	}
+	return "BEGIN;\nCREATE SCHEMA " + diagnosticSourceRestoreSchemaName + ";\nSET LOCAL search_path TO " + diagnosticSourceRestoreSchemaName + ";\n" + diagnosticSchemaSQL + `
+DO $restore$
+DECLARE
+	source_table text;
+	source_relation pg_catalog.regclass;
+	authored_relation pg_catalog.regclass;
+	authored_column record;
+	obsolete_column record;
+BEGIN
+	FOR source_table IN
+		SELECT table_name
+		FROM pg_catalog.unnest(ARRAY[` + strings.Join(tables, ", ") + `]::text[]) AS tables(table_name)
+	LOOP
+		source_relation := pg_catalog.format('public.%I', source_table)::pg_catalog.regclass;
+		authored_relation := pg_catalog.format('` + diagnosticSourceRestoreSchemaName + `.%I', source_table)::pg_catalog.regclass;
+		FOR authored_column IN
+			SELECT expected.attname,
+			       expected.atttypid,
+			       expected.atttypmod,
+			       pg_catalog.format_type(expected.atttypid, expected.atttypmod) AS type_name,
+			       expected.attnotnull,
+			       pg_catalog.pg_get_expr(default_value.adbin, default_value.adrelid) AS default_expression
+			FROM pg_catalog.pg_attribute AS expected
+			LEFT JOIN pg_catalog.pg_attrdef AS default_value
+			  ON default_value.adrelid = expected.attrelid
+			 AND default_value.adnum = expected.attnum
+			WHERE expected.attrelid = authored_relation
+			  AND expected.attnum > 0
+			  AND NOT expected.attisdropped
+			ORDER BY expected.attnum
+		LOOP
+			IF NOT EXISTS (
+				SELECT 1
+				FROM pg_catalog.pg_attribute AS actual
+				WHERE actual.attrelid = source_relation
+				  AND actual.attname = authored_column.attname
+				  AND actual.attnum > 0
+				  AND NOT actual.attisdropped
+			) THEN
+				EXECUTE pg_catalog.format(
+					'ALTER TABLE public.%I ADD COLUMN %I %s',
+					source_table, authored_column.attname, authored_column.type_name
+				);
+			ELSIF EXISTS (
+				SELECT 1
+				FROM pg_catalog.pg_attribute AS actual
+				WHERE actual.attrelid = source_relation
+				  AND actual.attname = authored_column.attname
+				  AND actual.attnum > 0
+				  AND NOT actual.attisdropped
+				  AND (actual.atttypid <> authored_column.atttypid OR actual.atttypmod <> authored_column.atttypmod)
+			) THEN
+				EXECUTE pg_catalog.format(
+					'ALTER TABLE public.%I ALTER COLUMN %I TYPE %s USING %I::%s',
+					source_table, authored_column.attname, authored_column.type_name,
+					authored_column.attname, authored_column.type_name
+				);
+			END IF;
+
+			IF authored_column.default_expression IS NULL THEN
+				EXECUTE pg_catalog.format(
+					'ALTER TABLE public.%I ALTER COLUMN %I DROP DEFAULT',
+					source_table, authored_column.attname
+				);
+			ELSE
+				EXECUTE pg_catalog.format(
+					'ALTER TABLE public.%I ALTER COLUMN %I SET DEFAULT %s',
+					source_table, authored_column.attname, authored_column.default_expression
+				);
+			END IF;
+
+			IF authored_column.attnotnull THEN
+				EXECUTE pg_catalog.format(
+					'ALTER TABLE public.%I ALTER COLUMN %I SET NOT NULL',
+					source_table, authored_column.attname
+				);
+			ELSE
+				EXECUTE pg_catalog.format(
+					'ALTER TABLE public.%I ALTER COLUMN %I DROP NOT NULL',
+					source_table, authored_column.attname
+				);
+			END IF;
+		END LOOP;
+
+		FOR obsolete_column IN
+			SELECT actual.attname
+			FROM pg_catalog.pg_attribute AS actual
+			WHERE actual.attrelid = source_relation
+			  AND actual.attnum > 0
+			  AND NOT actual.attisdropped
+			  AND NOT EXISTS (
+				SELECT 1
+				FROM pg_catalog.pg_attribute AS expected
+				WHERE expected.attrelid = authored_relation
+				  AND expected.attname = actual.attname
+				  AND expected.attnum > 0
+				  AND NOT expected.attisdropped
+			)
+		LOOP
+			EXECUTE pg_catalog.format(
+				'ALTER TABLE public.%I DROP COLUMN %I', source_table, obsolete_column.attname
+			);
+		END LOOP;
+	END LOOP;
+END
+$restore$;
+DROP SCHEMA ` + diagnosticSourceRestoreSchemaName + ` CASCADE;
+COMMIT;`
 }
 
 // RestoreSchemaQueueFixture returns the schema-queue fixture to the column
