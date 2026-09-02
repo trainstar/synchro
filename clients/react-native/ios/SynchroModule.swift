@@ -1476,6 +1476,23 @@ public class SynchroModuleImpl: NSObject {
     }
 
     @objc
+    public func inspectRetainedMutations(
+        _ resolve: @escaping RCTPromiseResolveBlock,
+        reject: @escaping RCTPromiseRejectBlock
+    ) {
+        guard let client = client else {
+            reject("NOT_CONNECTED", "Client not initialized", nil)
+            return
+        }
+        do {
+            let payload = try client.inspectRetainedMutations().map(pendingMutationPayload)
+            resolve(try encodeBridgeJSON(payload))
+        } catch {
+            rejectWithError(reject, error)
+        }
+    }
+
+    @objc
     public func inspectRejectedMutations(
         _ resolve: @escaping RCTPromiseResolveBlock,
         reject: @escaping RCTPromiseRejectBlock

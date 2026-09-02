@@ -1015,6 +1015,17 @@ export class SynchroClient {
     }
   }
 
+  async inspectRetainedMutations(): Promise<PendingMutationInspection[]> {
+    try {
+      return parseNativeArray(
+        await this.native.inspectRetainedMutations(),
+        'retained mutation inspection'
+      ).map(parsePendingMutationInspection);
+    } catch (error) {
+      throw mapNativeError(error);
+    }
+  }
+
   async inspectRejectedMutations(): Promise<RejectedMutationInspection[]> {
     try {
       return parseNativeArray(

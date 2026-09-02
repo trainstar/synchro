@@ -517,6 +517,39 @@ describe('SynchroClient', () => {
       expect(mockNativeModule.inspectPendingMutations).toHaveBeenCalledTimes(1);
     });
 
+    it('maps retained mutation inspection JSON with a server rejection', async () => {
+      const retained = {
+        mutationID: 'mutation-2',
+        localOrder: 8,
+        tableID: 'table-1',
+        tableName: 'items',
+        recordID: 'record-2',
+        primaryKeyFieldID: 'field-id',
+        primaryKeyLogicalType: 'uuid',
+        operation: 'update',
+        authoredSchema: { version: 3, hash: 'b'.repeat(64) },
+        baseVersion: 'server-v1',
+        clientVersion: 'client-v2',
+        status: 'server_rejected',
+        sourceKind: 'local_write',
+        dependsOnMutationID: null,
+        normalizedMutationID: null,
+        sealedBatchID: 'batch-1',
+        sealedOrdinal: 2,
+        authoredFields: [
+          { fieldID: 'field-name', logicalType: 'string', value: 'rejected' },
+        ],
+      };
+      mockNativeModule.inspectRetainedMutations.mockResolvedValueOnce(
+        JSON.stringify([retained])
+      );
+
+      await expect(makeClient().inspectRetainedMutations()).resolves.toEqual([
+        retained,
+      ]);
+      expect(mockNativeModule.inspectRetainedMutations).toHaveBeenCalledTimes(1);
+    });
+
     it('maps rejected mutation inspection JSON without parsing retained JSON', async () => {
       const mutationJSON = '{ "operation": "update", "value": 1 }';
       const rejectionJSON = '{ "code": "version_conflict" }';
@@ -724,6 +757,7 @@ describe('SynchroClient', () => {
     it.each([
       ['getSyncStatus', () => makeClient().getSyncStatus()],
       ['inspectPendingMutations', () => makeClient().inspectPendingMutations()],
+      ['inspectRetainedMutations', () => makeClient().inspectRetainedMutations()],
       ['inspectRejectedMutations', () => makeClient().inspectRejectedMutations()],
     ])('rejects malformed JSON from %s', async (method, invoke) => {
       mockNativeModule[method].mockResolvedValueOnce('{invalid');
@@ -748,6 +782,7 @@ describe('SynchroClient', () => {
 
     it.each([
       ['inspectPendingMutations', () => makeClient().inspectPendingMutations()],
+      ['inspectRetainedMutations', () => makeClient().inspectRetainedMutations()],
       ['inspectRejectedMutations', () => makeClient().inspectRejectedMutations()],
     ])('rejects structurally invalid JSON from %s', async (method, invoke) => {
       mockNativeModule[method].mockResolvedValueOnce('{}');

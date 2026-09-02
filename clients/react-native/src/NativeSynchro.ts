@@ -143,6 +143,7 @@ export interface Spec extends TurboModule {
   pendingChangeCount(): Promise<number>;
   getSyncStatus(): Promise<string>;
   inspectPendingMutations(): Promise<string>;
+  inspectRetainedMutations(): Promise<string>;
   inspectRejectedMutations(): Promise<string>;
   inspectClientState(): Promise<string>;
   inspectDurableState(tableName: string, recordID: string): Promise<string>;

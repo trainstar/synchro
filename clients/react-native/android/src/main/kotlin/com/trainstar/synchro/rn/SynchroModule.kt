@@ -929,6 +929,19 @@ class SynchroModule(reactContext: ReactApplicationContext) :
     }
 
     @ReactMethod
+    override fun inspectRetainedMutations(promise: Promise) {
+        val c = client ?: run {
+            promise.reject("NOT_CONNECTED", "Client not initialized")
+            return
+        }
+        try {
+            promise.resolve(JSONArray(c.inspectRetainedMutations().map(::pendingMutationJson)).toString())
+        } catch (e: Exception) {
+            rejectWithError(promise, e)
+        }
+    }
+
+    @ReactMethod
     override fun inspectRejectedMutations(promise: Promise) {
         val c = client ?: run {
             promise.reject("NOT_CONNECTED", "Client not initialized")

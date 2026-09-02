@@ -409,7 +409,10 @@ export class PublicConformanceRunner {
           capture.application_rows = await captureRows(client, decodeSelectors(parameters.row_selectors));
           break;
         case 'pending-mutations':
-          capture.pending_mutations = bounded(await client.inspectPendingMutations());
+          // The native runners capture the complete retained ledger for this
+          // source, pending states plus rejected_terminal. The pending-only
+          // inspection excludes rejected_terminal by design.
+          capture.pending_mutations = bounded(await client.inspectRetainedMutations());
           break;
         case 'rejected-mutations':
           capture.rejected_mutations = bounded(await client.inspectRejectedMutations());
