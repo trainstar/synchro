@@ -127,7 +127,7 @@ async function executeCommand(command: Record<string, unknown>): Promise<string>
       const raw = typeof result.text === 'string' ? result.text : '';
       const envelope = parseConformanceEnvelope(raw);
       if (envelope.outcome === 'error') {
-        throw new Error(`React Native conformance command failed: ${envelope.error_code}`);
+        throw new Error(`React Native conformance command failed: ${envelope.error_code}${envelope.error_detail === null ? '' : `: ${envelope.error_detail}`}`);
       }
       return raw;
     }
