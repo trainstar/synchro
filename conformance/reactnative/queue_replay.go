@@ -118,20 +118,20 @@ type QueueReplayCoordinator struct {
 	clientID   string
 	clientKey  string
 
-	mu          sync.Mutex
-	proxyMu     sync.Mutex
-	prepared    bool
-	closed      bool
-	completed   bool
-	failed      error
-	stage       queueReplayStage
-	nextSeq     uint64
-	process     *actionProcessIdentity
-	stepIndex   int
-	localIndex  int
-	finalResult *finalCapture
-	result      QueueReplayCoordinatorResult
-	dropNextPushResponse bool
+	mu           sync.Mutex
+	proxyMu      sync.Mutex
+	prepared     bool
+	closed       bool
+	completed    bool
+	failed       error
+	stage        queueReplayStage
+	nextSeq      uint64
+	process      *actionProcessIdentity
+	stepIndex    int
+	localIndex   int
+	finalResult  *finalCapture
+	result       QueueReplayCoordinatorResult
+	responseLoss *queueReplayResponseLoss
 }
 
 // QueueReplayCoordinatorResult contains validated server and native identity evidence.
@@ -149,6 +149,7 @@ const (
 	queueReplayStageLocalWrite
 	queueReplayStageStoppedBeforeSchema
 	queueReplayStageSchemaBoundary
+	queueReplayStageResponseLossBegun
 	queueReplayStageResponseLoss
 	queueReplayStageStoppedAfterLoss
 	queueReplayStageReplay
@@ -161,6 +162,15 @@ type queueReplayWorkload struct {
 	local    []scenarios.Operation
 	publish  scenarios.Operation
 	dropPush scenarios.Operation
+}
+
+type queueReplayResponseLoss struct {
+	committed     chan struct{}
+	release       chan struct{}
+	committedOnce sync.Once
+	releaseOnce   sync.Once
+	claimed       bool
+	err           error
 }
 
 // NewQueueReplayCoordinator creates an authenticated host-loopback listener.
@@ -313,7 +323,7 @@ func (c *QueueReplayCoordinator) StageCount() int {
 	defer c.mu.Unlock()
 	count := 4 // open, bootstrap, final capture, complete response
 	for _, workload := range c.steps {
-		count += len(workload.local) + 5 // writes, stop, schema check, loss, replay stop, replay
+		count += len(workload.local) + 6 // writes, stop, schema check, begin loss, await loss, replay stop, replay
 	}
 	return count
 }
@@ -356,6 +366,7 @@ func (c *QueueReplayCoordinator) Close(ctx context.Context) error {
 	}
 	c.closed = true
 	c.mu.Unlock()
+	_ = c.releaseResponseLossPush()
 	shutdownErr := c.server.Shutdown(ctx)
 	listenErr := c.listener.Close()
 	if shutdownErr != nil {
@@ -423,9 +434,18 @@ func (c *QueueReplayCoordinator) ServeHTTP(writer http.ResponseWriter, request *
 		writeExchangeError(writer, http.StatusInternalServerError)
 		return
 	}
+	releaseResponseLoss := response.Command != nil && response.Command.Action.Action.Actor == "client" &&
+		response.Command.Action.Action.Command == "await-call" && c.stage == queueReplayStageResponseLoss
 	writer.Header().Set("Content-Type", "application/json")
 	writer.WriteHeader(http.StatusOK)
 	_, _ = writer.Write(encoded)
+	if releaseResponseLoss {
+		// Flush the await-call command before the malformed response starts its retry deadline.
+		if flusher, ok := writer.(http.Flusher); ok {
+			flusher.Flush()
+		}
+		_ = c.releaseResponseLossPush()
+	}
 }
 
 func (c *QueueReplayCoordinator) proxyAdapter(writer http.ResponseWriter, request *http.Request) {
@@ -463,9 +483,25 @@ func (c *QueueReplayCoordinator) proxyAdapter(writer http.ResponseWriter, reques
 		writeExchangeError(writer, http.StatusBadGateway)
 		return
 	}
-	if request.Method == http.MethodPost && request.URL.Path == "/sync/push" && response.StatusCode == http.StatusOK && c.claimResponseLossPush() {
-		c.dropProxyResponse(writer)
-		return
+	if request.Method == http.MethodPost && request.URL.Path == "/sync/push" {
+		if fault := c.claimResponseLossPush(); fault != nil {
+			if response.StatusCode != http.StatusOK {
+				c.recordResponseLossProxyFailure(fault, fmt.Errorf("React Native queue-replay response-loss push status = %d", response.StatusCode))
+				writeExchangeError(writer, http.StatusBadGateway)
+				return
+			}
+			fault.committedOnce.Do(func() { close(fault.committed) })
+			select {
+			case <-request.Context().Done():
+				c.recordResponseLossProxyFailure(fault, request.Context().Err())
+				return
+			case <-fault.release:
+			}
+			if err := c.dropProxyResponse(writer); err != nil {
+				c.recordResponseLossProxyFailure(fault, err)
+			}
+			return
+		}
 	}
 	for name, values := range response.Header {
 		if strings.EqualFold(name, "Content-Length") || strings.EqualFold(name, "Transfer-Encoding") {
@@ -481,35 +517,82 @@ func (c *QueueReplayCoordinator) proxyAdapter(writer http.ResponseWriter, reques
 }
 
 func (c *QueueReplayCoordinator) armResponseLossPush() {
+	fault := &queueReplayResponseLoss{committed: make(chan struct{}), release: make(chan struct{})}
 	c.proxyMu.Lock()
-	c.dropNextPushResponse = true
+	c.responseLoss = fault
 	c.proxyMu.Unlock()
 }
 
-func (c *QueueReplayCoordinator) claimResponseLossPush() bool {
+func (c *QueueReplayCoordinator) claimResponseLossPush() *queueReplayResponseLoss {
 	c.proxyMu.Lock()
 	defer c.proxyMu.Unlock()
-	if !c.dropNextPushResponse {
-		return false
+	fault := c.responseLoss
+	if fault == nil || fault.claimed {
+		return nil
 	}
-	c.dropNextPushResponse = false
-	return true
+	fault.claimed = true
+	return fault
 }
 
-func (c *QueueReplayCoordinator) dropProxyResponse(writer http.ResponseWriter) {
+func (c *QueueReplayCoordinator) recordResponseLossProxyFailure(fault *queueReplayResponseLoss, err error) {
+	if fault == nil || err == nil {
+		return
+	}
+	c.proxyMu.Lock()
+	if fault.err == nil {
+		fault.err = err
+	}
+	c.proxyMu.Unlock()
+	fault.committedOnce.Do(func() { close(fault.committed) })
+	fault.releaseOnce.Do(func() { close(fault.release) })
+}
+
+func (c *QueueReplayCoordinator) waitForResponseLossPush(ctx context.Context) error {
+	c.proxyMu.Lock()
+	fault := c.responseLoss
+	c.proxyMu.Unlock()
+	if fault == nil {
+		return errors.New("React Native queue-replay response-loss fault is unavailable")
+	}
+	select {
+	case <-ctx.Done():
+		c.recordResponseLossProxyFailure(fault, ctx.Err())
+		return fmt.Errorf("wait for React Native queue-replay response-loss push: %w", ctx.Err())
+	case <-fault.committed:
+	}
+	c.proxyMu.Lock()
+	err := fault.err
+	c.proxyMu.Unlock()
+	if err != nil {
+		return fmt.Errorf("React Native queue-replay response-loss proxy failed: %w", err)
+	}
+	return nil
+}
+
+func (c *QueueReplayCoordinator) releaseResponseLossPush() error {
+	c.proxyMu.Lock()
+	fault := c.responseLoss
+	c.proxyMu.Unlock()
+	if fault == nil {
+		return errors.New("React Native queue-replay response-loss fault is unavailable")
+	}
+	fault.releaseOnce.Do(func() { close(fault.release) })
+	return nil
+}
+
+func (c *QueueReplayCoordinator) dropProxyResponse(writer http.ResponseWriter) error {
 	hijacker, ok := writer.(http.Hijacker)
 	if !ok {
-		writeExchangeError(writer, http.StatusBadGateway)
-		return
+		return errors.New("React Native queue-replay response writer cannot drop a response")
 	}
 	connection, _, err := hijacker.Hijack()
 	if err != nil {
-		writeExchangeError(writer, http.StatusBadGateway)
-		return
+		return err
 	}
+	defer connection.Close()
 	// A bare close lets the Android HTTP client repeat the request before it records the failure.
-	_, _ = connection.Write([]byte("SYNCHRO RESPONSE LOSS\r\n\r\n"))
-	_ = connection.Close()
+	_, err = connection.Write([]byte("SYNCHRO RESPONSE LOSS\r\n\r\n"))
+	return err
 }
 
 func (c *QueueReplayCoordinator) acceptResultLocked(raw json.RawMessage) error {
@@ -553,8 +636,12 @@ func (c *QueueReplayCoordinator) acceptResultLocked(raw json.RawMessage) error {
 		if err := c.validateSynchronized(envelope.Result, "error"); err != nil {
 			return err
 		}
+	case queueReplayStageResponseLossBegun:
+		if err := c.validateResponseLossCallBegun(envelope.Result); err != nil {
+			return err
+		}
 	case queueReplayStageResponseLoss:
-		if err := c.validateSynchronized(envelope.Result, "blocked"); err != nil {
+		if err := c.validateResponseLossCallCompleted(envelope.Result); err != nil {
 			return err
 		}
 	case queueReplayStageCapture:
@@ -615,15 +702,18 @@ func (c *QueueReplayCoordinator) advanceLocked(ctx context.Context, sequence uin
 		response.Command = c.command("client", "synchronize-step", map[string]any{"client_key": c.clientKey, "method": "start", "completion": "error"}, nil)
 		c.stage = queueReplayStageSchemaBoundary
 	case queueReplayStageSchemaBoundary:
-		committedPush, err := pushResponseLossAppliedOperation(c.steps[c.stepIndex].dropPush)
-		if err != nil {
-			return exchangeResponse{}, fmt.Errorf("prepare React Native queue-replay committed response-loss push: %w", err)
-		}
-		if err := c.config.Controller.BindApplicationPush(committedPush); err != nil {
-			return exchangeResponse{}, fmt.Errorf("bind React Native queue-replay response-loss push: %w", err)
-		}
 		c.armResponseLossPush()
-		response.Command = c.command("client", "synchronize-step", map[string]any{"client_key": c.clientKey, "method": "reset-schema-and-start", "completion": "blocked"}, nil)
+		response.Command = c.command("client", "begin-call", map[string]any{"client_key": c.clientKey, "call_id": c.responseLossCallID(), "method": "reset-schema-and-start"}, nil)
+		c.stage = queueReplayStageResponseLossBegun
+	case queueReplayStageResponseLossBegun:
+		if err := c.waitForResponseLossPush(ctx); err != nil {
+			return exchangeResponse{}, err
+		}
+		if err := c.bindResponseLossPush(); err != nil {
+			_ = c.releaseResponseLossPush()
+			return exchangeResponse{}, err
+		}
+		response.Command = c.command("client", "await-call", map[string]any{"client_key": c.clientKey, "call_id": c.responseLossCallID()}, nil)
 		c.stage = queueReplayStageResponseLoss
 	case queueReplayStageResponseLoss:
 		response.Command = c.command("client", "lifecycle", map[string]any{"client_key": c.clientKey, "operation": "stop"}, nil)
@@ -703,6 +793,54 @@ func (c *QueueReplayCoordinator) validateSynchronized(raw json.RawMessage, compl
 	return nil
 }
 
+func (c *QueueReplayCoordinator) validateResponseLossCallBegun(raw json.RawMessage) error {
+	if err := validateActionResult(raw, "call-begun"); err != nil {
+		return err
+	}
+	var members map[string]json.RawMessage
+	if err := decodeStrictMembers(raw, &members, 4, "queue-replay response-loss call-begun result"); err != nil {
+		return err
+	}
+	var callID, state string
+	if json.Unmarshal(members["call_id"], &callID) != nil || callID != c.responseLossCallID() ||
+		json.Unmarshal(members["state"], &state) != nil || state != "in_flight" {
+		return errors.New("React Native queue-replay response-loss call did not enter flight")
+	}
+	return c.validateProcess(members["process"])
+}
+
+func (c *QueueReplayCoordinator) validateResponseLossCallCompleted(raw json.RawMessage) error {
+	var members map[string]json.RawMessage
+	actionErr := validateActionResult(raw, "call-completed")
+	membersErr := decodeStrictMembers(raw, &members, 6, "queue-replay response-loss call-completed result")
+	if membersErr != nil {
+		return fmt.Errorf("React Native queue-replay response-loss call is invalid: members=%s want_count=6 raw=%s action_error=%v members_error=%v", queueReplayMemberNames(members), boundedRaw(raw), actionErr, membersErr)
+	}
+	var callID, state, completion string
+	callIDErr := json.Unmarshal(members["call_id"], &callID)
+	stateErr := json.Unmarshal(members["state"], &state)
+	completionErr := json.Unmarshal(members["completion"], &completion)
+	var status syncStatus
+	statusDecodeErr := json.Unmarshal(members["status"], &status)
+	statusErr := validateSyncStatusShape(members["status"])
+	actualProcess, processErr := decodeActionProcessIdentity(members["process"])
+	expectedProcess := actionProcessIdentity{}
+	if c.process != nil {
+		expectedProcess = *c.process
+	}
+	if actionErr != nil || callIDErr != nil || callID != c.responseLossCallID() || stateErr != nil || state != "completed" ||
+		completionErr != nil || completion != "blocked" || statusDecodeErr != nil || statusErr != nil || status.State != "backoff" ||
+		isJSONNull(status.RetryAt) || isJSONNull(status.Operation) || processErr != nil || c.process == nil || actualProcess != expectedProcess {
+		return fmt.Errorf(
+			"React Native queue-replay response-loss call is invalid: members=%s want_count=6, call_id=%q want=%q decode_error=%v, state=%q want=%q decode_error=%v, completion=%q want=%q decode_error=%v action_error=%v, status=%s state=%q want=%q retry_at=%s operation=%s status_decode_error=%v status_error=%v, process={process_id:%q database_identity_fingerprint:%q} want={process_id:%q database_identity_fingerprint:%q} process_error=%v",
+			queueReplayMemberNames(members), callID, c.responseLossCallID(), callIDErr, state, "completed", stateErr, completion, "blocked", completionErr, actionErr,
+			boundedRaw(members["status"]), status.State, "backoff", boundedRaw(status.RetryAt), boundedRaw(status.Operation), statusDecodeErr, statusErr,
+			actualProcess.ProcessID, actualProcess.DatabaseIdentityFingerprint, expectedProcess.ProcessID, expectedProcess.DatabaseIdentityFingerprint, processErr,
+		)
+	}
+	return nil
+}
+
 func queueReplayMemberNames(members map[string]json.RawMessage) string {
 	names := make([]string, 0, len(members))
 	for name := range members {
@@ -717,6 +855,24 @@ func (c *QueueReplayCoordinator) validateStopped(raw json.RawMessage) error {
 		return errors.New("React Native queue-replay process identity is unavailable")
 	}
 	return validateStoppedLifecycleResult(raw, *c.process)
+}
+
+func (c *QueueReplayCoordinator) bindResponseLossPush() error {
+	if c.stepIndex >= len(c.steps) || c.config.Controller == nil {
+		return errors.New("React Native queue-replay response-loss binding is unavailable")
+	}
+	committedPush, err := pushResponseLossAppliedOperation(c.steps[c.stepIndex].dropPush)
+	if err != nil {
+		return fmt.Errorf("prepare React Native queue-replay committed response-loss push: %w", err)
+	}
+	if err := c.config.Controller.BindApplicationPush(committedPush); err != nil {
+		return fmt.Errorf("bind React Native queue-replay response-loss push: %w", err)
+	}
+	return nil
+}
+
+func (c *QueueReplayCoordinator) responseLossCallID() string {
+	return fmt.Sprintf("queue-replay-response-loss-%d", c.stepIndex+1)
 }
 
 func (c *QueueReplayCoordinator) validateProcess(raw json.RawMessage) error {

@@ -229,11 +229,19 @@ func TestValidateFirstRebuildResponseRequiresIntermediatePage(t *testing.T) {
 	}
 }
 
-func TestValidateRebuildRequestsTransportNamesEveryIncrementalPullMember(t *testing.T) {
+func TestValidateRebuildRequestsTransportAcceptsAdvancedIncrementalPullCursor(t *testing.T) {
 	transport := traceSnapshot{Observations: rebuildRequestsTransportForTest(), SequenceCheckpoint: 4}
+	if err := validateRebuildRequestsTransport(loadRebuildRequestsAuthoredScenario(t), transport); err != nil {
+		t.Fatalf("incremental pull with an advanced response cursor was rejected: %v", err)
+	}
+}
+
+func TestValidateRebuildRequestsTransportRequiresOneIncrementalPullResponseCursor(t *testing.T) {
+	transport := traceSnapshot{Observations: rebuildRequestsTransportForTest(), SequenceCheckpoint: 4}
+	transport.Observations[3].PullResponseFacts = json.RawMessage(`{"change_count":1,"has_more":false,"rebuild_scope_count":0,"checksum_count":1,"scope_cursor_fingerprints":[],"scope_cursor_fingerprints_complete":true}`)
 	err := validateRebuildRequestsTransport(loadRebuildRequestsAuthoredScenario(t), transport)
 	if err == nil {
-		t.Fatal("incremental pull with a response cursor that differs from its request cursor was accepted")
+		t.Fatal("incremental pull without a response cursor was accepted")
 	}
 	for _, fact := range []string{
 		"first.client_generation=1",
@@ -253,7 +261,7 @@ func TestValidateRebuildRequestsTransportNamesEveryIncrementalPullMember(t *test
 		"pull_response.rebuild_scope_count=0",
 		"pull_response.checksum_count=1",
 		"pull_response.scope_cursor_fingerprints_complete=true",
-		"pull_response.scope_cursor_fingerprints=[bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb]",
+		"pull_response.scope_cursor_fingerprints=[]",
 	} {
 		if !strings.Contains(err.Error(), fact) {
 			t.Fatalf("incremental pull diagnostic = %q, want it to contain %q", err, fact)

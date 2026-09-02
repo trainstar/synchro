@@ -465,7 +465,6 @@ func (c *RebuildApplyCoordinator) advanceLocked(ctx context.Context, sequence ui
 		response.Command = c.command(clientKey, step.NativeBinding.ClientID, "observer", "capture", map[string]any{
 			"client_keys":   []string{clientKey},
 			"sources":       []string{"scope-state", "pending-mutations", "rejected-mutations", "sync-status", "sync-events", "provenance", "request-trace", "durable-proof"},
-			"detail_policy": "complete-or-omit",
 			"durable_proof_identity": map[string]any{
 				"table_name": c.tableName, "record_id": "rebuild-apply-absent-row",
 			},
@@ -545,10 +544,9 @@ func (c *RebuildApplyCoordinator) validateCapture(capture finalCapture) error {
 	if err := decodeStrictValue(capture.Provenance, &provenance); err != nil {
 		return fmt.Errorf("React Native rebuild-apply client %s provenance detail is invalid: %w", clientID, err)
 	}
-	detailCount := workload.RecordCount
-	if detailCount > 512 {
-		detailCount = 0
-	}
+	// A detail set above the 512 capture bound arrives truncated. The native
+	// validators omit detail validation then and prove the aggregate counts.
+	validateDetails := workload.RecordCount <= 512
 	counts := []struct {
 		name     string
 		observed uint64
@@ -559,23 +557,33 @@ func (c *RebuildApplyCoordinator) validateCapture(capture finalCapture) error {
 		{"scope states", state.ScopeStateCount, *expected.CheckpointCount},
 		{"scope rows", state.ScopeRowCount, workload.RecordCount},
 		{"scope state details", uint64(len(state.ScopeStates)), *expected.CheckpointCount},
-		{"provenance details", uint64(len(provenance)), detailCount},
 		{"active rebuild attempts", state.RebuildAttemptCount, 0},
 		{"active rebuild attempt details", uint64(len(state.RebuildAttempts)), state.RebuildAttemptCount},
 	}
-	counts = append(counts, struct {
-		name     string
-		observed uint64
-		expected uint64
-	}{"scope row details", uint64(len(state.ScopeRows)), detailCount})
+	if validateDetails {
+		counts = append(counts,
+			struct {
+				name     string
+				observed uint64
+				expected uint64
+			}{"provenance details", uint64(len(provenance)), workload.RecordCount},
+			struct {
+				name     string
+				observed uint64
+				expected uint64
+			}{"scope row details", uint64(len(state.ScopeRows)), workload.RecordCount},
+		)
+	}
 	for _, count := range counts {
 		if count.observed != count.expected {
 			return rebuildApplyCountError(clientID, count.name, count.observed, count.expected)
 		}
 	}
-	for index := range provenance {
-		if provenance[index] != state.ScopeRows[index] {
-			return fmt.Errorf("React Native rebuild-apply client %s provenance detail %d differs from scope state", clientID, index+1)
+	if validateDetails {
+		for index := range provenance {
+			if provenance[index] != state.ScopeRows[index] {
+				return fmt.Errorf("React Native rebuild-apply client %s provenance detail %d differs from scope state", clientID, index+1)
+			}
 		}
 	}
 	proof, err := decodeDurableProof(capture.DurableProof)

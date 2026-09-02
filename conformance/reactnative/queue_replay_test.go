@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/trainstar/synchro/conformance/scenarios"
 )
@@ -141,34 +142,57 @@ func TestQueueReplayProxyDropsCommittedPushAndForwardsReplay(t *testing.T) {
 	defer upstream.Close()
 
 	coordinator := &QueueReplayCoordinator{upstream: upstream.URL}
-	coordinator.armResponseLossPush()
 	proxy := httptest.NewServer(coordinator)
 	defer proxy.Close()
+	coordinator.armResponseLossPush()
+	defer func() { _ = coordinator.releaseResponseLossPush() }()
 
 	requestBody := `{"client_id":"client-a","batch_id":"batch-a"}`
 	request, err := http.NewRequest(http.MethodPost, proxy.URL+"/sync/push", strings.NewReader(requestBody))
 	if err != nil {
 		t.Fatalf("create initial proxy request: %v", err)
 	}
-	response, err := proxy.Client().Do(request)
-	if response != nil {
-		_ = response.Body.Close()
-	}
-	if err == nil {
-		t.Fatal("initial committed push response was not dropped")
-	}
-	if !strings.Contains(err.Error(), "malformed HTTP") {
-		t.Fatalf("initial committed push did not return an explicit malformed response: %v", err)
-	}
+	initialResult := make(chan error, 1)
+	go func() {
+		response, err := proxy.Client().Do(request)
+		if response != nil {
+			_ = response.Body.Close()
+		}
+		initialResult <- err
+	}()
 	if got := <-received; got != requestBody {
 		t.Fatalf("committed push body = %q, want %q", got, requestBody)
+	}
+	contextWithTimeout, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := coordinator.waitForResponseLossPush(contextWithTimeout); err != nil {
+		t.Fatalf("wait for committed response-loss push: %v", err)
+	}
+	select {
+	case err := <-initialResult:
+		t.Fatalf("initial committed push completed before coordinator release: %v", err)
+	default:
+	}
+	if err := coordinator.releaseResponseLossPush(); err != nil {
+		t.Fatalf("release committed response-loss push: %v", err)
+	}
+	select {
+	case err := <-initialResult:
+		if err == nil {
+			t.Fatal("initial committed push response was not dropped")
+		}
+		if !strings.Contains(err.Error(), "malformed HTTP") {
+			t.Fatalf("initial committed push did not return an explicit malformed response: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("initial committed push did not complete after coordinator release")
 	}
 
 	replay, err := http.NewRequest(http.MethodPost, proxy.URL+"/sync/push", strings.NewReader(requestBody))
 	if err != nil {
 		t.Fatalf("create replay proxy request: %v", err)
 	}
-	response, err = proxy.Client().Do(replay)
+	response, err := proxy.Client().Do(replay)
 	if err != nil {
 		t.Fatalf("send replay push: %v", err)
 	}
@@ -194,10 +218,48 @@ func TestQueueReplayStageCountMatchesDerivedCoordinatorStages(t *testing.T) {
 	coordinator := &QueueReplayCoordinator{steps: workloads}
 	want := 4
 	for _, workload := range workloads {
-		want += len(workload.local) + 5
+		want += len(workload.local) + 6
 	}
 	if actual := coordinator.StageCount(); actual != want {
 		t.Fatalf("queue-replay coordinator stage count = %d, want %d", actual, want)
+	}
+}
+
+func TestQueueReplayResponseLossUsesAnAsynchronousBlockedCall(t *testing.T) {
+	coordinator := &QueueReplayCoordinator{
+		clientKey: "client-a",
+		stage:     queueReplayStageSchemaBoundary,
+		steps:     []queueReplayWorkload{{}},
+		process: &actionProcessIdentity{
+			ProcessID:                   "process-a",
+			DatabaseIdentityFingerprint: strings.Repeat("a", 64),
+		},
+	}
+	response, err := coordinator.advanceLocked(context.Background(), 7)
+	if err != nil {
+		t.Fatalf("advance queue-replay response-loss begin: %v", err)
+	}
+	defer func() { _ = coordinator.releaseResponseLossPush() }()
+	if coordinator.stage != queueReplayStageResponseLossBegun || response.Command == nil {
+		t.Fatalf("queue-replay response-loss begin stage=%d command=%#v", coordinator.stage, response.Command)
+	}
+	action := response.Command.Action.Action
+	if action.Actor != "client" || action.Command != "begin-call" || action.Parameters["method"] != "reset-schema-and-start" || action.Parameters["call_id"] != coordinator.responseLossCallID() {
+		t.Fatalf("queue-replay response-loss begin action = %#v", action)
+	}
+	process := `{"process_id":"process-a","database_identity_fingerprint":"` + strings.Repeat("a", 64) + `"}`
+	if err := coordinator.validateResponseLossCallBegun(json.RawMessage(`{"kind":"call-begun","call_id":"`+coordinator.responseLossCallID()+`","state":"in_flight","process":`+process+`}`)); err != nil {
+		t.Fatalf("validate queue-replay response-loss call begin: %v", err)
+	}
+	blocked := json.RawMessage(`{"kind":"call-completed","call_id":"` + coordinator.responseLossCallID() + `","state":"completed","completion":"blocked","status":{"state":"backoff","retry_at":"2026-09-02T00:00:01Z","operation":"push","failure":null},"process":` + process + `}`)
+	if err := coordinator.validateResponseLossCallCompleted(blocked); err != nil {
+		t.Fatalf("validate queue-replay response-loss blocked call: %v", err)
+	}
+	forged := json.RawMessage(`{"kind":"call-completed","call_id":"` + coordinator.responseLossCallID() + `","state":"completed","completion":"blocked","status":{"state":"ready","retry_at":null,"operation":null,"failure":null},"process":` + process + `}`)
+	if err := coordinator.validateResponseLossCallCompleted(forged); err == nil {
+		t.Fatal("queue-replay response-loss accepted blocked completion without a backoff")
+	} else if !strings.Contains(err.Error(), `state="ready" want="backoff"`) {
+		t.Fatalf("queue-replay response-loss diagnostic = %q, want observed and expected backoff states", err)
 	}
 }
 

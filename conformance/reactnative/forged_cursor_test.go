@@ -293,7 +293,7 @@ func TestForgedCursorCallCompleteRequiresValidatedWireResponse(t *testing.T) {
 	coordinator.recordRebuildResponse(2, http.StatusBadRequest, http.StatusBadRequest, upstreamBody, upstreamBody)
 	process := actionProcessIdentity{ProcessID: "process-a", DatabaseIdentityFingerprint: strings.Repeat("a", 64)}
 	coordinator.process = &process
-	raw := json.RawMessage(`{"kind":"call-completed","call_id":"forged_rebuild","state":"completed","completion":"error","status":{"state":"error","retry_at":null,"operation":"rebuilding","failure":{"operation":"rebuilding","code":"server_error","retryable":false,"recovery_action":"retry"}},"process":{"process_id":"process-a","database_identity_fingerprint":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}`)
+	raw := json.RawMessage(`{"kind":"call-completed","call_id":"forged_rebuild","state":"completed","completion":"error","status":{"state":"error","retry_at":null,"operation":null,"failure":{"operation":"rebuilding","code":"server_error","retryable":false,"recovery_action":"retry"}},"process":{"process_id":"process-a","database_identity_fingerprint":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}`)
 	err = coordinator.validateCallComplete(raw)
 	if err == nil || !strings.Contains(err.Error(), "lacks authored wire proof") {
 		t.Fatalf("forged-cursor call without wire proof error=%q, want missing-proof failure", err)
@@ -315,15 +315,19 @@ func TestValidateForgedCursorErrorStatusFollowsNativeAuthority(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.platform, func(t *testing.T) {
-			status := json.RawMessage(fmt.Sprintf(`{"state":"error","retry_at":null,"operation":"rebuilding","failure":{"operation":"rebuilding","code":%q,"retryable":false,"recovery_action":"retry"}}`, test.code))
+			status := json.RawMessage(fmt.Sprintf(`{"state":"error","retry_at":null,"operation":null,"failure":{"operation":"rebuilding","code":%q,"retryable":false,"recovery_action":"retry"}}`, test.code))
 			if err := validateForgedCursorErrorStatus(scenario, test.platform, status); err != nil {
 				t.Fatalf("validate %s forged-cursor native failure: %v", test.platform, err)
 			}
-			wrongOperation := json.RawMessage(fmt.Sprintf(`{"state":"error","retry_at":null,"operation":"rebuild","failure":{"operation":"rebuild","code":%q,"retryable":false,"recovery_action":"retry"}}`, test.code))
-			if err := validateForgedCursorErrorStatus(scenario, test.platform, wrongOperation); err == nil {
-				t.Fatal("forged-cursor non-native lifecycle operation was accepted")
+			activeOperation := json.RawMessage(fmt.Sprintf(`{"state":"error","retry_at":null,"operation":"rebuilding","failure":{"operation":"rebuilding","code":%q,"retryable":false,"recovery_action":"retry"}}`, test.code))
+			if err := validateForgedCursorErrorStatus(scenario, test.platform, activeOperation); err == nil {
+				t.Fatal("forged-cursor error status with an active operation was accepted")
 			}
-			wrongCode := json.RawMessage(`{"state":"error","retry_at":null,"operation":"rebuilding","failure":{"operation":"rebuilding","code":"invalid_response","retryable":false,"recovery_action":"retry"}}`)
+			wrongFailureOperation := json.RawMessage(fmt.Sprintf(`{"state":"error","retry_at":null,"operation":null,"failure":{"operation":"rebuild","code":%q,"retryable":false,"recovery_action":"retry"}}`, test.code))
+			if err := validateForgedCursorErrorStatus(scenario, test.platform, wrongFailureOperation); err == nil {
+				t.Fatal("forged-cursor non-native failure operation was accepted")
+			}
+			wrongCode := json.RawMessage(`{"state":"error","retry_at":null,"operation":null,"failure":{"operation":"rebuilding","code":"invalid_response","retryable":false,"recovery_action":"retry"}}`)
 			if err := validateForgedCursorErrorStatus(scenario, test.platform, wrongCode); err == nil {
 				t.Fatal("forged-cursor non-native lifecycle code was accepted")
 			}

@@ -1248,7 +1248,7 @@ func (facts rebuildRequestsIncrementalPullFacts) valid() bool {
 		response.HasMore != nil && !*response.HasMore && response.RebuildScopeCount != nil &&
 		*response.RebuildScopeCount == 0 && response.ChecksumCount != nil && *response.ChecksumCount == 1 &&
 		response.ScopeCursorFingerprintsComplete != nil && *response.ScopeCursorFingerprintsComplete &&
-		len(response.ScopeCursorFingerprints) == 1 && response.ScopeCursorFingerprints[0] == facts.requestCursors[0]
+		len(response.ScopeCursorFingerprints) == 1
 }
 
 func (facts rebuildRequestsIncrementalPullFacts) String() string {
@@ -1384,7 +1384,8 @@ func (c *RebuildRequestsCoordinator) validateState(server scenarios.StateFacts, 
 	}
 	storedChecksum, storedErr := checksumDigest(state.ScopeStates[0].Checksum)
 	localChecksum, localErr := checksumDigest(&state.ScopeStates[0].LocalChecksum)
-	if storedErr != nil || localErr != nil || storedChecksum == nil || localChecksum == nil || *storedChecksum != *localChecksum || trace.Observations[3].CursorFingerprints[0] != hashFingerprint(*state.ScopeStates[0].Cursor) {
+	pullFacts, pullErr := decodePullResponseFacts(trace.Observations[3].PullResponseFacts)
+	if storedErr != nil || localErr != nil || storedChecksum == nil || localChecksum == nil || *storedChecksum != *localChecksum || pullErr != nil || len(pullFacts.ScopeCursorFingerprints) != 1 || pullFacts.ScopeCursorFingerprints[0] != hashFingerprint(*state.ScopeStates[0].Cursor) {
 		return errors.New("React Native rebuild-requests checkpoint is not verified")
 	}
 	if err := c.validateRows(state, proof, evidence); err != nil {

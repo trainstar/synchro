@@ -1404,8 +1404,6 @@ func validateForgedCursorErrorStatus(scenario scenarios.Scenario, platform strin
 	var failureMembers map[string]json.RawMessage
 	failureErr := decodeStrictMembers(status.Failure, &failureMembers, 4, "forged-cursor failure")
 	decodeErr := json.Unmarshal(status.Failure, &failure)
-	var operation string
-	operationErr := json.Unmarshal(status.Operation, &operation)
 	wantCode := ""
 	if wire.ErrorCode != nil {
 		wantCode = *wire.ErrorCode
@@ -1415,8 +1413,8 @@ func validateForgedCursorErrorStatus(scenario scenarios.Scenario, platform strin
 	} else if platform != "ios" {
 		return fmt.Errorf("React Native forged-cursor lifecycle platform=%q, want ios or android", platform)
 	}
-	if status.State != "error" || !isJSONNull(status.RetryAt) || operationErr != nil || operation != "rebuilding" || failureErr != nil || decodeErr != nil || failure.Operation != operation || failure.Code != wantCode || failure.Retryable != wire.Retryable || failure.RecoveryAction != "retry" {
-		return fmt.Errorf("React Native forged-cursor status state=%q retry_at=%s operation=%q failure={operation:%q code:%q retryable:%t recovery_action:%q} want={state:error retry_at:null operation:rebuilding failure_operation:rebuilding code:%q retryable:%t recovery_action:retry} errors=%v/%v/%v", status.State, boundedRaw(status.RetryAt), operation, failure.Operation, failure.Code, failure.Retryable, failure.RecoveryAction, wantCode, wire.Retryable, operationErr, failureErr, decodeErr)
+	if status.State != "error" || !isJSONNull(status.RetryAt) || !isJSONNull(status.Operation) || failureErr != nil || decodeErr != nil || failure.Operation != "rebuilding" || failure.Code != wantCode || failure.Retryable != wire.Retryable || failure.RecoveryAction != "retry" {
+		return fmt.Errorf("React Native forged-cursor status state=%q retry_at=%s operation=%s failure={operation:%q code:%q retryable:%t recovery_action:%q} want={state:error retry_at:null operation:null failure_operation:rebuilding code:%q retryable:%t recovery_action:retry} errors=%v/%v", status.State, boundedRaw(status.RetryAt), boundedRaw(status.Operation), failure.Operation, failure.Code, failure.Retryable, failure.RecoveryAction, wantCode, wire.Retryable, failureErr, decodeErr)
 	}
 	return nil
 }

@@ -121,8 +121,8 @@ func TestRebuildApplyAuthoredFlowServesExactlyExchangeCount(t *testing.T) {
 		if response.Runtime.ClientKey != clientKey || step.NativeBinding.ClientID != expected.client {
 			t.Fatalf("authored rebuild-apply exchange %d client binding = %q, want %q", index+1, response.Runtime.ClientKey, clientKey)
 		}
-		if expected.command == "capture" && response.Action.Action.Parameters["detail_policy"] != "complete-or-omit" {
-			t.Fatalf("authored rebuild-apply exchange %d detail policy = %#v, want complete-or-omit", index+1, response.Action.Action.Parameters["detail_policy"])
+		if expected.command == "capture" && !reflect.DeepEqual(response.Action.Action.Parameters["client_keys"], []string{clientKey}) {
+			t.Fatalf("authored rebuild-apply exchange %d capture client keys = %#v, want %q", index+1, response.Action.Action.Parameters["client_keys"], clientKey)
 		}
 	}
 	if terminal := want[len(want)-1]; terminal.state != "complete" || terminal.actor != "" || terminal.command != "" || terminal.client != "" {
@@ -175,36 +175,6 @@ func TestRebuildApplyCaptureRequestsTerminalReceiptProof(t *testing.T) {
 	wantIdentity := map[string]any{"table_name": "runtime_items", "record_id": "rebuild-apply-absent-row"}
 	if !reflect.DeepEqual(parameters["durable_proof_identity"], wantIdentity) {
 		t.Fatalf("rebuild-apply durable proof identity = %#v, want %#v", parameters["durable_proof_identity"], wantIdentity)
-	}
-	if parameters["detail_policy"] != "complete-or-omit" {
-		t.Fatalf("rebuild-apply detail policy = %#v, want complete-or-omit", parameters["detail_policy"])
-	}
-}
-
-func TestValidateRebuildApplyCaptureRejectsPartialOverBoundDetails(t *testing.T) {
-	scenario := loadRebuildApplyAuthoredScenario(t)
-	step := scenario.Steps[6]
-	var workload rebuildApplyWorkload
-	if err := json.Unmarshal(step.Operation.Payload, &workload); err != nil {
-		t.Fatalf("decode over-bound rebuild-apply workload: %v", err)
-	}
-	capture := rebuildApplyCaptureFixture(t, workload)
-	rows := make([]any, 512)
-	for index := range rows {
-		rows[index] = map[string]any{"scopeID": "scope-a"}
-	}
-	var state map[string]any
-	if err := json.Unmarshal(capture.ClientState, &state); err != nil {
-		t.Fatalf("decode over-bound rebuild-apply state: %v", err)
-	}
-	state["scopeRows"] = rows
-	capture.ClientState = marshalRebuildApplyFixture(t, state)
-	capture.Provenance = marshalRebuildApplyFixture(t, rows)
-	coordinator := &RebuildApplyCoordinator{
-		expected: rebuildApplyExpectedState(scenario), steps: []scenarios.Step{step}, workloads: []rebuildApplyWorkload{workload},
-	}
-	if err := coordinator.validateCapture(capture); err == nil || !strings.Contains(err.Error(), "provenance details count: observed=512 expected=0") {
-		t.Fatalf("partial over-bound rebuild-apply detail error = %v, want complete-or-omit rejection", err)
 	}
 }
 

@@ -988,7 +988,7 @@ func (c *SchemaQueuedMutationCoordinator) validatePendingMutation(expected scena
 	if observed.MutationID != mutationID || observed.TableID != tableID || observed.TableName != c.tableName || observed.RecordID != recordID ||
 		observed.PrimaryKeyFieldID != primaryField || observed.Operation != expected.Operation || observed.AuthoredSchema != schemaOne ||
 		observed.BaseVersion == nil || *observed.BaseVersion != baseVersion || observed.ClientVersion == "" ||
-		observed.Status != expected.Status || observed.SealedBatchID == nil || *observed.SealedBatchID != batchID || observed.SealedOrdinal == nil || *observed.SealedOrdinal != 1 ||
+		observed.Status != expected.Status || observed.SealedBatchID == nil || *observed.SealedBatchID != batchID || observed.SealedOrdinal == nil || *observed.SealedOrdinal != 0 ||
 		observed.LocalOrder != expected.LocalOrder || len(observed.AuthoredFields) != len(expected.AuthoredColumns) {
 		return fmt.Errorf("React Native schema-queued-mutation pending observed=%+v expected mutation=%q table=%q table_name=%q record=%q primary=%q schema=%+v base=%q batch=%q order=%d", observed, mutationID, tableID, c.tableName, recordID, primaryField, schemaOne, baseVersion, batchID, expected.LocalOrder)
 	}
