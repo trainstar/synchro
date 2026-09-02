@@ -430,6 +430,14 @@ private class ClientSession(private val context: Context) : Closeable {
         val selectors = command.optionalArray("row_selectors") ?: JsonArray(emptyList())
         require(selectors.size <= MAXIMUM_SELECTORS) { "too many row selectors" }
         val client = requireClient()
+        // Keep counts, details, and application rows on one snapshot while a
+        // reconnect can renew the client generation.
+        return client.transaction {
+            captureInTransaction(client, selectors)
+        }
+    }
+
+    private fun captureInTransaction(client: SynchroClient, selectors: JsonArray): JsonObject {
         val capture = SynchroInspection(client).captureState(MAXIMUM_RECORDS)
         val retainedMutations = if (capture.mutationLedgerCount <= MAXIMUM_RECORDS) {
             client.inspectRetainedMutations()
