@@ -463,8 +463,9 @@ func (c *RebuildApplyCoordinator) advanceLocked(ctx context.Context, sequence ui
 		c.stage = rebuildApplyStageCapture
 	case rebuildApplyStageCapture:
 		response.Command = c.command(clientKey, step.NativeBinding.ClientID, "observer", "capture", map[string]any{
-			"client_keys": []string{clientKey},
-			"sources":     []string{"scope-state", "pending-mutations", "rejected-mutations", "sync-status", "sync-events", "provenance", "request-trace", "durable-proof"},
+			"client_keys":   []string{clientKey},
+			"sources":       []string{"scope-state", "pending-mutations", "rejected-mutations", "sync-status", "sync-events", "provenance", "request-trace", "durable-proof"},
+			"detail_policy": "complete-or-omit",
 			"durable_proof_identity": map[string]any{
 				"table_name": c.tableName, "record_id": "rebuild-apply-absent-row",
 			},
@@ -540,6 +541,14 @@ func (c *RebuildApplyCoordinator) validateCapture(capture finalCapture) error {
 	if expected == nil || expected.RowCount == nil || expected.ProvenanceCount == nil || expected.CheckpointCount == nil || expected.RebuildAttemptCount == nil {
 		return errors.New("React Native rebuild-apply authored client state is unavailable")
 	}
+	var provenance []clientScopeRow
+	if err := decodeStrictValue(capture.Provenance, &provenance); err != nil {
+		return fmt.Errorf("React Native rebuild-apply client %s provenance detail is invalid: %w", clientID, err)
+	}
+	detailCount := workload.RecordCount
+	if detailCount > 512 {
+		detailCount = 0
+	}
 	counts := []struct {
 		name     string
 		observed uint64
@@ -550,12 +559,9 @@ func (c *RebuildApplyCoordinator) validateCapture(capture finalCapture) error {
 		{"scope states", state.ScopeStateCount, *expected.CheckpointCount},
 		{"scope rows", state.ScopeRowCount, workload.RecordCount},
 		{"scope state details", uint64(len(state.ScopeStates)), *expected.CheckpointCount},
+		{"provenance details", uint64(len(provenance)), detailCount},
 		{"active rebuild attempts", state.RebuildAttemptCount, 0},
 		{"active rebuild attempt details", uint64(len(state.RebuildAttempts)), state.RebuildAttemptCount},
-	}
-	detailCount := workload.RecordCount
-	if detailCount > 512 {
-		detailCount = 512
 	}
 	counts = append(counts, struct {
 		name     string
@@ -565,6 +571,11 @@ func (c *RebuildApplyCoordinator) validateCapture(capture finalCapture) error {
 	for _, count := range counts {
 		if count.observed != count.expected {
 			return rebuildApplyCountError(clientID, count.name, count.observed, count.expected)
+		}
+	}
+	for index := range provenance {
+		if provenance[index] != state.ScopeRows[index] {
+			return fmt.Errorf("React Native rebuild-apply client %s provenance detail %d differs from scope state", clientID, index+1)
 		}
 	}
 	proof, err := decodeDurableProof(capture.DurableProof)
@@ -604,7 +615,7 @@ func (c *RebuildApplyCoordinator) validateCapture(capture finalCapture) error {
 	if rebuildAttempts != *expected.RebuildAttemptCount {
 		return rebuildApplyCountError(clientID, "rebuild attempt facts", rebuildAttempts, *expected.RebuildAttemptCount)
 	}
-	if len(capture.Provenance) == 0 || len(capture.Events) == 0 {
+	if len(capture.Events) == 0 {
 		return errors.New("React Native rebuild-apply durable evidence is incomplete")
 	}
 	trace, err := captureTraceFromRaw(capture.Trace)

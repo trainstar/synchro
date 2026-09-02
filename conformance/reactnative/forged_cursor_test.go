@@ -223,6 +223,9 @@ func TestForgedCursorProxyMutatesOnlyFirstRebuildPage(t *testing.T) {
 	if err := coordinator.waitForForgedPage(context.Background()); err != nil {
 		t.Fatalf("wait for forged-cursor rejection: %v", err)
 	}
+	if err := coordinator.requireValidatedRejectedResponse(); err != nil {
+		t.Fatalf("validate forged-cursor rejected wire response: %v", err)
+	}
 	diagnostic := coordinator.rebuildResponseDiagnostic()
 	for _, want := range []string{
 		fmt.Sprintf("{request:1 upstream_status:200 proxied_status:200 upstream_body:%q proxied_body:%q}", firstUpstreamBody, first.Body.String()),
@@ -231,6 +234,34 @@ func TestForgedCursorProxyMutatesOnlyFirstRebuildPage(t *testing.T) {
 		if !strings.Contains(diagnostic, want) {
 			t.Fatalf("forged-cursor rebuild response diagnostic = %q, want %q", diagnostic, want)
 		}
+	}
+}
+
+func TestValidateForgedCursorRejectedResponseRequiresAuthoredByteIdentity(t *testing.T) {
+	scenario := loadForgedCursorAuthoredScenario(t)
+	valid := []byte(`{"error": {"code": "invalid_request", "message": "invalid rebuild request", "retryable": false}}`)
+	if err := validateForgedCursorRejectedResponse(scenario, http.StatusBadRequest, http.StatusBadRequest, valid, valid); err != nil {
+		t.Fatalf("validate authored forged-cursor rejection: %v", err)
+	}
+	tests := []struct {
+		name           string
+		upstreamStatus int
+		proxiedStatus  int
+		upstreamBody   []byte
+		proxiedBody    []byte
+	}{
+		{name: "changed bytes", upstreamStatus: http.StatusBadRequest, proxiedStatus: http.StatusBadRequest, upstreamBody: valid, proxiedBody: []byte(`{"error":{"code":"invalid_request","message":"invalid rebuild request","retryable":false}}`)},
+		{name: "changed status", upstreamStatus: http.StatusBadRequest, proxiedStatus: http.StatusBadGateway, upstreamBody: valid, proxiedBody: valid},
+		{name: "wrong code", upstreamStatus: http.StatusBadRequest, proxiedStatus: http.StatusBadRequest, upstreamBody: []byte(`{"error":{"code":"sync_integrity_failure","message":"invalid rebuild request","retryable":false}}`), proxiedBody: []byte(`{"error":{"code":"sync_integrity_failure","message":"invalid rebuild request","retryable":false}}`)},
+		{name: "retryable", upstreamStatus: http.StatusBadRequest, proxiedStatus: http.StatusBadRequest, upstreamBody: []byte(`{"error":{"code":"invalid_request","message":"invalid rebuild request","retryable":true}}`), proxiedBody: []byte(`{"error":{"code":"invalid_request","message":"invalid rebuild request","retryable":true}}`)},
+		{name: "missing message", upstreamStatus: http.StatusBadRequest, proxiedStatus: http.StatusBadRequest, upstreamBody: []byte(`{"error":{"code":"invalid_request","message":"","retryable":false}}`), proxiedBody: []byte(`{"error":{"code":"invalid_request","message":"","retryable":false}}`)},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if err := validateForgedCursorRejectedResponse(scenario, test.upstreamStatus, test.proxiedStatus, test.upstreamBody, test.proxiedBody); err == nil {
+				t.Fatal("changed forged-cursor rejection was accepted")
+			}
+		})
 	}
 }
 
@@ -250,7 +281,7 @@ func TestForgedCursorRebuildResponseDiagnosticBoundsBodies(t *testing.T) {
 	}
 }
 
-func TestForgedCursorCallCompleteFailureIncludesRebuildResponseDiagnostic(t *testing.T) {
+func TestForgedCursorCallCompleteRequiresValidatedWireResponse(t *testing.T) {
 	coordinator, err := NewForgedCursorCoordinator(ForgedCursorCoordinatorConfig{
 		Scenario: loadForgedCursorAuthoredScenario(t), Platform: "android", ServerURL: "http://127.0.0.1:8080", AuthToken: "unit-token",
 	})
@@ -260,19 +291,43 @@ func TestForgedCursorCallCompleteFailureIncludesRebuildResponseDiagnostic(t *tes
 	defer func() { _ = coordinator.Close(context.Background()) }()
 	upstreamBody := []byte(`{"error":{"code":"invalid_request","message":"invalid request","retryable":false}}`)
 	coordinator.recordRebuildResponse(2, http.StatusBadRequest, http.StatusBadRequest, upstreamBody, upstreamBody)
-	raw := json.RawMessage(`{"kind":"call-completed","call_id":"forged_rebuild","state":"completed","completion":"error","status":{"state":"error","retry_at":null,"operation":"rebuilding","failure":{"operation":"rebuilding","code":"server_error","retryable":false,"recovery_action":"retry"}},"process":{}}`)
+	process := actionProcessIdentity{ProcessID: "process-a", DatabaseIdentityFingerprint: strings.Repeat("a", 64)}
+	coordinator.process = &process
+	raw := json.RawMessage(`{"kind":"call-completed","call_id":"forged_rebuild","state":"completed","completion":"error","status":{"state":"error","retry_at":null,"operation":"rebuilding","failure":{"operation":"rebuilding","code":"server_error","retryable":false,"recovery_action":"retry"}},"process":{"process_id":"process-a","database_identity_fingerprint":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}`)
 	err = coordinator.validateCallComplete(raw)
-	if err == nil {
-		t.Fatal("forged-cursor call-complete status mismatch was accepted")
+	if err == nil || !strings.Contains(err.Error(), "lacks authored wire proof") {
+		t.Fatalf("forged-cursor call without wire proof error=%q, want missing-proof failure", err)
 	}
-	for _, want := range []string{
-		`failure={operation:"rebuilding" code:"server_error"`,
-		fmt.Sprintf("upstream_body:%q", string(upstreamBody)),
-		fmt.Sprintf("proxied_body:%q", string(upstreamBody)),
-	} {
-		if !strings.Contains(err.Error(), want) {
-			t.Fatalf("forged-cursor call-complete diagnostic = %q, want %q", err, want)
-		}
+	coordinator.markRejectedResponseValidated()
+	if err := coordinator.validateCallComplete(raw); err != nil {
+		t.Fatalf("validate Android forged-cursor call with authored wire proof: %v", err)
+	}
+}
+
+func TestValidateForgedCursorErrorStatusFollowsNativeAuthority(t *testing.T) {
+	scenario := loadForgedCursorAuthoredScenario(t)
+	tests := []struct {
+		platform string
+		code     string
+	}{
+		{platform: "ios", code: "invalid_request"},
+		{platform: "android", code: "server_error"},
+	}
+	for _, test := range tests {
+		t.Run(test.platform, func(t *testing.T) {
+			status := json.RawMessage(fmt.Sprintf(`{"state":"error","retry_at":null,"operation":"rebuilding","failure":{"operation":"rebuilding","code":%q,"retryable":false,"recovery_action":"retry"}}`, test.code))
+			if err := validateForgedCursorErrorStatus(scenario, test.platform, status); err != nil {
+				t.Fatalf("validate %s forged-cursor native failure: %v", test.platform, err)
+			}
+			wrongOperation := json.RawMessage(fmt.Sprintf(`{"state":"error","retry_at":null,"operation":"rebuild","failure":{"operation":"rebuild","code":%q,"retryable":false,"recovery_action":"retry"}}`, test.code))
+			if err := validateForgedCursorErrorStatus(scenario, test.platform, wrongOperation); err == nil {
+				t.Fatal("forged-cursor non-native lifecycle operation was accepted")
+			}
+			wrongCode := json.RawMessage(`{"state":"error","retry_at":null,"operation":"rebuilding","failure":{"operation":"rebuilding","code":"invalid_response","retryable":false,"recovery_action":"retry"}}`)
+			if err := validateForgedCursorErrorStatus(scenario, test.platform, wrongCode); err == nil {
+				t.Fatal("forged-cursor non-native lifecycle code was accepted")
+			}
+		})
 	}
 }
 

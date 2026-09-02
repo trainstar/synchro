@@ -123,7 +123,6 @@ type RebuildRequestsCoordinator struct {
 	result        RebuildRequestsCoordinatorResult
 }
 
-
 // rebuildRequestsAuthoredPageLimit reads the page limit the authored rebuild
 // request declares, so the client requests the authored page shape.
 func rebuildRequestsAuthoredPageLimit(steps map[scenarios.StepID]scenarios.Step) (uint64, error) {
@@ -1182,17 +1181,146 @@ func validateRebuildRequestsTransport(scenario scenarios.Scenario, trace traceSn
 	if err != nil || finalFacts.RecordCount == nil || *finalFacts.RecordCount != 1 || finalFacts.HasMore == nil || *finalFacts.HasMore || finalFacts.HasCursor == nil || *finalFacts.HasCursor || finalFacts.HasFinalScopeCursor == nil || !*finalFacts.HasFinalScopeCursor || finalFacts.HasChecksum == nil || !*finalFacts.HasChecksum || finalFacts.FinalScopeCursorFingerprint == nil {
 		return errors.New("React Native rebuild-requests final page is not terminal")
 	}
-	pullGeneration, pullGenerationErr := requestInteger(pull, "client_generation")
-	pullSchema, pullSchemaErr := requestInteger(pull, "schema_version")
-	pullHash, pullHashErr := requestString(pull, "schema_hash")
-	scopeSet, scopeSetErr := requestInteger(pull, "scope_set_version")
-	scopeCount, scopeCountErr := requestInteger(pull, "scope_count")
-	limit, limitErr := requestInteger(pull, "limit")
-	pullFacts, pullErr := decodePullResponseFacts(pull.PullResponseFacts)
-	if pullGenerationErr != nil || pullSchemaErr != nil || pullHashErr != nil || scopeSetErr != nil || scopeCountErr != nil || limitErr != nil || pullErr != nil || pullGeneration != firstGeneration || pullSchema != firstSchema || pullHash != firstHash || scopeSet == 0 || scopeCount != 1 || limit != 1 || pullFacts.ChangeCount == nil || *pullFacts.ChangeCount != 1 || pullFacts.HasMore == nil || *pullFacts.HasMore || pullFacts.RebuildScopeCount == nil || *pullFacts.RebuildScopeCount != 0 || pullFacts.ChecksumCount == nil || *pullFacts.ChecksumCount != 1 || pullFacts.ScopeCursorFingerprintsComplete == nil || !*pullFacts.ScopeCursorFingerprintsComplete || len(pullFacts.ScopeCursorFingerprints) != 1 || pull.CursorFingerprintsComplete == nil || !*pull.CursorFingerprintsComplete || len(pull.CursorFingerprints) != 1 || pull.CursorFingerprints[0] != *finalFacts.FinalScopeCursorFingerprint || pullFacts.ScopeCursorFingerprints[0] != pull.CursorFingerprints[0] {
-		return errors.New("React Native rebuild-requests incremental pull is invalid")
+	facts := rebuildRequestsIncrementalPullFactsFor(first, finalFacts, pull)
+	if !facts.valid() {
+		return fmt.Errorf("React Native rebuild-requests incremental pull is invalid: %s", facts)
 	}
 	return nil
+}
+
+type rebuildRequestsIncrementalPullFacts struct {
+	firstGeneration    uint64
+	firstGenerationErr error
+	pullGeneration     uint64
+	pullGenerationErr  error
+	firstSchema        uint64
+	firstSchemaErr     error
+	pullSchema         uint64
+	pullSchemaErr      error
+	firstHash          string
+	firstHashErr       error
+	pullHash           string
+	pullHashErr        error
+	scopeSet           uint64
+	scopeSetErr        error
+	scopeCount         uint64
+	scopeCountErr      error
+	limit              uint64
+	limitErr           error
+	finalCursor        *string
+	requestCursors     []string
+	requestComplete    *bool
+	response           pullResponseFacts
+	responseErr        error
+}
+
+func rebuildRequestsIncrementalPullFactsFor(first transportObservation, final rebuildResponseFacts, pull transportObservation) rebuildRequestsIncrementalPullFacts {
+	facts := rebuildRequestsIncrementalPullFacts{
+		finalCursor:     final.FinalScopeCursorFingerprint,
+		requestCursors:  append([]string(nil), pull.CursorFingerprints...),
+		requestComplete: pull.CursorFingerprintsComplete,
+	}
+	facts.firstGeneration, facts.firstGenerationErr = requestInteger(first, "client_generation")
+	facts.pullGeneration, facts.pullGenerationErr = requestInteger(pull, "client_generation")
+	facts.firstSchema, facts.firstSchemaErr = requestInteger(first, "schema_version")
+	facts.pullSchema, facts.pullSchemaErr = requestInteger(pull, "schema_version")
+	facts.firstHash, facts.firstHashErr = requestString(first, "schema_hash")
+	facts.pullHash, facts.pullHashErr = requestString(pull, "schema_hash")
+	facts.scopeSet, facts.scopeSetErr = requestInteger(pull, "scope_set_version")
+	facts.scopeCount, facts.scopeCountErr = requestInteger(pull, "scope_count")
+	facts.limit, facts.limitErr = requestInteger(pull, "limit")
+	facts.response, facts.responseErr = decodePullResponseFacts(pull.PullResponseFacts)
+	return facts
+}
+
+func (facts rebuildRequestsIncrementalPullFacts) valid() bool {
+	if facts.firstGenerationErr != nil || facts.pullGenerationErr != nil || facts.firstSchemaErr != nil ||
+		facts.pullSchemaErr != nil || facts.firstHashErr != nil || facts.pullHashErr != nil ||
+		facts.scopeSetErr != nil || facts.scopeCountErr != nil || facts.limitErr != nil ||
+		facts.responseErr != nil || facts.finalCursor == nil || facts.requestComplete == nil ||
+		!*facts.requestComplete || len(facts.requestCursors) != 1 {
+		return false
+	}
+	response := facts.response
+	return facts.pullGeneration == facts.firstGeneration && facts.pullSchema == facts.firstSchema &&
+		facts.pullHash == facts.firstHash && facts.scopeSet != 0 && facts.scopeCount == 1 && facts.limit == 1 &&
+		facts.requestCursors[0] == *facts.finalCursor && response.ChangeCount != nil && *response.ChangeCount == 1 &&
+		response.HasMore != nil && !*response.HasMore && response.RebuildScopeCount != nil &&
+		*response.RebuildScopeCount == 0 && response.ChecksumCount != nil && *response.ChecksumCount == 1 &&
+		response.ScopeCursorFingerprintsComplete != nil && *response.ScopeCursorFingerprintsComplete &&
+		len(response.ScopeCursorFingerprints) == 1 && response.ScopeCursorFingerprints[0] == facts.requestCursors[0]
+}
+
+func (facts rebuildRequestsIncrementalPullFacts) String() string {
+	values := []string{
+		rebuildRequestsUintFact("first.client_generation", facts.firstGeneration, facts.firstGenerationErr),
+		rebuildRequestsUintFact("pull.client_generation", facts.pullGeneration, facts.pullGenerationErr),
+		rebuildRequestsUintFact("first.schema_version", facts.firstSchema, facts.firstSchemaErr),
+		rebuildRequestsUintFact("pull.schema_version", facts.pullSchema, facts.pullSchemaErr),
+		rebuildRequestsStringFact("first.schema_hash", facts.firstHash, facts.firstHashErr),
+		rebuildRequestsStringFact("pull.schema_hash", facts.pullHash, facts.pullHashErr),
+		rebuildRequestsUintFact("pull.scope_set_version", facts.scopeSet, facts.scopeSetErr),
+		rebuildRequestsUintFact("pull.scope_count", facts.scopeCount, facts.scopeCountErr),
+		rebuildRequestsUintFact("pull.limit", facts.limit, facts.limitErr),
+		rebuildRequestsOptionalStringFact("final.final_scope_cursor_fingerprint", facts.finalCursor),
+		rebuildRequestsOptionalBoolFact("pull.cursor_fingerprints_complete", facts.requestComplete),
+		fmt.Sprintf("pull.cursor_fingerprints=%v", facts.requestCursors),
+	}
+	if facts.responseErr != nil {
+		return strings.Join(append(values,
+			"pull_response.change_count=unavailable",
+			"pull_response.has_more=unavailable",
+			"pull_response.rebuild_scope_count=unavailable",
+			"pull_response.checksum_count=unavailable",
+			"pull_response.scope_cursor_fingerprints_complete=unavailable",
+			"pull_response.scope_cursor_fingerprints=unavailable",
+			fmt.Sprintf("pull_response.decode_error=%q", facts.responseErr),
+		), " ")
+	}
+	response := facts.response
+	return strings.Join(append(values,
+		rebuildRequestsOptionalUintFact("pull_response.change_count", response.ChangeCount),
+		rebuildRequestsOptionalBoolFact("pull_response.has_more", response.HasMore),
+		rebuildRequestsOptionalUintFact("pull_response.rebuild_scope_count", response.RebuildScopeCount),
+		rebuildRequestsOptionalUintFact("pull_response.checksum_count", response.ChecksumCount),
+		rebuildRequestsOptionalBoolFact("pull_response.scope_cursor_fingerprints_complete", response.ScopeCursorFingerprintsComplete),
+		fmt.Sprintf("pull_response.scope_cursor_fingerprints=%v", response.ScopeCursorFingerprints),
+	), " ")
+}
+
+func rebuildRequestsUintFact(name string, value uint64, err error) string {
+	if err != nil {
+		return fmt.Sprintf("%s=unavailable(%q)", name, err)
+	}
+	return fmt.Sprintf("%s=%d", name, value)
+}
+
+func rebuildRequestsStringFact(name, value string, err error) string {
+	if err != nil {
+		return fmt.Sprintf("%s=unavailable(%q)", name, err)
+	}
+	return fmt.Sprintf("%s=%q", name, value)
+}
+
+func rebuildRequestsOptionalStringFact(name string, value *string) string {
+	if value == nil {
+		return name + "=absent"
+	}
+	return fmt.Sprintf("%s=%q", name, *value)
+}
+
+func rebuildRequestsOptionalBoolFact(name string, value *bool) string {
+	if value == nil {
+		return name + "=absent"
+	}
+	return fmt.Sprintf("%s=%t", name, *value)
+}
+
+func rebuildRequestsOptionalUintFact(name string, value *uint64) string {
+	if value == nil {
+		return name + "=absent"
+	}
+	return fmt.Sprintf("%s=%d", name, *value)
 }
 
 func validateRebuildRequestsWireObservation(scenario scenarios.Scenario, stepID string, observed transportObservation) error {

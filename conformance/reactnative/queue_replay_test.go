@@ -97,30 +97,75 @@ func TestQueueReplayResponseLossBindingUsesCommittedDelivery(t *testing.T) {
 	}
 }
 
-func TestQueueReplaySynchronizedResultNamesObservedAndExpectedValues(t *testing.T) {
+func TestQueueReplaySynchronizedResultDiagnosticsNameOnlyFailedField(t *testing.T) {
+	const process = `"process":{"process_id":"process-a","database_identity_fingerprint":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}`
+	const status = `"status":{"state":"ready","retry_at":null,"operation":null,"failure":null}`
+	tests := []struct {
+		name      string
+		raw       string
+		want      string
+		forbidden []string
+	}{
+		{
+			name:      "members",
+			raw:       `{"kind":"synchronized","completion":"blocked","status":{"state":"ready","retry_at":null,"operation":null,"failure":null},"process":{"process_id":"process-a","database_identity_fingerprint":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},"extra":true}`,
+			want:      "members",
+			forbidden: []string{"kind=", "completion=", "status=", "process_id="},
+		},
+		{
+			name:      "kind",
+			raw:       `{"kind":"other","completion":"blocked",` + status + `,` + process + `}`,
+			want:      `kind="other" want="synchronized"`,
+			forbidden: []string{"completion=", "status=", "process_id="},
+		},
+		{
+			name:      "completion",
+			raw:       `{"kind":"synchronized","completion":"idle",` + status + `,` + process + `}`,
+			want:      `completion="idle" want="blocked"`,
+			forbidden: []string{"kind=", "status=", "process_id="},
+		},
+		{
+			name:      "status",
+			raw:       `{"kind":"synchronized","completion":"blocked","status":{"state":""},` + process + `}`,
+			want:      "status",
+			forbidden: []string{"kind=", "completion=", "process_id="},
+		},
+		{
+			name:      "process id",
+			raw:       `{"kind":"synchronized","completion":"blocked",` + status + `,"process":{"process_id":"process-b","database_identity_fingerprint":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}`,
+			want:      `process_id="process-b" want="process-a"`,
+			forbidden: []string{"kind=", "completion=", "status=", "database_identity_fingerprint="},
+		},
+		{
+			name:      "database identity fingerprint",
+			raw:       `{"kind":"synchronized","completion":"blocked",` + status + `,"process":{"process_id":"process-a","database_identity_fingerprint":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}}`,
+			want:      `database_identity_fingerprint="bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" want="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"`,
+			forbidden: []string{"kind=", "completion=", "status=", "process_id="},
+		},
+	}
 	coordinator := &QueueReplayCoordinator{process: &actionProcessIdentity{
 		ProcessID:                   "process-a",
 		DatabaseIdentityFingerprint: strings.Repeat("a", 64),
 	}}
-	err := coordinator.validateSynchronized(json.RawMessage(`{"kind":"synchronized","completion":"idle","status":{"state":"ready","retry_at":null,"operation":null,"failure":null},"process":{"process_id":"process-b","database_identity_fingerprint":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}}`), "blocked")
-	if err == nil {
-		t.Fatal("invalid synchronized result was accepted")
-	}
-	for _, detail := range []string{
-		"members=[completion kind process status] want_count=4",
-		`kind="synchronized" want="synchronized"`,
-		`completion="idle" want="blocked"`,
-		"status_members=[failure operation retry_at state]",
-		`state="ready" retry_at=null operation=null failure=null`,
-		`process={process_id:"process-b" database_identity_fingerprint:"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"} want={process_id:"process-a" database_identity_fingerprint:"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}`,
-	} {
-		if !strings.Contains(err.Error(), detail) {
-			t.Fatalf("synchronized diagnostic = %q, want detail %q", err, detail)
-		}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			err := coordinator.validateSynchronized(json.RawMessage(test.raw), "blocked")
+			if err == nil {
+				t.Fatal("invalid synchronized result was accepted")
+			}
+			if !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("synchronized diagnostic = %q, want detail %q", err, test.want)
+			}
+			for _, detail := range test.forbidden {
+				if strings.Contains(err.Error(), detail) {
+					t.Fatalf("synchronized diagnostic = %q, must not name %q", err, detail)
+				}
+			}
+		})
 	}
 }
 
-func TestQueueReplayProxyDropsCommittedPushAndForwardsReplay(t *testing.T) {
+func TestQueueReplayProxyForwardsCommittedPushAndReplay(t *testing.T) {
 	received := make(chan string, 2)
 	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		if request.Method != http.MethodPost || request.URL.Path != "/sync/push" {
@@ -141,7 +186,6 @@ func TestQueueReplayProxyDropsCommittedPushAndForwardsReplay(t *testing.T) {
 	defer upstream.Close()
 
 	coordinator := &QueueReplayCoordinator{upstream: upstream.URL}
-	coordinator.armResponseLossPush()
 	proxy := httptest.NewServer(coordinator)
 	defer proxy.Close()
 
@@ -151,14 +195,16 @@ func TestQueueReplayProxyDropsCommittedPushAndForwardsReplay(t *testing.T) {
 		t.Fatalf("create initial proxy request: %v", err)
 	}
 	response, err := proxy.Client().Do(request)
-	if response != nil {
-		_ = response.Body.Close()
+	if err != nil {
+		t.Fatalf("send committed push: %v", err)
 	}
-	if err == nil {
-		t.Fatal("initial committed push response was not dropped")
+	body, err := io.ReadAll(response.Body)
+	_ = response.Body.Close()
+	if err != nil {
+		t.Fatalf("read committed push response: %v", err)
 	}
-	if !strings.Contains(err.Error(), "malformed HTTP") {
-		t.Fatalf("initial committed push did not return an explicit malformed response: %v", err)
+	if response.StatusCode != http.StatusOK || string(body) != `{"accepted":true}` {
+		t.Fatalf("committed push response status=%d body=%q, want status=200 body=%q", response.StatusCode, body, `{"accepted":true}`)
 	}
 	if got := <-received; got != requestBody {
 		t.Fatalf("committed push body = %q, want %q", got, requestBody)
@@ -172,8 +218,8 @@ func TestQueueReplayProxyDropsCommittedPushAndForwardsReplay(t *testing.T) {
 	if err != nil {
 		t.Fatalf("send replay push: %v", err)
 	}
-	defer response.Body.Close()
-	body, err := io.ReadAll(response.Body)
+	body, err = io.ReadAll(response.Body)
+	_ = response.Body.Close()
 	if err != nil {
 		t.Fatalf("read replay response: %v", err)
 	}

@@ -229,6 +229,38 @@ func TestValidateFirstRebuildResponseRequiresIntermediatePage(t *testing.T) {
 	}
 }
 
+func TestValidateRebuildRequestsTransportNamesEveryIncrementalPullMember(t *testing.T) {
+	transport := traceSnapshot{Observations: rebuildRequestsTransportForTest(), SequenceCheckpoint: 4}
+	err := validateRebuildRequestsTransport(loadRebuildRequestsAuthoredScenario(t), transport)
+	if err == nil {
+		t.Fatal("incremental pull with a response cursor that differs from its request cursor was accepted")
+	}
+	for _, fact := range []string{
+		"first.client_generation=1",
+		"pull.client_generation=1",
+		"first.schema_version=1",
+		"pull.schema_version=1",
+		`first.schema_hash="cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"`,
+		`pull.schema_hash="cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"`,
+		"pull.scope_set_version=1",
+		"pull.scope_count=1",
+		"pull.limit=1",
+		`final.final_scope_cursor_fingerprint="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"`,
+		"pull.cursor_fingerprints_complete=true",
+		"pull.cursor_fingerprints=[aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa]",
+		"pull_response.change_count=1",
+		"pull_response.has_more=false",
+		"pull_response.rebuild_scope_count=0",
+		"pull_response.checksum_count=1",
+		"pull_response.scope_cursor_fingerprints_complete=true",
+		"pull_response.scope_cursor_fingerprints=[bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb]",
+	} {
+		if !strings.Contains(err.Error(), fact) {
+			t.Fatalf("incremental pull diagnostic = %q, want it to contain %q", err, fact)
+		}
+	}
+}
+
 func loadRebuildRequestsAuthoredScenario(t *testing.T) scenarios.Scenario {
 	t.Helper()
 	repoRoot, err := filepath.Abs(filepath.Join("..", ".."))
@@ -281,3 +313,21 @@ func stageNameForTest(stage rebuildRequestsStage) string {
 		rebuildRequestsStageAwaitCall: "await-call",
 	}[stage]
 }
+
+func rebuildRequestsTransportForTest() []transportObservation {
+	const (
+		firstCursor = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+		pullCursor  = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+		schemaHash  = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+		scopeHash   = "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+		rebuildHash = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+	)
+	return []transportObservation{
+		{Sequence: 1, OperationClass: "connect", StatusCode: http.StatusOK, DurationNanoseconds: 1, RequestFacts: json.RawMessage(`{}`)},
+		{Sequence: 2, OperationClass: "rebuild", StatusCode: http.StatusOK, DurationNanoseconds: 1, RequestFacts: json.RawMessage(`{"client_generation":1,"schema_version":1,"schema_hash":"` + schemaHash + `","scope_fingerprint":"` + scopeHash + `","rebuild_id_fingerprint":"` + rebuildHash + `","limit":1}`), RebuildResponseFacts: json.RawMessage(`{"record_count":1,"has_more":true,"has_cursor":true,"has_final_scope_cursor":false,"has_checksum":false,"scope_fingerprint":"` + scopeHash + `"}`)},
+		{Sequence: 3, OperationClass: "rebuild", StatusCode: http.StatusOK, DurationNanoseconds: 1, RequestFacts: json.RawMessage(`{"client_generation":1,"schema_version":1,"schema_hash":"` + schemaHash + `","scope_fingerprint":"` + scopeHash + `","rebuild_id_fingerprint":"` + rebuildHash + `","limit":1}`), RebuildResponseFacts: json.RawMessage(`{"record_count":1,"has_more":false,"has_cursor":false,"has_final_scope_cursor":true,"has_checksum":true,"scope_fingerprint":"` + scopeHash + `","final_scope_cursor_fingerprint":"` + firstCursor + `"}`)},
+		{Sequence: 4, OperationClass: "pull", StatusCode: http.StatusOK, DurationNanoseconds: 1, CursorFingerprints: []string{firstCursor}, CursorFingerprintsComplete: boolPointer(true), RequestFacts: json.RawMessage(`{"client_generation":1,"schema_version":1,"schema_hash":"` + schemaHash + `","scope_set_version":1,"scope_count":1,"limit":1}`), PullResponseFacts: json.RawMessage(`{"change_count":1,"has_more":false,"rebuild_scope_count":0,"checksum_count":1,"scope_cursor_fingerprints":["` + pullCursor + `"],"scope_cursor_fingerprints_complete":true}`)},
+	}
+}
+
+func boolPointer(value bool) *bool { return &value }

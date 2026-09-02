@@ -119,7 +119,6 @@ type QueueReplayCoordinator struct {
 	clientKey  string
 
 	mu          sync.Mutex
-	proxyMu     sync.Mutex
 	prepared    bool
 	closed      bool
 	completed   bool
@@ -131,7 +130,6 @@ type QueueReplayCoordinator struct {
 	localIndex  int
 	finalResult *finalCapture
 	result      QueueReplayCoordinatorResult
-	dropNextPushResponse bool
 }
 
 // QueueReplayCoordinatorResult contains validated server and native identity evidence.
@@ -463,10 +461,6 @@ func (c *QueueReplayCoordinator) proxyAdapter(writer http.ResponseWriter, reques
 		writeExchangeError(writer, http.StatusBadGateway)
 		return
 	}
-	if request.Method == http.MethodPost && request.URL.Path == "/sync/push" && response.StatusCode == http.StatusOK && c.claimResponseLossPush() {
-		c.dropProxyResponse(writer)
-		return
-	}
 	for name, values := range response.Header {
 		if strings.EqualFold(name, "Content-Length") || strings.EqualFold(name, "Transfer-Encoding") {
 			continue
@@ -478,38 +472,6 @@ func (c *QueueReplayCoordinator) proxyAdapter(writer http.ResponseWriter, reques
 	writer.Header().Set("Content-Length", strconv.Itoa(len(responseBody)))
 	writer.WriteHeader(response.StatusCode)
 	_, _ = writer.Write(responseBody)
-}
-
-func (c *QueueReplayCoordinator) armResponseLossPush() {
-	c.proxyMu.Lock()
-	c.dropNextPushResponse = true
-	c.proxyMu.Unlock()
-}
-
-func (c *QueueReplayCoordinator) claimResponseLossPush() bool {
-	c.proxyMu.Lock()
-	defer c.proxyMu.Unlock()
-	if !c.dropNextPushResponse {
-		return false
-	}
-	c.dropNextPushResponse = false
-	return true
-}
-
-func (c *QueueReplayCoordinator) dropProxyResponse(writer http.ResponseWriter) {
-	hijacker, ok := writer.(http.Hijacker)
-	if !ok {
-		writeExchangeError(writer, http.StatusBadGateway)
-		return
-	}
-	connection, _, err := hijacker.Hijack()
-	if err != nil {
-		writeExchangeError(writer, http.StatusBadGateway)
-		return
-	}
-	// A bare close lets the Android HTTP client repeat the request before it records the failure.
-	_, _ = connection.Write([]byte("SYNCHRO RESPONSE LOSS\r\n\r\n"))
-	_ = connection.Close()
 }
 
 func (c *QueueReplayCoordinator) acceptResultLocked(raw json.RawMessage) error {
@@ -622,7 +584,6 @@ func (c *QueueReplayCoordinator) advanceLocked(ctx context.Context, sequence uin
 		if err := c.config.Controller.BindApplicationPush(committedPush); err != nil {
 			return exchangeResponse{}, fmt.Errorf("bind React Native queue-replay response-loss push: %w", err)
 		}
-		c.armResponseLossPush()
 		response.Command = c.command("client", "synchronize-step", map[string]any{"client_key": c.clientKey, "method": "reset-schema-and-start", "completion": "blocked"}, nil)
 		c.stage = queueReplayStageResponseLoss
 	case queueReplayStageResponseLoss:
@@ -673,43 +634,36 @@ func (c *QueueReplayCoordinator) validateLocal(raw json.RawMessage) error {
 
 func (c *QueueReplayCoordinator) validateSynchronized(raw json.RawMessage, completion string) error {
 	var members map[string]json.RawMessage
-	actionErr := validateActionResult(raw, "synchronized")
-	membersErr := decodeStrictMembers(raw, &members, 4, "queue-replay synchronized result")
-	if membersErr != nil {
-		return fmt.Errorf("React Native queue-replay synchronized result is invalid: members=%s want_count=4 raw=%s action_error=%v members_error=%v", queueReplayMemberNames(members), boundedRaw(raw), actionErr, membersErr)
+	if err := decodeStrictMembers(raw, &members, 4, "queue-replay synchronized result members"); err != nil {
+		return fmt.Errorf("React Native queue-replay synchronized result members are invalid: %w", err)
 	}
-	var kind, actual string
-	kindErr := json.Unmarshal(members["kind"], &kind)
-	completionErr := json.Unmarshal(members["completion"], &actual)
-	var status syncStatus
-	statusDecodeErr := json.Unmarshal(members["status"], &status)
-	statusErr := validateSyncStatusShape(members["status"])
-	var statusMembers map[string]json.RawMessage
-	_ = json.Unmarshal(members["status"], &statusMembers)
-	actualProcess, processErr := decodeActionProcessIdentity(members["process"])
-	expectedProcess := actionProcessIdentity{}
-	if c.process != nil {
-		expectedProcess = *c.process
+
+	var kind string
+	if err := json.Unmarshal(members["kind"], &kind); err != nil || kind != "synchronized" {
+		return fmt.Errorf("React Native queue-replay synchronized result kind=%q want=%q decode_error=%v", kind, "synchronized", err)
 	}
-	if actionErr != nil || kindErr != nil || kind != "synchronized" || completionErr != nil || actual != completion ||
-		statusDecodeErr != nil || statusErr != nil || processErr != nil || c.process == nil || actualProcess != expectedProcess {
-		return fmt.Errorf(
-			"React Native queue-replay synchronized result is invalid: members=%s want_count=4, kind=%q want=%q decode_error=%v action_error=%v, completion=%q want=%q decode_error=%v, status_members=%s status=%s state=%q retry_at=%s operation=%s failure=%s want_state=nonempty_bounded_string status_decode_error=%v status_error=%v, process={process_id:%q database_identity_fingerprint:%q} want={process_id:%q database_identity_fingerprint:%q} process_error=%v",
-			queueReplayMemberNames(members), kind, "synchronized", kindErr, actionErr, actual, completion, completionErr,
-			queueReplayMemberNames(statusMembers), boundedRaw(members["status"]), status.State, boundedRaw(status.RetryAt), boundedRaw(status.Operation), boundedRaw(status.Failure), statusDecodeErr, statusErr,
-			actualProcess.ProcessID, actualProcess.DatabaseIdentityFingerprint, expectedProcess.ProcessID, expectedProcess.DatabaseIdentityFingerprint, processErr,
-		)
+
+	var actual string
+	if err := json.Unmarshal(members["completion"], &actual); err != nil || actual != completion {
+		return fmt.Errorf("React Native queue-replay synchronized result completion=%q want=%q decode_error=%v", actual, completion, err)
+	}
+	if err := validateSyncStatusShape(members["status"]); err != nil {
+		return fmt.Errorf("React Native queue-replay synchronized result status is invalid: %w", err)
+	}
+	actualProcess, err := decodeActionProcessIdentity(members["process"])
+	if err != nil {
+		return fmt.Errorf("React Native queue-replay synchronized result process is invalid: %w", err)
+	}
+	if c.process == nil {
+		return errors.New("React Native queue-replay synchronized result process expectation is unavailable")
+	}
+	if actualProcess.ProcessID != c.process.ProcessID {
+		return fmt.Errorf("React Native queue-replay synchronized result process_id=%q want=%q", actualProcess.ProcessID, c.process.ProcessID)
+	}
+	if actualProcess.DatabaseIdentityFingerprint != c.process.DatabaseIdentityFingerprint {
+		return fmt.Errorf("React Native queue-replay synchronized result database_identity_fingerprint=%q want=%q", actualProcess.DatabaseIdentityFingerprint, c.process.DatabaseIdentityFingerprint)
 	}
 	return nil
-}
-
-func queueReplayMemberNames(members map[string]json.RawMessage) string {
-	names := make([]string, 0, len(members))
-	for name := range members {
-		names = append(names, name)
-	}
-	sort.Strings(names)
-	return "[" + strings.Join(names, " ") + "]"
 }
 
 func (c *QueueReplayCoordinator) validateStopped(raw json.RawMessage) error {

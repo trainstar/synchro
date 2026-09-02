@@ -85,20 +85,21 @@ type ForgedCursorCoordinator struct {
 	database    string
 	transport   *http.Client
 
-	proxyMu             sync.Mutex
-	rebuildRequests     uint64
-	rebuildResponses    [2]forgedCursorRebuildResponse
-	proxyErr            error
-	pushCommitted       chan struct{}
-	pushCommittedOnce   sync.Once
-	firstPageReady      chan struct{}
-	firstPageReadyOnce  sync.Once
-	forgedPageReady     chan struct{}
-	forgedPageReadyOnce sync.Once
-	allowPushResponse   chan struct{}
-	allowPushOnce       sync.Once
-	allowForgedPage     chan struct{}
-	allowForgedPageOnce sync.Once
+	proxyMu                   sync.Mutex
+	rebuildRequests           uint64
+	rebuildResponses          [2]forgedCursorRebuildResponse
+	rejectedResponseValidated bool
+	proxyErr                  error
+	pushCommitted             chan struct{}
+	pushCommittedOnce         sync.Once
+	firstPageReady            chan struct{}
+	firstPageReadyOnce        sync.Once
+	forgedPageReady           chan struct{}
+	forgedPageReadyOnce       sync.Once
+	allowPushResponse         chan struct{}
+	allowPushOnce             sync.Once
+	allowForgedPage           chan struct{}
+	allowForgedPageOnce       sync.Once
 
 	steps        map[scenarios.StepID]scenarios.Step
 	identities   []scenarios.NativeIdentityAlias
@@ -814,6 +815,12 @@ func (c *ForgedCursorCoordinator) proxyAdapter(writer http.ResponseWriter, reque
 		if rebuildRequest != 0 {
 			c.recordRebuildResponse(rebuildRequest, response.StatusCode, response.StatusCode, body, proxiedBody)
 		}
+		if rebuildRequest == 2 {
+			if err := validateForgedCursorRejectedResponse(c.config.Scenario, response.StatusCode, response.StatusCode, body, proxiedBody); err != nil {
+				return err
+			}
+			c.markRejectedResponseValidated()
+		}
 		response.Body = io.NopCloser(bytes.NewReader(proxiedBody))
 		response.ContentLength = int64(len(proxiedBody))
 		response.Header.Set("Content-Length", strconv.Itoa(len(proxiedBody)))
@@ -873,6 +880,21 @@ func (c *ForgedCursorCoordinator) rebuildResponseDiagnostic() string {
 	c.proxyMu.Lock()
 	defer c.proxyMu.Unlock()
 	return c.rebuildResponseDiagnosticLocked()
+}
+
+func (c *ForgedCursorCoordinator) markRejectedResponseValidated() {
+	c.proxyMu.Lock()
+	c.rejectedResponseValidated = true
+	c.proxyMu.Unlock()
+}
+
+func (c *ForgedCursorCoordinator) requireValidatedRejectedResponse() error {
+	c.proxyMu.Lock()
+	defer c.proxyMu.Unlock()
+	if !c.rejectedResponseValidated {
+		return fmt.Errorf("React Native forged-cursor rejected response lacks authored wire proof rebuild_responses=%s", c.rebuildResponseDiagnosticLocked())
+	}
+	return nil
 }
 
 func (c *ForgedCursorCoordinator) recordProxyFailure(err error) {
@@ -1035,6 +1057,38 @@ func mutateForgedCursorFirstResponse(raw []byte) ([]byte, error) {
 		return nil, fmt.Errorf("encode React Native forged-cursor first response: %w", err)
 	}
 	return mutated, nil
+}
+
+func validateForgedCursorRejectedResponse(scenario scenarios.Scenario, upstreamStatus, proxiedStatus int, upstreamBody, proxiedBody []byte) error {
+	wire, err := forgedCursorWireExpectation(scenario, forgedCursorStepOrder[5])
+	if err != nil {
+		return err
+	}
+	if upstreamStatus != wire.HTTPStatus || proxiedStatus != upstreamStatus {
+		return fmt.Errorf("React Native forged-cursor rejected response statuses upstream=%d proxied=%d want=%d/%d", upstreamStatus, proxiedStatus, wire.HTTPStatus, wire.HTTPStatus)
+	}
+	if !bytes.Equal(proxiedBody, upstreamBody) {
+		return fmt.Errorf("React Native forged-cursor rejected response bytes changed upstream=%q proxied=%q", boundedRaw(upstreamBody), boundedRaw(proxiedBody))
+	}
+	var envelope struct {
+		Error *struct {
+			Code      string `json:"code"`
+			Message   string `json:"message"`
+			Retryable bool   `json:"retryable"`
+		} `json:"error"`
+	}
+	decodeErr := jsonstrict.Decode(upstreamBody, &envelope)
+	wantCode := ""
+	if wire.ErrorCode != nil {
+		wantCode = *wire.ErrorCode
+	}
+	if decodeErr != nil || envelope.Error == nil {
+		return fmt.Errorf("React Native forged-cursor rejected response envelope=%q error_present=%t decode_error=%v", boundedRaw(upstreamBody), envelope.Error != nil, decodeErr)
+	}
+	if envelope.Error.Code != wantCode || envelope.Error.Message == "" || envelope.Error.Retryable != wire.Retryable {
+		return fmt.Errorf("React Native forged-cursor rejected response error={code:%q message_nonempty:%t retryable:%t} want={code:%q message_nonempty:true retryable:%t}", envelope.Error.Code, envelope.Error.Message != "", envelope.Error.Retryable, wantCode, wire.Retryable)
+	}
+	return nil
 }
 
 func (c *ForgedCursorCoordinator) acceptLocked(raw json.RawMessage) error {
@@ -1314,7 +1368,10 @@ func (c *ForgedCursorCoordinator) validateCallComplete(raw json.RawMessage) erro
 	if callErr != nil || stateErr != nil || completionErr != nil || callID != c.callID || state != "completed" || completion != "error" {
 		return fmt.Errorf("React Native forged-cursor completed call_id=%q want=%q state=%q want=completed completion=%q want=error errors=%v/%v/%v", callID, c.callID, state, completion, callErr, stateErr, completionErr)
 	}
-	if err := validateForgedCursorErrorStatus(c.config.Scenario, members["status"]); err != nil {
+	if err := c.requireValidatedRejectedResponse(); err != nil {
+		return err
+	}
+	if err := validateForgedCursorErrorStatus(c.config.Scenario, c.config.Platform, members["status"]); err != nil {
 		return fmt.Errorf("%w rebuild_responses=%s", err, c.rebuildResponseDiagnostic())
 	}
 	return c.validateProcess(members["process"], "call-completed")
@@ -1328,7 +1385,7 @@ func (c *ForgedCursorCoordinator) validateProcess(raw json.RawMessage, stage str
 	return nil
 }
 
-func validateForgedCursorErrorStatus(scenario scenarios.Scenario, raw json.RawMessage) error {
+func validateForgedCursorErrorStatus(scenario scenarios.Scenario, platform string, raw json.RawMessage) error {
 	wire, err := forgedCursorWireExpectation(scenario, forgedCursorStepOrder[5])
 	if err != nil {
 		return err
@@ -1347,12 +1404,19 @@ func validateForgedCursorErrorStatus(scenario scenarios.Scenario, raw json.RawMe
 	var failureMembers map[string]json.RawMessage
 	failureErr := decodeStrictMembers(status.Failure, &failureMembers, 4, "forged-cursor failure")
 	decodeErr := json.Unmarshal(status.Failure, &failure)
+	var operation string
+	operationErr := json.Unmarshal(status.Operation, &operation)
 	wantCode := ""
 	if wire.ErrorCode != nil {
 		wantCode = *wire.ErrorCode
 	}
-	if status.State != "error" || !isJSONNull(status.RetryAt) || failureErr != nil || decodeErr != nil || failure.Operation != "rebuild" || failure.Code != wantCode || failure.Retryable != wire.Retryable || failure.RecoveryAction == "" {
-		return fmt.Errorf("React Native forged-cursor status state=%q retry_at=%s failure={operation:%q code:%q retryable:%t recovery_action:%q} want={state:error retry_at:null operation:rebuild code:%q retryable:%t nonempty_recovery:true} errors=%v/%v", status.State, boundedRaw(status.RetryAt), failure.Operation, failure.Code, failure.Retryable, failure.RecoveryAction, wantCode, wire.Retryable, failureErr, decodeErr)
+	if platform == "android" {
+		wantCode = "server_error"
+	} else if platform != "ios" {
+		return fmt.Errorf("React Native forged-cursor lifecycle platform=%q, want ios or android", platform)
+	}
+	if status.State != "error" || !isJSONNull(status.RetryAt) || operationErr != nil || operation != "rebuilding" || failureErr != nil || decodeErr != nil || failure.Operation != operation || failure.Code != wantCode || failure.Retryable != wire.Retryable || failure.RecoveryAction != "retry" {
+		return fmt.Errorf("React Native forged-cursor status state=%q retry_at=%s operation=%q failure={operation:%q code:%q retryable:%t recovery_action:%q} want={state:error retry_at:null operation:rebuilding failure_operation:rebuilding code:%q retryable:%t recovery_action:retry} errors=%v/%v/%v", status.State, boundedRaw(status.RetryAt), operation, failure.Operation, failure.Code, failure.Retryable, failure.RecoveryAction, wantCode, wire.Retryable, operationErr, failureErr, decodeErr)
 	}
 	return nil
 }
@@ -1399,7 +1463,7 @@ func (c *ForgedCursorCoordinator) finishLocked() error {
 	if err := c.bindFinalServerIdentities(); err != nil {
 		return err
 	}
-	if err := validateForgedCursorFinalCapture(c.config.Scenario, *c.finalCapture, *c.serverAfter, c.runtimeIDs, c.serverClient.ClientGeneration); err != nil {
+	if err := validateForgedCursorFinalCapture(c.config.Scenario, c.config.Platform, *c.finalCapture, *c.serverAfter, c.runtimeIDs, c.serverClient.ClientGeneration); err != nil {
 		return err
 	}
 	expected := scenarios.CloneStateFacts(*c.expected)
@@ -1472,14 +1536,14 @@ func resolveForgedCursorServerIdentities(aliases []scenarios.NativeIdentityAlias
 	return resolutions, nil
 }
 
-func validateForgedCursorFinalCapture(scenario scenarios.Scenario, capture finalCapture, server scenarios.StateFacts, runtime map[string]json.RawMessage, serverGeneration uint64) error {
+func validateForgedCursorFinalCapture(scenario scenarios.Scenario, platform string, capture finalCapture, server scenarios.StateFacts, runtime map[string]json.RawMessage, serverGeneration uint64) error {
 	if err := validateEmptyArray(capture.Pending); err != nil {
 		return fmt.Errorf("React Native forged-cursor pending mutations=%s, want []: %w", boundedRaw(capture.Pending), err)
 	}
 	if err := validateEmptyArray(capture.Rejected); err != nil {
 		return fmt.Errorf("React Native forged-cursor rejected mutations=%s, want []: %w", boundedRaw(capture.Rejected), err)
 	}
-	if err := validateForgedCursorErrorStatus(scenario, capture.Status); err != nil {
+	if err := validateForgedCursorErrorStatus(scenario, platform, capture.Status); err != nil {
 		return err
 	}
 	state, err := decodeClientState(capture.ClientState)

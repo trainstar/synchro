@@ -86,17 +86,18 @@ type SchemaQueuedMutationCoordinator struct {
 	tableName  string
 	primaryKey string
 
-	mu          sync.Mutex
-	prepared    bool
-	closed      bool
-	completed   bool
-	failed      error
-	stage       schemaQueuedMutationStage
-	nextSeq     uint64
-	process     *actionProcessIdentity
-	preRestart  *traceSnapshot
-	finalResult *finalCapture
-	result      SchemaQueuedMutationCoordinatorResult
+	mu                    sync.Mutex
+	prepared              bool
+	closed                bool
+	completed             bool
+	failed                error
+	stage                 schemaQueuedMutationStage
+	nextSeq               uint64
+	process               *actionProcessIdentity
+	preRestart            *traceSnapshot
+	finalResult           *finalCapture
+	retainedClientVersion string
+	result                SchemaQueuedMutationCoordinatorResult
 }
 
 type schemaQueuedMutationStage uint8
@@ -986,7 +987,7 @@ func (c *SchemaQueuedMutationCoordinator) validatePendingMutation(expected scena
 	observed := pending[0]
 	if observed.MutationID != mutationID || observed.TableID != tableID || observed.TableName != c.tableName || observed.RecordID != recordID ||
 		observed.PrimaryKeyFieldID != primaryField || observed.Operation != expected.Operation || observed.AuthoredSchema != schemaOne ||
-		observed.BaseVersion == nil || *observed.BaseVersion != baseVersion || observed.ClientVersion != expected.ClientVersion ||
+		observed.BaseVersion == nil || *observed.BaseVersion != baseVersion || observed.ClientVersion == "" ||
 		observed.Status != expected.Status || observed.SealedBatchID == nil || *observed.SealedBatchID != batchID || observed.SealedOrdinal == nil || *observed.SealedOrdinal != 1 ||
 		observed.LocalOrder != expected.LocalOrder || len(observed.AuthoredFields) != len(expected.AuthoredColumns) {
 		return fmt.Errorf("React Native schema-queued-mutation pending observed=%+v expected mutation=%q table=%q table_name=%q record=%q primary=%q schema=%+v base=%q batch=%q order=%d", observed, mutationID, tableID, c.tableName, recordID, primaryField, schemaOne, baseVersion, batchID, expected.LocalOrder)
@@ -995,6 +996,8 @@ func (c *SchemaQueuedMutationCoordinator) validatePendingMutation(expected scena
 	if field.FieldID != fieldID || field.LogicalType != expected.AuthoredColumns[0].Type || !semanticRawJSONEqual(field.Value, json.RawMessage(expected.AuthoredColumns[0].WireJSON)) {
 		return fmt.Errorf("React Native schema-queued-mutation retained field id=%q want=%q type=%q want=%q value=%s want=%s", field.FieldID, fieldID, field.LogicalType, expected.AuthoredColumns[0].Type, field.Value, expected.AuthoredColumns[0].WireJSON)
 	}
+	// The local trigger generates clientVersion. Kotlin and Swift accept that runtime timestamp because the scenario declares no timestamp alias.
+	c.retainedClientVersion = observed.ClientVersion
 	return nil
 }
 
@@ -1090,7 +1093,8 @@ func (c *SchemaQueuedMutationCoordinator) validateStoredMutation(raw string) err
 	column := mutation.Columns[fieldID]
 	if mutation.MutationID != mutationID || mutation.Table != tableID || !semanticRawJSONEqual(primary, c.runtimeIDs["queued-row-primary-key"]) ||
 		mutation.AuthoredSchema != schemaOne || mutation.Operation != expected.Operation || mutation.BaseVersion == nil || *mutation.BaseVersion != baseVersion ||
-		mutation.ClientVersion != expected.ClientVersion || len(mutation.Columns) != 1 || !semanticRawJSONEqual(column, json.RawMessage(expected.AuthoredColumns[0].WireJSON)) {
+		mutation.ClientVersion == "" || c.retainedClientVersion == "" || mutation.ClientVersion != c.retainedClientVersion ||
+		len(mutation.Columns) != 1 || !semanticRawJSONEqual(column, json.RawMessage(expected.AuthoredColumns[0].WireJSON)) {
 		return fmt.Errorf("React Native schema-queued-mutation stored mutation=%s expected mutation=%q table=%q primary_field=%q record=%q schema=%+v base=%q field=%q", raw, mutationID, tableID, primaryField, recordID, schemaOne, baseVersion, fieldID)
 	}
 	return nil
