@@ -25,8 +25,6 @@ import (
 const (
 	queueReplayScenarioPath = "conformance/scenarios/performance/queue-replay-001.json"
 	queueReplayScenarioID   = "SCN-PERF-QUEUE-REPLAY-001"
-	// The conformance command parser bounds the action steps array to 512 values.
-	queueReplayMaximumLocalOperations = 512
 )
 
 // LoadQueueReplayScenario loads the authored queue-replay scenario.
@@ -317,26 +315,19 @@ func (c *QueueReplayCoordinator) Token() string {
 	return c.token
 }
 
-// ExchangeCount returns the exact number of exchanges required by this coordinator.
-func (c *QueueReplayCoordinator) ExchangeCount() int {
+// StageCount returns the exact number of exchanges required by this coordinator.
+func (c *QueueReplayCoordinator) StageCount() int {
 	if c == nil {
 		return 0
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return c.exchangeCountLocked()
-}
-
-func (c *QueueReplayCoordinator) exchangeCountLocked() int {
 	count := 4 // open, bootstrap, final capture, complete response
 	for _, workload := range c.steps {
-		count += queueReplayLocalBatchCount(workload) + 6 // write batches, stop, schema check, begin loss, await loss, replay stop, replay
+		count += len(workload.local) + 6 // writes, stop, schema check, begin loss, await loss, replay stop, replay
 	}
 	return count
 }
-
-// StageCount is retained for the Detox configuration name.
-func (c *QueueReplayCoordinator) StageCount() int { return c.ExchangeCount() }
 
 func (c *QueueReplayCoordinator) Completed() bool {
 	if c == nil {
@@ -353,22 +344,13 @@ func (c *QueueReplayCoordinator) Result() (QueueReplayCoordinatorResult, error) 
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	progress := c.progressLocked()
 	if c.failed != nil {
-		return QueueReplayCoordinatorResult{}, fmt.Errorf("%w (%s)", c.failed, progress)
+		return QueueReplayCoordinatorResult{}, c.failed
 	}
 	if !c.completed {
-		return QueueReplayCoordinatorResult{}, fmt.Errorf("React Native queue-replay coordinator has not completed (%s)", progress)
+		return QueueReplayCoordinatorResult{}, errors.New("React Native queue-replay coordinator has not completed")
 	}
 	return c.result, nil
-}
-
-func (c *QueueReplayCoordinator) progressLocked() string {
-	served := c.nextSeq
-	if served > 0 {
-		served--
-	}
-	return fmt.Sprintf("current stage=%s, exchanges served=%d versus ExchangeCount=%d", queueReplayStageName(c.stage), served, c.exchangeCountLocked())
 }
 
 func (c *QueueReplayCoordinator) Close(ctx context.Context) error {
@@ -669,6 +651,7 @@ func (c *QueueReplayCoordinator) acceptResultLocked(raw json.RawMessage) error {
 		if err := c.validateLocal(envelope.Result); err != nil {
 			return err
 		}
+		c.localIndex++
 	case queueReplayStageStoppedBeforeSchema, queueReplayStageStoppedAfterLoss:
 		if err := c.validateStopped(envelope.Result); err != nil {
 			return err
@@ -718,22 +701,22 @@ func (c *QueueReplayCoordinator) advanceLocked(ctx context.Context, sequence uin
 			c.stage = queueReplayStageCapture
 			break
 		}
-		command, err := c.localCommand()
+		operation, err := c.localOperation()
 		if err != nil {
 			return exchangeResponse{}, err
 		}
-		response.Command = command
+		response.Command = c.commandOperation("client", "execute-step", map[string]any{"client_key": c.clientKey}, operation)
 		c.stage = queueReplayStageLocalWrite
 	case queueReplayStageLocalWrite:
 		if c.stepIndex >= len(c.steps) {
 			return exchangeResponse{}, errors.New("React Native queue-replay workload is unavailable")
 		}
 		if c.localIndex < len(c.steps[c.stepIndex].local) {
-			command, err := c.localCommand()
+			operation, err := c.localOperation()
 			if err != nil {
 				return exchangeResponse{}, err
 			}
-			response.Command = command
+			response.Command = c.commandOperation("client", "execute-step", map[string]any{"client_key": c.clientKey}, operation)
 			break
 		}
 		response.Command = c.command("client", "lifecycle", map[string]any{"client_key": c.clientKey, "operation": "stop"}, nil)
@@ -779,25 +762,15 @@ func (c *QueueReplayCoordinator) advanceLocked(ctx context.Context, sequence uin
 	return response, nil
 }
 
-func (c *QueueReplayCoordinator) localCommand() (*conformanceCommand, error) {
+func (c *QueueReplayCoordinator) localOperation() (scenarios.Operation, error) {
 	if c.stepIndex >= len(c.steps) || c.localIndex >= len(c.steps[c.stepIndex].local) {
-		return nil, errors.New("React Native queue-replay local operation is unavailable")
+		return scenarios.Operation{}, errors.New("React Native queue-replay local operation is unavailable")
 	}
-	workload := c.steps[c.stepIndex]
-	limit := c.localIndex + queueReplayMaximumLocalOperations
-	if limit > len(workload.local) {
-		limit = len(workload.local)
+	operation, err := c.config.Controller.ApplicationWrite(c.steps[c.stepIndex].local[c.localIndex])
+	if err != nil {
+		return scenarios.Operation{}, fmt.Errorf("bind React Native queue-replay local write %d for step %s: %w", c.localIndex+1, c.steps[c.stepIndex].step.ID, err)
 	}
-	operations := make([]scenarios.Operation, 0, limit-c.localIndex)
-	for index := c.localIndex; index < limit; index++ {
-		operation, err := c.config.Controller.ApplicationWrite(workload.local[index])
-		if err != nil {
-			return nil, fmt.Errorf("bind React Native queue-replay local write %d for step %s: %w", index+1, workload.step.ID, err)
-		}
-		operations = append(operations, operation)
-	}
-	c.localIndex = limit
-	return c.commandOperations("client", "execute-workload", map[string]any{"client_key": c.clientKey}, operations), nil
+	return operation, nil
 }
 
 func (c *QueueReplayCoordinator) validateLocal(raw json.RawMessage) error {
@@ -1061,50 +1034,8 @@ func (c *QueueReplayCoordinator) command(actor, name string, parameters map[stri
 	return &conformanceCommand{SchemaVersion: 1, Action: conformanceManifest{Action: conformanceAction{Actor: actor, Command: name, Parameters: parameters}, Steps: steps}, Runtime: conformanceRuntime{ClientKey: c.clientKey, Database: c.database, ClientID: c.clientID, ServerURL: c.adapter, AuthToken: c.config.AuthToken}}
 }
 
-func (c *QueueReplayCoordinator) commandOperations(actor, name string, parameters map[string]any, operations []scenarios.Operation) *conformanceCommand {
-	steps := make([]conformanceStep, 0, len(operations))
-	for _, operation := range operations {
-		steps = append(steps, conformanceStep{Operation: conformanceOperation{ContractOperation: operation.ContractOperation, Name: operation.Name, Payload: copyRaw(operation.Payload)}})
-	}
-	return &conformanceCommand{SchemaVersion: 1, Action: conformanceManifest{Action: conformanceAction{Actor: actor, Command: name, Parameters: parameters}, Steps: steps}, Runtime: conformanceRuntime{ClientKey: c.clientKey, Database: c.database, ClientID: c.clientID, ServerURL: c.adapter, AuthToken: c.config.AuthToken}}
-}
-
-func queueReplayLocalBatchCount(workload queueReplayWorkload) int {
-	if len(workload.local) == 0 {
-		return 0
-	}
-	return (len(workload.local) + queueReplayMaximumLocalOperations - 1) / queueReplayMaximumLocalOperations
-}
-
-func queueReplayStageName(stage queueReplayStage) string {
-	switch stage {
-	case queueReplayStageOpen:
-		return "open"
-	case queueReplayStageOpened:
-		return "opened"
-	case queueReplayStageBootstrapped:
-		return "bootstrapped"
-	case queueReplayStageLocalWrite:
-		return "local-write"
-	case queueReplayStageStoppedBeforeSchema:
-		return "stopped-before-schema"
-	case queueReplayStageSchemaBoundary:
-		return "schema-boundary"
-	case queueReplayStageResponseLossBegun:
-		return "response-loss-begun"
-	case queueReplayStageResponseLoss:
-		return "response-loss"
-	case queueReplayStageStoppedAfterLoss:
-		return "stopped-after-loss"
-	case queueReplayStageReplay:
-		return "replay"
-	case queueReplayStageCapture:
-		return "capture"
-	case queueReplayStageComplete:
-		return "complete"
-	default:
-		return "invalid"
-	}
+func (c *QueueReplayCoordinator) commandOperation(actor, name string, parameters map[string]any, operation scenarios.Operation) *conformanceCommand {
+	return &conformanceCommand{SchemaVersion: 1, Action: conformanceManifest{Action: conformanceAction{Actor: actor, Command: name, Parameters: parameters}, Steps: []conformanceStep{{Operation: conformanceOperation{ContractOperation: operation.ContractOperation, Name: operation.Name, Payload: copyRaw(operation.Payload)}}}}, Runtime: conformanceRuntime{ClientKey: c.clientKey, Database: c.database, ClientID: c.clientID, ServerURL: c.adapter, AuthToken: c.config.AuthToken}}
 }
 
 type queueReplayClient struct{ userID, clientID string }

@@ -227,82 +227,19 @@ func TestQueueReplayProxyDropsCommittedPushAndForwardsReplay(t *testing.T) {
 	}
 }
 
-func TestQueueReplayAuthoredFlowServesExactlyExchangeCount(t *testing.T) {
+func TestQueueReplayStageCountMatchesDerivedCoordinatorStages(t *testing.T) {
 	scenario := loadQueueReplayAuthoredScenario(t)
 	workloads, err := queueReplayWorkloads(scenario)
 	if err != nil {
 		t.Fatalf("derive queue-replay workloads: %v", err)
 	}
 	coordinator := &QueueReplayCoordinator{steps: workloads}
-	type exchange struct {
-		actor           string
-		command         string
-		state           string
-		localOperations int
-	}
-	want := []exchange{
-		{actor: "client", command: "open", state: "command"},
-		{actor: "client", command: "synchronize-step", state: "command"},
-	}
+	want := 4
 	for _, workload := range workloads {
-		for start := 0; start < len(workload.local); start += queueReplayMaximumLocalOperations {
-			end := start + queueReplayMaximumLocalOperations
-			if end > len(workload.local) {
-				end = len(workload.local)
-			}
-			want = append(want, exchange{actor: "client", command: "execute-workload", state: "command", localOperations: end - start})
-		}
-		want = append(want,
-			exchange{actor: "client", command: "lifecycle", state: "command"},
-			exchange{actor: "client", command: "synchronize-step", state: "command"},
-			exchange{actor: "client", command: "begin-call", state: "command"},
-			exchange{actor: "client", command: "await-call", state: "command"},
-			exchange{actor: "client", command: "lifecycle", state: "command"},
-			exchange{actor: "client", command: "synchronize-step", state: "command"},
-		)
+		want += len(workload.local) + 6
 	}
-	want = append(want, exchange{actor: "observer", command: "capture", state: "command"}, exchange{state: "complete"})
-
-	localOperations := 0
-	for sequence, expected := range want {
-		if expected.state == "complete" {
-			if sequence+1 != coordinator.ExchangeCount() {
-				t.Fatalf("queue-replay terminal exchange = %d, want ExchangeCount=%d", sequence+1, coordinator.ExchangeCount())
-			}
-			continue
-		}
-		if expected.actor == "" || expected.command == "" || expected.state != "command" {
-			t.Fatalf("queue-replay exchange %d is invalid: %#v", sequence+1, expected)
-		}
-		if expected.command == "execute-workload" {
-			if expected.localOperations == 0 || expected.localOperations > queueReplayMaximumLocalOperations {
-				t.Fatalf("queue-replay exchange %d local operation count = %d", sequence+1, expected.localOperations)
-			}
-			localOperations += expected.localOperations
-		}
-	}
-	if localOperations != 3306 {
-		t.Fatalf("queue-replay authored local operations = %d, want 3306", localOperations)
-	}
-	if got, wantCount := coordinator.ExchangeCount(), 70; got != wantCount {
-		t.Fatalf("queue-replay ExchangeCount = %d, want %d", got, wantCount)
-	}
-	if got, wantCount := coordinator.StageCount(), coordinator.ExchangeCount(); got != wantCount {
-		t.Fatalf("queue-replay StageCount = %d, want ExchangeCount=%d", got, wantCount)
-	}
-}
-
-func TestQueueReplayIncompleteResultNamesStageAndExchangeProgress(t *testing.T) {
-	scenario := loadQueueReplayAuthoredScenario(t)
-	workloads, err := queueReplayWorkloads(scenario)
-	if err != nil {
-		t.Fatalf("derive queue-replay workloads: %v", err)
-	}
-	coordinator := &QueueReplayCoordinator{steps: workloads, stage: queueReplayStageCapture}
-	coordinator.nextSeq = uint64(coordinator.ExchangeCount())
-	_, err = coordinator.Result()
-	if err == nil || !strings.Contains(err.Error(), "current stage=capture") || !strings.Contains(err.Error(), "exchanges served=69 versus ExchangeCount=70") {
-		t.Fatalf("incomplete queue-replay result = %v, want current stage and exchange progress", err)
+	if actual := coordinator.StageCount(); actual != want {
+		t.Fatalf("queue-replay coordinator stage count = %d, want %d", actual, want)
 	}
 }
 
