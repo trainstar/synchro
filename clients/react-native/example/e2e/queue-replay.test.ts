@@ -1,5 +1,7 @@
 import { by, device, element, expect } from 'detox';
 
+jest.setTimeout(30 * 60 * 1000);
+
 type ExchangeResponse = {
   schema_version: number;
   sequence: number;

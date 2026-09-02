@@ -315,19 +315,26 @@ func (c *QueueReplayCoordinator) Token() string {
 	return c.token
 }
 
-// StageCount returns the exact number of exchanges required by this coordinator.
-func (c *QueueReplayCoordinator) StageCount() int {
+// ExchangeCount returns the exact number of exchanges required by this coordinator.
+func (c *QueueReplayCoordinator) ExchangeCount() int {
 	if c == nil {
 		return 0
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	return c.exchangeCountLocked()
+}
+
+func (c *QueueReplayCoordinator) exchangeCountLocked() int {
 	count := 4 // open, bootstrap, final capture, complete response
 	for _, workload := range c.steps {
 		count += len(workload.local) + 6 // writes, stop, schema check, begin loss, await loss, replay stop, replay
 	}
 	return count
 }
+
+// StageCount retains the configuration name used by the Detox consumer.
+func (c *QueueReplayCoordinator) StageCount() int { return c.ExchangeCount() }
 
 func (c *QueueReplayCoordinator) Completed() bool {
 	if c == nil {
@@ -344,11 +351,16 @@ func (c *QueueReplayCoordinator) Result() (QueueReplayCoordinatorResult, error) 
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	served := uint64(0)
+	if c.nextSeq > 0 {
+		served = c.nextSeq - 1
+	}
+	progress := fmt.Sprintf("current stage=%s, exchanges served=%d versus ExchangeCount=%d", c.stage, served, c.exchangeCountLocked())
 	if c.failed != nil {
-		return QueueReplayCoordinatorResult{}, c.failed
+		return QueueReplayCoordinatorResult{}, fmt.Errorf("%w (%s)", c.failed, progress)
 	}
 	if !c.completed {
-		return QueueReplayCoordinatorResult{}, errors.New("React Native queue-replay coordinator has not completed")
+		return QueueReplayCoordinatorResult{}, fmt.Errorf("React Native queue-replay coordinator has not completed (%s)", progress)
 	}
 	return c.result, nil
 }
@@ -1036,6 +1048,37 @@ func (c *QueueReplayCoordinator) command(actor, name string, parameters map[stri
 
 func (c *QueueReplayCoordinator) commandOperation(actor, name string, parameters map[string]any, operation scenarios.Operation) *conformanceCommand {
 	return &conformanceCommand{SchemaVersion: 1, Action: conformanceManifest{Action: conformanceAction{Actor: actor, Command: name, Parameters: parameters}, Steps: []conformanceStep{{Operation: conformanceOperation{ContractOperation: operation.ContractOperation, Name: operation.Name, Payload: copyRaw(operation.Payload)}}}}, Runtime: conformanceRuntime{ClientKey: c.clientKey, Database: c.database, ClientID: c.clientID, ServerURL: c.adapter, AuthToken: c.config.AuthToken}}
+}
+
+func (stage queueReplayStage) String() string {
+	switch stage {
+	case queueReplayStageOpen:
+		return "open"
+	case queueReplayStageOpened:
+		return "opened"
+	case queueReplayStageBootstrapped:
+		return "bootstrapped"
+	case queueReplayStageLocalWrite:
+		return "local-write"
+	case queueReplayStageStoppedBeforeSchema:
+		return "stopped-before-schema"
+	case queueReplayStageSchemaBoundary:
+		return "schema-boundary"
+	case queueReplayStageResponseLossBegun:
+		return "response-loss-begun"
+	case queueReplayStageResponseLoss:
+		return "response-loss"
+	case queueReplayStageStoppedAfterLoss:
+		return "stopped-after-loss"
+	case queueReplayStageReplay:
+		return "replay"
+	case queueReplayStageCapture:
+		return "capture"
+	case queueReplayStageComplete:
+		return "complete"
+	default:
+		return "invalid"
+	}
 }
 
 type queueReplayClient struct{ userID, clientID string }

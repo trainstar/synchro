@@ -405,6 +405,36 @@ func TestValidateRebuildRequestsDurableCountsAcceptsTwoPageReceipts(t *testing.T
 	}
 }
 
+func TestValidateRebuildRequestsRowsAcceptsNativeMetadataChecksum(t *testing.T) {
+	coordinator, state, proof, evidence := rebuildRequestsRowsForTest(t)
+	if err := coordinator.validateRows(state, proof, evidence); err != nil {
+		t.Fatalf("native selected row metadata checksum was rejected: %v", err)
+	}
+}
+
+func TestValidateRebuildRequestsRowsNamesEverySelectedMetadataMember(t *testing.T) {
+	coordinator, state, proof, evidence := rebuildRequestsRowsForTest(t)
+	invalidChecksum := "invalid"
+	proof.RowMetadata = &durableMetadata{
+		TableName: "other-table", RecordID: "other-record", ServerVersion: "", RowChecksum: &invalidChecksum,
+	}
+	err := coordinator.validateRows(state, proof, evidence)
+	if err == nil {
+		t.Fatal("invalid selected row metadata was accepted")
+	}
+	for _, value := range []string{
+		`table_name="other-table" want="items"`,
+		`record_id="other-record" want="row-c"`,
+		`server_version="" want=nonempty`,
+		`row_checksum=invalid want="` + strings.Repeat("c", 64) + `"`,
+		"row_checksum_decode_error=",
+	} {
+		if !strings.Contains(err.Error(), value) {
+			t.Fatalf("selected row metadata diagnostic = %q, want it to contain %q", err, value)
+		}
+	}
+}
+
 func loadRebuildRequestsAuthoredScenario(t *testing.T) scenarios.Scenario {
 	t.Helper()
 	repoRoot, err := filepath.Abs(filepath.Join("..", ".."))
@@ -538,4 +568,33 @@ func rebuildRequestsDurableStateForTest() inspectedClientState {
 		RebuildAttemptCount: 0, RebuildReceiptCount: 2,
 		ScopeStates: []clientScopeState{{}}, ScopeRows: []clientScopeRow{{}, {}, {}},
 	}
+}
+
+func rebuildRequestsRowsForTest(t *testing.T) (*RebuildRequestsCoordinator, inspectedClientState, durableProof, rebuildRequestsIdentityEvidence) {
+	t.Helper()
+	coordinator, err := NewRebuildRequestsCoordinator(RebuildRequestsCoordinatorConfig{
+		Scenario: loadRebuildRequestsAuthoredScenario(t), Platform: "android", ServerURL: "http://127.0.0.1:8080", AuthToken: "unit-token",
+	})
+	if err != nil {
+		t.Fatalf("create rebuild-requests coordinator: %v", err)
+	}
+	t.Cleanup(func() { _ = coordinator.Close(context.Background()) })
+	rows := []clientScopeRow{
+		{ScopeID: "scope-a", TableName: "items", RecordID: "row-a", Checksum: strings.Repeat("a", 64), Generation: 1},
+		{ScopeID: "scope-a", TableName: "items", RecordID: "row-b", Checksum: strings.Repeat("b", 64), Generation: 1},
+		{ScopeID: "scope-a", TableName: "items", RecordID: "row-c", Checksum: strings.Repeat("c", 64), Generation: 1},
+	}
+	coordinator.runtimeIDs["row-a-primary-key"] = json.RawMessage(`"row-a"`)
+	coordinator.runtimeIDs["row-b-primary-key"] = json.RawMessage(`"row-b"`)
+	coordinator.runtimeIDs["row-c-primary-key"] = json.RawMessage(`"row-c"`)
+	provenance, err := json.Marshal(rows)
+	if err != nil {
+		t.Fatalf("encode rebuild-requests provenance: %v", err)
+	}
+	coordinator.finalResult = &finalCapture{Provenance: provenance}
+	checksum := `{"algorithm":"sha256","version":1,"encoding":"hex","digest":"` + strings.Repeat("c", 64) + `"}`
+	proof := durableProof{RowMetadata: &durableMetadata{
+		TableName: "items", RecordID: "row-c", ServerVersion: "version-c", RowChecksum: &checksum,
+	}}
+	return coordinator, inspectedClientState{ScopeRows: rows}, proof, rebuildRequestsIdentityEvidence{tableName: "items"}
 }

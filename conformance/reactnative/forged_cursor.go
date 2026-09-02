@@ -1555,6 +1555,14 @@ func resolveForgedCursorServerIdentities(aliases []scenarios.NativeIdentityAlias
 	return resolutions, nil
 }
 
+func validateForgedCursorUnfinishedReceipt(receipt rebuildReceiptProof, rebuildID string, pageCount uint64) error {
+	// The rejected continuation leaves only the intermediate page receipt.
+	if receipt.RebuildIDFingerprint != hashFingerprint(rebuildID) || receipt.PageCount != pageCount || receipt.ReturnedRecordCount != pageCount || receipt.RequestChainValid || !receipt.RecordsInCanonicalOrder || !receipt.RowChecksumsValid || receipt.ScopeChecksumValid || receipt.FinalChecksumMatches {
+		return fmt.Errorf("React Native forged-cursor receipt={id:%q pages:%d records:%d chain:%t order:%t rows:%t scope:%t final:%t}, want={id:%q pages:%d records:%d chain:false order:true rows:true scope:false final:false}", receipt.RebuildIDFingerprint, receipt.PageCount, receipt.ReturnedRecordCount, receipt.RequestChainValid, receipt.RecordsInCanonicalOrder, receipt.RowChecksumsValid, receipt.ScopeChecksumValid, receipt.FinalChecksumMatches, hashFingerprint(rebuildID), pageCount, pageCount)
+	}
+	return nil
+}
+
 func validateForgedCursorFinalCapture(scenario scenarios.Scenario, platform string, capture finalCapture, server scenarios.StateFacts, runtime map[string]json.RawMessage, serverGeneration uint64) error {
 	if err := validateEmptyArray(capture.Pending); err != nil {
 		return fmt.Errorf("React Native forged-cursor pending mutations=%s, want []: %w", boundedRaw(capture.Pending), err)
@@ -1598,8 +1606,8 @@ func validateForgedCursorFinalCapture(scenario scenarios.Scenario, platform stri
 		return fmt.Errorf("React Native forged-cursor durable proof row_metadata=%+v receipts=%d want nil/1 error=%v", proof.RowMetadata, len(proof.RebuildReceiptProofs), err)
 	}
 	receipt := proof.RebuildReceiptProofs[0]
-	if receipt.RebuildIDFingerprint != hashFingerprint(wantRebuild) || receipt.PageCount != server.Rebuilds[0].PageCount || receipt.ReturnedRecordCount != server.Rebuilds[0].PageCount || !receipt.RequestChainValid || !receipt.RecordsInCanonicalOrder || !receipt.RowChecksumsValid || receipt.ScopeChecksumValid || receipt.FinalChecksumMatches {
-		return fmt.Errorf("React Native forged-cursor receipt={id:%q pages:%d records:%d chain:%t order:%t rows:%t scope:%t final:%t}, want={id:%q pages:%d records:%d chain:true order:true rows:true scope:false final:false}", receipt.RebuildIDFingerprint, receipt.PageCount, receipt.ReturnedRecordCount, receipt.RequestChainValid, receipt.RecordsInCanonicalOrder, receipt.RowChecksumsValid, receipt.ScopeChecksumValid, receipt.FinalChecksumMatches, hashFingerprint(wantRebuild), server.Rebuilds[0].PageCount, server.Rebuilds[0].PageCount)
+	if err := validateForgedCursorUnfinishedReceipt(receipt, wantRebuild, server.Rebuilds[0].PageCount); err != nil {
+		return err
 	}
 	distinct, err := rebuildAttemptFactCount(state.RebuildAttempts, proof.RebuildReceiptProofs)
 	if err != nil || distinct != 1 {

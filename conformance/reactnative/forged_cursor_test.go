@@ -350,6 +350,43 @@ func TestValidateForgedCursorErrorStatusFollowsNativeAuthority(t *testing.T) {
 	}
 }
 
+func TestValidateForgedCursorUnfinishedReceiptRequiresIncompleteProof(t *testing.T) {
+	expected := forgedCursorExpectedState(loadForgedCursorAuthoredScenario(t))
+	if expected == nil || len(expected.Rebuilds) != 1 {
+		t.Fatal("authored forged-cursor rebuild is unavailable")
+	}
+	rebuild := expected.Rebuilds[0]
+	receipt := rebuildReceiptProof{
+		RebuildIDFingerprint:    hashFingerprint(rebuild.RebuildID),
+		PageCount:               rebuild.PageCount,
+		ReturnedRecordCount:     rebuild.PageCount,
+		RequestChainValid:       false,
+		RecordsInCanonicalOrder: true,
+		RowChecksumsValid:       true,
+		ScopeChecksumValid:      false,
+		FinalChecksumMatches:    false,
+	}
+	if err := validateForgedCursorUnfinishedReceipt(receipt, rebuild.RebuildID, rebuild.PageCount); err != nil {
+		t.Fatalf("validate incomplete forged-cursor receipt: %v", err)
+	}
+	for _, test := range []struct {
+		name   string
+		mutate func(*rebuildReceiptProof)
+	}{
+		{name: "completed chain", mutate: func(receipt *rebuildReceiptProof) { receipt.RequestChainValid = true }},
+		{name: "scope checksum", mutate: func(receipt *rebuildReceiptProof) { receipt.ScopeChecksumValid = true }},
+		{name: "local final checksum", mutate: func(receipt *rebuildReceiptProof) { receipt.FinalChecksumMatches = true }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			changed := receipt
+			test.mutate(&changed)
+			if err := validateForgedCursorUnfinishedReceipt(changed, rebuild.RebuildID, rebuild.PageCount); err == nil {
+				t.Fatal("changed incomplete forged-cursor receipt was accepted")
+			}
+		})
+	}
+}
+
 func TestForgedCursorProxyMatchesDirectConnectAndRelaysUpstreamResponse(t *testing.T) {
 	const requestBody = `{"client_id":"client-a","client_generation":1,"platform":"android"}`
 	longErrorBody := strings.Repeat("x", 513)

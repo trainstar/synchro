@@ -1495,8 +1495,15 @@ func (c *RebuildRequestsCoordinator) validateRows(state inspectedClientState, pr
 		metadata = *proof.RowMetadata
 	}
 	rowC, err := c.runtimeRecordID("row-c-primary-key")
-	if err != nil || metadata.TableName != evidence.tableName || metadata.RecordID != rowC || metadata.ServerVersion == "" || metadata.RowChecksum == nil || *metadata.RowChecksum != rowByID[rowC].Checksum {
-		return errors.New("React Native rebuild-requests selected row metadata is inconsistent")
+	rowChecksum, checksumErr := checksumDigest(metadata.RowChecksum)
+	checksumValue := "absent"
+	if checksumErr != nil {
+		checksumValue = "invalid"
+	} else if rowChecksum != nil {
+		checksumValue = fmt.Sprintf("%q", *rowChecksum)
+	}
+	if err != nil || metadata.TableName != evidence.tableName || metadata.RecordID != rowC || metadata.ServerVersion == "" || checksumErr != nil || rowChecksum == nil || *rowChecksum != rowByID[rowC].Checksum {
+		return fmt.Errorf("React Native rebuild-requests selected row metadata is inconsistent: table_name=%q want=%q record_id=%q want=%q server_version=%q want=nonempty row_checksum=%s want=%q row_checksum_decode_error=%v record_id_decode_error=%v", metadata.TableName, evidence.tableName, metadata.RecordID, rowC, metadata.ServerVersion, checksumValue, rowByID[rowC].Checksum, checksumErr, err)
 	}
 	var provenance []clientScopeRow
 	if err := decodeStrictValue(c.finalResult.Provenance, &provenance); err != nil || len(provenance) != 3 {
