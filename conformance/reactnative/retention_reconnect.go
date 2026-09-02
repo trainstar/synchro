@@ -1125,11 +1125,17 @@ func (c *RetentionReconnectCoordinator) validateInitialTrace(trace traceSnapshot
 			pushes = append(pushes, observed)
 		}
 	}
-	if len(pushes) != 1 {
-		return transportObservation{}, fmt.Errorf("React Native retention-reconnect initial push count = %d, want 1", len(pushes))
+	// The engine retries the sealed push inside one call through native
+	// backoff. The contract bounds the delay, the durable retry metadata, and
+	// the request identity, not the attempt count per call. Every attempt must
+	// observe the authored wire result. See the Kotlin ruling at 075767c.
+	if len(pushes) == 0 {
+		return transportObservation{}, fmt.Errorf("React Native retention-reconnect initial push count = 0, want at least 1 with status %d; trace holds %d observations", c.initialWire.HTTPStatus, len(trace.Observations))
 	}
-	if err := c.validatePushTrace(pushes[0], c.initialWire); err != nil {
-		return transportObservation{}, err
+	for _, push := range pushes {
+		if err := c.validatePushTrace(push, c.initialWire); err != nil {
+			return transportObservation{}, err
+		}
 	}
 	generation, err := requestInteger(pushes[0], "client_generation")
 	if err != nil || generation == 0 {

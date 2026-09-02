@@ -517,7 +517,11 @@ func (c *RebuildRequestsCoordinator) ServeHTTP(writer http.ResponseWriter, reque
 	defer c.mu.Unlock()
 	closed, prepared, failed, completed := c.closed, c.prepared, c.failed != nil, c.completed
 	if closed || !prepared || failed || completed || exchange.Sequence != c.nextSeq {
-		c.failed = fmt.Errorf("React Native rebuild-requests exchange is unavailable or non-monotonic: closed=%t prepared=%t failed=%t completed=%t got sequence=%d want sequence=%d", closed, prepared, failed, completed, exchange.Sequence, c.nextSeq)
+		// A latched failure is the root cause. Overwriting it with this
+		// rejection hides the defect the device run must name.
+		if !failed {
+			c.failed = fmt.Errorf("React Native rebuild-requests exchange is unavailable or non-monotonic: closed=%t prepared=%t completed=%t got sequence=%d want sequence=%d", closed, prepared, completed, exchange.Sequence, c.nextSeq)
+		}
 		writeExchangeError(writer, http.StatusConflict)
 		return
 	}
