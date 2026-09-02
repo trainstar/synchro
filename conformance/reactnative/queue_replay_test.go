@@ -239,15 +239,19 @@ func TestQueueReplayAuthoredFlowServesExactlyExchangeCount(t *testing.T) {
 		actor           string
 		command         string
 		state           string
-		localOperations int
+		localOperations []scenarios.Operation
 	}
 	want := []exchange{
 		{actor: "client", command: "open", state: "command"},
 		{actor: "client", command: "synchronize-step", state: "command"},
 	}
 	for _, workload := range workloads {
-		for range workload.local {
-			want = append(want, exchange{actor: "client", command: "execute-step", state: "command", localOperations: 1})
+		for start := 0; start < len(workload.local); start += queueReplayMaximumLocalOperations {
+			end := start + queueReplayMaximumLocalOperations
+			if end > len(workload.local) {
+				end = len(workload.local)
+			}
+			want = append(want, exchange{actor: "client", command: "execute-steps", state: "command", localOperations: workload.local[start:end]})
 		}
 		want = append(want,
 			exchange{actor: "client", command: "lifecycle", state: "command"},
@@ -261,21 +265,33 @@ func TestQueueReplayAuthoredFlowServesExactlyExchangeCount(t *testing.T) {
 	want = append(want, exchange{actor: "observer", command: "capture", state: "command"}, exchange{state: "complete"})
 
 	localOperations := 0
+	served := 0
 	for sequence, expected := range want {
+		served++
 		if expected.state == "complete" {
-			if sequence+1 != coordinator.ExchangeCount() {
-				t.Fatalf("queue-replay terminal exchange = %d, want ExchangeCount=%d", sequence+1, coordinator.ExchangeCount())
+			if served != coordinator.ExchangeCount() {
+				t.Fatalf("queue-replay terminal exchange = %d, want ExchangeCount=%d", served, coordinator.ExchangeCount())
 			}
 			continue
 		}
 		if expected.actor == "" || expected.command == "" || expected.state != "command" {
 			t.Fatalf("queue-replay exchange %d is invalid: %#v", sequence+1, expected)
 		}
-		if expected.command == "execute-step" {
-			if expected.localOperations != 1 {
-				t.Fatalf("queue-replay exchange %d local operation count = %d, want 1", sequence+1, expected.localOperations)
+		if expected.command == "execute-steps" {
+			if len(expected.localOperations) == 0 || len(expected.localOperations) > queueReplayMaximumLocalOperations {
+				t.Fatalf("queue-replay exchange %d local operation count = %d", sequence+1, len(expected.localOperations))
 			}
-			localOperations += expected.localOperations
+			command := coordinator.commandOperations(expected.actor, expected.command, map[string]any{"client_key": coordinator.clientKey}, expected.localOperations)
+			if got := len(command.Action.Steps); got != len(expected.localOperations) {
+				t.Fatalf("queue-replay exchange %d command operations = %d, want %d", sequence+1, got, len(expected.localOperations))
+			}
+			for index, authored := range expected.localOperations {
+				actual := command.Action.Steps[index].Operation
+				if actual.ContractOperation != authored.ContractOperation || actual.Name != authored.Name || string(actual.Payload) != string(authored.Payload) {
+					t.Fatalf("queue-replay exchange %d operation %d does not preserve authored order", sequence+1, index+1)
+				}
+			}
+			localOperations += len(expected.localOperations)
 		}
 	}
 	wantLocalOperations := 0
@@ -288,7 +304,10 @@ func TestQueueReplayAuthoredFlowServesExactlyExchangeCount(t *testing.T) {
 	if got, wantCount := len(want), coordinator.ExchangeCount(); got != wantCount {
 		t.Fatalf("queue-replay full-flow exchanges = %d, want ExchangeCount=%d", got, wantCount)
 	}
-	if got, wantCount := coordinator.ExchangeCount(), 3364; got != wantCount {
+	if served != coordinator.ExchangeCount() {
+		t.Fatalf("queue-replay exchanges served = %d, want ExchangeCount=%d", served, coordinator.ExchangeCount())
+	}
+	if got, wantCount := coordinator.ExchangeCount(), 115; got != wantCount {
 		t.Fatalf("queue-replay ExchangeCount = %d, want %d", got, wantCount)
 	}
 	if got, wantCount := coordinator.StageCount(), coordinator.ExchangeCount(); got != wantCount {
@@ -299,15 +318,63 @@ func TestQueueReplayAuthoredFlowServesExactlyExchangeCount(t *testing.T) {
 	}
 }
 
+func TestQueueReplayLocalBatchResultMatchesAuthoredOperationCount(t *testing.T) {
+	process := &actionProcessIdentity{
+		ProcessID:                   "process-a",
+		DatabaseIdentityFingerprint: strings.Repeat("a", 64),
+	}
+	coordinator := &QueueReplayCoordinator{
+		steps:   []queueReplayWorkload{{local: make([]scenarios.Operation, 65)}},
+		stage:   queueReplayStageLocalWrite,
+		process: process,
+	}
+	if err := coordinator.acceptResultLocked(queueReplayLocalResultForTest(64, *process)); err != nil {
+		t.Fatalf("accept full queue-replay local batch: %v", err)
+	}
+	if coordinator.localIndex != 64 {
+		t.Fatalf("queue-replay local index = %d, want 64", coordinator.localIndex)
+	}
+	if err := coordinator.acceptResultLocked(queueReplayLocalResultForTest(2, *process)); err == nil {
+		t.Fatal("queue-replay accepted a partial batch with an invalid summed row count")
+	} else if !strings.Contains(err.Error(), "rows_affected=2 want=1") {
+		t.Fatalf("queue-replay local batch diagnostic = %q, want summed rows and authored operation count", err)
+	}
+	if coordinator.localIndex != 64 {
+		t.Fatalf("queue-replay local index after rejected result = %d, want 64", coordinator.localIndex)
+	}
+	if err := coordinator.acceptResultLocked(queueReplayLocalResultForTest(1, *process)); err != nil {
+		t.Fatalf("accept final queue-replay local batch: %v", err)
+	}
+	if coordinator.localIndex != 65 {
+		t.Fatalf("queue-replay final local index = %d, want 65", coordinator.localIndex)
+	}
+}
+
+func queueReplayLocalResultForTest(rows uint64, process actionProcessIdentity) json.RawMessage {
+	encoded, err := json.Marshal(map[string]any{
+		"schema_version": 1,
+		"outcome":        "passed",
+		"result": map[string]any{
+			"kind": "local-action", "rows_affected": rows, "process": process,
+		},
+		"error_code":   nil,
+		"error_detail": nil,
+	})
+	if err != nil {
+		panic(err)
+	}
+	return encoded
+}
+
 func TestQueueReplayIncompleteResultNamesServedAndExpectedExchanges(t *testing.T) {
 	scenario := loadQueueReplayAuthoredScenario(t)
 	workloads, err := queueReplayWorkloads(scenario)
 	if err != nil {
 		t.Fatalf("derive queue-replay workloads: %v", err)
 	}
-	coordinator := &QueueReplayCoordinator{steps: workloads, stage: queueReplayStageCapture, nextSeq: 3364}
+	coordinator := &QueueReplayCoordinator{steps: workloads, stage: queueReplayStageCapture, nextSeq: 115}
 	_, err = coordinator.Result()
-	if err == nil || !strings.Contains(err.Error(), "current stage=capture") || !strings.Contains(err.Error(), "exchanges served=3363 versus ExchangeCount=3364") {
+	if err == nil || !strings.Contains(err.Error(), "current stage=capture") || !strings.Contains(err.Error(), "exchanges served=114 versus ExchangeCount=115") {
 		t.Fatalf("incomplete queue-replay result = %v, want current stage and exchange progress", err)
 	}
 }
@@ -318,9 +385,9 @@ func TestQueueReplayFailedResultNamesServedAndExpectedExchanges(t *testing.T) {
 	if err != nil {
 		t.Fatalf("derive queue-replay workloads: %v", err)
 	}
-	coordinator := &QueueReplayCoordinator{steps: workloads, stage: queueReplayStageComplete, nextSeq: 3364, failed: errors.New("terminal validation failed")}
+	coordinator := &QueueReplayCoordinator{steps: workloads, stage: queueReplayStageComplete, nextSeq: 115, failed: errors.New("terminal validation failed")}
 	_, err = coordinator.Result()
-	if err == nil || !strings.Contains(err.Error(), "terminal validation failed") || !strings.Contains(err.Error(), "current stage=complete") || !strings.Contains(err.Error(), "exchanges served=3363 versus ExchangeCount=3364") {
+	if err == nil || !strings.Contains(err.Error(), "terminal validation failed") || !strings.Contains(err.Error(), "current stage=complete") || !strings.Contains(err.Error(), "exchanges served=114 versus ExchangeCount=115") {
 		t.Fatalf("failed queue-replay result = %v, want cause, current stage, and exchange progress", err)
 	}
 }
