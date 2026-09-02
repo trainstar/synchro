@@ -437,16 +437,16 @@ export class PublicConformanceRunner {
           // The native runners capture the complete retained ledger for this
           // source, pending states plus rejected_terminal. The pending-only
           // inspection excludes rejected_terminal by design.
-          capture.pending_mutations = bounded(await client.inspectRetainedMutations());
+          capture.pending_mutations = bounded(await client.inspectRetainedMutations(), 'pending-mutations');
           break;
         case 'rejected-mutations':
-          capture.rejected_mutations = bounded(await client.inspectRejectedMutations());
+          capture.rejected_mutations = bounded(await client.inspectRejectedMutations(), 'rejected-mutations');
           break;
         case 'sync-status':
           capture.sync_status = rawStatus(await client.getSyncStatus());
           break;
         case 'sync-events':
-          capture.sync_events = bounded(rawEvents(this.requireSession(clientKeys[0]).events));
+          capture.sync_events = bounded(rawEvents(this.requireSession(clientKeys[0]).events), 'sync-events');
           break;
         case 'scope-state':
           capture.client_state = await inspection.clientState();
@@ -464,7 +464,7 @@ export class PublicConformanceRunner {
           break;
         }
         case 'provenance':
-          capture.provenance = bounded((await inspection.clientState()).scopeRows);
+          capture.provenance = bounded((await inspection.clientState()).scopeRows, 'provenance');
           break;
         case 'request-trace':
           capture.request_trace = await inspection.transportObservations();
@@ -850,9 +850,9 @@ function describeBoundFailure(error: unknown): string {
   return error instanceof Error ? error.message : 'result is not bounded';
 }
 
-function bounded<T>(values: T[]): T[] {
+function bounded<T>(values: T[], source: string): T[] {
   if (values.length > MAXIMUM_CAPTURE_VALUES) {
-    throw new ConformanceCommandError('execution_failed', new Error(`capture holds ${values.length} values, bound is ${MAXIMUM_CAPTURE_VALUES}`));
+    throw new ConformanceCommandError('execution_failed', new Error(`capture source ${source} holds ${values.length} values, bound is ${MAXIMUM_CAPTURE_VALUES}`));
   }
   return values;
 }
