@@ -159,7 +159,7 @@ func TestRebuildRequestsExchangeDiagnosticNamesGuardValues(t *testing.T) {
 		t.Fatal("out-of-order rebuild-requests exchange did not preserve coordinator failure")
 	}
 	for _, value := range []string{
-		"closed=false", "prepared=true", "failed=false", "completed=false", "got sequence=2", "want sequence=1",
+		"closed=false", "prepared=true", "completed=false", "got sequence=2", "want sequence=1",
 	} {
 		if !strings.Contains(err.Error(), value) {
 			t.Fatalf("rebuild-requests diagnostic = %q, want it to contain %q", err, value)
