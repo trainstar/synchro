@@ -25,6 +25,8 @@ const (
 	forgedCursorScenarioID   = "SCN-REBUILD-FORGED-CURSOR-001"
 	forgedCursorSeedAsset    = "seed.db"
 	forgedCursorOverride     = "native-forged-rebuild-cursor"
+	// Keep a response window before Detox cancels the exchange.
+	forgedCursorPushWait     = 20 * time.Second
 )
 
 var forgedCursorStepOrder = []scenarios.StepID{
@@ -130,7 +132,10 @@ const (
 	forgedCursorStageCallComplete
 	forgedCursorStageCapture
 	forgedCursorStageComplete
+	forgedCursorStagePushTimeoutDiagnostic
 )
+
+var errForgedCursorPushWaitTimeout = errors.New("React Native forged-cursor push commit timed out")
 
 type forgedCursorServerClient struct {
 	UserID           string
@@ -850,9 +855,19 @@ func (c *ForgedCursorCoordinator) waitForFirstPage(ctx context.Context) error {
 }
 
 func (c *ForgedCursorCoordinator) waitForPushCommit(ctx context.Context) error {
+	waitContext, cancel := context.WithTimeout(ctx, forgedCursorPushWait)
+	defer cancel()
 	select {
-	case <-ctx.Done():
-		return fmt.Errorf("wait for React Native forged-cursor push commit: %w", ctx.Err())
+	case <-waitContext.Done():
+		if errors.Is(waitContext.Err(), context.DeadlineExceeded) {
+			select {
+			case <-c.pushCommitted:
+				return c.proxyFailure("push")
+			default:
+			}
+			return errForgedCursorPushWaitTimeout
+		}
+		return fmt.Errorf("wait for React Native forged-cursor push commit: %w", waitContext.Err())
 	case <-c.pushCommitted:
 	}
 	return c.proxyFailure("push")
@@ -921,6 +936,9 @@ func (c *ForgedCursorCoordinator) acceptLocked(raw json.RawMessage) error {
 	if err != nil {
 		return fmt.Errorf("decode React Native forged-cursor result envelope %s: %w", boundedRaw(raw), err)
 	}
+	if c.stage == forgedCursorStagePushTimeoutDiagnostic {
+		return c.pushTimeoutDiagnostic(envelope)
+	}
 	if envelope.Outcome != "passed" {
 		return fmt.Errorf("React Native forged-cursor command outcome=%q error_code=%v error_detail=%v, want passed", envelope.Outcome, envelope.ErrorCode, envelope.ErrorDetail)
 	}
@@ -959,6 +977,36 @@ func (c *ForgedCursorCoordinator) acceptLocked(raw json.RawMessage) error {
 	return nil
 }
 
+func (c *ForgedCursorCoordinator) pushTimeoutDiagnostic(envelope resultEnvelope) error {
+	if envelope.Outcome == "error" {
+		detail := "<none>"
+		if envelope.ErrorDetail != nil {
+			detail = boundedRaw(json.RawMessage(strconv.Quote(*envelope.ErrorDetail)))
+		}
+		code := "<none>"
+		if envelope.ErrorCode != nil {
+			code = *envelope.ErrorCode
+		}
+		return fmt.Errorf("React Native forged-cursor push did not reach the proxy within %s: in-flight call ID=%q completion=unavailable status=unavailable error_code=%q error_detail=%s", forgedCursorPushWait, c.callID, code, detail)
+	}
+	var members map[string]json.RawMessage
+	if err := jsonstrict.Decode(envelope.Result, &members); err != nil {
+		return fmt.Errorf("React Native forged-cursor push did not reach the proxy within %s: in-flight call ID=%q completion=unavailable status=unavailable error_code=<none> error_detail=<none> result_error=%v", forgedCursorPushWait, c.callID, err)
+	}
+	if resultErr := validateActionResult(envelope.Result, "call-completed"); len(members) != 6 || resultErr != nil {
+		return fmt.Errorf("React Native forged-cursor push did not reach the proxy within %s: in-flight call ID=%q completion=unavailable status=unavailable error_code=<none> error_detail=<none> result_members=%d want=6 result_error=%v", forgedCursorPushWait, c.callID, len(members), resultErr)
+	}
+	var callID, state, completion string
+	callErr := json.Unmarshal(members["call_id"], &callID)
+	stateErr := json.Unmarshal(members["state"], &state)
+	completionErr := json.Unmarshal(members["completion"], &completion)
+	status := boundedRaw(members["status"])
+	if callErr != nil || stateErr != nil || completionErr != nil || callID != c.callID || state != "completed" || validateSyncStatusShape(members["status"]) != nil {
+		return fmt.Errorf("React Native forged-cursor push did not reach the proxy within %s: in-flight call ID=%q completion=%q status=%s error_code=<none> error_detail=<none> result_errors=%v/%v/%v", forgedCursorPushWait, c.callID, completion, status, callErr, stateErr, completionErr)
+	}
+	return fmt.Errorf("React Native forged-cursor push did not reach the proxy within %s: in-flight call ID=%q completion=%q status=%s error_code=<none> error_detail=<none>", forgedCursorPushWait, callID, completion, status)
+}
+
 func boundedRaw(raw json.RawMessage) string {
 	const maximum = 512
 	if len(raw) <= maximum {
@@ -985,6 +1033,16 @@ func (c *ForgedCursorCoordinator) advanceLocked(ctx context.Context, sequence ui
 		c.stage = forgedCursorStageCallBegun
 	case forgedCursorStageCallBegun:
 		if err := c.waitForPushCommit(ctx); err != nil {
+			if errors.Is(err, errForgedCursorPushWaitTimeout) {
+				// Release a late push. Otherwise the diagnostic would describe the
+				// coordinator barrier instead of the client call.
+				c.releasePushResponse()
+				response.Command = c.command("client", "await-call", map[string]any{
+					"client_key": c.clientKey, "call_id": c.callID,
+				}, nil)
+				c.stage = forgedCursorStagePushTimeoutDiagnostic
+				return response, nil
+			}
 			return forgedCursorExchangeResponse{}, err
 		}
 		if err := c.bindAndMaterializePush(ctx); err != nil {

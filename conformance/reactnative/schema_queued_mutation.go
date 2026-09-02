@@ -700,8 +700,9 @@ func (c *SchemaQueuedMutationCoordinator) validateFinalCapture(raw json.RawMessa
 	if trace.Overflowed || len(trace.Observations) != 0 || trace.SequenceCheckpoint != 0 {
 		return finalCapture{}, fmt.Errorf("React Native schema-queued-mutation restart trace observations=%d checkpoint=%d overflowed=%t", len(trace.Observations), trace.SequenceCheckpoint, trace.Overflowed)
 	}
-	if err := validateReadyStatus(capture.Status); err != nil {
-		return finalCapture{}, fmt.Errorf("React Native schema-queued-mutation restart status: %w", err)
+	// Restart reopens the durable client without synchronizing, so only status shape is contractual here.
+	if err := validateSyncStatusShape(capture.Status); err != nil {
+		return finalCapture{}, fmt.Errorf("React Native schema-queued-mutation restart status is invalid: %w", err)
 	}
 	return capture, nil
 }

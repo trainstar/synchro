@@ -114,6 +114,22 @@ func TestRetentionReconnectCaptureUsesDistinctRunnerInputAndResultKeys(t *testin
 	}
 }
 
+func TestRetentionReconnectQueueAllowsInspectableRejection(t *testing.T) {
+	coordinator := &RetentionReconnectCoordinator{
+		sealedGeneration:  1,
+		sealedBatchID:     "batch-runtime",
+		sealedMutationIDs: []string{"mutation-runtime"},
+	}
+	capture := finalCapture{
+		ClientState: json.RawMessage(`{"schema":{"version":1,"hash":"` + strings.Repeat("a", 64) + `"},"provenanceMaintenanceWorkCursor":"cursor","mutationLedgerCount":1}`),
+		Pending:     json.RawMessage(`[{"mutationID":"mutation-runtime","status":"sealed"}]`),
+		Rejected:    json.RawMessage(`[{"mutationID":"mutation-runtime","status":"rejected_terminal","code":"policy_rejected"}]`),
+	}
+	if err := coordinator.validateQueue(capture); err != nil {
+		t.Fatalf("validate retention-reconnect queue with an inspectable rejection: %v", err)
+	}
+}
+
 func TestRetentionReconnectProxyKeepsFaultUntilRelease(t *testing.T) {
 	var forwarded atomic.Uint64
 	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {

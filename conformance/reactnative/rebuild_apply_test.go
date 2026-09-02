@@ -63,6 +63,73 @@ func TestNewRebuildApplyCoordinatorKeepsAndroidSidecarOnHostLoopback(t *testing.
 	}
 }
 
+func TestValidateRebuildApplyCaptureUsesAuthoredRebuildAttemptCount(t *testing.T) {
+	scenario := loadRebuildApplyAuthoredScenario(t)
+	expected := rebuildApplyExpectedState(scenario)
+	step := scenario.Steps[0]
+	marshal := func(value any) json.RawMessage {
+		raw, err := json.Marshal(value)
+		if err != nil {
+			t.Fatalf("marshal rebuild-apply capture fixture: %v", err)
+		}
+		return raw
+	}
+	scopeFingerprint := strings.Repeat("a", 64)
+	finalCursorFingerprint := strings.Repeat("b", 64)
+	trace := map[string]any{
+		"observations": []any{
+			map[string]any{
+				"sequence": 1, "operationClass": "connect", "statusCode": 200,
+				"durationNanoseconds": 1, "requestFacts": map[string]any{"client_generation": 1},
+			},
+			map[string]any{
+				"sequence": 2, "operationClass": "rebuild", "statusCode": 200,
+				"durationNanoseconds": 1, "requestFacts": map[string]any{"limit": 100},
+				"rebuildResponseFacts": map[string]any{
+					"record_count": 1, "has_more": false, "has_cursor": false,
+					"has_final_scope_cursor": true, "has_checksum": true,
+					"scope_fingerprint":              scopeFingerprint,
+					"final_scope_cursor_fingerprint": finalCursorFingerprint,
+				},
+			},
+			map[string]any{
+				"sequence": 3, "operationClass": "pull", "statusCode": 200,
+				"durationNanoseconds": 1, "cursorFingerprints": []string{finalCursorFingerprint},
+				"cursorFingerprintsComplete": true, "requestFacts": map[string]any{"scope_count": 1},
+				"pullResponseFacts": map[string]any{
+					"change_count": 0, "has_more": false, "rebuild_scope_count": 0,
+					"checksum_count": 1, "scope_cursor_fingerprints": []string{finalCursorFingerprint},
+					"scope_cursor_fingerprints_complete": true,
+				},
+			},
+		},
+		"overflowed": false, "sequenceCheckpoint": 3,
+	}
+	state := map[string]any{
+		"schema":              map[string]any{"version": 1, "hash": strings.Repeat("c", 64)},
+		"scopeStates":         []any{map[string]any{"scopeID": "scope-a"}},
+		"scopeRows":           []any{map[string]any{"scopeID": "scope-a"}},
+		"rebuildAttempts":     []any{},
+		"applicationRowCount": 1, "provenanceCount": 1, "scopeStateCount": 1,
+		"rebuildAttemptCount": 1, "rebuildReceiptCount": 1,
+		"provenanceMaintenanceWorkCursor": "cursor",
+	}
+	coordinator := &RebuildApplyCoordinator{
+		expected:  expected,
+		steps:     []scenarios.Step{step},
+		workloads: []rebuildApplyWorkload{{Profile: "scope_cardinality", ScopeID: "scope-a", RecordCount: 1, PageSize: 100}},
+	}
+	capture := finalCapture{
+		ClientState: marshal(state), Pending: marshal([]any{}), Rejected: marshal([]any{}),
+		Status:     marshal(map[string]any{"state": "ready", "retry_at": nil, "operation": nil, "failure": nil}),
+		Events:     marshal([]any{map[string]any{"type": "rebuild_completed"}}),
+		Provenance: marshal([]any{map[string]any{"scopeID": "scope-a"}}), Trace: marshal(trace),
+	}
+	if err := coordinator.validateCapture(capture); err != nil {
+		t.Fatalf("validate authored rebuild attempt count: %v", err)
+	}
+}
+
 func loadRebuildApplyAuthoredScenario(t *testing.T) scenarios.Scenario {
 	t.Helper()
 	repoRoot, err := filepath.Abs(filepath.Join("..", ".."))

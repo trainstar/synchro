@@ -3,6 +3,7 @@ package reactnative
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -70,6 +71,18 @@ func TestSchemaQueuedMutationCommandUsesEmptyStepsArray(t *testing.T) {
 	}
 	if command.Action.Steps == nil || !strings.Contains(string(encoded), `"steps":[]`) {
 		t.Fatalf("schema-queued-mutation command steps=%#v encoded=%s", command.Action.Steps, encoded)
+	}
+}
+
+func TestSchemaQueuedMutationFinalCaptureAcceptsReopenedStatus(t *testing.T) {
+	coordinator := &SchemaQueuedMutationCoordinator{}
+	for _, status := range []string{"stopped", "uninitialized"} {
+		t.Run(status, func(t *testing.T) {
+			raw := fmt.Sprintf(`{"kind":"capture","capture":{"client_state":null,"pending_mutations":[],"rejected_mutations":[],"sync_status":{"state":%q,"retry_at":null,"operation":null,"failure":null},"sync_events":[],"request_trace":{"observations":[],"overflowed":false,"sequenceCheckpoint":0}},"process":{"process_id":"process","database_identity_fingerprint":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}`, status)
+			if _, err := coordinator.validateFinalCapture(json.RawMessage(raw)); err != nil {
+				t.Fatalf("validate reopened status %q: %v", status, err)
+			}
+		})
 	}
 }
 

@@ -9,7 +9,7 @@ function configuration(): { endpoint: string; token: string; stageCount: number 
   const url = process.env.SYNCHRO_RN_COORDINATOR_URL;
   const token = process.env.SYNCHRO_RN_COORDINATOR_TOKEN;
   const stageCount = Number(process.env.SYNCHRO_RN_COORDINATOR_STAGE_COUNT);
-  if (!url || !token || !/^[A-Za-z0-9_-]{43}$/.test(token) || !Number.isSafeInteger(stageCount) || stageCount !== 6) {
+  if (!url || !token || !/^[A-Za-z0-9_-]{43}$/.test(token) || !Number.isSafeInteger(stageCount) || stageCount !== 9) {
     throw new Error('React Native rebuild-requests coordinator configuration is invalid');
   }
   const parsed = new URL(url);

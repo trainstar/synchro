@@ -525,7 +525,7 @@ func (c *RebuildApplyCoordinator) validateCapture(capture finalCapture) error {
 	if expected == nil || expected.RowCount == nil || expected.ProvenanceCount == nil || expected.CheckpointCount == nil || expected.RebuildAttemptCount == nil {
 		return errors.New("React Native rebuild-apply authored client state is unavailable")
 	}
-	if state.ApplicationRowCount != *expected.RowCount || state.ProvenanceCount != *expected.ProvenanceCount || state.ScopeStateCount != *expected.CheckpointCount || state.RebuildAttemptCount != 0 || state.RebuildReceiptCount != 1 || len(state.ScopeStates) != 1 || len(state.ScopeRows) != int(workload.RecordCount) {
+	if state.ApplicationRowCount != *expected.RowCount || state.ProvenanceCount != *expected.ProvenanceCount || state.ScopeStateCount != *expected.CheckpointCount || state.RebuildAttemptCount != *expected.RebuildAttemptCount || state.RebuildReceiptCount != 1 || len(state.ScopeStates) != 1 || len(state.ScopeRows) != int(workload.RecordCount) {
 		return errors.New("React Native rebuild-apply durable state differs from the authored model")
 	}
 	if len(capture.Provenance) == 0 || len(capture.Events) == 0 {

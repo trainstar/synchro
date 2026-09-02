@@ -1,6 +1,7 @@
 package reactnative
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"path/filepath"
@@ -62,8 +63,64 @@ func TestNewRebuildRequestsCoordinatorKeepsAndroidSidecarOnHostLoopback(t *testi
 	if !strings.HasPrefix(coordinator.adapter, "http://10.0.2.2:") {
 		t.Fatalf("Android rebuild-requests adapter URL = %q", coordinator.adapter)
 	}
-	if got, want := coordinator.ExchangeCount(), int(rebuildRequestsStageComplete)+1; got != want {
+	if got, want := coordinator.ExchangeCount(), 9; got != want {
 		t.Fatalf("rebuild-requests exchange count = %d, want %d", got, want)
+	}
+}
+
+func TestRebuildRequestsStagesOnePublicStepPerCommand(t *testing.T) {
+	coordinator, err := NewRebuildRequestsCoordinator(RebuildRequestsCoordinatorConfig{
+		Scenario: loadRebuildRequestsAuthoredScenario(t), Platform: "ios", ServerURL: "http://127.0.0.1:8080", AuthToken: "unit-token",
+	})
+	if err != nil {
+		t.Fatalf("create rebuild-requests coordinator: %v", err)
+	}
+	defer func() { _ = coordinator.Close(context.Background()) }()
+
+	tests := []struct {
+		stage  rebuildRequestsStage
+		actor  string
+		name   string
+		stepID scenarios.StepID
+	}{
+		{rebuildRequestsStageBegin, "client", "begin-call", rebuildRequestsStepOrder[3]},
+		{rebuildRequestsStageFirstPage, "observer", "await-step", rebuildRequestsStepOrder[5]},
+		{rebuildRequestsStageFinalPage, "observer", "await-step", rebuildRequestsStepOrder[9]},
+		{rebuildRequestsStagePull, "observer", "await-step", rebuildRequestsStepOrder[12]},
+	}
+	for _, test := range tests {
+		t.Run(string(test.stepID), func(t *testing.T) {
+			coordinator.stage = test.stage
+			response, err := coordinator.advanceLocked(context.Background(), 1)
+			if err != nil {
+				t.Fatalf("advance rebuild-requests stage: %v", err)
+			}
+			if response.Command.Action.Action.Actor != test.actor ||
+				response.Command.Action.Action.Command != test.name {
+				t.Fatalf("rebuild-requests command = %q/%q, want %q/%q", response.Command.Action.Action.Actor, response.Command.Action.Action.Command, test.actor, test.name)
+			}
+			if len(response.Command.Action.Steps) != 1 {
+				t.Fatalf("rebuild-requests command step count = %d, want 1", len(response.Command.Action.Steps))
+			}
+			operation := response.Command.Action.Steps[0].Operation
+			if operation.ContractOperation != coordinator.steps[test.stepID].Operation.ContractOperation ||
+				operation.Name != coordinator.steps[test.stepID].Operation.Name ||
+				!bytes.Equal(operation.Payload, coordinator.steps[test.stepID].Operation.Payload) {
+				t.Fatalf("rebuild-requests command step = %#v, want %s", operation, test.stepID)
+			}
+		})
+	}
+
+	coordinator.stage = rebuildRequestsStageAwaitCall
+	response, err := coordinator.advanceLocked(context.Background(), 1)
+	if err != nil {
+		t.Fatalf("advance rebuild-requests await-call: %v", err)
+	}
+	if response.Command.Action.Action.Actor != "client" ||
+		response.Command.Action.Action.Command != "await-call" ||
+		response.Command.Action.Steps == nil ||
+		len(response.Command.Action.Steps) != 0 {
+		t.Fatalf("rebuild-requests await-call command = %#v", response.Command.Action)
 	}
 }
 

@@ -52,17 +52,6 @@ var rebuildRequestsAliasNames = []string{
 	"row-c-primary-key",
 }
 
-var rebuildRequestsPublicStepIDs = []scenarios.StepID{
-	"STEP-PERF-REBUILD-REQUESTS-001",
-	"STEP-PERF-REBUILD-REQUESTS-BEGIN-001",
-	"STEP-PERF-REBUILD-REQUESTS-003",
-	"STEP-PERF-REBUILD-REQUESTS-APPLY-001",
-	"STEP-PERF-REBUILD-REQUESTS-004",
-	"STEP-PERF-REBUILD-REQUESTS-APPLY-002",
-	"STEP-PERF-REBUILD-REQUESTS-FINALIZE-001",
-	"STEP-PERF-REBUILD-REQUESTS-002",
-}
-
 // RebuildRequestsCoordinatorConfig configures one authenticated React Native sidecar.
 type RebuildRequestsCoordinatorConfig struct {
 	Scenario   scenarios.Scenario
@@ -92,6 +81,9 @@ type rebuildRequestsStage uint8
 const (
 	rebuildRequestsStageOpen rebuildRequestsStage = iota
 	rebuildRequestsStageBegin
+	rebuildRequestsStageFirstPage
+	rebuildRequestsStageFinalPage
+	rebuildRequestsStagePull
 	rebuildRequestsStageAwaitCall
 	rebuildRequestsStageFinalCapture
 	rebuildRequestsStageApplicationRows
@@ -569,6 +561,8 @@ func (c *RebuildRequestsCoordinator) acceptResultLocked(raw json.RawMessage) err
 			return err
 		}
 		c.process = &process
+	case rebuildRequestsStageFirstPage, rebuildRequestsStageFinalPage, rebuildRequestsStagePull:
+		return c.validateAwaited(envelope.Result)
 	case rebuildRequestsStageAwaitCall:
 		return c.validateCallBegun(envelope.Result)
 	case rebuildRequestsStageFinalCapture:
@@ -607,7 +601,22 @@ func (c *RebuildRequestsCoordinator) advanceLocked(ctx context.Context, sequence
 	case rebuildRequestsStageBegin:
 		response.Command = c.command("client", "begin-call", map[string]any{
 			"client_key": clientKey, "call_id": c.callID, "method": "start",
-		}, rebuildRequestsPublicStepIDs)
+		}, []scenarios.StepID{rebuildRequestsStepOrder[3]})
+		c.stage = rebuildRequestsStageFirstPage
+	case rebuildRequestsStageFirstPage:
+		response.Command = c.command("observer", "await-step", map[string]any{
+			"client_key": clientKey, "call_id": c.callID,
+		}, []scenarios.StepID{rebuildRequestsStepOrder[5]})
+		c.stage = rebuildRequestsStageFinalPage
+	case rebuildRequestsStageFinalPage:
+		response.Command = c.command("observer", "await-step", map[string]any{
+			"client_key": clientKey, "call_id": c.callID,
+		}, []scenarios.StepID{rebuildRequestsStepOrder[9]})
+		c.stage = rebuildRequestsStagePull
+	case rebuildRequestsStagePull:
+		response.Command = c.command("observer", "await-step", map[string]any{
+			"client_key": clientKey, "call_id": c.callID,
+		}, []scenarios.StepID{rebuildRequestsStepOrder[12]})
 		c.stage = rebuildRequestsStageAwaitCall
 	case rebuildRequestsStageAwaitCall:
 		response.Command = c.command("client", "await-call", map[string]any{
@@ -698,6 +707,24 @@ func (c *RebuildRequestsCoordinator) validateCallBegun(raw json.RawMessage) erro
 	if json.Unmarshal(members["call_id"], &actualID) != nil || actualID != c.callID ||
 		json.Unmarshal(members["state"], &state) != nil || state != "in_flight" {
 		return fmt.Errorf("React Native rebuild-requests begun call is invalid: call_id=%q state=%q, want %q in_flight", actualID, state, c.callID)
+	}
+	return nil
+}
+
+func (c *RebuildRequestsCoordinator) validateAwaited(raw json.RawMessage) error {
+	if err := validateActionResult(raw, "awaited"); err != nil {
+		return err
+	}
+	var members map[string]json.RawMessage
+	if err := decodeStrictMembers(raw, &members, 3, "React Native rebuild-requests awaited result"); err != nil {
+		return err
+	}
+	if err := validateSyncStatusShape(members["status"]); err != nil {
+		return err
+	}
+	process, err := decodeActionProcessIdentity(members["process"])
+	if err != nil || c.process == nil || process != *c.process {
+		return errors.New("React Native rebuild-requests awaited process identity changed")
 	}
 	return nil
 }

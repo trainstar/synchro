@@ -386,6 +386,7 @@ type PushResponseLossCoordinator struct {
 	nextSeq                     uint64
 	process                     *actionProcessIdentity
 	finalResult                 *finalCapture
+	serverFacts                 *scenarios.StateFacts
 	equalReplay, changedReplay  blackbox.NativeStepObservation
 	result                      PushResponseLossCoordinatorResult
 }
@@ -788,6 +789,21 @@ func (c *PushResponseLossCoordinator) advanceLocked(ctx context.Context, sequenc
 		if c.finalResult == nil {
 			return exchangeResponse{}, errors.New("React Native push-response-loss final capture is unavailable")
 		}
+		captures, err := c.config.Controller.Capture(ctx, []string{c.clientKey}, []string{"server-state"})
+		if err != nil {
+			return exchangeResponse{}, err
+		}
+		if len(captures) != 1 {
+			return exchangeResponse{}, errors.New("React Native push-response-loss server state capture is invalid")
+		}
+		server := captures[0].StateFacts
+		if server.BatchCount == nil || *server.BatchCount != 1 || server.MutationCount == nil || *server.MutationCount != 1 {
+			return exchangeResponse{}, errors.New("React Native push-response-loss server state is invalid")
+		}
+		c.serverFacts = &server
+		if err := c.bindServerIdentities(true); err != nil {
+			return exchangeResponse{}, err
+		}
 		recordID, err := c.runtimeRecordID()
 		if err != nil {
 			return exchangeResponse{}, err
@@ -795,7 +811,7 @@ func (c *PushResponseLossCoordinator) advanceLocked(ctx context.Context, sequenc
 		response.Command = c.command("observer", "capture", map[string]any{"client_keys": []string{c.clientKey}, "sources": []string{"application-rows"}, "row_selectors": []map[string]any{{"table_name": c.tableName, "primary_key_field": c.primaryKey, "primary_key": recordID}}}, nil)
 		c.stage = pushResponseLossStageComplete
 	case pushResponseLossStageComplete:
-		if err := c.validateCompletionLocked(ctx); err != nil {
+		if err := c.validateCompletionLocked(); err != nil {
 			return exchangeResponse{}, err
 		}
 		response.State = "complete"
@@ -938,7 +954,7 @@ func (c *PushResponseLossCoordinator) bindCommittedPush() error {
 	if err := c.config.Controller.BindApplicationPush(operation); err != nil {
 		return err
 	}
-	return c.bindServerIdentities(true)
+	return nil
 }
 func (c *PushResponseLossCoordinator) runControllerReplays(ctx context.Context) error {
 	var err error
@@ -1032,7 +1048,7 @@ func (c *PushResponseLossCoordinator) runtimeRecordID() (string, error) {
 	}
 	return value, nil
 }
-func (c *PushResponseLossCoordinator) validateCompletionLocked(ctx context.Context) error {
+func (c *PushResponseLossCoordinator) validateCompletionLocked() error {
 	if c.finalResult == nil {
 		return errors.New("React Native push-response-loss final evidence is unavailable")
 	}
@@ -1047,16 +1063,8 @@ func (c *PushResponseLossCoordinator) validateCompletionLocked(ctx context.Conte
 	if len(rows) != 1 || !rowUsesRuntimePrimary(rows[0], c.primaryKey, recordID) {
 		return errors.New("React Native push-response-loss application row identity is invalid")
 	}
-	captures, err := c.config.Controller.Capture(ctx, []string{c.clientKey}, []string{"server-state"})
-	if err != nil {
-		return err
-	}
-	if len(captures) != 1 {
-		return errors.New("React Native push-response-loss server state capture is invalid")
-	}
-	server := captures[0].StateFacts
-	if server.BatchCount == nil || *server.BatchCount != 1 || server.MutationCount == nil || *server.MutationCount != 1 {
-		return errors.New("React Native push-response-loss server state is invalid")
+	if c.serverFacts == nil {
+		return errors.New("React Native push-response-loss server state is unavailable")
 	}
 	trace, err := captureTraceFromRaw(c.finalResult.Trace)
 	if err != nil {
@@ -1066,7 +1074,7 @@ func (c *PushResponseLossCoordinator) validateCompletionLocked(ctx context.Conte
 	if err != nil {
 		return err
 	}
-	c.result = PushResponseLossCoordinatorResult{c.equalReplay, c.changedReplay, server, identities}
+	c.result = PushResponseLossCoordinatorResult{c.equalReplay, c.changedReplay, *c.serverFacts, identities}
 	return nil
 }
 func (c *PushResponseLossCoordinator) resolveIdentities(trace traceSnapshot) ([]blackbox.NativeIdentityResolution, error) {

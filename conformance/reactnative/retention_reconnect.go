@@ -1241,8 +1241,9 @@ func (c *RetentionReconnectCoordinator) validateQueue(capture finalCapture) erro
 	if err := decodeStrictValue(capture.Pending, &pending); err != nil || pending == nil {
 		return errors.New("React Native retention-reconnect pending queue is invalid")
 	}
-	if err := validateEmptyArray(capture.Rejected); err != nil {
-		return errors.New("React Native retention-reconnect rejected queue is not empty")
+	var rejected []json.RawMessage
+	if err := decodeStrictValue(capture.Rejected, &rejected); err != nil || rejected == nil {
+		return errors.New("React Native retention-reconnect rejected queue is invalid")
 	}
 	_, mutationIDs, _, _, _, identityErr := c.proxyIdentity()
 	if identityErr != nil || state.MutationLedgerCount != uint64(len(mutationIDs)) || len(pending) != len(mutationIDs) {

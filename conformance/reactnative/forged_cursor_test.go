@@ -232,6 +232,81 @@ func TestForgedCursorProxyHoldsPushUntilMaterializationBarrier(t *testing.T) {
 	}
 }
 
+func TestForgedCursorPushTimeoutAwaitsInFlightCall(t *testing.T) {
+	coordinator, err := NewForgedCursorCoordinator(ForgedCursorCoordinatorConfig{
+		Scenario: loadForgedCursorAuthoredScenario(t), Platform: "ios", ServerURL: "http://127.0.0.1:8080", AuthToken: "unit-token",
+	})
+	if err != nil {
+		t.Fatalf("create forged-cursor timeout coordinator: %v", err)
+	}
+	defer func() { _ = coordinator.Close(context.Background()) }()
+	coordinator.stage = forgedCursorStageCallBegun
+	deadline, cancel := context.WithTimeout(context.Background(), 0)
+	defer cancel()
+
+	response, err := coordinator.advanceLocked(deadline, 5)
+	if err != nil {
+		t.Fatalf("advance forged-cursor push timeout: %v", err)
+	}
+	if coordinator.stage != forgedCursorStagePushTimeoutDiagnostic || response.Command == nil {
+		t.Fatalf("forged-cursor push timeout stage=%d command=%v, want diagnostic await-call", coordinator.stage, response.Command)
+	}
+	action := response.Command.Action.Action
+	if action.Actor != "client" || action.Command != "await-call" || len(response.Command.Action.Steps) != 0 ||
+		action.Parameters["client_key"] != coordinator.clientKey || action.Parameters["call_id"] != coordinator.callID {
+		t.Fatalf("forged-cursor push timeout command=%+v steps=%d", action, len(response.Command.Action.Steps))
+	}
+	select {
+	case <-coordinator.allowPushResponse:
+	default:
+		t.Fatal("forged-cursor push timeout did not release a late push response")
+	}
+}
+
+func TestForgedCursorPushTimeoutReportsCallCompletion(t *testing.T) {
+	coordinator, err := NewForgedCursorCoordinator(ForgedCursorCoordinatorConfig{
+		Scenario: loadForgedCursorAuthoredScenario(t), Platform: "ios", ServerURL: "http://127.0.0.1:8080", AuthToken: "unit-token",
+	})
+	if err != nil {
+		t.Fatalf("create forged-cursor diagnostic coordinator: %v", err)
+	}
+	defer func() { _ = coordinator.Close(context.Background()) }()
+	coordinator.stage = forgedCursorStagePushTimeoutDiagnostic
+	raw := json.RawMessage(`{"schema_version":1,"outcome":"passed","result":{"kind":"call-completed","call_id":"forged_rebuild","state":"completed","completion":"error","status":{"state":"error","retry_at":null,"operation":"rebuild","failure":{"operation":"rebuild","code":"invalid_request","retryable":false,"recovery_action":"restart"}},"process":{"process_id":"process-a","database_identity_fingerprint":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}},"error_code":null,"error_detail":null}`)
+
+	err = coordinator.acceptLocked(raw)
+	if err == nil {
+		t.Fatal("forged-cursor push timeout accepted a completed call")
+	}
+	for _, want := range []string{`completion="error"`, `status={"state":"error"`, "error_detail=<none>"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("forged-cursor push timeout diagnostic = %q, want %q", err, want)
+		}
+	}
+}
+
+func TestForgedCursorPushTimeoutReportsCallErrorDetail(t *testing.T) {
+	coordinator, err := NewForgedCursorCoordinator(ForgedCursorCoordinatorConfig{
+		Scenario: loadForgedCursorAuthoredScenario(t), Platform: "ios", ServerURL: "http://127.0.0.1:8080", AuthToken: "unit-token",
+	})
+	if err != nil {
+		t.Fatalf("create forged-cursor error diagnostic coordinator: %v", err)
+	}
+	defer func() { _ = coordinator.Close(context.Background()) }()
+	coordinator.stage = forgedCursorStagePushTimeoutDiagnostic
+	raw := json.RawMessage(`{"schema_version":1,"outcome":"error","result":null,"error_code":"execution_failed","error_detail":"sync did not complete within 30000 ms, last status local_ready"}`)
+
+	err = coordinator.acceptLocked(raw)
+	if err == nil {
+		t.Fatal("forged-cursor push timeout accepted a failed call")
+	}
+	for _, want := range []string{"completion=unavailable", "status=unavailable", `error_code="execution_failed"`, `error_detail="sync did not complete within 30000 ms, last status local_ready"`} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("forged-cursor push timeout error diagnostic = %q, want %q", err, want)
+		}
+	}
+}
+
 func TestValidateForgedCursorServerFreezeRejectsStateChange(t *testing.T) {
 	count := uint64(1)
 	before := scenarios.StateFacts{RebuildCount: &count, Rebuilds: []scenarios.RebuildFact{{RebuildID: "runtime-rebuild", PageCount: 1, Status: "staged"}}}

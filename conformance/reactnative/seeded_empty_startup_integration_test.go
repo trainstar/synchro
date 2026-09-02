@@ -100,6 +100,14 @@ func runRealReactNativeSeededEmptyStartup(t *testing.T, platform string) {
 	if err := coordinator.Prepare(runContext); err != nil {
 		t.Fatalf("prepare React Native %s seeded-empty-startup coordinator: %v", platform, err)
 	}
+	if err := stageReactNativeSeededEmptyStartupAsset(runContext, repositoryRoot, coordinator, artifact); err != nil {
+		t.Fatalf("stage React Native %s seeded-empty-startup device asset: %v", platform, err)
+	}
+	build := exec.CommandContext(runContext, "npx", "detox", "build", "--config-path", "./.detoxrc.steady-pull.js", "--configuration", detoxConfiguration)
+	build.Dir = filepath.Join(repositoryRoot, "clients", "react-native", "example")
+	if output, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("build React Native %s seeded-empty-startup app with the staged artifact: %v\n%s", platform, err, output)
+	}
 	serveErrors := make(chan error, 1)
 	go func() { serveErrors <- coordinator.Serve(runContext) }()
 
@@ -153,4 +161,37 @@ func runRealReactNativeSeededEmptyStartup(t *testing.T, platform string) {
 	case <-time.After(5 * time.Second):
 		t.Fatalf("React Native %s seeded-empty-startup coordinator did not stop", platform)
 	}
+}
+
+func stageReactNativeSeededEmptyStartupAsset(ctx context.Context, repositoryRoot string, coordinator *SeededEmptyStartupCoordinator, artifact *blackbox.NativeArtifact) error {
+	var source string
+	for _, client := range coordinator.clients {
+		if client.artifactStep == nil {
+			continue
+		}
+		path, err := artifact.SeedDatabasePath(ctx, client.userID, client.clientID, client.artifactStep.ID)
+		if err != nil {
+			return fmt.Errorf("resolve current portable seed: %w", err)
+		}
+		source = path
+		break
+	}
+	if source == "" {
+		return fmt.Errorf("current portable seed is unavailable")
+	}
+	contents, err := os.ReadFile(source)
+	if err != nil {
+		return fmt.Errorf("read current portable seed: %w", err)
+	}
+	if len(contents) == 0 {
+		return fmt.Errorf("current portable seed is empty")
+	}
+	destination := filepath.Join(repositoryRoot, "clients", "react-native", "example", "verification", portableSeedAssetName)
+	if err := os.MkdirAll(filepath.Dir(destination), 0o755); err != nil {
+		return fmt.Errorf("create React Native seed asset directory: %w", err)
+	}
+	if err := os.WriteFile(destination, contents, 0o644); err != nil {
+		return fmt.Errorf("write React Native seed asset: %w", err)
+	}
+	return nil
 }
