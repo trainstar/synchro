@@ -144,13 +144,28 @@ internal class PushProcessor(
         normalizeUnsealedChains(db)
         val candidates = eligibleForSealing(db, batchSize)
         if (candidates.isEmpty()) return@writeTransaction null
-        val mutations = candidates.map { buildMutation(db, it) }
-        validateNewMutations(db, mutations, SchemaRef(schemaVersion, schemaHash), syncedTables)
+        val requestSchema = SchemaRef(schemaVersion, schemaHash)
+        val authoredTablesCache = HashMap<SchemaRef, List<LocalSchemaTable>?>()
+        val mutations = candidates.map { candidate ->
+            val built = buildMutation(db, candidate)
+            if (built.authoredSchema == requestSchema) {
+                built
+            } else {
+                // A mutation authored before the installed schema can carry
+                // captured defaults of since-removed fields. The same
+                // reconciliation rule as the renewal path applies here.
+                val authoredTables = authoredTablesCache.getOrPut(built.authoredSchema) {
+                    schemaTablesForReference(db, built.authoredSchema, null)
+                }
+                if (authoredTables == null) built else reconcileRemovedDefaults(built, authoredTables, syncedTables)
+            }
+        }
+        validateNewMutations(db, mutations, requestSchema, syncedTables)
         val request = PushRequest(
             clientID = clientID,
             clientGeneration = clientGeneration,
             batchID = UUID.randomUUID().toString(),
-            schema = SchemaRef(schemaVersion, schemaHash),
+            schema = requestSchema,
             mutations = mutations,
         )
         request.validate()
