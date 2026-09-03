@@ -2575,7 +2575,7 @@ fn emit_registry_activation_when_ready(
     emit_registry_activation(client, generation)
 }
 
-fn active_registration_for_logical_name(
+pub(crate) fn active_registration_for_logical_name(
     client: &SpiClient<'_>,
     generation: i64,
     table_name: &str,
@@ -4692,14 +4692,65 @@ fn validate_logical_id_kinds(
     Ok(())
 }
 
-fn validate_loaded_registration(
+pub(crate) fn validate_loaded_registration(
     client: &SpiClient<'_>,
     registration: &TableRegistration,
 ) -> Result<(), spi::Error> {
+    if staged_reconfiguration_owns_live_catalog(client, registration)? {
+        // A pending validated generation staged this relation's live shape,
+        // so the loaded registration mismatches the catalog by design until
+        // activation. True drift stays detectable because tolerance requires
+        // the staged shape to match the catalog exactly. Issue #43.
+        return Ok(());
+    }
     validate_registration_metadata(client, registration)?;
     validate_capture_triggers(client, registration)?;
     validate_publication_membership(client, registration.physical_relation_oid)?;
     Ok(())
+}
+
+fn staged_reconfiguration_owns_live_catalog(
+    client: &SpiClient<'_>,
+    registration: &TableRegistration,
+) -> Result<bool, spi::Error> {
+    let rows = client.select(
+        "SELECT reg.sync_columns, reg.exclude_columns
+         FROM synchro.sync_registry reg
+         JOIN synchro.sync_registry_generations gen
+           ON gen.generation = reg.registry_generation
+         WHERE gen.state = 'pending'
+           AND gen.validated
+           AND reg.registry_generation > $1
+           AND reg.relation_id = $2::uuid
+         ORDER BY reg.registry_generation DESC
+         LIMIT 1",
+        None,
+        &[
+            registration.registry_generation.into(),
+            registration.relation_id.as_str().into(),
+        ],
+    )?;
+    let Some(staged) = rows.into_iter().next() else {
+        return Ok(false);
+    };
+    let staged_sync = staged
+        .get_by_name::<Vec<String>, &str>("sync_columns")?
+        .unwrap_or_default();
+    let staged_exclude = staged
+        .get_by_name::<Vec<String>, &str>("exclude_columns")?
+        .unwrap_or_default();
+    if staged_sync.is_empty() {
+        return Ok(false);
+    }
+    let actual =
+        ordered_table_columns_for_oid_in_client(client, registration.physical_relation_oid)?;
+    let actual: std::collections::HashSet<&str> = actual.iter().map(String::as_str).collect();
+    let staged: std::collections::HashSet<&str> = staged_sync
+        .iter()
+        .chain(staged_exclude.iter())
+        .map(String::as_str)
+        .collect();
+    Ok(staged == actual)
 }
 
 pub(crate) fn validate_capture_triggers(

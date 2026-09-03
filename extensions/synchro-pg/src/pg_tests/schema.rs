@@ -3233,3 +3233,47 @@
         let staged = stage_orders_transition(true, true);
         assert!(!staged_generation_requires_bootstrap(staged));
     }
+
+    fn loaded_orders_registration_validates(active_generation: i64) -> Result<(), pgrx::spi::Error> {
+        Spi::connect(|client| {
+            let registration = crate::registry::active_registration_for_logical_name(
+                client,
+                active_generation,
+                "public.test_orders",
+            )?
+            .expect("active orders registration");
+            crate::registry::validate_loaded_registration(client, &registration)
+        })
+    }
+
+    fn active_orders_generation() -> i64 {
+        let active: Option<i64> = Spi::get_one(
+            "SELECT max(g.generation)
+             FROM sync_registry_generations g
+             JOIN sync_registry r ON r.registry_generation = g.generation
+             WHERE g.state = 'active' AND r.table_name = 'test_orders'",
+        )
+        .unwrap();
+        active.expect("active orders generation")
+    }
+
+    // Issue #43: the staged class 4 window leaves the active registration
+    // behind the live catalog by design, and the loader tolerates exactly
+    // that window while activation waits on the operator bootstrap.
+    #[pg_test]
+    fn test_loaded_registration_tolerates_staged_reshape_window() {
+        setup_test_tables();
+        Spi::run("SELECT synchro_schema_manifest()").unwrap();
+        Spi::run("INSERT INTO test_orders (user_id, title) VALUES ('user-a', 'kept')").unwrap();
+        let active = active_orders_generation();
+        stage_orders_transition(true, true);
+        loaded_orders_registration_validates(active).expect("staged window validation");
+    }
+
+    #[pg_test(error = "registered synced column metadata has drifted")]
+    fn test_loaded_registration_rejects_unstaged_catalog_drift() {
+        setup_test_tables();
+        let active = active_orders_generation();
+        Spi::run("ALTER TABLE test_orders ADD COLUMN rogue TEXT").unwrap();
+        loaded_orders_registration_validates(active).expect("unstaged drift must abort");
+    }
