@@ -2944,11 +2944,11 @@ func decodeLocalWrite(operation scenarios.Operation, client Client) (LocalAction
 	if err != nil {
 		return LocalAction{}, RowSelector{}, err
 	}
-	fields, err := decodeColumns(payload["columns"])
+	fields, authoredColumns, err := decodeColumns(payload["columns"])
 	if err != nil {
 		return LocalAction{}, RowSelector{}, err
 	}
-	action := LocalAction{Operation: name, TableName: table, PrimaryKeyField: primaryField, PrimaryKey: primary, Fields: fields}
+	action := LocalAction{Operation: name, TableName: table, PrimaryKeyField: primaryField, PrimaryKey: primary, Fields: fields, AuthoredColumns: authoredColumns}
 	if !validLocalAction(action) {
 		return LocalAction{}, RowSelector{}, errors.New("Kotlin Android local write operation is invalid")
 	}
@@ -2980,55 +2980,73 @@ func decodePrimaryKey(raw json.RawMessage) (string, json.RawMessage, error) {
 	return "", nil, errors.New("Kotlin Android local write primary key is invalid")
 }
 
-func decodeColumns(raw json.RawMessage) (map[string]TypedValue, error) {
+func decodeColumns(raw json.RawMessage) (map[string]TypedValue, []string, error) {
 	if absentJSON(raw) || bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
-		return map[string]TypedValue{}, nil
+		return map[string]TypedValue{}, []string{}, nil
 	}
 	trimmed := bytes.TrimSpace(raw)
 	if trimmed[0] == '{' {
 		var object map[string]json.RawMessage
 		if err := jsonstrict.Decode(raw, &object); err != nil {
-			return nil, errors.New("Kotlin Android local write columns are invalid")
+			return nil, nil, errors.New("Kotlin Android local write columns are invalid")
 		}
 		result := make(map[string]TypedValue, len(object))
+		authored := make([]string, 0, len(object))
 		for field, value := range object {
 			if validAndroidName(field) != nil {
-				return nil, errors.New("Kotlin Android local write column name is invalid")
+				return nil, nil, errors.New("Kotlin Android local write column name is invalid")
 			}
 			decoded, err := typedValue(value, true)
 			if err != nil {
-				return nil, err
+				return nil, nil, err
 			}
 			result[field] = decoded
+			authored = append(authored, field)
 		}
-		return result, nil
+		sort.Strings(authored)
+		return result, authored, nil
 	}
 	var values []json.RawMessage
 	if err := decodeStrictFact(raw, &values); err != nil {
-		return nil, errors.New("Kotlin Android local write columns are invalid")
+		return nil, nil, errors.New("Kotlin Android local write columns are invalid")
 	}
 	result := make(map[string]TypedValue, len(values))
+	authored := make([]string, 0, len(values))
 	for _, value := range values {
 		var object map[string]json.RawMessage
-		if err := jsonstrict.Decode(value, &object); err != nil || len(object) != 2 {
-			return nil, errors.New("Kotlin Android local write column shape is invalid")
+		if err := jsonstrict.Decode(value, &object); err != nil || len(object) < 2 || len(object) > 3 {
+			return nil, nil, errors.New("Kotlin Android local write column shape is invalid")
 		}
 		fieldRaw, hasField := object["field_id"]
 		fieldValue, hasValue := object["value"]
 		var field string
 		if !hasField || !hasValue || json.Unmarshal(fieldRaw, &field) != nil || validAndroidName(field) != nil {
-			return nil, errors.New("Kotlin Android local write column is invalid")
+			return nil, nil, errors.New("Kotlin Android local write column is invalid")
+		}
+		// The controller marks an injected runtime support value, so it stays
+		// out of the authored capture context while the statement writes it.
+		support := false
+		if supportRaw, hasSupport := object["support"]; hasSupport {
+			if json.Unmarshal(supportRaw, &support) != nil || !support {
+				return nil, nil, errors.New("Kotlin Android local write support marker is invalid")
+			}
+		} else if len(object) != 2 {
+			return nil, nil, errors.New("Kotlin Android local write column shape is invalid")
 		}
 		if _, duplicate := result[field]; duplicate {
-			return nil, errors.New("Kotlin Android local write column is duplicated")
+			return nil, nil, errors.New("Kotlin Android local write column is duplicated")
 		}
 		decoded, err := typedValue(fieldValue, true)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		result[field] = decoded
+		if !support {
+			authored = append(authored, field)
+		}
 	}
-	return result, nil
+	sort.Strings(authored)
+	return result, authored, nil
 }
 
 func typedValue(raw json.RawMessage, allowNull bool) (TypedValue, error) {

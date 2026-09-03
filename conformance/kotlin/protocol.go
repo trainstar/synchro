@@ -60,6 +60,10 @@ type LocalAction struct {
 	PrimaryKeyField string                `json:"primary_key_field"`
 	PrimaryKey      TypedValue            `json:"primary_key"`
 	Fields          map[string]TypedValue `json:"fields"`
+	// AuthoredColumns lists the supplied columns the application authored.
+	// A controller-injected runtime support column stays out of this list
+	// while the physical statement still writes it.
+	AuthoredColumns []string `json:"authored_columns"`
 }
 
 // RowSelector identifies one application row for Kotlin inspection.
@@ -488,6 +492,19 @@ func validLocalAction(action LocalAction) bool {
 	}
 	if supplied, found := action.Fields[action.PrimaryKeyField]; found && !typedValuesEqual(supplied, action.PrimaryKey) {
 		return false
+	}
+	if action.AuthoredColumns == nil {
+		return false
+	}
+	seen := make(map[string]struct{}, len(action.AuthoredColumns))
+	for _, name := range action.AuthoredColumns {
+		if _, found := action.Fields[name]; !found {
+			return false
+		}
+		if _, duplicate := seen[name]; duplicate {
+			return false
+		}
+		seen[name] = struct{}{}
 	}
 	return true
 }

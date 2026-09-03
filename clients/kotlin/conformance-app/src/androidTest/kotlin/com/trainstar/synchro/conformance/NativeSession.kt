@@ -296,7 +296,7 @@ private class ClientSession(private val context: Context) : Closeable {
     private fun localAction(command: JsonObject): JsonObject {
         command.requireOnly("schema_version", "operation", "local_action")
         val action = command.requiredObject("local_action")
-        action.requireOnly("operation", "table_name", "primary_key_field", "primary_key", "fields")
+        action.requireOnly("operation", "table_name", "primary_key_field", "primary_key", "fields", "authored_columns")
         val operation = action.requiredString("operation")
         require(operation in setOf("insert", "update", "delete")) { "local operation is invalid" }
         val tableName = action.requiredIdentifier("table_name")
@@ -310,13 +310,21 @@ private class ClientSession(private val context: Context) : Closeable {
         fields.remove(primaryKeyField)?.let { supplied ->
             require(valuesEqual(supplied, primaryKey)) { "primary key values differ" }
         }
+        val authoredColumns = (action.optionalArray("authored_columns")
+            ?: throw IllegalArgumentException("authored_columns is required")).map { element ->
+            val name = (element as? JsonPrimitive)?.takeIf { it.isString }?.content
+            require(name != null && IDENTIFIER.matches(name)) { "authored column is invalid" }
+            require(fields.containsKey(name)) { "authored column is not a supplied field" }
+            name
+        }
+        require(authoredColumns.size == authoredColumns.toSet().size) { "authored columns repeat" }
         val client = requireClient()
         val rowsAffected = when (operation) {
             "insert" -> {
                 val names = fields.keys.sorted()
                 val columns = (listOf(primaryKeyField) + names).joinToString(", ") { quoteIdentifier(it) }
                 val placeholders = List(names.size + 1) { "?" }.joinToString(", ")
-                client.transaction { transaction ->
+                client.authoredWriteTransaction(tableName, operation, authoredColumns) { transaction ->
                     transaction.execute(
                         "INSERT INTO ${quoteIdentifier(tableName)} ($columns) VALUES ($placeholders)",
                         arrayOf(primaryKey, *names.map { fields[it] }.toTypedArray()),
@@ -327,7 +335,7 @@ private class ClientSession(private val context: Context) : Closeable {
                 require(fields.isNotEmpty()) { "update fields are empty" }
                 val names = fields.keys.sorted()
                 val assignments = names.joinToString(", ") { "${quoteIdentifier(it)} = ?" }
-                client.transaction { transaction ->
+                client.authoredWriteTransaction(tableName, operation, authoredColumns) { transaction ->
                     transaction.execute(
                         "UPDATE ${quoteIdentifier(tableName)} SET $assignments WHERE ${quoteIdentifier(primaryKeyField)} = ?",
                         arrayOf(*names.map { fields[it] }.toTypedArray(), primaryKey),
@@ -336,7 +344,7 @@ private class ClientSession(private val context: Context) : Closeable {
             }
             else -> {
                 require(fields.isEmpty()) { "delete fields are not empty" }
-                client.transaction { transaction ->
+                client.authoredWriteTransaction(tableName, operation, authoredColumns) { transaction ->
                     transaction.execute(
                         "DELETE FROM ${quoteIdentifier(tableName)} WHERE ${quoteIdentifier(primaryKeyField)} = ?",
                         arrayOf(primaryKey),
@@ -1043,7 +1051,7 @@ private class ClientSession(private val context: Context) : Closeable {
  * The host sends one JSON object per line with schema_version and operation.
  * open requires database_key, database_mode, server_url, auth_token, and client_id.
  * open permits seed_database_name, platform, app_version, pull_page_size, push_batch_size, and transport_capacity.
- * local-action requires local_action with operation, table_name, primary_key_field, primary_key, and fields.
+ * local-action requires local_action with operation, table_name, primary_key_field, primary_key, fields, and authored_columns.
  * begin-call requires call_id and method. await-call requires call_id.
  * lifecycle requires lifecycle_operation. Transport arm and await require transport_operation.
  * Transport cursor override requires rebuild_cursor_override. Transport resume and snapshot have no operation-specific members.
