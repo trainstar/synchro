@@ -83,6 +83,11 @@ type queueWorkloadPayload struct {
 	RejectedCount uint64 `json:"rejected_count"`
 }
 
+type queueOutcomeCounts struct {
+	Total    uint64
+	Rejected uint64
+}
+
 type queueLocalPayload struct {
 	AuthenticatedUserID string             `json:"authenticated_user_id"`
 	ClientID            string             `json:"client_id"`
@@ -126,6 +131,7 @@ func RunQueueReplayScenario(ctx context.Context, scenario scenarios.Scenario, co
 	}
 	nextCommitLSN := uint64(1)
 	replayCalls := make([]SynchronizationResult, 0, len(scenario.Steps))
+	priorOutcomes := queueOutcomeCounts{}
 	for index := 1; index <= len(scenario.Steps); index++ {
 		stepID := scenarios.StepID(fmt.Sprintf("STEP-PERF-QUEUE-REPLAY-%03d", index))
 		step := steps[stepID]
@@ -181,6 +187,14 @@ func RunQueueReplayScenario(ctx context.Context, scenario scenarios.Scenario, co
 		if replayed.Completion != "idle" || push.StatusCode != 200 || push.Retryable == nil || *push.Retryable {
 			return QueueReplayResult{}, fmt.Errorf("Kotlin Android queue-replay replay for step %s did not complete successfully", stepID)
 		}
+		capturedOutcomes, err := queueCapturedOutcomeCounts(ctx, platform, client)
+		if err != nil {
+			return QueueReplayResult{}, fmt.Errorf("capture Kotlin Android queue-replay outcomes for step %s: %w", stepID, err)
+		}
+		if err := validateQueueWorkloadOutcomeCounts(step, priorOutcomes, capturedOutcomes); err != nil {
+			return QueueReplayResult{}, err
+		}
+		priorOutcomes = capturedOutcomes
 		replayCalls = append(replayCalls, replayed)
 		current = next
 		nextCommitLSN += 2
@@ -209,6 +223,37 @@ func RunQueueReplayScenario(ctx context.Context, scenario scenarios.Scenario, co
 		return QueueReplayResult{}, err
 	}
 	return QueueReplayResult{ReplayCalls: replayCalls, ClientFacts: clientFacts, ServerFacts: serverCaptures[0].StateFacts}, nil
+}
+
+func queueCapturedOutcomeCounts(ctx context.Context, platform *Platform, client Client) (queueOutcomeCounts, error) {
+	snapshot, err := platform.scenarioSnapshot(ctx, client)
+	if err != nil {
+		return queueOutcomeCounts{}, err
+	}
+	return queueCapturedOutcomeCountsFromResult(snapshot)
+}
+
+func queueCapturedOutcomeCountsFromResult(snapshot Result) (queueOutcomeCounts, error) {
+	if snapshot.MutationOutcomeCount == nil || snapshot.RejectedMutationCount == nil || *snapshot.MutationOutcomeCount < 0 || *snapshot.RejectedMutationCount < 0 {
+		return queueOutcomeCounts{}, errors.New("Kotlin Android queue-replay captured outcome counts are incomplete")
+	}
+	return queueOutcomeCounts{Total: uint64(*snapshot.MutationOutcomeCount), Rejected: uint64(*snapshot.RejectedMutationCount)}, nil
+}
+
+func validateQueueWorkloadOutcomeCounts(step scenarios.Step, prior, captured queueOutcomeCounts) error {
+	var expected queueWorkloadPayload
+	if err := json.Unmarshal(step.Operation.Payload, &expected); err != nil {
+		return fmt.Errorf("Kotlin Android queue-replay workload %s outcome payload is invalid", step.ID)
+	}
+	if prior.Rejected > prior.Total || captured.Rejected > captured.Total || captured.Total < prior.Total || captured.Rejected < prior.Rejected {
+		return fmt.Errorf("Kotlin Android queue-replay workload %s captured outcome counts moved backward", step.ID)
+	}
+	observedRejected := captured.Rejected - prior.Rejected
+	observedAccepted := (captured.Total - prior.Total) - observedRejected
+	if observedAccepted != expected.AcceptedCount || observedRejected != expected.RejectedCount {
+		return fmt.Errorf("Kotlin Android queue-replay workload %s outcome counts observed accepted=%d rejected=%d expected accepted=%d rejected=%d", step.ID, observedAccepted, observedRejected, expected.AcceptedCount, expected.RejectedCount)
+	}
+	return nil
 }
 
 func queueRequireSchemaReset(ctx context.Context, platform *Platform, client Client, stepID scenarios.StepID) error {
