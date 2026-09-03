@@ -247,24 +247,12 @@ struct PendingChange: Codable, Sendable, Equatable {
 
 final class ChangeTracker: @unchecked Sendable {
     private let database: SynchroDatabase
-    private static let resetReconciliationChunkSize = 400
 
     private struct LogicalRowIdentity: Hashable {
         let tableID: String
         let pkFieldID: String
         let pkLogicalType: String
         let recordID: String
-    }
-
-    private struct ArchivedSchemaKey: Hashable {
-        let version: Int64
-        let hash: String
-    }
-
-    private struct ArchivedFieldKey: Hashable {
-        let schema: ArchivedSchemaKey
-        let tableID: String
-        let fieldID: String
     }
 
     init(database: SynchroDatabase) {
@@ -396,7 +384,7 @@ final class ChangeTracker: @unchecked Sendable {
                 throw SynchroError.invalidResponse(message: "cannot hydrate mutation without a server version for \(change.tableName)/\(change.recordID)")
             }
             let values = change.fieldValuesByID
-            if change.operation == "update" && values.isEmpty {
+            if change.operation != "delete" && values.isEmpty {
                 throw SynchroError.invalidResponse(message: "cannot hydrate mutation without immutable authored fields for \(change.tableName)/\(change.recordID)")
             }
             let data = Dictionary(uniqueKeysWithValues: schema.columns.compactMap { column in
@@ -417,121 +405,6 @@ final class ChangeTracker: @unchecked Sendable {
 
     func fieldValues(_ db: GRDB.Database, mutationID: String) throws -> [String: StoredFieldValue] {
         try loadFieldValues(db, mutationID: mutationID)
-    }
-
-    func reconcileRemovedDefaults(
-        _ db: GRDB.Database,
-        targetTables: [LocalSchemaTable]
-    ) throws {
-        let targetFields = Dictionary(uniqueKeysWithValues: targetTables.map { table in
-            (table.tableID, Set(table.columns.map(\.fieldID)))
-        })
-        let rows = try Row.fetchAll(
-            db,
-            sql: """
-                SELECT pending.mutation_id, pending.table_id,
-                       pending.authored_schema_version, pending.authored_schema_hash,
-                       value.field_id, value.logical_type, value.value_kind,
-                       value.value_integer, value.value_real, value.value_text, value.value_blob
-                FROM _synchro_pending_changes AS pending
-                JOIN _synchro_mutation_values AS value USING (mutation_id)
-                WHERE pending.lifecycle_state IN (
-                    'unsealed', 'sealed', 'legacy_blocked', 'blocked_by_predecessor'
-                )
-                ORDER BY pending.local_order, value.field_id
-                """
-        )
-        var archivedSchemas: [ArchivedSchemaKey: [LocalSchemaTable]] = [:]
-        var resolvedDefaults: [ArchivedFieldKey: AnyCodable] = [:]
-        var fieldsWithoutDefaults = Set<ArchivedFieldKey>()
-        var removable: [(mutationID: String, fieldID: String)] = []
-
-        for row in rows {
-            let mutationID: String = row["mutation_id"]
-            let fieldID: String = row["field_id"]
-            guard let tableID: String = row["table_id"],
-                  let schemaVersion: Int64 = row["authored_schema_version"],
-                  let schemaHash: String = row["authored_schema_hash"] else {
-                continue
-            }
-            if targetFields[tableID]?.contains(fieldID) == true {
-                continue
-            }
-
-            let schemaKey = ArchivedSchemaKey(version: schemaVersion, hash: schemaHash)
-            let archivedTables: [LocalSchemaTable]
-            if let cached = archivedSchemas[schemaKey] {
-                archivedTables = cached
-            } else {
-                guard let archived = try SynchroMeta.getArchivedSchemaTables(
-                    db,
-                    version: schemaVersion,
-                    hash: schemaHash
-                ) else {
-                    throw SynchroError.invalidResponse(message: "mutation authored schema is not archived")
-                }
-                archivedSchemas[schemaKey] = archived
-                archivedTables = archived
-            }
-            guard let authoredTable = archivedTables.first(where: { $0.tableID == tableID }),
-                  let authoredField = authoredTable.columns.first(where: { $0.fieldID == fieldID }),
-                  authoredField.writable else {
-                throw SynchroError.invalidResponse(message: "mutation field is absent from its authored schema")
-            }
-            let storedValue = StoredFieldValue(
-                fieldID: fieldID,
-                logicalType: row["logical_type"],
-                kind: row["value_kind"],
-                integerValue: row["value_integer"],
-                realValue: row["value_real"],
-                textValue: row["value_text"],
-                blobValue: row["value_blob"]
-            )
-            guard storedValue.logicalType == authoredField.logicalType else {
-                throw SynchroError.invalidResponse(message: "mutation field type differs from its authored schema")
-            }
-
-            let fieldKey = ArchivedFieldKey(schema: schemaKey, tableID: tableID, fieldID: fieldID)
-            if fieldsWithoutDefaults.contains(fieldKey) {
-                continue
-            }
-            let defaultValue: AnyCodable
-            if let cached = resolvedDefaults[fieldKey] {
-                defaultValue = cached
-            } else if let resolved = try authoredField.sqliteDefaultWireValue(db) {
-                resolvedDefaults[fieldKey] = resolved
-                defaultValue = resolved
-            } else {
-                fieldsWithoutDefaults.insert(fieldKey)
-                continue
-            }
-            if try storedValue.immutableValue() == defaultValue {
-                removable.append((mutationID: mutationID, fieldID: fieldID))
-            }
-        }
-
-        for start in stride(from: 0, to: removable.count, by: Self.resetReconciliationChunkSize) {
-            let end = min(start + Self.resetReconciliationChunkSize, removable.count)
-            let chunk = removable[start..<end]
-            let values = Array(repeating: "(?, ?)", count: chunk.count).joined(separator: ", ")
-            var arguments: [DatabaseValue] = []
-            arguments.reserveCapacity(chunk.count * 2)
-            for key in chunk {
-                arguments.append(key.mutationID.databaseValue)
-                arguments.append(key.fieldID.databaseValue)
-            }
-            try db.execute(
-                sql: """
-                    WITH removable(mutation_id, field_id) AS (VALUES \(values))
-                    DELETE FROM _synchro_mutation_values
-                    WHERE (mutation_id, field_id) IN (SELECT mutation_id, field_id FROM removable)
-                    """,
-                arguments: StatementArguments(arguments)
-            )
-            guard db.changesCount == chunk.count else {
-                throw SynchroError.invalidResponse(message: "removed default reconciliation changed an unexpected row count")
-            }
-        }
     }
 
     func markPendingAsSealed(_ db: GRDB.Database, batchID: String, pending: [PendingChange]) throws {

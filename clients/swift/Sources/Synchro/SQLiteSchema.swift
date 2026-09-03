@@ -41,15 +41,6 @@ enum SQLiteSchema {
         return "CREATE TABLE IF NOT EXISTS \(quotedName) (\(colDefs.joined(separator: ", ")))"
     }
 
-    /// Dynamic defaults cannot prove capture-time equality or satisfy SQLite additive DDL rules.
-    static func isConstantDefaultSQL(_ sql: String) -> Bool {
-        let upper = sql.uppercased()
-        return !upper.contains("CURRENT_TIMESTAMP")
-            && !upper.contains("CURRENT_DATE")
-            && !upper.contains("CURRENT_TIME")
-            && !upper.contains("(")
-    }
-
     static func generateIndexSQL(index: LocalSchemaIndex, table: LocalSchemaTable) throws -> String {
         let columnsByID = Dictionary(uniqueKeysWithValues: table.columns.map { ($0.fieldID, $0.name) })
         let columns = try index.fieldIDs.map { fieldID -> String in

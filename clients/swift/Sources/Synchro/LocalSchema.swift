@@ -1,5 +1,4 @@
 import Foundation
-@preconcurrency import GRDB
 
 struct LocalSchemaColumn: Codable, Sendable, Equatable {
     let fieldID: String
@@ -11,56 +10,6 @@ struct LocalSchemaColumn: Codable, Sendable, Equatable {
     let scale: Int?
     let sqliteDefaultSQL: String?
     let isPrimaryKey: Bool
-
-    func sqliteDefaultWireValue(_ db: GRDB.Database) throws -> AnyCodable? {
-        guard let sqliteDefaultSQL,
-              !sqliteDefaultSQL.isEmpty,
-              SQLiteSchema.isConstantDefaultSQL(sqliteDefaultSQL) else {
-            return nil
-        }
-        guard let row = try Row.fetchOne(
-            db,
-            sql: "SELECT CAST((\(sqliteDefaultSQL)) AS \(SQLiteSchema.sqliteType(for: logicalType))) AS value"
-        ) else {
-            throw SynchroError.invalidResponse(message: "SQLite default did not produce a value")
-        }
-        let value: DatabaseValue = row["value"]
-        let wireValue: AnyCodable
-        switch (logicalType, value.storage) {
-        case (_, .null):
-            wireValue = AnyCodable(NSNull())
-        case ("boolean", .int64(let value)) where value == 0 || value == 1:
-            wireValue = AnyCodable(value == 1)
-        case ("int", .int64(let value)):
-            wireValue = AnyCodable(value)
-        case ("int64", .int64(let value)):
-            wireValue = AnyCodable(String(value))
-        case ("float", .double(let value)):
-            wireValue = AnyCodable(value)
-        case ("bytes", .blob(let value)):
-            wireValue = AnyCodable(
-                value.base64EncodedString()
-                    .replacingOccurrences(of: "+", with: "-")
-                    .replacingOccurrences(of: "/", with: "_")
-                    .replacingOccurrences(of: "=", with: "")
-            )
-        case ("string", .string(let value)),
-             ("decimal", .string(let value)),
-             ("datetime", .string(let value)),
-             ("date", .string(let value)),
-             ("time", .string(let value)),
-             ("json", .string(let value)):
-            wireValue = AnyCodable(value)
-        default:
-            return nil
-        }
-        do {
-            try Integrity.validateTypedValue(wireValue, field: self)
-        } catch {
-            return nil
-        }
-        return wireValue
-    }
 }
 
 struct LocalSchemaIndex: Codable, Sendable, Equatable {

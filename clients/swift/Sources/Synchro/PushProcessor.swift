@@ -206,7 +206,7 @@ final class PushProcessor: @unchecked Sendable {
         }
 
         let values = change.fieldValuesByID
-        if change.operation == "update" && values.isEmpty {
+        if change.operation != "delete" && values.isEmpty {
             throw SynchroError.invalidResponse(message: "mutation has no immutable authored values")
         }
         for value in values.values {
@@ -458,85 +458,6 @@ final class PushProcessor: @unchecked Sendable {
         )
     }
 
-    private func renewedMutation(
-        _ db: GRDB.Database,
-        source: PendingChange,
-        oldMutation: Mutation,
-        currentTables: [LocalSchemaTable]
-    ) throws -> Mutation {
-        guard let tableID = source.tableID,
-              let authoredVersion = source.authoredSchemaVersion,
-              let authoredHash = source.authoredSchemaHash,
-              tableID == oldMutation.table,
-              source.mutationID == oldMutation.mutationID,
-              authoredVersion == oldMutation.authoredSchema.version,
-              authoredHash == oldMutation.authoredSchema.hash else {
-            throw SynchroError.invalidResponse(message: "renewed mutation does not match its durable ledger identity")
-        }
-        let authoredTable = try historicalTable(
-            db,
-            tableID: tableID,
-            schema: oldMutation.authoredSchema,
-            sealedSchema: nil,
-            sealedTables: nil
-        )
-        try validateCapturedMutation(source, schema: authoredTable)
-        let renewed = try mutation(from: source, schema: authoredTable)
-        if renewed != oldMutation {
-            guard try isAllowedDefaultReconciliation(
-                db,
-                oldMutation: oldMutation,
-                renewedMutation: renewed,
-                authoredTable: authoredTable,
-                currentTables: currentTables
-            ) else {
-                throw SynchroError.invalidResponse(message: "renewed mutation changed its authored payload")
-            }
-        }
-        return renewed
-    }
-
-    private func isAllowedDefaultReconciliation(
-        _ db: GRDB.Database,
-        oldMutation: Mutation,
-        renewedMutation: Mutation,
-        authoredTable: LocalSchemaTable,
-        currentTables: [LocalSchemaTable]
-    ) throws -> Bool {
-        guard oldMutation.mutationID == renewedMutation.mutationID,
-              oldMutation.table == renewedMutation.table,
-              oldMutation.op == renewedMutation.op,
-              oldMutation.pk == renewedMutation.pk,
-              oldMutation.authoredSchema == renewedMutation.authoredSchema,
-              oldMutation.baseVersion == renewedMutation.baseVersion,
-              oldMutation.clientVersion == renewedMutation.clientVersion,
-              oldMutation.columns != nil,
-              renewedMutation.columns != nil else {
-            return false
-        }
-        let oldColumns = oldMutation.columns ?? [:]
-        let renewedColumns = renewedMutation.columns ?? [:]
-        guard renewedColumns.allSatisfy({ oldColumns[$0.key] == $0.value }) else {
-            return false
-        }
-        let removedFieldIDs = Set(oldColumns.keys).subtracting(renewedColumns.keys)
-        guard !removedFieldIDs.isEmpty else {
-            return false
-        }
-        let currentFieldIDs = Set(
-            currentTables.first(where: { $0.tableID == oldMutation.table })?.columns.map(\.fieldID) ?? []
-        )
-        for fieldID in removedFieldIDs {
-            guard !currentFieldIDs.contains(fieldID),
-                  let field = authoredTable.columns.first(where: { $0.fieldID == fieldID }),
-                  let defaultValue = try field.sqliteDefaultWireValue(db),
-                  defaultValue == oldColumns[fieldID] else {
-                return false
-            }
-        }
-        return true
-    }
-
     private func markBatchRenewalRequired(_ db: GRDB.Database, batchID: String) throws {
         try db.execute(
             sql: "UPDATE _synchro_push_batches SET state = 'renewal_required' WHERE batch_id = ? AND state = 'pending'",
@@ -620,21 +541,12 @@ final class PushProcessor: @unchecked Sendable {
                 throw SynchroError.invalidResponse(message: "sealed push renewal membership is invalid")
             }
 
-            let renewedMutations = try zip(members, oldRequest.mutations).map { member, mutation in
-                try renewedMutation(
-                    db,
-                    source: member,
-                    oldMutation: mutation,
-                    currentTables: syncedTables
-                )
-            }
-
             let successor = PushRequest(
                 clientID: clientID,
                 clientGeneration: clientGeneration,
                 batchID: UUID().uuidString.lowercased(),
                 schema: installedSchema,
-                mutations: renewedMutations
+                mutations: oldRequest.mutations
             )
             try validateRenewedRequest(db, request: successor, syncedTables: syncedTables)
             let successorJSON = try encodeString(successor)

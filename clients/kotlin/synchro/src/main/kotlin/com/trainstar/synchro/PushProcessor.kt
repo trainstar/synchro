@@ -144,28 +144,13 @@ internal class PushProcessor(
         normalizeUnsealedChains(db)
         val candidates = eligibleForSealing(db, batchSize)
         if (candidates.isEmpty()) return@writeTransaction null
-        val requestSchema = SchemaRef(schemaVersion, schemaHash)
-        val authoredTablesCache = HashMap<SchemaRef, List<LocalSchemaTable>?>()
-        val mutations = candidates.map { candidate ->
-            val built = buildMutation(db, candidate)
-            if (built.authoredSchema == requestSchema) {
-                built
-            } else {
-                // A mutation authored before the installed schema can carry
-                // captured defaults of since-removed fields. The same
-                // reconciliation rule as the renewal path applies here.
-                val authoredTables = authoredTablesCache.getOrPut(built.authoredSchema) {
-                    schemaTablesForReference(db, built.authoredSchema, null)
-                }
-                if (authoredTables == null) built else reconcileRemovedDefaults(built, authoredTables, syncedTables)
-            }
-        }
-        validateNewMutations(db, mutations, requestSchema, syncedTables)
+        val mutations = candidates.map { buildMutation(db, it) }
+        validateNewMutations(db, mutations, SchemaRef(schemaVersion, schemaHash), syncedTables)
         val request = PushRequest(
             clientID = clientID,
             clientGeneration = clientGeneration,
             batchID = UUID.randomUUID().toString(),
-            schema = requestSchema,
+            schema = SchemaRef(schemaVersion, schemaHash),
             mutations = mutations,
         )
         request.validate()
@@ -456,49 +441,6 @@ internal class PushProcessor(
         }
     }
 
-    // The insert triggers capture every writable field with its declared
-    // default. A class-4 transition can remove such a field, and a captured
-    // default carries no authored intent, so the renewed request drops the
-    // column when the reconciled schema removed the field and the captured
-    // value equals the authored default. An authored non-default value stays,
-    // and the server rejects that mutation, which preserves the authored
-    // outcome of the incompatible write.
-    private fun reconcileRemovedDefaults(
-        mutation: Mutation,
-        authoredTables: List<LocalSchemaTable>,
-        currentTables: List<LocalSchemaTable>,
-    ): Mutation {
-        val columns = mutation.columns ?: return mutation
-        val authoredColumns = authoredTables.firstOrNull { it.tableID == mutation.table }?.columns
-            ?: return mutation
-        val currentFieldIDs = currentTables.firstOrNull { it.tableID == mutation.table }
-            ?.columns?.mapTo(HashSet()) { it.fieldID }
-            ?: return mutation
-        val retained = columns.filterKeys { fieldID ->
-            if (fieldID in currentFieldIDs) return@filterKeys true
-            val authored = authoredColumns.firstOrNull { it.fieldID == fieldID }
-                ?: return@filterKeys true
-            val defaultValue = constantDefaultWireValue(authored)
-                ?: return@filterKeys true
-            columns[fieldID] != defaultValue
-        }
-        if (retained.size == columns.size) return mutation
-        return mutation.copy(columns = JsonObject(retained))
-    }
-
-    // Only a constant literal default can prove capture-time equality. A
-    // dynamic default, or any form this parser does not recognize, keeps the
-    // column so the mismatch stays visible at the server.
-    private fun constantDefaultWireValue(column: LocalSchemaColumn): JsonElement? {
-        val sql = column.sqliteDefaultSQL?.trim() ?: return null
-        if (sql.equals("NULL", ignoreCase = true)) return JsonNull
-        if (sql.length >= 2 && sql.startsWith("'") && sql.endsWith("'")) {
-            return JsonPrimitive(sql.substring(1, sql.length - 1).replace("''", "'"))
-        }
-        sql.toLongOrNull()?.let { return JsonPrimitive(it) }
-        return null
-    }
-
     private fun renewRequiredBatchesInTransaction(
         db: SQLiteDatabase,
         clientID: String,
@@ -562,7 +504,7 @@ internal class PushProcessor(
                 clientGeneration = clientGeneration,
                 batchID = UUID.randomUUID().toString(),
                 schema = installed,
-                mutations = oldRequest.mutations.map { reconcileRemovedDefaults(it, oldTables, syncedTables) },
+                mutations = oldRequest.mutations,
             )
             try {
                 successor.validate()
