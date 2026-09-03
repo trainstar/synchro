@@ -337,11 +337,6 @@ pub(crate) fn prepare_pending_manifest(
     let transition_class =
         classify_transition(client, registry_generation, parent.as_ref(), &tables)
             .map_err(|_| "classifying pending schema manifest failed".to_string())?;
-    if transition_class == SchemaTransitionClass::Class4 {
-        return Err(
-            "pending registry generation has an incompatible schema transition".to_string(),
-        );
-    }
     let compatibility_floor = if transition_class == SchemaTransitionClass::Class2 {
         parent
             .as_ref()
@@ -404,7 +399,6 @@ pub(crate) fn publish_pending_manifest(
     };
     if canonical != canonical_body.as_bytes()
         || body.schema_version != version
-        || transition_class == SchemaTransitionClass::Class4
         || body.transition_class != transition_class
         || body.compatibility_floor != compatibility_floor
         || body.parent_schema.as_ref().map(|value| value.version)

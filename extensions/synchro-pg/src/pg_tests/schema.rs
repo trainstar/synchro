@@ -3197,7 +3197,8 @@
     }
 
     // Issue #43: manifest publication refuses a class 4 reshape over retained
-    // rows, so bootstrap preparation must accept the same generation.
+    // rows, so bootstrap preparation must accept the same generation and
+    // produce the pending class 4 manifest the activation publishes.
     #[pg_test]
     fn test_class_4_reshape_over_rows_requires_projection_bootstrap() {
         setup_test_tables();
@@ -3205,6 +3206,15 @@
         Spi::run("INSERT INTO test_orders (user_id, title) VALUES ('user-a', 'kept')").unwrap();
         let staged = stage_orders_transition(true, true);
         assert!(staged_generation_requires_bootstrap(staged));
+        let published: Option<i64> =
+            Spi::get_one("SELECT max(schema_version) FROM sync_schema_manifest").unwrap();
+        let pending = Spi::connect(|client| {
+            crate::schema::prepare_pending_manifest(client, staged)
+                .map_err(pgrx::spi::Error::CursorNotFound)
+        })
+        .expect("prepare pending class 4 manifest")
+        .expect("pending class 4 manifest is present");
+        assert_eq!(pending.version, published.expect("published manifest") + 1);
     }
 
     #[pg_test]
