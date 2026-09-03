@@ -1033,9 +1033,15 @@ func (c *QueueReplayCoordinator) validateTraceSnapshot(raw json.RawMessage) (tra
 }
 
 func (c *QueueReplayCoordinator) combinedTrace(raw json.RawMessage) (json.RawMessage, error) {
-	trace, err := c.validateTraceSnapshot(raw)
+	// The terminal capture already extracted the request_trace member, so this
+	// decodes the snapshot itself. validateTraceSnapshot expects the whole
+	// per-restart capture envelope with its process identity.
+	trace, err := captureTraceFromRaw(raw)
 	if err != nil {
 		return nil, err
+	}
+	if trace.Overflowed || validateTraceSequence(trace.Observations) != nil {
+		return nil, errors.New("React Native queue-replay terminal trace is invalid")
 	}
 	observations := make([]transportObservation, 0, len(c.trace)+len(trace.Observations))
 	observations = append(observations, c.trace...)

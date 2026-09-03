@@ -549,8 +549,11 @@ func TestQueueReplayCombinesTraceSnapshotsAcrossRestarts(t *testing.T) {
 		process: &process,
 		trace:   []transportObservation{{Sequence: 1, OperationClass: "push", StatusCode: http.StatusOK}},
 	}
-	raw := queueReplayCaptureResultForTest(t, process, traceSnapshot{Observations: []transportObservation{{Sequence: 1, OperationClass: "push", StatusCode: http.StatusOK}}, SequenceCheckpoint: 1})
-	combined, err := coordinator.combinedTrace(raw)
+	snapshot, err := json.Marshal(traceSnapshot{Observations: []transportObservation{{Sequence: 1, OperationClass: "push", StatusCode: http.StatusOK}}, SequenceCheckpoint: 1})
+	if err != nil {
+		t.Fatalf("encode queue-replay trace snapshot: %v", err)
+	}
+	combined, err := coordinator.combinedTrace(snapshot)
 	if err != nil {
 		t.Fatalf("combine queue-replay trace snapshots: %v", err)
 	}
