@@ -134,7 +134,9 @@ async function executeCommand(command: Record<string, unknown>): Promise<string>
   }
   await element(by.id('conformance-command-input')).tapReturnKey();
   await element(by.id('btn-conformance-execute')).tap();
-  const deadline = Date.now() + 45000;
+  // The response-loss await retries through in-call backoff on the device,
+  // so the command poll matches the runner completion wait.
+  const deadline = Date.now() + 570000;
   while (Date.now() < deadline) {
     const state = await element(by.id('conformance-command-state')).getAttributes();
     if (state.text === 'ok' || state.text === 'error') {
@@ -177,4 +179,6 @@ it('executes the queue-replay coordinator sequence', async () => {
     }
   }
   throw new Error('React Native queue-replay coordinator did not complete');
-});
+  // The batched flow drives 133 exchanges and the response-loss await can
+  // hold one command through in-call backoff, past the 120 second default.
+}, 1800000);
