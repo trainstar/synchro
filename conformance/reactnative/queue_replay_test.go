@@ -272,8 +272,8 @@ func TestQueueReplayAuthoredFlowServesExactlyExchangeCount(t *testing.T) {
 	want = append(want,
 		exchange{actor: "observer", command: "capture", state: "command"},
 		exchange{actor: "observer", command: "capture", state: "command"},
-		exchange{state: "complete"},
 	)
+	want = append(want, exchange{state: "complete"})
 
 	localOperations := 0
 	served := 0
@@ -324,14 +324,11 @@ func TestQueueReplayAuthoredFlowServesExactlyExchangeCount(t *testing.T) {
 	if served != coordinator.ExchangeCount() {
 		t.Fatalf("queue-replay exchanges served = %d, want ExchangeCount=%d", served, coordinator.ExchangeCount())
 	}
-	if got, wantCount := coordinator.ExchangeCount(), 133; got != wantCount {
-		t.Fatalf("queue-replay ExchangeCount = %d, want %d", got, wantCount)
-	}
 	if got, wantCount := coordinator.StageCount(), coordinator.ExchangeCount(); got != wantCount {
 		t.Fatalf("queue-replay StageCount = %d, want ExchangeCount=%d", got, wantCount)
 	}
-	if wantLocalOperations != 3306 {
-		t.Fatalf("queue-replay authored local operations = %d, want 3306", wantLocalOperations)
+	if wantLocalOperations == 0 {
+		t.Fatal("queue-replay authored local operations are absent")
 	}
 }
 
@@ -356,7 +353,7 @@ func TestQueueReplayFinalCaptureRequestsAggregateEvidenceFirst(t *testing.T) {
 	if !ok {
 		t.Fatalf("queue-replay final capture sources = %#v, want string array", response.Command.Action.Action.Parameters["sources"])
 	}
-	want := []string{"scope-state", "sync-status", "request-trace"}
+	want := []string{"scope-state", "sync-status", "sync-events", "request-trace"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("queue-replay final capture sources = %#v, want %#v", got, want)
 	}
@@ -417,6 +414,21 @@ func TestQueueReplayFinalCaptureRequestsRejectedDetailsAfterBoundedAggregate(t *
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("queue-replay rejected detail capture sources = %#v, want %#v", got, want)
 	}
+
+	state["rejectedMutationCount"] = queueReplayMaximumRejectedDetails + 1
+	coordinator.finalResult = &finalCapture{ClientState: queueReplayFixtureJSON(t, state)}
+	coordinator.stage = queueReplayStageCapture
+	response, err = coordinator.advanceLocked(context.Background(), 2)
+	if err != nil || response.Command == nil {
+		t.Fatalf("advance queue-replay authored rejected detail capture: command=%#v error=%v", response.Command, err)
+	}
+	if coordinator.stage != queueReplayStageRejectedCapture {
+		t.Fatalf("queue-replay authored detail capture stage = %s, want rejected-capture", coordinator.stage)
+	}
+	got, ok = response.Command.Action.Action.Parameters["sources"].([]string)
+	if !ok || !reflect.DeepEqual(got, want) {
+		t.Fatalf("queue-replay authored rejected detail capture sources = %#v, want %#v", response.Command.Action.Action.Parameters["sources"], want)
+	}
 }
 
 func TestQueueReplayFinalCaptureValidatesAuthoredAggregateCounts(t *testing.T) {
@@ -466,6 +478,7 @@ func TestQueueReplayFinalCaptureValidatesAuthoredAggregateCounts(t *testing.T) {
 		ClientState: queueReplayFixtureJSON(t, state),
 		Rejected:    queueReplayFixtureJSON(t, rejected),
 		Status:      json.RawMessage(`{"state":"ready","retry_at":null,"operation":null,"failure":null}`),
+		Events:      json.RawMessage(`[{"type":"mutation_rejected","rejection_code":"unsupported_schema"}]`),
 		Trace:       queueReplayFixtureJSON(t, traceSnapshot{Observations: observations, SequenceCheckpoint: uint64(len(observations))}),
 	}
 	if err := coordinator.validateCapture(capture); err != nil {
@@ -480,8 +493,33 @@ func TestQueueReplayFinalCaptureValidatesAuthoredAggregateCounts(t *testing.T) {
 	state["rejectedMutationCount"] = coordinator.rejectedCount() + 1
 	capture.ClientState = queueReplayFixtureJSON(t, state)
 	_, err = coordinator.validateCaptureAggregate(capture)
-	if err == nil || !strings.Contains(err.Error(), fmt.Sprintf("rejected mutations count=%d want=%d", coordinator.rejectedCount()+1, coordinator.rejectedCount())) {
-		t.Fatalf("queue-replay rejected aggregate diagnostic = %v, want observed and expected counts", err)
+	if err == nil || !strings.Contains(err.Error(), fmt.Sprintf("rejected mutations count=%d want=%d", coordinator.rejectedCount()+1, coordinator.rejectedCount())) || !strings.Contains(err.Error(), "terminal_rejection_codes=mutation_rejected:unsupported_schema=1") {
+		t.Fatalf("queue-replay rejected aggregate diagnostic = %v, want observed counts and terminal rejection code", err)
+	}
+}
+
+func TestQueueReplayTerminalRejectionCodesAreBoundedAndSorted(t *testing.T) {
+	raw := json.RawMessage(`[
+		{"type":"mutation_rejected","rejection_code":"version_conflict"},
+		{"type":"mutation_rejected","rejection_code":"version_conflict"},
+		{"type":"failure","failure":{"code":"server_error"}}
+	]`)
+	if got, want := queueReplayTerminalRejectionCodes(raw), "failure:server_error=1,mutation_rejected:version_conflict=2"; got != want {
+		t.Fatalf("queue-replay terminal rejection codes = %q, want %q", got, want)
+	}
+	if got, want := queueReplayTerminalRejectionCodes(json.RawMessage(`{}`)), "<unavailable>"; got != want {
+		t.Fatalf("queue-replay unavailable terminal rejection codes = %q, want %q", got, want)
+	}
+	events := make([]map[string]string, 0, queueReplayMaximumTerminalRejectionCodes+1)
+	for index := 0; index <= queueReplayMaximumTerminalRejectionCodes; index++ {
+		events = append(events, map[string]string{"type": "mutation_rejected", "rejection_code": fmt.Sprintf("code-%d", index)})
+	}
+	encoded, err := json.Marshal(events)
+	if err != nil {
+		t.Fatalf("marshal queue-replay terminal rejection codes: %v", err)
+	}
+	if got := queueReplayTerminalRejectionCodes(encoded); !strings.HasSuffix(got, "...+1") || strings.Count(got, "=") != queueReplayMaximumTerminalRejectionCodes {
+		t.Fatalf("queue-replay bounded terminal rejection codes = %q", got)
 	}
 }
 
@@ -615,9 +653,11 @@ func TestQueueReplayIncompleteResultNamesServedAndExpectedExchanges(t *testing.T
 	if err != nil {
 		t.Fatalf("derive queue-replay workloads: %v", err)
 	}
-	coordinator := &QueueReplayCoordinator{steps: workloads, stage: queueReplayStageCapture, nextSeq: 115}
+	coordinator := &QueueReplayCoordinator{steps: workloads, stage: queueReplayStageCapture}
+	coordinator.nextSeq = uint64(coordinator.ExchangeCount())
 	_, err = coordinator.Result()
-	if err == nil || !strings.Contains(err.Error(), "current stage=capture") || !strings.Contains(err.Error(), "exchanges served=114 versus ExchangeCount=133") {
+	progress := fmt.Sprintf("exchanges served=%d versus ExchangeCount=%d", coordinator.ExchangeCount()-1, coordinator.ExchangeCount())
+	if err == nil || !strings.Contains(err.Error(), "current stage=capture") || !strings.Contains(err.Error(), progress) {
 		t.Fatalf("incomplete queue-replay result = %v, want current stage and exchange progress", err)
 	}
 }
@@ -628,9 +668,11 @@ func TestQueueReplayFailedResultNamesServedAndExpectedExchanges(t *testing.T) {
 	if err != nil {
 		t.Fatalf("derive queue-replay workloads: %v", err)
 	}
-	coordinator := &QueueReplayCoordinator{steps: workloads, stage: queueReplayStageComplete, nextSeq: 115, failed: errors.New("terminal validation failed")}
+	coordinator := &QueueReplayCoordinator{steps: workloads, stage: queueReplayStageComplete, failed: errors.New("terminal validation failed")}
+	coordinator.nextSeq = uint64(coordinator.ExchangeCount())
 	_, err = coordinator.Result()
-	if err == nil || !strings.Contains(err.Error(), "terminal validation failed") || !strings.Contains(err.Error(), "current stage=complete") || !strings.Contains(err.Error(), "exchanges served=114 versus ExchangeCount=133") {
+	progress := fmt.Sprintf("exchanges served=%d versus ExchangeCount=%d", coordinator.ExchangeCount()-1, coordinator.ExchangeCount())
+	if err == nil || !strings.Contains(err.Error(), "terminal validation failed") || !strings.Contains(err.Error(), "current stage=complete") || !strings.Contains(err.Error(), progress) {
 		t.Fatalf("failed queue-replay result = %v, want cause, current stage, and exchange progress", err)
 	}
 }

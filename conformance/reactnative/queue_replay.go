@@ -29,6 +29,8 @@ const (
 	queueReplayMaximumLocalOperations = 64
 	// Rejected mutation details use the runner's bounded detail-record limit.
 	queueReplayMaximumRejectedDetails = 512
+	// Terminal diagnostics name a bounded set of protocol failure codes.
+	queueReplayMaximumTerminalRejectionCodes = 8
 )
 
 // LoadQueueReplayScenario loads the authored queue-replay scenario.
@@ -87,8 +89,12 @@ func ValidateQueueReplayScenario(scenario scenarios.Scenario) error {
 	if ios != 1 || android != 1 {
 		return errors.New("React Native queue-replay proof obligations are invalid")
 	}
-	if _, err := queueReplayWorkloads(scenario); err != nil {
+	workloads, err := queueReplayWorkloads(scenario)
+	if err != nil {
 		return fmt.Errorf("React Native queue-replay workload contract is invalid: %w", err)
+	}
+	if queueReplayRejectedCount(workloads) > queueReplayMaximumRejectedDetails {
+		return errors.New("React Native queue-replay rejected detail records exceed the public capture bound")
 	}
 	return nil
 }
@@ -334,10 +340,7 @@ func (c *QueueReplayCoordinator) ExchangeCount() int {
 }
 
 func (c *QueueReplayCoordinator) exchangeCountLocked() int {
-	count := 4 // open, bootstrap, aggregate capture, complete response
-	if c.rejectedCount() <= queueReplayMaximumRejectedDetails {
-		count++ // bounded rejected-mutation detail capture
-	}
+	count := 5 // open, bootstrap, aggregate capture, rejected detail capture, complete response
 	for _, workload := range c.steps {
 		count += queueReplayLocalBatchCount(workload) + 7 // write batches, restart, schema check, begin loss, await loss, trace, restart, replay
 	}
@@ -720,13 +723,13 @@ func (c *QueueReplayCoordinator) acceptResultLocked(raw json.RawMessage) error {
 		}
 		c.trace = append(c.trace, trace.Observations...)
 	case queueReplayStageCapture:
-		capture, err := decodeCapture(envelope.Result, []string{"client_state", "sync_status", "request_trace"})
+		capture, err := decodeCapture(envelope.Result, []string{"client_state", "sync_status", "sync_events", "request_trace"})
 		if err != nil {
-			return err
+			return fmt.Errorf("decode React Native queue-replay terminal aggregate capture: %w", err)
 		}
 		trace, err := c.combinedTrace(capture.Trace)
 		if err != nil {
-			return err
+			return fmt.Errorf("validate React Native queue-replay terminal aggregate trace: %w", err)
 		}
 		capture.Trace = trace
 		if _, err := c.validateCaptureAggregate(capture); err != nil {
@@ -774,7 +777,7 @@ func (c *QueueReplayCoordinator) advanceLocked(ctx context.Context, sequence uin
 			break
 		}
 		if c.stepIndex == len(c.steps) {
-			response.Command = c.command("observer", "capture", map[string]any{"client_keys": []string{c.clientKey}, "sources": []string{"scope-state", "sync-status", "request-trace"}}, nil)
+			response.Command = c.command("observer", "capture", map[string]any{"client_keys": []string{c.clientKey}, "sources": []string{"scope-state", "sync-status", "sync-events", "request-trace"}}, nil)
 			c.stage = queueReplayStageCapture
 			break
 		}
@@ -839,22 +842,8 @@ func (c *QueueReplayCoordinator) advanceLocked(ctx context.Context, sequence uin
 		if c.finalResult == nil {
 			return exchangeResponse{}, errors.New("React Native queue-replay aggregate capture is unavailable")
 		}
-		state, err := decodeClientState(c.finalResult.ClientState)
-		if err != nil {
-			return exchangeResponse{}, err
-		}
-		if state.RejectedMutationCount <= queueReplayMaximumRejectedDetails {
-			response.Command = c.command("observer", "capture", map[string]any{"client_keys": []string{c.clientKey}, "sources": []string{"rejected-mutations"}}, nil)
-			c.stage = queueReplayStageRejectedCapture
-			break
-		}
-		if err := c.completeLocked(ctx); err != nil {
-			return exchangeResponse{}, err
-		}
-		response.State = "complete"
-		response.Command = nil
-		c.stage = queueReplayStageComplete
-		c.completed = true
+		response.Command = c.command("observer", "capture", map[string]any{"client_keys": []string{c.clientKey}, "sources": []string{"rejected-mutations"}}, nil)
+		c.stage = queueReplayStageRejectedCapture
 	case queueReplayStageRejectedCapture:
 		if err := c.completeLocked(ctx); err != nil {
 			return exchangeResponse{}, err
@@ -1096,9 +1085,6 @@ func (c *QueueReplayCoordinator) validateCapture(capture finalCapture) error {
 	if err != nil {
 		return err
 	}
-	if state.RejectedMutationCount > queueReplayMaximumRejectedDetails {
-		return nil
-	}
 	return validateRejectedMutationDetails(capture.Rejected, state.RejectedMutationCount)
 }
 
@@ -1122,10 +1108,20 @@ func (c *QueueReplayCoordinator) validateCaptureAggregate(capture finalCapture) 
 		{"sealed batches", state.SealedBatchCount, *expected.Clients[0].SealedBatchCount},
 		{"rejected mutations", state.RejectedMutationCount, uint64(c.rejectedCount())},
 	}
+	mismatches := make([]string, 0, len(counts))
+	rejectedMismatch := false
 	for _, count := range counts {
 		if count.observed != count.expected {
-			return inspectedClientState{}, fmt.Errorf("React Native queue-replay final %s count=%d want=%d", count.name, count.observed, count.expected)
+			mismatches = append(mismatches, fmt.Sprintf("%s count=%d want=%d", count.name, count.observed, count.expected))
+			rejectedMismatch = rejectedMismatch || count.name == "rejected mutations"
 		}
+	}
+	if len(mismatches) != 0 {
+		diagnostic := ""
+		if rejectedMismatch {
+			diagnostic = fmt.Sprintf(" terminal_rejection_codes=%s", queueReplayTerminalRejectionCodes(capture.Events))
+		}
+		return inspectedClientState{}, fmt.Errorf("React Native queue-replay final aggregate mismatch: %s%s", strings.Join(mismatches, ", "), diagnostic)
 	}
 	if validateReadyStatus(capture.Status) != nil {
 		return inspectedClientState{}, errors.New("React Native queue-replay final queue status is invalid")
@@ -1154,9 +1150,61 @@ func validateRejectedMutationDetails(raw json.RawMessage, expected uint64) error
 	return nil
 }
 
+func queueReplayTerminalRejectionCodes(raw json.RawMessage) string {
+	var events []struct {
+		Type          string  `json:"type"`
+		RejectionCode *string `json:"rejection_code"`
+		Failure       *struct {
+			Code string `json:"code"`
+		} `json:"failure"`
+	}
+	if json.Unmarshal(raw, &events) != nil {
+		return "<unavailable>"
+	}
+	codes := make(map[string]int)
+	for _, event := range events {
+		switch event.Type {
+		case "mutation_rejected":
+			code := "<none>"
+			if event.RejectionCode != nil && *event.RejectionCode != "" {
+				code = *event.RejectionCode
+			}
+			codes["mutation_rejected:"+code]++
+		case "failure":
+			if event.Failure != nil && event.Failure.Code != "" {
+				codes["failure:"+event.Failure.Code]++
+			}
+		}
+	}
+	if len(codes) == 0 {
+		return "<none>"
+	}
+	values := make([]string, 0, len(codes))
+	for code := range codes {
+		values = append(values, code)
+	}
+	sort.Strings(values)
+	more := 0
+	if len(values) > queueReplayMaximumTerminalRejectionCodes {
+		more = len(values) - queueReplayMaximumTerminalRejectionCodes
+		values = values[:queueReplayMaximumTerminalRejectionCodes]
+	}
+	for index, code := range values {
+		values[index] = fmt.Sprintf("%s=%d", code, codes[code])
+	}
+	if more != 0 {
+		values = append(values, fmt.Sprintf("...+%d", more))
+	}
+	return strings.Join(values, ",")
+}
+
 func (c *QueueReplayCoordinator) rejectedCount() int {
+	return queueReplayRejectedCount(c.steps)
+}
+
+func queueReplayRejectedCount(workloads []queueReplayWorkload) int {
 	count := 0
-	for _, workload := range c.steps {
+	for _, workload := range workloads {
 		var payload queueReplayWorkloadPayload
 		if json.Unmarshal(workload.step.Operation.Payload, &payload) == nil {
 			count += int(payload.RejectedCount)
@@ -1411,7 +1459,7 @@ func queueReplayOperations(step scenarios.Step, current queueReplaySchema, commi
 		return nil, scenarios.Operation{}, scenarios.Operation{}, queueReplaySchema{}, fmt.Errorf("React Native queue-replay step %s schema is invalid", step.ID)
 	}
 	var payload queueReplayWorkloadPayload
-	if json.Unmarshal(step.Operation.Payload, &payload) != nil || payload.Profile != "pending_mutations" || payload.UserID != binding.UserID || payload.ClientID != binding.ClientID || payload.TableID == "" || payload.RejectedCount != 1 || payload.AcceptedCount != binding.Workload.RecordCount-1 || len(current.Tables) != 1 || len(binding.Workload.Targets) != 1 || binding.Workload.RecordCount == 0 || binding.Workload.BatchSize == 0 {
+	if json.Unmarshal(step.Operation.Payload, &payload) != nil || payload.Profile != "pending_mutations" || payload.UserID != binding.UserID || payload.ClientID != binding.ClientID || payload.TableID == "" || payload.RejectedCount > binding.Workload.RecordCount || payload.AcceptedCount != binding.Workload.RecordCount-payload.RejectedCount || len(current.Tables) != 1 || len(binding.Workload.Targets) != 1 || binding.Workload.RecordCount == 0 || binding.Workload.BatchSize == 0 {
 		return nil, scenarios.Operation{}, scenarios.Operation{}, queueReplaySchema{}, fmt.Errorf("React Native queue-replay step %s workload is invalid", step.ID)
 	}
 	table := current.Tables[0]
@@ -1427,6 +1475,7 @@ func queueReplayOperations(step scenarios.Step, current queueReplaySchema, commi
 		return nil, scenarios.Operation{}, scenarios.Operation{}, queueReplaySchema{}, fmt.Errorf("expand React Native queue-replay workload %s: %w", step.ID, err)
 	}
 	wire := make([]map[string]any, 0, len(local))
+	rejectedMutations := uint64(0)
 	for ordinal, operation := range local {
 		var value struct {
 			AuthenticatedUserID string            `json:"authenticated_user_id"`
@@ -1464,14 +1513,16 @@ func queueReplayOperations(step scenarios.Step, current queueReplaySchema, commi
 		if _, found := columns[acceptedField.FieldID]; !found {
 			return nil, scenarios.Operation{}, scenarios.Operation{}, queueReplaySchema{}, fmt.Errorf("React Native queue-replay local write %d lacks the accepted field", ordinal+1)
 		}
-		if ordinal+1 < len(local) {
-			if _, found := columns[rejectedField.FieldID]; found {
-				return nil, scenarios.Operation{}, scenarios.Operation{}, queueReplaySchema{}, fmt.Errorf("React Native queue-replay local write %d contains the rejection field", ordinal+1)
+		if _, found := columns[rejectedField.FieldID]; found {
+			if ordinal+1 != len(local) {
+				return nil, scenarios.Operation{}, scenarios.Operation{}, queueReplaySchema{}, fmt.Errorf("React Native queue-replay local write %d contains the rejection field before the terminal mutation", ordinal+1)
 			}
-		} else if _, found := columns[rejectedField.FieldID]; !found {
-			return nil, scenarios.Operation{}, scenarios.Operation{}, queueReplaySchema{}, errors.New("React Native queue-replay terminal local write lacks the rejection field")
+			rejectedMutations++
 		}
 		wire = append(wire, map[string]any{"mutation_id": value.MutationID, "table": value.TableID, "pk": value.PK, "authored_schema": map[string]any{"version": value.AuthoredSchema.Version, "hash": value.AuthoredSchema.Hash}, "op": value.Operation, "client_version": value.ClientVersion, "columns": columns})
+	}
+	if rejectedMutations != payload.RejectedCount || uint64(len(local))-rejectedMutations != payload.AcceptedCount {
+		return nil, scenarios.Operation{}, scenarios.Operation{}, queueReplaySchema{}, fmt.Errorf("React Native queue-replay workload outcome partition is invalid: accepted=%d rejected=%d want_accepted=%d want_rejected=%d", uint64(len(local))-rejectedMutations, rejectedMutations, payload.AcceptedCount, payload.RejectedCount)
 	}
 	next, publish, err := queueReplayNextSchema(current, rejectedField.FieldID, current.Version+1)
 	if err != nil {
