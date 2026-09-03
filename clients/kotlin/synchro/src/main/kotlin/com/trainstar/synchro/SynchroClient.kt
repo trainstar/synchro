@@ -78,6 +78,20 @@ class SynchroClient(private val config: SynchroConfig, context: Context) {
     fun <T> writeTransaction(block: (ApplicationTransaction) -> T): T =
         transaction(block)
 
+    fun <T> authoredWriteTransaction(
+        tableID: String,
+        operation: Operation,
+        fieldIDs: List<String>,
+        block: (ApplicationTransaction) -> T,
+    ): T = database.applicationAuthoredWriteTransaction(tableID, operation, fieldIDs, block)
+
+    fun <T> authoredWriteTransaction(
+        tableID: String,
+        operation: String,
+        fieldIDs: List<String>,
+        block: (ApplicationTransaction) -> T,
+    ): T = database.applicationAuthoredWriteTransaction(tableID, operation, fieldIDs, block)
+
     // MARK: - Batch
 
     fun executeBatch(statements: List<SQLStatement>): Int =

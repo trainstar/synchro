@@ -120,6 +120,16 @@
     [self.impl execute:sql params:params resolve:resolve reject:reject];
 }
 
+- (void)executeAuthoredWrite:(NSString *)tableID
+                    operation:(NSString *)operation
+                     fieldIDs:(NSArray<NSString *> *)fieldIDs
+                          sql:(NSString *)sql
+                       values:(NSArray *)values
+                      resolve:(RCTPromiseResolveBlock)resolve
+                       reject:(RCTPromiseRejectBlock)reject {
+    [self.impl executeAuthoredWrite:tableID operation:operation fieldIDs:fieldIDs sql:sql values:values resolve:resolve reject:reject];
+}
+
 - (void)executeBatch:(NSArray *)statements
 	             resolve:(RCTPromiseResolveBlock)resolve
 	              reject:(RCTPromiseRejectBlock)reject {
@@ -367,6 +377,13 @@ RCT_EXTERN_METHOD(queryOne:(NSString *)sql
                   reject:(RCTPromiseRejectBlock)reject)
 RCT_EXTERN_METHOD(execute:(NSString *)sql
                   params:(NSArray *)params
+                 resolve:(RCTPromiseResolveBlock)resolve
+                  reject:(RCTPromiseRejectBlock)reject)
+RCT_EXTERN_METHOD(executeAuthoredWrite:(NSString *)tableID
+                  operation:(NSString *)operation
+                  fieldIDs:(NSArray<NSString *> *)fieldIDs
+                  sql:(NSString *)sql
+                  values:(NSArray *)values
                   resolve:(RCTPromiseResolveBlock)resolve
                   reject:(RCTPromiseRejectBlock)reject)
 RCT_EXTERN_METHOD(executeBatch:(NSArray *)statements

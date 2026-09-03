@@ -18,6 +18,7 @@ internal object ApplicationSql {
     data class Statement(
         val kind: Kind,
         val writeTarget: String? = null,
+        val writeOperation: String? = null,
     )
 
     fun authorizeRead(sql: String): Statement = authorize(sql, Kind.READ)
@@ -219,7 +220,7 @@ internal object ApplicationSql {
                 throw IllegalArgumentException("Application SQL conflict clauses are not allowed for synced writes")
             }
             requireKeyword("INTO")
-            return Statement(Kind.WRITE, consumeObjectName())
+            return Statement(Kind.WRITE, consumeObjectName(), "insert")
         }
 
         private fun parseUpdate(): Statement {
@@ -227,13 +228,13 @@ internal object ApplicationSql {
             if (keywordAt(index) == "OR") {
                 throw IllegalArgumentException("Application SQL conflict clauses are not allowed for synced writes")
             }
-            return Statement(Kind.WRITE, consumeObjectName())
+            return Statement(Kind.WRITE, consumeObjectName(), "update")
         }
 
         private fun parseDelete(): Statement {
             index += 1
             requireKeyword("FROM")
-            return Statement(Kind.WRITE, consumeObjectName())
+            return Statement(Kind.WRITE, consumeObjectName(), "delete")
         }
 
         private fun consumeObjectName(): String {

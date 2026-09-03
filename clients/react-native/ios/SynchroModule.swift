@@ -514,6 +514,39 @@ public class SynchroModuleImpl: NSObject {
     }
 
     @objc
+    public func executeAuthoredWrite(
+        _ tableID: String,
+        operation: String,
+        fieldIDs: [String],
+        sql: String,
+        values: [Any],
+        resolve: @escaping RCTPromiseResolveBlock,
+        reject: @escaping RCTPromiseRejectBlock
+    ) {
+        guard let client = client else {
+            reject("NOT_CONNECTED", "Client not initialized", nil)
+            return
+        }
+        guard let authoredOperation = Synchro.Operation(rawValue: operation) else {
+            reject("INVALID_CONFIG", "Invalid authored write operation", nil)
+            return
+        }
+        do {
+            let params = try bridgeParams(values)
+            let result = try client.authoredWriteTransaction(
+                tableID: tableID,
+                operation: authoredOperation,
+                fieldIDs: fieldIDs
+            ) { transaction in
+                try transaction.execute(sql, params: params)
+            }
+            resolve(["rowsAffected": result.rowsAffected])
+        } catch {
+            rejectWithError(reject, error)
+        }
+    }
+
+    @objc
     public func executeBatch(
         _ statements: [[String: Any]],
         resolve: @escaping RCTPromiseResolveBlock,

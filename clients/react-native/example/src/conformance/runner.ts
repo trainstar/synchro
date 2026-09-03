@@ -287,13 +287,16 @@ export class PublicConformanceRunner {
     const operation = requireOneLocalOperation(command);
     const client = await this.activate(clientKey);
     const action = decodeLocalAction(operation);
-    const rowsAffected = await client.writeTransaction(async (transaction) => {
-      const result = await transaction.execute(action.sql, action.values);
-      return result.rowsAffected;
-    });
+    const result = await client.executeAuthoredWrite(
+      action.tableID,
+      action.operation,
+      action.fieldIDs,
+      action.sql,
+      action.values
+    );
     return {
       kind: 'local-action',
-      rows_affected: rowsAffected,
+      rows_affected: result.rowsAffected,
       process: await this.processIdentity(clientKey, client),
     };
   }
@@ -309,10 +312,14 @@ export class PublicConformanceRunner {
     let rowsAffected = 0;
     for (const operation of operations) {
       const action = decodeLocalAction(operation);
-      rowsAffected += await client.writeTransaction(async (transaction) => {
-        const result = await transaction.execute(action.sql, action.values);
-        return result.rowsAffected;
-      });
+      const result = await client.executeAuthoredWrite(
+        action.tableID,
+        action.operation,
+        action.fieldIDs,
+        action.sql,
+        action.values
+      );
+      rowsAffected += result.rowsAffected;
     }
     return {
       kind: 'local-action',
@@ -665,11 +672,14 @@ function requireOneLocalOperation(command: ConformanceCommand): ScenarioOperatio
 }
 
 function decodeLocalAction(operation: ScenarioOperation): {
+  tableID: string;
+  operation: string;
+  fieldIDs: string[];
   sql: string;
   values: SQLiteBindValue[];
 } {
   const payload = operation.payload as Record<string, unknown>;
-  const tableName = requiredIdentifier(payload.table_id);
+  const tableID = requiredIdentifier(payload.table_id);
   // The contract authors pk as a field identifier to value object, the same
   // shape as columns, so it normalizes through the same decoder. A registered
   // relation carries exactly one primary key column.
@@ -681,6 +691,7 @@ function decodeLocalAction(operation: ScenarioOperation): {
   const primaryKeyValue = primaryKeyColumns[0].value;
   const action = requiredString(payload.operation);
   const columns = payload.columns === undefined ? [] : decodeColumnValues(payload.columns);
+  const fieldIDs = decodeAuthoredFieldIDs(columns);
   const values: SQLiteBindValue[] = [];
   switch (action) {
     case 'insert': {
@@ -688,7 +699,10 @@ function decodeLocalAction(operation: ScenarioOperation): {
       const names = [primaryKeyField, ...fields.map((field) => field.name)];
       values.push(primaryKeyValue, ...fields.map((field) => field.value));
       return {
-        sql: `INSERT INTO ${quoteIdentifier(tableName)} (${names.map(quoteIdentifier).join(', ')}) VALUES (${names.map(() => '?').join(', ')})`,
+        tableID,
+        operation: action,
+        fieldIDs,
+        sql: `INSERT INTO ${quoteIdentifier(tableID)} (${names.map(quoteIdentifier).join(', ')}) VALUES (${names.map(() => '?').join(', ')})`,
         values,
       };
     }
@@ -699,7 +713,10 @@ function decodeLocalAction(operation: ScenarioOperation): {
       }
       values.push(...fields.map((field) => field.value), primaryKeyValue);
       return {
-        sql: `UPDATE ${quoteIdentifier(tableName)} SET ${fields.map((field) => `${quoteIdentifier(field.name)} = ?`).join(', ')} WHERE ${quoteIdentifier(primaryKeyField)} = ?`,
+        tableID,
+        operation: action,
+        fieldIDs,
+        sql: `UPDATE ${quoteIdentifier(tableID)} SET ${fields.map((field) => `${quoteIdentifier(field.name)} = ?`).join(', ')} WHERE ${quoteIdentifier(primaryKeyField)} = ?`,
         values,
       };
     }
@@ -708,12 +725,31 @@ function decodeLocalAction(operation: ScenarioOperation): {
         throw new ConformanceCommandError('invalid_command');
       }
       return {
-        sql: `DELETE FROM ${quoteIdentifier(tableName)} WHERE ${quoteIdentifier(primaryKeyField)} = ?`,
+        tableID,
+        operation: action,
+        fieldIDs,
+        sql: `DELETE FROM ${quoteIdentifier(tableID)} WHERE ${quoteIdentifier(primaryKeyField)} = ?`,
         values: [primaryKeyValue],
       };
     default:
       throw new ConformanceUnavailableError('local write operation is not exposed by the public JavaScript client');
   }
+}
+
+function decodeAuthoredFieldIDs(columns: unknown[]): string[] {
+  // A column the controller injected as a runtime support value carries the
+  // support marker and is not authored, so it stays out of the capture
+  // context while the physical statement still writes it.
+  const fieldIDs = columns
+    .filter((value) => requiredRecord(value).support !== true)
+    .map((value) => {
+      const column = requiredRecord(value);
+      return requiredIdentifier(column.field_id);
+    });
+  if (new Set(fieldIDs).size !== fieldIDs.length) {
+    throw new ConformanceCommandError('invalid_command');
+  }
+  return fieldIDs;
 }
 
 function decodeColumnValues(value: unknown): unknown[] {

@@ -19,6 +19,8 @@ internal object SeedDatabaseInstaller {
         "_synchro_meta",
         "_synchro_pending_changes",
         "_synchro_mutation_values",
+        "_synchro_capture_context",
+        "_synchro_capture_fields",
         "_synchro_push_batch_members",
         "_synchro_schema_archives",
         "_synchro_scopes",
@@ -44,6 +46,8 @@ internal object SeedDatabaseInstaller {
     private val emptyWorkTables = setOf(
         "_synchro_pending_changes",
         "_synchro_mutation_values",
+        "_synchro_capture_context",
+        "_synchro_capture_fields",
         "_synchro_push_batch_members",
         "_synchro_push_batches",
         "_synchro_rejected_mutations",

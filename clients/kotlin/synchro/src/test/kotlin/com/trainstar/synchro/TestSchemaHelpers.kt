@@ -30,7 +30,9 @@ internal fun installTestSchema(database: SynchroDatabase, schema: SchemaResponse
 }
 
 internal fun SynchroDatabase.execute(sql: String, params: Array<out Any?>? = null): ExecResult =
-    writeTransaction { db ->
+    if (runCatching { ApplicationSql.authorizeWrite(sql) }.isSuccess) {
+        applicationExecute(sql, params)
+    } else writeTransaction { db ->
         val statement = db.compileStatement(sql)
         val changes = try {
             bindTypedValues(statement, params?.toList() ?: emptyList())

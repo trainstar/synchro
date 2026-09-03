@@ -75,7 +75,38 @@ object SQLiteSchema {
             )
         """.trimIndent().replace("\n", " ")
         val schemaGuard = "SELECT CASE WHEN $verifiedSchema THEN 1 ELSE RAISE(ABORT, 'verified Synchro schema metadata is required for capture') END;"
-
+        fun intentHas(fieldID: String): String {
+            val safeFieldID = SQLiteHelpers.escapeSQLString(fieldID)
+            return """
+                EXISTS (
+                    SELECT 1
+                    FROM _synchro_capture_context AS context
+                    JOIN _synchro_capture_fields AS field
+                      ON field.statement_token = context.statement_token
+                    WHERE context.singleton = 1
+                      AND context.table_id = '$safeTableID'
+                      AND field.field_id = '$safeFieldID'
+                )
+            """.trimIndent().replace("\n", " ")
+        }
+        val intentHasWritable = if (writable.isEmpty()) {
+            "0"
+        } else {
+            val writableFieldIDs = writable.joinToString(", ") { column ->
+                "'${SQLiteHelpers.escapeSQLString(column.fieldID)}'"
+            }
+            """
+                EXISTS (
+                    SELECT 1
+                    FROM _synchro_capture_context AS context
+                    JOIN _synchro_capture_fields AS field
+                      ON field.statement_token = context.statement_token
+                    WHERE context.singleton = 1
+                      AND context.table_id = '$safeTableID'
+                      AND field.field_id IN ($writableFieldIDs)
+                )
+            """.trimIndent().replace("\n", " ")
+        }
         val triggers = mutableListOf<String>()
 
         // DROP existing triggers first (for re-creation on schema update)
@@ -114,6 +145,7 @@ object SQLiteSchema {
             BEGIN
                 $schemaGuard
                 ${if (writable.isEmpty()) "SELECT RAISE(ABORT, 'synced insert has no writable fields');" else ""}
+                ${if (writable.isEmpty()) "" else "SELECT CASE WHEN NOT ($intentHasWritable) THEN RAISE(ABORT, 'synced insert has no authored writable fields') END;"}
                 $insertMutation
                 ${writable.joinToString("\n") {
                     valueInsertSQL(
@@ -121,15 +153,17 @@ object SQLiteSchema {
                         "NEW.${SQLiteHelpers.quoteIdentifier(it.name)}",
                         safeTableID,
                         safePKFieldID,
-                        primaryKey.logicalType,
-                        "NEW.$quotedPK",
-                    )
-                }}
+                         primaryKey.logicalType,
+                         "NEW.$quotedPK",
+                         captureCondition = intentHas(it.fieldID),
+                     )
+                 }}
             END
         """.trimIndent())
 
         val changedWritable = writable.joinToString(" OR ") { column ->
-            "NEW.${SQLiteHelpers.quoteIdentifier(column.name)} IS NOT OLD.${SQLiteHelpers.quoteIdentifier(column.name)}"
+            "(${intentHas(column.fieldID)}) AND " +
+                "NEW.${SQLiteHelpers.quoteIdentifier(column.name)} IS NOT OLD.${SQLiteHelpers.quoteIdentifier(column.name)}"
         }.ifEmpty { "0" }
         val deleteTransition = deletedAtCol?.let { column ->
             "NEW.${SQLiteHelpers.quoteIdentifier(column)} IS NOT NULL AND OLD.${SQLiteHelpers.quoteIdentifier(column)} IS NULL"
@@ -160,10 +194,11 @@ object SQLiteSchema {
                         "NEW.${SQLiteHelpers.quoteIdentifier(column.name)}",
                         safeTableID,
                         safePKFieldID,
-                        primaryKey.logicalType,
-                        "NEW.$quotedPK",
-                        "NOT ($deleteTransition) AND NEW.${SQLiteHelpers.quoteIdentifier(column.name)} IS NOT OLD.${SQLiteHelpers.quoteIdentifier(column.name)}",
-                    )
+                         primaryKey.logicalType,
+                         "NEW.$quotedPK",
+                          captureCondition = intentHas(column.fieldID),
+                         changedCondition = "NOT ($deleteTransition) AND NEW.${SQLiteHelpers.quoteIdentifier(column.name)} IS NOT OLD.${SQLiteHelpers.quoteIdentifier(column.name)}",
+                     )
                 }}
             END
         """.trimIndent())
@@ -284,6 +319,7 @@ object SQLiteSchema {
         primaryKeyFieldID: String,
         primaryKeyType: String,
         recordExpression: String,
+        captureCondition: String? = null,
         changedCondition: String? = null,
     ): String {
         val fieldID = SQLiteHelpers.escapeSQLString(column.fieldID)
@@ -295,7 +331,10 @@ object SQLiteSchema {
             "bytes" -> "blob"
             else -> "text"
         }
-        val condition = changedCondition?.let { " AND ($it)" }.orEmpty()
+        val condition = buildString {
+            captureCondition?.let { append(" AND ($it)") }
+            changedCondition?.let { append(" AND ($it)") }
+        }
         val integerValue = if (valueKind == "boolean" || valueKind == "integer") valueExpression else "NULL"
         val realValue = if (valueKind == "real") valueExpression else "NULL"
         val textValue = if (valueKind == "text") "CAST($valueExpression AS TEXT)" else "NULL"

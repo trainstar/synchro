@@ -407,7 +407,7 @@ describe('PublicConformanceRunner call lifecycle', () => {
   });
 });
 
-it('executes a local write whose primary key uses the authored field map', async () => {
+it('executes a local write with authored payload context', async () => {
   const runner = new PublicConformanceRunner({
     serverURL: 'http://localhost:8091',
     authToken: 'test-token',
@@ -438,10 +438,80 @@ it('executes a local write whose primary key uses the authored field map', async
   await expect(
     runner.execute(command('client', 'execute-step', 'client-a', {}, [step]))
   ).resolves.toMatchObject({ kind: 'local-action' });
-  expect(mockNativeModule.txExecute).toHaveBeenCalledWith(
-    expect.anything(),
+  expect(mockNativeModule.executeAuthoredWrite).toHaveBeenCalledWith(
+    'items',
+    'insert',
+    ['value'],
     'INSERT INTO "items" ("id", "value") VALUES (?, ?)',
     ['pending-row', 'pending']
   );
+  expect(mockNativeModule.txExecute).not.toHaveBeenCalled();
+  await runner.close();
+});
+
+it('executes local batches through separate authored write contexts', async () => {
+  resetNativeModuleMockState();
+  const runner = new PublicConformanceRunner({
+    serverURL: 'http://localhost:8091',
+    authToken: 'test-token',
+    appVersion: '1.0.0',
+  });
+  await runner.execute(command('client', 'open', 'client-a', {
+    database_mode: 'create',
+    seed_step_id: null,
+  }));
+
+  const steps = [
+    {
+      id: 'STEP-LOCAL-WRITE-001',
+      operation: {
+        contract_operation: 'local',
+        name: 'write',
+        payload: {
+          table_id: 'items',
+          pk: { id: 'pending-row' },
+          operation: 'insert',
+          columns: [
+            { field_id: 'zeta', value: 'z' },
+            { field_id: 'alpha', value: 'a' },
+          ],
+        },
+      },
+    },
+    {
+      id: 'STEP-LOCAL-WRITE-002',
+      operation: {
+        contract_operation: 'local',
+        name: 'write',
+        payload: {
+          table_id: 'items',
+          pk: { id: 'pending-row' },
+          operation: 'update',
+          columns: { value: 'updated' },
+        },
+      },
+    },
+  ] as unknown as ScenarioStep[];
+
+  await expect(
+    runner.execute(command('client', 'execute-steps', 'client-a', {}, steps))
+  ).resolves.toMatchObject({ kind: 'local-action' });
+  expect(mockNativeModule.executeAuthoredWrite).toHaveBeenNthCalledWith(
+    1,
+    'items',
+    'insert',
+    ['zeta', 'alpha'],
+    'INSERT INTO "items" ("id", "alpha", "zeta") VALUES (?, ?, ?)',
+    ['pending-row', 'a', 'z']
+  );
+  expect(mockNativeModule.executeAuthoredWrite).toHaveBeenNthCalledWith(
+    2,
+    'items',
+    'update',
+    ['value'],
+    'UPDATE "items" SET "value" = ? WHERE "id" = ?',
+    ['updated', 'pending-row']
+  );
+  expect(mockNativeModule.txExecute).not.toHaveBeenCalled();
   await runner.close();
 });

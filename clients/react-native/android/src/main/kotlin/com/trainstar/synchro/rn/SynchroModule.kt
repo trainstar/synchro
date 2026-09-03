@@ -367,6 +367,36 @@ class SynchroModule(reactContext: ReactApplicationContext) :
     }
 
     @ReactMethod
+    override fun executeAuthoredWrite(
+        tableID: String,
+        operation: String,
+        fieldIDs: ReadableArray,
+        sql: String,
+        values: ReadableArray,
+        promise: Promise,
+    ) {
+        val c = client ?: run {
+            promise.reject("NOT_CONNECTED", "Client not initialized")
+            return
+        }
+        try {
+            val authoredFieldIDs = (0 until fieldIDs.size()).map { index ->
+                fieldIDs.getString(index)
+                    ?: throw IllegalArgumentException("Missing field ID at index $index")
+            }
+            val result = c.authoredWriteTransaction(tableID, operation, authoredFieldIDs) { transaction ->
+                transaction.execute(sql, parseParams(values))
+            }
+            val map = Arguments.createMap().apply {
+                putInt("rowsAffected", result.rowsAffected)
+            }
+            promise.resolve(map)
+        } catch (e: Exception) {
+            rejectWithError(promise, e)
+        }
+    }
+
+    @ReactMethod
     override fun executeBatch(statements: ReadableArray, promise: Promise) {
         val c = client ?: run {
             promise.reject("NOT_CONNECTED", "Client not initialized")

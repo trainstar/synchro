@@ -81,6 +81,13 @@ export interface Spec extends TurboModule {
     sql: string,
     params: ReadonlyArray<NativeSQLiteBindValue>
   ): Promise<{ rowsAffected: number }>;
+  executeAuthoredWrite(
+    tableID: string,
+    operation: string,
+    fieldIDs: ReadonlyArray<string>,
+    sql: string,
+    values: ReadonlyArray<NativeSQLiteBindValue>
+  ): Promise<{ rowsAffected: number }>;
   executeBatch(
     statements: ReadonlyArray<NativeSQLStatement>
   ): Promise<{ totalRowsAffected: number }>;

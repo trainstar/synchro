@@ -160,6 +160,51 @@ describe('SynchroClient', () => {
     });
   });
 
+  describe('executeAuthoredWrite', () => {
+    it('passes authored context and returns rowsAffected', async () => {
+      mockNativeModule.executeAuthoredWrite.mockResolvedValueOnce({ rowsAffected: 3 });
+
+      const client = makeClient();
+      const result = await client.executeAuthoredWrite(
+        'items',
+        'insert',
+        ['value'],
+        'INSERT INTO items (id, value) VALUES (?, ?)',
+        ['item-1', 'new']
+      );
+
+      expect(result.rowsAffected).toBe(3);
+      expect(mockNativeModule.executeAuthoredWrite).toHaveBeenCalledWith(
+        'items',
+        'insert',
+        ['value'],
+        'INSERT INTO items (id, value) VALUES (?, ?)',
+        ['item-1', 'new']
+      );
+    });
+
+    it('passes null bind values without removing positional slots', async () => {
+      mockNativeModule.executeAuthoredWrite.mockResolvedValueOnce({ rowsAffected: 1 });
+
+      const client = makeClient();
+      await client.executeAuthoredWrite(
+        'items',
+        'update',
+        ['deleted_at', 'value'],
+        'UPDATE items SET deleted_at = ?, value = ? WHERE id = ?',
+        [null, 'new', 'item-1']
+      );
+
+      expect(mockNativeModule.executeAuthoredWrite).toHaveBeenCalledWith(
+        'items',
+        'update',
+        ['deleted_at', 'value'],
+        'UPDATE items SET deleted_at = ?, value = ? WHERE id = ?',
+        [null, 'new', 'item-1']
+      );
+    });
+  });
+
   describe('executeBatch', () => {
     it('passes statements array with typed params', async () => {
       mockNativeModule.executeBatch.mockResolvedValueOnce({ totalRowsAffected: 2 });

@@ -96,7 +96,7 @@ var closedPayloadShapes = map[string]*payloadShape{
 	"local/write": shapeWith(closedOperationFields["local/write"], map[string]payloadChild{
 		"pk":              dynamicObjectChild(),
 		"authored_schema": objectChild(schemaReferenceShape),
-		"columns":         objectOrArrayChild(shape(required("field_id", "value"))),
+		"columns":         objectOrArrayChild(shape(operationFields{required: []string{"field_id", "value"}, optional: []string{"support"}})),
 	}),
 	"model/commit-source-transaction": shapeWith(closedOperationFields["model/commit-source-transaction"], map[string]payloadChild{
 		"events": arrayChild(shapeWith(required("event_ordinal", "relation", "operation", "before", "after"), map[string]payloadChild{

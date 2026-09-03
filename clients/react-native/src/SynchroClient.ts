@@ -765,6 +765,26 @@ export class SynchroClient {
     }
   }
 
+  async executeAuthoredWrite(
+    tableID: string,
+    operation: string,
+    fieldIDs: readonly string[],
+    sql: string,
+    values?: readonly SQLiteBindValue[]
+  ): Promise<ExecResult> {
+    try {
+      return await this.native.executeAuthoredWrite(
+        tableID,
+        operation,
+        fieldIDs,
+        sql,
+        checkedParams(values ?? [])
+      );
+    } catch (error) {
+      throw mapNativeError(error);
+    }
+  }
+
   async executeBatch(statements: SQLStatement[]): Promise<BatchResult> {
     try {
       const payload = statements.map((s) => ({

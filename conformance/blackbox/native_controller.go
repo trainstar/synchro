@@ -1582,7 +1582,10 @@ func nativeApplicationInsertSupportColumns(value any, support map[string]any) (a
 			if _, exists := existing[name]; exists {
 				continue
 			}
-			columns = append(columns, map[string]any{"field_id": name, "value": support[name]})
+			// The marker separates a runtime support value from an authored
+			// column, so a consumer can build the physical statement from the
+			// full set and the authored capture context from the authored set.
+			columns = append(columns, map[string]any{"field_id": name, "value": support[name], "support": true})
 		}
 		return columns, nil
 	default:

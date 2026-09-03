@@ -11,6 +11,8 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CopyOnWriteArraySet
 import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.locks.ReentrantLock
+import java.util.UUID
+import java.util.Locale
 import kotlin.concurrent.withLock
 
 typealias Row = Map<String, Any?>
@@ -133,6 +135,7 @@ internal class SynchroDatabase private constructor(context: Context, dbPath: Str
         db.execSQL("INSERT OR IGNORE INTO _synchro_meta (key, value) VALUES ('sync_lock', '0')")
         db.execSQL("INSERT OR IGNORE INTO _synchro_meta (key, value) VALUES ('checkpoint', '0')")
         createMutationLedgerTables(db)
+        createCaptureContextTables(db)
         migrateRejectedMutations(db)
         createProtocolThreeTables(db)
         createBackoffTable(db)
@@ -141,6 +144,7 @@ internal class SynchroDatabase private constructor(context: Context, dbPath: Str
     }
 
     private fun upgradeDatabase(db: SQLiteDatabase, oldVersion: Int) {
+        createCaptureContextTables(db)
         if (oldVersion < 2) {
             ensureLegacyScopeTables(db)
             migrateScopeIntegrity(db)
@@ -168,6 +172,7 @@ internal class SynchroDatabase private constructor(context: Context, dbPath: Str
         }
         if (oldVersion < 9) {
             createBackoffTable(db)
+            migrateCaptureTriggers(db)
         }
         if (oldVersion < 10) {
             createClientStateTable(db)
@@ -599,7 +604,30 @@ internal class SynchroDatabase private constructor(context: Context, dbPath: Str
         )
     }
 
+    private fun createCaptureContextTables(db: SQLiteDatabase) {
+        db.execSQL(
+            """
+            CREATE TABLE IF NOT EXISTS _synchro_capture_context (
+                singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+                statement_token TEXT NOT NULL,
+                table_id TEXT NOT NULL,
+                operation TEXT NOT NULL CHECK (operation IN ('insert', 'update', 'delete'))
+            )
+            """.trimIndent(),
+        )
+        db.execSQL(
+            """
+            CREATE TABLE IF NOT EXISTS _synchro_capture_fields (
+                statement_token TEXT NOT NULL,
+                field_id TEXT NOT NULL,
+                PRIMARY KEY (statement_token, field_id)
+            )
+            """.trimIndent(),
+        )
+    }
+
     private fun migrateMutationLedger(db: SQLiteDatabase) {
+        createCaptureContextTables(db)
         val pendingExists = hasTable(db, "_synchro_pending_changes")
         if (pendingExists && !hasColumn(db, "_synchro_pending_changes", "mutation_id")) {
             dropCaptureTriggers(db)
@@ -639,6 +667,8 @@ internal class SynchroDatabase private constructor(context: Context, dbPath: Str
     }
 
     private fun restoreCaptureTriggers(db: SQLiteDatabase) {
+        createCaptureContextTables(db)
+        if (!hasTable(db, "_synchro_meta")) return
         val schemaVersion = SynchroMeta.getInt64(db, MetaKey.SCHEMA_VERSION)
         val schemaHash = SynchroMeta.get(db, MetaKey.SCHEMA_HASH).orEmpty()
         if (schemaVersion <= 0 || schemaHash.isEmpty()) return
@@ -659,6 +689,12 @@ internal class SynchroDatabase private constructor(context: Context, dbPath: Str
         tables.forEach { table ->
             SQLiteSchema.generateCDCTriggers(table).forEach { trigger -> db.execSQL(trigger) }
         }
+    }
+
+    private fun migrateCaptureTriggers(db: SQLiteDatabase) {
+        createCaptureContextTables(db)
+        dropCaptureTriggers(db)
+        restoreCaptureTriggers(db)
     }
 
     private fun createSealedPushBatchTable(db: SQLiteDatabase) {
@@ -788,22 +824,7 @@ internal class SynchroDatabase private constructor(context: Context, dbPath: Str
     }
 
     fun applicationExecute(sql: String, params: Array<out Any?>? = null): ExecResult {
-        var changedTables = emptySet<String>()
-        val result = writeTransaction { db ->
-            val statement = ApplicationSql.authorizeWrite(sql)
-            ApplicationWriteGuard.requireWritableTarget(db, requireNotNull(statement.writeTarget))
-            val compiled = db.compileStatement(sql)
-            val changes = try {
-                bindTypedValues(compiled, params?.toList() ?: emptyList())
-                compiled.executeUpdateDelete()
-            } finally {
-                compiled.close()
-            }
-            changedTables = setOf(requireNotNull(statement.writeTarget))
-            ExecResult(rowsAffected = changes)
-        }
-        notifyTablesChanged(changedTables)
-        return result
+        return applicationTransaction { transaction -> transaction.execute(sql, params) }
     }
 
     fun <T> applicationReadTransaction(block: (ApplicationReadTransaction) -> T): T =
@@ -812,7 +833,7 @@ internal class SynchroDatabase private constructor(context: Context, dbPath: Str
     fun <T> applicationTransaction(block: (ApplicationTransaction) -> T): T {
         var changedTables = emptySet<String>()
         val result = writeTransaction { db ->
-            val transaction = ApplicationTransaction(db)
+            val transaction = ApplicationTransaction(this, db)
             val previousDepth = applicationTransactionDepth.get() ?: 0
             applicationTransactionDepth.set(previousDepth + 1)
             try {
@@ -830,6 +851,131 @@ internal class SynchroDatabase private constructor(context: Context, dbPath: Str
         notifyTablesChanged(changedTables)
         return result
     }
+
+    fun <T> applicationAuthoredWriteTransaction(
+        tableID: String,
+        operation: Operation,
+        fieldIDs: List<String>,
+        block: (ApplicationTransaction) -> T,
+    ): T {
+        val operationName = when (operation) {
+            Operation.INSERT -> "insert"
+            Operation.UPDATE -> "update"
+            Operation.DELETE -> "delete"
+            Operation.UPSERT -> throw IllegalArgumentException("upsert is not an authored write operation")
+        }
+        validateCaptureContextInput(tableID, fieldIDs)
+
+        var changedTables = emptySet<String>()
+        val result = writeTransaction { db ->
+            val transaction = ApplicationTransaction(this, db)
+            val previousDepth = applicationTransactionDepth.get() ?: 0
+            val statementToken = UUID.randomUUID().toString()
+            applicationTransactionDepth.set(previousDepth + 1)
+            try {
+                installCaptureContext(db, statementToken, tableID, operationName, fieldIDs)
+                val value = block(transaction)
+                changedTables = transaction.changedTables()
+                value
+            } finally {
+                try {
+                    clearCaptureContext(db, statementToken)
+                } finally {
+                    if (previousDepth == 0) {
+                        applicationTransactionDepth.remove()
+                    } else {
+                        applicationTransactionDepth.set(previousDepth)
+                    }
+                }
+            }
+        }
+        notifyTablesChanged(changedTables)
+        return result
+    }
+
+    fun <T> applicationAuthoredWriteTransaction(
+        tableID: String,
+        operation: String,
+        fieldIDs: List<String>,
+        block: (ApplicationTransaction) -> T,
+    ): T {
+        val parsedOperation = when (operation.lowercase(Locale.ROOT)) {
+            "insert" -> Operation.INSERT
+            "update" -> Operation.UPDATE
+            "delete" -> Operation.DELETE
+            else -> throw IllegalArgumentException("authored write operation is invalid")
+        }
+        return applicationAuthoredWriteTransaction(tableID, parsedOperation, fieldIDs, block)
+    }
+
+    private fun validateCaptureContextInput(tableID: String, fieldIDs: List<String>) {
+        require(tableID.isNotEmpty()) { "authored write table ID must not be empty" }
+        require(fieldIDs.all { it.isNotEmpty() }) { "authored write field IDs must not be empty" }
+        require(fieldIDs.size == fieldIDs.toSet().size) { "authored write field IDs must be unique" }
+    }
+
+    private fun installCaptureContext(
+        db: SQLiteDatabase,
+        statementToken: String,
+        tableID: String,
+        operation: String,
+        fieldIDs: List<String>,
+    ) {
+        db.execSQL(
+            """
+            INSERT INTO _synchro_capture_context (singleton, statement_token, table_id, operation)
+            VALUES (1, ?, ?, ?)
+            """.trimIndent(),
+            arrayOf(statementToken, tableID, operation),
+        )
+        fieldIDs.forEach { fieldID ->
+            db.execSQL(
+                "INSERT INTO _synchro_capture_fields (statement_token, field_id) VALUES (?, ?)",
+                arrayOf(statementToken, fieldID),
+            )
+        }
+    }
+
+    private fun clearCaptureContext(db: SQLiteDatabase, statementToken: String) {
+        db.execSQL(
+            "DELETE FROM _synchro_capture_fields WHERE statement_token = ?",
+            arrayOf(statementToken),
+        )
+        db.execSQL(
+            "DELETE FROM _synchro_capture_context WHERE singleton = 1 AND statement_token = ?",
+            arrayOf(statementToken),
+        )
+    }
+
+    internal fun <T> withDefaultCaptureContext(
+        db: SQLiteDatabase,
+        tableName: String,
+        operation: String,
+        block: () -> T,
+    ): T {
+        if (hasCaptureContext(db)) return block()
+        val table = ApplicationWriteGuard.loadSyncedTables(db)
+            .singleOrNull { it.tableName.equals(tableName, ignoreCase = true) }
+            ?: return block()
+        val statementToken = UUID.randomUUID().toString()
+        installCaptureContext(
+            db = db,
+            statementToken = statementToken,
+            tableID = table.tableID,
+            operation = operation,
+            fieldIDs = table.columns.filter { it.writable }.map { it.fieldID },
+        )
+        return try {
+            block()
+        } finally {
+            clearCaptureContext(db, statementToken)
+        }
+    }
+
+    private fun hasCaptureContext(db: SQLiteDatabase): Boolean = db.rawQuery(
+        "SELECT 1 FROM _synchro_capture_context WHERE singleton = 1 LIMIT 1",
+        null,
+    ).use { it.moveToFirst() }
 
     internal fun requireOutsideApplicationTransaction(operation: String) {
         check((applicationTransactionDepth.get() ?: 0) == 0) {
@@ -1110,6 +1256,7 @@ class ApplicationReadTransaction internal constructor(
  * remove capture triggers.
  */
 class ApplicationTransaction internal constructor(
+    private val owner: SynchroDatabase,
     private val database: SQLiteDatabase,
 ) {
     private val changed = linkedSetOf<String>()
@@ -1134,12 +1281,18 @@ class ApplicationTransaction internal constructor(
             validateTriggerSet = !triggerSetValidated,
         )
         triggerSetValidated = true
-        val compiled = database.compileStatement(sql)
-        val changes = try {
-            bindTypedValues(compiled, params?.toList() ?: emptyList())
-            compiled.executeUpdateDelete()
-        } finally {
-            compiled.close()
+        val changes = owner.withDefaultCaptureContext(
+            db = database,
+            tableName = target,
+            operation = requireNotNull(statement.writeOperation),
+        ) {
+            val compiled = database.compileStatement(sql)
+            try {
+                bindTypedValues(compiled, params?.toList() ?: emptyList())
+                compiled.executeUpdateDelete()
+            } finally {
+                compiled.close()
+            }
         }
         changed += target
         return ExecResult(rowsAffected = changes)
