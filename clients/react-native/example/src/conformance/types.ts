@@ -52,6 +52,7 @@ export interface ConformanceRuntime {
   server_url?: string;
   auth_token?: string;
   pull_page_size?: number;
+  push_batch_size?: number;
 }
 
 export interface ConformanceCommand {
@@ -193,7 +194,7 @@ function decodeRuntime(value: unknown): ConformanceRuntime {
   exactKeys(
     record,
     ['client_key', 'database_path', 'client_id'],
-    ['seed_database_path', 'server_url', 'auth_token', 'pull_page_size'],
+    ['seed_database_path', 'server_url', 'auth_token', 'pull_page_size', 'push_batch_size'],
     'runtime'
   );
   const seedDatabasePath = optionalString(record.seed_database_path, 'runtime.seed_database_path');
@@ -207,6 +208,14 @@ function decodeRuntime(value: unknown): ConformanceRuntime {
     }
     pullPageSize = pullPageSizeRaw;
   }
+  const pushBatchSizeRaw = record.push_batch_size;
+  let pushBatchSize: number | undefined;
+  if (pushBatchSizeRaw !== undefined) {
+    if (typeof pushBatchSizeRaw !== 'number' || !Number.isSafeInteger(pushBatchSizeRaw) || pushBatchSizeRaw < 1 || pushBatchSizeRaw > 1000) {
+      throw new Error('runtime.push_batch_size is invalid');
+    }
+    pushBatchSize = pushBatchSizeRaw;
+  }
   return {
     client_key: requiredString(record.client_key, 'runtime.client_key', 128),
     database_path: requiredString(record.database_path, 'runtime.database_path'),
@@ -215,6 +224,7 @@ function decodeRuntime(value: unknown): ConformanceRuntime {
     ...(serverURL === undefined ? {} : { server_url: serverURL }),
     ...(authToken === undefined ? {} : { auth_token: authToken }),
     ...(pullPageSize === undefined ? {} : { pull_page_size: pullPageSize }),
+    ...(pushBatchSize === undefined ? {} : { push_batch_size: pushBatchSize }),
   };
 }
 

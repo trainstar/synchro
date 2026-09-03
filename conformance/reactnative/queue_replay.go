@@ -1302,7 +1302,7 @@ func (c *QueueReplayCoordinator) command(actor, name string, parameters map[stri
 			}
 		}
 	}
-	return &conformanceCommand{SchemaVersion: 1, Action: conformanceManifest{Action: conformanceAction{Actor: actor, Command: name, Parameters: parameters}, Steps: steps}, Runtime: conformanceRuntime{ClientKey: c.clientKey, Database: c.database, ClientID: c.clientID, ServerURL: c.adapter, AuthToken: c.config.AuthToken}}
+	return &conformanceCommand{SchemaVersion: 1, Action: conformanceManifest{Action: conformanceAction{Actor: actor, Command: name, Parameters: parameters}, Steps: steps}, Runtime: conformanceRuntime{ClientKey: c.clientKey, Database: c.database, ClientID: c.clientID, ServerURL: c.adapter, AuthToken: c.config.AuthToken, PushBatchSize: 1000}}
 }
 
 func (c *QueueReplayCoordinator) commandOperations(actor, name string, parameters map[string]any, operations []scenarios.Operation) *conformanceCommand {
@@ -1310,7 +1310,7 @@ func (c *QueueReplayCoordinator) commandOperations(actor, name string, parameter
 	for _, operation := range operations {
 		steps = append(steps, conformanceStep{Operation: conformanceOperation{ContractOperation: operation.ContractOperation, Name: operation.Name, Payload: copyRaw(operation.Payload)}})
 	}
-	return &conformanceCommand{SchemaVersion: 1, Action: conformanceManifest{Action: conformanceAction{Actor: actor, Command: name, Parameters: parameters}, Steps: steps}, Runtime: conformanceRuntime{ClientKey: c.clientKey, Database: c.database, ClientID: c.clientID, ServerURL: c.adapter, AuthToken: c.config.AuthToken}}
+	return &conformanceCommand{SchemaVersion: 1, Action: conformanceManifest{Action: conformanceAction{Actor: actor, Command: name, Parameters: parameters}, Steps: steps}, Runtime: conformanceRuntime{ClientKey: c.clientKey, Database: c.database, ClientID: c.clientID, ServerURL: c.adapter, AuthToken: c.config.AuthToken, PushBatchSize: 1000}}
 }
 
 func queueReplayLocalBatchCount(workload queueReplayWorkload) int {

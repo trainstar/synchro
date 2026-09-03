@@ -146,6 +146,9 @@ type conformanceRuntime struct {
 	// The authored pull page size, when a scenario authors one. The client
 	// default applies when absent, which matches the native runner openings.
 	PullPageSize uint64 `json:"pull_page_size,omitempty"`
+	// The push batch size the passing native fixtures configure, when a
+	// scenario's workload requires it. The client default applies when absent.
+	PushBatchSize uint64 `json:"push_batch_size,omitempty"`
 }
 
 type resultEnvelope struct {
