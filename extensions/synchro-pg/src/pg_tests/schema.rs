@@ -3161,3 +3161,65 @@
         let count: Option<i64> = Spi::get_one("SELECT count(*) FROM sync_schema_manifest").unwrap();
         assert_eq!(count, Some(1));
     }
+
+    fn stage_orders_transition(drop_title: bool, add_headline: bool) -> i64 {
+        if drop_title {
+            Spi::run("ALTER TABLE test_orders DROP COLUMN title").unwrap();
+        }
+        if add_headline {
+            Spi::run("ALTER TABLE test_orders ADD COLUMN headline TEXT").unwrap();
+        }
+        Spi::run(
+            "SELECT tests.register_legacy_test_table(
+                'test_orders',
+                $$SELECT ARRAY['user:' || user_id] FROM test_orders WHERE id = $1::uuid$$,
+                'single_scope',
+                'id', 'updated_at', 'deleted_at', 'enabled',
+                ARRAY['internal_notes']
+            )",
+        )
+        .unwrap();
+        let staged: Option<i64> = Spi::get_one(
+            "SELECT max(g.generation)
+             FROM sync_registry_generations g
+             JOIN sync_registry r ON r.registry_generation = g.generation
+             WHERE g.state = 'pending' AND r.table_name = 'test_orders'",
+        )
+        .unwrap();
+        staged.expect("staged transition generation")
+    }
+
+    fn staged_generation_requires_bootstrap(generation: i64) -> bool {
+        Spi::connect(|client| {
+            crate::schema::generation_requires_projection_bootstrap(client, generation)
+        })
+        .expect("classify staged generation")
+    }
+
+    // Issue #43: manifest publication refuses a class 4 reshape over retained
+    // rows, so bootstrap preparation must accept the same generation.
+    #[pg_test]
+    fn test_class_4_reshape_over_rows_requires_projection_bootstrap() {
+        setup_test_tables();
+        Spi::run("SELECT synchro_schema_manifest()").unwrap();
+        Spi::run("INSERT INTO test_orders (user_id, title) VALUES ('user-a', 'kept')").unwrap();
+        let staged = stage_orders_transition(true, true);
+        assert!(staged_generation_requires_bootstrap(staged));
+    }
+
+    #[pg_test]
+    fn test_class_4_field_removal_over_rows_keeps_wal_activation() {
+        setup_test_tables();
+        Spi::run("SELECT synchro_schema_manifest()").unwrap();
+        Spi::run("INSERT INTO test_orders (user_id, title) VALUES ('user-a', 'kept')").unwrap();
+        let staged = stage_orders_transition(true, false);
+        assert!(!staged_generation_requires_bootstrap(staged));
+    }
+
+    #[pg_test]
+    fn test_class_4_reshape_over_empty_relation_keeps_wal_activation() {
+        setup_test_tables();
+        Spi::run("SELECT synchro_schema_manifest()").unwrap();
+        let staged = stage_orders_transition(true, true);
+        assert!(!staged_generation_requires_bootstrap(staged));
+    }

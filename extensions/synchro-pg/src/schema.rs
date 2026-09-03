@@ -482,6 +482,7 @@ pub(crate) fn generation_requires_projection_bootstrap(
              LIMIT 1
          )
           SELECT target.registration_kind,
+                 target.relation_id::text AS relation_id,
                  target.physical_schema::text AS physical_schema,
                  target.physical_relation::text AS physical_relation,
                  target.physical_relation_oid::bigint AS physical_relation_oid
@@ -551,17 +552,49 @@ pub(crate) fn generation_requires_projection_bootstrap(
         None,
         &[registry_generation.into()],
     )?;
+    let parent_tables: std::collections::HashMap<&str, &TableSchema> = parent
+        .as_ref()
+        .map(|stored| {
+            stored
+                .body
+                .tables
+                .iter()
+                .map(|table| (table.table_id.as_str(), table))
+                .collect()
+        })
+        .unwrap_or_default();
     for row in rows {
         let registration_kind = row
             .get_by_name::<String, &str>("registration_kind")?
             .unwrap_or_else(|| pgrx::error!("projection bootstrap registration kind is missing"));
-        if registration_kind == "synced"
-            && !matches!(
-                schema_transition,
-                Some(SchemaTransitionClass::Initial | SchemaTransitionClass::Class3)
-            )
-        {
-            continue;
+        if registration_kind == "synced" {
+            match schema_transition {
+                Some(SchemaTransitionClass::Initial | SchemaTransitionClass::Class3) => {}
+                Some(SchemaTransitionClass::Class4) => {
+                    // Manifest publication refuses a class 4 reshape over
+                    // retained rows, so the same predicate must route the
+                    // generation to the operator bootstrap. Issue #43.
+                    let relation_id = row
+                        .get_by_name::<String, &str>("relation_id")?
+                        .unwrap_or_else(|| {
+                            pgrx::error!("projection bootstrap relation identity is missing")
+                        });
+                    let Some(table) = tables.iter().find(|table| table.relation_id == relation_id)
+                    else {
+                        continue;
+                    };
+                    if class_4_table_requires_bootstrap(
+                        client,
+                        registry_generation,
+                        parent_tables.get(table.table_id.as_str()).copied(),
+                        table,
+                    )? {
+                        return Ok(true);
+                    }
+                    continue;
+                }
+                _ => continue,
+            }
         }
         let schema = row
             .get_by_name::<String, &str>("physical_schema")?
@@ -936,17 +969,33 @@ fn validate_class_4_projection_transition(
         .map(|table| (table.table_id.as_str(), table))
         .collect();
     for table in tables {
-        let requires_baseline = parent_tables
-            .get(table.table_id.as_str())
-            .is_none_or(|prior| prior != &table && !is_field_removal_only(prior, table));
-        if requires_baseline
-            && (manifest_relation_is_nonempty(client, registry_generation, &table.relation_id)?
-                || relation_has_retained_projection(client, &table.relation_id)?)
-        {
+        if class_4_table_requires_bootstrap(
+            client,
+            registry_generation,
+            parent_tables.get(table.table_id.as_str()).copied(),
+            table,
+        )? {
             pgrx::error!("class 4 transition requires projection bootstrap");
         }
     }
     Ok(())
+}
+
+/// A class 4 transition that changes more than field removal cannot replay
+/// retained rows through the reshaped projection. Over a nonempty or retained
+/// relation it completes only through the operator projection bootstrap, and
+/// manifest publication and bootstrap preparation share this one predicate.
+fn class_4_table_requires_bootstrap(
+    client: &SpiClient<'_>,
+    registry_generation: i64,
+    prior: Option<&TableSchema>,
+    table: &TableSchema,
+) -> Result<bool, spi::Error> {
+    let requires_baseline =
+        prior.is_none_or(|prior| prior != table && !is_field_removal_only(prior, table));
+    Ok(requires_baseline
+        && (manifest_relation_is_nonempty(client, registry_generation, &table.relation_id)?
+            || relation_has_retained_projection(client, &table.relation_id)?))
 }
 
 fn is_field_removal_only(parent: &TableSchema, child: &TableSchema) -> bool {
