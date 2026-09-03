@@ -27,6 +27,8 @@ const (
 	queueReplayScenarioID   = "SCN-PERF-QUEUE-REPLAY-001"
 	// The runner rejects client/execute-steps commands above 64 operations.
 	queueReplayMaximumLocalOperations = 64
+	// Rejected mutation details use the runner's bounded detail-record limit.
+	queueReplayMaximumRejectedDetails = 512
 )
 
 // LoadQueueReplayScenario loads the authored queue-replay scenario.
@@ -131,6 +133,7 @@ type QueueReplayCoordinator struct {
 	process      *actionProcessIdentity
 	stepIndex    int
 	localIndex   int
+	trace        []transportObservation
 	finalResult  *finalCapture
 	result       QueueReplayCoordinatorResult
 	responseLoss *queueReplayResponseLoss
@@ -149,13 +152,16 @@ const (
 	queueReplayStageOpened
 	queueReplayStageBootstrapped
 	queueReplayStageLocalWrite
-	queueReplayStageStoppedBeforeSchema
+	queueReplayStageRestartedBeforeSchema
 	queueReplayStageSchemaBoundary
 	queueReplayStageResponseLossBegun
 	queueReplayStageResponseLoss
-	queueReplayStageStoppedAfterLoss
+	queueReplayStageResponseLossCapture
+	queueReplayStageRestartedAfterLoss
 	queueReplayStageReplay
+	queueReplayStageReplayCapture
 	queueReplayStageCapture
+	queueReplayStageRejectedCapture
 	queueReplayStageComplete
 )
 
@@ -328,9 +334,15 @@ func (c *QueueReplayCoordinator) ExchangeCount() int {
 }
 
 func (c *QueueReplayCoordinator) exchangeCountLocked() int {
-	count := 4 // open, bootstrap, final capture, complete response
+	count := 4 // open, bootstrap, aggregate capture, complete response
+	if c.rejectedCount() <= queueReplayMaximumRejectedDetails {
+		count++ // bounded rejected-mutation detail capture
+	}
 	for _, workload := range c.steps {
-		count += queueReplayLocalBatchCount(workload) + 6 // write batches, stop, schema check, begin loss, await loss, replay stop, replay
+		count += queueReplayLocalBatchCount(workload) + 7 // write batches, restart, schema check, begin loss, await loss, trace, restart, replay
+	}
+	if len(c.steps) > 1 {
+		count += len(c.steps) - 1 // retain the prior replay trace before each later restart
 	}
 	return count
 }
@@ -670,11 +682,13 @@ func (c *QueueReplayCoordinator) acceptResultLocked(raw json.RawMessage) error {
 			return err
 		}
 		c.localIndex += len(batch)
-	case queueReplayStageStoppedBeforeSchema, queueReplayStageStoppedAfterLoss:
-		if err := c.validateStopped(envelope.Result); err != nil {
+	case queueReplayStageRestartedBeforeSchema, queueReplayStageRestartedAfterLoss:
+		process, err := c.validateRestarted(envelope.Result)
+		if err != nil {
 			return err
 		}
-		if c.stage == queueReplayStageStoppedAfterLoss {
+		c.process = &process
+		if c.stage == queueReplayStageRestartedAfterLoss {
 			c.allowResponseLossReplay()
 		}
 	case queueReplayStageSchemaBoundary:
@@ -689,15 +703,45 @@ func (c *QueueReplayCoordinator) acceptResultLocked(raw json.RawMessage) error {
 		if err := c.validateResponseLossCallCompleted(envelope.Result); err != nil {
 			return err
 		}
-	case queueReplayStageCapture:
-		capture, err := decodeCapture(envelope.Result, []string{"client_state", "rejected_mutations", "sync_status", "request_trace"})
+	case queueReplayStageResponseLossCapture, queueReplayStageReplayCapture:
+		trace, err := c.validateTraceSnapshot(envelope.Result)
 		if err != nil {
 			return err
 		}
-		if err := c.validateCapture(capture); err != nil {
+		c.trace = append(c.trace, trace.Observations...)
+	case queueReplayStageCapture:
+		capture, err := decodeCapture(envelope.Result, []string{"client_state", "sync_status", "request_trace"})
+		if err != nil {
+			return err
+		}
+		trace, err := c.combinedTrace(capture.Trace)
+		if err != nil {
+			return err
+		}
+		capture.Trace = trace
+		if _, err := c.validateCaptureAggregate(capture); err != nil {
 			return err
 		}
 		c.finalResult = &capture
+	case queueReplayStageRejectedCapture:
+		capture, err := decodeCapture(envelope.Result, []string{"rejected_mutations"})
+		if err != nil {
+			return err
+		}
+		if c.finalResult == nil {
+			return errors.New("React Native queue-replay aggregate capture is unavailable")
+		}
+		state, err := decodeClientState(c.finalResult.ClientState)
+		if err != nil {
+			return err
+		}
+		if state.RejectedMutationCount > queueReplayMaximumRejectedDetails {
+			return fmt.Errorf("React Native queue-replay rejected mutation detail count=%d exceeds bound=%d", state.RejectedMutationCount, queueReplayMaximumRejectedDetails)
+		}
+		if err := validateRejectedMutationDetails(capture.Rejected, state.RejectedMutationCount); err != nil {
+			return err
+		}
+		c.finalResult.Rejected = copyRaw(capture.Rejected)
 	default:
 		return errInvalidExchange
 	}
@@ -714,8 +758,13 @@ func (c *QueueReplayCoordinator) advanceLocked(ctx context.Context, sequence uin
 		response.Command = c.command("client", "synchronize-step", map[string]any{"client_key": c.clientKey, "method": "start", "completion": "idle"}, nil)
 		c.stage = queueReplayStageBootstrapped
 	case queueReplayStageBootstrapped, queueReplayStageReplay:
+		if c.stage == queueReplayStageReplay && c.stepIndex > 0 && c.stepIndex < len(c.steps) {
+			response.Command = c.command("observer", "capture", map[string]any{"client_keys": []string{c.clientKey}, "sources": []string{"request-trace"}}, nil)
+			c.stage = queueReplayStageReplayCapture
+			break
+		}
 		if c.stepIndex == len(c.steps) {
-			response.Command = c.command("observer", "capture", map[string]any{"client_keys": []string{c.clientKey}, "sources": []string{"scope-state", "rejected-mutations", "sync-status", "request-trace"}}, nil)
+			response.Command = c.command("observer", "capture", map[string]any{"client_keys": []string{c.clientKey}, "sources": []string{"scope-state", "sync-status", "request-trace"}}, nil)
 			c.stage = queueReplayStageCapture
 			break
 		}
@@ -737,9 +786,9 @@ func (c *QueueReplayCoordinator) advanceLocked(ctx context.Context, sequence uin
 			response.Command = command
 			break
 		}
-		response.Command = c.command("client", "lifecycle", map[string]any{"client_key": c.clientKey, "operation": "stop"}, nil)
-		c.stage = queueReplayStageStoppedBeforeSchema
-	case queueReplayStageStoppedBeforeSchema:
+		response.Command = c.command("client", "open", map[string]any{"client_key": c.clientKey, "database_mode": "reuse", "initialization": "empty", "seed_step_id": nil}, nil)
+		c.stage = queueReplayStageRestartedBeforeSchema
+	case queueReplayStageRestartedBeforeSchema:
 		workload := c.steps[c.stepIndex]
 		if observation, err := c.config.Controller.ApplyStep(ctx, workload.publish); err != nil || observation.Disposition != "success" {
 			return exchangeResponse{}, fmt.Errorf("publish React Native queue-replay schema for step %s: %w", workload.step.ID, nativeResultError(err, observation.Disposition))
@@ -761,12 +810,42 @@ func (c *QueueReplayCoordinator) advanceLocked(ctx context.Context, sequence uin
 		response.Command = c.command("client", "await-call", map[string]any{"client_key": c.clientKey, "call_id": c.responseLossCallID()}, nil)
 		c.stage = queueReplayStageResponseLoss
 	case queueReplayStageResponseLoss:
-		response.Command = c.command("client", "lifecycle", map[string]any{"client_key": c.clientKey, "operation": "stop"}, nil)
-		c.stage = queueReplayStageStoppedAfterLoss
-	case queueReplayStageStoppedAfterLoss:
+		response.Command = c.command("observer", "capture", map[string]any{"client_keys": []string{c.clientKey}, "sources": []string{"request-trace"}}, nil)
+		c.stage = queueReplayStageResponseLossCapture
+	case queueReplayStageResponseLossCapture:
+		response.Command = c.command("client", "open", map[string]any{"client_key": c.clientKey, "database_mode": "reuse", "initialization": "empty", "seed_step_id": nil}, nil)
+		c.stage = queueReplayStageRestartedAfterLoss
+	case queueReplayStageRestartedAfterLoss:
 		response.Command = c.command("client", "synchronize-step", map[string]any{"client_key": c.clientKey, "method": "start", "completion": "idle"}, nil)
 		c.stage = queueReplayStageReplay
+	case queueReplayStageReplayCapture:
+		command, err := c.localCommand()
+		if err != nil {
+			return exchangeResponse{}, err
+		}
+		response.Command = command
+		c.stage = queueReplayStageLocalWrite
 	case queueReplayStageCapture:
+		if c.finalResult == nil {
+			return exchangeResponse{}, errors.New("React Native queue-replay aggregate capture is unavailable")
+		}
+		state, err := decodeClientState(c.finalResult.ClientState)
+		if err != nil {
+			return exchangeResponse{}, err
+		}
+		if state.RejectedMutationCount <= queueReplayMaximumRejectedDetails {
+			response.Command = c.command("observer", "capture", map[string]any{"client_keys": []string{c.clientKey}, "sources": []string{"rejected-mutations"}}, nil)
+			c.stage = queueReplayStageRejectedCapture
+			break
+		}
+		if err := c.completeLocked(ctx); err != nil {
+			return exchangeResponse{}, err
+		}
+		response.State = "complete"
+		response.Command = nil
+		c.stage = queueReplayStageComplete
+		c.completed = true
+	case queueReplayStageRejectedCapture:
 		if err := c.completeLocked(ctx); err != nil {
 			return exchangeResponse{}, err
 		}
@@ -914,11 +993,63 @@ func queueReplayMemberNames(members map[string]json.RawMessage) string {
 	return "[" + strings.Join(names, " ") + "]"
 }
 
-func (c *QueueReplayCoordinator) validateStopped(raw json.RawMessage) error {
-	if c.process == nil {
-		return errors.New("React Native queue-replay process identity is unavailable")
+func (c *QueueReplayCoordinator) validateRestarted(raw json.RawMessage) (actionProcessIdentity, error) {
+	process, err := validateOpenedResult(raw)
+	if err != nil {
+		return actionProcessIdentity{}, err
 	}
-	return validateStoppedLifecycleResult(raw, *c.process)
+	if c.process == nil {
+		return actionProcessIdentity{}, errors.New("React Native queue-replay prior process identity is unavailable")
+	}
+	if process.DatabaseIdentityFingerprint != c.process.DatabaseIdentityFingerprint {
+		return actionProcessIdentity{}, fmt.Errorf("React Native queue-replay restarted database identity fingerprint=%q want=%q", process.DatabaseIdentityFingerprint, c.process.DatabaseIdentityFingerprint)
+	}
+	if process.ProcessID == c.process.ProcessID {
+		return actionProcessIdentity{}, fmt.Errorf("React Native queue-replay restarted process_id=%q want a new process identity", process.ProcessID)
+	}
+	return process, nil
+}
+
+func (c *QueueReplayCoordinator) validateTraceSnapshot(raw json.RawMessage) (traceSnapshot, error) {
+	capture, err := decodeCapture(raw, []string{"request_trace"})
+	if err != nil {
+		return traceSnapshot{}, err
+	}
+	var members map[string]json.RawMessage
+	if err := decodeStrictMembers(raw, &members, 3, "queue-replay trace capture"); err != nil {
+		return traceSnapshot{}, err
+	}
+	if c.process == nil {
+		return traceSnapshot{}, errors.New("React Native queue-replay trace process identity is unavailable")
+	}
+	process, err := decodeActionProcessIdentity(members["process"])
+	if err != nil || process != *c.process {
+		return traceSnapshot{}, fmt.Errorf("React Native queue-replay trace process=%+v want=%+v decode_error=%v", process, *c.process, err)
+	}
+	trace, err := captureTraceFromRaw(capture.Trace)
+	if err != nil || trace.Overflowed || trace.SequenceCheckpoint != uint64(len(trace.Observations)) || validateTraceSequence(trace.Observations) != nil {
+		return traceSnapshot{}, errors.New("React Native queue-replay trace snapshot is invalid")
+	}
+	return trace, nil
+}
+
+func (c *QueueReplayCoordinator) combinedTrace(raw json.RawMessage) (json.RawMessage, error) {
+	trace, err := c.validateTraceSnapshot(raw)
+	if err != nil {
+		return nil, err
+	}
+	observations := make([]transportObservation, 0, len(c.trace)+len(trace.Observations))
+	observations = append(observations, c.trace...)
+	observations = append(observations, trace.Observations...)
+	for index := range observations {
+		observations[index].Sequence = uint64(index + 1)
+	}
+	combined := traceSnapshot{Observations: observations, SequenceCheckpoint: uint64(len(observations))}
+	encoded, err := json.Marshal(combined)
+	if err != nil {
+		return nil, fmt.Errorf("encode React Native queue-replay request trace: %w", err)
+	}
+	return encoded, nil
 }
 
 func (c *QueueReplayCoordinator) bindResponseLossPush() error {
@@ -951,14 +1082,25 @@ func (c *QueueReplayCoordinator) validateProcess(raw json.RawMessage) error {
 }
 
 func (c *QueueReplayCoordinator) validateCapture(capture finalCapture) error {
+	state, err := c.validateCaptureAggregate(capture)
+	if err != nil {
+		return err
+	}
+	if state.RejectedMutationCount > queueReplayMaximumRejectedDetails {
+		return nil
+	}
+	return validateRejectedMutationDetails(capture.Rejected, state.RejectedMutationCount)
+}
+
+func (c *QueueReplayCoordinator) validateCaptureAggregate(capture finalCapture) (inspectedClientState, error) {
 	expected, err := queueReplayExpectedState(c.config.Scenario)
 	if err != nil || len(expected.Clients) != 1 || expected.Clients[0].UserID != c.userID || expected.Clients[0].ClientID != c.clientID ||
 		expected.Clients[0].QueueCount == nil || expected.Clients[0].OutcomeCount == nil || expected.Clients[0].SealedBatchCount == nil {
-		return errors.New("React Native queue-replay authored client state is invalid")
+		return inspectedClientState{}, errors.New("React Native queue-replay authored client state is invalid")
 	}
 	state, err := decodeClientState(capture.ClientState)
 	if err != nil {
-		return err
+		return inspectedClientState{}, err
 	}
 	counts := []struct {
 		name     string
@@ -972,19 +1114,15 @@ func (c *QueueReplayCoordinator) validateCapture(capture finalCapture) error {
 	}
 	for _, count := range counts {
 		if count.observed != count.expected {
-			return fmt.Errorf("React Native queue-replay final %s count=%d want=%d", count.name, count.observed, count.expected)
+			return inspectedClientState{}, fmt.Errorf("React Native queue-replay final %s count=%d want=%d", count.name, count.observed, count.expected)
 		}
 	}
 	if validateReadyStatus(capture.Status) != nil {
-		return errors.New("React Native queue-replay final queue status is invalid")
-	}
-	var rejected []json.RawMessage
-	if json.Unmarshal(capture.Rejected, &rejected) != nil || uint64(len(rejected)) != state.RejectedMutationCount {
-		return errors.New("React Native queue-replay rejected mutation count is invalid")
+		return inspectedClientState{}, errors.New("React Native queue-replay final queue status is invalid")
 	}
 	trace, err := captureTraceFromRaw(capture.Trace)
 	if err != nil || trace.Overflowed || trace.SequenceCheckpoint != uint64(len(trace.Observations)) || validateTraceSequence(trace.Observations) != nil {
-		return errors.New("React Native queue-replay request trace is invalid")
+		return inspectedClientState{}, errors.New("React Native queue-replay request trace is invalid")
 	}
 	pushes := 0
 	for _, observation := range trace.Observations {
@@ -993,7 +1131,15 @@ func (c *QueueReplayCoordinator) validateCapture(capture finalCapture) error {
 		}
 	}
 	if pushes != len(c.steps)*2 {
-		return errors.New("React Native queue-replay response-loss and replay push trace is invalid")
+		return inspectedClientState{}, errors.New("React Native queue-replay response-loss and replay push trace is invalid")
+	}
+	return state, nil
+}
+
+func validateRejectedMutationDetails(raw json.RawMessage, expected uint64) error {
+	var rejected []json.RawMessage
+	if json.Unmarshal(raw, &rejected) != nil || uint64(len(rejected)) != expected {
+		return fmt.Errorf("React Native queue-replay rejected mutation detail count=%d want=%d", len(rejected), expected)
 	}
 	return nil
 }
@@ -1120,20 +1266,26 @@ func (stage queueReplayStage) String() string {
 		return "bootstrapped"
 	case queueReplayStageLocalWrite:
 		return "local-write"
-	case queueReplayStageStoppedBeforeSchema:
-		return "stopped-before-schema"
+	case queueReplayStageRestartedBeforeSchema:
+		return "restarted-before-schema"
 	case queueReplayStageSchemaBoundary:
 		return "schema-boundary"
 	case queueReplayStageResponseLossBegun:
 		return "response-loss-begun"
 	case queueReplayStageResponseLoss:
 		return "response-loss"
-	case queueReplayStageStoppedAfterLoss:
-		return "stopped-after-loss"
+	case queueReplayStageResponseLossCapture:
+		return "response-loss-capture"
+	case queueReplayStageRestartedAfterLoss:
+		return "restarted-after-loss"
 	case queueReplayStageReplay:
 		return "replay"
+	case queueReplayStageReplayCapture:
+		return "replay-capture"
 	case queueReplayStageCapture:
 		return "capture"
+	case queueReplayStageRejectedCapture:
+		return "rejected-capture"
 	case queueReplayStageComplete:
 		return "complete"
 	default:

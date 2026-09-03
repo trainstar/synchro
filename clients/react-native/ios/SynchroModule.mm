@@ -267,6 +267,11 @@
     [self.impl inspectPendingMutations:resolve reject:reject];
 }
 
+- (void)inspectRetainedMutations:(RCTPromiseResolveBlock)resolve
+                          reject:(RCTPromiseRejectBlock)reject {
+    [self.impl inspectRetainedMutations:resolve reject:reject];
+}
+
 - (void)inspectRejectedMutations:(RCTPromiseResolveBlock)resolve
                           reject:(RCTPromiseRejectBlock)reject {
     [self.impl inspectRejectedMutations:resolve reject:reject];
@@ -438,6 +443,8 @@ RCT_EXTERN_METHOD(pendingChangeCount:(RCTPromiseResolveBlock)resolve
 RCT_EXTERN_METHOD(getSyncStatus:(RCTPromiseResolveBlock)resolve
                   reject:(RCTPromiseRejectBlock)reject)
 RCT_EXTERN_METHOD(inspectPendingMutations:(RCTPromiseResolveBlock)resolve
+                  reject:(RCTPromiseRejectBlock)reject)
+RCT_EXTERN_METHOD(inspectRetainedMutations:(RCTPromiseResolveBlock)resolve
                   reject:(RCTPromiseRejectBlock)reject)
 RCT_EXTERN_METHOD(inspectRejectedMutations:(RCTPromiseResolveBlock)resolve
                   reject:(RCTPromiseRejectBlock)reject)

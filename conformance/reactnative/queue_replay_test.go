@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -240,10 +241,11 @@ func TestQueueReplayAuthoredFlowServesExactlyExchangeCount(t *testing.T) {
 		actor           string
 		command         string
 		state           string
+		databaseMode    string
 		localOperations []scenarios.Operation
 	}
 	want := []exchange{
-		{actor: "client", command: "open", state: "command"},
+		{actor: "client", command: "open", state: "command", databaseMode: "create"},
 		{actor: "client", command: "synchronize-step", state: "command"},
 	}
 	for _, workload := range workloads {
@@ -255,15 +257,23 @@ func TestQueueReplayAuthoredFlowServesExactlyExchangeCount(t *testing.T) {
 			want = append(want, exchange{actor: "client", command: "execute-steps", state: "command", localOperations: workload.local[start:end]})
 		}
 		want = append(want,
-			exchange{actor: "client", command: "lifecycle", state: "command"},
+			exchange{actor: "client", command: "open", state: "command", databaseMode: "reuse"},
 			exchange{actor: "client", command: "synchronize-step", state: "command"},
 			exchange{actor: "client", command: "begin-call", state: "command"},
 			exchange{actor: "client", command: "await-call", state: "command"},
-			exchange{actor: "client", command: "lifecycle", state: "command"},
+			exchange{actor: "observer", command: "capture", state: "command"},
+			exchange{actor: "client", command: "open", state: "command", databaseMode: "reuse"},
 			exchange{actor: "client", command: "synchronize-step", state: "command"},
 		)
+		if workload.step.ID != workloads[len(workloads)-1].step.ID {
+			want = append(want, exchange{actor: "observer", command: "capture", state: "command"})
+		}
 	}
-	want = append(want, exchange{actor: "observer", command: "capture", state: "command"}, exchange{state: "complete"})
+	want = append(want,
+		exchange{actor: "observer", command: "capture", state: "command"},
+		exchange{actor: "observer", command: "capture", state: "command"},
+		exchange{state: "complete"},
+	)
 
 	localOperations := 0
 	served := 0
@@ -277,6 +287,12 @@ func TestQueueReplayAuthoredFlowServesExactlyExchangeCount(t *testing.T) {
 		}
 		if expected.actor == "" || expected.command == "" || expected.state != "command" {
 			t.Fatalf("queue-replay exchange %d is invalid: %#v", sequence+1, expected)
+		}
+		if expected.command == "open" && (expected.databaseMode != "create" && expected.databaseMode != "reuse") {
+			t.Fatalf("queue-replay exchange %d open database mode = %q", sequence+1, expected.databaseMode)
+		}
+		if expected.command != "open" && expected.databaseMode != "" {
+			t.Fatalf("queue-replay exchange %d non-open database mode = %q", sequence+1, expected.databaseMode)
 		}
 		if expected.command == "execute-steps" {
 			if len(expected.localOperations) == 0 || len(expected.localOperations) > queueReplayMaximumLocalOperations {
@@ -308,7 +324,7 @@ func TestQueueReplayAuthoredFlowServesExactlyExchangeCount(t *testing.T) {
 	if served != coordinator.ExchangeCount() {
 		t.Fatalf("queue-replay exchanges served = %d, want ExchangeCount=%d", served, coordinator.ExchangeCount())
 	}
-	if got, wantCount := coordinator.ExchangeCount(), 115; got != wantCount {
+	if got, wantCount := coordinator.ExchangeCount(), 133; got != wantCount {
 		t.Fatalf("queue-replay ExchangeCount = %d, want %d", got, wantCount)
 	}
 	if got, wantCount := coordinator.StageCount(), coordinator.ExchangeCount(); got != wantCount {
@@ -319,7 +335,7 @@ func TestQueueReplayAuthoredFlowServesExactlyExchangeCount(t *testing.T) {
 	}
 }
 
-func TestQueueReplayFinalCaptureRequestsAggregateAndRequiredDetailEvidence(t *testing.T) {
+func TestQueueReplayFinalCaptureRequestsAggregateEvidenceFirst(t *testing.T) {
 	scenario := loadQueueReplayAuthoredScenario(t)
 	workloads, err := queueReplayWorkloads(scenario)
 	if err != nil {
@@ -340,9 +356,66 @@ func TestQueueReplayFinalCaptureRequestsAggregateAndRequiredDetailEvidence(t *te
 	if !ok {
 		t.Fatalf("queue-replay final capture sources = %#v, want string array", response.Command.Action.Action.Parameters["sources"])
 	}
-	want := []string{"scope-state", "rejected-mutations", "sync-status", "request-trace"}
+	want := []string{"scope-state", "sync-status", "request-trace"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("queue-replay final capture sources = %#v, want %#v", got, want)
+	}
+}
+
+func TestQueueReplayFinalCaptureRequestsRejectedDetailsAfterBoundedAggregate(t *testing.T) {
+	scenario := loadQueueReplayAuthoredScenario(t)
+	workloads, err := queueReplayWorkloads(scenario)
+	if err != nil {
+		t.Fatalf("derive queue-replay workloads: %v", err)
+	}
+	identity, err := queueReplayClientIdentity(scenario)
+	if err != nil {
+		t.Fatalf("derive queue-replay identity: %v", err)
+	}
+	coordinator := &QueueReplayCoordinator{
+		config:   QueueReplayCoordinatorConfig{Scenario: scenario},
+		steps:    workloads,
+		userID:   identity.userID,
+		clientID: identity.clientID,
+		stage:    queueReplayStageCapture,
+	}
+	expected, err := queueReplayExpectedState(scenario)
+	if err != nil || len(expected.Clients) != 1 || expected.Clients[0].QueueCount == nil || expected.Clients[0].OutcomeCount == nil || expected.Clients[0].SealedBatchCount == nil {
+		t.Fatalf("queue-replay authored client state = %#v, error=%v", expected.Clients, err)
+	}
+	state := map[string]any{
+		"schema":                          map[string]any{"version": 10, "hash": strings.Repeat("a", 64)},
+		"scopeStates":                     []any{},
+		"scopeRows":                       []any{},
+		"rebuildAttempts":                 []any{},
+		"applicationRowCount":             0,
+		"mutationLedgerCount":             *expected.Clients[0].QueueCount,
+		"mutationOutcomeCount":            *expected.Clients[0].OutcomeCount,
+		"sealedBatchCount":                *expected.Clients[0].SealedBatchCount,
+		"rejectedMutationCount":           coordinator.rejectedCount(),
+		"scopeStateCount":                 0,
+		"scopeRowCount":                   0,
+		"provenanceCount":                 0,
+		"rowMetadataCount":                0,
+		"rebuildAttemptCount":             0,
+		"rebuildReceiptCount":             0,
+		"provenanceMaintenanceWorkCursor": "0",
+	}
+	coordinator.finalResult = &finalCapture{ClientState: queueReplayFixtureJSON(t, state)}
+	response, err := coordinator.advanceLocked(context.Background(), 1)
+	if err != nil || response.Command == nil {
+		t.Fatalf("advance queue-replay rejected detail capture: command=%#v error=%v", response.Command, err)
+	}
+	if coordinator.stage != queueReplayStageRejectedCapture {
+		t.Fatalf("queue-replay detail capture stage = %s, want rejected-capture", coordinator.stage)
+	}
+	got, ok := response.Command.Action.Action.Parameters["sources"].([]string)
+	if !ok {
+		t.Fatalf("queue-replay rejected detail capture sources = %#v, want string array", response.Command.Action.Action.Parameters["sources"])
+	}
+	want := []string{"rejected-mutations"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("queue-replay rejected detail capture sources = %#v, want %#v", got, want)
 	}
 }
 
@@ -403,6 +476,53 @@ func TestQueueReplayFinalCaptureValidatesAuthoredAggregateCounts(t *testing.T) {
 	if err := coordinator.validateCapture(capture); err == nil {
 		t.Fatal("queue-replay accepted a mismatched retained-mutation aggregate")
 	}
+	state["mutationLedgerCount"] = *expected.Clients[0].QueueCount
+	state["rejectedMutationCount"] = coordinator.rejectedCount() + 1
+	capture.ClientState = queueReplayFixtureJSON(t, state)
+	_, err = coordinator.validateCaptureAggregate(capture)
+	if err == nil || !strings.Contains(err.Error(), fmt.Sprintf("rejected mutations count=%d want=%d", coordinator.rejectedCount()+1, coordinator.rejectedCount())) {
+		t.Fatalf("queue-replay rejected aggregate diagnostic = %v, want observed and expected counts", err)
+	}
+}
+
+func TestQueueReplayRestartRequiresNewProcessAndPreservesDatabase(t *testing.T) {
+	oldProcess := actionProcessIdentity{ProcessID: "ios-app:101", DatabaseIdentityFingerprint: strings.Repeat("a", 64)}
+	coordinator := &QueueReplayCoordinator{process: &oldProcess}
+	if _, err := coordinator.validateRestarted(queueReplayOpenedResultForTest(oldProcess)); err == nil || !strings.Contains(err.Error(), "want a new process identity") {
+		t.Fatalf("queue-replay accepted unchanged restart identity: %v", err)
+	}
+	newProcess := actionProcessIdentity{ProcessID: "ios-app:102", DatabaseIdentityFingerprint: oldProcess.DatabaseIdentityFingerprint}
+	got, err := coordinator.validateRestarted(queueReplayOpenedResultForTest(newProcess))
+	if err != nil {
+		t.Fatalf("validate queue-replay restarted identity: %v", err)
+	}
+	if got != newProcess {
+		t.Fatalf("queue-replay restarted process = %+v, want %+v", got, newProcess)
+	}
+	differentDatabase := actionProcessIdentity{ProcessID: "ios-app:103", DatabaseIdentityFingerprint: strings.Repeat("b", 64)}
+	if _, err := coordinator.validateRestarted(queueReplayOpenedResultForTest(differentDatabase)); err == nil || !strings.Contains(err.Error(), "want=") {
+		t.Fatalf("queue-replay accepted changed database identity: %v", err)
+	}
+}
+
+func TestQueueReplayCombinesTraceSnapshotsAcrossRestarts(t *testing.T) {
+	process := actionProcessIdentity{ProcessID: "android-app:101", DatabaseIdentityFingerprint: strings.Repeat("a", 64)}
+	coordinator := &QueueReplayCoordinator{
+		process: &process,
+		trace:   []transportObservation{{Sequence: 1, OperationClass: "push", StatusCode: http.StatusOK}},
+	}
+	raw := queueReplayCaptureResultForTest(t, process, traceSnapshot{Observations: []transportObservation{{Sequence: 1, OperationClass: "push", StatusCode: http.StatusOK}}, SequenceCheckpoint: 1})
+	combined, err := coordinator.combinedTrace(raw)
+	if err != nil {
+		t.Fatalf("combine queue-replay trace snapshots: %v", err)
+	}
+	trace, err := captureTraceFromRaw(combined)
+	if err != nil {
+		t.Fatalf("decode combined queue-replay trace: %v", err)
+	}
+	if len(trace.Observations) != 2 || trace.SequenceCheckpoint != 2 || trace.Observations[0].Sequence != 1 || trace.Observations[1].Sequence != 2 {
+		t.Fatalf("combined queue-replay trace = %+v, want two renumbered observations", trace)
+	}
 }
 
 func queueReplayFixtureJSON(t *testing.T, value any) json.RawMessage {
@@ -462,6 +582,33 @@ func queueReplayLocalResultForTest(rows uint64, process actionProcessIdentity) j
 	return encoded
 }
 
+func queueReplayOpenedResultForTest(process actionProcessIdentity) json.RawMessage {
+	encoded, err := json.Marshal(map[string]any{
+		"kind": "opened",
+		"status": map[string]any{
+			"state": "ready", "retry_at": nil, "operation": nil, "failure": nil,
+		},
+		"process": process,
+	})
+	if err != nil {
+		panic(err)
+	}
+	return encoded
+}
+
+func queueReplayCaptureResultForTest(t *testing.T, process actionProcessIdentity, trace traceSnapshot) json.RawMessage {
+	t.Helper()
+	encoded, err := json.Marshal(map[string]any{
+		"kind":    "capture",
+		"capture": map[string]any{"request_trace": trace},
+		"process": process,
+	})
+	if err != nil {
+		t.Fatalf("marshal queue-replay trace capture: %v", err)
+	}
+	return encoded
+}
+
 func TestQueueReplayIncompleteResultNamesServedAndExpectedExchanges(t *testing.T) {
 	scenario := loadQueueReplayAuthoredScenario(t)
 	workloads, err := queueReplayWorkloads(scenario)
@@ -470,7 +617,7 @@ func TestQueueReplayIncompleteResultNamesServedAndExpectedExchanges(t *testing.T
 	}
 	coordinator := &QueueReplayCoordinator{steps: workloads, stage: queueReplayStageCapture, nextSeq: 115}
 	_, err = coordinator.Result()
-	if err == nil || !strings.Contains(err.Error(), "current stage=capture") || !strings.Contains(err.Error(), "exchanges served=114 versus ExchangeCount=115") {
+	if err == nil || !strings.Contains(err.Error(), "current stage=capture") || !strings.Contains(err.Error(), "exchanges served=114 versus ExchangeCount=133") {
 		t.Fatalf("incomplete queue-replay result = %v, want current stage and exchange progress", err)
 	}
 }
@@ -483,7 +630,7 @@ func TestQueueReplayFailedResultNamesServedAndExpectedExchanges(t *testing.T) {
 	}
 	coordinator := &QueueReplayCoordinator{steps: workloads, stage: queueReplayStageComplete, nextSeq: 115, failed: errors.New("terminal validation failed")}
 	_, err = coordinator.Result()
-	if err == nil || !strings.Contains(err.Error(), "terminal validation failed") || !strings.Contains(err.Error(), "current stage=complete") || !strings.Contains(err.Error(), "exchanges served=114 versus ExchangeCount=115") {
+	if err == nil || !strings.Contains(err.Error(), "terminal validation failed") || !strings.Contains(err.Error(), "current stage=complete") || !strings.Contains(err.Error(), "exchanges served=114 versus ExchangeCount=133") {
 		t.Fatalf("failed queue-replay result = %v, want cause, current stage, and exchange progress", err)
 	}
 }

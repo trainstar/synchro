@@ -110,7 +110,22 @@ async function exchange(endpoint: string, token: string, sequence: number, rawRe
   }
 }
 
+function requiresProcessRelaunch(command: Record<string, unknown>): boolean {
+  const action = command.action;
+  if (!isJSONObject(action)) return false;
+  const nested = action.action;
+  if (!isJSONObject(nested) || nested.actor !== 'client' || nested.command !== 'open') return false;
+  const parameters = nested.parameters;
+  return isJSONObject(parameters) && parameters.database_mode === 'reuse';
+}
+
 async function executeCommand(command: Record<string, unknown>): Promise<string> {
+  if (requiresProcessRelaunch(command)) {
+    // A reuse open is the coordinator's process-restart boundary. Keep the
+    // database while replacing the application process before opening it.
+    await device.launchApp({ newInstance: true, delete: false, launchArgs: { synchroConformance: '1' } });
+    await expect(element(by.id('conformance-harness'))).toBeVisible();
+  }
   const serialized = JSON.stringify(command);
   await element(by.id('conformance-command-input')).replaceText(serialized);
   const input = await element(by.id('conformance-command-input')).getAttributes();
