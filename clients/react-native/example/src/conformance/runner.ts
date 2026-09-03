@@ -45,7 +45,10 @@ const MAXIMUM_CAPTURE_VALUES = 512;
 const MAXIMUM_CAPTURE_ROWS = 256;
 const MAXIMUM_EVENTS = 256;
 const POLL_INTERVAL_MS = 100;
-const COMPLETION_TIMEOUT_MS = 30000;
+// The Kotlin runner awaits a call without its own cap inside the command
+// budget. A capped wait expired during in-call backoff retries that the
+// device spec budget accommodates, so the cap matches the spec budget.
+const COMPLETION_TIMEOUT_MS = 540000;
 const IDENTIFIER_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/;
 const DATABASE_NAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 
