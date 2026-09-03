@@ -368,9 +368,9 @@ class SynchroModule(reactContext: ReactApplicationContext) :
 
     @ReactMethod
     override fun executeAuthoredWrite(
-        tableID: String,
+        tableName: String,
         operation: String,
-        fieldIDs: ReadableArray,
+        columnNames: ReadableArray,
         sql: String,
         values: ReadableArray,
         promise: Promise,
@@ -380,11 +380,11 @@ class SynchroModule(reactContext: ReactApplicationContext) :
             return
         }
         try {
-            val authoredFieldIDs = (0 until fieldIDs.size()).map { index ->
-                fieldIDs.getString(index)
-                    ?: throw IllegalArgumentException("Missing field ID at index $index")
+            val authoredColumnNames = (0 until columnNames.size()).map { index ->
+                columnNames.getString(index)
+                    ?: throw IllegalArgumentException("Missing column name at index $index")
             }
-            val result = c.authoredWriteTransaction(tableID, operation, authoredFieldIDs) { transaction ->
+            val result = c.authoredWriteTransaction(tableName, operation, authoredColumnNames) { transaction ->
                 transaction.execute(sql, parseParams(values))
             }
             val map = Arguments.createMap().apply {

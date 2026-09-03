@@ -75,8 +75,10 @@ object SQLiteSchema {
             )
         """.trimIndent().replace("\n", " ")
         val schemaGuard = "SELECT CASE WHEN $verifiedSchema THEN 1 ELSE RAISE(ABORT, 'verified Synchro schema metadata is required for capture') END;"
-        fun intentHas(fieldID: String): String {
-            val safeFieldID = SQLiteHelpers.escapeSQLString(fieldID)
+        // The context matches physical identifiers because the write author
+        // knows table and column names, not wire field IDs. Issue #42.
+        fun intentHas(columnName: String): String {
+            val safeColumnName = SQLiteHelpers.escapeSQLString(columnName)
             return """
                 EXISTS (
                     SELECT 1
@@ -84,16 +86,16 @@ object SQLiteSchema {
                     JOIN _synchro_capture_fields AS field
                       ON field.statement_token = context.statement_token
                     WHERE context.singleton = 1
-                      AND context.table_id = '$safeTableID'
-                      AND field.field_id = '$safeFieldID'
+                      AND context.table_name = '$safeName'
+                      AND field.column_name = '$safeColumnName'
                 )
             """.trimIndent().replace("\n", " ")
         }
         val intentHasWritable = if (writable.isEmpty()) {
             "0"
         } else {
-            val writableFieldIDs = writable.joinToString(", ") { column ->
-                "'${SQLiteHelpers.escapeSQLString(column.fieldID)}'"
+            val writableColumnNames = writable.joinToString(", ") { column ->
+                "'${SQLiteHelpers.escapeSQLString(column.name)}'"
             }
             """
                 EXISTS (
@@ -102,8 +104,8 @@ object SQLiteSchema {
                     JOIN _synchro_capture_fields AS field
                       ON field.statement_token = context.statement_token
                     WHERE context.singleton = 1
-                      AND context.table_id = '$safeTableID'
-                      AND field.field_id IN ($writableFieldIDs)
+                      AND context.table_name = '$safeName'
+                      AND field.column_name IN ($writableColumnNames)
                 )
             """.trimIndent().replace("\n", " ")
         }
@@ -155,14 +157,14 @@ object SQLiteSchema {
                         safePKFieldID,
                          primaryKey.logicalType,
                          "NEW.$quotedPK",
-                         captureCondition = intentHas(it.fieldID),
+                         captureCondition = intentHas(it.name),
                      )
                  }}
             END
         """.trimIndent())
 
         val changedWritable = writable.joinToString(" OR ") { column ->
-            "(${intentHas(column.fieldID)}) AND " +
+            "(${intentHas(column.name)}) AND " +
                 "NEW.${SQLiteHelpers.quoteIdentifier(column.name)} IS NOT OLD.${SQLiteHelpers.quoteIdentifier(column.name)}"
         }.ifEmpty { "0" }
         val deleteTransition = deletedAtCol?.let { column ->
@@ -196,7 +198,7 @@ object SQLiteSchema {
                         safePKFieldID,
                          primaryKey.logicalType,
                          "NEW.$quotedPK",
-                          captureCondition = intentHas(column.fieldID),
+                          captureCondition = intentHas(column.name),
                          changedCondition = "NOT ($deleteTransition) AND NEW.${SQLiteHelpers.quoteIdentifier(column.name)} IS NOT OLD.${SQLiteHelpers.quoteIdentifier(column.name)}",
                      )
                 }}

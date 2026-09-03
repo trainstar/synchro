@@ -605,12 +605,18 @@ internal class SynchroDatabase private constructor(context: Context, dbPath: Str
     }
 
     private fun createCaptureContextTables(db: SQLiteDatabase) {
+        // The context outlives no statement, so an old identifier shape is
+        // dropped instead of migrated.
+        if (hasTable(db, "_synchro_capture_context") && !hasColumn(db, "_synchro_capture_context", "table_name")) {
+            db.execSQL("DROP TABLE _synchro_capture_context")
+            db.execSQL("DROP TABLE IF EXISTS _synchro_capture_fields")
+        }
         db.execSQL(
             """
             CREATE TABLE IF NOT EXISTS _synchro_capture_context (
                 singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
                 statement_token TEXT NOT NULL,
-                table_id TEXT NOT NULL,
+                table_name TEXT NOT NULL,
                 operation TEXT NOT NULL CHECK (operation IN ('insert', 'update', 'delete'))
             )
             """.trimIndent(),
@@ -619,8 +625,8 @@ internal class SynchroDatabase private constructor(context: Context, dbPath: Str
             """
             CREATE TABLE IF NOT EXISTS _synchro_capture_fields (
                 statement_token TEXT NOT NULL,
-                field_id TEXT NOT NULL,
-                PRIMARY KEY (statement_token, field_id)
+                column_name TEXT NOT NULL,
+                PRIMARY KEY (statement_token, column_name)
             )
             """.trimIndent(),
         )
@@ -853,9 +859,9 @@ internal class SynchroDatabase private constructor(context: Context, dbPath: Str
     }
 
     fun <T> applicationAuthoredWriteTransaction(
-        tableID: String,
+        tableName: String,
         operation: Operation,
-        fieldIDs: List<String>,
+        columnNames: List<String>,
         block: (ApplicationTransaction) -> T,
     ): T {
         val operationName = when (operation) {
@@ -864,7 +870,7 @@ internal class SynchroDatabase private constructor(context: Context, dbPath: Str
             Operation.DELETE -> "delete"
             Operation.UPSERT -> throw IllegalArgumentException("upsert is not an authored write operation")
         }
-        validateCaptureContextInput(tableID, fieldIDs)
+        validateCaptureContextInput(tableName, columnNames)
 
         var changedTables = emptySet<String>()
         val result = writeTransaction { db ->
@@ -873,7 +879,7 @@ internal class SynchroDatabase private constructor(context: Context, dbPath: Str
             val statementToken = UUID.randomUUID().toString()
             applicationTransactionDepth.set(previousDepth + 1)
             try {
-                installCaptureContext(db, statementToken, tableID, operationName, fieldIDs)
+                installCaptureContext(db, statementToken, tableName, operationName, columnNames)
                 val value = block(transaction)
                 changedTables = transaction.changedTables()
                 value
@@ -894,9 +900,9 @@ internal class SynchroDatabase private constructor(context: Context, dbPath: Str
     }
 
     fun <T> applicationAuthoredWriteTransaction(
-        tableID: String,
+        tableName: String,
         operation: String,
-        fieldIDs: List<String>,
+        columnNames: List<String>,
         block: (ApplicationTransaction) -> T,
     ): T {
         val parsedOperation = when (operation.lowercase(Locale.ROOT)) {
@@ -905,33 +911,33 @@ internal class SynchroDatabase private constructor(context: Context, dbPath: Str
             "delete" -> Operation.DELETE
             else -> throw IllegalArgumentException("authored write operation is invalid")
         }
-        return applicationAuthoredWriteTransaction(tableID, parsedOperation, fieldIDs, block)
+        return applicationAuthoredWriteTransaction(tableName, parsedOperation, columnNames, block)
     }
 
-    private fun validateCaptureContextInput(tableID: String, fieldIDs: List<String>) {
-        require(tableID.isNotEmpty()) { "authored write table ID must not be empty" }
-        require(fieldIDs.all { it.isNotEmpty() }) { "authored write field IDs must not be empty" }
-        require(fieldIDs.size == fieldIDs.toSet().size) { "authored write field IDs must be unique" }
+    private fun validateCaptureContextInput(tableName: String, columnNames: List<String>) {
+        require(tableName.isNotEmpty()) { "authored write table name must not be empty" }
+        require(columnNames.all { it.isNotEmpty() }) { "authored write column names must not be empty" }
+        require(columnNames.size == columnNames.toSet().size) { "authored write column names must be unique" }
     }
 
     private fun installCaptureContext(
         db: SQLiteDatabase,
         statementToken: String,
-        tableID: String,
+        tableName: String,
         operation: String,
-        fieldIDs: List<String>,
+        columnNames: List<String>,
     ) {
         db.execSQL(
             """
-            INSERT INTO _synchro_capture_context (singleton, statement_token, table_id, operation)
+            INSERT INTO _synchro_capture_context (singleton, statement_token, table_name, operation)
             VALUES (1, ?, ?, ?)
             """.trimIndent(),
-            arrayOf(statementToken, tableID, operation),
+            arrayOf(statementToken, tableName, operation),
         )
-        fieldIDs.forEach { fieldID ->
+        columnNames.forEach { columnName ->
             db.execSQL(
-                "INSERT INTO _synchro_capture_fields (statement_token, field_id) VALUES (?, ?)",
-                arrayOf(statementToken, fieldID),
+                "INSERT INTO _synchro_capture_fields (statement_token, column_name) VALUES (?, ?)",
+                arrayOf(statementToken, columnName),
             )
         }
     }
@@ -961,9 +967,9 @@ internal class SynchroDatabase private constructor(context: Context, dbPath: Str
         installCaptureContext(
             db = db,
             statementToken = statementToken,
-            tableID = table.tableID,
+            tableName = table.tableName,
             operation = operation,
-            fieldIDs = table.columns.filter { it.writable }.map { it.fieldID },
+            columnNames = table.columns.filter { it.writable }.map { it.name },
         )
         return try {
             block()

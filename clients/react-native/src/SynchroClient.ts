@@ -766,17 +766,17 @@ export class SynchroClient {
   }
 
   async executeAuthoredWrite(
-    tableID: string,
+    tableName: string,
     operation: string,
-    fieldIDs: readonly string[],
+    columnNames: readonly string[],
     sql: string,
     values?: readonly SQLiteBindValue[]
   ): Promise<ExecResult> {
     try {
       return await this.native.executeAuthoredWrite(
-        tableID,
+        tableName,
         operation,
-        fieldIDs,
+        columnNames,
         sql,
         checkedParams(values ?? [])
       );

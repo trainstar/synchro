@@ -22,9 +22,9 @@ class AuthoredCaptureTests {
         val client = clientWithSchema(databaseName)
         try {
             client.authoredWriteTransaction(
-                tableID = authoredTable.tableID,
+                tableName = authoredTable.tableName,
                 operation = Operation.INSERT,
-                fieldIDs = listOf("field-body"),
+                columnNames = listOf("body"),
             ) { transaction ->
                 transaction.execute(
                     "INSERT INTO authored_rows (id, body, updated_at) VALUES (?, ?, ?)",
@@ -51,9 +51,9 @@ class AuthoredCaptureTests {
         val client = clientWithSchema(databaseName)
         try {
             client.authoredWriteTransaction(
-                tableID = authoredTable.tableID,
+                tableName = authoredTable.tableName,
                 operation = Operation.INSERT,
-                fieldIDs = listOf("field-default"),
+                columnNames = listOf("default_value"),
             ) { transaction ->
                 transaction.execute(
                     "INSERT INTO authored_rows (id, default_value, updated_at) VALUES (?, ?, ?)",
@@ -80,9 +80,9 @@ class AuthoredCaptureTests {
         val client = clientWithSchema(databaseName)
         try {
             client.authoredWriteTransaction(
-                tableID = authoredTable.tableID,
+                tableName = authoredTable.tableName,
                 operation = Operation.INSERT,
-                fieldIDs = listOf("field-body"),
+                columnNames = listOf("body"),
             ) { transaction ->
                 transaction.execute(
                     "INSERT INTO authored_rows (id, body, support_value, updated_at) VALUES (?, ?, ?, ?)",
@@ -109,9 +109,9 @@ class AuthoredCaptureTests {
         val client = clientWithSchema(databaseName)
         try {
             client.authoredWriteTransaction(
-                tableID = authoredTable.tableID,
+                tableName = authoredTable.tableName,
                 operation = Operation.INSERT,
-                fieldIDs = listOf("field-body"),
+                columnNames = listOf("body"),
             ) { transaction ->
                 transaction.execute(
                     "INSERT INTO authored_rows (id, body, updated_at) VALUES (?, ?, ?)",
@@ -119,9 +119,9 @@ class AuthoredCaptureTests {
                 )
             }
             client.authoredWriteTransaction(
-                tableID = authoredTable.tableID,
+                tableName = authoredTable.tableName,
                 operation = Operation.UPDATE,
-                fieldIDs = listOf("field-body"),
+                columnNames = listOf("body"),
             ) { transaction ->
                 transaction.execute(
                     "UPDATE authored_rows SET body = ?, support_value = ? WHERE id = ?",
@@ -136,9 +136,9 @@ class AuthoredCaptureTests {
             )
 
             client.authoredWriteTransaction(
-                tableID = authoredTable.tableID,
+                tableName = authoredTable.tableName,
                 operation = Operation.UPDATE,
-                fieldIDs = listOf("field-body"),
+                columnNames = listOf("body"),
             ) { transaction ->
                 transaction.execute(
                     "UPDATE authored_rows SET support_value = ? WHERE id = ?",
@@ -163,9 +163,9 @@ class AuthoredCaptureTests {
         try {
             assertThrows(RuntimeException::class.java) {
                 client.authoredWriteTransaction(
-                    tableID = authoredTable.tableID,
+                    tableName = authoredTable.tableName,
                     operation = Operation.INSERT,
-                    fieldIDs = listOf("field-id"),
+                    columnNames = listOf("id"),
                 ) { transaction ->
                     transaction.execute(
                         "INSERT INTO authored_rows (id, updated_at) VALUES (?, ?)",
