@@ -1036,6 +1036,215 @@ final class SchemaManagerTests: XCTestCase {
         XCTAssertEqual(localChecksum, targetScopeDigest)
     }
 
+    func testSchemaResetStripsOnlyRemovedFieldsCapturedAtAuthoredDefault() async throws {
+        let database = try makeTestDB()
+        defer { try? database.close() }
+        let manager = SchemaManager(database: database)
+        let tracker = ChangeTracker(database: database)
+        let sourceHash = String(repeating: "1", count: 64)
+        let sourceTable = LocalSchemaTable(
+            tableID: "table-orders",
+            relationID: "relation-orders",
+            tableName: "orders",
+            primaryKeyFieldID: "field-id",
+            createdAtFieldID: nil,
+            updatedAtFieldID: "field-updated-at",
+            deletedAtFieldID: nil,
+            updatedAtColumn: "updated_at",
+            deletedAtColumn: "",
+            composition: .singleScope,
+            primaryKey: ["id"],
+            columns: [
+                LocalSchemaColumn(
+                    fieldID: "field-id", name: "id", logicalType: "string",
+                    nullable: false, writable: false, precision: nil, scale: nil,
+                    sqliteDefaultSQL: nil, isPrimaryKey: true
+                ),
+                LocalSchemaColumn(
+                    fieldID: "field-obsolete", name: "obsolete_value", logicalType: "string",
+                    nullable: false, writable: true, precision: nil, scale: nil,
+                    sqliteDefaultSQL: "''", isPrimaryKey: false
+                ),
+                LocalSchemaColumn(
+                    fieldID: "field-updated-at", name: "updated_at", logicalType: "datetime",
+                    nullable: false, writable: false, precision: nil, scale: nil,
+                    sqliteDefaultSQL: nil, isPrimaryKey: false
+                ),
+            ]
+        )
+        try manager.reconcileLocalSchema(
+            schemaVersion: 1,
+            schemaHash: sourceHash,
+            tables: [sourceTable]
+        )
+        _ = try database.execute(
+            "INSERT INTO orders (id, updated_at) VALUES (?, ?)",
+            params: ["default-only", "2026-01-01T00:00:00.000000Z"]
+        )
+        _ = try database.execute(
+            "INSERT INTO orders (id, obsolete_value, updated_at) VALUES (?, ?, ?)",
+            params: ["authored", "keep-me", "2026-01-01T00:00:00.000000Z"]
+        )
+        let captured = try tracker.pendingChanges()
+        XCTAssertEqual(captured.map(\.recordID), ["default-only", "authored"])
+        let defaultMutationID = captured[0].mutationID
+        let authoredMutationID = captured[1].mutationID
+
+        let sessionConfiguration = URLSessionConfiguration.ephemeral
+        sessionConfiguration.protocolClasses = [MockURLProtocol.self]
+        let session = URLSession(configuration: sessionConfiguration)
+        defer {
+            MockURLProtocol.requestHandler = nil
+            session.invalidateAndCancel()
+        }
+        let config = SynchroConfig(
+            dbPath: database.path,
+            serverURL: URL(string: "http://test.local")!,
+            authProvider: { "test-token" },
+            clientID: "client-1",
+            appVersion: "1.0.0"
+        )
+        let httpClient = HttpClient(config: config, session: session)
+        MockURLProtocol.requestHandler = { request in
+            let response = HTTPURLResponse(
+                url: request.url!,
+                statusCode: 409,
+                httpVersion: nil,
+                headerFields: ["Content-Type": "application/json"]
+            )!
+            let body = try JSONSerialization.data(withJSONObject: [
+                "error": [
+                    "code": "client_generation_expired",
+                    "message": "generation expired",
+                    "retryable": false,
+                    "current_client_generation": 2,
+                ] as [String: Any]
+            ])
+            return (response, body)
+        }
+        let processor = PushProcessor(database: database, changeTracker: tracker)
+        do {
+            _ = try await processor.processPush(
+                httpClient: httpClient,
+                clientID: "client-1",
+                clientGeneration: 1,
+                schemaVersion: 1,
+                schemaHash: sourceHash,
+                syncedTables: [sourceTable]
+            )
+            XCTFail("Expected the sealed batch to require renewal")
+        } catch is BindingRenewalError {
+        }
+        XCTAssertEqual(
+            try textRows(
+                db: database,
+                sql: "SELECT state AS value FROM _synchro_push_batches"
+            ),
+            ["renewal_required"]
+        )
+
+        var targetManifest = SchemaManifest(
+            schemaVersion: 2,
+            schemaHash: String(repeating: "0", count: 64),
+            parentSchema: SchemaRef(version: 1, hash: sourceHash),
+            transitionClass: "class_4",
+            compatibilityFloor: 2,
+            tables: [
+                TableSchema(
+                    tableID: sourceTable.tableID,
+                    relationID: sourceTable.relationID,
+                    name: sourceTable.tableName,
+                    primaryKeyFieldID: sourceTable.primaryKeyFieldID,
+                    lifecycle: LifecycleSchema(
+                        createdAtFieldID: nil,
+                        updatedAtFieldID: sourceTable.updatedAtFieldID,
+                        deletedAtFieldID: nil
+                    ),
+                    composition: .singleScope,
+                    fields: [
+                        ColumnSchema(
+                            fieldID: "field-id", name: "id", type: "string",
+                            nullable: false, writable: false, precision: nil, scale: nil
+                        ),
+                        ColumnSchema(
+                            fieldID: "field-updated-at", name: "updated_at", type: "datetime",
+                            nullable: false, writable: false, precision: nil, scale: nil
+                        ),
+                    ],
+                    indexes: []
+                )
+            ]
+        )
+        targetManifest.schemaHash = try Integrity.schemaManifestHash(targetManifest)
+        _ = try manager.prepareMigration(
+            targetManifest: targetManifest,
+            action: .replace,
+            affectedScopes: [],
+            scopeCursorUpdates: [:],
+            schemaReset: true
+        )
+        _ = try database.writeSyncLockedTransaction { connection in
+            try manager.applyPreparedMigrationInTransaction(connection)
+        }
+
+        let oldBatchID = try XCTUnwrap(
+            try database.queryOne(
+                "SELECT batch_id FROM _synchro_push_batches WHERE state = 'renewal_required'",
+                params: nil
+            )?["batch_id"] as String?
+        )
+        let retained = try database.readTransaction { connection in
+            try tracker.entriesForBatch(connection, batchID: oldBatchID)
+        }
+        XCTAssertEqual(retained.map(\.recordID), ["default-only", "authored"])
+        XCTAssertEqual(retained[0].fieldValuesByID, [:])
+        XCTAssertEqual(retained[1].fieldValuesByID["field-obsolete"]?.textValue, "keep-me")
+        XCTAssertEqual(
+            try textRows(
+                db: database,
+                sql: """
+                    SELECT pending.record_id || '|' || mv.field_id || '|' || mv.value_text AS value
+                    FROM _synchro_pending_changes pending
+                    JOIN _synchro_mutation_values mv USING (mutation_id)
+                    ORDER BY pending.local_order, mv.field_id
+                    """
+            ),
+            ["authored|field-obsolete|keep-me"]
+        )
+        let targetTable = try XCTUnwrap(targetManifest.localTables().first)
+        XCTAssertTrue(try processor.renewSealedBatchesAfterBindingChange(
+            clientID: "client-1",
+            clientGeneration: 2,
+            schemaVersion: 2,
+            schemaHash: targetManifest.schemaHash,
+            syncedTables: [targetTable]
+        ))
+        let renewedJSON = try XCTUnwrap(
+            try database.queryOne(
+                "SELECT request_json FROM _synchro_push_batches WHERE state = 'pending'",
+                params: nil
+            )?["request_json"] as String?
+        )
+        let renewed = try JSONDecoder.synchroDecoder().decode(
+            PushRequest.self,
+            from: Data(renewedJSON.utf8)
+        )
+        XCTAssertEqual(renewed.schema, SchemaRef(version: 2, hash: targetManifest.schemaHash))
+        XCTAssertEqual(renewed.mutations.map(\.mutationID), [defaultMutationID, authoredMutationID])
+        XCTAssertEqual(renewed.mutations[0].columns, [:])
+        XCTAssertEqual(renewed.mutations[1].columns, ["field-obsolete": AnyCodable("keep-me")])
+        let renewedPending = try database.readTransaction { connection in
+            try tracker.entriesForBatch(connection, batchID: renewed.batchID)
+        }
+        XCTAssertEqual(renewedPending.map(\.recordID), ["default-only", "authored"])
+        XCTAssertEqual(renewedPending[0].fieldValuesByID, [:])
+        let hydrated = try tracker.hydratePendingForPush(
+            pending: [renewedPending[0]],
+            syncedTables: [targetTable]
+        )
+        XCTAssertEqual(hydrated.first?.data, [:])
+    }
+
     func testPreparedMigrationProtectsTargetTableDuringConcurrentDDL() throws {
         let database = try makeTestDB()
         defer { try? database.close() }

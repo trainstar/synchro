@@ -685,7 +685,9 @@ public struct PushRequest: Codable, Sendable, Equatable {
             }
             switch mutation.op {
             case .insert:
-                guard mutation.baseVersion == nil, !columns.isEmpty else {
+                guard mutation.baseVersion == nil,
+                      mutation.columns != nil,
+                      !columns.isEmpty || mutation.authoredSchema != schema else {
                     throw ContractViolation.invalidMutationShape("insert shape is invalid")
                 }
             case .update:

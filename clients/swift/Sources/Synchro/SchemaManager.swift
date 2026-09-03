@@ -3,9 +3,11 @@ import Foundation
 
 final class SchemaManager: @unchecked Sendable {
     private let database: SynchroDatabase
+    private let changeTracker: ChangeTracker
 
     init(database: SynchroDatabase) {
         self.database = database
+        self.changeTracker = ChangeTracker(database: database)
     }
 
     func ensureSchema(httpClient: HttpClient) async throws -> SchemaResponse {
@@ -312,7 +314,7 @@ final class SchemaManager: @unchecked Sendable {
                     // Non-constant defaults (CURRENT_TIMESTAMP, etc.) are rejected. Adding as nullable
                     // is safe: existing rows get NULL, the server enforces constraints on push.
                     let hasDefault = col.sqliteDefaultSQL != nil && !col.sqliteDefaultSQL!.isEmpty
-                    let isConstantDefault = hasDefault && !isNonConstantDefault(col.sqliteDefaultSQL!)
+                    let isConstantDefault = hasDefault && SQLiteSchema.isConstantDefaultSQL(col.sqliteDefaultSQL!)
                     var sql = "ALTER TABLE \(quotedTable) ADD COLUMN \(quotedCol) \(sqlType)"
                     if !col.nullable && !col.isPrimaryKey && isConstantDefault {
                         sql += " NOT NULL"
@@ -369,6 +371,9 @@ final class SchemaManager: @unchecked Sendable {
         }
         if journal.source.version > 0 {
             try validatePhysicalSchema(db, tables: sourceTables)
+        }
+        if journal.schemaReset {
+            try changeTracker.reconcileRemovedDefaults(db, targetTables: targetTables)
         }
         try executeMigrationPlan(
             db,
@@ -464,7 +469,7 @@ final class SchemaManager: @unchecked Sendable {
         let sqlType = SQLiteSchema.sqliteType(for: column.logicalType)
         var sql = "ALTER TABLE \(SQLiteHelpers.quoteIdentifier(table.tableName)) ADD COLUMN \(SQLiteHelpers.quoteIdentifier(column.name)) \(sqlType)"
         let hasDefault = column.sqliteDefaultSQL.map { !$0.isEmpty } ?? false
-        let constantDefault = hasDefault && !isNonConstantDefault(column.sqliteDefaultSQL!)
+        let constantDefault = hasDefault && SQLiteSchema.isConstantDefaultSQL(column.sqliteDefaultSQL!)
         if !column.nullable && !column.isPrimaryKey && constantDefault {
             sql += " NOT NULL"
         }
@@ -554,15 +559,6 @@ final class SchemaManager: @unchecked Sendable {
             tables[table.tableName.lowercased(with: Locale(identifier: "en_US_POSIX"))] = table
         }
         return tables.values.sorted { utf8Less($0.tableName, $1.tableName) }
-    }
-
-    /// Returns true if the SQL default expression is non-constant (not allowed in ALTER TABLE ADD COLUMN).
-    private func isNonConstantDefault(_ sql: String) -> Bool {
-        let upper = sql.uppercased()
-        return upper.contains("CURRENT_TIMESTAMP") ||
-               upper.contains("CURRENT_DATE") ||
-               upper.contains("CURRENT_TIME") ||
-               upper.contains("(")
     }
 
     private func validateSupportedTransitions(
