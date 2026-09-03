@@ -2,6 +2,7 @@ package blackbox
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -73,6 +74,11 @@ func (executor *OperatorExecutor) transitionSchemaQueue(ctx context.Context, rem
 	if err != nil {
 		return errors.New("begin schema transition failed")
 	}
+	var nonempty bool
+	if err := transaction.QueryRowContext(ctx, "SELECT EXISTS (SELECT 1 FROM public.cf_schema_queue)").Scan(&nonempty); err != nil {
+		_ = transaction.Rollback()
+		return errors.New("read schema transition relation state failed")
+	}
 	if _, err := transaction.ExecContext(ctx, "ALTER TABLE public.cf_schema_queue DROP COLUMN "+removed); err != nil {
 		_ = transaction.Rollback()
 		return errors.New("drop schema transition field failed")
@@ -92,6 +98,30 @@ func (executor *OperatorExecutor) transitionSchemaQueue(ctx context.Context, rem
 	}
 	if err := transaction.Commit(); err != nil {
 		return errors.New("commit schema transition failed")
+	}
+	return executor.bootstrapStagedTransition(ctx, database, added != "", nonempty)
+}
+
+// bootstrapStagedTransition completes a committed transition that the WAL
+// activation path cannot finish alone. The extension activates a removal-only
+// transition from commit order. A transition that adds a field or changes a
+// type over a nonempty relation requires the operator projection bootstrap,
+// so the staged generation stays pending until this runs it.
+func (executor *OperatorExecutor) bootstrapStagedTransition(ctx context.Context, database *sql.DB, shapeChanged, nonempty bool) error {
+	if !shapeChanged || !nonempty {
+		return nil
+	}
+	var generation int64
+	if err := database.QueryRowContext(ctx, `
+		SELECT generation
+		FROM synchro.sync_registry_generations
+		WHERE state = 'pending' AND validated
+		ORDER BY generation DESC
+		LIMIT 1`).Scan(&generation); err != nil || generation <= 0 {
+		return errors.New("read staged schema transition generation failed")
+	}
+	if _, err := executor.RunProjectionBootstrap(ctx, generation); err != nil {
+		return fmt.Errorf("bootstrap staged schema transition generation %d failed: %w", generation, err)
 	}
 	return nil
 }
@@ -226,6 +256,10 @@ func (executor *OperatorExecutor) TransitionSyncedTableField(
 	}
 
 	physicalRelation := quoteIdentifier(registration.physicalSchema) + "." + quoteIdentifier(registration.physicalRelation)
+	var nonempty bool
+	if err := transaction.QueryRowContext(ctx, "SELECT EXISTS (SELECT 1 FROM "+physicalRelation+")").Scan(&nonempty); err != nil {
+		return errors.New("read synced schema transition relation state failed")
+	}
 	if removed != "" {
 		if _, err := transaction.ExecContext(ctx, "ALTER TABLE "+physicalRelation+" DROP COLUMN "+quoteIdentifier(removed)); err != nil {
 			return errors.New("drop synced schema transition field failed")
@@ -291,7 +325,7 @@ func (executor *OperatorExecutor) TransitionSyncedTableField(
 		return errors.New("commit synced schema transition failed")
 	}
 	committed = true
-	return nil
+	return executor.bootstrapStagedTransition(ctx, database, added != "" || typeChanged != "", nonempty)
 }
 
 func transitionSchemaColumns(columns []string, removed, added string) []string {
