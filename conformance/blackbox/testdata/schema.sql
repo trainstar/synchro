@@ -10,7 +10,9 @@ CREATE TABLE cf_global_items (
 
 CREATE TABLE cf_items (
     id UUID PRIMARY KEY,
-    owner_id TEXT NOT NULL,
+    -- The authored corpus never authors ownership. A push materializes it
+    -- from the extension's push identity context, issue #42.
+    owner_id TEXT NOT NULL DEFAULT current_setting('synchro.user_id', true),
     value TEXT NOT NULL,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
     deleted_at TIMESTAMPTZ
@@ -70,9 +72,11 @@ CREATE INDEX cf_document_notes_document_id_idx ON cf_document_notes (document_id
 
 CREATE TABLE cf_schema_queue (
     id UUID PRIMARY KEY,
-    owner_id TEXT NOT NULL,
+    owner_id TEXT NOT NULL DEFAULT current_setting('synchro.user_id', true),
     authored_mutation JSONB NOT NULL,
-    legacy_value TEXT NOT NULL,
+    -- The authored registration declares default "" for this field, so the
+    -- realization carries the same default.
+    legacy_value TEXT NOT NULL DEFAULT '',
     updated_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
     deleted_at TIMESTAMPTZ
 );

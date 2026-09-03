@@ -2901,7 +2901,6 @@ BEGIN
 		  AND attname = 'legacy_value'
 	) THEN
 		ALTER TABLE public.cf_schema_queue ADD COLUMN legacy_value TEXT NOT NULL DEFAULT '';
-		ALTER TABLE public.cf_schema_queue ALTER COLUMN legacy_value DROP DEFAULT;
 	END IF;
 END $$`)
 }
