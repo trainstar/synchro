@@ -3239,7 +3239,7 @@
             let registration = crate::registry::active_registration_for_logical_name(
                 client,
                 active_generation,
-                "public.test_orders",
+                "test_orders",
             )?
             .expect("active orders registration");
             crate::registry::validate_loaded_registration(client, &registration)
