@@ -653,8 +653,18 @@ func (c *QueueReplayCoordinator) acceptResultLocked(raw json.RawMessage) error {
 		return nil
 	}
 	envelope, err := decodeResultEnvelope(raw)
-	if err != nil || envelope.Outcome != "passed" {
-		return errInvalidExchange
+	if err != nil {
+		return fmt.Errorf("React Native queue-replay result envelope: %w", err)
+	}
+	if envelope.Outcome != "passed" {
+		code, detail := "<none>", "<none>"
+		if envelope.ErrorCode != nil {
+			code = *envelope.ErrorCode
+		}
+		if envelope.ErrorDetail != nil {
+			detail = *envelope.ErrorDetail
+		}
+		return fmt.Errorf("React Native queue-replay command failed: code=%s detail=%s", code, detail)
 	}
 	switch c.stage {
 	case queueReplayStageOpened:
