@@ -84,7 +84,9 @@ private func runPackagedSmoke(
             authProvider: { config.token },
             clientID: config.clientID,
             platform: config.platform,
-            appVersion: "0.3.0",
+            // The application version, not the package version. The test
+            // adapter gates clients below MIN_CLIENT_VERSION 1.0.0.
+            appVersion: "1.0.0",
             syncInterval: 3_600,
             pushDebounce: 3_600,
             maxRetryAttempts: 1,
