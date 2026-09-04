@@ -643,7 +643,14 @@ func (c *QueueReplayCoordinator) dropProxyResponse(writer http.ResponseWriter) e
 		return err
 	}
 	defer connection.Close()
-	// An invalid response makes the Android HTTP client record the transport failure.
+	// The two HTTP clients need opposite drops. A bare close makes the
+	// Android client repeat the request silently, so Android receives an
+	// invalid response and records the failure. The iOS client parses any
+	// invalid status line as an HTTP/0.9 success, so iOS receives the bare
+	// close and records the connection loss as retryable.
+	if c.config.Platform == "ios" {
+		return nil
+	}
 	_, err = connection.Write([]byte("SYNCHRO RESPONSE LOSS\r\n\r\n"))
 	return err
 }

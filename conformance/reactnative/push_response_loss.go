@@ -1248,9 +1248,15 @@ func (c *PushResponseLossCoordinator) loseInitialResponse(writer http.ResponseWr
 		c.recordProxyFailure(err)
 		return
 	}
-	// A bare close lets the Android HTTP client repeat the request before it records the failure.
-	if _, err := connection.Write([]byte("SYNCHRO RESPONSE LOSS\r\n\r\n")); err != nil {
-		c.recordProxyFailure(err)
+	// The two HTTP clients need opposite drops. A bare close makes the
+	// Android client repeat the request silently, so Android receives an
+	// invalid response and records the failure. The iOS client parses any
+	// invalid status line as an HTTP/0.9 success, so iOS receives the bare
+	// close and records the connection loss as retryable.
+	if c.config.Platform != "ios" {
+		if _, err := connection.Write([]byte("SYNCHRO RESPONSE LOSS\r\n\r\n")); err != nil {
+			c.recordProxyFailure(err)
+		}
 	}
 	_ = connection.Close()
 }
