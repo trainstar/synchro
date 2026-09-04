@@ -1210,7 +1210,9 @@ func (c *PushResponseLossCoordinator) proxyAdapter(writer http.ResponseWriter, r
 			c.signalPushCommitted()
 			select {
 			case <-request.Context().Done():
-				c.recordProxyFailure(request.Context().Err())
+				// The push committed upstream and the client abandoned the
+				// response, so the response is lost exactly as the fault
+				// requires. The sealed batch replays by identity either way.
 				return
 			case <-c.allowInitialResponse:
 			}

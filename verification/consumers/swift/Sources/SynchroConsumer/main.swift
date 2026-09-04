@@ -94,6 +94,10 @@ private func runPackagedSmoke(
 
     if phase == "initial" {
         try await client.start()
+        // start() returns after local recovery and runs the first cycle in
+        // the background, so the server schema is not applied yet. The
+        // customers insert requires that schema.
+        try await client.syncNow()
         let timestamp = ISO8601DateFormatter().string(from: Date())
         _ = try client.execute(
             "INSERT INTO customers (id, user_id, name, balance, is_active, created_at, updated_at) VALUES (?, ?, ?, 0, 1, ?, ?)",

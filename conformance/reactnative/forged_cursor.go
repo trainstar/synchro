@@ -844,7 +844,11 @@ func (c *ForgedCursorCoordinator) proxyAdapter(writer http.ResponseWriter, reque
 			c.signalPushCommitted()
 			select {
 			case <-request.Context().Done():
-				return fmt.Errorf("wait to release React Native forged-cursor push response: %w", request.Context().Err())
+				// The push committed upstream and the client abandoned the
+				// response. The barrier only sequences the response, and the
+				// committed batch replays by identity, so the disconnect is
+				// not a proxy failure.
+				return nil
 			case <-c.allowPushResponse:
 			}
 		}

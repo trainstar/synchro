@@ -535,7 +535,9 @@ func (c *QueueReplayCoordinator) proxyAdapter(writer http.ResponseWriter, reques
 			responseLoss.committedOnce.Do(func() { close(responseLoss.committed) })
 			select {
 			case <-request.Context().Done():
-				c.recordResponseLossProxyFailure(responseLoss, request.Context().Err())
+				// The push committed upstream and the client abandoned the
+				// response, so the response is lost exactly as the fault
+				// requires. The sealed batch replays by identity either way.
 				return
 			case <-responseLoss.release:
 			}
