@@ -472,7 +472,13 @@ func TestQueueReplayFinalCaptureValidatesAuthoredAggregateCounts(t *testing.T) {
 	rejected := make([]string, coordinator.rejectedCount())
 	observations := make([]transportObservation, len(workloads)*2)
 	for index := range observations {
-		observations[index] = transportObservation{Sequence: uint64(index + 1), OperationClass: "push", StatusCode: http.StatusOK}
+		// Each wave records one response-loss attempt without a success
+		// observation and one successful replay.
+		status := http.StatusOK
+		if index%2 == 0 {
+			status = http.StatusBadGateway
+		}
+		observations[index] = transportObservation{Sequence: uint64(index + 1), OperationClass: "push", StatusCode: status}
 	}
 	capture := finalCapture{
 		ClientState: queueReplayFixtureJSON(t, state),

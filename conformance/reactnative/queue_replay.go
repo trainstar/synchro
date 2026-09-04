@@ -1142,8 +1142,12 @@ func (c *QueueReplayCoordinator) validateCaptureAggregate(capture finalCapture) 
 			pushes++
 		}
 	}
-	if pushes != len(c.steps)*2 {
-		return inspectedClientState{}, fmt.Errorf("React Native queue-replay response-loss and replay push trace is invalid: successful pushes=%d want=%d", pushes, len(c.steps)*2)
+	// Each wave seals one batch, its response-loss attempt never yields a
+	// success observation on the device, and the replay resolves the batch
+	// exactly once. The contract bounds identity and durable retry metadata,
+	// not attempt counts, so only the terminal success count is authored.
+	if pushes != len(c.steps) {
+		return inspectedClientState{}, fmt.Errorf("React Native queue-replay replay push trace is invalid: successful pushes=%d want=%d", pushes, len(c.steps))
 	}
 	return state, nil
 }
