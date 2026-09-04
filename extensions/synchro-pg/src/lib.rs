@@ -1578,6 +1578,17 @@ BEGIN
     IF TG_OP = 'DELETE'
        AND EXISTS (
            SELECT 1
+           FROM sync_registry_membership_stages stage
+           WHERE stage.registry_generation::text = NULLIF(
+                     current_setting('synchro.membership_activation_generation', true), ''
+                 )
+             AND stage.state = 'pending'
+       ) THEN
+        RETURN OLD;
+    END IF;
+    IF TG_OP = 'DELETE'
+       AND EXISTS (
+           SELECT 1
            FROM sync_rebuild_sessions session
            WHERE session.session_id = OLD.session_id
              AND (

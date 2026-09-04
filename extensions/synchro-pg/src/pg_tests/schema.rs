@@ -3277,3 +3277,60 @@
         Spi::run("ALTER TABLE test_orders ADD COLUMN rogue TEXT").unwrap();
         loaded_orders_registration_validates(active).expect("unstaged drift must abort");
     }
+
+    // Issue #43: membership activation clears affected rebuild state while
+    // sessions are live, so the child immutability trigger accepts the same
+    // staged-generation authorization as the session trigger.
+    #[pg_test]
+    fn test_membership_activation_clears_live_rebuild_state() {
+        setup_test_tables();
+        Spi::run("SELECT synchro_schema_manifest()").unwrap();
+        Spi::run("INSERT INTO test_orders (user_id, title) VALUES ('user-a', 'kept')").unwrap();
+        let staged = stage_orders_transition(true, true);
+        connect_client(
+            "user-a",
+            json!({
+                "client_id": "client-a",
+                "platform": "ios",
+                "app_version": "1.0.0",
+                "protocol_version": 3,
+                "schema": { "version": 0, "hash": "" },
+                "scope_set_version": 0,
+                "known_scopes": {}
+            }),
+        );
+        Spi::run(
+            "INSERT INTO sync_rebuild_sessions (
+                 user_id, client_id, rebuild_id, scope_id, client_generation,
+                 schema_version, schema_hash, stream_generation,
+                 membership_generation, retention_generation,
+                 boundary_position_kind, accepted_write_epoch, page_limit,
+                 snapshot_checksum, staged_row_count
+             ) VALUES (
+                 'user-a', 'client-a', '44444444-4444-4444-4444-444444444444',
+                 'user:user-a', 1, 1, repeat('a', 64), 'sg-1', 1, 1,
+                 'generation_start', 1, 10, decode(repeat('ab', 32), 'hex'), 0
+             )",
+        )
+        .unwrap();
+        Spi::run(
+            "INSERT INTO sync_rebuild_pages (session_id, next_row_ordinal, response)
+             SELECT session_id, 0, '{}'::jsonb
+             FROM sync_rebuild_sessions
+             WHERE rebuild_id = '44444444-4444-4444-4444-444444444444'",
+        )
+        .unwrap();
+        Spi::connect_mut(|client| {
+            crate::materialize::invalidate_affected_membership_generation(
+                client,
+                &["user:user-a".to_string()],
+                staged,
+            )
+        })
+        .expect("membership activation clears live rebuild state");
+        let remaining: Option<i64> =
+            Spi::get_one("SELECT count(*) FROM sync_rebuild_sessions").unwrap();
+        assert_eq!(remaining, Some(0));
+        let pages: Option<i64> = Spi::get_one("SELECT count(*) FROM sync_rebuild_pages").unwrap();
+        assert_eq!(pages, Some(0));
+    }
