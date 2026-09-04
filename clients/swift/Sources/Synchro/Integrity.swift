@@ -13,13 +13,24 @@ package enum Integrity {
     private static let scopeDigestDomain = Data("synchro:v3:scope-digest:v1\0".utf8)
     private static let schemaManifestDomain = Data("synchro:v3:schema-manifest:v1\0".utf8)
 
+    // A Formatter allocation for each byte dominates hex encoding, and state
+    // inspection encodes every retained row identity and checksum.
+    private static let hexDigits = Array("0123456789abcdef".utf8)
+    static func hexString<S: Sequence>(_ bytes: S) -> String where S.Element == UInt8 {
+        var output = [UInt8]()
+        output.reserveCapacity(64)
+        for byte in bytes {
+            output.append(Self.hexDigits[Int(byte >> 4)])
+            output.append(Self.hexDigits[Int(byte & 0x0f)])
+        }
+        return String(decoding: output, as: UTF8.self)
+    }
+
     static func sha256Hex(domain: String, data: Data) -> String {
         var preimage = Data(domain.utf8)
         preimage.append(0)
         preimage.append(data)
-        return SHA256.hash(data: preimage)
-            .map { String(format: "%02x", $0) }
-            .joined()
+        return hexString(SHA256.hash(data: preimage))
     }
 
     static func schemaManifestHash(_ manifest: SchemaManifest) throws -> String {
@@ -78,7 +89,7 @@ package enum Integrity {
         }
         var preimage = schemaManifestDomain
         preimage.append(try canonicalJSON(source))
-        return SHA256.hash(data: preimage).map { String(format: "%02x", $0) }.joined()
+        return hexString(SHA256.hash(data: preimage))
     }
 
     static func rowIdentity(table: LocalSchemaTable, pk: [String: AnyCodable]) throws -> Data {
@@ -224,7 +235,7 @@ package enum Integrity {
         var bytes = Array(SHA256.hash(data: input).prefix(16))
         bytes[6] = (bytes[6] & 0x0f) | 0x50
         bytes[8] = (bytes[8] & 0x3f) | 0x80
-        let hex = bytes.map { String(format: "%02x", $0) }.joined()
+        let hex = hexString(bytes)
         return "\(hex.prefix(8))-\(hex.dropFirst(8).prefix(4))-\(hex.dropFirst(12).prefix(4))-\(hex.dropFirst(16).prefix(4))-\(hex.dropFirst(20))"
     }
 
@@ -794,7 +805,7 @@ package enum Integrity {
     }
 
     private static func checksum(_ digest: SHA256.Digest) -> ChecksumObject {
-        ChecksumObject(algorithm: "sha256", version: 1, encoding: "hex", digest: digest.map { String(format: "%02x", $0) }.joined())
+        ChecksumObject(algorithm: "sha256", version: 1, encoding: "hex", digest: hexString(digest))
     }
 
     private static func appendText(_ value: String, to data: inout Data) {

@@ -686,7 +686,7 @@ public final class SynchroClient: @unchecked Sendable {
     }
 
     private static func hexString(_ value: Data) -> String {
-        value.map { String(format: "%02x", $0) }.joined()
+        Integrity.hexString(value)
     }
 
     private static func checksumKey(_ value: ChecksumObject) -> String {

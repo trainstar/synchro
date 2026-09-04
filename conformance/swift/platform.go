@@ -1796,7 +1796,9 @@ func captureRunner(ctx context.Context, state *platformClient) (runnerResult, er
 func captureRunnerBatch(ctx context.Context, state *platformClient, selectors []runnerRowSelector) (runnerResult, error) {
 	result, err := state.session.Execute(ctx, Request{Operation: "capture", RowSelectors: selectors})
 	if err != nil {
-		return runnerResult{}, fmt.Errorf("capture Swift runner state: %w", err)
+		// The runner reports its underlying failure on stderr, and losing
+		// that cause costs one full gate run to learn it again.
+		return runnerResult{}, fmt.Errorf("capture Swift runner state: %w (runner reported: %s)", err, state.session.stderrReport())
 	}
 	if err := validateCaptureResult(result); err != nil {
 		return runnerResult{}, err

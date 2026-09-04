@@ -458,7 +458,7 @@ public final class TransportObservationCollector: @unchecked Sendable {
     }
 
     static func cursorFingerprint(_ cursor: String) -> String {
-        SHA256.hash(data: Data(cursor.utf8)).map { String(format: "%02x", $0) }.joined()
+        Integrity.hexString(SHA256.hash(data: Data(cursor.utf8)))
     }
 
     @discardableResult
