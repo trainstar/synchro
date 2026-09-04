@@ -1432,6 +1432,7 @@ test-client-platforms:
 	@set -eu; \
 		$(WARM_CONNECT_ENV) \
 		export SYNCHRO_TEST_URL="$(SYNCHRO_TEST_URL)"; \
+		export SYNCHRO_TEST_JWT_SECRET="$(SYNCHRO_TEST_JWT_SECRET)"; \
 		export PACKAGED_SMOKE_CELL_ID="$(SUPPORT_CELL_ID)"; \
 		export PACKAGED_SMOKE_CELL_RESULT="$(PACKAGED_SMOKE_CELL_DIR)/$(SUPPORT_CELL_ID).json"; \
 		case "$(SUPPORT_CELL_ID)" in \
