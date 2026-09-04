@@ -85,6 +85,9 @@ type ForgedCursorCoordinator struct {
 	database    string
 	transport   *http.Client
 
+	timelineMu sync.Mutex
+	timeline   []string
+
 	proxyMu                   sync.Mutex
 	rebuildRequests           uint64
 	rebuildResponses          [2]forgedCursorRebuildResponse
@@ -649,7 +652,10 @@ func (c *ForgedCursorCoordinator) Result() (ForgedCursorCoordinatorResult, error
 		return ForgedCursorCoordinatorResult{}, c.failed
 	}
 	if !c.completed {
-		return ForgedCursorCoordinatorResult{}, fmt.Errorf("React Native forged-cursor coordinator completed=%t stage=%d", c.completed, c.stage)
+		c.timelineMu.Lock()
+		timeline := strings.Join(c.timeline, "; ")
+		c.timelineMu.Unlock()
+		return ForgedCursorCoordinatorResult{}, fmt.Errorf("React Native forged-cursor coordinator completed=%t stage=%d timeline=[%s]", c.completed, c.stage, timeline)
 	}
 	return c.result, nil
 }
@@ -847,7 +853,9 @@ func (c *ForgedCursorCoordinator) proxyAdapter(writer http.ResponseWriter, reque
 			// cancellation while the client still reads. The barrier waits
 			// for the coordinated release only, so the response is delivered
 			// in sequence to a connected client.
+			c.mark("push hold begins")
 			<-c.allowPushResponse
+			c.mark("push hold ends, response delivery begins")
 		}
 		return nil
 	}
@@ -916,15 +924,26 @@ func (c *ForgedCursorCoordinator) recordProxyFailure(err error) {
 	c.signalForgedPageReady()
 }
 
+// mark records one timestamped timeline entry. The final coordinator error
+// reports the timeline, because a stalled stage is invisible otherwise.
+func (c *ForgedCursorCoordinator) mark(format string, values ...any) {
+	c.timelineMu.Lock()
+	c.timeline = append(c.timeline, time.Now().Format("15:04:05.000")+" "+fmt.Sprintf(format, values...))
+	c.timelineMu.Unlock()
+}
+
 func (c *ForgedCursorCoordinator) signalFirstPageReady() {
+	c.mark("first page ready")
 	c.firstPageReadyOnce.Do(func() { close(c.firstPageReady) })
 }
 
 func (c *ForgedCursorCoordinator) signalPushCommitted() {
+	c.mark("push committed")
 	c.pushCommittedOnce.Do(func() { close(c.pushCommitted) })
 }
 
 func (c *ForgedCursorCoordinator) signalForgedPageReady() {
+	c.mark("forged page ready")
 	c.forgedPageReadyOnce.Do(func() { close(c.forgedPageReady) })
 }
 
@@ -933,6 +952,7 @@ func (c *ForgedCursorCoordinator) releaseForgedPage() {
 }
 
 func (c *ForgedCursorCoordinator) releasePushResponse() {
+	c.mark("push response released")
 	c.allowPushOnce.Do(func() { close(c.allowPushResponse) })
 }
 
@@ -1190,6 +1210,7 @@ func boundedRaw(raw json.RawMessage) string {
 }
 
 func (c *ForgedCursorCoordinator) advanceLocked(ctx context.Context, sequence uint64) (forgedCursorExchangeResponse, error) {
+	c.mark("exchange %d arrives at stage %d", sequence, c.stage)
 	response := forgedCursorExchangeResponse{SchemaVersion: 1, Sequence: sequence, State: "command"}
 	switch c.stage {
 	case forgedCursorStageOpen:
