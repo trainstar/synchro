@@ -71,6 +71,9 @@ final class SchemaManagerTests: XCTestCase {
     private var standardColumns: [SchemaColumn] {
         [
             makeColumn(name: "id", dbType: "uuid", logicalType: "string", nullable: false, isPrimaryKey: true),
+            // A synced table with no writable column accepts no insert, so the
+            // fixture carries one authored column like every real registration.
+            makeColumn(name: "title", dbType: "text", logicalType: "string", nullable: true),
             makeColumn(name: "updated_at", dbType: "timestamp with time zone", logicalType: "datetime", nullable: false),
             makeColumn(name: "deleted_at", dbType: "timestamp with time zone", logicalType: "datetime", nullable: true),
         ]
@@ -361,7 +364,7 @@ final class SchemaManagerTests: XCTestCase {
             try connection.execute(sql: "ALTER TABLE orders ADD COLUMN extra_data TEXT")
         }
         _ = try db.execute(
-            "INSERT INTO orders (id, updated_at, extra_data) VALUES ('o1', '2026-01-01T00:00:00Z', 'local-stuff')",
+            "INSERT INTO orders (id, title, updated_at, extra_data) VALUES ('o1', 'first', '2026-01-01T00:00:00Z', 'local-stuff')",
             params: nil
         )
 
@@ -394,11 +397,11 @@ final class SchemaManagerTests: XCTestCase {
         try manager.createSyncedTables(schema: v1)
 
         _ = try db.execute(
-            "INSERT INTO orders (id, updated_at) VALUES ('o1', '2026-01-01T00:00:00Z')",
+            "INSERT INTO orders (id, title, updated_at) VALUES ('o1', 'first', '2026-01-01T00:00:00Z')",
             params: nil
         )
         _ = try db.execute(
-            "INSERT INTO orders (id, updated_at) VALUES ('o2', '2026-01-02T00:00:00Z')",
+            "INSERT INTO orders (id, title, updated_at) VALUES ('o2', 'second', '2026-01-02T00:00:00Z')",
             params: nil
         )
 
@@ -460,7 +463,7 @@ final class SchemaManagerTests: XCTestCase {
         try manager.createSyncedTables(schema: v1)
 
         _ = try db.execute(
-            "INSERT INTO orders (id, updated_at) VALUES ('o1', '2026-01-01T00:00:00Z')",
+            "INSERT INTO orders (id, title, updated_at) VALUES ('o1', 'first', '2026-01-01T00:00:00Z')",
             params: nil
         )
 
@@ -558,7 +561,7 @@ final class SchemaManagerTests: XCTestCase {
         try manager.createSyncedTables(schema: v1)
 
         _ = try db.execute(
-            "INSERT INTO orders (id, updated_at) VALUES ('o1', '2026-01-01T00:00:00Z')",
+            "INSERT INTO orders (id, title, updated_at) VALUES ('o1', 'first', '2026-01-01T00:00:00Z')",
             params: nil
         )
         _ = try db.execute(
@@ -594,15 +597,15 @@ final class SchemaManagerTests: XCTestCase {
         // Simulates a stale seed database that has "orders" with [id, updated_at, deleted_at]
         // but the server schema now also requires "description".
         _ = try db.execute(
-            "CREATE TABLE orders (id TEXT PRIMARY KEY, updated_at TEXT NOT NULL, deleted_at TEXT)",
+            "CREATE TABLE orders (id TEXT PRIMARY KEY, title TEXT, updated_at TEXT NOT NULL, deleted_at TEXT)",
             params: nil
         )
         _ = try db.execute(
-            "INSERT INTO orders (id, updated_at) VALUES ('seed-1', '2025-12-01T00:00:00Z')",
+            "INSERT INTO orders (id, title, updated_at) VALUES ('seed-1', 'first', '2025-12-01T00:00:00Z')",
             params: nil
         )
         _ = try db.execute(
-            "INSERT INTO orders (id, updated_at) VALUES ('seed-2', '2025-12-02T00:00:00Z')",
+            "INSERT INTO orders (id, title, updated_at) VALUES ('seed-2', 'second', '2025-12-02T00:00:00Z')",
             params: nil
         )
 

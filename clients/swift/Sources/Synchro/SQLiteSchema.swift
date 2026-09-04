@@ -92,8 +92,45 @@ enum SQLiteSchema {
             return "NOT (NEW.\(quotedColumn) IS OLD.\(quotedColumn))"
         }
 
+        // The capture context matches physical identifiers because the write
+        // author knows table and column names, not wire field IDs. Issue #42.
+        func intentHas(_ columnName: String) -> String {
+            """
+            EXISTS (
+                SELECT 1
+                FROM _synchro_capture_context AS context
+                JOIN _synchro_capture_fields AS field
+                  ON field.statement_token = context.statement_token
+                 AND field.table_name = context.table_name
+                WHERE context.table_name = \(sqlLiteral(safeName))
+                  AND field.column_name = \(sqlLiteral(columnName))
+            )
+            """.replacingOccurrences(of: "\n", with: " ")
+        }
+
         let writableColumns = table.columns.filter(\.writable)
-        let updateHasWritableChange = writableColumns.map(changedExpression).joined(separator: " OR ")
+        let intentHasWritable: String
+        if writableColumns.isEmpty {
+            intentHasWritable = "0"
+        } else {
+            let writableNames = writableColumns
+                .map { sqlLiteral($0.name) }
+                .joined(separator: ", ")
+            intentHasWritable = """
+                EXISTS (
+                    SELECT 1
+                    FROM _synchro_capture_context AS context
+                    JOIN _synchro_capture_fields AS field
+                      ON field.statement_token = context.statement_token
+                     AND field.table_name = context.table_name
+                    WHERE context.table_name = \(sqlLiteral(safeName))
+                      AND field.column_name IN (\(writableNames))
+                )
+                """.replacingOccurrences(of: "\n", with: " ")
+        }
+        let updateHasWritableChange = writableColumns
+            .map { "((\(intentHas($0.name))) AND \(changedExpression($0)))" }
+            .joined(separator: " OR ")
         let updateIsDelete = !deletedAtCol.isEmpty
             ? "(NEW.\(quotedDeletedAt) IS NOT NULL AND OLD.\(quotedDeletedAt) IS NULL)"
             : "0"
@@ -198,15 +235,20 @@ enum SQLiteSchema {
         triggers.append("DROP TRIGGER IF EXISTS \(quotedUpdateTrigger)")
         triggers.append("DROP TRIGGER IF EXISTS \(quotedDeleteTrigger)")
 
-        // INSERT trigger
+        // INSERT trigger. Inserts have no server base, and they retain every
+        // authored writable column the capture context names.
+        let insertIntentGuard = writableColumns.isEmpty
+            ? "SELECT RAISE(ABORT, 'synced insert has no writable fields');"
+            : "SELECT CASE WHEN NOT (\(intentHasWritable)) THEN RAISE(ABORT, 'synced insert has no authored writable fields') END;"
         triggers.append("""
             CREATE TRIGGER \(quotedInsertTrigger)
             AFTER INSERT ON \(quoted)
             WHEN \(lockCheck)
             BEGIN
                 \(schemaGuard)
+                \(insertIntentGuard)
                 \(insertLedger(operation: "insert", captureCondition: "1", baseVersion: "NULL", recordReference: "NEW.\(quotedPK)") )
-                \(writableColumns.map { valueInsert($0, changed: nil) }.joined())
+                \(writableColumns.map { valueInsert($0, changed: intentHas($0.name)) }.joined())
             END
             """)
 
@@ -225,7 +267,7 @@ enum SQLiteSchema {
                     baseVersion: "CASE WHEN \(dependencyExpression(recordReference: "NEW.\(quotedPK)")) IS NOT NULL THEN NULL ELSE (SELECT server_version FROM _synchro_row_versions WHERE table_name = \(sqlLiteral(name)) AND record_id = CAST(NEW.\(quotedPK) AS TEXT)) END",
                     recordReference: "NEW.\(quotedPK)"
                 ))
-                \(writableColumns.map { valueInsert($0, changed: changedExpression($0)) }.joined())
+                \(writableColumns.map { valueInsert($0, changed: "(\(intentHas($0.name))) AND \(changedExpression($0))") }.joined())
             END
             """)
 

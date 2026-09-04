@@ -64,6 +64,37 @@ public final class SynchroClient: @unchecked Sendable {
         try database.applicationWriteTransaction(block)
     }
 
+    /// Runs one write transaction whose capture retains only the named
+    /// authored columns of the named table. A runtime support column the
+    /// statement also writes stays out of the captured payload.
+    public func authoredWriteTransaction<T>(
+        tableName: String,
+        operation: String,
+        columnNames: [String],
+        _ block: (ApplicationTransaction) throws -> T
+    ) throws -> T {
+        try database.applicationAuthoredWriteTransaction(
+            tableName: tableName,
+            operation: operation,
+            columnNames: columnNames,
+            block
+        )
+    }
+
+    public func authoredWriteTransaction<T>(
+        tableName: String,
+        operation: Operation,
+        columnNames: [String],
+        _ block: (ApplicationTransaction) throws -> T
+    ) throws -> T {
+        try authoredWriteTransaction(
+            tableName: tableName,
+            operation: operation.rawValue,
+            columnNames: columnNames,
+            block
+        )
+    }
+
     // MARK: - Prepared Statements
 
     public func withPreparedStatement<T>(_ sql: String, _ block: (Statement) throws -> T) throws -> T {

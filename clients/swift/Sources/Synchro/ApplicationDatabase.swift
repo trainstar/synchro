@@ -76,6 +76,7 @@ final class ApplicationSQLPolicy: @unchecked Sendable {
     private struct State {
         var syncedTables: Set<String> = []
         var captureTriggers: Set<String> = []
+        var captureContextWindowDepth = 0
     }
 
     private let state = NSLock()
@@ -91,6 +92,21 @@ final class ApplicationSQLPolicy: @unchecked Sendable {
                 "_synchro_cdc_delete_\(table.tableName)",
             ].map(normalized)
         })
+        state.unlock()
+    }
+
+    /// The SDK writes the capture context rows itself, and the reserved-table
+    /// rule would deny that. The window opens only around the SDK's own
+    /// install and clear statements on the serial application queue.
+    func openCaptureContextWindow() {
+        state.lock()
+        protectedState.captureContextWindowDepth += 1
+        state.unlock()
+    }
+
+    func closeCaptureContextWindow() {
+        state.lock()
+        protectedState.captureContextWindowDepth -= 1
         state.unlock()
     }
 
@@ -125,6 +141,9 @@ final class ApplicationSQLPolicy: @unchecked Sendable {
             if isSQLiteCatalog(target) {
                 // SQLite emits catalog writes for authorized DDL. Direct catalog
                 // writes remain unavailable because writable_schema is denied.
+                return SQLITE_OK
+            }
+            if isCaptureContextTable(target), snapshot.captureContextWindowDepth > 0 {
                 return SQLITE_OK
             }
             guard isReserved(target) else { return SQLITE_OK }
@@ -203,6 +222,15 @@ final class ApplicationSQLPolicy: @unchecked Sendable {
             || name == "_grdb_migrations"
     }
 
+    private func isCaptureContextTable(_ name: String) -> Bool {
+        switch normalized(name) {
+        case "_synchro_capture_context", "_synchro_capture_fields":
+            return true
+        default:
+            return false
+        }
+    }
+
     private func isSQLiteCatalog(_ name: String) -> Bool {
         switch normalized(name) {
         case "sqlite_master", "sqlite_schema", "sqlite_temp_master", "sqlite_temp_schema":
@@ -239,10 +267,24 @@ final class ApplicationSQLPolicy: @unchecked Sendable {
     }
 }
 
+/// The authored capture context for one application write transaction.
+enum ApplicationCaptureContext {
+    /// The application names the table and the columns it authored, and the
+    /// capture triggers retain exactly those columns.
+    case authored(tableName: String, operation: String, columnNames: [String])
+    /// A plain write transaction names no authored set, so every writable
+    /// column of every synced table stays capturable.
+    case defaultForSyncedTables
+}
+
 final class ApplicationDatabase: @unchecked Sendable {
     private let queue: DatabaseQueue
+    private let policy: ApplicationSQLPolicy
+    private let writableColumnsLock = NSLock()
+    private var writableColumnsByTable: [String: [String]] = [:]
 
     init(path: String, policy: ApplicationSQLPolicy) throws {
+        self.policy = policy
         var configuration = Configuration()
         configuration.busyMode = .timeout(5)
         configuration.prepareDatabase { database in
@@ -251,10 +293,78 @@ final class ApplicationDatabase: @unchecked Sendable {
         queue = try DatabaseQueue(path: path, configuration: configuration)
     }
 
+    func updateSyncedWritableColumns(_ tables: [LocalSchemaTable]) {
+        writableColumnsLock.lock()
+        writableColumnsByTable = Dictionary(uniqueKeysWithValues: tables.map { table in
+            (table.tableName, table.columns.filter(\.writable).map(\.name))
+        })
+        writableColumnsLock.unlock()
+    }
+
     func write<T>(_ body: (ApplicationTransaction) throws -> T) throws -> T {
+        try write(context: .defaultForSyncedTables, body)
+    }
+
+    func write<T>(
+        context: ApplicationCaptureContext,
+        _ body: (ApplicationTransaction) throws -> T
+    ) throws -> T {
         try queue.write { database in
-            try body(ApplicationTransaction(database: database))
+            let token = UUID().uuidString
+            policy.openCaptureContextWindow()
+            defer { policy.closeCaptureContextWindow() }
+            try installCaptureContext(context, token: token, database: database)
+            defer { try? clearCaptureContext(token: token, database: database) }
+            return try body(ApplicationTransaction(database: database))
         }
+    }
+
+    private func installCaptureContext(
+        _ context: ApplicationCaptureContext,
+        token: String,
+        database: GRDB.Database
+    ) throws {
+        var rows: [(table: String, operation: String, columns: [String])]
+        switch context {
+        case let .authored(tableName, operation, columnNames):
+            rows = [(tableName, operation, columnNames)]
+        case .defaultForSyncedTables:
+            writableColumnsLock.lock()
+            let tables = writableColumnsByTable
+            writableColumnsLock.unlock()
+            rows = tables
+                .sorted { $0.key < $1.key }
+                .map { ($0.key, "insert", $0.value) }
+        }
+        for row in rows {
+            try database.execute(
+                sql: """
+                    INSERT INTO _synchro_capture_context (statement_token, table_name, operation)
+                    VALUES (?, ?, ?)
+                    """,
+                arguments: [token, row.table, row.operation]
+            )
+            for column in row.columns {
+                try database.execute(
+                    sql: """
+                        INSERT INTO _synchro_capture_fields (statement_token, table_name, column_name)
+                        VALUES (?, ?, ?)
+                        """,
+                    arguments: [token, row.table, column]
+                )
+            }
+        }
+    }
+
+    private func clearCaptureContext(token: String, database: GRDB.Database) throws {
+        try database.execute(
+            sql: "DELETE FROM _synchro_capture_fields WHERE statement_token = ?",
+            arguments: [token]
+        )
+        try database.execute(
+            sql: "DELETE FROM _synchro_capture_context WHERE statement_token = ?",
+            arguments: [token]
+        )
     }
 
     func withPreparedStatement<T>(

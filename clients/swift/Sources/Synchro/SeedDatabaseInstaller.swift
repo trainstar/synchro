@@ -61,6 +61,8 @@ private enum SeedDatabaseValidator {
         "_synchro_meta",
         "_synchro_pending_changes",
         "_synchro_mutation_values",
+        "_synchro_capture_context",
+        "_synchro_capture_fields",
         "_synchro_push_batch_members",
         "_synchro_schema_archive",
         "_synchro_scopes",
@@ -91,11 +93,14 @@ private enum SeedDatabaseValidator {
         "synchro_v11_durable_backoff",
         "synchro_v12_gate2_recovery",
         "synchro_v13_scope_text_affinity",
+        "synchro_v14_capture_context",
     ]
 
     private static let emptyWorkTables = [
         "_synchro_pending_changes",
         "_synchro_mutation_values",
+        "_synchro_capture_context",
+        "_synchro_capture_fields",
         "_synchro_push_batch_members",
         "_synchro_push_batches",
         "_synchro_rejected_mutations",

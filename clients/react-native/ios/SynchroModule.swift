@@ -515,9 +515,9 @@ public class SynchroModuleImpl: NSObject {
 
     @objc
     public func executeAuthoredWrite(
-        _ tableID: String,
+        _ tableName: String,
         operation: String,
-        fieldIDs: [String],
+        columnNames: [String],
         sql: String,
         values: [Any],
         resolve: @escaping RCTPromiseResolveBlock,
@@ -534,9 +534,9 @@ public class SynchroModuleImpl: NSObject {
         do {
             let params = try bridgeParams(values)
             let result = try client.authoredWriteTransaction(
-                tableID: tableID,
+                tableName: tableName,
                 operation: authoredOperation,
-                fieldIDs: fieldIDs
+                columnNames: columnNames
             ) { transaction in
                 try transaction.execute(sql, params: params)
             }

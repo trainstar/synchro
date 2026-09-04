@@ -100,6 +100,7 @@ final class SynchroDatabase: @unchecked Sendable {
         }
         applicationPolicy.updateSyncedTables(storedTables)
         applicationDatabase = try ApplicationDatabase(path: path, policy: applicationPolicy)
+        applicationDatabase.updateSyncedWritableColumns(storedTables)
     }
 
     // MARK: - Queries
@@ -183,6 +184,37 @@ final class SynchroDatabase: @unchecked Sendable {
 
     func updateApplicationSyncedTables(_ tables: [LocalSchemaTable]) {
         applicationPolicy.updateSyncedTables(tables)
+        applicationDatabase.updateSyncedWritableColumns(tables)
+    }
+
+    func applicationAuthoredWriteTransaction<T>(
+        tableName: String,
+        operation: String,
+        columnNames: [String],
+        _ block: (ApplicationTransaction) throws -> T
+    ) throws -> T {
+        guard ["insert", "update", "delete"].contains(operation.lowercased()) else {
+            throw SynchroError.invalidResponse(message: "authored write operation is invalid")
+        }
+        guard !tableName.isEmpty else {
+            throw SynchroError.invalidResponse(message: "authored write table name must not be empty")
+        }
+        guard columnNames.allSatisfy({ !$0.isEmpty }) else {
+            throw SynchroError.invalidResponse(message: "authored write column names must not be empty")
+        }
+        guard Set(columnNames).count == columnNames.count else {
+            throw SynchroError.invalidResponse(message: "authored write column names must be unique")
+        }
+        let result = try applicationDatabase.write(
+            context: .authored(
+                tableName: tableName,
+                operation: operation.lowercased(),
+                columnNames: columnNames
+            ),
+            block
+        )
+        notifyDatabaseChange()
+        return result
     }
 
     // MARK: - Batch
@@ -799,6 +831,40 @@ final class SynchroDatabase: @unchecked Sendable {
                 CREATE INDEX idx_synchro_scope_rows_record
                 ON _synchro_scope_rows (table_name, record_id)
                 """)
+        }
+        migrator.registerMigration("synchro_v14_capture_context") { db in
+            try db.execute(sql: """
+                CREATE TABLE IF NOT EXISTS _synchro_capture_context (
+                    statement_token TEXT NOT NULL,
+                    table_name TEXT NOT NULL,
+                    operation TEXT NOT NULL CHECK (operation IN ('insert', 'update', 'delete')),
+                    PRIMARY KEY (statement_token, table_name)
+                ) WITHOUT ROWID
+                """)
+            try db.execute(sql: """
+                CREATE TABLE IF NOT EXISTS _synchro_capture_fields (
+                    statement_token TEXT NOT NULL,
+                    table_name TEXT NOT NULL,
+                    column_name TEXT NOT NULL,
+                    PRIMARY KEY (statement_token, table_name, column_name)
+                ) WITHOUT ROWID
+                """)
+            // Live capture triggers predate the context predicates, so a
+            // verified installed schema regenerates its trigger set.
+            if let schemaVersionText = try SynchroMeta.get(db, key: .schemaVersion),
+               let schemaVersion = Int64(schemaVersionText),
+               schemaVersion > 0,
+               let schemaHash = try SynchroMeta.get(db, key: .schemaHash),
+               !schemaHash.isEmpty,
+               let localSchemaJSON = try SynchroMeta.get(db, key: .localSchema),
+               let localSchemaData = localSchemaJSON.data(using: .utf8),
+               let localTables = try? JSONDecoder().decode([LocalSchemaTable].self, from: localSchemaData) {
+                for table in localTables {
+                    for trigger in SQLiteSchema.generateCDCTriggers(table: table) {
+                        try db.execute(sql: trigger)
+                    }
+                }
+            }
         }
         try migrator.migrate(dbPool)
     }
