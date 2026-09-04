@@ -124,6 +124,10 @@ async function executeCommand(command: Record<string, unknown>): Promise<string>
     // A reuse open is the coordinator's process-restart boundary. Keep the
     // database while replacing the application process before opening it.
     await device.launchApp({ newInstance: true, delete: false, launchArgs: { synchroConformance: '1' } });
+    // The coordinator holds sync responses on purpose, and Detox on iOS
+    // waits for network idle before each UI action. The held request must
+    // not count toward idleness or every UI step stalls behind it.
+    await device.setURLBlacklist(['.*127\\.0\\.0\\.1.*', '.*localhost.*']);
     await expect(element(by.id('conformance-harness'))).toBeVisible();
   }
   const serialized = JSON.stringify(command);
@@ -156,6 +160,10 @@ async function executeCommand(command: Record<string, unknown>): Promise<string>
 it('executes the queue-replay coordinator sequence', async () => {
   const { endpoint, token, stageCount } = coordinatorConfiguration();
   await device.launchApp({ newInstance: true, delete: true, launchArgs: { synchroConformance: '1' } });
+  // The coordinator holds sync responses on purpose, and Detox on iOS
+  // waits for network idle before each UI action. The held request must
+  // not count toward idleness or every UI step stalls behind it.
+  await device.setURLBlacklist(['.*127\\.0\\.0\\.1.*', '.*localhost.*']);
   await expect(element(by.id('conformance-harness'))).toBeVisible();
   let rawResult = 'null';
   let commandCount = 0;

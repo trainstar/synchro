@@ -165,6 +165,10 @@ it('executes the push-response-loss coordinator sequence', async () => {
     delete: true,
     launchArgs: { synchroConformance: '1' },
   });
+  // The coordinator holds sync responses on purpose, and Detox on iOS
+  // waits for network idle before each UI action. The held request must
+  // not count toward idleness or every UI step stalls behind it.
+  await device.setURLBlacklist(['.*127\\.0\\.0\\.1.*', '.*localhost.*']);
   await expect(element(by.id('conformance-harness'))).toBeVisible();
 
   let rawResult = 'null';
