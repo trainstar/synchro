@@ -529,6 +529,9 @@ export class PublicConformanceRunner {
     session.client = client;
     session.inspection = inspection;
     session.unsubscribeEvents = client.onSyncEvent((event) => {
+      // The console line reaches the device log, so a stalled engine names
+      // its state transitions with timestamps during a device-log capture.
+      console.log(`synchro-conformance event ${clientKey}: ${JSON.stringify(event)}`);
       if (session.events.length >= MAXIMUM_EVENTS) {
         session.events.shift();
       }
