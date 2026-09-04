@@ -208,6 +208,7 @@ private struct LocalActionPayload: Decodable {
     let primaryKeyField: String
     let primaryKey: RunnerJSONValue
     let fields: [String: RunnerJSONValue]
+    let authoredColumns: [String]
 
     enum CodingKeys: String, CodingKey, CaseIterable {
         case operation
@@ -215,6 +216,7 @@ private struct LocalActionPayload: Decodable {
         case primaryKeyField = "primary_key_field"
         case primaryKey = "primary_key"
         case fields
+        case authoredColumns = "authored_columns"
     }
 
     init(from decoder: Decoder) throws {
@@ -233,6 +235,7 @@ private struct LocalActionPayload: Decodable {
         primaryKeyField = try container.decode(String.self, forKey: .primaryKeyField)
         primaryKey = try container.decode(RunnerJSONValue.self, forKey: .primaryKey)
         fields = try container.decode([String: RunnerJSONValue].self, forKey: .fields)
+        authoredColumns = try container.decode([String].self, forKey: .authoredColumns)
     }
 }
 
@@ -991,6 +994,12 @@ private final class Runner: @unchecked Sendable {
                 throw RunnerError.invalidCommand
             }
         }
+        // The authored columns bound the capture context, so an injected
+        // runtime support value stays out of the captured payload.
+        guard Set(payload.authoredColumns).count == payload.authoredColumns.count,
+              payload.authoredColumns.allSatisfy({ fields[$0] != nil }) else {
+            throw RunnerError.invalidCommand
+        }
         let result: ExecResult
         switch payload.operation {
         case .insert:
@@ -1000,7 +1009,11 @@ private final class Runner: @unchecked Sendable {
             let columns = ([primaryKeyField] + orderedFields.map { $0.0 }).joined(separator: ", ")
             let placeholders = Array(repeating: "?", count: orderedFields.count + 1).joined(separator: ", ")
             let values = [primaryKey] + orderedFields.map { $0.1.databaseValue() }
-            result = try client.writeTransaction { transaction in
+            result = try client.authoredWriteTransaction(
+                tableName: payload.tableName,
+                operation: "insert",
+                columnNames: payload.authoredColumns
+            ) { transaction in
                 try transaction.execute(
                     "INSERT INTO \(table) (\(columns)) VALUES (\(placeholders))",
                     params: values
@@ -1015,7 +1028,11 @@ private final class Runner: @unchecked Sendable {
             }
             let assignments = orderedFields.map { "\($0.0) = ?" }.joined(separator: ", ")
             let values = orderedFields.map { $0.1.databaseValue() } + [primaryKey]
-            result = try client.writeTransaction { transaction in
+            result = try client.authoredWriteTransaction(
+                tableName: payload.tableName,
+                operation: "update",
+                columnNames: payload.authoredColumns
+            ) { transaction in
                 try transaction.execute(
                     "UPDATE \(table) SET \(assignments) WHERE \(primaryKeyField) = ?",
                     params: values
@@ -1025,7 +1042,11 @@ private final class Runner: @unchecked Sendable {
             guard fields.isEmpty else {
                 throw RunnerError.invalidCommand
             }
-            result = try client.writeTransaction { transaction in
+            result = try client.authoredWriteTransaction(
+                tableName: payload.tableName,
+                operation: "delete",
+                columnNames: payload.authoredColumns
+            ) { transaction in
                 try transaction.execute(
                     "DELETE FROM \(table) WHERE \(primaryKeyField) = ?",
                     params: [primaryKey]

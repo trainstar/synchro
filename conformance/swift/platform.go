@@ -2214,11 +2214,11 @@ func decodeLocalWrite(operation scenarios.Operation, client Client) (runnerLocal
 	if err != nil {
 		return runnerLocalAction{}, runnerRowSelector{}, err
 	}
-	fields, err := decodeColumns(payload["columns"])
+	fields, authoredColumns, err := decodeColumns(payload["columns"])
 	if err != nil {
 		return runnerLocalAction{}, runnerRowSelector{}, err
 	}
-	action := runnerLocalAction{Operation: operationName, TableName: tableName, PrimaryKeyField: primaryKeyField, PrimaryKey: append(json.RawMessage(nil), primaryKey...), Fields: fields}
+	action := runnerLocalAction{Operation: operationName, TableName: tableName, PrimaryKeyField: primaryKeyField, PrimaryKey: append(json.RawMessage(nil), primaryKey...), Fields: fields, AuthoredColumns: authoredColumns}
 	if err := validateRunnerLocalAction(action); err != nil {
 		return runnerLocalAction{}, runnerRowSelector{}, errors.New("Swift local write cannot map to runner action")
 	}
@@ -2274,50 +2274,68 @@ func decodePrimaryKey(raw json.RawMessage) (string, json.RawMessage, error) {
 	return "", nil, errors.New("Swift local write primary key is invalid")
 }
 
-func decodeColumns(raw json.RawMessage) (map[string]json.RawMessage, error) {
+func decodeColumns(raw json.RawMessage) (map[string]json.RawMessage, []string, error) {
 	if len(raw) == 0 {
-		return map[string]json.RawMessage{}, nil
+		return map[string]json.RawMessage{}, []string{}, nil
 	}
 	trimmed := strings.TrimSpace(string(raw))
 	if strings.HasPrefix(trimmed, "{") {
 		var object map[string]json.RawMessage
 		if err := jsonstrict.Decode(raw, &object); err != nil {
-			return nil, errors.New("Swift local write columns are invalid")
+			return nil, nil, errors.New("Swift local write columns are invalid")
 		}
 		fields := make(map[string]json.RawMessage, len(object))
+		authored := make([]string, 0, len(object))
 		for field, value := range object {
 			if field == "" || validateRunnerLocalJSONValue(value) != nil {
-				return nil, errors.New("Swift local write column is invalid")
+				return nil, nil, errors.New("Swift local write column is invalid")
 			}
 			fields[field] = append(json.RawMessage(nil), value...)
+			authored = append(authored, field)
 		}
-		return fields, nil
+		sort.Strings(authored)
+		return fields, authored, nil
 	}
 	var values []json.RawMessage
 	if err := json.Unmarshal(raw, &values); err != nil {
-		return nil, errors.New("Swift local write columns are invalid")
+		return nil, nil, errors.New("Swift local write columns are invalid")
 	}
 	fields := make(map[string]json.RawMessage, len(values))
+	authored := make([]string, 0, len(values))
 	for _, value := range values {
 		var object map[string]json.RawMessage
-		if err := jsonstrict.Decode(value, &object); err != nil || len(object) != 2 {
-			return nil, errors.New("Swift local write column shape is invalid")
+		if err := jsonstrict.Decode(value, &object); err != nil || len(object) < 2 || len(object) > 3 {
+			return nil, nil, errors.New("Swift local write column shape is invalid")
 		}
 		fieldRaw, hasField := object["field_id"]
 		fieldValue, hasValue := object["value"]
 		if !hasField || !hasValue {
-			return nil, errors.New("Swift local write column is incomplete")
+			return nil, nil, errors.New("Swift local write column is incomplete")
+		}
+		// The marker separates a runtime support value from an authored
+		// column, so it stays out of the authored capture context.
+		support := false
+		if supportRaw, hasSupport := object["support"]; hasSupport {
+			if json.Unmarshal(supportRaw, &support) != nil || !support {
+				return nil, nil, errors.New("Swift local write support marker is invalid")
+			}
+		} else if len(object) != 2 {
+			return nil, nil, errors.New("Swift local write column shape is invalid")
 		}
 		var field string
 		if err := json.Unmarshal(fieldRaw, &field); err != nil || field == "" || validateRunnerLocalJSONValue(fieldValue) != nil {
-			return nil, errors.New("Swift local write column is invalid")
+			return nil, nil, errors.New("Swift local write column is invalid")
 		}
 		if _, duplicate := fields[field]; duplicate {
-			return nil, errors.New("Swift local write column is duplicated")
+			return nil, nil, errors.New("Swift local write column is duplicated")
 		}
 		fields[field] = append(json.RawMessage(nil), fieldValue...)
+		if !support {
+			authored = append(authored, field)
+		}
 	}
-	return fields, nil
+	sort.Strings(authored)
+	return fields, authored, nil
 }
 
 func (p *Platform) completeWindow(state *platformClient, checkpoint uint64, started time.Time, before, after runnerResult) (operationWindow, error) {

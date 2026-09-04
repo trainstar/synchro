@@ -59,6 +59,10 @@ type runnerLocalAction struct {
 	PrimaryKeyField string                     `json:"primary_key_field"`
 	PrimaryKey      json.RawMessage            `json:"primary_key"`
 	Fields          map[string]json.RawMessage `json:"fields"`
+	// AuthoredColumns lists the supplied columns the application authored.
+	// A controller-injected runtime support column stays out of this list
+	// while the physical statement still writes it.
+	AuthoredColumns []string `json:"authored_columns"`
 }
 
 type runnerRowSelector struct {
@@ -844,6 +848,19 @@ func validateRunnerLocalAction(action runnerLocalAction) error {
 	}
 	if action.Operation == "update" && len(action.Fields) == 0 || action.Operation == "delete" && len(action.Fields) != 0 {
 		return errors.New("runner local-action fields do not match operation")
+	}
+	if action.AuthoredColumns == nil {
+		return errors.New("runner local-action authored columns are missing")
+	}
+	seen := make(map[string]struct{}, len(action.AuthoredColumns))
+	for _, name := range action.AuthoredColumns {
+		if _, found := action.Fields[name]; !found {
+			return errors.New("runner local-action authored column is not a supplied field")
+		}
+		if _, duplicate := seen[name]; duplicate {
+			return errors.New("runner local-action authored column repeats")
+		}
+		seen[name] = struct{}{}
 	}
 	return nil
 }
