@@ -1729,6 +1729,11 @@ private enum Main {
                 }
                 data = encoded
             } catch {
+                // This fallback replaced a response the runner could not emit,
+                // so without this report the harness sees a bounded code and
+                // no cause at all.
+                let detail = (error as? RunnerError)?.detail ?? "runner response encoding failed: \(error)"
+                FileHandle.standardError.write(Data("\(detail)\n".utf8))
                 data = (try? encoder.encode(
                     RunnerResponse(outcome: "error", result: nil, errorCode: "execution_failed")
                 )) ?? Data("{\"error_code\":\"execution_failed\",\"outcome\":\"error\",\"result\":null,\"schema_version\":1}".utf8)
