@@ -75,33 +75,6 @@
       "control_id": null
     },
     {
-      "obligation_id": "OBL-PUSH-RESPONSE-LOSS-PG-MACOS-ARM64-001",
-      "requirement_ids": [
-        "SYNC-IDEMPOTENCY-001"
-      ],
-      "assertion_ids": [
-        "ASSERT-PUSH-RESPONSE-LOSS-SEMANTIC-001"
-      ],
-      "proof_type": "server-black-box",
-      "support_cell_id": "SUP-PG-MACOS-ARM64-001",
-      "artifact_inventory_ids": [
-        "ARTDEF-PG-EXTENSION-001",
-        "ARTDEF-ADAPTER-001"
-      ],
-      "performance_budget_ids": [],
-      "required_measurement_ids": [],
-      "required_vector_set_ids": [
-        "VSET-CANONICAL-001"
-      ],
-      "make_target": "test-blackbox",
-      "argv": [
-        "make",
-        "test-blackbox"
-      ],
-      "fault_plan_id": null,
-      "control_id": null
-    },
-    {
       "obligation_id": "OBL-PUSH-RESPONSE-LOSS-MACOS-CURRENT-001",
       "requirement_ids": [
         "SYNC-IDEMPOTENCY-001"
@@ -242,31 +215,6 @@
       "control_id": "CTRL-IDEMPOTENCY-001"
     },
     {
-      "obligation_id": "OBL-PUSH-RESPONSE-LOSS-FAULT-MACOS-ARM64-001",
-      "requirement_ids": [
-        "SYNC-IDEMPOTENCY-001"
-      ],
-      "assertion_ids": [
-        "ASSERT-PUSH-RESPONSE-LOSS-SEMANTIC-001"
-      ],
-      "proof_type": "fault-injection",
-      "support_cell_id": "SUP-PG-MACOS-ARM64-001",
-      "artifact_inventory_ids": [
-        "ARTDEF-PG-EXTENSION-001",
-        "ARTDEF-ADAPTER-001"
-      ],
-      "performance_budget_ids": [],
-      "required_measurement_ids": [],
-      "required_vector_set_ids": [],
-      "make_target": "test-blackbox",
-      "argv": [
-        "make",
-        "test-blackbox"
-      ],
-      "fault_plan_id": "FPL-PUSH-RESPONSE-LOSS-001",
-      "control_id": "CTRL-IDEMPOTENCY-001"
-    },
-    {
       "obligation_id": "OBL-PUSH-RESPONSE-LOSS-CONTROL-001",
       "requirement_ids": [
         "SYNC-IDEMPOTENCY-001"
@@ -313,14 +261,6 @@
     {
       "scenario_id": "SCN-PUSH-RESPONSE-LOSS-001",
       "requirement_id": "SYNC-IDEMPOTENCY-001",
-      "proof_obligation_id": "OBL-PUSH-RESPONSE-LOSS-PG-MACOS-ARM64-001",
-      "assertion_id": "ASSERT-PUSH-RESPONSE-LOSS-SEMANTIC-001",
-      "proof_type": "server-black-box",
-      "support_cell_id": "SUP-PG-MACOS-ARM64-001"
-    },
-    {
-      "scenario_id": "SCN-PUSH-RESPONSE-LOSS-001",
-      "requirement_id": "SYNC-IDEMPOTENCY-001",
       "proof_obligation_id": "OBL-PUSH-RESPONSE-LOSS-MACOS-CURRENT-001",
       "assertion_id": "ASSERT-PUSH-RESPONSE-LOSS-SEMANTIC-001",
       "proof_type": "native-e2e",
@@ -357,14 +297,6 @@
       "assertion_id": "ASSERT-PUSH-RESPONSE-LOSS-SEMANTIC-001",
       "proof_type": "fault-injection",
       "support_cell_id": "SUP-PG-LINUX-X64-001"
-    },
-    {
-      "scenario_id": "SCN-PUSH-RESPONSE-LOSS-001",
-      "requirement_id": "SYNC-IDEMPOTENCY-001",
-      "proof_obligation_id": "OBL-PUSH-RESPONSE-LOSS-FAULT-MACOS-ARM64-001",
-      "assertion_id": "ASSERT-PUSH-RESPONSE-LOSS-SEMANTIC-001",
-      "proof_type": "fault-injection",
-      "support_cell_id": "SUP-PG-MACOS-ARM64-001"
     },
     {
       "scenario_id": "SCN-PUSH-RESPONSE-LOSS-001",

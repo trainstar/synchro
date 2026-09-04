@@ -47,34 +47,6 @@
       "control_id": null
     },
     {
-      "obligation_id": "OBL-PERF-CORE-SYNC-PATH-PG-MACOS-ARM64-001",
-      "requirement_ids": [
-        "SYNC-PERFORMANCE-001"
-      ],
-      "assertion_ids": [
-        "ASSERT-PERF-CORE-SYNC-PATH-SEMANTIC-001",
-        "ASSERT-PERF-CORE-SYNC-PATH-PERFORMANCE-001"
-      ],
-      "proof_type": "server-black-box",
-      "support_cell_id": "SUP-PG-MACOS-ARM64-001",
-      "artifact_inventory_ids": [
-        "ARTDEF-PG-EXTENSION-001",
-        "ARTDEF-ADAPTER-001"
-      ],
-      "performance_budget_ids": [
-        "BUD-CORE-SYNC-RPC-001"
-      ],
-      "required_measurement_ids": [],
-      "required_vector_set_ids": [],
-      "make_target": "test-blackbox",
-      "argv": [
-        "make",
-        "test-blackbox"
-      ],
-      "fault_plan_id": null,
-      "control_id": null
-    },
-    {
       "obligation_id": "OBL-PERF-CORE-SYNC-PATH-CONTROL-001",
       "requirement_ids": [
         "SYNC-PERFORMANCE-001"
@@ -112,26 +84,10 @@
     {
       "scenario_id": "SCN-PERF-CORE-SYNC-PATH-001",
       "requirement_id": "SYNC-PERFORMANCE-001",
-      "proof_obligation_id": "OBL-PERF-CORE-SYNC-PATH-PG-MACOS-ARM64-001",
-      "assertion_id": "ASSERT-PERF-CORE-SYNC-PATH-SEMANTIC-001",
-      "proof_type": "server-black-box",
-      "support_cell_id": "SUP-PG-MACOS-ARM64-001"
-    },
-    {
-      "scenario_id": "SCN-PERF-CORE-SYNC-PATH-001",
-      "requirement_id": "SYNC-PERFORMANCE-001",
       "proof_obligation_id": "OBL-PERF-CORE-SYNC-PATH-PG-LINUX-X64-001",
       "assertion_id": "ASSERT-PERF-CORE-SYNC-PATH-PERFORMANCE-001",
       "proof_type": "server-black-box",
       "support_cell_id": "SUP-PG-LINUX-X64-001"
-    },
-    {
-      "scenario_id": "SCN-PERF-CORE-SYNC-PATH-001",
-      "requirement_id": "SYNC-PERFORMANCE-001",
-      "proof_obligation_id": "OBL-PERF-CORE-SYNC-PATH-PG-MACOS-ARM64-001",
-      "assertion_id": "ASSERT-PERF-CORE-SYNC-PATH-PERFORMANCE-001",
-      "proof_type": "server-black-box",
-      "support_cell_id": "SUP-PG-MACOS-ARM64-001"
     },
     {
       "scenario_id": "SCN-PERF-CORE-SYNC-PATH-001",
@@ -262,7 +218,7 @@
                 "evaluations": [
                   {
                     "row": {
-                      "canonical_identity_bytes": "synchro:v3:row-identity:v1\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0005items\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0002id\u0001\u0001\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0008core-row",
+                      "canonical_identity_bytes": "synchro:v3:row-identity:v1\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0005items\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0002id\u0001\u0001\u0000\u0000\u0000\u0000\u0000\u0000\u0000\bcore-row",
                       "table_id": "items",
                       "primary_key_field_id": "id",
                       "portable_type": "string",

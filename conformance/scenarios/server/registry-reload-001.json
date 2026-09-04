@@ -45,31 +45,6 @@
       "control_id": null
     },
     {
-      "obligation_id": "OBL-REGISTRY-RELOAD-PG-MACOS-ARM64-001",
-      "requirement_ids": [
-        "SYNC-WAL-007"
-      ],
-      "assertion_ids": [
-        "ASSERT-REGISTRY-RELOAD-SEMANTIC-001"
-      ],
-      "proof_type": "server-black-box",
-      "support_cell_id": "SUP-PG-MACOS-ARM64-001",
-      "artifact_inventory_ids": [
-        "ARTDEF-PG-EXTENSION-001",
-        "ARTDEF-ADAPTER-001"
-      ],
-      "performance_budget_ids": [],
-      "required_measurement_ids": [],
-      "required_vector_set_ids": [],
-      "make_target": "test-blackbox",
-      "argv": [
-        "make",
-        "test-blackbox"
-      ],
-      "fault_plan_id": null,
-      "control_id": null
-    },
-    {
       "obligation_id": "OBL-REGISTRY-RELOAD-FAULT-LINUX-X64-001",
       "requirement_ids": [
         "SYNC-WAL-007"
@@ -79,31 +54,6 @@
       ],
       "proof_type": "fault-injection",
       "support_cell_id": "SUP-PG-LINUX-X64-001",
-      "artifact_inventory_ids": [
-        "ARTDEF-PG-EXTENSION-001",
-        "ARTDEF-ADAPTER-001"
-      ],
-      "performance_budget_ids": [],
-      "required_measurement_ids": [],
-      "required_vector_set_ids": [],
-      "make_target": "test-blackbox",
-      "argv": [
-        "make",
-        "test-blackbox"
-      ],
-      "fault_plan_id": "FPL-REGISTRY-RELOAD-001",
-      "control_id": "CTRL-WAL-007"
-    },
-    {
-      "obligation_id": "OBL-REGISTRY-RELOAD-FAULT-MACOS-ARM64-001",
-      "requirement_ids": [
-        "SYNC-WAL-007"
-      ],
-      "assertion_ids": [
-        "ASSERT-REGISTRY-RELOAD-SEMANTIC-001"
-      ],
-      "proof_type": "fault-injection",
-      "support_cell_id": "SUP-PG-MACOS-ARM64-001",
       "artifact_inventory_ids": [
         "ARTDEF-PG-EXTENSION-001",
         "ARTDEF-ADAPTER-001"
@@ -157,26 +107,10 @@
     {
       "scenario_id": "SCN-REGISTRY-RELOAD-001",
       "requirement_id": "SYNC-WAL-007",
-      "proof_obligation_id": "OBL-REGISTRY-RELOAD-PG-MACOS-ARM64-001",
-      "assertion_id": "ASSERT-REGISTRY-RELOAD-SEMANTIC-001",
-      "proof_type": "server-black-box",
-      "support_cell_id": "SUP-PG-MACOS-ARM64-001"
-    },
-    {
-      "scenario_id": "SCN-REGISTRY-RELOAD-001",
-      "requirement_id": "SYNC-WAL-007",
       "proof_obligation_id": "OBL-REGISTRY-RELOAD-FAULT-LINUX-X64-001",
       "assertion_id": "ASSERT-REGISTRY-RELOAD-SEMANTIC-001",
       "proof_type": "fault-injection",
       "support_cell_id": "SUP-PG-LINUX-X64-001"
-    },
-    {
-      "scenario_id": "SCN-REGISTRY-RELOAD-001",
-      "requirement_id": "SYNC-WAL-007",
-      "proof_obligation_id": "OBL-REGISTRY-RELOAD-FAULT-MACOS-ARM64-001",
-      "assertion_id": "ASSERT-REGISTRY-RELOAD-SEMANTIC-001",
-      "proof_type": "fault-injection",
-      "support_cell_id": "SUP-PG-MACOS-ARM64-001"
     },
     {
       "scenario_id": "SCN-REGISTRY-RELOAD-001",
@@ -397,7 +331,9 @@
               "end_lsn": "11",
               "registry_generation": 1,
               "lifecycle": "materialized",
-              "event_ordinals": [1]
+              "event_ordinals": [
+                1
+              ]
             },
             {
               "stream_generation": "stream-1",
@@ -405,7 +341,10 @@
               "end_lsn": "21",
               "registry_generation": 2,
               "lifecycle": "materialized",
-              "event_ordinals": [3, 4]
+              "event_ordinals": [
+                3,
+                4
+              ]
             }
           ],
           "rows": [
@@ -559,7 +498,7 @@
         "contract_operation": "model",
         "name": "stage-registry-membership-generation",
         "payload": {
-		  "batch_size": 1000,
+          "batch_size": 1000,
           "registry_generation": 2,
           "membership_generation": 2,
           "activation_boundary": {

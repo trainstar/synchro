@@ -75,8 +75,7 @@ export function supportPolicyErrors(requirements, supportMatrix) {
       component: "postgresql-server",
       platform: "postgresql",
       platform_version: { kind: "exact", value: "18" },
-      extension_architecture: "macos-arm64",
-      policy: "required",
+      policy: "excluded",
     },
     ...[
       ["SUP-IOS-MIN-001", "swift-client", "ios", "minimum", "16", null],

@@ -54,40 +54,6 @@
       "control_id": null
     },
     {
-      "obligation_id": "OBL-PERF-WARM-CONNECT-PG-MACOS-ARM64-001",
-      "requirement_ids": [
-        "SYNC-SCOPE-001"
-      ],
-      "assertion_ids": [
-        "ASSERT-PERF-WARM-CONNECT-SEMANTIC-001",
-        "ASSERT-PERF-WARM-CONNECT-WIRE-001",
-        "ASSERT-PERF-WARM-CONNECT-PERFORMANCE-001"
-      ],
-      "proof_type": "server-black-box",
-      "support_cell_id": "SUP-PG-MACOS-ARM64-001",
-      "artifact_inventory_ids": [
-        "ARTDEF-PG-EXTENSION-001",
-        "ARTDEF-ADAPTER-001"
-      ],
-      "performance_budget_ids": [
-        "BUD-WARM-CONNECT-001",
-        "BUD-WARM-CONNECT-PULL-001",
-        "BUD-WARM-CONNECT-PUSH-001",
-        "BUD-WARM-CONNECT-REBUILD-001",
-        "BUD-WARM-CONNECT-SCHEMA-001",
-        "BUD-WARM-CONNECT-OTHER-001"
-      ],
-      "required_measurement_ids": [],
-      "required_vector_set_ids": [],
-      "make_target": "test-blackbox",
-      "argv": [
-        "make",
-        "test-blackbox"
-      ],
-      "fault_plan_id": null,
-      "control_id": null
-    },
-    {
       "obligation_id": "OBL-PERF-WARM-CONNECT-MACOS-CURRENT-001",
       "requirement_ids": [
         "SYNC-SCOPE-001"
@@ -371,30 +337,6 @@
       "assertion_id": "ASSERT-PERF-WARM-CONNECT-PERFORMANCE-001",
       "proof_type": "server-black-box",
       "support_cell_id": "SUP-PG-LINUX-X64-001"
-    },
-    {
-      "scenario_id": "SCN-PERF-WARM-CONNECT-001",
-      "requirement_id": "SYNC-SCOPE-001",
-      "proof_obligation_id": "OBL-PERF-WARM-CONNECT-PG-MACOS-ARM64-001",
-      "assertion_id": "ASSERT-PERF-WARM-CONNECT-SEMANTIC-001",
-      "proof_type": "server-black-box",
-      "support_cell_id": "SUP-PG-MACOS-ARM64-001"
-    },
-    {
-      "scenario_id": "SCN-PERF-WARM-CONNECT-001",
-      "requirement_id": "SYNC-SCOPE-001",
-      "proof_obligation_id": "OBL-PERF-WARM-CONNECT-PG-MACOS-ARM64-001",
-      "assertion_id": "ASSERT-PERF-WARM-CONNECT-WIRE-001",
-      "proof_type": "server-black-box",
-      "support_cell_id": "SUP-PG-MACOS-ARM64-001"
-    },
-    {
-      "scenario_id": "SCN-PERF-WARM-CONNECT-001",
-      "requirement_id": "SYNC-SCOPE-001",
-      "proof_obligation_id": "OBL-PERF-WARM-CONNECT-PG-MACOS-ARM64-001",
-      "assertion_id": "ASSERT-PERF-WARM-CONNECT-PERFORMANCE-001",
-      "proof_type": "server-black-box",
-      "support_cell_id": "SUP-PG-MACOS-ARM64-001"
     },
     {
       "scenario_id": "SCN-PERF-WARM-CONNECT-001",

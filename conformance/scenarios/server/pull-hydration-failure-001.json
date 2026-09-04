@@ -70,31 +70,6 @@
       "control_id": null
     },
     {
-      "obligation_id": "OBL-PULL-HYDRATION-PG-MACOS-ARM64-001",
-      "requirement_ids": [
-        "SYNC-PULL-003"
-      ],
-      "assertion_ids": [
-        "ASSERT-PULL-HYDRATION-SEMANTIC-001"
-      ],
-      "proof_type": "server-black-box",
-      "support_cell_id": "SUP-PG-MACOS-ARM64-001",
-      "artifact_inventory_ids": [
-        "ARTDEF-PG-EXTENSION-001",
-        "ARTDEF-ADAPTER-001"
-      ],
-      "performance_budget_ids": [],
-      "required_measurement_ids": [],
-      "required_vector_set_ids": [],
-      "make_target": "test-blackbox",
-      "argv": [
-        "make",
-        "test-blackbox"
-      ],
-      "fault_plan_id": null,
-      "control_id": null
-    },
-    {
       "obligation_id": "OBL-PULL-HYDRATION-FAULT-LINUX-X64-001",
       "requirement_ids": [
         "SYNC-PULL-003"
@@ -104,31 +79,6 @@
       ],
       "proof_type": "fault-injection",
       "support_cell_id": "SUP-PG-LINUX-X64-001",
-      "artifact_inventory_ids": [
-        "ARTDEF-PG-EXTENSION-001",
-        "ARTDEF-ADAPTER-001"
-      ],
-      "performance_budget_ids": [],
-      "required_measurement_ids": [],
-      "required_vector_set_ids": [],
-      "make_target": "test-blackbox",
-      "argv": [
-        "make",
-        "test-blackbox"
-      ],
-      "fault_plan_id": "FPL-PULL-HYDRATION-001",
-      "control_id": "CTRL-PULL-003"
-    },
-    {
-      "obligation_id": "OBL-PULL-HYDRATION-FAULT-MACOS-ARM64-001",
-      "requirement_ids": [
-        "SYNC-PULL-003"
-      ],
-      "assertion_ids": [
-        "ASSERT-PULL-HYDRATION-SEMANTIC-001"
-      ],
-      "proof_type": "fault-injection",
-      "support_cell_id": "SUP-PG-MACOS-ARM64-001",
       "artifact_inventory_ids": [
         "ARTDEF-PG-EXTENSION-001",
         "ARTDEF-ADAPTER-001"
@@ -190,26 +140,10 @@
     {
       "scenario_id": "SCN-PULL-HYDRATION-FAILURE-001",
       "requirement_id": "SYNC-PULL-003",
-      "proof_obligation_id": "OBL-PULL-HYDRATION-PG-MACOS-ARM64-001",
-      "assertion_id": "ASSERT-PULL-HYDRATION-SEMANTIC-001",
-      "proof_type": "server-black-box",
-      "support_cell_id": "SUP-PG-MACOS-ARM64-001"
-    },
-    {
-      "scenario_id": "SCN-PULL-HYDRATION-FAILURE-001",
-      "requirement_id": "SYNC-PULL-003",
       "proof_obligation_id": "OBL-PULL-HYDRATION-FAULT-LINUX-X64-001",
       "assertion_id": "ASSERT-PULL-HYDRATION-SEMANTIC-001",
       "proof_type": "fault-injection",
       "support_cell_id": "SUP-PG-LINUX-X64-001"
-    },
-    {
-      "scenario_id": "SCN-PULL-HYDRATION-FAILURE-001",
-      "requirement_id": "SYNC-PULL-003",
-      "proof_obligation_id": "OBL-PULL-HYDRATION-FAULT-MACOS-ARM64-001",
-      "assertion_id": "ASSERT-PULL-HYDRATION-SEMANTIC-001",
-      "proof_type": "fault-injection",
-      "support_cell_id": "SUP-PG-MACOS-ARM64-001"
     },
     {
       "scenario_id": "SCN-PULL-HYDRATION-FAILURE-001",

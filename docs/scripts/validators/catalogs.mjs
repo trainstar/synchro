@@ -166,7 +166,7 @@ export function performanceCatalogSemanticErrors(
     artifactInventory.artifacts.map(({ id }) => id),
   );
   const lockedCatalogDigest =
-    "bcb87ae792bcf4a736104e9cd8f62aa31dbc8bb76661e99cf9a562d1e9efa282";
+    "cd29425e0cd55e4e8c27a5c36fb185a253396541f2561a76c52564e158cd6d50";
   const actualCatalogDigest = createHash("sha256")
     .update(
       JSON.stringify({

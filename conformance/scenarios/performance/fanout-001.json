@@ -72,34 +72,6 @@
       "control_id": null
     },
     {
-      "obligation_id": "OBL-PERF-FANOUT-PG-MACOS-ARM64-001",
-      "requirement_ids": [
-        "SYNC-SCOPE-004"
-      ],
-      "assertion_ids": [
-        "ASSERT-PERF-FANOUT-SEMANTIC-001",
-        "ASSERT-PERF-FANOUT-PERFORMANCE-001"
-      ],
-      "proof_type": "server-black-box",
-      "support_cell_id": "SUP-PG-MACOS-ARM64-001",
-      "artifact_inventory_ids": [
-        "ARTDEF-PG-EXTENSION-001",
-        "ARTDEF-ADAPTER-001"
-      ],
-      "performance_budget_ids": [],
-      "required_measurement_ids": [
-        "MEAS-FANOUT-001"
-      ],
-      "required_vector_set_ids": [],
-      "make_target": "test-blackbox",
-      "argv": [
-        "make",
-        "test-blackbox"
-      ],
-      "fault_plan_id": null,
-      "control_id": null
-    },
-    {
       "obligation_id": "OBL-PERF-FANOUT-CONTROL-001",
       "requirement_ids": [
         "SYNC-SCOPE-004"
@@ -145,26 +117,10 @@
     {
       "scenario_id": "SCN-PERF-FANOUT-001",
       "requirement_id": "SYNC-SCOPE-004",
-      "proof_obligation_id": "OBL-PERF-FANOUT-PG-MACOS-ARM64-001",
-      "assertion_id": "ASSERT-PERF-FANOUT-SEMANTIC-001",
-      "proof_type": "server-black-box",
-      "support_cell_id": "SUP-PG-MACOS-ARM64-001"
-    },
-    {
-      "scenario_id": "SCN-PERF-FANOUT-001",
-      "requirement_id": "SYNC-SCOPE-004",
       "proof_obligation_id": "OBL-PERF-FANOUT-PG-LINUX-X64-001",
       "assertion_id": "ASSERT-PERF-FANOUT-PERFORMANCE-001",
       "proof_type": "server-black-box",
       "support_cell_id": "SUP-PG-LINUX-X64-001"
-    },
-    {
-      "scenario_id": "SCN-PERF-FANOUT-001",
-      "requirement_id": "SYNC-SCOPE-004",
-      "proof_obligation_id": "OBL-PERF-FANOUT-PG-MACOS-ARM64-001",
-      "assertion_id": "ASSERT-PERF-FANOUT-PERFORMANCE-001",
-      "proof_type": "server-black-box",
-      "support_cell_id": "SUP-PG-MACOS-ARM64-001"
     },
     {
       "scenario_id": "SCN-PERF-FANOUT-001",
@@ -511,7 +467,24 @@
       "phase": "exercise",
       "transport": "model",
       "description": "Execute the authored workload operation.",
-      "measurement_sample": {"measurement_id": "MEAS-FANOUT-001", "stratum_id": "STR-FANOUT-LOW-001", "sample_id": "SAMPLE-FANOUT-LOW-001", "parameters": {"scope_fanout": 1, "impact_rows": 1}, "operation": {"id": "MOP-FANOUT-LOW-001", "family": "scope-fanout", "boundary": "low", "value": {"scope_fanout": 1, "impact_rows": 1}}},
+      "measurement_sample": {
+        "measurement_id": "MEAS-FANOUT-001",
+        "stratum_id": "STR-FANOUT-LOW-001",
+        "sample_id": "SAMPLE-FANOUT-LOW-001",
+        "parameters": {
+          "scope_fanout": 1,
+          "impact_rows": 1
+        },
+        "operation": {
+          "id": "MOP-FANOUT-LOW-001",
+          "family": "scope-fanout",
+          "boundary": "low",
+          "value": {
+            "scope_fanout": 1,
+            "impact_rows": 1
+          }
+        }
+      },
       "operation": {
         "contract_operation": "workload",
         "name": "prepare",
@@ -530,7 +503,24 @@
       "phase": "exercise",
       "transport": "model",
       "description": "Execute the authored workload operation.",
-      "measurement_sample": {"measurement_id": "MEAS-FANOUT-001", "stratum_id": "STR-FANOUT-LOW-001", "sample_id": "SAMPLE-FANOUT-LOW-002", "parameters": {"scope_fanout": 1, "impact_rows": 1}, "operation": {"id": "MOP-FANOUT-LOW-002", "family": "scope-fanout", "boundary": "low", "value": {"scope_fanout": 1, "impact_rows": 1}}},
+      "measurement_sample": {
+        "measurement_id": "MEAS-FANOUT-001",
+        "stratum_id": "STR-FANOUT-LOW-001",
+        "sample_id": "SAMPLE-FANOUT-LOW-002",
+        "parameters": {
+          "scope_fanout": 1,
+          "impact_rows": 1
+        },
+        "operation": {
+          "id": "MOP-FANOUT-LOW-002",
+          "family": "scope-fanout",
+          "boundary": "low",
+          "value": {
+            "scope_fanout": 1,
+            "impact_rows": 1
+          }
+        }
+      },
       "operation": {
         "contract_operation": "workload",
         "name": "prepare",
@@ -549,7 +539,24 @@
       "phase": "exercise",
       "transport": "model",
       "description": "Execute the authored workload operation.",
-      "measurement_sample": {"measurement_id": "MEAS-FANOUT-001", "stratum_id": "STR-FANOUT-LOW-001", "sample_id": "SAMPLE-FANOUT-LOW-003", "parameters": {"scope_fanout": 1, "impact_rows": 1}, "operation": {"id": "MOP-FANOUT-LOW-003", "family": "scope-fanout", "boundary": "low", "value": {"scope_fanout": 1, "impact_rows": 1}}},
+      "measurement_sample": {
+        "measurement_id": "MEAS-FANOUT-001",
+        "stratum_id": "STR-FANOUT-LOW-001",
+        "sample_id": "SAMPLE-FANOUT-LOW-003",
+        "parameters": {
+          "scope_fanout": 1,
+          "impact_rows": 1
+        },
+        "operation": {
+          "id": "MOP-FANOUT-LOW-003",
+          "family": "scope-fanout",
+          "boundary": "low",
+          "value": {
+            "scope_fanout": 1,
+            "impact_rows": 1
+          }
+        }
+      },
       "operation": {
         "contract_operation": "workload",
         "name": "prepare",
@@ -568,7 +575,24 @@
       "phase": "exercise",
       "transport": "model",
       "description": "Execute the authored workload operation.",
-      "measurement_sample": {"measurement_id": "MEAS-FANOUT-001", "stratum_id": "STR-FANOUT-MEDIUM-001", "sample_id": "SAMPLE-FANOUT-MEDIUM-001", "parameters": {"scope_fanout": 2, "impact_rows": 2}, "operation": {"id": "MOP-FANOUT-MEDIUM-001", "family": "scope-fanout", "boundary": "medium", "value": {"scope_fanout": 2, "impact_rows": 2}}},
+      "measurement_sample": {
+        "measurement_id": "MEAS-FANOUT-001",
+        "stratum_id": "STR-FANOUT-MEDIUM-001",
+        "sample_id": "SAMPLE-FANOUT-MEDIUM-001",
+        "parameters": {
+          "scope_fanout": 2,
+          "impact_rows": 2
+        },
+        "operation": {
+          "id": "MOP-FANOUT-MEDIUM-001",
+          "family": "scope-fanout",
+          "boundary": "medium",
+          "value": {
+            "scope_fanout": 2,
+            "impact_rows": 2
+          }
+        }
+      },
       "operation": {
         "contract_operation": "workload",
         "name": "prepare",
@@ -587,7 +611,24 @@
       "phase": "exercise",
       "transport": "model",
       "description": "Execute the authored workload operation.",
-      "measurement_sample": {"measurement_id": "MEAS-FANOUT-001", "stratum_id": "STR-FANOUT-MEDIUM-001", "sample_id": "SAMPLE-FANOUT-MEDIUM-002", "parameters": {"scope_fanout": 2, "impact_rows": 2}, "operation": {"id": "MOP-FANOUT-MEDIUM-002", "family": "scope-fanout", "boundary": "medium", "value": {"scope_fanout": 2, "impact_rows": 2}}},
+      "measurement_sample": {
+        "measurement_id": "MEAS-FANOUT-001",
+        "stratum_id": "STR-FANOUT-MEDIUM-001",
+        "sample_id": "SAMPLE-FANOUT-MEDIUM-002",
+        "parameters": {
+          "scope_fanout": 2,
+          "impact_rows": 2
+        },
+        "operation": {
+          "id": "MOP-FANOUT-MEDIUM-002",
+          "family": "scope-fanout",
+          "boundary": "medium",
+          "value": {
+            "scope_fanout": 2,
+            "impact_rows": 2
+          }
+        }
+      },
       "operation": {
         "contract_operation": "workload",
         "name": "prepare",
@@ -606,7 +647,24 @@
       "phase": "exercise",
       "transport": "model",
       "description": "Execute the authored workload operation.",
-      "measurement_sample": {"measurement_id": "MEAS-FANOUT-001", "stratum_id": "STR-FANOUT-MEDIUM-001", "sample_id": "SAMPLE-FANOUT-MEDIUM-003", "parameters": {"scope_fanout": 2, "impact_rows": 2}, "operation": {"id": "MOP-FANOUT-MEDIUM-003", "family": "scope-fanout", "boundary": "medium", "value": {"scope_fanout": 2, "impact_rows": 2}}},
+      "measurement_sample": {
+        "measurement_id": "MEAS-FANOUT-001",
+        "stratum_id": "STR-FANOUT-MEDIUM-001",
+        "sample_id": "SAMPLE-FANOUT-MEDIUM-003",
+        "parameters": {
+          "scope_fanout": 2,
+          "impact_rows": 2
+        },
+        "operation": {
+          "id": "MOP-FANOUT-MEDIUM-003",
+          "family": "scope-fanout",
+          "boundary": "medium",
+          "value": {
+            "scope_fanout": 2,
+            "impact_rows": 2
+          }
+        }
+      },
       "operation": {
         "contract_operation": "workload",
         "name": "prepare",
@@ -625,7 +683,24 @@
       "phase": "exercise",
       "transport": "model",
       "description": "Execute the authored workload operation.",
-      "measurement_sample": {"measurement_id": "MEAS-FANOUT-001", "stratum_id": "STR-FANOUT-HIGH-001", "sample_id": "SAMPLE-FANOUT-HIGH-001", "parameters": {"scope_fanout": 8, "impact_rows": 8}, "operation": {"id": "MOP-FANOUT-HIGH-001", "family": "scope-fanout", "boundary": "high", "value": {"scope_fanout": 8, "impact_rows": 8}}},
+      "measurement_sample": {
+        "measurement_id": "MEAS-FANOUT-001",
+        "stratum_id": "STR-FANOUT-HIGH-001",
+        "sample_id": "SAMPLE-FANOUT-HIGH-001",
+        "parameters": {
+          "scope_fanout": 8,
+          "impact_rows": 8
+        },
+        "operation": {
+          "id": "MOP-FANOUT-HIGH-001",
+          "family": "scope-fanout",
+          "boundary": "high",
+          "value": {
+            "scope_fanout": 8,
+            "impact_rows": 8
+          }
+        }
+      },
       "operation": {
         "contract_operation": "workload",
         "name": "prepare",
@@ -644,7 +719,24 @@
       "phase": "exercise",
       "transport": "model",
       "description": "Execute the authored workload operation.",
-      "measurement_sample": {"measurement_id": "MEAS-FANOUT-001", "stratum_id": "STR-FANOUT-HIGH-001", "sample_id": "SAMPLE-FANOUT-HIGH-002", "parameters": {"scope_fanout": 8, "impact_rows": 8}, "operation": {"id": "MOP-FANOUT-HIGH-002", "family": "scope-fanout", "boundary": "high", "value": {"scope_fanout": 8, "impact_rows": 8}}},
+      "measurement_sample": {
+        "measurement_id": "MEAS-FANOUT-001",
+        "stratum_id": "STR-FANOUT-HIGH-001",
+        "sample_id": "SAMPLE-FANOUT-HIGH-002",
+        "parameters": {
+          "scope_fanout": 8,
+          "impact_rows": 8
+        },
+        "operation": {
+          "id": "MOP-FANOUT-HIGH-002",
+          "family": "scope-fanout",
+          "boundary": "high",
+          "value": {
+            "scope_fanout": 8,
+            "impact_rows": 8
+          }
+        }
+      },
       "operation": {
         "contract_operation": "workload",
         "name": "prepare",
@@ -663,7 +755,24 @@
       "phase": "exercise",
       "transport": "model",
       "description": "Execute the authored workload operation.",
-      "measurement_sample": {"measurement_id": "MEAS-FANOUT-001", "stratum_id": "STR-FANOUT-HIGH-001", "sample_id": "SAMPLE-FANOUT-HIGH-003", "parameters": {"scope_fanout": 8, "impact_rows": 8}, "operation": {"id": "MOP-FANOUT-HIGH-003", "family": "scope-fanout", "boundary": "high", "value": {"scope_fanout": 8, "impact_rows": 8}}},
+      "measurement_sample": {
+        "measurement_id": "MEAS-FANOUT-001",
+        "stratum_id": "STR-FANOUT-HIGH-001",
+        "sample_id": "SAMPLE-FANOUT-HIGH-003",
+        "parameters": {
+          "scope_fanout": 8,
+          "impact_rows": 8
+        },
+        "operation": {
+          "id": "MOP-FANOUT-HIGH-003",
+          "family": "scope-fanout",
+          "boundary": "high",
+          "value": {
+            "scope_fanout": 8,
+            "impact_rows": 8
+          }
+        }
+      },
       "operation": {
         "contract_operation": "workload",
         "name": "prepare",

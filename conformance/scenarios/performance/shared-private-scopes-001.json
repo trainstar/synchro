@@ -72,34 +72,6 @@
       "control_id": null
     },
     {
-      "obligation_id": "OBL-PERF-SHARED-PRIVATE-SCOPES-PG-MACOS-ARM64-001",
-      "requirement_ids": [
-        "SYNC-SCOPE-003"
-      ],
-      "assertion_ids": [
-        "ASSERT-PERF-SHARED-PRIVATE-SCOPES-SEMANTIC-001",
-        "ASSERT-PERF-SHARED-PRIVATE-SCOPES-PERFORMANCE-001"
-      ],
-      "proof_type": "server-black-box",
-      "support_cell_id": "SUP-PG-MACOS-ARM64-001",
-      "artifact_inventory_ids": [
-        "ARTDEF-PG-EXTENSION-001",
-        "ARTDEF-ADAPTER-001"
-      ],
-      "performance_budget_ids": [],
-      "required_measurement_ids": [
-        "MEAS-SHARED-PRIVATE-SCOPES-001"
-      ],
-      "required_vector_set_ids": [],
-      "make_target": "test-blackbox",
-      "argv": [
-        "make",
-        "test-blackbox"
-      ],
-      "fault_plan_id": null,
-      "control_id": null
-    },
-    {
       "obligation_id": "OBL-PERF-SHARED-PRIVATE-SCOPES-CONTROL-001",
       "requirement_ids": [
         "SYNC-SCOPE-003"
@@ -145,26 +117,10 @@
     {
       "scenario_id": "SCN-PERF-SHARED-PRIVATE-SCOPES-001",
       "requirement_id": "SYNC-SCOPE-003",
-      "proof_obligation_id": "OBL-PERF-SHARED-PRIVATE-SCOPES-PG-MACOS-ARM64-001",
-      "assertion_id": "ASSERT-PERF-SHARED-PRIVATE-SCOPES-SEMANTIC-001",
-      "proof_type": "server-black-box",
-      "support_cell_id": "SUP-PG-MACOS-ARM64-001"
-    },
-    {
-      "scenario_id": "SCN-PERF-SHARED-PRIVATE-SCOPES-001",
-      "requirement_id": "SYNC-SCOPE-003",
       "proof_obligation_id": "OBL-PERF-SHARED-PRIVATE-SCOPES-PG-LINUX-X64-001",
       "assertion_id": "ASSERT-PERF-SHARED-PRIVATE-SCOPES-PERFORMANCE-001",
       "proof_type": "server-black-box",
       "support_cell_id": "SUP-PG-LINUX-X64-001"
-    },
-    {
-      "scenario_id": "SCN-PERF-SHARED-PRIVATE-SCOPES-001",
-      "requirement_id": "SYNC-SCOPE-003",
-      "proof_obligation_id": "OBL-PERF-SHARED-PRIVATE-SCOPES-PG-MACOS-ARM64-001",
-      "assertion_id": "ASSERT-PERF-SHARED-PRIVATE-SCOPES-PERFORMANCE-001",
-      "proof_type": "server-black-box",
-      "support_cell_id": "SUP-PG-MACOS-ARM64-001"
     },
     {
       "scenario_id": "SCN-PERF-SHARED-PRIVATE-SCOPES-001",
@@ -511,7 +467,22 @@
       "phase": "exercise",
       "transport": "model",
       "description": "Execute the authored workload operation.",
-      "measurement_sample": {"measurement_id": "MEAS-SHARED-PRIVATE-SCOPES-001", "stratum_id": "STR-SHARED-SCOPE-001", "sample_id": "SAMPLE-SHARED-PRIVATE-SCOPES-SHARED-001", "parameters": {"scope_topology": "shared"}, "operation": {"id": "MOP-SHARED-PRIVATE-SCOPES-SHARED-001", "family": "scope-topology", "boundary": "shared", "value": {"scope_topology": "shared"}}},
+      "measurement_sample": {
+        "measurement_id": "MEAS-SHARED-PRIVATE-SCOPES-001",
+        "stratum_id": "STR-SHARED-SCOPE-001",
+        "sample_id": "SAMPLE-SHARED-PRIVATE-SCOPES-SHARED-001",
+        "parameters": {
+          "scope_topology": "shared"
+        },
+        "operation": {
+          "id": "MOP-SHARED-PRIVATE-SCOPES-SHARED-001",
+          "family": "scope-topology",
+          "boundary": "shared",
+          "value": {
+            "scope_topology": "shared"
+          }
+        }
+      },
       "operation": {
         "contract_operation": "workload",
         "name": "prepare",
@@ -530,7 +501,22 @@
       "phase": "exercise",
       "transport": "model",
       "description": "Execute the authored workload operation.",
-      "measurement_sample": {"measurement_id": "MEAS-SHARED-PRIVATE-SCOPES-001", "stratum_id": "STR-SHARED-SCOPE-001", "sample_id": "SAMPLE-SHARED-PRIVATE-SCOPES-SHARED-002", "parameters": {"scope_topology": "shared"}, "operation": {"id": "MOP-SHARED-PRIVATE-SCOPES-SHARED-002", "family": "scope-topology", "boundary": "shared", "value": {"scope_topology": "shared"}}},
+      "measurement_sample": {
+        "measurement_id": "MEAS-SHARED-PRIVATE-SCOPES-001",
+        "stratum_id": "STR-SHARED-SCOPE-001",
+        "sample_id": "SAMPLE-SHARED-PRIVATE-SCOPES-SHARED-002",
+        "parameters": {
+          "scope_topology": "shared"
+        },
+        "operation": {
+          "id": "MOP-SHARED-PRIVATE-SCOPES-SHARED-002",
+          "family": "scope-topology",
+          "boundary": "shared",
+          "value": {
+            "scope_topology": "shared"
+          }
+        }
+      },
       "operation": {
         "contract_operation": "workload",
         "name": "prepare",
@@ -549,7 +535,22 @@
       "phase": "exercise",
       "transport": "model",
       "description": "Execute the authored workload operation.",
-      "measurement_sample": {"measurement_id": "MEAS-SHARED-PRIVATE-SCOPES-001", "stratum_id": "STR-SHARED-SCOPE-001", "sample_id": "SAMPLE-SHARED-PRIVATE-SCOPES-SHARED-003", "parameters": {"scope_topology": "shared"}, "operation": {"id": "MOP-SHARED-PRIVATE-SCOPES-SHARED-003", "family": "scope-topology", "boundary": "shared", "value": {"scope_topology": "shared"}}},
+      "measurement_sample": {
+        "measurement_id": "MEAS-SHARED-PRIVATE-SCOPES-001",
+        "stratum_id": "STR-SHARED-SCOPE-001",
+        "sample_id": "SAMPLE-SHARED-PRIVATE-SCOPES-SHARED-003",
+        "parameters": {
+          "scope_topology": "shared"
+        },
+        "operation": {
+          "id": "MOP-SHARED-PRIVATE-SCOPES-SHARED-003",
+          "family": "scope-topology",
+          "boundary": "shared",
+          "value": {
+            "scope_topology": "shared"
+          }
+        }
+      },
       "operation": {
         "contract_operation": "workload",
         "name": "prepare",
@@ -568,7 +569,22 @@
       "phase": "exercise",
       "transport": "model",
       "description": "Execute the authored workload operation.",
-      "measurement_sample": {"measurement_id": "MEAS-SHARED-PRIVATE-SCOPES-001", "stratum_id": "STR-DUPLICATED-PRIVATE-001", "sample_id": "SAMPLE-SHARED-PRIVATE-SCOPES-DUPLICATED-PRIVATE-001", "parameters": {"scope_topology": "duplicated-private"}, "operation": {"id": "MOP-SHARED-PRIVATE-SCOPES-DUPLICATED-PRIVATE-001", "family": "scope-topology", "boundary": "duplicated-private", "value": {"scope_topology": "duplicated-private"}}},
+      "measurement_sample": {
+        "measurement_id": "MEAS-SHARED-PRIVATE-SCOPES-001",
+        "stratum_id": "STR-DUPLICATED-PRIVATE-001",
+        "sample_id": "SAMPLE-SHARED-PRIVATE-SCOPES-DUPLICATED-PRIVATE-001",
+        "parameters": {
+          "scope_topology": "duplicated-private"
+        },
+        "operation": {
+          "id": "MOP-SHARED-PRIVATE-SCOPES-DUPLICATED-PRIVATE-001",
+          "family": "scope-topology",
+          "boundary": "duplicated-private",
+          "value": {
+            "scope_topology": "duplicated-private"
+          }
+        }
+      },
       "operation": {
         "contract_operation": "workload",
         "name": "prepare",
@@ -587,7 +603,22 @@
       "phase": "exercise",
       "transport": "model",
       "description": "Execute the authored workload operation.",
-      "measurement_sample": {"measurement_id": "MEAS-SHARED-PRIVATE-SCOPES-001", "stratum_id": "STR-DUPLICATED-PRIVATE-001", "sample_id": "SAMPLE-SHARED-PRIVATE-SCOPES-DUPLICATED-PRIVATE-002", "parameters": {"scope_topology": "duplicated-private"}, "operation": {"id": "MOP-SHARED-PRIVATE-SCOPES-DUPLICATED-PRIVATE-002", "family": "scope-topology", "boundary": "duplicated-private", "value": {"scope_topology": "duplicated-private"}}},
+      "measurement_sample": {
+        "measurement_id": "MEAS-SHARED-PRIVATE-SCOPES-001",
+        "stratum_id": "STR-DUPLICATED-PRIVATE-001",
+        "sample_id": "SAMPLE-SHARED-PRIVATE-SCOPES-DUPLICATED-PRIVATE-002",
+        "parameters": {
+          "scope_topology": "duplicated-private"
+        },
+        "operation": {
+          "id": "MOP-SHARED-PRIVATE-SCOPES-DUPLICATED-PRIVATE-002",
+          "family": "scope-topology",
+          "boundary": "duplicated-private",
+          "value": {
+            "scope_topology": "duplicated-private"
+          }
+        }
+      },
       "operation": {
         "contract_operation": "workload",
         "name": "prepare",
@@ -606,7 +637,22 @@
       "phase": "exercise",
       "transport": "model",
       "description": "Execute the authored workload operation.",
-      "measurement_sample": {"measurement_id": "MEAS-SHARED-PRIVATE-SCOPES-001", "stratum_id": "STR-DUPLICATED-PRIVATE-001", "sample_id": "SAMPLE-SHARED-PRIVATE-SCOPES-DUPLICATED-PRIVATE-003", "parameters": {"scope_topology": "duplicated-private"}, "operation": {"id": "MOP-SHARED-PRIVATE-SCOPES-DUPLICATED-PRIVATE-003", "family": "scope-topology", "boundary": "duplicated-private", "value": {"scope_topology": "duplicated-private"}}},
+      "measurement_sample": {
+        "measurement_id": "MEAS-SHARED-PRIVATE-SCOPES-001",
+        "stratum_id": "STR-DUPLICATED-PRIVATE-001",
+        "sample_id": "SAMPLE-SHARED-PRIVATE-SCOPES-DUPLICATED-PRIVATE-003",
+        "parameters": {
+          "scope_topology": "duplicated-private"
+        },
+        "operation": {
+          "id": "MOP-SHARED-PRIVATE-SCOPES-DUPLICATED-PRIVATE-003",
+          "family": "scope-topology",
+          "boundary": "duplicated-private",
+          "value": {
+            "scope_topology": "duplicated-private"
+          }
+        }
+      },
       "operation": {
         "contract_operation": "workload",
         "name": "prepare",

@@ -25,7 +25,7 @@ const (
 	artifactSchemaURI     = "https://synchro.dev/conformance/schemas/artifact-inventory-v1.schema.json"
 	performanceSchemaURI  = "https://synchro.dev/conformance/schemas/performance-budgets-v2.schema.json"
 
-	lockedPerformanceDigest = "bcb87ae792bcf4a736104e9cd8f62aa31dbc8bb76661e99cf9a562d1e9efa282"
+	lockedPerformanceDigest = "cd29425e0cd55e4e8c27a5c36fb185a253396541f2561a76c52564e158cd6d50"
 )
 
 var lockedSupportCells = map[SupportCellID]supportTuple{
@@ -34,7 +34,7 @@ var lockedSupportCells = map[SupportCellID]supportTuple{
 	"SUP-PG-016":                 {component: "postgresql-server", platform: "postgresql", platformVersion: versionTuple{kind: "exact", value: "16"}, policy: "excluded"},
 	"SUP-PG-017":                 {component: "postgresql-server", platform: "postgresql", platformVersion: versionTuple{kind: "exact", value: "17"}, policy: "excluded"},
 	"SUP-PG-LINUX-X64-001":       {component: "postgresql-server", platform: "postgresql", platformVersion: versionTuple{kind: "exact", value: "18"}, extensionArchitecture: "linux-x64", policy: "required"},
-	"SUP-PG-MACOS-ARM64-001":     {component: "postgresql-server", platform: "postgresql", platformVersion: versionTuple{kind: "exact", value: "18"}, extensionArchitecture: "macos-arm64", policy: "required"},
+	"SUP-PG-MACOS-ARM64-001":     {component: "postgresql-server", platform: "postgresql", platformVersion: versionTuple{kind: "exact", value: "18"}, policy: "excluded"},
 	"SUP-IOS-MIN-001":            {component: "swift-client", platform: "ios", platformVersion: versionTuple{kind: "minimum", value: "16"}, policy: "required"},
 	"SUP-IOS-CURRENT-001":        {component: "swift-client", platform: "ios", platformVersion: versionTuple{kind: "current-stable"}, policy: "required"},
 	"SUP-MACOS-CURRENT-001":      {component: "swift-client", platform: "macos", platformVersion: versionTuple{kind: "current-stable"}, policy: "tested"},
@@ -595,8 +595,8 @@ func validateSupportMatrix(matrix SupportMatrix) []error {
 			failures = append(failures, fmt.Errorf("support matrix is missing locked cell %s", id))
 		}
 	}
-	if requiredCount != 8 {
-		failures = append(failures, fmt.Errorf("support matrix must contain exactly 8 required cells, found %d", requiredCount))
+	if requiredCount != 7 {
+		failures = append(failures, fmt.Errorf("support matrix must contain exactly 7 required cells, found %d", requiredCount))
 	}
 	return failures
 }

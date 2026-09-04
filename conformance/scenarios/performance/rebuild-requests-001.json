@@ -52,38 +52,6 @@
       "control_id": null
     },
     {
-      "obligation_id": "OBL-PERF-REBUILD-REQUESTS-PG-MACOS-ARM64-001",
-      "requirement_ids": [
-        "SYNC-REBUILD-003"
-      ],
-      "assertion_ids": [
-        "ASSERT-PERF-REBUILD-REQUESTS-SEMANTIC-001",
-        "ASSERT-PERF-REBUILD-REQUESTS-PERFORMANCE-001"
-      ],
-      "proof_type": "server-black-box",
-      "support_cell_id": "SUP-PG-MACOS-ARM64-001",
-      "artifact_inventory_ids": [
-        "ARTDEF-PG-EXTENSION-001",
-        "ARTDEF-ADAPTER-001"
-      ],
-      "performance_budget_ids": [
-        "BUD-REBUILD-CONNECT-001",
-        "BUD-REBUILD-PULL-001",
-        "BUD-REBUILD-PAGE-001",
-        "BUD-REBUILD-SCHEMA-FETCH-001",
-        "BUD-REBUILD-UNEXPECTED-001"
-      ],
-      "required_measurement_ids": [],
-      "required_vector_set_ids": [],
-      "make_target": "test-blackbox",
-      "argv": [
-        "make",
-        "test-blackbox"
-      ],
-      "fault_plan_id": null,
-      "control_id": null
-    },
-    {
       "obligation_id": "OBL-PERF-REBUILD-REQUESTS-MACOS-CURRENT-001",
       "requirement_ids": [
         "SYNC-REBUILD-003"
@@ -357,22 +325,6 @@
       "assertion_id": "ASSERT-PERF-REBUILD-REQUESTS-PERFORMANCE-001",
       "proof_type": "server-black-box",
       "support_cell_id": "SUP-PG-LINUX-X64-001"
-    },
-    {
-      "scenario_id": "SCN-PERF-REBUILD-REQUESTS-001",
-      "requirement_id": "SYNC-REBUILD-003",
-      "proof_obligation_id": "OBL-PERF-REBUILD-REQUESTS-PG-MACOS-ARM64-001",
-      "assertion_id": "ASSERT-PERF-REBUILD-REQUESTS-SEMANTIC-001",
-      "proof_type": "server-black-box",
-      "support_cell_id": "SUP-PG-MACOS-ARM64-001"
-    },
-    {
-      "scenario_id": "SCN-PERF-REBUILD-REQUESTS-001",
-      "requirement_id": "SYNC-REBUILD-003",
-      "proof_obligation_id": "OBL-PERF-REBUILD-REQUESTS-PG-MACOS-ARM64-001",
-      "assertion_id": "ASSERT-PERF-REBUILD-REQUESTS-PERFORMANCE-001",
-      "proof_type": "server-black-box",
-      "support_cell_id": "SUP-PG-MACOS-ARM64-001"
     },
     {
       "scenario_id": "SCN-PERF-REBUILD-REQUESTS-001",

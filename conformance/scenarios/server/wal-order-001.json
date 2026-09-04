@@ -70,31 +70,6 @@
       "control_id": null
     },
     {
-      "obligation_id": "OBL-WAL-ORDER-PG-MACOS-ARM64-001",
-      "requirement_ids": [
-        "SYNC-WAL-003"
-      ],
-      "assertion_ids": [
-        "ASSERT-WAL-ORDER-SEMANTIC-001"
-      ],
-      "proof_type": "server-black-box",
-      "support_cell_id": "SUP-PG-MACOS-ARM64-001",
-      "artifact_inventory_ids": [
-        "ARTDEF-PG-EXTENSION-001",
-        "ARTDEF-ADAPTER-001"
-      ],
-      "performance_budget_ids": [],
-      "required_measurement_ids": [],
-      "required_vector_set_ids": [],
-      "make_target": "test-blackbox",
-      "argv": [
-        "make",
-        "test-blackbox"
-      ],
-      "fault_plan_id": null,
-      "control_id": null
-    },
-    {
       "obligation_id": "OBL-WAL-ORDER-FAULT-LINUX-X64-001",
       "requirement_ids": [
         "SYNC-WAL-003"
@@ -104,31 +79,6 @@
       ],
       "proof_type": "fault-injection",
       "support_cell_id": "SUP-PG-LINUX-X64-001",
-      "artifact_inventory_ids": [
-        "ARTDEF-PG-EXTENSION-001",
-        "ARTDEF-ADAPTER-001"
-      ],
-      "performance_budget_ids": [],
-      "required_measurement_ids": [],
-      "required_vector_set_ids": [],
-      "make_target": "test-blackbox",
-      "argv": [
-        "make",
-        "test-blackbox"
-      ],
-      "fault_plan_id": "FPL-WAL-ORDER-001",
-      "control_id": "CTRL-WAL-003"
-    },
-    {
-      "obligation_id": "OBL-WAL-ORDER-FAULT-MACOS-ARM64-001",
-      "requirement_ids": [
-        "SYNC-WAL-003"
-      ],
-      "assertion_ids": [
-        "ASSERT-WAL-ORDER-SEMANTIC-001"
-      ],
-      "proof_type": "fault-injection",
-      "support_cell_id": "SUP-PG-MACOS-ARM64-001",
       "artifact_inventory_ids": [
         "ARTDEF-PG-EXTENSION-001",
         "ARTDEF-ADAPTER-001"
@@ -190,26 +140,10 @@
     {
       "scenario_id": "SCN-WAL-ORDER-001",
       "requirement_id": "SYNC-WAL-003",
-      "proof_obligation_id": "OBL-WAL-ORDER-PG-MACOS-ARM64-001",
-      "assertion_id": "ASSERT-WAL-ORDER-SEMANTIC-001",
-      "proof_type": "server-black-box",
-      "support_cell_id": "SUP-PG-MACOS-ARM64-001"
-    },
-    {
-      "scenario_id": "SCN-WAL-ORDER-001",
-      "requirement_id": "SYNC-WAL-003",
       "proof_obligation_id": "OBL-WAL-ORDER-FAULT-LINUX-X64-001",
       "assertion_id": "ASSERT-WAL-ORDER-SEMANTIC-001",
       "proof_type": "fault-injection",
       "support_cell_id": "SUP-PG-LINUX-X64-001"
-    },
-    {
-      "scenario_id": "SCN-WAL-ORDER-001",
-      "requirement_id": "SYNC-WAL-003",
-      "proof_obligation_id": "OBL-WAL-ORDER-FAULT-MACOS-ARM64-001",
-      "assertion_id": "ASSERT-WAL-ORDER-SEMANTIC-001",
-      "proof_type": "fault-injection",
-      "support_cell_id": "SUP-PG-MACOS-ARM64-001"
     },
     {
       "scenario_id": "SCN-WAL-ORDER-001",
@@ -422,7 +356,9 @@
               "end_lsn": "11",
               "registry_generation": 1,
               "lifecycle": "materialized",
-              "event_ordinals": [2]
+              "event_ordinals": [
+                2
+              ]
             },
             {
               "stream_generation": "stream-1",
@@ -430,7 +366,9 @@
               "end_lsn": "21",
               "registry_generation": 1,
               "lifecycle": "materialized",
-              "event_ordinals": [7]
+              "event_ordinals": [
+                7
+              ]
             }
           ],
           "rows": [
@@ -446,7 +384,10 @@
               "scope_id": "scope-a",
               "membership_generation": 1,
               "cardinality": 1,
-              "effect_versions": ["v1", "v2"]
+              "effect_versions": [
+                "v1",
+                "v2"
+              ]
             }
           ]
         }

@@ -57,33 +57,6 @@
       "control_id": null
     },
     {
-      "obligation_id": "OBL-RETENTION-RECONNECT-PG-MACOS-ARM64-001",
-      "requirement_ids": [
-        "SYNC-RETENTION-002",
-        "SYNC-RETENTION-003"
-      ],
-      "assertion_ids": [
-        "ASSERT-RETENTION-RECONNECT-EXPIRY-SEMANTIC-001",
-        "ASSERT-RETENTION-RECONNECT-COMPACTION-SEMANTIC-001"
-      ],
-      "proof_type": "server-black-box",
-      "support_cell_id": "SUP-PG-MACOS-ARM64-001",
-      "artifact_inventory_ids": [
-        "ARTDEF-PG-EXTENSION-001",
-        "ARTDEF-ADAPTER-001"
-      ],
-      "performance_budget_ids": [],
-      "required_measurement_ids": [],
-      "required_vector_set_ids": [],
-      "make_target": "test-blackbox",
-      "argv": [
-        "make",
-        "test-blackbox"
-      ],
-      "fault_plan_id": null,
-      "control_id": null
-    },
-    {
       "obligation_id": "OBL-RETENTION-RECONNECT-MACOS-CURRENT-001",
       "requirement_ids": [
         "SYNC-RETENTION-002"
@@ -242,31 +215,6 @@
       "control_id": "CTRL-RETENTION-003"
     },
     {
-      "obligation_id": "OBL-RETENTION-RECONNECT-RETENTION-003-FAULT-MACOS-ARM64-001",
-      "requirement_ids": [
-        "SYNC-RETENTION-003"
-      ],
-      "assertion_ids": [
-        "ASSERT-RETENTION-RECONNECT-COMPACTION-SEMANTIC-001"
-      ],
-      "proof_type": "fault-injection",
-      "support_cell_id": "SUP-PG-MACOS-ARM64-001",
-      "artifact_inventory_ids": [
-        "ARTDEF-PG-EXTENSION-001",
-        "ARTDEF-ADAPTER-001"
-      ],
-      "performance_budget_ids": [],
-      "required_measurement_ids": [],
-      "required_vector_set_ids": [],
-      "make_target": "test-blackbox",
-      "argv": [
-        "make",
-        "test-blackbox"
-      ],
-      "fault_plan_id": "FPL-RETENTION-RECONNECT-RETENTION-003-001",
-      "control_id": "CTRL-RETENTION-003"
-    },
-    {
       "obligation_id": "OBL-RETENTION-RECONNECT-RETENTION-002-CONTROL-001",
       "requirement_ids": [
         "SYNC-RETENTION-002"
@@ -342,22 +290,6 @@
     {
       "scenario_id": "SCN-RETENTION-RECONNECT-001",
       "requirement_id": "SYNC-RETENTION-002",
-      "proof_obligation_id": "OBL-RETENTION-RECONNECT-PG-MACOS-ARM64-001",
-      "assertion_id": "ASSERT-RETENTION-RECONNECT-EXPIRY-SEMANTIC-001",
-      "proof_type": "server-black-box",
-      "support_cell_id": "SUP-PG-MACOS-ARM64-001"
-    },
-    {
-      "scenario_id": "SCN-RETENTION-RECONNECT-001",
-      "requirement_id": "SYNC-RETENTION-003",
-      "proof_obligation_id": "OBL-RETENTION-RECONNECT-PG-MACOS-ARM64-001",
-      "assertion_id": "ASSERT-RETENTION-RECONNECT-COMPACTION-SEMANTIC-001",
-      "proof_type": "server-black-box",
-      "support_cell_id": "SUP-PG-MACOS-ARM64-001"
-    },
-    {
-      "scenario_id": "SCN-RETENTION-RECONNECT-001",
-      "requirement_id": "SYNC-RETENTION-002",
       "proof_obligation_id": "OBL-RETENTION-RECONNECT-MACOS-CURRENT-001",
       "assertion_id": "ASSERT-RETENTION-RECONNECT-EXPIRY-SEMANTIC-001",
       "proof_type": "native-e2e",
@@ -402,14 +334,6 @@
       "assertion_id": "ASSERT-RETENTION-RECONNECT-COMPACTION-SEMANTIC-001",
       "proof_type": "fault-injection",
       "support_cell_id": "SUP-PG-LINUX-X64-001"
-    },
-    {
-      "scenario_id": "SCN-RETENTION-RECONNECT-001",
-      "requirement_id": "SYNC-RETENTION-003",
-      "proof_obligation_id": "OBL-RETENTION-RECONNECT-RETENTION-003-FAULT-MACOS-ARM64-001",
-      "assertion_id": "ASSERT-RETENTION-RECONNECT-COMPACTION-SEMANTIC-001",
-      "proof_type": "fault-injection",
-      "support_cell_id": "SUP-PG-MACOS-ARM64-001"
     },
     {
       "scenario_id": "SCN-RETENTION-RECONNECT-001",

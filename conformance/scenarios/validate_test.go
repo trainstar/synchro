@@ -393,7 +393,7 @@ func TestValidateRejectsSemanticMutants(t *testing.T) {
 			s.Assertions[0].RequirementIDs = []contract.RequirementID{"SYNC-CURSOR-001"}
 		}, "outside the scenario"},
 		{"omitted ownership", authoredTimeScenario, func(s *Scenario) { s.Ownership = s.Ownership[:len(s.Ownership)-1] }, "ownership"},
-		{"nil support cell", authoredTimeScenario, func(s *Scenario) { s.ProofObligations[2].SupportCellID = nil }, "requires a swift-client support cell"},
+		{"nil support cell", authoredTimeScenario, func(s *Scenario) { s.ProofObligations[1].SupportCellID = nil }, "requires a swift-client support cell"},
 		{"excluded support cell", authoredTimeScenario, func(s *Scenario) { s.ProofObligations[0].SupportCellID = ptrSupport("SUP-PG-017") }, "excluded"},
 		{"wrong target", authoredTimeScenario, func(s *Scenario) { s.ProofObligations[0].MakeTarget = "test-conformance" }, "cannot prove"},
 		{"missing repository target", authoredTimeScenario, func(s *Scenario) { delete(s.makeTargets, "test-blackbox") }, "not defined by the repository Makefile"},
@@ -812,7 +812,6 @@ func authoredTimeScenario() Scenario {
 		s.Ownership = append(s.Ownership, Ownership{ScenarioID: scenarioID, RequirementID: requirementID, ProofObligationID: id, AssertionID: assertion, ProofType: proof, SupportCellID: support})
 	}
 	addObligation("OBL-TIME-PG-LINUX-X64-001", "server-black-box", ptrSupport("SUP-PG-LINUX-X64-001"), "test-blackbox", []contract.ArtifactInventoryID{"ARTDEF-PG-EXTENSION-001", "ARTDEF-ADAPTER-001"}, assertionIDs[0], nil, nil)
-	addObligation("OBL-TIME-PG-MACOS-ARM64-001", "server-black-box", ptrSupport("SUP-PG-MACOS-ARM64-001"), "test-blackbox", []contract.ArtifactInventoryID{"ARTDEF-PG-EXTENSION-001", "ARTDEF-ADAPTER-001"}, assertionIDs[0], nil, nil)
 	for index, cell := range clientCells {
 		artifacts := []contract.ArtifactInventoryID{"ARTDEF-PG-EXTENSION-001", "ARTDEF-ADAPTER-001"}
 		if cell.target == "test-swift" {
@@ -970,7 +969,6 @@ func authoredTimeScenarioWithFaultInjection() Scenario {
 		supportID    contract.SupportCellID
 	}{
 		{"OBL-TIME-FI-LINUX-X64-001", "SUP-PG-LINUX-X64-001"},
-		{"OBL-TIME-FI-MACOS-ARM64-001", "SUP-PG-MACOS-ARM64-001"},
 	} {
 		supportID := fixture.supportID
 		obligation := ProofObligation{ObligationID: fixture.obligationID, RequirementIDs: []contract.RequirementID{"SYNC-TIME-001"}, AssertionIDs: []contract.AssertionID{"ASSERT-TIME-PG-001"}, ProofType: "fault-injection", SupportCellID: &supportID, ArtifactInventoryIDs: []contract.ArtifactInventoryID{"ARTDEF-PG-EXTENSION-001", "ARTDEF-ADAPTER-001"}, PerformanceBudgetIDs: []contract.BudgetID{}, RequiredMeasurementIDs: []contract.MeasurementID{}, RequiredVectorSetIDs: []contract.VectorSetID{}, MakeTarget: "test-blackbox", Argv: []string{"make", "test-blackbox"}, FaultPlanID: &plan.ID, ControlID: &plan.ControlID}

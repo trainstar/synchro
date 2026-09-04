@@ -86,13 +86,14 @@ must report the inconsistency and return a nonzero exit status.
 The support scope is exactly the matrix in
 `conformance/support-matrix.json`:
 
-- required PostgreSQL cells: `SUP-PG-LINUX-X64-001` and
-  `SUP-PG-MACOS-ARM64-001`, both on PostgreSQL `18`
+- required PostgreSQL cell: `SUP-PG-LINUX-X64-001` on PostgreSQL `18`.
+  PostgreSQL servers deploy on Linux.
 - required Swift cells: iOS `16` minimum and current stable
 - required Kotlin cells: Android API `24` minimum and current stable
 - required React Native cells: current stable iOS and current stable Android on
   React Native `0.83.x`
-- excluded PostgreSQL cells: `SUP-PG-014` through `SUP-PG-017`
+- excluded PostgreSQL cells: `SUP-PG-014` through `SUP-PG-017`, and
+  `SUP-PG-MACOS-ARM64-001` as a development-only architecture
 
 Current-stable selectors are resolved at RC start. The candidate lock freezes
 the exact OS, SDK, IDE, emulator, simulator, runtime, and toolchain versions.

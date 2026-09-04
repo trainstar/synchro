@@ -18,7 +18,10 @@
       "id": "SUP-PG-014",
       "component": "postgresql-server",
       "platform": "postgresql",
-      "platform_version": { "kind": "exact", "value": "14" },
+      "platform_version": {
+        "kind": "exact",
+        "value": "14"
+      },
       "policy": "excluded",
       "note": "PostgreSQL 14 is outside v0.3.0 certification."
     },
@@ -26,7 +29,10 @@
       "id": "SUP-PG-015",
       "component": "postgresql-server",
       "platform": "postgresql",
-      "platform_version": { "kind": "exact", "value": "15" },
+      "platform_version": {
+        "kind": "exact",
+        "value": "15"
+      },
       "policy": "excluded",
       "note": "PostgreSQL 15 is outside v0.3.0 certification."
     },
@@ -34,7 +40,10 @@
       "id": "SUP-PG-016",
       "component": "postgresql-server",
       "platform": "postgresql",
-      "platform_version": { "kind": "exact", "value": "16" },
+      "platform_version": {
+        "kind": "exact",
+        "value": "16"
+      },
       "policy": "excluded",
       "note": "PostgreSQL 16 is outside v0.3.0 certification."
     },
@@ -42,7 +51,10 @@
       "id": "SUP-PG-017",
       "component": "postgresql-server",
       "platform": "postgresql",
-      "platform_version": { "kind": "exact", "value": "17" },
+      "platform_version": {
+        "kind": "exact",
+        "value": "17"
+      },
       "policy": "excluded",
       "note": "PostgreSQL 17 is outside v0.3.0 certification."
     },
@@ -50,7 +62,10 @@
       "id": "SUP-PG-LINUX-X64-001",
       "component": "postgresql-server",
       "platform": "postgresql",
-      "platform_version": { "kind": "exact", "value": "18" },
+      "platform_version": {
+        "kind": "exact",
+        "value": "18"
+      },
       "extension_architecture": "linux-x64",
       "policy": "required",
       "note": "Published by the release package-extension matrix. The derived PostgreSQL server-cell count is 2."
@@ -59,37 +74,49 @@
       "id": "SUP-PG-MACOS-ARM64-001",
       "component": "postgresql-server",
       "platform": "postgresql",
-      "platform_version": { "kind": "exact", "value": "18" },
-      "extension_architecture": "macos-arm64",
-      "policy": "required",
-      "note": "Published by the release package-extension matrix. The derived PostgreSQL server-cell count is 2."
+      "platform_version": {
+        "kind": "exact",
+        "value": "18"
+      },
+      "policy": "excluded",
+      "note": "PostgreSQL servers deploy on Linux. The macos-arm64 extension build is a development convenience and is outside v0.3.0 certification."
     },
     {
       "id": "SUP-IOS-MIN-001",
       "component": "swift-client",
       "platform": "ios",
-      "platform_version": { "kind": "minimum", "value": "16" },
+      "platform_version": {
+        "kind": "minimum",
+        "value": "16"
+      },
       "policy": "required"
     },
     {
       "id": "SUP-IOS-CURRENT-001",
       "component": "swift-client",
       "platform": "ios",
-      "platform_version": { "kind": "current-stable" },
+      "platform_version": {
+        "kind": "current-stable"
+      },
       "policy": "required"
     },
     {
       "id": "SUP-MACOS-CURRENT-001",
       "component": "swift-client",
       "platform": "macos",
-      "platform_version": { "kind": "current-stable" },
+      "platform_version": {
+        "kind": "current-stable"
+      },
       "policy": "tested"
     },
     {
       "id": "SUP-ANDROID-MIN-001",
       "component": "kotlin-client",
       "platform": "android",
-      "platform_version": { "kind": "minimum", "value": "24" },
+      "platform_version": {
+        "kind": "minimum",
+        "value": "24"
+      },
       "policy": "required",
       "note": "The minimum selector is an Android API level."
     },
@@ -97,23 +124,35 @@
       "id": "SUP-ANDROID-CURRENT-001",
       "component": "kotlin-client",
       "platform": "android",
-      "platform_version": { "kind": "current-stable" },
+      "platform_version": {
+        "kind": "current-stable"
+      },
       "policy": "required"
     },
     {
       "id": "SUP-RN-IOS-CURRENT-001",
       "component": "react-native-client",
       "platform": "ios",
-      "platform_version": { "kind": "current-stable" },
-      "runtime_version": { "kind": "series", "value": "0.83.x" },
+      "platform_version": {
+        "kind": "current-stable"
+      },
+      "runtime_version": {
+        "kind": "series",
+        "value": "0.83.x"
+      },
       "policy": "required"
     },
     {
       "id": "SUP-RN-ANDROID-CURRENT-001",
       "component": "react-native-client",
       "platform": "android",
-      "platform_version": { "kind": "current-stable" },
-      "runtime_version": { "kind": "series", "value": "0.83.x" },
+      "platform_version": {
+        "kind": "current-stable"
+      },
+      "runtime_version": {
+        "kind": "series",
+        "value": "0.83.x"
+      },
       "policy": "required"
     }
   ]

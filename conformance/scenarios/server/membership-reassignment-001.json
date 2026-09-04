@@ -70,31 +70,6 @@
       "control_id": null
     },
     {
-      "obligation_id": "OBL-MEMBERSHIP-REASSIGNMENT-PG-MACOS-ARM64-001",
-      "requirement_ids": [
-        "SYNC-MEMBERSHIP-001"
-      ],
-      "assertion_ids": [
-        "ASSERT-MEMBERSHIP-REASSIGNMENT-SEMANTIC-001"
-      ],
-      "proof_type": "server-black-box",
-      "support_cell_id": "SUP-PG-MACOS-ARM64-001",
-      "artifact_inventory_ids": [
-        "ARTDEF-PG-EXTENSION-001",
-        "ARTDEF-ADAPTER-001"
-      ],
-      "performance_budget_ids": [],
-      "required_measurement_ids": [],
-      "required_vector_set_ids": [],
-      "make_target": "test-blackbox",
-      "argv": [
-        "make",
-        "test-blackbox"
-      ],
-      "fault_plan_id": null,
-      "control_id": null
-    },
-    {
       "obligation_id": "OBL-MEMBERSHIP-REASSIGNMENT-FAULT-LINUX-X64-001",
       "requirement_ids": [
         "SYNC-MEMBERSHIP-001"
@@ -104,31 +79,6 @@
       ],
       "proof_type": "fault-injection",
       "support_cell_id": "SUP-PG-LINUX-X64-001",
-      "artifact_inventory_ids": [
-        "ARTDEF-PG-EXTENSION-001",
-        "ARTDEF-ADAPTER-001"
-      ],
-      "performance_budget_ids": [],
-      "required_measurement_ids": [],
-      "required_vector_set_ids": [],
-      "make_target": "test-blackbox",
-      "argv": [
-        "make",
-        "test-blackbox"
-      ],
-      "fault_plan_id": "FPL-MEMBERSHIP-REASSIGNMENT-001",
-      "control_id": "CTRL-MEMBERSHIP-001"
-    },
-    {
-      "obligation_id": "OBL-MEMBERSHIP-REASSIGNMENT-FAULT-MACOS-ARM64-001",
-      "requirement_ids": [
-        "SYNC-MEMBERSHIP-001"
-      ],
-      "assertion_ids": [
-        "ASSERT-MEMBERSHIP-REASSIGNMENT-SEMANTIC-001"
-      ],
-      "proof_type": "fault-injection",
-      "support_cell_id": "SUP-PG-MACOS-ARM64-001",
       "artifact_inventory_ids": [
         "ARTDEF-PG-EXTENSION-001",
         "ARTDEF-ADAPTER-001"
@@ -190,26 +140,10 @@
     {
       "scenario_id": "SCN-MEMBERSHIP-REASSIGNMENT-001",
       "requirement_id": "SYNC-MEMBERSHIP-001",
-      "proof_obligation_id": "OBL-MEMBERSHIP-REASSIGNMENT-PG-MACOS-ARM64-001",
-      "assertion_id": "ASSERT-MEMBERSHIP-REASSIGNMENT-SEMANTIC-001",
-      "proof_type": "server-black-box",
-      "support_cell_id": "SUP-PG-MACOS-ARM64-001"
-    },
-    {
-      "scenario_id": "SCN-MEMBERSHIP-REASSIGNMENT-001",
-      "requirement_id": "SYNC-MEMBERSHIP-001",
       "proof_obligation_id": "OBL-MEMBERSHIP-REASSIGNMENT-FAULT-LINUX-X64-001",
       "assertion_id": "ASSERT-MEMBERSHIP-REASSIGNMENT-SEMANTIC-001",
       "proof_type": "fault-injection",
       "support_cell_id": "SUP-PG-LINUX-X64-001"
-    },
-    {
-      "scenario_id": "SCN-MEMBERSHIP-REASSIGNMENT-001",
-      "requirement_id": "SYNC-MEMBERSHIP-001",
-      "proof_obligation_id": "OBL-MEMBERSHIP-REASSIGNMENT-FAULT-MACOS-ARM64-001",
-      "assertion_id": "ASSERT-MEMBERSHIP-REASSIGNMENT-SEMANTIC-001",
-      "proof_type": "fault-injection",
-      "support_cell_id": "SUP-PG-MACOS-ARM64-001"
     },
     {
       "scenario_id": "SCN-MEMBERSHIP-REASSIGNMENT-001",
@@ -576,7 +510,7 @@
         "contract_operation": "model",
         "name": "stage-registry-membership-generation",
         "payload": {
-		  "batch_size": 1000,
+          "batch_size": 1000,
           "registry_generation": 2,
           "membership_generation": 2,
           "activation_boundary": {
@@ -729,7 +663,7 @@
         "contract_operation": "model",
         "name": "stage-registry-membership-generation",
         "payload": {
-		  "batch_size": 1000,
+          "batch_size": 1000,
           "registry_generation": 3,
           "membership_generation": 3,
           "activation_boundary": {
