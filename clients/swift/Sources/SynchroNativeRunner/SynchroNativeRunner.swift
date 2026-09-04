@@ -533,9 +533,11 @@ private struct RebuildReceiptRecord: Encodable {
     let returnedRecordCount: Int
     let requestChainExpected: [String]
     let requestChainObserved: [String]
-    let recordIdentitiesHex: [String]
-    let receivedRowChecksums: [String]
-    let computedRowChecksums: [String]
+    // A rebuild of the authored corpus carries one identity and two checksums
+    // per record, which exceeds the transport bound. The device evaluates the
+    // two predicates the consumer asserts, matching the Kotlin receipt shape.
+    let recordsInCanonicalOrder: Bool
+    let rowChecksumsValid: Bool
     let computedScopeChecksum: String?
     let finalScopeChecksum: String?
     let storedScopeChecksum: String?
@@ -547,9 +549,8 @@ private struct RebuildReceiptRecord: Encodable {
         case returnedRecordCount = "returned_record_count"
         case requestChainExpected = "request_chain_expected"
         case requestChainObserved = "request_chain_observed"
-        case recordIdentitiesHex = "record_identities_hex"
-        case receivedRowChecksums = "received_row_checksums"
-        case computedRowChecksums = "computed_row_checksums"
+        case recordsInCanonicalOrder = "records_in_canonical_order"
+        case rowChecksumsValid = "row_checksums_valid"
         case computedScopeChecksum = "computed_scope_checksum"
         case finalScopeChecksum = "final_scope_checksum"
         case storedScopeChecksum = "stored_scope_checksum"
@@ -562,9 +563,11 @@ private struct RebuildReceiptRecord: Encodable {
         returnedRecordCount = receipt.returnedRecordCount
         requestChainExpected = receipt.requestChainExpected
         requestChainObserved = receipt.requestChainObserved
-        recordIdentitiesHex = receipt.recordIdentitiesHex
-        receivedRowChecksums = receipt.receivedRowChecksums
-        computedRowChecksums = receipt.computedRowChecksums
+        recordsInCanonicalOrder = receipt.recordIdentitiesHex.count == Set(receipt.recordIdentitiesHex).count
+            && receipt.recordIdentitiesHex == receipt.recordIdentitiesHex.sorted()
+            && receipt.recordIdentitiesHex.count == receipt.returnedRecordCount
+        rowChecksumsValid = receipt.receivedRowChecksums == receipt.computedRowChecksums
+            && receipt.receivedRowChecksums.count == receipt.returnedRecordCount
         computedScopeChecksum = receipt.computedScopeChecksum
         finalScopeChecksum = receipt.finalScopeChecksum
         storedScopeChecksum = receipt.storedScopeChecksum

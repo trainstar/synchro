@@ -63,16 +63,15 @@ func TestWarmConnectTransportRequiresCompletedRebuildReceiptProof(t *testing.T) 
 		"current-schema":        json.RawMessage(`{"version":1,"hash":"` + schemaHash + `"}`),
 	}
 	validReceipt := rebuildReceiptRecord{
-		RebuildIDFingerprint:  rebuildFingerprint,
-		PageCount:             1,
-		ReturnedRecordCount:   0,
-		RequestChainExpected:  []string{"final"},
-		RequestChainObserved:  []string{"final"},
-		RecordIdentitiesHex:   []string{},
-		ReceivedRowChecksums:  []string{},
-		ComputedRowChecksums:  []string{},
-		ComputedScopeChecksum: pointerString("scope-checksum"),
-		FinalScopeChecksum:    pointerString("scope-checksum"),
+		RebuildIDFingerprint:    rebuildFingerprint,
+		PageCount:               1,
+		ReturnedRecordCount:     0,
+		RequestChainExpected:    []string{"final"},
+		RequestChainObserved:    []string{"final"},
+		RecordsInCanonicalOrder: true,
+		RowChecksumsValid:       true,
+		ComputedScopeChecksum:   pointerString("scope-checksum"),
+		FinalScopeChecksum:      pointerString("scope-checksum"),
 	}
 	validSnapshot := runnerResult{
 		Schema:          &schemaRef{Version: 1, Hash: schemaHash},
@@ -178,22 +177,23 @@ func TestWarmConnectTransportRequiresCompletedRebuildReceiptProof(t *testing.T) 
 }
 
 func rawReceipt(fingerprint string, scopeMatches, hasRecords bool) rebuildReceiptRecord {
+	// A well-formed empty receipt satisfies both device predicates, so each
+	// case below fails for the reason its name states.
 	receipt := rebuildReceiptRecord{
-		RebuildIDFingerprint:  fingerprint,
-		PageCount:             1,
-		RequestChainExpected:  []string{"final"},
-		RequestChainObserved:  []string{"final"},
-		ComputedScopeChecksum: pointerString("scope-checksum"),
-		FinalScopeChecksum:    pointerString("scope-checksum"),
+		RebuildIDFingerprint:    fingerprint,
+		PageCount:               1,
+		RequestChainExpected:    []string{"final"},
+		RequestChainObserved:    []string{"final"},
+		RecordsInCanonicalOrder: true,
+		RowChecksumsValid:       true,
+		ComputedScopeChecksum:   pointerString("scope-checksum"),
+		FinalScopeChecksum:      pointerString("scope-checksum"),
 	}
 	if !scopeMatches {
 		receipt.FinalScopeChecksum = pointerString("different")
 	}
 	if hasRecords {
 		receipt.ReturnedRecordCount = 1
-		receipt.RecordIdentitiesHex = []string{"record"}
-		receipt.ReceivedRowChecksums = []string{"received"}
-		receipt.ComputedRowChecksums = []string{"computed"}
 	}
 	return receipt
 }

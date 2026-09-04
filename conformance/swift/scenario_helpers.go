@@ -157,8 +157,8 @@ func validateCompletedEmptyRebuildReceipt(receipt rebuildReceiptRecord, rebuildI
 		receipt.PageCount == pageCount &&
 		receipt.ReturnedRecordCount == 0 &&
 		reflect.DeepEqual(receipt.RequestChainExpected, receipt.RequestChainObserved) &&
-		sortedUniqueStrings(receipt.RecordIdentitiesHex) &&
-		reflect.DeepEqual(receipt.ReceivedRowChecksums, receipt.ComputedRowChecksums) &&
+		receipt.RecordsInCanonicalOrder &&
+		receipt.RowChecksumsValid &&
 		receipt.ComputedScopeChecksum != nil &&
 		receipt.FinalScopeChecksum != nil &&
 		*receipt.ComputedScopeChecksum == *receipt.FinalScopeChecksum

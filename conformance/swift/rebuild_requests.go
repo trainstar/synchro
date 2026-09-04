@@ -289,8 +289,8 @@ func validateRebuildRequestsReceipt(receipt rebuildReceiptRecord, rebuildID stri
 		receipt.PageCount == 2 &&
 		receipt.ReturnedRecordCount == 2 &&
 		reflect.DeepEqual(receipt.RequestChainExpected, receipt.RequestChainObserved) &&
-		sortedUniqueStrings(receipt.RecordIdentitiesHex) &&
-		reflect.DeepEqual(receipt.ReceivedRowChecksums, receipt.ComputedRowChecksums) &&
+		receipt.RecordsInCanonicalOrder &&
+		receipt.RowChecksumsValid &&
 		receipt.ComputedScopeChecksum != nil &&
 		receipt.FinalScopeChecksum != nil &&
 		*receipt.ComputedScopeChecksum == *receipt.FinalScopeChecksum

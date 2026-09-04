@@ -358,14 +358,13 @@ func TestCaptureRejectsIncompleteOrAmbiguousDurableFacts(t *testing.T) {
 	multiPage := complete
 	multiPage.RebuildReceiptCount = &receiptCount
 	multiPage.RebuildReceipts = []rebuildReceiptRecord{{
-		RebuildIDFingerprint: cursorFingerprint(rebuildID),
-		PageCount:            2,
-		ReturnedRecordCount:  3,
-		RequestChainExpected: []string{"final"},
-		RequestChainObserved: []string{"final"},
-		RecordIdentitiesHex:  []string{"a", "b", "c"},
-		ReceivedRowChecksums: []string{"a", "b", "c"},
-		ComputedRowChecksums: []string{"a", "b", "c"},
+		RebuildIDFingerprint:    cursorFingerprint(rebuildID),
+		PageCount:               2,
+		ReturnedRecordCount:     3,
+		RequestChainExpected:    []string{"final"},
+		RequestChainObserved:    []string{"final"},
+		RecordsInCanonicalOrder: true,
+		RowChecksumsValid:       true,
 	}}
 	if err := validateCaptureResult(multiPage); err != nil {
 		t.Fatalf("grouped multi-page rebuild proof was rejected: %v", err)

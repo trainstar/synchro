@@ -1891,7 +1891,7 @@ func validateCaptureResult(result runnerResult) error {
 		pageCount := 0
 		seenRebuilds := make(map[string]struct{}, len(result.RebuildReceipts))
 		for _, receipt := range result.RebuildReceipts {
-			if !validLowerHexDigest(receipt.RebuildIDFingerprint) || receipt.PageCount <= 0 || receipt.ReturnedRecordCount < 0 || receipt.PageCount > *result.RebuildReceiptCount-pageCount || len(receipt.RecordIdentitiesHex) != receipt.ReturnedRecordCount || len(receipt.ReceivedRowChecksums) != receipt.ReturnedRecordCount || len(receipt.ComputedRowChecksums) != receipt.ReturnedRecordCount || len(receipt.RequestChainExpected) != len(receipt.RequestChainObserved) {
+			if !validLowerHexDigest(receipt.RebuildIDFingerprint) || receipt.PageCount <= 0 || receipt.ReturnedRecordCount < 0 || receipt.PageCount > *result.RebuildReceiptCount-pageCount || !receipt.RecordsInCanonicalOrder || !receipt.RowChecksumsValid || len(receipt.RequestChainExpected) != len(receipt.RequestChainObserved) {
 				return errors.New("Swift runner rebuild receipt is invalid")
 			}
 			if _, duplicate := seenRebuilds[receipt.RebuildIDFingerprint]; duplicate {

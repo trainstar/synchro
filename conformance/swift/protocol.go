@@ -449,41 +449,39 @@ type rebuildAttemptRecord struct {
 }
 
 type rebuildReceiptRecord struct {
-	RebuildIDFingerprint  string
-	PageCount             int
-	ReturnedRecordCount   int
-	RequestChainExpected  []string
-	RequestChainObserved  []string
-	RecordIdentitiesHex   []string
-	ReceivedRowChecksums  []string
-	ComputedRowChecksums  []string
-	ComputedScopeChecksum *string
-	FinalScopeChecksum    *string
-	StoredScopeChecksum   *string
-	LocalScopeChecksum    *string
+	RebuildIDFingerprint    string
+	PageCount               int
+	ReturnedRecordCount     int
+	RequestChainExpected    []string
+	RequestChainObserved    []string
+	RecordsInCanonicalOrder bool
+	RowChecksumsValid       bool
+	ComputedScopeChecksum   *string
+	FinalScopeChecksum      *string
+	StoredScopeChecksum     *string
+	LocalScopeChecksum      *string
 }
 
 func (p *rebuildReceiptRecord) UnmarshalJSON(data []byte) error {
 	var raw struct {
-		RebuildIDFingerprint  *string   `json:"rebuild_id_fingerprint"`
-		PageCount             *int      `json:"page_count"`
-		ReturnedRecordCount   *int      `json:"returned_record_count"`
-		RequestChainExpected  *[]string `json:"request_chain_expected"`
-		RequestChainObserved  *[]string `json:"request_chain_observed"`
-		RecordIdentitiesHex   *[]string `json:"record_identities_hex"`
-		ReceivedRowChecksums  *[]string `json:"received_row_checksums"`
-		ComputedRowChecksums  *[]string `json:"computed_row_checksums"`
-		ComputedScopeChecksum *string   `json:"computed_scope_checksum"`
-		FinalScopeChecksum    *string   `json:"final_scope_checksum"`
-		StoredScopeChecksum   *string   `json:"stored_scope_checksum"`
-		LocalScopeChecksum    *string   `json:"local_scope_checksum"`
+		RebuildIDFingerprint    *string   `json:"rebuild_id_fingerprint"`
+		PageCount               *int      `json:"page_count"`
+		ReturnedRecordCount     *int      `json:"returned_record_count"`
+		RequestChainExpected    *[]string `json:"request_chain_expected"`
+		RequestChainObserved    *[]string `json:"request_chain_observed"`
+		RecordsInCanonicalOrder *bool     `json:"records_in_canonical_order"`
+		RowChecksumsValid       *bool     `json:"row_checksums_valid"`
+		ComputedScopeChecksum   *string   `json:"computed_scope_checksum"`
+		FinalScopeChecksum      *string   `json:"final_scope_checksum"`
+		StoredScopeChecksum     *string   `json:"stored_scope_checksum"`
+		LocalScopeChecksum      *string   `json:"local_scope_checksum"`
 	}
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&raw); err != nil || requireDecoderEOF(decoder) != nil {
 		return errors.New("decode rebuild receipt failed")
 	}
-	if raw.RebuildIDFingerprint == nil || raw.PageCount == nil || raw.ReturnedRecordCount == nil || raw.RequestChainExpected == nil || raw.RequestChainObserved == nil || raw.RecordIdentitiesHex == nil || raw.ReceivedRowChecksums == nil || raw.ComputedRowChecksums == nil {
+	if raw.RebuildIDFingerprint == nil || raw.PageCount == nil || raw.ReturnedRecordCount == nil || raw.RequestChainExpected == nil || raw.RequestChainObserved == nil || raw.RecordsInCanonicalOrder == nil || raw.RowChecksumsValid == nil {
 		return errors.New("rebuild receipt is incomplete")
 	}
 	p.RebuildIDFingerprint = *raw.RebuildIDFingerprint
@@ -491,9 +489,8 @@ func (p *rebuildReceiptRecord) UnmarshalJSON(data []byte) error {
 	p.ReturnedRecordCount = *raw.ReturnedRecordCount
 	p.RequestChainExpected = append([]string(nil), (*raw.RequestChainExpected)...)
 	p.RequestChainObserved = append([]string(nil), (*raw.RequestChainObserved)...)
-	p.RecordIdentitiesHex = append([]string(nil), (*raw.RecordIdentitiesHex)...)
-	p.ReceivedRowChecksums = append([]string(nil), (*raw.ReceivedRowChecksums)...)
-	p.ComputedRowChecksums = append([]string(nil), (*raw.ComputedRowChecksums)...)
+	p.RecordsInCanonicalOrder = *raw.RecordsInCanonicalOrder
+	p.RowChecksumsValid = *raw.RowChecksumsValid
 	p.ComputedScopeChecksum = raw.ComputedScopeChecksum
 	p.FinalScopeChecksum = raw.FinalScopeChecksum
 	p.StoredScopeChecksum = raw.StoredScopeChecksum
