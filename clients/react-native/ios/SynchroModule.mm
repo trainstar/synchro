@@ -120,14 +120,14 @@
     [self.impl execute:sql params:params resolve:resolve reject:reject];
 }
 
-- (void)executeAuthoredWrite:(NSString *)tableID
+- (void)executeAuthoredWrite:(NSString *)tableName
                     operation:(NSString *)operation
-                     fieldIDs:(NSArray<NSString *> *)fieldIDs
+                  columnNames:(NSArray<NSString *> *)columnNames
                           sql:(NSString *)sql
                        values:(NSArray *)values
                       resolve:(RCTPromiseResolveBlock)resolve
                        reject:(RCTPromiseRejectBlock)reject {
-    [self.impl executeAuthoredWrite:tableID operation:operation fieldIDs:fieldIDs sql:sql values:values resolve:resolve reject:reject];
+    [self.impl executeAuthoredWrite:tableName operation:operation columnNames:columnNames sql:sql values:values resolve:resolve reject:reject];
 }
 
 - (void)executeBatch:(NSArray *)statements
