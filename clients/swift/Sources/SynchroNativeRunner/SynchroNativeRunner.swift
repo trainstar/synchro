@@ -302,6 +302,33 @@ private struct RunnerResponse: Encodable {
     }
 }
 
+private extension RunnerResult {
+    /// Encodes each collection separately so an oversized response names the
+    /// section that dominates it. This runs only on the overflow path.
+    func sectionSizeReport(_ encoder: JSONEncoder) -> String {
+        func size<T: Encodable>(_ values: [T]?) -> Int {
+            guard let values else { return -1 }
+            return ((try? encoder.encode(values))?.count) ?? -2
+        }
+        let sections: [(String, Int)] = [
+            ("application_rows", size(applicationRows)),
+            ("retained_mutations", size(retainedMutations)),
+            ("rejected_mutations", size(rejectedMutations)),
+            ("scope_states", size(scopeStates)),
+            ("scope_rows", size(scopeRows)),
+            ("row_metadata_records", size(rowMetadataRecords)),
+            ("rebuild_attempts", size(rebuildAttempts)),
+            ("rebuild_receipts", size(rebuildReceipts)),
+            ("events", size(events)),
+        ]
+        return sections
+            .filter { $0.1 != -1 }
+            .sorted { $0.1 > $1.1 }
+            .map { "\($0.0)=\($0.1)" }
+            .joined(separator: " ")
+    }
+}
+
 private struct RunnerResult: Encodable {
     var callID: String? = nil
     var state: String? = nil
@@ -1725,7 +1752,10 @@ private enum Main {
             do {
                 let encoded = try encoder.encode(response)
                 guard encoded.count <= maximumRunnerLineBytes - 1 else {
-                    throw RunnerError.outputLimit("encoded response bytes \(encoded.count) exceeds \(maximumRunnerLineBytes - 1)")
+                    let sections = response.result?.sectionSizeReport(encoder) ?? "no result sections"
+                    throw RunnerError.outputLimit(
+                        "encoded response bytes \(encoded.count) exceeds \(maximumRunnerLineBytes - 1); sections: \(sections)"
+                    )
                 }
                 data = encoded
             } catch {
