@@ -1208,15 +1208,12 @@ func (c *PushResponseLossCoordinator) proxyAdapter(writer http.ResponseWriter, r
 		}
 		if pushNumber == 1 {
 			c.signalPushCommitted()
-			select {
-			case <-request.Context().Done():
-				// The push committed upstream, so the loss stands. A plain
-				// return would let the server write an implicit empty 200,
-				// which a still-connected client decodes as corruption. The
-				// abort drops the connection, which is the authored loss.
-				panic(http.ErrAbortHandler)
-			case <-c.allowInitialResponse:
-			}
+			// The iOS HTTP client half-closes after it sends the request
+			// body, and the server reports that as request-context
+			// cancellation while the client still reads. The hold waits for
+			// the coordinated release only, and the loss below reaches a
+			// connected client or fails silently on a gone one.
+			<-c.allowInitialResponse
 			c.loseInitialResponse(writer)
 			return
 		}

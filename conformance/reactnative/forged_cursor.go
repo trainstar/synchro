@@ -842,15 +842,12 @@ func (c *ForgedCursorCoordinator) proxyAdapter(writer http.ResponseWriter, reque
 				c.recordProxyFailure(fmt.Errorf("React Native forged-cursor push status=%d want=%d", response.StatusCode, http.StatusOK))
 			}
 			c.signalPushCommitted()
-			select {
-			case <-request.Context().Done():
-				// The push committed upstream, so the barrier cannot deliver
-				// the response in sequence any more. The abort drops the
-				// connection instead of releasing the response early, and the
-				// committed batch replays by identity.
-				panic(http.ErrAbortHandler)
-			case <-c.allowPushResponse:
-			}
+			// The iOS HTTP client half-closes after it sends the request
+			// body, and the server reports that as request-context
+			// cancellation while the client still reads. The barrier waits
+			// for the coordinated release only, so the response is delivered
+			// in sequence to a connected client.
+			<-c.allowPushResponse
 		}
 		return nil
 	}
