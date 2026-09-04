@@ -1130,7 +1130,8 @@ private final class Runner: @unchecked Sendable {
         let counts = capture
         let retainedMutations: [RetainedMutation]? = counts.mutationLedgerCount <= maximumBoundedRecords ? try retainedMutationRecords(client.inspectRetainedMutations()) : nil
         let rejectedMutations: [RetainedRejection]? = counts.rejectedMutationCount <= maximumBoundedRecords ? try bounded(
-            client.inspectRejectedMutations().map(RetainedRejection.init)
+            client.inspectRejectedMutations().map(RetainedRejection.init),
+            subject: "rejected mutations"
         ) : nil
         var capturedApplicationRows: [[String: AnyCodable]] = []
         var captureValueBytes = 0
@@ -1179,13 +1180,13 @@ private final class Runner: @unchecked Sendable {
             ? nil
             : counts.rowMetadata.map(RowMetadataRecord.init)
         guard capturedApplicationRows.count <= Self.maximumRows else {
-            throw RunnerError.outputLimit
+            throw RunnerError.outputLimit("captured application rows \(capturedApplicationRows.count) exceeds \(Self.maximumRows)")
         }
         do {
-            let scopeStateRecords: [ScopeStateRecord]? = try scopeStates.map { try bounded($0.map(ScopeStateRecord.init)) }
-            let scopeRowRecords: [ScopeRowRecord]? = try scopeRows.map { try bounded($0.map(ScopeRowRecord.init)) }
-            let rebuildAttemptRecords: [RebuildAttemptRecord]? = try rebuildAttempts.map { try bounded($0.map(RebuildAttemptRecord.init)) }
-            let rebuildReceiptRecords: [RebuildReceiptRecord]? = try rebuildReceipts.map { try bounded($0.map(RebuildReceiptRecord.init)) }
+            let scopeStateRecords: [ScopeStateRecord]? = try scopeStates.map { try bounded($0.map(ScopeStateRecord.init), subject: "scope states") }
+            let scopeRowRecords: [ScopeRowRecord]? = try scopeRows.map { try bounded($0.map(ScopeRowRecord.init), subject: "scope rows") }
+            let rebuildAttemptRecords: [RebuildAttemptRecord]? = try rebuildAttempts.map { try bounded($0.map(RebuildAttemptRecord.init), subject: "rebuild attempts") }
+            let rebuildReceiptRecords: [RebuildReceiptRecord]? = try rebuildReceipts.map { try bounded($0.map(RebuildReceiptRecord.init), subject: "rebuild receipts") }
             return RunnerResult(
                 status: client.getSyncStatus().rawValue,
                 pendingChangeCount: try client.pendingChangeCount(),
@@ -1407,9 +1408,9 @@ private extension Data {
 
 private let maximumBoundedRecords = 512
 
-private func bounded<T>(_ values: [T], limit: Int = maximumBoundedRecords) throws -> [T] {
+private func bounded<T>(_ values: [T], subject: String, limit: Int = maximumBoundedRecords) throws -> [T] {
     guard values.count <= limit else {
-        throw RunnerError.outputLimit
+        throw RunnerError.outputLimit("\(subject) count \(values.count) exceeds \(limit)")
     }
     return values
 }
@@ -1418,9 +1419,9 @@ private func retainedMutationRecords(
     _ values: [PendingMutationInspection]
 ) throws -> [RetainedMutation] {
     guard values.allSatisfy({ $0.authoredFields.count <= maximumBoundedRecords }) else {
-        throw RunnerError.outputLimit
+        throw RunnerError.outputLimit("retained mutation authored fields exceed \(maximumBoundedRecords)")
     }
-    return try bounded(values.map(RetainedMutation.init))
+    return try bounded(values.map(RetainedMutation.init), subject: "retained mutations")
 }
 
 private func isReservedTable(_ value: String) -> Bool {
@@ -1501,7 +1502,7 @@ private enum RunnerError: Error {
     case captureQuery
     case captureRowCardinality
     case captureInspection
-    case outputLimit
+    case outputLimit(String)
 
     var code: String {
         switch self {
@@ -1519,6 +1520,17 @@ private enum RunnerError: Error {
             return "capture_inspection_failed"
         case .outputLimit:
             return "execution_failed"
+        }
+    }
+
+    /// The protocol code stays bounded, so the tripped bound reaches the
+    /// harness through stderr instead of the response.
+    var detail: String {
+        switch self {
+        case .outputLimit(let subject):
+            return "runner output limit: \(subject)"
+        default:
+            return "runner error: \(code)"
         }
     }
 }
@@ -1626,7 +1638,7 @@ private extension RunnerJSONValue {
 
 private func rowObject(_ row: Row, valueBytes: inout Int) throws -> [String: AnyCodable] {
     guard row.columnNames.count <= 256 else {
-        throw RunnerError.outputLimit
+        throw RunnerError.outputLimit("captured row columns \(row.columnNames.count) exceeds 256")
     }
     var result: [String: AnyCodable] = [:]
     for column in row.columnNames {
@@ -1645,14 +1657,14 @@ private func rowObject(_ row: Row, valueBytes: inout Int) throws -> [String: Any
         case .string(let value):
             guard value.utf8.count <= 1_048_576,
                   valueBytes <= maximumCaptureValueBytes - value.utf8.count else {
-                throw RunnerError.outputLimit
+                throw RunnerError.outputLimit("captured text value bytes \(valueBytes + value.utf8.count) exceeds \(maximumCaptureValueBytes)")
             }
             valueBytes += value.utf8.count
             output = value
         case .blob(let value):
             guard value.count <= 1_048_576,
                   valueBytes <= maximumCaptureValueBytes - value.count else {
-                throw RunnerError.outputLimit
+                throw RunnerError.outputLimit("captured blob value bytes \(valueBytes + value.count) exceeds \(maximumCaptureValueBytes)")
             }
             valueBytes += value.count
             output = value.base64URLEncodedString
@@ -1693,6 +1705,7 @@ private enum Main {
             } catch is DecodingError {
                 response = RunnerResponse(outcome: "error", result: nil, errorCode: "invalid_command")
             } catch let error as RunnerError {
+                FileHandle.standardError.write(Data("\(error.detail)\n".utf8))
                 response = RunnerResponse(outcome: "error", result: nil, errorCode: error.code)
             } catch {
                 // The protocol response carries a bounded code, so the
@@ -1712,7 +1725,7 @@ private enum Main {
             do {
                 let encoded = try encoder.encode(response)
                 guard encoded.count <= maximumRunnerLineBytes - 1 else {
-                    throw RunnerError.outputLimit
+                    throw RunnerError.outputLimit("encoded response bytes \(encoded.count) exceeds \(maximumRunnerLineBytes - 1)")
                 }
                 data = encoded
             } catch {
