@@ -1421,6 +1421,16 @@ fn activate_projection_bootstrap(
     cover_projection_bootstrap_fences(client, &reset, barrier)?;
     replace_live_projection(client, &reset)?;
     activate_projection_registry(client, &reset, target_generation, barrier, &affected_scopes)?;
+    // The rebuild immutability triggers accept a catching-up projection
+    // bootstrap named by this setting, because the activation clears the
+    // affected live rebuild state. Issue #43.
+    client
+        .update(
+            "SELECT set_config('synchro.stream_reset_id', $1, true)",
+            None,
+            &[reset.reset_id.as_str().into()],
+        )
+        .map_err(|_| "authorizing projection bootstrap invalidation failed".to_string())?;
     crate::materialize::invalidate_affected_membership_generation(
         client,
         &affected_scopes,

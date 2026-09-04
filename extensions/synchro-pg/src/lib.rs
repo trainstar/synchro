@@ -1529,7 +1529,13 @@ BEGIN
            SELECT 1
            FROM sync_stream_resets reset
            WHERE reset.reset_id::text = NULLIF(current_setting('synchro.stream_reset_id', true), '')
-             AND reset.lifecycle = 'baseline_staged'
+             AND (
+                 reset.lifecycle = 'baseline_staged'
+                 OR (
+                     reset.operation_kind = 'projection_bootstrap'
+                     AND reset.lifecycle = 'catching_up'
+                 )
+             )
        ) THEN
         RETURN OLD;
     END IF;
@@ -1571,7 +1577,13 @@ BEGIN
            SELECT 1
            FROM sync_stream_resets reset
            WHERE reset.reset_id::text = NULLIF(current_setting('synchro.stream_reset_id', true), '')
-             AND reset.lifecycle = 'baseline_staged'
+             AND (
+                 reset.lifecycle = 'baseline_staged'
+                 OR (
+                     reset.operation_kind = 'projection_bootstrap'
+                     AND reset.lifecycle = 'catching_up'
+                 )
+             )
        ) THEN
         RETURN OLD;
     END IF;

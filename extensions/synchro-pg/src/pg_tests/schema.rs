@@ -3320,6 +3320,30 @@
              WHERE rebuild_id = '44444444-4444-4444-4444-444444444444'",
         )
         .unwrap();
+        let active = active_orders_generation();
+        Spi::run(&format!(
+            "INSERT INTO sync_stream_resets (
+                 reset_id, operation_kind, source_stream_generation,
+                 target_stream_generation, source_registry_generation,
+                 target_registry_generation, old_slot_name, candidate_slot_name,
+                 database_oid, database_name, plugin, lifecycle,
+                 consistent_point, exported_snapshot_name, activation_barrier,
+                 baseline_staged_at
+             ) VALUES (
+                 '55555555-5555-5555-5555-555555555555', 'projection_bootstrap',
+                 'sg-1', 'sg-1', {active}, {staged}, 'old_slot', 'cand_slot',
+                 1, current_database(), 'pgoutput', 'catching_up',
+                 '0/10', 'snap_test', '0/20', now()
+             )"
+        ))
+        .unwrap();
+        Spi::run(
+            "SELECT set_config(
+                 'synchro.stream_reset_id',
+                 '55555555-5555-5555-5555-555555555555', true
+             )",
+        )
+        .unwrap();
         Spi::connect_mut(|client| {
             crate::materialize::invalidate_affected_membership_generation(
                 client,
