@@ -54,6 +54,6 @@ internal data class LocalMigrationJournal(
     val phase: MigrationPhase,
 )
 
-internal fun migrationPlanHash(planJSON: String): String = MessageDigest.getInstance("SHA-256")
-    .digest(planJSON.toByteArray(Charsets.UTF_8))
-    .joinToString(separator = "") { byte -> "%02x".format(byte.toInt() and 0xff) }
+internal fun migrationPlanHash(planJSON: String): String = Integrity.hex(
+    MessageDigest.getInstance("SHA-256").digest(planJSON.toByteArray(Charsets.UTF_8)),
+)

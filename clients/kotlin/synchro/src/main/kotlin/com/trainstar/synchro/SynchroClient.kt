@@ -495,7 +495,7 @@ class SynchroClient(private val config: SynchroConfig, context: Context) {
                 } catch (_: Exception) {
                     throw SynchroError.InvalidResponse("rebuild receipt record metadata is invalid")
                 }
-                recordIdentitiesHex += digest.identity.joinToString("") { "%02x".format(it.toInt() and 0xff) }
+                recordIdentitiesHex += Integrity.hex(digest.identity)
                 receivedRowChecksums += checksumKey(record.rowChecksum)
                 computedRowChecksums += checksumKey(digest.checksum)
                 entries += digest.identity to digest.checksum

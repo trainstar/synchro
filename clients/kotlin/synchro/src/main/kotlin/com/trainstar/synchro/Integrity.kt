@@ -85,8 +85,7 @@ internal object Integrity {
                 }
             }
         }
-        return sha256(schemaManifestDomain + canonicalJSON(body).toByteArray())
-            .joinToString("") { "%02x".format(it.toInt() and 0xff) }
+        return hex(sha256(schemaManifestDomain + canonicalJSON(body).toByteArray()))
     }
 
     fun rowIdentity(table: LocalSchemaTable, pk: JsonObject): ByteArray {
@@ -219,7 +218,7 @@ internal object Integrity {
         }).copyOf(16)
         digest[6] = ((digest[6].toInt() and 0x0f) or 0x50).toByte()
         digest[8] = ((digest[8].toInt() and 0x3f) or 0x80).toByte()
-        val hex = digest.joinToString("") { "%02x".format(it.toInt() and 0xff) }
+        val hex = hex(digest)
         return "${hex.substring(0, 8)}-${hex.substring(8, 12)}-${hex.substring(12, 16)}-${hex.substring(16, 20)}-${hex.substring(20)}"
     }
 
@@ -679,12 +678,25 @@ internal object Integrity {
         }
     }
 
-    private fun checksum(digest: ByteArray) = ChecksumObject("sha256", 1, "hex", digest.joinToString("") { "%02x".format(it.toInt() and 0xff) })
+    private fun checksum(digest: ByteArray) = ChecksumObject("sha256", 1, "hex", hex(digest))
 
     // Provider resolution in MessageDigest.getInstance dominates a per-row
     // digest, and state inspection digests every retained row.
     private val sha256Digest = ThreadLocal.withInitial { MessageDigest.getInstance("SHA-256") }
     private fun sha256(value: ByteArray): ByteArray = sha256Digest.get().digest(value)
+
+    // A Formatter allocation for each byte dominates hex encoding, and state
+    // inspection encodes every retained row identity and checksum.
+    private val hexDigits = "0123456789abcdef".toCharArray()
+    internal fun hex(value: ByteArray): String {
+        val output = CharArray(value.size * 2)
+        for (index in value.indices) {
+            val byte = value[index].toInt() and 0xff
+            output[index * 2] = hexDigits[byte ushr 4]
+            output[index * 2 + 1] = hexDigits[byte and 0x0f]
+        }
+        return String(output)
+    }
     private fun bytes(block: Encoder.() -> Unit): ByteArray = Encoder().apply(block).value()
     private fun invalid(subject: String): Nothing = throw IllegalArgumentException("invalid $subject")
 
