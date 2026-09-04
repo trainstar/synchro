@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"math"
 	"net/url"
@@ -338,7 +339,13 @@ func (s *Session) Execute(ctx context.Context, request Request) (Result, error) 
 		return Result{}, errors.New("write Kotlin instrumentation command failed")
 	}
 	if !scanner.Scan() || scanner.Err() != nil {
-		return Result{}, s.instrumentationFailure("read Kotlin instrumentation response failed")
+		// EOF with a nil error is a closed connection. A deadline error is a
+		// stalled response. The two need different investigations.
+		cause := "connection closed"
+		if err := scanner.Err(); err != nil {
+			cause = err.Error()
+		}
+		return Result{}, s.instrumentationFailure(fmt.Sprintf("read Kotlin instrumentation response failed (%s)", cause))
 	}
 	result, err := DecodeResponse(append([]byte(nil), scanner.Bytes()...))
 	if err != nil {
