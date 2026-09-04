@@ -3328,12 +3328,13 @@
                  target_registry_generation, old_slot_name, candidate_slot_name,
                  database_oid, database_name, plugin, lifecycle,
                  consistent_point, exported_snapshot_name, activation_barrier,
-                 baseline_staged_at
+                 baseline_staged_at, staged_row_count, staged_version_count,
+                 staged_edge_count, staged_fence_count, staged_scope_count
              ) VALUES (
                  '55555555-5555-5555-5555-555555555555', 'projection_bootstrap',
                  'sg-1', 'sg-1', {active}, {staged}, 'old_slot', 'cand_slot',
                  1, current_database(), 'pgoutput', 'catching_up',
-                 '0/10', 'snap_test', '0/20', now()
+                 '0/10', 'snap_test', '0/20', now(), 0, 0, 0, 0, 0
              )"
         ))
         .unwrap();
