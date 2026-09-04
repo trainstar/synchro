@@ -1210,10 +1210,11 @@ func (c *PushResponseLossCoordinator) proxyAdapter(writer http.ResponseWriter, r
 			c.signalPushCommitted()
 			select {
 			case <-request.Context().Done():
-				// The push committed upstream and the client abandoned the
-				// response, so the response is lost exactly as the fault
-				// requires. The sealed batch replays by identity either way.
-				return
+				// The push committed upstream, so the loss stands. A plain
+				// return would let the server write an implicit empty 200,
+				// which a still-connected client decodes as corruption. The
+				// abort drops the connection, which is the authored loss.
+				panic(http.ErrAbortHandler)
 			case <-c.allowInitialResponse:
 			}
 			c.loseInitialResponse(writer)

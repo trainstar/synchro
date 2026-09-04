@@ -844,11 +844,11 @@ func (c *ForgedCursorCoordinator) proxyAdapter(writer http.ResponseWriter, reque
 			c.signalPushCommitted()
 			select {
 			case <-request.Context().Done():
-				// The push committed upstream and the client abandoned the
-				// response. The barrier only sequences the response, and the
-				// committed batch replays by identity, so the disconnect is
-				// not a proxy failure.
-				return nil
+				// The push committed upstream, so the barrier cannot deliver
+				// the response in sequence any more. The abort drops the
+				// connection instead of releasing the response early, and the
+				// committed batch replays by identity.
+				panic(http.ErrAbortHandler)
 			case <-c.allowPushResponse:
 			}
 		}
