@@ -56,6 +56,9 @@ for _ in $(seq 1 120); do
 done
 if [ "$ready" -ne 1 ]; then
   wait "$initial_pid" || true
+  # The consumer names its failure on stderr, and the work directory is
+  # deleted on exit, so the cause must be reported here or it is lost.
+  cat "$work_dir/initial.log" >&2 || true
   printf '%s\n' "Packaged Swift initial phase did not become ready" >&2
   exit 1
 fi
@@ -90,6 +93,7 @@ for _ in $(seq 1 120); do
 done
 wait "$resume_pid"
 if [ "$resumed" -ne 1 ]; then
+  cat "$work_dir/resume.log" >&2 || true
   printf '%s\n' "Packaged Swift resume phase did not pass" >&2
   exit 1
 fi
