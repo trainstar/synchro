@@ -1399,7 +1399,12 @@ func (c *RebuildRequestsCoordinator) validateState(server scenarios.StateFacts, 
 	receipt := proof.RebuildReceiptProofs[0]
 	wantFinalChecksum := c.config.Platform == "ios"
 	if receipt.PageCount != 2 || receipt.ReturnedRecordCount != 2 || !receipt.RequestChainValid || !receipt.RecordsInCanonicalOrder || !receipt.RowChecksumsValid || !receipt.ScopeChecksumValid || receipt.FinalChecksumMatches != wantFinalChecksum {
-		return errors.New("React Native rebuild-requests receipt proof is invalid")
+		return fmt.Errorf(
+			"React Native rebuild-requests receipt={pages:%d records:%d chain:%t order:%t rows:%t scope:%t final:%t}, want={pages:2 records:2 chain:true order:true rows:true scope:true final:%t}",
+			receipt.PageCount, receipt.ReturnedRecordCount, receipt.RequestChainValid,
+			receipt.RecordsInCanonicalOrder, receipt.RowChecksumsValid, receipt.ScopeChecksumValid,
+			receipt.FinalChecksumMatches, wantFinalChecksum,
+		)
 	}
 	var runtimeSchema clientSchema
 	if json.Unmarshal(evidence.runtime["current-schema"], &runtimeSchema) != nil || state.Schema == nil || *state.Schema != runtimeSchema {
