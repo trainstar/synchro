@@ -1143,7 +1143,7 @@ func (c *QueueReplayCoordinator) validateCaptureAggregate(capture finalCapture) 
 		}
 	}
 	if pushes != len(c.steps)*2 {
-		return inspectedClientState{}, errors.New("React Native queue-replay response-loss and replay push trace is invalid")
+		return inspectedClientState{}, fmt.Errorf("React Native queue-replay response-loss and replay push trace is invalid: successful pushes=%d want=%d", pushes, len(c.steps)*2)
 	}
 	return state, nil
 }
