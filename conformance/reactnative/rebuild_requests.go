@@ -1397,7 +1397,11 @@ func (c *RebuildRequestsCoordinator) validateState(server scenarios.StateFacts, 
 		return errors.New("React Native rebuild-requests durable proof is incomplete")
 	}
 	receipt := proof.RebuildReceiptProofs[0]
-	wantFinalChecksum := c.config.Platform == "ios"
+	// The final receipt follows the terminal pull, where the Kotlin surface
+	// asserts the same false value at the same stage. The earlier receipt is
+	// the one that matches local. This outcome is stage bound, not platform
+	// bound, and both React Native platforms produce it.
+	const wantFinalChecksum = false
 	if receipt.PageCount != 2 || receipt.ReturnedRecordCount != 2 || !receipt.RequestChainValid || !receipt.RecordsInCanonicalOrder || !receipt.RowChecksumsValid || !receipt.ScopeChecksumValid || receipt.FinalChecksumMatches != wantFinalChecksum {
 		return fmt.Errorf(
 			"React Native rebuild-requests receipt={pages:%d records:%d chain:%t order:%t rows:%t scope:%t final:%t}, want={pages:2 records:2 chain:true order:true rows:true scope:true final:%t}",
