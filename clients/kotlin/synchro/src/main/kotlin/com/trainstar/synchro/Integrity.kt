@@ -680,7 +680,11 @@ internal object Integrity {
     }
 
     private fun checksum(digest: ByteArray) = ChecksumObject("sha256", 1, "hex", digest.joinToString("") { "%02x".format(it.toInt() and 0xff) })
-    private fun sha256(value: ByteArray): ByteArray = MessageDigest.getInstance("SHA-256").digest(value)
+
+    // Provider resolution in MessageDigest.getInstance dominates a per-row
+    // digest, and state inspection digests every retained row.
+    private val sha256Digest = ThreadLocal.withInitial { MessageDigest.getInstance("SHA-256") }
+    private fun sha256(value: ByteArray): ByteArray = sha256Digest.get().digest(value)
     private fun bytes(block: Encoder.() -> Unit): ByteArray = Encoder().apply(block).value()
     private fun invalid(subject: String): Nothing = throw IllegalArgumentException("invalid $subject")
 
