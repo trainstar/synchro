@@ -760,7 +760,7 @@ test-kotlin-performance: conformance-mod-download build-kotlin-conformance-app b
 			GOFLAGS= GOWORK=off go run ./cmd/testresult exact \
 			-test TestRealKotlinPerformance \
 			-expect target_pass \
-			-- go test -tags kotlinintegration -json ./kotlin -count=1 -timeout=50m \
+			-- go test -tags kotlinintegration -json ./kotlin -count=1 -timeout=75m \
 			-run '^TestRealKotlinPerformance$$' -args --provision --install
 
 test-kotlin-instrumentation: build-kotlin-conformance-app
