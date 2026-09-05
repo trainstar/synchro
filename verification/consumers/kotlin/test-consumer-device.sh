@@ -114,6 +114,11 @@ if [ "$killed" -ne 1 ]; then
   exit 1
 fi
 
+# Android restarts a killed foreground activity within a second, and that
+# uncontrolled instance races the resume configuration swap. The stop clears
+# it so the resume launch starts from a controlled state.
+adb_command shell am force-stop "$package"
+
 write_config "$work_dir/resume-config.json"
 adb_command shell am start -W -n "$package/.MainActivity" >/dev/null
 resume_pid=$(adb_command shell pidof "$package" | tr -d '\r')
@@ -136,6 +141,8 @@ for _ in $(seq 1 120); do
 done
 adb_command shell am force-stop "$package"
 if [ "$resumed" -ne 1 ]; then
+  # The app names its failure in logcat and nothing else records it.
+  adb_command logcat -d -t 80 AndroidRuntime:E SynchroConsumer:V "*:S" >&2 || true
   printf '%s\n' "Packaged Kotlin resume phase did not pass" >&2
   exit 1
 fi
