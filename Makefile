@@ -1635,7 +1635,7 @@ test-adapter:
 	fi; \
 	exit $$status
 
-synchrod-pg-test-start: build-seed verify-rn-seed
+synchrod-pg-test-start: build build-seed verify-rn-seed
 	@test -n "$(ADAPTER_TEST_URL)" || { echo "ADAPTER_TEST_URL is required" >&2; exit 1; }
 	@set -e; \
 	for PID in $$(lsof -tiTCP:$(SYNCHROD_PG_PORT) -sTCP:LISTEN 2>/dev/null); do \
@@ -1650,12 +1650,14 @@ synchrod-pg-test-start: build-seed verify-rn-seed
 	echo "Preparing client integration database..."; \
 	(cd conformance && DATABASE_URL="$(ADAPTER_TEST_URL)" GOFLAGS= GOWORK=off go run ./cmd/synchro-local-postgres prepare --repo-root ..); \
 	echo "Starting synchrod-pg on :$(SYNCHROD_PG_PORT)..."; \
-	nohup env \
+	MIN_CLIENT_VERSION="$(MIN_CLIENT_VERSION)" \
 		DATABASE_URL="$(ADAPTER_TEST_URL)" \
 		JWT_SECRET="$(SYNCHRO_TEST_JWT_SECRET)" \
-		MIN_CLIENT_VERSION="$(MIN_CLIENT_VERSION)" \
 		LISTEN_ADDR=":$(SYNCHROD_PG_PORT)" \
-		sh -c 'cd "$(CURDIR)/api/go" && GOWORK=off go run ./cmd/synchrod-pg' >"$(SYNCHROD_PG_LOG_FILE)" 2>&1 </dev/null & echo $$! >"$(SYNCHROD_PG_PID_FILE)"; \
+		SYNCHROD_ADAPTER_BINARY="$(CURDIR)/$(BINARY)" \
+		SYNCHROD_ADAPTER_PID_FILE="$(SYNCHROD_PG_PID_FILE)" \
+		SYNCHROD_ADAPTER_LOG_FILE="$(SYNCHROD_PG_LOG_FILE)" \
+		scripts/ci/start-adapter.sh; \
 	sleep 2; \
 	if ! kill -0 "$$(cat "$(SYNCHROD_PG_PID_FILE)")" 2>/dev/null; then \
 		echo "synchrod-pg failed to start:"; \
