@@ -113,6 +113,11 @@ if [ -n "${PACKAGED_SMOKE_CELL_ID:-}" ]; then
     sleep 1
   done
   if [ "$ready" -ne 1 ]; then
+    # The app names its failure in the simulator log, and the phase leaves no
+    # other trace, so the recent app log must be reported here or it is lost.
+    xcrun simctl spawn "$simulator_udid" log show --last 3m --style compact \
+      --predicate 'processImagePath CONTAINS "SynchroConsumer"' 2>/dev/null \
+      | grep -vE "com.apple" | tail -40 >&2 || true
     printf '%s\n' "Packaged Swift iOS initial phase did not become ready" >&2
     exit 1
   fi
