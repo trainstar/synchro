@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 
@@ -43,6 +44,14 @@ var requiredGateVariables = []string{
 	"TESTRESULT_TEST_NAME",
 }
 
+var digestedGateVariables = map[string]struct{}{
+	"DETOX_ARGS":       {},
+	"GO_TEST_ARGS":     {},
+	"GRADLE_TEST_ARGS": {},
+}
+
+var embeddedCredentialURL = regexp.MustCompile(`[A-Za-z][A-Za-z0-9+.-]*://[^/\s:@]+:[^/@\s]+@`)
+
 var proofHomes = map[string]string{
 	"reference-model":  "scenario",
 	"server-black-box": "real-integration",
@@ -71,7 +80,8 @@ type Summary struct {
 	Coverage       []CoverageEntry `json:"coverage"`
 }
 
-// GateVariable records one exact gate-affecting Make value.
+// GateVariable records a canonical JSON object of gate names and their values.
+// Free-form argument values use sha256 digests because they can contain credentials.
 type GateVariable struct {
 	Name  string `json:"name"`
 	Value string `json:"value"`
@@ -187,11 +197,11 @@ func Validate(ctx context.Context, repoRoot string, summary Summary) error {
 	if err := validateHashes(summary.ArtifactHashes, "CI summary"); err != nil {
 		return err
 	}
-	if err := validateGateVariables(summary.GateVariables); err != nil {
-		return err
-	}
 	expected, err := expectedObligations(ctx, root)
 	if err != nil {
+		return err
+	}
+	if err := validateGateVariables(summary.GateVariables, expected); err != nil {
 		return err
 	}
 	if err := validateObligations(summary.Obligations, expected, summary.ArtifactHashes); err != nil {
@@ -394,7 +404,7 @@ func validateCoverage(actual, expected []CoverageEntry, obligations map[string]s
 	return nil
 }
 
-func validateGateVariables(values []GateVariable) error {
+func validateGateVariables(values []GateVariable, obligations map[string]string) error {
 	if len(values) != len(requiredGateVariables) {
 		return errors.New("CI summary gate-variable set is incomplete")
 	}
@@ -403,6 +413,12 @@ func validateGateVariables(values []GateVariable) error {
 		wanted[name] = struct{}{}
 	}
 	seen := make(map[string]struct{}, len(values))
+	wantedGates := make(map[string]struct{})
+	for id, kind := range obligations {
+		if kind == "gate" && strings.HasPrefix(id, "gate/") {
+			wantedGates[strings.TrimPrefix(id, "gate/")] = struct{}{}
+		}
+	}
 	for _, variable := range values {
 		if _, required := wanted[variable.Name]; !required {
 			return fmt.Errorf("CI summary has unknown gate variable %s", variable.Name)
@@ -412,6 +428,27 @@ func validateGateVariables(values []GateVariable) error {
 		}
 		if len(variable.Value) > 4096 || strings.ContainsAny(variable.Value, "\x00\r\n") {
 			return fmt.Errorf("CI summary gate variable %s has an unsafe value", variable.Name)
+		}
+		var byGate map[string]string
+		if err := decodeClosed([]byte(variable.Value), &byGate); err != nil || len(byGate) == 0 {
+			return fmt.Errorf("CI summary gate variable %s has invalid gate values", variable.Name)
+		}
+		if len(byGate) != len(wantedGates) {
+			return fmt.Errorf("CI summary gate variable %s has an incomplete gate set", variable.Name)
+		}
+		for gate, value := range byGate {
+			if _, required := wantedGates[gate]; !required {
+				return fmt.Errorf("CI summary gate variable %s has an unknown gate %s", variable.Name, gate)
+			}
+			if gate == "" || len(value) > 4096 || strings.ContainsAny(value, "\x00\r\n") {
+				return fmt.Errorf("CI summary gate variable %s has an unsafe gate value", variable.Name)
+			}
+			if embeddedCredentialURL.MatchString(value) {
+				return fmt.Errorf("CI summary gate variable %s exposes credentials", variable.Name)
+			}
+			if _, digested := digestedGateVariables[variable.Name]; digested && (!strings.HasPrefix(value, "sha256:") || !validSHA256(strings.TrimPrefix(value, "sha256:"))) {
+				return fmt.Errorf("CI summary gate variable %s exposes a sensitive value", variable.Name)
+			}
 		}
 		seen[variable.Name] = struct{}{}
 	}

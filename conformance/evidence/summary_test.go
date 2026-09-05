@@ -19,7 +19,11 @@ func TestGenerateAndValidateCISummary(t *testing.T) {
 	if summary.SchemaURI != SchemaURI || summary.SchemaVersion != SchemaVersion || len(summary.Coverage) == 0 {
 		t.Fatalf("generated summary is incomplete: %#v", summary)
 	}
-	if summary.GateVariables[0].Name != "BLACKBOX_TEST_COUNT" || summary.GateVariables[0].Value != "17" {
+	var blackboxValues map[string]string
+	if err := json.Unmarshal([]byte(summary.GateVariables[0].Value), &blackboxValues); err != nil {
+		t.Fatalf("decode generated gate variable: %v", err)
+	}
+	if summary.GateVariables[0].Name != "BLACKBOX_TEST_COUNT" || blackboxValues["test-conformance"] != "17" {
 		t.Fatalf("generated gate variable = %#v, want exact value", summary.GateVariables[0])
 	}
 	if err := Validate(context.Background(), root, summary); err != nil {
@@ -68,7 +72,13 @@ func TestCISummaryRejectsGateVariableAndCoverageDrift(t *testing.T) {
 	}
 
 	input = validInput(t, root)
-	input.GateVariables[0].Name = input.GateVariables[1].Name
+	input.GateVariables[0].Name = "UNLISTED_VARIABLE"
+	if _, err := Generate(context.Background(), root, input); err == nil || !strings.Contains(err.Error(), "unknown gate variable") {
+		t.Fatalf("unlisted gate variable error = %v", err)
+	}
+
+	input = validInput(t, root)
+	input.GateVariables[0] = input.GateVariables[1]
 	if _, err := Generate(context.Background(), root, input); err == nil || !strings.Contains(err.Error(), "repeats gate variable") {
 		t.Fatalf("duplicate gate variable error = %v", err)
 	}
@@ -138,13 +148,31 @@ func validInput(t *testing.T, root string) Input {
 	for id, kind := range expected {
 		obligations = append(obligations, Obligation{ID: id, Kind: kind, Status: "passed", Terminal: true, TestCount: 1, ArtifactHashes: []string{hash}})
 	}
+	gateValues := make(map[string]string)
+	for id, kind := range expected {
+		if kind == "gate" {
+			gateValues[strings.TrimPrefix(id, "gate/")] = ""
+		}
+	}
 	variables := make([]GateVariable, 0, len(requiredGateVariables))
 	for _, name := range requiredGateVariables {
-		value := ""
-		if name == "BLACKBOX_TEST_COUNT" {
-			value = "17"
+		values := make(map[string]string, len(gateValues))
+		for gate, value := range gateValues {
+			values[gate] = value
 		}
-		variables = append(variables, GateVariable{Name: name, Value: value})
+		if name == "BLACKBOX_TEST_COUNT" {
+			values["test-conformance"] = "17"
+		}
+		if _, digested := digestedGateVariables[name]; digested {
+			for gate := range values {
+				values[gate] = "sha256:" + strings.Repeat("a", 64)
+			}
+		}
+		encoded, err := json.Marshal(values)
+		if err != nil {
+			t.Fatalf("marshal gate values: %v", err)
+		}
+		variables = append(variables, GateVariable{Name: name, Value: string(encoded)})
 	}
 	return Input{Status: "passed", ArtifactHashes: []string{hash}, GateVariables: variables, Obligations: obligations}
 }

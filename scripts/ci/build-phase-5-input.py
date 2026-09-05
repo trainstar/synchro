@@ -6,7 +6,6 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
-import os
 import re
 import sys
 from pathlib import Path
@@ -27,6 +26,10 @@ GATE_VARIABLES = (
     "SUPPORT_PLATFORM_VERSION",
     "TESTRESULT_TEST_NAME",
 )
+# Free-form argument variables can carry credentials. Receipts store only digests.
+DIGESTED_GATE_VARIABLES = {"DETOX_ARGS", "GO_TEST_ARGS", "GRADLE_TEST_ARGS"}
+SHA256_VALUE = re.compile(r"^sha256:[a-f0-9]{64}$")
+EMBEDDED_CREDENTIAL_URL = re.compile(r"[a-z][a-z0-9+.-]*://[^/\s:@]+:[^/@\s]+@", re.IGNORECASE)
 SMOKE_OPERATIONS = ("connect", "push", "pull", "kill", "resume")
 GATE_TARGET = re.compile(r"^phase-5-check:\s*(.*)$", re.MULTILINE)
 
@@ -105,10 +108,34 @@ def artifact_hashes(root: Path) -> list[str]:
     return sorted(set(hashes))
 
 
-def read_receipts(root: Path, expected: dict[str, str], hashes: list[str]) -> list[dict[str, object]]:
+def read_gate_variables(value: object, gate: str) -> dict[str, str]:
+    if not isinstance(value, list) or len(value) != len(GATE_VARIABLES):
+        raise InputError(f"gate result {gate} has an incomplete gate-variable set")
+    variables: dict[str, str] = {}
+    for item in value:
+        if not isinstance(item, dict) or set(item) != {"name", "value"}:
+            raise InputError(f"gate result {gate} has a malformed gate variable")
+        name = item.get("name")
+        variable_value = item.get("value")
+        if not isinstance(name, str) or name not in GATE_VARIABLES:
+            raise InputError(f"gate result {gate} has an unknown gate variable")
+        if name in variables:
+            raise InputError(f"gate result {gate} repeats gate variable {name}")
+        if not isinstance(variable_value, str) or len(variable_value) > 4096 or any(character in variable_value for character in "\x00\r\n"):
+            raise InputError(f"gate result {gate} has an unsafe gate variable {name}")
+        if EMBEDDED_CREDENTIAL_URL.search(variable_value):
+            raise InputError(f"gate result {gate} exposes credentials in gate variable {name}")
+        if name in DIGESTED_GATE_VARIABLES and not SHA256_VALUE.fullmatch(variable_value):
+            raise InputError(f"gate result {gate} exposes sensitive gate variable {name}")
+        variables[name] = variable_value
+    return variables
+
+
+def read_receipts(root: Path, expected: dict[str, str], hashes: list[str]) -> tuple[list[dict[str, object]], list[dict[str, str]]]:
     if not root.is_dir():
         raise InputError(f"gate result directory is missing: {root}")
     receipts: dict[str, dict[str, object]] = {}
+    receipt_variables: dict[str, dict[str, str]] = {}
     for path in sorted(root.glob("*.json")):
         value = load_json(path, f"gate result {path}")
         if not isinstance(value, dict):
@@ -124,6 +151,7 @@ def read_receipts(root: Path, expected: dict[str, str], hashes: list[str]) -> li
         if not isinstance(count, int) or isinstance(count, bool) or count < 1:
             raise InputError(f"gate result {gate} has no positive test count")
         receipts[gate] = value
+        receipt_variables[gate] = read_gate_variables(value.get("gate_variables"), gate)
     gate_names = {key[5:] for key in expected if key.startswith("gate/")}
     missing = sorted(gate_names - receipts.keys())
     if missing:
@@ -158,7 +186,12 @@ def read_receipts(root: Path, expected: dict[str, str], hashes: list[str]) -> li
         if not isinstance(count, int) or isinstance(count, bool) or count < 1:
             raise InputError(f"obligation {obligation_id} has no positive test count")
         item["artifact_hashes"] = hashes
-    return [obligations[key] for key in sorted(obligations)]
+    variables = []
+    for name in GATE_VARIABLES:
+        # The JSON object binds each recorded value to the gate that used it.
+        by_gate = {gate: receipt_variables[gate][name] for gate in sorted(receipt_variables)}
+        variables.append({"name": name, "value": json.dumps(by_gate, sort_keys=True, separators=(",", ":"))})
+    return [obligations[key] for key in sorted(obligations)], variables
 
 
 def main() -> int:
@@ -171,15 +204,7 @@ def main() -> int:
     try:
         expected = required_obligations(args.repo_root)
         hashes = artifact_hashes(args.artifact_root)
-        obligations = read_receipts(args.results_dir, expected, hashes)
-        variables = []
-        for name in GATE_VARIABLES:
-            if name not in os.environ:
-                raise InputError(f"missing required gate variable: {name}")
-            value = os.environ[name]
-            if len(value) > 4096 or any(character in value for character in "\x00\r\n"):
-                raise InputError(f"gate variable {name} has an unsafe value")
-            variables.append({"name": name, "value": value})
+        obligations, variables = read_receipts(args.results_dir, expected, hashes)
         value = {
             "status": "passed",
             "artifact_hashes": hashes,

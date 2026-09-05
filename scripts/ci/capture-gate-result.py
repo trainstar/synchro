@@ -4,7 +4,9 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
+import os
 import re
 import subprocess
 import sys
@@ -16,6 +18,38 @@ COUNT_PATTERNS = (
     re.compile(r"testresult:\s+(\d+)\s+Rust tests passed\b"),
 )
 TARGET_PASS = re.compile(r"testresult:\s+target_pass\b")
+GATE_VARIABLES = (
+    "BLACKBOX_TEST_COUNT",
+    "DETOX_ARGS",
+    "GO_TEST_ARGS",
+    "GO_TEST_PKGS",
+    "GRADLE_TEST_ARGS",
+    "KOTLIN_ANDROID_SERIAL",
+    "MUTATION_CONTROL_EXPECT",
+    "MUTATION_CONTROL_TEST",
+    "PGRX_TEST_NAME",
+    "RN_ANDROID_DETOX_CONFIG",
+    "SUPPORT_CELL_ID",
+    "SUPPORT_PLATFORM_VERSION",
+    "TESTRESULT_TEST_NAME",
+)
+# Free-form argument variables can carry credentials. Store only their digests.
+DIGESTED_GATE_VARIABLES = {"DETOX_ARGS", "GO_TEST_ARGS", "GRADLE_TEST_ARGS"}
+GATE_VARIABLE_DEFAULTS = {
+    "BLACKBOX_TEST_COUNT": "1",
+    "DETOX_ARGS": "",
+    "GO_TEST_ARGS": "-v -count=1 -p 1",
+    "GO_TEST_PKGS": "./...",
+    "GRADLE_TEST_ARGS": "--rerun-tasks",
+    "MUTATION_CONTROL_EXPECT": "target_pass",
+    "MUTATION_CONTROL_TEST": "",
+    "PGRX_TEST_NAME": "",
+    "RN_ANDROID_DETOX_CONFIG": "android.emu.release",
+    "SUPPORT_CELL_ID": "",
+    "SUPPORT_PLATFORM_VERSION": "",
+    "TESTRESULT_TEST_NAME": "",
+}
+EMBEDDED_CREDENTIAL_URL = re.compile(r"[a-z][a-z0-9+.-]*://[^/\s:@]+:[^/@\s]+@", re.IGNORECASE)
 
 
 def parse_count(output: str) -> int:
@@ -25,6 +59,29 @@ def parse_count(output: str) -> int:
     if TARGET_PASS.search(output):
         return 1
     return 0
+
+
+def gate_variables(environment: dict[str, str], command: list[str] | None = None) -> list[dict[str, str]]:
+    effective = dict(GATE_VARIABLE_DEFAULTS)
+    effective["KOTLIN_ANDROID_SERIAL"] = environment.get("ANDROID_SERIAL", "")
+    for name in GATE_VARIABLES:
+        if name in environment:
+            effective[name] = environment[name]
+    for argument in command or []:
+        name, separator, value = argument.partition("=")
+        if separator and name in GATE_VARIABLES:
+            effective[name] = value
+    variables = []
+    for name in GATE_VARIABLES:
+        if name not in effective:
+            raise ValueError(f"missing required gate variable: {name}")
+        value = effective[name]
+        if len(value) > 4096 or any(character in value for character in "\x00\r\n"):
+            raise ValueError(f"gate variable {name} has an unsafe value")
+        if name in DIGESTED_GATE_VARIABLES or EMBEDDED_CREDENTIAL_URL.search(value):
+            value = "sha256:" + hashlib.sha256(value.encode("utf-8")).hexdigest()
+        variables.append({"name": name, "value": value})
+    return variables
 
 
 def main() -> int:
@@ -40,6 +97,10 @@ def main() -> int:
         command = command[1:]
     if not command:
         parser.error("a gate command is required")
+    try:
+        variables = gate_variables(dict(os.environ), command)
+    except ValueError as error:
+        parser.error(str(error))
 
     process = subprocess.Popen(
         command,
@@ -63,6 +124,7 @@ def main() -> int:
         "terminal": status == 0 and test_count > 0,
         "test_count": test_count,
         "exit_code": status,
+        "gate_variables": variables,
     }
     args.output.parent.mkdir(parents=True, exist_ok=True)
     temporary = args.output.with_name(f".{args.output.name}.tmp")
