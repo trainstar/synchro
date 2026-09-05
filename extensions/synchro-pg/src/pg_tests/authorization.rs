@@ -178,15 +178,15 @@ fn seed_and_operator_have_only_declared_function_grants() {
     ));
     assert!(has_function_privilege(
         "synchro_operator",
-        "synchro.synchro_expire_retention_client(text,text)"
+        "synchro.synchro_inject_client_retention_expiry(text,text)"
     ));
     assert!(!has_function_privilege(
         "synchro_adapter",
-        "synchro.synchro_expire_retention_client(text,text)"
+        "synchro.synchro_inject_client_retention_expiry(text,text)"
     ));
     assert!(!has_function_privilege(
         "synchro_worker",
-        "synchro.synchro_expire_retention_client(text,text)"
+        "synchro.synchro_inject_client_retention_expiry(text,text)"
     ));
     assert!(!has_function_privilege(
         "synchro_operator",

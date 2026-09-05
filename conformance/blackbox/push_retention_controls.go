@@ -112,7 +112,7 @@ func (executor *OperatorExecutor) ExpireRetentionClient(ctx context.Context, use
 	var expired bool
 	err = database.QueryRowContext(
 		ctx,
-		"SELECT synchro.synchro_expire_retention_client($1, $2)",
+		"SELECT synchro.synchro_inject_client_retention_expiry($1, $2)",
 		userID,
 		clientID,
 	).Scan(&expired)

@@ -2014,7 +2014,7 @@ BEGIN
                  'synchro_unregister_table', 'synchro_register_shared_scope',
                  'synchro_unregister_shared_scope', 'synchro_grant_user_scope',
                  'synchro_revoke_user_scope', 'synchro_backfill_bucket_edges',
-                 'synchro_compact', 'synchro_expire_retention_client',
+                  'synchro_compact', 'synchro_inject_client_retention_expiry',
                  'synchro_retry_wal_poison', 'synchro_health_detail',
                  'synchro_debug', 'synchro_primary_key_guard', 'synchro_capture_fence',
                  'synchro_prepare_stream_reset', 'synchro_lock_stream_reset_sources',

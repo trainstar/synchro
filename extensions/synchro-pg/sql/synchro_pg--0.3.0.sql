@@ -1948,13 +1948,13 @@ AS 'MODULE_PATHNAME', 'synchro_emit_projection_bootstrap_barrier_wrapper';
 
 /* <begin connected objects> */
 -- synchro-pg/src/compaction.rs:37
--- synchro_pg::compaction::synchro_expire_retention_client
-CREATE  FUNCTION "synchro_expire_retention_client"(
+-- synchro_pg::compaction::synchro_inject_client_retention_expiry
+CREATE  FUNCTION "synchro_inject_client_retention_expiry"(
 	"p_user_id" TEXT, /* core::option::Option<&str> */
 	"p_client_id" TEXT /* core::option::Option<&str> */
 ) RETURNS bool /* bool */
 LANGUAGE c /* Rust */
-AS 'MODULE_PATHNAME', 'synchro_expire_retention_client_wrapper';
+AS 'MODULE_PATHNAME', 'synchro_inject_client_retention_expiry_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
@@ -2480,7 +2480,7 @@ BEGIN
                  'synchro_register_membership_dependency',
                  'synchro_unregister_table', 'synchro_register_shared_scope',
                  'synchro_unregister_shared_scope', 'synchro_backfill_bucket_edges',
-                 'synchro_compact', 'synchro_expire_retention_client',
+                  'synchro_compact', 'synchro_inject_client_retention_expiry',
                  'synchro_retry_wal_poison', 'synchro_health_detail',
                  'synchro_debug', 'synchro_primary_key_guard', 'synchro_capture_fence',
                  'synchro_prepare_stream_reset', 'synchro_lock_stream_reset_sources',

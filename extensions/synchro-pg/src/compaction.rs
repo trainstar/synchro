@@ -33,9 +33,12 @@ fn synchro_compact(
     })
 }
 
-/// Mark one active client generation for expiry during the next compaction.
+/// Test-support injection that marks one active client generation for expiry during compaction.
 #[pg_extern]
-fn synchro_expire_retention_client(p_user_id: Option<&str>, p_client_id: Option<&str>) -> bool {
+fn synchro_inject_client_retention_expiry(
+    p_user_id: Option<&str>,
+    p_client_id: Option<&str>,
+) -> bool {
     let p_user_id =
         p_user_id.unwrap_or_else(|| pgrx::error!("retention client identity is invalid"));
     let p_client_id =

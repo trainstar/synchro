@@ -76,7 +76,7 @@
         register_client("u1", "expired-by-injected-clock");
         register_client("u1", "active-at-injected-clock");
         let marked: bool = Spi::get_one(
-            "SELECT synchro_expire_retention_client('u1', 'expired-by-injected-clock')",
+            "SELECT synchro_inject_client_retention_expiry('u1', 'expired-by-injected-clock')",
         )
         .expect("mark retention client")
         .expect("retention client mark result");
@@ -114,12 +114,18 @@
         register_client("u1", "c1");
 
         let accepted = PgTryBuilder::new(std::panic::AssertUnwindSafe(|| {
-            Spi::get_one::<bool>("SELECT synchro_expire_retention_client('', 'c1')").is_ok()
+            Spi::get_one::<bool>(
+                "SELECT synchro_inject_client_retention_expiry('', 'c1')",
+            )
+            .is_ok()
         }))
         .catch_others(|_| false)
         .execute();
         let null_accepted = PgTryBuilder::new(std::panic::AssertUnwindSafe(|| {
-            Spi::get_one::<bool>("SELECT synchro_expire_retention_client(NULL, 'c1')").is_ok()
+            Spi::get_one::<bool>(
+                "SELECT synchro_inject_client_retention_expiry(NULL, 'c1')",
+            )
+            .is_ok()
         }))
         .catch_others(|_| false)
         .execute();
