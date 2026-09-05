@@ -359,12 +359,14 @@ jobs:
 
   validate-kotlin:
     runs-on: ubuntu-24.04
-    needs: [validate-metadata, linux-pgrx-runtime]
+    needs: [validate-metadata, linux-pgrx-runtime, package-extension]
     env:
       ANDROID_HOME: /usr/local/lib/android/sdk
       ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
       KOTLIN_ANDROID_SERIAL: emulator-5554
       GRADLE_TEST_ARGS: ""
+      SYNCHRO_TEST_URL: http://localhost:8091
+      SYNCHRO_TEST_JWT_SECRET: test-secret-for-integration-tests
     steps:
       - uses: actions/checkout@v6.0.2
 
@@ -403,6 +405,34 @@ jobs:
         run: |
           test -f "$HOME/.pgrx/config.toml"
           grep -q '^pg18' "$HOME/.pgrx/config.toml"
+
+      - uses: ./.github/actions/setup-conformance-pg18
+
+      - uses: actions/download-artifact@v8.0.1
+        with:
+          name: synchro-pg-pg18-linux-x64
+          path: ${{ runner.temp }}/synchro-pg-pg18-linux-x64
+
+      - name: Restore packaged PostgreSQL 18 extension
+        run: |
+          mkdir -p "$RUNNER_TEMP/packaged-extension"
+          tar -C "$RUNNER_TEMP/packaged-extension" -xzf "$RUNNER_TEMP/synchro-pg-pg18-linux-x64/synchro-pg-pg18-linux-x64.tar.gz"
+          test -f "$RUNNER_TEMP/packaged-extension/synchro-pg-pg18/artifact-manifest.json"
+          echo "SYNCHRO_CONFORMANCE_EXTENSION_ARTIFACT=$RUNNER_TEMP/packaged-extension/synchro-pg-pg18" >> "$GITHUB_ENV"
+
+      - name: Start packaged PostgreSQL 18 adapter
+        run: |
+          make local-postgres-start CONFORMANCE_EXTENSION_ARTIFACT="$SYNCHRO_CONFORMANCE_EXTENSION_ARTIFACT"
+          database_url="$(cat .ignore/r2/tmp/local-postgres/postgres.url)"
+          (cd conformance && DATABASE_URL="$database_url" GOFLAGS= GOWORK=off go run ./cmd/synchro-local-postgres prepare --repo-root ..)
+          DATABASE_URL="$database_url" \
+            JWT_SECRET="$SYNCHRO_TEST_JWT_SECRET" \
+            LISTEN_ADDR=:8091 \
+            SYNCHROD_ADAPTER_BINARY="$SYNCHRO_CONFORMANCE_ADAPTER_ARTIFACT" \
+            SYNCHROD_ADAPTER_PID_FILE="$GITHUB_WORKSPACE/.synchrod-pg-test.pid" \
+            SYNCHROD_ADAPTER_LOG_FILE="$GITHUB_WORKSPACE/.synchrod-pg-test.log" \
+            scripts/ci/start-adapter.sh
+          echo "ADAPTER_TEST_URL=$database_url" >> "$GITHUB_ENV"
 
       - name: Verify Android SDK tooling
         run: |
@@ -454,7 +484,9 @@ jobs:
           disable-animations: true
           emulator-boot-timeout: 900
           emulator-options: -no-snapshot-save -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
-          script: scripts/ci/capture-gate-result.py --gate test-kotlin-instrumentation --output dist/verification/gate-results/test-kotlin-instrumentation.json -- make test-kotlin-instrumentation
+          script: |
+            scripts/ci/capture-gate-result.py --gate test-kotlin-instrumentation --output dist/verification/gate-results/test-kotlin-instrumentation.json -- make test-kotlin-instrumentation
+            make test-client-platforms SUPPORT_CELL_ID=SUP-PG-LINUX-X64-001 SUPPORT_PLATFORM_VERSION=18
 
       - name: Validate Kotlin SDK
         run: |
@@ -469,6 +501,13 @@ jobs:
         with:
           name: phase-5-gate-results-kotlin
           path: dist/verification/gate-results
+
+      - name: Publish PostgreSQL Linux x64 packaged smoke result
+        if: always()
+        uses: actions/upload-artifact@v7.0.0
+        with:
+          name: phase-5-packaged-smoke-cells-pg-linux-x64
+          path: dist/verification/packaged-smoke-cells/SUP-PG-LINUX-X64-001.json
 
   validate-rn-android:
     runs-on: ubuntu-24.04
@@ -745,12 +784,8 @@ jobs:
 
       - name: Package PG 18 extension
         run: |
-          mkdir -p dist
-          cd extensions/synchro-pg
-          PG_CONFIG_PATH="$(awk -F'\"' '/^pg18[[:space:]]*=/ { print $2 }' "$HOME/.pgrx/config.toml")"
-          CARGO_TARGET_DIR="${GITHUB_WORKSPACE}/.pgrx-target" cargo pgrx package --pg-config "$PG_CONFIG_PATH" --out-dir "${GITHUB_WORKSPACE}/dist/synchro-pg-pg18"
-          cd "${GITHUB_WORKSPACE}/dist"
-          tar -czf "synchro-pg-pg18-${{ matrix.extension_architecture }}.tar.gz" synchro-pg-pg18
+          make conformance-pg18-extension-artifact
+          tar -C dist/conformance -czf "dist/synchro-pg-pg18-${{ matrix.extension_architecture }}.tar.gz" synchro-pg-pg18
 
       - uses: actions/upload-artifact@v7.0.0
         with:
