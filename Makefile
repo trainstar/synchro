@@ -38,6 +38,7 @@
 	conformance-adapter-artifact \
 	conformance-pg18-extension-artifact \
 	test-evidence \
+	coverage-report \
 	test-inventory \
 	test-conformance \
 	test-blackbox \
@@ -270,6 +271,7 @@ help:
 	@echo "  test-r1-benchmark     - Compare R1 benchmark results with the tracked baseline"
 	@echo "  rc-check-pg18         - Verify the packaged PostgreSQL 18 candidate"
 	@echo "  evidence              - Generate and validate the Phase 5 CI summary"
+	@echo "  coverage-report       - Generate requirement coverage from the Phase 5 CI summary"
 	@echo "  lint-go               - Run Go formatting checks and go vet"
 	@echo "  lint-rn               - Run React Native typecheck and ESLint"
 	@echo "  lint-rust-core        - Run Rust fmt and clippy for the shared core"
@@ -618,6 +620,10 @@ evidence:
 	@test -f "$(PHASE_5_INPUT)" || (echo "PHASE_5_INPUT is required: $(PHASE_5_INPUT)" >&2; exit 1)
 	cd conformance && GOFLAGS= GOWORK=off go run ./cmd/synchro-evidence generate --repo-root .. --input "$(PHASE_5_INPUT)" --output "$(PHASE_5_EVIDENCE)"
 	cd conformance && GOFLAGS= GOWORK=off go run ./cmd/synchro-evidence validate --repo-root .. --summary "$(PHASE_5_EVIDENCE)"
+
+coverage-report:
+	@test -f "$(PHASE_5_EVIDENCE)" || (echo "PHASE_5_EVIDENCE is required: $(PHASE_5_EVIDENCE)" >&2; exit 1)
+	cd conformance && GOFLAGS= GOWORK=off go run ./cmd/synchro-evidence coverage-report --repo-root .. --summary "$(PHASE_5_EVIDENCE)" --json "$(CURDIR)/dist/verification/requirement-coverage.json" --markdown "$(CURDIR)/dist/verification/requirement-coverage.md"
 
 lint-rn:
 	cd clients/react-native && yarn typecheck

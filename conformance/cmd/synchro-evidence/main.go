@@ -42,6 +42,8 @@ func run(ctx context.Context, args []string) error {
 		return runValidate(ctx, args[1:])
 	case "coverage":
 		return runCoverage(ctx, args[1:])
+	case "coverage-report":
+		return runCoverageReport(ctx, args[1:])
 	default:
 		return errors.New("unknown command")
 	}
@@ -116,6 +118,36 @@ func runCoverage(ctx context.Context, args []string) error {
 		return err
 	}
 	if err := inventory.WriteMarkdown(&markdownOutput, report); err != nil {
+		return err
+	}
+	if err := publish(*jsonPath, jsonOutput.Bytes()); err != nil {
+		return err
+	}
+	return publish(*markdownPath, markdownOutput.Bytes())
+}
+
+func runCoverageReport(ctx context.Context, args []string) error {
+	flags := newFlagSet("coverage-report")
+	repoRoot := flags.String("repo-root", "", "repository root")
+	summaryPath := flags.String("summary", "", "phase-5 CI summary")
+	jsonPath := flags.String("json", "", "requirement coverage JSON output")
+	markdownPath := flags.String("markdown", "", "requirement coverage Markdown output")
+	if err := flags.Parse(args); err != nil || flags.NArg() != 0 || *repoRoot == "" || *summaryPath == "" || *jsonPath == "" || *markdownPath == "" {
+		return errors.New("coverage-report requires --repo-root, --summary, --json, and --markdown")
+	}
+	summary, err := readSummary(*summaryPath)
+	if err != nil {
+		return err
+	}
+	report, err := evidence.GenerateRequirementCoverage(ctx, *repoRoot, summary)
+	if err != nil {
+		return fmt.Errorf("generate requirement coverage: %w", err)
+	}
+	var jsonOutput, markdownOutput bytes.Buffer
+	if err := evidence.WriteRequirementCoverageJSON(&jsonOutput, report); err != nil {
+		return err
+	}
+	if err := evidence.WriteRequirementCoverageMarkdown(&markdownOutput, report); err != nil {
 		return err
 	}
 	if err := publish(*jsonPath, jsonOutput.Bytes()); err != nil {
