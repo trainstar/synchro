@@ -72,13 +72,21 @@ write_config() {
 }
 
 write_config "$work_dir/initial-config.json"
-adb_command shell am start -W -n "$package/.MainActivity" >/dev/null
-initial_pid=$(adb_command shell pidof "$package" | tr -d '\r')
+adb_command shell am start -n "$package/.MainActivity" >/dev/null
+initial_pid=""
+for _ in $(seq 1 30); do
+  initial_pid=$(adb_command shell pidof "$package" 2>/dev/null | tr -d '\r' || true)
+  [ -n "$initial_pid" ] && break
+  sleep 1
+done
 case "$initial_pid" in *[!0-9]*|'') printf '%s\n' "Android initial process id is invalid" >&2; exit 1 ;; esac
 
 ready=0
 for _ in $(seq 1 120); do
-  if adb_command exec-out run-as "$package" cat files/initial-result.json > "$work_dir/initial.json" 2>/dev/null; then
+  # exec-out reports success even when the remote cat fails, so only the
+  # captured content proves the phase result exists.
+  adb_command exec-out run-as "$package" cat files/initial-result.json > "$work_dir/initial.json" 2>/dev/null || true
+  if grep -q '"phase"' "$work_dir/initial.json" 2>/dev/null; then
     ready=1
     break
   fi
@@ -120,8 +128,15 @@ fi
 adb_command shell am force-stop "$package"
 
 write_config "$work_dir/resume-config.json"
-adb_command shell am start -W -n "$package/.MainActivity" >/dev/null
-resume_pid=$(adb_command shell pidof "$package" | tr -d '\r')
+# am start -W never returns when the launched activity dies at once, so the
+# launch is asynchronous and the process id is polled.
+adb_command shell am start -n "$package/.MainActivity" >/dev/null
+resume_pid=""
+for _ in $(seq 1 30); do
+  resume_pid=$(adb_command shell pidof "$package" 2>/dev/null | tr -d '\r' || true)
+  [ -n "$resume_pid" ] && break
+  sleep 1
+done
 case "$resume_pid" in *[!0-9]*|'') printf '%s\n' "Android resume process id is invalid" >&2; exit 1 ;; esac
 if [ "$resume_pid" = "$initial_pid" ]; then
   printf '%s\n' "Packaged Kotlin resume reused the killed process" >&2
@@ -130,7 +145,8 @@ fi
 
 resumed=0
 for _ in $(seq 1 120); do
-  if adb_command exec-out run-as "$package" cat files/resume-result.json > "$work_dir/resume.json" 2>/dev/null; then
+  adb_command exec-out run-as "$package" cat files/resume-result.json > "$work_dir/resume.json" 2>/dev/null || true
+  if grep -q '"phase"' "$work_dir/resume.json" 2>/dev/null; then
     resumed=1
     break
   fi
