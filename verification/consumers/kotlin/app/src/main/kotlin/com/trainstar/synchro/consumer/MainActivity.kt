@@ -74,9 +74,6 @@ class MainActivity : Activity() {
 
         if (phase == "initial") {
             client.start()
-            // start() can return before the first cycle applies the server
-            // schema, and the customers insert requires that schema.
-            client.syncNow()
             val timestamp = Instant.now().toString()
             client.execute(
                 "INSERT INTO customers (id, user_id, name, balance, is_active, created_at, updated_at) VALUES (?, ?, ?, 0, 1, ?, ?)",
