@@ -90,7 +90,10 @@ for _ in $(seq 1 120); do
     ready=1
     break
   fi
-  if ! adb_command shell run-as "$package" kill -0 "$initial_pid" >/dev/null 2>&1; then
+  # kill -0 through run-as is permission-denied against a live process on
+  # API 34, so liveness is the process id still being listed.
+  current_pid=$(adb_command shell pidof "$package" 2>/dev/null | tr -d '\r' || true)
+  if [ "$current_pid" != "$initial_pid" ]; then
     break
   fi
   sleep 1
@@ -152,7 +155,8 @@ for _ in $(seq 1 120); do
     resumed=1
     break
   fi
-  if ! adb_command shell run-as "$package" kill -0 "$resume_pid" >/dev/null 2>&1; then
+  current_pid=$(adb_command shell pidof "$package" 2>/dev/null | tr -d '\r' || true)
+  if [ "$current_pid" != "$resume_pid" ]; then
     break
   fi
   sleep 1
