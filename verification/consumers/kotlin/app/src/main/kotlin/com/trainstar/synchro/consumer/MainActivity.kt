@@ -5,6 +5,7 @@ package com.trainstar.synchro.consumer
 import android.app.Activity
 import android.os.Bundle
 import com.trainstar.synchro.ColumnDef
+import com.trainstar.synchro.SyncStatus
 import com.trainstar.synchro.SynchroClient
 import com.trainstar.synchro.SynchroConfig
 import com.trainstar.synchro.inspection.TransportObservationCollector
@@ -74,6 +75,10 @@ class MainActivity : Activity() {
 
         if (phase == "initial") {
             client.start()
+            // start() can return before the first cycle applies the server
+            // schema, and the customers insert requires that schema. The
+            // public status reaches Ready when the schema is applied.
+            awaitReadyStatus(client)
             val timestamp = Instant.now().toString()
             client.execute(
                 "INSERT INTO customers (id, user_id, name, balance, is_active, created_at, updated_at) VALUES (?, ?, ?, 0, 1, ?, ?)",
@@ -127,12 +132,28 @@ class MainActivity : Activity() {
         val pendingBeforeResume = client.pendingChangeCount()
         check(durable == """{"street":"Packaged Durable"}""" && pendingBeforeResume > 0)
         client.start()
+        // syncNow before the engine publishes connectionReady throws, so the
+        // resume waits for the public Ready status first.
+        awaitReadyStatus(client)
         client.syncNow()
         val pendingAfterResume = client.pendingChangeCount()
         check(pendingAfterResume == 0)
         writePhaseResult(phase, pendingAfterResume)
         client.stop()
         client.close()
+    }
+
+    private fun awaitReadyStatus(client: SynchroClient) {
+        // A bounded wait on the public status. The initial cycle applies the
+        // server schema before the engine reports Ready.
+        repeat(600) {
+            when (val status = client.getSyncStatus()) {
+                is SyncStatus.Ready -> return
+                is SyncStatus.Error -> error("sync engine entered error: ${'$'}{status.failure.code}")
+                else -> Thread.sleep(100)
+            }
+        }
+        error("sync engine did not reach Ready within 60 seconds")
     }
 
     private fun writePhaseResult(phase: String, pendingCount: Int) {
