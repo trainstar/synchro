@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -12,7 +11,6 @@ import (
 	"testing"
 
 	"github.com/trainstar/synchro/conformance/internal/contract"
-	"github.com/trainstar/synchro/conformance/nativeexecution"
 	"github.com/trainstar/synchro/conformance/scenarios"
 )
 
@@ -31,8 +29,6 @@ func TestRunRejectsInvalidCommandsAndFlags(t *testing.T) {
 		{"positional extra", []string{"catalog", "--repo-root", ".", "--check", "extra"}, "does not accept positional"},
 		{"blackbox missing mode", []string{"blackbox", "--repo-root", "."}, "blackbox requires --mode"},
 		{"blackbox invalid mode", []string{"blackbox", "--repo-root", ".", "--mode", "other"}, "blackbox requires --mode"},
-		{"native missing selection", []string{"native", "--repo-root", "."}, "native requires"},
-		{"native malformed flag", []string{"native", "--unknown"}, "native flags are invalid"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -41,36 +37,6 @@ func TestRunRejectsInvalidCommandsAndFlags(t *testing.T) {
 				t.Fatalf("run error = %v, want %q", err, test.want)
 			}
 		})
-	}
-}
-
-func TestRunNativeWritesCatalogBoundManifest(t *testing.T) {
-	var output bytes.Buffer
-	err := runNative(context.Background(), []string{
-		"--repo-root", repositoryRoot(t),
-		"--scenario", "SCN-PERF-STEADY-PULL-001",
-		"--support-cell", "SUP-IOS-MIN-001",
-	}, &output)
-	if err != nil {
-		t.Fatalf("run native manifest: %v", err)
-	}
-	var manifest nativeexecution.Manifest
-	if err := json.Unmarshal(output.Bytes(), &manifest); err != nil {
-		t.Fatalf("decode native manifest: %v", err)
-	}
-	if manifest.ScenarioID != "SCN-PERF-STEADY-PULL-001" || manifest.SupportCellID != "SUP-IOS-MIN-001" || manifest.MakeTarget != "test-swift" {
-		t.Fatalf("native manifest selection = %+v", manifest)
-	}
-	foundMeasuredStep := false
-	for _, action := range manifest.Actions {
-		for _, step := range action.Steps {
-			if step.ID == "STEP-PERF-STEADY-PULL-002" {
-				foundMeasuredStep = true
-			}
-		}
-	}
-	if !foundMeasuredStep {
-		t.Fatal("native manifest omitted the measured steady pull")
 	}
 }
 

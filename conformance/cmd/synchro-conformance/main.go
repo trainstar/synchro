@@ -5,7 +5,6 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -21,7 +20,6 @@ import (
 	"github.com/trainstar/synchro/conformance/blackbox"
 	"github.com/trainstar/synchro/conformance/blackbox/syntheticproof"
 	"github.com/trainstar/synchro/conformance/execution"
-	"github.com/trainstar/synchro/conformance/nativeexecution"
 	"github.com/trainstar/synchro/conformance/scenarios"
 )
 
@@ -49,44 +47,9 @@ func run(ctx context.Context, args []string) error {
 		return runCatalog(ctx, args[1:])
 	case "blackbox":
 		return runBlackbox(ctx, args[1:])
-	case "native":
-		return runNative(ctx, args[1:], os.Stdout)
 	default:
 		return errors.New("unknown command")
 	}
-}
-
-func runNative(ctx context.Context, args []string, output io.Writer) error {
-	flags := newFlagSet("native")
-	repoRoot := flags.String("repo-root", "", "repository root")
-	scenarioID := flags.String("scenario", "", "authored scenario ID")
-	supportCellID := flags.String("support-cell", "", "native support-cell ID")
-	if err := flags.Parse(args); err != nil {
-		return errors.New("native flags are invalid")
-	}
-	if flags.NArg() != 0 {
-		return errors.New("native does not accept positional arguments")
-	}
-	if *repoRoot == "" || *scenarioID == "" || *supportCellID == "" {
-		return errors.New("native requires --repo-root PATH, --scenario ID, and --support-cell ID")
-	}
-	if output == nil {
-		return errors.New("native output is nil")
-	}
-	selection, err := nativeexecution.Select(ctx, *repoRoot, *scenarioID, *supportCellID)
-	if err != nil {
-		return operationError(ctx, "native select", err)
-	}
-	manifest, err := nativeexecution.BuildManifest(selection)
-	if err != nil {
-		return operationError(ctx, "native manifest", err)
-	}
-	encoder := json.NewEncoder(output)
-	encoder.SetEscapeHTML(false)
-	if err := encoder.Encode(manifest); err != nil {
-		return operationError(ctx, "native manifest encode", err)
-	}
-	return nil
 }
 
 func runCatalog(ctx context.Context, args []string) error {

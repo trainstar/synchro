@@ -414,7 +414,7 @@ check-conformance-catalog:
 	cd conformance && GOFLAGS= GOWORK=off go run ./cmd/synchro-conformance catalog --repo-root .. --check
 
 test-conformance-scenarios:
-	cd conformance && GOFLAGS= GOWORK=off go run ./cmd/testresult suite -- go test -json ./scenarios/... ./nativeexecution ./nativeharness ./modelrunner ./cmd/synchro-conformance -count=1
+	cd conformance && GOFLAGS= GOWORK=off go run ./cmd/testresult suite -- go test -json ./scenarios/... ./modelrunner ./cmd/synchro-conformance -count=1
 
 test-vectors:
 	cd conformance && GOFLAGS= GOWORK=off go run ./cmd/testresult suite -- go test -json ./vectors -count=1
