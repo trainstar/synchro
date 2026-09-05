@@ -323,6 +323,11 @@ jobs:
           corepack enable
           yarn install --immutable
 
+      - name: Start the local PostgreSQL for the adapter
+        run: |
+          make local-postgres-start
+          echo "ADAPTER_TEST_URL=$(cat .ignore/r2/tmp/local-postgres/postgres.url)" >> "$GITHUB_ENV"
+
       - name: Ensure CocoaPods is available
         run: |
           if ! command -v pod >/dev/null 2>&1; then

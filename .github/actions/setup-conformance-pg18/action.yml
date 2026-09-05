@@ -19,7 +19,7 @@ runs:
       env:
         EXPECTED_POSTGRESQL_VERSION: ${{ inputs.expected-postgresql-version }}
       run: |
-        set -euo pipefail
+        set -euxo pipefail
         test -f "$HOME/.pgrx/config.toml"
         pg_config="$(awk -F'"' '/^pg18[[:space:]]*=/ { print $2 }' "$HOME/.pgrx/config.toml")"
         test -x "$pg_config"
