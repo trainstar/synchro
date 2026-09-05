@@ -96,6 +96,8 @@ for _ in $(seq 1 120); do
   sleep 1
 done
 if [ "$ready" -ne 1 ]; then
+  # The app names its failure in logcat and nothing else records it.
+  adb_command logcat -d -t 120 AndroidRuntime:E "*:S" >&2 || true
   printf '%s\n' "Packaged Kotlin initial phase did not become ready" >&2
   exit 1
 fi
