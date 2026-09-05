@@ -118,6 +118,10 @@ final class PushProcessor: @unchecked Sendable {
         syncedTables: [LocalSchemaTable]
     ) throws -> [Mutation] {
         let requestSchema = SchemaRef(version: schemaVersion, hash: schemaHash)
+        // Resolving a historical table decodes every sealed batch, and one
+        // seal resolves the same few (table, schema) pairs for every pending
+        // mutation, so the resolution is cached for the batch.
+        var tableCache: [String: LocalSchemaTable] = [:]
         return try pending.map { change in
             guard let tableID = change.tableID,
                   let pkFieldID = change.pkFieldID,
@@ -130,13 +134,20 @@ final class PushProcessor: @unchecked Sendable {
                 throw SynchroError.invalidResponse(message: "mutation ledger lacks authored schema identity")
             }
             let authoredSchema = SchemaRef(version: authoredVersion, hash: authoredHash)
-            let schema = try historicalTable(
-                db,
-                tableID: tableID,
-                schema: authoredSchema,
-                sealedSchema: authoredSchema == requestSchema ? requestSchema : nil,
-                sealedTables: authoredSchema == requestSchema ? syncedTables : nil
-            )
+            let cacheKey = "\(tableID)|\(authoredVersion)|\(authoredHash)"
+            let schema: LocalSchemaTable
+            if let cached = tableCache[cacheKey] {
+                schema = cached
+            } else {
+                schema = try historicalTable(
+                    db,
+                    tableID: tableID,
+                    schema: authoredSchema,
+                    sealedSchema: authoredSchema == requestSchema ? requestSchema : nil,
+                    sealedTables: authoredSchema == requestSchema ? syncedTables : nil
+                )
+                tableCache[cacheKey] = schema
+            }
             let columns: [String: AnyCodable]? = change.operation == "delete"
                 ? nil
                 : Dictionary(uniqueKeysWithValues: change.fieldValuesByID.values.map { ($0.fieldID, $0.wireValue) })
