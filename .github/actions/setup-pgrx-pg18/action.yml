@@ -76,10 +76,10 @@ runs:
           echo "Using cached PG18 pgrx runtime"
         elif [ "${{ inputs.runtime-source }}" = 'brew' ]; then
           cargo pgrx init --pg18 "$(brew --prefix postgresql@18)/bin/pg_config" || {
-    echo "cargo pgrx init failed; reporting pgrx logs" >&2
-    find "$HOME/.pgrx" -maxdepth 2 -name '*.log' -exec cat {} + >&2 2>/dev/null || true
-    exit 1
-  }
+            echo "cargo pgrx init failed; reporting pgrx logs" >&2
+            find "$HOME/.pgrx" -maxdepth 2 -name '*.log' -exec cat {} + >&2 2>/dev/null || true
+            exit 1
+          }
         elif [ "${{ inputs.runtime-source }}" = 'download' ]; then
           cargo pgrx init --pg18 download
         else
