@@ -1203,7 +1203,7 @@ fn decode_base64url(value: &str) -> Result<Vec<u8>, DigestError> {
     }
     let mut output = Vec::with_capacity(input.len() / 4 * 3 + 2);
     let complete = input.len() / 4 * 4;
-    for chunk in input[..complete].chunks_exact(4) {
+    for chunk in input[..complete].as_chunks::<4>().0 {
         let a = base64url_value(chunk[0])?;
         let b = base64url_value(chunk[1])?;
         let c = base64url_value(chunk[2])?;
@@ -1404,7 +1404,7 @@ fn decode_lower_hex(value: &str) -> Result<Vec<u8>, DigestError> {
         return Err(DigestError::new("hexadecimal value has odd length"));
     }
     let mut output = Vec::with_capacity(value.len() / 2);
-    for pair in value.as_bytes().chunks_exact(2) {
+    for pair in value.as_bytes().as_chunks::<2>().0 {
         let high = lower_hex_value(pair[0])?;
         let low = lower_hex_value(pair[1])?;
         output.push(high << 4 | low);

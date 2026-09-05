@@ -330,6 +330,10 @@ jobs:
           fi
 
       - name: Ensure Detox iOS utilities are available
+        env:
+          # Homebrew 6 requires explicit tap trust, and CI provisions a fresh
+          # runner every time, so the trust prompt cannot be answered.
+          HOMEBREW_NO_REQUIRE_TAP_TRUST: "1"
         run: |
           if ! command -v applesimutils >/dev/null 2>&1; then
             brew tap wix/brew
@@ -604,6 +608,11 @@ jobs:
         run: |
           corepack enable
           yarn install --immutable
+
+      - name: Start the local PostgreSQL for the adapter
+        run: |
+          make local-postgres-start
+          echo "ADAPTER_TEST_URL=$(cat .ignore/r2/tmp/local-postgres/postgres.url)" >> "$GITHUB_ENV"
 
       - name: Build React Native Android Detox app
         run: make test-rn-e2e-android-build
