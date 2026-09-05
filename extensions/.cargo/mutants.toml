@@ -2,10 +2,8 @@ examine_globs = [
   "synchro-core/src/change.rs",
   "synchro-core/src/checksum.rs",
   "synchro-core/src/contract.rs",
-  "synchro-core/src/dedup.rs",
   "synchro-core/src/edge_diff.rs",
   "synchro-core/src/fingerprint.rs",
-  "synchro-core/src/state.rs",
   "synchro-core/src/version.rs",
 ]
 

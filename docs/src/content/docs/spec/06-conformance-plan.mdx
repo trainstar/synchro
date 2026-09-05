@@ -211,9 +211,9 @@ A scenario with a `native-e2e` obligation must bind every authored step through
 `native_binding`. A scenario without that obligation must not contain native
 step bindings or native identity aliases.
 
-The staged loader can read `native_execution` while the scenario corpus moves
-to step bindings. One scenario must not contain both representations. A legacy
-plan cannot satisfy the final release gate after corpus migration closes.
+The corpus migration to step bindings is closed. A scenario that carries the
+removed `native_execution` representation fails schema validation, and the
+loader negative control proves the rejection.
 
 Each step binding uses one closed kind:
 
