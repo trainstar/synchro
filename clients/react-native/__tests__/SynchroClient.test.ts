@@ -424,12 +424,6 @@ describe('SynchroClient', () => {
   });
 
   describe('sync control', () => {
-    it('start calls native start', async () => {
-      const client = makeClient();
-      await client.start();
-      expect(mockNativeModule.start).toHaveBeenCalled();
-    });
-
     it('does not require JS to call start twice when native startup retries', async () => {
       const client = makeClient();
       const statuses: SyncStatus[] = [];
@@ -498,11 +492,6 @@ describe('SynchroClient', () => {
       expect(mockNativeModule[method]).toHaveBeenCalledTimes(1);
     });
 
-    it('syncNow calls native syncNow', async () => {
-      const client = makeClient();
-      await client.syncNow();
-      expect(mockNativeModule.syncNow).toHaveBeenCalled();
-    });
   });
 
   describe('status and mutation inspection', () => {
