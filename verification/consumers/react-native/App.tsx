@@ -10,7 +10,9 @@ const client = new SynchroClient({
   authProvider: async () => packagedSmokeConfig.token,
   clientID: packagedSmokeConfig.client_id,
   platform: packagedSmokeConfig.platform,
-  appVersion: '0.3.0',
+  // The application version, not the package version. The test adapter
+  // gates clients below MIN_CLIENT_VERSION 1.0.0.
+  appVersion: '1.0.0',
   syncInterval: 3600,
   pushDebounce: 3600,
   maxRetryAttempts: 1,
@@ -47,6 +49,10 @@ export default function App(): React.JSX.Element {
         }
 
         await client.start();
+        // start() returns after local recovery and runs the first cycle in
+        // the background, so the server schema is not applied yet. The
+        // customers insert requires that schema.
+        await client.syncNow();
         const timestamp = new Date().toISOString();
         await client.execute(
           'INSERT INTO customers (id, user_id, name, balance, is_active, created_at, updated_at) VALUES (?, ?, ?, 0, 1, ?, ?)',

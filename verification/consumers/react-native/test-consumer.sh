@@ -146,18 +146,23 @@ RUBY
           break
         fi
       fi
-      if ! xcrun simctl spawn "$simulator_udid" kill -0 "$initial_pid" >/dev/null 2>&1; then break; fi
+      if ! kill -0 "$initial_pid" >/dev/null 2>&1; then break; fi
       sleep 1
     done
     if [ "$ready" -ne 1 ]; then
+      # The app names its failure in the simulator log, and the phase leaves
+      # no other trace, so the recent app log must be reported or it is lost.
+      xcrun simctl spawn "$simulator_udid" log show --last 3m --style compact \
+        --predicate 'processImagePath CONTAINS "SynchroConsumer"' 2>/dev/null \
+        | grep -vE "com.apple" | tail -40 >&2 || true
       printf '%s\n' "Packaged React Native iOS initial phase did not become ready" >&2
       exit 1
     fi
     python3 "$tool" phase-result --output "$work_dir/initial.json" --phase initial --pid "$initial_pid" --pending-count "$pending"
-    xcrun simctl spawn "$simulator_udid" kill -9 "$initial_pid"
+    kill -9 "$initial_pid"
     killed=0
     for _ in $(seq 1 30); do
-      if ! xcrun simctl spawn "$simulator_udid" kill -0 "$initial_pid" >/dev/null 2>&1; then killed=1; break; fi
+      if ! kill -0 "$initial_pid" >/dev/null 2>&1; then killed=1; break; fi
       sleep 1
     done
     if [ "$killed" -ne 1 ]; then
@@ -175,7 +180,7 @@ RUBY
     for _ in $(seq 1 120); do
       pending=$(sqlite3 "$container/Documents/consumer.db" "SELECT COUNT(*) FROM _synchro_pending_changes WHERE lifecycle_state NOT IN ('accepted','rejected','superseded_before_send','cancelled_before_send');" 2>/dev/null || true)
       if [ "$pending" = "0" ]; then resumed=1; break; fi
-      if ! xcrun simctl spawn "$simulator_udid" kill -0 "$resume_pid" >/dev/null 2>&1; then break; fi
+      if ! kill -0 "$resume_pid" >/dev/null 2>&1; then break; fi
       sleep 1
     done
     xcrun simctl terminate "$simulator_udid" dev.synchro.consumer >/dev/null 2>&1 || true
