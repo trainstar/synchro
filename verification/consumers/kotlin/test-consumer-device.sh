@@ -65,6 +65,8 @@ write_config() {
   source_path=$1
   remote_path="/data/local/tmp/synchro-packaged-smoke-$$.json"
   adb_command push "$source_path" "$remote_path" >/dev/null
+  # The files directory does not exist before the app first launches.
+  adb_command shell run-as "$package" mkdir -p files
   adb_command shell run-as "$package" cp "$remote_path" files/packaged-smoke-config.json
   adb_command shell rm -f "$remote_path"
 }

@@ -62,7 +62,9 @@ class MainActivity : Activity() {
                 serverURL = config.getString("server_url"),
                 authProvider = { config.getString("token") },
                 clientID = config.getString("client_id"),
-                appVersion = "0.3.0",
+                // The application version, not the package version. The test
+                // adapter gates clients below MIN_CLIENT_VERSION 1.0.0.
+                appVersion = "1.0.0",
                 syncInterval = 3_600.0,
                 pushDebounce = 3_600.0,
                 maxRetryAttempts = 1,
@@ -72,6 +74,9 @@ class MainActivity : Activity() {
 
         if (phase == "initial") {
             client.start()
+            // start() can return before the first cycle applies the server
+            // schema, and the customers insert requires that schema.
+            client.syncNow()
             val timestamp = Instant.now().toString()
             client.execute(
                 "INSERT INTO customers (id, user_id, name, balance, is_active, created_at, updated_at) VALUES (?, ?, ?, 0, 1, ?, ?)",
