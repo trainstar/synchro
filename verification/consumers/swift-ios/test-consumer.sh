@@ -107,7 +107,7 @@ if [ -n "${PACKAGED_SMOKE_CELL_ID:-}" ]; then
       ready=1
       break
     fi
-    if ! xcrun simctl spawn "$simulator_udid" kill -0 "$initial_pid" >/dev/null 2>&1; then
+    if ! kill -0 "$initial_pid" >/dev/null 2>&1; then
       break
     fi
     sleep 1
@@ -122,10 +122,10 @@ if [ -n "${PACKAGED_SMOKE_CELL_ID:-}" ]; then
     exit 1
   fi
 
-  xcrun simctl spawn "$simulator_udid" kill -9 "$initial_pid"
+  kill -9 "$initial_pid"
   killed=0
   for _ in $(seq 1 30); do
-    if ! xcrun simctl spawn "$simulator_udid" kill -0 "$initial_pid" >/dev/null 2>&1; then
+    if ! kill -0 "$initial_pid" >/dev/null 2>&1; then
       killed=1
       break
     fi
@@ -151,7 +151,7 @@ if [ -n "${PACKAGED_SMOKE_CELL_ID:-}" ]; then
       resumed=1
       break
     fi
-    if ! xcrun simctl spawn "$simulator_udid" kill -0 "$resume_pid" >/dev/null 2>&1; then
+    if ! kill -0 "$resume_pid" >/dev/null 2>&1; then
       break
     fi
     sleep 1
