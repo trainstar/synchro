@@ -351,6 +351,10 @@ jobs:
             sudo gem install cocoapods
           fi
 
+      - name: Build the Detox framework cache
+        working-directory: clients/react-native/example
+        run: npx detox clean-framework-cache && npx detox build-framework-cache
+
       - name: Ensure Detox iOS utilities are available
         env:
           # Homebrew 6 requires explicit tap trust, and CI provisions a fresh
@@ -439,6 +443,17 @@ jobs:
           name: synchro-pg-pg18-linux-x64
           path: ${{ runner.temp }}/synchro-pg-pg18-linux-x64
 
+      - name: Install the certified PostgreSQL 18.3
+        run: |
+          # The packaged artifact certifies exactly PostgreSQL 18.3, and the
+          # local provisioner requires the runtime to equal the manifest.
+          sudo install -d /usr/share/postgresql-common/pgdg
+          sudo curl --fail -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc https://www.postgresql.org/media/keys/ACCC4CF8.asc
+          echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt-archive.postgresql.org/pub/repos/apt noble-pgdg-archive main" | sudo tee /etc/apt/sources.list.d/pgdg-archive.list
+          sudo apt-get update
+          sudo apt-get install -y --allow-downgrades             postgresql-18=18.3-1.pgdg24.04+1             postgresql-client-18=18.3-1.pgdg24.04+1
+          echo "SYNCHRO_CONFORMANCE_PG18_BINDIR=/usr/lib/postgresql/18/bin" >> "$GITHUB_ENV"
+
       - name: Restore packaged PostgreSQL 18 extension
         run: |
           mkdir -p "$RUNNER_TEMP/packaged-extension"
@@ -448,7 +463,10 @@ jobs:
 
       - name: Start packaged PostgreSQL 18 adapter
         run: |
-          make local-postgres-start CONFORMANCE_EXTENSION_ARTIFACT="$SYNCHRO_CONFORMANCE_EXTENSION_ARTIFACT"
+          make local-postgres-start \
+            CONFORMANCE_EXTENSION_ARTIFACT="$SYNCHRO_CONFORMANCE_EXTENSION_ARTIFACT" \
+            PGRX_PG_BIN_DIR=/usr/lib/postgresql/18/bin \
+            PGRX_PG_CONFIG=/usr/lib/postgresql/18/bin/pg_config
           database_url="$(cat .ignore/r2/tmp/local-postgres/postgres.url)"
           (cd conformance && DATABASE_URL="$database_url" GOFLAGS= GOWORK=off go run ./cmd/synchro-local-postgres prepare --repo-root ..)
           DATABASE_URL="$database_url" \
@@ -679,14 +697,9 @@ jobs:
           disable-animations: true
           emulator-boot-timeout: 900
           emulator-options: -no-snapshot-save -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
-          script: |
-            adb shell wm dismiss-keyguard || true
-            adb shell input keyevent 82 || true
-            scripts/ci/capture-gate-result.py --gate test-rn-e2e-android --output dist/verification/gate-results/test-rn-e2e-android.json -- make test-rn-e2e-android-run || {
-              echo "=== device log after the failed bridge run ==="
-              timeout 60 adb logcat -d AndroidRuntime:E ActivityManager:I ReactNativeJS:V "*:S" | tail -n 200 || true
-              exit 1
-            }
+          # The emulator runner executes each script line in its own shell,
+          # so the sequence lives in one checked-in script.
+          script: bash scripts/ci/run-rn-android-e2e.sh
 
       - name: Publish React Native Android gate results
         if: always()

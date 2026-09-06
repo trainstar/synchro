@@ -375,6 +375,21 @@ pub extern "C-unwind" fn synchro_wal_worker_main(_arg: pg_sys::Datum) {
     let database = database_name();
     BackgroundWorker::connect_worker_to_spi(Some(&database), Some(&worker_login));
 
+    // The pgrx SIGTERM handler sets a latch flag and does not interrupt a
+    // running statement, so an unbounded statement or lock wait keeps the
+    // worker alive through a fast shutdown, and a worker orphaned by a
+    // killed postmaster stays inside its statement forever. Session bounds
+    // return control to the latch loop, where SIGTERM and postmaster death
+    // are observed.
+    if let Err(error) = run_worker_transaction(|| -> Result<(), pgrx::spi::Error> {
+        Spi::run("SET statement_timeout = '5s'")?;
+        Spi::run("SET lock_timeout = '5s'")?;
+        Spi::run("SET idle_in_transaction_session_timeout = '30s'")?;
+        Ok(())
+    }) {
+        pgrx::error!("synchro WAL worker session bounds failed: {error}");
+    }
+
     let preparation_started_at = std::time::Instant::now();
     let identity = 'prepare: loop {
         let expected_runtime = loop {
