@@ -257,6 +257,11 @@ jobs:
             sudo gem install cocoapods
           fi
 
+      - name: Start the local PostgreSQL for the adapter
+        run: |
+          make local-postgres-start
+          echo "ADAPTER_TEST_URL=$(cat .ignore/r2/tmp/local-postgres/postgres.url)" >> "$GITHUB_ENV"
+
       - name: Validate Apple package metadata
         run: make release-pods-check
 
@@ -676,6 +681,10 @@ jobs:
             adb shell input keyevent 82 || true
             scripts/ci/capture-gate-result.py --gate test-rn-e2e-android --output dist/verification/gate-results/test-rn-e2e-android.json -- make test-rn-e2e-android-run
 
+      - name: Report the Android crash log
+        if: failure()
+        run: adb logcat -d AndroidRuntime:E ActivityManager:I "*:S" | tail -n 150
+
       - name: Publish React Native Android gate results
         if: always()
         uses: actions/upload-artifact@v7.0.0
@@ -800,7 +809,17 @@ jobs:
 
       - uses: ./.github/actions/setup-pgrx-pg18
         with:
-          runtime-source: ${{ runner.os == 'macOS' && 'brew' || 'download' }}
+          runtime-source: artifact
+
+      - name: Install the certified PostgreSQL 18.3
+        run: |
+          sudo install -d /usr/share/postgresql-common/pgdg
+          sudo curl --fail -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc https://www.postgresql.org/media/keys/ACCC4CF8.asc
+          echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt-archive.postgresql.org/pub/repos/apt noble-pgdg-archive main" | sudo tee /etc/apt/sources.list.d/pgdg-archive.list
+          sudo apt-get update
+          sudo apt-get install -y --allow-downgrades             postgresql-18=18.3-1.pgdg24.04+1             postgresql-client-18=18.3-1.pgdg24.04+1             postgresql-server-dev-18=18.3-1.pgdg24.04+1
+          cargo pgrx init --pg18 /usr/lib/postgresql/18/bin/pg_config
+          echo "PGRX_PG_CONFIG=/usr/lib/postgresql/18/bin/pg_config" >> "$GITHUB_ENV"
 
       - name: Validate PG 18 extension architecture
         run: |
@@ -808,11 +827,11 @@ jobs:
             printf '%s\n' "Runner architecture $RUNNER_ARCH does not match expected architecture ${{ matrix.expected_runner_arch }}" >&2
             exit 1
           fi
-          make test-rust-pg
+          make test-rust-pg PGRX_PG_CONFIG="$PGRX_PG_CONFIG"
 
       - name: Package PG 18 extension
         run: |
-          make conformance-pg18-extension-artifact
+          make conformance-pg18-extension-artifact PGRX_PG_CONFIG="$PGRX_PG_CONFIG"
           tar -C dist/conformance -czf "dist/synchro-pg-pg18-${{ matrix.extension_architecture }}.tar.gz" synchro-pg-pg18
 
       - uses: actions/upload-artifact@v7.0.0
