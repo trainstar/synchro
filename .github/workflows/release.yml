@@ -695,10 +695,6 @@ jobs:
           runtime-source: artifact
           cache-runtime: 'false'
 
-      # Provisioning gates need the conformance artifacts, secrets, and
-      # installation lock.
-      - uses: ./.github/actions/setup-conformance-pg18
-
       - uses: actions/download-artifact@v8.0.1
         with:
           name: pgrx-pg18-linux
@@ -706,6 +702,10 @@ jobs:
 
       - name: Restore PostgreSQL 18 pgrx runtime
         run: tar -C "$HOME" -xf "$RUNNER_TEMP/pgrx-pg18-linux/pgrx-pg18-linux.tar"
+
+      # Provisioning gates need the conformance artifacts, secrets, and
+      # installation lock.
+      - uses: ./.github/actions/setup-conformance-pg18
 
       - name: Verify PostgreSQL 18 for pgrx
         run: |
