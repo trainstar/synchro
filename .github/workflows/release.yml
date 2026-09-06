@@ -225,7 +225,28 @@ jobs:
             --output dist/verification/gate-results/test-adapter.json \
             -- make test-adapter
 
+      - name: Install the certified PostgreSQL 18.3 for the black-box suite
+        run: |
+          # The black-box integration environment requires exactly the
+          # certified PostgreSQL 18.3 runtime and a matching artifact.
+          sudo install -d /usr/share/postgresql-common/pgdg
+          sudo curl --fail -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc https://www.postgresql.org/media/keys/ACCC4CF8.asc
+          echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt-archive.postgresql.org/pub/repos/apt noble-pgdg-archive main" | sudo tee /etc/apt/sources.list.d/pgdg-archive.list
+          sudo apt-get update
+          sudo apt-get install -y --allow-downgrades postgresql-18=18.3-1.pgdg24.04+1 postgresql-client-18=18.3-1.pgdg24.04+1 postgresql-server-dev-18=18.3-1.pgdg24.04+1
+          sudo chmod -R a+w "$(/usr/lib/postgresql/18/bin/pg_config --sharedir)/extension" "$(/usr/lib/postgresql/18/bin/pg_config --pkglibdir)"
+          cargo pgrx init --pg18 /usr/lib/postgresql/18/bin/pg_config
+
+      - name: Build the certified extension artifact
+        run: |
+          make conformance-pg18-extension-artifact \
+            CONFORMANCE_EXTENSION_ARTIFACT="$RUNNER_TEMP/certified-extension" \
+            PGRX_PG_CONFIG=/usr/lib/postgresql/18/bin/pg_config
+
       - name: Validate server black-box suite
+        env:
+          SYNCHRO_CONFORMANCE_PG18_BINDIR: /usr/lib/postgresql/18/bin
+          SYNCHRO_CONFORMANCE_EXTENSION_ARTIFACT: ${{ runner.temp }}/certified-extension
         run: |
           scripts/ci/capture-gate-result.py \
             --gate test-blackbox \
