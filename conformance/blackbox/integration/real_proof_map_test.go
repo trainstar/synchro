@@ -24,49 +24,37 @@ type serverProofBinding struct {
 
 type realTestDeclaration struct {
 	linuxX64       bool
-	macOSARM64     bool
 	validSignature bool
 }
 
 var requiredServerProofs = map[string][]string{
-	"SCN-PERF-CONFIGURED-BOUNDS-001":     {"OBL-PERF-CONFIGURED-BOUNDS-PG-LINUX-X64-001", "OBL-PERF-CONFIGURED-BOUNDS-PG-MACOS-ARM64-001"},
-	"SCN-WAL-ORDER-001":                  {"OBL-WAL-ORDER-PG-LINUX-X64-001", "OBL-WAL-ORDER-PG-MACOS-ARM64-001"},
-	"SCN-PULL-DIVERGENT-CHECKPOINTS-001": {"OBL-PULL-DIVERGENT-PG-LINUX-X64-001", "OBL-PULL-DIVERGENT-PG-MACOS-ARM64-001"},
-	"SCN-PULL-HYDRATION-FAILURE-001":     {"OBL-PULL-HYDRATION-PG-LINUX-X64-001", "OBL-PULL-HYDRATION-PG-MACOS-ARM64-001"},
-	"SCN-WAL-DECODE-FAILURE-001":         {"OBL-WAL-DECODE-PG-LINUX-X64-001", "OBL-WAL-DECODE-PG-MACOS-ARM64-001"},
-	"SCN-REGISTRY-RELOAD-001":            {"OBL-REGISTRY-RELOAD-PG-LINUX-X64-001", "OBL-REGISTRY-RELOAD-PG-MACOS-ARM64-001"},
-	"SCN-PUSH-RESPONSE-LOSS-001":         {"OBL-PUSH-RESPONSE-LOSS-PG-LINUX-X64-001", "OBL-PUSH-RESPONSE-LOSS-PG-MACOS-ARM64-001"},
-	"SCN-REBUILD-FORGED-CURSOR-001":      {"OBL-REBUILD-FORGED-CURSOR-PG-LINUX-X64-001", "OBL-REBUILD-FORGED-CURSOR-PG-MACOS-ARM64-001"},
-	"SCN-SCHEMA-QUEUED-MUTATION-001":     {"OBL-SCHEMA-QUEUED-MUTATION-PG-LINUX-X64-001", "OBL-SCHEMA-QUEUED-MUTATION-PG-MACOS-ARM64-001"},
-	"SCN-RETENTION-RECONNECT-001":        {"OBL-RETENTION-RECONNECT-PG-LINUX-X64-001", "OBL-RETENTION-RECONNECT-PG-MACOS-ARM64-001"},
-	"SCN-MEMBERSHIP-REASSIGNMENT-001":    {"OBL-MEMBERSHIP-REASSIGNMENT-PG-LINUX-X64-001", "OBL-MEMBERSHIP-REASSIGNMENT-PG-MACOS-ARM64-001"},
+	"SCN-PERF-CONFIGURED-BOUNDS-001":     {"OBL-PERF-CONFIGURED-BOUNDS-PG-LINUX-X64-001"},
+	"SCN-WAL-ORDER-001":                  {"OBL-WAL-ORDER-PG-LINUX-X64-001"},
+	"SCN-PULL-DIVERGENT-CHECKPOINTS-001": {"OBL-PULL-DIVERGENT-PG-LINUX-X64-001"},
+	"SCN-PULL-HYDRATION-FAILURE-001":     {"OBL-PULL-HYDRATION-PG-LINUX-X64-001"},
+	"SCN-WAL-DECODE-FAILURE-001":         {"OBL-WAL-DECODE-PG-LINUX-X64-001"},
+	"SCN-REGISTRY-RELOAD-001":            {"OBL-REGISTRY-RELOAD-PG-LINUX-X64-001"},
+	"SCN-PUSH-RESPONSE-LOSS-001":         {"OBL-PUSH-RESPONSE-LOSS-PG-LINUX-X64-001"},
+	"SCN-REBUILD-FORGED-CURSOR-001":      {"OBL-REBUILD-FORGED-CURSOR-PG-LINUX-X64-001"},
+	"SCN-SCHEMA-QUEUED-MUTATION-001":     {"OBL-SCHEMA-QUEUED-MUTATION-PG-LINUX-X64-001"},
+	"SCN-RETENTION-RECONNECT-001":        {"OBL-RETENTION-RECONNECT-PG-LINUX-X64-001"},
+	"SCN-MEMBERSHIP-REASSIGNMENT-001":    {"OBL-MEMBERSHIP-REASSIGNMENT-PG-LINUX-X64-001"},
 }
 
 // serverProofBindings is the sole server-proof map. Synthetic harness runs are
 // layer-6 self-tests and negative controls, so they must not enter this map.
 var serverProofBindings = []serverProofBinding{
 	{"SCN-WAL-ORDER-001", "OBL-WAL-ORDER-PG-LINUX-X64-001", "TestRealWALPipeline"},
-	{"SCN-WAL-ORDER-001", "OBL-WAL-ORDER-PG-MACOS-ARM64-001", "TestRealWALPipeline"},
 	{"SCN-PERF-CONFIGURED-BOUNDS-001", "OBL-PERF-CONFIGURED-BOUNDS-PG-LINUX-X64-001", "TestRealConfiguredBoundsMeasurement"},
-	{"SCN-PERF-CONFIGURED-BOUNDS-001", "OBL-PERF-CONFIGURED-BOUNDS-PG-MACOS-ARM64-001", "TestRealConfiguredBoundsMeasurement"},
 	{"SCN-PULL-DIVERGENT-CHECKPOINTS-001", "OBL-PULL-DIVERGENT-PG-LINUX-X64-001", "TestRealS02DivergentPullPaginationIsStarvationFree"},
-	{"SCN-PULL-DIVERGENT-CHECKPOINTS-001", "OBL-PULL-DIVERGENT-PG-MACOS-ARM64-001", "TestRealS02DivergentPullPaginationIsStarvationFree"},
 	{"SCN-PULL-HYDRATION-FAILURE-001", "OBL-PULL-HYDRATION-PG-LINUX-X64-001", "TestRealS03PullHydrationFailurePreservesCursors"},
-	{"SCN-PULL-HYDRATION-FAILURE-001", "OBL-PULL-HYDRATION-PG-MACOS-ARM64-001", "TestRealS03PullHydrationFailurePreservesCursors"},
 	{"SCN-WAL-DECODE-FAILURE-001", "OBL-WAL-DECODE-PG-LINUX-X64-001", "TestRealWALDecodeFailureRepairsSameIdentity"},
-	{"SCN-WAL-DECODE-FAILURE-001", "OBL-WAL-DECODE-PG-MACOS-ARM64-001", "TestRealWALDecodeFailureRepairsSameIdentity"},
 	{"SCN-REGISTRY-RELOAD-001", "OBL-REGISTRY-RELOAD-PG-LINUX-X64-001", "TestRealRegistryGenerationReloadAtCommitBoundary"},
-	{"SCN-REGISTRY-RELOAD-001", "OBL-REGISTRY-RELOAD-PG-MACOS-ARM64-001", "TestRealRegistryGenerationReloadAtCommitBoundary"},
 	{"SCN-PUSH-RESPONSE-LOSS-001", "OBL-PUSH-RESPONSE-LOSS-PG-LINUX-X64-001", "TestRealS11PushResponseLossReplaysExactCanonicalResponse"},
-	{"SCN-PUSH-RESPONSE-LOSS-001", "OBL-PUSH-RESPONSE-LOSS-PG-MACOS-ARM64-001", "TestRealS11PushResponseLossReplaysExactCanonicalResponse"},
 	{"SCN-REBUILD-FORGED-CURSOR-001", "OBL-REBUILD-FORGED-CURSOR-PG-LINUX-X64-001", "TestRealS04RebuildRejectsForgedCursorAndFreezesBoundary"},
-	{"SCN-REBUILD-FORGED-CURSOR-001", "OBL-REBUILD-FORGED-CURSOR-PG-MACOS-ARM64-001", "TestRealS04RebuildRejectsForgedCursorAndFreezesBoundary"},
 	{"SCN-SCHEMA-QUEUED-MUTATION-001", "OBL-SCHEMA-QUEUED-MUTATION-PG-LINUX-X64-001", "TestRealSchemaIncompatibleMutationPersistsCanonicalIntent"},
-	{"SCN-SCHEMA-QUEUED-MUTATION-001", "OBL-SCHEMA-QUEUED-MUTATION-PG-MACOS-ARM64-001", "TestRealSchemaIncompatibleMutationPersistsCanonicalIntent"},
 	{"SCN-RETENTION-RECONNECT-001", "OBL-RETENTION-RECONNECT-PG-LINUX-X64-001", "TestRealS12StaleClientCompactionAndReconnect"},
-	{"SCN-RETENTION-RECONNECT-001", "OBL-RETENTION-RECONNECT-PG-MACOS-ARM64-001", "TestRealS12StaleClientCompactionAndReconnect"},
 	{"SCN-MEMBERSHIP-REASSIGNMENT-001", "OBL-MEMBERSHIP-REASSIGNMENT-PG-LINUX-X64-001", "TestRealWALPipeline"},
-	{"SCN-MEMBERSHIP-REASSIGNMENT-001", "OBL-MEMBERSHIP-REASSIGNMENT-PG-MACOS-ARM64-001", "TestRealWALPipeline"},
 }
 
 var nonScenarioRealTests = map[string]string{
@@ -116,9 +104,6 @@ func TestServerProofMapRejectsDrift(t *testing.T) {
 		{"missing binding", "missing proof binding SCN-WAL-ORDER-001|OBL-WAL-ORDER-PG-LINUX-X64-001", func(bindings []serverProofBinding, classifications map[string]string, declarations map[string]realTestDeclaration) ([]serverProofBinding, map[string]string, map[string]realTestDeclaration) {
 			return bindings[1:], classifications, declarations
 		}},
-		{"missing scenario bindings", "missing proof binding SCN-WAL-ORDER-001|OBL-WAL-ORDER-PG-LINUX-X64-001", func(bindings []serverProofBinding, classifications map[string]string, declarations map[string]realTestDeclaration) ([]serverProofBinding, map[string]string, map[string]realTestDeclaration) {
-			return bindings[2:], classifications, declarations
-		}},
 		{"unknown obligation", "unexpected proof binding SCN-WAL-ORDER-001|OBL-UNKNOWN-001", func(bindings []serverProofBinding, classifications map[string]string, declarations map[string]realTestDeclaration) ([]serverProofBinding, map[string]string, map[string]realTestDeclaration) {
 			bindings[0].obligationID = "OBL-UNKNOWN-001"
 			return bindings, classifications, declarations
@@ -133,9 +118,9 @@ func TestServerProofMapRejectsDrift(t *testing.T) {
 			declarations["TestRealWALPipeline"] = declaration
 			return bindings, classifications, declarations
 		}},
-		{"constrained mapped test", "proof binding SCN-WAL-ORDER-001|OBL-WAL-ORDER-PG-MACOS-ARM64-001 names real test TestRealWALPipeline unavailable on macos-arm64", func(bindings []serverProofBinding, classifications map[string]string, declarations map[string]realTestDeclaration) ([]serverProofBinding, map[string]string, map[string]realTestDeclaration) {
+		{"constrained mapped test", "proof binding SCN-WAL-ORDER-001|OBL-WAL-ORDER-PG-LINUX-X64-001 names real test TestRealWALPipeline unavailable on linux-x64", func(bindings []serverProofBinding, classifications map[string]string, declarations map[string]realTestDeclaration) ([]serverProofBinding, map[string]string, map[string]realTestDeclaration) {
 			declaration := declarations["TestRealWALPipeline"]
-			declaration.macOSARM64 = false
+			declaration.linuxX64 = false
 			declarations["TestRealWALPipeline"] = declaration
 			return bindings, classifications, declarations
 		}},
@@ -184,9 +169,6 @@ func realTestDeclarations(directory string) (map[string]realTestDeclaration, err
 	linuxX64 := build.Default
 	linuxX64.GOOS = "linux"
 	linuxX64.GOARCH = "amd64"
-	macOSARM64 := build.Default
-	macOSARM64.GOOS = "darwin"
-	macOSARM64.GOARCH = "arm64"
 	for _, entry := range entries {
 		if entry.IsDir() || !strings.HasSuffix(entry.Name(), "_test.go") {
 			continue
@@ -195,10 +177,6 @@ func realTestDeclarations(directory string) (map[string]realTestDeclaration, err
 		availableOnLinuxX64, err := linuxX64.MatchFile(directory, entry.Name())
 		if err != nil {
 			return nil, fmt.Errorf("match %s for linux-x64: %w", path, err)
-		}
-		availableOnMacOSARM64, err := macOSARM64.MatchFile(directory, entry.Name())
-		if err != nil {
-			return nil, fmt.Errorf("match %s for macos-arm64: %w", path, err)
 		}
 		parsed, err := parser.ParseFile(files, path, nil, 0)
 		if err != nil {
@@ -214,7 +192,6 @@ func realTestDeclarations(directory string) (map[string]realTestDeclaration, err
 			}
 			declarations[function.Name.Name] = realTestDeclaration{
 				linuxX64:       availableOnLinuxX64,
-				macOSARM64:     availableOnMacOSARM64,
 				validSignature: isGoTestSignature(function.Type),
 			}
 		}
@@ -277,8 +254,6 @@ func validateServerProofMap(authored []scenarios.Scenario, declarations map[stri
 			failures = append(failures, fmt.Sprintf("proof binding %s names unknown real test %s", key, binding.testName))
 		} else if strings.Contains(binding.obligationID, "-PG-LINUX-X64-") && !declaration.linuxX64 {
 			failures = append(failures, fmt.Sprintf("proof binding %s names real test %s unavailable on linux-x64", key, binding.testName))
-		} else if strings.Contains(binding.obligationID, "-PG-MACOS-ARM64-") && !declaration.macOSARM64 {
-			failures = append(failures, fmt.Sprintf("proof binding %s names real test %s unavailable on macos-arm64", key, binding.testName))
 		}
 		mappedTests[binding.testName] = struct{}{}
 

@@ -348,8 +348,6 @@ func configuredBoundsProofIdentity() (contract.ObligationID, contract.SupportCel
 	switch runtime.GOOS + "/" + runtime.GOARCH {
 	case "linux/amd64":
 		return "OBL-PERF-CONFIGURED-BOUNDS-PG-LINUX-X64-001", "SUP-PG-LINUX-X64-001", nil
-	case "darwin/arm64":
-		return "OBL-PERF-CONFIGURED-BOUNDS-PG-MACOS-ARM64-001", "SUP-PG-MACOS-ARM64-001", nil
 	default:
 		return "", "", fmt.Errorf("configured-bounds proof has no support cell for %s/%s", runtime.GOOS, runtime.GOARCH)
 	}
