@@ -1276,6 +1276,7 @@ client-consumer-apple-artifact: version-check release-pods-check
 		trap cleanup EXIT HUP INT TERM; \
 		rm -rf "$$stage"; \
 		mkdir -p "$$stage/Synchro/clients/swift"; \
+		test -f Package.resolved || swift package resolve >/dev/null; \
 		cp Package.swift Package.resolved Synchro.podspec LICENSE "$$stage/Synchro/"; \
 		cp -R clients/swift/Sources "$$stage/Synchro/clients/swift/"; \
 		COPYFILE_DISABLE=1 tar -czf "$$stage/synchro-spm-$(CURRENT_VERSION).tar.gz" -C "$$stage" Synchro; \
