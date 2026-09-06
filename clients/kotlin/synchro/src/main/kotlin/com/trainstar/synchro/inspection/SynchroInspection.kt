@@ -8,6 +8,9 @@ import com.trainstar.synchro.SchemaRef
 fun SynchroConfig.withTransportObservation(collector: TransportObservationCollector): SynchroConfig =
     withTransportObservationCollector(collector)
 
+@SynchroProofApi
+fun SynchroClient.provenanceMaintenanceWorkCursor(): Long = inspectProvenanceMaintenanceWorkCursor()
+
 /** Shipped inspection access that is outside the primary client API. */
 @SynchroProofApi
 class SynchroInspection(private val client: SynchroClient) {

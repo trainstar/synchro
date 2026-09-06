@@ -327,6 +327,9 @@ class SynchroClient(private val config: SynchroConfig, context: Context) {
         }
     }
 
+    internal fun inspectProvenanceMaintenanceWorkCursor(): Long =
+        database.provenanceMaintenanceWorkCursor()
+
     private fun inspectionCount(db: SQLiteDatabase, sql: String): Int =
         db.rawQuery(sql, null).use { cursor ->
             require(cursor.moveToFirst()) { "durable state count is absent" }

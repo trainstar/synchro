@@ -771,9 +771,7 @@ test-kotlin-performance: conformance-mod-download build-kotlin-conformance-app b
 			SYNCHRO_KOTLIN_APPLICATION_APK="$$application_apk" \
 			SYNCHRO_KOTLIN_INSTRUMENTATION_APK="$$instrumentation_apk" \
 			SYNCHRO_SEED_TOOL="$(CURDIR)/$(SEED_BINARY)" \
-			GOFLAGS= GOWORK=off go run ./cmd/testresult exact \
-			-test TestRealKotlinPerformance \
-			-expect target_pass \
+			GOFLAGS= GOWORK=off go run ./cmd/testresult suite \
 			-- go test -tags kotlinintegration -json ./kotlin -count=1 -timeout=75m \
 			-run '^TestRealKotlinPerformance$$' -args --provision --install
 

@@ -329,6 +329,58 @@ class DatabaseMigrationTests {
     }
 
     @Test
+    fun versionThirteenUpgradeIndexesPendingProtocolIdentity() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val path = context.getDatabasePath("synchro_pending_identity_${UUID.randomUUID()}.sqlite").absolutePath
+        SQLiteDatabase.openOrCreateDatabase(path, null).use { legacy ->
+            legacy.execSQL(
+                """
+                CREATE TABLE _synchro_pending_changes (
+                    local_order INTEGER PRIMARY KEY AUTOINCREMENT,
+                    mutation_id TEXT NOT NULL UNIQUE,
+                    table_id TEXT NOT NULL,
+                    record_id TEXT NOT NULL,
+                    pk_field_id TEXT NOT NULL,
+                    pk_logical_type TEXT NOT NULL
+                )
+                """.trimIndent(),
+            )
+            legacy.execSQL(
+                "INSERT INTO _synchro_pending_changes " +
+                    "(mutation_id, table_id, record_id, pk_field_id, pk_logical_type) VALUES (?, ?, ?, ?, ?)",
+                arrayOf("mutation-1", "items", "record-1", "id", "string"),
+            )
+            legacy.execSQL("PRAGMA user_version = 13")
+        }
+
+        val database = databases.open(context, path)
+        assertEquals(
+            SynchroDatabase.DATABASE_VERSION.toLong(),
+            database.queryOne("PRAGMA user_version")?.get("user_version"),
+        )
+        assertEquals(
+            1,
+            database.query(
+                "SELECT name FROM sqlite_master " +
+                    "WHERE type = 'index' AND name = 'idx_synchro_pending_protocol_row_order'",
+            ).size,
+        )
+        assertEquals(
+            "mutation-1",
+            database.queryOne(
+                """
+                SELECT mutation_id
+                FROM _synchro_pending_changes INDEXED BY idx_synchro_pending_protocol_row_order
+                WHERE table_id = ? AND pk_field_id = ? AND pk_logical_type = ? AND record_id = ?
+                ORDER BY local_order DESC
+                LIMIT 1
+                """.trimIndent(),
+                arrayOf("items", "id", "string", "record-1"),
+            )?.get("mutation_id"),
+        )
+    }
+
+    @Test
     fun versionTwelveUpgradeRollsBackWhenScopeStateIsIncomplete() {
         val context = ApplicationProvider.getApplicationContext<Context>()
         val name = "synchro_scope_affinity_failure_${UUID.randomUUID()}.sqlite"

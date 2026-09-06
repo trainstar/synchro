@@ -24,6 +24,7 @@ import com.trainstar.synchro.inspection.ScopeStateInspection
 import com.trainstar.synchro.inspection.SynchroInspection
 import com.trainstar.synchro.inspection.TransportObservationCollector
 import com.trainstar.synchro.inspection.TransportOperationClass
+import com.trainstar.synchro.inspection.provenanceMaintenanceWorkCursor
 import com.trainstar.synchro.inspection.withTransportObservation
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -290,7 +291,7 @@ private class ClientSession(private val context: Context) : Closeable {
                 }
             }
         }
-        return stateResult()
+        return operationResult()
     }
 
     private fun localAction(command: JsonObject): JsonObject {
@@ -353,7 +354,7 @@ private class ClientSession(private val context: Context) : Closeable {
             }
         }
         check(rowsAffected == 1) { "local action affected an unexpected row count" }
-        return stateResult(rowsAffected)
+        return operationResult(rowsAffected)
     }
 
     private fun beginCall(command: JsonObject): JsonObject {
@@ -569,6 +570,18 @@ private class ClientSession(private val context: Context) : Closeable {
             put("events", JsonArray(events.toList()))
             put("events_overflowed", eventsOverflowed.get())
             blockingFailure(client.getSyncStatus())?.let { put("failure", normalizeFailure(it)) }
+        }
+    }
+
+    private fun operationResult(rowsAffected: Int? = null): JsonObject {
+        val client = requireClient()
+        return buildJsonObject {
+            put("status", client.getSyncStatus().state.wireName)
+            rowsAffected?.let { put("rows_affected", it) }
+            put(
+                "provenance_maintenance_work_cursor",
+                client.provenanceMaintenanceWorkCursor(),
+            )
         }
     }
 

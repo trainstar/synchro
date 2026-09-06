@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"sort"
 	"strconv"
+	"time"
 
 	"github.com/gowebpki/jcs"
 	"github.com/trainstar/synchro/conformance/blackbox"
@@ -132,9 +133,11 @@ func RunQueueReplayScenario(ctx context.Context, scenario scenarios.Scenario, co
 	nextCommitLSN := uint64(1)
 	replayCalls := make([]SynchronizationResult, 0, len(scenario.Steps))
 	priorOutcomes := queueOutcomeCounts{}
+	scenarioStarted := time.Now()
 	for index := 1; index <= len(scenario.Steps); index++ {
 		stepID := scenarios.StepID(fmt.Sprintf("STEP-PERF-QUEUE-REPLAY-%03d", index))
 		step := steps[stepID]
+		stepStarted := time.Now()
 		workload, publish, dropPush, batchID, next, err := queueWorkloadOperations(step, current, nextCommitLSN)
 		if err != nil {
 			return QueueReplayResult{}, err
@@ -142,11 +145,11 @@ func RunQueueReplayScenario(ctx context.Context, scenario scenarios.Scenario, co
 		for ordinal, operation := range workload {
 			operation, err = controller.ApplicationWrite(operation)
 			if err != nil {
-				return QueueReplayResult{}, fmt.Errorf("bind Kotlin Android queue-replay local write %d for step %s: %w", ordinal+1, stepID, err)
+				return QueueReplayResult{}, fmt.Errorf("bind Kotlin Android queue-replay local write %d for step %s after scenario elapsed %s and step elapsed %s: %w", ordinal+1, stepID, time.Since(scenarioStarted), time.Since(stepStarted), err)
 			}
 			observation, applyErr := platform.ApplyStep(ctx, client, operation)
 			if applyErr != nil || observation.Disposition != "success" {
-				return QueueReplayResult{}, fmt.Errorf("apply Kotlin Android queue-replay local write %d for step %s: %w", ordinal+1, stepID, kotlinResultError(applyErr, observation.Disposition))
+				return QueueReplayResult{}, fmt.Errorf("apply Kotlin Android queue-replay local write %d for step %s after scenario elapsed %s and step elapsed %s: %w", ordinal+1, stepID, time.Since(scenarioStarted), time.Since(stepStarted), kotlinResultError(applyErr, observation.Disposition))
 			}
 		}
 		restart := scenarios.Operation{ContractOperation: "process", Name: "restart-client", Payload: queueJSON(map[string]any{"user_id": client.UserID, "client_id": client.ClientID})}

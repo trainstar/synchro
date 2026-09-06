@@ -757,10 +757,8 @@ func (p *Platform) ApplyStep(ctx context.Context, client Client, operation scena
 	if err := state.available("apply"); err != nil {
 		return StepObservation{}, err
 	}
-	before, err := captureClientState(ctx, state)
-	if err != nil {
-		return StepObservation{}, err
-	}
+	beforeCursor := state.maintenanceCursor
+	before := Result{ProvenanceMaintenanceWorkCursor: &beforeCursor}
 	checkpoint := state.session.Checkpoint()
 	started := time.Now()
 	result, err := state.session.Execute(ctx, Request{Operation: "local-action", LocalAction: &action})
@@ -771,7 +769,11 @@ func (p *Platform) ApplyStep(ctx context.Context, client Client, operation scena
 		return StepObservation{}, errors.New("Kotlin Android local action did not affect one row")
 	}
 	state.selectors[selectorKey(selector)] = selector
-	window, err := p.completeWindow(ctx, state, checkpoint, started, before)
+	observations, err := state.session.ObservationsAfter(checkpoint)
+	if err != nil {
+		return StepObservation{}, err
+	}
+	window, err := state.windowFromResults(started, before, result, observations)
 	if err != nil {
 		return StepObservation{}, err
 	}
@@ -1374,11 +1376,7 @@ func (p *Platform) ProcessStep(ctx context.Context, client Client, operation sce
 		if err != nil {
 			return StepObservation{}, err
 		}
-		after, err := captureClientState(ctx, state)
-		if err != nil {
-			return StepObservation{}, err
-		}
-		window, err := state.windowFromResults(started, opened, after, nil)
+		window, err := state.windowFromResults(started, opened, opened, nil)
 		if err != nil {
 			return StepObservation{}, err
 		}
@@ -1401,11 +1399,7 @@ func (p *Platform) ProcessStep(ctx context.Context, client Client, operation sce
 		}
 		state.pendingLoss = nil
 		state.restarted = true
-		after, err := captureClientState(ctx, state)
-		if err != nil {
-			return StepObservation{}, err
-		}
-		window, err := state.windowFromResults(started, opened, after, nil)
+		window, err := state.windowFromResults(started, opened, opened, nil)
 		if err != nil {
 			return StepObservation{}, err
 		}
