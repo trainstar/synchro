@@ -26,7 +26,8 @@ runs:
         pg_bindir="$(dirname "$pg_config")"
         for program in initdb pg_ctl postgres psql pg_isready pg_config; do
           output="$("$pg_bindir/$program" --version)"
-          version="${output##* }"
+          # A Homebrew build appends a suffix, so take the numeric token.
+          version="$(printf '%s\n' "$output" | grep -oE '[0-9]+[.][0-9]+' | head -n 1)"
           if [ "$EXPECTED_POSTGRESQL_VERSION" = '18' ]; then
             case "$version" in
               18.*) ;;
