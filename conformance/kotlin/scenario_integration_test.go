@@ -14,22 +14,26 @@ import (
 )
 
 func TestRealKotlinPerformance(t *testing.T) {
+	// Each scenario runs in its own subtest, so its fixture cleanup closes
+	// the harness and releases the shared installation lock before the next
+	// scenario provisions. One shared subtest deadlocks on that lock.
 	t.Run("assertion", func(t *testing.T) {
-		runKotlinSteadyPull(t)
-		runKotlinPendingCycle(t)
-		runKotlinQueueReplay(t)
-		runKotlinRebuildRequests(t)
-		runKotlinRebuildApply(t)
-		runKotlinRebuildCardinality(t)
-		runKotlinForgedCursor(t)
-		runKotlinPushResponseLoss(t)
-		runKotlinRetentionReconnect(t)
-		runKotlinSchemaQueuedMutation(t)
-		runKotlinSchemaCheck(t)
+		t.Run("steady-pull", runKotlinSteadyPull)
+		t.Run("pending-cycle", runKotlinPendingCycle)
+		t.Run("queue-replay", runKotlinQueueReplay)
+		t.Run("rebuild-requests", runKotlinRebuildRequests)
+		t.Run("rebuild-apply", runKotlinRebuildApply)
+		t.Run("rebuild-cardinality", runKotlinRebuildCardinality)
+		t.Run("forged-cursor", runKotlinForgedCursor)
+		t.Run("push-response-loss", runKotlinPushResponseLoss)
+		t.Run("retention-reconnect", runKotlinRetentionReconnect)
+		t.Run("schema-queued-mutation", runKotlinSchemaQueuedMutation)
+		t.Run("schema-check", runKotlinSchemaCheck)
 		// A scenario that holds a seed artifact runs last. Its artifact closes
-		// after the body returns, so it cannot reset the server for a successor.
-		runKotlinSeededEmptyStartup(t)
-		runKotlinMultiScopeProvenance(t)
+		// after the subtest returns, so it cannot reset the server for a
+		// successor.
+		t.Run("seeded-empty-startup", runKotlinSeededEmptyStartup)
+		t.Run("multi-scope-provenance", runKotlinMultiScopeProvenance)
 	})
 }
 
