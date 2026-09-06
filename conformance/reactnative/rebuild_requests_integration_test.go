@@ -43,7 +43,7 @@ func runRealReactNativeRebuildRequests(t *testing.T, platform string) {
 	if err != nil {
 		t.Fatalf("load React Native rebuild-requests scenario: %v", err)
 	}
-	environment, err := blackbox.LoadEnvironment()
+	environment, err := blackbox.LoadLocalEnvironment()
 	if err != nil {
 		t.Fatalf("load React Native conformance environment: %v", err)
 	}

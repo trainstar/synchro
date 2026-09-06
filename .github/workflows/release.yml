@@ -683,7 +683,8 @@ jobs:
 
       - name: Report the Android crash log
         if: failure()
-        run: adb logcat -d AndroidRuntime:E ActivityManager:I "*:S" | tail -n 150
+        timeout-minutes: 2
+        run: timeout 60 adb logcat -d AndroidRuntime:E ActivityManager:I "*:S" | tail -n 150 || true
 
       - name: Publish React Native Android gate results
         if: always()
@@ -818,6 +819,9 @@ jobs:
           echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt-archive.postgresql.org/pub/repos/apt noble-pgdg-archive main" | sudo tee /etc/apt/sources.list.d/pgdg-archive.list
           sudo apt-get update
           sudo apt-get install -y --allow-downgrades             postgresql-18=18.3-1.pgdg24.04+1             postgresql-client-18=18.3-1.pgdg24.04+1             postgresql-server-dev-18=18.3-1.pgdg24.04+1
+          # pgrx installs the extension into the server directories during
+          # tests, and the apt installation is root owned.
+          sudo chmod -R a+w "$(/usr/lib/postgresql/18/bin/pg_config --sharedir)/extension" "$(/usr/lib/postgresql/18/bin/pg_config --pkglibdir)"
           cargo pgrx init --pg18 /usr/lib/postgresql/18/bin/pg_config
           echo "PGRX_PG_CONFIG=/usr/lib/postgresql/18/bin/pg_config" >> "$GITHUB_ENV"
 

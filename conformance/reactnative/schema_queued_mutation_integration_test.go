@@ -43,7 +43,7 @@ func runRealReactNativeSchemaQueuedMutation(t *testing.T, platform string) {
 	if err != nil {
 		t.Fatalf("load React Native schema-queued-mutation scenario: %v", err)
 	}
-	environment, err := blackbox.LoadEnvironment()
+	environment, err := blackbox.LoadLocalEnvironment()
 	if err != nil {
 		t.Fatalf("load React Native conformance environment: %v", err)
 	}

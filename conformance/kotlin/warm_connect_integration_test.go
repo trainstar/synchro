@@ -30,7 +30,7 @@ func TestRealKotlinWarmConnect(t *testing.T) {
 	if adbPath == "" || deviceSerial == "" || applicationAPK == "" || instrumentationAPK == "" {
 		t.Fatal("Kotlin warm-connect Android environment is incomplete")
 	}
-	environment, err := blackbox.LoadEnvironment()
+	environment, err := blackbox.LoadLocalEnvironment()
 	if err != nil {
 		t.Fatalf("load Kotlin conformance environment: %v", err)
 	}

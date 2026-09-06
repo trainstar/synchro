@@ -391,7 +391,7 @@ func newKotlinPerformanceFixture(t *testing.T, scenarioPath string, pullPageSize
 	if adbPath == "" || deviceSerial == "" || applicationAPK == "" || instrumentationAPK == "" || seedToolPath == "" {
 		t.Fatal("Kotlin Android performance environment is incomplete")
 	}
-	environment, err := blackbox.LoadEnvironment()
+	environment, err := blackbox.LoadLocalEnvironment()
 	if err != nil {
 		t.Fatalf("load Kotlin Android conformance environment: %v", err)
 	}

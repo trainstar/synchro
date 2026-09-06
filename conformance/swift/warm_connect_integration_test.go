@@ -27,7 +27,7 @@ func TestRealSwiftWarmConnect(t *testing.T) {
 	if runnerPath == "" {
 		t.Fatal("SYNCHRO_SWIFT_NATIVE_RUNNER is required")
 	}
-	environment, err := blackbox.LoadEnvironment()
+	environment, err := blackbox.LoadLocalEnvironment()
 	if err != nil {
 		t.Fatalf("load Swift conformance environment: %v", err)
 	}

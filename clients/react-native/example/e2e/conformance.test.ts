@@ -157,8 +157,14 @@ describe('React Native conformance host', () => {
   });
 
   it('treats unavailable as a failed required command', async () => {
-    // The prior test relaunches the app twice, and the harness needs a
-    // moment to mount after the second cold launch on a busy runner.
+    // The prior test ends on a handled open failure, and the development
+    // bundle can leave an overlay above the harness, so this test starts
+    // from its own launch.
+    await device.launchApp({
+      newInstance: true,
+      delete: true,
+      launchArgs: { synchroConformance: '1' },
+    });
     await waitFor(element(by.id('conformance-harness')))
       .toBeVisible()
       .withTimeout(15000);
