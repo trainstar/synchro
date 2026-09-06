@@ -107,6 +107,9 @@ class ClientCallLifecycleTest {
             status = SyncStatus.Ready
             lifecycle.begin("client-d", "call-d", "sync-now")
             assertEquals(CallCompletion.ERROR, lifecycle.await("client-d", "call-d").completion)
+            // A thrown call completes in error even under a schema-reset
+            // status, so the blocked derivation needs a call that returns.
+            fail = false
             status = SyncStatus.Error(
                 SyncFailure(
                     operation = SyncOperationKind.SCHEMA,
