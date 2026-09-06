@@ -18,24 +18,9 @@ sys.dont_write_bytecode = True
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "verification"))
 from packaged_smoke import SMOKE_OPERATIONS  # noqa: E402
 
-REQUIRED_GATE_TARGETS = (
-    "test-conformance",
-    "test-blackbox",
-    "test-adapter",
-    "test-rust-core",
-    "test-rust-pg",
-    "test-swift-unit",
-    "test-kotlin-unit",
-    "test-rn-unit",
-    "test-swift",
-    "test-kotlin",
-    "test-kotlin-instrumentation",
-    "test-rn-e2e-ios",
-    "test-rn-e2e-android",
-    "test-packaged-consumers",
-)
 SHA256 = re.compile(r"^[0-9a-f]{64}$")
 COMMIT = re.compile(r"^[0-9a-f]{40}$")
+PHASE_GATE = re.compile(r"^phase-5-check:\s*(.*)$")
 
 
 class SummaryError(ValueError):
@@ -54,6 +39,24 @@ def required_string(value: object, field: str) -> str:
     if not isinstance(value, str) or not value:
         raise SummaryError(f"{field} must be a nonempty string")
     return value
+
+
+def phase_gate_targets(repo_root: Path) -> list[str]:
+    try:
+        makefile = (repo_root / "Makefile").read_text(encoding="utf-8")
+    except OSError as error:
+        raise SummaryError(f"Makefile is missing or unreadable: {error}") from error
+    for line in makefile.splitlines():
+        match = PHASE_GATE.fullmatch(line)
+        if not match:
+            continue
+        targets = match.group(1).split()
+        if not targets:
+            raise SummaryError("phase-5-check has no gate prerequisites")
+        if len(targets) != len(set(targets)):
+            raise SummaryError("phase-5-check repeats a gate prerequisite")
+        return targets
+    raise SummaryError("Makefile has no phase-5-check target")
 
 
 def expected_obligations(repo_root: Path) -> dict[str, str]:
@@ -108,7 +111,7 @@ def expected_obligations(repo_root: Path) -> dict[str, str]:
         for operation in SMOKE_OPERATIONS:
             expected[f"smoke/{cell_id}/{operation}"] = "smoke"
 
-    for target in REQUIRED_GATE_TARGETS:
+    for target in phase_gate_targets(repo_root):
         expected[f"gate/{target}"] = "gate"
     return expected
 

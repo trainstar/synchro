@@ -50,6 +50,7 @@ GATE_VARIABLE_DEFAULTS = {
     "TESTRESULT_TEST_NAME": "",
 }
 EMBEDDED_CREDENTIAL_URL = re.compile(r"[a-z][a-z0-9+.-]*://[^/\s:@]+:[^/@\s]+@", re.IGNORECASE)
+COMMIT = re.compile(r"^[0-9a-f]{40}$")
 
 
 def parse_count(output: str) -> int:
@@ -84,6 +85,20 @@ def gate_variables(environment: dict[str, str], command: list[str] | None = None
     return variables
 
 
+def source_commit() -> str:
+    try:
+        commit = subprocess.check_output(
+            ["git", "rev-parse", "--verify", "HEAD"],
+            text=True,
+            stderr=subprocess.DEVNULL,
+        ).strip()
+    except (OSError, subprocess.CalledProcessError) as error:
+        raise ValueError(f"cannot resolve the repository commit: {error}") from error
+    if not COMMIT.fullmatch(commit):
+        raise ValueError("repository HEAD is not a full commit hash")
+    return commit
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--gate", required=True, help="Make target name")
@@ -99,6 +114,7 @@ def main() -> int:
         parser.error("a gate command is required")
     try:
         variables = gate_variables(dict(os.environ), command)
+        commit = source_commit()
     except ValueError as error:
         parser.error(str(error))
 
@@ -125,6 +141,7 @@ def main() -> int:
         "test_count": test_count,
         "exit_code": status,
         "gate_variables": variables,
+        "source_commit": commit,
     }
     args.output.parent.mkdir(parents=True, exist_ok=True)
     temporary = args.output.with_name(f".{args.output.name}.tmp")

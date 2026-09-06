@@ -77,6 +77,41 @@ class PackagedSmokeStructureTests(unittest.TestCase):
             self.assertNotEqual(result.returncode, 0)
             self.assertIn("is not terminal", result.stderr)
 
+            valid = copy.deepcopy(dry)
+            valid.pop("dry_run")
+
+            wrong_kind = copy.deepcopy(valid)
+            wrong_kind["obligations"][0]["kind"] = "gate"
+            wrong_kind_path = directory / "wrong-kind.json"
+            packaged_smoke.write_json(wrong_kind_path, wrong_kind)
+            result = self.run_checker(wrong_kind_path)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("wrong kind", result.stderr)
+
+            zero_count = copy.deepcopy(valid)
+            zero_count["obligations"][0]["test_count"] = 0
+            zero_count_path = directory / "zero-count.json"
+            packaged_smoke.write_json(zero_count_path, zero_count)
+            result = self.run_checker(zero_count_path)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("zero or invalid test_count", result.stderr)
+
+            wrong_commit = copy.deepcopy(valid)
+            wrong_commit["source_commit"] = "0" * 40
+            wrong_commit_path = directory / "wrong-commit.json"
+            packaged_smoke.write_json(wrong_commit_path, wrong_commit)
+            result = self.run_checker(wrong_commit_path)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("source_commit does not match HEAD", result.stderr)
+
+            outside_hash = copy.deepcopy(valid)
+            outside_hash["obligations"][0]["artifact_hashes"] = ["0" * 64]
+            outside_hash_path = directory / "outside-hash.json"
+            packaged_smoke.write_json(outside_hash_path, outside_hash)
+            result = self.run_checker(outside_hash_path)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("outside the summary", result.stderr)
+
     def test_missing_cells_become_terminal_failures(self) -> None:
         with tempfile.TemporaryDirectory(prefix="packaged-smoke-collect.") as raw_directory:
             directory = Path(raw_directory)
