@@ -443,6 +443,11 @@ jobs:
         run: |
           set -euo pipefail
           device_type="$(xcrun simctl list devicetypes -j | ruby -rjson -e 'devices = JSON.parse(STDIN.read).fetch("devicetypes"); device = devices.find { |item| item["name"] == "iPhone 15" } || devices.find { |item| item["name"].start_with?("iPhone") }; abort "no iPhone simulator type" unless device; puts device.fetch("identifier")')"
+          # The runner image ships only recent simulator runtimes, so the
+          # minimum cell downloads the iOS 16 runtime when it is absent.
+          if ! xcrun simctl list runtimes available -j | ruby -rjson -e 'exit(JSON.parse(STDIN.read).fetch("runtimes").any? { |item| item["identifier"].include?("iOS-16-") } ? 0 : 1)'; then
+            sudo xcodebuild -downloadPlatform iOS -buildVersion 16.4
+          fi
           min_runtime="$(xcrun simctl list runtimes available -j | ruby -rjson -e 'runtimes = JSON.parse(STDIN.read).fetch("runtimes"); runtime = runtimes.find { |item| item["identifier"].include?("iOS-16-") }; abort "iOS 16 simulator runtime is unavailable" unless runtime; puts runtime.fetch("identifier")')"
           min_udid="$(xcrun simctl create Synchro_iOS_16 "$device_type" "$min_runtime")"
           cleanup_min() { xcrun simctl shutdown "$min_udid" >/dev/null 2>&1 || true; xcrun simctl delete "$min_udid" >/dev/null 2>&1 || true; }
