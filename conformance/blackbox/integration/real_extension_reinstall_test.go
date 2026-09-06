@@ -102,6 +102,10 @@ func waitForReinstalledWorker(
 			observation.ActiveSlotName == harness.Names().ReplicationSlot && observation.RestartLSN != "" &&
 			observation.SlotActive && observation.RestartLSNAtOrAfterReinstall &&
 			observation.ActiveRegistryGeneration > minimumGeneration &&
+			// The worker reports its own generation after activation, so a
+			// sample can land between the two. Wait for the settled state
+			// the caller asserts.
+			observation.WorkerRegistryGeneration == observation.ActiveRegistryGeneration &&
 			observation.PendingRegistryGenerationCount == 0 && observation.NoValidationFailurePoison {
 			return observation
 		}
