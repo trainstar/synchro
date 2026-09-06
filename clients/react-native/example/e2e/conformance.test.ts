@@ -101,9 +101,25 @@ describe('React Native conformance host', () => {
     await expect(element(by.id('conformance-harness'))).toBeVisible();
     await element(by.id('conformance-command-input')).replaceText('{');
     await element(by.id('btn-conformance-execute')).tap();
-    await waitFor(element(by.id('conformance-result')))
-      .toHaveText('{"schema_version":1,"outcome":"error","result":null,"error_code":"invalid_command"}')
+    await waitFor(element(by.id('conformance-command-state')))
+      .toHaveText('error')
       .withTimeout(5000);
+    // The error detail carries an engine-specific parse message, so the
+    // envelope is asserted by structure rather than by exact text.
+    const attributes = await element(by.id('conformance-result')).getAttributes();
+    const raw = String('text' in attributes ? attributes.text : '');
+    const envelope = JSON.parse(raw) as Record<string, unknown>;
+    const keys = Object.keys(envelope).sort();
+    if (
+      keys.join(',') !== 'error_code,error_detail,outcome,result,schema_version' ||
+      envelope.schema_version !== 1 ||
+      envelope.outcome !== 'error' ||
+      envelope.result !== null ||
+      envelope.error_code !== 'invalid_command' ||
+      (envelope.error_detail !== null && typeof envelope.error_detail !== 'string')
+    ) {
+      throw new Error(`strict error envelope is invalid: ${raw}`);
+    }
   });
 
   it('rejects create mode when the database survives a process relaunch', async () => {

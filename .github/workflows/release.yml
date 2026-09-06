@@ -671,7 +671,10 @@ jobs:
           disable-animations: true
           emulator-boot-timeout: 900
           emulator-options: -no-snapshot-save -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
-          script: scripts/ci/capture-gate-result.py --gate test-rn-e2e-android --output dist/verification/gate-results/test-rn-e2e-android.json -- make test-rn-e2e-android-run
+          script: |
+            adb shell wm dismiss-keyguard || true
+            adb shell input keyevent 82 || true
+            scripts/ci/capture-gate-result.py --gate test-rn-e2e-android --output dist/verification/gate-results/test-rn-e2e-android.json -- make test-rn-e2e-android-run
 
       - name: Publish React Native Android gate results
         if: always()
@@ -778,12 +781,12 @@ jobs:
     strategy:
       matrix:
         include:
+          # SUP-PG-MACOS-ARM64-001 is excluded from v0.3.0 certification.
+          # PostgreSQL servers deploy on Linux, so only the linux-x64
+          # extension artifact is packaged and published.
           - os: ubuntu-24.04
             extension_architecture: linux-x64
             expected_runner_arch: X64
-          - os: macos-15
-            extension_architecture: macos-arm64
-            expected_runner_arch: ARM64
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v6.0.2

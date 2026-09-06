@@ -43,7 +43,10 @@ runs:
       run: |
         set -euo pipefail
         make conformance-adapter-artifact
-        make conformance-pg18-extension-artifact
+        # CI provisions local test instances, so the artifact records the
+        # runner's actual PostgreSQL 18 minor. The certified release artifact
+        # keeps the exact pinned minor in its own target.
+        make conformance-pg18-extension-test-artifact
         test "$(shasum -a 256 dist/conformance/synchrod-pg-adapter/synchrod-pg | cut -d ' ' -f 1)" = "$(tr -d '[:space:]' < dist/conformance/synchrod-pg-adapter/synchrod-pg.sha256)"
         test -f dist/conformance/synchro-pg-pg18/artifact-manifest.json
         test "$(shasum -a 256 dist/conformance/synchro-pg-pg18/artifact-manifest.json | cut -d ' ' -f 1)" = "$(tr -d '[:space:]' < dist/conformance/synchro-pg-pg18/artifact-manifest.json.sha256)"
