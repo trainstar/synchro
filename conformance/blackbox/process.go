@@ -1563,11 +1563,25 @@ func (h *Harness) waitForWorker(ctx context.Context) error {
 		}
 		defer database.Close()
 		var present bool
+		// Registration must not commit before the worker binds its slot.
+		// A registration that commits first leaves its activation message
+		// behind the fresh slot boundary, and the worker then idles on the
+		// old registry forever. The wait therefore requires the bound
+		// runtime, not only the worker backend.
 		err = database.QueryRowContext(attemptContext, `
 			SELECT EXISTS (
 				SELECT 1
 				FROM pg_catalog.pg_stat_activity
 				WHERE datname = $1 AND backend_type = 'synchro WAL consumer'
+			) AND EXISTS (
+				SELECT 1
+				FROM synchro.sync_runtime_state runtime
+				JOIN synchro.sync_wal_progress progress
+				  ON progress.singleton
+				 AND progress.stream_generation = runtime.stream_generation
+				WHERE runtime.singleton
+				  AND runtime.active_slot_name IS NOT NULL
+				  AND progress.generation_start_lsn IS NOT NULL
 			)`, h.names.Database).Scan(&present)
 		if err != nil {
 			return false, nil
