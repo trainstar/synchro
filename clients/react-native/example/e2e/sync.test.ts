@@ -51,12 +51,14 @@ async function readPendingRecord(testID: string): Promise<string> {
   return recordID;
 }
 
-async function runConflictAction(timeout = 30000) {
+async function runConflictAction(timeout = 90000) {
   await scrollToAndTap('btn-conflict');
   try {
+    // The setup runs two full sync cycles plus a pending drain, and one
+    // cycle alone costs several seconds on the CI emulator.
     await waitFor(element(by.id('step-value')))
       .toHaveText('conflict:awaiting-server')
-      .withTimeout(15000);
+      .withTimeout(60000);
   } catch (error) {
     const step = await element(by.id('step-value')).getAttributes();
     const detail = await element(by.id('error-value')).getAttributes();
@@ -180,7 +182,7 @@ describe('Synchro RN E2E', () => {
   });
 
   it('conflict resolution, detects server-side conflict', async () => {
-    await runConflictAction(30000);
+    await runConflictAction(45000);
   });
 
   it('multi-user isolation, user 2 cannot see user 1 data', async () => {
