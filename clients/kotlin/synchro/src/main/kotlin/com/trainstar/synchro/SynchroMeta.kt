@@ -847,6 +847,8 @@ internal object SynchroMeta {
 
     data class ScopeRowChecksum(val tableName: String, val recordID: String, val checksum: String)
 
+    data class RowVersion(val serverVersion: String, val rowChecksum: ChecksumObject?)
+
     fun getScopeRowChecksums(
         db: SQLiteDatabase,
         scopeId: String,
@@ -888,6 +890,25 @@ internal object SynchroMeta {
             arrayOf(tableName, recordId)
         ).use { cursor ->
             return if (cursor.moveToFirst()) cursor.getString(0) else null
+        }
+    }
+
+    fun getRowVersionWithChecksum(db: SQLiteDatabase, tableName: String, recordId: String): RowVersion? {
+        db.rawQuery(
+            "SELECT server_version, row_checksum FROM _synchro_row_versions WHERE table_name = ? AND record_id = ?",
+            arrayOf(tableName, recordId),
+        ).use { cursor ->
+            if (!cursor.moveToFirst()) return null
+            val rowChecksum = if (cursor.isNull(1)) {
+                null
+            } else {
+                try {
+                    Json.decodeFromString<ChecksumObject>(cursor.getString(1)).also { it.validate() }
+                } catch (_: Exception) {
+                    throw SynchroError.InvalidResponse("row version checksum is invalid")
+                }
+            }
+            return RowVersion(cursor.getString(0), rowChecksum)
         }
     }
 

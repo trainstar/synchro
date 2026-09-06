@@ -137,6 +137,77 @@ final class PullProcessorTests: XCTestCase {
         )
     }
 
+    private func orderRow(
+        recordID: String,
+        shipAddress: String,
+        updatedAt: String
+    ) -> [String: AnyCodable] {
+        [
+            "id": AnyCodable(recordID),
+            "ship_address": AnyCodable(shipAddress),
+            "updated_at": AnyCodable(updatedAt),
+            "deleted_at": AnyCodable(NSNull()),
+        ]
+    }
+
+    private func installCanonicalScopeRow(
+        _ db: SynchroDatabase,
+        scopeID: String,
+        recordID: String,
+        shipAddress: String,
+        serverVersion: String
+    ) throws -> ChecksumObject {
+        let row = orderRow(recordID: recordID, shipAddress: shipAddress, updatedAt: serverVersion)
+        let rowDigest = try Integrity.rowDigest(
+            schemaHash: protocolTestSchemaHash,
+            table: testTable.localSchema,
+            pk: ["id": AnyCodable(recordID)],
+            row: row,
+            serverVersion: serverVersion
+        )
+        try insertOrder(db, id: recordID, shipAddress: shipAddress, updatedAt: serverVersion)
+        try addScopeRow(db, scopeID: scopeID, recordID: recordID, checksum: rowDigest.checksum.digest)
+        try db.writeTransaction { connection in
+            try SynchroMeta.upsertRowVersion(
+                connection,
+                tableName: testTable.tableName,
+                recordID: recordID,
+                serverVersion: serverVersion,
+                rowChecksum: rowDigest.checksum
+            )
+        }
+        return try scopeChecksum(
+            scopeID: scopeID,
+            schema: testTable.localSchema,
+            row: row,
+            serverVersion: serverVersion
+        )
+    }
+
+    private func applyTerminalScopeChecksum(
+        _ processor: PullProcessor,
+        scopeID: String,
+        checksum: ChecksumObject
+    ) throws {
+        try processor.applyScopeChanges(
+            changes: [],
+            syncedTables: [testTable.localSchema],
+            scopeCursors: [scopeID: "11"],
+            checksums: [scopeID: checksum],
+            schemaHash: protocolTestSchemaHash
+        )
+    }
+
+    private func localScopeChecksum(_ db: SynchroDatabase, scopeID: String) throws -> ChecksumObject {
+        let scope = try db.readTransaction { connection in
+            try SynchroMeta.getScope(connection, scopeID: scopeID)
+        }
+        guard let scope else {
+            throw SynchroError.invalidResponse(message: "test scope is missing")
+        }
+        return try JSONDecoder.synchroDecoder().decode(ChecksumObject.self, from: Data(scope.localChecksum.utf8))
+    }
+
     private func rebuildRequestBody(_ request: RebuildRequest) throws -> Data {
         try JSONEncoder.synchroEncoder().encode(request)
     }
@@ -1297,6 +1368,204 @@ final class PullProcessorTests: XCTestCase {
             ).count,
             0
         )
+    }
+
+    func testTerminalChecksumUsesStoredScopeChecksumAfterConflictReconciliationBeforeEcho() throws {
+        let (db, pullProcessor) = try makeTestEnv()
+        let scopeID = "orders:conflict"
+        let recordID = "conflict-before-echo"
+        let initialVersion = "2026-01-01T00:00:00.000000Z"
+        let initialScopeChecksum = try installCanonicalScopeRow(
+            db,
+            scopeID: scopeID,
+            recordID: recordID,
+            shipAddress: "before",
+            serverVersion: initialVersion
+        )
+        _ = try db.execute("UPDATE orders SET ship_address = ? WHERE id = ?", params: ["local", recordID])
+        let tracker = ChangeTracker(database: db)
+        let sent = try XCTUnwrap(try tracker.pendingChanges().first)
+        let serverVersion = "2026-01-02T00:00:00.000000Z"
+        let canonicalRow = orderRow(recordID: recordID, shipAddress: "canonical", updatedAt: serverVersion)
+        let rejected = try makeRejectedMutation(
+            mutationID: sent.mutationID,
+            schema: testTable.localSchema,
+            pk: ["id": AnyCodable(recordID)],
+            status: .conflict,
+            code: .versionConflict,
+            message: "server version is newer",
+            serverRow: canonicalRow,
+            serverVersion: serverVersion
+        )
+
+        _ = try PushProcessor(database: db, changeTracker: tracker).applyRejected(
+            rejected: [rejected],
+            syncedTables: [testTable.localSchema],
+            sentPending: [sent.mutationID: sent]
+        )
+        try applyTerminalScopeChecksum(pullProcessor, scopeID: scopeID, checksum: initialScopeChecksum)
+
+        XCTAssertEqual(try localScopeChecksum(db, scopeID: scopeID), initialScopeChecksum)
+    }
+
+    func testTerminalChecksumUsesStoredScopeChecksumAfterAcceptedReconciliationBeforeEcho() throws {
+        let (db, pullProcessor) = try makeTestEnv()
+        let scopeID = "orders:accepted"
+        let recordID = "accepted-before-echo"
+        let initialVersion = "2026-01-01T00:00:00.000000Z"
+        let initialScopeChecksum = try installCanonicalScopeRow(
+            db,
+            scopeID: scopeID,
+            recordID: recordID,
+            shipAddress: "before",
+            serverVersion: initialVersion
+        )
+        _ = try db.execute("UPDATE orders SET ship_address = ? WHERE id = ?", params: ["local", recordID])
+        let tracker = ChangeTracker(database: db)
+        let sent = try XCTUnwrap(try tracker.pendingChanges().first)
+        let serverVersion = "2026-01-02T00:00:00.000000Z"
+        let canonicalRow = orderRow(recordID: recordID, shipAddress: "canonical", updatedAt: serverVersion)
+        let accepted = try makeAcceptedMutation(
+            mutationID: sent.mutationID,
+            schema: testTable.localSchema,
+            pk: ["id": AnyCodable(recordID)],
+            status: .applied,
+            serverRow: canonicalRow,
+            serverVersion: serverVersion
+        )
+
+        _ = try PushProcessor(database: db, changeTracker: tracker).applyAccepted(
+            accepted: [accepted],
+            syncedTables: [testTable.localSchema],
+            sentPending: [sent.mutationID: sent]
+        )
+        try applyTerminalScopeChecksum(pullProcessor, scopeID: scopeID, checksum: initialScopeChecksum)
+
+        XCTAssertEqual(try localScopeChecksum(db, scopeID: scopeID), initialScopeChecksum)
+    }
+
+    func testTerminalChecksumUsesStoredScopeChecksumAfterRowlessConflictBeforeEcho() throws {
+        let (db, pullProcessor) = try makeTestEnv()
+        let scopeID = "orders:rowless-conflict"
+        let recordID = "rowless-conflict-before-echo"
+        let initialScopeChecksum = try installCanonicalScopeRow(
+            db,
+            scopeID: scopeID,
+            recordID: recordID,
+            shipAddress: "before",
+            serverVersion: "2026-01-01T00:00:00.000000Z"
+        )
+        _ = try db.execute("DELETE FROM orders WHERE id = ?", params: [recordID])
+        let tracker = ChangeTracker(database: db)
+        let sent = try XCTUnwrap(try tracker.pendingChanges().first)
+        let absenceVersion = "2026-01-02T00:00:00.000000Z"
+        let rejected = try makeRejectedMutation(
+            mutationID: sent.mutationID,
+            schema: testTable.localSchema,
+            pk: ["id": AnyCodable(recordID)],
+            status: .conflict,
+            code: .rowDeleted,
+            message: "row was deleted",
+            serverVersion: absenceVersion
+        )
+
+        _ = try PushProcessor(database: db, changeTracker: tracker).applyRejected(
+            rejected: [rejected],
+            syncedTables: [testTable.localSchema],
+            sentPending: [sent.mutationID: sent]
+        )
+        XCTAssertNil(try db.queryOne("SELECT id FROM orders WHERE id = ?", params: [recordID]))
+        XCTAssertNil(try db.readTransaction {
+            try SynchroMeta.getRowMetadata($0, tableName: self.testTable.tableName, recordID: recordID)?.rowChecksum
+        })
+
+        try applyTerminalScopeChecksum(pullProcessor, scopeID: scopeID, checksum: initialScopeChecksum)
+
+        XCTAssertEqual(try localScopeChecksum(db, scopeID: scopeID), initialScopeChecksum)
+    }
+
+    func testTerminalChecksumUsesNormalRecomputeAfterPullEchoUpdatesScopeRow() throws {
+        let (db, pullProcessor) = try makeTestEnv()
+        let scopeID = "orders:echo"
+        let recordID = "echo-updates-provenance"
+        let initialVersion = "2026-01-01T00:00:00.000000Z"
+        _ = try installCanonicalScopeRow(
+            db,
+            scopeID: scopeID,
+            recordID: recordID,
+            shipAddress: "before",
+            serverVersion: initialVersion
+        )
+        _ = try db.execute("UPDATE orders SET ship_address = ? WHERE id = ?", params: ["local", recordID])
+        let tracker = ChangeTracker(database: db)
+        let sent = try XCTUnwrap(try tracker.pendingChanges().first)
+        let serverVersion = "2026-01-02T00:00:00.000000Z"
+        let canonicalRow = orderRow(recordID: recordID, shipAddress: "canonical", updatedAt: serverVersion)
+        let accepted = try makeAcceptedMutation(
+            mutationID: sent.mutationID,
+            schema: testTable.localSchema,
+            pk: ["id": AnyCodable(recordID)],
+            status: .applied,
+            serverRow: canonicalRow,
+            serverVersion: serverVersion
+        )
+        _ = try PushProcessor(database: db, changeTracker: tracker).applyAccepted(
+            accepted: [accepted],
+            syncedTables: [testTable.localSchema],
+            sentPending: [sent.mutationID: sent]
+        )
+        let canonicalScopeChecksum = try scopeChecksum(
+            scopeID: scopeID,
+            schema: testTable.localSchema,
+            row: canonicalRow,
+            serverVersion: serverVersion
+        )
+        let echo = try makeChangeRecord(
+            scope: scopeID,
+            schema: testTable.localSchema,
+            op: .upsert,
+            pk: ["id": AnyCodable(recordID)],
+            row: canonicalRow,
+            serverVersion: serverVersion
+        )
+
+        try pullProcessor.applyScopeChanges(
+            changes: [echo],
+            syncedTables: [testTable.localSchema],
+            scopeCursors: [scopeID: "12"],
+            checksums: [scopeID: canonicalScopeChecksum],
+            schemaHash: protocolTestSchemaHash
+        )
+
+        XCTAssertEqual(try localScopeChecksum(db, scopeID: scopeID), canonicalScopeChecksum)
+    }
+
+    func testTerminalChecksumRejectsUntrackedLocalMutation() throws {
+        let (db, pullProcessor) = try makeTestEnv()
+        let scopeID = "orders:untracked"
+        let recordID = "untracked-local-mutation"
+        let initialScopeChecksum = try installCanonicalScopeRow(
+            db,
+            scopeID: scopeID,
+            recordID: recordID,
+            shipAddress: "before",
+            serverVersion: "2026-01-01T00:00:00.000000Z"
+        )
+        try db.writeSyncLockedTransaction { connection in
+            try connection.execute(
+                sql: "UPDATE orders SET ship_address = ? WHERE id = ?",
+                arguments: ["mutated", recordID]
+            )
+        }
+
+        XCTAssertThrowsError(
+            try applyTerminalScopeChecksum(pullProcessor, scopeID: scopeID, checksum: initialScopeChecksum)
+        ) { error in
+            guard case SynchroError.invalidResponse(let message) = error else {
+                return XCTFail("expected InvalidResponse")
+            }
+            XCTAssertEqual(message, "scope row checksum does not match local row")
+        }
     }
 
     func testTerminalChecksumUsesValidatedServerDigestForTerminalRejectedProjection() throws {

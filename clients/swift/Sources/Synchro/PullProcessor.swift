@@ -714,7 +714,7 @@ final class PullProcessor: @unchecked Sendable {
             let schemaVersion: Int64? = row["schema_version"]
             let schemaHash: String? = row["schema_hash"]
             let cardinality: Int64? = row["cardinality"]
-            let checksum: ChecksumObject? = checksumObject(row["checksum"])
+            let checksum: ChecksumObject? = Self.checksumObject(row["checksum"])
             return SeedReceiptForConnect(
                 scopeID: scopeID,
                 receipt: receipt,
@@ -769,8 +769,8 @@ final class PullProcessor: @unchecked Sendable {
               let scope = try SynchroMeta.getScope(db, scopeID: receipt.scopeID),
               scope.cursor == nil,
               scope.generation == 0,
-              checksumObject(scope.checksum) == expectedChecksum,
-              checksumObject(scope.localChecksum) == expectedChecksum else {
+               Self.checksumObject(scope.checksum) == expectedChecksum,
+               Self.checksumObject(scope.localChecksum) == expectedChecksum else {
             return false
         }
 
@@ -818,14 +818,14 @@ final class PullProcessor: @unchecked Sendable {
                   let serverVersion: String = versionRow["server_version"],
                   !serverVersion.isEmpty,
                   let rowChecksumJSON: String = versionRow["row_checksum"],
-                  checksumObject(rowChecksumJSON) == expectedChecksum else {
+                  Self.checksumObject(rowChecksumJSON) == expectedChecksum else {
                 return false
             }
         }
         return true
     }
 
-    private func checksumObject(_ source: String?) -> ChecksumObject? {
+    private static func checksumObject(_ source: String?) -> ChecksumObject? {
         guard let source else { return nil }
         do {
             let data = Data(source.utf8)
@@ -1186,22 +1186,32 @@ final class PullProcessor: @unchecked Sendable {
                 recordID: scopeRow.recordID
             )
             if protected {
-                let pk = try Self.primaryKeyValue(recordID: scopeRow.recordID, schema: table)
-                let identity = try Integrity.rowIdentity(table: table, pk: pk)
-                let digest = ChecksumObject(
-                    algorithm: "sha256",
-                    version: 1,
-                    encoding: "hex",
-                    digest: scopeRow.checksum
-                )
-                try digest.validate()
-                entries.append((identity: identity, digest: digest))
+                entries.append(try Self.storedScopeDigestEntry(
+                    table: table,
+                    recordID: scopeRow.recordID,
+                    checksum: scopeRow.checksum
+                ))
                 continue
             }
 
-            let localRow = try Self.loadWireRow(db: db, table: table, recordID: scopeRow.recordID)
+            let metadata = try SynchroMeta.getRowMetadata(
+                db,
+                tableName: table.tableName,
+                recordID: scopeRow.recordID
+            )
+            guard let localRow = try Self.loadWireRow(db: db, table: table, recordID: scopeRow.recordID) else {
+                guard let metadata, metadata.rowChecksum == nil else {
+                    throw SynchroError.invalidResponse(message: "scope provenance references a missing row")
+                }
+                entries.append(try Self.storedScopeDigestEntry(
+                    table: table,
+                    recordID: scopeRow.recordID,
+                    checksum: scopeRow.checksum
+                ))
+                continue
+            }
             let pk = [table.primaryKeyFieldID: localRow[table.primaryKeyFieldID]!]
-            guard let version = try SynchroMeta.getRowVersion(db, tableName: table.tableName, recordID: scopeRow.recordID) else {
+            guard let metadata else {
                 throw SynchroError.invalidResponse(message: "scope row has no server version")
             }
             let computed = try Integrity.rowDigest(
@@ -1209,14 +1219,40 @@ final class PullProcessor: @unchecked Sendable {
                 table: table,
                 pk: pk,
                 row: localRow,
-                serverVersion: version
+                serverVersion: metadata.serverVersion
             )
-            guard computed.checksum.digest == scopeRow.checksum else {
-                throw SynchroError.invalidResponse(message: "scope row checksum does not match local row")
+            if computed.checksum.digest == scopeRow.checksum {
+                entries.append((identity: computed.identity, digest: computed.checksum))
+                continue
             }
-            entries.append((identity: computed.identity, digest: computed.checksum))
+            if Self.checksumObject(metadata.rowChecksum) == computed.checksum {
+                entries.append(try Self.storedScopeDigestEntry(
+                    table: table,
+                    recordID: scopeRow.recordID,
+                    checksum: scopeRow.checksum
+                ))
+                continue
+            }
+            throw SynchroError.invalidResponse(message: "scope row checksum does not match local row")
         }
         return try Integrity.scopeDigest(schemaHash: schemaHash, scopeID: scopeID, entries: entries)
+    }
+
+    private static func storedScopeDigestEntry(
+        table: LocalSchemaTable,
+        recordID: String,
+        checksum: String
+    ) throws -> (identity: Data, digest: ChecksumObject) {
+        let pk = try primaryKeyValue(recordID: recordID, schema: table)
+        let identity = try Integrity.rowIdentity(table: table, pk: pk)
+        let digest = ChecksumObject(
+            algorithm: "sha256",
+            version: 1,
+            encoding: "hex",
+            digest: checksum
+        )
+        try digest.validate()
+        return (identity: identity, digest: digest)
     }
 
     private static func primaryKeyValue(recordID: String, schema: LocalSchemaTable) throws -> [String: AnyCodable] {
@@ -1247,7 +1283,7 @@ final class PullProcessor: @unchecked Sendable {
         db: GRDB.Database,
         table: LocalSchemaTable,
         recordID: String
-    ) throws -> [String: AnyCodable] {
+    ) throws -> [String: AnyCodable]? {
         let columns = table.columns.map { SQLiteHelpers.quoteIdentifier($0.name) }.joined(separator: ", ")
         let primaryKey = SQLiteHelpers.quoteIdentifier(table.primaryKey.first ?? "id")
         let relation = SQLiteHelpers.quoteIdentifier(table.tableName)
@@ -1256,7 +1292,7 @@ final class PullProcessor: @unchecked Sendable {
             sql: "SELECT \(columns) FROM \(relation) WHERE \(primaryKey) = ?",
             arguments: [recordID]
         ) else {
-            throw SynchroError.invalidResponse(message: "scope provenance references a missing row")
+            return nil
         }
         return try Dictionary(uniqueKeysWithValues: table.columns.map { column in
             let value: DatabaseValue = row[column.name]

@@ -986,11 +986,23 @@ internal class PullProcessor(private val database: SynchroDatabase) {
                     ChecksumObject("sha256", 1, "hex", scopeRow.checksum)
             }
             val row = loadWireRow(db, table, scopeRow.recordID)
+            val rowVersion = SynchroMeta.getRowVersionWithChecksum(db, table.tableName, scopeRow.recordID)
+            if (row == null) {
+                if (rowVersion != null && rowVersion.rowChecksum == null) {
+                    return@map scopeRowIdentity(table, scopeRow.recordID) to
+                        ChecksumObject("sha256", 1, "hex", scopeRow.checksum)
+                }
+                throw SynchroError.InvalidResponse("scope provenance references a missing row")
+            }
             val pk = JsonObject(mapOf(table.primaryKeyFieldID to row.getValue(table.primaryKeyFieldID)))
-            val serverVersion = SynchroMeta.getRowVersion(db, table.tableName, scopeRow.recordID)
+            val serverVersion = rowVersion?.serverVersion
                 ?: throw SynchroError.InvalidResponse("scope row has no server version")
             val computed = Integrity.rowDigest(schemaHash, table, pk, row, serverVersion)
             if (computed.checksum.digest != scopeRow.checksum) {
+                if (computed.checksum.digest == rowVersion.rowChecksum?.digest) {
+                    return@map scopeRowIdentity(table, scopeRow.recordID) to
+                        ChecksumObject("sha256", 1, "hex", scopeRow.checksum)
+                }
                 throw SynchroError.InvalidResponse("scope row checksum does not match local row")
             }
             computed.identity to computed.checksum
@@ -1097,13 +1109,13 @@ internal class PullProcessor(private val database: SynchroDatabase) {
         return Integrity.rowIdentity(table, JsonObject(mapOf(table.primaryKeyFieldID to value)))
     }
 
-    private fun loadWireRow(db: SQLiteDatabase, table: LocalSchemaTable, recordId: String): JsonObject {
+    private fun loadWireRow(db: SQLiteDatabase, table: LocalSchemaTable, recordId: String): JsonObject? {
         val columns = table.columns.joinToString(", ") { SQLiteHelpers.quoteIdentifier(it.name) }
         val primaryKey = SQLiteHelpers.quoteIdentifier(table.primaryKey.firstOrNull() ?: "id")
         val relation = SQLiteHelpers.quoteIdentifier(table.tableName)
         db.rawQuery("SELECT $columns FROM $relation WHERE $primaryKey = ?", arrayOf(recordId)).use { cursor ->
             if (!cursor.moveToFirst()) {
-                throw SynchroError.InvalidResponse("scope provenance references a missing row")
+                return null
             }
             return JsonObject(table.columns.mapIndexed { index, column ->
                 column.fieldID to wireValue(cursor, index, column)

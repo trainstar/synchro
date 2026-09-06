@@ -153,6 +153,46 @@ class PullProcessorTests {
         },
     )
 
+    private fun installCanonicalScopeRow(
+        db: SynchroDatabase,
+        processor: PullProcessor,
+        scopeID: String,
+        recordID: String,
+        shipAddress: String,
+        serverVersion: String,
+    ): ChangeRecord {
+        db.writeTransaction { conn -> SynchroMeta.upsertScope(conn, scopeID, null, null) }
+        val change = makeChangeRecord(
+            scope = scopeID,
+            schema = localTestTable,
+            op = Operation.UPSERT,
+            pk = buildJsonObject { put("id", recordID) },
+            row = orderRow(recordID, shipAddress),
+            serverVersion = serverVersion,
+        )
+        processor.applyScopeChanges(
+            changes = listOf(change),
+            syncedTables = listOf(localTestTable),
+            scopeCursors = emptyMap(),
+            checksums = null,
+            schemaHash = PROTOCOL_TEST_SCHEMA_HASH,
+        )
+        return change
+    }
+
+    private fun computeScopeChecksum(
+        db: SynchroDatabase,
+        processor: PullProcessor,
+        scopeID: String,
+    ): ChecksumObject = db.writeSyncLockedTransaction { conn ->
+        processor.computeScopeChecksum(
+            conn,
+            scopeID,
+            PROTOCOL_TEST_SCHEMA_HASH,
+            mapOf(localTestTable.tableName to localTestTable),
+        )
+    }
+
     private fun insertPendingChange(
         db: SynchroDatabase,
         recordID: String,
@@ -1378,6 +1418,221 @@ class PullProcessorTests {
         val scope = db.queryOne("SELECT cursor, checksum FROM _synchro_scopes WHERE scope_id = ?", arrayOf(scopeID))
         assertEquals("20", scope?.get("cursor"))
         assertTrue((scope?.get("checksum") as String).contains(checksum.digest))
+    }
+
+    @Test
+    fun testScopeChecksumUsesStoredDigestAfterRowBearingConflictBeforeEcho() {
+        val (db, pullProcessor) = makeTestEnv()
+        val scopeID = "orders:user1"
+        val recordID = "conflict-before-echo"
+        val previous = installCanonicalScopeRow(
+            db,
+            pullProcessor,
+            scopeID,
+            recordID,
+            shipAddress = "previous server value",
+            serverVersion = "server-v1",
+        )
+        db.execute(
+            "UPDATE orders SET ship_address = ? WHERE id = ?",
+            arrayOf("local value", recordID),
+        )
+        val tracker = ChangeTracker(db)
+        val mutationID = tracker.pendingChanges().single().mutationID
+        val canonicalRow = orderRow(recordID, "conflict server value")
+        val conflict = makeRejectedMutation(
+            mutationID = mutationID,
+            schema = localTestTable,
+            pk = buildJsonObject { put("id", recordID) },
+            status = MutationStatus.CONFLICT,
+            code = MutationRejectionCode.VERSION_CONFLICT,
+            message = "server changed",
+            serverRow = canonicalRow,
+            serverVersion = "server-v2",
+        )
+
+        PushProcessor(db, tracker).applyRejected(listOf(conflict), listOf(localTestTable))
+
+        assertEquals(
+            "conflict",
+            db.queryOne(
+                "SELECT lifecycle_state FROM _synchro_pending_changes WHERE mutation_id = ?",
+                arrayOf(mutationID),
+            )?.get("lifecycle_state"),
+        )
+        assertEquals(
+            "conflict server value",
+            db.queryOne("SELECT ship_address FROM orders WHERE id = ?", arrayOf(recordID))?.get("ship_address"),
+        )
+        val previousScopeChecksum = scopeChecksum(scopeID, listOf(recordID to previous.rowChecksum!!))
+        assertEquals(previousScopeChecksum, computeScopeChecksum(db, pullProcessor, scopeID))
+        assertNotEquals(
+            scopeChecksum(scopeID, listOf(recordID to conflict.rowChecksum!!)),
+            previousScopeChecksum,
+        )
+    }
+
+    @Test
+    fun testScopeChecksumUsesStoredDigestAfterAcceptedResponseBeforeEcho() {
+        val (db, pullProcessor) = makeTestEnv()
+        val scopeID = "orders:user1"
+        val recordID = "accepted-before-echo"
+        val previous = installCanonicalScopeRow(
+            db,
+            pullProcessor,
+            scopeID,
+            recordID,
+            shipAddress = "previous server value",
+            serverVersion = "server-v1",
+        )
+        db.execute(
+            "UPDATE orders SET ship_address = ? WHERE id = ?",
+            arrayOf("accepted local value", recordID),
+        )
+        val tracker = ChangeTracker(db)
+        val mutationID = tracker.pendingChanges().single().mutationID
+        val canonicalRow = orderRow(recordID, "accepted server value")
+        val accepted = makeAcceptedMutation(
+            mutationID = mutationID,
+            schema = localTestTable,
+            pk = buildJsonObject { put("id", recordID) },
+            status = MutationStatus.APPLIED,
+            serverRow = canonicalRow,
+            serverVersion = "server-v2",
+        )
+
+        PushProcessor(db, tracker).applyAccepted(listOf(accepted), listOf(localTestTable))
+
+        assertEquals(
+            "accepted",
+            db.queryOne(
+                "SELECT lifecycle_state FROM _synchro_pending_changes WHERE mutation_id = ?",
+                arrayOf(mutationID),
+            )?.get("lifecycle_state"),
+        )
+        assertEquals(
+            "accepted server value",
+            db.queryOne("SELECT ship_address FROM orders WHERE id = ?", arrayOf(recordID))?.get("ship_address"),
+        )
+        assertEquals(
+            scopeChecksum(scopeID, listOf(recordID to previous.rowChecksum!!)),
+            computeScopeChecksum(db, pullProcessor, scopeID),
+        )
+    }
+
+    @Test
+    fun testScopeChecksumUsesStoredDigestAfterRowlessConflictBeforeEcho() {
+        val (db, pullProcessor) = makeTestEnv()
+        val scopeID = "orders:user1"
+        val recordID = "rowless-conflict-before-echo"
+        val previous = installCanonicalScopeRow(
+            db,
+            pullProcessor,
+            scopeID,
+            recordID,
+            shipAddress = "previous server value",
+            serverVersion = "server-v1",
+        )
+        db.execute(
+            "UPDATE orders SET ship_address = ? WHERE id = ?",
+            arrayOf("local value", recordID),
+        )
+        val tracker = ChangeTracker(db)
+        val mutationID = tracker.pendingChanges().single().mutationID
+        val conflict = makeRejectedMutation(
+            mutationID = mutationID,
+            schema = localTestTable,
+            pk = buildJsonObject { put("id", recordID) },
+            status = MutationStatus.CONFLICT,
+            code = MutationRejectionCode.ROW_DELETED,
+            message = "row was deleted",
+            serverVersion = "server-v2",
+        )
+
+        PushProcessor(db, tracker).applyRejected(listOf(conflict), listOf(localTestTable))
+
+        assertNull(db.queryOne("SELECT id FROM orders WHERE id = ?", arrayOf(recordID)))
+        assertEquals(
+            scopeChecksum(scopeID, listOf(recordID to previous.rowChecksum!!)),
+            computeScopeChecksum(db, pullProcessor, scopeID),
+        )
+    }
+
+    @Test
+    fun testScopeChecksumRecomputesCanonicalRowAfterPullEcho() {
+        val (db, pullProcessor) = makeTestEnv()
+        val scopeID = "orders:user1"
+        val recordID = "accepted-after-echo"
+        val previous = installCanonicalScopeRow(
+            db,
+            pullProcessor,
+            scopeID,
+            recordID,
+            shipAddress = "previous server value",
+            serverVersion = "server-v1",
+        )
+        db.execute(
+            "UPDATE orders SET ship_address = ? WHERE id = ?",
+            arrayOf("accepted local value", recordID),
+        )
+        val tracker = ChangeTracker(db)
+        val accepted = makeAcceptedMutation(
+            mutationID = tracker.pendingChanges().single().mutationID,
+            schema = localTestTable,
+            pk = buildJsonObject { put("id", recordID) },
+            status = MutationStatus.APPLIED,
+            serverRow = orderRow(recordID, "accepted server value"),
+            serverVersion = "server-v2",
+        )
+        PushProcessor(db, tracker).applyAccepted(listOf(accepted), listOf(localTestTable))
+        val beforeEcho = computeScopeChecksum(db, pullProcessor, scopeID)
+
+        val echo = makeChangeRecord(
+            scope = scopeID,
+            schema = localTestTable,
+            op = Operation.UPSERT,
+            pk = accepted.pk,
+            row = accepted.serverRow,
+            serverVersion = accepted.serverVersion,
+        )
+        pullProcessor.applyScopeChanges(
+            changes = listOf(echo),
+            syncedTables = listOf(localTestTable),
+            scopeCursors = emptyMap(),
+            checksums = null,
+            schemaHash = PROTOCOL_TEST_SCHEMA_HASH,
+        )
+
+        val previousScopeChecksum = scopeChecksum(scopeID, listOf(recordID to previous.rowChecksum!!))
+        val canonicalScopeChecksum = scopeChecksum(scopeID, listOf(recordID to accepted.rowChecksum!!))
+        assertEquals(previousScopeChecksum, beforeEcho)
+        assertNotEquals(previousScopeChecksum, canonicalScopeChecksum)
+        assertEquals(canonicalScopeChecksum, computeScopeChecksum(db, pullProcessor, scopeID))
+    }
+
+    @Test
+    fun testScopeChecksumRejectsMutationWithoutMatchingRowVersionChecksum() {
+        val (db, processor) = makeTestEnv()
+        val scopeID = "orders:user1"
+        val recordID = "corrupt-local-row"
+        installCanonicalScopeRow(
+            db,
+            processor,
+            scopeID,
+            recordID,
+            shipAddress = "canonical value",
+            serverVersion = "server-v1",
+        )
+        db.writeSyncLockedTransaction { conn ->
+            conn.execSQL(
+                "UPDATE orders SET ship_address = ? WHERE id = ?",
+                arrayOf("corrupt value", recordID),
+            )
+        }
+
+        assertThrows(SynchroError.InvalidResponse::class.java) {
+            computeScopeChecksum(db, processor, scopeID)
+        }
     }
 
     @Test
