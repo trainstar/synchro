@@ -317,8 +317,7 @@ jobs:
       - name: Run macOS packaged smoke cell
         run: |
           macos_version="$(sw_vers -productVersion)"
-          SYNCHRO_TEST_JWT_SECRET="$(cat "$SYNCHRO_CONFORMANCE_JWT_SECRET_FILE")" \
-            make test-client-platforms \
+          make test-client-platforms \
             SUPPORT_CELL_ID=SUP-MACOS-CURRENT-001 \
             SUPPORT_PLATFORM_VERSION="${macos_version%%.*}"
 
