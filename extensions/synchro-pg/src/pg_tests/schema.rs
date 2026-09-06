@@ -96,7 +96,9 @@
         .expect("send backfill query");
 
         let mut waiting_for_progress = false;
-        for _ in 0..1000 {
+        // A loaded runner can take several seconds to reach the lock wait,
+        // and the loop exits on first observation, so the budget is generous.
+        for _ in 0..3000 {
             waiting_for_progress = Spi::get_one_with_args(
                 "SELECT EXISTS (
                      SELECT 1 FROM pg_locks
@@ -112,7 +114,7 @@
             if waiting_for_progress {
                 break;
             }
-            std::thread::sleep(std::time::Duration::from_millis(1));
+            std::thread::sleep(std::time::Duration::from_millis(10));
         }
         let checkpoint_locked = if waiting_for_progress {
             Spi::get_one_with_args(

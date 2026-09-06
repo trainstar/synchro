@@ -16,6 +16,9 @@ concurrency:
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  # Seeds are instance-bound by design, and every CI database is fresh, so
+  # every adapter start regenerates the canonical seed asset.
+  REFRESH_RN_SEED: "1"
 
 jobs:
   validate-metadata:
@@ -679,12 +682,11 @@ jobs:
           script: |
             adb shell wm dismiss-keyguard || true
             adb shell input keyevent 82 || true
-            scripts/ci/capture-gate-result.py --gate test-rn-e2e-android --output dist/verification/gate-results/test-rn-e2e-android.json -- make test-rn-e2e-android-run
-
-      - name: Report the Android crash log
-        if: failure()
-        timeout-minutes: 2
-        run: timeout 60 adb logcat -d AndroidRuntime:E ActivityManager:I "*:S" | tail -n 150 || true
+            scripts/ci/capture-gate-result.py --gate test-rn-e2e-android --output dist/verification/gate-results/test-rn-e2e-android.json -- make test-rn-e2e-android-run || {
+              echo "=== device log after the failed bridge run ==="
+              timeout 60 adb logcat -d AndroidRuntime:E ActivityManager:I ReactNativeJS:V "*:S" | tail -n 200 || true
+              exit 1
+            }
 
       - name: Publish React Native Android gate results
         if: always()
