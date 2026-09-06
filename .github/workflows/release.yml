@@ -518,7 +518,7 @@ jobs:
           sudo udevadm control --reload-rules
           sudo udevadm trigger --name-match=kvm
 
-      - name: Run Android instrumentation release gate
+      - name: Run Android emulator release gates
         uses: reactivecircus/android-emulator-runner@v2
         with:
           api-level: 34
@@ -534,13 +534,7 @@ jobs:
           script: |
             scripts/ci/capture-gate-result.py --gate test-kotlin-instrumentation --output dist/verification/gate-results/test-kotlin-instrumentation.json -- make test-kotlin-instrumentation
             make test-client-platforms SUPPORT_CELL_ID=SUP-PG-LINUX-X64-001 SUPPORT_PLATFORM_VERSION=18
-
-      - name: Validate Kotlin SDK
-        run: |
-          scripts/ci/capture-gate-result.py \
-            --gate test-kotlin \
-            --output dist/verification/gate-results/test-kotlin.json \
-            -- make test-kotlin
+            scripts/ci/capture-gate-result.py --gate test-kotlin --output dist/verification/gate-results/test-kotlin.json -- make test-kotlin
 
       - name: Publish Kotlin gate results
         if: always()
