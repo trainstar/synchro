@@ -5897,11 +5897,49 @@ func acquireInstallationLock(ctx context.Context, path string) (*installationLoc
 			if !timer.Stop() {
 				<-timer.C
 			}
+			holder := lockHolderDescription(file)
 			_ = file.Close()
+			if holder != "" {
+				return nil, fmt.Errorf("bounded installation lock wait expired: held by %s", holder)
+			}
 			return nil, errors.New("bounded installation lock wait expired")
 		case <-timer.C:
 		}
 	}
+}
+
+// lockHolderDescription names the process that holds the lock through
+// /proc/locks, which exists only on Linux. Other platforms report nothing.
+func lockHolderDescription(file *os.File) string {
+	info, err := file.Stat()
+	if err != nil {
+		return ""
+	}
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		return ""
+	}
+	locks, err := os.ReadFile("/proc/locks")
+	if err != nil {
+		return ""
+	}
+	inode := fmt.Sprintf(":%d ", stat.Ino)
+	for _, line := range strings.Split(string(locks), "\n") {
+		if !strings.Contains(line, "FLOCK") || !strings.Contains(line, inode) {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) < 5 {
+			continue
+		}
+		pid := fields[4]
+		command, err := os.ReadFile("/proc/" + pid + "/cmdline")
+		if err != nil {
+			return "pid " + pid
+		}
+		return "pid " + pid + " (" + strings.TrimRight(strings.ReplaceAll(string(command), "\x00", " "), " ") + ")"
+	}
+	return ""
 }
 
 func (lock *installationLock) Release() error {
