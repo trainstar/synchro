@@ -367,28 +367,26 @@ fn startup_retry_exhausted(started_at: std::time::Instant) -> bool {
 #[no_mangle]
 pub extern "C-unwind" fn synchro_wal_worker_main(_arg: pg_sys::Datum) {
     BackgroundWorker::attach_signal_handlers(SignalWakeFlags::SIGHUP | SignalWakeFlags::SIGTERM);
+    // The pgrx SIGTERM handler only sets a latch flag, so a statement that
+    // runs at fast shutdown outlives the postmaster wait budget. The
+    // standard backend die handler raises FATAL at the next interrupt
+    // check inside the executor and inside lock waits, which bounds the
+    // exit. The postmaster does not restart workers while it shuts down,
+    // and an isolated SIGTERM restarts the worker through the configured
+    // restart time, which is the designed self-heal path.
+    unsafe extern "C-unwind" fn worker_die(signal: core::ffi::c_int) {
+        unsafe { pg_sys::die(signal) };
+    }
+    unsafe {
+        pg_sys::pqsignal_be(pg_sys::SIGTERM as i32, Some(worker_die));
+    }
     // PostgreSQL restarts this worker only after a nonzero exit status.
-    // Self-heal paths must raise errors. SIGTERM and shutdown return cleanly.
+    // Self-heal paths must raise errors. Shutdown returns cleanly.
     let Some(worker_login) = crate::configured_worker_login() else {
         pgrx::error!("synchro WAL worker login is unavailable");
     };
     let database = database_name();
     BackgroundWorker::connect_worker_to_spi(Some(&database), Some(&worker_login));
-
-    // The pgrx SIGTERM handler sets a latch flag and does not interrupt a
-    // running statement, so an unbounded statement or lock wait keeps the
-    // worker alive through a fast shutdown, and a worker orphaned by a
-    // killed postmaster stays inside its statement forever. Session bounds
-    // return control to the latch loop, where SIGTERM and postmaster death
-    // are observed.
-    if let Err(error) = run_worker_transaction(|| -> Result<(), pgrx::spi::Error> {
-        Spi::run("SET statement_timeout = '5s'")?;
-        Spi::run("SET lock_timeout = '5s'")?;
-        Spi::run("SET idle_in_transaction_session_timeout = '30s'")?;
-        Ok(())
-    }) {
-        pgrx::error!("synchro WAL worker session bounds failed: {error}");
-    }
 
     let preparation_started_at = std::time::Instant::now();
     let identity = 'prepare: loop {
