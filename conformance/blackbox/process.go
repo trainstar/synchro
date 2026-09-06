@@ -2074,10 +2074,10 @@ func (h *Harness) ReinstallExtension(ctx context.Context) (ExtensionReinstallRes
 	}
 	defer tx.Rollback()
 	if _, err := tx.ExecContext(ctx, "DROP EXTENSION synchro_pg CASCADE"); err != nil {
-		return ExtensionReinstallResult{}, errors.New("drop synchro_pg extension failed")
+		return ExtensionReinstallResult{}, fmt.Errorf("drop synchro_pg extension failed: %w", err)
 	}
 	if _, err := tx.ExecContext(ctx, "CREATE EXTENSION synchro_pg"); err != nil {
-		return ExtensionReinstallResult{}, errors.New("create synchro_pg extension failed")
+		return ExtensionReinstallResult{}, fmt.Errorf("create synchro_pg extension failed: %w", err)
 	}
 	var publicationExists bool
 	if err := tx.QueryRowContext(
