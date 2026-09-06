@@ -452,6 +452,9 @@ jobs:
           echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt-archive.postgresql.org/pub/repos/apt noble-pgdg-archive main" | sudo tee /etc/apt/sources.list.d/pgdg-archive.list
           sudo apt-get update
           sudo apt-get install -y --allow-downgrades             postgresql-18=18.3-1.pgdg24.04+1             postgresql-client-18=18.3-1.pgdg24.04+1
+          # The local provisioner installs the packaged extension files into
+          # the server directories, and the apt installation is root owned.
+          sudo chmod -R a+w "$(/usr/lib/postgresql/18/bin/pg_config --sharedir)/extension" "$(/usr/lib/postgresql/18/bin/pg_config --pkglibdir)"
           echo "SYNCHRO_CONFORMANCE_PG18_BINDIR=/usr/lib/postgresql/18/bin" >> "$GITHUB_ENV"
 
       - name: Restore packaged PostgreSQL 18 extension
