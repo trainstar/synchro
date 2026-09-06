@@ -571,6 +571,17 @@ CREATE TABLE IF NOT EXISTS sync_shared_scopes (
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+-- A granted scope belongs to one user and can be revoked from that user. An
+-- identity scope is unconditional and a shared scope belongs to every user, so
+-- neither expresses an assignment that changes.
+CREATE TABLE IF NOT EXISTS sync_user_scopes (
+    user_id TEXT NOT NULL,
+    scope_id TEXT NOT NULL,
+    assigned BOOLEAN NOT NULL DEFAULT true,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (user_id, scope_id)
+);
+
 CREATE TABLE IF NOT EXISTS sync_scope_state (
     scope_id TEXT PRIMARY KEY,
     stream_generation TEXT NOT NULL,
@@ -1490,7 +1501,13 @@ BEGIN
            SELECT 1
            FROM sync_stream_resets reset
            WHERE reset.reset_id::text = NULLIF(current_setting('synchro.stream_reset_id', true), '')
-             AND reset.lifecycle = 'baseline_staged'
+             AND (
+                 reset.lifecycle = 'baseline_staged'
+                 OR (
+                     reset.operation_kind = 'projection_bootstrap'
+                     AND reset.lifecycle = 'catching_up'
+                 )
+             )
        ) THEN
         RETURN OLD;
     END IF;
@@ -1532,7 +1549,24 @@ BEGIN
            SELECT 1
            FROM sync_stream_resets reset
            WHERE reset.reset_id::text = NULLIF(current_setting('synchro.stream_reset_id', true), '')
-             AND reset.lifecycle = 'baseline_staged'
+             AND (
+                 reset.lifecycle = 'baseline_staged'
+                 OR (
+                     reset.operation_kind = 'projection_bootstrap'
+                     AND reset.lifecycle = 'catching_up'
+                 )
+             )
+       ) THEN
+        RETURN OLD;
+    END IF;
+    IF TG_OP = 'DELETE'
+       AND EXISTS (
+           SELECT 1
+           FROM sync_registry_membership_stages stage
+           WHERE stage.registry_generation::text = NULLIF(
+                     current_setting('synchro.membership_activation_generation', true), ''
+                 )
+             AND stage.state = 'pending'
        ) THEN
         RETURN OLD;
     END IF;
@@ -1947,14 +1981,15 @@ AS 'MODULE_PATHNAME', 'synchro_emit_projection_bootstrap_barrier_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- synchro-pg/src/compaction.rs:37
--- synchro_pg::compaction::synchro_inject_client_retention_expiry
-CREATE  FUNCTION "synchro_inject_client_retention_expiry"(
-	"p_user_id" TEXT, /* core::option::Option<&str> */
-	"p_client_id" TEXT /* core::option::Option<&str> */
-) RETURNS bool /* bool */
+-- synchro-pg/src/portable_seed.rs:212
+-- synchro_pg::portable_seed::synchro_grant_user_scope
+CREATE  FUNCTION "synchro_grant_user_scope"(
+	"p_user_id" TEXT, /* &str */
+	"p_scope_id" TEXT /* &str */
+) RETURNS void
+STRICT
 LANGUAGE c /* Rust */
-AS 'MODULE_PATHNAME', 'synchro_inject_client_retention_expiry_wrapper';
+AS 'MODULE_PATHNAME', 'synchro_grant_user_scope_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
@@ -1964,6 +1999,17 @@ CREATE  FUNCTION "synchro_health_detail"() RETURNS jsonb /* pgrx::datum::json::J
 STRICT
 LANGUAGE c /* Rust */
 AS 'MODULE_PATHNAME', 'synchro_health_detail_wrapper';
+/* </end connected objects> */
+
+/* <begin connected objects> */
+-- synchro-pg/src/compaction.rs:37
+-- synchro_pg::compaction::synchro_inject_client_retention_expiry
+CREATE  FUNCTION "synchro_inject_client_retention_expiry"(
+	"p_user_id" TEXT, /* core::option::Option<&str> */
+	"p_client_id" TEXT /* core::option::Option<&str> */
+) RETURNS bool /* bool */
+LANGUAGE c /* Rust */
+AS 'MODULE_PATHNAME', 'synchro_inject_client_retention_expiry_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
@@ -1990,7 +2036,7 @@ AS 'MODULE_PATHNAME', 'synchro_mark_stream_reset_snapshot_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- synchro-pg/src/portable_seed.rs:250
+-- synchro-pg/src/portable_seed.rs:328
 -- synchro_pg::portable_seed::synchro_portable_seed_manifest
 CREATE  FUNCTION "synchro_portable_seed_manifest"(
 	"p_page_limit" INT DEFAULT 1000 /* i32 */
@@ -2001,7 +2047,7 @@ AS 'MODULE_PATHNAME', 'synchro_portable_seed_manifest_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- synchro-pg/src/portable_seed.rs:423
+-- synchro-pg/src/portable_seed.rs:501
 -- synchro_pg::portable_seed::synchro_portable_seed_scope
 CREATE  FUNCTION "synchro_portable_seed_scope"(
 	"p_scope_id" TEXT, /* &str */
@@ -2251,12 +2297,24 @@ AS 'MODULE_PATHNAME', 'synchro_request_projection_bootstrap_barrier_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- synchro-pg/src/bgworker.rs:687
+-- synchro-pg/src/bgworker.rs:700
 -- synchro_pg::bgworker::synchro_retry_wal_poison
 CREATE  FUNCTION "synchro_retry_wal_poison"() RETURNS bool /* bool */
 STRICT
 LANGUAGE c /* Rust */
 AS 'MODULE_PATHNAME', 'synchro_retry_wal_poison_wrapper';
+/* </end connected objects> */
+
+/* <begin connected objects> */
+-- synchro-pg/src/portable_seed.rs:244
+-- synchro_pg::portable_seed::synchro_revoke_user_scope
+CREATE  FUNCTION "synchro_revoke_user_scope"(
+	"p_user_id" TEXT, /* &str */
+	"p_scope_id" TEXT /* &str */
+) RETURNS void
+STRICT
+LANGUAGE c /* Rust */
+AS 'MODULE_PATHNAME', 'synchro_revoke_user_scope_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
@@ -2314,7 +2372,7 @@ AS 'MODULE_PATHNAME', 'synchro_tables_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- synchro-pg/src/portable_seed.rs:209
+-- synchro-pg/src/portable_seed.rs:287
 -- synchro_pg::portable_seed::synchro_unregister_shared_scope
 CREATE  FUNCTION "synchro_unregister_shared_scope"(
 	"p_scope_id" TEXT /* &str */
@@ -2336,7 +2394,7 @@ AS 'MODULE_PATHNAME', 'synchro_unregister_table_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- synchro-pg/src/lib.rs:1839
+-- synchro-pg/src/lib.rs:1873
 -- finalize
 
 DO $roles$
@@ -2479,7 +2537,8 @@ BEGIN
                 'synchro_prepare_projection_view',
                  'synchro_register_membership_dependency',
                  'synchro_unregister_table', 'synchro_register_shared_scope',
-                 'synchro_unregister_shared_scope', 'synchro_backfill_bucket_edges',
+                 'synchro_unregister_shared_scope', 'synchro_grant_user_scope',
+                 'synchro_revoke_user_scope', 'synchro_backfill_bucket_edges',
                   'synchro_compact', 'synchro_inject_client_retention_expiry',
                  'synchro_retry_wal_poison', 'synchro_health_detail',
                  'synchro_debug', 'synchro_primary_key_guard', 'synchro_capture_fence',
@@ -2542,7 +2601,7 @@ GRANT SELECT, INSERT, UPDATE ON synchro.sync_captured_projections TO synchro_wor
 GRANT SELECT, INSERT ON synchro.sync_capture_dependency_projections TO synchro_worker;
 GRANT SELECT ON synchro.sync_current_projections TO synchro_worker;
 GRANT SELECT ON synchro.sync_clients, synchro.sync_client_checkpoints,
-    synchro.sync_shared_scopes TO synchro_worker;
+    synchro.sync_shared_scopes, synchro.sync_user_scopes TO synchro_worker;
 GRANT DELETE ON synchro.sync_client_checkpoints TO synchro_worker;
 GRANT SELECT, INSERT, UPDATE ON synchro.sync_scope_state,
     synchro.sync_schema_manifest TO synchro_worker;
