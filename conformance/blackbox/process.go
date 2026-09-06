@@ -30,7 +30,11 @@ import (
 )
 
 const (
-	defaultStartupTimeout = 45 * time.Second
+	// The WAL worker retries preparation for 30 seconds, and PostgreSQL
+	// restarts a failed worker after 5 more, so a healthy start under
+	// load can cross one full retry cycle. The bound covers that
+	// designed envelope with room for a second preparation pass.
+	defaultStartupTimeout = 90 * time.Second
 	// Fast shutdown includes a final checkpoint. Accumulated filesystem
 	// writeback across many serial provisions makes a tight bound flake,
 	// so the bound stays generous while still catching a real hang.
