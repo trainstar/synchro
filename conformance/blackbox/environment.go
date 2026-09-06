@@ -32,8 +32,9 @@ const (
 )
 
 var (
-	postgresVersionPattern = regexp.MustCompile(`(?i)postgresql\)?\s*([0-9]+(?:\.[0-9]+)*)`)
-	roleNamePattern        = regexp.MustCompile(`^[a-z_][a-z0-9_]{0,62}$`)
+	postgresVersionPattern     = regexp.MustCompile(`(?i)postgresql\)?\s*([0-9]+(?:\.[0-9]+)*)`)
+	postgresql18VersionPattern = regexp.MustCompile(`^18\.[0-9]+$`)
+	roleNamePattern            = regexp.MustCompile(`^[a-z_][a-z0-9_]{0,62}$`)
 )
 
 // RequiredEnvironmentVariables lists the complete conformance environment contract.
@@ -129,7 +130,20 @@ func LoadEnvironment() (EnvironmentConfig, error) {
 	return loadEnvironment(os.LookupEnv)
 }
 
+// LoadLocalEnvironment verifies a local PostgreSQL 18 runtime and its extension bundle.
+func LoadLocalEnvironment() (EnvironmentConfig, error) {
+	return loadLocalEnvironment(os.LookupEnv)
+}
+
 func loadEnvironment(lookup func(string) (string, bool)) (EnvironmentConfig, error) {
+	return loadEnvironmentForPostgreSQLVersion(lookup, postgresqlRuntimeVersion)
+}
+
+func loadLocalEnvironment(lookup func(string) (string, bool)) (EnvironmentConfig, error) {
+	return loadEnvironmentForPostgreSQLVersion(lookup, "")
+}
+
+func loadEnvironmentForPostgreSQLVersion(lookup func(string) (string, bool), requiredVersion string) (EnvironmentConfig, error) {
 	if lookup == nil {
 		return EnvironmentConfig{}, errors.New("conformance environment lookup is required")
 	}
@@ -162,17 +176,27 @@ func loadEnvironment(lookup func(string) (string, bool)) (EnvironmentConfig, err
 	var pgBinDir, version string
 	if value := values["SYNCHRO_CONFORMANCE_PG18_BINDIR"]; value != "" {
 		var err error
-		pgBinDir, version, err = verifyPG18Binaries(value)
+		pgBinDir, version, err = verifyPG18BinariesForPostgreSQLVersion(value, requiredVersion)
 		if err != nil {
 			return EnvironmentConfig{}, err
 		}
 	}
 	var extension extensionBundle
 	if value := values["SYNCHRO_CONFORMANCE_EXTENSION_ARTIFACT"]; value != "" {
+		extensionVersion := requiredVersion
+		if extensionVersion == "" {
+			extensionVersion = version
+		}
+		if extensionVersion == "" {
+			return EnvironmentConfig{}, errors.New("PostgreSQL runtime version is required for the extension artifact")
+		}
 		var err error
-		extension, err = verifyExtensionBundle(value)
+		extension, err = verifyExtensionBundleForPostgreSQLVersion(value, extensionVersion)
 		if err != nil {
 			return EnvironmentConfig{}, err
+		}
+		if version == "" {
+			version = extensionVersion
 		}
 	}
 	adapterIdentity, err := loadAdapterArtifactIdentity(values["SYNCHRO_CONFORMANCE_ADAPTER_ARTIFACT"])
@@ -309,6 +333,10 @@ func loadSecretFile(path, variable string) ([]byte, string, string, error) {
 }
 
 func verifyPG18Binaries(path string) (string, string, error) {
+	return verifyPG18BinariesForPostgreSQLVersion(path, postgresqlRuntimeVersion)
+}
+
+func verifyPG18BinariesForPostgreSQLVersion(path, requiredVersion string) (string, string, error) {
 	absolute, err := filepath.Abs(path)
 	if err != nil {
 		return "", "", errors.New("SYNCHRO_CONFORMANCE_PG18_BINDIR path is invalid")
@@ -324,9 +352,12 @@ func verifyPG18Binaries(path string) (string, string, error) {
 		if err := verifyExecutable(candidate); err != nil {
 			return "", "", fmt.Errorf("PostgreSQL binary %s is unavailable", program)
 		}
-		version, err := postgresBinaryVersion(candidate)
+		version, err := postgresBinaryVersionForPostgreSQLVersion(candidate, requiredVersion)
 		if err != nil {
-			return "", "", fmt.Errorf("PostgreSQL binary %s is not PostgreSQL %s", program, postgresqlRuntimeVersion)
+			if requiredVersion == "" {
+				return "", "", fmt.Errorf("PostgreSQL binary %s is not PostgreSQL 18", program)
+			}
+			return "", "", fmt.Errorf("PostgreSQL binary %s is not PostgreSQL %s", program, requiredVersion)
 		}
 		versions[program] = version
 	}
@@ -351,6 +382,10 @@ func verifyExecutable(path string) error {
 }
 
 func postgresBinaryVersion(path string) (string, error) {
+	return postgresBinaryVersionForPostgreSQLVersion(path, postgresqlRuntimeVersion)
+}
+
+func postgresBinaryVersionForPostgreSQLVersion(path, requiredVersion string) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), environmentCommandTimeout)
 	defer cancel()
 	command := exec.CommandContext(ctx, path, "--version")
@@ -362,8 +397,11 @@ func postgresBinaryVersion(path string) (string, error) {
 	if len(match) != 2 {
 		return "", errors.New("version output is invalid")
 	}
-	if match[1] != postgresqlRuntimeVersion {
-		return "", fmt.Errorf("PostgreSQL version is not %s", postgresqlRuntimeVersion)
+	if requiredVersion != "" && match[1] != requiredVersion {
+		return "", fmt.Errorf("PostgreSQL version is not %s", requiredVersion)
+	}
+	if requiredVersion == "" && !postgresql18VersionPattern.MatchString(match[1]) {
+		return "", errors.New("PostgreSQL version is not PostgreSQL 18")
 	}
 	return match[1], nil
 }
@@ -445,6 +483,10 @@ func readAdapterDigest(path string) (string, error) {
 }
 
 func verifyExtensionBundle(path string) (extensionBundle, error) {
+	return verifyExtensionBundleForPostgreSQLVersion(path, postgresqlRuntimeVersion)
+}
+
+func verifyExtensionBundleForPostgreSQLVersion(path, requiredVersion string) (extensionBundle, error) {
 	root, err := filepath.Abs(path)
 	if err != nil {
 		return extensionBundle{}, errors.New("SYNCHRO_CONFORMANCE_EXTENSION_ARTIFACT path is invalid")
@@ -481,7 +523,7 @@ func verifyExtensionBundle(path string) (extensionBundle, error) {
 	if err := decodeStrictManifest(manifestData, &manifest); err != nil {
 		return extensionBundle{}, errors.New("extension artifact manifest is invalid")
 	}
-	if manifest.Format != extensionBundleManifestFormat || manifest.PostgreSQLMajor != 18 || manifest.PostgreSQLVersion != postgresqlRuntimeVersion || len(manifest.Files) != 3 {
+	if !postgresql18VersionPattern.MatchString(requiredVersion) || manifest.Format != extensionBundleManifestFormat || manifest.PostgreSQLMajor != 18 || manifest.PostgreSQLVersion != requiredVersion || len(manifest.Files) != 3 {
 		return extensionBundle{}, errors.New("extension artifact manifest is invalid")
 	}
 	files := append([]extensionBundleFile(nil), manifest.Files...)
@@ -590,7 +632,7 @@ func sameAdapterArtifactIdentity(left, right adapterArtifactIdentity) bool {
 
 func verifyEnvironmentArtifactIdentity(environment EnvironmentConfig) error {
 	if environment.ExtensionArtifact != "" {
-		extension, err := verifyExtensionBundle(environment.ExtensionArtifact)
+		extension, err := verifyExtensionBundleForPostgreSQLVersion(environment.ExtensionArtifact, environment.postgresVersion)
 		if err != nil || !sameExtensionBundleIdentity(environment.extension, extension) {
 			return errors.New("candidate extension artifact identity changed after execution")
 		}

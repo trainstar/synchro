@@ -96,7 +96,7 @@ func runStart(ctx context.Context, args []string) error {
 		"SYNCHRO_CONFORMANCE_INSTALL_LOCK":           filepath.Join(*stateDir, "install.lock"),
 	})
 	defer restoreEnvironment()
-	environment, err := blackbox.LoadEnvironment()
+	environment, err := blackbox.LoadLocalEnvironment()
 	if err != nil {
 		return fmt.Errorf("load local provisioner environment: %w", err)
 	}

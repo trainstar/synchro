@@ -204,6 +204,13 @@ jobs:
             --output dist/verification/gate-results/test-rust-pg.json \
             -- make test-rust-pg
 
+      - name: Provision local PostgreSQL for the adapter
+        run: |
+          pg_config="$(awk -F'"' '/^pg18[[:space:]]*=/ { print $2 }' "$HOME/.pgrx/config.toml")"
+          test -x "$pg_config"
+          make local-postgres-start PGRX_PG_CONFIG="$pg_config"
+          echo "ADAPTER_TEST_URL=$(cat .ignore/r2/tmp/local-postgres/postgres.url)" >> "$GITHUB_ENV"
+
       - name: Validate Go adapter
         run: |
           scripts/ci/capture-gate-result.py \
@@ -323,9 +330,11 @@ jobs:
           corepack enable
           yarn install --immutable
 
-      - name: Start the local PostgreSQL for the adapter
+      - name: Provision local PostgreSQL for the adapter
         run: |
-          make local-postgres-start
+          pg_config="$(awk -F'"' '/^pg18[[:space:]]*=/ { print $2 }' "$HOME/.pgrx/config.toml")"
+          test -x "$pg_config"
+          make local-postgres-start PGRX_PG_CONFIG="$pg_config"
           echo "ADAPTER_TEST_URL=$(cat .ignore/r2/tmp/local-postgres/postgres.url)" >> "$GITHUB_ENV"
 
       - name: Ensure CocoaPods is available
@@ -614,9 +623,11 @@ jobs:
           corepack enable
           yarn install --immutable
 
-      - name: Start the local PostgreSQL for the adapter
+      - name: Provision local PostgreSQL for the adapter
         run: |
-          make local-postgres-start
+          pg_config="$(awk -F'"' '/^pg18[[:space:]]*=/ { print $2 }' "$HOME/.pgrx/config.toml")"
+          test -x "$pg_config"
+          make local-postgres-start PGRX_PG_CONFIG="$pg_config"
           echo "ADAPTER_TEST_URL=$(cat .ignore/r2/tmp/local-postgres/postgres.url)" >> "$GITHUB_ENV"
 
       - name: Build React Native Android Detox app

@@ -37,6 +37,7 @@
 	parse-testresult \
 	conformance-adapter-artifact \
 	conformance-pg18-extension-artifact \
+	conformance-pg18-extension-test-artifact \
 	test-evidence \
 	coverage-report \
 	test-inventory \
@@ -554,10 +555,17 @@ conformance-adapter-artifact:
 		rmdir "$$lock"; \
 		trap - EXIT HUP INT TERM
 
-conformance-pg18-extension-artifact:
-	@test -n "$(PGRX_PG_CONFIG)" || (echo "PGRX_PG_CONFIG is required" >&2; exit 1)
-	@test "$$($(PGRX_PG_CONFIG) --version | awk '{print $$2}')" = "18.3" || (echo "PGRX_PG_CONFIG must select PostgreSQL 18.3, found: $$($(PGRX_PG_CONFIG) --version)" >&2; exit 1)
+conformance-pg18-extension-artifact: override CONFORMANCE_PG18_EXTENSION_ARTIFACT_POLICY := certified
+conformance-pg18-extension-test-artifact: override CONFORMANCE_PG18_EXTENSION_ARTIFACT_POLICY := runtime
+conformance-pg18-extension-artifact conformance-pg18-extension-test-artifact:
 	@set -eu; \
+		test -n "$(PGRX_PG_CONFIG)" || { echo "PGRX_PG_CONFIG is required" >&2; exit 1; }; \
+		postgresql_version="$$($(PGRX_PG_CONFIG) --version | awk '{print $$2}')"; \
+		case "$(CONFORMANCE_PG18_EXTENSION_ARTIFACT_POLICY)" in \
+			certified) test "$$postgresql_version" = "18.3" || { echo "PGRX_PG_CONFIG must select PostgreSQL 18.3, found: $$($(PGRX_PG_CONFIG) --version)" >&2; exit 1; } ;; \
+			runtime) printf '%s\n' "$$postgresql_version" | awk 'NR == 1 && $$0 ~ /^18\.[0-9]+$$/ { valid = 1 } END { exit valid && NR == 1 ? 0 : 1 }' || { echo "PGRX_PG_CONFIG must select PostgreSQL 18.x, found: $$($(PGRX_PG_CONFIG) --version)" >&2; exit 1; } ;; \
+			*) echo "extension artifact PostgreSQL version policy is invalid" >&2; exit 1 ;; \
+		esac; \
 		final="$(CONFORMANCE_EXTENSION_ARTIFACT)"; \
 		parent="$$(dirname "$$final")"; \
 		out="$$final.tmp.$$$$"; \
@@ -585,7 +593,7 @@ conformance-pg18-extension-artifact:
 			'{' \
 			'  "format": "synchro-pg18-extension-bundle-v1",' \
 			'  "postgresql_major": 18,' \
-			'  "postgresql_version": "18.3",' \
+			"  \"postgresql_version\": \"$$postgresql_version\"," \
 			'  "files": [' \
 			"    {\"path\": \"$$library_path\", \"destination\": \"pkglibdir/synchro_pg.$$suffix\", \"sha256\": \"$$library_hash\"}," \
 			"    {\"path\": \"$$control_path\", \"destination\": \"sharedir/extension/synchro_pg.control\", \"sha256\": \"$$control_hash\"}," \
@@ -1570,7 +1578,7 @@ build-local-postgres:
 
 local-postgres-start: build-local-postgres
 	@test -x "$(CONFORMANCE_ADAPTER_ARTIFACT_DIR)/synchrod-pg" || $(MAKE) conformance-adapter-artifact
-	@test -d "$(CONFORMANCE_EXTENSION_ARTIFACT)" || $(MAKE) conformance-pg18-extension-artifact
+	@test -d "$(CONFORMANCE_EXTENSION_ARTIFACT)" || $(MAKE) conformance-pg18-extension-test-artifact
 	@test -n "$(PGRX_PG_BIN_DIR)" || { echo "PGRX_PG_BIN_DIR is required" >&2; exit 1; }
 	@test -x "$(PGRX_PG_BIN_DIR)"/initdb || { echo "PostgreSQL 18 binaries are required in $(PGRX_PG_BIN_DIR)" >&2; exit 1; }
 	@set -eu; \

@@ -690,7 +690,7 @@ func allocateLoopbackPort() (int, error) {
 }
 
 func (h *Harness) installExtension(ctx context.Context) error {
-	bundle, err := verifyExtensionBundle(h.env.ExtensionArtifact)
+	bundle, err := verifyExtensionBundleForPostgreSQLVersion(h.env.ExtensionArtifact, h.env.postgresVersion)
 	if err != nil {
 		return err
 	}
@@ -747,7 +747,7 @@ func (h *Harness) installExtension(ctx context.Context) error {
 			return errors.New("install extension file failed")
 		}
 	}
-	verifiedAfterInstall, err := verifyExtensionBundle(h.env.ExtensionArtifact)
+	verifiedAfterInstall, err := verifyExtensionBundleForPostgreSQLVersion(h.env.ExtensionArtifact, h.env.postgresVersion)
 	if err != nil || !sameExtensionBundleIdentity(bundle, verifiedAfterInstall) {
 		return errors.New("extension bundle identity changed during installation")
 	}

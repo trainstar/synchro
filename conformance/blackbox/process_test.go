@@ -48,6 +48,7 @@ func TestInstallExtensionRejectsBundleIdentityChangeAfterLoad(t *testing.T) {
 			test.replace(t, loaded)
 			harness := &Harness{env: EnvironmentConfig{
 				ExtensionArtifact: root,
+				postgresVersion:   postgresqlRuntimeVersion,
 				extension:         loaded,
 			}}
 			if err := harness.installExtension(context.Background()); err == nil {
@@ -224,6 +225,7 @@ func candidateArtifactEnvironmentFixture(t *testing.T) EnvironmentConfig {
 		AdapterArtifact:   adapterPath,
 		adapterSHA256:     adapter.sha256,
 		adapterIdentity:   adapter,
+		postgresVersion:   postgresqlRuntimeVersion,
 		extension:         extension,
 		verified:          true,
 	}

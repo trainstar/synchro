@@ -135,6 +135,79 @@ func TestLoadEnvironmentRequiresOperatorCredentialVariables(t *testing.T) {
 	}
 }
 
+func TestLoadLocalEnvironmentRequiresRuntimeMatchingExtensionArtifact(t *testing.T) {
+	root := t.TempDir()
+	passwordFiles := make(map[string]string)
+	for _, role := range []string{"admin", "adapter", "observer", "worker", "operator"} {
+		path := filepath.Join(root, role+"-password")
+		if err := os.WriteFile(path, []byte(role+"-secret"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		passwordFiles[role] = path
+	}
+	jwtPath := filepath.Join(root, "jwt-secret")
+	if err := os.WriteFile(jwtPath, []byte("jwt-secret"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	adapterPath := filepath.Join(root, "synchrod-pg")
+	adapterData := []byte("adapter")
+	if err := os.WriteFile(adapterPath, adapterData, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	adapterDigest := sha256.Sum256(adapterData)
+	if err := os.WriteFile(adapterPath+".sha256", []byte(hex.EncodeToString(adapterDigest[:])), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	versions := make(map[string]string)
+	for _, program := range []string{"initdb", "pg_ctl", "postgres", "psql", "pg_isready", "pg_config"} {
+		versions[program] = "18.6"
+	}
+	extensionPath := writeExtensionBundleFixture(t)
+	manifest := readExtensionManifestFixture(t, extensionPath)
+	manifest.PostgreSQLVersion = "18.6"
+	writeExtensionManifestFixture(t, extensionPath, manifest)
+	values := map[string]string{
+		"SYNCHRO_CONFORMANCE_PG18_BINDIR":            writePostgresVersionFixtures(t, versions),
+		"SYNCHRO_CONFORMANCE_EXTENSION_ARTIFACT":     extensionPath,
+		"SYNCHRO_CONFORMANCE_ADAPTER_ARTIFACT":       adapterPath,
+		"SYNCHRO_CONFORMANCE_ADMIN_USER":             "cf_admin",
+		"SYNCHRO_CONFORMANCE_ADMIN_PASSWORD_FILE":    passwordFiles["admin"],
+		"SYNCHRO_CONFORMANCE_ADAPTER_USER":           "cf_adapter",
+		"SYNCHRO_CONFORMANCE_ADAPTER_PASSWORD_FILE":  passwordFiles["adapter"],
+		"SYNCHRO_CONFORMANCE_OBSERVER_USER":          "cf_observer",
+		"SYNCHRO_CONFORMANCE_OBSERVER_PASSWORD_FILE": passwordFiles["observer"],
+		"SYNCHRO_CONFORMANCE_WORKER_USER":            "cf_worker",
+		"SYNCHRO_CONFORMANCE_WORKER_PASSWORD_FILE":   passwordFiles["worker"],
+		"SYNCHRO_CONFORMANCE_OPERATOR_USER":          "cf_operator",
+		"SYNCHRO_CONFORMANCE_OPERATOR_PASSWORD_FILE": passwordFiles["operator"],
+		"SYNCHRO_CONFORMANCE_JWT_SECRET_FILE":        jwtPath,
+		"SYNCHRO_CONFORMANCE_INSTALL_LOCK":           filepath.Join(root, "install.lock"),
+	}
+	lookup := func(key string) (string, bool) {
+		value, ok := values[key]
+		return value, ok
+	}
+	if _, err := loadLocalEnvironment(lookup); err != nil {
+		t.Fatalf("runtime-matched local environment rejected: %v", err)
+	}
+
+	manifest.PostgreSQLVersion = "18.5"
+	writeExtensionManifestFixture(t, extensionPath, manifest)
+	if _, err := loadLocalEnvironment(lookup); err == nil {
+		t.Fatal("local environment accepted an extension artifact for a different runtime")
+	}
+
+	manifest.PostgreSQLVersion = "17.7"
+	writeExtensionManifestFixture(t, extensionPath, manifest)
+	for program := range versions {
+		versions[program] = "17.7"
+	}
+	values["SYNCHRO_CONFORMANCE_PG18_BINDIR"] = writePostgresVersionFixtures(t, versions)
+	if _, err := loadLocalEnvironment(lookup); err == nil {
+		t.Fatal("local environment accepted a non-PostgreSQL-18 runtime")
+	}
+}
+
 func TestVerifyExtensionBundleRejectsTamperingAndWrongDestinations(t *testing.T) {
 	t.Run("valid", func(t *testing.T) {
 		if _, err := verifyExtensionBundle(writeExtensionBundleFixture(t)); err != nil {
