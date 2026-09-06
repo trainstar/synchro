@@ -449,7 +449,10 @@ jobs:
             sudo xcodebuild -downloadPlatform iOS -buildVersion 16.4
           fi
           min_runtime="$(xcrun simctl list runtimes available -j | ruby -rjson -e 'runtimes = JSON.parse(STDIN.read).fetch("runtimes"); runtime = runtimes.find { |item| item["identifier"].include?("iOS-16-") }; abort "iOS 16 simulator runtime is unavailable" unless runtime; puts runtime.fetch("identifier")')"
-          min_udid="$(xcrun simctl create Synchro_iOS_16 "$device_type" "$min_runtime")"
+          # Current iPhone device types postdate iOS 16, so the minimum
+          # cell uses a device generation that the runtime supports.
+          min_device_type="$(xcrun simctl list devicetypes -j | ruby -rjson -e 'devices = JSON.parse(STDIN.read).fetch("devicetypes"); device = devices.find { |item| item["name"] == "iPhone 14" } || devices.find { |item| item["name"] == "iPhone SE (3rd generation)" }; abort "no iOS 16 compatible iPhone device type" unless device; puts device.fetch("identifier")')"
+          min_udid="$(xcrun simctl create Synchro_iOS_16 "$min_device_type" "$min_runtime")"
           cleanup_min() { xcrun simctl shutdown "$min_udid" >/dev/null 2>&1 || true; xcrun simctl delete "$min_udid" >/dev/null 2>&1 || true; }
           trap cleanup_min EXIT HUP INT TERM
           xcrun simctl boot "$min_udid"
