@@ -821,8 +821,8 @@ jobs:
            # so the sequence lives in one checked-in script.
           script: |
             bash scripts/ci/run-rn-android-e2e.sh
-            scripts/ci/capture-gate-result.py --gate test-rn-warm-connect-android --output dist/verification/gate-results/test-rn-warm-connect-android.json -- make test-rn-warm-connect-android
             make test-client-platforms SUPPORT_CELL_ID=SUP-RN-ANDROID-CURRENT-001 SUPPORT_PLATFORM_VERSION=34
+            scripts/ci/capture-gate-result.py --gate test-rn-warm-connect-android --output dist/verification/gate-results/test-rn-warm-connect-android.json -- make test-rn-warm-connect-android
 
       - name: Publish React Native Android gate results
         if: always()
