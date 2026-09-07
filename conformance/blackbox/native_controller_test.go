@@ -714,7 +714,7 @@ func TestNativeCaptureServerObservationSignals(t *testing.T) {
 			relation_id, record_id, row_data, row_version, checksum, deleted,
 			source_stream_generation, source_commit_lsn, source_event_ordinal, registry_generation
 		) VALUES (
-			$1::uuid, $2, jsonb_build_object('id', $2), $3::uuid,
+			$1::uuid, $2::text, jsonb_build_object('id', $2::text), $3::uuid,
 			decode(repeat('02', 32), 'hex'), false, $4, '0/1'::pg_lsn, 0, $5
 		)`, relationID, runtimeRecord, runtimeVersion, runtimeStream, registryGeneration); err != nil {
 		t.Fatalf("insert PostgreSQL captured row: %v", err)
