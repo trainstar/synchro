@@ -115,6 +115,7 @@ RUBY
         PRODUCT_BUNDLE_IDENTIFIER=dev.synchro.consumer \
         IPHONEOS_DEPLOYMENT_TARGET=16.0 \
         CODE_SIGNING_ALLOWED=NO \
+        DEBUG_INFORMATION_FORMAT=dwarf \
         build
     )
     if [ "$mode" = "build-only" ]; then
