@@ -2068,14 +2068,31 @@ func (h *Harness) ReinstallExtension(ctx context.Context) (ExtensionReinstallRes
 		  AND backend_type = 'synchro WAL consumer'`).Scan(&workerCount, &result.PriorWorkerPID); err != nil || workerCount != 1 || result.PriorWorkerPID <= 0 {
 		return ExtensionReinstallResult{}, errors.New("unique WAL worker is unavailable before extension reinstall")
 	}
-	tx, err := database.BeginTx(ctx, nil)
-	if err != nil {
-		return ExtensionReinstallResult{}, errors.New("begin extension reinstall transaction failed")
+	// The drop takes locks the live worker's poll transaction can also
+	// hold, and PostgreSQL then cancels one side with a deadlock. The
+	// worker retries its poll, so the reinstall retries the same way.
+	var tx *sql.Tx
+	for attempt := 1; ; attempt++ {
+		var err error
+		tx, err = database.BeginTx(ctx, nil)
+		if err != nil {
+			return ExtensionReinstallResult{}, errors.New("begin extension reinstall transaction failed")
+		}
+		_, err = tx.ExecContext(ctx, "DROP EXTENSION synchro_pg CASCADE")
+		if err == nil {
+			break
+		}
+		_ = tx.Rollback()
+		if attempt >= 3 || !strings.Contains(err.Error(), "40P01") {
+			return ExtensionReinstallResult{}, fmt.Errorf("drop synchro_pg extension failed: %w", err)
+		}
+		select {
+		case <-ctx.Done():
+			return ExtensionReinstallResult{}, errors.New("isolated extension reinstall context expired")
+		case <-time.After(time.Second):
+		}
 	}
 	defer tx.Rollback()
-	if _, err := tx.ExecContext(ctx, "DROP EXTENSION synchro_pg CASCADE"); err != nil {
-		return ExtensionReinstallResult{}, fmt.Errorf("drop synchro_pg extension failed: %w", err)
-	}
 	if _, err := tx.ExecContext(ctx, "CREATE EXTENSION synchro_pg"); err != nil {
 		return ExtensionReinstallResult{}, fmt.Errorf("create synchro_pg extension failed: %w", err)
 	}
