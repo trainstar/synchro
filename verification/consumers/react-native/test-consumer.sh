@@ -137,7 +137,9 @@ RUBY
     container=$(xcrun simctl get_app_container "$simulator_udid" dev.synchro.consumer data)
     pending=0
     ready=0
-    for _ in $(seq 1 120); do
+    # A cold Hermes start on a busy runner can pass two minutes before the
+    # first durable write, so the bound covers that envelope.
+    for _ in $(seq 1 240); do
       if [ -f "$container/Documents/consumer.db" ]; then
         pending=$(sqlite3 "$container/Documents/consumer.db" "SELECT COUNT(*) FROM _synchro_pending_changes WHERE lifecycle_state NOT IN ('accepted','rejected','superseded_before_send','cancelled_before_send');" 2>/dev/null || true)
         durable=$(sqlite3 "$container/Documents/consumer.db" "SELECT ship_address FROM orders WHERE id = '$(python3 "$tool" config-value --config "$work_dir/config.json" --field order_id)';" 2>/dev/null || true)
@@ -151,10 +153,17 @@ RUBY
     done
     if [ "$ready" -ne 1 ]; then
       # The app names its failure in the simulator log, and the phase leaves
-      # no other trace, so the recent app log must be reported or it is lost.
-      xcrun simctl spawn "$simulator_udid" log show --last 3m --style compact \
+      # no other trace, so the failure state must be reported or it is lost.
+      if kill -0 "$initial_pid" >/dev/null 2>&1; then
+        printf '%s\n' "initial process $initial_pid is still alive" >&2
+      else
+        printf '%s\n' "initial process $initial_pid exited" >&2
+      fi
+      ls -la "$container/Documents" >&2 || true
+      printf 'pending=%s durable=%s\n' "${pending:-none}" "${durable:-none}" >&2
+      xcrun simctl spawn "$simulator_udid" log show --last 5m --style compact \
         --predicate 'processImagePath CONTAINS "SynchroConsumer"' 2>/dev/null \
-        | grep -vE "com.apple" | tail -40 >&2 || true
+        | tail -60 >&2 || true
       printf '%s\n' "Packaged React Native iOS initial phase did not become ready" >&2
       exit 1
     fi
