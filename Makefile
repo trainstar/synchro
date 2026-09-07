@@ -1279,7 +1279,8 @@ client-consumer-apple-artifact: version-check release-pods-check
 		test -f Package.resolved || swift package resolve >/dev/null; \
 		cp Package.swift Package.resolved Synchro.podspec LICENSE "$$stage/Synchro/"; \
 		cp -R clients/swift/Sources "$$stage/Synchro/clients/swift/"; \
-		COPYFILE_DISABLE=1 tar -czf "$$stage/synchro-spm-$(CURRENT_VERSION).tar.gz" -C "$$stage" Synchro; \
+		find "$$stage/Synchro" -exec touch -t 202601010000 {} +; \
+		COPYFILE_DISABLE=1 tar -cf - -C "$$stage" Synchro | gzip -n > "$$stage/synchro-spm-$(CURRENT_VERSION).tar.gz"; \
 		mkdir -p "$$(dirname "$$final")"; \
 		rm -rf "$$final"; \
 		mv "$$stage" "$$final"; \
