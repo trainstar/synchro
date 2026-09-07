@@ -2605,10 +2605,10 @@ func (control *ProjectionBootstrapBarrierControl) ReleaseBarrier() error {
 	control.released = true
 	if err := control.tx.Rollback(); err != nil {
 		_ = control.database.Close()
-		return errors.New("release projection bootstrap queued barrier failed")
+		return fmt.Errorf("release projection bootstrap queued barrier rollback failed: %w", err)
 	}
 	if err := control.database.Close(); err != nil {
-		return errors.New("release projection bootstrap queued barrier failed")
+		return fmt.Errorf("release projection bootstrap queued barrier close failed: %w", err)
 	}
 	return nil
 }
