@@ -18,6 +18,23 @@ mkdir -p "$tmp_root"
 work_dir=$(mktemp -d "$tmp_root/synchro-swift-ios-consumer.XXXXXX")
 simulator_udid=
 app_installed=0
+
+# The simulator launch service can refuse a request on a freshly booted
+# device, so launches retry before they fail.
+launch_app() {
+  attempt=1
+  while :; do
+    if launch_output=$(xcrun simctl launch "$1" "$2"); then
+      printf '%s' "$launch_output"
+      return 0
+    fi
+    if [ "$attempt" -ge 3 ]; then
+      return 1
+    fi
+    attempt=$((attempt + 1))
+    sleep 15
+  done
+}
 bundle_id=dev.synchro.swift-consumer
 cleanup() {
   if [ "$app_installed" -eq 1 ] && [ -n "$simulator_udid" ]; then
@@ -97,7 +114,7 @@ if [ -n "${PACKAGED_SMOKE_CELL_ID:-}" ]; then
 
   container=$(xcrun simctl get_app_container "$simulator_udid" "$bundle_id" data)
   cp "$work_dir/initial-config.json" "$container/Documents/packaged-smoke-config.json"
-  launch_output=$(xcrun simctl launch "$simulator_udid" "$bundle_id")
+  launch_output=$(launch_app "$simulator_udid" "$bundle_id")
   initial_pid=${launch_output##*: }
   case "$initial_pid" in *[!0-9]*|'') printf '%s\n' "iOS initial process id is invalid" >&2; exit 1 ;; esac
 
@@ -137,7 +154,7 @@ if [ -n "${PACKAGED_SMOKE_CELL_ID:-}" ]; then
   fi
 
   cp "$work_dir/resume-config.json" "$container/Documents/packaged-smoke-config.json"
-  launch_output=$(xcrun simctl launch "$simulator_udid" "$bundle_id")
+  launch_output=$(launch_app "$simulator_udid" "$bundle_id")
   resume_pid=${launch_output##*: }
   case "$resume_pid" in *[!0-9]*|'') printf '%s\n' "iOS resume process id is invalid" >&2; exit 1 ;; esac
   if [ "$resume_pid" = "$initial_pid" ]; then
@@ -180,7 +197,7 @@ if [ -n "${PACKAGED_SMOKE_CELL_ID:-}" ]; then
   exit 0
 fi
 
-xcrun simctl launch "$simulator_udid" "$bundle_id" >/dev/null
+launch_app "$simulator_udid" "$bundle_id" >/dev/null
 
 passed=0
 for _ in $(seq 1 60); do

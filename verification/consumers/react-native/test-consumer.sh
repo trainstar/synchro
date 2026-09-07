@@ -131,7 +131,23 @@ RUBY
     xcrun simctl uninstall "$simulator_udid" dev.synchro.consumer >/dev/null 2>&1 || true
     xcrun simctl install "$simulator_udid" "$app_path"
     installed_platform=ios
-    launch_output=$(xcrun simctl launch "$simulator_udid" dev.synchro.consumer)
+    # The simulator launch service can refuse a request on a freshly
+    # booted device, so launches retry before they fail.
+    launch_ios_app() {
+      attempt=1
+      while :; do
+        if launch_output=$(xcrun simctl launch "$1" "$2"); then
+          printf '%s' "$launch_output"
+          return 0
+        fi
+        if [ "$attempt" -ge 3 ]; then
+          return 1
+        fi
+        attempt=$((attempt + 1))
+        sleep 15
+      done
+    }
+    launch_output=$(launch_ios_app "$simulator_udid" dev.synchro.consumer)
     initial_pid=${launch_output##*: }
     case "$initial_pid" in *[!0-9]*|'') printf '%s\n' "React Native iOS initial process id is invalid" >&2; exit 1 ;; esac
     container=$(xcrun simctl get_app_container "$simulator_udid" dev.synchro.consumer data)
@@ -178,7 +194,7 @@ RUBY
       printf '%s\n' "Packaged React Native iOS process kill was not observed" >&2
       exit 1
     fi
-    launch_output=$(xcrun simctl launch "$simulator_udid" dev.synchro.consumer)
+    launch_output=$(launch_ios_app "$simulator_udid" dev.synchro.consumer)
     resume_pid=${launch_output##*: }
     case "$resume_pid" in *[!0-9]*|'') printf '%s\n' "React Native iOS resume process id is invalid" >&2; exit 1 ;; esac
     if [ "$resume_pid" = "$initial_pid" ]; then
