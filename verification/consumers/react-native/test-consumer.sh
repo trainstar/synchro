@@ -103,10 +103,13 @@ RUBY
     (
       cd "$work_dir/app/ios"
       pod install
+      # A Debug build queries the Metro port and can retry it forever on
+      # a machine with no packager, so the consumer builds Release and
+      # always runs its embedded bundle.
       FORCE_BUNDLING=1 xcodebuild \
         -workspace SynchroConsumer.xcworkspace \
         -scheme SynchroConsumer \
-        -configuration Debug \
+        -configuration Release \
         -sdk iphonesimulator \
         -derivedDataPath "$work_dir/derived-data" \
         PRODUCT_BUNDLE_IDENTIFIER=dev.synchro.consumer \
@@ -126,7 +129,7 @@ RUBY
         *) test "${simulator_version%%.*}" = "$SUPPORT_PLATFORM_VERSION" ;;
       esac
     fi
-    app_path="$work_dir/derived-data/Build/Products/Debug-iphonesimulator/SynchroConsumer.app"
+    app_path="$work_dir/derived-data/Build/Products/Release-iphonesimulator/SynchroConsumer.app"
     test -f "$app_path/main.jsbundle"
     xcrun simctl uninstall "$simulator_udid" dev.synchro.consumer >/dev/null 2>&1 || true
     xcrun simctl install "$simulator_udid" "$app_path"
