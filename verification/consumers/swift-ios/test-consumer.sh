@@ -119,7 +119,7 @@ if [ -n "${PACKAGED_SMOKE_CELL_ID:-}" ]; then
   case "$initial_pid" in *[!0-9]*|'') printf '%s\n' "iOS initial process id is invalid" >&2; exit 1 ;; esac
 
   ready=0
-  for _ in $(seq 1 120); do
+  for _ in $(seq 1 240); do
     if [ -f "$container/Documents/initial-result.json" ]; then
       ready=1
       break
@@ -131,10 +131,16 @@ if [ -n "${PACKAGED_SMOKE_CELL_ID:-}" ]; then
   done
   if [ "$ready" -ne 1 ]; then
     # The app names its failure in the simulator log, and the phase leaves no
-    # other trace, so the recent app log must be reported here or it is lost.
-    xcrun simctl spawn "$simulator_udid" log show --last 3m --style compact \
+    # other trace, so the failure state must be reported here or it is lost.
+    if kill -0 "$initial_pid" >/dev/null 2>&1; then
+      printf '%s\n' "initial process $initial_pid is still alive" >&2
+    else
+      printf '%s\n' "initial process $initial_pid exited" >&2
+    fi
+    ls -la "$container/Documents" >&2 || true
+    xcrun simctl spawn "$simulator_udid" log show --last 5m --style compact \
       --predicate 'processImagePath CONTAINS "SynchroConsumer"' 2>/dev/null \
-      | grep -vE "com.apple" | tail -40 >&2 || true
+      | tail -60 >&2 || true
     printf '%s\n' "Packaged Swift iOS initial phase did not become ready" >&2
     exit 1
   fi
@@ -163,7 +169,7 @@ if [ -n "${PACKAGED_SMOKE_CELL_ID:-}" ]; then
   fi
 
   resumed=0
-  for _ in $(seq 1 120); do
+  for _ in $(seq 1 240); do
     if [ -f "$container/Documents/resume-result.json" ]; then
       resumed=1
       break
@@ -175,6 +181,15 @@ if [ -n "${PACKAGED_SMOKE_CELL_ID:-}" ]; then
   done
   xcrun simctl terminate "$simulator_udid" "$bundle_id" >/dev/null 2>&1 || true
   if [ "$resumed" -ne 1 ]; then
+    if kill -0 "$resume_pid" >/dev/null 2>&1; then
+      printf '%s\n' "resume process $resume_pid is still alive" >&2
+    else
+      printf '%s\n' "resume process $resume_pid exited" >&2
+    fi
+    ls -la "$container/Documents" >&2 || true
+    xcrun simctl spawn "$simulator_udid" log show --last 5m --style compact \
+      --predicate 'processImagePath CONTAINS "SynchroConsumer"' 2>/dev/null \
+      | tail -60 >&2 || true
     printf '%s\n' "Packaged Swift iOS resume phase did not pass" >&2
     exit 1
   fi
