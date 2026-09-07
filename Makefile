@@ -24,6 +24,7 @@
 	test-vectors \
 	test-reference \
 	test-conformance-faults \
+	test-conformance-invariants \
 	test-local-postgres \
 	test-blackbox-harness \
 	test-blackbox-components \
@@ -263,6 +264,7 @@ help:
 	@echo "  test-conformance-scenarios - Test strict scenario loading and catalog generation"
 	@echo "  test-vectors          - Test canonical protocol 3 vectors"
 	@echo "  test-reference        - Test the independent protocol 3 reference model"
+	@echo "  test-conformance-invariants - Test the invariant engine and soak driver"
 	@echo "  test-conformance      - Run the independent protocol conformance suite"
 	@echo "  test-inventory        - Test generated evidence inventory"
 	@echo "  test-blackbox         - Run the packaged server black-box suite"
@@ -427,6 +429,9 @@ test-reference:
 
 test-conformance-faults:
 	cd conformance && GOFLAGS= GOWORK=off go run ./cmd/testresult suite -- go test -json ./barriers ./faults -count=1
+
+test-conformance-invariants:
+	cd conformance && GOFLAGS= GOWORK=off go run ./cmd/testresult suite -- go test -json ./invariants ./soak -count=1
 
 test-local-postgres:
 	cd conformance && GOFLAGS= GOWORK=off go run ./cmd/testresult suite -- go test -json ./cmd/synchro-local-postgres -count=1
@@ -618,7 +623,7 @@ test-inventory:
 test-blackbox: conformance-mod-download test-blackbox-harness test-blackbox-components
 	cd conformance && GOFLAGS= GOWORK=off go run ./cmd/testresult suite -- go test -json ./blackbox/integration -count=$(BLACKBOX_TEST_COUNT) -args --provision --install
 
-test-conformance: conformance-mod-download test-conformance-testresult test-conformance-imports test-conformance-contract test-conformance-drivers test-conformance-scenarios check-conformance-catalog test-vectors test-reference test-conformance-faults test-blackbox-harness test-evidence test-inventory
+test-conformance: conformance-mod-download test-conformance-testresult test-conformance-imports test-conformance-contract test-conformance-drivers test-conformance-scenarios check-conformance-catalog test-vectors test-reference test-conformance-faults test-conformance-invariants test-blackbox-harness test-evidence test-inventory
 
 rc-check-pg18:
 	@echo "$@ is unavailable until its required verification phase is implemented; release promotion is blocked." >&2
