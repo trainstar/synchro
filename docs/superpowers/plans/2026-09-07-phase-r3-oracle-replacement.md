@@ -64,14 +64,16 @@ Produce the table that later authorizes deletion.
 
 - [ ] Enumerate every assertion, comparison, and invariant in `conformance/reference/`.
 - [ ] Enumerate every assertion, comparison, and invariant in `conformance/modelrunner/`.
-- [ ] Assign each check one target: an invariant family, or an existing proof home with its `file:line`.
-- [ ] Flag every check that fits none of the five invariant families as an engine gap.
+- [ ] Assign each check one target: an invariant family, an existing proof home with its `file:line`, or `oracle-internal`.
+- [ ] An `oracle-internal` check validates only the oracle's own inputs, registries, or run lifecycle. It is deleted with the oracle and needs no migration.
+- [ ] Flag every remaining check that verifies sync semantics but fits no invariant family and no proof home as an engine gap.
 - [ ] Record the required negative control for each migrated check.
 - [ ] Record every consumer that currently depends on the two directories.
 
 ## Output
 
-One table in `.r3-completion-tracker.md` with these columns: check identifier, source `file:line`, verified behavior, target invariant family or existing proof home, negative-control requirement.
+Two committed contract tables beside this plan, one per directory, with these columns: check identifier, source `file:line`, verified behavior, target, negative-control requirement.
+The tracker holds the category counts and points to the tables.
 
 ## Exit Gate
 
