@@ -117,7 +117,7 @@ final class AppDelegate: UIResponder, UIApplicationDelegate {
         var attempt = 1
         while true {
             do {
-                try await syncNowWithRetry(client)
+                try await client.syncNow()
                 return
             } catch {
                 guard attempt < 3 else { throw error }
