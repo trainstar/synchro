@@ -275,6 +275,8 @@ func mergeSwiftStateFacts(values ...scenarios.StateFacts) (scenarios.StateFacts,
 		merged.Transactions = append(merged.Transactions, value.Transactions...)
 		merged.Rows = append(merged.Rows, value.Rows...)
 		merged.Scopes = append(merged.Scopes, value.Scopes...)
+		merged.MutationOutcomes = append(merged.MutationOutcomes, value.MutationOutcomes...)
+		merged.RowScopeEdges = append(merged.RowScopeEdges, value.RowScopeEdges...)
 		merged.Poison = append(merged.Poison, value.Poison...)
 		merged.Rebuilds = append(merged.Rebuilds, value.Rebuilds...)
 		for _, client := range value.Clients {

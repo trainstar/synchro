@@ -23,13 +23,14 @@ import (
 )
 
 const (
-	nativeControllerRequestTimeout   = 30 * time.Second
-	nativeControllerWaitTimeout      = 30 * time.Second
-	nativeControllerPollInterval     = 25 * time.Millisecond
-	nativeStagedSharedAuthoredScope  = "scope-b"
-	nativeStagedSharedRuntimeScope   = "cf:dedup"
-	nativeCaptureDependencyFixture   = "cf_item_impacts"
-	nativeCaptureDependencyKeyColumn = "id"
+	nativeControllerRequestTimeout       = 30 * time.Second
+	nativeControllerWaitTimeout          = 30 * time.Second
+	nativeControllerPollInterval         = 25 * time.Millisecond
+	nativeStagedSharedAuthoredScope      = "scope-b"
+	nativeStagedSharedRuntimeScope       = "cf:dedup"
+	nativeCaptureDependencyFixture       = "cf_item_impacts"
+	nativeCaptureDependencyKeyColumn     = "id"
+	nativeCaptureMaximumMutationOutcomes = 4096
 )
 
 // NativeControllerConfig configures one generic native server controller.
@@ -3472,6 +3473,11 @@ func captureNativeRowsAndScopes(ctx context.Context, tx *sql.Tx, installation *n
 			installation.runtimeRowVersions = make(map[string]string)
 		}
 		installation.runtimeRowVersions[record.Image.CanonicalWireJSON] = runtimeVersion
+		for _, authoredScope := range record.AuthoredScopes {
+			if _, found := installation.scopes[authoredScope]; !found {
+				return errors.New("native captured row scope has no runtime binding")
+			}
+		}
 		observedScopes, err := captureNativeRowScopeEdges(ctx, tx, installation, record, facts)
 		if err != nil {
 			return err
@@ -3525,6 +3531,10 @@ func captureNativeRowScopeEdges(ctx context.Context, tx *sql.Tx, installation *n
 		}
 		if _, duplicate := observed[authoredScope]; duplicate {
 			return nil, errors.New("native runtime row scope edge is duplicated")
+		}
+		forwardRuntimeScope, found := installation.scopes[authoredScope]
+		if !found || forwardRuntimeScope != runtimeScope {
+			return nil, errors.New("native runtime row scope edge does not match its forward binding")
 		}
 		observed[authoredScope] = struct{}{}
 		facts.RowScopeEdges = append(facts.RowScopeEdges, scenarios.RowScopeEdgeFact{
@@ -3624,34 +3634,43 @@ func captureNativeCountsAndRebuilds(ctx context.Context, tx *sql.Tx, installatio
 
 func captureNativeMutationOutcomeIdentities(ctx context.Context, tx *sql.Tx, installation *nativeInstallationBinding, facts *scenarios.StateFacts) error {
 	facts.MutationOutcomes = make([]scenarios.MutationOutcomeIdentityFact, 0)
-	for _, client := range installation.clients {
-		rows, err := tx.QueryContext(ctx, `
-			SELECT mutation_id::text FROM synchro.sync_push_mutations
-			WHERE user_id = $1 AND client_id = $2
-			ORDER BY mutation_id`, client.UserID, client.ClientID)
-		if err != nil {
-			return errors.New("read native push mutation outcome identities failed")
-		}
-		for rows.Next() {
-			var mutationID string
-			if err := rows.Scan(&mutationID); err != nil {
-				_ = rows.Close()
-				return errors.New("scan native push mutation outcome identity failed")
-			}
-			facts.MutationOutcomes = append(facts.MutationOutcomes, scenarios.MutationOutcomeIdentityFact{
-				UserID:     client.UserID,
-				ClientID:   client.ClientID,
-				MutationID: mutationID,
-			})
-		}
-		if err := rows.Err(); err != nil {
-			_ = rows.Close()
-			return errors.New("read native push mutation outcome identities failed")
-		}
-		if err := rows.Close(); err != nil {
-			return errors.New("close native push mutation outcome identities failed")
-		}
+	userIDs := make([]string, len(installation.clients))
+	clientIDs := make([]string, len(installation.clients))
+	for index, client := range installation.clients {
+		userIDs[index] = client.UserID
+		clientIDs[index] = client.ClientID
 	}
+	rows, err := tx.QueryContext(ctx, `
+		WITH requested_clients(user_id, client_id) AS (
+			SELECT DISTINCT user_id, client_id
+			FROM unnest($1::text[], $2::text[]) AS requested(user_id, client_id)
+		)
+		SELECT mutation.user_id, mutation.client_id, mutation.mutation_id::text
+		FROM synchro.sync_push_mutations mutation
+		JOIN requested_clients requested
+		  ON requested.user_id = mutation.user_id
+		 AND requested.client_id = mutation.client_id
+		ORDER BY mutation.user_id, mutation.client_id, mutation.mutation_id
+		LIMIT $3`, userIDs, clientIDs, nativeCaptureMaximumMutationOutcomes+1)
+	if err != nil {
+		return errors.New("read native push mutation outcome identities failed")
+	}
+	defer rows.Close()
+	outcomes := make([]scenarios.MutationOutcomeIdentityFact, 0)
+	for rows.Next() {
+		var value scenarios.MutationOutcomeIdentityFact
+		if err := rows.Scan(&value.UserID, &value.ClientID, &value.MutationID); err != nil {
+			return errors.New("scan native push mutation outcome identity failed")
+		}
+		outcomes = append(outcomes, value)
+	}
+	if err := rows.Err(); err != nil {
+		return errors.New("read native push mutation outcome identities failed")
+	}
+	if len(outcomes) > nativeCaptureMaximumMutationOutcomes {
+		return errors.New("native push mutation outcome identity observation limit exceeded")
+	}
+	facts.MutationOutcomes = outcomes
 	return nil
 }
 
