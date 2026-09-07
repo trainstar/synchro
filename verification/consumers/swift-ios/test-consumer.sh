@@ -138,6 +138,10 @@ if [ -n "${PACKAGED_SMOKE_CELL_ID:-}" ]; then
       printf '%s\n' "initial process $initial_pid exited" >&2
     fi
     ls -la "$container/Documents" >&2 || true
+    for report in $(ls -t "$HOME/Library/Logs/DiagnosticReports" 2>/dev/null | grep -i SynchroConsumer | head -2); do
+      printf '=== crash report %s ===\n' "$report" >&2
+      head -40 "$HOME/Library/Logs/DiagnosticReports/$report" >&2 || true
+    done
     xcrun simctl spawn "$simulator_udid" log show --last 5m --style compact \
       --predicate 'processImagePath CONTAINS "SynchroConsumer"' 2>/dev/null \
       | tail -60 >&2 || true
@@ -187,6 +191,10 @@ if [ -n "${PACKAGED_SMOKE_CELL_ID:-}" ]; then
       printf '%s\n' "resume process $resume_pid exited" >&2
     fi
     ls -la "$container/Documents" >&2 || true
+    for report in $(ls -t "$HOME/Library/Logs/DiagnosticReports" 2>/dev/null | grep -i SynchroConsumer | head -2); do
+      printf '=== crash report %s ===\n' "$report" >&2
+      head -40 "$HOME/Library/Logs/DiagnosticReports/$report" >&2 || true
+    done
     xcrun simctl spawn "$simulator_udid" log show --last 5m --style compact \
       --predicate 'processImagePath CONTAINS "SynchroConsumer"' 2>/dev/null \
       | tail -60 >&2 || true
