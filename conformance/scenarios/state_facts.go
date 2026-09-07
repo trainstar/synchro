@@ -18,6 +18,12 @@ func NormalizeStateFacts(source StateFacts) (StateFacts, error) {
 	if err := normalizeScopes(facts.Scopes); err != nil {
 		return StateFacts{}, err
 	}
+	if err := normalizeMutationOutcomeIdentities(facts.MutationOutcomes); err != nil {
+		return StateFacts{}, err
+	}
+	if err := normalizeRowScopeEdges(facts.RowScopeEdges); err != nil {
+		return StateFacts{}, err
+	}
 	if err := normalizePoison(facts.Poison); err != nil {
 		return StateFacts{}, err
 	}
@@ -80,6 +86,32 @@ func normalizeScopes(values []ScopeFact) error {
 		sort.Strings(values[index].EffectVersions)
 	}
 	sort.Slice(values, func(left, right int) bool { return values[left].ScopeID < values[right].ScopeID })
+	return nil
+}
+
+func normalizeMutationOutcomeIdentities(values []MutationOutcomeIdentityFact) error {
+	seen := make(map[string]struct{}, len(values))
+	for _, value := range values {
+		if !addUniqueStateFact(seen, stateMutationOutcomeIdentityKey(value)) {
+			return errors.New("mutation outcome identity fact is duplicated")
+		}
+	}
+	sort.Slice(values, func(left, right int) bool {
+		return stateMutationOutcomeIdentityKey(values[left]) < stateMutationOutcomeIdentityKey(values[right])
+	})
+	return nil
+}
+
+func normalizeRowScopeEdges(values []RowScopeEdgeFact) error {
+	seen := make(map[string]struct{}, len(values))
+	for _, value := range values {
+		if !addUniqueStateFact(seen, stateRowScopeEdgeKey(value)) {
+			return errors.New("row scope edge fact is duplicated")
+		}
+	}
+	sort.Slice(values, func(left, right int) bool {
+		return stateRowScopeEdgeKey(values[left]) < stateRowScopeEdgeKey(values[right])
+	})
 	return nil
 }
 
@@ -218,6 +250,8 @@ func StateFactsProjectionEqual(want, got StateFacts) bool {
 	if !projectedStateListEqual(want.Transactions, got.Transactions) ||
 		!projectedStateListEqual(want.Rows, got.Rows) ||
 		!projectedStateListEqual(want.Scopes, got.Scopes) ||
+		!projectedStateListEqual(want.MutationOutcomes, got.MutationOutcomes) ||
+		!projectedStateListEqual(want.RowScopeEdges, got.RowScopeEdges) ||
 		!projectedStateListEqual(want.Poison, got.Poison) ||
 		!projectedStateListEqual(want.Rebuilds, got.Rebuilds) {
 		return false
@@ -322,6 +356,8 @@ func CloneStateFacts(source StateFacts) StateFacts {
 	for index := range result.Scopes {
 		result.Scopes[index].EffectVersions = append([]string(nil), source.Scopes[index].EffectVersions...)
 	}
+	result.MutationOutcomes = cloneStateSlice(source.MutationOutcomes)
+	result.RowScopeEdges = cloneStateSlice(source.RowScopeEdges)
 	result.Poison = cloneStateSlice(source.Poison)
 	for index := range result.Poison {
 		result.Poison[index].Relation = cloneStateString(source.Poison[index].Relation)
@@ -401,6 +437,14 @@ func stateTransactionKey(value TransactionFact) string {
 
 func stateRowKey(value RowFact) string {
 	return value.TableID + "\x00" + value.CanonicalWireJSON
+}
+
+func stateMutationOutcomeIdentityKey(value MutationOutcomeIdentityFact) string {
+	return value.UserID + "\x00" + value.ClientID + "\x00" + value.MutationID
+}
+
+func stateRowScopeEdgeKey(value RowScopeEdgeFact) string {
+	return stateRowKey(RowFact{TableID: value.TableID, CanonicalWireJSON: value.CanonicalWireJSON}) + "\x00" + value.ScopeID
 }
 
 func statePoisonKey(value PoisonFact) string {

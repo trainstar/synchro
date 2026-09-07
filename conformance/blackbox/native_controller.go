@@ -3444,6 +3444,7 @@ func captureNativeTransactions(ctx context.Context, tx *sql.Tx, installation *na
 func captureNativeRowsAndScopes(ctx context.Context, tx *sql.Tx, installation *nativeInstallationBinding, transactions []*nativeTransactionBinding, records []*nativeRecordBinding, facts *scenarios.StateFacts) error {
 	scopeRows := make(map[string]uint64)
 	scopeVersions := make(map[string][]string)
+	facts.RowScopeEdges = make([]scenarios.RowScopeEdgeFact, 0)
 	for _, record := range records {
 		var rowData []byte
 		var runtimeVersion, runtimeChecksum string
@@ -3471,17 +3472,16 @@ func captureNativeRowsAndScopes(ctx context.Context, tx *sql.Tx, installation *n
 			installation.runtimeRowVersions = make(map[string]string)
 		}
 		installation.runtimeRowVersions[record.Image.CanonicalWireJSON] = runtimeVersion
+		observedScopes, err := captureNativeRowScopeEdges(ctx, tx, installation, record, facts)
+		if err != nil {
+			return err
+		}
 		for _, authoredScope := range record.AuthoredScopes {
-			runtimeScope, found := installation.scopes[authoredScope]
-			if !found {
-				return errors.New("native captured row scope has no runtime binding")
-			}
-			var edgeCount int64
-			if err := tx.QueryRowContext(ctx, `
-				SELECT count(*) FROM synchro.sync_bucket_edges
-				WHERE table_name = $1 AND record_id = $2 AND bucket_id = $3`, record.Table.RuntimeName, record.RuntimeRecordID, runtimeScope).Scan(&edgeCount); err != nil || edgeCount != 1 {
+			if _, found := observedScopes[authoredScope]; !found {
 				return errors.New("native runtime scope edge does not match its authored binding")
 			}
+		}
+		for authoredScope := range observedScopes {
 			scopeRows[authoredScope]++
 			scopeVersions[authoredScope] = append(scopeVersions[authoredScope], record.Image.Version)
 		}
@@ -3502,6 +3502,41 @@ func captureNativeRowsAndScopes(ctx context.Context, tx *sql.Tx, installation *n
 	facts.ScopeCount = &scopeCount
 	_ = transactions
 	return nil
+}
+
+func captureNativeRowScopeEdges(ctx context.Context, tx *sql.Tx, installation *nativeInstallationBinding, record *nativeRecordBinding, facts *scenarios.StateFacts) (map[string]struct{}, error) {
+	rows, err := tx.QueryContext(ctx, `
+		SELECT bucket_id FROM synchro.sync_bucket_edges
+		WHERE table_name = $1 AND record_id = $2
+		ORDER BY bucket_id`, record.Table.RuntimeName, record.RuntimeRecordID)
+	if err != nil {
+		return nil, errors.New("read native runtime row scope edges failed")
+	}
+	defer rows.Close()
+	observed := make(map[string]struct{})
+	for rows.Next() {
+		var runtimeScope string
+		if err := rows.Scan(&runtimeScope); err != nil {
+			return nil, errors.New("scan native runtime row scope edge failed")
+		}
+		authoredScope, found := installation.runtimeScopes[runtimeScope]
+		if !found {
+			return nil, errors.New("native runtime row scope edge has no authored binding")
+		}
+		if _, duplicate := observed[authoredScope]; duplicate {
+			return nil, errors.New("native runtime row scope edge is duplicated")
+		}
+		observed[authoredScope] = struct{}{}
+		facts.RowScopeEdges = append(facts.RowScopeEdges, scenarios.RowScopeEdgeFact{
+			TableID:           record.Table.AuthoredID,
+			CanonicalWireJSON: record.Image.CanonicalWireJSON,
+			ScopeID:           authoredScope,
+		})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, errors.New("read native runtime row scope edges failed")
+	}
+	return observed, nil
 }
 
 func validateNativeRuntimeRow(record *nativeRecordBinding, raw []byte) error {
@@ -3542,6 +3577,9 @@ func captureNativeCountsAndRebuilds(ctx context.Context, tx *sql.Tx, installatio
 	}
 	facts.BatchCount = &batchCount
 	facts.MutationCount = &mutationCount
+	if err := captureNativeMutationOutcomeIdentities(ctx, tx, installation, facts); err != nil {
+		return err
+	}
 	rows, err := tx.QueryContext(ctx, `
 		SELECT session.user_id, session.client_id, session.scope_id, session.rebuild_id::text,
 		       session.page_limit, session.staged_row_count,
@@ -3581,6 +3619,39 @@ func captureNativeCountsAndRebuilds(ctx context.Context, tx *sql.Tx, installatio
 	}
 	rebuildCount := uint64(len(facts.Rebuilds))
 	facts.RebuildCount = &rebuildCount
+	return nil
+}
+
+func captureNativeMutationOutcomeIdentities(ctx context.Context, tx *sql.Tx, installation *nativeInstallationBinding, facts *scenarios.StateFacts) error {
+	facts.MutationOutcomes = make([]scenarios.MutationOutcomeIdentityFact, 0)
+	for _, client := range installation.clients {
+		rows, err := tx.QueryContext(ctx, `
+			SELECT mutation_id::text FROM synchro.sync_push_mutations
+			WHERE user_id = $1 AND client_id = $2
+			ORDER BY mutation_id`, client.UserID, client.ClientID)
+		if err != nil {
+			return errors.New("read native push mutation outcome identities failed")
+		}
+		for rows.Next() {
+			var mutationID string
+			if err := rows.Scan(&mutationID); err != nil {
+				_ = rows.Close()
+				return errors.New("scan native push mutation outcome identity failed")
+			}
+			facts.MutationOutcomes = append(facts.MutationOutcomes, scenarios.MutationOutcomeIdentityFact{
+				UserID:     client.UserID,
+				ClientID:   client.ClientID,
+				MutationID: mutationID,
+			})
+		}
+		if err := rows.Err(); err != nil {
+			_ = rows.Close()
+			return errors.New("read native push mutation outcome identities failed")
+		}
+		if err := rows.Close(); err != nil {
+			return errors.New("close native push mutation outcome identities failed")
+		}
+	}
 	return nil
 }
 

@@ -192,21 +192,23 @@ type ModelExpectation struct {
 // StateFacts is a closed partial projection of contract-relevant durable state.
 // Omitted families are not part of the expectation.
 type StateFacts struct {
-	TransactionCount *uint64                `json:"transaction_count,omitempty"`
-	RowCount         *uint64                `json:"row_count,omitempty"`
-	ScopeCount       *uint64                `json:"scope_count,omitempty"`
-	RebuildCount     *uint64                `json:"rebuild_count,omitempty"`
-	BatchCount       *uint64                `json:"batch_count,omitempty"`
-	MutationCount    *uint64                `json:"mutation_count,omitempty"`
-	ConfiguredLimits *ConfiguredLimitsFact  `json:"configured_limits,omitempty"`
-	Transactions     []TransactionFact      `json:"transactions,omitempty"`
-	Registry         *RegistryFact          `json:"registry,omitempty"`
-	Stream           *StreamFact            `json:"stream,omitempty"`
-	Rows             []RowFact              `json:"rows,omitempty"`
-	Scopes           []ScopeFact            `json:"scopes,omitempty"`
-	Poison           []PoisonFact           `json:"poison,omitempty"`
-	Rebuilds         []RebuildFact          `json:"rebuilds,omitempty"`
-	Clients          []ClientDurabilityFact `json:"clients,omitempty"`
+	TransactionCount *uint64                       `json:"transaction_count,omitempty"`
+	RowCount         *uint64                       `json:"row_count,omitempty"`
+	ScopeCount       *uint64                       `json:"scope_count,omitempty"`
+	RebuildCount     *uint64                       `json:"rebuild_count,omitempty"`
+	BatchCount       *uint64                       `json:"batch_count,omitempty"`
+	MutationCount    *uint64                       `json:"mutation_count,omitempty"`
+	ConfiguredLimits *ConfiguredLimitsFact         `json:"configured_limits,omitempty"`
+	Transactions     []TransactionFact             `json:"transactions,omitempty"`
+	Registry         *RegistryFact                 `json:"registry,omitempty"`
+	Stream           *StreamFact                   `json:"stream,omitempty"`
+	Rows             []RowFact                     `json:"rows,omitempty"`
+	Scopes           []ScopeFact                   `json:"scopes,omitempty"`
+	MutationOutcomes []MutationOutcomeIdentityFact `json:"mutation_outcomes,omitempty"`
+	RowScopeEdges    []RowScopeEdgeFact            `json:"row_scope_edges,omitempty"`
+	Poison           []PoisonFact                  `json:"poison,omitempty"`
+	Rebuilds         []RebuildFact                 `json:"rebuilds,omitempty"`
+	Clients          []ClientDurabilityFact        `json:"clients,omitempty"`
 }
 
 type ConfiguredLimitsFact struct {
@@ -250,6 +252,20 @@ type ScopeFact struct {
 	MembershipGeneration uint64   `json:"membership_generation"`
 	Cardinality          uint64   `json:"cardinality"`
 	EffectVersions       []string `json:"effect_versions"`
+}
+
+// MutationOutcomeIdentityFact identifies one server-retained mutation outcome.
+type MutationOutcomeIdentityFact struct {
+	UserID     string `json:"user_id"`
+	ClientID   string `json:"client_id"`
+	MutationID string `json:"mutation_id"`
+}
+
+// RowScopeEdgeFact identifies one server-retained row-to-scope edge.
+type RowScopeEdgeFact struct {
+	TableID           string `json:"table_id"`
+	CanonicalWireJSON string `json:"canonical_wire_json"`
+	ScopeID           string `json:"scope_id"`
 }
 
 type PoisonFact struct {

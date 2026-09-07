@@ -3,6 +3,7 @@ package blackbox
 import (
 	"context"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -629,6 +630,115 @@ func TestNativeCaptureDependencySourceStatementUsesFixture(t *testing.T) {
 	// the runtime key names that column and carries the authored identity.
 	if key := nativeCaptureDependencyKey(nativeAuthoredImage{CaptureKey: "impact-key-a"}); key != `{"id":"impact-key-a"}` {
 		t.Fatalf("capture dependency runtime key = %q", key)
+	}
+}
+
+func TestNativeCaptureServerObservationSignals(t *testing.T) {
+	databaseURL := strings.TrimSpace(os.Getenv("TEST_DATABASE_URL"))
+	if databaseURL == "" {
+		t.Skip("TEST_DATABASE_URL is not configured")
+	}
+	database, err := sql.Open("pgx", databaseURL)
+	if err != nil {
+		t.Fatalf("open PostgreSQL capture database: %v", err)
+	}
+	t.Cleanup(func() { _ = database.Close() })
+	ctx := context.Background()
+	if err := database.PingContext(ctx); err != nil {
+		t.Fatalf("ping PostgreSQL capture database: %v", err)
+	}
+	if _, err := database.ExecContext(ctx, "CREATE EXTENSION IF NOT EXISTS synchro_pg CASCADE"); err != nil {
+		t.Fatalf("install PostgreSQL capture extension: %v", err)
+	}
+	tx, err := database.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelRepeatableRead})
+	if err != nil {
+		t.Fatalf("begin PostgreSQL capture transaction: %v", err)
+	}
+	t.Cleanup(func() { _ = tx.Rollback() })
+
+	const (
+		userID       = "native-capture-observation-user"
+		clientID     = "native-capture-observation-client"
+		firstBatchID = "00000000-0000-4000-8000-000000000401"
+	)
+	mutationIDs := []string{
+		"00000000-0000-4000-8000-000000000402",
+		"00000000-0000-4000-8000-000000000403",
+	}
+	for ordinal, mutationID := range mutationIDs {
+		if _, err := tx.ExecContext(ctx, `
+			INSERT INTO synchro.sync_push_mutations (
+				user_id, client_id, mutation_id,
+				fingerprint_algorithm, fingerprint_version, fingerprint_domain, fingerprint_digest,
+				first_batch_id, request_ordinal,
+				authored_schema_version, authored_schema_hash,
+				submitted_schema_version, submitted_schema_hash,
+				outcome_schema_version, outcome_schema_hash,
+				table_id, primary_key_field_id, primary_key_type, primary_key_value,
+				operation, outcome_status, rejection_code,
+				sealed_canonical_request, sealed_canonical_response, completed_at
+			) VALUES (
+				$1, $2, $3::uuid,
+				'sha256', 1, 'synchro:v3:push-mutation-fingerprint:v1', decode(repeat('00', 32), 'hex'),
+				$4::uuid, $5,
+				1, repeat('a', 64),
+				1, repeat('a', 64),
+				1, repeat('a', 64),
+				'runtime-items', 'runtime-id', 'string', '"runtime-row"'::jsonb,
+				'insert', 'applied', NULL,
+				decode('00', 'hex'), decode('00', 'hex'), now()
+			)`, userID, clientID, mutationID, firstBatchID, ordinal+1); err != nil {
+			t.Fatalf("insert PostgreSQL mutation outcome %d: %v", ordinal, err)
+		}
+	}
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO synchro.sync_bucket_edges (relation_id, table_name, record_id, bucket_id, checksum)
+		VALUES
+			('00000000-0000-4000-8000-000000000404'::uuid, 'runtime-items', 'runtime-row', 'runtime-scope-b', decode(repeat('00', 32), 'hex')),
+			('00000000-0000-4000-8000-000000000405'::uuid, 'runtime-items', 'runtime-row', 'runtime-scope-a', decode(repeat('00', 32), 'hex'))`); err != nil {
+		t.Fatalf("insert PostgreSQL row scope edges: %v", err)
+	}
+
+	installation := &nativeInstallationBinding{
+		clients:       []nativeInstalledClient{{UserID: userID, ClientID: clientID}},
+		runtimeScopes: map[string]string{"runtime-scope-a": "scope-a", "runtime-scope-b": "scope-b"},
+	}
+	facts := scenarios.StateFacts{}
+	if err := captureNativeMutationOutcomeIdentities(ctx, tx, installation, &facts); err != nil {
+		t.Fatalf("capture PostgreSQL mutation outcome identities: %v", err)
+	}
+	record := &nativeRecordBinding{
+		Table:           nativeTableBinding{AuthoredID: "items", RuntimeName: "runtime-items"},
+		RuntimeRecordID: "runtime-row",
+		Image:           nativeAuthoredImage{CanonicalWireJSON: `"row-a"`},
+	}
+	observedScopes, err := captureNativeRowScopeEdges(ctx, tx, installation, record, &facts)
+	if err != nil {
+		t.Fatalf("capture PostgreSQL row scope edges: %v", err)
+	}
+	if len(facts.MutationOutcomes) != 2 || facts.MutationOutcomes[0] != (scenarios.MutationOutcomeIdentityFact{UserID: userID, ClientID: clientID, MutationID: mutationIDs[0]}) || facts.MutationOutcomes[1] != (scenarios.MutationOutcomeIdentityFact{UserID: userID, ClientID: clientID, MutationID: mutationIDs[1]}) {
+		t.Fatalf("mutation outcome identities = %#v", facts.MutationOutcomes)
+	}
+	if len(observedScopes) != 2 {
+		t.Fatalf("observed scope count = %d, want 2", len(observedScopes))
+	}
+	if _, found := observedScopes["scope-a"]; !found {
+		t.Fatal("scope-a edge is absent")
+	}
+	if _, found := observedScopes["scope-b"]; !found {
+		t.Fatal("scope-b edge is absent")
+	}
+	wantEdges := []scenarios.RowScopeEdgeFact{
+		{TableID: "items", CanonicalWireJSON: `"row-a"`, ScopeID: "scope-a"},
+		{TableID: "items", CanonicalWireJSON: `"row-a"`, ScopeID: "scope-b"},
+	}
+	if len(facts.RowScopeEdges) != len(wantEdges) {
+		t.Fatalf("row scope edges = %#v", facts.RowScopeEdges)
+	}
+	for index := range wantEdges {
+		if facts.RowScopeEdges[index] != wantEdges[index] {
+			t.Fatalf("row scope edge %d = %#v, want %#v", index, facts.RowScopeEdges[index], wantEdges[index])
+		}
 	}
 }
 

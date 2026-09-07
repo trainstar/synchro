@@ -10,6 +10,14 @@ func TestNormalizeStateFactsPreservesProjectionAndCanonicalizesOrder(t *testing.
 			{ScopeID: "scope-b", EffectVersions: []string{"v2", "v1"}},
 			{ScopeID: "scope-a", EffectVersions: []string{}},
 		},
+		MutationOutcomes: []MutationOutcomeIdentityFact{
+			{UserID: "user-b", ClientID: "client-b", MutationID: "mutation-b"},
+			{UserID: "user-a", ClientID: "client-a", MutationID: "mutation-a"},
+		},
+		RowScopeEdges: []RowScopeEdgeFact{
+			{TableID: "items", CanonicalWireJSON: `"row-b"`, ScopeID: "scope-b"},
+			{TableID: "items", CanonicalWireJSON: `"row-a"`, ScopeID: "scope-a"},
+		},
 	}
 	normalized, err := NormalizeStateFacts(source)
 	if err != nil {
@@ -26,6 +34,15 @@ func TestNormalizeStateFactsPreservesProjectionAndCanonicalizesOrder(t *testing.
 	}
 	if source.Scopes[0].ScopeID != "scope-b" || source.Scopes[0].EffectVersions[0] != "v2" {
 		t.Fatal("normalization mutated its input")
+	}
+	if got := normalized.MutationOutcomes; len(got) != 2 || got[0].MutationID != "mutation-a" || got[1].MutationID != "mutation-b" {
+		t.Fatalf("mutation outcome identity order = %v", got)
+	}
+	if got := normalized.RowScopeEdges; len(got) != 2 || got[0].CanonicalWireJSON != `"row-a"` || got[1].CanonicalWireJSON != `"row-b"` {
+		t.Fatalf("row scope edge order = %v", got)
+	}
+	if source.MutationOutcomes[0].MutationID != "mutation-b" || source.RowScopeEdges[0].CanonicalWireJSON != `"row-b"` {
+		t.Fatal("normalization changed a new observation family")
 	}
 }
 
@@ -50,5 +67,41 @@ func TestNormalizeStateFactsRejectsDuplicateNestedIdentity(t *testing.T) {
 	}}})
 	if err == nil {
 		t.Fatal("duplicate checkpoint identity passed normalization")
+	}
+}
+
+func TestNormalizeStateFactsRejectsDuplicateServerObservationIdentity(t *testing.T) {
+	for _, facts := range []StateFacts{
+		{MutationOutcomes: []MutationOutcomeIdentityFact{
+			{UserID: "user-a", ClientID: "client-a", MutationID: "mutation-a"},
+			{UserID: "user-a", ClientID: "client-a", MutationID: "mutation-a"},
+		}},
+		{RowScopeEdges: []RowScopeEdgeFact{
+			{TableID: "items", CanonicalWireJSON: `"row-a"`, ScopeID: "scope-a"},
+			{TableID: "items", CanonicalWireJSON: `"row-a"`, ScopeID: "scope-a"},
+		}},
+	} {
+		if _, err := NormalizeStateFacts(facts); err == nil {
+			t.Fatal("duplicate server observation identity passed normalization")
+		}
+	}
+}
+
+func TestStateFactsProjectionEqualIgnoresOmittedServerObservationFamilies(t *testing.T) {
+	want := StateFacts{
+		Rows:   []RowFact{{TableID: "items", CanonicalWireJSON: `"row-a"`}},
+		Scopes: []ScopeFact{{ScopeID: "scope-a"}},
+	}
+	got := want
+	got.MutationOutcomes = []MutationOutcomeIdentityFact{{UserID: "user-a", ClientID: "client-a", MutationID: "mutation-a"}}
+	got.RowScopeEdges = []RowScopeEdgeFact{{TableID: "items", CanonicalWireJSON: `"row-a"`, ScopeID: "scope-a"}}
+	if !StateFactsProjectionEqual(want, got) {
+		t.Fatal("omitted server observation families changed an authored projection")
+	}
+	if StateFactsProjectionEqual(StateFacts{MutationOutcomes: []MutationOutcomeIdentityFact{}}, got) {
+		t.Fatal("explicit empty mutation outcome identities accepted an observation")
+	}
+	if StateFactsProjectionEqual(StateFacts{RowScopeEdges: []RowScopeEdgeFact{}}, got) {
+		t.Fatal("explicit empty row scope edges accepted an observation")
 	}
 }
