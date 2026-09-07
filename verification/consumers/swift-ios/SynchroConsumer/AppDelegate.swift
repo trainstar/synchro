@@ -111,6 +111,22 @@ final class AppDelegate: UIResponder, UIApplicationDelegate {
         return true
     }
 
+    // A transient transport drop surfaces as a retryable sync error, and a
+    // real client retries it. The bound keeps a persistent failure fatal.
+    private func syncNowWithRetry(_ client: SynchroClient) async throws {
+        var attempt = 1
+        while true {
+            do {
+                try await syncNowWithRetry(client)
+                return
+            } catch {
+                guard attempt < 3 else { throw error }
+                attempt += 1
+                try await Task.sleep(nanoseconds: 5_000_000_000)
+            }
+        }
+    }
+
     private func runPackagedSmoke(configURL: URL, documents: URL) async throws {
         let data = try Data(contentsOf: configURL)
         let smoke = try JSONDecoder().decode(PackagedSmokeConfig.self, from: data)
@@ -145,7 +161,7 @@ final class AppDelegate: UIResponder, UIApplicationDelegate {
             // start() returns after local recovery and runs the first cycle
             // in the background, so the server schema is not applied yet.
             // The customers insert requires that schema.
-            try await client.syncNow()
+            try await syncNowWithRetry(client)
             let timestamp = ISO8601DateFormatter().string(from: Date())
             _ = try client.execute(
                 "INSERT INTO customers (id, user_id, name, balance, is_active, created_at, updated_at) VALUES (?, ?, ?, 0, 1, ?, ?)",
@@ -162,7 +178,7 @@ final class AppDelegate: UIResponder, UIApplicationDelegate {
                     timestamp,
                 ]
             )
-            try await client.syncNow()
+            try await syncNowWithRetry(client)
             guard try client.pendingChangeCount() == 0 else {
                 throw CocoaError(.fileWriteUnknown)
             }
@@ -204,7 +220,7 @@ final class AppDelegate: UIResponder, UIApplicationDelegate {
             throw CocoaError(.fileReadCorruptFile)
         }
         try await client.start()
-        try await client.syncNow()
+        try await syncNowWithRetry(client)
         let pendingAfterResume = try client.pendingChangeCount()
         guard pendingAfterResume == 0 else {
             throw CocoaError(.fileWriteUnknown)
