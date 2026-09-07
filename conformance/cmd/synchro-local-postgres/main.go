@@ -298,7 +298,7 @@ func runPrepare(ctx context.Context, args []string) error {
 		return errors.New("client integration seed rows did not materialize")
 	}
 	if _, err := database.ExecContext(ctx, "SELECT synchro.synchro_backfill_bucket_edges()"); err != nil {
-		return errors.New("backfill client integration scope edges failed")
+		return fmt.Errorf("backfill client integration scope edges failed: %w", err)
 	}
 	return nil
 }
