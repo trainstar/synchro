@@ -1,5 +1,7 @@
 package invariants
 
+import "unicode/utf8"
+
 const (
 	// MaximumViolationEvidenceFields limits evidence cardinality for one violation.
 	MaximumViolationEvidenceFields = 8
@@ -36,4 +38,34 @@ type Violation struct {
 	RuleID              RuleID
 	ObservationSequence uint64
 	Evidence            []EvidenceField
+}
+
+func boundedViolation(family InvariantFamily, ruleID RuleID, sequence uint64, evidence ...EvidenceField) Violation {
+	if len(evidence) > MaximumViolationEvidenceFields {
+		evidence = evidence[:MaximumViolationEvidenceFields]
+	}
+	bounded := make([]EvidenceField, len(evidence))
+	for index, field := range evidence {
+		bounded[index] = EvidenceField{
+			Name:  boundedUTF8(field.Name, MaximumViolationEvidenceNameBytes),
+			Value: boundedUTF8(field.Value, MaximumViolationEvidenceValueBytes),
+		}
+	}
+	return Violation{
+		Family:              family,
+		RuleID:              ruleID,
+		ObservationSequence: sequence,
+		Evidence:            bounded,
+	}
+}
+
+func boundedUTF8(value string, maximum int) string {
+	if len(value) <= maximum {
+		return value
+	}
+	value = value[:maximum]
+	for !utf8.ValidString(value) {
+		value = value[:len(value)-1]
+	}
+	return value
 }

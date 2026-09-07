@@ -1,43 +1,80 @@
 package invariants
 
-// NotImplementedError reports that an invariant checker has no implementation.
-type NotImplementedError struct{}
+// Stable checker rule identifiers classify each emitted invariant failure.
+const (
+	RuleMutationUnexpectedStatus     RuleID = "mutation-conservation.unexpected-status"
+	RuleMutationWireShapeInvalid     RuleID = "mutation-conservation.wire-shape-invalid"
+	RuleMutationBatchMismatch        RuleID = "mutation-conservation.batch-mismatch"
+	RuleMutationOutcomeIDInvalid     RuleID = "mutation-conservation.outcome-id-invalid"
+	RuleMutationOutcomeStatusInvalid RuleID = "mutation-conservation.outcome-status-invalid"
+	RuleMutationOutcomeDuplicate     RuleID = "mutation-conservation.outcome-duplicate"
+	RuleMutationOutcomeUnrequested   RuleID = "mutation-conservation.outcome-unrequested"
+	RuleMutationOutcomeOmitted       RuleID = "mutation-conservation.outcome-omitted"
+	RuleMutationOutcomeOrder         RuleID = "mutation-conservation.outcome-order"
+	RuleMutationOutcomeTable         RuleID = "mutation-conservation.outcome-table-mismatch"
+	RuleMutationOutcomePrimaryKey    RuleID = "mutation-conservation.outcome-primary-key-mismatch"
+	RuleMutationOutcomeSchema        RuleID = "mutation-conservation.outcome-schema-mismatch"
+	RuleMutationOutcomeCode          RuleID = "mutation-conservation.outcome-code-invalid"
+	RuleMutationOutcomeServerRow     RuleID = "mutation-conservation.outcome-server-row-invalid"
+	RuleMutationOutcomeServerVersion RuleID = "mutation-conservation.outcome-server-version-invalid"
+	RuleMutationOutcomeChecksum      RuleID = "mutation-conservation.outcome-checksum-invalid"
 
-// Error returns the stable checker implementation error.
-func (NotImplementedError) Error() string {
-	return "invariant checker is not implemented"
-}
+	RuleCursorUnexpectedStatus          RuleID = "cursor-monotonicity.unexpected-status"
+	RuleCursorWireShapeInvalid          RuleID = "cursor-monotonicity.wire-shape-invalid"
+	RuleCursorTerminalPageInvalid       RuleID = "cursor-monotonicity.terminal-page-invalid"
+	RuleCursorChangeSetMismatch         RuleID = "cursor-monotonicity.change-set-mismatch"
+	RuleCursorTerminalSetMismatch       RuleID = "cursor-monotonicity.terminal-set-mismatch"
+	RuleCursorTerminalValueInvalid      RuleID = "cursor-monotonicity.terminal-value-invalid"
+	RuleCursorCheckpointDuplicate       RuleID = "cursor-monotonicity.checkpoint-duplicate"
+	RuleCursorCheckpointPositionInvalid RuleID = "cursor-monotonicity.checkpoint-position-invalid"
+	RuleCursorCheckpointRegressed       RuleID = "cursor-monotonicity.checkpoint-regressed"
+	RuleCursorTerminalCheckpointInvalid RuleID = "cursor-monotonicity.terminal-checkpoint-invalid"
+	RuleCursorClientGenerationRegressed RuleID = "cursor-monotonicity.client-generation-regressed"
+	RuleCursorClientValueInvalid        RuleID = "cursor-monotonicity.client-value-invalid"
+	RuleCursorClientRegressed           RuleID = "cursor-monotonicity.client-regressed"
+	RuleCursorPositionUnbound           RuleID = "cursor-monotonicity.cursor-position-unbound"
+	RuleCursorTerminalAcknowledgement   RuleID = "cursor-monotonicity.terminal-acknowledgement-missing"
 
-// ErrNotImplemented prevents an unimplemented checker from reporting no violations.
-var ErrNotImplemented = NotImplementedError{}
+	RuleChecksumUnexpectedStatus            RuleID = "checksum-convergence.unexpected-status"
+	RuleChecksumWireShapeInvalid            RuleID = "checksum-convergence.wire-shape-invalid"
+	RuleChecksumWireMetadataInvalid         RuleID = "checksum-convergence.wire-checksum-metadata-invalid"
+	RuleChecksumWireRowDigestMismatch       RuleID = "checksum-convergence.wire-row-digest-mismatch"
+	RuleChecksumWireScopeDigestMismatch     RuleID = "checksum-convergence.wire-scope-digest-mismatch"
+	RuleChecksumWireScopeRowsIncomplete     RuleID = "checksum-convergence.wire-scope-rows-incomplete"
+	RuleChecksumManifestMissing             RuleID = "checksum-convergence.manifest-missing"
+	RuleChecksumRowInputInvalid             RuleID = "checksum-convergence.row-input-invalid"
+	RuleChecksumRowDigestMissing            RuleID = "checksum-convergence.row-digest-missing"
+	RuleChecksumRowDigestMismatch           RuleID = "checksum-convergence.row-digest-mismatch"
+	RuleChecksumRowIdentityDuplicate        RuleID = "checksum-convergence.row-identity-duplicate"
+	RuleChecksumScopeRowDigestMismatch      RuleID = "checksum-convergence.scope-row-digest-mismatch"
+	RuleChecksumScopeInputInvalid           RuleID = "checksum-convergence.scope-input-invalid"
+	RuleChecksumAuthoritativeDigestMissing  RuleID = "checksum-convergence.authoritative-digest-missing"
+	RuleChecksumAuthoritativeDigestMismatch RuleID = "checksum-convergence.authoritative-digest-mismatch"
+	RuleChecksumLocalDigestMissing          RuleID = "checksum-convergence.local-digest-missing"
+	RuleChecksumLocalDigestMismatch         RuleID = "checksum-convergence.local-digest-mismatch"
+	RuleChecksumScopeObservationMissing     RuleID = "checksum-convergence.scope-observation-missing"
+	RuleChecksumScopeRowUnknown             RuleID = "checksum-convergence.scope-row-unknown"
 
-// CheckMutationConservation checks the accepted and rejected mutation partition.
-// It generalizes conformance/blackbox/integration/real_mutation_controls_test.go:171-258.
-func CheckMutationConservation([]Observation) ([]Violation, error) {
-	return nil, ErrNotImplemented
-}
+	RuleScopeUnexpectedStatus           RuleID = "scope-isolation.unexpected-status"
+	RuleScopeWireShapeInvalid           RuleID = "scope-isolation.wire-shape-invalid"
+	RuleScopeSelectionInvalid           RuleID = "scope-isolation.selection-invalid"
+	RuleScopeUnselectedChange           RuleID = "scope-isolation.unselected-change"
+	RuleScopeUnexpectedChange           RuleID = "scope-isolation.unexpected-change"
+	RuleScopeDuplicate                  RuleID = "scope-isolation.scope-duplicate"
+	RuleScopeMembershipUnknown          RuleID = "scope-isolation.membership-unknown"
+	RuleScopeMembershipDuplicate        RuleID = "scope-isolation.membership-duplicate"
+	RuleScopeMembershipGeneration       RuleID = "scope-isolation.membership-generation-mismatch"
+	RuleScopeServerGenerationMismatch   RuleID = "scope-isolation.server-generation-mismatch"
+	RuleScopeServerCardinalityMismatch  RuleID = "scope-isolation.server-cardinality-mismatch"
+	RuleScopeRowIdentityRelationInvalid RuleID = "scope-isolation.row-identity-relation-invalid"
+	RuleScopeServerMembershipMismatch   RuleID = "scope-isolation.server-membership-mismatch"
 
-// CheckCursorMonotonicity checks raw client cursors against ordered server positions.
-// It generalizes conformance/blackbox/integration/real_mutation_controls_test.go:18-74.
-func CheckCursorMonotonicity([]Observation) ([]Violation, error) {
-	return nil, ErrNotImplemented
-}
-
-// CheckChecksumConvergence recomputes row and scope digests with vectors.RowDigest and vectors.ScopeDigest.
-// It generalizes conformance/blackbox/integration/real_mutation_controls_test.go:261-313.
-func CheckChecksumConvergence([]Observation) ([]Violation, error) {
-	return nil, ErrNotImplemented
-}
-
-// CheckScopeIsolation checks selected scopes, membership edges, and cardinalities.
-// It generalizes conformance/blackbox/integration/real_mutation_controls_test.go:316-347.
-func CheckScopeIsolation([]Observation) ([]Violation, error) {
-	return nil, ErrNotImplemented
-}
-
-// CheckNoStateForks checks process replacement, database identity, and durable state equality.
-// It generalizes conformance/kotlin/platform.go:1412-1438 and conformance/kotlin/platform.go:1524-1531.
-// It also generalizes conformance/reactnative/queue_replay.go:1002-1016.
-func CheckNoStateForks([]Observation) ([]Violation, error) {
-	return nil, ErrNotImplemented
-}
+	RuleStateForkCaptureIncomplete           RuleID = "no-state-forks.capture-incomplete"
+	RuleStateForkProcessIdentityMissing      RuleID = "no-state-forks.process-identity-missing"
+	RuleStateForkProcessIdentityInvalid      RuleID = "no-state-forks.process-identity-invalid"
+	RuleStateForkProcessNotReplaced          RuleID = "no-state-forks.process-not-replaced"
+	RuleStateForkProcessReplacedUnexpectedly RuleID = "no-state-forks.process-replaced-unexpectedly"
+	RuleStateForkDatabaseIdentityChanged     RuleID = "no-state-forks.database-identity-changed"
+	RuleStateForkDurableStateInvalid         RuleID = "no-state-forks.durable-state-invalid"
+	RuleStateForkDurableStateChanged         RuleID = "no-state-forks.durable-state-changed"
+)
