@@ -442,6 +442,19 @@ jobs:
       - name: Run iOS packaged smoke cells
         run: |
           set -euo pipefail
+          # A boot straight after another simulator's teardown can lose the
+          # launchd_sim session on the runner, so boots retry once.
+          boot_simulator() {
+            local udid="$1"
+            for attempt in 1 2 3; do
+              if xcrun simctl boot "$udid" && xcrun simctl bootstatus "$udid" -b; then
+                return 0
+              fi
+              xcrun simctl shutdown "$udid" >/dev/null 2>&1 || true
+              sleep 20
+            done
+            return 1
+          }
           device_type="$(xcrun simctl list devicetypes -j | ruby -rjson -e 'devices = JSON.parse(STDIN.read).fetch("devicetypes"); device = devices.find { |item| item["name"] == "iPhone 15" } || devices.find { |item| item["name"].start_with?("iPhone") }; abort "no iPhone simulator type" unless device; puts device.fetch("identifier")')"
           # The runner image ships only recent simulator runtimes, so the
           # minimum cell downloads the iOS 16 runtime when it is absent.
@@ -455,8 +468,7 @@ jobs:
           min_udid="$(xcrun simctl create Synchro_iOS_16 "$min_device_type" "$min_runtime")"
           cleanup_min() { xcrun simctl shutdown "$min_udid" >/dev/null 2>&1 || true; xcrun simctl delete "$min_udid" >/dev/null 2>&1 || true; }
           trap cleanup_min EXIT HUP INT TERM
-          xcrun simctl boot "$min_udid"
-          xcrun simctl bootstatus "$min_udid" -b
+          boot_simulator "$min_udid"
           IOS_SIMULATOR_UDID="$min_udid" make test-client-platforms SUPPORT_CELL_ID=SUP-IOS-MIN-001 SUPPORT_PLATFORM_VERSION=16
           cleanup_min
           trap - EXIT HUP INT TERM
@@ -466,8 +478,7 @@ jobs:
           current_udid="$(xcrun simctl create Synchro_iOS_Current "$device_type" "$current_runtime")"
           cleanup_current() { xcrun simctl shutdown "$current_udid" >/dev/null 2>&1 || true; xcrun simctl delete "$current_udid" >/dev/null 2>&1 || true; }
           trap cleanup_current EXIT HUP INT TERM
-          xcrun simctl boot "$current_udid"
-          xcrun simctl bootstatus "$current_udid" -b
+          boot_simulator "$current_udid"
           IOS_SIMULATOR_UDID="$current_udid" make test-client-platforms SUPPORT_CELL_ID=SUP-IOS-CURRENT-001 SUPPORT_PLATFORM_VERSION="${current_version%%.*}"
           IOS_SIMULATOR_UDID="$current_udid" make test-client-platforms SUPPORT_CELL_ID=SUP-RN-IOS-CURRENT-001 SUPPORT_PLATFORM_VERSION="${current_version%%.*}"
 
