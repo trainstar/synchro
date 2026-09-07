@@ -119,16 +119,18 @@ type Platform struct {
 type platformClient struct {
 	mu sync.Mutex
 
-	client       Client
-	databasePath string
-	session      *Session
-	terminated   bool
-	started      bool
-	restarted    bool
-	callSequence uint64
-	selectors    map[string]runnerRowSelector
-	pendingLoss  *pendingResponseLoss
-	activeCall   *platformCall
+	client                      Client
+	databasePath                string
+	session                     *Session
+	processID                   string
+	databaseIdentityFingerprint string
+	terminated                  bool
+	started                     bool
+	restarted                   bool
+	callSequence                uint64
+	selectors                   map[string]runnerRowSelector
+	pendingLoss                 *pendingResponseLoss
+	activeCall                  *platformCall
 }
 
 type platformCall struct {
@@ -585,6 +587,16 @@ func requireExistingDatabase(path string) error {
 	return nil
 }
 
+func verifyRestartIdentity(priorProcessID, priorFingerprint, processID, fingerprint string) error {
+	if !validProcessID(priorProcessID) || !validLowerHexDigest(priorFingerprint) || !validProcessID(processID) || !validLowerHexDigest(fingerprint) || processID == priorProcessID {
+		return errors.New("Swift relaunch did not create a distinct process")
+	}
+	if fingerprint != priorFingerprint {
+		return errors.New("Swift relaunch changed the database identity")
+	}
+	return nil
+}
+
 func (p *Platform) startClient(ctx context.Context, state *platformClient, seedPath string) error {
 	session, err := StartSession(ctx, Config{RunnerPath: p.config.RunnerPath})
 	if err != nil {
@@ -615,6 +627,8 @@ func (p *Platform) startClient(ctx context.Context, state *platformClient, seedP
 		closeSession(session)
 		return errors.New("Swift runner open did not return status")
 	}
+	state.processID = result.ProcessID
+	state.databaseIdentityFingerprint = result.DatabaseIdentityFingerprint
 	state.session = session
 	state.terminated = false
 	state.started = false
@@ -1625,6 +1639,8 @@ func (p *Platform) ProcessStep(ctx context.Context, client Client, operation sce
 		if state.terminated || state.session == nil || state.pendingLoss != nil || state.activeCall != nil {
 			return StepObservation{}, errors.New("Swift client restart is unavailable")
 		}
+		priorProcessID := state.processID
+		priorFingerprint := state.databaseIdentityFingerprint
 		started := time.Now()
 		if err := state.session.Kill(ctx); err != nil {
 			return StepObservation{}, err
@@ -1637,6 +1653,12 @@ func (p *Platform) ProcessStep(ctx context.Context, client Client, operation sce
 		}
 		if err := p.startClient(ctx, state, ""); err != nil {
 			return StepObservation{}, fmt.Errorf("relaunch Swift runner: %w", err)
+		}
+		if err := verifyRestartIdentity(priorProcessID, priorFingerprint, state.processID, state.databaseIdentityFingerprint); err != nil {
+			closeSession(state.session)
+			state.session = nil
+			state.terminated = true
+			return StepObservation{}, err
 		}
 		state.restarted = true
 		after, err := captureRunner(ctx, state)
@@ -1666,6 +1688,12 @@ func (p *Platform) ProcessStep(ctx context.Context, client Client, operation sce
 		}
 		if err := p.startClient(ctx, state, ""); err != nil {
 			return StepObservation{}, fmt.Errorf("relaunch Swift runner after response loss: %w", err)
+		}
+		if err := verifyRestartIdentity(loss.before.ProcessID, loss.before.DatabaseIdentityFingerprint, state.processID, state.databaseIdentityFingerprint); err != nil {
+			closeSession(state.session)
+			state.session = nil
+			state.terminated = true
+			return StepObservation{}, err
 		}
 		state.restarted = true
 		state.pendingLoss = nil

@@ -13,6 +13,7 @@ import (
 	"os/exec"
 	"reflect"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -125,6 +126,8 @@ type runnerResult struct {
 	State                           *string                       `json:"state"`
 	Completion                      *string                       `json:"completion"`
 	CallErrorCategory               *string                       `json:"call_error_category"`
+	ProcessID                       string                        `json:"process_id"`
+	DatabaseIdentityFingerprint     string                        `json:"database_identity_fingerprint"`
 }
 
 type schemaRef struct {
@@ -569,16 +572,18 @@ type eventRecord struct {
 }
 
 type runnerProcess struct {
-	mu                    sync.Mutex
-	requestMu             sync.Mutex
-	waitOnce              sync.Once
-	waitDone              chan error
-	command               *exec.Cmd
-	stdin                 io.WriteCloser
-	scanner               *bufio.Scanner
-	stderr                *boundedWriter
-	transportCheckpoint   uint64
-	transportObservations []transportObservation
+	mu                          sync.Mutex
+	requestMu                   sync.Mutex
+	waitOnce                    sync.Once
+	waitDone                    chan error
+	command                     *exec.Cmd
+	stdin                       io.WriteCloser
+	scanner                     *bufio.Scanner
+	stderr                      *boundedWriter
+	processID                   string
+	databaseIdentityFingerprint string
+	transportCheckpoint         uint64
+	transportObservations       []transportObservation
 }
 
 func startRunnerProcess(ctx context.Context, path string) (*runnerProcess, error) {
@@ -663,6 +668,9 @@ func (p *runnerProcess) send(ctx context.Context, command runnerCommand) (runner
 	}
 	result, err := validateRunnerResponse(append([]byte(nil), scanner.Bytes()...))
 	if err != nil {
+		return runnerResult{}, err
+	}
+	if err := p.acceptRunnerIdentity(result); err != nil {
 		return runnerResult{}, err
 	}
 	if err := p.acceptTransportObservations(result.TransportObservations); err != nil {
@@ -1004,6 +1012,9 @@ func validRunnerCallID(value string) bool {
 }
 
 func validateRunnerResult(result runnerResult) error {
+	if !validProcessID(result.ProcessID) || !validLowerHexDigest(result.DatabaseIdentityFingerprint) {
+		return errors.New("runner process identity is invalid")
+	}
 	for _, count := range []*int{result.ApplicationRowCount, result.MutationLedgerCount, result.MutationOutcomeCount, result.SealedBatchCount, result.RejectedMutationCount, result.ScopeStateCount, result.ScopeRowCount, result.ProvenanceCount, result.RowMetadataCount, result.RebuildAttemptCount, result.RebuildReceiptCount} {
 		if count != nil && *count < 0 {
 			return errors.New("runner state count is invalid")
@@ -1054,6 +1065,19 @@ func validateRunnerResult(result runnerResult) error {
 		}
 	}
 	return nil
+}
+
+func validProcessID(value string) bool {
+	if value == "" {
+		return false
+	}
+	for _, character := range value {
+		if character < '0' || character > '9' {
+			return false
+		}
+	}
+	parsed, err := strconv.ParseInt(value, 10, 32)
+	return err == nil && parsed > 0
 }
 
 func validRetainedMutationStatus(status string) bool {
@@ -1173,6 +1197,23 @@ func validTransportErrorCode(code string) bool {
 	default:
 		return false
 	}
+}
+
+func (p *runnerProcess) acceptRunnerIdentity(result runnerResult) error {
+	if !validProcessID(result.ProcessID) || !validLowerHexDigest(result.DatabaseIdentityFingerprint) {
+		return errors.New("runner process identity is invalid")
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.processID != "" && p.processID != result.ProcessID {
+		return errors.New("runner process identity changed")
+	}
+	if p.databaseIdentityFingerprint != "" && p.databaseIdentityFingerprint != result.DatabaseIdentityFingerprint {
+		return errors.New("runner database identity changed")
+	}
+	p.processID = result.ProcessID
+	p.databaseIdentityFingerprint = result.DatabaseIdentityFingerprint
+	return nil
 }
 
 func transportErrorRetryable(code string) bool {

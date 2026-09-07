@@ -58,7 +58,7 @@ func runRunnerHelper() {
 }
 
 func helperResponse(requestCount int) string {
-	return fmt.Sprintf(`{"schema_version":1,"outcome":"passed","result":{"call_id":"call_%d","state":"completed","completion":"idle","transport_observations":{"observations":[],"overflowed":false,"sequence_checkpoint":0}},"error_code":null}`, requestCount)
+	return fmt.Sprintf(`{"schema_version":1,"outcome":"passed","result":{"call_id":"call_%d","state":"completed","completion":"idle","process_id":"1234","database_identity_fingerprint":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","transport_observations":{"observations":[],"overflowed":false,"sequence_checkpoint":0}},"error_code":null}`, requestCount)
 }
 
 func TestSessionStartsExecutesAndClosesRunner(t *testing.T) {

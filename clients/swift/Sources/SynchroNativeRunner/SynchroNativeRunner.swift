@@ -1,5 +1,6 @@
 import Foundation
 import Darwin
+import CryptoKit
 import GRDB
 @_spi(Inspection) import Synchro
 
@@ -368,6 +369,8 @@ private struct RunnerResult: Encodable {
     var events: [EventRecord]? = nil
     var failure: SyncFailure? = nil
     var transportObservations: RunnerTransportObservationSnapshot? = nil
+    var processID: String? = nil
+    var databaseIdentityFingerprint: String? = nil
 
     enum CodingKeys: String, CodingKey {
         case callID = "call_id"
@@ -408,6 +411,8 @@ private struct RunnerResult: Encodable {
         case events
         case failure
         case transportObservations = "transport_observations"
+        case processID = "process_id"
+        case databaseIdentityFingerprint = "database_identity_fingerprint"
     }
 }
 
@@ -881,6 +886,7 @@ private final class Runner: @unchecked Sendable {
     private static let maximumFields = 256
 
     private var client: SynchroClient?
+    private var databasePath: String?
     private var eventSubscription: (any Cancellable)?
     private var inFlightCalls: [String: Task<Void, Error>] = [:]
     private let events = EventStore()
@@ -915,6 +921,8 @@ private final class Runner: @unchecked Sendable {
         default:
             throw RunnerError.invalidCommand
         }
+        result.processID = String(ProcessInfo.processInfo.processIdentifier)
+        result.databaseIdentityFingerprint = try databaseIdentityFingerprint()
         result.transportObservations = transportObservations.map { RunnerTransportObservationSnapshot($0.snapshot()) }
         return result
     }
@@ -933,6 +941,7 @@ private final class Runner: @unchecked Sendable {
         eventSubscription = nil
         try? await client?.close()
         client = nil
+        databasePath = nil
         transportObservations = nil
     }
 
@@ -984,6 +993,7 @@ private final class Runner: @unchecked Sendable {
         )
         let client = try SynchroClient(config: config)
         self.client = client
+        self.databasePath = databasePath
         transportObservations = collector
         eventSubscription = client.onSyncEvent { [events] event in
             events.append(event)
@@ -1254,6 +1264,20 @@ private final class Runner: @unchecked Sendable {
         } catch {
             throw RunnerError.captureInspection
         }
+    }
+
+    private func databaseIdentityFingerprint() throws -> String {
+        guard let databasePath else {
+            throw RunnerError.invalidCommand
+        }
+        let canonicalPath = URL(fileURLWithPath: databasePath)
+            .resolvingSymlinksInPath()
+            .standardizedFileURL
+            .path
+        let preimage = Data("synchro-swift-database-v1\u{0}\(canonicalPath)".utf8)
+        return SHA256.hash(data: preimage)
+            .map { String(format: "%02x", $0) }
+            .joined()
     }
 
     private func requireClient() throws -> SynchroClient {
