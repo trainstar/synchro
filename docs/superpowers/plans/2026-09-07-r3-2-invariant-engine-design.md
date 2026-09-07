@@ -61,6 +61,12 @@ The soak drives the real extension and adapter through the blackbox harness on t
 
 Rationale: a 72-hour run through mobile simulators would measure simulator flake, not sync correctness, and the client-native invariants already execute in the scenario layer through the same engine functions.
 
+Refinement (2026-09-07, after the checker reviews): the soak executes four families live against the real stack: mutation conservation, cursor monotonicity, checksum convergence, and scope isolation.
+The `no-state-forks` family requires real client durable state across a real client process death, which only an SDK client produces.
+Its real extension-backed execution therefore comes from the scenario layer: the existing Kotlin restart flow feeds its captures through `CheckNoStateForks`.
+The soak driver maps its process-death operations to server-side kills: the WAL worker, the adapter, and the postmaster.
+The soak keeps protocol-level bookkeeping only (cursors and row digests for observation assembly). It never implements queues, capture, or retry, so no fourth sync engine appears.
+
 ## Decision 6: Deterministic Validation Rows Are Not Engine Work
 
 The R3.1 contract contains rows that verify deterministic protocol validation (lifecycle transition rules, installation shape, schema gates, write policy).
