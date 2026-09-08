@@ -308,7 +308,7 @@ final class SyncEngine: @unchecked Sendable {
             throw SynchroError.notStarted
         }
         defer { endOperation() }
-        try await runSerializedSyncCycleWithRetry(
+        try await runSerializedSyncCyclePersistingBackoff(
             lifecycleGeneration: generation
         )
     }
@@ -428,17 +428,36 @@ final class SyncEngine: @unchecked Sendable {
     private func syncLoop(generation: Int64) async {
         while !Task.isCancelled {
             do {
+                let backoff = try loadPersistedBackoff()
+                if let backoff {
+                    try await sleep(until: backoff.nextRetryAtMS)
+                    try ensureLifecycleActive(generation)
+                    let resumeStatus = syncStatus(for: backoff.resumeState)
+                    let currentStatus = getSyncStatus()
+                    if currentStatus == .backoff {
+                        try transition(to: resumeStatus, lifecycleGeneration: generation)
+                    } else if currentStatus != resumeStatus {
+                        throw SynchroError.invalidStateTransition(from: currentStatus, to: resumeStatus)
+                    }
+                    try await runSerializedSyncCyclePersistingBackoff(
+                        resuming: backoff,
+                        lifecycleGeneration: generation
+                    )
+                    continue
+                }
+
                 try await Task.sleep(nanoseconds: UInt64(config.syncInterval * 1_000_000_000))
-            } catch {
+                try ensureLifecycleActive(generation)
+                if try loadPersistedBackoff() != nil {
+                    continue
+                }
+                try await runSerializedSyncCyclePersistingBackoff(lifecycleGeneration: generation)
+            } catch is CancellationError {
                 return
-            }
-            guard !Task.isCancelled, isLifecycleActive(generation) else { return }
-            do {
-                try await runSerializedSyncCycleWithRetry(
-                    lifecycleGeneration: generation
-                )
+            } catch is RetryableError {
+                // The next iteration resumes the durable operation after its deadline.
             } catch {
-                // Error already handled in runSyncCycleWithRetry
+                // The cycle handles non-retryable failures at their boundary.
             }
         }
     }
@@ -605,16 +624,38 @@ final class SyncEngine: @unchecked Sendable {
 
     // MARK: - Retry
 
-    private func runSerializedSyncCycleWithRetry(
+    private func runSerializedSyncCyclePersistingBackoff(
         resuming backoff: LocalBackoffRecord? = nil,
         lifecycleGeneration requestedGeneration: Int64? = nil
     ) async throws {
         try await runSerializedCycle(lifecycleGeneration: requestedGeneration) { [weak self] generation in
             guard let self else { return }
-            try await self.runSyncCycleWithRetry(
-                resuming: backoff,
-                lifecycleGeneration: generation
-            )
+            if backoff == nil, self.getSyncStatus() == .backoff {
+                return
+            }
+            do {
+                try await self.runSingleSyncCycle(
+                    resuming: backoff,
+                    lifecycleGeneration: generation
+                )
+            } catch let error as RetryableError {
+                try self.ensureLifecycleActive(generation)
+                let alreadyPersisted = self.getSyncStatus() == .backoff
+                let persistedBackoff: LocalBackoffRecord
+                if alreadyPersisted, let current = try self.currentBackoff(for: error) {
+                    persistedBackoff = current
+                } else {
+                    persistedBackoff = try self.persistBackoff(error)
+                }
+                if !alreadyPersisted {
+                    try self.transition(to: .backoff, lifecycleGeneration: generation)
+                }
+                self.emitBackoffEvent(persistedBackoff)
+                throw error
+            } catch {
+                self.handleSyncError(error)
+                throw error
+            }
         }
     }
 
@@ -648,16 +689,6 @@ final class SyncEngine: @unchecked Sendable {
         } onCancel: {
             cycleTask.cancel()
         }
-    }
-
-    private func runSyncCycleWithRetry(
-        resuming backoff: LocalBackoffRecord? = nil,
-        lifecycleGeneration: Int64
-    ) async throws {
-        try await runSingleSyncCycleWithRetry(
-            resuming: backoff,
-            lifecycleGeneration: lifecycleGeneration
-        )
     }
 
     /// Runs one sync cycle attempt. A renewed binding replaces the attempt in
@@ -695,54 +726,6 @@ final class SyncEngine: @unchecked Sendable {
                 try await reconnectAfterBindingRenewal(lifecycleGeneration: lifecycleGeneration)
                 backoff = nil
             }
-        }
-    }
-
-    private func runSingleSyncCycleWithRetry(
-        resuming initialBackoff: LocalBackoffRecord? = nil,
-        lifecycleGeneration: Int64
-    ) async throws {
-        var attempt = 0
-        var lastError: Error?
-        var backoff = initialBackoff
-
-        while attempt <= config.maxRetryAttempts {
-            do {
-                try await runSingleSyncCycle(
-                    resuming: backoff,
-                    lifecycleGeneration: lifecycleGeneration
-                )
-                return
-            } catch let error as RetryableError {
-                try ensureLifecycleActive(lifecycleGeneration)
-                attempt += 1
-                lastError = error
-                let persistedBackoff = try persistBackoff(error)
-                try transition(to: .backoff, lifecycleGeneration: lifecycleGeneration)
-                emitBackoffEvent(persistedBackoff)
-                guard attempt <= config.maxRetryAttempts else {
-                    break
-                }
-                do {
-                    try await sleep(until: persistedBackoff.nextRetryAtMS)
-                } catch {
-                    throw lastError!
-                }
-                try ensureLifecycleActive(lifecycleGeneration)
-                try transition(
-                    to: syncStatus(for: persistedBackoff.resumeState),
-                    lifecycleGeneration: lifecycleGeneration
-                )
-                backoff = persistedBackoff
-            } catch {
-                // Non-retryable errors propagate immediately
-                handleSyncError(error)
-                throw error
-            }
-        }
-
-        if let lastError {
-            throw lastError
         }
     }
 
@@ -1152,30 +1135,6 @@ final class SyncEngine: @unchecked Sendable {
                 requestBody = try httpClient.rebuildRequestBody(request)
             }
 
-            if let finality = try pullProcessor.pendingRebuildFinality(
-                attempt: attempt,
-                request: request,
-                requestBody: requestBody
-            ) {
-                do {
-                    try pullProcessor.finalizeScopeRebuild(
-                        attempt: attempt,
-                        finalCursor: finality.finalCursor,
-                        checksum: finality.checksum,
-                        syncedTables: syncedTables
-                    )
-                    emitEvent(.rebuildCompleted(SyncRebuildEvent(
-                        scopeID: scopeID,
-                        rebuildID: attempt.rebuildID
-                    )))
-                    return
-                } catch is RebuildChecksumMismatchError {
-                    attempt = try restartScopeRebuild(scopeID: scopeID)
-                    replayRequestBody = nil
-                    continue
-                }
-            }
-
             do {
                 let result = try await httpClient.rebuildWithBody(
                     request: request,
@@ -1197,29 +1156,14 @@ final class SyncEngine: @unchecked Sendable {
                     continue
                 }
 
-                guard let finality = try pullProcessor.pendingRebuildFinality(
-                    attempt: attempt,
-                    request: request,
-                    requestBody: result.requestBody
-                ) else {
-                    throw SynchroError.invalidResponse(message: "final rebuild page did not persist finality")
-                }
-                do {
-                    try pullProcessor.finalizeScopeRebuild(
-                        attempt: attempt,
-                        finalCursor: finality.finalCursor,
-                        checksum: finality.checksum,
-                        syncedTables: syncedTables
-                    )
-                    emitEvent(.rebuildCompleted(SyncRebuildEvent(
-                        scopeID: scopeID,
-                        rebuildID: attempt.rebuildID
-                    )))
-                    return
-                } catch is RebuildChecksumMismatchError {
-                    attempt = try restartScopeRebuild(scopeID: scopeID)
-                    replayRequestBody = nil
-                }
+                emitEvent(.rebuildCompleted(SyncRebuildEvent(
+                    scopeID: scopeID,
+                    rebuildID: attempt.rebuildID
+                )))
+                return
+            } catch is RebuildChecksumMismatchError {
+                attempt = try restartScopeRebuild(scopeID: scopeID)
+                replayRequestBody = nil
             } catch let error as RebuildRestartRequiredError {
                 guard error.scopeID == scopeID else {
                     throw SynchroError.invalidResponse(message: "rebuild restart response targets an unexpected scope")
@@ -1558,7 +1502,7 @@ final class SyncEngine: @unchecked Sendable {
                 try await Task.sleep(nanoseconds: UInt64(self.config.pushDebounce * 1_000_000_000))
                 guard !Task.isCancelled,
                       self.claimDebounceTask(taskID, generation: generation) else { return }
-                try await self.runSerializedSyncCycleWithRetry(
+                try await self.runSerializedSyncCyclePersistingBackoff(
                     lifecycleGeneration: generation
                 )
             } catch {

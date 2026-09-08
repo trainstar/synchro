@@ -793,9 +793,12 @@ data class PullResponse(
         validate()
         if (requestScopeSetVersion != null) {
             val assignmentChanged = scopeUpdates.add.isNotEmpty() || scopeUpdates.remove.isNotEmpty()
-            if (scopeSetVersion < requestScopeSetVersion ||
-                (assignmentChanged && scopeSetVersion == requestScopeSetVersion)
-            ) {
+            val validVersion = if (assignmentChanged) {
+                scopeSetVersion > requestScopeSetVersion
+            } else {
+                scopeSetVersion == requestScopeSetVersion
+            }
+            if (!validVersion) {
                 throw ContractException(
                     "scope_set_version regressed from $requestScopeSetVersion to $scopeSetVersion"
                 )

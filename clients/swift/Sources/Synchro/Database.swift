@@ -857,6 +857,14 @@ final class SynchroDatabase: @unchecked Sendable {
                 }
             }
         }
+        migrator.registerMigration("synchro_v15_pending_protocol_identity_index") { db in
+            guard try db.tableExists("_synchro_pending_changes") else { return }
+            try db.execute(sql: """
+                CREATE INDEX IF NOT EXISTS idx_synchro_pending_protocol_row_order
+                ON _synchro_pending_changes
+                    (table_id, pk_field_id, pk_logical_type, record_id, local_order)
+                """)
+        }
         try migrator.migrate(dbPool)
     }
 }

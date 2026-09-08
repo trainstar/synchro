@@ -80,6 +80,48 @@ final class PullProcessorTests: XCTestCase {
         try ChangeTracker(database: db).pendingChangeCount()
     }
 
+    private func applyEmptyFinalRebuild(
+        _ db: SynchroDatabase,
+        processor: PullProcessor,
+        attempt: LocalRebuildAttempt
+    ) throws {
+        try db.writeTransaction { connection in
+            try SynchroMeta.upsertScope(
+                connection,
+                scopeID: attempt.scopeID,
+                cursor: nil,
+                checksum: nil,
+                generation: attempt.generation
+            )
+            try SynchroMeta.upsertRebuildAttempt(connection, attempt: attempt)
+        }
+        let request = RebuildRequest(
+            clientID: "test-client",
+            clientGeneration: attempt.clientGeneration,
+            schema: SchemaRef(version: attempt.schemaVersion, hash: attempt.schemaHash),
+            scope: attempt.scopeID,
+            rebuildID: attempt.rebuildID,
+            cursor: attempt.cursor,
+            limit: attempt.pageLimit
+        )
+        let response = RebuildResponse(
+            scope: attempt.scopeID,
+            records: [],
+            cursor: nil,
+            hasMore: false,
+            finalScopeCursor: "scope_cursor_20",
+            checksum: protocolEmptyScopeChecksum(scopeID: attempt.scopeID)
+        )
+        _ = try processor.applyScopeRebuildPage(
+            attempt: attempt,
+            request: request,
+            requestBody: try rebuildRequestBody(request),
+            response: response,
+            responseBody: try rebuildResponseBody(response),
+            syncedTables: [testTable.localSchema]
+        )
+    }
+
     private func makeTestEnv(schema table: LocalSchemaTable) throws -> (SynchroDatabase, PullProcessor) {
         let tmpDir = NSTemporaryDirectory()
         let path = (tmpDir as NSString).appendingPathComponent("synchro_test_\(UUID().uuidString).sqlite")
@@ -899,6 +941,77 @@ final class PullProcessorTests: XCTestCase {
         XCTAssertNil(try recovered.readTransaction { try SynchroMeta.getBackoffRecord($0) })
     }
 
+    func testFinalRebuildPageRollsBackRowsAndFinalityWhenChecksumMismatches() throws {
+        let (db, processor) = try makeTestEnv()
+        let scopeID = "orders:atomic"
+        try db.writeTransaction { connection in
+            try SynchroMeta.upsertScope(connection, scopeID: scopeID, cursor: nil, checksum: nil)
+        }
+        let attempt = try processor.beginScopeRebuild(
+            scopeID: scopeID,
+            clientGeneration: 1,
+            schemaVersion: 1,
+            schemaHash: protocolTestSchemaHash,
+            pageLimit: 100,
+            syncedTables: [testTable.localSchema]
+        )
+        let request = RebuildRequest(
+            clientID: "test-client",
+            clientGeneration: attempt.clientGeneration,
+            schema: SchemaRef(version: attempt.schemaVersion, hash: attempt.schemaHash),
+            scope: scopeID,
+            rebuildID: attempt.rebuildID,
+            cursor: attempt.cursor,
+            limit: attempt.pageLimit
+        )
+        let serverVersion = "server-version-atomic"
+        let row = orderRow(
+            recordID: "atomic-row",
+            shipAddress: "server",
+            updatedAt: "2026-01-01T12:00:00.000000Z"
+        )
+        let rowChecksum = try Integrity.rowDigest(
+            schemaHash: protocolTestSchemaHash,
+            table: testTable.localSchema,
+            pk: ["id": AnyCodable("atomic-row")],
+            row: row,
+            serverVersion: serverVersion
+        ).checksum
+        let response = RebuildResponse(
+            scope: scopeID,
+            records: [RebuildRecord(
+                table: testTable.tableID,
+                pk: ["id": AnyCodable("atomic-row")],
+                row: row,
+                rowChecksum: rowChecksum,
+                serverVersion: serverVersion
+            )],
+            cursor: nil,
+            hasMore: false,
+            finalScopeCursor: "scope-cursor-final",
+            checksum: protocolEmptyScopeChecksum(scopeID: scopeID)
+        )
+
+        XCTAssertThrowsError(try processor.applyScopeRebuildPage(
+            attempt: attempt,
+            request: request,
+            requestBody: try rebuildRequestBody(request),
+            response: response,
+            responseBody: try rebuildResponseBody(response),
+            syncedTables: [testTable.localSchema]
+        )) { error in
+            XCTAssertTrue(error is RebuildChecksumMismatchError)
+        }
+
+        XCTAssertNil(try db.queryOne("SELECT id FROM orders WHERE id = ?", params: ["atomic-row"]))
+        XCTAssertEqual(
+            try db.readTransaction { try SynchroMeta.getRebuildAttempt($0, scopeID: scopeID) },
+            attempt
+        )
+        XCTAssertNil(try db.readTransaction { try SynchroMeta.getScope($0, scopeID: scopeID)?.cursor })
+        XCTAssertEqual(try db.query("SELECT * FROM _synchro_rebuild_page_receipts", params: nil).count, 0)
+    }
+
     func testScopeRemovalDeletesActiveRebuildArtifactsAndMatchingBackoff() throws {
         let (db, processor) = try makeTestEnv()
         let scopeID = "orders:user1"
@@ -1148,18 +1261,12 @@ final class PullProcessorTests: XCTestCase {
             finalScopeCursor: "scope_cursor_20",
             checksum: checksum
         )
-        let finalAttempt = try processor.applyScopeRebuildPage(
+        _ = try processor.applyScopeRebuildPage(
             attempt: continuedAttempt,
             request: finalRequest,
             requestBody: try rebuildRequestBody(finalRequest),
             response: finalResponse,
             responseBody: try rebuildResponseBody(finalResponse),
-            syncedTables: [testTable.localSchema]
-        )
-        try processor.finalizeScopeRebuild(
-            attempt: finalAttempt,
-            finalCursor: "scope_cursor_20",
-            checksum: checksum,
             syncedTables: [testTable.localSchema]
         )
 
@@ -1891,12 +1998,7 @@ final class PullProcessorTests: XCTestCase {
             cursor: nil,
             pageLimit: 100
         )
-        try processor.finalizeScopeRebuild(
-            attempt: attempt,
-            finalCursor: "scope_cursor_20",
-            checksum: protocolEmptyScopeChecksum(scopeID: attempt.scopeID),
-            syncedTables: [testTable.localSchema]
-        )
+        try applyEmptyFinalRebuild(db, processor: processor, attempt: attempt)
 
         let row = try db.queryOne("SELECT id FROM orders WHERE id = ?", params: ["w1"])
         XCTAssertNil(row)
@@ -1920,12 +2022,7 @@ final class PullProcessorTests: XCTestCase {
             cursor: nil,
             pageLimit: 100
         )
-        try processor.finalizeScopeRebuild(
-            attempt: attempt,
-            finalCursor: "scope_cursor_20",
-            checksum: protocolEmptyScopeChecksum(scopeID: attempt.scopeID),
-            syncedTables: [testTable.localSchema]
-        )
+        try applyEmptyFinalRebuild(db, processor: processor, attempt: attempt)
 
         let row = try db.queryOne("SELECT id FROM orders WHERE id = ?", params: ["w1"])
         XCTAssertNotNil(row)

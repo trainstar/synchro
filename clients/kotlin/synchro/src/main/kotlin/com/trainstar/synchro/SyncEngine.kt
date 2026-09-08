@@ -922,32 +922,6 @@ internal class SyncEngine(
                 continue
             }
 
-            val pendingFinality = pullProcessor.pendingRebuildFinality(
-                attempt,
-                request,
-                requestJSON,
-            )
-            if (pendingFinality != null) {
-                try {
-                    pullProcessor.finalizeScopeRebuild(
-                        attempt,
-                        pendingFinality.finalCursor,
-                        pendingFinality.checksum,
-                        syncedTables,
-                    )
-                    fireEvent(
-                        SyncEvent.RebuildCompleted(
-                            SyncRebuildEvent(scopeID = scopeId, rebuildID = attempt.rebuildID),
-                        ),
-                    )
-                    return
-                } catch (_: RebuildChecksumMismatchException) {
-                    attempt = restartScopeRebuild(scopeId)
-                    nextReplayRequestJSON = null
-                    continue
-                }
-            }
-
             try {
                 val result = httpClient.rebuildWithBody(request, requestJSON)
                 val response = result.response
@@ -965,28 +939,15 @@ internal class SyncEngine(
                     continue
                 }
 
-                val finality = pullProcessor.pendingRebuildFinality(
-                    attempt,
-                    request,
-                    result.requestJSON,
-                ) ?: throw SynchroError.InvalidResponse("final rebuild page did not persist finality")
-                try {
-                    pullProcessor.finalizeScopeRebuild(
-                        attempt,
-                        finality.finalCursor,
-                        finality.checksum,
-                        syncedTables,
-                    )
-                    fireEvent(
-                        SyncEvent.RebuildCompleted(
-                            SyncRebuildEvent(scopeID = scopeId, rebuildID = attempt.rebuildID),
-                        ),
-                    )
-                    return
-                } catch (_: RebuildChecksumMismatchException) {
-                    attempt = restartScopeRebuild(scopeId)
-                    nextReplayRequestJSON = null
-                }
+                fireEvent(
+                    SyncEvent.RebuildCompleted(
+                        SyncRebuildEvent(scopeID = scopeId, rebuildID = attempt.rebuildID),
+                    ),
+                )
+                return
+            } catch (_: RebuildChecksumMismatchException) {
+                attempt = restartScopeRebuild(scopeId)
+                nextReplayRequestJSON = null
             } catch (e: RebuildRestartRequiredException) {
                 if (e.scopeID != scopeId) {
                     throw SynchroError.InvalidResponse("rebuild restart response targets an unexpected scope")

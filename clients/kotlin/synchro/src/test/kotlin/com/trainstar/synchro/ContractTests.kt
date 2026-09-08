@@ -332,6 +332,36 @@ class ContractTests {
     }
 
     @Test
+    fun testPullScopeSetVersionMatchesAssignmentDelta() {
+        val scopeID = "scope-a"
+        val checksum = ChecksumObject("sha256", 1, "hex", "0".repeat(64))
+        val unchanged = PullResponse(
+            changes = emptyList(),
+            scopeSetVersion = 2,
+            scopeCursors = mapOf(scopeID to "cursor-a"),
+            scopeUpdates = ScopeAssignmentDelta(emptyList(), emptyList()),
+            rebuild = emptyList(),
+            hasMore = false,
+            checksums = mapOf(scopeID to checksum),
+        )
+
+        assertTrue(runCatching { unchanged.validate(setOf(scopeID), 1) }.isFailure)
+        unchanged.copy(scopeSetVersion = 1).validate(setOf(scopeID), 1)
+
+        val changed = PullResponse(
+            changes = emptyList(),
+            scopeSetVersion = 2,
+            scopeCursors = emptyMap(),
+            scopeUpdates = ScopeAssignmentDelta(emptyList(), listOf(scopeID)),
+            rebuild = emptyList(),
+            hasMore = false,
+            checksums = emptyMap(),
+        )
+        changed.validate(setOf(scopeID), 1)
+        assertTrue(runCatching { changed.copy(scopeSetVersion = 1).validate(setOf(scopeID), 1) }.isFailure)
+    }
+
+    @Test
     fun testPullValidationRejectsInvalidOperationAndScopeBindings() {
         val scopeID = "scope-a"
         val checksum = ChecksumObject("sha256", 1, "hex", "0".repeat(64))

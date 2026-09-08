@@ -1071,8 +1071,10 @@ public struct PullResponse: Codable, Sendable, Equatable {
         try validate()
         if let requestScopeSetVersion {
             let assignmentChanged = !scopeUpdates.add.isEmpty || !scopeUpdates.remove.isEmpty
-            guard scopeSetVersion >= requestScopeSetVersion,
-                  !assignmentChanged || scopeSetVersion > requestScopeSetVersion else {
+            let validVersion = assignmentChanged
+                ? scopeSetVersion > requestScopeSetVersion
+                : scopeSetVersion == requestScopeSetVersion
+            guard validVersion else {
                 throw ContractViolation.invalidScopeSetVersion(
                     request: requestScopeSetVersion,
                     response: scopeSetVersion

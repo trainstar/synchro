@@ -89,8 +89,22 @@ final class DatabaseMigrationTests: XCTestCase {
             ] {
                 try db.execute(sql: "INSERT INTO grdb_migrations (identifier) VALUES (?)", arguments: [identifier])
             }
-            try db.execute(sql: "CREATE TABLE _synchro_pending_changes (mutation_id TEXT PRIMARY KEY, lifecycle_state TEXT NOT NULL)")
-            try db.execute(sql: "INSERT INTO _synchro_pending_changes VALUES ('mutation-1', 'sealed')")
+            try db.execute(sql: """
+                CREATE TABLE _synchro_pending_changes (
+                    local_order INTEGER PRIMARY KEY AUTOINCREMENT,
+                    mutation_id TEXT NOT NULL UNIQUE,
+                    table_id TEXT NOT NULL,
+                    record_id TEXT NOT NULL,
+                    pk_field_id TEXT NOT NULL,
+                    pk_logical_type TEXT NOT NULL,
+                    lifecycle_state TEXT NOT NULL
+                )
+                """)
+            try db.execute(sql: """
+                INSERT INTO _synchro_pending_changes
+                    (mutation_id, table_id, record_id, pk_field_id, pk_logical_type, lifecycle_state)
+                VALUES ('mutation-1', 'items', 'record-1', 'id', 'string', 'sealed')
+                """)
             try db.execute(sql: "CREATE TABLE _synchro_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
             try db.execute(sql: "INSERT INTO _synchro_meta (key, value) VALUES ('sync_lock', '0'), ('checkpoint', '0')")
             try db.execute(sql: "CREATE TABLE _synchro_scopes (scope_id TEXT PRIMARY KEY, cursor TEXT, checksum TEXT, generation INTEGER NOT NULL DEFAULT 0, local_checksum INTEGER NOT NULL DEFAULT 0)")
@@ -231,6 +245,62 @@ final class DatabaseMigrationTests: XCTestCase {
             XCTAssertNil(scopeRow["checksum"] as String?)
             XCTAssertEqual(scopeRow["generation"] as Int64?, 4)
         }
+    }
+
+    func testVersionFourteenUpgradeIndexesPendingProtocolIdentity() throws {
+        let path = (NSTemporaryDirectory() as NSString)
+            .appendingPathComponent("synchro_pending_identity_\(UUID().uuidString).sqlite")
+        let legacy = try DatabaseQueue(path: path)
+        try legacy.write { db in
+            try recordMigrationsThroughVersionTwelve(db)
+            for identifier in ["synchro_v13_scope_text_affinity", "synchro_v14_capture_context"] {
+                try db.execute(sql: "INSERT INTO grdb_migrations (identifier) VALUES (?)", arguments: [identifier])
+            }
+            try db.execute(sql: "CREATE TABLE _synchro_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+            try db.execute(sql: "INSERT INTO _synchro_meta (key, value) VALUES ('sync_lock', '0'), ('checkpoint', '0')")
+            try db.execute(sql: """
+                CREATE TABLE _synchro_pending_changes (
+                    local_order INTEGER PRIMARY KEY AUTOINCREMENT,
+                    mutation_id TEXT NOT NULL UNIQUE,
+                    table_id TEXT NOT NULL,
+                    record_id TEXT NOT NULL,
+                    pk_field_id TEXT NOT NULL,
+                    pk_logical_type TEXT NOT NULL
+                )
+                """)
+            try db.execute(
+                sql: """
+                    INSERT INTO _synchro_pending_changes
+                        (mutation_id, table_id, record_id, pk_field_id, pk_logical_type)
+                    VALUES (?, ?, ?, ?, ?)
+                    """,
+                arguments: ["mutation-1", "items", "record-1", "id", "string"]
+            )
+        }
+        try legacy.close()
+
+        let db = try SynchroDatabase(path: path)
+        defer { try? db.close() }
+        XCTAssertEqual(
+            try db.query(
+                "SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'idx_synchro_pending_protocol_row_order'",
+                params: nil
+            ).count,
+            1
+        )
+        XCTAssertEqual(
+            try db.queryOne(
+                """
+                SELECT mutation_id
+                FROM _synchro_pending_changes INDEXED BY idx_synchro_pending_protocol_row_order
+                WHERE table_id = ? AND pk_field_id = ? AND pk_logical_type = ? AND record_id = ?
+                ORDER BY local_order DESC
+                LIMIT 1
+                """,
+                params: ["items", "id", "string", "record-1"]
+            )?["mutation_id"] as String?,
+            "mutation-1"
+        )
     }
 
     private func recordMigrationsThroughVersionTwelve(_ db: GRDB.Database) throws {

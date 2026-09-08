@@ -17,11 +17,6 @@ import java.util.UUID
 
 internal class RebuildChecksumMismatchException(val scopeID: String) : Exception("rebuild checksum mismatch")
 
-internal data class PendingRebuildFinality(
-    val finalCursor: String,
-    val checksum: ChecksumObject,
-)
-
 internal class PullProcessor(private val database: SynchroDatabase) {
     @OptIn(ExperimentalSerializationApi::class)
     private val rebuildJSON = Json {
@@ -295,6 +290,7 @@ internal class PullProcessor(private val database: SynchroDatabase) {
         syncedTables: List<LocalSchemaTable>,
     ): LocalRebuildAttempt {
         val tableMap = syncedTables.associateBy { it.tableID }
+        val tablesByName = syncedTables.associateBy { it.tableName }
         response.validate(request)
         if (!response.hasMore) {
             response.checksum?.validate()
@@ -392,7 +388,18 @@ internal class PullProcessor(private val database: SynchroDatabase) {
                 validatedRequestJSON,
             )
 
-            if (!response.hasMore) return@writeSyncLockedTransaction attempt
+            if (!response.hasMore) {
+                finalizeScopeRebuild(
+                    db,
+                    attempt,
+                    response.finalScopeCursor
+                        ?: throw SynchroError.InvalidResponse("final rebuild page finality is missing"),
+                    response.checksum
+                        ?: throw SynchroError.InvalidResponse("final rebuild page finality is missing"),
+                    tablesByName,
+                )
+                return@writeSyncLockedTransaction attempt
+            }
             val nextCursor = response.cursor
                 ?: throw SynchroError.InvalidResponse("intermediate rebuild page cursor is missing")
             attempt.copy(cursor = nextCursor).also {
@@ -428,123 +435,41 @@ internal class PullProcessor(private val database: SynchroDatabase) {
         }
     }
 
-    internal fun pendingRebuildFinality(
-        attempt: LocalRebuildAttempt,
-        request: RebuildRequest,
-        requestJSON: String,
-    ): PendingRebuildFinality? {
-        if (request.scope != attempt.scopeID ||
-            request.rebuildID != attempt.rebuildID ||
-            request.clientGeneration != attempt.clientGeneration ||
-            request.schema != SchemaRef(attempt.schemaVersion, attempt.schemaHash) ||
-            request.limit != attempt.pageLimit ||
-            request.cursor != attempt.cursor
-        ) {
-            throw SynchroError.InvalidResponse("rebuild finality request does not match its attempt")
-        }
-        val validatedRequestJSON = rebuildRequestJSON(request, requestJSON)
-        return database.readTransaction { db ->
-            if (SynchroMeta.getRebuildAttempt(db, attempt.scopeID) != attempt) {
-                return@readTransaction null
-            }
-            val receipt = SynchroMeta.getFinalRebuildPageReceipt(
-                db,
-                attempt.scopeID,
-                attempt.rebuildID,
-            ) ?: return@readTransaction null
-            val finalCursor = receipt.finalScopeCursor
-            val finalChecksumJSON = receipt.finalChecksumJSON
-            if (receipt.requestCursor != attempt.cursor ||
-                receipt.requestJSON != validatedRequestJSON ||
-                finalCursor == null ||
-                finalChecksumJSON == null
-            ) {
-                throw SynchroError.InvalidResponse("final rebuild receipt does not match its request")
-            }
-            val response = try {
-                rebuildJSON.decodeFromString(RebuildResponse.serializer(), receipt.responseJSON)
-            } catch (_: Exception) {
-                throw SynchroError.InvalidResponse("final rebuild receipt response is invalid")
-            }
-            rebuildResponseJSON(response, receipt.responseJSON)
-            response.validate(request)
-            if (response.hasMore || response.finalScopeCursor != finalCursor || response.checksum == null) {
-                throw SynchroError.InvalidResponse("final rebuild receipt does not match its attempt")
-            }
-            val checksum = try {
-                rebuildJSON.decodeFromString(ChecksumObject.serializer(), finalChecksumJSON)
-            } catch (_: Exception) {
-                throw SynchroError.InvalidResponse("final rebuild receipt checksum is invalid")
-            }
-            checksum.validate()
-            if (checksum != response.checksum) {
-                throw SynchroError.InvalidResponse("final rebuild receipt checksum differs from its content")
-            }
-            PendingRebuildFinality(finalCursor, checksum)
-        }
-    }
-
-    fun finalizeScopeRebuild(
+    private fun finalizeScopeRebuild(
+        db: SQLiteDatabase,
         attempt: LocalRebuildAttempt,
         finalCursor: String,
         checksum: ChecksumObject,
-        syncedTables: List<LocalSchemaTable>,
+        tablesByName: Map<String, LocalSchemaTable>,
     ) {
-        val tableMap = syncedTables.associateBy { it.tableName }
-
-        database.writeSyncLockedTransaction { db ->
-            val expectedChecksumJSON = checksumJSON(checksum)
-            val currentAttempt = SynchroMeta.getRebuildAttempt(db, attempt.scopeID)
-            val receipt = SynchroMeta.getFinalRebuildPageReceipt(
-                db,
-                attempt.scopeID,
-                attempt.rebuildID,
-            )
-            if (currentAttempt != null) {
-                if (currentAttempt != attempt ||
-                    SynchroMeta.getScopeGeneration(db, attempt.scopeID) != attempt.generation
-                ) {
-                    throw SynchroError.InvalidResponse("rebuild finality targets an inactive attempt")
-                }
-                if (receipt != null &&
-                    (receipt.requestCursor != attempt.cursor ||
-                        receipt.finalScopeCursor != finalCursor ||
-                        receipt.finalChecksumJSON != expectedChecksumJSON)
-                ) {
-                    throw SynchroError.InvalidResponse("rebuild finality differs from its page receipt")
-                }
-            }
-            val staleRows = SynchroMeta.getStaleScopeRows(db, attempt.scopeID, attempt.generation)
-            SynchroMeta.deleteStaleScopeRows(db, attempt.scopeID, attempt.generation)
-
-            for ((tableName, recordId) in staleRows) {
-                val schema = tableMap[tableName] ?: continue
-                removeLocalRowIfUnreferenced(db, tableName, recordId, schema)
-            }
-
-            val localChecksum = computeScopeChecksum(db, attempt.scopeID, attempt.schemaHash, tableMap)
-            checksum.validate()
-            if (localChecksum != checksum) {
-                throw RebuildChecksumMismatchException(attempt.scopeID)
-            }
-
-            SynchroMeta.upsertScope(
-                db,
-                attempt.scopeID,
-                finalCursor,
-                checksumJSON(checksum),
-                attempt.generation,
-                checksumJSON(localChecksum)
-            )
-            SynchroMeta.deleteRebuildAttempt(db, attempt.scopeID)
-            receipt?.let {
-                DurableBackoffStore.clearMatching(
-                    db,
-                    RetryOperation.REBUILDING,
-                    it.requestJSON,
-                )
-            }
+        if (SynchroMeta.getRebuildAttempt(db, attempt.scopeID) != attempt ||
+            SynchroMeta.getScopeGeneration(db, attempt.scopeID) != attempt.generation
+        ) {
+            throw SynchroError.InvalidResponse("rebuild finality targets an inactive attempt")
         }
+        val staleRows = SynchroMeta.getStaleScopeRows(db, attempt.scopeID, attempt.generation)
+        SynchroMeta.deleteStaleScopeRows(db, attempt.scopeID, attempt.generation)
+
+        for ((tableName, recordId) in staleRows) {
+            val schema = tablesByName[tableName] ?: continue
+            removeLocalRowIfUnreferenced(db, tableName, recordId, schema)
+        }
+
+        val localChecksum = computeScopeChecksum(db, attempt.scopeID, attempt.schemaHash, tablesByName)
+        checksum.validate()
+        if (localChecksum != checksum) {
+            throw RebuildChecksumMismatchException(attempt.scopeID)
+        }
+
+        SynchroMeta.upsertScope(
+            db,
+            attempt.scopeID,
+            finalCursor,
+            checksumJSON(checksum),
+            attempt.generation,
+            checksumJSON(localChecksum)
+        )
+        SynchroMeta.deleteRebuildAttempt(db, attempt.scopeID)
     }
 
     fun removeScope(scopeId: String, syncedTables: List<LocalSchemaTable>) {

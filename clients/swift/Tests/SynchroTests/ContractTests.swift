@@ -333,6 +333,52 @@ final class ContractTests: XCTestCase {
         ))
     }
 
+    func testPullScopeSetVersionMatchesAssignmentDelta() throws {
+        let scopeID = "scope-a"
+        let checksum = ChecksumObject(
+            algorithm: "sha256",
+            version: 1,
+            encoding: "hex",
+            digest: String(repeating: "0", count: 64)
+        )
+        let unchanged = PullResponse(
+            changes: [],
+            scopeSetVersion: 2,
+            scopeCursors: [scopeID: "cursor-a"],
+            scopeUpdates: ScopeAssignmentDelta(add: [], remove: []),
+            rebuild: [],
+            hasMore: false,
+            checksums: [scopeID: checksum]
+        )
+
+        XCTAssertThrowsError(try unchanged.validate(
+            activeScopes: [scopeID],
+            requestScopeSetVersion: 1
+        ))
+
+        var matching = unchanged
+        matching.scopeSetVersion = 1
+        try matching.validate(activeScopes: [scopeID], requestScopeSetVersion: 1)
+
+        let changed = PullResponse(
+            changes: [],
+            scopeSetVersion: 2,
+            scopeCursors: [:],
+            scopeUpdates: ScopeAssignmentDelta(add: [], remove: [scopeID]),
+            rebuild: [],
+            hasMore: false,
+            checksums: [:]
+        )
+        try changed.validate(activeScopes: [scopeID], requestScopeSetVersion: 1)
+
+        var unchangedVersion = changed
+        unchangedVersion.scopeSetVersion = 1
+        XCTAssertThrowsError(try unchangedVersion.validate(
+            activeScopes: [scopeID],
+            requestScopeSetVersion: 1
+        ))
+    }
+
     func testPullValidationRejectsInvalidOperationAndScopeBindings() throws {
         let scopeID = "scope-a"
         let checksum = ChecksumObject(

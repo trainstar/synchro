@@ -5,11 +5,6 @@ struct RebuildChecksumMismatchError: Error, Sendable, Equatable {
     let scopeID: String
 }
 
-struct PendingRebuildFinality: Sendable, Equatable {
-    let finalCursor: String
-    let checksum: ChecksumObject
-}
-
 private struct SeedReceiptForConnect {
     let scopeID: String
     let receipt: String
@@ -322,6 +317,7 @@ final class PullProcessor: @unchecked Sendable {
         syncedTables: [LocalSchemaTable]
     ) throws -> LocalRebuildAttempt {
         let tableMap = Dictionary(uniqueKeysWithValues: syncedTables.map { ($0.tableID, $0) })
+        let tablesByName = Dictionary(uniqueKeysWithValues: syncedTables.map { ($0.tableName, $0) })
         try response.validate(for: request)
         if !response.hasMore {
             guard let checksum = response.checksum else {
@@ -508,7 +504,20 @@ final class PullProcessor: @unchecked Sendable {
                 workIdentity: requestJSON
             )
 
-            guard response.hasMore else { return attempt }
+            if !response.hasMore {
+                guard let finalCursor = response.finalScopeCursor,
+                      let checksum = response.checksum else {
+                    throw SynchroError.invalidResponse(message: "final rebuild page finality is missing")
+                }
+                try finalizeScopeRebuild(
+                    db,
+                    attempt: attempt,
+                    finalCursor: finalCursor,
+                    checksum: checksum,
+                    tablesByName: tablesByName
+                )
+                return attempt
+            }
             guard let nextCursor = response.cursor else {
                 throw SynchroError.invalidResponse(message: "intermediate rebuild page cursor is missing")
             }
@@ -527,123 +536,54 @@ final class PullProcessor: @unchecked Sendable {
         }
     }
 
-    func pendingRebuildFinality(
-        attempt: LocalRebuildAttempt,
-        request: RebuildRequest,
-        requestBody: Data
-    ) throws -> PendingRebuildFinality? {
-        guard request.scope == attempt.scopeID,
-              request.rebuildID == attempt.rebuildID,
-              request.clientGeneration == attempt.clientGeneration,
-              request.schema == SchemaRef(version: attempt.schemaVersion, hash: attempt.schemaHash),
-              request.limit == attempt.pageLimit,
-              request.cursor == attempt.cursor else {
-            throw SynchroError.invalidResponse(message: "rebuild finality request does not match its attempt")
-        }
-        let requestJSON = try rebuildRequestJSON(request, body: requestBody)
-        return try database.readTransaction { db -> PendingRebuildFinality? in
-            guard let currentAttempt = try SynchroMeta.getRebuildAttempt(db, scopeID: attempt.scopeID),
-                  currentAttempt == attempt,
-                  let receipt = try SynchroMeta.getFinalRebuildPageReceipt(
-                    db,
-                    scopeID: attempt.scopeID,
-                    rebuildID: attempt.rebuildID
-                  ) else {
-                return nil
-            }
-            guard receipt.requestCursor == attempt.cursor,
-                  receipt.requestJSON == requestJSON,
-                  let finalCursor = receipt.finalScopeCursor,
-                  let finalChecksumJSON = receipt.finalChecksumJSON else {
-                throw SynchroError.invalidResponse(message: "final rebuild receipt does not match its request")
-            }
-            let responseBody = Data(receipt.responseJSON.utf8)
-            let response = try JSONDecoder.synchroDecoder().decode(RebuildResponse.self, from: responseBody)
-            _ = try rebuildResponseJSON(response, body: responseBody)
-            try response.validate(for: request)
-            guard response.hasMore == false,
-                  response.finalScopeCursor == finalCursor,
-                  let responseChecksum = response.checksum else {
-                throw SynchroError.invalidResponse(message: "final rebuild receipt does not match its attempt")
-            }
-            let checksum = try JSONDecoder.synchroDecoder().decode(
-                ChecksumObject.self,
-                from: Data(finalChecksumJSON.utf8)
-            )
-            try checksum.validate()
-            guard checksum == responseChecksum else {
-                throw SynchroError.invalidResponse(message: "final rebuild receipt checksum differs from its content")
-            }
-            return PendingRebuildFinality(finalCursor: finalCursor, checksum: checksum)
-        }
-    }
-
-    func finalizeScopeRebuild(
+    private func finalizeScopeRebuild(
+        _ db: GRDB.Database,
         attempt: LocalRebuildAttempt,
         finalCursor: String,
         checksum: ChecksumObject,
-        syncedTables: [LocalSchemaTable]
+        tablesByName: [String: LocalSchemaTable]
     ) throws {
-        let tableMap = Dictionary(uniqueKeysWithValues: syncedTables.map { ($0.tableName, $0) })
-
-        try database.writeSyncLockedTransaction { db in
-            let expectedChecksumJSON = try checksumJSON(checksum)
-            if let currentAttempt = try SynchroMeta.getRebuildAttempt(db, scopeID: attempt.scopeID) {
-                guard currentAttempt == attempt,
-                      try SynchroMeta.getScopeGeneration(db, scopeID: attempt.scopeID) == attempt.generation else {
-                    throw SynchroError.invalidResponse(message: "rebuild finality targets an inactive attempt")
-                }
-                if let receipt = try SynchroMeta.getFinalRebuildPageReceipt(
-                    db,
-                    scopeID: attempt.scopeID,
-                    rebuildID: attempt.rebuildID
-                ) {
-                    guard receipt.requestCursor == attempt.cursor,
-                          receipt.finalScopeCursor == finalCursor,
-                          let finalChecksumJSON = receipt.finalChecksumJSON,
-                          finalChecksumJSON == expectedChecksumJSON else {
-                        throw SynchroError.invalidResponse(message: "rebuild finality differs from its page receipt")
-                    }
-                }
-            }
-            let staleRows = try SynchroMeta.getStaleScopeRowRecordIDs(
-                db,
-                scopeID: attempt.scopeID,
-                generation: attempt.generation
-            )
-            try SynchroMeta.deleteStaleScopeRows(db, scopeID: attempt.scopeID, generation: attempt.generation)
-
-            for staleRow in staleRows {
-                guard let schema = tableMap[staleRow.tableName] else { continue }
-                try removeLocalRowIfUnreferenced(
-                    db: db,
-                    tableName: staleRow.tableName,
-                    recordID: staleRow.recordID,
-                    schema: schema
-                )
-            }
-
-            let localChecksum = try computeScopeChecksum(
-                db: db,
-                scopeID: attempt.scopeID,
-                schemaHash: attempt.schemaHash,
-                tablesByName: tableMap
-            )
-            try checksum.validate()
-            guard localChecksum == checksum else {
-                throw RebuildChecksumMismatchError(scopeID: attempt.scopeID)
-            }
-
-            try SynchroMeta.upsertScope(
-                db,
-                scopeID: attempt.scopeID,
-                cursor: finalCursor,
-                checksum: try checksumJSON(checksum),
-                generation: attempt.generation,
-                localChecksum: try checksumJSON(localChecksum)
-            )
-            try SynchroMeta.deleteRebuildAttempt(db, scopeID: attempt.scopeID)
+        guard try SynchroMeta.getRebuildAttempt(db, scopeID: attempt.scopeID) == attempt,
+              try SynchroMeta.getScopeGeneration(db, scopeID: attempt.scopeID) == attempt.generation else {
+            throw SynchroError.invalidResponse(message: "rebuild finality targets an inactive attempt")
         }
+        let staleRows = try SynchroMeta.getStaleScopeRowRecordIDs(
+            db,
+            scopeID: attempt.scopeID,
+            generation: attempt.generation
+        )
+        try SynchroMeta.deleteStaleScopeRows(db, scopeID: attempt.scopeID, generation: attempt.generation)
+
+        for staleRow in staleRows {
+            guard let schema = tablesByName[staleRow.tableName] else { continue }
+            try removeLocalRowIfUnreferenced(
+                db: db,
+                tableName: staleRow.tableName,
+                recordID: staleRow.recordID,
+                schema: schema
+            )
+        }
+
+        let localChecksum = try computeScopeChecksum(
+            db: db,
+            scopeID: attempt.scopeID,
+            schemaHash: attempt.schemaHash,
+            tablesByName: tablesByName
+        )
+        try checksum.validate()
+        guard localChecksum == checksum else {
+            throw RebuildChecksumMismatchError(scopeID: attempt.scopeID)
+        }
+
+        try SynchroMeta.upsertScope(
+            db,
+            scopeID: attempt.scopeID,
+            cursor: finalCursor,
+            checksum: try checksumJSON(checksum),
+            generation: attempt.generation,
+            localChecksum: try checksumJSON(localChecksum)
+        )
+        try SynchroMeta.deleteRebuildAttempt(db, scopeID: attempt.scopeID)
     }
 
     func removeScope(scopeID: String, syncedTables: [LocalSchemaTable]) throws {

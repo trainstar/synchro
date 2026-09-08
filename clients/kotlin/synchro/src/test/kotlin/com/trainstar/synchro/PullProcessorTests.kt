@@ -103,6 +103,48 @@ class PullProcessorTests {
         return ChangeTracker(db).pendingChangeCount()
     }
 
+    private fun applyEmptyFinalRebuild(
+        database: SynchroDatabase,
+        processor: PullProcessor,
+        attempt: LocalRebuildAttempt,
+    ) {
+        database.writeTransaction {
+            SynchroMeta.upsertScope(
+                it,
+                attempt.scopeID,
+                cursor = null,
+                checksum = null,
+                generation = attempt.generation,
+            )
+            SynchroMeta.upsertRebuildAttempt(it, attempt)
+        }
+        val request = RebuildRequest(
+            clientID = "test-client",
+            clientGeneration = attempt.clientGeneration,
+            schema = SchemaRef(attempt.schemaVersion, attempt.schemaHash),
+            scope = attempt.scopeID,
+            rebuildID = attempt.rebuildID,
+            cursor = attempt.cursor,
+            limit = attempt.pageLimit,
+        )
+        val response = RebuildResponse(
+            scope = attempt.scopeID,
+            records = emptyList(),
+            cursor = null,
+            hasMore = false,
+            finalScopeCursor = "scope_cursor_20",
+            checksum = protocolEmptyScopeChecksum(attempt.scopeID),
+        )
+        processor.applyScopeRebuildPage(
+            attempt,
+            request,
+            rebuildRequestJSON(request),
+            response,
+            rebuildResponseJSON(response),
+            listOf(localTestTable),
+        )
+    }
+
     private fun orderRow(
         id: String,
         shipAddress: String,
@@ -733,12 +775,7 @@ class PullProcessorTests {
             cursor = null,
             pageLimit = 100,
         )
-        processor.finalizeScopeRebuild(
-            attempt = attempt,
-            finalCursor = "scope_cursor_20",
-            checksum = protocolEmptyScopeChecksum(attempt.scopeID),
-            syncedTables = listOf(localTestTable)
-        )
+        applyEmptyFinalRebuild(db, processor, attempt)
 
         val row = db.queryOne("SELECT id FROM orders WHERE id = ?", arrayOf("w1"))
         assertNull(row)
@@ -935,6 +972,54 @@ class PullProcessorTests {
     }
 
     @Test
+    fun finalRebuildPageRollsBackRowsAndFinalityWhenChecksumMismatches() {
+        val (database, processor) = makeTestEnv()
+        val scopeID = "orders:atomic"
+        database.writeTransaction { SynchroMeta.upsertScope(it, scopeID, null, null) }
+        val attempt = processor.beginScopeRebuild(
+            scopeID,
+            clientGeneration = 1,
+            schemaVersion = 1,
+            schemaHash = PROTOCOL_TEST_SCHEMA_HASH,
+            pageLimit = 100,
+        )
+        val request = RebuildRequest(
+            clientID = "test-client",
+            clientGeneration = attempt.clientGeneration,
+            schema = SchemaRef(attempt.schemaVersion, attempt.schemaHash),
+            scope = scopeID,
+            rebuildID = attempt.rebuildID,
+            cursor = attempt.cursor,
+            limit = attempt.pageLimit,
+        )
+        val record = rebuildRecord("atomic-row", "server")
+        val response = RebuildResponse(
+            scope = scopeID,
+            records = listOf(record),
+            cursor = null,
+            hasMore = false,
+            finalScopeCursor = "scope-cursor-final",
+            checksum = protocolEmptyScopeChecksum(scopeID),
+        )
+
+        assertThrows(RebuildChecksumMismatchException::class.java) {
+            processor.applyScopeRebuildPage(
+                attempt,
+                request,
+                rebuildRequestJSON(request),
+                response,
+                rebuildResponseJSON(response),
+                listOf(localTestTable),
+            )
+        }
+
+        assertNull(database.queryOne("SELECT id FROM orders WHERE id = ?", arrayOf("atomic-row")))
+        assertEquals(attempt, database.readTransaction { SynchroMeta.getRebuildAttempt(it, scopeID) })
+        assertNull(database.readTransaction { SynchroMeta.getScope(it, scopeID) }?.cursor)
+        assertTrue(database.query("SELECT * FROM _synchro_rebuild_page_receipts").isEmpty())
+    }
+
+    @Test
     fun scopeRemovalDeletesAttemptReceiptsAndMatchingBackoffAtomically() {
         val (database, processor) = makeTestEnv()
         val targetScope = "orders:removed"
@@ -1041,12 +1126,7 @@ class PullProcessorTests {
             cursor = null,
             pageLimit = 100,
         )
-        processor.finalizeScopeRebuild(
-            attempt = attempt,
-            finalCursor = "scope_cursor_20",
-            checksum = protocolEmptyScopeChecksum(attempt.scopeID),
-            syncedTables = listOf(localTestTable)
-        )
+        applyEmptyFinalRebuild(db, processor, attempt)
 
         val row = db.queryOne("SELECT id FROM orders WHERE id = ?", arrayOf("w1"))
         assertNotNull(row)
@@ -1308,7 +1388,7 @@ class PullProcessorTests {
             checksum = checksum,
         )
 
-        val finalAttempt = processor.applyScopeRebuildPage(
+        processor.applyScopeRebuildPage(
             attempt = attempt,
             request = request,
             requestJSON = rebuildRequestJSON(request),
@@ -1324,13 +1404,6 @@ class PullProcessorTests {
         assertEquals(
             "server",
             db.queryOne("SELECT ship_address FROM orders WHERE id = ?", arrayOf("page-unprotected"))?.get("ship_address"),
-        )
-
-        processor.finalizeScopeRebuild(
-            attempt = finalAttempt,
-            finalCursor = "scope-20",
-            checksum = checksum,
-            syncedTables = listOf(localTestTable),
         )
 
         assertNotNull(db.queryOne("SELECT id FROM orders WHERE id = ?", arrayOf("stale-protected")))

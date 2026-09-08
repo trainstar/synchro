@@ -1247,7 +1247,7 @@ class SyncEngineTests {
     }
 
     @Test
-    fun testFinalRebuildReceiptFinalizesAfterRestartWithoutRequestingPage() = runTest {
+    fun testFinalRebuildPageCommitsFinalityBeforeRestartWithoutRequestingPage() = runTest {
         val dbName = "rebuild_finality_restart_${UUID.randomUUID()}.sqlite"
         val clientID = "rebuild-finality-device"
         val finalCursor = "scope_cursor_final"
@@ -1305,7 +1305,8 @@ class SyncEngineTests {
             responseJSON,
             listOf(protocolOrdersSchema()),
         )
-        assertNull(db1.readTransaction { connection -> SynchroMeta.getScope(connection, scopeID)?.cursor })
+        assertEquals(finalCursor, db1.readTransaction { connection -> SynchroMeta.getScope(connection, scopeID)?.cursor })
+        assertNull(db1.readTransaction { connection -> SynchroMeta.getRebuildAttempt(connection, scopeID) })
         assertEquals(1, db1.query("SELECT * FROM _synchro_rebuild_page_receipts").size)
         engine1.stop()
         db1.close()

@@ -688,7 +688,7 @@ final class SyncEngineTests: XCTestCase {
         XCTAssertFalse(try tracker.hasPendingChanges())
     }
 
-    func testFinalRebuildReceiptFinalizesAfterRestartWithoutRequestingPage() async throws {
+    func testFinalRebuildPageCommitsFinalityBeforeRestartWithoutRequestingPage() async throws {
         let dbPath = tempDBPath()
         let finalCursor = "scope_cursor_final"
         let rebuiltRecord = try authoritativeRecord(
@@ -746,7 +746,11 @@ final class SyncEngineTests: XCTestCase {
             responseBody: try rebuildResponseBody(finalResponse),
             syncedTables: [ordersLocalSchemaTable(includeNotes: false)]
         )
-        XCTAssertNil(try db1.readTransaction { try SynchroMeta.getScope($0, scopeID: scopeID)?.cursor })
+        XCTAssertEqual(
+            try db1.readTransaction { try SynchroMeta.getScope($0, scopeID: scopeID)?.cursor },
+            finalCursor
+        )
+        XCTAssertNil(try db1.readTransaction { try SynchroMeta.getRebuildAttempt($0, scopeID: scopeID) })
         XCTAssertEqual(try db1.query("SELECT * FROM _synchro_rebuild_page_receipts", params: nil).count, 1)
         await engine1.stop()
         try db1.close()
@@ -1653,8 +1657,9 @@ final class SyncEngineTests: XCTestCase {
         XCTAssertEqual(backoff?.retryClassification, .http503)
     }
 
-    func testSyncRetriesOnRetryableError() async throws {
+    func testDurableSchedulerRetriesSyncNowRetryableError() async throws {
         var pushCallCount = 0
+        let resumed = expectation(description: "durable push retry resumed")
 
         MockURLProtocol.requestHandler = { request in
             let path = request.url!.path
@@ -1670,7 +1675,7 @@ final class SyncEngineTests: XCTestCase {
                                                    headerFields: ["Retry-After": "0.01"])!
                     return (response, data)
                 } else {
-                    // Second attempt: success
+                    resumed.fulfill()
                     let body = try JSONSerialization.jsonObject(with: request.bodyData()!) as! [String: Any]
                     let mutations = body["mutations"] as! [[String: Any]]
                     let accepted: [[String: Any]] = try mutations.map {
@@ -1694,7 +1699,7 @@ final class SyncEngineTests: XCTestCase {
             return try self.mockResponse(statusCode: 500, json: ["error": "unexpected"])
         }
 
-        let (engine, db) = try makeIntegrationEnv()
+        let (engine, db) = try makeIntegrationEnv(syncInterval: 0.2)
         addTeardownBlock { await engine.stop() }
 
         try await engine.start()
@@ -1704,7 +1709,13 @@ final class SyncEngineTests: XCTestCase {
             params: ["w1", "123 Main St", "u1", "2026-01-01T10:00:00.000Z"]
         )
 
-        try await engine.syncNow()
+        do {
+            try await engine.syncNow()
+            XCTFail("Expected the durable scheduler to own the retry")
+        } catch is RetryableError {
+        }
+        await fulfillment(of: [resumed], timeout: 4.0)
+        try await waitForBackoffClear(in: db)
 
         XCTAssertEqual(pushCallCount, 2)
         let tracker = ChangeTracker(database: db)
@@ -1712,6 +1723,53 @@ final class SyncEngineTests: XCTestCase {
         XCTAssertNil(try db.readTransaction { db in
             try SynchroMeta.getBackoffRecord(db)
         })
+    }
+
+    func testPeriodicRetryExhaustionResumesDurableWorkWithoutIllegalTransition() async throws {
+        let pullCount = OSAllocatedUnfairLock(initialState: 0)
+        let resumed = expectation(description: "durable periodic retry resumed")
+
+        MockURLProtocol.requestHandler = { request in
+            let path = request.url!.path
+            if path.hasSuffix("/sync/connect") {
+                return try self.mockResponse(json: self.connectJSON)
+            } else if path.hasSuffix("/sync/rebuild") {
+                return try self.mockResponse(json: self.rebuildJSON(finalCursor: "scope_cursor_1"))
+            } else if path.hasSuffix("/sync/pull") {
+                let count = pullCount.withLock { value -> Int in
+                    value += 1
+                    return value
+                }
+                if count == 2 {
+                    let data = try JSONSerialization.data(withJSONObject: self.retryableTemporaryUnavailableError())
+                    let response = HTTPURLResponse(
+                        url: request.url!,
+                        statusCode: 503,
+                        httpVersion: nil,
+                        headerFields: ["Retry-After": "0"]
+                    )!
+                    return (response, data)
+                }
+                if count == 3 {
+                    resumed.fulfill()
+                }
+                return try self.mockResponse(json: self.scopePullJSON(cursor: "scope_cursor_\(count + 1)"))
+            }
+            return try self.mockResponse(statusCode: 500, json: ["error": "unexpected"])
+        }
+
+        let (engine, database) = try makeIntegrationEnv(
+            maxRetryAttempts: 0,
+            syncInterval: 0.02
+        )
+        addTeardownBlock { await engine.stop() }
+
+        try await engine.start()
+        await fulfillment(of: [resumed], timeout: 4.0)
+        try await waitForBackoffClear(in: database)
+
+        XCTAssertGreaterThanOrEqual(pullCount.withLock { $0 }, 3)
+        XCTAssertNil(try engine.getBlockingFailure())
     }
 
     func testRetryablePushFailurePreservesQueueAcrossRestart() async throws {
@@ -1836,6 +1894,7 @@ final class SyncEngineTests: XCTestCase {
     func testRenewalRequiredBatchSurvivesRetryableReconnectFailure() async throws {
         var connectCallCount = 0
         var pushCallCount = 0
+        let resumed = expectation(description: "renewal retry resumed")
 
         MockURLProtocol.requestHandler = { request in
             let path = request.url!.path
@@ -1873,6 +1932,7 @@ final class SyncEngineTests: XCTestCase {
                         ]
                     )
                 }
+                resumed.fulfill()
                 let mutations = body["mutations"] as! [[String: Any]]
                 let accepted = try mutations.map {
                     try self.acceptedPushOutcome(
@@ -1893,7 +1953,7 @@ final class SyncEngineTests: XCTestCase {
             return try self.mockResponse(statusCode: 500, json: ["error": "unexpected"])
         }
 
-        let (engine, db) = try makeIntegrationEnv(maxRetryAttempts: 1)
+        let (engine, db) = try makeIntegrationEnv(maxRetryAttempts: 1, syncInterval: 0.2)
         addTeardownBlock { await engine.stop() }
         try await engine.start()
         _ = try db.execute(
@@ -1901,7 +1961,17 @@ final class SyncEngineTests: XCTestCase {
             params: ["w1", "generation renewal", "u1", "2026-01-01T10:00:00.000000Z"]
         )
 
-        try await engine.syncNow()
+        do {
+            try await engine.syncNow()
+            XCTFail("Expected the durable scheduler to own the renewal retry")
+        } catch is RetryableError {
+        }
+        await fulfillment(of: [resumed], timeout: 4.0)
+        try await waitForBackoffClear(in: db)
+        let completionDeadline = Date().addingTimeInterval(3)
+        while try ChangeTracker(database: db).hasPendingChanges(), Date() < completionDeadline {
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
 
         XCTAssertEqual(connectCallCount, 3)
         XCTAssertEqual(pushCallCount, 2)
@@ -2979,6 +3049,7 @@ final class SyncEngineTests: XCTestCase {
         clientID: String = "test-device",
         maxRetryAttempts: Int = 3,
         pushDebounce: TimeInterval = 0.5,
+        syncInterval: TimeInterval = 999,
         transportObservationCollector: TransportObservationCollector? = nil
     ) throws -> (SyncEngine, SynchroDatabase) {
         let sessionConfig = URLSessionConfiguration.ephemeral
@@ -2992,7 +3063,7 @@ final class SyncEngineTests: XCTestCase {
             authProvider: { "token" },
             clientID: clientID,
             appVersion: "1.0.0",
-            syncInterval: 999,
+            syncInterval: syncInterval,
             pushDebounce: pushDebounce,
             maxRetryAttempts: maxRetryAttempts,
             transportObservationCollector: transportObservationCollector
