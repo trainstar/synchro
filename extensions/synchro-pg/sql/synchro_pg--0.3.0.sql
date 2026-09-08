@@ -267,6 +267,7 @@ CREATE TABLE sync_registry_membership_stages (
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     activated_at TIMESTAMPTZ,
     CHECK (source_registry_generation < registry_generation),
+    CHECK (affected_scopes IS NULL OR cardinality(affected_scopes) > 0),
     CHECK (
         (state = 'pending'
          AND stream_generation IS NULL
@@ -274,7 +275,6 @@ CREATE TABLE sync_registry_membership_stages (
          AND activation_end_lsn IS NULL
          AND staged_record_count IS NULL
          AND staged_edge_count IS NULL
-         AND affected_scopes IS NULL
          AND NOT verified
          AND activated_at IS NULL)
         OR
@@ -2226,7 +2226,7 @@ AS 'MODULE_PATHNAME', 'synchro_rebuild_contract_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- synchro-pg/src/registry.rs:646
+-- synchro-pg/src/registry.rs:652
 -- synchro_pg::registry::synchro_register_capture_dependency
 CREATE  FUNCTION "synchro_register_capture_dependency"(
 	"p_relation_name" TEXT, /* &str */
@@ -2239,7 +2239,7 @@ AS 'MODULE_PATHNAME', 'synchro_register_capture_dependency_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- synchro-pg/src/registry.rs:922
+-- synchro-pg/src/registry.rs:928
 -- synchro_pg::registry::synchro_register_membership_dependency
 CREATE  FUNCTION "synchro_register_membership_dependency"(
 	"p_dependency_table_name" TEXT, /* &str */
@@ -2278,7 +2278,8 @@ CREATE  FUNCTION "synchro_register_table"(
 	"p_push_policy" TEXT DEFAULT 'enabled', /* &str */
 	"p_exclude_columns" TEXT[] DEFAULT '{}', /* alloc::vec::Vec<alloc::string::String> */
 	"p_sync_columns" TEXT[] DEFAULT '{}', /* alloc::vec::Vec<alloc::string::String> */
-	"p_max_scope_fanout" INT DEFAULT 8 /* i32 */
+	"p_max_scope_fanout" INT DEFAULT 8, /* i32 */
+	"p_affected_scopes" TEXT[] DEFAULT '{}' /* alloc::vec::Vec<alloc::string::String> */
 ) RETURNS void
 STRICT
 LANGUAGE c /* Rust */
@@ -2383,7 +2384,7 @@ AS 'MODULE_PATHNAME', 'synchro_unregister_shared_scope_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- synchro-pg/src/registry.rs:879
+-- synchro-pg/src/registry.rs:885
 -- synchro_pg::registry::synchro_unregister_table
 CREATE  FUNCTION "synchro_unregister_table"(
 	"p_table_name" TEXT /* &str */

@@ -150,7 +150,7 @@ pub(crate) fn activate_staged_membership_generation(
 ) -> Result<(), String> {
     let rows = client
         .select(
-            "SELECT source_registry_generation, state
+            "SELECT source_registry_generation, state, affected_scopes
              FROM synchro.sync_registry_membership_stages
              WHERE registry_generation = $1",
             None,
@@ -165,6 +165,9 @@ pub(crate) fn activate_staged_membership_generation(
         .map_err(|error| format!("reading membership activation source: {error}"))?
         .ok_or_else(|| "membership activation source is missing".to_string())?;
     let state = required_text(&stage, "state", "")?;
+    let declared_affected_scopes = stage
+        .get_by_name::<Vec<String>, &str>("affected_scopes")
+        .map_err(|error| format!("reading declared affected scopes: {error}"))?;
     if staged_source != source_generation || state != "pending" {
         return Err("membership activation stage binding is invalid".to_string());
     }
@@ -215,7 +218,29 @@ pub(crate) fn activate_staged_membership_generation(
             .ok_or_else(|| "membership activation edge count overflowed".to_string())?;
     }
     verify_staging(client, &tables)?;
-    let affected_scopes = changed_scopes(client, &table_names)?;
+    let changed_scopes = changed_scopes(client, &table_names)?;
+    let affected_scopes = match declared_affected_scopes {
+        Some(declared) => {
+            if declared.is_empty()
+                || declared
+                    .windows(2)
+                    .any(|pair| pair[0].as_bytes() >= pair[1].as_bytes())
+            {
+                return Err("declared affected scopes are invalid".to_string());
+            }
+            if changed_scopes
+                .iter()
+                .any(|scope| declared.binary_search(scope).is_err())
+            {
+                return Err("declared affected scopes omit a changed scope".to_string());
+            }
+            declared
+        }
+        None if changed_scopes.is_empty() => {
+            return Err("membership activation requires exact affected scopes".to_string());
+        }
+        None => changed_scopes,
+    };
     install_staged_edges(client, &table_names)?;
     advance_affected_generations(client, &affected_scopes, Some(target_generation))?;
 

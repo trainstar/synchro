@@ -75,18 +75,6 @@ type NativeStepObservation struct {
 	Disposition string           `json:"disposition"`
 	ErrorCode   *string          `json:"error_code,omitempty"`
 	Wire        *NativeWireFacts `json:"wire,omitempty"`
-	Transition  string           `json:"transition,omitempty"`
-}
-
-// RequireNativeMembershipTransition proves that the authored Class 1 stage ran.
-func RequireNativeMembershipTransition(stepID string, observation NativeStepObservation) error {
-	if stepID != "STEP-PERF-SCHEMA-CHECK-CLASS1-STAGE-001" {
-		return nil
-	}
-	if observation.Disposition != "success" || observation.Transition != "membership-generation" {
-		return fmt.Errorf("native membership stage transition=%q disposition=%q want membership-generation success", observation.Transition, observation.Disposition)
-	}
-	return nil
 }
 
 // NativeCaptureFacts binds one requested source to its durable state facts.
@@ -104,6 +92,7 @@ type nativeInstallationBinding struct {
 	// pendingCompositionChange records that a stage reconfigured a registration
 	// in a way the server publishes as a new manifest on activation.
 	pendingCompositionChange bool
+	pendingMembershipChange  *nativeMembershipActivationBinding
 	tables                   map[string]nativeTableBinding
 	relations                map[string]string
 	captureDependencies      map[string]nativeCaptureDependencyBinding
@@ -132,6 +121,13 @@ type nativeInstallationBinding struct {
 type nativeInstalledClient struct {
 	UserID   string
 	ClientID string
+}
+
+type nativeMembershipActivationBinding struct {
+	authoredRegistryGeneration uint64
+	runtimeRegistryGeneration  int64
+	runtimeScope               string
+	priorMembershipGeneration  int64
 }
 
 type nativeSchemaReference struct {
@@ -532,25 +528,23 @@ func nativeStageRegistersSharedScope(operation scenarios.Operation) (bool, error
 	return hasPrimaryScope && hasSharedScope, nil
 }
 
-func nativeStageRequiresEmptyEdgeTransition(operation scenarios.Operation) (bool, error) {
+func nativeStageRequiresClass1MembershipTransition(operation scenarios.Operation) (bool, error) {
 	var payload struct {
 		AffectedScopes []string `json:"affected_scopes"`
 		ScopeRules     []struct {
-			Evaluations []json.RawMessage `json:"evaluations"`
+			Relation           string            `json:"relation"`
+			MembershipFunction string            `json:"membership_function"`
+			Evaluations        []json.RawMessage `json:"evaluations"`
 		} `json:"scope_rules"`
 	}
 	if err := jsonstrict.Decode(operation.Payload, &payload); err != nil {
 		return false, errors.New("native controller membership stage payload is invalid")
 	}
-	if len(payload.AffectedScopes) == 0 || len(payload.ScopeRules) == 0 {
+	if len(payload.AffectedScopes) != 1 || payload.AffectedScopes[0] != "user:user-a" || len(payload.ScopeRules) != 1 {
 		return false, nil
 	}
-	for _, rule := range payload.ScopeRules {
-		if len(rule.Evaluations) != 0 {
-			return false, nil
-		}
-	}
-	return true, nil
+	rule := payload.ScopeRules[0]
+	return rule.Relation == "public.items" && rule.MembershipFunction == "synchro.scope_items", nil
 }
 
 func validateNativeInstallPayload(payload nativeInstallPayload) error {
@@ -1221,15 +1215,39 @@ func (c *NativeController) ApplyStep(ctx context.Context, operation scenarios.Op
 	case "model/publish-schema":
 		return c.publishSchema(ctx, operation)
 	case "model/stage-registry-membership-generation":
-		emptyEdgeTransition, err := nativeStageRequiresEmptyEdgeTransition(operation)
+		class1Transition, err := nativeStageRequiresClass1MembershipTransition(operation)
 		if err != nil {
 			return NativeStepObservation{}, err
 		}
-		if emptyEdgeTransition {
-			if err := c.harness.Operator().ConfigureClass1MembershipTransition(ctx); err != nil {
+		if class1Transition {
+			var stage struct {
+				RegistryGeneration uint64   `json:"registry_generation"`
+				AffectedScopes     []string `json:"affected_scopes"`
+			}
+			if err := jsonstrict.Decode(operation.Payload, &stage); err != nil || stage.RegistryGeneration == 0 {
+				return NativeStepObservation{}, errors.New("native controller membership stage payload is invalid")
+			}
+			runtimeScope, err := c.runtimeScope(stage.AffectedScopes[0])
+			if err != nil {
 				return NativeStepObservation{}, err
 			}
-			return nativeSuccessTransition("membership-generation"), nil
+			runtimeGeneration, priorMembershipGeneration, err := c.harness.Operator().ConfigureClass1MembershipTransition(ctx, runtimeScope)
+			if err != nil {
+				return NativeStepObservation{}, err
+			}
+			c.mu.Lock()
+			if c.installation == nil {
+				c.mu.Unlock()
+				return NativeStepObservation{}, errors.New("native controller contract is not installed")
+			}
+			c.installation.pendingMembershipChange = &nativeMembershipActivationBinding{
+				authoredRegistryGeneration: stage.RegistryGeneration,
+				runtimeRegistryGeneration:  runtimeGeneration,
+				runtimeScope:               runtimeScope,
+				priorMembershipGeneration:  priorMembershipGeneration,
+			}
+			c.mu.Unlock()
+			return nativeSuccess(), nil
 		}
 		registerSharedScope, err := nativeStageRegistersSharedScope(operation)
 		if err != nil {
@@ -1251,8 +1269,40 @@ func (c *NativeController) ApplyStep(ctx context.Context, operation scenarios.Op
 		}
 		return nativeSuccess(), nil
 	case "model/activate-registry-membership-generation":
+		var activation struct {
+			RegistryGeneration uint64 `json:"registry_generation"`
+		}
+		if err := jsonstrict.Decode(operation.Payload, &activation); err != nil || activation.RegistryGeneration == 0 {
+			return NativeStepObservation{}, errors.New("native controller membership activation payload is invalid")
+		}
+		c.mu.Lock()
+		var membershipChange *nativeMembershipActivationBinding
+		if c.installation != nil && c.installation.pendingMembershipChange != nil {
+			copy := *c.installation.pendingMembershipChange
+			membershipChange = &copy
+		}
+		c.mu.Unlock()
+		if membershipChange != nil && membershipChange.authoredRegistryGeneration != activation.RegistryGeneration {
+			return NativeStepObservation{}, errors.New("native controller membership activation does not match its stage")
+		}
 		if err := c.harness.Operator().ReloadRegistry(ctx); err != nil {
 			return NativeStepObservation{}, err
+		}
+		if membershipChange != nil {
+			if err := c.harness.Operator().WaitForClass1MembershipActivation(
+				ctx,
+				membershipChange.runtimeRegistryGeneration,
+				membershipChange.runtimeScope,
+				membershipChange.priorMembershipGeneration,
+				c.waitTimeout,
+			); err != nil {
+				return NativeStepObservation{}, err
+			}
+			c.mu.Lock()
+			if c.installation != nil {
+				c.installation.pendingMembershipChange = nil
+			}
+			c.mu.Unlock()
 		}
 		// A staged composition change publishes a new manifest when the
 		// generation activates. The worker publishes it asynchronously, so wait
@@ -1264,12 +1314,6 @@ func (c *NativeController) ApplyStep(ctx context.Context, operation scenarios.Op
 		// The authored registry generation advances with each activation. The
 		// captured registry fact reports the generation the scenario has
 		// reached, not the one its setup installed.
-		var activation struct {
-			RegistryGeneration uint64 `json:"registry_generation"`
-		}
-		if err := jsonstrict.Decode(operation.Payload, &activation); err != nil || activation.RegistryGeneration == 0 {
-			return NativeStepObservation{}, errors.New("native controller membership activation payload is invalid")
-		}
 		c.mu.Lock()
 		if c.installation != nil {
 			c.installation.authoredRegistryGeneration = activation.RegistryGeneration
@@ -3807,10 +3851,6 @@ func nativeUnsupported(boundary string, operation scenarios.Operation) error {
 
 func nativeSuccess() NativeStepObservation {
 	return NativeStepObservation{Disposition: "success"}
-}
-
-func nativeSuccessTransition(name string) NativeStepObservation {
-	return NativeStepObservation{Disposition: "success", Transition: name}
 }
 
 func validNativeSchemaReference(value nativeSchemaReference, fresh bool) bool {

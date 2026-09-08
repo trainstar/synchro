@@ -4107,6 +4107,136 @@ func (executor *OperatorExecutor) RestoreCrossScopeTable(ctx context.Context) er
 	return executor.ReloadRegistry(ctx)
 }
 
+// ConfigureClass1MembershipTransition installs the fixed Class 1 rule change.
+func (executor *OperatorExecutor) ConfigureClass1MembershipTransition(ctx context.Context, affectedScope string) (int64, int64, error) {
+	if executor == nil || executor.harness == nil || !executor.harness.sourceReady || ctx == nil || affectedScope == "" {
+		return 0, 0, errors.New("Class 1 membership control is invalid")
+	}
+	database, err := executor.harness.openDatabase(ctx, executor.harness.names.Database, executor.harness.env.Admin, false)
+	if err != nil {
+		return 0, 0, errors.New("open Class 1 membership control connection failed")
+	}
+	defer database.Close()
+	transaction, err := database.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, 0, errors.New("begin Class 1 membership control failed")
+	}
+	defer transaction.Rollback()
+
+	var priorMembershipGeneration int64
+	if err := transaction.QueryRowContext(ctx, `
+		SELECT membership_generation
+		FROM synchro.sync_scope_state
+		WHERE scope_id = $1`, affectedScope).Scan(&priorMembershipGeneration); err != nil || priorMembershipGeneration <= 0 {
+		return 0, 0, errors.New("Class 1 affected scope is not authoritative")
+	}
+	if _, err := transaction.ExecContext(ctx, `
+		CREATE OR REPLACE FUNCTION public.cf_items_membership(p_id uuid)
+		RETURNS SETOF text
+		LANGUAGE SQL STABLE SECURITY INVOKER SET search_path = pg_catalog, synchro
+		BEGIN ATOMIC
+			SELECT 'user:' || (p.owner_id #>> '{}')
+			FROM synchro_projection.cf_items AS p
+			WHERE p.record_id = p_id::text
+			  AND NOT p.deleted
+			  AND pg_catalog.length(p.owner_id #>> '{}') > 0;
+		END`); err != nil {
+		return 0, 0, errors.New("replace Class 1 membership rule failed")
+	}
+	if _, err := transaction.ExecContext(ctx, `
+		SELECT synchro.synchro_register_table(
+			'public.cf_items',
+			'public.cf_items_membership',
+			'single_scope',
+			'id', 'updated_at', 'deleted_at', 'enabled',
+			p_affected_scopes => ARRAY[$1]::text[]
+		)`, affectedScope); err != nil {
+		return 0, 0, errors.New("stage Class 1 membership rule failed")
+	}
+	var runtimeRegistryGeneration int64
+	var affectedScopesJSON string
+	if err := transaction.QueryRowContext(ctx, `
+		SELECT stage.registry_generation, pg_catalog.array_to_json(stage.affected_scopes)::text
+		FROM synchro.sync_registry_membership_stages stage
+		JOIN synchro.sync_registry registry
+		  ON registry.registry_generation = stage.registry_generation
+		 AND registry.relation_id = ANY(stage.target_relation_ids)
+		WHERE stage.state = 'pending'
+		  AND registry.physical_schema = 'public'
+		  AND registry.physical_relation = 'cf_items'
+		ORDER BY stage.registry_generation DESC
+		LIMIT 1`).Scan(&runtimeRegistryGeneration, &affectedScopesJSON); err != nil || runtimeRegistryGeneration <= 0 {
+		return 0, 0, errors.New("observe staged Class 1 membership rule failed")
+	}
+	var persistedScopes []string
+	if json.Unmarshal([]byte(affectedScopesJSON), &persistedScopes) != nil || len(persistedScopes) != 1 || persistedScopes[0] != affectedScope {
+		return 0, 0, errors.New("staged Class 1 affected scopes are invalid")
+	}
+	if err := transaction.Commit(); err != nil {
+		return 0, 0, errors.New("commit Class 1 membership rule failed")
+	}
+	return runtimeRegistryGeneration, priorMembershipGeneration, nil
+}
+
+// WaitForClass1MembershipActivation verifies the fixed durable Class 1 result.
+func (executor *OperatorExecutor) WaitForClass1MembershipActivation(ctx context.Context, registryGeneration int64, affectedScope string, priorMembershipGeneration int64, timeout time.Duration) error {
+	if executor == nil || executor.harness == nil || !executor.harness.sourceReady || ctx == nil || registryGeneration <= 0 || affectedScope == "" || priorMembershipGeneration <= 0 || timeout <= 0 {
+		return errors.New("Class 1 membership activation observation is invalid")
+	}
+	database, err := executor.harness.openDatabase(ctx, executor.harness.names.Database, executor.harness.env.Admin, false)
+	if err != nil {
+		return errors.New("open Class 1 membership activation connection failed")
+	}
+	defer database.Close()
+	deadline := time.NewTimer(timeout)
+	defer deadline.Stop()
+	for {
+		var state, affectedScopesJSON string
+		var membershipGeneration int64
+		err := database.QueryRowContext(ctx, `
+			SELECT stage.state,
+			       COALESCE(pg_catalog.array_to_json(stage.affected_scopes)::text, 'null'),
+			       scope.membership_generation
+			FROM synchro.sync_registry_membership_stages stage
+			JOIN synchro.sync_scope_state scope ON scope.scope_id = $2
+			WHERE stage.registry_generation = $1`, registryGeneration, affectedScope).Scan(
+			&state,
+			&affectedScopesJSON,
+			&membershipGeneration,
+		)
+		if err != nil {
+			return errors.New("read Class 1 membership activation failed")
+		}
+		if state == "activated" {
+			var affectedScopes []string
+			if json.Unmarshal([]byte(affectedScopesJSON), &affectedScopes) != nil || len(affectedScopes) != 1 || affectedScopes[0] != affectedScope {
+				return errors.New("activated Class 1 affected scopes are invalid")
+			}
+			if membershipGeneration != priorMembershipGeneration+1 {
+				return errors.New("Class 1 membership generation did not advance exactly once")
+			}
+			return nil
+		}
+		if state != "pending" {
+			return errors.New("Class 1 membership activation state is invalid")
+		}
+		timer := time.NewTimer(processPollInterval)
+		select {
+		case <-ctx.Done():
+			if !timer.Stop() {
+				<-timer.C
+			}
+			return errors.New("Class 1 membership activation wait was canceled")
+		case <-deadline.C:
+			if !timer.Stop() {
+				<-timer.C
+			}
+			return errors.New("Class 1 membership activation wait expired")
+		case <-timer.C:
+		}
+	}
+}
+
 // ReloadRegistry requests one PostgreSQL configuration reload.
 func (executor *OperatorExecutor) ReloadRegistry(ctx context.Context) error {
 	return executor.exec(ctx, "SELECT pg_reload_conf()")

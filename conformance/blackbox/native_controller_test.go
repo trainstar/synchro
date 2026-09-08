@@ -174,46 +174,41 @@ func TestNativeStageRegistersStagedSharedScope(t *testing.T) {
 	}
 }
 
-func TestNativeStageRequiresClass1MembershipTransitionForEmptyEdges(t *testing.T) {
+func TestNativeStageRequiresClass1MembershipTransitionFromAuthoredRule(t *testing.T) {
 	operation := scenarios.Operation{
 		ContractOperation: "model",
 		Name:              "stage-registry-membership-generation",
 		Payload: json.RawMessage(`{
 			"affected_scopes":["user:user-a"],
-			"scope_rules":[{"evaluations":[]}]
+			"scope_rules":[{
+				"relation":"public.items",
+				"membership_function":"synchro.scope_items",
+				"evaluations":[]
+			}]
 		}`),
 	}
-	requiresTransition, err := nativeStageRequiresEmptyEdgeTransition(operation)
+	requiresTransition, err := nativeStageRequiresClass1MembershipTransition(operation)
 	if err != nil {
-		t.Fatalf("classify empty-edge membership stage: %v", err)
+		t.Fatalf("classify authored Class 1 membership stage: %v", err)
 	}
 	if !requiresTransition {
-		t.Fatal("empty-edge Class 1 membership stage was classified as a no-op")
+		t.Fatal("authored Class 1 membership stage was classified as a no-op")
 	}
 
 	operation.Payload = json.RawMessage(`{
 		"affected_scopes":["user:user-a"],
-		"scope_rules":[{"evaluations":[{"row":{}}]}]
+		"scope_rules":[{
+			"relation":"public.items",
+			"membership_function":"synchro.scope_items",
+			"evaluations":[{"row":{}}]
+		}]
 	}`)
-	requiresTransition, err = nativeStageRequiresEmptyEdgeTransition(operation)
+	requiresTransition, err = nativeStageRequiresClass1MembershipTransition(operation)
 	if err != nil {
-		t.Fatalf("classify populated-edge membership stage: %v", err)
+		t.Fatalf("classify populated authored membership stage: %v", err)
 	}
-	if requiresTransition {
-		t.Fatal("populated-edge membership stage used the empty-edge transition")
-	}
-}
-
-func TestRequireNativeMembershipTransitionRejectsSilentSuccess(t *testing.T) {
-	stepID := "STEP-PERF-SCHEMA-CHECK-CLASS1-STAGE-001"
-	if err := RequireNativeMembershipTransition(stepID, NativeStepObservation{Disposition: "success"}); err == nil {
-		t.Fatal("silent Class 1 membership success passed without a realized transition")
-	}
-	if err := RequireNativeMembershipTransition(stepID, NativeStepObservation{
-		Disposition: "success",
-		Transition:  "membership-generation",
-	}); err != nil {
-		t.Fatalf("realized Class 1 membership transition was rejected: %v", err)
+	if !requiresTransition {
+		t.Fatal("authored Class 1 stage classification depended on current row evaluations")
 	}
 }
 

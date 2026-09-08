@@ -295,6 +295,7 @@ CREATE TABLE sync_registry_membership_stages (
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     activated_at TIMESTAMPTZ,
     CHECK (source_registry_generation < registry_generation),
+    CHECK (affected_scopes IS NULL OR cardinality(affected_scopes) > 0),
     CHECK (
         (state = 'pending'
          AND stream_generation IS NULL
@@ -302,7 +303,6 @@ CREATE TABLE sync_registry_membership_stages (
          AND activation_end_lsn IS NULL
          AND staged_record_count IS NULL
          AND staged_edge_count IS NULL
-         AND affected_scopes IS NULL
          AND NOT verified
          AND activated_at IS NULL)
         OR

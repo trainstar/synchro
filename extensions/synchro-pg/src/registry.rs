@@ -346,6 +346,7 @@ fn synchro_register_table(
     p_exclude_columns: default!(Vec<String>, "'{}'"),
     p_sync_columns: default!(Vec<String>, "'{}'"),
     p_max_scope_fanout: default!(i32, "8"),
+    p_affected_scopes: default!(Vec<String>, "'{}'"),
 ) {
     let actor = unsafe { pg_sys::GetOuterUserId() };
     let policy = PushPolicy::parse(p_push_policy).unwrap_or_else(|| {
@@ -376,6 +377,7 @@ fn synchro_register_table(
     Spi::connect_mut(|client| {
         acquire_registry_write_lock(client)?;
         acquire_source_write_gate(client)?;
+        let affected_scopes = validate_declared_affected_scopes(client, &p_affected_scopes)?;
         let base = latest_complete_generation(client)?;
         let physical = resolve_physical_relation(client, p_table_name)?;
         let logical_table_name = physical.relation.clone();
@@ -487,6 +489,9 @@ fn synchro_register_table(
             capture_fields: Vec::new(),
         };
         if retained.is_some_and(|active| same_registration_content(active, &registration)) {
+            if !affected_scopes.is_empty() {
+                pgrx::error!("affected scopes require a membership rule transition");
+            }
             return Ok(());
         }
 
@@ -621,6 +626,7 @@ fn synchro_register_table(
             base.generation,
             registration.registry_generation,
             &registration.relation_id,
+            &affected_scopes,
         )?;
 
         with_registration_actor_ddl(
@@ -1075,18 +1081,6 @@ fn synchro_register_membership_dependency(
                 impact_function_fingerprint.into(),
             ],
         )?;
-        client.update(
-            "INSERT INTO synchro.sync_registry_membership_stages (
-                 registry_generation, source_registry_generation,
-                 target_relation_ids, state
-             ) VALUES ($1, $2, ARRAY[$3::uuid], 'pending')",
-            None,
-            &[
-                next_generation.into(),
-                base.generation.into(),
-                target.relation_id.as_str().into(),
-            ],
-        )?;
         validate_generation_entries(client, next_generation)?;
         mark_generation_validated(client, next_generation)?;
         emit_registry_activation_when_ready(client, next_generation)?;
@@ -1176,13 +1170,16 @@ fn stage_membership_replacement_if_changed(
     source_generation: i64,
     target_generation: i64,
     relation_id: &str,
+    affected_scopes: &[String],
 ) -> Result<(), spi::Error> {
-    client.update(
+    let staged = client
+        .update(
         "INSERT INTO synchro.sync_registry_membership_stages (
              registry_generation, source_registry_generation,
-             target_relation_ids, state
+             target_relation_ids, affected_scopes, state
          )
-         SELECT $2, $1, ARRAY[target.relation_id], 'pending'
+         SELECT $2, $1, ARRAY[target.relation_id],
+                NULLIF($4::text[], '{}'::text[]), 'pending'
          FROM synchro.sync_registry target
          JOIN synchro.sync_registry source
            ON source.registry_generation = $1
@@ -1203,9 +1200,45 @@ fn stage_membership_replacement_if_changed(
                 source_generation.into(),
                 target_generation.into(),
                 relation_id.into(),
+                affected_scopes.to_vec().into(),
             ],
-        )?;
+        )?
+        .len();
+    if !affected_scopes.is_empty() && staged != 1 {
+        pgrx::error!("affected scopes require a membership rule transition");
+    }
     Ok(())
+}
+
+fn validate_declared_affected_scopes(
+    client: &SpiClient<'_>,
+    affected_scopes: &[String],
+) -> Result<Vec<String>, spi::Error> {
+    if affected_scopes.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut normalized = affected_scopes.to_vec();
+    normalized.sort_by(|left, right| left.as_bytes().cmp(right.as_bytes()));
+    if normalized.iter().any(String::is_empty)
+        || normalized.windows(2).any(|pair| pair[0] == pair[1])
+    {
+        pgrx::error!("affected scopes are invalid");
+    }
+    let authoritative = client
+        .select(
+            "SELECT count(*) AS scope_count
+             FROM synchro.sync_scope_state
+             WHERE scope_id = ANY($1)",
+            None,
+            &[normalized.clone().into()],
+        )?
+        .first()
+        .get_by_name::<i64, &str>("scope_count")?
+        .unwrap_or(0);
+    if authoritative != i64::try_from(normalized.len()).unwrap_or(i64::MAX) {
+        pgrx::error!("affected scopes must be authoritative");
+    }
+    Ok(normalized)
 }
 
 fn validate_capture_application_ownership(
@@ -3575,31 +3608,46 @@ fn carry_pending_membership_stage(
              SELECT parent_generation
              FROM synchro.sync_registry_generations
              WHERE generation = $1 AND state = 'pending'
-         ), candidate_targets AS (
-             SELECT DISTINCT target_relation_id
+         ), candidate_stages AS (
+             SELECT stage.target_relation_ids, stage.affected_scopes
              FROM lineage
              JOIN synchro.sync_registry_membership_stages stage
                ON stage.registry_generation IN ($1, lineage.parent_generation)
               AND stage.state = 'pending'
+         ), candidate_targets AS (
+             SELECT DISTINCT target_relation_id
+             FROM candidate_stages stage
              CROSS JOIN LATERAL unnest(stage.target_relation_ids) target(target_relation_id)
              JOIN synchro.sync_registry registry
                ON registry.registry_generation = $1
-              AND registry.relation_id = target.target_relation_id
-              AND registry.registration_kind = 'synced'
+               AND registry.relation_id = target.target_relation_id
+               AND registry.registration_kind = 'synced'
+         ), candidate_affected_scopes AS (
+             SELECT CASE WHEN count(*) = 0 THEN NULL::text[]
+                         ELSE array_agg(scope_id ORDER BY scope_id) END AS affected_scopes
+             FROM (
+                 SELECT DISTINCT scope_id
+                 FROM candidate_stages stage
+                 CROSS JOIN LATERAL unnest(
+                     COALESCE(stage.affected_scopes, '{}'::text[])
+                 ) affected(scope_id)
+             ) scopes
          )
          INSERT INTO synchro.sync_registry_membership_stages (
              registry_generation, source_registry_generation,
-             target_relation_ids, state
+             target_relation_ids, affected_scopes, state
          )
          SELECT $1, lineage.parent_generation,
-                array_agg(candidate_targets.target_relation_id ORDER BY candidate_targets.target_relation_id),
-                'pending'
+                 array_agg(candidate_targets.target_relation_id ORDER BY candidate_targets.target_relation_id),
+                 candidate_affected_scopes.affected_scopes, 'pending'
          FROM lineage
          JOIN candidate_targets ON true
-         GROUP BY lineage.parent_generation
+         CROSS JOIN candidate_affected_scopes
+         GROUP BY lineage.parent_generation, candidate_affected_scopes.affected_scopes
          ON CONFLICT (registry_generation) DO UPDATE
          SET source_registry_generation = EXCLUDED.source_registry_generation,
-             target_relation_ids = EXCLUDED.target_relation_ids
+             target_relation_ids = EXCLUDED.target_relation_ids,
+             affected_scopes = EXCLUDED.affected_scopes
          WHERE synchro.sync_registry_membership_stages.state = 'pending'",
         None,
         &[generation.into()],

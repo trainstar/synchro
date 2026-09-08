@@ -181,6 +181,7 @@ fn create_impact_function(
 }
 
 fn enable_dependent_target_membership(fixture: &MembershipDependencyFixture) {
+    ensure_authoritative_scopes(&["dependent-scope", "target-scope"]);
     Spi::run(&format!(
         "CREATE OR REPLACE FUNCTION public.{target_membership}(p_key INTEGER)
          RETURNS SETOF text
@@ -200,13 +201,31 @@ fn enable_dependent_target_membership(fixture: &MembershipDependencyFixture) {
              'public.{target_table}',
              'public.{target_membership}',
              'single_scope',
-             'id', 'updated_at', 'deleted_at', 'enabled'
+             'id', 'updated_at', 'deleted_at', 'enabled',
+             p_affected_scopes => ARRAY['dependent-scope', 'target-scope']::text[]
          )",
         target_membership = fixture.target_membership,
         source_table = fixture.source_table,
         target_table = fixture.target_table,
     ))
     .expect("enable dependent target membership");
+}
+
+fn ensure_authoritative_scopes(scopes: &[&str]) {
+    Spi::connect_mut(|client| {
+        client.update(
+            "INSERT INTO synchro.sync_scope_state (scope_id, stream_generation)
+             SELECT scope_id, runtime.stream_generation
+             FROM unnest($1::text[]) scope(scope_id)
+             CROSS JOIN synchro.sync_runtime_state runtime
+             WHERE runtime.singleton
+             ON CONFLICT (scope_id) DO NOTHING",
+            None,
+            &[scopes.to_vec().into()],
+        )?;
+        Ok::<_, pgrx::spi::Error>(())
+    })
+    .expect("create authoritative membership fixture scopes");
 }
 
 fn target_row_expression(fixture: &MembershipDependencyFixture, value: &str) -> String {
@@ -749,6 +768,162 @@ fn membership_dependency_activation_replaces_existing_edges() {
         stage.0["affected_scopes"],
         json!(["dependent-scope", "target-scope"])
     );
+}
+
+#[pg_test]
+fn empty_membership_rule_activation_uses_exact_declared_scopes() {
+    let fixture = membership_dependency_fixture();
+    ensure_authoritative_scopes(&["target-scope", "unrelated-scope"]);
+    let before: pgrx::JsonB = Spi::get_one(
+        "SELECT jsonb_object_agg(scope_id, membership_generation ORDER BY scope_id)
+         FROM synchro.sync_scope_state
+         WHERE scope_id IN ('target-scope', 'unrelated-scope')",
+    )
+    .expect("load membership generations before empty activation")
+    .expect("membership generations before empty activation");
+
+    Spi::run(&format!(
+        "CREATE OR REPLACE FUNCTION public.{target_membership}(p_key INTEGER)
+         RETURNS SETOF text
+         LANGUAGE sql
+         STABLE
+         SECURITY INVOKER
+         SET search_path = pg_catalog, synchro
+         BEGIN ATOMIC
+             SELECT pg_catalog.concat('target-', 'scope')::text;
+         END;
+         SELECT synchro.synchro_register_table(
+             'public.{target_table}',
+             'public.{target_membership}',
+             'single_scope',
+             'id', 'updated_at', 'deleted_at', 'enabled',
+             p_affected_scopes => ARRAY['target-scope']::text[]
+         )",
+        target_membership = fixture.target_membership,
+        target_table = fixture.target_table,
+    ))
+    .expect("stage empty membership rule activation");
+    let pending_scopes: Vec<String> = Spi::get_one(
+        "SELECT affected_scopes
+         FROM synchro.sync_registry_membership_stages
+         WHERE state = 'pending'
+         ORDER BY registry_generation DESC
+         LIMIT 1",
+    )
+    .expect("load pending empty membership affected scopes")
+    .expect("pending empty membership affected scopes");
+
+    activate_pending_registry_for_test();
+    let after: pgrx::JsonB = Spi::get_one(
+        "SELECT jsonb_object_agg(scope_id, membership_generation ORDER BY scope_id)
+         FROM synchro.sync_scope_state
+         WHERE scope_id IN ('target-scope', 'unrelated-scope')",
+    )
+    .expect("load membership generations after empty activation")
+    .expect("membership generations after empty activation");
+    let stage: pgrx::JsonB = Spi::get_one(
+        "SELECT jsonb_build_object(
+             'state', state,
+             'records', staged_record_count,
+             'edges', staged_edge_count,
+             'affected_scopes', affected_scopes
+         )
+         FROM synchro.sync_registry_membership_stages
+         ORDER BY registry_generation DESC
+         LIMIT 1",
+    )
+    .expect("load activated empty membership stage")
+    .expect("activated empty membership stage");
+    cleanup_membership_fixture(&fixture);
+
+    assert_eq!(before.0["target-scope"], json!(1));
+    assert_eq!(before.0["unrelated-scope"], json!(1));
+    assert_eq!(pending_scopes, vec!["target-scope"]);
+    assert_eq!(after.0["target-scope"], json!(2));
+    assert_eq!(after.0["unrelated-scope"], json!(1));
+    assert_eq!(stage.0["state"], json!("activated"));
+    assert_eq!(stage.0["records"], json!(0));
+    assert_eq!(stage.0["edges"], json!(0));
+    assert_eq!(stage.0["affected_scopes"], json!(["target-scope"]));
+}
+
+#[pg_test]
+fn empty_membership_rule_activation_rejects_missing_declaration() {
+    let fixture = membership_dependency_fixture();
+    ensure_authoritative_scopes(&["target-scope"]);
+    Spi::run(&format!(
+        "CREATE OR REPLACE FUNCTION public.{target_membership}(p_key INTEGER)
+         RETURNS SETOF text
+         LANGUAGE sql
+         STABLE
+         SECURITY INVOKER
+         SET search_path = pg_catalog, synchro
+         BEGIN ATOMIC
+             SELECT pg_catalog.concat('target-', 'scope')::text;
+         END;
+         SELECT synchro.synchro_register_table(
+             'public.{target_table}',
+             'public.{target_membership}',
+             'single_scope',
+             'id', 'updated_at', 'deleted_at', 'enabled'
+         )",
+        target_membership = fixture.target_membership,
+        target_table = fixture.target_table,
+    ))
+    .expect("stage empty membership rule without declaration");
+
+    let activation = std::panic::catch_unwind(activate_pending_registry_for_test);
+
+    assert!(activation.is_err());
+}
+
+#[pg_test]
+fn membership_rule_activation_rejects_omitted_changed_scope() {
+    let fixture = membership_dependency_fixture();
+    Spi::run(&format!(
+        "INSERT INTO public.{target_table} (id, label) VALUES (7, 'target');
+         INSERT INTO public.{source_table} (id, target_id) VALUES (1, 7)",
+        target_table = fixture.target_table,
+        source_table = fixture.source_table,
+    ))
+    .expect("insert omitted-scope activation rows");
+    insert_changelog("target-scope", &fixture.target_table, "7", 1);
+    insert_changelog("source-scope", &fixture.source_table, "1", 1);
+    insert_edge(&fixture.target_table, "7", "target-scope");
+    insert_edge(&fixture.source_table, "1", "source-scope");
+    ensure_authoritative_scopes(&["dependent-scope"]);
+
+    Spi::run(&format!(
+        "CREATE OR REPLACE FUNCTION public.{target_membership}(p_key INTEGER)
+         RETURNS SETOF text
+         LANGUAGE sql
+         STABLE
+         SECURITY INVOKER
+         SET search_path = pg_catalog, synchro
+         BEGIN ATOMIC
+             SELECT CASE WHEN EXISTS (
+                 SELECT 1
+                 FROM synchro_projection.{source_table} projection
+                 WHERE projection.target_id #>> '{{}}' = p_key::text
+                   AND NOT projection.deleted
+             ) THEN 'dependent-scope'::text ELSE 'target-scope'::text END;
+         END;
+         SELECT synchro.synchro_register_table(
+             'public.{target_table}',
+             'public.{target_membership}',
+             'single_scope',
+             'id', 'updated_at', 'deleted_at', 'enabled',
+             p_affected_scopes => ARRAY['target-scope']::text[]
+         )",
+        target_membership = fixture.target_membership,
+        source_table = fixture.source_table,
+        target_table = fixture.target_table,
+    ))
+    .expect("stage membership rule with omitted changed scope");
+
+    let activation = std::panic::catch_unwind(activate_pending_registry_for_test);
+
+    assert!(activation.is_err());
 }
 
 #[pg_test]
