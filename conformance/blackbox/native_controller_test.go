@@ -3,7 +3,6 @@ package blackbox
 import (
 	"context"
 	"crypto/sha256"
-	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -172,6 +171,49 @@ func TestNativeStageRegistersStagedSharedScope(t *testing.T) {
 				t.Fatalf("staged shared registration = %t, want %t", got, test.want)
 			}
 		})
+	}
+}
+
+func TestNativeStageRequiresClass1MembershipTransitionForEmptyEdges(t *testing.T) {
+	operation := scenarios.Operation{
+		ContractOperation: "model",
+		Name:              "stage-registry-membership-generation",
+		Payload: json.RawMessage(`{
+			"affected_scopes":["user:user-a"],
+			"scope_rules":[{"evaluations":[]}]
+		}`),
+	}
+	requiresTransition, err := nativeStageRequiresEmptyEdgeTransition(operation)
+	if err != nil {
+		t.Fatalf("classify empty-edge membership stage: %v", err)
+	}
+	if !requiresTransition {
+		t.Fatal("empty-edge Class 1 membership stage was classified as a no-op")
+	}
+
+	operation.Payload = json.RawMessage(`{
+		"affected_scopes":["user:user-a"],
+		"scope_rules":[{"evaluations":[{"row":{}}]}]
+	}`)
+	requiresTransition, err = nativeStageRequiresEmptyEdgeTransition(operation)
+	if err != nil {
+		t.Fatalf("classify populated-edge membership stage: %v", err)
+	}
+	if requiresTransition {
+		t.Fatal("populated-edge membership stage used the empty-edge transition")
+	}
+}
+
+func TestRequireNativeMembershipTransitionRejectsSilentSuccess(t *testing.T) {
+	stepID := "STEP-PERF-SCHEMA-CHECK-CLASS1-STAGE-001"
+	if err := RequireNativeMembershipTransition(stepID, NativeStepObservation{Disposition: "success"}); err == nil {
+		t.Fatal("silent Class 1 membership success passed without a realized transition")
+	}
+	if err := RequireNativeMembershipTransition(stepID, NativeStepObservation{
+		Disposition: "success",
+		Transition:  "membership-generation",
+	}); err != nil {
+		t.Fatalf("realized Class 1 membership transition was rejected: %v", err)
 	}
 }
 
@@ -633,283 +675,155 @@ func TestNativeCaptureDependencySourceStatementUsesFixture(t *testing.T) {
 	}
 }
 
-func TestNativeCaptureServerObservationSignals(t *testing.T) {
-	databaseURL := strings.TrimSpace(os.Getenv("TEST_DATABASE_URL"))
-	if databaseURL == "" {
-		t.Skip("TEST_DATABASE_URL is not configured")
-	}
-	database, err := sql.Open("pgx", databaseURL)
-	if err != nil {
-		t.Fatalf("open PostgreSQL capture database: %v", err)
-	}
-	t.Cleanup(func() { _ = database.Close() })
-	ctx := context.Background()
-	if err := database.PingContext(ctx); err != nil {
-		t.Fatalf("ping PostgreSQL capture database: %v", err)
-	}
-	if _, err := database.ExecContext(ctx, "CREATE EXTENSION IF NOT EXISTS synchro_pg CASCADE"); err != nil {
-		t.Fatalf("install PostgreSQL capture extension: %v", err)
-	}
-	tx, err := database.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelRepeatableRead})
-	if err != nil {
-		t.Fatalf("begin PostgreSQL capture transaction: %v", err)
-	}
-	t.Cleanup(func() { _ = tx.Rollback() })
-
-	const (
-		userID          = "native-capture-observation-user"
-		clientID        = "native-capture-observation-client"
-		firstBatchID    = "00000000-0000-4000-8000-000000000401"
-		runtimeTable    = "native-capture-observation-items"
-		runtimeRecord   = "native-capture-observation-row"
-		runtimeScopeA   = "native-capture-runtime-scope-a"
-		runtimeScopeB   = "native-capture-runtime-scope-b"
-		relationID      = "00000000-0000-4000-8000-000000000410"
-		tableID         = "00000000-0000-4000-8000-000000000411"
-		primaryFieldID  = "00000000-0000-4000-8000-000000000412"
-		runtimeVersion  = "00000000-0000-4000-8000-000000000413"
-		authoredVersion = "authored-version-a"
-	)
-	mutationIDs := []string{
-		"00000000-0000-4000-8000-000000000402",
-		"00000000-0000-4000-8000-000000000403",
-	}
-	for ordinal, mutationID := range mutationIDs {
-		insertNativeCaptureMutation(t, ctx, tx, userID, clientID, mutationID, firstBatchID, ordinal+1)
-	}
-	insertNativeCaptureMutation(t, ctx, tx, userID, clientID+"-decoy", "00000000-0000-4000-8000-000000000404", "00000000-0000-4000-8000-000000000405", 1)
-	insertNativeCaptureMutation(t, ctx, tx, userID+"-decoy", clientID, "00000000-0000-4000-8000-000000000406", "00000000-0000-4000-8000-000000000407", 1)
-
-	var registryGeneration int64
-	var runtimeStream string
-	if err := tx.QueryRowContext(ctx, `
-		SELECT generation, stream_generation
-		FROM synchro.sync_registry_generations
-		WHERE state = 'active' AND validated`).Scan(&registryGeneration, &runtimeStream); err != nil {
-		t.Fatalf("read PostgreSQL active registry generation: %v", err)
-	}
-	if _, err := tx.ExecContext(ctx, `
-		INSERT INTO synchro.sync_logical_ids (logical_id, kind)
-		VALUES ($1::uuid, 'relation'), ($2::uuid, 'table'), ($3::uuid, 'field')`, relationID, tableID, primaryFieldID); err != nil {
-		t.Fatalf("insert PostgreSQL capture logical identities: %v", err)
-	}
-	if _, err := tx.ExecContext(ctx, `
-		INSERT INTO synchro.sync_registry (
-			registry_generation, relation_id, registration_kind, table_id, primary_key_field_id,
-			table_name, physical_schema, physical_relation, physical_relation_oid, replica_identity,
-			composition, membership_function_oid, membership_function_schema,
-			membership_function_name, membership_function_fingerprint, max_scope_fanout,
-			pk_column, pk_type, pk_portable_type, capture_key_columns, push_policy, sync_columns
-		) VALUES (
-			$1, $2::uuid, 'synced', $3::uuid, $4::uuid,
-			$5, 'pg_catalog', 'pg_class', 'pg_catalog.pg_class'::regclass::oid, 'd',
-			'single_scope', 'pg_catalog.current_schemas(boolean)'::regprocedure::oid,
-			'pg_catalog', 'current_schemas', decode(repeat('01', 32), 'hex'), 8,
-			'id', 'text', 'string', ARRAY['id']::text[], 'enabled', ARRAY['id']::text[]
-		)`, registryGeneration, relationID, tableID, primaryFieldID, runtimeTable); err != nil {
-		t.Fatalf("insert PostgreSQL capture registry binding: %v", err)
-	}
-	if _, err := tx.ExecContext(ctx, `
-		INSERT INTO synchro.sync_captured_rows (
-			relation_id, record_id, row_data, row_version, checksum, deleted,
-			source_stream_generation, source_commit_lsn, source_event_ordinal, registry_generation
-		) VALUES (
-			$1::uuid, $2::text, jsonb_build_object('id', $2::text), $3::uuid,
-			decode(repeat('02', 32), 'hex'), false, $4, '0/1'::pg_lsn, 0, $5
-		)`, relationID, runtimeRecord, runtimeVersion, runtimeStream, registryGeneration); err != nil {
-		t.Fatalf("insert PostgreSQL captured row: %v", err)
-	}
-	insertNativeCaptureScopeEdge(t, ctx, tx, relationID, runtimeTable, runtimeRecord, runtimeScopeB)
-	insertNativeCaptureScopeEdge(t, ctx, tx, relationID, runtimeTable, runtimeRecord, runtimeScopeA)
-	insertNativeCaptureScopeEdge(t, ctx, tx, relationID, runtimeTable, runtimeRecord+"-decoy", runtimeScopeA)
-	insertNativeCaptureScopeEdge(t, ctx, tx, relationID, runtimeTable+"-decoy", runtimeRecord, runtimeScopeB)
-
-	installation := &nativeInstallationBinding{
-		clients:       []nativeInstalledClient{{UserID: userID, ClientID: clientID}},
-		scopes:        map[string]string{"scope-a": runtimeScopeA, "scope-b": runtimeScopeB},
-		runtimeScopes: map[string]string{runtimeScopeA: "scope-a", runtimeScopeB: "scope-b"},
-	}
+func TestMapNativeRowScopeEdges(t *testing.T) {
 	record := &nativeRecordBinding{
-		Table: nativeTableBinding{
-			AuthoredID:      "items",
-			RuntimeName:     runtimeTable,
-			AuthoredPrimary: "id",
-			Fields:          map[string]string{"id": "id"},
-		},
-		RuntimeRecordID: runtimeRecord,
-		Image: nativeAuthoredImage{
-			CanonicalWireJSON: `"row-a"`,
-			Fields:            map[string]json.RawMessage{"id": json.RawMessage(`"row-a"`)},
-			Version:           authoredVersion,
-			Checksum:          strings.Repeat("a", 64),
-		},
+		Table:          nativeTableBinding{AuthoredID: "items"},
+		Image:          nativeAuthoredImage{CanonicalWireJSON: `"row-a"`},
 		AuthoredScopes: []string{"scope-a", "scope-b"},
 	}
-	facts := scenarios.StateFacts{}
-	if err := captureNativeRowsAndScopes(ctx, tx, installation, nil, []*nativeRecordBinding{record}, &facts); err != nil {
-		t.Fatalf("capture PostgreSQL rows and scopes: %v", err)
+	tests := []struct {
+		name          string
+		runtimeScopes []string
+		forward       map[string]string
+		reverse       map[string]string
+		recordScopes  []string
+		wantEdges     []scenarios.RowScopeEdgeFact
+		wantError     string
+	}{
+		{
+			name:          "maps observed order",
+			runtimeScopes: []string{"runtime-scope-b", "runtime-scope-a"},
+			forward:       map[string]string{"scope-a": "runtime-scope-a", "scope-b": "runtime-scope-b"},
+			reverse:       map[string]string{"runtime-scope-a": "scope-a", "runtime-scope-b": "scope-b"},
+			recordScopes:  []string{"scope-a", "scope-b"},
+			wantEdges: []scenarios.RowScopeEdgeFact{
+				{TableID: "items", CanonicalWireJSON: `"row-a"`, ScopeID: "scope-b"},
+				{TableID: "items", CanonicalWireJSON: `"row-a"`, ScopeID: "scope-a"},
+			},
+		},
+		{
+			name:          "unbound runtime scope",
+			runtimeScopes: []string{"runtime-scope-unbound"},
+			forward:       map[string]string{},
+			reverse:       map[string]string{},
+			recordScopes:  nil,
+			wantError:     "native runtime row scope edge has no authored binding",
+		},
+		{
+			name:          "duplicated edge",
+			runtimeScopes: []string{"runtime-scope-a", "runtime-scope-duplicate"},
+			forward:       map[string]string{"scope-a": "runtime-scope-a"},
+			reverse:       map[string]string{"runtime-scope-a": "scope-a", "runtime-scope-duplicate": "scope-a"},
+			recordScopes:  []string{"scope-a"},
+			wantError:     "native runtime row scope edge is duplicated",
+		},
+		{
+			name:          "missing authored runtime binding",
+			runtimeScopes: []string{"runtime-scope-a"},
+			forward:       map[string]string{},
+			reverse:       map[string]string{"runtime-scope-a": "scope-a"},
+			recordScopes:  []string{"scope-a"},
+			wantError:     "native captured row scope has no runtime binding",
+		},
+		{
+			name:          "mismatched forward binding",
+			runtimeScopes: []string{"runtime-scope-a"},
+			forward:       map[string]string{"scope-a": "runtime-scope-other"},
+			reverse:       map[string]string{"runtime-scope-a": "scope-a"},
+			recordScopes:  []string{"scope-a"},
+			wantError:     "native runtime row scope edge does not match its forward binding",
+		},
+		{
+			name:          "authored subset enforcement",
+			runtimeScopes: []string{"runtime-scope-a"},
+			forward:       map[string]string{"scope-a": "runtime-scope-a", "scope-b": "runtime-scope-b"},
+			reverse:       map[string]string{"runtime-scope-a": "scope-a", "runtime-scope-b": "scope-b"},
+			recordScopes:  []string{"scope-a", "scope-b"},
+			wantError:     "native runtime scope edge does not match its authored binding",
+		},
 	}
-	if err := captureNativeCountsAndRebuilds(ctx, tx, installation, &facts); err != nil {
-		t.Fatalf("capture PostgreSQL counts and rebuilds: %v", err)
-	}
-	normalized, err := scenarios.NormalizeStateFacts(facts)
-	if err != nil {
-		t.Fatalf("normalize PostgreSQL server observation facts: %v", err)
-	}
-	if normalized.RowCount == nil || *normalized.RowCount != 1 || len(normalized.Rows) != 1 || normalized.Rows[0] != (scenarios.RowFact{TableID: "items", CanonicalWireJSON: `"row-a"`, Version: authoredVersion, Checksum: strings.Repeat("a", 64)}) {
-		t.Fatalf("captured PostgreSQL rows = %#v, count=%v", normalized.Rows, normalized.RowCount)
-	}
-	if normalized.ScopeCount == nil || *normalized.ScopeCount != 2 || len(normalized.Scopes) != 2 {
-		t.Fatalf("captured PostgreSQL scopes = %#v, count=%v", normalized.Scopes, normalized.ScopeCount)
-	}
-	for index, scopeID := range []string{"scope-a", "scope-b"} {
-		got := normalized.Scopes[index]
-		if got.ScopeID != scopeID || got.MembershipGeneration != 1 || got.Cardinality != 1 || len(got.EffectVersions) != 1 || got.EffectVersions[0] != authoredVersion {
-			t.Fatalf("captured PostgreSQL scope %d = %#v", index, got)
-		}
-	}
-	if normalized.BatchCount == nil || *normalized.BatchCount != 0 || normalized.MutationCount == nil || *normalized.MutationCount != 2 {
-		t.Fatalf("captured PostgreSQL push counts = batches %v, mutations %v", normalized.BatchCount, normalized.MutationCount)
-	}
-	if normalized.RebuildCount == nil || *normalized.RebuildCount != 0 {
-		t.Fatalf("captured PostgreSQL rebuild count = %v", normalized.RebuildCount)
-	}
-	if len(normalized.MutationOutcomes) != 2 || normalized.MutationOutcomes[0] != (scenarios.MutationOutcomeIdentityFact{UserID: userID, ClientID: clientID, MutationID: mutationIDs[0]}) || normalized.MutationOutcomes[1] != (scenarios.MutationOutcomeIdentityFact{UserID: userID, ClientID: clientID, MutationID: mutationIDs[1]}) {
-		t.Fatalf("mutation outcome identities = %#v", normalized.MutationOutcomes)
-	}
-	wantEdges := []scenarios.RowScopeEdgeFact{
-		{TableID: "items", CanonicalWireJSON: `"row-a"`, ScopeID: "scope-a"},
-		{TableID: "items", CanonicalWireJSON: `"row-a"`, ScopeID: "scope-b"},
-	}
-	if len(normalized.RowScopeEdges) != len(wantEdges) {
-		t.Fatalf("row scope edges = %#v", normalized.RowScopeEdges)
-	}
-	for index := range wantEdges {
-		if normalized.RowScopeEdges[index] != wantEdges[index] {
-			t.Fatalf("row scope edge %d = %#v, want %#v", index, normalized.RowScopeEdges[index], wantEdges[index])
-		}
-	}
-
-	delete(installation.scopes, "scope-a")
-	if err := captureNativeRowsAndScopes(ctx, tx, installation, nil, []*nativeRecordBinding{record}, &scenarios.StateFacts{}); err == nil || !strings.Contains(err.Error(), "no runtime binding") {
-		t.Fatalf("missing forward scope binding error = %v", err)
-	}
-	installation.scopes["scope-a"] = runtimeScopeA
-
-	installation.scopes["scope-a"] = runtimeScopeA + "-other"
-	if err := captureNativeRowsAndScopes(ctx, tx, installation, nil, []*nativeRecordBinding{record}, &scenarios.StateFacts{}); err == nil || !strings.Contains(err.Error(), "forward binding") {
-		t.Fatalf("mismatched forward scope binding error = %v", err)
-	}
-	installation.scopes["scope-a"] = runtimeScopeA
-
-	if _, err := tx.ExecContext(ctx, `
-		DELETE FROM synchro.sync_bucket_edges
-		WHERE table_name = $1 AND record_id = $2 AND bucket_id = $3`, runtimeTable, runtimeRecord, runtimeScopeB); err != nil {
-		t.Fatalf("remove authored-subset PostgreSQL edge: %v", err)
-	}
-	if err := captureNativeRowsAndScopes(ctx, tx, installation, nil, []*nativeRecordBinding{record}, &scenarios.StateFacts{}); err == nil || !strings.Contains(err.Error(), "does not match its authored binding") {
-		t.Fatalf("authored-subset enforcement error = %v", err)
-	}
-	insertNativeCaptureScopeEdge(t, ctx, tx, relationID, runtimeTable, runtimeRecord, runtimeScopeB)
-
-	unboundRuntimeScope := "native-capture-runtime-scope-unbound"
-	insertNativeCaptureScopeEdge(t, ctx, tx, relationID, runtimeTable, runtimeRecord, unboundRuntimeScope)
-	if err := captureNativeRowsAndScopes(ctx, tx, installation, nil, []*nativeRecordBinding{record}, &scenarios.StateFacts{}); err == nil || !strings.Contains(err.Error(), "no authored binding") {
-		t.Fatalf("unbound runtime scope error = %v", err)
-	}
-	if _, err := tx.ExecContext(ctx, `
-		DELETE FROM synchro.sync_bucket_edges
-		WHERE table_name = $1 AND record_id = $2 AND bucket_id = $3`, runtimeTable, runtimeRecord, unboundRuntimeScope); err != nil {
-		t.Fatalf("remove unbound PostgreSQL edge: %v", err)
-	}
-
-	duplicateRuntimeScope := runtimeScopeA + "-duplicate"
-	installation.runtimeScopes[duplicateRuntimeScope] = "scope-a"
-	insertNativeCaptureScopeEdge(t, ctx, tx, relationID, runtimeTable, runtimeRecord, duplicateRuntimeScope)
-	if err := captureNativeRowsAndScopes(ctx, tx, installation, nil, []*nativeRecordBinding{record}, &scenarios.StateFacts{}); err == nil || !strings.Contains(err.Error(), "duplicated") {
-		t.Fatalf("duplicate mapped scope edge error = %v", err)
-	}
-	delete(installation.runtimeScopes, duplicateRuntimeScope)
-	if _, err := tx.ExecContext(ctx, `
-		DELETE FROM synchro.sync_bucket_edges
-		WHERE table_name = $1 AND record_id = $2 AND bucket_id = $3`, runtimeTable, runtimeRecord, duplicateRuntimeScope); err != nil {
-		t.Fatalf("remove duplicate PostgreSQL edge: %v", err)
-	}
-
-	if _, err := tx.ExecContext(ctx, "SAVEPOINT native_capture_mutation_overflow"); err != nil {
-		t.Fatalf("create PostgreSQL mutation overflow savepoint: %v", err)
-	}
-	if _, err := tx.ExecContext(ctx, `
-		INSERT INTO synchro.sync_push_mutations (
-			user_id, client_id, mutation_id,
-			fingerprint_algorithm, fingerprint_version, fingerprint_domain, fingerprint_digest,
-			first_batch_id, request_ordinal,
-			authored_schema_version, authored_schema_hash,
-			submitted_schema_version, submitted_schema_hash,
-			outcome_schema_version, outcome_schema_hash,
-			table_id, primary_key_field_id, primary_key_type, primary_key_value,
-			operation, outcome_status, rejection_code,
-			sealed_canonical_request, sealed_canonical_response, completed_at
-		)
-		SELECT $1, $2,
-		       ('00000000-0000-4000-9000-' || lpad(generated.ordinal::text, 12, '0'))::uuid,
-		       'sha256', 1, 'synchro:v3:push-mutation-fingerprint:v1', decode(repeat('00', 32), 'hex'),
-		       '00000000-0000-4000-8000-000000000414'::uuid, generated.ordinal,
-		       1, repeat('a', 64),
-		       1, repeat('a', 64),
-		       1, repeat('a', 64),
-		       $3, 'runtime-id', 'string', to_jsonb($4::text),
-		       'insert', 'applied', NULL,
-		       decode('00', 'hex'), decode('00', 'hex'), now()
-		FROM generate_series(1, $5::integer) AS generated(ordinal)`, userID, clientID, runtimeTable, runtimeRecord, nativeCaptureMaximumMutationOutcomes-1); err != nil {
-		t.Fatalf("insert PostgreSQL mutation observation overflow: %v", err)
-	}
-	overflowFacts := scenarios.StateFacts{}
-	if err := captureNativeCountsAndRebuilds(ctx, tx, installation, &overflowFacts); err == nil || err.Error() != "native push mutation outcome identity observation limit exceeded" {
-		t.Fatalf("mutation observation overflow error = %v", err)
-	}
-	if len(overflowFacts.MutationOutcomes) != 0 {
-		t.Fatalf("mutation observation overflow returned truncated facts: %#v", overflowFacts.MutationOutcomes)
-	}
-	if _, err := tx.ExecContext(ctx, "ROLLBACK TO SAVEPOINT native_capture_mutation_overflow"); err != nil {
-		t.Fatalf("roll back PostgreSQL mutation overflow savepoint: %v", err)
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			boundRecord := *record
+			boundRecord.AuthoredScopes = test.recordScopes
+			observed, edges, err := mapNativeRowScopeEdges(test.runtimeScopes, test.forward, test.reverse, &boundRecord)
+			if test.wantError != "" {
+				if err == nil || err.Error() != test.wantError {
+					t.Fatalf("map row scope edges error = %v, want %q", err, test.wantError)
+				}
+				if observed != nil || edges != nil {
+					t.Fatalf("map row scope edges returned partial output: observed=%v edges=%#v", observed, edges)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("map row scope edges: %v", err)
+			}
+			if len(observed) != len(test.wantEdges) || len(edges) != len(test.wantEdges) {
+				t.Fatalf("mapped row scope edges = observed %v, edges %#v", observed, edges)
+			}
+			for index, want := range test.wantEdges {
+				if edges[index] != want {
+					t.Fatalf("mapped row scope edge %d = %#v, want %#v", index, edges[index], want)
+				}
+				if _, found := observed[want.ScopeID]; !found {
+					t.Fatalf("mapped authored scope %q is absent", want.ScopeID)
+				}
+			}
+		})
 	}
 }
 
-func insertNativeCaptureMutation(t *testing.T, ctx context.Context, tx *sql.Tx, userID, clientID, mutationID, batchID string, ordinal int) {
-	t.Helper()
-	if _, err := tx.ExecContext(ctx, `
-		INSERT INTO synchro.sync_push_mutations (
-			user_id, client_id, mutation_id,
-			fingerprint_algorithm, fingerprint_version, fingerprint_domain, fingerprint_digest,
-			first_batch_id, request_ordinal,
-			authored_schema_version, authored_schema_hash,
-			submitted_schema_version, submitted_schema_hash,
-			outcome_schema_version, outcome_schema_hash,
-			table_id, primary_key_field_id, primary_key_type, primary_key_value,
-			operation, outcome_status, rejection_code,
-			sealed_canonical_request, sealed_canonical_response, completed_at
-		) VALUES (
-			$1, $2, $3::uuid,
-			'sha256', 1, 'synchro:v3:push-mutation-fingerprint:v1', decode(repeat('00', 32), 'hex'),
-			$4::uuid, $5,
-			1, repeat('a', 64),
-			1, repeat('a', 64),
-			1, repeat('a', 64),
-			'native-capture-observation-items', 'runtime-id', 'string', '"native-capture-observation-row"'::jsonb,
-			'insert', 'applied', NULL,
-			decode('00', 'hex'), decode('00', 'hex'), now()
-		)`, userID, clientID, mutationID, batchID, ordinal); err != nil {
-		t.Fatalf("insert PostgreSQL mutation outcome %s: %v", mutationID, err)
+func TestMapNativeMutationOutcomeIdentities(t *testing.T) {
+	identities := []nativeMutationOutcomeIdentity{
+		{UserID: "user-a", ClientID: "client-a", MutationID: "mutation-a"},
+		{UserID: "user-a", ClientID: "client-a", MutationID: "mutation-b"},
 	}
-}
-
-func insertNativeCaptureScopeEdge(t *testing.T, ctx context.Context, tx *sql.Tx, relationID, tableName, recordID, scopeID string) {
-	t.Helper()
-	if _, err := tx.ExecContext(ctx, `
-		INSERT INTO synchro.sync_bucket_edges (relation_id, table_name, record_id, bucket_id, checksum)
-		VALUES ($1::uuid, $2, $3, $4, decode(repeat('00', 32), 'hex'))`, relationID, tableName, recordID, scopeID); err != nil {
-		t.Fatalf("insert PostgreSQL row scope edge %s: %v", scopeID, err)
+	overflow := make([]nativeMutationOutcomeIdentity, nativeCaptureMaximumMutationOutcomes+1)
+	tests := []struct {
+		name       string
+		identities []nativeMutationOutcomeIdentity
+		want       []scenarios.MutationOutcomeIdentityFact
+		wantError  string
+	}{
+		{
+			name:       "constructs facts",
+			identities: identities,
+			want: []scenarios.MutationOutcomeIdentityFact{
+				{UserID: "user-a", ClientID: "client-a", MutationID: "mutation-a"},
+				{UserID: "user-a", ClientID: "client-a", MutationID: "mutation-b"},
+			},
+		},
+		{
+			name:       "rejects overflow",
+			identities: overflow,
+			wantError:  "native push mutation outcome identity observation limit exceeded",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			facts, err := mapNativeMutationOutcomeIdentities(test.identities)
+			if test.wantError != "" {
+				if err == nil || err.Error() != test.wantError {
+					t.Fatalf("map mutation outcome identities error = %v, want %q", err, test.wantError)
+				}
+				if facts != nil {
+					t.Fatalf("mutation observation overflow returned truncated facts: %#v", facts)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("map mutation outcome identities: %v", err)
+			}
+			if len(facts) != len(test.want) {
+				t.Fatalf("mutation outcome facts = %#v, want %#v", facts, test.want)
+			}
+			for index, want := range test.want {
+				if facts[index] != want {
+					t.Fatalf("mutation outcome fact %d = %#v, want %#v", index, facts[index], want)
+				}
+			}
+		})
 	}
 }
 

@@ -75,6 +75,18 @@ type NativeStepObservation struct {
 	Disposition string           `json:"disposition"`
 	ErrorCode   *string          `json:"error_code,omitempty"`
 	Wire        *NativeWireFacts `json:"wire,omitempty"`
+	Transition  string           `json:"transition,omitempty"`
+}
+
+// RequireNativeMembershipTransition proves that the authored Class 1 stage ran.
+func RequireNativeMembershipTransition(stepID string, observation NativeStepObservation) error {
+	if stepID != "STEP-PERF-SCHEMA-CHECK-CLASS1-STAGE-001" {
+		return nil
+	}
+	if observation.Disposition != "success" || observation.Transition != "membership-generation" {
+		return fmt.Errorf("native membership stage transition=%q disposition=%q want membership-generation success", observation.Transition, observation.Disposition)
+	}
+	return nil
 }
 
 // NativeCaptureFacts binds one requested source to its durable state facts.
@@ -518,6 +530,27 @@ func nativeStageRegistersSharedScope(operation scenarios.Operation) (bool, error
 		}
 	}
 	return hasPrimaryScope && hasSharedScope, nil
+}
+
+func nativeStageRequiresEmptyEdgeTransition(operation scenarios.Operation) (bool, error) {
+	var payload struct {
+		AffectedScopes []string `json:"affected_scopes"`
+		ScopeRules     []struct {
+			Evaluations []json.RawMessage `json:"evaluations"`
+		} `json:"scope_rules"`
+	}
+	if err := jsonstrict.Decode(operation.Payload, &payload); err != nil {
+		return false, errors.New("native controller membership stage payload is invalid")
+	}
+	if len(payload.AffectedScopes) == 0 || len(payload.ScopeRules) == 0 {
+		return false, nil
+	}
+	for _, rule := range payload.ScopeRules {
+		if len(rule.Evaluations) != 0 {
+			return false, nil
+		}
+	}
+	return true, nil
 }
 
 func validateNativeInstallPayload(payload nativeInstallPayload) error {
@@ -1188,6 +1221,16 @@ func (c *NativeController) ApplyStep(ctx context.Context, operation scenarios.Op
 	case "model/publish-schema":
 		return c.publishSchema(ctx, operation)
 	case "model/stage-registry-membership-generation":
+		emptyEdgeTransition, err := nativeStageRequiresEmptyEdgeTransition(operation)
+		if err != nil {
+			return NativeStepObservation{}, err
+		}
+		if emptyEdgeTransition {
+			if err := c.harness.Operator().ConfigureClass1MembershipTransition(ctx); err != nil {
+				return NativeStepObservation{}, err
+			}
+			return nativeSuccessTransition("membership-generation"), nil
+		}
 		registerSharedScope, err := nativeStageRegistersSharedScope(operation)
 		if err != nil {
 			return NativeStepObservation{}, err
@@ -3473,19 +3516,9 @@ func captureNativeRowsAndScopes(ctx context.Context, tx *sql.Tx, installation *n
 			installation.runtimeRowVersions = make(map[string]string)
 		}
 		installation.runtimeRowVersions[record.Image.CanonicalWireJSON] = runtimeVersion
-		for _, authoredScope := range record.AuthoredScopes {
-			if _, found := installation.scopes[authoredScope]; !found {
-				return errors.New("native captured row scope has no runtime binding")
-			}
-		}
 		observedScopes, err := captureNativeRowScopeEdges(ctx, tx, installation, record, facts)
 		if err != nil {
 			return err
-		}
-		for _, authoredScope := range record.AuthoredScopes {
-			if _, found := observedScopes[authoredScope]; !found {
-				return errors.New("native runtime scope edge does not match its authored binding")
-			}
 		}
 		for authoredScope := range observedScopes {
 			scopeRows[authoredScope]++
@@ -3519,34 +3552,58 @@ func captureNativeRowScopeEdges(ctx context.Context, tx *sql.Tx, installation *n
 		return nil, errors.New("read native runtime row scope edges failed")
 	}
 	defer rows.Close()
-	observed := make(map[string]struct{})
+	runtimeScopes := make([]string, 0)
 	for rows.Next() {
 		var runtimeScope string
 		if err := rows.Scan(&runtimeScope); err != nil {
 			return nil, errors.New("scan native runtime row scope edge failed")
 		}
-		authoredScope, found := installation.runtimeScopes[runtimeScope]
+		runtimeScopes = append(runtimeScopes, runtimeScope)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, errors.New("read native runtime row scope edges failed")
+	}
+	observed, edges, err := mapNativeRowScopeEdges(runtimeScopes, installation.scopes, installation.runtimeScopes, record)
+	if err != nil {
+		return nil, err
+	}
+	facts.RowScopeEdges = append(facts.RowScopeEdges, edges...)
+	return observed, nil
+}
+
+func mapNativeRowScopeEdges(runtimeScopeIDs []string, scopes, runtimeScopes map[string]string, record *nativeRecordBinding) (map[string]struct{}, []scenarios.RowScopeEdgeFact, error) {
+	for _, authoredScope := range record.AuthoredScopes {
+		if _, found := scopes[authoredScope]; !found {
+			return nil, nil, errors.New("native captured row scope has no runtime binding")
+		}
+	}
+	observed := make(map[string]struct{}, len(runtimeScopeIDs))
+	edges := make([]scenarios.RowScopeEdgeFact, 0, len(runtimeScopeIDs))
+	for _, runtimeScope := range runtimeScopeIDs {
+		authoredScope, found := runtimeScopes[runtimeScope]
 		if !found {
-			return nil, errors.New("native runtime row scope edge has no authored binding")
+			return nil, nil, errors.New("native runtime row scope edge has no authored binding")
 		}
 		if _, duplicate := observed[authoredScope]; duplicate {
-			return nil, errors.New("native runtime row scope edge is duplicated")
+			return nil, nil, errors.New("native runtime row scope edge is duplicated")
 		}
-		forwardRuntimeScope, found := installation.scopes[authoredScope]
+		forwardRuntimeScope, found := scopes[authoredScope]
 		if !found || forwardRuntimeScope != runtimeScope {
-			return nil, errors.New("native runtime row scope edge does not match its forward binding")
+			return nil, nil, errors.New("native runtime row scope edge does not match its forward binding")
 		}
 		observed[authoredScope] = struct{}{}
-		facts.RowScopeEdges = append(facts.RowScopeEdges, scenarios.RowScopeEdgeFact{
+		edges = append(edges, scenarios.RowScopeEdgeFact{
 			TableID:           record.Table.AuthoredID,
 			CanonicalWireJSON: record.Image.CanonicalWireJSON,
 			ScopeID:           authoredScope,
 		})
 	}
-	if err := rows.Err(); err != nil {
-		return nil, errors.New("read native runtime row scope edges failed")
+	for _, authoredScope := range record.AuthoredScopes {
+		if _, found := observed[authoredScope]; !found {
+			return nil, nil, errors.New("native runtime scope edge does not match its authored binding")
+		}
 	}
-	return observed, nil
+	return observed, edges, nil
 }
 
 func validateNativeRuntimeRow(record *nativeRecordBinding, raw []byte) error {
@@ -3656,22 +3713,44 @@ func captureNativeMutationOutcomeIdentities(ctx context.Context, tx *sql.Tx, ins
 		return errors.New("read native push mutation outcome identities failed")
 	}
 	defer rows.Close()
-	outcomes := make([]scenarios.MutationOutcomeIdentityFact, 0)
+	identities := make([]nativeMutationOutcomeIdentity, 0)
 	for rows.Next() {
-		var value scenarios.MutationOutcomeIdentityFact
+		var value nativeMutationOutcomeIdentity
 		if err := rows.Scan(&value.UserID, &value.ClientID, &value.MutationID); err != nil {
 			return errors.New("scan native push mutation outcome identity failed")
 		}
-		outcomes = append(outcomes, value)
+		identities = append(identities, value)
 	}
 	if err := rows.Err(); err != nil {
 		return errors.New("read native push mutation outcome identities failed")
 	}
-	if len(outcomes) > nativeCaptureMaximumMutationOutcomes {
-		return errors.New("native push mutation outcome identity observation limit exceeded")
+	outcomes, err := mapNativeMutationOutcomeIdentities(identities)
+	if err != nil {
+		return err
 	}
 	facts.MutationOutcomes = outcomes
 	return nil
+}
+
+type nativeMutationOutcomeIdentity struct {
+	UserID     string
+	ClientID   string
+	MutationID string
+}
+
+func mapNativeMutationOutcomeIdentities(identities []nativeMutationOutcomeIdentity) ([]scenarios.MutationOutcomeIdentityFact, error) {
+	if len(identities) > nativeCaptureMaximumMutationOutcomes {
+		return nil, errors.New("native push mutation outcome identity observation limit exceeded")
+	}
+	outcomes := make([]scenarios.MutationOutcomeIdentityFact, len(identities))
+	for index, identity := range identities {
+		outcomes[index] = scenarios.MutationOutcomeIdentityFact{
+			UserID:     identity.UserID,
+			ClientID:   identity.ClientID,
+			MutationID: identity.MutationID,
+		}
+	}
+	return outcomes, nil
 }
 
 // Close closes the controller and optionally the owned black-box harness.
@@ -3728,6 +3807,10 @@ func nativeUnsupported(boundary string, operation scenarios.Operation) error {
 
 func nativeSuccess() NativeStepObservation {
 	return NativeStepObservation{Disposition: "success"}
+}
+
+func nativeSuccessTransition(name string) NativeStepObservation {
+	return NativeStepObservation{Disposition: "success", Transition: name}
 }
 
 func validNativeSchemaReference(value nativeSchemaReference, fresh bool) bool {
