@@ -893,6 +893,19 @@ fn membership_rule_activation_rejects_omitted_changed_scope() {
     insert_edge(&fixture.source_table, "1", "source-scope");
     ensure_authoritative_scopes(&["dependent-scope"]);
 
+    // The membership function below reads the source projection, so the registry
+    // requires a declared impact dependency before it accepts the registration.
+    let impact_body = format!(
+        "SELECT {} WHERE old_row ? 'target_id'
+         UNION ALL
+         SELECT {} WHERE new_row ? 'target_id'",
+        target_row_expression(&fixture, "(old_row ->> 'target_id')::integer"),
+        target_row_expression(&fixture, "(new_row ->> 'target_id')::integer"),
+    );
+    create_impact_function(&fixture, &impact_body, true, true);
+    register_dependency(&fixture, 2);
+    activate_pending_registry_for_test();
+
     Spi::run(&format!(
         "CREATE OR REPLACE FUNCTION public.{target_membership}(p_key INTEGER)
          RETURNS SETOF text
