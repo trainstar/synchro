@@ -181,6 +181,13 @@ func newLiveSoakHarness(ctx context.Context, seed uint64, corruptChecksum bool) 
 	if err := result.requireScopeSet(); err != nil {
 		return nil, err
 	}
+	// Every later request carries this reference, and the extension compares it
+	// with the published manifest, so a divergence must fail here with both values.
+	if version, _ := jsonInt64(result.protocol.Schema["version"]); uint64(version) != result.manifestDocument.SchemaVersion ||
+		result.protocol.Schema["hash"] != result.manifestDocument.SchemaHash {
+		return nil, fmt.Errorf("soak connect schema %v does not match published manifest version %d hash %s",
+			result.protocol.Schema, result.manifestDocument.SchemaVersion, result.manifestDocument.SchemaHash)
+	}
 	// The extension binds scope subscriptions through the pull path, so a
 	// rebuild before the first drained pull is an invalid request.
 	if err := result.drainPulls(ctx); err != nil {
