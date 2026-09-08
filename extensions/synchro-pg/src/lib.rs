@@ -116,6 +116,62 @@ FROM sync_runtime_state
 WHERE singleton = true
   AND NOT EXISTS (SELECT 1 FROM sync_registry_generations);
 
+-- Keep activation requests durable until an initial slot binding can replay them.
+CREATE TABLE IF NOT EXISTS sync_registry_activation_requests (
+    registry_generation BIGINT PRIMARY KEY
+        REFERENCES sync_registry_generations(generation) ON DELETE CASCADE,
+    requested_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    emitted_at TIMESTAMPTZ
+);
+
+CREATE OR REPLACE FUNCTION synchro_replay_registry_activation_requests()
+RETURNS trigger
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, synchro
+AS $$
+DECLARE
+    request RECORD;
+BEGIN
+    IF OLD.active_slot_name IS NULL AND NEW.active_slot_name IS NOT NULL THEN
+        FOR request IN
+            SELECT activation.registry_generation
+            FROM sync_registry_activation_requests activation
+            JOIN sync_registry_generations generation
+              ON generation.generation = activation.registry_generation
+             AND generation.state = 'pending'
+             AND generation.validated
+            ORDER BY activation.registry_generation
+            FOR UPDATE OF activation
+        LOOP
+            PERFORM pg_logical_emit_message(
+                true,
+                'synchro_registry',
+                convert_to(
+                    format(
+                        '{"generation":%s,"action":"activate"}',
+                        request.registry_generation
+                    ),
+                    'UTF8'
+                )
+            );
+            UPDATE sync_registry_activation_requests
+            SET emitted_at = now()
+            WHERE registry_generation = request.registry_generation;
+        END LOOP;
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS synchro_replay_registry_activation_requests
+    ON sync_runtime_state;
+CREATE TRIGGER synchro_replay_registry_activation_requests
+AFTER UPDATE OF active_slot_name ON sync_runtime_state
+FOR EACH ROW
+WHEN (OLD.active_slot_name IS NULL AND NEW.active_slot_name IS NOT NULL)
+EXECUTE FUNCTION synchro_replay_registry_activation_requests();
+
 CREATE TABLE IF NOT EXISTS sync_logical_ids (
     logical_id UUID PRIMARY KEY,
     kind TEXT NOT NULL CHECK (kind IN ('relation', 'table', 'field')),

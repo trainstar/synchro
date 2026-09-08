@@ -853,3 +853,124 @@
         assert_eq!(installed.0["source_reset_id"], json!(id));
         assert_eq!(installed.0["fence_covered"], json!(true));
     }
+
+    #[pg_test]
+    fn candidate_membership_catchup_reconciles_only_affected_records() {
+        setup_test_tables();
+        configure_reset_test_slot("synchro_reset_old");
+        let affected_id = "26000000-0000-4000-8000-000000000001";
+        let untouched_id = "26000000-0000-4000-8000-000000000002";
+        Spi::run_with_args(
+            "INSERT INTO public.test_orders (id, user_id, title) VALUES
+                 ($1::uuid, 'u1', 'affected'),
+                 ($2::uuid, 'u1', 'untouched')",
+            &[affected_id.into(), untouched_id.into()],
+        )
+        .expect("insert candidate membership source rows");
+
+        let prepared = prepare_reset_for_test("synchro_reset_candidate");
+        let reset_id = reset_id(&prepared);
+        lock_and_stage_reset(&reset_id, "synchro_reset_candidate");
+        let stage: pgrx::JsonB = Spi::get_one_with_args(
+            "SELECT jsonb_build_object(
+                 'registry_generation', captured.registry_generation,
+                 'relation_id', registry.relation_id
+             )
+             FROM synchro.sync_stream_reset_captured_rows captured
+             JOIN synchro.sync_registry registry
+               ON registry.registry_generation = captured.registry_generation
+              AND registry.table_name = 'test_orders'
+             WHERE captured.reset_id = $1::uuid
+             LIMIT 1",
+            &[reset_id.as_str().into()],
+        )
+        .expect("load candidate membership stage")
+        .expect("candidate membership stage");
+        let registry_generation = stage.0["registry_generation"]
+            .as_i64()
+            .expect("candidate registry generation");
+        let relation_id = stage.0["relation_id"]
+            .as_str()
+            .expect("candidate relation identity")
+            .to_string();
+        Spi::run_with_args(
+            "INSERT INTO synchro.sync_stream_reset_membership_edges (
+                 reset_id, relation_id, table_name, record_id, scope_id,
+                 checksum, row_version
+             )
+             SELECT captured.reset_id, captured.relation_id, registry.table_name,
+                    captured.record_id, 'candidate-sentinel', captured.checksum,
+                    captured.row_version
+             FROM synchro.sync_stream_reset_captured_rows captured
+             JOIN synchro.sync_registry registry
+               ON registry.registry_generation = $3
+              AND registry.relation_id = captured.relation_id
+             WHERE captured.reset_id = $1::uuid
+               AND captured.relation_id = $2::uuid
+               AND captured.record_id = $4",
+            &[
+                reset_id.as_str().into(),
+                relation_id.as_str().into(),
+                registry_generation.into(),
+                untouched_id.into(),
+            ],
+        )
+        .expect("insert untouched candidate sentinel edge");
+
+        Spi::connect_mut(|client| {
+            client
+                .update(
+                    "SELECT set_config('synchro.stream_reset_staging_id', $1, true)",
+                    None,
+                    &[reset_id.as_str().into()],
+                )
+                .map_err(|error| error.to_string())?;
+            client
+                .update(
+                    "SELECT set_config(
+                         'synchro.stream_reset_staging_registry_generation', $1, true
+                     )",
+                    None,
+                    &[registry_generation.to_string().as_str().into()],
+                )
+                .map_err(|error| error.to_string())?;
+            let registry = crate::registry::load_registry_generation_from_client(
+                client,
+                registry_generation,
+            )
+            .map_err(|error| error.to_string())?;
+            crate::bgworker::reconcile_candidate_membership_records(
+                client,
+                &reset_id,
+                registry_generation,
+                &registry,
+                &[(relation_id.clone(), affected_id.to_string())],
+            )
+        })
+        .expect("reconcile only the affected candidate membership");
+
+        let edges: pgrx::JsonB = Spi::get_one_with_args(
+            "SELECT jsonb_object_agg(record_id, scopes ORDER BY record_id)
+             FROM (
+                 SELECT record_id, jsonb_agg(scope_id ORDER BY scope_id) AS scopes
+                 FROM synchro.sync_stream_reset_membership_edges
+                 WHERE reset_id = $1::uuid
+                   AND relation_id = $2::uuid
+                   AND record_id = ANY($3::text[])
+                 GROUP BY record_id
+             ) scoped",
+            &[
+                reset_id.as_str().into(),
+                relation_id.as_str().into(),
+                vec![affected_id, untouched_id].into(),
+            ],
+        )
+        .expect("load candidate membership edges")
+        .expect("candidate membership edges");
+
+        assert_eq!(edges.0[affected_id], json!(["user:u1"]));
+        assert_eq!(
+            edges.0[untouched_id],
+            json!(["candidate-sentinel", "user:u1"])
+        );
+    }

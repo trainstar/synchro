@@ -685,6 +685,107 @@
         );
     }
 
+    fn reset_runtime_for_unbound_registration_test() {
+        Spi::run(
+            "UPDATE synchro.sync_runtime_state
+             SET active_slot_name = NULL,
+                 active_publication_name = NULL,
+                 active_publication_oid = NULL,
+                 updated_at = now()
+             WHERE singleton;
+             UPDATE synchro.sync_wal_progress
+             SET generation_start_lsn = NULL,
+                 materialized_commit_lsn = NULL,
+                 materialized_end_lsn = NULL,
+                 acknowledged_end_lsn = NULL,
+                 updated_at = now()
+             WHERE singleton",
+        )
+        .expect("reset runtime for unbound registration test");
+    }
+
+    fn bind_test_runtime_after_registration(slot: &str) -> i64 {
+        Spi::run_with_args(
+            "UPDATE synchro.sync_runtime_state
+             SET active_slot_name = $1,
+                  updated_at = now()
+             WHERE singleton",
+            &[slot.into()],
+        )
+        .expect("bind unbound registration test runtime");
+        Spi::get_one_with_args(
+            "SELECT count(*)
+             FROM synchro.sync_registry_activation_requests request
+             JOIN synchro.sync_registry_generations generation
+               ON generation.generation = request.registry_generation
+              AND generation.state = 'pending'
+             WHERE request.emitted_at IS NOT NULL",
+            &[],
+        )
+        .expect("read unbound registration activation requests")
+        .expect("unbound registration activation message count")
+    }
+
+    fn create_and_register_unbound_test_table(table: &str) {
+        Spi::run(&format!(
+            "CREATE TABLE {table} (
+                 id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                 user_id TEXT NOT NULL,
+                 title TEXT NOT NULL DEFAULT '',
+                 updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                 deleted_at TIMESTAMPTZ
+             )"
+        ))
+        .expect("create unbound registration test table");
+        Spi::run(&format!(
+            "SELECT tests.register_legacy_test_table(
+                 '{table}',
+                 $$SELECT ARRAY['user:' || user_id] FROM {table} WHERE id = $1::uuid$$,
+                 'single_scope'
+             )"
+        ))
+        .expect("register unbound registration test table");
+    }
+
+    #[pg_test]
+    fn registration_committed_before_initial_slot_binding_is_replayed() {
+        setup_test_tables();
+        reset_runtime_for_unbound_registration_test();
+        create_and_register_unbound_test_table("test_prebound_registration");
+
+        let activation_messages = bind_test_runtime_after_registration("synchro_prebound_test");
+        reset_runtime_for_unbound_registration_test();
+
+        assert_eq!(
+            activation_messages, 1,
+            "registration activation was lost before initial slot binding"
+        );
+    }
+
+    #[pg_test]
+    fn repeated_unbound_reinstalls_replay_every_pending_registration() {
+        setup_test_tables();
+        for (index, table) in [
+            "test_reinstall_registration_one",
+            "test_reinstall_registration_two",
+            "test_reinstall_registration_three",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            reset_runtime_for_unbound_registration_test();
+            create_and_register_unbound_test_table(table);
+            let slot = format!("synchro_reinstall_test_{index}");
+            let activation_messages = bind_test_runtime_after_registration(&slot);
+            assert_eq!(
+                activation_messages,
+                i64::try_from(index + 1).expect("activation count fits"),
+                "pending registration {table} was lost during repeated reinstall"
+            );
+        }
+        reset_runtime_for_unbound_registration_test();
+    }
+
     fn backfill_scope_generation(scope_id: &str) -> i64 {
         Spi::get_one_with_args(
             "SELECT membership_generation
@@ -705,4 +806,51 @@
         )
         .unwrap()
         .expect("backfill edge count")
+    }
+
+    #[pg_test]
+    fn backfill_membership_spi_query_is_batched() {
+        setup_test_tables();
+        let record_ids = vec![
+            "1a1a1a1a-1a1a-1a1a-1a1a-1a1a1a1a1a1a".to_string(),
+            "1b1b1b1b-1b1b-1b1b-1b1b-1b1b1b1b1b1b".to_string(),
+        ];
+        for record_id in &record_ids {
+            Spi::run_with_args(
+                "INSERT INTO test_products (id, name, price)
+                 VALUES ($1::uuid, 'Bounded membership', 12)",
+                &[record_id.as_str().into()],
+            )
+            .expect("insert bounded membership product");
+            insert_changelog("global", "test_products", record_id, 1);
+        }
+
+        let registration = Spi::connect(|client| {
+            let registry = crate::registry::load_registry_from_client(client)?;
+            Ok::<_, pgrx::spi::Error>(
+                registry
+                    .into_iter()
+                    .find(|registration| registration.table_name == "test_products")
+                    .expect("product membership registration"),
+            )
+        })
+        .expect("load product membership registration");
+        let query = crate::materialize::membership_batch_query(&registration)
+            .expect("build bounded membership query");
+        let memberships = Spi::connect(|client| {
+            crate::materialize::resolve_membership_batch(client, &registration, &record_ids)
+        })
+        .expect("resolve bounded membership batch");
+        let response: pgrx::JsonB = Spi::get_one(
+            "SELECT synchro_backfill_bucket_edges('test_products', 1000)",
+        )
+        .expect("run bounded membership backfill")
+        .expect("bounded membership backfill response");
+
+        assert_eq!(query.matches("jsonb_to_recordset").count(), 1);
+        assert_eq!(query.matches("CROSS JOIN LATERAL").count(), 1);
+        assert_eq!(memberships.len(), 2);
+        assert!(memberships.values().all(|scopes| scopes == &["global"]));
+        assert_eq!(response.0["records"], json!(2));
+        assert_eq!(response.0["edges"], json!(2));
     }

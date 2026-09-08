@@ -1,7 +1,7 @@
 use pgrx::prelude::*;
 use pgrx::spi::SpiClient;
+use synchro_core::checksum::SchemaHash;
 
-use crate::bucketing::resolve_membership;
 use crate::pull::{canonicalize_synced_row_data, synced_row_digest, typed_primary_key_bytes};
 use crate::registry::{
     load_registry_from_client, load_registry_generation_for_activation,
@@ -138,6 +138,87 @@ fn synchro_backfill_bucket_edges(
             "boundary": boundary,
         }))
     })
+}
+
+pub(crate) fn membership_batch_query(registration: &TableRegistration) -> Result<String, String> {
+    if registration.max_scope_fanout <= 0 {
+        return Err("registered membership evaluation metadata is invalid".to_string());
+    }
+    let result_limit = registration
+        .max_scope_fanout
+        .checked_add(1)
+        .ok_or_else(|| "registered scope fanout limit overflowed".to_string())?;
+    Ok(format!(
+        "SELECT input.record_id, membership.scope_id
+         FROM jsonb_to_recordset($1::jsonb) AS input(record_id text)
+         CROSS JOIN LATERAL (
+             SELECT membership.scope_id
+             FROM {}(input.record_id::{}) AS membership(scope_id)
+             LIMIT {}
+         ) membership",
+        crate::bucketing::qualified_function_name(&registration.membership_function),
+        registration.pk_type,
+        result_limit,
+    ))
+}
+
+/// Resolve one relation's bounded key batch through one SPI query.
+pub(crate) fn resolve_membership_batch(
+    client: &SpiClient<'_>,
+    registration: &TableRegistration,
+    record_ids: &[String],
+) -> Result<std::collections::HashMap<String, Vec<String>>, pgrx::spi::Error> {
+    let maximum = usize::try_from(registration.max_scope_fanout)
+        .unwrap_or_else(|_| pgrx::error!("registered scope fanout limit is invalid"));
+    let query =
+        membership_batch_query(registration).unwrap_or_else(|error| pgrx::error!("{error}"));
+    let mut memberships = std::collections::HashMap::with_capacity(record_ids.len());
+    let mut seen_records = std::collections::HashSet::with_capacity(record_ids.len());
+    for record_id in record_ids {
+        if !seen_records.insert(record_id) {
+            pgrx::error!("membership batch contains a duplicate record identity");
+        }
+        memberships.insert(record_id.clone(), Vec::new());
+    }
+    if memberships.is_empty() {
+        return Ok(memberships);
+    }
+
+    let input = record_ids
+        .iter()
+        .map(|record_id| serde_json::json!({ "record_id": record_id }))
+        .collect::<Vec<_>>();
+    let rows = client.select(
+        &query,
+        None,
+        &[pgrx::JsonB(serde_json::Value::Array(input)).into()],
+    )?;
+    for row in rows {
+        let record_id = row
+            .get_by_name::<String, &str>("record_id")?
+            .unwrap_or_else(|| pgrx::error!("membership batch record identity is missing"));
+        let scopes = memberships.get_mut(&record_id).unwrap_or_else(|| {
+            pgrx::error!("membership batch returned an unknown record identity")
+        });
+        if scopes.len() >= maximum {
+            pgrx::error!("membership function exceeded its registered scope fanout bound");
+        }
+        let scope_id = row
+            .get_by_name::<String, &str>("scope_id")?
+            .unwrap_or_else(|| pgrx::error!("membership function returned a null scope ID"));
+        if scope_id.is_empty()
+            || scope_id.as_bytes().contains(&0)
+            || scope_id.chars().any(char::is_control)
+        {
+            pgrx::error!("membership function returned an invalid scope ID");
+        }
+        scopes.push(scope_id);
+    }
+    for scopes in memberships.values_mut() {
+        scopes.sort_by(|left, right| left.as_bytes().cmp(right.as_bytes()));
+        scopes.dedup();
+    }
+    Ok(memberships)
 }
 
 pub(crate) fn activate_staged_membership_generation(
@@ -800,6 +881,7 @@ fn stage_table_edges(
     let mut record_count = 0i64;
     let mut edge_count = 0i64;
     let mut batch_count = 0i64;
+    let mut cached_schema_hash = None;
 
     loop {
         let rows = client
@@ -844,19 +926,29 @@ fn stage_table_edges(
             });
         }
 
-        for record in records {
+        let schema_hash = match cached_schema_hash {
+            Some(schema_hash) => schema_hash,
+            None => {
+                let loaded =
+                    crate::pull::schema_hash_for_generation(client, table.registry_generation)?;
+                cached_schema_hash = Some(loaded);
+                loaded
+            }
+        };
+        let mut computed_digests = std::collections::HashMap::with_capacity(records.len());
+        for record in &records {
             if record.checksum.len() != 32 {
                 return Err(format!(
                     "captured row {}.{} has an invalid checksum",
                     table.table_name, record.record_id
                 ));
             }
-            let computed = synced_row_digest(
-                client,
+            let computed = synced_row_digest_with_schema_hash(
                 table,
                 &record.row_data.0,
                 &record.record_id,
                 &record.row_version,
+                schema_hash,
             )
             .map_err(|error| {
                 format!(
@@ -870,49 +962,103 @@ fn stage_table_edges(
                     table.table_name, record.record_id
                 ));
             }
+            computed_digests.insert(record.record_id.clone(), computed);
+        }
 
-            let desired =
-                resolve_membership(client, table, &record.record_id).map_err(|error| {
-                    format!(
-                        "resolving membership for {}.{}: {error}",
-                        table.table_name, record.record_id
-                    )
-                })?;
-            for bucket_id in desired {
-                client
-                    .update(
-                        "INSERT INTO pg_temp.synchro_backfill_edges (
-                             relation_id, table_name, record_id, bucket_id,
-                             checksum, row_version
-                         ) VALUES ($1::uuid, $2, $3, $4, $5, $6::uuid)",
-                        None,
-                        &[
-                            table.relation_id.as_str().into(),
-                            table.table_name.as_str().into(),
-                            record.record_id.as_str().into(),
-                            bucket_id.as_str().into(),
-                            computed.as_bytes().to_vec().into(),
-                            record.row_version.as_str().into(),
-                        ],
-                    )
-                    .map_err(|error| {
-                        format!(
-                            "staging edge for {}.{}: {error}",
-                            table.table_name, record.record_id
-                        )
-                    })?;
-                edge_count = edge_count
-                    .checked_add(1)
-                    .ok_or_else(|| "membership backfill edge count overflowed".to_string())?;
+        let record_ids = records
+            .iter()
+            .map(|record| record.record_id.clone())
+            .collect::<Vec<_>>();
+        let memberships = resolve_membership_batch(client, table, &record_ids)
+            .map_err(|error| format!("resolving membership for {}: {error}", table.table_name))?;
+        let mut edge_rows = Vec::new();
+        for record in &records {
+            let digest = computed_digests
+                .get(&record.record_id)
+                .ok_or_else(|| "computed membership digest is missing".to_string())?;
+            let scopes = memberships
+                .get(&record.record_id)
+                .ok_or_else(|| "resolved membership is missing a captured row".to_string())?;
+            for bucket_id in scopes {
+                edge_rows.push(serde_json::json!({
+                    "record_id": record.record_id,
+                    "bucket_id": bucket_id,
+                    "checksum_hex": lower_hex(digest.as_bytes()),
+                    "row_version": record.row_version,
+                }));
             }
             record_count = record_count
                 .checked_add(1)
                 .ok_or_else(|| "membership backfill record count overflowed".to_string())?;
-            last_record_id = record.record_id;
         }
+        if !edge_rows.is_empty() {
+            let expected_edges = edge_rows.len();
+            let inserted = client
+                .update(
+                    "INSERT INTO pg_temp.synchro_backfill_edges (
+                         relation_id, table_name, record_id, bucket_id,
+                         checksum, row_version
+                     )
+                     SELECT $2::uuid, $3, input.record_id, input.bucket_id,
+                            decode(input.checksum_hex, 'hex'), input.row_version::uuid
+                     FROM jsonb_to_recordset($1::jsonb) AS input(
+                         record_id text, bucket_id text, checksum_hex text, row_version text
+                     )
+                     RETURNING record_id",
+                    None,
+                    &[
+                        pgrx::JsonB(serde_json::Value::Array(edge_rows)).into(),
+                        table.relation_id.as_str().into(),
+                        table.table_name.as_str().into(),
+                    ],
+                )
+                .map_err(|error| {
+                    format!("staging membership edges for {}: {error}", table.table_name)
+                })?
+                .len();
+            if inserted != expected_edges {
+                return Err("membership backfill did not stage every edge".to_string());
+            }
+            edge_count =
+                edge_count
+                    .checked_add(i64::try_from(inserted).map_err(|_| {
+                        "membership backfill edge count is out of range".to_string()
+                    })?)
+                    .ok_or_else(|| "membership backfill edge count overflowed".to_string())?;
+        }
+        last_record_id = records
+            .last()
+            .map(|record| record.record_id.clone())
+            .ok_or_else(|| "membership backfill batch is empty".to_string())?;
     }
 
     Ok((record_count, edge_count, batch_count))
+}
+
+fn synced_row_digest_with_schema_hash(
+    table: &TableRegistration,
+    data: &serde_json::Value,
+    record_id: &str,
+    server_version: &str,
+    schema_hash: SchemaHash,
+) -> Result<synchro_core::checksum::Sha256Digest, String> {
+    let mut canonical = data.clone();
+    canonicalize_synced_row_data(table, &mut canonical)?;
+    let canonical_table = crate::pull::canonical_table(table)?;
+    let primary_key = crate::pull::row_primary_key_json(table, record_id)?;
+    let row = synchro_core::checksum::CanonicalRow::from_json(
+        serde_json::to_string(&primary_key)
+            .map_err(|error| format!("encoding primary key: {error}"))?,
+        &serde_json::to_string(&canonical)
+            .map_err(|error| format!("encoding wire row: {error}"))?,
+    )
+    .map_err(|error| format!("canonical row is invalid: {error}"))?;
+    synchro_core::checksum::row_digest(schema_hash, &canonical_table, &row, server_version)
+        .map_err(|error| format!("computing row digest: {error}"))
+}
+
+fn lower_hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 fn verify_staging(client: &SpiClient<'_>, tables: &[&TableRegistration]) -> Result<(), String> {

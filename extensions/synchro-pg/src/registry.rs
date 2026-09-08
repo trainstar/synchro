@@ -2578,7 +2578,28 @@ fn mark_generation_validated(
     Ok(())
 }
 
-fn emit_registry_activation(client: &SpiClient<'_>, generation: i64) -> Result<(), spi::Error> {
+/// Preserve the activation when a replacement slot can start after this transaction commits.
+fn queue_registry_activation_if_unbound(
+    client: &mut SpiClient<'_>,
+    generation: i64,
+) -> Result<(), spi::Error> {
+    client.update(
+        "WITH unbound AS (
+             SELECT singleton
+             FROM synchro.sync_runtime_state
+             WHERE singleton AND active_slot_name IS NULL
+             FOR UPDATE
+         )
+         INSERT INTO synchro.sync_registry_activation_requests (registry_generation)
+         SELECT $1 FROM unbound
+         ON CONFLICT (registry_generation) DO NOTHING",
+        None,
+        &[generation.into()],
+    )?;
+    Ok(())
+}
+
+fn emit_registry_activation(client: &mut SpiClient<'_>, generation: i64) -> Result<(), spi::Error> {
     if generation <= 0 {
         pgrx::error!("registry generation is invalid");
     }
@@ -2599,12 +2620,13 @@ fn emit_registry_activation(client: &SpiClient<'_>, generation: i64) -> Result<(
 /// verified an exported-snapshot projection bootstrap. Other generations keep
 /// the normal commit-ordered WAL activation path.
 fn emit_registry_activation_when_ready(
-    client: &SpiClient<'_>,
+    client: &mut SpiClient<'_>,
     generation: i64,
 ) -> Result<(), spi::Error> {
     if crate::schema::generation_requires_projection_bootstrap(client, generation)? {
         return Ok(());
     }
+    queue_registry_activation_if_unbound(client, generation)?;
     emit_registry_activation(client, generation)
 }
 

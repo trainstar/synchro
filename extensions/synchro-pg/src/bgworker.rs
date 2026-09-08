@@ -11,7 +11,7 @@ use synchro_core::change::ChangeOperation;
 use synchro_core::checksum::Sha256Digest;
 use synchro_core::edge_diff::{build_edge_diff_entries, diff_bucket_sets};
 
-use crate::bucketing::{resolve_dependency_impacts, resolve_membership};
+use crate::bucketing::resolve_dependency_impacts;
 use crate::pull::synced_row_digest;
 use crate::registry::{
     load_membership_dependencies_from_client, load_registry_generation_for_activation,
@@ -2360,6 +2360,12 @@ fn select_candidate_projection(
     Ok(())
 }
 
+struct CandidateMembershipRecord {
+    record_id: String,
+    checksum: Vec<u8>,
+    row_version: String,
+}
+
 fn recompute_candidate_membership(
     client: &mut SpiClient<'_>,
     target: ProjectionTarget<'_>,
@@ -2386,62 +2392,275 @@ fn recompute_candidate_membership(
         if registration.registry_generation != registry_generation {
             return Err("candidate registry generation changed".to_string());
         }
-        let rows = client
-            .select(
-                "SELECT record_id, checksum, row_version::text AS row_version
-                 FROM synchro.sync_stream_reset_captured_rows
-                 WHERE reset_id = $1::uuid
-                   AND relation_id = $2::uuid
-                   AND registry_generation = $3
-                   AND NOT deleted
-                 ORDER BY record_id",
-                None,
-                &[
-                    bootstrap_id.into(),
-                    registration.relation_id.as_str().into(),
-                    registry_generation.into(),
-                ],
-            )
-            .map_err(|_| "loading candidate membership rows failed".to_string())?;
-        for row in rows {
-            let record_id = optional_text(&row, "record_id")?
-                .filter(|value| !value.is_empty())
-                .ok_or_else(|| "candidate membership row identity is missing".to_string())?;
-            let row_version = optional_text(&row, "row_version")?
-                .filter(|value| !value.is_empty())
-                .ok_or_else(|| "candidate membership row version is missing".to_string())?;
-            let checksum = row
-                .get_by_name::<Vec<u8>, &str>("checksum")
-                .map_err(|_| "reading candidate membership row failed".to_string())?
-                .and_then(|value| <[u8; 32]>::try_from(value).ok())
-                .ok_or_else(|| "candidate membership row digest is invalid".to_string())?;
-            let scopes = resolve_membership(client, registration, &record_id)
-                .map_err(|_| "resolving candidate membership failed".to_string())?;
-            for scope_id in scopes {
-                client
-                    .update(
-                        "INSERT INTO synchro.sync_stream_reset_membership_edges (
-                             reset_id, relation_id, table_name, record_id, scope_id,
-                             checksum, row_version, staged_at
-                         ) VALUES (
-                             $1::uuid, $2::uuid, $3, $4, $5, $6, $7::uuid, now()
-                         )",
-                        None,
-                        &[
-                            bootstrap_id.into(),
-                            registration.relation_id.as_str().into(),
-                            registration.table_name.as_str().into(),
-                            record_id.as_str().into(),
-                            scope_id.as_str().into(),
-                            checksum.to_vec().into(),
-                            row_version.as_str().into(),
-                        ],
-                    )
-                    .map_err(|_| "recording candidate membership failed".to_string())?;
+        let mut after = None;
+        loop {
+            let records = load_candidate_membership_batch(
+                client,
+                bootstrap_id,
+                registry_generation,
+                registration,
+                after.as_deref(),
+            )?;
+            if records.is_empty() {
+                break;
             }
+            after = records.last().map(|record| record.record_id.clone());
+            write_candidate_membership_records(client, bootstrap_id, registration, &records)?;
         }
     }
     Ok(())
+}
+
+/// Reconcile only the candidate rows that one transaction changed.
+pub(crate) fn reconcile_candidate_membership_records(
+    client: &mut SpiClient<'_>,
+    bootstrap_id: &str,
+    registry_generation: i64,
+    registry: &[TableRegistration],
+    records: &[(String, String)],
+) -> Result<(), String> {
+    if records.is_empty() {
+        return Ok(());
+    }
+    let mut registrations = HashMap::new();
+    for registration in registry
+        .iter()
+        .filter(|registration| registration.is_synced())
+    {
+        if registration.registry_generation != registry_generation {
+            return Err("candidate registry generation changed".to_string());
+        }
+        registrations.insert(registration.relation_id.as_str(), registration);
+    }
+    let mut seen = HashSet::with_capacity(records.len());
+    let mut records_by_relation = HashMap::<&str, Vec<String>>::new();
+    let mut edge_input = Vec::with_capacity(records.len());
+    for (relation_id, record_id) in records {
+        let registration = registrations
+            .get(relation_id.as_str())
+            .ok_or_else(|| "candidate impact relation is unavailable".to_string())?;
+        if !seen.insert((relation_id.as_str(), record_id.as_str())) {
+            continue;
+        }
+        records_by_relation
+            .entry(registration.relation_id.as_str())
+            .or_default()
+            .push(record_id.clone());
+        edge_input.push(serde_json::json!({
+            "relation_id": relation_id,
+            "record_id": record_id,
+        }));
+    }
+    client
+        .update(
+            "WITH impact AS (
+                 SELECT relation_id, record_id
+                 FROM jsonb_to_recordset($2::jsonb) AS input(
+                     relation_id text, record_id text
+                 )
+             )
+             DELETE FROM synchro.sync_stream_reset_membership_edges edge
+             USING impact
+             WHERE edge.reset_id = $1::uuid
+               AND edge.relation_id = impact.relation_id::uuid
+               AND edge.record_id = impact.record_id",
+            None,
+            &[
+                bootstrap_id.into(),
+                pgrx::JsonB(serde_json::Value::Array(edge_input)).into(),
+            ],
+        )
+        .map_err(|_| "clearing affected candidate membership failed".to_string())?;
+    for (relation_id, record_ids) in records_by_relation {
+        let registration = registrations
+            .get(relation_id)
+            .ok_or_else(|| "candidate impact registration is unavailable".to_string())?;
+        let records = load_candidate_membership_records(
+            client,
+            bootstrap_id,
+            registry_generation,
+            registration,
+            &record_ids,
+        )?;
+        write_candidate_membership_records(client, bootstrap_id, registration, &records)?;
+    }
+    Ok(())
+}
+
+fn load_candidate_membership_batch(
+    client: &SpiClient<'_>,
+    bootstrap_id: &str,
+    registry_generation: i64,
+    registration: &TableRegistration,
+    after: Option<&str>,
+) -> Result<Vec<CandidateMembershipRecord>, String> {
+    let (query, values) = match after {
+        Some(after) => (
+            "SELECT record_id, checksum, row_version::text AS row_version
+             FROM synchro.sync_stream_reset_captured_rows
+             WHERE reset_id = $1::uuid
+               AND relation_id = $2::uuid
+               AND registry_generation = $3
+               AND NOT deleted
+               AND record_id > $4
+             ORDER BY record_id
+             LIMIT $5",
+            vec![
+                bootstrap_id.into(),
+                registration.relation_id.as_str().into(),
+                registry_generation.into(),
+                after.into(),
+                i64::try_from(JSONB_BATCH_SIZE)
+                    .map_err(|_| "candidate membership batch size is invalid".to_string())?
+                    .into(),
+            ],
+        ),
+        None => (
+            "SELECT record_id, checksum, row_version::text AS row_version
+             FROM synchro.sync_stream_reset_captured_rows
+             WHERE reset_id = $1::uuid
+               AND relation_id = $2::uuid
+               AND registry_generation = $3
+               AND NOT deleted
+             ORDER BY record_id
+             LIMIT $4",
+            vec![
+                bootstrap_id.into(),
+                registration.relation_id.as_str().into(),
+                registry_generation.into(),
+                i64::try_from(JSONB_BATCH_SIZE)
+                    .map_err(|_| "candidate membership batch size is invalid".to_string())?
+                    .into(),
+            ],
+        ),
+    };
+    let rows = client
+        .select(query, None, &values)
+        .map_err(|_| "loading candidate membership rows failed".to_string())?;
+    candidate_membership_records(rows)
+}
+
+fn load_candidate_membership_records(
+    client: &SpiClient<'_>,
+    bootstrap_id: &str,
+    registry_generation: i64,
+    registration: &TableRegistration,
+    record_ids: &[String],
+) -> Result<Vec<CandidateMembershipRecord>, String> {
+    if record_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let rows = client
+        .select(
+            "SELECT record_id, checksum, row_version::text AS row_version
+             FROM synchro.sync_stream_reset_captured_rows
+             WHERE reset_id = $1::uuid
+               AND relation_id = $2::uuid
+               AND registry_generation = $3
+               AND NOT deleted
+               AND record_id = ANY($4)
+             ORDER BY record_id",
+            None,
+            &[
+                bootstrap_id.into(),
+                registration.relation_id.as_str().into(),
+                registry_generation.into(),
+                record_ids.to_vec().into(),
+            ],
+        )
+        .map_err(|_| "loading affected candidate membership rows failed".to_string())?;
+    candidate_membership_records(rows)
+}
+
+fn candidate_membership_records(
+    rows: SpiTupleTable<'_>,
+) -> Result<Vec<CandidateMembershipRecord>, String> {
+    let mut records = Vec::with_capacity(rows.len());
+    for row in rows {
+        let record_id = optional_text(&row, "record_id")?
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| "candidate membership row identity is missing".to_string())?;
+        let row_version = optional_text(&row, "row_version")?
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| "candidate membership row version is missing".to_string())?;
+        let checksum = row
+            .get_by_name::<Vec<u8>, &str>("checksum")
+            .map_err(|_| "reading candidate membership row failed".to_string())?
+            .and_then(|value| <[u8; 32]>::try_from(value.clone()).ok().map(|_| value))
+            .ok_or_else(|| "candidate membership row digest is invalid".to_string())?;
+        records.push(CandidateMembershipRecord {
+            record_id,
+            checksum,
+            row_version,
+        });
+    }
+    Ok(records)
+}
+
+fn write_candidate_membership_records(
+    client: &mut SpiClient<'_>,
+    bootstrap_id: &str,
+    registration: &TableRegistration,
+    records: &[CandidateMembershipRecord],
+) -> Result<(), String> {
+    if records.is_empty() {
+        return Ok(());
+    }
+    let record_ids = records
+        .iter()
+        .map(|record| record.record_id.clone())
+        .collect::<Vec<_>>();
+    let memberships =
+        crate::materialize::resolve_membership_batch(client, registration, &record_ids)
+            .map_err(|_| "resolving candidate membership failed".to_string())?;
+    let mut edges = Vec::new();
+    for record in records {
+        let scopes = memberships
+            .get(&record.record_id)
+            .ok_or_else(|| "candidate membership result is missing a record".to_string())?;
+        for scope_id in scopes {
+            edges.push(serde_json::json!({
+                "record_id": record.record_id,
+                "scope_id": scope_id,
+                "checksum_hex": lower_hex(&record.checksum),
+                "row_version": record.row_version,
+            }));
+        }
+    }
+    if edges.is_empty() {
+        return Ok(());
+    }
+    let expected = edges.len();
+    let inserted = client
+        .update(
+            "INSERT INTO synchro.sync_stream_reset_membership_edges (
+                 reset_id, relation_id, table_name, record_id, scope_id,
+                 checksum, row_version, staged_at
+             )
+             SELECT $2::uuid, $3::uuid, $4, input.record_id, input.scope_id,
+                    decode(input.checksum_hex, 'hex'), input.row_version::uuid, now()
+             FROM jsonb_to_recordset($1::jsonb) AS input(
+                 record_id text, scope_id text, checksum_hex text, row_version text
+             )
+             RETURNING record_id",
+            None,
+            &[
+                pgrx::JsonB(serde_json::Value::Array(edges)).into(),
+                bootstrap_id.into(),
+                registration.relation_id.as_str().into(),
+                registration.table_name.as_str().into(),
+            ],
+        )
+        .map_err(|_| "recording candidate membership failed".to_string())?
+        .len();
+    if inserted != expected {
+        return Err("candidate membership insert count differs".to_string());
+    }
+    Ok(())
+}
+
+fn lower_hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 fn finalize_candidate(bootstrap: &CandidateBootstrap) -> Result<(), String> {
@@ -5141,9 +5360,28 @@ fn materialize_impacts(
     registry: &[TableRegistration],
     impacts: Vec<ImpactedRow>,
 ) -> Result<i64, PoisonFailure> {
-    if matches!(target, ProjectionTarget::Candidate { .. }) {
-        recompute_candidate_membership(client, target, registry)
-            .map_err(|_| failure("scope_evaluation_failed", transaction.commit_lsn))?;
+    if let ProjectionTarget::Candidate {
+        bootstrap_id,
+        registry_generation,
+    } = target
+    {
+        let records = impacts
+            .iter()
+            .map(|impact| {
+                let registration = registry
+                    .get(impact.registration_index)
+                    .ok_or_else(|| failure("validation_failed", transaction.commit_lsn))?;
+                Ok((registration.relation_id.clone(), impact.record_id.clone()))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        reconcile_candidate_membership_records(
+            client,
+            bootstrap_id,
+            registry_generation,
+            registry,
+            &records,
+        )
+        .map_err(|_| failure("scope_evaluation_failed", transaction.commit_lsn))?;
         return Ok(0);
     }
     let ProjectionTarget::Active { stream_generation } = target else {
@@ -5195,6 +5433,29 @@ fn materialize_impacts(
             }
         }
 
+        let mut record_ids_by_registration = HashMap::<usize, Vec<String>>::new();
+        for impact in impact_chunk
+            .iter()
+            .filter(|impact| impact.operation != ChangeOperation::Delete)
+        {
+            record_ids_by_registration
+                .entry(impact.registration_index)
+                .or_default()
+                .push(impact.record_id.clone());
+        }
+        let mut desired_memberships = HashMap::<(usize, String), Vec<String>>::new();
+        for (registration_index, record_ids) in record_ids_by_registration {
+            let registration = registry
+                .get(registration_index)
+                .ok_or_else(|| failure("validation_failed", transaction.commit_lsn))?;
+            let memberships =
+                crate::materialize::resolve_membership_batch(client, registration, &record_ids)
+                    .map_err(|_| failure("scope_evaluation_failed", transaction.commit_lsn))?;
+            for (record_id, scopes) in memberships {
+                desired_memberships.insert((registration_index, record_id), scopes);
+            }
+        }
+
         let mut changelog_effects = Vec::new();
         let mut edge_deletes = Vec::new();
         let mut edge_upserts = Vec::new();
@@ -5206,8 +5467,9 @@ fn materialize_impacts(
             let mut desired = if impact.operation == ChangeOperation::Delete {
                 Vec::new()
             } else {
-                resolve_membership(client, registration, &impact.record_id)
-                    .map_err(|_| failure("scope_evaluation_failed", transaction.commit_lsn))?
+                desired_memberships
+                    .remove(&(impact.registration_index, impact.record_id.clone()))
+                    .ok_or_else(|| failure("scope_evaluation_failed", transaction.commit_lsn))?
             };
             desired.sort();
             desired.dedup();
