@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/trainstar/synchro/conformance/invariants"
 	"github.com/trainstar/synchro/conformance/scenarios"
 )
 
@@ -63,6 +64,60 @@ func TestAdapterReversePortSelectsOnlyLoopbackServers(t *testing.T) {
 		if port != test.port || required != test.required {
 			t.Errorf("adapter reverse for %q = %d, %t", test.serverURL, port, required)
 		}
+	}
+}
+
+func TestRestartInvariantCheckRejectsUnreplacedProcess(t *testing.T) {
+	before := restartInvariantCaptureFixture("process-a", testDigest)
+	after := restartInvariantCaptureFixture("process-a", testDigest)
+	err := checkRestartInvariants(Client{UserID: "user-a", ClientID: "client-a"}, before, after)
+	if err == nil || !strings.Contains(err.Error(), string(invariants.RuleStateForkProcessNotReplaced)) {
+		t.Fatalf("unreplaced process invariant result = %v", err)
+	}
+}
+
+func TestRestartInvariantCheckRejectsChangedDatabaseFingerprint(t *testing.T) {
+	before := restartInvariantCaptureFixture("process-a", testDigest)
+	after := restartInvariantCaptureFixture("process-b", strings.Repeat("b", 64))
+	err := checkRestartInvariants(Client{UserID: "user-a", ClientID: "client-a"}, before, after)
+	if err == nil || !strings.Contains(err.Error(), string(invariants.RuleStateForkDatabaseIdentityChanged)) {
+		t.Fatalf("changed fingerprint invariant result = %v", err)
+	}
+}
+
+func restartInvariantCaptureFixture(processID, fingerprint string) Result {
+	status := "stopped"
+	zero := 0
+	maintenanceCursor := int64(0)
+	empty := json.RawMessage(`[]`)
+	return Result{
+		Status:                          &status,
+		ApplicationRowCount:             &zero,
+		MutationLedgerCount:             &zero,
+		MutationOutcomeCount:            &zero,
+		SealedBatchCount:                &zero,
+		RejectedMutationCount:           &zero,
+		ScopeStateCount:                 &zero,
+		ScopeRowCount:                   &zero,
+		ProvenanceCount:                 &zero,
+		RowMetadataCount:                &zero,
+		RebuildAttemptCount:             &zero,
+		RebuildReceiptCount:             &zero,
+		Schema:                          json.RawMessage(`null`),
+		ApplicationRows:                 empty,
+		RetainedMutations:               empty,
+		RejectedMutations:               empty,
+		ScopeStates:                     empty,
+		ScopeRows:                       empty,
+		RowMetadata:                     empty,
+		Checkpoints:                     empty,
+		Provenance:                      empty,
+		RebuildAttempts:                 empty,
+		RebuildReceipts:                 empty,
+		RebuildReceiptProofs:            empty,
+		ProvenanceMaintenanceWorkCursor: &maintenanceCursor,
+		ProcessID:                       processID,
+		DatabaseIdentityFingerprint:     fingerprint,
 	}
 }
 

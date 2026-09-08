@@ -23,7 +23,9 @@ import (
 
 	"github.com/trainstar/synchro/conformance/faults"
 	"github.com/trainstar/synchro/conformance/internal/jsonstrict"
+	"github.com/trainstar/synchro/conformance/invariants"
 	"github.com/trainstar/synchro/conformance/scenarios"
+	"github.com/trainstar/synchro/conformance/vectors"
 )
 
 const (
@@ -262,10 +264,11 @@ type pausedCall struct {
 }
 
 type pendingResponseLoss struct {
-	batchID      string
-	before       Result
-	observations []TransportObservation
-	started      time.Time
+	batchID        string
+	before         Result
+	restartCapture Result
+	observations   []TransportObservation
+	started        time.Time
 }
 
 // NewPlatform creates a direct Android client platform.
@@ -985,6 +988,7 @@ func (p *Platform) synchronizeWithResponseLoss(ctx context.Context, state *platf
 	if err := state.session.Kill(ctx); err != nil {
 		return SynchronizationResult{}, fmt.Errorf("terminate Kotlin Android client after server response: %w", err)
 	}
+	// The engine compares identities but does not confirm that the killed process exited.
 	if err := state.session.WaitForExit(ctx); err != nil {
 		return SynchronizationResult{}, errors.New("Kotlin Android response-loss termination is not confirmed")
 	}
@@ -995,10 +999,12 @@ func (p *Platform) synchronizeWithResponseLoss(ctx context.Context, state *platf
 	state.terminated = true
 	state.started = false
 	state.pendingLoss = &pendingResponseLoss{
-		batchID:      batchID,
-		before:       before,
-		observations: cloneObservations(observations),
-		started:      started,
+		batchID: batchID,
+		before:  before,
+		// The last paused capture is the complete pre-kill state for restart comparison.
+		restartCapture: lastState,
+		observations:   cloneObservations(observations),
+		started:        started,
 	}
 	return synchronizationResult("blocked", mapped, window), nil
 }
@@ -1397,6 +1403,15 @@ func (p *Platform) ProcessStep(ctx context.Context, client Client, operation sce
 		if err != nil {
 			return StepObservation{}, fmt.Errorf("relaunch Kotlin Android client after response loss: %w", err)
 		}
+		after, err := captureClientState(ctx, state)
+		if err != nil {
+			p.discardRelaunchedClient(state)
+			return StepObservation{}, fmt.Errorf("capture Kotlin Android client after response loss: %w", err)
+		}
+		if err := checkRestartInvariants(state.client, loss.restartCapture, after); err != nil {
+			p.discardRelaunchedClient(state)
+			return StepObservation{}, err
+		}
 		state.pendingLoss = nil
 		state.restarted = true
 		window, err := state.windowFromResults(started, opened, opened, nil)
@@ -1410,12 +1425,15 @@ func (p *Platform) ProcessStep(ctx context.Context, client Client, operation sce
 }
 
 func (p *Platform) restartClient(ctx context.Context, client *platformClient) (Result, error) {
-	priorProcessID := client.processID
-	priorFingerprint := client.databaseIdentityFingerprint
+	before, err := captureClientState(ctx, client)
+	if err != nil {
+		return Result{}, fmt.Errorf("capture Kotlin Android client before restart: %w", err)
+	}
 	oldSession := client.session
 	if err := oldSession.Kill(ctx); err != nil {
 		return Result{}, err
 	}
+	// The engine compares identities but does not confirm that the killed process exited.
 	if err := oldSession.WaitForExit(ctx); err != nil {
 		return Result{}, errors.New("Kotlin Android client termination is not confirmed")
 	}
@@ -1428,10 +1446,13 @@ func (p *Platform) restartClient(ctx context.Context, client *platformClient) (R
 	if err != nil {
 		return Result{}, fmt.Errorf("relaunch Kotlin Android client: %w", err)
 	}
-	if err := verifyRestartIdentity(priorProcessID, priorFingerprint, client.processID, client.databaseIdentityFingerprint); err != nil {
-		closeClientSession(client.session)
-		client.session = nil
-		client.terminated = true
+	after, err := captureClientState(ctx, client)
+	if err != nil {
+		p.discardRelaunchedClient(client)
+		return Result{}, fmt.Errorf("capture Kotlin Android client after restart: %w", err)
+	}
+	if err := checkRestartInvariants(client.client, before, after); err != nil {
+		p.discardRelaunchedClient(client)
 		return Result{}, err
 	}
 	client.restarted = true
@@ -1439,8 +1460,6 @@ func (p *Platform) restartClient(ctx context.Context, client *platformClient) (R
 }
 
 func (p *Platform) relaunchExistingClient(ctx context.Context, client *platformClient) (Result, error) {
-	priorProcessID := client.processID
-	priorFingerprint := client.databaseIdentityFingerprint
 	config := p.config
 	config.ApplicationAPKPath = ""
 	config.InstrumentationAPKPath = ""
@@ -1468,18 +1487,258 @@ func (p *Platform) relaunchExistingClient(ctx context.Context, client *platformC
 		client.terminated = true
 		return Result{}, err
 	}
-	if err := verifyRestartIdentity(priorProcessID, priorFingerprint, client.processID, client.databaseIdentityFingerprint); err != nil {
-		closeKotlinSession(session)
-		p.mu.Lock()
-		if p.host == session {
-			p.host = nil
-		}
-		p.mu.Unlock()
-		client.session = nil
-		client.terminated = true
-		return Result{}, err
-	}
 	return opened, nil
+}
+
+func (p *Platform) discardRelaunchedClient(client *platformClient) {
+	var session *Session
+	if client.session != nil {
+		session = client.session.host
+	}
+	closeKotlinSession(session)
+	p.mu.Lock()
+	if p.host == session {
+		p.host = nil
+	}
+	p.mu.Unlock()
+	client.session = nil
+	client.terminated = true
+}
+
+func checkRestartInvariants(client Client, before, after Result) error {
+	observations := make([]invariants.Observation, 0, 2)
+	for index, capture := range []Result{before, after} {
+		observedClient, err := restartInvariantClientObservation(client, capture, index == 1)
+		if err != nil {
+			return fmt.Errorf("assemble Kotlin Android restart invariant observation %d: %w", index+1, err)
+		}
+		observations = append(observations, invariants.Observation{
+			Sequence: uint64(index + 1),
+			Clients:  []invariants.ClientObservation{observedClient},
+		})
+	}
+	violations, err := invariants.CheckNoStateForks(observations)
+	if err != nil {
+		return fmt.Errorf("check Kotlin Android restart invariant: %w", err)
+	}
+	if len(violations) == 0 {
+		return nil
+	}
+	rules := make([]string, len(violations))
+	for index, violation := range violations {
+		rules[index] = string(violation.RuleID)
+	}
+	return fmt.Errorf("Kotlin Android restart violated invariant rules %s", strings.Join(rules, ","))
+}
+
+func restartInvariantClientObservation(client Client, capture Result, restartBoundary bool) (invariants.ClientObservation, error) {
+	// CheckNoStateForks trusts Complete. Reject captures that omit any bounded durable detail.
+	if err := validateCapturedClientState(capture); err != nil {
+		return invariants.ClientObservation{}, err
+	}
+	if *capture.ApplicationRowCount > maximumRows ||
+		*capture.MutationLedgerCount > maximumRecords ||
+		*capture.RejectedMutationCount > maximumRecords ||
+		*capture.ScopeStateCount > maximumRecords ||
+		*capture.ScopeRowCount > maximumRecords ||
+		*capture.ProvenanceCount > maximumRecords ||
+		*capture.RowMetadataCount > maximumRecords ||
+		*capture.RebuildAttemptCount > maximumRecords ||
+		*capture.RebuildReceiptCount > maximumRecords {
+		return invariants.ClientObservation{}, errors.New("Kotlin Android restart invariant capture exceeds complete bounds")
+	}
+
+	stateParts := make([]scenarios.StateFacts, 0, 6)
+	stateClient := &platformClient{client: client}
+	for _, source := range []string{"application-rows", "pending-mutations", "rejected-mutations", "scope-state", "provenance", "rebuild-state"} {
+		facts, err := androidClientFactsForSource(source, stateClient, capture)
+		if err != nil {
+			return invariants.ClientObservation{}, err
+		}
+		stateParts = append(stateParts, scenarios.StateFacts{Clients: []scenarios.ClientDurabilityFact{*facts}})
+	}
+	merged, err := mergeKotlinStateFacts(stateParts...)
+	if err != nil {
+		return invariants.ClientObservation{}, err
+	}
+	if len(merged.Clients) != 1 ||
+		len(merged.Clients[0].Queue) != *capture.MutationLedgerCount ||
+		len(merged.Clients[0].Outcomes) != *capture.RejectedMutationCount ||
+		len(merged.Clients[0].Checkpoints) != *capture.ScopeStateCount ||
+		len(merged.Clients[0].Provenance) != *capture.ProvenanceCount {
+		return invariants.ClientObservation{}, errors.New("Kotlin Android restart invariant durable facts are incomplete")
+	}
+
+	rows, err := restartInvariantRows(capture)
+	if err != nil {
+		return invariants.ClientObservation{}, err
+	}
+	scopes, err := restartInvariantScopes(capture)
+	if err != nil {
+		return invariants.ClientObservation{}, err
+	}
+	scopeRows, err := restartInvariantScopeRows(capture)
+	if err != nil {
+		return invariants.ClientObservation{}, err
+	}
+	return invariants.ClientObservation{
+		State:     merged.Clients[0],
+		Rows:      rows,
+		Scopes:    scopes,
+		ScopeRows: scopeRows,
+		Process: &invariants.ProcessIdentityObservation{
+			ProcessID:                   capture.ProcessID,
+			DatabaseIdentityFingerprint: capture.DatabaseIdentityFingerprint,
+		},
+		RestartBoundary: restartBoundary,
+		Complete:        true,
+	}, nil
+}
+
+func restartInvariantRows(capture Result) ([]invariants.ClientRowObservation, error) {
+	values, err := androidApplicationRows(capture.ApplicationRows)
+	if err != nil {
+		return nil, err
+	}
+	if len(values) != *capture.ApplicationRowCount {
+		return nil, errors.New("Kotlin Android restart invariant application rows are incomplete")
+	}
+	var metadata []rowMetadataRecord
+	if err := decodeFactArray(capture.RowMetadata, &metadata, maximumRecords); err != nil {
+		return nil, errors.New("Kotlin Android restart invariant row metadata is invalid")
+	}
+	if len(metadata) != *capture.RowMetadataCount {
+		return nil, errors.New("Kotlin Android restart invariant row metadata is incomplete")
+	}
+	seenMetadata := make(map[string]struct{}, len(metadata))
+	for _, value := range metadata {
+		key := value.TableName + "\x00" + value.RecordID
+		if value.TableName == "" || value.RecordID == "" || value.ServerVersion == "" {
+			return nil, errors.New("Kotlin Android restart invariant row metadata is invalid")
+		}
+		if _, duplicate := seenMetadata[key]; duplicate {
+			return nil, errors.New("Kotlin Android restart invariant row metadata is duplicated")
+		}
+		seenMetadata[key] = struct{}{}
+	}
+	rows := make([]invariants.ClientRowObservation, 0, len(values)+len(metadata))
+	for _, value := range values {
+		canonical, err := json.Marshal(value)
+		if err != nil {
+			return nil, errors.New("encode Kotlin Android restart invariant application row failed")
+		}
+		rows = append(rows, invariants.ClientRowObservation{
+			TableID: "kotlin-application-row",
+			Row:     vectors.Row{PK: canonical},
+		})
+	}
+	for _, value := range metadata {
+		primaryKey, err := json.Marshal(value.RecordID)
+		if err != nil {
+			return nil, errors.New("encode Kotlin Android restart invariant row metadata identity failed")
+		}
+		var storedDigest *[sha256.Size]byte
+		if value.RowChecksum != nil {
+			storedDigest, err = restartInvariantChecksum(value.RowChecksum)
+			if err != nil {
+				return nil, err
+			}
+		}
+		rows = append(rows, invariants.ClientRowObservation{
+			TableID:       value.TableName,
+			Row:           vectors.Row{PK: primaryKey},
+			ServerVersion: value.ServerVersion,
+			StoredDigest:  storedDigest,
+		})
+	}
+	return rows, nil
+}
+
+func restartInvariantScopes(capture Result) ([]invariants.ClientScopeObservation, error) {
+	values, err := androidCursorScopeStates(capture.ScopeStates)
+	if err != nil {
+		return nil, err
+	}
+	if len(values) != *capture.ScopeStateCount {
+		return nil, errors.New("Kotlin Android restart invariant scopes are incomplete")
+	}
+	scopes := make([]invariants.ClientScopeObservation, 0, len(values))
+	for _, value := range values {
+		authoritative, err := restartInvariantChecksum(value.Checksum)
+		if err != nil {
+			return nil, err
+		}
+		var local *[sha256.Size]byte
+		if value.LocalChecksum != "" {
+			local, err = restartInvariantChecksum(&value.LocalChecksum)
+			if err != nil {
+				return nil, err
+			}
+		}
+		scopes = append(scopes, invariants.ClientScopeObservation{
+			ScopeID:             value.ScopeID,
+			RawCursor:           clonePointer(value.Cursor),
+			AuthoritativeDigest: authoritative,
+			LocalDigest:         local,
+			Generation:          uint64(value.Generation),
+		})
+	}
+	return scopes, nil
+}
+
+func restartInvariantScopeRows(capture Result) ([]invariants.ClientScopeRowObservation, error) {
+	values, err := androidScopeRows(capture.ScopeRows)
+	if err != nil {
+		return nil, err
+	}
+	if len(values) != *capture.ScopeRowCount {
+		return nil, errors.New("Kotlin Android restart invariant scope rows are incomplete")
+	}
+	rows := make([]invariants.ClientScopeRowObservation, 0, len(values))
+	for _, value := range values {
+		digest, err := restartInvariantHexDigest(value.Checksum)
+		if err != nil {
+			return nil, err
+		}
+		identity, err := json.Marshal([]string{value.TableName, value.RecordID})
+		if err != nil {
+			return nil, errors.New("encode Kotlin Android restart invariant scope row identity failed")
+		}
+		rows = append(rows, invariants.ClientScopeRowObservation{
+			ScopeID: value.ScopeID,
+			Entry: vectors.DigestEntry{
+				RowIdentity: identity,
+				RowDigest:   digest,
+			},
+			Generation: uint64(value.Generation),
+		})
+	}
+	return rows, nil
+}
+
+func restartInvariantChecksum(value *string) (*[sha256.Size]byte, error) {
+	digest, err := androidChecksumDigest(value)
+	if err != nil || digest == nil {
+		return nil, err
+	}
+	decoded, err := restartInvariantHexDigest(*digest)
+	if err != nil {
+		return nil, err
+	}
+	return &decoded, nil
+}
+
+func restartInvariantHexDigest(value string) ([sha256.Size]byte, error) {
+	if !validLowerHexDigest(value) {
+		return [sha256.Size]byte{}, errors.New("Kotlin Android restart invariant digest is invalid")
+	}
+	decoded, err := hex.DecodeString(value)
+	if err != nil {
+		return [sha256.Size]byte{}, errors.New("decode Kotlin Android restart invariant digest failed")
+	}
+	var digest [sha256.Size]byte
+	copy(digest[:], decoded)
+	return digest, nil
 }
 
 func configureAdapterReverse(ctx context.Context, session *Session, serverURL string) error {
@@ -1519,16 +1778,6 @@ func adapterReversePort(serverURL string) (int, bool, error) {
 		return 0, false, errors.New("Kotlin Android platform server URL is invalid")
 	}
 	return port, true, nil
-}
-
-func verifyRestartIdentity(priorProcessID, priorFingerprint, processID, fingerprint string) error {
-	if priorProcessID == "" || priorFingerprint == "" || processID == "" || fingerprint == "" || processID == priorProcessID {
-		return errors.New("Kotlin Android relaunch did not create a distinct process")
-	}
-	if fingerprint != priorFingerprint {
-		return errors.New("Kotlin Android relaunch changed the database identity")
-	}
-	return nil
 }
 
 func closeKotlinSession(session *Session) {
