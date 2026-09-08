@@ -461,17 +461,15 @@ func TestReplayRunDoesNotOverwriteSourceJournal(t *testing.T) {
 func TestRunnerOrdersCrossFamilyViolations(t *testing.T) {
 	position := invariants.PositionObservation{Kind: "invalid"}
 	first := invariants.Observation{
-		Sequence:      1,
-		Operator:      &invariants.OperatorObservation{Checkpoints: []invariants.OperatorCheckpointObservation{{UserID: "u", ClientID: "c", ScopeID: "s", Position: position}}},
-		WireExchanges: []invariants.WireExchangeObservation{{Sequence: 1, ResponseStatus: 500, ExpectMutationConservation: true, ExpectChecksumConvergence: true, ExpectScopeIsolation: true}},
-		Clients:       []invariants.ClientObservation{{State: scenarios.ClientDurabilityFact{UserID: "u", ClientID: "c"}, Process: &invariants.ProcessIdentityObservation{ProcessID: "p1", DatabaseIdentityFingerprint: digest}, Complete: true}},
+		Sequence: 1,
+		Clients:  []invariants.ClientObservation{{State: scenarios.ClientDurabilityFact{UserID: "u", ClientID: "c"}, Process: &invariants.ProcessIdentityObservation{ProcessID: "p1", DatabaseIdentityFingerprint: digest}, Complete: true}},
 	}
 	second := first
 	second.Sequence = 2
-	second.Operator = &invariants.OperatorObservation{}
-	second.WireExchanges = nil
+	second.Operator = &invariants.OperatorObservation{Checkpoints: []invariants.OperatorCheckpointObservation{{UserID: "u", ClientID: "c", ScopeID: "s", Position: position}}}
+	second.WireExchanges = []invariants.WireExchangeObservation{{Sequence: 1, ResponseStatus: 500, ExpectMutationConservation: true, ExpectChecksumConvergence: true, ExpectScopeIsolation: true}}
 	second.Clients = []invariants.ClientObservation{{State: scenarios.ClientDurabilityFact{UserID: "u", ClientID: "c"}, Process: &invariants.ProcessIdentityObservation{ProcessID: "p2", DatabaseIdentityFingerprint: digest}, Complete: true}}
-	violations, err := checkAll([]invariants.Observation{first, second})
+	violations, err := checkLatest([]invariants.Observation{first, second})
 	if err != nil {
 		t.Fatalf("check all: %v", err)
 	}
@@ -485,6 +483,36 @@ func TestRunnerOrdersCrossFamilyViolations(t *testing.T) {
 	}
 	if violations[0].Family != invariants.InvariantChecksumConvergence {
 		t.Fatalf("first family = %s, want checksum-convergence by total order", violations[0].Family)
+	}
+}
+
+func TestCheckLatestUsesLastCaptureForEachCurrentClient(t *testing.T) {
+	process := func(userID, clientID, processID string) invariants.ClientObservation {
+		return invariants.ClientObservation{
+			State: scenarios.ClientDurabilityFact{UserID: userID, ClientID: clientID},
+			Process: &invariants.ProcessIdentityObservation{
+				ProcessID: processID, DatabaseIdentityFingerprint: digest,
+			},
+			Complete: true,
+		}
+	}
+	observations := []invariants.Observation{
+		{Sequence: 1, Clients: []invariants.ClientObservation{process("user-a", "client-a", "process-a")}},
+		{Sequence: 2, Clients: []invariants.ClientObservation{process("user-b", "client-b", "process-b")}},
+		{Sequence: 3, Clients: []invariants.ClientObservation{process("user-a", "client-a", "process-replaced")}},
+	}
+	violations, err := checkLatest(observations)
+	if err != nil {
+		t.Fatalf("check latest: %v", err)
+	}
+	found := false
+	for _, violation := range violations {
+		if violation.RuleID == invariants.RuleStateForkProcessReplacedUnexpectedly {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("violations = %#v, want process replacement violation", violations)
 	}
 }
 

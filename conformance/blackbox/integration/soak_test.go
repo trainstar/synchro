@@ -29,7 +29,7 @@ func TestSoak(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), duration*6+15*time.Minute)
 	defer cancel()
 	catalog, err := faults.LoadCatalog(ctx, soakRepositoryRoot)
 	if err != nil {
@@ -55,7 +55,7 @@ func TestSoak(t *testing.T) {
 		t.Cleanup(func() { closeLiveSoakHarness(t, harness) })
 		result, err := soak.Run(ctx, plan, harness, t.TempDir()+"/live-soak.jsonl")
 		if err != nil {
-			t.Fatalf("run live soak: %v; violations: %#v", err, result.Violations)
+			t.Fatalf("run live soak: %v; operations %d/%d; violations: %#v", err, result.OperationsExecuted, len(plan.Operations), result.Violations)
 		}
 		if result.OperationsExecuted != len(plan.Operations) || len(result.Violations) != 0 {
 			t.Fatalf("live soak result = operations %d/%d, violations %d", result.OperationsExecuted, len(plan.Operations), len(result.Violations))

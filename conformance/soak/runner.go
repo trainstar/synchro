@@ -138,7 +138,7 @@ func runPlan(ctx context.Context, plan Plan, harness Harness, writer *journalWri
 		result.Observations = append(result.Observations, observation)
 		result.OperationsExecuted++
 
-		violations, checkerErr := checkAll(result.Observations)
+		violations, checkerErr := checkLatest(result.Observations)
 		result.Violations = append(result.Violations, violations...)
 		result.Violations = orderViolations(result.Violations)
 		if checkerErr != nil {
@@ -248,18 +248,48 @@ func validateRunPlan(plan Plan) error {
 	return nil
 }
 
-func checkAll(observations []invariants.Observation) ([]invariants.Violation, error) {
-	checkers := []func([]invariants.Observation) ([]invariants.Violation, error){
-		invariants.CheckMutationConservation,
-		invariants.CheckCursorMonotonicity,
-		invariants.CheckChecksumConvergence,
-		invariants.CheckScopeIsolation,
-		invariants.CheckNoStateForks,
+func checkLatest(observations []invariants.Observation) ([]invariants.Violation, error) {
+	latest := observations[len(observations)-1:]
+	current := latest[0]
+	priorClients := make(map[string]invariants.ClientObservation, len(current.Clients))
+	needed := make(map[string]struct{}, len(current.Clients))
+	for _, client := range current.Clients {
+		needed[client.State.UserID+"\x00"+client.State.ClientID] = struct{}{}
+	}
+	for index := len(observations) - 2; index >= 0 && len(priorClients) < len(needed); index-- {
+		for _, client := range observations[index].Clients {
+			key := client.State.UserID + "\x00" + client.State.ClientID
+			if _, wanted := needed[key]; !wanted {
+				continue
+			}
+			if _, found := priorClients[key]; !found {
+				priorClients[key] = client
+			}
+		}
+	}
+	stateForkWindow := latest
+	if len(priorClients) != 0 {
+		prior := invariants.Observation{Sequence: current.Sequence - 1, Clients: make([]invariants.ClientObservation, 0, len(priorClients))}
+		for _, client := range priorClients {
+			client.RestartBoundary = false
+			prior.Clients = append(prior.Clients, client)
+		}
+		stateForkWindow = []invariants.Observation{prior, current}
+	}
+	checks := []struct {
+		checker      func([]invariants.Observation) ([]invariants.Violation, error)
+		observations []invariants.Observation
+	}{
+		{checker: invariants.CheckMutationConservation, observations: latest},
+		{checker: invariants.CheckCursorMonotonicity, observations: observations},
+		{checker: invariants.CheckChecksumConvergence, observations: latest},
+		{checker: invariants.CheckScopeIsolation, observations: latest},
+		{checker: invariants.CheckNoStateForks, observations: stateForkWindow},
 	}
 	var violations []invariants.Violation
 	var failures []error
-	for _, checker := range checkers {
-		found, err := checker(observations)
+	for _, check := range checks {
+		found, err := check.checker(check.observations)
 		violations = append(violations, found...)
 		if err != nil {
 			failures = append(failures, err)

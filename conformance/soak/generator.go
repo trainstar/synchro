@@ -214,8 +214,10 @@ func ConfigForDuration(duration time.Duration) (Config, error) {
 	if duration <= 0 || duration > MaximumSoakDuration {
 		return Config{}, fmt.Errorf("%w: duration must be greater than zero and at most %s", ErrInvalidConfig, MaximumSoakDuration)
 	}
-	const operationsPerSecond = 16
-	unit := time.Second / operationsPerSecond
+	// One live operation drives the real adapter, the extension, and often a
+	// WAL wait or a process restart, so it costs seconds, not milliseconds.
+	const secondsPerOperation = 5
+	unit := secondsPerOperation * time.Second
 	count := int64(duration / unit)
 	if duration%unit != 0 {
 		count++
