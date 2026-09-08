@@ -21,6 +21,8 @@ var (
 	ErrZeroOperations = errors.New("soak executed zero operations")
 	// ErrInvariantViolation reports a checker-detected violation.
 	ErrInvariantViolation = errors.New("soak invariant violation")
+	// ErrCheckerCoverage reports a completed run that did not exercise every applicable checker family.
+	ErrCheckerCoverage = errors.New("soak checker coverage is incomplete")
 )
 
 // ObservationCapture contains the neutral surfaces returned by one harness step.
@@ -165,6 +167,14 @@ func runPlan(ctx context.Context, plan Plan, harness Harness, writer *journalWri
 	if result.OperationsExecuted == 0 {
 		return result, ErrZeroOperations
 	}
+	if err := validateCheckerCoverage(plan, result.Observations); err != nil {
+		return result, err
+	}
+	if writer != nil {
+		if err := writer.Seal(); err != nil {
+			return result, err
+		}
+	}
 	return result, nil
 }
 
@@ -249,6 +259,48 @@ func checkAll(observations []invariants.Observation) ([]invariants.Violation, er
 		}
 	}
 	return orderViolations(violations), errors.Join(failures...)
+}
+
+func validateCheckerCoverage(plan Plan, observations []invariants.Observation) error {
+	applicable := make(map[invariants.InvariantFamily]struct{})
+	for _, operation := range plan.Operations {
+		switch operation.Kind {
+		case OperationPush:
+			applicable[invariants.InvariantMutationConservation] = struct{}{}
+		case OperationPull:
+			applicable[invariants.InvariantCursorMonotonicity] = struct{}{}
+			applicable[invariants.InvariantChecksumConvergence] = struct{}{}
+			applicable[invariants.InvariantScopeIsolation] = struct{}{}
+		}
+	}
+	judged := make(map[invariants.InvariantFamily]struct{})
+	for _, observation := range observations {
+		for _, exchange := range observation.WireExchanges {
+			if exchange.ExpectMutationConservation {
+				judged[invariants.InvariantMutationConservation] = struct{}{}
+			}
+			if exchange.ExpectChecksumConvergence {
+				judged[invariants.InvariantChecksumConvergence] = struct{}{}
+			}
+			if exchange.ExpectScopeIsolation {
+				judged[invariants.InvariantScopeIsolation] = struct{}{}
+			}
+		}
+		if len(observation.PullResults) != 0 && len(observation.CursorAcknowledgements) != 0 {
+			judged[invariants.InvariantCursorMonotonicity] = struct{}{}
+		}
+	}
+	missing := make([]string, 0, len(applicable))
+	for family := range applicable {
+		if _, ok := judged[family]; !ok {
+			missing = append(missing, string(family))
+		}
+	}
+	if len(missing) == 0 {
+		return nil
+	}
+	sort.Strings(missing)
+	return fmt.Errorf("%w: missing %s", ErrCheckerCoverage, strings.Join(missing, ", "))
 }
 
 func orderViolations(violations []invariants.Violation) []invariants.Violation {

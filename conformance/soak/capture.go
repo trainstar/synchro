@@ -1,11 +1,13 @@
 package soak
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strconv"
 
 	"github.com/trainstar/synchro/conformance/invariants"
+	"github.com/trainstar/synchro/conformance/scenarios"
 )
 
 // ObservationSurface identifies one required black-box capture surface.
@@ -79,6 +81,18 @@ func validateObservationCapture(operation Operation, capture ObservationCapture,
 			return fmt.Errorf("%w: operation %d missing %s", ErrCaptureIncomplete, operation.Sequence, surface)
 		}
 	}
+	if capture.Manifest == nil || len(capture.Manifest.CanonicalBody()) == 0 {
+		return fmt.Errorf("%w: operation %d manifest is empty", ErrCaptureIncomplete, operation.Sequence)
+	}
+	if !stateFactsPresent(capture.ServerState) {
+		return fmt.Errorf("%w: operation %d server state is empty", ErrCaptureIncomplete, operation.Sequence)
+	}
+	if capture.Operator == nil || len(capture.Operator.Checkpoints) == 0 {
+		return fmt.Errorf("%w: operation %d operator facts are empty", ErrCaptureIncomplete, operation.Sequence)
+	}
+	if len(capture.Clients) == 0 {
+		return fmt.Errorf("%w: operation %d has no clients", ErrCaptureIncomplete, operation.Sequence)
+	}
 	if err := validateCaptureClients(operation, capture.Clients, prior); err != nil {
 		return err
 	}
@@ -95,6 +109,17 @@ func validateObservationCapture(operation Operation, capture ObservationCapture,
 		return err
 	}
 	return nil
+}
+
+func stateFactsPresent(facts *scenarios.StateFacts) bool {
+	if facts == nil {
+		return false
+	}
+	return facts.TransactionCount != nil || facts.RowCount != nil || facts.ScopeCount != nil || facts.RebuildCount != nil ||
+		facts.BatchCount != nil || facts.MutationCount != nil || facts.ConfiguredLimits != nil || facts.Registry != nil ||
+		facts.Stream != nil || len(facts.Transactions) != 0 || len(facts.Rows) != 0 || len(facts.Scopes) != 0 ||
+		len(facts.MutationOutcomes) != 0 || len(facts.RowScopeEdges) != 0 || len(facts.Poison) != 0 ||
+		len(facts.Rebuilds) != 0 || len(facts.Clients) != 0
 }
 
 func captureHasSurface(capture ObservationCapture, surface ObservationSurface) bool {
@@ -144,7 +169,7 @@ func validateCaptureClients(operation Operation, clients []invariants.ClientObse
 		if !client.Complete || client.Process == nil {
 			return fmt.Errorf("%w: operation %d client %s is not complete", ErrCaptureIncomplete, operation.Sequence, client.State.ClientID)
 		}
-		expectedBoundary := operation.Kind == OperationProcessDeath && client.State.ClientID == operation.ClientID
+		expectedBoundary := operation.Kind == OperationProcessDeath && client.State.UserID == operation.UserID && client.State.ClientID == operation.ClientID
 		if client.RestartBoundary != expectedBoundary {
 			return fmt.Errorf("%w: operation %d restart boundary for client %s is incorrect", ErrCaptureIncomplete, operation.Sequence, client.State.ClientID)
 		}
@@ -176,7 +201,14 @@ func validateFaultActivation(operation Operation, activation *FaultActivationObs
 }
 
 func validateWireExchanges(operation Operation, exchanges []invariants.WireExchangeObservation) error {
+	expectedClass := operationExchangeClass(operation.Kind)
+	if operation.Kind != OperationProcessDeath && len(exchanges) == 0 {
+		return fmt.Errorf("%w: operation %d has no wire exchange", ErrCaptureIncomplete, operation.Sequence)
+	}
 	seen := make(map[uint64]struct{}, len(exchanges))
+	mutationJudged := false
+	checksumJudged := false
+	scopeJudged := false
 	for _, exchange := range exchanges {
 		if exchange.Sequence == 0 {
 			return fmt.Errorf("%w: operation %d wire exchange has no sequence", ErrCaptureIncomplete, operation.Sequence)
@@ -185,16 +217,87 @@ func validateWireExchanges(operation Operation, exchanges []invariants.WireExcha
 			return fmt.Errorf("%w: operation %d wire exchange sequence is duplicated", ErrCaptureIncomplete, operation.Sequence)
 		}
 		seen[exchange.Sequence] = struct{}{}
+		if expectedClass != "" && exchange.OperationClass != expectedClass {
+			return fmt.Errorf("%w: operation %d wire exchange class %q does not match %q", ErrCaptureIncomplete, operation.Sequence, exchange.OperationClass, expectedClass)
+		}
+		if exchange.ExpectMutationConservation {
+			if operation.Kind != OperationPush || exchange.OperationClass != "push" {
+				return fmt.Errorf("%w: operation %d has mutation facts on a non-push exchange", ErrCaptureIncomplete, operation.Sequence)
+			}
+			mutationJudged = true
+		}
+		if exchange.ExpectChecksumConvergence {
+			if operation.Kind != OperationPull || exchange.OperationClass != "pull" {
+				return fmt.Errorf("%w: operation %d has checksum facts on a non-pull exchange", ErrCaptureIncomplete, operation.Sequence)
+			}
+			terminal, changeCount, err := terminalPullExchange(exchange)
+			if err != nil || !terminal || changeCount != 1 {
+				return fmt.Errorf("%w: operation %d checksum facts are not bound to one terminal pull change", ErrCaptureIncomplete, operation.Sequence)
+			}
+			checksumJudged = true
+		}
+		if exchange.ExpectScopeIsolation {
+			if operation.Kind != OperationPull || exchange.OperationClass != "pull" {
+				return fmt.Errorf("%w: operation %d has scope facts on a non-pull exchange", ErrCaptureIncomplete, operation.Sequence)
+			}
+			terminal, changeCount, err := terminalPullExchange(exchange)
+			if err != nil || !terminal || changeCount != 0 {
+				return fmt.Errorf("%w: operation %d scope facts are not bound to a terminal zero-change pull", ErrCaptureIncomplete, operation.Sequence)
+			}
+			scopeJudged = true
+		}
 	}
-	if operation.Kind != OperationProcessDeath && len(exchanges) == 0 {
-		return fmt.Errorf("%w: operation %d has no wire exchange", ErrCaptureIncomplete, operation.Sequence)
+	switch operation.Kind {
+	case OperationPush:
+		if !mutationJudged {
+			return fmt.Errorf("%w: operation %d push exchange has no mutation checker facts", ErrCaptureIncomplete, operation.Sequence)
+		}
+	case OperationPull:
+		if !checksumJudged || !scopeJudged {
+			return fmt.Errorf("%w: operation %d pull exchange lacks terminal checker facts", ErrCaptureIncomplete, operation.Sequence)
+		}
 	}
 	return nil
 }
 
+func operationExchangeClass(kind OperationKind) string {
+	switch kind {
+	case OperationConnect:
+		return "connect"
+	case OperationPush:
+		return "push"
+	case OperationPull:
+		return "pull"
+	case OperationRebuild:
+		return "rebuild"
+	case OperationSchemaTransition:
+		return "schema-transition"
+	case OperationProcessDeath:
+		return "process-death"
+	case OperationWireFault:
+		return "wire-fault"
+	default:
+		return ""
+	}
+}
+
+func terminalPullExchange(exchange invariants.WireExchangeObservation) (bool, int, error) {
+	if exchange.ResponseStatus != 200 || exchange.OperationClass != "pull" {
+		return false, 0, nil
+	}
+	var response struct {
+		HasMore *bool             `json:"has_more"`
+		Changes []json.RawMessage `json:"changes"`
+	}
+	if err := json.Unmarshal(exchange.ResponseBody, &response); err != nil || response.HasMore == nil || response.Changes == nil {
+		return false, 0, errors.New("pull response is invalid")
+	}
+	return !*response.HasMore, len(response.Changes), nil
+}
+
 func validateCursorBindings(operation Operation, capture ObservationCapture, prior []invariants.Observation) error {
 	if operation.Kind != OperationPull {
-		if len(capture.CursorPositions) != 0 || len(capture.PullResults) != 0 || len(capture.CursorAcknowledgements) != 0 {
+		if len(capture.PullResults) != 0 || len(capture.CursorAcknowledgements) != 0 {
 			return fmt.Errorf("%w: operation %d has unexpected pull facts", ErrCaptureIncomplete, operation.Sequence)
 		}
 		return validateRawCursorRelations(operation, capture.Clients, capture.CursorPositions)

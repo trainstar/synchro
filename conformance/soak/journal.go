@@ -32,6 +32,8 @@ var (
 	ErrJournalBound = errors.New("soak journal bound exceeded")
 	// ErrInvalidJournal reports malformed journal content.
 	ErrInvalidJournal = errors.New("soak journal is invalid")
+	// ErrJournalUnsealed reports a valid journal that ended without a completion trailer.
+	ErrJournalUnsealed = errors.New("soak journal is unsealed")
 )
 
 // JournalLimits bounds journal bytes, lines, and encoded line size.
@@ -63,6 +65,7 @@ type Journal struct {
 	Config          Config              `json:"config"`
 	CatalogIdentity CatalogIdentity     `json:"catalog_identity"`
 	PlanDigest      string              `json:"plan_digest"`
+	RunDigest       string              `json:"run_digest,omitempty"`
 	Operations      []Operation         `json:"operations"`
 	OperationFacts  []OperationFact     `json:"operation_facts"`
 	Observations    []ObservationRecord `json:"observations"`
@@ -127,7 +130,10 @@ type journalWriter struct {
 	lastOperation   uint64
 	lastObservation uint64
 	lastFact        uint64
+	facts           []OperationFact
+	observations    []ObservationRecord
 	closed          bool
+	sealed          bool
 }
 
 type journalRecord struct {
@@ -139,6 +145,7 @@ type journalRecord struct {
 	Operation       *Operation         `json:"operation,omitempty"`
 	OperationFact   *OperationFact     `json:"operation_fact,omitempty"`
 	Observation     *ObservationRecord `json:"observation,omitempty"`
+	RunDigest       *string            `json:"run_digest,omitempty"`
 }
 
 func newJournalWriter(path string, plan Plan) (*journalWriter, error) {
@@ -225,6 +232,7 @@ func (w *journalWriter) RecordObservation(observation invariants.Observation) er
 		return err
 	}
 	w.lastObservation = observation.Sequence
+	w.observations = append(w.observations, record)
 	return nil
 }
 
@@ -262,6 +270,29 @@ func (w *journalWriter) recordFact(fact OperationFact) error {
 		return err
 	}
 	w.lastFact = fact.Sequence
+	w.facts = append(w.facts, fact)
+	return nil
+}
+
+// Seal writes the completion trailer for a fully successful run.
+func (w *journalWriter) Seal() error {
+	if w == nil || w.closed || w.file == nil || w.sealed {
+		return ErrInvalidJournal
+	}
+	if w.lastOperation == 0 || w.lastFact != w.lastOperation || w.lastObservation != w.lastOperation {
+		return fmt.Errorf("%w: incomplete run cannot be sealed", ErrInvalidJournal)
+	}
+	digest, err := runDigest(w.facts, w.observations)
+	if err != nil {
+		return err
+	}
+	if w.recordsWritten >= w.limits.MaxRecords {
+		return ErrJournalBound
+	}
+	if err := w.writeRecord(journalRecord{Type: "trailer", RunDigest: &digest}); err != nil {
+		return err
+	}
+	w.sealed = true
 	return nil
 }
 
@@ -309,6 +340,7 @@ func ReadJournal(path string) (Journal, error) {
 	var totalBytes int64
 	lineCount := 0
 	headerRead := false
+	trailerRead := false
 	for {
 		line, readErr := reader.ReadBytes('\n')
 		if len(line) != 0 {
@@ -323,7 +355,7 @@ func ReadJournal(path string) (Journal, error) {
 			if lineCount > limits.MaxRecords {
 				return Journal{}, fmt.Errorf("%w: journal records", ErrJournalBound)
 			}
-			if err := decodeJournalLine(line, &journal, &headerRead); err != nil {
+			if err := decodeJournalLine(line, &journal, &headerRead, &trailerRead); err != nil {
 				return Journal{}, err
 			}
 		}
@@ -342,6 +374,24 @@ func ReadJournal(path string) (Journal, error) {
 	}
 	if len(journal.OperationFacts) > len(journal.Operations) || len(journal.Observations) > len(journal.Operations) {
 		return Journal{}, fmt.Errorf("%w: journal records exceed operations", ErrInvalidJournal)
+	}
+	if !trailerRead {
+		return journal, ErrJournalUnsealed
+	}
+	if len(journal.OperationFacts) != len(journal.Operations) || len(journal.Observations) != len(journal.Operations) {
+		return Journal{}, fmt.Errorf("%w: sealed journal records are incomplete", ErrInvalidJournal)
+	}
+	for index, fact := range journal.OperationFacts {
+		if fact.Status != "completed" || fact.ObservationSequence != uint64(index+1) {
+			return Journal{}, fmt.Errorf("%w: sealed journal has a non-completion fact", ErrInvalidJournal)
+		}
+	}
+	digest, err := runDigest(journal.OperationFacts, journal.Observations)
+	if err != nil {
+		return Journal{}, err
+	}
+	if digest != journal.RunDigest {
+		return Journal{}, fmt.Errorf("%w: run digest does not match records", ErrInvalidJournal)
 	}
 	return journal, nil
 }
@@ -363,8 +413,8 @@ func (w *journalWriter) writeRecord(record journalRecord) error {
 	return nil
 }
 
-func decodeJournalLine(line []byte, journal *Journal, headerRead *bool) error {
-	if journal == nil || headerRead == nil {
+func decodeJournalLine(line []byte, journal *Journal, headerRead, trailerRead *bool) error {
+	if journal == nil || headerRead == nil || trailerRead == nil {
 		return ErrInvalidJournal
 	}
 	decoder := json.NewDecoder(bytesTrimNewline(line))
@@ -382,7 +432,7 @@ func decodeJournalLine(line []byte, journal *Journal, headerRead *bool) error {
 	}
 	switch record.Type {
 	case "header":
-		if *headerRead || record.Seed == nil || record.Config == nil || record.CatalogIdentity == nil || record.PlanDigest == nil || record.Operation != nil || record.OperationFact != nil || record.Observation != nil {
+		if *headerRead || *trailerRead || record.Seed == nil || record.Config == nil || record.CatalogIdentity == nil || record.PlanDigest == nil || record.Operation != nil || record.OperationFact != nil || record.Observation != nil || record.RunDigest != nil {
 			return fmt.Errorf("%w: header is malformed or repeated", ErrInvalidJournal)
 		}
 		if err := record.Config.validate(); err != nil {
@@ -400,7 +450,7 @@ func decodeJournalLine(line []byte, journal *Journal, headerRead *bool) error {
 		journal.PlanDigest = *record.PlanDigest
 		*headerRead = true
 	case "operation":
-		if !*headerRead || record.Operation == nil || record.Seed != nil || record.Config != nil || record.CatalogIdentity != nil || record.OperationFact != nil || record.Observation != nil {
+		if !*headerRead || *trailerRead || record.Operation == nil || record.Seed != nil || record.Config != nil || record.CatalogIdentity != nil || record.OperationFact != nil || record.Observation != nil || record.RunDigest != nil {
 			return fmt.Errorf("%w: operation record is malformed", ErrInvalidJournal)
 		}
 		operation := *record.Operation
@@ -415,7 +465,7 @@ func decodeJournalLine(line []byte, journal *Journal, headerRead *bool) error {
 		}
 		journal.Operations = append(journal.Operations, operation)
 	case "operation-fact":
-		if !*headerRead || record.OperationFact == nil || record.Seed != nil || record.Config != nil || record.CatalogIdentity != nil || record.Operation != nil || record.Observation != nil {
+		if !*headerRead || *trailerRead || record.OperationFact == nil || record.Seed != nil || record.Config != nil || record.CatalogIdentity != nil || record.Operation != nil || record.Observation != nil || record.RunDigest != nil {
 			return fmt.Errorf("%w: operation fact record is malformed", ErrInvalidJournal)
 		}
 		fact := *record.OperationFact
@@ -427,7 +477,7 @@ func decodeJournalLine(line []byte, journal *Journal, headerRead *bool) error {
 		}
 		journal.OperationFacts = append(journal.OperationFacts, fact)
 	case "observation":
-		if !*headerRead || record.Observation == nil || record.Seed != nil || record.Config != nil || record.CatalogIdentity != nil || record.Operation != nil || record.OperationFact != nil {
+		if !*headerRead || *trailerRead || record.Observation == nil || record.Seed != nil || record.Config != nil || record.CatalogIdentity != nil || record.Operation != nil || record.OperationFact != nil || record.RunDigest != nil {
 			return fmt.Errorf("%w: observation record is malformed", ErrInvalidJournal)
 		}
 		observation := *record.Observation
@@ -443,10 +493,31 @@ func decodeJournalLine(line []byte, journal *Journal, headerRead *bool) error {
 			}
 		}
 		journal.Observations = append(journal.Observations, observation)
+	case "trailer":
+		if !*headerRead || *trailerRead || record.RunDigest == nil || record.Seed != nil || record.Config != nil || record.CatalogIdentity != nil || record.PlanDigest != nil || record.Operation != nil || record.OperationFact != nil || record.Observation != nil {
+			return fmt.Errorf("%w: trailer is malformed or repeated", ErrInvalidJournal)
+		}
+		if !validLowerHexDigest64(*record.RunDigest) {
+			return fmt.Errorf("%w: run digest is malformed", ErrInvalidJournal)
+		}
+		journal.RunDigest = *record.RunDigest
+		*trailerRead = true
 	default:
 		return fmt.Errorf("%w: unknown record type %q", ErrInvalidJournal, record.Type)
 	}
 	return nil
+}
+
+func runDigest(facts []OperationFact, observations []ObservationRecord) (string, error) {
+	payload, err := json.Marshal(struct {
+		OperationFacts []OperationFact     `json:"operation_facts"`
+		Observations   []ObservationRecord `json:"observations"`
+	}{facts, observations})
+	if err != nil {
+		return "", fmt.Errorf("encode soak run digest: %w", err)
+	}
+	digest := sha256.Sum256(payload)
+	return hex.EncodeToString(digest[:]), nil
 }
 
 func wireAttachmentIdentities(exchanges []invariants.WireExchangeObservation) ([]WireAttachmentIdentity, error) {
