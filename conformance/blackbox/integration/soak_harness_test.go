@@ -649,7 +649,12 @@ func (h *liveSoakHarness) connect(ctx context.Context, requestClass string) (soa
 		return soakRecordedCall{}, err
 	}
 	if response.Status != http.StatusOK {
-		return soakRecordedCall{}, fmt.Errorf("soak connect status = %d, code = %v", response.Status, body["error"])
+		sent := fmt.Sprintf("%v", h.protocol.Schema)
+		if _, manifestErr := h.loadManifest(ctx, requestClass+"-diagnostic"); manifestErr == nil {
+			return soakRecordedCall{}, fmt.Errorf("soak connect status = %d, code = %v, sent schema %s, published manifest version %d hash %s",
+				response.Status, body["error"], sent, h.manifestDocument.SchemaVersion, h.manifestDocument.SchemaHash)
+		}
+		return soakRecordedCall{}, fmt.Errorf("soak connect status = %d, code = %v, sent schema %s", response.Status, body["error"], sent)
 	}
 	generation, ok := jsonInt64(body["client_generation"])
 	if !ok || generation <= 0 {
