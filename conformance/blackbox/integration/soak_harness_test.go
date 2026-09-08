@@ -642,7 +642,7 @@ func (h *liveSoakHarness) connect(ctx context.Context, requestClass string) (soa
 		return soakRecordedCall{}, err
 	}
 	if response.Status != http.StatusOK {
-		return soakRecordedCall{}, fmt.Errorf("soak connect status = %d", response.Status)
+		return soakRecordedCall{}, fmt.Errorf("soak connect status = %d, code = %v", response.Status, body["error"])
 	}
 	generation, ok := jsonInt64(body["client_generation"])
 	if !ok || generation <= 0 {
@@ -699,7 +699,7 @@ func (h *liveSoakHarness) loadManifest(ctx context.Context, requestClass string)
 		return soakRecordedCall{}, err
 	}
 	if response.Status != http.StatusOK {
-		return soakRecordedCall{}, fmt.Errorf("soak schema status = %d", response.Status)
+		return soakRecordedCall{}, fmt.Errorf("soak schema status = %d, code = %v", response.Status, body["error"])
 	}
 	rawManifest, err := json.Marshal(body["manifest"])
 	if err != nil || string(rawManifest) == "null" {
@@ -790,7 +790,7 @@ func (h *liveSoakHarness) submitInsert(ctx context.Context, scopeID, label strin
 		return soakRecordedCall{}, "", err
 	}
 	if response.Status != http.StatusOK {
-		return soakRecordedCall{}, "", fmt.Errorf("soak push status = %d", response.Status)
+		return soakRecordedCall{}, "", fmt.Errorf("soak push status = %d, code = %v", response.Status, body["error"])
 	}
 	accepted, ok := body["accepted"].([]any)
 	if !ok || len(accepted) != 1 {
@@ -922,7 +922,7 @@ func (h *liveSoakHarness) drainPulls(ctx context.Context) error {
 			return err
 		}
 		if response.Status != http.StatusOK {
-			return fmt.Errorf("soak drain pull status = %d", response.Status)
+			return fmt.Errorf("soak drain pull status = %d, code = %v", response.Status, body["error"])
 		}
 		changeCount, err := h.applyPullResponse(body)
 		if err != nil {
@@ -951,7 +951,7 @@ func (h *liveSoakHarness) executePullControl(ctx context.Context, operation soak
 		return nil, err
 	}
 	if response.Status != http.StatusOK {
-		return nil, fmt.Errorf("soak pull control status = %d", response.Status)
+		return nil, fmt.Errorf("soak pull control status = %d, code = %v", response.Status, body["error"])
 	}
 	changes, ok := body["changes"].([]any)
 	if !ok || len(changes) != 1 {
