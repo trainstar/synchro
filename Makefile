@@ -25,6 +25,7 @@
 	test-reference \
 	test-conformance-faults \
 	test-conformance-invariants \
+	soak \
 	test-local-postgres \
 	test-blackbox-harness \
 	test-blackbox-components \
@@ -176,6 +177,8 @@ PGRX_PG_BIN_DIR ?= $(dir $(PGRX_PG_CONFIG))
 PGRX_TARGET_DIR ?= $(CURDIR)/.pgrx-target
 MUTATION_CONTROL_TEST ?=
 MUTATION_CONTROL_EXPECT ?= target_pass
+SOAK_SEED ?= 1
+SOAK_DURATION ?= 1s
 TESTRESULT_TEST_NAME ?=
 BLACKBOX_TEST_COUNT ?= 1
 CONFORMANCE_ADAPTER_ARTIFACT_DIR ?= $(CURDIR)/dist/conformance/synchrod-pg-adapter
@@ -265,6 +268,7 @@ help:
 	@echo "  test-vectors          - Test canonical protocol 3 vectors"
 	@echo "  test-reference        - Test the independent protocol 3 reference model"
 	@echo "  test-conformance-invariants - Test the invariant engine and soak driver"
+	@echo "  soak                  - Run the bounded seeded desktop soak"
 	@echo "  test-conformance      - Run the independent protocol conformance suite"
 	@echo "  test-inventory        - Test generated evidence inventory"
 	@echo "  test-blackbox         - Run the packaged server black-box suite"
@@ -432,6 +436,16 @@ test-conformance-faults:
 
 test-conformance-invariants:
 	cd conformance && GOFLAGS= GOWORK=off go run ./cmd/testresult suite -- go test -json ./invariants ./soak -count=1
+
+soak:
+	@$(WARM_CONNECT_ENV) \
+		database_url="$${SYNCHRO_CONFORMANCE_ATTACH_DATABASE_URL:-$(ADAPTER_TEST_URL)}"; \
+		test -n "$$database_url" || { echo "ADAPTER_TEST_URL or SYNCHRO_CONFORMANCE_ATTACH_DATABASE_URL is required for soak" >&2; exit 1; }; \
+		cd conformance && GOFLAGS= GOWORK=off TEST_DATABASE_URL="$$database_url" \
+			SYNCHRO_CONFORMANCE_ATTACH_DATABASE_URL="$$database_url" \
+			SOAK_SEED="$(SOAK_SEED)" SOAK_DURATION="$(SOAK_DURATION)" \
+			go run ./cmd/testresult suite -- go test -json ./blackbox/integration -count=1 -timeout=35m \
+			-run '^TestSoak$$' -args --provision --install
 
 test-local-postgres:
 	cd conformance && GOFLAGS= GOWORK=off go run ./cmd/testresult suite -- go test -json ./cmd/synchro-local-postgres -count=1
