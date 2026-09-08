@@ -118,23 +118,15 @@ func runPlan(ctx context.Context, plan Plan, harness Harness, writer *journalWri
 	result.Observations = make([]invariants.Observation, 0, len(plan.Operations))
 	for index, operation := range plan.Operations {
 		if err := ctx.Err(); err != nil {
-			if writer != nil {
-				_ = writer.RecordFailure(operation.Sequence, "context-cancelled")
-			}
-			return result, err
+			return result, recordRunFailure(writer, operation.Sequence, "context-cancelled", err)
 		}
 		capture, err := harness.Execute(ctx, operation)
 		if err != nil {
-			if writer != nil {
-				_ = writer.RecordFailure(operation.Sequence, "harness-error")
-			}
-			return result, fmt.Errorf("execute soak operation %d: %w", index+1, err)
+			err = fmt.Errorf("execute soak operation %d: %w", index+1, err)
+			return result, recordRunFailure(writer, operation.Sequence, "harness-error", err)
 		}
 		if err := validateObservationCapture(operation, capture, result.Observations); err != nil {
-			if writer != nil {
-				_ = writer.RecordFailure(operation.Sequence, "capture-incomplete")
-			}
-			return result, err
+			return result, recordRunFailure(writer, operation.Sequence, "capture-incomplete", err)
 		}
 		sequence := operation.Sequence
 		observation := AssembleObservation(sequence, capture)
@@ -150,10 +142,8 @@ func runPlan(ctx context.Context, plan Plan, harness Harness, writer *journalWri
 		result.Violations = append(result.Violations, violations...)
 		result.Violations = orderViolations(result.Violations)
 		if checkerErr != nil {
-			if writer != nil {
-				_ = writer.RecordFailure(operation.Sequence, "checker-error")
-			}
-			return result, fmt.Errorf("run invariant checkers after operation %d: %w", index+1, checkerErr)
+			checkerErr = fmt.Errorf("run invariant checkers after operation %d: %w", index+1, checkerErr)
+			return result, recordRunFailure(writer, operation.Sequence, "checker-error", checkerErr)
 		}
 		if len(violations) != 0 {
 			if writer != nil {
@@ -181,6 +171,18 @@ func runPlan(ctx context.Context, plan Plan, harness Harness, writer *journalWri
 		}
 	}
 	return result, nil
+}
+
+// recordRunFailure writes the failure fact and preserves a recording error
+// beside the run error, so a broken failure artifact is never silent.
+func recordRunFailure(writer *journalWriter, sequence uint64, code string, runErr error) error {
+	if writer == nil {
+		return runErr
+	}
+	if recordErr := writer.RecordFailure(sequence, code); recordErr != nil {
+		return errors.Join(runErr, fmt.Errorf("record soak failure fact: %w", recordErr))
+	}
+	return runErr
 }
 
 // ReplayPlan regenerates a journal plan and rejects any operation divergence.

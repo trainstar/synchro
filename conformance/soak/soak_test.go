@@ -236,6 +236,24 @@ func TestReplayRunReproducesKnownCheckerViolation(t *testing.T) {
 	}
 }
 
+func TestReadJournalRejectsRecordsAfterFailedFact(t *testing.T) {
+	_, path, _ := knownCheckerViolation(t, "failed-fact-suffix")
+	suffix := `{"type":"operation_fact","operation_fact":{"sequence":8,"status":"completed","observation_sequence":8}}` + "\n"
+	file, err := os.OpenFile(path, os.O_WRONLY|os.O_APPEND, 0o600)
+	if err != nil {
+		t.Fatalf("open violation journal for append: %v", err)
+	}
+	if _, err := file.WriteString(suffix); err != nil {
+		t.Fatalf("append completed fact after failure: %v", err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatalf("close appended journal: %v", err)
+	}
+	if _, err := ReadJournal(path); !errors.Is(err, ErrInvalidJournal) {
+		t.Fatalf("failed-fact suffix journal error = %v, want ErrInvalidJournal", err)
+	}
+}
+
 func TestNegativeControlMalformedJournal(t *testing.T) {
 	path := journalPath(t, "malformed")
 	if err := os.WriteFile(path, []byte("not-json\n"), 0o600); err != nil {

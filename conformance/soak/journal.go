@@ -539,6 +539,12 @@ func validateJournalFactRelations(journal Journal) error {
 			if fact.ObservationSequence != 0 || !validFailureCode(fact.FailureCode) {
 				return fmt.Errorf("%w: failed operation fact is invalid", ErrInvalidJournal)
 			}
+			if index != len(journal.OperationFacts)-1 {
+				return fmt.Errorf("%w: failed operation fact is not terminal", ErrInvalidJournal)
+			}
+			if len(journal.Observations) > index+1 {
+				return fmt.Errorf("%w: observation follows the failed operation fact", ErrInvalidJournal)
+			}
 		default:
 			return fmt.Errorf("%w: operation fact status is invalid", ErrInvalidJournal)
 		}
