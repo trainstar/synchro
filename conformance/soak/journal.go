@@ -241,7 +241,7 @@ func (w *journalWriter) RecordCompletion(sequence, observationSequence uint64) e
 }
 
 func (w *journalWriter) RecordFailure(sequence uint64, code string) error {
-	if code == "" || len(code) > 64 {
+	if !validFailureCode(code) {
 		return fmt.Errorf("%w: failure code is invalid", ErrInvalidJournal)
 	}
 	return w.recordFact(OperationFact{Sequence: sequence, Status: "failed", FailureCode: code})
@@ -257,11 +257,11 @@ func (w *journalWriter) recordFact(fact OperationFact) error {
 	if fact.Status != "completed" && fact.Status != "failed" {
 		return fmt.Errorf("%w: operation fact status is invalid", ErrInvalidJournal)
 	}
-	if fact.Status == "completed" && fact.ObservationSequence == 0 {
-		return fmt.Errorf("%w: completed operation has no observation", ErrInvalidJournal)
+	if fact.Status == "completed" && (fact.ObservationSequence == 0 || fact.FailureCode != "") {
+		return fmt.Errorf("%w: completed operation fact is invalid", ErrInvalidJournal)
 	}
-	if fact.Status == "failed" && fact.ObservationSequence != 0 {
-		return fmt.Errorf("%w: failed operation has an observation", ErrInvalidJournal)
+	if fact.Status == "failed" && (fact.ObservationSequence != 0 || !validFailureCode(fact.FailureCode)) {
+		return fmt.Errorf("%w: failed operation fact is invalid", ErrInvalidJournal)
 	}
 	if w.recordsWritten >= w.limits.MaxRecords {
 		return ErrJournalBound
@@ -281,6 +281,12 @@ func (w *journalWriter) Seal() error {
 	}
 	if w.lastOperation == 0 || w.lastFact != w.lastOperation || w.lastObservation != w.lastOperation {
 		return fmt.Errorf("%w: incomplete run cannot be sealed", ErrInvalidJournal)
+	}
+	for index, fact := range w.facts {
+		sequence := uint64(index + 1)
+		if fact.Status != "completed" || fact.Sequence != sequence || fact.ObservationSequence != sequence {
+			return fmt.Errorf("%w: failed run cannot be sealed", ErrInvalidJournal)
+		}
 	}
 	digest, err := runDigest(w.facts, w.observations)
 	if err != nil {
@@ -374,6 +380,9 @@ func ReadJournal(path string) (Journal, error) {
 	}
 	if len(journal.OperationFacts) > len(journal.Operations) || len(journal.Observations) > len(journal.Operations) {
 		return Journal{}, fmt.Errorf("%w: journal records exceed operations", ErrInvalidJournal)
+	}
+	if err := validateJournalFactRelations(journal); err != nil {
+		return Journal{}, err
 	}
 	if !trailerRead {
 		return journal, ErrJournalUnsealed
@@ -472,7 +481,7 @@ func decodeJournalLine(line []byte, journal *Journal, headerRead, trailerRead *b
 		if fact.Sequence != uint64(len(journal.OperationFacts)+1) || fact.Sequence > uint64(len(journal.Operations)) {
 			return fmt.Errorf("%w: operation fact sequence is invalid", ErrInvalidJournal)
 		}
-		if fact.Status != "completed" && fact.Status != "failed" || fact.Status == "completed" && fact.ObservationSequence == 0 || fact.Status == "failed" && fact.ObservationSequence != 0 {
+		if fact.Status != "completed" && fact.Status != "failed" || fact.Status == "completed" && (fact.ObservationSequence == 0 || fact.FailureCode != "") || fact.Status == "failed" && (fact.ObservationSequence != 0 || !validFailureCode(fact.FailureCode)) {
 			return fmt.Errorf("%w: operation fact is invalid", ErrInvalidJournal)
 		}
 		journal.OperationFacts = append(journal.OperationFacts, fact)
@@ -506,6 +515,39 @@ func decodeJournalLine(line []byte, journal *Journal, headerRead, trailerRead *b
 		return fmt.Errorf("%w: unknown record type %q", ErrInvalidJournal, record.Type)
 	}
 	return nil
+}
+
+func validateJournalFactRelations(journal Journal) error {
+	observations := make(map[uint64]struct{}, len(journal.Observations))
+	for _, observation := range journal.Observations {
+		observations[observation.Sequence] = struct{}{}
+	}
+	for index, fact := range journal.OperationFacts {
+		sequence := uint64(index + 1)
+		if fact.Sequence != sequence {
+			return fmt.Errorf("%w: operation fact sequence is invalid", ErrInvalidJournal)
+		}
+		switch fact.Status {
+		case "completed":
+			if fact.ObservationSequence != sequence {
+				return fmt.Errorf("%w: completed operation observation sequence is invalid", ErrInvalidJournal)
+			}
+			if _, exists := observations[fact.ObservationSequence]; !exists {
+				return fmt.Errorf("%w: completed operation observation is missing", ErrInvalidJournal)
+			}
+		case "failed":
+			if fact.ObservationSequence != 0 || !validFailureCode(fact.FailureCode) {
+				return fmt.Errorf("%w: failed operation fact is invalid", ErrInvalidJournal)
+			}
+		default:
+			return fmt.Errorf("%w: operation fact status is invalid", ErrInvalidJournal)
+		}
+	}
+	return nil
+}
+
+func validFailureCode(code string) bool {
+	return code != "" && len(code) <= 64
 }
 
 func runDigest(facts []OperationFact, observations []ObservationRecord) (string, error) {

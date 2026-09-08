@@ -96,6 +96,9 @@ func validateObservationCapture(operation Operation, capture ObservationCapture,
 	if err := validateCaptureClients(operation, capture.Clients, prior); err != nil {
 		return err
 	}
+	if err := validateCaptureCheckpoint(operation, capture.Operator); err != nil {
+		return err
+	}
 	if err := validateFaultActivation(operation, capture.FaultActivation); err != nil {
 		return err
 	}
@@ -179,12 +182,30 @@ func validateCaptureClients(operation Operation, clients []invariants.ClientObse
 			}
 		}
 	}
-	if operation.Kind == OperationProcessDeath {
-		if _, exists := seen[operation.UserID+"\x00"+operation.ClientID]; !exists {
-			return fmt.Errorf("%w: operation %d process target is not captured", ErrCaptureIncomplete, operation.Sequence)
+	if _, exists := seen[operation.UserID+"\x00"+operation.ClientID]; !exists {
+		return fmt.Errorf("%w: operation %d target client is not captured", ErrCaptureIncomplete, operation.Sequence)
+	}
+	for _, client := range clients {
+		if client.State.UserID != operation.UserID || client.State.ClientID != operation.ClientID {
+			continue
+		}
+		for _, scope := range client.Scopes {
+			if scope.ScopeID == operation.ScopeID {
+				return nil
+			}
+		}
+		break
+	}
+	return fmt.Errorf("%w: operation %d target scope is not captured", ErrCaptureIncomplete, operation.Sequence)
+}
+
+func validateCaptureCheckpoint(operation Operation, operator *invariants.OperatorObservation) error {
+	for _, checkpoint := range operator.Checkpoints {
+		if checkpoint.UserID == operation.UserID && checkpoint.ClientID == operation.ClientID && checkpoint.ScopeID == operation.ScopeID {
+			return nil
 		}
 	}
-	return nil
+	return fmt.Errorf("%w: operation %d target checkpoint is not captured", ErrCaptureIncomplete, operation.Sequence)
 }
 
 func validateFaultActivation(operation Operation, activation *FaultActivationObservation) error {
@@ -219,6 +240,9 @@ func validateWireExchanges(operation Operation, exchanges []invariants.WireExcha
 		seen[exchange.Sequence] = struct{}{}
 		if expectedClass != "" && exchange.OperationClass != expectedClass {
 			return fmt.Errorf("%w: operation %d wire exchange class %q does not match %q", ErrCaptureIncomplete, operation.Sequence, exchange.OperationClass, expectedClass)
+		}
+		if err := validateWireExchangeTarget(operation, exchange); err != nil {
+			return err
 		}
 		if exchange.ExpectMutationConservation {
 			if operation.Kind != OperationPush || exchange.OperationClass != "push" {
@@ -256,6 +280,42 @@ func validateWireExchanges(operation Operation, exchanges []invariants.WireExcha
 		if !checksumJudged || !scopeJudged {
 			return fmt.Errorf("%w: operation %d pull exchange lacks terminal checker facts", ErrCaptureIncomplete, operation.Sequence)
 		}
+	}
+	return nil
+}
+
+func validateWireExchangeTarget(operation Operation, exchange invariants.WireExchangeObservation) error {
+	var request struct {
+		UserID              string                     `json:"user_id"`
+		AuthenticatedUserID string                     `json:"authenticated_user_id"`
+		ClientID            string                     `json:"client_id"`
+		ScopeID             string                     `json:"scope_id"`
+		Scopes              map[string]json.RawMessage `json:"scopes"`
+	}
+	if err := json.Unmarshal(exchange.RequestBody, &request); err != nil {
+		return fmt.Errorf("%w: operation %d wire exchange target is malformed", ErrCaptureIncomplete, operation.Sequence)
+	}
+	if request.UserID == "" && request.AuthenticatedUserID == "" ||
+		request.UserID != "" && request.UserID != operation.UserID ||
+		request.AuthenticatedUserID != "" && request.AuthenticatedUserID != operation.UserID ||
+		request.ClientID != operation.ClientID {
+		return fmt.Errorf("%w: operation %d wire exchange target identity does not match", ErrCaptureIncomplete, operation.Sequence)
+	}
+	scopeBound := false
+	if request.ScopeID != "" {
+		if request.ScopeID != operation.ScopeID {
+			return fmt.Errorf("%w: operation %d wire exchange target scope does not match", ErrCaptureIncomplete, operation.Sequence)
+		}
+		scopeBound = true
+	}
+	if request.Scopes != nil {
+		if _, exists := request.Scopes[operation.ScopeID]; !exists {
+			return fmt.Errorf("%w: operation %d wire exchange target scope does not match", ErrCaptureIncomplete, operation.Sequence)
+		}
+		scopeBound = true
+	}
+	if !scopeBound {
+		return fmt.Errorf("%w: operation %d wire exchange target scope is missing", ErrCaptureIncomplete, operation.Sequence)
 	}
 	return nil
 }
@@ -314,7 +374,7 @@ func validateCursorBindings(operation Operation, capture ObservationCapture, pri
 	}
 	pulls := make(map[uint64]invariants.PullResultObservation, len(capture.PullResults))
 	for _, result := range capture.PullResults {
-		if result.ExchangeSequence == 0 || result.UserID == "" || result.ClientID == "" || len(result.Cursors) == 0 {
+		if result.ExchangeSequence == 0 || result.UserID != operation.UserID || result.ClientID != operation.ClientID || len(result.Changes) != 1 || result.Changes[0].ScopeID != operation.ScopeID || len(result.Cursors) == 0 {
 			return fmt.Errorf("%w: operation %d pull result is incomplete", ErrCaptureIncomplete, operation.Sequence)
 		}
 		exchange, exists := wires[result.ExchangeSequence]
@@ -325,10 +385,20 @@ func validateCursorBindings(operation Operation, capture ObservationCapture, pri
 			return fmt.Errorf("%w: operation %d pull result is duplicated", ErrCaptureIncomplete, operation.Sequence)
 		}
 		pulls[result.ExchangeSequence] = result
+		targetCursor := false
 		for _, cursor := range result.Cursors {
+			if cursor.UserID != operation.UserID || cursor.ClientID != operation.ClientID {
+				return fmt.Errorf("%w: operation %d pull cursor target does not match", ErrCaptureIncomplete, operation.Sequence)
+			}
+			if cursor.ScopeID == operation.ScopeID {
+				targetCursor = true
+			}
 			if err := requireCursorPosition(capture.CursorPositions, cursor, operation.Sequence); err != nil {
 				return err
 			}
+		}
+		if !targetCursor {
+			return fmt.Errorf("%w: operation %d pull target scope has no cursor", ErrCaptureIncomplete, operation.Sequence)
 		}
 	}
 	acknowledged := make(map[string]struct{}, len(capture.CursorAcknowledgements))

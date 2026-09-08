@@ -9,6 +9,7 @@ import (
 	"os"
 	"reflect"
 	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/trainstar/synchro/conformance/faults"
@@ -122,17 +123,73 @@ func TestRunRejectsNoopExchangeBeforeCheckers(t *testing.T) {
 }
 
 func TestRestartBoundaryMatchesUserAndClient(t *testing.T) {
-	operation := Operation{Sequence: 2, Kind: OperationProcessDeath, UserID: "user-a", ClientID: "client-a"}
+	operation := Operation{Sequence: 2, Kind: OperationProcessDeath, UserID: "user-a", ClientID: "client-a", ScopeID: "scope-a"}
 	prior := []invariants.Observation{{Clients: []invariants.ClientObservation{
 		{State: scenarios.ClientDurabilityFact{UserID: "user-a", ClientID: "client-a"}},
 		{State: scenarios.ClientDurabilityFact{UserID: "user-b", ClientID: "client-a"}},
 	}}}
 	clients := []invariants.ClientObservation{
-		{State: scenarios.ClientDurabilityFact{UserID: "user-a", ClientID: "client-a"}, Process: &invariants.ProcessIdentityObservation{ProcessID: "new-a"}, RestartBoundary: true, Complete: true},
-		{State: scenarios.ClientDurabilityFact{UserID: "user-b", ClientID: "client-a"}, Process: &invariants.ProcessIdentityObservation{ProcessID: "same-b"}, Complete: true},
+		{State: scenarios.ClientDurabilityFact{UserID: "user-a", ClientID: "client-a"}, Scopes: []invariants.ClientScopeObservation{{ScopeID: "scope-a"}}, Process: &invariants.ProcessIdentityObservation{ProcessID: "new-a"}, RestartBoundary: true, Complete: true},
+		{State: scenarios.ClientDurabilityFact{UserID: "user-b", ClientID: "client-a"}, Scopes: []invariants.ClientScopeObservation{{ScopeID: "scope-b"}}, Process: &invariants.ProcessIdentityObservation{ProcessID: "same-b"}, Complete: true},
 	}
 	if err := validateCaptureClients(operation, clients, prior); err != nil {
 		t.Fatalf("validate multi-user restart boundary: %v", err)
+	}
+}
+
+func TestCaptureRejectsDifferentOperationTarget(t *testing.T) {
+	plan, err := Generate(13, Config{
+		OperationCount: MinimumCoverageOperations,
+		Users:          []string{"user-a", "user-b"},
+		Clients:        []string{"client-a", "client-b"},
+		Scopes:         []string{"scope-a", "scope-b"},
+	}, testCatalog(t))
+	if err != nil {
+		t.Fatalf("generate multi-target plan: %v", err)
+	}
+	operation := plan.Operations[2]
+	if operation.Kind != OperationPull {
+		t.Fatalf("operation kind = %s, want pull", operation.Kind)
+	}
+	different := operation
+	if different.UserID == "user-a" {
+		different.UserID = "user-b"
+	} else {
+		different.UserID = "user-a"
+	}
+	if different.ClientID == "client-a" {
+		different.ClientID = "client-b"
+	} else {
+		different.ClientID = "client-a"
+	}
+	if different.ScopeID == "scope-a" {
+		different.ScopeID = "scope-b"
+	} else {
+		different.ScopeID = "scope-a"
+	}
+
+	mutations := []struct {
+		name  string
+		apply func(*ObservationCapture, ObservationCapture)
+	}{
+		{name: "capture", apply: func(capture *ObservationCapture, wrong ObservationCapture) {
+			*capture = wrong
+		}},
+		{name: "wire", apply: func(capture *ObservationCapture, wrong ObservationCapture) {
+			capture.WireExchanges = wrong.WireExchanges
+		}},
+		{name: "pull-fact", apply: func(capture *ObservationCapture, wrong ObservationCapture) {
+			capture.PullResults = wrong.PullResults
+		}},
+	}
+	for _, mutation := range mutations {
+		t.Run(mutation.name, func(t *testing.T) {
+			capture := captureForOperation(operation, "pid-target")
+			mutation.apply(&capture, captureForOperation(different, "pid-wrong-target"))
+			if err := validateObservationCapture(operation, capture, nil); !errors.Is(err, ErrCaptureIncomplete) {
+				t.Fatalf("different target error = %v, want ErrCaptureIncomplete", err)
+			}
+		})
 	}
 }
 
@@ -154,13 +211,28 @@ func TestNegativeControlEmptyExecution(t *testing.T) {
 }
 
 func TestNegativeControlKnownCheckerViolation(t *testing.T) {
-	plan, err := Generate(3, Config{OperationCount: MinimumCoverageOperations}, testCatalog(t))
-	if err != nil {
-		t.Fatalf("generate plan: %v", err)
+	result, path, _ := knownCheckerViolation(t, "violation")
+	journal, err := ReadJournal(path)
+	if !errors.Is(err, ErrJournalUnsealed) {
+		t.Fatalf("violation journal error = %v, want ErrJournalUnsealed", err)
 	}
-	_, err = Run(context.Background(), plan, changingProcessHarness{}, journalPath(t, "violation"))
+	if journal.RunDigest != "" {
+		t.Fatal("violation journal has a completion trailer")
+	}
+	fact := journal.OperationFacts[result.OperationsExecuted-1]
+	if fact.Status != "failed" || fact.ObservationSequence != 0 || fact.FailureCode != "invariant-violation" {
+		t.Fatalf("violation fact = %#v, want failed invariant-violation fact", fact)
+	}
+}
+
+func TestReplayRunReproducesKnownCheckerViolation(t *testing.T) {
+	original, path, catalog := knownCheckerViolation(t, "violation-replay")
+	replayed, err := ReplayRun(context.Background(), path, catalog, changingProcessHarness{})
 	if !errors.Is(err, ErrInvariantViolation) {
-		t.Fatalf("checker violation error = %v, want ErrInvariantViolation", err)
+		t.Fatalf("replayed checker violation error = %v, want ErrInvariantViolation", err)
+	}
+	if !reflect.DeepEqual(replayed.Violations, original.Violations) {
+		t.Fatalf("replayed violations = %#v, want %#v", replayed.Violations, original.Violations)
 	}
 }
 
@@ -222,6 +294,47 @@ func TestReadJournalReportsUnsealedKilledRun(t *testing.T) {
 	}
 	if len(journal.Operations) != len(plan.Operations) || journal.RunDigest != "" {
 		t.Fatalf("unsealed journal = %#v", journal)
+	}
+}
+
+func TestNegativeControlMalformedUnsealedJournal(t *testing.T) {
+	plan, err := Generate(12, Config{OperationCount: MinimumCoverageOperations}, testCatalog(t))
+	if err != nil {
+		t.Fatalf("generate plan: %v", err)
+	}
+	path := journalPath(t, "malformed-unsealed")
+	if _, err := Run(context.Background(), plan, emptyCaptureHarness{}, path); !errors.Is(err, ErrCaptureIncomplete) {
+		t.Fatalf("killed run error = %v, want ErrCaptureIncomplete", err)
+	}
+	original, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read unsealed journal: %v", err)
+	}
+	mutations := []struct {
+		name string
+		edit func(*journalRecord)
+	}{
+		{name: "missing-completion-observation", edit: func(record *journalRecord) {
+			record.OperationFact.Status = "completed"
+			record.OperationFact.ObservationSequence = 1
+			record.OperationFact.FailureCode = ""
+		}},
+		{name: "oversize-failure-code", edit: func(record *journalRecord) {
+			record.OperationFact.FailureCode = strings.Repeat("x", 65)
+		}},
+	}
+	for _, mutation := range mutations {
+		t.Run(mutation.name, func(t *testing.T) {
+			if err := os.WriteFile(path, tamperJournalRecord(original, "operation-fact", mutation.edit), 0o600); err != nil {
+				t.Fatalf("write malformed unsealed journal: %v", err)
+			}
+			if _, err := ReadJournal(path); !errors.Is(err, ErrInvalidJournal) {
+				t.Fatalf("malformed unsealed journal error = %v, want ErrInvalidJournal", err)
+			}
+			if err := os.WriteFile(path, original, 0o600); err != nil {
+				t.Fatalf("restore unsealed journal: %v", err)
+			}
+		})
 	}
 }
 
@@ -366,6 +479,21 @@ func testCatalog(t *testing.T) *faults.Catalog {
 	return catalog
 }
 
+func knownCheckerViolation(t *testing.T, name string) (RunResult, string, *faults.Catalog) {
+	t.Helper()
+	catalog := testCatalog(t)
+	plan, err := Generate(3, Config{OperationCount: MinimumCoverageOperations}, catalog)
+	if err != nil {
+		t.Fatalf("generate plan: %v", err)
+	}
+	path := journalPath(t, name)
+	result, err := Run(context.Background(), plan, changingProcessHarness{}, path)
+	if !errors.Is(err, ErrInvariantViolation) {
+		t.Fatalf("checker violation error = %v, want ErrInvariantViolation", err)
+	}
+	return result, path, catalog
+}
+
 func journalPath(t *testing.T, name string) string {
 	t.Helper()
 	return t.TempDir() + "/soak-" + name + ".jsonl"
@@ -440,7 +568,7 @@ func captureForOperation(operation Operation, processID string) ObservationCaptu
 	case OperationPull:
 		capture.WireExchanges, capture.PullResults, capture.CursorAcknowledgements = stablePullExchanges(operation, positions, rowDigest, scopeDigest)
 	default:
-		capture.WireExchanges = []invariants.WireExchangeObservation{{Sequence: 1, OperationClass: operationExchangeClass(operation.Kind), ResponseStatus: 200, RequestBody: []byte(`{}`), ResponseBody: []byte(`{}`)}}
+		capture.WireExchanges = []invariants.WireExchangeObservation{{Sequence: 1, OperationClass: operationExchangeClass(operation.Kind), ResponseStatus: 200, RequestBody: mustJSON(map[string]any{"user_id": operation.UserID, "client_id": operation.ClientID, "scope_id": operation.ScopeID}), ResponseBody: []byte(`{}`)}}
 	}
 	if operation.FaultPlan != nil {
 		capture.FaultActivation = &FaultActivationObservation{ControlID: string(operation.FaultPlan.ControlID), Target: operation.ClientID, Activated: true, CleanedUp: true}
@@ -474,28 +602,31 @@ func stableDurableCapture(operation Operation, processID string) (vectors.Manife
 	if err != nil {
 		panic(err)
 	}
-	selectedScope := "scope-a"
+	selectedScope := operation.ScopeID
 	other := otherScope(selectedScope)
-	scopeDigest, err := vectors.ScopeDigest(manifest.Hash(), selectedScope, []vectors.DigestEntry{{RowIdentity: rowIdentity, RowDigest: rowDigest}, {RowIdentity: secondIdentity, RowDigest: secondDigest}})
+	entries := []vectors.DigestEntry{{RowIdentity: rowIdentity, RowDigest: rowDigest}, {RowIdentity: secondIdentity, RowDigest: secondDigest}}
+	scopeDigest, err := vectors.ScopeDigest(manifest.Hash(), selectedScope, entries)
 	if err != nil {
 		panic(err)
 	}
-	authoritativeDigest := scopeDigest
-	localDigest := scopeDigest
-	cursorA := "cursor-terminal"
-	cursorB := "cursor-secondary"
-	positionA := pullPosition(operation, selectedScope, cursorA)
-	positionB := pullPosition(operation, other, cursorB)
+	otherDigest, err := vectors.ScopeDigest(manifest.Hash(), other, entries)
+	if err != nil {
+		panic(err)
+	}
+	selectedCursor := "cursor-" + selectedScope
+	otherCursor := "cursor-" + other
+	positionA := pullPosition(operation, selectedScope, selectedCursor)
+	positionB := pullPosition(operation, other, otherCursor)
 	checkpoints := []invariants.OperatorCheckpointObservation{{UserID: operation.UserID, ClientID: operation.ClientID, ScopeID: positionA.ScopeID, StreamGeneration: "stream", Position: positionA.Position}, {UserID: operation.UserID, ClientID: operation.ClientID, ScopeID: positionB.ScopeID, StreamGeneration: "stream", Position: positionB.Position}}
 	clients := []invariants.ClientObservation{{
-		State:     scenarios.ClientDurabilityFact{UserID: operation.UserID, ClientID: operation.ClientID, Checkpoints: []scenarios.CheckpointFact{{ScopeID: selectedScope, HasCursor: true, HasChecksum: true, Verified: true}, {ScopeID: other, HasCursor: true, Verified: true}}},
+		State:     scenarios.ClientDurabilityFact{UserID: operation.UserID, ClientID: operation.ClientID, Checkpoints: []scenarios.CheckpointFact{{ScopeID: selectedScope, HasCursor: true, HasChecksum: true, Verified: true}, {ScopeID: other, HasCursor: true, HasChecksum: true, Verified: true}}},
 		Rows:      []invariants.ClientRowObservation{{TableID: stableTableID, Row: row, ServerVersion: stableServerVersion, StoredDigest: &rowDigest}, {TableID: stableTableID, Row: secondRow, ServerVersion: stableSecondVersion, StoredDigest: &secondDigest}},
-		Scopes:    []invariants.ClientScopeObservation{{ScopeID: selectedScope, RawCursor: &cursorA, AuthoritativeDigest: &authoritativeDigest, LocalDigest: &localDigest, Generation: 4}, {ScopeID: other, RawCursor: &cursorB, Generation: 4}},
-		ScopeRows: []invariants.ClientScopeRowObservation{{ScopeID: selectedScope, Entry: vectors.DigestEntry{RowIdentity: rowIdentity, RowDigest: rowDigest}, Generation: 4}, {ScopeID: selectedScope, Entry: vectors.DigestEntry{RowIdentity: secondIdentity, RowDigest: secondDigest}, Generation: 4}},
+		Scopes:    []invariants.ClientScopeObservation{{ScopeID: selectedScope, RawCursor: &selectedCursor, AuthoritativeDigest: &scopeDigest, LocalDigest: &scopeDigest, Generation: 4}, {ScopeID: other, RawCursor: &otherCursor, AuthoritativeDigest: &otherDigest, LocalDigest: &otherDigest, Generation: 4}},
+		ScopeRows: []invariants.ClientScopeRowObservation{{ScopeID: selectedScope, Entry: vectors.DigestEntry{RowIdentity: rowIdentity, RowDigest: rowDigest}, Generation: 4}, {ScopeID: selectedScope, Entry: vectors.DigestEntry{RowIdentity: secondIdentity, RowDigest: secondDigest}, Generation: 4}, {ScopeID: other, Entry: vectors.DigestEntry{RowIdentity: rowIdentity, RowDigest: rowDigest}, Generation: 4}, {ScopeID: other, Entry: vectors.DigestEntry{RowIdentity: secondIdentity, RowDigest: secondDigest}, Generation: 4}},
 		Process:   &invariants.ProcessIdentityObservation{ProcessID: processID, DatabaseIdentityFingerprint: digest},
 		Complete:  true,
 	}}
-	serverState := scenarios.StateFacts{Scopes: []scenarios.ScopeFact{{ScopeID: selectedScope, MembershipGeneration: 4, Cardinality: 2}, {ScopeID: other, MembershipGeneration: 4, Cardinality: 0}}, RowScopeEdges: []scenarios.RowScopeEdgeFact{{TableID: stableTableID, CanonicalWireJSON: `"row-authored"`, ScopeID: selectedScope}, {TableID: stableTableID, CanonicalWireJSON: `"row-existing"`, ScopeID: selectedScope}}}
+	serverState := scenarios.StateFacts{Scopes: []scenarios.ScopeFact{{ScopeID: selectedScope, MembershipGeneration: 4, Cardinality: 2}, {ScopeID: other, MembershipGeneration: 4, Cardinality: 2}}, RowScopeEdges: []scenarios.RowScopeEdgeFact{{TableID: stableTableID, CanonicalWireJSON: `"row-authored"`, ScopeID: selectedScope}, {TableID: stableTableID, CanonicalWireJSON: `"row-existing"`, ScopeID: selectedScope}, {TableID: stableTableID, CanonicalWireJSON: `"row-authored"`, ScopeID: other}, {TableID: stableTableID, CanonicalWireJSON: `"row-existing"`, ScopeID: other}}}
 	serverRows := []invariants.ServerRowIdentityObservation{{TableID: stableTableID, CanonicalWireJSON: `"row-authored"`, RowIdentity: rowIdentity}, {TableID: stableTableID, CanonicalWireJSON: `"row-existing"`, RowIdentity: secondIdentity}}
 	return manifest, clients, serverState, serverRows, []invariants.CursorPositionObservation{positionA, positionB}, checkpoints, rowDigest, scopeDigest
 }
@@ -506,20 +637,22 @@ func stablePushExchange(operation Operation) invariants.WireExchangeObservation 
 	batchID := "00000000-0000-4000-8000-000000000061"
 	pk := map[string]any{stablePKFieldID: "row-push"}
 	columns := map[string]any{stableValueFieldID: "value-push"}
-	request := map[string]any{"client_id": operation.ClientID, "client_generation": 1, "batch_id": batchID, "schema": schema, "mutations": []any{map[string]any{"mutation_id": mutationID, "table": stableTableID, "pk": pk, "authored_schema": schema, "op": "insert", "client_version": "00000000-0000-4000-8000-000000000062", "columns": columns}}}
+	request := map[string]any{"authenticated_user_id": operation.UserID, "client_id": operation.ClientID, "scope_id": operation.ScopeID, "client_generation": 1, "batch_id": batchID, "schema": schema, "mutations": []any{map[string]any{"mutation_id": mutationID, "table": stableTableID, "pk": pk, "authored_schema": schema, "op": "insert", "client_version": "00000000-0000-4000-8000-000000000062", "columns": columns}}}
 	outcome := map[string]any{"mutation_id": mutationID, "status": "applied", "table": stableTableID, "pk": pk, "outcome_schema": schema, "server_row": columns, "server_version": "00000000-0000-4000-8000-000000000063", "row_checksum": map[string]any{"algorithm": "sha256", "version": 1, "encoding": "hex", "digest": digest}}
 	response := map[string]any{"batch_id": batchID, "accepted": []any{outcome}, "rejected": []any{}}
 	return invariants.WireExchangeObservation{Sequence: 1, OperationClass: "push", ResponseStatus: 200, RequestBody: mustJSON(request), ResponseBody: mustJSON(response), ExpectMutationConservation: true}
 }
 
 func stablePullExchanges(operation Operation, positions []invariants.CursorPositionObservation, rowDigest, scopeDigest [32]byte) ([]invariants.WireExchangeObservation, []invariants.PullResultObservation, []invariants.CursorAcknowledgementObservation) {
-	selected := "scope-a"
+	selected := operation.ScopeID
 	other := otherScope(selected)
-	request := map[string]any{"client_id": operation.ClientID, "scopes": map[string]any{selected: map[string]any{"cursor": "cursor-terminal"}, other: map[string]any{"cursor": "cursor-secondary"}}}
+	selectedCursor := positions[0].RawCursor
+	otherCursor := positions[1].RawCursor
+	request := map[string]any{"user_id": operation.UserID, "client_id": operation.ClientID, "scopes": map[string]any{selected: map[string]any{"cursor": selectedCursor}, other: map[string]any{"cursor": otherCursor}}}
 	row := map[string]any{stablePKFieldID: "row-authored", stableValueFieldID: "value-authored"}
-	response := map[string]any{"changes": []any{map[string]any{"scope": selected, "table": stableTableID, "pk": map[string]any{stablePKFieldID: "row-authored"}, "row": row, "server_version": stableServerVersion, "row_checksum": map[string]any{"algorithm": "sha256", "version": 1, "encoding": "hex", "digest": hex.EncodeToString(rowDigest[:])}}}, "scope_cursors": map[string]any{selected: "cursor-terminal", other: "cursor-secondary"}, "scope_updates": map[string]any{"add": []any{}, "remove": []any{}}, "rebuild": []any{}, "has_more": false, "checksums": map[string]any{selected: map[string]any{"algorithm": "sha256", "version": 1, "encoding": "hex", "digest": hex.EncodeToString(scopeDigest[:])}}}
-	zeroRequest := map[string]any{"client_id": operation.ClientID, "scopes": map[string]any{selected: map[string]any{"cursor": "cursor-terminal"}}}
-	zeroResponse := map[string]any{"changes": []any{}, "scope_cursors": map[string]any{selected: "cursor-terminal"}, "scope_updates": map[string]any{"add": []any{}, "remove": []any{}}, "rebuild": []any{}, "has_more": false}
+	response := map[string]any{"changes": []any{map[string]any{"scope": selected, "table": stableTableID, "pk": map[string]any{stablePKFieldID: "row-authored"}, "row": row, "server_version": stableServerVersion, "row_checksum": map[string]any{"algorithm": "sha256", "version": 1, "encoding": "hex", "digest": hex.EncodeToString(rowDigest[:])}}}, "scope_cursors": map[string]any{selected: selectedCursor, other: otherCursor}, "scope_updates": map[string]any{"add": []any{}, "remove": []any{}}, "rebuild": []any{}, "has_more": false, "checksums": map[string]any{selected: map[string]any{"algorithm": "sha256", "version": 1, "encoding": "hex", "digest": hex.EncodeToString(scopeDigest[:])}}}
+	zeroRequest := map[string]any{"user_id": operation.UserID, "client_id": operation.ClientID, "scopes": map[string]any{selected: map[string]any{"cursor": selectedCursor}}}
+	zeroResponse := map[string]any{"changes": []any{}, "scope_cursors": map[string]any{selected: selectedCursor}, "scope_updates": map[string]any{"add": []any{}, "remove": []any{}}, "rebuild": []any{}, "has_more": false}
 	checksumExchange := invariants.WireExchangeObservation{Sequence: 1, OperationClass: "pull", ResponseStatus: 200, RequestBody: mustJSON(request), ResponseBody: mustJSON(response), ExpectChecksumConvergence: true}
 	scopeExchange := invariants.WireExchangeObservation{Sequence: 2, OperationClass: "pull", ResponseStatus: 200, RequestBody: mustJSON(zeroRequest), ResponseBody: mustJSON(zeroResponse), ExpectScopeIsolation: true}
 	change := invariants.PullChangeIdentityObservation{ScopeID: selected, TableID: stableTableID, PrimaryKeyFieldID: stablePKFieldID, PrimaryKey: json.RawMessage(`"row-authored"`)}

@@ -155,13 +155,18 @@ func runPlan(ctx context.Context, plan Plan, harness Harness, writer *journalWri
 			}
 			return result, fmt.Errorf("run invariant checkers after operation %d: %w", index+1, checkerErr)
 		}
+		if len(violations) != 0 {
+			if writer != nil {
+				if err := writer.RecordFailure(operation.Sequence, "invariant-violation"); err != nil {
+					return result, err
+				}
+			}
+			return result, fmt.Errorf("%w after operation %d", ErrInvariantViolation, index+1)
+		}
 		if writer != nil {
 			if err := writer.RecordCompletion(operation.Sequence, observation.Sequence); err != nil {
 				return result, err
 			}
-		}
-		if len(violations) != 0 {
-			return result, fmt.Errorf("%w after operation %d", ErrInvariantViolation, index+1)
 		}
 	}
 	if result.OperationsExecuted == 0 {
@@ -204,7 +209,7 @@ func ReplayPlan(journal Journal, catalog *faults.Catalog) (Plan, error) {
 // ReplayRun regenerates a journal plan and executes that exact replay.
 func ReplayRun(ctx context.Context, journalPath string, catalog *faults.Catalog, harness Harness) (RunResult, error) {
 	journal, err := ReadJournal(journalPath)
-	if err != nil {
+	if err != nil && !errors.Is(err, ErrJournalUnsealed) {
 		return RunResult{}, err
 	}
 	plan, err := ReplayPlan(journal, catalog)
