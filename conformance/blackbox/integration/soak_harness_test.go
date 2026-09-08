@@ -644,6 +644,11 @@ func (h *liveSoakHarness) connect(ctx context.Context, requestClass string) (soa
 		"scope_set_version": h.protocol.ScopeSetVersion,
 		"known_scopes":      knownScopes,
 	}
+	// A returning client must present its generation. Only the first connect
+	// carries the fresh sentinel schema and no generation.
+	if h.protocol.Generation > 0 {
+		payload["client_generation"] = h.protocol.Generation
+	}
 	response, body, call, err := h.doJSON(ctx, &h.client, http.MethodPost, "/sync/connect", requestClass, payload)
 	if err != nil {
 		return soakRecordedCall{}, err
