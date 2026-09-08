@@ -656,9 +656,13 @@ func (h *liveSoakHarness) connect(ctx context.Context, requestClass string) (soa
 	if !ok {
 		return soakRecordedCall{}, errors.New("soak connect schema is invalid")
 	}
+	reference, err := soakSchemaReference(schema)
+	if err != nil {
+		return soakRecordedCall{}, err
+	}
 	h.protocol.Generation = generation
 	h.protocol.ScopeSetVersion = scopeVersion
-	h.protocol.Schema = cloneAnyMap(schema)
+	h.protocol.Schema = reference
 	delta, ok := body["scopes"].(map[string]any)
 	if !ok {
 		return soakRecordedCall{}, errors.New("soak connect scope delta is invalid")
@@ -1491,6 +1495,21 @@ func (h *liveSoakHarness) nextUUID(label string) string {
 	digest[8] = (digest[8] & 0x3f) | 0x80
 	encoded := hex.EncodeToString(digest[:16])
 	return encoded[0:8] + "-" + encoded[8:12] + "-" + encoded[12:16] + "-" + encoded[16:20] + "-" + encoded[20:32]
+}
+
+// soakSchemaReference keeps only the two wire members of SchemaRef.
+// The contract type decodes strictly, so any extra member from a response
+// makes every later request an invalid request.
+func soakSchemaReference(schema map[string]any) (map[string]any, error) {
+	version, ok := jsonInt64(schema["version"])
+	if !ok || version <= 0 {
+		return nil, fmt.Errorf("soak schema version is invalid: %#v", schema["version"])
+	}
+	hash, ok := schema["hash"].(string)
+	if !ok || len(hash) != 64 {
+		return nil, fmt.Errorf("soak schema hash is invalid: %#v", schema["hash"])
+	}
+	return map[string]any{"version": version, "hash": hash}, nil
 }
 
 func lowerSHA256(value string) string {
