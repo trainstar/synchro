@@ -842,7 +842,7 @@ func (h *liveSoakHarness) rebuildScope(ctx context.Context, scopeID, requestClas
 			return nil, err
 		}
 		if response.Status != http.StatusOK {
-			return nil, fmt.Errorf("soak rebuild status = %d", response.Status)
+			return nil, fmt.Errorf("soak rebuild status = %d, code = %v", response.Status, body["error"])
 		}
 		calls = append(calls, call)
 		records, ok := body["records"].([]any)
