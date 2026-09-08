@@ -969,6 +969,7 @@ internal class SynchroDatabase private constructor(context: Context, dbPath: Str
         db: SQLiteDatabase,
         tableName: String,
         operation: String,
+        columnNames: List<String>?,
         block: () -> T,
     ): T {
         if (hasCaptureContext(db)) return block()
@@ -976,12 +977,16 @@ internal class SynchroDatabase private constructor(context: Context, dbPath: Str
             .singleOrNull { it.tableName.equals(tableName, ignoreCase = true) }
             ?: return block()
         val statementToken = UUID.randomUUID().toString()
+        val writableColumns = table.columns.filter { it.writable }
+        val requestedColumns = columnNames?.map { it.lowercase(Locale.ROOT) }?.toSet()
         installCaptureContext(
             db = db,
             statementToken = statementToken,
             tableName = table.tableName,
             operation = operation,
-            columnNames = table.columns.filter { it.writable }.map { it.name },
+            columnNames = writableColumns
+                .filter { requestedColumns == null || it.name.lowercase(Locale.ROOT) in requestedColumns }
+                .map { it.name },
         )
         return try {
             block()
@@ -1303,6 +1308,7 @@ class ApplicationTransaction internal constructor(
             db = database,
             tableName = target,
             operation = requireNotNull(statement.writeOperation),
+            columnNames = statement.writeColumns,
         ) {
             val compiled = database.compileStatement(sql)
             try {

@@ -46,6 +46,31 @@ class AuthoredCaptureTests {
     }
 
     @Test
+    fun ordinaryWritesCaptureOnlyStatementColumns() {
+        val databaseName = databaseName()
+        val client = clientWithSchema(databaseName)
+        try {
+            client.execute(
+                "INSERT INTO authored_rows (id, body, updated_at) VALUES (?, ?, ?)",
+                arrayOf("row-1", "before", "2026-01-01T00:00:00.000000Z"),
+            )
+            client.execute(
+                "UPDATE authored_rows SET support_value = ?, updated_at = ? WHERE id = ?",
+                arrayOf("runtime-support", "2026-01-02T00:00:00.000000Z", "row-1"),
+            )
+
+            assertLedger(
+                databaseName,
+                expectedOperations = listOf("insert", "update"),
+                expectedFields = listOf(listOf("field-body"), listOf("field-support")),
+            )
+        } finally {
+            client.close()
+            context.deleteDatabase(databaseName)
+        }
+    }
+
+    @Test
     fun explicitDefaultValuedWriteRemainsAuthored() {
         val databaseName = databaseName()
         val client = clientWithSchema(databaseName)

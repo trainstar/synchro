@@ -7,9 +7,14 @@ import SQLite3
 /// This type intentionally does not expose the writable SQLite connection.
 public final class ApplicationTransaction {
     private let database: GRDB.Database
+    private let writeExecutor: ((String, () throws -> ExecResult) throws -> ExecResult)?
 
-    fileprivate init(database: GRDB.Database) {
+    fileprivate init(
+        database: GRDB.Database,
+        writeExecutor: ((String, () throws -> ExecResult) throws -> ExecResult)? = nil
+    ) {
         self.database = database
+        self.writeExecutor = writeExecutor
     }
 
     @discardableResult
@@ -17,11 +22,14 @@ public final class ApplicationTransaction {
         _ sql: String,
         params: [(any DatabaseValueConvertible)?]? = nil
     ) throws -> ExecResult {
-        try database.execute(
-            sql: sql,
-            arguments: StatementArguments(params ?? [])
-        )
-        return ExecResult(rowsAffected: database.changesCount)
+        let execute = {
+            try self.database.execute(
+                sql: sql,
+                arguments: StatementArguments(params ?? [])
+            )
+            return ExecResult(rowsAffected: self.database.changesCount)
+        }
+        return try writeExecutor?(sql, execute) ?? execute()
     }
 
     public func query(
@@ -272,16 +280,13 @@ enum ApplicationCaptureContext {
     /// The application names the table and the columns it authored, and the
     /// capture triggers retain exactly those columns.
     case authored(tableName: String, operation: String, columnNames: [String])
-    /// A plain write transaction names no authored set, so every writable
-    /// column of every synced table stays capturable.
-    case defaultForSyncedTables
 }
 
 final class ApplicationDatabase: @unchecked Sendable {
     private let queue: DatabaseQueue
     private let policy: ApplicationSQLPolicy
     private let writableColumnsLock = NSLock()
-    private var writableColumnsByTable: [String: [String]] = [:]
+    private var syncedTablesByName: [String: LocalSchemaTable] = [:]
 
     init(path: String, policy: ApplicationSQLPolicy) throws {
         self.policy = policy
@@ -295,14 +300,21 @@ final class ApplicationDatabase: @unchecked Sendable {
 
     func updateSyncedWritableColumns(_ tables: [LocalSchemaTable]) {
         writableColumnsLock.lock()
-        writableColumnsByTable = Dictionary(uniqueKeysWithValues: tables.map { table in
-            (table.tableName, table.columns.filter(\.writable).map(\.name))
+        syncedTablesByName = Dictionary(uniqueKeysWithValues: tables.map { table in
+            (normalized(table.tableName), table)
         })
         writableColumnsLock.unlock()
     }
 
     func write<T>(_ body: (ApplicationTransaction) throws -> T) throws -> T {
-        try write(context: .defaultForSyncedTables, body)
+        try queue.write { database in
+            try body(ApplicationTransaction(database: database) { sql, execute in
+                guard let context = try self.captureContext(for: sql) else {
+                    return try execute()
+                }
+                return try self.withCaptureContext(context, database: database, execute)
+            })
+        }
     }
 
     func write<T>(
@@ -310,13 +322,54 @@ final class ApplicationDatabase: @unchecked Sendable {
         _ body: (ApplicationTransaction) throws -> T
     ) throws -> T {
         try queue.write { database in
-            let token = UUID().uuidString
-            policy.openCaptureContextWindow()
-            defer { policy.closeCaptureContextWindow() }
-            try installCaptureContext(context, token: token, database: database)
-            defer { try? clearCaptureContext(token: token, database: database) }
-            return try body(ApplicationTransaction(database: database))
+            try withCaptureContext(context, database: database) {
+                try body(ApplicationTransaction(database: database))
+            }
         }
+    }
+
+    private func captureContext(for sql: String) throws -> ApplicationCaptureContext? {
+        guard let statement = try ApplicationWriteStatement.parse(sql) else { return nil }
+        writableColumnsLock.lock()
+        let table = syncedTablesByName[normalized(statement.tableName)]
+        writableColumnsLock.unlock()
+        guard let table else { return nil }
+
+        let requested = statement.columnNames.map { names in
+            Set(names.map(normalized))
+        }
+        let columns = table.columns.compactMap { column -> String? in
+            guard column.writable else { return nil }
+            guard requested?.contains(normalized(column.name)) ?? true else { return nil }
+            return column.name
+        }
+        return .authored(
+            tableName: table.tableName,
+            operation: statement.operation,
+            columnNames: columns
+        )
+    }
+
+    private func withCaptureContext<T>(
+        _ context: ApplicationCaptureContext,
+        database: GRDB.Database,
+        _ body: () throws -> T
+    ) throws -> T {
+        let token = UUID().uuidString
+        policy.openCaptureContextWindow()
+        do {
+            try installCaptureContext(context, token: token, database: database)
+            policy.closeCaptureContextWindow()
+        } catch {
+            policy.closeCaptureContextWindow()
+            throw error
+        }
+        defer {
+            policy.openCaptureContextWindow()
+            try? clearCaptureContext(token: token, database: database)
+            policy.closeCaptureContextWindow()
+        }
+        return try body()
     }
 
     private func installCaptureContext(
@@ -328,13 +381,6 @@ final class ApplicationDatabase: @unchecked Sendable {
         switch context {
         case let .authored(tableName, operation, columnNames):
             rows = [(tableName, operation, columnNames)]
-        case .defaultForSyncedTables:
-            writableColumnsLock.lock()
-            let tables = writableColumnsByTable
-            writableColumnsLock.unlock()
-            rows = tables
-                .sorted { $0.key < $1.key }
-                .map { ($0.key, "insert", $0.value) }
         }
         for row in rows {
             try database.execute(
@@ -367,16 +413,303 @@ final class ApplicationDatabase: @unchecked Sendable {
         )
     }
 
-    func withPreparedStatement<T>(
-        sql: String,
-        body: (Statement) throws -> T
-    ) throws -> T {
-        try queue.writeWithoutTransaction { database in
-            try body(database.makeStatement(sql: sql))
-        }
-    }
-
     func close() throws {
         try queue.close()
     }
+
+    private func normalized(_ value: String) -> String {
+        value.lowercased(with: Locale(identifier: "en_US_POSIX"))
+    }
+}
+
+private struct ApplicationWriteStatement {
+    let tableName: String
+    let operation: String
+    let columnNames: [String]?
+
+    static func parse(_ sql: String) throws -> ApplicationWriteStatement? {
+        var lexer = Lexer(source: sql)
+        var parser = Parser(tokens: try lexer.tokens())
+        try parser.skipWithClause()
+        switch parser.keyword() {
+        case "INSERT":
+            return try parser.parseInsert()
+        case "UPDATE":
+            return try parser.parseUpdate()
+        case "DELETE":
+            return try parser.parseDelete()
+        default:
+            return nil
+        }
+    }
+
+    private enum Token: Equatable {
+        case word(String)
+        case identifier(String)
+        case symbol(Character)
+        case other
+    }
+
+    private struct Lexer {
+        let source: [UnicodeScalar]
+        var index = 0
+
+        init(source: String) {
+            self.source = Array(source.unicodeScalars)
+        }
+
+        mutating func tokens() throws -> [Token] {
+            var result: [Token] = []
+            while index < source.count {
+                if CharacterSet.whitespacesAndNewlines.contains(source[index]) {
+                    index += 1
+                } else if starts(with: "--") {
+                    index += 2
+                    while index < source.count, source[index] != "\n", source[index] != "\r" { index += 1 }
+                } else if starts(with: "/*") {
+                    index += 2
+                    while index + 1 < source.count, !starts(with: "*/") { index += 1 }
+                    guard index + 1 < source.count else { throw invalidSQL() }
+                    index += 2
+                } else if source[index] == "'" {
+                    try skipQuoted(opening: "'", closing: "'", doubledEscape: true)
+                    result.append(.other)
+                } else if source[index] == "\"" || source[index] == "`" || source[index] == "[" {
+                    let opening = source[index]
+                    let closing: UnicodeScalar = opening == "[" ? "]" : opening
+                    result.append(.identifier(try quotedIdentifier(
+                        opening: opening,
+                        closing: closing,
+                        doubledEscape: opening != "["
+                    )))
+                } else if isIdentifierStart(source[index]) {
+                    let start = index
+                    index += 1
+                    while index < source.count, isIdentifierPart(source[index]) { index += 1 }
+                    result.append(.word(String(String.UnicodeScalarView(source[start..<index]))))
+                } else if source[index] == "?" || source[index] == ":" || source[index] == "@" || source[index] == "$" {
+                    index += 1
+                    while index < source.count, isIdentifierPart(source[index]) { index += 1 }
+                    result.append(.other)
+                } else if CharacterSet.decimalDigits.contains(source[index]) {
+                    index += 1
+                    while index < source.count,
+                          CharacterSet.alphanumerics.contains(source[index]) || ".+-".unicodeScalars.contains(source[index]) {
+                        index += 1
+                    }
+                    result.append(.other)
+                } else {
+                    result.append(.symbol(Character(source[index])))
+                    index += 1
+                }
+            }
+            return result
+        }
+
+        private mutating func skipQuoted(
+            opening: UnicodeScalar,
+            closing: UnicodeScalar,
+            doubledEscape: Bool
+        ) throws {
+            _ = try quotedIdentifier(opening: opening, closing: closing, doubledEscape: doubledEscape)
+        }
+
+        private mutating func quotedIdentifier(
+            opening: UnicodeScalar,
+            closing: UnicodeScalar,
+            doubledEscape: Bool
+        ) throws -> String {
+            guard source[index] == opening else { throw invalidSQL() }
+            index += 1
+            var value: [UnicodeScalar] = []
+            while index < source.count {
+                let scalar = source[index]
+                index += 1
+                if scalar == closing {
+                    if doubledEscape, index < source.count, source[index] == closing {
+                        value.append(closing)
+                        index += 1
+                    } else {
+                        return String(String.UnicodeScalarView(value))
+                    }
+                } else {
+                    value.append(scalar)
+                }
+            }
+            throw invalidSQL()
+        }
+
+        private func starts(with value: String) -> Bool {
+            let scalars = Array(value.unicodeScalars)
+            guard index + scalars.count <= source.count else { return false }
+            return Array(source[index..<(index + scalars.count)]) == scalars
+        }
+
+        private func isIdentifierStart(_ scalar: UnicodeScalar) -> Bool {
+            scalar == "_" || CharacterSet.letters.contains(scalar) || scalar.value >= 128
+        }
+
+        private func isIdentifierPart(_ scalar: UnicodeScalar) -> Bool {
+            isIdentifierStart(scalar) || CharacterSet.decimalDigits.contains(scalar) || scalar == "$"
+        }
+    }
+
+    private struct Parser {
+        let tokens: [Token]
+        var index = 0
+
+        mutating func skipWithClause() throws {
+            guard consumeKeyword("WITH") else { return }
+            _ = consumeKeyword("RECURSIVE")
+            repeat {
+                _ = try consumeIdentifier()
+                if symbol() == "(" { try skipBalancedParentheses() }
+                try requireKeyword("AS")
+                if consumeKeyword("NOT") { try requireKeyword("MATERIALIZED") } else { _ = consumeKeyword("MATERIALIZED") }
+                try skipBalancedParentheses()
+            } while consumeSymbol(",")
+        }
+
+        mutating func parseInsert() throws -> ApplicationWriteStatement {
+            try requireKeyword("INSERT")
+            if consumeKeyword("OR") { index += 1 }
+            try requireKeyword("INTO")
+            let tableName = try consumeObjectName()
+            if consumeKeyword("AS") { _ = try consumeIdentifier() }
+            let columns: [String]?
+            if symbol() == "(" {
+                columns = try consumeIdentifierList()
+            } else if keyword() == "DEFAULT" {
+                columns = []
+            } else {
+                columns = nil
+            }
+            return ApplicationWriteStatement(tableName: tableName, operation: "insert", columnNames: columns)
+        }
+
+        mutating func parseUpdate() throws -> ApplicationWriteStatement {
+            try requireKeyword("UPDATE")
+            if consumeKeyword("OR") { index += 1 }
+            let tableName = try consumeObjectName()
+            if consumeKeyword("AS") { _ = try consumeIdentifier() }
+            try requireKeyword("SET")
+            let columns = try consumeUpdateTargets()
+            return ApplicationWriteStatement(tableName: tableName, operation: "update", columnNames: columns)
+        }
+
+        mutating func parseDelete() throws -> ApplicationWriteStatement {
+            try requireKeyword("DELETE")
+            try requireKeyword("FROM")
+            return ApplicationWriteStatement(
+                tableName: try consumeObjectName(),
+                operation: "delete",
+                columnNames: []
+            )
+        }
+
+        private mutating func consumeUpdateTargets() throws -> [String] {
+            var result: [String] = []
+            while true {
+                if symbol() == "(" {
+                    result.append(contentsOf: try consumeIdentifierList())
+                } else {
+                    result.append(try consumeIdentifier())
+                }
+                guard consumeSymbol("=") else { throw invalidSQL() }
+                var depth = 0
+                var consumedValue = false
+                while index < tokens.count {
+                    if symbol() == "(" {
+                        depth += 1
+                    } else if symbol() == ")", depth > 0 {
+                        depth -= 1
+                    } else if depth == 0, symbol() == "," {
+                        index += 1
+                        break
+                    } else if depth == 0, let keyword = keyword(),
+                              ["FROM", "WHERE", "RETURNING", "ORDER", "LIMIT"].contains(keyword) {
+                        guard consumedValue else { throw invalidSQL() }
+                        return result
+                    }
+                    consumedValue = true
+                    index += 1
+                }
+                guard consumedValue else { throw invalidSQL() }
+                if index >= tokens.count || symbol(at: index - 1) != "," { return result }
+            }
+        }
+
+        private mutating func consumeIdentifierList() throws -> [String] {
+            guard consumeSymbol("(") else { throw invalidSQL() }
+            var result: [String] = []
+            repeat { result.append(try consumeIdentifier()) } while consumeSymbol(",")
+            guard consumeSymbol(")") else { throw invalidSQL() }
+            return result
+        }
+
+        private mutating func consumeObjectName() throws -> String {
+            var result = try consumeIdentifier()
+            while consumeSymbol(".") { result = try consumeIdentifier() }
+            return result
+        }
+
+        private mutating func skipBalancedParentheses() throws {
+            guard consumeSymbol("(") else { throw invalidSQL() }
+            var depth = 1
+            while index < tokens.count {
+                if consumeSymbol("(") {
+                    depth += 1
+                } else if consumeSymbol(")") {
+                    depth -= 1
+                    if depth == 0 { return }
+                } else {
+                    index += 1
+                }
+            }
+            throw invalidSQL()
+        }
+
+        private mutating func consumeIdentifier() throws -> String {
+            defer { index += 1 }
+            switch tokens.indices.contains(index) ? tokens[index] : nil {
+            case let .word(value), let .identifier(value):
+                return value
+            default:
+                throw invalidSQL()
+            }
+        }
+
+        private mutating func requireKeyword(_ value: String) throws {
+            guard consumeKeyword(value) else { throw invalidSQL() }
+        }
+
+        private mutating func consumeKeyword(_ value: String) -> Bool {
+            guard keyword() == value else { return false }
+            index += 1
+            return true
+        }
+
+        private mutating func consumeSymbol(_ value: Character) -> Bool {
+            guard symbol() == value else { return false }
+            index += 1
+            return true
+        }
+
+        func keyword() -> String? {
+            guard case let .word(value)? = tokens.indices.contains(index) ? tokens[index] : nil else { return nil }
+            return value.uppercased(with: Locale(identifier: "en_US_POSIX"))
+        }
+
+        private func symbol() -> Character? { symbol(at: index) }
+
+        private func symbol(at position: Int) -> Character? {
+            guard case let .symbol(value)? = tokens.indices.contains(position) ? tokens[position] : nil else { return nil }
+            return value
+        }
+    }
+
+}
+
+private func invalidSQL() -> SynchroError {
+    .invalidResponse(message: "application write SQL is invalid")
 }

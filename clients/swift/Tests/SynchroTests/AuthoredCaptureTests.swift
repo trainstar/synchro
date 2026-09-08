@@ -93,6 +93,24 @@ final class AuthoredCaptureTests: XCTestCase {
         try assertLedger(db, expectedOperations: ["insert"], expectedFields: [["field-body"]])
     }
 
+    func testOrdinaryWritesCaptureOnlyStatementColumns() throws {
+        let db = try makeEnvironment()
+        _ = try db.execute(
+            "INSERT INTO authored_rows (id, body, updated_at) VALUES (?, ?, ?)",
+            params: ["row-1", "before", "2026-01-01T00:00:00.000000Z"]
+        )
+        _ = try db.execute(
+            "UPDATE authored_rows SET support_value = ?, updated_at = ? WHERE id = ?",
+            params: ["runtime-support", "2026-01-02T00:00:00.000000Z", "row-1"]
+        )
+
+        try assertLedger(
+            db,
+            expectedOperations: ["insert", "update"],
+            expectedFields: [["field-body"], ["field-support"]]
+        )
+    }
+
     func testExplicitDefaultValuedWriteRemainsAuthored() throws {
         let db = try makeEnvironment()
         try db.applicationAuthoredWriteTransaction(

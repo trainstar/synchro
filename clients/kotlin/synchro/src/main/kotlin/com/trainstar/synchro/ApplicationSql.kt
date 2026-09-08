@@ -19,6 +19,7 @@ internal object ApplicationSql {
         val kind: Kind,
         val writeTarget: String? = null,
         val writeOperation: String? = null,
+        val writeColumns: List<String>? = null,
     )
 
     fun authorizeRead(sql: String): Statement = authorize(sql, Kind.READ)
@@ -220,7 +221,17 @@ internal object ApplicationSql {
                 throw IllegalArgumentException("Application SQL conflict clauses are not allowed for synced writes")
             }
             requireKeyword("INTO")
-            return Statement(Kind.WRITE, consumeObjectName(), "insert")
+            val target = consumeObjectName()
+            if (keywordAt(index) == "AS") {
+                index += 1
+                consumeIdentifier("table alias")
+            }
+            val columns = when {
+                symbolAt(index) == "(" -> consumeIdentifierList()
+                keywordAt(index) == "DEFAULT" -> emptyList()
+                else -> null
+            }
+            return Statement(Kind.WRITE, target, "insert", columns)
         }
 
         private fun parseUpdate(): Statement {
@@ -228,13 +239,63 @@ internal object ApplicationSql {
             if (keywordAt(index) == "OR") {
                 throw IllegalArgumentException("Application SQL conflict clauses are not allowed for synced writes")
             }
-            return Statement(Kind.WRITE, consumeObjectName(), "update")
+            val target = consumeObjectName()
+            if (keywordAt(index) == "AS") {
+                index += 1
+                consumeIdentifier("table alias")
+            }
+            requireKeyword("SET")
+            return Statement(Kind.WRITE, target, "update", consumeUpdateTargets())
         }
 
         private fun parseDelete(): Statement {
             index += 1
             requireKeyword("FROM")
-            return Statement(Kind.WRITE, consumeObjectName(), "delete")
+            return Statement(Kind.WRITE, consumeObjectName(), "delete", emptyList())
+        }
+
+        private fun consumeUpdateTargets(): List<String> {
+            val result = mutableListOf<String>()
+            while (true) {
+                if (symbolAt(index) == "(") {
+                    result += consumeIdentifierList()
+                } else {
+                    result += consumeIdentifier("update column")
+                }
+                if (!consumeSymbol("=")) throw IllegalArgumentException("Application SQL update assignment is invalid")
+                var depth = 0
+                var consumedValue = false
+                var hasNextAssignment = false
+                while (index < tokens.size) {
+                    when {
+                        symbolAt(index) == "(" -> depth += 1
+                        symbolAt(index) == ")" && depth > 0 -> depth -= 1
+                        symbolAt(index) == "," && depth == 0 -> {
+                            index += 1
+                            hasNextAssignment = true
+                            break
+                        }
+                        depth == 0 && keywordAt(index) in UPDATE_TRAILING_CLAUSES -> {
+                            if (!consumedValue) throw IllegalArgumentException("Application SQL update value is missing")
+                            return result
+                        }
+                    }
+                    consumedValue = true
+                    index += 1
+                }
+                if (!consumedValue) throw IllegalArgumentException("Application SQL update value is missing")
+                if (!hasNextAssignment) return result
+            }
+        }
+
+        private fun consumeIdentifierList(): List<String> {
+            if (!consumeSymbol("(")) throw IllegalArgumentException("Application SQL column list is invalid")
+            val result = mutableListOf<String>()
+            do {
+                result += consumeIdentifier("column name")
+            } while (consumeSymbol(","))
+            if (!consumeSymbol(")")) throw IllegalArgumentException("Application SQL column list is invalid")
+            return result
         }
 
         private fun consumeObjectName(): String {
@@ -323,4 +384,6 @@ internal object ApplicationSql {
         "ALTER", "ANALYZE", "ATTACH", "BEGIN", "COMMIT", "CREATE", "DETACH", "DROP", "EXPLAIN", "PRAGMA",
         "REINDEX", "RELEASE", "ROLLBACK", "SAVEPOINT", "VACUUM",
     )
+
+    private val UPDATE_TRAILING_CLAUSES = setOf("FROM", "WHERE", "RETURNING", "ORDER", "LIMIT")
 }

@@ -87,13 +87,37 @@ final class PullProcessor: @unchecked Sendable {
         }
         let tablesByID = Dictionary(uniqueKeysWithValues: syncedTables.map { ($0.tableID, $0) })
         let tablesByName = Dictionary(uniqueKeysWithValues: syncedTables.map { ($0.tableName, $0) })
+        let validatedChanges = try changes.map { change -> (
+            change: ChangeRecord,
+            schema: LocalSchemaTable,
+            recordID: String
+        ) in
+            guard let schema = tablesByID[change.table] else {
+                throw SynchroError.invalidResponse(message: "unknown logical table \(change.table)")
+            }
+            guard change.op == .upsert || change.op == .delete else {
+                throw SynchroError.invalidResponse(message: "invalid pull operation \(change.op.rawValue)")
+            }
+            guard !change.serverVersion.isEmpty else {
+                throw SynchroError.invalidResponse(message: "pull change server version is missing")
+            }
+            let recordID = try scopeRecordID(pk: change.pk, schema: schema)
+            if change.row == nil {
+                guard change.op == .delete else {
+                    throw SynchroError.invalidResponse(message: "missing row for \(change.table)")
+                }
+                guard change.rowChecksum == nil else {
+                    throw SynchroError.invalidResponse(message: "rowless delete has a row checksum")
+                }
+            }
+            return (change, schema, recordID)
+        }
 
         try database.writeSyncLockedTransaction { db in
-            for change in changes {
-                guard let schema = tablesByID[change.table] else {
-                    throw SynchroError.invalidResponse(message: "unknown logical table \(change.table)")
-                }
-                let recordID = try scopeRecordID(pk: change.pk, schema: schema)
+            for validated in validatedChanges {
+                let change = validated.change
+                let schema = validated.schema
+                let recordID = validated.recordID
 
                 switch change.op {
                 case .insert, .update:
@@ -1079,6 +1103,11 @@ final class PullProcessor: @unchecked Sendable {
     }
 
     private func scopeRecordID(pk: [String: AnyCodable], schema: LocalSchemaTable) throws -> String {
+        do {
+            _ = try Integrity.rowIdentity(table: schema, pk: pk)
+        } catch {
+            throw SynchroError.invalidResponse(message: "invalid primary key for \(schema.tableName)")
+        }
         guard let value = pk[schema.primaryKeyFieldID]?.value else {
             throw SynchroError.invalidResponse(
                 message: "missing primary key \(schema.primaryKeyFieldID) for \(schema.tableName)"

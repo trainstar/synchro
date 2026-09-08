@@ -404,6 +404,75 @@ class PullProcessorTests {
     }
 
     @Test
+    fun testMalformedRowlessDeletesDoNotMutateLocalState() {
+        val checksum = ChecksumObject(
+            algorithm = "sha256",
+            version = 1,
+            encoding = "hex",
+            digest = "0".repeat(64),
+        )
+        val changes = listOf(
+            ChangeRecord(
+                scope = "orders:user1",
+                table = localTestTable.tableID,
+                op = Operation.DELETE,
+                pk = buildJsonObject {
+                    put("id", "w1")
+                    put("extra", "invalid")
+                },
+                serverVersion = "server-version",
+            ),
+            ChangeRecord(
+                scope = "orders:user1",
+                table = localTestTable.tableID,
+                op = Operation.DELETE,
+                pk = buildJsonObject { put("id", 1) },
+                serverVersion = "server-version",
+            ),
+            ChangeRecord(
+                scope = "orders:user1",
+                table = localTestTable.tableID,
+                op = Operation.DELETE,
+                pk = buildJsonObject { put("id", "w1") },
+                serverVersion = "",
+            ),
+            ChangeRecord(
+                scope = "orders:user1",
+                table = localTestTable.tableID,
+                op = Operation.DELETE,
+                pk = buildJsonObject { put("id", "w1") },
+                rowChecksum = checksum,
+                serverVersion = "server-version",
+            ),
+        )
+
+        changes.forEach { change ->
+            val (db, processor) = makeTestEnv()
+            addScopeRow(db, change.scope, "w1")
+            insertOrder(db, "w1", updatedAt = "2026-01-01T00:00:00.000000Z")
+
+            assertThrows(SynchroError.InvalidResponse::class.java) {
+                processor.applyScopeChanges(
+                    changes = listOf(change),
+                    syncedTables = listOf(localTestTable),
+                    scopeCursors = emptyMap(),
+                    checksums = null,
+                    schemaHash = PROTOCOL_TEST_SCHEMA_HASH,
+                )
+            }
+            assertNotNull(db.queryOne("SELECT id FROM orders WHERE id = ?", arrayOf("w1")))
+            assertNotNull(db.queryOne(
+                "SELECT record_id FROM _synchro_scope_rows WHERE scope_id = ? AND table_name = ? AND record_id = ?",
+                arrayOf(change.scope, "orders", "w1"),
+            ))
+            assertNull(db.queryOne(
+                "SELECT record_id FROM _synchro_row_versions WHERE table_name = ? AND record_id = ?",
+                arrayOf("orders", "w1"),
+            ))
+        }
+    }
+
+    @Test
     fun testPullRejectsPushOperationsWithoutChangingRows() {
         val (db, processor) = makeTestEnv()
         val row = buildJsonObject {

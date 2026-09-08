@@ -332,6 +332,76 @@ final class PullProcessorTests: XCTestCase {
         )
     }
 
+    func testMalformedRowlessDeletesDoNotMutateLocalState() throws {
+        let checksum = ChecksumObject(
+            algorithm: "sha256",
+            version: 1,
+            encoding: "hex",
+            digest: String(repeating: "0", count: 64)
+        )
+        let changes = [
+            ChangeRecord(
+                scope: "orders:user1",
+                table: testTable.localSchema.tableID,
+                op: .delete,
+                pk: ["id": AnyCodable("w1"), "extra": AnyCodable("invalid")],
+                row: nil,
+                rowChecksum: nil,
+                serverVersion: "server-version"
+            ),
+            ChangeRecord(
+                scope: "orders:user1",
+                table: testTable.localSchema.tableID,
+                op: .delete,
+                pk: ["id": AnyCodable(1)],
+                row: nil,
+                rowChecksum: nil,
+                serverVersion: "server-version"
+            ),
+            ChangeRecord(
+                scope: "orders:user1",
+                table: testTable.localSchema.tableID,
+                op: .delete,
+                pk: ["id": AnyCodable("w1")],
+                row: nil,
+                rowChecksum: nil,
+                serverVersion: ""
+            ),
+            ChangeRecord(
+                scope: "orders:user1",
+                table: testTable.localSchema.tableID,
+                op: .delete,
+                pk: ["id": AnyCodable("w1")],
+                row: nil,
+                rowChecksum: checksum,
+                serverVersion: "server-version"
+            ),
+        ]
+
+        for change in changes {
+            let (db, processor) = try makeTestEnv()
+            try addScopeRow(db, scopeID: change.scope, recordID: "w1")
+            try insertOrder(db, id: "w1", updatedAt: "2026-01-01T00:00:00.000000Z")
+
+            XCTAssertThrowsError(try processor.applyScopeChanges(
+                changes: [change],
+                syncedTables: [testTable.localSchema],
+                scopeCursors: [:],
+                checksums: nil,
+                schemaHash: protocolTestSchemaHash
+            ))
+            XCTAssertNotNil(try db.queryOne("SELECT id FROM orders WHERE id = ?", params: ["w1"]))
+            XCTAssertNotNil(try db.queryOne(
+                "SELECT record_id FROM _synchro_scope_rows WHERE scope_id = ? AND table_name = ? AND record_id = ?",
+                params: [change.scope, "orders", "w1"]
+            ))
+            XCTAssertNil(try db.queryOne(
+                "SELECT record_id FROM _synchro_row_versions WHERE table_name = ? AND record_id = ?",
+                params: ["orders", "w1"]
+            ))
+        }
+    }
+
     func testPullRejectsPushOperationsWithoutChangingRows() throws {
         let (db, processor) = try makeTestEnv()
         let row: [String: AnyCodable] = [

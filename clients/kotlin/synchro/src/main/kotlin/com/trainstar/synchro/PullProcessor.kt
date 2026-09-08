@@ -101,12 +101,29 @@ internal class PullProcessor(private val database: SynchroDatabase) {
         ) return
         val tablesByID = syncedTables.associateBy { it.tableID }
         val tablesByName = syncedTables.associateBy { it.tableName }
+        val validatedChanges = changes.map { change ->
+            val schema = tablesByID[change.table]
+                ?: throw SynchroError.InvalidResponse("unknown logical table ${change.table}")
+            if (change.op != Operation.UPSERT && change.op != Operation.DELETE) {
+                throw SynchroError.InvalidResponse("invalid pull operation ${change.op}")
+            }
+            if (change.serverVersion.isEmpty()) {
+                throw SynchroError.InvalidResponse("pull change server version is missing")
+            }
+            val recordId = scopeRecordID(change.pk, schema)
+            if (change.row == null) {
+                if (change.op != Operation.DELETE) {
+                    throw SynchroError.InvalidResponse("missing row for ${change.table}")
+                }
+                if (change.rowChecksum != null) {
+                    throw SynchroError.InvalidResponse("rowless delete has a row checksum")
+                }
+            }
+            Triple(change, schema, recordId)
+        }
 
         database.writeSyncLockedTransaction { db ->
-            for (change in changes) {
-                val schema = tablesByID[change.table]
-                    ?: throw SynchroError.InvalidResponse("unknown logical table ${change.table}")
-                val recordId = scopeRecordID(change.pk, schema)
+            for ((change, schema, recordId) in validatedChanges) {
 
                 when (change.op) {
                     Operation.INSERT, Operation.UPDATE -> {
@@ -918,6 +935,11 @@ internal class PullProcessor(private val database: SynchroDatabase) {
     }
 
     private fun scopeRecordID(pk: JsonObject, schema: LocalSchemaTable): String {
+        try {
+            Integrity.rowIdentity(schema, pk)
+        } catch (_: IllegalArgumentException) {
+            throw SynchroError.InvalidResponse("invalid primary key for ${schema.tableName}")
+        }
         val value = pk[schema.primaryKeyFieldID] as? JsonPrimitive
             ?: throw SynchroError.InvalidResponse("missing primary key ${schema.primaryKeyFieldID} for ${schema.tableName}")
         return value.content

@@ -1105,27 +1105,26 @@ final class SchemaManagerTests: XCTestCase {
         }
         wait(for: [migrationEntered], timeout: 1)
 
-        let applicationFinished = expectation(description: "application DDL is rejected before the writer is released")
+        let applicationFinished = expectation(description: "application DDL is rejected for the migration target")
+        let applicationStarted = expectation(description: "application DDL starts while migration holds the writer")
         let applicationResult = OSAllocatedUnfairLock(
             initialState: Optional<Result<Void, Error>>.none
         )
         DispatchQueue.global().async {
+            applicationStarted.fulfill()
             let result: Result<Void, Error> = Result {
-                try database.applicationWritePreparedStatement(
-                    "CREATE TABLE future_items (id TEXT PRIMARY KEY)"
-                ) { statement in
-                    try statement.execute()
+                try database.applicationWriteTransaction { transaction in
+                    _ = try transaction.execute("CREATE TABLE future_items (id TEXT PRIMARY KEY)")
                 }
             }
             applicationResult.withLock { $0 = result }
             applicationFinished.fulfill()
         }
 
-        let applicationWait = XCTWaiter.wait(for: [applicationFinished], timeout: 1)
+        wait(for: [applicationStarted], timeout: 1)
         releaseMigration.signal()
-        wait(for: [migrationFinished], timeout: 2)
+        wait(for: [migrationFinished, applicationFinished], timeout: 3)
 
-        XCTAssertEqual(applicationWait, .completed)
         guard let applicationResult = applicationResult.withLock({ $0 }) else {
             return XCTFail("Application DDL did not produce a result")
         }

@@ -104,10 +104,6 @@ public final class SynchroClient: @unchecked Sendable {
         }
     }
 
-    public func withWritePreparedStatement<T>(_ sql: String, _ block: (Statement) throws -> T) throws -> T {
-        try database.applicationWritePreparedStatement(sql, block)
-    }
-
     // MARK: - Batch
 
     public func executeBatch(_ statements: [SQLStatement]) throws -> Int {

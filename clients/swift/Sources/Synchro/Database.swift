@@ -173,15 +173,6 @@ final class SynchroDatabase: @unchecked Sendable {
         return result
     }
 
-    func applicationWritePreparedStatement<T>(
-        _ sql: String,
-        _ block: (Statement) throws -> T
-    ) throws -> T {
-        let result = try applicationDatabase.withPreparedStatement(sql: sql, body: block)
-        notifyDatabaseChange()
-        return result
-    }
-
     func updateApplicationSyncedTables(_ tables: [LocalSchemaTable]) {
         applicationPolicy.updateSyncedTables(tables)
         applicationDatabase.updateSyncedWritableColumns(tables)
