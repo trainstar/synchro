@@ -40,13 +40,14 @@ type liveSoakHarness struct {
 	seed     uint64
 	root     string
 
-	mu                  sync.Mutex
-	closed              bool
-	identitySequence    uint64
-	processGeneration   uint64
-	schemaTransition    uint64
-	corruptNextChecksum bool
-	authoredTable       map[string]any
+	mu                    sync.Mutex
+	closed                bool
+	identitySequence      uint64
+	clientVersionSequence uint64
+	processGeneration     uint64
+	schemaTransition      uint64
+	corruptNextChecksum   bool
+	authoredTable         map[string]any
 
 	protocol            soakProtocolClient
 	manifest            vectors.Manifest
@@ -789,7 +790,7 @@ func (h *liveSoakHarness) submitInsert(ctx context.Context, scopeID, label strin
 	recordID := h.nextUUID(label + "-record")
 	mutationID := h.nextUUID(label + "-mutation")
 	batchID := h.nextUUID(label + "-batch")
-	clientVersion := h.nextUUID(label + "-client-version")
+	clientVersion := h.nextClientVersion()
 	pk := map[string]any{table.PrimaryKeyField: recordID}
 	columns := map[string]any{table.ValueField: fmt.Sprintf("soak-%d-%s", h.seed, label)}
 	payload := map[string]any{
@@ -1512,6 +1513,14 @@ func (h *liveSoakHarness) nextUUID(label string) string {
 	digest[8] = (digest[8] & 0x3f) | 0x80
 	encoded := hex.EncodeToString(digest[:16])
 	return encoded[0:8] + "-" + encoded[8:12] + "-" + encoded[12:16] + "-" + encoded[16:20] + "-" + encoded[20:32]
+}
+
+// nextClientVersion returns the canonical microsecond timestamp the mutation
+// contract requires. It advances deterministically so a seed replays exactly.
+func (h *liveSoakHarness) nextClientVersion() string {
+	h.clientVersionSequence++
+	base := time.Date(2032, time.January, 2, 3, 4, 5, 0, time.UTC)
+	return base.Add(time.Duration(h.clientVersionSequence) * time.Microsecond).Format("2006-01-02T15:04:05.000000Z")
 }
 
 // soakSchemaReference keeps only the two wire members of SchemaRef.
