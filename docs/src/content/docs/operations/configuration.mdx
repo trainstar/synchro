@@ -19,6 +19,8 @@ Reload PostgreSQL after a `SIGHUP` setting changes. Restart PostgreSQL after a `
 
 An empty publication, slot, database, or worker login makes the related readiness check fail.
 
+The decoder retains at most 16 MiB and 10,000 pgoutput payload records for one source transaction. An oversized active-stream transaction becomes blocking poison before materialization or slot acknowledgement. Candidate decoding also rejects the transaction. Split the source write into smaller transactions to stay below these fixed safety limits.
+
 ## Readiness limits
 
 | GUC | Context | Default | Purpose |

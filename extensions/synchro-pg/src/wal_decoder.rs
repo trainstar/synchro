@@ -15,6 +15,9 @@ pub const ORIGIN_MSG: u8 = b'O';
 pub const LOGICAL_MSG: u8 = b'M';
 pub const TRUNCATE_MSG: u8 = b'T';
 
+const MAX_TRANSACTION_BYTES: usize = 16 * 1024 * 1024;
+const MAX_TRANSACTION_RECORDS: usize = 10_000;
+
 /// Tuple value tags used by pgoutput.
 pub const COL_NULL: u8 = b'n';
 pub const COL_TEXT: u8 = b't';
@@ -113,6 +116,8 @@ struct PendingTransaction {
     final_lsn: u64,
     commit_timestamp: i64,
     next_ordinal: u64,
+    buffered_bytes: usize,
+    buffered_records: usize,
     events: Vec<WalEvent>,
     truncates: Vec<WalTruncate>,
     messages: Vec<WalLogicalMessage>,
@@ -172,11 +177,51 @@ impl WalDecoder {
                 "decoder is poisoned by a prior malformed message".to_string(),
             ));
         }
-        let result = self.feed_inner(wal_data);
+        let result = self
+            .charge_pending_transaction(wal_data)
+            .and_then(|()| self.feed_inner(wal_data));
         if result.is_err() {
             self.failed = true;
         }
         result
+    }
+
+    fn charge_pending_transaction(&mut self, wal_data: &[u8]) -> Result<(), DecodeError> {
+        if wal_data.first() == Some(&COMMIT_MSG) {
+            return Ok(());
+        }
+        let Some(transaction) = self.transaction.as_mut() else {
+            return Ok(());
+        };
+        let buffered_bytes = transaction
+            .buffered_bytes
+            .checked_add(wal_data.len())
+            .ok_or(DecodeError::TransactionTooLarge {
+                max_bytes: MAX_TRANSACTION_BYTES,
+                max_records: MAX_TRANSACTION_RECORDS,
+            })?;
+        let retained_records = match wal_data {
+            [TRUNCATE_MSG, count @ ..] if count.len() >= 4 => {
+                u32::from_be_bytes(count[..4].try_into().unwrap_or([0; 4])) as usize
+            }
+            _ => 1,
+        };
+        let buffered_records = transaction
+            .buffered_records
+            .checked_add(retained_records)
+            .ok_or(DecodeError::TransactionTooLarge {
+                max_bytes: MAX_TRANSACTION_BYTES,
+                max_records: MAX_TRANSACTION_RECORDS,
+            })?;
+        if buffered_bytes > MAX_TRANSACTION_BYTES || buffered_records > MAX_TRANSACTION_RECORDS {
+            return Err(DecodeError::TransactionTooLarge {
+                max_bytes: MAX_TRANSACTION_BYTES,
+                max_records: MAX_TRANSACTION_RECORDS,
+            });
+        }
+        transaction.buffered_bytes = buffered_bytes;
+        transaction.buffered_records = buffered_records;
+        Ok(())
     }
 
     fn feed_inner(&mut self, wal_data: &[u8]) -> Result<Vec<WalTransaction>, DecodeError> {
@@ -245,6 +290,8 @@ impl WalDecoder {
             final_lsn,
             commit_timestamp,
             next_ordinal: 0,
+            buffered_bytes: data.len() + 1,
+            buffered_records: 0,
             events: Vec::new(),
             truncates: Vec::new(),
             messages: Vec::new(),
@@ -659,6 +706,10 @@ impl<'a> Cursor<'a> {
 pub enum DecodeError {
     UnexpectedEof,
     InvalidMessage(String),
+    TransactionTooLarge {
+        max_bytes: usize,
+        max_records: usize,
+    },
 }
 
 impl std::fmt::Display for DecodeError {
@@ -666,6 +717,13 @@ impl std::fmt::Display for DecodeError {
         match self {
             Self::UnexpectedEof => write!(f, "unexpected end of WAL data"),
             Self::InvalidMessage(message) => write!(f, "invalid WAL message: {message}"),
+            Self::TransactionTooLarge {
+                max_bytes,
+                max_records,
+            } => write!(
+                f,
+                "WAL transaction exceeds the {max_bytes}-byte or {max_records}-record decode limit"
+            ),
         }
     }
 }
@@ -846,6 +904,80 @@ mod tests {
         assert_eq!(result[0].events.len(), 2);
         assert_eq!(result[0].events[0].event_ordinal, 0);
         assert_eq!(result[0].events[1].event_ordinal, 1);
+    }
+
+    #[test]
+    fn rejects_transaction_larger_than_decode_limit() {
+        let mut decoder = decoder(7, "public", "items");
+        decoder.feed(&relation(7, "public", "items", b'd')).unwrap();
+        decoder.feed(&begin(1, 2, 1)).unwrap();
+        let message = dml(
+            INSERT_MSG,
+            7,
+            None,
+            Some(&[
+                TupleValue::Text(b"a".to_vec()),
+                TupleValue::Text(vec![b'x'; 1024 * 1024]),
+            ]),
+        );
+        let accepted = MAX_TRANSACTION_BYTES / message.len();
+        for _ in 0..accepted {
+            decoder.feed(&message).unwrap();
+        }
+
+        assert!(accepted * message.len() <= MAX_TRANSACTION_BYTES);
+        assert!((accepted + 1) * message.len() > MAX_TRANSACTION_BYTES);
+        assert!(matches!(
+            decoder.feed(&message),
+            Err(DecodeError::TransactionTooLarge {
+                max_bytes: MAX_TRANSACTION_BYTES,
+                max_records: MAX_TRANSACTION_RECORDS,
+            })
+        ));
+        assert!(decoder.feed(&commit(2, 3, 1)).is_err());
+    }
+
+    #[test]
+    fn rejects_transaction_with_too_many_records() {
+        let mut decoder = decoder(7, "public", "items");
+        decoder.feed(&relation(7, "public", "items", b'd')).unwrap();
+        decoder.feed(&begin(1, 2, 1)).unwrap();
+        let message = dml(
+            INSERT_MSG,
+            7,
+            None,
+            Some(&[TupleValue::Text(b"a".to_vec()), TupleValue::Null]),
+        );
+        for _ in 0..MAX_TRANSACTION_RECORDS {
+            decoder.feed(&message).unwrap();
+        }
+
+        assert!(matches!(
+            decoder.feed(&message),
+            Err(DecodeError::TransactionTooLarge {
+                max_bytes: MAX_TRANSACTION_BYTES,
+                max_records: MAX_TRANSACTION_RECORDS,
+            })
+        ));
+        assert!(decoder.feed(&commit(2, 3, 1)).is_err());
+    }
+
+    #[test]
+    fn rejects_large_truncate_before_relation_allocation() {
+        let mut decoder = decoder(7, "public", "items");
+        decoder.feed(&begin(1, 2, 1)).unwrap();
+        let mut truncate = vec![TRUNCATE_MSG];
+        truncate.extend_from_slice(&((MAX_TRANSACTION_RECORDS + 1) as u32).to_be_bytes());
+        truncate.push(0);
+        truncate.resize(6 + (MAX_TRANSACTION_RECORDS + 1) * 4, 0);
+
+        assert!(matches!(
+            decoder.feed(&truncate),
+            Err(DecodeError::TransactionTooLarge {
+                max_bytes: MAX_TRANSACTION_BYTES,
+                max_records: MAX_TRANSACTION_RECORDS,
+            })
+        ));
     }
 
     #[test]

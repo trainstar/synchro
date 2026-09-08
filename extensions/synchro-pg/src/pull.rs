@@ -434,10 +434,10 @@ fn parse_scope_positions(
             }
             Ok(ParsedScopeCursor::Current(_)) => stale_scopes.push(scope_id.clone()),
             Ok(ParsedScopeCursor::Stale) => stale_scopes.push(scope_id.clone()),
-            Err(err) => {
+            Err(_) => {
                 return Err(protocol_error_response(
                     ProtocolErrorCode::InvalidRequest,
-                    format!("scope {scope_id} cursor is invalid: {err}"),
+                    "invalid scope cursor",
                     false,
                 ));
             }

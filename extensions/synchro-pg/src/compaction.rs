@@ -95,7 +95,10 @@ fn deactivate_stale_clients(client: &mut SpiClient<'_>, threshold: &str) -> i64 
         "UPDATE sync_clients SET is_active = false, updated_at = now()
           WHERE is_active = true
              AND (
-                 generation_expires_at IS NOT NULL
+                 (
+                     generation_expires_at IS NOT NULL
+                     AND generation_expires_at <= pg_catalog.statement_timestamp()
+                 )
                  OR GREATEST(
                      created_at,
                      COALESCE(last_sync_at, '-infinity'::timestamptz),
@@ -121,118 +124,110 @@ fn lock_retention_state(client: &SpiClient<'_>) {
 }
 
 fn delete_acknowledged_effects(client: &mut SpiClient<'_>, batch_size: i32) -> (i64, i64) {
-    let mut total = 0i64;
     let mut last_deleted_seq = 0i64;
-    loop {
-        let deleted = client
-            .update(
-                "WITH candidates AS (
-                     SELECT effect.seq
-                     FROM sync_changelog effect
-                     WHERE effect.stream_generation IS NOT NULL
-                       AND effect.commit_lsn IS NOT NULL
-                       AND effect.event_ordinal IS NOT NULL
-                       AND effect.effect_ordinal IS NOT NULL
+    let deleted = client
+        .update(
+            "WITH candidates AS (
+                 SELECT effect.seq
+                 FROM sync_changelog effect
+                 WHERE effect.stream_generation IS NOT NULL
+                   AND effect.commit_lsn IS NOT NULL
+                   AND effect.event_ordinal IS NOT NULL
+                   AND effect.effect_ordinal IS NOT NULL
+                   AND NOT EXISTS (
+                     SELECT 1
+                     FROM sync_clients active_client
+                     WHERE active_client.is_active = true
+                       AND effect.bucket_id = ANY(active_client.bucket_subs)
                        AND NOT EXISTS (
-                         SELECT 1
-                         FROM sync_clients active_client
-                         WHERE active_client.is_active = true
-                           AND effect.bucket_id = ANY(active_client.bucket_subs)
-                           AND NOT EXISTS (
-                               SELECT 1
-                               FROM sync_client_checkpoints checkpoint
-                               WHERE checkpoint.user_id = active_client.user_id
-                                 AND checkpoint.client_id = active_client.client_id
-                                 AND checkpoint.bucket_id = effect.bucket_id
-                                 AND checkpoint.stream_generation = effect.stream_generation
-                                 AND (
-                                     checkpoint.position_kind = 'transaction_end'
-                                         AND checkpoint.commit_lsn >= effect.commit_lsn
-                                     OR checkpoint.position_kind = 'effect'
-                                         AND (checkpoint.commit_lsn,
-                                              checkpoint.event_ordinal,
-                                              checkpoint.effect_ordinal) >=
-                                             (effect.commit_lsn,
-                                              effect.event_ordinal,
-                                              effect.effect_ordinal)
-                                 )
-                           )
-                      )
-                       AND NOT EXISTS (
-                         SELECT 1
-                         FROM sync_rebuild_sessions rebuild_session
-                         JOIN sync_scope_state scope_state
-                           ON scope_state.scope_id = rebuild_session.scope_id
-                          AND scope_state.stream_generation = rebuild_session.stream_generation
-                          AND scope_state.membership_generation = rebuild_session.membership_generation
-                          AND scope_state.retention_generation = rebuild_session.retention_generation
-                         WHERE rebuild_session.scope_id = effect.bucket_id
-                           AND rebuild_session.expires_at > now()
-                           AND rebuild_session.stream_generation = effect.stream_generation
-                           AND (
-                               rebuild_session.boundary_position_kind = 'generation_start'
-                               OR rebuild_session.boundary_position_kind = 'transaction_end'
-                                  AND effect.commit_lsn > rebuild_session.boundary_commit_lsn
-                           )
+                           SELECT 1
+                           FROM sync_client_checkpoints checkpoint
+                           WHERE checkpoint.user_id = active_client.user_id
+                             AND checkpoint.client_id = active_client.client_id
+                             AND checkpoint.bucket_id = effect.bucket_id
+                             AND checkpoint.stream_generation = effect.stream_generation
+                             AND (
+                                 checkpoint.position_kind = 'transaction_end'
+                                     AND checkpoint.commit_lsn >= effect.commit_lsn
+                                 OR checkpoint.position_kind = 'effect'
+                                     AND (checkpoint.commit_lsn,
+                                          checkpoint.event_ordinal,
+                                          checkpoint.effect_ordinal) >=
+                                         (effect.commit_lsn,
+                                          effect.event_ordinal,
+                                          effect.effect_ordinal)
+                             )
                        )
-                      ORDER BY effect.seq
-                     LIMIT $1
-                 )
-                 DELETE FROM sync_changelog effect
-                 USING candidates
-                 WHERE effect.seq = candidates.seq
-                 RETURNING effect.seq, effect.bucket_id, effect.stream_generation,
-                           effect.commit_lsn::text AS commit_lsn,
-                           effect.event_ordinal, effect.effect_ordinal",
-                None,
-                &[batch_size.into()],
-            )
-            .unwrap_or_else(|error| pgrx::error!("deleting acknowledged effects: {}", error));
-        let count = deleted.len() as i64;
-        let mut floors = std::collections::BTreeMap::<(String, String), StreamPosition>::new();
-        for row in deleted {
-            let seq = row
-                .get_by_name::<i64, &str>("seq")
-                .unwrap_or_else(|error| pgrx::error!("reading deleted effect sequence: {}", error))
-                .unwrap_or(0);
-            last_deleted_seq = last_deleted_seq.max(seq);
-            let scope_id = row
-                .get_by_name::<String, &str>("bucket_id")
-                .unwrap_or_else(|error| pgrx::error!("reading compacted scope: {}", error))
-                .unwrap_or_else(|| pgrx::error!("compacted scope is missing"));
-            let stream_generation = row
-                .get_by_name::<String, &str>("stream_generation")
-                .unwrap_or_else(|error| {
-                    pgrx::error!("reading compacted stream generation: {}", error)
-                })
-                .unwrap_or_else(|| pgrx::error!("compacted stream generation is missing"));
-            let commit_lsn = row
-                .get_by_name::<String, &str>("commit_lsn")
-                .unwrap_or_else(|error| pgrx::error!("reading compacted commit LSN: {}", error))
-                .unwrap_or_else(|| pgrx::error!("compacted commit LSN is missing"));
-            let event_ordinal = row
-                .get_by_name::<i64, &str>("event_ordinal")
-                .unwrap_or_else(|error| pgrx::error!("reading compacted event ordinal: {}", error))
-                .unwrap_or_else(|| pgrx::error!("compacted event ordinal is missing"));
-            let effect_ordinal = row
-                .get_by_name::<i32, &str>("effect_ordinal")
-                .unwrap_or_else(|error| pgrx::error!("reading compacted effect ordinal: {}", error))
-                .unwrap_or_else(|| pgrx::error!("compacted effect ordinal is missing"));
-            let position = StreamPosition::effect(&commit_lsn, event_ordinal, effect_ordinal)
-                .unwrap_or_else(|error| pgrx::error!("reading compacted position: {}", error));
-            floors
-                .entry((scope_id, stream_generation))
-                .and_modify(|prior| *prior = prior.clone().max(position.clone()))
-                .or_insert(position);
-        }
-        for ((scope_id, stream_generation), floor) in floors {
-            advance_retention_floor(client, &scope_id, &stream_generation, &floor);
-        }
-        total += count;
-        if count < i64::from(batch_size) {
-            return (total, last_deleted_seq);
-        }
+                   )
+                   AND NOT EXISTS (
+                     SELECT 1
+                     FROM sync_rebuild_sessions rebuild_session
+                     JOIN sync_scope_state scope_state
+                       ON scope_state.scope_id = rebuild_session.scope_id
+                      AND scope_state.stream_generation = rebuild_session.stream_generation
+                      AND scope_state.membership_generation = rebuild_session.membership_generation
+                      AND scope_state.retention_generation = rebuild_session.retention_generation
+                     WHERE rebuild_session.scope_id = effect.bucket_id
+                       AND rebuild_session.expires_at > now()
+                       AND rebuild_session.stream_generation = effect.stream_generation
+                       AND (
+                           rebuild_session.boundary_position_kind = 'generation_start'
+                           OR rebuild_session.boundary_position_kind = 'transaction_end'
+                              AND effect.commit_lsn > rebuild_session.boundary_commit_lsn
+                       )
+                   )
+                 ORDER BY effect.seq
+                 LIMIT $1
+             )
+             DELETE FROM sync_changelog effect
+             USING candidates
+             WHERE effect.seq = candidates.seq
+             RETURNING effect.seq, effect.bucket_id, effect.stream_generation,
+                       effect.commit_lsn::text AS commit_lsn,
+                       effect.event_ordinal, effect.effect_ordinal",
+            None,
+            &[batch_size.into()],
+        )
+        .unwrap_or_else(|error| pgrx::error!("deleting acknowledged effects: {}", error));
+    let count = deleted.len() as i64;
+    let mut floors = std::collections::BTreeMap::<(String, String), StreamPosition>::new();
+    for row in deleted {
+        let seq = row
+            .get_by_name::<i64, &str>("seq")
+            .unwrap_or_else(|error| pgrx::error!("reading deleted effect sequence: {}", error))
+            .unwrap_or(0);
+        last_deleted_seq = last_deleted_seq.max(seq);
+        let scope_id = row
+            .get_by_name::<String, &str>("bucket_id")
+            .unwrap_or_else(|error| pgrx::error!("reading compacted scope: {}", error))
+            .unwrap_or_else(|| pgrx::error!("compacted scope is missing"));
+        let stream_generation = row
+            .get_by_name::<String, &str>("stream_generation")
+            .unwrap_or_else(|error| pgrx::error!("reading compacted stream generation: {}", error))
+            .unwrap_or_else(|| pgrx::error!("compacted stream generation is missing"));
+        let commit_lsn = row
+            .get_by_name::<String, &str>("commit_lsn")
+            .unwrap_or_else(|error| pgrx::error!("reading compacted commit LSN: {}", error))
+            .unwrap_or_else(|| pgrx::error!("compacted commit LSN is missing"));
+        let event_ordinal = row
+            .get_by_name::<i64, &str>("event_ordinal")
+            .unwrap_or_else(|error| pgrx::error!("reading compacted event ordinal: {}", error))
+            .unwrap_or_else(|| pgrx::error!("compacted event ordinal is missing"));
+        let effect_ordinal = row
+            .get_by_name::<i32, &str>("effect_ordinal")
+            .unwrap_or_else(|error| pgrx::error!("reading compacted effect ordinal: {}", error))
+            .unwrap_or_else(|| pgrx::error!("compacted effect ordinal is missing"));
+        let position = StreamPosition::effect(&commit_lsn, event_ordinal, effect_ordinal)
+            .unwrap_or_else(|error| pgrx::error!("reading compacted position: {}", error));
+        floors
+            .entry((scope_id, stream_generation))
+            .and_modify(|prior| *prior = prior.clone().max(position.clone()))
+            .or_insert(position);
     }
+    for ((scope_id, stream_generation), floor) in floors {
+        advance_retention_floor(client, &scope_id, &stream_generation, &floor);
+    }
+    (count, last_deleted_seq)
 }
 
 fn advance_retention_floor(

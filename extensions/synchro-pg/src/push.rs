@@ -52,17 +52,13 @@ struct StoredMutation {
     outcome: serde_json::Value,
 }
 
-#[derive(Debug, Clone)]
-struct StoredManifest {
-    reference: SchemaRef,
-    manifest: SchemaManifest,
-}
-
 struct EvaluationContext<'a> {
     submitted_schema: &'a SchemaRef,
     current_manifest: &'a SchemaManifest,
-    manifests: &'a [StoredManifest],
-    registry: &'a [TableRegistration],
+    manifests: &'a HashMap<SchemaRef, SchemaManifest>,
+    registry: &'a HashMap<String, TableRegistration>,
+    ever_synced_tables: &'a HashSet<String>,
+    required_insert_columns: &'a HashMap<u32, HashSet<String>>,
     has_write_protect: bool,
 }
 
@@ -278,16 +274,19 @@ fn synchro_push_contract(p_user_id: &str, p_request: pgrx::JsonB) -> String {
         let stored_mutations =
             load_mutation_ledgers(client, p_user_id, &request.client_id, &mutation_ids)
                 .unwrap_or_else(|_| pgrx::error!("loading push mutation ledger failed"));
+        let mutation_fingerprints = request
+            .mutations
+            .iter()
+            .zip(fingerprints.mutations.iter())
+            .map(|(mutation, digest)| (mutation.mutation_id.as_str(), digest.as_slice()))
+            .collect::<HashMap<_, _>>();
         for mutation in &request.mutations {
             let Some(stored) = stored_mutations.get(&mutation.mutation_id) else {
                 continue;
             };
-            let digest = fingerprints
-                .mutations
-                .iter()
-                .zip(request.mutations.iter())
-                .find(|(_, candidate)| candidate.mutation_id == mutation.mutation_id)
-                .map(|(digest, _)| digest.as_slice())
+            let digest = mutation_fingerprints
+                .get(mutation.mutation_id.as_str())
+                .copied()
                 .unwrap_or_else(|| pgrx::error!("push mutation fingerprint is missing"));
             if stored.algorithm != FINGERPRINT_ALGORITHM
                 || stored.version != FINGERPRINT_VERSION
@@ -359,14 +358,33 @@ fn synchro_push_contract(p_user_id: &str, p_request: pgrx::JsonB) -> String {
             );
         }
 
-        let manifests = load_manifest_history(client);
-        let registry = load_registry_inner(client);
+        let mut manifests = load_authored_manifests(client, &request.mutations);
+        manifests.insert(current_schema.clone(), current_manifest.clone());
+        let registry = load_registry_inner(client)
+            .into_iter()
+            .map(|registration| (registration.table_id.clone(), registration))
+            .collect::<HashMap<_, _>>();
+        let historically_synced_table_ids = request
+            .mutations
+            .iter()
+            .filter(|mutation| {
+                manifests
+                    .get(&mutation.authored_schema)
+                    .is_some_and(|manifest| table_for_id(manifest, &mutation.table).is_none())
+            })
+            .map(|mutation| mutation.table.clone())
+            .collect::<HashSet<_>>();
+        let ever_synced_tables = load_ever_synced_tables(client, &historically_synced_table_ids);
+        let required_insert_columns =
+            load_required_insert_columns(client, &request.mutations, &registry);
         let has_write_protect = check_write_protect_exists(client);
         let evaluation_context = EvaluationContext {
             submitted_schema: &request.schema,
             current_manifest: &current_manifest,
             manifests: &manifests,
             registry: &registry,
+            ever_synced_tables: &ever_synced_tables,
+            required_insert_columns: &required_insert_columns,
             has_write_protect,
         };
 
@@ -948,17 +966,40 @@ fn operation_name(operation: Operation) -> &'static str {
     }
 }
 
-fn load_manifest_history(client: &SpiClient<'_>) -> Vec<StoredManifest> {
+pub(crate) fn load_authored_manifests(
+    client: &SpiClient<'_>,
+    mutations: &[Mutation],
+) -> HashMap<SchemaRef, SchemaManifest> {
+    let references = mutations
+        .iter()
+        .map(|mutation| {
+            serde_json::json!({
+                "schema_version": mutation.authored_schema.version,
+                "schema_hash": mutation.authored_schema.hash,
+            })
+        })
+        .collect::<Vec<_>>();
     let rows = client
         .select(
-            "SELECT schema_version, schema_hash, canonical_manifest_body
-             FROM sync_schema_manifest
-             ORDER BY schema_version",
+            "WITH authored AS (
+                 SELECT DISTINCT schema_version, schema_hash
+                 FROM jsonb_to_recordset($1::jsonb) AS reference(
+                     schema_version bigint,
+                     schema_hash text
+                 )
+             )
+             SELECT manifest.schema_version, manifest.schema_hash,
+                    manifest.canonical_manifest_body
+             FROM sync_schema_manifest manifest
+             JOIN authored
+               ON authored.schema_version = manifest.schema_version
+              AND authored.schema_hash = manifest.schema_hash
+             ORDER BY manifest.schema_version",
             None,
-            &[],
+            &[pgrx::JsonB(serde_json::Value::Array(references)).into()],
         )
         .unwrap_or_else(|_| pgrx::error!("loading schema manifest history failed"));
-    let mut manifests = Vec::with_capacity(rows.len());
+    let mut manifests = HashMap::with_capacity(rows.len());
     for row in rows {
         let version = row
             .get_by_name::<i64, &str>("schema_version")
@@ -983,22 +1024,96 @@ fn load_manifest_history(client: &SpiClient<'_>) -> Vec<StoredManifest> {
         if manifest.validate().is_err() {
             pgrx::error!("stored schema manifest violates the contract");
         }
-        manifests.push(StoredManifest {
-            reference: SchemaRef { version, hash },
-            manifest,
-        });
+        manifests.insert(SchemaRef { version, hash }, manifest);
     }
     manifests
 }
 
-fn manifest_for_ref<'a>(
-    manifests: &'a [StoredManifest],
-    reference: &SchemaRef,
-) -> Option<&'a SchemaManifest> {
-    manifests
+fn load_ever_synced_tables(client: &SpiClient<'_>, table_ids: &HashSet<String>) -> HashSet<String> {
+    if table_ids.is_empty() {
+        return HashSet::new();
+    }
+    let rows = client
+        .select(
+            "SELECT logical_id::text AS table_id
+             FROM synchro.sync_logical_ids
+            WHERE kind = 'table'
+               AND logical_id = ANY($1::uuid[])",
+            None,
+            &[table_ids.iter().cloned().collect::<Vec<_>>().into()],
+        )
+        .unwrap_or_else(|_| pgrx::error!("loading push table identities failed"));
+    rows.into_iter()
+        .map(|row| {
+            row.get_by_name::<String, &str>("table_id")
+                .unwrap_or_else(|_| pgrx::error!("reading push table identity failed"))
+                .unwrap_or_else(|| pgrx::error!("push table identity is missing"))
+        })
+        .collect()
+}
+
+fn load_required_insert_columns(
+    client: &SpiClient<'_>,
+    mutations: &[Mutation],
+    registry: &HashMap<String, TableRegistration>,
+) -> HashMap<u32, HashSet<String>> {
+    let relation_ids = mutations
         .iter()
-        .find(|stored| stored.reference == *reference)
-        .map(|stored| &stored.manifest)
+        .filter(|mutation| mutation.op == Operation::Insert)
+        .filter_map(|mutation| registry.get(&mutation.table))
+        .map(|registration| registration.physical_relation_oid)
+        .collect::<HashSet<_>>();
+    if relation_ids.is_empty() {
+        return HashMap::new();
+    }
+    let relation_ids = relation_ids.into_iter().collect::<Vec<_>>();
+    let relations = relation_ids
+        .iter()
+        .map(|relation_id| serde_json::json!({ "physical_relation_oid": relation_id }))
+        .collect::<Vec<_>>();
+    let rows = client
+        .select(
+            "WITH relations AS (
+                 SELECT physical_relation_oid::oid AS physical_relation_oid
+                 FROM jsonb_to_recordset($1::jsonb) AS relation(
+                     physical_relation_oid bigint
+                 )
+             )
+             SELECT attribute.attrelid::bigint AS physical_relation_oid,
+                    attribute.attname::text AS attname
+             FROM pg_catalog.pg_attribute attribute
+             JOIN relations ON relations.physical_relation_oid = attribute.attrelid
+             LEFT JOIN pg_catalog.pg_attrdef default_value
+               ON default_value.adrelid = attribute.attrelid
+              AND default_value.adnum = attribute.attnum
+             WHERE attribute.attnum > 0
+               AND NOT attribute.attisdropped
+               AND attribute.attnotnull
+               AND default_value.adbin IS NULL",
+            None,
+            &[pgrx::JsonB(serde_json::Value::Array(relations)).into()],
+        )
+        .unwrap_or_else(|_| pgrx::error!("loading required insert columns failed"));
+    let mut required = relation_ids
+        .into_iter()
+        .map(|relation_id| (relation_id, HashSet::new()))
+        .collect::<HashMap<_, _>>();
+    for row in rows {
+        let relation_id = row
+            .get_by_name::<i64, &str>("physical_relation_oid")
+            .unwrap_or_else(|_| pgrx::error!("reading required insert relation failed"))
+            .map(|relation_id| relation_id as u32)
+            .unwrap_or_else(|| pgrx::error!("required insert relation is missing"));
+        let column = row
+            .get_by_name::<String, &str>("attname")
+            .unwrap_or_else(|_| pgrx::error!("reading required insert column failed"))
+            .unwrap_or_else(|| pgrx::error!("required insert column is missing"));
+        required
+            .get_mut(&relation_id)
+            .unwrap_or_else(|| pgrx::error!("required insert relation is unknown"))
+            .insert(column);
+    }
+    required
 }
 
 fn table_for_id<'a>(manifest: &'a SchemaManifest, table_id: &str) -> Option<&'a TableSchema> {
@@ -1109,6 +1224,8 @@ fn evaluate_mutation(
     let current_manifest = context.current_manifest;
     let manifests = context.manifests;
     let registry = context.registry;
+    let ever_synced_tables = context.ever_synced_tables;
+    let required_insert_columns = context.required_insert_columns;
     let has_write_protect = context.has_write_protect;
     let pk_field_id = mutation
         .pk
@@ -1123,13 +1240,11 @@ fn evaluate_mutation(
         .cloned()
         .unwrap_or(serde_json::Value::Null);
     let outcome_schema = submitted_schema.clone();
-    let authored_manifest = manifest_for_ref(manifests, &mutation.authored_schema);
+    let authored_manifest = manifests.get(&mutation.authored_schema);
     let authored_table =
         authored_manifest.and_then(|manifest| table_for_id(manifest, &mutation.table));
     let current_table = table_for_id(current_manifest, &mutation.table);
-    let table_reg = registry
-        .iter()
-        .find(|table| table.table_id == mutation.table);
+    let table_reg = registry.get(&mutation.table);
 
     if authored_manifest.is_none() {
         return terminal_evaluation(
@@ -1147,10 +1262,7 @@ fn evaluate_mutation(
     }
 
     if authored_table.is_none() {
-        let ever_synced = manifests
-            .iter()
-            .any(|stored| table_for_id(&stored.manifest, &mutation.table).is_some());
-        if ever_synced {
+        if ever_synced_tables.contains(&mutation.table) {
             return terminal_evaluation(
                 mutation,
                 outcome_schema,
@@ -1323,7 +1435,7 @@ fn evaluate_mutation(
         serde_json::Value::Object(serde_json::Map::new())
     };
     if mutation.op == Operation::Insert
-        && !has_required_insert_columns(client, table_reg, &dml_data)
+        && !has_required_insert_columns(required_insert_columns, table_reg, &dml_data)
     {
         return validation_evaluation(
             mutation,
@@ -2184,34 +2296,21 @@ fn sql_wire_value(field: &FieldRegistration, value: &serde_json::Value) -> serde
 }
 
 fn has_required_insert_columns(
-    client: &SpiClient<'_>,
+    required_insert_columns: &HashMap<u32, HashSet<String>>,
     table_reg: &TableRegistration,
     data: &serde_json::Value,
 ) -> bool {
-    let required = client
-        .select(
-            "SELECT a.attname::text AS attname
-             FROM pg_catalog.pg_attribute a
-             LEFT JOIN pg_catalog.pg_attrdef d
-               ON d.adrelid = a.attrelid AND d.adnum = a.attnum
-             WHERE a.attrelid = $1::oid AND a.attnum > 0
-               AND NOT a.attisdropped AND a.attnotnull AND d.adbin IS NULL",
-            None,
-            &[i64::from(table_reg.physical_relation_oid).into()],
-        )
-        .unwrap_or_else(|_| pgrx::error!("loading required insert columns failed"));
     let object = data
         .as_object()
         .unwrap_or_else(|| pgrx::error!("push insert payload is not an object"));
-    for row in required {
-        let name = row
-            .get_by_name::<String, &str>("attname")
-            .unwrap_or_else(|_| pgrx::error!("reading required insert column failed"))
-            .unwrap_or_else(|| pgrx::error!("required insert column is missing"));
-        if name == table_reg.pk_column {
+    let required = required_insert_columns
+        .get(&table_reg.physical_relation_oid)
+        .unwrap_or_else(|| pgrx::error!("required insert metadata is missing"));
+    for name in required {
+        if name == &table_reg.pk_column {
             continue;
         }
-        if !object.contains_key(&name) {
+        if !object.contains_key(name) {
             return false;
         }
     }

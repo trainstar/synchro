@@ -1458,10 +1458,6 @@ fn validate_bound_slot(
                    AND runtime.active_publication_name::text = $4
                    AND progress.stream_generation = runtime.stream_generation
                    AND progress.generation_start_lsn IS NOT NULL
-                   AND COALESCE(
-                       progress.acknowledged_end_lsn,
-                       progress.generation_start_lsn
-                   ) = slot.confirmed_flush_lsn
                    AND slot.slot_type = 'logical'
                    AND slot.plugin = 'pgoutput'
                    AND NOT slot.temporary
@@ -1486,7 +1482,85 @@ fn validate_bound_slot(
     if !valid {
         return Err("active replication slot is invalid".to_string());
     }
+    let row = client
+        .select(
+            "SELECT slot.confirmed_flush_lsn::text AS actual_lsn,
+                    COALESCE(
+                        progress.acknowledged_end_lsn,
+                        progress.generation_start_lsn
+                    )::text AS expected_lsn,
+                    progress.materialized_end_lsn::text AS materialized_end_lsn
+             FROM synchro.sync_runtime_state runtime
+             JOIN synchro.sync_wal_progress progress
+               ON progress.singleton
+              AND progress.stream_generation = runtime.stream_generation
+             JOIN pg_catalog.pg_replication_slots slot
+               ON slot.slot_name = runtime.active_slot_name
+             WHERE runtime.singleton
+               AND runtime.stream_generation = $1
+               AND runtime.active_slot_name::text = $2
+             FOR UPDATE OF progress",
+            None,
+            &[
+                runtime.stream_generation.as_str().into(),
+                runtime.slot_name.as_str().into(),
+            ],
+        )
+        .map_err(|_| "reading active replication slot boundary failed".to_string())?
+        .first();
+    let actual = row
+        .get_by_name::<String, &str>("actual_lsn")
+        .map_err(|_| "reading active replication slot boundary failed".to_string())?
+        .and_then(|value| parse_lsn(&value))
+        .ok_or_else(|| "active replication slot boundary is invalid".to_string())?;
+    let expected = row
+        .get_by_name::<String, &str>("expected_lsn")
+        .map_err(|_| "reading active replication slot boundary failed".to_string())?
+        .and_then(|value| parse_lsn(&value))
+        .ok_or_else(|| "active replication acknowledgement is invalid".to_string())?;
+    let materialized_end = row
+        .get_by_name::<String, &str>("materialized_end_lsn")
+        .map_err(|_| "reading active materialized boundary failed".to_string())?
+        .and_then(|value| parse_lsn(&value));
+    if let Some(reconciled) = startup_slot_reconciliation(actual, expected, materialized_end)? {
+        let requested = format_lsn(reconciled);
+        let expected = format_lsn(expected);
+        let updated = client
+            .update(
+                "UPDATE synchro.sync_wal_progress
+                 SET acknowledged_end_lsn = $1::pg_lsn, updated_at = now()
+                 WHERE singleton
+                   AND stream_generation = $2
+                   AND COALESCE(acknowledged_end_lsn, generation_start_lsn) = $3::pg_lsn
+                   AND materialized_end_lsn >= $1::pg_lsn",
+                None,
+                &[
+                    requested.as_str().into(),
+                    runtime.stream_generation.as_str().into(),
+                    expected.as_str().into(),
+                ],
+            )
+            .map_err(|_| "reconciling active replication slot failed".to_string())?
+            .len();
+        if updated != 1 {
+            return Err("active replication slot boundary changed".to_string());
+        }
+    }
     Ok(())
+}
+
+fn startup_slot_reconciliation(
+    actual: u64,
+    expected: u64,
+    materialized_end: Option<u64>,
+) -> Result<Option<u64>, String> {
+    if actual == expected {
+        return Ok(None);
+    }
+    if actual > expected && materialized_end.is_some_and(|materialized| actual <= materialized) {
+        return Ok(Some(actual));
+    }
+    Err("active replication slot is invalid".to_string())
 }
 
 fn ensure_publication(
@@ -5775,6 +5849,12 @@ fn run_replication_transaction<R, E, F: FnOnce() -> Result<R, E> + UnwindSafe + 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn startup_slot_reconciliation_stays_within_materialized_state() {
+        assert_eq!(startup_slot_reconciliation(20, 10, Some(30)), Ok(Some(20)));
+        assert!(startup_slot_reconciliation(40, 10, Some(30)).is_err());
+    }
 
     #[test]
     fn captured_row_deletion_uses_logical_field_identity() {

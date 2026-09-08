@@ -176,6 +176,55 @@
     }
 
     #[pg_test]
+    fn test_push_loads_only_authored_schema_manifests() {
+        setup_test_tables();
+        Spi::run(
+            "INSERT INTO sync_schema_manifest (
+                 schema_version, schema_hash, canonical_manifest_body,
+                 parent_schema_version, parent_schema_hash, transition_class,
+                 compatibility_floor, affected_scopes, registry_generation
+             )
+             SELECT 900000 + series.value,
+                    lpad(to_hex(900000 + series.value), 64, '0'),
+                    jsonb_build_object(
+                        'schema_version', 900000 + series.value,
+                        'parent_schema', NULL,
+                        'transition_class', 'initial',
+                        'compatibility_floor', 900000 + series.value,
+                        'tables', '[]'::jsonb
+                    )::text,
+                    NULL, NULL, 'initial', 900000 + series.value,
+                    ARRAY[]::text[], generation.generation
+             FROM generate_series(1, 16) AS series(value)
+             CROSS JOIN sync_registry_generations generation
+             WHERE generation.state = 'active'",
+        )
+        .expect("create historical schema manifests");
+
+        let authored_schema = synchro_core::contract::SchemaRef {
+            version: 900001,
+            hash: format!("{:064x}", 900001),
+        };
+        let mut mutation: synchro_core::contract::Mutation = serde_json::from_value(push_mutation(
+            ("u1", "c1"),
+            "authored-schema-only",
+            "test_orders",
+            "insert",
+            "d0000000-0000-4000-8000-000000000001",
+            None,
+            Some(&[("user_id", json!("u1")), ("title", json!("manifest"))]),
+        ))
+        .expect("authored schema mutation");
+        mutation.authored_schema = authored_schema.clone();
+        let manifests = Spi::connect(|client| {
+            crate::push::load_authored_manifests(client, &[mutation])
+        });
+
+        assert_eq!(manifests.len(), 1);
+        assert!(manifests.contains_key(&authored_schema));
+    }
+
+    #[pg_test]
     fn test_push_changed_mutation_identity_creates_no_new_batch() {
         setup_test_tables();
         let user_id = "u1";

@@ -3009,33 +3009,68 @@ fn load_field_registrations(
     )?;
     let mut fields = Vec::new();
     for row in rows {
-        fields.push(FieldRegistration {
-            field_id: row
-                .get_by_name::<String, &str>("field_id")?
-                .unwrap_or_else(|| pgrx::error!("registry field has no field ID")),
-            physical_column: row
-                .get_by_name::<String, &str>("physical_column")?
-                .unwrap_or_else(|| pgrx::error!("registry field has no physical column")),
-            portable_type: row
-                .get_by_name::<String, &str>("portable_type")?
-                .unwrap_or_else(|| pgrx::error!("registry field has no portable type")),
-            native_json: row
-                .get_by_name::<bool, &str>("native_json")?
-                .unwrap_or_else(|| pgrx::error!("registry field has no native JSON state")),
-            decimal_precision: row.get_by_name::<i32, &str>("decimal_precision")?,
-            decimal_scale: row.get_by_name::<i32, &str>("decimal_scale")?,
-            nullable: row
-                .get_by_name::<bool, &str>("nullable")?
-                .unwrap_or_else(|| pgrx::error!("registry field has no nullability")),
-            writable: row
-                .get_by_name::<bool, &str>("writable")?
-                .unwrap_or_else(|| pgrx::error!("registry field has no writable state")),
-            primary_key: row
-                .get_by_name::<bool, &str>("primary_key")?
-                .unwrap_or_else(|| pgrx::error!("registry field has no primary-key state")),
-        });
+        fields.push(field_registration_from_row(&row)?);
     }
     Ok(fields)
+}
+
+fn load_field_registrations_for_generation(
+    client: &SpiClient<'_>,
+    generation: i64,
+) -> Result<std::collections::HashMap<String, Vec<FieldRegistration>>, spi::Error> {
+    let rows = client.select(
+        "SELECT relation_id::text AS relation_id,
+                field_id::text AS field_id,
+                physical_column::text AS physical_column,
+                portable_type, native_json, decimal_precision, decimal_scale,
+                nullable, writable, primary_key
+         FROM synchro.sync_registry_fields
+         WHERE registry_generation = $1
+         ORDER BY relation_id, field_id",
+        None,
+        &[generation.into()],
+    )?;
+    let mut fields = std::collections::HashMap::new();
+    for row in rows {
+        let relation_id = row
+            .get_by_name::<String, &str>("relation_id")?
+            .unwrap_or_else(|| pgrx::error!("registry field has no relation ID"));
+        fields
+            .entry(relation_id)
+            .or_insert_with(Vec::new)
+            .push(field_registration_from_row(&row)?);
+    }
+    Ok(fields)
+}
+
+fn field_registration_from_row(
+    row: &SpiHeapTupleData<'_>,
+) -> Result<FieldRegistration, spi::Error> {
+    Ok(FieldRegistration {
+        field_id: row
+            .get_by_name::<String, &str>("field_id")?
+            .unwrap_or_else(|| pgrx::error!("registry field has no field ID")),
+        physical_column: row
+            .get_by_name::<String, &str>("physical_column")?
+            .unwrap_or_else(|| pgrx::error!("registry field has no physical column")),
+        portable_type: row
+            .get_by_name::<String, &str>("portable_type")?
+            .unwrap_or_else(|| pgrx::error!("registry field has no portable type")),
+        native_json: row
+            .get_by_name::<bool, &str>("native_json")?
+            .unwrap_or_else(|| pgrx::error!("registry field has no native JSON state")),
+        decimal_precision: row.get_by_name::<i32, &str>("decimal_precision")?,
+        decimal_scale: row.get_by_name::<i32, &str>("decimal_scale")?,
+        nullable: row
+            .get_by_name::<bool, &str>("nullable")?
+            .unwrap_or_else(|| pgrx::error!("registry field has no nullability")),
+        writable: row
+            .get_by_name::<bool, &str>("writable")?
+            .unwrap_or_else(|| pgrx::error!("registry field has no writable state")),
+        primary_key: row
+            .get_by_name::<bool, &str>("primary_key")?
+            .unwrap_or_else(|| pgrx::error!("registry field has no primary-key state")),
+    })
 }
 
 fn load_capture_field_registrations(
@@ -3054,22 +3089,55 @@ fn load_capture_field_registrations(
     )?;
     let mut fields = Vec::new();
     for row in rows {
-        fields.push(CaptureFieldRegistration {
-            physical_column: row
-                .get_by_name::<String, &str>("physical_column")?
-                .unwrap_or_else(|| pgrx::error!("capture dependency field has no column")),
-            portable_type: row
-                .get_by_name::<String, &str>("portable_type")?
-                .unwrap_or_else(|| pgrx::error!("capture dependency field has no type")),
-            nullable: row
-                .get_by_name::<bool, &str>("nullable")?
-                .unwrap_or_else(|| pgrx::error!("capture dependency field has no nullability")),
-            capture_key: row
-                .get_by_name::<bool, &str>("capture_key")?
-                .unwrap_or_else(|| pgrx::error!("capture dependency field has no key state")),
-        });
+        fields.push(capture_field_registration_from_row(&row)?);
     }
     Ok(fields)
+}
+
+fn load_capture_field_registrations_for_generation(
+    client: &SpiClient<'_>,
+    generation: i64,
+) -> Result<std::collections::HashMap<String, Vec<CaptureFieldRegistration>>, spi::Error> {
+    let rows = client.select(
+        "SELECT relation_id::text AS relation_id,
+                physical_column::text AS physical_column,
+                portable_type, nullable, capture_key
+         FROM synchro.sync_capture_dependency_fields
+         WHERE registry_generation = $1
+         ORDER BY relation_id, physical_column",
+        None,
+        &[generation.into()],
+    )?;
+    let mut fields = std::collections::HashMap::new();
+    for row in rows {
+        let relation_id = row
+            .get_by_name::<String, &str>("relation_id")?
+            .unwrap_or_else(|| pgrx::error!("capture dependency field has no relation ID"));
+        fields
+            .entry(relation_id)
+            .or_insert_with(Vec::new)
+            .push(capture_field_registration_from_row(&row)?);
+    }
+    Ok(fields)
+}
+
+fn capture_field_registration_from_row(
+    row: &SpiHeapTupleData<'_>,
+) -> Result<CaptureFieldRegistration, spi::Error> {
+    Ok(CaptureFieldRegistration {
+        physical_column: row
+            .get_by_name::<String, &str>("physical_column")?
+            .unwrap_or_else(|| pgrx::error!("capture dependency field has no column")),
+        portable_type: row
+            .get_by_name::<String, &str>("portable_type")?
+            .unwrap_or_else(|| pgrx::error!("capture dependency field has no type")),
+        nullable: row
+            .get_by_name::<bool, &str>("nullable")?
+            .unwrap_or_else(|| pgrx::error!("capture dependency field has no nullability")),
+        capture_key: row
+            .get_by_name::<bool, &str>("capture_key")?
+            .unwrap_or_else(|| pgrx::error!("capture dependency field has no key state")),
+    })
 }
 
 fn parse_decimal_metadata(sql_type: &str) -> Option<(Option<i32>, Option<i32>)> {
@@ -3576,19 +3644,15 @@ fn validate_generation_entries(
         None,
         &[generation.into()],
     )?;
+    let mut fields = load_field_registrations_for_generation(client, generation)?;
+    let mut capture_fields = load_capture_field_registrations_for_generation(client, generation)?;
     let mut registrations = Vec::new();
     for row in rows {
         let mut registration = registration_from_row(&row)?;
-        registration.fields = load_field_registrations(
-            client,
-            registration.registry_generation,
-            &registration.relation_id,
-        )?;
-        registration.capture_fields = load_capture_field_registrations(
-            client,
-            registration.registry_generation,
-            &registration.relation_id,
-        )?;
+        registration.fields = fields.remove(&registration.relation_id).unwrap_or_default();
+        registration.capture_fields = capture_fields
+            .remove(&registration.relation_id)
+            .unwrap_or_default();
         if registration.registry_generation != generation {
             pgrx::error!("registry generation contains an invalid entry");
         }
@@ -3780,19 +3844,15 @@ fn load_registry_generation_entries(
         None,
         &[generation.into()],
     )?;
+    let mut fields = load_field_registrations_for_generation(client, generation)?;
+    let mut capture_fields = load_capture_field_registrations_for_generation(client, generation)?;
     let mut registrations = Vec::new();
     for row in rows {
         let mut registration = registration_from_row(&row)?;
-        registration.fields = load_field_registrations(
-            client,
-            registration.registry_generation,
-            &registration.relation_id,
-        )?;
-        registration.capture_fields = load_capture_field_registrations(
-            client,
-            registration.registry_generation,
-            &registration.relation_id,
-        )?;
+        registration.fields = fields.remove(&registration.relation_id).unwrap_or_default();
+        registration.capture_fields = capture_fields
+            .remove(&registration.relation_id)
+            .unwrap_or_default();
         if registration.registry_generation != generation {
             pgrx::error!("registry entry belongs to another generation");
         }

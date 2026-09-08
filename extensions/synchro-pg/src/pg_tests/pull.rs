@@ -596,6 +596,22 @@
     }
 
     #[pg_test]
+    fn test_pull_redacts_invalid_cursor_parser_details() {
+        setup_pull_fixtures();
+
+        let response = pull_client(
+            "u1",
+            "c1",
+            1,
+            json!({ "user:u1": { "cursor": "synchro.v1.invalid" } }),
+            100,
+        );
+
+        assert_eq!(response["error"]["code"].as_str(), Some("invalid_request"));
+        assert_eq!(response["error"]["message"].as_str(), Some("invalid scope cursor"));
+    }
+
+    #[pg_test]
     fn test_pull_deduplication() {
         setup_pull_fixtures();
         Spi::run(

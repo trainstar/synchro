@@ -3144,6 +3144,55 @@
     }
 
     #[pg_test]
+    fn test_registry_loads_child_metadata_in_one_scan_per_table() {
+        setup_test_tables();
+        Spi::run("SET LOCAL enable_indexscan = off; SET LOCAL enable_bitmapscan = off")
+            .expect("force registry metadata sequential scans");
+        let field_scans_before: i64 = Spi::get_one(
+            "SELECT COALESCE((
+                 SELECT seq_scan
+                 FROM pg_catalog.pg_stat_xact_all_tables
+                 WHERE relid = 'synchro.sync_registry_fields'::regclass
+             ), 0)",
+        )
+        .expect("read registry field scan count before load")
+        .expect("registry field scan count before load");
+        let capture_field_scans_before: i64 = Spi::get_one(
+            "SELECT COALESCE((
+                 SELECT seq_scan
+                 FROM pg_catalog.pg_stat_xact_all_tables
+                 WHERE relid = 'synchro.sync_capture_dependency_fields'::regclass
+             ), 0)",
+        )
+        .expect("read capture field scan count before load")
+        .expect("capture field scan count before load");
+
+        let registrations = crate::registry::load_registry().expect("load active registry");
+        let field_scans: i64 = Spi::get_one(
+            "SELECT COALESCE((
+                 SELECT seq_scan
+                 FROM pg_catalog.pg_stat_xact_all_tables
+                 WHERE relid = 'synchro.sync_registry_fields'::regclass
+             ), 0)",
+        )
+        .expect("read registry field scan count")
+        .expect("registry field scan count");
+        let capture_field_scans: i64 = Spi::get_one(
+            "SELECT COALESCE((
+                 SELECT seq_scan
+                 FROM pg_catalog.pg_stat_xact_all_tables
+                 WHERE relid = 'synchro.sync_capture_dependency_fields'::regclass
+             ), 0)",
+        )
+        .expect("read capture field scan count")
+        .expect("capture field scan count");
+
+        assert_eq!(registrations.len(), 3);
+        assert_eq!(field_scans - field_scans_before, 1);
+        assert_eq!(capture_field_scans - capture_field_scans_before, 1);
+    }
+
+    #[pg_test]
     fn test_connect_publishes_initial_empty_manifest() {
         let response = connect_client(
             "empty_user",

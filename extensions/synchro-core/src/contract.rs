@@ -250,7 +250,7 @@ pub enum CompositionClass {
     MultiScope,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SchemaRef {
     pub version: i64,

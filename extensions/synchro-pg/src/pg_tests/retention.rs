@@ -109,6 +109,31 @@
     }
 
     #[pg_test]
+    fn test_compact_keeps_future_expiry_client_active() {
+        setup_test_tables();
+        register_client("u1", "future-expiry");
+        Spi::run(
+            "UPDATE sync_clients
+             SET generation_expires_at = pg_catalog.statement_timestamp() + interval '1 hour'
+             WHERE user_id = 'u1' AND client_id = 'future-expiry'",
+        )
+        .expect("set future client expiry");
+
+        let response: pgrx::JsonB = Spi::get_one("SELECT synchro_compact('30 days', 10000)")
+            .unwrap()
+            .expect("compaction response with future expiry client");
+        let active: Option<bool> = Spi::get_one(
+            "SELECT is_active
+             FROM sync_clients
+             WHERE user_id = 'u1' AND client_id = 'future-expiry'",
+        )
+        .unwrap();
+
+        assert_eq!(response.0["deactivated_clients"].as_i64(), Some(0));
+        assert_eq!(active, Some(true));
+    }
+
+    #[pg_test]
     fn test_expire_retention_rejects_empty_identity() {
         setup_test_tables();
         register_client("u1", "c1");
@@ -253,6 +278,41 @@
         let deleted = resp["deleted_entries"].as_i64().unwrap_or(0);
         // With no active clients, all entries should be deleted.
         assert!(deleted >= before.unwrap_or(0));
+    }
+
+    #[pg_test]
+    fn test_compact_deletes_at_most_requested_batch_size() {
+        setup_test_tables();
+        let first = "e1100000-0000-0000-0000-000000000001";
+        let second = "e1100000-0000-0000-0000-000000000002";
+        let third = "e1100000-0000-0000-0000-000000000003";
+        Spi::run_with_args(
+            "INSERT INTO test_products (id, name) VALUES
+             ($1::uuid, 'first'), ($2::uuid, 'second'), ($3::uuid, 'third')",
+            &[first.into(), second.into(), third.into()],
+        )
+        .unwrap();
+        for record_id in [first, second, third] {
+            insert_changelog("global", "test_products", record_id, 1);
+        }
+
+        let response: pgrx::JsonB = Spi::get_one("SELECT synchro_compact('7 days', 2)")
+            .unwrap()
+            .expect("bounded compaction response");
+        let remaining: i64 = Spi::get_one(
+            "SELECT count(*)
+             FROM sync_changelog
+             WHERE record_id IN (
+                 'e1100000-0000-0000-0000-000000000001',
+                 'e1100000-0000-0000-0000-000000000002',
+                 'e1100000-0000-0000-0000-000000000003'
+             )",
+        )
+        .unwrap()
+        .expect("remaining bounded compaction effects");
+
+        assert_eq!(response.0["deleted_entries"].as_i64(), Some(2));
+        assert_eq!(remaining, 1);
     }
 
     #[pg_test]
