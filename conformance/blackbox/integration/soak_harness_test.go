@@ -205,7 +205,7 @@ func newLiveSoakHarness(ctx context.Context, seed uint64, corruptChecksum bool) 
 }
 
 func soakInstallOperation(ctx context.Context) (scenarios.Operation, map[string]any, error) {
-	scenario, err := scenarios.LoadFile(ctx, soakRepositoryRoot, "conformance/scenarios/performance/pending-cycle-001.json")
+	scenario, err := scenarios.LoadFile(ctx, soakRepositoryRoot, "conformance/scenarios/server/schema-queued-mutation-001.json")
 	if err != nil {
 		return scenarios.Operation{}, nil, fmt.Errorf("load soak installation fixture: %w", err)
 	}
@@ -810,12 +810,25 @@ func (h *liveSoakHarness) submitInsert(ctx context.Context, scopeID, label strin
 	if response.Status != http.StatusOK {
 		return soakRecordedCall{}, "", fmt.Errorf("soak push status = %d, code = %v", response.Status, body["error"])
 	}
-	accepted, ok := body["accepted"].([]any)
-	if !ok || len(accepted) != 1 {
+	accepted, acceptedOK := body["accepted"].([]any)
+	rejected, rejectedOK := body["rejected"].([]any)
+	if !acceptedOK || !rejectedOK {
+		return soakRecordedCall{}, "", errors.New("soak push outcome partitions are invalid")
+	}
+	if scopeID == soakSharedScope {
+		if len(accepted) != 0 || len(rejected) != 1 {
+			return soakRecordedCall{}, "", errors.New("soak read-only push outcome partition is invalid")
+		}
+		outcome, ok := rejected[0].(map[string]any)
+		if !ok || outcome["status"] != "rejected_terminal" || outcome["code"] != "policy_rejected" {
+			return soakRecordedCall{}, "", errors.New("soak read-only push outcome is invalid")
+		}
+		return call, "", nil
+	}
+	if len(accepted) != 1 {
 		return soakRecordedCall{}, "", errors.New("soak push accepted partition is invalid")
 	}
-	rejected, ok := body["rejected"].([]any)
-	if !ok || len(rejected) != 0 {
+	if len(rejected) != 0 {
 		return soakRecordedCall{}, "", errors.New("soak push rejected partition is not empty")
 	}
 	outcome, ok := accepted[0].(map[string]any)
@@ -934,7 +947,6 @@ func (h *liveSoakHarness) replaceScopeRows(scopeID string, rebuilt map[string]so
 
 func (h *liveSoakHarness) drainPulls(ctx context.Context) error {
 	for page := 0; page < 64; page++ {
-		requestCursors := cloneStringMap(h.protocol.Scopes)
 		response, body, _, err := h.pull(ctx, h.protocol.Scopes, "soak-drain")
 		if err != nil {
 			return err
@@ -950,7 +962,7 @@ func (h *liveSoakHarness) drainPulls(ctx context.Context) error {
 		if !ok {
 			return errors.New("soak drain pull finality is invalid")
 		}
-		if !hasMore && changeCount == 0 && equalStringMap(requestCursors, h.protocol.Scopes) {
+		if !hasMore && changeCount == 0 {
 			return nil
 		}
 	}
@@ -961,7 +973,17 @@ func (h *liveSoakHarness) executePullControl(ctx context.Context, operation soak
 	if err := h.drainPulls(ctx); err != nil {
 		return nil, err
 	}
-	if _, _, err := h.submitInsert(ctx, operation.ScopeID, "pull-control"); err != nil {
+	if operation.ScopeID == soakSharedScope {
+		recordID := h.nextUUID("pull-control-record")
+		if err := h.server.Source().ExecContext(ctx,
+			"INSERT INTO cf_global_items (id, value) VALUES ($1, $2)",
+			recordID, fmt.Sprintf("soak-%d-pull-control", h.seed)); err != nil {
+			return nil, fmt.Errorf("insert soak shared pull control row: %w", err)
+		}
+		if err := h.waitForWALRecord(ctx, "cf_global_items", recordID); err != nil {
+			return nil, err
+		}
+	} else if _, _, err := h.submitInsert(ctx, operation.ScopeID, "pull-control"); err != nil {
 		return nil, err
 	}
 	response, body, mainCall, err := h.pull(ctx, h.protocol.Scopes, "soak-pull-control")
@@ -1226,8 +1248,8 @@ func (h *liveSoakHarness) transitionSchema(ctx context.Context) (soakRecordedCal
 		if !ok {
 			return soakRecordedCall{}, errors.New("soak authored schema field is invalid")
 		}
-		name, _ := field["name"].(string)
-		if strings.HasPrefix(name, "soak_value_") {
+		primaryKey, _ := field["primary_key"].(bool)
+		if !primaryKey {
 			continue
 		}
 		nextFields = append(nextFields, field)
@@ -1259,7 +1281,7 @@ func (h *liveSoakHarness) transitionSchema(ctx context.Context) (soakRecordedCal
 	}
 	observation, err := h.native.ApplyStep(ctx, operation)
 	if err != nil {
-		return soakRecordedCall{}, fmt.Errorf("apply soak schema transition: %w", err)
+		return soakRecordedCall{}, fmt.Errorf("apply soak schema transition: %w; %s", err, h.server.FailureDiagnostics())
 	}
 	if observation.Disposition != "success" {
 		return soakRecordedCall{}, errors.New("soak schema transition did not succeed")
@@ -1594,18 +1616,6 @@ func cloneStringMap(source map[string]string) map[string]string {
 		result[key] = value
 	}
 	return result
-}
-
-func equalStringMap(left, right map[string]string) bool {
-	if len(left) != len(right) {
-		return false
-	}
-	for key, value := range left {
-		if right[key] != value {
-			return false
-		}
-	}
-	return true
 }
 
 func cloneVectorRow(source vectors.Row) vectors.Row {

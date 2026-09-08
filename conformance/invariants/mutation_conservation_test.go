@@ -41,6 +41,11 @@ func TestCheckMutationConservationCatchesEachRule(t *testing.T) {
 			delete(request, "client_id")
 			observation.WireExchanges[0].RequestBody = marshalFixture(t, request)
 		}},
+		{name: "malformed client version", ruleID: RuleMutationWireShapeInvalid, mutate: func(t *testing.T, observation *Observation) {
+			request := decodeFixtureObject(t, observation.WireExchanges[0].RequestBody)
+			request["mutations"].([]any)[0].(map[string]any)["client_version"] = "2032-01-02T03:04:05Z"
+			observation.WireExchanges[0].RequestBody = marshalFixture(t, request)
+		}},
 		{name: "batch mismatch", ruleID: RuleMutationBatchMismatch, mutate: func(t *testing.T, observation *Observation) {
 			response := decodeFixtureObject(t, observation.WireExchanges[0].ResponseBody)
 			response["batch_id"] = "00000000-0000-4000-8000-000000000099"
@@ -122,13 +127,18 @@ func TestCheckMutationConservationRejectsMalformedRequestMutationIdentifier(t *t
 	assertCaughtRule(t, violations, err, RuleMutationWireShapeInvalid)
 }
 
-func TestCheckMutationConservationRejectsRejectedTerminalControlOutcome(t *testing.T) {
+func TestCheckMutationConservationAcceptsRejectedTerminalControlOutcome(t *testing.T) {
 	observation := mutationConservationFixture(t)
 	response := decodeFixtureObject(t, observation.WireExchanges[0].ResponseBody)
-	response["rejected"].([]any)[0].(map[string]any)["status"] = "rejected_terminal"
+	outcome := response["rejected"].([]any)[0].(map[string]any)
+	outcome["status"] = "rejected_terminal"
+	outcome["code"] = "policy_rejected"
+	delete(outcome, "server_row")
+	delete(outcome, "server_version")
+	delete(outcome, "row_checksum")
 	observation.WireExchanges[0].ResponseBody = marshalFixture(t, response)
 	violations, err := CheckMutationConservation([]Observation{observation})
-	assertCaughtRule(t, violations, err, RuleMutationOutcomeStatusInvalid)
+	assertNoViolations(t, violations, err)
 }
 
 func mutationConservationFixture(t *testing.T) Observation {
@@ -144,7 +154,7 @@ func mutationConservationFixture(t *testing.T) Observation {
 		mutations = append(mutations, map[string]any{
 			"mutation_id": mutationID, "table": mutationTableID,
 			"pk": map[string]any{mutationPKFieldID: rowID}, "authored_schema": schema,
-			"op": "insert", "client_version": "00000000-0000-4000-8000-000000000040", "columns": columns,
+			"op": "insert", "client_version": "2032-01-02T03:04:05.000000Z", "columns": columns,
 		})
 		outcome := map[string]any{
 			"mutation_id": mutationID, "table": mutationTableID,

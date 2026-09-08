@@ -655,7 +655,7 @@ func stablePushExchange(operation Operation) invariants.WireExchangeObservation 
 	batchID := "00000000-0000-4000-8000-000000000061"
 	pk := map[string]any{stablePKFieldID: "row-push"}
 	columns := map[string]any{stableValueFieldID: "value-push"}
-	request := map[string]any{"authenticated_user_id": operation.UserID, "client_id": operation.ClientID, "scope_id": operation.ScopeID, "client_generation": 1, "batch_id": batchID, "schema": schema, "mutations": []any{map[string]any{"mutation_id": mutationID, "table": stableTableID, "pk": pk, "authored_schema": schema, "op": "insert", "client_version": "00000000-0000-4000-8000-000000000062", "columns": columns}}}
+	request := map[string]any{"authenticated_user_id": operation.UserID, "client_id": operation.ClientID, "scope_id": operation.ScopeID, "client_generation": 1, "batch_id": batchID, "schema": schema, "mutations": []any{map[string]any{"mutation_id": mutationID, "table": stableTableID, "pk": pk, "authored_schema": schema, "op": "insert", "client_version": "2032-01-02T03:04:05.000000Z", "columns": columns}}}
 	outcome := map[string]any{"mutation_id": mutationID, "status": "applied", "table": stableTableID, "pk": pk, "outcome_schema": schema, "server_row": columns, "server_version": "00000000-0000-4000-8000-000000000063", "row_checksum": map[string]any{"algorithm": "sha256", "version": 1, "encoding": "hex", "digest": digest}}
 	response := map[string]any{"batch_id": batchID, "accepted": []any{outcome}, "rejected": []any{}}
 	return invariants.WireExchangeObservation{Sequence: 1, OperationClass: "push", ResponseStatus: 200, RequestBody: mustJSON(request), ResponseBody: mustJSON(response), ExpectMutationConservation: true}

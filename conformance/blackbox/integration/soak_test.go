@@ -55,7 +55,7 @@ func TestSoak(t *testing.T) {
 		t.Cleanup(func() { closeLiveSoakHarness(t, harness) })
 		result, err := soak.Run(ctx, plan, harness, t.TempDir()+"/live-soak.jsonl")
 		if err != nil {
-			t.Fatalf("run live soak: %v", err)
+			t.Fatalf("run live soak: %v; violations: %#v", err, result.Violations)
 		}
 		if result.OperationsExecuted != len(plan.Operations) || len(result.Violations) != 0 {
 			t.Fatalf("live soak result = operations %d/%d, violations %d", result.OperationsExecuted, len(plan.Operations), len(result.Violations))

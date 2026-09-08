@@ -3,6 +3,7 @@ package invariants
 import (
 	"encoding/json"
 	"strconv"
+	"time"
 )
 
 type pushMutation struct {
@@ -91,7 +92,7 @@ func parsePushRequest(raw []byte) (string, []pushMutation, bool) {
 		columns, columnsErr := decodeRawObject(mutation["columns"])
 		if !idOK || !validUUID(id) || !tableOK || !validUUID(table) || pkErr != nil || len(pk) != 1 ||
 			!authoredSchemaOK || !equalRawJSON(authoredSchema, schema) || !operationOK || op != "insert" ||
-			!clientVersionOK || !validUUID(clientVersion) || columnsErr != nil || len(columns) == 0 {
+			!clientVersionOK || !isCanonicalUTCMicrosecond(clientVersion) || columnsErr != nil || len(columns) == 0 {
 			return "", nil, false
 		}
 		for fieldID, value := range pk {
@@ -111,6 +112,11 @@ func parsePushRequest(raw []byte) (string, []pushMutation, bool) {
 		mutations = append(mutations, pushMutation{id: id, table: table, pk: pk, schema: authoredSchema, columns: columns})
 	}
 	return batchID, mutations, true
+}
+
+func isCanonicalUTCMicrosecond(value string) bool {
+	parsed, err := time.Parse(time.RFC3339Nano, value)
+	return err == nil && parsed.UTC().Format("2006-01-02T15:04:05.000000Z") == value
 }
 
 func parseSchemaReference(raw json.RawMessage) (json.RawMessage, bool) {
@@ -243,17 +249,38 @@ func checkCanonicalMutationOutcome(sequence, exchangeSequence uint64, partitionN
 	if !schemaOK || !equalRawJSON(schema, request.schema) {
 		violations = append(violations, mutationOutcomeViolation(sequence, exchangeSequence, RuleMutationOutcomeSchema, partitionName, outcomeIndex))
 	}
-	code, codePresent := outcome["code"]
 	if partitionName == "accepted" {
+		_, codePresent := outcome["code"]
 		if codePresent {
 			violations = append(violations, mutationOutcomeViolation(sequence, exchangeSequence, RuleMutationOutcomeCode, partitionName, outcomeIndex))
 		}
-	} else {
-		value, ok := decodeJSONString(code)
-		if !ok || value != "row_already_exists" {
+		return append(violations, checkMutationOutcomeReconciliation(sequence, exchangeSequence, partitionName, outcomeIndex, outcome, request)...)
+	}
+	status, _ := decodeJSONString(outcome["status"])
+	code, codeOK := decodeJSONString(outcome["code"])
+	if status == "rejected_terminal" {
+		if !codeOK || !validTerminalMutationCode(code) {
 			violations = append(violations, mutationOutcomeViolation(sequence, exchangeSequence, RuleMutationOutcomeCode, partitionName, outcomeIndex))
 		}
+		if _, present := outcome["server_row"]; present {
+			violations = append(violations, mutationOutcomeViolation(sequence, exchangeSequence, RuleMutationOutcomeServerRow, partitionName, outcomeIndex))
+		}
+		if _, present := outcome["server_version"]; present {
+			violations = append(violations, mutationOutcomeViolation(sequence, exchangeSequence, RuleMutationOutcomeServerVersion, partitionName, outcomeIndex))
+		}
+		if _, present := outcome["row_checksum"]; present {
+			violations = append(violations, mutationOutcomeViolation(sequence, exchangeSequence, RuleMutationOutcomeChecksum, partitionName, outcomeIndex))
+		}
+		return violations
 	}
+	if !codeOK || !validConflictMutationCode(code) {
+		violations = append(violations, mutationOutcomeViolation(sequence, exchangeSequence, RuleMutationOutcomeCode, partitionName, outcomeIndex))
+	}
+	return append(violations, checkMutationOutcomeReconciliation(sequence, exchangeSequence, partitionName, outcomeIndex, outcome, request)...)
+}
+
+func checkMutationOutcomeReconciliation(sequence, exchangeSequence uint64, partitionName string, outcomeIndex int, outcome map[string]json.RawMessage, request pushMutation) []Violation {
+	var violations []Violation
 	serverRow, rowErr := decodeRawObject(outcome["server_row"])
 	if rowErr != nil || !rawObjectContains(serverRow, request.columns) {
 		violations = append(violations, mutationOutcomeViolation(sequence, exchangeSequence, RuleMutationOutcomeServerRow, partitionName, outcomeIndex))
@@ -266,6 +293,24 @@ func checkCanonicalMutationOutcome(sequence, exchangeSequence uint64, partitionN
 		violations = append(violations, mutationOutcomeViolation(sequence, exchangeSequence, RuleMutationOutcomeChecksum, partitionName, outcomeIndex))
 	}
 	return violations
+}
+
+func validConflictMutationCode(code string) bool {
+	switch code {
+	case "version_conflict", "row_already_exists", "row_deleted", "row_not_found":
+		return true
+	default:
+		return false
+	}
+}
+
+func validTerminalMutationCode(code string) bool {
+	switch code {
+	case "schema_incompatible", "table_not_synced", "policy_rejected", "validation_failed":
+		return true
+	default:
+		return false
+	}
 }
 
 func equalRawObject(left, right map[string]json.RawMessage) bool {
@@ -286,7 +331,7 @@ func validMutationOutcomeStatus(partitionName, status string) bool {
 	if partitionName == "accepted" {
 		return status == "applied"
 	}
-	return status == "conflict"
+	return status == "conflict" || status == "rejected_terminal"
 }
 
 func mutationWireShapeViolation(sequence, exchangeSequence uint64, stage string) Violation {
