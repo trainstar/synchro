@@ -15,8 +15,8 @@ import (
 )
 
 func TestSoak(t *testing.T) {
-	if strings.TrimSpace(os.Getenv("TEST_DATABASE_URL")) == "" {
-		t.Skip("TEST_DATABASE_URL is not configured")
+	if strings.TrimSpace(os.Getenv("SYNCHRO_CONFORMANCE_ADAPTER_ARTIFACT")) == "" {
+		t.Skip("the black-box environment is not configured")
 	}
 	if !*provision || !*install {
 		t.Fatal("TestSoak requires --provision --install")

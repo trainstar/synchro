@@ -439,10 +439,8 @@ test-conformance-invariants:
 
 soak:
 	@$(WARM_CONNECT_ENV) \
-		database_url="$${SYNCHRO_CONFORMANCE_ATTACH_DATABASE_URL:-$(ADAPTER_TEST_URL)}"; \
-		test -n "$$database_url" || { echo "ADAPTER_TEST_URL or SYNCHRO_CONFORMANCE_ATTACH_DATABASE_URL is required for soak" >&2; exit 1; }; \
-		cd conformance && GOFLAGS= GOWORK=off TEST_DATABASE_URL="$$database_url" \
-			SYNCHRO_CONFORMANCE_ATTACH_DATABASE_URL="$$database_url" \
+		test -n "$${SYNCHRO_CONFORMANCE_ADAPTER_ARTIFACT:-}" || { echo "the black-box environment is required for soak: set WARM_CONNECT_ENV_FILE or export SYNCHRO_CONFORMANCE_* variables" >&2; exit 1; }; \
+		cd conformance && GOFLAGS= GOWORK=off \
 			SOAK_SEED="$(SOAK_SEED)" SOAK_DURATION="$(SOAK_DURATION)" \
 			go run ./cmd/testresult suite -- go test -json ./blackbox/integration -count=1 -timeout=35m \
 			-run '^TestSoak$$' -args --provision --install
