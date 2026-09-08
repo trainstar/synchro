@@ -211,6 +211,9 @@ jobs:
           test -f "$HOME/.pgrx/config.toml"
           grep -q '^pg18' "$HOME/.pgrx/config.toml"
 
+      # The adapter gate needs the conformance artifacts, secrets, and lock.
+      - uses: ./.github/actions/setup-conformance-pg18
+
       - name: Run shared core tests
         run: make test-rust-core
 
@@ -228,6 +231,13 @@ jobs:
 
       - name: Verify generated PostgreSQL SQL
         run: make check-pg-sql
+
+      - name: Provision local PostgreSQL for the adapter
+        run: |
+          pg_config="$(awk -F'"' '/^pg18[[:space:]]*=/ { print $2 }' "$HOME/.pgrx/config.toml")"
+          test -x "$pg_config"
+          make local-postgres-start PGRX_PG_CONFIG="$pg_config"
+          echo "ADAPTER_TEST_URL=$(cat .ignore/r2/tmp/local-postgres/postgres.url)" >> "$GITHUB_ENV"
 
       - name: Run adapter integration tests
         run: make test-adapter
@@ -286,9 +296,17 @@ jobs:
       - name: Install exact cargo-pgrx
         run: cargo install --locked cargo-pgrx --version "$PGRX_VERSION"
 
-      - name: Initialize exact PostgreSQL 18 runtime
+      - name: Install the certified PostgreSQL 18.3 for the black-box suite
         run: |
-          cargo pgrx init --pg18 download
+          # The black-box integration environment requires exactly the
+          # certified PostgreSQL 18.3 runtime and a matching artifact.
+          sudo install -d /usr/share/postgresql-common/pgdg
+          sudo curl --fail -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc https://www.postgresql.org/media/keys/ACCC4CF8.asc
+          echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt-archive.postgresql.org/pub/repos/apt noble-pgdg-archive main" | sudo tee /etc/apt/sources.list.d/pgdg-archive.list
+          sudo apt-get update
+          sudo apt-get install -y --allow-downgrades postgresql-18=18.3-1.pgdg24.04+1 postgresql-client-18=18.3-1.pgdg24.04+1 postgresql-server-dev-18=18.3-1.pgdg24.04+1
+          sudo chmod -R a+w "$(/usr/lib/postgresql/18/bin/pg_config --sharedir)/extension" "$(/usr/lib/postgresql/18/bin/pg_config --pkglibdir)"
+          cargo pgrx init --pg18 /usr/lib/postgresql/18/bin/pg_config
 
       - uses: ./.github/actions/setup-conformance-pg18
         with:
@@ -333,6 +351,11 @@ jobs:
           if ! command -v pod >/dev/null 2>&1; then
             sudo gem install cocoapods
           fi
+
+      - name: Start the local PostgreSQL for the adapter
+        run: |
+          make local-postgres-start
+          echo "ADAPTER_TEST_URL=$(cat .ignore/r2/tmp/local-postgres/postgres.url)" >> "$GITHUB_ENV"
 
       - name: Validate Apple package metadata
         run: make release-pods-check
@@ -421,10 +444,20 @@ jobs:
       - name: Restore PostgreSQL 18 pgrx runtime
         run: tar -C "$HOME" -xf "$RUNNER_TEMP/pgrx-pg18-linux/pgrx-pg18-linux.tar"
 
+      # The Kotlin gate needs the conformance artifacts, secrets, and lock.
+      - uses: ./.github/actions/setup-conformance-pg18
+
       - name: Verify PostgreSQL 18 for pgrx
         run: |
           test -f "$HOME/.pgrx/config.toml"
           grep -q '^pg18' "$HOME/.pgrx/config.toml"
+
+      - name: Provision local PostgreSQL for the adapter
+        run: |
+          pg_config="$(awk -F'"' '/^pg18[[:space:]]*=/ { print $2 }' "$HOME/.pgrx/config.toml")"
+          test -x "$pg_config"
+          make local-postgres-start PGRX_PG_CONFIG="$pg_config"
+          echo "ADAPTER_TEST_URL=$(cat .ignore/r2/tmp/local-postgres/postgres.url)" >> "$GITHUB_ENV"
 
       - name: Verify Android SDK tooling
         run: |
@@ -459,7 +492,7 @@ jobs:
           sudo udevadm control --reload-rules
           sudo udevadm trigger --name-match=kvm
 
-      - name: Run Android instrumentation release gate
+      - name: Run Android emulator release gates
         uses: reactivecircus/android-emulator-runner@v2
         with:
           api-level: 34
@@ -472,10 +505,9 @@ jobs:
           disable-animations: true
           emulator-boot-timeout: 900
           emulator-options: -no-snapshot-save -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
-          script: make test-kotlin-instrumentation
-
-      - name: Run Kotlin integration tests
-        run: make test-kotlin
+          script: |
+            make test-kotlin-instrumentation
+            make test-kotlin
 
       - name: Run packaged Kotlin consumer
         run: make test-consumer-kotlin
@@ -535,6 +567,9 @@ jobs:
       - name: Restore PostgreSQL 18 pgrx runtime
         run: tar -C "$HOME" -xf "$RUNNER_TEMP/pgrx-pg18-linux/pgrx-pg18-linux.tar"
 
+      # The Android gate needs the conformance artifacts, secrets, and lock.
+      - uses: ./.github/actions/setup-conformance-pg18
+
       - name: Verify PostgreSQL 18 for pgrx
         run: |
           test -f "$HOME/.pgrx/config.toml"
@@ -575,6 +610,13 @@ jobs:
         run: |
           corepack enable
           yarn install --immutable
+
+      - name: Provision local PostgreSQL for the adapter
+        run: |
+          pg_config="$(awk -F'"' '/^pg18[[:space:]]*=/ { print $2 }' "$HOME/.pgrx/config.toml")"
+          test -x "$pg_config"
+          make local-postgres-start PGRX_PG_CONFIG="$pg_config"
+          echo "ADAPTER_TEST_URL=$(cat .ignore/r2/tmp/local-postgres/postgres.url)" >> "$GITHUB_ENV"
 
       - name: Build React Native Android Detox app
         run: make test-rn-e2e-android-build
