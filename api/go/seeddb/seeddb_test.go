@@ -562,12 +562,91 @@ func TestCDCTriggerSQLSupportsTablesWithoutDeletedAt(t *testing.T) {
 	if !strings.Contains(statements[5], "local_revision = local_revision + 1") {
 		t.Fatalf("delete trigger should increment local_revision for an existing pending row: %q", statements[5])
 	}
-	// A trigger body is stored in the schema and parsed again by every client
-	// that opens the seed. SQLite gains UPSERT in 3.24 and Android API 24 ships
-	// 3.9, so UPSERT here makes the entire seed schema unreadable on that cell.
 	for _, statement := range statements {
-		if strings.Contains(statement, "ON CONFLICT") {
-			t.Fatalf("trigger must avoid UPSERT syntax, which SQLite 3.9 cannot parse: %q", statement)
+		assertSQLite392CompatibleSQL(t, statement)
+	}
+}
+
+func TestEmittedSQLiteSchemaUsesSQLite392Syntax(t *testing.T) {
+	ctx := context.Background()
+	db, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatalf("open sqlite database: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	table := localSchemaTable{
+		TableName:       "test_items",
+		UpdatedAtColumn: "updated_at",
+		DeletedAtColumn: "deleted_at",
+		PrimaryKey:      []string{"id"},
+		Columns: []localSchemaColumn{
+			{Name: "id", LogicalType: "string", IsPrimaryKey: true},
+			{Name: "title", LogicalType: "string"},
+			{Name: "updated_at", LogicalType: "datetime"},
+			{Name: "deleted_at", LogicalType: "datetime", Nullable: true},
+		},
+	}
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("begin sqlite transaction: %v", err)
+	}
+	if err := createInternalTables(ctx, tx); err != nil {
+		_ = tx.Rollback()
+		t.Fatalf("create sqlite internals: %v", err)
+	}
+	if err := createSyncedTables(ctx, tx, []localSchemaTable{table}); err != nil {
+		_ = tx.Rollback()
+		t.Fatalf("create synced table: %v", err)
+	}
+	if err := createSyncedTableTriggers(ctx, tx, []localSchemaTable{table}); err != nil {
+		_ = tx.Rollback()
+		t.Fatalf("create capture triggers: %v", err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("commit sqlite schema: %v", err)
+	}
+
+	rows, err := db.QueryContext(ctx, "SELECT sql FROM sqlite_master WHERE sql IS NOT NULL")
+	if err != nil {
+		t.Fatalf("read emitted sqlite schema: %v", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var statement string
+		if err := rows.Scan(&statement); err != nil {
+			t.Fatalf("scan emitted sqlite schema: %v", err)
+		}
+		assertSQLite392CompatibleSQL(t, statement)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate emitted sqlite schema: %v", err)
+	}
+}
+
+func assertSQLite392CompatibleSQL(t *testing.T, statement string) {
+	t.Helper()
+	upper := strings.ToUpper(statement)
+	unsupported := []string{
+		"ON CONFLICT",        // UPSERT, SQLite 3.24.0.
+		" RETURNING ",        // SQLite 3.35.0.
+		" GENERATED ALWAYS ", // SQLite 3.31.0.
+		" STRICT",            // SQLite 3.37.0.
+		" DROP COLUMN ",      // SQLite 3.35.0.
+		" RENAME COLUMN ",    // SQLite 3.25.0.
+		" UPDATE FROM ",      // SQLite 3.33.0.
+		" RIGHT JOIN ",       // SQLite 3.39.0.
+		" FULL OUTER JOIN ",  // SQLite 3.39.0.
+		" MATERIALIZED ",     // SQLite 3.35.0.
+		" NOT MATERIALIZED ", // SQLite 3.35.0.
+		" NULLS FIRST",       // SQLite 3.30.0.
+		" NULLS LAST",        // SQLite 3.30.0.
+		" FILTER (",          // SQLite 3.30.0.
+		" OVER (",            // SQLite 3.25.0.
+	}
+	for _, feature := range unsupported {
+		if strings.Contains(upper, feature) {
+			t.Fatalf("SQLite 3.9.2 does not support %q in emitted SQL: %q", feature, statement)
 		}
 	}
 }

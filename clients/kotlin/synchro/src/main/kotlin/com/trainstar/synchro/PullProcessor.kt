@@ -1270,26 +1270,47 @@ internal fun executeUpsert(
     require(keyColumns.isNotEmpty()) { "an upsert requires at least one key column" }
     require(keyColumns.size == keyValues.size) { "upsert key column and value counts differ" }
     require(dataColumns.size == dataValues.size) { "upsert data column and value counts differ" }
-    if (dataColumns.isNotEmpty()) {
-        val assignments = dataColumns.joinToString(", ") { "$it = ?" }
-        val predicate = keyColumns.joinToString(" AND ") { "$it = ?" }
-        val updated = executeChangeCount(
-            db,
-            "UPDATE $table SET $assignments WHERE $predicate",
-            dataValues + keyValues,
-        )
-        if (updated > 0) return updated
+    val statements = portableUpsertStatements(table, keyColumns, dataColumns)
+    val ownsTransaction = !db.inTransaction()
+    if (ownsTransaction) db.beginTransaction()
+    try {
+        statements.update?.let { update ->
+            val updated = executeChangeCount(db, update, dataValues + keyValues)
+            if (updated > 0) {
+                if (ownsTransaction) db.setTransactionSuccessful()
+                return updated
+            }
+        }
+        val insertValues = if (dataColumns.isEmpty()) keyValues + keyValues else keyValues + dataValues
+        val inserted = executeChangeCount(db, statements.insert, insertValues)
+        if (ownsTransaction) db.setTransactionSuccessful()
+        return inserted
+    } finally {
+        if (ownsTransaction) db.endTransaction()
     }
+}
+
+internal data class PortableUpsertStatements(val update: String?, val insert: String)
+
+/** Builds the SQLite 3.9.2 statements used by [executeUpsert]. */
+internal fun portableUpsertStatements(
+    table: String,
+    keyColumns: List<String>,
+    dataColumns: List<String>,
+): PortableUpsertStatements {
     val columns = keyColumns + dataColumns
-    // Every column is a key column, so an existing row already holds the
-    // intended state and the insert yields to it.
-    val verb = if (dataColumns.isEmpty()) "INSERT OR IGNORE" else "INSERT"
-    return executeChangeCount(
-        db,
-        "$verb INTO $table (${columns.joinToString(", ")}) " +
-            "VALUES (${SQLiteHelpers.placeholders(columns.size)})",
-        keyValues + dataValues,
-    )
+    val predicate = keyColumns.joinToString(" AND ") { "$it = ?" }
+    val update = dataColumns.takeIf { it.isNotEmpty() }?.joinToString(", ") { "$it = ?" }
+        ?.let { assignments -> "UPDATE $table SET $assignments WHERE $predicate" }
+    val insert = if (dataColumns.isEmpty()) {
+        "INSERT INTO $table (${columns.joinToString(", ")}) " +
+            "SELECT ${SQLiteHelpers.placeholders(columns.size)} " +
+            "WHERE NOT EXISTS (SELECT 1 FROM $table WHERE $predicate)"
+    } else {
+        "INSERT INTO $table (${columns.joinToString(", ")}) " +
+            "VALUES (${SQLiteHelpers.placeholders(columns.size)})"
+    }
+    return PortableUpsertStatements(update, insert)
 }
 
 internal fun bindTypedValues(stmt: SQLiteProgram, values: List<Any?>) {

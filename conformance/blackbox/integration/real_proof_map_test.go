@@ -65,6 +65,7 @@ var nonScenarioRealTests = map[string]string{
 	"TestRealMutationControlChecksumCorrectness":                       "adversarial",
 	"TestRealMutationControlCursorAdvancement":                         "adversarial",
 	"TestRealMutationControlMutationConservation":                      "adversarial",
+	"TestRealNativeCaptureServerObservationSignals":                    "regression",
 	"TestRealMutationControlProgressOrder":                             "adversarial",
 	"TestRealMutationControlScopeIsolation":                            "adversarial",
 	"TestRealMutationControlWALAcknowledgement":                        "adversarial",

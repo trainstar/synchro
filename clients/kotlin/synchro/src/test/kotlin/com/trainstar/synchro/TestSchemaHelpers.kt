@@ -49,21 +49,19 @@ internal fun installDurableBackoff(
     workIdentity: String,
     nextRetryAtMs: Long = 0L,
 ) {
-    database.execute(
-        """
-        INSERT INTO _synchro_backoff (
-            singleton, resume_state, work_identity, retry_classification,
-            attempt_count, next_retry_at_ms
-        ) VALUES (1, ?, ?, 'network', 1, ?)
-        ON CONFLICT (singleton) DO UPDATE SET
-            resume_state = excluded.resume_state,
-            work_identity = excluded.work_identity,
-            retry_classification = excluded.retry_classification,
-            attempt_count = excluded.attempt_count,
-            next_retry_at_ms = excluded.next_retry_at_ms
-        """.trimIndent(),
-        arrayOf(resumeState, workIdentity, nextRetryAtMs),
-    )
+    database.writeTransaction { db ->
+        executeUpsert(
+            db,
+            table = "_synchro_backoff",
+            keyColumns = listOf("singleton"),
+            keyValues = listOf(1L),
+            dataColumns = listOf(
+                "resume_state", "work_identity", "retry_classification",
+                "attempt_count", "next_retry_at_ms",
+            ),
+            dataValues = listOf(resumeState, workIdentity, "network", 1L, nextRetryAtMs),
+        )
+    }
 }
 
 val PROTOCOL_TEST_SCHEMA_HASH = Integrity.schemaManifestHash(protocolOrdersSchemaManifest())
