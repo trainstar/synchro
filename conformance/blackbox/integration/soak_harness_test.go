@@ -181,13 +181,15 @@ func newLiveSoakHarness(ctx context.Context, seed uint64, corruptChecksum bool) 
 	if err := result.requireScopeSet(); err != nil {
 		return nil, err
 	}
+	// The extension binds scope subscriptions through the pull path, so a
+	// rebuild before the first drained pull is an invalid request.
+	if err := result.drainPulls(ctx); err != nil {
+		return nil, err
+	}
 	for _, scopeID := range result.scopeIDs() {
 		if _, err := result.rebuildScope(ctx, scopeID, "soak-setup-rebuild"); err != nil {
 			return nil, err
 		}
-	}
-	if err := result.drainPulls(ctx); err != nil {
-		return nil, err
 	}
 	cleanupServer = false
 	cleanupAttachments = false
