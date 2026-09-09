@@ -64,7 +64,7 @@ func (executor *OperatorExecutor) ObserveWALRecordStages(
 		return WALRecordStageObservation{}, errors.New("WAL stage observation input is invalid")
 	}
 	for _, recordID := range recordIDs {
-		if !diagnosticUUIDPattern.MatchString(recordID) {
+		if !validPullRebuildObservationRecord(tableName, recordID) {
 			return WALRecordStageObservation{}, errors.New("WAL stage observation record ID is invalid")
 		}
 	}
@@ -138,7 +138,7 @@ func (executor *OperatorExecutor) ObserveWALRecordsForTable(
 		return WALPipelineObservation{}, errors.New("WAL observation input is invalid")
 	}
 	for _, recordID := range recordIDs {
-		if !diagnosticUUIDPattern.MatchString(recordID) {
+		if !validPullRebuildObservationRecord(tableName, recordID) {
 			return WALPipelineObservation{}, errors.New("WAL observation record ID is invalid")
 		}
 	}
@@ -364,9 +364,16 @@ func (executor *OperatorExecutor) ObserveClientScopeAssignment(ctx context.Conte
 
 func validPullRebuildObservationTable(tableName string) bool {
 	switch tableName {
-	case "cf_global_items", "cf_items", "cf_schema_queue":
+	case "cf_global_items", "cf_items", "cf_schema_queue", "cf_string_keys", "cf_int_keys":
 		return true
 	default:
 		return false
 	}
+}
+
+func validPullRebuildObservationRecord(tableName, recordID string) bool {
+	if tableName == "cf_string_keys" || tableName == "cf_int_keys" {
+		return recordID == "1"
+	}
+	return diagnosticUUIDPattern.MatchString(recordID)
 }

@@ -1,0 +1,12 @@
+diff --git a/extensions/synchro-pg/src/rebuild.rs b/extensions/synchro-pg/src/rebuild.rs
+--- a/extensions/synchro-pg/src/rebuild.rs
++++ b/extensions/synchro-pg/src/rebuild.rs
+@@ -994,7 +994,7 @@ fn load_rebuild_page(
+             Some(issue_scope_cursor(
+                 client,
+                 &cursor_context,
+-                &session.boundary,
++                &StreamPosition::generation_start(),
+             )?),
+             Some(session.snapshot_checksum),
+         )

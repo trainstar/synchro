@@ -5,18 +5,20 @@
   "title": "Strict positive limits performance scenario",
   "description": "The workload requires lower, upper, and invalid boundary operations for every declared configured-limit family.",
   "requirement_ids": [
-    "SYNC-LIMIT-001"
+    "SYNC-LIMIT-001",
+    "SYNC-HEALTH-001",
+    "SYNC-HEALTH-002"
   ],
   "normative_references": [
-    {
-      "path": "docs/src/content/docs/spec/04-invariants.mdx",
-      "anchor": "#strict-positive-limits"
-    }
+    {"path":"docs/src/content/docs/spec/04-invariants.mdx","anchor":"#strict-positive-limits"},
+    {"path":"docs/src/content/docs/spec/04-invariants.mdx","anchor":"#capture-health-readiness"},
+    {"path":"docs/src/content/docs/spec/04-invariants.mdx","anchor":"#finite-capture-lag"}
   ],
   "proof_types": [
     "reference-model",
     "server-black-box",
-    "negative-control"
+    "negative-control",
+    "fault-injection"
   ],
   "proof_obligations": [
     {
@@ -96,7 +98,13 @@
       ],
       "fault_plan_id": "FPL-PERF-CONFIGURED-BOUNDS-001",
       "control_id": "CTRL-LIMIT-001"
-    }
+    },
+    {"obligation_id":"OBL-PERF-CONFIGURED-BOUNDS-HEALTH-001-PG-LINUX-X64-001","requirement_ids":["SYNC-HEALTH-001"],"assertion_ids":["ASSERT-PERF-CONFIGURED-BOUNDS-HEALTH-001"],"proof_type":"server-black-box","support_cell_id":"SUP-PG-LINUX-X64-001","artifact_inventory_ids":["ARTDEF-PG-EXTENSION-001","ARTDEF-ADAPTER-001"],"performance_budget_ids":[],"required_measurement_ids":[],"required_vector_set_ids":[],"make_target":"test-blackbox","argv":["make","test-blackbox"],"fault_plan_id":null,"control_id":null},
+    {"obligation_id":"OBL-PERF-CONFIGURED-BOUNDS-HEALTH-001-FAULT-001","requirement_ids":["SYNC-HEALTH-001"],"assertion_ids":["ASSERT-PERF-CONFIGURED-BOUNDS-HEALTH-001"],"proof_type":"fault-injection","support_cell_id":"SUP-PG-LINUX-X64-001","artifact_inventory_ids":["ARTDEF-PG-EXTENSION-001","ARTDEF-ADAPTER-001"],"performance_budget_ids":[],"required_measurement_ids":[],"required_vector_set_ids":[],"make_target":"test-blackbox","argv":["make","test-blackbox"],"fault_plan_id":"FPL-PERF-CONFIGURED-BOUNDS-HEALTH-001","control_id":"CTRL-HEALTH-001"},
+    {"obligation_id":"OBL-PERF-CONFIGURED-BOUNDS-HEALTH-001-CONTROL-001","requirement_ids":["SYNC-HEALTH-001"],"assertion_ids":["ASSERT-PERF-CONFIGURED-BOUNDS-HEALTH-001"],"proof_type":"negative-control","support_cell_id":null,"artifact_inventory_ids":["ARTDEF-CONFORMANCE-RUNNER-001","ARTDEF-PG-EXTENSION-001","ARTDEF-ADAPTER-001"],"performance_budget_ids":[],"required_measurement_ids":[],"required_vector_set_ids":[],"make_target":"test-conformance","argv":["make","test-conformance"],"fault_plan_id":"FPL-PERF-CONFIGURED-BOUNDS-HEALTH-001","control_id":"CTRL-HEALTH-001"},
+    {"obligation_id":"OBL-PERF-CONFIGURED-BOUNDS-HEALTH-002-PG-LINUX-X64-001","requirement_ids":["SYNC-HEALTH-002"],"assertion_ids":["ASSERT-PERF-CONFIGURED-BOUNDS-HEALTH-002"],"proof_type":"server-black-box","support_cell_id":"SUP-PG-LINUX-X64-001","artifact_inventory_ids":["ARTDEF-PG-EXTENSION-001","ARTDEF-ADAPTER-001"],"performance_budget_ids":[],"required_measurement_ids":[],"required_vector_set_ids":[],"make_target":"test-blackbox","argv":["make","test-blackbox"],"fault_plan_id":null,"control_id":null},
+    {"obligation_id":"OBL-PERF-CONFIGURED-BOUNDS-HEALTH-002-FAULT-001","requirement_ids":["SYNC-HEALTH-002"],"assertion_ids":["ASSERT-PERF-CONFIGURED-BOUNDS-HEALTH-002"],"proof_type":"fault-injection","support_cell_id":"SUP-PG-LINUX-X64-001","artifact_inventory_ids":["ARTDEF-PG-EXTENSION-001","ARTDEF-ADAPTER-001"],"performance_budget_ids":[],"required_measurement_ids":[],"required_vector_set_ids":[],"make_target":"test-blackbox","argv":["make","test-blackbox"],"fault_plan_id":"FPL-PERF-CONFIGURED-BOUNDS-HEALTH-002","control_id":"CTRL-HEALTH-002"},
+    {"obligation_id":"OBL-PERF-CONFIGURED-BOUNDS-HEALTH-002-CONTROL-001","requirement_ids":["SYNC-HEALTH-002"],"assertion_ids":["ASSERT-PERF-CONFIGURED-BOUNDS-HEALTH-002"],"proof_type":"negative-control","support_cell_id":null,"artifact_inventory_ids":["ARTDEF-CONFORMANCE-RUNNER-001","ARTDEF-PG-EXTENSION-001","ARTDEF-ADAPTER-001"],"performance_budget_ids":[],"required_measurement_ids":[],"required_vector_set_ids":[],"make_target":"test-conformance","argv":["make","test-conformance"],"fault_plan_id":"FPL-PERF-CONFIGURED-BOUNDS-HEALTH-002","control_id":"CTRL-HEALTH-002"}
   ],
   "ownership": [
     {
@@ -130,7 +138,13 @@
       "assertion_id": "ASSERT-PERF-CONFIGURED-BOUNDS-SEMANTIC-001",
       "proof_type": "negative-control",
       "support_cell_id": null
-    }
+    },
+    {"scenario_id":"SCN-PERF-CONFIGURED-BOUNDS-001","requirement_id":"SYNC-HEALTH-001","proof_obligation_id":"OBL-PERF-CONFIGURED-BOUNDS-HEALTH-001-PG-LINUX-X64-001","assertion_id":"ASSERT-PERF-CONFIGURED-BOUNDS-HEALTH-001","proof_type":"server-black-box","support_cell_id":"SUP-PG-LINUX-X64-001"},
+    {"scenario_id":"SCN-PERF-CONFIGURED-BOUNDS-001","requirement_id":"SYNC-HEALTH-001","proof_obligation_id":"OBL-PERF-CONFIGURED-BOUNDS-HEALTH-001-FAULT-001","assertion_id":"ASSERT-PERF-CONFIGURED-BOUNDS-HEALTH-001","proof_type":"fault-injection","support_cell_id":"SUP-PG-LINUX-X64-001"},
+    {"scenario_id":"SCN-PERF-CONFIGURED-BOUNDS-001","requirement_id":"SYNC-HEALTH-001","proof_obligation_id":"OBL-PERF-CONFIGURED-BOUNDS-HEALTH-001-CONTROL-001","assertion_id":"ASSERT-PERF-CONFIGURED-BOUNDS-HEALTH-001","proof_type":"negative-control","support_cell_id":null},
+    {"scenario_id":"SCN-PERF-CONFIGURED-BOUNDS-001","requirement_id":"SYNC-HEALTH-002","proof_obligation_id":"OBL-PERF-CONFIGURED-BOUNDS-HEALTH-002-PG-LINUX-X64-001","assertion_id":"ASSERT-PERF-CONFIGURED-BOUNDS-HEALTH-002","proof_type":"server-black-box","support_cell_id":"SUP-PG-LINUX-X64-001"},
+    {"scenario_id":"SCN-PERF-CONFIGURED-BOUNDS-001","requirement_id":"SYNC-HEALTH-002","proof_obligation_id":"OBL-PERF-CONFIGURED-BOUNDS-HEALTH-002-FAULT-001","assertion_id":"ASSERT-PERF-CONFIGURED-BOUNDS-HEALTH-002","proof_type":"fault-injection","support_cell_id":"SUP-PG-LINUX-X64-001"},
+    {"scenario_id":"SCN-PERF-CONFIGURED-BOUNDS-001","requirement_id":"SYNC-HEALTH-002","proof_obligation_id":"OBL-PERF-CONFIGURED-BOUNDS-HEALTH-002-CONTROL-001","assertion_id":"ASSERT-PERF-CONFIGURED-BOUNDS-HEALTH-002","proof_type":"negative-control","support_cell_id":null}
   ],
   "model": {
     "setup": [
@@ -361,7 +375,9 @@
           "defect": "default, clamp, truncate, allocate ledger state, or perform semantic work after an invalid limit"
         }
       }
-    }
+    },
+    {"id":"FPL-PERF-CONFIGURED-BOUNDS-HEALTH-001","requirement_id":"SYNC-HEALTH-001","fault_id":"FAULT-HEALTH-001","control_id":"CTRL-HEALTH-001","barrier_id":"BAR-PERF-CONFIGURED-BOUNDS-CONTROL-001","expected_assertion_ids":["ASSERT-PERF-CONFIGURED-BOUNDS-HEALTH-001"],"injection":{"mechanism":"wire-fault","target":"adapter readiness extension result mapping","operator":"replace","parameters":{"scenario":"return failed, unknown, absent, inconsistent, and query-error tri-state checks from the configured database","defect":"report ready from ping or partial checks and expose the detailed check map publicly"}}},
+    {"id":"FPL-PERF-CONFIGURED-BOUNDS-HEALTH-002","requirement_id":"SYNC-HEALTH-002","fault_id":"FAULT-HEALTH-002","control_id":"CTRL-HEALTH-002","barrier_id":"BAR-PERF-CONFIGURED-BOUNDS-CONTROL-001","expected_assertion_ids":["ASSERT-PERF-CONFIGURED-BOUNDS-HEALTH-002"],"injection":{"mechanism":"state-fault","target":"capture lag observation and configured limit validation","operator":"replace","parameters":{"scenario":"supply zero, negative, NaN, infinite, missing, unparseable, and over-limit heartbeat, WAL, and oldest-commit values","defect":"treat invalid or excessive lag as healthy or accept a nonpositive/nonfinite limit"}}}
   ],
   "replay": {
     "mode": "deterministic",
@@ -380,7 +396,9 @@
       "detected_by": [
         "ASSERT-PERF-CONFIGURED-BOUNDS-SEMANTIC-001"
       ]
-    }
+    },
+    {"control_id":"CTRL-HEALTH-001","requirement_id":"SYNC-HEALTH-001","fault_id":"FAULT-HEALTH-001","subject_artifact_inventory_ids":["ARTDEF-PG-EXTENSION-001","ARTDEF-ADAPTER-001"],"detected_by":["ASSERT-PERF-CONFIGURED-BOUNDS-HEALTH-001"]},
+    {"control_id":"CTRL-HEALTH-002","requirement_id":"SYNC-HEALTH-002","fault_id":"FAULT-HEALTH-002","subject_artifact_inventory_ids":["ARTDEF-PG-EXTENSION-001","ARTDEF-ADAPTER-001"],"detected_by":["ASSERT-PERF-CONFIGURED-BOUNDS-HEALTH-002"]}
   ],
   "steps": [
     {
@@ -451,7 +469,9 @@
         "observed_source": "system-under-test"
       },
       "detects_control_ids": []
-    }
+    },
+    {"id":"ASSERT-PERF-CONFIGURED-BOUNDS-HEALTH-001","requirement_ids":["SYNC-HEALTH-001"],"description":"Readiness is false when any required canonical check is failed or unknown.","expectation_ids":["EXPECT-PERF-CONFIGURED-BOUNDS-SEMANTIC-001"],"predicate":{"contract_predicate":"state-equality","name":"state-equals-authored-model","payload":{}},"oracle":{"kind":"model-state-equality","expected_source":"authored-model","observed_source":"system-under-test"},"detects_control_ids":["CTRL-HEALTH-001"]},
+    {"id":"ASSERT-PERF-CONFIGURED-BOUNDS-HEALTH-002","requirement_ids":["SYNC-HEALTH-002"],"description":"Readiness is false for invalid limits and nonfinite or over-limit observations.","expectation_ids":["EXPECT-PERF-CONFIGURED-BOUNDS-SEMANTIC-001"],"predicate":{"contract_predicate":"state-equality","name":"state-equals-authored-model","payload":{}},"oracle":{"kind":"model-state-equality","expected_source":"authored-model","observed_source":"system-under-test"},"detects_control_ids":["CTRL-HEALTH-002"]}
   ],
   "measurement_bindings": [
     {

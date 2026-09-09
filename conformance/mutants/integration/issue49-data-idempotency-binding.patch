@@ -1,0 +1,13 @@
+diff --git a/extensions/synchro-pg/src/push.rs b/extensions/synchro-pg/src/push.rs
+--- a/extensions/synchro-pg/src/push.rs
++++ b/extensions/synchro-pg/src/push.rs
+@@ -290,8 +290,8 @@ fn synchro_push(p_user_id: &str, p_request: pgrx::JsonB) -> pgrx::JsonB {
+                 .unwrap_or_else(|| pgrx::error!("push mutation fingerprint is missing"));
+             if stored.algorithm != FINGERPRINT_ALGORITHM
+                 || stored.version != FINGERPRINT_VERSION
+                 || stored.domain != MUTATION_FINGERPRINT_DOMAIN
+-                || stored.digest != digest
++                || (stored.digest != digest && false)
+             {
+                 return push_error(
+                     ProtocolErrorCode::IdempotencyConflict,

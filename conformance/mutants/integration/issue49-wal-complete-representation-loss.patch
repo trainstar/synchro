@@ -1,0 +1,14 @@
+diff --git a/extensions/synchro-pg/src/bgworker.rs b/extensions/synchro-pg/src/bgworker.rs
+--- a/extensions/synchro-pg/src/bgworker.rs
++++ b/extensions/synchro-pg/src/bgworker.rs
+@@ -3306,6 +3306,10 @@ fn materialize_transaction(
+         &registry,
+         &applicable,
+     )?;
++    let persisted = PersistedEvents {
++        direct_impacts: persisted.direct_impacts.into_iter().skip(1).collect(),
++        dependency_events: persisted.dependency_events,
++    };
+     let impacts = collect_membership_impacts(
+         client,
+         projection_target,

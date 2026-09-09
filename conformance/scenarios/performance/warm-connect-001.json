@@ -5,29 +5,107 @@
   "title": "Warm startup request count and semantic convergence",
   "description": "A warm public startup sends one connect and one pull, then converges on the server-authoritative scope state.",
   "requirement_ids": [
-    "SYNC-SCOPE-001"
+    "SYNC-SCOPE-001",
+    "SYNC-TIME-001",
+    "SYNC-CURSOR-001",
+    "SYNC-VERSION-001",
+    "SYNC-SCOPE-002",
+    "SYNC-SCHEMA-001",
+    "SYNC-CLIENT-VERSION-001",
+    "SYNC-PROTOCOL-004"
   ],
   "normative_references": [
     {
       "path": "docs/src/content/docs/spec/04-invariants.mdx",
       "anchor": "#scope-assignment-authority"
+    },
+    {
+      "path": "docs/src/content/docs/spec/04-invariants.mdx",
+      "anchor": "#canonical-time-format"
+    },
+    {
+      "path": "docs/src/content/docs/spec/04-invariants.mdx",
+      "anchor": "#opaque-cursor-invariant"
+    },
+    {
+      "path": "docs/src/content/docs/spec/04-invariants.mdx",
+      "anchor": "#opaque-server-version-invariant"
+    },
+    {
+      "path": "docs/src/content/docs/spec/04-invariants.mdx",
+      "anchor": "#scope-set-version-monotonicity"
+    },
+    {
+      "path": "docs/src/content/docs/spec/04-invariants.mdx",
+      "anchor": "#schema-authority"
+    },
+    {
+      "path": "docs/src/content/docs/spec/04-invariants.mdx",
+      "anchor": "#semantic-version-precedence"
+    },
+    {
+      "path": "docs/src/content/docs/spec/04-invariants.mdx",
+      "anchor": "#portable-wire-integer-range"
     }
   ],
   "proof_types": [
+    "reference-model",
     "server-black-box",
     "native-e2e",
     "negative-control"
   ],
   "proof_obligations": [
     {
+      "obligation_id": "OBL-PERF-WARM-CONNECT-RM-001",
+      "requirement_ids": [
+        "SYNC-CURSOR-001",
+        "SYNC-VERSION-001",
+        "SYNC-SCOPE-002",
+        "SYNC-CLIENT-VERSION-001",
+        "SYNC-PROTOCOL-004"
+      ],
+      "assertion_ids": [
+        "ASSERT-PERF-WARM-CONNECT-CURSOR-001",
+        "ASSERT-PERF-WARM-CONNECT-VERSION-001",
+        "ASSERT-PERF-WARM-CONNECT-SCOPE-SET-001",
+        "ASSERT-PERF-WARM-CONNECT-CLIENT-VERSION-001",
+        "ASSERT-PERF-WARM-CONNECT-INTEGER-001"
+      ],
+      "proof_type": "reference-model",
+      "support_cell_id": null,
+      "artifact_inventory_ids": [
+        "ARTDEF-CONFORMANCE-RUNNER-001"
+      ],
+      "performance_budget_ids": [],
+      "required_measurement_ids": [],
+      "required_vector_set_ids": [],
+      "make_target": "test-conformance",
+      "argv": [
+        "make",
+        "test-conformance"
+      ],
+      "fault_plan_id": null,
+      "control_id": null
+    },
+    {
       "obligation_id": "OBL-PERF-WARM-CONNECT-PG-LINUX-X64-001",
       "requirement_ids": [
-        "SYNC-SCOPE-001"
+        "SYNC-SCOPE-001",
+        "SYNC-TIME-001",
+        "SYNC-SCOPE-002",
+        "SYNC-SCHEMA-001",
+        "SYNC-CLIENT-VERSION-001",
+        "SYNC-PROTOCOL-004"
       ],
       "assertion_ids": [
         "ASSERT-PERF-WARM-CONNECT-SEMANTIC-001",
         "ASSERT-PERF-WARM-CONNECT-WIRE-001",
-        "ASSERT-PERF-WARM-CONNECT-PERFORMANCE-001"
+        "ASSERT-PERF-WARM-CONNECT-PERFORMANCE-001",
+        "ASSERT-PERF-WARM-CONNECT-TIME-001",
+        "ASSERT-PERF-WARM-CONNECT-SCOPE-SET-001",
+        "ASSERT-PERF-WARM-CONNECT-SCHEMA-001",
+        "ASSERT-PERF-WARM-CONNECT-CLIENT-VERSION-001",
+        "ASSERT-PERF-WARM-CONNECT-INTEGER-001"
       ],
       "proof_type": "server-black-box",
       "support_cell_id": "SUP-PG-LINUX-X64-001",
@@ -56,10 +134,22 @@
     {
       "obligation_id": "OBL-PERF-WARM-CONNECT-MACOS-CURRENT-001",
       "requirement_ids": [
-        "SYNC-SCOPE-001"
+        "SYNC-SCOPE-001",
+        "SYNC-TIME-001",
+        "SYNC-CURSOR-001",
+        "SYNC-VERSION-001",
+        "SYNC-SCOPE-002",
+        "SYNC-SCHEMA-001",
+        "SYNC-PROTOCOL-004"
       ],
       "assertion_ids": [
-        "ASSERT-PERF-WARM-CONNECT-SEMANTIC-001"
+        "ASSERT-PERF-WARM-CONNECT-SEMANTIC-001",
+        "ASSERT-PERF-WARM-CONNECT-TIME-001",
+        "ASSERT-PERF-WARM-CONNECT-CURSOR-001",
+        "ASSERT-PERF-WARM-CONNECT-VERSION-001",
+        "ASSERT-PERF-WARM-CONNECT-SCOPE-SET-001",
+        "ASSERT-PERF-WARM-CONNECT-SCHEMA-001",
+        "ASSERT-PERF-WARM-CONNECT-INTEGER-001"
       ],
       "proof_type": "native-e2e",
       "support_cell_id": "SUP-MACOS-CURRENT-001",
@@ -184,11 +274,23 @@
     {
       "obligation_id": "OBL-PERF-WARM-CONNECT-ANDROID-CURRENT-001",
       "requirement_ids": [
-        "SYNC-SCOPE-001"
+        "SYNC-SCOPE-001",
+        "SYNC-TIME-001",
+        "SYNC-CURSOR-001",
+        "SYNC-VERSION-001",
+        "SYNC-SCOPE-002",
+        "SYNC-SCHEMA-001",
+        "SYNC-PROTOCOL-004"
       ],
       "assertion_ids": [
         "ASSERT-PERF-WARM-CONNECT-SEMANTIC-001",
-        "ASSERT-PERF-WARM-CONNECT-PERFORMANCE-001"
+        "ASSERT-PERF-WARM-CONNECT-PERFORMANCE-001",
+        "ASSERT-PERF-WARM-CONNECT-TIME-001",
+        "ASSERT-PERF-WARM-CONNECT-CURSOR-001",
+        "ASSERT-PERF-WARM-CONNECT-VERSION-001",
+        "ASSERT-PERF-WARM-CONNECT-SCOPE-SET-001",
+        "ASSERT-PERF-WARM-CONNECT-SCHEMA-001",
+        "ASSERT-PERF-WARM-CONNECT-INTEGER-001"
       ],
       "proof_type": "native-e2e",
       "support_cell_id": "SUP-ANDROID-CURRENT-001",
@@ -218,11 +320,23 @@
     {
       "obligation_id": "OBL-PERF-WARM-CONNECT-RN-IOS-CURRENT-001",
       "requirement_ids": [
-        "SYNC-SCOPE-001"
+        "SYNC-SCOPE-001",
+        "SYNC-TIME-001",
+        "SYNC-CURSOR-001",
+        "SYNC-VERSION-001",
+        "SYNC-SCOPE-002",
+        "SYNC-SCHEMA-001",
+        "SYNC-PROTOCOL-004"
       ],
       "assertion_ids": [
         "ASSERT-PERF-WARM-CONNECT-SEMANTIC-001",
-        "ASSERT-PERF-WARM-CONNECT-PERFORMANCE-001"
+        "ASSERT-PERF-WARM-CONNECT-PERFORMANCE-001",
+        "ASSERT-PERF-WARM-CONNECT-TIME-001",
+        "ASSERT-PERF-WARM-CONNECT-CURSOR-001",
+        "ASSERT-PERF-WARM-CONNECT-VERSION-001",
+        "ASSERT-PERF-WARM-CONNECT-SCOPE-SET-001",
+        "ASSERT-PERF-WARM-CONNECT-SCHEMA-001",
+        "ASSERT-PERF-WARM-CONNECT-INTEGER-001"
       ],
       "proof_type": "native-e2e",
       "support_cell_id": "SUP-RN-IOS-CURRENT-001",
@@ -254,11 +368,23 @@
     {
       "obligation_id": "OBL-PERF-WARM-CONNECT-RN-ANDROID-CURRENT-001",
       "requirement_ids": [
-        "SYNC-SCOPE-001"
+        "SYNC-SCOPE-001",
+        "SYNC-TIME-001",
+        "SYNC-CURSOR-001",
+        "SYNC-VERSION-001",
+        "SYNC-SCOPE-002",
+        "SYNC-SCHEMA-001",
+        "SYNC-PROTOCOL-004"
       ],
       "assertion_ids": [
         "ASSERT-PERF-WARM-CONNECT-SEMANTIC-001",
-        "ASSERT-PERF-WARM-CONNECT-PERFORMANCE-001"
+        "ASSERT-PERF-WARM-CONNECT-PERFORMANCE-001",
+        "ASSERT-PERF-WARM-CONNECT-TIME-001",
+        "ASSERT-PERF-WARM-CONNECT-CURSOR-001",
+        "ASSERT-PERF-WARM-CONNECT-VERSION-001",
+        "ASSERT-PERF-WARM-CONNECT-SCOPE-SET-001",
+        "ASSERT-PERF-WARM-CONNECT-SCHEMA-001",
+        "ASSERT-PERF-WARM-CONNECT-INTEGER-001"
       ],
       "proof_type": "native-e2e",
       "support_cell_id": "SUP-RN-ANDROID-CURRENT-001",
@@ -311,9 +437,121 @@
       ],
       "fault_plan_id": "FPL-PERF-WARM-CONNECT-001",
       "control_id": "CTRL-SCOPE-001"
+    },
+    {
+      "obligation_id": "OBL-PERF-WARM-CONNECT-TIME-CONTROL-001",
+      "requirement_ids": ["SYNC-TIME-001"],
+      "assertion_ids": ["ASSERT-PERF-WARM-CONNECT-TIME-001"],
+      "proof_type": "negative-control",
+      "support_cell_id": null,
+      "artifact_inventory_ids": ["ARTDEF-CONFORMANCE-RUNNER-001", "ARTDEF-PG-EXTENSION-001", "ARTDEF-ADAPTER-001", "ARTDEF-SWIFT-SPM-001", "ARTDEF-COCOAPODS-001", "ARTDEF-KOTLIN-MAVEN-001", "ARTDEF-RN-NPM-001"],
+      "performance_budget_ids": [], "required_measurement_ids": [], "required_vector_set_ids": [],
+      "make_target": "test-conformance", "argv": ["make", "test-conformance"],
+      "fault_plan_id": "FPL-PERF-WARM-CONNECT-TIME-001", "control_id": "CTRL-TIMESTAMP-001"
+    },
+    {
+      "obligation_id": "OBL-PERF-WARM-CONNECT-CURSOR-CONTROL-001",
+      "requirement_ids": ["SYNC-CURSOR-001"],
+      "assertion_ids": ["ASSERT-PERF-WARM-CONNECT-CURSOR-001"],
+      "proof_type": "negative-control", "support_cell_id": null,
+      "artifact_inventory_ids": ["ARTDEF-CONFORMANCE-RUNNER-001", "ARTDEF-SWIFT-SPM-001", "ARTDEF-COCOAPODS-001", "ARTDEF-KOTLIN-MAVEN-001", "ARTDEF-RN-NPM-001"],
+      "performance_budget_ids": [], "required_measurement_ids": [], "required_vector_set_ids": [],
+      "make_target": "test-conformance", "argv": ["make", "test-conformance"],
+      "fault_plan_id": "FPL-PERF-WARM-CONNECT-CURSOR-001", "control_id": "CTRL-CURSOR-001"
+    },
+    {
+      "obligation_id": "OBL-PERF-WARM-CONNECT-VERSION-CONTROL-001",
+      "requirement_ids": ["SYNC-VERSION-001"],
+      "assertion_ids": ["ASSERT-PERF-WARM-CONNECT-VERSION-001"],
+      "proof_type": "negative-control", "support_cell_id": null,
+      "artifact_inventory_ids": ["ARTDEF-CONFORMANCE-RUNNER-001", "ARTDEF-SWIFT-SPM-001", "ARTDEF-COCOAPODS-001", "ARTDEF-KOTLIN-MAVEN-001", "ARTDEF-RN-NPM-001"],
+      "performance_budget_ids": [], "required_measurement_ids": [], "required_vector_set_ids": [],
+      "make_target": "test-conformance", "argv": ["make", "test-conformance"],
+      "fault_plan_id": "FPL-PERF-WARM-CONNECT-VERSION-001", "control_id": "CTRL-VERSION-001"
+    },
+    {
+      "obligation_id": "OBL-PERF-WARM-CONNECT-SCOPE-SET-CONTROL-001",
+      "requirement_ids": ["SYNC-SCOPE-002"],
+      "assertion_ids": ["ASSERT-PERF-WARM-CONNECT-SCOPE-SET-001"],
+      "proof_type": "negative-control", "support_cell_id": null,
+      "artifact_inventory_ids": ["ARTDEF-CONFORMANCE-RUNNER-001", "ARTDEF-PG-EXTENSION-001", "ARTDEF-ADAPTER-001", "ARTDEF-SWIFT-SPM-001", "ARTDEF-COCOAPODS-001", "ARTDEF-KOTLIN-MAVEN-001", "ARTDEF-RN-NPM-001"],
+      "performance_budget_ids": [], "required_measurement_ids": [], "required_vector_set_ids": [],
+      "make_target": "test-conformance", "argv": ["make", "test-conformance"],
+      "fault_plan_id": "FPL-PERF-WARM-CONNECT-SCOPE-SET-001", "control_id": "CTRL-SCOPE-002"
+    },
+    {
+      "obligation_id": "OBL-PERF-WARM-CONNECT-SCHEMA-CONTROL-001",
+      "requirement_ids": ["SYNC-SCHEMA-001"],
+      "assertion_ids": ["ASSERT-PERF-WARM-CONNECT-SCHEMA-001"],
+      "proof_type": "negative-control", "support_cell_id": null,
+      "artifact_inventory_ids": ["ARTDEF-CONFORMANCE-RUNNER-001", "ARTDEF-PG-EXTENSION-001", "ARTDEF-ADAPTER-001", "ARTDEF-SWIFT-SPM-001", "ARTDEF-COCOAPODS-001", "ARTDEF-KOTLIN-MAVEN-001", "ARTDEF-RN-NPM-001"],
+      "performance_budget_ids": [], "required_measurement_ids": [], "required_vector_set_ids": [],
+      "make_target": "test-conformance", "argv": ["make", "test-conformance"],
+      "fault_plan_id": "FPL-PERF-WARM-CONNECT-SCHEMA-001", "control_id": "CTRL-SCHEMA-001"
+    },
+    {
+      "obligation_id": "OBL-PERF-WARM-CONNECT-CLIENT-VERSION-CONTROL-001",
+      "requirement_ids": ["SYNC-CLIENT-VERSION-001"],
+      "assertion_ids": ["ASSERT-PERF-WARM-CONNECT-CLIENT-VERSION-001"],
+      "proof_type": "negative-control", "support_cell_id": null,
+      "artifact_inventory_ids": ["ARTDEF-CONFORMANCE-RUNNER-001", "ARTDEF-PG-EXTENSION-001", "ARTDEF-ADAPTER-001"],
+      "performance_budget_ids": [], "required_measurement_ids": [], "required_vector_set_ids": [],
+      "make_target": "test-conformance", "argv": ["make", "test-conformance"],
+      "fault_plan_id": "FPL-PERF-WARM-CONNECT-CLIENT-VERSION-001", "control_id": "CTRL-CLIENT-VERSION-001"
+    },
+    {
+      "obligation_id": "OBL-PERF-WARM-CONNECT-INTEGER-CONTROL-001",
+      "requirement_ids": ["SYNC-PROTOCOL-004"],
+      "assertion_ids": ["ASSERT-PERF-WARM-CONNECT-INTEGER-001"],
+      "proof_type": "negative-control", "support_cell_id": null,
+      "artifact_inventory_ids": ["ARTDEF-CONFORMANCE-RUNNER-001", "ARTDEF-PG-EXTENSION-001", "ARTDEF-ADAPTER-001", "ARTDEF-SWIFT-SPM-001", "ARTDEF-COCOAPODS-001", "ARTDEF-KOTLIN-MAVEN-001", "ARTDEF-RN-NPM-001"],
+      "performance_budget_ids": [], "required_measurement_ids": [], "required_vector_set_ids": [],
+      "make_target": "test-conformance", "argv": ["make", "test-conformance"],
+      "fault_plan_id": "FPL-PERF-WARM-CONNECT-INTEGER-001", "control_id": "CTRL-PROTOCOL-004"
     }
   ],
   "ownership": [
+    {"scenario_id":"SCN-PERF-WARM-CONNECT-001","requirement_id":"SYNC-CURSOR-001","proof_obligation_id":"OBL-PERF-WARM-CONNECT-RM-001","assertion_id":"ASSERT-PERF-WARM-CONNECT-CURSOR-001","proof_type":"reference-model","support_cell_id":null},
+    {"scenario_id":"SCN-PERF-WARM-CONNECT-001","requirement_id":"SYNC-VERSION-001","proof_obligation_id":"OBL-PERF-WARM-CONNECT-RM-001","assertion_id":"ASSERT-PERF-WARM-CONNECT-VERSION-001","proof_type":"reference-model","support_cell_id":null},
+    {"scenario_id":"SCN-PERF-WARM-CONNECT-001","requirement_id":"SYNC-SCOPE-002","proof_obligation_id":"OBL-PERF-WARM-CONNECT-RM-001","assertion_id":"ASSERT-PERF-WARM-CONNECT-SCOPE-SET-001","proof_type":"reference-model","support_cell_id":null},
+    {"scenario_id":"SCN-PERF-WARM-CONNECT-001","requirement_id":"SYNC-CLIENT-VERSION-001","proof_obligation_id":"OBL-PERF-WARM-CONNECT-RM-001","assertion_id":"ASSERT-PERF-WARM-CONNECT-CLIENT-VERSION-001","proof_type":"reference-model","support_cell_id":null},
+    {"scenario_id":"SCN-PERF-WARM-CONNECT-001","requirement_id":"SYNC-PROTOCOL-004","proof_obligation_id":"OBL-PERF-WARM-CONNECT-RM-001","assertion_id":"ASSERT-PERF-WARM-CONNECT-INTEGER-001","proof_type":"reference-model","support_cell_id":null},
+    {"scenario_id":"SCN-PERF-WARM-CONNECT-001","requirement_id":"SYNC-TIME-001","proof_obligation_id":"OBL-PERF-WARM-CONNECT-PG-LINUX-X64-001","assertion_id":"ASSERT-PERF-WARM-CONNECT-TIME-001","proof_type":"server-black-box","support_cell_id":"SUP-PG-LINUX-X64-001"},
+    {"scenario_id":"SCN-PERF-WARM-CONNECT-001","requirement_id":"SYNC-SCOPE-002","proof_obligation_id":"OBL-PERF-WARM-CONNECT-PG-LINUX-X64-001","assertion_id":"ASSERT-PERF-WARM-CONNECT-SCOPE-SET-001","proof_type":"server-black-box","support_cell_id":"SUP-PG-LINUX-X64-001"},
+    {"scenario_id":"SCN-PERF-WARM-CONNECT-001","requirement_id":"SYNC-SCHEMA-001","proof_obligation_id":"OBL-PERF-WARM-CONNECT-PG-LINUX-X64-001","assertion_id":"ASSERT-PERF-WARM-CONNECT-SCHEMA-001","proof_type":"server-black-box","support_cell_id":"SUP-PG-LINUX-X64-001"},
+    {"scenario_id":"SCN-PERF-WARM-CONNECT-001","requirement_id":"SYNC-CLIENT-VERSION-001","proof_obligation_id":"OBL-PERF-WARM-CONNECT-PG-LINUX-X64-001","assertion_id":"ASSERT-PERF-WARM-CONNECT-CLIENT-VERSION-001","proof_type":"server-black-box","support_cell_id":"SUP-PG-LINUX-X64-001"},
+    {"scenario_id":"SCN-PERF-WARM-CONNECT-001","requirement_id":"SYNC-PROTOCOL-004","proof_obligation_id":"OBL-PERF-WARM-CONNECT-PG-LINUX-X64-001","assertion_id":"ASSERT-PERF-WARM-CONNECT-INTEGER-001","proof_type":"server-black-box","support_cell_id":"SUP-PG-LINUX-X64-001"},
+    {"scenario_id":"SCN-PERF-WARM-CONNECT-001","requirement_id":"SYNC-TIME-001","proof_obligation_id":"OBL-PERF-WARM-CONNECT-MACOS-CURRENT-001","assertion_id":"ASSERT-PERF-WARM-CONNECT-TIME-001","proof_type":"native-e2e","support_cell_id":"SUP-MACOS-CURRENT-001"},
+    {"scenario_id":"SCN-PERF-WARM-CONNECT-001","requirement_id":"SYNC-CURSOR-001","proof_obligation_id":"OBL-PERF-WARM-CONNECT-MACOS-CURRENT-001","assertion_id":"ASSERT-PERF-WARM-CONNECT-CURSOR-001","proof_type":"native-e2e","support_cell_id":"SUP-MACOS-CURRENT-001"},
+    {"scenario_id":"SCN-PERF-WARM-CONNECT-001","requirement_id":"SYNC-VERSION-001","proof_obligation_id":"OBL-PERF-WARM-CONNECT-MACOS-CURRENT-001","assertion_id":"ASSERT-PERF-WARM-CONNECT-VERSION-001","proof_type":"native-e2e","support_cell_id":"SUP-MACOS-CURRENT-001"},
+    {"scenario_id":"SCN-PERF-WARM-CONNECT-001","requirement_id":"SYNC-SCOPE-002","proof_obligation_id":"OBL-PERF-WARM-CONNECT-MACOS-CURRENT-001","assertion_id":"ASSERT-PERF-WARM-CONNECT-SCOPE-SET-001","proof_type":"native-e2e","support_cell_id":"SUP-MACOS-CURRENT-001"},
+    {"scenario_id":"SCN-PERF-WARM-CONNECT-001","requirement_id":"SYNC-SCHEMA-001","proof_obligation_id":"OBL-PERF-WARM-CONNECT-MACOS-CURRENT-001","assertion_id":"ASSERT-PERF-WARM-CONNECT-SCHEMA-001","proof_type":"native-e2e","support_cell_id":"SUP-MACOS-CURRENT-001"},
+    {"scenario_id":"SCN-PERF-WARM-CONNECT-001","requirement_id":"SYNC-PROTOCOL-004","proof_obligation_id":"OBL-PERF-WARM-CONNECT-MACOS-CURRENT-001","assertion_id":"ASSERT-PERF-WARM-CONNECT-INTEGER-001","proof_type":"native-e2e","support_cell_id":"SUP-MACOS-CURRENT-001"},
+    {"scenario_id":"SCN-PERF-WARM-CONNECT-001","requirement_id":"SYNC-TIME-001","proof_obligation_id":"OBL-PERF-WARM-CONNECT-ANDROID-CURRENT-001","assertion_id":"ASSERT-PERF-WARM-CONNECT-TIME-001","proof_type":"native-e2e","support_cell_id":"SUP-ANDROID-CURRENT-001"},
+    {"scenario_id":"SCN-PERF-WARM-CONNECT-001","requirement_id":"SYNC-CURSOR-001","proof_obligation_id":"OBL-PERF-WARM-CONNECT-ANDROID-CURRENT-001","assertion_id":"ASSERT-PERF-WARM-CONNECT-CURSOR-001","proof_type":"native-e2e","support_cell_id":"SUP-ANDROID-CURRENT-001"},
+    {"scenario_id":"SCN-PERF-WARM-CONNECT-001","requirement_id":"SYNC-VERSION-001","proof_obligation_id":"OBL-PERF-WARM-CONNECT-ANDROID-CURRENT-001","assertion_id":"ASSERT-PERF-WARM-CONNECT-VERSION-001","proof_type":"native-e2e","support_cell_id":"SUP-ANDROID-CURRENT-001"},
+    {"scenario_id":"SCN-PERF-WARM-CONNECT-001","requirement_id":"SYNC-SCOPE-002","proof_obligation_id":"OBL-PERF-WARM-CONNECT-ANDROID-CURRENT-001","assertion_id":"ASSERT-PERF-WARM-CONNECT-SCOPE-SET-001","proof_type":"native-e2e","support_cell_id":"SUP-ANDROID-CURRENT-001"},
+    {"scenario_id":"SCN-PERF-WARM-CONNECT-001","requirement_id":"SYNC-SCHEMA-001","proof_obligation_id":"OBL-PERF-WARM-CONNECT-ANDROID-CURRENT-001","assertion_id":"ASSERT-PERF-WARM-CONNECT-SCHEMA-001","proof_type":"native-e2e","support_cell_id":"SUP-ANDROID-CURRENT-001"},
+    {"scenario_id":"SCN-PERF-WARM-CONNECT-001","requirement_id":"SYNC-PROTOCOL-004","proof_obligation_id":"OBL-PERF-WARM-CONNECT-ANDROID-CURRENT-001","assertion_id":"ASSERT-PERF-WARM-CONNECT-INTEGER-001","proof_type":"native-e2e","support_cell_id":"SUP-ANDROID-CURRENT-001"},
+    {"scenario_id":"SCN-PERF-WARM-CONNECT-001","requirement_id":"SYNC-TIME-001","proof_obligation_id":"OBL-PERF-WARM-CONNECT-RN-IOS-CURRENT-001","assertion_id":"ASSERT-PERF-WARM-CONNECT-TIME-001","proof_type":"native-e2e","support_cell_id":"SUP-RN-IOS-CURRENT-001"},
+    {"scenario_id":"SCN-PERF-WARM-CONNECT-001","requirement_id":"SYNC-CURSOR-001","proof_obligation_id":"OBL-PERF-WARM-CONNECT-RN-IOS-CURRENT-001","assertion_id":"ASSERT-PERF-WARM-CONNECT-CURSOR-001","proof_type":"native-e2e","support_cell_id":"SUP-RN-IOS-CURRENT-001"},
+    {"scenario_id":"SCN-PERF-WARM-CONNECT-001","requirement_id":"SYNC-VERSION-001","proof_obligation_id":"OBL-PERF-WARM-CONNECT-RN-IOS-CURRENT-001","assertion_id":"ASSERT-PERF-WARM-CONNECT-VERSION-001","proof_type":"native-e2e","support_cell_id":"SUP-RN-IOS-CURRENT-001"},
+    {"scenario_id":"SCN-PERF-WARM-CONNECT-001","requirement_id":"SYNC-SCOPE-002","proof_obligation_id":"OBL-PERF-WARM-CONNECT-RN-IOS-CURRENT-001","assertion_id":"ASSERT-PERF-WARM-CONNECT-SCOPE-SET-001","proof_type":"native-e2e","support_cell_id":"SUP-RN-IOS-CURRENT-001"},
+    {"scenario_id":"SCN-PERF-WARM-CONNECT-001","requirement_id":"SYNC-SCHEMA-001","proof_obligation_id":"OBL-PERF-WARM-CONNECT-RN-IOS-CURRENT-001","assertion_id":"ASSERT-PERF-WARM-CONNECT-SCHEMA-001","proof_type":"native-e2e","support_cell_id":"SUP-RN-IOS-CURRENT-001"},
+    {"scenario_id":"SCN-PERF-WARM-CONNECT-001","requirement_id":"SYNC-PROTOCOL-004","proof_obligation_id":"OBL-PERF-WARM-CONNECT-RN-IOS-CURRENT-001","assertion_id":"ASSERT-PERF-WARM-CONNECT-INTEGER-001","proof_type":"native-e2e","support_cell_id":"SUP-RN-IOS-CURRENT-001"},
+    {"scenario_id":"SCN-PERF-WARM-CONNECT-001","requirement_id":"SYNC-TIME-001","proof_obligation_id":"OBL-PERF-WARM-CONNECT-RN-ANDROID-CURRENT-001","assertion_id":"ASSERT-PERF-WARM-CONNECT-TIME-001","proof_type":"native-e2e","support_cell_id":"SUP-RN-ANDROID-CURRENT-001"},
+    {"scenario_id":"SCN-PERF-WARM-CONNECT-001","requirement_id":"SYNC-CURSOR-001","proof_obligation_id":"OBL-PERF-WARM-CONNECT-RN-ANDROID-CURRENT-001","assertion_id":"ASSERT-PERF-WARM-CONNECT-CURSOR-001","proof_type":"native-e2e","support_cell_id":"SUP-RN-ANDROID-CURRENT-001"},
+    {"scenario_id":"SCN-PERF-WARM-CONNECT-001","requirement_id":"SYNC-VERSION-001","proof_obligation_id":"OBL-PERF-WARM-CONNECT-RN-ANDROID-CURRENT-001","assertion_id":"ASSERT-PERF-WARM-CONNECT-VERSION-001","proof_type":"native-e2e","support_cell_id":"SUP-RN-ANDROID-CURRENT-001"},
+    {"scenario_id":"SCN-PERF-WARM-CONNECT-001","requirement_id":"SYNC-SCOPE-002","proof_obligation_id":"OBL-PERF-WARM-CONNECT-RN-ANDROID-CURRENT-001","assertion_id":"ASSERT-PERF-WARM-CONNECT-SCOPE-SET-001","proof_type":"native-e2e","support_cell_id":"SUP-RN-ANDROID-CURRENT-001"},
+    {"scenario_id":"SCN-PERF-WARM-CONNECT-001","requirement_id":"SYNC-SCHEMA-001","proof_obligation_id":"OBL-PERF-WARM-CONNECT-RN-ANDROID-CURRENT-001","assertion_id":"ASSERT-PERF-WARM-CONNECT-SCHEMA-001","proof_type":"native-e2e","support_cell_id":"SUP-RN-ANDROID-CURRENT-001"},
+    {"scenario_id":"SCN-PERF-WARM-CONNECT-001","requirement_id":"SYNC-PROTOCOL-004","proof_obligation_id":"OBL-PERF-WARM-CONNECT-RN-ANDROID-CURRENT-001","assertion_id":"ASSERT-PERF-WARM-CONNECT-INTEGER-001","proof_type":"native-e2e","support_cell_id":"SUP-RN-ANDROID-CURRENT-001"},
+    {"scenario_id":"SCN-PERF-WARM-CONNECT-001","requirement_id":"SYNC-TIME-001","proof_obligation_id":"OBL-PERF-WARM-CONNECT-TIME-CONTROL-001","assertion_id":"ASSERT-PERF-WARM-CONNECT-TIME-001","proof_type":"negative-control","support_cell_id":null},
+    {"scenario_id":"SCN-PERF-WARM-CONNECT-001","requirement_id":"SYNC-CURSOR-001","proof_obligation_id":"OBL-PERF-WARM-CONNECT-CURSOR-CONTROL-001","assertion_id":"ASSERT-PERF-WARM-CONNECT-CURSOR-001","proof_type":"negative-control","support_cell_id":null},
+    {"scenario_id":"SCN-PERF-WARM-CONNECT-001","requirement_id":"SYNC-VERSION-001","proof_obligation_id":"OBL-PERF-WARM-CONNECT-VERSION-CONTROL-001","assertion_id":"ASSERT-PERF-WARM-CONNECT-VERSION-001","proof_type":"negative-control","support_cell_id":null},
+    {"scenario_id":"SCN-PERF-WARM-CONNECT-001","requirement_id":"SYNC-SCOPE-002","proof_obligation_id":"OBL-PERF-WARM-CONNECT-SCOPE-SET-CONTROL-001","assertion_id":"ASSERT-PERF-WARM-CONNECT-SCOPE-SET-001","proof_type":"negative-control","support_cell_id":null},
+    {"scenario_id":"SCN-PERF-WARM-CONNECT-001","requirement_id":"SYNC-SCHEMA-001","proof_obligation_id":"OBL-PERF-WARM-CONNECT-SCHEMA-CONTROL-001","assertion_id":"ASSERT-PERF-WARM-CONNECT-SCHEMA-001","proof_type":"negative-control","support_cell_id":null},
+    {"scenario_id":"SCN-PERF-WARM-CONNECT-001","requirement_id":"SYNC-CLIENT-VERSION-001","proof_obligation_id":"OBL-PERF-WARM-CONNECT-CLIENT-VERSION-CONTROL-001","assertion_id":"ASSERT-PERF-WARM-CONNECT-CLIENT-VERSION-001","proof_type":"negative-control","support_cell_id":null},
+    {"scenario_id":"SCN-PERF-WARM-CONNECT-001","requirement_id":"SYNC-PROTOCOL-004","proof_obligation_id":"OBL-PERF-WARM-CONNECT-INTEGER-CONTROL-001","assertion_id":"ASSERT-PERF-WARM-CONNECT-INTEGER-001","proof_type":"negative-control","support_cell_id":null},
     {
       "scenario_id": "SCN-PERF-WARM-CONNECT-001",
       "requirement_id": "SYNC-SCOPE-001",
@@ -872,7 +1110,14 @@
           "defect": "treat the client-authored scope as authoritative instead of rejecting it and using server assignment"
         }
       }
-    }
+    },
+    {"id":"FPL-PERF-WARM-CONNECT-TIME-001","requirement_id":"SYNC-TIME-001","fault_id":"FAULT-TIME-001","control_id":"CTRL-TIMESTAMP-001","barrier_id":"BAR-PERF-WARM-CONNECT-CONTROL-001","expected_assertion_ids":["ASSERT-PERF-WARM-CONNECT-TIME-001"],"injection":{"mechanism":"wire-fault","target":"push.client_version timestamp decoder","operator":"replace","parameters":{"scenario":"portable datetime mutation with a timestamp offset and missing microseconds","defect":"accept the non-UTC or noncanonical representation instead of rejecting before mutation state changes"}}},
+    {"id":"FPL-PERF-WARM-CONNECT-CURSOR-001","requirement_id":"SYNC-CURSOR-001","fault_id":"FAULT-CURSOR-001","control_id":"CTRL-CURSOR-001","barrier_id":"BAR-PERF-WARM-CONNECT-CONTROL-001","expected_assertion_ids":["ASSERT-PERF-WARM-CONNECT-CURSOR-001"],"injection":{"mechanism":"source-mutant","target":"native scope cursor persistence and request serialization","operator":"replace","parameters":{"scenario":"resume a scope with a server-issued non-null cursor containing opaque bytes","defect":"parse, sort, or rewrite the token before the next authenticated request"}}},
+    {"id":"FPL-PERF-WARM-CONNECT-VERSION-001","requirement_id":"SYNC-VERSION-001","fault_id":"FAULT-VERSION-001","control_id":"CTRL-VERSION-001","barrier_id":"BAR-PERF-WARM-CONNECT-CONTROL-001","expected_assertion_ids":["ASSERT-PERF-WARM-CONNECT-VERSION-001"],"injection":{"mechanism":"source-mutant","target":"client server_version reconciliation","operator":"replace","parameters":{"scenario":"apply a server outcome carrying a nonnumeric opaque version","defect":"sort or synthesize the version from timestamp or client data instead of preserving equality bytes"}}},
+    {"id":"FPL-PERF-WARM-CONNECT-SCOPE-SET-001","requirement_id":"SYNC-SCOPE-002","fault_id":"FAULT-SCOPE-002","control_id":"CTRL-SCOPE-002","barrier_id":"BAR-PERF-WARM-CONNECT-CONTROL-001","expected_assertion_ids":["ASSERT-PERF-WARM-CONNECT-SCOPE-SET-001"],"injection":{"mechanism":"state-fault","target":"client scope_set_version transition","operator":"replace","parameters":{"scenario":"connect twice with the same assigned set, then change one assigned scope","defect":"increment for the unchanged set or reuse a version for the changed set"}}},
+    {"id":"FPL-PERF-WARM-CONNECT-SCHEMA-001","requirement_id":"SYNC-SCHEMA-001","fault_id":"FAULT-SCHEMA-001","control_id":"CTRL-SCHEMA-001","barrier_id":"BAR-PERF-WARM-CONNECT-CONTROL-001","expected_assertion_ids":["ASSERT-PERF-WARM-CONNECT-SCHEMA-001"],"injection":{"mechanism":"wire-fault","target":"connect schema dispatch","operator":"replace","parameters":{"scenario":"continue a known client with an incompatible manifest and fresh sentinel","defect":"accept the fresh sentinel or choose a local action that bypasses the server's unsupported/reset decision"}}},
+    {"id":"FPL-PERF-WARM-CONNECT-CLIENT-VERSION-001","requirement_id":"SYNC-CLIENT-VERSION-001","fault_id":"FAULT-CLIENT-VERSION-001","control_id":"CTRL-CLIENT-VERSION-001","barrier_id":"BAR-PERF-WARM-CONNECT-CONTROL-001","expected_assertion_ids":["ASSERT-PERF-WARM-CONNECT-CLIENT-VERSION-001"],"injection":{"mechanism":"wire-fault","target":"application and minimum-client version parser","operator":"replace","parameters":{"scenario":"compare prerelease, numeric prerelease, build metadata, malformed, leading-v, and protocol version values","defect":"apply non-SemVer precedence or conflate protocol integer 3 with application version parsing"}}},
+    {"id":"FPL-PERF-WARM-CONNECT-INTEGER-001","requirement_id":"SYNC-PROTOCOL-004","fault_id":"FAULT-PROTOCOL-004","control_id":"CTRL-PROTOCOL-004","barrier_id":"BAR-PERF-WARM-CONNECT-CONTROL-001","expected_assertion_ids":["ASSERT-PERF-WARM-CONNECT-INTEGER-001"],"injection":{"mechanism":"wire-fault","target":"protocol JSON integer encoder and counter allocator","operator":"corrupt","parameters":{"scenario":"round trip safe-range extrema, out-of-range values, positive fields, and counter overflow","defect":"round, wrap, sign-change, accept unsafe envelope integer, or allocate after overflow"}}}
   ],
   "replay": {
     "mode": "deterministic",
@@ -880,6 +1125,13 @@
     "barrier_trace_required": true
   },
   "negative_controls": [
+    {"control_id":"CTRL-TIMESTAMP-001","requirement_id":"SYNC-TIME-001","fault_id":"FAULT-TIME-001","subject_artifact_inventory_ids":["ARTDEF-PG-EXTENSION-001","ARTDEF-ADAPTER-001","ARTDEF-SWIFT-SPM-001","ARTDEF-COCOAPODS-001","ARTDEF-KOTLIN-MAVEN-001","ARTDEF-RN-NPM-001"],"detected_by":["ASSERT-PERF-WARM-CONNECT-TIME-001"]},
+    {"control_id":"CTRL-CURSOR-001","requirement_id":"SYNC-CURSOR-001","fault_id":"FAULT-CURSOR-001","subject_artifact_inventory_ids":["ARTDEF-SWIFT-SPM-001","ARTDEF-COCOAPODS-001","ARTDEF-KOTLIN-MAVEN-001","ARTDEF-RN-NPM-001"],"detected_by":["ASSERT-PERF-WARM-CONNECT-CURSOR-001"]},
+    {"control_id":"CTRL-VERSION-001","requirement_id":"SYNC-VERSION-001","fault_id":"FAULT-VERSION-001","subject_artifact_inventory_ids":["ARTDEF-SWIFT-SPM-001","ARTDEF-COCOAPODS-001","ARTDEF-KOTLIN-MAVEN-001","ARTDEF-RN-NPM-001"],"detected_by":["ASSERT-PERF-WARM-CONNECT-VERSION-001"]},
+    {"control_id":"CTRL-SCOPE-002","requirement_id":"SYNC-SCOPE-002","fault_id":"FAULT-SCOPE-002","subject_artifact_inventory_ids":["ARTDEF-PG-EXTENSION-001","ARTDEF-ADAPTER-001","ARTDEF-SWIFT-SPM-001","ARTDEF-COCOAPODS-001","ARTDEF-KOTLIN-MAVEN-001","ARTDEF-RN-NPM-001"],"detected_by":["ASSERT-PERF-WARM-CONNECT-SCOPE-SET-001"]},
+    {"control_id":"CTRL-SCHEMA-001","requirement_id":"SYNC-SCHEMA-001","fault_id":"FAULT-SCHEMA-001","subject_artifact_inventory_ids":["ARTDEF-PG-EXTENSION-001","ARTDEF-ADAPTER-001","ARTDEF-SWIFT-SPM-001","ARTDEF-COCOAPODS-001","ARTDEF-KOTLIN-MAVEN-001","ARTDEF-RN-NPM-001"],"detected_by":["ASSERT-PERF-WARM-CONNECT-SCHEMA-001"]},
+    {"control_id":"CTRL-CLIENT-VERSION-001","requirement_id":"SYNC-CLIENT-VERSION-001","fault_id":"FAULT-CLIENT-VERSION-001","subject_artifact_inventory_ids":["ARTDEF-PG-EXTENSION-001","ARTDEF-ADAPTER-001"],"detected_by":["ASSERT-PERF-WARM-CONNECT-CLIENT-VERSION-001"]},
+    {"control_id":"CTRL-PROTOCOL-004","requirement_id":"SYNC-PROTOCOL-004","fault_id":"FAULT-PROTOCOL-004","subject_artifact_inventory_ids":["ARTDEF-PG-EXTENSION-001","ARTDEF-ADAPTER-001","ARTDEF-SWIFT-SPM-001","ARTDEF-COCOAPODS-001","ARTDEF-KOTLIN-MAVEN-001","ARTDEF-RN-NPM-001"],"detected_by":["ASSERT-PERF-WARM-CONNECT-INTEGER-001"]},
     {
       "control_id": "CTRL-SCOPE-001",
       "requirement_id": "SYNC-SCOPE-001",
@@ -1439,6 +1691,13 @@
         "observed_source": "system-under-test"
       },
       "detects_control_ids": []
-    }
+    },
+    {"id":"ASSERT-PERF-WARM-CONNECT-TIME-001","requirement_ids":["SYNC-TIME-001"],"description":"The server emits canonical UTC timestamps, and each native client completes the canonical response without durable-state drift.","expectation_ids":["EXPECT-PERF-WARM-CONNECT-SEMANTIC-001"],"predicate":{"contract_predicate":"state-equality","name":"state-equals-authored-model","payload":{}},"oracle":{"kind":"model-state-equality","expected_source":"authored-model","observed_source":"system-under-test"},"detects_control_ids":["CTRL-TIMESTAMP-001"]},
+    {"id":"ASSERT-PERF-WARM-CONNECT-CURSOR-001","requirement_ids":["SYNC-CURSOR-001"],"description":"Native clients preserve each non-null server cursor byte for byte before resumed durable progress.","expectation_ids":["EXPECT-PERF-WARM-CONNECT-SEMANTIC-001"],"predicate":{"contract_predicate":"state-equality","name":"state-equals-authored-model","payload":{}},"oracle":{"kind":"model-state-equality","expected_source":"authored-model","observed_source":"system-under-test"},"detects_control_ids":["CTRL-CURSOR-001"]},
+    {"id":"ASSERT-PERF-WARM-CONNECT-VERSION-001","requirement_ids":["SYNC-VERSION-001"],"description":"Native clients preserve the nonnumeric server_version token exactly.","expectation_ids":["EXPECT-PERF-WARM-CONNECT-SEMANTIC-001"],"predicate":{"contract_predicate":"state-equality","name":"state-equals-authored-model","payload":{}},"oracle":{"kind":"model-state-equality","expected_source":"authored-model","observed_source":"system-under-test"},"detects_control_ids":["CTRL-VERSION-001"]},
+    {"id":"ASSERT-PERF-WARM-CONNECT-SCOPE-SET-001","requirement_ids":["SYNC-SCOPE-002"],"description":"An unchanged assignment keeps scope_set_version stable, while a changed assignment requires a new version.","expectation_ids":["EXPECT-PERF-WARM-CONNECT-SEMANTIC-001"],"predicate":{"contract_predicate":"state-equality","name":"state-equals-authored-model","payload":{}},"oracle":{"kind":"model-state-equality","expected_source":"authored-model","observed_source":"system-under-test"},"detects_control_ids":["CTRL-SCOPE-002"]},
+    {"id":"ASSERT-PERF-WARM-CONNECT-SCHEMA-001","requirement_ids":["SYNC-SCHEMA-001"],"description":"Each native client uses the fresh sentinel once, then persists and sends the server-selected current schema.","expectation_ids":["EXPECT-PERF-WARM-CONNECT-SEMANTIC-001"],"predicate":{"contract_predicate":"state-equality","name":"state-equals-authored-model","payload":{}},"oracle":{"kind":"model-state-equality","expected_source":"authored-model","observed_source":"system-under-test"},"detects_control_ids":["CTRL-SCHEMA-001"]},
+    {"id":"ASSERT-PERF-WARM-CONNECT-CLIENT-VERSION-001","requirement_ids":["SYNC-CLIENT-VERSION-001"],"description":"The server applies Semantic Versioning precedence and rejects malformed versions before durable progress.","expectation_ids":["EXPECT-PERF-WARM-CONNECT-SEMANTIC-001"],"predicate":{"contract_predicate":"state-equality","name":"state-equals-authored-model","payload":{}},"oracle":{"kind":"model-state-equality","expected_source":"authored-model","observed_source":"system-under-test"},"detects_control_ids":["CTRL-CLIENT-VERSION-001"]},
+    {"id":"ASSERT-PERF-WARM-CONNECT-INTEGER-001","requirement_ids":["SYNC-PROTOCOL-004"],"description":"Every observed protocol-envelope integer remains exactly representable and satisfies its required sign constraint.","expectation_ids":["EXPECT-PERF-WARM-CONNECT-SEMANTIC-001"],"predicate":{"contract_predicate":"state-equality","name":"state-equals-authored-model","payload":{}},"oracle":{"kind":"model-state-equality","expected_source":"authored-model","observed_source":"system-under-test"},"detects_control_ids":["CTRL-PROTOCOL-004"]}
   ]
 }

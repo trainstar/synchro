@@ -8,12 +8,15 @@ import (
 	"fmt"
 	"reflect"
 	"sort"
+	"strconv"
 
 	"github.com/trainstar/synchro/conformance/blackbox"
 	"github.com/trainstar/synchro/conformance/scenarios"
 )
 
 const warmConnectScenarioID = "SCN-PERF-WARM-CONNECT-001"
+
+const warmConnectMaximumSafeInteger = int64(9007199254740991)
 
 var warmConnectStepOrder = []scenarios.StepID{
 	"STEP-PERF-WARM-CONNECT-ASSIGN-001",
@@ -286,8 +289,61 @@ func validateWarmConnectCall(scenario scenarios.Scenario, result Synchronization
 		if observed.Wire.HTTPStatus != wire.HTTPStatus || !reflect.DeepEqual(observed.Wire.ErrorCode, wire.ErrorCode) || observed.Wire.Retryable != wire.Retryable {
 			return fmt.Errorf("Kotlin Android warm-connect step %s differs from its wire expectation", id)
 		}
+		if err := validateWarmConnectTransportStep(id, result.transportObservations[index]); err != nil {
+			return err
+		}
 	}
 	return nil
+}
+
+func validateWarmConnectTransportStep(id scenarios.StepID, observation TransportObservation) error {
+	facts := observation.RequestFacts
+	if facts == nil || observation.StatusCode != 200 || observation.ErrorCode != nil || observation.Retryable == nil || *observation.Retryable || observation.DurationNanoseconds == 0 || observation.DurationNanoseconds > uint64(warmConnectMaximumSafeInteger) {
+		return fmt.Errorf("Kotlin Android warm-connect step %s has invalid transport evidence", id)
+	}
+	if !warmConnectRequestIntegersArePortable(facts) {
+		return fmt.Errorf("Kotlin Android warm-connect step %s has an unsafe wire integer", id)
+	}
+	validCurrentSchema := facts.SchemaVersion > 0 && facts.SchemaHash != ""
+	validCurrentGeneration := facts.ClientGeneration != nil && *facts.ClientGeneration > 0
+	switch id {
+	case "STEP-PERF-WARM-CONNECT-BOOTSTRAP-CONNECT-001":
+		if observation.OperationClass != "connect" || facts.ClientGeneration != nil || facts.SchemaVersion != 0 || facts.SchemaHash != "" || facts.ProtocolVersion == nil || *facts.ProtocolVersion != 3 || facts.ScopeSetVersion == nil || *facts.ScopeSetVersion != 0 || facts.ScopeCount == nil || *facts.ScopeCount != 0 {
+			return errors.New("Kotlin Android warm-connect bootstrap did not use the fresh connect sentinel")
+		}
+	case "STEP-PERF-WARM-CONNECT-BASELINE-REBUILD-001":
+		if observation.OperationClass != "rebuild" || !validCurrentGeneration || !validCurrentSchema || facts.Limit == nil || *facts.Limit != 100 {
+			return errors.New("Kotlin Android warm-connect bootstrap rebuild request is invalid")
+		}
+	case "STEP-PERF-WARM-CONNECT-BASELINE-ACK-001", "STEP-PERF-WARM-CONNECT-002":
+		if observation.OperationClass != "pull" || !validCurrentGeneration || !validCurrentSchema || facts.ScopeSetVersion == nil || *facts.ScopeSetVersion <= 0 || facts.ScopeCount == nil || *facts.ScopeCount != 1 || facts.Limit == nil || *facts.Limit != 100 {
+			return fmt.Errorf("Kotlin Android warm-connect step %s has an invalid pull request", id)
+		}
+	case "STEP-PERF-WARM-CONNECT-001":
+		if observation.OperationClass != "connect" || !validCurrentGeneration || !validCurrentSchema || facts.ProtocolVersion == nil || *facts.ProtocolVersion != 3 || facts.ScopeSetVersion == nil || *facts.ScopeSetVersion <= 0 || facts.ScopeCount == nil || *facts.ScopeCount != 1 {
+			return errors.New("Kotlin Android warm-connect reconnect request is invalid")
+		}
+	default:
+		return fmt.Errorf("Kotlin Android warm-connect step %s has no transport contract", id)
+	}
+	return nil
+}
+
+func warmConnectRequestIntegersArePortable(facts *TransportRequestFacts) bool {
+	if facts.SchemaVersion < 0 || facts.SchemaVersion > warmConnectMaximumSafeInteger {
+		return false
+	}
+	for _, value := range []*int64{facts.ClientGeneration, facts.ScopeSetVersion} {
+		if value != nil && (*value < 0 || *value > warmConnectMaximumSafeInteger) {
+			return false
+		}
+	}
+	for _, value := range []*int{facts.ProtocolVersion, facts.ScopeCount, facts.Limit, facts.MutationCount} {
+		if value != nil && (*value < 0 || int64(*value) > warmConnectMaximumSafeInteger) {
+			return false
+		}
+	}
+	return true
 }
 
 func (p *Platform) warmConnectSnapshot(ctx context.Context, client Client) (warmConnectSnapshot, error) {
@@ -385,6 +441,17 @@ func resolveWarmConnectIdentities(controller *blackbox.NativeController, aliases
 	for _, value := range controllerValues {
 		runtime[value.Alias] = append(json.RawMessage(nil), value.RuntimeValue...)
 	}
+	serverVersions := controller.RuntimeRowVersions()
+	if len(serverVersions) != 1 {
+		return nil, errors.New("Kotlin Android warm-connect server version evidence is incomplete")
+	}
+	var serverVersion string
+	for _, value := range serverVersions {
+		serverVersion = value
+	}
+	if serverVersion != metadata.ServerVersion || !warmConnectExercisesOpaqueToken(serverVersion) {
+		return nil, errors.New("Kotlin Android warm-connect client did not preserve the server-issued opaque version")
+	}
 	rebuildID, err := completedWarmConnectRebuildID(snapshot.result.Events, scope.ScopeID)
 	if err != nil {
 		return nil, err
@@ -394,7 +461,7 @@ func resolveWarmConnectIdentities(controller *blackbox.NativeController, aliases
 		"scope-a-checksum":      *scopeChecksum,
 		"client-a-generation":   *bootstrap.transportObservations[1].RequestFacts.ClientGeneration,
 		"baseline-rebuild":      rebuildID,
-		"row-a-version":         metadata.ServerVersion,
+		"row-a-version":         serverVersion,
 		"scope-set-version-one": warm.transportObservations[0].RequestFacts.ScopeSetVersion,
 	}
 	for alias, value := range generated {
@@ -480,10 +547,10 @@ func validateWarmConnectTransportIdentities(runtime map[string]json.RawMessage, 
 	var scopeSetVersion int64
 	var rebuildID string
 	var schema schemaRef
-	if json.Unmarshal(runtime["client-a-generation"], &generation) != nil || generation <= 0 ||
-		json.Unmarshal(runtime["scope-set-version-one"], &scopeSetVersion) != nil || scopeSetVersion < 0 ||
+	if json.Unmarshal(runtime["client-a-generation"], &generation) != nil || generation <= 0 || generation > warmConnectMaximumSafeInteger ||
+		json.Unmarshal(runtime["scope-set-version-one"], &scopeSetVersion) != nil || scopeSetVersion <= 0 || scopeSetVersion > warmConnectMaximumSafeInteger ||
 		json.Unmarshal(runtime["baseline-rebuild"], &rebuildID) != nil || rebuildID == "" ||
-		json.Unmarshal(runtime["current-schema"], &schema) != nil || schema.Version <= 0 || schema.Hash == "" {
+		json.Unmarshal(runtime["current-schema"], &schema) != nil || schema.Version <= 0 || schema.Version > warmConnectMaximumSafeInteger || schema.Hash == "" {
 		return errors.New("Kotlin Android warm-connect resolved transport identities are invalid")
 	}
 	requests := []*TransportRequestFacts{
@@ -502,6 +569,9 @@ func validateWarmConnectTransportIdentities(runtime map[string]json.RawMessage, 
 			return errors.New("Kotlin Android warm-connect scope-set identity is inconsistent")
 		}
 	}
+	if bootstrap[0].RequestFacts.ScopeSetVersion != nil && *bootstrap[0].RequestFacts.ScopeSetVersion != 0 {
+		return errors.New("Kotlin Android warm-connect fresh scope-set version is invalid")
+	}
 	rebuildFingerprint := cursorFingerprint(rebuildID)
 	if bootstrap[1].RequestFacts.RebuildIDFingerprint == nil || *bootstrap[1].RequestFacts.RebuildIDFingerprint != rebuildFingerprint {
 		return errors.New("Kotlin Android warm-connect rebuild identity is inconsistent")
@@ -515,7 +585,7 @@ func validateWarmConnectTransportIdentities(runtime map[string]json.RawMessage, 
 	rebuild := bootstrap[1].RebuildResponseFacts
 	bootstrapPull := bootstrap[2].PullResponseFacts
 	warmPull := warm[1].PullResponseFacts
-	if rebuild == nil || rebuild.HasMore || rebuild.HasCursor || !rebuild.HasFinalScopeCursor || !rebuild.HasChecksum || rebuild.FinalScopeCursorFingerprint == nil || bootstrapPull == nil || bootstrapPull.HasMore || !bootstrapPull.ScopeCursorFingerprintsComplete || len(bootstrapPull.ScopeCursorFingerprints) != 1 || warmPull == nil || warmPull.HasMore || !warmPull.ScopeCursorFingerprintsComplete || len(warmPull.ScopeCursorFingerprints) != 1 || snapshot.scopeStates[0].Cursor == nil || bootstrap[2].CursorFingerprintsComplete == nil || !*bootstrap[2].CursorFingerprintsComplete || warm[1].CursorFingerprintsComplete == nil || !*warm[1].CursorFingerprintsComplete {
+	if rebuild == nil || rebuild.HasMore || rebuild.HasCursor || !rebuild.HasFinalScopeCursor || !rebuild.HasChecksum || rebuild.FinalScopeCursorFingerprint == nil || bootstrapPull == nil || bootstrapPull.HasMore || !bootstrapPull.ScopeCursorFingerprintsComplete || len(bootstrapPull.ScopeCursorFingerprints) != 1 || warmPull == nil || warmPull.HasMore || !warmPull.ScopeCursorFingerprintsComplete || len(warmPull.ScopeCursorFingerprints) != 1 || snapshot.scopeStates[0].Cursor == nil || !warmConnectExercisesOpaqueToken(*snapshot.scopeStates[0].Cursor) || bootstrap[2].CursorFingerprintsComplete == nil || !*bootstrap[2].CursorFingerprintsComplete || warm[1].CursorFingerprintsComplete == nil || !*warm[1].CursorFingerprintsComplete {
 		return errors.New("Kotlin Android warm-connect cursor identity evidence is incomplete")
 	}
 	if !reflect.DeepEqual(bootstrap[2].CursorFingerprints, []string{*rebuild.FinalScopeCursorFingerprint}) {
@@ -532,6 +602,14 @@ func validateWarmConnectTransportIdentities(runtime map[string]json.RawMessage, 
 		return errors.New("Kotlin Android warm-connect completed rebuild evidence is invalid")
 	}
 	return nil
+}
+
+func warmConnectExercisesOpaqueToken(value string) bool {
+	if value == "" {
+		return false
+	}
+	_, err := strconv.ParseInt(value, 10, 64)
+	return err != nil
 }
 
 func validateWarmConnectState(expected, server scenarios.StateFacts, captures []CaptureFacts, snapshot warmConnectSnapshot, applicationIdentity warmConnectApplicationIdentity, resolutions []blackbox.NativeIdentityResolution) error {

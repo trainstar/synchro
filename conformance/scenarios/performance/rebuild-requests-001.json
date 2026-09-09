@@ -5,28 +5,60 @@
   "title": "First sync uses rebuild semantics performance scenario",
   "description": "The ordered workload proves the authored semantic outcome and performance declaration.",
   "requirement_ids": [
-    "SYNC-REBUILD-003"
+    "SYNC-REBUILD-003",
+    "SYNC-REBUILD-008"
   ],
   "normative_references": [
     {
       "path": "docs/src/content/docs/spec/04-invariants.mdx",
       "anchor": "#first-sync-uses-rebuild-semantics"
+    },
+    {
+      "path": "docs/src/content/docs/spec/04-invariants.mdx",
+      "anchor": "#post-boundary-change-delivery"
     }
   ],
   "proof_types": [
+    "reference-model",
     "server-black-box",
     "native-e2e",
     "negative-control"
   ],
   "proof_obligations": [
     {
+      "obligation_id": "OBL-PERF-REBUILD-REQUESTS-BOUNDARY-RM-001",
+      "requirement_ids": [
+        "SYNC-REBUILD-008"
+      ],
+      "assertion_ids": [
+        "ASSERT-PERF-REBUILD-REQUESTS-BOUNDARY-001"
+      ],
+      "proof_type": "reference-model",
+      "support_cell_id": null,
+      "artifact_inventory_ids": [
+        "ARTDEF-CONFORMANCE-RUNNER-001"
+      ],
+      "performance_budget_ids": [],
+      "required_measurement_ids": [],
+      "required_vector_set_ids": [],
+      "make_target": "test-conformance",
+      "argv": [
+        "make",
+        "test-conformance"
+      ],
+      "fault_plan_id": null,
+      "control_id": null
+    },
+    {
       "obligation_id": "OBL-PERF-REBUILD-REQUESTS-PG-LINUX-X64-001",
       "requirement_ids": [
-        "SYNC-REBUILD-003"
+        "SYNC-REBUILD-003",
+        "SYNC-REBUILD-008"
       ],
       "assertion_ids": [
         "ASSERT-PERF-REBUILD-REQUESTS-SEMANTIC-001",
-        "ASSERT-PERF-REBUILD-REQUESTS-PERFORMANCE-001"
+        "ASSERT-PERF-REBUILD-REQUESTS-PERFORMANCE-001",
+        "ASSERT-PERF-REBUILD-REQUESTS-BOUNDARY-001"
       ],
       "proof_type": "server-black-box",
       "support_cell_id": "SUP-PG-LINUX-X64-001",
@@ -54,10 +86,12 @@
     {
       "obligation_id": "OBL-PERF-REBUILD-REQUESTS-MACOS-CURRENT-001",
       "requirement_ids": [
-        "SYNC-REBUILD-003"
+        "SYNC-REBUILD-003",
+        "SYNC-REBUILD-008"
       ],
       "assertion_ids": [
-        "ASSERT-PERF-REBUILD-REQUESTS-SEMANTIC-001"
+        "ASSERT-PERF-REBUILD-REQUESTS-SEMANTIC-001",
+        "ASSERT-PERF-REBUILD-REQUESTS-BOUNDARY-001"
       ],
       "proof_type": "native-e2e",
       "support_cell_id": "SUP-MACOS-CURRENT-001",
@@ -179,11 +213,13 @@
     {
       "obligation_id": "OBL-PERF-REBUILD-REQUESTS-ANDROID-CURRENT-001",
       "requirement_ids": [
-        "SYNC-REBUILD-003"
+        "SYNC-REBUILD-003",
+        "SYNC-REBUILD-008"
       ],
       "assertion_ids": [
         "ASSERT-PERF-REBUILD-REQUESTS-SEMANTIC-001",
-        "ASSERT-PERF-REBUILD-REQUESTS-PERFORMANCE-001"
+        "ASSERT-PERF-REBUILD-REQUESTS-PERFORMANCE-001",
+        "ASSERT-PERF-REBUILD-REQUESTS-BOUNDARY-001"
       ],
       "proof_type": "native-e2e",
       "support_cell_id": "SUP-ANDROID-CURRENT-001",
@@ -212,11 +248,13 @@
     {
       "obligation_id": "OBL-PERF-REBUILD-REQUESTS-RN-IOS-CURRENT-001",
       "requirement_ids": [
-        "SYNC-REBUILD-003"
+        "SYNC-REBUILD-003",
+        "SYNC-REBUILD-008"
       ],
       "assertion_ids": [
         "ASSERT-PERF-REBUILD-REQUESTS-SEMANTIC-001",
-        "ASSERT-PERF-REBUILD-REQUESTS-PERFORMANCE-001"
+        "ASSERT-PERF-REBUILD-REQUESTS-PERFORMANCE-001",
+        "ASSERT-PERF-REBUILD-REQUESTS-BOUNDARY-001"
       ],
       "proof_type": "native-e2e",
       "support_cell_id": "SUP-RN-IOS-CURRENT-001",
@@ -247,11 +285,13 @@
     {
       "obligation_id": "OBL-PERF-REBUILD-REQUESTS-RN-ANDROID-CURRENT-001",
       "requirement_ids": [
-        "SYNC-REBUILD-003"
+        "SYNC-REBUILD-003",
+        "SYNC-REBUILD-008"
       ],
       "assertion_ids": [
         "ASSERT-PERF-REBUILD-REQUESTS-SEMANTIC-001",
-        "ASSERT-PERF-REBUILD-REQUESTS-PERFORMANCE-001"
+        "ASSERT-PERF-REBUILD-REQUESTS-PERFORMANCE-001",
+        "ASSERT-PERF-REBUILD-REQUESTS-BOUNDARY-001"
       ],
       "proof_type": "native-e2e",
       "support_cell_id": "SUP-RN-ANDROID-CURRENT-001",
@@ -307,6 +347,31 @@
       ],
       "fault_plan_id": "FPL-PERF-REBUILD-REQUESTS-001",
       "control_id": "CTRL-REBUILD-003"
+    },
+    {
+      "obligation_id": "OBL-PERF-REBUILD-REQUESTS-BOUNDARY-CONTROL-001",
+      "requirement_ids": [
+        "SYNC-REBUILD-008"
+      ],
+      "assertion_ids": [
+        "ASSERT-PERF-REBUILD-REQUESTS-BOUNDARY-001"
+      ],
+      "proof_type": "negative-control",
+      "support_cell_id": null,
+      "artifact_inventory_ids": [
+        "ARTDEF-CONFORMANCE-RUNNER-001",
+        "ARTDEF-PG-EXTENSION-001"
+      ],
+      "performance_budget_ids": [],
+      "required_measurement_ids": [],
+      "required_vector_set_ids": [],
+      "make_target": "test-integration-mutants",
+      "argv": [
+        "make",
+        "test-integration-mutants"
+      ],
+      "fault_plan_id": "FPL-PERF-REBUILD-REQUESTS-BOUNDARY-001",
+      "control_id": "CTRL-REBUILD-008"
     }
   ],
   "ownership": [
@@ -413,6 +478,62 @@
       "assertion_id": "ASSERT-PERF-REBUILD-REQUESTS-SEMANTIC-001",
       "proof_type": "negative-control",
       "support_cell_id": null
+    },
+    {
+      "scenario_id": "SCN-PERF-REBUILD-REQUESTS-001",
+      "requirement_id": "SYNC-REBUILD-008",
+      "proof_obligation_id": "OBL-PERF-REBUILD-REQUESTS-BOUNDARY-CONTROL-001",
+      "assertion_id": "ASSERT-PERF-REBUILD-REQUESTS-BOUNDARY-001",
+      "proof_type": "negative-control",
+      "support_cell_id": null
+    },
+    {
+      "scenario_id": "SCN-PERF-REBUILD-REQUESTS-001",
+      "requirement_id": "SYNC-REBUILD-008",
+      "proof_obligation_id": "OBL-PERF-REBUILD-REQUESTS-BOUNDARY-RM-001",
+      "assertion_id": "ASSERT-PERF-REBUILD-REQUESTS-BOUNDARY-001",
+      "proof_type": "reference-model",
+      "support_cell_id": null
+    },
+    {
+      "scenario_id": "SCN-PERF-REBUILD-REQUESTS-001",
+      "requirement_id": "SYNC-REBUILD-008",
+      "proof_obligation_id": "OBL-PERF-REBUILD-REQUESTS-PG-LINUX-X64-001",
+      "assertion_id": "ASSERT-PERF-REBUILD-REQUESTS-BOUNDARY-001",
+      "proof_type": "server-black-box",
+      "support_cell_id": "SUP-PG-LINUX-X64-001"
+    },
+    {
+      "scenario_id": "SCN-PERF-REBUILD-REQUESTS-001",
+      "requirement_id": "SYNC-REBUILD-008",
+      "proof_obligation_id": "OBL-PERF-REBUILD-REQUESTS-MACOS-CURRENT-001",
+      "assertion_id": "ASSERT-PERF-REBUILD-REQUESTS-BOUNDARY-001",
+      "proof_type": "native-e2e",
+      "support_cell_id": "SUP-MACOS-CURRENT-001"
+    },
+    {
+      "scenario_id": "SCN-PERF-REBUILD-REQUESTS-001",
+      "requirement_id": "SYNC-REBUILD-008",
+      "proof_obligation_id": "OBL-PERF-REBUILD-REQUESTS-ANDROID-CURRENT-001",
+      "assertion_id": "ASSERT-PERF-REBUILD-REQUESTS-BOUNDARY-001",
+      "proof_type": "native-e2e",
+      "support_cell_id": "SUP-ANDROID-CURRENT-001"
+    },
+    {
+      "scenario_id": "SCN-PERF-REBUILD-REQUESTS-001",
+      "requirement_id": "SYNC-REBUILD-008",
+      "proof_obligation_id": "OBL-PERF-REBUILD-REQUESTS-RN-IOS-CURRENT-001",
+      "assertion_id": "ASSERT-PERF-REBUILD-REQUESTS-BOUNDARY-001",
+      "proof_type": "native-e2e",
+      "support_cell_id": "SUP-RN-IOS-CURRENT-001"
+    },
+    {
+      "scenario_id": "SCN-PERF-REBUILD-REQUESTS-001",
+      "requirement_id": "SYNC-REBUILD-008",
+      "proof_obligation_id": "OBL-PERF-REBUILD-REQUESTS-RN-ANDROID-CURRENT-001",
+      "assertion_id": "ASSERT-PERF-REBUILD-REQUESTS-BOUNDARY-001",
+      "proof_type": "native-e2e",
+      "support_cell_id": "SUP-RN-ANDROID-CURRENT-001"
     }
   ],
   "model": {
@@ -767,6 +888,25 @@
           "defect": "use incremental resume or install unverified rows instead of authenticated snapshot-bound rebuild"
         }
       }
+    },
+    {
+      "id": "FPL-PERF-REBUILD-REQUESTS-BOUNDARY-001",
+      "requirement_id": "SYNC-REBUILD-008",
+      "fault_id": "FAULT-REBUILD-008",
+      "control_id": "CTRL-REBUILD-008",
+      "barrier_id": "BAR-PERF-REBUILD-REQUESTS-CONTROL-001",
+      "expected_assertion_ids": [
+        "ASSERT-PERF-REBUILD-REQUESTS-BOUNDARY-001"
+      ],
+      "injection": {
+        "mechanism": "source-mutant",
+        "target": "rebuild boundary candidate filter and post-final incremental pull",
+        "operator": "replace",
+        "parameters": {
+          "scenario": "write, delete, and change membership after boundary B before final cursor acknowledgement",
+          "defect": "include post-boundary effects in the snapshot or omit them from subsequent incremental delivery"
+        }
+      }
     }
   ],
   "replay": {
@@ -789,6 +929,17 @@
       ],
       "detected_by": [
         "ASSERT-PERF-REBUILD-REQUESTS-SEMANTIC-001"
+      ]
+    },
+    {
+      "control_id": "CTRL-REBUILD-008",
+      "requirement_id": "SYNC-REBUILD-008",
+      "fault_id": "FAULT-REBUILD-008",
+      "subject_artifact_inventory_ids": [
+        "ARTDEF-PG-EXTENSION-001"
+      ],
+      "detected_by": [
+        "ASSERT-PERF-REBUILD-REQUESTS-BOUNDARY-001"
       ]
     }
   ],
@@ -1338,6 +1489,29 @@
         "observed_source": "system-under-test"
       },
       "detects_control_ids": []
+    },
+    {
+      "id": "ASSERT-PERF-REBUILD-REQUESTS-BOUNDARY-001",
+      "requirement_ids": [
+        "SYNC-REBUILD-008"
+      ],
+      "description": "The rebuild-boundary control detects a post-boundary effect in the snapshot or missing from incremental delivery.",
+      "expectation_ids": [
+        "EXPECT-PERF-REBUILD-REQUESTS-SEMANTIC-001"
+      ],
+      "predicate": {
+        "contract_predicate": "wire-outcome",
+        "name": "canonical-wire-outcome",
+        "payload": {}
+      },
+      "oracle": {
+        "kind": "wire-contract",
+        "expected_source": "authored-model",
+        "observed_source": "system-under-test"
+      },
+      "detects_control_ids": [
+        "CTRL-REBUILD-008"
+      ]
     }
   ]
 }

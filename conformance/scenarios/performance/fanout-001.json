@@ -5,18 +5,20 @@
   "title": "Deterministic scope function contract performance scenario",
   "description": "The ordered workload proves the authored semantic outcome and performance declaration.",
   "requirement_ids": [
-    "SYNC-SCOPE-004"
+    "SYNC-SCOPE-004",
+    "SYNC-REGISTRY-001",
+    "SYNC-REGISTRY-002"
   ],
   "normative_references": [
-    {
-      "path": "docs/src/content/docs/spec/04-invariants.mdx",
-      "anchor": "#deterministic-scope-function-contract"
-    }
+    {"path":"docs/src/content/docs/spec/04-invariants.mdx","anchor":"#deterministic-scope-function-contract"},
+    {"path":"docs/src/content/docs/spec/04-invariants.mdx","anchor":"#qualified-registered-relation-identity"},
+    {"path":"docs/src/content/docs/spec/04-invariants.mdx","anchor":"#registered-key-and-replica-identity"}
   ],
   "proof_types": [
     "reference-model",
     "server-black-box",
-    "negative-control"
+    "negative-control",
+    "fault-injection"
   ],
   "proof_obligations": [
     {
@@ -95,7 +97,12 @@
       ],
       "fault_plan_id": "FPL-PERF-FANOUT-001",
       "control_id": "CTRL-SCOPE-004"
-    }
+    },
+    {"obligation_id":"OBL-PERF-FANOUT-REGISTRY-001-PG-LINUX-X64-001","requirement_ids":["SYNC-REGISTRY-001"],"assertion_ids":["ASSERT-PERF-FANOUT-REGISTRY-001"],"proof_type":"server-black-box","support_cell_id":"SUP-PG-LINUX-X64-001","artifact_inventory_ids":["ARTDEF-PG-EXTENSION-001","ARTDEF-ADAPTER-001"],"performance_budget_ids":[],"required_measurement_ids":[],"required_vector_set_ids":[],"make_target":"test-blackbox","argv":["make","test-blackbox"],"fault_plan_id":null,"control_id":null},
+    {"obligation_id":"OBL-PERF-FANOUT-REGISTRY-001-FAULT-001","requirement_ids":["SYNC-REGISTRY-001"],"assertion_ids":["ASSERT-PERF-FANOUT-REGISTRY-001"],"proof_type":"fault-injection","support_cell_id":"SUP-PG-LINUX-X64-001","artifact_inventory_ids":["ARTDEF-PG-EXTENSION-001","ARTDEF-ADAPTER-001"],"performance_budget_ids":[],"required_measurement_ids":[],"required_vector_set_ids":[],"make_target":"test-blackbox","argv":["make","test-blackbox"],"fault_plan_id":"FPL-PERF-FANOUT-REGISTRY-001","control_id":"CTRL-REGISTRY-001"},
+    {"obligation_id":"OBL-PERF-FANOUT-REGISTRY-001-CONTROL-001","requirement_ids":["SYNC-REGISTRY-001"],"assertion_ids":["ASSERT-PERF-FANOUT-REGISTRY-001"],"proof_type":"negative-control","support_cell_id":null,"artifact_inventory_ids":["ARTDEF-CONFORMANCE-RUNNER-001","ARTDEF-PG-EXTENSION-001"],"performance_budget_ids":[],"required_measurement_ids":[],"required_vector_set_ids":[],"make_target":"test-conformance","argv":["make","test-conformance"],"fault_plan_id":"FPL-PERF-FANOUT-REGISTRY-001","control_id":"CTRL-REGISTRY-001"},
+    {"obligation_id":"OBL-PERF-FANOUT-REGISTRY-002-PG-LINUX-X64-001","requirement_ids":["SYNC-REGISTRY-002"],"assertion_ids":["ASSERT-PERF-FANOUT-REGISTRY-002"],"proof_type":"server-black-box","support_cell_id":"SUP-PG-LINUX-X64-001","artifact_inventory_ids":["ARTDEF-PG-EXTENSION-001","ARTDEF-ADAPTER-001"],"performance_budget_ids":[],"required_measurement_ids":[],"required_vector_set_ids":[],"make_target":"test-blackbox","argv":["make","test-blackbox"],"fault_plan_id":null,"control_id":null},
+    {"obligation_id":"OBL-PERF-FANOUT-REGISTRY-002-CONTROL-001","requirement_ids":["SYNC-REGISTRY-002"],"assertion_ids":["ASSERT-PERF-FANOUT-REGISTRY-002"],"proof_type":"negative-control","support_cell_id":null,"artifact_inventory_ids":["ARTDEF-CONFORMANCE-RUNNER-001","ARTDEF-PG-EXTENSION-001"],"performance_budget_ids":[],"required_measurement_ids":[],"required_vector_set_ids":[],"make_target":"test-conformance","argv":["make","test-conformance"],"fault_plan_id":"FPL-PERF-FANOUT-REGISTRY-002","control_id":"CTRL-REGISTRY-002"}
   ],
   "ownership": [
     {
@@ -129,7 +136,12 @@
       "assertion_id": "ASSERT-PERF-FANOUT-SEMANTIC-001",
       "proof_type": "negative-control",
       "support_cell_id": null
-    }
+    },
+    {"scenario_id":"SCN-PERF-FANOUT-001","requirement_id":"SYNC-REGISTRY-001","proof_obligation_id":"OBL-PERF-FANOUT-REGISTRY-001-PG-LINUX-X64-001","assertion_id":"ASSERT-PERF-FANOUT-REGISTRY-001","proof_type":"server-black-box","support_cell_id":"SUP-PG-LINUX-X64-001"},
+    {"scenario_id":"SCN-PERF-FANOUT-001","requirement_id":"SYNC-REGISTRY-001","proof_obligation_id":"OBL-PERF-FANOUT-REGISTRY-001-FAULT-001","assertion_id":"ASSERT-PERF-FANOUT-REGISTRY-001","proof_type":"fault-injection","support_cell_id":"SUP-PG-LINUX-X64-001"},
+    {"scenario_id":"SCN-PERF-FANOUT-001","requirement_id":"SYNC-REGISTRY-001","proof_obligation_id":"OBL-PERF-FANOUT-REGISTRY-001-CONTROL-001","assertion_id":"ASSERT-PERF-FANOUT-REGISTRY-001","proof_type":"negative-control","support_cell_id":null},
+    {"scenario_id":"SCN-PERF-FANOUT-001","requirement_id":"SYNC-REGISTRY-002","proof_obligation_id":"OBL-PERF-FANOUT-REGISTRY-002-PG-LINUX-X64-001","assertion_id":"ASSERT-PERF-FANOUT-REGISTRY-002","proof_type":"server-black-box","support_cell_id":"SUP-PG-LINUX-X64-001"},
+    {"scenario_id":"SCN-PERF-FANOUT-001","requirement_id":"SYNC-REGISTRY-002","proof_obligation_id":"OBL-PERF-FANOUT-REGISTRY-002-CONTROL-001","assertion_id":"ASSERT-PERF-FANOUT-REGISTRY-002","proof_type":"negative-control","support_cell_id":null}
   ],
   "model": {
     "setup": [
@@ -441,7 +453,9 @@
           "defect": "activate it despite a signature or restriction violation"
         }
       }
-    }
+    },
+    {"id":"FPL-PERF-FANOUT-REGISTRY-001","requirement_id":"SYNC-REGISTRY-001","fault_id":"FAULT-REGISTRY-001","control_id":"CTRL-REGISTRY-001","barrier_id":"BAR-PERF-FANOUT-CONTROL-001","expected_assertion_ids":["ASSERT-PERF-FANOUT-REGISTRY-001"],"injection":{"mechanism":"source-mutant","target":"registry and hydration relation lookup","operator":"replace","parameters":{"scenario":"place same-named tables in two schemas and replace the registered relation OID","defect":"resolve by bare name or search_path and automatically rebind after OID drift"}}},
+    {"id":"FPL-PERF-FANOUT-REGISTRY-002","requirement_id":"SYNC-REGISTRY-002","fault_id":"FAULT-REGISTRY-002","control_id":"CTRL-REGISTRY-002","barrier_id":"BAR-PERF-FANOUT-CONTROL-001","expected_assertion_ids":["ASSERT-PERF-FANOUT-REGISTRY-002"],"injection":{"mechanism":"infrastructure-fault","target":"registered relation key and replica identity metadata","operator":"corrupt","parameters":{"scenario":"register a composite, nullable, nonportable, or non-default-replica-identity key and attempt a key update","defect":"leave the relation active or apply the key-changing DML after fence and row effects begin"}}}
   ],
   "replay": {
     "mode": "deterministic",
@@ -459,7 +473,9 @@
       "detected_by": [
         "ASSERT-PERF-FANOUT-SEMANTIC-001"
       ]
-    }
+    },
+    {"control_id":"CTRL-REGISTRY-001","requirement_id":"SYNC-REGISTRY-001","fault_id":"FAULT-REGISTRY-001","subject_artifact_inventory_ids":["ARTDEF-PG-EXTENSION-001"],"detected_by":["ASSERT-PERF-FANOUT-REGISTRY-001"]},
+    {"control_id":"CTRL-REGISTRY-002","requirement_id":"SYNC-REGISTRY-002","fault_id":"FAULT-REGISTRY-002","subject_artifact_inventory_ids":["ARTDEF-PG-EXTENSION-001"],"detected_by":["ASSERT-PERF-FANOUT-REGISTRY-002"]}
   ],
   "steps": [
     {
@@ -832,6 +848,8 @@
         "observed_source": "system-under-test"
       },
       "detects_control_ids": []
-    }
+    },
+    {"id":"ASSERT-PERF-FANOUT-REGISTRY-001","requirement_ids":["SYNC-REGISTRY-001"],"description":"Registered relations retain qualified physical identity and fail closed on OID drift.","expectation_ids":["EXPECT-PERF-FANOUT-SEMANTIC-001"],"predicate":{"contract_predicate":"state-equality","name":"state-equals-authored-model","payload":{}},"oracle":{"kind":"model-state-equality","expected_source":"authored-model","observed_source":"system-under-test"},"detects_control_ids":["CTRL-REGISTRY-001"]},
+    {"id":"ASSERT-PERF-FANOUT-REGISTRY-002","requirement_ids":["SYNC-REGISTRY-002"],"description":"Invalid registered keys and primary-key changes fail before durable effects.","expectation_ids":["EXPECT-PERF-FANOUT-SEMANTIC-001"],"predicate":{"contract_predicate":"state-equality","name":"state-equals-authored-model","payload":{}},"oracle":{"kind":"model-state-equality","expected_source":"authored-model","observed_source":"system-under-test"},"detects_control_ids":["CTRL-REGISTRY-002"]}
   ]
 }

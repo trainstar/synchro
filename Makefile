@@ -24,6 +24,7 @@
 	test-vectors \
 	test-reference \
 	test-conformance-faults \
+	test-invariants \
 	test-conformance-invariants \
 	soak \
 	test-local-postgres \
@@ -40,11 +41,16 @@
 	conformance-adapter-artifact \
 	conformance-pg18-extension-artifact \
 	conformance-pg18-extension-test-artifact \
+	rc-stage-server-artifacts \
+	rc-stage-artifacts \
+	rc-verify-artifacts \
+	rc-run-support-cell \
 	test-evidence \
 	coverage-report \
 	test-inventory \
 	test-conformance \
 	test-blackbox \
+	test-rc-artifacts \
 	rc-check-pg18 \
 	evidence \
 	lint-go \
@@ -233,6 +239,11 @@ PHASE_5_INPUT ?= $(CURDIR)/dist/verification/phase-5-input.json
 PACKAGED_SMOKE_EVIDENCE ?= $(CURDIR)/dist/verification/packaged-smoke-summary.json
 PACKAGED_SMOKE_CELL_DIR ?= $(CURDIR)/dist/verification/packaged-smoke-cells
 PACKAGED_SMOKE_TMP_ROOT ?= $(CURDIR)/.ignore/r2/tmp
+RC_CANDIDATE_ID ?=
+RC_CANDIDATE_DIR ?= $(CURDIR)/dist/verification/$(RC_CANDIDATE_ID)
+RC_SERVER_ARTIFACT_DIR ?= $(CURDIR)/dist/rc-server-artifacts/$(RC_CANDIDATE_ID)
+RC_ENV_FILE ?= $(CURDIR)/.ignore/r2/cf-secrets
+RC_STAGED_ARTIFACTS ?= 0
 
 TEST_ENV = \
 	TEST_DATABASE_URL="$(ADAPTER_TEST_URL)" \
@@ -434,8 +445,11 @@ test-reference:
 test-conformance-faults:
 	cd conformance && GOFLAGS= GOWORK=off go run ./cmd/testresult suite -- go test -json ./barriers ./faults -count=1
 
-test-conformance-invariants:
-	cd conformance && GOFLAGS= GOWORK=off go run ./cmd/testresult suite -- go test -json ./invariants ./soak -count=1
+test-invariants:
+	cd conformance && GOFLAGS= GOWORK=off go run ./cmd/testresult suite -- go test -json ./invariants -count=1
+
+test-conformance-invariants: test-invariants
+	cd conformance && GOFLAGS= GOWORK=off go run ./cmd/testresult suite -- go test -json ./soak -count=1
 
 soak:
 	@$(WARM_CONNECT_ENV) \
@@ -465,7 +479,10 @@ test-blackbox-configured-bounds: conformance-mod-download test-blackbox-harness
 test-blackbox-mutation-control:
 	@test -n "$(MUTATION_CONTROL_TEST)" || { echo "MUTATION_CONTROL_TEST is required" >&2; exit 1; }
 	@case "$(MUTATION_CONTROL_TEST)" in \
-		TestRealMutationControlCursorAdvancement|TestRealMutationControlWALAcknowledgement|TestRealMutationControlMutationConservation|TestRealMutationControlChecksumCorrectness|TestRealMutationControlScopeIsolation|TestRealMutationControlProgressOrder) ;; \
+		TestRealMutationControlCursorAdvancement|TestRealMutationControlWALAcknowledgement|TestRealMutationControlMutationConservation|TestRealMutationControlChecksumCorrectness|TestRealMutationControlScopeIsolation|TestRealMutationControlProgressOrder|TestRealS02DivergentPullPaginationIsStarvationFree|\
+		TestRealIssue49ConnectRejectsFreshReuseAndInvalidEnvelopeValues|TestRealIssue49SemanticVersionPrecedence|TestRealIssue49PortableIntegerBoundariesAndCounterOverflow|TestRealIssue49MutationLifecycleVersionsVocabularyAndCrossBatchReplay|TestRealIssue49PortableSeedScopeContinuationAndTokenBindings|TestRealIssue49ConcurrentUpdateDeletePreservesOneAuthoritativeWinner|TestRealIssue49RebuildReplayEpochAndMonotonicCursor|TestRealIssue49PublishedSchemaIdentityIsImmutable|\
+		TestRealIssue49SecurityAdapterAuthorityAndScopeBoundary|TestRealIssue49SecurityRegistryIdentityAndKeys|TestRealIssue49SecurityCaptureHealthFailsClosed|TestRealIssue49SecurityDatabaseAuthority|TestRealIssue49SecurityOperationalRedaction|TestRealIssue49SecurityInstallationAuthority|\
+		TestRealIssue49WALIsTheOnlyAtomicPublicationPath|TestRealIssue49WALPoisonBlocksContiguousProgress|TestRealIssue49ResetLifecycleAndFenceCoverage|TestRealIssue49FenceCorrelationAndCapturePending|TestRealIssue49CompletePullVisibleWALRepresentation|TestRealIssue49CaptureReadinessRequiresEveryCheck|TestRealIssue49FenceCorrelatesOldRecordIdentity|TestRealIssue49FenceCorrelatesCaptureKeys|TestRealIssue49ResetCoversEveryFenceOperation|TestRealIssue49MembershipBackfillRetainsContinuationAcrossWorkerLoss) ;; \
 		*) echo "MUTATION_CONTROL_TEST is not a supported mutation control" >&2; exit 1 ;; \
 	esac
 	@case "$(MUTATION_CONTROL_EXPECT)" in \
@@ -635,11 +652,103 @@ test-inventory:
 test-blackbox: conformance-mod-download test-blackbox-harness test-blackbox-components
 	cd conformance && GOFLAGS= GOWORK=off go run ./cmd/testresult suite -- go test -json ./blackbox/integration -count=$(BLACKBOX_TEST_COUNT) -args --provision --install
 
-test-conformance: conformance-mod-download test-conformance-testresult test-conformance-imports test-conformance-contract test-conformance-drivers test-conformance-scenarios check-conformance-catalog test-vectors test-reference test-conformance-faults test-conformance-invariants test-blackbox-harness test-evidence test-inventory
+test-conformance: conformance-mod-download test-conformance-testresult test-conformance-imports test-conformance-contract test-conformance-drivers test-conformance-scenarios check-conformance-catalog test-vectors test-reference test-conformance-faults test-invariants test-conformance-invariants test-blackbox-harness test-evidence test-inventory
 
-rc-check-pg18:
-	@echo "$@ is unavailable until its required verification phase is implemented; release promotion is blocked." >&2
-	@exit 1
+rc-stage-server-artifacts:
+	@test -n "$(RC_CANDIDATE_ID)" || { echo "RC_CANDIDATE_ID is required" >&2; exit 1; }
+	@python3 scripts/rc-artifacts.py validate-id --candidate-id "$(RC_CANDIDATE_ID)"
+	@set -eu; \
+		test "$$(uname -s)" = Linux && test "$$(uname -m)" = x86_64 || { echo "RC server artifacts require linux-x64" >&2; exit 1; }; \
+		test -z "$$(git status --porcelain --untracked-files=normal)" || { echo "RC staging requires a clean worktree" >&2; exit 1; }; \
+		revision="$$(git rev-parse --verify HEAD)"; \
+		final="$(abspath $(RC_SERVER_ARTIFACT_DIR))"; \
+		stage="$$final.tmp.$$$$"; \
+		trap 'rm -rf "$$stage"' EXIT HUP INT TERM; \
+		test ! -e "$$final" || { echo "server artifacts already exist: $$final" >&2; exit 1; }; \
+		mkdir -p "$$stage"; \
+		$(MAKE) --no-print-directory conformance-adapter-artifact CONFORMANCE_ADAPTER_ARTIFACT_DIR="$$stage/adapter"; \
+		$(MAKE) --no-print-directory conformance-pg18-extension-artifact CONFORMANCE_EXTENSION_ARTIFACT="$$stage/extension"; \
+		python3 scripts/rc-artifacts.py archive-extension --source "$$stage/extension" --output "$$stage/synchro-pg-pg18-linux-x64.tar.gz"; \
+		test -z "$$(git status --porcelain --untracked-files=normal)" && test "$$(git rev-parse --verify HEAD)" = "$$revision" || { echo "source changed during RC server staging" >&2; exit 1; }; \
+		printf '%s\n' "$$revision" > "$$stage/source-commit"; \
+		mkdir -p "$$(dirname "$$final")"; \
+		mv "$$stage" "$$final"; \
+		trap - EXIT HUP INT TERM
+
+rc-stage-artifacts:
+	@test -n "$(RC_CANDIDATE_ID)" || { echo "RC_CANDIDATE_ID is required" >&2; exit 1; }
+	@python3 scripts/rc-artifacts.py validate-id --candidate-id "$(RC_CANDIDATE_ID)"
+	@set -eu; \
+		test -z "$$(git status --porcelain --untracked-files=normal)" || { echo "RC staging requires a clean worktree" >&2; exit 1; }; \
+		revision="$$(git rev-parse --verify HEAD)"; \
+		server="$(abspath $(RC_SERVER_ARTIFACT_DIR))"; \
+		final="$(abspath $(RC_CANDIDATE_DIR))"; \
+		work="$$final.tmp.$$$$"; \
+		stage="$$work/$(RC_CANDIDATE_ID)"; \
+		trap 'rm -rf "$$work"' EXIT HUP INT TERM; \
+		test -d "$$server/adapter" && test -d "$$server/extension" && test -f "$$server/synchro-pg-pg18-linux-x64.tar.gz" || { echo "complete staged server artifacts are required: $$server" >&2; exit 1; }; \
+		test "$$(cat "$$server/source-commit")" = "$$revision" || { echo "server artifacts do not match the candidate source commit" >&2; exit 1; }; \
+		test ! -e "$$final" || { echo "candidate already exists: $$final" >&2; exit 1; }; \
+		mkdir -p "$$stage/artifacts"; \
+		cp -R "$$server/adapter" "$$server/extension" "$$stage/artifacts/"; \
+		cp "$$server/synchro-pg-pg18-linux-x64.tar.gz" "$$stage/artifacts/"; \
+		$(MAKE) --no-print-directory client-consumer-artifacts CLIENT_ARTIFACT_DIR="$$stage/artifacts/clients"; \
+		test -z "$$(git status --porcelain --untracked-files=normal)" && test "$$(git rev-parse --verify HEAD)" = "$$revision" || { echo "source changed during RC staging" >&2; exit 1; }; \
+		python3 scripts/rc-artifacts.py seal --candidate-dir "$$stage" --candidate-id "$(RC_CANDIDATE_ID)" --source-commit "$$revision"; \
+		mkdir -p "$$(dirname "$$final")"; \
+		mv "$$stage" "$$final"; \
+		rmdir "$$work"; \
+		trap - EXIT HUP INT TERM
+
+rc-verify-artifacts:
+	@test -n "$(RC_CANDIDATE_ID)" || { echo "RC_CANDIDATE_ID is required" >&2; exit 1; }
+	@test -z "$$(git status --porcelain --untracked-files=normal)" || { echo "RC verification requires a clean worktree" >&2; exit 1; }
+	@python3 scripts/rc-artifacts.py verify --candidate-dir "$(abspath $(RC_CANDIDATE_DIR))" --candidate-id "$(RC_CANDIDATE_ID)" --source-commit "$$(git rev-parse --verify HEAD)"
+
+rc-run-support-cell: rc-verify-artifacts
+	@test -n "$(SUPPORT_CELL_ID)" || { echo "SUPPORT_CELL_ID is required" >&2; exit 1; }
+	@python3 scripts/rc-artifacts.py run-verified \
+		--candidate-dir "$(abspath $(RC_CANDIDATE_DIR))" --candidate-id "$(RC_CANDIDATE_ID)" \
+		--source-commit "$$(git rev-parse --verify HEAD)" -- $(MAKE) --no-print-directory test-client-platforms \
+		SUPPORT_CELL_ID="$(SUPPORT_CELL_ID)" SUPPORT_PLATFORM_VERSION="$(SUPPORT_PLATFORM_VERSION)" \
+		CLIENT_ARTIFACT_DIR="$(abspath $(RC_CANDIDATE_DIR))/artifacts/clients" \
+		CONFORMANCE_ADAPTER_ARTIFACT_DIR="$(abspath $(RC_CANDIDATE_DIR))/artifacts/adapter" \
+		CONFORMANCE_EXTENSION_ARTIFACT="$(abspath $(RC_CANDIDATE_DIR))/artifacts/extension" \
+		PACKAGED_SMOKE_CELL_DIR="$(abspath $(RC_CANDIDATE_DIR))/evidence/cells" \
+		RC_CANDIDATE_DIR="$(abspath $(RC_CANDIDATE_DIR))" RC_CANDIDATE_ID="$(RC_CANDIDATE_ID)" RC_STAGED_ARTIFACTS=1
+	@$(MAKE) --no-print-directory rc-verify-artifacts RC_CANDIDATE_ID="$(RC_CANDIDATE_ID)" RC_CANDIDATE_DIR="$(abspath $(RC_CANDIDATE_DIR))"
+
+test-rc-artifacts:
+	@PYTHONPYCACHEPREFIX="$(PACKAGED_SMOKE_TMP_ROOT)/python-cache" python3 -m unittest scripts.ci.test_rc_artifacts
+
+rc-check-pg18: test-rc-artifacts rc-verify-artifacts
+	@test -r "$(RC_ENV_FILE)" || { echo "RC_ENV_FILE is required: $(RC_ENV_FILE)" >&2; exit 1; }
+	@set -eu; \
+		candidate="$(abspath $(RC_CANDIDATE_DIR))"; \
+		tmp="$$(mktemp -d "$${TMPDIR:-/tmp}/synchro-rc-pg18.XXXXXX")"; \
+		trap 'rm -rf "$$tmp"' EXIT HUP INT TERM; \
+		tar -xzf "$$candidate/artifacts/synchro-pg-pg18-linux-x64.tar.gz" -C "$$tmp"; \
+		set -a; . "$(RC_ENV_FILE)"; set +a; \
+		SYNCHRO_CONFORMANCE_EXTENSION_ARTIFACT="$$tmp/extension" \
+		SYNCHRO_CONFORMANCE_ADAPTER_ARTIFACT="$$candidate/artifacts/adapter/synchrod-pg" \
+		PYTHONPYCACHEPREFIX="$(PACKAGED_SMOKE_TMP_ROOT)/python-cache" \
+		python3 scripts/ci/capture-gate-result.py \
+			--gate rc-check-pg18 --output "$$candidate/evidence/rc-check-pg18.json" -- \
+			python3 scripts/rc-artifacts.py run-verified \
+				--candidate-dir "$$candidate" --candidate-id "$(RC_CANDIDATE_ID)" \
+				--source-commit "$$(git rev-parse --verify HEAD)" -- \
+				$(MAKE) --no-print-directory test-blackbox; \
+		python3 scripts/rc-artifacts.py verify --candidate-dir "$$candidate" --candidate-id "$(RC_CANDIDATE_ID)" --source-commit "$$(git rev-parse --verify HEAD)"; \
+		$(MAKE) --no-print-directory test-packaged-smoke \
+			PACKAGED_SMOKE_CELL_DIR="$$candidate/evidence/cells" \
+			PACKAGED_SMOKE_EVIDENCE="$$candidate/evidence/packaged-smoke-summary.json"; \
+		python3 scripts/rc-artifacts.py manifest \
+			--candidate-dir "$$candidate" --candidate-id "$(RC_CANDIDATE_ID)" \
+			--source-commit "$$(git rev-parse --verify HEAD)" \
+			--cells-dir "$$candidate/evidence/cells" \
+			--smoke-summary "$$candidate/evidence/packaged-smoke-summary.json" \
+			--pg-receipt "$$candidate/evidence/rc-check-pg18.json"; \
+		python3 scripts/rc-artifacts.py verify --candidate-dir "$$candidate" --candidate-id "$(RC_CANDIDATE_ID)" --source-commit "$$(git rev-parse --verify HEAD)"
 
 evidence:
 	@test -f "$(PHASE_5_INPUT)" || (echo "PHASE_5_INPUT is required: $(PHASE_5_INPUT)" >&2; exit 1)
@@ -1287,6 +1396,7 @@ release-npm-dry-run: version-check
 
 client-consumer-apple-artifact: version-check release-pods-check
 	@set -eu; \
+		if [ "$(RC_STAGED_ARTIFACTS)" = 1 ]; then python3 scripts/rc-artifacts.py verify --candidate-dir "$(abspath $(RC_CANDIDATE_DIR))" --candidate-id "$(RC_CANDIDATE_ID)"; exit 0; fi; \
 		final="$(abspath $(CLIENT_ARTIFACT_DIR))/apple"; \
 		stage="$$final.tmp.$$$$"; \
 		cleanup() { rm -rf "$$stage"; }; \
@@ -1304,9 +1414,10 @@ client-consumer-apple-artifact: version-check release-pods-check
 		trap - EXIT HUP INT TERM
 
 client-consumer-kotlin-artifact: version-check
-	@test -n "$(ANDROID_JAVA_HOME)" || (echo "Android builds require JDK 17. Set ANDROID_JAVA_HOME to a JDK 17 install."; exit 1)
-	@test -d "$(ANDROID_HOME)" || (echo "Android SDK not found at $(ANDROID_HOME). Set ANDROID_HOME to a valid SDK install."; exit 1)
 	@set -eu; \
+		if [ "$(RC_STAGED_ARTIFACTS)" = 1 ]; then python3 scripts/rc-artifacts.py verify --candidate-dir "$(abspath $(RC_CANDIDATE_DIR))" --candidate-id "$(RC_CANDIDATE_ID)"; exit 0; fi; \
+		test -n "$(ANDROID_JAVA_HOME)" || { echo "Android builds require JDK 17. Set ANDROID_JAVA_HOME to a JDK 17 install."; exit 1; }; \
+		test -d "$(ANDROID_HOME)" || { echo "Android SDK not found at $(ANDROID_HOME). Set ANDROID_HOME to a valid SDK install."; exit 1; }; \
 		final="$(abspath $(CLIENT_ARTIFACT_DIR))/maven"; \
 		stage="$$final.tmp.$$$$"; \
 		cleanup() { rm -rf "$$stage"; }; \
@@ -1326,6 +1437,7 @@ client-consumer-kotlin-artifact: version-check
 
 client-consumer-rn-artifact: version-check
 	@set -eu; \
+		if [ "$(RC_STAGED_ARTIFACTS)" = 1 ]; then python3 scripts/rc-artifacts.py verify --candidate-dir "$(abspath $(RC_CANDIDATE_DIR))" --candidate-id "$(RC_CANDIDATE_ID)"; exit 0; fi; \
 		final="$(abspath $(CLIENT_ARTIFACT_DIR))/npm"; \
 		stage="$$final.tmp.$$$$"; \
 		cleanup() { rm -rf "$$stage"; }; \

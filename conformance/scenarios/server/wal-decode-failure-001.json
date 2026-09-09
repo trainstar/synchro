@@ -5,12 +5,32 @@
   "title": "WAL decode poison blocks and repairs in commit order",
   "description": "A decode failure creates durable redacted quarantine until the same source transaction repairs and unblocks the contiguous prefix.",
   "requirement_ids": [
-    "SYNC-WAL-006"
+    "SYNC-WAL-005",
+    "SYNC-WAL-006",
+    "SYNC-WAL-008",
+    "SYNC-WAL-010",
+    "SYNC-WAL-011"
   ],
   "normative_references": [
     {
       "path": "docs/src/content/docs/spec/04-invariants.mdx",
+      "anchor": "#contiguous-wal-acknowledgement"
+    },
+    {
+      "path": "docs/src/content/docs/spec/04-invariants.mdx",
       "anchor": "#blocking-poison-quarantine"
+    },
+    {
+      "path": "docs/src/content/docs/spec/04-invariants.mdx",
+      "anchor": "#capture-readiness"
+    },
+    {
+      "path": "docs/src/content/docs/spec/04-invariants.mdx",
+      "anchor": "#durable-reset-slot-lifecycle"
+    },
+    {
+      "path": "docs/src/content/docs/spec/04-invariants.mdx",
+      "anchor": "#reset-baseline-fence-coverage"
     }
   ],
   "proof_types": [
@@ -93,6 +113,186 @@
       ],
       "fault_plan_id": "FPL-WAL-DECODE-001",
       "control_id": "CTRL-WAL-006"
+    },
+    {
+      "obligation_id": "OBL-WAL-ACK-PG-LINUX-X64-001",
+      "requirement_ids": ["SYNC-WAL-005"],
+      "assertion_ids": ["ASSERT-WAL-ACK-SEMANTIC-001"],
+      "proof_type": "server-black-box",
+      "support_cell_id": "SUP-PG-LINUX-X64-001",
+      "artifact_inventory_ids": ["ARTDEF-PG-EXTENSION-001", "ARTDEF-ADAPTER-001"],
+      "performance_budget_ids": [],
+      "required_measurement_ids": [],
+      "required_vector_set_ids": [],
+      "make_target": "test-blackbox",
+      "argv": ["make", "test-blackbox"],
+      "fault_plan_id": null,
+      "control_id": null
+    },
+    {
+      "obligation_id": "OBL-WAL-ACK-FAULT-LINUX-X64-001",
+      "requirement_ids": ["SYNC-WAL-005"],
+      "assertion_ids": ["ASSERT-WAL-ACK-SEMANTIC-001"],
+      "proof_type": "fault-injection",
+      "support_cell_id": "SUP-PG-LINUX-X64-001",
+      "artifact_inventory_ids": ["ARTDEF-PG-EXTENSION-001", "ARTDEF-ADAPTER-001"],
+      "performance_budget_ids": [],
+      "required_measurement_ids": [],
+      "required_vector_set_ids": [],
+      "make_target": "test-blackbox",
+      "argv": ["make", "test-blackbox"],
+      "fault_plan_id": "FPL-WAL-ACK-001",
+      "control_id": "CTRL-WAL-005"
+    },
+    {
+      "obligation_id": "OBL-WAL-ACK-CONTROL-001",
+      "requirement_ids": ["SYNC-WAL-005"],
+      "assertion_ids": ["ASSERT-WAL-ACK-SEMANTIC-001"],
+      "proof_type": "negative-control",
+      "support_cell_id": null,
+      "artifact_inventory_ids": ["ARTDEF-CONFORMANCE-RUNNER-001", "ARTDEF-PG-EXTENSION-001"],
+      "performance_budget_ids": [],
+      "required_measurement_ids": [],
+      "required_vector_set_ids": [],
+      "make_target": "test-integration-mutants",
+      "argv": ["make", "test-integration-mutants"],
+      "fault_plan_id": "FPL-WAL-ACK-001",
+      "control_id": "CTRL-WAL-005"
+    },
+    {
+      "obligation_id": "OBL-WAL-CAPTURE-READINESS-PG-LINUX-X64-001",
+      "requirement_ids": ["SYNC-WAL-008"],
+      "assertion_ids": ["ASSERT-WAL-CAPTURE-READINESS-SEMANTIC-001"],
+      "proof_type": "server-black-box",
+      "support_cell_id": "SUP-PG-LINUX-X64-001",
+      "artifact_inventory_ids": ["ARTDEF-PG-EXTENSION-001", "ARTDEF-ADAPTER-001"],
+      "performance_budget_ids": [],
+      "required_measurement_ids": [],
+      "required_vector_set_ids": [],
+      "make_target": "test-blackbox",
+      "argv": ["make", "test-blackbox"],
+      "fault_plan_id": null,
+      "control_id": null
+    },
+    {
+      "obligation_id": "OBL-WAL-CAPTURE-READINESS-FAULT-LINUX-X64-001",
+      "requirement_ids": ["SYNC-WAL-008"],
+      "assertion_ids": ["ASSERT-WAL-CAPTURE-READINESS-SEMANTIC-001"],
+      "proof_type": "fault-injection",
+      "support_cell_id": "SUP-PG-LINUX-X64-001",
+      "artifact_inventory_ids": ["ARTDEF-PG-EXTENSION-001", "ARTDEF-ADAPTER-001"],
+      "performance_budget_ids": [],
+      "required_measurement_ids": [],
+      "required_vector_set_ids": [],
+      "make_target": "test-blackbox",
+      "argv": ["make", "test-blackbox"],
+      "fault_plan_id": "FPL-WAL-CAPTURE-READINESS-001",
+      "control_id": "CTRL-WAL-008"
+    },
+    {
+      "obligation_id": "OBL-WAL-CAPTURE-READINESS-CONTROL-001",
+      "requirement_ids": ["SYNC-WAL-008"],
+      "assertion_ids": ["ASSERT-WAL-CAPTURE-READINESS-SEMANTIC-001"],
+      "proof_type": "negative-control",
+      "support_cell_id": null,
+      "artifact_inventory_ids": ["ARTDEF-CONFORMANCE-RUNNER-001", "ARTDEF-PG-EXTENSION-001"],
+      "performance_budget_ids": [],
+      "required_measurement_ids": [],
+      "required_vector_set_ids": [],
+      "make_target": "test-integration-mutants",
+      "argv": ["make", "test-integration-mutants"],
+      "fault_plan_id": "FPL-WAL-CAPTURE-READINESS-001",
+      "control_id": "CTRL-WAL-008"
+    },
+    {
+      "obligation_id": "OBL-WAL-RESET-LIFECYCLE-PG-LINUX-X64-001",
+      "requirement_ids": ["SYNC-WAL-010"],
+      "assertion_ids": ["ASSERT-WAL-RESET-LIFECYCLE-SEMANTIC-001"],
+      "proof_type": "server-black-box",
+      "support_cell_id": "SUP-PG-LINUX-X64-001",
+      "artifact_inventory_ids": ["ARTDEF-PG-EXTENSION-001", "ARTDEF-ADAPTER-001"],
+      "performance_budget_ids": [],
+      "required_measurement_ids": [],
+      "required_vector_set_ids": [],
+      "make_target": "test-blackbox",
+      "argv": ["make", "test-blackbox"],
+      "fault_plan_id": null,
+      "control_id": null
+    },
+    {
+      "obligation_id": "OBL-WAL-RESET-LIFECYCLE-FAULT-LINUX-X64-001",
+      "requirement_ids": ["SYNC-WAL-010"],
+      "assertion_ids": ["ASSERT-WAL-RESET-LIFECYCLE-SEMANTIC-001"],
+      "proof_type": "fault-injection",
+      "support_cell_id": "SUP-PG-LINUX-X64-001",
+      "artifact_inventory_ids": ["ARTDEF-PG-EXTENSION-001", "ARTDEF-ADAPTER-001"],
+      "performance_budget_ids": [],
+      "required_measurement_ids": [],
+      "required_vector_set_ids": [],
+      "make_target": "test-blackbox",
+      "argv": ["make", "test-blackbox"],
+      "fault_plan_id": "FPL-WAL-RESET-LIFECYCLE-001",
+      "control_id": "CTRL-WAL-010"
+    },
+    {
+      "obligation_id": "OBL-WAL-RESET-LIFECYCLE-CONTROL-001",
+      "requirement_ids": ["SYNC-WAL-010"],
+      "assertion_ids": ["ASSERT-WAL-RESET-LIFECYCLE-SEMANTIC-001"],
+      "proof_type": "negative-control",
+      "support_cell_id": null,
+      "artifact_inventory_ids": ["ARTDEF-CONFORMANCE-RUNNER-001", "ARTDEF-PG-EXTENSION-001"],
+      "performance_budget_ids": [],
+      "required_measurement_ids": [],
+      "required_vector_set_ids": [],
+      "make_target": "test-conformance",
+      "argv": ["make", "test-conformance"],
+      "fault_plan_id": "FPL-WAL-RESET-LIFECYCLE-001",
+      "control_id": "CTRL-WAL-010"
+    },
+    {
+      "obligation_id": "OBL-WAL-RESET-COVERAGE-PG-LINUX-X64-001",
+      "requirement_ids": ["SYNC-WAL-011"],
+      "assertion_ids": ["ASSERT-WAL-RESET-COVERAGE-SEMANTIC-001"],
+      "proof_type": "server-black-box",
+      "support_cell_id": "SUP-PG-LINUX-X64-001",
+      "artifact_inventory_ids": ["ARTDEF-PG-EXTENSION-001", "ARTDEF-ADAPTER-001"],
+      "performance_budget_ids": [],
+      "required_measurement_ids": [],
+      "required_vector_set_ids": [],
+      "make_target": "test-blackbox",
+      "argv": ["make", "test-blackbox"],
+      "fault_plan_id": null,
+      "control_id": null
+    },
+    {
+      "obligation_id": "OBL-WAL-RESET-COVERAGE-FAULT-LINUX-X64-001",
+      "requirement_ids": ["SYNC-WAL-011"],
+      "assertion_ids": ["ASSERT-WAL-RESET-COVERAGE-SEMANTIC-001"],
+      "proof_type": "fault-injection",
+      "support_cell_id": "SUP-PG-LINUX-X64-001",
+      "artifact_inventory_ids": ["ARTDEF-PG-EXTENSION-001", "ARTDEF-ADAPTER-001"],
+      "performance_budget_ids": [],
+      "required_measurement_ids": [],
+      "required_vector_set_ids": [],
+      "make_target": "test-blackbox",
+      "argv": ["make", "test-blackbox"],
+      "fault_plan_id": "FPL-WAL-RESET-COVERAGE-001",
+      "control_id": "CTRL-WAL-011"
+    },
+    {
+      "obligation_id": "OBL-WAL-RESET-COVERAGE-CONTROL-001",
+      "requirement_ids": ["SYNC-WAL-011"],
+      "assertion_ids": ["ASSERT-WAL-RESET-COVERAGE-SEMANTIC-001"],
+      "proof_type": "negative-control",
+      "support_cell_id": null,
+      "artifact_inventory_ids": ["ARTDEF-CONFORMANCE-RUNNER-001", "ARTDEF-PG-EXTENSION-001"],
+      "performance_budget_ids": [],
+      "required_measurement_ids": [],
+      "required_vector_set_ids": [],
+      "make_target": "test-integration-mutants",
+      "argv": ["make", "test-integration-mutants"],
+      "fault_plan_id": "FPL-WAL-RESET-COVERAGE-001",
+      "control_id": "CTRL-WAL-011"
     }
   ],
   "ownership": [
@@ -117,6 +317,102 @@
       "requirement_id": "SYNC-WAL-006",
       "proof_obligation_id": "OBL-WAL-DECODE-CONTROL-001",
       "assertion_id": "ASSERT-WAL-DECODE-SEMANTIC-001",
+      "proof_type": "negative-control",
+      "support_cell_id": null
+    },
+    {
+      "scenario_id": "SCN-WAL-DECODE-FAILURE-001",
+      "requirement_id": "SYNC-WAL-005",
+      "proof_obligation_id": "OBL-WAL-ACK-PG-LINUX-X64-001",
+      "assertion_id": "ASSERT-WAL-ACK-SEMANTIC-001",
+      "proof_type": "server-black-box",
+      "support_cell_id": "SUP-PG-LINUX-X64-001"
+    },
+    {
+      "scenario_id": "SCN-WAL-DECODE-FAILURE-001",
+      "requirement_id": "SYNC-WAL-005",
+      "proof_obligation_id": "OBL-WAL-ACK-FAULT-LINUX-X64-001",
+      "assertion_id": "ASSERT-WAL-ACK-SEMANTIC-001",
+      "proof_type": "fault-injection",
+      "support_cell_id": "SUP-PG-LINUX-X64-001"
+    },
+    {
+      "scenario_id": "SCN-WAL-DECODE-FAILURE-001",
+      "requirement_id": "SYNC-WAL-005",
+      "proof_obligation_id": "OBL-WAL-ACK-CONTROL-001",
+      "assertion_id": "ASSERT-WAL-ACK-SEMANTIC-001",
+      "proof_type": "negative-control",
+      "support_cell_id": null
+    },
+    {
+      "scenario_id": "SCN-WAL-DECODE-FAILURE-001",
+      "requirement_id": "SYNC-WAL-008",
+      "proof_obligation_id": "OBL-WAL-CAPTURE-READINESS-PG-LINUX-X64-001",
+      "assertion_id": "ASSERT-WAL-CAPTURE-READINESS-SEMANTIC-001",
+      "proof_type": "server-black-box",
+      "support_cell_id": "SUP-PG-LINUX-X64-001"
+    },
+    {
+      "scenario_id": "SCN-WAL-DECODE-FAILURE-001",
+      "requirement_id": "SYNC-WAL-008",
+      "proof_obligation_id": "OBL-WAL-CAPTURE-READINESS-FAULT-LINUX-X64-001",
+      "assertion_id": "ASSERT-WAL-CAPTURE-READINESS-SEMANTIC-001",
+      "proof_type": "fault-injection",
+      "support_cell_id": "SUP-PG-LINUX-X64-001"
+    },
+    {
+      "scenario_id": "SCN-WAL-DECODE-FAILURE-001",
+      "requirement_id": "SYNC-WAL-008",
+      "proof_obligation_id": "OBL-WAL-CAPTURE-READINESS-CONTROL-001",
+      "assertion_id": "ASSERT-WAL-CAPTURE-READINESS-SEMANTIC-001",
+      "proof_type": "negative-control",
+      "support_cell_id": null
+    },
+    {
+      "scenario_id": "SCN-WAL-DECODE-FAILURE-001",
+      "requirement_id": "SYNC-WAL-010",
+      "proof_obligation_id": "OBL-WAL-RESET-LIFECYCLE-PG-LINUX-X64-001",
+      "assertion_id": "ASSERT-WAL-RESET-LIFECYCLE-SEMANTIC-001",
+      "proof_type": "server-black-box",
+      "support_cell_id": "SUP-PG-LINUX-X64-001"
+    },
+    {
+      "scenario_id": "SCN-WAL-DECODE-FAILURE-001",
+      "requirement_id": "SYNC-WAL-010",
+      "proof_obligation_id": "OBL-WAL-RESET-LIFECYCLE-FAULT-LINUX-X64-001",
+      "assertion_id": "ASSERT-WAL-RESET-LIFECYCLE-SEMANTIC-001",
+      "proof_type": "fault-injection",
+      "support_cell_id": "SUP-PG-LINUX-X64-001"
+    },
+    {
+      "scenario_id": "SCN-WAL-DECODE-FAILURE-001",
+      "requirement_id": "SYNC-WAL-010",
+      "proof_obligation_id": "OBL-WAL-RESET-LIFECYCLE-CONTROL-001",
+      "assertion_id": "ASSERT-WAL-RESET-LIFECYCLE-SEMANTIC-001",
+      "proof_type": "negative-control",
+      "support_cell_id": null
+    },
+    {
+      "scenario_id": "SCN-WAL-DECODE-FAILURE-001",
+      "requirement_id": "SYNC-WAL-011",
+      "proof_obligation_id": "OBL-WAL-RESET-COVERAGE-PG-LINUX-X64-001",
+      "assertion_id": "ASSERT-WAL-RESET-COVERAGE-SEMANTIC-001",
+      "proof_type": "server-black-box",
+      "support_cell_id": "SUP-PG-LINUX-X64-001"
+    },
+    {
+      "scenario_id": "SCN-WAL-DECODE-FAILURE-001",
+      "requirement_id": "SYNC-WAL-011",
+      "proof_obligation_id": "OBL-WAL-RESET-COVERAGE-FAULT-LINUX-X64-001",
+      "assertion_id": "ASSERT-WAL-RESET-COVERAGE-SEMANTIC-001",
+      "proof_type": "fault-injection",
+      "support_cell_id": "SUP-PG-LINUX-X64-001"
+    },
+    {
+      "scenario_id": "SCN-WAL-DECODE-FAILURE-001",
+      "requirement_id": "SYNC-WAL-011",
+      "proof_obligation_id": "OBL-WAL-RESET-COVERAGE-CONTROL-001",
+      "assertion_id": "ASSERT-WAL-RESET-COVERAGE-SEMANTIC-001",
       "proof_type": "negative-control",
       "support_cell_id": null
     }
@@ -401,6 +697,30 @@
           "runner",
           "wal-worker"
         ]
+      },
+      {
+        "id": "BAR-WAL-ACK-CONTROL-001",
+        "name": "Before contiguous end-LSN acknowledgement",
+        "release_order": 2,
+        "participants": ["runner", "wal-worker"]
+      },
+      {
+        "id": "BAR-WAL-CAPTURE-READINESS-CONTROL-001",
+        "name": "Before capture readiness aggregation",
+        "release_order": 3,
+        "participants": ["runner", "health-checker"]
+      },
+      {
+        "id": "BAR-WAL-RESET-LIFECYCLE-CONTROL-001",
+        "name": "During durable reset slot preparation",
+        "release_order": 4,
+        "participants": ["runner", "wal-worker"]
+      },
+      {
+        "id": "BAR-WAL-RESET-COVERAGE-CONTROL-001",
+        "name": "Before reset fence coverage activation",
+        "release_order": 5,
+        "participants": ["runner", "wal-worker"]
       }
     ]
   },
@@ -423,6 +743,74 @@
           "defect": "log and skip poison or acknowledge later progress without durable redacted quarantine and blocking"
         }
       }
+    },
+    {
+      "id": "FPL-WAL-ACK-001",
+      "requirement_id": "SYNC-WAL-005",
+      "fault_id": "FAULT-WAL-005",
+      "control_id": "CTRL-WAL-005",
+      "barrier_id": "BAR-WAL-ACK-CONTROL-001",
+      "expected_assertion_ids": ["ASSERT-WAL-ACK-SEMANTIC-001"],
+      "injection": {
+        "mechanism": "state-fault",
+        "target": "logical slot acknowledgement",
+        "operator": "replace",
+        "parameters": {
+          "scenario": "materialize transaction N+1 while transaction N is incomplete",
+          "defect": "advance the slot to a later or batch-maximum LSN beyond the durable contiguous prefix"
+        }
+      }
+    },
+    {
+      "id": "FPL-WAL-CAPTURE-READINESS-001",
+      "requirement_id": "SYNC-WAL-008",
+      "fault_id": "FAULT-WAL-008",
+      "control_id": "CTRL-WAL-008",
+      "barrier_id": "BAR-WAL-CAPTURE-READINESS-CONTROL-001",
+      "expected_assertion_ids": ["ASSERT-WAL-CAPTURE-READINESS-SEMANTIC-001"],
+      "injection": {
+        "mechanism": "state-fault",
+        "target": "capture readiness check aggregation",
+        "operator": "replace",
+        "parameters": {
+          "scenario": "make one required trigger, slot, poison, registry, worker, or contiguous-progress check unhealthy",
+          "defect": "report ready from database ping or a partial set of healthy checks"
+        }
+      }
+    },
+    {
+      "id": "FPL-WAL-RESET-LIFECYCLE-001",
+      "requirement_id": "SYNC-WAL-010",
+      "fault_id": "FAULT-WAL-010",
+      "control_id": "CTRL-WAL-010",
+      "barrier_id": "BAR-WAL-RESET-LIFECYCLE-CONTROL-001",
+      "expected_assertion_ids": ["ASSERT-WAL-RESET-LIFECYCLE-SEMANTIC-001"],
+      "injection": {
+        "mechanism": "process-fault",
+        "target": "candidate logical slot reset lifecycle",
+        "operator": "crash",
+        "parameters": {
+          "scenario": "kill reset during exported-snapshot import, catch-up, or active-slot handoff",
+          "defect": "use temporary or wrong slot, lose lifecycle state, activate before gap-free verification, or lose WAL continuity"
+        }
+      }
+    },
+    {
+      "id": "FPL-WAL-RESET-COVERAGE-001",
+      "requirement_id": "SYNC-WAL-011",
+      "fault_id": "FAULT-WAL-011",
+      "control_id": "CTRL-WAL-011",
+      "barrier_id": "BAR-WAL-RESET-COVERAGE-CONTROL-001",
+      "expected_assertion_ids": ["ASSERT-WAL-RESET-COVERAGE-SEMANTIC-001"],
+      "injection": {
+        "mechanism": "state-fault",
+        "target": "reset accepted-fence coverage ledger",
+        "operator": "omit",
+        "parameters": {
+          "scenario": "reset with accepted fences before the imported snapshot boundary and later candidate-slot WAL",
+          "defect": "guess coverage by LSN, fabricate or omit a fence, duplicate coverage, or leave it permanently pending"
+        }
+      }
     }
   ],
   "replay": {
@@ -441,6 +829,34 @@
       "detected_by": [
         "ASSERT-WAL-DECODE-SEMANTIC-001"
       ]
+    },
+    {
+      "control_id": "CTRL-WAL-005",
+      "requirement_id": "SYNC-WAL-005",
+      "fault_id": "FAULT-WAL-005",
+      "subject_artifact_inventory_ids": ["ARTDEF-PG-EXTENSION-001"],
+      "detected_by": ["ASSERT-WAL-ACK-SEMANTIC-001"]
+    },
+    {
+      "control_id": "CTRL-WAL-008",
+      "requirement_id": "SYNC-WAL-008",
+      "fault_id": "FAULT-WAL-008",
+      "subject_artifact_inventory_ids": ["ARTDEF-PG-EXTENSION-001"],
+      "detected_by": ["ASSERT-WAL-CAPTURE-READINESS-SEMANTIC-001"]
+    },
+    {
+      "control_id": "CTRL-WAL-010",
+      "requirement_id": "SYNC-WAL-010",
+      "fault_id": "FAULT-WAL-010",
+      "subject_artifact_inventory_ids": ["ARTDEF-PG-EXTENSION-001"],
+      "detected_by": ["ASSERT-WAL-RESET-LIFECYCLE-SEMANTIC-001"]
+    },
+    {
+      "control_id": "CTRL-WAL-011",
+      "requirement_id": "SYNC-WAL-011",
+      "fault_id": "FAULT-WAL-011",
+      "subject_artifact_inventory_ids": ["ARTDEF-PG-EXTENSION-001"],
+      "detected_by": ["ASSERT-WAL-RESET-COVERAGE-SEMANTIC-001"]
     }
   ],
   "steps": [
@@ -696,6 +1112,42 @@
       "detects_control_ids": [
         "CTRL-WAL-006"
       ]
+    },
+    {
+      "id": "ASSERT-WAL-ACK-SEMANTIC-001",
+      "requirement_ids": ["SYNC-WAL-005"],
+      "description": "The slot stays at the prior contiguous end LSN while poison blocks progress, then advances to the exact recovered transaction end LSN.",
+      "expectation_ids": ["EXPECT-WAL-DECODE-STATE-001", "EXPECT-WAL-DECODE-TRANSITION-001"],
+      "predicate": {"contract_predicate": "state-equality", "name": "state-equals-authored-model", "payload": {}},
+      "oracle": {"kind": "model-state-equality", "expected_source": "authored-model", "observed_source": "system-under-test"},
+      "detects_control_ids": ["CTRL-WAL-005"]
+    },
+    {
+      "id": "ASSERT-WAL-CAPTURE-READINESS-SEMANTIC-001",
+      "requirement_ids": ["SYNC-WAL-008"],
+      "description": "Capture readiness is false when any required trigger, slot, poison, registry, worker, heartbeat, publication, or progress check is unhealthy.",
+      "expectation_ids": ["EXPECT-WAL-DECODE-STATE-001", "EXPECT-WAL-DECODE-TRANSITION-001"],
+      "predicate": {"contract_predicate": "state-equality", "name": "state-equals-authored-model", "payload": {}},
+      "oracle": {"kind": "model-state-equality", "expected_source": "authored-model", "observed_source": "system-under-test"},
+      "detects_control_ids": ["CTRL-WAL-008"]
+    },
+    {
+      "id": "ASSERT-WAL-RESET-LIFECYCLE-SEMANTIC-001",
+      "requirement_ids": ["SYNC-WAL-010"],
+      "description": "A permanent candidate slot and its persisted reset state survive interruption, then activate atomically only after verified gap-free catch-up.",
+      "expectation_ids": ["EXPECT-WAL-DECODE-STATE-001", "EXPECT-WAL-DECODE-TRANSITION-001"],
+      "predicate": {"contract_predicate": "state-transition", "name": "legal-state-transition", "payload": {}},
+      "oracle": {"kind": "state-transition", "expected_source": "authored-model", "observed_source": "system-under-test"},
+      "detects_control_ids": ["CTRL-WAL-010"]
+    },
+    {
+      "id": "ASSERT-WAL-RESET-COVERAGE-SEMANTIC-001",
+      "requirement_ids": ["SYNC-WAL-011"],
+      "description": "Reset covers every synced and capture-dependency insert, update, and delete fence exactly once without synthetic events or effects.",
+      "expectation_ids": ["EXPECT-WAL-DECODE-STATE-001", "EXPECT-WAL-DECODE-TRANSITION-001"],
+      "predicate": {"contract_predicate": "state-transition", "name": "legal-state-transition", "payload": {}},
+      "oracle": {"kind": "state-transition", "expected_source": "authored-model", "observed_source": "system-under-test"},
+      "detects_control_ids": ["CTRL-WAL-011"]
     }
   ]
 }

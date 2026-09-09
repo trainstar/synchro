@@ -5,12 +5,17 @@
   "title": "Seed database is a cache performance scenario",
   "description": "The ordered workload proves the authored semantic outcome and performance declaration.",
   "requirement_ids": [
-    "SYNC-SEED-001"
+    "SYNC-SEED-001",
+    "SYNC-SEED-002"
   ],
   "normative_references": [
     {
       "path": "docs/src/content/docs/spec/04-invariants.mdx",
       "anchor": "#seeded-db-is-cache-only"
+    },
+    {
+      "path": "docs/src/content/docs/spec/04-invariants.mdx",
+      "anchor": "#portable-seed-authority"
     }
   ],
   "proof_types": [
@@ -22,11 +27,13 @@
     {
       "obligation_id": "OBL-PERF-SEEDED-EMPTY-STARTUP-PG-LINUX-X64-001",
       "requirement_ids": [
-        "SYNC-SEED-001"
+        "SYNC-SEED-001",
+        "SYNC-SEED-002"
       ],
       "assertion_ids": [
         "ASSERT-PERF-SEEDED-EMPTY-STARTUP-SEMANTIC-001",
-        "ASSERT-PERF-SEEDED-EMPTY-STARTUP-PERFORMANCE-001"
+        "ASSERT-PERF-SEEDED-EMPTY-STARTUP-PERFORMANCE-001",
+        "ASSERT-PERF-SEEDED-EMPTY-STARTUP-AUTHORITY-001"
       ],
       "proof_type": "server-black-box",
       "support_cell_id": "SUP-PG-LINUX-X64-001",
@@ -52,10 +59,12 @@
     {
       "obligation_id": "OBL-PERF-SEEDED-EMPTY-STARTUP-MACOS-CURRENT-001",
       "requirement_ids": [
-        "SYNC-SEED-001"
+        "SYNC-SEED-001",
+        "SYNC-SEED-002"
       ],
       "assertion_ids": [
-        "ASSERT-PERF-SEEDED-EMPTY-STARTUP-SEMANTIC-001"
+        "ASSERT-PERF-SEEDED-EMPTY-STARTUP-SEMANTIC-001",
+        "ASSERT-PERF-SEEDED-EMPTY-STARTUP-AUTHORITY-001"
       ],
       "proof_type": "native-e2e",
       "support_cell_id": "SUP-MACOS-CURRENT-001",
@@ -173,11 +182,13 @@
     {
       "obligation_id": "OBL-PERF-SEEDED-EMPTY-STARTUP-ANDROID-CURRENT-001",
       "requirement_ids": [
-        "SYNC-SEED-001"
+        "SYNC-SEED-001",
+        "SYNC-SEED-002"
       ],
       "assertion_ids": [
         "ASSERT-PERF-SEEDED-EMPTY-STARTUP-SEMANTIC-001",
-        "ASSERT-PERF-SEEDED-EMPTY-STARTUP-PERFORMANCE-001"
+        "ASSERT-PERF-SEEDED-EMPTY-STARTUP-PERFORMANCE-001",
+        "ASSERT-PERF-SEEDED-EMPTY-STARTUP-AUTHORITY-001"
       ],
       "proof_type": "native-e2e",
       "support_cell_id": "SUP-ANDROID-CURRENT-001",
@@ -204,11 +215,13 @@
     {
       "obligation_id": "OBL-PERF-SEEDED-EMPTY-STARTUP-RN-IOS-CURRENT-001",
       "requirement_ids": [
-        "SYNC-SEED-001"
+        "SYNC-SEED-001",
+        "SYNC-SEED-002"
       ],
       "assertion_ids": [
         "ASSERT-PERF-SEEDED-EMPTY-STARTUP-SEMANTIC-001",
-        "ASSERT-PERF-SEEDED-EMPTY-STARTUP-PERFORMANCE-001"
+        "ASSERT-PERF-SEEDED-EMPTY-STARTUP-PERFORMANCE-001",
+        "ASSERT-PERF-SEEDED-EMPTY-STARTUP-AUTHORITY-001"
       ],
       "proof_type": "native-e2e",
       "support_cell_id": "SUP-RN-IOS-CURRENT-001",
@@ -237,11 +250,13 @@
     {
       "obligation_id": "OBL-PERF-SEEDED-EMPTY-STARTUP-RN-ANDROID-CURRENT-001",
       "requirement_ids": [
-        "SYNC-SEED-001"
+        "SYNC-SEED-001",
+        "SYNC-SEED-002"
       ],
       "assertion_ids": [
         "ASSERT-PERF-SEEDED-EMPTY-STARTUP-SEMANTIC-001",
-        "ASSERT-PERF-SEEDED-EMPTY-STARTUP-PERFORMANCE-001"
+        "ASSERT-PERF-SEEDED-EMPTY-STARTUP-PERFORMANCE-001",
+        "ASSERT-PERF-SEEDED-EMPTY-STARTUP-AUTHORITY-001"
       ],
       "proof_type": "native-e2e",
       "support_cell_id": "SUP-RN-ANDROID-CURRENT-001",
@@ -297,6 +312,31 @@
       ],
       "fault_plan_id": "FPL-PERF-SEEDED-EMPTY-STARTUP-001",
       "control_id": "CTRL-SEED-001"
+    },
+    {
+      "obligation_id": "OBL-PERF-SEEDED-EMPTY-STARTUP-AUTHORITY-CONTROL-001",
+      "requirement_ids": [
+        "SYNC-SEED-002"
+      ],
+      "assertion_ids": [
+        "ASSERT-PERF-SEEDED-EMPTY-STARTUP-AUTHORITY-001"
+      ],
+      "proof_type": "negative-control",
+      "support_cell_id": null,
+      "artifact_inventory_ids": [
+        "ARTDEF-CONFORMANCE-RUNNER-001",
+        "ARTDEF-PG-EXTENSION-001"
+      ],
+      "performance_budget_ids": [],
+      "required_measurement_ids": [],
+      "required_vector_set_ids": [],
+      "make_target": "test-integration-mutants",
+      "argv": [
+        "make",
+        "test-integration-mutants"
+      ],
+      "fault_plan_id": "FPL-PERF-SEEDED-EMPTY-STARTUP-AUTHORITY-001",
+      "control_id": "CTRL-SEED-002"
     }
   ],
   "ownership": [
@@ -403,6 +443,54 @@
       "assertion_id": "ASSERT-PERF-SEEDED-EMPTY-STARTUP-SEMANTIC-001",
       "proof_type": "negative-control",
       "support_cell_id": null
+    },
+    {
+      "scenario_id": "SCN-PERF-SEEDED-EMPTY-STARTUP-001",
+      "requirement_id": "SYNC-SEED-002",
+      "proof_obligation_id": "OBL-PERF-SEEDED-EMPTY-STARTUP-AUTHORITY-CONTROL-001",
+      "assertion_id": "ASSERT-PERF-SEEDED-EMPTY-STARTUP-AUTHORITY-001",
+      "proof_type": "negative-control",
+      "support_cell_id": null
+    },
+    {
+      "scenario_id": "SCN-PERF-SEEDED-EMPTY-STARTUP-001",
+      "requirement_id": "SYNC-SEED-002",
+      "proof_obligation_id": "OBL-PERF-SEEDED-EMPTY-STARTUP-PG-LINUX-X64-001",
+      "assertion_id": "ASSERT-PERF-SEEDED-EMPTY-STARTUP-AUTHORITY-001",
+      "proof_type": "server-black-box",
+      "support_cell_id": "SUP-PG-LINUX-X64-001"
+    },
+    {
+      "scenario_id": "SCN-PERF-SEEDED-EMPTY-STARTUP-001",
+      "requirement_id": "SYNC-SEED-002",
+      "proof_obligation_id": "OBL-PERF-SEEDED-EMPTY-STARTUP-MACOS-CURRENT-001",
+      "assertion_id": "ASSERT-PERF-SEEDED-EMPTY-STARTUP-AUTHORITY-001",
+      "proof_type": "native-e2e",
+      "support_cell_id": "SUP-MACOS-CURRENT-001"
+    },
+    {
+      "scenario_id": "SCN-PERF-SEEDED-EMPTY-STARTUP-001",
+      "requirement_id": "SYNC-SEED-002",
+      "proof_obligation_id": "OBL-PERF-SEEDED-EMPTY-STARTUP-ANDROID-CURRENT-001",
+      "assertion_id": "ASSERT-PERF-SEEDED-EMPTY-STARTUP-AUTHORITY-001",
+      "proof_type": "native-e2e",
+      "support_cell_id": "SUP-ANDROID-CURRENT-001"
+    },
+    {
+      "scenario_id": "SCN-PERF-SEEDED-EMPTY-STARTUP-001",
+      "requirement_id": "SYNC-SEED-002",
+      "proof_obligation_id": "OBL-PERF-SEEDED-EMPTY-STARTUP-RN-IOS-CURRENT-001",
+      "assertion_id": "ASSERT-PERF-SEEDED-EMPTY-STARTUP-AUTHORITY-001",
+      "proof_type": "native-e2e",
+      "support_cell_id": "SUP-RN-IOS-CURRENT-001"
+    },
+    {
+      "scenario_id": "SCN-PERF-SEEDED-EMPTY-STARTUP-001",
+      "requirement_id": "SYNC-SEED-002",
+      "proof_obligation_id": "OBL-PERF-SEEDED-EMPTY-STARTUP-RN-ANDROID-CURRENT-001",
+      "assertion_id": "ASSERT-PERF-SEEDED-EMPTY-STARTUP-AUTHORITY-001",
+      "proof_type": "native-e2e",
+      "support_cell_id": "SUP-RN-ANDROID-CURRENT-001"
     }
   ],
   "model": {
@@ -750,6 +838,25 @@
           "defect": "authorize or synchronize from seed metadata through a separate seed-only mode"
         }
       }
+    },
+    {
+      "id": "FPL-PERF-SEEDED-EMPTY-STARTUP-AUTHORITY-001",
+      "requirement_id": "SYNC-SEED-002",
+      "fault_id": "FAULT-SEED-002",
+      "control_id": "CTRL-SEED-002",
+      "barrier_id": "BAR-PERF-SEEDED-EMPTY-STARTUP-CONTROL-001",
+      "expected_assertion_ids": [
+        "ASSERT-PERF-SEEDED-EMPTY-STARTUP-AUTHORITY-001"
+      ],
+      "injection": {
+        "mechanism": "artifact-tamper",
+        "target": "portable seed scope and row export",
+        "operator": "inject",
+        "parameters": {
+          "scenario": "add an auth-scoped row and an undeclared scope to an otherwise valid export",
+          "defect": "infer portability from row presence instead of server-declared portable scope authority"
+        }
+      }
     }
   ],
   "replay": {
@@ -774,6 +881,17 @@
       ],
       "detected_by": [
         "ASSERT-PERF-SEEDED-EMPTY-STARTUP-SEMANTIC-001"
+      ]
+    },
+    {
+      "control_id": "CTRL-SEED-002",
+      "requirement_id": "SYNC-SEED-002",
+      "fault_id": "FAULT-SEED-002",
+      "subject_artifact_inventory_ids": [
+        "ARTDEF-PG-EXTENSION-001"
+      ],
+      "detected_by": [
+        "ASSERT-PERF-SEEDED-EMPTY-STARTUP-AUTHORITY-001"
       ]
     }
   ],
@@ -1416,6 +1534,29 @@
         "observed_source": "system-under-test"
       },
       "detects_control_ids": []
+    },
+    {
+      "id": "ASSERT-PERF-SEEDED-EMPTY-STARTUP-AUTHORITY-001",
+      "requirement_ids": [
+        "SYNC-SEED-002"
+      ],
+      "description": "The portable-seed authority control detects an exported row or scope that the server did not declare portable.",
+      "expectation_ids": [
+        "EXPECT-PERF-SEEDED-EMPTY-STARTUP-SEMANTIC-001"
+      ],
+      "predicate": {
+        "contract_predicate": "wire-outcome",
+        "name": "canonical-wire-outcome",
+        "payload": {}
+      },
+      "oracle": {
+        "kind": "wire-contract",
+        "expected_source": "authored-model",
+        "observed_source": "system-under-test"
+      },
+      "detects_control_ids": [
+        "CTRL-SEED-002"
+      ]
     }
   ]
 }

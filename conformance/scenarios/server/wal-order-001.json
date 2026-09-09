@@ -5,12 +5,27 @@
   "title": "Commit-safe WAL transaction and event order",
   "description": "Out-of-order arrival cannot change commit-LSN transaction order, source event ordinals, registry selection, or atomic materialization.",
   "requirement_ids": [
-    "SYNC-WAL-003"
+    "SYNC-WAL-001",
+    "SYNC-WAL-002",
+    "SYNC-WAL-003",
+    "SYNC-WAL-004"
   ],
   "normative_references": [
     {
       "path": "docs/src/content/docs/spec/04-invariants.mdx",
+      "anchor": "#no-silent-server-change-loss"
+    },
+    {
+      "path": "docs/src/content/docs/spec/04-invariants.mdx",
+      "anchor": "#wal-is-the-only-pull-visible-capture-path"
+    },
+    {
+      "path": "docs/src/content/docs/spec/04-invariants.mdx",
       "anchor": "#commit-safe-wal-order"
+    },
+    {
+      "path": "docs/src/content/docs/spec/04-invariants.mdx",
+      "anchor": "#idempotent-wal-replay"
     }
   ],
   "proof_types": [
@@ -118,6 +133,231 @@
       ],
       "fault_plan_id": "FPL-WAL-ORDER-001",
       "control_id": "CTRL-WAL-003"
+    },
+    {
+      "obligation_id": "OBL-WAL-NO-LOSS-PG-LINUX-X64-001",
+      "requirement_ids": [
+        "SYNC-WAL-001"
+      ],
+      "assertion_ids": [
+        "ASSERT-WAL-NO-LOSS-SEMANTIC-001"
+      ],
+      "proof_type": "server-black-box",
+      "support_cell_id": "SUP-PG-LINUX-X64-001",
+      "artifact_inventory_ids": [
+        "ARTDEF-PG-EXTENSION-001",
+        "ARTDEF-ADAPTER-001"
+      ],
+      "performance_budget_ids": [],
+      "required_measurement_ids": [],
+      "required_vector_set_ids": [],
+      "make_target": "test-blackbox",
+      "argv": [
+        "make",
+        "test-blackbox"
+      ],
+      "fault_plan_id": null,
+      "control_id": null
+    },
+    {
+      "obligation_id": "OBL-WAL-NO-LOSS-FAULT-LINUX-X64-001",
+      "requirement_ids": [
+        "SYNC-WAL-001"
+      ],
+      "assertion_ids": [
+        "ASSERT-WAL-NO-LOSS-SEMANTIC-001"
+      ],
+      "proof_type": "fault-injection",
+      "support_cell_id": "SUP-PG-LINUX-X64-001",
+      "artifact_inventory_ids": [
+        "ARTDEF-PG-EXTENSION-001",
+        "ARTDEF-ADAPTER-001"
+      ],
+      "performance_budget_ids": [],
+      "required_measurement_ids": [],
+      "required_vector_set_ids": [],
+      "make_target": "test-blackbox",
+      "argv": [
+        "make",
+        "test-blackbox"
+      ],
+      "fault_plan_id": "FPL-WAL-NO-LOSS-001",
+      "control_id": "CTRL-WAL-001"
+    },
+    {
+      "obligation_id": "OBL-WAL-NO-LOSS-CONTROL-001",
+      "requirement_ids": [
+        "SYNC-WAL-001"
+      ],
+      "assertion_ids": [
+        "ASSERT-WAL-NO-LOSS-SEMANTIC-001"
+      ],
+      "proof_type": "negative-control",
+      "support_cell_id": null,
+      "artifact_inventory_ids": [
+        "ARTDEF-CONFORMANCE-RUNNER-001",
+        "ARTDEF-PG-EXTENSION-001"
+      ],
+      "performance_budget_ids": [],
+      "required_measurement_ids": [],
+      "required_vector_set_ids": [],
+      "make_target": "test-integration-mutants",
+      "argv": [
+        "make",
+        "test-integration-mutants"
+      ],
+      "fault_plan_id": "FPL-WAL-NO-LOSS-001",
+      "control_id": "CTRL-WAL-001"
+    },
+    {
+      "obligation_id": "OBL-WAL-ONLY-PUBLICATION-PG-LINUX-X64-001",
+      "requirement_ids": [
+        "SYNC-WAL-002"
+      ],
+      "assertion_ids": [
+        "ASSERT-WAL-ONLY-PUBLICATION-SEMANTIC-001"
+      ],
+      "proof_type": "server-black-box",
+      "support_cell_id": "SUP-PG-LINUX-X64-001",
+      "artifact_inventory_ids": [
+        "ARTDEF-PG-EXTENSION-001",
+        "ARTDEF-ADAPTER-001"
+      ],
+      "performance_budget_ids": [],
+      "required_measurement_ids": [],
+      "required_vector_set_ids": [],
+      "make_target": "test-blackbox",
+      "argv": [
+        "make",
+        "test-blackbox"
+      ],
+      "fault_plan_id": null,
+      "control_id": null
+    },
+    {
+      "obligation_id": "OBL-WAL-ONLY-PUBLICATION-FAULT-LINUX-X64-001",
+      "requirement_ids": [
+        "SYNC-WAL-002"
+      ],
+      "assertion_ids": [
+        "ASSERT-WAL-ONLY-PUBLICATION-SEMANTIC-001"
+      ],
+      "proof_type": "fault-injection",
+      "support_cell_id": "SUP-PG-LINUX-X64-001",
+      "artifact_inventory_ids": [
+        "ARTDEF-PG-EXTENSION-001",
+        "ARTDEF-ADAPTER-001"
+      ],
+      "performance_budget_ids": [],
+      "required_measurement_ids": [],
+      "required_vector_set_ids": [],
+      "make_target": "test-blackbox",
+      "argv": [
+        "make",
+        "test-blackbox"
+      ],
+      "fault_plan_id": "FPL-WAL-ONLY-PUBLICATION-001",
+      "control_id": "CTRL-WAL-002"
+    },
+    {
+      "obligation_id": "OBL-WAL-ONLY-PUBLICATION-CONTROL-001",
+      "requirement_ids": [
+        "SYNC-WAL-002"
+      ],
+      "assertion_ids": [
+        "ASSERT-WAL-ONLY-PUBLICATION-SEMANTIC-001"
+      ],
+      "proof_type": "negative-control",
+      "support_cell_id": null,
+      "artifact_inventory_ids": [
+        "ARTDEF-CONFORMANCE-RUNNER-001",
+        "ARTDEF-PG-EXTENSION-001"
+      ],
+      "performance_budget_ids": [],
+      "required_measurement_ids": [],
+      "required_vector_set_ids": [],
+      "make_target": "test-integration-mutants",
+      "argv": [
+        "make",
+        "test-integration-mutants"
+      ],
+      "fault_plan_id": "FPL-WAL-ONLY-PUBLICATION-001",
+      "control_id": "CTRL-WAL-002"
+    },
+    {
+      "obligation_id": "OBL-WAL-REPLAY-PG-LINUX-X64-001",
+      "requirement_ids": [
+        "SYNC-WAL-004"
+      ],
+      "assertion_ids": [
+        "ASSERT-WAL-REPLAY-SEMANTIC-001"
+      ],
+      "proof_type": "server-black-box",
+      "support_cell_id": "SUP-PG-LINUX-X64-001",
+      "artifact_inventory_ids": [
+        "ARTDEF-PG-EXTENSION-001",
+        "ARTDEF-ADAPTER-001"
+      ],
+      "performance_budget_ids": [],
+      "required_measurement_ids": [],
+      "required_vector_set_ids": [],
+      "make_target": "test-blackbox",
+      "argv": [
+        "make",
+        "test-blackbox"
+      ],
+      "fault_plan_id": null,
+      "control_id": null
+    },
+    {
+      "obligation_id": "OBL-WAL-REPLAY-FAULT-LINUX-X64-001",
+      "requirement_ids": [
+        "SYNC-WAL-004"
+      ],
+      "assertion_ids": [
+        "ASSERT-WAL-REPLAY-SEMANTIC-001"
+      ],
+      "proof_type": "fault-injection",
+      "support_cell_id": "SUP-PG-LINUX-X64-001",
+      "artifact_inventory_ids": [
+        "ARTDEF-PG-EXTENSION-001",
+        "ARTDEF-ADAPTER-001"
+      ],
+      "performance_budget_ids": [],
+      "required_measurement_ids": [],
+      "required_vector_set_ids": [],
+      "make_target": "test-blackbox",
+      "argv": [
+        "make",
+        "test-blackbox"
+      ],
+      "fault_plan_id": "FPL-WAL-REPLAY-001",
+      "control_id": "CTRL-WAL-004"
+    },
+    {
+      "obligation_id": "OBL-WAL-REPLAY-CONTROL-001",
+      "requirement_ids": [
+        "SYNC-WAL-004"
+      ],
+      "assertion_ids": [
+        "ASSERT-WAL-REPLAY-SEMANTIC-001"
+      ],
+      "proof_type": "negative-control",
+      "support_cell_id": null,
+      "artifact_inventory_ids": [
+        "ARTDEF-CONFORMANCE-RUNNER-001",
+        "ARTDEF-PG-EXTENSION-001"
+      ],
+      "performance_budget_ids": [],
+      "required_measurement_ids": [],
+      "required_vector_set_ids": [],
+      "make_target": "test-integration-mutants",
+      "argv": [
+        "make",
+        "test-integration-mutants"
+      ],
+      "fault_plan_id": "FPL-WAL-REPLAY-001",
+      "control_id": "CTRL-WAL-004"
     }
   ],
   "ownership": [
@@ -150,6 +390,78 @@
       "requirement_id": "SYNC-WAL-003",
       "proof_obligation_id": "OBL-WAL-ORDER-CONTROL-001",
       "assertion_id": "ASSERT-WAL-ORDER-SEMANTIC-001",
+      "proof_type": "negative-control",
+      "support_cell_id": null
+    },
+    {
+      "scenario_id": "SCN-WAL-ORDER-001",
+      "requirement_id": "SYNC-WAL-001",
+      "proof_obligation_id": "OBL-WAL-NO-LOSS-PG-LINUX-X64-001",
+      "assertion_id": "ASSERT-WAL-NO-LOSS-SEMANTIC-001",
+      "proof_type": "server-black-box",
+      "support_cell_id": "SUP-PG-LINUX-X64-001"
+    },
+    {
+      "scenario_id": "SCN-WAL-ORDER-001",
+      "requirement_id": "SYNC-WAL-001",
+      "proof_obligation_id": "OBL-WAL-NO-LOSS-FAULT-LINUX-X64-001",
+      "assertion_id": "ASSERT-WAL-NO-LOSS-SEMANTIC-001",
+      "proof_type": "fault-injection",
+      "support_cell_id": "SUP-PG-LINUX-X64-001"
+    },
+    {
+      "scenario_id": "SCN-WAL-ORDER-001",
+      "requirement_id": "SYNC-WAL-001",
+      "proof_obligation_id": "OBL-WAL-NO-LOSS-CONTROL-001",
+      "assertion_id": "ASSERT-WAL-NO-LOSS-SEMANTIC-001",
+      "proof_type": "negative-control",
+      "support_cell_id": null
+    },
+    {
+      "scenario_id": "SCN-WAL-ORDER-001",
+      "requirement_id": "SYNC-WAL-002",
+      "proof_obligation_id": "OBL-WAL-ONLY-PUBLICATION-PG-LINUX-X64-001",
+      "assertion_id": "ASSERT-WAL-ONLY-PUBLICATION-SEMANTIC-001",
+      "proof_type": "server-black-box",
+      "support_cell_id": "SUP-PG-LINUX-X64-001"
+    },
+    {
+      "scenario_id": "SCN-WAL-ORDER-001",
+      "requirement_id": "SYNC-WAL-002",
+      "proof_obligation_id": "OBL-WAL-ONLY-PUBLICATION-FAULT-LINUX-X64-001",
+      "assertion_id": "ASSERT-WAL-ONLY-PUBLICATION-SEMANTIC-001",
+      "proof_type": "fault-injection",
+      "support_cell_id": "SUP-PG-LINUX-X64-001"
+    },
+    {
+      "scenario_id": "SCN-WAL-ORDER-001",
+      "requirement_id": "SYNC-WAL-002",
+      "proof_obligation_id": "OBL-WAL-ONLY-PUBLICATION-CONTROL-001",
+      "assertion_id": "ASSERT-WAL-ONLY-PUBLICATION-SEMANTIC-001",
+      "proof_type": "negative-control",
+      "support_cell_id": null
+    },
+    {
+      "scenario_id": "SCN-WAL-ORDER-001",
+      "requirement_id": "SYNC-WAL-004",
+      "proof_obligation_id": "OBL-WAL-REPLAY-PG-LINUX-X64-001",
+      "assertion_id": "ASSERT-WAL-REPLAY-SEMANTIC-001",
+      "proof_type": "server-black-box",
+      "support_cell_id": "SUP-PG-LINUX-X64-001"
+    },
+    {
+      "scenario_id": "SCN-WAL-ORDER-001",
+      "requirement_id": "SYNC-WAL-004",
+      "proof_obligation_id": "OBL-WAL-REPLAY-FAULT-LINUX-X64-001",
+      "assertion_id": "ASSERT-WAL-REPLAY-SEMANTIC-001",
+      "proof_type": "fault-injection",
+      "support_cell_id": "SUP-PG-LINUX-X64-001"
+    },
+    {
+      "scenario_id": "SCN-WAL-ORDER-001",
+      "requirement_id": "SYNC-WAL-004",
+      "proof_obligation_id": "OBL-WAL-REPLAY-CONTROL-001",
+      "assertion_id": "ASSERT-WAL-REPLAY-SEMANTIC-001",
       "proof_type": "negative-control",
       "support_cell_id": null
     }
@@ -412,6 +724,34 @@
           "runner",
           "wal-worker"
         ]
+      },
+      {
+        "id": "BAR-WAL-NO-LOSS-CONTROL-001",
+        "name": "Before complete WAL representation durability",
+        "release_order": 2,
+        "participants": [
+          "runner",
+          "wal-worker"
+        ]
+      },
+      {
+        "id": "BAR-WAL-ONLY-PUBLICATION-CONTROL-001",
+        "name": "Before WAL-only pull publication",
+        "release_order": 3,
+        "participants": [
+          "runner",
+          "push-handler",
+          "wal-worker"
+        ]
+      },
+      {
+        "id": "BAR-WAL-REPLAY-CONTROL-001",
+        "name": "After materialization and before acknowledgement",
+        "release_order": 4,
+        "participants": [
+          "runner",
+          "wal-worker"
+        ]
       }
     ]
   },
@@ -434,6 +774,63 @@
           "defect": "order by timestamp, notification, table, sequence, or poll order rather than commit LSN and pre-filter ordinal"
         }
       }
+    },
+    {
+      "id": "FPL-WAL-NO-LOSS-001",
+      "requirement_id": "SYNC-WAL-001",
+      "fault_id": "FAULT-WAL-001",
+      "control_id": "CTRL-WAL-001",
+      "barrier_id": "BAR-WAL-NO-LOSS-CONTROL-001",
+      "expected_assertion_ids": [
+        "ASSERT-WAL-NO-LOSS-SEMANTIC-001"
+      ],
+      "injection": {
+        "mechanism": "process-fault",
+        "target": "WAL representation materialization commit",
+        "operator": "crash",
+        "parameters": {
+          "scenario": "fail decoding or hydrating one committed registered-data transaction",
+          "defect": "drop the transaction and acknowledge or serve later progress instead of durable quarantine"
+        }
+      }
+    },
+    {
+      "id": "FPL-WAL-ONLY-PUBLICATION-001",
+      "requirement_id": "SYNC-WAL-002",
+      "fault_id": "FAULT-WAL-002",
+      "control_id": "CTRL-WAL-002",
+      "barrier_id": "BAR-WAL-ONLY-PUBLICATION-CONTROL-001",
+      "expected_assertion_ids": [
+        "ASSERT-WAL-ONLY-PUBLICATION-SEMANTIC-001"
+      ],
+      "injection": {
+        "mechanism": "source-mutant",
+        "target": "accepted push publication path",
+        "operator": "inject",
+        "parameters": {
+          "scenario": "accept a push write while WAL materialization is delayed",
+          "defect": "write a synchronous pull-visible changelog or edge without WAL replay identity"
+        }
+      }
+    },
+    {
+      "id": "FPL-WAL-REPLAY-001",
+      "requirement_id": "SYNC-WAL-004",
+      "fault_id": "FAULT-WAL-004",
+      "control_id": "CTRL-WAL-004",
+      "barrier_id": "BAR-WAL-REPLAY-CONTROL-001",
+      "expected_assertion_ids": [
+        "ASSERT-WAL-REPLAY-SEMANTIC-001"
+      ],
+      "injection": {
+        "mechanism": "process-fault",
+        "target": "source transaction replay boundary",
+        "operator": "crash",
+        "parameters": {
+          "scenario": "force the worker to exit after complete materialization commits and before slot acknowledgement, then retry the same identity",
+          "defect": "duplicate versions, edges, or effects or leave a split durable replay unit"
+        }
+      }
     }
   ],
   "replay": {
@@ -451,6 +848,39 @@
       ],
       "detected_by": [
         "ASSERT-WAL-ORDER-SEMANTIC-001"
+      ]
+    },
+    {
+      "control_id": "CTRL-WAL-001",
+      "requirement_id": "SYNC-WAL-001",
+      "fault_id": "FAULT-WAL-001",
+      "subject_artifact_inventory_ids": [
+        "ARTDEF-PG-EXTENSION-001"
+      ],
+      "detected_by": [
+        "ASSERT-WAL-NO-LOSS-SEMANTIC-001"
+      ]
+    },
+    {
+      "control_id": "CTRL-WAL-002",
+      "requirement_id": "SYNC-WAL-002",
+      "fault_id": "FAULT-WAL-002",
+      "subject_artifact_inventory_ids": [
+        "ARTDEF-PG-EXTENSION-001"
+      ],
+      "detected_by": [
+        "ASSERT-WAL-ONLY-PUBLICATION-SEMANTIC-001"
+      ]
+    },
+    {
+      "control_id": "CTRL-WAL-004",
+      "requirement_id": "SYNC-WAL-004",
+      "fault_id": "FAULT-WAL-004",
+      "subject_artifact_inventory_ids": [
+        "ARTDEF-PG-EXTENSION-001"
+      ],
+      "detected_by": [
+        "ASSERT-WAL-REPLAY-SEMANTIC-001"
       ]
     }
   ],
@@ -667,6 +1097,77 @@
       },
       "detects_control_ids": [
         "CTRL-WAL-003"
+      ]
+    },
+    {
+      "id": "ASSERT-WAL-NO-LOSS-SEMANTIC-001",
+      "requirement_ids": [
+        "SYNC-WAL-001"
+      ],
+      "description": "Each committed transaction keeps all declared events, projections, captured rows, edges, and changes until its complete representation is durable or blocking quarantine exists.",
+      "expectation_ids": [
+        "EXPECT-WAL-ORDER-SEMANTIC-001",
+        "EXPECT-WAL-ORDER-BLOCKED-001"
+      ],
+      "predicate": {
+        "contract_predicate": "state-equality",
+        "name": "state-equals-authored-model",
+        "payload": {}
+      },
+      "oracle": {
+        "kind": "model-state-equality",
+        "expected_source": "authored-model",
+        "observed_source": "system-under-test"
+      },
+      "detects_control_ids": [
+        "CTRL-WAL-001"
+      ]
+    },
+    {
+      "id": "ASSERT-WAL-ONLY-PUBLICATION-SEMANTIC-001",
+      "requirement_ids": [
+        "SYNC-WAL-002"
+      ],
+      "description": "Direct and accepted push writes remain pull-invisible before WAL replay and become visible exactly once with one durable WAL source identity.",
+      "expectation_ids": [
+        "EXPECT-WAL-ORDER-SEMANTIC-001",
+        "EXPECT-WAL-ORDER-BLOCKED-001"
+      ],
+      "predicate": {
+        "contract_predicate": "state-equality",
+        "name": "state-equals-authored-model",
+        "payload": {}
+      },
+      "oracle": {
+        "kind": "model-state-equality",
+        "expected_source": "authored-model",
+        "observed_source": "system-under-test"
+      },
+      "detects_control_ids": [
+        "CTRL-WAL-002"
+      ]
+    },
+    {
+      "id": "ASSERT-WAL-REPLAY-SEMANTIC-001",
+      "requirement_ids": [
+        "SYNC-WAL-004"
+      ],
+      "description": "A restart after durable materialization and before acknowledgement increments replay once without changing the complete transaction representation or duplicating effects.",
+      "expectation_ids": [
+        "EXPECT-WAL-ORDER-SEMANTIC-001"
+      ],
+      "predicate": {
+        "contract_predicate": "state-equality",
+        "name": "state-equals-authored-model",
+        "payload": {}
+      },
+      "oracle": {
+        "kind": "model-state-equality",
+        "expected_source": "authored-model",
+        "observed_source": "system-under-test"
+      },
+      "detects_control_ids": [
+        "CTRL-WAL-004"
       ]
     }
   ]

@@ -3,10 +3,11 @@
   "schema_version": 2,
   "id": "SCN-PULL-DIVERGENT-CHECKPOINTS-001",
   "title": "Divergent per-scope pull checkpoints",
-  "description": "Two finite pages resolve complete per-scope streams, preserve typed scope-inclusive ordering, and atomically apply divergent cursors.",
+  "description": "Two finite pages resolve complete per-scope streams, retain the greatest typed scoped effects, and atomically apply divergent cursors.",
   "requirement_ids": [
     "SYNC-PULL-001",
-    "SYNC-PULL-002"
+    "SYNC-PULL-002",
+    "SYNC-PULL-004"
   ],
   "normative_references": [
     {
@@ -16,6 +17,10 @@
     {
       "path": "docs/src/content/docs/spec/04-invariants.mdx",
       "anchor": "#deterministic-cross-scope-pull-merge"
+    },
+    {
+      "path": "docs/src/content/docs/spec/04-invariants.mdx",
+      "anchor": "#scope-inclusive-typed-deduplication"
     }
   ],
   "proof_types": [
@@ -28,11 +33,13 @@
       "obligation_id": "OBL-PULL-DIVERGENT-RM-001",
       "requirement_ids": [
         "SYNC-PULL-001",
-        "SYNC-PULL-002"
+        "SYNC-PULL-002",
+        "SYNC-PULL-004"
       ],
       "assertion_ids": [
         "ASSERT-PULL-DIVERGENT-SEMANTIC-001",
-        "ASSERT-PULL-DIVERGENT-MERGE-SEMANTIC-001"
+        "ASSERT-PULL-DIVERGENT-MERGE-SEMANTIC-001",
+        "ASSERT-PULL-DIVERGENT-DEDUP-SEMANTIC-001"
       ],
       "proof_type": "reference-model",
       "support_cell_id": null,
@@ -54,11 +61,13 @@
       "obligation_id": "OBL-PULL-DIVERGENT-PG-LINUX-X64-001",
       "requirement_ids": [
         "SYNC-PULL-001",
-        "SYNC-PULL-002"
+        "SYNC-PULL-002",
+        "SYNC-PULL-004"
       ],
       "assertion_ids": [
         "ASSERT-PULL-DIVERGENT-SEMANTIC-001",
-        "ASSERT-PULL-DIVERGENT-MERGE-SEMANTIC-001"
+        "ASSERT-PULL-DIVERGENT-MERGE-SEMANTIC-001",
+        "ASSERT-PULL-DIVERGENT-DEDUP-SEMANTIC-001"
       ],
       "proof_type": "server-black-box",
       "support_cell_id": "SUP-PG-LINUX-X64-001",
@@ -126,6 +135,31 @@
       ],
       "fault_plan_id": "FPL-PULL-DIVERGENT-PULL-002-001",
       "control_id": "CTRL-PULL-002"
+    },
+    {
+      "obligation_id": "OBL-PULL-DIVERGENT-PULL-004-CONTROL-001",
+      "requirement_ids": [
+        "SYNC-PULL-004"
+      ],
+      "assertion_ids": [
+        "ASSERT-PULL-DIVERGENT-DEDUP-SEMANTIC-001"
+      ],
+      "proof_type": "negative-control",
+      "support_cell_id": null,
+      "artifact_inventory_ids": [
+        "ARTDEF-CONFORMANCE-RUNNER-001",
+        "ARTDEF-PG-EXTENSION-001"
+      ],
+      "performance_budget_ids": [],
+      "required_measurement_ids": [],
+      "required_vector_set_ids": [],
+      "make_target": "test-integration-mutants",
+      "argv": [
+        "make",
+        "test-integration-mutants"
+      ],
+      "fault_plan_id": "FPL-PULL-DIVERGENT-PULL-004-001",
+      "control_id": "CTRL-PULL-004"
     }
   ],
   "ownership": [
@@ -155,6 +189,22 @@
     },
     {
       "scenario_id": "SCN-PULL-DIVERGENT-CHECKPOINTS-001",
+      "requirement_id": "SYNC-PULL-004",
+      "proof_obligation_id": "OBL-PULL-DIVERGENT-RM-001",
+      "assertion_id": "ASSERT-PULL-DIVERGENT-DEDUP-SEMANTIC-001",
+      "proof_type": "reference-model",
+      "support_cell_id": null
+    },
+    {
+      "scenario_id": "SCN-PULL-DIVERGENT-CHECKPOINTS-001",
+      "requirement_id": "SYNC-PULL-004",
+      "proof_obligation_id": "OBL-PULL-DIVERGENT-PG-LINUX-X64-001",
+      "assertion_id": "ASSERT-PULL-DIVERGENT-DEDUP-SEMANTIC-001",
+      "proof_type": "server-black-box",
+      "support_cell_id": "SUP-PG-LINUX-X64-001"
+    },
+    {
+      "scenario_id": "SCN-PULL-DIVERGENT-CHECKPOINTS-001",
       "requirement_id": "SYNC-PULL-002",
       "proof_obligation_id": "OBL-PULL-DIVERGENT-PG-LINUX-X64-001",
       "assertion_id": "ASSERT-PULL-DIVERGENT-MERGE-SEMANTIC-001",
@@ -166,6 +216,14 @@
       "requirement_id": "SYNC-PULL-001",
       "proof_obligation_id": "OBL-PULL-DIVERGENT-PULL-001-CONTROL-001",
       "assertion_id": "ASSERT-PULL-DIVERGENT-SEMANTIC-001",
+      "proof_type": "negative-control",
+      "support_cell_id": null
+    },
+    {
+      "scenario_id": "SCN-PULL-DIVERGENT-CHECKPOINTS-001",
+      "requirement_id": "SYNC-PULL-004",
+      "proof_obligation_id": "OBL-PULL-DIVERGENT-PULL-004-CONTROL-001",
+      "assertion_id": "ASSERT-PULL-DIVERGENT-DEDUP-SEMANTIC-001",
       "proof_type": "negative-control",
       "support_cell_id": null
     },
@@ -209,7 +267,7 @@
               "version": 1,
               "hash": "07904a21452931ca3c189218ad44ad9b7c45c888dff6156e5ac669560025f17b"
             },
-            "body": "{\"compatibility_floor\":1,\"parent_schema\":null,\"schema_hash\":\"07904a21452931ca3c189218ad44ad9b7c45c888dff6156e5ac669560025f17b\",\"schema_version\":1,\"tables\":[{\"composition\":\"multi_scope\",\"fields\":[{\"field_id\":\"id\",\"name\":\"id\",\"nullable\":false,\"type\":\"string\",\"writable\":false},{\"field_id\":\"value\",\"name\":\"value\",\"nullable\":false,\"type\":\"string\",\"writable\":true}],\"indexes\":[{\"field_ids\":[\"id\"],\"index_id\":\"items-a-pk\",\"name\":\"items_a_pk\",\"unique\":true}],\"lifecycle\":{\"created_at_field_id\":null,\"deleted_at_field_id\":null,\"updated_at_field_id\":null},\"name\":\"items_a\",\"primary_key_field_id\":\"id\",\"relation_id\":\"public.items_a\",\"table_id\":\"items-a\"},{\"composition\":\"multi_scope\",\"fields\":[{\"field_id\":\"id\",\"name\":\"id\",\"nullable\":false,\"type\":\"string\",\"writable\":false},{\"field_id\":\"value\",\"name\":\"value\",\"nullable\":false,\"type\":\"string\",\"writable\":true}],\"indexes\":[{\"field_ids\":[\"id\"],\"index_id\":\"items-b-pk\",\"name\":\"items_b_pk\",\"unique\":true}],\"lifecycle\":{\"created_at_field_id\":null,\"deleted_at_field_id\":null,\"updated_at_field_id\":null},\"name\":\"items_b\",\"primary_key_field_id\":\"id\",\"relation_id\":\"public.items_b\",\"table_id\":\"items-b\"}],\"transition_class\":\"initial\"}",
+            "body": "{\"compatibility_floor\":1,\"parent_schema\":null,\"schema_hash\":\"07904a21452931ca3c189218ad44ad9b7c45c888dff6156e5ac669560025f17b\",\"schema_version\":1,\"tables\":[{\"composition\":\"multi_scope\",\"fields\":[{\"field_id\":\"id\",\"name\":\"id\",\"nullable\":false,\"type\":\"string\",\"writable\":false},{\"field_id\":\"value\",\"name\":\"value\",\"nullable\":false,\"type\":\"string\",\"writable\":true}],\"indexes\":[{\"field_ids\":[\"id\"],\"index_id\":\"items-a-pk\",\"name\":\"items_a_pk\",\"unique\":true}],\"lifecycle\":{\"created_at_field_id\":null,\"deleted_at_field_id\":null,\"updated_at_field_id\":null},\"name\":\"items_a\",\"primary_key_field_id\":\"id\",\"relation_id\":\"public.items_a\",\"table_id\":\"items-a\"},{\"composition\":\"multi_scope\",\"fields\":[{\"field_id\":\"id\",\"name\":\"id\",\"nullable\":false,\"type\":\"int\",\"writable\":false},{\"field_id\":\"value\",\"name\":\"value\",\"nullable\":false,\"type\":\"string\",\"writable\":true}],\"indexes\":[{\"field_ids\":[\"id\"],\"index_id\":\"items-b-pk\",\"name\":\"items_b_pk\",\"unique\":true}],\"lifecycle\":{\"created_at_field_id\":null,\"deleted_at_field_id\":null,\"updated_at_field_id\":null},\"name\":\"items_b\",\"primary_key_field_id\":\"id\",\"relation_id\":\"public.items_b\",\"table_id\":\"items-b\"}],\"transition_class\":\"initial\"}",
             "transition_class": "initial",
             "compatibility_floor": 1,
             "tables": [
@@ -270,7 +328,7 @@
                   {
                     "field_id": "id",
                     "name": "id",
-                    "type": "string",
+                    "type": "int",
                     "primary_key": true,
                     "nullable": false,
                     "writable": false,
@@ -343,7 +401,7 @@
                 },
                 "primary_key_field_id": "id",
                 "primary_key_physical_column": "id",
-                "primary_key_portable_type": "string",
+                "primary_key_portable_type": "int",
                 "capture_key_field_ids": [],
                 "captured_field_ids": [
                   "id",
@@ -366,14 +424,15 @@
                 "evaluations": [
                   {
                     "row": {
-                      "canonical_identity_bytes": "typed-string:row-a",
+                      "canonical_identity_bytes": "typed-string:1",
                       "table_id": "items-a",
                       "primary_key_field_id": "id",
                       "portable_type": "string",
-                      "canonical_wire_json": "\"row-a\""
+                      "canonical_wire_json": "\"1\""
                     },
                     "scopes": [
-                      "scope-a"
+                      "scope-a",
+                      "scope-b"
                     ]
                   },
                   {
@@ -398,11 +457,11 @@
                 "evaluations": [
                   {
                     "row": {
-                      "canonical_identity_bytes": "typed-string:row-a",
+                      "canonical_identity_bytes": "typed-int:1",
                       "table_id": "items-b",
                       "primary_key_field_id": "id",
-                      "portable_type": "string",
-                      "canonical_wire_json": "\"row-a\""
+                      "portable_type": "int",
+                      "canonical_wire_json": "1"
                     },
                     "scopes": [
                       "scope-a"
@@ -491,20 +550,21 @@
               "checkpoint_count": 2,
               "provenance": [
                 {
-                  "table_id": "items-a",
-                  "canonical_wire_json": "\"row-a\"",
-                  "scopes": [
-                    "scope-a"
-                  ],
-                  "version": "a-v2"
-                },
-                {
                   "table_id": "items-b",
-                  "canonical_wire_json": "\"row-a\"",
+                  "canonical_wire_json": "1",
                   "scopes": [
                     "scope-a"
                   ],
                   "version": "collision-v1"
+                },
+                {
+                  "table_id": "items-a",
+                  "canonical_wire_json": "\"1\"",
+                  "scopes": [
+                    "scope-a",
+                    "scope-b"
+                  ],
+                  "version": "a-v2"
                 },
                 {
                   "table_id": "items-a",
@@ -562,6 +622,15 @@
           "runner",
           "pull-handler"
         ]
+      },
+      {
+        "id": "BAR-PULL-DIVERGENT-PULL-004-CONTROL-001",
+        "name": "Before scope-inclusive typed deduplication",
+        "release_order": 3,
+        "participants": [
+          "runner",
+          "pull-handler"
+        ]
       }
     ]
   },
@@ -603,6 +672,25 @@
           "defect": "use lexical or unstable ordering or compute has_more without every remaining stream head"
         }
       }
+    },
+    {
+      "id": "FPL-PULL-DIVERGENT-PULL-004-001",
+      "requirement_id": "SYNC-PULL-004",
+      "fault_id": "FAULT-PULL-004",
+      "control_id": "CTRL-PULL-004",
+      "barrier_id": "BAR-PULL-DIVERGENT-PULL-004-CONTROL-001",
+      "expected_assertion_ids": [
+        "ASSERT-PULL-DIVERGENT-DEDUP-SEMANTIC-001"
+      ],
+      "injection": {
+        "mechanism": "source-mutant",
+        "target": "pull candidate deduplication key",
+        "operator": "replace",
+        "parameters": {
+          "scenario": "deliver string key 1 in two scopes and positions, plus integer key 1 in a second logical table",
+          "defect": "omit logical table identity and collapse typed string and integer keys stored as equal record text"
+        }
+      }
     }
   ],
   "replay": {
@@ -631,6 +719,17 @@
       ],
       "detected_by": [
         "ASSERT-PULL-DIVERGENT-MERGE-SEMANTIC-001"
+      ]
+    },
+    {
+      "control_id": "CTRL-PULL-004",
+      "requirement_id": "SYNC-PULL-004",
+      "fault_id": "FAULT-PULL-004",
+      "subject_artifact_inventory_ids": [
+        "ARTDEF-PG-EXTENSION-001"
+      ],
+      "detected_by": [
+        "ASSERT-PULL-DIVERGENT-DEDUP-SEMANTIC-001"
       ]
     }
   ],
@@ -821,7 +920,7 @@
       "id": "STEP-PULL-DIVERGENT-COMMIT-002-001",
       "phase": "setup",
       "transport": "model",
-      "description": "Commit the scope A row-a insertion at source position (2,1).",
+      "description": "Commit the shared string-key insertion at source position (2,1).",
       "operation": {
         "contract_operation": "model",
         "name": "commit-source-transaction",
@@ -839,11 +938,11 @@
                 "identity": {
                   "kind": "synced",
                   "synced_row": {
-                    "canonical_identity_bytes": "typed-string:row-a",
+                    "canonical_identity_bytes": "typed-string:1",
                     "table_id": "items-a",
                     "primary_key_field_id": "id",
                     "portable_type": "string",
-                    "canonical_wire_json": "\"row-a\""
+                    "canonical_wire_json": "\"1\""
                   },
                   "capture_key": null
                 },
@@ -851,7 +950,7 @@
                   {
                     "field": "id",
                     "type": "string",
-                    "wire_json": "\"row-a\""
+                    "wire_json": "\"1\""
                   },
                   {
                     "field": "value",
@@ -875,7 +974,7 @@
       "id": "STEP-PULL-DIVERGENT-MATERIALIZE-002-001",
       "phase": "setup",
       "transport": "process",
-      "description": "Materialize exactly one scope A effect at position (2,1,1).",
+      "description": "Materialize one string-key effect in each scope at position (2,1,1).",
       "operation": {
         "contract_operation": "process",
         "name": "materialize-source-transaction",
@@ -963,7 +1062,7 @@
       "id": "STEP-PULL-DIVERGENT-COMMIT-004-001",
       "phase": "setup",
       "transport": "model",
-      "description": "Commit the second-table row-a insertion at source position (4,1).",
+      "description": "Commit the second-table integer-key insertion at source position (4,1).",
       "operation": {
         "contract_operation": "model",
         "name": "commit-source-transaction",
@@ -981,19 +1080,19 @@
                 "identity": {
                   "kind": "synced",
                   "synced_row": {
-                    "canonical_identity_bytes": "typed-string:row-a",
+                    "canonical_identity_bytes": "typed-int:1",
                     "table_id": "items-b",
                     "primary_key_field_id": "id",
-                    "portable_type": "string",
-                    "canonical_wire_json": "\"row-a\""
+                    "portable_type": "int",
+                    "canonical_wire_json": "1"
                   },
                   "capture_key": null
                 },
                 "fields": [
                   {
                     "field": "id",
-                    "type": "string",
-                    "wire_json": "\"row-a\""
+                    "type": "int",
+                    "wire_json": "1"
                   },
                   {
                     "field": "value",
@@ -1034,7 +1133,7 @@
       "id": "STEP-PULL-DIVERGENT-COMMIT-005-001",
       "phase": "setup",
       "transport": "model",
-      "description": "Commit the newer scope A row-a update at source position (5,1).",
+      "description": "Commit the newer shared string-key update at source position (5,1).",
       "operation": {
         "contract_operation": "model",
         "name": "commit-source-transaction",
@@ -1051,11 +1150,11 @@
                 "identity": {
                   "kind": "synced",
                   "synced_row": {
-                    "canonical_identity_bytes": "typed-string:row-a",
+                    "canonical_identity_bytes": "typed-string:1",
                     "table_id": "items-a",
                     "primary_key_field_id": "id",
                     "portable_type": "string",
-                    "canonical_wire_json": "\"row-a\""
+                    "canonical_wire_json": "\"1\""
                   },
                   "capture_key": null
                 },
@@ -1063,7 +1162,7 @@
                   {
                     "field": "id",
                     "type": "string",
-                    "wire_json": "\"row-a\""
+                    "wire_json": "\"1\""
                   },
                   {
                     "field": "value",
@@ -1079,11 +1178,11 @@
                 "identity": {
                   "kind": "synced",
                   "synced_row": {
-                    "canonical_identity_bytes": "typed-string:row-a",
+                    "canonical_identity_bytes": "typed-string:1",
                     "table_id": "items-a",
                     "primary_key_field_id": "id",
                     "portable_type": "string",
-                    "canonical_wire_json": "\"row-a\""
+                    "canonical_wire_json": "\"1\""
                   },
                   "capture_key": null
                 },
@@ -1091,7 +1190,7 @@
                   {
                     "field": "id",
                     "type": "string",
-                    "wire_json": "\"row-a\""
+                    "wire_json": "\"1\""
                   },
                   {
                     "field": "value",
@@ -1115,7 +1214,7 @@
       "id": "STEP-PULL-DIVERGENT-MATERIALIZE-005-001",
       "phase": "setup",
       "transport": "process",
-      "description": "Materialize the newer scope A effect at position (5,1,1).",
+      "description": "Materialize the newer string-key effect in each scope at position (5,1,1).",
       "operation": {
         "contract_operation": "process",
         "name": "materialize-source-transaction",
@@ -1273,7 +1372,7 @@
       "requirement_ids": [
         "SYNC-PULL-001"
       ],
-      "description": "Four lawful WAL effects occupy scope A positions (2,1,1), (4,1,1), and (5,1,1), plus scope B position (3,1,1). Scope A deduplicates positions 2 and 5 by typed scoped row identity before limiting. Page one returns B position 3, then A position 4, with has_more true and no checksums. Its atomic apply installs divergent cursors B3 and A4 with matching rows and provenance. Page two returns A position 5 with has_more false and both scope checksums. Its atomic apply installs both terminal cursors, verifies checksums, and preserves the table-ID collision.",
+      "description": "Six lawful WAL effects occupy scope A positions (2,1,1), (4,1,1), and (5,1,1), plus scope B positions (2,1,1), (3,1,1), and (5,1,1). Page one returns B position 3, then A position 4, with has_more true and no checksums. Its atomic apply installs divergent cursors B3 and A4 with matching rows and provenance. Page two returns both position 5 effects with has_more false and both scope checksums. Its atomic apply installs both terminal cursors, verifies checksums, and preserves the table-ID collision.",
       "expectation_ids": [
         "EXPECT-PULL-DIVERGENT-SEMANTIC-001",
         "EXPECT-PULL-DIVERGENT-WIRE-001"
@@ -1314,6 +1413,30 @@
       },
       "detects_control_ids": [
         "CTRL-PULL-002"
+      ]
+    },
+    {
+      "id": "ASSERT-PULL-DIVERGENT-DEDUP-SEMANTIC-001",
+      "requirement_ids": [
+        "SYNC-PULL-004"
+      ],
+      "description": "Pull deduplicates by the typed tuple of scope ID, logical table ID, and primary key. It retains the greatest eligible stream position for that key within its scope without cross-scope collapse. Items-a string key 1 belongs to scope-a and scope-b at positions (2,1,1) and (5,1,1). Each scope retains position (5,1,1). The terminal page returns both scoped string-key effects. Items-b integer key 1 remains a distinct typed logical-table collision.",
+      "expectation_ids": [
+        "EXPECT-PULL-DIVERGENT-SEMANTIC-001",
+        "EXPECT-PULL-DIVERGENT-WIRE-001"
+      ],
+      "predicate": {
+        "contract_predicate": "wire-outcome",
+        "name": "canonical-wire-outcome",
+        "payload": {}
+      },
+      "oracle": {
+        "kind": "wire-contract",
+        "expected_source": "authored-model",
+        "observed_source": "system-under-test"
+      },
+      "detects_control_ids": [
+        "CTRL-PULL-004"
       ]
     }
   ]

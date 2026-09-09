@@ -1,0 +1,12 @@
+diff --git a/api/go/version.go b/api/go/version.go
+--- a/api/go/version.go
++++ b/api/go/version.go
+@@ -124,7 +124,7 @@ func (v semver) lessThan(other semver) bool {
+ 	for i := 0; i < len(v.prerelease) && i < len(other.prerelease); i++ {
+ 		left, right := v.prerelease[i], other.prerelease[i]
+ 		if left.numeric && right.numeric {
+-			if comparison := compareSemverCoreNumber(left.value, right.value); comparison != 0 {
++			if comparison := strings.Compare(left.value, right.value); comparison != 0 {
+ 				return comparison < 0
+ 			}
+ 			continue

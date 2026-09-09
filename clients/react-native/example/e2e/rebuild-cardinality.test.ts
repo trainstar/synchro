@@ -40,6 +40,7 @@ async function exchange(endpoint: string, token: string, sequence: number, resul
 
 async function execute(command: Record<string, unknown>): Promise<string> {
   const serialized = JSON.stringify(command);
+  console.log(`rnmem execute start ${String((command.action as { action?: { actor?: unknown; command?: unknown } } | undefined)?.action?.actor)}/${String((command.action as { action?: { actor?: unknown; command?: unknown } } | undefined)?.action?.command)} bytes=${serialized.length}`);
   await element(by.id('conformance-command-input')).replaceText(serialized);
   if ((await element(by.id('conformance-command-input')).getAttributes()).text !== serialized) throw new Error('React Native conformance command input changed');
   await element(by.id('conformance-command-input')).tapReturnKey();
@@ -51,6 +52,7 @@ async function execute(command: Record<string, unknown>): Promise<string> {
       const raw = String((await element(by.id('conformance-result')).getAttributes()).text ?? '');
       const envelope = JSON.parse(raw) as { outcome: string; error_code: string | null; error_detail: string | null };
       if (envelope.outcome !== 'passed') throw new Error(`React Native conformance command failed: ${envelope.error_code}${envelope.error_detail === null ? '' : `: ${envelope.error_detail}`}`);
+      console.log(`rnmem execute complete result-bytes=${raw.length}`);
       return raw;
     }
     await new Promise((resolve) => setTimeout(resolve, 100));

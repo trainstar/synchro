@@ -89,7 +89,7 @@ var proofTargetPolicy = map[string]map[string]struct{}{
 	"fault-injection": {
 		"test-blackbox": {}, "test-swift": {}, "test-kotlin": {}, "test-rn-e2e-ios": {}, "test-rn-e2e-android": {},
 	},
-	"negative-control": {"test-conformance": {}, "test-rn-warm-connect-control": {}},
+	"negative-control": {"test-conformance": {}, "test-integration-mutants": {}, "test-rn-warm-connect-control": {}},
 }
 
 type targetRule struct {
@@ -100,12 +100,13 @@ type targetRule struct {
 }
 
 var targetRules = map[string]targetRule{
-	"test-conformance":    {},
-	"test-blackbox":       {component: "postgresql-server", hasComponent: true},
-	"test-swift":          {component: "swift-client", hasComponent: true},
-	"test-kotlin":         {component: "kotlin-client", hasComponent: true},
-	"test-rn-e2e-ios":     {component: "react-native-client", platform: "ios", hasComponent: true, hasPlatform: true},
-	"test-rn-e2e-android": {component: "react-native-client", platform: "android", hasComponent: true, hasPlatform: true},
+	"test-conformance":         {},
+	"test-integration-mutants": {},
+	"test-blackbox":            {component: "postgresql-server", hasComponent: true},
+	"test-swift":               {component: "swift-client", hasComponent: true},
+	"test-kotlin":              {component: "kotlin-client", hasComponent: true},
+	"test-rn-e2e-ios":          {component: "react-native-client", platform: "ios", hasComponent: true, hasPlatform: true},
+	"test-rn-e2e-android":      {component: "react-native-client", platform: "android", hasComponent: true, hasPlatform: true},
 	"test-rn-warm-connect-ios": {
 		component: "react-native-client", platform: "ios", hasComponent: true, hasPlatform: true,
 	},
@@ -116,12 +117,13 @@ var targetRules = map[string]targetRule{
 }
 
 var targetRequiredRoles = map[string]map[string]struct{}{
-	"test-conformance":    {"conformance-runner": {}},
-	"test-blackbox":       {"pg-extension": {}, "adapter": {}},
-	"test-swift":          {"pg-extension": {}, "adapter": {}, "swift-spm": {}},
-	"test-kotlin":         {"pg-extension": {}, "adapter": {}, "kotlin-maven": {}},
-	"test-rn-e2e-ios":     {"pg-extension": {}, "adapter": {}, "swift-spm": {}, "cocoapods": {}, "react-native-npm": {}},
-	"test-rn-e2e-android": {"pg-extension": {}, "adapter": {}, "kotlin-maven": {}, "react-native-npm": {}},
+	"test-conformance":         {"conformance-runner": {}},
+	"test-integration-mutants": {"conformance-runner": {}, "pg-extension": {}},
+	"test-blackbox":            {"pg-extension": {}, "adapter": {}},
+	"test-swift":               {"pg-extension": {}, "adapter": {}, "swift-spm": {}},
+	"test-kotlin":              {"pg-extension": {}, "adapter": {}, "kotlin-maven": {}},
+	"test-rn-e2e-ios":          {"pg-extension": {}, "adapter": {}, "swift-spm": {}, "cocoapods": {}, "react-native-npm": {}},
+	"test-rn-e2e-android":      {"pg-extension": {}, "adapter": {}, "kotlin-maven": {}, "react-native-npm": {}},
 	"test-rn-warm-connect-ios": {
 		"pg-extension": {}, "adapter": {}, "swift-spm": {}, "cocoapods": {}, "react-native-npm": {},
 	},
@@ -132,11 +134,12 @@ var targetRequiredRoles = map[string]map[string]struct{}{
 }
 
 var targetAllowedRoles = map[string]map[string]struct{}{
-	"test-blackbox":       {"pg-extension": {}, "pg-install-sql": {}, "adapter": {}, "seed-tool": {}, "portable-seed": {}},
-	"test-swift":          {"pg-extension": {}, "adapter": {}, "seed-tool": {}, "swift-spm": {}, "cocoapods": {}, "portable-seed": {}},
-	"test-kotlin":         {"pg-extension": {}, "adapter": {}, "seed-tool": {}, "kotlin-maven": {}, "portable-seed": {}},
-	"test-rn-e2e-ios":     {"pg-extension": {}, "adapter": {}, "seed-tool": {}, "swift-spm": {}, "cocoapods": {}, "react-native-npm": {}, "portable-seed": {}},
-	"test-rn-e2e-android": {"pg-extension": {}, "adapter": {}, "seed-tool": {}, "kotlin-maven": {}, "react-native-npm": {}, "portable-seed": {}},
+	"test-integration-mutants": {"conformance-runner": {}, "pg-extension": {}},
+	"test-blackbox":            {"pg-extension": {}, "pg-install-sql": {}, "adapter": {}, "seed-tool": {}, "portable-seed": {}},
+	"test-swift":               {"pg-extension": {}, "adapter": {}, "seed-tool": {}, "swift-spm": {}, "cocoapods": {}, "portable-seed": {}},
+	"test-kotlin":              {"pg-extension": {}, "adapter": {}, "seed-tool": {}, "kotlin-maven": {}, "portable-seed": {}},
+	"test-rn-e2e-ios":          {"pg-extension": {}, "adapter": {}, "seed-tool": {}, "swift-spm": {}, "cocoapods": {}, "react-native-npm": {}, "portable-seed": {}},
+	"test-rn-e2e-android":      {"pg-extension": {}, "adapter": {}, "seed-tool": {}, "kotlin-maven": {}, "react-native-npm": {}, "portable-seed": {}},
 	"test-rn-warm-connect-ios": {
 		"pg-extension": {}, "adapter": {}, "seed-tool": {}, "swift-spm": {}, "cocoapods": {}, "react-native-npm": {}, "portable-seed": {},
 	},

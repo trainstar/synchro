@@ -1429,7 +1429,7 @@ func provisionRealProofHarness(t *testing.T, ctx context.Context) (*blackbox.Har
 	return harness, token
 }
 
-func connectRealProtocolClient(t *testing.T, ctx context.Context, harness *blackbox.Harness, token, clientID string) *realProtocolClient {
+func connectRealProtocolClient(t *testing.T, ctx context.Context, harness *blackbox.Harness, token, clientID string, expectedScopes ...string) *realProtocolClient {
 	t.Helper()
 	status, response := postSync(t, ctx, harness.AdapterURL(), token, "/sync/connect", map[string]any{
 		"client_id":         clientID,
@@ -1490,8 +1490,12 @@ func connectRealProtocolClient(t *testing.T, ctx context.Context, harness *black
 		assigned = append(assigned, scopeID)
 	}
 	slices.Sort(assigned)
-	if !slices.Equal(assigned, []string{"cf:global", "user:diagnostic-user"}) {
-		t.Fatal("real protocol client did not receive both diagnostic scopes")
+	if len(expectedScopes) == 0 {
+		expectedScopes = []string{"cf:global", "user:diagnostic-user"}
+	}
+	slices.Sort(expectedScopes)
+	if !slices.Equal(assigned, expectedScopes) {
+		t.Fatalf("real protocol client scopes = %#v, want %#v", assigned, expectedScopes)
 	}
 	return &realProtocolClient{
 		ID:              clientID,
@@ -1516,9 +1520,6 @@ func parseRealProtocolTables(t *testing.T, definition map[string]any) map[string
 			t.Fatal("real protocol manifest table is invalid")
 		}
 		name, _ := tableObject["name"].(string)
-		if name != "cf_items" && name != "cf_global_items" {
-			continue
-		}
 		table := realProtocolTable{}
 		table.ID, _ = tableObject["table_id"].(string)
 		table.PrimaryKeyField, _ = tableObject["primary_key_field_id"].(string)
@@ -1535,7 +1536,7 @@ func parseRealProtocolTables(t *testing.T, definition map[string]any) map[string
 				table.ValueField, _ = field["field_id"].(string)
 			}
 		}
-		if !uuidPattern.MatchString(table.ID) || !uuidPattern.MatchString(table.PrimaryKeyField) || !uuidPattern.MatchString(table.ValueField) {
+		if name == "" || !uuidPattern.MatchString(table.ID) || !uuidPattern.MatchString(table.PrimaryKeyField) || table.ValueField != "" && !uuidPattern.MatchString(table.ValueField) {
 			t.Fatal("real protocol manifest identity is invalid")
 		}
 		tables[name] = table

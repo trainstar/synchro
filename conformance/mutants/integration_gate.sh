@@ -13,6 +13,7 @@ run_root=$(mktemp -d "$scratch_parent/synchro-integration-mutants.XXXXXX")
 log_parent=${SYNCHRO_MUTANT_LOG_TMPDIR:-${TMPDIR:-/tmp}}
 logs_root=$(mktemp -d "$log_parent/synchro-integration-mutant-logs.XXXXXX")
 gate_passed=0
+mutant_count=0
 
 cleanup() {
 	status=$?
@@ -57,6 +58,26 @@ apply_mutation() {
 	git -C "$workspace" apply "$repo_root/$patch"
 }
 
+configure_real_environment() {
+	pgrx_config=${PGRX_PG_CONFIG:-}
+	if [ -z "$pgrx_config" ]; then
+		pgrx_config=$(awk -F '"' '/^pg18[[:space:]]*=/ { print $2; exit }' "$HOME/.pgrx/config.toml")
+	fi
+	if [ ! -x "$pgrx_config" ]; then
+		fail "integration mutation gate requires a PostgreSQL 18 pgrx configuration"
+	fi
+
+	pg_bindir=$(dirname "$pgrx_config")
+	secrets_root="$run_root/secrets"
+	mkdir -m 700 "$secrets_root"
+	(
+		umask 077
+		for name in admin adapter observer worker operator jwt; do
+			openssl rand -hex 32 >"$secrets_root/$name-password"
+		done
+	)
+}
+
 package_artifacts() {
 	workspace=$1
 	label=$2
@@ -88,6 +109,7 @@ run_control() {
 	test_name=$4
 	extension_artifact=$5
 	adapter_artifact=$6
+	expected=$7
 	json_log="$logs_root/$label-$phase.json"
 	stderr_log="$logs_root/$label-$phase.stderr.log"
 	parser_output="$logs_root/$label-$phase.parser.out"
@@ -95,10 +117,24 @@ run_control() {
 
 	set +e
 	env \
+		SYNCHRO_CONFORMANCE_PG18_BINDIR="$pg_bindir" \
 		SYNCHRO_CONFORMANCE_EXTENSION_ARTIFACT="$extension_artifact" \
 		SYNCHRO_CONFORMANCE_ADAPTER_ARTIFACT="$adapter_artifact" \
+		SYNCHRO_CONFORMANCE_ADMIN_USER="synchro_mutant_admin" \
+		SYNCHRO_CONFORMANCE_ADMIN_PASSWORD_FILE="$secrets_root/admin-password" \
+		SYNCHRO_CONFORMANCE_ADAPTER_USER="synchro_mutant_adapter" \
+		SYNCHRO_CONFORMANCE_ADAPTER_PASSWORD_FILE="$secrets_root/adapter-password" \
+		SYNCHRO_CONFORMANCE_OBSERVER_USER="synchro_mutant_observer" \
+		SYNCHRO_CONFORMANCE_OBSERVER_PASSWORD_FILE="$secrets_root/observer-password" \
+		SYNCHRO_CONFORMANCE_WORKER_USER="synchro_mutant_worker" \
+		SYNCHRO_CONFORMANCE_WORKER_PASSWORD_FILE="$secrets_root/worker-password" \
+		SYNCHRO_CONFORMANCE_OPERATOR_USER="synchro_mutant_operator" \
+		SYNCHRO_CONFORMANCE_OPERATOR_PASSWORD_FILE="$secrets_root/operator-password" \
+		SYNCHRO_CONFORMANCE_JWT_SECRET_FILE="$secrets_root/jwt-password" \
+		SYNCHRO_CONFORMANCE_INSTALL_LOCK="$run_root/install.lock" \
 		make --no-print-directory -s -C "$workspace" test-blackbox-mutation-control \
-		MUTATION_CONTROL_TEST="$test_name" >"$json_log" 2>"$stderr_log"
+		MUTATION_CONTROL_TEST="$test_name" \
+		MUTATION_CONTROL_EXPECT="$expected" >"$json_log" 2>"$stderr_log"
 	control_status=$?
 	set -e
 
@@ -124,7 +160,7 @@ expect_control_result() {
 	adapter_artifact=$6
 	expected=$7
 
-	run_control "$label" "$phase" "$workspace" "$test_name" "$extension_artifact" "$adapter_artifact"
+	run_control "$label" "$phase" "$workspace" "$test_name" "$extension_artifact" "$adapter_artifact" "$expected"
 	case "$expected" in
 		target_pass)
 			if [ "$CONTROL_STATUS" -ne 0 ] || [ "$CONTROL_RESULT" != target_pass ]; then
@@ -180,10 +216,34 @@ run_category() {
 		"$category" post-baseline "$repo_root" "$test_name" \
 		"$baseline_extension" "$baseline_adapter" target_pass
 	cleanup_category "$category"
+	mutant_count=$((mutant_count + 1))
 	printf 'KILLED %s by %s\n' "$category" "$test_name"
 }
 
+validate_manifest() {
+	if ! (
+		cd "$repo_root/conformance"
+		GOFLAGS= GOWORK=off go test ./mutants -run '^TestIntegrationManifest$' -count=1
+	); then
+		fail "integration mutant manifest validation failed"
+	fi
+}
+
+manifest_rows() {
+	python3 - "$repo_root/conformance/mutants/integration/manifest.json" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as source:
+    manifest = json.load(source)
+for mutant in manifest["mutants"]:
+    print("\t".join((mutant["id"], mutant["patch"], mutant["test_target"])))
+PY
+}
+
 printf '%s\n' 'Packaging unmodified integration mutation artifacts'
+validate_manifest
+configure_real_environment
 package_artifacts "$repo_root" baseline
 baseline_extension=$PACKAGE_EXTENSION_ARTIFACT
 baseline_adapter=$PACKAGE_ADAPTER_ARTIFACT
@@ -212,6 +272,16 @@ run_category \
 	progress-order \
 	conformance/mutants/integration/progress-order.patch \
 	TestRealMutationControlProgressOrder
+run_category \
+	pull-deduplication \
+	conformance/mutants/integration/pull-deduplication.patch \
+	TestRealS02DivergentPullPaginationIsStarvationFree
+
+manifest_rows >"$run_root/manifest.tsv"
+tab=$(printf '\t')
+while IFS="$tab" read -r category patch test_name; do
+	run_category "$category" "$patch" "$test_name"
+done <"$run_root/manifest.tsv"
 
 gate_passed=1
-printf '%s\n' 'Integration mutation gate passed: 6 killed, 0 survived'
+printf 'Integration mutation gate passed: %s killed, 0 survived\n' "$mutant_count"

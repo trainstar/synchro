@@ -1,0 +1,19 @@
+diff --git a/api/go/handlers.go b/api/go/handlers.go
+--- a/api/go/handlers.go
++++ b/api/go/handlers.go
+@@ -95,13 +95,9 @@ func (h *Handler) servePull(w http.ResponseWriter, r *http.Request) {
+ 		writeJSONError(w, http.StatusBadRequest, "client_id is required")
+ 		return
+ 	}
+-	resp, err := h.queryJSONB(
+-		r.Context(),
+-		"SELECT synchro.synchro_pull($1, $2::pg_catalog.jsonb)",
+-		userID,
+-		string(raw),
+-	)
++	// Mutant: the adapter fabricates a semantic pull result without the extension.
++	resp, err := []byte(`{"changes":[],"has_more":false,"scope_cursors":{}}`), error(nil)
+ 	if err != nil {
+ 		mapSQLError(w, err)
+ 		return
+ 	}

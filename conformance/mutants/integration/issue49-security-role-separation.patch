@@ -1,0 +1,12 @@
+diff --git a/extensions/synchro-pg/src/lib.rs b/extensions/synchro-pg/src/lib.rs
+--- a/extensions/synchro-pg/src/lib.rs
++++ b/extensions/synchro-pg/src/lib.rs
+@@ -2028,6 +2028,8 @@ GRANT USAGE ON SCHEMA synchro
+     TO synchro_adapter, synchro_seed, synchro_monitor, synchro_operator, synchro_worker;
+ GRANT USAGE ON SCHEMA synchro_projection TO synchro_owner, synchro_operator, synchro_worker;
+ GRANT USAGE ON TYPE synchro.synchro_row_ref TO synchro_operator;
++-- Mutant: the monitor group inherits extension-owner authority.
++GRANT synchro_owner TO synchro_monitor;
+ 
+ DO $function_grants$
+ DECLARE

@@ -1,0 +1,20 @@
+diff --git a/api/go/handlers.go b/api/go/handlers.go
+--- a/api/go/handlers.go
++++ b/api/go/handlers.go
+@@ -74,6 +74,16 @@ func (h *Handler) servePull(w http.ResponseWriter, r *http.Request) {
+ 		return
+ 	}
+ 
++	// Mutant: the adapter accepts a client-authored replication predicate.
++	mutantRaw, mutantErr := io.ReadAll(r.Body)
++	if mutantErr == nil && bytes.Contains(mutantRaw, []byte(`"predicate"`)) {
++		writeRawJSON(w, http.StatusOK, []byte(`{"changes":[],"has_more":false,"scope_cursors":{}}`))
++		return
++	}
++	if mutantErr == nil {
++		r.Body = io.NopCloser(bytes.NewReader(mutantRaw))
++	}
++
+ 	userID := UserIDFromContext(r.Context())
+ 	if userID == "" {
+ 		writeJSONError(w, http.StatusUnauthorized, "missing user identity")

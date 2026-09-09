@@ -1,0 +1,13 @@
+diff --git a/extensions/synchro-pg/src/health.rs b/extensions/synchro-pg/src/health.rs
+--- a/extensions/synchro-pg/src/health.rs
++++ b/extensions/synchro-pg/src/health.rs
+@@ -943,7 +943,8 @@ pub(crate) fn load_readiness_status_with_configuration(
+     );
+     status.set(
+         "relation_identity",
+-        known_check(raw.relation_identity_valid, "relation_identity_invalid"),
++        // Mutant: relation drift silently rebinds instead of blocking readiness.
++        known_check(true, "relation_identity_invalid"),
+     );
+     if configuration.publication.is_some() {
+         status.set(

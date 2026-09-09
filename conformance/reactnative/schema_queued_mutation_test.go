@@ -108,6 +108,26 @@ func TestSchemaQueuedMutationFinalCaptureRequestsDurableProof(t *testing.T) {
 	}
 }
 
+func TestSchemaQueuedMutationRestartRequiresNewProcessAndPreservesDatabase(t *testing.T) {
+	digest := strings.Repeat("a", 64)
+	oldProcess := actionProcessIdentity{ProcessID: "ios-app:101", DatabaseIdentityFingerprint: digest}
+	coordinator := &SchemaQueuedMutationCoordinator{process: &oldProcess}
+	opened := func(processID, databaseFingerprint string) json.RawMessage {
+		return json.RawMessage(fmt.Sprintf(`{"kind":"opened","status":{"state":"local_ready","retry_at":null,"operation":null,"failure":null},"process":{"process_id":%q,"database_identity_fingerprint":%q}}`, processID, databaseFingerprint))
+	}
+	if _, err := coordinator.validateRestarted(opened(oldProcess.ProcessID, digest)); err == nil || !strings.Contains(err.Error(), "want a new process identity") {
+		t.Fatalf("schema-queued-mutation accepted unchanged restart identity: %v", err)
+	}
+	newProcess := actionProcessIdentity{ProcessID: "ios-app:102", DatabaseIdentityFingerprint: digest}
+	observed, err := coordinator.validateRestarted(opened(newProcess.ProcessID, digest))
+	if err != nil || observed != newProcess {
+		t.Fatalf("schema-queued-mutation restarted process=%+v want=%+v error=%v", observed, newProcess, err)
+	}
+	if _, err := coordinator.validateRestarted(opened("ios-app:103", strings.Repeat("b", 64))); err == nil || !strings.Contains(err.Error(), "database identity fingerprint") {
+		t.Fatalf("schema-queued-mutation accepted changed database identity: %v", err)
+	}
+}
+
 func TestSchemaQueuedMutationPendingCaptureFailureNamesStoresAndRestartMoment(t *testing.T) {
 	coordinator := &SchemaQueuedMutationCoordinator{finalResult: &finalCapture{
 		Pending:  json.RawMessage(`[]`),

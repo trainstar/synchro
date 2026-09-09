@@ -27,6 +27,17 @@ function response(raw: string, sequence: number): ExchangeResponse {
   return value as unknown as ExchangeResponse;
 }
 
+function requiresProcessRelaunch(command: Record<string, unknown>): boolean {
+  const manifest = command.action;
+  if (typeof manifest !== 'object' || manifest === null || Array.isArray(manifest)) return false;
+  const action = (manifest as Record<string, unknown>).action;
+  if (typeof action !== 'object' || action === null || Array.isArray(action)) return false;
+  const fields = action as Record<string, unknown>;
+  if (fields.actor !== 'client' || fields.command !== 'open') return false;
+  const parameters = fields.parameters;
+  return typeof parameters === 'object' && parameters !== null && !Array.isArray(parameters) && (parameters as Record<string, unknown>).database_mode === 'reuse';
+}
+
 async function exchange(endpoint: string, token: string, sequence: number, result: string): Promise<ExchangeResponse> {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 30000);
@@ -41,6 +52,11 @@ async function exchange(endpoint: string, token: string, sequence: number, resul
 }
 
 async function execute(command: Record<string, unknown>): Promise<string> {
+  if (requiresProcessRelaunch(command)) {
+    await device.terminateApp();
+    await device.launchApp({ newInstance: true, delete: false, launchArgs: { synchroConformance: '1' } });
+    await expect(element(by.id('conformance-harness'))).toBeVisible();
+  }
   const serialized = JSON.stringify(command);
   await element(by.id('conformance-command-input')).replaceText(serialized);
   const input = await element(by.id('conformance-command-input')).getAttributes();

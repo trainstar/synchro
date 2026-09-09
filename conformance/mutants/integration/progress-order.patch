@@ -1,7 +1,7 @@
 diff --git a/extensions/synchro-pg/src/bgworker.rs b/extensions/synchro-pg/src/bgworker.rs
 --- a/extensions/synchro-pg/src/bgworker.rs
 +++ b/extensions/synchro-pg/src/bgworker.rs
-@@ -2690,8 +2690,6 @@ fn validate_progress_order(
+@@ -3572,8 +3572,6 @@ fn validate_progress_order(
          return Err(failure("activation_barrier", transaction.commit_lsn));
      }
      if progress_stream != stream_generation

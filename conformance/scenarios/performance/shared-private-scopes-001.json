@@ -5,13 +5,12 @@
   "title": "Deterministic scope membership performance scenario",
   "description": "The ordered workload proves the authored semantic outcome and performance declaration.",
   "requirement_ids": [
-    "SYNC-SCOPE-003"
+    "SYNC-SCOPE-003",
+    "SYNC-SCOPE-005"
   ],
   "normative_references": [
-    {
-      "path": "docs/src/content/docs/spec/04-invariants.mdx",
-      "anchor": "#deterministic-scope-membership"
-    }
+    {"path":"docs/src/content/docs/spec/04-invariants.mdx","anchor":"#deterministic-scope-membership"},
+    {"path":"docs/src/content/docs/spec/04-invariants.mdx","anchor":"#no-arbitrary-client-defined-replication-model"}
   ],
   "proof_types": [
     "reference-model",
@@ -95,7 +94,9 @@
       ],
       "fault_plan_id": "FPL-PERF-SHARED-PRIVATE-SCOPES-001",
       "control_id": "CTRL-SCOPE-003"
-    }
+    },
+    {"obligation_id":"OBL-PERF-SHARED-PRIVATE-SCOPES-SCOPE-005-PG-LINUX-X64-001","requirement_ids":["SYNC-SCOPE-005"],"assertion_ids":["ASSERT-PERF-SHARED-PRIVATE-SCOPES-SCOPE-005"],"proof_type":"server-black-box","support_cell_id":"SUP-PG-LINUX-X64-001","artifact_inventory_ids":["ARTDEF-PG-EXTENSION-001","ARTDEF-ADAPTER-001"],"performance_budget_ids":[],"required_measurement_ids":[],"required_vector_set_ids":[],"make_target":"test-blackbox","argv":["make","test-blackbox"],"fault_plan_id":null,"control_id":null},
+    {"obligation_id":"OBL-PERF-SHARED-PRIVATE-SCOPES-SCOPE-005-CONTROL-001","requirement_ids":["SYNC-SCOPE-005"],"assertion_ids":["ASSERT-PERF-SHARED-PRIVATE-SCOPES-SCOPE-005"],"proof_type":"negative-control","support_cell_id":null,"artifact_inventory_ids":["ARTDEF-CONFORMANCE-RUNNER-001","ARTDEF-PG-EXTENSION-001","ARTDEF-ADAPTER-001"],"performance_budget_ids":[],"required_measurement_ids":[],"required_vector_set_ids":[],"make_target":"test-conformance","argv":["make","test-conformance"],"fault_plan_id":"FPL-PERF-SHARED-PRIVATE-SCOPES-SCOPE-005","control_id":"CTRL-SCOPE-005"}
   ],
   "ownership": [
     {
@@ -129,7 +130,9 @@
       "assertion_id": "ASSERT-PERF-SHARED-PRIVATE-SCOPES-SEMANTIC-001",
       "proof_type": "negative-control",
       "support_cell_id": null
-    }
+    },
+    {"scenario_id":"SCN-PERF-SHARED-PRIVATE-SCOPES-001","requirement_id":"SYNC-SCOPE-005","proof_obligation_id":"OBL-PERF-SHARED-PRIVATE-SCOPES-SCOPE-005-PG-LINUX-X64-001","assertion_id":"ASSERT-PERF-SHARED-PRIVATE-SCOPES-SCOPE-005","proof_type":"server-black-box","support_cell_id":"SUP-PG-LINUX-X64-001"},
+    {"scenario_id":"SCN-PERF-SHARED-PRIVATE-SCOPES-001","requirement_id":"SYNC-SCOPE-005","proof_obligation_id":"OBL-PERF-SHARED-PRIVATE-SCOPES-SCOPE-005-CONTROL-001","assertion_id":"ASSERT-PERF-SHARED-PRIVATE-SCOPES-SCOPE-005","proof_type":"negative-control","support_cell_id":null}
   ],
   "model": {
     "setup": [
@@ -441,7 +444,8 @@
           "defect": "return a different normalized set or turn evaluation failure into empty membership"
         }
       }
-    }
+    },
+    {"id":"FPL-PERF-SHARED-PRIVATE-SCOPES-SCOPE-005","requirement_id":"SYNC-SCOPE-005","fault_id":"FAULT-SCOPE-005","control_id":"CTRL-SCOPE-005","barrier_id":"BAR-PERF-SHARED-PRIVATE-SCOPES-CONTROL-001","expected_assertion_ids":["ASSERT-PERF-SHARED-PRIVATE-SCOPES-SCOPE-005"],"injection":{"mechanism":"wire-fault","target":"sync request scope selector","operator":"inject","parameters":{"scenario":"send a validly authenticated request containing an ad hoc row predicate and scope SQL","defect":"execute client-authored replication input rather than accepting only server-assigned scope IDs"}}}
   ],
   "replay": {
     "mode": "deterministic",
@@ -459,7 +463,8 @@
       "detected_by": [
         "ASSERT-PERF-SHARED-PRIVATE-SCOPES-SEMANTIC-001"
       ]
-    }
+    },
+    {"control_id":"CTRL-SCOPE-005","requirement_id":"SYNC-SCOPE-005","fault_id":"FAULT-SCOPE-005","subject_artifact_inventory_ids":["ARTDEF-PG-EXTENSION-001","ARTDEF-ADAPTER-001"],"detected_by":["ASSERT-PERF-SHARED-PRIVATE-SCOPES-SCOPE-005"]}
   ],
   "steps": [
     {
@@ -712,6 +717,7 @@
         "observed_source": "system-under-test"
       },
       "detects_control_ids": []
-    }
+    },
+    {"id":"ASSERT-PERF-SHARED-PRIVATE-SCOPES-SCOPE-005","requirement_ids":["SYNC-SCOPE-005"],"description":"Authenticated sync requests reject client-authored predicates and scope SQL without durable progress.","expectation_ids":["EXPECT-PERF-SHARED-PRIVATE-SCOPES-SEMANTIC-001"],"predicate":{"contract_predicate":"state-equality","name":"state-equals-authored-model","payload":{}},"oracle":{"kind":"model-state-equality","expected_source":"authored-model","observed_source":"system-under-test"},"detects_control_ids":["CTRL-SCOPE-005"]}
   ]
 }

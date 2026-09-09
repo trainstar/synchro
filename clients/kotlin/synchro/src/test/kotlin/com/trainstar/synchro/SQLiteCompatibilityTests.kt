@@ -3,14 +3,14 @@ package com.trainstar.synchro
 import android.content.Context
 import androidx.test.core.app.ApplicationProvider
 import org.junit.After
-import org.junit.Assert.assertFalse
+import org.junit.Assert.assertEquals
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
 
 @RunWith(RobolectricTestRunner::class)
-@Config(sdk = [28])
+@Config(sdk = [24])
 class SQLiteCompatibilityTests {
     private val databases = TestDatabaseTracker()
 
@@ -20,7 +20,7 @@ class SQLiteCompatibilityTests {
     }
 
     @Test
-    fun emittedClientSQLUsesSQLite392Syntax() {
+    fun emittedClientSQLExecutesOnSupportedSQLite() {
         val database = databases.create(ApplicationProvider.getApplicationContext<Context>())
         val table = LocalSchemaTable(
             tableID = "orders",
@@ -37,37 +37,59 @@ class SQLiteCompatibilityTests {
         )
         installTestSchema(database, 1, "schema-hash", listOf(table))
 
-        val storedDDL = database.query("SELECT sql FROM sqlite_master WHERE sql IS NOT NULL")
-            .map { it.getValue("sql") as String }
-        val upsertSQL = listOf(
-            portableUpsertStatements("orders", listOf("id"), listOf("title")),
-            portableUpsertStatements("_synchro_scope_rows", listOf("scope_id", "table_name", "record_id"), emptyList()),
-        ).flatMap { listOfNotNull(it.update, it.insert) }
-
-        (storedDDL + upsertSQL).forEach(::assertSQLite392Compatible)
-    }
-
-    private fun assertSQLite392Compatible(sql: String) {
-        val upper = sql.uppercase()
-        val unsupported = listOf(
-            "ON CONFLICT",
-            " RETURNING ",
-            " GENERATED ALWAYS ",
-            " STRICT",
-            " DROP COLUMN ",
-            " RENAME COLUMN ",
-            " UPDATE FROM ",
-            " RIGHT JOIN ",
-            " FULL OUTER JOIN ",
-            " MATERIALIZED ",
-            " NOT MATERIALIZED ",
-            " NULLS FIRST",
-            " NULLS LAST",
-            " FILTER (",
-            " OVER (",
-        )
-        unsupported.forEach { feature ->
-            assertFalse("SQLite 3.9.2 does not support $feature in $sql", upper.contains(feature))
+        database.writeTransaction { db ->
+            db.execSQL("CREATE TABLE portable_upsert (id TEXT PRIMARY KEY, title TEXT)")
+            assertEquals(
+                1,
+                executeUpsert(
+                    db,
+                    "portable_upsert",
+                    listOf("id"),
+                    listOf("order-1"),
+                    listOf("title"),
+                    listOf("first title"),
+                ),
+            )
+            assertEquals(
+                1,
+                executeUpsert(
+                    db,
+                    "portable_upsert",
+                    listOf("id"),
+                    listOf("order-1"),
+                    listOf("title"),
+                    listOf("updated title"),
+                ),
+            )
+            db.execSQL("CREATE TABLE portable_key_only (id TEXT PRIMARY KEY)")
+            assertEquals(
+                1,
+                executeUpsert(
+                    db,
+                    "portable_key_only",
+                    listOf("id"),
+                    listOf("key-1"),
+                    emptyList(),
+                    emptyList(),
+                ),
+            )
+            assertEquals(
+                0,
+                executeUpsert(
+                    db,
+                    "portable_key_only",
+                    listOf("id"),
+                    listOf("key-1"),
+                    emptyList(),
+                    emptyList(),
+                ),
+            )
         }
+
+        assertEquals(
+            "updated title",
+            database.queryOne("SELECT title FROM portable_upsert WHERE id = ?", arrayOf("order-1"))?.get("title"),
+        )
+        assertEquals(1L, database.queryOne("SELECT COUNT(*) AS count FROM portable_key_only")?.get("count"))
     }
 }

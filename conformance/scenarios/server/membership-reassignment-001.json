@@ -5,12 +5,17 @@
   "title": "Dependency-driven scope reassignment",
   "description": "Materialize a synchronized row and two dependency changes in commit order without changing the row version or retaining stale membership.",
   "requirement_ids": [
-    "SYNC-MEMBERSHIP-001"
+    "SYNC-MEMBERSHIP-001",
+    "SYNC-WAL-009"
   ],
   "normative_references": [
     {
       "path": "docs/src/content/docs/spec/04-invariants.mdx",
       "anchor": "#dependency-driven-membership-propagation"
+    },
+    {
+      "path": "docs/src/content/docs/spec/04-invariants.mdx",
+      "anchor": "#one-to-one-version-fence-correlation"
     }
   ],
   "proof_types": [
@@ -118,6 +123,51 @@
       ],
       "fault_plan_id": "FPL-MEMBERSHIP-REASSIGNMENT-001",
       "control_id": "CTRL-MEMBERSHIP-001"
+    },
+    {
+      "obligation_id": "OBL-WAL-FENCE-CORRELATION-PG-LINUX-X64-001",
+      "requirement_ids": ["SYNC-WAL-009"],
+      "assertion_ids": ["ASSERT-WAL-FENCE-CORRELATION-SEMANTIC-001"],
+      "proof_type": "server-black-box",
+      "support_cell_id": "SUP-PG-LINUX-X64-001",
+      "artifact_inventory_ids": ["ARTDEF-PG-EXTENSION-001", "ARTDEF-ADAPTER-001"],
+      "performance_budget_ids": [],
+      "required_measurement_ids": [],
+      "required_vector_set_ids": [],
+      "make_target": "test-blackbox",
+      "argv": ["make", "test-blackbox"],
+      "fault_plan_id": null,
+      "control_id": null
+    },
+    {
+      "obligation_id": "OBL-WAL-FENCE-CORRELATION-FAULT-LINUX-X64-001",
+      "requirement_ids": ["SYNC-WAL-009"],
+      "assertion_ids": ["ASSERT-WAL-FENCE-CORRELATION-SEMANTIC-001"],
+      "proof_type": "fault-injection",
+      "support_cell_id": "SUP-PG-LINUX-X64-001",
+      "artifact_inventory_ids": ["ARTDEF-PG-EXTENSION-001", "ARTDEF-ADAPTER-001"],
+      "performance_budget_ids": [],
+      "required_measurement_ids": [],
+      "required_vector_set_ids": [],
+      "make_target": "test-blackbox",
+      "argv": ["make", "test-blackbox"],
+      "fault_plan_id": "FPL-WAL-FENCE-CORRELATION-001",
+      "control_id": "CTRL-WAL-009"
+    },
+    {
+      "obligation_id": "OBL-WAL-FENCE-CORRELATION-CONTROL-001",
+      "requirement_ids": ["SYNC-WAL-009"],
+      "assertion_ids": ["ASSERT-WAL-FENCE-CORRELATION-SEMANTIC-001"],
+      "proof_type": "negative-control",
+      "support_cell_id": null,
+      "artifact_inventory_ids": ["ARTDEF-CONFORMANCE-RUNNER-001", "ARTDEF-PG-EXTENSION-001"],
+      "performance_budget_ids": [],
+      "required_measurement_ids": [],
+      "required_vector_set_ids": [],
+      "make_target": "test-integration-mutants",
+      "argv": ["make", "test-integration-mutants"],
+      "fault_plan_id": "FPL-WAL-FENCE-CORRELATION-001",
+      "control_id": "CTRL-WAL-009"
     }
   ],
   "ownership": [
@@ -150,6 +200,30 @@
       "requirement_id": "SYNC-MEMBERSHIP-001",
       "proof_obligation_id": "OBL-MEMBERSHIP-REASSIGNMENT-CONTROL-001",
       "assertion_id": "ASSERT-MEMBERSHIP-REASSIGNMENT-SEMANTIC-001",
+      "proof_type": "negative-control",
+      "support_cell_id": null
+    },
+    {
+      "scenario_id": "SCN-MEMBERSHIP-REASSIGNMENT-001",
+      "requirement_id": "SYNC-WAL-009",
+      "proof_obligation_id": "OBL-WAL-FENCE-CORRELATION-PG-LINUX-X64-001",
+      "assertion_id": "ASSERT-WAL-FENCE-CORRELATION-SEMANTIC-001",
+      "proof_type": "server-black-box",
+      "support_cell_id": "SUP-PG-LINUX-X64-001"
+    },
+    {
+      "scenario_id": "SCN-MEMBERSHIP-REASSIGNMENT-001",
+      "requirement_id": "SYNC-WAL-009",
+      "proof_obligation_id": "OBL-WAL-FENCE-CORRELATION-FAULT-LINUX-X64-001",
+      "assertion_id": "ASSERT-WAL-FENCE-CORRELATION-SEMANTIC-001",
+      "proof_type": "fault-injection",
+      "support_cell_id": "SUP-PG-LINUX-X64-001"
+    },
+    {
+      "scenario_id": "SCN-MEMBERSHIP-REASSIGNMENT-001",
+      "requirement_id": "SYNC-WAL-009",
+      "proof_obligation_id": "OBL-WAL-FENCE-CORRELATION-CONTROL-001",
+      "assertion_id": "ASSERT-WAL-FENCE-CORRELATION-SEMANTIC-001",
       "proof_type": "negative-control",
       "support_cell_id": null
     }
@@ -387,6 +461,12 @@
           "wal-worker",
           "dependency-impact"
         ]
+      },
+      {
+        "id": "BAR-WAL-FENCE-CORRELATION-CONTROL-001",
+        "name": "Before row-level AFTER fence correlation",
+        "release_order": 2,
+        "participants": ["runner", "wal-worker"]
       }
     ]
   },
@@ -409,6 +489,23 @@
           "defect": "skip an affected source row or evaluate against later live state instead of captured old/new images"
         }
       }
+    },
+    {
+      "id": "FPL-WAL-FENCE-CORRELATION-001",
+      "requirement_id": "SYNC-WAL-009",
+      "fault_id": "FAULT-WAL-009",
+      "control_id": "CTRL-WAL-009",
+      "barrier_id": "BAR-WAL-FENCE-CORRELATION-CONTROL-001",
+      "expected_assertion_ids": ["ASSERT-WAL-FENCE-CORRELATION-SEMANTIC-001"],
+      "injection": {
+        "mechanism": "wire-fault",
+        "target": "row-level AFTER fence correlation stream",
+        "operator": "duplicate",
+        "parameters": {
+          "scenario": "execute repeated same-row DML, ON CONFLICT UPDATE, DO NOTHING, and capture-dependency writes",
+          "defect": "omit, duplicate, reorder, reuse, or add speculative fences or wrong table identity and continue capture"
+        }
+      }
     }
   ],
   "replay": {
@@ -427,6 +524,13 @@
       "detected_by": [
         "ASSERT-MEMBERSHIP-REASSIGNMENT-SEMANTIC-001"
       ]
+    },
+    {
+      "control_id": "CTRL-WAL-009",
+      "requirement_id": "SYNC-WAL-009",
+      "fault_id": "FAULT-WAL-009",
+      "subject_artifact_inventory_ids": ["ARTDEF-PG-EXTENSION-001"],
+      "detected_by": ["ASSERT-WAL-FENCE-CORRELATION-SEMANTIC-001"]
     }
   ],
   "steps": [
@@ -853,6 +957,15 @@
       "detects_control_ids": [
         "CTRL-MEMBERSHIP-001"
       ]
+    },
+    {
+      "id": "ASSERT-WAL-FENCE-CORRELATION-SEMANTIC-001",
+      "requirement_ids": ["SYNC-WAL-009"],
+      "description": "Each actual synced or capture-dependency operation correlates one AFTER fence by operation, ordinal, old and new keys, version, and distinct registration identity.",
+      "expectation_ids": ["EXPECT-MEMBERSHIP-REASSIGNMENT-SEMANTIC-001"],
+      "predicate": {"contract_predicate": "state-transition", "name": "legal-state-transition", "payload": {}},
+      "oracle": {"kind": "state-transition", "expected_source": "authored-model", "observed_source": "system-under-test"},
+      "detects_control_ids": ["CTRL-WAL-009"]
     }
   ]
 }

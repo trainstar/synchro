@@ -529,9 +529,11 @@ func (c *SchemaQueuedMutationCoordinator) acceptResultLocked(raw json.RawMessage
 		}
 		c.preRestart = &trace
 	case schemaQueuedMutationStageRestarted:
-		if _, err := validateOpenedResult(envelope.Result); err != nil {
+		process, err := c.validateRestarted(envelope.Result)
+		if err != nil {
 			return err
 		}
+		c.process = &process
 	case schemaQueuedMutationStageFinalCapture:
 		capture, err := c.validateFinalCapture(envelope.Result)
 		if err != nil {
@@ -707,6 +709,23 @@ func (c *SchemaQueuedMutationCoordinator) validateFinalCapture(raw json.RawMessa
 		return finalCapture{}, fmt.Errorf("React Native schema-queued-mutation restart status observed=invalid want=valid status error=%v", err)
 	}
 	return capture, nil
+}
+
+func (c *SchemaQueuedMutationCoordinator) validateRestarted(raw json.RawMessage) (actionProcessIdentity, error) {
+	process, err := validateOpenedResult(raw)
+	if err != nil {
+		return actionProcessIdentity{}, err
+	}
+	if c.process == nil {
+		return actionProcessIdentity{}, errors.New("React Native schema-queued-mutation prior process identity is unavailable")
+	}
+	if process.DatabaseIdentityFingerprint != c.process.DatabaseIdentityFingerprint {
+		return actionProcessIdentity{}, fmt.Errorf("React Native schema-queued-mutation restarted database identity fingerprint=%q want=%q", process.DatabaseIdentityFingerprint, c.process.DatabaseIdentityFingerprint)
+	}
+	if process.ProcessID == c.process.ProcessID {
+		return actionProcessIdentity{}, fmt.Errorf("React Native schema-queued-mutation restarted process_id=%q want a new process identity", process.ProcessID)
+	}
+	return process, nil
 }
 
 func validateSchemaQueuedMutationTrace(scenario scenarios.Scenario, trace traceSnapshot) error {

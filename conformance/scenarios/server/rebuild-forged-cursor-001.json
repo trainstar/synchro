@@ -5,27 +5,69 @@
   "title": "Forged rebuild continuation rejection",
   "description": "A forged continuation rejects the bound retry and preserves all durable state without token-byte inspection.",
   "requirement_ids": [
-    "SYNC-REBUILD-007"
+    "SYNC-REBUILD-007",
+    "SYNC-CURSOR-005",
+    "SYNC-REBUILD-011"
   ],
   "normative_references": [
     {
       "path": "docs/src/content/docs/spec/04-invariants.mdx",
       "anchor": "#authenticated-rebuild-continuation"
+    },
+    {
+      "path": "docs/src/content/docs/spec/04-invariants.mdx",
+      "anchor": "#complete-cursor-bindings"
+    },
+    {
+      "path": "docs/src/content/docs/spec/04-invariants.mdx",
+      "anchor": "#accepted-write-invalidates-older-rebuild"
     }
   ],
   "proof_types": [
+    "reference-model",
     "server-black-box",
     "native-e2e",
+    "fault-injection",
     "negative-control"
   ],
   "proof_obligations": [
     {
-      "obligation_id": "OBL-REBUILD-FORGED-CURSOR-PG-LINUX-X64-001",
+      "obligation_id": "OBL-REBUILD-FORGED-CURSOR-ISSUE49-RM-001",
       "requirement_ids": [
-        "SYNC-REBUILD-007"
+        "SYNC-CURSOR-005",
+        "SYNC-REBUILD-011"
       ],
       "assertion_ids": [
-        "ASSERT-REBUILD-FORGED-CURSOR-SEMANTIC-001"
+        "ASSERT-REBUILD-FORGED-CURSOR-BINDINGS-001",
+        "ASSERT-REBUILD-FORGED-CURSOR-EPOCH-001"
+      ],
+      "proof_type": "reference-model",
+      "support_cell_id": null,
+      "artifact_inventory_ids": [
+        "ARTDEF-CONFORMANCE-RUNNER-001"
+      ],
+      "performance_budget_ids": [],
+      "required_measurement_ids": [],
+      "required_vector_set_ids": [],
+      "make_target": "test-conformance",
+      "argv": [
+        "make",
+        "test-conformance"
+      ],
+      "fault_plan_id": null,
+      "control_id": null
+    },
+    {
+      "obligation_id": "OBL-REBUILD-FORGED-CURSOR-PG-LINUX-X64-001",
+      "requirement_ids": [
+        "SYNC-REBUILD-007",
+        "SYNC-CURSOR-005",
+        "SYNC-REBUILD-011"
+      ],
+      "assertion_ids": [
+        "ASSERT-REBUILD-FORGED-CURSOR-SEMANTIC-001",
+        "ASSERT-REBUILD-FORGED-CURSOR-BINDINGS-001",
+        "ASSERT-REBUILD-FORGED-CURSOR-EPOCH-001"
       ],
       "proof_type": "server-black-box",
       "support_cell_id": "SUP-PG-LINUX-X64-001",
@@ -47,10 +89,14 @@
     {
       "obligation_id": "OBL-REBUILD-FORGED-CURSOR-MACOS-CURRENT-001",
       "requirement_ids": [
-        "SYNC-REBUILD-007"
+        "SYNC-REBUILD-007",
+        "SYNC-CURSOR-005",
+        "SYNC-REBUILD-011"
       ],
       "assertion_ids": [
-        "ASSERT-REBUILD-FORGED-CURSOR-SEMANTIC-001"
+        "ASSERT-REBUILD-FORGED-CURSOR-SEMANTIC-001",
+        "ASSERT-REBUILD-FORGED-CURSOR-BINDINGS-001",
+        "ASSERT-REBUILD-FORGED-CURSOR-EPOCH-001"
       ],
       "proof_type": "native-e2e",
       "support_cell_id": "SUP-MACOS-CURRENT-001",
@@ -73,10 +119,14 @@
     {
       "obligation_id": "OBL-REBUILD-FORGED-CURSOR-ANDROID-CURRENT-001",
       "requirement_ids": [
-        "SYNC-REBUILD-007"
+        "SYNC-REBUILD-007",
+        "SYNC-CURSOR-005",
+        "SYNC-REBUILD-011"
       ],
       "assertion_ids": [
-        "ASSERT-REBUILD-FORGED-CURSOR-SEMANTIC-001"
+        "ASSERT-REBUILD-FORGED-CURSOR-SEMANTIC-001",
+        "ASSERT-REBUILD-FORGED-CURSOR-BINDINGS-001",
+        "ASSERT-REBUILD-FORGED-CURSOR-EPOCH-001"
       ],
       "proof_type": "native-e2e",
       "support_cell_id": "SUP-ANDROID-CURRENT-001",
@@ -99,10 +149,14 @@
     {
       "obligation_id": "OBL-REBUILD-FORGED-CURSOR-RN-IOS-CURRENT-001",
       "requirement_ids": [
-        "SYNC-REBUILD-007"
+        "SYNC-REBUILD-007",
+        "SYNC-CURSOR-005",
+        "SYNC-REBUILD-011"
       ],
       "assertion_ids": [
-        "ASSERT-REBUILD-FORGED-CURSOR-SEMANTIC-001"
+        "ASSERT-REBUILD-FORGED-CURSOR-SEMANTIC-001",
+        "ASSERT-REBUILD-FORGED-CURSOR-BINDINGS-001",
+        "ASSERT-REBUILD-FORGED-CURSOR-EPOCH-001"
       ],
       "proof_type": "native-e2e",
       "support_cell_id": "SUP-RN-IOS-CURRENT-001",
@@ -127,10 +181,14 @@
     {
       "obligation_id": "OBL-REBUILD-FORGED-CURSOR-RN-ANDROID-CURRENT-001",
       "requirement_ids": [
-        "SYNC-REBUILD-007"
+        "SYNC-REBUILD-007",
+        "SYNC-CURSOR-005",
+        "SYNC-REBUILD-011"
       ],
       "assertion_ids": [
-        "ASSERT-REBUILD-FORGED-CURSOR-SEMANTIC-001"
+        "ASSERT-REBUILD-FORGED-CURSOR-SEMANTIC-001",
+        "ASSERT-REBUILD-FORGED-CURSOR-BINDINGS-001",
+        "ASSERT-REBUILD-FORGED-CURSOR-EPOCH-001"
       ],
       "proof_type": "native-e2e",
       "support_cell_id": "SUP-RN-ANDROID-CURRENT-001",
@@ -150,6 +208,31 @@
       ],
       "fault_plan_id": null,
       "control_id": null
+    },
+    {
+      "obligation_id": "OBL-REBUILD-FORGED-CURSOR-EPOCH-FAULT-001",
+      "requirement_ids": [
+        "SYNC-REBUILD-011"
+      ],
+      "assertion_ids": [
+        "ASSERT-REBUILD-FORGED-CURSOR-EPOCH-001"
+      ],
+      "proof_type": "fault-injection",
+      "support_cell_id": "SUP-PG-LINUX-X64-001",
+      "artifact_inventory_ids": [
+        "ARTDEF-PG-EXTENSION-001",
+        "ARTDEF-ADAPTER-001"
+      ],
+      "performance_budget_ids": [],
+      "required_measurement_ids": [],
+      "required_vector_set_ids": [],
+      "make_target": "test-blackbox",
+      "argv": [
+        "make",
+        "test-blackbox"
+      ],
+      "fault_plan_id": "FPL-REBUILD-FORGED-CURSOR-EPOCH-001",
+      "control_id": "CTRL-REBUILD-011"
     },
     {
       "obligation_id": "OBL-REBUILD-FORGED-CURSOR-CONTROL-001",
@@ -176,6 +259,56 @@
       ],
       "fault_plan_id": "FPL-REBUILD-FORGED-CURSOR-001",
       "control_id": "CTRL-REBUILD-007"
+    },
+    {
+      "obligation_id": "OBL-REBUILD-FORGED-CURSOR-BINDINGS-CONTROL-001",
+      "requirement_ids": [
+        "SYNC-CURSOR-005"
+      ],
+      "assertion_ids": [
+        "ASSERT-REBUILD-FORGED-CURSOR-BINDINGS-001"
+      ],
+      "proof_type": "negative-control",
+      "support_cell_id": null,
+      "artifact_inventory_ids": [
+        "ARTDEF-CONFORMANCE-RUNNER-001",
+        "ARTDEF-PG-EXTENSION-001"
+      ],
+      "performance_budget_ids": [],
+      "required_measurement_ids": [],
+      "required_vector_set_ids": [],
+      "make_target": "test-integration-mutants",
+      "argv": [
+        "make",
+        "test-integration-mutants"
+      ],
+      "fault_plan_id": "FPL-REBUILD-FORGED-CURSOR-BINDINGS-001",
+      "control_id": "CTRL-CURSOR-005"
+    },
+    {
+      "obligation_id": "OBL-REBUILD-FORGED-CURSOR-EPOCH-CONTROL-001",
+      "requirement_ids": [
+        "SYNC-REBUILD-011"
+      ],
+      "assertion_ids": [
+        "ASSERT-REBUILD-FORGED-CURSOR-EPOCH-001"
+      ],
+      "proof_type": "negative-control",
+      "support_cell_id": null,
+      "artifact_inventory_ids": [
+        "ARTDEF-CONFORMANCE-RUNNER-001",
+        "ARTDEF-PG-EXTENSION-001"
+      ],
+      "performance_budget_ids": [],
+      "required_measurement_ids": [],
+      "required_vector_set_ids": [],
+      "make_target": "test-integration-mutants",
+      "argv": [
+        "make",
+        "test-integration-mutants"
+      ],
+      "fault_plan_id": "FPL-REBUILD-FORGED-CURSOR-EPOCH-001",
+      "control_id": "CTRL-REBUILD-011"
     }
   ],
   "ownership": [
@@ -226,6 +359,126 @@
       "assertion_id": "ASSERT-REBUILD-FORGED-CURSOR-SEMANTIC-001",
       "proof_type": "negative-control",
       "support_cell_id": null
+    },
+    {
+      "scenario_id": "SCN-REBUILD-FORGED-CURSOR-001",
+      "requirement_id": "SYNC-CURSOR-005",
+      "proof_obligation_id": "OBL-REBUILD-FORGED-CURSOR-BINDINGS-CONTROL-001",
+      "assertion_id": "ASSERT-REBUILD-FORGED-CURSOR-BINDINGS-001",
+      "proof_type": "negative-control",
+      "support_cell_id": null
+    },
+    {
+      "scenario_id": "SCN-REBUILD-FORGED-CURSOR-001",
+      "requirement_id": "SYNC-REBUILD-011",
+      "proof_obligation_id": "OBL-REBUILD-FORGED-CURSOR-EPOCH-CONTROL-001",
+      "assertion_id": "ASSERT-REBUILD-FORGED-CURSOR-EPOCH-001",
+      "proof_type": "negative-control",
+      "support_cell_id": null
+    },
+    {
+      "scenario_id": "SCN-REBUILD-FORGED-CURSOR-001",
+      "requirement_id": "SYNC-CURSOR-005",
+      "proof_obligation_id": "OBL-REBUILD-FORGED-CURSOR-ISSUE49-RM-001",
+      "assertion_id": "ASSERT-REBUILD-FORGED-CURSOR-BINDINGS-001",
+      "proof_type": "reference-model",
+      "support_cell_id": null
+    },
+    {
+      "scenario_id": "SCN-REBUILD-FORGED-CURSOR-001",
+      "requirement_id": "SYNC-CURSOR-005",
+      "proof_obligation_id": "OBL-REBUILD-FORGED-CURSOR-PG-LINUX-X64-001",
+      "assertion_id": "ASSERT-REBUILD-FORGED-CURSOR-BINDINGS-001",
+      "proof_type": "server-black-box",
+      "support_cell_id": "SUP-PG-LINUX-X64-001"
+    },
+    {
+      "scenario_id": "SCN-REBUILD-FORGED-CURSOR-001",
+      "requirement_id": "SYNC-CURSOR-005",
+      "proof_obligation_id": "OBL-REBUILD-FORGED-CURSOR-MACOS-CURRENT-001",
+      "assertion_id": "ASSERT-REBUILD-FORGED-CURSOR-BINDINGS-001",
+      "proof_type": "native-e2e",
+      "support_cell_id": "SUP-MACOS-CURRENT-001"
+    },
+    {
+      "scenario_id": "SCN-REBUILD-FORGED-CURSOR-001",
+      "requirement_id": "SYNC-CURSOR-005",
+      "proof_obligation_id": "OBL-REBUILD-FORGED-CURSOR-ANDROID-CURRENT-001",
+      "assertion_id": "ASSERT-REBUILD-FORGED-CURSOR-BINDINGS-001",
+      "proof_type": "native-e2e",
+      "support_cell_id": "SUP-ANDROID-CURRENT-001"
+    },
+    {
+      "scenario_id": "SCN-REBUILD-FORGED-CURSOR-001",
+      "requirement_id": "SYNC-CURSOR-005",
+      "proof_obligation_id": "OBL-REBUILD-FORGED-CURSOR-RN-IOS-CURRENT-001",
+      "assertion_id": "ASSERT-REBUILD-FORGED-CURSOR-BINDINGS-001",
+      "proof_type": "native-e2e",
+      "support_cell_id": "SUP-RN-IOS-CURRENT-001"
+    },
+    {
+      "scenario_id": "SCN-REBUILD-FORGED-CURSOR-001",
+      "requirement_id": "SYNC-CURSOR-005",
+      "proof_obligation_id": "OBL-REBUILD-FORGED-CURSOR-RN-ANDROID-CURRENT-001",
+      "assertion_id": "ASSERT-REBUILD-FORGED-CURSOR-BINDINGS-001",
+      "proof_type": "native-e2e",
+      "support_cell_id": "SUP-RN-ANDROID-CURRENT-001"
+    },
+    {
+      "scenario_id": "SCN-REBUILD-FORGED-CURSOR-001",
+      "requirement_id": "SYNC-REBUILD-011",
+      "proof_obligation_id": "OBL-REBUILD-FORGED-CURSOR-ISSUE49-RM-001",
+      "assertion_id": "ASSERT-REBUILD-FORGED-CURSOR-EPOCH-001",
+      "proof_type": "reference-model",
+      "support_cell_id": null
+    },
+    {
+      "scenario_id": "SCN-REBUILD-FORGED-CURSOR-001",
+      "requirement_id": "SYNC-REBUILD-011",
+      "proof_obligation_id": "OBL-REBUILD-FORGED-CURSOR-PG-LINUX-X64-001",
+      "assertion_id": "ASSERT-REBUILD-FORGED-CURSOR-EPOCH-001",
+      "proof_type": "server-black-box",
+      "support_cell_id": "SUP-PG-LINUX-X64-001"
+    },
+    {
+      "scenario_id": "SCN-REBUILD-FORGED-CURSOR-001",
+      "requirement_id": "SYNC-REBUILD-011",
+      "proof_obligation_id": "OBL-REBUILD-FORGED-CURSOR-MACOS-CURRENT-001",
+      "assertion_id": "ASSERT-REBUILD-FORGED-CURSOR-EPOCH-001",
+      "proof_type": "native-e2e",
+      "support_cell_id": "SUP-MACOS-CURRENT-001"
+    },
+    {
+      "scenario_id": "SCN-REBUILD-FORGED-CURSOR-001",
+      "requirement_id": "SYNC-REBUILD-011",
+      "proof_obligation_id": "OBL-REBUILD-FORGED-CURSOR-ANDROID-CURRENT-001",
+      "assertion_id": "ASSERT-REBUILD-FORGED-CURSOR-EPOCH-001",
+      "proof_type": "native-e2e",
+      "support_cell_id": "SUP-ANDROID-CURRENT-001"
+    },
+    {
+      "scenario_id": "SCN-REBUILD-FORGED-CURSOR-001",
+      "requirement_id": "SYNC-REBUILD-011",
+      "proof_obligation_id": "OBL-REBUILD-FORGED-CURSOR-RN-IOS-CURRENT-001",
+      "assertion_id": "ASSERT-REBUILD-FORGED-CURSOR-EPOCH-001",
+      "proof_type": "native-e2e",
+      "support_cell_id": "SUP-RN-IOS-CURRENT-001"
+    },
+    {
+      "scenario_id": "SCN-REBUILD-FORGED-CURSOR-001",
+      "requirement_id": "SYNC-REBUILD-011",
+      "proof_obligation_id": "OBL-REBUILD-FORGED-CURSOR-RN-ANDROID-CURRENT-001",
+      "assertion_id": "ASSERT-REBUILD-FORGED-CURSOR-EPOCH-001",
+      "proof_type": "native-e2e",
+      "support_cell_id": "SUP-RN-ANDROID-CURRENT-001"
+    },
+    {
+      "scenario_id": "SCN-REBUILD-FORGED-CURSOR-001",
+      "requirement_id": "SYNC-REBUILD-011",
+      "proof_obligation_id": "OBL-REBUILD-FORGED-CURSOR-EPOCH-FAULT-001",
+      "assertion_id": "ASSERT-REBUILD-FORGED-CURSOR-EPOCH-001",
+      "proof_type": "fault-injection",
+      "support_cell_id": "SUP-PG-LINUX-X64-001"
     }
   ],
   "model": {
@@ -611,6 +864,44 @@
           "defect": "accept forged, cross-context, resized, expired, or expiry-extended continuation"
         }
       }
+    },
+    {
+      "id": "FPL-REBUILD-FORGED-CURSOR-BINDINGS-001",
+      "requirement_id": "SYNC-CURSOR-005",
+      "fault_id": "FAULT-CURSOR-005",
+      "control_id": "CTRL-CURSOR-005",
+      "barrier_id": "BAR-REBUILD-FORGED-CURSOR-CONTROL-001",
+      "expected_assertion_ids": [
+        "ASSERT-REBUILD-FORGED-CURSOR-BINDINGS-001"
+      ],
+      "injection": {
+        "mechanism": "wire-fault",
+        "target": "incremental cursor authentication input",
+        "operator": "misbind",
+        "parameters": {
+          "scenario": "reuse a signed cursor with changed client, generation, scope, schema, retention, position, issue-time, or key context",
+          "defect": "accept an omitted or mismatched binding or classify forged state as stale authenticated state"
+        }
+      }
+    },
+    {
+      "id": "FPL-REBUILD-FORGED-CURSOR-EPOCH-001",
+      "requirement_id": "SYNC-REBUILD-011",
+      "fault_id": "FAULT-REBUILD-011",
+      "control_id": "CTRL-REBUILD-011",
+      "barrier_id": "BAR-REBUILD-FORGED-CURSOR-CONTROL-001",
+      "expected_assertion_ids": [
+        "ASSERT-REBUILD-FORGED-CURSOR-EPOCH-001"
+      ],
+      "injection": {
+        "mechanism": "wire-fault",
+        "target": "stored rebuild page accepted-write epoch check",
+        "operator": "replay",
+        "parameters": {
+          "scenario": "stage a rebuild, execute an accepted first push, then replay an older rebuild page",
+          "defect": "return records or progress from the old epoch instead of rebuild_restart_required without records"
+        }
+      }
     }
   ],
   "replay": {
@@ -629,6 +920,28 @@
       ],
       "detected_by": [
         "ASSERT-REBUILD-FORGED-CURSOR-SEMANTIC-001"
+      ]
+    },
+    {
+      "control_id": "CTRL-CURSOR-005",
+      "requirement_id": "SYNC-CURSOR-005",
+      "fault_id": "FAULT-CURSOR-005",
+      "subject_artifact_inventory_ids": [
+        "ARTDEF-PG-EXTENSION-001"
+      ],
+      "detected_by": [
+        "ASSERT-REBUILD-FORGED-CURSOR-BINDINGS-001"
+      ]
+    },
+    {
+      "control_id": "CTRL-REBUILD-011",
+      "requirement_id": "SYNC-REBUILD-011",
+      "fault_id": "FAULT-REBUILD-011",
+      "subject_artifact_inventory_ids": [
+        "ARTDEF-PG-EXTENSION-001"
+      ],
+      "detected_by": [
+        "ASSERT-REBUILD-FORGED-CURSOR-EPOCH-001"
       ]
     }
   ],
@@ -920,6 +1233,54 @@
       },
       "detects_control_ids": [
         "CTRL-REBUILD-007"
+      ]
+    },
+    {
+      "id": "ASSERT-REBUILD-FORGED-CURSOR-BINDINGS-001",
+      "requirement_ids": [
+        "SYNC-CURSOR-005"
+      ],
+      "description": "The cursor-binding control detects an accepted cursor with any omitted, forged, or mismatched context binding.",
+      "expectation_ids": [
+        "EXPECT-REBUILD-FORGED-CURSOR-WIRE-001",
+        "EXPECT-REBUILD-FORGED-CURSOR-STATE-001"
+      ],
+      "predicate": {
+        "contract_predicate": "wire-outcome",
+        "name": "canonical-wire-outcome",
+        "payload": {}
+      },
+      "oracle": {
+        "kind": "wire-contract",
+        "expected_source": "authored-model",
+        "observed_source": "system-under-test"
+      },
+      "detects_control_ids": [
+        "CTRL-CURSOR-005"
+      ]
+    },
+    {
+      "id": "ASSERT-REBUILD-FORGED-CURSOR-EPOCH-001",
+      "requirement_ids": [
+        "SYNC-REBUILD-011"
+      ],
+      "description": "The rebuild-epoch control detects records or durable progress from a rebuild page staged before an accepted write.",
+      "expectation_ids": [
+        "EXPECT-REBUILD-FORGED-CURSOR-WIRE-001",
+        "EXPECT-REBUILD-FORGED-CURSOR-STATE-001"
+      ],
+      "predicate": {
+        "contract_predicate": "wire-outcome",
+        "name": "canonical-wire-outcome",
+        "payload": {}
+      },
+      "oracle": {
+        "kind": "wire-contract",
+        "expected_source": "authored-model",
+        "observed_source": "system-under-test"
+      },
+      "detects_control_ids": [
+        "CTRL-REBUILD-011"
       ]
     }
   ]

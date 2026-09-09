@@ -1,0 +1,12 @@
+diff --git a/extensions/synchro-pg/src/lib.rs b/extensions/synchro-pg/src/lib.rs
+--- a/extensions/synchro-pg/src/lib.rs
++++ b/extensions/synchro-pg/src/lib.rs
+@@ -40,4 +40,8 @@ pgrx::extension_sql!(
+     r#"
++-- Mutant: opportunistic pre-baseline compatibility logic.
++CREATE TABLE IF NOT EXISTS sync_pre_0_3_0_compatibility (
++    legacy_version TEXT PRIMARY KEY
++);
+ CREATE TABLE IF NOT EXISTS sync_runtime_state (
+     singleton BOOLEAN PRIMARY KEY DEFAULT true CHECK (singleton),
+     stream_generation TEXT NOT NULL,

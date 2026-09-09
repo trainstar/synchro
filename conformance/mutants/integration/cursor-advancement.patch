@@ -1,9 +1,7 @@
 diff --git a/extensions/synchro-pg/src/pull.rs b/extensions/synchro-pg/src/pull.rs
 --- a/extensions/synchro-pg/src/pull.rs
 +++ b/extensions/synchro-pg/src/pull.rs
-@@ -234,9 +234,9 @@ pub(crate) fn pull(user_id: &str, request: PullRequest) -> PullResponse {
-                 .get(scope_id)
-                 .is_some_and(|candidates| candidates.len() > selected.len());
+@@ -254,7 +254,7 @@ fn synchro_pull_contract(p_user_id: &str, p_request: pgrx::JsonB) -> pgrx::JsonB
              let safe_position = if remaining {
                  selected.last().map(|candidate| &candidate.entry.position)
              } else {

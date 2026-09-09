@@ -1,0 +1,13 @@
+diff --git a/api/go/handlers.go b/api/go/handlers.go
+--- a/api/go/handlers.go
++++ b/api/go/handlers.go
+@@ -286,6 +286,8 @@ func decodeJSONBodyObject(w http.ResponseWriter, r *http.Request, allowedMembers
+ 	if len(raw) > maxJSONBodyBytes {
+ 		writeJSONError(w, http.StatusBadRequest, "invalid request body")
+ 		return nil, nil, false
+ 	}
++	// Mutant: emit the raw identity-bearing request into operational logs.
++	log.Printf("[synchro] raw request: %s", raw)
+ 	if len(bytes.TrimSpace(raw)) == 0 {
+ 		writeJSONError(w, http.StatusBadRequest, "invalid request body")
+ 		return nil, nil, false

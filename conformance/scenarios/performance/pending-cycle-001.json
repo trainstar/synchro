@@ -5,28 +5,50 @@
   "title": "Canonical mutation reconciliation performance scenario",
   "description": "The ordered workload proves the authored semantic outcome and performance declaration.",
   "requirement_ids": [
-    "SYNC-MUTATION-002"
+    "SYNC-MUTATION-002",
+    "SYNC-CONFLICT-002",
+    "SYNC-TIME-002",
+    "SYNC-VOCAB-001"
   ],
   "normative_references": [
     {
       "path": "docs/src/content/docs/spec/04-invariants.mdx",
       "anchor": "#canonical-server-outcome"
+    },
+    {
+      "path": "docs/src/content/docs/spec/04-invariants.mdx",
+      "anchor": "#concurrent-update-delete-conservation"
+    },
+    {
+      "path": "docs/src/content/docs/spec/04-invariants.mdx",
+      "anchor": "#client-time-has-no-conflict-authority"
+    },
+    {
+      "path": "docs/src/content/docs/spec/04-invariants.mdx",
+      "anchor": "#canonical-operation-vocabulary"
     }
   ],
   "proof_types": [
     "reference-model",
     "server-black-box",
     "native-e2e",
+    "fault-injection",
     "negative-control"
   ],
   "proof_obligations": [
     {
       "obligation_id": "OBL-PERF-PENDING-CYCLE-RM-001",
       "requirement_ids": [
-        "SYNC-MUTATION-002"
+        "SYNC-MUTATION-002",
+        "SYNC-CONFLICT-002",
+        "SYNC-TIME-002",
+        "SYNC-VOCAB-001"
       ],
       "assertion_ids": [
-        "ASSERT-PERF-PENDING-CYCLE-SEMANTIC-001"
+        "ASSERT-PERF-PENDING-CYCLE-SEMANTIC-001",
+        "ASSERT-PERF-PENDING-CYCLE-CONFLICT-001",
+        "ASSERT-PERF-PENDING-CYCLE-TIME-001",
+        "ASSERT-PERF-PENDING-CYCLE-VOCAB-001"
       ],
       "proof_type": "reference-model",
       "support_cell_id": null,
@@ -47,11 +69,17 @@
     {
       "obligation_id": "OBL-PERF-PENDING-CYCLE-PG-LINUX-X64-001",
       "requirement_ids": [
-        "SYNC-MUTATION-002"
+        "SYNC-MUTATION-002",
+        "SYNC-CONFLICT-002",
+        "SYNC-TIME-002",
+        "SYNC-VOCAB-001"
       ],
       "assertion_ids": [
         "ASSERT-PERF-PENDING-CYCLE-SEMANTIC-001",
-        "ASSERT-PERF-PENDING-CYCLE-PERFORMANCE-001"
+        "ASSERT-PERF-PENDING-CYCLE-PERFORMANCE-001",
+        "ASSERT-PERF-PENDING-CYCLE-CONFLICT-001",
+        "ASSERT-PERF-PENDING-CYCLE-TIME-001",
+        "ASSERT-PERF-PENDING-CYCLE-VOCAB-001"
       ],
       "proof_type": "server-black-box",
       "support_cell_id": "SUP-PG-LINUX-X64-001",
@@ -290,6 +318,31 @@
       "control_id": null
     },
     {
+      "obligation_id": "OBL-PERF-PENDING-CYCLE-CONFLICT-FAULT-001",
+      "requirement_ids": [
+        "SYNC-CONFLICT-002"
+      ],
+      "assertion_ids": [
+        "ASSERT-PERF-PENDING-CYCLE-CONFLICT-001"
+      ],
+      "proof_type": "fault-injection",
+      "support_cell_id": "SUP-PG-LINUX-X64-001",
+      "artifact_inventory_ids": [
+        "ARTDEF-PG-EXTENSION-001",
+        "ARTDEF-ADAPTER-001"
+      ],
+      "performance_budget_ids": [],
+      "required_measurement_ids": [],
+      "required_vector_set_ids": [],
+      "make_target": "test-blackbox",
+      "argv": [
+        "make",
+        "test-blackbox"
+      ],
+      "fault_plan_id": "FPL-PERF-PENDING-CYCLE-CONFLICT-001",
+      "control_id": "CTRL-CONFLICT-002"
+    },
+    {
       "obligation_id": "OBL-PERF-PENDING-CYCLE-CONTROL-001",
       "requirement_ids": [
         "SYNC-MUTATION-002"
@@ -316,6 +369,81 @@
       ],
       "fault_plan_id": "FPL-PERF-PENDING-CYCLE-001",
       "control_id": "CTRL-MUTATION-002"
+    },
+    {
+      "obligation_id": "OBL-PERF-PENDING-CYCLE-CONFLICT-CONTROL-001",
+      "requirement_ids": [
+        "SYNC-CONFLICT-002"
+      ],
+      "assertion_ids": [
+        "ASSERT-PERF-PENDING-CYCLE-CONFLICT-001"
+      ],
+      "proof_type": "negative-control",
+      "support_cell_id": null,
+      "artifact_inventory_ids": [
+        "ARTDEF-CONFORMANCE-RUNNER-001",
+        "ARTDEF-PG-EXTENSION-001"
+      ],
+      "performance_budget_ids": [],
+      "required_measurement_ids": [],
+      "required_vector_set_ids": [],
+      "make_target": "test-integration-mutants",
+      "argv": [
+        "make",
+        "test-integration-mutants"
+      ],
+      "fault_plan_id": "FPL-PERF-PENDING-CYCLE-CONFLICT-001",
+      "control_id": "CTRL-CONFLICT-002"
+    },
+    {
+      "obligation_id": "OBL-PERF-PENDING-CYCLE-TIME-CONTROL-001",
+      "requirement_ids": [
+        "SYNC-TIME-002"
+      ],
+      "assertion_ids": [
+        "ASSERT-PERF-PENDING-CYCLE-TIME-001"
+      ],
+      "proof_type": "negative-control",
+      "support_cell_id": null,
+      "artifact_inventory_ids": [
+        "ARTDEF-CONFORMANCE-RUNNER-001",
+        "ARTDEF-PG-EXTENSION-001"
+      ],
+      "performance_budget_ids": [],
+      "required_measurement_ids": [],
+      "required_vector_set_ids": [],
+      "make_target": "test-integration-mutants",
+      "argv": [
+        "make",
+        "test-integration-mutants"
+      ],
+      "fault_plan_id": "FPL-PERF-PENDING-CYCLE-TIME-001",
+      "control_id": "CTRL-TIME-002"
+    },
+    {
+      "obligation_id": "OBL-PERF-PENDING-CYCLE-VOCAB-CONTROL-001",
+      "requirement_ids": [
+        "SYNC-VOCAB-001"
+      ],
+      "assertion_ids": [
+        "ASSERT-PERF-PENDING-CYCLE-VOCAB-001"
+      ],
+      "proof_type": "negative-control",
+      "support_cell_id": null,
+      "artifact_inventory_ids": [
+        "ARTDEF-CONFORMANCE-RUNNER-001",
+        "ARTDEF-PG-EXTENSION-001"
+      ],
+      "performance_budget_ids": [],
+      "required_measurement_ids": [],
+      "required_vector_set_ids": [],
+      "make_target": "test-integration-mutants",
+      "argv": [
+        "make",
+        "test-integration-mutants"
+      ],
+      "fault_plan_id": "FPL-PERF-PENDING-CYCLE-VOCAB-001",
+      "control_id": "CTRL-VOCAB-001"
     }
   ],
   "ownership": [
@@ -430,6 +558,86 @@
       "assertion_id": "ASSERT-PERF-PENDING-CYCLE-SEMANTIC-001",
       "proof_type": "negative-control",
       "support_cell_id": null
+    },
+    {
+      "scenario_id": "SCN-PERF-PENDING-CYCLE-001",
+      "requirement_id": "SYNC-CONFLICT-002",
+      "proof_obligation_id": "OBL-PERF-PENDING-CYCLE-CONFLICT-CONTROL-001",
+      "assertion_id": "ASSERT-PERF-PENDING-CYCLE-CONFLICT-001",
+      "proof_type": "negative-control",
+      "support_cell_id": null
+    },
+    {
+      "scenario_id": "SCN-PERF-PENDING-CYCLE-001",
+      "requirement_id": "SYNC-TIME-002",
+      "proof_obligation_id": "OBL-PERF-PENDING-CYCLE-TIME-CONTROL-001",
+      "assertion_id": "ASSERT-PERF-PENDING-CYCLE-TIME-001",
+      "proof_type": "negative-control",
+      "support_cell_id": null
+    },
+    {
+      "scenario_id": "SCN-PERF-PENDING-CYCLE-001",
+      "requirement_id": "SYNC-VOCAB-001",
+      "proof_obligation_id": "OBL-PERF-PENDING-CYCLE-VOCAB-CONTROL-001",
+      "assertion_id": "ASSERT-PERF-PENDING-CYCLE-VOCAB-001",
+      "proof_type": "negative-control",
+      "support_cell_id": null
+    },
+    {
+      "scenario_id": "SCN-PERF-PENDING-CYCLE-001",
+      "requirement_id": "SYNC-CONFLICT-002",
+      "proof_obligation_id": "OBL-PERF-PENDING-CYCLE-RM-001",
+      "assertion_id": "ASSERT-PERF-PENDING-CYCLE-CONFLICT-001",
+      "proof_type": "reference-model",
+      "support_cell_id": null
+    },
+    {
+      "scenario_id": "SCN-PERF-PENDING-CYCLE-001",
+      "requirement_id": "SYNC-CONFLICT-002",
+      "proof_obligation_id": "OBL-PERF-PENDING-CYCLE-PG-LINUX-X64-001",
+      "assertion_id": "ASSERT-PERF-PENDING-CYCLE-CONFLICT-001",
+      "proof_type": "server-black-box",
+      "support_cell_id": "SUP-PG-LINUX-X64-001"
+    },
+    {
+      "scenario_id": "SCN-PERF-PENDING-CYCLE-001",
+      "requirement_id": "SYNC-CONFLICT-002",
+      "proof_obligation_id": "OBL-PERF-PENDING-CYCLE-CONFLICT-FAULT-001",
+      "assertion_id": "ASSERT-PERF-PENDING-CYCLE-CONFLICT-001",
+      "proof_type": "fault-injection",
+      "support_cell_id": "SUP-PG-LINUX-X64-001"
+    },
+    {
+      "scenario_id": "SCN-PERF-PENDING-CYCLE-001",
+      "requirement_id": "SYNC-TIME-002",
+      "proof_obligation_id": "OBL-PERF-PENDING-CYCLE-RM-001",
+      "assertion_id": "ASSERT-PERF-PENDING-CYCLE-TIME-001",
+      "proof_type": "reference-model",
+      "support_cell_id": null
+    },
+    {
+      "scenario_id": "SCN-PERF-PENDING-CYCLE-001",
+      "requirement_id": "SYNC-TIME-002",
+      "proof_obligation_id": "OBL-PERF-PENDING-CYCLE-PG-LINUX-X64-001",
+      "assertion_id": "ASSERT-PERF-PENDING-CYCLE-TIME-001",
+      "proof_type": "server-black-box",
+      "support_cell_id": "SUP-PG-LINUX-X64-001"
+    },
+    {
+      "scenario_id": "SCN-PERF-PENDING-CYCLE-001",
+      "requirement_id": "SYNC-VOCAB-001",
+      "proof_obligation_id": "OBL-PERF-PENDING-CYCLE-RM-001",
+      "assertion_id": "ASSERT-PERF-PENDING-CYCLE-VOCAB-001",
+      "proof_type": "reference-model",
+      "support_cell_id": null
+    },
+    {
+      "scenario_id": "SCN-PERF-PENDING-CYCLE-001",
+      "requirement_id": "SYNC-VOCAB-001",
+      "proof_obligation_id": "OBL-PERF-PENDING-CYCLE-PG-LINUX-X64-001",
+      "assertion_id": "ASSERT-PERF-PENDING-CYCLE-VOCAB-001",
+      "proof_type": "server-black-box",
+      "support_cell_id": "SUP-PG-LINUX-X64-001"
     }
   ],
   "model": {
@@ -755,6 +963,63 @@
           "defect": "retain the pre-outcome local base or version while marking the mutation terminal"
         }
       }
+    },
+    {
+      "id": "FPL-PERF-PENDING-CYCLE-CONFLICT-001",
+      "requirement_id": "SYNC-CONFLICT-002",
+      "fault_id": "FAULT-CONFLICT-002",
+      "control_id": "CTRL-CONFLICT-002",
+      "barrier_id": "BAR-PERF-PENDING-CYCLE-CONTROL-001",
+      "expected_assertion_ids": [
+        "ASSERT-PERF-PENDING-CYCLE-CONFLICT-001"
+      ],
+      "injection": {
+        "mechanism": "process-fault",
+        "target": "concurrent update-delete race",
+        "operator": "delay",
+        "parameters": {
+          "scenario": "issue update and delete concurrently from the same current base version",
+          "defect": "allow both to apply, omit the loser conflict outcome, or discard the winning transition"
+        }
+      }
+    },
+    {
+      "id": "FPL-PERF-PENDING-CYCLE-TIME-001",
+      "requirement_id": "SYNC-TIME-002",
+      "fault_id": "FAULT-TIME-002",
+      "control_id": "CTRL-TIME-002",
+      "barrier_id": "BAR-PERF-PENDING-CYCLE-CONTROL-001",
+      "expected_assertion_ids": [
+        "ASSERT-PERF-PENDING-CYCLE-TIME-001"
+      ],
+      "injection": {
+        "mechanism": "source-mutant",
+        "target": "conflict comparison and accepted version allocation",
+        "operator": "replace",
+        "parameters": {
+          "scenario": "submit equal, past, and future client_version values against the same base state",
+          "defect": "let client time change winner, server version, source updated_at, or write order"
+        }
+      }
+    },
+    {
+      "id": "FPL-PERF-PENDING-CYCLE-VOCAB-001",
+      "requirement_id": "SYNC-VOCAB-001",
+      "fault_id": "FAULT-VOCAB-001",
+      "control_id": "CTRL-VOCAB-001",
+      "barrier_id": "BAR-PERF-PENDING-CYCLE-CONTROL-001",
+      "expected_assertion_ids": [
+        "ASSERT-PERF-PENDING-CYCLE-VOCAB-001"
+      ],
+      "injection": {
+        "mechanism": "wire-fault",
+        "target": "push mutation operation decoder",
+        "operator": "inject",
+        "parameters": {
+          "scenario": "submit create, upsert, and resurrection-shaped operations for an existing row",
+          "defect": "accept an operation outside push insert/update/delete instead of rejecting it"
+        }
+      }
     }
   ],
   "replay": {
@@ -775,6 +1040,39 @@
       ],
       "detected_by": [
         "ASSERT-PERF-PENDING-CYCLE-SEMANTIC-001"
+      ]
+    },
+    {
+      "control_id": "CTRL-CONFLICT-002",
+      "requirement_id": "SYNC-CONFLICT-002",
+      "fault_id": "FAULT-CONFLICT-002",
+      "subject_artifact_inventory_ids": [
+        "ARTDEF-PG-EXTENSION-001"
+      ],
+      "detected_by": [
+        "ASSERT-PERF-PENDING-CYCLE-CONFLICT-001"
+      ]
+    },
+    {
+      "control_id": "CTRL-TIME-002",
+      "requirement_id": "SYNC-TIME-002",
+      "fault_id": "FAULT-TIME-002",
+      "subject_artifact_inventory_ids": [
+        "ARTDEF-PG-EXTENSION-001"
+      ],
+      "detected_by": [
+        "ASSERT-PERF-PENDING-CYCLE-TIME-001"
+      ]
+    },
+    {
+      "control_id": "CTRL-VOCAB-001",
+      "requirement_id": "SYNC-VOCAB-001",
+      "fault_id": "FAULT-VOCAB-001",
+      "subject_artifact_inventory_ids": [
+        "ARTDEF-PG-EXTENSION-001"
+      ],
+      "detected_by": [
+        "ASSERT-PERF-PENDING-CYCLE-VOCAB-001"
       ]
     }
   ],
@@ -992,6 +1290,75 @@
         "observed_source": "system-under-test"
       },
       "detects_control_ids": []
+    },
+    {
+      "id": "ASSERT-PERF-PENDING-CYCLE-CONFLICT-001",
+      "requirement_ids": [
+        "SYNC-CONFLICT-002"
+      ],
+      "description": "The concurrent update-delete control detects two accepted transitions or a missing authoritative loser outcome.",
+      "expectation_ids": [
+        "EXPECT-PERF-PENDING-CYCLE-SEMANTIC-001"
+      ],
+      "predicate": {
+        "contract_predicate": "wire-outcome",
+        "name": "canonical-wire-outcome",
+        "payload": {}
+      },
+      "oracle": {
+        "kind": "wire-contract",
+        "expected_source": "authored-model",
+        "observed_source": "system-under-test"
+      },
+      "detects_control_ids": [
+        "CTRL-CONFLICT-002"
+      ]
+    },
+    {
+      "id": "ASSERT-PERF-PENDING-CYCLE-TIME-001",
+      "requirement_ids": [
+        "SYNC-TIME-002"
+      ],
+      "description": "The client-time control detects any authoritative outcome that changes only because client_version changes.",
+      "expectation_ids": [
+        "EXPECT-PERF-PENDING-CYCLE-SEMANTIC-001"
+      ],
+      "predicate": {
+        "contract_predicate": "wire-outcome",
+        "name": "canonical-wire-outcome",
+        "payload": {}
+      },
+      "oracle": {
+        "kind": "wire-contract",
+        "expected_source": "authored-model",
+        "observed_source": "system-under-test"
+      },
+      "detects_control_ids": [
+        "CTRL-TIME-002"
+      ]
+    },
+    {
+      "id": "ASSERT-PERF-PENDING-CYCLE-VOCAB-001",
+      "requirement_ids": [
+        "SYNC-VOCAB-001"
+      ],
+      "description": "The operation-vocabulary control detects an accepted noncanonical push operation or implicit resurrection.",
+      "expectation_ids": [
+        "EXPECT-PERF-PENDING-CYCLE-SEMANTIC-001"
+      ],
+      "predicate": {
+        "contract_predicate": "wire-outcome",
+        "name": "canonical-wire-outcome",
+        "payload": {}
+      },
+      "oracle": {
+        "kind": "wire-contract",
+        "expected_source": "authored-model",
+        "observed_source": "system-under-test"
+      },
+      "detects_control_ids": [
+        "CTRL-VOCAB-001"
+      ]
     }
   ]
 }

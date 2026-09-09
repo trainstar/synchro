@@ -61,8 +61,9 @@ describe('useSyncStatus', () => {
     expect(remove).toBeDefined();
     expect(remove).toHaveBeenCalledTimes(1);
 
+    let notified = -1;
     act(() => {
-      emitNativeEvent('onStatusChange', {
+      notified = emitNativeEvent('onStatusChange', {
         status: 'error',
         retryAt: null,
         operation: null,
@@ -76,5 +77,7 @@ describe('useSyncStatus', () => {
         },
       });
     });
+
+    expect(notified).toBe(0);
   });
 });

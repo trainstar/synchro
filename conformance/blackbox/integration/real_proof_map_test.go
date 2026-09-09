@@ -2,6 +2,7 @@ package integration
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"go/ast"
 	"go/build"
@@ -19,7 +20,7 @@ import (
 type serverProofBinding struct {
 	scenarioID   string
 	obligationID string
-	testName     string
+	testNames    []string
 }
 
 type realTestDeclaration struct {
@@ -27,34 +28,97 @@ type realTestDeclaration struct {
 	validSignature bool
 }
 
-var requiredServerProofs = map[string][]string{
-	"SCN-PERF-CONFIGURED-BOUNDS-001":     {"OBL-PERF-CONFIGURED-BOUNDS-PG-LINUX-X64-001"},
-	"SCN-WAL-ORDER-001":                  {"OBL-WAL-ORDER-PG-LINUX-X64-001"},
-	"SCN-PULL-DIVERGENT-CHECKPOINTS-001": {"OBL-PULL-DIVERGENT-PG-LINUX-X64-001"},
-	"SCN-PULL-HYDRATION-FAILURE-001":     {"OBL-PULL-HYDRATION-PG-LINUX-X64-001"},
-	"SCN-WAL-DECODE-FAILURE-001":         {"OBL-WAL-DECODE-PG-LINUX-X64-001"},
-	"SCN-REGISTRY-RELOAD-001":            {"OBL-REGISTRY-RELOAD-PG-LINUX-X64-001"},
-	"SCN-PUSH-RESPONSE-LOSS-001":         {"OBL-PUSH-RESPONSE-LOSS-PG-LINUX-X64-001"},
-	"SCN-REBUILD-FORGED-CURSOR-001":      {"OBL-REBUILD-FORGED-CURSOR-PG-LINUX-X64-001"},
-	"SCN-SCHEMA-QUEUED-MUTATION-001":     {"OBL-SCHEMA-QUEUED-MUTATION-PG-LINUX-X64-001"},
-	"SCN-RETENTION-RECONNECT-001":        {"OBL-RETENTION-RECONNECT-PG-LINUX-X64-001"},
-	"SCN-MEMBERSHIP-REASSIGNMENT-001":    {"OBL-MEMBERSHIP-REASSIGNMENT-PG-LINUX-X64-001"},
+type integrationMutant struct {
+	Patch         string `json:"patch"`
+	RequirementID string `json:"requirement_id"`
+	ControlID     string `json:"control_id"`
+	TestTarget    string `json:"test_target"`
 }
 
-// serverProofBindings is the sole server-proof map. Synthetic harness runs are
-// layer-6 self-tests and negative controls, so they must not enter this map.
+type integrationMutantManifest struct {
+	Mutants []integrationMutant `json:"mutants"`
+}
+
+var requiredServerProofs = map[string][]string{
+	"SCN-PERF-CONFIGURED-BOUNDS-001": {"OBL-PERF-CONFIGURED-BOUNDS-PG-LINUX-X64-001"},
+	"SCN-WAL-ORDER-001": {
+		"OBL-WAL-ORDER-PG-LINUX-X64-001",
+		"OBL-WAL-NO-LOSS-PG-LINUX-X64-001",
+		"OBL-WAL-NO-LOSS-FAULT-LINUX-X64-001",
+		"OBL-WAL-ONLY-PUBLICATION-PG-LINUX-X64-001",
+		"OBL-WAL-ONLY-PUBLICATION-FAULT-LINUX-X64-001",
+		"OBL-WAL-REPLAY-PG-LINUX-X64-001",
+		"OBL-WAL-REPLAY-FAULT-LINUX-X64-001",
+	},
+	"SCN-PULL-DIVERGENT-CHECKPOINTS-001": {"OBL-PULL-DIVERGENT-PG-LINUX-X64-001"},
+	"SCN-PULL-HYDRATION-FAILURE-001":     {"OBL-PULL-HYDRATION-PG-LINUX-X64-001"},
+	"SCN-WAL-DECODE-FAILURE-001": {
+		"OBL-WAL-DECODE-PG-LINUX-X64-001",
+		"OBL-WAL-ACK-PG-LINUX-X64-001",
+		"OBL-WAL-ACK-FAULT-LINUX-X64-001",
+		"OBL-WAL-CAPTURE-READINESS-PG-LINUX-X64-001",
+		"OBL-WAL-CAPTURE-READINESS-FAULT-LINUX-X64-001",
+		"OBL-WAL-RESET-LIFECYCLE-PG-LINUX-X64-001",
+		"OBL-WAL-RESET-LIFECYCLE-FAULT-LINUX-X64-001",
+		"OBL-WAL-RESET-COVERAGE-PG-LINUX-X64-001",
+		"OBL-WAL-RESET-COVERAGE-FAULT-LINUX-X64-001",
+	},
+	"SCN-REGISTRY-RELOAD-001":        {"OBL-REGISTRY-RELOAD-PG-LINUX-X64-001"},
+	"SCN-PUSH-RESPONSE-LOSS-001":     {"OBL-PUSH-RESPONSE-LOSS-PG-LINUX-X64-001"},
+	"SCN-REBUILD-FORGED-CURSOR-001":  {"OBL-REBUILD-FORGED-CURSOR-PG-LINUX-X64-001"},
+	"SCN-SCHEMA-QUEUED-MUTATION-001": {
+		"OBL-SCHEMA-QUEUED-MUTATION-PG-LINUX-X64-001",
+		"OBL-SCHEMA-QUEUED-MUTATION-MANIFEST-FAULT-001",
+	},
+	"SCN-RETENTION-RECONNECT-001":    {"OBL-RETENTION-RECONNECT-PG-LINUX-X64-001"},
+	"SCN-MEMBERSHIP-REASSIGNMENT-001": {
+		"OBL-MEMBERSHIP-REASSIGNMENT-PG-LINUX-X64-001",
+		"OBL-WAL-FENCE-CORRELATION-PG-LINUX-X64-001",
+		"OBL-WAL-FENCE-CORRELATION-FAULT-LINUX-X64-001",
+	},
+	"SCN-PERF-MULTI-SCOPE-PROVENANCE-001": {
+		"OBL-MEMBERSHIP-GENERATION-PG-LINUX-X64-001",
+		"OBL-MEMBERSHIP-GENERATION-FAULT-LINUX-X64-001",
+		"OBL-MEMBERSHIP-BACKFILL-PG-LINUX-X64-001",
+		"OBL-MEMBERSHIP-BACKFILL-FAULT-LINUX-X64-001",
+	},
+}
+
+// serverProofBindings is the sole server and fault proof map. Synthetic harness
+// runs are layer-6 self-tests and negative controls, so they cannot enter it.
 var serverProofBindings = []serverProofBinding{
-	{"SCN-WAL-ORDER-001", "OBL-WAL-ORDER-PG-LINUX-X64-001", "TestRealWALPipeline"},
-	{"SCN-PERF-CONFIGURED-BOUNDS-001", "OBL-PERF-CONFIGURED-BOUNDS-PG-LINUX-X64-001", "TestRealConfiguredBoundsMeasurement"},
-	{"SCN-PULL-DIVERGENT-CHECKPOINTS-001", "OBL-PULL-DIVERGENT-PG-LINUX-X64-001", "TestRealS02DivergentPullPaginationIsStarvationFree"},
-	{"SCN-PULL-HYDRATION-FAILURE-001", "OBL-PULL-HYDRATION-PG-LINUX-X64-001", "TestRealS03PullHydrationFailurePreservesCursors"},
-	{"SCN-WAL-DECODE-FAILURE-001", "OBL-WAL-DECODE-PG-LINUX-X64-001", "TestRealWALDecodeFailureRepairsSameIdentity"},
-	{"SCN-REGISTRY-RELOAD-001", "OBL-REGISTRY-RELOAD-PG-LINUX-X64-001", "TestRealRegistryGenerationReloadAtCommitBoundary"},
-	{"SCN-PUSH-RESPONSE-LOSS-001", "OBL-PUSH-RESPONSE-LOSS-PG-LINUX-X64-001", "TestRealS11PushResponseLossReplaysExactCanonicalResponse"},
-	{"SCN-REBUILD-FORGED-CURSOR-001", "OBL-REBUILD-FORGED-CURSOR-PG-LINUX-X64-001", "TestRealS04RebuildRejectsForgedCursorAndFreezesBoundary"},
-	{"SCN-SCHEMA-QUEUED-MUTATION-001", "OBL-SCHEMA-QUEUED-MUTATION-PG-LINUX-X64-001", "TestRealSchemaIncompatibleMutationPersistsCanonicalIntent"},
-	{"SCN-RETENTION-RECONNECT-001", "OBL-RETENTION-RECONNECT-PG-LINUX-X64-001", "TestRealS12StaleClientCompactionAndReconnect"},
-	{"SCN-MEMBERSHIP-REASSIGNMENT-001", "OBL-MEMBERSHIP-REASSIGNMENT-PG-LINUX-X64-001", "TestRealWALPipeline"},
+	{"SCN-WAL-ORDER-001", "OBL-WAL-ORDER-PG-LINUX-X64-001", []string{"TestRealWALPipeline"}},
+	{"SCN-PERF-CONFIGURED-BOUNDS-001", "OBL-PERF-CONFIGURED-BOUNDS-PG-LINUX-X64-001", []string{"TestRealConfiguredBoundsMeasurement"}},
+	{"SCN-PULL-DIVERGENT-CHECKPOINTS-001", "OBL-PULL-DIVERGENT-PG-LINUX-X64-001", []string{"TestRealS02DivergentPullPaginationIsStarvationFree"}},
+	{"SCN-PULL-HYDRATION-FAILURE-001", "OBL-PULL-HYDRATION-PG-LINUX-X64-001", []string{"TestRealS03PullHydrationFailurePreservesCursors"}},
+	{"SCN-WAL-DECODE-FAILURE-001", "OBL-WAL-DECODE-PG-LINUX-X64-001", []string{"TestRealWALDecodeFailureRepairsSameIdentity"}},
+	{"SCN-REGISTRY-RELOAD-001", "OBL-REGISTRY-RELOAD-PG-LINUX-X64-001", []string{"TestRealRegistryGenerationReloadAtCommitBoundary"}},
+	{"SCN-PUSH-RESPONSE-LOSS-001", "OBL-PUSH-RESPONSE-LOSS-PG-LINUX-X64-001", []string{"TestRealS11PushResponseLossReplaysExactCanonicalResponse"}},
+	{"SCN-REBUILD-FORGED-CURSOR-001", "OBL-REBUILD-FORGED-CURSOR-PG-LINUX-X64-001", []string{"TestRealS04RebuildRejectsForgedCursorAndFreezesBoundary"}},
+	{"SCN-SCHEMA-QUEUED-MUTATION-001", "OBL-SCHEMA-QUEUED-MUTATION-PG-LINUX-X64-001", []string{"TestRealSchemaIncompatibleMutationPersistsCanonicalIntent", "TestRealIssue49PublishedSchemaIdentityIsImmutable"}},
+	{"SCN-SCHEMA-QUEUED-MUTATION-001", "OBL-SCHEMA-QUEUED-MUTATION-MANIFEST-FAULT-001", []string{"TestRealIssue49PublishedSchemaIdentityIsImmutable"}},
+	{"SCN-RETENTION-RECONNECT-001", "OBL-RETENTION-RECONNECT-PG-LINUX-X64-001", []string{"TestRealS12StaleClientCompactionAndReconnect"}},
+	{"SCN-MEMBERSHIP-REASSIGNMENT-001", "OBL-MEMBERSHIP-REASSIGNMENT-PG-LINUX-X64-001", []string{"TestRealWALPipeline"}},
+	{"SCN-WAL-ORDER-001", "OBL-WAL-NO-LOSS-PG-LINUX-X64-001", []string{"TestRealIssue49CompletePullVisibleWALRepresentation", "TestRealIssue49WALIsTheOnlyAtomicPublicationPath"}},
+	{"SCN-WAL-ORDER-001", "OBL-WAL-NO-LOSS-FAULT-LINUX-X64-001", []string{"TestRealIssue49CompletePullVisibleWALRepresentation", "TestRealIssue49WALPoisonBlocksContiguousProgress"}},
+	{"SCN-WAL-ORDER-001", "OBL-WAL-ONLY-PUBLICATION-PG-LINUX-X64-001", []string{"TestRealIssue49WALIsTheOnlyAtomicPublicationPath"}},
+	{"SCN-WAL-ORDER-001", "OBL-WAL-ONLY-PUBLICATION-FAULT-LINUX-X64-001", []string{"TestRealIssue49WALIsTheOnlyAtomicPublicationPath"}},
+	{"SCN-WAL-ORDER-001", "OBL-WAL-REPLAY-PG-LINUX-X64-001", []string{"TestRealIssue49WALIsTheOnlyAtomicPublicationPath"}},
+	{"SCN-WAL-ORDER-001", "OBL-WAL-REPLAY-FAULT-LINUX-X64-001", []string{"TestRealIssue49WALIsTheOnlyAtomicPublicationPath"}},
+	{"SCN-WAL-DECODE-FAILURE-001", "OBL-WAL-ACK-PG-LINUX-X64-001", []string{"TestRealIssue49WALPoisonBlocksContiguousProgress"}},
+	{"SCN-WAL-DECODE-FAILURE-001", "OBL-WAL-ACK-FAULT-LINUX-X64-001", []string{"TestRealIssue49WALPoisonBlocksContiguousProgress"}},
+	{"SCN-WAL-DECODE-FAILURE-001", "OBL-WAL-CAPTURE-READINESS-PG-LINUX-X64-001", []string{"TestRealIssue49CaptureReadinessRequiresEveryCheck", "TestRealIssue49WALPoisonBlocksContiguousProgress"}},
+	{"SCN-WAL-DECODE-FAILURE-001", "OBL-WAL-CAPTURE-READINESS-FAULT-LINUX-X64-001", []string{"TestRealIssue49CaptureReadinessRequiresEveryCheck", "TestRealIssue49WALPoisonBlocksContiguousProgress"}},
+	{"SCN-WAL-DECODE-FAILURE-001", "OBL-WAL-RESET-LIFECYCLE-PG-LINUX-X64-001", []string{"TestRealIssue49ResetLifecycleAndFenceCoverage"}},
+	{"SCN-WAL-DECODE-FAILURE-001", "OBL-WAL-RESET-LIFECYCLE-FAULT-LINUX-X64-001", []string{"TestRealIssue49ResetLifecycleAndFenceCoverage"}},
+	{"SCN-WAL-DECODE-FAILURE-001", "OBL-WAL-RESET-COVERAGE-PG-LINUX-X64-001", []string{"TestRealIssue49ResetCoversEveryFenceOperation", "TestRealIssue49ResetLifecycleAndFenceCoverage"}},
+	{"SCN-WAL-DECODE-FAILURE-001", "OBL-WAL-RESET-COVERAGE-FAULT-LINUX-X64-001", []string{"TestRealIssue49ResetCoversEveryFenceOperation", "TestRealIssue49ResetLifecycleAndFenceCoverage"}},
+	{"SCN-MEMBERSHIP-REASSIGNMENT-001", "OBL-WAL-FENCE-CORRELATION-PG-LINUX-X64-001", []string{"TestRealIssue49FenceCorrelationAndCapturePending"}},
+	{"SCN-MEMBERSHIP-REASSIGNMENT-001", "OBL-WAL-FENCE-CORRELATION-FAULT-LINUX-X64-001", []string{"TestRealIssue49FenceCorrelationAndCapturePending", "TestRealIssue49FenceCorrelatesOldRecordIdentity", "TestRealIssue49FenceCorrelatesCaptureKeys"}},
+	{"SCN-PERF-MULTI-SCOPE-PROVENANCE-001", "OBL-MEMBERSHIP-GENERATION-PG-LINUX-X64-001", []string{"TestRealIssue49MembershipActivationIsStagedAndScoped"}},
+	{"SCN-PERF-MULTI-SCOPE-PROVENANCE-001", "OBL-MEMBERSHIP-GENERATION-FAULT-LINUX-X64-001", []string{"TestRealIssue49MembershipBackfillRetainsContinuationAcrossWorkerLoss"}},
+	{"SCN-PERF-MULTI-SCOPE-PROVENANCE-001", "OBL-MEMBERSHIP-BACKFILL-PG-LINUX-X64-001", []string{"TestRealIssue49MembershipActivationIsStagedAndScoped"}},
+	{"SCN-PERF-MULTI-SCOPE-PROVENANCE-001", "OBL-MEMBERSHIP-BACKFILL-FAULT-LINUX-X64-001", []string{"TestRealIssue49MembershipBackfillRetainsContinuationAcrossWorkerLoss"}},
 }
 
 var nonScenarioRealTests = map[string]string{
@@ -84,6 +148,50 @@ func TestServerProofMapMatchesAuthoredScenariosAndRealTests(t *testing.T) {
 	}
 }
 
+func TestIssue49WALMutantsMapToAuthoredControlsAndRealProofs(t *testing.T) {
+	authored, declarations := loadServerProofMapInputs(t)
+	repoRoot, err := filepath.Abs(filepath.Join("..", "..", ".."))
+	if err != nil {
+		t.Fatalf("resolve repository root: %v", err)
+	}
+	manifestBytes, err := os.ReadFile(filepath.Join(repoRoot, "conformance", "mutants", "integration", "manifest.json"))
+	if err != nil {
+		t.Fatalf("read integration mutant manifest: %v", err)
+	}
+	var manifest integrationMutantManifest
+	if err := json.Unmarshal(manifestBytes, &manifest); err != nil {
+		t.Fatalf("decode integration mutant manifest: %v", err)
+	}
+	patches, err := filepath.Glob(filepath.Join(repoRoot, "conformance", "mutants", "integration", "issue49-wal-*.patch"))
+	if err != nil {
+		t.Fatalf("discover issue49 WAL mutants: %v", err)
+	}
+	for index, patch := range patches {
+		relative, err := filepath.Rel(repoRoot, patch)
+		if err != nil {
+			t.Fatalf("resolve mutant path %s: %v", patch, err)
+		}
+		patches[index] = filepath.ToSlash(relative)
+	}
+	if failures := validateIssue49WALMutantProofs(authored, declarations, serverProofBindings, manifest.Mutants, patches); len(failures) > 0 {
+		t.Fatalf("issue49 WAL mutant proof map drift:\n%s", strings.Join(failures, "\n"))
+	}
+	mutated := append([]integrationMutant(nil), manifest.Mutants...)
+	for index := range mutated {
+		if !strings.HasPrefix(mutated[index].Patch, "conformance/mutants/integration/issue49-wal-") {
+			continue
+		}
+		mutated[index].TestTarget = "TestRealMissingWALProof"
+		expected := fmt.Sprintf("issue49 WAL mutant %s names unknown real test TestRealMissingWALProof", mutated[index].Patch)
+		failures := validateIssue49WALMutantProofs(authored, declarations, serverProofBindings, mutated, patches)
+		if !containsFailure(failures, expected) {
+			t.Fatalf("mutant failures = %v, want %q", failures, expected)
+		}
+		return
+	}
+	t.Fatal("integration mutant manifest has no issue49 WAL row")
+}
+
 func TestServerProofMapRejectsDrift(t *testing.T) {
 	authored, declarations := loadServerProofMapInputs(t)
 	tests := []struct {
@@ -92,11 +200,11 @@ func TestServerProofMapRejectsDrift(t *testing.T) {
 		mutate   func([]serverProofBinding, map[string]string, map[string]realTestDeclaration) ([]serverProofBinding, map[string]string, map[string]realTestDeclaration)
 	}{
 		{"renamed real test", "proof binding SCN-WAL-ORDER-001|OBL-WAL-ORDER-PG-LINUX-X64-001 names unknown real test TestRealRenamed", func(bindings []serverProofBinding, classifications map[string]string, declarations map[string]realTestDeclaration) ([]serverProofBinding, map[string]string, map[string]realTestDeclaration) {
-			bindings[0].testName = "TestRealRenamed"
+			bindings[0].testNames = []string{"TestRealRenamed"}
 			return bindings, classifications, declarations
 		}},
 		{"synthetic harness test", "proof binding SCN-WAL-ORDER-001|OBL-WAL-ORDER-PG-LINUX-X64-001 names non-real test TestRunSyntheticHarnessDetectsSemanticFaults", func(bindings []serverProofBinding, classifications map[string]string, declarations map[string]realTestDeclaration) ([]serverProofBinding, map[string]string, map[string]realTestDeclaration) {
-			bindings[0].testName = "TestRunSyntheticHarnessDetectsSemanticFaults"
+			bindings[0].testNames = []string{"TestRunSyntheticHarnessDetectsSemanticFaults"}
 			return bindings, classifications, declarations
 		}},
 		{"duplicate binding", "duplicate proof binding SCN-WAL-ORDER-001|OBL-WAL-ORDER-PG-LINUX-X64-001", func(bindings []serverProofBinding, classifications map[string]string, declarations map[string]realTestDeclaration) ([]serverProofBinding, map[string]string, map[string]realTestDeclaration) {
@@ -249,14 +357,19 @@ func validateServerProofMap(authored []scenarios.Scenario, declarations map[stri
 		if _, required := requiredKeys[key]; !required {
 			failures = append(failures, "unexpected proof binding "+key)
 		}
-		if !strings.HasPrefix(binding.testName, "TestReal") {
-			failures = append(failures, fmt.Sprintf("proof binding %s names non-real test %s", key, binding.testName))
-		} else if declaration, found := declarations[binding.testName]; !found {
-			failures = append(failures, fmt.Sprintf("proof binding %s names unknown real test %s", key, binding.testName))
-		} else if strings.Contains(binding.obligationID, "-PG-LINUX-X64-") && !declaration.linuxX64 {
-			failures = append(failures, fmt.Sprintf("proof binding %s names real test %s unavailable on linux-x64", key, binding.testName))
+		if len(binding.testNames) == 0 {
+			failures = append(failures, "proof binding "+key+" names no real tests")
 		}
-		mappedTests[binding.testName] = struct{}{}
+		for _, testName := range binding.testNames {
+			if !strings.HasPrefix(testName, "TestReal") {
+				failures = append(failures, fmt.Sprintf("proof binding %s names non-real test %s", key, testName))
+			} else if declaration, found := declarations[testName]; !found {
+				failures = append(failures, fmt.Sprintf("proof binding %s names unknown real test %s", key, testName))
+			} else if strings.Contains(binding.obligationID, "-LINUX-X64-") && !declaration.linuxX64 {
+				failures = append(failures, fmt.Sprintf("proof binding %s names real test %s unavailable on linux-x64", key, testName))
+			}
+			mappedTests[testName] = struct{}{}
+		}
 
 		scenario, found := scenarioByID[binding.scenarioID]
 		if !found {
@@ -269,7 +382,11 @@ func validateServerProofMap(authored []scenarios.Scenario, declarations map[stri
 				continue
 			}
 			obligationFound = true
-			if obligation.ProofType != "server-black-box" {
+			expectedProofType := "server-black-box"
+			if strings.Contains(binding.obligationID, "-FAULT-") {
+				expectedProofType = "fault-injection"
+			}
+			if obligation.ProofType != expectedProofType {
 				failures = append(failures, fmt.Sprintf("proof binding %s selects proof type %s", key, obligation.ProofType))
 			}
 			if obligation.MakeTarget != "test-blackbox" || len(obligation.Argv) != 2 || obligation.Argv[0] != "make" || obligation.Argv[1] != "test-blackbox" {
@@ -329,6 +446,111 @@ func validateServerProofMap(authored []scenarios.Scenario, declarations map[stri
 
 	sort.Strings(failures)
 	return failures
+}
+
+func validateIssue49WALMutantProofs(authored []scenarios.Scenario, declarations map[string]realTestDeclaration, bindings []serverProofBinding, mutants []integrationMutant, patches []string) []string {
+	type controlOwner struct {
+		scenarioID  string
+		requirement string
+	}
+	scenarioByID := make(map[string]scenarios.Scenario, len(authored))
+	controlOwners := make(map[string][]controlOwner)
+	for _, scenario := range authored {
+		scenarioID := string(scenario.ID)
+		scenarioByID[scenarioID] = scenario
+		for _, obligation := range scenario.ProofObligations {
+			if obligation.ProofType != "negative-control" || obligation.ControlID == nil || len(obligation.RequirementIDs) != 1 {
+				continue
+			}
+			controlID := string(*obligation.ControlID)
+			controlOwners[controlID] = append(controlOwners[controlID], controlOwner{
+				scenarioID:  scenarioID,
+				requirement: string(obligation.RequirementIDs[0]),
+			})
+		}
+	}
+
+	expectedPatches := make(map[string]struct{}, len(patches))
+	for _, patch := range patches {
+		expectedPatches[patch] = struct{}{}
+	}
+	mappedPatches := make(map[string]struct{}, len(expectedPatches))
+	var failures []string
+	if len(expectedPatches) == 0 {
+		failures = append(failures, "no issue49 WAL mutant patches were discovered")
+	}
+	for _, mutant := range mutants {
+		if !strings.HasPrefix(mutant.Patch, "conformance/mutants/integration/issue49-wal-") {
+			continue
+		}
+		if _, duplicate := mappedPatches[mutant.Patch]; duplicate {
+			failures = append(failures, "duplicate issue49 WAL mutant mapping "+mutant.Patch)
+			continue
+		}
+		mappedPatches[mutant.Patch] = struct{}{}
+		if _, found := expectedPatches[mutant.Patch]; !found {
+			failures = append(failures, "issue49 WAL mutant mapping names unknown patch "+mutant.Patch)
+		}
+
+		owners := controlOwners[mutant.ControlID]
+		if len(owners) != 1 {
+			failures = append(failures, fmt.Sprintf("issue49 WAL mutant %s control %s has %d authored owners", mutant.Patch, mutant.ControlID, len(owners)))
+			continue
+		}
+		owner := owners[0]
+		if owner.requirement != mutant.RequirementID {
+			failures = append(failures, fmt.Sprintf("issue49 WAL mutant %s requirement %s does not match authored control requirement %s", mutant.Patch, mutant.RequirementID, owner.requirement))
+		}
+		declaration, found := declarations[mutant.TestTarget]
+		if !found {
+			failures = append(failures, fmt.Sprintf("issue49 WAL mutant %s names unknown real test %s", mutant.Patch, mutant.TestTarget))
+		} else if !declaration.linuxX64 {
+			failures = append(failures, fmt.Sprintf("issue49 WAL mutant %s names real test %s unavailable on linux-x64", mutant.Patch, mutant.TestTarget))
+		}
+
+		realProofFound := false
+		for _, binding := range bindings {
+			if binding.scenarioID != owner.scenarioID || !containsString(binding.testNames, mutant.TestTarget) {
+				continue
+			}
+			scenario := scenarioByID[owner.scenarioID]
+			for _, obligation := range scenario.ProofObligations {
+				if string(obligation.ObligationID) == binding.obligationID && containsContractRequirement(obligation, mutant.RequirementID) {
+					realProofFound = true
+					break
+				}
+			}
+		}
+		if !realProofFound {
+			failures = append(failures, fmt.Sprintf("issue49 WAL mutant %s test %s has no matching real proof binding", mutant.Patch, mutant.TestTarget))
+		}
+	}
+	for patch := range expectedPatches {
+		if _, found := mappedPatches[patch]; !found {
+			failures = append(failures, "missing issue49 WAL mutant mapping "+patch)
+		}
+	}
+
+	sort.Strings(failures)
+	return failures
+}
+
+func containsString(values []string, target string) bool {
+	for _, value := range values {
+		if value == target {
+			return true
+		}
+	}
+	return false
+}
+
+func containsContractRequirement(obligation scenarios.ProofObligation, target string) bool {
+	for _, requirementID := range obligation.RequirementIDs {
+		if string(requirementID) == target {
+			return true
+		}
+	}
+	return false
 }
 
 func containsFailure(failures []string, expected string) bool {

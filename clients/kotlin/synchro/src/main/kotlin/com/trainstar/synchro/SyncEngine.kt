@@ -923,8 +923,10 @@ internal class SyncEngine(
             }
 
             try {
+                android.util.Log.i("SynchroMemory", "rebuild before HTTP records=${attempt.pageLimit} heap=${android.os.Debug.getNativeHeapAllocatedSize()}")
                 val result = httpClient.rebuildWithBody(request, requestJSON)
                 val response = result.response
+                android.util.Log.i("SynchroMemory", "rebuild after HTTP records=${response.records.size} more=${response.hasMore} heap=${android.os.Debug.getNativeHeapAllocatedSize()}")
                 attempt = pullProcessor.applyScopeRebuildPage(
                     attempt = attempt,
                     request = request,
@@ -933,6 +935,7 @@ internal class SyncEngine(
                     responseJSON = result.responseJSON,
                     syncedTables = syncedTables,
                 )
+                android.util.Log.i("SynchroMemory", "rebuild after apply records=${response.records.size} more=${response.hasMore} heap=${android.os.Debug.getNativeHeapAllocatedSize()}")
                 nextReplayRequestJSON = null
 
                 if (response.hasMore) {

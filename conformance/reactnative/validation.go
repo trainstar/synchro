@@ -17,6 +17,8 @@ import (
 
 const warmConnectScenarioID = "SCN-PERF-WARM-CONNECT-001"
 
+const warmConnectMaximumSafeInteger = uint64(9007199254740991)
+
 var warmConnectStepOrder = []scenarios.StepID{
 	"STEP-PERF-WARM-CONNECT-ASSIGN-001",
 	"STEP-PERF-WARM-CONNECT-BOOTSTRAP-CONNECT-001",
@@ -175,6 +177,18 @@ func ValidateScenario(scenario scenarios.Scenario) error {
 		scenarios.OperationKey(scenario.Model.Setup[0]) != "model/install-current-contract" {
 		return errors.New("React Native warm-connect scenario contract is invalid")
 	}
+	if !orderedIdentifiersEqual(scenario.RequirementIDs, []string{
+		"SYNC-SCOPE-001",
+		"SYNC-TIME-001",
+		"SYNC-CURSOR-001",
+		"SYNC-VERSION-001",
+		"SYNC-SCOPE-002",
+		"SYNC-SCHEMA-001",
+		"SYNC-CLIENT-VERSION-001",
+		"SYNC-PROTOCOL-004",
+	}) {
+		return errors.New("React Native warm-connect requirement set changed")
+	}
 	if len(scenario.Steps) != len(warmConnectStepOrder) {
 		return errors.New("React Native warm-connect step set changed")
 	}
@@ -210,28 +224,62 @@ func ValidateScenario(scenario scenarios.Scenario) error {
 			return fmt.Errorf("React Native warm-connect identity alias %q is absent", name)
 		}
 	}
-	semantic, performance := false, false
+	assertionSpecs := map[string]struct {
+		requirement string
+		expectation string
+		predicate   string
+		name        string
+		oracle      string
+		control     string
+	}{
+		"ASSERT-PERF-WARM-CONNECT-SEMANTIC-001":       {"SYNC-SCOPE-001", "EXPECT-PERF-WARM-CONNECT-SEMANTIC-001", "state-equality", "state-equals-authored-model", "model-state-equality", "CTRL-SCOPE-001"},
+		"ASSERT-PERF-WARM-CONNECT-WIRE-001":           {"SYNC-SCOPE-001", "EXPECT-PERF-WARM-CONNECT-WIRE-001", "wire-outcome", "canonical-wire-outcome", "wire-contract", ""},
+		"ASSERT-PERF-WARM-CONNECT-PERFORMANCE-001":    {"SYNC-SCOPE-001", "EXPECT-PERF-WARM-CONNECT-PERFORMANCE-001", "performance-measurement", "performance-contract-satisfied", "performance-budget", ""},
+		"ASSERT-PERF-WARM-CONNECT-TIME-001":           {"SYNC-TIME-001", "EXPECT-PERF-WARM-CONNECT-SEMANTIC-001", "state-equality", "state-equals-authored-model", "model-state-equality", "CTRL-TIMESTAMP-001"},
+		"ASSERT-PERF-WARM-CONNECT-CURSOR-001":         {"SYNC-CURSOR-001", "EXPECT-PERF-WARM-CONNECT-SEMANTIC-001", "state-equality", "state-equals-authored-model", "model-state-equality", "CTRL-CURSOR-001"},
+		"ASSERT-PERF-WARM-CONNECT-VERSION-001":        {"SYNC-VERSION-001", "EXPECT-PERF-WARM-CONNECT-SEMANTIC-001", "state-equality", "state-equals-authored-model", "model-state-equality", "CTRL-VERSION-001"},
+		"ASSERT-PERF-WARM-CONNECT-SCOPE-SET-001":      {"SYNC-SCOPE-002", "EXPECT-PERF-WARM-CONNECT-SEMANTIC-001", "state-equality", "state-equals-authored-model", "model-state-equality", "CTRL-SCOPE-002"},
+		"ASSERT-PERF-WARM-CONNECT-SCHEMA-001":         {"SYNC-SCHEMA-001", "EXPECT-PERF-WARM-CONNECT-SEMANTIC-001", "state-equality", "state-equals-authored-model", "model-state-equality", "CTRL-SCHEMA-001"},
+		"ASSERT-PERF-WARM-CONNECT-CLIENT-VERSION-001": {"SYNC-CLIENT-VERSION-001", "EXPECT-PERF-WARM-CONNECT-SEMANTIC-001", "state-equality", "state-equals-authored-model", "model-state-equality", "CTRL-CLIENT-VERSION-001"},
+		"ASSERT-PERF-WARM-CONNECT-INTEGER-001":        {"SYNC-PROTOCOL-004", "EXPECT-PERF-WARM-CONNECT-SEMANTIC-001", "state-equality", "state-equals-authored-model", "model-state-equality", "CTRL-PROTOCOL-004"},
+	}
+	matchedAssertions := make(map[string]int, len(assertionSpecs))
 	for _, assertion := range scenario.Assertions {
-		switch assertion.ID {
-		case "ASSERT-PERF-WARM-CONNECT-SEMANTIC-001":
-			semantic = assertion.Predicate.ContractPredicate == "state-equality" && assertion.Oracle.ExpectedSource == "authored-model"
-		case "ASSERT-PERF-WARM-CONNECT-PERFORMANCE-001":
-			performance = assertion.Predicate.ContractPredicate == "performance-measurement" && assertion.Oracle.ExpectedSource == "authored-model"
+		spec, found := assertionSpecs[string(assertion.ID)]
+		if !found {
+			continue
+		}
+		controls := []string{}
+		if spec.control != "" {
+			controls = append(controls, spec.control)
+		}
+		if orderedIdentifiersEqual(assertion.RequirementIDs, []string{spec.requirement}) &&
+			orderedIdentifiersEqual(assertion.ExpectationIDs, []string{spec.expectation}) &&
+			assertion.Predicate.ContractPredicate == spec.predicate && assertion.Predicate.Name == spec.name &&
+			assertion.Oracle.Kind == spec.oracle && assertion.Oracle.ExpectedSource == "authored-model" &&
+			assertion.Oracle.ObservedSource == "system-under-test" &&
+			orderedIdentifiersEqual(assertion.DetectsControlIDs, controls) {
+			matchedAssertions[string(assertion.ID)]++
 		}
 	}
-	if !semantic || !performance || warmConnectExpectedState(scenario) == nil {
-		return errors.New("React Native warm-connect semantic or performance assertion changed")
+	for id := range assertionSpecs {
+		if matchedAssertions[id] != 1 {
+			return fmt.Errorf("React Native warm-connect assertion %s changed", id)
+		}
+	}
+	if warmConnectExpectedState(scenario) == nil {
+		return errors.New("React Native warm-connect semantic expectation changed")
 	}
 	obligations := map[string]int{}
 	for _, obligation := range scenario.ProofObligations {
 		id := string(obligation.ObligationID)
 		switch id {
 		case "OBL-PERF-WARM-CONNECT-RN-IOS-CURRENT-001":
-			if proofTargetMatches(obligation, "native-e2e", "SUP-RN-IOS-CURRENT-001", "test-rn-warm-connect-ios", "", "") {
+			if proofTargetMatches(obligation, "native-e2e", "SUP-RN-IOS-CURRENT-001", "test-rn-warm-connect-ios", "", "") && warmConnectNativeClaimsMatch(obligation) {
 				obligations[id]++
 			}
 		case "OBL-PERF-WARM-CONNECT-RN-ANDROID-CURRENT-001":
-			if proofTargetMatches(obligation, "native-e2e", "SUP-RN-ANDROID-CURRENT-001", "test-rn-warm-connect-android", "", "") {
+			if proofTargetMatches(obligation, "native-e2e", "SUP-RN-ANDROID-CURRENT-001", "test-rn-warm-connect-android", "", "") && warmConnectNativeClaimsMatch(obligation) {
 				obligations[id]++
 			}
 		case "OBL-PERF-WARM-CONNECT-CONTROL-001":
@@ -246,6 +294,39 @@ func ValidateScenario(scenario scenarios.Scenario) error {
 		return errors.New("React Native warm-connect proof obligations are invalid")
 	}
 	return nil
+}
+
+func warmConnectNativeClaimsMatch(obligation scenarios.ProofObligation) bool {
+	return orderedIdentifiersEqual(obligation.RequirementIDs, []string{
+		"SYNC-SCOPE-001",
+		"SYNC-TIME-001",
+		"SYNC-CURSOR-001",
+		"SYNC-VERSION-001",
+		"SYNC-SCOPE-002",
+		"SYNC-SCHEMA-001",
+		"SYNC-PROTOCOL-004",
+	}) && orderedIdentifiersEqual(obligation.AssertionIDs, []string{
+		"ASSERT-PERF-WARM-CONNECT-SEMANTIC-001",
+		"ASSERT-PERF-WARM-CONNECT-PERFORMANCE-001",
+		"ASSERT-PERF-WARM-CONNECT-TIME-001",
+		"ASSERT-PERF-WARM-CONNECT-CURSOR-001",
+		"ASSERT-PERF-WARM-CONNECT-VERSION-001",
+		"ASSERT-PERF-WARM-CONNECT-SCOPE-SET-001",
+		"ASSERT-PERF-WARM-CONNECT-SCHEMA-001",
+		"ASSERT-PERF-WARM-CONNECT-INTEGER-001",
+	})
+}
+
+func orderedIdentifiersEqual[T ~string](actual []T, expected []string) bool {
+	if len(actual) != len(expected) {
+		return false
+	}
+	for index, value := range actual {
+		if string(value) != expected[index] {
+			return false
+		}
+	}
+	return true
 }
 
 func proofTargetMatches(obligation scenarios.ProofObligation, proofType, supportCell, target, faultPlan, control string) bool {
@@ -485,7 +566,7 @@ func semanticRawJSONEqual(left, right json.RawMessage) bool {
 
 func validateTraceSequence(observations []transportObservation) error {
 	for index, observation := range observations {
-		if observation.Sequence != uint64(index+1) {
+		if observation.Sequence != uint64(index+1) || observation.Sequence > warmConnectMaximumSafeInteger {
 			return errors.New("React Native request trace has a gap")
 		}
 	}
@@ -494,10 +575,13 @@ func validateTraceSequence(observations []transportObservation) error {
 
 func validateTraceOperation(observation transportObservation, operation string) error {
 	if observation.OperationClass != operation || observation.StatusCode != 200 ||
-		observation.DurationNanoseconds == 0 || !hasJSONValue(observation.RequestFacts) {
+		observation.DurationNanoseconds == 0 || observation.DurationNanoseconds > warmConnectMaximumSafeInteger || !hasJSONValue(observation.RequestFacts) {
 		return errors.New("operation facts are absent or invalid")
 	}
 	if err := validateBoundedJSON(observation.RequestFacts, maximumExchangeBytes); err != nil {
+		return err
+	}
+	if err := validatePortableRequestIntegers(observation.RequestFacts); err != nil {
 		return err
 	}
 	if operation == "pull" {
@@ -526,6 +610,24 @@ func validateTraceOperation(observation transportObservation, operation string) 
 		}
 		if _, err := decodePullResponseFacts(observation.PullResponseFacts); err != nil {
 			return err
+		}
+	}
+	return nil
+}
+
+func validatePortableRequestIntegers(raw json.RawMessage) error {
+	var facts map[string]json.RawMessage
+	if jsonstrict.Decode(raw, &facts) != nil {
+		return errors.New("React Native request facts are invalid")
+	}
+	for _, name := range []string{"client_generation", "schema_version", "protocol_version", "scope_set_version", "scope_count", "limit", "mutation_count"} {
+		value, found := facts[name]
+		if !found {
+			continue
+		}
+		var integer uint64
+		if json.Unmarshal(value, &integer) != nil || integer > warmConnectMaximumSafeInteger {
+			return fmt.Errorf("React Native request fact %q is outside the portable integer range", name)
 		}
 	}
 	return nil
@@ -584,7 +686,7 @@ func requestInteger(observation transportObservation, name string) (uint64, erro
 		return 0, fmt.Errorf("React Native request fact %q is absent", name)
 	}
 	var value uint64
-	if json.Unmarshal(raw, &value) != nil {
+	if json.Unmarshal(raw, &value) != nil || value > warmConnectMaximumSafeInteger {
 		return 0, fmt.Errorf("React Native request fact %q is invalid", name)
 	}
 	return value, nil
@@ -611,9 +713,36 @@ func decodeClientState(raw json.RawMessage) (inspectedClientState, error) {
 	if err := jsonstrict.Decode(raw, &state); err != nil || state.Schema == nil {
 		return inspectedClientState{}, errors.New("React Native client state is invalid")
 	}
-	if state.Schema.Version == 0 || len(state.Schema.Hash) != 64 ||
+	if state.Schema.Version == 0 || state.Schema.Version > warmConnectMaximumSafeInteger || len(state.Schema.Hash) != 64 ||
 		state.ProvenanceMaintenanceWorkCursor == "" {
 		return inspectedClientState{}, errors.New("React Native client state identity is invalid")
+	}
+	integers := []uint64{
+		state.ApplicationRowCount,
+		state.MutationLedgerCount,
+		state.MutationOutcomeCount,
+		state.SealedBatchCount,
+		state.RejectedMutationCount,
+		state.ScopeStateCount,
+		state.ScopeRowCount,
+		state.ProvenanceCount,
+		state.RowMetadataCount,
+		state.RebuildAttemptCount,
+		state.RebuildReceiptCount,
+	}
+	for _, scope := range state.ScopeStates {
+		integers = append(integers, scope.Generation)
+	}
+	for _, row := range state.ScopeRows {
+		integers = append(integers, row.Generation)
+	}
+	for _, attempt := range state.RebuildAttempts {
+		integers = append(integers, attempt.ClientGeneration, attempt.SchemaVersion, attempt.Generation, attempt.PageLimit)
+	}
+	for _, integer := range integers {
+		if integer > warmConnectMaximumSafeInteger {
+			return inspectedClientState{}, errors.New("React Native client state has an unsafe integer")
+		}
 	}
 	return state, nil
 }
@@ -637,6 +766,11 @@ func decodeDurableProof(raw json.RawMessage) (durableProof, error) {
 		members["row_metadata"] == nil || members["rebuild_receipt_proofs"] == nil ||
 		jsonstrict.Decode(raw, &proof) != nil {
 		return durableProof{}, errors.New("React Native durable proof is invalid")
+	}
+	for _, receipt := range proof.RebuildReceiptProofs {
+		if receipt.PageCount > warmConnectMaximumSafeInteger || receipt.ReturnedRecordCount > warmConnectMaximumSafeInteger {
+			return durableProof{}, errors.New("React Native durable proof has an unsafe integer")
+		}
 	}
 	return proof, nil
 }
@@ -741,7 +875,8 @@ func validateTransportIdentities(state inspectedClientState, capture finalCaptur
 		return errors.New("React Native bootstrap rebuild generation is invalid")
 	}
 	scopeSet, err := requestInteger(bootstrap.Observations[2], "scope_set_version")
-	if err != nil {
+	initialScopeSet, initialScopeSetErr := requestInteger(bootstrap.Observations[0], "scope_set_version")
+	if err != nil || initialScopeSetErr != nil || initialScopeSet != 0 || scopeSet == 0 {
 		return errors.New("React Native bootstrap scope-set version is invalid")
 	}
 	requests := []transportObservation{bootstrap.Observations[1], bootstrap.Observations[2], warm[0], warm[1]}
@@ -787,7 +922,7 @@ func validateTransportIdentities(state inspectedClientState, capture finalCaptur
 	if !reflect.DeepEqual(warm[1].CursorFingerprints, bootstrapPull.ScopeCursorFingerprints) {
 		return errors.New("React Native warm pull is not bound to the bootstrap pull response")
 	}
-	if state.ScopeStates[0].Cursor == nil || !reflect.DeepEqual(
+	if state.ScopeStates[0].Cursor == nil || !warmConnectExercisesOpaqueToken(*state.ScopeStates[0].Cursor) || !reflect.DeepEqual(
 		warmPull.ScopeCursorFingerprints,
 		[]string{hashFingerprint(*state.ScopeStates[0].Cursor)},
 	) {
@@ -1033,6 +1168,9 @@ func validateClientStateAgainstModel(scenario scenarios.Scenario, capture *final
 		len(expected.Clients[0].Checkpoints) != 1 || expected.Clients[0].Checkpoints[0].Checksum == nil {
 		return errors.New("React Native authored schema identity is unavailable")
 	}
+	if !warmConnectExercisesOpaqueToken(metadata.ServerVersion) || metadata.ServerVersion == expected.Clients[0].Provenance[0].Version {
+		return errors.New("React Native client did not preserve an independently issued opaque server version")
+	}
 	scopeChecksum, err := checksumDigest(state.ScopeStates[0].Checksum)
 	if err != nil || scopeChecksum == nil {
 		return errors.New("React Native scope checksum identity is invalid")
@@ -1101,6 +1239,18 @@ func validateServerState(expected scenarios.StateFacts, actual scenarios.StateFa
 func hashFingerprint(value string) string {
 	digest := sha256.Sum256([]byte(value))
 	return hex.EncodeToString(digest[:])
+}
+
+func warmConnectExercisesOpaqueToken(value string) bool {
+	if value == "" {
+		return false
+	}
+	for _, character := range value {
+		if character < '0' || character > '9' {
+			return true
+		}
+	}
+	return false
 }
 
 func copyRaw(value json.RawMessage) json.RawMessage {

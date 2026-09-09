@@ -5,15 +5,21 @@
   "title": "Schema-incompatible queued intent preservation",
   "description": "An incompatible schema change preserves complete authored intent as one durable blocked outcome across restart.",
   "requirement_ids": [
-    "SYNC-SCHEMA-002"
+    "SYNC-SCHEMA-002",
+    "SYNC-SCHEMA-003"
   ],
   "normative_references": [
     {
       "path": "docs/src/content/docs/spec/04-invariants.mdx",
       "anchor": "#schema-incompatible-intent-is-preserved"
+    },
+    {
+      "path": "docs/src/content/docs/spec/04-invariants.mdx",
+      "anchor": "#immutable-schema-manifest"
     }
   ],
   "proof_types": [
+    "reference-model",
     "server-black-box",
     "native-e2e",
     "fault-injection",
@@ -21,12 +27,38 @@
   ],
   "proof_obligations": [
     {
-      "obligation_id": "OBL-SCHEMA-QUEUED-MUTATION-PG-LINUX-X64-001",
+      "obligation_id": "OBL-SCHEMA-QUEUED-MUTATION-MANIFEST-RM-001",
       "requirement_ids": [
-        "SYNC-SCHEMA-002"
+        "SYNC-SCHEMA-003"
       ],
       "assertion_ids": [
-        "ASSERT-SCHEMA-QUEUED-MUTATION-SEMANTIC-001"
+        "ASSERT-SCHEMA-QUEUED-MUTATION-MANIFEST-001"
+      ],
+      "proof_type": "reference-model",
+      "support_cell_id": null,
+      "artifact_inventory_ids": [
+        "ARTDEF-CONFORMANCE-RUNNER-001"
+      ],
+      "performance_budget_ids": [],
+      "required_measurement_ids": [],
+      "required_vector_set_ids": [],
+      "make_target": "test-conformance",
+      "argv": [
+        "make",
+        "test-conformance"
+      ],
+      "fault_plan_id": null,
+      "control_id": null
+    },
+    {
+      "obligation_id": "OBL-SCHEMA-QUEUED-MUTATION-PG-LINUX-X64-001",
+      "requirement_ids": [
+        "SYNC-SCHEMA-002",
+        "SYNC-SCHEMA-003"
+      ],
+      "assertion_ids": [
+        "ASSERT-SCHEMA-QUEUED-MUTATION-SEMANTIC-001",
+        "ASSERT-SCHEMA-QUEUED-MUTATION-MANIFEST-001"
       ],
       "proof_type": "server-black-box",
       "support_cell_id": "SUP-PG-LINUX-X64-001",
@@ -48,10 +80,12 @@
     {
       "obligation_id": "OBL-SCHEMA-QUEUED-MUTATION-MACOS-CURRENT-001",
       "requirement_ids": [
-        "SYNC-SCHEMA-002"
+        "SYNC-SCHEMA-002",
+        "SYNC-SCHEMA-003"
       ],
       "assertion_ids": [
-        "ASSERT-SCHEMA-QUEUED-MUTATION-SEMANTIC-001"
+        "ASSERT-SCHEMA-QUEUED-MUTATION-SEMANTIC-001",
+        "ASSERT-SCHEMA-QUEUED-MUTATION-MANIFEST-001"
       ],
       "proof_type": "native-e2e",
       "support_cell_id": "SUP-MACOS-CURRENT-001",
@@ -74,10 +108,12 @@
     {
       "obligation_id": "OBL-SCHEMA-QUEUED-MUTATION-ANDROID-CURRENT-001",
       "requirement_ids": [
-        "SYNC-SCHEMA-002"
+        "SYNC-SCHEMA-002",
+        "SYNC-SCHEMA-003"
       ],
       "assertion_ids": [
-        "ASSERT-SCHEMA-QUEUED-MUTATION-SEMANTIC-001"
+        "ASSERT-SCHEMA-QUEUED-MUTATION-SEMANTIC-001",
+        "ASSERT-SCHEMA-QUEUED-MUTATION-MANIFEST-001"
       ],
       "proof_type": "native-e2e",
       "support_cell_id": "SUP-ANDROID-CURRENT-001",
@@ -100,10 +136,12 @@
     {
       "obligation_id": "OBL-SCHEMA-QUEUED-MUTATION-RN-IOS-CURRENT-001",
       "requirement_ids": [
-        "SYNC-SCHEMA-002"
+        "SYNC-SCHEMA-002",
+        "SYNC-SCHEMA-003"
       ],
       "assertion_ids": [
-        "ASSERT-SCHEMA-QUEUED-MUTATION-SEMANTIC-001"
+        "ASSERT-SCHEMA-QUEUED-MUTATION-SEMANTIC-001",
+        "ASSERT-SCHEMA-QUEUED-MUTATION-MANIFEST-001"
       ],
       "proof_type": "native-e2e",
       "support_cell_id": "SUP-RN-IOS-CURRENT-001",
@@ -128,10 +166,12 @@
     {
       "obligation_id": "OBL-SCHEMA-QUEUED-MUTATION-RN-ANDROID-CURRENT-001",
       "requirement_ids": [
-        "SYNC-SCHEMA-002"
+        "SYNC-SCHEMA-002",
+        "SYNC-SCHEMA-003"
       ],
       "assertion_ids": [
-        "ASSERT-SCHEMA-QUEUED-MUTATION-SEMANTIC-001"
+        "ASSERT-SCHEMA-QUEUED-MUTATION-SEMANTIC-001",
+        "ASSERT-SCHEMA-QUEUED-MUTATION-MANIFEST-001"
       ],
       "proof_type": "native-e2e",
       "support_cell_id": "SUP-RN-ANDROID-CURRENT-001",
@@ -179,6 +219,31 @@
       "control_id": "CTRL-SCHEMA-002"
     },
     {
+      "obligation_id": "OBL-SCHEMA-QUEUED-MUTATION-MANIFEST-FAULT-001",
+      "requirement_ids": [
+        "SYNC-SCHEMA-003"
+      ],
+      "assertion_ids": [
+        "ASSERT-SCHEMA-QUEUED-MUTATION-MANIFEST-001"
+      ],
+      "proof_type": "fault-injection",
+      "support_cell_id": "SUP-PG-LINUX-X64-001",
+      "artifact_inventory_ids": [
+        "ARTDEF-PG-EXTENSION-001",
+        "ARTDEF-ADAPTER-001"
+      ],
+      "performance_budget_ids": [],
+      "required_measurement_ids": [],
+      "required_vector_set_ids": [],
+      "make_target": "test-blackbox",
+      "argv": [
+        "make",
+        "test-blackbox"
+      ],
+      "fault_plan_id": "FPL-SCHEMA-QUEUED-MUTATION-MANIFEST-001",
+      "control_id": "CTRL-SCHEMA-003"
+    },
+    {
       "obligation_id": "OBL-SCHEMA-QUEUED-MUTATION-CONTROL-001",
       "requirement_ids": [
         "SYNC-SCHEMA-002"
@@ -205,6 +270,31 @@
       ],
       "fault_plan_id": "FPL-SCHEMA-QUEUED-MUTATION-001",
       "control_id": "CTRL-SCHEMA-002"
+    },
+    {
+      "obligation_id": "OBL-SCHEMA-QUEUED-MUTATION-MANIFEST-CONTROL-001",
+      "requirement_ids": [
+        "SYNC-SCHEMA-003"
+      ],
+      "assertion_ids": [
+        "ASSERT-SCHEMA-QUEUED-MUTATION-MANIFEST-001"
+      ],
+      "proof_type": "negative-control",
+      "support_cell_id": null,
+      "artifact_inventory_ids": [
+        "ARTDEF-CONFORMANCE-RUNNER-001",
+        "ARTDEF-PG-EXTENSION-001"
+      ],
+      "performance_budget_ids": [],
+      "required_measurement_ids": [],
+      "required_vector_set_ids": [],
+      "make_target": "test-integration-mutants",
+      "argv": [
+        "make",
+        "test-integration-mutants"
+      ],
+      "fault_plan_id": "FPL-SCHEMA-QUEUED-MUTATION-MANIFEST-001",
+      "control_id": "CTRL-SCHEMA-003"
     }
   ],
   "ownership": [
@@ -263,6 +353,70 @@
       "assertion_id": "ASSERT-SCHEMA-QUEUED-MUTATION-SEMANTIC-001",
       "proof_type": "negative-control",
       "support_cell_id": null
+    },
+    {
+      "scenario_id": "SCN-SCHEMA-QUEUED-MUTATION-001",
+      "requirement_id": "SYNC-SCHEMA-003",
+      "proof_obligation_id": "OBL-SCHEMA-QUEUED-MUTATION-MANIFEST-CONTROL-001",
+      "assertion_id": "ASSERT-SCHEMA-QUEUED-MUTATION-MANIFEST-001",
+      "proof_type": "negative-control",
+      "support_cell_id": null
+    },
+    {
+      "scenario_id": "SCN-SCHEMA-QUEUED-MUTATION-001",
+      "requirement_id": "SYNC-SCHEMA-003",
+      "proof_obligation_id": "OBL-SCHEMA-QUEUED-MUTATION-MANIFEST-RM-001",
+      "assertion_id": "ASSERT-SCHEMA-QUEUED-MUTATION-MANIFEST-001",
+      "proof_type": "reference-model",
+      "support_cell_id": null
+    },
+    {
+      "scenario_id": "SCN-SCHEMA-QUEUED-MUTATION-001",
+      "requirement_id": "SYNC-SCHEMA-003",
+      "proof_obligation_id": "OBL-SCHEMA-QUEUED-MUTATION-PG-LINUX-X64-001",
+      "assertion_id": "ASSERT-SCHEMA-QUEUED-MUTATION-MANIFEST-001",
+      "proof_type": "server-black-box",
+      "support_cell_id": "SUP-PG-LINUX-X64-001"
+    },
+    {
+      "scenario_id": "SCN-SCHEMA-QUEUED-MUTATION-001",
+      "requirement_id": "SYNC-SCHEMA-003",
+      "proof_obligation_id": "OBL-SCHEMA-QUEUED-MUTATION-MACOS-CURRENT-001",
+      "assertion_id": "ASSERT-SCHEMA-QUEUED-MUTATION-MANIFEST-001",
+      "proof_type": "native-e2e",
+      "support_cell_id": "SUP-MACOS-CURRENT-001"
+    },
+    {
+      "scenario_id": "SCN-SCHEMA-QUEUED-MUTATION-001",
+      "requirement_id": "SYNC-SCHEMA-003",
+      "proof_obligation_id": "OBL-SCHEMA-QUEUED-MUTATION-ANDROID-CURRENT-001",
+      "assertion_id": "ASSERT-SCHEMA-QUEUED-MUTATION-MANIFEST-001",
+      "proof_type": "native-e2e",
+      "support_cell_id": "SUP-ANDROID-CURRENT-001"
+    },
+    {
+      "scenario_id": "SCN-SCHEMA-QUEUED-MUTATION-001",
+      "requirement_id": "SYNC-SCHEMA-003",
+      "proof_obligation_id": "OBL-SCHEMA-QUEUED-MUTATION-RN-IOS-CURRENT-001",
+      "assertion_id": "ASSERT-SCHEMA-QUEUED-MUTATION-MANIFEST-001",
+      "proof_type": "native-e2e",
+      "support_cell_id": "SUP-RN-IOS-CURRENT-001"
+    },
+    {
+      "scenario_id": "SCN-SCHEMA-QUEUED-MUTATION-001",
+      "requirement_id": "SYNC-SCHEMA-003",
+      "proof_obligation_id": "OBL-SCHEMA-QUEUED-MUTATION-RN-ANDROID-CURRENT-001",
+      "assertion_id": "ASSERT-SCHEMA-QUEUED-MUTATION-MANIFEST-001",
+      "proof_type": "native-e2e",
+      "support_cell_id": "SUP-RN-ANDROID-CURRENT-001"
+    },
+    {
+      "scenario_id": "SCN-SCHEMA-QUEUED-MUTATION-001",
+      "requirement_id": "SYNC-SCHEMA-003",
+      "proof_obligation_id": "OBL-SCHEMA-QUEUED-MUTATION-MANIFEST-FAULT-001",
+      "assertion_id": "ASSERT-SCHEMA-QUEUED-MUTATION-MANIFEST-001",
+      "proof_type": "fault-injection",
+      "support_cell_id": "SUP-PG-LINUX-X64-001"
     }
   ],
   "model": {
@@ -549,6 +703,25 @@
           "defect": "drop or rewrite UUID, complete payload, schema, base version, client version, or local order, or auto-retry it"
         }
       }
+    },
+    {
+      "id": "FPL-SCHEMA-QUEUED-MUTATION-MANIFEST-001",
+      "requirement_id": "SYNC-SCHEMA-003",
+      "fault_id": "FAULT-SCHEMA-003",
+      "control_id": "CTRL-SCHEMA-003",
+      "barrier_id": "BAR-SCHEMA-QUEUED-MUTATION-CONTROL-001",
+      "expected_assertion_ids": [
+        "ASSERT-SCHEMA-QUEUED-MUTATION-MANIFEST-001"
+      ],
+      "injection": {
+        "mechanism": "state-fault",
+        "target": "published schema manifest storage and serving",
+        "operator": "replace",
+        "parameters": {
+          "scenario": "publish a manifest, then change a field type and live catalog body without changing its identity",
+          "defect": "mutate body, hash, version, class, composition, table ID, or field ID in place or serve live content under old identity"
+        }
+      }
     }
   ],
   "replay": {
@@ -569,6 +742,17 @@
       ],
       "detected_by": [
         "ASSERT-SCHEMA-QUEUED-MUTATION-SEMANTIC-001"
+      ]
+    },
+    {
+      "control_id": "CTRL-SCHEMA-003",
+      "requirement_id": "SYNC-SCHEMA-003",
+      "fault_id": "FAULT-SCHEMA-003",
+      "subject_artifact_inventory_ids": [
+        "ARTDEF-PG-EXTENSION-001"
+      ],
+      "detected_by": [
+        "ASSERT-SCHEMA-QUEUED-MUTATION-MANIFEST-001"
       ]
     }
   ],
@@ -1097,6 +1281,30 @@
       },
       "detects_control_ids": [
         "CTRL-SCHEMA-002"
+      ]
+    },
+    {
+      "id": "ASSERT-SCHEMA-QUEUED-MUTATION-MANIFEST-001",
+      "requirement_ids": [
+        "SYNC-SCHEMA-003"
+      ],
+      "description": "The manifest-identity control detects incomplete identity fields, in-place changes, or live-catalog synthesis under a published identity.",
+      "expectation_ids": [
+        "EXPECT-SCHEMA-QUEUED-MUTATION-WIRE-001",
+        "EXPECT-SCHEMA-QUEUED-MUTATION-STATE-001"
+      ],
+      "predicate": {
+        "contract_predicate": "wire-outcome",
+        "name": "canonical-wire-outcome",
+        "payload": {}
+      },
+      "oracle": {
+        "kind": "wire-contract",
+        "expected_source": "authored-model",
+        "observed_source": "system-under-test"
+      },
+      "detects_control_ids": [
+        "CTRL-SCHEMA-003"
       ]
     }
   ],

@@ -298,6 +298,7 @@ internal class PullProcessor(private val database: SynchroDatabase) {
         }
         val validatedRequestJSON = rebuildRequestJSON(request, requestJSON)
         val validatedResponseJSON = rebuildResponseJSON(response, responseJSON)
+        android.util.Log.i("SynchroMemory", "apply before transaction records=${response.records.size} more=${response.hasMore} heap=${android.os.Debug.getNativeHeapAllocatedSize()}")
 
         return database.writeSyncLockedTransaction { db ->
             if (request.scope != attempt.scopeID ||
@@ -370,6 +371,7 @@ internal class PullProcessor(private val database: SynchroDatabase) {
                     attempt.generation
                 )
             }
+            android.util.Log.i("SynchroMemory", "apply after records records=${response.records.size} more=${response.hasMore} heap=${android.os.Debug.getNativeHeapAllocatedSize()}")
             val finalChecksumJSON = response.checksum?.let(::checksumJSON)
             SynchroMeta.insertRebuildPageReceipt(
                 db,
@@ -389,6 +391,7 @@ internal class PullProcessor(private val database: SynchroDatabase) {
             )
 
             if (!response.hasMore) {
+                android.util.Log.i("SynchroMemory", "apply before finalize heap=${android.os.Debug.getNativeHeapAllocatedSize()}")
                 finalizeScopeRebuild(
                     db,
                     attempt,
@@ -398,6 +401,7 @@ internal class PullProcessor(private val database: SynchroDatabase) {
                         ?: throw SynchroError.InvalidResponse("final rebuild page finality is missing"),
                     tablesByName,
                 )
+                android.util.Log.i("SynchroMemory", "apply after finalize heap=${android.os.Debug.getNativeHeapAllocatedSize()}")
                 return@writeSyncLockedTransaction attempt
             }
             val nextCursor = response.cursor
@@ -455,7 +459,9 @@ internal class PullProcessor(private val database: SynchroDatabase) {
             removeLocalRowIfUnreferenced(db, tableName, recordId, schema)
         }
 
+        android.util.Log.i("SynchroMemory", "finalize before checksum stale=${staleRows.size} heap=${android.os.Debug.getNativeHeapAllocatedSize()}")
         val localChecksum = computeScopeChecksum(db, attempt.scopeID, attempt.schemaHash, tablesByName)
+        android.util.Log.i("SynchroMemory", "finalize after checksum heap=${android.os.Debug.getNativeHeapAllocatedSize()}")
         checksum.validate()
         if (localChecksum != checksum) {
             throw RebuildChecksumMismatchException(attempt.scopeID)

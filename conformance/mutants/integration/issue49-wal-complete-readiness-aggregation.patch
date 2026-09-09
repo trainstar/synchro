@@ -1,0 +1,13 @@
+diff --git a/extensions/synchro-pg/src/health.rs b/extensions/synchro-pg/src/health.rs
+--- a/extensions/synchro-pg/src/health.rs
++++ b/extensions/synchro-pg/src/health.rs
+@@ -647,6 +647,7 @@ impl ReadinessStatus {
+     pub(crate) fn ready(&self) -> bool {
+         self.checks
+-            .values()
++            .iter()
++            .filter(|(name, _)| **name != "capture_triggers")
+-            .all(|check| check.state == CheckState::Ok)
++            .all(|(_, check)| check.state == CheckState::Ok)
+     }
+ 

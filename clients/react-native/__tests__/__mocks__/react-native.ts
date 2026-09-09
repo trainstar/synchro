@@ -101,5 +101,7 @@ export function resetNativeModuleMockState() {
 
 // Helper: emit a native event to all JS listeners
 export function emitNativeEvent(eventName: string, data: unknown) {
-  listeners[eventName]?.forEach((cb) => cb(data));
+  const callbacks = [...(listeners[eventName] ?? [])];
+  callbacks.forEach((callback) => callback(data));
+  return callbacks.length;
 }

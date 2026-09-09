@@ -18,6 +18,7 @@ import (
 	"log"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strconv"
 	"strings"
 	"sync"
@@ -347,8 +348,7 @@ func TestConnectPassthrough(t *testing.T) {
 	token := testToken("user-1")
 	clientID := testClientID(t, "test-canonical-connect-client")
 	schema := currentSchemaReference(t, srv)
-
-	status, body := doJSON(t, "POST", srv.URL+"/sync/connect", token, map[string]any{
+	request := map[string]any{
 		"client_id":         clientID,
 		"platform":          "ios",
 		"app_version":       "1.0.0",
@@ -356,19 +356,45 @@ func TestConnectPassthrough(t *testing.T) {
 		"schema":            schema,
 		"scope_set_version": 0,
 		"known_scopes":      map[string]any{},
-	})
+	}
+	requestJSON, err := json.Marshal(request)
+	if err != nil {
+		t.Fatalf("marshal canonical connect request: %v", err)
+	}
+	database := testsupport.OpenPostgres(t)
+	tx, err := database.BeginTx(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("begin canonical connect transaction: %v", err)
+	}
+	defer func() {
+		if err := tx.Rollback(); err != nil && err != sql.ErrTxDone {
+			t.Errorf("rollback canonical connect transaction: %v", err)
+		}
+	}()
+	var expectedJSON []byte
+	if err := tx.QueryRowContext(
+		context.Background(),
+		"SELECT synchro.synchro_connect($1, $2::pg_catalog.jsonb)",
+		"user-1",
+		string(requestJSON),
+	).Scan(&expectedJSON); err != nil {
+		t.Fatalf("call canonical connect function: %v", err)
+	}
+	if err := tx.Rollback(); err != nil {
+		t.Fatalf("rollback canonical connect transaction: %v", err)
+	}
+	var expected map[string]any
+	if err := json.Unmarshal(expectedJSON, &expected); err != nil {
+		t.Fatalf("decode canonical connect response: %v", err)
+	}
+
+	status, body := doJSON(t, "POST", srv.URL+"/sync/connect", token, request)
 
 	if status != 200 {
 		t.Fatalf("expected 200, got %d: %v", status, body)
 	}
-	if body["protocol_version"] == nil {
-		t.Error("response missing 'protocol_version'")
-	}
-	if body["schema"] == nil {
-		t.Error("response missing 'schema'")
-	}
-	if body["scopes"] == nil {
-		t.Error("response missing 'scopes'")
+	if !reflect.DeepEqual(body, expected) {
+		t.Fatalf("connect response differs from canonical function: got %v, want %v", body, expected)
 	}
 }
 

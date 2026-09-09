@@ -5,17 +5,27 @@
   "title": "Core sync direct extension path",
   "description": "Connect, push, pull, and rebuild use the direct PostgreSQL extension path without outbound RPC hops.",
   "requirement_ids": [
-    "SYNC-PERFORMANCE-001"
+    "SYNC-PERFORMANCE-001",
+    "SYNC-BOUNDARY-001",
+    "SYNC-DBAUTH-001",
+    "SYNC-DBAUTH-002",
+    "SYNC-LOGGING-001",
+    "SYNC-INSTALL-001",
+    "SYNC-INSTALL-002"
   ],
   "normative_references": [
-    {
-      "path": "docs/src/content/docs/spec/04-invariants.mdx",
-      "anchor": "#no-extra-hot-path-network-hop-for-core-sync-logic"
-    }
+    {"path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#no-extra-hot-path-network-hop-for-core-sync-logic"},
+    {"path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#thin-adapter-invariant"},
+    {"path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#database-default-deny"},
+    {"path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#database-role-separation"},
+    {"path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#operational-data-redaction"},
+    {"path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#pgrx-installation-authority"},
+    {"path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#extension-migration-baseline"}
   ],
   "proof_types": [
     "server-black-box",
-    "negative-control"
+    "negative-control",
+    "fault-injection"
   ],
   "proof_obligations": [
     {
@@ -70,7 +80,20 @@
       ],
       "fault_plan_id": "FPL-PERF-CORE-SYNC-PATH-001",
       "control_id": "CTRL-PERFORMANCE-001"
-    }
+    },
+    {"obligation_id":"OBL-PERF-CORE-SYNC-PATH-BOUNDARY-PG-LINUX-X64-001","requirement_ids":["SYNC-BOUNDARY-001"],"assertion_ids":["ASSERT-PERF-CORE-SYNC-PATH-BOUNDARY-001"],"proof_type":"server-black-box","support_cell_id":"SUP-PG-LINUX-X64-001","artifact_inventory_ids":["ARTDEF-PG-EXTENSION-001","ARTDEF-ADAPTER-001"],"performance_budget_ids":[],"required_measurement_ids":[],"required_vector_set_ids":[],"make_target":"test-blackbox","argv":["make","test-blackbox"],"fault_plan_id":null,"control_id":null},
+    {"obligation_id":"OBL-PERF-CORE-SYNC-PATH-BOUNDARY-CONTROL-001","requirement_ids":["SYNC-BOUNDARY-001"],"assertion_ids":["ASSERT-PERF-CORE-SYNC-PATH-BOUNDARY-001"],"proof_type":"negative-control","support_cell_id":null,"artifact_inventory_ids":["ARTDEF-CONFORMANCE-RUNNER-001","ARTDEF-ADAPTER-001"],"performance_budget_ids":[],"required_measurement_ids":[],"required_vector_set_ids":[],"make_target":"test-conformance","argv":["make","test-conformance"],"fault_plan_id":"FPL-PERF-CORE-SYNC-PATH-BOUNDARY-001","control_id":"CTRL-BOUNDARY-001"},
+    {"obligation_id":"OBL-PERF-CORE-SYNC-PATH-DBAUTH-001-PG-LINUX-X64-001","requirement_ids":["SYNC-DBAUTH-001"],"assertion_ids":["ASSERT-PERF-CORE-SYNC-PATH-DBAUTH-001"],"proof_type":"server-black-box","support_cell_id":"SUP-PG-LINUX-X64-001","artifact_inventory_ids":["ARTDEF-PG-EXTENSION-001","ARTDEF-ADAPTER-001"],"performance_budget_ids":[],"required_measurement_ids":[],"required_vector_set_ids":[],"make_target":"test-blackbox","argv":["make","test-blackbox"],"fault_plan_id":null,"control_id":null},
+    {"obligation_id":"OBL-PERF-CORE-SYNC-PATH-DBAUTH-001-CONTROL-001","requirement_ids":["SYNC-DBAUTH-001"],"assertion_ids":["ASSERT-PERF-CORE-SYNC-PATH-DBAUTH-001"],"proof_type":"negative-control","support_cell_id":null,"artifact_inventory_ids":["ARTDEF-CONFORMANCE-RUNNER-001","ARTDEF-PG-EXTENSION-001"],"performance_budget_ids":[],"required_measurement_ids":[],"required_vector_set_ids":[],"make_target":"test-conformance","argv":["make","test-conformance"],"fault_plan_id":"FPL-PERF-CORE-SYNC-PATH-DBAUTH-001-001","control_id":"CTRL-DBAUTH-001"},
+    {"obligation_id":"OBL-PERF-CORE-SYNC-PATH-DBAUTH-002-PG-LINUX-X64-001","requirement_ids":["SYNC-DBAUTH-002"],"assertion_ids":["ASSERT-PERF-CORE-SYNC-PATH-DBAUTH-002"],"proof_type":"server-black-box","support_cell_id":"SUP-PG-LINUX-X64-001","artifact_inventory_ids":["ARTDEF-PG-EXTENSION-001","ARTDEF-ADAPTER-001"],"performance_budget_ids":[],"required_measurement_ids":[],"required_vector_set_ids":[],"make_target":"test-blackbox","argv":["make","test-blackbox"],"fault_plan_id":null,"control_id":null},
+    {"obligation_id":"OBL-PERF-CORE-SYNC-PATH-DBAUTH-002-CONTROL-001","requirement_ids":["SYNC-DBAUTH-002"],"assertion_ids":["ASSERT-PERF-CORE-SYNC-PATH-DBAUTH-002"],"proof_type":"negative-control","support_cell_id":null,"artifact_inventory_ids":["ARTDEF-CONFORMANCE-RUNNER-001","ARTDEF-PG-EXTENSION-001"],"performance_budget_ids":[],"required_measurement_ids":[],"required_vector_set_ids":[],"make_target":"test-conformance","argv":["make","test-conformance"],"fault_plan_id":"FPL-PERF-CORE-SYNC-PATH-DBAUTH-002-001","control_id":"CTRL-DBAUTH-002"},
+    {"obligation_id":"OBL-PERF-CORE-SYNC-PATH-LOGGING-PG-LINUX-X64-001","requirement_ids":["SYNC-LOGGING-001"],"assertion_ids":["ASSERT-PERF-CORE-SYNC-PATH-LOGGING-001"],"proof_type":"server-black-box","support_cell_id":"SUP-PG-LINUX-X64-001","artifact_inventory_ids":["ARTDEF-PG-EXTENSION-001","ARTDEF-ADAPTER-001"],"performance_budget_ids":[],"required_measurement_ids":[],"required_vector_set_ids":[],"make_target":"test-blackbox","argv":["make","test-blackbox"],"fault_plan_id":null,"control_id":null},
+    {"obligation_id":"OBL-PERF-CORE-SYNC-PATH-LOGGING-FAULT-001","requirement_ids":["SYNC-LOGGING-001"],"assertion_ids":["ASSERT-PERF-CORE-SYNC-PATH-LOGGING-001"],"proof_type":"fault-injection","support_cell_id":"SUP-PG-LINUX-X64-001","artifact_inventory_ids":["ARTDEF-PG-EXTENSION-001","ARTDEF-ADAPTER-001"],"performance_budget_ids":[],"required_measurement_ids":[],"required_vector_set_ids":[],"make_target":"test-blackbox","argv":["make","test-blackbox"],"fault_plan_id":"FPL-PERF-CORE-SYNC-PATH-LOGGING-001","control_id":"CTRL-LOGGING-001"},
+    {"obligation_id":"OBL-PERF-CORE-SYNC-PATH-LOGGING-CONTROL-001","requirement_ids":["SYNC-LOGGING-001"],"assertion_ids":["ASSERT-PERF-CORE-SYNC-PATH-LOGGING-001"],"proof_type":"negative-control","support_cell_id":null,"artifact_inventory_ids":["ARTDEF-CONFORMANCE-RUNNER-001","ARTDEF-ADAPTER-001"],"performance_budget_ids":[],"required_measurement_ids":[],"required_vector_set_ids":[],"make_target":"test-conformance","argv":["make","test-conformance"],"fault_plan_id":"FPL-PERF-CORE-SYNC-PATH-LOGGING-001","control_id":"CTRL-LOGGING-001"},
+    {"obligation_id":"OBL-PERF-CORE-SYNC-PATH-INSTALL-001-PG-LINUX-X64-001","requirement_ids":["SYNC-INSTALL-001"],"assertion_ids":["ASSERT-PERF-CORE-SYNC-PATH-INSTALL-001"],"proof_type":"server-black-box","support_cell_id":"SUP-PG-LINUX-X64-001","artifact_inventory_ids":["ARTDEF-PG-EXTENSION-001","ARTDEF-ADAPTER-001"],"performance_budget_ids":[],"required_measurement_ids":[],"required_vector_set_ids":[],"make_target":"test-blackbox","argv":["make","test-blackbox"],"fault_plan_id":null,"control_id":null},
+    {"obligation_id":"OBL-PERF-CORE-SYNC-PATH-INSTALL-001-CONTROL-001","requirement_ids":["SYNC-INSTALL-001"],"assertion_ids":["ASSERT-PERF-CORE-SYNC-PATH-INSTALL-001"],"proof_type":"negative-control","support_cell_id":null,"artifact_inventory_ids":["ARTDEF-CONFORMANCE-RUNNER-001","ARTDEF-PG-EXTENSION-001"],"performance_budget_ids":[],"required_measurement_ids":[],"required_vector_set_ids":[],"make_target":"test-conformance","argv":["make","test-conformance"],"fault_plan_id":"FPL-PERF-CORE-SYNC-PATH-INSTALL-001-001","control_id":"CTRL-INSTALL-001"},
+    {"obligation_id":"OBL-PERF-CORE-SYNC-PATH-INSTALL-002-PG-LINUX-X64-001","requirement_ids":["SYNC-INSTALL-002"],"assertion_ids":["ASSERT-PERF-CORE-SYNC-PATH-INSTALL-002"],"proof_type":"server-black-box","support_cell_id":"SUP-PG-LINUX-X64-001","artifact_inventory_ids":["ARTDEF-PG-EXTENSION-001","ARTDEF-ADAPTER-001"],"performance_budget_ids":[],"required_measurement_ids":[],"required_vector_set_ids":[],"make_target":"test-blackbox","argv":["make","test-blackbox"],"fault_plan_id":null,"control_id":null},
+    {"obligation_id":"OBL-PERF-CORE-SYNC-PATH-INSTALL-002-CONTROL-001","requirement_ids":["SYNC-INSTALL-002"],"assertion_ids":["ASSERT-PERF-CORE-SYNC-PATH-INSTALL-002"],"proof_type":"negative-control","support_cell_id":null,"artifact_inventory_ids":["ARTDEF-CONFORMANCE-RUNNER-001","ARTDEF-PG-EXTENSION-001"],"performance_budget_ids":[],"required_measurement_ids":[],"required_vector_set_ids":[],"make_target":"test-conformance","argv":["make","test-conformance"],"fault_plan_id":"FPL-PERF-CORE-SYNC-PATH-INSTALL-002-001","control_id":"CTRL-INSTALL-002"}
   ],
   "ownership": [
     {
@@ -96,7 +119,20 @@
       "assertion_id": "ASSERT-PERF-CORE-SYNC-PATH-SEMANTIC-001",
       "proof_type": "negative-control",
       "support_cell_id": null
-    }
+    },
+    {"scenario_id":"SCN-PERF-CORE-SYNC-PATH-001","requirement_id":"SYNC-BOUNDARY-001","proof_obligation_id":"OBL-PERF-CORE-SYNC-PATH-BOUNDARY-PG-LINUX-X64-001","assertion_id":"ASSERT-PERF-CORE-SYNC-PATH-BOUNDARY-001","proof_type":"server-black-box","support_cell_id":"SUP-PG-LINUX-X64-001"},
+    {"scenario_id":"SCN-PERF-CORE-SYNC-PATH-001","requirement_id":"SYNC-BOUNDARY-001","proof_obligation_id":"OBL-PERF-CORE-SYNC-PATH-BOUNDARY-CONTROL-001","assertion_id":"ASSERT-PERF-CORE-SYNC-PATH-BOUNDARY-001","proof_type":"negative-control","support_cell_id":null},
+    {"scenario_id":"SCN-PERF-CORE-SYNC-PATH-001","requirement_id":"SYNC-DBAUTH-001","proof_obligation_id":"OBL-PERF-CORE-SYNC-PATH-DBAUTH-001-PG-LINUX-X64-001","assertion_id":"ASSERT-PERF-CORE-SYNC-PATH-DBAUTH-001","proof_type":"server-black-box","support_cell_id":"SUP-PG-LINUX-X64-001"},
+    {"scenario_id":"SCN-PERF-CORE-SYNC-PATH-001","requirement_id":"SYNC-DBAUTH-001","proof_obligation_id":"OBL-PERF-CORE-SYNC-PATH-DBAUTH-001-CONTROL-001","assertion_id":"ASSERT-PERF-CORE-SYNC-PATH-DBAUTH-001","proof_type":"negative-control","support_cell_id":null},
+    {"scenario_id":"SCN-PERF-CORE-SYNC-PATH-001","requirement_id":"SYNC-DBAUTH-002","proof_obligation_id":"OBL-PERF-CORE-SYNC-PATH-DBAUTH-002-PG-LINUX-X64-001","assertion_id":"ASSERT-PERF-CORE-SYNC-PATH-DBAUTH-002","proof_type":"server-black-box","support_cell_id":"SUP-PG-LINUX-X64-001"},
+    {"scenario_id":"SCN-PERF-CORE-SYNC-PATH-001","requirement_id":"SYNC-DBAUTH-002","proof_obligation_id":"OBL-PERF-CORE-SYNC-PATH-DBAUTH-002-CONTROL-001","assertion_id":"ASSERT-PERF-CORE-SYNC-PATH-DBAUTH-002","proof_type":"negative-control","support_cell_id":null},
+    {"scenario_id":"SCN-PERF-CORE-SYNC-PATH-001","requirement_id":"SYNC-LOGGING-001","proof_obligation_id":"OBL-PERF-CORE-SYNC-PATH-LOGGING-PG-LINUX-X64-001","assertion_id":"ASSERT-PERF-CORE-SYNC-PATH-LOGGING-001","proof_type":"server-black-box","support_cell_id":"SUP-PG-LINUX-X64-001"},
+    {"scenario_id":"SCN-PERF-CORE-SYNC-PATH-001","requirement_id":"SYNC-LOGGING-001","proof_obligation_id":"OBL-PERF-CORE-SYNC-PATH-LOGGING-FAULT-001","assertion_id":"ASSERT-PERF-CORE-SYNC-PATH-LOGGING-001","proof_type":"fault-injection","support_cell_id":"SUP-PG-LINUX-X64-001"},
+    {"scenario_id":"SCN-PERF-CORE-SYNC-PATH-001","requirement_id":"SYNC-LOGGING-001","proof_obligation_id":"OBL-PERF-CORE-SYNC-PATH-LOGGING-CONTROL-001","assertion_id":"ASSERT-PERF-CORE-SYNC-PATH-LOGGING-001","proof_type":"negative-control","support_cell_id":null},
+    {"scenario_id":"SCN-PERF-CORE-SYNC-PATH-001","requirement_id":"SYNC-INSTALL-001","proof_obligation_id":"OBL-PERF-CORE-SYNC-PATH-INSTALL-001-PG-LINUX-X64-001","assertion_id":"ASSERT-PERF-CORE-SYNC-PATH-INSTALL-001","proof_type":"server-black-box","support_cell_id":"SUP-PG-LINUX-X64-001"},
+    {"scenario_id":"SCN-PERF-CORE-SYNC-PATH-001","requirement_id":"SYNC-INSTALL-001","proof_obligation_id":"OBL-PERF-CORE-SYNC-PATH-INSTALL-001-CONTROL-001","assertion_id":"ASSERT-PERF-CORE-SYNC-PATH-INSTALL-001","proof_type":"negative-control","support_cell_id":null},
+    {"scenario_id":"SCN-PERF-CORE-SYNC-PATH-001","requirement_id":"SYNC-INSTALL-002","proof_obligation_id":"OBL-PERF-CORE-SYNC-PATH-INSTALL-002-PG-LINUX-X64-001","assertion_id":"ASSERT-PERF-CORE-SYNC-PATH-INSTALL-002","proof_type":"server-black-box","support_cell_id":"SUP-PG-LINUX-X64-001"},
+    {"scenario_id":"SCN-PERF-CORE-SYNC-PATH-001","requirement_id":"SYNC-INSTALL-002","proof_obligation_id":"OBL-PERF-CORE-SYNC-PATH-INSTALL-002-CONTROL-001","assertion_id":"ASSERT-PERF-CORE-SYNC-PATH-INSTALL-002","proof_type":"negative-control","support_cell_id":null}
   ],
   "model": {
     "setup": [
@@ -333,7 +369,13 @@
           "defect": "call a separate outbound sync-service RPC instead of the PostgreSQL extension directly"
         }
       }
-    }
+    },
+    {"id":"FPL-PERF-CORE-SYNC-PATH-BOUNDARY-001","requirement_id":"SYNC-BOUNDARY-001","fault_id":"FAULT-BOUNDARY-001","control_id":"CTRL-BOUNDARY-001","barrier_id":"BAR-PERF-CORE-SYNC-PATH-CONTROL-001","expected_assertion_ids":["ASSERT-PERF-CORE-SYNC-PATH-BOUNDARY-001"],"injection":{"mechanism":"source-mutant","target":"Go sync endpoint handler","operator":"inject","parameters":{"scenario":"trace connect, push, pull, and rebuild endpoint execution","defect":"perform an independent scope, conflict, rebuild, or synced-write decision instead of one canonical extension call"}}},
+    {"id":"FPL-PERF-CORE-SYNC-PATH-DBAUTH-001-001","requirement_id":"SYNC-DBAUTH-001","fault_id":"FAULT-DBAUTH-001","control_id":"CTRL-DBAUTH-001","barrier_id":"BAR-PERF-CORE-SYNC-PATH-CONTROL-001","expected_assertion_ids":["ASSERT-PERF-CORE-SYNC-PATH-DBAUTH-001"],"injection":{"mechanism":"infrastructure-fault","target":"synchro schema and extension-owned object grants","operator":"expose","parameters":{"scenario":"connect as PUBLIC or adapter, seed, and monitor roles and enumerate metadata tables, sequences, and functions","defect":"leave public execution or direct metadata authority granted beyond explicit capabilities"}}},
+    {"id":"FPL-PERF-CORE-SYNC-PATH-DBAUTH-002-001","requirement_id":"SYNC-DBAUTH-002","fault_id":"FAULT-DBAUTH-002","control_id":"CTRL-DBAUTH-002","barrier_id":"BAR-PERF-CORE-SYNC-PATH-CONTROL-001","expected_assertion_ids":["ASSERT-PERF-CORE-SYNC-PATH-DBAUTH-002"],"injection":{"mechanism":"infrastructure-fault","target":"PostgreSQL runtime role membership and worker login","operator":"expose","parameters":{"scenario":"inspect six group roles, worker login attributes, membership, SET ROLE, HBA, and external credential path","defect":"grant owner inheritance or replication authority to another runtime login or omit explicit worker SET ROLE"}}},
+    {"id":"FPL-PERF-CORE-SYNC-PATH-LOGGING-001","requirement_id":"SYNC-LOGGING-001","fault_id":"FAULT-LOGGING-001","control_id":"CTRL-LOGGING-001","barrier_id":"BAR-PERF-CORE-SYNC-PATH-CONTROL-001","expected_assertion_ids":["ASSERT-PERF-CORE-SYNC-PATH-LOGGING-001"],"injection":{"mechanism":"source-mutant","target":"adapter, extension, worker, and quarantine logging fields","operator":"expose","parameters":{"scenario":"process a canary row, protected identity, mutation, token, credential, raw WAL, SQL, and long error","defect":"emit a prohibited value in logs, metric labels, traces, readiness output, or quarantine text"}}},
+    {"id":"FPL-PERF-CORE-SYNC-PATH-INSTALL-001-001","requirement_id":"SYNC-INSTALL-001","fault_id":"FAULT-INSTALL-001","control_id":"CTRL-INSTALL-001","barrier_id":"BAR-PERF-CORE-SYNC-PATH-CONTROL-001","expected_assertion_ids":["ASSERT-PERF-CORE-SYNC-PATH-INSTALL-001"],"injection":{"mechanism":"artifact-tamper","target":"tracked generated extension SQL and pgrx source declarations","operator":"corrupt","parameters":{"scenario":"edit generated grants, revokes, comments, or membership without changing pgrx annotations","defect":"ship hand-maintained parallel SQL or byte-different generated output"}}},
+    {"id":"FPL-PERF-CORE-SYNC-PATH-INSTALL-002-001","requirement_id":"SYNC-INSTALL-002","fault_id":"FAULT-INSTALL-002","control_id":"CTRL-INSTALL-002","barrier_id":"BAR-PERF-CORE-SYNC-PATH-CONTROL-001","expected_assertion_ids":["ASSERT-PERF-CORE-SYNC-PATH-INSTALL-002"],"injection":{"mechanism":"artifact-tamper","target":"extension 0.3.0 migration SQL","operator":"inject","parameters":{"scenario":"install on clean PostgreSQL 18 and inspect migration path and non-superuser role checks","defect":"add pre-0.3.0 in-place update or IF NOT EXISTS migration logic instead of the first supported baseline"}}}
   ],
   "replay": {
     "mode": "deterministic",
@@ -351,7 +393,13 @@
       "detected_by": [
         "ASSERT-PERF-CORE-SYNC-PATH-SEMANTIC-001"
       ]
-    }
+    },
+    {"control_id":"CTRL-BOUNDARY-001","requirement_id":"SYNC-BOUNDARY-001","fault_id":"FAULT-BOUNDARY-001","subject_artifact_inventory_ids":["ARTDEF-ADAPTER-001"],"detected_by":["ASSERT-PERF-CORE-SYNC-PATH-BOUNDARY-001"]},
+    {"control_id":"CTRL-DBAUTH-001","requirement_id":"SYNC-DBAUTH-001","fault_id":"FAULT-DBAUTH-001","subject_artifact_inventory_ids":["ARTDEF-PG-EXTENSION-001"],"detected_by":["ASSERT-PERF-CORE-SYNC-PATH-DBAUTH-001"]},
+    {"control_id":"CTRL-DBAUTH-002","requirement_id":"SYNC-DBAUTH-002","fault_id":"FAULT-DBAUTH-002","subject_artifact_inventory_ids":["ARTDEF-PG-EXTENSION-001"],"detected_by":["ASSERT-PERF-CORE-SYNC-PATH-DBAUTH-002"]},
+    {"control_id":"CTRL-LOGGING-001","requirement_id":"SYNC-LOGGING-001","fault_id":"FAULT-LOGGING-001","subject_artifact_inventory_ids":["ARTDEF-ADAPTER-001"],"detected_by":["ASSERT-PERF-CORE-SYNC-PATH-LOGGING-001"]},
+    {"control_id":"CTRL-INSTALL-001","requirement_id":"SYNC-INSTALL-001","fault_id":"FAULT-INSTALL-001","subject_artifact_inventory_ids":["ARTDEF-PG-EXTENSION-001"],"detected_by":["ASSERT-PERF-CORE-SYNC-PATH-INSTALL-001"]},
+    {"control_id":"CTRL-INSTALL-002","requirement_id":"SYNC-INSTALL-002","fault_id":"FAULT-INSTALL-002","subject_artifact_inventory_ids":["ARTDEF-PG-EXTENSION-001"],"detected_by":["ASSERT-PERF-CORE-SYNC-PATH-INSTALL-002"]}
   ],
   "steps": [
     {
@@ -615,6 +663,12 @@
         "observed_source": "system-under-test"
       },
       "detects_control_ids": []
-    }
+    },
+    {"id":"ASSERT-PERF-CORE-SYNC-PATH-BOUNDARY-001","requirement_ids":["SYNC-BOUNDARY-001"],"description":"Each endpoint delegates its semantic operation to the extension.","expectation_ids":["EXPECT-PERF-CORE-SYNC-PATH-SEMANTIC-001"],"predicate":{"contract_predicate":"wire-outcome","name":"canonical-wire-outcome","payload":{}},"oracle":{"kind":"wire-contract","expected_source":"authored-model","observed_source":"system-under-test"},"detects_control_ids":["CTRL-BOUNDARY-001"]},
+    {"id":"ASSERT-PERF-CORE-SYNC-PATH-DBAUTH-001","requirement_ids":["SYNC-DBAUTH-001"],"description":"No public or unauthorized runtime role has extension metadata authority.","expectation_ids":["EXPECT-PERF-CORE-SYNC-PATH-SEMANTIC-001"],"predicate":{"contract_predicate":"wire-outcome","name":"canonical-wire-outcome","payload":{}},"oracle":{"kind":"wire-contract","expected_source":"authored-model","observed_source":"system-under-test"},"detects_control_ids":["CTRL-DBAUTH-001"]},
+    {"id":"ASSERT-PERF-CORE-SYNC-PATH-DBAUTH-002","requirement_ids":["SYNC-DBAUTH-002"],"description":"Runtime roles retain their distinct least-privilege authority.","expectation_ids":["EXPECT-PERF-CORE-SYNC-PATH-SEMANTIC-001"],"predicate":{"contract_predicate":"wire-outcome","name":"canonical-wire-outcome","payload":{}},"oracle":{"kind":"wire-contract","expected_source":"authored-model","observed_source":"system-under-test"},"detects_control_ids":["CTRL-DBAUTH-002"]},
+    {"id":"ASSERT-PERF-CORE-SYNC-PATH-LOGGING-001","requirement_ids":["SYNC-LOGGING-001"],"description":"Operational output excludes protected values and remains bounded.","expectation_ids":["EXPECT-PERF-CORE-SYNC-PATH-SEMANTIC-001"],"predicate":{"contract_predicate":"wire-outcome","name":"canonical-wire-outcome","payload":{}},"oracle":{"kind":"wire-contract","expected_source":"authored-model","observed_source":"system-under-test"},"detects_control_ids":["CTRL-LOGGING-001"]},
+    {"id":"ASSERT-PERF-CORE-SYNC-PATH-INSTALL-001","requirement_ids":["SYNC-INSTALL-001"],"description":"The packaged extension metadata matches the generated pgrx output.","expectation_ids":["EXPECT-PERF-CORE-SYNC-PATH-SEMANTIC-001"],"predicate":{"contract_predicate":"wire-outcome","name":"canonical-wire-outcome","payload":{}},"oracle":{"kind":"wire-contract","expected_source":"authored-model","observed_source":"generated-artifact"},"detects_control_ids":["CTRL-INSTALL-001"]},
+    {"id":"ASSERT-PERF-CORE-SYNC-PATH-INSTALL-002","requirement_ids":["SYNC-INSTALL-002"],"description":"The extension installs as the PostgreSQL 18 version 0.3.0 baseline.","expectation_ids":["EXPECT-PERF-CORE-SYNC-PATH-SEMANTIC-001"],"predicate":{"contract_predicate":"wire-outcome","name":"canonical-wire-outcome","payload":{}},"oracle":{"kind":"wire-contract","expected_source":"authored-model","observed_source":"system-under-test"},"detects_control_ids":["CTRL-INSTALL-002"]}
   ]
 }

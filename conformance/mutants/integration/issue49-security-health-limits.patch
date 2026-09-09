@@ -1,0 +1,23 @@
+diff --git a/extensions/synchro-pg/src/health.rs b/extensions/synchro-pg/src/health.rs
+--- a/extensions/synchro-pg/src/health.rs
++++ b/extensions/synchro-pg/src/health.rs
+@@ -887,13 +887,16 @@ pub(crate) fn load_readiness_status_with_configuration(
+         status.set("worker", HealthCheck::failed("worker_not_configured"));
+     }
+     if configuration.max_heartbeat_age_seconds <= 0 {
+-        status.set("heartbeat", HealthCheck::failed("invalid_limit"));
++        // Mutant: invalid finite limits are accepted as healthy.
++        status.set("heartbeat", HealthCheck::ok());
+     }
+     if configuration.max_wal_lag_bytes <= 0 {
+-        status.set("wal_byte_lag", HealthCheck::failed("invalid_limit"));
++        // Mutant: invalid finite limits are accepted as healthy.
++        status.set("wal_byte_lag", HealthCheck::ok());
+     }
+     if configuration.max_wal_lag_seconds <= 0 {
+-        status.set("wal_time_lag", HealthCheck::failed("invalid_limit"));
++        // Mutant: invalid finite limits are accepted as healthy.
++        status.set("wal_time_lag", HealthCheck::ok());
+     }
+ 
+     let Some(worker_login) = configuration.worker_login.as_deref() else {

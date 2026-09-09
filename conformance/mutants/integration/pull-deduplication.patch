@@ -1,0 +1,10 @@
+diff --git a/extensions/synchro-pg/src/pull.rs b/extensions/synchro-pg/src/pull.rs
+--- a/extensions/synchro-pg/src/pull.rs
++++ b/extensions/synchro-pg/src/pull.rs
+@@ -857,4 +857,4 @@ fn query_scope_candidates(
+-                 SELECT DISTINCT ON (relation_id, record_id) *
++                 SELECT DISTINCT ON (record_id) *
+                  FROM eligible
+-                 ORDER BY relation_id, record_id,
++                 ORDER BY record_id,
+                           commit_lsn::pg_lsn DESC, event_ordinal DESC, effect_ordinal DESC

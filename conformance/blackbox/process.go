@@ -4130,6 +4130,74 @@ func (executor *OperatorExecutor) RestoreCrossScopeTable(ctx context.Context) er
 	return executor.ReloadRegistry(ctx)
 }
 
+// ConfigureTypedKeyCollisionTables installs text and integer key tables for pull deduplication proof.
+func (executor *OperatorExecutor) ConfigureTypedKeyCollisionTables(ctx context.Context) error {
+	if executor == nil || executor.harness == nil || !executor.harness.sourceReady {
+		return errors.New("operator executor is unavailable")
+	}
+	sourceRole := quoteIdentifier(executor.harness.sourceRole)
+	for step, statement := range []string{
+		`CREATE TABLE public.cf_string_keys (
+            id text PRIMARY KEY,
+            owner_id text NOT NULL,
+            value text NOT NULL,
+            updated_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+            deleted_at timestamptz,
+            enabled boolean NOT NULL DEFAULT true
+        )`,
+		`CREATE TABLE public.cf_int_keys (
+            id integer PRIMARY KEY,
+            owner_id text NOT NULL,
+            value text NOT NULL,
+            updated_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+            deleted_at timestamptz,
+            enabled boolean NOT NULL DEFAULT true
+        )`,
+		"GRANT SELECT, INSERT, UPDATE ON TABLE public.cf_string_keys, public.cf_int_keys TO synchro_owner",
+		"GRANT SELECT ON TABLE public.cf_string_keys, public.cf_int_keys TO synchro_worker",
+		"GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.cf_string_keys, public.cf_int_keys TO " + sourceRole,
+		"ALTER TABLE public.cf_string_keys ENABLE ROW LEVEL SECURITY",
+		"ALTER TABLE public.cf_int_keys ENABLE ROW LEVEL SECURITY",
+		"CREATE POLICY synchro_owner_all ON public.cf_string_keys AS PERMISSIVE FOR ALL TO synchro_owner USING (true) WITH CHECK (true)",
+		"CREATE POLICY synchro_owner_all ON public.cf_int_keys AS PERMISSIVE FOR ALL TO synchro_owner USING (true) WITH CHECK (true)",
+		"CREATE POLICY synchro_source_all ON public.cf_string_keys AS PERMISSIVE FOR ALL TO " + sourceRole + " USING (true) WITH CHECK (true)",
+		"CREATE POLICY synchro_source_all ON public.cf_int_keys AS PERMISSIVE FOR ALL TO " + sourceRole + " USING (true) WITH CHECK (true)",
+		"SELECT synchro.synchro_prepare_projection_view('public.cf_string_keys', 'cf_string_keys', ARRAY['owner_id'])",
+		"SELECT synchro.synchro_prepare_projection_view('public.cf_int_keys', 'cf_int_keys', ARRAY['owner_id'])",
+		`CREATE FUNCTION public.cf_string_keys_membership(p_id text)
+        RETURNS SETOF text
+        LANGUAGE SQL STABLE SECURITY INVOKER SET search_path = pg_catalog, synchro
+        BEGIN ATOMIC
+            SELECT 'user:' || (p.owner_id #>> '{}')
+            FROM synchro_projection.cf_string_keys AS p
+            WHERE p.record_id = p_id AND NOT p.deleted;
+        END`,
+		`CREATE FUNCTION public.cf_int_keys_membership(p_id integer)
+        RETURNS SETOF text
+        LANGUAGE SQL STABLE SECURITY INVOKER SET search_path = pg_catalog, synchro
+        BEGIN ATOMIC
+            SELECT 'user:' || (p.owner_id #>> '{}')
+            FROM synchro_projection.cf_int_keys AS p
+            WHERE p.record_id = p_id::text AND NOT p.deleted;
+        END`,
+		"REVOKE ALL ON FUNCTION public.cf_string_keys_membership(text), public.cf_int_keys_membership(integer) FROM PUBLIC",
+		"GRANT EXECUTE ON FUNCTION public.cf_string_keys_membership(text), public.cf_int_keys_membership(integer) TO synchro_owner, synchro_worker",
+		`SELECT synchro.synchro_register_table(
+            'public.cf_string_keys', 'public.cf_string_keys_membership', 'single_scope',
+            'id', 'updated_at', 'deleted_at', 'enabled'
+        )`,
+		`SELECT synchro.synchro_register_table(
+            'public.cf_int_keys', 'public.cf_int_keys_membership', 'single_scope',
+            'id', 'updated_at', 'deleted_at', 'enabled'
+        )`,
+	} {
+		if err := executor.exec(ctx, statement); err != nil {
+			return fmt.Errorf("configure typed key collision tables step %d failed: %w", step+1, err)
+		}
+	}
+	return executor.ReloadRegistry(ctx)
+}
+
 // ConfigureClass1MembershipTransition installs the fixed Class 1 rule change.
 func (executor *OperatorExecutor) ConfigureClass1MembershipTransition(ctx context.Context, affectedScope string) (int64, int64, error) {
 	if executor == nil || executor.harness == nil || !executor.harness.sourceReady || ctx == nil || affectedScope == "" {
@@ -5642,6 +5710,9 @@ func validateSourceDML(statement string) error {
 			allowed = true
 			break
 		}
+	}
+	if table == "cf_string_keys" || table == "cf_int_keys" {
+		allowed = true
 	}
 	if !allowed {
 		return errors.New("source mutation must target an independent source table")

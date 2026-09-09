@@ -18,6 +18,10 @@ type ConformanceEnvelope = {
 const exchangeMembers = ['command', 'schema_version', 'sequence', 'state'];
 const envelopeMembers = ['error_code', 'error_detail', 'outcome', 'result', 'schema_version'];
 
+function isNonnegativeSafeInteger(value: unknown): value is number {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
+}
+
 function exactObject(value: unknown, members: string[]): value is Record<string, unknown> {
   return (
     typeof value === 'object' &&
@@ -67,6 +71,8 @@ function parseExchangeResponse(raw: string, sequence: number): ExchangeResponse 
   }
   if (
     !exactObject(value, exchangeMembers) ||
+    !isNonnegativeSafeInteger(value.schema_version) ||
+    !isNonnegativeSafeInteger(value.sequence) ||
     value.schema_version !== 1 ||
     value.sequence !== sequence ||
     (value.state !== 'command' && value.state !== 'complete')
@@ -92,6 +98,7 @@ function parseConformanceEnvelope(raw: string): ConformanceEnvelope {
   }
   if (
     !exactObject(value, envelopeMembers) ||
+    !isNonnegativeSafeInteger(value.schema_version) ||
     value.schema_version !== 1 ||
     (value.outcome !== 'passed' && value.outcome !== 'error')
   ) {
@@ -112,6 +119,9 @@ async function exchange(
   sequence: number,
   rawResult: string
 ): Promise<ExchangeResponse> {
+  if (!isNonnegativeSafeInteger(sequence)) {
+    throw new Error('React Native coordinator sequence is invalid');
+  }
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 30000);
   try {

@@ -1,0 +1,26 @@
+diff --git a/extensions/synchro-pg/src/push.rs b/extensions/synchro-pg/src/push.rs
+--- a/extensions/synchro-pg/src/push.rs
++++ b/extensions/synchro-pg/src/push.rs
+@@ -1451,21 +1451,5 @@ fn evaluate_mutation(
+     let row_identity = logical_row_identity(table_reg, &pk_value);
+     let existing = load_existing_record(client, &record_id, table_reg);
+ 
+-    if existing.as_ref().is_some_and(|row| row.deleted) {
+-        return conflict_evaluation(
+-            mutation,
+-            outcome_schema,
+-            "row_deleted",
+-            "the row has been deleted",
+-            client,
+-            ConflictTarget {
+-                existing: existing.as_ref(),
+-                table: table_reg,
+-                record_id: &record_id,
+-                row_identity,
+-            },
+-        );
+-    }
+-
+     match mutation.op {
+         Operation::Insert => {
+             if let Some(existing) = existing.as_ref() {

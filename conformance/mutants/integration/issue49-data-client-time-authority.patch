@@ -1,0 +1,21 @@
+diff --git a/extensions/synchro-pg/src/push.rs b/extensions/synchro-pg/src/push.rs
+--- a/extensions/synchro-pg/src/push.rs
++++ b/extensions/synchro-pg/src/push.rs
+@@ -2378,7 +2378,7 @@ fn push_update(
+         .collect::<Vec<_>>();
+     if table_reg.has_updated_at {
+         assignments.push(format!(
+-            "{} = now()",
++            "{} = '2099-12-31T23:59:59.999999Z'::timestamptz",
+             pg_quote_ident(&table_reg.updated_at_col)
+         ));
+     }
+@@ -2402,7 +2402,7 @@ fn push_soft_delete(
+     table_reg: &TableRegistration,
+ ) -> DmlOutcome {
+     let updated_at = if table_reg.has_updated_at {
+-        format!(", {} = now()", pg_quote_ident(&table_reg.updated_at_col))
++        format!(", {} = '2099-12-31T23:59:59.999999Z'::timestamptz", pg_quote_ident(&table_reg.updated_at_col))
+     } else {
+         String::new()
+     };

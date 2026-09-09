@@ -1,0 +1,36 @@
+diff --git a/extensions/synchro-pg/src/stream_reset.rs b/extensions/synchro-pg/src/stream_reset.rs
+--- a/extensions/synchro-pg/src/stream_reset.rs
++++ b/extensions/synchro-pg/src/stream_reset.rs
+@@ -2360,7 +2360,9 @@ fn stage_fence_coverage(
+              JOIN synchro.sync_registry registry
+                ON registry.registry_generation = $5
+               AND registry.relation_id = fence.relation_id
+-             WHERE fence.coverage = 'pending'",
++             WHERE fence.coverage = 'pending'
++               AND NOT (fence.registration_kind = 'capture_dependency'
++                        AND fence.operation = 'delete')",
+             None,
+             &[
+                 reset.reset_id.as_str().into(),
+@@ -2411,7 +2413,9 @@ fn verify_staging(
+                           JOIN synchro.sync_registry registry
+                             ON registry.registry_generation = $2
+                            AND registry.relation_id = fence.relation_id
+-                          WHERE fence.coverage = 'pending'
++                          WHERE fence.coverage = 'pending'
++                            AND NOT (fence.registration_kind = 'capture_dependency'
++                                     AND fence.operation = 'delete')
+                           EXCEPT
+                           SELECT fence_id
+                           FROM synchro.sync_stream_reset_fence_coverage
+@@ -2426,7 +2430,9 @@ fn verify_staging(
+                           JOIN synchro.sync_registry registry
+                             ON registry.registry_generation = $2
+                            AND registry.relation_id = fence.relation_id
+-                          WHERE fence.coverage = 'pending')
++                          WHERE fence.coverage = 'pending'
++                            AND NOT (fence.registration_kind = 'capture_dependency'
++                                     AND fence.operation = 'delete'))
+                      )
+                      AND NOT EXISTS (
+                          SELECT 1

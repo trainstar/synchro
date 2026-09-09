@@ -1,0 +1,11 @@
+diff --git a/extensions/synchro-pg/src/rebuild.rs b/extensions/synchro-pg/src/rebuild.rs
+--- a/extensions/synchro-pg/src/rebuild.rs
++++ b/extensions/synchro-pg/src/rebuild.rs
+@@ -532,7 +532,6 @@ fn session_is_current(
+         && session.client_generation == request.client_generation
+         && session.schema_version == request.schema.version
+         && session.schema_hash == request.schema.hash
+-        && session.accepted_write_epoch == client.accepted_write_epoch
+         && session.stream_generation == boundary.stream_generation
+         && session.stream_generation == scope.stream_generation
+         && session.membership_generation == scope.membership_generation
