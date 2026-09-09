@@ -1602,11 +1602,14 @@ func (h *Harness) verifyCaptureReadiness(ctx context.Context) error {
 	defer database.Close()
 	deadline, cancel := context.WithTimeout(ctx, h.config.StartupTimeout)
 	defer cancel()
-	var failedNames string
+	failedNames := "unavailable"
+	lastObservedState := "unavailable"
 	var queryErr error
 	err = waitUntil(deadline, func(attemptContext context.Context) (bool, error) {
 		var ready bool
 		var failedChecks int
+		var observedFailedNames string
+		var observedState string
 		queryErr = database.QueryRowContext(attemptContext, `
 			SELECT (health->>'ready')::boolean,
 			       (SELECT count(*) FROM jsonb_each(health->'checks') entry
@@ -1615,21 +1618,28 @@ func (h *Harness) verifyCaptureReadiness(ctx context.Context) error {
 			           SELECT string_agg(entry.key, ',' ORDER BY entry.key)
 			           FROM jsonb_each(health->'checks') entry
 			           WHERE entry.value->>'state' <> 'ok'
-			       ), '')
+			       ), ''),
+			       health::text
 			FROM (SELECT synchro.synchro_health_detail() AS health) state`,
-		).Scan(&ready, &failedChecks, &failedNames)
+		).Scan(&ready, &failedChecks, &observedFailedNames, &observedState)
 		if queryErr != nil {
 			return false, nil
 		}
+		failedNames = observedFailedNames
+		lastObservedState = observedState
 		return ready && failedChecks == 0, nil
 	})
 	if err != nil {
-		if queryErr != nil {
-			return fmt.Errorf("capture readiness verification failed: %w", queryErr)
-		}
-		return fmt.Errorf("capture readiness verification failed: %s", failedNames)
+		return captureReadinessFailure(failedNames, lastObservedState, queryErr)
 	}
 	return nil
+}
+
+func captureReadinessFailure(failedNames, lastObservedState string, queryErr error) error {
+	if queryErr == nil {
+		return fmt.Errorf("capture readiness verification failed: checks=%s; last_state=%s", failedNames, lastObservedState)
+	}
+	return fmt.Errorf("capture readiness verification failed: checks=%s; last_state=%s; query_error=%w", failedNames, lastObservedState, queryErr)
 }
 
 func (h *Harness) applyIndependentSourceSetup(ctx context.Context) (bool, error) {

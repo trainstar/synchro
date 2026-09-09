@@ -464,6 +464,27 @@ func TestPostmasterConfigurationStagesWorkerAutoStartAfterBootstrap(t *testing.T
 	}
 }
 
+func TestCaptureReadinessFailureIncludesLastObservedStateAndQueryError(t *testing.T) {
+	queryErr := context.DeadlineExceeded
+	err := captureReadinessFailure(
+		"heartbeat,worker",
+		`{"ready":false,"checks":{"worker":{"state":"failed"}}}`,
+		queryErr,
+	)
+	for _, wanted := range []string{
+		"checks=heartbeat,worker",
+		`last_state={"ready":false,"checks":{"worker":{"state":"failed"}}}`,
+		"query_error=context deadline exceeded",
+	} {
+		if !strings.Contains(err.Error(), wanted) {
+			t.Fatalf("capture readiness failure does not contain %q: %v", wanted, err)
+		}
+	}
+	if !errors.Is(err, queryErr) {
+		t.Fatalf("capture readiness failure does not wrap the query error: %v", err)
+	}
+}
+
 func TestCandidateOperationRecoveryPlanRoutesByOperationKind(t *testing.T) {
 	streamActivated, err := candidateOperationRecoveryPlan(
 		streamResetOperationKind,
