@@ -107,14 +107,18 @@ DECLARE
 BEGIN
     IF OLD.active_slot_name IS NULL AND NEW.active_slot_name IS NOT NULL THEN
         FOR request IN
-            SELECT activation.registry_generation
-            FROM sync_registry_activation_requests activation
-            JOIN sync_registry_generations generation
-              ON generation.generation = activation.registry_generation
-             AND generation.state = 'pending'
-             AND generation.validated
-            ORDER BY activation.registry_generation
-            FOR UPDATE OF activation
+            WITH claimed AS (
+                UPDATE sync_registry_activation_requests activation
+                SET emitted_at = now()
+                FROM sync_registry_generations generation
+                WHERE generation.generation = activation.registry_generation
+                  AND generation.state = 'pending'
+                  AND generation.validated
+                RETURNING activation.registry_generation
+            )
+            SELECT claimed.registry_generation
+            FROM claimed
+            ORDER BY claimed.registry_generation
         LOOP
             PERFORM pg_logical_emit_message(
                 true,
@@ -127,9 +131,6 @@ BEGIN
                     'UTF8'
                 )
             );
-            UPDATE sync_registry_activation_requests
-            SET emitted_at = now()
-            WHERE registry_generation = request.registry_generation;
         END LOOP;
     END IF;
     RETURN NEW;
@@ -2451,7 +2452,7 @@ AS 'MODULE_PATHNAME', 'synchro_unregister_table_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- synchro-pg/src/lib.rs:1929
+-- synchro-pg/src/lib.rs:1930
 -- finalize
 
 DO $roles$
