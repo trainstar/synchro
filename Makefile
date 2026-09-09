@@ -15,6 +15,7 @@
 	build-conformance \
 	lint-conformance \
 	test-conformance-testresult \
+	test-integration-mutant-manifest \
 	test-conformance-imports \
 	test-conformance-contract \
 	test-conformance-drivers \
@@ -270,6 +271,7 @@ help:
 	@echo "  build-conformance     - Build every standalone conformance package"
 	@echo "  lint-conformance      - Format and vet the standalone conformance module"
 	@echo "  test-conformance-testresult - Test the structured Go test-result parser"
+	@echo "  test-integration-mutant-manifest - Validate integration mutant bindings"
 	@echo "  test-conformance-imports - Test standalone conformance import policy"
 	@echo "  test-conformance-contract - Test strict contract loading and snapshots"
 	@echo "  test-conformance-drivers - Test the plain Swift and Kotlin process drivers"
@@ -418,6 +420,9 @@ test-conformance-testresult:
 		exit 1; \
 	fi
 
+test-integration-mutant-manifest: conformance-mod-download
+	cd conformance && GOFLAGS= GOWORK=off go run ./cmd/testresult suite -- go test -json ./mutants -count=1
+
 test-conformance-imports:
 	cd conformance && GOFLAGS= GOWORK=off go run ./cmd/testresult suite -- go test -json ./internal/importguard -count=1
 
@@ -478,21 +483,24 @@ test-blackbox-configured-bounds: conformance-mod-download test-blackbox-harness
 
 test-blackbox-mutation-control:
 	@test -n "$(MUTATION_CONTROL_TEST)" || { echo "MUTATION_CONTROL_TEST is required" >&2; exit 1; }
-	@case "$(MUTATION_CONTROL_TEST)" in \
+	@case "$(MUTATION_CONTROL_EXPECT)" in \
+		target_pass|target_semantic_test_failure) ;; \
+		*) echo "MUTATION_CONTROL_EXPECT is invalid" >&2; exit 1 ;; \
+	esac
+	@target='$(MUTATION_CONTROL_TEST)'; test_name=$${target%%/*}; assertion=$${target#*/}; \
+	if [ "$$assertion" = "$$target" ]; then assertion=assertion; fi; \
+	case "$$test_name" in \
 		TestRealMutationControlCursorAdvancement|TestRealMutationControlWALAcknowledgement|TestRealMutationControlMutationConservation|TestRealMutationControlChecksumCorrectness|TestRealMutationControlScopeIsolation|TestRealMutationControlProgressOrder|TestRealS02DivergentPullPaginationIsStarvationFree|\
 		TestRealIssue49ConnectRejectsFreshReuseAndInvalidEnvelopeValues|TestRealIssue49SemanticVersionPrecedence|TestRealIssue49PortableIntegerBoundariesAndCounterOverflow|TestRealIssue49MutationLifecycleVersionsVocabularyAndCrossBatchReplay|TestRealIssue49PortableSeedScopeContinuationAndTokenBindings|TestRealIssue49ConcurrentUpdateDeletePreservesOneAuthoritativeWinner|TestRealIssue49RebuildReplayEpochAndMonotonicCursor|TestRealIssue49PublishedSchemaIdentityIsImmutable|\
 		TestRealIssue49SecurityAdapterAuthorityAndScopeBoundary|TestRealIssue49SecurityRegistryIdentityAndKeys|TestRealIssue49SecurityCaptureHealthFailsClosed|TestRealIssue49SecurityDatabaseAuthority|TestRealIssue49SecurityOperationalRedaction|TestRealIssue49SecurityInstallationAuthority|\
 		TestRealIssue49WALIsTheOnlyAtomicPublicationPath|TestRealIssue49WALPoisonBlocksContiguousProgress|TestRealIssue49ResetLifecycleAndFenceCoverage|TestRealIssue49FenceCorrelationAndCapturePending|TestRealIssue49CompletePullVisibleWALRepresentation|TestRealIssue49CaptureReadinessRequiresEveryCheck|TestRealIssue49FenceCorrelatesOldRecordIdentity|TestRealIssue49FenceCorrelatesCaptureKeys|TestRealIssue49ResetCoversEveryFenceOperation|TestRealIssue49MembershipBackfillRetainsContinuationAcrossWorkerLoss) ;; \
 		*) echo "MUTATION_CONTROL_TEST is not a supported mutation control" >&2; exit 1 ;; \
-	esac
-	@case "$(MUTATION_CONTROL_EXPECT)" in \
-		target_pass|target_semantic_test_failure) ;; \
-		*) echo "MUTATION_CONTROL_EXPECT is invalid" >&2; exit 1 ;; \
-	esac
-	@cd conformance && GOFLAGS= GOWORK=off go run ./cmd/testresult exact \
-		-test "$(MUTATION_CONTROL_TEST)" \
+	esac; \
+	case "$$assertion" in assertion|assertion\#[0-9][0-9]) ;; *) echo "MUTATION_CONTROL_TEST does not name a supported assertion" >&2; exit 1 ;; esac; \
+	cd conformance && GOFLAGS= GOWORK=off go run ./cmd/testresult exact \
+		-test "$$target" \
 		-expect "$(MUTATION_CONTROL_EXPECT)" \
-		-- go test -json ./blackbox/integration -count=1 -run "^$(MUTATION_CONTROL_TEST)$$" -args --provision --install
+		-- go test -json ./blackbox/integration -count=1 -run "^$$test_name$$/^$$assertion$$" -args --provision --install
 
 test-r1-benchmark-units:
 	cd conformance && GOFLAGS= GOWORK=off go run ./cmd/testresult suite -- go test -tags r1benchmark -json ./blackbox/integration -count=1 -run '^TestR1Benchmark(StrictParser|ThresholdLogic|ResultPathSafety)$$'

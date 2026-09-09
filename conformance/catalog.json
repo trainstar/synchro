@@ -74,7 +74,7 @@
     {
       "scenario_id": "SCN-PERF-WARM-CONNECT-001",
       "path": "conformance/scenarios/performance/warm-connect-001.json",
-      "sha256": "0933e97b86723dfca5039d66bfabaf6bcb54c3abaf5e0316a59a13027658b01b"
+      "sha256": "c8efed7da6c53cf835085546988ab3f93892239280b85be086b31240bd1de903"
     },
     {
       "scenario_id": "SCN-PULL-DIVERGENT-CHECKPOINTS-001",

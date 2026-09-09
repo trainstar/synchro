@@ -5,26 +5,83 @@
   "title": "Final pull checksums performance scenario",
   "description": "The ordered workload proves the authored semantic outcome and performance declaration.",
   "requirement_ids": [
+    "SYNC-CURSOR-002",
+    "SYNC-INTEGRITY-001",
+    "SYNC-INTEGRITY-003",
+    "SYNC-INTEGRITY-004",
+    "SYNC-INTEGRITY-005",
+    "SYNC-INTEGRITY-006",
     "SYNC-INTEGRITY-002"
   ],
   "normative_references": [
+    {
+      "path": "docs/src/content/docs/spec/04-invariants.mdx",
+      "anchor": "#per-scope-cursor-correctness"
+    },
+    {
+      "path": "docs/src/content/docs/spec/04-invariants.mdx",
+      "anchor": "#progress-and-integrity-separation"
+    },
+    {
+      "path": "docs/src/content/docs/spec/04-invariants.mdx",
+      "anchor": "#canonical-typed-row-encoding"
+    },
+    {
+      "path": "docs/src/content/docs/spec/04-invariants.mdx",
+      "anchor": "#row-digest-binding"
+    },
+    {
+      "path": "docs/src/content/docs/spec/04-invariants.mdx",
+      "anchor": "#scope-digest-binding"
+    },
+    {
+      "path": "docs/src/content/docs/spec/04-invariants.mdx",
+      "anchor": "#complete-terminal-checksum-maps"
+    },
     {
       "path": "docs/src/content/docs/spec/04-invariants.mdx",
       "anchor": "#final-pull-checksum-requirement"
     }
   ],
   "proof_types": [
+    "reference-model",
     "server-black-box",
     "native-e2e",
+    "fault-injection",
     "negative-control"
   ],
   "proof_obligations": [
     {
+      "obligation_id": "OBL-PERF-STEADY-PULL-RM-001",
+      "requirement_ids": ["SYNC-CURSOR-002", "SYNC-INTEGRITY-001", "SYNC-INTEGRITY-003", "SYNC-INTEGRITY-004", "SYNC-INTEGRITY-005", "SYNC-INTEGRITY-006"],
+      "assertion_ids": ["ASSERT-PERF-STEADY-PULL-CURSOR-002", "ASSERT-PERF-STEADY-PULL-INTEGRITY-001", "ASSERT-PERF-STEADY-PULL-INTEGRITY-003", "ASSERT-PERF-STEADY-PULL-INTEGRITY-004", "ASSERT-PERF-STEADY-PULL-INTEGRITY-005", "ASSERT-PERF-STEADY-PULL-INTEGRITY-006"],
+      "proof_type": "reference-model",
+      "support_cell_id": null,
+      "artifact_inventory_ids": ["ARTDEF-CONFORMANCE-RUNNER-001"],
+      "performance_budget_ids": [],
+      "required_measurement_ids": [],
+      "required_vector_set_ids": [],
+      "make_target": "test-conformance",
+      "argv": ["make", "test-conformance"],
+      "fault_plan_id": null,
+      "control_id": null
+    },
+    {
       "obligation_id": "OBL-PERF-STEADY-PULL-PG-LINUX-X64-001",
       "requirement_ids": [
+        "SYNC-INTEGRITY-001",
+        "SYNC-INTEGRITY-003",
+        "SYNC-INTEGRITY-004",
+        "SYNC-INTEGRITY-005",
+        "SYNC-INTEGRITY-006",
         "SYNC-INTEGRITY-002"
       ],
       "assertion_ids": [
+        "ASSERT-PERF-STEADY-PULL-INTEGRITY-001",
+        "ASSERT-PERF-STEADY-PULL-INTEGRITY-003",
+        "ASSERT-PERF-STEADY-PULL-INTEGRITY-004",
+        "ASSERT-PERF-STEADY-PULL-INTEGRITY-005",
+        "ASSERT-PERF-STEADY-PULL-INTEGRITY-006",
         "ASSERT-PERF-STEADY-PULL-SEMANTIC-001",
         "ASSERT-PERF-STEADY-PULL-WIRE-001",
         "ASSERT-PERF-STEADY-PULL-PERFORMANCE-001"
@@ -52,9 +109,21 @@
     {
       "obligation_id": "OBL-PERF-STEADY-PULL-MACOS-CURRENT-001",
       "requirement_ids": [
+        "SYNC-CURSOR-002",
+        "SYNC-INTEGRITY-001",
+        "SYNC-INTEGRITY-003",
+        "SYNC-INTEGRITY-004",
+        "SYNC-INTEGRITY-005",
+        "SYNC-INTEGRITY-006",
         "SYNC-INTEGRITY-002"
       ],
       "assertion_ids": [
+        "ASSERT-PERF-STEADY-PULL-CURSOR-002",
+        "ASSERT-PERF-STEADY-PULL-INTEGRITY-001",
+        "ASSERT-PERF-STEADY-PULL-INTEGRITY-003",
+        "ASSERT-PERF-STEADY-PULL-INTEGRITY-004",
+        "ASSERT-PERF-STEADY-PULL-INTEGRITY-005",
+        "ASSERT-PERF-STEADY-PULL-INTEGRITY-006",
         "ASSERT-PERF-STEADY-PULL-SEMANTIC-001"
       ],
       "proof_type": "native-e2e",
@@ -168,9 +237,21 @@
     {
       "obligation_id": "OBL-PERF-STEADY-PULL-ANDROID-CURRENT-001",
       "requirement_ids": [
+        "SYNC-CURSOR-002",
+        "SYNC-INTEGRITY-001",
+        "SYNC-INTEGRITY-003",
+        "SYNC-INTEGRITY-004",
+        "SYNC-INTEGRITY-005",
+        "SYNC-INTEGRITY-006",
         "SYNC-INTEGRITY-002"
       ],
       "assertion_ids": [
+        "ASSERT-PERF-STEADY-PULL-CURSOR-002",
+        "ASSERT-PERF-STEADY-PULL-INTEGRITY-001",
+        "ASSERT-PERF-STEADY-PULL-INTEGRITY-003",
+        "ASSERT-PERF-STEADY-PULL-INTEGRITY-004",
+        "ASSERT-PERF-STEADY-PULL-INTEGRITY-005",
+        "ASSERT-PERF-STEADY-PULL-INTEGRITY-006",
         "ASSERT-PERF-STEADY-PULL-SEMANTIC-001",
         "ASSERT-PERF-STEADY-PULL-PERFORMANCE-001"
       ],
@@ -198,9 +279,21 @@
     {
       "obligation_id": "OBL-PERF-STEADY-PULL-RN-IOS-CURRENT-001",
       "requirement_ids": [
+        "SYNC-CURSOR-002",
+        "SYNC-INTEGRITY-001",
+        "SYNC-INTEGRITY-003",
+        "SYNC-INTEGRITY-004",
+        "SYNC-INTEGRITY-005",
+        "SYNC-INTEGRITY-006",
         "SYNC-INTEGRITY-002"
       ],
       "assertion_ids": [
+        "ASSERT-PERF-STEADY-PULL-CURSOR-002",
+        "ASSERT-PERF-STEADY-PULL-INTEGRITY-001",
+        "ASSERT-PERF-STEADY-PULL-INTEGRITY-003",
+        "ASSERT-PERF-STEADY-PULL-INTEGRITY-004",
+        "ASSERT-PERF-STEADY-PULL-INTEGRITY-005",
+        "ASSERT-PERF-STEADY-PULL-INTEGRITY-006",
         "ASSERT-PERF-STEADY-PULL-SEMANTIC-001",
         "ASSERT-PERF-STEADY-PULL-PERFORMANCE-001"
       ],
@@ -230,9 +323,21 @@
     {
       "obligation_id": "OBL-PERF-STEADY-PULL-RN-ANDROID-CURRENT-001",
       "requirement_ids": [
+        "SYNC-CURSOR-002",
+        "SYNC-INTEGRITY-001",
+        "SYNC-INTEGRITY-003",
+        "SYNC-INTEGRITY-004",
+        "SYNC-INTEGRITY-005",
+        "SYNC-INTEGRITY-006",
         "SYNC-INTEGRITY-002"
       ],
       "assertion_ids": [
+        "ASSERT-PERF-STEADY-PULL-CURSOR-002",
+        "ASSERT-PERF-STEADY-PULL-INTEGRITY-001",
+        "ASSERT-PERF-STEADY-PULL-INTEGRITY-003",
+        "ASSERT-PERF-STEADY-PULL-INTEGRITY-004",
+        "ASSERT-PERF-STEADY-PULL-INTEGRITY-005",
+        "ASSERT-PERF-STEADY-PULL-INTEGRITY-006",
         "ASSERT-PERF-STEADY-PULL-SEMANTIC-001",
         "ASSERT-PERF-STEADY-PULL-PERFORMANCE-001"
       ],
@@ -285,7 +390,28 @@
       ],
       "fault_plan_id": "FPL-PERF-STEADY-PULL-001",
       "control_id": "CTRL-INTEGRITY-002"
-    }
+    },
+    {
+      "obligation_id": "OBL-PERF-STEADY-PULL-CURSOR-002-FAULT-001",
+      "requirement_ids": ["SYNC-CURSOR-002"],
+      "assertion_ids": ["ASSERT-PERF-STEADY-PULL-CURSOR-002"],
+      "proof_type": "fault-injection",
+      "support_cell_id": "SUP-MACOS-CURRENT-001",
+      "artifact_inventory_ids": ["ARTDEF-PG-EXTENSION-001", "ARTDEF-ADAPTER-001", "ARTDEF-SWIFT-SPM-001"],
+      "performance_budget_ids": [],
+      "required_measurement_ids": [],
+      "required_vector_set_ids": [],
+      "make_target": "test-swift",
+      "argv": ["make", "test-swift"],
+      "fault_plan_id": "FPL-PERF-STEADY-PULL-CURSOR-002",
+      "control_id": "CTRL-CURSOR-002"
+    },
+    {"obligation_id":"OBL-PERF-STEADY-PULL-CURSOR-002-CONTROL-001","requirement_ids":["SYNC-CURSOR-002"],"assertion_ids":["ASSERT-PERF-STEADY-PULL-CURSOR-002"],"proof_type":"negative-control","support_cell_id":null,"artifact_inventory_ids":["ARTDEF-CONFORMANCE-RUNNER-001","ARTDEF-SWIFT-SPM-001","ARTDEF-COCOAPODS-001","ARTDEF-KOTLIN-MAVEN-001","ARTDEF-RN-NPM-001"],"performance_budget_ids":[],"required_measurement_ids":[],"required_vector_set_ids":[],"make_target":"test-conformance","argv":["make","test-conformance"],"fault_plan_id":"FPL-PERF-STEADY-PULL-CURSOR-002","control_id":"CTRL-CURSOR-002"},
+    {"obligation_id":"OBL-PERF-STEADY-PULL-INTEGRITY-001-CONTROL-001","requirement_ids":["SYNC-INTEGRITY-001"],"assertion_ids":["ASSERT-PERF-STEADY-PULL-INTEGRITY-001"],"proof_type":"negative-control","support_cell_id":null,"artifact_inventory_ids":["ARTDEF-CONFORMANCE-RUNNER-001","ARTDEF-PG-EXTENSION-001","ARTDEF-ADAPTER-001","ARTDEF-SWIFT-SPM-001","ARTDEF-COCOAPODS-001","ARTDEF-KOTLIN-MAVEN-001","ARTDEF-RN-NPM-001"],"performance_budget_ids":[],"required_measurement_ids":[],"required_vector_set_ids":[],"make_target":"test-conformance","argv":["make","test-conformance"],"fault_plan_id":"FPL-PERF-STEADY-PULL-INTEGRITY-001","control_id":"CTRL-INTEGRITY-001"},
+    {"obligation_id":"OBL-PERF-STEADY-PULL-INTEGRITY-003-CONTROL-001","requirement_ids":["SYNC-INTEGRITY-003"],"assertion_ids":["ASSERT-PERF-STEADY-PULL-INTEGRITY-003"],"proof_type":"negative-control","support_cell_id":null,"artifact_inventory_ids":["ARTDEF-CONFORMANCE-RUNNER-001","ARTDEF-PG-EXTENSION-001","ARTDEF-ADAPTER-001","ARTDEF-SWIFT-SPM-001","ARTDEF-COCOAPODS-001","ARTDEF-KOTLIN-MAVEN-001","ARTDEF-RN-NPM-001"],"performance_budget_ids":[],"required_measurement_ids":[],"required_vector_set_ids":[],"make_target":"test-conformance","argv":["make","test-conformance"],"fault_plan_id":"FPL-PERF-STEADY-PULL-INTEGRITY-003","control_id":"CTRL-INTEGRITY-003"},
+    {"obligation_id":"OBL-PERF-STEADY-PULL-INTEGRITY-004-CONTROL-001","requirement_ids":["SYNC-INTEGRITY-004"],"assertion_ids":["ASSERT-PERF-STEADY-PULL-INTEGRITY-004"],"proof_type":"negative-control","support_cell_id":null,"artifact_inventory_ids":["ARTDEF-CONFORMANCE-RUNNER-001","ARTDEF-PG-EXTENSION-001","ARTDEF-ADAPTER-001","ARTDEF-SWIFT-SPM-001","ARTDEF-COCOAPODS-001","ARTDEF-KOTLIN-MAVEN-001","ARTDEF-RN-NPM-001"],"performance_budget_ids":[],"required_measurement_ids":[],"required_vector_set_ids":[],"make_target":"test-conformance","argv":["make","test-conformance"],"fault_plan_id":"FPL-PERF-STEADY-PULL-INTEGRITY-004","control_id":"CTRL-INTEGRITY-004"},
+    {"obligation_id":"OBL-PERF-STEADY-PULL-INTEGRITY-005-CONTROL-001","requirement_ids":["SYNC-INTEGRITY-005"],"assertion_ids":["ASSERT-PERF-STEADY-PULL-INTEGRITY-005"],"proof_type":"negative-control","support_cell_id":null,"artifact_inventory_ids":["ARTDEF-CONFORMANCE-RUNNER-001","ARTDEF-PG-EXTENSION-001","ARTDEF-ADAPTER-001","ARTDEF-SWIFT-SPM-001","ARTDEF-COCOAPODS-001","ARTDEF-KOTLIN-MAVEN-001","ARTDEF-RN-NPM-001"],"performance_budget_ids":[],"required_measurement_ids":[],"required_vector_set_ids":[],"make_target":"test-conformance","argv":["make","test-conformance"],"fault_plan_id":"FPL-PERF-STEADY-PULL-INTEGRITY-005","control_id":"CTRL-INTEGRITY-005"},
+    {"obligation_id":"OBL-PERF-STEADY-PULL-INTEGRITY-006-CONTROL-001","requirement_ids":["SYNC-INTEGRITY-006"],"assertion_ids":["ASSERT-PERF-STEADY-PULL-INTEGRITY-006"],"proof_type":"negative-control","support_cell_id":null,"artifact_inventory_ids":["ARTDEF-CONFORMANCE-RUNNER-001","ARTDEF-PG-EXTENSION-001","ARTDEF-ADAPTER-001","ARTDEF-SWIFT-SPM-001","ARTDEF-COCOAPODS-001","ARTDEF-KOTLIN-MAVEN-001","ARTDEF-RN-NPM-001"],"performance_budget_ids":[],"required_measurement_ids":[],"required_vector_set_ids":[],"make_target":"test-conformance","argv":["make","test-conformance"],"fault_plan_id":"FPL-PERF-STEADY-PULL-INTEGRITY-006","control_id":"CTRL-INTEGRITY-006"}
   ],
   "ownership": [
     {
@@ -399,7 +525,49 @@
       "assertion_id": "ASSERT-PERF-STEADY-PULL-SEMANTIC-001",
       "proof_type": "negative-control",
       "support_cell_id": null
-    }
+    },
+    {"scenario_id":"SCN-PERF-STEADY-PULL-001","requirement_id":"SYNC-CURSOR-002","proof_obligation_id":"OBL-PERF-STEADY-PULL-RM-001","assertion_id":"ASSERT-PERF-STEADY-PULL-CURSOR-002","proof_type":"reference-model","support_cell_id":null},
+    {"scenario_id":"SCN-PERF-STEADY-PULL-001","requirement_id":"SYNC-INTEGRITY-001","proof_obligation_id":"OBL-PERF-STEADY-PULL-RM-001","assertion_id":"ASSERT-PERF-STEADY-PULL-INTEGRITY-001","proof_type":"reference-model","support_cell_id":null},
+    {"scenario_id":"SCN-PERF-STEADY-PULL-001","requirement_id":"SYNC-INTEGRITY-003","proof_obligation_id":"OBL-PERF-STEADY-PULL-RM-001","assertion_id":"ASSERT-PERF-STEADY-PULL-INTEGRITY-003","proof_type":"reference-model","support_cell_id":null},
+    {"scenario_id":"SCN-PERF-STEADY-PULL-001","requirement_id":"SYNC-INTEGRITY-004","proof_obligation_id":"OBL-PERF-STEADY-PULL-RM-001","assertion_id":"ASSERT-PERF-STEADY-PULL-INTEGRITY-004","proof_type":"reference-model","support_cell_id":null},
+    {"scenario_id":"SCN-PERF-STEADY-PULL-001","requirement_id":"SYNC-INTEGRITY-005","proof_obligation_id":"OBL-PERF-STEADY-PULL-RM-001","assertion_id":"ASSERT-PERF-STEADY-PULL-INTEGRITY-005","proof_type":"reference-model","support_cell_id":null},
+    {"scenario_id":"SCN-PERF-STEADY-PULL-001","requirement_id":"SYNC-INTEGRITY-006","proof_obligation_id":"OBL-PERF-STEADY-PULL-RM-001","assertion_id":"ASSERT-PERF-STEADY-PULL-INTEGRITY-006","proof_type":"reference-model","support_cell_id":null},
+    {"scenario_id":"SCN-PERF-STEADY-PULL-001","requirement_id":"SYNC-INTEGRITY-001","proof_obligation_id":"OBL-PERF-STEADY-PULL-PG-LINUX-X64-001","assertion_id":"ASSERT-PERF-STEADY-PULL-INTEGRITY-001","proof_type":"server-black-box","support_cell_id":"SUP-PG-LINUX-X64-001"},
+    {"scenario_id":"SCN-PERF-STEADY-PULL-001","requirement_id":"SYNC-INTEGRITY-003","proof_obligation_id":"OBL-PERF-STEADY-PULL-PG-LINUX-X64-001","assertion_id":"ASSERT-PERF-STEADY-PULL-INTEGRITY-003","proof_type":"server-black-box","support_cell_id":"SUP-PG-LINUX-X64-001"},
+    {"scenario_id":"SCN-PERF-STEADY-PULL-001","requirement_id":"SYNC-INTEGRITY-004","proof_obligation_id":"OBL-PERF-STEADY-PULL-PG-LINUX-X64-001","assertion_id":"ASSERT-PERF-STEADY-PULL-INTEGRITY-004","proof_type":"server-black-box","support_cell_id":"SUP-PG-LINUX-X64-001"},
+    {"scenario_id":"SCN-PERF-STEADY-PULL-001","requirement_id":"SYNC-INTEGRITY-005","proof_obligation_id":"OBL-PERF-STEADY-PULL-PG-LINUX-X64-001","assertion_id":"ASSERT-PERF-STEADY-PULL-INTEGRITY-005","proof_type":"server-black-box","support_cell_id":"SUP-PG-LINUX-X64-001"},
+    {"scenario_id":"SCN-PERF-STEADY-PULL-001","requirement_id":"SYNC-INTEGRITY-006","proof_obligation_id":"OBL-PERF-STEADY-PULL-PG-LINUX-X64-001","assertion_id":"ASSERT-PERF-STEADY-PULL-INTEGRITY-006","proof_type":"server-black-box","support_cell_id":"SUP-PG-LINUX-X64-001"},
+    {"scenario_id":"SCN-PERF-STEADY-PULL-001","requirement_id":"SYNC-CURSOR-002","proof_obligation_id":"OBL-PERF-STEADY-PULL-CURSOR-002-FAULT-001","assertion_id":"ASSERT-PERF-STEADY-PULL-CURSOR-002","proof_type":"fault-injection","support_cell_id":"SUP-MACOS-CURRENT-001"},
+    {"scenario_id":"SCN-PERF-STEADY-PULL-001","requirement_id":"SYNC-CURSOR-002","proof_obligation_id":"OBL-PERF-STEADY-PULL-CURSOR-002-CONTROL-001","assertion_id":"ASSERT-PERF-STEADY-PULL-CURSOR-002","proof_type":"negative-control","support_cell_id":null},
+    {"scenario_id":"SCN-PERF-STEADY-PULL-001","requirement_id":"SYNC-INTEGRITY-001","proof_obligation_id":"OBL-PERF-STEADY-PULL-INTEGRITY-001-CONTROL-001","assertion_id":"ASSERT-PERF-STEADY-PULL-INTEGRITY-001","proof_type":"negative-control","support_cell_id":null},
+    {"scenario_id":"SCN-PERF-STEADY-PULL-001","requirement_id":"SYNC-INTEGRITY-003","proof_obligation_id":"OBL-PERF-STEADY-PULL-INTEGRITY-003-CONTROL-001","assertion_id":"ASSERT-PERF-STEADY-PULL-INTEGRITY-003","proof_type":"negative-control","support_cell_id":null},
+    {"scenario_id":"SCN-PERF-STEADY-PULL-001","requirement_id":"SYNC-INTEGRITY-004","proof_obligation_id":"OBL-PERF-STEADY-PULL-INTEGRITY-004-CONTROL-001","assertion_id":"ASSERT-PERF-STEADY-PULL-INTEGRITY-004","proof_type":"negative-control","support_cell_id":null},
+    {"scenario_id":"SCN-PERF-STEADY-PULL-001","requirement_id":"SYNC-INTEGRITY-005","proof_obligation_id":"OBL-PERF-STEADY-PULL-INTEGRITY-005-CONTROL-001","assertion_id":"ASSERT-PERF-STEADY-PULL-INTEGRITY-005","proof_type":"negative-control","support_cell_id":null},
+    {"scenario_id":"SCN-PERF-STEADY-PULL-001","requirement_id":"SYNC-INTEGRITY-006","proof_obligation_id":"OBL-PERF-STEADY-PULL-INTEGRITY-006-CONTROL-001","assertion_id":"ASSERT-PERF-STEADY-PULL-INTEGRITY-006","proof_type":"negative-control","support_cell_id":null},
+    {"scenario_id":"SCN-PERF-STEADY-PULL-001","requirement_id":"SYNC-CURSOR-002","proof_obligation_id":"OBL-PERF-STEADY-PULL-MACOS-CURRENT-001","assertion_id":"ASSERT-PERF-STEADY-PULL-CURSOR-002","proof_type":"native-e2e","support_cell_id":"SUP-MACOS-CURRENT-001"},
+    {"scenario_id":"SCN-PERF-STEADY-PULL-001","requirement_id":"SYNC-INTEGRITY-001","proof_obligation_id":"OBL-PERF-STEADY-PULL-MACOS-CURRENT-001","assertion_id":"ASSERT-PERF-STEADY-PULL-INTEGRITY-001","proof_type":"native-e2e","support_cell_id":"SUP-MACOS-CURRENT-001"},
+    {"scenario_id":"SCN-PERF-STEADY-PULL-001","requirement_id":"SYNC-INTEGRITY-003","proof_obligation_id":"OBL-PERF-STEADY-PULL-MACOS-CURRENT-001","assertion_id":"ASSERT-PERF-STEADY-PULL-INTEGRITY-003","proof_type":"native-e2e","support_cell_id":"SUP-MACOS-CURRENT-001"},
+    {"scenario_id":"SCN-PERF-STEADY-PULL-001","requirement_id":"SYNC-INTEGRITY-004","proof_obligation_id":"OBL-PERF-STEADY-PULL-MACOS-CURRENT-001","assertion_id":"ASSERT-PERF-STEADY-PULL-INTEGRITY-004","proof_type":"native-e2e","support_cell_id":"SUP-MACOS-CURRENT-001"},
+    {"scenario_id":"SCN-PERF-STEADY-PULL-001","requirement_id":"SYNC-INTEGRITY-005","proof_obligation_id":"OBL-PERF-STEADY-PULL-MACOS-CURRENT-001","assertion_id":"ASSERT-PERF-STEADY-PULL-INTEGRITY-005","proof_type":"native-e2e","support_cell_id":"SUP-MACOS-CURRENT-001"},
+    {"scenario_id":"SCN-PERF-STEADY-PULL-001","requirement_id":"SYNC-INTEGRITY-006","proof_obligation_id":"OBL-PERF-STEADY-PULL-MACOS-CURRENT-001","assertion_id":"ASSERT-PERF-STEADY-PULL-INTEGRITY-006","proof_type":"native-e2e","support_cell_id":"SUP-MACOS-CURRENT-001"},
+    {"scenario_id":"SCN-PERF-STEADY-PULL-001","requirement_id":"SYNC-CURSOR-002","proof_obligation_id":"OBL-PERF-STEADY-PULL-ANDROID-CURRENT-001","assertion_id":"ASSERT-PERF-STEADY-PULL-CURSOR-002","proof_type":"native-e2e","support_cell_id":"SUP-ANDROID-CURRENT-001"},
+    {"scenario_id":"SCN-PERF-STEADY-PULL-001","requirement_id":"SYNC-INTEGRITY-001","proof_obligation_id":"OBL-PERF-STEADY-PULL-ANDROID-CURRENT-001","assertion_id":"ASSERT-PERF-STEADY-PULL-INTEGRITY-001","proof_type":"native-e2e","support_cell_id":"SUP-ANDROID-CURRENT-001"},
+    {"scenario_id":"SCN-PERF-STEADY-PULL-001","requirement_id":"SYNC-INTEGRITY-003","proof_obligation_id":"OBL-PERF-STEADY-PULL-ANDROID-CURRENT-001","assertion_id":"ASSERT-PERF-STEADY-PULL-INTEGRITY-003","proof_type":"native-e2e","support_cell_id":"SUP-ANDROID-CURRENT-001"},
+    {"scenario_id":"SCN-PERF-STEADY-PULL-001","requirement_id":"SYNC-INTEGRITY-004","proof_obligation_id":"OBL-PERF-STEADY-PULL-ANDROID-CURRENT-001","assertion_id":"ASSERT-PERF-STEADY-PULL-INTEGRITY-004","proof_type":"native-e2e","support_cell_id":"SUP-ANDROID-CURRENT-001"},
+    {"scenario_id":"SCN-PERF-STEADY-PULL-001","requirement_id":"SYNC-INTEGRITY-005","proof_obligation_id":"OBL-PERF-STEADY-PULL-ANDROID-CURRENT-001","assertion_id":"ASSERT-PERF-STEADY-PULL-INTEGRITY-005","proof_type":"native-e2e","support_cell_id":"SUP-ANDROID-CURRENT-001"},
+    {"scenario_id":"SCN-PERF-STEADY-PULL-001","requirement_id":"SYNC-INTEGRITY-006","proof_obligation_id":"OBL-PERF-STEADY-PULL-ANDROID-CURRENT-001","assertion_id":"ASSERT-PERF-STEADY-PULL-INTEGRITY-006","proof_type":"native-e2e","support_cell_id":"SUP-ANDROID-CURRENT-001"},
+    {"scenario_id":"SCN-PERF-STEADY-PULL-001","requirement_id":"SYNC-CURSOR-002","proof_obligation_id":"OBL-PERF-STEADY-PULL-RN-IOS-CURRENT-001","assertion_id":"ASSERT-PERF-STEADY-PULL-CURSOR-002","proof_type":"native-e2e","support_cell_id":"SUP-RN-IOS-CURRENT-001"},
+    {"scenario_id":"SCN-PERF-STEADY-PULL-001","requirement_id":"SYNC-INTEGRITY-001","proof_obligation_id":"OBL-PERF-STEADY-PULL-RN-IOS-CURRENT-001","assertion_id":"ASSERT-PERF-STEADY-PULL-INTEGRITY-001","proof_type":"native-e2e","support_cell_id":"SUP-RN-IOS-CURRENT-001"},
+    {"scenario_id":"SCN-PERF-STEADY-PULL-001","requirement_id":"SYNC-INTEGRITY-003","proof_obligation_id":"OBL-PERF-STEADY-PULL-RN-IOS-CURRENT-001","assertion_id":"ASSERT-PERF-STEADY-PULL-INTEGRITY-003","proof_type":"native-e2e","support_cell_id":"SUP-RN-IOS-CURRENT-001"},
+    {"scenario_id":"SCN-PERF-STEADY-PULL-001","requirement_id":"SYNC-INTEGRITY-004","proof_obligation_id":"OBL-PERF-STEADY-PULL-RN-IOS-CURRENT-001","assertion_id":"ASSERT-PERF-STEADY-PULL-INTEGRITY-004","proof_type":"native-e2e","support_cell_id":"SUP-RN-IOS-CURRENT-001"},
+    {"scenario_id":"SCN-PERF-STEADY-PULL-001","requirement_id":"SYNC-INTEGRITY-005","proof_obligation_id":"OBL-PERF-STEADY-PULL-RN-IOS-CURRENT-001","assertion_id":"ASSERT-PERF-STEADY-PULL-INTEGRITY-005","proof_type":"native-e2e","support_cell_id":"SUP-RN-IOS-CURRENT-001"},
+    {"scenario_id":"SCN-PERF-STEADY-PULL-001","requirement_id":"SYNC-INTEGRITY-006","proof_obligation_id":"OBL-PERF-STEADY-PULL-RN-IOS-CURRENT-001","assertion_id":"ASSERT-PERF-STEADY-PULL-INTEGRITY-006","proof_type":"native-e2e","support_cell_id":"SUP-RN-IOS-CURRENT-001"},
+    {"scenario_id":"SCN-PERF-STEADY-PULL-001","requirement_id":"SYNC-CURSOR-002","proof_obligation_id":"OBL-PERF-STEADY-PULL-RN-ANDROID-CURRENT-001","assertion_id":"ASSERT-PERF-STEADY-PULL-CURSOR-002","proof_type":"native-e2e","support_cell_id":"SUP-RN-ANDROID-CURRENT-001"},
+    {"scenario_id":"SCN-PERF-STEADY-PULL-001","requirement_id":"SYNC-INTEGRITY-001","proof_obligation_id":"OBL-PERF-STEADY-PULL-RN-ANDROID-CURRENT-001","assertion_id":"ASSERT-PERF-STEADY-PULL-INTEGRITY-001","proof_type":"native-e2e","support_cell_id":"SUP-RN-ANDROID-CURRENT-001"},
+    {"scenario_id":"SCN-PERF-STEADY-PULL-001","requirement_id":"SYNC-INTEGRITY-003","proof_obligation_id":"OBL-PERF-STEADY-PULL-RN-ANDROID-CURRENT-001","assertion_id":"ASSERT-PERF-STEADY-PULL-INTEGRITY-003","proof_type":"native-e2e","support_cell_id":"SUP-RN-ANDROID-CURRENT-001"},
+    {"scenario_id":"SCN-PERF-STEADY-PULL-001","requirement_id":"SYNC-INTEGRITY-004","proof_obligation_id":"OBL-PERF-STEADY-PULL-RN-ANDROID-CURRENT-001","assertion_id":"ASSERT-PERF-STEADY-PULL-INTEGRITY-004","proof_type":"native-e2e","support_cell_id":"SUP-RN-ANDROID-CURRENT-001"},
+    {"scenario_id":"SCN-PERF-STEADY-PULL-001","requirement_id":"SYNC-INTEGRITY-005","proof_obligation_id":"OBL-PERF-STEADY-PULL-RN-ANDROID-CURRENT-001","assertion_id":"ASSERT-PERF-STEADY-PULL-INTEGRITY-005","proof_type":"native-e2e","support_cell_id":"SUP-RN-ANDROID-CURRENT-001"},
+    {"scenario_id":"SCN-PERF-STEADY-PULL-001","requirement_id":"SYNC-INTEGRITY-006","proof_obligation_id":"OBL-PERF-STEADY-PULL-RN-ANDROID-CURRENT-001","assertion_id":"ASSERT-PERF-STEADY-PULL-INTEGRITY-006","proof_type":"native-e2e","support_cell_id":"SUP-RN-ANDROID-CURRENT-001"}
   ],
   "model": {
     "setup": [
@@ -843,7 +1011,13 @@
           "defect": "install terminal cursor and healthy state before checksum verification"
         }
       }
-    }
+    },
+    {"id":"FPL-PERF-STEADY-PULL-CURSOR-002","requirement_id":"SYNC-CURSOR-002","fault_id":"FAULT-CURSOR-002","control_id":"CTRL-CURSOR-002","barrier_id":"BAR-PERF-STEADY-PULL-CONTROL-001","expected_assertion_ids":["ASSERT-PERF-STEADY-PULL-CURSOR-002"],"injection":{"mechanism":"state-fault","target":"incremental pull apply transaction","operator":"replace","parameters":{"scenario":"make one selected scope outcome fail validation after an earlier outcome was applied","defect":"advance that scope cursor before all outcomes are durable or because another scope progressed"}}},
+    {"id":"FPL-PERF-STEADY-PULL-INTEGRITY-001","requirement_id":"SYNC-INTEGRITY-001","fault_id":"FAULT-INTEGRITY-001","control_id":"CTRL-INTEGRITY-001","barrier_id":"BAR-PERF-STEADY-PULL-CONTROL-001","expected_assertion_ids":["ASSERT-PERF-STEADY-PULL-INTEGRITY-001"],"injection":{"mechanism":"state-fault","target":"scope health transition","operator":"replace","parameters":{"scenario":"install a valid cursor while local materialization has a wrong row","defect":"mark the scope healthy from cursor validity without authoritative digest verification"}}},
+    {"id":"FPL-PERF-STEADY-PULL-INTEGRITY-003","requirement_id":"SYNC-INTEGRITY-003","fault_id":"FAULT-INTEGRITY-003","control_id":"CTRL-INTEGRITY-003","barrier_id":"BAR-PERF-STEADY-PULL-CONTROL-001","expected_assertion_ids":["ASSERT-PERF-STEADY-PULL-INTEGRITY-003"],"injection":{"mechanism":"wire-fault","target":"row decoder typed field map","operator":"inject","parameters":{"scenario":"send unknown, duplicate, omitted, mistyped, aliased, alternate-case, and primary-key-mismatched row fields","defect":"normalize malformed fields or physical database type names instead of rejecting before apply"}}},
+    {"id":"FPL-PERF-STEADY-PULL-INTEGRITY-004","requirement_id":"SYNC-INTEGRITY-004","fault_id":"FAULT-INTEGRITY-004","control_id":"CTRL-INTEGRITY-004","barrier_id":"BAR-PERF-STEADY-PULL-CONTROL-001","expected_assertion_ids":["ASSERT-PERF-STEADY-PULL-INTEGRITY-004"],"injection":{"mechanism":"wire-fault","target":"row-bearing outcome digest and version","operator":"corrupt","parameters":{"scenario":"alter one schema hash, table ID, typed key, row field, server version, or required digest domain","defect":"accept the changed row with the original opaque version or SHA-256 digest and advance reconciliation"}}},
+    {"id":"FPL-PERF-STEADY-PULL-INTEGRITY-005","requirement_id":"SYNC-INTEGRITY-005","fault_id":"FAULT-INTEGRITY-005","control_id":"CTRL-INTEGRITY-005","barrier_id":"BAR-PERF-STEADY-PULL-CONTROL-001","expected_assertion_ids":["ASSERT-PERF-STEADY-PULL-INTEGRITY-005"],"injection":{"mechanism":"wire-fault","target":"authoritative scope digest input stream","operator":"corrupt","parameters":{"scenario":"change scope ID, cardinality, row identity, row digest pairing, duplicate, omission, or sort order","defect":"accept a noncanonical aggregate while retaining the claimed scope digest"}}},
+    {"id":"FPL-PERF-STEADY-PULL-INTEGRITY-006","requirement_id":"SYNC-INTEGRITY-006","fault_id":"FAULT-INTEGRITY-006","control_id":"CTRL-INTEGRITY-006","barrier_id":"BAR-PERF-STEADY-PULL-CONTROL-001","expected_assertion_ids":["ASSERT-PERF-STEADY-PULL-INTEGRITY-006"],"injection":{"mechanism":"wire-fault","target":"terminal pull checksum map","operator":"omit","parameters":{"scenario":"return terminal and nonterminal pages with missing, extra, malformed, or wrong-bound active scope entries","defect":"include checksums on nonterminal pages or accept an incomplete terminal map with cursor advancement"}}}
   ],
   "replay": {
     "mode": "deterministic",
@@ -864,7 +1038,13 @@
       "detected_by": [
         "ASSERT-PERF-STEADY-PULL-SEMANTIC-001"
       ]
-    }
+    },
+    {"control_id":"CTRL-CURSOR-002","requirement_id":"SYNC-CURSOR-002","fault_id":"FAULT-CURSOR-002","subject_artifact_inventory_ids":["ARTDEF-SWIFT-SPM-001","ARTDEF-COCOAPODS-001","ARTDEF-KOTLIN-MAVEN-001","ARTDEF-RN-NPM-001"],"detected_by":["ASSERT-PERF-STEADY-PULL-CURSOR-002"]},
+    {"control_id":"CTRL-INTEGRITY-001","requirement_id":"SYNC-INTEGRITY-001","fault_id":"FAULT-INTEGRITY-001","subject_artifact_inventory_ids":["ARTDEF-PG-EXTENSION-001","ARTDEF-ADAPTER-001","ARTDEF-SWIFT-SPM-001","ARTDEF-COCOAPODS-001","ARTDEF-KOTLIN-MAVEN-001","ARTDEF-RN-NPM-001"],"detected_by":["ASSERT-PERF-STEADY-PULL-INTEGRITY-001"]},
+    {"control_id":"CTRL-INTEGRITY-003","requirement_id":"SYNC-INTEGRITY-003","fault_id":"FAULT-INTEGRITY-003","subject_artifact_inventory_ids":["ARTDEF-PG-EXTENSION-001","ARTDEF-ADAPTER-001","ARTDEF-SWIFT-SPM-001","ARTDEF-COCOAPODS-001","ARTDEF-KOTLIN-MAVEN-001","ARTDEF-RN-NPM-001"],"detected_by":["ASSERT-PERF-STEADY-PULL-INTEGRITY-003"]},
+    {"control_id":"CTRL-INTEGRITY-004","requirement_id":"SYNC-INTEGRITY-004","fault_id":"FAULT-INTEGRITY-004","subject_artifact_inventory_ids":["ARTDEF-PG-EXTENSION-001","ARTDEF-ADAPTER-001","ARTDEF-SWIFT-SPM-001","ARTDEF-COCOAPODS-001","ARTDEF-KOTLIN-MAVEN-001","ARTDEF-RN-NPM-001"],"detected_by":["ASSERT-PERF-STEADY-PULL-INTEGRITY-004"]},
+    {"control_id":"CTRL-INTEGRITY-005","requirement_id":"SYNC-INTEGRITY-005","fault_id":"FAULT-INTEGRITY-005","subject_artifact_inventory_ids":["ARTDEF-PG-EXTENSION-001","ARTDEF-ADAPTER-001","ARTDEF-SWIFT-SPM-001","ARTDEF-COCOAPODS-001","ARTDEF-KOTLIN-MAVEN-001","ARTDEF-RN-NPM-001"],"detected_by":["ASSERT-PERF-STEADY-PULL-INTEGRITY-005"]},
+    {"control_id":"CTRL-INTEGRITY-006","requirement_id":"SYNC-INTEGRITY-006","fault_id":"FAULT-INTEGRITY-006","subject_artifact_inventory_ids":["ARTDEF-PG-EXTENSION-001","ARTDEF-ADAPTER-001","ARTDEF-SWIFT-SPM-001","ARTDEF-COCOAPODS-001","ARTDEF-KOTLIN-MAVEN-001","ARTDEF-RN-NPM-001"],"detected_by":["ASSERT-PERF-STEADY-PULL-INTEGRITY-006"]}
   ],
   "steps": [
     {
@@ -1221,6 +1401,12 @@
         "observed_source": "system-under-test"
       },
       "detects_control_ids": []
-    }
+    },
+    {"id":"ASSERT-PERF-STEADY-PULL-CURSOR-002","requirement_ids":["SYNC-CURSOR-002"],"description":"The client installs the scope cursor only after the corresponding row and metadata are durable.","expectation_ids":["EXPECT-PERF-STEADY-PULL-SEMANTIC-001"],"predicate":{"contract_predicate":"state-equality","name":"state-equals-authored-model","payload":{}},"oracle":{"kind":"model-state-equality","expected_source":"authored-model","observed_source":"system-under-test"},"detects_control_ids":["CTRL-CURSOR-002"]},
+    {"id":"ASSERT-PERF-STEADY-PULL-INTEGRITY-001","requirement_ids":["SYNC-INTEGRITY-001"],"description":"The client marks the scope healthy only after the local and authoritative checksums match.","expectation_ids":["EXPECT-PERF-STEADY-PULL-SEMANTIC-001"],"predicate":{"contract_predicate":"state-equality","name":"state-equals-authored-model","payload":{}},"oracle":{"kind":"model-state-equality","expected_source":"authored-model","observed_source":"system-under-test"},"detects_control_ids":["CTRL-INTEGRITY-001"]},
+    {"id":"ASSERT-PERF-STEADY-PULL-INTEGRITY-003","requirement_ids":["SYNC-INTEGRITY-003"],"description":"The server and clients retain the canonical typed row without field normalization or identity drift.","expectation_ids":["EXPECT-PERF-STEADY-PULL-SEMANTIC-001"],"predicate":{"contract_predicate":"state-equality","name":"state-equals-authored-model","payload":{}},"oracle":{"kind":"model-state-equality","expected_source":"authored-model","observed_source":"system-under-test"},"detects_control_ids":["CTRL-INTEGRITY-003"]},
+    {"id":"ASSERT-PERF-STEADY-PULL-INTEGRITY-004","requirement_ids":["SYNC-INTEGRITY-004"],"description":"The durable row keeps the authoritative version and digest bound to its complete typed identity and content.","expectation_ids":["EXPECT-PERF-STEADY-PULL-SEMANTIC-001"],"predicate":{"contract_predicate":"state-equality","name":"state-equals-authored-model","payload":{}},"oracle":{"kind":"model-state-equality","expected_source":"authored-model","observed_source":"system-under-test"},"detects_control_ids":["CTRL-INTEGRITY-004"]},
+    {"id":"ASSERT-PERF-STEADY-PULL-INTEGRITY-005","requirement_ids":["SYNC-INTEGRITY-005"],"description":"The durable scope checksum equals the authored digest over the complete canonical row set.","expectation_ids":["EXPECT-PERF-STEADY-PULL-SEMANTIC-001"],"predicate":{"contract_predicate":"state-equality","name":"state-equals-authored-model","payload":{}},"oracle":{"kind":"model-state-equality","expected_source":"authored-model","observed_source":"system-under-test"},"detects_control_ids":["CTRL-INTEGRITY-005"]},
+    {"id":"ASSERT-PERF-STEADY-PULL-INTEGRITY-006","requirement_ids":["SYNC-INTEGRITY-006"],"description":"The terminal pull installs exactly the active scope checksum map and advances no unrelated scope.","expectation_ids":["EXPECT-PERF-STEADY-PULL-SEMANTIC-001"],"predicate":{"contract_predicate":"state-equality","name":"state-equals-authored-model","payload":{}},"oracle":{"kind":"model-state-equality","expected_source":"authored-model","observed_source":"system-under-test"},"detects_control_ids":["CTRL-INTEGRITY-006"]}
   ]
 }

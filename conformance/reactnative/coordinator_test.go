@@ -107,6 +107,36 @@ func TestBootstrapTraceRejectsMissingPull(t *testing.T) {
 	}
 }
 
+func TestBootstrapTraceRejectsInvalidFreshConnectSentinel(t *testing.T) {
+	tests := []struct {
+		name  string
+		key   string
+		value any
+	}{
+		{"client generation", "client_generation", 0},
+		{"current schema version", "schema_version", 1},
+		{"current schema hash", "schema_hash", testSchema().Hash},
+		{"wrong protocol", "protocol_version", 2},
+		{"advanced scope set", "scope_set_version", 1},
+		{"client-authored scope", "scope_count", 1},
+		{"unknown member", "unknown", 1},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			trace := validBootstrapTrace(testSchema())
+			var facts map[string]any
+			if err := json.Unmarshal(trace.Observations[0].RequestFacts, &facts); err != nil {
+				t.Fatalf("decode fresh connect facts: %v", err)
+			}
+			facts[test.key] = test.value
+			trace.Observations[0].RequestFacts, _ = json.Marshal(facts)
+			if err := validateBootstrapTrace(trace); err == nil {
+				t.Fatal("invalid fresh connect evidence was accepted")
+			}
+		})
+	}
+}
+
 func TestBootstrapTraceRejectsInvalidResponseFacts(t *testing.T) {
 	mutateRebuildBoolean := func(name string, value bool) func(*traceSnapshot) {
 		return func(trace *traceSnapshot) {
@@ -158,7 +188,7 @@ func TestWarmConnectScopeAuthorityNegativeControl(t *testing.T) {
 			t.Fatalf("validate authored negative-control binding: %v", err)
 		}
 		trace := validBootstrapTrace(testSchema())
-		trace.Observations[0].RequestFacts = requestFacts(0, testSchema(), 0, 1, "", "")
+		trace.Observations[0].RequestFacts = freshConnectRequestFacts(1)
 		if err := validateBootstrapTrace(trace); err == nil {
 			t.Fatal("client-authored bootstrap scope mutant was accepted")
 		}
@@ -196,7 +226,7 @@ func TestWarmTraceRejectsExtraRequest(t *testing.T) {
 	bootstrap := validBootstrapTrace(testSchema())
 	final := traceSnapshot{
 		Observations: append(append([]transportObservation(nil), bootstrap.Observations...),
-			transport("connect", 4, requestFacts(1, testSchema(), 1, 1, "", "")),
+			transport("connect", 4, connectRequestFacts(1, testSchema(), 1, 1)),
 			transport("pull", 5, requestFacts(1, testSchema(), 1, 1, "", "")),
 			transport("other", 6, requestFacts(1, testSchema(), 1, 1, "", "")),
 		),
@@ -211,12 +241,12 @@ func TestWarmTraceAcceptsReorderedJSONFacts(t *testing.T) {
 	bootstrap := validBootstrapTrace(testSchema())
 	final := traceSnapshot{
 		Observations: append(append([]transportObservation(nil), bootstrap.Observations...),
-			transport("connect", 4, requestFacts(1, testSchema(), 1, 1, "", "")),
+			transport("connect", 4, connectRequestFacts(1, testSchema(), 1, 1)),
 			transportWithPull("pull", 5, requestFacts(1, testSchema(), 1, 1, "", ""), "cursor-b", "cursor-c"),
 		),
 		SequenceCheckpoint: 5,
 	}
-	final.Observations[0].RequestFacts = json.RawMessage(`{"scope_count":0,"scope_set_version":0,"schema_hash":"721d2c95e6f34cd9733feea9f5118fba391eee10d07663dad066cfc59439fa44","schema_version":1,"client_generation":0}`)
+	final.Observations[0].RequestFacts = json.RawMessage(`{"scope_count":0,"scope_set_version":0,"protocol_version":3,"schema_hash":"","schema_version":0}`)
 	if _, err := warmTrace(final, &bootstrap); err != nil {
 		t.Fatalf("reordered bootstrap facts failed: %v", err)
 	}
@@ -226,12 +256,12 @@ func TestWarmTraceRejectsChangedBootstrapFacts(t *testing.T) {
 	bootstrap := validBootstrapTrace(testSchema())
 	final := traceSnapshot{
 		Observations: append(append([]transportObservation(nil), bootstrap.Observations...),
-			transport("connect", 4, requestFacts(1, testSchema(), 1, 1, "", "")),
+			transport("connect", 4, connectRequestFacts(1, testSchema(), 1, 1)),
 			transportWithPull("pull", 5, requestFacts(1, testSchema(), 1, 1, "", ""), "cursor-b", "cursor-c"),
 		),
 		SequenceCheckpoint: 5,
 	}
-	final.Observations[0].RequestFacts = requestFacts(0, testSchema(), 0, 1, "", "")
+	final.Observations[0].RequestFacts = freshConnectRequestFacts(1)
 	if _, err := warmTrace(final, &bootstrap); err == nil {
 		t.Fatal("changed bootstrap facts were accepted")
 	}
@@ -258,6 +288,39 @@ func TestWarmTraceRejectsInvalidPullEvidence(t *testing.T) {
 			test.mutate(&final.Observations[4])
 			if _, err := warmTrace(final, &bootstrap); err == nil {
 				t.Fatal("invalid warm pull evidence was accepted")
+			}
+		})
+	}
+}
+
+func TestWarmTraceRejectsInvalidConnectIdentity(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(map[string]any)
+	}{
+		{"missing generation", func(facts map[string]any) { delete(facts, "client_generation") }},
+		{"zero generation", func(facts map[string]any) { facts["client_generation"] = 0 }},
+		{"fresh schema", func(facts map[string]any) {
+			facts["schema_version"] = 0
+			facts["schema_hash"] = ""
+		}},
+		{"wrong protocol", func(facts map[string]any) { facts["protocol_version"] = 2 }},
+		{"fresh scope set", func(facts map[string]any) { facts["scope_set_version"] = 0 }},
+		{"unsafe generation", func(facts map[string]any) { facts["client_generation"] = warmConnectMaximumSafeInteger + 1 }},
+		{"unknown member", func(facts map[string]any) { facts["unknown"] = 1 }},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			bootstrap := validBootstrapTrace(testSchema())
+			final := validWarmTrace(bootstrap)
+			var facts map[string]any
+			if err := json.Unmarshal(final.Observations[3].RequestFacts, &facts); err != nil {
+				t.Fatalf("decode warm connect facts: %v", err)
+			}
+			test.mutate(facts)
+			final.Observations[3].RequestFacts, _ = json.Marshal(facts)
+			if _, err := warmTrace(final, &bootstrap); err == nil {
+				t.Fatal("invalid warm connect evidence was accepted")
 			}
 		})
 	}
@@ -343,7 +406,7 @@ func TestFinalCaptureRejectsChecksumAndIdentityChanges(t *testing.T) {
 	capture = validFinalCapture(*expected)
 	bootstrap := validBootstrapTrace(testSchema())
 	warm := []transportObservation{
-		transport("connect", 4, requestFacts(1, testSchema(), 1, 1, "", "")),
+		transport("connect", 4, connectRequestFacts(1, testSchema(), 1, 1)),
 		transportWithPull("pull", 5, requestFacts(1, testSchema(), 1, 1, "", ""), "cursor-b", "cursor-c"),
 	}
 	state, err = decodeClientState(capture.ClientState)
@@ -353,19 +416,19 @@ func TestFinalCaptureRejectsChecksumAndIdentityChanges(t *testing.T) {
 	if err := validateTransportIdentities(state, capture, bootstrap, warm); err != nil {
 		t.Fatalf("valid transport cursor chain failed: %v", err)
 	}
-	warm[0] = transport("connect", 4, requestFacts(2, testSchema(), 1, 1, "", ""))
+	warm[0] = transport("connect", 4, connectRequestFacts(2, testSchema(), 1, 1))
 	if err := validateTransportIdentities(state, capture, bootstrap, warm); err == nil {
 		t.Fatal("changed warm client generation was accepted")
 	}
 
-	warm[0] = transport("connect", 4, requestFacts(1, testSchema(), 1, 1, "", ""))
+	warm[0] = transport("connect", 4, connectRequestFacts(1, testSchema(), 1, 1))
 	warm[1].CursorFingerprints[0] = hashFingerprint("different-cursor")
 	if err := validateTransportIdentities(state, capture, bootstrap, warm); err == nil {
 		t.Fatal("changed warm cursor fingerprint was accepted")
 	}
 
 	warm = []transportObservation{
-		transport("connect", 4, requestFacts(1, testSchema(), 1, 1, "", "")),
+		transport("connect", 4, connectRequestFacts(1, testSchema(), 1, 1)),
 		transportWithPull("pull", 5, requestFacts(1, testSchema(), 1, 1, "", ""), "cursor-b", "cursor-c"),
 	}
 	bootstrap.Observations[2].PullResponseFacts = json.RawMessage(validPullResponseFacts("different-cursor"))
@@ -451,7 +514,7 @@ func testSchema() clientSchema {
 func validBootstrapTrace(schema clientSchema) traceSnapshot {
 	return traceSnapshot{
 		Observations: []transportObservation{
-			transport("connect", 1, requestFacts(0, schema, 0, 0, "", "")),
+			transport("connect", 1, freshConnectRequestFacts(0)),
 			transportWithResponse("rebuild", 2, requestFacts(1, schema, 0, 1, "rebuild-a", "scope-a"), validRebuildResponseFacts()),
 			transportWithPull("pull", 3, requestFacts(1, schema, 1, 1, "", ""), "cursor-a", "cursor-b"),
 		},
@@ -462,7 +525,7 @@ func validBootstrapTrace(schema clientSchema) traceSnapshot {
 func validWarmTrace(bootstrap traceSnapshot) traceSnapshot {
 	return traceSnapshot{
 		Observations: append(append([]transportObservation(nil), bootstrap.Observations...),
-			transport("connect", 4, requestFacts(1, testSchema(), 1, 1, "", "")),
+			transport("connect", 4, connectRequestFacts(1, testSchema(), 1, 1)),
 			transportWithPull("pull", 5, requestFacts(1, testSchema(), 1, 1, "", ""), "cursor-b", "cursor-c"),
 		),
 		SequenceCheckpoint: 5,
@@ -536,6 +599,35 @@ func requestFacts(generation uint64, schema clientSchema, scopeSet, scopeCount u
 		values["scope_fingerprint"] = hashFingerprint(scope)
 	}
 	encoded, err := json.Marshal(values)
+	if err != nil {
+		panic(err)
+	}
+	return encoded
+}
+
+func freshConnectRequestFacts(scopeCount uint64) json.RawMessage {
+	encoded, err := json.Marshal(map[string]any{
+		"schema_version":    0,
+		"schema_hash":       "",
+		"protocol_version":  3,
+		"scope_set_version": 0,
+		"scope_count":       scopeCount,
+	})
+	if err != nil {
+		panic(err)
+	}
+	return encoded
+}
+
+func connectRequestFacts(generation uint64, schema clientSchema, scopeSet, scopeCount uint64) json.RawMessage {
+	encoded, err := json.Marshal(map[string]any{
+		"client_generation": generation,
+		"schema_version":    schema.Version,
+		"schema_hash":       schema.Hash,
+		"protocol_version":  3,
+		"scope_set_version": scopeSet,
+		"scope_count":       scopeCount,
+	})
 	if err != nil {
 		panic(err)
 	}

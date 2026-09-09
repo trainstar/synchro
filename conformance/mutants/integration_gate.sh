@@ -106,10 +106,9 @@ run_control() {
 	label=$1
 	phase=$2
 	workspace=$3
-	test_name=$4
+	test_path=$4
 	extension_artifact=$5
 	adapter_artifact=$6
-	expected=$7
 	json_log="$logs_root/$label-$phase.json"
 	stderr_log="$logs_root/$label-$phase.stderr.log"
 	parser_output="$logs_root/$label-$phase.parser.out"
@@ -133,14 +132,13 @@ run_control() {
 		SYNCHRO_CONFORMANCE_JWT_SECRET_FILE="$secrets_root/jwt-password" \
 		SYNCHRO_CONFORMANCE_INSTALL_LOCK="$run_root/install.lock" \
 		make --no-print-directory -s -C "$workspace" test-blackbox-mutation-control \
-		MUTATION_CONTROL_TEST="$test_name" \
-		MUTATION_CONTROL_EXPECT="$expected" >"$json_log" 2>"$stderr_log"
+		MUTATION_CONTROL_TEST="$test_path" >"$json_log" 2>"$stderr_log"
 	control_status=$?
 	set -e
 
 	set +e
 	make --no-print-directory -s -C "$repo_root" parse-testresult \
-		TESTRESULT_TEST_NAME="$test_name" <"$json_log" >"$parser_output" 2>"$parser_log"
+		TESTRESULT_TEST_NAME="$test_path" <"$json_log" >"$parser_output" 2>"$parser_log"
 	parser_status=$?
 	set -e
 	if [ "$parser_status" -ne 0 ]; then
@@ -155,12 +153,12 @@ expect_control_result() {
 	label=$1
 	phase=$2
 	workspace=$3
-	test_name=$4
+	test_path=$4
 	extension_artifact=$5
 	adapter_artifact=$6
 	expected=$7
 
-	run_control "$label" "$phase" "$workspace" "$test_name" "$extension_artifact" "$adapter_artifact" "$expected"
+	run_control "$label" "$phase" "$workspace" "$test_path" "$extension_artifact" "$adapter_artifact"
 	case "$expected" in
 		target_pass)
 			if [ "$CONTROL_STATUS" -ne 0 ] || [ "$CONTROL_RESULT" != target_pass ]; then
@@ -197,7 +195,7 @@ cleanup_category() {
 run_category() {
 	category=$1
 	patch=$2
-	test_name=$3
+	test_path=$3
 	workspace="$run_root/workspaces/$category"
 
 	copy_worktree "$workspace"
@@ -207,24 +205,21 @@ run_category() {
 	mutant_adapter=$PACKAGE_ADAPTER_ARTIFACT
 
 	expect_control_result \
-		"$category" baseline "$repo_root" "$test_name" \
+		"$category" baseline "$repo_root" "$test_path" \
 		"$baseline_extension" "$baseline_adapter" target_pass
 	expect_control_result \
-		"$category" mutant "$workspace" "$test_name" \
+		"$category" mutant "$workspace" "$test_path" \
 		"$mutant_extension" "$mutant_adapter" target_semantic_test_failure
 	expect_control_result \
-		"$category" post-baseline "$repo_root" "$test_name" \
+		"$category" post-baseline "$repo_root" "$test_path" \
 		"$baseline_extension" "$baseline_adapter" target_pass
 	cleanup_category "$category"
 	mutant_count=$((mutant_count + 1))
-	printf 'KILLED %s by %s\n' "$category" "$test_name"
+	printf 'KILLED %s by %s\n' "$category" "$test_path"
 }
 
 validate_manifest() {
-	if ! (
-		cd "$repo_root/conformance"
-		GOFLAGS= GOWORK=off go test ./mutants -run '^TestIntegrationManifest$' -count=1
-	); then
+	if ! make --no-print-directory -s -C "$repo_root" test-integration-mutant-manifest; then
 		fail "integration mutant manifest validation failed"
 	fi
 }
@@ -237,7 +232,8 @@ import sys
 with open(sys.argv[1], encoding="utf-8") as source:
     manifest = json.load(source)
 for mutant in manifest["mutants"]:
-    print("\t".join((mutant["id"], mutant["patch"], mutant["test_target"])))
+    test_path = mutant["test_target"] + "/" + mutant["assertion_subtest"]
+    print("\t".join((mutant["id"], mutant["patch"], test_path)))
 PY
 }
 
@@ -279,8 +275,8 @@ run_category \
 
 manifest_rows >"$run_root/manifest.tsv"
 tab=$(printf '\t')
-while IFS="$tab" read -r category patch test_name; do
-	run_category "$category" "$patch" "$test_name"
+while IFS="$tab" read -r category patch test_path; do
+	run_category "$category" "$patch" "$test_path"
 done <"$run_root/manifest.tsv"
 
 gate_passed=1

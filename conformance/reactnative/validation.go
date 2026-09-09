@@ -500,8 +500,8 @@ func validateBootstrapTrace(trace traceSnapshot) error {
 			return fmt.Errorf("React Native bootstrap %s trace is invalid: %w", operation, err)
 		}
 	}
-	if integer, err := requestInteger(trace.Observations[0], "scope_count"); err != nil || integer != 0 {
-		return errors.New("React Native bootstrap connect scope projection is invalid")
+	if err := validateWarmConnectConnectRequest(trace.Observations[0], true); err != nil {
+		return fmt.Errorf("React Native bootstrap connect request is invalid: %w", err)
 	}
 	if integer, err := requestInteger(trace.Observations[2], "scope_count"); err != nil || integer != 1 {
 		return errors.New("React Native bootstrap pull scope projection is invalid")
@@ -536,7 +536,43 @@ func warmTrace(final traceSnapshot, bootstrap *traceSnapshot) ([]transportObserv
 			return nil, fmt.Errorf("React Native warm %s trace is invalid: %w", operation, err)
 		}
 	}
+	if err := validateWarmConnectConnectRequest(warm[0], false); err != nil {
+		return nil, fmt.Errorf("React Native warm connect request is invalid: %w", err)
+	}
 	return warm, nil
+}
+
+func validateWarmConnectConnectRequest(observation transportObservation, fresh bool) error {
+	var members map[string]json.RawMessage
+	if jsonstrict.Decode(observation.RequestFacts, &members) != nil {
+		return errors.New("connect request facts are invalid")
+	}
+	wantMembers := 6
+	if fresh {
+		wantMembers = 5
+	}
+	protocol, protocolErr := requestInteger(observation, "protocol_version")
+	schemaVersion, schemaVersionErr := requestInteger(observation, "schema_version")
+	scopeSetVersion, scopeSetVersionErr := requestInteger(observation, "scope_set_version")
+	scopeCount, scopeCountErr := requestInteger(observation, "scope_count")
+	var schemaHash string
+	schemaHashErr := json.Unmarshal(members["schema_hash"], &schemaHash)
+	if len(members) != wantMembers || protocolErr != nil || protocol != 3 || schemaVersionErr != nil ||
+		scopeSetVersionErr != nil || scopeCountErr != nil || schemaHashErr != nil {
+		return errors.New("connect request facts differ from the protocol shape")
+	}
+	_, hasGeneration := members["client_generation"]
+	if fresh {
+		if hasGeneration || schemaVersion != 0 || schemaHash != "" || scopeSetVersion != 0 || scopeCount != 0 {
+			return errors.New("connect request facts do not use the fresh sentinel")
+		}
+		return nil
+	}
+	generation, generationErr := requestInteger(observation, "client_generation")
+	if !hasGeneration || generationErr != nil || generation == 0 || schemaVersion == 0 || schemaHash == "" || scopeSetVersion == 0 || scopeCount != 1 {
+		return errors.New("connect request facts do not use current durable identity")
+	}
+	return nil
 }
 
 func transportObservationsEqual(left, right transportObservation) bool {

@@ -78,11 +78,18 @@ func TestIntegrationManifestRejectsInvalidBindings(t *testing.T) {
 			want: "stale patch",
 		},
 		{
-			name: "duplicate home",
+			name: "duplicate ID",
 			mutate: func(m *integrationManifest) {
 				m.Mutants = append(m.Mutants, m.Mutants[0])
 			},
-			want: "duplicate requirement/control home",
+			want: "duplicate mutant ID",
+		},
+		{
+			name: "duplicate patch",
+			mutate: func(m *integrationManifest) {
+				m.Mutants[1].Patch = m.Mutants[0].Patch
+			},
+			want: "duplicate patch",
 		},
 		{
 			name: "unknown control",
@@ -154,7 +161,6 @@ func validateIntegrationManifest(root string, manifest integrationManifest, chec
 
 	manifestPatches := make(map[string]struct{}, len(manifest.Mutants))
 	ids := make(map[string]struct{}, len(manifest.Mutants))
-	homes := make(map[string]struct{}, len(manifest.Mutants))
 	for _, mutant := range manifest.Mutants {
 		if !strings.HasPrefix(mutant.ID, "issue49-") {
 			failures = append(failures, fmt.Sprintf("invalid Issue 49 mutant ID %q", mutant.ID))
@@ -167,12 +173,6 @@ func validateIntegrationManifest(root string, manifest integrationManifest, chec
 			failures = append(failures, fmt.Sprintf("duplicate patch %q", mutant.Patch))
 		}
 		manifestPatches[mutant.Patch] = struct{}{}
-		home := strings.Join([]string{mutant.RequirementID, mutant.ControlID, mutant.TestTarget, mutant.AssertionSubtest}, "\x00")
-		if _, duplicate := homes[home]; duplicate {
-			failures = append(failures, fmt.Sprintf("duplicate requirement/control home %q", home))
-		}
-		homes[home] = struct{}{}
-
 		if !validRelativePatch(mutant.Patch) || !fileExists(root, mutant.Patch) {
 			failures = append(failures, fmt.Sprintf("missing patch %q", mutant.Patch))
 		} else if err := checkPatch(mutant.Patch); err != nil {

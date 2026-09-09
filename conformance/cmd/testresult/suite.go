@@ -64,7 +64,7 @@ func runExact(args []string, stdout, stderr io.Writer) int {
 	flags := flag.NewFlagSet("exact", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	directory := flags.String("dir", "", "working directory for the test command")
-	target := flags.String("test", "", "exact top-level test name")
+	target := flags.String("test", "", "exact test name or assertion path")
 	expected := flags.String("expect", string(resultTargetPass), "required exact-test result")
 	if err := flags.Parse(args); err != nil {
 		return 2

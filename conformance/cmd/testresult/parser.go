@@ -39,7 +39,8 @@ type eventState struct {
 }
 
 func classifyTestResult(input io.Reader, target string) result {
-	if input == nil || !validTargetName(target) {
+	testName, assertionName, valid := exactTestNames(target)
+	if input == nil || !valid {
 		return resultMalformedOutput
 	}
 
@@ -51,7 +52,7 @@ func classifyTestResult(input io.Reader, target string) result {
 		if errors.Is(err, io.EOF) {
 			break
 		}
-		if err != nil || !state.accepts(event, target) {
+		if err != nil || !state.accepts(event, testName, assertionName) {
 			return resultMalformedOutput
 		}
 	}
@@ -59,10 +60,40 @@ func classifyTestResult(input io.Reader, target string) result {
 }
 
 func validTargetName(target string) bool {
-	return target != "" && !strings.Contains(target, "/")
+	_, _, valid := exactTestNames(target)
+	return valid
 }
 
-func (state *eventState) accepts(event testEvent, target string) bool {
+func exactTestNames(target string) (string, string, bool) {
+	parts := strings.Split(target, "/")
+	switch len(parts) {
+	case 1:
+		if parts[0] == "" {
+			return "", "", false
+		}
+		return parts[0], parts[0] + "/assertion", true
+	case 2:
+		if parts[0] == "" || !validAssertionName(parts[1]) {
+			return "", "", false
+		}
+		return parts[0], target, true
+	default:
+		return "", "", false
+	}
+}
+
+func validAssertionName(name string) bool {
+	if name == "assertion" {
+		return true
+	}
+	if len(name) != len("assertion#00") || !strings.HasPrefix(name, "assertion#") {
+		return false
+	}
+	tens, ones := name[len(name)-2], name[len(name)-1]
+	return tens >= '0' && tens <= '9' && ones >= '0' && ones <= '9' && (tens != '0' || ones != '0')
+}
+
+func (state *eventState) accepts(event testEvent, target, assertion string) bool {
 	if event.Action == "" || event.Package == "" {
 		return false
 	}
@@ -76,7 +107,6 @@ func (state *eventState) accepts(event testEvent, target string) bool {
 	}
 	state.eventCount++
 
-	assertion := target + "/assertion"
 	switch event.Action {
 	case "start":
 		if event.Test != "" || state.packageStarted || state.eventCount != 1 {

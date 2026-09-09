@@ -178,6 +178,35 @@ func TestRealIssue49SemanticVersionPrecedence(t *testing.T) {
 	defer cancel()
 	harness, token := provisionRealProofHarness(t, ctx)
 
+	t.Run("assertion", func(t *testing.T) {
+		adapterURL, stop := issue49StartVersionedAdapter(t, ctx, harness, "1.0.0-beta.11")
+		defer stop()
+		lowerStatus, _ := issue49PostVersionedConnect(
+			t,
+			ctx,
+			adapterURL,
+			token,
+			"1.0.0-beta.2",
+			"issue49-semver-numeric-lower",
+			3,
+		)
+		higherStatus, higherResponse := issue49PostVersionedConnect(
+			t,
+			ctx,
+			adapterURL,
+			token,
+			"1.0.0-beta.11",
+			"issue49-semver-numeric-higher",
+			3,
+		)
+		if lowerStatus != http.StatusUpgradeRequired {
+			t.Fatalf("lower numeric prerelease passed minimum with status %d", lowerStatus)
+		}
+		if higherStatus != http.StatusOK {
+			t.Fatalf("higher numeric prerelease failed minimum with status %d: %#v", higherStatus, higherResponse)
+		}
+	})
+
 	comparisons := []struct {
 		name    string
 		lower   string
@@ -188,7 +217,6 @@ func TestRealIssue49SemanticVersionPrecedence(t *testing.T) {
 		{name: "numeric before nonnumeric", lower: "1.0.0-alpha.1", higher: "1.0.0-alpha.beta", minimum: "1.0.0-alpha.beta"},
 		{name: "alpha before beta", lower: "1.0.0-alpha.beta", higher: "1.0.0-beta", minimum: "1.0.0-beta"},
 		{name: "beta extension", lower: "1.0.0-beta", higher: "1.0.0-beta.2", minimum: "1.0.0-beta.2"},
-		{name: "numeric prerelease", lower: "1.0.0-beta.2", higher: "1.0.0-beta.11", minimum: "1.0.0-beta.11"},
 		{name: "beta before release candidate", lower: "1.0.0-beta.11", higher: "1.0.0-rc.1", minimum: "1.0.0-rc.1"},
 		{name: "prerelease before release", lower: "1.0.0-rc.1", higher: "1.0.0", minimum: "1.0.0"},
 		{name: "major version", lower: "1.999.999", higher: "2.0.0", minimum: "2.0.0"},

@@ -95,6 +95,63 @@ func TestClassifyTestResult(t *testing.T) {
 	}
 }
 
+func TestClassifyTestResultSelectsNumberedAssertion(t *testing.T) {
+	const target = "TestRealIssue49Proof/assertion#03"
+	input := eventStream(
+		`{"Action":"start","Package":"example/integration"}`,
+		`{"Action":"run","Package":"example/integration","Test":"TestRealIssue49Proof"}`,
+		`{"Action":"run","Package":"example/integration","Test":"TestRealIssue49Proof/assertion#03"}`,
+		`{"Action":"pass","Package":"example/integration","Test":"TestRealIssue49Proof/assertion#03"}`,
+		`{"Action":"pass","Package":"example/integration","Test":"TestRealIssue49Proof"}`,
+		`{"Action":"pass","Package":"example/integration"}`,
+	)
+	if got := classifyTestResult(strings.NewReader(input), target); got != resultTargetPass {
+		t.Fatalf("classifyTestResult() = %q, want %q", got, resultTargetPass)
+	}
+}
+
+func TestClassifyTestResultClassifiesNumberedAssertionFailure(t *testing.T) {
+	const target = "TestRealIssue49Proof/assertion#03"
+	input := eventStream(
+		`{"Action":"start","Package":"example/integration"}`,
+		`{"Action":"run","Package":"example/integration","Test":"TestRealIssue49Proof"}`,
+		`{"Action":"run","Package":"example/integration","Test":"TestRealIssue49Proof/assertion#03"}`,
+		`{"Action":"fail","Package":"example/integration","Test":"TestRealIssue49Proof/assertion#03"}`,
+		`{"Action":"output","Package":"example/integration","Test":"TestRealIssue49Proof","Output":"--- FAIL: TestRealIssue49Proof (0.01s)\n"}`,
+		`{"Action":"fail","Package":"example/integration","Test":"TestRealIssue49Proof"}`,
+		`{"Action":"output","Package":"example/integration","Output":"FAIL\n"}`,
+		`{"Action":"fail","Package":"example/integration"}`,
+	)
+	if got := classifyTestResult(strings.NewReader(input), target); got != resultTargetSemanticTestFailure {
+		t.Fatalf("classifyTestResult() = %q, want %q", got, resultTargetSemanticTestFailure)
+	}
+}
+
+func TestClassifyTestResultRejectsDifferentAssertion(t *testing.T) {
+	const target = "TestRealIssue49Proof/assertion#03"
+	input := eventStream(
+		`{"Action":"start","Package":"example/integration"}`,
+		`{"Action":"run","Package":"example/integration","Test":"TestRealIssue49Proof"}`,
+		`{"Action":"run","Package":"example/integration","Test":"TestRealIssue49Proof/assertion"}`,
+	)
+	if got := classifyTestResult(strings.NewReader(input), target); got != resultMalformedOutput {
+		t.Fatalf("classifyTestResult() = %q, want %q", got, resultMalformedOutput)
+	}
+}
+
+func TestValidTargetNameRejectsInvalidAssertionPaths(t *testing.T) {
+	for _, target := range []string{
+		"TestRealIssue49Proof/assertion#00",
+		"TestRealIssue49Proof/assertion#1",
+		"TestRealIssue49Proof/other",
+		"TestRealIssue49Proof/assertion/nested",
+	} {
+		if validTargetName(target) {
+			t.Fatalf("validTargetName(%q) = true", target)
+		}
+	}
+}
+
 func TestClassifyTestResultRejectsUnexpectedTests(t *testing.T) {
 	input := eventStream(
 		`{"Action":"start","Package":"example/integration"}`,

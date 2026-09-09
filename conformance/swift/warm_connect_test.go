@@ -235,3 +235,100 @@ func TestWarmConnectApplicationIdentityRequiresRuntimePrimaryKey(t *testing.T) {
 		t.Fatal("unrelated runtime primary-key identity passed")
 	}
 }
+
+func TestWarmConnectTransportStepRejectsMalformedRequestEvidence(t *testing.T) {
+	protocol := 3
+	generation := int64(1)
+	scopeSetVersion := int64(1)
+	zeroScopeSetVersion := int64(0)
+	schemaHash := "721d2c95e6f34cd9733feea9f5118fba391eee10d07663dad066cfc59439fa44"
+	zero := 0
+	one := 1
+	validBootstrap := transportObservation{
+		OperationClass:      "connect",
+		StatusCode:          200,
+		DurationNanoseconds: 1,
+		RequestFacts: &transportRequestFacts{
+			SchemaVersion:   0,
+			SchemaHash:      "",
+			ProtocolVersion: &protocol,
+			ScopeSetVersion: &zeroScopeSetVersion,
+			ScopeCount:      &zero,
+		},
+	}
+	validReconnect := transportObservation{
+		OperationClass:      "connect",
+		StatusCode:          200,
+		DurationNanoseconds: 1,
+		RequestFacts: &transportRequestFacts{
+			ClientGeneration: &generation,
+			SchemaVersion:    1,
+			SchemaHash:       schemaHash,
+			ProtocolVersion:  &protocol,
+			ScopeSetVersion:  &scopeSetVersion,
+			ScopeCount:       &one,
+		},
+	}
+	if err := validateWarmConnectTransportStep("STEP-PERF-WARM-CONNECT-BOOTSTRAP-CONNECT-001", validBootstrap); err != nil {
+		t.Fatalf("valid bootstrap connect evidence was rejected: %v", err)
+	}
+	if err := validateWarmConnectTransportStep("STEP-PERF-WARM-CONNECT-001", validReconnect); err != nil {
+		t.Fatalf("valid reconnect evidence was rejected: %v", err)
+	}
+
+	tests := []struct {
+		name   string
+		stepID scenarios.StepID
+		base   transportObservation
+		mutate func(*transportObservation)
+	}{
+		{
+			name: "bootstrap generation", stepID: "STEP-PERF-WARM-CONNECT-BOOTSTRAP-CONNECT-001", base: validBootstrap,
+			mutate: func(value *transportObservation) { value.RequestFacts.ClientGeneration = &generation },
+		},
+		{
+			name: "bootstrap current schema", stepID: "STEP-PERF-WARM-CONNECT-BOOTSTRAP-CONNECT-001", base: validBootstrap,
+			mutate: func(value *transportObservation) {
+				value.RequestFacts.SchemaVersion = 1
+				value.RequestFacts.SchemaHash = schemaHash
+			},
+		},
+		{
+			name: "wrong protocol", stepID: "STEP-PERF-WARM-CONNECT-001", base: validReconnect,
+			mutate: func(value *transportObservation) {
+				wrongProtocol := 2
+				value.RequestFacts.ProtocolVersion = &wrongProtocol
+			},
+		},
+		{
+			name: "nonpositive scope set", stepID: "STEP-PERF-WARM-CONNECT-001", base: validReconnect,
+			mutate: func(value *transportObservation) {
+				zeroScopeSetVersion := int64(0)
+				value.RequestFacts.ScopeSetVersion = &zeroScopeSetVersion
+			},
+		},
+		{
+			name: "unsafe schema version", stepID: "STEP-PERF-WARM-CONNECT-001", base: validReconnect,
+			mutate: func(value *transportObservation) {
+				value.RequestFacts.SchemaVersion = warmConnectMaximumSafeInteger + 1
+			},
+		},
+		{
+			name: "unsafe duration", stepID: "STEP-PERF-WARM-CONNECT-001", base: validReconnect,
+			mutate: func(value *transportObservation) {
+				value.DurationNanoseconds = uint64(warmConnectMaximumSafeInteger) + 1
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			observation := test.base
+			facts := *observation.RequestFacts
+			observation.RequestFacts = &facts
+			test.mutate(&observation)
+			if err := validateWarmConnectTransportStep(test.stepID, observation); err == nil {
+				t.Fatal("malformed request evidence was accepted")
+			}
+		})
+	}
+}

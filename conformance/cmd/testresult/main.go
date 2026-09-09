@@ -26,10 +26,10 @@ func main() {
 		os.Exit(runRust(os.Args[2:], os.Stdout, os.Stderr))
 	}
 
-	target := flag.String("test", "", "exact top-level test name")
+	target := flag.String("test", "", "exact test name or assertion path")
 	flag.Parse()
 	if !validTargetName(*target) || flag.NArg() != 0 {
-		fmt.Fprintln(os.Stderr, "testresult requires one exact top-level test name")
+		fmt.Fprintln(os.Stderr, "testresult requires one exact test name or assertion path")
 		os.Exit(2)
 	}
 	fmt.Println(classifyTestResult(os.Stdin, *target))
