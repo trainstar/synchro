@@ -2163,6 +2163,7 @@ func (h *Harness) FailureDiagnostics() string {
 	if h == nil {
 		return ""
 	}
+	h.capturePostgresFileLog()
 	var diagnostics []string
 	if text := h.postgres.diagnosticTextMatching(
 		"synchro WAL",
@@ -2180,6 +2181,18 @@ func (h *Harness) FailureDiagnostics() string {
 		diagnostics = append(diagnostics, "adapter: "+text)
 	}
 	return strings.Join(diagnostics, " | ")
+}
+
+func (h *Harness) capturePostgresFileLog() {
+	if h.postgres == nil || h.postgres.log == nil || h.dataDir == "" {
+		return
+	}
+	file, err := os.Open(filepath.Join(h.dataDir, "log", "postgresql.log"))
+	if err != nil {
+		return
+	}
+	defer file.Close()
+	_, _ = io.Copy(h.postgres.log, io.LimitReader(file, int64(h.config.ProcessLogBytes)))
 }
 
 // Source returns a source-DML-only executor for this isolated run.

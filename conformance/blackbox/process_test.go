@@ -485,6 +485,34 @@ func TestCaptureReadinessFailureIncludesLastObservedStateAndQueryError(t *testin
 	}
 }
 
+func TestFailureDiagnosticsIncludesRedactedPostgresFileLog(t *testing.T) {
+	dataDir := t.TempDir()
+	logDir := filepath.Join(dataDir, "log")
+	if err := os.Mkdir(logDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	secret := []byte("worker-password")
+	if err := os.WriteFile(
+		filepath.Join(logDir, "postgresql.log"),
+		[]byte("synchro WAL worker preparation failed: "+string(secret)),
+		0o600,
+	); err != nil {
+		t.Fatal(err)
+	}
+	harness := &Harness{
+		config:   HarnessConfig{ProcessLogBytes: 1024},
+		dataDir:  dataDir,
+		postgres: &ownedProcess{log: newBoundedLog(1024, [][]byte{secret})},
+	}
+	diagnostics := harness.FailureDiagnostics()
+	if !strings.Contains(diagnostics, "synchro WAL worker preparation failed") {
+		t.Fatalf("PostgreSQL collector log is absent: %s", diagnostics)
+	}
+	if strings.Contains(diagnostics, string(secret)) || !strings.Contains(diagnostics, "[REDACTED]") {
+		t.Fatalf("PostgreSQL collector log was not redacted: %s", diagnostics)
+	}
+}
+
 func TestCandidateOperationRecoveryPlanRoutesByOperationKind(t *testing.T) {
 	streamActivated, err := candidateOperationRecoveryPlan(
 		streamResetOperationKind,
