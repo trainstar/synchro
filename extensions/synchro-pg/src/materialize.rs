@@ -787,9 +787,9 @@ fn lock_backfill_state(client: &mut SpiClient<'_>) -> Result<(), String> {
     Ok(())
 }
 
-fn acquire_backfill_lock(client: &SpiClient<'_>) -> Result<(), String> {
+fn acquire_backfill_lock(client: &mut SpiClient<'_>) -> Result<(), String> {
     client
-        .select(
+        .update(
             "SELECT pg_catalog.pg_advisory_xact_lock($1::bigint)",
             None,
             &[crate::MEMBERSHIP_BACKFILL_LOCK_KEY.into()],
