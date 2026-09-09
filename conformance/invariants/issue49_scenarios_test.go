@@ -19,7 +19,10 @@ var issue49RequirementIDs = []string{
 	"SYNC-MUTATION-001",
 	"SYNC-MUTATION-003",
 	"SYNC-REBUILD-001",
+	"SYNC-REBUILD-004",
+	"SYNC-REBUILD-005",
 	"SYNC-CURSOR-002",
+	"SYNC-CURSOR-004",
 	"SYNC-INTEGRITY-001",
 	"SYNC-PROVENANCE-001",
 	"SYNC-CONFLICT-001",
@@ -39,6 +42,8 @@ var issue49RequirementIDs = []string{
 	"SYNC-OUTCOME-002",
 	"SYNC-PULL-005",
 	"SYNC-REBUILD-008",
+	"SYNC-REBUILD-009",
+	"SYNC-REBUILD-010",
 	"SYNC-REBUILD-011",
 	"SYNC-SCHEMA-005",
 	"SYNC-SCHEMA-006",
@@ -64,8 +69,8 @@ func TestIssue49NormativeControlScenariosAreComplete(t *testing.T) {
 		seen[requirementID] = struct{}{}
 		issue49ControlScenario(t, requirementID)
 	}
-	if len(seen) != 35 {
-		t.Fatalf("Issue 49 requirement count = %d, want 35", len(seen))
+	if len(seen) != 40 {
+		t.Fatalf("Issue 49 requirement count = %d, want 40", len(seen))
 	}
 }
 
