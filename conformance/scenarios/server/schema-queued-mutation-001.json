@@ -6,7 +6,9 @@
   "description": "An incompatible schema change preserves complete authored intent as one durable blocked outcome across restart.",
   "requirement_ids": [
     "SYNC-SCHEMA-002",
-    "SYNC-SCHEMA-003"
+    "SYNC-SCHEMA-003",
+    "SYNC-MUTATION-004",
+    "SYNC-BOUNDARY-002"
   ],
   "normative_references": [
     {
@@ -16,6 +18,14 @@
     {
       "path": "docs/src/content/docs/spec/04-invariants.mdx",
       "anchor": "#immutable-schema-manifest"
+    },
+    {
+      "path": "docs/src/content/docs/spec/04-invariants.mdx",
+      "anchor": "#rejection-inspectability"
+    },
+    {
+      "path": "docs/src/content/docs/spec/04-invariants.mdx",
+      "anchor": "#thin-react-native-invariant"
     }
   ],
   "proof_types": [
@@ -81,11 +91,13 @@
       "obligation_id": "OBL-SCHEMA-QUEUED-MUTATION-MACOS-CURRENT-001",
       "requirement_ids": [
         "SYNC-SCHEMA-002",
-        "SYNC-SCHEMA-003"
+        "SYNC-SCHEMA-003",
+        "SYNC-MUTATION-004"
       ],
       "assertion_ids": [
         "ASSERT-SCHEMA-QUEUED-MUTATION-SEMANTIC-001",
-        "ASSERT-SCHEMA-QUEUED-MUTATION-MANIFEST-001"
+        "ASSERT-SCHEMA-QUEUED-MUTATION-MANIFEST-001",
+        "ASSERT-SCHEMA-QUEUED-MUTATION-MUTATION-004"
       ],
       "proof_type": "native-e2e",
       "support_cell_id": "SUP-MACOS-CURRENT-001",
@@ -109,11 +121,13 @@
       "obligation_id": "OBL-SCHEMA-QUEUED-MUTATION-ANDROID-CURRENT-001",
       "requirement_ids": [
         "SYNC-SCHEMA-002",
-        "SYNC-SCHEMA-003"
+        "SYNC-SCHEMA-003",
+        "SYNC-MUTATION-004"
       ],
       "assertion_ids": [
         "ASSERT-SCHEMA-QUEUED-MUTATION-SEMANTIC-001",
-        "ASSERT-SCHEMA-QUEUED-MUTATION-MANIFEST-001"
+        "ASSERT-SCHEMA-QUEUED-MUTATION-MANIFEST-001",
+        "ASSERT-SCHEMA-QUEUED-MUTATION-MUTATION-004"
       ],
       "proof_type": "native-e2e",
       "support_cell_id": "SUP-ANDROID-CURRENT-001",
@@ -137,11 +151,15 @@
       "obligation_id": "OBL-SCHEMA-QUEUED-MUTATION-RN-IOS-CURRENT-001",
       "requirement_ids": [
         "SYNC-SCHEMA-002",
-        "SYNC-SCHEMA-003"
+        "SYNC-SCHEMA-003",
+        "SYNC-MUTATION-004",
+        "SYNC-BOUNDARY-002"
       ],
       "assertion_ids": [
         "ASSERT-SCHEMA-QUEUED-MUTATION-SEMANTIC-001",
-        "ASSERT-SCHEMA-QUEUED-MUTATION-MANIFEST-001"
+        "ASSERT-SCHEMA-QUEUED-MUTATION-MANIFEST-001",
+        "ASSERT-SCHEMA-QUEUED-MUTATION-MUTATION-004",
+        "ASSERT-SCHEMA-QUEUED-MUTATION-BOUNDARY-002"
       ],
       "proof_type": "native-e2e",
       "support_cell_id": "SUP-RN-IOS-CURRENT-001",
@@ -167,11 +185,15 @@
       "obligation_id": "OBL-SCHEMA-QUEUED-MUTATION-RN-ANDROID-CURRENT-001",
       "requirement_ids": [
         "SYNC-SCHEMA-002",
-        "SYNC-SCHEMA-003"
+        "SYNC-SCHEMA-003",
+        "SYNC-MUTATION-004",
+        "SYNC-BOUNDARY-002"
       ],
       "assertion_ids": [
         "ASSERT-SCHEMA-QUEUED-MUTATION-SEMANTIC-001",
-        "ASSERT-SCHEMA-QUEUED-MUTATION-MANIFEST-001"
+        "ASSERT-SCHEMA-QUEUED-MUTATION-MANIFEST-001",
+        "ASSERT-SCHEMA-QUEUED-MUTATION-MUTATION-004",
+        "ASSERT-SCHEMA-QUEUED-MUTATION-BOUNDARY-002"
       ],
       "proof_type": "native-e2e",
       "support_cell_id": "SUP-RN-ANDROID-CURRENT-001",
@@ -295,7 +317,10 @@
       ],
       "fault_plan_id": "FPL-SCHEMA-QUEUED-MUTATION-MANIFEST-001",
       "control_id": "CTRL-SCHEMA-003"
-    }
+    },
+    {"obligation_id":"OBL-SCHEMA-QUEUED-MUTATION-MUTATION-004-FAULT-001","requirement_ids":["SYNC-MUTATION-004"],"assertion_ids":["ASSERT-SCHEMA-QUEUED-MUTATION-MUTATION-004"],"proof_type":"fault-injection","support_cell_id":"SUP-MACOS-CURRENT-001","artifact_inventory_ids":["ARTDEF-PG-EXTENSION-001","ARTDEF-ADAPTER-001","ARTDEF-SWIFT-SPM-001"],"performance_budget_ids":[],"required_measurement_ids":[],"required_vector_set_ids":[],"make_target":"test-swift","argv":["make","test-swift"],"fault_plan_id":"FPL-SCHEMA-QUEUED-MUTATION-MUTATION-004","control_id":"CTRL-MUTATION-004"},
+    {"obligation_id":"OBL-SCHEMA-QUEUED-MUTATION-MUTATION-004-CONTROL-001","requirement_ids":["SYNC-MUTATION-004"],"assertion_ids":["ASSERT-SCHEMA-QUEUED-MUTATION-MUTATION-004"],"proof_type":"negative-control","support_cell_id":null,"artifact_inventory_ids":["ARTDEF-CONFORMANCE-RUNNER-001","ARTDEF-SWIFT-SPM-001","ARTDEF-COCOAPODS-001","ARTDEF-KOTLIN-MAVEN-001","ARTDEF-RN-NPM-001"],"performance_budget_ids":[],"required_measurement_ids":[],"required_vector_set_ids":[],"make_target":"test-conformance","argv":["make","test-conformance"],"fault_plan_id":"FPL-SCHEMA-QUEUED-MUTATION-MUTATION-004","control_id":"CTRL-MUTATION-004"},
+    {"obligation_id":"OBL-SCHEMA-QUEUED-MUTATION-BOUNDARY-002-CONTROL-001","requirement_ids":["SYNC-BOUNDARY-002"],"assertion_ids":["ASSERT-SCHEMA-QUEUED-MUTATION-BOUNDARY-002"],"proof_type":"negative-control","support_cell_id":null,"artifact_inventory_ids":["ARTDEF-CONFORMANCE-RUNNER-001","ARTDEF-SWIFT-SPM-001","ARTDEF-COCOAPODS-001","ARTDEF-KOTLIN-MAVEN-001","ARTDEF-RN-NPM-001"],"performance_budget_ids":[],"required_measurement_ids":[],"required_vector_set_ids":[],"make_target":"test-conformance","argv":["make","test-conformance"],"fault_plan_id":"FPL-SCHEMA-QUEUED-MUTATION-BOUNDARY-002","control_id":"CTRL-BOUNDARY-002"}
   ],
   "ownership": [
     {
@@ -417,7 +442,16 @@
       "assertion_id": "ASSERT-SCHEMA-QUEUED-MUTATION-MANIFEST-001",
       "proof_type": "fault-injection",
       "support_cell_id": "SUP-PG-LINUX-X64-001"
-    }
+    },
+    {"scenario_id":"SCN-SCHEMA-QUEUED-MUTATION-001","requirement_id":"SYNC-MUTATION-004","proof_obligation_id":"OBL-SCHEMA-QUEUED-MUTATION-MACOS-CURRENT-001","assertion_id":"ASSERT-SCHEMA-QUEUED-MUTATION-MUTATION-004","proof_type":"native-e2e","support_cell_id":"SUP-MACOS-CURRENT-001"},
+    {"scenario_id":"SCN-SCHEMA-QUEUED-MUTATION-001","requirement_id":"SYNC-MUTATION-004","proof_obligation_id":"OBL-SCHEMA-QUEUED-MUTATION-ANDROID-CURRENT-001","assertion_id":"ASSERT-SCHEMA-QUEUED-MUTATION-MUTATION-004","proof_type":"native-e2e","support_cell_id":"SUP-ANDROID-CURRENT-001"},
+    {"scenario_id":"SCN-SCHEMA-QUEUED-MUTATION-001","requirement_id":"SYNC-MUTATION-004","proof_obligation_id":"OBL-SCHEMA-QUEUED-MUTATION-RN-IOS-CURRENT-001","assertion_id":"ASSERT-SCHEMA-QUEUED-MUTATION-MUTATION-004","proof_type":"native-e2e","support_cell_id":"SUP-RN-IOS-CURRENT-001"},
+    {"scenario_id":"SCN-SCHEMA-QUEUED-MUTATION-001","requirement_id":"SYNC-MUTATION-004","proof_obligation_id":"OBL-SCHEMA-QUEUED-MUTATION-RN-ANDROID-CURRENT-001","assertion_id":"ASSERT-SCHEMA-QUEUED-MUTATION-MUTATION-004","proof_type":"native-e2e","support_cell_id":"SUP-RN-ANDROID-CURRENT-001"},
+    {"scenario_id":"SCN-SCHEMA-QUEUED-MUTATION-001","requirement_id":"SYNC-MUTATION-004","proof_obligation_id":"OBL-SCHEMA-QUEUED-MUTATION-MUTATION-004-FAULT-001","assertion_id":"ASSERT-SCHEMA-QUEUED-MUTATION-MUTATION-004","proof_type":"fault-injection","support_cell_id":"SUP-MACOS-CURRENT-001"},
+    {"scenario_id":"SCN-SCHEMA-QUEUED-MUTATION-001","requirement_id":"SYNC-MUTATION-004","proof_obligation_id":"OBL-SCHEMA-QUEUED-MUTATION-MUTATION-004-CONTROL-001","assertion_id":"ASSERT-SCHEMA-QUEUED-MUTATION-MUTATION-004","proof_type":"negative-control","support_cell_id":null},
+    {"scenario_id":"SCN-SCHEMA-QUEUED-MUTATION-001","requirement_id":"SYNC-BOUNDARY-002","proof_obligation_id":"OBL-SCHEMA-QUEUED-MUTATION-RN-IOS-CURRENT-001","assertion_id":"ASSERT-SCHEMA-QUEUED-MUTATION-BOUNDARY-002","proof_type":"native-e2e","support_cell_id":"SUP-RN-IOS-CURRENT-001"},
+    {"scenario_id":"SCN-SCHEMA-QUEUED-MUTATION-001","requirement_id":"SYNC-BOUNDARY-002","proof_obligation_id":"OBL-SCHEMA-QUEUED-MUTATION-RN-ANDROID-CURRENT-001","assertion_id":"ASSERT-SCHEMA-QUEUED-MUTATION-BOUNDARY-002","proof_type":"native-e2e","support_cell_id":"SUP-RN-ANDROID-CURRENT-001"},
+    {"scenario_id":"SCN-SCHEMA-QUEUED-MUTATION-001","requirement_id":"SYNC-BOUNDARY-002","proof_obligation_id":"OBL-SCHEMA-QUEUED-MUTATION-BOUNDARY-002-CONTROL-001","assertion_id":"ASSERT-SCHEMA-QUEUED-MUTATION-BOUNDARY-002","proof_type":"negative-control","support_cell_id":null}
   ],
   "model": {
     "setup": [
@@ -722,7 +756,9 @@
           "defect": "mutate body, hash, version, class, composition, table ID, or field ID in place or serve live content under old identity"
         }
       }
-    }
+    },
+    {"id":"FPL-SCHEMA-QUEUED-MUTATION-MUTATION-004","requirement_id":"SYNC-MUTATION-004","fault_id":"FAULT-MUTATION-004","control_id":"CTRL-MUTATION-004","barrier_id":"BAR-SCHEMA-QUEUED-MUTATION-CONTROL-001","expected_assertion_ids":["ASSERT-SCHEMA-QUEUED-MUTATION-MUTATION-004"],"injection":{"mechanism":"state-fault","target":"rejected mutation retention","operator":"omit","parameters":{"scenario":"restart after a canonical server rejection and before policy cleanup","defect":"delete the rejected mutation or reason during restart or schema reconciliation"}}},
+    {"id":"FPL-SCHEMA-QUEUED-MUTATION-BOUNDARY-002","requirement_id":"SYNC-BOUNDARY-002","fault_id":"FAULT-BOUNDARY-002","control_id":"CTRL-BOUNDARY-002","barrier_id":"BAR-SCHEMA-QUEUED-MUTATION-CONTROL-001","expected_assertion_ids":["ASSERT-SCHEMA-QUEUED-MUTATION-BOUNDARY-002"],"injection":{"mechanism":"source-mutant","target":"React Native TurboModule sync method","operator":"inject","parameters":{"scenario":"exercise queue, cursor, conflict, apply, and rebuild calls on iOS and Android","defect":"implement a JavaScript-owned transition rather than delegating to the native client"}}}
   ],
   "replay": {
     "mode": "deterministic",
@@ -754,7 +790,9 @@
       "detected_by": [
         "ASSERT-SCHEMA-QUEUED-MUTATION-MANIFEST-001"
       ]
-    }
+    },
+    {"control_id":"CTRL-MUTATION-004","requirement_id":"SYNC-MUTATION-004","fault_id":"FAULT-MUTATION-004","subject_artifact_inventory_ids":["ARTDEF-SWIFT-SPM-001","ARTDEF-COCOAPODS-001","ARTDEF-KOTLIN-MAVEN-001","ARTDEF-RN-NPM-001"],"detected_by":["ASSERT-SCHEMA-QUEUED-MUTATION-MUTATION-004"]},
+    {"control_id":"CTRL-BOUNDARY-002","requirement_id":"SYNC-BOUNDARY-002","fault_id":"FAULT-BOUNDARY-002","subject_artifact_inventory_ids":["ARTDEF-SWIFT-SPM-001","ARTDEF-COCOAPODS-001","ARTDEF-KOTLIN-MAVEN-001","ARTDEF-RN-NPM-001"],"detected_by":["ASSERT-SCHEMA-QUEUED-MUTATION-BOUNDARY-002"]}
   ],
   "steps": [
     {
@@ -1306,7 +1344,9 @@
       "detects_control_ids": [
         "CTRL-SCHEMA-003"
       ]
-    }
+    },
+    {"id":"ASSERT-SCHEMA-QUEUED-MUTATION-MUTATION-004","requirement_ids":["SYNC-MUTATION-004"],"description":"Native durable queue inspection preserves the rejected mutation and canonical reason across process restart.","expectation_ids":["EXPECT-SCHEMA-QUEUED-MUTATION-WIRE-001","EXPECT-SCHEMA-QUEUED-MUTATION-STATE-001"],"predicate":{"contract_predicate":"state-equality","name":"state-equals-authored-model","payload":{}},"oracle":{"kind":"model-state-equality","expected_source":"authored-model","observed_source":"system-under-test"},"detects_control_ids":["CTRL-MUTATION-004"]},
+    {"id":"ASSERT-SCHEMA-QUEUED-MUTATION-BOUNDARY-002","requirement_ids":["SYNC-BOUNDARY-002"],"description":"React Native exposes the native queue result without implementing independent JavaScript mutation or schema transitions.","expectation_ids":["EXPECT-SCHEMA-QUEUED-MUTATION-WIRE-001","EXPECT-SCHEMA-QUEUED-MUTATION-STATE-001"],"predicate":{"contract_predicate":"state-equality","name":"state-equals-authored-model","payload":{}},"oracle":{"kind":"model-state-equality","expected_source":"authored-model","observed_source":"system-under-test"},"detects_control_ids":["CTRL-BOUNDARY-002"]}
   ],
   "native_identity_aliases": [
     {
