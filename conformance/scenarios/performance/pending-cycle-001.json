@@ -8,7 +8,15 @@
     "SYNC-MUTATION-002",
     "SYNC-CONFLICT-002",
     "SYNC-TIME-002",
-    "SYNC-VOCAB-001"
+    "SYNC-VOCAB-001",
+    "SYNC-LOCALSQL-001",
+    "SYNC-CRUD-001",
+    "SYNC-APPLY-001",
+    "SYNC-VERSION-002",
+    "SYNC-CLEANUP-001",
+    "SYNC-CURSOR-003",
+    "SYNC-BOUNDARY-003",
+    "SYNC-CRUD-002"
   ],
   "normative_references": [
     {
@@ -26,6 +34,38 @@
     {
       "path": "docs/src/content/docs/spec/04-invariants.mdx",
       "anchor": "#canonical-operation-vocabulary"
+    },
+    {
+      "path": "docs/src/content/docs/spec/04-invariants.mdx",
+      "anchor": "#local-sql-is-the-app-surface"
+    },
+    {
+      "path": "docs/src/content/docs/spec/04-invariants.mdx",
+      "anchor": "#synced-crud-authority"
+    },
+    {
+      "path": "docs/src/content/docs/spec/04-invariants.mdx",
+      "anchor": "#no-silent-server-apply-echo-loop"
+    },
+    {
+      "path": "docs/src/content/docs/spec/04-invariants.mdx",
+      "anchor": "#accepted-writes-advance-canonical-row-version"
+    },
+    {
+      "path": "docs/src/content/docs/spec/04-invariants.mdx",
+      "anchor": "#no-synthetic-cleanup-tombstones"
+    },
+    {
+      "path": "docs/src/content/docs/spec/04-invariants.mdx",
+      "anchor": "#durable-cursor-invariant"
+    },
+    {
+      "path": "docs/src/content/docs/spec/04-invariants.mdx",
+      "anchor": "#native-client-responsibility-boundary"
+    },
+    {
+      "path": "docs/src/content/docs/spec/04-invariants.mdx",
+      "anchor": "#no-mandatory-custom-backend-write-contract"
     }
   ],
   "proof_types": [
@@ -42,13 +82,15 @@
         "SYNC-MUTATION-002",
         "SYNC-CONFLICT-002",
         "SYNC-TIME-002",
-        "SYNC-VOCAB-001"
+        "SYNC-VOCAB-001",
+        "SYNC-CRUD-001"
       ],
       "assertion_ids": [
         "ASSERT-PERF-PENDING-CYCLE-SEMANTIC-001",
         "ASSERT-PERF-PENDING-CYCLE-CONFLICT-001",
         "ASSERT-PERF-PENDING-CYCLE-TIME-001",
-        "ASSERT-PERF-PENDING-CYCLE-VOCAB-001"
+        "ASSERT-PERF-PENDING-CYCLE-VOCAB-001",
+        "ASSERT-PERF-PENDING-CYCLE-CRUD-001"
       ],
       "proof_type": "reference-model",
       "support_cell_id": null,
@@ -72,14 +114,20 @@
         "SYNC-MUTATION-002",
         "SYNC-CONFLICT-002",
         "SYNC-TIME-002",
-        "SYNC-VOCAB-001"
+        "SYNC-VOCAB-001",
+        "SYNC-CRUD-001",
+        "SYNC-VERSION-002",
+        "SYNC-CRUD-002"
       ],
       "assertion_ids": [
         "ASSERT-PERF-PENDING-CYCLE-SEMANTIC-001",
         "ASSERT-PERF-PENDING-CYCLE-PERFORMANCE-001",
         "ASSERT-PERF-PENDING-CYCLE-CONFLICT-001",
         "ASSERT-PERF-PENDING-CYCLE-TIME-001",
-        "ASSERT-PERF-PENDING-CYCLE-VOCAB-001"
+        "ASSERT-PERF-PENDING-CYCLE-VOCAB-001",
+        "ASSERT-PERF-PENDING-CYCLE-CRUD-001",
+        "ASSERT-PERF-PENDING-CYCLE-VERSION-002",
+        "ASSERT-PERF-PENDING-CYCLE-CRUD-002"
       ],
       "proof_type": "server-black-box",
       "support_cell_id": "SUP-PG-LINUX-X64-001",
@@ -105,10 +153,26 @@
     {
       "obligation_id": "OBL-PERF-PENDING-CYCLE-MACOS-CURRENT-001",
       "requirement_ids": [
-        "SYNC-MUTATION-002"
+        "SYNC-MUTATION-002",
+        "SYNC-LOCALSQL-001",
+        "SYNC-CRUD-001",
+        "SYNC-APPLY-001",
+        "SYNC-VERSION-002",
+        "SYNC-CLEANUP-001",
+        "SYNC-CURSOR-003",
+        "SYNC-BOUNDARY-003",
+        "SYNC-CRUD-002"
       ],
       "assertion_ids": [
-        "ASSERT-PERF-PENDING-CYCLE-SEMANTIC-001"
+        "ASSERT-PERF-PENDING-CYCLE-SEMANTIC-001",
+        "ASSERT-PERF-PENDING-CYCLE-LOCALSQL-001",
+        "ASSERT-PERF-PENDING-CYCLE-CRUD-001",
+        "ASSERT-PERF-PENDING-CYCLE-APPLY-001",
+        "ASSERT-PERF-PENDING-CYCLE-VERSION-002",
+        "ASSERT-PERF-PENDING-CYCLE-CLEANUP-001",
+        "ASSERT-PERF-PENDING-CYCLE-CURSOR-003",
+        "ASSERT-PERF-PENDING-CYCLE-BOUNDARY-003",
+        "ASSERT-PERF-PENDING-CYCLE-CRUD-002"
       ],
       "proof_type": "native-e2e",
       "support_cell_id": "SUP-MACOS-CURRENT-001",
@@ -224,11 +288,27 @@
     {
       "obligation_id": "OBL-PERF-PENDING-CYCLE-ANDROID-CURRENT-001",
       "requirement_ids": [
-        "SYNC-MUTATION-002"
+        "SYNC-MUTATION-002",
+        "SYNC-LOCALSQL-001",
+        "SYNC-CRUD-001",
+        "SYNC-APPLY-001",
+        "SYNC-VERSION-002",
+        "SYNC-CLEANUP-001",
+        "SYNC-CURSOR-003",
+        "SYNC-BOUNDARY-003",
+        "SYNC-CRUD-002"
       ],
       "assertion_ids": [
         "ASSERT-PERF-PENDING-CYCLE-SEMANTIC-001",
-        "ASSERT-PERF-PENDING-CYCLE-PERFORMANCE-001"
+        "ASSERT-PERF-PENDING-CYCLE-PERFORMANCE-001",
+        "ASSERT-PERF-PENDING-CYCLE-LOCALSQL-001",
+        "ASSERT-PERF-PENDING-CYCLE-CRUD-001",
+        "ASSERT-PERF-PENDING-CYCLE-APPLY-001",
+        "ASSERT-PERF-PENDING-CYCLE-VERSION-002",
+        "ASSERT-PERF-PENDING-CYCLE-CLEANUP-001",
+        "ASSERT-PERF-PENDING-CYCLE-CURSOR-003",
+        "ASSERT-PERF-PENDING-CYCLE-BOUNDARY-003",
+        "ASSERT-PERF-PENDING-CYCLE-CRUD-002"
       ],
       "proof_type": "native-e2e",
       "support_cell_id": "SUP-ANDROID-CURRENT-001",
@@ -255,11 +335,27 @@
     {
       "obligation_id": "OBL-PERF-PENDING-CYCLE-RN-IOS-CURRENT-001",
       "requirement_ids": [
-        "SYNC-MUTATION-002"
+        "SYNC-MUTATION-002",
+        "SYNC-LOCALSQL-001",
+        "SYNC-CRUD-001",
+        "SYNC-APPLY-001",
+        "SYNC-VERSION-002",
+        "SYNC-CLEANUP-001",
+        "SYNC-CURSOR-003",
+        "SYNC-BOUNDARY-003",
+        "SYNC-CRUD-002"
       ],
       "assertion_ids": [
         "ASSERT-PERF-PENDING-CYCLE-SEMANTIC-001",
-        "ASSERT-PERF-PENDING-CYCLE-PERFORMANCE-001"
+        "ASSERT-PERF-PENDING-CYCLE-PERFORMANCE-001",
+        "ASSERT-PERF-PENDING-CYCLE-LOCALSQL-001",
+        "ASSERT-PERF-PENDING-CYCLE-CRUD-001",
+        "ASSERT-PERF-PENDING-CYCLE-APPLY-001",
+        "ASSERT-PERF-PENDING-CYCLE-VERSION-002",
+        "ASSERT-PERF-PENDING-CYCLE-CLEANUP-001",
+        "ASSERT-PERF-PENDING-CYCLE-CURSOR-003",
+        "ASSERT-PERF-PENDING-CYCLE-BOUNDARY-003",
+        "ASSERT-PERF-PENDING-CYCLE-CRUD-002"
       ],
       "proof_type": "native-e2e",
       "support_cell_id": "SUP-RN-IOS-CURRENT-001",
@@ -288,11 +384,27 @@
     {
       "obligation_id": "OBL-PERF-PENDING-CYCLE-RN-ANDROID-CURRENT-001",
       "requirement_ids": [
-        "SYNC-MUTATION-002"
+        "SYNC-MUTATION-002",
+        "SYNC-LOCALSQL-001",
+        "SYNC-CRUD-001",
+        "SYNC-APPLY-001",
+        "SYNC-VERSION-002",
+        "SYNC-CLEANUP-001",
+        "SYNC-CURSOR-003",
+        "SYNC-BOUNDARY-003",
+        "SYNC-CRUD-002"
       ],
       "assertion_ids": [
         "ASSERT-PERF-PENDING-CYCLE-SEMANTIC-001",
-        "ASSERT-PERF-PENDING-CYCLE-PERFORMANCE-001"
+        "ASSERT-PERF-PENDING-CYCLE-PERFORMANCE-001",
+        "ASSERT-PERF-PENDING-CYCLE-LOCALSQL-001",
+        "ASSERT-PERF-PENDING-CYCLE-CRUD-001",
+        "ASSERT-PERF-PENDING-CYCLE-APPLY-001",
+        "ASSERT-PERF-PENDING-CYCLE-VERSION-002",
+        "ASSERT-PERF-PENDING-CYCLE-CLEANUP-001",
+        "ASSERT-PERF-PENDING-CYCLE-CURSOR-003",
+        "ASSERT-PERF-PENDING-CYCLE-BOUNDARY-003",
+        "ASSERT-PERF-PENDING-CYCLE-CRUD-002"
       ],
       "proof_type": "native-e2e",
       "support_cell_id": "SUP-RN-ANDROID-CURRENT-001",
@@ -444,7 +556,16 @@
       ],
       "fault_plan_id": "FPL-PERF-PENDING-CYCLE-VOCAB-001",
       "control_id": "CTRL-VOCAB-001"
-    }
+    },
+    {"obligation_id":"OBL-PERF-PENDING-CYCLE-CURSOR-003-FAULT-001","requirement_ids":["SYNC-CURSOR-003"],"assertion_ids":["ASSERT-PERF-PENDING-CYCLE-CURSOR-003"],"proof_type":"fault-injection","support_cell_id":"SUP-MACOS-CURRENT-001","artifact_inventory_ids":["ARTDEF-PG-EXTENSION-001","ARTDEF-ADAPTER-001","ARTDEF-SWIFT-SPM-001"],"performance_budget_ids":[],"required_measurement_ids":[],"required_vector_set_ids":[],"make_target":"test-swift","argv":["make","test-swift"],"fault_plan_id":"FPL-PERF-PENDING-CYCLE-CURSOR-003","control_id":"CTRL-CURSOR-003"},
+    {"obligation_id":"OBL-PERF-PENDING-CYCLE-LOCALSQL-CONTROL-001","requirement_ids":["SYNC-LOCALSQL-001"],"assertion_ids":["ASSERT-PERF-PENDING-CYCLE-LOCALSQL-001"],"proof_type":"negative-control","support_cell_id":null,"artifact_inventory_ids":["ARTDEF-CONFORMANCE-RUNNER-001","ARTDEF-SWIFT-SPM-001","ARTDEF-COCOAPODS-001","ARTDEF-KOTLIN-MAVEN-001","ARTDEF-RN-NPM-001"],"performance_budget_ids":[],"required_measurement_ids":[],"required_vector_set_ids":[],"make_target":"test-conformance","argv":["make","test-conformance"],"fault_plan_id":"FPL-PERF-PENDING-CYCLE-LOCALSQL-001","control_id":"CTRL-LOCALSQL-001"},
+    {"obligation_id":"OBL-PERF-PENDING-CYCLE-CRUD-001-CONTROL-001","requirement_ids":["SYNC-CRUD-001"],"assertion_ids":["ASSERT-PERF-PENDING-CYCLE-CRUD-001"],"proof_type":"negative-control","support_cell_id":null,"artifact_inventory_ids":["ARTDEF-CONFORMANCE-RUNNER-001","ARTDEF-PG-EXTENSION-001","ARTDEF-ADAPTER-001","ARTDEF-SWIFT-SPM-001","ARTDEF-COCOAPODS-001","ARTDEF-KOTLIN-MAVEN-001","ARTDEF-RN-NPM-001"],"performance_budget_ids":[],"required_measurement_ids":[],"required_vector_set_ids":[],"make_target":"test-conformance","argv":["make","test-conformance"],"fault_plan_id":"FPL-PERF-PENDING-CYCLE-CRUD-001","control_id":"CTRL-CRUD-001"},
+    {"obligation_id":"OBL-PERF-PENDING-CYCLE-APPLY-CONTROL-001","requirement_ids":["SYNC-APPLY-001"],"assertion_ids":["ASSERT-PERF-PENDING-CYCLE-APPLY-001"],"proof_type":"negative-control","support_cell_id":null,"artifact_inventory_ids":["ARTDEF-CONFORMANCE-RUNNER-001","ARTDEF-SWIFT-SPM-001","ARTDEF-COCOAPODS-001","ARTDEF-KOTLIN-MAVEN-001","ARTDEF-RN-NPM-001"],"performance_budget_ids":[],"required_measurement_ids":[],"required_vector_set_ids":[],"make_target":"test-conformance","argv":["make","test-conformance"],"fault_plan_id":"FPL-PERF-PENDING-CYCLE-APPLY-001","control_id":"CTRL-APPLY-001"},
+    {"obligation_id":"OBL-PERF-PENDING-CYCLE-VERSION-002-CONTROL-001","requirement_ids":["SYNC-VERSION-002"],"assertion_ids":["ASSERT-PERF-PENDING-CYCLE-VERSION-002"],"proof_type":"negative-control","support_cell_id":null,"artifact_inventory_ids":["ARTDEF-CONFORMANCE-RUNNER-001","ARTDEF-PG-EXTENSION-001","ARTDEF-ADAPTER-001","ARTDEF-SWIFT-SPM-001","ARTDEF-COCOAPODS-001","ARTDEF-KOTLIN-MAVEN-001","ARTDEF-RN-NPM-001"],"performance_budget_ids":[],"required_measurement_ids":[],"required_vector_set_ids":[],"make_target":"test-conformance","argv":["make","test-conformance"],"fault_plan_id":"FPL-PERF-PENDING-CYCLE-VERSION-002","control_id":"CTRL-VERSION-002"},
+    {"obligation_id":"OBL-PERF-PENDING-CYCLE-CLEANUP-CONTROL-001","requirement_ids":["SYNC-CLEANUP-001"],"assertion_ids":["ASSERT-PERF-PENDING-CYCLE-CLEANUP-001"],"proof_type":"negative-control","support_cell_id":null,"artifact_inventory_ids":["ARTDEF-CONFORMANCE-RUNNER-001","ARTDEF-SWIFT-SPM-001","ARTDEF-COCOAPODS-001","ARTDEF-KOTLIN-MAVEN-001","ARTDEF-RN-NPM-001"],"performance_budget_ids":[],"required_measurement_ids":[],"required_vector_set_ids":[],"make_target":"test-conformance","argv":["make","test-conformance"],"fault_plan_id":"FPL-PERF-PENDING-CYCLE-CLEANUP-001","control_id":"CTRL-CLEANUP-001"},
+    {"obligation_id":"OBL-PERF-PENDING-CYCLE-CURSOR-003-CONTROL-001","requirement_ids":["SYNC-CURSOR-003"],"assertion_ids":["ASSERT-PERF-PENDING-CYCLE-CURSOR-003"],"proof_type":"negative-control","support_cell_id":null,"artifact_inventory_ids":["ARTDEF-CONFORMANCE-RUNNER-001","ARTDEF-SWIFT-SPM-001","ARTDEF-COCOAPODS-001","ARTDEF-KOTLIN-MAVEN-001","ARTDEF-RN-NPM-001"],"performance_budget_ids":[],"required_measurement_ids":[],"required_vector_set_ids":[],"make_target":"test-conformance","argv":["make","test-conformance"],"fault_plan_id":"FPL-PERF-PENDING-CYCLE-CURSOR-003","control_id":"CTRL-CURSOR-003"},
+    {"obligation_id":"OBL-PERF-PENDING-CYCLE-BOUNDARY-003-CONTROL-001","requirement_ids":["SYNC-BOUNDARY-003"],"assertion_ids":["ASSERT-PERF-PENDING-CYCLE-BOUNDARY-003"],"proof_type":"negative-control","support_cell_id":null,"artifact_inventory_ids":["ARTDEF-CONFORMANCE-RUNNER-001","ARTDEF-SWIFT-SPM-001","ARTDEF-COCOAPODS-001","ARTDEF-KOTLIN-MAVEN-001","ARTDEF-RN-NPM-001"],"performance_budget_ids":[],"required_measurement_ids":[],"required_vector_set_ids":[],"make_target":"test-conformance","argv":["make","test-conformance"],"fault_plan_id":"FPL-PERF-PENDING-CYCLE-BOUNDARY-003","control_id":"CTRL-BOUNDARY-003"},
+    {"obligation_id":"OBL-PERF-PENDING-CYCLE-CRUD-002-CONTROL-001","requirement_ids":["SYNC-CRUD-002"],"assertion_ids":["ASSERT-PERF-PENDING-CYCLE-CRUD-002"],"proof_type":"negative-control","support_cell_id":null,"artifact_inventory_ids":["ARTDEF-CONFORMANCE-RUNNER-001","ARTDEF-PG-EXTENSION-001","ARTDEF-ADAPTER-001","ARTDEF-SWIFT-SPM-001","ARTDEF-COCOAPODS-001","ARTDEF-KOTLIN-MAVEN-001","ARTDEF-RN-NPM-001"],"performance_budget_ids":[],"required_measurement_ids":[],"required_vector_set_ids":[],"make_target":"test-conformance","argv":["make","test-conformance"],"fault_plan_id":"FPL-PERF-PENDING-CYCLE-CRUD-002","control_id":"CTRL-CRUD-002"}
   ],
   "ownership": [
     {
@@ -638,7 +759,52 @@
       "assertion_id": "ASSERT-PERF-PENDING-CYCLE-VOCAB-001",
       "proof_type": "server-black-box",
       "support_cell_id": "SUP-PG-LINUX-X64-001"
-    }
+    },
+    {"scenario_id":"SCN-PERF-PENDING-CYCLE-001","requirement_id":"SYNC-LOCALSQL-001","proof_obligation_id":"OBL-PERF-PENDING-CYCLE-MACOS-CURRENT-001","assertion_id":"ASSERT-PERF-PENDING-CYCLE-LOCALSQL-001","proof_type":"native-e2e","support_cell_id":"SUP-MACOS-CURRENT-001"},
+    {"scenario_id":"SCN-PERF-PENDING-CYCLE-001","requirement_id":"SYNC-LOCALSQL-001","proof_obligation_id":"OBL-PERF-PENDING-CYCLE-ANDROID-CURRENT-001","assertion_id":"ASSERT-PERF-PENDING-CYCLE-LOCALSQL-001","proof_type":"native-e2e","support_cell_id":"SUP-ANDROID-CURRENT-001"},
+    {"scenario_id":"SCN-PERF-PENDING-CYCLE-001","requirement_id":"SYNC-LOCALSQL-001","proof_obligation_id":"OBL-PERF-PENDING-CYCLE-RN-IOS-CURRENT-001","assertion_id":"ASSERT-PERF-PENDING-CYCLE-LOCALSQL-001","proof_type":"native-e2e","support_cell_id":"SUP-RN-IOS-CURRENT-001"},
+    {"scenario_id":"SCN-PERF-PENDING-CYCLE-001","requirement_id":"SYNC-LOCALSQL-001","proof_obligation_id":"OBL-PERF-PENDING-CYCLE-RN-ANDROID-CURRENT-001","assertion_id":"ASSERT-PERF-PENDING-CYCLE-LOCALSQL-001","proof_type":"native-e2e","support_cell_id":"SUP-RN-ANDROID-CURRENT-001"},
+    {"scenario_id":"SCN-PERF-PENDING-CYCLE-001","requirement_id":"SYNC-LOCALSQL-001","proof_obligation_id":"OBL-PERF-PENDING-CYCLE-LOCALSQL-CONTROL-001","assertion_id":"ASSERT-PERF-PENDING-CYCLE-LOCALSQL-001","proof_type":"negative-control","support_cell_id":null},
+    {"scenario_id":"SCN-PERF-PENDING-CYCLE-001","requirement_id":"SYNC-CRUD-001","proof_obligation_id":"OBL-PERF-PENDING-CYCLE-RM-001","assertion_id":"ASSERT-PERF-PENDING-CYCLE-CRUD-001","proof_type":"reference-model","support_cell_id":null},
+    {"scenario_id":"SCN-PERF-PENDING-CYCLE-001","requirement_id":"SYNC-CRUD-001","proof_obligation_id":"OBL-PERF-PENDING-CYCLE-PG-LINUX-X64-001","assertion_id":"ASSERT-PERF-PENDING-CYCLE-CRUD-001","proof_type":"server-black-box","support_cell_id":"SUP-PG-LINUX-X64-001"},
+    {"scenario_id":"SCN-PERF-PENDING-CYCLE-001","requirement_id":"SYNC-CRUD-001","proof_obligation_id":"OBL-PERF-PENDING-CYCLE-MACOS-CURRENT-001","assertion_id":"ASSERT-PERF-PENDING-CYCLE-CRUD-001","proof_type":"native-e2e","support_cell_id":"SUP-MACOS-CURRENT-001"},
+    {"scenario_id":"SCN-PERF-PENDING-CYCLE-001","requirement_id":"SYNC-CRUD-001","proof_obligation_id":"OBL-PERF-PENDING-CYCLE-ANDROID-CURRENT-001","assertion_id":"ASSERT-PERF-PENDING-CYCLE-CRUD-001","proof_type":"native-e2e","support_cell_id":"SUP-ANDROID-CURRENT-001"},
+    {"scenario_id":"SCN-PERF-PENDING-CYCLE-001","requirement_id":"SYNC-CRUD-001","proof_obligation_id":"OBL-PERF-PENDING-CYCLE-RN-IOS-CURRENT-001","assertion_id":"ASSERT-PERF-PENDING-CYCLE-CRUD-001","proof_type":"native-e2e","support_cell_id":"SUP-RN-IOS-CURRENT-001"},
+    {"scenario_id":"SCN-PERF-PENDING-CYCLE-001","requirement_id":"SYNC-CRUD-001","proof_obligation_id":"OBL-PERF-PENDING-CYCLE-RN-ANDROID-CURRENT-001","assertion_id":"ASSERT-PERF-PENDING-CYCLE-CRUD-001","proof_type":"native-e2e","support_cell_id":"SUP-RN-ANDROID-CURRENT-001"},
+    {"scenario_id":"SCN-PERF-PENDING-CYCLE-001","requirement_id":"SYNC-CRUD-001","proof_obligation_id":"OBL-PERF-PENDING-CYCLE-CRUD-001-CONTROL-001","assertion_id":"ASSERT-PERF-PENDING-CYCLE-CRUD-001","proof_type":"negative-control","support_cell_id":null},
+    {"scenario_id":"SCN-PERF-PENDING-CYCLE-001","requirement_id":"SYNC-APPLY-001","proof_obligation_id":"OBL-PERF-PENDING-CYCLE-MACOS-CURRENT-001","assertion_id":"ASSERT-PERF-PENDING-CYCLE-APPLY-001","proof_type":"native-e2e","support_cell_id":"SUP-MACOS-CURRENT-001"},
+    {"scenario_id":"SCN-PERF-PENDING-CYCLE-001","requirement_id":"SYNC-APPLY-001","proof_obligation_id":"OBL-PERF-PENDING-CYCLE-ANDROID-CURRENT-001","assertion_id":"ASSERT-PERF-PENDING-CYCLE-APPLY-001","proof_type":"native-e2e","support_cell_id":"SUP-ANDROID-CURRENT-001"},
+    {"scenario_id":"SCN-PERF-PENDING-CYCLE-001","requirement_id":"SYNC-APPLY-001","proof_obligation_id":"OBL-PERF-PENDING-CYCLE-RN-IOS-CURRENT-001","assertion_id":"ASSERT-PERF-PENDING-CYCLE-APPLY-001","proof_type":"native-e2e","support_cell_id":"SUP-RN-IOS-CURRENT-001"},
+    {"scenario_id":"SCN-PERF-PENDING-CYCLE-001","requirement_id":"SYNC-APPLY-001","proof_obligation_id":"OBL-PERF-PENDING-CYCLE-RN-ANDROID-CURRENT-001","assertion_id":"ASSERT-PERF-PENDING-CYCLE-APPLY-001","proof_type":"native-e2e","support_cell_id":"SUP-RN-ANDROID-CURRENT-001"},
+    {"scenario_id":"SCN-PERF-PENDING-CYCLE-001","requirement_id":"SYNC-APPLY-001","proof_obligation_id":"OBL-PERF-PENDING-CYCLE-APPLY-CONTROL-001","assertion_id":"ASSERT-PERF-PENDING-CYCLE-APPLY-001","proof_type":"negative-control","support_cell_id":null},
+    {"scenario_id":"SCN-PERF-PENDING-CYCLE-001","requirement_id":"SYNC-VERSION-002","proof_obligation_id":"OBL-PERF-PENDING-CYCLE-PG-LINUX-X64-001","assertion_id":"ASSERT-PERF-PENDING-CYCLE-VERSION-002","proof_type":"server-black-box","support_cell_id":"SUP-PG-LINUX-X64-001"},
+    {"scenario_id":"SCN-PERF-PENDING-CYCLE-001","requirement_id":"SYNC-VERSION-002","proof_obligation_id":"OBL-PERF-PENDING-CYCLE-MACOS-CURRENT-001","assertion_id":"ASSERT-PERF-PENDING-CYCLE-VERSION-002","proof_type":"native-e2e","support_cell_id":"SUP-MACOS-CURRENT-001"},
+    {"scenario_id":"SCN-PERF-PENDING-CYCLE-001","requirement_id":"SYNC-VERSION-002","proof_obligation_id":"OBL-PERF-PENDING-CYCLE-ANDROID-CURRENT-001","assertion_id":"ASSERT-PERF-PENDING-CYCLE-VERSION-002","proof_type":"native-e2e","support_cell_id":"SUP-ANDROID-CURRENT-001"},
+    {"scenario_id":"SCN-PERF-PENDING-CYCLE-001","requirement_id":"SYNC-VERSION-002","proof_obligation_id":"OBL-PERF-PENDING-CYCLE-RN-IOS-CURRENT-001","assertion_id":"ASSERT-PERF-PENDING-CYCLE-VERSION-002","proof_type":"native-e2e","support_cell_id":"SUP-RN-IOS-CURRENT-001"},
+    {"scenario_id":"SCN-PERF-PENDING-CYCLE-001","requirement_id":"SYNC-VERSION-002","proof_obligation_id":"OBL-PERF-PENDING-CYCLE-RN-ANDROID-CURRENT-001","assertion_id":"ASSERT-PERF-PENDING-CYCLE-VERSION-002","proof_type":"native-e2e","support_cell_id":"SUP-RN-ANDROID-CURRENT-001"},
+    {"scenario_id":"SCN-PERF-PENDING-CYCLE-001","requirement_id":"SYNC-VERSION-002","proof_obligation_id":"OBL-PERF-PENDING-CYCLE-VERSION-002-CONTROL-001","assertion_id":"ASSERT-PERF-PENDING-CYCLE-VERSION-002","proof_type":"negative-control","support_cell_id":null},
+    {"scenario_id":"SCN-PERF-PENDING-CYCLE-001","requirement_id":"SYNC-CLEANUP-001","proof_obligation_id":"OBL-PERF-PENDING-CYCLE-MACOS-CURRENT-001","assertion_id":"ASSERT-PERF-PENDING-CYCLE-CLEANUP-001","proof_type":"native-e2e","support_cell_id":"SUP-MACOS-CURRENT-001"},
+    {"scenario_id":"SCN-PERF-PENDING-CYCLE-001","requirement_id":"SYNC-CLEANUP-001","proof_obligation_id":"OBL-PERF-PENDING-CYCLE-ANDROID-CURRENT-001","assertion_id":"ASSERT-PERF-PENDING-CYCLE-CLEANUP-001","proof_type":"native-e2e","support_cell_id":"SUP-ANDROID-CURRENT-001"},
+    {"scenario_id":"SCN-PERF-PENDING-CYCLE-001","requirement_id":"SYNC-CLEANUP-001","proof_obligation_id":"OBL-PERF-PENDING-CYCLE-RN-IOS-CURRENT-001","assertion_id":"ASSERT-PERF-PENDING-CYCLE-CLEANUP-001","proof_type":"native-e2e","support_cell_id":"SUP-RN-IOS-CURRENT-001"},
+    {"scenario_id":"SCN-PERF-PENDING-CYCLE-001","requirement_id":"SYNC-CLEANUP-001","proof_obligation_id":"OBL-PERF-PENDING-CYCLE-RN-ANDROID-CURRENT-001","assertion_id":"ASSERT-PERF-PENDING-CYCLE-CLEANUP-001","proof_type":"native-e2e","support_cell_id":"SUP-RN-ANDROID-CURRENT-001"},
+    {"scenario_id":"SCN-PERF-PENDING-CYCLE-001","requirement_id":"SYNC-CLEANUP-001","proof_obligation_id":"OBL-PERF-PENDING-CYCLE-CLEANUP-CONTROL-001","assertion_id":"ASSERT-PERF-PENDING-CYCLE-CLEANUP-001","proof_type":"negative-control","support_cell_id":null},
+    {"scenario_id":"SCN-PERF-PENDING-CYCLE-001","requirement_id":"SYNC-CURSOR-003","proof_obligation_id":"OBL-PERF-PENDING-CYCLE-MACOS-CURRENT-001","assertion_id":"ASSERT-PERF-PENDING-CYCLE-CURSOR-003","proof_type":"native-e2e","support_cell_id":"SUP-MACOS-CURRENT-001"},
+    {"scenario_id":"SCN-PERF-PENDING-CYCLE-001","requirement_id":"SYNC-CURSOR-003","proof_obligation_id":"OBL-PERF-PENDING-CYCLE-ANDROID-CURRENT-001","assertion_id":"ASSERT-PERF-PENDING-CYCLE-CURSOR-003","proof_type":"native-e2e","support_cell_id":"SUP-ANDROID-CURRENT-001"},
+    {"scenario_id":"SCN-PERF-PENDING-CYCLE-001","requirement_id":"SYNC-CURSOR-003","proof_obligation_id":"OBL-PERF-PENDING-CYCLE-RN-IOS-CURRENT-001","assertion_id":"ASSERT-PERF-PENDING-CYCLE-CURSOR-003","proof_type":"native-e2e","support_cell_id":"SUP-RN-IOS-CURRENT-001"},
+    {"scenario_id":"SCN-PERF-PENDING-CYCLE-001","requirement_id":"SYNC-CURSOR-003","proof_obligation_id":"OBL-PERF-PENDING-CYCLE-RN-ANDROID-CURRENT-001","assertion_id":"ASSERT-PERF-PENDING-CYCLE-CURSOR-003","proof_type":"native-e2e","support_cell_id":"SUP-RN-ANDROID-CURRENT-001"},
+    {"scenario_id":"SCN-PERF-PENDING-CYCLE-001","requirement_id":"SYNC-CURSOR-003","proof_obligation_id":"OBL-PERF-PENDING-CYCLE-CURSOR-003-FAULT-001","assertion_id":"ASSERT-PERF-PENDING-CYCLE-CURSOR-003","proof_type":"fault-injection","support_cell_id":"SUP-MACOS-CURRENT-001"},
+    {"scenario_id":"SCN-PERF-PENDING-CYCLE-001","requirement_id":"SYNC-CURSOR-003","proof_obligation_id":"OBL-PERF-PENDING-CYCLE-CURSOR-003-CONTROL-001","assertion_id":"ASSERT-PERF-PENDING-CYCLE-CURSOR-003","proof_type":"negative-control","support_cell_id":null},
+    {"scenario_id":"SCN-PERF-PENDING-CYCLE-001","requirement_id":"SYNC-BOUNDARY-003","proof_obligation_id":"OBL-PERF-PENDING-CYCLE-MACOS-CURRENT-001","assertion_id":"ASSERT-PERF-PENDING-CYCLE-BOUNDARY-003","proof_type":"native-e2e","support_cell_id":"SUP-MACOS-CURRENT-001"},
+    {"scenario_id":"SCN-PERF-PENDING-CYCLE-001","requirement_id":"SYNC-BOUNDARY-003","proof_obligation_id":"OBL-PERF-PENDING-CYCLE-ANDROID-CURRENT-001","assertion_id":"ASSERT-PERF-PENDING-CYCLE-BOUNDARY-003","proof_type":"native-e2e","support_cell_id":"SUP-ANDROID-CURRENT-001"},
+    {"scenario_id":"SCN-PERF-PENDING-CYCLE-001","requirement_id":"SYNC-BOUNDARY-003","proof_obligation_id":"OBL-PERF-PENDING-CYCLE-RN-IOS-CURRENT-001","assertion_id":"ASSERT-PERF-PENDING-CYCLE-BOUNDARY-003","proof_type":"native-e2e","support_cell_id":"SUP-RN-IOS-CURRENT-001"},
+    {"scenario_id":"SCN-PERF-PENDING-CYCLE-001","requirement_id":"SYNC-BOUNDARY-003","proof_obligation_id":"OBL-PERF-PENDING-CYCLE-RN-ANDROID-CURRENT-001","assertion_id":"ASSERT-PERF-PENDING-CYCLE-BOUNDARY-003","proof_type":"native-e2e","support_cell_id":"SUP-RN-ANDROID-CURRENT-001"},
+    {"scenario_id":"SCN-PERF-PENDING-CYCLE-001","requirement_id":"SYNC-BOUNDARY-003","proof_obligation_id":"OBL-PERF-PENDING-CYCLE-BOUNDARY-003-CONTROL-001","assertion_id":"ASSERT-PERF-PENDING-CYCLE-BOUNDARY-003","proof_type":"negative-control","support_cell_id":null},
+    {"scenario_id":"SCN-PERF-PENDING-CYCLE-001","requirement_id":"SYNC-CRUD-002","proof_obligation_id":"OBL-PERF-PENDING-CYCLE-PG-LINUX-X64-001","assertion_id":"ASSERT-PERF-PENDING-CYCLE-CRUD-002","proof_type":"server-black-box","support_cell_id":"SUP-PG-LINUX-X64-001"},
+    {"scenario_id":"SCN-PERF-PENDING-CYCLE-001","requirement_id":"SYNC-CRUD-002","proof_obligation_id":"OBL-PERF-PENDING-CYCLE-MACOS-CURRENT-001","assertion_id":"ASSERT-PERF-PENDING-CYCLE-CRUD-002","proof_type":"native-e2e","support_cell_id":"SUP-MACOS-CURRENT-001"},
+    {"scenario_id":"SCN-PERF-PENDING-CYCLE-001","requirement_id":"SYNC-CRUD-002","proof_obligation_id":"OBL-PERF-PENDING-CYCLE-ANDROID-CURRENT-001","assertion_id":"ASSERT-PERF-PENDING-CYCLE-CRUD-002","proof_type":"native-e2e","support_cell_id":"SUP-ANDROID-CURRENT-001"},
+    {"scenario_id":"SCN-PERF-PENDING-CYCLE-001","requirement_id":"SYNC-CRUD-002","proof_obligation_id":"OBL-PERF-PENDING-CYCLE-RN-IOS-CURRENT-001","assertion_id":"ASSERT-PERF-PENDING-CYCLE-CRUD-002","proof_type":"native-e2e","support_cell_id":"SUP-RN-IOS-CURRENT-001"},
+    {"scenario_id":"SCN-PERF-PENDING-CYCLE-001","requirement_id":"SYNC-CRUD-002","proof_obligation_id":"OBL-PERF-PENDING-CYCLE-RN-ANDROID-CURRENT-001","assertion_id":"ASSERT-PERF-PENDING-CYCLE-CRUD-002","proof_type":"native-e2e","support_cell_id":"SUP-RN-ANDROID-CURRENT-001"},
+    {"scenario_id":"SCN-PERF-PENDING-CYCLE-001","requirement_id":"SYNC-CRUD-002","proof_obligation_id":"OBL-PERF-PENDING-CYCLE-CRUD-002-CONTROL-001","assertion_id":"ASSERT-PERF-PENDING-CYCLE-CRUD-002","proof_type":"negative-control","support_cell_id":null}
   ],
   "model": {
     "setup": [
@@ -1020,7 +1186,15 @@
           "defect": "accept an operation outside push insert/update/delete instead of rejecting it"
         }
       }
-    }
+    },
+    {"id":"FPL-PERF-PENDING-CYCLE-LOCALSQL-001","requirement_id":"SYNC-LOCALSQL-001","fault_id":"FAULT-LOCALSQL-001","control_id":"CTRL-LOCALSQL-001","barrier_id":"BAR-PERF-PENDING-CYCLE-CONTROL-001","expected_assertion_ids":["ASSERT-PERF-PENDING-CYCLE-LOCALSQL-001"],"injection":{"mechanism":"source-mutant","target":"native synced-table SQLite write path","operator":"reroute","parameters":{"scenario":"create, update, and delete a registered row through local SQLite","defect":"reject local CRUD unless the application calls a separate upload API"}}},
+    {"id":"FPL-PERF-PENDING-CYCLE-CRUD-001","requirement_id":"SYNC-CRUD-001","fault_id":"FAULT-CRUD-001","control_id":"CTRL-CRUD-001","barrier_id":"BAR-PERF-PENDING-CYCLE-CONTROL-001","expected_assertion_ids":["ASSERT-PERF-PENDING-CYCLE-CRUD-001"],"injection":{"mechanism":"source-mutant","target":"registered-table mutation dispatch","operator":"reroute","parameters":{"scenario":"push create, update, and delete mutations for each registered table","defect":"delegate one CRUD operation to an application-specific transport instead of the canonical Synchro mutation contract"}}},
+    {"id":"FPL-PERF-PENDING-CYCLE-APPLY-001","requirement_id":"SYNC-APPLY-001","fault_id":"FAULT-APPLY-001","control_id":"CTRL-APPLY-001","barrier_id":"BAR-PERF-PENDING-CYCLE-CONTROL-001","expected_assertion_ids":["ASSERT-PERF-PENDING-CYCLE-APPLY-001"],"injection":{"mechanism":"source-mutant","target":"server-originated SQLite apply trigger guard","operator":"bypass","parameters":{"scenario":"apply a pull, rebuild, seed, or push-response row to local SQLite","defect":"leave CDC enabled so the authoritative apply is enqueued as new client intent"}}},
+    {"id":"FPL-PERF-PENDING-CYCLE-VERSION-002","requirement_id":"SYNC-VERSION-002","fault_id":"FAULT-VERSION-002","control_id":"CTRL-VERSION-002","barrier_id":"BAR-PERF-PENDING-CYCLE-CONTROL-001","expected_assertion_ids":["ASSERT-PERF-PENDING-CYCLE-VERSION-002"],"injection":{"mechanism":"source-mutant","target":"accepted source write version-fence allocation","operator":"replace","parameters":{"scenario":"accept an update whose client_version and updated_at are both controlled","defect":"reuse the prior version or derive the new version from client data rather than the server fence"}}},
+    {"id":"FPL-PERF-PENDING-CYCLE-CLEANUP-001","requirement_id":"SYNC-CLEANUP-001","fault_id":"FAULT-CLEANUP-001","control_id":"CTRL-CLEANUP-001","barrier_id":"BAR-PERF-PENDING-CYCLE-CONTROL-001","expected_assertion_ids":["ASSERT-PERF-PENDING-CYCLE-CLEANUP-001"],"injection":{"mechanism":"state-fault","target":"scope-loss and rebuild-pruning mutation capture","operator":"inject","parameters":{"scenario":"remove a row solely because its last local scope provenance was pruned","defect":"create a delete mutation or tombstone without a server-supplied authoritative tombstone"}}},
+    {"id":"FPL-PERF-PENDING-CYCLE-CURSOR-003","requirement_id":"SYNC-CURSOR-003","fault_id":"FAULT-CURSOR-003","control_id":"CTRL-CURSOR-003","barrier_id":"BAR-PERF-PENDING-CYCLE-CONTROL-001","expected_assertion_ids":["ASSERT-PERF-PENDING-CYCLE-CURSOR-003"],"injection":{"mechanism":"process-fault","target":"scope data apply and cursor transaction","operator":"crash","parameters":{"scenario":"kill the client at the commit boundary for an incremental page","defect":"persist the new cursor without all data or all data without its paired cursor decision"}}},
+    {"id":"FPL-PERF-PENDING-CYCLE-BOUNDARY-003","requirement_id":"SYNC-BOUNDARY-003","fault_id":"FAULT-BOUNDARY-003","control_id":"CTRL-BOUNDARY-003","barrier_id":"BAR-PERF-PENDING-CYCLE-CONTROL-001","expected_assertion_ids":["ASSERT-PERF-PENDING-CYCLE-BOUNDARY-003"],"injection":{"mechanism":"source-mutant","target":"native client server-decision and local-durability boundary","operator":"replace","parameters":{"scenario":"deliver server assignment, schema, conflict, cursor, and rebuild decisions to the native client","defect":"override a server decision or delegate local SQLite queue and safe apply to JavaScript"}}},
+    {"id":"FPL-PERF-PENDING-CYCLE-CRUD-002","requirement_id":"SYNC-CRUD-002","fault_id":"FAULT-CRUD-002","control_id":"CTRL-CRUD-002","barrier_id":"BAR-PERF-PENDING-CYCLE-CONTROL-001","expected_assertion_ids":["ASSERT-PERF-PENDING-CYCLE-CRUD-002"],"injection":{"mechanism":"source-mutant","target":"client CRUD sync route selection","operator":"reroute","parameters":{"scenario":"synchronize local SQL create, update, and delete against a registered table","defect":"require an application-defined upload endpoint before canonical push can execute"}}}
   ],
   "replay": {
     "mode": "deterministic",
@@ -1074,7 +1248,15 @@
       "detected_by": [
         "ASSERT-PERF-PENDING-CYCLE-VOCAB-001"
       ]
-    }
+    },
+    {"control_id":"CTRL-LOCALSQL-001","requirement_id":"SYNC-LOCALSQL-001","fault_id":"FAULT-LOCALSQL-001","subject_artifact_inventory_ids":["ARTDEF-SWIFT-SPM-001","ARTDEF-COCOAPODS-001","ARTDEF-KOTLIN-MAVEN-001","ARTDEF-RN-NPM-001"],"detected_by":["ASSERT-PERF-PENDING-CYCLE-LOCALSQL-001"]},
+    {"control_id":"CTRL-CRUD-001","requirement_id":"SYNC-CRUD-001","fault_id":"FAULT-CRUD-001","subject_artifact_inventory_ids":["ARTDEF-PG-EXTENSION-001","ARTDEF-ADAPTER-001","ARTDEF-SWIFT-SPM-001","ARTDEF-COCOAPODS-001","ARTDEF-KOTLIN-MAVEN-001","ARTDEF-RN-NPM-001"],"detected_by":["ASSERT-PERF-PENDING-CYCLE-CRUD-001"]},
+    {"control_id":"CTRL-APPLY-001","requirement_id":"SYNC-APPLY-001","fault_id":"FAULT-APPLY-001","subject_artifact_inventory_ids":["ARTDEF-SWIFT-SPM-001","ARTDEF-COCOAPODS-001","ARTDEF-KOTLIN-MAVEN-001","ARTDEF-RN-NPM-001"],"detected_by":["ASSERT-PERF-PENDING-CYCLE-APPLY-001"]},
+    {"control_id":"CTRL-VERSION-002","requirement_id":"SYNC-VERSION-002","fault_id":"FAULT-VERSION-002","subject_artifact_inventory_ids":["ARTDEF-PG-EXTENSION-001","ARTDEF-ADAPTER-001","ARTDEF-SWIFT-SPM-001","ARTDEF-COCOAPODS-001","ARTDEF-KOTLIN-MAVEN-001","ARTDEF-RN-NPM-001"],"detected_by":["ASSERT-PERF-PENDING-CYCLE-VERSION-002"]},
+    {"control_id":"CTRL-CLEANUP-001","requirement_id":"SYNC-CLEANUP-001","fault_id":"FAULT-CLEANUP-001","subject_artifact_inventory_ids":["ARTDEF-SWIFT-SPM-001","ARTDEF-COCOAPODS-001","ARTDEF-KOTLIN-MAVEN-001","ARTDEF-RN-NPM-001"],"detected_by":["ASSERT-PERF-PENDING-CYCLE-CLEANUP-001"]},
+    {"control_id":"CTRL-CURSOR-003","requirement_id":"SYNC-CURSOR-003","fault_id":"FAULT-CURSOR-003","subject_artifact_inventory_ids":["ARTDEF-SWIFT-SPM-001","ARTDEF-COCOAPODS-001","ARTDEF-KOTLIN-MAVEN-001","ARTDEF-RN-NPM-001"],"detected_by":["ASSERT-PERF-PENDING-CYCLE-CURSOR-003"]},
+    {"control_id":"CTRL-BOUNDARY-003","requirement_id":"SYNC-BOUNDARY-003","fault_id":"FAULT-BOUNDARY-003","subject_artifact_inventory_ids":["ARTDEF-SWIFT-SPM-001","ARTDEF-COCOAPODS-001","ARTDEF-KOTLIN-MAVEN-001","ARTDEF-RN-NPM-001"],"detected_by":["ASSERT-PERF-PENDING-CYCLE-BOUNDARY-003"]},
+    {"control_id":"CTRL-CRUD-002","requirement_id":"SYNC-CRUD-002","fault_id":"FAULT-CRUD-002","subject_artifact_inventory_ids":["ARTDEF-PG-EXTENSION-001","ARTDEF-ADAPTER-001","ARTDEF-SWIFT-SPM-001","ARTDEF-COCOAPODS-001","ARTDEF-KOTLIN-MAVEN-001","ARTDEF-RN-NPM-001"],"detected_by":["ASSERT-PERF-PENDING-CYCLE-CRUD-002"]}
   ],
   "steps": [
     {
@@ -1359,6 +1541,14 @@
       "detects_control_ids": [
         "CTRL-VOCAB-001"
       ]
-    }
+    },
+    {"id":"ASSERT-PERF-PENDING-CYCLE-LOCALSQL-001","requirement_ids":["SYNC-LOCALSQL-001"],"description":"Direct native SQLite inspection proves application CRUD uses the registered table without an upload API.","expectation_ids":["EXPECT-PERF-PENDING-CYCLE-SEMANTIC-001"],"predicate":{"contract_predicate":"wire-outcome","name":"canonical-wire-outcome","payload":{}},"oracle":{"kind":"wire-contract","expected_source":"authored-model","observed_source":"system-under-test"},"detects_control_ids":["CTRL-LOCALSQL-001"]},
+    {"id":"ASSERT-PERF-PENDING-CYCLE-CRUD-001","requirement_ids":["SYNC-CRUD-001"],"description":"The registered-table insert, update, and delete outcomes remain canonical across native and server observations.","expectation_ids":["EXPECT-PERF-PENDING-CYCLE-SEMANTIC-001"],"predicate":{"contract_predicate":"wire-outcome","name":"canonical-wire-outcome","payload":{}},"oracle":{"kind":"wire-contract","expected_source":"authored-model","observed_source":"system-under-test"},"detects_control_ids":["CTRL-CRUD-001"]},
+    {"id":"ASSERT-PERF-PENDING-CYCLE-APPLY-001","requirement_ids":["SYNC-APPLY-001"],"description":"Authoritative pull application leaves no new pending or rejected client-originated mutation.","expectation_ids":["EXPECT-PERF-PENDING-CYCLE-SEMANTIC-001"],"predicate":{"contract_predicate":"wire-outcome","name":"canonical-wire-outcome","payload":{}},"oracle":{"kind":"wire-contract","expected_source":"authored-model","observed_source":"system-under-test"},"detects_control_ids":["CTRL-APPLY-001"]},
+    {"id":"ASSERT-PERF-PENDING-CYCLE-VERSION-002","requirement_ids":["SYNC-VERSION-002"],"description":"The accepted transition installs a nonempty server version that differs from client-authored time data.","expectation_ids":["EXPECT-PERF-PENDING-CYCLE-SEMANTIC-001"],"predicate":{"contract_predicate":"wire-outcome","name":"canonical-wire-outcome","payload":{}},"oracle":{"kind":"wire-contract","expected_source":"authored-model","observed_source":"system-under-test"},"detects_control_ids":["CTRL-VERSION-002"]},
+    {"id":"ASSERT-PERF-PENDING-CYCLE-CLEANUP-001","requirement_ids":["SYNC-CLEANUP-001"],"description":"Native cleanup inspection rejects any local delete intent that lacks an authoritative tombstone.","expectation_ids":["EXPECT-PERF-PENDING-CYCLE-SEMANTIC-001"],"predicate":{"contract_predicate":"wire-outcome","name":"canonical-wire-outcome","payload":{}},"oracle":{"kind":"wire-contract","expected_source":"authored-model","observed_source":"system-under-test"},"detects_control_ids":["CTRL-CLEANUP-001"]},
+    {"id":"ASSERT-PERF-PENDING-CYCLE-CURSOR-003","requirement_ids":["SYNC-CURSOR-003"],"description":"The pulled row and its per-scope cursor become durable together and remain paired after native inspection.","expectation_ids":["EXPECT-PERF-PENDING-CYCLE-SEMANTIC-001"],"predicate":{"contract_predicate":"wire-outcome","name":"canonical-wire-outcome","payload":{}},"oracle":{"kind":"wire-contract","expected_source":"authored-model","observed_source":"system-under-test"},"detects_control_ids":["CTRL-CURSOR-003"]},
+    {"id":"ASSERT-PERF-PENDING-CYCLE-BOUNDARY-003","requirement_ids":["SYNC-BOUNDARY-003"],"description":"The native client owns SQLite queue and safe apply while retaining server-issued outcomes and cursor decisions.","expectation_ids":["EXPECT-PERF-PENDING-CYCLE-SEMANTIC-001"],"predicate":{"contract_predicate":"wire-outcome","name":"canonical-wire-outcome","payload":{}},"oracle":{"kind":"wire-contract","expected_source":"authored-model","observed_source":"system-under-test"},"detects_control_ids":["CTRL-BOUNDARY-003"]},
+    {"id":"ASSERT-PERF-PENDING-CYCLE-CRUD-002","requirement_ids":["SYNC-CRUD-002"],"description":"Local SQLite and canonical Synchro requests complete registered CRUD without an application upload endpoint.","expectation_ids":["EXPECT-PERF-PENDING-CYCLE-SEMANTIC-001"],"predicate":{"contract_predicate":"wire-outcome","name":"canonical-wire-outcome","payload":{}},"oracle":{"kind":"wire-contract","expected_source":"authored-model","observed_source":"system-under-test"},"detects_control_ids":["CTRL-CRUD-002"]}
   ]
 }
