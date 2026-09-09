@@ -414,7 +414,8 @@ BEGIN
             'public.' || dependency.target_relation,
             'public.' || dependency.final_membership_function,
             dependency.composition,
-            'id', 'updated_at', 'deleted_at', 'enabled'
+            'id', 'updated_at', 'deleted_at', 'enabled',
+            p_affected_scopes => ARRAY['bootstrap']::text[]
         );
     END LOOP;
 END
