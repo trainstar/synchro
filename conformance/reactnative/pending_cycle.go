@@ -103,6 +103,17 @@ func ValidatePendingCycleScenario(scenario scenarios.Scenario) error {
 		}
 	}
 	semantic, performance := false, false
+	claimSpecs := map[string]struct{ requirement, control string }{
+		"ASSERT-PERF-PENDING-CYCLE-LOCALSQL-001": {"SYNC-LOCALSQL-001", "CTRL-LOCALSQL-001"},
+		"ASSERT-PERF-PENDING-CYCLE-CRUD-001":     {"SYNC-CRUD-001", "CTRL-CRUD-001"},
+		"ASSERT-PERF-PENDING-CYCLE-APPLY-001":    {"SYNC-APPLY-001", "CTRL-APPLY-001"},
+		"ASSERT-PERF-PENDING-CYCLE-VERSION-002":  {"SYNC-VERSION-002", "CTRL-VERSION-002"},
+		"ASSERT-PERF-PENDING-CYCLE-CLEANUP-001":  {"SYNC-CLEANUP-001", "CTRL-CLEANUP-001"},
+		"ASSERT-PERF-PENDING-CYCLE-CURSOR-003":   {"SYNC-CURSOR-003", "CTRL-CURSOR-003"},
+		"ASSERT-PERF-PENDING-CYCLE-BOUNDARY-003": {"SYNC-BOUNDARY-003", "CTRL-BOUNDARY-003"},
+		"ASSERT-PERF-PENDING-CYCLE-CRUD-002":     {"SYNC-CRUD-002", "CTRL-CRUD-002"},
+	}
+	matchedClaims := make(map[string]int, len(claimSpecs))
 	for _, assertion := range scenario.Assertions {
 		switch assertion.ID {
 		case "ASSERT-PERF-PENDING-CYCLE-SEMANTIC-001":
@@ -110,20 +121,34 @@ func ValidatePendingCycleScenario(scenario scenarios.Scenario) error {
 		case "ASSERT-PERF-PENDING-CYCLE-PERFORMANCE-001":
 			performance = assertion.Predicate.ContractPredicate == "performance-measurement" && assertion.Oracle.ExpectedSource == "authored-model"
 		}
+		if spec, found := claimSpecs[string(assertion.ID)]; found &&
+			orderedIdentifiersEqual(assertion.RequirementIDs, []string{spec.requirement}) &&
+			orderedIdentifiersEqual(assertion.ExpectationIDs, []string{"EXPECT-PERF-PENDING-CYCLE-SEMANTIC-001"}) &&
+			assertion.Predicate.ContractPredicate == "wire-outcome" && assertion.Predicate.Name == "canonical-wire-outcome" &&
+			assertion.Oracle.Kind == "wire-contract" && assertion.Oracle.ExpectedSource == "authored-model" &&
+			assertion.Oracle.ObservedSource == "system-under-test" &&
+			orderedIdentifiersEqual(assertion.DetectsControlIDs, []string{spec.control}) {
+			matchedClaims[string(assertion.ID)]++
+		}
 	}
 	if !semantic || !performance {
 		return errors.New("React Native pending-cycle assertion contract changed")
+	}
+	for id := range claimSpecs {
+		if matchedClaims[id] != 1 {
+			return fmt.Errorf("React Native pending-cycle assertion %s changed", id)
+		}
 	}
 	obligations := map[string]int{}
 	for _, obligation := range scenario.ProofObligations {
 		id := string(obligation.ObligationID)
 		switch id {
 		case "OBL-PERF-PENDING-CYCLE-RN-IOS-CURRENT-001":
-			if proofTargetMatches(obligation, "native-e2e", "SUP-RN-IOS-CURRENT-001", "test-rn-e2e-ios", "", "") {
+			if proofTargetMatches(obligation, "native-e2e", "SUP-RN-IOS-CURRENT-001", "test-rn-e2e-ios", "", "") && pendingCycleNativeClaimsMatch(obligation) {
 				obligations[id]++
 			}
 		case "OBL-PERF-PENDING-CYCLE-RN-ANDROID-CURRENT-001":
-			if proofTargetMatches(obligation, "native-e2e", "SUP-RN-ANDROID-CURRENT-001", "test-rn-e2e-android", "", "") {
+			if proofTargetMatches(obligation, "native-e2e", "SUP-RN-ANDROID-CURRENT-001", "test-rn-e2e-android", "", "") && pendingCycleNativeClaimsMatch(obligation) {
 				obligations[id]++
 			}
 		case "OBL-PERF-PENDING-CYCLE-CONTROL-001":
@@ -138,6 +163,19 @@ func ValidatePendingCycleScenario(scenario scenarios.Scenario) error {
 		return errors.New("React Native pending-cycle proof obligations are invalid")
 	}
 	return nil
+}
+
+func pendingCycleNativeClaimsMatch(obligation scenarios.ProofObligation) bool {
+	return orderedIdentifiersEqual(obligation.RequirementIDs, []string{
+		"SYNC-MUTATION-002", "SYNC-LOCALSQL-001", "SYNC-CRUD-001", "SYNC-APPLY-001", "SYNC-VERSION-002",
+		"SYNC-CLEANUP-001", "SYNC-CURSOR-003", "SYNC-BOUNDARY-003", "SYNC-CRUD-002",
+	}) && orderedIdentifiersEqual(obligation.AssertionIDs, []string{
+		"ASSERT-PERF-PENDING-CYCLE-SEMANTIC-001", "ASSERT-PERF-PENDING-CYCLE-PERFORMANCE-001",
+		"ASSERT-PERF-PENDING-CYCLE-LOCALSQL-001", "ASSERT-PERF-PENDING-CYCLE-CRUD-001",
+		"ASSERT-PERF-PENDING-CYCLE-APPLY-001", "ASSERT-PERF-PENDING-CYCLE-VERSION-002",
+		"ASSERT-PERF-PENDING-CYCLE-CLEANUP-001", "ASSERT-PERF-PENDING-CYCLE-CURSOR-003",
+		"ASSERT-PERF-PENDING-CYCLE-BOUNDARY-003", "ASSERT-PERF-PENDING-CYCLE-CRUD-002",
+	})
 }
 
 // PendingCycleCoordinatorConfig configures one authenticated RN pending-cycle sidecar.

@@ -184,23 +184,43 @@ func ValidateSchemaQueuedMutationScenario(scenario scenarios.Scenario) error {
 		return err
 	}
 	semantic := false
+	claimSpecs := map[string]struct{ requirement, control string }{
+		"ASSERT-SCHEMA-QUEUED-MUTATION-MUTATION-004": {"SYNC-MUTATION-004", "CTRL-MUTATION-004"},
+		"ASSERT-SCHEMA-QUEUED-MUTATION-BOUNDARY-002": {"SYNC-BOUNDARY-002", "CTRL-BOUNDARY-002"},
+	}
+	matchedClaims := make(map[string]int, len(claimSpecs))
 	for _, assertion := range scenario.Assertions {
 		if assertion.ID == "ASSERT-SCHEMA-QUEUED-MUTATION-SEMANTIC-001" {
 			semantic = assertion.Predicate.ContractPredicate == "wire-outcome" && assertion.Oracle.ExpectedSource == "authored-model"
+		}
+		if spec, found := claimSpecs[string(assertion.ID)]; found &&
+			orderedIdentifiersEqual(assertion.RequirementIDs, []string{spec.requirement}) &&
+			orderedIdentifiersEqual(assertion.ExpectationIDs, []string{
+				"EXPECT-SCHEMA-QUEUED-MUTATION-WIRE-001", "EXPECT-SCHEMA-QUEUED-MUTATION-STATE-001",
+			}) && assertion.Predicate.ContractPredicate == "state-equality" &&
+			assertion.Predicate.Name == "state-equals-authored-model" && assertion.Oracle.Kind == "model-state-equality" &&
+			assertion.Oracle.ExpectedSource == "authored-model" && assertion.Oracle.ObservedSource == "system-under-test" &&
+			orderedIdentifiersEqual(assertion.DetectsControlIDs, []string{spec.control}) {
+			matchedClaims[string(assertion.ID)]++
 		}
 	}
 	if !semantic || schemaQueuedMutationExpectedState(scenario) == nil {
 		return errors.New("React Native schema-queued-mutation assertion or expected state is invalid")
 	}
+	for id := range claimSpecs {
+		if matchedClaims[id] != 1 {
+			return fmt.Errorf("React Native schema-queued-mutation assertion %s changed", id)
+		}
+	}
 	obligations := map[string]int{}
 	for _, obligation := range scenario.ProofObligations {
 		switch string(obligation.ObligationID) {
 		case "OBL-SCHEMA-QUEUED-MUTATION-RN-IOS-CURRENT-001":
-			if proofTargetMatches(obligation, "native-e2e", "SUP-RN-IOS-CURRENT-001", "test-rn-e2e-ios", "", "") {
+			if proofTargetMatches(obligation, "native-e2e", "SUP-RN-IOS-CURRENT-001", "test-rn-e2e-ios", "", "") && schemaQueuedMutationNativeClaimsMatch(obligation) {
 				obligations[string(obligation.ObligationID)]++
 			}
 		case "OBL-SCHEMA-QUEUED-MUTATION-RN-ANDROID-CURRENT-001":
-			if proofTargetMatches(obligation, "native-e2e", "SUP-RN-ANDROID-CURRENT-001", "test-rn-e2e-android", "", "") {
+			if proofTargetMatches(obligation, "native-e2e", "SUP-RN-ANDROID-CURRENT-001", "test-rn-e2e-android", "", "") && schemaQueuedMutationNativeClaimsMatch(obligation) {
 				obligations[string(obligation.ObligationID)]++
 			}
 		case "OBL-SCHEMA-QUEUED-MUTATION-CONTROL-001":
@@ -215,6 +235,15 @@ func ValidateSchemaQueuedMutationScenario(scenario scenarios.Scenario) error {
 		return fmt.Errorf("React Native schema-queued-mutation proof obligations=%v", obligations)
 	}
 	return nil
+}
+
+func schemaQueuedMutationNativeClaimsMatch(obligation scenarios.ProofObligation) bool {
+	return orderedIdentifiersEqual(obligation.RequirementIDs, []string{
+		"SYNC-SCHEMA-002", "SYNC-SCHEMA-003", "SYNC-MUTATION-004", "SYNC-BOUNDARY-002",
+	}) && orderedIdentifiersEqual(obligation.AssertionIDs, []string{
+		"ASSERT-SCHEMA-QUEUED-MUTATION-SEMANTIC-001", "ASSERT-SCHEMA-QUEUED-MUTATION-MANIFEST-001",
+		"ASSERT-SCHEMA-QUEUED-MUTATION-MUTATION-004", "ASSERT-SCHEMA-QUEUED-MUTATION-BOUNDARY-002",
+	})
 }
 
 // NewSchemaQueuedMutationCoordinator creates an authenticated host-loopback sidecar.

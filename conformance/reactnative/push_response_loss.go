@@ -225,10 +225,23 @@ func pushResponseLossOperation(operations map[scenarios.StepID]scenarios.Operati
 }
 
 func validatePushResponseLossAssertion(scenario scenarios.Scenario) error {
+	semantic, failure := false, false
 	for _, assertion := range scenario.Assertions {
 		if assertion.ID == "ASSERT-PUSH-RESPONSE-LOSS-SEMANTIC-001" && assertion.Predicate.ContractPredicate == "wire-outcome" && assertion.Oracle.Kind == "wire-contract" && assertion.Oracle.ExpectedSource == "authored-model" && assertion.Oracle.ObservedSource == "system-under-test" && len(assertion.ExpectationIDs) == 1 && assertion.ExpectationIDs[0] == "EXPECT-PUSH-RESPONSE-LOSS-SEMANTIC-001" && len(assertion.DetectsControlIDs) == 1 && assertion.DetectsControlIDs[0] == "CTRL-IDEMPOTENCY-001" {
-			return nil
+			semantic = true
 		}
+		if assertion.ID == "ASSERT-PUSH-RESPONSE-LOSS-FAILURE-002" &&
+			orderedIdentifiersEqual(assertion.RequirementIDs, []string{"SYNC-FAILURE-002"}) &&
+			orderedIdentifiersEqual(assertion.ExpectationIDs, []string{"EXPECT-PUSH-RESPONSE-LOSS-SEMANTIC-001"}) &&
+			assertion.Predicate.ContractPredicate == "wire-outcome" && assertion.Predicate.Name == "canonical-wire-outcome" &&
+			assertion.Oracle.Kind == "wire-contract" && assertion.Oracle.ExpectedSource == "authored-model" &&
+			assertion.Oracle.ObservedSource == "system-under-test" &&
+			orderedIdentifiersEqual(assertion.DetectsControlIDs, []string{"CTRL-FAILURE-002"}) {
+			failure = true
+		}
+	}
+	if semantic && failure {
+		return nil
 	}
 	return errors.New("React Native push-response-loss assertion contract is invalid")
 }
@@ -250,7 +263,11 @@ func validatePushResponseLossProofs(scenario scenarios.Scenario) error {
 		if expected.proof == "negative-control" {
 			fault, control = "FPL-PUSH-RESPONSE-LOSS-001", "CTRL-IDEMPOTENCY-001"
 		}
-		if proofTargetMatches(obligation, expected.proof, expected.cell, expected.target, fault, control) {
+		matchesClaims := true
+		if expected.proof == "native-e2e" {
+			matchesClaims = pushResponseLossNativeClaimsMatch(obligation)
+		}
+		if proofTargetMatches(obligation, expected.proof, expected.cell, expected.target, fault, control) && matchesClaims {
 			counts[id]++
 		}
 	}
@@ -260,6 +277,15 @@ func validatePushResponseLossProofs(scenario scenarios.Scenario) error {
 		}
 	}
 	return nil
+}
+
+func pushResponseLossNativeClaimsMatch(obligation scenarios.ProofObligation) bool {
+	return orderedIdentifiersEqual(obligation.RequirementIDs, []string{
+		"SYNC-IDEMPOTENCY-001", "SYNC-IDEMPOTENCY-002", "SYNC-FAILURE-002",
+	}) && orderedIdentifiersEqual(obligation.AssertionIDs, []string{
+		"ASSERT-PUSH-RESPONSE-LOSS-SEMANTIC-001", "ASSERT-PUSH-RESPONSE-LOSS-BINDING-001",
+		"ASSERT-PUSH-RESPONSE-LOSS-FAILURE-002",
+	})
 }
 
 type pushResponseLossPayload struct {

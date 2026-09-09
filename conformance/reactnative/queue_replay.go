@@ -62,6 +62,16 @@ func ValidateQueueReplayScenario(scenario scenarios.Scenario) error {
 		return errors.New("React Native queue-replay lifecycle contract changed")
 	}
 	semantic, performance := false, false
+	claimSpecs := map[string]struct{ requirement, control string }{
+		"ASSERT-PERF-QUEUE-REPLAY-MUTATION-001": {"SYNC-MUTATION-001", "CTRL-MUTATION-001"},
+		"ASSERT-PERF-QUEUE-REPLAY-MUTATION-003": {"SYNC-MUTATION-003", "CTRL-MUTATION-003"},
+		"ASSERT-PERF-QUEUE-REPLAY-QUEUE-001":    {"SYNC-QUEUE-001", "CTRL-QUEUE-001"},
+		"ASSERT-PERF-QUEUE-REPLAY-QUEUE-002":    {"SYNC-QUEUE-002", "CTRL-QUEUE-002"},
+		"ASSERT-PERF-QUEUE-REPLAY-FAILURE-001":  {"SYNC-FAILURE-001", "CTRL-FAILURE-001"},
+		"ASSERT-PERF-QUEUE-REPLAY-STATE-001":    {"SYNC-STATE-001", "CTRL-STATE-001"},
+		"ASSERT-PERF-QUEUE-REPLAY-QUEUE-004":    {"SYNC-QUEUE-004", "CTRL-QUEUE-004"},
+	}
+	matchedClaims := make(map[string]int, len(claimSpecs))
 	for _, assertion := range scenario.Assertions {
 		switch assertion.ID {
 		case "ASSERT-PERF-QUEUE-REPLAY-SEMANTIC-001":
@@ -69,19 +79,33 @@ func ValidateQueueReplayScenario(scenario scenarios.Scenario) error {
 		case "ASSERT-PERF-QUEUE-REPLAY-PERFORMANCE-001":
 			performance = assertion.Predicate.ContractPredicate == "performance-measurement" && assertion.Oracle.ExpectedSource == "authored-model"
 		}
+		if spec, found := claimSpecs[string(assertion.ID)]; found &&
+			orderedIdentifiersEqual(assertion.RequirementIDs, []string{spec.requirement}) &&
+			orderedIdentifiersEqual(assertion.ExpectationIDs, []string{"EXPECT-PERF-QUEUE-REPLAY-SEMANTIC-001"}) &&
+			assertion.Predicate.ContractPredicate == "state-equality" && assertion.Predicate.Name == "state-equals-authored-model" &&
+			assertion.Oracle.Kind == "model-state-equality" && assertion.Oracle.ExpectedSource == "authored-model" &&
+			assertion.Oracle.ObservedSource == "system-under-test" &&
+			orderedIdentifiersEqual(assertion.DetectsControlIDs, []string{spec.control}) {
+			matchedClaims[string(assertion.ID)]++
+		}
 	}
 	if !semantic || !performance {
 		return errors.New("React Native queue-replay assertion contract changed")
+	}
+	for id := range claimSpecs {
+		if matchedClaims[id] != 1 {
+			return fmt.Errorf("React Native queue-replay assertion %s changed", id)
+		}
 	}
 	ios, android := 0, 0
 	for _, obligation := range scenario.ProofObligations {
 		switch string(obligation.ObligationID) {
 		case "OBL-PERF-QUEUE-REPLAY-RN-IOS-CURRENT-001":
-			if proofTargetMatches(obligation, "native-e2e", "SUP-RN-IOS-CURRENT-001", "test-rn-e2e-ios", "", "") {
+			if proofTargetMatches(obligation, "native-e2e", "SUP-RN-IOS-CURRENT-001", "test-rn-e2e-ios", "", "") && queueReplayNativeClaimsMatch(obligation) {
 				ios++
 			}
 		case "OBL-PERF-QUEUE-REPLAY-RN-ANDROID-CURRENT-001":
-			if proofTargetMatches(obligation, "native-e2e", "SUP-RN-ANDROID-CURRENT-001", "test-rn-e2e-android", "", "") {
+			if proofTargetMatches(obligation, "native-e2e", "SUP-RN-ANDROID-CURRENT-001", "test-rn-e2e-android", "", "") && queueReplayNativeClaimsMatch(obligation) {
 				android++
 			}
 		}
@@ -97,6 +121,19 @@ func ValidateQueueReplayScenario(scenario scenarios.Scenario) error {
 		return errors.New("React Native queue-replay rejected detail records exceed the public capture bound")
 	}
 	return nil
+}
+
+func queueReplayNativeClaimsMatch(obligation scenarios.ProofObligation) bool {
+	return orderedIdentifiersEqual(obligation.RequirementIDs, []string{
+		"SYNC-OUTCOME-001", "SYNC-MUTATION-001", "SYNC-MUTATION-003", "SYNC-QUEUE-001",
+		"SYNC-QUEUE-002", "SYNC-FAILURE-001", "SYNC-STATE-001", "SYNC-QUEUE-004",
+	}) && orderedIdentifiersEqual(obligation.AssertionIDs, []string{
+		"ASSERT-PERF-QUEUE-REPLAY-SEMANTIC-001", "ASSERT-PERF-QUEUE-REPLAY-PERFORMANCE-001",
+		"ASSERT-PERF-QUEUE-REPLAY-MUTATION-001", "ASSERT-PERF-QUEUE-REPLAY-MUTATION-003",
+		"ASSERT-PERF-QUEUE-REPLAY-QUEUE-001", "ASSERT-PERF-QUEUE-REPLAY-QUEUE-002",
+		"ASSERT-PERF-QUEUE-REPLAY-FAILURE-001", "ASSERT-PERF-QUEUE-REPLAY-STATE-001",
+		"ASSERT-PERF-QUEUE-REPLAY-QUEUE-004",
+	})
 }
 
 // QueueReplayCoordinatorConfig configures one authenticated RN queue-replay sidecar.

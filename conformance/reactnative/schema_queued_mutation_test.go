@@ -46,6 +46,16 @@ func TestValidateSchemaQueuedMutationScenarioRejectsContractChanges(t *testing.T
 				}
 			}
 		}},
+		{"Issue 49 assertion claim", func(scenario *scenarios.Scenario) {
+			scenario.Assertions[len(scenario.Assertions)-1].Oracle.ExpectedSource = "system-under-test"
+		}},
+		{"Issue 49 native proof claim", func(scenario *scenarios.Scenario) {
+			for index := range scenario.ProofObligations {
+				if string(scenario.ProofObligations[index].ObligationID) == "OBL-SCHEMA-QUEUED-MUTATION-RN-IOS-CURRENT-001" {
+					scenario.ProofObligations[index].RequirementIDs = scenario.ProofObligations[index].RequirementIDs[:2]
+				}
+			}
+		}},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
