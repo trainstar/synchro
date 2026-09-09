@@ -390,10 +390,9 @@ pub(crate) fn migrate_schema_digests(
              FROM synchro.sync_captured_rows captured
              JOIN synchro.sync_registry target
                ON target.registry_generation = $1
-              AND target.relation_id = captured.relation_id
-              AND target.registration_kind = 'synced'
-             ORDER BY captured.relation_id, captured.record_id
-             FOR UPDATE OF captured",
+               AND target.relation_id = captured.relation_id
+               AND target.registration_kind = 'synced'
+             ORDER BY captured.relation_id, captured.record_id",
             None,
             &[target_generation.into()],
         )
@@ -530,12 +529,11 @@ pub(crate) fn migrate_schema_digests(
              FROM synchro.sync_captured_projections projection
              JOIN synchro.sync_registry target
                ON target.registry_generation = $1
-              AND target.relation_id = projection.relation_id
-              AND target.registration_kind = 'synced'
+               AND target.relation_id = projection.relation_id
+               AND target.registration_kind = 'synced'
              ORDER BY projection.relation_id, projection.record_id,
-                      projection.commit_lsn, projection.event_ordinal,
-                      projection.image_kind
-             FOR UPDATE OF projection",
+                       projection.commit_lsn, projection.event_ordinal,
+                       projection.image_kind",
             None,
             &[target_generation.into()],
         )
