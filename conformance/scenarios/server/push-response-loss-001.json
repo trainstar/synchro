@@ -297,6 +297,7 @@
       "fault_plan_id": "FPL-PUSH-RESPONSE-LOSS-BINDING-001",
       "control_id": "CTRL-IDEMPOTENCY-002"
     },
+    {"obligation_id":"OBL-PUSH-RESPONSE-LOSS-FAILURE-002-FAULT-001","requirement_ids":["SYNC-FAILURE-002"],"assertion_ids":["ASSERT-PUSH-RESPONSE-LOSS-FAILURE-002"],"proof_type":"fault-injection","support_cell_id":"SUP-PG-LINUX-X64-001","artifact_inventory_ids":["ARTDEF-PG-EXTENSION-001","ARTDEF-ADAPTER-001"],"performance_budget_ids":[],"required_measurement_ids":[],"required_vector_set_ids":[],"make_target":"test-blackbox","argv":["make","test-blackbox"],"fault_plan_id":"FPL-PUSH-RESPONSE-LOSS-FAILURE-002","control_id":"CTRL-FAILURE-002"},
     {"obligation_id":"OBL-PUSH-RESPONSE-LOSS-FAILURE-002-CONTROL-001","requirement_ids":["SYNC-FAILURE-002"],"assertion_ids":["ASSERT-PUSH-RESPONSE-LOSS-FAILURE-002"],"proof_type":"negative-control","support_cell_id":null,"artifact_inventory_ids":["ARTDEF-CONFORMANCE-RUNNER-001","ARTDEF-PG-EXTENSION-001","ARTDEF-ADAPTER-001","ARTDEF-SWIFT-SPM-001","ARTDEF-COCOAPODS-001","ARTDEF-KOTLIN-MAVEN-001","ARTDEF-RN-NPM-001"],"performance_budget_ids":[],"required_measurement_ids":[],"required_vector_set_ids":[],"make_target":"test-conformance","argv":["make","test-conformance"],"fault_plan_id":"FPL-PUSH-RESPONSE-LOSS-FAILURE-002","control_id":"CTRL-FAILURE-002"}
   ],
   "ownership": [
@@ -425,6 +426,7 @@
     {"scenario_id":"SCN-PUSH-RESPONSE-LOSS-001","requirement_id":"SYNC-FAILURE-002","proof_obligation_id":"OBL-PUSH-RESPONSE-LOSS-ANDROID-CURRENT-001","assertion_id":"ASSERT-PUSH-RESPONSE-LOSS-FAILURE-002","proof_type":"native-e2e","support_cell_id":"SUP-ANDROID-CURRENT-001"},
     {"scenario_id":"SCN-PUSH-RESPONSE-LOSS-001","requirement_id":"SYNC-FAILURE-002","proof_obligation_id":"OBL-PUSH-RESPONSE-LOSS-RN-IOS-CURRENT-001","assertion_id":"ASSERT-PUSH-RESPONSE-LOSS-FAILURE-002","proof_type":"native-e2e","support_cell_id":"SUP-RN-IOS-CURRENT-001"},
     {"scenario_id":"SCN-PUSH-RESPONSE-LOSS-001","requirement_id":"SYNC-FAILURE-002","proof_obligation_id":"OBL-PUSH-RESPONSE-LOSS-RN-ANDROID-CURRENT-001","assertion_id":"ASSERT-PUSH-RESPONSE-LOSS-FAILURE-002","proof_type":"native-e2e","support_cell_id":"SUP-RN-ANDROID-CURRENT-001"},
+    {"scenario_id":"SCN-PUSH-RESPONSE-LOSS-001","requirement_id":"SYNC-FAILURE-002","proof_obligation_id":"OBL-PUSH-RESPONSE-LOSS-FAILURE-002-FAULT-001","assertion_id":"ASSERT-PUSH-RESPONSE-LOSS-FAILURE-002","proof_type":"fault-injection","support_cell_id":"SUP-PG-LINUX-X64-001"},
     {"scenario_id":"SCN-PUSH-RESPONSE-LOSS-001","requirement_id":"SYNC-FAILURE-002","proof_obligation_id":"OBL-PUSH-RESPONSE-LOSS-FAILURE-002-CONTROL-001","assertion_id":"ASSERT-PUSH-RESPONSE-LOSS-FAILURE-002","proof_type":"negative-control","support_cell_id":null}
   ],
   "model": {
