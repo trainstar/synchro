@@ -1483,7 +1483,7 @@ fn validate_bound_slot(
         return Err("active replication slot is invalid".to_string());
     }
     let row = client
-        .select(
+        .update(
             "SELECT slot.confirmed_flush_lsn::text AS actual_lsn,
                     COALESCE(
                         progress.acknowledged_end_lsn,
