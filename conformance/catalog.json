@@ -24,7 +24,7 @@
     {
       "scenario_id": "SCN-PERF-MULTI-SCOPE-PROVENANCE-001",
       "path": "conformance/scenarios/performance/multi-scope-provenance-001.json",
-      "sha256": "ba1c49af3bfdcc3fdbb7d997573cbb75a99377392f25b8132d627bae2cf112dc"
+      "sha256": "dd29d86716996a3c0a3b30ed4a80e2f089fbd510db7ab96ebf70078466b726f1"
     },
     {
       "scenario_id": "SCN-PERF-PENDING-CYCLE-001",
@@ -69,7 +69,7 @@
     {
       "scenario_id": "SCN-PERF-STEADY-PULL-001",
       "path": "conformance/scenarios/performance/steady-pull-001.json",
-      "sha256": "0e469d094713931b857b354e6cd7b95f5a6568d2f23b5780b0048f57b3a6132c"
+      "sha256": "dc61512c63f24983e334293aab065c2d22c64e087cf5e1a1a6220d3653630fcd"
     },
     {
       "scenario_id": "SCN-PERF-WARM-CONNECT-001",
@@ -104,7 +104,7 @@
     {
       "scenario_id": "SCN-RETENTION-RECONNECT-001",
       "path": "conformance/scenarios/server/retention-reconnect-001.json",
-      "sha256": "d55be1f70020016bec01cfa2f9f4644509e0c3af39026f061a611a9b2bea5ba4"
+      "sha256": "1f16287b33d9fea3e9dec436256c3a9bee278e660c68e977d1ae1fa349dac816"
     },
     {
       "scenario_id": "SCN-SCHEMA-QUEUED-MUTATION-001",

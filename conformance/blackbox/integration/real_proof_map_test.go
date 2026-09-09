@@ -41,6 +41,8 @@ type integrationMutantManifest struct {
 
 var requiredServerProofs = map[string][]string{
 	"SCN-PERF-CONFIGURED-BOUNDS-001": {"OBL-PERF-CONFIGURED-BOUNDS-PG-LINUX-X64-001"},
+	"SCN-PERF-WARM-CONNECT-001":      {"OBL-PERF-WARM-CONNECT-PG-LINUX-X64-001"},
+	"SCN-PERF-STEADY-PULL-001":       {"OBL-PERF-STEADY-PULL-PG-LINUX-X64-001"},
 	"SCN-WAL-ORDER-001": {
 		"OBL-WAL-ORDER-PG-LINUX-X64-001",
 		"OBL-WAL-NO-LOSS-PG-LINUX-X64-001",
@@ -70,13 +72,17 @@ var requiredServerProofs = map[string][]string{
 		"OBL-SCHEMA-QUEUED-MUTATION-PG-LINUX-X64-001",
 		"OBL-SCHEMA-QUEUED-MUTATION-MANIFEST-FAULT-001",
 	},
-	"SCN-RETENTION-RECONNECT-001": {"OBL-RETENTION-RECONNECT-PG-LINUX-X64-001"},
+	"SCN-RETENTION-RECONNECT-001": {
+		"OBL-RETENTION-RECONNECT-PG-LINUX-X64-001",
+		"OBL-RETENTION-RECONNECT-RETENTION-001-FAULT-LINUX-X64-001",
+	},
 	"SCN-MEMBERSHIP-REASSIGNMENT-001": {
 		"OBL-MEMBERSHIP-REASSIGNMENT-PG-LINUX-X64-001",
 		"OBL-WAL-FENCE-CORRELATION-PG-LINUX-X64-001",
 		"OBL-WAL-FENCE-CORRELATION-FAULT-LINUX-X64-001",
 	},
 	"SCN-PERF-MULTI-SCOPE-PROVENANCE-001": {
+		"OBL-PERF-MULTI-SCOPE-REBUILD-001-PG-LINUX-X64-001",
 		"OBL-MEMBERSHIP-GENERATION-PG-LINUX-X64-001",
 		"OBL-MEMBERSHIP-GENERATION-FAULT-LINUX-X64-001",
 		"OBL-MEMBERSHIP-BACKFILL-PG-LINUX-X64-001",
@@ -89,15 +95,18 @@ var requiredServerProofs = map[string][]string{
 var serverProofBindings = []serverProofBinding{
 	{"SCN-WAL-ORDER-001", "OBL-WAL-ORDER-PG-LINUX-X64-001", []string{"TestRealWALPipeline"}},
 	{"SCN-PERF-CONFIGURED-BOUNDS-001", "OBL-PERF-CONFIGURED-BOUNDS-PG-LINUX-X64-001", []string{"TestRealConfiguredBoundsMeasurement"}},
+	{"SCN-PERF-WARM-CONNECT-001", "OBL-PERF-WARM-CONNECT-PG-LINUX-X64-001", []string{"TestRealIssue49ConnectRejectsFreshReuseAndInvalidEnvelopeValues", "TestRealIssue49SemanticVersionPrecedence", "TestRealIssue49PortableIntegerBoundariesAndCounterOverflow"}},
+	{"SCN-PERF-STEADY-PULL-001", "OBL-PERF-STEADY-PULL-PG-LINUX-X64-001", []string{"TestRealMutationControlChecksumCorrectness", "TestRealIssue49RebuildReplayEpochAndMonotonicCursor"}},
 	{"SCN-PULL-DIVERGENT-CHECKPOINTS-001", "OBL-PULL-DIVERGENT-PG-LINUX-X64-001", []string{"TestRealS02DivergentPullPaginationIsStarvationFree"}},
 	{"SCN-PULL-HYDRATION-FAILURE-001", "OBL-PULL-HYDRATION-PG-LINUX-X64-001", []string{"TestRealS03PullHydrationFailurePreservesCursors"}},
 	{"SCN-WAL-DECODE-FAILURE-001", "OBL-WAL-DECODE-PG-LINUX-X64-001", []string{"TestRealWALDecodeFailureRepairsSameIdentity"}},
 	{"SCN-REGISTRY-RELOAD-001", "OBL-REGISTRY-RELOAD-PG-LINUX-X64-001", []string{"TestRealRegistryGenerationReloadAtCommitBoundary"}},
-	{"SCN-PUSH-RESPONSE-LOSS-001", "OBL-PUSH-RESPONSE-LOSS-PG-LINUX-X64-001", []string{"TestRealS11PushResponseLossReplaysExactCanonicalResponse"}},
-	{"SCN-REBUILD-FORGED-CURSOR-001", "OBL-REBUILD-FORGED-CURSOR-PG-LINUX-X64-001", []string{"TestRealS04RebuildRejectsForgedCursorAndFreezesBoundary"}},
+	{"SCN-PUSH-RESPONSE-LOSS-001", "OBL-PUSH-RESPONSE-LOSS-PG-LINUX-X64-001", []string{"TestRealS11PushResponseLossReplaysExactCanonicalResponse", "TestRealIssue49MutationLifecycleVersionsVocabularyAndCrossBatchReplay"}},
+	{"SCN-REBUILD-FORGED-CURSOR-001", "OBL-REBUILD-FORGED-CURSOR-PG-LINUX-X64-001", []string{"TestRealS04RebuildRejectsForgedCursorAndFreezesBoundary", "TestRealIssue49RebuildReplayEpochAndMonotonicCursor"}},
 	{"SCN-SCHEMA-QUEUED-MUTATION-001", "OBL-SCHEMA-QUEUED-MUTATION-PG-LINUX-X64-001", []string{"TestRealSchemaIncompatibleMutationPersistsCanonicalIntent", "TestRealIssue49PublishedSchemaIdentityIsImmutable"}},
 	{"SCN-SCHEMA-QUEUED-MUTATION-001", "OBL-SCHEMA-QUEUED-MUTATION-MANIFEST-FAULT-001", []string{"TestRealIssue49PublishedSchemaIdentityIsImmutable"}},
 	{"SCN-RETENTION-RECONNECT-001", "OBL-RETENTION-RECONNECT-PG-LINUX-X64-001", []string{"TestRealS12StaleClientCompactionAndReconnect"}},
+	{"SCN-RETENTION-RECONNECT-001", "OBL-RETENTION-RECONNECT-RETENTION-001-FAULT-LINUX-X64-001", []string{"TestRealS12StaleClientCompactionAndReconnect"}},
 	{"SCN-MEMBERSHIP-REASSIGNMENT-001", "OBL-MEMBERSHIP-REASSIGNMENT-PG-LINUX-X64-001", []string{"TestRealWALPipeline"}},
 	{"SCN-WAL-ORDER-001", "OBL-WAL-NO-LOSS-PG-LINUX-X64-001", []string{"TestRealIssue49CompletePullVisibleWALRepresentation", "TestRealIssue49WALIsTheOnlyAtomicPublicationPath"}},
 	{"SCN-WAL-ORDER-001", "OBL-WAL-NO-LOSS-FAULT-LINUX-X64-001", []string{"TestRealIssue49CompletePullVisibleWALRepresentation", "TestRealIssue49WALPoisonBlocksContiguousProgress"}},
@@ -119,6 +128,7 @@ var serverProofBindings = []serverProofBinding{
 	{"SCN-PERF-MULTI-SCOPE-PROVENANCE-001", "OBL-MEMBERSHIP-GENERATION-FAULT-LINUX-X64-001", []string{"TestRealIssue49MembershipBackfillRetainsContinuationAcrossWorkerLoss"}},
 	{"SCN-PERF-MULTI-SCOPE-PROVENANCE-001", "OBL-MEMBERSHIP-BACKFILL-PG-LINUX-X64-001", []string{"TestRealIssue49MembershipActivationIsStagedAndScoped"}},
 	{"SCN-PERF-MULTI-SCOPE-PROVENANCE-001", "OBL-MEMBERSHIP-BACKFILL-FAULT-LINUX-X64-001", []string{"TestRealIssue49MembershipBackfillRetainsContinuationAcrossWorkerLoss"}},
+	{"SCN-PERF-MULTI-SCOPE-PROVENANCE-001", "OBL-PERF-MULTI-SCOPE-REBUILD-001-PG-LINUX-X64-001", []string{"TestRealS05SelectiveRebuildPreservesCheckpoints"}},
 }
 
 var nonScenarioRealTests = map[string]string{
@@ -126,7 +136,6 @@ var nonScenarioRealTests = map[string]string{
 	"TestRealClass3ProjectionBootstrapRecoversAfterProcessTermination": "regression",
 	"TestRealExtensionReinstallRebindsWorkerSlot":                      "regression",
 	"TestRealHTTPHarness":                                              "framework",
-	"TestRealMutationControlChecksumCorrectness":                       "adversarial",
 	"TestRealMutationControlCursorAdvancement":                         "adversarial",
 	"TestRealMutationControlMutationConservation":                      "adversarial",
 	"TestRealNativeCaptureServerObservationSignals":                    "regression",
@@ -134,7 +143,6 @@ var nonScenarioRealTests = map[string]string{
 	"TestRealMutationControlScopeIsolation":                            "adversarial",
 	"TestRealMutationControlWALAcknowledgement":                        "adversarial",
 	"TestRealR1PerformanceBenchmark":                                   "benchmark",
-	"TestRealS05SelectiveRebuildPreservesCheckpoints":                  "regression",
 	"TestRealS11MixedPushOutcomesPreservePartitionOrder":               "regression",
 	"TestRealS16ConcurrentPushCASIgnoresClientTime":                    "regression",
 	"TestRealS17InvalidPushShapesDoNoDurableWork":                      "adversarial",

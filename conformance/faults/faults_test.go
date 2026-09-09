@@ -27,10 +27,16 @@ func TestLoadCatalogAndValidatePlanExactly(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load scenario: %v", err)
 	}
-	if len(scenario.FaultPlans) != 1 {
-		t.Fatalf("fault plan count = %d, want 1", len(scenario.FaultPlans))
+	var matchingPlans []scenarios.FaultPlan
+	for _, candidate := range scenario.FaultPlans {
+		if candidate.ID == "FPL-PUSH-RESPONSE-LOSS-001" {
+			matchingPlans = append(matchingPlans, candidate)
+		}
 	}
-	plan := scenario.FaultPlans[0]
+	if len(matchingPlans) != 1 {
+		t.Fatalf("matching fault plan count = %d, want 1", len(matchingPlans))
+	}
+	plan := matchingPlans[0]
 	if err := ValidatePlan(plan, catalog); err != nil {
 		t.Fatalf("validate exact plan: %v", err)
 	}
