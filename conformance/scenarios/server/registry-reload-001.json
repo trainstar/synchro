@@ -5,12 +5,17 @@
   "title": "Commit-ordered registry generation reload",
   "description": "The WAL worker stages and activates a registry generation at a complete boundary while each transaction retains one selected generation.",
   "requirement_ids": [
-    "SYNC-WAL-007"
+    "SYNC-WAL-007",
+    "SYNC-WAL-008"
   ],
   "normative_references": [
     {
       "path": "docs/src/content/docs/spec/04-invariants.mdx",
       "anchor": "#commit-ordered-registry-activation"
+    },
+    {
+      "path": "docs/src/content/docs/spec/04-invariants.mdx",
+      "anchor": "#capture-readiness"
     }
   ],
   "proof_types": [
@@ -93,6 +98,51 @@
       ],
       "fault_plan_id": "FPL-REGISTRY-RELOAD-001",
       "control_id": "CTRL-WAL-007"
+    },
+    {
+      "obligation_id": "OBL-REGISTRY-RELOAD-WAL-008-PG-LINUX-X64-001",
+      "requirement_ids": ["SYNC-WAL-008"],
+      "assertion_ids": ["ASSERT-REGISTRY-RELOAD-WAL-008-001"],
+      "proof_type": "server-black-box",
+      "support_cell_id": "SUP-PG-LINUX-X64-001",
+      "artifact_inventory_ids": ["ARTDEF-PG-EXTENSION-001", "ARTDEF-ADAPTER-001"],
+      "performance_budget_ids": [],
+      "required_measurement_ids": [],
+      "required_vector_set_ids": [],
+      "make_target": "test-blackbox",
+      "argv": ["make", "test-blackbox"],
+      "fault_plan_id": null,
+      "control_id": null
+    },
+    {
+      "obligation_id": "OBL-REGISTRY-RELOAD-WAL-008-FAULT-LINUX-X64-001",
+      "requirement_ids": ["SYNC-WAL-008"],
+      "assertion_ids": ["ASSERT-REGISTRY-RELOAD-WAL-008-001"],
+      "proof_type": "fault-injection",
+      "support_cell_id": "SUP-PG-LINUX-X64-001",
+      "artifact_inventory_ids": ["ARTDEF-PG-EXTENSION-001", "ARTDEF-ADAPTER-001"],
+      "performance_budget_ids": [],
+      "required_measurement_ids": [],
+      "required_vector_set_ids": [],
+      "make_target": "test-blackbox",
+      "argv": ["make", "test-blackbox"],
+      "fault_plan_id": "FPL-REGISTRY-RELOAD-WAL-008-001",
+      "control_id": "CTRL-WAL-008"
+    },
+    {
+      "obligation_id": "OBL-REGISTRY-RELOAD-WAL-008-CONTROL-001",
+      "requirement_ids": ["SYNC-WAL-008"],
+      "assertion_ids": ["ASSERT-REGISTRY-RELOAD-WAL-008-001"],
+      "proof_type": "negative-control",
+      "support_cell_id": null,
+      "artifact_inventory_ids": ["ARTDEF-CONFORMANCE-RUNNER-001", "ARTDEF-PG-EXTENSION-001"],
+      "performance_budget_ids": [],
+      "required_measurement_ids": [],
+      "required_vector_set_ids": [],
+      "make_target": "test-conformance",
+      "argv": ["make", "test-conformance"],
+      "fault_plan_id": "FPL-REGISTRY-RELOAD-WAL-008-001",
+      "control_id": "CTRL-WAL-008"
     }
   ],
   "ownership": [
@@ -117,6 +167,30 @@
       "requirement_id": "SYNC-WAL-007",
       "proof_obligation_id": "OBL-REGISTRY-RELOAD-CONTROL-001",
       "assertion_id": "ASSERT-REGISTRY-RELOAD-SEMANTIC-001",
+      "proof_type": "negative-control",
+      "support_cell_id": null
+    },
+    {
+      "scenario_id": "SCN-REGISTRY-RELOAD-001",
+      "requirement_id": "SYNC-WAL-008",
+      "proof_obligation_id": "OBL-REGISTRY-RELOAD-WAL-008-PG-LINUX-X64-001",
+      "assertion_id": "ASSERT-REGISTRY-RELOAD-WAL-008-001",
+      "proof_type": "server-black-box",
+      "support_cell_id": "SUP-PG-LINUX-X64-001"
+    },
+    {
+      "scenario_id": "SCN-REGISTRY-RELOAD-001",
+      "requirement_id": "SYNC-WAL-008",
+      "proof_obligation_id": "OBL-REGISTRY-RELOAD-WAL-008-FAULT-LINUX-X64-001",
+      "assertion_id": "ASSERT-REGISTRY-RELOAD-WAL-008-001",
+      "proof_type": "fault-injection",
+      "support_cell_id": "SUP-PG-LINUX-X64-001"
+    },
+    {
+      "scenario_id": "SCN-REGISTRY-RELOAD-001",
+      "requirement_id": "SYNC-WAL-008",
+      "proof_obligation_id": "OBL-REGISTRY-RELOAD-WAL-008-CONTROL-001",
+      "assertion_id": "ASSERT-REGISTRY-RELOAD-WAL-008-001",
       "proof_type": "negative-control",
       "support_cell_id": null
     }
@@ -397,6 +471,23 @@
           "defect": "select by notification or use two generations within one transaction"
         }
       }
+    },
+    {
+      "id": "FPL-REGISTRY-RELOAD-WAL-008-001",
+      "requirement_id": "SYNC-WAL-008",
+      "fault_id": "FAULT-WAL-008",
+      "control_id": "CTRL-WAL-008",
+      "barrier_id": "BAR-REGISTRY-RELOAD-CONTROL-001",
+      "expected_assertion_ids": ["ASSERT-REGISTRY-RELOAD-WAL-008-001"],
+      "injection": {
+        "mechanism": "state-fault",
+        "target": "capture readiness check aggregation",
+        "operator": "replace",
+        "parameters": {
+          "scenario": "make one required trigger, slot, poison, registry, worker, or contiguous-progress check unhealthy",
+          "defect": "report ready from database ping or a partial set of healthy checks"
+        }
+      }
     }
   ],
   "replay": {
@@ -415,6 +506,13 @@
       "detected_by": [
         "ASSERT-REGISTRY-RELOAD-SEMANTIC-001"
       ]
+    },
+    {
+      "control_id": "CTRL-WAL-008",
+      "requirement_id": "SYNC-WAL-008",
+      "fault_id": "FAULT-WAL-008",
+      "subject_artifact_inventory_ids": ["ARTDEF-PG-EXTENSION-001"],
+      "detected_by": ["ASSERT-REGISTRY-RELOAD-WAL-008-001"]
     }
   ],
   "steps": [
@@ -740,6 +838,23 @@
       "detects_control_ids": [
         "CTRL-WAL-007"
       ]
+    },
+    {
+      "id": "ASSERT-REGISTRY-RELOAD-WAL-008-001",
+      "requirement_ids": ["SYNC-WAL-008"],
+      "description": "Capture readiness is false when any required check is unhealthy.",
+      "expectation_ids": ["EXPECT-REGISTRY-RELOAD-SEMANTIC-001"],
+      "predicate": {
+        "contract_predicate": "state-equality",
+        "name": "state-equals-authored-model",
+        "payload": {}
+      },
+      "oracle": {
+        "kind": "model-state-equality",
+        "expected_source": "authored-model",
+        "observed_source": "system-under-test"
+      },
+      "detects_control_ids": ["CTRL-WAL-008"]
     }
   ]
 }

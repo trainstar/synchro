@@ -24,8 +24,8 @@ type issue49SecurityProofBinding struct {
 }
 
 // issue49SecurityProofBindings assigns each Issue 49 security mutant to its
-// authored control. An empty mutantPatch supplies the second installation
-// requirement proved by the same real test.
+// authored control. An empty mutantPatch records a requirement without an
+// Issue 49 security mutant patch.
 var issue49SecurityProofBindings = []issue49SecurityProofBinding{
 	{"issue49-security-adapter-boundary.patch", "SCN-PERF-CORE-SYNC-PATH-001", "SYNC-BOUNDARY-001", "ASSERT-PERF-CORE-SYNC-PATH-BOUNDARY-001", "CTRL-BOUNDARY-001", "FPL-PERF-CORE-SYNC-PATH-BOUNDARY-001", "OBL-PERF-CORE-SYNC-PATH-BOUNDARY-PG-LINUX-X64-001", "", "TestRealIssue49SecurityAdapterAuthorityAndScopeBoundary"},
 	{"issue49-security-client-scope.patch", "SCN-PERF-SHARED-PRIVATE-SCOPES-001", "SYNC-SCOPE-005", "ASSERT-PERF-SHARED-PRIVATE-SCOPES-SCOPE-005", "CTRL-SCOPE-005", "FPL-PERF-SHARED-PRIVATE-SCOPES-SCOPE-005", "OBL-PERF-SHARED-PRIVATE-SCOPES-SCOPE-005-PG-LINUX-X64-001", "", "TestRealIssue49SecurityAdapterAuthorityAndScopeBoundary"},
@@ -38,6 +38,7 @@ var issue49SecurityProofBindings = []issue49SecurityProofBinding{
 	{"issue49-security-logging-redaction.patch", "SCN-PERF-CORE-SYNC-PATH-001", "SYNC-LOGGING-001", "ASSERT-PERF-CORE-SYNC-PATH-LOGGING-001", "CTRL-LOGGING-001", "FPL-PERF-CORE-SYNC-PATH-LOGGING-001", "OBL-PERF-CORE-SYNC-PATH-LOGGING-PG-LINUX-X64-001", "OBL-PERF-CORE-SYNC-PATH-LOGGING-FAULT-001", "TestRealIssue49SecurityOperationalRedaction"},
 	{"issue49-security-install-baseline.patch", "SCN-PERF-CORE-SYNC-PATH-001", "SYNC-INSTALL-002", "ASSERT-PERF-CORE-SYNC-PATH-INSTALL-002", "CTRL-INSTALL-002", "FPL-PERF-CORE-SYNC-PATH-INSTALL-002-001", "OBL-PERF-CORE-SYNC-PATH-INSTALL-002-PG-LINUX-X64-001", "", "TestRealIssue49SecurityInstallationAuthority"},
 	{"", "SCN-PERF-CORE-SYNC-PATH-001", "SYNC-INSTALL-001", "ASSERT-PERF-CORE-SYNC-PATH-INSTALL-001", "CTRL-INSTALL-001", "FPL-PERF-CORE-SYNC-PATH-INSTALL-001-001", "OBL-PERF-CORE-SYNC-PATH-INSTALL-001-PG-LINUX-X64-001", "", "TestRealIssue49SecurityInstallationAuthority"},
+	{"", "SCN-REGISTRY-RELOAD-001", "SYNC-WAL-008", "ASSERT-REGISTRY-RELOAD-WAL-008-001", "CTRL-WAL-008", "FPL-REGISTRY-RELOAD-WAL-008-001", "OBL-REGISTRY-RELOAD-WAL-008-PG-LINUX-X64-001", "OBL-REGISTRY-RELOAD-WAL-008-FAULT-LINUX-X64-001", "TestRealIssue49CaptureReadinessRequiresEveryCheck"},
 }
 
 func TestIssue49SecurityProofBindings(t *testing.T) {

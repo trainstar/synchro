@@ -99,7 +99,7 @@
     {
       "scenario_id": "SCN-REGISTRY-RELOAD-001",
       "path": "conformance/scenarios/server/registry-reload-001.json",
-      "sha256": "ff208ee1163d1959dd77a2e554efb3f5e0d5091d483e6acdac3670d1290d5fcd"
+      "sha256": "09aac4b85323d99d2bd8db7d6e953cb916bbb9d019745c640ae1905db6a79516"
     },
     {
       "scenario_id": "SCN-RETENTION-RECONNECT-001",
@@ -114,7 +114,7 @@
     {
       "scenario_id": "SCN-WAL-DECODE-FAILURE-001",
       "path": "conformance/scenarios/server/wal-decode-failure-001.json",
-      "sha256": "fcbb6b42c900d11f599de9800ddd63e879a2d8c15ac4d99bb230090aa44f2b03"
+      "sha256": "cf625e8a5f2a67d0cc2f1c1b4df450695a4779551fcbe69ce3d0902b6dfa8753"
     },
     {
       "scenario_id": "SCN-WAL-ORDER-001",
