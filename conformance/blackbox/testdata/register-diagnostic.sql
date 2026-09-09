@@ -359,7 +359,8 @@ SELECT synchro.synchro_register_table(
     'public.cf_document_members',
     'public.cf_document_members_membership_v2',
     'multi_scope',
-    'id', 'updated_at', 'deleted_at', 'enabled'
+    'id', 'updated_at', 'deleted_at', 'enabled',
+    p_affected_scopes => ARRAY['cf:global']::text[]
 );
 
 CREATE OR REPLACE FUNCTION public.cf_document_notes_membership_v2(p_id uuid)
@@ -388,5 +389,6 @@ SELECT synchro.synchro_register_table(
     'public.cf_document_notes',
     'public.cf_document_notes_membership_v2',
     'multi_scope',
-    'id', 'updated_at', 'deleted_at', 'enabled'
+    'id', 'updated_at', 'deleted_at', 'enabled',
+    p_affected_scopes => ARRAY['cf:global']::text[]
 );
