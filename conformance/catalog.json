@@ -29,12 +29,12 @@
     {
       "scenario_id": "SCN-PERF-PENDING-CYCLE-001",
       "path": "conformance/scenarios/performance/pending-cycle-001.json",
-      "sha256": "0350739af5ca903118528945dd553200f1179026de24f65a715aa906b3da5e5e"
+      "sha256": "98a7e0f4e98227ec80f9cae251971237d63e3ce5b704f38a8b2c30aa7bbccc3e"
     },
     {
       "scenario_id": "SCN-PERF-QUEUE-REPLAY-001",
       "path": "conformance/scenarios/performance/queue-replay-001.json",
-      "sha256": "a41fef72fbb9525e91070073ee7390a78fb0ed941e1730f7c70e9b281821f069"
+      "sha256": "7f9f78fff3e097072405cd8cfd94905e14e831b2b9712e60a467645ff5bcc2ba"
     },
     {
       "scenario_id": "SCN-PERF-REBUILD-APPLY-001",
@@ -49,7 +49,7 @@
     {
       "scenario_id": "SCN-PERF-REBUILD-REQUESTS-001",
       "path": "conformance/scenarios/performance/rebuild-requests-001.json",
-      "sha256": "fb0ea96d0bf4ae888adba45769ea938a00b49689eea4eeb069e9616455e6e706"
+      "sha256": "7ec3b1bc638c9a967cca34d302c4e6047916896f06b3ff1cb23f69e803816720"
     },
     {
       "scenario_id": "SCN-PERF-SCHEMA-CHECK-001",
@@ -89,7 +89,7 @@
     {
       "scenario_id": "SCN-PUSH-RESPONSE-LOSS-001",
       "path": "conformance/scenarios/server/push-response-loss-001.json",
-      "sha256": "80838189ae8ad72539eb06f30e38e3b6a429d11b87f52c2bd2a8933f94ec8a88"
+      "sha256": "8a1bd7e90c152985d1f34daf4484287514032e365e84e9e87e1cad2be9294425"
     },
     {
       "scenario_id": "SCN-REBUILD-FORGED-CURSOR-001",
@@ -109,7 +109,7 @@
     {
       "scenario_id": "SCN-SCHEMA-QUEUED-MUTATION-001",
       "path": "conformance/scenarios/server/schema-queued-mutation-001.json",
-      "sha256": "47667f71601c6ff2153d86dafab0fe68f9bfc277c305a86765180440ed29724a"
+      "sha256": "0d951482fece7e31e21dd3b9e5c2ebb88b00af62d285efdf2ee8d6c6591b2499"
     },
     {
       "scenario_id": "SCN-WAL-DECODE-FAILURE-001",
