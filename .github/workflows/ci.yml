@@ -221,7 +221,10 @@ jobs:
         run: make lint-rust-pg
 
       - name: Install exact Rust mutation runner
-        run: cargo install --locked cargo-mutants --version 27.1.0
+        run: |
+          if ! command -v cargo-mutants >/dev/null 2>&1 || [ "$(cargo mutants --version)" != "cargo-mutants 27.1.0" ]; then
+            cargo install --locked --force cargo-mutants --version 27.1.0
+          fi
 
       - name: Run targeted Rust mutation tests
         run: make test-rust-mutants
