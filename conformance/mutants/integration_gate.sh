@@ -10,7 +10,11 @@ fi
 
 scratch_parent=${SYNCHRO_MUTANT_TMPDIR:-${TMPDIR:-/tmp}}
 run_root=$(mktemp -d "$scratch_parent/synchro-integration-mutants.XXXXXX")
-log_parent=${SYNCHRO_MUTANT_LOG_TMPDIR:-${TMPDIR:-/tmp}}
+# Failure logs stay inside the repository so an agent or operator can read them.
+# A system temp directory is outside the sandbox and cannot be inspected after a
+# failing run, which makes the gate's output useless exactly when it matters.
+log_parent=${SYNCHRO_MUTANT_LOG_TMPDIR:-"$repo_root/.ignore/mutant-logs"}
+mkdir -p "$log_parent"
 logs_root=$(mktemp -d "$log_parent/synchro-integration-mutant-logs.XXXXXX")
 gate_passed=0
 mutant_count=0
