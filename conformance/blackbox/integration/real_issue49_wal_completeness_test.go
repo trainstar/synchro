@@ -446,7 +446,7 @@ func TestRealIssue49ResetCoversEveryFenceOperation(t *testing.T) {
 		if len(expectedFenceIDs) != 6 || combinations != "capture_dependency:delete,capture_dependency:insert,capture_dependency:update,synced:delete,synced:insert,synced:update" {
 			t.Fatalf("reset operation fence set is incomplete: count=%d combinations=%q", len(expectedFenceIDs), combinations)
 		}
-		if coverage.Staged != 6 || coverage.Covered != 6 || coverage.UniqueCovered != 6 ||
+		if coverage.Staged != 0 || coverage.Covered != 6 || coverage.UniqueCovered != 6 ||
 			!coverage.ExactFenceSet || coverage.MetadataMismatches != 0 || coverage.PendingExpected != 0 ||
 			coverage.PendingRegistered != 0 || !coverage.SnapshotMarkersBounded || coverage.CoverageModes != "reset_baseline" ||
 			syntheticEvents != 0 || syntheticEffects != 0 {

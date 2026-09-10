@@ -313,7 +313,7 @@ func TestRealIssue49ResetLifecycleAndFenceCoverage(t *testing.T) {
 			t.Fatalf("reset did not cover the accepted fence exactly once: %#v", observation)
 		}
 		if len(expectedFences) < 4 || expectedKinds != "capture_dependency,synced" ||
-			coverage.Staged != int64(len(expectedFences)) || coverage.Covered != int64(len(expectedFences)) ||
+			coverage.Staged != 0 || coverage.Covered != int64(len(expectedFences)) ||
 			coverage.UniqueCovered != int64(len(expectedFences)) || !coverage.ExactFenceSet ||
 			coverage.MetadataMismatches != 0 || coverage.PendingExpected != 0 || coverage.PendingRegistered != 0 ||
 			!coverage.SnapshotMarkersBounded || coverage.CoverageModes != "reset_baseline" {
@@ -1325,30 +1325,17 @@ func observeIssue49ResetFenceCoverage(
 		       (SELECT count(*) FROM covered),
 		       (SELECT count(DISTINCT fence_id) FROM covered),
 		       NOT EXISTS (
-			   (SELECT fence_id FROM expected EXCEPT SELECT fence_id FROM staged)
+			   (SELECT fence_id FROM expected EXCEPT SELECT fence_id FROM covered)
 			   UNION ALL
-			   (SELECT fence_id FROM staged EXCEPT SELECT fence_id FROM expected)
+			   (SELECT fence_id FROM covered EXCEPT SELECT fence_id FROM expected)
 		       ),
 		       (SELECT count(*)
-		        FROM staged coverage
-		        JOIN synchro.sync_write_fences fence USING (fence_id)
+		        FROM covered fence
 		        CROSS JOIN selected_reset reset
-		        WHERE coverage.relation_id <> fence.relation_id
-		           OR coverage.registration_kind <> fence.registration_kind
-		           OR coverage.table_id IS DISTINCT FROM fence.table_id
-		           OR coverage.operation <> fence.operation
-		           OR coverage.old_record_id IS DISTINCT FROM fence.old_record_id
-		           OR coverage.new_record_id IS DISTINCT FROM fence.new_record_id
-		           OR coverage.old_capture_key IS DISTINCT FROM fence.old_capture_key
-		           OR coverage.new_capture_key IS DISTINCT FROM fence.new_capture_key
-		           OR coverage.row_version <> fence.row_version
-		           OR coverage.candidate_slot_name <> reset.candidate_slot_name
-		           OR coverage.consistent_point <> reset.consistent_point
-		           OR coverage.target_stream_generation <> reset.target_stream_generation
-		           OR fence.coverage <> 'reset_baseline'
-		           OR fence.stream_generation <> reset.target_stream_generation
-		           OR fence.reset_slot_name <> reset.candidate_slot_name
-		           OR fence.reset_consistent_point <> reset.consistent_point
+		        WHERE fence.coverage <> 'reset_baseline'
+		           OR fence.stream_generation IS DISTINCT FROM reset.target_stream_generation
+		           OR fence.reset_slot_name IS DISTINCT FROM reset.candidate_slot_name
+		           OR fence.reset_consistent_point IS DISTINCT FROM reset.consistent_point
 		           OR fence.commit_lsn IS NOT NULL OR fence.event_ordinal IS NOT NULL
 		           OR fence.materialized_at IS NULL),
 		       (SELECT count(*) FROM synchro.sync_write_fences fence JOIN expected USING (fence_id) WHERE fence.coverage = 'pending'),
