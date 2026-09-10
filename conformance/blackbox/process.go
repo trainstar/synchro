@@ -1431,6 +1431,9 @@ func (h *Harness) grantExtensionRolesOnDatabase(ctx context.Context, database *s
 	if _, err := database.ExecContext(ctx, "GRANT synchro_adapter TO "+quoteIdentifier(h.env.Adapter.Username)); err != nil {
 		return errors.New("grant isolated adapter group failed")
 	}
+	if _, err := database.ExecContext(ctx, "GRANT synchro_monitor TO "+quoteIdentifier(h.env.Observer.Username)); err != nil {
+		return errors.New("grant isolated observer group failed")
+	}
 	if _, err := database.ExecContext(ctx, "GRANT synchro_worker TO "+quoteIdentifier(h.worker.Username)); err != nil {
 		return errors.New("grant isolated worker group failed")
 	}
@@ -1802,6 +1805,7 @@ func (h *Harness) verifyRunRoleSeparation(ctx context.Context, database *sql.DB)
 	}
 	for role, expectedGroup := range map[string]string{
 		h.env.Adapter.Username:  "synchro_adapter",
+		h.env.Observer.Username: "synchro_monitor",
 		h.worker.Username:       "synchro_worker",
 		h.env.Operator.Username: "synchro_operator",
 	} {
